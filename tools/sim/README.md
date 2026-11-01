@@ -80,9 +80,17 @@ SIM_JITTER=3 tools/sim/run.sh test  # share a cpuset with 3 bursty CPU burners
     `__read_chk`, `__ppoll_chk` and `__poll_chk`: without them the MCU's
     console reads and idle ppoll bypassed the shim entirely. A device
     whose reading thread is itself stepping to its own imminent timer
-    cannot read until time moves, so its unread input stops holding the
-    clock: two MCUs each waiting on their own timer with input pending
-    used to wedge each other.
+    cannot read until time reaches that timer, so its unread input lets
+    the clock run exactly that far: two MCUs each waiting on their own
+    timer with input pending used to wedge each other.
+  - A `poll`/`ppoll`/`select`/`epoll` whose descriptors are already ready
+    returns at once without moving the clock. serialport-rs polls for
+    writability before every write and readability before every read, and
+    the wait used to advance virtual time to the next pacer floor first:
+    each get_clock left klippy one MCU tick (0.2–2 ms) before it was
+    written, and the clock estimate converged to only ±1–3 ppm with a
+    +0.3 ms offset bias. Now it tracks a skewed crystal exactly
+    (`test_clock_estimate.py`).
   - `sim_world(..., crystal_ppm={"f4": 30.0})` gives an MCU its own
     oscillator (`VTIME_CRYSTAL_PPM`): every clock that process reads runs
     that many ppm off the shared timeline, and the deadlines it sets map

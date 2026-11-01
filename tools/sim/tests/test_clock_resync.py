@@ -10,15 +10,11 @@ re-sync point for the host→MCU clock mapping.
 Contract: the clock-sync stability gate admits a slope error of at most
 clock_sync_stable_ppm, so a mapping re-synced at every rest cannot let the
 cross-MCU timing error grow faster than that; over a session it can grow by
-at most the gate times the session length, plus the jitter each re-sync
-inherits from the estimate's offset: a get_clock reply lags its request by
-up to a millisecond. The sim stamps a step when the MCU's timer actually
-toggles the pin, which may trail its scheduled clock by the vtime pacer
-slack. The gate is a convergence criterion, so the
-session starts once the estimate has had a minute of samples, as on a
-printer that sat idle after connecting. A mapping frozen at the first move
-drifts by that move's estimate error for as long as the session runs, and
-never logs a re-sync.
+at most the gate times the session length. The sim stamps a step when the
+MCU's timer actually toggles the pin, which may trail its scheduled clock
+by the vtime pacer slack. A mapping frozen at the first move drifts by that
+move's estimate error for as long as the session runs, and never logs a
+re-sync.
 """
 
 import json
@@ -34,11 +30,9 @@ X_STEP_LINE = 0
 Y_STEP_LINE = 3
 MOVES = 80
 DWELL_MS = 2000
-CLOCK_ESTIMATE_SETTLE_MS = 60000
 STEPS_PER_MOVE = 8000
 CLOCK_SYNC_STABLE_PPM = 5.0
 VTIME_PACER_SLACK_S = 400e-6
-GET_CLOCK_LATENCY_S = 1e-3
 
 
 def _dual_mcu_cartesian(world):
@@ -67,7 +61,6 @@ def test_secondary_mcu_steps_stay_in_time_across_a_long_session(sim_world):
     world = sim_world(_dual_mcu_cartesian, crystal_ppm=CRYSTAL_PPM)
     main = world.sim_control("h7")
     secondary = world.sim_control("f4")
-    world.gcode_ok(f"G4 P{CLOCK_ESTIMATE_SETTLE_MS}", timeout=120)
     world.gcode_ok("SET_KINEMATIC_POSITION X=50 Y=50 Z=50", timeout=10)
 
     moves = []
@@ -89,11 +82,7 @@ def test_secondary_mcu_steps_stay_in_time_across_a_long_session(sim_world):
     report = " ".join(f"{offset * 1e6:+.0f}" for _, offset in moves)
     for at, offset in moves:
         growth = offset - start_offset
-        bound = (
-            VTIME_PACER_SLACK_S
-            + GET_CLOCK_LATENCY_S
-            + gate * (at - session_start)
-        )
+        bound = VTIME_PACER_SLACK_S + gate * (at - session_start)
         assert abs(growth) <= bound, (
             f"cross-MCU step timing moved {growth * 1e6:+.0f} us, past the"
             f" {bound * 1e6:.0f} us the clock-sync gate allows"
