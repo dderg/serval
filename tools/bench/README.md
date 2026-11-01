@@ -68,6 +68,8 @@ Reference is offline `_motion_engine.pipeline_snapshot_axis_samples`; needs loca
 - F407: if its firmware ever disables the SWD pins, set BOOT0=1 and press reset (manual).
 - Config validation forbids PA13/PA14 (SWD) and PA8 (reserved for clock output).
 
+Any tool that touches the Pi or the boards (`run.py`, every `deploy.py` subcommand) takes an exclusive lock on `~/bench/.lock` and waits up to `--lock-timeout` seconds (default 1800), reporting the holder every 30 s, so several agents can share the bench safely.
+
 ## Limits
 
 - No endstops, heaters or TMC wired: no homing (`run.py` uses `SET_KINEMATIC_POSITION`).

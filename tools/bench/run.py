@@ -13,6 +13,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
+import lock
 from capture import Capture
 from pi import (
     PI_LOGS,
@@ -148,8 +149,10 @@ def main() -> None:
         "--runs-dir", type=Path, default=Path("~/bench/runs").expanduser()
     )
     parser.add_argument("--timeout", type=float, default=1800.0)
+    lock.add_timeout_argument(parser)
     args = parser.parse_args()
-    print(run(args.gcode, args.runs_dir.expanduser(), args.timeout))
+    with lock.bench_lock(args.lock_timeout):
+        print(run(args.gcode, args.runs_dir.expanduser(), args.timeout))
 
 
 if __name__ == "__main__":

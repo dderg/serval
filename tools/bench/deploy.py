@@ -15,6 +15,7 @@ import sys
 import time
 from pathlib import Path
 
+import lock
 import pi
 from capture import DEVICE as CAPTURE_DEVICE
 
@@ -182,7 +183,10 @@ COMMANDS = {
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=COMMANDS)
-    COMMANDS[parser.parse_args().command]()
+    lock.add_timeout_argument(parser)
+    args = parser.parse_args()
+    with lock.bench_lock(args.lock_timeout):
+        COMMANDS[args.command]()
 
 
 if __name__ == "__main__":
