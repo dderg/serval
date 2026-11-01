@@ -19,6 +19,15 @@ A Pi 5 runs klippy against an STM32F401 printer MCU; an F407 board on this box r
 - **Always `sync` first.** The Pi runs whatever was last synced; `run.json` → `deployed` (HEAD, branch, `git diff HEAD` sha256, dirty paths, worktree) says which code a run tested. Another agent's uncommitted edits in your worktree ship with `sync`. To test a clean ref: `git worktree add /tmp/x <ref>` then `deploy.py sync --tree /tmp/x`.
 - Offline-only work needs no lock. Fail loudly: don't patch production code from the bench to make a run pass.
 
+## One-command regression
+
+```bash
+uv run python tools/bench/suite.py --quick      # first_layers, speed_ladder, epochs (~6 min)
+uv run python tools/bench/suite.py              # full matrix incl. dense_top and a throttled-host row
+```
+
+Takes the lock once, syncs, runs + analyzes each row, prints a table, writes `~/bench/suites/<ts>/summary.json` (per row: print state/error, analyzer ok + failed checks, stalls, abs_max per motor, deployed identity, run dir) and exits non-zero if any row fails. `--expect-fail <row>` is the only way to tolerate a known failure; there is no built-in allowlist.
+
 ## Loop
 
 ```bash
@@ -37,13 +46,13 @@ Run dirs: `~/bench/runs/<YYYYmmdd-HHMMSS>/` — `print.gcode`, `printer.cfg` (th
 `ok` = all four `checks`:
 
 - `net_steps_match` — per motor, captured net steps (DIR-signed) equal the reference's. False = lost or extra steps.
-- `all_steps_matched` — every captured step pairs with a reference step and vice versa (`unmatched_capture_steps`/`unmatched_reference_steps` = 0). A step pairs within 100 ms when its (level,dir) key is unique in that window, but only within 2 ms (`PAIR_WINDOW_S`) when the key repeats (ripple bursts), so a step can't pair with the neighbouring burst. Unpaired steps whose count disagreement stays within ±1 on a lattice line are `edge_tie_steps`, not failures; a dropped final step when the trajectory ends exactly on a lattice line is an `end_tie_steps` tie (and is allowed in `net_steps_match`).
+- `all_steps_matched` — every captured step pairs with a reference step and vice versa (`unmatched_capture_steps`/`unmatched_reference_steps` = 0). Keys are absolute (level,dir): capture and reference counts run continuously across epochs. A step pairs within 100 ms when its key is unique in that window, but only within 2 ms (`PAIR_WINDOW_S`) when the key repeats (ripple bursts), so a step can't pair with the neighbouring burst. Unpaired steps whose count disagreement stays within ±1 on a lattice line are `edge_tie_steps`, not failures. When a burst ends exactly on a lattice line the firmware may withhold the final step, then take it when the next burst starts or skip it if that burst reverses; the lone unpaired step at the epoch's end or start is a `rest_tie_steps` tie (and is allowed in `net_steps_match`).
 - `no_stalls` — no 5 ms bin where the reference has ≥3 steps and the capture none (or reverse); `stalls.items[]` give times.
 - `timing_abs_max_within_50us` — max |capture − aligned reference| over motors. **Sign: positive = step late.** Healthy runs show p99 ≈ 13–25 µs, abs_max ≈ 33–37 µs (25 µs tick quantization).
 
 Also useful: `epochs[]` (one per motion burst; `ppm` = clock drift fit, `residual_wander_us`, capture-vs-stream span delta), `motors.*.peak_step_rate_captured_hz` vs `_reference_hz`, `max_abs_count_error_steps`. More than one capture epoch vs one reference epoch (`AnalysisError: N capture epochs vs 1`) means the printer stopped and restarted mid-run (starved host); rerun analyze with a larger `--gap`.
 
-Known deviations that are design, not bugs: extruder net E is shorter than gcode E (corner cut / shaper follower, `docs/rewrite/shaper.md`), exposed as `corexy.e_net_vs_gcode_corner_cut_mm`; sub-200 Hz steps are excluded from timing stats (`timing_steps_below_rate_floor`).
+Known deviations that are design, not bugs: extruder net E is shorter than gcode E (corner cut / shaper follower, `docs/rewrite/shaper.md`), exposed as `corexy.e_net_vs_gcode_corner_cut_mm`; sub-200 Hz steps are excluded from timing stats (`timing_steps_below_rate_floor`). The extruder's step lattice is absolute from `SET_KINEMATIC_POSITION` and carries its fractional position across drains and dwells, so the reference chains each block's E track onto the previous block's end.
 
 Crash triage: `journalctl -u klipper` on the Pi (`ssh bench-pi`) and `events/host-rust.jsonl` (`anchor_underrun`, `stream_worker_fatal`, `pacer_reserve_raised`); `klippy.log` `Stats` lines give `print_time`/`buffer_time` (a frozen `print_time` with draining `buffer_time` = producer stopped).
 
