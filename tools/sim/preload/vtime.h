@@ -25,12 +25,19 @@ struct vtime_device_link {
     _Atomic uint64_t reply_consumed;
 };
 
-enum { VTIME_FAULT_DELAY = 1, VTIME_FAULT_DROP = 2, VTIME_FAULT_STALL = 3 };
+enum {
+    VTIME_FAULT_DELAY = 1,
+    VTIME_FAULT_DROP = 2,
+    VTIME_FAULT_STALL = 3,
+    VTIME_FAULT_LATE = 4,
+};
 
 // A fault the harness posts for one link's host→device traffic, applied by
 // the device process as it reads: hold the next `count` frames carrying
-// `msgid` (and everything behind them) for `delay_ns`, drop them, or hold
-// the whole link for `delay_ns`. A new generation replaces the request.
+// `msgid` (and everything behind them) for `delay_ns`, drop them, hold just
+// the next `count` `msgid` commands for `delay_ns` while their frames go on,
+// or hold the whole link for `delay_ns`. A new generation replaces the
+// request.
 struct vtime_link_fault {
     _Atomic uint32_t generation;
     uint32_t kind;

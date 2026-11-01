@@ -1,5 +1,5 @@
-"""world.inject: a dropped frame is retransmitted and a short link stall is
-absorbed by the MCU's queued motion; neither shuts the printer down."""
+"""world.inject: a dropped frame is retransmitted, and a delayed frame or a
+short link stall is absorbed; none of them shuts the printer down."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ def _mcu_log(world) -> str:
     return (world.log_dir / "h7.log").read_text(errors="replace")
 
 
-def test_dropped_and_stalled_frames_are_survivable(sim_world):
+def test_dropped_delayed_and_stalled_frames_are_survivable(sim_world):
     world = sim_world(
         lambda w: configs.minimal_config(w.h7_pty, str(w.gcode_dir)),
         dual_mcu=False,
@@ -26,6 +26,11 @@ def test_dropped_and_stalled_frames_are_survivable(sim_world):
     world.gcode_ok("G4 P3000")
     world.gcode_ok("M400")
     assert _mcu_log(world).count("[vtime] fault: dropping frame") == 2
+
+    world.inject("h7", delay_command="get_clock", by_s=0.05)
+    world.gcode_ok("G4 P2000")
+    world.gcode_ok("M400")
+    assert "[vtime] fault: delaying frame" in _mcu_log(world)
 
     world.inject("h7", stall_s=0.05)
     world.gcode_ok("G1 X100 F3000")

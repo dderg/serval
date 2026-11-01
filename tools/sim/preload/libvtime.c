@@ -512,6 +512,15 @@ settle_write(int fd, _Atomic uint64_t *reply_written, size_t count,
 // frames are 0x55 len16 ... and are never matched. MCU_SIM_CMD_SHAPES maps
 // each command id to its parameter kinds ("n" int, "b" buffer) so a frame
 // can be walked past commands that do not match.
+//
+// A late command models the host producing one command late while every
+// other frame goes out on time. The MCU accepts only the frame whose seq is
+// its next_sequence and acks by seq, so the command cannot travel in a frame
+// of its own without renumbering the stream both ways. Instead it is cut
+// from its frame (same seq, CRC resealed) and appended to the first frame
+// the MCU will accept once it is due: the next frame the host sends, in
+// order, as a late-produced command would be. next_seq mirrors the MCU's
+// next_sequence to tell which frames it will accept.
 #define FAULT_STREAM_BYTES (1 << 16)
 #define FAULT_MSGID_MIN (-32)
 #define FAULT_MSGID_SPAN 1024
@@ -528,6 +537,8 @@ cmd_shape(int32_t msgid)
     return index >= 0 && index < FAULT_MSGID_SPAN ? cmd_shapes[index] : NULL;
 }
 
+#define FAULT_LATE_SLOTS 8
+
 static struct {
     uint32_t seen_generation;
     uint32_t kind, count;
@@ -537,6 +548,13 @@ static struct {
     enum { FRAME_WAIT, FRAME_KLIPPER, FRAME_KALICO_HDR, FRAME_KALICO } state;
     uint8_t frame[KLIPPER_LEN_MAX];
     uint32_t frame_len, frame_need;
+    uint8_t next_seq;
+    struct {
+        uint8_t bytes[KLIPPER_LEN_MAX];
+        uint32_t len;
+        uint64_t held_at_ns, due_ns;
+    } late[FAULT_LATE_SLOTS];
+    uint32_t late_count;
     uint8_t held[FAULT_STREAM_BYTES];
     size_t held_len;
     uint8_t out[FAULT_STREAM_BYTES];
@@ -580,14 +598,13 @@ frame_vlq(const uint8_t **pp, const uint8_t *end)
     return v;
 }
 
-static int
-frame_carries(const uint8_t *frame, uint32_t len, int32_t msgid)
+static uint32_t
+frame_find(const uint8_t *frame, uint32_t len, int32_t msgid, uint32_t *size)
 {
     const uint8_t *p = frame + 2, *end = frame + len - 3;
     while (p < end) {
+        const uint8_t *cmd = p;
         int32_t id = (int32_t)frame_vlq(&p, end);
-        if (id == msgid)
-            return 1;
         const char *shape = cmd_shape(id);
         if (!shape)
             return 0;
@@ -596,8 +613,48 @@ frame_carries(const uint8_t *frame, uint32_t len, int32_t msgid)
             if (*shape == 'b')
                 p += v;
         }
+        if (id == msgid) {
+            *size = (uint32_t)(p - cmd);
+            return (uint32_t)(cmd - frame);
+        }
     }
     return 0;
+}
+
+static uint16_t
+frame_crc16(const uint8_t *buf, uint32_t len)
+{
+    uint16_t crc = 0xffff;
+    while (len--) {
+        uint8_t data = *buf++;
+        data ^= crc & 0xff;
+        data ^= data << 4;
+        crc = ((((uint16_t)data << 8) | (crc >> 8)) ^ (uint8_t)(data >> 4)
+               ^ ((uint16_t)data << 3));
+    }
+    return crc;
+}
+
+static void
+frame_seal(uint8_t *frame, uint32_t len)
+{
+    frame[0] = (uint8_t)len;
+    uint16_t crc = frame_crc16(frame, len - 3);
+    frame[len - 3] = crc >> 8;
+    frame[len - 2] = crc & 0xff;
+    frame[len - 1] = 0x7e;
+}
+
+static int
+mcu_accepts_frame(const uint8_t *frame, uint32_t len)
+{
+    uint16_t crc = frame_crc16(frame, len - 3);
+    int valid = frame[len - 1] == 0x7e && frame[len - 3] == (crc >> 8)
+        && frame[len - 2] == (crc & 0xff);
+    if (!valid || frame[1] != (0x10 | fault.next_seq))
+        return 0;
+    fault.next_seq = (frame[1] + 1) & 0x0f;
+    return 1;
 }
 
 static void
@@ -615,12 +672,56 @@ fault_route(const uint8_t *bytes, size_t n)
 }
 
 static void
+hold_late_command(uint32_t at, uint32_t size)
+{
+    if (fault.late_count == FAULT_LATE_SLOTS) {
+        fprintf(stderr, "[vtime] more than %d late commands pending\n",
+                FAULT_LATE_SLOTS);
+        abort();
+    }
+    uint64_t now = vtime_now();
+    typeof(fault.late[0]) *late = &fault.late[fault.late_count++];
+    memcpy(late->bytes, fault.frame + at, size);
+    late->len = size;
+    late->held_at_ns = now;
+    late->due_ns = now + fault.delay_ns;
+    memmove(fault.frame + at, fault.frame + at + size,
+            fault.frame_len - at - size);
+    fault.frame_len -= size;
+    frame_seal(fault.frame, fault.frame_len);
+    fprintf(stderr, "[vtime] fault: holding msgid %d from frame seq %u at %lu"
+            " ns\n", fault.msgid, fault.frame[1] & 0x0f, (unsigned long)now);
+}
+
+static void
+append_due_late_commands(void)
+{
+    uint64_t now = vtime_now();
+    while (fault.late_count && fault.late[0].due_ns <= now
+           && fault.frame_len + fault.late[0].len <= KLIPPER_LEN_MAX) {
+        uint32_t payload_end = fault.frame_len - 3;
+        memmove(fault.frame + payload_end + fault.late[0].len,
+                fault.frame + payload_end, 3);
+        memcpy(fault.frame + payload_end, fault.late[0].bytes,
+               fault.late[0].len);
+        fault.frame_len += fault.late[0].len;
+        frame_seal(fault.frame, fault.frame_len);
+        fprintf(stderr, "[vtime] fault: sending late msgid %d in frame seq %u"
+                " at %lu ns, held %lu ns\n", fault.msgid,
+                fault.frame[1] & 0x0f, (unsigned long)now,
+                (unsigned long)(now - fault.late[0].held_at_ns));
+        memmove(&fault.late[0], &fault.late[1],
+                --fault.late_count * sizeof(fault.late[0]));
+    }
+}
+
+static void
 fault_frame_done(void)
 {
-    int matched = fault.count
-        && (fault.kind == VTIME_FAULT_DELAY || fault.kind == VTIME_FAULT_DROP)
-        && frame_carries(fault.frame, fault.frame_len, fault.msgid);
-    if (matched) {
+    uint32_t size = 0;
+    uint32_t at = fault.count && fault.kind != VTIME_FAULT_STALL
+        ? frame_find(fault.frame, fault.frame_len, fault.msgid, &size) : 0;
+    if (at && fault.kind != VTIME_FAULT_LATE) {
         fault.count--;
         fprintf(stderr, "[vtime] fault: %s frame carrying msgid %d at %lu ns\n",
                 fault.kind == VTIME_FAULT_DROP ? "dropping" : "delaying",
@@ -629,6 +730,13 @@ fault_frame_done(void)
             return;
         if (!fault.release_ns)
             fault.release_ns = vtime_now() + fault.delay_ns;
+    }
+    if (mcu_accepts_frame(fault.frame, fault.frame_len)) {
+        if (at && fault.kind == VTIME_FAULT_LATE) {
+            fault.count--;
+            hold_late_command(at, size);
+        }
+        append_due_late_commands();
     }
     fault_route(fault.frame, fault.frame_len);
 }
