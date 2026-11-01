@@ -118,7 +118,10 @@ SIM_JITTER=3 tools/sim/run.sh test  # share a cpuset with 3 bursty CPU burners
     the MCU when held bytes come due, and logs each fault to the MCU log
     (`[vtime] fault: delaying frame carrying msgid ...`, `... sending late
     msgid ... held N ns`). Held bytes still count as read, so a fault never
-    holds the clock.
+    holds the clock. A late command that shuts the MCU down longjmps out of
+    its frame, losing any frames the MCU read behind it in the same chunk:
+    the MCU NAKs (`[mcu-seq] MISMATCH`) until klippy retransmits them, and
+    whether any were read behind it is up to scheduling.
   - `sim_world(..., crystal_ppm={"f4": 30.0})` gives an MCU its own
     oscillator (`VTIME_CRYSTAL_PPM`): every clock that process reads runs
     that many ppm off the shared timeline, and the deadlines it sets map
