@@ -32,6 +32,7 @@ for _path in (REPO_ROOT / "snapshots", REPO_ROOT / "klippy", REPO_ROOT):
 
 import capture_events  # noqa: E402
 import harness  # noqa: E402
+import mcu_execution  # noqa: E402
 
 CAPTURE_ROLES = ("a", "b", "z", "e")
 ROLE_AXIS_WEIGHTS = {
@@ -154,6 +155,7 @@ class Capture:
     tick_hz: float
     deltas: np.ndarray
     exact_steps: list[tuple[np.ndarray, np.ndarray]] | None = None
+    events: capture_events.EventCapture | None = None
 
     @property
     def duration_s(self) -> float:
@@ -288,6 +290,7 @@ def load_capture(run_dir: Path) -> Capture:
                 (c.step_ticks / float(meta["tick_hz"]), c.step_signs())
                 for c in events.channels
             ],
+            events,
         )
     raw = np.fromfile(run_dir / "capture.bin", dtype=np.int8)
     if raw.size % channels:
@@ -1625,6 +1628,9 @@ def analyze(
         ],
         "motors": motors_report,
         "corexy": corexy_report(inputs, reference, finals, errors),
+        "mcu_execution": mcu_execution.report(
+            inputs.run_dir, inputs.capture.events, inputs.motors
+        ),
         "stalls": {
             "count": len(stalls),
             "items": [vars(s) for s in stalls[:REPORTED_STALLS_LIMIT]],

@@ -3681,3 +3681,6 @@ fn an_idle_resume_reset_waits_for_the_mcu_stepper_to_finish_the_old_stream() {
 
 #[path = "stepcompress_sink_fuzz.rs"]
 mod stepcompress_sink_fuzz;
+
+#[path = "stepcompress_sink_tap_tests.rs"]
+mod stepcompress_sink_tap_tests;

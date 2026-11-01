@@ -1,5 +1,6 @@
 use super::barrier_ledger::{AckFault, BarrierId, BarrierLedger};
 use super::pump_loop::pump_past_guard_secs;
+use super::step_tap::{STEP_TAP_DIR_ENV, StepTap, TapLane};
 use super::{AxisFrame, HeartbeatMsg, PumpMsg, SendError};
 use crate::lock_ext::LockExt;
 use crate::mcu_config::{McuAxisConfig, StepcompressEncoder};
@@ -238,7 +239,7 @@ pub fn build_endpoint(
             shim: StepShim::new(motors, SHIM_RING_DEPTH),
             egress: host_io_egress(cfg.mcu_id, host_io),
             pump_control,
-            clock_of,
+            clock_of: Arc::clone(&clock_of),
             budget,
             step_count_query: query,
             link_health,
@@ -253,7 +254,34 @@ pub fn build_endpoint(
     if !simulated {
         endpoint.set_drain_pass_budget(DRAIN_PASS_BUDGET);
     }
+    if let Some(dir) = std::env::var_os(STEP_TAP_DIR_ENV) {
+        endpoint.attach_tap(StepTap::open(
+            std::path::Path::new(&dir),
+            cfg.mcu_id,
+            measured_clock_freq,
+            &tap_lanes(cfg),
+            clock_of,
+        )?);
+    }
     Ok(endpoint)
+}
+
+fn tap_lanes(cfg: &McuAxisConfig) -> Vec<TapLane> {
+    cfg.axes
+        .iter()
+        .enumerate()
+        .filter(|&(lane, _)| cfg.pulse_capable(lane))
+        .flat_map(|(lane, &axis)| {
+            let range = cfg.motor_range(lane);
+            range.clone().map(move |motor| TapLane {
+                oid: cfg.hw.stepper_oids[motor],
+                axis: axis as u32,
+                motor_in_axis: (motor - range.start) as u32,
+                microstep_distance: cfg.hw.microstep_distance[motor],
+                invert_dir: cfg.hw.invert_dir[motor],
+            })
+        })
+        .collect()
 }
 
 struct PendingRetire {
@@ -519,6 +547,7 @@ pub struct StepcompressEndpoint {
     buzz: Option<StepBuzz>,
     drain_pass_budget: Option<std::time::Duration>,
     link_health: Option<Arc<host_rt::host_io::link_health::LinkHealth>>,
+    tap: Option<Arc<StepTap>>,
 }
 
 fn shim_error_to_send_error(mcu_id: u32, error: ShimError) -> SendError {
@@ -681,7 +710,13 @@ impl StepcompressEndpoint {
             buzz: None,
             drain_pass_budget: None,
             link_health,
+            tap: None,
         })
+    }
+
+    pub(crate) fn attach_tap(&mut self, tap: Arc<StepTap>) {
+        self.egress = tap.wrap(Arc::clone(&self.egress));
+        self.tap = Some(tap);
     }
 
     fn fatal(&self, message: &str) -> SendError {
@@ -957,6 +992,9 @@ impl StepcompressEndpoint {
     /// reads the executed count only runs once the mcu has stopped stepping,
     /// so nothing sent to this lane is still executing.
     pub fn reset_motor_position(&mut self, motor: usize, count: i64) -> Result<(), String> {
+        if let Some(tap) = &self.tap {
+            tap.record_halt(self.lanes[motor].oid);
+        }
         self.shim
             .halt_at(motor, u64::MAX)
             .map_err(|e| format!("stepcompress mcu {}: {e}", self.mcu_id))?;
@@ -1150,6 +1188,11 @@ impl StepcompressEndpoint {
     /// ack them — cancel them by advancing the high-water mark. Barriers
     /// already on the wire are acked even when the mcu halt discards them.
     pub fn abort_outbound(&mut self) {
+        if let Some(tap) = &self.tap {
+            for lane in &self.lanes {
+                tap.record_halt(lane.oid);
+            }
+        }
         for index in 0..self.backlog.len() {
             let out = &self.backlog[index];
             if let Outbound::Barrier(id) = out.frame {
