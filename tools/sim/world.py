@@ -26,7 +26,7 @@ from typing import Optional
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 VTIME_SHM_DIR = "/dev/shm"
-VTIME_SHM_SIZE = 4096
+VTIME_SHM_SIZE = 8192
 UNBOUNDED_VTIME_SPEED = 1000.0
 
 READY_POLL_S = 0.05
@@ -75,6 +75,26 @@ def _parse_gpio_pin(pin: str) -> tuple[str, int, int]:
     ):
         raise SimError(f"unsupported simulated motor pin {pin!r}")
     return mcu, int(chip[8:]), int(line[4:])
+
+
+def command_shapes(dict_path: pathlib.Path) -> tuple[dict[str, int], str]:
+    """Host→MCU command ids from an MCU data dictionary, and each command's
+    parameter kinds for libvtime's frame walker: "n" for a VLQ integer, "b"
+    for a length-prefixed buffer."""
+    if not dict_path.exists():
+        raise SimError(f"missing {dict_path}: rebuild the sim image")
+    commands = json.loads(dict_path.read_text())["commands"]
+    ids = {}
+    shapes = []
+    for fmt, msgid in commands.items():
+        name, *params = fmt.split()
+        ids[name] = msgid
+        kinds = "".join(
+            "b" if param.split("=", 1)[1] in ("%s", "%*s", "%.*s") else "n"
+            for param in params
+        )
+        shapes.append(f"{msgid}={kinds}")
+    return ids, ";".join(shapes)
 
 
 def configured_step_tracks(
@@ -186,8 +206,11 @@ _MAX_WAITERS = 128
 _MAX_HOST_THREADS = 64
 _LINK_SLOTS_USED_OFFSET = 3600
 _LINKS_OFFSET = 3608
-_LINK_SLOT_SIZE = 24
+_LINK_SLOT_SIZE = 48
 _MAX_LINKS = 8
+_LINK_FAULTS_OFFSET = 3992
+_LINK_FAULT_SIZE = 24
+FAULT_DELAY, FAULT_DROP, FAULT_STALL = 1, 2, 3
 # Pacer and device-link slots the harness reserves before any MCU process
 # claims one.
 HARNESS_PACER_SLOTS = 4
@@ -289,7 +312,7 @@ class VirtualClock:
                 )
             slot = self._free_links.pop()
         base = _LINKS_OFFSET + slot * _LINK_SLOT_SIZE
-        struct.pack_into("<QQ", self._shm, base + 8, 0, 0)
+        struct.pack_into("<I5Q", self._shm, base + 4, 0, 0, 0, 0, 0, 0)
         struct.pack_into("<I", self._shm, base, pts + 1)
         return DeviceLink(self._shm, base)
 
@@ -299,6 +322,24 @@ class VirtualClock:
             self._free_links.append(
                 (link.base - _LINKS_OFFSET) // _LINK_SLOT_SIZE
             )
+
+    def link_slot_of_pts(self, pts: int) -> int:
+        used = struct.unpack_from("<I", self._shm, _LINK_SLOTS_USED_OFFSET)[0]
+        for slot in range(min(used, _MAX_LINKS)):
+            base = _LINKS_OFFSET + slot * _LINK_SLOT_SIZE
+            if struct.unpack_from("<I", self._shm, base)[0] == pts + 1:
+                return slot
+        raise SimError(f"no device link registered for pts{pts}")
+
+    def post_link_fault(
+        self, slot: int, kind: int, msgid: int, count: int, delay_ns: int
+    ) -> None:
+        base = _LINK_FAULTS_OFFSET + slot * _LINK_FAULT_SIZE
+        generation = struct.unpack_from("<I", self._shm, base)[0]
+        struct.pack_into(
+            "<IiIQ", self._shm, base + 4, kind, msgid, count, delay_ns
+        )
+        struct.pack_into("<I", self._shm, base, (generation + 1) & 0xFFFFFFFF)
 
     def holds(self) -> str:
         """What currently stops virtual time: the shm state a wedge leaves."""
@@ -744,6 +785,7 @@ class SimWorld:
         verbose: bool = False,
         vtime_speed: float = UNBOUNDED_VTIME_SPEED,
         host_gated: bool = True,
+        crystal_ppm: Optional[dict[str, float]] = None,
     ):
         self.workdir = pathlib.Path(workdir)
         self.repo_root = repo_root
@@ -759,6 +801,7 @@ class SimWorld:
         # with real time.
         self.vtime_speed = float(os.environ.get("VTIME_SPEED", vtime_speed))
         self.host_gated = host_gated
+        self.crystal_ppm = crystal_ppm or {}
         self.vtime_shm_name = vtime_shm_name_alloc()
         self.vclock: Optional[VirtualClock] = None
         self.vtime_recorder: Optional[VtimeRecorder] = None
@@ -784,6 +827,7 @@ class SimWorld:
             str, list[tuple[int, int, int, int, int, int, int, int]]
         ] = {}
         self._z_step_lines: dict[str, int] = {}
+        self._command_ids: dict[str, dict[str, int]] = {}
 
     # ------------------------------------------------------------- boot
 
@@ -926,6 +970,11 @@ class SimWorld:
         env["VTIME_SPEED"] = str(self.vtime_speed)
         env["MCU_SIM_SOCK_DIR"] = str(sock_dir)
         env["MCU_SIM_GPIO_STEP_TRACKING"] = "1"
+        if name in self.crystal_ppm:
+            env["VTIME_CRYSTAL_PPM"] = repr(self.crystal_ppm[name])
+        command_ids, shapes = command_shapes(elf.with_suffix(".dict"))
+        self._command_ids[name] = command_ids
+        env["MCU_SIM_CMD_SHAPES"] = shapes
         tracks = self._step_tracks.get(name, [])
         env["MCU_SIM_STEP_TRACKS"] = ";".join(
             ",".join(str(value) for value in track) for track in tracks
@@ -1257,6 +1306,48 @@ class SimWorld:
                     f"{timeout}s; appended:\n{appended[-2000:]}"
                 )
             time.sleep(READY_POLL_S)
+
+    def inject(
+        self,
+        mcu: str,
+        *,
+        delay_command: Optional[str] = None,
+        drop_command: Optional[str] = None,
+        by_s: float = 0.0,
+        count: int = 1,
+        stall_s: Optional[float] = None,
+    ) -> None:
+        """Fault the host→MCU link of process `mcu` ("h7", "f4"), applied by
+        the MCU as it reads, in virtual time: hold the next `count` frames
+        carrying `delay_command` (and everything behind them) for `by_s`,
+        drop the next `count` frames carrying `drop_command`, or hold the
+        whole link for `stall_s`. Klippy is not touched."""
+        chosen = [
+            arg
+            for arg in (delay_command, drop_command, stall_s)
+            if arg is not None
+        ]
+        if len(chosen) != 1:
+            raise SimError(
+                "inject takes exactly one of delay_command, drop_command,"
+                " stall_s"
+            )
+        pty_path = {"h7": self.h7_pty, "f4": self.f4_pty}[mcu]
+        pts = int(os.readlink(pty_path).rsplit("/", 1)[1])
+        slot = self.vclock.link_slot_of_pts(pts)
+        if stall_s is not None:
+            self.vclock.post_link_fault(
+                slot, FAULT_STALL, 0, 0, int(stall_s * 1e9)
+            )
+            return
+        command = delay_command if delay_command is not None else drop_command
+        ids = self._command_ids[mcu]
+        if command not in ids:
+            raise SimError(f"{mcu} has no command {command!r}")
+        kind = FAULT_DELAY if delay_command is not None else FAULT_DROP
+        self.vclock.post_link_fault(
+            slot, kind, ids[command], count, int(by_s * 1e9)
+        )
 
     def shutdown_line(self) -> Optional[str]:
         for line in self.klippy_log_text().splitlines():

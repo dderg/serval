@@ -46,6 +46,7 @@ def sim_world(request, tmp_path):
         ready_timeout: float = 120.0,
         vtime_speed: float = UNBOUNDED_VTIME_SPEED,
         host_gated: bool = True,
+        crystal_ppm: dict = None,
     ) -> SimWorld:
         world = SimWorld(
             tmp_path / f"world{len(worlds)}",
@@ -55,6 +56,7 @@ def sim_world(request, tmp_path):
             cartographer=cartographer,
             vtime_speed=vtime_speed,
             host_gated=host_gated,
+            crystal_ppm=crystal_ppm,
         )
         worlds.append(world)
         world.boot(

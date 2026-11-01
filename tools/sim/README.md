@@ -78,7 +78,44 @@ SIM_JITTER=3 tools/sim/run.sh test  # share a cpuset with 3 bursty CPU burners
     ahead of its unread input; its next task round reads it. The firmware
     is built with `_FORTIFY_SOURCE`, so libvtime also intercepts
     `__read_chk`, `__ppoll_chk` and `__poll_chk`: without them the MCU's
-    console reads and idle ppoll bypassed the shim entirely.
+    console reads and idle ppoll bypassed the shim entirely. A device
+    whose reading thread is itself stepping to its own imminent timer
+    cannot read until time reaches that timer, so its unread input lets
+    the clock run exactly that far: two MCUs each waiting on their own
+    timer with input pending used to wedge each other.
+  - A `poll`/`ppoll`/`select`/`epoll` whose descriptors are already ready
+    returns at once without moving the clock. serialport-rs polls for
+    writability before every write and readability before every read, and
+    the wait used to advance virtual time to the next pacer floor first:
+    each get_clock left klippy one MCU tick (0.2–2 ms) before it was
+    written, and the clock estimate converged to only ±1–3 ppm with a
+    +0.3 ms offset bias. Now it tracks a skewed crystal exactly
+    (`test_clock_estimate.py`).
+  - The reverse direction holds too: bytes an MCU writes to its pty hold
+    the clock while a klippy thread is waiting on that pty (in `ppoll` or
+    a blocking `read`), until klippy has read them, so a reply reaches
+    klippy at the virtual instant the MCU sent it (`get_clock` was read
+    0–1.4 ms late, median 0.4 ms). The MCU counts a reply before its
+    `write` returns: klippy wakes in real time the moment the bytes land,
+    and until it marks itself running only that count keeps the clock
+    still. The hold needs a waiting reader, so an MCU writing while klippy
+    has no reader on its pty (boot output, a restart) cannot wedge.
+  - `world.inject(mcu, ...)` faults one MCU's host→MCU link in virtual
+    time, without touching klippy: `delay_command="queue_digital_out",
+    by_s=0.34` holds the next frame carrying that command, and everything
+    klippy sends behind it, for `by_s`; `drop_command=...` discards the
+    next `count` such frames (klippy retransmits); `stall_s=0.05` holds the
+    whole link. The MCU's libvtime walks the incoming Klipper frames with
+    each command's parameter kinds from its data dictionary
+    (`out/klipper-<board>-sim.dict`, passed as `MCU_SIM_CMD_SHAPES`), wakes
+    the MCU when held bytes come due, and logs each fault to the MCU log
+    (`[vtime] fault: delaying frame carrying msgid ...`). Held bytes still
+    count as read, so a fault never holds the clock.
+  - `sim_world(..., crystal_ppm={"f4": 30.0})` gives an MCU its own
+    oscillator (`VTIME_CRYSTAL_PPM`): every clock that process reads runs
+    that many ppm off the shared timeline, and the deadlines it sets map
+    back. Step timestamps from the GPIO shim stay on the shared timeline,
+    so step timing compares across MCUs.
   - A process klippy forks drops the host role in the child, so its
     waits and its exit cannot touch klippy's accounting (a forked child's
     exit used to clear `host_present` for the whole world).
