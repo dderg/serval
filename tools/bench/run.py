@@ -44,6 +44,11 @@ ALLOWED = {
     "M82",
     "M83",
     "M400",
+    "M18",
+    "M84",
+    "FORCE_MOVE",
+    "SET_STEPPER_ENABLE",
+    "SET_KINEMATIC_POSITION",
 }
 DROPPED = {"M104", "M109", "M140", "M190", "M106", "M107", "M73", "G28"}
 PREAMBLE = ["SET_KINEMATIC_POSITION X=0 Y=0 Z=0", "G92 E0"]
