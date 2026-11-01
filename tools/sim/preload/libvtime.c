@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/futex.h>
+#include <math.h>
 #include <poll.h>
 #include <pthread.h>
 #include <semaphore.h>
@@ -133,6 +134,7 @@ static struct {
     pthread_mutex_t lock;
 } vtimer = { .lock = PTHREAD_MUTEX_INITIALIZER };
 
+#define NO_DEADLINE UINT64_MAX
 static uint64_t
 ts_to_ns(const struct timespec *ts)
 {
@@ -150,6 +152,34 @@ static uint64_t
 vtime_now(void)
 {
     return atomic_load_explicit(&vshm->nanos, memory_order_acquire);
+}
+
+// The process's own oscillator: VTIME_CRYSTAL_PPM makes every clock this
+// process reads run that many ppm fast against the shared virtual timeline,
+// as a real MCU crystal does against the host's. Times the process hands
+// in (deadlines, pacer floors) are on its own clock and map back.
+static double crystal_scale = 1.0;
+
+static uint64_t
+local_ns(uint64_t virtual_ns)
+{
+    if (crystal_scale == 1.0 || virtual_ns == NO_DEADLINE)
+        return virtual_ns;
+    return (uint64_t)llround((double)virtual_ns * crystal_scale);
+}
+
+static uint64_t
+virtual_ns(uint64_t local)
+{
+    if (crystal_scale == 1.0 || local == NO_DEADLINE)
+        return local;
+    return (uint64_t)ceil((double)local / crystal_scale);
+}
+
+static uint64_t
+local_now(void)
+{
+    return local_ns(vtime_now());
 }
 
 static int owned_pacer_slots[VTIME_MAX_PACERS];
@@ -355,6 +385,7 @@ static int device_link_fd = -1;
 static int device_link_slot = -1;
 static __thread int device_handling;
 static __thread int stepping_own_timer;
+static __thread int reads_device_link;
 
 static int
 device_input_pending(void)
@@ -365,6 +396,9 @@ device_input_pending(void)
     for (uint32_t i = 0; i < used; i++) {
         struct vtime_device_link *link = &vshm->links[i];
         if (stepping_own_timer && (int)i == device_link_slot)
+            continue;
+        if (atomic_load_explicit(&link->owner_stepping_own_timer,
+                                 memory_order_acquire))
             continue;
         if (atomic_load_explicit(&link->pts_plus_one, memory_order_acquire)
             && atomic_load_explicit(&link->written, memory_order_acquire)
@@ -441,6 +475,7 @@ register_device_link(int master_fd)
 static void
 device_read(uint64_t bytes)
 {
+    reads_device_link = 1;
     if (!device_handling) {
         device_handling = 1;
         atomic_fetch_add_explicit(&vshm->devices_handling, 1,
@@ -634,6 +669,13 @@ static void
 vtime_advance_to(uint64_t target_ns)
 {
     finish_device_handling();
+    struct vtime_device_link *own_link =
+        device_link_slot >= 0 && reads_device_link
+            ? &vshm->links[device_link_slot]
+            : NULL;
+    if (own_link)
+        atomic_store_explicit(&own_link->owner_stepping_own_timer, 1,
+                              memory_order_release);
     stepping_own_timer = 1;
     while (vtime_now() < target_ns) {
         raise_toward(target_ns);
@@ -643,6 +685,9 @@ vtime_advance_to(uint64_t target_ns)
         real_nanosleep(&w, NULL);
     }
     stepping_own_timer = 0;
+    if (own_link)
+        atomic_store_explicit(&own_link->owner_stepping_own_timer, 0,
+                              memory_order_release);
 }
 
 static void vtimer_check_and_fire(void);
@@ -651,7 +696,6 @@ static void vtimer_check_and_fire(void);
 #define WAIT_SLICE_MAX_NS 20000000ULL
 #define WAIT_SLICE_HELD_NS WAIT_SLICE_MIN_NS
 #define HOST_WAIT_SLICE_HELD_NS 1000000ULL
-#define NO_DEADLINE UINT64_MAX
 
 // A timed wait in the thread that owns the virtual timer (the MCU main
 // thread sleeping in ppoll until SIGALRM) must also stop at that timer.
@@ -695,8 +739,9 @@ wait_step(uint64_t deadline)
 static uint64_t
 deadline_after(uint64_t delta_ns)
 {
-    uint64_t now = vtime_now();
-    return delta_ns > NO_DEADLINE - now ? NO_DEADLINE : now + delta_ns;
+    uint64_t now = local_now();
+    return delta_ns > NO_DEADLINE - now ? NO_DEADLINE
+                                        : virtual_ns(now + delta_ns);
 }
 
 static struct timespec
@@ -752,7 +797,7 @@ vtime_pacer_register_slack(uint64_t period_ns, uint64_t slack_ns)
     atomic_store_explicit(&vshm->pacers[slot].slack_ns, slack_ns,
                           memory_order_release);
     atomic_store_explicit(&vshm->pacers[slot].floor_ns,
-                          vtime_now() + period_ns, memory_order_release);
+                          deadline_after(period_ns), memory_order_release);
     atomic_store_explicit(&vshm->pacers[slot].active, 1,
                           memory_order_release);
     clock_unlock();
@@ -775,8 +820,8 @@ vtime_pacer_advance(int slot, uint64_t target_ns, uint64_t period_ns)
         return;
     (void)period_ns;
     finish_device_handling();
-    store_pacer_floor(slot, target_ns);
-    vtime_advance_to(target_ns);
+    store_pacer_floor(slot, virtual_ns(target_ns));
+    vtime_advance_to(virtual_ns(target_ns));
     vtimer_check_and_fire();
     sched_yield();
 }
@@ -791,7 +836,16 @@ vtime_pacer_set_floor(int slot, uint64_t target_ns)
 {
     if (!vshm || slot < 0 || slot >= VTIME_MAX_PACERS)
         return;
-    store_pacer_floor(slot, target_ns);
+    store_pacer_floor(slot, virtual_ns(target_ns));
+}
+
+// The shared timeline itself, for the step-tracking shim: step timestamps
+// are compared across processes, so they must not carry this process's
+// crystal error.
+__attribute__((visibility("default"))) uint64_t
+vtime_shared_now_ns(void)
+{
+    return vshm ? vtime_now() : 0;
 }
 
 static __thread int host_tid_slot = -1;
@@ -883,6 +937,10 @@ vtime_init(void)
         vtime_speed = atof(speed_env);
     if (vtime_speed <= 0.0)
         vtime_speed = 100.0;
+
+    const char *crystal_ppm = getenv("VTIME_CRYSTAL_PPM");
+    if (crystal_ppm)
+        crystal_scale = 1.0 + atof(crystal_ppm) * 1e-6;
 
     real_clock_gettime = dlsym(RTLD_NEXT, "clock_gettime");
     real_clock_nanosleep = dlsym(RTLD_NEXT, "clock_nanosleep");
@@ -981,7 +1039,7 @@ clock_gettime(clockid_t clk_id, struct timespec *tp)
 {
     if (!vshm || !tp || !is_monotonic(clk_id))
         return real_clock_gettime(clk_id, tp);
-    ns_to_ts(vtime_now(), tp);
+    ns_to_ts(local_now(), tp);
     return 0;
 }
 
@@ -1015,8 +1073,9 @@ store_remaining(uint64_t deadline, struct timespec *rem)
 {
     if (!rem)
         return;
-    uint64_t now = vtime_now();
-    ns_to_ts(deadline > now ? deadline - now : 0, rem);
+    uint64_t now = local_now();
+    uint64_t end = local_ns(deadline);
+    ns_to_ts(end > now ? end - now : 0, rem);
 }
 
 int
@@ -1025,7 +1084,7 @@ clock_nanosleep(clockid_t clk_id, int flags, const struct timespec *req,
 {
     if (!vshm || !is_monotonic(clk_id))
         return real_clock_nanosleep(clk_id, flags, req, rem);
-    uint64_t deadline = flags & TIMER_ABSTIME ? ts_to_ns(req)
+    uint64_t deadline = flags & TIMER_ABSTIME ? virtual_ns(ts_to_ns(req))
                                               : deadline_after(ts_to_ns(req));
     int ret = sleep_until(deadline);
     if (ret && !(flags & TIMER_ABSTIME))
@@ -1293,7 +1352,7 @@ syscall(long number, ...)
     if (timeout && !(op & FUTEX_CLOCK_REALTIME)) {
         uint64_t deadline = cmd == FUTEX_WAIT
                                 ? deadline_after(ts_to_ns(timeout))
-                                : ts_to_ns(timeout);
+                                : virtual_ns(ts_to_ns(timeout));
         uint32_t bitset = cmd == FUTEX_WAIT ? FUTEX_BITSET_MATCH_ANY
                                             : (uint32_t)a6;
         thread_blocks(deadline);
@@ -1360,8 +1419,9 @@ pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
                        const struct timespec *abstime)
 {
     int monotonic = vshm && (cond->__data.__wrefs & 2);
-    thread_blocks(monotonic ? ts_to_ns(abstime) : NO_DEADLINE);
-    int ret = monotonic ? cond_wait_loop(cond, mutex, ts_to_ns(abstime))
+    thread_blocks(monotonic ? virtual_ns(ts_to_ns(abstime)) : NO_DEADLINE);
+    int ret = monotonic ? cond_wait_loop(cond, mutex,
+                                         virtual_ns(ts_to_ns(abstime)))
                         : REAL(pthread_cond_timedwait)(cond, mutex, abstime);
     thread_runs();
     return ret;
@@ -1372,8 +1432,9 @@ pthread_cond_clockwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
                        clockid_t clockid, const struct timespec *abstime)
 {
     int monotonic = vshm && is_monotonic(clockid);
-    thread_blocks(monotonic ? ts_to_ns(abstime) : NO_DEADLINE);
-    int ret = monotonic ? cond_wait_loop(cond, mutex, ts_to_ns(abstime))
+    thread_blocks(monotonic ? virtual_ns(ts_to_ns(abstime)) : NO_DEADLINE);
+    int ret = monotonic ? cond_wait_loop(cond, mutex,
+                                         virtual_ns(ts_to_ns(abstime)))
                         : REAL(pthread_cond_clockwait)(cond, mutex, clockid,
                                                        abstime);
     thread_runs();
@@ -1403,8 +1464,8 @@ int
 sem_clockwait(sem_t *sem, clockid_t clockid, const struct timespec *abstime)
 {
     int monotonic = vshm && is_monotonic(clockid);
-    thread_blocks(monotonic ? ts_to_ns(abstime) : NO_DEADLINE);
-    int ret = monotonic ? sem_wait_loop(sem, ts_to_ns(abstime))
+    thread_blocks(monotonic ? virtual_ns(ts_to_ns(abstime)) : NO_DEADLINE);
+    int ret = monotonic ? sem_wait_loop(sem, virtual_ns(ts_to_ns(abstime)))
                         : REAL(sem_clockwait)(sem, clockid, abstime);
     thread_runs();
     return ret;
@@ -1662,10 +1723,10 @@ timer_settime(timer_t timerid, int flags, const struct itimerspec *new_value,
     if (new_value->it_value.tv_sec == 0 && new_value->it_value.tv_nsec == 0) {
         vtimer.armed = 0;
     } else if (flags & TIMER_ABSTIME) {
-        vtimer.target_ns = ts_to_ns(&new_value->it_value);
+        vtimer.target_ns = virtual_ns(ts_to_ns(&new_value->it_value));
         vtimer.armed = 1;
     } else {
-        vtimer.target_ns = vtime_now() + ts_to_ns(&new_value->it_value);
+        vtimer.target_ns = deadline_after(ts_to_ns(&new_value->it_value));
         vtimer.armed = 1;
     }
     pthread_mutex_unlock(&vtimer.lock);

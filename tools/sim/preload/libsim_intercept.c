@@ -188,6 +188,18 @@ static void load_configured_step_tracks(void) {
     free(copy);
 }
 
+static uint64_t shared_vtime_ns(void) {
+    static uint64_t (*shared_now)(void);
+    if (!shared_now)
+        shared_now = dlsym(RTLD_DEFAULT, "vtime_shared_now_ns");
+    uint64_t now = shared_now ? shared_now() : 0;
+    if (now)
+        return now;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
 static struct auto_endstop *find_step_tracker(int line) {
     int endstop_line = line == 18 ? 200
                        : line == 7 ? 201
@@ -519,10 +531,7 @@ static void control_handle_line(int client_fd, char *line) {
             min_pos = ae->min_pos;
             max_pos = ae->max_pos;
             hit = 1;
-            struct timespec vt;
-            clock_gettime(CLOCK_MONOTONIC, &vt);
-            vt_ns = (unsigned long long)vt.tv_sec * 1000000000ULL
-                    + (unsigned long long)vt.tv_nsec;
+            vt_ns = shared_vtime_ns();
         }
         pthread_mutex_unlock(&auto_endstop_mtx);
         if (!hit) {
@@ -935,10 +944,7 @@ static int gpio_handle_set_values(int line_fd, struct gpiohandle_data *data) {
     }
     pthread_mutex_unlock(&gpio_state_mtx);
     if (step_delta) {
-        struct timespec vt;
-        clock_gettime(CLOCK_MONOTONIC, &vt);
-        uint64_t vt_ns = (uint64_t)vt.tv_sec * 1000000000ULL
-                         + (uint64_t)vt.tv_nsec;
+        uint64_t vt_ns = shared_vtime_ns();
         auto_endstop_advance(chip_id, offset, step_delta, vt_ns, 0);
     }
     return 0;

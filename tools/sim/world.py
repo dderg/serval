@@ -744,6 +744,7 @@ class SimWorld:
         verbose: bool = False,
         vtime_speed: float = UNBOUNDED_VTIME_SPEED,
         host_gated: bool = True,
+        crystal_ppm: Optional[dict[str, float]] = None,
     ):
         self.workdir = pathlib.Path(workdir)
         self.repo_root = repo_root
@@ -759,6 +760,7 @@ class SimWorld:
         # with real time.
         self.vtime_speed = float(os.environ.get("VTIME_SPEED", vtime_speed))
         self.host_gated = host_gated
+        self.crystal_ppm = crystal_ppm or {}
         self.vtime_shm_name = vtime_shm_name_alloc()
         self.vclock: Optional[VirtualClock] = None
         self.vtime_recorder: Optional[VtimeRecorder] = None
@@ -926,6 +928,8 @@ class SimWorld:
         env["VTIME_SPEED"] = str(self.vtime_speed)
         env["MCU_SIM_SOCK_DIR"] = str(sock_dir)
         env["MCU_SIM_GPIO_STEP_TRACKING"] = "1"
+        if name in self.crystal_ppm:
+            env["VTIME_CRYSTAL_PPM"] = repr(self.crystal_ppm[name])
         tracks = self._step_tracks.get(name, [])
         env["MCU_SIM_STEP_TRACKS"] = ";".join(
             ",".join(str(value) for value in track) for track in tracks

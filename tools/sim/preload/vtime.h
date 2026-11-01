@@ -13,7 +13,7 @@
 
 struct vtime_device_link {
     _Atomic uint32_t pts_plus_one;
-    uint32_t reserved;
+    _Atomic uint32_t owner_stepping_own_timer;
     _Atomic uint64_t written;
     _Atomic uint64_t consumed;
 };

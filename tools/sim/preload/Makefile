@@ -1,6 +1,6 @@
 CC ?= gcc
 CFLAGS := -Wall -Wextra -O2 -fPIC -shared -pthread
-LDFLAGS := -ldl -lrt -pthread
+LDFLAGS := -ldl -lrt -lm -pthread
 
 all: libvtime.so libsim_intercept.so
 
