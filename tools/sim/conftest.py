@@ -9,6 +9,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from tools.sim.emulators import beacon_mcu, cartographer_mcu  # noqa: E402,F401
 from tools.sim.world import UNBOUNDED_VTIME_SPEED, SimWorld  # noqa: E402
 
 
