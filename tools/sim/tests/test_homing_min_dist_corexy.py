@@ -90,6 +90,37 @@ def _boot(sim_world, auto_y_wall=False):
     return world, control, XyTracker(control)
 
 
+def _stage_false_trip(world, control, tracker, y_start):
+    """Close the Y switch 0.5mm into the approach and open it once the
+    min_home_dist backoff is under way. Each poke happens inside the paced
+    predicate, so the printer cannot run on between seeing the position
+    and the pin changing."""
+    y_peak = [y_start]
+
+    def close_switch_after_approach():
+        y = tracker.xy()[1]
+        if y < y_start + 0.5:
+            return False
+        y_peak[0] = y
+        control.set_gpio_input(*Y_ENDSTOP, 1)
+        return True
+
+    def open_switch_once_backing_off():
+        y = tracker.xy()[1]
+        y_peak[0] = max(y_peak[0], y)
+        if y > y_peak[0] - 0.5:
+            return False
+        control.set_gpio_input(*Y_ENDSTOP, 0)
+        return True
+
+    world.wait_until(close_switch_after_approach, 90, "Y approach motion")
+    world.wait_until(
+        open_switch_once_backing_off,
+        60,
+        "min_home_dist backoff after the trip",
+    )
+
+
 def _home_y_against_wall_at_60(world):
     """G28 Y against the in-intercept wall 60mm out; returns the guard's
     first decision.
@@ -135,22 +166,7 @@ def test_false_trigger_far_from_endstop_fails_loudly(sim_world):
     y_start = tracker.xy()[1]
     g28.start()
 
-    world.wait_until(
-        lambda: tracker.xy()[1] >= y_start + 0.5, 90, "Y approach motion"
-    )
-    control.set_gpio_input(*Y_ENDSTOP, 1)
-    y_peak = tracker.xy()[1]
-
-    def backoff_started():
-        nonlocal y_peak
-        y = tracker.xy()[1]
-        y_peak = max(y_peak, y)
-        return y <= y_peak - 0.5
-
-    world.wait_until(
-        backoff_started, 60, "min_home_dist backoff after the trip"
-    )
-    control.set_gpio_input(*Y_ENDSTOP, 0)
+    _stage_false_trip(world, control, tracker, y_start)
 
     g28.join(timeout=200)
     assert not g28.is_alive(), "G28 Y did not finish"
@@ -204,22 +220,7 @@ def test_false_trigger_with_real_endstop_beyond_window_still_fails(sim_world):
     y_start = tracker.xy()[1]
     g28.start()
 
-    world.wait_until(
-        lambda: tracker.xy()[1] >= y_start + 0.5, 90, "Y approach motion"
-    )
-    control.set_gpio_input(*Y_ENDSTOP, 1)
-    y_peak = tracker.xy()[1]
-
-    def backoff_started():
-        nonlocal y_peak
-        y = tracker.xy()[1]
-        y_peak = max(y_peak, y)
-        return y <= y_peak - 0.5
-
-    world.wait_until(
-        backoff_started, 60, "min_home_dist backoff after the trip"
-    )
-    control.set_gpio_input(*Y_ENDSTOP, 0)
+    _stage_false_trip(world, control, tracker, y_start)
 
     with EndstopWall(
         tracker,
