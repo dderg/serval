@@ -2199,16 +2199,25 @@ trajectory. Correctness reduces to window bookkeeping:</p>
 </ul>
 <h2 id="the-refit">The refit<a class="headerlink" href="#the-refit" title="Permanent link">&para;</a></h2>
 <p>The exact convolved signal is not a polynomial the rest of the system can
-carry, so each emitted segment is refit (<code>fit_axis_from_signal</code>): a quintic
-Hermite base matching the signal's exact <code>(p, v, a)</code> at both span ends,
-escalated to degree 6/7 from interior residuals (the same ladder the lowerer
-uses), bisecting spans until the fit meets <code>SHAPED_FIT_TOL_MM = 1e-3</code> and
-<code>SHAPED_FIT_TOL_ACCEL_MM_S2 = 50</code>. Sliver spans below
-<code>SHAPED_FIT_MIN_SPAN_S</code> are carried as exact-endpoint linear pieces instead
-of dividing by a near-zero duration. Finally
+carry, so each emitted segment is refit (<code>fit_axis_from_signal</code>) with the
+ladder the lowerer uses: two endpoint-anchored quadratics that carry the
+span's travel, a cubic through both endpoint velocities, a quintic Hermite
+base matching the signal's exact <code>(p, v, a)</code> at both span ends, then degree
+6/7 from interior residuals — bisecting spans until the fit meets
+<code>SHAPED_FIT_TOL_MM = 1e-3</code> and <code>SHAPED_FIT_TOL_ACCEL_MM_S2 = 50</code>. Sliver spans
+below <code>SHAPED_FIT_MIN_SPAN_S</code> are carried as exact-endpoint linear pieces
+instead of dividing by a near-zero duration. Finally
 <code>pad_segment_axes_to_uniform_degree</code> zero-pads so kinematics lane mixing
-sees one degree per segment. Matching endpoint <code>(p, v, a)</code> per span keeps
-the emitted track C² at every seam by construction.</p>
+sees one degree per segment. Every rung is endpoint-anchored, so seams are
+C⁰ by construction; the quadratics solve an endpoint velocity from the
+travel, so a seam they win can step in velocity.</p>
+<p>A pressure advance applied before projection (<code>p + k·ṗ</code> without a follower
+kernel, or any nonlinear advance) turns such a velocity step into a position
+step the extruder would have to take in zero time. The tracks that advance
+differentiates — the leaders a projected follower rides, and the follower's
+own raw fit when its leaders are unshaped — are therefore fitted with
+<code>velocity_continuous</code>: the quadratics are withheld and every seam carries
+the signal's own velocity.</p>
 <p>Leader refits use ordered parallel work without changing the fitted signal.
 Axes run concurrently. Ordinary windows distribute whole target segments;
 a target with at least 512 exact cut spans distributes those spans instead.
