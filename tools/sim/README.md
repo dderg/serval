@@ -78,7 +78,16 @@ SIM_JITTER=3 tools/sim/run.sh test  # share a cpuset with 3 bursty CPU burners
     ahead of its unread input; its next task round reads it. The firmware
     is built with `_FORTIFY_SOURCE`, so libvtime also intercepts
     `__read_chk`, `__ppoll_chk` and `__poll_chk`: without them the MCU's
-    console reads and idle ppoll bypassed the shim entirely.
+    console reads and idle ppoll bypassed the shim entirely. A device
+    whose reading thread is itself stepping to its own imminent timer
+    cannot read until time moves, so its unread input stops holding the
+    clock: two MCUs each waiting on their own timer with input pending
+    used to wedge each other.
+  - `sim_world(..., crystal_ppm={"f4": 30.0})` gives an MCU its own
+    oscillator (`VTIME_CRYSTAL_PPM`): every clock that process reads runs
+    that many ppm off the shared timeline, and the deadlines it sets map
+    back. Step timestamps from the GPIO shim stay on the shared timeline,
+    so step timing compares across MCUs.
   - A process klippy forks drops the host role in the child, so its
     waits and its exit cannot touch klippy's accounting (a forked child's
     exit used to clear `host_present` for the whole world).
