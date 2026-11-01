@@ -1,4 +1,8 @@
-use super::{LawSegment, ScalarLaw};
+use std::sync::Arc;
+
+use super::{
+    LawSegment, RAIL_KNOT_DS, RAIL_KNOTS_MAX, RAIL_KNOTS_MIN, RailKnot, ScalarLaw, knot_duration,
+};
 
 fn rail(v0: f64, accel: f64, kappa0: f64, sigma: f64, brake: bool, ds: f64) -> LawSegment {
     LawSegment::until_arc(
@@ -161,4 +165,142 @@ fn min_velocity_reports_the_brake_end() {
     assert!((seg.min_velocity() - end_v).abs() < 1e-12);
     let accel = rail(4.0, 1000.0, 50.0, -1700.0, false, 0.02);
     assert_eq!(accel.min_velocity(), 4.0);
+}
+
+/// The rail integration as it was before each step reused the state its
+/// predecessor ended on: the oracle the carried version must match bit for
+/// bit.
+fn integrate_rail_arc_recomputing_step_ends(
+    law: &ScalarLaw,
+    v0: f64,
+    ds: f64,
+) -> Option<Arc<[RailKnot]>> {
+    if ds <= 0.0 {
+        let knot = RailKnot {
+            t: 0.0,
+            s: 0.0,
+            v: v0,
+            rise: 0.0,
+        };
+        return Some(Arc::from(vec![knot, knot]));
+    }
+    let n = ((ds / RAIL_KNOT_DS).ceil() as usize).clamp(RAIL_KNOTS_MIN, RAIL_KNOTS_MAX);
+    let apex_start = {
+        let a0 = law.accel_at(0.0, v0).abs();
+        let budget = match law {
+            ScalarLaw::DiskRail { accel, .. } => *accel,
+            ScalarLaw::ConstAccel { a0 } => a0.abs().max(1.0),
+        };
+        a0 < 0.1 * budget
+    };
+    let arc_at = |k: usize| -> f64 {
+        let u = k as f64 / n as f64;
+        if apex_start { ds * u * u } else { ds * u }
+    };
+    let mut knots = Vec::with_capacity(n + 1);
+    let mut w = v0 * v0;
+    let mut t = 0.0_f64;
+    knots.push(RailKnot {
+        t,
+        s: 0.0,
+        v: v0,
+        rise: 0.0,
+    });
+    let f = |s: f64, w: f64| 2.0 * law.accel_at(s, w.max(0.0).sqrt());
+    for i in 0..n {
+        let s = arc_at(i);
+        let h = arc_at(i + 1) - s;
+        let k1 = f(s, w);
+        let k2 = f(s + 0.5 * h, w + 0.5 * h * k1);
+        let k3 = f(s + 0.5 * h, w + 0.5 * h * k2);
+        let k4 = f(s + h, w + h * k3);
+        let increment = h * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0;
+        let stepped = w + increment;
+        let settled = law.settle_crossed_cap(s, s + h, stepped);
+        let w_next = settled.unwrap_or(stepped);
+        let last = i == n - 1;
+        if w_next <= 0.0 && !last {
+            return None;
+        }
+        let v_lo = w.max(0.0).sqrt();
+        let v_hi = w_next.max(0.0).sqrt();
+        if v_lo + v_hi <= 0.0 {
+            return None;
+        }
+        let rise = match settled {
+            None if w_next > 0.0 => increment / (v_lo + v_hi),
+            _ => v_hi - v_lo,
+        };
+        let a_lo = law.accel_at(s, v_lo);
+        let a_hi = law.accel_at(s + h, v_hi);
+        let r_lo = law.accel_rate_at(s, v_lo, a_lo);
+        let r_hi = law.accel_rate_at(s + h, v_hi, a_hi);
+        t += knot_duration(h, (v_lo, a_lo, r_lo), (v_hi, a_hi, r_hi));
+        w = w_next.max(0.0);
+        knots.push(RailKnot {
+            t,
+            s: arc_at(i + 1),
+            v: w.sqrt(),
+            rise,
+        });
+    }
+    Some(Arc::from(knots))
+}
+
+fn rail_laws() -> Vec<ScalarLaw> {
+    let mut laws = vec![
+        ScalarLaw::ConstAccel { a0: 0.0 },
+        ScalarLaw::ConstAccel { a0: 3000.0 },
+        ScalarLaw::ConstAccel { a0: -2500.0 },
+    ];
+    for &accel in &[100.0, 5000.0, 50_000.0] {
+        for &kappa0 in &[0.0, 0.05, 2.0, -1.5] {
+            for &sigma in &[0.0, 0.3, -4.0, 120.0] {
+                for brake in [false, true] {
+                    laws.push(ScalarLaw::DiskRail {
+                        accel,
+                        kappa0,
+                        sigma,
+                        brake,
+                    });
+                }
+            }
+        }
+    }
+    laws
+}
+
+#[test]
+fn carrying_each_step_end_into_the_next_step_changes_no_knot() {
+    let mut compared = 0usize;
+    for law in rail_laws() {
+        for &v0 in &[0.0, 1e-6, 0.5, 30.0, 250.0, 1200.0] {
+            for &ds in &[0.0, 1e-5, 3e-4, 0.01, 0.7, 12.0] {
+                let carried = super::integrate_rail_arc(&law, v0, ds);
+                let recomputed = integrate_rail_arc_recomputing_step_ends(&law, v0, ds);
+                let bits = |knots: &Option<Arc<[RailKnot]>>| {
+                    knots.as_ref().map(|knots| {
+                        knots
+                            .iter()
+                            .map(|k| {
+                                [
+                                    k.t.to_bits(),
+                                    k.s.to_bits(),
+                                    k.v.to_bits(),
+                                    k.rise.to_bits(),
+                                ]
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                };
+                assert_eq!(
+                    bits(&carried),
+                    bits(&recomputed),
+                    "{law:?} from v0={v0} over ds={ds}"
+                );
+                compared += 1;
+            }
+        }
+    }
+    assert!(compared > 1000);
 }

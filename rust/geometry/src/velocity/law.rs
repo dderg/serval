@@ -646,11 +646,27 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<[RailKnot
         v: v0,
         rise: 0.0,
     });
+    let state_at = |s: f64, w: f64| {
+        let v = w.max(0.0).sqrt();
+        let a = law.accel_at(s, v);
+        RailState {
+            s,
+            v,
+            a,
+            rate: law.accel_rate_at(s, v, a),
+        }
+    };
     let f = |s: f64, w: f64| 2.0 * law.accel_at(s, w.max(0.0).sqrt());
+    let mut carried: Option<RailState> = None;
     for i in 0..n {
         let s = arc_at(i);
-        let h = arc_at(i + 1) - s;
-        let k1 = f(s, w);
+        let s_next = arc_at(i + 1);
+        let h = s_next - s;
+        let lo = carried
+            .take()
+            .filter(|end| end.s == s)
+            .unwrap_or_else(|| state_at(s, w));
+        let k1 = 2.0 * lo.a;
         let k2 = f(s + 0.5 * h, w + 0.5 * h * k1);
         let k3 = f(s + 0.5 * h, w + 0.5 * h * k2);
         let k4 = f(s + h, w + h * k3);
@@ -662,29 +678,35 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<[RailKnot
         if w_next <= 0.0 && !last {
             return None;
         }
-        let v_lo = w.max(0.0).sqrt();
-        let v_hi = w_next.max(0.0).sqrt();
-        if v_lo + v_hi <= 0.0 {
+        let hi = state_at(s + h, w_next);
+        if lo.v + hi.v <= 0.0 {
             return None;
         }
         let rise = match settled {
-            None if w_next > 0.0 => increment / (v_lo + v_hi),
-            _ => v_hi - v_lo,
+            None if w_next > 0.0 => increment / (lo.v + hi.v),
+            _ => hi.v - lo.v,
         };
-        let a_lo = law.accel_at(s, v_lo);
-        let a_hi = law.accel_at(s + h, v_hi);
-        let r_lo = law.accel_rate_at(s, v_lo, a_lo);
-        let r_hi = law.accel_rate_at(s + h, v_hi, a_hi);
-        t += knot_duration(h, (v_lo, a_lo, r_lo), (v_hi, a_hi, r_hi));
+        t += knot_duration(h, (lo.v, lo.a, lo.rate), (hi.v, hi.a, hi.rate));
         w = w_next.max(0.0);
         knots.push(RailKnot {
             t,
-            s: arc_at(i + 1),
-            v: w.sqrt(),
+            s: s_next,
+            v: hi.v,
             rise,
         });
+        carried = Some(hi);
     }
     Some(Arc::from(knots))
+}
+
+/// The rail ODE's state at one arc position, with the law's acceleration
+/// and its rate there.
+#[derive(Clone, Copy)]
+struct RailState {
+    s: f64,
+    v: f64,
+    a: f64,
+    rate: f64,
 }
 
 /// The duration `τ` under which the quintic Hermite through `(v, a, ȧ)` at
