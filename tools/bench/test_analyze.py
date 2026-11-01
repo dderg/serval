@@ -269,13 +269,14 @@ def _apex_positions(apex_steps: float):
 def test_reversal_apex_step_the_capture_lacks(apex_steps, tie):
     reference = _events([0.8, 1.0, 1.2, 1.3], [9, 10, 9, 8], [1, 1, -1, -1])
     capture = _events([0.8, 1.3], [9, 8], [1, -1])
-    capture_tie, reference_tie = analyze.edge_ties(
+    capture_tie, reference_tie, _ = analyze.edge_ties(
         capture,
         capture.time,
         np.array([False, False]),
         reference,
         np.array([False, True, False, False]),
         _apex_positions(apex_steps),
+        None,
     )
     assert reference_tie.tolist() == [False, tie, False, False]
     assert not capture_tie.any()
@@ -285,13 +286,129 @@ def test_reversal_apex_step_the_capture_lacks(apex_steps, tie):
 def test_reversal_apex_step_the_reference_lacks(apex_steps, tie):
     reference = _events([0.8, 1.3], [9, 8], [1, -1])
     capture = _events([0.8, 1.0, 1.2, 1.3], [9, 10, 9, 8], [1, 1, -1, -1])
-    capture_tie, reference_tie = analyze.edge_ties(
+    capture_tie, reference_tie, _ = analyze.edge_ties(
         capture,
         capture.time,
         np.array([False, True, False, False]),
         reference,
         np.array([False, False]),
         _apex_positions(apex_steps),
+        None,
     )
     assert capture_tie.tolist() == [False, tie, False, False]
     assert not reference_tie.any()
+
+
+class _RippleReference:
+    def trajectory_end_s(self, t_stream: float):
+        return None
+
+    def positions(self, role: str, start_s: float, end_s: float):
+        t = np.linspace(start_s, end_s, 50)
+        return 9.9 + 0.1 * np.cos(2 * np.pi * t / 0.05)
+
+
+def test_ripple_bursts_beyond_the_pair_window_are_not_timing_errors():
+    reference = _events(
+        [1.000, 1.001, 1.050, 1.051], [10, 10, 10, 10], [1, -1, 1, -1]
+    )
+    capture = _events(
+        [1.025, 1.026, 1.075, 1.076], [10, 10, 10, 10], [1, -1, 1, -1]
+    )
+    match = analyze.measure_epoch(
+        analyze.EpochSteps({"a": capture}, {"a": reference}),
+        analyze.Alignment(0.0, 0.0, True),
+        _RippleReference(),
+    )["a"]
+    assert match.late_s.size == 0
+    assert match.unmatched_capture + match.edge_ties >= len(capture)
+
+
+def _end_positions(final_steps: float):
+    def positions(start_s: float, end_s: float) -> np.ndarray:
+        return np.full(2, final_steps)
+
+    return positions
+
+
+@pytest.mark.parametrize(
+    ("final_steps", "tie"), [(10.0, True), (10.0000001, True), (10.001, False)]
+)
+def test_final_step_the_capture_lacks_is_a_tie_only_on_the_lattice_line(
+    final_steps, tie
+):
+    reference = _events([0.8, 1.0], [9, 10], [1, 1])
+    capture = _events([0.8], [9], [1])
+    capture_tie, reference_tie, end_ties = analyze.edge_ties(
+        capture,
+        capture.time,
+        np.array([False]),
+        reference,
+        np.array([False, True]),
+        _end_positions(final_steps),
+        1.2,
+    )
+    assert reference_tie.tolist() == [False, tie]
+    assert end_ties == (1 if tie else 0)
+    assert not capture_tie.any()
+
+
+END_GCODE = """\
+SET_KINEMATIC_POSITION X=0 Y=0 Z=0
+G92 E0
+M83
+G1 X{x} F3000
+"""
+
+
+def _verdict_dropping_last_step(tmp_path_factory, x_mm: str) -> dict:
+    _require_snapshot_engine()
+    run_dir = tmp_path_factory.mktemp("end")
+    shutil.copy(BENCH_DIR / "printer.cfg", run_dir / "printer.cfg")
+    (run_dir / "print.gcode").write_text(END_GCODE.format(x=x_mm))
+    job = analyze.load_job(run_dir)
+    reference = analyze.build_reference(job)
+    first_step = min(
+        ev.time.min() for ev in reference.events.values() if len(ev)
+    )
+    last = max(ev.time.max() for ev in reference.events.values() if len(ev))
+    deltas = np.zeros(
+        (int((last - first_step + TIE_CAPTURE_START_S + 0.5) * TICK_HZ), 4),
+        np.int64,
+    )
+    for motor in job.motors:
+        events = reference.events[motor.role]
+        keep = np.ones(len(events), bool)
+        if motor.role == "a":
+            keep[-1] = False
+        capture_t = events.time[keep] - first_step + TIE_CAPTURE_START_S
+        ticks = np.floor(capture_t * TICK_HZ).astype(np.int64)
+        signed = events.direction[keep] * motor.dir_sign
+        np.add.at(deltas[:, motor.channel], ticks, signed)
+    deltas.astype(np.int8).tofile(run_dir / "capture.bin")
+    (run_dir / "capture.json").write_text(
+        json.dumps({"tick_hz": TICK_HZ, "channel_count": 4})
+    )
+    verdict, _ = analyze.analyze(analyze.load_run(run_dir))
+    return verdict
+
+
+def test_dropped_final_step_on_the_endpoint_line_is_an_end_tie(
+    tmp_path_factory,
+):
+    verdict = _verdict_dropping_last_step(tmp_path_factory, "10")
+    motor = verdict["motors"]["a"]
+    assert motor["net_steps_capture_minus_expected"] == -1
+    assert motor["edge_tie_steps"] == 1
+    assert motor["unmatched_reference_steps"] == 0
+    assert verdict["checks"]["net_steps_match"]
+    assert verdict["checks"]["all_steps_matched"]
+
+
+def test_dropped_final_step_past_the_line_still_fails(tmp_path_factory):
+    verdict = _verdict_dropping_last_step(tmp_path_factory, "10.004")
+    motor = verdict["motors"]["a"]
+    assert motor["net_steps_capture_minus_expected"] == -1
+    assert motor["unmatched_reference_steps"] == 1
+    assert not verdict["checks"]["net_steps_match"]
+    assert not verdict["checks"]["all_steps_matched"]

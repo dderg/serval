@@ -68,6 +68,7 @@ OFFSET_SEARCH_S = 1.0
 OFFSET_SEARCH_BIN_S = 1e-3
 FIT_WINDOWS_S = (10e-3, 2e-3, 2e-3, 2e-3)
 REPORT_MATCH_WINDOW_S = 100e-3
+PAIR_WINDOW_S = 2e-3
 EPOCH_DURATION_TOLERANCE_S = 1.0
 EPOCH_DURATION_TOLERANCE_FRACTION = 0.5
 TIMING_TOLERANCE_US = 50.0
@@ -172,6 +173,16 @@ class Reference:
     final_counts: dict[str, int]
     level_offsets: dict[str, list[float]]
 
+    def trajectory_end_s(self, t_stream: float) -> float | None:
+        for block in self.blocks:
+            if (
+                block.stream_offset_s
+                <= t_stream
+                <= (block.stream_offset_s + block.duration_s)
+            ):
+                return block.stream_offset_s + block.duration_s
+        return None
+
     def positions(
         self, role: str, start_s: float, end_s: float
     ) -> np.ndarray | None:
@@ -243,6 +254,7 @@ class MatchedSteps:
     unmatched_capture: int
     unmatched_reference: int
     edge_ties: int
+    end_ties: int = 0
 
 
 @dataclass
@@ -946,9 +958,11 @@ def edge_ties(
     reference: StepEvents,
     reference_unmatched: np.ndarray,
     positions: PositionWindow,
-) -> tuple[np.ndarray, np.ndarray]:
+    trajectory_end_s: float | None,
+) -> tuple[np.ndarray, np.ndarray, int]:
     capture_tie = np.zeros(len(capture), bool)
     reference_tie = np.zeros(len(reference), bool)
+    end_ties = 0
     times = np.union1d(capture_stream_s, reference.time)
     capture_counts = _counts_after(capture, capture_stream_s, times)
     reference_counts = _counts_after(reference, reference.time, times)
@@ -958,9 +972,8 @@ def edge_ties(
     capture_open_s = capture_stream_s[capture_open]
     reference_open_s = reference.time[reference_open]
     for lo, hi in _disagreement_spans(times, disagreement):
-        if hi == times.size:
-            continue
-        start_s, end_s = times[lo], times[hi]
+        start_s = times[lo]
+        end_s = times[hi] if hi < times.size else math.inf
         in_capture = capture_open[
             np.searchsorted(capture_open_s, start_s, "left") : np.searchsorted(
                 capture_open_s, end_s, "right"
@@ -974,6 +987,16 @@ def edge_ties(
         if not (in_capture.size or in_reference.size):
             continue
         if np.any(np.abs(disagreement[lo:hi]) > 1):
+            continue
+        if hi == times.size:
+            if (
+                trajectory_end_s is not None
+                and in_capture.size + in_reference.size == 1
+                and _ends_on_lattice_line(positions, trajectory_end_s)
+            ):
+                capture_tie[in_capture] = True
+                reference_tie[in_reference] = True
+                end_ties += 1
             continue
         band_holds = all(
             _stays_in_count_band(
@@ -991,7 +1014,16 @@ def edge_ties(
         ):
             capture_tie[in_capture] = True
             reference_tie[in_reference] = True
-    return capture_tie, reference_tie
+    return capture_tie, reference_tie, end_ties
+
+
+def _ends_on_lattice_line(
+    positions: PositionWindow, trajectory_end_s: float
+) -> bool:
+    path = positions(trajectory_end_s, trajectory_end_s)
+    return path is not None and bool(
+        abs(path[-1] - round(path[-1])) < LATTICE_SNAP_STEPS
+    )
 
 
 def _disagreement_spans(
@@ -1007,6 +1039,46 @@ def _disagreement_spans(
     return spans
 
 
+def same_key_count(
+    query_key: np.ndarray,
+    query_t: np.ndarray,
+    ref_key: np.ndarray,
+    ref_t: np.ndarray,
+) -> np.ndarray:
+    if query_t.size == 0 or ref_t.size == 0:
+        return np.zeros(query_t.size, np.int64)
+    order = np.lexsort((ref_t, ref_key))
+    sorted_key, sorted_t = ref_key[order], ref_t[order]
+    key_floor = min(sorted_key.min(), query_key.min())
+    t_floor = min(sorted_t.min(), query_t.min()) - REPORT_MATCH_WINDOW_S
+    span = (
+        max(sorted_t.max(), query_t.max())
+        - t_floor
+        + REPORT_MATCH_WINDOW_S
+        + 1.0
+    )
+    ref_composite = (sorted_key - key_floor) * span + (sorted_t - t_floor)
+    query_composite = (query_key - key_floor) * span + (query_t - t_floor)
+    resolution = np.spacing(max(ref_composite.max(), query_composite.max()))
+    if resolution > 1e-8:
+        raise AnalysisError(
+            f"step-key composite resolution {resolution:.2e}s too coarse"
+        )
+    return np.searchsorted(
+        ref_composite, query_composite + REPORT_MATCH_WINDOW_S, "right"
+    ) - np.searchsorted(
+        ref_composite, query_composite - REPORT_MATCH_WINDOW_S, "left"
+    )
+
+
+def _is_pair(
+    offset_s: np.ndarray, own_rivals: np.ndarray, partner_rivals: np.ndarray
+) -> np.ndarray:
+    unambiguous = (own_rivals == 1) & (partner_rivals == 1)
+    window = np.where(unambiguous, REPORT_MATCH_WINDOW_S, PAIR_WINDOW_S)
+    return np.abs(offset_s) < window
+
+
 def measure_epoch(
     steps: EpochSteps, alignment: Alignment, reference: Reference
 ) -> dict[str, MatchedSteps]:
@@ -1019,21 +1091,32 @@ def measure_epoch(
             )
             continue
         nearest, late = match_capture_to_reference(steps, role, alignment)
-        matched = np.abs(late) < REPORT_MATCH_WINDOW_S
-        _, reverse = nearest_same_key(
-            _step_keys(ref),
-            alignment.to_capture(ref.time),
-            _step_keys(cap),
-            cap.time,
+        ref_capture_t = alignment.to_capture(ref.time)
+        reverse_nearest, reverse = nearest_same_key(
+            _step_keys(ref), ref_capture_t, _step_keys(cap), cap.time
         )
-        reference_unmatched = np.abs(reverse) >= REPORT_MATCH_WINDOW_S
-        capture_tie, reference_tie = edge_ties(
+        capture_rivals = same_key_count(
+            _step_keys(cap), cap.time, _step_keys(ref), ref_capture_t
+        )
+        reference_rivals = same_key_count(
+            _step_keys(ref), ref_capture_t, _step_keys(cap), cap.time
+        )
+        matched = _is_pair(
+            late, capture_rivals, reference_rivals[np.maximum(nearest, 0)]
+        )
+        reference_unmatched = ~_is_pair(
+            reverse,
+            reference_rivals,
+            capture_rivals[np.maximum(reverse_nearest, 0)],
+        )
+        capture_tie, reference_tie, end_ties = edge_ties(
             cap,
             alignment.to_stream(cap.time),
             ~matched,
             ref,
             reference_unmatched,
             lambda lo, hi, role=role: reference.positions(role, lo, hi),
+            reference.trajectory_end_s(float(ref.time[-1])),
         )
         matches[role] = MatchedSteps(
             late_s=late[matched],
@@ -1046,6 +1129,7 @@ def measure_epoch(
             edge_ties=int(
                 np.count_nonzero(capture_tie) + np.count_nonzero(reference_tie)
             ),
+            end_ties=end_ties,
         )
     return matches
 
@@ -1369,6 +1453,7 @@ def analyze(
                 e.matches[role].unmatched_reference for e in epochs
             ),
             "edge_tie_steps": sum(e.matches[role].edge_ties for e in epochs),
+            "end_tie_steps": sum(e.matches[role].end_ties for e in epochs),
             "timing_error_capture_minus_reference_us": _timing_stats(
                 late[conditioned], late_at[conditioned]
             ),
@@ -1406,7 +1491,7 @@ def analyze(
     )
     checks = {
         "net_steps_match": all(
-            r["net_steps_capture_minus_expected"] == 0
+            abs(r["net_steps_capture_minus_expected"]) <= r["end_tie_steps"]
             for r in motors_report.values()
         ),
         "no_stalls": not stalls,

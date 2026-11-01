@@ -37,7 +37,7 @@ Run dirs: `~/bench/runs/<YYYYmmdd-HHMMSS>/` — `print.gcode`, `printer.cfg` (th
 `ok` = all four `checks`:
 
 - `net_steps_match` — per motor, captured net steps (DIR-signed) equal the reference's. False = lost or extra steps.
-- `all_steps_matched` — every captured step pairs with a reference step within 100 ms and vice versa (`unmatched_capture_steps`/`unmatched_reference_steps` = 0; lattice-edge ties are counted in `edge_tie_steps`, not as failures).
+- `all_steps_matched` — every captured step pairs with a reference step and vice versa (`unmatched_capture_steps`/`unmatched_reference_steps` = 0). A step pairs within 100 ms when its (level,dir) key is unique in that window, but only within 2 ms (`PAIR_WINDOW_S`) when the key repeats (ripple bursts), so a step can't pair with the neighbouring burst. Unpaired steps whose count disagreement stays within ±1 on a lattice line are `edge_tie_steps`, not failures; a dropped final step when the trajectory ends exactly on a lattice line is an `end_tie_steps` tie (and is allowed in `net_steps_match`).
 - `no_stalls` — no 5 ms bin where the reference has ≥3 steps and the capture none (or reverse); `stalls.items[]` give times.
 - `timing_abs_max_within_50us` — max |capture − aligned reference| over motors. **Sign: positive = step late.** Healthy runs show p99 ≈ 13–25 µs, abs_max ≈ 33–37 µs (25 µs tick quantization).
 
