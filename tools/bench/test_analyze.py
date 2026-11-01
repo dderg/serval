@@ -446,3 +446,41 @@ def test_blocks_split_by_drain_commands_stay_separate_epochs_across_short_rests(
         assert recovered.to_capture(start) == pytest.approx(
             truth.to_capture(start), abs=20e-6
         )
+
+
+def test_merged_epoch_is_cut_at_the_rest_nearest_the_reference_count():
+    def burst(start_s: float, steps: int, length_s: float):
+        return np.linspace(start_s, start_s + length_s, steps)
+
+    def events(times: np.ndarray) -> analyze.StepEvents:
+        return _events(times, np.arange(1, times.size + 1), np.ones(times.size))
+
+    reference = {
+        "a": events(
+            np.concatenate(
+                [
+                    burst(0.0, 2000, 1.0),
+                    burst(100.0, 2000, 1.0),
+                    burst(200.0, 2000, 1.0),
+                ]
+            )
+        )
+    }
+    capture = {
+        "a": events(
+            np.concatenate(
+                [
+                    burst(0.0, 2001, 1.0),
+                    burst(5.0, 1999, 0.1),
+                    burst(5.12, 2000, 0.1),
+                ]
+            )
+        )
+    }
+    capture_epochs = analyze.find_epochs(capture, 0.15)
+    reference_epochs = analyze.find_epochs(reference, 0.15)
+    assert len(capture_epochs) == 2
+    split = analyze.split_epochs_by_reference_counts(
+        capture, capture_epochs, reference, reference_epochs
+    )
+    assert [e.start_s for e in split] == pytest.approx([0.0, 5.0, 5.12])

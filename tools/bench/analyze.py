@@ -83,6 +83,8 @@ STALL_MIN_STEPS = 3
 PEAK_RATE_WINDOW_TICKS = 160
 REPORTED_STALLS_LIMIT = 50
 EDGE_TIE_STEPS = 0.5
+EPOCH_SPLIT_COUNT_SLACK = 200
+EPOCH_SPLIT_MIN_GAP_S = 1e-3
 
 
 class AnalysisError(RuntimeError):
@@ -742,9 +744,23 @@ def split_epochs_by_reference_counts(
         )
         for ref in reference_epochs
     ]
-    if sum(counts) != capture_times.size:
+    slack = EPOCH_SPLIT_COUNT_SLACK * len(reference_epochs)
+    if abs(sum(counts) - capture_times.size) > slack:
         return capture_epochs
-    bounds = np.concatenate(([0], np.cumsum(counts)))
+    gaps = np.diff(capture_times)
+    cuts = []
+    for target in np.cumsum(counts)[:-1]:
+        lo = max(1, int(target) - EPOCH_SPLIT_COUNT_SLACK)
+        hi = min(capture_times.size - 1, int(target) + EPOCH_SPLIT_COUNT_SLACK)
+        cut = lo + int(np.argmax(gaps[lo - 1 : hi]))
+        if gaps[cut - 1] < EPOCH_SPLIT_MIN_GAP_S:
+            raise AnalysisError(
+                f"no rest of at least {EPOCH_SPLIT_MIN_GAP_S * 1e3:g} ms near "
+                f"capture step {int(target)} (t={capture_times[cut]:.3f}s) "
+                "separates the reference blocks"
+            )
+        cuts.append(cut)
+    bounds = [0, *cuts, capture_times.size]
     return [
         Epoch(float(capture_times[lo]), float(capture_times[hi - 1]))
         for lo, hi in zip(bounds[:-1], bounds[1:])
