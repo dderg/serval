@@ -167,19 +167,42 @@ fn mock_router() -> host_rt::passthrough_queue::PassthroughRouter {
     )
 }
 
+fn real_router() -> host_rt::passthrough_queue::PassthroughRouter {
+    host_rt::passthrough_queue::PassthroughRouter::with_clock(
+        Arc::new(host_rt::clock::RealClock) as Arc<dyn host_rt::clock::Clock + Send + Sync>
+    )
+}
+
 #[derive(Clone)]
 struct AnchoredSink {
     anchor: Arc<Mutex<crate::anchor::Anchor>>,
     router: Arc<Mutex<host_rt::passthrough_queue::PassthroughRouter>>,
+    frontier: Arc<CommittedFrontier>,
     starts_host: Arc<Mutex<Vec<f64>>>,
+    parks: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl AnchoredSink {
+    fn on(timeline: &ExecutionTimeline) -> Self {
+        Self {
+            anchor: Arc::clone(&timeline.anchor),
+            router: Arc::clone(&timeline.router),
+            frontier: Arc::clone(&timeline.frontier),
+            starts_host: Arc::default(),
+            parks: Arc::default(),
+        }
+    }
+
     fn anchor_span(&self, t_start: f64, t_end: f64) {
         let mut anchor = self.anchor.lock_ok();
         let host_now = self.router.lock_ok().host_now_secs();
         let (t0, _) = anchor.anchor_segment(t_start, t_end, host_now);
         self.starts_host.lock_ok().push(t0 + t_start);
+        let runway_s = t0 + t_end - host_now;
+        if runway_s > 0.0 {
+            self.frontier
+                .advance_to(Instant::now() + Duration::from_secs_f64(runway_s));
+        }
     }
 }
 
@@ -200,6 +223,7 @@ impl SegmentSink for AnchoredSink {
         Ok(())
     }
     fn mark_parked(&mut self) {
+        self.parks.fetch_add(1, Ordering::SeqCst);
         self.anchor.lock_ok().mark_parked();
     }
     fn follow_stream_to(&mut self, stream_t: f64) {
@@ -216,11 +240,7 @@ fn a_claim_after_a_nudge_never_follows_the_next_move_start() {
         anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
         router: Arc::new(Mutex::new(mock_router())),
     };
-    let sink = AnchoredSink {
-        anchor: Arc::clone(&timeline.anchor),
-        router: Arc::clone(&timeline.router),
-        starts_host: Arc::default(),
-    };
+    let sink = AnchoredSink::on(&timeline);
     let mut h = spawn_on_timeline(
         cfg(),
         AxisChainSet::default(),
@@ -258,6 +278,71 @@ fn a_claim_after_a_nudge_never_follows_the_next_move_start() {
     h.shutdown();
 }
 
+fn limited_line(
+    line_no: u32,
+    start: [f64; 3],
+    end: [f64; 3],
+    feed: f64,
+    accel: f64,
+) -> geometry::Move {
+    let ctx = MoveContext {
+        extruder_axis: 3,
+        feedrate_mm_s: feed,
+        limits: VelocityLimits::try_new(1_000.0, accel, 5.0, f64::INFINITY).unwrap(),
+        source: SourceRange {
+            start_line: line_no,
+            end_line: line_no,
+        },
+    };
+    line_move(start, end, 0.0, ctx).unwrap()
+}
+
+#[test]
+fn a_planner_holding_its_window_behind_a_busy_inbox_brakes_instead_of_underrunning() {
+    let timeline = ExecutionTimeline {
+        frontier: Arc::default(),
+        anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
+        router: Arc::new(Mutex::new(real_router())),
+    };
+    let sink = AnchoredSink::on(&timeline);
+    let mut h = spawn_on_timeline(
+        cfg_cap(1_000_000),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0],
+        sink.clone(),
+        timeline,
+    );
+    let mut x = 0.0;
+    let mut line_no = 1;
+    let mut submit = |h: &TestWorker, len: f64, feed: f64, accel: f64| loop {
+        let m = limited_line(line_no, [x, 0.0, 0.0], [x + len, 0.0, 0.0], feed, accel);
+        match h.submit_move(m) {
+            Ok(()) => {
+                x += len;
+                line_no += 1;
+                return;
+            }
+            Err(StreamWorkerError::ChannelFull) => std::thread::yield_now(),
+            Err(e) => panic!("{e}"),
+        }
+    };
+    for _ in 0..10 {
+        submit(&h, 5.0, 100.0, 10_000.0);
+    }
+    let saturated = Instant::now();
+    while saturated.elapsed() < Duration::from_secs(2) {
+        submit(&h, 0.05, 1_000.0, 100.0);
+    }
+    let parks_while_saturated = sink.parks.load(Ordering::SeqCst);
+    h.flush().unwrap();
+    assert!(
+        parks_while_saturated > 0,
+        "the committed runway ran out while the inbox stayed full and the planner \
+         committed nothing, yet the pacer never braked to rest"
+    );
+    h.shutdown();
+}
+
 #[test]
 fn a_start_hold_delays_the_next_move_to_the_held_instant() {
     let frontier: Arc<CommittedFrontier> = Arc::default();
@@ -268,11 +353,7 @@ fn a_start_hold_delays_the_next_move_to_the_held_instant() {
         router: Arc::new(Mutex::new(mock_router())),
     };
     let host_now = timeline.router.lock_ok().host_now_secs();
-    let sink = AnchoredSink {
-        anchor: Arc::clone(&timeline.anchor),
-        router: Arc::clone(&timeline.router),
-        starts_host: Arc::default(),
-    };
+    let sink = AnchoredSink::on(&timeline);
     let mut h = spawn_on_timeline(
         cfg(),
         AxisChainSet::default(),

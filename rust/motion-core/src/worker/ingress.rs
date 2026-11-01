@@ -81,7 +81,10 @@ impl Ingress {
             };
             self.links.wakeup.notify_space_freed();
             match msg {
-                StreamMsg::Move(m) => self.handle_move(m),
+                StreamMsg::Move(m) => {
+                    self.handle_move(m);
+                    self.drain_or_runway();
+                }
                 other => {
                     if self.handle_control(other) {
                         return;
@@ -190,12 +193,14 @@ impl Ingress {
         self.undrained_since.get_or_insert_with(Instant::now);
     }
 
-    /// The pacer's one decision. Called when the inbox is silent while the
-    /// pipeline holds undrained moves: with runway beyond the reserve there is
-    /// provably time to wait for more input, so report how long; at the
-    /// reserve, send `Drain` so the fit stage and planner materialize the
-    /// brake-to-rest and the drained trajectory beats the playhead to the
-    /// pump.
+    /// The pacer's one decision. Called whenever the pipeline holds undrained
+    /// moves — on every arriving move as well as when the inbox goes silent,
+    /// since a saturated inbox in front of a planner that commits nothing
+    /// would otherwise let the playhead overrun the committed end: with
+    /// runway beyond the reserve there is provably time to wait for more
+    /// input, so report how long; at the reserve, send `Drain` so the fit
+    /// stage and planner materialize the brake-to-rest and the drained
+    /// trajectory beats the playhead to the pump.
     fn drain_or_runway(&mut self) -> Option<Duration> {
         let wait_s = self.timeline.frontier.runway_secs() - self.reserve_secs();
         if wait_s > 0.0 {
