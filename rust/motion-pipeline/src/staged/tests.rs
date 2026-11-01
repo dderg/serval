@@ -62,8 +62,11 @@ fn shaped_follower_chains() -> AxisChainSet {
 const HOME: [f64; 4] = [0.0; 4];
 
 fn zigzag_moves(count: u32) -> Vec<StreamInput> {
-    let mut start = [0.0, 0.0, 0.0];
-    (1..=count)
+    zigzag_from([0.0, 0.0, 0.0], 1, count)
+}
+
+fn zigzag_from(mut start: [f64; 3], first_line: u32, count: u32) -> Vec<StreamInput> {
+    (first_line..first_line + count)
         .map(|line| {
             let x = if line % 2 == 0 { 0.0 } else { 20.0 };
             let end = [x, f64::from(line), 0.0];
@@ -199,9 +202,12 @@ fn a_refusing_sink_closes_the_planning_side() {
 }
 
 #[test]
-fn a_panicking_shaper_closes_the_planning_side() {
+fn a_panicking_shaper_closes_the_planning_side_and_resurfaces_on_drop() {
     let mut staged = pipeline().into_staged(|_| panic!("shaper sink exploded"));
     assert!(feed_until_refused(&mut staged));
+    let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(staged)));
+    let panic = dropped.expect_err("dropping the pipeline re-raises the shaper's panic");
+    assert_eq!(panic.downcast_ref::<&str>(), Some(&"shaper sink exploded"));
 }
 
 #[test]
@@ -231,4 +237,81 @@ fn a_stalled_sink_backpressures_planning_at_the_inbox_bound() {
     let mut staged = planner.join().unwrap();
     assert_eq!(fed.load(Ordering::SeqCst), dwells);
     assert!(staged.finish());
+}
+
+#[test]
+fn a_reset_queued_behind_segments_reaches_the_sink_after_them_and_restarts_time() {
+    let before_reset = 20;
+    let mut items = zigzag_moves(before_reset);
+    items.push(StreamInput::Drain);
+    items.push(StreamInput::Control(Control::Reset {
+        pos: vec![
+            0.0,
+            f64::from(before_reset),
+            0.0,
+            0.8 * f64::from(before_reset),
+        ],
+    }));
+    items.extend(zigzag_from(
+        [0.0, f64::from(before_reset), 0.0],
+        before_reset + 1,
+        10,
+    ));
+    let expected = synchronous_output(
+        zigzag_moves(before_reset)
+            .into_iter()
+            .chain([
+                StreamInput::Drain,
+                StreamInput::Control(Control::Reset {
+                    pos: vec![
+                        0.0,
+                        f64::from(before_reset),
+                        0.0,
+                        0.8 * f64::from(before_reset),
+                    ],
+                }),
+            ])
+            .chain(zigzag_from(
+                [0.0, f64::from(before_reset), 0.0],
+                before_reset + 1,
+                10,
+            ))
+            .collect(),
+    );
+
+    let emitted = Arc::new(Mutex::new(Vec::new()));
+    let starts = Arc::new(Mutex::new(Vec::new()));
+    let (sink_emitted, sink_starts) = (Arc::clone(&emitted), Arc::clone(&starts));
+    let mut staged = pipeline().into_staged(move |item| {
+        std::thread::sleep(Duration::from_millis(1));
+        if let TrajectoryItem::Seg(segment) = &item {
+            sink_starts.lock().unwrap().push(segment.t_start);
+        }
+        if matches!(item, TrajectoryItem::Control(Control::Reset { .. })) {
+            sink_starts.lock().unwrap().push(f64::NAN);
+        }
+        sink_emitted.lock().unwrap().push(describe(&item));
+        true
+    });
+    for item in items {
+        assert!(staged.feed(item));
+    }
+    assert!(staged.finish());
+
+    assert_eq!(*emitted.lock().unwrap(), expected);
+    let starts = starts.lock().unwrap();
+    let reset = starts
+        .iter()
+        .position(|t| t.is_nan())
+        .expect("the reset reached the sink");
+    assert!(
+        reset > 0,
+        "segments shaped before the reset reach the sink before it"
+    );
+    assert!(starts[..reset].iter().all(|&t| t >= 0.0));
+    assert_eq!(
+        starts.get(reset + 1).copied(),
+        Some(0.0),
+        "the first segment after the reset restarts the timeline"
+    );
 }
