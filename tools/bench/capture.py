@@ -1,9 +1,16 @@
 """Host side of the F407 step-capture instrument.
 
-Protocol (little-endian), one frame per 128 snapshot ticks of 25 us:
-    magic "SVC1" | seq u32 | first_tick u32 | ticks u16 | status u8 | detail u8
-    | ticks * CHANNEL_COUNT signed step deltas (i8, + when DIR pin is high)
+Every frame (little-endian):
+    magic u32[4] | seq u32 | position u32 | length u16 | status u8 | detail u8
 status != 0 is a latched instrument fault; detail is the channel.
+
+Count mode ("SVC1", command S): one frame per 128 snapshot ticks of 25 us;
+position is the first tick, length the tick count, payload length *
+CHANNEL_COUNT signed step deltas (i8, + when DIR pin is high).
+
+Event mode ("SVE1", command E): payload is a slice of one continuous byte
+stream (position = its offset, length = its size), decoded by
+capture_events.py.
 """
 
 from __future__ import annotations
@@ -24,10 +31,14 @@ from pathlib import Path
 DEVICE = "/dev/serial/by-id/usb-serval-bench_step-capture_f407-capture-if00"
 CHANNEL_COUNT = 4
 TICK_HZ = 40_000
-FRAME_MAGIC = b"SVC1"
+EVENT_TICK_HZ = 84_000_000
+COUNT_MAGIC = b"SVC1"
+EVENT_MAGIC = b"SVE1"
 HEADER = struct.Struct("<4sIIHBB")
 STALL_TIMEOUT_S = 1.0
+POSITION_MODULUS = 1 << 32
 CMD_START = b"S"
+CMD_EVENTS = b"E"
 CMD_STOP = b"X"
 
 
@@ -36,6 +47,16 @@ class Fault(enum.IntEnum):
     DELTA_OVERFLOW = 2
     DIR_DESYNC = 3
     RING_OVERFLOW = 4
+    STEP_OVERCAPTURE = 5
+    TICK_LATE = 6
+    DMA_STALL = 7
+    DIR_ISR_LATE = 8
+    DMA_LAP = 9
+    TIMEBASE_DESYNC = 10
+    OUTPUT_OVERFLOW = 11
+    DMA_ERROR = 12
+    DIR_QUEUE_FULL = 13
+    NON_MONOTONIC = 14
 
 
 class CaptureError(RuntimeError):
@@ -44,21 +65,39 @@ class CaptureError(RuntimeError):
 
 @dataclass
 class CaptureResult:
-    ticks: int
+    units: int
+    unit: str
     path: Path
 
 
 class Capture:
     def __init__(
-        self, out_dir: Path, both_edges_mask: int, device: str = DEVICE
+        self,
+        out_dir: Path,
+        both_edges_mask: int,
+        events: bool = False,
+        device: str = DEVICE,
     ):
         self._out_dir = out_dir
         self._mask = both_edges_mask
+        self._events = events
         self._device = device
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._error: BaseException | None = None
-        self._ticks = 0
+        self._units = 0
+
+    @property
+    def _sink_path(self) -> Path:
+        return self._out_dir / ("events.bin" if self._events else "capture.bin")
+
+    @property
+    def _magic(self) -> bytes:
+        return EVENT_MAGIC if self._events else COUNT_MAGIC
+
+    @property
+    def _unit(self) -> str:
+        return "bytes" if self._events else "ticks"
 
     def start(self) -> None:
         self._out_dir.mkdir(parents=True, exist_ok=True)
@@ -67,7 +106,8 @@ class Capture:
         termios.tcflush(fd, termios.TCIOFLUSH)
         os.write(fd, CMD_STOP + b"\0")
         self._drain(fd)
-        os.write(fd, CMD_START + bytes([self._mask]))
+        command = CMD_EVENTS if self._events else CMD_START
+        os.write(fd, command + bytes([self._mask]))
         self._write_meta(
             started_monotonic=time.monotonic(), started_wall=time.time()
         )
@@ -82,7 +122,7 @@ class Capture:
         self._thread.join()
         if self._error is not None:
             raise self._error
-        return CaptureResult(self._ticks, self._out_dir / "capture.bin")
+        return CaptureResult(self._units, self._unit, self._sink_path)
 
     def check(self) -> None:
         if self._error is not None:
@@ -94,7 +134,8 @@ class Capture:
 
     def _write_meta(self, **extra) -> None:
         meta = {
-            "tick_hz": TICK_HZ,
+            "mode": "events" if self._events else "counts",
+            "tick_hz": EVENT_TICK_HZ if self._events else TICK_HZ,
             "channel_count": CHANNEL_COUNT,
             "both_edges_mask": self._mask,
             **extra,
@@ -103,7 +144,7 @@ class Capture:
 
     def _run(self, fd: int) -> None:
         try:
-            with open(self._out_dir / "capture.bin", "wb") as sink:
+            with open(self._sink_path, "wb") as sink:
                 self._pump(fd, sink)
         except BaseException as exc:
             self._error = exc
@@ -119,34 +160,37 @@ class Capture:
             if select.select([fd], [], [], 0.1)[0]:
                 buf += os.read(fd, 65536)
             elif time.monotonic() - last_data > STALL_TIMEOUT_S:
-                raise CaptureError(f"capture stalled after {self._ticks} ticks")
+                raise CaptureError(
+                    f"capture stalled after {self._units} {self._unit}"
+                )
             while len(buf) >= HEADER.size:
-                magic, seq, first_tick, ticks, status, detail = (
+                magic, seq, position, length, status, detail = (
                     HEADER.unpack_from(buf)
                 )
-                if magic != FRAME_MAGIC:
+                if magic != self._magic:
                     raise CaptureError(
-                        f"bad frame magic {magic!r} at tick {self._ticks}"
+                        f"bad frame magic {magic!r} after {self._units} {self._unit}"
                     )
-                frame_len = HEADER.size + ticks * CHANNEL_COUNT
+                payload_len = length if self._events else length * CHANNEL_COUNT
+                frame_len = HEADER.size + payload_len
                 if len(buf) < frame_len:
                     break
                 if seq != expected_seq:
                     raise CaptureError(
                         f"frame seq gap: got {seq}, expected {expected_seq}"
                     )
-                if first_tick != self._ticks:
+                if position != self._units % POSITION_MODULUS:
                     raise CaptureError(
-                        f"tick gap: got {first_tick}, expected {self._ticks}"
+                        f"{self._unit} gap: got {position}, expected {self._units}"
                     )
                 if status:
                     raise CaptureError(
-                        f"instrument fault {Fault(status).name} on channel {detail} at tick {first_tick}"
+                        f"instrument fault {Fault(status).name} on channel {detail} at {position} {self._unit}"
                     )
                 sink.write(buf[HEADER.size : frame_len])
                 del buf[:frame_len]
                 expected_seq += 1
-                self._ticks += ticks
+                self._units += length
                 last_data = time.monotonic()
 
 
@@ -159,15 +203,18 @@ def main() -> None:
     parser.add_argument(
         "--both-edges-mask", type=lambda s: int(s, 0), default=0
     )
+    parser.add_argument(
+        "--events", action="store_true", help="timestamp every edge (SVE1)"
+    )
     args = parser.parse_args()
-    capture = Capture(args.out_dir, args.both_edges_mask)
+    capture = Capture(args.out_dir, args.both_edges_mask, events=args.events)
     capture.start()
     deadline = time.monotonic() + args.seconds
     while time.monotonic() < deadline:
         capture.check()
         time.sleep(0.1)
     result = capture.stop()
-    print(f"{result.ticks} ticks -> {result.path}")
+    print(f"{result.units} {result.unit} -> {result.path}")
 
 
 if __name__ == "__main__":

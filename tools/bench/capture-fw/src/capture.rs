@@ -58,6 +58,16 @@ pub enum Fault {
     DeltaOverflow = 2,
     DirDesync = 3,
     RingOverflow = 4,
+    StepOvercapture = 5,
+    TickLate = 6,
+    DmaStall = 7,
+    DirIsrLate = 8,
+    DmaLap = 9,
+    TimebaseDesync = 10,
+    OutputOverflow = 11,
+    DmaError = 12,
+    DirQueueFull = 13,
+    NonMonotonic = 14,
 }
 
 #[derive(Clone, Copy)]
@@ -100,11 +110,11 @@ fn arm_counter(timer: Timer, mode: EdgeMode) {
     timer.set_cr1(regs::CR1_CEN);
 }
 
-pub fn start_snapshot_timer() {
+pub fn start_snapshot_timer(hz: u32) {
     let tim = regs::TIM6;
     tim.set_cr1(0);
     tim.set_psc(0);
-    tim.set_arr(SNAPSHOT_TIMER_CLOCK_HZ / TICK_HZ - 1);
+    tim.set_arr(SNAPSHOT_TIMER_CLOCK_HZ / hz - 1);
     tim.set_egr(regs::EGR_UG);
     tim.set_sr(0);
     tim.set_dier(regs::DIER_UIE);
