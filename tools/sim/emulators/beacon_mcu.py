@@ -136,6 +136,7 @@ class BeaconMcuStub:
         self._contact_trigger_freq: int = 0
         self._contact_triggered: bool = False
         self.contact_latch_commit_delay: float = 0.0
+        self.contact_heights: list[float] = []
         self._contact_latch_timer: Optional[threading.Event] = None
 
         self._z_current: float = 10.0
@@ -354,12 +355,13 @@ class BeaconMcuStub:
 
     def _contact_monitor_loop(self) -> None:
         """Bed contact checked every CONTACT_POLL_S of printer time from
-        the step counter at that instant; the crossing time interpolates
-        between the last two checks, both exact."""
+        the step counter at that instant. When a single step crossed the
+        bed since the last check, its own timestamp is the contact time;
+        a faster descent interpolates between the two exact checks."""
         sock = self._batch_sock()
         try:
             with HarnessPacer(self._clock) as pacer:
-                prev_t, prev_z = None, None
+                prev_t, prev_z, prev_steps = None, None, None
                 while self._contact_homing_active:
                     if not self._step_tracking:
                         if not pacer.sleep(self.CONTACT_POLL_S, self._stop):
@@ -369,13 +371,20 @@ class BeaconMcuStub:
                     z = self._z_at_steps(steps)
                     if z <= 0.0:
                         crossing = sampled_at
-                        if prev_z is not None and prev_z > 0.0:
+                        if (
+                            prev_steps is not None
+                            and abs(steps - prev_steps) == 1
+                        ):
+                            crossing = self._query_last_step_vt(sock)
+                        elif prev_z is not None and prev_z > 0.0:
                             crossing = prev_t + (sampled_at - prev_t) * (
                                 prev_z / (prev_z - z)
                             )
+                        self._steps_now = steps
+                        self._z_current = z
                         self._fire_contact_trigger(crossing)
                         return
-                    prev_t, prev_z = sampled_at, z
+                    prev_t, prev_z, prev_steps = sampled_at, z, steps
                     if not pacer.sleep(self.CONTACT_POLL_S, self._stop):
                         return
         finally:
@@ -766,6 +775,7 @@ class BeaconMcuStub:
         if self._log_path:
             with open(self._log_path, "a") as f:
                 f.write(contact_line)
+        self.contact_heights.append(self._z_current)
         self._contact_trigger_sample = self._sample_index
         self._contact_trigger_freq = self._z_to_frequency(0.0)
         self._trsync_can_trigger[self._contact_trsync_oid] = False
@@ -919,6 +929,20 @@ class BeaconMcuStub:
             raise OSError("bad get_steps response")
         fields = dict(kv.split(b"=", 1) for kv in resp.split() if b"=" in kv)
         return int(fields[b"steps"]), int(fields[b"vt"]) / 1e9
+
+    def _query_last_step_vt(self, sock) -> float:
+        sock.sendall(b"get_step_times line=%d\n" % self._z_step_line)
+        buf = b""
+        while b"\n" not in buf:
+            chunk = sock.recv(512)
+            if not chunk:
+                raise OSError("closed")
+            buf += chunk
+        resp, _, _ = buf.partition(b"\n")
+        fields = dict(kv.split(b"=", 1) for kv in resp.split() if b"=" in kv)
+        if b"last_ns" not in fields:
+            raise OSError(f"bad get_step_times response {resp!r}")
+        return int(fields[b"last_ns"]) / 1e9
 
     def _batch_sock(self):
         import socket as _socket

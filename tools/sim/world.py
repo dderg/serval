@@ -837,18 +837,12 @@ class SimWorld:
         cfg_path = self.workdir / "printer.cfg"
         if "[danger_options]" not in config_text:
             # Homing trip deadlines are wall-clock budgets sized for
-            # real-time motion, and the 5ppm clock-sync stability gate is
-            # sized for hardware oscillators. Virtual time legally runs
-            # slower than real time under load (pacer floors) and jitters
-            # far beyond real crystal drift, so give every sim world the
-            # slack to keep both guards without becoming a host-scheduling
+            # real-time motion; virtual time legally runs slower than real
+            # time under load (pacer floors), so give every sim world the
+            # slack to keep the guard without becoming a host-scheduling
             # lottery. Inserted before any autosave block — that section
             # must stay at the end of the file.
-            danger = (
-                "\n[danger_options]\n"
-                "homing_trip_deadline_margin: 30\n"
-                "clock_sync_stable_ppm: 1000\n"
-            )
+            danger = "\n[danger_options]\nhoming_trip_deadline_margin: 30\n"
             marker = config_text.find("#*#")
             if marker == -1:
                 config_text += danger

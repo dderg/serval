@@ -106,19 +106,29 @@ def test_contact_auto_calibrate(world):
     assert world.shutdown_line() is None
 
 
-CONTACT_PROBE_SERIES = (
-    "PROBE PROBE_METHOD=contact SAMPLES=6 SAMPLES_TOLERANCE=9 PROBE_SPEED=1"
-)
+Z_MICROSTEP_MM = 4.0 / (200 * 16)
 
 
-def _probe_series(world):
+def _probe_series(world, samples):
     world.mark_log()
-    world.gcode_ok(CONTACT_PROBE_SERIES, timeout=300)
+    world.gcode_ok(
+        f"PROBE PROBE_METHOD=contact SAMPLES={samples} SAMPLES_TOLERANCE=9"
+        " PROBE_SPEED=1",
+        timeout=300,
+    )
     return [
         float(line.rsplit("z=", 1)[1])
         for line in world.expect_log("Result is").splitlines()
         if line.startswith("probe at ")
     ]
+
+
+def _contact_offsets(world, samples):
+    first = len(world.beacon.contact_heights)
+    reported = _probe_series(world, samples)
+    physical = world.beacon.contact_heights[first:]
+    assert len(physical) == len(reported), (reported, physical)
+    return [r - p for r, p in zip(reported, physical)]
 
 
 def test_contact_auto_calibrate_with_mesh_active(sim_world):
@@ -127,18 +137,18 @@ def test_contact_auto_calibrate_with_mesh_active(sim_world):
     world.gcode_ok("G4 P1000", timeout=15)
     world.gcode_ok("BEACON_AUTO_CALIBRATE", timeout=300)
     world.gcode_ok("G1 Z3 F600", timeout=30)
-    plain = _probe_series(world)
+    plain = _contact_offsets(world, 8)
     world.gcode_ok("BED_MESH_PROFILE LOAD=edge", timeout=15)
-    meshed = _probe_series(world)
+    meshed = _contact_offsets(world, 8)
     assert world.shutdown_line() is None
 
-    plain_spread = max(plain) - min(plain)
-    meshed_spread = max(meshed) - min(meshed)
-    assert meshed_spread < max(0.012, 2.0 * plain_spread), (
-        "mesh-active contact probing must be as repeatable as mesh-off: "
-        "plain=%r (spread %.4f) meshed=%r (spread %.4f)"
-        % (plain, plain_spread, meshed, meshed_spread)
-    )
+    for mesh, offsets in (("off", plain), ("on", meshed)):
+        spread = max(offsets) - min(offsets)
+        assert spread < Z_MICROSTEP_MM, (
+            f"mesh {mesh}: every contact sample must report the emulator's"
+            f" physical contact step to within a microstep; reported minus"
+            f" physical {offsets} spread {spread:.6f} mm"
+        )
 
 
 def test_poke(world):
