@@ -210,7 +210,7 @@ _LINK_SLOT_SIZE = 48
 _MAX_LINKS = 8
 _LINK_FAULTS_OFFSET = 3992
 _LINK_FAULT_SIZE = 24
-FAULT_DELAY, FAULT_DROP, FAULT_STALL = 1, 2, 3
+FAULT_DELAY, FAULT_DROP, FAULT_STALL, FAULT_LATE = 1, 2, 3, 4
 # Pacer and device-link slots the harness reserves before any MCU process
 # claims one.
 HARNESS_PACER_SLOTS = 4
@@ -1313,6 +1313,7 @@ class SimWorld:
         *,
         delay_command: Optional[str] = None,
         drop_command: Optional[str] = None,
+        late_command: Optional[str] = None,
         by_s: float = 0.0,
         count: int = 1,
         stall_s: Optional[float] = None,
@@ -1320,17 +1321,21 @@ class SimWorld:
         """Fault the host→MCU link of process `mcu` ("h7", "f4"), applied by
         the MCU as it reads, in virtual time: hold the next `count` frames
         carrying `delay_command` (and everything behind them) for `by_s`,
-        drop the next `count` frames carrying `drop_command`, or hold the
-        whole link for `stall_s`. Klippy is not touched."""
-        chosen = [
-            arg
-            for arg in (delay_command, drop_command, stall_s)
-            if arg is not None
-        ]
-        if len(chosen) != 1:
+        drop the next `count` frames carrying `drop_command`, hold only the
+        next `count` `late_command` commands for `by_s` (as if the host
+        produced them late; they ride the first frame klippy sends after
+        that, while every other frame passes on time), or hold the whole
+        link for `stall_s`. Klippy is not touched."""
+        commands = {
+            FAULT_DELAY: delay_command,
+            FAULT_DROP: drop_command,
+            FAULT_LATE: late_command,
+        }
+        chosen = {k: c for k, c in commands.items() if c is not None}
+        if len(chosen) + (stall_s is not None) != 1:
             raise SimError(
                 "inject takes exactly one of delay_command, drop_command,"
-                " stall_s"
+                " late_command, stall_s"
             )
         pty_path = {"h7": self.h7_pty, "f4": self.f4_pty}[mcu]
         pts = int(os.readlink(pty_path).rsplit("/", 1)[1])
@@ -1340,11 +1345,10 @@ class SimWorld:
                 slot, FAULT_STALL, 0, 0, int(stall_s * 1e9)
             )
             return
-        command = delay_command if delay_command is not None else drop_command
+        ((kind, command),) = chosen.items()
         ids = self._command_ids[mcu]
         if command not in ids:
             raise SimError(f"{mcu} has no command {command!r}")
-        kind = FAULT_DELAY if delay_command is not None else FAULT_DROP
         self.vclock.post_link_fault(
             slot, kind, ids[command], count, int(by_s * 1e9)
         )

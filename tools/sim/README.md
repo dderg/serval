@@ -105,12 +105,20 @@ SIM_JITTER=3 tools/sim/run.sh test  # share a cpuset with 3 bursty CPU burners
     by_s=0.34` holds the next frame carrying that command, and everything
     klippy sends behind it, for `by_s`; `drop_command=...` discards the
     next `count` such frames (klippy retransmits); `stall_s=0.05` holds the
-    whole link. The MCU's libvtime walks the incoming Klipper frames with
-    each command's parameter kinds from its data dictionary
+    whole link. `late_command="queue_digital_out", by_s=0.337` models the
+    host producing just that command late while every other frame goes out
+    on time: the command is cut from its frame (same seq, CRC resealed) and
+    appended to the first frame the MCU will accept once `by_s` has passed,
+    so it reaches the MCU in order with a valid seq. A standalone frame
+    would need a seq of its own and every later seq and ack renumbered both
+    ways; riding the next frame costs the gap to it (the MCU log reports
+    the actual hold). The MCU's libvtime walks the incoming Klipper frames
+    with each command's parameter kinds from its data dictionary
     (`out/klipper-<board>-sim.dict`, passed as `MCU_SIM_CMD_SHAPES`), wakes
     the MCU when held bytes come due, and logs each fault to the MCU log
-    (`[vtime] fault: delaying frame carrying msgid ...`). Held bytes still
-    count as read, so a fault never holds the clock.
+    (`[vtime] fault: delaying frame carrying msgid ...`, `... sending late
+    msgid ... held N ns`). Held bytes still count as read, so a fault never
+    holds the clock.
   - `sim_world(..., crystal_ppm={"f4": 30.0})` gives an MCU its own
     oscillator (`VTIME_CRYSTAL_PPM`): every clock that process reads runs
     that many ppm off the shared timeline, and the deadlines it sets map
