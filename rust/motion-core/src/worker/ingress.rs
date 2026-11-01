@@ -20,6 +20,35 @@ const DRAIN_RESERVE_SAFETY: f64 = 2.0;
 // TODO: expose as a config knob if 250 ms turns out wrong for slower feeds.
 const STARTUP_PRIME_S: f64 = 0.250;
 
+/// Watches the committed runway while moves keep arriving. Under the
+/// reserve the runway is watched instead of drained on: a healthy stream
+/// holds or regains it as commits land, whereas one whose planning falls
+/// behind the playhead loses it. Losing half the reserve from the best
+/// runway seen under it leaves the other half — one slowest drain — to
+/// brake to rest in. A stream that never built runway has nothing in
+/// flight to brake.
+#[derive(Debug, Default)]
+pub(super) struct BusyRunwayWatch {
+    peak_s: Option<f64>,
+}
+
+impl BusyRunwayWatch {
+    /// Whether the stream must brake to rest now.
+    pub(super) fn observe(&mut self, runway_s: f64, reserve_s: f64) -> bool {
+        if runway_s >= reserve_s {
+            self.peak_s = None;
+            return false;
+        }
+        let peak_s = self.peak_s.map_or(runway_s, |peak_s| peak_s.max(runway_s));
+        self.peak_s = Some(peak_s);
+        peak_s - runway_s >= 0.5 * reserve_s
+    }
+
+    pub(super) fn reset(&mut self) {
+        self.peak_s = None;
+    }
+}
+
 pub(super) struct Ingress {
     pub(super) config: StreamConfig,
     /// Expected toolhead position after every move ingested so far; the
@@ -34,6 +63,7 @@ pub(super) struct Ingress {
     pub(super) timeline: ExecutionTimeline,
     pub(super) undrained_since: Option<Instant>,
     pub(super) worst_drain_s: f64,
+    pub(super) busy_runway: BusyRunwayWatch,
     /// Source line of the last move forwarded into the pipeline; a fence
     /// arriving now sequences after it.
     pub(super) last_line: u32,
@@ -81,7 +111,10 @@ impl Ingress {
             };
             self.links.wakeup.notify_space_freed();
             match msg {
-                StreamMsg::Move(m) => self.handle_move(m),
+                StreamMsg::Move(m) => {
+                    self.handle_move(m);
+                    self.brake_if_busy_runway_falls();
+                }
                 other => {
                     if self.handle_control(other) {
                         return;
@@ -143,6 +176,7 @@ impl Ingress {
         let sent = Instant::now();
         self.send(StreamInput::Drain);
         self.undrained_since = None;
+        self.busy_runway.reset();
         let ack = self.barrier();
         let latency_s = sent.elapsed().as_secs_f64();
         if latency_s > self.worst_drain_s {
@@ -190,8 +224,29 @@ impl Ingress {
         self.undrained_since.get_or_insert_with(Instant::now);
     }
 
-    /// The pacer's one decision. Called when the inbox is silent while the
-    /// pipeline holds undrained moves: with runway beyond the reserve there is
+    /// The pacer's decision while moves keep arriving. A saturated inbox
+    /// never lets the idle path run, so a planner committing slower than
+    /// the playhead consumes would overrun the committed end; see
+    /// [`BusyRunwayWatch`] for when that brakes.
+    fn brake_if_busy_runway_falls(&mut self) {
+        let runway_s = self.timeline.frontier.runway_secs();
+        let reserve_s = self.reserve_secs();
+        if !self.busy_runway.observe(runway_s, reserve_s) {
+            return;
+        }
+        tracing::debug!(
+            subsystem = "motion",
+            event = "pipe_drain",
+            runway_s,
+            reserve_s,
+            t_us = motion_pipeline::timing::mono_us(),
+            "[pipe] runway falling behind a busy inbox — draining pipeline to rest"
+        );
+        self.drain_and_fence();
+    }
+
+    /// The pacer's decision when the inbox is silent while the pipeline
+    /// holds undrained moves: with runway beyond the reserve there is
     /// provably time to wait for more input, so report how long; at the
     /// reserve, send `Drain` so the fit stage and planner materialize the
     /// brake-to-rest and the drained trajectory beats the playhead to the

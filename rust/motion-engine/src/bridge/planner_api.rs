@@ -232,19 +232,8 @@ impl PyMotionEngine {
                 }
             };
             let pos = self.commanded_pos.lock_ok().0;
-            let (max_v, max_a, corner_deviation) = {
-                let cfg = self.planner_config.lock_ok();
-                let (mut v, mut a) = cfg.cartesian.for_move(dx, dy, dz);
-                if let Some(rv) = cfg.runtime_caps.velocity {
-                    v = v.min(rv);
-                }
-                if let Some(ra) = cfg.runtime_caps.accel {
-                    a = a.min(ra);
-                }
-                (v, a, cfg.corner_deviation())
-            };
             let limits =
-                geometry::VelocityLimits::try_new(max_v, max_a, corner_deviation, f64::INFINITY)
+                motion_core::live_config::move_limits(&self.planner_config.lock_ok(), [dx, dy, dz])
                     .map_err(PyRuntimeError::new_err)?;
             let line_no = self.move_seq.fetch_add(1, Ordering::Relaxed) as u32;
             let m = classify::build_move(

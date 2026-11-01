@@ -52,14 +52,17 @@ def capture():
     evlog.setLevel(prev_level)
 
 
-@pytest.fixture
-def print_stats():
+def _new_print_stats():
     printer = FakePrinter(
         objects={"gcode_move": FakeGCodeMove(), "gcode": FakeGcode()},
         reactor=FakeReactor(),
     )
-    config = FakeConfig(printer)
-    return PrintStats(config)
+    return PrintStats(FakeConfig(printer))
+
+
+@pytest.fixture
+def print_stats():
+    return _new_print_stats()
 
 
 def _events(cap, name=None):
@@ -148,3 +151,16 @@ def test_reset_during_active_print_emits_print_end_reset(print_stats, capture):
 def test_reset_without_active_print_emits_nothing(print_stats, capture):
     print_stats.reset()
     assert len(_events(capture, "print.end")) == 0
+
+
+def test_constructing_with_a_print_still_bound_ends_it_as_reset(capture):
+    structured_log.bind_print("print-from-before-the-restart")
+
+    print_stats = _new_print_stats()
+
+    ends = _events(capture, "print.end")
+    assert len(ends) == 1
+    assert ends[0].outcome == "reset"
+    assert ends[0].duration_s == 0.0
+    assert print_stats.state == "standby"
+    assert structured_log.get_print() == ""
