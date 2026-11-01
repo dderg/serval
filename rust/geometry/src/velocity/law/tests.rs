@@ -86,6 +86,32 @@ fn disk_rail_on_a_straight_degenerates_to_constant_accel() {
 }
 
 #[test]
+fn a_fast_straight_rail_holds_its_budget_to_float_precision() {
+    let accel = 264.199_103_200_885_3;
+    let speed = 434.055_216_353_112_1;
+    let ds = 0.311_185_974_435_605_3;
+    let straight = |brake| ScalarLaw::DiskRail {
+        accel,
+        kappa0: 0.0,
+        sigma: 0.0,
+        brake,
+    };
+    let launch = LawSegment::until_arc(0.0, 0.0, speed, straight(false), ds).unwrap();
+    let (landing, _) = LawSegment::brake_to(0.0, 0.0, straight(true), ds, speed).unwrap();
+    let cut = launch.cut_at_speed(speed + 0.15).unwrap();
+    for seg in [&launch, &landing, &cut] {
+        for i in 0..=20_000 {
+            let t = seg.dt * f64::from(i) / 20_000.0;
+            let (_, _, a) = seg.state_at(t);
+            assert!(
+                (a.abs() - accel).abs() <= 1e-12 * accel,
+                "acceleration {a} strays from the budget {accel} at t={t}"
+            );
+        }
+    }
+}
+
+#[test]
 fn disk_rail_time_at_distance_inverts_state() {
     let seg = rail(4.0, 1000.0, 40.0, -1300.0, false, 0.02);
     for i in 1..40 {

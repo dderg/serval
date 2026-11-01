@@ -279,11 +279,16 @@ pub(crate) enum VelocitySign {
 /// mean anything. Below it the quintic base and its bump corrections read
 /// sampling noise amplified by `(2/h)²`, so only the cubic — which never
 /// touches endpoint acceleration — is attempted.
+///
+/// `velocity_continuous` withholds the two anchored quadratics, which solve
+/// an endpoint velocity from the travel instead of reading it from the
+/// signal, so every seam carries the signal's own velocity.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LadderPolicy {
     pub velocity_sign: VelocitySign,
     pub acceleration_monotonicity: Option<AccelerationTrend>,
     pub high_degree_span_floor: f64,
+    pub velocity_continuous: bool,
 }
 
 #[cfg(test)]
@@ -412,14 +417,21 @@ pub(crate) fn ladder_fit(
     let truth_v = truth.velocity;
     let truth_a = truth.acceleration;
     if policy.acceleration_monotonicity.is_none() || truth_a(-1.0) == truth_a(1.0) {
-        let anchored_acceleration_quadratic =
-            anchored_acceleration_quadratic_in_u(truth_p(-1.0), truth_a(0.0), h, endpoint_delta);
-        if candidate_ok(&anchored_acceleration_quadratic, h, truth, budget, policy) {
-            return Ok(anchored_acceleration_quadratic);
-        }
-        let anchored_quadratic = quadratic_in_u(truth_p(-1.0), truth_v(-1.0), h, endpoint_delta);
-        if candidate_ok(&anchored_quadratic, h, truth, budget, policy) {
-            return Ok(anchored_quadratic);
+        if !policy.velocity_continuous {
+            let anchored_acceleration_quadratic = anchored_acceleration_quadratic_in_u(
+                truth_p(-1.0),
+                truth_a(0.0),
+                h,
+                endpoint_delta,
+            );
+            if candidate_ok(&anchored_acceleration_quadratic, h, truth, budget, policy) {
+                return Ok(anchored_acceleration_quadratic);
+            }
+            let anchored_quadratic =
+                quadratic_in_u(truth_p(-1.0), truth_v(-1.0), h, endpoint_delta);
+            if candidate_ok(&anchored_quadratic, h, truth, budget, policy) {
+                return Ok(anchored_quadratic);
+            }
         }
         let cubic = cubic_in_u(
             (truth_p(-1.0), truth_v(-1.0)),

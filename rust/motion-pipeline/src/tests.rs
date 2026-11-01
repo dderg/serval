@@ -2420,6 +2420,7 @@ fn the_ladder_fits_a_resolution_scale_span_without_high_degree_amplification() {
             velocity_sign: crate::lowering::VelocitySign::Certified,
             acceleration_monotonicity: None,
             high_degree_span_floor: 0.0,
+            velocity_continuous: false,
         },
     );
     let fit = match attempt {
@@ -2523,6 +2524,7 @@ fn a_smooth_cusp_fits_below_the_high_degree_floor_without_bump_corrections() {
                 velocity_sign: crate::lowering::VelocitySign::Certified,
                 acceleration_monotonicity: None,
                 high_degree_span_floor,
+                velocity_continuous: false,
             },
         );
         match attempt {
@@ -2639,6 +2641,7 @@ fn a_constant_acceleration_resolution_span_fits_the_anchored_quadratic() {
             velocity_sign: crate::lowering::VelocitySign::Certified,
             acceleration_monotonicity: None,
             high_degree_span_floor: 3.6e-7,
+            velocity_continuous: false,
         },
     )
     .unwrap_or_else(|failure| {
@@ -2778,6 +2781,7 @@ fn an_endpoint_anchored_fit_never_steps_the_right_seam() {
             velocity_sign: crate::lowering::VelocitySign::Certified,
             acceleration_monotonicity: None,
             high_degree_span_floor: 0.0,
+            velocity_continuous: false,
         },
     )
     .unwrap_or_else(|failure| {
@@ -2845,6 +2849,7 @@ fn accepted_seed_intervals_do_not_spend_the_split_budget() {
                 seed_breakpoints: seeds,
                 fit_tol: tolerance,
                 fit_context: "test fit",
+                velocity_continuous: false,
             },
             &sig,
         )

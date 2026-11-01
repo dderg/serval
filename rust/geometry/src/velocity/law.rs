@@ -10,9 +10,10 @@
 //!
 //! `ConstAccel` is closed-form. `DiskRail` is evaluated through a dense
 //! Runge–Kutta solution built deterministically from the law parameters and
-//! cached inside the segment; between knots velocity and arc interpolate at
-//! O(h⁴) float accuracy while the acceleration is recomputed *from the law*
-//! at the interpolated state, so every sample lies exactly on the disk.
+//! cached inside the segment; between knots a C2 quintic interpolates
+//! velocity, arc is its anchored integral, and acceleration is its
+//! derivative taken across each knot pair's speed rise as the integrator
+//! produced it, not as the difference of two rounded knot speeds.
 
 use std::sync::{Arc, OnceLock};
 
@@ -41,6 +42,7 @@ struct RailKnot {
     t: f64,
     s: f64,
     v: f64,
+    rise: f64,
 }
 
 /// One law over one time interval, in chain-local time and run-frame arc.
@@ -119,7 +121,7 @@ impl ScalarLaw {
     /// that falls toward the state, or one rising faster than any rail can
     /// climb (`|σ| ≥ 2κ²`), has no such curve; the step stands as a
     /// reachability bound.
-    fn settle_crossed_cap(&self, from: f64, to: f64, w_next: f64) -> f64 {
+    fn settle_crossed_cap(&self, from: f64, to: f64, w_next: f64) -> Option<f64> {
         let ScalarLaw::DiskRail {
             accel,
             kappa0,
@@ -127,7 +129,7 @@ impl ScalarLaw {
             ..
         } = *self
         else {
-            return w_next;
+            return None;
         };
         let kappa = (kappa0 + sigma * to).abs();
         let cap = if kappa > 0.0 {
@@ -138,9 +140,9 @@ impl ScalarLaw {
         let falling = kappa > (kappa0 + sigma * from).abs();
         let follow = 0.5 * sigma / (kappa * kappa);
         if w_next <= cap || falling || follow.abs() >= 1.0 {
-            return w_next;
+            return None;
         }
-        cap * (1.0 - follow * follow).sqrt()
+        Some(cap * (1.0 - follow * follow).sqrt())
     }
 }
 
@@ -186,46 +188,11 @@ impl LawSegment {
                     return (self.s0 + ds, lo.v, self.law.accel_at(ds, lo.v));
                 }
                 let u = ((tau - lo.t) / h).clamp(0.0, 1.0);
-                let a_lo = self.law.accel_at(lo.s, lo.v);
-                let a_hi = self.law.accel_at(hi.s, hi.v);
-                let r_lo = self.law.accel_rate_at(lo.s, lo.v, a_lo);
-                let r_hi = self.law.accel_rate_at(hi.s, hi.v, a_hi);
-                let v = quintic(
-                    lo.v,
-                    a_lo * h,
-                    r_lo * h * h,
-                    hi.v,
-                    a_hi * h,
-                    r_hi * h * h,
-                    u,
-                );
-                let a = quintic_deriv(
-                    lo.v,
-                    a_lo * h,
-                    r_lo * h * h,
-                    hi.v,
-                    a_hi * h,
-                    r_hi * h * h,
-                    u,
-                ) / h;
-                let mass = quintic_integral(
-                    lo.v,
-                    a_lo * h,
-                    r_lo * h * h,
-                    hi.v,
-                    a_hi * h,
-                    r_hi * h * h,
-                    u,
-                );
-                let full_mass = quintic_integral(
-                    lo.v,
-                    a_lo * h,
-                    r_lo * h * h,
-                    hi.v,
-                    a_hi * h,
-                    r_hi * h * h,
-                    1.0,
-                );
+                let [m0, c0, m1, c1] = self.pair_slopes(lo, hi, h);
+                let v = quintic(lo.v, m0, c0, hi.v, m1, c1, u);
+                let a = quintic_deriv(0.0, m0, c0, hi.rise, m1, c1, u) / h;
+                let mass = quintic_integral(lo.v, m0, c0, hi.v, m1, c1, u);
+                let full_mass = quintic_integral(lo.v, m0, c0, hi.v, m1, c1, 1.0);
                 let ds = lo.s + h * mass + (hi.s - lo.s - h * full_mass) * u;
                 (self.s0 + ds, v.max(0.0), a)
             }
@@ -425,30 +392,7 @@ impl LawSegment {
             return Self::brake_to(t0, s0, law, ds, self.v0);
         }
         let reversed = self.cut_at_arc(ds)?;
-        let rev = reversed.rail_knots();
-        let n = rev.len();
-        let total_t = rev[n - 1].t;
-        let v0 = rev[n - 1].v;
-        let knots: Vec<RailKnot> = (0..n)
-            .map(|i| {
-                let k = &rev[n - 1 - i];
-                RailKnot {
-                    t: total_t - k.t,
-                    s: ds - k.s,
-                    v: k.v,
-                }
-            })
-            .collect();
-        let seg = LawSegment {
-            t0,
-            dt: total_t,
-            s0,
-            v0,
-            law,
-            dense: OnceLock::new(),
-        };
-        let _ = seg.dense.set(Arc::from(knots));
-        Some((seg, v0))
+        Some(flipped_rail(reversed.rail_knots(), t0, s0, law, ds))
     }
 
     /// The segment-local time inside knot pair `(reached - 1, reached)` at
@@ -480,10 +424,20 @@ impl LawSegment {
             .take_while(|knot| knot.t < tau)
             .copied()
             .collect();
+        let rise = match cut.last() {
+            Some(lo) => {
+                let hi = &knots[cut.len()];
+                let h = hi.t - lo.t;
+                let [m0, c0, m1, c1] = self.pair_slopes(lo, hi, h);
+                quintic(0.0, m0, c0, hi.rise, m1, c1, (tau - lo.t) / h)
+            }
+            None => 0.0,
+        };
         cut.push(RailKnot {
             t: tau,
             s: s - self.s0,
             v,
+            rise,
         });
         if cut.len() == 1 {
             cut.insert(0, cut[0]);
@@ -551,30 +505,13 @@ impl LawSegment {
                     sigma: -sigma,
                     brake: false,
                 };
-                let rev = integrate_rail_arc(&reversed, v_end, ds)?;
-                let n = rev.len();
-                let total_t = rev[n - 1].t;
-                let v0 = rev[n - 1].v;
-                let knots: Vec<RailKnot> = (0..n)
-                    .map(|i| {
-                        let k = &rev[n - 1 - i];
-                        RailKnot {
-                            t: total_t - k.t,
-                            s: ds - k.s,
-                            v: k.v,
-                        }
-                    })
-                    .collect();
-                let seg = LawSegment {
+                Some(flipped_rail(
+                    &integrate_rail_arc(&reversed, v_end, ds)?,
                     t0,
-                    dt: total_t,
                     s0,
-                    v0,
                     law,
-                    dense: OnceLock::new(),
-                };
-                let _ = seg.dense.set(Arc::from(knots));
-                Some((seg, v0))
+                    ds,
+                ))
             }
         }
     }
@@ -584,6 +521,44 @@ impl LawSegment {
             .get()
             .expect("a DiskRail segment always carries its dense solution")
     }
+
+    fn pair_slopes(&self, lo: &RailKnot, hi: &RailKnot, h: f64) -> [f64; 4] {
+        let a_lo = self.law.accel_at(lo.s, lo.v);
+        let a_hi = self.law.accel_at(hi.s, hi.v);
+        [
+            a_lo * h,
+            self.law.accel_rate_at(lo.s, lo.v, a_lo) * h * h,
+            a_hi * h,
+            self.law.accel_rate_at(hi.s, hi.v, a_hi) * h * h,
+        ]
+    }
+}
+
+fn flipped_rail(rev: &[RailKnot], t0: f64, s0: f64, law: ScalarLaw, ds: f64) -> (LawSegment, f64) {
+    let n = rev.len();
+    let total_t = rev[n - 1].t;
+    let v0 = rev[n - 1].v;
+    let knots: Vec<RailKnot> = (0..n)
+        .map(|i| {
+            let k = &rev[n - 1 - i];
+            RailKnot {
+                t: total_t - k.t,
+                s: ds - k.s,
+                v: k.v,
+                rise: if i == 0 { 0.0 } else { -rev[n - i].rise },
+            }
+        })
+        .collect();
+    let seg = LawSegment {
+        t0,
+        dt: total_t,
+        s0,
+        v0,
+        law,
+        dense: OnceLock::new(),
+    };
+    let _ = seg.dense.set(Arc::from(knots));
+    (seg, v0)
 }
 
 fn quintic(p0: f64, m0: f64, c0: f64, p1: f64, m1: f64, c1: f64, u: f64) -> f64 {
@@ -642,6 +617,7 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<[RailKnot
             t: 0.0,
             s: 0.0,
             v: v0,
+            rise: 0.0,
         };
         return Some(Arc::from(vec![knot, knot]));
     }
@@ -664,7 +640,12 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<[RailKnot
     let mut knots = Vec::with_capacity(n + 1);
     let mut w = v0 * v0;
     let mut t = 0.0_f64;
-    knots.push(RailKnot { t, s: 0.0, v: v0 });
+    knots.push(RailKnot {
+        t,
+        s: 0.0,
+        v: v0,
+        rise: 0.0,
+    });
     let f = |s: f64, w: f64| 2.0 * law.accel_at(s, w.max(0.0).sqrt());
     for i in 0..n {
         let s = arc_at(i);
@@ -673,8 +654,10 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<[RailKnot
         let k2 = f(s + 0.5 * h, w + 0.5 * h * k1);
         let k3 = f(s + 0.5 * h, w + 0.5 * h * k2);
         let k4 = f(s + h, w + h * k3);
-        let w_next =
-            law.settle_crossed_cap(s, s + h, w + h * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0);
+        let increment = h * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0;
+        let stepped = w + increment;
+        let settled = law.settle_crossed_cap(s, s + h, stepped);
+        let w_next = settled.unwrap_or(stepped);
         let last = i == n - 1;
         if w_next <= 0.0 && !last {
             return None;
@@ -684,6 +667,10 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<[RailKnot
         if v_lo + v_hi <= 0.0 {
             return None;
         }
+        let rise = match settled {
+            None if w_next > 0.0 => increment / (v_lo + v_hi),
+            _ => v_hi - v_lo,
+        };
         let a_lo = law.accel_at(s, v_lo);
         let a_hi = law.accel_at(s + h, v_hi);
         let r_lo = law.accel_rate_at(s, v_lo, a_lo);
@@ -694,6 +681,7 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<[RailKnot
             t,
             s: arc_at(i + 1),
             v: w.sqrt(),
+            rise,
         });
     }
     Some(Arc::from(knots))

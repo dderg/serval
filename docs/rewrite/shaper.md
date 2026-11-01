@@ -300,16 +300,26 @@ trajectory. Correctness reduces to window bookkeeping:
 ## The refit
 
 The exact convolved signal is not a polynomial the rest of the system can
-carry, so each emitted segment is refit (`fit_axis_from_signal`): a quintic
-Hermite base matching the signal's exact `(p, v, a)` at both span ends,
-escalated to degree 6/7 from interior residuals (the same ladder the lowerer
-uses), bisecting spans until the fit meets `SHAPED_FIT_TOL_MM = 1e-3` and
-`SHAPED_FIT_TOL_ACCEL_MM_S2 = 50`. Sliver spans below
-`SHAPED_FIT_MIN_SPAN_S` are carried as exact-endpoint linear pieces instead
-of dividing by a near-zero duration. Finally
+carry, so each emitted segment is refit (`fit_axis_from_signal`) with the
+ladder the lowerer uses: two endpoint-anchored quadratics that carry the
+span's travel, a cubic through both endpoint velocities, a quintic Hermite
+base matching the signal's exact `(p, v, a)` at both span ends, then degree
+6/7 from interior residuals — bisecting spans until the fit meets
+`SHAPED_FIT_TOL_MM = 1e-3` and `SHAPED_FIT_TOL_ACCEL_MM_S2 = 50`. Sliver spans
+below `SHAPED_FIT_MIN_SPAN_S` are carried as exact-endpoint linear pieces
+instead of dividing by a near-zero duration. Finally
 `pad_segment_axes_to_uniform_degree` zero-pads so kinematics lane mixing
-sees one degree per segment. Matching endpoint `(p, v, a)` per span keeps
-the emitted track C² at every seam by construction.
+sees one degree per segment. Every rung is endpoint-anchored, so seams are
+C⁰ by construction; the quadratics solve an endpoint velocity from the
+travel, so a seam they win can step in velocity.
+
+A pressure advance applied before projection (`p + k·ṗ` without a follower
+kernel, or any nonlinear advance) turns such a velocity step into a position
+step the extruder would have to take in zero time. The tracks that advance
+differentiates — the leaders a projected follower rides, and the follower's
+own raw fit when its leaders are unshaped — are therefore fitted with
+`velocity_continuous`: the quadratics are withheld and every seam carries
+the signal's own velocity.
 
 Leader refits use ordered parallel work without changing the fitted signal.
 Axes run concurrently. Ordinary windows distribute whole target segments;

@@ -154,6 +154,7 @@ fn fit_source_projection(
             } else {
                 "follower_source"
             },
+            velocity_continuous: false,
         };
         match leading_stage {
             Some(stage) => fit_axis_from_signal(
@@ -211,9 +212,7 @@ pub(crate) fn project_followers(
         let chain = &chains.chains[axis];
         let kernel = chain.kernel();
         let defer_linear_prefix = chain.follower_linear_transform();
-        let leading_stage = (!defer_linear_prefix)
-            .then(|| chain.leading_transform())
-            .flatten();
+        let leading_stage = advance_before_projection(chain);
         let leaders_transformed = leaders.iter().any(|&leader| {
             chains
                 .chains
@@ -380,7 +379,14 @@ pub(crate) fn project_followers(
                 (track, Some(semantic_cuts), Some((input_start, input_end)))
             } else {
                 (
-                    fit_continuous_axis(axis, raw_axis, base_position, t_start, t_end, fit_tol)?,
+                    fit_continuous_axis(
+                        axis,
+                        raw_axis,
+                        base_position,
+                        (t_start, t_end),
+                        fit_tol,
+                        leading_stage.is_some(),
+                    )?,
                     None,
                     None,
                 )
@@ -394,12 +400,11 @@ pub(crate) fn project_followers(
             let track = if projecting {
                 projected
             } else {
-                apply_leading_stages(
-                    chain,
+                crate::shaper::apply_zero_support_transform(
+                    leading_stage,
                     axis,
                     projected,
                     follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis)),
-                    defer_linear_prefix,
                 )?
             };
             if !track.control_points().iter().all(|v| v.is_finite()) {
@@ -831,6 +836,7 @@ fn fit_kernel_window<S: TrackSignal>(
             seed_breakpoints: shaped_breaks,
             fit_tol: target_tol,
             fit_context: "follower_kernel",
+            velocity_continuous: false,
         },
         &local,
     )?;
@@ -870,22 +876,10 @@ fn chain_output_velocity(chain: &CompiledChain, v: f64, a: f64, j: f64) -> f64 {
     }
 }
 
-/// The chain stages ahead of the follower's kernel (all of them when it has
-/// none), applied to the projected track — the convolution's input, matching
-/// the leader convention where pre-kernel stages bake into the raw track.
-fn apply_leading_stages(
-    chain: &CompiledChain,
-    axis: usize,
-    track: ScalarNurbs,
-    fit_tol: FitTol,
-    defer_linear_prefix: bool,
-) -> Result<ScalarNurbs, PostProcessError> {
-    let transform = if defer_linear_prefix {
-        None
-    } else {
-        chain.leading_transform()
-    };
-    crate::shaper::apply_zero_support_transform(transform, axis, track, fit_tol)
+pub(crate) fn advance_before_projection(chain: &CompiledChain) -> Option<&ChainStage> {
+    (!chain.follower_linear_transform())
+        .then(|| chain.leading_transform())
+        .flatten()
 }
 
 /// The convolution-relevant cuts of a projected follower source, split by
@@ -1269,9 +1263,9 @@ fn fit_continuous_axis(
     axis_index: usize,
     axis: &ContinuousAxis,
     base: f64,
-    t_start: f64,
-    t_end: f64,
+    (t_start, t_end): (f64, f64),
     fit_tol: FitTol,
+    velocity_continuous: bool,
 ) -> Result<ScalarNurbs, PostProcessError> {
     let breakpoints = axis_breakpoints(axis);
     fit_axis_from_signal(
@@ -1282,6 +1276,7 @@ fn fit_continuous_axis(
             seed_breakpoints: &breakpoints,
             fit_tol,
             fit_context: "follower_axis",
+            velocity_continuous,
         },
         &AxisSignal { axis, base },
     )
