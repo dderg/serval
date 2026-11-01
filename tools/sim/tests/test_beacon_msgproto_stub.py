@@ -6,9 +6,9 @@ import struct
 import time
 import zlib
 
+import msgproto
 import pytest
 
-from klippy import msgproto
 from tools.sim.emulators.beacon_identify_dict import (
     BEACON_COMMANDS,
     BEACON_RESPONSES,

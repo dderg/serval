@@ -10,7 +10,8 @@ import threading
 import time
 from typing import TYPE_CHECKING, Optional
 
-from klippy import msgproto
+import msgproto
+
 from tools.sim.emulators.beacon_identify_dict import (
     CLOCK_FREQ,
     IDENTIFY_BLOB,
