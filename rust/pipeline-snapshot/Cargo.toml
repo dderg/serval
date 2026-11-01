@@ -19,6 +19,9 @@ thiserror = { workspace = true }
 trajectory = { path = "../trajectory" }
 
 [dev-dependencies]
+config-doc = { path = "../config-doc" }
+motion-pipeline = { path = "../motion-pipeline", features = ["fit-audit"] }
+planner-config = { path = "../planner-config", features = ["doc"] }
 libm = { version = "0.2", default-features = false }
 proptest = "1"
 serde_json = { version = "1", features = ["float_roundtrip"] }

@@ -2428,6 +2428,19 @@ fn refine_shaped_span<S: TrackSignal>(
     let floors = policy.floors;
     let (mono_u, failure) = shaped_ladder(sig, t0, t1, policy)?;
     if failure.is_none() {
+        #[cfg(feature = "fit-audit")]
+        crate::fit_audit::check(
+            sig,
+            crate::fit_audit::AcceptedPiece {
+                fit_context: policy.fit_context,
+                axis: policy.axis,
+                fit_tol,
+                t0,
+                t1,
+                mono_u: &mono_u,
+                accepted_at_floor: false,
+            },
+        );
         out.push(exact_piece(&mono_u, t0, t1, t1 - t0));
         return Ok(());
     }
@@ -2446,6 +2459,19 @@ fn refine_shaped_span<S: TrackSignal>(
                 .acceleration_monotonicity(next_toward(t0, t1), next_toward(t1, t0))
                 .is_none()
         {
+            #[cfg(feature = "fit-audit")]
+            crate::fit_audit::check(
+                sig,
+                crate::fit_audit::AcceptedPiece {
+                    fit_context: policy.fit_context,
+                    axis: policy.axis,
+                    fit_tol,
+                    t0,
+                    t1,
+                    mono_u: &mono_u,
+                    accepted_at_floor: true,
+                },
+            );
             out.push(exact_piece(&mono_u, t0, t1, t1 - t0));
             return Ok(());
         }
