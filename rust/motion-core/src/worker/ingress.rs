@@ -245,6 +245,15 @@ impl Ingress {
                 self.links.start_claims.resolve(id, claim);
                 self.links.wakeup.notify_fence_resolved();
             }
+            StreamMsg::HoldStartUntil { host_s, notify } => {
+                if self.timeline.hold_start_until(host_s).is_err() {
+                    self.drain_and_fence();
+                    if let Err(e) = self.timeline.hold_start_until(host_s) {
+                        fatal(&format!("a drained stream refused a start hold: {e}"));
+                    }
+                }
+                let _ = notify.send(());
+            }
             StreamMsg::Dwell { duration_s, notify } => {
                 self.drain_and_fence();
                 if duration_s > 0.0 {

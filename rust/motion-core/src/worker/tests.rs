@@ -34,6 +34,7 @@ impl SegmentSink for Capture {
         self.nudges.lock_ok().push((axis, travel));
         Ok(())
     }
+    fn follow_stream_to(&mut self, _stream_t: f64) {}
 }
 
 impl Capture {
@@ -86,8 +87,18 @@ fn spawn_capture(
     config: StreamConfig,
     chains: AxisChainSet,
     home: Vec<f64>,
-    mut sink: impl SegmentSink + Send + 'static,
+    sink: impl SegmentSink + Send + 'static,
     frontier: Arc<CommittedFrontier>,
+) -> TestWorker {
+    spawn_on_timeline(config, chains, home, sink, idle_timeline(frontier))
+}
+
+fn spawn_on_timeline(
+    config: StreamConfig,
+    chains: AxisChainSet,
+    home: Vec<f64>,
+    mut sink: impl SegmentSink + Send + 'static,
+    timeline: ExecutionTimeline,
 ) -> TestWorker {
     struct NoEndpoint;
     impl crate::pump::SpanSink for NoEndpoint {
@@ -104,7 +115,7 @@ fn spawn_capture(
     let (control, control_rx) = crossbeam_channel::unbounded();
     let (output, trajectory_rx) = crossbeam_channel::bounded(TRAJECTORY_CHANNEL_CAP);
     let links = Arc::new(WorkerLinks::default());
-    let mut dispatcher = Dispatcher::new(Arc::clone(&links), Arc::clone(&frontier));
+    let mut dispatcher = Dispatcher::new(Arc::clone(&links), Arc::clone(&timeline.frontier));
     let admission = Arc::clone(&links);
     let execution = std::thread::spawn(move || {
         let mut pump = crate::pump::Pump::new(
@@ -132,7 +143,7 @@ fn spawn_capture(
         home,
         output,
         links,
-        idle_timeline(frontier),
+        timeline,
         control.clone(),
     );
     TestWorker {
@@ -143,16 +154,148 @@ fn spawn_capture(
 }
 
 pub(crate) fn idle_timeline(frontier: Arc<CommittedFrontier>) -> ExecutionTimeline {
-    let clock = host_rt::clock::MockClock::new();
     ExecutionTimeline {
         frontier,
         anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
-        router: Arc::new(Mutex::new(
-            host_rt::passthrough_queue::PassthroughRouter::with_clock(
-                clock as Arc<dyn host_rt::clock::Clock + Send + Sync>,
-            ),
-        )),
+        router: Arc::new(Mutex::new(mock_router())),
     }
+}
+
+fn mock_router() -> host_rt::passthrough_queue::PassthroughRouter {
+    host_rt::passthrough_queue::PassthroughRouter::with_clock(
+        host_rt::clock::MockClock::new() as Arc<dyn host_rt::clock::Clock + Send + Sync>
+    )
+}
+
+#[derive(Clone)]
+struct AnchoredSink {
+    anchor: Arc<Mutex<crate::anchor::Anchor>>,
+    router: Arc<Mutex<host_rt::passthrough_queue::PassthroughRouter>>,
+    starts_host: Arc<Mutex<Vec<f64>>>,
+}
+
+impl AnchoredSink {
+    fn anchor_span(&self, t_start: f64, t_end: f64) {
+        let mut anchor = self.anchor.lock_ok();
+        let host_now = self.router.lock_ok().host_now_secs();
+        let (t0, _) = anchor.anchor_segment(t_start, t_end, host_now);
+        self.starts_host.lock_ok().push(t0 + t_start);
+    }
+}
+
+impl SegmentSink for AnchoredSink {
+    fn dispatch(&mut self, seg: &ContinuousSegment) -> Result<(), DispatchError> {
+        self.anchor_span(seg.t_start, seg.t_end);
+        Ok(())
+    }
+    fn dispatch_nudge(
+        &mut self,
+        _mcu_id: u32,
+        _axis: u8,
+        _motor_mask: u8,
+        profile: &NudgeProfile,
+    ) -> Result<(), DispatchError> {
+        self.anchor_span(profile.t_start(), profile.t_end());
+        self.anchor.lock_ok().mark_parked();
+        Ok(())
+    }
+    fn mark_parked(&mut self) {
+        self.anchor.lock_ok().mark_parked();
+    }
+    fn follow_stream_to(&mut self, stream_t: f64) {
+        self.anchor.lock_ok().follow_stream_to(stream_t);
+    }
+}
+
+#[test]
+fn a_claim_after_a_nudge_never_follows_the_next_move_start() {
+    let frontier: Arc<CommittedFrontier> = Arc::default();
+    frontier.advance_to(Instant::now() + Duration::from_secs(60));
+    let timeline = ExecutionTimeline {
+        frontier,
+        anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
+        router: Arc::new(Mutex::new(mock_router())),
+    };
+    let sink = AnchoredSink {
+        anchor: Arc::clone(&timeline.anchor),
+        router: Arc::clone(&timeline.router),
+        starts_host: Arc::default(),
+    };
+    let mut h = spawn_on_timeline(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0, 0.0],
+        sink.clone(),
+        timeline,
+    );
+    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+    h.flush().unwrap();
+    let nudge = h
+        .submit_nudge(NudgeParams {
+            mcu_id: 0,
+            axis: 0,
+            motor_mask: 0,
+            delta_mm: 1.0,
+            speed: 10.0,
+            accel: 100.0,
+        })
+        .unwrap();
+    assert!(nudge.recv().unwrap().is_ok());
+    let id = h.claim_earliest_start().unwrap();
+    let claimed = poll_claim(&h, id, Duration::from_secs(5)).expect("claim answers");
+    let before_move = sink.starts_host.lock_ok().len();
+
+    h.submit_move(line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0]))
+        .unwrap();
+    h.flush().unwrap();
+
+    let move_start = sink.starts_host.lock_ok()[before_move];
+    assert!(
+        claimed <= move_start + 1e-9,
+        "claimed {claimed} follows the next move's start {move_start}"
+    );
+    h.shutdown();
+}
+
+#[test]
+fn a_start_hold_delays_the_next_move_to_the_held_instant() {
+    let frontier: Arc<CommittedFrontier> = Arc::default();
+    frontier.advance_to(Instant::now() + Duration::from_secs(60));
+    let timeline = ExecutionTimeline {
+        frontier,
+        anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
+        router: Arc::new(Mutex::new(mock_router())),
+    };
+    let host_now = timeline.router.lock_ok().host_now_secs();
+    let sink = AnchoredSink {
+        anchor: Arc::clone(&timeline.anchor),
+        router: Arc::clone(&timeline.router),
+        starts_host: Arc::default(),
+    };
+    let mut h = spawn_on_timeline(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0, 0.0],
+        sink.clone(),
+        timeline,
+    );
+    let held = host_now + 3.0;
+    h.hold_start_until(held).unwrap();
+    let id = h.claim_earliest_start().unwrap();
+    let claimed = poll_claim(&h, id, Duration::from_secs(5)).expect("claim answers");
+    assert!(claimed >= held, "claim {claimed} ignores the hold {held}");
+
+    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+    h.flush().unwrap();
+
+    let move_start = sink.starts_host.lock_ok()[0];
+    assert!(
+        (move_start - held).abs() < 1e-9,
+        "move starts at {move_start}, hold was {held}"
+    );
+    h.shutdown();
 }
 
 #[test]
@@ -985,6 +1128,7 @@ fn live_retune_pressure_advance_applies_to_plans_after_the_swap() {
         ) -> Result<(), DispatchError> {
             Ok(())
         }
+        fn follow_stream_to(&mut self, _stream_t: f64) {}
     }
     let deltas: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -1091,6 +1235,7 @@ impl SegmentSink for RestCount {
     fn mark_parked(&mut self) {
         self.0.fetch_add(1, Ordering::SeqCst);
     }
+    fn follow_stream_to(&mut self, _stream_t: f64) {}
 }
 
 impl RestCount {
@@ -1391,6 +1536,7 @@ fn beacon_scan_path_live_worker_velocity_stays_bounded() {
         ) -> Result<(), DispatchError> {
             Ok(())
         }
+        fn follow_stream_to(&mut self, _stream_t: f64) {}
     }
 
     let chains = trajectory::AxisChainSet::spatial(

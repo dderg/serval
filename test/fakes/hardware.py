@@ -212,8 +212,8 @@ class FakeEnableLine:
     def is_motor_enabled(self):
         return self._enabled
 
-    def energize(self, print_time):
-        self.enabled_at.append(print_time)
+    def energize(self, earliest, latest):
+        self.enabled_at.append(earliest)
         return None
 
     def motor_enable(self, print_time):

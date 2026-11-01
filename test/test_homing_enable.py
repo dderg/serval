@@ -26,10 +26,10 @@ def test_group_enable_dwells_once_around_the_batch():
     )
     se.motor_enable_group(["motor_a", "motor_b"])
     enabled_at = se.enable_lines["motor_a"].enabled_at[0]
-    settles = [c for c in th.calls if c[0] in ("dwell", "dwell_through")]
+    settles = [c for c in th.calls if c[0] in ("dwell", "dwell_until")]
     assert settles == [
         ("dwell", DISABLE_STALL_TIME),
-        ("dwell_through", enabled_at + DISABLE_STALL_TIME),
+        ("dwell_until", enabled_at + DISABLE_STALL_TIME),
     ], (
         "one settle before the batch, and motion held a settle past the"
         " shared enable after it, not per motor"

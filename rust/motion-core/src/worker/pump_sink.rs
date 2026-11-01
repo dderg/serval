@@ -542,12 +542,8 @@ impl<S: crate::pump::SpanSink> SegmentSink for PumpSink<'_, S> {
         self.projection.mark_parked();
     }
 
-    fn hold_stream(&mut self, secs: f64) {
-        self.projection.anchor.lock_ok().hold_stream(secs);
-    }
-
-    fn restart_stream(&mut self) {
-        self.projection.anchor.lock_ok().restart_stream();
+    fn follow_stream_to(&mut self, stream_t: f64) {
+        self.projection.anchor.lock_ok().follow_stream_to(stream_t);
     }
 }
 

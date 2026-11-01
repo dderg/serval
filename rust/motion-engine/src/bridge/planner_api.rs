@@ -352,6 +352,27 @@ impl PyMotionEngine {
         *self.last_g5_pq.lock_ok() = None;
         Ok(())
     }
+    fn dwell_until(&self, print_time: f64, mcu_handle: u32) -> PyResult<()> {
+        let host_s = self
+            .router
+            .lock_ok()
+            .print_time_to_host_secs(
+                host_rt::passthrough_queue::McuHandle::from_raw(mcu_handle),
+                print_time,
+            )
+            .ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "dwell_until: no clock estimate established for mcu_handle {mcu_handle}"
+                ))
+            })?;
+        let guard = self.planner.lock_ok();
+        let planner = guard.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("planner not initialized — call init_planner first")
+        })?;
+        planner.hold_start_until(host_s).map_err(planner_err)?;
+        *self.last_g5_pq.lock_ok() = None;
+        Ok(())
+    }
     #[pyo3(signature = (x, y, z))]
     fn set_position(&self, py: Python<'_>, x: f64, y: f64, z: f64) -> PyResult<()> {
         let gcode = geometry::GcodePos([x, y, z]);

@@ -15,10 +15,10 @@ class StepperEnablePin:
         self.mcu_enable = mcu_enable
         self.enable_count = enable_count
         self.is_dedicated = True
-        self._last_switch_time = float("-inf")
+        self.last_switch_time = float("-inf")
 
     def _switch(self, print_time, value):
-        if print_time < self._last_switch_time:
+        if print_time < self.last_switch_time:
             raise CommandError(
                 "stepper enable pin switched to %d at print_time %.6f,"
                 " before its pending %s at %.6f"
@@ -26,10 +26,10 @@ class StepperEnablePin:
                     value,
                     print_time,
                     "disable" if value else "enable",
-                    self._last_switch_time,
+                    self.last_switch_time,
                 )
             )
-        self._last_switch_time = print_time
+        self.last_switch_time = print_time
         return self.mcu_enable.set_digital(print_time, value)
 
     def set_enable(self, print_time):
@@ -75,9 +75,16 @@ class EnableTracking:
     def register_state_callback(self, callback):
         self.callbacks.append(callback)
 
-    def energize(self, print_time):
+    def energize(self, earliest, latest):
         if self.is_enabled:
             return None
+        print_time = max(earliest, self.enable.last_switch_time)
+        if print_time > latest:
+            raise CommandError(
+                "%s cannot be enabled before its move: the enable pin's last"
+                " switch is at print_time %.6f, the move may start at %.6f"
+                % (self.stepper.get_name(), print_time, latest)
+            )
         wait = self.enable.set_enable(print_time)
         self.is_enabled = True
 
@@ -90,7 +97,7 @@ class EnableTracking:
         return notify_state_callbacks
 
     def motor_enable(self, print_time):
-        notify = self.energize(print_time)
+        notify = self.energize(print_time, print_time)
         if notify is not None:
             notify()
 
@@ -139,7 +146,7 @@ class PrinterStepperEnable:
         for el in self.enable_lines.values():
             el.motor_disable(print_time)
         self.printer.send_event("stepper_enable:motor_off", print_time)
-        toolhead.dwell_through(print_time + DISABLE_STALL_TIME)
+        toolhead.dwell_until(print_time + DISABLE_STALL_TIME)
 
     def motor_debug_enable(self, stepper, enable):
         toolhead = self.printer.lookup_object("toolhead")
@@ -154,7 +161,7 @@ class PrinterStepperEnable:
             print_time = toolhead.get_last_move_time()
             el.motor_disable(print_time)
             logging.info("%s has been manually disabled", stepper)
-        toolhead.dwell_through(print_time + DISABLE_STALL_TIME)
+        toolhead.dwell_until(print_time + DISABLE_STALL_TIME)
 
     def motor_enable_group(self, stepper_names):
         toolhead = self.printer.lookup_object("toolhead")
@@ -163,13 +170,15 @@ class PrinterStepperEnable:
         shared_print_time = toolhead.get_last_move_time()
         notifiers = []
         for name in stepper_names:
-            notify = self.enable_lines[name].energize(shared_print_time)
+            notify = self.enable_lines[name].energize(
+                shared_print_time, shared_print_time
+            )
             if notify is not None:
                 notifiers.append(notify)
             logging.info("%s enabled", name)
         for notify in notifiers:
             notify()
-        toolhead.dwell_through(shared_print_time + DISABLE_STALL_TIME)
+        toolhead.dwell_until(shared_print_time + DISABLE_STALL_TIME)
 
     def get_status(self, eventtime):
         steppers = {

@@ -437,7 +437,7 @@ class Motion:
         if abs(de) > 1e-9:
             owners.extend(self.follower_steppers)
         fired = False
-        move_time = None
+        window = None
         deferred = []
         try:
             for owner in owners:
@@ -445,12 +445,12 @@ class Motion:
                     continue
                 cbs = owner._active_callbacks
                 owner._active_callbacks = []
-                if move_time is None:
-                    move_time = self._earliest_move_start()
+                if window is None:
+                    window = self._enable_window()
                 for i, cb in enumerate(cbs):
                     cb_t0 = time.monotonic()
                     try:
-                        followup = cb(move_time)
+                        followup = cb(*window)
                     except Exception:
                         owner._active_callbacks = (
                             cbs[i:] + owner._active_callbacks
@@ -471,14 +471,21 @@ class Motion:
                 followup()
         return fired
 
+    def _enable_window(self):
+        earliest = self._schedule_floor()
+        latest = self._earliest_move_start()
+        if earliest > latest:
+            self.dwell_until(earliest)
+            latest = earliest
+        return earliest, latest
+
     def dwell(self, delay):
         self.engine.submit_dwell(delay)
         if delay > 0.0:
             self._sync_print_time()
 
-    def dwell_through(self, print_time):
-        frontier = self.engine.frontier_print_time(self.mcu.get_engine_handle())
-        self.dwell(max(0.0, print_time - frontier))
+    def dwell_until(self, print_time):
+        self.engine.dwell_until(print_time, self.mcu.get_engine_handle())
 
     def wait_moves(self):
         self._wait_mcu_drained()

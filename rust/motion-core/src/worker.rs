@@ -52,6 +52,10 @@ impl ExecutionTimeline {
         let host_now = self.router.lock_ok().host_now_secs();
         anchor.claim_earliest_start(host_now)
     }
+
+    pub(crate) fn hold_start_until(&self, host_s: f64) -> Result<(), String> {
+        self.anchor.lock_ok().hold_start_until(host_s)
+    }
 }
 
 #[derive(Default)]
@@ -117,6 +121,10 @@ pub enum StreamMsg {
     },
     ClaimEarliestStart {
         id: u64,
+    },
+    HoldStartUntil {
+        host_s: f64,
+        notify: Sender<()>,
     },
     Dwell {
         duration_s: f64,
@@ -405,6 +413,14 @@ impl StreamWorkerHandle {
                 duration_s,
                 notify: tx,
             })
+            .map_err(|_| StreamWorkerError::ChannelClosed)?;
+        rx.recv().map_err(|_| StreamWorkerError::ChannelClosed)
+    }
+
+    pub fn hold_start_until(&self, host_s: f64) -> Result<(), StreamWorkerError> {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.sender
+            .send(StreamMsg::HoldStartUntil { host_s, notify: tx })
             .map_err(|_| StreamWorkerError::ChannelClosed)?;
         rx.recv().map_err(|_| StreamWorkerError::ChannelClosed)
     }

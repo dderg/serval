@@ -12,10 +12,14 @@ TMC_ENABLE_WORK_SECS = 0.170
 
 class FakeToolhead(FakeToolheadBase):
     _fire_active_callbacks = Motion._fire_active_callbacks
+    _enable_window = Motion._enable_window
 
     def __init__(self, kin):
         super().__init__(kin=kin)
         self.clock = 1000.0
+
+    def _schedule_floor(self):
+        return self.clock + MOTION_LEAD
 
     def _earliest_move_start(self):
         return self.clock + MOTION_LEAD
