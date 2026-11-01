@@ -19,6 +19,15 @@ A Pi 5 runs klippy against an STM32F401 printer MCU; an F407 board on this box r
 - **Always `sync` first.** The Pi runs whatever was last synced; `run.json` → `deployed` (HEAD, branch, `git diff HEAD` sha256, dirty paths, worktree) says which code a run tested. Another agent's uncommitted edits in your worktree ship with `sync`. To test a clean ref: `git worktree add /tmp/x <ref>` then `deploy.py sync --tree /tmp/x`.
 - Offline-only work needs no lock. Fail loudly: don't patch production code from the bench to make a run pass.
 
+## One-command regression
+
+```bash
+uv run python tools/bench/suite.py --quick      # first_layers, speed_ladder, epochs (~6 min)
+uv run python tools/bench/suite.py              # full matrix incl. dense_top and a throttled-host row
+```
+
+Takes the lock once, syncs, runs + analyzes each row, prints a table, writes `~/bench/suites/<ts>/summary.json` (per row: print state/error, analyzer ok + failed checks, stalls, abs_max per motor, deployed identity, run dir) and exits non-zero if any row fails. `--expect-fail <row>` is the only way to tolerate a known failure; there is no built-in allowlist.
+
 ## Loop
 
 ```bash
