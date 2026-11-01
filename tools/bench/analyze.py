@@ -19,6 +19,7 @@ import json
 import math
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, fields
 from pathlib import Path
 
@@ -80,6 +81,7 @@ STALL_BIN_S = 5e-3
 STALL_MIN_STEPS = 3
 PEAK_RATE_WINDOW_TICKS = 160
 REPORTED_STALLS_LIMIT = 50
+EDGE_TIE_STEPS = 0.5
 
 
 class AnalysisError(RuntimeError):
@@ -168,6 +170,31 @@ class Reference:
     events: dict[str, StepEvents]
     start_counts: dict[str, int]
     final_counts: dict[str, int]
+    level_offsets: dict[str, list[float]]
+
+    def positions(
+        self, role: str, start_s: float, end_s: float
+    ) -> np.ndarray | None:
+        for block, offset in zip(self.blocks, self.level_offsets[role]):
+            local_start = start_s - block.stream_offset_s
+            local_end = end_s - block.stream_offset_s
+            if local_start < 0.0 or local_end > block.duration_s:
+                continue
+            times = block.sample_times
+            lo = min(
+                len(times) - 2,
+                max(0, int(np.searchsorted(times, local_start, "right")) - 1),
+            )
+            hi = max(lo + 1, int(np.searchsorted(times, local_end, "left")))
+            fine_t, fine_p = upsample(
+                times[lo : hi + 1],
+                block.motor_pva_steps[role][lo : hi + 1],
+                REFERENCE_FINE_FACTOR,
+            )
+            inside = (fine_t >= local_start) & (fine_t <= local_end)
+            ends = np.interp([local_start, local_end], fine_t, fine_p)
+            return np.concatenate((fine_p[inside], ends)) - offset
+        return None
 
 
 @dataclass
@@ -215,6 +242,7 @@ class MatchedSteps:
     reference_rate_hz: np.ndarray
     unmatched_capture: int
     unmatched_reference: int
+    edge_ties: int
 
 
 @dataclass
@@ -591,23 +619,25 @@ def block_steps(
 
 def _motor_steps(
     motor: Motor, blocks: list[ReferenceBlock], start_count: int
-) -> tuple[StepEvents, int]:
+) -> tuple[StepEvents, int, list[float]]:
     if not motor.lattice_resets_per_block:
         state = PlayState.resting_at(
             blocks[0].motor_pva_steps[motor.role][0, 0]
         )
         parts = [block_steps(b, motor.role, state, 0.0) for b in blocks]
-        return StepEvents.concat(parts), state.count
+        return StepEvents.concat(parts), state.count, [0.0] * len(blocks)
     base = start_count
     parts = []
+    level_offsets = []
     for block in blocks:
         block_start = block.motor_pva_steps[motor.role][0, 0]
+        level_offsets.append(block_start - base)
         state = PlayState.resting_at(0.0)
         part = block_steps(block, motor.role, state, block_start)
         part.level += base
         base += state.count
         parts.append(part)
-    return StepEvents.concat(parts), base
+    return StepEvents.concat(parts), base, level_offsets
 
 
 def build_reference(job: Job) -> Reference:
@@ -621,12 +651,15 @@ def build_reference(job: Job) -> Reference:
     events: dict[str, StepEvents] = {}
     start_counts: dict[str, int] = {}
     final_counts: dict[str, int] = {}
+    level_offsets: dict[str, list[float]] = {}
     for motor in job.motors:
         first = blocks[0].motor_pva_steps[motor.role][0, 0]
         start_counts[motor.role] = PlayState.resting_at(first).count
-        events[motor.role], final_counts[motor.role] = _motor_steps(
-            motor, blocks, start_counts[motor.role]
-        )
+        (
+            events[motor.role],
+            final_counts[motor.role],
+            level_offsets[motor.role],
+        ) = _motor_steps(motor, blocks, start_counts[motor.role])
     return Reference(
         start_xyz=start_xyz,
         final_xyze=final_xyze,
@@ -634,6 +667,7 @@ def build_reference(job: Job) -> Reference:
         events=events,
         start_counts=start_counts,
         final_counts=final_counts,
+        level_offsets=level_offsets,
     )
 
 
@@ -870,15 +904,118 @@ def epoch_steps(
     )
 
 
+PositionWindow = Callable[[float, float], "np.ndarray | None"]
+
+
+def _counts_after(
+    events: StepEvents, event_times: np.ndarray, at: np.ndarray
+) -> np.ndarray:
+    index = np.searchsorted(event_times, at, "right") - 1
+    return np.where(
+        index >= 0, events.level[np.maximum(index, 0)], events.start_count()
+    )
+
+
+def _stays_in_count_band(
+    positions: PositionWindow,
+    start_s: float,
+    end_s: float,
+    counts: tuple[int, int],
+) -> bool:
+    path = positions(start_s, end_s)
+    return path is not None and bool(
+        np.all(path > min(counts) - EDGE_TIE_STEPS)
+        and np.all(path < max(counts) + EDGE_TIE_STEPS)
+    )
+
+
+def _steps_near_their_lines(
+    positions: PositionWindow, times: np.ndarray, lines: np.ndarray
+) -> bool:
+    for t, line in zip(times, lines):
+        path = positions(t, t)
+        if path is None or np.any(np.abs(path - line) >= EDGE_TIE_STEPS):
+            return False
+    return True
+
+
+def edge_ties(
+    capture: StepEvents,
+    capture_stream_s: np.ndarray,
+    capture_unmatched: np.ndarray,
+    reference: StepEvents,
+    reference_unmatched: np.ndarray,
+    positions: PositionWindow,
+) -> tuple[np.ndarray, np.ndarray]:
+    capture_tie = np.zeros(len(capture), bool)
+    reference_tie = np.zeros(len(reference), bool)
+    times = np.union1d(capture_stream_s, reference.time)
+    capture_counts = _counts_after(capture, capture_stream_s, times)
+    reference_counts = _counts_after(reference, reference.time, times)
+    disagreement = capture_counts - reference_counts
+    capture_open = np.flatnonzero(capture_unmatched)
+    reference_open = np.flatnonzero(reference_unmatched)
+    capture_open_s = capture_stream_s[capture_open]
+    reference_open_s = reference.time[reference_open]
+    for lo, hi in _disagreement_spans(times, disagreement):
+        if hi == times.size:
+            continue
+        start_s, end_s = times[lo], times[hi]
+        in_capture = capture_open[
+            np.searchsorted(capture_open_s, start_s, "left") : np.searchsorted(
+                capture_open_s, end_s, "right"
+            )
+        ]
+        in_reference = reference_open[
+            np.searchsorted(
+                reference_open_s, start_s, "left"
+            ) : np.searchsorted(reference_open_s, end_s, "right")
+        ]
+        if not (in_capture.size or in_reference.size):
+            continue
+        if np.any(np.abs(disagreement[lo:hi]) > 1):
+            continue
+        band_holds = all(
+            _stays_in_count_band(
+                positions,
+                times[k],
+                times[k + 1],
+                (int(capture_counts[k]), int(reference_counts[k])),
+            )
+            for k in range(lo, hi)
+        )
+        if band_holds and _steps_near_their_lines(
+            positions,
+            capture_stream_s[in_capture],
+            capture.level[in_capture],
+        ):
+            capture_tie[in_capture] = True
+            reference_tie[in_reference] = True
+    return capture_tie, reference_tie
+
+
+def _disagreement_spans(
+    times: np.ndarray, disagreement: np.ndarray
+) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for lo, hi in _runs(disagreement != 0):
+        agreed_s = times[lo] - times[spans[-1][1]] if spans else math.inf
+        if agreed_s < TIMING_TOLERANCE_US * 1e-6:
+            spans[-1] = (spans[-1][0], hi)
+        else:
+            spans.append((lo, hi))
+    return spans
+
+
 def measure_epoch(
-    steps: EpochSteps, alignment: Alignment
+    steps: EpochSteps, alignment: Alignment, reference: Reference
 ) -> dict[str, MatchedSteps]:
     matches = {}
     for role, cap in steps.capture.items():
         ref = steps.reference[role]
         if not len(cap) or not len(ref):
             matches[role] = MatchedSteps(
-                np.empty(0), np.empty(0), np.empty(0), len(cap), len(ref)
+                np.empty(0), np.empty(0), np.empty(0), len(cap), len(ref), 0
             )
             continue
         nearest, late = match_capture_to_reference(steps, role, alignment)
@@ -889,16 +1026,48 @@ def measure_epoch(
             _step_keys(cap),
             cap.time,
         )
+        reference_unmatched = np.abs(reverse) >= REPORT_MATCH_WINDOW_S
+        capture_tie, reference_tie = edge_ties(
+            cap,
+            alignment.to_stream(cap.time),
+            ~matched,
+            ref,
+            reference_unmatched,
+            lambda lo, hi, role=role: reference.positions(role, lo, hi),
+        )
         matches[role] = MatchedSteps(
             late_s=late[matched],
             capture_time_s=cap.time[matched],
             reference_rate_hz=ref.rate_hz[nearest[matched]],
-            unmatched_capture=int(np.count_nonzero(~matched)),
+            unmatched_capture=int(np.count_nonzero(~matched & ~capture_tie)),
             unmatched_reference=int(
-                np.count_nonzero(np.abs(reverse) >= REPORT_MATCH_WINDOW_S)
+                np.count_nonzero(reference_unmatched & ~reference_tie)
+            ),
+            edge_ties=int(
+                np.count_nonzero(capture_tie) + np.count_nonzero(reference_tie)
             ),
         )
     return matches
+
+
+def conditioned_span(epoch: EpochResult) -> dict:
+    matches = epoch.matches.values()
+    rate = np.concatenate([m.reference_rate_hz for m in matches])
+    keep = rate >= CONDITIONED_RATE_HZ
+    if not keep.any():
+        return {}
+    capture_t = np.concatenate([m.capture_time_s for m in matches])[keep]
+    late = np.concatenate([m.late_s for m in matches])[keep]
+    stream_t = epoch.alignment.to_stream(capture_t - late)
+    first, last = int(np.argmin(capture_t)), int(np.argmax(capture_t))
+    capture_span = float(capture_t[last] - capture_t[first])
+    stream_span = float(stream_t[last] - stream_t[first])
+    return {
+        "conditioned_span_capture_s": capture_span,
+        "conditioned_span_stream_s": stream_span,
+        "conditioned_span_capture_minus_stream_ms": (capture_span - stream_span)
+        * 1e3,
+    }
 
 
 def residual_wander_us(matches: dict[str, MatchedSteps]) -> float:
@@ -919,14 +1088,14 @@ def residual_wander_us(matches: dict[str, MatchedSteps]) -> float:
 
 def align_all(
     capture_events: dict[str, StepEvents],
-    reference_events: dict[str, StepEvents],
+    reference: Reference,
     gap_s: float,
 ) -> list[EpochResult]:
     pairs = pair_epochs(
-        find_epochs(capture_events, gap_s), find_epochs(reference_events, gap_s)
+        find_epochs(capture_events, gap_s), find_epochs(reference.events, gap_s)
     )
     steps = [
-        epoch_steps(capture_events, reference_events, cap, ref)
+        epoch_steps(capture_events, reference.events, cap, ref)
         for cap, ref in pairs
     ]
     alignments: list[Alignment | None] = [None] * len(pairs)
@@ -946,7 +1115,7 @@ def align_all(
                 reference=ref,
                 alignment=alignment,
                 steps=steps[index],
-                matches=measure_epoch(steps[index], alignment),
+                matches=measure_epoch(steps[index], alignment, reference),
             )
         )
     return results
@@ -1148,7 +1317,7 @@ def analyze(
         m.role: capture_steps(inputs.capture, m, reference.start_counts[m.role])
         for m in inputs.motors
     }
-    epochs = align_all(capture_events, reference.events, gap_s)
+    epochs = align_all(capture_events, reference, gap_s)
     stalls = [s for e in epochs for s in find_stalls(e)]
     errors = {
         m.role: count_errors(inputs.capture, m, reference, epochs)
@@ -1199,6 +1368,7 @@ def analyze(
             "unmatched_reference_steps": sum(
                 e.matches[role].unmatched_reference for e in epochs
             ),
+            "edge_tie_steps": sum(e.matches[role].edge_ties for e in epochs),
             "timing_error_capture_minus_reference_us": _timing_stats(
                 late[conditioned], late_at[conditioned]
             ),
@@ -1269,10 +1439,7 @@ def analyze(
                 "capture_duration_s": e.capture.duration_s,
                 "stream_start_s": e.reference.start_s,
                 "stream_duration_s": e.reference.duration_s,
-                "duration_capture_minus_stream_ms": (
-                    e.capture.duration_s - e.reference.duration_s
-                )
-                * 1e3,
+                **conditioned_span(e),
                 "offset_s": e.alignment.offset_s,
                 "ppm": e.alignment.ppm,
                 "scale_fitted": e.alignment.scale_fitted,
