@@ -208,3 +208,17 @@ pub fn stage_totals() -> [StageTotal; Stage::ALL.len()] {
         }
     })
 }
+
+static TALLIES: std::sync::Mutex<Vec<(&'static str, u64)>> = std::sync::Mutex::new(Vec::new());
+pub fn tally_count(name: &'static str, n: u64) {
+    let mut t = TALLIES.lock().unwrap();
+    if let Some(e) = t.iter_mut().find(|e| e.0 == name) { e.1 += n; } else { t.push((name, n)); }
+}
+pub fn tallies() -> Vec<(&'static str, u64)> { TALLIES.lock().unwrap().clone() }
+
+static MAXIMA: std::sync::Mutex<Vec<(&'static str, f64)>> = std::sync::Mutex::new(Vec::new());
+pub fn tally_max(name: &'static str, v: f64) {
+    let mut t = MAXIMA.lock().unwrap();
+    if let Some(e) = t.iter_mut().find(|e| e.0 == name) { if v > e.1 { e.1 = v; } } else { t.push((name, v)); }
+}
+pub fn maxima() -> Vec<(&'static str, f64)> { MAXIMA.lock().unwrap().clone() }

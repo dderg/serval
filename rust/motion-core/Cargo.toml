@@ -34,6 +34,7 @@ ethercat-rt = { path = "../ethercat-rt" }
 proptest = "1"
 libm = { version = "0.2", default-features = false }
 host-rt = { path = "../host-rt", features = ["test-harness"] }
+pprof = { version = "0.13", features = ["cpp"] }
 motion-core = { path = ".", features = ["test-support"] }
 
 [lints]

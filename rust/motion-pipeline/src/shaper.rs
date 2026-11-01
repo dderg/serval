@@ -2077,6 +2077,32 @@ pub(crate) struct AxisFit<'a> {
     pub velocity_continuous: bool,
 }
 
+/// Whether pieces fitted across several partition seeds still track the
+/// signal at those seeds and midway between them, where the exact output's
+/// own breaks would have put piece boundaries.
+fn coarse_span_holds<S: TrackSignal>(
+    sig: &S,
+    pieces: &[BezierPiece],
+    seeds: &[f64],
+    fit_tol: FitTol,
+) -> bool {
+    let per_span: usize = std::env::var("KFIT_VERIFY_PER_SPAN").ok().map_or(2, |v| v.parse().unwrap());
+    let probes = seeds
+        .windows(2)
+        .flat_map(|span| (1..=per_span).map(move |k| span[0] + (span[1] - span[0]) * k as f64 / per_span as f64))
+        .filter(|&t| t < seeds[seeds.len() - 1]);
+    probes.into_iter().all(|t| {
+        let index = pieces
+            .partition_point(|piece| piece.u_end < t)
+            .min(pieces.len() - 1);
+        let piece = &pieces[index];
+        let acceleration = piece.differentiate().differentiate();
+        let (position, _, truth_acceleration) = sig.eval_pva(t);
+        (piece.evaluate(t) - position).abs() <= fit_tol.pos_mm
+            && (acceleration.evaluate(t) - truth_acceleration).abs() <= fit_tol.accel_mm_s2
+    })
+}
+
 pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
     fit: AxisFit,
     sig: &S,
@@ -2101,22 +2127,87 @@ pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
     };
     let mut refinement_splits = 0;
     let mut pieces = Vec::with_capacity(plan.seeds.len());
-    for span in plan.seeds.windows(2) {
-        refine_shaped_span(
-            sig,
-            RefineSpan {
-                t0: span[0],
-                t1: span[1],
-                depth: 0,
-            },
-            &policy,
-            SpanSeeds {
-                lower: span[0],
-                upper: span[1],
-            },
-            &mut refinement_splits,
-            &mut pieces,
-        )?;
+    let coarse_span = if fit.fit_context == "follower_kernel" {
+        std::env::var("KFIT_COARSE_US")
+            .ok()
+            .map_or(0.0, |v| v.parse::<f64>().expect("KFIT_COARSE_US") * 1e-6)
+    } else {
+        0.0
+    };
+    let seeds = &plan.seeds;
+    let mut first = 0;
+    while first + 1 < seeds.len() {
+        let mut last = first + 1;
+        while last + 1 < seeds.len() && seeds[last] - seeds[first] < coarse_span {
+            last += 1;
+        }
+        if last > first + 1 {
+            let mut coarse = Vec::new();
+            let mut coarse_splits = refinement_splits;
+            let fitted = refine_shaped_span(
+                sig,
+                RefineSpan {
+                    t0: seeds[first],
+                    t1: seeds[last],
+                    depth: 0,
+                },
+                &policy,
+                SpanSeeds {
+                    lower: seeds[first],
+                    upper: seeds[last],
+                },
+                &mut coarse_splits,
+                &mut coarse,
+            );
+            crate::timing::tally_count("kfit:coarse_tries", 1);
+            if fitted.is_ok() && coarse_span_holds(sig, &coarse, &seeds[first..=last], fit.fit_tol) {
+                crate::timing::tally_count("kfit:coarse_kept", 1);
+                refinement_splits = coarse_splits;
+                pieces.append(&mut coarse);
+                first = last;
+                continue;
+            }
+        }
+        for span in seeds[first..=last].windows(2) {
+            refine_shaped_span(
+                sig,
+                RefineSpan {
+                    t0: span[0],
+                    t1: span[1],
+                    depth: 0,
+                },
+                &policy,
+                SpanSeeds {
+                    lower: span[0],
+                    upper: span[1],
+                },
+                &mut refinement_splits,
+                &mut pieces,
+            )?;
+        }
+        first = last;
+    }
+    if fit.fit_context == "follower_kernel" && std::env::var_os("KFIT_AUDIT").is_some() {
+        for span in plan.seeds.windows(2) {
+            for k in 1..32 {
+                let t = span[0] + (span[1] - span[0]) * f64::from(k) / 32.0;
+                let index = pieces.partition_point(|piece| piece.u_end < t).min(pieces.len() - 1);
+                let piece = &pieces[index];
+                let velocity = piece.differentiate();
+                let acceleration = velocity.differentiate();
+                let (p, v, a) = sig.eval_pva(t);
+                crate::timing::tally_max("audit:pos_over_tol", (piece.evaluate(t) - p).abs() / fit.fit_tol.pos_mm);
+                crate::timing::tally_max("audit:acc_over_tol", (acceleration.evaluate(t) - a).abs() / fit.fit_tol.accel_mm_s2);
+                crate::timing::tally_max("audit:vel_abs", (velocity.evaluate(t) - v).abs());
+            }
+        }
+    }
+    if fit.fit_context == "follower_kernel" {
+        crate::timing::tally_count("kfit:fits", 1);
+        crate::timing::tally_count("kfit:seed_spans", (plan.seeds.len() - 1) as u64);
+        crate::timing::tally_count("kfit:splits", refinement_splits as u64);
+        crate::timing::tally_count("kfit:pieces", pieces.len() as u64);
+        crate::timing::tally_count("kfit:window_us", ((fit.t_end - fit.t_start) * 1e6) as u64);
     }
     fit_pieces_to_nurbs(fit.axis, pieces)
 }

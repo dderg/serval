@@ -89,6 +89,7 @@ fn main() {
         live_config::move_limits(&planner, delta).expect("config limits are valid")
     });
 
+    let profiler = std::env::var_os("PPROF").map(|_| pprof::ProfilerGuardBuilder::default().frequency(2000).blocklist(&["libc", "libgcc", "pthread", "vdso"]).build().unwrap());
     let wall = Instant::now();
     let (arrival_tx, arrival_rx) = crossbeam_channel::unbounded::<(f64, f64)>();
     let mut pipeline = Pipeline::new(cfg, chains, vec![0.0; 4], 0.0).into_staged(move |item| {
@@ -119,6 +120,23 @@ fn main() {
     }
     assert!(pipeline.finish());
     let wall_s = wall.elapsed().as_secs_f64();
+    if let Some(guard) = profiler {
+        let report = guard.report().build().unwrap();
+        let mut self_counts: std::collections::HashMap<String, isize> = Default::default();
+        let mut incl: std::collections::HashMap<String, isize> = Default::default();
+        let mut total = 0isize;
+        for (frames, count) in &report.data {
+            total += count;
+            let names: Vec<String> = frames.frames.iter().flat_map(|f| f.iter().map(|s| s.name())).collect();
+            if let Some(first) = names.first() { *self_counts.entry(first.clone()).or_default() += count; }
+            let mut seen = std::collections::HashSet::new();
+            for n in names { if seen.insert(n.clone()) { *incl.entry(n).or_default() += count; } }
+        }
+        let mut v: Vec<_> = self_counts.into_iter().collect(); v.sort_by_key(|x| -x.1);
+        eprintln!("SELF top:"); for (n,c) in v.iter().take(40) { eprintln!("{:5.1}% {}", 100.0*(*c as f64)/total as f64, n); }
+        let mut v: Vec<_> = incl.into_iter().filter(|(n,_)| !n.contains("std::") && !n.contains("core::") && !n.contains("alloc::")).collect(); v.sort_by_key(|x| -x.1);
+        eprintln!("INCL top:"); for (n,c) in v.iter().take(90) { eprintln!("{:5.1}% {}", 100.0*(*c as f64)/total as f64, n); }
+    }
     let arrivals: Vec<(f64, f64)> = arrival_rx.try_iter().collect();
     let stream_s = arrivals.last().map_or(0.0, |&(_, t)| t);
     println!(
@@ -126,6 +144,8 @@ fn main() {
         arrivals.len(),
         stream_s / wall_s
     );
+    for (n, c) in motion_pipeline::timing::tallies() { println!("TALLY {n} {c}"); }
+    for (n, c) in motion_pipeline::timing::maxima() { println!("MAX {n} {c:.4e}"); }
     println!("stage breakdown (wall share, calls, per move):");
     for total in stage_totals() {
         let secs = total.total_us as f64 * 1e-6;
