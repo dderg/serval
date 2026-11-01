@@ -90,7 +90,17 @@ SIM_JITTER=3 tools/sim/run.sh test  # share a cpuset with 3 bursty CPU burners
     on the clock too: `world.wait_until(pred, ...)`, `EndstopWall`,
     `EndstopPulser`, or a `HarnessPacer` for new emulators. A plain
     `time.sleep` polling loop running beside a free-running wait samples
-    the printer at an arbitrary, load-dependent cadence.
+    the printer at an arbitrary, load-dependent cadence. A poke that must
+    land at a printer position (closing a switch once an axis passes a
+    point) belongs inside the `wait_until` predicate: after the wait
+    returns, a world held free-running by another call runs on before the
+    poke lands. The Beacon/Cartographer emulators sample, check homing
+    thresholds and check bed contact on pacer seats, reading Z from the
+    step counter at each check; the harness reserves four seats.
+  - klippy writes its log from its own thread, so a gcode response can
+    arrive before the lines it printed: assert on log text with
+    `mark_log()` + `expect_log(needle)`, not `klippy_log_text()` right
+    after `gcode_ok`.
 - Harness timeouts are virtual seconds (`VirtualDeadline`); a run whose
   virtual clock stops advancing for 60 s of real time fails as wedged, and
   the error names what holds the clock (host threads, floors, the lock).
