@@ -1,10 +1,12 @@
 use super::SendError;
-use super::step_tap::{RECORD_LEN, RecordKind, StepTap, TAP_MAGIC, TapLane, TapRecord};
+use super::step_tap::{
+    PAYLOAD_OFFSET, RECORD_LEN, RecordKind, StepTap, TAP_MAGIC, TapLane, TapRecord, encode_frame,
+};
 use super::stepcompress_sink::{ClockSource, FrameEgress};
 use crossbeam_channel::{Receiver, bounded};
 use host_rt::host_io::parser::ArgValue;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 const MCU: u32 = 3;
 const CLOCK_NOW: u64 = 5_000_000_123;
@@ -12,6 +14,7 @@ const OID_A: u32 = 7;
 const OID_B: u32 = 8;
 
 type Frame = (&'static str, Vec<(String, ArgValue)>);
+pub(crate) type DecodedFrame = (String, BTreeMap<String, i64>);
 
 fn clock() -> ClockSource {
     Arc::new(|_| Some((CLOCK_NOW, 84e6)))
@@ -24,6 +27,87 @@ fn frame(name: &'static str, args: &[(&str, i64)]) -> Frame {
             .map(|&(key, value)| (key.to_string(), ArgValue::Int(value)))
             .collect(),
     )
+}
+
+fn payload_u32(record: &TapRecord, at: usize) -> i64 {
+    let at = PAYLOAD_OFFSET + at;
+    i64::from(u32::from_le_bytes(record.0[at..at + 4].try_into().unwrap()))
+}
+
+fn payload_i32(record: &TapRecord, at: usize) -> i64 {
+    let at = PAYLOAD_OFFSET + at;
+    i64::from(i32::from_le_bytes(record.0[at..at + 4].try_into().unwrap()))
+}
+
+fn payload_u16(record: &TapRecord, at: usize) -> i64 {
+    let at = PAYLOAD_OFFSET + at;
+    i64::from(u16::from_le_bytes(record.0[at..at + 2].try_into().unwrap()))
+}
+
+fn payload_i16(record: &TapRecord, at: usize) -> i64 {
+    let at = PAYLOAD_OFFSET + at;
+    i64::from(i16::from_le_bytes(record.0[at..at + 2].try_into().unwrap()))
+}
+
+pub(crate) fn record_kind(record: &TapRecord) -> u8 {
+    record.0[0]
+}
+
+pub(crate) fn record_oid(record: &TapRecord) -> u32 {
+    u32::from_le_bytes(record.0[4..8].try_into().unwrap())
+}
+
+pub(crate) fn decode_frame(record: &TapRecord) -> Option<DecodedFrame> {
+    let oid = i64::from(record_oid(record));
+    let (name, args): (&str, Vec<(&str, i64)>) = match record_kind(record) {
+        3 => ("reset_step_clock", vec![("clock", payload_u32(record, 0))]),
+        4 => (
+            "set_next_step_dir",
+            vec![("dir", i64::from(record.0[PAYLOAD_OFFSET]))],
+        ),
+        5 => (
+            "queue_step",
+            vec![
+                ("interval", payload_u32(record, 0)),
+                ("count", payload_u16(record, 4)),
+                ("add", payload_i16(record, 6)),
+            ],
+        ),
+        6 => (
+            "queue_step_hp",
+            vec![
+                ("interval", payload_u32(record, 0)),
+                ("count", payload_u16(record, 4)),
+                ("add", payload_i16(record, 6)),
+                ("add2", payload_i16(record, 8)),
+                ("shift", payload_i16(record, 10)),
+            ],
+        ),
+        7 => (
+            "stepcompress_barrier",
+            vec![("seq", payload_u32(record, 0))],
+        ),
+        8 => (
+            "stepcompress_set_position",
+            vec![("pos", payload_i32(record, 0))],
+        ),
+        _ => return None,
+    };
+    let mut decoded: BTreeMap<String, i64> =
+        args.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    decoded.insert("oid".to_string(), oid);
+    Some((name.to_string(), decoded))
+}
+
+pub(crate) fn as_decoded(name: &str, args: &[(String, ArgValue)]) -> DecodedFrame {
+    let args = args
+        .iter()
+        .map(|(key, value)| match value {
+            ArgValue::Int(v) => (key.clone(), *v),
+            other => panic!("{name} `{key}` is not an integer: {other:?}"),
+        })
+        .collect();
+    (name.to_string(), args)
 }
 
 fn sent_names() -> (FrameEgress, Arc<Mutex<Vec<&'static str>>>) {
@@ -43,16 +127,12 @@ fn tap_with_capacity(capacity: usize) -> (Arc<StepTap>, Receiver<TapRecord>) {
     (Arc::new(StepTap::from_sender(tx, MCU, clock())), rx)
 }
 
-fn u32_at(record: &TapRecord, offset: usize) -> u32 {
-    u32::from_le_bytes(record.payload()[offset..offset + 4].try_into().unwrap())
-}
-
 #[test]
 fn the_tap_records_exactly_the_frames_sent_in_order() {
     let (tap, rx) = tap_with_capacity(64);
     let (inner, sent) = sent_names();
     let egress = tap.wrap(inner);
-    egress(&[
+    let first = [
         frame(
             "reset_step_clock",
             &[("oid", i64::from(OID_A)), ("clock", 1_000)],
@@ -70,13 +150,16 @@ fn the_tap_records_exactly_the_frames_sent_in_order() {
                 ("add", -2),
             ],
         ),
-    ])
-    .unwrap();
-    egress(&[
+    ];
+    let second = [
         frame("kalico_wire_probe", &[("clock", 42)]),
         frame(
             "stepcompress_barrier",
             &[("oid", i64::from(OID_A)), ("seq", 9)],
+        ),
+        frame(
+            "stepcompress_set_position",
+            &[("oid", i64::from(OID_B)), ("pos", -12)],
         ),
         frame(
             "queue_step",
@@ -87,34 +170,61 @@ fn the_tap_records_exactly_the_frames_sent_in_order() {
                 ("add", 0),
             ],
         ),
-    ])
-    .unwrap();
+    ];
+    egress(&first).unwrap();
+    egress(&second).unwrap();
 
-    assert_eq!(sent.lock().unwrap().len(), 6);
+    assert_eq!(sent.lock().unwrap().len(), 7);
     let records: Vec<TapRecord> = rx.try_iter().collect();
-    let kinds: Vec<u8> = records.iter().map(TapRecord::kind).collect();
-    assert_eq!(
-        kinds,
-        [
-            RecordKind::ResetStepClock as u8,
-            RecordKind::SetNextStepDir as u8,
-            RecordKind::QueueStep as u8,
-            RecordKind::Barrier as u8,
-            RecordKind::QueueStep as u8,
-        ]
-    );
-    let oids: Vec<u32> = records.iter().map(TapRecord::oid).collect();
-    assert_eq!(oids, [OID_A, OID_A, OID_A, OID_A, OID_B]);
-    assert_eq!(u32_at(&records[0], 0), 1_000);
-    assert_eq!(records[1].payload()[0], 1);
-    assert_eq!(u32_at(&records[2], 0), 100);
-    assert_eq!(&records[2].payload()[4..8], &[3, 0, 0xFE, 0xFF]);
-    assert_eq!(u32_at(&records[3], 0), 9);
+    let decoded: Vec<DecodedFrame> = records.iter().filter_map(decode_frame).collect();
+    let expected: Vec<DecodedFrame> = first
+        .iter()
+        .chain(&second[1..])
+        .map(|(name, args)| as_decoded(name, args))
+        .collect();
+    assert_eq!(decoded.len(), records.len());
+    assert_eq!(decoded, expected);
     assert!(
         records
             .iter()
             .all(|r| r.0[8..16] == CLOCK_NOW.to_le_bytes())
     );
+}
+
+#[test]
+fn queue_step_hp_keeps_every_argument_at_its_own_offset() {
+    let args = frame(
+        "queue_step_hp",
+        &[
+            ("oid", i64::from(OID_A)),
+            ("interval", 0x0102_0304),
+            ("count", 0x0506),
+            ("add", -0x0708),
+            ("add2", 0x090A),
+            ("shift", 11),
+        ],
+    );
+    let record = encode_frame(args.0, &args.1, CLOCK_NOW).unwrap().unwrap();
+    assert_eq!(record_kind(&record), RecordKind::QueueStepHp as u8);
+    assert_eq!(decode_frame(&record), Some(as_decoded(args.0, &args.1)));
+    assert!(record.0[PAYLOAD_OFFSET + 12..].iter().all(|&b| b == 0));
+}
+
+#[test]
+fn an_argument_wider_than_its_wire_field_is_refused() {
+    let args = frame(
+        "queue_step_hp",
+        &[
+            ("oid", 1),
+            ("interval", 1),
+            ("count", 1),
+            ("add", 0),
+            ("add2", 40_000),
+            ("shift", 0),
+        ],
+    );
+    let error = encode_frame(args.0, &args.1, 0).unwrap_err();
+    assert!(error.contains("add2"), "{error}");
 }
 
 #[test]
@@ -165,21 +275,8 @@ fn an_unrecognised_frame_is_fatal() {
     );
 }
 
-#[test]
-fn a_projection_is_recorded_once_per_epoch_and_oid() {
-    let (tap, _rx) = tap_with_capacity(64);
-    assert!(tap.projection_changed(OID_A, 84e6, 1_000.0));
-    assert!(!tap.projection_changed(OID_A, 84e6, 1_000.4));
-    assert!(tap.projection_changed(OID_A, 84e6, 1_001.0));
-    assert!(tap.projection_changed(OID_A, 84.001e6, 1_001.0));
-    assert!(tap.projection_changed(OID_B, 84.001e6, 1_001.0));
-}
-
-#[test]
-fn the_writer_puts_the_header_and_frames_in_the_file() {
-    let dir = std::env::temp_dir().join(format!("step-tap-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let lanes = [
+fn lanes() -> [TapLane; 2] {
+    [
         TapLane {
             oid: OID_A,
             axis: 0,
@@ -194,8 +291,29 @@ fn the_writer_puts_the_header_and_frames_in_the_file() {
             microstep_distance: 0.0024,
             invert_dir: true,
         },
-    ];
-    let tap = StepTap::open(&dir, MCU, 84e6, &lanes, clock()).unwrap();
+    ]
+}
+
+fn scratch_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("step-tap-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn tap_files(dir: &std::path::Path) -> Vec<Vec<u8>> {
+    let mut paths: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    paths.sort();
+    paths.iter().map(|p| std::fs::read(p).unwrap()).collect()
+}
+
+#[test]
+fn closing_the_tap_flushes_every_record_to_its_file() {
+    let dir = scratch_dir("close");
+    let tap = StepTap::open(&dir, MCU, 84e6, &lanes(), clock()).unwrap();
     let (inner, _) = sent_names();
     let egress = tap.wrap(inner);
     egress(&[frame(
@@ -205,18 +323,11 @@ fn the_writer_puts_the_header_and_frames_in_the_file() {
     .unwrap();
     drop(egress);
     drop(tap);
-    let path = dir.join(format!("step_tap_mcu{MCU}.bin"));
-    let expected = TAP_MAGIC.len() + 4 * RECORD_LEN;
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let bytes = loop {
-        let bytes = std::fs::read(&path).unwrap();
-        if bytes.len() >= expected || Instant::now() > deadline {
-            break bytes;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    };
+    let files = tap_files(&dir);
     std::fs::remove_dir_all(&dir).unwrap();
-    assert_eq!(bytes.len(), expected);
+    assert_eq!(files.len(), 1);
+    let bytes = &files[0];
+    assert_eq!(bytes.len(), TAP_MAGIC.len() + 4 * RECORD_LEN);
     assert_eq!(bytes[..8], TAP_MAGIC);
     let kinds: Vec<u8> = bytes[8..].chunks(RECORD_LEN).map(|r| r[0]).collect();
     assert_eq!(
@@ -230,4 +341,30 @@ fn the_writer_puts_the_header_and_frames_in_the_file() {
     );
     assert_eq!(bytes[8 + RECORD_LEN + 1], 0);
     assert_eq!(bytes[8 + 2 * RECORD_LEN + 1], 1);
+}
+
+#[test]
+fn a_second_session_in_one_process_never_truncates_the_first() {
+    let dir = scratch_dir("sessions");
+    let first = StepTap::open(&dir, MCU, 84e6, &lanes(), clock()).unwrap();
+    let second = StepTap::open(&dir, MCU, 84e6, &lanes(), clock()).unwrap();
+    drop(second);
+    drop(first);
+    let files = tap_files(&dir);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(files.len(), 2);
+    for bytes in files {
+        assert_eq!(bytes.len(), TAP_MAGIC.len() + 3 * RECORD_LEN);
+    }
+}
+
+#[test]
+fn opening_without_a_clock_estimate_fails() {
+    let dir = scratch_dir("noclock");
+    let no_clock: ClockSource = Arc::new(|_| None);
+    let error = StepTap::open(&dir, MCU, 84e6, &lanes(), no_clock)
+        .err()
+        .expect("a tap cannot stamp its header without a clock");
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(error.contains("no clock estimate"), "{error}");
 }

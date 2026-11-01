@@ -179,7 +179,6 @@ pub fn build_endpoint(
         .sum();
     let mut motors = Vec::with_capacity(motor_count);
     let mut pulse_lanes = Vec::with_capacity(motor_count);
-    let mut tap_lanes = Vec::with_capacity(motor_count);
     for (lane, &axis) in cfg.axes.iter().enumerate() {
         if !cfg.pulse_capable(lane) {
             continue;
@@ -222,13 +221,6 @@ pub fn build_endpoint(
                 axis,
                 oid: cfg.hw.stepper_oids[motor],
             });
-            tap_lanes.push(TapLane {
-                oid: cfg.hw.stepper_oids[motor],
-                axis: axis as u32,
-                motor_in_axis: (motor - cfg.motor_range(lane).start) as u32,
-                microstep_distance,
-                invert_dir: cfg.hw.invert_dir[motor],
-            });
         }
     }
     if motors.is_empty() {
@@ -267,11 +259,29 @@ pub fn build_endpoint(
             std::path::Path::new(&dir),
             cfg.mcu_id,
             measured_clock_freq,
-            &tap_lanes,
+            &tap_lanes(cfg),
             clock_of,
         )?);
     }
     Ok(endpoint)
+}
+
+fn tap_lanes(cfg: &McuAxisConfig) -> Vec<TapLane> {
+    cfg.axes
+        .iter()
+        .enumerate()
+        .filter(|&(lane, _)| cfg.pulse_capable(lane))
+        .flat_map(|(lane, &axis)| {
+            let range = cfg.motor_range(lane);
+            range.clone().map(move |motor| TapLane {
+                oid: cfg.hw.stepper_oids[motor],
+                axis: axis as u32,
+                motor_in_axis: (motor - range.start) as u32,
+                microstep_distance: cfg.hw.microstep_distance[motor],
+                invert_dir: cfg.hw.invert_dir[motor],
+            })
+        })
+        .collect()
 }
 
 struct PendingRetire {
@@ -2216,9 +2226,6 @@ impl StepcompressEndpoint {
         axis: u8,
         clock: McuClock,
     ) -> Result<(), SendError> {
-        if let Some(tap) = &self.tap {
-            tap.note_views(self.lanes[motor].oid, spans);
-        }
         let mut rest: &[ClockedMotorSpan] = spans;
         loop {
             let Some((index, seam)) = self.seam_reached_by(motor, rest) else {

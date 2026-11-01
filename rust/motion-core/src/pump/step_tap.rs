@@ -7,20 +7,22 @@ use super::SendError;
 use super::stepcompress_sink::{ClockSource, FrameEgress};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded};
 use host_rt::host_io::parser::ArgValue;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::Duration;
-use trajectory::ClockedMotorSpan;
 
 pub const STEP_TAP_DIR_ENV: &str = "SERVAL_STEP_TAP_DIR";
-pub(crate) const TAP_MAGIC: [u8; 8] = *b"SVTAP1\0\0";
+pub(crate) const TAP_MAGIC: [u8; 8] = *b"SVTAP2\0\0";
 pub(crate) const RECORD_LEN: usize = 32;
-const PAYLOAD_OFFSET: usize = 16;
+pub(crate) const PAYLOAD_OFFSET: usize = 16;
 const CHANNEL_RECORDS: usize = 1 << 16;
 const IDLE_FLUSH: Duration = Duration::from_millis(100);
-const PROJECTION_SLACK_TICKS: f64 = 0.5;
+
+static SESSIONS: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -33,8 +35,7 @@ pub(crate) enum RecordKind {
     QueueStepHp = 6,
     Barrier = 7,
     SetPosition = 8,
-    Projection = 9,
-    Halt = 10,
+    Halt = 9,
 }
 
 /// One fixed-size record: kind | flags | reserved u16 | oid u32 | the mcu's
@@ -63,21 +64,6 @@ impl TapRecord {
     }
 }
 
-#[cfg(test)]
-impl TapRecord {
-    pub(crate) fn kind(&self) -> u8 {
-        self.0[0]
-    }
-
-    pub(crate) fn oid(&self) -> u32 {
-        u32::from_le_bytes(self.0[4..8].try_into().expect("4 bytes"))
-    }
-
-    pub(crate) fn payload(&self) -> &[u8] {
-        &self.0[PAYLOAD_OFFSET..]
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TapLane {
     pub oid: u32,
@@ -89,10 +75,10 @@ pub(crate) struct TapLane {
 
 pub(crate) struct StepTap {
     mcu_id: u32,
-    tx: Sender<TapRecord>,
+    tx: Option<Sender<TapRecord>>,
+    writer: Option<JoinHandle<Result<(), String>>>,
     clock_of: ClockSource,
     fault: Mutex<Option<String>>,
-    projections: Mutex<Vec<(u32, f64, f64)>>,
 }
 
 impl StepTap {
@@ -103,35 +89,43 @@ impl StepTap {
         lanes: &[TapLane],
         clock_of: ClockSource,
     ) -> Result<Arc<Self>, String> {
-        let path = dir.join(format!("step_tap_mcu{mcu_id}.bin"));
-        let mut file = BufWriter::new(
-            File::create(&path)
-                .map_err(|e| format!("step tap: cannot create {}: {e}", path.display()))?,
-        );
+        let (clock, _) = clock_of(mcu_id)
+            .ok_or_else(|| format!("step tap: mcu {mcu_id} has no clock estimate to stamp"))?;
+        let session = SESSIONS.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!(
+            "step_tap_mcu{mcu_id}_p{}_s{session}.bin",
+            std::process::id()
+        ));
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| format!("step tap: cannot create {}: {e}", path.display()))?;
+        let mut file = BufWriter::new(file);
         file.write_all(&TAP_MAGIC)
             .map_err(|e| format!("step tap: cannot write {}: {e}", path.display()))?;
         let (tx, rx) = bounded(CHANNEL_RECORDS);
-        std::thread::Builder::new()
+        let writer = std::thread::Builder::new()
             .name(format!("step-tap-mcu{mcu_id}"))
             .spawn(move || write_records(&rx, file))
             .map_err(|e| format!("step tap: cannot spawn writer: {e}"))?;
-        let tap = Arc::new(Self::from_sender(tx, mcu_id, clock_of));
-        tap.record_header(clock_freq, lanes);
-        Ok(tap)
+        let mut tap = Self::from_sender(tx, mcu_id, clock_of);
+        tap.writer = Some(writer);
+        tap.record_header(clock, clock_freq, lanes);
+        Ok(Arc::new(tap))
     }
 
     pub(crate) fn from_sender(tx: Sender<TapRecord>, mcu_id: u32, clock_of: ClockSource) -> Self {
         Self {
             mcu_id,
-            tx,
+            tx: Some(tx),
+            writer: None,
             clock_of,
             fault: Mutex::new(None),
-            projections: Mutex::new(Vec::new()),
         }
     }
 
-    pub(crate) fn record_header(&self, clock_freq: f64, lanes: &[TapLane]) {
-        let clock = self.clock_now();
+    pub(crate) fn record_header(&self, clock: u64, clock_freq: f64, lanes: &[TapLane]) {
         self.push(
             TapRecord::new(RecordKind::Mcu, 0, clock)
                 .put(0, &self.mcu_id.to_le_bytes())
@@ -171,41 +165,8 @@ impl StepTap {
         self.check()
     }
 
-    pub(crate) fn note_views(&self, oid: u32, views: &[ClockedMotorSpan]) {
-        for view in views {
-            let freq = view.clock_freq_hz;
-            let offset = view.start_clock_exact - view.stream_t_start * freq;
-            if self.projection_changed(oid, freq, offset) {
-                self.push(
-                    TapRecord::new(RecordKind::Projection, oid, self.clock_now())
-                        .put(0, &freq.to_le_bytes())
-                        .put(8, &offset.to_le_bytes()),
-                );
-            }
-        }
-    }
-
     pub(crate) fn record_halt(&self, oid: u32) {
         self.push(TapRecord::new(RecordKind::Halt, oid, self.clock_now()));
-    }
-
-    pub(crate) fn projection_changed(&self, oid: u32, freq: f64, offset: f64) -> bool {
-        let mut known = self.projections.lock().expect("step tap projection lock");
-        match known.iter_mut().find(|(o, _, _)| *o == oid) {
-            Some(entry)
-                if entry.1 == freq && (entry.2 - offset).abs() <= PROJECTION_SLACK_TICKS =>
-            {
-                false
-            }
-            Some(entry) => {
-                *entry = (oid, freq, offset);
-                true
-            }
-            None => {
-                known.push((oid, freq, offset));
-                true
-            }
-        }
     }
 
     fn clock_now(&self) -> u64 {
@@ -222,13 +183,14 @@ impl StepTap {
     }
 
     fn push(&self, record: TapRecord) {
-        match self.tx.try_send(record) {
+        let tx = self.tx.as_ref().expect("the sender lives until drop");
+        match tx.try_send(record) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => self.latch(format!(
                 "writer backlog full ({CHANNEL_RECORDS} records); the tap fell behind"
             )),
             Err(TrySendError::Disconnected(_)) => {
-                self.latch("writer stopped; see the step-tap error log".to_string());
+                self.latch("writer stopped; its error surfaces when the tap closes".to_string());
             }
         }
     }
@@ -247,24 +209,47 @@ impl StepTap {
             None => Ok(()),
         }
     }
+
+    fn close(&mut self) -> Result<(), String> {
+        self.tx.take();
+        let Some(writer) = self.writer.take() else {
+            return Ok(());
+        };
+        writer
+            .join()
+            .map_err(|_| "writer thread panicked".to_string())?
+    }
 }
 
-fn write_records(rx: &Receiver<TapRecord>, mut file: BufWriter<File>) {
+impl Drop for StepTap {
+    fn drop(&mut self) {
+        if let Err(error) = self.close() {
+            tracing::error!(
+                event = "step_tap_close_failed",
+                mcu = self.mcu_id,
+                %error,
+                "[step-tap] the tap file is incomplete"
+            );
+            if !std::thread::panicking() {
+                panic!(
+                    "step tap mcu {}: the tap file is incomplete: {error}",
+                    self.mcu_id
+                );
+            }
+        }
+    }
+}
+
+fn write_records(rx: &Receiver<TapRecord>, mut file: BufWriter<File>) -> Result<(), String> {
     loop {
-        let outcome = match rx.recv_timeout(IDLE_FLUSH) {
+        match rx.recv_timeout(IDLE_FLUSH) {
             Ok(record) => file.write_all(&record.0),
             Err(RecvTimeoutError::Timeout) => file.flush(),
             Err(RecvTimeoutError::Disconnected) => {
-                if let Err(error) = file.flush() {
-                    tracing::error!(event = "step_tap_write_failed", %error, "[step-tap] final flush failed");
-                }
-                return;
+                return file.flush().map_err(|e| format!("final flush failed: {e}"));
             }
-        };
-        if let Err(error) = outcome {
-            tracing::error!(event = "step_tap_write_failed", %error, "[step-tap] write failed; stopping");
-            return;
         }
+        .map_err(|e| format!("write failed: {e}"))?;
     }
 }
 
@@ -289,6 +274,9 @@ pub(crate) fn encode_frame(
 ) -> Result<Option<TapRecord>, String> {
     let get = |key: &str| int_arg(name, args, key);
     let oid = || -> Result<u32, String> { narrow(name, "oid", get("oid")?) };
+    let i16_arg = |key: &str| -> Result<[u8; 2], String> {
+        Ok(narrow::<i16>(name, key, get(key)?)?.to_le_bytes())
+    };
     let record = match name {
         "kalico_wire_probe" => return Ok(None),
         "reset_step_clock" => TapRecord::new(RecordKind::ResetStepClock, oid()?, clock).put(
@@ -306,7 +294,7 @@ pub(crate) fn encode_frame(
                 4,
                 &narrow::<u16>(name, "count", get("count")?)?.to_le_bytes(),
             )
-            .put(6, &narrow::<i16>(name, "add", get("add")?)?.to_le_bytes()),
+            .put(6, &i16_arg("add")?),
         "queue_step_hp" => TapRecord::new(RecordKind::QueueStepHp, oid()?, clock)
             .put(
                 0,
@@ -316,12 +304,9 @@ pub(crate) fn encode_frame(
                 4,
                 &narrow::<u16>(name, "count", get("count")?)?.to_le_bytes(),
             )
-            .put(6, &narrow::<i32>(name, "add", get("add")?)?.to_le_bytes())
-            .put(
-                10,
-                &narrow::<i32>(name, "add2", get("add2")?)?.to_le_bytes(),
-            )
-            .put(14, &[narrow::<u8>(name, "shift", get("shift")?)?]),
+            .put(6, &i16_arg("add")?)
+            .put(8, &i16_arg("add2")?)
+            .put(10, &i16_arg("shift")?),
         "stepcompress_barrier" => TapRecord::new(RecordKind::Barrier, oid()?, clock)
             .put(0, &narrow::<u32>(name, "seq", get("seq")?)?.to_le_bytes()),
         "stepcompress_set_position" => TapRecord::new(RecordKind::SetPosition, oid()?, clock)
