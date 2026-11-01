@@ -1661,7 +1661,7 @@ fn reset_position_drops_the_stale_stream_and_re_emits_a_step_clock_reset() {
         .unwrap();
     assert!(!h.endpoint.backlog.is_empty());
 
-    h.endpoint.reset_position(&[5]).unwrap();
+    h.endpoint.reset_position(&[5.0]).unwrap();
     assert!(h.endpoint.backlog.is_empty());
     assert!(h.endpoint.in_flight.is_empty());
     assert_eq!(
@@ -1687,6 +1687,37 @@ fn reset_position_drops_the_stale_stream_and_re_emits_a_step_clock_reset() {
             .any(|f| matches!(f, StepFrame::ResetStepClock { .. })),
         "a reseeded motor must re-anchor its step clock before the next move"
     );
+}
+#[test]
+fn a_reseed_at_rest_keeps_the_step_the_rotor_stopped_on() {
+    for (rest_steps, stopped_on) in [(2.6, 2), (-2.6, -2)] {
+        let mut h = harness(BUDGET);
+        h.now.store(1_000, Ordering::Relaxed);
+        h.endpoint.reset_position(&[0.0]).unwrap();
+        h.endpoint
+            .send_frames(
+                MCU_ID,
+                &[axis_frame(linear_run(
+                    2_000,
+                    0.0,
+                    rest_steps * MICROSTEP,
+                    2,
+                ))],
+            )
+            .and_then(|()| h.endpoint.tick())
+            .unwrap();
+        assert_eq!(h.endpoint.shim.commanded_steps(0), stopped_on);
+        h.seeds.lock_ok().clear();
+
+        h.endpoint.reset_position(&[rest_steps]).unwrap();
+
+        assert_eq!(
+            h.seeds.lock_ok().as_slice(),
+            &[(OID, stopped_on)],
+            "re-seeding a rotor at rest {rest_steps} steps out must keep the step it \
+             stopped on, not round it to the next one"
+        );
+    }
 }
 #[test]
 fn abort_axes_retires_flushed_views_immediately() {
@@ -1717,7 +1748,7 @@ fn abort_axes_retires_flushed_views_immediately() {
 #[test]
 fn a_position_seed_of_the_wrong_width_is_fatal() {
     let mut h = harness(BUDGET);
-    let err = h.endpoint.reset_position(&[1, 2]).unwrap_err();
+    let err = h.endpoint.reset_position(&[1.0, 2.0]).unwrap_err();
     match err {
         SendError::Fatal(msg) => assert!(msg.contains("configured axes"), "{msg}"),
         other => panic!("expected Fatal, got {other:?}"),
@@ -3032,7 +3063,7 @@ fn a_host_buzz_grazing_the_lattice_closes_on_its_base_at_every_clock_phase() {
         for phase in 0..PHASES {
             let mut h = harness(1024);
             h.endpoint
-                .reset_position(&[BASE_STEPS])
+                .reset_position(&[BASE_STEPS as f64])
                 .expect("seed the lane on a lattice level");
             let freq = CYCLES_PER_SECOND + f64::from(phase) * hz_per_end_clock_phase;
             h.endpoint.shim.set_motor_cycles_per_second(0, freq);
@@ -3126,7 +3157,7 @@ fn a_buzz_after_a_move_resting_on_a_lattice_level_closes_on_that_level() {
     for phase in 0..PHASES {
         let mut h = harness(1024);
         h.endpoint
-            .reset_position(&[0])
+            .reset_position(&[0.0])
             .expect("seed the lane on a lattice level");
         let freq = CYCLES_PER_SECOND + f64::from(phase) / (f64::from(PHASES) * move_duration);
         h.endpoint.shim.set_motor_cycles_per_second(0, freq);

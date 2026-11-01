@@ -82,6 +82,13 @@ SIM_JITTER=3 tools/sim/run.sh test  # share a cpuset with 3 bursty CPU burners
   - A process klippy forks drops the host role in the child, so its
     waits and its exit cannot touch klippy's accounting (a forked child's
     exit used to clear `host_present` for the whole world).
+  - Worlds keep klippy's default `clock_sync_stable_ppm` (5 ppm). With
+    `get_clock` answered at the instant it is sent, the estimator converges
+    as it does on hardware. The former 1000 ppm sim override let the engine
+    freeze its host→MCU projection on a 300–600 ppm-off estimate taken at
+    connect: a secondary MCU's steps drifted ~20 ms off the plan over
+    30–60 s, then snapped back at the idle rebase (contact probes drifted
+    ~1 µm per sample, then jumped 0.02 mm).
   - While test code runs between world calls, virtual time is paced at
     real time (the printer idles while its "operator" thinks); inside a
     world wait (`gcode`, `print_file`, log/status waits, `wait_until`) it
