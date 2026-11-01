@@ -39,7 +39,9 @@ Plus 2× GND.
 Run from the repo root.
 
 ```
-uv run python tools/bench/deploy.py sync           # rsync tree to Pi ~/klipper, delete stale, build-native.sh if rust/ changed
+uv run python tools/bench/deploy.py sync [--tree DIR]  # rsync a worktree (default: this one) to Pi ~/klipper, delete stale, build-native.sh if rust/ changed, restart klipper, write ~/klipper/.bench-deploy.json
+uv run python tools/bench/deploy.py reset-target   # SWD-reset the F401 (clears a latched MCU shutdown), restart klipper
+uv run python tools/bench/lock.py hold -- <cmd...> # run a multi-step session under the bench lock
 uv run python tools/bench/deploy.py flash-target   # build F401 fw (f401.config), flash via Pi SWD, restart klippy
 uv run python tools/bench/deploy.py flash-capture  # build capture-fw, flash F407 via ST-Link
 uv run python tools/bench/deploy.py config         # validate + push printer.cfg, FIRMWARE_RESTART
@@ -68,7 +70,9 @@ Reference is offline `_motion_engine.pipeline_snapshot_axis_samples`; needs loca
 - F407: if its firmware ever disables the SWD pins, set BOOT0=1 and press reset (manual).
 - Config validation forbids PA13/PA14 (SWD) and PA8 (reserved for clock output).
 
-Any tool that touches the Pi or the boards (`run.py`, every `deploy.py` subcommand) takes an exclusive lock on `~/bench/.lock` and waits up to `--lock-timeout` seconds (default 1800), reporting the holder every 30 s, so several agents can share the bench safely.
+Any tool that touches the Pi or the boards (`run.py`, every `deploy.py` subcommand) takes an exclusive lock on `~/bench/.lock` and waits up to `--lock-timeout` seconds (default 1800), reporting the holder every 30 s, so several agents can share the bench safely. `lock.py hold -- <cmd>` keeps the lock across several steps (children inherit `BENCH_LOCK_TOKEN` and re-enter it).
+
+`run.json` records `deployed` (the Pi's `.bench-deploy.json`: HEAD, branch, `git diff HEAD` sha256, dirty paths, worktree); `run.py` fails if it is missing. Agent usage guide: `.claude/skills/bench/SKILL.md`.
 
 ## Limits
 
