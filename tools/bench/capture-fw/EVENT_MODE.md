@@ -1,6 +1,6 @@
 # Event mode: sub-µs step timestamps
 
-Status: firmware event mode, `capture.py --events` / `run.py --events`, the SVE1 decoder (`tools/bench/capture_events.py`), analyzer ingest and `tools/bench/buzz.py` are implemented and passed Gates 0 and 1 (results below). The host step tap is designed but not built. Count mode (`SVC1`, 40 kHz i8 deltas) is unchanged; event mode is a second mode, chosen per run with the start command (`E` + both-edges mask).
+Status: event mode (firmware, `capture.py --events` / `run.py --events`, SVE1 decoder `tools/bench/capture_events.py`, analyzer ingest, `buzz.py`) passed Gates 0 and 1 and is merged. The host step tap (`rust/motion-core/src/pump/step_tap.rs`, `run.py --step-tap`) and the analyzer's `mcu_execution` section (`tools/bench/step_tap.py`, `tools/bench/mcu_execution.py`) are implemented and bench-validated (results below). Count mode (`SVC1`, 40 kHz i8 deltas) is unchanged; event mode is a second mode, chosen per run with the start command (`E` + both-edges mask).
 
 ## Goal
 
@@ -120,18 +120,15 @@ Full 64-bit extension happens on the F407, where the proof lives. The host only 
 
 It does not give absolute latency, because the counter origin is still unknown. This needs a small F401 change to enable MCO1 on PA8 (config validation already reserves the pin), plus the wire, which the user must add.
 
-## Host step tap (proposed, awaiting review; no production code yet)
+## Host step tap
 
-What it must give the analyzer: for every stepcompress oid, the exact F401 clock of every commanded step and the DIR in force, in the order the MCU executes them.
+Gives the analyzer, for every stepcompress oid, the exact F401 clock of every commanded step and the DIR in force, in execution order.
 
-- **Where.** Every classic step frame leaves the host through one closure per MCU: `host_io_egress` (`rust/motion-core/src/pump/stepcompress_sink.rs:117-125`), a `FrameEgress` that receives `(&'static str, args)` batches and calls `McuHostIo::send_args_batch`. The tap wraps that closure (`tapped_egress(inner, tap)`) and records a batch only after `inner` returns `Ok`, so it logs exactly what reached the wire. The sink's logic is untouched; with the tap off, the closure is not wrapped at all.
-- **What.** Fixed-size binary records `{u8 kind, u8 mcu, u16 oid, u64 host_monotonic_ns, payload}` for `queue_step` (interval u32, count u16, add i16), `queue_step_hp` (+add2, shift), `set_next_step_dir` (dir u8), `reset_step_clock` (clock u32), and the cut barrier (seq). A header record maps each oid to its motor (mcu id, axis, motor index, stepper name). The analyzer replays these with Klipper's semantics: `reset_step_clock` sets the oid's last clock, low 32 bits extended against the previous clock; then each `queue_step` emits `count` steps, `t += interval; interval += add`.
-- **Halts.** Reanchor cuts are already exact: `complete_cut` reads the MCU's executed count and fails on any mismatch (`stepcompress_sink.rs:1282-1316`), so every sent step executes. Halts that drop queued steps (homing trips, `stepper_halt_oid`, `abort_outbound`) are not replayable from the wire alone. The tap records them as `halt` records, and the analyzer fails loudly on any it finds. Bench prints don't home, so this covers the scope.
-- **Enable.** An env var, `SERVAL_STEP_TAP_DIR`, read once when the endpoint is built. `run.py --events` sets it through a klipper systemd drop-in, the same mechanism `--host-cpus` already uses, and fetches `step_tap.bin` with the logs. An unwritable dir fails at startup.
-- **Never blocks the pump.** Records go through a bounded channel to a writer thread. A full channel is a fatal `SendError` ("step tap fell behind"), never a drop. Load is about 10³–10⁴ frames/s at 24 B each, well under 1 MB/s to local disk.
-- **Analyzer.** Pair commanded and captured steps by index per motor; any count mismatch is fatal. Fit the F401→F407 map (piecewise linear, see below). Report execution lateness relative to its minimum, interval jitter, DIR setup times, and cross-check against `STEP_LOAD_LATE` events.
-
-Open questions for review: is an env var acceptable, or should it be a `[mcu]` option; and is the oid→stepper-name header enough, or should klippy's `config_stepper` lines be parsed instead?
+- **Where.** Every classic step frame leaves the host through one closure per MCU (`host_io_egress`, a `FrameEgress` calling `McuHostIo::send_args_batch`). When `SERVAL_STEP_TAP_DIR` is set, `build_endpoint` opens a `StepTap` and `StepcompressEndpoint::attach_tap` wraps that closure: a batch is recorded only after the inner send returns `Ok`. Unset, nothing is built and the egress is not wrapped; the endpoint's only other touch points are three `if let Some(tap)` checks (view intake, `abort_outbound`, `reset_motor_position`).
+- **Records** (`step_tap_mcu<N>.bin`): magic `SVTAP1\0\0`, then 32-byte records `kind u8 | flags u8 | u16 | oid u32 | the endpoint's projected mcu clock when recorded u64 | 16-byte payload`. Header: `mcu` (mcu id, clock freq) and one `lane` per oid (axis index, motor index within it, microstep distance, invert flag) — the mapping the Rust side holds; it carries no stepper names, so the analyzer maps axis index → capture role (a, b, z, e on the bench corexy) and the exact per-motor count match verifies it. Frames: `reset_step_clock`, `set_next_step_dir`, `queue_step`, `queue_step_hp`, `stepcompress_barrier`, `stepcompress_set_position`; `kalico_wire_probe` is skipped and any other name is fatal. `projection` records the epoch map `clock = offset + stream_t × freq` whenever an oid's views move to a new one (each reanchor), and `halt` marks `abort_outbound` / `reset_motor_position`.
+- **Fails loudly, never drops.** Records go through a bounded channel (65,536) to a writer thread that flushes after 100 ms idle. A full channel, a stopped writer or an unrecognised frame latches a fault that the next egress call returns as a fatal `SendError`.
+- **Replay** (`step_tap.py`): Klipper semantics from `src/stepper_classic.c` — `reset_step_clock` low 32 bits extended to the wrap nearest the record's projected clock; `queue_step` step k at `last + (k+1)·interval + add·k(k+1)/2`. High-precision frames are refused; a halt while that oid still had steps queued past the halt clock is fatal (the discarded tail is unknown).
+- **Analyzer** (`mcu_execution.py`, `analysis.json` → `mcu_execution`): pairs commanded and captured steps by index per motor (count mismatch fatal; DIR must agree up to one constant inversion), fits one robust piecewise-linear F401→F407 map (2 s knots) on *isolated* steps only, and reports lateness relative to its p0.1 floor (all / isolated / coincident), interval error, DIR setup, and `motion.step_load_late` events matched to the commanded step by `min_next + behind`.
 
 ## Risks and gates
 
@@ -156,6 +153,14 @@ Open questions for review: is an env var acceptable, or should it be a `[mcu]` o
 | **Total** | **≈7.5 agent-days** |
 | Clock wire: F401 MCO + TIM2 ETR + map | +1–1.5 d, after the user wires it |
 
+## Tap results (`--events --step-tap`, runs `20261101-233329` epochs, `233412` speed_ladder, `233610` voron_first_layers)
+
+- **Exact pairing.** Commanded and captured counts matched on every motor of every run (epochs a 100592, b 78250, z 1040, e 14227; speed_ladder a 1634822, b 1628256; first_layers a 888984, b 618418, z 880, e 193978), with DIR consistent throughout. All three runs also passed the ideal-reference checks (`ok`).
+- **Isolated steps** (no other motor's step commanded within 3 µs): lateness p50 8–32 ns, p99 0.66–1.55 µs, p99.9 0.77–2.4 µs, max 3.5–10 µs. Interval error p50 2–6 ns.
+- **Coincident steps are serialized.** When a and b steps are commanded within 1 µs the MCU fires a first and b about 1.15–1.65 µs later (speed_ladder: 716 k coincident pairs, b p50 1.65 µs, a p50 ≈ 0; epochs b p50 0.91 µs, z p50 2.8 µs). That is real step-time error the 25 µs bench could not see; pure X/Y moves on CoreXY hit it on every step. The first fit (all steps) was dragged by it (speed_ladder inliers 55%), which is why the map is now fitted on isolated steps.
+- **`STEP_LOAD_LATE`.** Only speed_ladder logged them: 5 events, all matched to commanded clocks where a and b coincide (the event carries no oid, so both are candidates), behind 1.9–6.9 µs, measured lateness of the matched steps 2.9–8.4 µs — each at or above its event's `behind`, consistent with the load-late clamp plus serialization.
+- **DIR setup** (DIR edge → next step): ≥1.59 ms on every run; reversals happen at rest, nowhere near the 2 µs settle.
+
 ## Recommendation
 
-**GO**, staged. Gates 0 and 1 passed. Build the commanded-schedule tap next. Without it, event mode mixes compression error (p99 µs-level, tail to 25 µs) with the 0.2–7 µs MCU execution errors that motivate this work. The clock wire is worth adding once the tap works. It improves trend and long-rest fidelity, but it is not needed for jitter.
+Event mode and the tap are done. Next candidates: the F401 clock wire (measured instead of fitted drift; one constant per run), and a look at the coincident-step serialization (p50 0.9–1.7 µs on the later motor), which is a firmware scheduling property worth deciding on deliberately.

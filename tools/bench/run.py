@@ -8,10 +8,12 @@ uv run python tools/bench/run.py <gcode> [--runs-dir ~/bench/runs]
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import time
 import urllib.parse
 import urllib.request
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 
@@ -26,9 +28,15 @@ from pi import (
     prepare_printer,
     printer_state,
     read_deployed,
+    restart_klipper,
     scp_from_pi,
+    ssh,
     upload,
 )
+
+STEP_TAP_ENV = "SERVAL_STEP_TAP_DIR"
+STEP_TAP_DROPIN = f"{throttle.DROPIN_DIR}/bench-step-tap.conf"
+PI_STEP_TAP_DIR = "/tmp/serval-step-tap"
 
 TERMINAL_STATES = {"complete", "error", "cancelled"}
 ACTIVE_STATES = {"printing", "paused"}
@@ -103,6 +111,25 @@ def cancel_active_print() -> None:
         http("POST", "/printer/print/cancel")
 
 
+@contextlib.contextmanager
+def step_tap_session(enabled: bool) -> Iterator[None]:
+    if not enabled:
+        yield
+        return
+    ssh(
+        f"rm -rf {PI_STEP_TAP_DIR} && mkdir -p {PI_STEP_TAP_DIR} && "
+        f"sudo mkdir -p {throttle.DROPIN_DIR} && printf "
+        f"'[Service]\\nEnvironment={STEP_TAP_ENV}={PI_STEP_TAP_DIR}\\n' "
+        f"| sudo tee {STEP_TAP_DROPIN} >/dev/null && sudo systemctl daemon-reload"
+    )
+    restart_klipper()
+    try:
+        yield
+    finally:
+        ssh(f"sudo rm -f {STEP_TAP_DROPIN} && sudo systemctl daemon-reload")
+        restart_klipper()
+
+
 def run(
     gcode: Path,
     runs_dir: Path,
@@ -110,7 +137,10 @@ def run(
     config: Path = REPO_CFG,
     host_throttle: throttle.Throttle | None = None,
     events: bool = False,
+    tap: bool = False,
 ) -> Path:
+    if tap and not events:
+        raise BenchError("--step-tap is only analyzable with --events")
     lines, stats = sanitize(gcode.read_text())
     run_dir = runs_dir / datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir.mkdir(parents=True)
@@ -129,9 +159,13 @@ def run(
         "sanitized_lines": len(lines),
         **stats,
     }
-    with throttle.throttled(host_throttle) as applied_throttle:
+    with (
+        throttle.throttled(host_throttle) as applied_throttle,
+        step_tap_session(tap),
+    ):
         summary["host_throttle"] = applied_throttle
-        execute(run_dir, remote_name, summary, timeout_s, events)
+        summary["step_tap"] = tap
+        execute(run_dir, remote_name, summary, timeout_s, events, tap)
     return run_dir
 
 
@@ -141,6 +175,7 @@ def execute(
     summary: dict,
     timeout_s: float,
     events: bool,
+    tap: bool,
 ) -> None:
     capture = Capture(run_dir, both_edges_mask=0, events=events)
     final: dict = {}
@@ -168,6 +203,8 @@ def execute(
 
     scp_from_pi(f"{PI_LOGS}/klippy.log", run_dir / "klippy.log")
     scp_from_pi(f"{PI_LOGS}/events", run_dir / "events", recursive=True)
+    if tap:
+        scp_from_pi(f"{PI_STEP_TAP_DIR}/step_tap_mcu*.bin", run_dir)
     summary.update(
         host_start=datetime.fromtimestamp(started).isoformat(),
         host_end=datetime.fromtimestamp(ended).isoformat(),
@@ -199,6 +236,11 @@ def main() -> None:
         action="store_true",
         help="capture in event mode (timestamp every edge)",
     )
+    parser.add_argument(
+        "--step-tap",
+        action="store_true",
+        help="record the host's commanded step frames (needs --events)",
+    )
     lock.add_timeout_argument(parser)
     args = parser.parse_args()
     with lock.bench_lock(args.lock_timeout):
@@ -210,6 +252,7 @@ def main() -> None:
                 args.config,
                 throttle.Throttle(args.host_cpus, args.host_max_mhz),
                 args.events,
+                args.step_tap,
             )
         )
 
