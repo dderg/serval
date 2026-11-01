@@ -24,6 +24,7 @@ from pi import (
     BenchError,
     http,
     prepare_printer,
+    read_deployed,
     scp_from_pi,
     upload,
 )
@@ -101,12 +102,14 @@ def run(
     (run_dir / "print.gcode").write_bytes(sanitized)
     (run_dir / "printer.cfg").write_text(config.read_text())
 
+    deployed = read_deployed()
     prepare_printer(config)
     remote_name = f"bench_{run_dir.name}.gcode"
     upload(remote_name, sanitized)
     summary: dict = {
         "source_gcode": str(gcode.resolve()),
         "config": str(config.resolve()),
+        "deployed": deployed,
         "sanitized_lines": len(lines),
         **stats,
     }

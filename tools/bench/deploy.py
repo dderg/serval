@@ -9,10 +9,12 @@ uv run python tools/bench/deploy.py config
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import lock
@@ -55,18 +57,42 @@ def require_verified(output: str) -> None:
         raise pi.BenchError(f"flash output does not contain {VERIFIED!r}")
 
 
-def local_files() -> list[str]:
+def git_output(tree: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=tree, check=True, capture_output=True, text=True
+    ).stdout
+
+
+def deploy_identity(tree: Path) -> dict:
+    diff = subprocess.run(
+        ["git", "diff", "HEAD"], cwd=tree, check=True, capture_output=True
+    ).stdout
+    dirty = [
+        line[3:]
+        for line in git_output(tree, "status", "--porcelain").splitlines()
+    ]
+    return {
+        "head": git_output(tree, "rev-parse", "HEAD").strip(),
+        "branch": git_output(tree, "rev-parse", "--abbrev-ref", "HEAD").strip(),
+        "diff_sha256": hashlib.sha256(diff).hexdigest(),
+        "dirty_paths": dirty,
+        "timestamp": datetime.now().astimezone().isoformat(),
+        "worktree": str(tree),
+    }
+
+
+def local_files(tree: Path) -> list[str]:
     out = subprocess.run(
         ["git", "ls-files", "-z", "-co", "--exclude-standard"],
-        cwd=REPO,
+        cwd=tree,
         check=True,
         capture_output=True,
     ).stdout
     names = out.decode().split("\0")
-    return sorted({n for n in names if n and os.path.lexists(REPO / n)})
+    return sorted({n for n in names if n and os.path.lexists(tree / n)})
 
 
-def rsync_changes(files: list[str]) -> list[str]:
+def rsync_changes(tree: Path, files: list[str]) -> list[str]:
     result = subprocess.run(
         [
             "rsync",
@@ -77,7 +103,7 @@ def rsync_changes(files: list[str]) -> list[str]:
             "./",
             f"{pi.PI_SSH}:klipper/",
         ],
-        cwd=REPO,
+        cwd=tree,
         input="\0".join(files).encode(),
         capture_output=True,
     )
@@ -91,9 +117,9 @@ def rsync_changes(files: list[str]) -> list[str]:
     return changed
 
 
-def cmd_sync() -> None:
-    files = local_files()
-    changed = rsync_changes(files)
+def cmd_sync(tree: Path) -> None:
+    files = local_files(tree)
+    changed = rsync_changes(tree, files)
     stale = sorted(
         set(pi.ssh("cd klipper && git ls-files").splitlines()) - set(files)
     )
@@ -114,6 +140,7 @@ def cmd_sync() -> None:
             raise pi.BenchError(
                 f"build-native.sh failed with exit code {build.returncode}"
             )
+    pi.write_deployed(deploy_identity(tree))
     if changed or stale:
         before = pi.klipper_pid()
         pi.restart_klipper()
@@ -177,7 +204,6 @@ def cmd_config() -> None:
 
 
 COMMANDS = {
-    "sync": cmd_sync,
     "flash-target": cmd_flash_target,
     "flash-capture": cmd_flash_capture,
     "config": cmd_config,
@@ -186,11 +212,15 @@ COMMANDS = {
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=COMMANDS)
+    parser.add_argument("command", choices=["sync", *COMMANDS])
+    parser.add_argument("--tree", type=Path, default=REPO)
     lock.add_timeout_argument(parser)
     args = parser.parse_args()
     with lock.bench_lock(args.lock_timeout):
-        COMMANDS[args.command]()
+        if args.command == "sync":
+            cmd_sync(args.tree.resolve())
+        else:
+            COMMANDS[args.command]()
 
 
 if __name__ == "__main__":

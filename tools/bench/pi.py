@@ -101,6 +101,24 @@ def firmware_restart() -> None:
     wait_ready()
 
 
+DEPLOY_RECORD = "klipper/.bench-deploy.json"
+
+
+def write_deployed(identity: dict) -> None:
+    result = subprocess.run(
+        ["ssh", PI_SSH, f"cat > {DEPLOY_RECORD}"],
+        input=json.dumps(identity, indent=2),
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise BenchError(f"writing {DEPLOY_RECORD} failed:\n{result.stderr}")
+
+
+def read_deployed() -> dict:
+    return json.loads(ssh(f"cat {DEPLOY_RECORD}"))
+
+
 def klipper_pid() -> int:
     return int(ssh("systemctl show -p MainPID --value klipper").strip())
 
