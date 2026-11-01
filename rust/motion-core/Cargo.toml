@@ -13,6 +13,7 @@ mcu-protocol = { path = "../mcu-protocol" }
 trajectory = { path = "../trajectory" }
 geometry = { path = "../geometry" }
 motion-pipeline = { path = "../motion-pipeline" }
+planner-config = { path = "../planner-config" }
 gcode = { path = "../gcode", optional = true }
 nurbs = { path = "../nurbs" }
 runtime-contract = { path = "../runtime-contract" }
@@ -27,6 +28,8 @@ thiserror = { workspace = true }
 test-support = ["gcode"]
 
 [dev-dependencies]
+config-doc = { path = "../config-doc" }
+planner-config = { path = "../planner-config", features = ["doc"] }
 ethercat-rt = { path = "../ethercat-rt" }
 proptest = "1"
 libm = { version = "0.2", default-features = false }

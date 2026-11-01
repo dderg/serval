@@ -146,28 +146,6 @@ fn open_canbus_with_retry(
     })
 }
 
-/// Backstop only. The continuity commit drains at every blend, so the buffer
-/// normally hovers near the open-tail length past the finality barrier; this
-/// force-drain to rest fires solely when no clean seam exists within reach.
-///
-/// It must sit well above the open tail a *legitimate* dense stream carries,
-/// or the backstop stops being a backstop: the open tail is the re-plan batch
-/// plus the brake-to-rest setback measured in moves, and at 600 mm/s with a
-/// `max_jerk` of 2·max_accel that setback is ~150 mm — about 300 moves
-/// of half-millimetre slicer output. At 128 the Voron 0 motion repro tripped
-/// it 41 times in 4673 moves, i.e. once per window: every look-ahead ended in
-/// a full stop. A `Move` is 192 bytes, so this ceiling costs 200 kB of window.
-const STREAM_MAX_BUFFER_MOVES: usize = 1024;
-/// Velocity-profile ODE/sampling tolerance for the streaming planner, in v²
-/// units. The offline default (1e-7) drives the adaptive RK4 to a precision far
-/// below the physical noise floor — ~0.015 mm/s velocity error at this value on
-/// a 300 mm/s move — at ~9× the host cost. Streaming runs on the Pi against a
-/// real-time playhead, so it is tuned to the hardware budget: at 1e-4 a 40-move
-/// burst plans in ~0.4 s instead of ~3.8 s, with trajectory time unchanged to
-/// five significant figures (the residual is non-monotonic integration noise,
-/// not a slower path).
-const STREAM_INTEGRATION_TOL: f64 = 1e-4;
-
 #[pyclass(name = "MotionEngine")]
 #[allow(missing_debug_implementations)]
 pub struct PyMotionEngine {

@@ -1,8 +1,5 @@
-use super::pipeline_setup::{
-    build_stream_config, report_ethercat_credit, require_unlimited_config_jerk,
-};
+use super::pipeline_setup::report_ethercat_credit;
 use motion_core::lock_ext::LockExt;
-use planner_config::PlannerConfig;
 
 #[test]
 fn ethercat_credit_waits_for_delivery_and_the_laggard_motor_playback() {
@@ -78,26 +75,4 @@ fn ethercat_credit_waits_for_delivery_and_the_laggard_motor_playback() {
         "two motor slots retire one logical view"
     );
     assert!(report_ethercat_credit(&tx, 4, &[2, 2], &filler, &[end]).is_err());
-}
-
-#[test]
-fn stream_config_accepts_unlimited_jerk() {
-    let mut cfg = PlannerConfig::default();
-    cfg.cartesian.max_jerk = f64::INFINITY;
-
-    assert!(build_stream_config(&cfg).is_ok());
-}
-
-#[test]
-fn stream_config_rejects_finite_jerk() {
-    let mut cfg = PlannerConfig::default();
-    cfg.cartesian.max_jerk = 100_000.0;
-
-    assert_eq!(
-        require_unlimited_config_jerk(cfg.cartesian.max_jerk),
-        Err(
-            "finite [printer] max_jerk is not supported by the continuous trajectory pipeline; set max_jerk: 0"
-        )
-    );
-    assert!(build_stream_config(&cfg).is_err());
 }

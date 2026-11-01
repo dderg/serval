@@ -1,11 +1,12 @@
-// Replays a gcode file through the production streaming pipeline (fit ->
-// planner -> lowerer -> shaper, with input shapers on X/Y and PA + smoothing
-// on the E follower) and reports producer throughput as a sliding-window
-// realtime factor over stream time. Bench-repro tool for the Trident cube
-// anchor underrun: finds the gcode region where the producer falls behind
-// playback and how far behind it runs.
+// Replays a gcode file through the production streaming pipeline, built from
+// a printer.cfg exactly as the live path builds it (stream config, post-
+// processor chains, per-move limits including the Z caps), and reports
+// producer throughput as a sliding-window realtime factor over stream time
+// plus the deepest run of moves absorbed without the planner committing.
 //
-//   cargo run --release -p motion-core --example gcode_replay_bench -- <file.gcode> [t_lo t_hi]
+//   cargo run --release -p motion-core --example gcode_replay_bench -- \
+//       <file.gcode> --config <printer.cfg> [t_lo t_hi] \
+//       [--min-worst-x <x>] [--max-held-moves <n>]
 //
 // With t_lo/t_hi only moves whose stream window overlaps [t_lo, t_hi] stream
 // seconds are interesting; the whole file still replays (stream time only
@@ -16,46 +17,50 @@ use std::fs;
 use std::process;
 use std::time::Instant;
 
-use geometry::{CornerFitConfig, VelocityLimits};
-use motion_core::seam_test_harness::parse_gcode_to_moves;
-use motion_pipeline::{Pipeline, StreamConfig, TrajectoryItem};
-use trajectory::{AxisChainSet, CompiledChain, PostProcessorInstance};
+use motion_core::live_config;
+use motion_core::seam_test_harness::parse_gcode_to_moves_with;
+use motion_pipeline::{Pipeline, TrajectoryItem};
 
-fn trident_chains() -> AxisChainSet {
-    let bell = |name: &str, smooth: f64| {
-        CompiledChain::compile(&[PostProcessorInstance::new(
-            name,
-            &trajectory::algos::SmoothBell,
-            vec![smooth],
-        )])
-        .expect("single post-processor always compiles")
-    };
-    let e = CompiledChain::compile(&[
-        PostProcessorInstance::new("pa", &trajectory::algos::LinearPressureAdvance, vec![0.04]),
-        PostProcessorInstance::new("st", &trajectory::algos::SmoothBell, vec![0.013]),
-    ])
-    .expect("pa + kernel compiles");
-    AxisChainSet {
-        chains: vec![
-            bell("is_x", 0.0105),
-            bell("is_y", 0.0155),
-            CompiledChain::default(),
-            e,
-        ],
-        followers: vec![(3, vec![0, 1, 2])],
-    }
+fn take_flag(args: &mut Vec<String>, flag: &str) -> Option<String> {
+    let i = args.iter().position(|a| a == flag)?;
+    args.remove(i);
+    Some(args.remove(i))
+}
+
+fn planner_config(path: &str) -> planner_config::PlannerConfig {
+    let text = fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("cannot read {path}: {e}");
+        process::exit(1);
+    });
+    let doc = config_doc::Document::parse(&text, path).unwrap_or_else(|e| {
+        eprintln!("cannot parse {path}: {e}");
+        process::exit(1);
+    });
+    let (settings, _) = planner_config::from_doc::read_motion_settings(&doc).unwrap_or_else(|e| {
+        eprintln!("{path}: {e}");
+        process::exit(1);
+    });
+    planner_config::from_doc::planner_config_from_settings(&settings).unwrap_or_else(|e| {
+        eprintln!("{path}: {e}");
+        process::exit(1);
+    })
 }
 
 fn main() {
     let mut args: Vec<String> = env::args().collect();
-    let min_worst_x = args.iter().position(|a| a == "--min-worst-x").map(|i| {
-        args.remove(i);
-        args.remove(i)
-            .parse::<f64>()
-            .expect("--min-worst-x takes a number")
-    });
+    let min_worst_x = take_flag(&mut args, "--min-worst-x")
+        .map(|v| v.parse::<f64>().expect("--min-worst-x takes a number"));
+    let max_held_moves = take_flag(&mut args, "--max-held-moves")
+        .map(|v| v.parse::<u64>().expect("--max-held-moves takes a count"));
+    let Some(config_path) = take_flag(&mut args, "--config") else {
+        eprintln!(
+            "usage: gcode_replay_bench <in.gcode> --config <printer.cfg> [t_lo t_hi] \
+             [--min-worst-x <x>] [--max-held-moves <n>]"
+        );
+        process::exit(1);
+    };
     if args.len() < 2 {
-        eprintln!("usage: gcode_replay_bench <in.gcode> [t_lo t_hi] [--min-worst-x <x>]");
+        eprintln!("usage: gcode_replay_bench <in.gcode> --config <printer.cfg> [t_lo t_hi]");
         process::exit(1);
     }
     let source = fs::read_to_string(&args[1]).unwrap_or_else(|e| {
@@ -69,44 +74,53 @@ fn main() {
         )
     });
 
-    // Trident bench printer.cfg limits.
-    let corner_deviation = geometry::corner_deviation_from_scv(85.1, 30_000.0);
-    let limits = VelocityLimits::try_new(1_000.0, 30_000.0, corner_deviation, f64::INFINITY)
-        .expect("trident limits");
-    let cfg = StreamConfig {
-        corner: CornerFitConfig::default(),
-        integration_tol: 1e-4,
-        max_extrude_only_velocity_mm_s: f64::INFINITY,
-        max_extrude_only_accel_mm_s2: f64::INFINITY,
-        fit_tol_mm: 0.005,
-        fit_tol_accel_mm_s2: 50.0,
-        max_buffer_moves: 512,
-        limits,
-    };
+    let planner = planner_config(&config_path);
+    let cfg = live_config::stream_config(&planner).unwrap_or_else(|e| {
+        eprintln!("{config_path}: {e}");
+        process::exit(1);
+    });
+    let chains = planner.compile_active_chains().unwrap_or_else(|e| {
+        eprintln!("{config_path}: {e}");
+        process::exit(1);
+    });
+    let moves = parse_gcode_to_moves_with(&source, |delta| {
+        live_config::move_limits(&planner, delta).expect("config limits are valid")
+    });
 
     let wall = Instant::now();
-    let mut pipeline = Pipeline::new(cfg, trident_chains(), vec![0.0; 4], 0.0);
+    let mut pipeline = Pipeline::new(cfg, chains, vec![0.0; 4], 0.0);
     let mut arrivals: Vec<(f64, f64)> = Vec::new();
+    let emitted = std::cell::Cell::new(0usize);
     let mut output = |item| {
         if let TrajectoryItem::Seg(seg) = item {
+            emitted.set(emitted.get() + 1);
             arrivals.push((wall.elapsed().as_secs_f64(), seg.t_end));
         }
         true
     };
 
     let mut submitted = 0u64;
-    for m in parse_gcode_to_moves(&source, limits) {
+    let mut held = 0u64;
+    let mut deepest_held = 0u64;
+    for m in moves {
+        let emitted_before = emitted.get();
         if !pipeline.feed(m.into(), &mut output) {
             eprintln!("pipeline input closed at move {submitted}");
             process::exit(1);
         }
         submitted += 1;
+        held = if emitted.get() > emitted_before {
+            0
+        } else {
+            held + 1
+        };
+        deepest_held = deepest_held.max(held);
     }
     assert!(pipeline.finish(&mut output));
     let wall_s = wall.elapsed().as_secs_f64();
     let stream_s = arrivals.last().map_or(0.0, |&(_, t)| t);
     println!(
-        "moves={submitted} segments={} stream_secs={stream_s:.1} wall_secs={wall_s:.1} overall_x={:.2}",
+        "moves={submitted} segments={} stream_secs={stream_s:.1} wall_secs={wall_s:.1} overall_x={:.2} deepest_held_moves={deepest_held}",
         arrivals.len(),
         stream_s / wall_s
     );
@@ -159,5 +173,15 @@ fn main() {
             process::exit(1);
         }
         println!("budget ok: worst window {worst:.2}x >= {floor:.2}x floor");
+    }
+    if let Some(ceiling) = max_held_moves {
+        if deepest_held > ceiling {
+            eprintln!(
+                "FAIL: the planner absorbed {deepest_held} moves in a row without committing \
+                 (ceiling {ceiling})"
+            );
+            process::exit(1);
+        }
+        println!("commit flow ok: deepest held run {deepest_held} <= {ceiling} moves");
     }
 }

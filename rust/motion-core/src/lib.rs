@@ -7,6 +7,7 @@ pub mod feed_wakeup;
 pub mod fence;
 pub mod homing;
 pub mod kinematics;
+pub mod live_config;
 pub mod lock_ext;
 pub mod mcu_config;
 pub mod motion_history;
