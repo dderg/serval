@@ -1,0 +1,4 @@
+[toolchain]
+channel = "1.99.1"
+targets = ["thumbv7em-none-eabihf"]
+components = ["clippy", "rustfmt"]
