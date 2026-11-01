@@ -663,6 +663,7 @@ dependencies = [
 name = "motion-core"
 version = "0.1.0"
 dependencies = [
+ "config-doc",
  "crossbeam-channel",
  "ethercat-rt",
  "ethercat-setpoint",
@@ -675,6 +676,7 @@ dependencies = [
  "motion-core",
  "motion-pipeline",
  "nurbs",
+ "planner-config",
  "proptest",
  "runtime-contract",
  "step-shim",

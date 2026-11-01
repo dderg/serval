@@ -1,10 +1,9 @@
 use super::{
     Arc, Duration, ETHERCAT_CLOCK_FREQ_HZ, HashMap, HashSet, HomingRun, HomingState, Instant,
     McuAxisConfig, McuConnection, McuHandle, McuHostIo, McuSerialConn, McuTopologyInput, Mutex,
-    PyMotionEngine, PyResult, PyRuntimeError, PyValueError, STREAM_INTEGRATION_TOL,
-    STREAM_MAX_BUFFER_MOVES, abort_after_tracing_appender_drains, arm_endpoint_death_watchdog,
-    build_mcu_configs, collect_motor_positions_inner, dispatch_endstop_trip,
-    query_ethercat_runtime_caps, report_endpoint_death,
+    PyMotionEngine, PyResult, PyRuntimeError, PyValueError, abort_after_tracing_appender_drains,
+    arm_endpoint_death_watchdog, build_mcu_configs, collect_motor_positions_inner,
+    dispatch_endstop_trip, query_ethercat_runtime_caps, report_endpoint_death,
 };
 use motion_core::lock_ext::LockExt;
 fn escalate_endpoint_death(latch: &Arc<Mutex<HashMap<u32, String>>>, mcu_id: u32, reason: &str) {
@@ -33,42 +32,6 @@ fn abort_on_drip_stall(msg: String) {
          aborting klippy so systemd restarts it"
     );
     abort_after_tracing_appender_drains();
-}
-
-pub(super) fn require_unlimited_config_jerk(max_jerk: f64) -> Result<(), &'static str> {
-    if max_jerk.is_finite() {
-        return Err(
-            "finite [printer] max_jerk is not supported by the continuous trajectory pipeline; set max_jerk: 0",
-        );
-    }
-    Ok(())
-}
-
-pub(super) fn build_stream_config(
-    cfg: &planner_config::PlannerConfig,
-) -> PyResult<motion_pipeline::StreamConfig> {
-    let cart = cfg.cartesian;
-    require_unlimited_config_jerk(cart.max_jerk).map_err(PyValueError::new_err)?;
-    let max_extrude_only_accel_mm_s2 = cfg.max_extrude_only_accel.unwrap_or(f64::INFINITY);
-    Ok(motion_pipeline::StreamConfig {
-        corner: geometry::CornerFitConfig {
-            ramp_accel_budget_mm_s2: max_extrude_only_accel_mm_s2,
-            ..cfg.corner
-        },
-        integration_tol: STREAM_INTEGRATION_TOL,
-        max_extrude_only_velocity_mm_s: cfg.max_extrude_only_velocity.unwrap_or(f64::INFINITY),
-        max_extrude_only_accel_mm_s2,
-        fit_tol_mm: cfg.fit_tolerance_mm,
-        fit_tol_accel_mm_s2: cfg.fit_tolerance_accel_mm_s2,
-        max_buffer_moves: STREAM_MAX_BUFFER_MOVES,
-        limits: geometry::VelocityLimits::try_new(
-            cart.max_velocity,
-            cart.max_accel,
-            cart.corner_deviation,
-            f64::INFINITY,
-        )
-        .map_err(PyRuntimeError::new_err)?,
-    })
 }
 
 impl PyMotionEngine {
@@ -512,7 +475,8 @@ impl PyMotionEngine {
         let resources =
             self.build_execution_resources(mcu_configs, host_ios, ec_conns, &pump_tx)?;
 
-        let stream_cfg = build_stream_config(cfg)?;
+        let stream_cfg =
+            motion_core::live_config::stream_config(cfg).map_err(PyValueError::new_err)?;
         let axis_chains = cfg
             .compile_active_chains()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;

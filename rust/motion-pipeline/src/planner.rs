@@ -175,61 +175,23 @@ impl Planner {
         self.emit(n, &profile, output)
     }
 
-    /// Emit the prefix up to the furthest-forward clean seam that is inside
-    /// the finality barrier and clear of the brake-to-rest setback.
+    /// Emit the prefix up to the furthest-forward clean seam inside the
+    /// finality barrier. Seams at or before the barrier sit on their forward
+    /// ceiling, which appended moves can only leave unchanged, and every
+    /// committed body is reconstructed from its own two seam speeds, so the
+    /// committed prefix is the one a single window would plan.
     fn emit_committable(&mut self, output: &mut impl FnMut(PlannedItem) -> bool) -> bool {
-        let horizon = self.terminal_independent_seam();
         let profile = self.plan_selected(|barrier| {
-            let mut chosen = 0usize;
-            for i in 1..=barrier.min(horizon) {
-                if self.is_clean_seam(i) {
-                    chosen = i;
-                }
-            }
-            chosen
+            (1..=barrier)
+                .rev()
+                .find(|&i| self.is_clean_seam(i))
+                .unwrap_or(0)
         });
         let chosen = profile.moves.len();
         if chosen == 0 {
             return true;
         }
         self.emit(chosen, &profile, output)
-    }
-
-    /// Furthest-forward seam whose emitted bodies are terminal-independent.
-    ///
-    /// The lowering reconstructs each move's velocity body against its run
-    /// terminal, so a move within one braking distance of the window's
-    /// fictional rest has its body shaped by that fiction and an appended
-    /// move would change it. That braking rides the *open tail* — the moves
-    /// beyond the seam — so the tail's own peak feedrate and tightest
-    /// acceleration budget are what set its length. Reading them off the whole
-    /// window instead makes one already-passed travel move dictate the
-    /// setback for every seam behind it, which on a print that interleaves
-    /// 600 mm/s travels with 300 mm/s extrusions inflates the held-back tail
-    /// ~3x and, with it, the re-plan window every arriving move is charged
-    /// for. `v · t_brake` still over-bounds the true `∫v dt`, so the held-back
-    /// tail keeps its safety factor; it is now just measured where it applies.
-    fn terminal_independent_seam(&self) -> usize {
-        let mut arc = 0.0_f64;
-        let mut v_peak = 0.0_f64;
-        let mut accel = f64::INFINITY;
-        for i in (1..self.moves.len()).rev() {
-            let m = &self.moves[i];
-            arc += m.segment.s_len();
-            v_peak = v_peak.max(m.feedrate_mm_s.min(m.limits.max_velocity_mm_s));
-            accel = accel.min(m.limits.accel_mm_s2);
-            let brake_time = if v_peak <= 0.0 {
-                0.0
-            } else if accel <= 0.0 {
-                f64::INFINITY
-            } else {
-                v_peak / accel
-            };
-            if arc >= v_peak * brake_time {
-                return i;
-            }
-        }
-        0
     }
 
     fn emit(

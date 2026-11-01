@@ -1,5 +1,5 @@
-//! The commit horizon: how far into its window the streaming planner may cut,
-//! and whether cutting there still reproduces a single-window plan.
+//! How far into its window the streaming planner may cut, and whether
+//! cutting there still reproduces a single-window plan.
 
 use geometry::segment::SourceRange;
 use geometry::{CornerFitConfig, MoveContext, VelocityLimits, line_move};
@@ -143,19 +143,36 @@ fn streamed_commits_reproduce_a_single_window_plan() {
             .collect::<Vec<_>>()
     };
 
+    assert_plans_match(&streamed, &whole);
+}
+
+const PLAN_MATCH_TOL: f64 = 1e-9;
+
+fn assert_plans_match(streamed: &[PlannedMove], whole: &[PlannedMove]) {
     assert_eq!(streamed.len(), whole.len(), "same moves, different count");
-    let worst = streamed
-        .iter()
-        .zip(&whole)
-        .map(|(a, b)| (a.velocity.exit_v - b.velocity.exit_v).abs())
-        .fold(0.0_f64, f64::max);
-    assert!(
-        worst < 1.0,
-        "streaming cut at the tail-local horizon changed a seam velocity by \
-         {worst} mm/s against the single-window plan — a horizon cut short enough \
-         to expose the fictional terminal rest would show the whole braking ramp, \
-         tens of mm/s, not the iterative velocity stage's own residual"
-    );
+    for (index, (a, b)) in streamed.iter().zip(whole).enumerate() {
+        let (a, b) = (&a.velocity, &b.velocity);
+        for (what, x, y) in [
+            ("entry_v", a.entry_v, b.entry_v),
+            ("exit_v", a.exit_v, b.exit_v),
+            ("peak_v", a.peak_v, b.peak_v),
+        ] {
+            assert!(
+                (x - y).abs() <= PLAN_MATCH_TOL,
+                "move {index}: streamed {what} {x} differs from the single-window {y} — \
+                 the committed prefix depended on moves not yet seen"
+            );
+        }
+        assert_eq!(a.phases.len(), b.phases.len(), "move {index}: phase count");
+        for (phase, (p, q)) in a.phases.iter().zip(&b.phases).enumerate() {
+            assert!(
+                (p.dt - q.dt).abs() <= PLAN_MATCH_TOL,
+                "move {index} phase {phase}: streamed dt {} differs from the single-window {}",
+                p.dt,
+                q.dt
+            );
+        }
+    }
 }
 
 const RAMP_MM: f64 = 40.0;
@@ -265,9 +282,8 @@ fn interior_min_velocity(plan: &[PlannedMove]) -> f64 {
 
 #[test]
 fn streamed_speed_ramp_holds_its_plateaus() {
-    // 100 moves is many commit horizons' worth, so the stream really does cut
-    // and warm-start repeatedly instead of resolving as one window.
-    let moves = speed_ramp(20);
+    let cycles_cutting_many_windows = 20;
+    let moves = speed_ramp(cycles_cutting_many_windows);
     let streamed = stream_ramp(&moves);
     let whole = plan_one_window(&moves);
     assert_eq!(streamed.len(), moves.len());
@@ -287,4 +303,135 @@ fn streamed_speed_ramp_holds_its_plateaus() {
          held {whole_min} mm/s — a commit seam is braking toward its own \
          fictional terminal rest"
     );
+}
+
+const LAYER_ACCEL: f64 = 10_000.0;
+const LAYER_TRAVEL_V: f64 = 1_000.0;
+const LAYER_PRINT_V: f64 = 432.0;
+const LAYER_PRINT_MM: f64 = 0.5;
+const LAYER_PRINT_MOVES: usize = 60;
+const LAYER_TRAVEL_MM: f64 = 2.0;
+const LAYER_Z_STEP_MM: f64 = 0.2;
+const MAX_Z_V: f64 = 25.0;
+const MAX_Z_ACCEL: f64 = 100.0;
+
+fn layer_limits() -> VelocityLimits {
+    VelocityLimits::try_new(LAYER_TRAVEL_V, LAYER_ACCEL, 0.04, JERK).unwrap()
+}
+
+fn layer_change_limits() -> VelocityLimits {
+    VelocityLimits::try_new(MAX_Z_V, MAX_Z_ACCEL, 0.04, JERK).unwrap()
+}
+
+fn layer_config() -> StreamConfig {
+    StreamConfig {
+        limits: layer_limits(),
+        ..config(4096)
+    }
+}
+
+/// Short dense layers of fast print moves and a 1000 mm/s travel, joined by
+/// the Z-limited layer change a slicer emits at full travel feedrate — the
+/// live path caps that move to `max_z_velocity` / `max_z_accel`.
+fn dense_layers(layers: usize) -> Vec<geometry::Move> {
+    let mut moves = Vec::new();
+    let mut at = [0.0_f64, 0.0, 0.0];
+    let mut push = |at: &mut [f64; 3], d: [f64; 3], feed: f64, limits: VelocityLimits| {
+        let line_no = moves.len() as u32;
+        let ctx = MoveContext {
+            extruder_axis: 3,
+            feedrate_mm_s: feed,
+            limits,
+            source: SourceRange {
+                start_line: line_no,
+                end_line: line_no,
+            },
+        };
+        let end = [at[0] + d[0], at[1] + d[1], at[2] + d[2]];
+        moves.push(line_move(*at, end, 0.0, ctx).unwrap());
+        *at = end;
+    };
+    for _ in 0..layers {
+        for _ in 0..LAYER_PRINT_MOVES {
+            push(
+                &mut at,
+                [LAYER_PRINT_MM, 0.0, 0.0],
+                LAYER_PRINT_V,
+                layer_limits(),
+            );
+        }
+        push(
+            &mut at,
+            [LAYER_TRAVEL_MM, 0.0, 0.0],
+            LAYER_TRAVEL_V,
+            layer_limits(),
+        );
+        push(
+            &mut at,
+            [0.004, 0.0, LAYER_Z_STEP_MM],
+            LAYER_TRAVEL_V,
+            layer_change_limits(),
+        );
+    }
+    moves
+}
+
+fn plan_layers(moves: &[geometry::Move], cut: bool) -> (Vec<PlannedMove>, usize) {
+    let mut out = Vec::new();
+    let mut deepest_window = 0usize;
+    let mut planner = Planner::new(layer_config());
+    for (fed, m) in moves.iter().enumerate() {
+        let mut collect = |item| {
+            out.push(item);
+            true
+        };
+        assert!(
+            planner.feed(StreamInput::Move(m.clone()), &mut collect),
+            "closed"
+        );
+        if !cut {
+            planner.moves_since_plan = 0;
+        }
+        let emitted = out
+            .iter()
+            .filter(|item| matches!(item, PlannedItem::Move(_)))
+            .count();
+        deepest_window = deepest_window.max(fed + 1 - emitted);
+    }
+    let mut collect = |item| {
+        out.push(item);
+        true
+    };
+    assert!(planner.finish(&mut collect), "closed");
+    let planned = out
+        .into_iter()
+        .filter_map(|item| match item {
+            PlannedItem::Move(m) => Some(m),
+            PlannedItem::Drain | PlannedItem::Control(_) => None,
+        })
+        .collect();
+    (planned, deepest_window)
+}
+
+#[test]
+fn a_z_limited_layer_change_among_fast_travels_keeps_commits_flowing() {
+    let layers = 40;
+    let moves = dense_layers(layers);
+    let (_, deepest_window) = plan_layers(&moves, true);
+    let layer_moves = LAYER_PRINT_MOVES + 2;
+    assert!(
+        deepest_window <= 2 * layer_moves + 64,
+        "the planner held {deepest_window} of {} moves uncommitted; a layer is \
+         {layer_moves} moves, so commits are waiting on the layer change's \
+         Z acceleration to brake the travels' speed instead of its own",
+        moves.len()
+    );
+}
+
+#[test]
+fn streamed_layer_commits_reproduce_a_single_window_plan() {
+    let moves = dense_layers(12);
+    let (streamed, _) = plan_layers(&moves, true);
+    let (whole, _) = plan_layers(&moves, false);
+    assert_plans_match(&streamed, &whole);
 }

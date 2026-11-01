@@ -177,6 +177,14 @@ impl PosTracker {
 
 #[must_use]
 pub fn parse_gcode_to_moves(source: &str, limits: VelocityLimits) -> Vec<Move> {
+    parse_gcode_to_moves_with(source, |_| limits)
+}
+
+#[must_use]
+pub fn parse_gcode_to_moves_with(
+    source: &str,
+    limits_for: impl Fn([f64; 3]) -> VelocityLimits,
+) -> Vec<Move> {
     let mut p = PosTracker::new();
     let mut moves = Vec::new();
     let mut submitted: u32 = 0;
@@ -206,7 +214,7 @@ pub fn parse_gcode_to_moves(source: &str, limits: VelocityLimits) -> Vec<Move> {
                     [dx, dy, dz],
                     EXTRUDER_AXIS,
                     de,
-                    limits,
+                    limits_for([dx, dy, dz]),
                     p.feed,
                     submitted,
                 ) {
