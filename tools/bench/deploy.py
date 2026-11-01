@@ -4,6 +4,7 @@ uv run python tools/bench/deploy.py sync
 uv run python tools/bench/deploy.py flash-target
 uv run python tools/bench/deploy.py flash-capture
 uv run python tools/bench/deploy.py config
+uv run python tools/bench/deploy.py reset-target
 """
 
 from __future__ import annotations
@@ -174,6 +175,17 @@ def cmd_flash_target() -> None:
     print("target flashed, printer ready")
 
 
+def cmd_reset_target() -> None:
+    output = pi.ssh(
+        "openocd -f ~/klipper/tools/bench/openocd-target.cfg"
+        ' -c "init; reset; exit" 2>&1'
+    )
+    print(output)
+    wait_pi_serial()
+    pi.restart_klipper()
+    print("target reset, printer ready")
+
+
 def cmd_flash_capture() -> None:
     env = {**os.environ, "PATH": f"{CARGO_BIN}:{os.environ['PATH']}"}
     run_checked(["cargo", "build", "--release"], cwd=CAPTURE_FW, env=env)
@@ -207,6 +219,7 @@ def cmd_config() -> None:
 COMMANDS = {
     "flash-target": cmd_flash_target,
     "flash-capture": cmd_flash_capture,
+    "reset-target": cmd_reset_target,
     "config": cmd_config,
 }
 
