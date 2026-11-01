@@ -270,37 +270,95 @@ fn rail_laws() -> Vec<ScalarLaw> {
     laws
 }
 
+fn assert_carrying_matches_recomputing(law: &ScalarLaw, v0: f64, ds: f64) {
+    let bits = |knots: &Option<Arc<[RailKnot]>>| {
+        knots.as_ref().map(|knots| {
+            knots
+                .iter()
+                .map(|k| {
+                    [
+                        k.t.to_bits(),
+                        k.s.to_bits(),
+                        k.v.to_bits(),
+                        k.rise.to_bits(),
+                    ]
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(
+        bits(&super::integrate_rail_arc(law, v0, ds)),
+        bits(&integrate_rail_arc_recomputing_step_ends(law, v0, ds)),
+        "{law:?} from v0={v0} over ds={ds}"
+    );
+}
+
 #[test]
 fn carrying_each_step_end_into_the_next_step_changes_no_knot() {
     let mut compared = 0usize;
     for law in rail_laws() {
         for &v0 in &[0.0, 1e-6, 0.5, 30.0, 250.0, 1200.0] {
             for &ds in &[0.0, 1e-5, 3e-4, 0.01, 0.7, 12.0] {
-                let carried = super::integrate_rail_arc(&law, v0, ds);
-                let recomputed = integrate_rail_arc_recomputing_step_ends(&law, v0, ds);
-                let bits = |knots: &Option<Arc<[RailKnot]>>| {
-                    knots.as_ref().map(|knots| {
-                        knots
-                            .iter()
-                            .map(|k| {
-                                [
-                                    k.t.to_bits(),
-                                    k.s.to_bits(),
-                                    k.v.to_bits(),
-                                    k.rise.to_bits(),
-                                ]
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                };
-                assert_eq!(
-                    bits(&carried),
-                    bits(&recomputed),
-                    "{law:?} from v0={v0} over ds={ds}"
-                );
+                assert_carrying_matches_recomputing(&law, v0, ds);
                 compared += 1;
             }
         }
     }
     assert!(compared > 1000);
+}
+
+/// Steps of the quadratically graded grid near an apex whose `s + h` lands
+/// on the next knot, and those that miss it by an ulp, over one span.
+fn apex_grid_landings(ds: f64) -> (usize, usize) {
+    let n = ((ds / RAIL_KNOT_DS).ceil() as usize).clamp(RAIL_KNOTS_MIN, RAIL_KNOTS_MAX);
+    let arc_at = |k: usize| {
+        let u = k as f64 / n as f64;
+        ds * u * u
+    };
+    (0..n).fold((0, 0), |(lands, misses), i| {
+        let (s, s_next) = (arc_at(i), arc_at(i + 1));
+        if s + (s_next - s) == s_next {
+            (lands + 1, misses)
+        } else {
+            (lands, misses + 1)
+        }
+    })
+}
+
+#[test]
+fn an_apex_graded_step_ending_off_its_knot_recomputes_the_next_start() {
+    let (accel, kappa0, v0) = (5000.0, 2.0, 49.9);
+    let apex_spans = [
+        0.000_401_859_266_767_729_34,
+        0.039_314_775_273_804_545,
+        0.152_112_117_011_757_6,
+    ];
+    let (mut lands, mut misses) = (0, 0);
+    for &ds in &apex_spans {
+        let (span_lands, span_misses) = apex_grid_landings(ds);
+        lands += span_lands;
+        misses += span_misses;
+    }
+    assert!(
+        lands > 0 && misses > 0,
+        "the sweep must exercise both reused and recomputed step starts \
+         ({lands} landing, {misses} missing)"
+    );
+    for &sigma in &[0.0, 0.3, -4.0] {
+        for brake in [false, true] {
+            let law = ScalarLaw::DiskRail {
+                accel,
+                kappa0,
+                sigma,
+                brake,
+            };
+            assert!(
+                law.accel_at(0.0, v0).abs() < 0.1 * accel,
+                "{law:?} must start near its apex to grade the grid quadratically"
+            );
+            for &ds in &apex_spans {
+                assert_carrying_matches_recomputing(&law, v0, ds);
+            }
+        }
+    }
 }
