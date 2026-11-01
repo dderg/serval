@@ -46,20 +46,22 @@ uv run python tools/bench/suite.py [--quick] [--expect-fail NAME]  # regression 
 uv run python tools/bench/deploy.py flash-target   # build F401 fw (f401.config), flash via Pi SWD, restart klippy
 uv run python tools/bench/deploy.py flash-capture  # build capture-fw, flash F407 via ST-Link
 uv run python tools/bench/deploy.py config         # validate + push printer.cfg, FIRMWARE_RESTART
-uv run python tools/bench/run.py <gcode> [--runs-dir ~/bench/runs] [--timeout 1800]
+uv run python tools/bench/run.py <gcode> [--runs-dir ~/bench/runs] [--timeout 1800] [--events]
 uv run python tools/bench/analyze.py <run_dir> [--gap S]
-uv run python tools/bench/capture.py --help        # standalone capture
+uv run python tools/bench/capture.py --help        # standalone capture (--events for event mode)
+uv run python tools/bench/buzz.py --motor a --steps 2000 --period-us 100  # event-mode calibration against busy-waited DIAG_STEPPER_BUZZ steps
+uv run python tools/bench/cdc_throughput.py --seconds 60  # capture-board USB throughput probe (firmware mode "T"; Gate 0 of capture-fw/EVENT_MODE.md)
 ```
 
-`run.py` sanitizes the gcode (allowlist; unknown commands raise), pushes config, restarts, uploads, captures, prints, fetches logs. Test gcodes: `tools/bench/gcode/` (`gen_speed_ladder.py` regenerates the speed/extrude ladders). `--config tools/bench/configs/<name>.cfg` runs with an alternate printer config. `--host-cpus N --host-max-mhz M` emulate a weaker host (klipper CPUAffinity drop-in + cpufreq `scaling_max_freq`), always restored afterwards, and are recorded in `run.json`.
+`run.py` sanitizes the gcode (allowlist; unknown commands raise), pushes config, restarts, uploads, captures, prints, fetches logs, and cancels the print if the capture or the print fails. Test gcodes: `tools/bench/gcode/` (`gen_speed_ladder.py` regenerates the speed/extrude ladders). `--config tools/bench/configs/<name>.cfg` runs with an alternate printer config. `--host-cpus N --host-max-mhz M` emulate a weaker host (klipper CPUAffinity drop-in + cpufreq `scaling_max_freq`), always restored afterwards, and are recorded in `run.json`. `--events` captures in event mode.
 
 ## Run dir (`~/bench/runs/<YYYYmmdd-HHMMSS>/`)
 
-`print.gcode`, `printer.cfg`, `capture.bin` (int8, N×4, one row per 25 µs tick; channels a b z e; + = DIR high), `capture.json`, `klippy.log`, `events/` (structured logs), `run.json`, and after analysis `analysis.json`, `*.png`.
+`print.gcode`, `printer.cfg`, `capture.bin` (count mode: int8, N×4, one row per 25 µs tick; channels a b z e; + = DIR high) or `events.bin` (event mode), `capture.json` (`mode`, `tick_hz`), `klippy.log`, `events/` (structured logs), `run.json`, and after analysis `analysis.json`, `*.png`.
 
 ## Capture
 
-40 kHz snapshots, i8 step delta per channel. Wire protocol: docstring of `capture.py`. Latched faults (DIR overcapture, delta overflow, DIR desync, ring overflow) are raised by the host reader; host stall timeout 1 s.
+Count mode: 40 kHz snapshots, i8 step delta per channel. Event mode: every STEP and DIR edge timestamped at 84 MHz (11.9 ns) by input capture with DMA, decoded by `capture_events.py`; the analyzer uses the exact times and bins them for the count checks. Design, proofs and gate results: `capture-fw/EVENT_MODE.md`. Wire protocol: docstring of `capture.py`. Latched faults are raised by the host reader; host stall timeout 1 s.
 
 ## Analyzer
 
@@ -79,7 +81,7 @@ Any tool that touches the Pi or the boards (`run.py`, every `deploy.py` subcomma
 
 - No endstops, heaters or TMC wired: no homing (`run.py` uses `SET_KINEMATIC_POSITION`).
 - klippy takes the non-TMC single-edge 2 µs step path, not the TMC both-edge path real printers use.
-- 25 µs time resolution.
+- 25 µs time resolution in count mode; 11.9 ns in event mode, where compression error against the ideal reference (p99 ~3–6 µs, tail to the 25 µs `stepcompress_max_error`) dominates until the host step tap exists.
 - Pi 5 is faster than the Pi 4 printers.
 
 ## Planned wiring (not done)

@@ -30,6 +30,7 @@ for _path in (REPO_ROOT / "snapshots", REPO_ROOT / "klippy", REPO_ROOT):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
+import capture_events  # noqa: E402
 import harness  # noqa: E402
 
 CAPTURE_ROLES = ("a", "b", "z", "e")
@@ -152,6 +153,7 @@ class StepEvents:
 class Capture:
     tick_hz: float
     deltas: np.ndarray
+    exact_steps: list[tuple[np.ndarray, np.ndarray]] | None = None
 
     @property
     def duration_s(self) -> float:
@@ -276,6 +278,16 @@ def load_capture(run_dir: Path) -> Capture:
         raise AnalysisError(
             f"capture.json channel_count={channels}, analyzer expects "
             f"{len(CAPTURE_ROLES)} ({', '.join(CAPTURE_ROLES)})"
+        )
+    if meta.get("mode", "counts") == "events":
+        events = capture_events.load(run_dir)
+        return Capture(
+            float(capture_events.TICK_HZ),
+            events.binned_deltas(),
+            [
+                (c.step_ticks / float(meta["tick_hz"]), c.step_signs())
+                for c in events.channels
+            ],
         )
     raw = np.fromfile(run_dir / "capture.bin", dtype=np.int8)
     if raw.size % channels:
@@ -690,6 +702,15 @@ def build_reference(job: Job) -> Reference:
 def capture_steps(
     capture: Capture, motor: Motor, start_count: int
 ) -> StepEvents:
+    if capture.exact_steps is not None:
+        times, signs = capture.exact_steps[motor.channel]
+        direction = (signs * motor.dir_sign).astype(np.int8)
+        return StepEvents(
+            time=times,
+            level=start_count + np.cumsum(direction, dtype=np.int64),
+            direction=direction,
+            rate_hz=np.full(times.size, np.nan),
+        )
     deltas = capture.deltas[:, motor.channel].astype(np.int64) * motor.dir_sign
     ticks = np.flatnonzero(deltas)
     if ticks.size == 0:

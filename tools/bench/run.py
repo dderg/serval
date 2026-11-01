@@ -31,6 +31,7 @@ from pi import (
 )
 
 TERMINAL_STATES = {"complete", "error", "cancelled"}
+ACTIVE_STATES = {"printing", "paused"}
 ALLOWED = {
     "G0",
     "G1",
@@ -97,12 +98,18 @@ def poll_print(capture: Capture, timeout_s: float) -> dict:
     raise BenchError(f"print did not finish within {timeout_s}s")
 
 
+def cancel_active_print() -> None:
+    if printer_state() == "ready" and print_stats()["state"] in ACTIVE_STATES:
+        http("POST", "/printer/print/cancel")
+
+
 def run(
     gcode: Path,
     runs_dir: Path,
     timeout_s: float,
     config: Path = REPO_CFG,
     host_throttle: throttle.Throttle | None = None,
+    events: bool = False,
 ) -> Path:
     lines, stats = sanitize(gcode.read_text())
     run_dir = runs_dir / datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -124,14 +131,18 @@ def run(
     }
     with throttle.throttled(host_throttle) as applied_throttle:
         summary["host_throttle"] = applied_throttle
-        execute(run_dir, remote_name, summary, timeout_s)
+        execute(run_dir, remote_name, summary, timeout_s, events)
     return run_dir
 
 
 def execute(
-    run_dir: Path, remote_name: str, summary: dict, timeout_s: float
+    run_dir: Path,
+    remote_name: str,
+    summary: dict,
+    timeout_s: float,
+    events: bool,
 ) -> None:
-    capture = Capture(run_dir, both_edges_mask=0)
+    capture = Capture(run_dir, both_edges_mask=0, events=events)
     final: dict = {}
     failure: BaseException | None = None
     started = time.time()
@@ -148,9 +159,11 @@ def execute(
         failure = exc
     try:
         result = capture.stop()
-        summary["capture_ticks"] = result.ticks
+        summary[f"capture_{result.unit}"] = result.units
     except BaseException as exc:
         failure = failure or exc
+    if failure is not None:
+        cancel_active_print()
     ended = time.time()
 
     scp_from_pi(f"{PI_LOGS}/klippy.log", run_dir / "klippy.log")
@@ -181,6 +194,11 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=REPO_CFG)
     parser.add_argument("--host-cpus", type=int)
     parser.add_argument("--host-max-mhz", type=int)
+    parser.add_argument(
+        "--events",
+        action="store_true",
+        help="capture in event mode (timestamp every edge)",
+    )
     lock.add_timeout_argument(parser)
     args = parser.parse_args()
     with lock.bench_lock(args.lock_timeout):
@@ -191,6 +209,7 @@ def main() -> None:
                 args.timeout,
                 args.config,
                 throttle.Throttle(args.host_cpus, args.host_max_mhz),
+                args.events,
             )
         )
 
