@@ -17,7 +17,7 @@ class FakeToolhead(FakeToolheadBase):
         super().__init__(kin=kin)
         self.clock = 1000.0
 
-    def get_last_move_time(self):
+    def _earliest_move_start(self):
         return self.clock + MOTION_LEAD
 
 

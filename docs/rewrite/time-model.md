@@ -69,6 +69,17 @@ Two frequencies exist per MCU and they are not interchangeable:
   arms it; `force=True` drains the pipeline (brake to rest) exactly like
   mainline's lookahead flush. Also un-floored; scheduling safety comes from
   the floor below. `toolhead.get_last_move_time()` is this plus the floor.
+- `engine.earliest_start_print_time_poll(id, mcu_handle)` — absolute
+  print_time no motion submitted after the claim can start before.
+  `claim_earliest_start()` arms it; it rides the move FIFO (so it sees every
+  earlier reset and dwell) but never drains: the anchor answers from its own
+  state — the committed end for a continuing stream, `now + lead` when the
+  next segment must re-anchor. The anchor records the claim and aborts if a
+  later segment would start before it. `Motion` energizes a motor's enable
+  line at this time on its first move, so the pin is asserted no later than
+  the first step without bringing the toolhead to rest. Anything scheduled
+  at a floored `get_last_move_time()` that later motion must not precede
+  uses `toolhead.dwell_through(print_time)` to hold the stream past it.
 - `engine.print_time_now(mcu_handle)` — estimated print_time at this
   instant from the router record. `None` until clocksync establishes.
 

@@ -446,7 +446,7 @@ class Motion:
                 cbs = owner._active_callbacks
                 owner._active_callbacks = []
                 if move_time is None:
-                    move_time = self.get_last_move_time()
+                    move_time = self._earliest_move_start()
                 for i, cb in enumerate(cbs):
                     cb_t0 = time.monotonic()
                     try:
@@ -475,6 +475,10 @@ class Motion:
         self.engine.submit_dwell(delay)
         if delay > 0.0:
             self._sync_print_time()
+
+    def dwell_through(self, print_time):
+        frontier = self.engine.frontier_print_time(self.mcu.get_engine_handle())
+        self.dwell(max(0.0, print_time - frontier))
 
     def wait_moves(self):
         self._wait_mcu_drained()
@@ -604,6 +608,27 @@ class Motion:
             self.printer,
             _fence_print_time,
             "get_last_move_time motion fence",
+            engine_wait.UNBOUNDED,
+            interval_s=0.002,
+            park=self._engine_wakeup.park if self._engine_wakeup else None,
+        )
+
+    def _earliest_move_start(self):
+        claim_id = [None]
+
+        def _claimed_print_time():
+            if claim_id[0] is None:
+                claim_id[0] = self.engine.claim_earliest_start()
+            if claim_id[0] is None:
+                return None
+            return self.engine.earliest_start_print_time_poll(
+                claim_id[0], self.mcu.get_engine_handle()
+            )
+
+        return engine_wait.wait_for(
+            self.printer,
+            _claimed_print_time,
+            "earliest move start claim",
             engine_wait.UNBOUNDED,
             interval_s=0.002,
             park=self._engine_wakeup.park if self._engine_wakeup else None,

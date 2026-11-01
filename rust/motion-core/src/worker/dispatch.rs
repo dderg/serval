@@ -55,6 +55,8 @@ pub(crate) trait SegmentSink {
     /// The committed trajectory is planned to rest through its end; a resume
     /// across the idle gap that follows may re-anchor the timeline forward.
     fn mark_parked(&mut self) {}
+    fn hold_stream(&mut self, _secs: f64) {}
+    fn restart_stream(&mut self) {}
 }
 
 #[derive(Default)]
@@ -67,6 +69,7 @@ pub(crate) struct WorkerLinks {
     pub(crate) shutting_down: AtomicBool,
     pub(crate) last_move_time_bits: AtomicU64,
     pub(crate) fences: crate::fence::FenceRegistry,
+    pub(crate) start_claims: super::StartClaims,
     pub(crate) wakeup: crate::feed_wakeup::FeedWakeup,
 }
 
@@ -189,8 +192,10 @@ impl Dispatcher {
                 self.links
                     .last_move_time_bits
                     .store(0.0_f64.to_bits(), Ordering::Release);
+                sink.restart_stream();
             }
             Control::Dwell { secs } => {
+                sink.hold_stream(secs);
                 if let Some(t) = &mut self.dispatched_through {
                     *t += secs;
                     self.links

@@ -12,7 +12,7 @@ use motion_pipeline::{
 };
 
 use super::dispatch::WorkerLinks;
-use super::{CommittedFrontier, HomeDripParams, NudgeParams, StreamMsg, fatal};
+use super::{ExecutionTimeline, HomeDripParams, NudgeParams, StreamMsg, fatal};
 
 const DRAIN_RESERVE_FLOOR_S: f64 = 0.5;
 const DRAIN_RESERVE_SAFETY: f64 = 2.0;
@@ -31,7 +31,7 @@ pub(super) struct Ingress {
     pub(super) pipeline: motion_pipeline::Pipeline,
     pub(super) output: crossbeam_channel::Sender<motion_pipeline::TrajectoryItem>,
     pub(super) links: Arc<WorkerLinks>,
-    pub(super) frontier: Arc<CommittedFrontier>,
+    pub(super) timeline: ExecutionTimeline,
     pub(super) undrained_since: Option<Instant>,
     pub(super) worst_drain_s: f64,
     /// Source line of the last move forwarded into the pipeline; a fence
@@ -197,7 +197,7 @@ impl Ingress {
     /// brake-to-rest and the drained trajectory beats the playhead to the
     /// pump.
     fn drain_or_runway(&mut self) -> Option<Duration> {
-        let wait_s = self.frontier.runway_secs() - self.reserve_secs();
+        let wait_s = self.timeline.frontier.runway_secs() - self.reserve_secs();
         if wait_s > 0.0 {
             return Some(Duration::from_secs_f64(wait_s));
         }
@@ -239,6 +239,11 @@ impl Ingress {
                 } else {
                     self.links.fences.arm(id, self.last_line);
                 }
+            }
+            StreamMsg::ClaimEarliestStart { id } => {
+                let claim = self.timeline.claim_earliest_start();
+                self.links.start_claims.resolve(id, claim);
+                self.links.wakeup.notify_fence_resolved();
             }
             StreamMsg::Dwell { duration_s, notify } => {
                 self.drain_and_fence();
@@ -300,7 +305,7 @@ impl Ingress {
     /// reaches the pump and everything sent after does.
     fn reset_to(&mut self, pos: Vec<f64>) {
         self.links.discard.store(true, Ordering::Release);
-        self.frontier.clear();
+        self.timeline.frontier.clear();
         self.send(StreamInput::Control(Control::Reset { pos: pos.clone() }));
         self.undrained_since = None;
         self.barrier();

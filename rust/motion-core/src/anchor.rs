@@ -97,6 +97,8 @@ pub struct Anchor {
     t0: Option<f64>,
     last_t_end: f64,
     parked: bool,
+    stream_end: f64,
+    claimed_start_host: f64,
 }
 
 impl Anchor {
@@ -105,6 +107,8 @@ impl Anchor {
             t0: None,
             last_t_end: 0.0,
             parked: true,
+            stream_end: 0.0,
+            claimed_start_host: f64::NEG_INFINITY,
         }
     }
 
@@ -271,9 +275,56 @@ impl Anchor {
                 "[anchor-decision] fresh anchor"
             );
         }
+        let start_host = self.t0.unwrap() + seg_t_start;
+        if start_host + CONTIGUITY_EPS < self.claimed_start_host {
+            tracing::error!(
+                subsystem = "motion",
+                event = "anchor_start_before_claim",
+                start_host,
+                claimed_start_host = self.claimed_start_host,
+                seg_t_start,
+                "[anchor] segment starts before a claimed earliest start"
+            );
+            crate::worker::fatal(&format!(
+                "segment starts at host {start_host:.6}, {:.6}s before the claimed \
+                 earliest start {:.6}: a motor energized at the claim would step \
+                 before its enable",
+                self.claimed_start_host - start_host,
+                self.claimed_start_host
+            ));
+        }
         self.last_t_end = seg_t_end;
+        self.stream_end = seg_t_end;
         self.parked = false;
         (self.t0.unwrap(), epoch)
+    }
+
+    pub fn claim_earliest_start(&mut self, host_now: f64) -> Result<f64, String> {
+        let earliest = match self.classify(self.stream_end, host_now) {
+            AnchorClass::Reposition | AnchorClass::IdleResume { .. } => {
+                host_now + DEFAULT_LEAD_SECS
+            }
+            AnchorClass::Continuation { .. } | AnchorClass::Rejoin { .. } => {
+                self.t0.expect("a continuing stream is anchored") + self.stream_end
+            }
+            lost => {
+                return Err(format!(
+                    "no move can be scheduled: the stream already lost continuous \
+                     motion at stream time {:.6} ({lost:?})",
+                    self.stream_end
+                ));
+            }
+        };
+        self.claimed_start_host = self.claimed_start_host.max(earliest);
+        Ok(earliest)
+    }
+
+    pub fn hold_stream(&mut self, secs: f64) {
+        self.stream_end += secs;
+    }
+
+    pub fn restart_stream(&mut self) {
+        self.stream_end = 0.0;
     }
 
     /// The stream drained: everything committed is planned to rest and the

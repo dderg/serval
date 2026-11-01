@@ -40,6 +40,40 @@ impl CommittedFrontier {
     }
 }
 
+pub(crate) struct ExecutionTimeline {
+    pub(crate) frontier: Arc<CommittedFrontier>,
+    pub(crate) anchor: Arc<Mutex<crate::anchor::Anchor>>,
+    pub(crate) router: Arc<Mutex<host_rt::passthrough_queue::PassthroughRouter>>,
+}
+
+impl ExecutionTimeline {
+    pub(crate) fn claim_earliest_start(&self) -> Result<f64, String> {
+        let mut anchor = self.anchor.lock_ok();
+        let host_now = self.router.lock_ok().host_now_secs();
+        anchor.claim_earliest_start(host_now)
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct StartClaims {
+    next_id: AtomicU64,
+    resolved: Mutex<std::collections::HashMap<u64, Result<f64, String>>>,
+}
+
+impl StartClaims {
+    fn alloc_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub(crate) fn resolve(&self, id: u64, claim: Result<f64, String>) {
+        self.resolved.lock_ok().insert(id, claim);
+    }
+
+    fn take(&self, id: u64) -> Option<Result<f64, String>> {
+        self.resolved.lock_ok().remove(&id)
+    }
+}
+
 #[derive(Debug)]
 pub struct HomeDripParams {
     pub home_pos: [f64; 4],
@@ -80,6 +114,9 @@ pub enum StreamMsg {
     Fence {
         id: u64,
         force: bool,
+    },
+    ClaimEarliestStart {
+        id: u64,
     },
     Dwell {
         duration_s: f64,
@@ -182,13 +219,18 @@ pub fn setup_pipeline(
     let links = Arc::new(WorkerLinks::default());
     let mut dispatcher = Dispatcher::new(Arc::clone(&links), Arc::clone(&frontier));
     let admission = Arc::clone(&links);
+    let timeline = ExecutionTimeline {
+        frontier: Arc::clone(&frontier),
+        anchor: Arc::clone(&resources.anchor),
+        router: Arc::clone(&resources.router),
+    };
     let mut projection = Projection {
         transports: resources.transports,
         router: resources.router,
         anchor: resources.anchor,
         mcu_configs: resources.mcu_configs,
         counter: resources.counter,
-        frontier: Arc::clone(&frontier),
+        frontier,
         frozen_projection: std::collections::HashMap::new(),
     };
     let pump_thread = thread::Builder::new()
@@ -230,7 +272,7 @@ pub fn setup_pipeline(
         home_pos,
         output,
         links,
-        frontier,
+        timeline,
         pump_control.clone(),
     );
     MotionPipeline {
@@ -247,7 +289,7 @@ impl StreamWorkerHandle {
         home_pos: Vec<f64>,
         output: Sender<TrajectoryItem>,
         links: Arc<WorkerLinks>,
-        frontier: Arc<CommittedFrontier>,
+        timeline: ExecutionTimeline,
         pump: Sender<crate::pump::PumpMsg>,
     ) -> Self {
         let (tx, rx) = bounded(INPUT_CHANNEL_CAP);
@@ -259,7 +301,7 @@ impl StreamWorkerHandle {
             pipeline,
             output,
             links: Arc::clone(&links),
-            frontier,
+            timeline,
             undrained_since: None,
             worst_drain_s: 0.0,
             last_line: 0,
@@ -344,6 +386,16 @@ impl StreamWorkerHandle {
     /// stream was reset or nothing was ever dispatched). Consumes the result.
     pub fn fence_take(&self, id: u64) -> Option<Option<f64>> {
         self.links.fences.take(id)
+    }
+
+    pub fn claim_earliest_start(&self) -> Result<u64, StreamWorkerError> {
+        let id = self.links.start_claims.alloc_id();
+        self.try_send_arming(StreamMsg::ClaimEarliestStart { id })?;
+        Ok(id)
+    }
+
+    pub fn take_earliest_start(&self, id: u64) -> Option<Result<f64, String>> {
+        self.links.start_claims.take(id)
     }
 
     pub fn dwell(&self, duration_s: f64) -> Result<(), StreamWorkerError> {

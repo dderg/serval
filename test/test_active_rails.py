@@ -70,9 +70,14 @@ class FakeToolhead(FakeToolheadBase):
             move_time_step=0.090,
         )
 
+    def _earliest_move_start(self):
+        self.calls.append(("_earliest_move_start",))
+        self._last_move_time += self._move_time_step
+        return self._last_move_time
+
     @property
     def move_time_calls(self):
-        return sum(1 for c in self.calls if c[0] == "get_last_move_time")
+        return sum(1 for c in self.calls if c[0] == "_earliest_move_start")
 
 
 def arm_callbacks(steppers):

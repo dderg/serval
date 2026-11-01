@@ -132,13 +132,26 @@ fn spawn_capture(
         home,
         output,
         links,
-        frontier,
+        idle_timeline(frontier),
         control.clone(),
     );
     TestWorker {
         worker,
         control,
         execution: Some(execution),
+    }
+}
+
+pub(crate) fn idle_timeline(frontier: Arc<CommittedFrontier>) -> ExecutionTimeline {
+    let clock = host_rt::clock::MockClock::new();
+    ExecutionTimeline {
+        frontier,
+        anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
+        router: Arc::new(Mutex::new(
+            host_rt::passthrough_queue::PassthroughRouter::with_clock(
+                clock as Arc<dyn host_rt::clock::Clock + Send + Sync>,
+            ),
+        )),
     }
 }
 
@@ -303,7 +316,7 @@ fn finite_homing_admission_and_cancellation_preserve_backpressure() {
         vec![0.0; 3],
         output,
         links,
-        frontier,
+        idle_timeline(frontier),
         control.clone(),
     );
     let mut h = TestWorker {
@@ -1057,6 +1070,77 @@ fn poll_fence(h: &StreamWorkerHandle, id: u64, timeout: Duration) -> Option<f64>
         assert!(Instant::now() < deadline, "fence {id} did not resolve");
         std::thread::sleep(Duration::from_millis(2));
     }
+}
+
+#[derive(Clone, Default)]
+struct RestCount(Arc<std::sync::atomic::AtomicUsize>);
+
+impl SegmentSink for RestCount {
+    fn dispatch(&mut self, _seg: &ContinuousSegment) -> Result<(), DispatchError> {
+        Ok(())
+    }
+    fn dispatch_nudge(
+        &mut self,
+        _mcu_id: u32,
+        _axis: u8,
+        _motor_mask: u8,
+        _profile: &NudgeProfile,
+    ) -> Result<(), DispatchError> {
+        Ok(())
+    }
+    fn mark_parked(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl RestCount {
+    fn rests(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+fn poll_claim(h: &StreamWorkerHandle, id: u64, timeout: Duration) -> Result<f64, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(claimed) = h.take_earliest_start(id) {
+            return claimed;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "start claim {id} did not resolve"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn claiming_the_earliest_start_leaves_buffered_motion_unbraked() {
+    let rests = RestCount::default();
+    let frontier: Arc<CommittedFrontier> = Arc::default();
+    frontier.advance_to(Instant::now() + Duration::from_secs(60));
+    let mut h = spawn_capture(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0],
+        rests.clone(),
+        frontier,
+    );
+    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+    h.submit_move(line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0]))
+        .unwrap();
+
+    let id = h.claim_earliest_start().unwrap();
+    poll_claim(&h, id, Duration::from_secs(5)).expect("a healthy stream answers the claim");
+    assert_eq!(
+        rests.rests(),
+        0,
+        "answering where the next move can start must not plan the buffered moves to rest"
+    );
+
+    h.flush().unwrap();
+    assert_eq!(rests.rests(), 1, "the explicit flush is the only rest");
+    h.shutdown();
 }
 
 #[test]

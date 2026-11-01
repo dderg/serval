@@ -353,6 +353,10 @@ class FakeToolhead:
         self.calls.append(("dwell", delay))
         self._last_move_time += delay
 
+    def dwell_through(self, print_time):
+        self.calls.append(("dwell_through", print_time))
+        self._last_move_time = max(self._last_move_time, print_time)
+
     def wait_moves(self):
         self.calls.append(("wait_moves",))
 
