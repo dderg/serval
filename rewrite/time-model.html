@@ -1984,6 +1984,24 @@ rules here exist because we shipped a season of timing bugs by breaking them.</p
   arms it; <code>force=True</code> drains the pipeline (brake to rest) exactly like
   mainline's lookahead flush. Also un-floored; scheduling safety comes from
   the floor below. <code>toolhead.get_last_move_time()</code> is this plus the floor.</li>
+<li><code>engine.earliest_start_print_time_poll(id, mcu_handle)</code> — absolute
+  print_time no motion submitted after the claim can start before.
+  <code>claim_earliest_start()</code> arms it; it rides the move FIFO (so it sees every
+  earlier reset and dwell) but never drains: the anchor answers from its own
+  state — the committed end for a continuing stream, <code>now + lead</code> when the
+  next segment must re-anchor, never earlier than an active hold. The anchor
+  records the claim and aborts if a later segment would start before it.
+  <code>Motion</code> energizes a motor's first move at the schedule floor (no earlier
+  than the pin's last switch) and uses the claim only as the deadline: when
+  the floor lies past the claim it holds the stream until the floor first,
+  so the pin is asserted no later than the first step without bringing the
+  toolhead to rest.</li>
+<li><code>engine.dwell_until(print_time, mcu_handle)</code> — hold the next segment until
+  an absolute print_time. A parked stream re-anchors forward to it with no
+  drain; a stream in motion is drained first. Anything scheduled at a
+  floored <code>get_last_move_time()</code> that later motion must not precede (enable
+  switches and their settle) holds the stream with
+  <code>toolhead.dwell_until(print_time)</code>.</li>
 <li><code>engine.print_time_now(mcu_handle)</code> — estimated print_time at this
   instant from the router record. <code>None</code> until clocksync establishes.</li>
 </ul>
