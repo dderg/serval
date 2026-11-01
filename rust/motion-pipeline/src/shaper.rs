@@ -8,7 +8,7 @@ use trajectory::{
     RelativeSplinePiece, ShapedSignal, next_toward,
 };
 
-use crate::follower_projection::{FollowerState, project_followers};
+use crate::follower_projection::{FollowerState, advance_before_projection, project_followers};
 use crate::lowering::{
     AccelerationTrend, FitTol, LADDER_PROBES_U, LadderBudget, LadderFailure, LadderPolicy,
     LadderPva, LadderSpan, LadderTruth, VelocitySign, exact_piece, ladder_fit, quintic_in_u,
@@ -458,6 +458,7 @@ fn materialize_changed_sources(
                 seed_breakpoints: &breakpoints,
                 fit_tol,
                 fit_context: "materialize_source",
+                velocity_continuous: false,
             },
             source,
         )?;
@@ -837,8 +838,20 @@ fn fit_axis_column(
         },
         fit_tol,
         target_workers,
+        rides_an_advanced_follower(request.chains, axis),
     )
     .map(Some)
+}
+
+fn rides_an_advanced_follower(chains: &AxisChainSet, leader: usize) -> bool {
+    chains.projected_followers().any(|(follower, leaders)| {
+        leaders.contains(&leader)
+            && chains
+                .chains
+                .get(follower)
+                .and_then(advance_before_projection)
+                .is_some()
+    })
 }
 
 /// The convolution's input for one axis, packaged for the target fits: the
@@ -858,6 +871,7 @@ fn fit_axis_targets(
     source: ShapedSignalSource,
     fit_tol: FitTol,
     target_workers: usize,
+    velocity_continuous: bool,
 ) -> Result<Vec<nurbs::ScalarNurbs>, PostProcessError> {
     let ShapedSignalSource {
         kernel,
@@ -904,6 +918,7 @@ fn fit_axis_targets(
                     seed_breakpoints: &shaped_breaks,
                     fit_tol,
                     fit_context: "smooth_kernel_target",
+                    velocity_continuous,
                 },
                 sig,
             )?;
@@ -1073,6 +1088,7 @@ fn fit_axis_targets(
                 floors: plan.floors,
                 max_depth: plan.max_depth,
                 velocity_sign: VelocitySign::Unconstrained,
+                velocity_continuous,
             },
             SpanSeeds {
                 lower: t_start,
@@ -1171,6 +1187,7 @@ fn fit_axis_targets(
                     seed_breakpoints: &shaped_breaks,
                     fit_tol,
                     fit_context: "smooth_kernel_target",
+                    velocity_continuous,
                 },
                 &sig,
             )?
@@ -2034,6 +2051,7 @@ pub(crate) struct AxisFit<'a> {
     pub seed_breakpoints: &'a [f64],
     pub fit_tol: FitTol,
     pub fit_context: &'static str,
+    pub velocity_continuous: bool,
 }
 
 pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
@@ -2056,6 +2074,7 @@ pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
         floors: plan.floors,
         max_depth: plan.max_depth,
         velocity_sign: VelocitySign::Unconstrained,
+        velocity_continuous: fit.velocity_continuous,
     };
     let mut refinement_splits = 0;
     let mut pieces = Vec::with_capacity(plan.seeds.len());
@@ -2211,6 +2230,7 @@ struct SpanFitPolicy {
     floors: LadderFloors,
     max_depth: u32,
     velocity_sign: VelocitySign,
+    velocity_continuous: bool,
 }
 
 /// One span of a refinement tree: its bounds and how deep the bisection
@@ -2318,6 +2338,7 @@ fn shaped_ladder<S: TrackSignal>(
             velocity_sign: policy.velocity_sign,
             acceleration_monotonicity: sig.acceleration_monotonicity(t0_inside, t1_inside),
             high_degree_span_floor: policy.floors.high_degree,
+            velocity_continuous: policy.velocity_continuous,
         },
     ) {
         Ok(coefficients) => {
@@ -2634,6 +2655,7 @@ pub(crate) fn apply_nonlinear_advance_to_track(
             seed_breakpoints: &breakpoints,
             fit_tol,
             fit_context: "nonlinear_advance",
+            velocity_continuous: false,
         },
         &sig,
     )
