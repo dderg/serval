@@ -297,50 +297,189 @@ fn limited_line(
     line_move(start, end, 0.0, ctx).unwrap()
 }
 
-#[test]
-fn a_planner_holding_its_window_behind_a_busy_inbox_brakes_instead_of_underrunning() {
+#[derive(Clone)]
+struct PacedSink {
+    inner: AnchoredSink,
+    realtime_factor_bits: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl PacedSink {
+    fn set_realtime_factor(&self, realtime_factor: f64) {
+        self.realtime_factor_bits
+            .store(realtime_factor.to_bits(), Ordering::SeqCst);
+    }
+}
+
+impl SegmentSink for PacedSink {
+    fn dispatch(&mut self, seg: &ContinuousSegment) -> Result<(), DispatchError> {
+        let realtime_factor = f64::from_bits(self.realtime_factor_bits.load(Ordering::SeqCst));
+        std::thread::sleep(Duration::from_secs_f64(
+            (seg.t_end - seg.t_start) / realtime_factor,
+        ));
+        self.inner.dispatch(seg)
+    }
+    fn dispatch_nudge(
+        &mut self,
+        mcu_id: u32,
+        axis: u8,
+        motor_mask: u8,
+        profile: &NudgeProfile,
+    ) -> Result<(), DispatchError> {
+        self.inner.dispatch_nudge(mcu_id, axis, motor_mask, profile)
+    }
+    fn mark_parked(&mut self) {
+        self.inner.mark_parked();
+    }
+    fn follow_stream_to(&mut self, stream_t: f64) {
+        self.inner.follow_stream_to(stream_t);
+    }
+}
+
+/// Back-and-forth strokes — every reversal a rest seam the planner commits
+/// at — streamed for a while with the dispatcher producing at a multiple of
+/// realtime, optionally flushed to rest at the end.
+#[derive(Clone, Copy)]
+struct StrokePhase {
+    realtime_factor: f64,
+    stroke_mm: f64,
+    accel: f64,
+    streaming: Duration,
+    max_strokes: usize,
+    then_flush: bool,
+}
+
+impl StrokePhase {
+    fn healthy(realtime_factor: f64, stroke_mm: f64, streaming: Duration) -> Self {
+        Self {
+            realtime_factor,
+            stroke_mm,
+            accel: 5000.0,
+            streaming,
+            max_strokes: usize::MAX,
+            then_flush: false,
+        }
+    }
+
+    /// One long stroke dispatched at a quarter of realtime and flushed: a
+    /// drain that takes over a second, widening the pacer's reserve past
+    /// two.
+    fn slow_drain() -> Self {
+        Self {
+            realtime_factor: 0.25,
+            stroke_mm: 40.0,
+            accel: 5000.0,
+            streaming: Duration::MAX,
+            max_strokes: 1,
+            then_flush: true,
+        }
+    }
+
+    /// Strokes this short and this violent play out in microseconds,
+    /// faster than the pipeline can plan them, so a stream of them falls
+    /// behind its playhead however fast the dispatcher is.
+    fn unplannable(streaming: Duration) -> Self {
+        Self {
+            realtime_factor: f64::INFINITY,
+            stroke_mm: 0.0002,
+            accel: 1.0e9,
+            streaming,
+            max_strokes: usize::MAX,
+            then_flush: false,
+        }
+    }
+
+    fn next_move(&self, line_no: u32, at: [f64; 3]) -> (geometry::Move, [f64; 3]) {
+        let end = [if at[0] > 0.0 { 0.0 } else { self.stroke_mm }, 0.0, 0.0];
+        (limited_line(line_no, at, end, 150.0, self.accel), end)
+    }
+}
+
+/// Streams each phase through a saturated inbox, one after another, and
+/// reports how many times the stream had braked to rest by the end of each
+/// phase. A phase stops streaming the moment the stream brakes.
+fn parks_after_each_phase(phases: &[StrokePhase]) -> Vec<usize> {
     let timeline = ExecutionTimeline {
         frontier: Arc::default(),
         anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
         router: Arc::new(Mutex::new(real_router())),
     };
-    let sink = AnchoredSink::on(&timeline);
+    let sink = PacedSink {
+        inner: AnchoredSink::on(&timeline),
+        realtime_factor_bits: Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits())),
+    };
     let mut h = spawn_on_timeline(
-        cfg_cap(1_000_000),
+        cfg_cap(1024),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
         sink.clone(),
         timeline,
     );
-    let mut x = 0.0;
+    let mut at = [0.0_f64, 0.0, 0.0];
     let mut line_no = 1;
-    let mut submit = |h: &TestWorker, len: f64, feed: f64, accel: f64| loop {
-        let m = limited_line(line_no, [x, 0.0, 0.0], [x + len, 0.0, 0.0], feed, accel);
-        match h.submit_move(m) {
-            Ok(()) => {
-                x += len;
-                line_no += 1;
-                return;
+    let mut parks = Vec::with_capacity(phases.len());
+    let parked = || sink.inner.parks.load(Ordering::SeqCst);
+    for phase in phases {
+        sink.set_realtime_factor(phase.realtime_factor);
+        let parks_before = parked();
+        let started = Instant::now();
+        let mut strokes = 0;
+        while strokes < phase.max_strokes
+            && started.elapsed() < phase.streaming
+            && parked() == parks_before
+        {
+            let (m, end) = phase.next_move(line_no, at);
+            loop {
+                match h.submit_move(m.clone()) {
+                    Ok(()) => break,
+                    Err(StreamWorkerError::ChannelFull) => std::thread::yield_now(),
+                    Err(e) => panic!("{e}"),
+                }
             }
-            Err(StreamWorkerError::ChannelFull) => std::thread::yield_now(),
-            Err(e) => panic!("{e}"),
+            at = end;
+            line_no += 1;
+            strokes += 1;
         }
-    };
-    for _ in 0..10 {
-        submit(&h, 5.0, 100.0, 10_000.0);
+        if phase.then_flush {
+            h.flush().unwrap();
+        }
+        parks.push(parked());
     }
-    let saturated = Instant::now();
-    while saturated.elapsed() < Duration::from_secs(2) {
-        submit(&h, 0.05, 1_000.0, 100.0);
-    }
-    let parks_while_saturated = sink.parks.load(Ordering::SeqCst);
+    sink.set_realtime_factor(f64::INFINITY);
     h.flush().unwrap();
-    assert!(
-        parks_while_saturated > 0,
-        "the committed runway ran out while the inbox stayed full and the planner \
-         committed nothing, yet the pacer never braked to rest"
-    );
     h.shutdown();
+    parks
+}
+
+#[test]
+fn a_saturated_stream_produced_faster_than_realtime_never_brakes_to_rest() {
+    let parks = parks_after_each_phase(&[
+        StrokePhase::slow_drain(),
+        StrokePhase::healthy(2.0, 40.0, Duration::from_secs(3)),
+    ]);
+    assert_eq!(parks[0], 1, "the slow drain braked to rest once");
+    assert_eq!(
+        parks[1], parks[0],
+        "a stream produced 2x faster than realtime braked to rest while its inbox \
+         stayed full and its runway grew, because a slow earlier drain widened the \
+         reserve past it"
+    );
+}
+
+#[test]
+fn a_busy_stream_falling_behind_its_playhead_brakes_before_running_dry() {
+    let parks = parks_after_each_phase(&[
+        StrokePhase::healthy(2.0, 1.0, Duration::from_millis(1500)),
+        StrokePhase::unplannable(Duration::from_secs(10)),
+    ]);
+    assert_eq!(
+        parks[0], 0,
+        "the stream braked while it was still gaining runway"
+    );
+    assert!(
+        parks[1] > 0,
+        "the committed runway fell away while the inbox stayed full, yet the \
+         pacer never braked to rest"
+    );
 }
 
 #[test]

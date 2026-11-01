@@ -312,6 +312,7 @@ impl StreamWorkerHandle {
             timeline,
             undrained_since: None,
             worst_drain_s: 0.0,
+            busy_runway: ingress::BusyRunwayWatch::default(),
             last_line: 0,
             pump: pump.clone(),
         };
