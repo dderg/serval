@@ -11,11 +11,18 @@ CHANNEL_COUNT signed step deltas (i8, + when DIR pin is high).
 Event mode ("SVE1", command E): payload is a slice of one continuous byte
 stream (position = its offset, length = its size), decoded by
 capture_events.py.
+
+Simulated peripherals (tools/bench/capture-fw/PHASE2.md): command C sends a
+sim config (sim_config.py); commands s and e start count/event mode with aux
+records. Aux frames ("SVA1") share the stream's seq; position is the first
+record index, length the record count, payload length * AUX_RECORD_LEN
+bytes, decoded by capture_aux.py and written to aux.bin.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import enum
 import json
 import os
@@ -28,17 +35,25 @@ import tty
 from dataclasses import dataclass
 from pathlib import Path
 
+from sim_config import SimConfig
+from sim_config import command as sim_command
+
 DEVICE = "/dev/serial/by-id/usb-serval-bench_step-capture_f407-capture-if00"
 CHANNEL_COUNT = 4
 TICK_HZ = 40_000
 EVENT_TICK_HZ = 84_000_000
 COUNT_MAGIC = b"SVC1"
 EVENT_MAGIC = b"SVE1"
+AUX_MAGIC = b"SVA1"
+AUX_RECORD_LEN = 44
+AUX_CONFIG_ID_OFFSET = 36
 HEADER = struct.Struct("<4sIIHBB")
 STALL_TIMEOUT_S = 1.0
 POSITION_MODULUS = 1 << 32
 CMD_START = b"S"
 CMD_EVENTS = b"E"
+CMD_START_AUX = b"s"
+CMD_EVENTS_AUX = b"e"
 CMD_STOP = b"X"
 
 
@@ -57,6 +72,8 @@ class Fault(enum.IntEnum):
     DMA_ERROR = 12
     DIR_QUEUE_FULL = 13
     NON_MONOTONIC = 14
+    MCO_LOST = 15
+    AUX_OVERFLOW = 16
 
 
 class CaptureError(RuntimeError):
@@ -76,11 +93,19 @@ class Capture:
         out_dir: Path,
         both_edges_mask: int,
         events: bool = False,
+        sim: SimConfig | None = None,
         device: str = DEVICE,
     ):
+        if sim is not None and sim.both_edges_mask != both_edges_mask:
+            raise CaptureError(
+                f"both-edges mask {both_edges_mask:#x} disagrees with the sim "
+                f"config's {sim.both_edges_mask:#x}"
+            )
         self._out_dir = out_dir
         self._mask = both_edges_mask
         self._events = events
+        self._sim = sim
+        self._aux_records = 0
         self._device = device
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -106,7 +131,12 @@ class Capture:
         termios.tcflush(fd, termios.TCIOFLUSH)
         os.write(fd, CMD_STOP + b"\0")
         self._drain(fd)
-        command = CMD_EVENTS if self._events else CMD_START
+        if self._sim is not None:
+            os.write(fd, sim_command(self._sim))
+        if self._events:
+            command = CMD_EVENTS if self._sim is None else CMD_EVENTS_AUX
+        else:
+            command = CMD_START if self._sim is None else CMD_START_AUX
         os.write(fd, command + bytes([self._mask]))
         self._write_meta(
             started_monotonic=time.monotonic(), started_wall=time.time()
@@ -138,21 +168,53 @@ class Capture:
             "tick_hz": EVENT_TICK_HZ if self._events else TICK_HZ,
             "channel_count": CHANNEL_COUNT,
             "both_edges_mask": self._mask,
+            "aux": self._sim is not None,
+            "sim_config_id": None if self._sim is None else self._sim.config_id,
+            "sim_config": None if self._sim is None else self._sim.source,
             **extra,
         }
         (self._out_dir / "capture.json").write_text(json.dumps(meta, indent=2))
 
     def _run(self, fd: int) -> None:
         try:
-            with open(self._sink_path, "wb") as sink:
-                self._pump(fd, sink)
+            with (
+                open(self._sink_path, "wb") as sink,
+                (
+                    open(self._out_dir / "aux.bin", "wb")
+                    if self._sim is not None
+                    else contextlib.nullcontext()
+                ) as aux,
+            ):
+                self._pump(fd, sink, aux)
         except BaseException as exc:
             self._error = exc
         finally:
             os.write(fd, CMD_STOP + b"\0")
             os.close(fd)
 
-    def _pump(self, fd: int, sink) -> None:
+    def _take_aux(
+        self, position: int, length: int, payload: bytes, aux
+    ) -> None:
+        if self._sim is None:
+            raise CaptureError(
+                "aux frame from a capture started without a sim config"
+            )
+        if position != self._aux_records % POSITION_MODULUS:
+            raise CaptureError(
+                f"aux record gap: got {position}, expected {self._aux_records}"
+            )
+        for index in range(length):
+            at = index * AUX_RECORD_LEN + AUX_CONFIG_ID_OFFSET
+            (config_id,) = struct.unpack_from("<H", payload, at)
+            if config_id != self._sim.config_id:
+                raise CaptureError(
+                    f"firmware runs sim config {config_id}, sent "
+                    f"{self._sim.config_id}: it rejected the config"
+                )
+        aux.write(payload)
+        self._aux_records += length
+
+    def _pump(self, fd: int, sink, aux) -> None:
         buf = bytearray()
         expected_seq = 0
         last_data = time.monotonic()
@@ -167,11 +229,16 @@ class Capture:
                 magic, seq, position, length, status, detail = (
                     HEADER.unpack_from(buf)
                 )
-                if magic != self._magic:
+                if magic == AUX_MAGIC:
+                    payload_len = length * AUX_RECORD_LEN
+                elif magic == self._magic:
+                    payload_len = (
+                        length if self._events else length * CHANNEL_COUNT
+                    )
+                else:
                     raise CaptureError(
                         f"bad frame magic {magic!r} after {self._units} {self._unit}"
                     )
-                payload_len = length if self._events else length * CHANNEL_COUNT
                 frame_len = HEADER.size + payload_len
                 if len(buf) < frame_len:
                     break
@@ -179,6 +246,17 @@ class Capture:
                     raise CaptureError(
                         f"frame seq gap: got {seq}, expected {expected_seq}"
                     )
+                if magic == AUX_MAGIC:
+                    self._take_aux(
+                        position,
+                        length,
+                        bytes(buf[HEADER.size : frame_len]),
+                        aux,
+                    )
+                    del buf[:frame_len]
+                    expected_seq += 1
+                    last_data = time.monotonic()
+                    continue
                 if position != self._units % POSITION_MODULUS:
                     raise CaptureError(
                         f"{self._unit} gap: got {position}, expected {self._units}"

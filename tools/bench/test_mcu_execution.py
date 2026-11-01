@@ -5,6 +5,7 @@ import struct
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import capture_aux
 import capture_events
 import mcu_execution
 import numpy as np
@@ -226,3 +227,53 @@ def test_a_majority_of_coincident_late_steps_does_not_drag_the_clock_map(
         assert motors[role]["coincident_lateness_ns"]["p50"] == pytest.approx(
             COINCIDENT_LATE_NS, abs=30
         )
+
+
+CRYSTAL_PPM = 23e-6
+
+
+def _phase(t: np.ndarray, wander_s: float, period_s: float) -> np.ndarray:
+    return t * (1 + CRYSTAL_PPM) + wander_s * np.sin(2 * np.pi * t / period_s)
+
+
+def test_the_mco_count_tracks_drift_the_step_fit_cannot(tmp_path):
+    wander_s, period_s, seconds = 2e-6, 8.0, 16.0
+    start_clock, f401_offset, mco_offset = 10_000_000, 5_000.0, 123_456
+    steps = int(seconds * 1000) - 2
+    _write_tap(tmp_path, _lane(5, 0, steps, INTERVAL, start_clock))
+    commanded = _commanded(steps, INTERVAL, start_clock)
+    target = (commanded - f401_offset) / FREQ
+    t = target.copy()
+    for _ in range(5):
+        t = (target - wander_s * np.sin(2 * np.pi * t / period_s)) / (
+            1 + CRYSTAL_PPM
+        )
+    captured = np.round(t * FREQ).astype(np.int64)
+    captured[LATE_STEP] += LATE_TICKS
+    sample_t = np.arange(int(seconds * 1000)) * 1e-3
+    aux = np.zeros(sample_t.size, capture_aux.RECORD)
+    aux["time"] = np.round(sample_t * FREQ).astype(np.uint64)
+    aux["mco"] = (
+        np.floor(_phase(sample_t, wander_s, period_s) * 6.25e6) + mco_offset
+    ).astype(np.uint32)
+    aux["flags"] = capture_aux.FLAG_MCO_OK
+    report = mcu_execution.report(
+        tmp_path, _events(_channel(captured)), MOTORS, aux
+    )
+    assert report["clock_reference"] == "mco"
+    on_time = np.delete(np.arange(steps), LATE_STEP)
+    assert report["lateness_ns"]["p50"] < 30
+    assert report["lateness_ns"]["max"] == pytest.approx(3_000, abs=60)
+    assert report["steps_late_over_1000ns"] == 1
+    assert report["fit_lateness_ns"]["p99"] > 100
+    assert on_time.size == steps - 1
+
+
+def test_without_a_valid_mco_the_step_fit_is_the_reference(tmp_path):
+    commanded = _single_lane_run(tmp_path)
+    aux = np.zeros(4, capture_aux.RECORD)
+    aux["time"] = np.arange(4) * 84_000
+    report = mcu_execution.report(
+        tmp_path, _events(_channel(commanded)), MOTORS, aux
+    )
+    assert report["clock_reference"] == "fit"

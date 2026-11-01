@@ -30,9 +30,11 @@ for _path in (REPO_ROOT / "snapshots", REPO_ROOT / "klippy", REPO_ROOT):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
+import capture_aux  # noqa: E402
 import capture_events  # noqa: E402
 import harness  # noqa: E402
 import mcu_execution  # noqa: E402
+import sim_report  # noqa: E402
 
 CAPTURE_ROLES = ("a", "b", "z", "e")
 ROLE_AXIS_WEIGHTS = {
@@ -156,6 +158,8 @@ class Capture:
     deltas: np.ndarray
     exact_steps: list[tuple[np.ndarray, np.ndarray]] | None = None
     events: capture_events.EventCapture | None = None
+    meta: dict | None = None
+    aux: np.ndarray | None = None
 
     @property
     def duration_s(self) -> float:
@@ -281,6 +285,7 @@ def load_capture(run_dir: Path) -> Capture:
             f"capture.json channel_count={channels}, analyzer expects "
             f"{len(CAPTURE_ROLES)} ({', '.join(CAPTURE_ROLES)})"
         )
+    aux = capture_aux.load(run_dir) if meta.get("aux") else None
     if meta.get("mode", "counts") == "events":
         events = capture_events.load(run_dir)
         return Capture(
@@ -291,13 +296,17 @@ def load_capture(run_dir: Path) -> Capture:
                 for c in events.channels
             ],
             events,
+            meta,
+            aux,
         )
     raw = np.fromfile(run_dir / "capture.bin", dtype=np.int8)
     if raw.size % channels:
         raise AnalysisError(
             f"capture.bin size {raw.size} is not a multiple of {channels}"
         )
-    return Capture(float(meta["tick_hz"]), raw.reshape(-1, channels))
+    return Capture(
+        float(meta["tick_hz"]), raw.reshape(-1, channels), None, None, meta, aux
+    )
 
 
 def _config_sections(config_text: str) -> configparser.RawConfigParser:
@@ -1629,7 +1638,18 @@ def analyze(
         "motors": motors_report,
         "corexy": corexy_report(inputs, reference, finals, errors),
         "mcu_execution": mcu_execution.report(
-            inputs.run_dir, inputs.capture.events, inputs.motors
+            inputs.run_dir,
+            inputs.capture.events,
+            inputs.motors,
+            inputs.capture.aux,
+        ),
+        "simulator": None
+        if inputs.capture.aux is None
+        else sim_report.report(
+            inputs.capture.meta,
+            inputs.capture.aux,
+            inputs.config.config_text,
+            inputs.motors,
         ),
         "stalls": {
             "count": len(stalls),

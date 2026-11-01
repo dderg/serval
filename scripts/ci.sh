@@ -265,6 +265,12 @@ job_py() {
     fi
 }
 
+job_bench() {
+    cd "$ROOT" && uv run python -m pytest -q tools/bench
+    cd "$ROOT/tools/bench/sim-logic" && cargo test -q && cargo clippy --all-targets -- -D warnings && cargo fmt -- --check
+    cd "$ROOT/tools/bench/capture-fw" && cargo clippy --release -- -D warnings && cargo fmt -- --check
+}
+
 job_sim() {
     local sel="sim_unit and not needs_hardware"
     local paths="tools/sim \
@@ -367,6 +373,7 @@ run_all() {
         run_check "py"              job_py
         run_check "py-typecheck"    job_py_typecheck
         run_check "sim"             job_sim
+        run_check "bench"           job_bench
         run_check "snapshot"        job_snapshot
         run_check "replay-budget"   job_replay_budget
         run_check "rust-fuzz"       job_rust_fuzz
@@ -432,6 +439,7 @@ case "$name" in
     py-typecheck)     job=(job_py_typecheck) ;;
     docs)             job=(job_docs) ;;
     sim)              job=(job_sim) ;;
+    bench)            job=(job_bench) ;;
     sim-e2e)          job=(job_sim_e2e ${@+"$@"}) ;;
     replay-budget)    job=(job_replay_budget) ;;
     snapshot)         job=(job_snapshot) ;;

@@ -8,6 +8,9 @@ constant pipeline delay, so lateness is reported relative to its p0.1 floor.
 The map is fitted on isolated steps only: when two motors' steps are
 commanded within COINCIDENCE_SECONDS the mcu fires them one after another,
 so the second is genuinely late and must not drag the clock map.
+When the capture's aux records carry a valid F401 MCO count, the map comes
+from it instead (F401 clock = F401_CLOCKS_PER_MCO x MCO count + one constant
+fitted on isolated steps); the step fit is then reported as a cross-check.
 """
 
 from __future__ import annotations
@@ -16,13 +19,16 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import capture_aux
 import capture_events
 import numpy as np
 import step_tap
 
 KNOT_SECONDS = 2.0
+MCO_KNOT_SECONDS = 0.25
+F401_CLOCKS_PER_MCO = 84_000_000 / 6_250_000
 COINCIDENCE_SECONDS = 3e-6
-GAP_STIFFNESS = 1.0
+GAP_STIFFNESS = 1e-6
 FIT_ROUNDS = 3
 INLIER_FLOOR_S = 100e-9
 LATENESS_FLOOR_PERCENTILE = 0.1
@@ -53,7 +59,8 @@ def _solve(index, weight, y, size) -> np.ndarray:
     np.add.at(normal, (index + 1, index), left * weight)
     if size >= 3:
         second_difference = np.diff(np.eye(size), n=2, axis=0)
-        normal += GAP_STIFFNESS * second_difference.T @ second_difference
+        stiffness = GAP_STIFFNESS * np.trace(normal) / size
+        normal += stiffness * second_difference.T @ second_difference
     rhs = np.zeros(size)
     np.add.at(rhs, index, left * y)
     np.add.at(rhs, index + 1, weight * y)
@@ -71,11 +78,14 @@ def piecewise_fit(
         knots = np.array([x.min(), x.min() + spacing])
     index, weight = _hat_basis(x, knots)
     eligible = np.ones(x.size, bool) if eligible is None else eligible
+    center = float(np.mean(x[eligible]))
+    slope, intercept = np.polyfit(x[eligible] - center, y[eligible], 1)
+    detrended = y - (intercept + slope * (x - center))
     keep = eligible.copy()
     for _ in range(FIT_ROUNDS):
-        values = _solve(index[keep], weight[keep], y[keep], knots.size)
+        values = _solve(index[keep], weight[keep], detrended[keep], knots.size)
         model = values[index] * (1.0 - weight) + values[index + 1] * weight
-        residual = y - model
+        residual = detrended - model
         median = np.median(residual[keep])
         spread = 1.4826 * np.median(np.abs(residual[keep] - median))
         keep = eligible & (
@@ -84,7 +94,8 @@ def piecewise_fit(
 
     def evaluate(points: np.ndarray) -> np.ndarray:
         i, w = _hat_basis(points, knots)
-        return values[i] * (1.0 - w) + values[i + 1] * w
+        trend = intercept + slope * (points - center)
+        return trend + values[i] * (1.0 - w) + values[i + 1] * w
 
     return evaluate, keep
 
@@ -145,8 +156,29 @@ def _signed32(value: int) -> int:
     return value - (1 << 32) if value >= 1 << 31 else value
 
 
+def mco_clock_map(aux, x_isolated: np.ndarray, y_isolated: np.ndarray):
+    if aux is None or aux.size < 2:
+        return None
+    if not ((aux["flags"] & capture_aux.FLAG_MCO_OK) != 0).all():
+        return None
+    seconds = aux["time"].astype(np.float64) / capture_events.EVENT_TICK_HZ
+    mco_clock = (
+        capture_aux.unwrapped_mco(aux).astype(np.float64) * F401_CLOCKS_PER_MCO
+    )
+    to_time, _ = piecewise_fit(
+        mco_clock, seconds, MCO_KNOT_SECONDS * capture_events.EVENT_TICK_HZ
+    )
+    offset = float(
+        np.median(x_isolated - np.interp(y_isolated, seconds, mco_clock))
+    )
+    return lambda clocks: to_time(clocks - offset)
+
+
 def report(
-    run_dir: Path, events: capture_events.EventCapture | None, motors
+    run_dir: Path,
+    events: capture_events.EventCapture | None,
+    motors,
+    aux: np.ndarray | None = None,
 ) -> dict | None:
     taps = sorted(run_dir.glob("step_tap_mcu*.bin"))
     if not taps:
@@ -201,11 +233,16 @@ def report(
         )
     x = np.concatenate([c for _, c, _, _ in paired]).astype(np.float64)
     y = np.concatenate([t for _, _, t, _ in paired])
-    evaluate, inliers = piecewise_fit(
-        x, y, KNOT_SECONDS * tap.clock_freq, np.concatenate(isolated)
+    eligible = np.concatenate(isolated)
+    fitted, inliers = piecewise_fit(
+        x, y, KNOT_SECONDS * tap.clock_freq, eligible
     )
+    fit_ns = (y - fitted(x)) * NS
+    fit_ns -= np.percentile(fit_ns[inliers], LATENESS_FLOOR_PERCENTILE)
+    mco_map = mco_clock_map(aux, x[eligible], y[eligible])
+    evaluate = fitted if mco_map is None else mco_map
     lateness_ns = (y - evaluate(x)) * NS
-    floor = np.percentile(lateness_ns[inliers], LATENESS_FLOOR_PERCENTILE)
+    floor = np.percentile(lateness_ns[eligible], LATENESS_FLOOR_PERCENTILE)
     relative_ns = lateness_ns - floor
     motors_report = {}
     offset = 0
@@ -255,7 +292,9 @@ def report(
     return {
         "mcu_id": tap.mcu_id,
         "clock_freq": tap.clock_freq,
+        "clock_reference": "fit" if mco_map is None else "mco",
         "fit_knot_seconds": KNOT_SECONDS,
+        "fit_lateness_ns": _stats_ns(fit_ns),
         "fit_inlier_fraction": float(inliers.mean()),
         "lateness_floor_percentile": LATENESS_FLOOR_PERCENTILE,
         "lateness_ns": _stats_ns(relative_ns),

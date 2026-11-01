@@ -46,7 +46,8 @@ uv run python tools/bench/suite.py [--quick] [--expect-fail NAME]  # regression 
 uv run python tools/bench/deploy.py flash-target   # build F401 fw (f401.config), flash via Pi SWD, restart klippy
 uv run python tools/bench/deploy.py flash-capture  # build capture-fw, flash F407 via ST-Link
 uv run python tools/bench/deploy.py config         # validate + push printer.cfg, FIRMWARE_RESTART
-uv run python tools/bench/run.py <gcode> [--runs-dir ~/bench/runs] [--timeout 1800] [--events [--step-tap]]
+uv run python tools/bench/deploy.py mco            # enable F401 MCO1 (PA8, HSE/4) over SWD without resetting it
+uv run python tools/bench/run.py <gcode> [--runs-dir ~/bench/runs] [--timeout 1800] [--events [--step-tap]] [--sim configs/full.sim.json --config configs/full.cfg]
 uv run python tools/bench/analyze.py <run_dir> [--gap S]
 uv run python tools/bench/capture.py --help        # standalone capture (--events for event mode)
 uv run python tools/bench/buzz.py --motor a --steps 2000 --period-us 100  # event-mode calibration against busy-waited DIAG_STEPPER_BUZZ steps
@@ -79,14 +80,13 @@ Any tool that touches the Pi or the boards (`run.py`, every `deploy.py` subcomma
 
 ## Limits
 
-- No endstops, heaters or TMC wired: no homing (`run.py` uses `SET_KINEMATIC_POSITION`).
+- Endstops, heaters and TMC2209s are simulated by the capture board once the phase-2 wiring exists (`configs/full.cfg`); `run.py` still drops `G28` and starts from `SET_KINEMATIC_POSITION`, so homing runs need their own gcode path.
 - klippy takes the non-TMC single-edge 2 µs step path, not the TMC both-edge path real printers use.
 - 25 µs time resolution in count mode; 11.9 ns in event mode. Against the ideal reference event mode still includes host step compression (p99 ~3–6 µs, tail to the 25 µs `stepcompress_max_error`); `--step-tap` removes it by comparing against the commanded schedule.
 - Pi 5 is faster than the Pi 4 printers.
 
-## Planned wiring (not done)
+## Phase 2: simulated peripherals
 
-- Endstops: F407 PD8–PD11 → F401 via 1 kΩ.
-- Thermistor DAC: F407 PA4/PA5 → F401 ADC via 1 kΩ.
-- Clock: F401 PA8 → F407 PA15.
-- TMC UART emulation: F407 PA2 ↔ F401 via 1 kΩ (F401 pin to be chosen from the black-pill header).
+Wiring: `WIRING_PHASE2.md` (endstops/probe, two thermistor DACs, heater/fan duty inputs, MCO clock reference, single-wire TMC UART). Design, protocol and latency bounds: `capture-fw/PHASE2.md`; pure logic in `sim-logic/` (`cargo test` there). The capture firmware drives the endstops low (not triggered) from boot, serves four TMC2209s on the UART and feeds both thermistors from a heater model at all times; walls and aux records need a capture.
+
+`run.py <gcode> --config configs/full.cfg --sim configs/full.sim.json [--events]` sends the walls/heater config, captures with aux records (`aux.bin`), pokes MCO1 on after the printer is ready, and counts both STEP edges on the channels `full.sim.json` lists (must match the dedge klippy writes; the analyzer fails otherwise). `analysis.json` then has a `simulator` section and `mcu_execution` uses the MCO count as its clock reference. `deploy.py mco` re-enables MCO1 by hand (also run by `flash-target`/`reset-target`).

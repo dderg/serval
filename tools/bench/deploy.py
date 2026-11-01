@@ -5,6 +5,7 @@ uv run python tools/bench/deploy.py flash-target
 uv run python tools/bench/deploy.py flash-capture
 uv run python tools/bench/deploy.py config
 uv run python tools/bench/deploy.py reset-target
+uv run python tools/bench/deploy.py mco
 """
 
 from __future__ import annotations
@@ -172,7 +173,8 @@ def cmd_flash_target() -> None:
     require_verified(output)
     wait_pi_serial()
     pi.firmware_restart()
-    print("target flashed, printer ready")
+    pi.enable_mco()
+    print("target flashed, MCO1 on, printer ready")
 
 
 def cmd_reset_target() -> None:
@@ -183,7 +185,13 @@ def cmd_reset_target() -> None:
     print(output)
     wait_pi_serial()
     pi.restart_klipper()
-    print("target reset, printer ready")
+    pi.enable_mco()
+    print("target reset, MCO1 on, printer ready")
+
+
+def cmd_mco() -> None:
+    pi.enable_mco()
+    print("F401 MCO1 = HSE/4 on PA8")
 
 
 def cmd_flash_capture() -> None:
@@ -221,6 +229,7 @@ COMMANDS = {
     "flash-capture": cmd_flash_capture,
     "reset-target": cmd_reset_target,
     "config": cmd_config,
+    "mco": cmd_mco,
 }
 
 

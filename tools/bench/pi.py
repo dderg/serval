@@ -177,3 +177,31 @@ def prepare_printer(config: Path = REPO_CFG) -> None:
     wait_ready()
     push_config(config)
     firmware_restart()
+
+
+MCO_LIVE_CFG = "~/klipper/tools/bench/openocd-target-live.cfg"
+MCO_WRITES = (
+    (0x40023830, 0x00000001, 0x00000000),
+    (0x40023808, 0x06400000, 0x07600000),
+    (0x40020008, 0x00030000, 0x00030000),
+    (0x40020024, 0x00000000, 0x0000000F),
+    (0x40020000, 0x00020000, 0x00030000),
+)
+MCO_WORD = re.compile(r"(0x[0-9a-fA-F]{8}):\s+([0-9a-fA-F]{8})")
+
+
+def enable_mco() -> None:
+    writes = "; ".join(
+        f"mmw {a:#010x} {s:#010x} {c:#010x}" for a, s, c in MCO_WRITES
+    )
+    reads = "; ".join(f"mdw {a:#010x}" for a, _, _ in MCO_WRITES)
+    output = ssh(
+        f'openocd -f {MCO_LIVE_CFG} -c "init; {writes}; {reads}; exit" 2>&1'
+    )
+    words = {int(a, 16): int(v, 16) for a, v in MCO_WORD.findall(output)}
+    for address, set_bits, clear_bits in MCO_WRITES:
+        mask = set_bits | clear_bits
+        if address not in words or words[address] & mask != set_bits:
+            raise BenchError(
+                f"F401 MCO1 setup did not stick at {address:#010x}: {output}"
+            )

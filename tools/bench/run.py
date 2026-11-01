@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import secrets
 import time
 import urllib.parse
 import urllib.request
@@ -18,12 +19,14 @@ from datetime import datetime
 from pathlib import Path
 
 import lock
+import sim_config
 import throttle
 from capture import Capture
 from pi import (
     PI_LOGS,
     REPO_CFG,
     BenchError,
+    enable_mco,
     http,
     prepare_printer,
     printer_state,
@@ -33,6 +36,7 @@ from pi import (
     ssh,
     upload,
 )
+from sim_config import SimConfig
 
 STEP_TAP_ENV = "SERVAL_STEP_TAP_DIR"
 STEP_TAP_DROPIN = f"{throttle.DROPIN_DIR}/bench-step-tap.conf"
@@ -130,6 +134,19 @@ def step_tap_session(enabled: bool) -> Iterator[None]:
         restart_klipper()
 
 
+def build_sim(path: Path, config: Path, lines: list[str]) -> SimConfig:
+    import analyze
+
+    motors = analyze.read_motors(analyze._config_sections(config.read_text()))
+    return sim_config.load(
+        path,
+        config_id=secrets.randbelow(0xFFFF) + 1,
+        step_mm={m.role: m.step_mm for m in motors},
+        dir_sign={m.role: m.dir_sign for m in motors},
+        start_xyz=analyze._kinematic_start(lines[0]),
+    )
+
+
 def run(
     gcode: Path,
     runs_dir: Path,
@@ -138,10 +155,12 @@ def run(
     host_throttle: throttle.Throttle | None = None,
     events: bool = False,
     tap: bool = False,
+    sim_path: Path | None = None,
 ) -> Path:
     if tap and not events:
         raise BenchError("--step-tap is only analyzable with --events")
     lines, stats = sanitize(gcode.read_text())
+    sim = None if sim_path is None else build_sim(sim_path, config, lines)
     run_dir = runs_dir / datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir.mkdir(parents=True)
     sanitized = ("\n".join(lines) + "\n").encode()
@@ -157,6 +176,7 @@ def run(
         "config": str(config.resolve()),
         "deployed": deployed,
         "sanitized_lines": len(lines),
+        "sim": None if sim_path is None else str(sim_path.resolve()),
         **stats,
     }
     with (
@@ -165,7 +185,9 @@ def run(
     ):
         summary["host_throttle"] = applied_throttle
         summary["step_tap"] = tap
-        execute(run_dir, remote_name, summary, timeout_s, events, tap)
+        if sim is not None and sim.expect_mco:
+            enable_mco()
+        execute(run_dir, remote_name, summary, timeout_s, events, tap, sim)
     return run_dir
 
 
@@ -176,8 +198,14 @@ def execute(
     timeout_s: float,
     events: bool,
     tap: bool,
+    sim: SimConfig | None,
 ) -> None:
-    capture = Capture(run_dir, both_edges_mask=0, events=events)
+    capture = Capture(
+        run_dir,
+        both_edges_mask=0 if sim is None else sim.both_edges_mask,
+        events=events,
+        sim=sim,
+    )
     final: dict = {}
     failure: BaseException | None = None
     started = time.time()
@@ -241,6 +269,12 @@ def main() -> None:
         action="store_true",
         help="record the host's commanded step frames (needs --events)",
     )
+    parser.add_argument(
+        "--sim",
+        type=Path,
+        help="simulated peripherals JSON (e.g. configs/full.sim.json; pair with "
+        "--config configs/full.cfg)",
+    )
     lock.add_timeout_argument(parser)
     args = parser.parse_args()
     with lock.bench_lock(args.lock_timeout):
@@ -253,6 +287,7 @@ def main() -> None:
                 throttle.Throttle(args.host_cpus, args.host_max_mhz),
                 args.events,
                 args.step_tap,
+                args.sim,
             )
         )
 
