@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import struct
+import threading
 import time
 
 from tools.sim.emulators.beacon_mcu import BeaconMcuStub
@@ -54,6 +55,37 @@ class CartographerMcuStub(BeaconMcuStub):
     CLOCK_FREQ = CLOCK_FREQ
     STUB_NAME = "cartographer-stub"
     SAMPLE_PERIOD_S = 1.0 / 200.0
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._sample_thread_lock = threading.Lock()
+
+    def _start_sample_thread(self) -> None:
+        with self._sample_thread_lock:
+            if self._sample_thread is None:
+                self._sample_thread = threading.Thread(
+                    target=self._sample_loop,
+                    name="cartographer-stub-tx",
+                    daemon=True,
+                )
+                self._sample_thread.start()
+
+    def _start_homing_monitor(self) -> None:
+        self._start_sample_thread()
+
+    def _sampling_done(self) -> bool:
+        with self._sample_thread_lock:
+            if self._stream_en or self._home_active:
+                return False
+            self._sample_thread = None
+            return True
+
+    def _scan_triggered(self, count: int) -> bool:
+        if self._threshold_trigger <= 0:
+            return False
+        if self._home_trigger_invert:
+            return count <= self._threshold_untrigger
+        return count >= self._threshold_trigger
 
     def _build_handlers(self) -> dict:
         return {
@@ -95,7 +127,10 @@ class CartographerMcuStub(BeaconMcuStub):
             step_tracking_will_fire_at_bed_contact = (
                 self._step_thread is not None
             )
-            if not step_tracking_will_fire_at_bed_contact:
+            if step_tracking_will_fire_at_bed_contact:
+                if self._clock is not None:
+                    self._start_contact_monitor()
+            else:
                 self._homing_trigger_timer = self._start_virtual_timer(
                     self._homing_trigger_delay, self._fire_contact_trigger
                 )
@@ -158,11 +193,12 @@ class CartographerMcuStub(BeaconMcuStub):
         )
 
     def _sample_loop(self) -> None:
-        """One sample every SAMPLE_PERIOD_S of printer time. With a world
+        """One sample every SAMPLE_PERIOD_S of printer time while streaming
+        or SCAN-homing, as the firmware samples continuously. With a world
         clock the loop holds a pacer seat, so virtual time cannot run past
-        a sample before it is taken, and each sample reads Z from the step
-        counter at that instant: extrapolating from the step poll mid-move
-        reported positions an MCU-load-dependent distance off the bed."""
+        a sample before it is taken; each sample reads Z from the step
+        counter at that instant and a homing trigger fires at that
+        sample's clock."""
         with contextlib.ExitStack() as stack:
             pacer = (
                 stack.enter_context(HarnessPacer(self._clock))
@@ -170,7 +206,7 @@ class CartographerMcuStub(BeaconMcuStub):
                 else None
             )
             batch_sock = None
-            while not self._stop.is_set() and self._stream_en:
+            while not self._stop.is_set() and not self._sampling_done():
                 if pacer is not None:
                     if not pacer.sleep(self.SAMPLE_PERIOD_S, self._stop):
                         return
@@ -207,10 +243,13 @@ class CartographerMcuStub(BeaconMcuStub):
 
                 freq = self._z_to_frequency(z_at_sample)
                 data_value = self._freq_to_count(freq)
-                self._send_msg(
-                    "cartographer_data clock=%u data=%u temp=%u",
-                    clock=self._clock_at(sample_vt),
-                    data=data_value,
-                    temp=TEMP_RAW_25C,
-                )
-                self.tx_sample_count += 1
+                if self._stream_en:
+                    self._send_msg(
+                        "cartographer_data clock=%u data=%u temp=%u",
+                        clock=self._clock_at(sample_vt),
+                        data=data_value,
+                        temp=TEMP_RAW_25C,
+                    )
+                    self.tx_sample_count += 1
+                if self._home_active and self._scan_triggered(data_value):
+                    self._fire_homing_trigger()

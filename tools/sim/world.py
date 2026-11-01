@@ -166,7 +166,9 @@ def vtime_shm_name_alloc() -> str:
 
 # struct vtime_shm (tools/sim/preload/vtime.h): harness_paced u32 at 8, pace
 # anchors (virtual ns, real CLOCK_MONOTONIC ns) at 16 and 24, pacer slot
-# count u32 at 32, pacer slots {u32 active, u32, u64 floor, u64 slack} from 40.
+# count u32 at 32, pacer slots {u32 active, u32, u64 floor, u64 slack} from 40,
+# device link slot count u32 at 3600, devices_handling i32 at 3604, device
+# links {u32 pts + 1, u32, u64 written, u64 consumed} from 3608.
 _HARNESS_PACED_OFFSET = 8
 _HARNESS_PACE_ANCHOR_OFFSET = 16
 _PACER_SLOTS_USED_OFFSET = 32
@@ -182,8 +184,14 @@ _HOST_TID_OFFSET = 3344
 _MAX_PACERS = 8
 _MAX_WAITERS = 128
 _MAX_HOST_THREADS = 64
-# Pacer slots the harness reserves before any MCU process claims one.
-HARNESS_PACER_SLOTS = 3
+_LINK_SLOTS_USED_OFFSET = 3600
+_LINKS_OFFSET = 3608
+_LINK_SLOT_SIZE = 24
+_MAX_LINKS = 8
+# Pacer and device-link slots the harness reserves before any MCU process
+# claims one.
+HARNESS_PACER_SLOTS = 4
+HARNESS_LINK_SLOTS = 4
 
 
 def vtime_create(shm_name: str, start_ns: int = 1_000_000_000) -> None:
@@ -191,6 +199,7 @@ def vtime_create(shm_name: str, start_ns: int = 1_000_000_000) -> None:
     shm = bytearray(VTIME_SHM_SIZE)
     struct.pack_into("<Q", shm, 0, start_ns)
     struct.pack_into("<I", shm, _PACER_SLOTS_USED_OFFSET, HARNESS_PACER_SLOTS)
+    struct.pack_into("<I", shm, _LINK_SLOTS_USED_OFFSET, HARNESS_LINK_SLOTS)
     with open(path, "wb") as f:
         f.write(shm)
     os.chmod(path, 0o666)
@@ -217,6 +226,7 @@ class VirtualClock:
         self._lock = threading.Lock()
         self._free_depth = 0
         self._free_pacers = list(range(HARNESS_PACER_SLOTS))
+        self._free_links = list(range(HARNESS_LINK_SLOTS))
 
     def now_ns(self) -> int:
         return struct.unpack_from("<Q", self._shm)[0]
@@ -268,6 +278,28 @@ class VirtualClock:
         with self._lock:
             self._free_pacers.append(slot)
 
+    def claim_link(self, slave_fd: int) -> "DeviceLink":
+        rdev = os.fstat(slave_fd).st_rdev
+        pts = (os.major(rdev) - 136) * 256 + os.minor(rdev)
+        with self._lock:
+            if not self._free_links:
+                raise SimError(
+                    f"more than {HARNESS_LINK_SLOTS} emulated devices read "
+                    "from klippy at once"
+                )
+            slot = self._free_links.pop()
+        base = _LINKS_OFFSET + slot * _LINK_SLOT_SIZE
+        struct.pack_into("<QQ", self._shm, base + 8, 0, 0)
+        struct.pack_into("<I", self._shm, base, pts + 1)
+        return DeviceLink(self._shm, base)
+
+    def release_link(self, link: "DeviceLink") -> None:
+        struct.pack_into("<I", self._shm, link.base, 0)
+        with self._lock:
+            self._free_links.append(
+                (link.base - _LINKS_OFFSET) // _LINK_SLOT_SIZE
+            )
+
     def holds(self) -> str:
         """What currently stops virtual time: the shm state a wedge leaves."""
         shm = self._shm
@@ -278,11 +310,23 @@ class VirtualClock:
         lock_owner, host_pid, wake_epoch, idle_epoch = struct.unpack_from(
             "<IIQQ", shm, _CLOCK_LOCK_OWNER_OFFSET
         )
+        links_used, devices_handling = struct.unpack_from(
+            "<Ii", shm, _LINK_SLOTS_USED_OFFSET
+        )
         parts = [
             f"host_present={host_present} host_running={host_running} "
             f"host_pid={host_pid} wake_epoch={wake_epoch} "
-            f"idle_epoch={idle_epoch} clock_lock_owner={lock_owner}"
+            f"idle_epoch={idle_epoch} clock_lock_owner={lock_owner} "
+            f"devices_handling={devices_handling}"
         ]
+        for i in range(min(links_used, _MAX_LINKS)):
+            pts, _, written, consumed = struct.unpack_from(
+                "<IIQQ", shm, _LINKS_OFFSET + i * _LINK_SLOT_SIZE
+            )
+            if pts and written != consumed:
+                parts.append(
+                    f"device pts{pts - 1} unread={written - consumed}B"
+                )
         used = struct.unpack_from("<I", shm, _PACER_SLOTS_USED_OFFSET)[0]
         for i in range(min(used, _MAX_PACERS)):
             active, _, floor, slack = struct.unpack_from(
@@ -322,6 +366,25 @@ class VirtualClock:
             if rest.split()[0] == "R":
                 parts.append(f"host thread {tid} ({comm}) runnable")
         return "; ".join(parts)
+
+
+class DeviceLink:
+    """An emulated device's input from klippy, on the virtual clock.
+
+    klippy's libvtime counts every byte it writes to the device's pty and
+    virtual time stands still until the emulator reports them handled, so
+    a request is answered at the instant klippy sent it however late the
+    emulator thread gets scheduled.
+    """
+
+    def __init__(self, shm: mmap.mmap, base: int):
+        self._shm = shm
+        self.base = base
+
+    def consumed(self, nbytes: int) -> None:
+        offset = self.base + 16
+        total = struct.unpack_from("<Q", self._shm, offset)[0] + nbytes
+        struct.pack_into("<Q", self._shm, offset, total)
 
 
 class HarnessPacer:
@@ -1000,6 +1063,8 @@ class SimWorld:
                 str(self.klippy_log),
                 "-a",
                 self.api_socket,
+                "-I",
+                str(self.workdir / "printer_input"),
             ],
             env=env,
             stdout=stdout_log,

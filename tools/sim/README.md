@@ -40,11 +40,16 @@ SIM_JITTER=3 tools/sim/run.sh test  # share a cpuset with 3 bursty CPU burners
   command handling share the Linux scheduler thread; no background thread
   mutates the runtime. The next scheduler deadline bounds virtual time
   with 400 µs slack, and an imminent timer waits on the virtual clock
-  instead of spinning on it. Step queues notify the shim (auto-endstops,
-  Beacon Z tracking). The timer-in-past and timer-too-close checks stay
-  live; only the tick-gap fault is compiled out, because the sim's tick is
-  a paced thread rather than an interrupt. No source patching happens at
-  image build — the sim is a first-class build config.
+  instead of spinning on it. The pacer registers inside `timer_init`,
+  before the MCU clock starts, and holds the clock from then on: while it
+  was released until the first timer dispatch, a starved MCU let virtual
+  time leap tens of seconds past its boot timers ("Rescheduled timer in
+  the past" before klippy ever connected). Step queues notify the shim
+  (auto-endstops, Beacon Z tracking). The timer-in-past and
+  timer-too-close checks stay live; only the tick-gap fault is compiled
+  out, because the sim's tick is a paced thread rather than an interrupt.
+  No source patching happens at image build — the sim is a first-class
+  build config.
 - Every process (MCUs, klippy) preloads `libvtime` and shares one virtual
   clock, which is event driven rather than tied to real time:
   - Every timed wait (sleeps, `poll`/`epoll`/`select`, futexes, condvars,
@@ -64,6 +69,19 @@ SIM_JITTER=3 tools/sim/run.sh test  # share a cpuset with 3 bursty CPU burners
     timer, a klippy thread starting to run) also takes: an advancer
     preempted between the two can no longer step past a floor that
     dropped meanwhile.
+  - Bytes klippy writes to a device (an MCU's pty, or an emulator's
+    registered with `VirtualClock.claim_link`) hold the clock until the
+    device has read and handled them, so a request is answered at the
+    virtual instant klippy sent it however late the device process is
+    scheduled (a `get_clock` answered a scheduling-dependent time later
+    skews clock sync). An MCU stepping to its own imminent timer may run
+    ahead of its unread input; its next task round reads it. The firmware
+    is built with `_FORTIFY_SOURCE`, so libvtime also intercepts
+    `__read_chk`, `__ppoll_chk` and `__poll_chk`: without them the MCU's
+    console reads and idle ppoll bypassed the shim entirely.
+  - A process klippy forks drops the host role in the child, so its
+    waits and its exit cannot touch klippy's accounting (a forked child's
+    exit used to clear `host_present` for the whole world).
   - While test code runs between world calls, virtual time is paced at
     real time (the printer idles while its "operator" thinks); inside a
     world wait (`gcode`, `print_file`, log/status waits, `wait_until`) it
@@ -72,7 +90,17 @@ SIM_JITTER=3 tools/sim/run.sh test  # share a cpuset with 3 bursty CPU burners
     on the clock too: `world.wait_until(pred, ...)`, `EndstopWall`,
     `EndstopPulser`, or a `HarnessPacer` for new emulators. A plain
     `time.sleep` polling loop running beside a free-running wait samples
-    the printer at an arbitrary, load-dependent cadence.
+    the printer at an arbitrary, load-dependent cadence. A poke that must
+    land at a printer position (closing a switch once an axis passes a
+    point) belongs inside the `wait_until` predicate: after the wait
+    returns, a world held free-running by another call runs on before the
+    poke lands. The Beacon/Cartographer emulators sample, check homing
+    thresholds and check bed contact on pacer seats, reading Z from the
+    step counter at each check; the harness reserves four seats.
+  - klippy writes its log from its own thread, so a gcode response can
+    arrive before the lines it printed: assert on log text with
+    `mark_log()` + `expect_log(needle)`, not `klippy_log_text()` right
+    after `gcode_ok`.
 - Harness timeouts are virtual seconds (`VirtualDeadline`); a run whose
   virtual clock stops advancing for 60 s of real time fails as wedged, and
   the error names what holds the clock (host threads, floors, the lock).
@@ -94,6 +122,8 @@ SIM_JITTER=3 tools/sim/run.sh test  # share a cpuset with 3 bursty CPU burners
   workers by default and CI shards run sequentially; `SIM_TEST_JOBS=N`
   overrides (0 = sequential), and `SIM_TEST_TARGETS` narrows the run to
   specific test files (how the CI shards split the suite across runners).
+  Each klippy gets its own `-I` input tty in its world directory: parallel
+  worlds racing on the default `/tmp/printer` symlink failed klippy start.
 - `VTIME_SPEED` caps virtual seconds per real second inside world waits
   (tests default to uncapped). A world built with `host_gated=False`
   (`test_print_pressure.py`) instead runs free at its speed whether or not

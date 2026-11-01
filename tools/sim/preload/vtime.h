@@ -8,7 +8,15 @@
 #define VTIME_MAX_PACERS 8
 #define VTIME_MAX_WAITERS 128
 #define VTIME_MAX_HOST_THREADS 64
+#define VTIME_MAX_LINKS 8
 #define VTIME_SHM_BYTES 4096
+
+struct vtime_device_link {
+    _Atomic uint32_t pts_plus_one;
+    uint32_t reserved;
+    _Atomic uint64_t written;
+    _Atomic uint64_t consumed;
+};
 
 // A pacer is a thread that must observe every period of virtual time
 // (an MCU motion-tick thread). While any pacer is active, no participant
@@ -64,11 +72,16 @@ struct vtime_shm {
     _Atomic uint64_t host_wake_epoch;
     _Atomic uint64_t host_idle_epoch;
     _Atomic uint32_t host_tid[VTIME_MAX_HOST_THREADS];
+    _Atomic uint32_t link_slots_used;
+    _Atomic int32_t devices_handling;
+    struct vtime_device_link links[VTIME_MAX_LINKS];
 };
 
 _Static_assert(sizeof(struct vtime_shm) <= VTIME_SHM_BYTES,
                "tools/sim/world.py VTIME_SHM_SIZE must cover struct vtime_shm");
 _Static_assert(__builtin_offsetof(struct vtime_shm, host_tid) == 3344,
                "tools/sim/world.py _HOST_TID_OFFSET");
+_Static_assert(__builtin_offsetof(struct vtime_shm, links) == 3608,
+               "tools/sim/world.py _LINKS_OFFSET");
 
 #endif
