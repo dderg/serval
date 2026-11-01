@@ -628,7 +628,7 @@ impl<S: SpanSink> Pump<S> {
         let ring_depth = (self.callbacks.ring_depth_of)(key);
         let lane_seam_track = spans
             .last()
-            .map(|last| (last.end_clock, super::sched::span_ends_at_rest(last)));
+            .map(|last| (last.end_clock, last.ends_at_rest(), last.clock_freq_hz));
         // Hold merging is off during drip cohorts: their release floor is
         // view-count-based and coalescing would starve it.
         let merge_holds = self.cohort.is_none();
@@ -637,9 +637,10 @@ impl<S: SpanSink> Pump<S> {
             .entry(key)
             .or_insert_with(|| AxisQueue::new(ring_depth));
         q.lead_secs = lead_secs;
-        if let Some((end, at_rest)) = lane_seam_track {
+        if let Some((end, at_rest, slope_hz)) = lane_seam_track {
             q.seam_end_clock = Some(end);
             q.seam_end_at_rest = at_rest;
+            q.seam_slope_hz = Some(slope_hz);
         }
         q.staged_motion += spans
             .iter()
@@ -667,7 +668,12 @@ impl<S: SpanSink> Pump<S> {
         };
         let at_start_clock = first.start_clock;
         if epoch.is_fresh() {
-            return if epoch == crate::anchor::StreamEpoch::Rejoin {
+            let reslope = self
+                .queues
+                .get(&key)
+                .and_then(|q| q.seam_slope_hz)
+                .is_some_and(|slope_hz| slope_hz != first.clock_freq_hz);
+            return if epoch == crate::anchor::StreamEpoch::Rejoin && !reslope {
                 LaneCut::RejoinGap { at_start_clock }
             } else {
                 LaneCut::Reanchor { at_start_clock }

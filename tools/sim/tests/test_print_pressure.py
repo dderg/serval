@@ -1,19 +1,12 @@
 """Producer-throughput gate on real firmware: the dense top layers of the
 Voron cube that repeatedly exhausted the anchor lead on the Trident bench.
 
-Virtual time outruns the wall clock (vtime_speed > 1), so every host stage
-must produce that multiple of realtime — the way the bench Pi must produce
-1x with a fraction of a dev machine's single-core speed. A producer deficit
-surfaces here as an anchor underrun instead of minutes into a physical
-print.
-
-The multiplier is capped by the harness, not the pipeline: the simulated
-MCU replays its 10 kHz motion tick in wall time scaled by the same factor,
-and at 3x on a fast laptop the MCU process saturates — its serial task
-starves, acks stop, and the transport wedges into a Backpressure stall
-that says nothing about host throughput. 2x is stable locally; 1.5x is
-the CI default. Raise it locally via SIM_PRESSURE_VTIME for a stricter
-pre-deploy check."""
+Virtual time runs free at PRESSURE x the wall clock instead of waiting for
+klippy (host_gated=False), so every host stage must produce that multiple of
+realtime — the way the bench Pi must produce 1x with a fraction of a dev
+machine's single-core speed. A producer deficit surfaces here as an anchor
+underrun instead of minutes into a physical print. 1.5x is the CI default;
+raise it locally via SIM_PRESSURE_VTIME for a stricter pre-deploy check."""
 
 import os
 import pathlib
@@ -38,6 +31,7 @@ def test_dense_top_layers_survive_pi_pressure(sim_world):
         lambda w: configs.neptune_print_config(w.h7_pty, str(w.gcode_dir)),
         dual_mcu=False,
         vtime_speed=PRESSURE,
+        host_gated=False,
     )
     world.gcode_ok("SET_KINEMATIC_POSITION X=0 Y=0 Z=0", timeout=10)
     print_time = world.print_file(GCODE, timeout=600)

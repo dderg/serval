@@ -305,6 +305,7 @@ pub trajectory::continuous::ClockedMotorSpan::stream_t_end: f64
 pub trajectory::continuous::ClockedMotorSpan::stream_t_start: f64
 impl trajectory::continuous::ClockedMotorSpan
 pub fn trajectory::continuous::ClockedMotorSpan::clock_at_stream_time(&self, f64) -> core::result::Result<u64, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ClockedMotorSpan::ends_at_rest(&self) -> bool
 pub fn trajectory::continuous::ClockedMotorSpan::eval_at_clock(&self, u64) -> core::result::Result<trajectory::continuous::Pva, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::ClockedMotorSpan::position_at_clock(&self, u64) -> core::result::Result<f64, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::ClockedMotorSpan::split_max_duration(&self) -> core::result::Result<alloc::vec::Vec<Self>, trajectory::continuous::ContinuousError>
@@ -568,6 +569,7 @@ pub trajectory::ClockedMotorSpan::stream_t_end: f64
 pub trajectory::ClockedMotorSpan::stream_t_start: f64
 impl trajectory::continuous::ClockedMotorSpan
 pub fn trajectory::continuous::ClockedMotorSpan::clock_at_stream_time(&self, f64) -> core::result::Result<u64, trajectory::continuous::ContinuousError>
+pub fn trajectory::continuous::ClockedMotorSpan::ends_at_rest(&self) -> bool
 pub fn trajectory::continuous::ClockedMotorSpan::eval_at_clock(&self, u64) -> core::result::Result<trajectory::continuous::Pva, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::ClockedMotorSpan::position_at_clock(&self, u64) -> core::result::Result<f64, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::ClockedMotorSpan::split_max_duration(&self) -> core::result::Result<alloc::vec::Vec<Self>, trajectory::continuous::ContinuousError>

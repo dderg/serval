@@ -902,7 +902,7 @@ impl StepcompressEndpoint {
         self.lane_of_oid(oid).is_some()
     }
 
-    pub fn reset_position(&mut self, pos_steps: &[i64]) -> Result<(), SendError> {
+    pub fn reset_position(&mut self, pos_steps: &[f64]) -> Result<(), SendError> {
         if pos_steps.len() != self.lanes.len() {
             return Err(self.fatal(&format!(
                 "position seed has {} entries for {} configured axes",
@@ -910,8 +910,13 @@ impl StepcompressEndpoint {
                 self.lanes.len()
             )));
         }
+        let counts: Vec<i64> = pos_steps
+            .iter()
+            .enumerate()
+            .map(|(motor, &steps)| self.shim.count_resting_at(motor, steps))
+            .collect();
         self.abort_outbound();
-        for (motor, &count) in pos_steps.iter().enumerate() {
+        for (motor, count) in counts.into_iter().enumerate() {
             self.reset_motor_position(motor, count)
                 .map_err(SendError::Fatal)?;
             let mcu_count = if self.shim.invert_dir(motor) {
@@ -1854,6 +1859,12 @@ impl StepcompressEndpoint {
                          {error}"
                     ))
                 })?;
+                if chunk_end == buzz.stream_t_end && !view.ends_at_rest() {
+                    return Err(self.fatal(&format!(
+                        "resonance buzz closes at {chunk_end} s still moving: the shim would \
+                         not sample its end, and the motor would rest off the base it closes on"
+                    )));
+                }
                 let chunk_end_clock = view.end_clock;
                 self.shim
                     .push_spans(motor, &[view])
@@ -2131,16 +2142,16 @@ impl StepcompressEndpoint {
         let Some(view) = spans.iter().rev().find(|view| view.signal.motor_mask == 0) else {
             return Ok(());
         };
-        let pva = view.eval_at_clock(view.end_clock).map_err(|error| {
+        let end = view.signal.position(view.stream_t_end).map_err(|error| {
             self.motor_fatal(
                 motor,
                 &format!(
-                    "queued view does not evaluate at its own end clock {}: {error}",
-                    view.end_clock
+                    "queued view does not evaluate at its own end {} s: {error}",
+                    view.stream_t_end
                 ),
             )
         })?;
-        self.lanes[motor].commanded_base = pva.position;
+        self.lanes[motor].commanded_base = end;
         Ok(())
     }
 

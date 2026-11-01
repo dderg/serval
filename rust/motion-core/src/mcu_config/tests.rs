@@ -657,13 +657,13 @@ fn stepcompress_corexy_cfg() -> McuAxisConfig {
 }
 
 #[test]
-fn stepcompress_seed_counts_put_a_follower_lane_at_the_stream_origin() {
+fn stepcompress_seed_steps_put_a_follower_lane_at_the_stream_origin() {
     // The bench crash: 13 mm of net extrusion sat in the retained history
     // while `stream_open` restarted the odometer's follower coordinate at
     // zero, so the seeded shim counter and the first piece after the
     // re-anchor disagreed by the whole extrude — one sample of 18828 steps.
     let cfg = stepcompress_toolhead_cfg();
-    let counts = stepcompress_seed_counts(&cfg, geometry::MachinePos([60.0, 60.0, 20.0])).unwrap();
+    let steps = stepcompress_seed_steps(&cfg, geometry::MachinePos([60.0, 60.0, 20.0])).unwrap();
     let lane_origin = reanchor_stream_pos(geometry::GcodePos([60.0, 60.0, 20.0]))[3];
     let lane = crate::homing::stepcompress_lane(
         &cfg,
@@ -674,27 +674,24 @@ fn stepcompress_seed_counts_put_a_follower_lane_at_the_stream_origin() {
     )
     .unwrap()
     .unwrap();
-    assert_eq!(counts, vec![lane.mm_to_steps(lane_origin)]);
-    assert_eq!(counts, vec![0]);
+    assert_eq!(steps, vec![lane_origin / lane.microstep_distance]);
+    assert_eq!(steps, vec![0.0]);
 }
 
 #[test]
-fn stepcompress_seed_counts_are_motor_frame_for_spatial_lanes() {
+fn stepcompress_seed_steps_are_motor_frame_for_spatial_lanes() {
     let cfg = stepcompress_corexy_cfg();
-    let counts = stepcompress_seed_counts(&cfg, geometry::MachinePos([10.0, 4.0, 0.0])).unwrap();
-    assert_eq!(
-        counts,
-        vec![(14.0 / 0.0125) as i64, (6.0 / 0.0125) as i64, 0]
-    );
+    let steps = stepcompress_seed_steps(&cfg, geometry::MachinePos([10.0, 4.0, 0.0])).unwrap();
+    assert_eq!(steps, vec![14.0 / 0.0125, 6.0 / 0.0125, 0.0]);
 }
 
 #[test]
-fn stepcompress_seed_counts_skip_a_phase_only_config() {
-    let counts =
-        stepcompress_seed_counts(&corexy_cfg(), geometry::MachinePos([1.0, 2.0, 3.0])).unwrap();
+fn stepcompress_seed_steps_skip_a_phase_only_config() {
+    let steps =
+        stepcompress_seed_steps(&corexy_cfg(), geometry::MachinePos([1.0, 2.0, 3.0])).unwrap();
     assert!(
-        counts.is_empty(),
-        "a phase lane keeps no host step counter, so it takes no shim seed; got {counts:?}"
+        steps.is_empty(),
+        "a phase lane keeps no host step counter, so it takes no shim seed; got {steps:?}"
     );
 }
 

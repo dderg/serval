@@ -24,7 +24,6 @@ and the switches can be driven by hand from the test.
 from __future__ import annotations
 
 import threading
-import time
 
 import pytest
 
@@ -80,40 +79,42 @@ def _edges(control, pins) -> list[int]:
     return [control.gpio_edges(chip, line) for chip, line in pins]
 
 
-def _sample_while_peer_advances(control, pins, peer_target):
-    start = _edges(control, pins)
+def _sample_while_peer_advances(world, control, pins, peer_target):
+    start = []
     advanced = [0] * len(pins)
-    deadline = time.monotonic() + EDGE_PROGRESS_TIMEOUT_S
-    while time.monotonic() < deadline:
-        advanced = [
-            value - base for value, base in zip(_edges(control, pins), start)
-        ]
-        if advanced[1] >= peer_target:
-            break
-        time.sleep(0.01)
+
+    def peer_reached_target():
+        edges = _edges(control, pins)
+        if not start:
+            start.extend(edges)
+        advanced[:] = [value - base for value, base in zip(edges, start)]
+        return advanced[1] >= peer_target
+
+    world.wait_until(
+        peer_reached_target,
+        EDGE_PROGRESS_TIMEOUT_S,
+        f"step pin {pins[1]} to advance {peer_target} edges",
+    )
     return advanced
 
 
-def _wait_for_edges(control, pins, start, minimum, timeout=60.0) -> list[int]:
+def _wait_for_edges(world, control, pins, start, minimum, timeout=60.0):
     advanced = [0] * len(pins)
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        advanced = [
-            value - base for value, base in zip(_edges(control, pins), start)
-        ]
-        if all(a >= minimum for a in advanced):
-            break
-        time.sleep(0.01)
+
+    def all_advanced():
+        edges = _edges(control, pins)
+        advanced[:] = [value - base for value, base in zip(edges, start)]
+        return all(a >= minimum for a in advanced)
+
+    world.wait_until(
+        all_advanced, timeout, f"step pins {pins} to advance {minimum} edges"
+    )
     return advanced
 
 
-def _wait_until_moving(control, pins, timeout: float = 60.0) -> None:
+def _wait_until_moving(world, control, pins, timeout: float = 60.0) -> None:
     start = _edges(control, pins)
-    advanced = _wait_for_edges(control, pins, start, MOVING_STEPS, timeout)
-    if not all(value >= MOVING_STEPS for value in advanced):
-        raise AssertionError(
-            f"motors on step pins {pins} never started stepping: {advanced}"
-        )
+    _wait_for_edges(world, control, pins, start, MOVING_STEPS, timeout)
 
 
 class _GcodeThread(threading.Thread):
@@ -159,7 +160,7 @@ def _assert_both_motors_step(world, control, step_pins, script, label):
     start = _edges(control, step_pins)
     world.gcode_ok(script, timeout=120)
     world.gcode_ok("M400", timeout=120)
-    advanced = _wait_for_edges(control, step_pins, start, MOVING_STEPS)
+    advanced = _wait_for_edges(world, control, step_pins, start, MOVING_STEPS)
     assert all(a >= MOVING_STEPS for a in advanced), (
         f"{label}: '{script}' pulsed {advanced} step-pin edges on"
         f" {list(step_pins)}; both motors must step again once no endstop"
@@ -198,9 +199,9 @@ def _home_with_staggered_trips(
     homing = _GcodeThread(world, f"G28 {axis}")
     homing.start()
     try:
-        _wait_until_moving(control, step_pins)
+        _wait_until_moving(world, control, step_pins)
         bound_pre, peer_pre = _sample_while_peer_advances(
-            control, watched, MOVING_STEPS
+            world, control, watched, MOVING_STEPS
         )
         assert bound_pre >= RUNNING_EDGE_MIN and peer_pre >= RUNNING_EDGE_MIN, (
             f"{axis} approach must pulse both motors before any trip:"
@@ -209,14 +210,13 @@ def _home_with_staggered_trips(
         )
 
         switch_control.set_gpio_input(*first_switch, 1)
-        deadline = time.monotonic() + SUPPRESS_LATENCY_TIMEOUT_S
-        while "keyed_freeze_cut" not in world.events_text():
-            assert time.monotonic() < deadline, (
-                f"{axis}: first motor was not frozen before the deadline"
-            )
-            time.sleep(0.01)
+        world.wait_until(
+            lambda: "keyed_freeze_cut" in world.events_text(),
+            SUPPRESS_LATENCY_TIMEOUT_S,
+            f"{axis}: the first motor to freeze",
+        )
         bound_post, peer_post = _sample_while_peer_advances(
-            control, watched, MOVING_STEPS
+            world, control, watched, MOVING_STEPS
         )
         _assert_split_after_trip(
             f"G28 {axis}",
@@ -361,16 +361,14 @@ def test_abort_after_first_trip_leaves_no_suppression(sim_world):
     )
     homing.start()
     try:
-        _wait_until_moving(control, step_pins)
+        _wait_until_moving(world, control, step_pins)
         control.set_gpio_input(*first_switch, 1)
-        deadline = time.monotonic() + SUPPRESS_LATENCY_TIMEOUT_S
+        deadline = world.vclock.deadline(SUPPRESS_LATENCY_TIMEOUT_S)
         while True:
             bound_post, peer_post = _sample_while_peer_advances(
-                control, (bound_pin, peer_pin), MOVING_STEPS
+                world, control, (bound_pin, peer_pin), MOVING_STEPS
             )
-            if bound_post <= SUPPRESSED_EDGE_SLOP:
-                break
-            if time.monotonic() >= deadline:
+            if bound_post <= SUPPRESSED_EDGE_SLOP or deadline.expired():
                 break
         _assert_split_after_trip(
             "_HOME_TEST AXIS=X",

@@ -27,6 +27,10 @@ pub struct AxisQueue {
     /// at rest.
     pub seam_end_clock: Option<u64>,
     pub seam_end_at_rest: bool,
+    /// The host→mcu slope the last enqueued view was cut against. A dwell
+    /// that re-synced the map hands the next views a new one; a forward
+    /// seam gap cannot carry the change, so the lane takes a full cut.
+    pub seam_slope_hz: Option<f64>,
 }
 
 /// A view whose every contributing term holds one position: dwell / idle-blanket
@@ -41,18 +45,6 @@ pub fn is_hold_span(span: &ClockedMotorSpan) -> bool {
 /// error is span-scaled and stays in the microseconds.
 pub const LANE_REJOIN_GAP_FLOOR_SECS: f64 = 1e-3;
 
-/// A lane whose last view ends slower than this parked at rest.
-pub const LANE_REJOIN_REST_VEL_MM_S: f64 = 1e-3;
-
-#[must_use]
-pub fn span_ends_at_rest(span: &ClockedMotorSpan) -> bool {
-    is_hold_span(span)
-        || span
-            .signal
-            .eval_pva(span.stream_t_end)
-            .is_ok_and(|pva| pva.velocity.abs() <= LANE_REJOIN_REST_VEL_MM_S)
-}
-
 impl AxisQueue {
     pub fn new(ring_depth: u32) -> Self {
         Self {
@@ -65,6 +57,7 @@ impl AxisQueue {
             wire_end_clock: None,
             seam_end_clock: None,
             seam_end_at_rest: false,
+            seam_slope_hz: None,
         }
     }
 

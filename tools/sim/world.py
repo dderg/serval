@@ -8,9 +8,12 @@ klippy host process. Tests and the CLI drive it over klippy's API socket.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import functools
 import itertools
 import json
+import mmap
 import os
 import pathlib
 import signal
@@ -23,8 +26,8 @@ from typing import Optional
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 VTIME_SHM_DIR = "/dev/shm"
-VTIME_SHM_SIZE = 256
-VTIME_STRUCT_FMT = "<QIIII"
+VTIME_SHM_SIZE = 8192
+UNBOUNDED_VTIME_SPEED = 1000.0
 
 READY_POLL_S = 0.05
 PRINT_POLL_S = 0.2
@@ -72,6 +75,26 @@ def _parse_gpio_pin(pin: str) -> tuple[str, int, int]:
     ):
         raise SimError(f"unsupported simulated motor pin {pin!r}")
     return mcu, int(chip[8:]), int(line[4:])
+
+
+def command_shapes(dict_path: pathlib.Path) -> tuple[dict[str, int], str]:
+    """Host→MCU command ids from an MCU data dictionary, and each command's
+    parameter kinds for libvtime's frame walker: "n" for a VLQ integer, "b"
+    for a length-prefixed buffer."""
+    if not dict_path.exists():
+        raise SimError(f"missing {dict_path}: rebuild the sim image")
+    commands = json.loads(dict_path.read_text())["commands"]
+    ids = {}
+    shapes = []
+    for fmt, msgid in commands.items():
+        name, *params = fmt.split()
+        ids[name] = msgid
+        kinds = "".join(
+            "b" if param.split("=", 1)[1] in ("%s", "%*s", "%.*s") else "n"
+            for param in params
+        )
+        shapes.append(f"{msgid}={kinds}")
+    return ids, ";".join(shapes)
 
 
 def configured_step_tracks(
@@ -161,11 +184,47 @@ def vtime_shm_name_alloc() -> str:
     return f"/vtime-{os.getpid()}-{next(_vtime_shm_counter)}"
 
 
+# struct vtime_shm (tools/sim/preload/vtime.h): harness_paced u32 at 8, pace
+# anchors (virtual ns, real CLOCK_MONOTONIC ns) at 16 and 24, pacer slot
+# count u32 at 32, pacer slots {u32 active, u32, u64 floor, u64 slack} from 40,
+# device link slot count u32 at 3600, devices_handling i32 at 3604, device
+# links {u32 pts + 1, u32, u64 written, u64 consumed} from 3608.
+_HARNESS_PACED_OFFSET = 8
+_HARNESS_PACE_ANCHOR_OFFSET = 16
+_PACER_SLOTS_USED_OFFSET = 32
+_PACERS_OFFSET = 40
+_PACER_SLOT_SIZE = 24
+_HOST_PRESENT_OFFSET = 232
+_WAITER_SLOTS_USED_OFFSET = 240
+_WAITER_TARGET_OFFSET = 248
+_WAITER_THREAD_OFFSET = 1272
+_WAITER_IS_FLOOR_OFFSET = 2808
+_CLOCK_LOCK_OWNER_OFFSET = 3320
+_HOST_TID_OFFSET = 3344
+_MAX_PACERS = 8
+_MAX_WAITERS = 128
+_MAX_HOST_THREADS = 64
+_LINK_SLOTS_USED_OFFSET = 3600
+_LINKS_OFFSET = 3608
+_LINK_SLOT_SIZE = 48
+_MAX_LINKS = 8
+_LINK_FAULTS_OFFSET = 3992
+_LINK_FAULT_SIZE = 24
+FAULT_DELAY, FAULT_DROP, FAULT_STALL, FAULT_LATE = 1, 2, 3, 4
+# Pacer and device-link slots the harness reserves before any MCU process
+# claims one.
+HARNESS_PACER_SLOTS = 4
+HARNESS_LINK_SLOTS = 4
+
+
 def vtime_create(shm_name: str, start_ns: int = 1_000_000_000) -> None:
     path = VTIME_SHM_DIR + shm_name
+    shm = bytearray(VTIME_SHM_SIZE)
+    struct.pack_into("<Q", shm, 0, start_ns)
+    struct.pack_into("<I", shm, _PACER_SLOTS_USED_OFFSET, HARNESS_PACER_SLOTS)
+    struct.pack_into("<I", shm, _LINK_SLOTS_USED_OFFSET, HARNESS_LINK_SLOTS)
     with open(path, "wb") as f:
-        header = struct.pack(VTIME_STRUCT_FMT, start_ns, 0, 0, 1, 0)
-        f.write(header + b"\x00" * (VTIME_SHM_SIZE - len(header)))
+        f.write(shm)
     os.chmod(path, 0o666)
 
 
@@ -174,6 +233,303 @@ def vtime_destroy(shm_name: str) -> None:
         os.unlink(VTIME_SHM_DIR + shm_name)
     except FileNotFoundError:
         pass
+
+
+class VirtualClock:
+    """The world's virtual clock as seen from the harness.
+
+    While test code runs between calls into the world, the printer idles at
+    real-time pace, the way it would while an operator types; inside a world
+    wait (`running_free`) virtual time runs as fast as the processes allow.
+    """
+
+    def __init__(self, shm_name: str):
+        with open(VTIME_SHM_DIR + shm_name, "r+b") as f:
+            self._shm = mmap.mmap(f.fileno(), VTIME_SHM_SIZE)
+        self._lock = threading.Lock()
+        self._free_depth = 0
+        self._free_pacers = list(range(HARNESS_PACER_SLOTS))
+        self._free_links = list(range(HARNESS_LINK_SLOTS))
+
+    def now_ns(self) -> int:
+        return struct.unpack_from("<Q", self._shm)[0]
+
+    def deadline(self, timeout: float) -> "VirtualDeadline":
+        return VirtualDeadline(self, timeout)
+
+    def pace(self) -> None:
+        struct.pack_into(
+            "<QQ",
+            self._shm,
+            _HARNESS_PACE_ANCHOR_OFFSET,
+            self.now_ns(),
+            time.monotonic_ns(),
+        )
+        struct.pack_into("<I", self._shm, _HARNESS_PACED_OFFSET, 1)
+
+    @contextlib.contextmanager
+    def running_free(self):
+        with self._lock:
+            if self._free_depth == 0:
+                struct.pack_into("<I", self._shm, _HARNESS_PACED_OFFSET, 0)
+            self._free_depth += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._free_depth -= 1
+                if self._free_depth == 0:
+                    self.pace()
+
+    def claim_pacer(self) -> int:
+        with self._lock:
+            if not self._free_pacers:
+                raise SimError(
+                    f"more than {HARNESS_PACER_SLOTS} harness threads pace "
+                    "the virtual clock at once"
+                )
+            return self._free_pacers.pop()
+
+    def hold_at(self, slot: int, vtime_ns: int) -> None:
+        base = _PACERS_OFFSET + slot * _PACER_SLOT_SIZE
+        struct.pack_into("<QQ", self._shm, base + 8, vtime_ns, 0)
+        struct.pack_into("<I", self._shm, base, 1)
+
+    def release_pacer(self, slot: int) -> None:
+        base = _PACERS_OFFSET + slot * _PACER_SLOT_SIZE
+        struct.pack_into("<I", self._shm, base, 0)
+        with self._lock:
+            self._free_pacers.append(slot)
+
+    def claim_link(self, slave_fd: int) -> "DeviceLink":
+        rdev = os.fstat(slave_fd).st_rdev
+        pts = (os.major(rdev) - 136) * 256 + os.minor(rdev)
+        with self._lock:
+            if not self._free_links:
+                raise SimError(
+                    f"more than {HARNESS_LINK_SLOTS} emulated devices read "
+                    "from klippy at once"
+                )
+            slot = self._free_links.pop()
+        base = _LINKS_OFFSET + slot * _LINK_SLOT_SIZE
+        struct.pack_into("<I5Q", self._shm, base + 4, 0, 0, 0, 0, 0, 0)
+        struct.pack_into("<I", self._shm, base, pts + 1)
+        return DeviceLink(self._shm, base)
+
+    def release_link(self, link: "DeviceLink") -> None:
+        struct.pack_into("<I", self._shm, link.base, 0)
+        with self._lock:
+            self._free_links.append(
+                (link.base - _LINKS_OFFSET) // _LINK_SLOT_SIZE
+            )
+
+    def link_slot_of_pts(self, pts: int) -> int:
+        used = struct.unpack_from("<I", self._shm, _LINK_SLOTS_USED_OFFSET)[0]
+        for slot in range(min(used, _MAX_LINKS)):
+            base = _LINKS_OFFSET + slot * _LINK_SLOT_SIZE
+            if struct.unpack_from("<I", self._shm, base)[0] == pts + 1:
+                return slot
+        raise SimError(f"no device link registered for pts{pts}")
+
+    def post_link_fault(
+        self, slot: int, kind: int, msgid: int, count: int, delay_ns: int
+    ) -> None:
+        base = _LINK_FAULTS_OFFSET + slot * _LINK_FAULT_SIZE
+        generation = struct.unpack_from("<I", self._shm, base)[0]
+        struct.pack_into(
+            "<IiIQ", self._shm, base + 4, kind, msgid, count, delay_ns
+        )
+        struct.pack_into("<I", self._shm, base, (generation + 1) & 0xFFFFFFFF)
+
+    def holds(self) -> str:
+        """What currently stops virtual time: the shm state a wedge leaves."""
+        shm = self._shm
+        now = self.now_ns()
+        host_present, host_running = struct.unpack_from(
+            "<Ii", shm, _HOST_PRESENT_OFFSET
+        )
+        lock_owner, host_pid, wake_epoch, idle_epoch = struct.unpack_from(
+            "<IIQQ", shm, _CLOCK_LOCK_OWNER_OFFSET
+        )
+        links_used, devices_handling = struct.unpack_from(
+            "<Ii", shm, _LINK_SLOTS_USED_OFFSET
+        )
+        parts = [
+            f"host_present={host_present} host_running={host_running} "
+            f"host_pid={host_pid} wake_epoch={wake_epoch} "
+            f"idle_epoch={idle_epoch} clock_lock_owner={lock_owner} "
+            f"devices_handling={devices_handling}"
+        ]
+        for i in range(min(links_used, _MAX_LINKS)):
+            pts, _, written, consumed = struct.unpack_from(
+                "<IIQQ", shm, _LINKS_OFFSET + i * _LINK_SLOT_SIZE
+            )
+            if pts and written != consumed:
+                parts.append(
+                    f"device pts{pts - 1} unread={written - consumed}B"
+                )
+        used = struct.unpack_from("<I", shm, _PACER_SLOTS_USED_OFFSET)[0]
+        for i in range(min(used, _MAX_PACERS)):
+            active, _, floor, slack = struct.unpack_from(
+                "<IIQQ", shm, _PACERS_OFFSET + i * _PACER_SLOT_SIZE
+            )
+            if active:
+                parts.append(
+                    f"pacer{i} floor+slack={(floor + slack - now) / 1e6:+.3f}ms"
+                )
+        used = struct.unpack_from("<I", shm, _WAITER_SLOTS_USED_OFFSET)[0]
+        for i in range(min(used, _MAX_WAITERS)):
+            target = struct.unpack_from(
+                "<Q", shm, _WAITER_TARGET_OFFSET + i * 8
+            )[0]
+            is_floor = struct.unpack_from(
+                "<I", shm, _WAITER_IS_FLOOR_OFFSET + i * 4
+            )[0]
+            if target and is_floor:
+                who = struct.unpack_from(
+                    "<Q", shm, _WAITER_THREAD_OFFSET + i * 8
+                )[0]
+                parts.append(
+                    f"host waiter tid {who & 0xFFFFFFFF} "
+                    f"floor={(target - now) / 1e6:+.3f}ms"
+                )
+        for i in range(_MAX_HOST_THREADS):
+            tid = struct.unpack_from("<I", shm, _HOST_TID_OFFSET + i * 4)[0]
+            if not tid:
+                continue
+            try:
+                stat = pathlib.Path(
+                    f"/proc/{host_pid}/task/{tid}/stat"
+                ).read_text()
+            except OSError:
+                continue
+            comm, _, rest = stat.partition("(")[2].rpartition(")")
+            if rest.split()[0] == "R":
+                parts.append(f"host thread {tid} ({comm}) runnable")
+        return "; ".join(parts)
+
+
+class DeviceLink:
+    """An emulated device's input from klippy, on the virtual clock.
+
+    klippy's libvtime counts every byte it writes to the device's pty and
+    virtual time stands still until the emulator reports them handled, so
+    a request is answered at the instant klippy sent it however late the
+    emulator thread gets scheduled.
+    """
+
+    def __init__(self, shm: mmap.mmap, base: int):
+        self._shm = shm
+        self.base = base
+
+    def consumed(self, nbytes: int) -> None:
+        offset = self.base + 16
+        total = struct.unpack_from("<Q", self._shm, offset)[0] + nbytes
+        struct.pack_into("<Q", self._shm, offset, total)
+
+
+class HarnessPacer:
+    """A harness thread's seat on the virtual clock.
+
+    Virtual time cannot pass the instant the thread sleeps toward until the
+    thread has woken, so code that watches and pokes the printer while it
+    moves (an emulated switch, a test reacting to motion) observes it at its
+    own cadence of printer time however fast the world runs.
+    """
+
+    POLL_REAL_S = 0.0002
+
+    def __init__(self, clock: VirtualClock):
+        self._clock = clock
+        self._slot = clock.claim_pacer()
+        clock.hold_at(self._slot, clock.now_ns())
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._clock.release_pacer(self._slot)
+
+    def sleep(
+        self, seconds: float, stop: Optional[threading.Event] = None
+    ) -> bool:
+        """Sleep `seconds` of printer time; False if `stop` was set."""
+        target = self._clock.now_ns() + int(seconds * 1e9)
+        self._clock.hold_at(self._slot, target)
+        while self._clock.now_ns() < target:
+            if stop is None:
+                time.sleep(self.POLL_REAL_S)
+            elif stop.wait(self.POLL_REAL_S):
+                return False
+        return True
+
+
+class VirtualDeadline:
+    """A harness timeout measured in the printer's time, so a slow host
+    machine never fails a test. Virtual time that stops advancing for
+    WEDGE_REAL_S of real time is a wedged simulator and fails loudly."""
+
+    WEDGE_REAL_S = 60.0
+
+    def __init__(self, clock: VirtualClock, timeout: float):
+        self._clock = clock
+        self._last_ns = clock.now_ns()
+        self._end_ns = self._last_ns + int(timeout * 1e9)
+        self._last_progress = time.monotonic()
+
+    def expired(self) -> bool:
+        now_ns = self._clock.now_ns()
+        if now_ns != self._last_ns:
+            self._last_ns = now_ns
+            self._last_progress = time.monotonic()
+        elif time.monotonic() - self._last_progress > self.WEDGE_REAL_S:
+            raise SimError(
+                f"virtual clock stuck at {now_ns / 1e9:.6f}s for "
+                f"{self.WEDGE_REAL_S:.0f}s of real time: simulator wedged; "
+                f"{self._clock.holds()}"
+            )
+        return now_ns >= self._end_ns
+
+
+class VtimeRecorder:
+    """Samples (real, virtual) clock pairs so a run shows how fast virtual
+    time advanced and where it stalled."""
+
+    PERIOD_S = 0.05
+
+    def __init__(self, clock: VirtualClock, csv_path: pathlib.Path):
+        self._clock = clock
+        self.csv_path = csv_path
+        self.samples: list[tuple[int, int]] = []
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=1)
+        self.csv_path.write_text(
+            "real_ns,vtime_ns\n"
+            + "".join(f"{r},{v}\n" for r, v in self.samples)
+        )
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self.samples.append((time.monotonic_ns(), self._clock.now_ns()))
+            self._stop.wait(self.PERIOD_S)
+
+    def rate_summary(self) -> str:
+        s = self.samples
+        if len(s) < 2 or s[-1][0] == s[0][0]:
+            return "vtime: too few samples"
+        virtual = (s[-1][1] - s[0][1]) / 1e9
+        real = (s[-1][0] - s[0][0]) / 1e9
+        return (
+            f"vtime: {virtual:.1f}s of printer time in {real:.1f}s real "
+            f"({virtual / real:.2f}x); per-sample trace in {self.csv_path}"
+        )
 
 
 @dataclasses.dataclass
@@ -189,22 +545,24 @@ class McuProcess:
         return str(self.sock_dir / "sim_control")
 
 
+API_POLL_REAL_S = 0.2
+
+
 def _api_request(
-    api_socket: str, method: str, params: dict, timeout: float
+    api_socket: str, method: str, params: dict, deadline: VirtualDeadline
 ) -> dict:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
+    sock.settimeout(API_POLL_REAL_S)
     buf = b""
     with sock:
         sock.connect(api_socket)
         req = {"id": 1, "method": method, "params": params}
         sock.sendall(json.dumps(req).encode() + b"\x03")
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        while not deadline.expired():
             try:
                 chunk = sock.recv(4096)
             except socket.timeout:
-                break
+                continue
             if not chunk:
                 break
             buf += chunk
@@ -299,26 +657,17 @@ class SimControl:
             raise SimError(f"reset_step_times failed: {response!r}")
 
 
-class EndstopPulser:
-    """Cycles endstop GPIO lines low/high so a homing move always sees a
-    trigger within ~1s and a clear retract window, mimicking a switch."""
+class _EmulatorThread:
+    """A background thread emulating hardware against the printer, paced on
+    the world's virtual clock."""
 
-    def __init__(
-        self,
-        control: SimControl,
-        endstop_pins: list,
-        initial_delay: float = 0.5,
-        low_duration: float = 1.0,
-    ):
-        self.control = control
-        self.endstop_pins = endstop_pins
-        self.initial_delay = initial_delay
-        self.low_duration = low_duration
+    def __init__(self, clock: VirtualClock):
+        self.clock = clock
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
     def __enter__(self):
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread = threading.Thread(target=self._paced_run, daemon=True)
         self._thread.start()
         return self
 
@@ -326,21 +675,96 @@ class EndstopPulser:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=2)
+        self._released()
+
+    def _paced_run(self) -> None:
+        with HarnessPacer(self.clock) as pacer:
+            self._run(lambda seconds: pacer.sleep(seconds, self._stop))
+
+    def _run(self, sleep) -> None:
+        raise NotImplementedError
+
+    def _released(self) -> None:
+        raise NotImplementedError
+
+
+class EndstopPulser(_EmulatorThread):
+    """Cycles endstop GPIO lines low/high so a homing move always sees a
+    trigger within ~1s of printer time and a clear retract window,
+    mimicking a switch."""
+
+    def __init__(
+        self,
+        control: SimControl,
+        endstop_pins: list,
+        clock: VirtualClock,
+        initial_delay: float = 0.5,
+        low_duration: float = 1.0,
+    ):
+        super().__init__(clock)
+        self.control = control
+        self.endstop_pins = endstop_pins
+        self.initial_delay = initial_delay
+        self.low_duration = low_duration
+
+    def _run(self, sleep) -> None:
+        # The MCU must be fully up before GPIO commands stick.
+        if not sleep(self.initial_delay):
+            return
+        while True:
+            for chip, line in self.endstop_pins:
+                self.control.set_gpio_input(chip, line, 0)
+            if not sleep(self.low_duration):
+                return
+            for chip, line in self.endstop_pins:
+                self.control.set_gpio_input(chip, line, 1)
+            if not sleep(0.1):
+                return
+
+    def _released(self) -> None:
         for chip, line in self.endstop_pins:
             self.control.set_gpio_input(chip, line, 0)
 
-    def _run(self):
-        # The MCU must be fully up before GPIO commands stick.
-        time.sleep(self.initial_delay)
-        while not self._stop.is_set():
-            for chip, line in self.endstop_pins:
-                self.control.set_gpio_input(chip, line, 0)
-            if self._stop.wait(self.low_duration):
-                break
-            for chip, line in self.endstop_pins:
-                self.control.set_gpio_input(chip, line, 1)
-            if self._stop.wait(0.1):
-                break
+
+class EndstopWall(_EmulatorThread):
+    """Drive an endstop GPIO like a switch mounted at `wall_mm` on one
+    cartesian axis: high at/past the wall, low below it. `tracker.xy()`
+    reports the physical position from the shim's step counters."""
+
+    POLL_S = 0.005
+
+    def __init__(self, tracker, control, axis_idx, pin, wall_mm, clock):
+        super().__init__(clock)
+        self.tracker = tracker
+        self.control = control
+        self.axis_idx = axis_idx
+        self.pin = pin
+        self.wall_mm = wall_mm
+
+    def _run(self, sleep) -> None:
+        level = None
+        while True:
+            pos = self.tracker.xy()[self.axis_idx]
+            want = 1 if pos >= self.wall_mm else 0
+            if want != level:
+                self.control.set_gpio_input(*self.pin, want)
+                level = want
+            if not sleep(self.POLL_S):
+                return
+
+    def _released(self) -> None:
+        self.control.set_gpio_input(*self.pin, 0)
+
+
+def _runs_free(method):
+    """A world call that waits on the printer lets virtual time run free."""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self.vclock.running_free():
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 class SimWorld:
@@ -359,7 +783,9 @@ class SimWorld:
         beacon: bool = False,
         cartographer: bool = False,
         verbose: bool = False,
-        vtime_speed: float = 1.0,
+        vtime_speed: float = UNBOUNDED_VTIME_SPEED,
+        host_gated: bool = True,
+        crystal_ppm: Optional[dict[str, float]] = None,
     ):
         self.workdir = pathlib.Path(workdir)
         self.repo_root = repo_root
@@ -368,12 +794,17 @@ class SimWorld:
         self.want_beacon = beacon
         self.want_cartographer = cartographer
         self.verbose = verbose
-        # Virtual-clock speed relative to real time. Below 1.0 the simulated
-        # world runs slower than reality, inflating every host-side latency
-        # budget (drip windows, trsync timeouts) by 1/speed — the margin that
-        # keeps timing-sensitive scenarios deterministic under CPU load.
-        self.vtime_speed = vtime_speed
+        # Upper bound on virtual seconds per real second. With host_gated,
+        # virtual time stands still while klippy computes, so the cap only
+        # matters for runs a human watches; without it (throughput tests),
+        # klippy must keep up with the cap like a real host must keep up
+        # with real time.
+        self.vtime_speed = float(os.environ.get("VTIME_SPEED", vtime_speed))
+        self.host_gated = host_gated
+        self.crystal_ppm = crystal_ppm or {}
         self.vtime_shm_name = vtime_shm_name_alloc()
+        self.vclock: Optional[VirtualClock] = None
+        self.vtime_recorder: Optional[VtimeRecorder] = None
 
         self.log_dir = self.workdir / "logs"
         self.gcode_dir = self.workdir / "gcodes"
@@ -396,6 +827,7 @@ class SimWorld:
             str, list[tuple[int, int, int, int, int, int, int, int]]
         ] = {}
         self._z_step_lines: dict[str, int] = {}
+        self._command_ids: dict[str, dict[str, int]] = {}
 
     # ------------------------------------------------------------- boot
 
@@ -432,6 +864,11 @@ class SimWorld:
 
         shim_so, vtime_so = self._ensure_shims_built()
         vtime_create(self.vtime_shm_name)
+        self.vclock = VirtualClock(self.vtime_shm_name)
+        self.vtime_recorder = VtimeRecorder(
+            self.vclock, self.log_dir / "vtime.csv"
+        )
+        self.vtime_recorder.start()
 
         if spawn_mcus:
             self._spawn_mcus(shim_so, vtime_so)
@@ -444,18 +881,12 @@ class SimWorld:
         cfg_path = self.workdir / "printer.cfg"
         if "[danger_options]" not in config_text:
             # Homing trip deadlines are wall-clock budgets sized for
-            # real-time motion, and the 5ppm clock-sync stability gate is
-            # sized for hardware oscillators. Virtual time legally runs
-            # slower than real time under load (pacer floors) and jitters
-            # far beyond real crystal drift, so give every sim world the
-            # slack to keep both guards without becoming a host-scheduling
+            # real-time motion; virtual time legally runs slower than real
+            # time under load (pacer floors), so give every sim world the
+            # slack to keep the guard without becoming a host-scheduling
             # lottery. Inserted before any autosave block — that section
             # must stay at the end of the file.
-            danger = (
-                "\n[danger_options]\n"
-                "homing_trip_deadline_margin: 30\n"
-                "clock_sync_stable_ppm: 1000\n"
-            )
+            danger = "\n[danger_options]\nhoming_trip_deadline_margin: 30\n"
             marker = config_text.find("#*#")
             if marker == -1:
                 config_text += danger
@@ -536,11 +967,14 @@ class SimWorld:
         # vtime first, intercept second (constructor/interpose ordering).
         env["LD_PRELOAD"] = f"{vtime_so}:{shim_so}"
         env["VTIME_SHM_NAME"] = self.vtime_shm_name
-        env["VTIME_SPEED"] = os.environ.get(
-            "VTIME_SPEED", str(self.vtime_speed)
-        )
+        env["VTIME_SPEED"] = str(self.vtime_speed)
         env["MCU_SIM_SOCK_DIR"] = str(sock_dir)
         env["MCU_SIM_GPIO_STEP_TRACKING"] = "1"
+        if name in self.crystal_ppm:
+            env["VTIME_CRYSTAL_PPM"] = repr(self.crystal_ppm[name])
+        command_ids, shapes = command_shapes(elf.with_suffix(".dict"))
+        self._command_ids[name] = command_ids
+        env["MCU_SIM_CMD_SHAPES"] = shapes
         tracks = self._step_tracks.get(name, [])
         env["MCU_SIM_STEP_TRACKS"] = ";".join(
             ",".join(str(value) for value in track) for track in tracks
@@ -624,7 +1058,7 @@ class SimWorld:
             log_path=str(self.log_dir / "beacon_traffic.log"),
             step_sock_path=z_mcu.sim_control,
             z_step_line=z_step_line,
-            vtime_shm_name=self.vtime_shm_name,
+            clock=self.vclock,
         )
         self.beacon.start_sample_stream(z_target_mm=10.0, rate_hz=200)
 
@@ -638,20 +1072,22 @@ class SimWorld:
             log_path=str(self.log_dir / "cartographer_traffic.log"),
             step_sock_path=z_mcu.sim_control,
             z_step_line=z_step_line,
-            vtime_shm_name=self.vtime_shm_name,
+            clock=self.vclock,
         )
         self.cartographer.start_sample_stream(z_target_mm=10.0, rate_hz=200)
 
     def _spawn_klippy(self, cfg_path: pathlib.Path) -> None:
         env = os.environ.copy()
-        # Klippy deliberately does NOT load vtime: it runs at real CPU
-        # speed while the MCU processes live on the virtual clock; loading
-        # vtime in klippy deadlocks (both sides block on I/O and neither
-        # advances time).
+        # Klippy shares the MCUs' virtual clock: a host clock that slipped
+        # against the MCU clock whenever virtual time stalled made every
+        # MCU look like a wandering crystal to clock sync.
+        _, vtime_so = self._ensure_shims_built()
+        env["LD_PRELOAD"] = str(vtime_so)
+        env["VTIME_SPEED"] = str(self.vtime_speed)
+        if self.host_gated:
+            env["VTIME_HOST"] = "1"
         if self.mcus:
             env["MCU_SIM_SOCK_DIR"] = str(self.mcus[0].sock_dir)
-        # No preload, but sim-only extras (sim_remote_endstop) read the
-        # virtual clock word directly to time emulated physical events.
         env["VTIME_SHM_NAME"] = self.vtime_shm_name
         third_party = self.repo_root / "tools" / "sim" / "third_party_repos"
         for plugin_dir in ("beacon_klipper", "cartographer_klipper"):
@@ -670,6 +1106,8 @@ class SimWorld:
                 str(self.klippy_log),
                 "-a",
                 self.api_socket,
+                "-I",
+                str(self.workdir / "printer_input"),
             ],
             env=env,
             stdout=stdout_log,
@@ -678,13 +1116,16 @@ class SimWorld:
         )
         stdout_log.close()
 
+    @_runs_free
     def _wait_ready(self, timeout: float) -> bool:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        deadline = self.vclock.deadline(timeout)
+        while not deadline.expired():
             if self.klippy_proc.poll() is not None:
                 return False
             try:
-                info = _api_request(self.api_socket, "info", {}, timeout=3.0)
+                info = _api_request(
+                    self.api_socket, "info", {}, self.vclock.deadline(3.0)
+                )
             except OSError:
                 info = {}
             state = (info.get("result") or {}).get("state")
@@ -695,10 +1136,11 @@ class SimWorld:
             time.sleep(READY_POLL_S)
         return False
 
+    @_runs_free
     def _wait_clock_sync(self, timeout: float) -> None:
         try:
             resp = _api_request(
-                self.api_socket, "objects/list", {}, timeout=5.0
+                self.api_socket, "objects/list", {}, self.vclock.deadline(5.0)
             )
         except OSError as err:
             raise SimError(f"objects/list failed after ready: {err}") from err
@@ -707,7 +1149,7 @@ class SimWorld:
             for name in resp.get("result", {}).get("objects", [])
             if name == "mcu" or name.startswith("mcu ")
         ]
-        deadline = time.monotonic() + timeout
+        deadline = self.vclock.deadline(timeout)
         while pending:
             status = self.status({name: None for name in pending})
             pending = [
@@ -719,7 +1161,7 @@ class SimWorld:
                 return
             if self.klippy_proc.poll() is not None:
                 raise SimError("klippy exited while waiting for clock sync")
-            if time.monotonic() > deadline:
+            if deadline.expired():
                 raise SimError(
                     f"MCU clock sync did not converge within {timeout:.0f}s"
                     f" after ready (mcu: {', '.join(pending)})"
@@ -728,12 +1170,13 @@ class SimWorld:
 
     # ------------------------------------------------------------ drive
 
+    @_runs_free
     def gcode(self, script: str, timeout: float = 30.0) -> dict:
         return _api_request(
             self.api_socket,
             "gcode/script",
             {"script": script},
-            timeout=timeout,
+            self.vclock.deadline(timeout),
         )
 
     def gcode_ok(self, script: str, timeout: float = 30.0) -> dict:
@@ -744,6 +1187,7 @@ class SimWorld:
             raise SimError(f"{script}: {resp['error']}")
         return resp
 
+    @_runs_free
     def status(
         self, objects: Optional[dict] = None, timeout: float = 5.0
     ) -> dict:
@@ -758,7 +1202,7 @@ class SimWorld:
                 self.api_socket,
                 "objects/query",
                 {"objects": objects},
-                timeout=timeout,
+                self.vclock.deadline(timeout),
             )
         except OSError:
             return {}
@@ -772,13 +1216,14 @@ class SimWorld:
         pos = self.toolhead_position()
         return float(pos[2]) if pos and len(pos) >= 3 else None
 
+    @_runs_free
     def wait_print_done(self, timeout: float = 600.0) -> None:
-        deadline = time.monotonic() + timeout
+        deadline = self.vclock.deadline(timeout)
         log_offset = (
             self.klippy_log.stat().st_size if self.klippy_log.exists() else 0
         )
         log_remainder = ""
-        while time.monotonic() < deadline:
+        while not deadline.expired():
             if self.klippy_proc.poll() is not None:
                 raise SimError("klippy exited during print")
             if self.klippy_log.exists():
@@ -838,12 +1283,13 @@ class SimWorld:
     def mark_log(self) -> None:
         self.log_tail()
 
+    @_runs_free
     def expect_log(self, needle: str, timeout: float = 10.0) -> str:
         """Wait for `needle` to appear in klippy.log after the last
         mark_log()/log_tail() call; returns everything appended since the
         mark. klippy's log writer is async, so response text can land in
         the file a moment after the API response returns."""
-        deadline = time.monotonic() + timeout
+        deadline = self.vclock.deadline(timeout)
         while True:
             data = (
                 self.klippy_log.read_bytes()
@@ -854,12 +1300,58 @@ class SimWorld:
             if needle in appended:
                 self._log_offset = len(data)
                 return appended
-            if time.monotonic() >= deadline:
+            if deadline.expired():
                 raise SimError(
                     f"{needle!r} did not appear in klippy.log within "
                     f"{timeout}s; appended:\n{appended[-2000:]}"
                 )
             time.sleep(READY_POLL_S)
+
+    def inject(
+        self,
+        mcu: str,
+        *,
+        delay_command: Optional[str] = None,
+        drop_command: Optional[str] = None,
+        late_command: Optional[str] = None,
+        by_s: float = 0.0,
+        count: int = 1,
+        stall_s: Optional[float] = None,
+    ) -> None:
+        """Fault the host→MCU link of process `mcu` ("h7", "f4"), applied by
+        the MCU as it reads, in virtual time: hold the next `count` frames
+        carrying `delay_command` (and everything behind them) for `by_s`,
+        drop the next `count` frames carrying `drop_command`, hold only the
+        next `count` `late_command` commands for `by_s` (as if the host
+        produced them late; they ride the first frame klippy sends after
+        that, while every other frame passes on time), or hold the whole
+        link for `stall_s`. Klippy is not touched."""
+        commands = {
+            FAULT_DELAY: delay_command,
+            FAULT_DROP: drop_command,
+            FAULT_LATE: late_command,
+        }
+        chosen = {k: c for k, c in commands.items() if c is not None}
+        if len(chosen) + (stall_s is not None) != 1:
+            raise SimError(
+                "inject takes exactly one of delay_command, drop_command,"
+                " late_command, stall_s"
+            )
+        pty_path = {"h7": self.h7_pty, "f4": self.f4_pty}[mcu]
+        pts = int(os.readlink(pty_path).rsplit("/", 1)[1])
+        slot = self.vclock.link_slot_of_pts(pts)
+        if stall_s is not None:
+            self.vclock.post_link_fault(
+                slot, FAULT_STALL, 0, 0, int(stall_s * 1e9)
+            )
+            return
+        ((kind, command),) = chosen.items()
+        ids = self._command_ids[mcu]
+        if command not in ids:
+            raise SimError(f"{mcu} has no command {command!r}")
+        self.vclock.post_link_fault(
+            slot, kind, ids[command], count, int(by_s * 1e9)
+        )
 
     def shutdown_line(self) -> Optional[str]:
         for line in self.klippy_log_text().splitlines():
@@ -867,19 +1359,34 @@ class SimWorld:
                 return line.strip()
         return None
 
+    @_runs_free
     def wait_for_log_text(
         self, needle: str, timeout: float = 60.0
     ) -> Optional[str]:
-        deadline = time.monotonic() + timeout
+        deadline = self.vclock.deadline(timeout)
         while True:
             for line in self.klippy_log_text().splitlines():
                 if needle in line:
                     return line.strip()
             if self.klippy_proc.poll() is not None:
                 return None
-            if time.monotonic() >= deadline:
+            if deadline.expired():
                 return None
             time.sleep(0.2)
+
+    @_runs_free
+    def wait_until(
+        self, pred, timeout: float, what: str, poll: float = 0.005
+    ) -> None:
+        """Poll `pred` every `poll` seconds of printer time — the cadence a
+        test reacting to motion (poking a pin the moment the axis reaches a
+        point) needs however fast the world runs."""
+        deadline = self.vclock.deadline(timeout)
+        with HarnessPacer(self.vclock) as pacer:
+            while not pred():
+                if deadline.expired():
+                    raise SimError(f"timeout waiting for {what}")
+                pacer.sleep(poll)
 
     def events_text(self) -> str:
         events_dir = self.log_dir / "events"
@@ -896,6 +1403,8 @@ class SimWorld:
 
     def dump_diagnostics(self) -> None:
         print("=== sim diagnostics ===")
+        if self.vtime_recorder:
+            print(self.vtime_recorder.rate_summary())
         tail = self.klippy_log_text()[-6000:]
         if tail:
             print("--- klippy.log tail ---")
@@ -938,4 +1447,6 @@ class SimWorld:
             self.beacon.stop()
         if self.cartographer:
             self.cartographer.stop()
+        if self.vtime_recorder:
+            self.vtime_recorder.stop()
         vtime_destroy(self.vtime_shm_name)

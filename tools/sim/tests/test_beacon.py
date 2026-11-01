@@ -100,60 +100,64 @@ def test_contact_probing_survives_latch_commit_delay(world):
 def test_contact_auto_calibrate(world):
     world.gcode_ok("SET_KINEMATIC_POSITION X=150 Y=150 Z=10", timeout=10)
     world.gcode_ok("G4 P1000", timeout=15)
+    world.mark_log()
     world.gcode_ok("BEACON_AUTO_CALIBRATE", timeout=300)
-    assert "Collected" in world.klippy_log_text()
+    world.expect_log("Collected")
     assert world.shutdown_line() is None
 
 
-def _probe_samples(world):
+Z_MICROSTEP_MM = 4.0 / (200 * 16)
+
+
+def _probe_series(world, samples):
+    world.mark_log()
+    world.gcode_ok(
+        f"PROBE PROBE_METHOD=contact SAMPLES={samples} SAMPLES_TOLERANCE=9"
+        " PROBE_SPEED=1",
+        timeout=300,
+    )
     return [
         float(line.rsplit("z=", 1)[1])
-        for line in world.klippy_log_text().splitlines()
+        for line in world.expect_log("Result is").splitlines()
         if line.startswith("probe at ")
     ]
 
 
+def _contact_offsets(world, samples):
+    first = len(world.beacon.contact_heights)
+    reported = _probe_series(world, samples)
+    physical = world.beacon.contact_heights[first:]
+    assert len(physical) == len(reported), (reported, physical)
+    return [r - p for r, p in zip(reported, physical)]
+
+
 def test_contact_auto_calibrate_with_mesh_active(sim_world):
-    # PROBE_SPEED=1: the measured-z noise floor is the emulator's
-    # real-clock <-> virtual-clock mapping jitter (a few ms) times the
-    # probing speed, so 3mm/s leaves per-series spreads straddling the
-    # 0.012 assertion floor while 1mm/s keeps them well under it.
     world = sim_world(_cfg(bed_mesh=True), beacon=True)
     world.gcode_ok("SET_KINEMATIC_POSITION X=150 Y=150 Z=10", timeout=10)
     world.gcode_ok("G4 P1000", timeout=15)
     world.gcode_ok("BEACON_AUTO_CALIBRATE", timeout=300)
     world.gcode_ok("G1 Z3 F600", timeout=30)
-    world.gcode_ok(
-        "PROBE PROBE_METHOD=contact SAMPLES=6 SAMPLES_TOLERANCE=9"
-        " PROBE_SPEED=1",
-        timeout=300,
-    )
-    plain = _probe_samples(world)
+    plain = _contact_offsets(world, 8)
     world.gcode_ok("BED_MESH_PROFILE LOAD=edge", timeout=15)
-    world.gcode_ok(
-        "PROBE PROBE_METHOD=contact SAMPLES=6 SAMPLES_TOLERANCE=9"
-        " PROBE_SPEED=1",
-        timeout=300,
-    )
-    meshed = _probe_samples(world)[len(plain) :]
+    meshed = _contact_offsets(world, 8)
     assert world.shutdown_line() is None
 
-    plain_spread = max(plain) - min(plain)
-    meshed_spread = max(meshed) - min(meshed)
-    assert meshed_spread < max(0.012, 2.0 * plain_spread), (
-        "mesh-active contact probing must be as repeatable as mesh-off: "
-        "plain=%r (spread %.4f) meshed=%r (spread %.4f)"
-        % (plain, plain_spread, meshed, meshed_spread)
-    )
+    for mesh, offsets in (("off", plain), ("on", meshed)):
+        spread = max(offsets) - min(offsets)
+        assert spread < Z_MICROSTEP_MM, (
+            f"mesh {mesh}: every contact sample must report the emulator's"
+            f" physical contact step to within a microstep; reported minus"
+            f" physical {offsets} spread {spread:.6f} mm"
+        )
 
 
 def test_poke(world):
     world.gcode_ok("SET_KINEMATIC_POSITION X=150 Y=150 Z=10", timeout=10)
     world.gcode_ok("G4 P1000", timeout=15)
+    world.mark_log()
     world.gcode_ok("BEACON_POKE TOP=5 BOTTOM=-0.3", timeout=120)
-    log = world.klippy_log_text()
+    log = world.expect_log("Triggered at:")
     assert "Armed at:" in log
-    assert "Triggered at:" in log
     assert world.shutdown_line() is None
 
 

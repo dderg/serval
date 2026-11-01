@@ -266,6 +266,52 @@ fn a_fresh_epoch_resume_is_marked_as_reanchor_not_gap() {
     assert_eq!(sink.reanchors.lock_ok().as_slice(), &[(key, 5_000_000)],);
 }
 
+#[allow(clippy::cast_precision_loss)]
+fn hold_span_at_slope(start_clock: u64, secs: f64, freq: f64) -> ClockedMotorSpan {
+    let span = hold_span(start_clock, secs);
+    ClockedMotorSpan::try_new(
+        Arc::clone(&span.signal),
+        span.stream_t_start,
+        span.stream_t_end,
+        span.stream_t_start,
+        span.stream_t_end,
+        start_clock as f64,
+        freq,
+    )
+    .expect("the projected view spans at least one clock")
+}
+
+/// A dwell that re-synced the host→mcu map hands the next views a new slope.
+/// A forward seam gap keeps the lane on its old one, so that lane takes a
+/// full cut; a dwell on an unchanged slope stays a gap.
+#[test]
+fn a_dwell_that_reslopes_the_lane_cuts_it_instead_of_gapping() {
+    let key = AxisKey { mcu_id: 0, axis: 1 };
+    let resynced = FREQ * (1.0 + 30e-6);
+    let sink = with_pump(|_, data| {
+        enqueue(
+            data,
+            key,
+            vec![hold_span(1_000_000, 0.01)],
+            crate::anchor::StreamEpoch::Continuation,
+        );
+        enqueue(
+            data,
+            key,
+            vec![hold_span(2_000_000, 0.01)],
+            crate::anchor::StreamEpoch::Rejoin,
+        );
+        enqueue(
+            data,
+            key,
+            vec![hold_span_at_slope(3_000_000, 0.01, resynced)],
+            crate::anchor::StreamEpoch::Rejoin,
+        );
+    });
+    assert_eq!(sink.seam_gaps.lock_ok().as_slice(), &[(key, 2_000_000)]);
+    assert_eq!(sink.reanchors.lock_ok().as_slice(), &[(key, 3_000_000)]);
+}
+
 /// The EtherCAT explicit-hold `Reposition` (`enqueue.rs`) carries no views at
 /// all: its whole job is to retire the lane's junction across a redefined
 /// position. The committed seam it leaves behind belongs to the timeline that

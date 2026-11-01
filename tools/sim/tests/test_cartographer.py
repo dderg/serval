@@ -109,6 +109,7 @@ def test_bed_mesh_scan(sim_world):
     world = sim_world(_cfg(), cartographer=True)
     _home(world)
     world.gcode_ok("G1 Z3 F600", timeout=30)
+    world.mark_log()
     world.gcode_ok("BED_MESH_CALIBRATE", timeout=600)
-    assert "Mesh calibration complete" in world.klippy_log_text()
+    world.expect_log("Mesh calibration complete")
     assert world.shutdown_line() is None

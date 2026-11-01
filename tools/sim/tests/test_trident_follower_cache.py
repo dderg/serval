@@ -61,7 +61,7 @@ zero_reference_position: 150, 150
 
 
 def test_trident_dense_layers_keep_follower_fit_stable(sim_world):
-    world = sim_world(_config, dual_mcu=False, vtime_speed=0.5)
+    world = sim_world(_config, dual_mcu=False)
     world.gcode_ok("SET_KINEMATIC_POSITION X=150 Y=150 Z=0.2")
     world.gcode_ok("BED_MESH_PROFILE LOAD=failed")
     world.print_file(GCODE, timeout=900)

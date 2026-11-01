@@ -117,7 +117,8 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     cp tools/sim/configs/h7-sim.config .config; \
     make olddefconfig OUT=out-h7/ 2>/dev/null || true; \
     make -j$(nproc) OUT=out-h7/; \
-    cp out-h7/klipper.elf /sim_elfs/klipper-h7-sim.elf
+    cp out-h7/klipper.elf /sim_elfs/klipper-h7-sim.elf; \
+    cp out-h7/klipper.dict /sim_elfs/klipper-h7-sim.dict
 
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     set -e; \
@@ -125,14 +126,16 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     make olddefconfig OUT=out-f4/ 2>/dev/null || true; \
     make -j$(nproc) OUT=out-f4/; \
     cp out-f4/klipper.elf /sim_elfs/klipper-f4-sim.elf; \
-    cp out-f4/klipper.dict /sim_elfs/klipper.dict
+    cp out-f4/klipper.dict /sim_elfs/klipper.dict; \
+    cp out-f4/klipper.dict /sim_elfs/klipper-f4-sim.dict
 
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     set -e; \
     cp tools/sim/configs/sc-sim.config .config; \
     make olddefconfig OUT=out-sc/ 2>/dev/null || true; \
     make -j$(nproc) OUT=out-sc/; \
-    cp out-sc/klipper.elf /sim_elfs/klipper-sc-sim.elf
+    cp out-sc/klipper.elf /sim_elfs/klipper-sc-sim.elf; \
+    cp out-sc/klipper.dict /sim_elfs/klipper-sc-sim.dict
 
 # Build klippy chelper .so
 RUN cd klippy && python3 chelper/__init__.py
@@ -184,7 +187,6 @@ COPY --from=firmware /kalico/klippy/chelper/ /kalico/klippy/chelper/
 # Preload shims
 COPY --from=firmware \
     /kalico/tools/sim/preload/libvtime.so \
-    /kalico/tools/sim/preload/libvtime_clock_only.so \
     /kalico/tools/sim/preload/libsim_intercept.so \
     /kalico/tools/sim/preload/
 

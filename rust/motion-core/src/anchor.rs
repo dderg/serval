@@ -291,6 +291,11 @@ impl Anchor {
     pub fn t0(&self) -> Option<f64> {
         self.t0
     }
+
+    /// Host instant the committed stream comes to rest at, once anchored.
+    pub fn committed_end_host(&self) -> Option<f64> {
+        self.t0.map(|t0| t0 + self.last_t_end)
+    }
 }
 
 #[cfg(test)]

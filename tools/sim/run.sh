@@ -13,6 +13,7 @@
 #   ./run.sh --branch main            # build+run a specific branch
 #   ./run.sh --no-cache               # force a full rebuild
 #   ./run.sh --privileged             # SCHED_FIFO for jitter-sensitive runs
+#   SIM_JITTER=3 ./run.sh test        # share a cpuset with 3 bursty CPU burners
 
 set -euo pipefail
 
@@ -34,6 +35,39 @@ DOCKER_ARGS=(--rm --ulimit memlock=-1:-1)
 # reproducing starvation-class failures (transport wedge, clocksync skew)
 # deterministically instead of waiting for ambient host load.
 [[ -n "${SIM_DOCKER_CPUS:-}" ]] && DOCKER_ARGS+=(--cpus "$SIM_DOCKER_CPUS")
+# SIM_JITTER=N pins the container and N bursty burner containers (50 ms
+# spin, 20 ms sleep) to one cpuset (SIM_JITTER_CPUS, default 0,1): the
+# uneven preemption of a loaded CI runner, which a flat --cpus quota does
+# not reproduce.
+JITTER_CPUS="${SIM_JITTER_CPUS:-0,1}"
+JITTER_BURNERS=()
+BUILD_CTX=""
+cleanup() {
+    if [[ ${#JITTER_BURNERS[@]} -gt 0 ]]; then
+        docker rm -f "${JITTER_BURNERS[@]}" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$BUILD_CTX" ]]; then
+        rm -rf "$BUILD_CTX"
+    fi
+}
+trap cleanup EXIT
+start_jitter() {
+    DOCKER_ARGS+=(--cpuset-cpus "$JITTER_CPUS")
+    local burner='import time
+while True:
+    end = time.monotonic() + 0.05
+    while time.monotonic() < end:
+        pass
+    time.sleep(0.02)'
+    local i name
+    for ((i = 1; i <= SIM_JITTER; i++)); do
+        name="kalico-sim-jitter-$$-$i"
+        JITTER_BURNERS+=("$name")
+        docker run -d --rm --name "$name" --cpuset-cpus "$JITTER_CPUS" \
+            --entrypoint python3 "$IMAGE_TAG" -c "$burner" >/dev/null
+    done
+    echo "  Jitter:    $SIM_JITTER burners on cpuset $JITTER_CPUS"
+}
 DOCKER_BUILD_ARGS=()
 KEEP_LOGS=""
 VERBOSE=""
@@ -145,7 +179,6 @@ if [[ -n "$BRANCH" ]]; then
     # context dir. BuildKit keys its layer cache on file content hashes,
     # not the context path, so a fresh temp dir does not defeat caching.
     BUILD_CTX="$(mktemp -d "${TMPDIR:-/tmp}/kalico-sim-ctx.XXXXXX")"
-    trap 'rm -rf "$BUILD_CTX"' EXIT
     echo "Extracting branch '$BRANCH' to $BUILD_CTX ..."
     (cd "$MAIN_REPO" && git archive "$BRANCH") | tar -x -C "$BUILD_CTX"
     # Overlay current simulator tools from the worktree so local edits to
@@ -155,6 +188,10 @@ if [[ -n "$BRANCH" ]]; then
     build_image "$BUILD_CTX" "$BUILD_CTX/tools/sim/Dockerfile"
 else
     build_image "$REPO_ROOT" "$SCRIPT_DIR/Dockerfile"
+fi
+
+if [[ -n "${SIM_JITTER:-}" ]]; then
+    start_jitter
 fi
 
 case "$MODE" in

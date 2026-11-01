@@ -186,11 +186,7 @@ sched_insert_timer(struct timer *add, uint32_t caller)
             diag_note_timer_too_close(caller,
                                       (uint32_t)(uintptr_t)add->func,
                                       now - waketime);
-#if !CONFIG_MCU_SIM
-            // Sim virtual-clock races trip this on infrastructure
-            // jitter; see the matching gate in src/linux/timer.c.
             try_shutdown("Timer too close");
-#endif
         }
         if (tl == &SchedState.deleted_timer)
             add->next = SchedState.deleted_timer.next;

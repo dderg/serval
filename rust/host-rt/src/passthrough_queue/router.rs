@@ -290,7 +290,7 @@ impl PassthroughRouter {
             });
         }
         let updated_at = host_now_raw - raw_at_anchor;
-        tracing::debug!(
+        tracing::info!(
             subsystem = "clocksync",
             event = "set_clock_est_rebased",
             mcu = ?mcu,

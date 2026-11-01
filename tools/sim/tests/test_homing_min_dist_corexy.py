@@ -18,11 +18,11 @@ from __future__ import annotations
 
 import re
 import threading
-import time
 
 import pytest
 
 from tools.sim import configs
+from tools.sim.world import EndstopWall
 
 pytestmark = pytest.mark.needs_elf
 
@@ -70,40 +70,6 @@ class XyTracker:
         return ((a + b) / 2.0, (a - b) / 2.0)
 
 
-class EndstopWall:
-    """Drive an endstop GPIO like a switch mounted at `wall_mm` on one
-    cartesian axis: high at/past the wall, low below it."""
-
-    def __init__(self, tracker, control, axis_idx, pin, wall_mm):
-        self.tracker = tracker
-        self.control = control
-        self.axis_idx = axis_idx
-        self.pin = pin
-        self.wall_mm = wall_mm
-        self._stop = threading.Event()
-        self._thread = None
-
-    def __enter__(self):
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-        return self
-
-    def __exit__(self, *exc):
-        self._stop.set()
-        self._thread.join(timeout=2)
-        self.control.set_gpio_input(*self.pin, 0)
-
-    def _run(self):
-        level = None
-        while not self._stop.is_set():
-            pos = self.tracker.xy()[self.axis_idx]
-            want = 1 if pos >= self.wall_mm else 0
-            if want != level:
-                self.control.set_gpio_input(*self.pin, want)
-                level = want
-            time.sleep(0.01)
-
-
 def _boot(sim_world, auto_y_wall=False):
     def config(world):
         text = configs.awd_corexy_positive_dir_config(
@@ -122,6 +88,37 @@ def _boot(sim_world, auto_y_wall=False):
     if auto_y_wall:
         control.set_endstop_wall(AUTO_Y_ENDSTOP_LINE, LONG_Y_WALL_STEPS)
     return world, control, XyTracker(control)
+
+
+def _stage_false_trip(world, control, tracker, y_start):
+    """Close the Y switch 0.5mm into the approach and open it once the
+    min_home_dist backoff is under way. Each poke happens inside the paced
+    predicate, so the printer cannot run on between seeing the position
+    and the pin changing."""
+    y_peak = [y_start]
+
+    def close_switch_after_approach():
+        y = tracker.xy()[1]
+        if y < y_start + 0.5:
+            return False
+        y_peak[0] = y
+        control.set_gpio_input(*Y_ENDSTOP, 1)
+        return True
+
+    def open_switch_once_backing_off():
+        y = tracker.xy()[1]
+        y_peak[0] = max(y_peak[0], y)
+        if y > y_peak[0] - 0.5:
+            return False
+        control.set_gpio_input(*Y_ENDSTOP, 0)
+        return True
+
+    world.wait_until(close_switch_after_approach, 90, "Y approach motion")
+    world.wait_until(
+        open_switch_once_backing_off,
+        60,
+        "min_home_dist backoff after the trip",
+    )
 
 
 def _home_y_against_wall_at_60(world):
@@ -153,15 +150,6 @@ def test_long_travel_y_is_not_an_early_trigger(sim_world):
     assert world.shutdown_line() is None
 
 
-def _wait_until(pred, timeout, what):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if pred():
-            return
-        time.sleep(0.02)
-    raise AssertionError(f"timeout waiting for {what}")
-
-
 def test_false_trigger_far_from_endstop_fails_loudly(sim_world):
     """A trigger ~0.5mm into the Y approach with no endstop anywhere near
     is a false trigger (StallGuard misfire, bad wiring). By design the
@@ -178,20 +166,7 @@ def test_false_trigger_far_from_endstop_fails_loudly(sim_world):
     y_start = tracker.xy()[1]
     g28.start()
 
-    _wait_until(
-        lambda: tracker.xy()[1] >= y_start + 0.5, 90, "Y approach motion"
-    )
-    control.set_gpio_input(*Y_ENDSTOP, 1)
-    y_peak = tracker.xy()[1]
-
-    def backoff_started():
-        nonlocal y_peak
-        y = tracker.xy()[1]
-        y_peak = max(y_peak, y)
-        return y <= y_peak - 0.5
-
-    _wait_until(backoff_started, 60, "min_home_dist backoff after the trip")
-    control.set_gpio_input(*Y_ENDSTOP, 0)
+    _stage_false_trip(world, control, tracker, y_start)
 
     g28.join(timeout=200)
     assert not g28.is_alive(), "G28 Y did not finish"
@@ -213,7 +188,9 @@ def test_long_travel_y_after_x_early_rehome(sim_world):
     world, control, tracker = _boot(sim_world, auto_y_wall=True)
 
     world.mark_log()
-    with EndstopWall(tracker, control, 0, X_ENDSTOP, wall_mm=3.0):
+    with EndstopWall(
+        tracker, control, 0, X_ENDSTOP, wall_mm=3.0, clock=world.vclock
+    ):
         world.gcode_ok("G28 X", timeout=300)
     x_records = _needs_rehome_records(world.log_tail(), "X")
     assert x_records and x_records[0][0], (
@@ -243,22 +220,16 @@ def test_false_trigger_with_real_endstop_beyond_window_still_fails(sim_world):
     y_start = tracker.xy()[1]
     g28.start()
 
-    _wait_until(
-        lambda: tracker.xy()[1] >= y_start + 0.5, 90, "Y approach motion"
-    )
-    control.set_gpio_input(*Y_ENDSTOP, 1)
-    y_peak = tracker.xy()[1]
+    _stage_false_trip(world, control, tracker, y_start)
 
-    def backoff_started():
-        nonlocal y_peak
-        y = tracker.xy()[1]
-        y_peak = max(y_peak, y)
-        return y <= y_peak - 0.5
-
-    _wait_until(backoff_started, 60, "min_home_dist backoff after the trip")
-    control.set_gpio_input(*Y_ENDSTOP, 0)
-
-    with EndstopWall(tracker, control, 1, Y_ENDSTOP, wall_mm=y_start + 60.0):
+    with EndstopWall(
+        tracker,
+        control,
+        1,
+        Y_ENDSTOP,
+        wall_mm=y_start + 60.0,
+        clock=world.vclock,
+    ):
         g28.join(timeout=200)
     assert not g28.is_alive(), "G28 Y did not finish"
 
