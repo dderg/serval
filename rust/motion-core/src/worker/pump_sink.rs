@@ -42,6 +42,7 @@ struct AnchorPoint {
     epoch: crate::anchor::StreamEpoch,
     host_now: f64,
     lead_secs: f64,
+    rest_from_host: Option<f64>,
 }
 
 impl Projection {
@@ -58,26 +59,6 @@ impl Projection {
         self.mcu_configs
             .iter()
             .any(|c| c.mcu_id == mcu_id && !c.ethercat)
-    }
-
-    /// Whether any lane this mcu serves carries real motion in the segment —
-    /// the same hold test the wire path applies, decided on the lane span so
-    /// a re-anchor can tell a moving lane (whose clocks must track the live
-    /// record) from an idle one (whose step-clock stream must not jump).
-    fn mcu_has_motion(
-        &self,
-        cfg: &crate::mcu_config::McuAxisConfig,
-        seg: &ContinuousSegment,
-    ) -> bool {
-        let module = crate::kinematics::KinematicsModule::from_tag(cfg.hw.kinematics)
-            .expect("mcu_configs were validated at build");
-        cfg.axes.iter().any(|&axis_idx| {
-            if axis_idx >= seg.axes.len() {
-                return false;
-            }
-            !crate::enqueue::lane_span(&module, seg, axis_idx)
-                .is_ok_and(|span| span.is_explicit_hold)
-        })
     }
 
     fn live_clock_record(&self, mcu_id: u32) -> host_rt::passthrough_queue::ClockRecordSnapshot {
@@ -250,58 +231,56 @@ impl Projection {
             })
     }
 
-    /// Whether a retimed dispatch must re-base this mcu's frozen host→mcu
-    /// projection on the live clocksync record. Moving lanes always re-base:
-    /// their span clocks must track the clocksync, not a frozen slope that
-    /// drifted since the last anchor. Hold-only (idle) lanes keep their
-    /// frozen domain while it still tracks the live clock — re-basing them
-    /// would jump their step-clock stream by the projection's drift for no
-    /// motion. But that drift grows without bound while the lane sits parked
-    /// (crystal ppm × hours), and once it exceeds the margin floor the
-    /// frozen slope would project even hold spans into the mcu's past —
-    /// re-base then; the reanchor cut re-bases the seams and a hold carries
-    /// no steps, so no motion results.
-    pub(crate) fn needs_rebase(
-        &self,
-        cfg: &crate::mcu_config::McuAxisConfig,
-        seg: &ContinuousSegment,
-        retimed: bool,
-        prev: Option<FrozenProjection>,
+    /// Every fresh epoch resumes all lanes from rest, so correcting the
+    /// host→mcu map there shifts the resumed stream inside the rest instead
+    /// of inside motion. Between rests the frozen slope's error grows
+    /// unchecked, so every serial mcu re-syncs at every one — a mcu that
+    /// only holds in the epoch's first segment still moves later in it. A
+    /// correction pulling the resume back past the start of the rest would
+    /// schedule it before the previous stream ended; it waits for a rest
+    /// long enough to take it.
+    fn resync_at_rest(
+        &mut self,
         seam_host: f64,
-    ) -> bool {
-        let Some(prev) = prev else {
-            return true;
-        };
-        if !retimed {
-            return false;
-        }
-        if self.mcu_has_motion(cfg, seg) {
-            return true;
-        }
-        let handle = McuHandle::from_raw(cfg.mcu_id);
-        let live = self
-            .router
-            .lock_ok()
-            .host_time_to_mcu_clock(handle, seam_host);
-        match live {
-            Ok(live) => {
-                let drift = prev.project_exact(seam_host) - live as f64;
-                let freq = prev.freq.max(1.0);
-                let drifted = drift.abs() > crate::anchor::LOW_MARGIN_WARN_SECS * freq;
-                if drifted {
-                    tracing::warn!(
-                        subsystem = "motion",
-                        event = "hold_lane_projection_rebase",
-                        mcu = cfg.mcu_id,
-                        drift_us = drift / freq * 1e6,
-                        "[reanchor] idle mcu's frozen projection drifted past the \
-                         margin floor — re-basing its hold lanes on the live clock"
-                    );
-                }
-                drifted
+        rest_from_host: Option<f64>,
+    ) -> Result<(), DispatchError> {
+        let mcu_ids: std::collections::BTreeSet<u32> = self
+            .mcu_configs
+            .iter()
+            .filter(|cfg| self.freezes_projection(cfg.mcu_id))
+            .map(|cfg| cfg.mcu_id)
+            .collect();
+        for mcu_id in mcu_ids {
+            let Some(prev) = self.frozen_projection.get(&mcu_id).copied() else {
+                self.reanchor_projection(mcu_id, seam_host)?;
+                continue;
+            };
+            let live = self
+                .router
+                .lock_ok()
+                .host_time_to_mcu_clock(McuHandle::from_raw(mcu_id), seam_host)
+                .map_err(|_| DispatchError::ClockRecordUnusable {
+                    mcu_id,
+                    mcu_handle: McuHandle::from_raw(mcu_id),
+                })? as f64;
+            let correction_s = (live - prev.project_exact(seam_host)) / prev.freq;
+            let rest_s = rest_from_host.map_or(f64::INFINITY, |from| seam_host - from);
+            let fits_in_rest = -correction_s < rest_s;
+            tracing::info!(
+                subsystem = "motion",
+                event = "clock_resync",
+                mcu = mcu_id,
+                correction_us = correction_s * 1e6,
+                rest_s,
+                applied = fits_in_rest,
+                seam_host,
+                "[reanchor] re-syncing the host→mcu map at a rest"
+            );
+            if fits_in_rest {
+                self.reanchor_projection(mcu_id, seam_host)?;
             }
-            Err(_) => true,
         }
+        Ok(())
     }
 
     fn cut_sibling_lanes_after_rebase<S: crate::pump::SpanSink>(
@@ -329,10 +308,9 @@ impl Projection {
 
     fn anchor(&self, t_start: f64, t_end: f64, drip_active: bool) -> AnchorPoint {
         let host_now = self.host_now();
-        let (t0, epoch) = self
-            .anchor
-            .lock_ok()
-            .anchor_segment(t_start, t_end, host_now);
+        let mut anchor = self.anchor.lock_ok();
+        let rest_from_host = anchor.committed_end_host();
+        let (t0, epoch) = anchor.anchor_segment(t_start, t_end, host_now);
         AnchorPoint {
             t0,
             epoch,
@@ -342,7 +320,21 @@ impl Projection {
             } else {
                 crate::pump::MAX_LEAD_SECS
             },
+            rest_from_host,
         }
+    }
+
+    fn anchor_segment(
+        &mut self,
+        t_start: f64,
+        t_end: f64,
+        drip_active: bool,
+    ) -> Result<AnchorPoint, DispatchError> {
+        let at = self.anchor(t_start, t_end, drip_active);
+        if at.epoch.is_fresh() || self.frozen_projection.is_empty() {
+            self.resync_at_rest(at.t0 + t_start, at.rest_from_host)?;
+        }
+        Ok(at)
     }
 
     fn log_seg0_lead(&self, mcu_ids: impl Iterator<Item = u32>, seg_start_host: f64, t0: f64) {
@@ -371,36 +363,12 @@ impl Projection {
             "[engine-trace] dispatch entered"
         );
 
-        let at = self.anchor(seg.t_start, seg.t_end, pump.drip_active());
+        let at = self.anchor_segment(seg.t_start, seg.t_end, pump.drip_active())?;
 
         let runway_s = at.t0 + seg.t_end - at.host_now;
         if runway_s > 0.0 {
             self.frontier
                 .advance_to(Instant::now() + Duration::from_secs_f64(runway_s));
-        }
-
-        let seam_host = at.t0 + seg.t_start;
-        if at.epoch.retimed() || self.frozen_projection.is_empty() {
-            let reanchor = {
-                let frozen = &self.frozen_projection;
-                self.mcu_configs
-                    .iter()
-                    .filter(|cfg| self.freezes_projection(cfg.mcu_id))
-                    .filter(|cfg| {
-                        self.needs_rebase(
-                            cfg,
-                            seg,
-                            at.epoch.retimed(),
-                            frozen.get(&cfg.mcu_id).copied(),
-                            seam_host,
-                        )
-                    })
-                    .map(|cfg| cfg.mcu_id)
-                    .collect::<Vec<_>>()
-            };
-            for mcu_id in reanchor {
-                self.reanchor_projection(mcu_id, seam_host)?;
-            }
         }
 
         if at.epoch.is_fresh() {
