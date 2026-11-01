@@ -61,6 +61,19 @@ docker_image() {
     echo "$tag"
 }
 
+# Runs the container as the invoking user with every uv/python write target
+# outside the bind-mounted checkout, so a job never leaves root-owned files
+# (.venv, __pycache__) in the worktree.
+DOCKER_RUN_AS_USER=(
+    --user "$(id -u):$(id -g)"
+    --tmpfs /tmp:exec,mode=1777,size=4g
+    -e HOME=/tmp/ci-home
+    -e UV_CACHE_DIR=/tmp/ci-home/uv-cache
+    -e UV_PROJECT_ENVIRONMENT=/tmp/ci-home/venv
+    -e UV_LINK_MODE=copy
+    -e PYTHONDONTWRITEBYTECODE=1
+)
+
 # Linux-only: env RUSTFLAGS replaces (does not merge with) the per-target
 # rustflags in rust/.cargo/config.toml, so widening this past the host target
 # would drop the macOS cdylib `-undefined dynamic_lookup` and the cross-build
@@ -245,7 +258,7 @@ job_py_typecheck() {
 job_py() {
     local ver="${1:-3.13}"
     if command -v docker >/dev/null 2>&1; then
-        docker run -v "$ROOT:/klipper" "$(docker_image)" --python "$ver" py.test -n auto
+        docker run --rm "${DOCKER_RUN_AS_USER[@]}" -v "$ROOT:/klipper" "$(docker_image)" --python "$ver" py.test -n auto
     else
         echo "docker unavailable — running py.test on the local interpreter only (CI runs 3.9-3.14)"
         cd "$ROOT" && python -m pytest -n auto
@@ -259,7 +272,7 @@ job_sim() {
         tools/test_motion_idle_timeout.py \
         tools/test_motion_static.py"
     if command -v docker >/dev/null 2>&1; then
-        docker run --rm -v "$ROOT:/klipper" -w /klipper --entrypoint bash "$(docker_image)" -lc \
+        docker run --rm "${DOCKER_RUN_AS_USER[@]}" -v "$ROOT:/klipper" -w /klipper --entrypoint bash "$(docker_image)" -lc \
             "make -C tools/sim/preload >/dev/null && uv run py.test -n auto $paths -m '$sel'"
     else
         echo "docker unavailable — running sim unit tests on the local interpreter"
