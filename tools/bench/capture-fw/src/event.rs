@@ -6,7 +6,9 @@ use stm32f4xx_hal::pac::Interrupt;
 
 use crate::capture::{Fault, CHANNEL_COUNT};
 use crate::regs::{self, DmaStream, InputPin, Timer};
-use crate::ring::{ByteRing, DirQueue};
+use crate::ring::{ByteRing, DirQueue, DIR_QUEUE_LEN};
+use crate::sim;
+use bench_sim_logic::dir_merge::DirMerge;
 
 pub const SNAPSHOT_HZ: u32 = 10_000;
 const TIMER_HZ: u32 = 84_000_000;
@@ -140,6 +142,7 @@ struct Lane {
     last_step: u64,
     last_interval: u64,
     last_dir: u64,
+    step_level: bool,
     step_pending: bool,
     dir_pending: bool,
     dir_serviced: u32,
@@ -160,15 +163,22 @@ struct Snapshot {
     status: [u32; CHANNEL_COUNT],
     cycles: u32,
     counters: [u16; CHANNEL_COUNT],
+    mco: u16,
+}
+
+pub struct SnapshotOutput {
+    pub net: [i32; CHANNEL_COUNT],
+    pub mco: u16,
+    pub time: u64,
 }
 
 type LaneFault = (Fault, u8);
 
-fn read_clocks() -> (u32, [u16; CHANNEL_COUNT]) {
+fn read_clocks() -> (u32, [u16; CHANNEL_COUNT], u16) {
     cortex_m::interrupt::free(|_| {
         let cycles = DWT::cycle_count();
         let counters = core::array::from_fn(|i| CHANNELS[i].timer.cnt());
-        (cycles, counters)
+        (cycles, counters, sim::mco_count())
     })
 }
 
@@ -182,7 +192,7 @@ fn take_snapshot() -> Snapshot {
     let dir_heads = core::array::from_fn(|i| DIR_QUEUES[i].produced());
     let dir_serviced = core::array::from_fn(|i| DIR_SERVICED[i].load(Ordering::Acquire));
     let status = core::array::from_fn(|i| CHANNELS[i].timer.sr());
-    let (cycles, counters) = read_clocks();
+    let (cycles, counters, mco) = read_clocks();
     Snapshot {
         positions,
         flags,
@@ -191,6 +201,7 @@ fn take_snapshot() -> Snapshot {
         status,
         cycles,
         counters,
+        mco,
     }
 }
 
@@ -266,7 +277,7 @@ pub fn start(both_edges_mask: u8) {
     for channel in &CHANNELS {
         unsafe { NVIC::unmask(channel.dir_irq) };
     }
-    let (cycles, counters) = cortex_m::interrupt::free(|_| {
+    let (cycles, counters, _) = cortex_m::interrupt::free(|_| {
         CHANNELS[MASTER].timer.set_cr1(regs::CR1_CEN);
         read_clocks()
     });
@@ -279,6 +290,7 @@ pub fn start(both_edges_mask: u8) {
         last_step: 0,
         last_interval: 0,
         last_dir: 0,
+        step_level: initial_dir & (1 << i) != 0,
         step_pending: false,
         dir_pending: false,
         dir_serviced: 0,
@@ -462,12 +474,12 @@ fn extend(now: u64, counter: u16, captured: u16) -> Result<u64, Fault> {
         .ok_or(Fault::NonMonotonic)
 }
 
-pub fn tick() -> Option<Result<(), LaneFault>> {
+pub fn tick() -> Option<Result<SnapshotOutput, LaneFault>> {
     let engine = unsafe { (*ENGINE.0.get()).as_mut()? };
     Some(process(engine))
 }
 
-fn process(engine: &mut Engine) -> Result<(), LaneFault> {
+fn process(engine: &mut Engine) -> Result<SnapshotOutput, LaneFault> {
     let snapshot = take_snapshot();
     advance_clocks(engine, &snapshot)?;
     let mut advances = [0usize; CHANNEL_COUNT];
@@ -504,6 +516,7 @@ fn process(engine: &mut Engine) -> Result<(), LaneFault> {
         }
     }
     let rings = unsafe { &*DMA_RINGS.0.get() };
+    let mut net = [0i32; CHANNEL_COUNT];
     for index in 0..CHANNEL_COUNT {
         if mask & (1 << index) == 0 {
             continue;
@@ -511,6 +524,21 @@ fn process(engine: &mut Engine) -> Result<(), LaneFault> {
         let lane = &mut engine.lanes[index];
         let counter = snapshot.counters[index];
         let fault = |f: Fault| (f, index as u8);
+        let queue = &DIR_QUEUES[index];
+        let mut edges = [(0u64, false); DIR_QUEUE_LEN];
+        for (edge, slot) in edges
+            .iter_mut()
+            .zip(queue.consumed()..snapshot.dir_heads[index])
+        {
+            let entry = queue.entry(slot);
+            let captured = entry as u16;
+            let isr_counter = (entry >> 16) as u16;
+            let isr_time = extend(lane.now, counter, isr_counter).map_err(fault)?;
+            let time = extend(isr_time, isr_counter, captured).map_err(fault)?;
+            *edge = (time, (entry >> 32) & 1 != 0);
+        }
+        let edges = &edges[..dir_counts[index]];
+        let mut signs = DirMerge::new(edges, lane.step_level);
         writer.put_varint(advances[index] as u64);
         writer.put_varint(dir_counts[index] as u64);
         for k in 0..advances[index] {
@@ -523,26 +551,25 @@ fn process(engine: &mut Engine) -> Result<(), LaneFault> {
             writer.put_zigzag(interval as i64 - lane.last_interval as i64);
             lane.last_step = time;
             lane.last_interval = interval;
+            net[index] += signs.sign_at(time);
         }
+        lane.step_level = signs.finish();
         lane.dma_position = snapshot.positions[index];
-        let queue = &DIR_QUEUES[index];
-        for slot in queue.consumed()..snapshot.dir_heads[index] {
-            let entry = queue.entry(slot);
-            let captured = entry as u16;
-            let isr_counter = (entry >> 16) as u16;
-            let level = (entry >> 32) as u8 & 1;
-            let isr_time = extend(lane.now, counter, isr_counter).map_err(fault)?;
-            let time = extend(isr_time, isr_counter, captured).map_err(fault)?;
+        for &(time, level) in edges {
             if time <= lane.last_dir {
                 return Err(fault(Fault::NonMonotonic));
             }
             writer.put_varint(time - lane.last_dir);
-            writer.put(level);
+            writer.put(level as u8);
             lane.last_dir = time;
         }
         queue.release_through(snapshot.dir_heads[index]);
     }
     writer.commit();
     engine.block = engine.block.wrapping_add(1);
-    Ok(())
+    Ok(SnapshotOutput {
+        net,
+        mco: snapshot.mco,
+        time: engine.lanes[MASTER].now,
+    })
 }

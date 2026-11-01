@@ -68,6 +68,8 @@ pub enum Fault {
     DmaError = 12,
     DirQueueFull = 13,
     NonMonotonic = 14,
+    McoLost = 15,
+    AuxOverflow = 16,
 }
 
 #[derive(Clone, Copy)]

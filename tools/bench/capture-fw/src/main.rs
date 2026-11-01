@@ -5,6 +5,7 @@ mod capture;
 mod event;
 mod regs;
 mod ring;
+mod sim;
 
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicU16, Ordering};
@@ -20,20 +21,30 @@ use usb_device::bus::UsbBusAllocator;
 use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
+use bench_sim_logic::aux::AUX_RECORD_LEN;
+use bench_sim_logic::config::MAX_PAYLOAD;
 use capture::{Fault, Sampler, CHANNEL_COUNT};
 use ring::TickRing;
 
 const COUNT_MAGIC: [u8; 4] = *b"SVC1";
 const EVENT_MAGIC: [u8; 4] = *b"SVE1";
 const THROUGHPUT_MAGIC: [u8; 4] = *b"SVT1";
+const AUX_MAGIC: [u8; 4] = *b"SVA1";
 const FRAME_HEADER_LEN: usize = 16;
 const TICKS_PER_FRAME: usize = 128;
 const TICK_BYTES: usize = CHANNEL_COUNT;
 const FRAME_MAX_LEN: usize = FRAME_HEADER_LEN + TICKS_PER_FRAME * TICK_BYTES;
 const FRAME_PAYLOAD_LEN: usize = FRAME_MAX_LEN - FRAME_HEADER_LEN;
+const AUX_PER_FRAME: usize = FRAME_PAYLOAD_LEN / AUX_RECORD_LEN;
+const COUNT_TICKS_PER_AUX: u32 = capture::TICK_HZ / 1_000;
+const EVENT_SNAPSHOTS_PER_AUX: u32 = event::SNAPSHOT_HZ / 1_000;
 const STATUS_DATA: u8 = 0;
 const CMD_START: u8 = b'S';
 const CMD_EVENTS: u8 = b'E';
+const CMD_START_AUX: u8 = b's';
+const CMD_EVENTS_AUX: u8 = b'e';
+const CMD_CONFIG: u8 = b'C';
+const CONFIG_HEADER_LEN: usize = 3;
 const CMD_STOP: u8 = b'X';
 const CMD_THROUGHPUT: u8 = b'T';
 const NO_FAULT: u16 = 0;
@@ -41,6 +52,7 @@ const USB_VID_ST: u16 = 0x0483;
 const USB_PID_VCP: u16 = 0x5740;
 const DIR_EDGE_PRIORITY: u8 = 0x00;
 const SNAPSHOT_PRIORITY: u8 = 0x40;
+const PERIPHERAL_PRIORITY: u8 = 0x80;
 
 static RING: TickRing = TickRing::new();
 static SAMPLER: Mutex<RefCell<Option<Sampler>>> = Mutex::new(RefCell::new(None));
@@ -61,13 +73,19 @@ fn latch_fault(fault: Fault, channel: u8) {
 fn TIM6_DAC() {
     capture::ack_snapshot_tick();
     match event::tick() {
-        Some(Ok(())) => return,
+        Some(Ok(snapshot)) => {
+            if let Err(fault) = sim::on_tick(&snapshot.net, snapshot.mco, snapshot.time) {
+                latch_fault(fault, 0);
+            }
+            return;
+        }
         Some(Err((fault, channel))) => {
             latch_fault(fault, channel);
             return;
         }
         None => {}
     }
+    let mco = sim::mco_count();
     cortex_m::interrupt::free(|cs| {
         let mut slot = SAMPLER.borrow(cs).borrow_mut();
         let Some(sampler) = slot.as_mut() else {
@@ -75,13 +93,29 @@ fn TIM6_DAC() {
         };
         match sampler.sample() {
             Ok(tick) => {
+                let time = RING.produced() as u64;
                 if RING.push(tick).is_err() {
                     latch_fault(Fault::RingOverflow, 0);
+                    return;
+                }
+                let deltas = tick.to_le_bytes().map(|delta| i32::from(delta as i8));
+                if let Err(fault) = sim::on_tick(&deltas, mco, time) {
+                    latch_fault(fault, 0);
                 }
             }
             Err((fault, channel)) => latch_fault(fault, channel),
         }
     });
+}
+
+#[interrupt]
+fn TIM7() {
+    sim::on_sample();
+}
+
+#[interrupt]
+fn USART2() {
+    sim::on_uart();
 }
 
 fn dir_edge(lane: usize) {
@@ -134,7 +168,8 @@ struct Stream {
     seq: u32,
     fault_reported: bool,
     mode: Mode,
-    command: [u8; 2],
+    aux: bool,
+    command: [u8; CONFIG_HEADER_LEN + MAX_PAYLOAD],
     command_len: usize,
 }
 
@@ -147,7 +182,8 @@ impl Stream {
             seq: 0,
             fault_reported: true,
             mode: Mode::Counts,
-            command: [0; 2],
+            aux: false,
+            command: [0; CONFIG_HEADER_LEN + MAX_PAYLOAD],
             command_len: 0,
         }
     }
@@ -157,7 +193,18 @@ impl Stream {
     }
 
     fn write_header(&mut self, position: u32, length: u16, status: u8, detail: u8) {
-        self.frame[0..4].copy_from_slice(&self.mode.magic());
+        self.write_header_as(self.mode.magic(), position, length, status, detail);
+    }
+
+    fn write_header_as(
+        &mut self,
+        magic: [u8; 4],
+        position: u32,
+        length: u16,
+        status: u8,
+        detail: u8,
+    ) {
+        self.frame[0..4].copy_from_slice(&magic);
         self.frame[4..8].copy_from_slice(&self.seq.to_le_bytes());
         self.frame[8..12].copy_from_slice(&position.to_le_bytes());
         self.frame[12..14].copy_from_slice(&length.to_le_bytes());
@@ -183,6 +230,14 @@ impl Stream {
         self.frame_len = payload_end;
     }
 
+    fn stage_aux(&mut self, records: usize) {
+        let first = sim::AUX.consumed() as u32;
+        self.write_header_as(AUX_MAGIC, first, records as u16, STATUS_DATA, 0);
+        let payload_end = FRAME_HEADER_LEN + records * AUX_RECORD_LEN;
+        sim::AUX.pop_into(&mut self.frame[FRAME_HEADER_LEN..payload_end]);
+        self.frame_len = payload_end;
+    }
+
     fn stage_fault(&mut self, fault: u16, position: usize) {
         let [code, channel] = fault.to_le_bytes();
         self.write_header(position as u32, 0, code, channel);
@@ -203,32 +258,44 @@ impl Stream {
     }
 
     fn stage_next(&mut self) {
+        let (available, full, position) = match self.mode {
+            Mode::Throughput => {
+                self.stage_throughput();
+                return;
+            }
+            Mode::Counts => (RING.available(), TICKS_PER_FRAME, RING.consumed()),
+            Mode::Events => (
+                event::OUTPUT.available(),
+                FRAME_PAYLOAD_LEN,
+                event::OUTPUT.consumed(),
+            ),
+        };
+        if available >= full {
+            self.stage_data(full);
+            return;
+        }
+        let aux = if self.aux { sim::AUX.available() } else { 0 };
+        if aux >= AUX_PER_FRAME {
+            self.stage_aux(AUX_PER_FRAME);
+            return;
+        }
+        let Some(fault) = self.pending_fault() else {
+            return;
+        };
+        if available > 0 {
+            self.stage_data(available);
+        } else if aux > 0 {
+            self.stage_aux(aux);
+        } else {
+            self.stage_fault(fault, position);
+        }
+    }
+
+    fn stage_data(&mut self, amount: usize) {
         match self.mode {
-            Mode::Throughput => self.stage_throughput(),
-            Mode::Counts => {
-                let available = RING.available();
-                if available >= TICKS_PER_FRAME {
-                    self.stage_ticks(TICKS_PER_FRAME);
-                } else if let Some(fault) = self.pending_fault() {
-                    if available > 0 {
-                        self.stage_ticks(available);
-                    } else {
-                        self.stage_fault(fault, RING.consumed());
-                    }
-                }
-            }
-            Mode::Events => {
-                let available = event::OUTPUT.available();
-                if available >= FRAME_PAYLOAD_LEN {
-                    self.stage_events(FRAME_PAYLOAD_LEN);
-                } else if let Some(fault) = self.pending_fault() {
-                    if available > 0 {
-                        self.stage_events(available);
-                    } else {
-                        self.stage_fault(fault, event::OUTPUT.consumed());
-                    }
-                }
-            }
+            Mode::Counts => self.stage_ticks(amount),
+            Mode::Events => self.stage_events(amount),
+            Mode::Throughput => unreachable!("throughput frames are staged directly"),
         }
     }
 
@@ -244,21 +311,32 @@ impl Stream {
         }
     }
 
-    fn start_counts(&mut self, both_edges_mask: u8) {
+    fn start_counts(&mut self, both_edges_mask: u8, aux: bool) {
         self.stop();
         self.mode = Mode::Counts;
+        self.aux = aux;
         self.fault_reported = false;
         let sampler = Sampler::arm(both_edges_mask);
         cortex_m::interrupt::free(|cs| SAMPLER.borrow(cs).replace(Some(sampler)));
+        sim::start_capture(aux, COUNT_TICKS_PER_AUX);
         capture::start_snapshot_timer(capture::TICK_HZ);
     }
 
-    fn start_events(&mut self, both_edges_mask: u8) {
+    fn start_events(&mut self, both_edges_mask: u8, aux: bool) {
         self.stop();
         self.mode = Mode::Events;
+        self.aux = aux;
         self.fault_reported = false;
+        sim::start_capture(aux, EVENT_SNAPSHOTS_PER_AUX);
         event::start(both_edges_mask);
         capture::start_snapshot_timer(event::SNAPSHOT_HZ);
+    }
+
+    fn configure(&mut self, payload: &[u8]) {
+        self.stop();
+        if let Ok(config) = bench_sim_logic::config::parse(payload) {
+            sim::apply_config(config);
+        }
     }
 
     fn start_throughput(&mut self) {
@@ -272,8 +350,10 @@ impl Stream {
         cortex_m::interrupt::free(|cs| SAMPLER.borrow(cs).replace(None));
         RING.reset();
         event::OUTPUT.reset();
+        sim::stop_capture();
         FAULT.store(NO_FAULT, Ordering::Release);
         self.mode = Mode::Counts;
+        self.aux = false;
         self.seq = 0;
         self.frame_len = 0;
         self.sent = 0;
@@ -288,18 +368,39 @@ impl Stream {
         for &byte in &buf[..count] {
             self.command[self.command_len] = byte;
             self.command_len += 1;
-            if self.command_len < self.command.len() {
+            if self.command_len < self.command_len_needed() {
                 continue;
             }
+            let len = self.command_len;
             self.command_len = 0;
-            match self.command {
-                [CMD_START, mask] => self.start_counts(mask),
-                [CMD_EVENTS, mask] => self.start_events(mask),
+            match self.command[..len] {
+                [CMD_CONFIG, _, _, ..] => {
+                    let mut payload = [0u8; MAX_PAYLOAD];
+                    let size = len - CONFIG_HEADER_LEN;
+                    payload[..size].copy_from_slice(&self.command[CONFIG_HEADER_LEN..len]);
+                    self.configure(&payload[..size]);
+                }
+                [CMD_START, mask] => self.start_counts(mask, false),
+                [CMD_START_AUX, mask] => self.start_counts(mask, true),
+                [CMD_EVENTS, mask] => self.start_events(mask, false),
+                [CMD_EVENTS_AUX, mask] => self.start_events(mask, true),
                 [CMD_THROUGHPUT, _] => self.start_throughput(),
                 [CMD_STOP, _] => self.stop(),
                 _ => panic!("unknown command"),
             }
         }
+    }
+
+    fn command_len_needed(&self) -> usize {
+        if self.command[0] != CMD_CONFIG {
+            return 2;
+        }
+        if self.command_len < CONFIG_HEADER_LEN {
+            return CONFIG_HEADER_LEN;
+        }
+        let payload = usize::from(u16::from_le_bytes([self.command[1], self.command[2]]));
+        assert!(payload <= MAX_PAYLOAD, "config payload too long");
+        CONFIG_HEADER_LEN + payload
     }
 }
 
@@ -331,8 +432,24 @@ fn main() -> ! {
     let _m3_step = gpioc.pc6.into_alternate::<3>();
     let _m3_dir = gpioc.pc7.into_alternate::<3>();
 
+    let _x_endstop = gpiod.pd8.into_push_pull_output();
+    let _y_endstop = gpiod.pd9.into_push_pull_output();
+    let _z_endstop = gpiod.pd10.into_push_pull_output();
+    let _probe = gpiod.pd11.into_push_pull_output();
+    let _extruder_heater = gpiod.pd14.into_pull_down_input();
+    let _bed_heater = gpiod.pd15.into_pull_down_input();
+    let _part_fan = gpioe.pe8.into_pull_down_input();
+    let _mco = gpioe.pe5.into_alternate::<3>();
+    let _thermistor_extruder = gpioa.pa4.into_analog();
+    let _thermistor_bed = gpioa.pa5.into_analog();
+    let _tmc_uart = gpioa
+        .pa2
+        .into_alternate_open_drain::<7>()
+        .internal_pull_up(true);
+
     capture::enable_clocks();
     event::enable_clocks();
+    sim::enable_clocks();
     unsafe {
         cp.NVIC.set_priority(Interrupt::TIM6_DAC, SNAPSHOT_PRIORITY);
         for irq in [
@@ -343,8 +460,11 @@ fn main() -> ! {
         ] {
             cp.NVIC.set_priority(irq, DIR_EDGE_PRIORITY);
         }
+        cp.NVIC.set_priority(Interrupt::TIM7, PERIPHERAL_PRIORITY);
+        cp.NVIC.set_priority(Interrupt::USART2, PERIPHERAL_PRIORITY);
         NVIC::unmask(Interrupt::TIM6_DAC);
     }
+    sim::init();
 
     let usb = USB::new(
         (dp.OTG_FS_GLOBAL, dp.OTG_FS_DEVICE, dp.OTG_FS_PWRCLK),

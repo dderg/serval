@@ -10,8 +10,12 @@ pub const AHB1_DMA2: u32 = 1 << 22;
 pub const APB1_TIM3: u32 = 1 << 1;
 pub const APB1_TIM4: u32 = 1 << 2;
 pub const APB1_TIM6: u32 = 1 << 4;
+pub const APB1_TIM7: u32 = 1 << 5;
+pub const APB1_USART2: u32 = 1 << 17;
+pub const APB1_DAC: u32 = 1 << 29;
 pub const APB2_TIM1: u32 = 1 << 0;
 pub const APB2_TIM8: u32 = 1 << 1;
+pub const APB2_TIM9: u32 = 1 << 16;
 
 pub fn enable_ahb1(mask: u32) {
     set_bits(RCC_AHB1ENR, mask);
@@ -37,6 +41,8 @@ pub const TIM8: Timer = Timer(0x4001_0400);
 pub const TIM3: Timer = Timer(0x4000_0400);
 pub const TIM4: Timer = Timer(0x4000_0800);
 pub const TIM6: Timer = Timer(0x4000_1000);
+pub const TIM7: Timer = Timer(0x4000_1400);
+pub const TIM9: Timer = Timer(0x4001_4000);
 
 pub const CR1_CEN: u32 = 1 << 0;
 pub const DIER_UIE: u32 = 1 << 0;
@@ -210,3 +216,73 @@ pub const GPIOA: usize = 0x4002_0000;
 pub const GPIOC: usize = 0x4002_0800;
 pub const GPIOD: usize = 0x4002_0C00;
 pub const GPIOE: usize = 0x4002_1000;
+
+pub fn write_bsrr(port: usize, value: u32) {
+    unsafe { write_volatile((port + 0x18) as *mut u32, value) }
+}
+
+#[derive(Clone, Copy)]
+pub struct Usart(pub usize);
+
+pub const USART2: Usart = Usart(0x4000_4400);
+
+pub const USART_SR_ORE: u32 = 1 << 3;
+pub const USART_SR_IDLE: u32 = 1 << 4;
+pub const USART_SR_RXNE: u32 = 1 << 5;
+pub const USART_SR_TC: u32 = 1 << 6;
+pub const USART_SR_TXE: u32 = 1 << 7;
+pub const USART_CR1_RE: u32 = 1 << 2;
+pub const USART_CR1_TE: u32 = 1 << 3;
+pub const USART_CR1_IDLEIE: u32 = 1 << 4;
+pub const USART_CR1_RXNEIE: u32 = 1 << 5;
+pub const USART_CR1_TCIE: u32 = 1 << 6;
+pub const USART_CR1_TXEIE: u32 = 1 << 7;
+pub const USART_CR1_UE: u32 = 1 << 13;
+pub const USART_CR3_HDSEL: u32 = 1 << 3;
+
+impl Usart {
+    fn reg(self, offset: usize) -> *mut u32 {
+        (self.0 + offset) as *mut u32
+    }
+
+    pub fn sr(self) -> u32 {
+        unsafe { read_volatile(self.reg(0x00)) }
+    }
+
+    pub fn dr(self) -> u8 {
+        unsafe { read_volatile(self.reg(0x04)) as u8 }
+    }
+
+    pub fn set_dr(self, byte: u8) {
+        unsafe { write_volatile(self.reg(0x04), u32::from(byte)) }
+    }
+
+    pub fn set_brr(self, v: u32) {
+        unsafe { write_volatile(self.reg(0x08), v) }
+    }
+
+    pub fn cr1(self) -> u32 {
+        unsafe { read_volatile(self.reg(0x0C)) }
+    }
+
+    pub fn set_cr1(self, v: u32) {
+        unsafe { write_volatile(self.reg(0x0C), v) }
+    }
+
+    pub fn set_cr3(self, v: u32) {
+        unsafe { write_volatile(self.reg(0x14), v) }
+    }
+}
+
+const DAC_BASE: usize = 0x4000_7400;
+pub const DAC_CR_EN1: u32 = 1 << 0;
+pub const DAC_CR_EN2: u32 = 1 << 16;
+
+pub fn dac_set_cr(v: u32) {
+    unsafe { write_volatile(DAC_BASE as *mut u32, v) }
+}
+
+pub fn dac_write(channel: usize, code: u16) {
+    let offset = [0x08, 0x14][channel];
+    unsafe { write_volatile((DAC_BASE + offset) as *mut u32, u32::from(code)) }
+}

@@ -10,6 +10,7 @@ cortex-m-rt = "0.7.5"
 stm32f4xx-hal = { version = "0.23.0", features = ["stm32f407", "usb_fs"] }
 usb-device = "0.3.2"
 usbd-serial = "0.2.2"
+bench-sim-logic = { path = "../sim-logic" }
 
 [profile.release]
 opt-level = 3
