@@ -1082,6 +1082,7 @@ fn fit_axis_targets(
                 t0: t_start,
                 t1: t_end,
                 depth: 0,
+                slivers: plan.slivers[span_index],
             },
             &SpanFitPolicy {
                 axis,
@@ -1960,30 +1961,69 @@ fn ladder_resolution_floor_from_scales(
 /// full-width span evaluates to garbage. Exact convolution cut transitions
 /// land an ulp away from segment edges by construction, so the collision is
 /// routine rather than exceptional. Each cluster collapses to its rightmost
-/// member — the transitions are right-owned, and the sub-ulp interval that
+/// member — the transitions are right-owned, and the sub-floor interval that
 /// gets absorbed into the span on the left carries no integral. `t_start` and
 /// `t_end` are pinned, so a cluster touching the start keeps the start.
-fn coalesce_degenerate_seeds(seeds: &mut Vec<f64>, minimum_span: f64) {
+///
+/// The absorbed seeds may still be real breaks of the signal, so the plan
+/// records, per kept span, how far in from each edge they reach: the ladder
+/// must read that edge's state past them.
+fn coalesce_degenerate_seeds(seeds: &mut Vec<f64>, minimum_span: f64) -> Vec<EdgeSlivers> {
     let t_end = *seeds.last().expect("fit seeds are empty");
     let mut kept = Vec::with_capacity(seeds.len());
+    let mut absorbed_before = Vec::with_capacity(seeds.len());
+    let mut absorbed_after_start = 0.0_f64;
     kept.push(seeds[0]);
+    absorbed_before.push(0.0);
     for &seed in &seeds[1..seeds.len() - 1] {
-        if seed - *kept.last().expect("kept seeds are empty") >= minimum_span {
+        let last = *kept.last().expect("kept seeds are empty");
+        if seed - last >= minimum_span {
             kept.push(seed);
+            absorbed_before.push(0.0);
         } else if kept.len() > 1 {
             kept.pop();
+            let carried = absorbed_before
+                .pop()
+                .expect("absorbed widths track kept seeds");
             kept.push(seed);
+            absorbed_before.push(carried + (seed - last));
+        } else {
+            absorbed_after_start = absorbed_after_start.max(seed - last);
         }
     }
+    let mut absorbed_end = 0.0_f64;
     while kept.len() > 1 && t_end - *kept.last().expect("kept seeds are empty") < minimum_span {
-        kept.pop();
+        let dropped = kept.pop().expect("kept seeds are empty");
+        let carried = absorbed_before
+            .pop()
+            .expect("absorbed widths track kept seeds");
+        absorbed_end = absorbed_end.max(t_end - dropped + carried);
     }
     kept.push(t_end);
+    absorbed_before.push(absorbed_end);
     *seeds = kept;
+    (1..seeds.len())
+        .map(|span_end| EdgeSlivers {
+            start: if span_end == 1 {
+                absorbed_after_start
+            } else {
+                0.0
+            },
+            end: absorbed_before[span_end],
+        })
+        .collect()
+}
+
+/// How far into a span, from each edge, seeds absorbed by coalescing reach.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+struct EdgeSlivers {
+    start: f64,
+    end: f64,
 }
 
 struct FitPlan {
     seeds: Vec<f64>,
+    slivers: Vec<EdgeSlivers>,
     floors: LadderFloors,
     max_depth: u32,
 }
@@ -2023,10 +2063,11 @@ fn fit_plan_from_seeds(
     t_start: f64,
     t_end: f64,
 ) -> FitPlan {
-    coalesce_degenerate_seeds(&mut seeds, floors.cubic);
+    let slivers = coalesce_degenerate_seeds(&mut seeds, floors.cubic);
     let max_depth = libm::log2((t_end - t_start) / floors.cubic).ceil().max(0.0) as u32;
     FitPlan {
         seeds,
+        slivers,
         floors,
         max_depth,
     }
@@ -2101,13 +2142,14 @@ pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
     };
     let mut refinement_splits = 0;
     let mut pieces = Vec::with_capacity(plan.seeds.len());
-    for span in plan.seeds.windows(2) {
+    for (span, &slivers) in plan.seeds.windows(2).zip(&plan.slivers) {
         refine_shaped_span(
             sig,
             RefineSpan {
                 t0: span[0],
                 t1: span[1],
                 depth: 0,
+                slivers,
             },
             &policy,
             SpanSeeds {
@@ -2263,6 +2305,7 @@ struct RefineSpan {
     t0: f64,
     t1: f64,
     depth: u32,
+    slivers: EdgeSlivers,
 }
 
 /// The partition seeds the refined span sits between, reported by a fit
@@ -2282,10 +2325,43 @@ struct SpanSeeds {
 /// matter which rung wins. Returns the accepted monomial-in-u fit, or the
 /// quintic base with `fits = false` so the caller can bisect.
 #[allow(clippy::type_complexity)]
+/// How far inside a span edge the state the ladder anchors to is read: past
+/// whatever coalescing absorbed there, and at least a cubic floor, but no
+/// more than a quarter of the span.
+fn edge_inset(h: f64, cubic_floor: f64, absorbed: f64) -> f64 {
+    cubic_floor.max(absorbed).min(0.25 * h)
+}
+
+/// The velocity and acceleration a span is anchored to at one edge. Both
+/// are read at the seam itself, so neighbouring pieces meet with matching
+/// state wherever the signal is smooth — unless the acceleration past the
+/// edge's coalesced sliver differs from the seam reading by more than the
+/// fit tolerance: then a break hides in the sliver, and pinning the piece
+/// to the seam value would anchor it to the break's far side.
+fn edge_velocity_and_acceleration<S: TrackSignal>(
+    sig: &S,
+    axis: usize,
+    seam: f64,
+    past_sliver: f64,
+    fit_tol: FitTol,
+) -> Result<(f64, f64), PostProcessError> {
+    let (_, velocity, seam_acceleration) = sig.eval_pva(seam);
+    let velocity = exact_value(axis, velocity, seam)?;
+    let seam_acceleration = exact_value(axis, seam_acceleration, seam)?;
+    let past_acceleration = exact_value(axis, sig.second_deriv(past_sliver), past_sliver)?;
+    let acceleration = if (past_acceleration - seam_acceleration).abs() > fit_tol.accel_mm_s2 {
+        past_acceleration
+    } else {
+        seam_acceleration
+    };
+    Ok((velocity, acceleration))
+}
+
 fn shaped_ladder<S: TrackSignal>(
     sig: &S,
     t0: f64,
     t1: f64,
+    slivers: EdgeSlivers,
     policy: &SpanFitPolicy,
 ) -> Result<(Vec<f64>, Option<LadderFailure>), PostProcessError> {
     let axis = policy.axis;
@@ -2301,17 +2377,24 @@ fn shaped_ladder<S: TrackSignal>(
             t_of(u)
         }
     };
-    let coalesced_sliver = policy.floors.cubic.min(0.25 * h);
     let t0_inside = interior_t_of(-1.0);
-    let t0_past_sliver = (t0 + coalesced_sliver).max(t0_inside);
     let p0 = exact_value(axis, sig.eval(t0), t0)?;
-    let v0 = exact_value(axis, sig.deriv(t0_inside), t0_inside)?;
-    let a0 = exact_value(axis, sig.second_deriv(t0_past_sliver), t0_past_sliver)?;
+    let (v0, a0) = edge_velocity_and_acceleration(
+        sig,
+        axis,
+        t0_inside,
+        t0 + edge_inset(h, policy.floors.cubic, slivers.start),
+        fit_tol,
+    )?;
     let t1_inside = interior_t_of(1.0);
-    let t1_past_sliver = (t1 - coalesced_sliver).min(t1_inside);
     let p1 = exact_value(axis, sig.eval(t1), t1)?;
-    let v1 = exact_value(axis, sig.deriv(t1_inside), t1_inside)?;
-    let a1 = exact_value(axis, sig.second_deriv(t1_past_sliver), t1_past_sliver)?;
+    let (v1, a1) = edge_velocity_and_acceleration(
+        sig,
+        axis,
+        t1_inside,
+        t1 - edge_inset(h, policy.floors.cubic, slivers.end),
+        fit_tol,
+    )?;
     let base = quintic_in_u((p0, v0, a0), (p1, v1, a1), h);
     let endpoint_delta = exact_value(axis, sig.position_delta((t0, p0), (t1, p1)), t1)?;
 
@@ -2423,11 +2506,16 @@ fn refine_shaped_span<S: TrackSignal>(
     refinement_splits: &mut usize,
     out: &mut Vec<BezierPiece>,
 ) -> Result<(), PostProcessError> {
-    let RefineSpan { t0, t1, depth } = span;
+    let RefineSpan {
+        t0,
+        t1,
+        depth,
+        slivers,
+    } = span;
     let fit_tol = policy.fit_tol;
     let velocity_budget = policy.velocity_budget;
     let floors = policy.floors;
-    let (mono_u, failure) = shaped_ladder(sig, t0, t1, policy)?;
+    let (mono_u, failure) = shaped_ladder(sig, t0, t1, slivers, policy)?;
     if failure.is_none() {
         #[cfg(feature = "fit-audit")]
         crate::fit_audit::check(
@@ -2441,6 +2529,10 @@ fn refine_shaped_span<S: TrackSignal>(
                 mono_u: &mono_u,
                 accepted_at_floor: false,
                 cubic_floor: floors.cubic,
+                edge_insets: (
+                    edge_inset(t1 - t0, floors.cubic, slivers.start),
+                    edge_inset(t1 - t0, floors.cubic, slivers.end),
+                ),
             },
         );
         out.push(exact_piece(&mono_u, t0, t1, t1 - t0));
@@ -2473,6 +2565,10 @@ fn refine_shaped_span<S: TrackSignal>(
                     mono_u: &mono_u,
                     accepted_at_floor: true,
                     cubic_floor: floors.cubic,
+                    edge_insets: (
+                        edge_inset(t1 - t0, floors.cubic, slivers.start),
+                        edge_inset(t1 - t0, floors.cubic, slivers.end),
+                    ),
                 },
             );
             out.push(exact_piece(&mono_u, t0, t1, t1 - t0));
@@ -2519,6 +2615,10 @@ fn refine_shaped_span<S: TrackSignal>(
             t0,
             t1: tm,
             depth: depth + 1,
+            slivers: EdgeSlivers {
+                start: slivers.start,
+                end: 0.0,
+            },
         },
         policy,
         seeds,
@@ -2531,6 +2631,10 @@ fn refine_shaped_span<S: TrackSignal>(
             t0: tm,
             t1,
             depth: depth + 1,
+            slivers: EdgeSlivers {
+                start: 0.0,
+                end: slivers.end,
+            },
         },
         policy,
         seeds,
@@ -2920,3 +3024,7 @@ pub(crate) fn apply_derivative_gains_to_track(
 #[cfg(test)]
 #[path = "shaper_moment_tests.rs"]
 mod shaper_moment_tests;
+
+#[cfg(test)]
+#[path = "shaper_edge_tests.rs"]
+mod shaper_edge_tests;
