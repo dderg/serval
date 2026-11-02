@@ -2292,26 +2292,26 @@ fn shaped_ladder<S: TrackSignal>(
     let fit_tol = policy.fit_tol;
     let h = t1 - t0;
     let t_of = |u: f64| nurbs::fmadd(0.5 * (u + 1.0), h, t0);
-    let coalesced_sliver = policy.floors.cubic.min(0.25 * h);
     let interior_t_of = |u: f64| {
         if u == -1.0 {
-            (t0 + coalesced_sliver).max(next_toward(t0, t1))
+            next_toward(t0, t1)
         } else if u == 1.0 {
-            (t1 - coalesced_sliver).min(next_toward(t1, t0))
+            next_toward(t1, t0)
         } else {
             t_of(u)
         }
     };
+    let coalesced_sliver = policy.floors.cubic.min(0.25 * h);
     let t0_inside = interior_t_of(-1.0);
+    let t0_past_sliver = (t0 + coalesced_sliver).max(t0_inside);
     let p0 = exact_value(axis, sig.eval(t0), t0)?;
-    let (_, v0, a0) = sig.eval_pva(t0_inside);
-    let v0 = exact_value(axis, v0, t0_inside)?;
-    let a0 = exact_value(axis, a0, t0_inside)?;
+    let v0 = exact_value(axis, sig.deriv(t0_inside), t0_inside)?;
+    let a0 = exact_value(axis, sig.second_deriv(t0_past_sliver), t0_past_sliver)?;
     let t1_inside = interior_t_of(1.0);
+    let t1_past_sliver = (t1 - coalesced_sliver).min(t1_inside);
     let p1 = exact_value(axis, sig.eval(t1), t1)?;
-    let (_, v1, a1) = sig.eval_pva(t1_inside);
-    let v1 = exact_value(axis, v1, t1_inside)?;
-    let a1 = exact_value(axis, a1, t1_inside)?;
+    let v1 = exact_value(axis, sig.deriv(t1_inside), t1_inside)?;
+    let a1 = exact_value(axis, sig.second_deriv(t1_past_sliver), t1_past_sliver)?;
     let base = quintic_in_u((p0, v0, a0), (p1, v1, a1), h);
     let endpoint_delta = exact_value(axis, sig.position_delta((t0, p0), (t1, p1)), t1)?;
 
@@ -2440,6 +2440,7 @@ fn refine_shaped_span<S: TrackSignal>(
                 t1,
                 mono_u: &mono_u,
                 accepted_at_floor: false,
+                cubic_floor: floors.cubic,
             },
         );
         out.push(exact_piece(&mono_u, t0, t1, t1 - t0));
@@ -2471,6 +2472,7 @@ fn refine_shaped_span<S: TrackSignal>(
                     t1,
                     mono_u: &mono_u,
                     accepted_at_floor: true,
+                    cubic_floor: floors.cubic,
                 },
             );
             out.push(exact_piece(&mono_u, t0, t1, t1 - t0));
