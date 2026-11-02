@@ -237,6 +237,53 @@ fn endpoint_velocity_zero_dedups_against_the_support_grid() {
 }
 
 #[test]
+fn leader_speed_step_on_the_grid_is_seeded_as_a_construction_breakpoint() {
+    let (t0, step_at, t1) = (0.0, 0.01, 0.02);
+    let x = bezier_pieces_to_nurbs(&[
+        BezierPiece {
+            u_start: t0,
+            u_end: step_at,
+            coeffs: vec![0.0, 100.0],
+        },
+        BezierPiece {
+            u_start: step_at,
+            u_end: t1,
+            coeffs: vec![1.0, 200.0],
+        },
+    ]);
+    let y = bezier_pieces_to_nurbs(&[BezierPiece {
+        u_start: t0,
+        u_end: t1,
+        coeffs: vec![2.0],
+    }]);
+    let shaped = leader_segment(x, y, t0, t1);
+    let raw = shaped.clone();
+    let mut state = FollowerState::default();
+    state.push_span(10.0, 0.05, 0.05);
+    let sig = FollowerSignal::new(
+        &shaped,
+        &raw,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    let velocity_step = sig.deriv(trajectory::next_toward(step_at, f64::INFINITY))
+        - sig.deriv(trajectory::next_toward(step_at, f64::NEG_INFINITY));
+    assert!(
+        (velocity_step - 5.0).abs() < 1e-9,
+        "fixture must step the follower velocity by 5 mm/s at the leader knot, not \
+         {velocity_step}"
+    );
+    let breaks = sig.construction_breakpoints(&raw.axes[3], 50.0).fit_seeds;
+    assert!(
+        breaks.contains(&step_at),
+        "the follower's velocity step at {step_at} is not a fit seed: {breaks:?}"
+    );
+}
+
+#[test]
 #[should_panic(expected = "beyond the")]
 fn an_ingested_length_off_by_more_than_leaf_reordering_panics() {
     let shaped = cusp_segment(vec![0.0, 10.0], vec![0.0, 0.0, 500.0], 0.0, 0.02);

@@ -10,9 +10,10 @@ use trajectory::{
 
 use crate::lowering::{FitTol, follower_tol_scale};
 use crate::shaper::{
-    AxisFit, AxisSignalTable, FitBoundary, KnotJumpBound, Lookahead, SEGMENT_TIME_EPS_S,
-    ShiftedTrackSignal, SignalBounds, TrackSignal, apply_derivative_gains_to_track,
-    fit_axis_from_signal, fit_resolution, shaped_signal_breakpoints, unit_kernel_mass,
+    AxisFit, AxisSignalTable, FitBoundary, KnotJumpBound, Lookahead, MIN_DEVICE_INTERVAL_S,
+    SEGMENT_TIME_EPS_S, ShiftedTrackSignal, SignalBounds, TrackSignal,
+    apply_derivative_gains_to_track, fit_axis_from_signal, fit_resolution,
+    shaped_signal_breakpoints, unit_kernel_mass,
 };
 use crate::types::PostProcessError;
 
@@ -2341,6 +2342,7 @@ impl<'a> FollowerSignal<'a> {
         breaks.dedup();
         let semantic = breaks.clone();
         breaks.extend(self.acceleration_steps_on_the_grid(acceleration_tol));
+        breaks.extend(self.velocity_steps_on_the_grid(acceleration_tol * MIN_DEVICE_INTERVAL_S));
         breaks.sort_by(f64::total_cmp);
         breaks.dedup();
         let zeros = self.velocity_component_zeros(&breaks, support_start, support_end);
@@ -2391,6 +2393,23 @@ impl<'a> FollowerSignal<'a> {
             velocity_resolution / steepest_advance_slope(stage),
             |t, step| advance_slope(stage, self.deriv(t)).abs() * step > velocity_resolution,
         )
+    }
+
+    fn velocity_steps_on_the_grid(&self, velocity_resolution: f64) -> Vec<f64> {
+        let ratio_bound = self.ratio_bounds.ratio;
+        let interior = &self.grid[1..self.grid.len() - 1];
+        interior
+            .iter()
+            .copied()
+            .filter(|&t| {
+                let before = trajectory::next_toward(t, f64::NEG_INFINITY);
+                let after = trajectory::next_toward(t, f64::INFINITY);
+                let path_speed_step = self.odometer_scale
+                    * (self.leaders.speed(after) - self.leaders.speed(before)).abs();
+                ratio_bound * path_speed_step > velocity_resolution
+                    && (self.deriv(after) - self.deriv(before)).abs() > velocity_resolution
+            })
+            .collect()
     }
 
     fn grid_acceleration_steps(
