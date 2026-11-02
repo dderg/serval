@@ -247,7 +247,7 @@ fn a_plain_follower_source_fit_opens_and_closes_on_the_signal_velocity() {
         pos_mm: 1e-4,
         accel_mm_s2: 50.0,
     };
-    let fitted = super::fit_source_projection(source, fit_tol, None, false).unwrap();
+    let fitted = super::fit_source_projection(source, fit_tol, None).unwrap();
     let sig = FollowerSignal::new(&shaped, &shaped, 3, &[0, 1], &state, 0.0, 0.0);
     let pieces = nurbs::bezier::extract_bezier_pieces(&fitted.track);
     assert!(pieces.len() > 1, "fixture must fit with an interior seam");
@@ -395,7 +395,7 @@ fn an_advanced_follower_source_fit_opens_and_closes_on_the_signal_velocity() {
         nonlinear_offset: 0.03,
         linearization_velocity: 1.0,
     });
-    let fitted = super::fit_source_projection(source, fit_tol, Some(&stage), true).unwrap();
+    let fitted = super::fit_source_projection(source, fit_tol, Some(&stage)).unwrap();
     let sig = FollowerSignal::new(&shaped, &shaped, 3, &[0, 1], &state, 0.0, 0.0);
     let advanced = super::AdvancedFollowerSignal {
         source: &sig,

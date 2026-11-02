@@ -168,11 +168,9 @@ struct FollowerSource<'a> {
 }
 
 /// Fits one segment's projected follower source. Its pieces meet on the
-/// signal's own velocity wherever the signal is position-continuous: the
-/// plain source always, an advanced one once its in-window advance steps
-/// are taken out — which they are when a kernel follows to carry them.
-/// Without a kernel, steps within the fit tolerance stay in the signal, and
-/// only the endpoint-anchored rungs can absorb them.
+/// signal's own velocity: the plain source's always, an advanced one's once
+/// its in-window advance steps are taken out for the kernel after it to
+/// carry, which configuration and the shaper guarantee it has.
 fn fit_source_projection(
     source: FollowerSource,
     fit_tol: FitTol,
@@ -222,7 +220,7 @@ fn fit_source_projection(
             } else {
                 "follower_source"
             },
-            velocity_continuous: leading_stage.is_none() || kernel_follows,
+            velocity_continuous: true,
         };
         match leading_stage {
             Some(stage) => fit_axis_from_signal(

@@ -4116,20 +4116,23 @@ fn a_leader_fit_ignores_the_advanced_follower_riding_it() {
     ];
     let home = [0.0, 0.0, 0.0, 0.0];
     let leader_smooth_time = Some(0.044583333333333336);
+    let e_smooth_time = 0.005;
     let plain = replay(
         cfg(),
-        follower_kernel_chains(leader_smooth_time, None, 0.0),
+        follower_kernel_chains(leader_smooth_time, None, e_smooth_time),
         &home,
         0.0,
         &moves,
     );
-    let advanced = replay(
-        cfg(),
-        follower_kernel_chains(leader_smooth_time, Some(0.04), 0.0),
-        &home,
-        0.0,
-        &moves,
+    let mut advanced_chains = follower_kernel_chains(leader_smooth_time, None, 0.0);
+    advanced_chains.chains[3] = nonlinear_e_chain(
+        &trajectory::algos::TanhPressureAdvance,
+        0.04,
+        0.05,
+        20.0,
+        e_smooth_time,
     );
+    let advanced = replay(cfg(), advanced_chains, &home, 0.0, &moves);
     assert_eq!(plain.len(), advanced.len());
     for (left, right) in plain.iter().zip(&advanced) {
         assert_eq!((left.t_start, left.t_end), (right.t_start, right.t_end));
