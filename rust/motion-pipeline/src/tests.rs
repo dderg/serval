@@ -3936,3 +3936,104 @@ fn derivative_gains_preserve_one_sided_polynomial_law() {
         }
     }
 }
+
+fn worst_seam_velocity_step(segments: &[ContinuousSegment], axis: usize) -> (f64, f64) {
+    let mut worst = (0.0_f64, f64::NAN);
+    for pair in segments.windows(2) {
+        let seam = pair[0].t_end;
+        let left = pair[0].eval_axis(axis, seam).unwrap().velocity;
+        let right = pair[1].eval_axis(axis, seam).unwrap().velocity;
+        let step = (left - right).abs() / left.abs().max(right.abs()).max(1.0);
+        if step > worst.0 {
+            worst = (step, seam);
+        }
+    }
+    worst
+}
+
+/// A kernel's output is C1 wherever its input is C0, so a seam between two
+/// fitted stretches of it has no velocity step of its own: every fitted
+/// piece has to open and close on the signal's velocity, not on one solved
+/// from its travel.
+#[test]
+fn kernel_shaped_seams_carry_the_signal_velocity() {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 1.5),
+        line(2, [30.0, 0.0, 0.0], [30.0, 30.0, 0.0], 1.5),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let mut plain_axis = follower_kernel_chains(Some(0.044583333333333336), None, 0.02675);
+    plain_axis.followers.clear();
+    let shaped = replay(cfg(), plain_axis, &home, 0.0, &moves);
+    for axis in [0, 1, 3] {
+        let (step, seam) = worst_seam_velocity_step(&shaped, axis);
+        assert!(
+            step <= 1e-9,
+            "axis {axis} steps its velocity by {step} (relative) at the seam t={seam}"
+        );
+    }
+}
+
+fn exact_kernel_position(
+    kernel: &nurbs::algebra::PiecewisePolynomialKernel,
+    input: &[ContinuousSegment],
+    t: f64,
+) -> f64 {
+    const NODES: usize = 8_000;
+    let input_at = |time: f64| {
+        let first = input.first().expect("input stream is empty");
+        let last = input.last().expect("input stream is empty");
+        let clamped = time.clamp(first.t_start, last.t_end);
+        let segment = input
+            .iter()
+            .find(|segment| segment.t_start <= clamped && clamped <= segment.t_end)
+            .expect("input covers the clamped time");
+        eval_segment_axis(segment, 3, clamped)
+    };
+    let (lo, hi) = kernel.support();
+    let width = (hi - lo) / NODES as f64;
+    (0..NODES)
+        .map(|node| {
+            let tau = lo + (node as f64 + 0.5) * width;
+            let weight = kernel
+                .pieces
+                .iter()
+                .find(|piece| piece.u_start <= tau && tau <= piece.u_end)
+                .map_or(0.0, |piece| piece.evaluate(tau));
+            weight * input_at(t - tau) * width
+        })
+        .sum()
+}
+
+/// With raw leaders the projected follower is the raw extruder track, so its
+/// kernelled output must be that track's convolution to within the
+/// follower's own fit tolerance at every batch seam and inside every batch
+/// that extrudes; the opening and closing rest segments carry the rest
+/// tolerance instead.
+#[test]
+fn a_kernelled_follower_stays_on_its_convolution_across_batch_seams() {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 1.5),
+        line(2, [30.0, 0.0, 0.0], [30.0, 30.0, 0.0], 1.5),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let chains = follower_kernel_chains(None, None, 0.02675);
+    let kernel = chains.chains[3]
+        .kernel()
+        .expect("e chain has a kernel")
+        .clone();
+    let follower = replay(cfg(), chains, &home, 0.0, &moves);
+    let raw = replay(cfg(), follower_chains_without_kernels(), &home, 0.0, &moves);
+    let ratio = 1.5 / 30.0;
+    let budget = 2.0 * fit_tol(cfg()).pos_mm * ratio;
+    let delay = 0.5 * (kernel.support().1 - kernel.support().0);
+    let moving = &follower[1..follower.len() - 1];
+    for (t, e) in sample_extruder(moving) {
+        let exact = exact_kernel_position(&kernel, &raw, t - delay);
+        assert!(
+            (e - exact).abs() <= budget,
+            "follower e {e} departs from its convolution {exact} by {} > {budget} at t={t}",
+            (e - exact).abs()
+        );
+    }
+}

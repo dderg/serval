@@ -8,7 +8,7 @@ use trajectory::{
     RelativeSplinePiece, ShapedSignal, next_toward,
 };
 
-use crate::follower_projection::{FollowerState, advance_before_projection, project_followers};
+use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
     AccelerationTrend, FitTol, LADDER_PROBES_U, LadderBudget, LadderFailure, LadderPolicy,
     LadderPva, LadderSpan, LadderTruth, VelocitySign, exact_piece, ladder_fit, quintic_in_u,
@@ -852,20 +852,8 @@ fn fit_axis_column(
         ),
         fit_tol,
         target_workers,
-        rides_an_advanced_follower(request.chains, axis),
     )
     .map(Some)
-}
-
-fn rides_an_advanced_follower(chains: &AxisChainSet, leader: usize) -> bool {
-    chains.projected_followers().any(|(follower, leaders)| {
-        leaders.contains(&leader)
-            && chains
-                .chains
-                .get(follower)
-                .and_then(advance_before_projection)
-                .is_some()
-    })
 }
 
 /// The convolution's input for one axis, packaged for the target fits: the
@@ -948,7 +936,6 @@ fn fit_axis_targets(
     source: ShapedSignalSource,
     fit_tol: FitTol,
     target_workers: usize,
-    velocity_continuous: bool,
 ) -> Result<Vec<nurbs::ScalarNurbs>, PostProcessError> {
     if targets.is_empty() {
         return Ok(Vec::new());
@@ -974,7 +961,7 @@ fn fit_axis_targets(
                     seed_breakpoints: shaped_breaks,
                     fit_tol,
                     fit_context: "smooth_kernel_target",
-                    velocity_continuous,
+                    velocity_continuous: true,
                 },
                 sig,
             )?;
@@ -1144,7 +1131,7 @@ fn fit_axis_targets(
                 floors: plan.floors,
                 max_depth: plan.max_depth,
                 velocity_sign: VelocitySign::Unconstrained,
-                velocity_continuous,
+                velocity_continuous: true,
             },
             SpanSeeds {
                 lower: t_start,
@@ -1243,7 +1230,7 @@ fn fit_axis_targets(
                     seed_breakpoints: shaped_breaks,
                     fit_tol,
                     fit_context: "smooth_kernel_target",
-                    velocity_continuous,
+                    velocity_continuous: true,
                 },
                 &sig,
             )?

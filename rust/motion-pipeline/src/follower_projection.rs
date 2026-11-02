@@ -163,7 +163,7 @@ fn fit_source_projection(
             } else {
                 "follower_source"
             },
-            velocity_continuous: false,
+            velocity_continuous: leading_stage.is_none(),
         };
         match leading_stage {
             Some(stage) => fit_axis_from_signal(
@@ -845,7 +845,7 @@ fn fit_kernel_window<S: TrackSignal>(
             seed_breakpoints: shaped_breaks,
             fit_tol: target_tol,
             fit_context: "follower_kernel",
-            velocity_continuous: false,
+            velocity_continuous: true,
         },
         &local,
     )?;
