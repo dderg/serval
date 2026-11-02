@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use nurbs::ScalarNurbs;
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 use trajectory::{ContinuousAxis, ContinuousSegment};
 
@@ -1093,4 +1094,95 @@ fn advance_steps_at_leader_knots_closer_than_the_floor_plan() {
         "the advance turns both leader acceleration steps into velocity steps a sub-floor \
          interval apart, which one knot carries within the position tolerance",
     );
+}
+
+const ROUNDING_SEAM: f64 = 0.005;
+const SHORT_LEADER_PIECE_S: f64 = 1e-6;
+const SEAM_VELOCITY_ROUNDING_MM_S: f64 = 3e-8;
+
+fn leader_with_a_short_piece_after_a_rounding_velocity_seam(t0: f64, t1: f64) -> ScalarNurbs {
+    let knots = [t0, ROUNDING_SEAM, ROUNDING_SEAM + SHORT_LEADER_PIECE_S, t1];
+    let accelerations = [0.0, 4_000.0, 0.0];
+    let seam_velocity_mismatches = [0.0, SEAM_VELOCITY_ROUNDING_MM_S, 0.0];
+    let (mut position, mut velocity) = (0.0, 40.0);
+    let pieces: Vec<BezierPiece> = knots
+        .windows(2)
+        .zip(accelerations.into_iter().zip(seam_velocity_mismatches))
+        .map(|(span, (acceleration, mismatch))| {
+            let coeffs = vec![position, velocity + mismatch, 0.5 * acceleration];
+            (position, velocity, _) = super::polynomial_pva(&coeffs, span[1] - span[0]);
+            BezierPiece {
+                u_start: span[0],
+                u_end: span[1],
+                coeffs,
+            }
+        })
+        .collect();
+    bezier_pieces_to_nurbs(&pieces)
+}
+
+#[test]
+fn an_advanced_follower_source_holds_the_tolerance_past_a_leader_seam_velocity_rounding() {
+    let (t0, t1) = (0.0, 0.01);
+    let shaped = leader_segment(
+        leader_with_a_short_piece_after_a_rounding_velocity_seam(t0, t1),
+        bezier_pieces_to_nurbs(&[BezierPiece {
+            u_start: t0,
+            u_end: t1,
+            coeffs: vec![0.0, 30.0],
+        }]),
+        t0,
+        t1,
+    );
+    let mut state = FollowerState::default();
+    state.push_span(50.0, 0.05, 0.05);
+    let source = super::FollowerSource {
+        shaped: &shaped,
+        raw: &shaped,
+        axis: 3,
+        leaders: &[0, 1],
+        state: &state,
+        s_start: 0.0,
+        s_length: super::leader_arc_length(&shaped, &[0, 1]),
+    };
+    let fit_tol = crate::lowering::FitTol {
+        pos_mm: 0.000_125,
+        accel_mm_s2: 50.0,
+    };
+    let stage = trajectory::ChainStage::NonlinearAdvance(trajectory::NonlinearAdvance {
+        model: trajectory::AdvanceModel::Tanh,
+        linear_advance: 0.02,
+        nonlinear_offset: 0.03,
+        linearization_velocity: 1.0,
+    });
+    let fitted = super::fit_source_projection(source, fit_tol, Some(&stage)).unwrap();
+    let sig = FollowerSignal::new(
+        &shaped,
+        &shaped,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    let advanced = super::AdvancedFollowerSignal {
+        source: &sig,
+        stage: &stage,
+        steps: &fitted.window_advance_steps,
+    };
+    for piece in nurbs::bezier::extract_bezier_pieces(&fitted.track) {
+        let duration = piece.u_end - piece.u_start;
+        for sample in 0..64 {
+            let tau = duration * (f64::from(sample) + 0.5) / 64.0;
+            let fitted_acceleration = super::polynomial_pva(&piece.coeffs, tau).2;
+            let signal_acceleration = advanced.eval_pva(piece.u_start + tau).2;
+            assert!(
+                (fitted_acceleration - signal_acceleration).abs() <= fit_tol.accel_mm_s2,
+                "piece [{}, {}] accelerates at {fitted_acceleration} mm/s² where the advanced \
+                 signal does at {signal_acceleration}, {tau} s in",
+                piece.u_start,
+                piece.u_end
+            );
+        }
+    }
 }
