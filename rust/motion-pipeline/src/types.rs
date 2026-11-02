@@ -165,6 +165,17 @@ pub(crate) enum PostProcessError {
         acceleration_error: f64,
         acceleration_budget: f64,
     },
+    #[error(
+        "axis {axis} ({fit_context}): velocity breaks at {earlier} and {later} are closer than \
+         the {floor} s fit resolution floor, so no span can hold the signal between them"
+    )]
+    CrowdedVelocityBreaks {
+        axis: usize,
+        fit_context: &'static str,
+        earlier: f64,
+        later: f64,
+        floor: f64,
+    },
     #[error("axis {axis}: shaped sample is non-finite at t={t}")]
     NonFiniteSample { axis: usize, t: f64 },
 }

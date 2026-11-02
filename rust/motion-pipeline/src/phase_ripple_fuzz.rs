@@ -197,6 +197,7 @@ proptest! {
                 t_start: signal.start,
                 t_end: signal.end,
                 seed_breakpoints: &[signal.boundary],
+                keeps_velocity_breaks: false,
                 fit_tol: FitTol { pos_mm: 0.005, accel_mm_s2: 50.0 },
                 fit_context: "phase_ripple_fuzz",
                 velocity_continuous: false,

@@ -126,6 +126,7 @@ fn a_nanosecond_seed_cluster_far_from_the_origin_keeps_the_motor_command_in_budg
             t_start: 0.0,
             t_end: 0.01,
             seed_breakpoints: &clusters,
+            keeps_velocity_breaks: false,
             fit_tol: BENCH_TOL,
             fit_context: "test fit",
             velocity_continuous: false,

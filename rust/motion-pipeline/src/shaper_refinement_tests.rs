@@ -84,6 +84,7 @@ fn bisecting_toward_an_unseeded_acceleration_step_keeps_pieces_device_wide() {
             t_start: 0.982_839_222_588_5,
             t_end: 1.002_872_787_996_2,
             seed_breakpoints: &[0.994_616_767_877, 0.994_655_895_934_5],
+            keeps_velocity_breaks: false,
             fit_tol: FitTol {
                 pos_mm: 0.0025,
                 accel_mm_s2: 25.0,
@@ -118,6 +119,7 @@ fn a_picometre_ramp_to_rest_at_the_resolution_floor_fails_loudly() {
             t_start: 4.33,
             t_end: 4.35,
             seed_breakpoints: &[ramp.at - 0.7e-5, ramp.at + 1.3e-5],
+            keeps_velocity_breaks: false,
             fit_tol: FitTol {
                 pos_mm: 0.0025,
                 accel_mm_s2: 50.0,

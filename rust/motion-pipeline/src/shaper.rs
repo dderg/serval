@@ -484,6 +484,7 @@ fn materialize_changed_sources(
                 t_start: segment.t_start,
                 t_end: segment.t_end,
                 seed_breakpoints: &breakpoints,
+                keeps_velocity_breaks: false,
                 fit_tol,
                 fit_context: "materialize_source",
                 velocity_continuous: false,
@@ -962,6 +963,7 @@ fn fit_axis_targets(
                     t_start: target.t_start,
                     t_end: target.t_end,
                     seed_breakpoints: shaped_breaks,
+                    keeps_velocity_breaks: false,
                     fit_tol,
                     fit_context: "smooth_kernel_target",
                     velocity_continuous: true,
@@ -1085,7 +1087,9 @@ fn fit_axis_targets(
             time_scale,
             fit_tol,
         );
-        plans.push(fit_plan_from_seeds(seeds, floors));
+        plans.push(fit_plan_from_seeds(seeds, &[], floors).map_err(|crowded| {
+            crowded_velocity_breaks_error(axis, "smooth_kernel_target", floors.cubic, crowded)
+        })?);
     }
     let jobs = plans
         .iter()
@@ -1225,6 +1229,7 @@ fn fit_axis_targets(
                     t_start: targets[target_index].t_start,
                     t_end: targets[target_index].t_end,
                     seed_breakpoints: shaped_breaks,
+                    keeps_velocity_breaks: false,
                     fit_tol,
                     fit_context: "smooth_kernel_target",
                     velocity_continuous: true,
@@ -2017,58 +2022,106 @@ fn ladder_resolution_floor_from_scales(
 /// knot span, and de Boor divides by knot spacing, so the *neighbouring*
 /// full-width span evaluates to garbage. Exact convolution cut transitions
 /// land an ulp away from segment edges by construction, so the collision is
-/// routine rather than exceptional. Each cluster collapses to its rightmost
-/// member — the transitions are right-owned, and the sub-floor interval that
-/// gets absorbed into the span on the left carries no integral. `t_start` and
-/// `t_end` are pinned, so a cluster touching the start keeps the start.
+/// routine rather than exceptional. A run of seeds each closer than the floor
+/// to the last kept one rolls forward onto its rightmost member, so what it
+/// absorbs can be many floors wide; only the signal's velocity breaks carry
+/// what a span cannot stretch over, so a run never rolls onto or past one.
+/// The pinned `t_start` and `t_end` count as velocity breaks, and two
+/// velocity breaks closer than the floor cannot both be kept: that is an
+/// error of whatever laid them, not something to absorb.
 ///
-/// The absorbed seeds may still be real breaks of the signal, so the plan
-/// records, per kept span, how far in from each edge they reach: the ladder
-/// must read that edge's state past them.
-fn coalesce_degenerate_seeds(seeds: &mut Vec<f64>, minimum_span: f64) -> Vec<EdgeSlivers> {
+/// The absorbed seeds may still be acceleration breaks of the signal, so the
+/// plan records, per kept span, how far in from each edge they reach: the
+/// ladder must read that edge's state past them.
+fn coalesce_degenerate_seeds(
+    seeds: &mut Vec<f64>,
+    velocity_breaks: &[f64],
+    minimum_span: f64,
+) -> Result<Vec<EdgeSlivers>, CrowdedVelocityBreaks> {
+    assert!(
+        velocity_breaks.is_sorted_by(|left, right| left <= right),
+        "velocity breaks are not sorted: {velocity_breaks:?}"
+    );
+    let is_velocity_break = |t: f64| {
+        velocity_breaks
+            .binary_search_by(|probe| probe.total_cmp(&t))
+            .is_ok()
+    };
     let t_end = *seeds.last().expect("fit seeds are empty");
     let mut kept = Vec::with_capacity(seeds.len());
-    let mut absorbed_before = Vec::with_capacity(seeds.len());
-    let mut absorbed_after_start = 0.0_f64;
-    kept.push(seeds[0]);
-    absorbed_before.push(0.0);
+    kept.push(KeptSeed {
+        t: seeds[0],
+        velocity_break: true,
+        absorbed_before: 0.0,
+        absorbed_after: 0.0,
+    });
     for &seed in &seeds[1..seeds.len() - 1] {
-        let last = *kept.last().expect("kept seeds are empty");
-        if seed - last >= minimum_span {
-            kept.push(seed);
-            absorbed_before.push(0.0);
-        } else if kept.len() > 1 {
-            kept.pop();
-            let carried = absorbed_before
-                .pop()
-                .expect("absorbed widths track kept seeds");
-            kept.push(seed);
-            absorbed_before.push(carried + (seed - last));
+        let velocity_break = is_velocity_break(seed);
+        let last = kept.last_mut().expect("kept seeds are empty");
+        let gap = seed - last.t;
+        if gap >= minimum_span {
+            kept.push(KeptSeed {
+                t: seed,
+                velocity_break,
+                absorbed_before: 0.0,
+                absorbed_after: 0.0,
+            });
+        } else if last.velocity_break && velocity_break {
+            return Err(CrowdedVelocityBreaks {
+                earlier: last.t,
+                later: seed,
+            });
+        } else if last.velocity_break {
+            last.absorbed_after = last.absorbed_after.max(gap);
         } else {
-            absorbed_after_start = absorbed_after_start.max(seed - last);
+            last.absorbed_before += gap;
+            last.t = seed;
+            last.velocity_break = velocity_break;
         }
     }
     let mut absorbed_end = 0.0_f64;
-    while kept.len() > 1 && t_end - *kept.last().expect("kept seeds are empty") < minimum_span {
-        let dropped = kept.pop().expect("kept seeds are empty");
-        let carried = absorbed_before
-            .pop()
-            .expect("absorbed widths track kept seeds");
-        absorbed_end = absorbed_end.max(t_end - dropped + carried);
+    while kept.len() > 1 {
+        let last = kept.last().expect("kept seeds are empty");
+        let gap = t_end - last.t;
+        if gap >= minimum_span {
+            break;
+        }
+        if last.velocity_break {
+            return Err(CrowdedVelocityBreaks {
+                earlier: last.t,
+                later: t_end,
+            });
+        }
+        absorbed_end = absorbed_end.max(gap + last.absorbed_before);
+        kept.pop();
     }
-    kept.push(t_end);
-    absorbed_before.push(absorbed_end);
-    *seeds = kept;
-    (1..seeds.len())
-        .map(|span_end| EdgeSlivers {
-            start: if span_end == 1 {
-                absorbed_after_start
-            } else {
-                0.0
-            },
-            end: absorbed_before[span_end],
+    kept.push(KeptSeed {
+        t: t_end,
+        velocity_break: true,
+        absorbed_before: absorbed_end,
+        absorbed_after: 0.0,
+    });
+    *seeds = kept.iter().map(|seed| seed.t).collect();
+    Ok(kept
+        .windows(2)
+        .map(|span| EdgeSlivers {
+            start: span[0].absorbed_after,
+            end: span[1].absorbed_before,
         })
-        .collect()
+        .collect())
+}
+
+struct KeptSeed {
+    t: f64,
+    velocity_break: bool,
+    absorbed_before: f64,
+    absorbed_after: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CrowdedVelocityBreaks {
+    earlier: f64,
+    later: f64,
 }
 
 /// How far into a span, from each edge, seeds absorbed by coalescing reach.
@@ -2113,27 +2166,84 @@ fn fit_seed_times(
     Ok(seeds)
 }
 
-fn fit_plan_from_seeds(mut seeds: Vec<f64>, floors: LadderFloors) -> FitPlan {
-    let slivers = coalesce_degenerate_seeds(&mut seeds, floors.cubic);
-    FitPlan {
+fn fit_plan_from_seeds(
+    mut seeds: Vec<f64>,
+    velocity_breaks: &[f64],
+    floors: LadderFloors,
+) -> Result<FitPlan, CrowdedVelocityBreaks> {
+    let slivers = coalesce_degenerate_seeds(&mut seeds, velocity_breaks, floors.cubic)?;
+    Ok(FitPlan {
         seeds,
         slivers,
         floors,
+    })
+}
+
+fn crowded_velocity_breaks_error(
+    axis: usize,
+    fit_context: &'static str,
+    floor: f64,
+    crowded: CrowdedVelocityBreaks,
+) -> PostProcessError {
+    PostProcessError::CrowdedVelocityBreaks {
+        axis,
+        fit_context,
+        earlier: crowded.earlier,
+        later: crowded.later,
+        floor,
     }
 }
 
-fn prepare_fit_plan<S: TrackSignal>(
-    axis: usize,
-    t_start: f64,
-    t_end: f64,
-    seed_breakpoints: &[f64],
+fn plan_seeds_and_floors<S: TrackSignal>(
+    fit: &AxisFit,
     sig: &S,
-    fit_tol: FitTol,
-) -> Result<FitPlan, PostProcessError> {
-    let seeds = fit_seed_times(axis, t_start, t_end, seed_breakpoints)?;
-    let time_scale = t_start.abs().max(t_end.abs());
-    let floors = ladder_resolution_floor(sig, &seeds, time_scale, fit_tol);
-    Ok(fit_plan_from_seeds(seeds, floors))
+) -> Result<(Vec<f64>, LadderFloors), PostProcessError> {
+    let seeds = fit_seed_times(fit.axis, fit.t_start, fit.t_end, fit.seed_breakpoints)?;
+    let time_scale = fit.t_start.abs().max(fit.t_end.abs());
+    let floors = ladder_resolution_floor(sig, &seeds, time_scale, fit.fit_tol);
+    Ok((seeds, floors))
+}
+
+fn prepare_fit_plan<S: TrackSignal>(fit: &AxisFit, sig: &S) -> Result<FitPlan, PostProcessError> {
+    let (seeds, floors) = plan_seeds_and_floors(fit, sig)?;
+    let velocity_breaks = if fit.keeps_velocity_breaks {
+        velocity_breaks_among(sig, &seeds, velocity_resolution(fit.fit_tol, floors))
+    } else {
+        Vec::new()
+    };
+    fit_plan_from_seeds(seeds, &velocity_breaks, floors).map_err(|crowded| {
+        crowded_velocity_breaks_error(fit.axis, fit.fit_context, floors.cubic, crowded)
+    })
+}
+
+/// The widest velocity step a span at the resolution floor can carry and
+/// still pass the floor's velocity gate: what an acceleration within
+/// tolerance carries across one floor.
+fn velocity_resolution(fit_tol: FitTol, floors: LadderFloors) -> f64 {
+    fit_tol.accel_mm_s2 * floors.cubic
+}
+
+fn velocity_breaks_among<S: TrackSignal>(
+    sig: &S,
+    seeds: &[f64],
+    velocity_resolution: f64,
+) -> Vec<f64> {
+    seeds[1..seeds.len() - 1]
+        .iter()
+        .copied()
+        .filter(|&t| {
+            let before = sig.eval_pva(next_toward(t, f64::NEG_INFINITY)).1;
+            (sig.eval_pva(t).1 - before).abs() > velocity_resolution
+        })
+        .collect()
+}
+
+pub(crate) fn fit_velocity_resolution<S: TrackSignal>(
+    fit: &AxisFit,
+    sig: &S,
+) -> Result<f64, PostProcessError> {
+    let (_, floors) = plan_seeds_and_floors(fit, sig)?;
+    Ok(velocity_resolution(fit.fit_tol, floors))
 }
 
 fn fit_pieces_to_nurbs(
@@ -2162,6 +2272,7 @@ pub(crate) struct AxisFit<'a> {
     pub t_start: f64,
     pub t_end: f64,
     pub seed_breakpoints: &'a [f64],
+    pub keeps_velocity_breaks: bool,
     pub fit_tol: FitTol,
     pub fit_context: &'static str,
     pub velocity_continuous: bool,
@@ -2171,14 +2282,7 @@ pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
     fit: AxisFit,
     sig: &S,
 ) -> Result<nurbs::ScalarNurbs, PostProcessError> {
-    let plan = prepare_fit_plan(
-        fit.axis,
-        fit.t_start,
-        fit.t_end,
-        fit.seed_breakpoints,
-        sig,
-        fit.fit_tol,
-    )?;
+    let plan = prepare_fit_plan(&fit, sig)?;
     let policy = SpanFitPolicy {
         axis: fit.axis,
         fit_tol: fit.fit_tol,
@@ -2889,6 +2993,7 @@ pub(crate) fn apply_nonlinear_advance_to_track(
             t_start,
             t_end,
             seed_breakpoints: &breakpoints,
+            keeps_velocity_breaks: false,
             fit_tol,
             fit_context: "nonlinear_advance",
             velocity_continuous: true,
