@@ -189,6 +189,12 @@ pub enum ContinuousError {
     PieceGap { previous_end: f64, next_start: f64 },
     #[error("relative spline piece overlap from {next_start} to {previous_end}")]
     PieceOverlap { previous_end: f64, next_start: f64 },
+    #[error("relative spline piece seam at {at} jumps from {previous_end} to {next_start}")]
+    PieceJump {
+        at: f64,
+        previous_end: f64,
+        next_start: f64,
+    },
 }
 
 impl AnalyticMoveSpan {
@@ -1740,15 +1746,16 @@ fn spline_pv(curve: &ScalarNurbs, t: f64) -> (f64, f64) {
     (position, velocity)
 }
 
+fn meet_within_seam_roundoff(left: f64, right: f64) -> bool {
+    (left - right).abs()
+        <= PIECE_SEAM_ROUNDOFF_ULPS * f64::EPSILON * left.abs().max(right.abs()).max(1.0)
+}
+
 fn spline_pv_continuous(curve: &ScalarNurbs, left: f64, right: f64) -> bool {
     let (left_position, left_velocity) = spline_pv(curve, left);
     let (right_position, right_velocity) = spline_pv(curve, right);
-    let position_scale = left_position.abs().max(right_position.abs()).max(1.0);
-    let velocity_scale = left_velocity.abs().max(right_velocity.abs()).max(1.0);
-    (left_position - right_position).abs()
-        <= PIECE_SEAM_ROUNDOFF_ULPS * f64::EPSILON * position_scale
-        && (left_velocity - right_velocity).abs()
-            <= PIECE_SEAM_ROUNDOFF_ULPS * f64::EPSILON * velocity_scale
+    meet_within_seam_roundoff(left_position, right_position)
+        && meet_within_seam_roundoff(left_velocity, right_velocity)
 }
 
 /// The largest representable time strictly below `value`, for evaluating
@@ -2183,6 +2190,7 @@ fn validate_relative_pieces(pieces: &[RelativeSplinePiece]) -> Result<(), Contin
         return Err(EMPTY_PIECES);
     };
     let mut previous_end = first.t_start;
+    let mut previous_end_position = None;
     for piece in pieces {
         if ![piece.base_position, piece.t_start, piece.t_end]
             .into_iter()
@@ -2216,9 +2224,23 @@ fn validate_relative_pieces(pieces: &[RelativeSplinePiece]) -> Result<(), Contin
                 next_start: piece.t_start,
             });
         }
-        let (curve_start, curve_end) = spline_domain(&piece.curve);
-        checked_clamped_time(piece.t_start, curve_start, curve_end)?;
-        checked_clamped_time(piece.t_end, curve_start, curve_end)?;
+        let piece_position = |t: f64| -> Result<f64, ContinuousError> {
+            let t = spline_evaluation_time(&piece.curve, t)?;
+            Ok(piece.base_position + nurbs::eval::eval(&piece.curve, t))
+        };
+        let start_position = piece_position(piece.t_start)?;
+        if let Some(previous_end_position) =
+            previous_end_position.filter(|&previous_end_position| {
+                !meet_within_seam_roundoff(previous_end_position, start_position)
+            })
+        {
+            return Err(ContinuousError::PieceJump {
+                at: piece.t_start,
+                previous_end: previous_end_position,
+                next_start: start_position,
+            });
+        }
+        previous_end_position = Some(piece_position(piece.t_end)?);
         previous_end = piece.t_end;
     }
     Ok(())

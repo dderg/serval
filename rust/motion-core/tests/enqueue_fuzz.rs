@@ -92,8 +92,14 @@ fn arb_spline_shape() -> impl Strategy<Value = SplineShape> {
 #[derive(Debug, Clone)]
 enum AxisShape {
     Spline(SplineShape),
-    RelativeSpline { base_mm: f64, shape: SplineShape },
-    Piecewise(Vec<(f64, SplineShape)>),
+    RelativeSpline {
+        base_mm: f64,
+        shape: SplineShape,
+    },
+    Piecewise {
+        base_mm: f64,
+        shapes: Vec<SplineShape>,
+    },
     Hold(f64),
 }
 
@@ -106,24 +112,25 @@ impl AxisShape {
                 base_position: *base_mm,
                 curve: shape.curve(t_start, t_end),
             },
-            Self::Piecewise(pieces) => {
-                let count = pieces.len() as f64;
-                ContinuousAxis::PiecewiseRelativeSpline(Arc::from(
-                    pieces
-                        .iter()
-                        .enumerate()
-                        .map(|(index, (base_mm, shape))| {
-                            let piece_start = t_start + duration * index as f64 / count;
-                            let piece_end = t_start + duration * (index + 1) as f64 / count;
-                            RelativeSplinePiece {
-                                base_position: *base_mm,
-                                curve: shape.curve(piece_start, piece_end),
-                                t_start: piece_start,
-                                t_end: piece_end,
-                            }
-                        })
-                        .collect::<Vec<_>>(),
-                ))
+            Self::Piecewise { base_mm, shapes } => {
+                let count = shapes.len() as f64;
+                let mut pieces: Vec<RelativeSplinePiece> = Vec::with_capacity(shapes.len());
+                for (index, shape) in shapes.iter().enumerate() {
+                    let piece_start = t_start + duration * index as f64 / count;
+                    let piece_end = t_start + duration * (index + 1) as f64 / count;
+                    let curve = shape.curve(piece_start, piece_end);
+                    let base_position = pieces.last().map_or(*base_mm, |previous| {
+                        previous.base_position + nurbs::eval::eval(&previous.curve, previous.t_end)
+                            - nurbs::eval::eval(&curve, piece_start)
+                    });
+                    pieces.push(RelativeSplinePiece {
+                        base_position,
+                        curve,
+                        t_start: piece_start,
+                        t_end: piece_end,
+                    });
+                }
+                ContinuousAxis::PiecewiseRelativeSpline(Arc::from(pieces))
             }
             Self::Hold(position) => ContinuousAxis::Hold {
                 position: *position,
@@ -139,8 +146,11 @@ fn arb_axis_shape() -> impl Strategy<Value = AxisShape> {
         arb_spline_shape().prop_map(AxisShape::Spline),
         (-350.0..350.0, arb_spline_shape())
             .prop_map(|(base_mm, shape)| AxisShape::RelativeSpline { base_mm, shape }),
-        prop::collection::vec((-350.0..350.0, arb_spline_shape()), 1..=3)
-            .prop_map(AxisShape::Piecewise),
+        (
+            -350.0..350.0,
+            prop::collection::vec(arb_spline_shape(), 1..=3)
+        )
+            .prop_map(|(base_mm, shapes)| AxisShape::Piecewise { base_mm, shapes }),
         (-350.0..350.0).prop_map(AxisShape::Hold),
     ]
 }
