@@ -156,14 +156,18 @@ fn table(violations: &[(String, FitViolation)]) -> String {
 /// Fits whose exact signal is assembled from other tracks' pieces — the
 /// follower projections and their kernel outputs — where coalesced seeds
 /// and exact convolution transitions leave real breaks within a floor of a
-/// span edge.
+/// span edge. Elsewhere an edge-sliver change does not prove a break: a
+/// materialized disk rail's square-root approach to its curvature cap is
+/// steep enough to trip it while smooth.
 fn assembled_from_pieces(fit_context: &str) -> bool {
     fit_context.starts_with("follower") || fit_context.starts_with("advanced_follower")
 }
 
-/// The ladder reads a span's edge state a cubic floor inside it. Read any
-/// closer and a break that seed coalescing hid in the edge sliver pins the
-/// piece to the acceleration on the break's far side.
+/// Where a span's edge acceleration changes by more than the tolerance
+/// across its edge sliver, the ladder reads it past the sliver. Read at the
+/// seam instead and a break that seed coalescing hid there pins the piece
+/// to the acceleration on the break's far side. The shaper's unit tests pin
+/// the read itself; this holds the whole pipeline to it.
 #[test]
 fn no_follower_fit_piece_is_pinned_to_a_break_hidden_in_its_edge_sliver() {
     let pinned: Vec<(String, FitViolation)> = audited_violations()

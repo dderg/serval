@@ -43,7 +43,8 @@ pub struct FitViolation {
 
 static VIOLATIONS: Mutex<Vec<FitViolation>> = Mutex::new(Vec::new());
 
-/// Every violation recorded since the previous call.
+/// Every violation recorded since the previous call, by any thread: two
+/// audited runs in one process take each other's.
 pub fn take_violations() -> Vec<FitViolation> {
     std::mem::take(&mut *VIOLATIONS.lock().expect("fit audit poisoned"))
 }
