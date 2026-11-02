@@ -83,6 +83,15 @@ Run it with plain `python3`, not `uv run` (uv's python breaks the pyo3 test
 binaries). Snapshot checks need the engine built first:
 `--run "make -f Makefile.rust motion-engine-fast && uv run python snapshots/run.py"`.
 
+`scripts/corpus.sh [--configs fast,printer] [-k SUBSTR] [--audit]` plans the
+59-case corpus (51 snapshot cases + the four `tools/sim/gcode` prints on
+`fast.cfg` and `printer.cfg`) through the production pipeline and checks each
+result is finite. To measure something across the corpus, write a probe test
+starting with `mod corpus;` that iterates `corpus::corpus()` and run it with
+`scripts/corpus.sh --probe FILE.rs`: the file is copied into
+`rust/pipeline-snapshot/tests/` for the run and removed afterwards. The corpus
+lives in `rust/pipeline-snapshot/tests/corpus/mod.rs`, shared with the fit audit.
+
 # Reference docs
 
 - **MCU C/Rust boundary — architectural invariant:** [`docs/rewrite/mcu-c-rust-boundary.md`](docs/rewrite/mcu-c-rust-boundary.md). Read this before adding shared state between C and Rust on the MCU, or before reaching for `#[link_section]` on a Rust static. Rules: C owns boot, safety-critical paths, and all shared-memory placement; Rust owns the motion engine; the seam is `extern "C"` + `#[repr(C)]` only.
