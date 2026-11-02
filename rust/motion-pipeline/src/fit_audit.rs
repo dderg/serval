@@ -134,8 +134,8 @@ pub enum Exemption {
     /// A floor piece abutting a disk rail's curvature-cap contact, where the
     /// exact acceleration rises as `onset_coefficient · √τ`: no polynomial
     /// whose acceleration has degree n misses it by less than
-    /// `E_n · |B| · √h`, and the rungs, anchored to the endpoint state,
-    /// reach at most the Lebesgue factor of the nine probes times that.
+    /// `E_n · |B| · √h`. The rungs, anchored to the endpoint state, are not
+    /// minimax: they are held to an empirical multiple of that floor.
     CapContactOnset {
         onset_coefficient: f64,
         error_mm_s2: f64,
@@ -149,9 +149,12 @@ const SQRT_MINIMAX_ERROR: [f64; 12] = [
     0.01272,
 ];
 
-/// `1 + Λ₈`, Λ₈ ≈ 2.29 the Lebesgue constant of the nine Chebyshev–Lobatto
-/// ladder probes: an anchored rung exceeds the minimax error by at most it.
-pub const ANCHORED_RUNG_LEBESGUE_FACTOR: f64 = 3.3;
+/// Empirical ceiling on how far an endpoint-anchored rung exceeds the
+/// minimax error at a square-root onset: measured 1.65–2.47× on every
+/// onset floor piece of the dense slices, with margin. Not a proven bound —
+/// the rungs are not interpolants at the probes, so no Lebesgue constant
+/// applies to them.
+pub const ANCHORED_RUNG_EXCESS_CEILING: f64 = 3.3;
 
 pub const CAP_CONTACT_EDGE_SLACK_S: f64 = 1e-9;
 
@@ -215,7 +218,7 @@ fn cap_contact_onset<S: TrackSignal>(
     let onset_coefficient = (sig.eval_pva(far).2 - sig.eval_pva(onset).2) / h.sqrt();
     let acceleration_degree = (piece.mono_u.len() - 1).checked_sub(2)?;
     let minimax = *SQRT_MINIMAX_ERROR.get(acceleration_degree)?;
-    let bound_mm_s2 = ANCHORED_RUNG_LEBESGUE_FACTOR * minimax * onset_coefficient.abs() * h.sqrt();
+    let bound_mm_s2 = ANCHORED_RUNG_EXCESS_CEILING * minimax * onset_coefficient.abs() * h.sqrt();
     let error_mm_s2 = acceleration_over_tolerance * piece.fit_tol.accel_mm_s2;
     (error_mm_s2 <= bound_mm_s2).then_some(Exemption::CapContactOnset {
         onset_coefficient,
