@@ -2599,6 +2599,68 @@ fn acceleration_interval_witness<S: TrackSignal>(
     })
 }
 
+const PROBE_BARYCENTRIC_WEIGHTS: [f64; LADDER_PROBES_U.len()] = probe_barycentric_weights();
+
+const fn probe_barycentric_weights() -> [f64; LADDER_PROBES_U.len()] {
+    let mut weights = [1.0; LADDER_PROBES_U.len()];
+    let mut node = 0;
+    while node < LADDER_PROBES_U.len() {
+        let mut other = 0;
+        while other < LADDER_PROBES_U.len() {
+            if other != node {
+                weights[node] /= LADDER_PROBES_U[node] - LADDER_PROBES_U[other];
+            }
+            other += 1;
+        }
+        node += 1;
+    }
+    weights
+}
+
+fn interpolated_through_probes(at_probes: &[f64; LADDER_PROBES_U.len()], u: f64) -> f64 {
+    let (mut numerator, mut denominator) = (0.0, 0.0);
+    for ((&node, &weight), &value) in LADDER_PROBES_U
+        .iter()
+        .zip(&PROBE_BARYCENTRIC_WEIGHTS)
+        .zip(at_probes)
+    {
+        let term = weight / (u - node);
+        numerator += term * value;
+        denominator += term;
+    }
+    numerator / denominator
+}
+
+const INTERPOLANT_POINTS_PER_PROBE_GAP: u32 = 8;
+const INTERPOLANT_SUSPICION_SHARE: f64 = 0.9;
+const INTERPOLANT_REFINE_SHARE: f64 = 0.5;
+const GOLDEN_SECTION_STEPS: u32 = 16;
+
+fn golden_section_peak(value: impl Fn(f64) -> f64, mut low: f64, mut high: f64) -> (f64, f64) {
+    let shrink = 0.5 * (5.0_f64.sqrt() - 1.0);
+    let mut left = high - shrink * (high - low);
+    let mut right = low + shrink * (high - low);
+    let (mut left_value, mut right_value) = (value(left), value(right));
+    for _ in 0..GOLDEN_SECTION_STEPS {
+        if left_value >= right_value {
+            high = right;
+            (right, right_value) = (left, left_value);
+            left = high - shrink * (high - low);
+            left_value = value(left);
+        } else {
+            low = left;
+            (left, left_value) = (right, right_value);
+            right = low + shrink * (high - low);
+            right_value = value(right);
+        }
+    }
+    if left_value >= right_value {
+        (left, left_value)
+    } else {
+        (right, right_value)
+    }
+}
+
 const WITNESS_MAX_DEPTH: u32 = 6;
 
 #[derive(Clone, Copy)]
@@ -2726,15 +2788,53 @@ impl<S: TrackSignal> RungWitness<'_, S> {
     }
 
     fn over_probes(&self, truth: &SpanTruth) -> Result<Option<f64>, PostProcessError> {
-        let samples: [PositionErrorSample; LADDER_PROBES_U.len()] = std::array::from_fn(|index| {
-            self.position_sample(LADDER_PROBES_U[index], (truth.pos[index], truth.vel[index]))
+        let samples: [ErrorSample; LADDER_PROBES_U.len()] = std::array::from_fn(|index| {
+            self.sample(
+                LADDER_PROBES_U[index],
+                (truth.pos[index], truth.vel[index], truth.acc[index]),
+            )
         });
+        if let Some(u) = self.over_probe_interpolant(&samples)? {
+            return Ok(Some(u));
+        }
         for gap in samples.windows(2) {
-            if let Some(u) = self.over_gap(gap[0], gap[1], 0)? {
+            if let Some(u) = self.over_piece(gap[0], gap[1])? {
                 return Ok(Some(u));
             }
         }
         Ok(None)
+    }
+
+    fn over_probe_interpolant(
+        &self,
+        samples: &[ErrorSample; LADDER_PROBES_U.len()],
+    ) -> Result<Option<f64>, PostProcessError> {
+        let curvatures = samples.map(|sample| sample.curvature_per_u2);
+        let interpolated = |u: f64| interpolated_through_probes(&curvatures, u).abs();
+        let (coarse_u, coarse_peak, spacing) = LADDER_PROBES_U
+            .windows(2)
+            .flat_map(|gap| {
+                let spacing = (gap[1] - gap[0]) / f64::from(INTERPOLANT_POINTS_PER_PROBE_GAP);
+                (1..INTERPOLANT_POINTS_PER_PROBE_GAP)
+                    .map(move |step| (nurbs::fmadd(f64::from(step), spacing, gap[0]), spacing))
+            })
+            .map(|(u, spacing)| (u, interpolated(u), spacing))
+            .fold((f64::NAN, 0.0, 0.0), |widest, sample| {
+                if sample.1 > widest.1 { sample } else { widest }
+            });
+        if coarse_peak <= INTERPOLANT_REFINE_SHARE * self.curvature_budget() {
+            return Ok(None);
+        }
+        let (peak_u, peak) = golden_section_peak(
+            interpolated,
+            (coarse_u - spacing).max(-1.0),
+            (coarse_u + spacing).min(1.0),
+        );
+        if peak <= INTERPOLANT_SUSPICION_SHARE * self.curvature_budget() {
+            return Ok(None);
+        }
+        let at_peak = self.exact_sample_at(peak_u)?;
+        Ok((at_peak.curvature_per_u2.abs() > self.curvature_budget()).then_some(peak_u))
     }
 
     fn over_pieces(

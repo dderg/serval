@@ -193,19 +193,75 @@ struct CubicWithProbeBlindBump {
     bump: Vec<f64>,
 }
 
+fn times_root(polynomial: &[f64], root: f64) -> Vec<f64> {
+    let mut shifted = vec![0.0; polynomial.len() + 1];
+    for (power, &coefficient) in polynomial.iter().enumerate() {
+        shifted[power + 1] += coefficient;
+        shifted[power] -= root * coefficient;
+    }
+    shifted
+}
+
+fn integrated_from_minus_one(polynomial: &[f64]) -> Vec<f64> {
+    let mut integral = vec![0.0];
+    integral.extend(
+        polynomial
+            .iter()
+            .enumerate()
+            .map(|(power, &coefficient)| coefficient / (power + 1) as f64),
+    );
+    integral[0] = -eval_polynomial(&integral, -1.0);
+    integral
+}
+
+fn eval_polynomial(polynomial: &[f64], x: f64) -> f64 {
+    polynomial
+        .iter()
+        .rev()
+        .fold(0.0, |value, &coefficient| value * x + coefficient)
+}
+
+fn moment_over_unit_span(polynomial: &[f64], power: usize) -> f64 {
+    let mut weighted = vec![0.0; power];
+    weighted.extend_from_slice(polynomial);
+    eval_polynomial(&integrated_from_minus_one(&weighted), 1.0)
+}
+
+fn peak_on_unit_span(polynomial: &[f64]) -> f64 {
+    (0..=1000)
+        .map(|k| eval_polynomial(polynomial, 2.0 * f64::from(k) / 1000.0 - 1.0).abs())
+        .fold(0.0, f64::max)
+}
+
 impl CubicWithProbeBlindBump {
-    fn new(t0: f64, h: f64, cubic: [f64; 4], bump_scale_mm: f64) -> Self {
-        let mut bump = vec![bump_scale_mm];
+    fn position_blind(t0: f64, h: f64, cubic: [f64; 4], bump_scale_mm: f64) -> Self {
         let ends_flat = [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0];
         let interior_probes = LADDER_PROBES_U.iter().filter(|u| u.abs() < 1.0);
-        for &root in ends_flat.iter().chain(interior_probes) {
-            let mut shifted = vec![0.0; bump.len() + 1];
-            for (power, &coefficient) in bump.iter().enumerate() {
-                shifted[power + 1] += coefficient;
-                shifted[power] -= root * coefficient;
-            }
-            bump = shifted;
+        let bump = ends_flat
+            .iter()
+            .chain(interior_probes)
+            .fold(vec![bump_scale_mm], |bump, &root| times_root(&bump, root));
+        Self { t0, h, cubic, bump }
+    }
+
+    fn acceleration_blind(t0: f64, h: f64, cubic: [f64; 4], peak_mm_s2: f64) -> Self {
+        let vanishing_at_probes = LADDER_PROBES_U
+            .iter()
+            .fold(vec![1.0], |shape, &root| times_root(&shape, root));
+        let ends_at_rest = -moment_over_unit_span(&vanishing_at_probes, 1)
+            / moment_over_unit_span(&vanishing_at_probes, 3);
+        let mut shape = vanishing_at_probes.clone();
+        shape.extend([0.0, 0.0]);
+        for (power, &coefficient) in vanishing_at_probes.iter().enumerate() {
+            shape[power + 2] += ends_at_rest * coefficient;
         }
+        let rate = 2.0 / h;
+        let scale = peak_mm_s2 / (peak_on_unit_span(&shape) * rate * rate);
+        let shape: Vec<f64> = shape
+            .iter()
+            .map(|coefficient| coefficient * scale)
+            .collect();
+        let bump = integrated_from_minus_one(&integrated_from_minus_one(&shape));
         Self { t0, h, cubic, bump }
     }
 }
@@ -237,7 +293,8 @@ fn an_accepted_piece_holds_the_position_tolerance_between_the_ladder_probes() {
         accel_mm_s2: 50.0,
     };
     let (t_start, h) = (1.0, 0.05);
-    let sig = CubicWithProbeBlindBump::new(t_start, h, [0.3, 14.0, 300.0, -20_000.0], 0.042);
+    let sig =
+        CubicWithProbeBlindBump::position_blind(t_start, h, [0.3, 14.0, 300.0, -20_000.0], 0.042);
     let track = fit_axis_from_signal(
         AxisFit {
             axis: 3,
@@ -383,5 +440,56 @@ fn an_accepted_piece_holds_the_position_tolerance_across_an_unseeded_jerk_kink()
         worst <= FOLLOWER_LIKE_TOLERANCE.pos_mm,
         "the fit leaves the signal by {worst:e} mm at {at}, past the {:e} mm tolerance",
         FOLLOWER_LIKE_TOLERANCE.pos_mm
+    );
+}
+
+#[test]
+fn an_accepted_piece_holds_the_acceleration_tolerance_between_the_ladder_probes() {
+    let fit_tol = FitTol {
+        pos_mm: 1e-4,
+        accel_mm_s2: 50.0,
+    };
+    let (t_start, h) = (1.0, 0.004);
+    let sig = CubicWithProbeBlindBump::acceleration_blind(
+        t_start,
+        h,
+        [0.3, 14.0, 300.0, -20_000.0],
+        2.0 * fit_tol.accel_mm_s2,
+    );
+    let bump_travel = peak_on_unit_span(&sig.bump);
+    assert!(
+        bump_travel < 0.1 * fit_tol.pos_mm,
+        "the bump moves {bump_travel:e} mm: it must leave position to the acceleration alone"
+    );
+    let track = fit_axis_from_signal(
+        AxisFit {
+            axis: 3,
+            t_start,
+            t_end: t_start + h,
+            seed_breakpoints: &[],
+            fit_tol,
+            fit_context: "probe-blind acceleration bump",
+            velocity_continuous: true,
+        },
+        &sig,
+    )
+    .expect("a smooth signal fits");
+    let acceleration = nurbs::eval::derivative(&nurbs::eval::derivative(&track));
+    let (worst, at) = (0..=1000)
+        .map(|k| {
+            let t = t_start + h * f64::from(k) / 1000.0;
+            (
+                (nurbs::eval::eval(&acceleration, t) - sig.second_deriv(t)).abs(),
+                t,
+            )
+        })
+        .fold((0.0, f64::NAN), |worst, sample| {
+            if sample.0 > worst.0 { sample } else { worst }
+        });
+    assert!(
+        worst <= fit_tol.accel_mm_s2,
+        "the fit's acceleration leaves the signal by {worst} mm/s² at {at}, past the {} mm/s² \
+         tolerance",
+        fit_tol.accel_mm_s2
     );
 }
