@@ -105,8 +105,8 @@ struct SourceProjection {
     s_end: f64,
     e_end_relative: f64,
     semantic_cuts: Vec<f64>,
-    input_start: Pvaj4,
-    input_end: Pvaj4,
+    input_start: SeamInput,
+    input_end: SeamInput,
     /// Advance steps inside the segment, in time order, which `track`
     /// leaves out.
     window_advance_steps: Vec<AdvanceStep>,
@@ -197,8 +197,14 @@ fn fit_source_projection(
     let sig = FollowerSignal::new(shaped, raw, axis, leaders, state, s_start, 0.0);
     let breakpoints = sig.construction_breakpoints(raw_axis);
     let input_state = |t| {
-        let (p, v, a) = sig.eval_pva(t);
-        (p, v, a, sig.jerk(t))
+        let (_, velocity, acceleration) = sig.eval_pva(t);
+        SeamInput {
+            velocity,
+            acceleration,
+            jerk: sig.jerk(t),
+            ratio: sig.state.ratio_and_slope(sig.s_owned(t)).0,
+            leader_speed: sig.shaped_speed(t),
+        }
     };
     let input_start = input_state(t_start);
     let input_end = input_state(t_end);
@@ -510,8 +516,8 @@ pub(crate) fn project_followers(
             };
             let (input_start, input_end) = input_states.unwrap_or_else(|| {
                 (
-                    pvaj_of_track(&projected, t_start),
-                    pvaj_of_track(&projected, t_end),
+                    SeamInput::of_track(&projected, t_start),
+                    SeamInput::of_track(&projected, t_end),
                 )
             });
             let track = if projecting {
@@ -535,7 +541,7 @@ pub(crate) fn project_followers(
                     stage,
                     axis,
                     state.projected_input_end,
-                    (t_start, input_start.1),
+                    (t_start, input_start),
                 )
             }) {
                 Some(step) => {
@@ -560,7 +566,7 @@ pub(crate) fn project_followers(
                 .sum::<f64>();
             state.projected_output_end =
                 Some(output_base + nurbs::eval::eval(&track, t_end) + window_steps_mm);
-            state.projected_input_end = Some((t_end, input_end.1));
+            state.projected_input_end = Some((t_end, input_end));
             state.projected_through_t = Some(t_end);
             state.projected.push(ProjSeg {
                 t_start,
@@ -903,17 +909,25 @@ pub(crate) fn project_followers(
                 || (cached.base, extract_bezier_pieces(&cached.track)),
                 |(batch_base, bases, tracks)| (*batch_base + bases[i], tracks[i].clone()),
             );
-            let law_step = |previous_input: Option<Pvaj4>| {
+            let law_step = |previous_input: Option<SeamInput>| {
                 if kernel.is_some() {
                     return 0.0;
                 }
                 let previous = previous_input
                     .expect("an emitted endpoint always records its pre-transform state");
-                let shared_v = previous.1;
-                let (_, _, a_r, j_r) = input_start;
-                let (_, _, a_l, j_l) = previous;
-                chain_output_velocity(chain, shared_v, a_r, j_r)
-                    - chain_output_velocity(chain, shared_v, a_l, j_l)
+                let right_velocity =
+                    previous.velocity + previous.signal_velocity_step(&input_start);
+                chain_output_velocity(
+                    chain,
+                    right_velocity,
+                    input_start.acceleration,
+                    input_start.jerk,
+                ) - chain_output_velocity(
+                    chain,
+                    previous.velocity,
+                    previous.acceleration,
+                    previous.jerk,
+                )
             };
             if i == 0 {
                 if let (Some(previous), Some((emit_start, emit_end))) = (emitted_pv, emit_window) {
@@ -1006,26 +1020,51 @@ fn fit_kernel_window<S: TrackSignal>(
     Ok((local_base, pieces, started.elapsed_us()))
 }
 
-type Pvaj4 = (f64, f64, f64, f64);
-
-fn pvaj_of_track(track: &ScalarNurbs, t: f64) -> Pvaj4 {
-    let mut state = [nurbs::eval::eval(track, t), 0.0, 0.0, 0.0];
-    let mut current = track.clone();
-    for slot in state.iter_mut().skip(1) {
-        if current.degree() == 0 {
-            break;
-        }
-        current = nurbs::eval::derivative(&current);
-        *slot = nurbs::eval::eval(&current, t);
-    }
-    (state[0], state[1], state[2], state[3])
+/// A follower's pre-transform state at one side of a seam. Its velocity is
+/// `ratio · leader_speed` plus whatever the raw track adds on its own, so a
+/// velocity difference between two sides splits into the follower's own
+/// step (a ratio change or a raw step, which the seam must carry) and the
+/// part the leaders' speed residual explains (which a weld absorbs).
+#[derive(Debug, Clone, Copy)]
+struct SeamInput {
+    velocity: f64,
+    acceleration: f64,
+    jerk: f64,
+    ratio: f64,
+    leader_speed: f64,
 }
 
-/// The transformed output velocity the pre-kernel chain commands for a
-/// one-sided input `(a, j)` at a shared seam velocity `v` — the seam-side law
-/// value, so a weld can tell the law's own velocity step (driven by the input
-/// acceleration jumping across the seam) apart from the pipeline's fit
-/// residual (which lives in `v` and stays welded).
+impl SeamInput {
+    fn of_track(track: &ScalarNurbs, t: f64) -> Self {
+        let mut state = [0.0; 3];
+        let mut current = track.clone();
+        for slot in &mut state {
+            if current.degree() == 0 {
+                break;
+            }
+            current = nurbs::eval::derivative(&current);
+            *slot = nurbs::eval::eval(&current, t);
+        }
+        let [velocity, acceleration, jerk] = state;
+        Self {
+            velocity,
+            acceleration,
+            jerk,
+            ratio: 1.0,
+            leader_speed: velocity,
+        }
+    }
+
+    fn signal_velocity_step(&self, right: &Self) -> f64 {
+        right.velocity - self.velocity - right.ratio * (right.leader_speed - self.leader_speed)
+    }
+}
+
+/// The transformed output velocity the pre-kernel chain commands for one
+/// side's exact input state `(v, a, j)` at a seam — the seam-side law value,
+/// so a weld can tell the signal's own velocity step (an extrusion-ratio
+/// change under moving leaders, or the input acceleration jumping through
+/// the law) apart from the pipeline's fit residual, which alone is welded.
 fn chain_output_velocity(chain: &CompiledChain, v: f64, a: f64, j: f64) -> f64 {
     match chain.leading_transform() {
         Some(ChainStage::DerivativeGains { k1, k2 }) => v + k1 * a + k2 * j,
@@ -1037,33 +1076,41 @@ fn chain_output_velocity(chain: &CompiledChain, v: f64, a: f64, j: f64) -> f64 {
 
 /// Segment tracks are stitched end to start, which is exact only where the
 /// commanded signal is position-continuous. An advance applied before
-/// projection maps a follower velocity step at a join — an extrusion-ratio
-/// step taken at speed — onto a position step the stitch must carry: the
-/// output base takes it, and the emission weld or a kernel after the
-/// advance spreads it. A time gap between the segments (a dwell after a
-/// drain) is legal only at rest, where there is nothing to carry.
+/// projection turns the follower's velocity difference at a join into a
+/// position step: each segment's advanced track gains `advance(v)` between
+/// its own end states, so the totals telescope to the unadvanced extrusion
+/// only if the stitch carries every join's difference — the follower's own
+/// step (an extrusion-ratio change at speed) and the leaders' fit residual
+/// alike. The output base takes it and a kernel after the advance smooths
+/// it. The velocity difference itself is the seam's business: the emission
+/// carries the follower's own step as a C0 corner and welds the residual
+/// ([`SeamInput::signal_velocity_step`]), neither of which moves the total.
+/// A time gap between the segments (a dwell after a drain) is legal only at
+/// rest, where there is nothing to carry.
 fn join_advance_step(
     stage: &ChainStage,
     axis: usize,
-    previous_end: Option<(f64, f64)>,
-    (t_start, velocity_after): (f64, f64),
+    previous_end: Option<(f64, SeamInput)>,
+    (t_start, after): (f64, SeamInput),
 ) -> Option<AdvanceStep> {
-    let (previous_t_end, velocity_before) = previous_end?;
+    let (previous_t_end, before) = previous_end?;
     if (previous_t_end - t_start).abs() > SEGMENT_TIME_EPS_S {
         assert!(
-            velocity_before.abs() <= REST_VELOCITY_MM_S
-                && velocity_after.abs() <= REST_VELOCITY_MM_S,
+            before.velocity.abs() <= REST_VELOCITY_MM_S
+                && after.velocity.abs() <= REST_VELOCITY_MM_S,
             "follower axis {axis} stitches a segment starting at {t_start} onto one ending at \
-             {previous_t_end} while moving ({velocity_before} -> {velocity_after} mm/s); a \
-             time gap between follower segments is legal only at rest"
+             {previous_t_end} while moving ({} -> {} mm/s); a time gap between follower \
+             segments is legal only at rest",
+            before.velocity,
+            after.velocity
         );
         return None;
     }
     Some(AdvanceStep::between(
         stage,
         t_start,
-        velocity_before,
-        velocity_after,
+        before.velocity,
+        after.velocity,
     ))
     .filter(|step| !step.is_rounding())
 }
@@ -1099,8 +1146,8 @@ struct ProjSeg {
     t_start: f64,
     t_end: f64,
     base: f64,
-    input_start: Pvaj4,
-    input_end: Pvaj4,
+    input_start: SeamInput,
+    input_end: SeamInput,
     track: ScalarNurbs,
     semantic_cuts: Vec<f64>,
     /// The advance step at the join with the previous segment, which the
@@ -1153,11 +1200,11 @@ pub(crate) struct FollowerState {
     s_shaped: f64,
     e_end: Option<f64>,
     projected_output_end: Option<f64>,
-    /// Time and follower input velocity where `projected_output_end` was
+    /// Time and follower input state where `projected_output_end` was
     /// taken, so the next stitch can tell what an advance makes of the join.
-    projected_input_end: Option<(f64, f64)>,
+    projected_input_end: Option<(f64, SeamInput)>,
     emitted_output_pv: Option<(f64, f64)>,
-    committed_input_end: Option<Pvaj4>,
+    committed_input_end: Option<SeamInput>,
     projected: Vec<ProjSeg>,
     projected_through_t: Option<f64>,
     projected_trimmed: bool,

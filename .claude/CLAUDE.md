@@ -64,6 +64,14 @@ the checks, merges with a merge commit and moves local `main` to `origin/main`
 without checking anything out. Red checks print the failed-run log tail and
 exit non-zero. `--dry-run` prints the plan.
 
+`uv run python scripts/pending_baselines.py [-v|--all]` lists every open PR with
+its stack parent, mergeability, CI state, the snapshot cases whose output
+changes (max |dp|/|dv|/|da| per axis against its base, plus the cases differing
+from the baselines committed at its head) and a stack-aware merge order. Engines
+are built in throwaway worktrees and cached by commit under
+`~/.cache/pending-baselines`. `--review <pr>` checks that PR head out and
+starts the snapshot review UI so the baselines can be accepted and pushed.
+
 # Reference docs
 
 - **MCU C/Rust boundary — architectural invariant:** [`docs/rewrite/mcu-c-rust-boundary.md`](docs/rewrite/mcu-c-rust-boundary.md). Read this before adding shared state between C and Rust on the MCU, or before reaching for `#[link_section]` on a Rust static. Rules: C owns boot, safety-critical paths, and all shared-memory placement; Rust owns the motion engine; the seam is `extern "C"` + `#[repr(C)]` only.
