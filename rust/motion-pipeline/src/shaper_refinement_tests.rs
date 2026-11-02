@@ -632,7 +632,7 @@ impl TrackSignal for WaveWithQuietKnot {
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let tau = t - self.t0;
         let rate = self.angular_rate;
-        let (sine, cosine) = rate.mul_add(tau, self.phase).sin_cos();
+        let (sine, cosine) = libm::sincos(rate.mul_add(tau, self.phase));
         (
             0.3 + 10.0 * tau + 100.0 * tau * tau + self.amplitude * sine,
             10.0 + 200.0 * tau + self.amplitude * rate * cosine,
