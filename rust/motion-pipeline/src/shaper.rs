@@ -91,6 +91,11 @@ pub(crate) trait TrackSignal {
     fn diagnostic(&self, _t: f64) -> Option<String> {
         None
     }
+    /// Times at which the acceleration rises from a point as a square root,
+    /// whose shoulder can bend between the ladder's probes.
+    fn square_root_onsets(&self) -> &[f64] {
+        &[]
+    }
 }
 
 impl TrackSignal for ContinuousAxis {
@@ -131,6 +136,9 @@ impl<S: TrackSignal> TrackSignal for &S {
     }
     fn diagnostic(&self, t: f64) -> Option<String> {
         S::diagnostic(self, t)
+    }
+    fn square_root_onsets(&self) -> &[f64] {
+        S::square_root_onsets(self)
     }
 }
 
@@ -529,8 +537,8 @@ fn materialize_changed_sources(
         if !(variable_surface_z || changed) || matches!(source, ContinuousAxis::Spline(_)) {
             continue;
         }
-        let (mut breakpoints, _cap_contacts) = match source {
-            ContinuousAxis::Analytic { span, .. } => cap_graded_seeds(span),
+        let (mut breakpoints, cap_contacts) = match source {
+            ContinuousAxis::Analytic { span, .. } => cap_contact_seeds(span),
             _ => (vec![segment.t_start, segment.t_end], Vec::new()),
         };
         if let ContinuousAxis::Analytic { span, .. } = source {
@@ -541,7 +549,7 @@ fn materialize_changed_sources(
             }
         }
         #[cfg(feature = "fit-audit")]
-        let _cap_contacts_audited = crate::fit_audit::CapContactScope::enter(&_cap_contacts);
+        let _cap_contacts_audited = crate::fit_audit::CapContactScope::enter(&cap_contacts);
         let mut curve = fit_axis_from_signal(
             AxisFit {
                 axis,
@@ -552,7 +560,10 @@ fn materialize_changed_sources(
                 fit_context: "materialize_source",
                 velocity_continuous: false,
             },
-            source,
+            &CapContactSource {
+                source,
+                cap_contacts: &cap_contacts,
+            },
         )?;
         if !chains.is_projected_follower(axis) {
             if let Some(chain) = chains.chains.get(axis) {
@@ -570,43 +581,34 @@ fn materialize_changed_sources(
     Ok(rebuilt)
 }
 
-/// An analytic source's materialize seeds — its ends and phase seams,
-/// graded toward its curvature-cap contacts — and those contacts.
-fn cap_graded_seeds(span: &AnalyticMoveSpan) -> (Vec<f64>, Vec<f64>) {
-    let mut breakpoints = vec![span.t_start, span.t_end];
-    breakpoints.extend(span.phase_seam_times());
+/// An analytic source's materialize seeds — its ends, phase seams and
+/// curvature-cap contacts — and those contacts.
+fn cap_contact_seeds(span: &AnalyticMoveSpan) -> (Vec<f64>, Vec<f64>) {
     let cap_contacts: Vec<f64> = span.cap_contact_times().collect();
-    grade_seeds_toward(&mut breakpoints, &cap_contacts);
-    (breakpoints, cap_contacts)
+    assert!(
+        cap_contacts.is_sorted(),
+        "cap contacts are out of time order: {cap_contacts:?}"
+    );
+    let mut seeds = vec![span.t_start, span.t_end];
+    seeds.extend(span.phase_seam_times());
+    seeds.extend_from_slice(&cap_contacts);
+    (seeds, cap_contacts)
 }
 
-/// Seeds approach a non-analytic point geometrically down to this spacing:
-/// the disk rail's dense solution resolves a square-root approach no finer
-/// than its knot spacing, so finer seeds would split polynomial pieces.
-const SINGULAR_SEED_GRADING_FLOOR_S: f64 = 1e-6;
+/// A materialized source with the curvature-cap contacts its acceleration
+/// approaches as a square root.
+struct CapContactSource<'a> {
+    source: &'a ContinuousAxis,
+    cap_contacts: &'a [f64],
+}
 
-/// Adds each singular time to the seeds, then seeds halving their distance
-/// to it from the neighbouring seed on either side. A polynomial cannot
-/// follow a square-root shoulder across a span, but each graded span sees
-/// the same shoulder rescaled, which a ladder rung fits within tolerance.
-fn grade_seeds_toward(seeds: &mut Vec<f64>, singular: &[f64]) {
-    seeds.extend_from_slice(singular);
-    seeds.sort_by(f64::total_cmp);
-    seeds.dedup();
-    let anchors = seeds.clone();
-    for &point in singular {
-        let at = anchors.partition_point(|&seed| seed < point);
-        let neighbours = [
-            at.checked_sub(1).map(|i| anchors[i]),
-            anchors.get(at + 1).copied(),
-        ];
-        for neighbour in neighbours.into_iter().flatten() {
-            let mut offset = 0.5 * (neighbour - point);
-            while offset.abs() >= SINGULAR_SEED_GRADING_FLOOR_S {
-                seeds.push(point + offset);
-                offset *= 0.5;
-            }
-        }
+impl TrackSignal for CapContactSource<'_> {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        TrackSignal::eval_pva(self.source, t)
+    }
+
+    fn square_root_onsets(&self) -> &[f64] {
+        self.cap_contacts
     }
 }
 
@@ -3491,6 +3493,57 @@ fn shaped_ladder<S: TrackSignal>(
     }
 }
 
+/// Points at which a candidate next to a square-root onset is held to the
+/// fit tolerance, spread between its resolved edges as the fit audit
+/// spreads them.
+const SQUARE_ROOT_ONSET_CHECK_POINTS: u32 = 64;
+
+/// A ladder candidate over `[t0, t1]` in the ladder's `[-1, 1]` monomial
+/// coordinate, and how far inside each edge the fit resolves it.
+#[derive(Clone, Copy)]
+struct OnsetCandidate<'a> {
+    mono_u: &'a [f64],
+    t0: f64,
+    t1: f64,
+    edge_insets: (f64, f64),
+}
+
+/// Whether a candidate the ladder accepted at its probes leaves the fit
+/// tolerance between them, checked only on a span reaching a square-root
+/// onset: there the acceleration's shoulder bends between the probes, and
+/// splitting the span grades the partition toward the onset only as deep
+/// as its fit needs.
+fn misses_square_root_onset<S: TrackSignal>(
+    sig: &S,
+    candidate: OnsetCandidate,
+    fit_tol: FitTol,
+) -> bool {
+    let OnsetCandidate {
+        mono_u,
+        t0,
+        t1,
+        edge_insets: (start_inset, end_inset),
+    } = candidate;
+    let onsets = sig.square_root_onsets();
+    let first_reached = onsets.partition_point(|&onset| onset < t0);
+    if onsets.get(first_reached).is_none_or(|&onset| onset > t1) {
+        return false;
+    }
+    let h = t1 - t0;
+    let acceleration_scale = (2.0 / h) * (2.0 / h);
+    let resolved = h - start_inset - end_inset;
+    (0..SQUARE_ROOT_ONSET_CHECK_POINTS).any(|k| {
+        let u = (start_inset
+            + resolved * (f64::from(k) + 0.5) / f64::from(SQUARE_ROOT_ONSET_CHECK_POINTS))
+            / h;
+        let x = 2.0 * u - 1.0;
+        let (position, _, acceleration) = sig.eval_pva(t0 + h * u);
+        (eval_mono(mono_u, x) - position).abs() > fit_tol.pos_mm
+            || (eval_mono_dd(mono_u, x) * acceleration_scale - acceleration).abs()
+                > fit_tol.accel_mm_s2
+    })
+}
+
 fn refine_shaped_span<S: TrackSignal>(
     sig: &S,
     span: RefineSpan,
@@ -3504,7 +3557,26 @@ fn refine_shaped_span<S: TrackSignal>(
     let velocity_budget = policy.velocity_budget;
     let floors = policy.floors;
     let (mono_u, failure) = shaped_ladder(sig, t0, t1, slivers, policy)?;
-    if failure.is_none() {
+    let edge_insets = (
+        edge_inset(t1 - t0, floors.cubic, slivers.start),
+        edge_inset(t1 - t0, floors.cubic, slivers.end),
+    );
+    let tm = 0.5 * t0 + 0.5 * t1;
+    let at_resolution_floor = tm - t0 < floors.cubic || t1 - tm < floors.cubic;
+    let splittable = !at_resolution_floor && *refinement_splits < MAX_FIT_REFINEMENT_SPLITS;
+    if failure.is_none()
+        && !(splittable
+            && misses_square_root_onset(
+                sig,
+                OnsetCandidate {
+                    mono_u: &mono_u,
+                    t0,
+                    t1,
+                    edge_insets,
+                },
+                fit_tol,
+            ))
+    {
         #[cfg(feature = "fit-audit")]
         crate::fit_audit::check(
             sig,
@@ -3517,18 +3589,13 @@ fn refine_shaped_span<S: TrackSignal>(
                 mono_u: &mono_u,
                 accepted_at_floor: false,
                 cubic_floor: floors.cubic,
-                edge_insets: (
-                    edge_inset(t1 - t0, floors.cubic, slivers.start),
-                    edge_inset(t1 - t0, floors.cubic, slivers.end),
-                ),
+                edge_insets,
             },
         );
         out.push(exact_piece(&mono_u, t0, t1, t1 - t0));
         return Ok(());
     }
-    let tm = 0.5 * t0 + 0.5 * t1;
-    let at_resolution_floor = tm - t0 < floors.cubic || t1 - tm < floors.cubic;
-    if at_resolution_floor || *refinement_splits >= MAX_FIT_REFINEMENT_SPLITS {
+    if !splittable {
         let failure = failure.expect("failed fit has no ladder diagnostic");
         if failure.error.position <= fit_tol.pos_mm
             && failure.error.velocity <= velocity_budget
@@ -4093,3 +4160,7 @@ mod shaper_edge_tests;
 #[cfg(test)]
 #[path = "shaper_motor_command_tests.rs"]
 mod shaper_motor_command_tests;
+
+#[cfg(test)]
+#[path = "shaper_cap_contact_tests.rs"]
+mod shaper_cap_contact_tests;

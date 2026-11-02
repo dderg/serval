@@ -678,3 +678,80 @@ fn a_near_tolerance_acceleration_estimate_is_sampled_at_its_peak() {
         WaveWithQuietKnot::new(3.2, 3.0, 1.0).worst_acceleration_deviation_of_its_fit(),
     );
 }
+
+struct DeclaredOnset(SquareRootOnset);
+
+impl TrackSignal for DeclaredOnset {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        self.0.eval_pva(t)
+    }
+
+    fn square_root_onsets(&self) -> &[f64] {
+        std::slice::from_ref(&self.0.at)
+    }
+}
+
+/// The largest acceleration miss of a fitted track against its signal,
+/// sampled densely inside each piece clear of a percent at either edge.
+fn worst_interior_acceleration_miss(track: &nurbs::ScalarNurbs, sig: &impl TrackSignal) -> f64 {
+    const POINTS: u32 = 256;
+    nurbs::bezier::extract_bezier_pieces(track)
+        .iter()
+        .flat_map(|piece| {
+            let acceleration = piece.differentiate().differentiate();
+            let h = piece.u_end - piece.u_start;
+            (0..POINTS).map(move |k| {
+                let t = piece.u_start + h * (0.01 + 0.98 * f64::from(k) / f64::from(POINTS - 1));
+                (acceleration.evaluate(t) - sig.eval_pva(t).2).abs()
+            })
+        })
+        .fold(0.0, f64::max)
+}
+
+#[test]
+fn a_declared_square_root_onset_is_refined_until_its_shoulder_holds_the_tolerance() {
+    let fit_tol = FitTol {
+        pos_mm: 0.005,
+        accel_mm_s2: 50.0,
+    };
+    let onset = || SquareRootOnset {
+        at: 0.211_721_933,
+        offset_mm: 150.0,
+        velocity: 300.0,
+        coefficient: 4.0e5,
+    };
+    let span = 2e-3;
+    let fit_axis = |declared: bool| {
+        let axis_fit = AxisFit {
+            axis: 1,
+            t_start: onset().at,
+            t_end: onset().at + span,
+            seed_breakpoints: &[],
+            fit_tol,
+            fit_context: "square-root onset",
+            velocity_continuous: false,
+        };
+        if declared {
+            fit_axis_from_signal(axis_fit, &DeclaredOnset(onset()))
+        } else {
+            fit_axis_from_signal(axis_fit, &onset())
+        }
+        .expect("a square-root onset fits")
+    };
+    let undeclared = worst_interior_acceleration_miss(&fit_axis(false), &onset());
+    let declared = worst_interior_acceleration_miss(&fit_axis(true), &onset());
+    eprintln!(
+        "undeclared {undeclared} declared {declared} pieces {} {}",
+        fit_axis(false).knots().len(),
+        fit_axis(true).knots().len()
+    );
+    assert!(
+        undeclared > fit_tol.accel_mm_s2,
+        "the ladder's probes must miss the undeclared shoulder for this onset to test \
+         anything: worst miss {undeclared} mm/s²"
+    );
+    assert!(
+        declared <= fit_tol.accel_mm_s2,
+        "the declared onset's shoulder leaves the tolerance by {declared} mm/s²"
+    );
+}
