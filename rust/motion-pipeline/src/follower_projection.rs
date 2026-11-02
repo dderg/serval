@@ -119,6 +119,7 @@ struct FollowerSource<'a> {
     leaders: &'a [usize],
     state: &'a FollowerState,
     s_start: f64,
+    s_length: f64,
 }
 
 fn fit_source_projection(
@@ -133,10 +134,22 @@ fn fit_source_projection(
         leaders,
         state,
         s_start,
+        s_length,
     } = source;
     let raw_axis = &raw.axes[axis];
     let (t_start, t_end) = projection_support(raw, shaped, axis, leaders);
-    let sig = FollowerSignal::new(shaped, raw, axis, leaders, state, s_start, 0.0);
+    let sig = FollowerSignal::new(
+        shaped,
+        raw,
+        axis,
+        leaders,
+        state,
+        Odometer {
+            start: s_start,
+            length: s_length,
+        },
+        0.0,
+    );
     let breakpoints = sig.construction_breakpoints(raw_axis);
     let input_state = |t| {
         let (p, v, a) = sig.eval_pva(t);
@@ -259,7 +272,7 @@ pub(crate) fn project_followers(
                 let shaped_ds =
                     state.ingest(&base[i], &frontier[i], axis, leaders, &base[i + 1..], arc);
                 let s_start = state.aligned_span_start(next_s);
-                source_jobs.push((i, s_start));
+                source_jobs.push((i, s_start, shaped_ds));
                 next_s = s_start + shaped_ds;
             }
             timing.ingest_us += ingest_started.elapsed_us();
@@ -286,7 +299,7 @@ pub(crate) fn project_followers(
                             loop {
                                 let job =
                                     next_job.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                let Some(&(index, s_start)) = source_jobs.get(job) else {
+                                let Some(&(index, s_start, s_length)) = source_jobs.get(job) else {
                                     return done;
                                 };
                                 done.push((
@@ -299,6 +312,7 @@ pub(crate) fn project_followers(
                                             leaders,
                                             state: state_ref,
                                             s_start,
+                                            s_length,
                                         },
                                         fit_tol,
                                         leading_stage,
@@ -316,7 +330,7 @@ pub(crate) fn project_followers(
         } else {
             source_jobs
                 .iter()
-                .map(|&(index, s_start)| {
+                .map(|&(index, s_start, s_length)| {
                     (
                         index,
                         fit_source_projection(
@@ -327,6 +341,7 @@ pub(crate) fn project_followers(
                                 leaders,
                                 state: state_ref,
                                 s_start,
+                                s_length,
                             },
                             fit_tol,
                             leading_stage,
@@ -1501,6 +1516,12 @@ impl LeaderPieces {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Odometer {
+    start: f64,
+    length: f64,
+}
+
 pub(crate) struct FollowerSignal<'a> {
     state: &'a FollowerState,
     e_start: f64,
@@ -1512,6 +1533,7 @@ pub(crate) struct FollowerSignal<'a> {
     grid: Vec<f64>,
     dense_t: Vec<f64>,
     dense_s: Vec<f64>,
+    odometer_scale: f64,
     s_owned_end: f64,
     start_sliver: Option<SpeedZeroSliver>,
     end_sliver: Option<SpeedZeroSliver>,
@@ -1525,9 +1547,10 @@ impl<'a> FollowerSignal<'a> {
         axis: usize,
         leaders: &[usize],
         state: &'a FollowerState,
-        s_start: f64,
+        odometer: Odometer,
         e_start: f64,
     ) -> Self {
+        let s_start = odometer.start;
         let (t0, t1) = projection_support(raw, shaped, axis, leaders);
         let shaped_axes: Vec<&'a ContinuousAxis> =
             leaders.iter().map(|&leader| &shaped.axes[leader]).collect();
@@ -1557,6 +1580,7 @@ impl<'a> FollowerSignal<'a> {
             grid,
             dense_t: Vec::new(),
             dense_s: Vec::new(),
+            odometer_scale: 1.0,
             s_owned_end: f64::INFINITY,
             start_sliver: None,
             end_sliver: None,
@@ -1579,6 +1603,17 @@ impl<'a> FollowerSignal<'a> {
                 &mut dense_t,
                 &mut dense_s,
             );
+        }
+        assert!(
+            (acc - odometer.length).abs() <= SPAN_LOOKUP_SLACK_MM,
+            "follower odometer integrates {acc} mm over [{}, {}] but the span table \
+             ingested {} mm",
+            sig.grid[0],
+            sig.grid[sig.grid.len() - 1],
+            odometer.length
+        );
+        if acc > 0.0 {
+            sig.odometer_scale = odometer.length / acc;
         }
         sig.dense_t = dense_t;
         sig.dense_s = dense_s;
@@ -1719,7 +1754,7 @@ impl<'a> FollowerSignal<'a> {
         } else {
             t
         };
-        match self.dense_t.binary_search_by(|dense| dense.total_cmp(&t)) {
+        let integrated = match self.dense_t.binary_search_by(|dense| dense.total_cmp(&t)) {
             Ok(index) => self.dense_s[index],
             Err(insertion) => {
                 assert!(
@@ -1731,7 +1766,8 @@ impl<'a> FollowerSignal<'a> {
                 let index = insertion - 1;
                 self.dense_s[index] + integrate(&|u| self.shaped_speed(u), self.dense_t[index], t)
             }
-        }
+        };
+        integrated * self.odometer_scale
     }
     fn s_at(&self, t: f64) -> f64 {
         self.s_start + self.s_offset(t)
@@ -1743,7 +1779,8 @@ impl<'a> FollowerSignal<'a> {
         self.s_offset(t).min(self.s_owned_end - self.s_start)
     }
     fn s_end(&self) -> f64 {
-        self.s_start + self.dense_s.last().copied().expect("odometer knots seeded")
+        self.s_start
+            + self.dense_s.last().copied().expect("odometer knots seeded") * self.odometer_scale
     }
     /// The exact value of an identically-constant window — a follower whose
     /// span table commands zero extrusion ratio across the whole owned range

@@ -89,7 +89,15 @@ fn incremental_arc_cache_matches_direct_integration_in_any_query_order() {
     };
     let raw = shaped.clone();
     let state = FollowerState::default();
-    let sig = FollowerSignal::new(&shaped, &raw, 3, &[0, 1], &state, 0.0, 0.0);
+    let sig = FollowerSignal::new(
+        &shaped,
+        &raw,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
     for fraction in [0.85_f64, 0.15, 0.65, 0.35, 0.95, 0.05, 0.5, 0.15] {
         let t = fraction.mul_add(t1 - t0, t0);
         let expected = integrate(&|u| sig.shaped_speed(u), t0, t);
@@ -150,6 +158,7 @@ fn follower_advance_fits_the_transformed_acceleration() {
                 leaders: &[0, 1],
                 state: &state,
                 s_start: 0.0,
+                s_length: super::leader_arc_length(&shaped, &[0, 1]),
             },
             crate::lowering::FitTol {
                 pos_mm: 5e-5,
@@ -189,7 +198,15 @@ fn leader_velocity_sign_change_is_seeded_as_a_construction_breakpoint() {
     let shaped = cusp_segment(vec![1.0, -16.0, 1_000.0], vec![2.0, 1e-3], t0, t1);
     let raw = shaped.clone();
     let state = FollowerState::default();
-    let sig = FollowerSignal::new(&shaped, &raw, 3, &[0, 1], &state, 0.0, 0.0);
+    let sig = FollowerSignal::new(
+        &shaped,
+        &raw,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
     let breaks = sig.construction_breakpoints(&raw.axes[3]).fit_seeds;
     let vx = |t: f64| super::axis_pva(&shaped.axes[0], t).1;
     let seeded = breaks
@@ -213,7 +230,15 @@ fn endpoint_velocity_zero_dedups_against_the_support_grid() {
     let shaped = cusp_segment(vec![1.0, 0.0, 1_000.0], vec![2.0, 1e-3], t0, t1);
     let raw = shaped.clone();
     let state = FollowerState::default();
-    let sig = FollowerSignal::new(&shaped, &raw, 3, &[0, 1], &state, 0.0, 0.0);
+    let sig = FollowerSignal::new(
+        &shaped,
+        &raw,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
     let breaks = sig.construction_breakpoints(&raw.axes[3]).fit_seeds;
     assert_eq!(
         super::axis_pva(&shaped.axes[0], t0).1,
@@ -222,4 +247,11 @@ fn endpoint_velocity_zero_dedups_against_the_support_grid() {
     );
     let at_start = breaks.iter().filter(|&&t| (t - t0).abs() <= 1e-12).count();
     assert_eq!(at_start, 1, "endpoint root duplicated in {breaks:?}");
+}
+
+fn odometer_from_start(shaped: &ContinuousSegment) -> super::Odometer {
+    super::Odometer {
+        start: 0.0,
+        length: super::leader_arc_length(shaped, &[0, 1]),
+    }
 }
