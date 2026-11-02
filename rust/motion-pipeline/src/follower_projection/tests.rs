@@ -4,6 +4,7 @@ use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 use trajectory::{ContinuousAxis, ContinuousSegment};
 
 use super::{FollowerSignal, FollowerState, integrate};
+use crate::shaper::TrackSignal;
 
 /// Regression for the bench crash "shaper: axis 3: shaped sample is
 /// non-finite": deep into a long stream the odometer's ulp exceeds
@@ -247,6 +248,64 @@ fn endpoint_velocity_zero_dedups_against_the_support_grid() {
     );
     let at_start = breaks.iter().filter(|&&t| (t - t0).abs() <= 1e-12).count();
     assert_eq!(at_start, 1, "endpoint root duplicated in {breaks:?}");
+}
+
+#[test]
+#[should_panic(expected = "beyond the")]
+fn an_ingested_length_off_by_more_than_leaf_reordering_panics() {
+    let shaped = cusp_segment(vec![0.0, 10.0], vec![0.0, 0.0, 500.0], 0.0, 0.02);
+    let state = FollowerState::default();
+    let mut odometer = odometer_from_start(&shaped);
+    odometer.length += 1e-9;
+    FollowerSignal::new(&shaped, &shaped, 3, &[0, 1], &state, odometer, 0.0);
+}
+
+#[test]
+#[should_panic(expected = "stand still")]
+fn still_leaders_under_an_ingested_length_panic() {
+    let shaped = cusp_segment(vec![1.0], vec![2.0], 0.0, 0.02);
+    let state = FollowerState::default();
+    let odometer = super::Odometer {
+        start: 0.0,
+        length: 1e-12,
+    };
+    FollowerSignal::new(&shaped, &shaped, 3, &[0, 1], &state, odometer, 0.0);
+}
+
+#[test]
+fn a_rescaled_odometer_carries_its_scale_into_every_derivative() {
+    let shaped = cusp_segment(vec![0.0, 10.0], vec![0.0, 0.0, 500.0], 0.0, 0.02);
+    let mut state = FollowerState::default();
+    state.push_span(1.0, 0.05, 0.09);
+    let mut sig = FollowerSignal::new(
+        &shaped,
+        &shaped,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    sig.odometer_scale = 0.5;
+    let step = 1e-5;
+    let central = |before: f64, after: f64| (after - before) / (2.0 * step);
+    let assert_close = |label: &str, t: f64, exact: f64, difference: f64| {
+        assert!(
+            (exact - difference).abs() <= 1e-4 * exact.abs().max(1.0),
+            "{label} at {t}: {exact} but the central difference is {difference}"
+        );
+    };
+    for index in 1..20 {
+        let t = f64::from(index) * 0.001;
+        let (_, velocity, acceleration) = sig.eval_pva(t);
+        let before = sig.eval_pva(t - step);
+        let after = sig.eval_pva(t + step);
+        assert_close("velocity", t, velocity, central(before.0, after.0));
+        assert_close("acceleration", t, acceleration, central(before.1, after.1));
+        assert_close("jerk", t, sig.jerk(t), central(before.2, after.2));
+        assert_close("deriv", t, sig.deriv(t), velocity);
+        assert_close("second_deriv", t, sig.second_deriv(t), acceleration);
+    }
 }
 
 fn odometer_from_start(shaped: &ContinuousSegment) -> super::Odometer {
