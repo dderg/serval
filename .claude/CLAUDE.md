@@ -64,6 +64,25 @@ the checks, merges with a merge commit and moves local `main` to `origin/main`
 without checking anything out. Red checks print the failed-run log tail and
 exit non-zero. `--dry-run` prints the plan.
 
+`uv run python scripts/pending_baselines.py [-v|--all]` lists every open PR with
+its stack parent, mergeability, CI state, the snapshot cases whose output
+changes (max |dp|/|dv|/|da| per axis against its base, plus the cases differing
+from the baselines committed at its head) and a stack-aware merge order. Engines
+are built in throwaway worktrees and cached by commit under
+`~/.cache/pending-baselines`. `--review <pr>` checks that PR head out and
+starts the snapshot review UI so the baselines can be accepted and pushed.
+
+`uv run python scripts/integrate_stack.py 443 444 445 [--run CMD ...] [--keep]` (or
+`--order-from-pending`) merges PR heads in that order onto `origin/main` in a
+throwaway worktree (merge commits, never pushed), stops at the first conflict
+naming the files and the pair, runs each `--run` command in the integrated tree
+(cargo target dir shared with `pending_baselines.py`) and prints a table of
+merge steps and command tallies (last two output lines; full logs under
+`~/.cache/pending-baselines/stack-logs`). The worktree is removed unless `--keep`.
+Run it with plain `python3`, not `uv run` (uv's python breaks the pyo3 test
+binaries). Snapshot checks need the engine built first:
+`--run "make -f Makefile.rust motion-engine-fast && uv run python snapshots/run.py"`.
+
 # Reference docs
 
 - **MCU C/Rust boundary — architectural invariant:** [`docs/rewrite/mcu-c-rust-boundary.md`](docs/rewrite/mcu-c-rust-boundary.md). Read this before adding shared state between C and Rust on the MCU, or before reaching for `#[link_section]` on a Rust static. Rules: C owns boot, safety-critical paths, and all shared-memory placement; Rust owns the motion engine; the seam is `extern "C"` + `#[repr(C)]` only.
