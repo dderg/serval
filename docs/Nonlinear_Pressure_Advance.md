@@ -11,11 +11,17 @@ linear_advance: 0.04
 nonlinear_offset: 0.0
 linearization_velocity: 10.0
 
+[post_processor extruder_smoothing]
+type: smooth_triangle
+smooth_time: 0.005
+
 [axis e]
 follows: x, y, z
 motors: extruder_motor
-post_processors: extruder_pa
+post_processors: extruder_pa, extruder_smoothing
 ```
+
+The smoothing kernel is required: on an axis that follows others, an advance with no smoothing kernel in its chain is rejected at config load, because it would turn every extrusion-ratio change taken at speed into an instant extruder step. Keep it short; see [Evaluating an extruder chain](../README.md#evaluating-an-extruder-chain).
 
 `recipr_pressure_advance` accepts the same three parameters and may be used instead of `tanh_pressure_advance`. Do not attach both nonlinear models, or a nonlinear and linear pressure-advance processor, to the same axis.
 
