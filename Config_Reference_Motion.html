@@ -2413,8 +2413,11 @@ follows: x, y, z
 #   Optional comma-separated axis names. Default is an empty list.
 motors: e_motor
 #   Optional comma-separated motor names. Default is an empty list.
-post_processors: extruder_pa
+post_processors: extruder_pa, extruder_smoothing
 #   Optional comma-separated named post-processors. Default is an empty list.
+#   On an axis that follows others, a pressure advance (or any derivative-gain
+#   stage) needs a smoothing kernel in the same list; the chain is rejected
+#   otherwise.
 </code></pre></div>
 
 <p>The kinematic lane constructor creates <code>AxisRail</code>/servo rails and applies the
@@ -2492,7 +2495,7 @@ damping_ratio: 0.7
 #   Required. Must be in [0, 1).
 </code></pre></div>
 
-<p>Attach a named post-processor to an axis with <code>post_processors: name1, name2</code>. The fork has ZV, MZV, bell, and triangle smoothing kernels; it does not provide an EI-family input-shaper type.</p>
+<p>Attach a named post-processor to an axis with <code>post_processors: name1, name2</code>. On an axis that follows others, an advance (<code>linear_pressure_advance</code>, <code>tanh_pressure_advance</code>, <code>recipr_pressure_advance</code>, or another derivative-gain stage with a nonzero gain) must share its chain with a smoothing kernel: an advance turns every extrusion-ratio change taken at speed into an instant position step, which only a kernel makes followable, so the config compiler rejects the chain without one. A zero advance is accepted, and raising it at runtime on such a chain is rejected the same way. The fork has ZV, MZV, bell, and triangle smoothing kernels; it does not provide an EI-family input-shaper type.</p>
 <p>To judge an extruder chain (pressure advance plus its smoothing kernel) before printing, run <code>python3 tools/corner_flow.py printer.cfg</code>: it reports bead over- and under-fill at standard corners, flow changes and travel transitions, and accepts <code>--sweep smooth_time=...</code> and <code>--set name.param=value</code>. See <a href="https://github.com/KalicoCrew/kalico//blob/main/README.md#evaluating-an-extruder-chain">Evaluating an extruder chain</a> for how to read it.</p>
 <h2 id="extruder"><code>[extruder]</code><a class="headerlink" href="#extruder" title="Permanent link">&para;</a></h2>
 <p>The motion-owned portion of <code>[extruder]</code> is limited to the axis association and extrude-only caps. Heater, thermistor, and other extruder options remain mainline Klipper options and are outside this motion reference.</p>

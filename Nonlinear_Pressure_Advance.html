@@ -1908,12 +1908,17 @@
 <span class="na">nonlinear_offset</span><span class="o">:</span><span class="w"> </span><span class="s">0.0</span>
 <span class="na">linearization_velocity</span><span class="o">:</span><span class="w"> </span><span class="s">10.0</span>
 
+<span class="k">[post_processor extruder_smoothing]</span>
+<span class="na">type</span><span class="o">:</span><span class="w"> </span><span class="s">smooth_triangle</span>
+<span class="na">smooth_time</span><span class="o">:</span><span class="w"> </span><span class="s">0.005</span>
+
 <span class="k">[axis e]</span>
 <span class="na">follows</span><span class="o">:</span><span class="w"> </span><span class="s">x, y, z</span>
 <span class="na">motors</span><span class="o">:</span><span class="w"> </span><span class="s">extruder_motor</span>
-<span class="na">post_processors</span><span class="o">:</span><span class="w"> </span><span class="s">extruder_pa</span>
+<span class="na">post_processors</span><span class="o">:</span><span class="w"> </span><span class="s">extruder_pa, extruder_smoothing</span>
 </code></pre></div>
 
+<p>The smoothing kernel is required: on an axis that follows others, an advance with no smoothing kernel in its chain is rejected at config load, because it would turn every extrusion-ratio change taken at speed into an instant extruder step. Keep it short; see <a href="https://github.com/KalicoCrew/kalico//blob/main/README.md#evaluating-an-extruder-chain">Evaluating an extruder chain</a>.</p>
 <p><code>recipr_pressure_advance</code> accepts the same three parameters and may be used instead of <code>tanh_pressure_advance</code>. Do not attach both nonlinear models, or a nonlinear and linear pressure-advance processor, to the same axis.</p>
 <h2 id="model-and-parameters">Model and parameters<a class="headerlink" href="#model-and-parameters" title="Permanent link">&para;</a></h2>
 <p>The commanded advance is:</p>
