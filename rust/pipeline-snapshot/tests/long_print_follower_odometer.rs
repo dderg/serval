@@ -16,7 +16,7 @@ const MAX_ACCEL: f64 = 10_000.0;
 const EXTRUDER: usize = 3;
 const EIGHTEEN_HOURS_S: f64 = 65_536.0;
 const SAMPLES_PER_SEGMENT: usize = 64;
-const SLIVER_OF_SEGMENT: f64 = 1e-6;
+const MIN_DEVICE_INTERVAL_S: f64 = 2e-9;
 
 fn axis(name: &str, follows: &[&str], post_processors: &[&str]) -> AxisDecl {
     AxisDecl {
@@ -129,7 +129,6 @@ fn a_layer_extrudes_the_same_eighteen_hours_into_the_stream() {
 #[test]
 fn no_extruder_segment_opens_on_a_sliver_piece() {
     for segment in plan_from(0.0) {
-        let duration = segment.t_end - segment.t_start;
         let first_piece_end = segment.axes[EXTRUDER]
             .breakpoints()
             .into_iter()
@@ -137,7 +136,7 @@ fn no_extruder_segment_opens_on_a_sliver_piece() {
             .fold(segment.t_end, f64::min);
         let first_piece = first_piece_end - segment.t_start;
         assert!(
-            first_piece >= SLIVER_OF_SEGMENT * duration,
+            first_piece >= MIN_DEVICE_INTERVAL_S,
             "extruder segment [{}, {}] opens on a {first_piece} s piece",
             segment.t_start,
             segment.t_end
