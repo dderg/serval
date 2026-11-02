@@ -407,11 +407,13 @@ struct PhaseDrains {
 
 /// Streams each phase through the inbox as fast as the submitter can, one
 /// after another, and reports the brakes to rest made by the end of each
-/// phase. A phase stops streaming the moment the busy path brakes. The
-/// submitter cannot keep the inbox full while the pipeline still has room
-/// downstream, so the idle path may brake too: it only ever does so on an
-/// inbox it found empty, which [`super::ingress::InboxFoundEmpty`] makes it
-/// prove, so its brakes are counted but are no failure of the busy path.
+/// phase. A phase stops streaming the moment either path brakes: a stream
+/// that kept arriving after a brake would be judged on a runway that no
+/// longer exists. The submitter cannot keep the inbox full while the
+/// pipeline still has room downstream, so the idle path may brake too: it
+/// only ever does so on an inbox it found empty, which
+/// [`super::ingress::InboxFoundEmpty`] makes it prove, so its brakes are
+/// counted but are no failure of the busy path.
 fn drains_after_each_phase(phases: &[StrokePhase]) -> Vec<PhaseDrains> {
     let timeline = ExecutionTimeline {
         frontier: Arc::default(),
@@ -433,14 +435,17 @@ fn drains_after_each_phase(phases: &[StrokePhase]) -> Vec<PhaseDrains> {
     let mut line_no = 1;
     let mut drains = Vec::with_capacity(phases.len());
     let busy_drained = || h.links.pacer_drains.busy.load(Ordering::SeqCst);
+    let idle_drained = || h.links.pacer_drains.idle.load(Ordering::SeqCst);
     for phase in phases {
         sink.set_realtime_factor(phase.realtime_factor);
         let busy_before = busy_drained();
+        let idle_before = idle_drained();
         let started = Instant::now();
         let mut strokes = 0;
         while strokes < phase.max_strokes
             && started.elapsed() < phase.streaming
             && busy_drained() == busy_before
+            && idle_drained() == idle_before
         {
             let (m, end) = phase.next_move(line_no, at);
             loop {
@@ -462,7 +467,7 @@ fn drains_after_each_phase(phases: &[StrokePhase]) -> Vec<PhaseDrains> {
         drains.push(PhaseDrains {
             parks: sink.inner.parks.load(Ordering::SeqCst),
             busy: busy_drained(),
-            idle: h.links.pacer_drains.idle.load(Ordering::SeqCst),
+            idle: idle_drained(),
             flush_s,
         });
     }
@@ -504,8 +509,8 @@ fn a_busy_stream_falling_behind_its_playhead_brakes_before_running_dry() {
         "the stream braked while it was still gaining runway: {drains:?}"
     );
     assert!(
-        drains[1].busy > 0,
-        "the committed runway fell away while the inbox stayed full, yet the \
+        drains[1].busy + drains[1].idle > 0,
+        "the committed runway fell away while moves kept arriving, yet the \
          pacer never braked to rest: {drains:?}"
     );
 }
