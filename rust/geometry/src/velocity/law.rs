@@ -77,6 +77,36 @@ fn rail_accel(accel: f64, kappa_abs: f64, v: f64) -> f64 {
 }
 
 impl ScalarLaw {
+    /// Equal to the bit, so integrating either from the same state yields the
+    /// same knots; `==` would also identify `-0.0` with `0.0`.
+    fn is_bitwise(&self, other: &ScalarLaw) -> bool {
+        match (*self, *other) {
+            (ScalarLaw::ConstAccel { a0 }, ScalarLaw::ConstAccel { a0: other_a0 }) => {
+                a0.to_bits() == other_a0.to_bits()
+            }
+            (
+                ScalarLaw::DiskRail {
+                    accel,
+                    kappa0,
+                    sigma,
+                    brake,
+                },
+                ScalarLaw::DiskRail {
+                    accel: other_accel,
+                    kappa0: other_kappa0,
+                    sigma: other_sigma,
+                    brake: other_brake,
+                },
+            ) => {
+                accel.to_bits() == other_accel.to_bits()
+                    && kappa0.to_bits() == other_kappa0.to_bits()
+                    && sigma.to_bits() == other_sigma.to_bits()
+                    && brake == other_brake
+            }
+            _ => false,
+        }
+    }
+
     /// Tangential acceleration commanded by the law at state `(ds, v)`,
     /// where `ds` is arc travelled since the segment start.
     fn accel_at(&self, ds: f64, v: f64) -> f64 {
@@ -328,6 +358,27 @@ impl LawSegment {
                 Some(seg)
             }
         }
+    }
+
+    /// The speed at the far end of a rail built by [`Self::until_arc`],
+    /// exactly the speed [`Self::reach_over`] reports for the same span.
+    pub(crate) fn rail_end_speed(&self) -> f64 {
+        let knots = self.rail_knots();
+        knots[knots.len() - 1].v
+    }
+
+    /// Whether this rail, built by [`Self::until_arc`], is the one
+    /// `until_arc(0.0, 0.0, v0, law, ds)` builds: the same inputs to the bit,
+    /// so the same knots.
+    pub(crate) fn is_origin_rail(&self, v0: f64, law: ScalarLaw, ds: f64) -> bool {
+        let Some(knots) = self.dense.get() else {
+            return false;
+        };
+        self.t0.to_bits() == 0.0_f64.to_bits()
+            && self.s0.to_bits() == 0.0_f64.to_bits()
+            && self.v0.to_bits() == v0.to_bits()
+            && self.law.is_bitwise(&law)
+            && knots[knots.len() - 1].s.to_bits() == ds.to_bits()
     }
 
     /// This rail cut at the first time its speed reaches `target`, on its

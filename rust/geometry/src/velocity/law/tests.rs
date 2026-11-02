@@ -33,6 +33,25 @@ fn const_accel_matches_closed_form() {
 }
 
 #[test]
+fn origin_rail_identity_is_bitwise_in_every_input() {
+    let law = |kappa0: f64| ScalarLaw::DiskRail {
+        accel: 1000.0,
+        kappa0,
+        sigma: 0.05,
+        brake: false,
+    };
+    let seg = rail(50.0, 1000.0, -0.0, 0.05, false, 2.0);
+    assert!(seg.is_origin_rail(50.0, law(-0.0), 2.0));
+    assert!(!seg.is_origin_rail(50.0, law(0.0), 2.0));
+    assert!(!seg.is_origin_rail(50.000_000_000_001, law(-0.0), 2.0));
+    assert!(!seg.is_origin_rail(50.0, law(-0.0), 2.000_000_000_001));
+    let shifted = LawSegment::until_arc(0.0, 1.0, 50.0, law(-0.0), 2.0).unwrap();
+    assert!(!shifted.is_origin_rail(50.0, law(-0.0), 2.0));
+    let line = LawSegment::new(0.0, 0.1, 0.0, 50.0, ScalarLaw::ConstAccel { a0: 1000.0 });
+    assert!(!line.is_origin_rail(50.0, ScalarLaw::ConstAccel { a0: 1000.0 }, 2.0));
+}
+
+#[test]
 fn disk_rail_scalar_acceleration_is_exactly_the_budget() {
     // Braking into a tightening clothoid: kappa 0 -> 53.7 over 0.0292 mm at
     // A = 1000, entering at the disk-reach speed for the length.

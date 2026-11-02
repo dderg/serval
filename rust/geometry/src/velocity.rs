@@ -231,14 +231,16 @@ where
     let caps = build_move_caps(moves, params, &mut report)?;
     check_entry_ceiling(moves, &caps, entry_v, tol)?;
     let mut plan = seed_seam_velocities(&caps, stop_before, entry_v, &mut report);
-    forward_pass(moves, &caps, &mut plan.v, tol)?;
-    let (barrier, v_barrier) = reverse_brake_envelope(moves, &caps, &mut plan.v, tol)?;
-    check_entry_brake(moves, &caps, &plan.v, entry_v, tol)?;
+    forward_pass(moves, &caps, &mut plan, tol)?;
+    let (barrier, v_barrier) = reverse_brake_envelope(moves, &caps, &mut plan, tol)?;
+    check_entry_brake(moves, &caps, &mut plan, entry_v, tol)?;
     let reconstruct_count = select_prefix(barrier);
     assert!(
         reconstruct_count <= n,
         "cannot reconstruct {reconstruct_count} moves from a {n}-move plan"
     );
+    plan.forward_rails.truncate(reconstruct_count);
+    plan.backward_rails.truncate(reconstruct_count);
     let (out, boundaries) = reconstruct_runs(
         &moves[..reconstruct_count],
         &caps[..reconstruct_count],
@@ -350,9 +352,14 @@ fn check_entry_ceiling(
     Ok(())
 }
 
+/// Seam speeds, which seams are anchors, and per member the rails the passes
+/// read their reaches off: forward from the member's entry, reversed from its
+/// exit.
 struct SeamPlan {
     v: Vec<f64>,
     is_anchor: Vec<bool>,
+    forward_rails: Vec<Option<LawSegment>>,
+    backward_rails: Vec<Option<LawSegment>>,
 }
 
 fn seed_seam_velocities(
@@ -382,16 +389,22 @@ fn seed_seam_velocities(
             v[k] = ceiling.min(disk::notch_free_min(ceiling, boundary_vlim));
         }
     }
-    SeamPlan { v, is_anchor }
+    SeamPlan {
+        v,
+        is_anchor,
+        forward_rails: vec![None; n],
+        backward_rails: vec![None; n],
+    }
 }
 
 fn forward_pass(
     moves: &[crate::Move],
     caps: &[MoveCaps],
-    v: &mut [f64],
+    plan: &mut SeamPlan,
     tol: f64,
 ) -> Result<(), VelocityError> {
     let n = caps.len();
+    let v = &mut plan.v;
     for k in 1..=n {
         let j = k - 1;
         let line_no = moves[j].source.start_line;
@@ -401,7 +414,8 @@ fn forward_pass(
         if moves[j].limits.max_jerk_mm_s3 != f64::INFINITY {
             return Err(VelocityError::Diverged { line_no });
         }
-        v[k] = v[k].min(disk);
+        v[k] = v[k].min(disk.v);
+        plan.forward_rails[j] = disk.rail;
     }
     Ok(())
 }
@@ -409,10 +423,11 @@ fn forward_pass(
 fn reverse_brake_envelope(
     moves: &[crate::Move],
     caps: &[MoveCaps],
-    v: &mut [f64],
+    plan: &mut SeamPlan,
     tol: f64,
 ) -> Result<(usize, f64), VelocityError> {
     let n = caps.len();
+    let v = &mut plan.v;
     let mut barrier = 0usize;
     for k in (1..n).rev() {
         let j = k;
@@ -421,7 +436,8 @@ fn reverse_brake_envelope(
         let disk = disk::disk_reach_v_rev(kin, v[k + 1], kin.length, tol)
             .ok_or(VelocityError::Diverged { line_no })?;
         let forward_ceiling = v[k];
-        v[k] = v[k].min(disk);
+        v[k] = v[k].min(disk.v);
+        plan.backward_rails[j] = disk.rail;
         if barrier == 0 && !(v[k] < forward_ceiling) {
             barrier = k;
         }
@@ -433,17 +449,18 @@ fn reverse_brake_envelope(
 fn check_entry_brake(
     moves: &[crate::Move],
     caps: &[MoveCaps],
-    v: &[f64],
+    plan: &mut SeamPlan,
     entry_v: f64,
     tol: f64,
 ) -> Result<(), VelocityError> {
     let entry_line_no = moves[0].source.start_line;
     let kin = &caps[0].kin;
     let entry_brake =
-        disk::disk_reach_v_rev(kin, v[1], kin.length, tol).ok_or(VelocityError::Diverged {
+        disk::disk_reach_v_rev(kin, plan.v[1], kin.length, tol).ok_or(VelocityError::Diverged {
             line_no: entry_line_no,
         })?;
-    if entry_v > entry_brake + tol * (1.0 + entry_brake) {
+    plan.backward_rails[0] = entry_brake.rail;
+    if entry_v > entry_brake.v + tol * (1.0 + entry_brake.v) {
         return Err(VelocityError::OverCommitted {
             line_no: entry_line_no,
         });
@@ -474,6 +491,8 @@ fn reconstruct_runs(
             .map(|j| disk::RunMember {
                 kin: &caps[j].kin,
                 exit_v: v[j + 1],
+                forward_rail: plan.forward_rails[j].as_ref(),
+                backward_rail: plan.backward_rails[j].as_ref(),
             })
             .collect();
         let run_start_line = moves[run_start].source.start_line;
