@@ -1074,32 +1074,67 @@ fn split_views_are_at_most_25ms_and_share_one_signal() {
     assert_eq!(views.last().unwrap().stream_t_end, 0.061);
 }
 
-#[test]
-fn split_views_absorb_a_final_sub_clock_tail() {
-    let duration = 2.0 * MAX_SPAN_SECS + 1e-10;
+fn split_hold(
+    t_start: f64,
+    duration: f64,
+    start_clock_exact: f64,
+) -> (ClockedMotorSpan, Vec<ClockedMotorSpan>) {
+    let t_end = t_start + duration;
     let signal = motor_span(
         ContinuousAxis::Hold {
             position: 4.0,
-            t_start: 0.0,
-            t_end: duration,
+            t_start,
+            t_end,
         },
-        0.0,
-        duration,
+        t_start,
+        t_end,
     );
     let clocked = ClockedMotorSpan::try_new(
         signal,
-        0.0,
-        duration,
+        t_start,
+        t_end,
         3.0,
         3.0 + duration,
-        500.25,
+        start_clock_exact,
         1_000_000.0,
     )
     .unwrap();
     let views = clocked.split_max_duration().unwrap();
-    assert_eq!(views.len(), 2);
-    assert_eq!(views.last().unwrap().stream_t_end, duration);
+    (clocked, views)
+}
+
+fn assert_views_tile_within_the_bound(clocked: &ClockedMotorSpan, views: &[ClockedMotorSpan]) {
+    for view in views {
+        let duration = view.stream_t_end - view.stream_t_start;
+        let representable = MAX_SPAN_SECS + 4.0 * f64::EPSILON * view.stream_t_end.abs().max(1.0);
+        assert!(
+            duration <= representable,
+            "a {duration} s view outran the {MAX_SPAN_SECS} s bound"
+        );
+    }
+    for pair in views.windows(2) {
+        assert_eq!(pair[0].stream_t_end, pair[1].stream_t_start);
+    }
+    assert_eq!(
+        views.first().unwrap().stream_t_start,
+        clocked.stream_t_start
+    );
+    assert_eq!(views.last().unwrap().stream_t_end, clocked.stream_t_end);
     assert_eq!(views.last().unwrap().end_clock, clocked.end_clock);
+}
+
+#[test]
+fn split_views_share_a_final_sub_clock_tail_with_the_view_before() {
+    let (clocked, views) = split_hold(0.0, 2.0 * MAX_SPAN_SECS + 1e-10, 500.25);
+    assert_eq!(views.len(), 3);
+    assert_views_tile_within_the_bound(&clocked, &views);
+}
+
+#[test]
+fn split_views_keep_the_bound_on_the_enqueue_fuzz_counterexample() {
+    let (clocked, views) = split_hold(0.0, 0.675_000_197_837_529_6, 500_000.0);
+    assert_eq!(views.len(), 28);
+    assert_views_tile_within_the_bound(&clocked, &views);
 }
 
 #[test]

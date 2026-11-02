@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 5b725ac63904fad6f9fd00e8f29d1eb0b52f8fcd7bd56219fc4a67bb2bfa58ef # shrinks to a 0.6750001978375296 s spline segment at 1 MHz whose last 25 ms view absorbed a 0.2-clock tail
