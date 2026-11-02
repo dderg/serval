@@ -1042,12 +1042,7 @@ fn fit_axis_targets(
             time_scale,
             fit_tol,
         );
-        plans.push(fit_plan_from_seeds(
-            seeds,
-            floors,
-            target.t_start,
-            target.t_end,
-        ));
+        plans.push(fit_plan_from_seeds(seeds, floors));
     }
     let jobs = plans
         .iter()
@@ -1081,7 +1076,6 @@ fn fit_axis_targets(
             RefineSpan {
                 t0: t_start,
                 t1: t_end,
-                depth: 0,
             },
             &SpanFitPolicy {
                 axis,
@@ -1089,7 +1083,6 @@ fn fit_axis_targets(
                 fit_context: "smooth_kernel_target",
                 velocity_budget: f64::INFINITY,
                 floors: plan.floors,
-                max_depth: plan.max_depth,
                 velocity_sign: VelocitySign::Unconstrained,
                 velocity_continuous,
             },
@@ -1985,7 +1978,6 @@ fn coalesce_degenerate_seeds(seeds: &mut Vec<f64>, minimum_span: f64) {
 struct FitPlan {
     seeds: Vec<f64>,
     floors: LadderFloors,
-    max_depth: u32,
 }
 
 fn fit_seed_times(
@@ -2017,19 +2009,9 @@ fn fit_seed_times(
     Ok(seeds)
 }
 
-fn fit_plan_from_seeds(
-    mut seeds: Vec<f64>,
-    floors: LadderFloors,
-    t_start: f64,
-    t_end: f64,
-) -> FitPlan {
+fn fit_plan_from_seeds(mut seeds: Vec<f64>, floors: LadderFloors) -> FitPlan {
     coalesce_degenerate_seeds(&mut seeds, floors.cubic);
-    let max_depth = libm::log2((t_end - t_start) / floors.cubic).ceil().max(0.0) as u32;
-    FitPlan {
-        seeds,
-        floors,
-        max_depth,
-    }
+    FitPlan { seeds, floors }
 }
 
 fn prepare_fit_plan<S: TrackSignal>(
@@ -2043,7 +2025,7 @@ fn prepare_fit_plan<S: TrackSignal>(
     let seeds = fit_seed_times(axis, t_start, t_end, seed_breakpoints)?;
     let time_scale = t_start.abs().max(t_end.abs());
     let floors = ladder_resolution_floor(sig, &seeds, time_scale, fit_tol);
-    Ok(fit_plan_from_seeds(seeds, floors, t_start, t_end))
+    Ok(fit_plan_from_seeds(seeds, floors))
 }
 
 fn fit_pieces_to_nurbs(
@@ -2095,7 +2077,6 @@ pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
         fit_context: fit.fit_context,
         velocity_budget: f64::INFINITY,
         floors: plan.floors,
-        max_depth: plan.max_depth,
         velocity_sign: VelocitySign::Unconstrained,
         velocity_continuous: fit.velocity_continuous,
     };
@@ -2107,7 +2088,6 @@ pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
             RefineSpan {
                 t0: span[0],
                 t1: span[1],
-                depth: 0,
             },
             &policy,
             SpanSeeds {
@@ -2251,18 +2231,15 @@ struct SpanFitPolicy {
     fit_context: &'static str,
     velocity_budget: f64,
     floors: LadderFloors,
-    max_depth: u32,
     velocity_sign: VelocitySign,
     velocity_continuous: bool,
 }
 
-/// One span of a refinement tree: its bounds and how deep the bisection
-/// already is.
+/// One span of a refinement tree: its bounds.
 #[derive(Clone, Copy)]
 struct RefineSpan {
     t0: f64,
     t1: f64,
-    depth: u32,
 }
 
 /// The partition seeds the refined span sits between, reported by a fit
@@ -2422,7 +2399,7 @@ fn refine_shaped_span<S: TrackSignal>(
     refinement_splits: &mut usize,
     out: &mut Vec<BezierPiece>,
 ) -> Result<(), PostProcessError> {
-    let RefineSpan { t0, t1, depth } = span;
+    let RefineSpan { t0, t1 } = span;
     let fit_tol = policy.fit_tol;
     let velocity_budget = policy.velocity_budget;
     let floors = policy.floors;
@@ -2432,16 +2409,12 @@ fn refine_shaped_span<S: TrackSignal>(
         return Ok(());
     }
     let tm = 0.5 * t0 + 0.5 * t1;
-    if t1 - t0 <= floors.cubic
-        || depth >= policy.max_depth
-        || *refinement_splits >= MAX_FIT_REFINEMENT_SPLITS
-        || tm <= t0
-        || tm >= t1
-    {
+    let at_resolution_floor = tm - t0 < floors.cubic || t1 - tm < floors.cubic;
+    if at_resolution_floor || *refinement_splits >= MAX_FIT_REFINEMENT_SPLITS {
         let failure = failure.expect("failed fit has no ladder diagnostic");
         if failure.error.position <= fit_tol.pos_mm
             && failure.error.velocity <= velocity_budget
-            && t1 - t0 <= floors.high_degree
+            && (at_resolution_floor || t1 - t0 <= floors.high_degree)
             && sig
                 .acceleration_monotonicity(next_toward(t0, t1), next_toward(t1, t0))
                 .is_none()
@@ -2486,11 +2459,7 @@ fn refine_shaped_span<S: TrackSignal>(
     *refinement_splits += 1;
     refine_shaped_span(
         sig,
-        RefineSpan {
-            t0,
-            t1: tm,
-            depth: depth + 1,
-        },
+        RefineSpan { t0, t1: tm },
         policy,
         seeds,
         refinement_splits,
@@ -2498,11 +2467,7 @@ fn refine_shaped_span<S: TrackSignal>(
     )?;
     refine_shaped_span(
         sig,
-        RefineSpan {
-            t0: tm,
-            t1,
-            depth: depth + 1,
-        },
+        RefineSpan { t0: tm, t1 },
         policy,
         seeds,
         refinement_splits,
@@ -2891,3 +2856,7 @@ pub(crate) fn apply_derivative_gains_to_track(
 #[cfg(test)]
 #[path = "shaper_moment_tests.rs"]
 mod shaper_moment_tests;
+
+#[cfg(test)]
+#[path = "shaper_refinement_tests.rs"]
+mod shaper_refinement_tests;
