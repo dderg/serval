@@ -742,6 +742,26 @@ fn default_axis_snapshot_params() -> SnapshotParams {
     }
 }
 
+/// The smoothing kernel a follower advance needs after it.
+fn follower_smoothing() -> planner_config::PostProcessorDecl {
+    pp("st", "smooth_triangle", &[("smooth_time", 0.01)])
+}
+
+#[test]
+fn a_follower_advance_without_a_smoothing_kernel_is_refused_at_configuration() {
+    let mut params = default_axis_snapshot_params();
+    let mut e = axis("e", &["x", "y", "z"]);
+    e.post_processors = vec!["pa".to_string()];
+    params.axis_decls = vec![e];
+    params.post_processor_decls = vec![pp("pa", "linear_pressure_advance", &[("k", 0.04)])];
+    let refused = pipeline_snapshot(&square_waypoints(), params);
+    assert!(
+        matches!(&refused, Err(SnapshotError::InvalidChain(message)) if message.contains("no smoothing kernel")),
+        "a follower advance with no kernel must be refused before planning, got {:?}",
+        refused.map(|_| ())
+    );
+}
+
 fn axis(name: &str, follows: &[&str]) -> planner_config::AxisDecl {
     planner_config::AxisDecl {
         name: name.into(),
@@ -773,18 +793,18 @@ fn declaring_only_the_e_axis_still_defaults_x_y_z() {
     // the default topology.
     let mut params = default_axis_snapshot_params();
     let mut e = axis("e", &["x", "y", "z"]);
-    e.post_processors = vec!["pa".to_string()];
+    e.post_processors = vec!["pa".to_string(), "st".to_string()];
     params.axis_decls = vec![e];
-    params.post_processor_decls = vec![pp("pa", "linear_pressure_advance", &[("k", 0.04)])];
+    params.post_processor_decls = vec![
+        pp("pa", "linear_pressure_advance", &[("k", 0.04)]),
+        pp("st", "smooth_triangle", &[("smooth_time", 0.01)]),
+    ];
     let snap = pipeline_snapshot(&square_waypoints(), params).unwrap();
     assert!(!snap.trajectory.rows(0).is_empty());
 }
 
 #[test]
 fn all_post_processor_types_are_reachable() {
-    // Kernels attach to a spatial axis; a bare derivative-gain stage is only
-    // legal off the leader axes (pre-kernel gains on leaders are rejected),
-    // so linear_pressure_advance rides the e follower, its natural home.
     for (ty, params, axis_name) in [
         ("smooth_bell", [("smooth_time", 0.0200625)].as_slice(), "x"),
         ("smooth_triangle", [("smooth_time", 0.02)].as_slice(), "x"),
@@ -818,8 +838,12 @@ fn all_post_processor_types_are_reachable() {
             _ => axis("e", &["x", "y", "z"]),
         };
         carrier.post_processors = vec!["pp".to_string()];
-        params_snap.axis_decls = vec![carrier];
         params_snap.post_processor_decls = vec![pp("pp", ty, params)];
+        if axis_name == "e" {
+            carrier.post_processors.push("st".to_string());
+            params_snap.post_processor_decls.push(follower_smoothing());
+        }
+        params_snap.axis_decls = vec![carrier];
         pipeline_snapshot(&square_waypoints(), params_snap)
             .unwrap_or_else(|e| panic!("post-processor type '{ty}' should compile: {e}"));
     }
@@ -888,9 +912,12 @@ fn linear_advance_speed_ramp_never_retracts() {
     ];
     let mut params = default_axis_snapshot_params();
     let mut e = axis("e", &["x", "y", "z"]);
-    e.post_processors = vec!["pa".to_string()];
+    e.post_processors = vec!["pa".to_string(), "st".to_string()];
     params.axis_decls = vec![e];
-    params.post_processor_decls = vec![pp("pa", "linear_pressure_advance", &[("k", 0.03)])];
+    params.post_processor_decls = vec![
+        pp("pa", "linear_pressure_advance", &[("k", 0.03)]),
+        follower_smoothing(),
+    ];
     let snap = pipeline_snapshot(&waypoints, params).unwrap();
     let rows = snap.trajectory.rows(3);
     let decel_to_rest_start = 5.82;
@@ -924,17 +951,20 @@ fn reciprocal_advance_handles_a_fast_corner_endpoint_transition() {
     ];
     let mut params = default_axis_snapshot_params();
     let mut e = axis("e", &["x", "y", "z"]);
-    e.post_processors = vec!["pa".to_string()];
+    e.post_processors = vec!["pa".to_string(), "st".to_string()];
     params.axis_decls = vec![e];
-    params.post_processor_decls = vec![pp(
-        "pa",
-        "recipr_pressure_advance",
-        &[
-            ("linear_advance", 0.0),
-            ("nonlinear_offset", 0.06),
-            ("linearization_velocity", 2.0),
-        ],
-    )];
+    params.post_processor_decls = vec![
+        pp(
+            "pa",
+            "recipr_pressure_advance",
+            &[
+                ("linear_advance", 0.0),
+                ("nonlinear_offset", 0.06),
+                ("linearization_velocity", 2.0),
+            ],
+        ),
+        follower_smoothing(),
+    ];
     pipeline_snapshot(&waypoints, params)
         .expect("a sub-resolution reciprocal transition must not fail the snapshot");
 }
@@ -1216,4 +1246,115 @@ fn default_gcode_circle_loops_stay_concentric_across_corner_deviation() {
             radii_per_cd[0]
         );
     }
+}
+
+fn shaped_follower_params(e_chain: &[planner_config::PostProcessorDecl]) -> SnapshotParams {
+    let mut params = default_axis_snapshot_params();
+    params.max_velocity = 1000.0;
+    params.max_accel = 10_000.0;
+    params.corner_deviation = 0.21;
+    let mut x = axis("x", &[]);
+    x.post_processors = vec!["shx".to_string()];
+    let mut y = axis("y", &[]);
+    y.post_processors = vec!["shy".to_string()];
+    let mut e = axis("e", &["x", "y", "z"]);
+    e.post_processors = e_chain.iter().map(|decl| decl.name.clone()).collect();
+    params.axis_decls = vec![x, y, e];
+    params.post_processor_decls = vec![
+        pp("shx", "smooth_mzv", &[("frequency_hz", 50.0)]),
+        pp("shy", "smooth_zv", &[("frequency_hz", 44.0)]),
+    ];
+    params.post_processor_decls.extend_from_slice(e_chain);
+    params
+}
+
+fn tanh_advance() -> planner_config::PostProcessorDecl {
+    pp(
+        "pa",
+        "tanh_pressure_advance",
+        &[
+            ("linear_advance", 0.02),
+            ("nonlinear_offset", 0.05),
+            ("linearization_velocity", 20.0),
+        ],
+    )
+}
+
+fn triangle_smoothing() -> planner_config::PostProcessorDecl {
+    pp("st", "smooth_triangle", &[("smooth_time", 0.04)])
+}
+
+const PERIMETER_RATIO: f64 = 0.0333;
+
+/// A 20 mm square perimeter at 150 mm/s, entered from `entry` and left
+/// along its last side; `flow` scales each side's extrusion.
+fn perimeter_waypoints(entry: &[(f64, f64)], flow: [f64; 4]) -> Vec<waypoints::Waypoint> {
+    let mut e = 0.0;
+    let mut waypoints = vec![(0.0, 0.0, 0.0, 0.0, 150.0, 10_000.0)];
+    waypoints.extend(entry.iter().map(|&(x, y)| (x, y, 0.0, e, 150.0, 10_000.0)));
+    for ((x, y), scale) in [(40.0, 20.0), (40.0, 40.0), (20.0, 40.0), (20.0, 20.0)]
+        .into_iter()
+        .zip(flow)
+    {
+        e += PERIMETER_RATIO * 20.0 * scale;
+        waypoints.push((x, y, 0.0, e, 150.0, 10_000.0));
+    }
+    waypoints
+}
+
+fn extruder_snapshot(
+    waypoints: &[waypoints::Waypoint],
+    e_chain: &[planner_config::PostProcessorDecl],
+) -> Snapshot {
+    pipeline_snapshot(waypoints, shaped_follower_params(e_chain)).expect("snapshot")
+}
+
+fn final_extruder_position(snap: &Snapshot) -> f64 {
+    position(&snap.trajectory, EXTRUDER_AXIS, snap.trajectory.t_end())
+}
+
+/// A perimeter entered and left at speed with one side at 1.5x flow: four
+/// extrusion-ratio steps taken while the toolhead moves.
+fn perimeter_with_ratio_steps_at_speed() -> Vec<waypoints::Waypoint> {
+    let mut waypoints = perimeter_waypoints(&[(10.0, 10.0), (20.0, 20.0)], [1.0, 1.5, 1.0, 1.0]);
+    let e = waypoints.last().expect("perimeter").3;
+    waypoints.push((20.0, 5.0, 0.0, e, 150.0, 10_000.0));
+    waypoints
+}
+
+#[test]
+fn an_advance_before_a_kernel_carries_its_ratio_steps_into_the_smoothing() {
+    let waypoints = perimeter_with_ratio_steps_at_speed();
+    let unadvanced =
+        final_extruder_position(&extruder_snapshot(&waypoints, &[triangle_smoothing()]));
+    let snap = extruder_snapshot(&waypoints, &[tanh_advance(), triangle_smoothing()]);
+    let advanced = final_extruder_position(&snap);
+    assert!(
+        (advanced - unadvanced).abs() < 1e-6,
+        "the advance vanishes at rest, so it must not change the extruded total: \
+         {advanced} mm with advance, {unadvanced} mm without"
+    );
+    assert!(
+        snap.seam_max_dp[EXTRUDER_AXIS] < 1e-9,
+        "the kernel must smooth the advance's ratio steps, yet the extruder track steps by \
+         {} mm at a seam",
+        snap.seam_max_dp[EXTRUDER_AXIS]
+    );
+}
+
+#[test]
+fn a_wipe_retract_before_a_kernel_conserves_extrusion() {
+    let mut waypoints = perimeter_waypoints(&[(10.0, 10.0), (20.0, 20.0)], [1.0; 4]);
+    let e = waypoints.last().expect("perimeter").3;
+    waypoints.push((20.0, 10.0, 0.0, e - 0.8, 150.0, 10_000.0));
+    waypoints.push((10.0, 5.0, 0.0, e - 0.8, 150.0, 10_000.0));
+    let unadvanced =
+        final_extruder_position(&extruder_snapshot(&waypoints, &[triangle_smoothing()]));
+    let snap = extruder_snapshot(&waypoints, &[tanh_advance(), triangle_smoothing()]);
+    let advanced = final_extruder_position(&snap);
+    assert!(
+        (advanced - unadvanced).abs() < 1e-6,
+        "a retract wiped along the path steps the ratio negative at speed; the advance \
+         must still leave the total alone: {advanced} mm with advance, {unadvanced} mm without"
+    );
 }

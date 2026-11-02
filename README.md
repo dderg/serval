@@ -137,7 +137,7 @@ z_motors: z
 [axis e]
 follows: x, y, z
 motors: extruder
-post_processors: pa
+post_processors: pa, e_smooth
 ```
 
 - **A follower axis pays out its commanded displacement** in proportion to
@@ -172,6 +172,10 @@ frequency_hz: 43
 type: linear_pressure_advance
 k: 0.045
 
+[post_processor e_smooth]
+type: smooth_triangle
+smooth_time: 0.005
+
 [axis x]
 post_processors: smooth
 
@@ -180,7 +184,7 @@ post_processors: is
 
 [axis e]
 follows: x, y, z
-post_processors: pa
+post_processors: pa, e_smooth
 ```
 
 Eight types exist today (registry: `rust/trajectory/src/algos/mod.rs`):
@@ -201,6 +205,14 @@ Eight types exist today (registry: `rust/trajectory/src/algos/mod.rs`):
   commanded advance stops growing once flow is past the linearization
   velocity. The nozzle pressure response flattens there and a purely
   linear model over-advances.
+- **A follower's advance needs a smoothing kernel in its chain.** Pressure
+  advance turns every extrusion-ratio change taken at speed — travel to
+  extrusion, a flow change, a wipe — into an instant position step the
+  extruder cannot make. A kernel in the same chain smooths it; without one
+  the config compiler rejects the chain. Keep the kernel short: the
+  follower already tracks the shaped toolhead exactly, and every
+  millisecond of extruder smoothing blurs flow against nozzle speed at
+  corners.
 - **`mode_inverse` needs a preceding kernel.** It makes the toolhead
   follow the nominal path with the residual scaling with model error, and
   must be preceded by a short smoothing kernel; the config compiler
