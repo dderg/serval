@@ -714,23 +714,27 @@ def compare(
     if audits[1] is not None:
         snapshot_names = set(head_meta)
         extra = {}
-        for name in set(audits[1]) - snapshot_names:
-            before, after = (
-                worst_audit(audits[0], name),
-                worst_audit(audits[1], name),
-            )
-            assert after is not None, f"{name} vanished from the head audit"
-            extra[name] = {"base": before, "head": after}
-            regressed = any(
-                after[k] > 1.0 and before is not None and before[k] <= 1.0
-                for k in ("accel", "position")
-            )
-            if regressed:
-                review = Review(name, verdict="REGRESSION")
-                review.regressions.append(
-                    f"fit audit over tolerance: {after} (base {before})"
-                )
-                review.metrics["fit_audit"] = extra[name]
+        for name in sorted(set(audits[1]) - snapshot_names):
+            base_rows = (audits[0] or {}).get(name, {})
+            head_rows = audits[1][name]
+            extra[name] = {"base": base_rows, "head": head_rows}
+            review = Review(name)
+            review.metrics["fit_audit"] = extra[name]
+            for row, after in sorted(head_rows.items()):
+                before = base_rows.get(row)
+                for key in ("accel", "position"):
+                    was = before[key] if before else 0.0
+                    now = after[key]
+                    message = f"{row} {key} {was:.3g}x -> {now:.3g}x"
+                    if now > 1.0 and was <= 1.0 and audits[0] is not None:
+                        review.regressions.append(f"fit audit {message}")
+                    elif now > 1.0 and now > was * AUDIT_GROWTH:
+                        review.suspicions.append(f"fit audit {message}")
+            if review.regressions:
+                review.verdict = "REGRESSION"
+            elif review.suspicions:
+                review.verdict = "SUSPICIOUS"
+            if review.regressions or review.suspicions:
                 reviews.append(review)
         summary["audited_outside_snapshots"] = extra
     return reviews, summary
