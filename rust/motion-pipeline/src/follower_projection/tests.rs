@@ -4,6 +4,7 @@ use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 use trajectory::{ContinuousAxis, ContinuousSegment};
 
 use super::{FollowerSignal, FollowerState, integrate};
+use crate::shaper::TrackSignal;
 
 /// Regression for the bench crash "shaper: axis 3: shaped sample is
 /// non-finite": deep into a long stream the odometer's ulp exceeds
@@ -89,7 +90,15 @@ fn incremental_arc_cache_matches_direct_integration_in_any_query_order() {
     };
     let raw = shaped.clone();
     let state = FollowerState::default();
-    let sig = FollowerSignal::new(&shaped, &raw, 3, &[0, 1], &state, 0.0, 0.0);
+    let sig = FollowerSignal::new(
+        &shaped,
+        &raw,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
     for fraction in [0.85_f64, 0.15, 0.65, 0.35, 0.95, 0.05, 0.5, 0.15] {
         let t = fraction.mul_add(t1 - t0, t0);
         let expected = integrate(&|u| sig.shaped_speed(u), t0, t);
@@ -150,6 +159,7 @@ fn follower_advance_fits_the_transformed_acceleration() {
                 leaders: &[0, 1],
                 state: &state,
                 s_start: 0.0,
+                s_length: super::leader_arc_length(&shaped, &[0, 1]),
             },
             crate::lowering::FitTol {
                 pos_mm: 5e-5,
@@ -189,8 +199,16 @@ fn leader_velocity_sign_change_is_seeded_as_a_construction_breakpoint() {
     let shaped = cusp_segment(vec![1.0, -16.0, 1_000.0], vec![2.0, 1e-3], t0, t1);
     let raw = shaped.clone();
     let state = FollowerState::default();
-    let sig = FollowerSignal::new(&shaped, &raw, 3, &[0, 1], &state, 0.0, 0.0);
-    let breaks = sig.construction_breakpoints(&raw.axes[3]).fit_seeds;
+    let sig = FollowerSignal::new(
+        &shaped,
+        &raw,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    let breaks = sig.construction_breakpoints(&raw.axes[3], 50.0).fit_seeds;
     let vx = |t: f64| super::axis_pva(&shaped.axes[0], t).1;
     let seeded = breaks
         .iter()
@@ -213,8 +231,16 @@ fn endpoint_velocity_zero_dedups_against_the_support_grid() {
     let shaped = cusp_segment(vec![1.0, 0.0, 1_000.0], vec![2.0, 1e-3], t0, t1);
     let raw = shaped.clone();
     let state = FollowerState::default();
-    let sig = FollowerSignal::new(&shaped, &raw, 3, &[0, 1], &state, 0.0, 0.0);
-    let breaks = sig.construction_breakpoints(&raw.axes[3]).fit_seeds;
+    let sig = FollowerSignal::new(
+        &shaped,
+        &raw,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    let breaks = sig.construction_breakpoints(&raw.axes[3], 50.0).fit_seeds;
     assert_eq!(
         super::axis_pva(&shaped.axes[0], t0).1,
         0.0,
@@ -222,4 +248,267 @@ fn endpoint_velocity_zero_dedups_against_the_support_grid() {
     );
     let at_start = breaks.iter().filter(|&&t| (t - t0).abs() <= 1e-12).count();
     assert_eq!(at_start, 1, "endpoint root duplicated in {breaks:?}");
+}
+
+#[test]
+#[should_panic(expected = "beyond the")]
+fn an_ingested_length_off_by_more_than_leaf_reordering_panics() {
+    let shaped = cusp_segment(vec![0.0, 10.0], vec![0.0, 0.0, 500.0], 0.0, 0.02);
+    let state = FollowerState::default();
+    let mut odometer = odometer_from_start(&shaped);
+    odometer.length += 1e-9;
+    FollowerSignal::new(&shaped, &shaped, 3, &[0, 1], &state, odometer, 0.0);
+}
+
+#[test]
+#[should_panic(expected = "stand still")]
+fn still_leaders_under_an_ingested_length_panic() {
+    let shaped = cusp_segment(vec![1.0], vec![2.0], 0.0, 0.02);
+    let state = FollowerState::default();
+    let odometer = super::Odometer {
+        start: 0.0,
+        length: 1e-12,
+    };
+    FollowerSignal::new(&shaped, &shaped, 3, &[0, 1], &state, odometer, 0.0);
+}
+
+#[test]
+fn a_rescaled_odometer_carries_its_scale_into_every_derivative() {
+    let shaped = cusp_segment(vec![0.0, 10.0], vec![0.0, 0.0, 500.0], 0.0, 0.02);
+    let mut state = FollowerState::default();
+    state.push_span(1.0, 0.05, 0.09);
+    let mut sig = FollowerSignal::new(
+        &shaped,
+        &shaped,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    sig.odometer_scale = 0.5;
+    let step = 1e-5;
+    let central = |before: f64, after: f64| (after - before) / (2.0 * step);
+    let assert_close = |label: &str, t: f64, exact: f64, difference: f64| {
+        assert!(
+            (exact - difference).abs() <= 1e-4 * exact.abs().max(1.0),
+            "{label} at {t}: {exact} but the central difference is {difference}"
+        );
+    };
+    for index in 1..20 {
+        let t = f64::from(index) * 0.001;
+        let (_, velocity, acceleration) = sig.eval_pva(t);
+        let before = sig.eval_pva(t - step);
+        let after = sig.eval_pva(t + step);
+        assert_close("velocity", t, velocity, central(before.0, after.0));
+        assert_close("acceleration", t, acceleration, central(before.1, after.1));
+        assert_close("jerk", t, sig.jerk(t), central(before.2, after.2));
+        assert_close("deriv", t, sig.deriv(t), velocity);
+        assert_close("second_deriv", t, sig.second_deriv(t), acceleration);
+    }
+}
+
+fn odometer_from_start(shaped: &ContinuousSegment) -> super::Odometer {
+    super::Odometer {
+        start: 0.0,
+        length: super::leader_arc_length(shaped, &[0, 1]),
+    }
+}
+
+const SEAM_PIECE_S: f64 = 0.01;
+
+fn velocity_seam_segment(pieces: usize, seam_velocity_jump: f64) -> ContinuousSegment {
+    let knot = |index: usize| 2.0 + index as f64 * SEAM_PIECE_S;
+    let (t0, t1) = (knot(0), knot(pieces));
+    let mut coeffs = vec![150.0, 100.0, 2_000.0, -30_000.0];
+    let mut x_pieces = Vec::with_capacity(pieces);
+    for index in 0..pieces {
+        let (u_start, u_end) = (knot(index), knot(index + 1));
+        let (position, velocity, acceleration) = super::polynomial_pva(&coeffs, u_end - u_start);
+        let next = vec![
+            position,
+            velocity + seam_velocity_jump,
+            0.5 * acceleration,
+            -coeffs[3],
+        ];
+        x_pieces.push(BezierPiece {
+            u_start,
+            u_end,
+            coeffs: std::mem::replace(&mut coeffs, next),
+        });
+    }
+    let x = bezier_pieces_to_nurbs(&x_pieces);
+    let piece = |coeffs| {
+        bezier_pieces_to_nurbs(&[BezierPiece {
+            u_start: t0,
+            u_end: t1,
+            coeffs,
+        }])
+    };
+    let held = Arc::new(piece(vec![0.0]));
+    ContinuousSegment {
+        axes: Arc::from([
+            ContinuousAxis::Spline(Arc::new(x)),
+            ContinuousAxis::Spline(Arc::new(piece(vec![157.0, -40.0, 3_000.0]))),
+            ContinuousAxis::Spline(Arc::clone(&held)),
+            ContinuousAxis::Spline(held),
+        ]),
+        followers: Arc::from([]),
+        spatial_path: true,
+        t_start: t0,
+        t_end: t1,
+        motor_mask: 0,
+        source_line: 1,
+        rest_at_end: false,
+    }
+}
+
+#[test]
+fn follower_odometer_measures_the_ingested_arc_across_a_velocity_seam() {
+    let shaped = velocity_seam_segment(8, 1e-6);
+    let state = FollowerState::default();
+    let sig = FollowerSignal::new(
+        &shaped,
+        &shaped,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    let ingested = super::leader_arc_length(&shaped, &[0, 1]);
+    let measured = sig.s_end() - sig.s_start;
+    assert!(
+        (measured - ingested).abs() <= super::span_alignment_envelope(ingested),
+        "follower odometer {measured} drifted from the ingested span length {ingested}"
+    );
+}
+
+#[test]
+fn follower_jerk_is_the_derivative_of_its_acceleration() {
+    let shaped = cusp_segment(
+        vec![0.0, 0.0, 5000.0, -20000.0],
+        vec![0.0, 0.0, 0.0, 3000.0],
+        0.0,
+        0.05,
+    );
+    let mut state = FollowerState::default();
+    state.push_span(10.0, 0.05, 0.09);
+    let sig = FollowerSignal::new(
+        &shaped,
+        &shaped,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    let step = 1e-7;
+    for index in 1..50 {
+        let t = 0.001 * f64::from(index);
+        let expected = (sig.eval_pva(t + step).2 - sig.eval_pva(t - step).2) / (2.0 * step);
+        let jerk = sig.jerk(t);
+        assert!(
+            (jerk - expected).abs() <= 1e-4 * expected.abs().max(1e3),
+            "follower jerk at t={t} is {jerk}, its acceleration's derivative {expected}"
+        );
+    }
+}
+
+fn window_step(t: f64, step_mm: f64) -> super::AdvanceStep {
+    super::AdvanceStep {
+        t,
+        velocity_before: 0.0,
+        velocity_after: 0.0,
+        step_mm,
+    }
+}
+
+fn piece_value(pieces: &[BezierPiece], t: f64) -> f64 {
+    let piece = pieces
+        .iter()
+        .rev()
+        .find(|piece| piece.u_start <= t)
+        .expect("t inside the pieces");
+    let tau = t - piece.u_start;
+    piece.coeffs.iter().rev().fold(0.0, |acc, &c| acc * tau + c)
+}
+
+#[test]
+fn a_window_step_inside_a_piece_splits_it_and_raises_what_follows() {
+    let pieces = vec![
+        BezierPiece {
+            u_start: 0.0,
+            u_end: 1.0,
+            coeffs: vec![1.0, 2.0, -3.0, 0.5],
+        },
+        BezierPiece {
+            u_start: 1.0,
+            u_end: 2.0,
+            coeffs: vec![0.5, 0.5, 1.5, -0.5],
+        },
+    ];
+    let steps = [window_step(0.25, 0.1), window_step(1.0, -0.2)];
+    let mut steps_at = Vec::new();
+    let stepped = super::with_window_steps(pieces.clone(), &steps, 10.0, &mut steps_at);
+    assert_eq!(
+        stepped
+            .iter()
+            .map(|piece| (piece.u_start, piece.u_end))
+            .collect::<Vec<_>>(),
+        vec![(0.0, 0.25), (0.25, 1.0), (1.0, 2.0)],
+        "the step inside the first piece must split it at its own time"
+    );
+    assert_eq!(steps_at, vec![(0.25, 0.1), (1.0, -0.2)]);
+    for (t, raised) in [
+        (0.1, 10.0),
+        (0.25, 10.1),
+        (0.7, 10.1),
+        (1.0, 9.9),
+        (1.6, 9.9),
+    ] {
+        let expected = piece_value(&pieces, t) + raised;
+        let got = piece_value(&stepped, t);
+        assert!(
+            (got - expected).abs() < 1e-12,
+            "at t={t} the stepped pieces read {got}, the source raised by {raised} {expected}"
+        );
+    }
+}
+
+#[test]
+fn a_leader_acceleration_seam_is_seeded_as_a_construction_breakpoint() {
+    let (t0, seam, t1) = (300.0, 300.01, 300.02);
+    let x = bezier_pieces_to_nurbs(&[
+        BezierPiece {
+            u_start: t0,
+            u_end: seam,
+            coeffs: vec![0.0, 100.0, 0.0],
+        },
+        BezierPiece {
+            u_start: seam,
+            u_end: t1,
+            coeffs: vec![1.0, 100.0, 2_500.0],
+        },
+    ]);
+    let mut shaped = cusp_segment(vec![0.0, 100.0], vec![0.0, 50.0], t0, t1);
+    Arc::make_mut(&mut shaped.axes)[0] = ContinuousAxis::Spline(Arc::new(x));
+    let raw = shaped.clone();
+    let mut state = FollowerState::default();
+    state.push_span(10.0, 0.05, 0.05);
+    let sig = FollowerSignal::new(
+        &shaped,
+        &raw,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    let seeds = sig.construction_breakpoints(&raw.axes[3], 50.0).fit_seeds;
+    assert!(
+        seeds.iter().any(|&t| (t - seam).abs() <= 1e-12),
+        "the leader's acceleration jumps from 0 to 5000 mm/s² at {seam}, so the follower's \
+         does too, yet the fit seeds {seeds:?} straddle it"
+    );
 }

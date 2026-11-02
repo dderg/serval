@@ -128,6 +128,7 @@ pub fn trajectory::chain::AxisChainSet::forward_support(&self) -> f64
 pub fn trajectory::chain::AxisChainSet::has_motor_side_stages(&self) -> bool
 pub fn trajectory::chain::AxisChainSet::has_own_kernel(&self, usize) -> bool
 pub fn trajectory::chain::AxisChainSet::is_projected_follower(&self, usize) -> bool
+pub fn trajectory::chain::AxisChainSet::kernel_free_follower_transform(&self) -> core::option::Option<usize>
 pub fn trajectory::chain::AxisChainSet::leaders_support(&self, usize) -> (f64, f64)
 pub fn trajectory::chain::AxisChainSet::max_follower_own_forward_support(&self) -> f64
 pub fn trajectory::chain::AxisChainSet::n_axes(&self) -> usize
@@ -170,6 +171,7 @@ pub fn trajectory::chain::PostProcessorInstance::validate(&self) -> core::result
 pub struct trajectory::chain::RestSupport
 pub trajectory::chain::RestSupport::after_motion: f64
 pub trajectory::chain::RestSupport::before_motion: f64
+pub const trajectory::chain::FOLLOWER_TRANSFORM_WITHOUT_KERNEL: &str
 pub mod trajectory::continuous
 pub enum trajectory::continuous::ContinuousAxis
 pub trajectory::continuous::ContinuousAxis::Analytic
@@ -530,6 +532,7 @@ pub fn trajectory::chain::AxisChainSet::forward_support(&self) -> f64
 pub fn trajectory::chain::AxisChainSet::has_motor_side_stages(&self) -> bool
 pub fn trajectory::chain::AxisChainSet::has_own_kernel(&self, usize) -> bool
 pub fn trajectory::chain::AxisChainSet::is_projected_follower(&self, usize) -> bool
+pub fn trajectory::chain::AxisChainSet::kernel_free_follower_transform(&self) -> core::option::Option<usize>
 pub fn trajectory::chain::AxisChainSet::leaders_support(&self, usize) -> (f64, f64)
 pub fn trajectory::chain::AxisChainSet::max_follower_own_forward_support(&self) -> f64
 pub fn trajectory::chain::AxisChainSet::n_axes(&self) -> usize
@@ -701,6 +704,7 @@ pub fn trajectory::ShapedSignal<'a, F>::eval_pva(&self, f64) -> (f64, f64, f64)
 pub fn trajectory::ShapedSignal<'a, F>::new_from_evaluator(&'a nurbs::algebra::PiecewisePolynomialKernel, F, alloc::vec::Vec<f64>, usize) -> Self
 pub fn trajectory::ShapedSignal<'a, F>::new_from_polynomial_evaluator<M>(&'a nurbs::algebra::PiecewisePolynomialKernel, F, alloc::vec::Vec<f64>, usize, M, alloc::vec::Vec<(f64, f64, f64)>) -> Self where M: core::ops::function::Fn(f64, f64, usize, f64, [&mut [f64]; 3]) -> bool + 'a
 pub fn trajectory::ShapedSignal<'a, F>::second_deriv(&self, f64) -> f64
+pub const trajectory::FOLLOWER_TRANSFORM_WITHOUT_KERNEL: &str
 pub const trajectory::MAX_SPAN_SECS: f64
 pub const trajectory::SMOOTH_MZV_DURATION_PER_HZ: f64
 pub const trajectory::SMOOTH_ZV_DURATION_PER_HZ: f64
