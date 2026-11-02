@@ -2976,6 +2976,15 @@ struct ErrorSample {
 
 impl ErrorSample {
     fn hermite_curvature_peak_to(self, right: Self) -> f64 {
+        let ends = self
+            .curvature_per_u2
+            .abs()
+            .max(right.curvature_per_u2.abs());
+        self.hermite_curvature_vertex_to(right)
+            .map_or(ends, |(_, vertex)| ends.max(vertex))
+    }
+
+    fn hermite_curvature_vertex_to(self, right: Self) -> Option<(f64, f64)> {
         let width = right.position.u - self.position.u;
         let (f0, f1) = (
             self.position.slope_per_u * width,
@@ -2988,13 +2997,12 @@ impl ErrorSample {
         let c2 = 3.0 * (f1 - f0) - 2.0 * g0 - g1;
         let c3 = 2.0 * (f0 - f1) + g0 + g1;
         let vertex = -c2 / (3.0 * c3);
-        let ends = g0.abs().max(g1.abs());
-        let peak = if c3 != 0.0 && (0.0..=1.0).contains(&vertex) {
-            ends.max((g0 + vertex * (2.0 * c2 + 3.0 * c3 * vertex)).abs())
-        } else {
-            ends
-        };
-        peak / (width * width)
+        (c3 != 0.0 && (0.0..=1.0).contains(&vertex)).then(|| {
+            (
+                nurbs::fmadd(vertex, width, self.position.u),
+                (g0 + vertex * (2.0 * c2 + 3.0 * c3 * vertex)).abs() / (width * width),
+            )
+        })
     }
 }
 
@@ -3111,12 +3119,16 @@ impl<S: TrackSignal> RungWitness<'_, S> {
         truth: &SpanTruth,
         knots: &[f64],
     ) -> Result<Option<f64>, PostProcessError> {
-        let probe = |index: usize| {
+        let samples: [ErrorSample; LADDER_PROBES_U.len()] = std::array::from_fn(|index| {
             self.sample(
                 LADDER_PROBES_U[index],
                 (truth.pos[index], truth.vel[index], truth.acc[index]),
             )
-        };
+        });
+        if let Some(u) = self.over_probe_interpolant(&samples)? {
+            return Ok(Some(u));
+        }
+        let probe = |index: usize| samples[index];
         let half_span = 0.5 * self.h;
         let mut knots = knots
             .iter()
@@ -3176,7 +3188,14 @@ impl<S: TrackSignal> RungWitness<'_, S> {
         depth: u32,
     ) -> Result<Option<f64>, PostProcessError> {
         if left.hermite_curvature_peak_to(right) <= self.curvature_budget() {
-            return Ok(None);
+            return match left.hermite_curvature_vertex_to(right) {
+                Some((u, vertex))
+                    if vertex > INTERPOLANT_SUSPICION_SHARE * self.curvature_budget() =>
+                {
+                    Ok((!self.within(self.exact_sample_at(u)?)).then_some(u))
+                }
+                _ => Ok(None),
+            };
         }
         let u = 0.5 * (left.position.u + right.position.u);
         let mid = self.exact_sample_at(u)?;
