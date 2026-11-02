@@ -1394,6 +1394,9 @@ fn fit_columns(
     targets: &[ContinuousSegment],
     columns: &[FitColumn],
 ) -> Vec<TimedColumn> {
+    if columns.is_empty() {
+        return Vec::new();
+    }
     let parallel = cfg!(not(target_arch = "wasm32")) && columns.len() > 1 && !targets.is_empty();
     let target_workers = if cfg!(target_arch = "wasm32") || targets.len() < 4 {
         1
