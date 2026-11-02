@@ -2493,6 +2493,7 @@ damping_ratio: 0.7
 </code></pre></div>
 
 <p>Attach a named post-processor to an axis with <code>post_processors: name1, name2</code>. The fork has ZV, MZV, bell, and triangle smoothing kernels; it does not provide an EI-family input-shaper type.</p>
+<p>To judge an extruder chain (pressure advance plus its smoothing kernel) before printing, run <code>python3 tools/corner_flow.py printer.cfg</code>: it reports bead over- and under-fill at standard corners, flow changes and travel transitions, and accepts <code>--sweep smooth_time=...</code> and <code>--set name.param=value</code>. See <a href="https://github.com/KalicoCrew/kalico//blob/main/README.md#evaluating-an-extruder-chain">Evaluating an extruder chain</a> for how to read it.</p>
 <h2 id="extruder"><code>[extruder]</code><a class="headerlink" href="#extruder" title="Permanent link">&para;</a></h2>
 <p>The motion-owned portion of <code>[extruder]</code> is limited to the axis association and extrude-only caps. Heater, thermistor, and other extruder options remain mainline Klipper options and are outside this motion reference.</p>
 <div class="highlight"><pre><span></span><code>[extruder]
