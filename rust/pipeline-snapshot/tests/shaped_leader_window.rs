@@ -66,3 +66,57 @@ fn dense_top_layer_shapes_with_an_unkerneled_extruder() {
         pipeline_snapshot(&waypoints, bench_shapers_with_unkerneled_e()).expect("snapshot");
     assert!(snapshot.traversal_time_s > 0.0);
 }
+
+fn neptune_discontinuity_with_tanh_advance(
+    extrude_only: Option<(f64, f64)>,
+) -> (Vec<pipeline_snapshot::waypoints::Waypoint>, SnapshotParams) {
+    let path = format!(
+        "{}/../../snapshots/cases/neptune_cube/discontinuity.gcode",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let gcode = std::fs::read_to_string(path).expect("read neptune discontinuity gcode");
+    let waypoints = parse_gcode(&gcode, MAX_VELOCITY, MAX_ACCEL).expect("parse");
+    let params = SnapshotParams {
+        max_velocity: MAX_VELOCITY,
+        max_accel: MAX_ACCEL,
+        corner_deviation: geometry::corner_deviation_from_scv(20.0, MAX_ACCEL),
+        max_jerk: f64::INFINITY,
+        max_extrude_only_velocity: extrude_only.map(|(velocity, _)| velocity),
+        max_extrude_only_accel: extrude_only.map(|(_, accel)| accel),
+        max_path_deviation: None,
+        max_accel_deviation: None,
+        axis_decls: vec![
+            axis("x", &[], &["shaper_x"]),
+            axis("y", &[], &["shaper_y"]),
+            axis("z", &[], &[]),
+            axis("e", &["x", "y", "z"], &["pa", "st"]),
+        ],
+        post_processor_decls: vec![
+            post_processor(
+                "pa",
+                "tanh_pressure_advance",
+                &[
+                    ("linear_advance", 0.02),
+                    ("nonlinear_offset", 0.05),
+                    ("linearization_velocity", 20.0),
+                ],
+            ),
+            post_processor("st", "smooth_bell", &[("smooth_time", 0.02)]),
+            post_processor("shaper_x", "smooth_mzv", &[("frequency_hz", 50.0)]),
+            post_processor("shaper_y", "smooth_zv", &[("frequency_hz", 44.0)]),
+        ],
+    };
+    (waypoints, params)
+}
+
+#[test]
+fn a_tanh_advance_over_shaped_leaders_plans_the_discontinuity() {
+    let (waypoints, params) = neptune_discontinuity_with_tanh_advance(None);
+    pipeline_snapshot(&waypoints, params).expect("snapshot");
+}
+
+#[test]
+fn a_tanh_advance_over_shaped_leaders_plans_the_discontinuity_under_extrude_limits() {
+    let (waypoints, params) = neptune_discontinuity_with_tanh_advance(Some((100.0, 1000.0)));
+    pipeline_snapshot(&waypoints, params).expect("snapshot");
+}
