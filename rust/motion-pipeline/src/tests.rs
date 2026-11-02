@@ -4027,3 +4027,87 @@ fn a_ratio_change_under_moving_shaped_leaders_is_a_follower_velocity_step() {
         );
     }
 }
+
+/// The ratio change of
+/// `a_ratio_change_under_moving_shaped_leaders_is_a_follower_velocity_step`
+/// with pressure advance and a kernel on the follower. The seam carries the
+/// follower's velocity step as a C0 corner and the advance's position step
+/// `k·Δv` into the kernel; neither may count the other. A kernel-free
+/// advance chain is refused, linear gains after a kernel apply to the
+/// smoothed track, and a nonlinear advance (here all but linear) applies
+/// before projection: either way the output must be the unadvanced output
+/// plus `k` times its velocity.
+#[test]
+fn a_ratio_change_under_moving_shaped_leaders_with_advance_is_one_step() {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 1.5),
+        line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0], 3.0),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let leader_smooth_time = 0.044583333333333336;
+    let e_smooth_time = 0.01;
+    let k = 0.04;
+    let plain = replay(
+        cfg(),
+        follower_kernel_chains(Some(leader_smooth_time), None, e_smooth_time),
+        &home,
+        0.0,
+        &moves,
+    );
+    let linear = replay(
+        cfg(),
+        follower_kernel_chains(Some(leader_smooth_time), Some(k), e_smooth_time),
+        &home,
+        0.0,
+        &moves,
+    );
+    let nonlinear_offset = 1e-6;
+    let mut advanced_chains = follower_kernel_chains(Some(leader_smooth_time), None, 0.0);
+    advanced_chains.chains[3] = nonlinear_e_chain(
+        &trajectory::algos::TanhPressureAdvance,
+        k,
+        nonlinear_offset,
+        20.0,
+        e_smooth_time,
+    );
+    let advanced = replay(cfg(), advanced_chains, &home, 0.0, &moves);
+
+    let extruder_at = |segments: &[ContinuousSegment], t: f64| {
+        let segment = segments
+            .iter()
+            .find(|segment| segment.t_start <= t && t <= segment.t_end)
+            .unwrap_or_else(|| panic!("no segment covers t={t}"));
+        let pva = segment.eval_axis(3, t).unwrap();
+        (pva.position, pva.velocity)
+    };
+    let t_end = plain.last().expect("plain run has segments").t_end;
+    let tolerance = 2.0 * cfg().fit_tol_mm + nonlinear_offset;
+    for (label, run) in [
+        ("linear gains after the kernel", &linear),
+        ("advance before projection", &advanced),
+    ] {
+        for index in 0..=2000 {
+            let t = t_end * f64::from(index) / 2000.0;
+            let (plain_position, plain_velocity) = extruder_at(&plain, t);
+            let (position, _) = extruder_at(run, t);
+            let expected = plain_position + k * plain_velocity;
+            assert!(
+                (position - expected).abs() <= tolerance,
+                "{label}: at t={t} e is {position}, the unadvanced output plus k times its \
+                 velocity is {expected}"
+            );
+        }
+        for pair in run.windows(2) {
+            let seam = pair[0].t_end;
+            let (left, right) = (
+                pair[0].eval_axis(3, seam).unwrap().position,
+                pair[1].eval_axis(3, seam).unwrap().position,
+            );
+            assert!(
+                (left - right).abs() < 1e-9,
+                "{label}: e steps by {} mm at the seam t={seam}",
+                right - left
+            );
+        }
+    }
+}
