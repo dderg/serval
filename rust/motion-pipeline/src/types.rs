@@ -98,6 +98,26 @@ pub(crate) enum PostProcessError {
     #[error("axis {axis}: shaping window needs unavailable lookahead at t={t}")]
     MissingLookahead { axis: usize, t: f64 },
     #[error(
+        "axis {axis}: follower seam weld over [{t_start}, {t_end}] would move the emitted track \
+         by up to {displacement_mm} mm (budget {position_budget_mm}) and its acceleration by up \
+         to {acceleration_mm_s2} mm/s^2 (budget {acceleration_budget_mm_s2}): the emitted state \
+         (p, v) = ({emitted_position}, {emitted_velocity}) does not continue the fitted start \
+         (p, v) = ({fitted_position}, {fitted_velocity})"
+    )]
+    SeamWeld {
+        axis: usize,
+        t_start: f64,
+        t_end: f64,
+        displacement_mm: f64,
+        position_budget_mm: f64,
+        acceleration_mm_s2: f64,
+        acceleration_budget_mm_s2: f64,
+        emitted_position: f64,
+        emitted_velocity: f64,
+        fitted_position: f64,
+        fitted_velocity: f64,
+    },
+    #[error(
         "axis {axis} ({fit_context}): fit tolerance failed after {refinement_splits} refinement \
          splits on [{t_start}, {t_end}], nearest seeds [{lower_seed} ({lower_seed_provenance}), \
          {upper_seed} ({upper_seed_provenance})], at u={probe_u}, t={probe_t}: \

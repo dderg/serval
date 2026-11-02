@@ -782,14 +782,25 @@ pub(crate) fn project_followers(
             };
             if i == 0 {
                 if let (Some(previous), Some((emit_start, emit_end))) = (emitted_pv, emit_window) {
+                    let window_tol = follower_fit_tol(
+                        fit_tol,
+                        base[..commit_count]
+                            .iter()
+                            .map(|segment| follower_tol_scale(&segment.followers, axis))
+                            .fold(1.0, f64::min),
+                    );
                     batch_weld = Some(SeamWeld::spanning(
-                        emit_start,
-                        emit_end,
+                        WeldWindow {
+                            axis,
+                            start: emit_start,
+                            end: emit_end,
+                            tol: window_tol,
+                        },
                         previous,
                         law_step(committed_input_end),
                         base_position,
                         &pieces,
-                    ));
+                    )?);
                 }
             }
             if let Some(weld) = batch_weld {
@@ -800,13 +811,17 @@ pub(crate) fn project_followers(
             if i > 0 {
                 let previous = emitted_pv.expect("an earlier commit emitted its endpoint state");
                 let weld = SeamWeld::spanning(
-                    t_start,
-                    t_end,
+                    WeldWindow {
+                        axis,
+                        start: t_start,
+                        end: t_end,
+                        tol: follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis)),
+                    },
                     previous,
                     law_step(committed_input_end),
                     base_position,
                     &pieces,
-                );
+                )?;
                 for piece in &mut pieces {
                     weld.apply(piece);
                 }
@@ -2152,15 +2167,28 @@ struct SeamWeld {
     coeffs: [f64; 4],
 }
 
+#[derive(Clone, Copy)]
+struct WeldWindow {
+    axis: usize,
+    start: f64,
+    end: f64,
+    tol: FitTol,
+}
+
 impl SeamWeld {
     fn spanning(
-        start: f64,
-        end: f64,
+        window: WeldWindow,
         emitted: (f64, f64),
         law_step: f64,
         base_position: f64,
         pieces: &[BezierPiece],
-    ) -> Self {
+    ) -> Result<Self, PostProcessError> {
+        let WeldWindow {
+            axis,
+            start,
+            end,
+            tol,
+        } = window;
         let length = end - start;
         assert!(
             length > 0.0,
@@ -2171,10 +2199,61 @@ impl SeamWeld {
         let dv = emitted.1 + law_step - velocity_start;
         let cubic = (2.0 * dp + dv * length) / (length * length * length);
         let quadratic = -(3.0 * dp + 2.0 * dv * length) / (length * length);
-        Self {
+        let weld = Self {
             origin: start,
             coeffs: [dp, dv, quadratic, cubic],
+        };
+        let displacement = weld.max_displacement(length);
+        let acceleration = weld.max_acceleration(length);
+        if displacement > tol.pos_mm || acceleration > tol.accel_mm_s2 {
+            return Err(PostProcessError::SeamWeld {
+                axis,
+                t_start: start,
+                t_end: end,
+                displacement_mm: displacement,
+                position_budget_mm: tol.pos_mm,
+                acceleration_mm_s2: acceleration,
+                acceleration_budget_mm_s2: tol.accel_mm_s2,
+                emitted_position: emitted.0,
+                emitted_velocity: emitted.1,
+                fitted_position: base_position + run_start,
+                fitted_velocity: velocity_start,
+            });
         }
+        Ok(weld)
+    }
+
+    fn correction_at(&self, x: f64) -> f64 {
+        let [c0, c1, c2, c3] = self.coeffs;
+        c0 + x * (c1 + x * (c2 + x * c3))
+    }
+
+    fn max_displacement(&self, length: f64) -> f64 {
+        let [_, c1, c2, c3] = self.coeffs;
+        let (a, b, c) = (3.0 * c3, 2.0 * c2, c1);
+        let mut candidates = vec![0.0, length];
+        if a == 0.0 {
+            if b != 0.0 {
+                candidates.push(-c / b);
+            }
+        } else {
+            let discriminant = b * b - 4.0 * a * c;
+            if discriminant >= 0.0 {
+                let root = discriminant.sqrt();
+                candidates.push((-b + root) / (2.0 * a));
+                candidates.push((-b - root) / (2.0 * a));
+            }
+        }
+        candidates
+            .into_iter()
+            .filter(|&x| (0.0..=length).contains(&x))
+            .map(|x| self.correction_at(x).abs())
+            .fold(0.0, f64::max)
+    }
+
+    fn max_acceleration(&self, length: f64) -> f64 {
+        let [_, _, c2, c3] = self.coeffs;
+        (2.0 * c2).abs().max((2.0 * c2 + 6.0 * c3 * length).abs())
     }
 
     fn apply(&self, piece: &mut BezierPiece) {

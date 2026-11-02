@@ -255,3 +255,54 @@ fn odometer_from_start(shaped: &ContinuousSegment) -> super::Odometer {
         length: super::leader_arc_length(shaped, &[0, 1]),
     }
 }
+
+fn ramp_piece(start: f64, end: f64, velocity: f64) -> BezierPiece {
+    BezierPiece {
+        u_start: start,
+        u_end: end,
+        coeffs: vec![0.0, velocity],
+    }
+}
+
+fn weld_window(start: f64, end: f64) -> super::WeldWindow {
+    super::WeldWindow {
+        axis: 3,
+        start,
+        end,
+        tol: crate::lowering::FitTol {
+            pos_mm: 0.005,
+            accel_mm_s2: 50.0,
+        },
+    }
+}
+
+#[test]
+fn a_weld_that_would_bridge_a_velocity_step_is_refused() {
+    let pieces = [ramp_piece(0.0, 0.12, 1.7)];
+    let weld = super::SeamWeld::spanning(weld_window(0.0, 0.12), (1.0, -233.0), 0.0, 1.0, &pieces);
+    assert!(
+        matches!(weld, Err(crate::types::PostProcessError::SeamWeld { .. })),
+        "a 234.7 mm/s velocity step was welded silently"
+    );
+}
+
+#[test]
+fn a_weld_that_would_shift_the_track_past_the_tolerance_is_refused() {
+    let pieces = [ramp_piece(0.0, 0.01, 2.0)];
+    let weld = super::SeamWeld::spanning(weld_window(0.0, 0.01), (1.01, 2.0), 0.0, 1.0, &pieces);
+    assert!(matches!(
+        weld,
+        Err(crate::types::PostProcessError::SeamWeld { .. })
+    ));
+}
+
+#[test]
+fn a_fit_residual_is_welded_onto_the_emitted_state() {
+    let mut pieces = [ramp_piece(0.0, 0.01, 2.0)];
+    let emitted = (1.0 + 1e-9, 2.0 + 1e-6);
+    let weld = super::SeamWeld::spanning(weld_window(0.0, 0.01), emitted, 0.0, 1.0, &pieces)
+        .expect("a residual well inside the tolerance welds");
+    weld.apply(&mut pieces[0]);
+    assert!((1.0 + pieces[0].coeffs[0] - emitted.0).abs() <= 1e-15);
+    assert!((pieces[0].coeffs[1] - emitted.1).abs() <= 1e-12);
+}
