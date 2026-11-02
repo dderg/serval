@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 5b725ac63904fad6f9fd00e8f29d1eb0b52f8fcd7bd56219fc4a67bb2bfa58ef # shrinks to a 0.6750001978375296 s spline segment at 1 MHz whose last 25 ms view absorbed a 0.2-clock tail
+cc 2e188bdc812d96331fb18c85e02378af4b590ae2f55f6fac58823b0a40cbfd68 # issue #471: seam clock 31127921 reads 226.343 mm left, 188.440 mm right

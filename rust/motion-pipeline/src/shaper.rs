@@ -755,7 +755,7 @@ fn apply_axis_chains(
     }
     outputs.mirror_toolhead(&out);
     let motor_started = crate::timing::stopwatch();
-    let (motor_axes, motor_pieces) = apply_motor_side_stages(&mut out, chains, fit_tol)?;
+    let (motor_axes, motor_pieces) = apply_motor_side_stages(request, &mut out)?;
     let motor_us = motor_started.elapsed_us();
     crate::timing::record_stage(crate::timing::Stage::MotorSide, motor_us);
     if crate::timing::is_slow_phase(motor_us) {
@@ -774,16 +774,14 @@ fn apply_axis_chains(
     Ok(out)
 }
 
-/// Trailing derivative-gain stages produce the motor command (e.g. a
-/// mode-inverse counter-drive), which the physical toolhead does not follow —
-/// that is their entire purpose. They are therefore applied only after the
-/// followers have projected onto the toolhead signal.
 fn apply_motor_side_stages(
+    request: AxisFitRequest,
     out: &mut [ContinuousSegment],
-    chains: &AxisChainSet,
-    fit_tol: FitTol,
 ) -> Result<(usize, usize), PostProcessError> {
-    let mut rebuilt_axes = 0usize;
+    let AxisFitRequest {
+        chains, fit_tol, ..
+    } = request;
+    let mut rebuilt_axes = fit_motor_commands(request, out)?;
     let mut rebuilt_pieces = 0usize;
     for seg in out.iter_mut() {
         for axis in 0..seg.axes.len() {
@@ -792,10 +790,10 @@ fn apply_motor_side_stages(
             };
             let follower_linear_chain =
                 chains.is_projected_follower(axis) && chain.follower_linear_transform();
-            if follower_linear_chain {
-                continue;
-            }
-            if !chain.has_motor_side_gains() {
+            if follower_linear_chain
+                || motor_command_column(chains, axis).is_some()
+                || !chain.has_motor_side_gains()
+            {
                 continue;
             }
             let replacement = match &seg.axes[axis] {
@@ -832,6 +830,40 @@ fn apply_motor_side_stages(
         }
     }
     Ok((rebuilt_axes, rebuilt_pieces))
+}
+
+fn motor_command_column(chains: &AxisChainSet, axis: usize) -> Option<FitColumn<'_>> {
+    if chains.is_projected_follower(axis) {
+        return None;
+    }
+    let chain = chains.chains.get(axis)?;
+    match chain.trailing_transform()? {
+        ChainStage::DerivativeGains { k1, k2 } => Some(FitColumn {
+            axis,
+            chain,
+            signal: ColumnSignal::MotorCommand { k1: *k1, k2: *k2 },
+        }),
+        ChainStage::NonlinearAdvance(_) | ChainStage::SmoothKernel(_) => None,
+    }
+}
+
+fn fit_motor_commands(
+    request: AxisFitRequest,
+    out: &mut [ContinuousSegment],
+) -> Result<usize, PostProcessError> {
+    let n_axes = out.first().map_or(0, |seg| seg.axes.len());
+    let columns: Vec<FitColumn> = (0..n_axes)
+        .filter_map(|axis| motor_command_column(request.chains, axis))
+        .collect();
+    let mut rebuilt = 0;
+    for (axis, column, _) in fit_columns(request, out, &columns) {
+        let column = column?.expect("a motor-command chain convolves with its kernel");
+        for (seg, track) in out.iter_mut().zip(column) {
+            Arc::make_mut(&mut seg.axes)[axis] = ContinuousAxis::Spline(Arc::new(track));
+            rebuilt += 1;
+        }
+    }
+    Ok(rebuilt)
 }
 
 /// The trailing stages are position-blind — they add velocity and
@@ -895,12 +927,40 @@ fn constant_axis_column(
         .collect()
 }
 
+#[derive(Clone, Copy)]
+enum ColumnSignal {
+    Shaped,
+    MotorCommand { k1: f64, k2: f64 },
+}
+
+impl ColumnSignal {
+    fn fit_context(self) -> &'static str {
+        match self {
+            Self::Shaped => "smooth_kernel_target",
+            Self::MotorCommand { .. } => "motor_command",
+        }
+    }
+
+    fn convolution_input(self, shaped_input: AxisSignalTable) -> AxisSignalTable {
+        match self {
+            Self::Shaped => shaped_input,
+            Self::MotorCommand { k1, k2 } => shaped_input.with_derivative_gains(k1, k2),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FitColumn<'a> {
+    axis: usize,
+    chain: &'a CompiledChain,
+    signal: ColumnSignal,
+}
+
 fn fit_axis_column(
     request: AxisFitRequest,
     targets: &[ContinuousSegment],
-    axis: usize,
+    column: FitColumn,
     target_workers: usize,
-    chain: &CompiledChain,
 ) -> Result<Option<Vec<nurbs::ScalarNurbs>>, PostProcessError> {
     let AxisFitRequest {
         history,
@@ -910,6 +970,11 @@ fn fit_axis_column(
         lookahead,
         ..
     } = request;
+    let FitColumn {
+        axis,
+        chain,
+        signal,
+    } = column;
     let Some(kernel) = chain.kernel() else {
         return Ok(None);
     };
@@ -944,11 +1009,12 @@ fn fit_axis_column(
         targets,
         ShapedSignalSource::new(
             kernel,
-            AxisSignalTable::build(&signal_segments, axis, bounds),
+            signal.convolution_input(AxisSignalTable::build(&signal_segments, axis, bounds)),
             signal_breakpoints(&signal_segments, axis),
             targets[0].t_start,
         ),
         fit_tol,
+        signal.fit_context(),
         target_workers,
     )
     .map(Some)
@@ -1033,6 +1099,7 @@ fn fit_axis_targets(
     targets: &[ContinuousSegment],
     source: ShapedSignalSource,
     fit_tol: FitTol,
+    fit_context: &'static str,
     target_workers: usize,
 ) -> Result<Vec<nurbs::ScalarNurbs>, PostProcessError> {
     if targets.is_empty() {
@@ -1058,7 +1125,7 @@ fn fit_axis_targets(
                     t_end: target.t_end,
                     seed_breakpoints: shaped_breaks,
                     fit_tol,
-                    fit_context: "smooth_kernel_target",
+                    fit_context,
                     velocity_continuous: true,
                 },
                 sig,
@@ -1188,13 +1255,7 @@ fn fit_axis_targets(
         plans.push(
             fit_plan_from_seeds(seeds, &velocity_breaks, floors, fit_tol.pos_mm).map_err(
                 |crowded| {
-                    crowded_velocity_breaks_error(
-                        axis,
-                        "smooth_kernel_target",
-                        floors,
-                        fit_tol,
-                        crowded,
-                    )
+                    crowded_velocity_breaks_error(axis, fit_context, floors, fit_tol, crowded)
                 },
             )?,
         );
@@ -1236,7 +1297,7 @@ fn fit_axis_targets(
             &SpanFitPolicy {
                 axis,
                 fit_tol,
-                fit_context: "smooth_kernel_target",
+                fit_context,
                 velocity_budget: f64::INFINITY,
                 floors: plan.floors,
                 velocity_sign: VelocitySign::Unconstrained,
@@ -1338,7 +1399,7 @@ fn fit_axis_targets(
                     t_end: targets[target_index].t_end,
                     seed_breakpoints: shaped_breaks,
                     fit_tol,
-                    fit_context: "smooth_kernel_target",
+                    fit_context,
                     velocity_continuous: true,
                 },
                 &sig,
@@ -1357,6 +1418,52 @@ fn fit_axis_targets(
     Ok(tracks)
 }
 
+type TimedColumn = (
+    usize,
+    Result<Option<Vec<nurbs::ScalarNurbs>>, PostProcessError>,
+    u128,
+);
+
+fn fit_columns(
+    request: AxisFitRequest,
+    targets: &[ContinuousSegment],
+    columns: &[FitColumn],
+) -> Vec<TimedColumn> {
+    if columns.is_empty() {
+        return Vec::new();
+    }
+    let parallel = cfg!(not(target_arch = "wasm32")) && columns.len() > 1 && !targets.is_empty();
+    let target_workers = if cfg!(target_arch = "wasm32") || targets.len() < 4 {
+        1
+    } else {
+        std::thread::available_parallelism()
+            .map_or(1, |cores| cores.get())
+            .div_ceil(columns.len().max(1))
+            .min(4)
+            .min(targets.len())
+    };
+    let fit_timed = |column: FitColumn| {
+        let column_started = crate::timing::stopwatch();
+        let fitted = fit_axis_column(request, targets, column, target_workers);
+        (column.axis, fitted, column_started.elapsed_us())
+    };
+    if parallel {
+        let fit_timed = &fit_timed;
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = columns
+                .iter()
+                .map(|&column| scope.spawn(move || fit_timed(column)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("axis fit thread panicked"))
+                .collect()
+        })
+    } else {
+        columns.iter().map(|&column| fit_timed(column)).collect()
+    }
+}
+
 fn fit_leader_axes(
     request: AxisFitRequest,
     fresh: &mut [ContinuousSegment],
@@ -1365,56 +1472,17 @@ fn fit_leader_axes(
 ) -> Result<(), PostProcessError> {
     let chains = request.chains;
     let default_chain = CompiledChain::default();
-    let axis_chains: Vec<(usize, &CompiledChain)> = (0..n_axes)
+    let leader_columns: Vec<FitColumn> = (0..n_axes)
         .filter(|&axis| !chains.is_projected_follower(axis))
-        .map(|axis| (axis, chains.chains.get(axis).unwrap_or(&default_chain)))
-        .filter(|(_, chain)| !chain.is_empty())
+        .map(|axis| FitColumn {
+            axis,
+            chain: chains.chains.get(axis).unwrap_or(&default_chain),
+            signal: ColumnSignal::Shaped,
+        })
+        .filter(|column| !column.chain.is_empty())
         .collect();
     let fit_started = crate::timing::stopwatch();
-    type TimedColumn = (
-        usize,
-        Result<Option<Vec<nurbs::ScalarNurbs>>, PostProcessError>,
-        u128,
-    );
-    let parallel = cfg!(not(target_arch = "wasm32")) && axis_chains.len() > 1 && !fresh.is_empty();
-    let target_workers = if cfg!(target_arch = "wasm32") || fresh.len() < 4 {
-        1
-    } else {
-        std::thread::available_parallelism()
-            .map_or(1, |cores| cores.get())
-            .div_ceil(axis_chains.len().max(1))
-            .min(4)
-            .min(fresh.len())
-    };
-    let columns: Vec<TimedColumn> = if parallel {
-        let fresh_ref: &[ContinuousSegment] = fresh;
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = axis_chains
-                .iter()
-                .map(|&(axis, chain)| {
-                    scope.spawn(move || {
-                        let column_started = crate::timing::stopwatch();
-                        let column =
-                            fit_axis_column(request, fresh_ref, axis, target_workers, chain);
-                        (axis, column, column_started.elapsed_us())
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| h.join().expect("axis fit thread panicked"))
-                .collect()
-        })
-    } else {
-        axis_chains
-            .iter()
-            .map(|&(axis, chain)| {
-                let column_started = crate::timing::stopwatch();
-                let column = fit_axis_column(request, fresh, axis, target_workers, chain);
-                (axis, column, column_started.elapsed_us())
-            })
-            .collect()
-    };
+    let columns = fit_columns(request, fresh, &leader_columns);
     let fit_elapsed_us = fit_started.elapsed_us();
     crate::timing::record_stage(crate::timing::Stage::LeaderFit, fit_elapsed_us);
     if crate::timing::is_slow_phase(fit_elapsed_us) {
@@ -1427,7 +1495,7 @@ fn fit_leader_axes(
             fit_elapsed_us,
             crate::timing::PhaseWorkload {
                 segments: fresh.len(),
-                axes: axis_chains.len(),
+                axes: leader_columns.len(),
                 force: request.lookahead.clamps_past_signal(),
                 ..work
             },
@@ -1695,6 +1763,8 @@ pub(crate) struct AxisSignalTable {
     lookahead: Lookahead,
     moment_trees: Option<[MomentTree; MOMENT_ORDERS]>,
     input_jumps: Vec<(f64, f64, f64)>,
+    entering_step: f64,
+    leaving_step: f64,
 }
 
 /// The time extent of a flattened signal window and how its two edges
@@ -1734,6 +1804,8 @@ impl AxisSignalTable {
             lookahead: bounds.lookahead,
             moment_trees: None,
             input_jumps: Vec::new(),
+            entering_step: 0.0,
+            leaving_step: 0.0,
         };
         for track in tracks {
             for piece in extract_bezier_pieces(track) {
@@ -1765,6 +1837,38 @@ impl AxisSignalTable {
             coefficients[0] -= offset;
         }
         self
+    }
+
+    pub(crate) fn with_derivative_gains(mut self, k1: f64, k2: f64) -> Self {
+        assert!(
+            self.moment_trees.is_none(),
+            "derivative gains must reshape the signal before its moments are built"
+        );
+        let last = self.coeffs.len() - 1;
+        let held_before = self.piece_at(0, self.first_t);
+        let held_after = self.piece_at(last, self.last_t);
+        for coefficients in &mut self.coeffs {
+            for power in 0..coefficients.len() {
+                let slope = coefficients
+                    .get(power + 1)
+                    .map_or(0.0, |&c| c * (power + 1) as f64);
+                let curvature = coefficients
+                    .get(power + 2)
+                    .map_or(0.0, |&c| c * ((power + 1) * (power + 2)) as f64);
+                coefficients[power] += k1 * slope + k2 * curvature;
+            }
+        }
+        self.entering_step = self.piece_at(0, self.first_t) - held_before;
+        self.leaving_step = held_after - self.piece_at(last, self.last_t);
+        self
+    }
+
+    fn held_before(&self) -> f64 {
+        self.piece_at(0, self.first_t) - self.entering_step
+    }
+
+    fn held_after(&self) -> f64 {
+        self.piece_at(self.coeffs.len() - 1, self.last_t) + self.leaving_step
     }
 
     pub(crate) fn max_degree(&self) -> usize {
@@ -1802,8 +1906,8 @@ impl AxisSignalTable {
     fn collect_input_jumps(&self) -> Vec<(f64, f64, f64)> {
         let mut jumps = Vec::new();
         let entering = self.slope_at(0, self.first_t);
-        if entering != 0.0 {
-            jumps.push((self.first_t, 0.0, entering));
+        if entering != 0.0 || self.entering_step != 0.0 {
+            jumps.push((self.first_t, self.entering_step, entering));
         }
         for piece in 1..self.coeffs.len() {
             let seam = self.starts[piece];
@@ -1814,8 +1918,8 @@ impl AxisSignalTable {
             }
         }
         let leaving = self.slope_at(self.coeffs.len() - 1, self.last_t);
-        if leaving != 0.0 {
-            jumps.push((self.last_t, 0.0, -leaving));
+        if leaving != 0.0 || self.leaving_step != 0.0 {
+            jumps.push((self.last_t, self.leaving_step, -leaving));
         }
         jumps
     }
@@ -1867,7 +1971,7 @@ impl AxisSignalTable {
             assert_eq!(moments.len(), degree + 1);
             moments.fill(0.0);
             if lo < self.first_t && order == 0 {
-                let held = [self.piece_at(0, self.first_t)];
+                let held = [self.held_before()];
                 Self::accumulate_polynomial_moments(
                     &held,
                     lo,
@@ -1907,7 +2011,7 @@ impl AxisSignalTable {
                 }
             }
             if hi > self.last_t && order == 0 {
-                let held = [self.piece_at(self.coeffs.len() - 1, self.last_t)];
+                let held = [self.held_after()];
                 Self::accumulate_polynomial_moments(
                     &held,
                     self.last_t,
@@ -1988,13 +2092,13 @@ impl AxisSignalTable {
             if !self.boundary.clamps_before_signal() {
                 return f64::NAN;
             }
-            return self.piece_at(0, self.first_t);
+            return self.held_before();
         }
         if t > self.last_t {
             if !self.lookahead.clamps_past_signal() {
                 return f64::NAN;
             }
-            return self.piece_at(self.coeffs.len() - 1, self.last_t);
+            return self.held_after();
         }
         let i = self.piece_covering(t, hint);
         if t >= self.starts[i] - SEGMENT_TIME_EPS_S {
@@ -3733,3 +3837,7 @@ mod shaper_storage_tests;
 #[cfg(test)]
 #[path = "shaper_edge_tests.rs"]
 mod shaper_edge_tests;
+
+#[cfg(test)]
+#[path = "shaper_motor_command_tests.rs"]
+mod shaper_motor_command_tests;
