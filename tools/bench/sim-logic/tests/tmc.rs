@@ -1,4 +1,8 @@
-use bench_sim_logic::tmc::{crc8, reg, Reply, TmcBus, GSTAT_RESET};
+use bench_sim_logic::tmc::{crc8, reg, reply_wait_ticks, Reply, TmcBus, GSTAT_RESET};
+
+const BIT_NS: u32 = 25_000;
+const SAMPLE_NS: u32 = 100_000;
+const KLIPPER_WINDOW_BITS: u32 = 64;
 
 const READ_IFCNT_ADDR0: [u8; 4] = [0xF5, 0x00, 0x02, 0xC8];
 const READ_CHOPCONF_ADDR2: [u8; 4] = [0xF5, 0x02, 0x6C, 0xD6];
@@ -131,5 +135,93 @@ fn the_reply_waits_senddelay_bit_times() {
     for (senddelay, bits) in [(1u32, 8u16), (2, 24), (3, 24), (4, 40), (15, 120)] {
         feed(&mut bus, &write(2, reg::SLAVECONF, senddelay << 8));
         assert_eq!(delay(&mut bus), bits, "senddelay {senddelay}");
+    }
+}
+
+#[test]
+fn a_false_sync_byte_costs_one_frame_and_the_retry_after_idle_parses() {
+    let mut bus = TmcBus::default();
+    let mut stream = vec![0x05];
+    stream.extend_from_slice(&READ_IFCNT_ADDR0);
+    assert_eq!(feed(&mut bus, &stream), None);
+    bus.on_idle();
+    assert_eq!(bus.reads, 0);
+    assert!(bus.rejects >= 1);
+    assert_eq!(feed(&mut bus, &READ_IFCNT_ADDR0).unwrap().frame[6], 0);
+}
+
+#[test]
+fn a_bad_crc_on_a_read_gets_no_reply() {
+    let mut bus = TmcBus::default();
+    let mut corrupt = READ_CHOPCONF_ADDR2;
+    corrupt[3] ^= 0x80;
+    assert_eq!(feed(&mut bus, &corrupt), None);
+    assert_eq!((bus.reads, bus.rejects), (0, 1));
+    assert!(feed(&mut bus, &READ_CHOPCONF_ADDR2).is_some());
+}
+
+#[test]
+fn back_to_back_frames_parse_without_an_idle_gap() {
+    let mut bus = TmcBus::default();
+    let mut stream = WRITE_CHOPCONF_ADDR1.to_vec();
+    stream.extend_from_slice(&WRITE_CHOPCONF_ADDR1);
+    feed(&mut bus, &stream);
+    assert_eq!(bus.register(1, reg::IFCNT), 2);
+    assert_eq!(bus.rejects, 0);
+}
+
+#[test]
+fn an_overrun_drops_the_frame_in_progress() {
+    let mut bus = TmcBus::default();
+    feed(&mut bus, &WRITE_CHOPCONF_ADDR1[..3]);
+    bus.on_overrun();
+    assert_eq!(bus.rejects, 1);
+    feed(&mut bus, &WRITE_CHOPCONF_ADDR1);
+    assert_eq!(bus.register(1, reg::IFCNT), 1);
+}
+
+#[test]
+fn an_overrun_between_frames_still_counts() {
+    let mut bus = TmcBus::default();
+    bus.on_overrun();
+    assert_eq!(bus.rejects, 1);
+}
+
+#[test]
+fn rejects_wrap_like_the_other_counters() {
+    let mut bus = TmcBus::default();
+    for _ in 0..300 {
+        bus.on_overrun();
+    }
+    assert_eq!(bus.rejects, (300 % 256) as u8);
+}
+
+#[test]
+fn the_reply_starts_inside_klippers_receive_window() {
+    let mut bus = TmcBus::default();
+    feed(&mut bus, &write(0, reg::SLAVECONF, 2 << 8));
+    let delay = feed(&mut bus, &read(0, reg::IFCNT)).unwrap().delay_bits;
+    let ticks = reply_wait_ticks(delay, BIT_NS, SAMPLE_NS);
+    let earliest_ns = (ticks - 1) * SAMPLE_NS;
+    let latest_ns = ticks * SAMPLE_NS;
+    assert!(
+        earliest_ns >= u32::from(delay) * BIT_NS,
+        "never before SENDDELAY"
+    );
+    assert!(latest_ns <= KLIPPER_WINDOW_BITS * BIT_NS, "{latest_ns} ns");
+}
+
+#[test]
+fn the_wait_never_undercuts_senddelay() {
+    for bits in [8u16, 24, 40, 56, 120] {
+        let ticks = reply_wait_ticks(bits, BIT_NS, SAMPLE_NS);
+        assert!(
+            (ticks - 1) * SAMPLE_NS >= u32::from(bits) * BIT_NS,
+            "{bits} bits"
+        );
+        assert!(
+            (ticks - 2) * SAMPLE_NS < u32::from(bits) * BIT_NS,
+            "{bits} bits"
+        );
     }
 }

@@ -4,13 +4,13 @@ use core::sync::atomic::{AtomicI16, AtomicU16, AtomicU32, AtomicU8, Ordering};
 use bench_sim_logic::aux::{AuxRecord, FLAG_DAC_CLAMPED, FLAG_MCO_OK, INPUTS};
 use bench_sim_logic::config::SimConfig;
 use bench_sim_logic::thermal::{Heater, HEATERS};
-use bench_sim_logic::tmc::{Reply, TmcBus, REPLY_LEN};
-use bench_sim_logic::tracker::{TickOutput, Tracker};
-use bench_sim_logic::CHANNELS;
+use bench_sim_logic::tmc::{reply_wait_ticks, Reply, TmcBus, REPLY_LEN};
+use bench_sim_logic::tracker::{McoLost, TickOutput, Tracker};
 use cortex_m::peripheral::NVIC;
 use stm32f4xx_hal::pac::Interrupt;
 
-use crate::capture::Fault;
+use crate::capture::{Fault, Sample};
+use crate::event::SnapshotOutput;
 use crate::regs::{self, InputPin, Usart};
 use crate::ring::AuxRing;
 
@@ -212,14 +212,26 @@ pub fn stop_capture() {
     drive_endstops(config().walls.idle_levels());
 }
 
-pub fn on_tick(deltas: &[i32; CHANNELS], mco_raw: u16, time: u64) -> Result<(), Fault> {
+pub fn on_count_tick(sample: &Sample, mco_raw: u16, time: u64) -> Result<(), Fault> {
+    with_capture(time, |tracker| {
+        tracker.tick(&sample.deltas, &sample.excursions, mco_raw)
+    })
+}
+
+pub fn on_event_tick(snapshot: &SnapshotOutput, time: u64) -> Result<(), Fault> {
+    with_capture(time, |tracker| {
+        tracker.tick_steps(snapshot.steps, snapshot.mco)
+    })
+}
+
+fn with_capture(
+    time: u64,
+    tick: impl FnOnce(&mut Tracker) -> Result<TickOutput, McoLost>,
+) -> Result<(), Fault> {
     let Some(capture) = (unsafe { (*CAPTURE.0.get()).as_mut() }) else {
         return Ok(());
     };
-    let output = capture
-        .tracker
-        .tick(deltas, mco_raw)
-        .map_err(|_| Fault::McoLost)?;
+    let output = tick(&mut capture.tracker).map_err(|_| Fault::McoLost)?;
     drive_endstops(output.levels);
     if !capture.aux {
         return Ok(());
@@ -302,10 +314,6 @@ pub fn on_sample() {
     }
 }
 
-fn reply_wait_samples(delay_bits: u16) -> u32 {
-    (u32::from(delay_bits) * TMC_BIT_NS).div_ceil(SAMPLE_PERIOD_NS) + 1
-}
-
 fn begin_transmit(periph: &mut Peripherals, frame: [u8; REPLY_LEN]) {
     let uart = regs::USART2;
     uart.set_cr1(regs::USART_CR1_UE | regs::USART_CR1_TE);
@@ -336,15 +344,21 @@ pub fn on_uart() {
         }
         return;
     }
-    if status & regs::USART_SR_RXNE != 0 {
-        if let Some(reply) = periph.tmc.on_byte(uart.dr()) {
-            periph.pending = Some((reply, reply_wait_samples(reply.delay_bits)));
-        }
-    } else if status & (regs::USART_SR_IDLE | regs::USART_SR_ORE) != 0 {
-        uart.dr();
-    }
-    if status & (regs::USART_SR_IDLE | regs::USART_SR_ORE) != 0 {
+    if status & regs::USART_SR_ORE != 0 {
+        periph.tmc.on_overrun();
+    } else if status & regs::USART_SR_IDLE != 0 {
         periph.tmc.on_idle();
+    }
+    let received = uart.dr();
+    if status & regs::USART_SR_RXNE != 0 {
+        if let Some(reply) = periph.tmc.on_byte(received) {
+            if periph.pending.is_some() {
+                periph.tmc.on_reply_collision();
+            } else {
+                let wait = reply_wait_ticks(reply.delay_bits, TMC_BIT_NS, SAMPLE_PERIOD_NS);
+                periph.pending = Some((reply, wait));
+            }
+        }
     }
     publish_tmc(&periph.tmc);
 }

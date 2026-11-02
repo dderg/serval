@@ -13,6 +13,14 @@ pub struct Wall {
 }
 
 impl Wall {
+    pub fn only_channel(&self) -> Option<usize> {
+        let mut used = self.coeffs.iter().enumerate().filter(|(_, &c)| c != 0);
+        match (used.next(), used.next()) {
+            (Some((channel, _)), None) => Some(channel),
+            _ => None,
+        }
+    }
+
     pub fn triggered(&self, positions: &[i32; CHANNELS]) -> bool {
         let sum: i64 = self
             .coeffs
@@ -69,12 +77,32 @@ impl Walls {
     }
 
     pub fn levels(&self, positions: &[i32; CHANNELS]) -> u8 {
-        let mut triggered = 0u8;
+        self.levels_for(self.triggered(positions))
+    }
+
+    pub fn levels_for(&self, triggered_pins: u8) -> u8 {
+        self.idle_levels() ^ triggered_pins
+    }
+
+    pub fn triggered(&self, positions: &[i32; CHANNELS]) -> u8 {
+        self.triggered_where(positions, |_| true)
+    }
+
+    pub fn triggered_involving(&self, positions: &[i32; CHANNELS], channel: usize) -> u8 {
+        self.triggered_where(positions, |wall| wall.coeffs[channel] != 0)
+    }
+
+    pub fn triggered_by_channel_alone(&self, positions: &[i32; CHANNELS], channel: usize) -> u8 {
+        self.triggered_where(positions, |wall| wall.only_channel() == Some(channel))
+    }
+
+    fn triggered_where(&self, positions: &[i32; CHANNELS], select: impl Fn(&Wall) -> bool) -> u8 {
+        let mut pins = 0u8;
         for wall in self.walls[..self.count].iter().flatten() {
-            if wall.triggered(positions) {
-                triggered |= 1 << wall.pin;
+            if select(wall) && wall.triggered(positions) {
+                pins |= 1 << wall.pin;
             }
         }
-        self.idle_levels() ^ triggered
+        pins
     }
 }

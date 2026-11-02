@@ -70,6 +70,8 @@ pub enum Fault {
     NonMonotonic = 14,
     McoLost = 15,
     AuxOverflow = 16,
+    DirAmbiguous = 17,
+    WallStepsOverflow = 18,
 }
 
 #[derive(Clone, Copy)]
@@ -152,14 +154,20 @@ impl Sampler {
         Self { lanes }
     }
 
-    pub fn sample(&mut self) -> Result<u32, (Fault, u8)> {
-        let mut packed = 0u32;
+    pub fn sample(&mut self) -> Result<Sample, (Fault, u8)> {
+        let mut sample = Sample {
+            packed: 0,
+            deltas: [0; CHANNEL_COUNT],
+            excursions: [0; CHANNEL_COUNT],
+        };
         for (i, (lane, channel)) in self.lanes.iter_mut().zip(CHANNELS.iter()).enumerate() {
-            let delta = lane.advance(channel).map_err(|f| (f, i as u8))?;
-            let byte = i8::try_from(delta).map_err(|_| (Fault::DeltaOverflow, i as u8))?;
-            packed |= (byte as u8 as u32) << (8 * i);
+            let movement = lane.advance(channel).map_err(|f| (f, i as u8))?;
+            let byte = i8::try_from(movement.delta).map_err(|_| (Fault::DeltaOverflow, i as u8))?;
+            sample.packed |= (byte as u8 as u32) << (8 * i);
+            sample.deltas[i] = movement.delta;
+            sample.excursions[i] = movement.excursion;
         }
-        Ok(packed)
+        Ok(sample)
     }
 }
 
@@ -171,8 +179,19 @@ fn signed(steps: u16, dir_high: bool) -> i32 {
     }
 }
 
+pub struct Sample {
+    pub packed: u32,
+    pub deltas: [i32; CHANNEL_COUNT],
+    pub excursions: [i32; CHANNEL_COUNT],
+}
+
+struct Movement {
+    delta: i32,
+    excursion: i32,
+}
+
 impl Lane {
-    fn advance(&mut self, channel: &Channel) -> Result<i32, Fault> {
+    fn advance(&mut self, channel: &Channel) -> Result<Movement, Fault> {
         let timer = channel.timer;
         let (status, count, pin_high) = loop {
             let before = timer.sr();
@@ -187,19 +206,24 @@ impl Lane {
             return Err(Fault::DirOvercapture);
         }
 
-        let delta = if status & regs::SR_CC2IF != 0 {
+        let movement = if status & regs::SR_CC2IF != 0 {
             let reversal = timer.ccr2();
             if timer.sr() & regs::SR_CC2OF != 0 {
                 return Err(Fault::DirOvercapture);
             }
-            let before_reversal = reversal.wrapping_sub(self.previous_count);
+            let excursion = signed(reversal.wrapping_sub(self.previous_count), self.dir_high);
             let after_reversal = count.wrapping_sub(reversal);
-            let delta =
-                signed(before_reversal, self.dir_high) + signed(after_reversal, !self.dir_high);
             self.dir_high = !self.dir_high;
-            delta
+            Movement {
+                delta: excursion + signed(after_reversal, self.dir_high),
+                excursion,
+            }
         } else {
-            signed(count.wrapping_sub(self.previous_count), self.dir_high)
+            let delta = signed(count.wrapping_sub(self.previous_count), self.dir_high);
+            Movement {
+                delta,
+                excursion: delta,
+            }
         };
         self.previous_count = count;
 
@@ -210,6 +234,6 @@ impl Lane {
         } else {
             self.desync_pending = true;
         }
-        Ok(delta)
+        Ok(movement)
     }
 }

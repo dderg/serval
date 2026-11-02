@@ -74,7 +74,7 @@ fn TIM6_DAC() {
     capture::ack_snapshot_tick();
     match event::tick() {
         Some(Ok(snapshot)) => {
-            if let Err(fault) = sim::on_tick(&snapshot.net, snapshot.mco, snapshot.time) {
+            if let Err(fault) = sim::on_event_tick(&snapshot, snapshot.time) {
                 latch_fault(fault, 0);
             }
             return;
@@ -92,14 +92,13 @@ fn TIM6_DAC() {
             return;
         };
         match sampler.sample() {
-            Ok(tick) => {
+            Ok(sample) => {
                 let time = RING.produced() as u64;
-                if RING.push(tick).is_err() {
+                if RING.push(sample.packed).is_err() {
                     latch_fault(Fault::RingOverflow, 0);
                     return;
                 }
-                let deltas = tick.to_le_bytes().map(|delta| i32::from(delta as i8));
-                if let Err(fault) = sim::on_tick(&deltas, mco, time) {
+                if let Err(fault) = sim::on_count_tick(&sample, mco, time) {
                     latch_fault(fault, 0);
                 }
             }

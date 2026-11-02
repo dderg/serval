@@ -34,7 +34,12 @@ fn the_probe_pin_follows_z_from_the_origin() {
     let mut levels = Vec::new();
     for _ in 0..5 {
         mco = mco.wrapping_add(MCO_PER_TICK);
-        levels.push(tracker.tick(&[0, 0, -1, 0], mco).unwrap().levels);
+        levels.push(
+            tracker
+                .tick(&[0, 0, -1, 0], &[0, 0, -1, 0], mco)
+                .unwrap()
+                .levels,
+        );
     }
     assert_eq!(levels, [0, 0, 0b1000, 0b1000, 0b1000]);
     assert_eq!(tracker.positions(), [0, 0, -2, 0]);
@@ -53,7 +58,7 @@ fn aux_stamps_come_every_period_with_the_extended_mco() {
     let mut stamps = Vec::new();
     for _ in 0..(3 * TICKS_PER_AUX) {
         mco = mco.wrapping_add(MCO_PER_TICK);
-        if let Some(stamp) = tracker.tick(&[0; 4], mco).unwrap().aux {
+        if let Some(stamp) = tracker.tick(&[0; 4], &[0; 4], mco).unwrap().aux {
             stamps.push(stamp);
         }
     }
@@ -71,12 +76,12 @@ fn a_missing_mco_is_only_fatal_when_expected() {
     let mut relaxed = Tracker::start(&probe_config(10, false), TICKS_PER_AUX, 0);
     let mut strict = Tracker::start(&probe_config(10, true), TICKS_PER_AUX, 0);
     for _ in 1..TICKS_PER_AUX {
-        relaxed.tick(&[0; 4], 0).unwrap();
-        strict.tick(&[0; 4], 0).unwrap();
+        relaxed.tick(&[0; 4], &[0; 4], 0).unwrap();
+        strict.tick(&[0; 4], &[0; 4], 0).unwrap();
     }
-    let stamp = relaxed.tick(&[0; 4], 0).unwrap().aux.unwrap();
+    let stamp = relaxed.tick(&[0; 4], &[0; 4], 0).unwrap().aux.unwrap();
     assert!(!stamp.mco_ok);
-    assert_eq!(strict.tick(&[0; 4], 0), Err(McoLost { delta: 0 }));
+    assert_eq!(strict.tick(&[0; 4], &[0; 4], 0), Err(McoLost { delta: 0 }));
 }
 
 #[test]

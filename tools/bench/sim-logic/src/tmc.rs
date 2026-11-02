@@ -84,6 +84,10 @@ impl Driver {
     }
 }
 
+pub fn reply_wait_ticks(delay_bits: u16, bit_ns: u32, tick_ns: u32) -> u32 {
+    (u32::from(delay_bits) * bit_ns).div_ceil(tick_ns) + 1
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Reply {
     pub frame: [u8; REPLY_LEN],
@@ -124,6 +128,14 @@ impl TmcBus {
             .enumerate()
             .filter(|(_, d)| d.regs[usize::from(reg::CHOPCONF)] & CHOPCONF_DEDGE != 0)
             .fold(0, |mask, (address, _)| mask | (1 << address))
+    }
+
+    pub fn on_overrun(&mut self) {
+        self.reject();
+    }
+
+    pub fn on_reply_collision(&mut self) {
+        self.rejects = self.rejects.wrapping_add(1);
     }
 
     pub fn on_idle(&mut self) {

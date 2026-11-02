@@ -107,3 +107,44 @@ fn temperatures_report_in_centidegrees() {
     };
     assert_eq!(heater.temp_centi(), 21_546);
 }
+
+fn dac_at(temp_c: f32) -> bench_sim_logic::thermal::DacOutput {
+    Heater {
+        params: EXTRUDER_DEFAULT,
+        temp_c,
+    }
+    .dac()
+}
+
+fn temperature_at_ratio(ratio: f32) -> f32 {
+    let (mut cold, mut hot) = (-50.0f32, 500.0f32);
+    for _ in 0..60 {
+        let mid = 0.5 * (cold + hot);
+        if EXTRUDER_DEFAULT.adc_ratio(mid) > ratio {
+            cold = mid;
+        } else {
+            hot = mid;
+        }
+    }
+    0.5 * (cold + hot)
+}
+
+#[test]
+fn the_clamp_flag_turns_on_exactly_at_the_buffered_limits() {
+    let cold_limit = temperature_at_ratio(RATIO_MAX);
+    let hot_limit = temperature_at_ratio(RATIO_MIN);
+    assert!(!dac_at(cold_limit + 0.01).clamped);
+    assert!(dac_at(cold_limit - 0.01).clamped);
+    assert!(!dac_at(hot_limit - 0.01).clamped);
+    assert!(dac_at(hot_limit + 0.01).clamped);
+    assert!(
+        cold_limit < 20.0 && hot_limit > 280.0,
+        "{cold_limit} {hot_limit}"
+    );
+}
+
+#[test]
+fn a_non_finite_temperature_is_flagged_not_hidden() {
+    let dac = dac_at(f32::NAN);
+    assert!(dac.clamped);
+}

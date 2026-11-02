@@ -9,6 +9,7 @@ use crate::regs::{self, DmaStream, InputPin, Timer};
 use crate::ring::{ByteRing, DirQueue, DIR_QUEUE_LEN};
 use crate::sim;
 use bench_sim_logic::dir_merge::DirMerge;
+use bench_sim_logic::tracker::Step;
 
 pub const SNAPSHOT_HZ: u32 = 10_000;
 const TIMER_HZ: u32 = 84_000_000;
@@ -148,11 +149,41 @@ struct Lane {
     dir_serviced: u32,
 }
 
+pub const WALL_STEPS_PER_SNAPSHOT: usize = 32;
+
+struct StepLog {
+    steps: [[Step; WALL_STEPS_PER_SNAPSHOT]; CHANNEL_COUNT],
+    counts: [usize; CHANNEL_COUNT],
+}
+
+impl StepLog {
+    fn new() -> Self {
+        Self {
+            steps: [[Step::default(); WALL_STEPS_PER_SNAPSHOT]; CHANNEL_COUNT],
+            counts: [0; CHANNEL_COUNT],
+        }
+    }
+
+    fn push(&mut self, channel: usize, step: Step) -> Result<(), Fault> {
+        let slot = self.steps[channel]
+            .get_mut(self.counts[channel])
+            .ok_or(Fault::WallStepsOverflow)?;
+        *slot = step;
+        self.counts[channel] += 1;
+        Ok(())
+    }
+
+    fn lists(&self) -> [&[Step]; CHANNEL_COUNT] {
+        core::array::from_fn(|i| &self.steps[i][..self.counts[i]])
+    }
+}
+
 struct Engine {
     lanes: [Lane; CHANNEL_COUNT],
     cycles: u32,
     block: u32,
     drift_wander: u16,
+    steps: StepLog,
 }
 
 struct Snapshot {
@@ -166,8 +197,8 @@ struct Snapshot {
     mco: u16,
 }
 
-pub struct SnapshotOutput {
-    pub net: [i32; CHANNEL_COUNT],
+pub struct SnapshotOutput<'a> {
+    pub steps: [&'a [Step]; CHANNEL_COUNT],
     pub mco: u16,
     pub time: u64,
 }
@@ -301,6 +332,7 @@ pub fn start(both_edges_mask: u8) {
             cycles,
             block: 0,
             drift_wander: 0,
+            steps: StepLog::new(),
         })
     };
 }
@@ -474,12 +506,12 @@ fn extend(now: u64, counter: u16, captured: u16) -> Result<u64, Fault> {
         .ok_or(Fault::NonMonotonic)
 }
 
-pub fn tick() -> Option<Result<SnapshotOutput, LaneFault>> {
+pub fn tick() -> Option<Result<SnapshotOutput<'static>, LaneFault>> {
     let engine = unsafe { (*ENGINE.0.get()).as_mut()? };
     Some(process(engine))
 }
 
-fn process(engine: &mut Engine) -> Result<SnapshotOutput, LaneFault> {
+fn process(engine: &mut Engine) -> Result<SnapshotOutput<'_>, LaneFault> {
     let snapshot = take_snapshot();
     advance_clocks(engine, &snapshot)?;
     let mut advances = [0usize; CHANNEL_COUNT];
@@ -516,7 +548,7 @@ fn process(engine: &mut Engine) -> Result<SnapshotOutput, LaneFault> {
         }
     }
     let rings = unsafe { &*DMA_RINGS.0.get() };
-    let mut net = [0i32; CHANNEL_COUNT];
+    engine.steps.counts = [0; CHANNEL_COUNT];
     for index in 0..CHANNEL_COUNT {
         if mask & (1 << index) == 0 {
             continue;
@@ -551,7 +583,13 @@ fn process(engine: &mut Engine) -> Result<SnapshotOutput, LaneFault> {
             writer.put_zigzag(interval as i64 - lane.last_interval as i64);
             lane.last_step = time;
             lane.last_interval = interval;
-            net[index] += signs.sign_at(time);
+            let sign = signs
+                .sign_at(time)
+                .map_err(|_| fault(Fault::DirAmbiguous))?;
+            engine
+                .steps
+                .push(index, Step { time, sign })
+                .map_err(fault)?;
         }
         lane.step_level = signs.finish();
         lane.dma_position = snapshot.positions[index];
@@ -568,7 +606,7 @@ fn process(engine: &mut Engine) -> Result<SnapshotOutput, LaneFault> {
     writer.commit();
     engine.block = engine.block.wrapping_add(1);
     Ok(SnapshotOutput {
-        net,
+        steps: engine.steps.lists(),
         mco: snapshot.mco,
         time: engine.lanes[MASTER].now,
     })

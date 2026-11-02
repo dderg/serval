@@ -18,6 +18,12 @@ pub struct Tracker {
     levels: u8,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Step {
+    pub time: u64,
+    pub sign: i32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AuxStamp {
     pub mco: u64,
@@ -57,11 +63,56 @@ impl Tracker {
         self.levels
     }
 
-    pub fn tick(&mut self, deltas: &[i32; CHANNELS], mco_raw: u16) -> Result<TickOutput, McoLost> {
-        for (position, delta) in self.positions.iter_mut().zip(deltas) {
-            *position += delta;
+    pub fn tick(
+        &mut self,
+        deltas: &[i32; CHANNELS],
+        excursions: &[i32; CHANNELS],
+        mco_raw: u16,
+    ) -> Result<TickOutput, McoLost> {
+        let start = self.positions;
+        let mut during = 0u8;
+        for channel in 0..CHANNELS {
+            if excursions[channel] != deltas[channel] {
+                let mut turning_point = start;
+                turning_point[channel] += excursions[channel];
+                during |= self
+                    .walls
+                    .triggered_by_channel_alone(&turning_point, channel);
+            }
+            self.positions[channel] += deltas[channel];
         }
-        self.levels = self.walls.levels(&self.positions);
+        self.finish_tick(during, mco_raw)
+    }
+
+    pub fn tick_steps(
+        &mut self,
+        steps: [&[Step]; CHANNELS],
+        mco_raw: u16,
+    ) -> Result<TickOutput, McoLost> {
+        let mut next = [0usize; CHANNELS];
+        let mut during = 0u8;
+        loop {
+            let earliest = (0..CHANNELS)
+                .filter_map(|channel| {
+                    steps[channel]
+                        .get(next[channel])
+                        .map(|step| (step.time, channel))
+                })
+                .min();
+            let Some((_, channel)) = earliest else {
+                break;
+            };
+            self.positions[channel] += steps[channel][next[channel]].sign;
+            next[channel] += 1;
+            during |= self.walls.triggered_involving(&self.positions, channel);
+        }
+        self.finish_tick(during, mco_raw)
+    }
+
+    fn finish_tick(&mut self, triggered_during: u8, mco_raw: u16) -> Result<TickOutput, McoLost> {
+        self.levels = self
+            .walls
+            .levels_for(self.walls.triggered(&self.positions) | triggered_during);
         let mco = self.mco.update(mco_raw);
         self.ticks += 1;
         if self.ticks < self.ticks_per_aux {
