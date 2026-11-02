@@ -273,6 +273,7 @@ pub trajectory::continuous::AnalyticMoveSpan::surface: trajectory::continuous::S
 pub trajectory::continuous::AnalyticMoveSpan::t_end: f64
 pub trajectory::continuous::AnalyticMoveSpan::t_start: f64
 impl trajectory::continuous::AnalyticMoveSpan
+pub fn trajectory::continuous::AnalyticMoveSpan::cap_contact_times(&self) -> impl core::iter::traits::iterator::Iterator<Item = f64> + '_
 pub fn trajectory::continuous::AnalyticMoveSpan::eval_axis(&self, usize, f64) -> core::result::Result<trajectory::continuous::Pva, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::AnalyticMoveSpan::eval_axis_pvaj(&self, usize, f64) -> core::result::Result<trajectory::continuous::Pvaj, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::AnalyticMoveSpan::has_variable_surface(&self) -> bool
@@ -523,6 +524,7 @@ pub trajectory::AnalyticMoveSpan::surface: trajectory::continuous::SurfaceMode
 pub trajectory::AnalyticMoveSpan::t_end: f64
 pub trajectory::AnalyticMoveSpan::t_start: f64
 impl trajectory::continuous::AnalyticMoveSpan
+pub fn trajectory::continuous::AnalyticMoveSpan::cap_contact_times(&self) -> impl core::iter::traits::iterator::Iterator<Item = f64> + '_
 pub fn trajectory::continuous::AnalyticMoveSpan::eval_axis(&self, usize, f64) -> core::result::Result<trajectory::continuous::Pva, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::AnalyticMoveSpan::eval_axis_pvaj(&self, usize, f64) -> core::result::Result<trajectory::continuous::Pvaj, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::AnalyticMoveSpan::has_variable_surface(&self) -> bool
