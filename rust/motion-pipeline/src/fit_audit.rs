@@ -7,6 +7,7 @@
 //! tests that hold the shaper to its `max_path_deviation` /
 //! `max_accel_deviation` promise; the live host never pays for it.
 
+use std::cell::RefCell;
 use std::sync::Mutex;
 
 use crate::lowering::{FitTol, eval_mono, eval_mono_dd};
@@ -39,6 +40,7 @@ pub struct FitViolation {
     /// on its own it proves a break only where the signal is assembled from
     /// other tracks' pieces.
     pub break_in_edge_sliver: bool,
+    pub exemption: Option<Exemption>,
 }
 
 static VIOLATIONS: Mutex<Vec<FitViolation>> = Mutex::new(Vec::new());
@@ -97,6 +99,9 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
         }
     }
     if position > 1.0 || acceleration > 1.0 {
+        let exemption = (position <= 1.0)
+            .then(|| cap_contact_onset(sig, &piece, acceleration))
+            .flatten();
         let edge_change = |edge: f64, inside: f64, past_sliver: f64| {
             (sig.eval_pva(next_toward(edge, inside)).2 - sig.eval_pva(past_sliver).2).abs()
                 > piece.fit_tol.accel_mm_s2
@@ -117,6 +122,108 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
                 worst_u,
                 accepted_at_floor: piece.accepted_at_floor,
                 break_in_edge_sliver,
+                exemption,
             });
     }
 }
+
+/// Why a violating piece is not a fit failure: what no representable span
+/// could have held to the tolerance, with the measurements that bound it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Exemption {
+    /// A floor piece abutting a disk rail's curvature-cap contact, where the
+    /// exact acceleration rises as `onset_coefficient · √τ`: no polynomial
+    /// whose acceleration has degree n misses it by less than
+    /// `E_n · |B| · √h`, and the rungs, anchored to the endpoint state,
+    /// reach at most the Lebesgue factor of the nine probes times that.
+    CapContactOnset {
+        onset_coefficient: f64,
+        error_mm_s2: f64,
+        bound_mm_s2: f64,
+    },
+}
+
+/// Minimax error of √x on [0, 1] by polynomials of degree n, by Remez.
+const SQRT_MINIMAX_ERROR: [f64; 12] = [
+    0.5, 0.125, 0.06762, 0.04593, 0.03469, 0.02785, 0.02325, 0.01995, 0.01747, 0.01554, 0.01399,
+    0.01272,
+];
+
+/// `1 + Λ₈`, Λ₈ ≈ 2.29 the Lebesgue constant of the nine Chebyshev–Lobatto
+/// ladder probes: an anchored rung exceeds the minimax error by at most it.
+pub const ANCHORED_RUNG_LEBESGUE_FACTOR: f64 = 3.3;
+
+pub const CAP_CONTACT_EDGE_SLACK_S: f64 = 1e-9;
+
+thread_local! {
+    static CAP_CONTACTS: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The curvature-cap contact times of the source being fitted on this
+/// thread, for as long as the scope lives.
+pub(crate) struct CapContactScope;
+
+impl CapContactScope {
+    pub(crate) fn enter(contacts: &[f64]) -> Self {
+        CAP_CONTACTS.with(|held| {
+            let mut held = held.borrow_mut();
+            held.clear();
+            held.extend_from_slice(contacts);
+        });
+        Self
+    }
+}
+
+impl Drop for CapContactScope {
+    fn drop(&mut self) {
+        CAP_CONTACTS.with(|held| held.borrow_mut().clear());
+    }
+}
+
+fn cap_contact_onset<S: TrackSignal>(
+    sig: &S,
+    piece: &AcceptedPiece,
+    acceleration_over_tolerance: f64,
+) -> Option<Exemption> {
+    let h = piece.t1 - piece.t0;
+    if piece.fit_context != "materialize_source"
+        || !piece.accepted_at_floor
+        || h > 2.0 * piece.cubic_floor
+    {
+        return None;
+    }
+    let touches = |edge: f64| {
+        CAP_CONTACTS.with(|held| {
+            held.borrow()
+                .iter()
+                .any(|&contact| (contact - edge).abs() <= CAP_CONTACT_EDGE_SLACK_S)
+        })
+    };
+    let (onset, far) = if touches(piece.t0) {
+        (
+            next_toward(piece.t0, piece.t1),
+            next_toward(piece.t1, piece.t0),
+        )
+    } else if touches(piece.t1) {
+        (
+            next_toward(piece.t1, piece.t0),
+            next_toward(piece.t0, piece.t1),
+        )
+    } else {
+        return None;
+    };
+    let onset_coefficient = (sig.eval_pva(far).2 - sig.eval_pva(onset).2) / h.sqrt();
+    let acceleration_degree = (piece.mono_u.len() - 1).checked_sub(2)?;
+    let minimax = *SQRT_MINIMAX_ERROR.get(acceleration_degree)?;
+    let bound_mm_s2 = ANCHORED_RUNG_LEBESGUE_FACTOR * minimax * onset_coefficient.abs() * h.sqrt();
+    let error_mm_s2 = acceleration_over_tolerance * piece.fit_tol.accel_mm_s2;
+    (error_mm_s2 <= bound_mm_s2).then_some(Exemption::CapContactOnset {
+        onset_coefficient,
+        error_mm_s2,
+        bound_mm_s2,
+    })
+}
+
+#[cfg(test)]
+#[path = "fit_audit_tests.rs"]
+mod tests;

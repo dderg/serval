@@ -189,7 +189,10 @@ fn no_follower_fit_piece_is_pinned_to_a_break_hidden_in_its_edge_sliver() {
             the remaining exceedances are open (materialize disk rails, \
             shaped leaders, follower sources)"]
 fn every_accepted_fit_piece_holds_the_fit_tolerance_against_the_exact_signal() {
-    let violations = audited_violations();
+    let violations: Vec<(String, FitViolation)> = audited_violations()
+        .into_iter()
+        .filter(|(_, violation)| violation.exemption.is_none())
+        .collect();
     assert!(
         violations.is_empty(),
         "{} accepted fit pieces leave the fit tolerance:\n{}",

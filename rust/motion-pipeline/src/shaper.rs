@@ -530,19 +530,22 @@ fn materialize_changed_sources(
             continue;
         }
         let mut breakpoints = vec![segment.t_start, segment.t_end];
+        let mut cap_contacts = Vec::new();
         if let ContinuousAxis::Analytic { span, .. } = source {
             breakpoints.extend(span.phase_seam_times());
-            let contacts: Vec<f64> = span
-                .cap_contact_times()
-                .filter(|&t| t >= segment.t_start && t <= segment.t_end)
-                .collect();
-            grade_seeds_toward(&mut breakpoints, &contacts);
+            cap_contacts.extend(
+                span.cap_contact_times()
+                    .filter(|&t| t >= segment.t_start && t <= segment.t_end),
+            );
+            grade_seeds_toward(&mut breakpoints, &cap_contacts);
             if variable_surface_z {
                 breakpoints.extend(span.surface_seam_times().ok_or_else(|| {
                     fit_tolerance_without_probe(axis, segment.t_start, segment.t_end)
                 })?);
             }
         }
+        #[cfg(feature = "fit-audit")]
+        let _cap_contacts_audited = crate::fit_audit::CapContactScope::enter(&cap_contacts);
         let mut curve = fit_axis_from_signal(
             AxisFit {
                 axis,
