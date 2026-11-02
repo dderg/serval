@@ -121,34 +121,6 @@ fn cusp_segment(x_coeffs: Vec<f64>, y_coeffs: Vec<f64>, t0: f64, t1: f64) -> Con
     leader_segment(curve(x_coeffs), curve(y_coeffs), t0, t1)
 }
 
-fn leader_segment(
-    x: nurbs::ScalarNurbs,
-    y: nurbs::ScalarNurbs,
-    t0: f64,
-    t1: f64,
-) -> ContinuousSegment {
-    let held = Arc::new(bezier_pieces_to_nurbs(&[BezierPiece {
-        u_start: t0,
-        u_end: t1,
-        coeffs: vec![0.0],
-    }]));
-    ContinuousSegment {
-        axes: Arc::from([
-            ContinuousAxis::Spline(Arc::new(x)),
-            ContinuousAxis::Spline(Arc::new(y)),
-            ContinuousAxis::Spline(Arc::clone(&held)),
-            ContinuousAxis::Spline(held),
-        ]),
-        followers: Arc::from([]),
-        spatial_path: true,
-        t_start: t0,
-        t_end: t1,
-        motor_mask: 0,
-        source_line: 1,
-        rest_at_end: false,
-    }
-}
-
 #[test]
 fn follower_advance_fits_the_transformed_acceleration() {
     let shaped = cusp_segment(vec![0.0, 10.0], vec![0.0, 0.0, 500.0], 0.0, 0.02);
@@ -261,6 +233,150 @@ fn endpoint_velocity_zero_dedups_against_the_support_grid() {
     );
     let at_start = breaks.iter().filter(|&&t| (t - t0).abs() <= 1e-12).count();
     assert_eq!(at_start, 1, "endpoint root duplicated in {breaks:?}");
+}
+
+#[test]
+#[should_panic(expected = "beyond the")]
+fn an_ingested_length_off_by_more_than_leaf_reordering_panics() {
+    let shaped = cusp_segment(vec![0.0, 10.0], vec![0.0, 0.0, 500.0], 0.0, 0.02);
+    let state = FollowerState::default();
+    let mut odometer = odometer_from_start(&shaped);
+    odometer.length += 1e-9;
+    FollowerSignal::new(&shaped, &shaped, 3, &[0, 1], &state, odometer, 0.0);
+}
+
+#[test]
+#[should_panic(expected = "stand still")]
+fn still_leaders_under_an_ingested_length_panic() {
+    let shaped = cusp_segment(vec![1.0], vec![2.0], 0.0, 0.02);
+    let state = FollowerState::default();
+    let odometer = super::Odometer {
+        start: 0.0,
+        length: 1e-12,
+    };
+    FollowerSignal::new(&shaped, &shaped, 3, &[0, 1], &state, odometer, 0.0);
+}
+
+#[test]
+fn a_rescaled_odometer_carries_its_scale_into_every_derivative() {
+    let shaped = cusp_segment(vec![0.0, 10.0], vec![0.0, 0.0, 500.0], 0.0, 0.02);
+    let mut state = FollowerState::default();
+    state.push_span(1.0, 0.05, 0.09);
+    let mut sig = FollowerSignal::new(
+        &shaped,
+        &shaped,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    sig.odometer_scale = 0.5;
+    let step = 1e-5;
+    let central = |before: f64, after: f64| (after - before) / (2.0 * step);
+    let assert_close = |label: &str, t: f64, exact: f64, difference: f64| {
+        assert!(
+            (exact - difference).abs() <= 1e-4 * exact.abs().max(1.0),
+            "{label} at {t}: {exact} but the central difference is {difference}"
+        );
+    };
+    for index in 1..20 {
+        let t = f64::from(index) * 0.001;
+        let (_, velocity, acceleration) = sig.eval_pva(t);
+        let before = sig.eval_pva(t - step);
+        let after = sig.eval_pva(t + step);
+        assert_close("velocity", t, velocity, central(before.0, after.0));
+        assert_close("acceleration", t, acceleration, central(before.1, after.1));
+        assert_close("jerk", t, sig.jerk(t), central(before.2, after.2));
+        assert_close("deriv", t, sig.deriv(t), velocity);
+        assert_close("second_deriv", t, sig.second_deriv(t), acceleration);
+    }
+}
+
+fn odometer_from_start(shaped: &ContinuousSegment) -> super::Odometer {
+    super::Odometer {
+        start: 0.0,
+        length: super::leader_arc_length(shaped, &[0, 1]),
+    }
+}
+
+fn ramp_piece(start: f64, end: f64, velocity: f64) -> BezierPiece {
+    BezierPiece {
+        u_start: start,
+        u_end: end,
+        coeffs: vec![0.0, velocity],
+    }
+}
+
+fn weld_window(start: f64, end: f64) -> super::WeldWindow {
+    super::WeldWindow {
+        axis: 3,
+        start,
+        end,
+        tol: crate::lowering::FitTol {
+            pos_mm: 0.005,
+            accel_mm_s2: 50.0,
+        },
+    }
+}
+
+#[test]
+fn a_weld_that_would_bridge_a_velocity_step_is_refused() {
+    let pieces = [ramp_piece(0.0, 0.12, 1.7)];
+    let weld = super::SeamWeld::spanning(weld_window(0.0, 0.12), (1.0, -233.0), 0.0, 1.0, &pieces);
+    assert!(
+        matches!(weld, Err(crate::types::PostProcessError::SeamWeld { .. })),
+        "a 234.7 mm/s velocity step was welded silently"
+    );
+}
+
+#[test]
+fn a_weld_that_would_shift_the_track_past_the_tolerance_is_refused() {
+    let pieces = [ramp_piece(0.0, 0.01, 2.0)];
+    let weld = super::SeamWeld::spanning(weld_window(0.0, 0.01), (1.01, 2.0), 0.0, 1.0, &pieces);
+    assert!(matches!(
+        weld,
+        Err(crate::types::PostProcessError::SeamWeld { .. })
+    ));
+}
+
+#[test]
+fn a_fit_residual_is_welded_onto_the_emitted_state() {
+    let mut pieces = [ramp_piece(0.0, 0.01, 2.0)];
+    let emitted = (1.0 + 1e-9, 2.0 + 1e-6);
+    let weld = super::SeamWeld::spanning(weld_window(0.0, 0.01), emitted, 0.0, 1.0, &pieces)
+        .expect("a residual well inside the tolerance welds");
+    weld.apply(&mut pieces[0]);
+    assert!((1.0 + pieces[0].coeffs[0] - emitted.0).abs() <= 1e-15);
+    assert!((pieces[0].coeffs[1] - emitted.1).abs() <= 1e-12);
+}
+
+fn leader_segment(
+    x: nurbs::ScalarNurbs,
+    y: nurbs::ScalarNurbs,
+    t0: f64,
+    t1: f64,
+) -> ContinuousSegment {
+    let held = Arc::new(bezier_pieces_to_nurbs(&[BezierPiece {
+        u_start: t0,
+        u_end: t1,
+        coeffs: vec![0.0],
+    }]));
+    ContinuousSegment {
+        axes: Arc::from([
+            ContinuousAxis::Spline(Arc::new(x)),
+            ContinuousAxis::Spline(Arc::new(y)),
+            ContinuousAxis::Spline(Arc::clone(&held)),
+            ContinuousAxis::Spline(held),
+        ]),
+        followers: Arc::from([]),
+        spatial_path: true,
+        t_start: t0,
+        t_end: t1,
+        motor_mask: 0,
+        source_line: 1,
+        rest_at_end: false,
+    }
 }
 
 #[test]
@@ -495,6 +611,7 @@ fn an_advanced_follower_source_fit_opens_and_closes_on_the_signal_velocity() {
 }
 
 const DRAIN_WINDOW: (f64, f64) = (0.388_333_333_333_333_36, 0.400_833_333_333_333_4);
+
 const DRAIN_REVERSAL: f64 = 0.393_333_333_333_333_4;
 
 fn drain_reversal_leader() -> ContinuousSegment {
@@ -601,71 +718,6 @@ fn a_plain_follower_source_fits_through_a_leader_reversal() {
     };
     super::fit_source_projection(source, fit_tol, None)
         .unwrap_or_else(|error| panic!("reversal fit failed: {error:?}"));
-}
-
-#[test]
-#[should_panic(expected = "beyond the")]
-fn an_ingested_length_off_by_more_than_leaf_reordering_panics() {
-    let shaped = cusp_segment(vec![0.0, 10.0], vec![0.0, 0.0, 500.0], 0.0, 0.02);
-    let state = FollowerState::default();
-    let mut odometer = odometer_from_start(&shaped);
-    odometer.length += 1e-9;
-    FollowerSignal::new(&shaped, &shaped, 3, &[0, 1], &state, odometer, 0.0);
-}
-
-#[test]
-#[should_panic(expected = "stand still")]
-fn still_leaders_under_an_ingested_length_panic() {
-    let shaped = cusp_segment(vec![1.0], vec![2.0], 0.0, 0.02);
-    let state = FollowerState::default();
-    let odometer = super::Odometer {
-        start: 0.0,
-        length: 1e-12,
-    };
-    FollowerSignal::new(&shaped, &shaped, 3, &[0, 1], &state, odometer, 0.0);
-}
-
-#[test]
-fn a_rescaled_odometer_carries_its_scale_into_every_derivative() {
-    let shaped = cusp_segment(vec![0.0, 10.0], vec![0.0, 0.0, 500.0], 0.0, 0.02);
-    let mut state = FollowerState::default();
-    state.push_span(1.0, 0.05, 0.09);
-    let mut sig = FollowerSignal::new(
-        &shaped,
-        &shaped,
-        3,
-        &[0, 1],
-        &state,
-        odometer_from_start(&shaped),
-        0.0,
-    );
-    sig.odometer_scale = 0.5;
-    let step = 1e-5;
-    let central = |before: f64, after: f64| (after - before) / (2.0 * step);
-    let assert_close = |label: &str, t: f64, exact: f64, difference: f64| {
-        assert!(
-            (exact - difference).abs() <= 1e-4 * exact.abs().max(1.0),
-            "{label} at {t}: {exact} but the central difference is {difference}"
-        );
-    };
-    for index in 1..20 {
-        let t = f64::from(index) * 0.001;
-        let (_, velocity, acceleration) = sig.eval_pva(t);
-        let before = sig.eval_pva(t - step);
-        let after = sig.eval_pva(t + step);
-        assert_close("velocity", t, velocity, central(before.0, after.0));
-        assert_close("acceleration", t, acceleration, central(before.1, after.1));
-        assert_close("jerk", t, sig.jerk(t), central(before.2, after.2));
-        assert_close("deriv", t, sig.deriv(t), velocity);
-        assert_close("second_deriv", t, sig.second_deriv(t), acceleration);
-    }
-}
-
-fn odometer_from_start(shaped: &ContinuousSegment) -> super::Odometer {
-    super::Odometer {
-        start: 0.0,
-        length: super::leader_arc_length(shaped, &[0, 1]),
-    }
 }
 
 const SEAM_PIECE_S: f64 = 0.01;
