@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use nurbs::ScalarNurbs;
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 use trajectory::{ContinuousAxis, ContinuousSegment};
 
@@ -233,6 +234,53 @@ fn endpoint_velocity_zero_dedups_against_the_support_grid() {
     );
     let at_start = breaks.iter().filter(|&&t| (t - t0).abs() <= 1e-12).count();
     assert_eq!(at_start, 1, "endpoint root duplicated in {breaks:?}");
+}
+
+#[test]
+fn leader_speed_step_on_the_grid_is_seeded_as_a_construction_breakpoint() {
+    let (t0, step_at, t1) = (0.0, 0.01, 0.02);
+    let x = bezier_pieces_to_nurbs(&[
+        BezierPiece {
+            u_start: t0,
+            u_end: step_at,
+            coeffs: vec![0.0, 100.0],
+        },
+        BezierPiece {
+            u_start: step_at,
+            u_end: t1,
+            coeffs: vec![1.0, 200.0],
+        },
+    ]);
+    let y = bezier_pieces_to_nurbs(&[BezierPiece {
+        u_start: t0,
+        u_end: t1,
+        coeffs: vec![2.0],
+    }]);
+    let shaped = leader_segment(x, y, t0, t1);
+    let raw = shaped.clone();
+    let mut state = FollowerState::default();
+    state.push_span(10.0, 0.05, 0.05);
+    let sig = FollowerSignal::new(
+        &shaped,
+        &raw,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    let velocity_step = sig.deriv(trajectory::next_toward(step_at, f64::INFINITY))
+        - sig.deriv(trajectory::next_toward(step_at, f64::NEG_INFINITY));
+    assert!(
+        (velocity_step - 5.0).abs() < 1e-9,
+        "fixture must step the follower velocity by 5 mm/s at the leader knot, not \
+         {velocity_step}"
+    );
+    let breaks = sig.construction_breakpoints(&raw.axes[3], 50.0).fit_seeds;
+    assert!(
+        breaks.contains(&step_at),
+        "the follower's velocity step at {step_at} is not a fit seed: {breaks:?}"
+    );
 }
 
 #[test]
@@ -1092,5 +1140,184 @@ fn advance_steps_at_leader_knots_closer_than_the_floor_plan() {
     super::fit_source_projection(source, fit_tol, Some(&stage)).expect(
         "the advance turns both leader acceleration steps into velocity steps a sub-floor \
          interval apart, which one knot carries within the position tolerance",
+    );
+}
+
+const ROUNDING_SEAM: f64 = 0.005;
+const SHORT_LEADER_PIECE_S: f64 = 1e-6;
+const SEAM_VELOCITY_ROUNDING_MM_S: f64 = 3e-8;
+
+fn leader_with_a_short_piece_after_a_rounding_velocity_seam(t0: f64, t1: f64) -> ScalarNurbs {
+    let knots = [t0, ROUNDING_SEAM, ROUNDING_SEAM + SHORT_LEADER_PIECE_S, t1];
+    let accelerations = [0.0, 4_000.0, 0.0];
+    let seam_velocity_mismatches = [0.0, SEAM_VELOCITY_ROUNDING_MM_S, 0.0];
+    let (mut position, mut velocity) = (0.0, 40.0);
+    let pieces: Vec<BezierPiece> = knots
+        .windows(2)
+        .zip(accelerations.into_iter().zip(seam_velocity_mismatches))
+        .map(|(span, (acceleration, mismatch))| {
+            let coeffs = vec![position, velocity + mismatch, 0.5 * acceleration];
+            (position, velocity, _) = super::polynomial_pva(&coeffs, span[1] - span[0]);
+            BezierPiece {
+                u_start: span[0],
+                u_end: span[1],
+                coeffs,
+            }
+        })
+        .collect();
+    bezier_pieces_to_nurbs(&pieces)
+}
+
+#[test]
+fn an_advanced_follower_source_holds_the_tolerance_past_a_leader_seam_velocity_rounding() {
+    let (t0, t1) = (0.0, 0.01);
+    let shaped = leader_segment(
+        leader_with_a_short_piece_after_a_rounding_velocity_seam(t0, t1),
+        bezier_pieces_to_nurbs(&[BezierPiece {
+            u_start: t0,
+            u_end: t1,
+            coeffs: vec![0.0, 30.0],
+        }]),
+        t0,
+        t1,
+    );
+    let mut state = FollowerState::default();
+    state.push_span(50.0, 0.05, 0.05);
+    let source = super::FollowerSource {
+        shaped: &shaped,
+        raw: &shaped,
+        axis: 3,
+        leaders: &[0, 1],
+        state: &state,
+        s_start: 0.0,
+        s_length: super::leader_arc_length(&shaped, &[0, 1]),
+    };
+    let fit_tol = crate::lowering::FitTol {
+        pos_mm: 0.000_125,
+        accel_mm_s2: 50.0,
+    };
+    let stage = trajectory::ChainStage::NonlinearAdvance(trajectory::NonlinearAdvance {
+        model: trajectory::AdvanceModel::Tanh,
+        linear_advance: 0.02,
+        nonlinear_offset: 0.03,
+        linearization_velocity: 1.0,
+    });
+    let fitted = super::fit_source_projection(source, fit_tol, Some(&stage)).unwrap();
+    let sig = FollowerSignal::new(
+        &shaped,
+        &shaped,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    let advanced = super::AdvancedFollowerSignal {
+        source: &sig,
+        stage: &stage,
+        steps: &fitted.window_advance_steps,
+    };
+    for piece in nurbs::bezier::extract_bezier_pieces(&fitted.track) {
+        let duration = piece.u_end - piece.u_start;
+        for sample in 0..64 {
+            let tau = duration * (f64::from(sample) + 0.5) / 64.0;
+            let fitted_acceleration = super::polynomial_pva(&piece.coeffs, tau).2;
+            let signal_acceleration = advanced.eval_pva(piece.u_start + tau).2;
+            assert!(
+                (fitted_acceleration - signal_acceleration).abs() <= fit_tol.accel_mm_s2,
+                "piece [{}, {}] accelerates at {fitted_acceleration} mm/s² where the advanced \
+                 signal does at {signal_acceleration}, {tau} s in",
+                piece.u_start,
+                piece.u_end
+            );
+        }
+    }
+}
+
+fn leader_with_a_knot(knot: f64, end: f64) -> ContinuousSegment {
+    let before = [0.0, 80.0, 3_000.0, -400_000.0];
+    let at_knot = |order: usize| {
+        before
+            .iter()
+            .enumerate()
+            .skip(order)
+            .map(|(power, &coefficient)| {
+                let falling = ((power - order + 1)..=power).product::<usize>() as f64;
+                falling * coefficient * knot.powi((power - order) as i32)
+            })
+            .sum::<f64>()
+    };
+    let after = vec![
+        at_knot(0),
+        at_knot(1),
+        (at_knot(2) + 250.0) / 2.0,
+        (at_knot(3) + 900_000.0) / 6.0,
+    ];
+    let x = bezier_pieces_to_nurbs(&[
+        BezierPiece {
+            u_start: 0.0,
+            u_end: knot,
+            coeffs: before.to_vec(),
+        },
+        BezierPiece {
+            u_start: knot,
+            u_end: end,
+            coeffs: after,
+        },
+    ]);
+    let y = bezier_pieces_to_nurbs(&[BezierPiece {
+        u_start: 0.0,
+        u_end: end,
+        coeffs: vec![0.0, 30.0, -1_500.0, 60_000.0],
+    }]);
+    leader_segment(x, y, 0.0, end)
+}
+
+#[test]
+fn a_follower_reports_its_steps_across_a_leader_knot() {
+    let knot = 0.008;
+    let shaped = leader_with_a_knot(knot, 0.02);
+    let mut state = FollowerState::default();
+    state.push_span(10.0, 0.05, 0.09);
+    let sig = FollowerSignal::new(
+        &shaped,
+        &shaped,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    assert_eq!(sig.interior_knots(0.001, 0.019), [knot]);
+    let [before, after] = sig.eval_pva_across(knot);
+    for (side, across) in [(f64::NEG_INFINITY, before), (f64::INFINITY, after)] {
+        let direct = sig.eval_pva(trajectory::next_toward(knot, side));
+        for (across, direct) in [
+            (across.0, direct.0),
+            (across.1, direct.1),
+            (across.2, direct.2),
+        ] {
+            assert!(
+                (across - direct).abs() <= 1e-9 * direct.abs().max(1.0),
+                "evaluating across the knot reads {across}, one ulp to its side reads {direct}"
+            );
+        }
+    }
+    let acceleration_step = (after.2 - before.2).abs();
+    let jerk_step = (sig.jerk(trajectory::next_toward(knot, f64::INFINITY))
+        - sig.jerk(trajectory::next_toward(knot, f64::NEG_INFINITY)))
+    .abs();
+    assert!(
+        acceleration_step > 1.0 && jerk_step > 1_000.0,
+        "test premise: the follower steps across the knot ({acceleration_step} mm/s², \
+         {jerk_step} mm/s³)"
+    );
+    let bound = sig.knot_jump(knot);
+    assert!(
+        acceleration_step <= bound.acceleration && jerk_step <= bound.jerk,
+        "the follower steps by {acceleration_step} mm/s² and {jerk_step} mm/s³ across the \
+         knot, past its reported bound of {} mm/s² and {} mm/s³",
+        bound.acceleration,
+        bound.jerk
     );
 }
