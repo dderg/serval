@@ -190,7 +190,7 @@ fn leader_velocity_sign_change_is_seeded_as_a_construction_breakpoint() {
     let raw = shaped.clone();
     let state = FollowerState::default();
     let sig = FollowerSignal::new(&shaped, &raw, 3, &[0, 1], &state, 0.0, 0.0);
-    let breaks = sig.construction_breakpoints(&raw.axes[3]).fit_seeds;
+    let breaks = sig.construction_breakpoints(&raw.axes[3], 50.0).fit_seeds;
     let vx = |t: f64| super::axis_pva(&shaped.axes[0], t).1;
     let seeded = breaks
         .iter()
@@ -214,7 +214,7 @@ fn endpoint_velocity_zero_dedups_against_the_support_grid() {
     let raw = shaped.clone();
     let state = FollowerState::default();
     let sig = FollowerSignal::new(&shaped, &raw, 3, &[0, 1], &state, 0.0, 0.0);
-    let breaks = sig.construction_breakpoints(&raw.axes[3]).fit_seeds;
+    let breaks = sig.construction_breakpoints(&raw.axes[3], 50.0).fit_seeds;
     assert_eq!(
         super::axis_pva(&shaped.axes[0], t0).1,
         0.0,
@@ -222,4 +222,33 @@ fn endpoint_velocity_zero_dedups_against_the_support_grid() {
     );
     let at_start = breaks.iter().filter(|&&t| (t - t0).abs() <= 1e-12).count();
     assert_eq!(at_start, 1, "endpoint root duplicated in {breaks:?}");
+}
+
+#[test]
+fn a_leader_acceleration_seam_is_seeded_as_a_construction_breakpoint() {
+    let (t0, seam, t1) = (300.0, 300.01, 300.02);
+    let x = bezier_pieces_to_nurbs(&[
+        BezierPiece {
+            u_start: t0,
+            u_end: seam,
+            coeffs: vec![0.0, 100.0, 0.0],
+        },
+        BezierPiece {
+            u_start: seam,
+            u_end: t1,
+            coeffs: vec![1.0, 100.0, 2_500.0],
+        },
+    ]);
+    let mut shaped = cusp_segment(vec![0.0, 100.0], vec![0.0, 50.0], t0, t1);
+    Arc::make_mut(&mut shaped.axes)[0] = ContinuousAxis::Spline(Arc::new(x));
+    let raw = shaped.clone();
+    let mut state = FollowerState::default();
+    state.push_span(10.0, 0.05, 0.05);
+    let sig = FollowerSignal::new(&shaped, &raw, 3, &[0, 1], &state, 0.0, 0.0);
+    let seeds = sig.construction_breakpoints(&raw.axes[3], 50.0).fit_seeds;
+    assert!(
+        seeds.iter().any(|&t| (t - seam).abs() <= 1e-12),
+        "the leader's acceleration jumps from 0 to 5000 mm/s² at {seam}, so the follower's \
+         does too, yet the fit seeds {seeds:?} straddle it"
+    );
 }
