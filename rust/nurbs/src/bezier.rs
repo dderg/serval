@@ -83,17 +83,15 @@ impl BezierPiece {
         let d = bernstein.len() - 1;
         let h = u_end - u_start;
 
-        let mut h_pow = 1.0;
-        let mut coeffs = vec![0.0; d + 1];
-        for k in 0..=d {
-            let mut acc = 0.0;
-            for i in 0..=k {
-                let sign = if (k - i) % 2 == 0 { 1.0 } else { -1.0 };
-                let c_d_k = binomial(d, k) as f64;
-                let c_k_i = binomial(k, i) as f64;
-                acc += sign * c_d_k * c_k_i * bernstein[i];
+        let mut coeffs = bernstein.to_vec();
+        for k in 1..=d {
+            for i in (k..=d).rev() {
+                coeffs[i] -= coeffs[i - 1];
             }
-            coeffs[k] = acc / h_pow;
+        }
+        let mut h_pow = 1.0;
+        for (k, c) in coeffs.iter_mut().enumerate() {
+            *c = binomial(d, k) as f64 * *c / h_pow;
             h_pow *= h;
         }
         Self {

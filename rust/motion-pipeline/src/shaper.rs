@@ -10,8 +10,9 @@ use trajectory::{
 
 use crate::follower_projection::{FollowerState, advance_before_projection, project_followers};
 use crate::lowering::{
-    AccelerationTrend, FitTol, LADDER_PROBES_U, LadderBudget, LadderFailure, LadderPolicy,
-    LadderPva, LadderSpan, LadderTruth, VelocitySign, exact_piece, ladder_fit, quintic_in_u,
+    AccelerationTrend, FitTol, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget, LadderFailure,
+    LadderPolicy, LadderPva, LadderSpan, LadderTruth, VelocitySign, exact_piece, ladder_fit,
+    quintic_in_u,
 };
 use crate::types::{BaseItem, Control, PostProcessError, TrajectoryItem};
 
@@ -1909,6 +1910,18 @@ const MIN_DEVICE_INTERVAL_S: f64 = 2e-9;
 /// be handed — is the one that still leaves the budget to the signal.
 const LADDER_HIGH_DEGREE_ACCEL_NOISE_GAIN: f64 = 32.0;
 
+fn stored_acceleration_noise(position_scale: f64, span_s: f64) -> f64 {
+    let control_point_rounding = 0.5 * f64::EPSILON * position_scale;
+    let second_difference_rounding = 4.0 * control_point_rounding;
+    let degree = LADDER_MAX_DEGREE as f64;
+    degree * (degree - 1.0) * second_difference_rounding / (span_s * span_s)
+}
+
+fn stored_acceleration_floor(position_scale: f64, fit_tol: FitTol) -> f64 {
+    let storage_share_of_accel_budget = 0.5 * fit_tol.accel_mm_s2;
+    (stored_acceleration_noise(position_scale, 1.0) / storage_share_of_accel_budget).sqrt()
+}
+
 #[derive(Debug, Clone, Copy)]
 struct LadderFloors {
     high_degree: f64,
@@ -1949,7 +1962,9 @@ fn ladder_resolution_floor_from_scales(
     fit_tol: FitTol,
 ) -> LadderFloors {
     let sample_noise = f64::EPSILON * nurbs::fmadd(time_scale, velocity_scale, position_scale);
-    let representable = MIN_DEVICE_INTERVAL_S.max(8.0 * f64::EPSILON * time_scale);
+    let representable = MIN_DEVICE_INTERVAL_S
+        .max(8.0 * f64::EPSILON * time_scale)
+        .max(stored_acceleration_floor(position_scale, fit_tol));
     LadderFloors {
         high_degree: representable
             .max((LADDER_HIGH_DEGREE_ACCEL_NOISE_GAIN * sample_noise / fit_tol.accel_mm_s2).sqrt()),
@@ -2318,15 +2333,6 @@ struct SpanSeeds {
     upper: f64,
 }
 
-/// Ladder fit of the shaped signal over one span: the endpoint-anchored
-/// quadratic carrying the span's own travel, the cubic through both endpoint
-/// velocities, then the quintic Hermite matching the convolution's exact
-/// (p, v, a) at both ends and degrees 6/7 from interior residuals — the
-/// lowering ladder against pre-sampled truth, with the shaper's own budgets.
-/// Every accepted piece is endpoint-anchored, so the span seams stay C0 no
-/// matter which rung wins. Returns the accepted monomial-in-u fit, or the
-/// quintic base with `fits = false` so the caller can bisect.
-#[allow(clippy::type_complexity)]
 /// How far inside a span edge the state the ladder anchors to is read: past
 /// whatever coalescing absorbed there, and at least a cubic floor, but no
 /// more than a quarter of the span.
@@ -2337,9 +2343,14 @@ fn edge_inset(h: f64, cubic_floor: f64, absorbed: f64) -> f64 {
 /// The velocity and acceleration a span is anchored to at one edge. Both
 /// are read at the seam itself, so neighbouring pieces meet with matching
 /// state wherever the signal is smooth — unless the acceleration past the
-/// edge's coalesced sliver differs from the seam reading by more than the
-/// fit tolerance: then a break hides in the sliver, and pinning the piece
-/// to the seam value would anchor it to the break's far side.
+/// edge's coalesced sliver, extrapolated back to the seam, misses the seam
+/// reading by more than the fit tolerance: then a break hides in the
+/// sliver, and the piece anchors to that extrapolation, the break's far
+/// side as it would read at the seam. The extrapolation runs through a
+/// second read as far again past the sliver, so a smooth signal's jerk
+/// across a wide sliver cancels and only its snap times the squared sliver
+/// remains; the inset is at most a quarter span, so that read stays inside
+/// the span.
 fn edge_velocity_and_acceleration<S: TrackSignal>(
     sig: &S,
     axis: usize,
@@ -2351,14 +2362,26 @@ fn edge_velocity_and_acceleration<S: TrackSignal>(
     let velocity = exact_value(axis, velocity, seam)?;
     let seam_acceleration = exact_value(axis, seam_acceleration, seam)?;
     let past_acceleration = exact_value(axis, sig.second_deriv(past_sliver), past_sliver)?;
-    let acceleration = if (past_acceleration - seam_acceleration).abs() > fit_tol.accel_mm_s2 {
-        past_acceleration
+    let beyond = nurbs::fmadd(2.0, past_sliver - seam, seam);
+    let beyond_acceleration = exact_value(axis, sig.second_deriv(beyond), beyond)?;
+    let extrapolated_to_seam = 2.0 * past_acceleration - beyond_acceleration;
+    let acceleration = if (extrapolated_to_seam - seam_acceleration).abs() > fit_tol.accel_mm_s2 {
+        extrapolated_to_seam
     } else {
         seam_acceleration
     };
     Ok((velocity, acceleration))
 }
 
+/// Ladder fit of the shaped signal over one span: the endpoint-anchored
+/// quadratic carrying the span's own travel, the cubic through both endpoint
+/// velocities, then the quintic Hermite matching the convolution's exact
+/// (p, v, a) at both ends and degrees 6/7 from interior residuals — the
+/// lowering ladder against pre-sampled truth, with the shaper's own budgets.
+/// Every accepted piece is endpoint-anchored, so the span seams stay C0 no
+/// matter which rung wins. Returns the accepted monomial-in-u fit, or the
+/// quintic base with `fits = false` so the caller can bisect.
+#[allow(clippy::type_complexity)]
 fn shaped_ladder<S: TrackSignal>(
     sig: &S,
     t0: f64,
@@ -3038,6 +3061,10 @@ fn assert_followable(chains: &AxisChainSet) {
 #[cfg(test)]
 #[path = "shaper_moment_tests.rs"]
 mod shaper_moment_tests;
+
+#[cfg(test)]
+#[path = "shaper_storage_tests.rs"]
+mod shaper_storage_tests;
 
 #[cfg(test)]
 #[path = "shaper_edge_tests.rs"]
