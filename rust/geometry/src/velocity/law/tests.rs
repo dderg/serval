@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use super::{
-    LawSegment, RAIL_KNOT_DS, RAIL_KNOTS_MAX, RAIL_KNOTS_MIN, RailKnot, ScalarLaw, knot_duration,
+    CAP_CONTACT_FRACTION, LawSegment, RAIL_KNOT_DS, RAIL_KNOTS_MAX, RAIL_KNOTS_MIN, RailKnot,
+    ScalarLaw, knot_duration,
 };
 
 fn rail(v0: f64, accel: f64, kappa0: f64, sigma: f64, brake: bool, ds: f64) -> LawSegment {
@@ -87,6 +88,34 @@ fn disk_rail_on_a_straight_degenerates_to_constant_accel() {
     assert!((a - 1000.0).abs() < 1e-9);
     assert!((s - 0.1).abs() < 1e-9);
     assert!((v - (25.0_f64 + 2.0 * 1000.0 * 0.1).sqrt()).abs() < 1e-7);
+}
+
+#[test]
+fn a_straight_rail_never_touches_the_curvature_cap() {
+    assert!(
+        rail(5.0, 1000.0, 0.0, 0.0, false, 0.1)
+            .cap_contact_times()
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_rail_leaving_the_curvature_cap_reports_its_start_and_where_it_leaves() {
+    let accel = 5000.0;
+    let seg = rail((accel / 2.0_f64).sqrt(), accel, 2.0, -40.0, false, 0.05);
+    let in_contact = |t: f64| seg.state_at(t - seg.t0).2.abs() <= CAP_CONTACT_FRACTION * accel;
+    assert!(
+        in_contact(seg.t0) && !in_contact(seg.end_time()),
+        "fixture must start on the cap and leave it"
+    );
+    let times = seg.cap_contact_times();
+    assert_eq!(times.len(), 2, "{times:?}");
+    assert_eq!(times[0], seg.t0);
+    assert!(
+        in_contact(times[1]) && times[1] < seg.end_time(),
+        "the last contact {} must sit on the cap inside the segment",
+        times[1]
+    );
 }
 
 #[test]

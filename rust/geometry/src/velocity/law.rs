@@ -66,6 +66,11 @@ impl PartialEq for LawSegment {
     }
 }
 
+/// Below this fraction of its budget a disk rail's tangential acceleration
+/// is in contact with the curvature cap: its rate is taken as zero there,
+/// and the acceleration's shape changes where a rail enters or leaves it.
+const CAP_CONTACT_FRACTION: f64 = 0.02;
+
 fn rail_accel(accel: f64, kappa_abs: f64, v: f64) -> f64 {
     let a_n = kappa_abs * v * v;
     (accel * accel - a_n * a_n).max(0.0).sqrt()
@@ -103,7 +108,7 @@ impl ScalarLaw {
                 let kappa = kappa0 + sigma * ds;
                 let q = kappa.abs() * v * v;
                 let root = a.abs();
-                if root <= 0.02 * accel {
+                if root <= CAP_CONTACT_FRACTION * accel {
                     return 0.0;
                 }
                 let q_rate = kappa.signum() * sigma * v * v * v + 2.0 * kappa.abs() * v * a;
@@ -514,6 +519,36 @@ impl LawSegment {
                 ))
             }
         }
+    }
+
+    /// Chain-local times at which a disk rail enters or leaves contact with
+    /// its curvature cap, including either end of the segment when it starts
+    /// or finishes in contact. The acceleration is not analytic there — it
+    /// approaches the cap as a square root and its rate is cut to zero in
+    /// contact — so a polynomial fit straddling one cannot hold a tolerance.
+    #[must_use]
+    pub fn cap_contact_times(&self) -> Vec<f64> {
+        let ScalarLaw::DiskRail { accel, .. } = self.law else {
+            return Vec::new();
+        };
+        let knots = self.rail_knots();
+        let in_contact = |knot: &RailKnot| {
+            self.law.accel_at(knot.s, knot.v).abs() <= CAP_CONTACT_FRACTION * accel
+        };
+        let mut times = Vec::new();
+        if knots.first().is_some_and(in_contact) {
+            times.push(self.t0);
+        }
+        for pair in knots.windows(2) {
+            if in_contact(&pair[0]) != in_contact(&pair[1]) {
+                let entering = in_contact(&pair[1]);
+                times.push(self.t0 + if entering { pair[1].t } else { pair[0].t });
+            }
+        }
+        if knots.last().is_some_and(in_contact) {
+            times.push(self.end_time());
+        }
+        times
     }
 
     fn rail_knots(&self) -> &Arc<[RailKnot]> {
