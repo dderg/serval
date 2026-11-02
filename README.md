@@ -220,6 +220,38 @@ The per-axis tracks the executors receive, nominal vs the chain's output
 
 Design detail: [docs/rewrite/shaper.md](docs/rewrite/shaper.md).
 
+### Evaluating an extruder chain
+
+`tools/corner_flow.py` plans standard corners, a zigzag and two perimeters
+under a printer config and measures the bead the nozzle lays along the
+shaped path, through a first-order melt model with time constant K (by
+default the configured pressure advance):
+
+```
+make -f Makefile.rust motion-engine-fast
+python3 tools/corner_flow.py printer.cfg
+python3 tools/corner_flow.py printer.cfg --sweep smooth_time=0.005,0.01,0.02
+python3 tools/corner_flow.py printer.cfg --set pa.k=0.04 --melt-k 0.03 --json
+```
+
+- **`peak` / `dip`** are the worst bead over- and under-fill at a corner,
+  in % of the nominal bead. **`w>5%`** is how far along the path it stays
+  off by more than 5%, and **`blob`** the over-filled volume per corner,
+  in nL. Where flow changes or stops at speed, any smoothing sits at about
+  ±50% at the switch itself, so read `w>5%` and `blob` there.
+- **`dE_gc`** is the extruded total minus the G-code's. It is negative by
+  design where corners are cut: the bead follows the shorter path.
+  **`dE_adv`** compares against the same chain without its advance. The
+  advance vanishes at rest, so anything above ~1e-6 mm is material the
+  pipeline lost or invented.
+- **The extruder's smoothing kernel sets corner quality.** It blurs the
+  flow in time while the nozzle slows into a corner, and no pressure
+  advance value can cancel a symmetric blur. On `tools/bench/printer.cfg`
+  at 150 mm/s, a 45° corner bulges +159% with `smooth_time: 0.04`, +71%
+  with 0.02, +24% with 0.01 and +7% with 0.005, at matched K. A shorter
+  kernel costs extruder acceleration (the `ae` column, 597 → 3436 mm/s²
+  on the same corner), so keep it as short as the extruder tolerates.
+
 ---
 
 ## The MCU plays trajectory, not steps
