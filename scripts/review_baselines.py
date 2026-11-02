@@ -317,25 +317,48 @@ def shaped_limits(pva, duration: float, caps: dict) -> dict:
     return out
 
 
-def motion_deltas(base_pva, base_duration, head_pva, head_duration, seams):
+def start_shift(base: dict, head: dict) -> float:
+    base_spans, head_spans = (
+        base["trajectory"]["spans"],
+        head["trajectory"]["spans"],
+    )
+    if not base_spans or not head_spans:
+        return 0.0
+    return head_spans[0]["t_start"] - base_spans[0]["t_start"]
+
+
+def motion_deltas(
+    base_pva, base_duration, head_pva, head_duration, seams, shift
+):
     import numpy as np
 
-    common = min(base_duration, head_duration)
+    common = min(base_duration, head_duration - shift)
     grid = np.arange(0.0, common + pending.SAMPLE_DT_S / 2, pending.SAMPLE_DT_S)
-    grid = grid[grid <= common]
+    grid = grid[(grid <= common) & (grid + shift >= 0.0)]
     base_t = np.linspace(0.0, base_duration, base_pva.shape[1])
     head_t = np.linspace(0.0, head_duration, head_pva.shape[1])
+    spacing = max(base_t[1] - base_t[0], head_t[1] - head_t[0])
     seam_array = np.asarray(seams)
     out = {}
     for index, axis in enumerate(pending.AXES):
+        peak_accel = float(np.abs(base_pva[index, :, 2]).max())
+        sampling_floor = (
+            {
+                "p": spacing * spacing / 8.0 * peak_accel,
+                "v": spacing / 2.0 * peak_accel,
+                "a": 2.0 * peak_accel,
+            }
+            if shift
+            else {"p": 0.0, "v": 0.0, "a": 0.0}
+        )
         worst = {}
         for column, key in enumerate("pva"):
             delta = np.abs(
-                np.interp(grid, head_t, head_pva[index, :, column])
+                np.interp(grid + shift, head_t, head_pva[index, :, column])
                 - np.interp(grid, base_t, base_pva[index, :, column])
             )
             at = int(delta.argmax())
-            t = float(grid[at])
+            t = float(grid[at] + shift)
             nearest = (
                 float(np.abs(seam_array - t).min())
                 if len(seam_array)
@@ -343,6 +366,9 @@ def motion_deltas(base_pva, base_duration, head_pva, head_duration, seams):
             )
             worst[key] = {
                 "max": float(delta[at]),
+                "beyond_sampling": max(
+                    0.0, float(delta[at]) - sampling_floor[key]
+                ),
                 "t": t,
                 "near_seam": nearest <= SEAM_WINDOW_S,
             }
@@ -469,8 +495,20 @@ def review_case(
 
     metrics["duration_s"] = {"base": base_duration, "head": head_duration}
     duration_delta = head_duration - base_duration
+    shift = start_shift(base, head)
+    metrics["start_shift_s"] = shift
+    if shift:
+        review.notes.append(
+            f"motion starts {shift * 1e3:+.4g} ms later; compared after aligning "
+            "the starts, within the 1 ms sampling's interpolation error"
+        )
     deltas = motion_deltas(
-        base_pva, base_duration, head_pva, head_duration, seam_times(head)
+        base_pva,
+        base_duration,
+        head_pva,
+        head_duration,
+        seam_times(head),
+        shift,
     )
     metrics["deltas"] = deltas
 
@@ -573,19 +611,25 @@ def review_case(
         review.suspicions.append("no expectation covers this case")
     else:
         for axis, worst in deltas.items():
-            moved = any(worst[k]["max"] > CHANGE_FLOOR[k] for k in "pva")
+            moved = any(
+                worst[k]["beyond_sampling"] > CHANGE_FLOOR[k] for k in "pva"
+            )
             if moved and axis not in expectation.axes:
                 review.suspicions.append(
                     f"{axis} moved (dp {worst['p']['max']:.3g}, dv {worst['v']['max']:.3g}, "
                     f"da {worst['a']['max']:.3g}) but only {','.join(expectation.axes)} may"
                 )
             for k in "pva":
-                if worst[k]["max"] > expectation.bounds[k]:
+                if worst[k]["beyond_sampling"] > expectation.bounds[k]:
                     review.suspicions.append(
                         f"{axis} d{k} {worst[k]['max']:.3g} at t={worst[k]['t']:.4f}"
                         f"{' near a seam' if worst[k]['near_seam'] else ''} "
                         f"beyond {expectation.bounds[k]:.3g}"
                     )
+        if abs(shift) > expectation.duration:
+            review.suspicions.append(
+                f"motion start {shift:+.3g} s beyond {expectation.duration:.3g}"
+            )
         if abs(duration_delta) > expectation.duration:
             review.suspicions.append(
                 f"traversal time {duration_delta:+.3g} s beyond {expectation.duration:.3g}"
