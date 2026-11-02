@@ -4,6 +4,7 @@ use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 use trajectory::{ContinuousAxis, ContinuousSegment};
 
 use super::{FollowerSignal, FollowerState, integrate};
+use crate::shaper::TrackSignal;
 
 /// Regression for the bench crash "shaper: axis 3: shaped sample is
 /// non-finite": deep into a long stream the odometer's ulp exceeds
@@ -222,4 +223,57 @@ fn endpoint_velocity_zero_dedups_against_the_support_grid() {
     );
     let at_start = breaks.iter().filter(|&&t| (t - t0).abs() <= 1e-12).count();
     assert_eq!(at_start, 1, "endpoint root duplicated in {breaks:?}");
+}
+
+#[test]
+fn a_plain_follower_source_fit_opens_and_closes_on_the_signal_velocity() {
+    let shaped = cusp_segment(
+        vec![0.0, 80.0, -300.0],
+        vec![0.0, 5.0, 100.0, -900.0],
+        0.0,
+        0.1,
+    );
+    let mut state = FollowerState::default();
+    state.push_span(50.0, 0.05, 0.05);
+    let source = super::FollowerSource {
+        shaped: &shaped,
+        raw: &shaped,
+        axis: 3,
+        leaders: &[0, 1],
+        state: &state,
+        s_start: 0.0,
+    };
+    let fit_tol = crate::lowering::FitTol {
+        pos_mm: 1e-4,
+        accel_mm_s2: 50.0,
+    };
+    let fitted = super::fit_source_projection(source, fit_tol, None).unwrap();
+    let sig = FollowerSignal::new(&shaped, &shaped, 3, &[0, 1], &state, 0.0, 0.0);
+    let pieces = nurbs::bezier::extract_bezier_pieces(&fitted.track);
+    assert!(pieces.len() > 1, "fixture must fit with an interior seam");
+    for piece in &pieces {
+        let velocity =
+            nurbs::eval::derivative(&bezier_pieces_to_nurbs(std::slice::from_ref(piece)));
+        let ends = [
+            (
+                piece.u_start,
+                trajectory::next_toward(piece.u_start, piece.u_end),
+            ),
+            (
+                piece.u_end,
+                trajectory::next_toward(piece.u_end, piece.u_start),
+            ),
+        ];
+        for (end, inside) in ends {
+            let fitted_velocity = nurbs::eval::eval(&velocity, end);
+            let signal_velocity = sig.eval_pva(inside).1;
+            assert!(
+                (fitted_velocity - signal_velocity).abs() <= 1e-9 * signal_velocity.abs().max(1.0),
+                "piece [{}, {}] meets the signal velocity {signal_velocity} with \
+                 {fitted_velocity} at {end}",
+                piece.u_start,
+                piece.u_end
+            );
+        }
+    }
 }

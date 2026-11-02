@@ -885,7 +885,7 @@ fn chain_output_velocity(chain: &CompiledChain, v: f64, a: f64, j: f64) -> f64 {
     }
 }
 
-pub(crate) fn advance_before_projection(chain: &CompiledChain) -> Option<&ChainStage> {
+fn advance_before_projection(chain: &CompiledChain) -> Option<&ChainStage> {
     (!chain.follower_linear_transform())
         .then(|| chain.leading_transform())
         .flatten()

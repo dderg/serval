@@ -4025,7 +4025,7 @@ fn a_kernelled_follower_stays_on_its_convolution_across_batch_seams() {
     let follower = replay(cfg(), chains, &home, 0.0, &moves);
     let raw = replay(cfg(), follower_chains_without_kernels(), &home, 0.0, &moves);
     let ratio = 1.5 / 30.0;
-    let budget = 2.0 * fit_tol(cfg()).pos_mm * ratio;
+    let budget = fit_tol(cfg()).pos_mm * ratio;
     let delay = 0.5 * (kernel.support().1 - kernel.support().0);
     let moving = &follower[1..follower.len() - 1];
     for (t, e) in sample_extruder(moving) {
@@ -4035,5 +4035,123 @@ fn a_kernelled_follower_stays_on_its_convolution_across_batch_seams() {
             "follower e {e} departs from its convolution {exact} by {} > {budget} at t={t}",
             (e - exact).abs()
         );
+    }
+}
+
+struct PieceSeam {
+    t: f64,
+    left_velocity: f64,
+    right_velocity: f64,
+}
+
+fn fitted_piece_seams(segments: &[ContinuousSegment], axis: usize) -> Vec<PieceSeam> {
+    let pieces: Vec<nurbs::bezier::BezierPiece> = segments
+        .iter()
+        .flat_map(|segment| match &segment.axes[axis] {
+            ContinuousAxis::Spline(curve) | ContinuousAxis::RelativeSpline { curve, .. } => {
+                nurbs::bezier::extract_bezier_pieces(curve)
+            }
+            ContinuousAxis::PiecewiseRelativeSpline(relative) => relative
+                .iter()
+                .flat_map(|piece| nurbs::bezier::extract_bezier_pieces(&piece.curve))
+                .collect(),
+            other => panic!("axis {axis} is not a fitted track: {other:?}"),
+        })
+        .collect();
+    let velocity = |piece: &nurbs::bezier::BezierPiece, t: f64| {
+        let curve = nurbs::bezier::bezier_pieces_to_nurbs(std::slice::from_ref(piece));
+        eval(&nurbs::eval::derivative(&curve), t)
+    };
+    pieces
+        .windows(2)
+        .map(|pair| {
+            let t = pair[0].u_end;
+            assert_eq!(t, pair[1].u_start, "axis {axis} pieces leave a gap at {t}");
+            PieceSeam {
+                t,
+                left_velocity: velocity(&pair[0], t),
+                right_velocity: velocity(&pair[1], t),
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn a_plain_follower_carries_its_source_velocity_across_every_seam() {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 1.5),
+        line(2, [30.0, 0.0, 0.0], [30.0, 30.0, 0.0], 1.5),
+        line(3, [30.0, 30.0, 0.0], [0.0, 30.0, 0.0], 1.5),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let shaped = replay(
+        cfg(),
+        xy_shaper_follower_chains(0.044583333333333336),
+        &home,
+        0.0,
+        &moves,
+    );
+    let (_kernel_tail_past_the_last_extrusion, extruding) =
+        shaped.split_last().expect("segments emitted");
+    let seams = fitted_piece_seams(extruding, 3);
+    assert!(
+        seams.len() > extruding.len(),
+        "the follower fits interior seams"
+    );
+    for seam in seams {
+        let step = (seam.left_velocity - seam.right_velocity).abs()
+            / seam
+                .left_velocity
+                .abs()
+                .max(seam.right_velocity.abs())
+                .max(1.0);
+        assert!(
+            step <= 1e-9,
+            "follower steps its velocity from {} to {} at the seam t={}",
+            seam.left_velocity,
+            seam.right_velocity,
+            seam.t
+        );
+    }
+}
+
+#[test]
+fn a_leader_fit_ignores_the_advanced_follower_riding_it() {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 1.5),
+        line(2, [30.0, 0.0, 0.0], [30.0, 30.0, 0.0], 1.5),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let leader_smooth_time = Some(0.044583333333333336);
+    let plain = replay(
+        cfg(),
+        follower_kernel_chains(leader_smooth_time, None, 0.0),
+        &home,
+        0.0,
+        &moves,
+    );
+    let advanced = replay(
+        cfg(),
+        follower_kernel_chains(leader_smooth_time, Some(0.04), 0.0),
+        &home,
+        0.0,
+        &moves,
+    );
+    assert_eq!(plain.len(), advanced.len());
+    for (left, right) in plain.iter().zip(&advanced) {
+        assert_eq!((left.t_start, left.t_end), (right.t_start, right.t_end));
+        for axis in [0, 1] {
+            for i in 0..=200 {
+                let t = left.t_start + (left.t_end - left.t_start) * f64::from(i) / 200.0;
+                let alone = left.eval_axis(axis, t).unwrap();
+                let ridden = right.eval_axis(axis, t).unwrap();
+                assert!(
+                    (alone.position - ridden.position).abs() <= 1e-12
+                        && (alone.velocity - ridden.velocity).abs() <= 1e-12,
+                    "leader {axis} at t={t} moves from {alone:?} to {ridden:?} under an \
+                     advanced follower"
+                );
+            }
+        }
     }
 }
