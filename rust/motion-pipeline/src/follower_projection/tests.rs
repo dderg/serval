@@ -110,11 +110,24 @@ fn cusp_segment(x_coeffs: Vec<f64>, y_coeffs: Vec<f64>, t0: f64, t1: f64) -> Con
             coeffs,
         }])
     };
-    let held = Arc::new(curve(vec![0.0]));
+    leader_segment(curve(x_coeffs), curve(y_coeffs), t0, t1)
+}
+
+fn leader_segment(
+    x: nurbs::ScalarNurbs,
+    y: nurbs::ScalarNurbs,
+    t0: f64,
+    t1: f64,
+) -> ContinuousSegment {
+    let held = Arc::new(bezier_pieces_to_nurbs(&[BezierPiece {
+        u_start: t0,
+        u_end: t1,
+        coeffs: vec![0.0],
+    }]));
     ContinuousSegment {
         axes: Arc::from([
-            ContinuousAxis::Spline(Arc::new(curve(x_coeffs))),
-            ContinuousAxis::Spline(Arc::new(curve(y_coeffs))),
+            ContinuousAxis::Spline(Arc::new(x)),
+            ContinuousAxis::Spline(Arc::new(y)),
             ContinuousAxis::Spline(Arc::clone(&held)),
             ContinuousAxis::Spline(held),
         ]),
@@ -276,4 +289,102 @@ fn a_plain_follower_source_fit_opens_and_closes_on_the_signal_velocity() {
             );
         }
     }
+}
+
+const DRAIN_WINDOW: (f64, f64) = (0.388_333_333_333_333_36, 0.400_833_333_333_333_4);
+const DRAIN_REVERSAL: f64 = 0.393_333_333_333_333_4;
+
+fn drain_reversal_leader() -> ContinuousSegment {
+    let (t0, t1) = DRAIN_WINDOW;
+    let (decelerating_from, ramping_from) = (0.390_833_333_333_333_4, 0.398_333_333_333_333_4);
+    let x = nurbs::ScalarNurbs::try_new(
+        3,
+        vec![
+            t0,
+            t0,
+            t0,
+            t0,
+            decelerating_from,
+            decelerating_from,
+            decelerating_from,
+            ramping_from,
+            ramping_from,
+            ramping_from,
+            t1,
+            t1,
+            t1,
+            t1,
+        ],
+        vec![
+            10.0,
+            10.0,
+            10.0,
+            10.0,
+            10.0,
+            9.999_560_546_875_001,
+            10.001_318_359_375,
+            10.001_904_296_875_002,
+            10.002_777_777_777_78,
+            10.004_166_666_666_668,
+        ],
+    )
+    .expect("drain leader is a valid cubic");
+    let held = bezier_pieces_to_nurbs(&[BezierPiece {
+        u_start: t0,
+        u_end: t1,
+        coeffs: vec![0.0],
+    }]);
+    leader_segment(x, held, t0, t1)
+}
+
+fn extruding_state() -> FollowerState {
+    let mut state = FollowerState::default();
+    state.push_span(1.0, 10.0, 10.0);
+    state
+}
+
+#[test]
+fn a_leader_reversal_seed_sits_on_the_signal_acceleration_flip() {
+    let shaped = drain_reversal_leader();
+    let state = extruding_state();
+    let sig = FollowerSignal::new(&shaped, &shaped, 3, &[0, 1], &state, 0.0, 0.0);
+    let seeds = sig.construction_breakpoints(&shaped.axes[3]).fit_seeds;
+    let seed = seeds
+        .iter()
+        .copied()
+        .min_by(|left, right| {
+            (left - DRAIN_REVERSAL)
+                .abs()
+                .total_cmp(&(right - DRAIN_REVERSAL).abs())
+        })
+        .expect("the window is seeded");
+    let before = sig.eval_pva(super::next_lower_float(seed)).2;
+    let after = sig
+        .eval_pva(trajectory::next_toward(seed, DRAIN_WINDOW.1))
+        .2;
+    assert!(
+        before < 0.0 && after > 0.0,
+        "seed {seed} reads acceleration {before} before and {after} after it, so the \
+         reversal is not on the seed"
+    );
+}
+
+#[test]
+fn a_plain_follower_source_fits_through_a_leader_reversal() {
+    let shaped = drain_reversal_leader();
+    let state = extruding_state();
+    let source = super::FollowerSource {
+        shaped: &shaped,
+        raw: &shaped,
+        axis: 3,
+        leaders: &[0, 1],
+        state: &state,
+        s_start: 0.0,
+    };
+    let fit_tol = crate::lowering::FitTol {
+        pos_mm: 1e-3,
+        accel_mm_s2: 50.0,
+    };
+    super::fit_source_projection(source, fit_tol, None)
+        .unwrap_or_else(|error| panic!("reversal fit failed: {error:?}"));
 }

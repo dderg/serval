@@ -1902,22 +1902,28 @@ impl<'a> FollowerSignal<'a> {
         );
         nodes.push(support_end);
         let mut zeros = Vec::new();
-        for axis in &self.shaped_axes {
+        for leader in 0..self.shaped_axes.len() {
+            let velocity = |t| self.leader_pva(leader, t).1;
             for window in nodes.windows(2) {
-                isolate_velocity_zeros(axis, window[0], window[1], &mut zeros);
+                isolate_velocity_zeros(&velocity, window[0], window[1], &mut zeros);
             }
         }
         zeros
     }
 }
 
-fn isolate_velocity_zeros(axis: &ContinuousAxis, lo: f64, hi: f64, zeros: &mut Vec<f64>) {
+fn isolate_velocity_zeros(
+    velocity_at: &impl Fn(f64) -> f64,
+    lo: f64,
+    hi: f64,
+    zeros: &mut Vec<f64>,
+) {
     if hi <= lo {
         return;
     }
     let span = hi - lo;
     let mut previous_time = lo;
-    let mut previous_velocity = axis_pva(axis, lo).1;
+    let mut previous_velocity = velocity_at(lo);
     if previous_velocity == 0.0 {
         zeros.push(lo);
     }
@@ -1927,12 +1933,12 @@ fn isolate_velocity_zeros(axis: &ContinuousAxis, lo: f64, hi: f64, zeros: &mut V
         } else {
             lo + span * (probe as f64 / COMPONENT_ZERO_PROBES as f64)
         };
-        let velocity = axis_pva(axis, time).1;
+        let velocity = velocity_at(time);
         if velocity == 0.0 {
             zeros.push(time);
         } else if previous_velocity != 0.0 && previous_velocity.signum() != velocity.signum() {
             zeros.push(refine_velocity_zero(
-                axis,
+                velocity_at,
                 previous_time,
                 time,
                 previous_velocity,
@@ -1943,13 +1949,18 @@ fn isolate_velocity_zeros(axis: &ContinuousAxis, lo: f64, hi: f64, zeros: &mut V
     }
 }
 
-fn refine_velocity_zero(axis: &ContinuousAxis, mut lo: f64, mut hi: f64, lo_velocity: f64) -> f64 {
+fn refine_velocity_zero(
+    velocity_at: &impl Fn(f64) -> f64,
+    mut lo: f64,
+    mut hi: f64,
+    lo_velocity: f64,
+) -> f64 {
     loop {
         let mid = 0.5 * lo + 0.5 * hi;
         if mid <= lo || mid >= hi {
             return hi;
         }
-        let velocity = axis_pva(axis, mid).1;
+        let velocity = velocity_at(mid);
         if velocity == 0.0 {
             return mid;
         }
