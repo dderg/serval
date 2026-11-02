@@ -50,6 +50,30 @@ impl TrackSignal for ContinuousAxis {
     }
 }
 
+impl<S: TrackSignal> TrackSignal for &S {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        S::eval_pva(self, t)
+    }
+    fn eval(&self, t: f64) -> f64 {
+        S::eval(self, t)
+    }
+    fn deriv(&self, t: f64) -> f64 {
+        S::deriv(self, t)
+    }
+    fn second_deriv(&self, t: f64) -> f64 {
+        S::second_deriv(self, t)
+    }
+    fn position_delta(&self, from: (f64, f64), to: (f64, f64)) -> f64 {
+        S::position_delta(self, from, to)
+    }
+    fn acceleration_monotonicity(&self, start: f64, end: f64) -> Option<AccelerationTrend> {
+        S::acceleration_monotonicity(self, start, end)
+    }
+    fn diagnostic(&self, t: f64) -> Option<String> {
+        S::diagnostic(self, t)
+    }
+}
+
 impl<F> TrackSignal for ShapedSignal<'_, F>
 where
     F: Fn(f64) -> f64,
@@ -64,18 +88,18 @@ where
 /// `base`. Fitting a shifted view keeps every fit source near zero without
 /// changing what the convolution means, so the emitted track carries its own
 /// relative base instead of an unbounded cumulative one.
-pub(crate) struct ShiftedTrackSignal<'a, S: TrackSignal> {
-    inner: &'a S,
+pub(crate) struct ShiftedTrackSignal<S: TrackSignal> {
+    inner: S,
     base: f64,
 }
 
-impl<'a, S: TrackSignal> ShiftedTrackSignal<'a, S> {
-    pub(crate) fn new(inner: &'a S, base: f64) -> Self {
+impl<S: TrackSignal> ShiftedTrackSignal<S> {
+    pub(crate) fn new(inner: S, base: f64) -> Self {
         Self { inner, base }
     }
 }
 
-impl<S: TrackSignal> TrackSignal for ShiftedTrackSignal<'_, S> {
+impl<S: TrackSignal> TrackSignal for ShiftedTrackSignal<S> {
     fn eval(&self, t: f64) -> f64 {
         self.inner.eval(t) - self.base
     }
@@ -814,34 +838,21 @@ fn fit_axis_column(
     if let Some(column) = constant_axis_column(&signal_segments, targets, axis) {
         return Ok(Some(column));
     }
-    let input_breaks = signal_breakpoints(&signal_segments, axis);
-    let shaped_breaks = shaped_signal_breakpoints(kernel, &input_breaks);
-    let kernel_degree = kernel
-        .pieces
-        .iter()
-        .map(|piece| piece.degree())
-        .max()
-        .expect("shaper kernel has no pieces");
     let bounds = SignalBounds {
         first_t,
         last_t,
         boundary,
         lookahead,
     };
-    let table = Arc::new(
-        AxisSignalTable::build(&signal_segments, axis, bounds).with_piece_moments(kernel_degree),
-    );
-    let input_degree = table.max_degree();
     fit_axis_targets(
         axis,
         targets,
-        ShapedSignalSource {
+        ShapedSignalSource::new(
             kernel,
-            table,
-            input_breaks,
-            shaped_breaks,
-            input_degree,
-        },
+            AxisSignalTable::build(&signal_segments, axis, bounds),
+            signal_breakpoints(&signal_segments, axis),
+            targets[0].t_start,
+        ),
         fit_tol,
         target_workers,
         rides_an_advanced_follower(request.chains, axis),
@@ -863,12 +874,75 @@ fn rides_an_advanced_follower(chains: &AxisChainSet, leader: usize) -> bool {
 /// The convolution's input for one axis, packaged for the target fits: the
 /// kernel, the flattened signal it integrates, and the breakpoint sets that
 /// seed the input and shaped partitions.
-struct ShapedSignalSource<'a> {
+pub(crate) struct ShapedSignalSource<'a> {
     kernel: &'a nurbs::algebra::PiecewisePolynomialKernel,
     table: Arc<AxisSignalTable>,
     input_breaks: Vec<f64>,
     shaped_breaks: Vec<f64>,
     input_degree: usize,
+    shaped_offset: f64,
+}
+
+const KERNEL_MASS_TOLERANCE: f64 = 1e-9;
+
+pub(crate) fn unit_kernel_mass(kernel: &nurbs::algebra::PiecewisePolynomialKernel) -> f64 {
+    let mass = trajectory::kernel_mass(kernel);
+    assert!(
+        (mass - 1.0).abs() <= KERNEL_MASS_TOLERANCE,
+        "shaper kernel integrates to {mass}, not 1: it would scale every position it shapes"
+    );
+    mass
+}
+
+impl<'a> ShapedSignalSource<'a> {
+    pub(crate) fn new(
+        kernel: &'a nurbs::algebra::PiecewisePolynomialKernel,
+        input: AxisSignalTable,
+        input_breaks: Vec<f64>,
+        offset_at: f64,
+    ) -> Self {
+        let kernel_degree = kernel
+            .pieces
+            .iter()
+            .map(|piece| piece.degree())
+            .max()
+            .expect("shaper kernel has no pieces");
+        let input_offset = input.eval_hinted(offset_at, &std::cell::Cell::new(0));
+        assert!(
+            input_offset.is_finite(),
+            "shaper: convolution input offset at t={offset_at} is not finite"
+        );
+        let table = Arc::new(
+            input
+                .offset_by(input_offset)
+                .with_piece_moments(kernel_degree),
+        );
+        Self {
+            kernel,
+            shaped_breaks: shaped_signal_breakpoints(kernel, &input_breaks),
+            input_degree: table.max_degree(),
+            table,
+            input_breaks,
+            shaped_offset: input_offset * unit_kernel_mass(kernel),
+        }
+    }
+
+    pub(crate) fn signal(&self) -> impl TrackSignal + use<'_, 'a> {
+        let eval_table = Arc::clone(&self.table);
+        let moment_table = Arc::clone(&self.table);
+        let piece_hint = std::cell::Cell::new(0);
+        let relative = ShapedSignal::new_from_polynomial_evaluator(
+            self.kernel,
+            move |t| eval_table.eval_hinted(t, &piece_hint),
+            self.input_breaks.clone(),
+            self.input_degree,
+            move |lo, hi, degree, origin, orders| {
+                moment_table.integrate_moments(lo, hi, degree, origin, orders)
+            },
+            self.table.input_jumps().to_vec(),
+        );
+        ShiftedTrackSignal::new(relative, -self.shaped_offset)
+    }
 }
 
 fn fit_axis_targets(
@@ -879,32 +953,11 @@ fn fit_axis_targets(
     target_workers: usize,
     velocity_continuous: bool,
 ) -> Result<Vec<nurbs::ScalarNurbs>, PostProcessError> {
-    let ShapedSignalSource {
-        kernel,
-        table,
-        input_breaks,
-        shaped_breaks,
-        input_degree,
-    } = source;
     if targets.is_empty() {
         return Ok(Vec::new());
     }
-    let input_jumps = table.input_jumps().to_vec();
-    let make_sig = || {
-        let eval_table = Arc::clone(&table);
-        let moment_table = Arc::clone(&table);
-        let piece_hint = std::cell::Cell::new(0);
-        ShapedSignal::new_from_polynomial_evaluator(
-            kernel,
-            move |t| eval_table.eval_hinted(t, &piece_hint),
-            input_breaks.clone(),
-            input_degree,
-            move |lo, hi, degree, origin, orders| {
-                moment_table.integrate_moments(lo, hi, degree, origin, orders)
-            },
-            input_jumps.clone(),
-        )
-    };
+    let shaped_breaks = &source.shaped_breaks;
+    let make_sig = || source.signal();
     let max_seed_spans = targets
         .iter()
         .map(|target| {
@@ -921,7 +974,7 @@ fn fit_axis_targets(
                     axis,
                     t_start: target.t_start,
                     t_end: target.t_end,
-                    seed_breakpoints: &shaped_breaks,
+                    seed_breakpoints: shaped_breaks,
                     fit_tol,
                     fit_context: "smooth_kernel_target",
                     velocity_continuous,
@@ -977,7 +1030,7 @@ fn fit_axis_targets(
     let plan_started = crate::timing::stopwatch();
     let seed_sets = targets
         .iter()
-        .map(|target| fit_seed_times(axis, target.t_start, target.t_end, &shaped_breaks))
+        .map(|target| fit_seed_times(axis, target.t_start, target.t_end, shaped_breaks))
         .collect::<Result<Vec<_>, _>>()?;
     let mut scale_times = seed_sets
         .iter()
@@ -1191,7 +1244,7 @@ fn fit_axis_targets(
                     axis,
                     t_start: targets[target_index].t_start,
                     t_end: targets[target_index].t_end,
-                    seed_breakpoints: &shaped_breaks,
+                    seed_breakpoints: shaped_breaks,
                     fit_tol,
                     fit_context: "smooth_kernel_target",
                     velocity_continuous,
@@ -1613,6 +1666,13 @@ impl AxisSignalTable {
         }
         assert!(!table.coeffs.is_empty(), "empty signal window");
         table
+    }
+
+    pub(crate) fn offset_by(mut self, offset: f64) -> Self {
+        for coefficients in &mut self.coeffs {
+            coefficients[0] -= offset;
+        }
+        self
     }
 
     pub(crate) fn max_degree(&self) -> usize {
@@ -3061,6 +3121,10 @@ fn assert_followable(chains: &AxisChainSet) {
 #[cfg(test)]
 #[path = "shaper_moment_tests.rs"]
 mod shaper_moment_tests;
+
+#[cfg(test)]
+#[path = "shaper_offset_tests.rs"]
+mod shaper_offset_tests;
 
 #[cfg(test)]
 #[path = "shaper_storage_tests.rs"]
