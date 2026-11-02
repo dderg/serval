@@ -325,6 +325,175 @@ fn a_plain_follower_source_fit_opens_and_closes_on_the_signal_velocity() {
     }
 }
 
+#[test]
+fn follower_jerk_is_the_derivative_of_its_acceleration() {
+    let shaped = cusp_segment(
+        vec![0.0, 0.0, 5000.0, -20000.0],
+        vec![0.0, 0.0, 0.0, 3000.0],
+        0.0,
+        0.05,
+    );
+    let mut state = FollowerState::default();
+    state.push_span(10.0, 0.05, 0.09);
+    let sig = FollowerSignal::new(
+        &shaped,
+        &shaped,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    let step = 1e-7;
+    for index in 1..50 {
+        let t = 0.001 * f64::from(index);
+        let expected = (sig.eval_pva(t + step).2 - sig.eval_pva(t - step).2) / (2.0 * step);
+        let jerk = sig.jerk(t);
+        assert!(
+            (jerk - expected).abs() <= 1e-4 * expected.abs().max(1e3),
+            "follower jerk at t={t} is {jerk}, its acceleration's derivative {expected}"
+        );
+    }
+}
+
+fn window_step(t: f64, step_mm: f64) -> super::AdvanceStep {
+    super::AdvanceStep {
+        t,
+        velocity_before: 0.0,
+        velocity_after: 0.0,
+        step_mm,
+    }
+}
+
+fn piece_value(pieces: &[BezierPiece], t: f64) -> f64 {
+    let piece = pieces
+        .iter()
+        .rev()
+        .find(|piece| piece.u_start <= t)
+        .expect("t inside the pieces");
+    let tau = t - piece.u_start;
+    piece.coeffs.iter().rev().fold(0.0, |acc, &c| acc * tau + c)
+}
+
+#[test]
+fn a_window_step_inside_a_piece_splits_it_and_raises_what_follows() {
+    let pieces = vec![
+        BezierPiece {
+            u_start: 0.0,
+            u_end: 1.0,
+            coeffs: vec![1.0, 2.0, -3.0, 0.5],
+        },
+        BezierPiece {
+            u_start: 1.0,
+            u_end: 2.0,
+            coeffs: vec![0.5, 0.5, 1.5, -0.5],
+        },
+    ];
+    let steps = [window_step(0.25, 0.1), window_step(1.0, -0.2)];
+    let mut steps_at = Vec::new();
+    let stepped = super::with_window_steps(pieces.clone(), &steps, 10.0, &mut steps_at);
+    assert_eq!(
+        stepped
+            .iter()
+            .map(|piece| (piece.u_start, piece.u_end))
+            .collect::<Vec<_>>(),
+        vec![(0.0, 0.25), (0.25, 1.0), (1.0, 2.0)],
+        "the step inside the first piece must split it at its own time"
+    );
+    assert_eq!(steps_at, vec![(0.25, 0.1), (1.0, -0.2)]);
+    for (t, raised) in [
+        (0.1, 10.0),
+        (0.25, 10.1),
+        (0.7, 10.1),
+        (1.0, 9.9),
+        (1.6, 9.9),
+    ] {
+        let expected = piece_value(&pieces, t) + raised;
+        let got = piece_value(&stepped, t);
+        assert!(
+            (got - expected).abs() < 1e-12,
+            "at t={t} the stepped pieces read {got}, the source raised by {raised} {expected}"
+        );
+    }
+}
+
+/// The advanced source is fitted to the follower signal with the advance
+/// applied and its in-window steps taken out, which leaves it
+/// velocity-continuous. Its pieces must open and close on that signal's
+/// own velocity, as the plain source's do, so the emission never welds a
+/// fit residual into the stretch after a seam.
+#[test]
+fn an_advanced_follower_source_fit_opens_and_closes_on_the_signal_velocity() {
+    let shaped = cusp_segment(
+        vec![0.0, 80.0, -300.0],
+        vec![0.0, 5.0, 100.0, -900.0],
+        0.0,
+        0.1,
+    );
+    let mut state = FollowerState::default();
+    state.push_span(50.0, 0.05, 0.05);
+    let source = super::FollowerSource {
+        shaped: &shaped,
+        raw: &shaped,
+        axis: 3,
+        leaders: &[0, 1],
+        state: &state,
+        s_start: 0.0,
+        s_length: super::leader_arc_length(&shaped, &[0, 1]),
+    };
+    let fit_tol = crate::lowering::FitTol {
+        pos_mm: 1e-4,
+        accel_mm_s2: 50.0,
+    };
+    let stage = trajectory::ChainStage::NonlinearAdvance(trajectory::NonlinearAdvance {
+        model: trajectory::AdvanceModel::Tanh,
+        linear_advance: 0.02,
+        nonlinear_offset: 0.03,
+        linearization_velocity: 1.0,
+    });
+    let fitted = super::fit_source_projection(source, fit_tol, Some(&stage)).unwrap();
+    let sig = FollowerSignal::new(
+        &shaped,
+        &shaped,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    let advanced = super::AdvancedFollowerSignal {
+        source: &sig,
+        stage: &stage,
+        steps: &[],
+    };
+    let pieces = nurbs::bezier::extract_bezier_pieces(&fitted.track);
+    assert!(pieces.len() > 1, "fixture must fit with an interior seam");
+    for piece in &pieces {
+        let velocity =
+            nurbs::eval::derivative(&bezier_pieces_to_nurbs(std::slice::from_ref(piece)));
+        for (end, inside) in [
+            (
+                piece.u_start,
+                trajectory::next_toward(piece.u_start, piece.u_end),
+            ),
+            (
+                piece.u_end,
+                trajectory::next_toward(piece.u_end, piece.u_start),
+            ),
+        ] {
+            let fitted_velocity = nurbs::eval::eval(&velocity, end);
+            let signal_velocity = advanced.eval_pva(inside).1;
+            assert!(
+                (fitted_velocity - signal_velocity).abs() <= 1e-9 * signal_velocity.abs().max(1.0),
+                "piece [{}, {}] meets the advanced signal velocity {signal_velocity} with \
+                 {fitted_velocity} at {end}",
+                piece.u_start,
+                piece.u_end
+            );
+        }
+    }
+}
+
 const DRAIN_WINDOW: (f64, f64) = (0.388_333_333_333_333_36, 0.400_833_333_333_333_4);
 const DRAIN_REVERSAL: f64 = 0.393_333_333_333_333_4;
 
@@ -566,98 +735,6 @@ fn follower_odometer_measures_the_ingested_arc_across_a_velocity_seam() {
         (measured - ingested).abs() <= super::span_alignment_envelope(ingested),
         "follower odometer {measured} drifted from the ingested span length {ingested}"
     );
-}
-
-#[test]
-fn follower_jerk_is_the_derivative_of_its_acceleration() {
-    let shaped = cusp_segment(
-        vec![0.0, 0.0, 5000.0, -20000.0],
-        vec![0.0, 0.0, 0.0, 3000.0],
-        0.0,
-        0.05,
-    );
-    let mut state = FollowerState::default();
-    state.push_span(10.0, 0.05, 0.09);
-    let sig = FollowerSignal::new(
-        &shaped,
-        &shaped,
-        3,
-        &[0, 1],
-        &state,
-        odometer_from_start(&shaped),
-        0.0,
-    );
-    let step = 1e-7;
-    for index in 1..50 {
-        let t = 0.001 * f64::from(index);
-        let expected = (sig.eval_pva(t + step).2 - sig.eval_pva(t - step).2) / (2.0 * step);
-        let jerk = sig.jerk(t);
-        assert!(
-            (jerk - expected).abs() <= 1e-4 * expected.abs().max(1e3),
-            "follower jerk at t={t} is {jerk}, its acceleration's derivative {expected}"
-        );
-    }
-}
-
-fn window_step(t: f64, step_mm: f64) -> super::AdvanceStep {
-    super::AdvanceStep {
-        t,
-        velocity_before: 0.0,
-        velocity_after: 0.0,
-        step_mm,
-    }
-}
-
-fn piece_value(pieces: &[BezierPiece], t: f64) -> f64 {
-    let piece = pieces
-        .iter()
-        .rev()
-        .find(|piece| piece.u_start <= t)
-        .expect("t inside the pieces");
-    let tau = t - piece.u_start;
-    piece.coeffs.iter().rev().fold(0.0, |acc, &c| acc * tau + c)
-}
-
-#[test]
-fn a_window_step_inside_a_piece_splits_it_and_raises_what_follows() {
-    let pieces = vec![
-        BezierPiece {
-            u_start: 0.0,
-            u_end: 1.0,
-            coeffs: vec![1.0, 2.0, -3.0, 0.5],
-        },
-        BezierPiece {
-            u_start: 1.0,
-            u_end: 2.0,
-            coeffs: vec![0.5, 0.5, 1.5, -0.5],
-        },
-    ];
-    let steps = [window_step(0.25, 0.1), window_step(1.0, -0.2)];
-    let mut steps_at = Vec::new();
-    let stepped = super::with_window_steps(pieces.clone(), &steps, 10.0, &mut steps_at);
-    assert_eq!(
-        stepped
-            .iter()
-            .map(|piece| (piece.u_start, piece.u_end))
-            .collect::<Vec<_>>(),
-        vec![(0.0, 0.25), (0.25, 1.0), (1.0, 2.0)],
-        "the step inside the first piece must split it at its own time"
-    );
-    assert_eq!(steps_at, vec![(0.25, 0.1), (1.0, -0.2)]);
-    for (t, raised) in [
-        (0.1, 10.0),
-        (0.25, 10.1),
-        (0.7, 10.1),
-        (1.0, 9.9),
-        (1.6, 9.9),
-    ] {
-        let expected = piece_value(&pieces, t) + raised;
-        let got = piece_value(&stepped, t);
-        assert!(
-            (got - expected).abs() < 1e-12,
-            "at t={t} the stepped pieces read {got}, the source raised by {raised} {expected}"
-        );
-    }
 }
 
 #[test]
