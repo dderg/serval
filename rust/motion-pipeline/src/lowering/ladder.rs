@@ -15,6 +15,8 @@ pub(crate) const LADDER_PROBES_U: [f64; 9] = [
     1.0,
 ];
 
+pub(crate) const LADDER_MAX_DEGREE: usize = 13;
+
 /// `(1 − u²)³` — triple zeros at ±1, so adding it preserves endpoint p/v/a.
 const BUMP6: [f64; 7] = [1.0, 0.0, -3.0, 0.0, 3.0, 0.0, -1.0];
 /// `u·(1 − u²)³`.
@@ -449,7 +451,7 @@ pub(crate) fn ladder_fit(
     }
     let mut last = quintic;
     if h >= policy.high_degree_span_floor {
-        for degree in [6, 7, 9, 11, 13] {
+        for degree in [6, 7, 9, 11, LADDER_MAX_DEGREE] {
             let candidate = ladder_candidate(base, degree, truth_p);
             if candidate_ok(&candidate, h, truth, budget, policy) {
                 return Ok(candidate);
