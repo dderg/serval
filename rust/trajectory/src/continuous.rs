@@ -314,13 +314,14 @@ impl AnalyticMoveSpan {
     }
 
     /// Absolute times at which a disk-rail phase enters or leaves contact
-    /// with its curvature cap, or starts or ends in contact.
+    /// with its curvature cap, or starts or ends in contact — clamped into
+    /// the span, where a contact at its end would otherwise be nudged past
+    /// it.
     pub fn cap_contact_times(&self) -> impl Iterator<Item = f64> + '_ {
         self.phases.iter().flat_map(|phase| {
-            phase
-                .cap_contact_times()
-                .into_iter()
-                .map(|local| analytic_phase_boundary(self.t_start, local))
+            phase.cap_contact_times().into_iter().map(|local| {
+                analytic_phase_boundary(self.t_start, local).clamp(self.t_start, self.t_end)
+            })
         })
     }
 
