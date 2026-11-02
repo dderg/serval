@@ -107,6 +107,63 @@ struct SourceProjection {
     semantic_cuts: Vec<f64>,
     input_start: SeamInput,
     input_end: SeamInput,
+    /// Advance steps inside the segment, in time order, which `track`
+    /// leaves out.
+    window_advance_steps: Vec<AdvanceStep>,
+}
+
+/// The position step an advance before projection makes where the follower
+/// velocity steps — an extrusion-ratio step taken at speed, at a segment
+/// join or where the shaped path crosses a ratio-span boundary inside one.
+/// The fitted tracks are continuous, so whatever assembles them puts the
+/// step back for a kernel after the advance to smooth.
+#[derive(Debug, Clone, Copy)]
+struct AdvanceStep {
+    t: f64,
+    velocity_before: f64,
+    velocity_after: f64,
+    step_mm: f64,
+}
+
+/// Relative follower-velocity mismatch two evaluations of one continuous
+/// signal at a seam can show from rounding alone; measured mismatches sit
+/// near 1e-12.
+const ADVANCE_STEP_VELOCITY_ROUNDING: f64 = 1e-9;
+
+/// Follower velocity below which a stitch across a time gap counts as at
+/// rest.
+const REST_VELOCITY_MM_S: f64 = 1e-9;
+
+impl AdvanceStep {
+    fn is_rounding(&self) -> bool {
+        (self.velocity_after - self.velocity_before).abs()
+            <= ADVANCE_STEP_VELOCITY_ROUNDING
+                * self
+                    .velocity_before
+                    .abs()
+                    .max(self.velocity_after.abs())
+                    .max(1.0)
+    }
+
+    fn between(stage: &ChainStage, t: f64, velocity_before: f64, velocity_after: f64) -> Self {
+        Self {
+            t,
+            velocity_before,
+            velocity_after,
+            step_mm: advance_offset(stage, velocity_after) - advance_offset(stage, velocity_before),
+        }
+    }
+
+    fn unrepresentable(self, axis: usize, tolerance_mm: f64) -> PostProcessError {
+        PostProcessError::AdvanceStep {
+            axis,
+            t: self.t,
+            velocity_before: self.velocity_before,
+            velocity_after: self.velocity_after,
+            step_mm: self.step_mm,
+            tolerance_mm,
+        }
+    }
 }
 
 /// One raw segment's follower projection inputs: the shaped leader signal it
@@ -125,6 +182,7 @@ fn fit_source_projection(
     source: FollowerSource,
     fit_tol: FitTol,
     leading_stage: Option<&ChainStage>,
+    kernel_follows: bool,
 ) -> Result<SourceProjection, PostProcessError> {
     let FollowerSource {
         shaped,
@@ -151,6 +209,21 @@ fn fit_source_projection(
     let input_start = input_state(t_start);
     let input_end = input_state(t_end);
     let tolerance = follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis) * 0.5);
+    let mut window_advance_steps = match leading_stage {
+        Some(stage) => window_advance_steps(stage, &sig, &breakpoints.fit_seeds, (t_start, t_end))
+            .filter(|step| !step.is_rounding())
+            .collect::<Vec<_>>(),
+        None => Vec::new(),
+    };
+    if !kernel_follows {
+        if let Some(&step) = window_advance_steps
+            .iter()
+            .find(|step| step.step_mm.abs() > tolerance.pos_mm)
+        {
+            return Err(step.unrepresentable(axis, tolerance.pos_mm));
+        }
+        window_advance_steps.clear();
+    }
     let track = if let Some(value) = sig.constant_value() {
         bezier_pieces_to_nurbs(&[BezierPiece {
             u_start: t_start,
@@ -177,6 +250,7 @@ fn fit_source_projection(
                 &AdvancedFollowerSignal {
                     source: &sig,
                     stage,
+                    steps: &window_advance_steps,
                 },
             )?,
             None => fit_axis_from_signal(fit, &sig)?,
@@ -190,7 +264,32 @@ fn fit_source_projection(
         semantic_cuts: breakpoints.semantic,
         input_start,
         input_end,
+        window_advance_steps,
     })
+}
+
+/// Every follower velocity discontinuity inside a segment is a fit seed by
+/// construction (ratio-span boundaries are bisected onto the exact time the
+/// odometer crosses them; raw breaks come from the raw axis knots), and an
+/// advance turns each into a position step.
+fn window_advance_steps<'a>(
+    stage: &'a ChainStage,
+    sig: &'a FollowerSignal,
+    seeds: &'a [f64],
+    (t_start, t_end): (f64, f64),
+) -> impl Iterator<Item = AdvanceStep> + 'a {
+    seeds
+        .iter()
+        .copied()
+        .filter(move |&seed| seed > t_start && seed < t_end)
+        .map(move |seed| {
+            AdvanceStep::between(
+                stage,
+                seed,
+                sig.deriv(trajectory::next_toward(seed, t_start)),
+                sig.deriv(seed),
+            )
+        })
 }
 
 /// One emit window's projection inputs: the raw segments, the shaped leader
@@ -308,6 +407,7 @@ pub(crate) fn project_followers(
                                         },
                                         fit_tol,
                                         leading_stage,
+                                        kernel.is_some(),
                                     ),
                                 ));
                             }
@@ -336,6 +436,7 @@ pub(crate) fn project_followers(
                             },
                             fit_tol,
                             leading_stage,
+                            kernel.is_some(),
                         ),
                     )
                 })
@@ -373,7 +474,7 @@ pub(crate) fn project_followers(
                 "follower axis {axis} has no support in segment"
             );
             let base_position = state.e_end.unwrap_or_else(|| axis_pva(raw_axis, t_start).0);
-            let (projected, projected_cuts, input_states) = if projecting {
+            let (projected, projected_cuts, input_states, window_advance_steps) = if projecting {
                 let (source_index, source_result) = source_fits
                     .next()
                     .expect("every unprojected follower segment has a source fit");
@@ -388,10 +489,16 @@ pub(crate) fn project_followers(
                     semantic_cuts,
                     input_start,
                     input_end,
+                    window_advance_steps,
                 } = source_result?;
                 state.s_shaped = s_end;
                 state.e_end = Some(base_position + e_end_relative);
-                (track, Some(semantic_cuts), Some((input_start, input_end)))
+                (
+                    track,
+                    Some(semantic_cuts),
+                    Some((input_start, input_end)),
+                    window_advance_steps,
+                )
             } else {
                 (
                     fit_continuous_axis(
@@ -404,6 +511,7 @@ pub(crate) fn project_followers(
                     )?,
                     None,
                     None,
+                    Vec::new(),
                 )
             };
             let (input_start, input_end) = input_states.unwrap_or_else(|| {
@@ -428,10 +536,37 @@ pub(crate) fn project_followers(
                     t: raw.t_start,
                 });
             }
+            let join_advance_step = match leading_stage.and_then(|stage| {
+                join_advance_step(
+                    stage,
+                    axis,
+                    state.projected_input_end,
+                    (t_start, input_start),
+                )
+            }) {
+                Some(step) => {
+                    let tolerance =
+                        follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis) * 0.5)
+                            .pos_mm;
+                    if kernel.is_none() && step.step_mm.abs() > tolerance {
+                        return Err(step.unrepresentable(axis, tolerance));
+                    }
+                    step.step_mm
+                }
+                None => 0.0,
+            };
             let semantic_cuts = projected_cuts.unwrap_or_else(|| piece_boundaries(&track));
             let track_start = nurbs::eval::eval(&track, t_start);
-            let output_base = state.projected_output_end.unwrap_or(base_position) - track_start;
-            state.projected_output_end = Some(output_base + nurbs::eval::eval(&track, t_end));
+            let output_base = state.projected_output_end.unwrap_or(base_position)
+                + join_advance_step
+                - track_start;
+            let window_steps_mm = window_advance_steps
+                .iter()
+                .map(|step| step.step_mm)
+                .sum::<f64>();
+            state.projected_output_end =
+                Some(output_base + nurbs::eval::eval(&track, t_end) + window_steps_mm);
+            state.projected_input_end = Some((t_end, input_end));
             state.projected_through_t = Some(t_end);
             state.projected.push(ProjSeg {
                 t_start,
@@ -441,6 +576,8 @@ pub(crate) fn project_followers(
                 input_end,
                 track,
                 semantic_cuts,
+                join_advance_step,
+                window_advance_steps,
             });
         }
         assert!(
@@ -469,6 +606,7 @@ pub(crate) fn project_followers(
                 }
                 let mut input_pieces = Vec::new();
                 let mut semantic_cuts = Vec::new();
+                let mut input_steps = Vec::new();
                 let mut carried = 0.0;
                 let mut input_end = None;
                 for segment in &state.projected {
@@ -485,12 +623,19 @@ pub(crate) fn project_followers(
                             });
                         }
                     }
-                    let mut pieces = extract_bezier_pieces(&segment.track);
+                    let pieces = extract_bezier_pieces(&segment.track);
                     let head = pieces.first().expect("a projected track has pieces").coeffs[0];
                     let segment_offset = input_end.map_or(0.0, |_| carried - head);
-                    for piece in &mut pieces {
-                        piece.coeffs[0] += segment_offset;
+                    let join_step = input_end.map_or(0.0, |_| segment.join_advance_step);
+                    if join_step != 0.0 {
+                        input_steps.push((segment.t_start, join_step));
                     }
+                    let pieces = with_window_steps(
+                        pieces,
+                        &segment.window_advance_steps,
+                        segment_offset + join_step,
+                        &mut input_steps,
+                    );
                     let tail = pieces.last().expect("a projected track has pieces");
                     carried = polynomial_pva(&tail.coeffs, tail.u_end - tail.u_start).0;
                     input_pieces.extend(pieces);
@@ -508,7 +653,7 @@ pub(crate) fn project_followers(
                     .iter()
                     .all(|span| span.r0 >= 0.0 && span.r1 >= 0.0);
                 if projecting {
-                    assert_piece_seams(axis, "projected input", &input_pieces);
+                    assert_piece_seams(axis, "projected input", &input_pieces, &input_steps);
                     if nonnegative_demand {
                         let correction_tol = follower_fit_tol(
                             fit_tol,
@@ -532,12 +677,17 @@ pub(crate) fn project_followers(
                 for piece in &mut input_pieces {
                     piece.coeffs.resize(unified_input_degree + 1, 0.0);
                 }
-                let mut kernel_input = bezier_pieces_to_nurbs(&input_pieces);
+                let assemble = if input_steps.is_empty() {
+                    bezier_pieces_to_nurbs
+                } else {
+                    nurbs::bezier::bezier_pieces_to_discontinuous_nurbs
+                };
+                let mut kernel_input = assemble(&input_pieces);
                 let input_offset = nurbs::eval::eval(&kernel_input, target_start);
                 for piece in &mut input_pieces {
                     piece.coeffs[0] -= input_offset;
                 }
-                kernel_input = bezier_pieces_to_nurbs(&input_pieces);
+                kernel_input = assemble(&input_pieces);
                 batch_base += input_offset * unit_kernel_mass(kernel);
                 let mut gained_input = chain.leading_transform().is_some();
                 if defer_linear_prefix {
@@ -924,6 +1074,55 @@ fn chain_output_velocity(chain: &CompiledChain, v: f64, a: f64, j: f64) -> f64 {
     }
 }
 
+/// Segment tracks are stitched end to start, which is exact only where the
+/// commanded signal is position-continuous. An advance applied before
+/// projection turns the follower's velocity difference at a join into a
+/// position step: each segment's advanced track gains `advance(v)` between
+/// its own end states, so the totals telescope to the unadvanced extrusion
+/// only if the stitch carries every join's difference — the follower's own
+/// step (an extrusion-ratio change at speed) and the leaders' fit residual
+/// alike. The output base takes it and a kernel after the advance smooths
+/// it. The velocity difference itself is the seam's business: the emission
+/// carries the follower's own step as a C0 corner and welds the residual
+/// ([`SeamInput::signal_velocity_step`]), neither of which moves the total.
+/// A time gap between the segments (a dwell after a drain) is legal only at
+/// rest, where there is nothing to carry.
+fn join_advance_step(
+    stage: &ChainStage,
+    axis: usize,
+    previous_end: Option<(f64, SeamInput)>,
+    (t_start, after): (f64, SeamInput),
+) -> Option<AdvanceStep> {
+    let (previous_t_end, before) = previous_end?;
+    if (previous_t_end - t_start).abs() > SEGMENT_TIME_EPS_S {
+        assert!(
+            before.velocity.abs() <= REST_VELOCITY_MM_S
+                && after.velocity.abs() <= REST_VELOCITY_MM_S,
+            "follower axis {axis} stitches a segment starting at {t_start} onto one ending at \
+             {previous_t_end} while moving ({} -> {} mm/s); a time gap between follower \
+             segments is legal only at rest",
+            before.velocity,
+            after.velocity
+        );
+        return None;
+    }
+    Some(AdvanceStep::between(
+        stage,
+        t_start,
+        before.velocity,
+        after.velocity,
+    ))
+    .filter(|step| !step.is_rounding())
+}
+
+fn advance_offset(stage: &ChainStage, velocity: f64) -> f64 {
+    match stage {
+        ChainStage::DerivativeGains { k1, .. } => k1 * velocity,
+        ChainStage::NonlinearAdvance(advance) => advance.advance(velocity),
+        ChainStage::SmoothKernel(_) => unreachable!("a leading advance is not a kernel"),
+    }
+}
+
 fn advance_before_projection(chain: &CompiledChain) -> Option<&ChainStage> {
     (!chain.follower_linear_transform())
         .then(|| chain.leading_transform())
@@ -951,6 +1150,11 @@ struct ProjSeg {
     input_end: SeamInput,
     track: ScalarNurbs,
     semantic_cuts: Vec<f64>,
+    /// The advance step at the join with the previous segment, which the
+    /// track's own fit leaves out.
+    join_advance_step: f64,
+    /// The advance steps inside the segment, also left out of `track`.
+    window_advance_steps: Vec<AdvanceStep>,
 }
 
 /// One segment's stretch of path: shaped arc length `[s0, s1]` carrying a
@@ -996,6 +1200,9 @@ pub(crate) struct FollowerState {
     s_shaped: f64,
     e_end: Option<f64>,
     projected_output_end: Option<f64>,
+    /// Time and follower input state where `projected_output_end` was
+    /// taken, so the next stitch can tell what an advance makes of the join.
+    projected_input_end: Option<(f64, SeamInput)>,
     emitted_output_pv: Option<(f64, f64)>,
     committed_input_end: Option<SeamInput>,
     projected: Vec<ProjSeg>,
@@ -1016,6 +1223,7 @@ impl FollowerState {
         self.s_shaped = 0.0;
         self.e_end = None;
         self.projected_output_end = None;
+        self.projected_input_end = None;
         self.emitted_output_pv = None;
         self.committed_input_end = None;
         self.projected.clear();
@@ -1525,18 +1733,26 @@ impl LeaderPieces {
         })
     }
 
-    fn pva(&self, t: f64) -> Option<(f64, f64, f64)> {
+    fn piece_at(&self, t: f64) -> Option<&BezierPiece> {
         let index = self
             .pieces
             .partition_point(|piece| piece.u_end < t)
             .min(self.pieces.len().saturating_sub(1));
         let piece = self.pieces.get(index)?;
         let slack = 1e-9 * (piece.u_end - piece.u_start).max(1.0);
-        if t < piece.u_start - slack || t > piece.u_end + slack {
-            return None;
-        }
+        (t >= piece.u_start - slack && t <= piece.u_end + slack).then_some(piece)
+    }
+
+    fn pva(&self, t: f64) -> Option<(f64, f64, f64)> {
+        let piece = self.piece_at(t)?;
         let (p, v, a) = polynomial_pva(&piece.coeffs, t - piece.u_start);
         Some((self.base + p, v, a))
+    }
+
+    fn pvaj(&self, t: f64) -> Option<(f64, f64, f64, f64)> {
+        let piece = self.piece_at(t)?;
+        let (p, v, a, j) = polynomial_pvaj(&piece.coeffs, t - piece.u_start);
+        Some((self.base + p, v, a, j))
     }
 }
 
@@ -1634,6 +1850,22 @@ impl<'a> FollowerSignal<'a> {
         axis_pva(self.shaped_axes[index], t)
     }
 
+    /// The leader's state to third order, read from the same representation
+    /// as [`Self::leader_pva`]: the path-speed derivatives divide by the
+    /// speed, so mixing two evaluations of one leader amplifies their
+    /// rounding difference wherever the speed is tiny.
+    fn leader_pvaj(&self, index: usize, t: f64) -> (f64, f64, f64, f64) {
+        if let Some(Some(pieces)) = self.leader_pieces.get(index) {
+            if let Some(value) = pieces.pvaj(t) {
+                return value;
+            }
+        }
+        let pvaj = self.shaped_axes[index]
+            .eval_pvaj(t)
+            .expect("follower leader has exact derivatives");
+        (pvaj.position, pvaj.velocity, pvaj.acceleration, pvaj.jerk)
+    }
+
     fn raw_shaped_speed(&self, t: f64) -> f64 {
         (0..self.shaped_axes.len())
             .map(|index| {
@@ -1715,23 +1947,40 @@ impl<'a> FollowerSignal<'a> {
         }
     }
 
+    /// `d²|v|/dt² = (|v|²|a|² − (v·a)²)/|v|³ + v·j/|v|`, with the first
+    /// numerator summed through Lagrange's identity as the squared pairwise
+    /// cross terms: the difference form cancels to rounding times `|a|²`,
+    /// which the division by a near-rest speed would amplify.
+    fn shaped_speed_second(&self, t: f64, speed: f64) -> f64 {
+        const MAX_LEADERS: usize = 3;
+        let leaders = self.shaped_axes.len();
+        assert!(
+            leaders <= MAX_LEADERS,
+            "a follower rides at most {MAX_LEADERS} leaders, got {leaders}"
+        );
+        let mut states = [(0.0, 0.0, 0.0, 0.0); MAX_LEADERS];
+        for (index, state) in states.iter_mut().take(leaders).enumerate() {
+            *state = self.leader_pvaj(index, t);
+        }
+        let states = &states[..leaders];
+        let mut cross_squared = 0.0;
+        for (index, &(_, v_i, a_i, _)) in states.iter().enumerate() {
+            for &(_, v_j, a_j, _) in &states[index + 1..] {
+                let cross = v_i * a_j - v_j * a_i;
+                cross_squared += cross * cross;
+            }
+        }
+        let velocity_dot_jerk = states.iter().map(|&(_, v, _, j)| v * j).sum::<f64>();
+        cross_squared / (speed * speed * speed) + velocity_dot_jerk / speed
+    }
+
     fn jerk(&self, t: f64) -> f64 {
         let speed = self.shaped_speed(t);
         let speed_derivative = self.shaped_speed_deriv_from_speed(t, speed);
         let speed_second = if speed == 0.0 || self.speed_zero_sliver(t).is_some() {
             0.0
         } else {
-            let numerator = self
-                .shaped_axes
-                .iter()
-                .map(|axis| {
-                    let pvaj = axis
-                        .eval_pvaj(t)
-                        .expect("follower leader has exact derivatives");
-                    pvaj.acceleration * pvaj.acceleration + pvaj.velocity * pvaj.jerk
-                })
-                .sum::<f64>();
-            (numerator - speed_derivative * speed_derivative) / speed
+            self.shaped_speed_second(t, speed)
         };
         let (ratio, slope) = self.state.ratio_and_slope(self.s_owned(t));
         let raw = self.raw_delta.map_or(0.0, |(axis, _)| {
@@ -2048,15 +2297,29 @@ impl TrackSignal for FollowerSignal<'_> {
     }
 }
 
+/// The follower signal with the advance applied, less the advance steps
+/// inside the segment, which the assembly of the fitted tracks carries.
 struct AdvancedFollowerSignal<'a, 'b> {
     source: &'a FollowerSignal<'b>,
     stage: &'a ChainStage,
+    steps: &'a [AdvanceStep],
+}
+
+impl AdvancedFollowerSignal<'_, '_> {
+    fn steps_through(&self, t: f64) -> f64 {
+        self.steps
+            .iter()
+            .take_while(|step| step.t <= t)
+            .map(|step| step.step_mm)
+            .sum()
+    }
 }
 
 impl TrackSignal for AdvancedFollowerSignal<'_, '_> {
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let (p, v, a) = self.source.eval_pva(t);
         let j = self.source.jerk(t);
+        let p = p - self.steps_through(t);
         match self.stage {
             ChainStage::DerivativeGains { k1, k2 } => {
                 assert_eq!(*k2, 0.0, "leading acceleration gain is not supported");
@@ -2075,7 +2338,7 @@ impl TrackSignal for AdvancedFollowerSignal<'_, '_> {
         let delta = self.source.position_delta((t0, 0.0), (t1, 0.0));
         let v0 = self.source.deriv(t0);
         let v1 = self.source.deriv(t1);
-        delta
+        delta - (self.steps_through(t1) - self.steps_through(t0))
             + match self.stage {
                 ChainStage::DerivativeGains { k1, .. } => k1 * (v1 - v0),
                 ChainStage::NonlinearAdvance(advance) => advance.advance(v1) - advance.advance(v0),
@@ -2281,6 +2544,65 @@ fn polynomial_pva(coeffs: &[f64], tau: f64) -> (f64, f64, f64) {
     (p, v, 2.0 * a)
 }
 
+/// One segment's fitted pieces, raised by `offset` and by every window step
+/// at and after its time, each step's time recorded in `steps_at`.
+fn with_window_steps(
+    pieces: Vec<BezierPiece>,
+    steps: &[AdvanceStep],
+    offset: f64,
+    steps_at: &mut Vec<(f64, f64)>,
+) -> Vec<BezierPiece> {
+    let mut pieces = split_at_steps(pieces, steps);
+    let mut pending = steps.iter().peekable();
+    let mut stepped = offset;
+    for piece in &mut pieces {
+        while let Some(step) = pending.next_if(|step| step.t <= piece.u_start) {
+            assert_eq!(
+                step.t, piece.u_start,
+                "advance step at {} was not split onto a piece start",
+                step.t
+            );
+            stepped += step.step_mm;
+            steps_at.push((piece.u_start, step.step_mm));
+        }
+        piece.coeffs[0] += stepped;
+    }
+    assert!(
+        pending.next().is_none(),
+        "advance step past the end of its segment's pieces"
+    );
+    pieces
+}
+
+/// Splits the pieces that straddle a step time there, so every step lands
+/// on a piece start: seed coalescing may have merged the step's seed into a
+/// neighbour.
+fn split_at_steps(pieces: Vec<BezierPiece>, steps: &[AdvanceStep]) -> Vec<BezierPiece> {
+    let mut out = Vec::with_capacity(pieces.len() + steps.len());
+    for mut piece in pieces {
+        for step in steps {
+            if step.t > piece.u_start && step.t < piece.u_end {
+                let (head, tail) = nurbs::bezier::split_piece_at(&piece, step.t);
+                out.push(head);
+                piece = tail;
+            }
+        }
+        out.push(piece);
+    }
+    out
+}
+
+fn polynomial_pvaj(coeffs: &[f64], tau: f64) -> (f64, f64, f64, f64) {
+    let (mut p, mut v, mut a, mut j) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+    for &coefficient in coeffs.iter().rev() {
+        j = nurbs::fmadd(j, tau, a);
+        a = nurbs::fmadd(a, tau, v);
+        v = nurbs::fmadd(v, tau, p);
+        p = nurbs::fmadd(p, tau, coefficient);
+    }
+    (p, v, 2.0 * a, 6.0 * j)
+}
+
 fn next_lower_float(value: f64) -> f64 {
     if value == 0.0 {
         f64::from_bits((1_u64 << 63) | 1)
@@ -2315,13 +2637,26 @@ fn basis_conversion_same(
             * f64::EPSILON
             * left.abs().max(right.abs()).max(1.0)
 }
-fn assert_piece_seams(axis: usize, label: &str, pieces: &[nurbs::bezier::BezierPiece]) {
+/// Every seam of `pieces` must be position-continuous except where `steps`
+/// lists the step it carries.
+fn assert_piece_seams(
+    axis: usize,
+    label: &str,
+    pieces: &[nurbs::bezier::BezierPiece],
+    steps: &[(f64, f64)],
+) {
     for (index, pair) in pieces.windows(2).enumerate() {
         let left_h = pair[0].u_end - pair[0].u_start;
         let right_h = pair[1].u_end - pair[1].u_start;
-        let left = polynomial_pv(&pair[0].coeffs, left_h);
-        let right = polynomial_pv(&pair[1].coeffs, 0.0);
         let seam = pair[0].u_end;
+        let step = steps
+            .iter()
+            .filter(|&&(t, _)| t == seam)
+            .map(|&(_, step)| step)
+            .sum::<f64>();
+        let left = polynomial_pv(&pair[0].coeffs, left_h);
+        let left = (left.0 + step, left.1);
+        let right = polynomial_pv(&pair[1].coeffs, 0.0);
         let degree = pair[0].degree().max(pair[1].degree());
         assert!(
             basis_conversion_same(left.0, right.0, degree, left_h, right_h)
