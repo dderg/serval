@@ -3936,3 +3936,33 @@ fn derivative_gains_preserve_one_sided_polynomial_law() {
         }
     }
 }
+
+/// A straight stroke from rest to rest covers the same path shaped as raw,
+/// so its follower must extrude exactly the commanded amount. The shaped
+/// leaders reach into the rest holds on either side, where the fit can
+/// leave a sub-tolerance back-and-forth near the rest point; extruding over
+/// it at one end and not the other drifts the total with every start.
+#[test]
+fn a_shaped_stroke_from_rest_to_rest_extrudes_its_command() {
+    let mut chains = follower_kernel_chains(Some(0.01), None, 0.0);
+    chains.chains[3] = trajectory::CompiledChain::default();
+    let mut items = Vec::new();
+    for stroke in 0..3_u32 {
+        let x = 30.0 * f64::from(stroke);
+        items.push(StreamInput::Move(line(
+            stroke + 1,
+            [x, 0.0, 0.0],
+            [x + 30.0, 0.0, 0.0],
+            1.0,
+        )));
+        items.push(StreamInput::Drain);
+        items.push(StreamInput::Control(Control::Dwell { secs: 0.5 }));
+    }
+    let segs = replay_items(cfg(), chains, &[0.0, 0.0, 0.0, 0.0], items);
+    let last = segs.last().expect("the strokes produce segments");
+    let e_end = eval_segment_axis(last, 3, last.t_end);
+    assert!(
+        (e_end - 3.0).abs() < 1e-9,
+        "three 1 mm strokes from rest to rest must extrude 3 mm, got {e_end}"
+    );
+}

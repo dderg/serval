@@ -1023,6 +1023,15 @@ impl FollowerState {
         }
     }
 
+    /// Appends one segment's ratio spans over the shaped arc it covers. A
+    /// segment where the raw toolhead rests still moves when shaped: the
+    /// kernel drains the previous move into it (its tail, extruded at the
+    /// previous ratio) and starts the next move in it (its lead, extruded at
+    /// the next one). Both are measured as the shaped leaders' distance
+    /// from the rest point at the segment's edges, so the move on each side
+    /// extrudes over exactly the path it is shaped onto; any shaped arc
+    /// beyond them — the fit's back-and-forth near the rest point — moves
+    /// the nozzle without laying a bead.
     fn ingest(
         &mut self,
         raw: &ContinuousSegment,
@@ -1062,22 +1071,28 @@ impl FollowerState {
             self.push_span(shaped_ds, r0, r1);
             return shaped_ds;
         }
-        let tail = leader_distance(shaped, raw, leaders).min(shaped_ds);
-        let lead = shaped_ds - tail;
+        let tail = leader_distance(shaped, raw, leaders, SegmentEdge::Start).min(shaped_ds);
+        let lead = leader_distance(shaped, raw, leaders, SegmentEdge::End).min(shaped_ds - tail);
+        let idle = shaped_ds - tail - lead;
         let tail_ratio = self.spans.last().map_or(0.0, |span| span.r1);
-        if lead <= SPAN_LOOKUP_SLACK_MM {
+        if lead <= SPAN_LOOKUP_SLACK_MM && idle <= SPAN_LOOKUP_SLACK_MM {
             self.push_span(shaped_ds, tail_ratio, tail_ratio);
             return shaped_ds;
         }
         if tail > SPAN_MIN_LEN_MM {
             self.push_span(tail, tail_ratio, tail_ratio);
         }
+        if idle > SPAN_MIN_LEN_MM {
+            self.push_span(idle, 0.0, 0.0);
+        }
         let lead_ratio = upcoming
             .iter()
             .find(|seg| seg.spatial_path)
             .and_then(|seg| seg.followers.iter().find(|f| f.axis_index == axis))
             .map_or(0.0, |f| f.ratio);
-        self.push_span(lead, lead_ratio, lead_ratio);
+        if lead > SPAN_MIN_LEN_MM {
+            self.push_span(lead, lead_ratio, lead_ratio);
+        }
         shaped_ds
     }
 
@@ -1360,14 +1375,32 @@ fn leader_arc_lengths(
     out.into_iter().map(|(_, lengths)| lengths).collect()
 }
 
-fn leader_distance(a: &ContinuousSegment, b: &ContinuousSegment, leaders: &[usize]) -> f64 {
-    let t = leaders
-        .iter()
-        .fold(a.t_start.max(b.t_start), |start, &axis| {
-            start
-                .max(a.axes[axis].domain().0)
-                .max(b.axes[axis].domain().0)
-        });
+#[derive(Clone, Copy)]
+enum SegmentEdge {
+    Start,
+    End,
+}
+
+/// How far apart two segments' leaders are at their shared start or end.
+fn leader_distance(
+    a: &ContinuousSegment,
+    b: &ContinuousSegment,
+    leaders: &[usize],
+    edge: SegmentEdge,
+) -> f64 {
+    let t = match edge {
+        SegmentEdge::Start => leaders
+            .iter()
+            .fold(a.t_start.max(b.t_start), |start, &axis| {
+                start
+                    .max(a.axes[axis].domain().0)
+                    .max(b.axes[axis].domain().0)
+            }),
+        SegmentEdge::End => leaders.iter().fold(a.t_end.min(b.t_end), |end, &axis| {
+            end.min(a.axes[axis].domain().1)
+                .min(b.axes[axis].domain().1)
+        }),
+    };
     leaders
         .iter()
         .map(|&axis| {
