@@ -283,7 +283,7 @@ proptest! {
         let clocked = case.clocked();
         let pieces = clocked.split_max_duration().expect("a splittable view");
         let piece_ceiling =
-            MAX_SPAN_SECS + SEAM_ROUNDING_CYCLES as f64 / case.frequency + 8.0 * f64::EPSILON;
+            MAX_SPAN_SECS + 4.0 * f64::EPSILON * clocked.stream_t_end.abs().max(1.0);
 
         prop_assert!(!pieces.is_empty());
         let first = &pieces[0];

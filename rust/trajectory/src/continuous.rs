@@ -14,6 +14,9 @@ pub use profiles::{BuzzProfile, NudgeProfile, ProfileError, ProfileSample};
 mod tests;
 
 pub const MAX_SPAN_SECS: f64 = 0.025;
+/// A stretch of at least two clocks rounds to distinct start and end clocks
+/// whatever the phase of its start; one of under a clock may not.
+const TAIL_CLOCKS_THAT_ALWAYS_ROUND_APART: f64 = 2.0;
 
 const REST_VELOCITY_MM_S: f64 = 1e-3;
 
@@ -1248,58 +1251,48 @@ impl ClockedMotorSpan {
                 .is_ok_and(|pva| pva.velocity.abs() <= REST_VELOCITY_MM_S)
     }
 
+    /// Cuts the view into dispatchable pieces of at most `MAX_SPAN_SECS`, on
+    /// the `MAX_SPAN_SECS` grid from its start. A tail too short to round to a
+    /// clock is not folded into the piece before it, which would stretch that
+    /// piece past the bound; the two share what remains after the last full
+    /// piece instead.
     pub fn split_max_duration(&self) -> Result<Vec<Self>, ContinuousError> {
-        let mut views: Vec<Self> = Vec::new();
         let duration = self.stream_t_end - self.stream_t_start;
-        let count = (duration / MAX_SPAN_SECS).ceil() as usize;
-        let host_rate = (self.end_host - self.start_host) / duration;
-        for index in 0..count {
-            let offset_start = (index as f64 * MAX_SPAN_SECS).min(duration);
-            let offset_end = ((index + 1) as f64 * MAX_SPAN_SECS).min(duration);
-            let t_lo = self.stream_t_start + offset_start;
-            let (t_hi, host_hi) = if index + 1 == count {
-                (self.stream_t_end, self.end_host)
-            } else {
-                (
-                    self.stream_t_start + offset_end,
-                    self.start_host + offset_end * host_rate,
-                )
-            };
-            if t_hi <= t_lo {
-                debug_assert!(
-                    index + 1 == count,
-                    "only the fp-edge tail chunk may collapse below one ulp"
-                );
-                let last = views.last_mut().expect("original clocked span has a clock");
-                last.stream_t_end = self.stream_t_end;
-                last.end_host = self.end_host;
-                last.end_clock = self.end_clock;
-                continue;
-            }
-            let exact = self.start_clock_exact + offset_start * self.clock_freq_hz;
-            match Self::try_new(
-                Arc::clone(&self.signal),
-                t_lo,
-                t_hi,
-                self.start_host + offset_start * host_rate,
-                host_hi,
-                exact,
-                self.clock_freq_hz,
-            ) {
-                Ok(view) => views.push(view),
-                Err(ContinuousError::InvalidSpan {
-                    reason: "positive-duration clocked view must span at least one clock",
-                }) if index + 1 == count => {
-                    let last = views.last_mut().expect("original clocked span has a clock");
-
-                    last.stream_t_end = self.stream_t_end;
-                    last.end_host = self.end_host;
-                    last.end_clock = self.end_clock;
-                }
-                Err(error) => return Err(error),
+        let mut cuts: Vec<f64> = (1..)
+            .map(|index| f64::from(index) * MAX_SPAN_SECS)
+            .take_while(|&offset| self.stream_t_start + offset < self.stream_t_end)
+            .collect();
+        if let Some(last) = cuts.last().copied() {
+            if (duration - last) * self.clock_freq_hz < TAIL_CLOCKS_THAT_ALWAYS_ROUND_APART {
+                let previous = cuts.len().checked_sub(2).map_or(0.0, |index| cuts[index]);
+                *cuts.last_mut().expect("a cut was just read") =
+                    previous + 0.5 * (duration - previous);
             }
         }
-        Ok(views)
+        let host_rate = (self.end_host - self.start_host) / duration;
+        let starts = std::iter::once(0.0).chain(cuts.iter().copied());
+        let ends = cuts.iter().copied().map(Some).chain([None]);
+        starts
+            .zip(ends)
+            .map(|(offset_start, offset_end)| {
+                let (t_hi, host_hi) = match offset_end {
+                    Some(offset_end) => (
+                        self.stream_t_start + offset_end,
+                        self.start_host + offset_end * host_rate,
+                    ),
+                    None => (self.stream_t_end, self.end_host),
+                };
+                Self::try_new(
+                    Arc::clone(&self.signal),
+                    self.stream_t_start + offset_start,
+                    t_hi,
+                    self.start_host + offset_start * host_rate,
+                    host_hi,
+                    self.start_clock_exact + offset_start * self.clock_freq_hz,
+                    self.clock_freq_hz,
+                )
+            })
+            .collect()
     }
 }
 /// The first time strictly after `span_start + local_boundary` in absolute
