@@ -18,7 +18,16 @@ serde = { version = "1", features = ["derive"] }
 thiserror = { workspace = true }
 trajectory = { path = "../trajectory" }
 
+[features]
+fit-audit = ["motion-pipeline/fit-audit"]
+
+[[test]]
+name = "fit_tolerance"
+required-features = ["fit-audit"]
+
 [dev-dependencies]
+config-doc = { path = "../config-doc" }
+planner-config = { path = "../planner-config", features = ["doc"] }
 libm = { version = "0.2", default-features = false }
 proptest = "1"
 serde_json = { version = "1", features = ["float_roundtrip"] }

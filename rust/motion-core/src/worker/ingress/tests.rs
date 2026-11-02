@@ -55,7 +55,7 @@ fn a_slow_drain_reserves_runway_for_repeating_it_even_after_a_faster_drain() {
         .frontier
         .advance_to(Instant::now() + Duration::from_millis(250));
     ingress.undrained_since = Some(Instant::now() - Duration::from_secs(1));
-    assert!(ingress.drain_or_runway().is_none());
+    assert!(ingress.drain_or_runway(InboxFoundEmpty(())).is_none());
     downstream.join().unwrap();
 }
 

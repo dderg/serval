@@ -3,6 +3,8 @@
 use crossbeam_channel::Sender;
 use trajectory::{AxisChainSet, ContinuousSegment};
 
+#[cfg(feature = "fit-audit")]
+pub mod fit_audit;
 pub mod fit_stage;
 mod follower_projection;
 mod lower_stage;

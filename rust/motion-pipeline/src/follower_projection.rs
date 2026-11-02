@@ -137,14 +137,14 @@ fn fit_source_projection(
     let raw_axis = &raw.axes[axis];
     let (t_start, t_end) = projection_support(raw, shaped, axis, leaders);
     let sig = FollowerSignal::new(shaped, raw, axis, leaders, state, s_start, 0.0);
-    let breakpoints = sig.construction_breakpoints(raw_axis);
+    let tolerance = follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis) * 0.5);
+    let breakpoints = sig.construction_breakpoints(raw_axis, tolerance.accel_mm_s2);
     let input_state = |t| {
         let (p, v, a) = sig.eval_pva(t);
         (p, v, a, sig.jerk(t))
     };
     let input_start = input_state(t_start);
     let input_end = input_state(t_end);
-    let tolerance = follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis) * 0.5);
     let track = if let Some(value) = sig.constant_value() {
         bezier_pieces_to_nurbs(&[BezierPiece {
             u_start: t_start,
@@ -1774,7 +1774,11 @@ impl<'a> FollowerSignal<'a> {
         (overlapping_zero && tail_zero).then(|| self.eval(self.grid[0]))
     }
 
-    fn construction_breakpoints(&self, raw_axis: &ContinuousAxis) -> FollowerBreakpoints {
+    fn construction_breakpoints(
+        &self,
+        raw_axis: &ContinuousAxis,
+        acceleration_tol: f64,
+    ) -> FollowerBreakpoints {
         let raw_breaks = axis_breakpoints(raw_axis);
         let mut breaks = raw_breaks.clone();
         breaks.push(*self.grid.first().expect("follower grid is seeded"));
@@ -1833,6 +1837,9 @@ impl<'a> FollowerSignal<'a> {
         breaks.sort_by(f64::total_cmp);
         breaks.dedup();
         let semantic = breaks.clone();
+        breaks.extend(self.acceleration_steps_on_the_grid(acceleration_tol));
+        breaks.sort_by(f64::total_cmp);
+        breaks.dedup();
         let zeros = self.velocity_component_zeros(&breaks, support_start, support_end);
         for zero in zeros {
             let dominated = breaks.iter().any(|&b| (b - zero).abs() <= GRID_DEDUP_EPS_S);
@@ -1845,6 +1852,73 @@ impl<'a> FollowerSignal<'a> {
             semantic,
             fit_seeds: breaks,
         }
+    }
+
+    /// Interior leader-grid times where the follower's own acceleration
+    /// steps by more than `tolerance`: a shaped leader's pieces join with
+    /// their acceleration free to jump, and the projection inherits the
+    /// step. A fit span straddling one cannot hold the tolerance; every
+    /// other grid point is smooth enough to fit across, and seeding all of
+    /// them would multiply the follower's fit and kernel spans.
+    ///
+    /// The projection is `ë = r(s)·s̈ + r'(s)·ṡ²` plus raw-axis motion, and
+    /// raw-axis and ratio-span breaks are seeded on their own. At a leader
+    /// seam its step is therefore at most `max|r|·|Δs̈| + max|r'|·|Δṡ²|`,
+    /// with the path speed `ṡ` and its rate `s̈ = v·a/|v|` read off the
+    /// leaders alone; only seams where that bound exceeds the tolerance pay
+    /// for evaluating the projection itself on both sides. The ratio bounds
+    /// cover every span the signal rides and what the table holds beyond
+    /// its ends.
+    fn acceleration_steps_on_the_grid(&self, tolerance: f64) -> Vec<f64> {
+        let s_end = self.s_end();
+        let ridden = self
+            .state
+            .spans
+            .iter()
+            .filter(|span| {
+                span.s1 >= self.s_start - SPAN_LOOKUP_SLACK_MM
+                    && span.s0 <= s_end + SPAN_LOOKUP_SLACK_MM
+            })
+            .collect::<Vec<_>>();
+        let ratio_bound = ridden
+            .iter()
+            .map(|span| span.r0.abs().max(span.r1.abs()))
+            .chain([self.s_start, s_end].map(|s| self.state.ratio_and_slope(s).0.abs()))
+            .fold(0.0_f64, f64::max);
+        let slope_bound = ridden
+            .iter()
+            .map(|span| span.ratio_slope().abs())
+            .fold(0.0_f64, f64::max);
+        let path_rate = |t: f64| {
+            let (speed_squared, power) = (0..self.shaped_axes.len()).fold(
+                (0.0_f64, 0.0_f64),
+                |(speed_squared, power), index| {
+                    let (_, velocity, acceleration) = self.leader_pva(index, t);
+                    (
+                        speed_squared + velocity * velocity,
+                        power + velocity * acceleration,
+                    )
+                },
+            );
+            let speed = speed_squared.sqrt();
+            let rate = if speed > 0.0 { power / speed } else { 0.0 };
+            (speed_squared, rate)
+        };
+        let interior = &self.grid[1..self.grid.len() - 1];
+        interior
+            .iter()
+            .copied()
+            .filter(|&t| {
+                let before = trajectory::next_toward(t, f64::NEG_INFINITY);
+                let after = trajectory::next_toward(t, f64::INFINITY);
+                let (speed_squared_before, rate_before) = path_rate(before);
+                let (speed_squared_after, rate_after) = path_rate(after);
+                let bound = ratio_bound * (rate_after - rate_before).abs()
+                    + slope_bound * (speed_squared_after - speed_squared_before).abs();
+                bound > tolerance
+                    && (self.second_deriv(after) - self.second_deriv(before)).abs() > tolerance
+            })
+            .collect()
     }
 
     fn velocity_component_zeros(
