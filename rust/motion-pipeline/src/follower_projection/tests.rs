@@ -866,3 +866,19 @@ fn the_valley_is_continuous_where_lead_and_idle_arcs_meet() {
         deepest(&above)
     );
 }
+
+#[test]
+fn a_lead_with_no_ratio_lays_one_flat_span() {
+    for (lead, idle) in [(5e-12, 3e-5), (3e-5, 1e-5)] {
+        let state = laid_lead(lead, idle, 0.0);
+        assert_eq!(
+            state
+                .spans
+                .iter()
+                .map(|span| (span.r0, span.r1))
+                .collect::<Vec<_>>(),
+            vec![(0.0, 0.0)],
+            "lead {lead} mm, idle {idle} mm: a lead that lays nothing needs no valley"
+        );
+    }
+}

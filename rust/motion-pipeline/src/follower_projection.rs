@@ -1294,10 +1294,12 @@ impl FollowerState {
     /// share of material; with a longer idle arc, ramps one lead wide each
     /// around a flat floor at zero, the deepest a valley goes without
     /// changing sign. The two coincide where the lead and idle arcs are
-    /// equal.
+    /// equal. A lead with no ratio lays one flat span: its valley would only
+    /// cut the arc into extra breakpoints, down to slivers where the lead is
+    /// a few picometres.
     fn push_lead(&mut self, lead: f64, idle: f64, lead_ratio: f64) {
         let joined = lead + idle;
-        if idle <= SPAN_MIN_LEN_MM {
+        if idle <= SPAN_MIN_LEN_MM || lead_ratio == 0.0 {
             if joined > SPAN_MIN_LEN_MM {
                 self.push_span(joined, lead_ratio, lead_ratio);
             }
