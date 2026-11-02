@@ -11,8 +11,8 @@ use trajectory::{
 use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
     AccelerationTrend, FitTol, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget, LadderFailure,
-    LadderPolicy, LadderPva, LadderSpan, LadderTruth, VelocitySign, eval_mono, eval_mono_d,
-    eval_mono_dd, exact_piece, ladder_fit, quintic_in_u,
+    LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth, VelocitySign, eval_mono,
+    eval_mono_d, eval_mono_dd, exact_piece, ladder_fit, quintic_in_u,
 };
 use crate::types::{BaseItem, Control, PostProcessError, TrajectoryItem};
 
@@ -3196,7 +3196,10 @@ fn shaped_ladder<S: TrackSignal>(
                 }),
             ))
         }
-        Err(failure) => Ok((base, Some(failure))),
+        Err(LadderMiss {
+            closest_rung,
+            failure,
+        }) => Ok((closest_rung, Some(failure))),
     }
 }
 

@@ -2420,7 +2420,7 @@ fn the_ladder_fits_a_resolution_scale_span_without_high_degree_amplification() {
     );
     let fit = match attempt {
         Ok(fit) => fit,
-        Err(failure) => panic!(
+        Err(crate::lowering::LadderMiss { failure, .. }) => panic!(
             "a resolution-scale span must fit without midpoint shortcuts: u={}, \
              position error {}, acceleration error {}",
             failure.u, failure.error.position, failure.error.acceleration
@@ -2524,7 +2524,7 @@ fn a_smooth_cusp_fits_below_the_high_degree_floor_without_bump_corrections() {
         );
         match attempt {
             Ok(fit) => break fit,
-            Err(failure) => {
+            Err(crate::lowering::LadderMiss { failure, .. }) => {
                 assert!(
                     h > 2e-8,
                     "the cusp must fit by the 3e-8 decade, still failing at h={h}: \
@@ -2639,7 +2639,7 @@ fn a_constant_acceleration_resolution_span_fits_the_anchored_quadratic() {
             velocity_continuous: false,
         },
     )
-    .unwrap_or_else(|failure| {
+    .unwrap_or_else(|crate::lowering::LadderMiss { failure, .. }| {
         panic!(
             "a constant-acceleration resolution span must fit: u={}, position error {}, \
              velocity error {}, acceleration error {} > {}",
@@ -2779,7 +2779,7 @@ fn an_endpoint_anchored_fit_never_steps_the_right_seam() {
             velocity_continuous: false,
         },
     )
-    .unwrap_or_else(|failure| {
+    .unwrap_or_else(|crate::lowering::LadderMiss { failure, .. }| {
         panic!(
             "a smooth jerk span must fit: u={}, position error {}, acceleration error {}",
             failure.u, failure.error.position, failure.error.acceleration

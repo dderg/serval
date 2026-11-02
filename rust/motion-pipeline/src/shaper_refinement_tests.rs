@@ -2,7 +2,7 @@ use super::{
     AxisFit, FloorVelocityGate, KnotJumpBound, MIN_DEVICE_INTERVAL_S, TrackSignal,
     fit_axis_from_signal,
 };
-use crate::lowering::{FitTol, LADDER_PROBES_U};
+use crate::lowering::{FitTol, LADDER_PROBES_U, eval_mono_dd, quintic_in_u};
 use crate::types::PostProcessError;
 
 #[derive(Clone, Copy)]
@@ -491,5 +491,85 @@ fn an_accepted_piece_holds_the_acceleration_tolerance_between_the_ladder_probes(
         "the fit's acceleration leaves the signal by {worst} mm/s² at {at}, past the {} mm/s² \
          tolerance",
         fit_tol.accel_mm_s2
+    );
+}
+
+struct SquareRootOnset {
+    at: f64,
+    offset_mm: f64,
+    velocity: f64,
+    coefficient: f64,
+}
+
+impl TrackSignal for SquareRootOnset {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let tau = (t - self.at).max(0.0);
+        let root = tau.sqrt();
+        (
+            self.offset_mm
+                + self.velocity * (t - self.at)
+                + self.coefficient * 4.0 / 15.0 * tau * tau * root,
+            self.velocity + self.coefficient * 2.0 / 3.0 * tau * root,
+            self.coefficient * root,
+        )
+    }
+}
+
+#[test]
+fn a_square_root_onset_at_the_floor_is_fitted_by_the_closest_anchored_rung() {
+    let fit_tol = FitTol {
+        pos_mm: 0.005,
+        accel_mm_s2: 50.0,
+    };
+    let sig = SquareRootOnset {
+        at: 0.211_721_933,
+        offset_mm: 150.0,
+        velocity: 300.0,
+        coefficient: 9.8e6,
+    };
+    let track = fit_axis_from_signal(
+        AxisFit {
+            axis: 1,
+            t_start: sig.at,
+            t_end: sig.at + 4e-6,
+            seed_breakpoints: &[],
+            fit_tol,
+            fit_context: "square-root onset",
+            velocity_continuous: false,
+        },
+        &sig,
+    )
+    .expect("a square-root onset fits down to the floor");
+    let mut knots = track.knots().to_vec();
+    knots.dedup();
+    let (t0, t1) = (knots[0], knots[1]);
+    let h = t1 - t0;
+    let velocity = nurbs::eval::derivative(&track);
+    let acceleration = nurbs::eval::derivative(&velocity);
+    let state = |t: f64| {
+        (
+            nurbs::eval::eval(&track, t),
+            nurbs::eval::eval(&velocity, t),
+            nurbs::eval::eval(&acceleration, t),
+        )
+    };
+    let quintic = quintic_in_u(state(t0), state(t1), h);
+    let worst_error = |fitted: &dyn Fn(f64) -> f64| {
+        (1..200)
+            .map(|k| {
+                let past_edge_inset = 0.25 + 0.75 * f64::from(k) / 200.0;
+                let t = t0 + h * past_edge_inset;
+                (fitted(t) - sig.second_deriv(t)).abs()
+            })
+            .fold(0.0, f64::max)
+    };
+    let accepted = worst_error(&|t| nurbs::eval::eval(&acceleration, t));
+    let base_quintic =
+        worst_error(&|t| eval_mono_dd(&quintic, 2.0 * (t - t0) / h - 1.0) * (2.0 / h).powi(2));
+    assert!(
+        accepted < 0.8 * base_quintic,
+        "the {h:e} s floor piece at the onset misses the acceleration by {accepted} mm/s², \
+         the anchored quintic by {base_quintic} mm/s²: the floor kept a rung no closer than \
+         the quintic"
     );
 }
