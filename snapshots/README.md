@@ -33,6 +33,7 @@ snapshots/snapshot-tests.sh --view       # read-only baseline gallery
   the baselines and, with nothing left to review, the server stops itself; the
   script re-checks and exits with the final status. Nothing is left listening.
 - `--ci` skips the server and just fails, so CI gets a plain red.
+- `python3 snapshots/run.py --accept CASE...` / `--accept-all` writes the baselines of the named (or all) changed or pending cases without the server, for agents that have already reviewed the diff.
 - `--view` starts the browser UI in read-only mode and renders the
   committed baselines without running the planner or offering accept actions.
 
