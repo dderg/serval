@@ -208,7 +208,7 @@ fn leader_velocity_sign_change_is_seeded_as_a_construction_breakpoint() {
         odometer_from_start(&shaped),
         0.0,
     );
-    let breaks = sig.construction_breakpoints(&raw.axes[3]).fit_seeds;
+    let breaks = sig.construction_breakpoints(&raw.axes[3], 50.0).fit_seeds;
     let vx = |t: f64| super::axis_pva(&shaped.axes[0], t).1;
     let seeded = breaks
         .iter()
@@ -240,7 +240,7 @@ fn endpoint_velocity_zero_dedups_against_the_support_grid() {
         odometer_from_start(&shaped),
         0.0,
     );
-    let breaks = sig.construction_breakpoints(&raw.axes[3]).fit_seeds;
+    let breaks = sig.construction_breakpoints(&raw.axes[3], 50.0).fit_seeds;
     assert_eq!(
         super::axis_pva(&shaped.axes[0], t0).1,
         0.0,
@@ -381,5 +381,134 @@ fn follower_odometer_measures_the_ingested_arc_across_a_velocity_seam() {
     assert!(
         (measured - ingested).abs() <= super::span_alignment_envelope(ingested),
         "follower odometer {measured} drifted from the ingested span length {ingested}"
+    );
+}
+
+#[test]
+fn follower_jerk_is_the_derivative_of_its_acceleration() {
+    let shaped = cusp_segment(
+        vec![0.0, 0.0, 5000.0, -20000.0],
+        vec![0.0, 0.0, 0.0, 3000.0],
+        0.0,
+        0.05,
+    );
+    let mut state = FollowerState::default();
+    state.push_span(10.0, 0.05, 0.09);
+    let sig = FollowerSignal::new(
+        &shaped,
+        &shaped,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    let step = 1e-7;
+    for index in 1..50 {
+        let t = 0.001 * f64::from(index);
+        let expected = (sig.eval_pva(t + step).2 - sig.eval_pva(t - step).2) / (2.0 * step);
+        let jerk = sig.jerk(t);
+        assert!(
+            (jerk - expected).abs() <= 1e-4 * expected.abs().max(1e3),
+            "follower jerk at t={t} is {jerk}, its acceleration's derivative {expected}"
+        );
+    }
+}
+
+fn window_step(t: f64, step_mm: f64) -> super::AdvanceStep {
+    super::AdvanceStep {
+        t,
+        velocity_before: 0.0,
+        velocity_after: 0.0,
+        step_mm,
+    }
+}
+
+fn piece_value(pieces: &[BezierPiece], t: f64) -> f64 {
+    let piece = pieces
+        .iter()
+        .rev()
+        .find(|piece| piece.u_start <= t)
+        .expect("t inside the pieces");
+    let tau = t - piece.u_start;
+    piece.coeffs.iter().rev().fold(0.0, |acc, &c| acc * tau + c)
+}
+
+#[test]
+fn a_window_step_inside_a_piece_splits_it_and_raises_what_follows() {
+    let pieces = vec![
+        BezierPiece {
+            u_start: 0.0,
+            u_end: 1.0,
+            coeffs: vec![1.0, 2.0, -3.0, 0.5],
+        },
+        BezierPiece {
+            u_start: 1.0,
+            u_end: 2.0,
+            coeffs: vec![0.5, 0.5, 1.5, -0.5],
+        },
+    ];
+    let steps = [window_step(0.25, 0.1), window_step(1.0, -0.2)];
+    let mut steps_at = Vec::new();
+    let stepped = super::with_window_steps(pieces.clone(), &steps, 10.0, &mut steps_at);
+    assert_eq!(
+        stepped
+            .iter()
+            .map(|piece| (piece.u_start, piece.u_end))
+            .collect::<Vec<_>>(),
+        vec![(0.0, 0.25), (0.25, 1.0), (1.0, 2.0)],
+        "the step inside the first piece must split it at its own time"
+    );
+    assert_eq!(steps_at, vec![(0.25, 0.1), (1.0, -0.2)]);
+    for (t, raised) in [
+        (0.1, 10.0),
+        (0.25, 10.1),
+        (0.7, 10.1),
+        (1.0, 9.9),
+        (1.6, 9.9),
+    ] {
+        let expected = piece_value(&pieces, t) + raised;
+        let got = piece_value(&stepped, t);
+        assert!(
+            (got - expected).abs() < 1e-12,
+            "at t={t} the stepped pieces read {got}, the source raised by {raised} {expected}"
+        );
+    }
+}
+
+#[test]
+fn a_leader_acceleration_seam_is_seeded_as_a_construction_breakpoint() {
+    let (t0, seam, t1) = (300.0, 300.01, 300.02);
+    let x = bezier_pieces_to_nurbs(&[
+        BezierPiece {
+            u_start: t0,
+            u_end: seam,
+            coeffs: vec![0.0, 100.0, 0.0],
+        },
+        BezierPiece {
+            u_start: seam,
+            u_end: t1,
+            coeffs: vec![1.0, 100.0, 2_500.0],
+        },
+    ]);
+    let mut shaped = cusp_segment(vec![0.0, 100.0], vec![0.0, 50.0], t0, t1);
+    Arc::make_mut(&mut shaped.axes)[0] = ContinuousAxis::Spline(Arc::new(x));
+    let raw = shaped.clone();
+    let mut state = FollowerState::default();
+    state.push_span(10.0, 0.05, 0.05);
+    let sig = FollowerSignal::new(
+        &shaped,
+        &raw,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    let seeds = sig.construction_breakpoints(&raw.axes[3], 50.0).fit_seeds;
+    assert!(
+        seeds.iter().any(|&t| (t - seam).abs() <= 1e-12),
+        "the leader's acceleration jumps from 0 to 5000 mm/s² at {seam}, so the follower's \
+         does too, yet the fit seeds {seeds:?} straddle it"
     );
 }

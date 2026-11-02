@@ -5,6 +5,8 @@ pub(crate) use ladder::{
     LadderPolicy, LadderPva, LadderSpan, LadderTruth, VelocitySign, exact_piece, ladder_fit,
     quintic_in_u,
 };
+#[cfg(feature = "fit-audit")]
+pub(crate) use ladder::{eval_mono, eval_mono_dd};
 
 use geometry::FollowerDemand;
 

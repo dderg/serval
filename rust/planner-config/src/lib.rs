@@ -34,6 +34,12 @@ pub enum PostProcessorConfigError {
          ignore. Move '{name}' after the kernel in the axis post_processors list"
     )]
     LeaderGainBeforeKernel { axis: String, name: String },
+    #[error(
+        "axis '{axis}' follows other axes, and post_processor '{name}' advances it with no \
+         smoothing kernel in the axis post_processors: {}",
+        trajectory::FOLLOWER_TRANSFORM_WITHOUT_KERNEL
+    )]
+    FollowerAdvanceWithoutKernel { axis: String, name: String },
 }
 
 #[derive(Debug, Clone)]
@@ -109,7 +115,34 @@ impl PostProcessorSet {
             .collect::<Result<_, _>>()?;
         let followers = registry.follower_index_map();
         self.reject_pre_kernel_gains_on_leaders(registry, &followers)?;
-        Ok(AxisChainSet { chains, followers })
+        let chains = AxisChainSet { chains, followers };
+        self.reject_follower_advance_without_kernel(registry, &chains)?;
+        Ok(chains)
+    }
+
+    fn reject_follower_advance_without_kernel(
+        &self,
+        registry: &AxisRegistry,
+        chains: &AxisChainSet,
+    ) -> Result<(), PostProcessorConfigError> {
+        let Some(axis) = chains.kernel_free_follower_transform() else {
+            return Ok(());
+        };
+        let name = self.per_axis[axis]
+            .iter()
+            .find(|name| {
+                self.instances
+                    .iter()
+                    .find(|i| i.name() == name.as_str())
+                    .expect("validated in try_new")
+                    .compile_stage()
+                    .is_some()
+            })
+            .expect("a transformed chain names the stage that transforms it");
+        Err(PostProcessorConfigError::FollowerAdvanceWithoutKernel {
+            axis: registry.axis_name(axis).to_string(),
+            name: name.clone(),
+        })
     }
 
     fn reject_pre_kernel_gains_on_leaders(
