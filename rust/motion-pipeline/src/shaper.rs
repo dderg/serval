@@ -11,8 +11,8 @@ use trajectory::{
 use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
     AccelerationTrend, FitTol, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget, LadderFailure,
-    LadderPolicy, LadderPva, LadderSpan, LadderTruth, VelocitySign, exact_piece, ladder_fit,
-    quintic_in_u,
+    LadderPolicy, LadderPva, LadderSpan, LadderTruth, VelocitySign, eval_mono, eval_mono_d,
+    exact_piece, ladder_fit, quintic_in_u,
 };
 use crate::types::{BaseItem, Control, PostProcessError, TrajectoryItem};
 
@@ -2522,6 +2522,103 @@ fn acceleration_interval_witness<S: TrackSignal>(
     })
 }
 
+const POSITION_WITNESS_MAX_DEPTH: u32 = 6;
+
+#[derive(Clone, Copy)]
+struct PositionErrorSample {
+    u: f64,
+    error: f64,
+    slope_per_u: f64,
+}
+
+impl PositionErrorSample {
+    fn hermite_peak_to(self, right: Self) -> f64 {
+        let width = right.u - self.u;
+        let (e0, e1) = (self.error, right.error);
+        let (d0, d1) = (self.slope_per_u * width, right.slope_per_u * width);
+        let c2 = 3.0 * (e1 - e0) - 2.0 * d0 - d1;
+        let c3 = 2.0 * (e0 - e1) + d0 + d1;
+        let at = |s: f64| ((c3 * s + c2) * s + d0) * s + e0;
+        let (a, b, c) = (3.0 * c3, 2.0 * c2, d0);
+        let critical = if a == 0.0 {
+            [(b != 0.0).then(|| -c / b), None]
+        } else {
+            let discriminant = b * b - 4.0 * a * c;
+            if discriminant < 0.0 {
+                [None, None]
+            } else {
+                let root = discriminant.sqrt();
+                [Some((-b - root) / (2.0 * a)), Some((-b + root) / (2.0 * a))]
+            }
+        };
+        critical
+            .into_iter()
+            .flatten()
+            .filter(|s| (0.0..=1.0).contains(s))
+            .map(|s| at(s).abs())
+            .fold(e0.abs().max(e1.abs()), f64::max)
+    }
+}
+
+struct PositionErrorWitness<'a, S> {
+    axis: usize,
+    sig: &'a S,
+    coefficients: &'a [f64],
+    t0: f64,
+    h: f64,
+    budget: f64,
+}
+
+impl<S: TrackSignal> PositionErrorWitness<'_, S> {
+    fn sample(&self, u: f64, (position, velocity): (f64, f64)) -> PositionErrorSample {
+        PositionErrorSample {
+            u,
+            error: eval_mono(self.coefficients, u) - position,
+            slope_per_u: eval_mono_d(self.coefficients, u) - velocity * (0.5 * self.h),
+        }
+    }
+
+    fn over_probes(&self, truth: &SpanTruth) -> Result<Option<f64>, PostProcessError> {
+        let samples: [PositionErrorSample; LADDER_PROBES_U.len()] = std::array::from_fn(|index| {
+            self.sample(LADDER_PROBES_U[index], (truth.pos[index], truth.vel[index]))
+        });
+        for gap in samples.windows(2) {
+            if let Some(u) = self.over_gap(gap[0], gap[1], 0)? {
+                return Ok(Some(u));
+            }
+        }
+        Ok(None)
+    }
+
+    fn over_gap(
+        &self,
+        left: PositionErrorSample,
+        right: PositionErrorSample,
+        depth: u32,
+    ) -> Result<Option<f64>, PostProcessError> {
+        if left.hermite_peak_to(right) <= self.budget {
+            return Ok(None);
+        }
+        let u = 0.5 * (left.u + right.u);
+        let t = nurbs::fmadd(0.5 * (u + 1.0), self.h, self.t0);
+        let (position, velocity, _) = self.sig.eval_pva(t);
+        let mid = self.sample(
+            u,
+            (
+                exact_value(self.axis, position, t)?,
+                exact_value(self.axis, velocity, t)?,
+            ),
+        );
+        if mid.error.abs() > self.budget || depth == POSITION_WITNESS_MAX_DEPTH {
+            return Ok(Some(u));
+        }
+        match self.over_gap(left, mid, depth + 1)? {
+            Some(u) => Ok(Some(u)),
+            None => self.over_gap(mid, right, depth + 1),
+        }
+    }
+}
+
 const LADDER_FIT_NODES_U: [f64; 3] = [0.0, 0.5, -0.5];
 
 /// Everything one fit's spans are refined against: the axis being fitted,
@@ -2718,9 +2815,20 @@ fn shaped_ladder<S: TrackSignal>(
         },
     ) {
         Ok(coefficients) => {
-            let Some(u) =
-                acceleration_error_witness(sig, &coefficients, t0, t1, fit_tol.accel_mm_s2)
-            else {
+            let witness =
+                match acceleration_error_witness(sig, &coefficients, t0, t1, fit_tol.accel_mm_s2) {
+                    Some(u) => Some(u),
+                    None => PositionErrorWitness {
+                        axis,
+                        sig,
+                        coefficients: &coefficients,
+                        t0,
+                        h,
+                        budget: fit_tol.pos_mm,
+                    }
+                    .over_probes(&truth)?,
+                };
+            let Some(u) = witness else {
                 return Ok((coefficients, None));
             };
             let t = t_of(u);
