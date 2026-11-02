@@ -67,9 +67,22 @@ pub(crate) struct WorkerLinks {
     pub(crate) finite_homing_admission: AtomicBool,
     pub(crate) shutting_down: AtomicBool,
     pub(crate) last_move_time_bits: AtomicU64,
+    #[cfg(test)]
+    pub(crate) pacer_drains: PacerDrains,
     pub(crate) fences: crate::fence::FenceRegistry,
     pub(crate) start_claims: super::StartClaims,
     pub(crate) wakeup: crate::feed_wakeup::FeedWakeup,
+}
+
+/// Brakes to rest the pacer ordered, by the path that ordered them; a
+/// flush's drain is neither.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct PacerDrains {
+    /// The runway fell while moves kept arriving.
+    pub(crate) busy: AtomicU64,
+    /// The inbox was found empty with the runway at the reserve.
+    pub(crate) idle: AtomicU64,
 }
 
 impl WorkerLinks {
