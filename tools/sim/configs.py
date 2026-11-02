@@ -2117,11 +2117,15 @@ homing_speed: 5
 [axis e]
 follows: x, y, z
 motors: extruder
-post_processors: pa
+post_processors: pa, st
 
 [post_processor pa]
 type: linear_pressure_advance
 k: 0.02
+
+[post_processor st]
+type: smooth_triangle
+smooth_time: 0.005
 
 [motor x]
 drive: stepper

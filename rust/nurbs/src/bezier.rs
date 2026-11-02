@@ -39,6 +39,19 @@ impl BezierPiece {
         }
     }
 
+    /// The sum of the coefficients' magnitudes over the piece's span: the
+    /// scale its values are computed at, and so of their rounding.
+    fn magnitude(&self) -> f64 {
+        let h = self.u_end - self.u_start;
+        let mut h_pow = 1.0;
+        let mut total = 0.0_f64;
+        for c in &self.coeffs {
+            total += (c * h_pow).abs();
+            h_pow *= h;
+        }
+        total.max(1.0)
+    }
+
     pub fn to_bernstein(&self) -> Vec<f64> {
         let d = self.degree();
         let h = self.u_end - self.u_start;
@@ -114,6 +127,10 @@ pub fn extract_bezier_pieces(curve: &ScalarNurbs) -> Vec<BezierPiece> {
     pieces
 }
 
+/// Rounding two power-basis pieces' Bernstein conversions can leave between
+/// their shared seam values, in ulps of the larger piece's magnitude.
+const SEAM_ROUNDING_ENVELOPE: f64 = (1_u64 << 20) as f64;
+
 pub fn bezier_pieces_to_nurbs(pieces: &[BezierPiece]) -> ScalarNurbs {
     assemble_bezier_pieces(pieces, false)
 }
@@ -155,6 +172,20 @@ fn assemble_bezier_pieces(pieces: &[BezierPiece], discontinuous: bool) -> Scalar
         if i == 0 || discontinuous {
             cps.extend_from_slice(&bernstein);
         } else {
+            let seam = pieces[i - 1].u_end;
+            let left = *cps
+                .last()
+                .expect("a previous piece left its end control point");
+            assert!(
+                (bernstein[0] - left).abs()
+                    <= SEAM_ROUNDING_ENVELOPE
+                        * f64::EPSILON
+                        * pieces[i - 1].magnitude().max(piece.magnitude()),
+                "bezier_pieces_to_nurbs: pieces meet discontinuously at {seam} ({left} then {}); \
+                 a continuous NURBS would silently drop the step — use \
+                 bezier_pieces_to_discontinuous_nurbs",
+                bernstein[0]
+            );
             cps.extend_from_slice(&bernstein[1..]);
         }
     }
