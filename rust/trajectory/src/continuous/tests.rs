@@ -2378,6 +2378,66 @@ fn local_polynomial_sums_carriers_and_stops_at_a_piece_seam() {
     );
 }
 
+fn issue_471_seam(right_base: f64) -> Arc<[RelativeSplinePiece]> {
+    Arc::from(vec![
+        RelativeSplinePiece {
+            base_position: -90.80534819390974,
+            curve: cubic_bezier(vec![317.14878596142586; 4]),
+            t_start: 0.0,
+            t_end: 1.0,
+        },
+        RelativeSplinePiece {
+            base_position: right_base,
+            curve: Arc::new(
+                ScalarNurbs::try_new(
+                    3,
+                    vec![1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0],
+                    vec![254.67333002005893, 254.8, 255.4, 255.2],
+                )
+                .unwrap(),
+            ),
+            t_start: 1.0,
+            t_end: 2.0,
+        },
+    ])
+}
+
+fn independent_span(axis: ContinuousAxis) -> Result<MotorSpan, ContinuousError> {
+    MotorSpan::try_new(
+        Arc::from(vec![MotorGroup::Independent(MotorTerm {
+            source_axis: 1,
+            axis,
+            scale: 1.0,
+        })]),
+        0.0,
+        2.0,
+        0,
+        7,
+        false,
+    )
+}
+
+#[test]
+fn piecewise_relative_spline_refuses_a_position_jump_at_a_piece_seam() {
+    let jumping = issue_471_seam(-66.2333562065993);
+    let jump = Some(ContinuousError::PieceJump {
+        at: 1.0,
+        previous_end: -90.80534819390974 + 317.14878596142586,
+        next_start: -66.2333562065993 + 254.67333002005893,
+    });
+    assert_eq!(
+        ContinuousAxis::try_piecewise_relative_spline(Arc::clone(&jumping)).err(),
+        jump
+    );
+    assert_eq!(
+        independent_span(ContinuousAxis::PiecewiseRelativeSpline(jumping)).err(),
+        jump
+    );
+
+    let rebased = issue_471_seam(-90.80534819390974 + 317.14878596142586 - 254.67333002005893);
+    independent_span(ContinuousAxis::try_piecewise_relative_spline(rebased).unwrap()).unwrap();
+}
+
 #[test]
 fn local_polynomial_ranges_contain_every_sample_and_tighten_with_the_interval() {
     let curve = lumpy_degree_nine();
