@@ -573,3 +573,108 @@ fn a_square_root_onset_at_the_floor_is_fitted_by_the_closest_anchored_rung() {
          the quintic"
     );
 }
+
+struct WaveWithQuietKnot {
+    t0: f64,
+    amplitude: f64,
+    angular_rate: f64,
+    phase: f64,
+    knot: [f64; 1],
+}
+
+impl WaveWithQuietKnot {
+    const SPAN_S: f64 = 0.014;
+    const KNOT_FRACTION: f64 = 0.4;
+
+    fn new(cycles: f64, eighths_of_a_turn: f64, peak_over_tolerance: f64) -> Self {
+        let t0 = 1.0;
+        let angular_rate = std::f64::consts::TAU * cycles / Self::SPAN_S;
+        Self {
+            t0,
+            amplitude: peak_over_tolerance * FOLLOWER_LIKE_TOLERANCE.accel_mm_s2
+                / (angular_rate * angular_rate),
+            angular_rate,
+            phase: eighths_of_a_turn * std::f64::consts::TAU / 8.0,
+            knot: [t0 + Self::KNOT_FRACTION * Self::SPAN_S],
+        }
+    }
+
+    fn worst_acceleration_deviation_of_its_fit(&self) -> (f64, f64) {
+        let track = fit_axis_from_signal(
+            AxisFit {
+                axis: 3,
+                t_start: self.t0,
+                t_end: self.t0 + Self::SPAN_S,
+                seed_breakpoints: &[],
+                fit_tol: FOLLOWER_LIKE_TOLERANCE,
+                fit_context: "smooth wave past a quiet knot",
+                velocity_continuous: true,
+            },
+            self,
+        )
+        .expect("a smooth signal fits");
+        let acceleration = nurbs::eval::derivative(&nurbs::eval::derivative(&track));
+        (0..2000)
+            .map(|k| {
+                let t = self.t0 + Self::SPAN_S * (f64::from(k) + 0.5) / 2000.0;
+                (
+                    (nurbs::eval::eval(&acceleration, t) - self.second_deriv(t)).abs(),
+                    t,
+                )
+            })
+            .fold((0.0, f64::NAN), |worst, sample| {
+                if sample.0 > worst.0 { sample } else { worst }
+            })
+    }
+}
+
+impl TrackSignal for WaveWithQuietKnot {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let tau = t - self.t0;
+        let rate = self.angular_rate;
+        let (sine, cosine) = libm::sincos(rate.mul_add(tau, self.phase));
+        (
+            0.3 + 10.0 * tau + 100.0 * tau * tau + self.amplitude * sine,
+            10.0 + 200.0 * tau + self.amplitude * rate * cosine,
+            200.0 - self.amplitude * rate * rate * sine,
+        )
+    }
+
+    fn interior_knots(&self, start: f64, end: f64) -> &[f64] {
+        if self.knot[0] > start && self.knot[0] < end {
+            &self.knot
+        } else {
+            &[]
+        }
+    }
+
+    fn knot_jump(&self, _knot: f64) -> KnotJumpBound {
+        KnotJumpBound {
+            acceleration: 0.0,
+            jerk: 0.0,
+        }
+    }
+}
+
+fn assert_holds_the_acceleration_tolerance((worst, at): (f64, f64)) {
+    assert!(
+        worst <= FOLLOWER_LIKE_TOLERANCE.accel_mm_s2,
+        "the fit's acceleration leaves the signal by {worst} mm/s² at {at}, past the {} mm/s² \
+         tolerance",
+        FOLLOWER_LIKE_TOLERANCE.accel_mm_s2
+    );
+}
+
+#[test]
+fn a_quiet_knot_keeps_the_probe_interpolant_watching_the_acceleration_between_probes() {
+    assert_holds_the_acceleration_tolerance(
+        WaveWithQuietKnot::new(3.2, 3.0, 2.0).worst_acceleration_deviation_of_its_fit(),
+    );
+}
+
+#[test]
+fn a_near_tolerance_acceleration_estimate_is_sampled_at_its_peak() {
+    assert_holds_the_acceleration_tolerance(
+        WaveWithQuietKnot::new(3.2, 3.0, 1.0).worst_acceleration_deviation_of_its_fit(),
+    );
+}
