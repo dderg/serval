@@ -484,7 +484,6 @@ fn materialize_changed_sources(
                 t_start: segment.t_start,
                 t_end: segment.t_end,
                 seed_breakpoints: &breakpoints,
-                keeps_velocity_breaks: false,
                 fit_tol,
                 fit_context: "materialize_source",
                 velocity_continuous: false,
@@ -963,7 +962,6 @@ fn fit_axis_targets(
                     t_start: target.t_start,
                     t_end: target.t_end,
                     seed_breakpoints: shaped_breaks,
-                    keeps_velocity_breaks: false,
                     fit_tol,
                     fit_context: "smooth_kernel_target",
                     velocity_continuous: true,
@@ -1044,8 +1042,7 @@ fn fit_axis_targets(
                             let Some(&t) = scale_times.get(index) else {
                                 return done;
                             };
-                            let (position, velocity, _) = sig.eval_pva(t);
-                            done.push((t.to_bits(), (position, velocity)));
+                            done.push((t.to_bits(), scale_probe(&sig, t)));
                         }
                     })
                 })
@@ -1059,10 +1056,7 @@ fn fit_axis_targets(
         let sig = make_sig();
         scale_times
             .iter()
-            .map(|&t| {
-                let (position, velocity, _) = sig.eval_pva(t);
-                (t.to_bits(), (position, velocity))
-            })
+            .map(|&t| (t.to_bits(), scale_probe(&sig, t)))
             .collect()
     };
     let scale_cache = scale_samples.into_iter().collect::<HashMap<_, _>>();
@@ -1070,14 +1064,14 @@ fn fit_axis_targets(
     for (target, seeds) in targets.iter().zip(seed_sets) {
         let (mut position_scale, mut velocity_scale) = (0.0_f64, 0.0_f64);
         for &t in &seeds {
-            let &(position, velocity) = scale_cache
+            let probe = scale_cache
                 .get(&t.to_bits())
                 .expect("leader scale probe is missing");
-            if position.is_finite() {
-                position_scale = position_scale.max(position.abs());
+            if probe.position.is_finite() {
+                position_scale = position_scale.max(probe.position.abs());
             }
-            if velocity.is_finite() {
-                velocity_scale = velocity_scale.max(velocity.abs());
+            if probe.velocity.is_finite() {
+                velocity_scale = velocity_scale.max(probe.velocity.abs());
             }
         }
         let time_scale = target.t_start.abs().max(target.t_end.abs());
@@ -1087,9 +1081,28 @@ fn fit_axis_targets(
             time_scale,
             fit_tol,
         );
-        plans.push(fit_plan_from_seeds(seeds, &[], floors).map_err(|crowded| {
-            crowded_velocity_breaks_error(axis, "smooth_kernel_target", floors.cubic, crowded)
-        })?);
+        let resolution = velocity_resolution(fit_tol, floors);
+        let velocity_breaks = seeds[1..seeds.len() - 1]
+            .iter()
+            .map(|&t| VelocityBreak {
+                t,
+                step: scale_cache[&t.to_bits()].velocity_step,
+            })
+            .filter(|velocity_break| velocity_break.step.abs() > resolution)
+            .collect::<Vec<_>>();
+        plans.push(
+            fit_plan_from_seeds(seeds, &velocity_breaks, floors, fit_tol.pos_mm).map_err(
+                |crowded| {
+                    crowded_velocity_breaks_error(
+                        axis,
+                        "smooth_kernel_target",
+                        floors,
+                        fit_tol,
+                        crowded,
+                    )
+                },
+            )?,
+        );
     }
     let jobs = plans
         .iter()
@@ -1229,7 +1242,6 @@ fn fit_axis_targets(
                     t_start: targets[target_index].t_start,
                     t_end: targets[target_index].t_end,
                     seed_breakpoints: shaped_breaks,
-                    keeps_velocity_breaks: false,
                     fit_tol,
                     fit_context: "smooth_kernel_target",
                     velocity_continuous: true,
@@ -2024,111 +2036,162 @@ fn ladder_resolution_floor_from_scales(
 /// land an ulp away from segment edges by construction, so the collision is
 /// routine rather than exceptional. A run of seeds each closer than the floor
 /// to the last kept one rolls forward onto its rightmost member, so what it
-/// absorbs can be many floors wide; only the signal's velocity breaks carry
-/// what a span cannot stretch over, so a run never rolls onto or past one.
-/// The pinned `t_start` and `t_end` count as velocity breaks, and two
-/// velocity breaks closer than the floor cannot both be kept: that is an
-/// error of whatever laid them, not something to absorb.
+/// absorbs can be many floors wide. It may roll onto a velocity break but
+/// never past one, and never past the pinned `t_start`: those anchor it.
+///
+/// A velocity break within the floor of an anchor is moved onto it, one knot
+/// carrying both, and the span beyond reads its edge velocity past the moved
+/// break. Moving a break by `d` shifts position by its velocity step times
+/// `d`; within `position_tolerance` that is the knot the signal would have
+/// had at representable resolution, beyond it the breaks are an error of
+/// whatever laid them.
 ///
 /// The absorbed seeds may still be acceleration breaks of the signal, so the
 /// plan records, per kept span, how far in from each edge they reach: the
 /// ladder must read that edge's state past them.
 fn coalesce_degenerate_seeds(
     seeds: &mut Vec<f64>,
-    velocity_breaks: &[f64],
+    velocity_breaks: &[VelocityBreak],
     minimum_span: f64,
+    position_tolerance: f64,
 ) -> Result<Vec<EdgeSlivers>, CrowdedVelocityBreaks> {
     assert!(
-        velocity_breaks.is_sorted_by(|left, right| left <= right),
+        velocity_breaks.is_sorted_by(|left, right| left.t <= right.t),
         "velocity breaks are not sorted: {velocity_breaks:?}"
     );
-    let is_velocity_break = |t: f64| {
+    let step_at = |t: f64| {
         velocity_breaks
-            .binary_search_by(|probe| probe.total_cmp(&t))
-            .is_ok()
+            .binary_search_by(|probe| probe.t.total_cmp(&t))
+            .ok()
+            .map(|index| velocity_breaks[index].step.abs())
+    };
+    let moved = |break_at: f64, moved_onto: f64, velocity_step: f64| {
+        let position_shift = velocity_step * (break_at - moved_onto).abs();
+        if position_shift > position_tolerance {
+            Err(CrowdedVelocityBreaks {
+                break_at,
+                moved_onto,
+                velocity_step,
+                position_shift,
+            })
+        } else {
+            Ok(())
+        }
     };
     let t_end = *seeds.last().expect("fit seeds are empty");
     let mut kept = Vec::with_capacity(seeds.len());
-    kept.push(KeptSeed {
-        t: seeds[0],
-        velocity_break: true,
-        absorbed_before: 0.0,
-        absorbed_after: 0.0,
-    });
+    kept.push(KeptSeed::pinned(seeds[0]));
     for &seed in &seeds[1..seeds.len() - 1] {
-        let velocity_break = is_velocity_break(seed);
+        let step = step_at(seed);
         let last = kept.last_mut().expect("kept seeds are empty");
         let gap = seed - last.t;
         if gap >= minimum_span {
-            kept.push(KeptSeed {
-                t: seed,
-                velocity_break,
-                absorbed_before: 0.0,
-                absorbed_after: 0.0,
-            });
-        } else if last.velocity_break && velocity_break {
-            return Err(CrowdedVelocityBreaks {
-                earlier: last.t,
-                later: seed,
-            });
-        } else if last.velocity_break {
+            kept.push(KeptSeed::interior(seed, step));
+        } else if last.anchors() {
+            if let Some(step) = step {
+                moved(seed, last.t, step)?;
+                last.break_after = Some(seed);
+                last.carried_steps += step;
+            }
             last.absorbed_after = last.absorbed_after.max(gap);
         } else {
             last.absorbed_before += gap;
             last.t = seed;
-            last.velocity_break = velocity_break;
+            last.velocity_break = step.is_some();
+            last.carried_steps = step.unwrap_or(0.0);
         }
     }
     let mut absorbed_end = 0.0_f64;
+    let mut end_break = None;
     while kept.len() > 1 {
         let last = kept.last().expect("kept seeds are empty");
         let gap = t_end - last.t;
         if gap >= minimum_span {
             break;
         }
-        if last.velocity_break {
-            return Err(CrowdedVelocityBreaks {
-                earlier: last.t,
-                later: t_end,
-            });
+        if last.carried_steps > 0.0 {
+            moved(last.t, t_end, last.carried_steps)?;
+            end_break = Some(last.t);
         }
         absorbed_end = absorbed_end.max(gap + last.absorbed_before);
         kept.pop();
     }
-    kept.push(KeptSeed {
-        t: t_end,
-        velocity_break: true,
-        absorbed_before: absorbed_end,
-        absorbed_after: 0.0,
-    });
+    let mut end = KeptSeed::pinned(t_end);
+    end.absorbed_before = absorbed_end;
+    end.break_before = end_break;
+    kept.push(end);
     *seeds = kept.iter().map(|seed| seed.t).collect();
     Ok(kept
         .windows(2)
         .map(|span| EdgeSlivers {
             start: span[0].absorbed_after,
             end: span[1].absorbed_before,
+            start_break: span[0].break_after,
+            end_break: span[1].break_before,
         })
         .collect())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct VelocityBreak {
+    t: f64,
+    step: f64,
+}
+
 struct KeptSeed {
     t: f64,
+    pinned: bool,
     velocity_break: bool,
+    carried_steps: f64,
     absorbed_before: f64,
     absorbed_after: f64,
+    break_before: Option<f64>,
+    break_after: Option<f64>,
+}
+
+impl KeptSeed {
+    fn pinned(t: f64) -> Self {
+        Self {
+            pinned: true,
+            ..Self::interior(t, None)
+        }
+    }
+
+    fn interior(t: f64, step: Option<f64>) -> Self {
+        Self {
+            t,
+            pinned: false,
+            velocity_break: step.is_some(),
+            carried_steps: step.unwrap_or(0.0),
+            absorbed_before: 0.0,
+            absorbed_after: 0.0,
+            break_before: None,
+            break_after: None,
+        }
+    }
+
+    fn anchors(&self) -> bool {
+        self.pinned || self.velocity_break
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct CrowdedVelocityBreaks {
-    earlier: f64,
-    later: f64,
+    break_at: f64,
+    moved_onto: f64,
+    velocity_step: f64,
+    position_shift: f64,
 }
 
-/// How far into a span, from each edge, seeds absorbed by coalescing reach.
+/// How far into a span, from each edge, seeds absorbed by coalescing reach,
+/// and the innermost velocity break among them, past which the edge's
+/// velocity is read.
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 struct EdgeSlivers {
     start: f64,
     end: f64,
+    start_break: Option<f64>,
+    end_break: Option<f64>,
 }
 
 struct FitPlan {
@@ -2168,10 +2231,16 @@ fn fit_seed_times(
 
 fn fit_plan_from_seeds(
     mut seeds: Vec<f64>,
-    velocity_breaks: &[f64],
+    velocity_breaks: &[VelocityBreak],
     floors: LadderFloors,
+    position_tolerance: f64,
 ) -> Result<FitPlan, CrowdedVelocityBreaks> {
-    let slivers = coalesce_degenerate_seeds(&mut seeds, velocity_breaks, floors.cubic)?;
+    let slivers = coalesce_degenerate_seeds(
+        &mut seeds,
+        velocity_breaks,
+        floors.cubic,
+        position_tolerance,
+    )?;
     Ok(FitPlan {
         seeds,
         slivers,
@@ -2182,15 +2251,19 @@ fn fit_plan_from_seeds(
 fn crowded_velocity_breaks_error(
     axis: usize,
     fit_context: &'static str,
-    floor: f64,
+    floors: LadderFloors,
+    fit_tol: FitTol,
     crowded: CrowdedVelocityBreaks,
 ) -> PostProcessError {
     PostProcessError::CrowdedVelocityBreaks {
         axis,
         fit_context,
-        earlier: crowded.earlier,
-        later: crowded.later,
-        floor,
+        break_at: crowded.break_at,
+        moved_onto: crowded.moved_onto,
+        velocity_step: crowded.velocity_step,
+        position_shift: crowded.position_shift,
+        position_budget: fit_tol.pos_mm,
+        floor: floors.cubic,
     }
 }
 
@@ -2206,13 +2279,10 @@ fn plan_seeds_and_floors<S: TrackSignal>(
 
 fn prepare_fit_plan<S: TrackSignal>(fit: &AxisFit, sig: &S) -> Result<FitPlan, PostProcessError> {
     let (seeds, floors) = plan_seeds_and_floors(fit, sig)?;
-    let velocity_breaks = if fit.keeps_velocity_breaks {
-        velocity_breaks_among(sig, &seeds, velocity_resolution(fit.fit_tol, floors))
-    } else {
-        Vec::new()
-    };
-    fit_plan_from_seeds(seeds, &velocity_breaks, floors).map_err(|crowded| {
-        crowded_velocity_breaks_error(fit.axis, fit.fit_context, floors.cubic, crowded)
+    let velocity_breaks =
+        velocity_breaks_among(sig, &seeds, velocity_resolution(fit.fit_tol, floors));
+    fit_plan_from_seeds(seeds, &velocity_breaks, floors, fit.fit_tol.pos_mm).map_err(|crowded| {
+        crowded_velocity_breaks_error(fit.axis, fit.fit_context, floors, fit.fit_tol, crowded)
     })
 }
 
@@ -2227,15 +2297,35 @@ fn velocity_breaks_among<S: TrackSignal>(
     sig: &S,
     seeds: &[f64],
     velocity_resolution: f64,
-) -> Vec<f64> {
+) -> Vec<VelocityBreak> {
     seeds[1..seeds.len() - 1]
         .iter()
-        .copied()
-        .filter(|&t| {
-            let before = sig.eval_pva(next_toward(t, f64::NEG_INFINITY)).1;
-            (sig.eval_pva(t).1 - before).abs() > velocity_resolution
+        .map(|&t| VelocityBreak {
+            t,
+            step: velocity_step_across(sig, t),
         })
+        .filter(|velocity_break| velocity_break.step.abs() > velocity_resolution)
         .collect()
+}
+
+fn velocity_step_across<S: TrackSignal>(sig: &S, t: f64) -> f64 {
+    sig.eval_pva(next_toward(t, f64::INFINITY)).1
+        - sig.eval_pva(next_toward(t, f64::NEG_INFINITY)).1
+}
+
+struct ScaleProbe {
+    position: f64,
+    velocity: f64,
+    velocity_step: f64,
+}
+
+fn scale_probe<S: TrackSignal>(sig: &S, t: f64) -> ScaleProbe {
+    let (position, velocity, _) = sig.eval_pva(t);
+    ScaleProbe {
+        position,
+        velocity,
+        velocity_step: velocity_step_across(sig, t),
+    }
 }
 
 pub(crate) fn fit_velocity_resolution<S: TrackSignal>(
@@ -2272,7 +2362,6 @@ pub(crate) struct AxisFit<'a> {
     pub t_start: f64,
     pub t_end: f64,
     pub seed_breakpoints: &'a [f64],
-    pub keeps_velocity_breaks: bool,
     pub fit_tol: FitTol,
     pub fit_context: &'static str,
     pub velocity_continuous: bool,
@@ -2504,6 +2593,31 @@ fn edge_velocity_and_acceleration<S: TrackSignal>(
     Ok((velocity, acceleration))
 }
 
+/// The velocity a span anchors to at a seam where coalescing moved a velocity
+/// break onto it: the far side of the break, carried back to the seam by its
+/// acceleration across the sub-floor gap.
+fn velocity_past_moved_break<S: TrackSignal>(
+    sig: &S,
+    axis: usize,
+    break_at: f64,
+    into_span: f64,
+    seam: f64,
+) -> Result<f64, PostProcessError> {
+    let past = next_toward(break_at, into_span);
+    let (_, velocity, acceleration) = sig.eval_pva(past);
+    let velocity = exact_value(axis, velocity, past)?;
+    let acceleration = exact_value(axis, acceleration, past)?;
+    Ok(nurbs::fmadd(acceleration, seam - past, velocity))
+}
+
+fn span_probe_t(t0: f64, t1: f64, u: f64) -> f64 {
+    match u {
+        -1.0 => next_toward(t0, t1),
+        1.0 => next_toward(t1, t0),
+        _ => nurbs::fmadd(0.5 * (u + 1.0), t1 - t0, t0),
+    }
+}
+
 /// Ladder fit of the shaped signal over one span: the endpoint-anchored
 /// quadratic carrying the span's own travel, the cubic through both endpoint
 /// velocities, then the quintic Hermite matching the convolution's exact
@@ -2524,33 +2638,32 @@ fn shaped_ladder<S: TrackSignal>(
     let fit_tol = policy.fit_tol;
     let h = t1 - t0;
     let t_of = |u: f64| nurbs::fmadd(0.5 * (u + 1.0), h, t0);
-    let interior_t_of = |u: f64| {
-        if u == -1.0 {
-            next_toward(t0, t1)
-        } else if u == 1.0 {
-            next_toward(t1, t0)
-        } else {
-            t_of(u)
-        }
-    };
-    let t0_inside = interior_t_of(-1.0);
+    let t0_inside = span_probe_t(t0, t1, -1.0);
     let p0 = exact_value(axis, sig.eval(t0), t0)?;
-    let (v0, a0) = edge_velocity_and_acceleration(
+    let (seam_v0, a0) = edge_velocity_and_acceleration(
         sig,
         axis,
         t0_inside,
         t0 + edge_inset(h, policy.floors.cubic, slivers.start),
         fit_tol,
     )?;
-    let t1_inside = interior_t_of(1.0);
+    let v0 = match slivers.start_break {
+        Some(break_at) => velocity_past_moved_break(sig, axis, break_at, t1, t0)?,
+        None => seam_v0,
+    };
+    let t1_inside = span_probe_t(t0, t1, 1.0);
     let p1 = exact_value(axis, sig.eval(t1), t1)?;
-    let (v1, a1) = edge_velocity_and_acceleration(
+    let (seam_v1, a1) = edge_velocity_and_acceleration(
         sig,
         axis,
         t1_inside,
         t1 - edge_inset(h, policy.floors.cubic, slivers.end),
         fit_tol,
     )?;
+    let v1 = match slivers.end_break {
+        Some(break_at) => velocity_past_moved_break(sig, axis, break_at, t0, t1)?,
+        None => seam_v1,
+    };
     let base = quintic_in_u((p0, v0, a0), (p1, v1, a1), h);
     let endpoint_delta = exact_value(axis, sig.position_delta((t0, p0), (t1, p1)), t1)?;
 
@@ -2701,20 +2814,17 @@ fn refine_shaped_span<S: TrackSignal>(
                 .is_none()
         {
             let velocity_change = failure.right.velocity - failure.left.velocity;
-            let (carried_low, carried_high) = velocity_carried_by_acceleration(sig, t0, t1);
-            let velocity_slack = fit_tol.accel_mm_s2 * (t1 - t0);
-            if velocity_change < carried_low - velocity_slack
-                || velocity_change > carried_high + velocity_slack
-            {
+            let gate = FloorVelocityGate::over(sig, t0, t1, fit_tol);
+            if !gate.admits(velocity_change) {
                 return Err(PostProcessError::VelocityStepAtFitFloor {
                     axis: policy.axis,
                     fit_context: policy.fit_context,
                     t_start: t0,
                     t_end: t1,
                     velocity_change,
-                    carried_low,
-                    carried_high,
-                    velocity_slack,
+                    carried_low: gate.carried_low,
+                    carried_high: gate.carried_high,
+                    velocity_slack: gate.slack,
                     position_error: failure.error.position,
                     position_budget: fit_tol.pos_mm,
                     velocity_error: failure.error.velocity,
@@ -2784,8 +2894,9 @@ fn refine_shaped_span<S: TrackSignal>(
             t0,
             t1: tm,
             slivers: EdgeSlivers {
-                start: slivers.start,
                 end: 0.0,
+                end_break: None,
+                ..slivers
             },
         },
         policy,
@@ -2800,7 +2911,8 @@ fn refine_shaped_span<S: TrackSignal>(
             t1,
             slivers: EdgeSlivers {
                 start: 0.0,
-                end: slivers.end,
+                start_break: None,
+                ..slivers
             },
         },
         policy,
@@ -2810,21 +2922,38 @@ fn refine_shaped_span<S: TrackSignal>(
     )
 }
 
-fn velocity_carried_by_acceleration<S: TrackSignal>(sig: &S, t0: f64, t1: f64) -> (f64, f64) {
-    let h = t1 - t0;
-    let (lowest, highest) = LADDER_PROBES_U
-        .iter()
-        .map(|&u| match u {
-            -1.0 => next_toward(t0, t1),
-            1.0 => next_toward(t1, t0),
-            _ => nurbs::fmadd(0.5 * (u + 1.0), h, t0),
-        })
-        .map(|t| sig.second_deriv(t))
-        .fold(
-            (f64::INFINITY, f64::NEG_INFINITY),
-            |(lowest, highest), acceleration| (lowest.min(acceleration), highest.max(acceleration)),
-        );
-    (lowest * h, highest * h)
+/// What a floor-width span may carry in velocity across it: the velocity
+/// its own probed acceleration accounts for, widened by what an acceleration
+/// within tolerance carries over the span.
+struct FloorVelocityGate {
+    carried_low: f64,
+    carried_high: f64,
+    slack: f64,
+}
+
+impl FloorVelocityGate {
+    fn over<S: TrackSignal>(sig: &S, t0: f64, t1: f64, fit_tol: FitTol) -> Self {
+        let h = t1 - t0;
+        let (lowest, highest) = LADDER_PROBES_U
+            .iter()
+            .map(|&u| sig.second_deriv(span_probe_t(t0, t1, u)))
+            .fold(
+                (f64::INFINITY, f64::NEG_INFINITY),
+                |(lowest, highest), acceleration| {
+                    (lowest.min(acceleration), highest.max(acceleration))
+                },
+            );
+        Self {
+            carried_low: lowest * h,
+            carried_high: highest * h,
+            slack: fit_tol.accel_mm_s2 * h,
+        }
+    }
+
+    fn admits(&self, velocity_change: f64) -> bool {
+        velocity_change >= self.carried_low - self.slack
+            && velocity_change <= self.carried_high + self.slack
+    }
 }
 
 fn fit_tolerance_without_probe(axis: usize, t_start: f64, t_end: f64) -> PostProcessError {
@@ -2993,7 +3122,6 @@ pub(crate) fn apply_nonlinear_advance_to_track(
             t_start,
             t_end,
             seed_breakpoints: &breakpoints,
-            keeps_velocity_breaks: false,
             fit_tol,
             fit_context: "nonlinear_advance",
             velocity_continuous: true,

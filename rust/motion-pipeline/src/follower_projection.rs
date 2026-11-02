@@ -227,7 +227,6 @@ fn fit_source_projection(
             t_start,
             t_end,
             seed_breakpoints: &breakpoints.fit_seeds,
-            keeps_velocity_breaks: true,
             fit_tol: tolerance,
             fit_context: if leading_stage.is_some() {
                 "advanced_follower_source"
@@ -989,7 +988,6 @@ fn fit_kernel_window<S: TrackSignal>(
             t_start: start,
             t_end: end,
             seed_breakpoints: shaped_breaks,
-            keeps_velocity_breaks: false,
             fit_tol: target_tol,
             fit_context: "follower_kernel",
             velocity_continuous: true,
@@ -1555,7 +1553,6 @@ fn fit_continuous_axis(
             t_start,
             t_end,
             seed_breakpoints: &breakpoints,
-            keeps_velocity_breaks: false,
             fit_tol,
             fit_context: "follower_axis",
             velocity_continuous,
