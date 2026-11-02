@@ -131,9 +131,9 @@ fn replay(chains: &AxisChainSet) -> Replay {
 /// images of the materialize seeds graded toward it.
 const CONTACT_IMAGE_RADIUS_S: f64 = 2e-4;
 
-/// Shaped-leader knots one contact image may cost: its own break plus a
-/// refinement split toward a neighbouring image.
-const KNOTS_PER_CONTACT_IMAGE: usize = 2;
+/// Shaped-leader knots one contact image may cost: its own break plus the
+/// images of the source's refinement toward the contact's shoulder.
+const KNOTS_PER_CONTACT_IMAGE: usize = 3;
 
 fn count_within(sorted: &[f64], centre: f64) -> usize {
     let lo = sorted.partition_point(|&t| t < centre - CONTACT_IMAGE_RADIUS_S);
@@ -141,10 +141,10 @@ fn count_within(sorted: &[f64], centre: f64) -> usize {
     hi - lo
 }
 
-/// Graded materialize seeds only let the source fit follow the square-root
-/// shoulder of a cap contact; their knots carry fit residuals the kernel
-/// smooths away, so the shaped leader breaks at a contact's images and not
-/// at the images of every seed graded toward it.
+/// Every knot of the materialized source seeds the shaped leader at each of
+/// its kernel images, so the source refines toward a cap contact's
+/// square-root shoulder only as deep as its fit needs, not down a fixed
+/// ladder of graded seeds.
 #[test]
 fn a_cap_contact_costs_the_shaped_leader_a_bounded_number_of_pieces() {
     let chains = xy_bell_chains();

@@ -91,6 +91,11 @@ pub(crate) trait TrackSignal {
     fn diagnostic(&self, _t: f64) -> Option<String> {
         None
     }
+    /// Times at which the acceleration rises from a point as a square root,
+    /// whose shoulder can bend between the ladder's probes.
+    fn square_root_onsets(&self) -> &[f64] {
+        &[]
+    }
 }
 
 impl TrackSignal for ContinuousAxis {
@@ -131,6 +136,9 @@ impl<S: TrackSignal> TrackSignal for &S {
     }
     fn diagnostic(&self, t: f64) -> Option<String> {
         S::diagnostic(self, t)
+    }
+    fn square_root_onsets(&self) -> &[f64] {
+        S::square_root_onsets(self)
     }
 }
 
@@ -258,7 +266,6 @@ pub struct Shaper {
     fit_tol: FitTol,
     history: VecDeque<ContinuousSegment>,
     pending: PendingSegments,
-    graded_knots: GradedSourceKnots,
     forward_support: f64,
     back_support: f64,
     history_trimmed: bool,
@@ -276,7 +283,6 @@ impl Shaper {
             fit_tol,
             history: VecDeque::new(),
             pending: PendingSegments::default(),
-            graded_knots: GradedSourceKnots::default(),
             history_trimmed: false,
             follower_states: Vec::new(),
             toolhead_tap: None,
@@ -294,13 +300,8 @@ impl Shaper {
 
     fn buffer_segment(&mut self, mut segment: ContinuousSegment) {
         let started = crate::timing::stopwatch();
-        let rebuilt = materialize_changed_sources(
-            &mut segment,
-            &self.chains,
-            self.fit_tol,
-            &mut self.graded_knots,
-        )
-        .unwrap_or_else(|error| panic!("shaper: {error}"));
+        let rebuilt = materialize_changed_sources(&mut segment, &self.chains, self.fit_tol)
+            .unwrap_or_else(|error| panic!("shaper: {error}"));
         let elapsed_us = started.elapsed_us();
         crate::timing::record_stage(crate::timing::Stage::MaterializeSource, elapsed_us);
         if crate::timing::is_slow_phase(elapsed_us) {
@@ -340,7 +341,6 @@ impl Shaper {
                     Control::Reset { .. } => {
                         self.pending.clear();
                         self.history.clear();
-                        self.graded_knots.clear();
                         self.history_trimmed = false;
                         for state in &mut self.follower_states {
                             state.reset_timeline();
@@ -369,7 +369,6 @@ impl Shaper {
                             // fall back to the stream-boundary clamp then.
                             if new_back > self.back_support {
                                 self.history.clear();
-                                self.graded_knots.clear();
                                 self.history_trimmed = false;
                                 for state in &mut self.follower_states {
                                     state.clear_projected_history();
@@ -472,7 +471,6 @@ impl Shaper {
                 base: segments,
                 chains: &self.chains,
                 fit_tol: self.fit_tol,
-                graded_knots: &self.graded_knots,
                 boundary: if self.history_trimmed {
                     FitBoundary::Interior
                 } else {
@@ -518,12 +516,6 @@ impl Shaper {
             self.history.pop_front();
             self.history_trimmed = true;
         }
-        let retained_from = self
-            .history
-            .front()
-            .expect("history keeps a segment")
-            .t_start;
-        self.graded_knots.retain_from(retained_from);
         true
     }
 }
@@ -532,7 +524,6 @@ fn materialize_changed_sources(
     segment: &mut ContinuousSegment,
     chains: &AxisChainSet,
     fit_tol: FitTol,
-    graded_knots: &mut GradedSourceKnots,
 ) -> Result<usize, PostProcessError> {
     let mut replacements = Vec::new();
     for (axis, source) in segment.axes.iter().enumerate() {
@@ -546,31 +537,19 @@ fn materialize_changed_sources(
         if !(variable_surface_z || changed) || matches!(source, ContinuousAxis::Spline(_)) {
             continue;
         }
-        let CapGradedSeeds {
-            mut breakpoints,
-            cap_contacts: _cap_contacts,
-            mut graded,
-        } = match source {
-            ContinuousAxis::Analytic { span, .. } => cap_graded_seeds(span),
-            _ => CapGradedSeeds {
-                breakpoints: vec![segment.t_start, segment.t_end],
-                cap_contacts: Vec::new(),
-                graded: Vec::new(),
-            },
+        let (mut breakpoints, cap_contacts) = match source {
+            ContinuousAxis::Analytic { span, .. } => cap_contact_seeds(span),
+            _ => (vec![segment.t_start, segment.t_end], Vec::new()),
         };
         if let ContinuousAxis::Analytic { span, .. } = source {
             if variable_surface_z {
                 breakpoints.extend(span.surface_seam_times().ok_or_else(|| {
                     fit_tolerance_without_probe(axis, segment.t_start, segment.t_end)
                 })?);
-                breakpoints.sort_by(f64::total_cmp);
-                breakpoints.dedup();
             }
         }
-        graded.retain(|seed| breakpoints.binary_search_by(|t| t.total_cmp(seed)).is_err());
-        breakpoints.extend_from_slice(&graded);
         #[cfg(feature = "fit-audit")]
-        let _cap_contacts_audited = crate::fit_audit::CapContactScope::enter(&_cap_contacts);
+        let _cap_contacts_audited = crate::fit_audit::CapContactScope::enter(&cap_contacts);
         let mut curve = fit_axis_from_signal(
             AxisFit {
                 axis,
@@ -581,18 +560,16 @@ fn materialize_changed_sources(
                 fit_context: "materialize_source",
                 velocity_continuous: false,
             },
-            source,
+            &CapContactSource {
+                source,
+                cap_contacts: &cap_contacts,
+            },
         )?;
-        let leading_transform = chains
-            .chains
-            .get(axis)
-            .filter(|_| !chains.is_projected_follower(axis))
-            .and_then(CompiledChain::leading_transform);
-        match leading_transform {
-            Some(transform) => {
-                curve = apply_zero_support_transform(Some(transform), axis, curve, fit_tol)?;
+        if !chains.is_projected_follower(axis) {
+            if let Some(chain) = chains.chains.get(axis) {
+                curve =
+                    apply_zero_support_transform(chain.leading_transform(), axis, curve, fit_tol)?;
             }
-            None => graded_knots.record(axis, &graded),
         }
         replacements.push((axis, ContinuousAxis::Spline(Arc::new(curve))));
     }
@@ -604,107 +581,34 @@ fn materialize_changed_sources(
     Ok(rebuilt)
 }
 
-/// An analytic source's materialize seeds: its ends, phase seams and
-/// curvature-cap contacts, sorted and without repeats, then the seeds graded
-/// toward those contacts.
-struct CapGradedSeeds {
-    breakpoints: Vec<f64>,
-    cap_contacts: Vec<f64>,
-    graded: Vec<f64>,
-}
-
-fn cap_graded_seeds(span: &AnalyticMoveSpan) -> CapGradedSeeds {
+/// An analytic source's materialize seeds — its ends, phase seams and
+/// curvature-cap contacts — and those contacts.
+fn cap_contact_seeds(span: &AnalyticMoveSpan) -> (Vec<f64>, Vec<f64>) {
     let cap_contacts: Vec<f64> = span.cap_contact_times().collect();
-    let mut breakpoints = vec![span.t_start, span.t_end];
-    breakpoints.extend(span.phase_seam_times());
-    breakpoints.extend_from_slice(&cap_contacts);
-    breakpoints.sort_by(f64::total_cmp);
-    breakpoints.dedup();
-    let graded = seeds_graded_toward(&breakpoints, &cap_contacts);
-    CapGradedSeeds {
-        breakpoints,
-        cap_contacts,
-        graded,
-    }
+    assert!(
+        cap_contacts.is_sorted(),
+        "cap contacts are out of time order: {cap_contacts:?}"
+    );
+    let mut seeds = vec![span.t_start, span.t_end];
+    seeds.extend(span.phase_seam_times());
+    seeds.extend_from_slice(&cap_contacts);
+    (seeds, cap_contacts)
 }
 
-/// Seeds approach a non-analytic point geometrically down to this spacing:
-/// the disk rail's dense solution resolves a square-root approach no finer
-/// than its knot spacing, so finer seeds would split polynomial pieces.
-const SINGULAR_SEED_GRADING_FLOOR_S: f64 = 1e-6;
-
-/// Seeds halving their distance to each singular time from the neighbouring
-/// anchor on either side, sorted and without repeats. A polynomial cannot
-/// follow a square-root shoulder across a span, but each graded span sees
-/// the same shoulder rescaled, which a ladder rung fits within tolerance.
-/// `anchors` are sorted and hold every singular time.
-fn seeds_graded_toward(anchors: &[f64], singular: &[f64]) -> Vec<f64> {
-    let mut graded = Vec::new();
-    for &point in singular {
-        let at = anchors.partition_point(|&seed| seed < point);
-        assert_eq!(
-            anchors.get(at),
-            Some(&point),
-            "singular time {point} is not among the grading anchors"
-        );
-        let neighbours = [
-            at.checked_sub(1).map(|i| anchors[i]),
-            anchors.get(at + 1).copied(),
-        ];
-        for neighbour in neighbours.into_iter().flatten() {
-            let mut offset = 0.5 * (neighbour - point);
-            while offset.abs() >= SINGULAR_SEED_GRADING_FLOOR_S {
-                graded.push(point + offset);
-                offset *= 0.5;
-            }
-        }
-    }
-    graded.sort_by(f64::total_cmp);
-    graded.dedup();
-    graded
+/// A materialized source with the curvature-cap contacts its acceleration
+/// approaches as a square root.
+struct CapContactSource<'a> {
+    source: &'a ContinuousAxis,
+    cap_contacts: &'a [f64],
 }
 
-/// The materialize seeds graded toward curvature-cap contacts, per axis and
-/// in time order, across the buffered and retained segments. They let the
-/// source fit follow a contact's square-root shoulder; the knots they leave
-/// carry only fit-residual acceleration steps, which a kernel smooths, so
-/// the shaped partition does not break at their images.
-#[derive(Default)]
-pub(crate) struct GradedSourceKnots {
-    axes: Vec<VecDeque<f64>>,
-}
-
-impl GradedSourceKnots {
-    fn record(&mut self, axis: usize, knots: &[f64]) {
-        if knots.is_empty() {
-            return;
-        }
-        if self.axes.len() <= axis {
-            self.axes.resize_with(axis + 1, VecDeque::new);
-        }
-        let times = &mut self.axes[axis];
-        assert!(
-            knots.is_sorted() && times.back().is_none_or(|&last| last < knots[0]),
-            "graded source knots on axis {axis} arrived out of time order"
-        );
-        times.extend(knots);
+impl TrackSignal for CapContactSource<'_> {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        TrackSignal::eval_pva(self.source, t)
     }
 
-    fn retain_from(&mut self, t: f64) {
-        for times in &mut self.axes {
-            let stale = times.partition_point(|&knot| knot < t);
-            times.drain(..stale);
-        }
-    }
-
-    fn clear(&mut self) {
-        self.axes.clear();
-    }
-
-    fn contains(&self, axis: usize, t: f64) -> bool {
-        self.axes
-            .get(axis)
-            .is_some_and(|times| times.binary_search_by(|knot| knot.total_cmp(&t)).is_ok())
+    fn square_root_onsets(&self) -> &[f64] {
+        self.cap_contacts
     }
 }
 
@@ -739,16 +643,14 @@ impl Lookahead {
 }
 
 /// Everything one emit window's leader fits read: the signal the convolution
-/// integrates (history plus the buffered base) and the source knots graded
-/// toward its cap contacts, the chains and tolerance it is fitted with, and
-/// how the window's two edges behave.
+/// integrates (history plus the buffered base), the chains and tolerance it
+/// is fitted with, and how the window's two edges behave.
 #[derive(Clone, Copy)]
 struct AxisFitRequest<'a> {
     history: &'a VecDeque<ContinuousSegment>,
     base: &'a [ContinuousSegment],
     chains: &'a AxisChainSet,
     fit_tol: FitTol,
-    graded_knots: &'a GradedSourceKnots,
     boundary: FitBoundary,
     lookahead: Lookahead,
 }
@@ -1056,27 +958,6 @@ impl ColumnSignal {
             Self::MotorCommand { k1, k2 } => shaped_input.with_derivative_gains(k1, k2),
         }
     }
-
-    /// The input breaks whose kernel images seed the shaped partition. A
-    /// shaped column leaves out the knots graded toward a cap contact, whose
-    /// fit-residual acceleration steps the kernel smooths; the motor
-    /// command's derivative gains turn those steps into position steps the
-    /// kernel carries through, so it keeps every break.
-    fn shaped_break_seeds<'b>(
-        self,
-        axis: usize,
-        input_breaks: &'b [f64],
-        graded_knots: &GradedSourceKnots,
-    ) -> std::borrow::Cow<'b, [f64]> {
-        match self {
-            Self::Shaped => input_breaks
-                .iter()
-                .copied()
-                .filter(|&t| !graded_knots.contains(axis, t))
-                .collect(),
-            Self::MotorCommand { .. } => std::borrow::Cow::Borrowed(input_breaks),
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -1096,7 +977,6 @@ fn fit_axis_column(
         history,
         base,
         fit_tol,
-        graded_knots,
         boundary,
         lookahead,
         ..
@@ -1135,19 +1015,13 @@ fn fit_axis_column(
         boundary,
         lookahead,
     };
-    let input_breaks = signal_breakpoints(&signal_segments, axis);
-    let shaped_breaks = shaped_signal_breakpoints(
-        kernel,
-        &signal.shaped_break_seeds(axis, &input_breaks, graded_knots),
-    );
     fit_axis_targets(
         axis,
         targets,
         ShapedSignalSource::new(
             kernel,
             signal.convolution_input(AxisSignalTable::build(&signal_segments, axis, bounds)),
-            input_breaks,
-            shaped_breaks,
+            signal_breakpoints(&signal_segments, axis),
             targets[0].t_start,
         ),
         fit_tol,
@@ -1158,8 +1032,8 @@ fn fit_axis_column(
 }
 
 /// The convolution's input for one axis, packaged for the target fits: the
-/// kernel, the flattened signal it integrates, the input breaks its exact
-/// integration splits at, and the shaped breaks that seed the target fits.
+/// kernel, the flattened signal it integrates, and the breakpoint sets that
+/// seed the input and shaped partitions.
 pub(crate) struct ShapedSignalSource<'a> {
     kernel: &'a nurbs::algebra::PiecewisePolynomialKernel,
     table: Arc<AxisSignalTable>,
@@ -1265,7 +1139,6 @@ impl<'a> ShapedSignalSource<'a> {
         kernel: &'a nurbs::algebra::PiecewisePolynomialKernel,
         input: AxisSignalTable,
         input_breaks: Vec<f64>,
-        shaped_breaks: Vec<f64>,
         offset_at: f64,
     ) -> Self {
         let kernel_degree = kernel
@@ -1286,7 +1159,7 @@ impl<'a> ShapedSignalSource<'a> {
         );
         Self {
             kernel,
-            shaped_breaks,
+            shaped_breaks: shaped_signal_breakpoints(kernel, &input_breaks),
             input_degree: table.max_degree(),
             gain_impulse_response: (!table.gain_impulses().is_empty())
                 .then(|| GainImpulseResponse::new(kernel, table.gain_impulses())),
@@ -3620,6 +3493,57 @@ fn shaped_ladder<S: TrackSignal>(
     }
 }
 
+/// Points at which a candidate next to a square-root onset is held to the
+/// fit tolerance, spread between its resolved edges as the fit audit
+/// spreads them.
+const SQUARE_ROOT_ONSET_CHECK_POINTS: u32 = 64;
+
+/// A ladder candidate over `[t0, t1]` in the ladder's `[-1, 1]` monomial
+/// coordinate, and how far inside each edge the fit resolves it.
+#[derive(Clone, Copy)]
+struct OnsetCandidate<'a> {
+    mono_u: &'a [f64],
+    t0: f64,
+    t1: f64,
+    edge_insets: (f64, f64),
+}
+
+/// Whether a candidate the ladder accepted at its probes leaves the fit
+/// tolerance between them, checked only on a span reaching a square-root
+/// onset: there the acceleration's shoulder bends between the probes, and
+/// splitting the span grades the partition toward the onset only as deep
+/// as its fit needs.
+fn misses_square_root_onset<S: TrackSignal>(
+    sig: &S,
+    candidate: OnsetCandidate,
+    fit_tol: FitTol,
+) -> bool {
+    let OnsetCandidate {
+        mono_u,
+        t0,
+        t1,
+        edge_insets: (start_inset, end_inset),
+    } = candidate;
+    let onsets = sig.square_root_onsets();
+    let first_reached = onsets.partition_point(|&onset| onset < t0);
+    if onsets.get(first_reached).is_none_or(|&onset| onset > t1) {
+        return false;
+    }
+    let h = t1 - t0;
+    let acceleration_scale = (2.0 / h) * (2.0 / h);
+    let resolved = h - start_inset - end_inset;
+    (0..SQUARE_ROOT_ONSET_CHECK_POINTS).any(|k| {
+        let u = (start_inset
+            + resolved * (f64::from(k) + 0.5) / f64::from(SQUARE_ROOT_ONSET_CHECK_POINTS))
+            / h;
+        let x = 2.0 * u - 1.0;
+        let (position, _, acceleration) = sig.eval_pva(t0 + h * u);
+        (eval_mono(mono_u, x) - position).abs() > fit_tol.pos_mm
+            || (eval_mono_dd(mono_u, x) * acceleration_scale - acceleration).abs()
+                > fit_tol.accel_mm_s2
+    })
+}
+
 fn refine_shaped_span<S: TrackSignal>(
     sig: &S,
     span: RefineSpan,
@@ -3633,7 +3557,26 @@ fn refine_shaped_span<S: TrackSignal>(
     let velocity_budget = policy.velocity_budget;
     let floors = policy.floors;
     let (mono_u, failure) = shaped_ladder(sig, t0, t1, slivers, policy)?;
-    if failure.is_none() {
+    let edge_insets = (
+        edge_inset(t1 - t0, floors.cubic, slivers.start),
+        edge_inset(t1 - t0, floors.cubic, slivers.end),
+    );
+    let tm = 0.5 * t0 + 0.5 * t1;
+    let at_resolution_floor = tm - t0 < floors.cubic || t1 - tm < floors.cubic;
+    let splittable = !at_resolution_floor && *refinement_splits < MAX_FIT_REFINEMENT_SPLITS;
+    if failure.is_none()
+        && !(splittable
+            && misses_square_root_onset(
+                sig,
+                OnsetCandidate {
+                    mono_u: &mono_u,
+                    t0,
+                    t1,
+                    edge_insets,
+                },
+                fit_tol,
+            ))
+    {
         #[cfg(feature = "fit-audit")]
         crate::fit_audit::check(
             sig,
@@ -3646,18 +3589,13 @@ fn refine_shaped_span<S: TrackSignal>(
                 mono_u: &mono_u,
                 accepted_at_floor: false,
                 cubic_floor: floors.cubic,
-                edge_insets: (
-                    edge_inset(t1 - t0, floors.cubic, slivers.start),
-                    edge_inset(t1 - t0, floors.cubic, slivers.end),
-                ),
+                edge_insets,
             },
         );
         out.push(exact_piece(&mono_u, t0, t1, t1 - t0));
         return Ok(());
     }
-    let tm = 0.5 * t0 + 0.5 * t1;
-    let at_resolution_floor = tm - t0 < floors.cubic || t1 - tm < floors.cubic;
-    if at_resolution_floor || *refinement_splits >= MAX_FIT_REFINEMENT_SPLITS {
+    if !splittable {
         let failure = failure.expect("failed fit has no ladder diagnostic");
         if failure.error.position <= fit_tol.pos_mm
             && failure.error.velocity <= velocity_budget

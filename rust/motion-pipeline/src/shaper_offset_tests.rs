@@ -5,7 +5,6 @@ use trajectory::build_smooth_mzv_kernel;
 
 use super::{
     AxisSignalTable, FitBoundary, Lookahead, ShapedSignalSource, SignalBounds, TrackSignal,
-    shaped_signal_breakpoints,
 };
 
 const ACCEL_MM_S2: f64 = 8_000.0;
@@ -43,7 +42,7 @@ fn worst_travel_mismatch(offset_mm: f64) -> f64 {
             lookahead: Lookahead::Forced,
         },
     );
-    let source = shaped_source(&kernel, input, &track);
+    let source = ShapedSignalSource::new(&kernel, input, track.knots().to_vec(), HALF_S);
     let signal = source.signal();
     (1..400)
         .map(|k| {
@@ -90,15 +89,5 @@ fn a_kernel_without_unit_mass_is_refused() {
             lookahead: Lookahead::Forced,
         },
     );
-    shaped_source(&kernel, input, &track);
-}
-
-fn shaped_source<'k>(
-    kernel: &'k nurbs::algebra::PiecewisePolynomialKernel,
-    input: AxisSignalTable,
-    track: &nurbs::ScalarNurbs,
-) -> ShapedSignalSource<'k> {
-    let knots = track.knots().to_vec();
-    let shaped_breaks = shaped_signal_breakpoints(kernel, &knots);
-    ShapedSignalSource::new(kernel, input, knots, shaped_breaks, HALF_S)
+    ShapedSignalSource::new(&kernel, input, track.knots().to_vec(), HALF_S);
 }

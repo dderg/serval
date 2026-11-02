@@ -8,9 +8,8 @@ use geometry::{LawSegment, Move, ScalarLaw, SourceRange, VelocityLimits};
 use trajectory::{AnalyticMoveSpan, SurfaceMode};
 
 use super::{
-    CapGradedSeeds, CrowdedVelocityBreaks, EdgeSlivers, FitTol, SINGULAR_SEED_GRADING_FLOOR_S,
-    TrackSignal, VelocityBreak, cap_graded_seeds, coalesce_degenerate_seeds, edge_inset,
-    edge_velocity_and_acceleration, seeds_graded_toward, velocity_breaks_among,
+    CrowdedVelocityBreaks, EdgeSlivers, FitTol, TrackSignal, VelocityBreak, cap_contact_seeds,
+    coalesce_degenerate_seeds, edge_inset, edge_velocity_and_acceleration, velocity_breaks_among,
 };
 
 const FLOOR: f64 = 2e-9;
@@ -255,32 +254,6 @@ fn a_velocity_break_that_reads_its_left_value_on_the_seed_is_found() {
     );
 }
 
-#[test]
-fn seeds_grade_geometrically_toward_a_cap_contact_from_both_sides() {
-    let contact = 4e-4;
-    let seeds = seeds_graded_toward(&[0.0, contact, 1e-3], &[contact]);
-    let at = seeds.partition_point(|&seed| seed < contact);
-    assert_ne!(
-        seeds.get(at),
-        Some(&contact),
-        "the contact is an anchor, not a graded seed"
-    );
-    for side in [&seeds[..at], &seeds[at..]] {
-        let nearest = side
-            .iter()
-            .map(|&seed| (seed - contact).abs())
-            .fold(f64::INFINITY, f64::min);
-        assert!(
-            nearest < 2.0 * SINGULAR_SEED_GRADING_FLOOR_S,
-            "the grading stops {nearest} s short of the contact: {seeds:?}"
-        );
-    }
-    assert!(
-        seeds.windows(2).all(|pair| pair[1] > pair[0]),
-        "graded seeds repeat: {seeds:?}"
-    );
-}
-
 /// A circular arc travelled at the speed whose centripetal load is the
 /// whole acceleration budget: the rail is on its curvature cap throughout,
 /// so it starts and ends in contact. The span ends on the last absolute
@@ -339,20 +312,15 @@ fn arc_on_the_curvature_cap() -> AnalyticMoveSpan {
 }
 
 #[test]
-fn a_source_ending_on_the_curvature_cap_grades_its_seeds_toward_its_end() {
+fn a_source_ending_on_the_curvature_cap_seeds_its_end_contact() {
     let span = arc_on_the_curvature_cap();
-    let CapGradedSeeds {
-        breakpoints,
-        cap_contacts: contacts,
-        graded,
-    } = cap_graded_seeds(&span);
+    let (seeds, contacts) = cap_contact_seeds(&span);
     assert!(
         contacts.contains(&span.t_end),
         "the contact the span ends in must be one of its own: {contacts:?} in [{}, {}]",
         span.t_start,
         span.t_end
     );
-    let seeds = [breakpoints, graded].concat();
     assert!(
         seeds
             .iter()
@@ -361,14 +329,9 @@ fn a_source_ending_on_the_curvature_cap_grades_its_seeds_toward_its_end() {
         span.t_start,
         span.t_end
     );
-    let nearest_below_end = seeds
-        .iter()
-        .filter(|&&seed| seed < span.t_end)
-        .map(|&seed| span.t_end - seed)
-        .fold(f64::INFINITY, f64::min);
     assert!(
-        nearest_below_end < 2.0 * SINGULAR_SEED_GRADING_FLOOR_S,
-        "the grading stops {nearest_below_end} s short of the end contact: {seeds:?}"
+        contacts.iter().all(|contact| seeds.contains(contact)),
+        "every contact must be a seed: {contacts:?} among {seeds:?}"
     );
 }
 
