@@ -1,11 +1,9 @@
 mod ladder;
 
-#[cfg(feature = "fit-audit")]
-pub(crate) use ladder::eval_mono_dd;
 pub(crate) use ladder::{
     AccelerationTrend, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget, LadderFailure,
     LadderPolicy, LadderPva, LadderSpan, LadderTruth, VelocitySign, eval_mono, eval_mono_d,
-    exact_piece, ladder_fit, quintic_in_u,
+    eval_mono_dd, exact_piece, ladder_fit, quintic_in_u,
 };
 
 use geometry::FollowerDemand;
