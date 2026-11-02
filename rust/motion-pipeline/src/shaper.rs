@@ -10,8 +10,9 @@ use trajectory::{
 
 use crate::follower_projection::{FollowerState, advance_before_projection, project_followers};
 use crate::lowering::{
-    AccelerationTrend, FitTol, LADDER_PROBES_U, LadderBudget, LadderFailure, LadderPolicy,
-    LadderPva, LadderSpan, LadderTruth, VelocitySign, exact_piece, ladder_fit, quintic_in_u,
+    AccelerationTrend, FitTol, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget, LadderFailure,
+    LadderPolicy, LadderPva, LadderSpan, LadderTruth, VelocitySign, exact_piece, ladder_fit,
+    quintic_in_u,
 };
 use crate::types::{BaseItem, Control, PostProcessError, TrajectoryItem};
 
@@ -1906,6 +1907,14 @@ const MIN_DEVICE_INTERVAL_S: f64 = 2e-9;
 /// be handed — is the one that still leaves the budget to the signal.
 const LADDER_HIGH_DEGREE_ACCEL_NOISE_GAIN: f64 = 32.0;
 
+/// `bezier_pieces_to_nurbs` stores every piece as absolute Bernstein control
+/// points, each rounded by up to half an ulp of the position. A degree-`d`
+/// piece reads its acceleration off second differences of those points, so
+/// storage alone puts up to `2·d·(d−1)·ε·|p| / h²` of acceleration into a
+/// knot span of width `h` — noise the ladder never saw, and which a
+/// motor-side derivative gain turns into commanded position.
+const STORED_ACCEL_NOISE_GAIN: f64 = (2 * LADDER_MAX_DEGREE * (LADDER_MAX_DEGREE - 1)) as f64;
+
 #[derive(Debug, Clone, Copy)]
 struct LadderFloors {
     high_degree: f64,
@@ -1914,9 +1923,9 @@ struct LadderFloors {
     /// the signal's own endpoint delta rather than a difference of absolute
     /// samples, so its error tracks the span rather than the track's offset
     /// from the origin. There is still no cubic noise floor worth computing:
-    /// cubic refinement stops where the span stops being representable, and
-    /// the probe checks in `candidate_ok` are what reject a cubic that did
-    /// amplify.
+    /// cubic refinement stops where the span stops being representable — in
+    /// time or in absolute storage — and the probe checks in `candidate_ok`
+    /// are what reject a cubic that did amplify.
     cubic: f64,
 }
 
@@ -1946,7 +1955,11 @@ fn ladder_resolution_floor_from_scales(
     fit_tol: FitTol,
 ) -> LadderFloors {
     let sample_noise = f64::EPSILON * nurbs::fmadd(time_scale, velocity_scale, position_scale);
-    let representable = MIN_DEVICE_INTERVAL_S.max(8.0 * f64::EPSILON * time_scale);
+    let stored_accel_floor =
+        (STORED_ACCEL_NOISE_GAIN * f64::EPSILON * position_scale / fit_tol.accel_mm_s2).sqrt();
+    let representable = MIN_DEVICE_INTERVAL_S
+        .max(8.0 * f64::EPSILON * time_scale)
+        .max(stored_accel_floor);
     LadderFloors {
         high_degree: representable
             .max((LADDER_HIGH_DEGREE_ACCEL_NOISE_GAIN * sample_noise / fit_tol.accel_mm_s2).sqrt()),
@@ -2891,3 +2904,7 @@ pub(crate) fn apply_derivative_gains_to_track(
 #[cfg(test)]
 #[path = "shaper_moment_tests.rs"]
 mod shaper_moment_tests;
+
+#[cfg(test)]
+#[path = "shaper_storage_tests.rs"]
+mod shaper_storage_tests;
