@@ -236,6 +236,9 @@ impl Ingress {
             t_us = motion_pipeline::timing::mono_us(),
             "[pipe] runway falling behind a busy inbox — draining pipeline to rest"
         );
+        self.links
+            .busy_runway_drains
+            .fetch_add(1, Ordering::Relaxed);
         self.drain_and_fence();
     }
 

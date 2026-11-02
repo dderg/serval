@@ -67,6 +67,9 @@ pub(crate) struct WorkerLinks {
     pub(crate) finite_homing_admission: AtomicBool,
     pub(crate) shutting_down: AtomicBool,
     pub(crate) last_move_time_bits: AtomicU64,
+    /// Brakes to rest the pacer ordered because the runway fell while moves
+    /// kept arriving, as opposed to drains an idle inbox or a flush asked for.
+    pub(crate) busy_runway_drains: AtomicU64,
     pub(crate) fences: crate::fence::FenceRegistry,
     pub(crate) start_claims: super::StartClaims,
     pub(crate) wakeup: crate::feed_wakeup::FeedWakeup,

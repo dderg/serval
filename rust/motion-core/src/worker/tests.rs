@@ -395,9 +395,12 @@ impl StrokePhase {
 }
 
 /// Streams each phase through a saturated inbox, one after another, and
-/// reports how many times the stream had braked to rest by the end of each
-/// phase. A phase stops streaming the moment the stream brakes.
-fn parks_after_each_phase(phases: &[StrokePhase]) -> Vec<usize> {
+/// reports how many times the pacer had braked the stream to rest because
+/// its runway fell while moves kept arriving, by the end of each phase. A
+/// phase stops streaming the moment that happens. A drain the idle path
+/// orders when a starved submitter lets the inbox empty is the idle path's
+/// to justify, not the busy one's, and is not counted.
+fn busy_drains_after_each_phase(phases: &[StrokePhase]) -> Vec<u64> {
     let timeline = ExecutionTimeline {
         frontier: Arc::default(),
         anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
@@ -416,16 +419,16 @@ fn parks_after_each_phase(phases: &[StrokePhase]) -> Vec<usize> {
     );
     let mut at = [0.0_f64, 0.0, 0.0];
     let mut line_no = 1;
-    let mut parks = Vec::with_capacity(phases.len());
-    let parked = || sink.inner.parks.load(Ordering::SeqCst);
+    let mut busy_drains = Vec::with_capacity(phases.len());
+    let busy_drained = || h.links.busy_runway_drains.load(Ordering::SeqCst);
     for phase in phases {
         sink.set_realtime_factor(phase.realtime_factor);
-        let parks_before = parked();
+        let busy_before = busy_drained();
         let started = Instant::now();
         let mut strokes = 0;
         while strokes < phase.max_strokes
             && started.elapsed() < phase.streaming
-            && parked() == parks_before
+            && busy_drained() == busy_before
         {
             let (m, end) = phase.next_move(line_no, at);
             loop {
@@ -442,23 +445,23 @@ fn parks_after_each_phase(phases: &[StrokePhase]) -> Vec<usize> {
         if phase.then_flush {
             h.flush().unwrap();
         }
-        parks.push(parked());
+        busy_drains.push(busy_drained());
     }
     sink.set_realtime_factor(f64::INFINITY);
     h.flush().unwrap();
     h.shutdown();
-    parks
+    busy_drains
 }
 
 #[test]
 fn a_saturated_stream_produced_faster_than_realtime_never_brakes_to_rest() {
-    let parks = parks_after_each_phase(&[
+    let busy_drains = busy_drains_after_each_phase(&[
         StrokePhase::slow_drain(),
         StrokePhase::healthy(2.0, 40.0, Duration::from_secs(3)),
     ]);
-    assert_eq!(parks[0], 1, "the slow drain braked to rest once");
     assert_eq!(
-        parks[1], parks[0],
+        busy_drains,
+        [0, 0],
         "a stream produced 2x faster than realtime braked to rest while its inbox \
          stayed full and its runway grew, because a slow earlier drain widened the \
          reserve past it"
@@ -467,16 +470,16 @@ fn a_saturated_stream_produced_faster_than_realtime_never_brakes_to_rest() {
 
 #[test]
 fn a_busy_stream_falling_behind_its_playhead_brakes_before_running_dry() {
-    let parks = parks_after_each_phase(&[
+    let busy_drains = busy_drains_after_each_phase(&[
         StrokePhase::healthy(2.0, 1.0, Duration::from_millis(1500)),
         StrokePhase::unplannable(Duration::from_secs(10)),
     ]);
     assert_eq!(
-        parks[0], 0,
+        busy_drains[0], 0,
         "the stream braked while it was still gaining runway"
     );
     assert!(
-        parks[1] > 0,
+        busy_drains[1] > 0,
         "the committed runway fell away while the inbox stayed full, yet the \
          pacer never braked to rest"
     );
