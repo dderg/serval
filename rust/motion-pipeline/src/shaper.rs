@@ -4084,3 +4084,7 @@ mod shaper_edge_tests;
 #[cfg(test)]
 #[path = "shaper_motor_command_tests.rs"]
 mod shaper_motor_command_tests;
+
+#[cfg(test)]
+#[path = "shaper_cap_contact_tests.rs"]
+mod shaper_cap_contact_tests;
