@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crossbeam_channel::Sender;
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
 use trajectory::{
-    AxisChainSet, ChainStage, CompiledChain, ContinuousAxis, ContinuousSegment,
+    AnalyticMoveSpan, AxisChainSet, ChainStage, CompiledChain, ContinuousAxis, ContinuousSegment,
     RelativeSplinePiece, ShapedSignal, next_toward,
 };
 
@@ -529,15 +529,11 @@ fn materialize_changed_sources(
         if !(variable_surface_z || changed) || matches!(source, ContinuousAxis::Spline(_)) {
             continue;
         }
-        let mut breakpoints = vec![segment.t_start, segment.t_end];
-        let mut cap_contacts = Vec::new();
+        let (mut breakpoints, _cap_contacts) = match source {
+            ContinuousAxis::Analytic { span, .. } => cap_graded_seeds(span),
+            _ => (vec![segment.t_start, segment.t_end], Vec::new()),
+        };
         if let ContinuousAxis::Analytic { span, .. } = source {
-            breakpoints.extend(span.phase_seam_times());
-            cap_contacts.extend(
-                span.cap_contact_times()
-                    .filter(|&t| t >= segment.t_start && t <= segment.t_end),
-            );
-            grade_seeds_toward(&mut breakpoints, &cap_contacts);
             if variable_surface_z {
                 breakpoints.extend(span.surface_seam_times().ok_or_else(|| {
                     fit_tolerance_without_probe(axis, segment.t_start, segment.t_end)
@@ -545,7 +541,7 @@ fn materialize_changed_sources(
             }
         }
         #[cfg(feature = "fit-audit")]
-        let _cap_contacts_audited = crate::fit_audit::CapContactScope::enter(&cap_contacts);
+        let _cap_contacts_audited = crate::fit_audit::CapContactScope::enter(&_cap_contacts);
         let mut curve = fit_axis_from_signal(
             AxisFit {
                 axis,
@@ -572,6 +568,16 @@ fn materialize_changed_sources(
         axes[axis] = replacement;
     }
     Ok(rebuilt)
+}
+
+/// An analytic source's materialize seeds — its ends and phase seams,
+/// graded toward its curvature-cap contacts — and those contacts.
+fn cap_graded_seeds(span: &AnalyticMoveSpan) -> (Vec<f64>, Vec<f64>) {
+    let mut breakpoints = vec![span.t_start, span.t_end];
+    breakpoints.extend(span.phase_seam_times());
+    let cap_contacts: Vec<f64> = span.cap_contact_times().collect();
+    grade_seeds_toward(&mut breakpoints, &cap_contacts);
+    (breakpoints, cap_contacts)
 }
 
 /// Seeds approach a non-analytic point geometrically down to this spacing:

@@ -1,10 +1,16 @@
 //! How the ladder reads a span's anchoring edge state, and how coalescing
 //! reports the seeds it absorbs.
 
+use std::sync::Arc;
+
+use geometry::path::{Arc as PathArc, PathSegment, Segment};
+use geometry::{LawSegment, Move, ScalarLaw, SourceRange, VelocityLimits};
+use trajectory::{AnalyticMoveSpan, SurfaceMode};
+
 use super::{
     CrowdedVelocityBreaks, EdgeSlivers, FitTol, SINGULAR_SEED_GRADING_FLOOR_S, TrackSignal,
-    VelocityBreak, coalesce_degenerate_seeds, edge_inset, edge_velocity_and_acceleration,
-    grade_seeds_toward, velocity_breaks_among,
+    VelocityBreak, cap_graded_seeds, coalesce_degenerate_seeds, edge_inset,
+    edge_velocity_and_acceleration, grade_seeds_toward, velocity_breaks_among,
 };
 
 const FLOOR: f64 = 2e-9;
@@ -272,6 +278,92 @@ fn seeds_grade_geometrically_toward_a_cap_contact_from_both_sides() {
     assert!(
         seeds.windows(2).all(|pair| pair[1] > pair[0]),
         "graded seeds repeat: {seeds:?}"
+    );
+}
+
+/// A circular arc travelled at the speed whose centripetal load is the
+/// whole acceleration budget: the rail is on its curvature cap throughout,
+/// so it starts and ends in contact. The span ends on the last absolute
+/// time not past its rail's end, as the lowerer's spans do wherever adding
+/// the duration rounds up.
+fn arc_on_the_curvature_cap() -> AnalyticMoveSpan {
+    let (accel, radius, sweep): (f64, f64, f64) = (5000.0, 2.0, 0.5);
+    let length = radius * sweep;
+    let rail = LawSegment::until_arc(
+        0.0,
+        0.0,
+        (accel * radius).sqrt(),
+        ScalarLaw::DiskRail {
+            accel,
+            kappa0: 1.0 / radius,
+            sigma: 0.0,
+            brake: false,
+        },
+        length,
+    )
+    .expect("a rail on the cap still advances");
+    let t_start = 0.211_7;
+    let rounded_end = t_start + rail.end_time();
+    let t_end = if rounded_end - t_start > rail.end_time() {
+        trajectory::next_toward(rounded_end, t_start)
+    } else {
+        rounded_end
+    };
+    let arc = PathArc::try_new(
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        radius,
+        0.0,
+        sweep,
+    )
+    .expect("arc");
+    AnalyticMoveSpan::try_new(
+        Move {
+            segment: PathSegment::try_new(Segment::Arc(arc), Vec::new()).expect("path"),
+            feedrate_mm_s: 200.0,
+            limits: VelocityLimits::try_new(200.0, accel, 0.1, f64::INFINITY).expect("limits"),
+            source: SourceRange {
+                start_line: 1,
+                end_line: 1,
+            },
+        },
+        Arc::from([rail]),
+        0.0,
+        t_start,
+        t_end,
+        Arc::from([0.0, 0.0, 0.0]),
+        SurfaceMode::None,
+    )
+    .expect("span")
+}
+
+#[test]
+fn a_source_ending_on_the_curvature_cap_grades_its_seeds_toward_its_end() {
+    let span = arc_on_the_curvature_cap();
+    let (seeds, contacts) = cap_graded_seeds(&span);
+    assert!(
+        contacts.contains(&span.t_end),
+        "the contact the span ends in must be one of its own: {contacts:?} in [{}, {}]",
+        span.t_start,
+        span.t_end
+    );
+    assert!(
+        seeds
+            .iter()
+            .all(|&seed| seed >= span.t_start && seed <= span.t_end),
+        "a seed left the span [{}, {}]: {seeds:?}",
+        span.t_start,
+        span.t_end
+    );
+    let nearest_below_end = seeds
+        .iter()
+        .filter(|&&seed| seed < span.t_end)
+        .map(|&seed| span.t_end - seed)
+        .fold(f64::INFINITY, f64::min);
+    assert!(
+        nearest_below_end < 2.0 * SINGULAR_SEED_GRADING_FLOOR_S,
+        "the grading stops {nearest_below_end} s short of the end contact: {seeds:?}"
     );
 }
 
