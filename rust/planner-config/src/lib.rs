@@ -35,12 +35,9 @@ pub enum PostProcessorConfigError {
     )]
     LeaderGainBeforeKernel { axis: String, name: String },
     #[error(
-        "axis '{axis}' follows other axes, and post_processor '{name}' advances it \
-         (pressure advance or another derivative-gain stage) with no smoothing kernel in \
-         the axis post_processors. An advance turns every extrusion-ratio change taken at \
-         speed — travel to extrusion, a flow change, a wipe — into an instant position \
-         step the motor cannot make, so nearly any print would abort mid-way. Add a \
-         smoothing kernel (e.g. smooth_triangle) to the axis post_processors"
+        "axis '{axis}' follows other axes, and post_processor '{name}' advances it with no \
+         smoothing kernel in the axis post_processors: {}",
+        trajectory::FOLLOWER_TRANSFORM_WITHOUT_KERNEL
     )]
     FollowerAdvanceWithoutKernel { axis: String, name: String },
 }
@@ -118,53 +115,34 @@ impl PostProcessorSet {
             .collect::<Result<_, _>>()?;
         let followers = registry.follower_index_map();
         self.reject_pre_kernel_gains_on_leaders(registry, &followers)?;
-        self.reject_follower_advance_without_kernel(registry, &followers)?;
-        Ok(AxisChainSet { chains, followers })
+        let chains = AxisChainSet { chains, followers };
+        self.reject_follower_advance_without_kernel(registry, &chains)?;
+        Ok(chains)
     }
 
     fn reject_follower_advance_without_kernel(
         &self,
         registry: &AxisRegistry,
-        followers: &[(usize, Vec<usize>)],
+        chains: &AxisChainSet,
     ) -> Result<(), PostProcessorConfigError> {
-        for (axis, leaders) in followers {
-            if leaders.is_empty() {
-                continue;
-            }
-            let stages = self.per_axis[*axis].iter().map(|name| {
-                let inst = self
-                    .instances
+        let Some(axis) = chains.kernel_free_follower_transform() else {
+            return Ok(());
+        };
+        let name = self.per_axis[axis]
+            .iter()
+            .find(|name| {
+                self.instances
                     .iter()
-                    .find(|i| i.name() == *name)
-                    .expect("validated in try_new");
-                (name, inst.compile_stage())
-            });
-            let mut advance = None;
-            let mut kernel = false;
-            for (name, stage) in stages {
-                match stage {
-                    Some(trajectory::ChainStage::SmoothKernel(_)) => kernel = true,
-                    Some(trajectory::ChainStage::DerivativeGains { k1, k2 })
-                        if k1 != 0.0 || k2 != 0.0 =>
-                    {
-                        advance.get_or_insert(name);
-                    }
-                    Some(trajectory::ChainStage::NonlinearAdvance(law))
-                        if law.linear_advance != 0.0 || law.nonlinear_offset != 0.0 =>
-                    {
-                        advance.get_or_insert(name);
-                    }
-                    _ => {}
-                }
-            }
-            if let (Some(name), false) = (advance, kernel) {
-                return Err(PostProcessorConfigError::FollowerAdvanceWithoutKernel {
-                    axis: registry.axis_name(*axis).to_string(),
-                    name: name.clone(),
-                });
-            }
-        }
-        Ok(())
+                    .find(|i| i.name() == name.as_str())
+                    .expect("validated in try_new")
+                    .compile_stage()
+                    .is_some()
+            })
+            .expect("a transformed chain names the stage that transforms it");
+        Err(PostProcessorConfigError::FollowerAdvanceWithoutKernel {
+            axis: registry.axis_name(axis).to_string(),
+            name: name.clone(),
+        })
     }
 
     fn reject_pre_kernel_gains_on_leaders(

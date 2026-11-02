@@ -7,7 +7,7 @@ mod kernel;
 
 pub use chain::{
     AdvanceModel, AxisChainSet, ChainStage, CompiledChain, NonlinearAdvance, PostProcessorError,
-    PostProcessorInstance, RestSupport,
+    PostProcessorInstance, RestSupport, FOLLOWER_TRANSFORM_WITHOUT_KERNEL,
 };
 pub use continuous::{
     next_toward, AnalyticMoveSpan, BuzzProfile, ClockedMotorSpan, ContinuousAxis, ContinuousError,

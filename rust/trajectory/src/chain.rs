@@ -352,6 +352,13 @@ pub struct AxisChainSet {
     pub followers: Vec<(usize, Vec<usize>)>,
 }
 
+/// Why a projected follower's advance needs a smoothing kernel in its
+/// chain, shared by every place that refuses one.
+pub const FOLLOWER_TRANSFORM_WITHOUT_KERNEL: &str = "an advance turns every \
+    extrusion-ratio change taken at speed — travel to extrusion, a flow change, a wipe — \
+    into an instant position step the motor cannot make, so nearly any print would abort \
+    mid-way. Add a smoothing kernel (e.g. smooth_triangle) to the axis post_processors";
+
 impl AxisChainSet {
     #[must_use]
     pub fn spatial(x: CompiledChain, y: CompiledChain, z: CompiledChain) -> Self {
@@ -383,6 +390,16 @@ impl AxisChainSet {
     #[must_use]
     pub fn n_axes(&self) -> usize {
         self.chains.len()
+    }
+
+    /// The first projected follower whose chain transforms it with no
+    /// smoothing kernel: the configuration this pipeline refuses, see
+    /// [`FOLLOWER_TRANSFORM_WITHOUT_KERNEL`].
+    #[must_use]
+    pub fn kernel_free_follower_transform(&self) -> Option<usize> {
+        self.projected_followers()
+            .map(|(axis, _)| axis)
+            .find(|&axis| self.chains[axis].is_zero_support_only())
     }
 
     /// Follower axes that ride on at least one leader: their tracks are not
