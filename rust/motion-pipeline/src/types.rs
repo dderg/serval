@@ -142,6 +142,44 @@ pub(crate) enum PostProcessError {
         candidate_velocity: f64,
         candidate_acceleration: f64,
     },
+    #[error(
+        "axis {axis} ({fit_context}): the signal's velocity changes by {velocity_change} across \
+         [{t_start}, {t_end}], a span the fit cannot split further, while its acceleration \
+         there carries [{carried_low}, {carried_high}] (slack {velocity_slack}): a velocity \
+         step narrower than the resolution floor; position error \
+         {position_error}/{position_budget}, velocity error {velocity_error}, acceleration \
+         error {acceleration_error}/{acceleration_budget}"
+    )]
+    VelocityStepAtFitFloor {
+        axis: usize,
+        fit_context: &'static str,
+        t_start: f64,
+        t_end: f64,
+        velocity_change: f64,
+        carried_low: f64,
+        carried_high: f64,
+        velocity_slack: f64,
+        position_error: f64,
+        position_budget: f64,
+        velocity_error: f64,
+        acceleration_error: f64,
+        acceleration_budget: f64,
+    },
+    #[error(
+        "axis {axis} ({fit_context}): the velocity break at {break_at} lies within the {floor} s \
+         fit resolution floor of {moved_onto}; moving its velocity step {velocity_step} there \
+         shifts position by {position_shift}, beyond the {position_budget} tolerance"
+    )]
+    CrowdedVelocityBreaks {
+        axis: usize,
+        fit_context: &'static str,
+        break_at: f64,
+        moved_onto: f64,
+        velocity_step: f64,
+        position_shift: f64,
+        position_budget: f64,
+        floor: f64,
+    },
     #[error("axis {axis}: shaped sample is non-finite at t={t}")]
     NonFiniteSample { axis: usize, t: f64 },
 }

@@ -25,7 +25,7 @@ const BUMP7: [f64; 8] = [0.0, 1.0, 0.0, -3.0, 0.0, 3.0, 0.0, -1.0];
 pub(crate) fn eval_mono(c: &[f64], x: f64) -> f64 {
     c.iter().rev().fold(0.0, |acc, &ck| acc * x + ck)
 }
-fn eval_mono_d(c: &[f64], x: f64) -> f64 {
+pub(crate) fn eval_mono_d(c: &[f64], x: f64) -> f64 {
     c.iter()
         .enumerate()
         .skip(1)

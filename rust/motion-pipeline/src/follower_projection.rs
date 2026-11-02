@@ -12,7 +12,7 @@ use crate::lowering::{FitTol, follower_tol_scale};
 use crate::shaper::{
     AxisFit, AxisSignalTable, FitBoundary, Lookahead, SEGMENT_TIME_EPS_S, ShiftedTrackSignal,
     SignalBounds, TrackSignal, apply_derivative_gains_to_track, fit_axis_from_signal,
-    shaped_signal_breakpoints, unit_kernel_mass,
+    fit_velocity_resolution, shaped_signal_breakpoints, unit_kernel_mass,
 };
 use crate::types::PostProcessError;
 
@@ -236,14 +236,25 @@ fn fit_source_projection(
             velocity_continuous: true,
         };
         match leading_stage {
-            Some(stage) => fit_axis_from_signal(
-                fit,
-                &AdvancedFollowerSignal {
+            Some(stage) => {
+                let advanced = AdvancedFollowerSignal {
                     source: &sig,
                     stage,
                     steps: &window_advance_steps,
-                },
-            )?,
+                };
+                let velocity_resolution = fit_velocity_resolution(&fit, &advanced)?;
+                let mut seeds = breakpoints.fit_seeds.clone();
+                seeds.extend(sig.advance_velocity_steps_on_the_grid(stage, velocity_resolution));
+                seeds.sort_by(f64::total_cmp);
+                seeds.dedup();
+                fit_axis_from_signal(
+                    AxisFit {
+                        seed_breakpoints: &seeds,
+                        ..fit
+                    },
+                    &advanced,
+                )?
+            }
             None => fit_axis_from_signal(fit, &sig)?,
         }
     };
@@ -1070,6 +1081,27 @@ fn advance_offset(stage: &ChainStage, velocity: f64) -> f64 {
     }
 }
 
+fn advance_slope(stage: &ChainStage, velocity: f64) -> f64 {
+    match stage {
+        ChainStage::DerivativeGains { k1, .. } => *k1,
+        ChainStage::NonlinearAdvance(advance) => advance.slope(velocity),
+        ChainStage::SmoothKernel(_) => unreachable!("a leading advance is not a kernel"),
+    }
+}
+
+/// Both saturating shapes have unit slope at the origin and flatten away
+/// from it, so the law is steepest there.
+fn steepest_advance_slope(stage: &ChainStage) -> f64 {
+    match stage {
+        ChainStage::DerivativeGains { k1, .. } => k1.abs(),
+        ChainStage::NonlinearAdvance(advance) => {
+            advance.linear_advance.abs()
+                + (advance.nonlinear_offset / advance.linearization_velocity).abs()
+        }
+        ChainStage::SmoothKernel(_) => unreachable!("a leading advance is not a kernel"),
+    }
+}
+
 fn advance_before_projection(chain: &CompiledChain) -> Option<&ChainStage> {
     (!chain.follower_linear_transform())
         .then(|| chain.leading_transform())
@@ -1801,6 +1833,13 @@ impl<'a> ShapedLeaders<'a> {
             / speed
     }
 
+    fn never_moves(&self, index: usize, t0: f64, t1: f64) -> bool {
+        let bounds = self.axes[index].pva_bounds(t0, t1).unwrap_or_else(|error| {
+            panic!("leader {index} has no velocity bounds over [{t0}, {t1}]: {error}")
+        });
+        bounds.velocity_min == 0.0 && bounds.velocity_max == 0.0
+    }
+
     /// The leader's state to third order, read from the same representation
     /// as [`Self::pva`]: the path-speed derivatives divide by the speed, so
     /// mixing two evaluations of one leader amplifies their rounding
@@ -2235,6 +2274,31 @@ impl<'a> FollowerSignal<'a> {
     /// cover every span the signal rides and what the table holds beyond
     /// its ends.
     fn acceleration_steps_on_the_grid(&self, tolerance: f64) -> Vec<f64> {
+        self.grid_acceleration_steps(tolerance, |_, step| step > tolerance)
+    }
+
+    /// Interior leader-grid times where a leading advance turns the
+    /// follower's acceleration step `Δa` into a velocity step `a'(v)·Δa`
+    /// wider than `velocity_resolution`. The follower's velocity is
+    /// continuous there, so the step is the advance slope at that velocity
+    /// times `Δa`, and only seams whose `Δa` bound times the steepest slope
+    /// the law reaches clears the resolution pay for evaluating it.
+    fn advance_velocity_steps_on_the_grid(
+        &self,
+        stage: &ChainStage,
+        velocity_resolution: f64,
+    ) -> Vec<f64> {
+        self.grid_acceleration_steps(
+            velocity_resolution / steepest_advance_slope(stage),
+            |t, step| advance_slope(stage, self.deriv(t)).abs() * step > velocity_resolution,
+        )
+    }
+
+    fn grid_acceleration_steps(
+        &self,
+        step_bound_threshold: f64,
+        step_exceeds: impl Fn(f64, f64) -> bool,
+    ) -> Vec<f64> {
         let s_end = self.s_end();
         let ridden = self
             .state
@@ -2281,8 +2345,11 @@ impl<'a> FollowerSignal<'a> {
                 let (speed_squared_after, rate_after) = path_rate(after);
                 let bound = ratio_bound * (rate_after - rate_before).abs()
                     + slope_bound * (speed_squared_after - speed_squared_before).abs();
-                bound > tolerance
-                    && (self.second_deriv(after) - self.second_deriv(before)).abs() > tolerance
+                bound > step_bound_threshold
+                    && step_exceeds(
+                        t,
+                        (self.second_deriv(after) - self.second_deriv(before)).abs(),
+                    )
             })
             .collect()
     }
@@ -2303,7 +2370,9 @@ impl<'a> FollowerSignal<'a> {
         );
         nodes.push(support_end);
         let mut zeros = Vec::new();
-        for leader in 0..self.leaders.axes.len() {
+        let moving_leaders = (0..self.leaders.axes.len())
+            .filter(|&leader| !self.leaders.never_moves(leader, support_start, support_end));
+        for leader in moving_leaders {
             let velocity = |t| self.leaders.pva(leader, t).1;
             for window in nodes.windows(2) {
                 isolate_velocity_zeros(&velocity, window[0], window[1], &mut zeros);

@@ -2,11 +2,12 @@
 //! reports the seeds it absorbs.
 
 use super::{
-    EdgeSlivers, FitTol, TrackSignal, coalesce_degenerate_seeds, edge_inset,
-    edge_velocity_and_acceleration,
+    CrowdedVelocityBreaks, EdgeSlivers, FitTol, TrackSignal, VelocityBreak,
+    coalesce_degenerate_seeds, edge_inset, edge_velocity_and_acceleration, velocity_breaks_among,
 };
 
 const FLOOR: f64 = 2e-9;
+const POSITION_TOL: f64 = 1e-4;
 const TOL: FitTol = FitTol {
     pos_mm: 1e-3,
     accel_mm_s2: 50.0,
@@ -120,7 +121,8 @@ fn a_coalesced_chain_reports_the_full_width_it_absorbed() {
         1.0 + 1.8 * FLOOR,
         3.0,
     ];
-    let slivers = coalesce_degenerate_seeds(&mut seeds, FLOOR);
+    let slivers = coalesce_degenerate_seeds(&mut seeds, &[], FLOOR, POSITION_TOL)
+        .expect("no velocity breaks");
     assert_eq!(seeds, vec![0.0, 1.0 + 1.8 * FLOOR, 3.0]);
     assert_eq!(slivers.len(), 2);
     assert!(
@@ -135,13 +137,114 @@ fn a_coalesced_chain_reports_the_full_width_it_absorbed() {
 #[test]
 fn seeds_absorbed_at_the_pinned_ends_reach_into_the_end_spans() {
     let mut seeds = vec![0.0, 0.5 * FLOOR, 1.0, 2.0 - 0.7 * FLOOR, 2.0];
-    let slivers = coalesce_degenerate_seeds(&mut seeds, FLOOR);
+    let slivers = coalesce_degenerate_seeds(&mut seeds, &[], FLOOR, POSITION_TOL)
+        .expect("no velocity breaks");
     assert_eq!(seeds, vec![0.0, 1.0, 2.0]);
     assert_eq!(slivers[0].start, 0.5 * FLOOR);
     assert!(
         (slivers[1].end - 0.7 * FLOOR).abs() <= 1e-15,
         "{:?}",
         slivers[1]
+    );
+}
+
+#[test]
+fn a_chain_of_sub_floor_seeds_never_rolls_past_a_velocity_break() {
+    let end = 2.0;
+    let ratio_step = end - 7.0 * FLOOR;
+    let mut seeds = vec![0.0, 1.0, ratio_step];
+    seeds.extend((1..16).map(|k| ratio_step + f64::from(k) * 7.0 * FLOOR / 16.0));
+    seeds.push(end);
+    let breaks = [VelocityBreak {
+        t: ratio_step,
+        step: -3.4,
+    }];
+    let slivers = coalesce_degenerate_seeds(&mut seeds, &breaks, FLOOR, POSITION_TOL)
+        .expect("the ratio step is a floor clear of the end");
+    assert!(
+        seeds.contains(&ratio_step),
+        "the ratio step at {ratio_step} was coalesced away: {seeds:?}"
+    );
+    assert!(
+        seeds.windows(2).all(|span| span[1] - span[0] >= FLOOR),
+        "a kept span is narrower than the floor: {seeds:?}"
+    );
+    assert_eq!(slivers.len(), seeds.len() - 1);
+}
+
+#[test]
+fn velocity_breaks_within_the_floor_of_an_anchor_move_onto_it() {
+    let (crowding, near_end) = (1.0 + 0.5 * FLOOR, 2.0 - 0.5 * FLOOR);
+    let mut seeds = vec![0.0, 1.0, crowding, near_end, 2.0];
+    let breaks = [
+        VelocityBreak { t: 1.0, step: 3.4 },
+        VelocityBreak {
+            t: crowding,
+            step: -1.0,
+        },
+        VelocityBreak {
+            t: near_end,
+            step: 2.0,
+        },
+    ];
+    let slivers = coalesce_degenerate_seeds(&mut seeds, &breaks, FLOOR, POSITION_TOL)
+        .expect("each moved break shifts position by nanometres");
+    assert_eq!(seeds, vec![0.0, 1.0, 2.0]);
+    assert_eq!(slivers[0].end_break, None);
+    assert_eq!(slivers[1].start_break, Some(crowding));
+    assert_eq!(slivers[1].end_break, Some(near_end));
+}
+
+#[test]
+fn moving_a_velocity_break_past_the_position_tolerance_fails_loudly() {
+    let crowding = 1.0 + 0.5 * FLOOR;
+    let mut seeds = vec![0.0, 1.0, crowding, 2.0];
+    let step = 1e6;
+    let breaks = [
+        VelocityBreak { t: 1.0, step: 1.0 },
+        VelocityBreak { t: crowding, step },
+    ];
+    assert_eq!(
+        coalesce_degenerate_seeds(&mut seeds, &breaks, FLOOR, POSITION_TOL),
+        Err(CrowdedVelocityBreaks {
+            break_at: crowding,
+            moved_onto: 1.0,
+            velocity_step: step,
+            position_shift: step * (crowding - 1.0),
+        })
+    );
+}
+
+struct LeftValuedVelocityStep {
+    at: f64,
+    before: f64,
+    after: f64,
+}
+
+impl TrackSignal for LeftValuedVelocityStep {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let velocity = if t <= self.at {
+            self.before
+        } else {
+            self.after
+        };
+        (velocity * (t - self.at), velocity, 0.0)
+    }
+}
+
+#[test]
+fn a_velocity_break_that_reads_its_left_value_on_the_seed_is_found() {
+    let sig = LeftValuedVelocityStep {
+        at: 0.01,
+        before: 7.2673,
+        after: 4.5839,
+    };
+    assert_eq!(
+        velocity_breaks_among(&sig, &[0.0, sig.at, 0.02], 1e-6),
+        vec![VelocityBreak {
+            t: sig.at,
+            step: sig.after - sig.before,
+        }]
     );
 }
 

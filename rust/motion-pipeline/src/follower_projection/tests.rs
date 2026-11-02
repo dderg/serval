@@ -882,3 +882,163 @@ fn a_lead_with_no_ratio_lays_one_flat_span() {
         );
     }
 }
+
+const DENSE_SEGMENT: (f64, f64) = (11.042_946_570_120_918, 11.049_146_570_120_918);
+const DENSE_ODOMETER_START: f64 = 1_825.258_274_639_182_7;
+const DENSE_LEADERS: [usize; 3] = [0, 1, 2];
+const DENSE_EXTRUSION_RATIO: f64 = 0.033_697_061_385_477_234;
+const CLEAR_ZERO_RATIO_TAIL_MM: f64 = 2e-6;
+const SUB_FLOOR_ZERO_RATIO_TAIL_MM: f64 = 5e-7;
+
+fn dense_corner_with_an_idle_z() -> ContinuousSegment {
+    let (t0, t1) = DENSE_SEGMENT;
+    cusp_segment(
+        vec![120.1, -56.1, 3_328.9],
+        vec![150.9, -29.3, -5_671.8],
+        t0,
+        t1,
+    )
+}
+
+fn dense_odometer(shaped: &ContinuousSegment) -> super::Odometer {
+    super::Odometer {
+        start: DENSE_ODOMETER_START,
+        length: super::leader_arc_length(shaped, &DENSE_LEADERS),
+    }
+}
+
+fn extrusion_stopping_before_the_end(
+    shaped: &ContinuousSegment,
+    zero_ratio_tail_mm: f64,
+) -> FollowerState {
+    let odometer = dense_odometer(shaped);
+    let mut state = FollowerState::default();
+    state.push_span(
+        odometer.start + odometer.length - zero_ratio_tail_mm,
+        DENSE_EXTRUSION_RATIO,
+        DENSE_EXTRUSION_RATIO,
+    );
+    state.push_span(1.0, 0.0, 0.0);
+    state
+}
+
+fn fit_dense_extrusion_stopping_before_the_end(
+    zero_ratio_tail_mm: f64,
+) -> Result<super::SourceProjection, crate::types::PostProcessError> {
+    let shaped = dense_corner_with_an_idle_z();
+    let state = extrusion_stopping_before_the_end(&shaped, zero_ratio_tail_mm);
+    let odometer = dense_odometer(&shaped);
+    let source = super::FollowerSource {
+        shaped: &shaped,
+        raw: &shaped,
+        axis: 3,
+        leaders: &DENSE_LEADERS,
+        state: &state,
+        s_start: odometer.start,
+        s_length: odometer.length,
+    };
+    let fit_tol = crate::lowering::FitTol {
+        pos_mm: 0.0025,
+        accel_mm_s2: 50.0,
+    };
+    super::fit_source_projection(source, fit_tol, None)
+}
+
+#[test]
+fn a_leader_axis_that_never_moves_seeds_no_velocity_zeros() {
+    let shaped = dense_corner_with_an_idle_z();
+    let state = extrusion_stopping_before_the_end(&shaped, CLEAR_ZERO_RATIO_TAIL_MM);
+    let sig = FollowerSignal::new(
+        &shaped,
+        &shaped,
+        3,
+        &DENSE_LEADERS,
+        &state,
+        dense_odometer(&shaped),
+        0.0,
+    );
+    let breaks = sig.construction_breakpoints(&shaped.axes[3], 50.0);
+    assert_eq!(
+        breaks.fit_seeds, breaks.semantic,
+        "x and y never stop and z never moves, so no velocity component has a zero to seed"
+    );
+}
+
+#[test]
+fn a_ratio_step_just_before_the_segment_end_fits_on_its_own_seed() {
+    fit_dense_extrusion_stopping_before_the_end(CLEAR_ZERO_RATIO_TAIL_MM)
+        .expect("the ratio step is a floor clear of the segment end, so it keeps its own seed");
+}
+
+#[test]
+fn a_ratio_step_within_a_floor_of_the_segment_end_moves_onto_it() {
+    fit_dense_extrusion_stopping_before_the_end(SUB_FLOOR_ZERO_RATIO_TAIL_MM).expect(
+        "moving the ratio step onto the segment end shifts the extruder by far less than the \
+         position tolerance",
+    );
+}
+
+const SEAM_SPLIT_S: f64 = 1e-8;
+
+fn leader_with_an_acceleration_step(
+    t0: f64,
+    knot: f64,
+    t1: f64,
+    (velocity, acceleration, acceleration_step): (f64, f64, f64),
+) -> nurbs::ScalarNurbs {
+    let before = vec![0.0, velocity, 0.5 * acceleration];
+    let (position, knot_velocity, _) = super::polynomial_pva(&before, knot - t0);
+    bezier_pieces_to_nurbs(&[
+        BezierPiece {
+            u_start: t0,
+            u_end: knot,
+            coeffs: before,
+        },
+        BezierPiece {
+            u_start: knot,
+            u_end: t1,
+            coeffs: vec![
+                position,
+                knot_velocity,
+                0.5 * (acceleration + acceleration_step),
+            ],
+        },
+    ])
+}
+
+#[test]
+fn advance_steps_at_leader_knots_closer_than_the_floor_plan() {
+    let (t0, t1) = (0.0, 0.02);
+    let knot = 0.01;
+    let shaped = leader_segment(
+        leader_with_an_acceleration_step(t0, knot, t1, (100.0, 1_000.0, 2_000.0)),
+        leader_with_an_acceleration_step(t0, knot + SEAM_SPLIT_S, t1, (50.0, -500.0, -1_500.0)),
+        t0,
+        t1,
+    );
+    let mut state = FollowerState::default();
+    state.push_span(50.0, 0.05, 0.05);
+    let source = super::FollowerSource {
+        shaped: &shaped,
+        raw: &shaped,
+        axis: 3,
+        leaders: &[0, 1],
+        state: &state,
+        s_start: 0.0,
+        s_length: super::leader_arc_length(&shaped, &[0, 1]),
+    };
+    let fit_tol = crate::lowering::FitTol {
+        pos_mm: 0.0025,
+        accel_mm_s2: 50.0,
+    };
+    let stage = trajectory::ChainStage::NonlinearAdvance(trajectory::NonlinearAdvance {
+        model: trajectory::AdvanceModel::Tanh,
+        linear_advance: 0.02,
+        nonlinear_offset: 0.03,
+        linearization_velocity: 1.0,
+    });
+    super::fit_source_projection(source, fit_tol, Some(&stage)).expect(
+        "the advance turns both leader acceleration steps into velocity steps a sub-floor \
+         interval apart, which one knot carries within the position tolerance",
+    );
+}
