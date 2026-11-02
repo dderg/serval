@@ -109,6 +109,40 @@ struct SourceProjection {
     input_end: Pvaj4,
 }
 
+/// The position step an advance before projection makes at a segment join
+/// where the follower velocity steps (an extrusion-ratio step taken at
+/// speed). Each segment's track is fitted on its own side of it, so the
+/// stitch has to put it back for a kernel after the advance to smooth.
+#[derive(Debug, Clone, Copy)]
+struct AdvanceStep {
+    t: f64,
+    velocity_before: f64,
+    velocity_after: f64,
+    step_mm: f64,
+}
+
+impl AdvanceStep {
+    fn between(stage: &ChainStage, t: f64, velocity_before: f64, velocity_after: f64) -> Self {
+        Self {
+            t,
+            velocity_before,
+            velocity_after,
+            step_mm: advance_offset(stage, velocity_after) - advance_offset(stage, velocity_before),
+        }
+    }
+
+    fn unrepresentable(self, axis: usize, tolerance_mm: f64) -> PostProcessError {
+        PostProcessError::AdvanceStep {
+            axis,
+            t: self.t,
+            velocity_before: self.velocity_before,
+            velocity_after: self.velocity_after,
+            step_mm: self.step_mm,
+            tolerance_mm,
+        }
+    }
+}
+
 /// One raw segment's follower projection inputs: the shaped leader signal it
 /// rides, its own raw track, and where on the shaped path it starts.
 #[derive(Clone, Copy)]
@@ -422,18 +456,30 @@ pub(crate) fn project_followers(
                     t: raw.t_start,
                 });
             }
-            if let Some(stage) = leading_stage {
-                check_advance_continuity(
+            let join_advance_step = match leading_stage.and_then(|stage| {
+                join_advance_step(
                     stage,
                     axis,
                     state.projected_input_end,
                     (t_start, input_start.1),
-                    follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis)).pos_mm,
-                )?;
-            }
+                )
+            }) {
+                Some(step) if kernel.is_some() => step.step_mm,
+                Some(step) => {
+                    let tolerance =
+                        follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis)).pos_mm;
+                    if step.step_mm.abs() > tolerance {
+                        return Err(step.unrepresentable(axis, tolerance));
+                    }
+                    0.0
+                }
+                None => 0.0,
+            };
             let semantic_cuts = projected_cuts.unwrap_or_else(|| piece_boundaries(&track));
             let track_start = nurbs::eval::eval(&track, t_start);
-            let output_base = state.projected_output_end.unwrap_or(base_position) - track_start;
+            let output_base = state.projected_output_end.unwrap_or(base_position)
+                + join_advance_step
+                - track_start;
             state.projected_output_end = Some(output_base + nurbs::eval::eval(&track, t_end));
             state.projected_input_end = Some((t_end, input_end.1));
             state.projected_through_t = Some(t_end);
@@ -445,6 +491,7 @@ pub(crate) fn project_followers(
                 input_end,
                 track,
                 semantic_cuts,
+                join_advance_step,
             });
         }
         assert!(
@@ -473,6 +520,7 @@ pub(crate) fn project_followers(
                 }
                 let mut input_pieces = Vec::new();
                 let mut semantic_cuts = Vec::new();
+                let mut input_steps = Vec::new();
                 let mut carried = 0.0;
                 let mut input_end = None;
                 for segment in &state.projected {
@@ -492,8 +540,12 @@ pub(crate) fn project_followers(
                     let mut pieces = extract_bezier_pieces(&segment.track);
                     let head = pieces.first().expect("a projected track has pieces").coeffs[0];
                     let segment_offset = input_end.map_or(0.0, |_| carried - head);
+                    let join_step = input_end.map_or(0.0, |_| segment.join_advance_step);
+                    if join_step != 0.0 {
+                        input_steps.push((segment.t_start, join_step));
+                    }
                     for piece in &mut pieces {
-                        piece.coeffs[0] += segment_offset;
+                        piece.coeffs[0] += segment_offset + join_step;
                     }
                     let tail = pieces.last().expect("a projected track has pieces");
                     carried = polynomial_pva(&tail.coeffs, tail.u_end - tail.u_start).0;
@@ -512,7 +564,7 @@ pub(crate) fn project_followers(
                     .iter()
                     .all(|span| span.r0 >= 0.0 && span.r1 >= 0.0);
                 if projecting {
-                    assert_piece_seams(axis, "projected input", &input_pieces);
+                    assert_piece_seams(axis, "projected input", &input_pieces, &input_steps);
                     if nonnegative_demand {
                         let correction_tol = follower_fit_tol(
                             fit_tol,
@@ -536,12 +588,17 @@ pub(crate) fn project_followers(
                 for piece in &mut input_pieces {
                     piece.coeffs.resize(unified_input_degree + 1, 0.0);
                 }
-                let mut kernel_input = bezier_pieces_to_nurbs(&input_pieces);
+                let assemble = if input_steps.is_empty() {
+                    bezier_pieces_to_nurbs
+                } else {
+                    nurbs::bezier::bezier_pieces_to_discontinuous_nurbs
+                };
+                let mut kernel_input = assemble(&input_pieces);
                 let input_offset = nurbs::eval::eval(&kernel_input, target_start);
                 for piece in &mut input_pieces {
                     piece.coeffs[0] -= input_offset;
                 }
-                kernel_input = bezier_pieces_to_nurbs(&input_pieces);
+                kernel_input = assemble(&input_pieces);
                 batch_base += input_offset;
                 let mut gained_input = chain.leading_transform().is_some();
                 if defer_linear_prefix {
@@ -897,37 +954,28 @@ fn chain_output_velocity(chain: &CompiledChain, v: f64, a: f64, j: f64) -> f64 {
 
 /// Segment tracks are stitched end to start, which is exact only where the
 /// commanded signal is position-continuous. An advance applied before
-/// projection with no kernel after it maps a follower velocity step — an
-/// extrusion-ratio step at speed — onto a position step that no track can
-/// carry and the stitch would silently absorb, leaving every later position
-/// offset by it.
-fn check_advance_continuity(
+/// projection maps a follower velocity step at a join — an extrusion-ratio
+/// step taken at speed — onto a position step the stitch must carry: a
+/// kernel after the advance smooths it, and with none the step cannot be
+/// followed at all.
+fn join_advance_step(
     stage: &ChainStage,
     axis: usize,
     previous_end: Option<(f64, f64)>,
     (t_start, velocity_after): (f64, f64),
-    tolerance_mm: f64,
-) -> Result<(), PostProcessError> {
-    let Some((previous_t_end, velocity_before)) = previous_end else {
-        return Ok(());
-    };
+) -> Option<AdvanceStep> {
+    let (previous_t_end, velocity_before) = previous_end?;
     assert!(
         (previous_t_end - t_start).abs() <= SEGMENT_TIME_EPS_S,
         "follower axis {axis} stitches a segment starting at {t_start} onto one ending at \
          {previous_t_end}"
     );
-    let step_mm = advance_offset(stage, velocity_after) - advance_offset(stage, velocity_before);
-    if step_mm.abs() > tolerance_mm {
-        return Err(PostProcessError::AdvanceStep {
-            axis,
-            t: t_start,
-            velocity_before,
-            velocity_after,
-            step_mm,
-            tolerance_mm,
-        });
-    }
-    Ok(())
+    Some(AdvanceStep::between(
+        stage,
+        t_start,
+        velocity_before,
+        velocity_after,
+    ))
 }
 
 fn advance_offset(stage: &ChainStage, velocity: f64) -> f64 {
@@ -965,6 +1013,9 @@ struct ProjSeg {
     input_end: Pvaj4,
     track: ScalarNurbs,
     semantic_cuts: Vec<f64>,
+    /// The advance step at the join with the previous segment, which the
+    /// track's own fit leaves out.
+    join_advance_step: f64,
 }
 
 /// One segment's stretch of path: shaped arc length `[s0, s1]` carrying a
@@ -2364,13 +2415,26 @@ fn basis_conversion_same(
             * f64::EPSILON
             * left.abs().max(right.abs()).max(1.0)
 }
-fn assert_piece_seams(axis: usize, label: &str, pieces: &[nurbs::bezier::BezierPiece]) {
+/// Every seam of `pieces` must be position-continuous except where `steps`
+/// lists the step it carries.
+fn assert_piece_seams(
+    axis: usize,
+    label: &str,
+    pieces: &[nurbs::bezier::BezierPiece],
+    steps: &[(f64, f64)],
+) {
     for (index, pair) in pieces.windows(2).enumerate() {
         let left_h = pair[0].u_end - pair[0].u_start;
         let right_h = pair[1].u_end - pair[1].u_start;
-        let left = polynomial_pv(&pair[0].coeffs, left_h);
-        let right = polynomial_pv(&pair[1].coeffs, 0.0);
         let seam = pair[0].u_end;
+        let step = steps
+            .iter()
+            .filter(|&&(t, _)| t == seam)
+            .map(|&(_, step)| step)
+            .sum::<f64>();
+        let left = polynomial_pv(&pair[0].coeffs, left_h);
+        let left = (left.0 + step, left.1);
+        let right = polynomial_pv(&pair[1].coeffs, 0.0);
         let degree = pair[0].degree().max(pair[1].degree());
         assert!(
             basis_conversion_same(left.0, right.0, degree, left_h, right_h)

@@ -1249,7 +1249,7 @@ fn pressure_advance_alone_follows_shaped_leaders_away_from_rest() {
     );
 }
 
-fn shaped_follower_params(e_post_processors: &[(&str, &str, f64)]) -> SnapshotParams {
+fn shaped_follower_params(e_chain: &[planner_config::PostProcessorDecl]) -> SnapshotParams {
     let mut params = default_axis_snapshot_params();
     params.max_velocity = 1000.0;
     params.max_accel = 10_000.0;
@@ -1259,26 +1259,34 @@ fn shaped_follower_params(e_post_processors: &[(&str, &str, f64)]) -> SnapshotPa
     let mut y = axis("y", &[]);
     y.post_processors = vec!["shy".to_string()];
     let mut e = axis("e", &["x", "y", "z"]);
-    e.post_processors = e_post_processors
-        .iter()
-        .map(|(name, _, _)| (*name).to_string())
-        .collect();
+    e.post_processors = e_chain.iter().map(|decl| decl.name.clone()).collect();
     params.axis_decls = vec![x, y, e];
     params.post_processor_decls = vec![
         pp("shx", "smooth_mzv", &[("frequency_hz", 50.0)]),
         pp("shy", "smooth_zv", &[("frequency_hz", 44.0)]),
     ];
+    params.post_processor_decls.extend_from_slice(e_chain);
     params
-        .post_processor_decls
-        .extend(e_post_processors.iter().map(|(name, ty, value)| {
-            let key = if *ty == "linear_pressure_advance" {
-                "k"
-            } else {
-                "smooth_time"
-            };
-            pp(name, ty, &[(key, *value)])
-        }));
-    params
+}
+
+fn linear_advance(k: f64) -> planner_config::PostProcessorDecl {
+    pp("pa", "linear_pressure_advance", &[("k", k)])
+}
+
+fn tanh_advance() -> planner_config::PostProcessorDecl {
+    pp(
+        "pa",
+        "tanh_pressure_advance",
+        &[
+            ("linear_advance", 0.02),
+            ("nonlinear_offset", 0.05),
+            ("linearization_velocity", 20.0),
+        ],
+    )
+}
+
+fn triangle_smoothing() -> planner_config::PostProcessorDecl {
+    pp("st", "smooth_triangle", &[("smooth_time", 0.04)])
 }
 
 const PERIMETER_RATIO: f64 = 0.0333;
@@ -1299,32 +1307,63 @@ fn perimeter_waypoints(entry: &[(f64, f64)], flow: [f64; 4]) -> Vec<waypoints::W
     waypoints
 }
 
-fn final_extruder_position(
+fn extruder_snapshot(
     waypoints: &[waypoints::Waypoint],
-    e_post_processors: &[(&str, &str, f64)],
-) -> f64 {
-    let snap =
-        pipeline_snapshot(waypoints, shaped_follower_params(e_post_processors)).expect("snapshot");
+    e_chain: &[planner_config::PostProcessorDecl],
+) -> Snapshot {
+    pipeline_snapshot(waypoints, shaped_follower_params(e_chain)).expect("snapshot")
+}
+
+fn final_extruder_position(snap: &Snapshot) -> f64 {
     position(&snap.trajectory, EXTRUDER_AXIS, snap.trajectory.t_end())
+}
+
+/// A perimeter entered and left at speed with one side at 1.5x flow: four
+/// extrusion-ratio steps taken while the toolhead moves.
+fn perimeter_with_ratio_steps_at_speed() -> Vec<waypoints::Waypoint> {
+    let mut waypoints = perimeter_waypoints(&[(10.0, 10.0), (20.0, 20.0)], [1.0, 1.5, 1.0, 1.0]);
+    let e = waypoints.last().expect("perimeter").3;
+    waypoints.push((20.0, 5.0, 0.0, e, 150.0, 10_000.0));
+    waypoints
 }
 
 #[test]
 #[should_panic(expected = "cannot follow an extrusion-ratio step taken at speed")]
 fn an_advance_with_no_kernel_refuses_an_extrusion_ratio_step_at_speed() {
-    let mut waypoints = perimeter_waypoints(&[(10.0, 10.0), (20.0, 20.0)], [1.0, 1.5, 1.0, 1.0]);
-    let e = waypoints.last().expect("perimeter").3;
-    waypoints.push((20.0, 5.0, 0.0, e, 150.0, 10_000.0));
-    final_extruder_position(&waypoints, &[("pa", "linear_pressure_advance", 0.03)]);
+    extruder_snapshot(
+        &perimeter_with_ratio_steps_at_speed(),
+        &[linear_advance(0.03)],
+    );
 }
 
 #[test]
 fn an_advance_with_no_kernel_conserves_extrusion_between_rests() {
     let waypoints = perimeter_waypoints(&[(20.0, 20.0)], [1.0; 4]);
-    let unadvanced = final_extruder_position(&waypoints, &[]);
-    let advanced = final_extruder_position(&waypoints, &[("pa", "linear_pressure_advance", 0.03)]);
+    let unadvanced = final_extruder_position(&extruder_snapshot(&waypoints, &[]));
+    let advanced = final_extruder_position(&extruder_snapshot(&waypoints, &[linear_advance(0.03)]));
     assert!(
         (advanced - unadvanced).abs() < 1e-6,
         "pressure advance vanishes at rest, so it must not change the extruded total: \
          {advanced} mm with advance, {unadvanced} mm without"
+    );
+}
+
+#[test]
+fn an_advance_before_a_kernel_carries_its_ratio_steps_into_the_smoothing() {
+    let waypoints = perimeter_with_ratio_steps_at_speed();
+    let unadvanced =
+        final_extruder_position(&extruder_snapshot(&waypoints, &[triangle_smoothing()]));
+    let snap = extruder_snapshot(&waypoints, &[tanh_advance(), triangle_smoothing()]);
+    let advanced = final_extruder_position(&snap);
+    assert!(
+        (advanced - unadvanced).abs() < 1e-6,
+        "the advance vanishes at rest, so it must not change the extruded total: \
+         {advanced} mm with advance, {unadvanced} mm without"
+    );
+    assert!(
+        snap.seam_max_dp[EXTRUDER_AXIS] < 1e-9,
+        "the kernel must smooth the advance's ratio steps, yet the extruder track steps by \
+         {} mm at a seam",
+        snap.seam_max_dp[EXTRUDER_AXIS]
     );
 }
