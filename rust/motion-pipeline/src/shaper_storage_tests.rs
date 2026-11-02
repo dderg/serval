@@ -97,20 +97,35 @@ impl TrackSignal for OffsetSine {
     }
 }
 
+fn worst_case_stored_acceleration(degree: usize, position_mm: f64, span_s: f64) -> f64 {
+    let alternating_half_ulp_second_difference = 2.0 * f64::EPSILON * position_mm.abs();
+    (degree * (degree - 1)) as f64 * alternating_half_ulp_second_difference / (span_s * span_s)
+}
+
+fn shortest_span_storing_half_the_accel_budget(degree: usize, position_mm: f64) -> f64 {
+    (worst_case_stored_acceleration(degree, position_mm, 1.0) / (0.5 * BENCH_TOL.accel_mm_s2))
+        .sqrt()
+}
+
 #[test]
 fn a_nanosecond_seed_cluster_far_from_the_origin_keeps_the_motor_command_in_budget() {
     let sig = OffsetSine {
         offset: FAR_FROM_ORIGIN_MM,
         amplitude: 1.0,
-        omega: 300.0,
+        omega: 1500.0,
     };
-    let cluster = [0.004, 0.004 + 3.0e-9];
+    let sub_floor_cluster_s = 0.8
+        * shortest_span_storing_half_the_accel_budget(
+            crate::lowering::LADDER_MAX_DEGREE,
+            FAR_FROM_ORIGIN_MM,
+        );
+    let clusters = [0.004, 0.004 + 3.0e-9, 0.006, 0.006 + sub_floor_cluster_s];
     let track = fit_axis_from_signal(
         AxisFit {
             axis: 0,
             t_start: 0.0,
             t_end: 0.01,
-            seed_breakpoints: &cluster,
+            seed_breakpoints: &clusters,
             fit_tol: BENCH_TOL,
             fit_context: "test fit",
             velocity_continuous: false,
@@ -118,6 +133,18 @@ fn a_nanosecond_seed_cluster_far_from_the_origin_keeps_the_motor_command_in_budg
         &sig,
     )
     .expect("the offset sine must fit");
+    let degree = track.degree() as usize;
+    for span in track.knots().windows(2).filter(|span| span[1] > span[0]) {
+        let position = sig.eval_pva(span[0]).0;
+        let storage_noise = worst_case_stored_acceleration(degree, position, span[1] - span[0]);
+        assert!(
+            storage_noise <= 0.5 * BENCH_TOL.accel_mm_s2,
+            "knot span [{}, {}] of a degree-{degree} track can store {storage_noise:e} mm/s² \
+             of rounding acceleration",
+            span[0],
+            span[1]
+        );
+    }
     let (k1, k2) = mode_inverse_gains(50.0, 0.1);
     let motor = apply_derivative_gains_to_track(&track, k1, k2);
     let motor_budget = BENCH_TOL.pos_mm + k2 * BENCH_TOL.accel_mm_s2;

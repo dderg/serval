@@ -1907,13 +1907,17 @@ const MIN_DEVICE_INTERVAL_S: f64 = 2e-9;
 /// be handed — is the one that still leaves the budget to the signal.
 const LADDER_HIGH_DEGREE_ACCEL_NOISE_GAIN: f64 = 32.0;
 
-/// `bezier_pieces_to_nurbs` stores every piece as absolute Bernstein control
-/// points, each rounded by up to half an ulp of the position. A degree-`d`
-/// piece reads its acceleration off second differences of those points, so
-/// storage alone puts up to `2·d·(d−1)·ε·|p| / h²` of acceleration into a
-/// knot span of width `h` — noise the ladder never saw, and which a
-/// motor-side derivative gain turns into commanded position.
-const STORED_ACCEL_NOISE_GAIN: f64 = (2 * LADDER_MAX_DEGREE * (LADDER_MAX_DEGREE - 1)) as f64;
+fn stored_acceleration_noise(position_scale: f64, span_s: f64) -> f64 {
+    let control_point_rounding = 0.5 * f64::EPSILON * position_scale;
+    let second_difference_rounding = 4.0 * control_point_rounding;
+    let degree = LADDER_MAX_DEGREE as f64;
+    degree * (degree - 1.0) * second_difference_rounding / (span_s * span_s)
+}
+
+fn stored_acceleration_floor(position_scale: f64, fit_tol: FitTol) -> f64 {
+    let storage_share_of_accel_budget = 0.5 * fit_tol.accel_mm_s2;
+    (stored_acceleration_noise(position_scale, 1.0) / storage_share_of_accel_budget).sqrt()
+}
 
 #[derive(Debug, Clone, Copy)]
 struct LadderFloors {
@@ -1923,9 +1927,9 @@ struct LadderFloors {
     /// the signal's own endpoint delta rather than a difference of absolute
     /// samples, so its error tracks the span rather than the track's offset
     /// from the origin. There is still no cubic noise floor worth computing:
-    /// cubic refinement stops where the span stops being representable — in
-    /// time or in absolute storage — and the probe checks in `candidate_ok`
-    /// are what reject a cubic that did amplify.
+    /// cubic refinement stops where the span stops being representable, and
+    /// the probe checks in `candidate_ok` are what reject a cubic that did
+    /// amplify.
     cubic: f64,
 }
 
@@ -1955,11 +1959,9 @@ fn ladder_resolution_floor_from_scales(
     fit_tol: FitTol,
 ) -> LadderFloors {
     let sample_noise = f64::EPSILON * nurbs::fmadd(time_scale, velocity_scale, position_scale);
-    let stored_accel_floor =
-        (STORED_ACCEL_NOISE_GAIN * f64::EPSILON * position_scale / fit_tol.accel_mm_s2).sqrt();
     let representable = MIN_DEVICE_INTERVAL_S
         .max(8.0 * f64::EPSILON * time_scale)
-        .max(stored_accel_floor);
+        .max(stored_acceleration_floor(position_scale, fit_tol));
     LadderFloors {
         high_degree: representable
             .max((LADDER_HIGH_DEGREE_ACCEL_NOISE_GAIN * sample_noise / fit_tol.accel_mm_s2).sqrt()),
