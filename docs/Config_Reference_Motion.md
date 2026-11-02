@@ -319,6 +319,8 @@ damping_ratio: 0.7
 
 Attach a named post-processor to an axis with `post_processors: name1, name2`. The fork has ZV, MZV, bell, and triangle smoothing kernels; it does not provide an EI-family input-shaper type.
 
+To judge an extruder chain (pressure advance plus its smoothing kernel) before printing, run `python3 tools/corner_flow.py printer.cfg`: it reports bead over- and under-fill at standard corners, flow changes and travel transitions, and accepts `--sweep smooth_time=...` and `--set name.param=value`. See [Evaluating an extruder chain](../README.md#evaluating-an-extruder-chain) for how to read it.
+
 ## `[extruder]`
 
 The motion-owned portion of `[extruder]` is limited to the axis association and extrude-only caps. Heater, thermistor, and other extruder options remain mainline Klipper options and are outside this motion reference.
