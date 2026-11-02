@@ -2353,6 +2353,15 @@ fn velocity_resolution(fit_tol: FitTol, floors: LadderFloors) -> f64 {
     fit_tol.accel_mm_s2 * floors.cubic
 }
 
+const CUBIC_ANCHOR_OFFSET_CURVATURE: f64 = 6.0;
+
+/// The widest position step a span at the resolution floor can absorb and
+/// still hold the acceleration tolerance: a cubic anchored `δ` off its
+/// signal at one end bends by `6δ/h²` there.
+fn position_resolution(fit_tol: FitTol, floors: LadderFloors) -> f64 {
+    fit_tol.accel_mm_s2 * floors.cubic * floors.cubic / CUBIC_ANCHOR_OFFSET_CURVATURE
+}
+
 fn velocity_breaks_among<S: TrackSignal>(
     sig: &S,
     seeds: &[f64],
@@ -2388,12 +2397,20 @@ fn scale_probe<S: TrackSignal>(sig: &S, t: f64) -> ScaleProbe {
     }
 }
 
-pub(crate) fn fit_velocity_resolution<S: TrackSignal>(
+pub(crate) struct FitResolution {
+    pub velocity: f64,
+    pub position: f64,
+}
+
+pub(crate) fn fit_resolution<S: TrackSignal>(
     fit: &AxisFit,
     sig: &S,
-) -> Result<f64, PostProcessError> {
+) -> Result<FitResolution, PostProcessError> {
     let (_, floors) = plan_seeds_and_floors(fit, sig)?;
-    Ok(velocity_resolution(fit.fit_tol, floors))
+    Ok(FitResolution {
+        velocity: velocity_resolution(fit.fit_tol, floors),
+        position: position_resolution(fit.fit_tol, floors),
+    })
 }
 
 fn fit_pieces_to_nurbs(

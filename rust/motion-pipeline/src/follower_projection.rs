@@ -12,7 +12,7 @@ use crate::lowering::{FitTol, follower_tol_scale};
 use crate::shaper::{
     AxisFit, AxisSignalTable, FitBoundary, KnotJumpBound, Lookahead, SEGMENT_TIME_EPS_S,
     ShiftedTrackSignal, SignalBounds, TrackSignal, apply_derivative_gains_to_track,
-    fit_axis_from_signal, fit_velocity_resolution, shaped_signal_breakpoints, unit_kernel_mass,
+    fit_axis_from_signal, fit_resolution, shaped_signal_breakpoints, unit_kernel_mass,
 };
 use crate::types::PostProcessError;
 
@@ -209,18 +209,19 @@ fn fit_source_projection(
     };
     let input_start = input_state(t_start);
     let input_end = input_state(t_end);
-    let window_advance_steps = match leading_stage {
-        Some(stage) => window_advance_steps(stage, &sig, &breakpoints.fit_seeds, (t_start, t_end))
+    let steps_beyond_rounding = match leading_stage {
+        Some(stage) => advance_steps_at(stage, &sig, &breakpoints.fit_seeds, (t_start, t_end))
             .filter(|step| !step.is_rounding())
             .collect::<Vec<_>>(),
         None => Vec::new(),
     };
-    let track = if let Some(value) = sig.constant_value() {
-        bezier_pieces_to_nurbs(&[BezierPiece {
+    let (track, window_advance_steps) = if let Some(value) = sig.constant_value() {
+        let track = bezier_pieces_to_nurbs(&[BezierPiece {
             u_start: t_start,
             u_end: t_end,
             coeffs: vec![value, value],
-        }])
+        }]);
+        (track, steps_beyond_rounding)
     } else {
         let fit = AxisFit {
             axis,
@@ -237,25 +238,38 @@ fn fit_source_projection(
         };
         match leading_stage {
             Some(stage) => {
-                let advanced = AdvancedFollowerSignal {
-                    source: &sig,
-                    stage,
-                    steps: &window_advance_steps,
-                };
-                let velocity_resolution = fit_velocity_resolution(&fit, &advanced)?;
+                let resolution = fit_resolution(
+                    &fit,
+                    &AdvancedFollowerSignal {
+                        source: &sig,
+                        stage,
+                        steps: &steps_beyond_rounding,
+                    },
+                )?;
                 let mut seeds = breakpoints.fit_seeds.clone();
-                seeds.extend(sig.advance_velocity_steps_on_the_grid(stage, velocity_resolution));
+                seeds.extend(sig.advance_velocity_steps_on_the_grid(stage, resolution.velocity));
                 seeds.sort_by(f64::total_cmp);
                 seeds.dedup();
-                fit_axis_from_signal(
+                let mut step_candidates = [seeds.as_slice(), sig.grid.as_slice()].concat();
+                step_candidates.sort_by(f64::total_cmp);
+                step_candidates.dedup();
+                let steps = advance_steps_at(stage, &sig, &step_candidates, (t_start, t_end))
+                    .filter(|step| !step.is_rounding() || step.step_mm.abs() > resolution.position)
+                    .collect::<Vec<_>>();
+                let track = fit_axis_from_signal(
                     AxisFit {
                         seed_breakpoints: &seeds,
                         ..fit
                     },
-                    &advanced,
-                )?
+                    &AdvancedFollowerSignal {
+                        source: &sig,
+                        stage,
+                        steps: &steps,
+                    },
+                )?;
+                (track, steps)
             }
-            None => fit_axis_from_signal(fit, &sig)?,
+            None => (fit_axis_from_signal(fit, &sig)?, steps_beyond_rounding),
         }
     };
     let e_end_relative = sig.eval(t_end);
@@ -273,23 +287,27 @@ fn fit_source_projection(
 /// Every follower velocity discontinuity inside a segment is a fit seed by
 /// construction (ratio-span boundaries are bisected onto the exact time the
 /// odometer crosses them; raw breaks come from the raw axis knots), and an
-/// advance turns each into a position step.
-fn window_advance_steps<'a>(
+/// advance turns each into a position step. So do the leaders' own knots,
+/// where their stored pieces meet with a velocity mismatch inversely
+/// proportional to their duration: rounding for the follower's velocity,
+/// yet through the advance a position step that spans down to the fit floor
+/// cannot absorb.
+fn advance_steps_at<'a>(
     stage: &'a ChainStage,
     sig: &'a FollowerSignal,
-    seeds: &'a [f64],
+    times: &'a [f64],
     (t_start, t_end): (f64, f64),
 ) -> impl Iterator<Item = AdvanceStep> + 'a {
-    seeds
+    times
         .iter()
         .copied()
-        .filter(move |&seed| seed > t_start && seed < t_end)
-        .map(move |seed| {
+        .filter(move |&t| t > t_start && t < t_end)
+        .map(move |t| {
             AdvanceStep::between(
                 stage,
-                seed,
-                sig.deriv(trajectory::next_toward(seed, t_start)),
-                sig.deriv(seed),
+                t,
+                sig.deriv(trajectory::next_toward(t, t_start)),
+                sig.deriv(trajectory::next_toward(t, t_end)),
             )
         })
 }
@@ -2620,20 +2638,43 @@ impl TrackSignal for FollowerSignal<'_> {
 }
 
 /// The follower signal with the advance applied, less the advance steps
-/// inside the segment, which the assembly of the fitted tracks carries.
+/// inside the segment, which the assembly of the fitted tracks carries. At
+/// a step's own time the advance reads the velocity before the step, so the
+/// signal there is its left limit whichever side the follower evaluates —
+/// at a leader knot it reads the piece before, past a ratio-span boundary
+/// the span after.
 struct AdvancedFollowerSignal<'a, 'b> {
     source: &'a FollowerSignal<'b>,
     stage: &'a ChainStage,
     steps: &'a [AdvanceStep],
 }
 
+struct AdvanceInput {
+    velocity: f64,
+    steps_taken_out: f64,
+}
+
 impl AdvancedFollowerSignal<'_, '_> {
-    fn steps_through(&self, t: f64) -> f64 {
-        self.steps
-            .iter()
-            .take_while(|step| step.t <= t)
-            .map(|step| step.step_mm)
-            .sum()
+    fn advance_input(&self, t: f64, velocity: f64) -> AdvanceInput {
+        self.steps.iter().take_while(|step| step.t <= t).fold(
+            AdvanceInput {
+                velocity,
+                steps_taken_out: 0.0,
+            },
+            |input, step| {
+                if step.t == t {
+                    AdvanceInput {
+                        velocity: step.velocity_before,
+                        ..input
+                    }
+                } else {
+                    AdvanceInput {
+                        steps_taken_out: input.steps_taken_out + step.step_mm,
+                        ..input
+                    }
+                }
+            },
+        )
     }
 }
 
@@ -2641,14 +2682,15 @@ impl TrackSignal for AdvancedFollowerSignal<'_, '_> {
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let (p, v, a) = self.source.eval_pva(t);
         let j = self.source.jerk(t);
-        let p = p - self.steps_through(t);
+        let input = self.advance_input(t, v);
+        let p = p - input.steps_taken_out;
         match self.stage {
             ChainStage::DerivativeGains { k1, k2 } => {
                 assert_eq!(*k2, 0.0, "leading acceleration gain is not supported");
-                (p + k1 * v, v + k1 * a, a + k1 * j)
+                (p + k1 * input.velocity, v + k1 * a, a + k1 * j)
             }
             ChainStage::NonlinearAdvance(advance) => (
-                p + advance.advance(v),
+                p + advance.advance(input.velocity),
                 v + advance.slope(v) * a,
                 a + advance.slope(v) * j + advance.curvature(v) * a * a,
             ),
@@ -2662,9 +2704,10 @@ impl TrackSignal for AdvancedFollowerSignal<'_, '_> {
 
     fn position_delta(&self, (t0, _): (f64, f64), (t1, _): (f64, f64)) -> f64 {
         let delta = self.source.position_delta((t0, 0.0), (t1, 0.0));
-        let v0 = self.source.deriv(t0);
-        let v1 = self.source.deriv(t1);
-        delta - (self.steps_through(t1) - self.steps_through(t0))
+        let start = self.advance_input(t0, self.source.deriv(t0));
+        let end = self.advance_input(t1, self.source.deriv(t1));
+        let (v0, v1) = (start.velocity, end.velocity);
+        delta - (end.steps_taken_out - start.steps_taken_out)
             + match self.stage {
                 ChainStage::DerivativeGains { k1, .. } => k1 * (v1 - v0),
                 ChainStage::NonlinearAdvance(advance) => advance.advance(v1) - advance.advance(v0),
