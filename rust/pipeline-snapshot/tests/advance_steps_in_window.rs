@@ -1,8 +1,8 @@
 //! An advance before projection turns every follower velocity step into a
 //! position step — at a segment join, or inside a segment where the shaped
-//! path crosses a ratio-span boundary. With a smoothing kernel after the
-//! advance the step is carried into it; with none the extruder cannot
-//! follow it and the pipeline must say so.
+//! path crosses a ratio-span boundary. A smoothing kernel after the advance
+//! carries it; the kernel-free case is refused by configuration and held
+//! by motion-core's kernel_free_follower_advance tests.
 
 use pipeline_snapshot::waypoints::parse_gcode;
 use pipeline_snapshot::{
@@ -96,16 +96,6 @@ fn final_extruder_position(e_chain: Vec<PostProcessorDecl>) -> (f64, f64) {
         .expect("extruder carrier")
         .position;
     (position, snap.seam_max_dp[EXTRUDER_AXIS])
-}
-
-#[test]
-#[should_panic(expected = "cannot follow an extrusion-ratio step taken at speed")]
-fn a_ratio_step_inside_a_segment_is_refused_without_a_kernel() {
-    final_extruder_position(vec![post_processor(
-        "pa",
-        "linear_pressure_advance",
-        &[("k", 0.06)],
-    )]);
 }
 
 #[test]

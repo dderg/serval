@@ -221,8 +221,11 @@ follows: x, y, z
 #   Optional comma-separated axis names. Default is an empty list.
 motors: e_motor
 #   Optional comma-separated motor names. Default is an empty list.
-post_processors: extruder_pa
+post_processors: extruder_pa, extruder_smoothing
 #   Optional comma-separated named post-processors. Default is an empty list.
+#   On an axis that follows others, a pressure advance (or any derivative-gain
+#   stage) needs a smoothing kernel in the same list; the chain is rejected
+#   otherwise.
 ```
 
 The kinematic lane constructor creates `AxisRail`/servo rails and applies the
@@ -317,7 +320,7 @@ damping_ratio: 0.7
 #   Required. Must be in [0, 1).
 ```
 
-Attach a named post-processor to an axis with `post_processors: name1, name2`. The fork has ZV, MZV, bell, and triangle smoothing kernels; it does not provide an EI-family input-shaper type.
+Attach a named post-processor to an axis with `post_processors: name1, name2`. On an axis that follows others, an advance (`linear_pressure_advance`, `tanh_pressure_advance`, `recipr_pressure_advance`, or another derivative-gain stage with a nonzero gain) must share its chain with a smoothing kernel: an advance turns every extrusion-ratio change taken at speed into an instant position step, which only a kernel makes followable, so the config compiler rejects the chain without one. A zero advance is accepted, and raising it at runtime on such a chain is rejected the same way. The fork has ZV, MZV, bell, and triangle smoothing kernels; it does not provide an EI-family input-shaper type.
 
 ## `[extruder]`
 
