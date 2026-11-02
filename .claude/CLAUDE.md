@@ -99,6 +99,15 @@ Run it with plain `python3`, not `uv run` (uv's python breaks the pyo3 test
 binaries). Snapshot checks need the engine built first:
 `--run "make -f Makefile.rust motion-engine-fast && uv run python snapshots/run.py"`.
 
+`uv run python scripts/accept_reviewed.py <pr> [--accept-suspicious CASE=REASON ...]`
+(from the PR branch's own worktree, pushed and clean) runs
+`scripts/review_baselines.py --pr N`, refuses on any REGRESSION or on a SUSPICIOUS
+case without a stated reason, writes the EXPECTED, reasoned and new baselines
+through `snapshots/run.py --accept`, checks every snapshot is exact and commits
+`snapshots/baselines` with the review summary and reasons in the body. Run the
+snapshot tools with `uv run python` (they need numpy); a cache entry in which
+every case failed identically is never kept.
+
 # Reference docs
 
 - **MCU C/Rust boundary — architectural invariant:** [`docs/rewrite/mcu-c-rust-boundary.md`](docs/rewrite/mcu-c-rust-boundary.md). Read this before adding shared state between C and Rust on the MCU, or before reaching for `#[link_section]` on a Rust static. Rules: C owns boot, safety-critical paths, and all shared-memory placement; Rust owns the motion engine; the seam is `extern "C"` + `#[repr(C)]` only.
