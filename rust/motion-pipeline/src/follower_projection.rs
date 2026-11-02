@@ -1861,13 +1861,17 @@ impl<'a> FollowerSignal<'a> {
     /// other grid point is smooth enough to fit across, and seeding all of
     /// them would multiply the follower's fit and kernel spans.
     ///
-    /// The projection's acceleration step at a leader seam is at most the
-    /// largest extrusion ratio it rides times the leaders' own acceleration
-    /// step, so only seams where that bound exceeds the tolerance pay for
-    /// evaluating the projection itself on both sides.
+    /// The projection is `ë = r(s)·s̈ + r'(s)·ṡ²` plus raw-axis motion, and
+    /// raw-axis and ratio-span breaks are seeded on their own. At a leader
+    /// seam its step is therefore at most `max|r|·|Δs̈| + max|r'|·|Δṡ²|`,
+    /// with the path speed `ṡ` and its rate `s̈ = v·a/|v|` read off the
+    /// leaders alone; only seams where that bound exceeds the tolerance pay
+    /// for evaluating the projection itself on both sides. The ratio bounds
+    /// cover every span the signal rides and what the table holds beyond
+    /// its ends.
     fn acceleration_steps_on_the_grid(&self, tolerance: f64) -> Vec<f64> {
         let s_end = self.s_end();
-        let ratio_bound = self
+        let ridden = self
             .state
             .spans
             .iter()
@@ -1875,8 +1879,31 @@ impl<'a> FollowerSignal<'a> {
                 span.s1 >= self.s_start - SPAN_LOOKUP_SLACK_MM
                     && span.s0 <= s_end + SPAN_LOOKUP_SLACK_MM
             })
+            .collect::<Vec<_>>();
+        let ratio_bound = ridden
+            .iter()
             .map(|span| span.r0.abs().max(span.r1.abs()))
+            .chain([self.s_start, s_end].map(|s| self.state.ratio_and_slope(s).0.abs()))
             .fold(0.0_f64, f64::max);
+        let slope_bound = ridden
+            .iter()
+            .map(|span| span.ratio_slope().abs())
+            .fold(0.0_f64, f64::max);
+        let path_rate = |t: f64| {
+            let (speed_squared, power) = (0..self.shaped_axes.len()).fold(
+                (0.0_f64, 0.0_f64),
+                |(speed_squared, power), index| {
+                    let (_, velocity, acceleration) = self.leader_pva(index, t);
+                    (
+                        speed_squared + velocity * velocity,
+                        power + velocity * acceleration,
+                    )
+                },
+            );
+            let speed = speed_squared.sqrt();
+            let rate = if speed > 0.0 { power / speed } else { 0.0 };
+            (speed_squared, rate)
+        };
         let interior = &self.grid[1..self.grid.len() - 1];
         interior
             .iter()
@@ -1884,15 +1911,11 @@ impl<'a> FollowerSignal<'a> {
             .filter(|&t| {
                 let before = trajectory::next_toward(t, f64::NEG_INFINITY);
                 let after = trajectory::next_toward(t, f64::INFINITY);
-                let leader_step = (0..self.shaped_axes.len())
-                    .map(|index| {
-                        let step =
-                            self.leader_pva(index, after).2 - self.leader_pva(index, before).2;
-                        step * step
-                    })
-                    .sum::<f64>()
-                    .sqrt();
-                ratio_bound * leader_step > tolerance
+                let (speed_squared_before, rate_before) = path_rate(before);
+                let (speed_squared_after, rate_after) = path_rate(after);
+                let bound = ratio_bound * (rate_after - rate_before).abs()
+                    + slope_bound * (speed_squared_after - speed_squared_before).abs();
+                bound > tolerance
                     && (self.second_deriv(after) - self.second_deriv(before)).abs() > tolerance
             })
             .collect()
