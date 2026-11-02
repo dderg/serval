@@ -381,3 +381,66 @@ fn mode_inverse_motor_command_holds_the_fit_tolerance_against_its_exact_signal()
         );
     }
 }
+
+fn stepped_source() -> nurbs::ScalarNurbs {
+    nurbs::bezier::bezier_pieces_to_discontinuous_nurbs(&[
+        BezierPiece {
+            u_start: 0.0,
+            u_end: 0.5,
+            coeffs: vec![0.0, 10.0, 3.0, 0.0],
+        },
+        BezierPiece {
+            u_start: 0.5,
+            u_end: 1.0,
+            coeffs: vec![5.75 + 1e-3, 15.0, -4.0, 2.0],
+        },
+    ])
+}
+
+fn convolved<'a>(
+    kernel: &'a nurbs::algebra::PiecewisePolynomialKernel,
+    track: &nurbs::ScalarNurbs,
+    gains: Option<(f64, f64)>,
+) -> super::ShapedSignalSource<'a> {
+    let table = super::AxisSignalTable::from_tracks(
+        std::iter::once(track),
+        super::SignalBounds {
+            first_t: 0.0,
+            last_t: 1.0,
+            boundary: super::FitBoundary::StreamBoundary,
+            lookahead: super::Lookahead::Forced,
+        },
+    );
+    let table = match gains {
+        Some((k1, k2)) => table.with_derivative_gains(k1, k2),
+        None => table,
+    };
+    super::ShapedSignalSource::new(kernel, table, track.knots().to_vec(), 0.5)
+}
+
+#[test]
+fn a_gained_convolution_carries_the_impulses_of_its_input_steps() {
+    use super::TrackSignal;
+    let chain = mode_inverse_chain();
+    let kernel = chain.kernel().expect("mode_inverse rides a kernel");
+    let Some(trajectory::ChainStage::DerivativeGains { k1, k2 }) = chain.trailing_transform()
+    else {
+        panic!("chain ends in motor-side derivative gains");
+    };
+    let (k1, k2) = (*k1, *k2);
+    let track = stepped_source();
+    let raw = convolved(kernel, &track, None);
+    let gained = convolved(kernel, &track, Some((k1, k2)));
+    let (raw, gained) = (raw.signal(), gained.signal());
+    let worst = (0..=200)
+        .map(|sample| 0.499 + 0.002 * (f64::from(sample) + 0.37) / 200.0)
+        .map(|t| {
+            let (p, v, a) = raw.eval_pva(t);
+            (gained.eval(t) - (p + k1 * v + k2 * a)).abs()
+        })
+        .fold(0.0, f64::max);
+    assert!(
+        worst <= 1e-12,
+        "the gained convolution misses x + k1·ẋ + k2·ẍ of the shaped signal by {worst} mm"
+    );
+}
