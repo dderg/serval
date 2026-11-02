@@ -1,4 +1,4 @@
-use super::{AxisFit, MIN_DEVICE_INTERVAL_S, TrackSignal, fit_axis_from_signal};
+use super::{AxisFit, FloorVelocityGate, MIN_DEVICE_INTERVAL_S, TrackSignal, fit_axis_from_signal};
 use crate::lowering::FitTol;
 use crate::types::PostProcessError;
 
@@ -84,7 +84,6 @@ fn bisecting_toward_an_unseeded_acceleration_step_keeps_pieces_device_wide() {
             t_start: 0.982_839_222_588_5,
             t_end: 1.002_872_787_996_2,
             seed_breakpoints: &[0.994_616_767_877, 0.994_655_895_934_5],
-            keeps_velocity_breaks: false,
             fit_tol: FitTol {
                 pos_mm: 0.0025,
                 accel_mm_s2: 25.0,
@@ -119,7 +118,6 @@ fn a_picometre_ramp_to_rest_at_the_resolution_floor_fails_loudly() {
             t_start: 4.33,
             t_end: 4.35,
             seed_breakpoints: &[ramp.at - 0.7e-5, ramp.at + 1.3e-5],
-            keeps_velocity_breaks: false,
             fit_tol: FitTol {
                 pos_mm: 0.0025,
                 accel_mm_s2: 50.0,
@@ -155,4 +153,32 @@ fn a_picometre_ramp_to_rest_at_the_resolution_floor_fails_loudly() {
             track.knots().len()
         ),
     }
+}
+
+struct Coasting;
+
+impl TrackSignal for Coasting {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        (10.0 * t, 10.0, 0.0)
+    }
+}
+
+#[test]
+fn the_floor_admits_a_velocity_change_an_acceleration_within_tolerance_carries() {
+    let fit_tol = FitTol {
+        pos_mm: 0.0025,
+        accel_mm_s2: 50.0,
+    };
+    let (t0, t1) = (1.0, 1.0 + 4e-9);
+    let within = 0.5 * fit_tol.accel_mm_s2 * (t1 - t0);
+    let gate = FloorVelocityGate::over(&Coasting, t0, t1, fit_tol);
+    assert!(
+        gate.admits(within) && gate.admits(-within),
+        "a velocity change of {within} is what half the acceleration tolerance carries across \
+         the span"
+    );
+    assert!(
+        !gate.admits(4.0 * within),
+        "twice the acceleration tolerance across the span is a velocity step"
+    );
 }

@@ -2842,7 +2842,6 @@ fn accepted_seed_intervals_do_not_spend_the_split_budget() {
                 t_start,
                 t_end,
                 seed_breakpoints: seeds,
-                keeps_velocity_breaks: false,
                 fit_tol: tolerance,
                 fit_context: "test fit",
                 velocity_continuous: false,
