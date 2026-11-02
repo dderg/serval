@@ -416,7 +416,7 @@ def fit_audit(sha: str) -> dict | None:
                 "fit_tolerance",
                 "every_accepted_fit_piece",
                 "--",
-                "--ignored",
+                "--include-ignored",
                 "--exact",
                 "every_accepted_fit_piece_holds_the_fit_tolerance_against_the_exact_signal",
             ],

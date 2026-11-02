@@ -529,7 +529,7 @@ fn materialize_changed_sources(
         if !(variable_surface_z || changed) || matches!(source, ContinuousAxis::Spline(_)) {
             continue;
         }
-        let (mut breakpoints, _) = match source {
+        let (mut breakpoints, _cap_contacts) = match source {
             ContinuousAxis::Analytic { span, .. } => cap_graded_seeds(span),
             _ => (vec![segment.t_start, segment.t_end], Vec::new()),
         };
@@ -540,6 +540,8 @@ fn materialize_changed_sources(
                 })?);
             }
         }
+        #[cfg(feature = "fit-audit")]
+        let _cap_contacts_audited = crate::fit_audit::CapContactScope::enter(&_cap_contacts);
         let mut curve = fit_axis_from_signal(
             AxisFit {
                 axis,
