@@ -2596,6 +2596,28 @@ fn refine_shaped_span<S: TrackSignal>(
                 .acceleration_monotonicity(next_toward(t0, t1), next_toward(t1, t0))
                 .is_none()
         {
+            let velocity_change = failure.right.velocity - failure.left.velocity;
+            let (carried_low, carried_high) = velocity_carried_by_acceleration(sig, t0, t1);
+            let velocity_slack = fit_tol.accel_mm_s2 * (t1 - t0);
+            if velocity_change < carried_low - velocity_slack
+                || velocity_change > carried_high + velocity_slack
+            {
+                return Err(PostProcessError::VelocityStepAtFitFloor {
+                    axis: policy.axis,
+                    fit_context: policy.fit_context,
+                    t_start: t0,
+                    t_end: t1,
+                    velocity_change,
+                    carried_low,
+                    carried_high,
+                    velocity_slack,
+                    position_error: failure.error.position,
+                    position_budget: fit_tol.pos_mm,
+                    velocity_error: failure.error.velocity,
+                    acceleration_error: failure.error.acceleration,
+                    acceleration_budget: fit_tol.accel_mm_s2,
+                });
+            }
             #[cfg(feature = "fit-audit")]
             crate::fit_audit::check(
                 sig,
@@ -2682,6 +2704,23 @@ fn refine_shaped_span<S: TrackSignal>(
         refinement_splits,
         out,
     )
+}
+
+fn velocity_carried_by_acceleration<S: TrackSignal>(sig: &S, t0: f64, t1: f64) -> (f64, f64) {
+    let h = t1 - t0;
+    let (lowest, highest) = LADDER_PROBES_U
+        .iter()
+        .map(|&u| match u {
+            -1.0 => next_toward(t0, t1),
+            1.0 => next_toward(t1, t0),
+            _ => nurbs::fmadd(0.5 * (u + 1.0), h, t0),
+        })
+        .map(|t| sig.second_deriv(t))
+        .fold(
+            (f64::INFINITY, f64::NEG_INFINITY),
+            |(lowest, highest), acceleration| (lowest.min(acceleration), highest.max(acceleration)),
+        );
+    (lowest * h, highest * h)
 }
 
 fn fit_tolerance_without_probe(axis: usize, t_start: f64, t_end: f64) -> PostProcessError {
