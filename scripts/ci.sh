@@ -265,6 +265,15 @@ job_py() {
     fi
 }
 
+job_bench_fw() {
+    cd "$ROOT/tools/bench/capture-fw"
+    rustup show active-toolchain >/dev/null 2>&1 || rustup toolchain install
+    cargo fmt --check
+    cargo clippy --release -- -D warnings
+    cargo build --release
+    cd "$ROOT" && uv run pytest tools/bench
+}
+
 job_sim() {
     local sel="sim_unit and not needs_hardware"
     local paths="tools/sim \
@@ -366,6 +375,7 @@ run_all() {
         run_check "docs"            job_docs
         run_check "py"              job_py
         run_check "py-typecheck"    job_py_typecheck
+        run_check "bench-fw"        job_bench_fw
         run_check "sim"             job_sim
         run_check "snapshot"        job_snapshot
         run_check "replay-budget"   job_replay_budget
@@ -431,6 +441,7 @@ case "$name" in
     py)               job=(job_py "${1:-3.13}") ;;
     py-typecheck)     job=(job_py_typecheck) ;;
     docs)             job=(job_docs) ;;
+    bench-fw)         job=(job_bench_fw) ;;
     sim)              job=(job_sim) ;;
     sim-e2e)          job=(job_sim_e2e ${@+"$@"}) ;;
     replay-budget)    job=(job_replay_budget) ;;
