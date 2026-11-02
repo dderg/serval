@@ -1,6 +1,6 @@
 # Phase 2: the F407 as printer simulator
 
-Status: implemented and host-tested (`sim-logic` 34 tests, `tools/bench` pytest), firmware builds; not yet run on hardware (waits for the phase-2 wiring). RAM: 108 KB static of 128 KB, about 17 KB left for the stack.
+Status: implemented and host-tested (`sim-logic`: 57 tests; `tools/bench` pytest), firmware builds; not yet run on hardware (waits for the phase-2 wiring). RAM: 113 KB static of 128 KB (bss 108 KB + data 5 KB), about 15 KB left for the stack.
 
 Wiring: `tools/bench/WIRING_PHASE2.md`. The F407 keeps capturing STEP/DIR (count mode `SVC1` and event mode `SVE1`, both unchanged on the wire) and adds four simulated peripherals: endstops/probe, thermistors fed by a thermal model of the heaters the F401 drives, a clock reference count, and four TMC2209 drivers on a single-wire UART. Pure logic lives in a separate `no_std` crate, `tools/bench/sim-logic`, tested on the host with `cargo test`. `capture-fw` holds only the register-level glue.
 
@@ -21,7 +21,11 @@ TIM7 and USART2 share a priority, so they never preempt each other and can share
 - **Walls** come from the host config. Each wall has a pin, an active level, integer coefficients over the four channel counts, a comparison (`>=` or `<=`) and a threshold in steps. That one form covers motor space (`a ≥ N`) and CoreXY toolhead space: x = (a+b)/2 becomes `a + b ≥ 2N`, and y = (a−b)/2 becomes `a − b ≥ 2N`. Several walls may share a pin, and the pin is the OR of them. The probe is a wall on z.
 - **Positions** are absolute steps: `origin + Σ signed steps since capture start`. The host sends the origin, computed from the gcode's `SET_KINEMATIC_POSITION`, with the config. In count mode the positions come from the per-tick deltas. In event mode each snapshot signs every step by the DIR level in force at its timestamp (the DIR edges are merged in time order) before summing.
 - **When.** Walls are evaluated in the TIM6 tick, after the capture work. Outside a capture every pin sits at its inactive level, because positions are only known while capturing.
-- **Latency bound.** A crossing is reflected on the pin at the first tick after the step that caused it, plus the ISR's run time before the GPIO write. Count mode: ≤ 25 µs + ≤ 3 µs. Event mode: ≤ 100 µs + snapshot processing (≤ 20 µs). Each pin's driven level appears in every aux record. The analyzer reports each transition with its capture time (1 ms aux resolution).
+- **Within a tick.** A pin is asserted for a tick if its wall was crossed at any moment during that tick, not only at the tick's end. A touch-and-return inside one tick therefore still fires the pin for one tick, as a real switch would fire for that moment.
+  - Event mode is exact. The snapshot keeps every step with its timestamp and sign (up to `WALL_STEPS_PER_SNAPSHOT` = 32 per channel per 100 µs; more is the fault `WALL_STEPS_OVERFLOW`). The tracker replays all channels in time order and evaluates each wall after every step of a channel it involves. CoreXY walls see the true interleaving of a and b.
+  - Count mode knows each channel's turning point (the position at its single allowed DIR reversal in the tick). That is exact for single-channel walls (z, probe, motor-space walls). CoreXY walls are judged at the tick end. Between ticks this only misses an x/y excursion that both starts and ends inside one 25 µs tick, at most 3 steps (≈ 40 µm at 0.0125 mm/step and the bench's maximum step rate), which is below count mode's time resolution anyway.
+- **DIR/STEP ambiguity.** In event mode a DIR edge within `MIN_DIR_STEP_TICKS` (9 ticks, 107 ns) of a step makes that step's sign ambiguous. That is the fault `DIR_AMBIGUOUS`, the same bound the event decoder enforces on the host.
+- **Latency bound.** A crossing is reflected on the pin at the end of the tick that holds the step that caused it, plus the ISR's run time before the GPIO write. A step at the exact snapshot boundary belongs to the snapshot whose DMA position includes it. Count mode: ≤ 25 µs + ≤ 3 µs. Event mode: ≤ 100 µs + snapshot processing (≤ 20 µs). Each pin's driven level appears in every aux record. The analyzer recomputes every record's levels from the captured steps and reports each transition with its toolhead position.
 
 ## 2. Thermistors (DAC1/DAC2 on PA4/PA5) and heater/fan inputs
 
@@ -89,22 +93,140 @@ u8  tmc_writes, tmc_reads, tmc_rejects   wrapping counters
 - **Files.** `capture.py` writes `aux.bin` next to `capture.bin`/`events.bin`, and `capture.json` gets `"aux": true`.
 - **Run config.** `tools/bench/sim_config.py` builds the config from a JSON file (`configs/full.sim.json`): walls in toolhead mm or motor steps, heaters, `expect_mco`. `run.py --sim` sends it with the origin from the gcode, and `--config configs/full.cfg` selects the matching printer config. Existing runs without these flags are unchanged.
 
+## Fail loudly
+
+Every check below stops the run with a named error. None of them recovers or pads.
+
+| where | condition | result |
+|---|---|---|
+| firmware | MCO delta outside 6250 ± 50 per ms with `expect_mco` | fault `MCO_LOST` (15) |
+| firmware | aux ring full | fault `AUX_OVERFLOW` (16) |
+| firmware | DIR edge within 9 ticks of a step (event mode) | fault `DIR_AMBIGUOUS` (17) |
+| firmware | more than 32 steps on one channel in one snapshot | fault `WALL_STEPS_OVERFLOW` (18) |
+| firmware | unknown command byte, config longer than 512 B | panic (board needs `reset-capture`) |
+| capture.py | aux record gap, aux frame without a sim config | `CaptureError` |
+| capture.py | aux records carry another config id (firmware rejected the config) | `CaptureError` |
+| capture.py | a sim capture ends with no aux record | `CaptureError` |
+| sim_config.py | unknown key, wall with neither or both of `at_mm`/`at_steps`, toolhead wall in steps, start or wall not on a whole step, unequal a/b steps, payload > 512 B | `SimConfigError` |
+| sim_report.py | config id changes, MCO lost while expected | `SimReportError` |
+| sim_report.py | a record whose 10 kHz input sample count is not 10 ± 1 (missed TIM7 interrupts) | `SimReportError` |
+| sim_report.py | any thermistor DAC clamp during the capture | `SimReportError` |
+| sim_report.py | any TMC reject during the capture (bad CRC, stray byte, overrun, request during a pending reply) | `SimReportError` |
+| sim_report.py | dedge changes, is set on an address without a `[tmc2209]` section, or disagrees with the capture's both-edges mask | `SimReportError` |
+| sim_report.py | endstop levels disagree with the walls evaluated on the captured positions for ≥ 2 consecutive records | `SimReportError` |
+| analyze.py | count-mode aux record beyond the captured ticks | `AnalysisError` |
+
+Kept as counters, not faults: TMC rejects outside a capture (klippy's own CRC/IFCNT retries surface a broken bus as a klippy error), and the firmware's silent keeping of the previous config on a malformed `C` payload (the host fails on the config id instead).
+
 ## Testing without hardware
 
-- `sim-logic` (`cargo test` in `tools/bench/sim-logic`):
-  - wall evaluation, CoreXY, both comparisons, OR per pin;
-  - DIR merge signing in event mode;
+- `sim-logic` (`cargo test` in `tools/bench/sim-logic`, also `./scripts/ci.sh bench`):
+  - walls: CoreXY, both comparisons, OR per pin, polarity, overflow;
+  - wall timing (`tests/wall_timing.rs`):
+    - a crossing step that is the last step of a snapshot fires in that snapshot;
+    - one just after the boundary fires in the next;
+    - a touch-and-return inside one snapshot fires for exactly that snapshot;
+    - CoreXY walls follow the cross-channel time order;
+    - other channels' steps are ignored;
+    - count-mode excursions fire single-channel walls only when they reach the wall;
+    - count and event ticks agree on monotone motion;
+  - DIR merge signing, plus ambiguity at < 9 ticks on either side, at the same tick, and none at exactly 9;
   - MCO extension across wraps;
-  - thermal step response against the analytic first-order solution;
-  - ratio/clamp against the beta formula;
-  - TMC: frames encoded exactly as `tmc_uart.py` does, golden CRCs, IFCNT, GSTAT W1C, SENDDELAY, resync, bad-CRC rejection, reply bytes that `tmc_uart.py`'s `_decode_read` accepts;
-  - config TLV decoding, including a golden payload shared with the Python encoder test;
-  - aux record encoding, golden-tested against the Python decoder.
-- Python: `sim_config` encoding, `aux.bin` decoding, analyzer aux report and MCO mapping on synthetic data.
-- Hardware validation (once wired), in order:
-  1. aux stream and MCO flag at idle;
-  2. temperatures at ambient in klippy with `full.cfg`;
-  3. TMC init (klippy loads, `DUMP_TMC` reads registers, dedge set);
-  4. both-edge capture;
-  5. a homing run against walls;
-  6. heater PID to 60 °C.
+  - thermal: step response against the analytic first-order solution, ratio against the beta formula. The clamp flag turns on exactly at the ratio limits (bisected temperature ± 0.01 °C), the limits bracket 20–280 °C, and a NaN temperature is flagged;
+  - TMC:
+    - frames byte-identical to `tmc_uart.py`;
+    - IFCNT wrap at 256;
+    - GSTAT write-1-to-clear;
+    - bad CRC on a write or a read (no reply, counted);
+    - a false sync byte costs exactly one frame and the retry after IDLE parses;
+    - back-to-back frames with no gap;
+    - overrun mid-frame and between frames;
+    - wrapping reject counter;
+    - SENDDELAY;
+    - the scheduled reply starts no earlier than SENDDELAY and, for klippy's `senddelay=2`, ends its wait inside Klipper's 64-bit window;
+  - config TLV with a golden payload shared with the Python encoder; aux record layout golden-tested against the Python decoder.
+- Python (`uv run python -m pytest tools/bench`):
+  - TMC golden frames and replies checked against klippy's real `tmc_uart.py` encoder;
+  - the thermistor ratios checked against klippy's `Thermistor` class;
+  - `sim_config`: golden payload, CoreXY coefficients, dir inversion, strict keys, whole-step starts;
+  - `aux.bin` decoding and MCO unwrap;
+  - every `sim_report` fatal check;
+  - wall-level recomputation: agreement, one-record hold tolerated, two-record disagreement fatal;
+  - capture positions for count and event records;
+  - MCO clock mapping under crystal wander that the step fit cannot follow.
+
+## Hardware validation plan
+
+Run each step in order. Stop at the first failure and fix it before going on. Every command runs under the bench lock after a sync:
+
+```
+B='uv run python tools/bench'
+uv run python tools/bench/lock.py hold -- bash -c "$B/deploy.py sync && <command>"
+```
+
+`<command>` is written below with `$B` for `uv run python tools/bench`. Captures write to `/tmp/sim-probe-*` unless `--out` is given. `sim_probe.py` prints one JSON document per call.
+
+**V0. Flash and phase-1 regression** (printer still on `printer.cfg`).
+- `$B/deploy.py flash-capture`
+- `$B/capture.py /tmp/p2-v0c --seconds 5` → prints `≈200000 ticks`. Pass: 200 000 ± 1 %, no fault.
+- `$B/capture.py /tmp/p2-v0e --seconds 5 --events` → pass: no fault.
+- `$B/run.py tools/bench/gcode/epochs.gcode --events` → pass: analysis completes; per-motor step counts equal the last phase-1 run of the same gcode; event-mode lateness within run-to-run spread of the phase-1 runs. The F407 now drives PD8–PD11 low, and `printer.cfg`'s `^PA9` endstops read not-triggered.
+
+**V1. `full.cfg` boots: TMC init and thermistors in range.**
+- `$B/deploy.py config --config tools/bench/configs/full.cfg` → pass: prints `printer ready`. Klippy refuses to become ready if any TMC2209 read fails (`Unable to read tmc uart`), if GSTAT/DRV_STATUS reports an error, or if an ADC is out of range. The F401 resets on FIRMWARE_RESTART, so then run:
+- `$B/deploy.py mco` → pass: exits 0 (the five registers read back as written).
+
+**V2. Aux stream and MCO at idle.**
+- `$B/sim_probe.py capture --seconds 10 --start 100,100,10`
+- Pass:
+  - `simulator.mco.records_ok == simulator.mco.records` (≈ 10 000) and `|f401_vs_f407_ppm| < 100`;
+  - `input_duty` all 0;
+  - both heaters `start_c`/`end_c` 25.00 ± 0.05;
+  - `tmc.dedge_channels_mask == 15` and `tmc.rejects == 0`;
+  - `endstop_transitions == 0` and `walls.mismatched_records == 0`;
+  - `walls.final_toolhead_mm == klippy_position == [100, 100, 10]`.
+- Repeat with `--events`. Pass: the same, and the ppm agrees with the count-mode value within 2 ppm.
+
+**V3. Thermistor chain at ambient.**
+- `$B/sim_probe.py query extruder heater_bed` → pass: both `temperature` 25 ± 1.5 °C. The tolerance is the two-regulator VREF/VDDA error. Record the offset; V7 compares against it.
+
+**V4. TMC register traffic.**
+- `$B/sim_probe.py gcode "DUMP_TMC STEPPER=a"` → pass:
+  - `IOIN` shows `version=0x21`;
+  - `GSTAT` is 0 (klippy cleared the reset bit);
+  - `CHOPCONF` has `dedge=1`;
+  - `IFCNT` is non-zero.
+- Repeat for `b`, `z` and `extruder` (addresses 1–3).
+- `$B/sim_probe.py gcode "SET_TMC_CURRENT STEPPER=z CURRENT=0.6"` → pass: no error. Klippy verifies the write through IFCNT, so this exercises a write and a read-back.
+- `$B/sim_probe.py query "tmc2209 a"` → pass: `run_current` 0.8 (± the TMC current-scale quantisation) and an empty `drv_status`.
+
+**V5. Both-edge capture and the MCO clock reference.**
+- `$B/run.py tools/bench/gcode/epochs.gcode --config tools/bench/configs/full.cfg --sim tools/bench/configs/full.sim.json`
+- `$B/run.py tools/bench/gcode/epochs.gcode --config tools/bench/configs/full.cfg --sim tools/bench/configs/full.sim.json --events --step-tap`
+- Pass:
+  - both analyses complete. A both-edges mismatch shows as doubled or halved step counts, or as the dedge-vs-mask fatal error;
+  - `simulator.tmc.dedge_channels_mask == 15` and `simulator.walls.mismatched_records == 0`;
+  - `mcu_execution.clock_reference == "mco"`, with `lateness_ns.p50` within 50 ns of `fit_lateness_ns.p50`, and `simulator.mco.f401_vs_f407_ppm` within 2 ppm of V2.
+
+**V6. Endstops, homing and probe.**
+- Count mode: `$B/sim_probe.py capture --seconds 90 --start 50,50,10 --gcode G28 --gcode "G1 X20 Y20 Z5 F3000"`
+- Event mode: the same with `--events`.
+- Pass:
+  - every `gcode` entry has no `!!` error (no `No trigger on x after full movement`);
+  - `klippy_homed_axes == "xyz"`;
+  - `klippy_position == [20, 20, 5]`;
+  - `simulator.walls.final_toolhead_mm` within 0.02 mm of `[20, 20, 5]` on every axis. The homing trigger error is latency × homing speed (≤ 128 µs × 20 mm/s = 2.6 µm) plus half a step of CoreXY quantisation (6 µm);
+  - `endstop_transition_examples`: each asserting edge of a homed pin is at that axis ≈ 0 (within 0.02 mm);
+  - `walls.mismatched_records` ≤ the number of transitions.
+- Probe: `$B/sim_probe.py capture --seconds 60 --start 50,50,10 --gcode G28 --gcode "G1 Z5" --gcode PROBE`. Pass: the PROBE response reports `z=` within 0.01 of 0.000.
+
+**V7. Heater control.**
+- `$B/sim_probe.py heat --heater extruder --target 60 --seconds 240` → pass:
+  - `klippy_plateau_c` 60 ± 1;
+  - `klippy_minus_model_c` equal to V3's ambient offset ± 0.5 °C;
+  - `klippy_max_c` ≤ 65;
+  - `simulator.input_duty.extruder_heater` > 0, and no clamp or sample error (both fatal).
+- `$B/sim_probe.py heat --heater bed --target 50 --seconds 600` → the same criteria with the bed fields.
+- `$B/sim_probe.py capture --seconds 16 --start 100,100,10 --gcode "M106 S128" --gcode "G4 P15000" --gcode M107` → pass: `input_duty.part_fan` 0.45–0.50 (half duty for 15 of the 16 s).
+
+After V7: restore `printer.cfg` with `$B/deploy.py config`, then open the PR.

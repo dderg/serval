@@ -211,3 +211,71 @@ def test_the_full_run_config_builds():
     assert config.expect_mco
     assert [h.index for h in config.heaters] == [0, 1]
     assert len(sim_config.encode(config)) <= sim_config.MAX_PAYLOAD
+
+
+def test_unknown_keys_are_refused():
+    with pytest.raises(sim_config.SimConfigError, match="unknown keys"):
+        _build({"wals": []})
+    wall = {
+        "pin": "probe",
+        "axis": "z",
+        "at_mm": 0,
+        "trigger": "at_or_below",
+        "polarity": 1,
+    }
+    with pytest.raises(sim_config.SimConfigError, match="polarity"):
+        _build({"walls": [wall]})
+    spec = json.loads((BENCH_DIR / "configs" / "full.sim.json").read_text())
+    spec["heaters"]["bed"]["mass_kg"] = 1.0
+    with pytest.raises(sim_config.SimConfigError, match="mass_kg"):
+        _build(spec)
+
+
+def test_a_wall_needs_exactly_one_position():
+    wall = {"pin": "probe", "axis": "z", "trigger": "at_or_below"}
+    with pytest.raises(sim_config.SimConfigError, match="exactly one"):
+        _build({"walls": [wall]})
+    with pytest.raises(sim_config.SimConfigError, match="exactly one"):
+        _build({"walls": [dict(wall, at_mm=0, at_steps=0)]})
+    toolhead = {
+        "pin": "x_endstop",
+        "axis": "x",
+        "at_steps": 0,
+        "trigger": "at_or_below",
+    }
+    with pytest.raises(sim_config.SimConfigError, match="at_mm"):
+        _build({"walls": [toolhead]})
+
+
+def test_a_start_between_steps_is_refused():
+    with pytest.raises(sim_config.SimConfigError, match="start z"):
+        _build({}, start=(0.0, 0.0, 0.001))
+
+
+def test_describe_records_what_the_firmware_evaluates():
+    config = _build(
+        {
+            "walls": [
+                {
+                    "pin": "probe",
+                    "axis": "z",
+                    "at_mm": 0,
+                    "trigger": "at_or_below",
+                }
+            ]
+        },
+        start=(0.0, 0.0, 1.0),
+    )
+    assert sim_config.describe(config) == {
+        "config_id": 9,
+        "origin": [0, 0, 400, 0],
+        "walls": [
+            {
+                "pin": 3,
+                "active_high": True,
+                "at_or_below": True,
+                "coeffs": (0, 0, 1, 0),
+                "threshold": 0,
+            }
+        ],
+    }

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import struct
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 CMD_CONFIG = b"C"
@@ -35,6 +35,8 @@ HEATER_FIELDS = (
 WALL_ACTIVE_HIGH = 1 << 0
 WALL_AT_OR_BELOW = 1 << 1
 TRIGGERS = {"at_or_below": True, "at_or_above": False}
+SPEC_KEYS = {"expect_mco", "both_edges", "walls", "heaters"}
+WALL_KEYS = {"pin", "axis", "trigger", "at_mm", "at_steps", "active_high"}
 
 
 class SimConfigError(ValueError):
@@ -96,6 +98,20 @@ def encode(config: SimConfig) -> bytes:
     return bytes(out)
 
 
+def describe(config: SimConfig) -> dict:
+    return {
+        "config_id": config.config_id,
+        "origin": list(config.origin),
+        "walls": [asdict(wall) for wall in config.walls],
+    }
+
+
+def _check_keys(spec: dict, allowed: set[str], what: str) -> None:
+    unknown = set(spec) - allowed
+    if unknown:
+        raise SimConfigError(f"{what}: unknown keys {sorted(unknown)}")
+
+
 def command(config: SimConfig) -> bytes:
     payload = encode(config)
     return CMD_CONFIG + struct.pack("<H", len(payload)) + payload
@@ -112,6 +128,11 @@ def _steps(mm: float, step_mm: float, what: str) -> int:
 def _wall(
     spec: dict, step_mm: dict[str, float], dir_sign: dict[str, int]
 ) -> Wall:
+    _check_keys(spec, WALL_KEYS, f"wall {spec}")
+    if ("at_mm" in spec) == ("at_steps" in spec):
+        raise SimConfigError(
+            f"wall {spec}: give exactly one of at_mm, at_steps"
+        )
     try:
         pin = PINS[spec["pin"]]
         at_or_below = TRIGGERS[spec["trigger"]]
@@ -120,6 +141,8 @@ def _wall(
     axis = spec["axis"]
     active_high = bool(spec.get("active_high", True))
     if axis in ("x", "y"):
+        if "at_steps" in spec:
+            raise SimConfigError(f"wall {spec}: toolhead walls take at_mm")
         if step_mm["a"] != step_mm["b"]:
             raise SimConfigError("CoreXY walls need equal a/b step sizes")
         sign = 1 if axis == "x" else -1
@@ -139,6 +162,7 @@ def _wall(
 def _heater(name: str, spec: dict) -> Heater:
     if name not in HEATERS:
         raise SimConfigError(f"unknown heater {name!r}")
+    _check_keys(spec, set(HEATER_FIELDS), f"heater {name}")
     missing = [f for f in HEATER_FIELDS if f not in spec]
     if missing:
         raise SimConfigError(f"heater {name} misses {missing}")
@@ -152,12 +176,12 @@ def corexy_origin(
 ) -> tuple[int, int, int, int]:
     x, y, z = start_xyz
     motor = {
-        "a": (x + y) / step_mm["a"],
-        "b": (x - y) / step_mm["b"],
-        "z": z / step_mm["z"],
-        "e": 0.0,
+        "a": _steps(x + y, step_mm["a"], "start a"),
+        "b": _steps(x - y, step_mm["b"], "start b"),
+        "z": _steps(z, step_mm["z"], "start z"),
+        "e": 0,
     }
-    return tuple(dir_sign[c] * round(motor[c]) for c in CHANNELS)
+    return tuple(dir_sign[c] * motor[c] for c in CHANNELS)
 
 
 def build(
@@ -167,6 +191,7 @@ def build(
     dir_sign: dict[str, int],
     start_xyz: tuple[float, float, float],
 ) -> SimConfig:
+    _check_keys(spec, SPEC_KEYS, "sim config")
     mask = 0
     for role in spec.get("both_edges", []):
         if role not in CHANNELS:

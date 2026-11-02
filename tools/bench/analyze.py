@@ -309,6 +309,39 @@ def load_capture(run_dir: Path) -> Capture:
     )
 
 
+def capture_positions(capture: Capture):
+    if capture.events is not None:
+        channels = capture.events.channels
+
+        def at_event_records(records: np.ndarray) -> np.ndarray:
+            times = records["time"].astype(np.int64)
+            columns = []
+            for channel in channels:
+                totals = np.concatenate(([0], np.cumsum(channel.step_signs())))
+                columns.append(
+                    totals[np.searchsorted(channel.step_ticks, times, "right")]
+                )
+            return np.stack(columns, axis=1)
+
+        return at_event_records
+    totals = np.concatenate(
+        (
+            np.zeros((1, len(CAPTURE_ROLES)), np.int64),
+            np.cumsum(capture.deltas, axis=0),
+        )
+    )
+
+    def at_count_records(records: np.ndarray) -> np.ndarray:
+        ticks = records["time"].astype(np.int64)
+        if ticks.size and ticks[-1] >= len(capture.deltas):
+            raise AnalysisError(
+                f"aux record at tick {ticks[-1]} beyond the {len(capture.deltas)} captured ticks"
+            )
+        return totals[ticks + 1]
+
+    return at_count_records
+
+
 def _config_sections(config_text: str) -> configparser.RawConfigParser:
     parser = configparser.RawConfigParser(strict=False)
     parser.read_string(config_text)
@@ -1650,6 +1683,7 @@ def analyze(
             inputs.capture.aux,
             inputs.config.config_text,
             inputs.motors,
+            capture_positions(inputs.capture),
         ),
         "stalls": {
             "count": len(stalls),

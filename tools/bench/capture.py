@@ -37,6 +37,7 @@ from pathlib import Path
 
 from sim_config import SimConfig
 from sim_config import command as sim_command
+from sim_config import describe as sim_describe
 
 DEVICE = "/dev/serial/by-id/usb-serval-bench_step-capture_f407-capture-if00"
 CHANNEL_COUNT = 4
@@ -74,6 +75,8 @@ class Fault(enum.IntEnum):
     NON_MONOTONIC = 14
     MCO_LOST = 15
     AUX_OVERFLOW = 16
+    DIR_AMBIGUOUS = 17
+    WALL_STEPS_OVERFLOW = 18
 
 
 class CaptureError(RuntimeError):
@@ -152,6 +155,10 @@ class Capture:
         self._thread.join()
         if self._error is not None:
             raise self._error
+        if self._sim is not None and self._units and not self._aux_records:
+            raise CaptureError(
+                f"no aux records in {self._units} {self._unit} of a sim capture"
+            )
         return CaptureResult(self._units, self._unit, self._sink_path)
 
     def check(self) -> None:
@@ -171,6 +178,7 @@ class Capture:
             "aux": self._sim is not None,
             "sim_config_id": None if self._sim is None else self._sim.config_id,
             "sim_config": None if self._sim is None else self._sim.source,
+            "sim": None if self._sim is None else sim_describe(self._sim),
             **extra,
         }
         (self._out_dir / "capture.json").write_text(json.dumps(meta, indent=2))

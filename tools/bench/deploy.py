@@ -216,10 +216,12 @@ def cmd_flash_capture() -> None:
     print("capture board flashed, device present")
 
 
-def cmd_config() -> None:
-    pi.validate_config(pi.REPO_CFG.read_text())
+def cmd_config(config: Path) -> None:
+    pi.validate_config(config.read_text())
     print("config valid")
-    print("config pushed" if pi.push_config() else "config unchanged on Pi")
+    print(
+        "config pushed" if pi.push_config(config) else "config unchanged on Pi"
+    )
     pi.firmware_restart()
     print("printer ready")
 
@@ -228,20 +230,27 @@ COMMANDS = {
     "flash-target": cmd_flash_target,
     "flash-capture": cmd_flash_capture,
     "reset-target": cmd_reset_target,
-    "config": cmd_config,
     "mco": cmd_mco,
 }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["sync", *COMMANDS])
+    parser.add_argument("command", choices=["sync", "config", *COMMANDS])
     parser.add_argument("--tree", type=Path, default=REPO)
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=pi.REPO_CFG,
+        help="printer config the config command pushes (e.g. configs/full.cfg)",
+    )
     lock.add_timeout_argument(parser)
     args = parser.parse_args()
     with lock.bench_lock(args.lock_timeout):
         if args.command == "sync":
             cmd_sync(args.tree.resolve())
+        elif args.command == "config":
+            cmd_config(args.config)
         else:
             COMMANDS[args.command]()
 

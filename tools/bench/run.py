@@ -134,7 +134,15 @@ def step_tap_session(enabled: bool) -> Iterator[None]:
         restart_klipper()
 
 
-def build_sim(path: Path, config: Path, lines: list[str]) -> SimConfig:
+def kinematic_start(line: str) -> tuple[float, float, float]:
+    import analyze
+
+    return analyze._kinematic_start(line)
+
+
+def build_sim(
+    path: Path, config: Path, start_xyz: tuple[float, float, float]
+) -> SimConfig:
     import analyze
 
     motors = analyze.read_motors(analyze._config_sections(config.read_text()))
@@ -143,7 +151,7 @@ def build_sim(path: Path, config: Path, lines: list[str]) -> SimConfig:
         config_id=secrets.randbelow(0xFFFF) + 1,
         step_mm={m.role: m.step_mm for m in motors},
         dir_sign={m.role: m.dir_sign for m in motors},
-        start_xyz=analyze._kinematic_start(lines[0]),
+        start_xyz=start_xyz,
     )
 
 
@@ -160,7 +168,11 @@ def run(
     if tap and not events:
         raise BenchError("--step-tap is only analyzable with --events")
     lines, stats = sanitize(gcode.read_text())
-    sim = None if sim_path is None else build_sim(sim_path, config, lines)
+    sim = (
+        None
+        if sim_path is None
+        else build_sim(sim_path, config, kinematic_start(lines[0]))
+    )
     run_dir = runs_dir / datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir.mkdir(parents=True)
     sanitized = ("\n".join(lines) + "\n").encode()
