@@ -1,7 +1,7 @@
 //! The moment-translation and Taylor-shift kernels against the versions
 //! they replaced, which must agree bit for bit.
 
-use super::{MOMENT_POWER_CAPACITY, accumulate_translated_moments, taylor_shift};
+use super::{MOMENT_POWER_CAPACITY, MomentTranslation, taylor_shift};
 
 fn accumulate_translated_moments_dividing_per_term(
     source_origin: f64,
@@ -75,7 +75,8 @@ fn translating_moments_through_the_binomial_table_matches_the_running_product() 
             let start = rng.values(len);
             let mut table = start.clone();
             let mut running = start;
-            accumulate_translated_moments(source_origin, &source, target_origin, &mut table);
+            MomentTranslation::new(source_origin, target_origin, len)
+                .accumulate(&source, &mut table);
             accumulate_translated_moments_dividing_per_term(
                 source_origin,
                 &source,
