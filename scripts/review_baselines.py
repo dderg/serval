@@ -26,11 +26,13 @@ Each case is classified:
 
 - REGRESSION: a limit or tolerance violated that the base did not violate,
   material gained or lost beyond what the expectation allows, a seam
-  discontinuity grown past its physical threshold, non-finite output, or a
-  case that plans at the base and fails at the head;
+  position or velocity discontinuity grown past its physical threshold,
+  non-finite output, or a case that plans at the base and fails at the head;
 - SUSPICIOUS: the change falls outside the expectation (an axis it should
   not touch, a magnitude beyond the stated bound, a timing or piece-count
-  change it did not claim) or no expectation covers it;
+  change it did not claim), a seam acceleration step grown past the
+  acceleration tolerance (a knot may carry the signal's own acceleration
+  step, so only reading the case tells), or no expectation covers it;
 - EXPECTED: inside the expectation, no red flags.
 
 An expectation is `key=value;...` with keys
@@ -257,6 +259,12 @@ def planned_limit_excess(snapshot: dict) -> float:
     return worst
 
 
+def worst_seam_time(snapshot: dict, axis: int, key: str) -> float | None:
+    seams = [s for s in snapshot.get("worst_seams", []) if s["axis"] == axis]
+    worst = max(seams, key=lambda s: s[key], default=None)
+    return None if worst is None else worst["t"]
+
+
 def seam_times(snapshot: dict) -> list[float]:
     times = set()
     for span in snapshot["trajectory"]["spans"]:
@@ -475,16 +483,24 @@ def review_case(
             "dv": caps["max_accel_deviation"] * pending.SAMPLE_DT_S,
             "da": caps["max_accel_deviation"],
         }[key]
-        for axis, before, after in zip(pending.AXES, base_seam, head_seam):
+        for index, (axis, before, after) in enumerate(
+            zip(pending.AXES, base_seam, head_seam)
+        ):
             grown = after > before * (1.0 + SEAM_GROWTH) + 1e-12
-            if grown and after > threshold:
-                review.regressions.append(
-                    f"seam {key} on {axis} grew {before:.3g} -> {after:.3g}, past {threshold:.3g}"
+            where = worst_seam_time(head, index, key)
+            message = (
+                f"seam {key} on {axis} grew {before:.3g} -> {after:.3g}"
+                f"{'' if where is None else f' (worst at t={where:.4f})'}"
+            )
+            if grown and after > threshold and key == "da":
+                review.suspicions.append(
+                    f"{message}, past {threshold:.3g}: a knot acceleration step "
+                    "is the fit's or the signal's own"
                 )
+            elif grown and after > threshold:
+                review.regressions.append(f"{message}, past {threshold:.3g}")
             elif grown and after > 1e-9:
-                review.notes.append(
-                    f"seam {key} on {axis} {before:.3g} -> {after:.3g}"
-                )
+                review.notes.append(message)
     metrics["seams"] = seams
 
     planned = {
