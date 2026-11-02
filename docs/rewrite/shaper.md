@@ -172,10 +172,11 @@ loudly at config time rather than producing silently wrong motion:
 - a gain stage with `k2 ≠ 0` must come **after** a kernel
   (`AccelGainNeedsPrecedingKernel`): applied before the kernel it would run
   in the lowerer, whose curved-path sampler carries no jerk and cannot form
-  the transformed velocity. After a kernel the track is polynomial and the
-  operator is exact algebra on coefficients
-  (`apply_derivative_gains_to_track`: differentiate the monomial pieces
-  twice, add `k1·ẋ + k2·ẍ` termwise).
+  the transformed velocity. After a kernel the operator commutes with the
+  convolution — `x + k1·ẋ + k2·ẍ` of `k ∗ f` is `k ∗ (f + k1·ḟ + k2·f̈)` —
+  so the motor command is the exact convolution of the gained input
+  polynomials (`AxisSignalTable::with_derivative_gains`), with the input's
+  acceleration and velocity steps carried as kernel-weighted jump terms.
 
 Order within a chain is meaningful: stages before the kernel act on the
 input signal, the kernel convolves the result, stages after the kernel act
@@ -226,12 +227,16 @@ supposed to cancel them.
 The shaper materializes the distinction (`apply_motor_side_stages` in
 shaper.rs): trailing gains are applied as the *last* transformation, after
 follower projection, and `Shaper::with_toolhead_tap` can mirror every
-emitted segment as it stands *before* that stage. The snapshot pipeline uses
-the tap to emit optional `toolhead_*_pieces`, which is what the snapshot
-viewer and playground plot as the toolhead signal alongside the motor
-command. `CompiledChain::has_motor_side_gains` /
-`AxisChainSet::has_motor_side_stages` define "motor-side": a gain stage
-that follows a kernel.
+emitted segment as it stands *before* that stage. A leader axis's motor
+command is its own velocity-continuous fit of that exact gained convolution
+(`fit_motor_commands`, fit context `motor_command`), never a derivative of
+the fitted toolhead track: a fit is only C1–C2 at its knots, so
+differentiating it twice would step the command's velocity by `k2·Δjerk` at
+every seam. The snapshot pipeline uses the tap to emit optional
+`toolhead_*_pieces`, which is what the snapshot viewer and playground plot
+as the toolhead signal alongside the motor command.
+`CompiledChain::has_motor_side_gains` / `AxisChainSet::has_motor_side_stages`
+define "motor-side": a gain stage that follows a kernel.
 
 ## Followers: the extruder rides the toolhead
 
