@@ -1728,12 +1728,17 @@ fn spline_evaluation_time(curve: &ScalarNurbs, t: f64) -> Result<f64, Continuous
 }
 
 const DEGENERATE_PIECE_WIDTH_ULPS: f64 = 4.0;
-const DEGENERATE_PIECE_SLACK_S: f64 = 1e-12;
+const DEGENERATE_RUN_WIDTH_ULPS: f64 = 2.0 * DEGENERATE_PIECE_WIDTH_ULPS;
+const DEGENERATE_RUN_SLACK_FLOOR_S: f64 = 1e-12;
 const PIECE_SEAM_ROUNDOFF_ULPS: f64 = (1_u64 << 20) as f64;
 
 fn degenerate_knot_span(knots: &[f64], span: usize) -> bool {
     let (low, high) = (knots[span], knots[span + 1]);
     high - low <= DEGENERATE_PIECE_WIDTH_ULPS * f64::EPSILON * low.abs().max(high.abs())
+}
+
+fn degenerate_run_slack(t: f64) -> f64 {
+    DEGENERATE_RUN_SLACK_FLOOR_S.max(DEGENERATE_RUN_WIDTH_ULPS * f64::EPSILON * t.abs())
 }
 
 fn spline_pv(curve: &ScalarNurbs, t: f64) -> (f64, f64) {
@@ -1793,9 +1798,10 @@ fn spline_owned_time(curve: &ScalarNurbs, t: f64) -> f64 {
     let right_time = (!degenerate_knot_span(knots, right)).then(|| knots[right]);
     let left_time =
         (!degenerate_knot_span(knots, left)).then(|| interior_time_below(knots[left + 1]));
+    let slack = degenerate_run_slack(t);
     match (left_time, right_time) {
         (Some(left_time), Some(right_time)) => {
-            if knots[right] - knots[left + 1] <= DEGENERATE_PIECE_SLACK_S
+            if knots[right] - knots[left + 1] <= slack
                 && spline_pv_continuous(curve, left_time, right_time)
             {
                 right_time
@@ -1803,8 +1809,8 @@ fn spline_owned_time(curve: &ScalarNurbs, t: f64) -> f64 {
                 t
             }
         }
-        (None, Some(right_time)) if knots[right] - t <= DEGENERATE_PIECE_SLACK_S => right_time,
-        (Some(left_time), None) if t - knots[left + 1] <= DEGENERATE_PIECE_SLACK_S => left_time,
+        (None, Some(right_time)) if knots[right] - t <= slack => right_time,
+        (Some(left_time), None) if t - knots[left + 1] <= slack => left_time,
         _ => t,
     }
 }
