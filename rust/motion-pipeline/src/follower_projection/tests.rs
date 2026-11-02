@@ -773,3 +773,112 @@ fn a_leader_acceleration_seam_is_seeded_as_a_construction_breakpoint() {
          does too, yet the fit seeds {seeds:?} straddle it"
     );
 }
+
+fn laid_lead(lead: f64, idle: f64, lead_ratio: f64) -> FollowerState {
+    let mut state = FollowerState::default();
+    state.push_lead(lead, idle, lead_ratio);
+    state
+}
+
+fn assert_lead_lays_its_material_continuously(lead: f64, idle: f64, lead_ratio: f64) {
+    let state = laid_lead(lead, idle, lead_ratio);
+    let first = state.spans.first().expect("the lead lays spans");
+    let last = state.spans.last().expect("the lead lays spans");
+    let context = format!("lead {lead} mm, idle {idle} mm, ratio {lead_ratio}");
+    assert_eq!(
+        first.r0, lead_ratio,
+        "{context}: the lead must open on its ratio"
+    );
+    assert_eq!(
+        last.r1, lead_ratio,
+        "{context}: the lead must close on its ratio"
+    );
+    for pair in state.spans.windows(2) {
+        assert_eq!(
+            pair[0].r1, pair[1].r0,
+            "{context}: the ratio steps at s={}",
+            pair[0].s1
+        );
+    }
+    assert!(
+        state
+            .spans
+            .iter()
+            .all(|span| span.r0 * lead_ratio >= 0.0 && span.r1 * lead_ratio >= 0.0),
+        "{context}: the valley changes sign: {:?}",
+        state.spans
+    );
+    assert!(
+        (last.s1 - (lead + idle)).abs() <= 1e-15,
+        "{context}: the spans cover {} mm of the joined arc",
+        last.s1
+    );
+    let material = last.e_at(last.s1);
+    assert!(
+        (material - lead_ratio * lead).abs() <= 1e-15,
+        "{context}: the lead lays {material} mm, its command is {}",
+        lead_ratio * lead
+    );
+}
+
+#[test]
+fn a_lead_longer_than_its_idle_arc_dips_and_keeps_its_material() {
+    assert_lead_lays_its_material_continuously(3e-5, 1e-5, 0.05);
+}
+
+#[test]
+fn a_lead_shorter_than_its_idle_arc_bottoms_out_at_zero_and_keeps_its_material() {
+    assert_lead_lays_its_material_continuously(2e-5, 5e-5, 0.05);
+    assert_lead_lays_its_material_continuously(2e-5, 5e-5, -0.05);
+    let state = laid_lead(2e-5, 5e-5, 0.05);
+    assert_eq!(
+        state
+            .spans
+            .iter()
+            .map(|span| (span.r0, span.r1))
+            .collect::<Vec<_>>(),
+        vec![(0.05, 0.0), (0.0, 0.0), (0.0, 0.05)],
+        "a lead shorter than its idle arc ramps one lead wide each way around a floor at zero"
+    );
+}
+
+#[test]
+fn the_valley_is_continuous_where_lead_and_idle_arcs_meet() {
+    let at = |idle: f64| {
+        laid_lead(4e-5, idle, 0.05)
+            .spans
+            .iter()
+            .map(|span| (span.s1 - span.s0, span.r0, span.r1))
+            .filter(|&(len, _, _)| len > 1e-12)
+            .collect::<Vec<_>>()
+    };
+    let (below, above) = (at(4e-5 * (1.0 - 1e-9)), at(4e-5 * (1.0 + 1e-9)));
+    let deepest = |spans: &[(f64, f64, f64)]| {
+        spans
+            .iter()
+            .map(|&(_, r0, r1)| r0.min(r1))
+            .fold(f64::INFINITY, f64::min)
+    };
+    assert!(
+        (deepest(&below) - deepest(&above)).abs() <= 1e-9,
+        "the valley floor jumps from {} to {} as the idle arc passes the lead",
+        deepest(&below),
+        deepest(&above)
+    );
+}
+
+#[test]
+fn a_lead_with_no_ratio_lays_one_flat_span() {
+    for (lead, idle) in [(5e-12, 3e-5), (3e-5, 1e-5)] {
+        let state = laid_lead(lead, idle, 0.0);
+        assert_eq!(
+            state
+                .spans
+                .iter()
+                .map(|span| (span.r0, span.r1))
+                .collect::<Vec<_>>(),
+            vec![(0.0, 0.0)],
+            "lead {lead} mm, idle {idle} mm: a lead that lays nothing needs no valley"
+        );
+    }
+}

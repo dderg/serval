@@ -3821,8 +3821,6 @@ fn projected_follower_seams_hold_velocity_across_emit_batches() {
     assert!(step < 1e-9, "follower velocity seam at {t}: {step} mm/s");
 }
 
-const IDLE_FOLLOWER_KERNEL_PIECES: usize = 5;
-
 /// A follower that never extrudes must not inherit the kernel-shaped leader
 /// lattice: travel and homing windows project as one constant piece, not
 /// hundreds of flat spline pieces — that fit starved real-time drip streams
@@ -3929,6 +3927,73 @@ fn derivative_gains_preserve_one_sided_polynomial_law() {
         }
     }
 }
+
+/// A straight stroke from rest to rest covers the same path shaped as raw,
+/// so its follower must extrude exactly the commanded amount. The shaped
+/// leaders reach into the rest holds on either side, where the fit can
+/// leave a sub-tolerance back-and-forth near the rest point; extruding over
+/// it at one end and not the other drifts the total with every start.
+#[test]
+fn a_shaped_stroke_from_rest_to_rest_extrudes_its_command() {
+    let mut chains = follower_kernel_chains(Some(0.01), None, 0.0);
+    chains.chains[3] = trajectory::CompiledChain::default();
+    let mut items = Vec::new();
+    for stroke in 0..3_u32 {
+        let x = 30.0 * f64::from(stroke);
+        items.push(StreamInput::Move(line(
+            stroke + 1,
+            [x, 0.0, 0.0],
+            [x + 30.0, 0.0, 0.0],
+            1.0,
+        )));
+        items.push(StreamInput::Drain);
+        items.push(StreamInput::Control(Control::Dwell { secs: 0.5 }));
+    }
+    let segs = replay_items(cfg(), chains, &[0.0, 0.0, 0.0, 0.0], items);
+    let last = segs.last().expect("the strokes produce segments");
+    let e_end = eval_segment_axis(last, 3, last.t_end);
+    assert!(
+        (e_end - 3.0).abs() < 1e-9,
+        "three 1 mm strokes from rest to rest must extrude 3 mm, got {e_end}"
+    );
+}
+
+/// Raw leaders stop at an abrupt extrusion-ratio change, but the shaped
+/// leaders are still moving through it, so a projected follower with no
+/// kernel of its own changes ratio at speed: a real velocity step. The seam
+/// has to carry it as a C0 corner, each side running at its own ratio,
+/// rather than bending the stretch after it toward the previous rate.
+#[test]
+fn a_ratio_change_under_moving_shaped_leaders_is_a_follower_velocity_step() {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 1.5),
+        line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0], 3.0),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let chains = follower_kernel_chains(Some(0.044583333333333336), None, 0.0);
+    let segments = replay(cfg(), chains, &home, 0.0, &moves);
+    let seam = segments
+        .windows(2)
+        .find(|pair| (eval_segment_axis(&pair[0], 0, pair[0].t_end) - 30.0).abs() < 1.0)
+        .expect("a seam sits at the ratio change");
+    let at = seam[0].t_end;
+    let speed = seam[0].eval_axis(0, at).unwrap().velocity;
+    assert!(
+        speed > 1.0,
+        "the shaped leader must still move at the seam, runs {speed}"
+    );
+    let left = seam[0].eval_axis(3, at).unwrap().velocity;
+    let right = seam[1].eval_axis(3, at).unwrap().velocity;
+    let tolerance = 1e-3 * speed;
+    for (side, measured, ratio) in [("left", left, 0.05), ("right", right, 0.1)] {
+        assert!(
+            (measured - ratio * speed).abs() <= tolerance,
+            "{side} of the ratio change e runs {measured} mm/s, not {ratio} x {speed}"
+        );
+    }
+}
+
+const IDLE_FOLLOWER_KERNEL_PIECES: usize = 5;
 
 fn worst_seam_velocity_step(segments: &[ContinuousSegment], axis: usize) -> (f64, f64) {
     let mut worst = (0.0_f64, f64::NAN);
@@ -4263,41 +4328,6 @@ fn an_advance_before_projection_stitches_across_a_dwell_at_rest() {
                  advance changed the total across the dwells, {advanced} mm against {plain} mm"
             );
         }
-    }
-}
-
-/// Raw leaders stop at an abrupt extrusion-ratio change, but the shaped
-/// leaders are still moving through it, so a projected follower with no
-/// kernel of its own changes ratio at speed: a real velocity step. The seam
-/// has to carry it as a C0 corner, each side running at its own ratio,
-/// rather than bending the stretch after it toward the previous rate.
-#[test]
-fn a_ratio_change_under_moving_shaped_leaders_is_a_follower_velocity_step() {
-    let moves = [
-        line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 1.5),
-        line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0], 3.0),
-    ];
-    let home = [0.0, 0.0, 0.0, 0.0];
-    let chains = follower_kernel_chains(Some(0.044583333333333336), None, 0.0);
-    let segments = replay(cfg(), chains, &home, 0.0, &moves);
-    let seam = segments
-        .windows(2)
-        .find(|pair| (eval_segment_axis(&pair[0], 0, pair[0].t_end) - 30.0).abs() < 1.0)
-        .expect("a seam sits at the ratio change");
-    let at = seam[0].t_end;
-    let speed = seam[0].eval_axis(0, at).unwrap().velocity;
-    assert!(
-        speed > 1.0,
-        "the shaped leader must still move at the seam, runs {speed}"
-    );
-    let left = seam[0].eval_axis(3, at).unwrap().velocity;
-    let right = seam[1].eval_axis(3, at).unwrap().velocity;
-    let tolerance = 1e-3 * speed;
-    for (side, measured, ratio) in [("left", left, 0.05), ("right", right, 0.1)] {
-        assert!(
-            (measured - ratio * speed).abs() <= tolerance,
-            "{side} of the ratio change e runs {measured} mm/s, not {ratio} x {speed}"
-        );
     }
 }
 
