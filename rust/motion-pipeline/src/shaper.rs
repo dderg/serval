@@ -2725,7 +2725,7 @@ pub(crate) fn apply_nonlinear_advance_to_track(
             seed_breakpoints: &breakpoints,
             fit_tol,
             fit_context: "nonlinear_advance",
-            velocity_continuous: false,
+            velocity_continuous: true,
         },
         &sig,
     )

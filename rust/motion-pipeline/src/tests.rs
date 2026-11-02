@@ -4155,3 +4155,61 @@ fn a_leader_fit_ignores_the_advanced_follower_riding_it() {
         }
     }
 }
+
+#[test]
+fn nonlinear_advance_pieces_open_and_close_on_the_advance_law_velocity() {
+    let drifting_deceleration =
+        nurbs::bezier::bezier_pieces_to_nurbs(&[nurbs::bezier::BezierPiece {
+            u_start: 0.3,
+            u_end: 0.3145,
+            coeffs: vec![0.0, 80.0, -2_500.0, 100.0],
+        }]);
+    let input_velocity = nurbs::eval::derivative(&drifting_deceleration);
+    let input_acceleration = nurbs::eval::derivative(&input_velocity);
+    for (model, linear_advance, nonlinear_offset, linearization_velocity) in [
+        (trajectory::AdvanceModel::Tanh, 0.02, 0.05, 2.0),
+        (trajectory::AdvanceModel::Tanh, 0.0, 0.06, 5.0),
+        (trajectory::AdvanceModel::Reciprocal, 0.02, 0.05, 2.0),
+    ] {
+        let advance = trajectory::NonlinearAdvance {
+            model,
+            linear_advance,
+            nonlinear_offset,
+            linearization_velocity,
+        };
+        let law_velocity = |t: f64| {
+            let velocity = eval(&input_velocity, t);
+            advance
+                .slope(velocity)
+                .mul_add(eval(&input_acceleration, t), velocity)
+        };
+        let output = crate::shaper::apply_nonlinear_advance_to_track(
+            0,
+            &drifting_deceleration,
+            advance,
+            fit_tol(cfg()),
+        )
+        .expect("a smooth deceleration fits its advance");
+        let pieces = nurbs::bezier::extract_bezier_pieces(&output);
+        assert!(
+            pieces.len() > 1,
+            "{advance:?}: fixture must fit with interior seams"
+        );
+        for piece in &pieces {
+            let velocity = nurbs::eval::derivative(&nurbs::bezier::bezier_pieces_to_nurbs(
+                std::slice::from_ref(piece),
+            ));
+            for end in [piece.u_start, piece.u_end] {
+                let fitted = eval(&velocity, end);
+                let law = law_velocity(end);
+                assert!(
+                    (fitted - law).abs() <= 1e-7 * law.abs().max(1.0),
+                    "{advance:?}: piece [{}, {}] meets the advance law velocity {law} with \
+                     {fitted} at {end}",
+                    piece.u_start,
+                    piece.u_end
+                );
+            }
+        }
+    }
+}
