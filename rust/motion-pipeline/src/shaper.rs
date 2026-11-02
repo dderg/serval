@@ -445,6 +445,11 @@ fn materialize_changed_sources(
         let mut breakpoints = vec![segment.t_start, segment.t_end];
         if let ContinuousAxis::Analytic { span, .. } = source {
             breakpoints.extend(span.phase_seam_times());
+            let contacts: Vec<f64> = span
+                .cap_contact_times()
+                .filter(|&t| t >= segment.t_start && t <= segment.t_end)
+                .collect();
+            grade_seeds_toward(&mut breakpoints, &contacts);
             if variable_surface_z {
                 breakpoints.extend(span.surface_seam_times().ok_or_else(|| {
                     fit_tolerance_without_probe(axis, segment.t_start, segment.t_end)
@@ -477,6 +482,36 @@ fn materialize_changed_sources(
         axes[axis] = replacement;
     }
     Ok(rebuilt)
+}
+
+/// Seeds approach a non-analytic point geometrically down to this spacing:
+/// the disk rail's dense solution resolves a square-root approach no finer
+/// than its knot spacing, so finer seeds would split polynomial pieces.
+const SINGULAR_SEED_GRADING_FLOOR_S: f64 = 1e-6;
+
+/// Adds each singular time to the seeds, then seeds halving their distance
+/// to it from the neighbouring seed on either side. A polynomial cannot
+/// follow a square-root shoulder across a span, but each graded span sees
+/// the same shoulder rescaled, which a ladder rung fits within tolerance.
+fn grade_seeds_toward(seeds: &mut Vec<f64>, singular: &[f64]) {
+    seeds.extend_from_slice(singular);
+    seeds.sort_by(f64::total_cmp);
+    seeds.dedup();
+    let anchors = seeds.clone();
+    for &point in singular {
+        let at = anchors.partition_point(|&seed| seed < point);
+        let neighbours = [
+            at.checked_sub(1).map(|i| anchors[i]),
+            anchors.get(at + 1).copied(),
+        ];
+        for neighbour in neighbours.into_iter().flatten() {
+            let mut offset = 0.5 * (neighbour - point);
+            while offset.abs() >= SINGULAR_SEED_GRADING_FLOOR_S {
+                seeds.push(point + offset);
+                offset *= 0.5;
+            }
+        }
+    }
 }
 
 /// Whether the fit window's left edge is the start of the signal — where the
@@ -2440,6 +2475,7 @@ fn refine_shaped_span<S: TrackSignal>(
                 t1,
                 mono_u: &mono_u,
                 accepted_at_floor: false,
+                cubic_floor: floors.cubic,
             },
         );
         out.push(exact_piece(&mono_u, t0, t1, t1 - t0));
@@ -2471,6 +2507,7 @@ fn refine_shaped_span<S: TrackSignal>(
                     t1,
                     mono_u: &mono_u,
                     accepted_at_floor: true,
+                    cubic_floor: floors.cubic,
                 },
             );
             out.push(exact_piece(&mono_u, t0, t1, t1 - t0));

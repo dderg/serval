@@ -304,6 +304,17 @@ impl AnalyticMoveSpan {
             .map(|phase| analytic_phase_boundary(self.t_start, phase.end_time()))
     }
 
+    /// Absolute times at which a disk-rail phase enters or leaves contact
+    /// with its curvature cap, or starts or ends in contact.
+    pub fn cap_contact_times(&self) -> impl Iterator<Item = f64> + '_ {
+        self.phases.iter().flat_map(|phase| {
+            phase
+                .cap_contact_times()
+                .into_iter()
+                .map(|local| analytic_phase_boundary(self.t_start, local))
+        })
+    }
+
     /// Absolute times at which a variable bed surface changes its piecewise
     /// definition along the path; empty without a variable surface or a
     /// spatial body, `None` when a transition cannot be located in the phases.
