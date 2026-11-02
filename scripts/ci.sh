@@ -107,6 +107,16 @@ job_rust_fuzz() {
         -E "$pipeline"
 }
 
+# The fit audit checks every accepted fit piece densely and slows the
+# pipeline ~2.5x, so it is compiled only here: as a feature of the default
+# test build it would unify into every workspace test binary.
+job_rust_fit_audit() {
+    cd "$RUST"
+    host_cargo nextest run --profile ci -p pipeline-snapshot --features fit-audit \
+        --test fit_tolerance
+    cargo clippy -p pipeline-snapshot --features fit-audit --all-targets -- -D warnings
+}
+
 job_rust_clippy() { cd "$RUST" && cargo clippy --workspace --all-targets -- -D warnings; }
 job_rust_fmt()    { cd "$RUST" && cargo fmt --all -- --check; }
 job_public_api()  { "$ROOT/scripts/public-api.sh"; }
@@ -346,6 +356,7 @@ run_all() {
     local quick="${1:-false}"
     run_check "ruff"            job_ruff
     run_check "rust-test"       job_rust_test
+    run_check "rust-fit-audit"  job_rust_fit_audit
     run_check "rust-clippy"     job_rust_clippy
     run_check "rust-fmt"        job_rust_fmt
     run_check "public-api"      job_public_api
@@ -411,6 +422,7 @@ name="$1"; shift
 case "$name" in
     rust-test)        job=(job_rust_test) ;;
     rust-fuzz)        job=(job_rust_fuzz) ;;
+    rust-fit-audit)   job=(job_rust_fit_audit) ;;
     rust-clippy)      job=(job_rust_clippy) ;;
     rust-fmt)         job=(job_rust_fmt) ;;
     public-api)       job=(job_public_api) ;;
