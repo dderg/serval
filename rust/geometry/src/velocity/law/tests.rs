@@ -216,8 +216,8 @@ fn min_velocity_reports_the_brake_end() {
 }
 
 /// The rail integration as it was before each step reused the state its
-/// predecessor ended on: the oracle the carried version must match bit for
-/// bit.
+/// predecessor ended on, or a memoized step of an autonomous law: the oracle
+/// the integrator must match bit for bit.
 fn integrate_rail_arc_recomputing_step_ends(
     law: &ScalarLaw,
     v0: f64,
@@ -353,6 +353,33 @@ fn carrying_each_step_end_into_the_next_step_changes_no_knot() {
         }
     }
     assert!(compared > 1000);
+}
+
+#[test]
+fn memoized_steps_of_constant_curvature_rails_change_no_knot() {
+    for sigma in [0.0, -0.0] {
+        for &(accel, kappa0, v0, ds) in &[
+            (
+                50_000.0,
+                0.305_837_469_599_224_14,
+                0.0,
+                20.293_902_419_340_885,
+            ),
+            (50_000.0, -0.305_837_469_599_224_14, 120.0, 9.75),
+            (20_000.0, 1.25, 0.0, 3.3),
+            (20_000.0, 1.25, 400.0, 3.3),
+        ] {
+            for brake in [false, true] {
+                let law = ScalarLaw::DiskRail {
+                    accel,
+                    kappa0,
+                    sigma,
+                    brake,
+                };
+                assert_carrying_matches_recomputing(&law, v0, ds);
+            }
+        }
+    }
 }
 
 /// Steps of the quadratically graded grid near an apex whose `s + h` lands
