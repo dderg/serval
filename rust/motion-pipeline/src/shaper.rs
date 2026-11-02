@@ -506,7 +506,8 @@ fn grade_seeds_toward(seeds: &mut Vec<f64>, singular: &[f64]) {
         ];
         for neighbour in neighbours.into_iter().flatten() {
             let mut offset = 0.5 * (neighbour - point);
-            while offset.abs() >= SINGULAR_SEED_GRADING_FLOOR_S {
+            let floor = std::env::var("GRADE_FLOOR").ok().map_or(SINGULAR_SEED_GRADING_FLOOR_S, |v| v.parse().unwrap());
+            while offset.abs() >= floor {
                 seeds.push(point + offset);
                 offset *= 0.5;
             }
@@ -847,7 +848,10 @@ fn fit_axis_column(
         return Ok(Some(column));
     }
     let input_breaks = signal_breakpoints(&signal_segments, axis);
-    let shaped_breaks = shaped_signal_breakpoints(kernel, &input_breaks);
+    let shaped_breaks = match std::env::var("SEED_JUMP").ok().map(|v| v.parse::<f64>().unwrap()) {
+        Some(factor) => shaped_signal_breakpoints(kernel, &seed_worthy_breaks(&signal_segments, axis, factor * fit_tol.accel_mm_s2)),
+        None => shaped_signal_breakpoints(kernel, &input_breaks),
+    };
     let kernel_degree = kernel
         .pieces
         .iter()
@@ -1333,6 +1337,29 @@ fn fit_leader_axes(
 /// segment's NURBS knots plus the segment edges (a gap between segments is a
 /// constant hold, which the edges delimit). The exact convolution integrates
 /// between these, so its Gauss rule never straddles a polynomial change.
+fn seed_worthy_breaks(segments: &[&ContinuousSegment], axis: usize, accel_jump: f64) -> Vec<f64> {
+    let mut breaks = Vec::new();
+    for seg in segments {
+        breaks.push(seg.t_start);
+        if let ContinuousAxis::Spline(curve) = &seg.axes[axis] {
+            let knots = curve.knots();
+            let mut out = [0.0; 3];
+            let mut accel_at = |t: f64| {
+                nurbs::eval::eval_derivatives(curve.control_points(), knots, curve.degree(), t, 2, &mut out);
+                out[2]
+            };
+            for &k in knots.iter() {
+                if k <= seg.t_start || k >= seg.t_end { continue; }
+                let left = accel_at(next_toward(k, f64::NEG_INFINITY));
+                let right = accel_at(k);
+                if (right - left).abs() > accel_jump { breaks.push(k); }
+            }
+        }
+        breaks.push(seg.t_end);
+    }
+    breaks
+}
+
 fn signal_breakpoints(segments: &[&ContinuousSegment], axis: usize) -> Vec<f64> {
     let mut breaks = Vec::new();
     for seg in segments {
