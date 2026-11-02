@@ -1248,3 +1248,83 @@ fn pressure_advance_alone_follows_shaped_leaders_away_from_rest() {
         "the extruder must end near the commanded 4 mm, ended at {e_end}"
     );
 }
+
+fn shaped_follower_params(e_post_processors: &[(&str, &str, f64)]) -> SnapshotParams {
+    let mut params = default_axis_snapshot_params();
+    params.max_velocity = 1000.0;
+    params.max_accel = 10_000.0;
+    params.corner_deviation = 0.21;
+    let mut x = axis("x", &[]);
+    x.post_processors = vec!["shx".to_string()];
+    let mut y = axis("y", &[]);
+    y.post_processors = vec!["shy".to_string()];
+    let mut e = axis("e", &["x", "y", "z"]);
+    e.post_processors = e_post_processors
+        .iter()
+        .map(|(name, _, _)| (*name).to_string())
+        .collect();
+    params.axis_decls = vec![x, y, e];
+    params.post_processor_decls = vec![
+        pp("shx", "smooth_mzv", &[("frequency_hz", 50.0)]),
+        pp("shy", "smooth_zv", &[("frequency_hz", 44.0)]),
+    ];
+    params
+        .post_processor_decls
+        .extend(e_post_processors.iter().map(|(name, ty, value)| {
+            let key = if *ty == "linear_pressure_advance" {
+                "k"
+            } else {
+                "smooth_time"
+            };
+            pp(name, ty, &[(key, *value)])
+        }));
+    params
+}
+
+const PERIMETER_RATIO: f64 = 0.0333;
+
+/// A 20 mm square perimeter at 150 mm/s, entered from `entry` and left
+/// along its last side; `flow` scales each side's extrusion.
+fn perimeter_waypoints(entry: &[(f64, f64)], flow: [f64; 4]) -> Vec<waypoints::Waypoint> {
+    let mut e = 0.0;
+    let mut waypoints = vec![(0.0, 0.0, 0.0, 0.0, 150.0, 10_000.0)];
+    waypoints.extend(entry.iter().map(|&(x, y)| (x, y, 0.0, e, 150.0, 10_000.0)));
+    for ((x, y), scale) in [(40.0, 20.0), (40.0, 40.0), (20.0, 40.0), (20.0, 20.0)]
+        .into_iter()
+        .zip(flow)
+    {
+        e += PERIMETER_RATIO * 20.0 * scale;
+        waypoints.push((x, y, 0.0, e, 150.0, 10_000.0));
+    }
+    waypoints
+}
+
+fn final_extruder_position(
+    waypoints: &[waypoints::Waypoint],
+    e_post_processors: &[(&str, &str, f64)],
+) -> f64 {
+    let snap =
+        pipeline_snapshot(waypoints, shaped_follower_params(e_post_processors)).expect("snapshot");
+    position(&snap.trajectory, EXTRUDER_AXIS, snap.trajectory.t_end())
+}
+
+#[test]
+#[should_panic(expected = "cannot follow an extrusion-ratio step taken at speed")]
+fn an_advance_with_no_kernel_refuses_an_extrusion_ratio_step_at_speed() {
+    let mut waypoints = perimeter_waypoints(&[(10.0, 10.0), (20.0, 20.0)], [1.0, 1.5, 1.0, 1.0]);
+    let e = waypoints.last().expect("perimeter").3;
+    waypoints.push((20.0, 5.0, 0.0, e, 150.0, 10_000.0));
+    final_extruder_position(&waypoints, &[("pa", "linear_pressure_advance", 0.03)]);
+}
+
+#[test]
+fn an_advance_with_no_kernel_conserves_extrusion_between_rests() {
+    let waypoints = perimeter_waypoints(&[(20.0, 20.0)], [1.0; 4]);
+    let unadvanced = final_extruder_position(&waypoints, &[]);
+    let advanced = final_extruder_position(&waypoints, &[("pa", "linear_pressure_advance", 0.03)]);
+    assert!(
+        (advanced - unadvanced).abs() < 1e-6,
+        "pressure advance vanishes at rest, so it must not change the extruded total: \
+         {advanced} mm with advance, {unadvanced} mm without"
+    );
+}

@@ -422,10 +422,20 @@ pub(crate) fn project_followers(
                     t: raw.t_start,
                 });
             }
+            if let Some(stage) = leading_stage {
+                check_advance_continuity(
+                    stage,
+                    axis,
+                    state.projected_input_end,
+                    (t_start, input_start.1),
+                    follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis)).pos_mm,
+                )?;
+            }
             let semantic_cuts = projected_cuts.unwrap_or_else(|| piece_boundaries(&track));
             let track_start = nurbs::eval::eval(&track, t_start);
             let output_base = state.projected_output_end.unwrap_or(base_position) - track_start;
             state.projected_output_end = Some(output_base + nurbs::eval::eval(&track, t_end));
+            state.projected_input_end = Some((t_end, input_end.1));
             state.projected_through_t = Some(t_end);
             state.projected.push(ProjSeg {
                 t_start,
@@ -885,6 +895,49 @@ fn chain_output_velocity(chain: &CompiledChain, v: f64, a: f64, j: f64) -> f64 {
     }
 }
 
+/// Segment tracks are stitched end to start, which is exact only where the
+/// commanded signal is position-continuous. An advance applied before
+/// projection with no kernel after it maps a follower velocity step — an
+/// extrusion-ratio step at speed — onto a position step that no track can
+/// carry and the stitch would silently absorb, leaving every later position
+/// offset by it.
+fn check_advance_continuity(
+    stage: &ChainStage,
+    axis: usize,
+    previous_end: Option<(f64, f64)>,
+    (t_start, velocity_after): (f64, f64),
+    tolerance_mm: f64,
+) -> Result<(), PostProcessError> {
+    let Some((previous_t_end, velocity_before)) = previous_end else {
+        return Ok(());
+    };
+    assert!(
+        (previous_t_end - t_start).abs() <= SEGMENT_TIME_EPS_S,
+        "follower axis {axis} stitches a segment starting at {t_start} onto one ending at \
+         {previous_t_end}"
+    );
+    let step_mm = advance_offset(stage, velocity_after) - advance_offset(stage, velocity_before);
+    if step_mm.abs() > tolerance_mm {
+        return Err(PostProcessError::AdvanceStep {
+            axis,
+            t: t_start,
+            velocity_before,
+            velocity_after,
+            step_mm,
+            tolerance_mm,
+        });
+    }
+    Ok(())
+}
+
+fn advance_offset(stage: &ChainStage, velocity: f64) -> f64 {
+    match stage {
+        ChainStage::DerivativeGains { k1, .. } => k1 * velocity,
+        ChainStage::NonlinearAdvance(advance) => advance.advance(velocity),
+        ChainStage::SmoothKernel(_) => unreachable!("a leading advance is not a kernel"),
+    }
+}
+
 pub(crate) fn advance_before_projection(chain: &CompiledChain) -> Option<&ChainStage> {
     (!chain.follower_linear_transform())
         .then(|| chain.leading_transform())
@@ -957,6 +1010,9 @@ pub(crate) struct FollowerState {
     s_shaped: f64,
     e_end: Option<f64>,
     projected_output_end: Option<f64>,
+    /// Time and follower input velocity where `projected_output_end` was
+    /// taken, so the next stitch can tell what an advance makes of the join.
+    projected_input_end: Option<(f64, f64)>,
     emitted_output_pv: Option<(f64, f64)>,
     committed_input_end: Option<Pvaj4>,
     projected: Vec<ProjSeg>,
@@ -977,6 +1033,7 @@ impl FollowerState {
         self.s_shaped = 0.0;
         self.e_end = None;
         self.projected_output_end = None;
+        self.projected_input_end = None;
         self.emitted_output_pv = None;
         self.committed_input_end = None;
         self.projected.clear();

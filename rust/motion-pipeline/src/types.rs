@@ -98,6 +98,20 @@ pub(crate) enum PostProcessError {
     #[error("axis {axis}: shaping window needs unavailable lookahead at t={t}")]
     MissingLookahead { axis: usize, t: f64 },
     #[error(
+        "axis {axis}: the advance before projection steps the commanded position by \
+         {step_mm} mm at t={t} (follower velocity {velocity_before} -> {velocity_after} mm/s), \
+         beyond the {tolerance_mm} mm fit tolerance; an advance with no smoothing kernel \
+         after it cannot follow an extrusion-ratio step taken at speed"
+    )]
+    AdvanceStep {
+        axis: usize,
+        t: f64,
+        velocity_before: f64,
+        velocity_after: f64,
+        step_mm: f64,
+        tolerance_mm: f64,
+    },
+    #[error(
         "axis {axis} ({fit_context}): fit tolerance failed after {refinement_splits} refinement \
          splits on [{t_start}, {t_end}], nearest seeds [{lower_seed} ({lower_seed_provenance}), \
          {upper_seed} ({upper_seed_provenance})], at u={probe_u}, t={probe_t}: \
