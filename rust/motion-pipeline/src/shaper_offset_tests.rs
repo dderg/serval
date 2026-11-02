@@ -67,3 +67,27 @@ fn the_shaped_position_does_not_pick_up_noise_from_the_axis_offset() {
          {near:e} mm at the origin"
     );
 }
+
+#[test]
+#[should_panic(expected = "shaper kernel integrates to")]
+fn a_kernel_without_unit_mass_is_refused() {
+    let mut kernel = build_smooth_mzv_kernel(50.0);
+    for coefficient in kernel
+        .pieces
+        .iter_mut()
+        .flat_map(|piece| piece.coeffs.iter_mut())
+    {
+        *coefficient *= 1.01;
+    }
+    let track = accelerate_then_brake(0.0);
+    let input = AxisSignalTable::from_tracks(
+        once(&track),
+        SignalBounds {
+            first_t: 0.0,
+            last_t: 2.0 * HALF_S,
+            boundary: FitBoundary::StreamBoundary,
+            lookahead: Lookahead::Forced,
+        },
+    );
+    ShapedSignalSource::new(&kernel, input, track.knots().to_vec(), HALF_S);
+}

@@ -150,3 +150,23 @@ fn a_line_far_from_the_origin_shapes_to_a_line_within_a_few_ulps() {
         "the shaped line bends by {worst_bend:e} mm between 1 µs samples"
     );
 }
+
+#[test]
+fn kernel_mass_integrates_every_piece() {
+    let mass = super::kernel_mass(&degree_six_kernel());
+    assert!(
+        (mass - 32.0 / 35.0).abs() <= 4.0 * f64::EPSILON,
+        "mass {mass}"
+    );
+}
+
+#[test]
+fn the_shaper_kernels_have_unit_mass() {
+    for kernel in [
+        crate::build_smooth_mzv_kernel(50.0),
+        crate::build_smooth_zv_kernel(44.0),
+    ] {
+        let mass = super::kernel_mass(&kernel);
+        assert!((mass - 1.0).abs() <= 1e-12, "mass {mass}");
+    }
+}

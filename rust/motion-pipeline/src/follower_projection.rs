@@ -12,7 +12,7 @@ use crate::lowering::{FitTol, follower_tol_scale};
 use crate::shaper::{
     AxisFit, AxisSignalTable, FitBoundary, Lookahead, SEGMENT_TIME_EPS_S, ShiftedTrackSignal,
     SignalBounds, TrackSignal, apply_derivative_gains_to_track, fit_axis_from_signal,
-    shaped_signal_breakpoints,
+    shaped_signal_breakpoints, unit_kernel_mass,
 };
 use crate::types::PostProcessError;
 
@@ -532,7 +532,7 @@ pub(crate) fn project_followers(
                     piece.coeffs[0] -= input_offset;
                 }
                 kernel_input = bezier_pieces_to_nurbs(&input_pieces);
-                batch_base += input_offset;
+                batch_base += input_offset * unit_kernel_mass(kernel);
                 let mut gained_input = chain.leading_transform().is_some();
                 if defer_linear_prefix {
                     if let Some(ChainStage::DerivativeGains { k1, k2 }) = chain.transform() {

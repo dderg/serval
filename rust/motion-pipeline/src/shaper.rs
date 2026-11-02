@@ -877,7 +877,18 @@ pub(crate) struct ShapedSignalSource<'a> {
     input_breaks: Vec<f64>,
     shaped_breaks: Vec<f64>,
     input_degree: usize,
-    input_offset: f64,
+    shaped_offset: f64,
+}
+
+const KERNEL_MASS_TOLERANCE: f64 = 1e-9;
+
+pub(crate) fn unit_kernel_mass(kernel: &nurbs::algebra::PiecewisePolynomialKernel) -> f64 {
+    let mass = trajectory::kernel_mass(kernel);
+    assert!(
+        (mass - 1.0).abs() <= KERNEL_MASS_TOLERANCE,
+        "shaper kernel integrates to {mass}, not 1: it would scale every position it shapes"
+    );
+    mass
 }
 
 impl<'a> ShapedSignalSource<'a> {
@@ -909,7 +920,7 @@ impl<'a> ShapedSignalSource<'a> {
             input_degree: table.max_degree(),
             table,
             input_breaks,
-            input_offset,
+            shaped_offset: input_offset * unit_kernel_mass(kernel),
         }
     }
 
@@ -927,7 +938,7 @@ impl<'a> ShapedSignalSource<'a> {
             },
             self.table.input_jumps().to_vec(),
         );
-        ShiftedTrackSignal::new(relative, -self.input_offset)
+        ShiftedTrackSignal::new(relative, -self.shaped_offset)
     }
 }
 

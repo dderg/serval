@@ -182,17 +182,11 @@ const MOMENT_ORDERS: usize = 3;
 
 type MomentEvaluator<'a> = dyn Fn(f64, f64, usize, f64, [&mut [f64]; MOMENT_ORDERS]) -> bool + 'a;
 
-/// The convolution `(input ∗ kernel)(t)`, evaluated exactly: both factors are
-/// piecewise polynomials, so integrating between their breakpoints with a
-/// Gauss rule of sufficient order carries no quadrature error at all. The
-/// previous sampled rectangle-rule evaluator corrugated the result at the
-/// sample wavelength — noise invisible in position but fatal to the refit's
-/// second-difference acceleration probes, which chased it into subdividing
 const PVA_MEMO_SLOTS: usize = 256;
 
-/// every span to the floor.
 struct CenteredKernelPiece {
     u_mid: f64,
+    half_width: f64,
     coeffs: Vec<f64>,
 }
 
@@ -201,8 +195,22 @@ impl CenteredKernelPiece {
         let half_width = 0.5 * (piece.u_end - piece.u_start);
         Self {
             u_mid: piece.u_start + half_width,
+            half_width,
             coeffs: nurbs::chebyshev::taylor_shift(&piece.coeffs, half_width),
         }
+    }
+
+    fn mass(&self) -> f64 {
+        let half_width = self.half_width;
+        let mut reach = half_width;
+        let mut mass = 0.0;
+        for (power, coefficient) in self.coeffs.iter().enumerate() {
+            if power % 2 == 0 {
+                mass += coefficient * 2.0 * reach / (power + 1) as f64;
+            }
+            reach *= half_width;
+        }
+        mass
     }
 
     fn integrate(&self, moments: &[f64]) -> f64 {
@@ -215,6 +223,21 @@ impl CenteredKernelPiece {
     }
 }
 
+pub fn kernel_mass(kernel: &PiecewisePolynomialKernel) -> f64 {
+    kernel
+        .pieces
+        .iter()
+        .map(|piece| CenteredKernelPiece::new(piece).mass())
+        .sum()
+}
+
+/// The convolution `(input ∗ kernel)(t)`, evaluated exactly: both factors are
+/// piecewise polynomials, so integrating between their breakpoints with a
+/// Gauss rule of sufficient order carries no quadrature error at all. The
+/// previous sampled rectangle-rule evaluator corrugated the result at the
+/// sample wavelength — noise invisible in position but fatal to the refit's
+/// second-difference acceleration probes, which chased it into subdividing
+/// every span to the floor.
 pub struct ShapedSignal<'a, F = Box<dyn Fn(f64) -> f64 + 'a>> {
     eval_input: F,
     moment_input: Option<Box<MomentEvaluator<'a>>>,

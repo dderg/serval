@@ -706,4 +706,5 @@ pub const trajectory::SMOOTH_MZV_DURATION_PER_HZ: f64
 pub const trajectory::SMOOTH_ZV_DURATION_PER_HZ: f64
 pub fn trajectory::build_smooth_mzv_kernel(f64) -> nurbs::algebra::PiecewisePolynomialKernel
 pub fn trajectory::build_smooth_zv_kernel(f64) -> nurbs::algebra::PiecewisePolynomialKernel
+pub fn trajectory::kernel_mass(&nurbs::algebra::PiecewisePolynomialKernel) -> f64
 pub fn trajectory::next_toward(f64, f64) -> f64
