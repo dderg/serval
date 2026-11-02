@@ -228,6 +228,10 @@ pub trajectory::continuous::ContinuousError::PhaseOverlap::previous_end: f64
 pub trajectory::continuous::ContinuousError::PieceGap
 pub trajectory::continuous::ContinuousError::PieceGap::next_start: f64
 pub trajectory::continuous::ContinuousError::PieceGap::previous_end: f64
+pub trajectory::continuous::ContinuousError::PieceJump
+pub trajectory::continuous::ContinuousError::PieceJump::at: f64
+pub trajectory::continuous::ContinuousError::PieceJump::next_start: f64
+pub trajectory::continuous::ContinuousError::PieceJump::previous_end: f64
 pub trajectory::continuous::ContinuousError::PieceOverlap
 pub trajectory::continuous::ContinuousError::PieceOverlap::next_start: f64
 pub trajectory::continuous::ContinuousError::PieceOverlap::previous_end: f64
@@ -469,6 +473,10 @@ pub trajectory::ContinuousError::PhaseOverlap::previous_end: f64
 pub trajectory::ContinuousError::PieceGap
 pub trajectory::ContinuousError::PieceGap::next_start: f64
 pub trajectory::ContinuousError::PieceGap::previous_end: f64
+pub trajectory::ContinuousError::PieceJump
+pub trajectory::ContinuousError::PieceJump::at: f64
+pub trajectory::ContinuousError::PieceJump::next_start: f64
+pub trajectory::ContinuousError::PieceJump::previous_end: f64
 pub trajectory::ContinuousError::PieceOverlap
 pub trajectory::ContinuousError::PieceOverlap::next_start: f64
 pub trajectory::ContinuousError::PieceOverlap::previous_end: f64
