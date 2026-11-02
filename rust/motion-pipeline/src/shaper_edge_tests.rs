@@ -2,7 +2,7 @@
 //! reports the seeds it absorbs.
 
 use super::{
-    EdgeSlivers, FitTol, TrackSignal, coalesce_degenerate_seeds, edge_inset,
+    CrowdedVelocityBreaks, EdgeSlivers, FitTol, TrackSignal, coalesce_degenerate_seeds, edge_inset,
     edge_velocity_and_acceleration,
 };
 
@@ -120,7 +120,7 @@ fn a_coalesced_chain_reports_the_full_width_it_absorbed() {
         1.0 + 1.8 * FLOOR,
         3.0,
     ];
-    let slivers = coalesce_degenerate_seeds(&mut seeds, FLOOR);
+    let slivers = coalesce_degenerate_seeds(&mut seeds, &[], FLOOR).expect("no velocity breaks");
     assert_eq!(seeds, vec![0.0, 1.0 + 1.8 * FLOOR, 3.0]);
     assert_eq!(slivers.len(), 2);
     assert!(
@@ -135,13 +135,53 @@ fn a_coalesced_chain_reports_the_full_width_it_absorbed() {
 #[test]
 fn seeds_absorbed_at_the_pinned_ends_reach_into_the_end_spans() {
     let mut seeds = vec![0.0, 0.5 * FLOOR, 1.0, 2.0 - 0.7 * FLOOR, 2.0];
-    let slivers = coalesce_degenerate_seeds(&mut seeds, FLOOR);
+    let slivers = coalesce_degenerate_seeds(&mut seeds, &[], FLOOR).expect("no velocity breaks");
     assert_eq!(seeds, vec![0.0, 1.0, 2.0]);
     assert_eq!(slivers[0].start, 0.5 * FLOOR);
     assert!(
         (slivers[1].end - 0.7 * FLOOR).abs() <= 1e-15,
         "{:?}",
         slivers[1]
+    );
+}
+
+#[test]
+fn a_chain_of_sub_floor_seeds_never_rolls_past_a_velocity_break() {
+    let end = 2.0;
+    let ratio_step = end - 7.0 * FLOOR;
+    let mut seeds = vec![0.0, 1.0, ratio_step];
+    seeds.extend((1..16).map(|k| ratio_step + f64::from(k) * 7.0 * FLOOR / 16.0));
+    seeds.push(end);
+    let slivers = coalesce_degenerate_seeds(&mut seeds, &[0.0, ratio_step, end], FLOOR)
+        .expect("the velocity breaks are a floor apart");
+    assert!(
+        seeds.contains(&ratio_step),
+        "the ratio step at {ratio_step} was coalesced away: {seeds:?}"
+    );
+    assert!(
+        seeds.windows(2).all(|span| span[1] - span[0] >= FLOOR),
+        "a kept span is narrower than the floor: {seeds:?}"
+    );
+    assert_eq!(slivers.len(), seeds.len() - 1);
+}
+
+#[test]
+fn velocity_breaks_closer_than_the_floor_fail_loudly() {
+    let mut interior = vec![0.0, 1.0, 1.0 + 0.5 * FLOOR, 2.0];
+    assert_eq!(
+        coalesce_degenerate_seeds(&mut interior, &[1.0, 1.0 + 0.5 * FLOOR], FLOOR),
+        Err(CrowdedVelocityBreaks {
+            earlier: 1.0,
+            later: 1.0 + 0.5 * FLOOR
+        })
+    );
+    let mut at_the_end = vec![0.0, 2.0 - 0.5 * FLOOR, 2.0];
+    assert_eq!(
+        coalesce_degenerate_seeds(&mut at_the_end, &[2.0 - 0.5 * FLOOR], FLOOR),
+        Err(CrowdedVelocityBreaks {
+            earlier: 2.0 - 0.5 * FLOOR,
+            later: 2.0
+        })
     );
 }
 
