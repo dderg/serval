@@ -33,27 +33,33 @@ fn config() -> StreamConfig {
 }
 
 fn square_moves() -> Vec<geometry::Move> {
-    [[0.0, 0.0], [20.0, 0.0], [20.0, 20.0], [0.0, 20.0], [0.0, 0.0]]
-        .windows(2)
-        .enumerate()
-        .map(|(line, pair)| {
-            line_move(
-                [pair[0][0], pair[0][1], 0.0],
-                [pair[1][0], pair[1][1], 0.0],
-                0.0,
-                MoveContext {
-                    extruder_axis: 3,
-                    feedrate_mm_s: FEEDRATE,
-                    limits: limits(),
-                    source: SourceRange {
-                        start_line: line as u32,
-                        end_line: line as u32,
-                    },
+    [
+        [0.0, 0.0],
+        [20.0, 0.0],
+        [20.0, 20.0],
+        [0.0, 20.0],
+        [0.0, 0.0],
+    ]
+    .windows(2)
+    .enumerate()
+    .map(|(line, pair)| {
+        line_move(
+            [pair[0][0], pair[0][1], 0.0],
+            [pair[1][0], pair[1][1], 0.0],
+            0.0,
+            MoveContext {
+                extruder_axis: 3,
+                feedrate_mm_s: FEEDRATE,
+                limits: limits(),
+                source: SourceRange {
+                    start_line: line as u32,
+                    end_line: line as u32,
                 },
-            )
-            .unwrap()
-        })
-        .collect()
+            },
+        )
+        .unwrap()
+    })
+    .collect()
 }
 
 fn bell_chain() -> CompiledChain {
