@@ -1486,18 +1486,26 @@ impl LeaderPieces {
         })
     }
 
-    fn pva(&self, t: f64) -> Option<(f64, f64, f64)> {
+    fn piece_at(&self, t: f64) -> Option<&BezierPiece> {
         let index = self
             .pieces
             .partition_point(|piece| piece.u_end < t)
             .min(self.pieces.len().saturating_sub(1));
         let piece = self.pieces.get(index)?;
         let slack = 1e-9 * (piece.u_end - piece.u_start).max(1.0);
-        if t < piece.u_start - slack || t > piece.u_end + slack {
-            return None;
-        }
+        (t >= piece.u_start - slack && t <= piece.u_end + slack).then_some(piece)
+    }
+
+    fn pva(&self, t: f64) -> Option<(f64, f64, f64)> {
+        let piece = self.piece_at(t)?;
         let (p, v, a) = polynomial_pva(&piece.coeffs, t - piece.u_start);
         Some((self.base + p, v, a))
+    }
+
+    fn pvaj(&self, t: f64) -> Option<(f64, f64, f64, f64)> {
+        let piece = self.piece_at(t)?;
+        let (p, v, a, j) = polynomial_pvaj(&piece.coeffs, t - piece.u_start);
+        Some((self.base + p, v, a, j))
     }
 }
 
@@ -1595,6 +1603,22 @@ impl<'a> FollowerSignal<'a> {
         axis_pva(self.shaped_axes[index], t)
     }
 
+    /// The leader's state to third order, read from the same representation
+    /// as [`Self::leader_pva`]: the path-speed derivatives divide by the
+    /// speed, so mixing two evaluations of one leader amplifies their
+    /// rounding difference wherever the speed is tiny.
+    fn leader_pvaj(&self, index: usize, t: f64) -> (f64, f64, f64, f64) {
+        if let Some(Some(pieces)) = self.leader_pieces.get(index) {
+            if let Some(value) = pieces.pvaj(t) {
+                return value;
+            }
+        }
+        let pvaj = self.shaped_axes[index]
+            .eval_pvaj(t)
+            .expect("follower leader has exact derivatives");
+        (pvaj.position, pvaj.velocity, pvaj.acceleration, pvaj.jerk)
+    }
+
     fn raw_shaped_speed(&self, t: f64) -> f64 {
         (0..self.shaped_axes.len())
             .map(|index| {
@@ -1682,14 +1706,10 @@ impl<'a> FollowerSignal<'a> {
         let speed_second = if speed == 0.0 || self.speed_zero_sliver(t).is_some() {
             0.0
         } else {
-            let numerator = self
-                .shaped_axes
-                .iter()
-                .map(|axis| {
-                    let pvaj = axis
-                        .eval_pvaj(t)
-                        .expect("follower leader has exact derivatives");
-                    pvaj.acceleration * pvaj.acceleration + pvaj.velocity * pvaj.jerk
+            let numerator = (0..self.shaped_axes.len())
+                .map(|index| {
+                    let (_, velocity, acceleration, jerk) = self.leader_pvaj(index, t);
+                    acceleration * acceleration + velocity * jerk
                 })
                 .sum::<f64>();
             (numerator - speed_derivative * speed_derivative) / speed
@@ -2240,6 +2260,17 @@ fn polynomial_pva(coeffs: &[f64], tau: f64) -> (f64, f64, f64) {
         p = nurbs::fmadd(p, tau, coefficient);
     }
     (p, v, 2.0 * a)
+}
+
+fn polynomial_pvaj(coeffs: &[f64], tau: f64) -> (f64, f64, f64, f64) {
+    let (mut p, mut v, mut a, mut j) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+    for &coefficient in coeffs.iter().rev() {
+        j = nurbs::fmadd(j, tau, a);
+        a = nurbs::fmadd(a, tau, v);
+        v = nurbs::fmadd(v, tau, p);
+        p = nurbs::fmadd(p, tau, coefficient);
+    }
+    (p, v, 2.0 * a, 6.0 * j)
 }
 
 fn next_lower_float(value: f64) -> f64 {
