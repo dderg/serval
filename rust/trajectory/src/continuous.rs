@@ -1258,7 +1258,8 @@ impl ClockedMotorSpan {
     /// piece instead.
     pub fn split_max_duration(&self) -> Result<Vec<Self>, ContinuousError> {
         let duration = self.stream_t_end - self.stream_t_start;
-        let mut cuts: Vec<f64> = (1..)
+        let grid_cuts = (duration / MAX_SPAN_SECS).ceil() as u32;
+        let mut cuts: Vec<f64> = (1..grid_cuts)
             .map(|index| f64::from(index) * MAX_SPAN_SECS)
             .take_while(|&offset| self.stream_t_start + offset < self.stream_t_end)
             .collect();
