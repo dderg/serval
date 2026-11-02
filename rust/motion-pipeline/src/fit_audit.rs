@@ -1,8 +1,11 @@
 //! Checks every piece a fit accepts against the exact signal it was fitted
 //! to, at dense interior points rather than only at the ladder's probes, and
-//! keeps the ones that break the fit tolerance. Compiled only for tests that
-//! hold the shaper to its `max_path_deviation` / `max_accel_deviation`
-//! promise; the live host never pays for it.
+//! keeps the ones that break the fit tolerance. What the fit does not resolve
+//! is not held to it: pieces narrower than the cubic floor, and the slivers
+//! within a floor of a piece's edges, which seed coalescing treats as
+//! carrying no integral. Compiled only for tests that hold the shaper to its
+//! `max_path_deviation` / `max_accel_deviation` promise; the live host never
+//! pays for it.
 
 use std::sync::Mutex;
 
@@ -44,14 +47,20 @@ pub(crate) struct AcceptedPiece<'a> {
     pub t1: f64,
     pub mono_u: &'a [f64],
     pub accepted_at_floor: bool,
+    pub cubic_floor: f64,
 }
 
 pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
     let h = piece.t1 - piece.t0;
+    if h < piece.cubic_floor {
+        return;
+    }
     let acceleration_scale = (2.0 / h) * (2.0 / h);
     let (mut position, mut acceleration, mut worst_u) = (0.0_f64, 0.0_f64, 0.0);
+    let edge_sliver = piece.cubic_floor.min(0.25 * h) / h;
     for k in 0..AUDIT_POINTS {
-        let u = (f64::from(k) + 0.5) / f64::from(AUDIT_POINTS);
+        let u = edge_sliver
+            + (1.0 - 2.0 * edge_sliver) * (f64::from(k) + 0.5) / f64::from(AUDIT_POINTS);
         let x = 2.0 * u - 1.0;
         let (truth_position, _, truth_acceleration) = sig.eval_pva(piece.t0 + h * u);
         if !(truth_position.is_finite() && truth_acceleration.is_finite()) {
