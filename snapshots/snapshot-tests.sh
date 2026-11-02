@@ -128,7 +128,7 @@ url="http://127.0.0.1:$PORT"
 cat <<EOF
 
 ==================================================================
- Snapshots changed — a human needs to approve them.
+ Snapshots changed — review them, then accept.
  Review and accept at:  $url
 ==================================================================
 EOF
