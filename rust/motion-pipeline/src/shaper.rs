@@ -995,6 +995,86 @@ pub(crate) struct ShapedSignalSource<'a> {
     shaped_breaks: Vec<f64>,
     input_degree: usize,
     shaped_offset: f64,
+    gain_impulse_response: Option<GainImpulseResponse>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct GainImpulse {
+    at: f64,
+    delta: f64,
+    doublet: f64,
+}
+
+struct GainImpulseResponse {
+    impulses: Vec<GainImpulse>,
+    kernel_derivatives: [Vec<BezierPiece>; 4],
+    support: (f64, f64),
+}
+
+impl GainImpulseResponse {
+    fn new(kernel: &nurbs::algebra::PiecewisePolynomialKernel, impulses: &[GainImpulse]) -> Self {
+        assert!(
+            impulses.is_sorted_by(|left, right| left.at <= right.at),
+            "gain impulses are out of time order"
+        );
+        let mut order = kernel.pieces.clone();
+        let kernel_derivatives = std::array::from_fn(|_| {
+            let current = order.clone();
+            order = order.iter().map(BezierPiece::differentiate).collect();
+            current
+        });
+        Self {
+            impulses: impulses.to_vec(),
+            kernel_derivatives,
+            support: kernel.support(),
+        }
+    }
+
+    fn kernel_derivatives_at(&self, tau: f64) -> [f64; 4] {
+        let pieces = &self.kernel_derivatives[0];
+        let piece = pieces
+            .partition_point(|piece| piece.u_end <= tau)
+            .min(pieces.len() - 1);
+        self.kernel_derivatives
+            .each_ref()
+            .map(|order| order[piece].evaluate(tau))
+    }
+
+    fn response(&self, t: f64) -> (f64, f64, f64) {
+        let (k_lo, k_hi) = self.support;
+        let first = self
+            .impulses
+            .partition_point(|impulse| impulse.at <= t - k_hi);
+        let end = self
+            .impulses
+            .partition_point(|impulse| impulse.at < t - k_lo);
+        self.impulses[first..end]
+            .iter()
+            .fold((0.0, 0.0, 0.0), |(p, v, a), impulse| {
+                let [k, dk, ddk, dddk] = self.kernel_derivatives_at(t - impulse.at);
+                (
+                    p + impulse.delta * k + impulse.doublet * dk,
+                    v + impulse.delta * dk + impulse.doublet * ddk,
+                    a + impulse.delta * ddk + impulse.doublet * dddk,
+                )
+            })
+    }
+}
+
+struct WithGainImpulses<'r, S: TrackSignal> {
+    convolved: S,
+    response: Option<&'r GainImpulseResponse>,
+}
+
+impl<S: TrackSignal> TrackSignal for WithGainImpulses<'_, S> {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let (p, v, a) = self.convolved.eval_pva(t);
+        let Some(response) = self.response else {
+            return (p, v, a);
+        };
+        let (dp, dv, da) = response.response(t);
+        (p + dp, v + dv, a + da)
+    }
 }
 
 const KERNEL_MASS_TOLERANCE: f64 = 1e-9;
@@ -1035,6 +1115,8 @@ impl<'a> ShapedSignalSource<'a> {
             kernel,
             shaped_breaks: shaped_signal_breakpoints(kernel, &input_breaks),
             input_degree: table.max_degree(),
+            gain_impulse_response: (!table.gain_impulses().is_empty())
+                .then(|| GainImpulseResponse::new(kernel, table.gain_impulses())),
             table,
             input_breaks,
             shaped_offset: input_offset * unit_kernel_mass(kernel),
@@ -1055,7 +1137,13 @@ impl<'a> ShapedSignalSource<'a> {
             },
             self.table.input_jumps().to_vec(),
         );
-        ShiftedTrackSignal::new(relative, -self.shaped_offset)
+        ShiftedTrackSignal::new(
+            WithGainImpulses {
+                convolved: relative,
+                response: self.gain_impulse_response.as_ref(),
+            },
+            -self.shaped_offset,
+        )
     }
 }
 
@@ -1730,6 +1818,7 @@ pub(crate) struct AxisSignalTable {
     input_jumps: Vec<(f64, f64, f64)>,
     entering_step: f64,
     leaving_step: f64,
+    gain_impulses: Vec<GainImpulse>,
 }
 
 /// The time extent of a flattened signal window and how its two edges
@@ -1771,6 +1860,7 @@ impl AxisSignalTable {
             input_jumps: Vec::new(),
             entering_step: 0.0,
             leaving_step: 0.0,
+            gain_impulses: Vec::new(),
         };
         for track in tracks {
             for piece in extract_bezier_pieces(track) {
@@ -1812,6 +1902,7 @@ impl AxisSignalTable {
         let last = self.coeffs.len() - 1;
         let held_before = self.piece_at(0, self.first_t);
         let held_after = self.piece_at(last, self.last_t);
+        self.gain_impulses = self.input_step_impulses(k1, k2);
         for coefficients in &mut self.coeffs {
             for power in 0..coefficients.len() {
                 let slope = coefficients
@@ -1826,6 +1917,36 @@ impl AxisSignalTable {
         self.entering_step = self.piece_at(0, self.first_t) - held_before;
         self.leaving_step = held_after - self.piece_at(last, self.last_t);
         self
+    }
+
+    fn input_step_impulses(&self, k1: f64, k2: f64) -> Vec<GainImpulse> {
+        let last = self.coeffs.len() - 1;
+        let seams = (1..=last).map(|piece| {
+            let seam = self.starts[piece];
+            (
+                seam,
+                self.piece_at(piece, seam) - self.piece_at(piece - 1, seam),
+                self.slope_at(piece, seam) - self.slope_at(piece - 1, seam),
+            )
+        });
+        std::iter::once((self.first_t, 0.0, self.slope_at(0, self.first_t)))
+            .chain(seams)
+            .chain(std::iter::once((
+                self.last_t,
+                0.0,
+                -self.slope_at(last, self.last_t),
+            )))
+            .map(|(at, position_step, slope_step)| GainImpulse {
+                at,
+                delta: k1 * position_step + k2 * slope_step,
+                doublet: k2 * position_step,
+            })
+            .filter(|impulse| impulse.delta != 0.0 || impulse.doublet != 0.0)
+            .collect()
+    }
+
+    pub(crate) fn gain_impulses(&self) -> &[GainImpulse] {
+        &self.gain_impulses
     }
 
     fn held_before(&self) -> f64 {

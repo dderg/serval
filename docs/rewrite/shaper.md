@@ -177,6 +177,11 @@ loudly at config time rather than producing silently wrong motion:
   so the motor command is the exact convolution of the gained input
   polynomials (`AxisSignalTable::with_derivative_gains`), with the input's
   acceleration and velocity steps carried as kernel-weighted jump terms.
+  The input is only position-continuous at its knots, so `ḟ` and `f̈` also
+  carry impulses there: a velocity step `Δḟ` puts `k2·Δḟ·δ` into the gained
+  input, a position step `Δf` puts `k1·Δf·δ + k2·Δf·δ′`. Gaining the pieces
+  drops them, so `GainImpulseResponse` adds their convolution back —
+  `δ ∗ k = k`, `δ′ ∗ k = k′` evaluated at each step.
 
 Order within a chain is meaningful: stages before the kernel act on the
 input signal, the kernel convolves the result, stages after the kernel act
