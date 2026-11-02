@@ -494,6 +494,7 @@ pub geometry::velocity::law::LawSegment::t0: f64
 pub geometry::velocity::law::LawSegment::v0: f64
 impl geometry::velocity::law::LawSegment
 pub fn geometry::velocity::law::LawSegment::brake_to(f64, f64, geometry::velocity::law::ScalarLaw, f64, f64) -> core::option::Option<(geometry::velocity::law::LawSegment, f64)>
+pub fn geometry::velocity::law::LawSegment::cap_contact_times(&self) -> alloc::vec::Vec<f64>
 pub fn geometry::velocity::law::LawSegment::cut_at_arc(&self, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
 pub fn geometry::velocity::law::LawSegment::cut_at_speed(&self, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
 pub fn geometry::velocity::law::LawSegment::end_distance(&self) -> f64
@@ -550,6 +551,7 @@ pub geometry::velocity::LawSegment::t0: f64
 pub geometry::velocity::LawSegment::v0: f64
 impl geometry::velocity::law::LawSegment
 pub fn geometry::velocity::law::LawSegment::brake_to(f64, f64, geometry::velocity::law::ScalarLaw, f64, f64) -> core::option::Option<(geometry::velocity::law::LawSegment, f64)>
+pub fn geometry::velocity::law::LawSegment::cap_contact_times(&self) -> alloc::vec::Vec<f64>
 pub fn geometry::velocity::law::LawSegment::cut_at_arc(&self, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
 pub fn geometry::velocity::law::LawSegment::cut_at_speed(&self, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
 pub fn geometry::velocity::law::LawSegment::end_distance(&self) -> f64
@@ -760,6 +762,7 @@ pub geometry::LawSegment::t0: f64
 pub geometry::LawSegment::v0: f64
 impl geometry::velocity::law::LawSegment
 pub fn geometry::velocity::law::LawSegment::brake_to(f64, f64, geometry::velocity::law::ScalarLaw, f64, f64) -> core::option::Option<(geometry::velocity::law::LawSegment, f64)>
+pub fn geometry::velocity::law::LawSegment::cap_contact_times(&self) -> alloc::vec::Vec<f64>
 pub fn geometry::velocity::law::LawSegment::cut_at_arc(&self, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
 pub fn geometry::velocity::law::LawSegment::cut_at_speed(&self, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
 pub fn geometry::velocity::law::LawSegment::end_distance(&self) -> f64
