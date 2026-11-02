@@ -50,6 +50,11 @@ impl BusyRunwayWatch {
     }
 }
 
+/// Proof the ingress just found its inbox empty: the idle path's runway
+/// rule only holds then, and a stream whose moves keep arriving is paced by
+/// [`BusyRunwayWatch`] instead.
+pub(super) struct InboxFoundEmpty(());
+
 pub(super) struct Ingress {
     pub(super) config: StreamConfig,
     /// Expected toolhead position after every move ingested so far; the
@@ -90,7 +95,7 @@ impl Ingress {
                             }
                             fatal("execution owner closed during planning idle");
                         }
-                        match self.drain_or_runway() {
+                        match self.drain_or_runway(InboxFoundEmpty(())) {
                             None => continue,
                             Some(wait) => match rx.recv_timeout(wait) {
                                 Ok(msg) => Some(msg),
@@ -236,9 +241,8 @@ impl Ingress {
             t_us = motion_pipeline::timing::mono_us(),
             "[pipe] runway falling behind a busy inbox — draining pipeline to rest"
         );
-        self.links
-            .busy_runway_drains
-            .fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
+        self.links.pacer_drains.busy.fetch_add(1, Ordering::SeqCst);
         self.drain_and_fence();
     }
 
@@ -248,7 +252,7 @@ impl Ingress {
     /// reserve, send `Drain` so the fit stage and planner materialize the
     /// brake-to-rest and the drained trajectory beats the playhead to the
     /// pump.
-    fn drain_or_runway(&mut self) -> Option<Duration> {
+    fn drain_or_runway(&mut self, _: InboxFoundEmpty) -> Option<Duration> {
         let wait_s = self.timeline.frontier.runway_secs() - self.reserve_secs();
         if wait_s > 0.0 {
             return Some(Duration::from_secs_f64(wait_s));
@@ -266,6 +270,8 @@ impl Ingress {
             t_us = motion_pipeline::timing::mono_us(),
             "[pipe] runway exhausted — draining pipeline to rest"
         );
+        #[cfg(test)]
+        self.links.pacer_drains.idle.fetch_add(1, Ordering::SeqCst);
         self.drain_and_fence();
         None
     }
