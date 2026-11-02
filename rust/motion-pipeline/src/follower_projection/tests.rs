@@ -362,3 +362,71 @@ fn a_window_step_inside_a_piece_splits_it_and_raises_what_follows() {
         );
     }
 }
+
+/// The advanced source is fitted to the follower signal with the advance
+/// applied and its in-window steps taken out, which leaves it
+/// velocity-continuous. Its pieces must open and close on that signal's
+/// own velocity, as the plain source's do, so the emission never welds a
+/// fit residual into the stretch after a seam.
+#[test]
+fn an_advanced_follower_source_fit_opens_and_closes_on_the_signal_velocity() {
+    let shaped = cusp_segment(
+        vec![0.0, 80.0, -300.0],
+        vec![0.0, 5.0, 100.0, -900.0],
+        0.0,
+        0.1,
+    );
+    let mut state = FollowerState::default();
+    state.push_span(50.0, 0.05, 0.05);
+    let source = super::FollowerSource {
+        shaped: &shaped,
+        raw: &shaped,
+        axis: 3,
+        leaders: &[0, 1],
+        state: &state,
+        s_start: 0.0,
+    };
+    let fit_tol = crate::lowering::FitTol {
+        pos_mm: 1e-4,
+        accel_mm_s2: 50.0,
+    };
+    let stage = trajectory::ChainStage::NonlinearAdvance(trajectory::NonlinearAdvance {
+        model: trajectory::AdvanceModel::Tanh,
+        linear_advance: 0.02,
+        nonlinear_offset: 0.03,
+        linearization_velocity: 1.0,
+    });
+    let fitted = super::fit_source_projection(source, fit_tol, Some(&stage), true).unwrap();
+    let sig = FollowerSignal::new(&shaped, &shaped, 3, &[0, 1], &state, 0.0, 0.0);
+    let advanced = super::AdvancedFollowerSignal {
+        source: &sig,
+        stage: &stage,
+        steps: &[],
+    };
+    let pieces = nurbs::bezier::extract_bezier_pieces(&fitted.track);
+    assert!(pieces.len() > 1, "fixture must fit with an interior seam");
+    for piece in &pieces {
+        let velocity =
+            nurbs::eval::derivative(&bezier_pieces_to_nurbs(std::slice::from_ref(piece)));
+        for (end, inside) in [
+            (
+                piece.u_start,
+                trajectory::next_toward(piece.u_start, piece.u_end),
+            ),
+            (
+                piece.u_end,
+                trajectory::next_toward(piece.u_end, piece.u_start),
+            ),
+        ] {
+            let fitted_velocity = nurbs::eval::eval(&velocity, end);
+            let signal_velocity = advanced.eval_pva(inside).1;
+            assert!(
+                (fitted_velocity - signal_velocity).abs() <= 1e-9 * signal_velocity.abs().max(1.0),
+                "piece [{}, {}] meets the advanced signal velocity {signal_velocity} with \
+                 {fitted_velocity} at {end}",
+                piece.u_start,
+                piece.u_end
+            );
+        }
+    }
+}
