@@ -26,6 +26,19 @@ const BASIS_CONVERSION_ROUNDOFF_ENVELOPE: f64 = (1_u64 << 20) as f64;
 const ODOMETER_ALIGNMENT_ULPS: f64 = (1_u64 << 12) as f64;
 const SPEED_ZERO_SLIVER_FRACTION: f64 = 1e-6;
 const COMPONENT_ZERO_PROBES: usize = 16;
+/// TODO: prototype knob — extrusion-ratio steps are spread over this many
+/// mm of shaped path (`KALICO_E_RATIO_RAMP_MM`, default 0 = steps).
+fn e_ratio_ramp_mm() -> f64 {
+    static RAMP: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *RAMP.get_or_init(|| {
+        std::env::var("KALICO_E_RATIO_RAMP_MM")
+            .ok()
+            .map_or(0.0, |value| {
+                value.parse().expect("KALICO_E_RATIO_RAMP_MM is a number")
+            })
+    })
+}
+
 fn follower_fit_tol(fit_tol: FitTol, position_scale: f64) -> FitTol {
     FitTol {
         pos_mm: fit_tol.pos_mm * position_scale,
@@ -1052,6 +1065,15 @@ impl FollowerState {
         if shaped_ds <= SPAN_MIN_LEN_MM {
             return shaped_ds;
         }
+        let ramp = e_ratio_ramp_mm();
+        let next_ratio = upcoming.first().and_then(|seg| {
+            seg.spatial_path.then(|| {
+                seg.followers
+                    .iter()
+                    .find(|f| f.axis_index == axis)
+                    .map_or(0.0, |f| f.ratio)
+            })
+        });
         if raw_ds > SPAN_MIN_LEN_MM {
             let (r0, r1) = raw
                 .followers
@@ -1059,7 +1081,7 @@ impl FollowerState {
                 .find(|f| f.axis_index == axis)
                 .filter(|_| raw.spatial_path)
                 .map_or((0.0, 0.0), |f| (f.ratio, f.ratio_end));
-            self.push_span(shaped_ds, r0, r1);
+            self.push_ramped_span(shaped_ds, (r0, r1), next_ratio, ramp);
             return shaped_ds;
         }
         let tail = leader_distance(shaped, raw, leaders).min(shaped_ds);
@@ -1077,7 +1099,7 @@ impl FollowerState {
             .find(|seg| seg.spatial_path)
             .and_then(|seg| seg.followers.iter().find(|f| f.axis_index == axis))
             .map_or(0.0, |f| f.ratio);
-        self.push_span(lead, lead_ratio, lead_ratio);
+        self.push_ramped_span(lead, (lead_ratio, lead_ratio), None, ramp);
         shaped_ds
     }
 
@@ -1100,6 +1122,41 @@ impl FollowerState {
             e0,
         });
         self.s_ingested_end = s1;
+    }
+
+    /// Pushes one segment's ratio span with every step against its
+    /// neighbours spread over `ramp` mm of path, half on each side of the
+    /// seam: from the previous span's end ratio, and towards `next_ratio`
+    /// when the following segment is already known. Meeting at the mean
+    /// keeps the extrusion of a ramped step equal to the step's.
+    fn push_ramped_span(
+        &mut self,
+        len: f64,
+        (r0, r1): (f64, f64),
+        next_ratio: Option<f64>,
+        ramp: f64,
+    ) {
+        const RATIO_STEP_EPS: f64 = 1e-12;
+        if ramp <= 0.0 {
+            self.push_span(len, r0, r1);
+            return;
+        }
+        let half = (0.5 * ramp).min(0.5 * len);
+        let at = |offset: f64| r0 + (r1 - r0) * offset / len;
+        let start = match self.spans.last().map(|span| span.r1) {
+            Some(previous) if (previous - r0).abs() > RATIO_STEP_EPS => {
+                self.push_span(half, previous, at(half));
+                half
+            }
+            _ => 0.0,
+        };
+        match next_ratio.filter(|next| (next - r1).abs() > RATIO_STEP_EPS) {
+            Some(next) => {
+                self.push_span(len - start - half, at(start), at(len - half));
+                self.push_span(half, at(len - half), 0.5 * (r1 + next));
+            }
+            None => self.push_span(len - start, at(start), r1),
+        }
     }
 
     fn prune_spans(&mut self) {
