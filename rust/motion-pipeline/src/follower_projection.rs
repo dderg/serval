@@ -1240,11 +1240,9 @@ impl FollowerState {
     /// from the rest point at the segment's edges, so the move on each side
     /// extrudes exactly the material of the path it is shaped onto. Any
     /// shaped arc beyond them — the fit's back-and-forth near the rest point
-    /// — joins the lead, which dips its ratio linearly to the arc's middle
-    /// and back by just enough to keep the lead's material: a separate idle
-    /// span would step the ratio, and so the follower's velocity, where the
-    /// leaders are already moving. Only a lead shorter than the idle arc,
-    /// whose dip would go below zero, is diluted evenly instead.
+    /// — joins the lead (see [`Self::push_lead`]): a separate idle span
+    /// would step the ratio, and so the follower's velocity, where the
+    /// leaders are already moving.
     fn ingest(
         &mut self,
         raw: &ContinuousSegment,
@@ -1300,19 +1298,40 @@ impl FollowerState {
             .find(|seg| seg.spatial_path)
             .and_then(|seg| seg.followers.iter().find(|f| f.axis_index == axis))
             .map_or(0.0, |f| f.ratio);
-        let lead_with_idle = lead + idle;
-        if lead < idle {
-            let diluted_ratio = lead_ratio * lead / lead_with_idle;
-            self.push_span(lead_with_idle, diluted_ratio, diluted_ratio);
-        } else if idle > SPAN_MIN_LEN_MM {
-            let half = 0.5 * lead_with_idle;
-            let dip_ratio = lead_ratio * (1.0 - idle / half);
-            self.push_span(half, lead_ratio, dip_ratio);
-            self.push_span(half, dip_ratio, lead_ratio);
-        } else if lead_with_idle > SPAN_MIN_LEN_MM {
-            self.push_span(lead_with_idle, lead_ratio, lead_ratio);
-        }
+        self.push_lead(lead, idle, lead_ratio);
         shaped_ds
+    }
+
+    /// Lays a lead's material, `lead_ratio × lead`, over the lead joined with
+    /// the idle arc, opening and closing on the lead ratio. The ratio ramps
+    /// linearly into a valley and back out over equal widths: with the idle
+    /// arc no longer than the lead, a V reaching just as deep as the idle's
+    /// share of material; with a longer idle arc, ramps one lead wide each
+    /// around a flat floor at zero, the deepest a valley goes without
+    /// changing sign. The two coincide where the lead and idle arcs are
+    /// equal. A lead with no ratio lays one flat span: its valley would only
+    /// cut the arc into extra breakpoints, down to slivers where the lead is
+    /// a few picometres.
+    fn push_lead(&mut self, lead: f64, idle: f64, lead_ratio: f64) {
+        let joined = lead + idle;
+        if idle <= SPAN_MIN_LEN_MM || lead_ratio == 0.0 {
+            if joined > SPAN_MIN_LEN_MM {
+                self.push_span(joined, lead_ratio, lead_ratio);
+            }
+            return;
+        }
+        let ramp = (0.5 * joined).min(lead);
+        let floor = joined - 2.0 * ramp;
+        let valley_ratio = lead_ratio * (lead - ramp) / (joined - ramp);
+        if ramp > SPAN_MIN_LEN_MM {
+            self.push_span(ramp, lead_ratio, valley_ratio);
+        }
+        if floor > SPAN_MIN_LEN_MM {
+            self.push_span(floor, valley_ratio, valley_ratio);
+        }
+        if ramp > SPAN_MIN_LEN_MM {
+            self.push_span(ramp, valley_ratio, lead_ratio);
+        }
     }
 
     /// A span shorter than the odometer's float resolution cannot advance
