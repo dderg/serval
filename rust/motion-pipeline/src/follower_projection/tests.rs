@@ -157,7 +157,6 @@ fn follower_advance_fits_the_transformed_acceleration() {
                 accel_mm_s2: 0.5,
             },
             Some(&stage),
-            false,
         )
         .unwrap();
         let acceleration = nurbs::eval::derivative(&nurbs::eval::derivative(&fitted.track));

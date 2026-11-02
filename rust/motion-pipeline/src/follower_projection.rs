@@ -153,17 +153,6 @@ impl AdvanceStep {
             step_mm: advance_offset(stage, velocity_after) - advance_offset(stage, velocity_before),
         }
     }
-
-    fn unrepresentable(self, axis: usize, tolerance_mm: f64) -> PostProcessError {
-        PostProcessError::AdvanceStep {
-            axis,
-            t: self.t,
-            velocity_before: self.velocity_before,
-            velocity_after: self.velocity_after,
-            step_mm: self.step_mm,
-            tolerance_mm,
-        }
-    }
 }
 
 /// One raw segment's follower projection inputs: the shaped leader signal it
@@ -188,7 +177,6 @@ fn fit_source_projection(
     source: FollowerSource,
     fit_tol: FitTol,
     leading_stage: Option<&ChainStage>,
-    kernel_follows: bool,
 ) -> Result<SourceProjection, PostProcessError> {
     let FollowerSource {
         shaped,
@@ -202,34 +190,20 @@ fn fit_source_projection(
     let (t_start, t_end) = projection_support(raw, shaped, axis, leaders);
     let sig = FollowerSignal::new(shaped, raw, axis, leaders, state, s_start, 0.0);
     let breakpoints = sig.construction_breakpoints(raw_axis);
-    let input_state = |t| {
-        let (_, velocity, acceleration) = sig.eval_pva(t);
-        SeamInput {
-            velocity,
-            acceleration,
-            jerk: sig.jerk(t),
-            ratio: sig.state.ratio_and_slope(sig.s_owned(t)).0,
-            leader_speed: sig.shaped_speed(t),
-        }
+    let input_state = |t| SeamInput {
+        velocity: sig.deriv(t),
+        ratio: sig.state.ratio_and_slope(sig.s_owned(t)).0,
+        leader_speed: sig.shaped_speed(t),
     };
     let input_start = input_state(t_start);
     let input_end = input_state(t_end);
     let tolerance = follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis) * 0.5);
-    let mut window_advance_steps = match leading_stage {
+    let window_advance_steps = match leading_stage {
         Some(stage) => window_advance_steps(stage, &sig, &breakpoints.fit_seeds, (t_start, t_end))
             .filter(|step| !step.is_rounding())
             .collect::<Vec<_>>(),
         None => Vec::new(),
     };
-    if !kernel_follows {
-        if let Some(&step) = window_advance_steps
-            .iter()
-            .find(|step| step.step_mm.abs() > tolerance.pos_mm)
-        {
-            return Err(step.unrepresentable(axis, tolerance.pos_mm));
-        }
-        window_advance_steps.clear();
-    }
     let track = if let Some(value) = sig.constant_value() {
         bezier_pieces_to_nurbs(&[BezierPiece {
             u_start: t_start,
@@ -413,7 +387,6 @@ pub(crate) fn project_followers(
                                         },
                                         fit_tol,
                                         leading_stage,
-                                        kernel.is_some(),
                                     ),
                                 ));
                             }
@@ -442,7 +415,6 @@ pub(crate) fn project_followers(
                             },
                             fit_tol,
                             leading_stage,
-                            kernel.is_some(),
                         ),
                     )
                 })
@@ -542,25 +514,16 @@ pub(crate) fn project_followers(
                     t: raw.t_start,
                 });
             }
-            let join_advance_step = match leading_stage.and_then(|stage| {
-                join_advance_step(
-                    stage,
-                    axis,
-                    state.projected_input_end,
-                    (t_start, input_start),
-                )
-            }) {
-                Some(step) => {
-                    let tolerance =
-                        follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis) * 0.5)
-                            .pos_mm;
-                    if kernel.is_none() && step.step_mm.abs() > tolerance {
-                        return Err(step.unrepresentable(axis, tolerance));
-                    }
-                    step.step_mm
-                }
-                None => 0.0,
-            };
+            let join_advance_step = leading_stage
+                .and_then(|stage| {
+                    join_advance_step(
+                        stage,
+                        axis,
+                        state.projected_input_end,
+                        (t_start, input_start),
+                    )
+                })
+                .map_or(0.0, |step| step.step_mm);
             let semantic_cuts = projected_cuts.unwrap_or_else(|| piece_boundaries(&track));
             let track_start = nurbs::eval::eval(&track, t_start);
             let output_base = state.projected_output_end.unwrap_or(base_position)
@@ -919,21 +882,9 @@ pub(crate) fn project_followers(
                 if kernel.is_some() {
                     return 0.0;
                 }
-                let previous = previous_input
-                    .expect("an emitted endpoint always records its pre-transform state");
-                let right_velocity =
-                    previous.velocity + previous.signal_velocity_step(&input_start);
-                chain_output_velocity(
-                    chain,
-                    right_velocity,
-                    input_start.acceleration,
-                    input_start.jerk,
-                ) - chain_output_velocity(
-                    chain,
-                    previous.velocity,
-                    previous.acceleration,
-                    previous.jerk,
-                )
+                previous_input
+                    .expect("an emitted endpoint always records its pre-transform state")
+                    .signal_velocity_step(&input_start)
             };
             if i == 0 {
                 if let (Some(previous), Some((emit_start, emit_end))) = (emitted_pv, emit_window) {
@@ -1034,28 +985,19 @@ fn fit_kernel_window<S: TrackSignal>(
 #[derive(Debug, Clone, Copy)]
 struct SeamInput {
     velocity: f64,
-    acceleration: f64,
-    jerk: f64,
     ratio: f64,
     leader_speed: f64,
 }
 
 impl SeamInput {
     fn of_track(track: &ScalarNurbs, t: f64) -> Self {
-        let mut state = [0.0; 3];
-        let mut current = track.clone();
-        for slot in &mut state {
-            if current.degree() == 0 {
-                break;
-            }
-            current = nurbs::eval::derivative(&current);
-            *slot = nurbs::eval::eval(&current, t);
-        }
-        let [velocity, acceleration, jerk] = state;
+        let velocity = if track.degree() == 0 {
+            0.0
+        } else {
+            nurbs::eval::eval(&nurbs::eval::derivative(track), t)
+        };
         Self {
             velocity,
-            acceleration,
-            jerk,
             ratio: 1.0,
             leader_speed: velocity,
         }
@@ -1063,20 +1005,6 @@ impl SeamInput {
 
     fn signal_velocity_step(&self, right: &Self) -> f64 {
         right.velocity - self.velocity - right.ratio * (right.leader_speed - self.leader_speed)
-    }
-}
-
-/// The transformed output velocity the pre-kernel chain commands for one
-/// side's exact input state `(v, a, j)` at a seam — the seam-side law value,
-/// so a weld can tell the signal's own velocity step (an extrusion-ratio
-/// change under moving leaders, or the input acceleration jumping through
-/// the law) apart from the pipeline's fit residual, which alone is welded.
-fn chain_output_velocity(chain: &CompiledChain, v: f64, a: f64, j: f64) -> f64 {
-    match chain.leading_transform() {
-        Some(ChainStage::DerivativeGains { k1, k2 }) => v + k1 * a + k2 * j,
-        Some(ChainStage::NonlinearAdvance(advance)) => v + advance.slope(v) * a,
-        Some(ChainStage::SmoothKernel(_)) => unreachable!("zero-support transform is a kernel"),
-        None => v,
     }
 }
 

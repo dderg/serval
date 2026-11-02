@@ -1438,12 +1438,7 @@ fn a_drain_declares_the_park_after_its_last_segment() {
             trajectory::CompiledChain::default(),
             trajectory::CompiledChain::default(),
             trajectory::CompiledChain::default(),
-            trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
-                "pa",
-                &trajectory::algos::LinearPressureAdvance,
-                vec![0.05],
-            )])
-            .expect("single post-processor always compiles"),
+            e_chain(Some(0.05), 0.005),
         ],
         followers: vec![(3, vec![0, 1, 2])],
     };
@@ -3826,19 +3821,17 @@ fn projected_follower_seams_hold_velocity_across_emit_batches() {
     assert!(step < 1e-9, "follower velocity seam at {t}: {step} mm/s");
 }
 
+const IDLE_FOLLOWER_KERNEL_PIECES: usize = 5;
+
 /// A follower that never extrudes must not inherit the kernel-shaped leader
 /// lattice: travel and homing windows project as one constant piece, not
 /// hundreds of flat spline pieces — that fit starved real-time drip streams
-/// on small hosts (StallGuard false triggers during sensorless homing).
+/// on small hosts (StallGuard false triggers during sensorless homing). The
+/// follower's own kernel then adds only its own few breakpoints per window.
 #[test]
 fn idle_follower_projects_as_a_single_constant_piece() {
     let config = cfg();
-    let pa = trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
-        "linear_pressure_advance",
-        &trajectory::algos::LinearPressureAdvance,
-        vec![0.04],
-    )])
-    .unwrap();
+    let pa = e_chain(Some(0.04), 0.005);
     let kernel = smooth_x_chains(0.044583333333333336).chains[0].clone();
     let chains = AxisChainSet {
         chains: vec![
@@ -3864,7 +3857,7 @@ fn idle_follower_projects_as_a_single_constant_piece() {
         let e = &seg.axes[3];
         if let ContinuousAxis::PiecewiseRelativeSpline(pieces) = e {
             assert!(
-                pieces.len() <= 2,
+                pieces.len() <= IDLE_FOLLOWER_KERNEL_PIECES,
                 "idle follower window [{}, {}] burst into {} pieces",
                 seg.t_start,
                 seg.t_end,
@@ -4258,7 +4251,7 @@ fn an_advance_before_projection_stitches_across_a_dwell_at_rest() {
         eval_segment_axis(last, 3, last.t_end)
     };
     for leader_smooth_time in [Some(0.01), None] {
-        for e_smooth_time in [0.0, 0.02] {
+        for e_smooth_time in [0.005, 0.02] {
             let advanced = extruded(leader_smooth_time, tanh(e_smooth_time));
             let plain = extruded(leader_smooth_time, unadvanced(e_smooth_time));
             assert!(

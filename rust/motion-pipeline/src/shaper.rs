@@ -206,6 +206,7 @@ pub struct Shaper {
 
 impl Shaper {
     pub fn new(chains: AxisChainSet, fit_tol: FitTol) -> Self {
+        assert_followable(&chains);
         Self {
             forward_support: chains.forward_support(),
             back_support: chains.back_support(),
@@ -304,6 +305,7 @@ impl Shaper {
                                     state.clear_projected_history();
                                 }
                             }
+                            assert_followable(chains);
                             (self.forward_support, self.back_support) = (new_forward, new_back);
                             self.chains = chains.clone();
                         }
@@ -2933,6 +2935,18 @@ pub(crate) fn apply_derivative_gains_to_track(
         });
     }
     nurbs::bezier::bezier_pieces_to_discontinuous_nurbs(&out_pieces)
+}
+
+/// The shaper refuses a chain set it cannot follow: configuration refuses
+/// the same set first, so this only trips on a chain set built by hand.
+fn assert_followable(chains: &AxisChainSet) {
+    if let Some(axis) = chains.kernel_free_follower_transform() {
+        panic!(
+            "shaper: axis {axis} follows other axes and its chain advances it with no \
+             smoothing kernel: {}",
+            trajectory::FOLLOWER_TRANSFORM_WITHOUT_KERNEL
+        );
+    }
 }
 
 #[cfg(test)]
