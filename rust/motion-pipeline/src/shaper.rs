@@ -2166,7 +2166,7 @@ fn acceleration_error_witness<S: TrackSignal>(
     coefficients: &[f64],
     t0: f64,
     t1: f64,
-    budget: f64,
+    budget: FitTol,
 ) -> Option<f64> {
     sig.acceleration_monotonicity(next_toward(t0, t1), next_toward(t1, t0))?;
     let h = t1 - t0;
@@ -2188,12 +2188,13 @@ fn acceleration_error_witness<S: TrackSignal>(
 
 fn acceleration_interval_witness<S: TrackSignal>(
     sig: &S,
-    (t0, h, budget): (f64, f64, f64),
+    (t0, h, fit_tol): (f64, f64, FitTol),
     (left, right): (f64, f64),
     (a_left, a_right): (f64, f64),
     controls: &[f64],
     depth: u32,
 ) -> Option<f64> {
+    let budget = fit_tol.accel_budget_between(a_left, a_right);
     let candidate_min = controls.iter().copied().fold(f64::INFINITY, f64::min);
     let candidate_max = controls.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     if candidate_max - a_left.min(a_right) <= budget
@@ -2222,7 +2223,7 @@ fn acceleration_interval_witness<S: TrackSignal>(
     }
     acceleration_interval_witness(
         sig,
-        (t0, h, budget),
+        (t0, h, fit_tol),
         (left, mid),
         (a_left, truth),
         &lower[..n],
@@ -2231,7 +2232,7 @@ fn acceleration_interval_witness<S: TrackSignal>(
     .or_else(|| {
         acceleration_interval_witness(
             sig,
-            (t0, h, budget),
+            (t0, h, fit_tol),
             (mid, right),
             (truth, a_right),
             &upper[..n],
@@ -2366,9 +2367,7 @@ fn shaped_ladder<S: TrackSignal>(
         },
     ) {
         Ok(coefficients) => {
-            let Some(u) =
-                acceleration_error_witness(sig, &coefficients, t0, t1, fit_tol.accel_mm_s2)
-            else {
+            let Some(u) = acceleration_error_witness(sig, &coefficients, t0, t1, fit_tol) else {
                 return Ok((coefficients, None));
             };
             let t = t_of(u);

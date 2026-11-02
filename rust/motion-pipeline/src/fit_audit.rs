@@ -76,7 +76,7 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
         position = position
             .max((eval_mono(piece.mono_u, x) - truth_position).abs() / piece.fit_tol.pos_mm);
         let over = (eval_mono_dd(piece.mono_u, x) * acceleration_scale - truth_acceleration).abs()
-            / piece.fit_tol.accel_mm_s2;
+            / piece.fit_tol.accel_budget_at(truth_acceleration);
         if over > acceleration {
             acceleration = over;
             worst_u = u;

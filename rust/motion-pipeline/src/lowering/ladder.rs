@@ -401,7 +401,7 @@ fn candidate_ok(
         && LADDER_PROBES_U.iter().all(|&u| {
             (eval_mono(mono_u, u) - (truth.position)(u)).abs() <= budget.tol.pos_mm
                 && (eval_mono_dd(mono_u, u) * dd_scale - (truth.acceleration)(u)).abs()
-                    <= budget.tol.accel_mm_s2
+                    <= budget.tol.accel_budget_at((truth.acceleration)(u))
         })
 }
 
@@ -466,7 +466,7 @@ pub(crate) fn ladder_fit(
                 let velocity = (eval_mono_d(&last, probe) * (2.0 / h) - truth_v(probe)).abs()
                     / budget.velocity;
                 let acceleration = (eval_mono_dd(&last, probe) * dd_scale - truth_a(probe)).abs()
-                    / budget.tol.accel_mm_s2;
+                    / budget.tol.accel_budget_at(truth_a(probe));
                 position.max(velocity).max(acceleration)
             };
             score(left).total_cmp(&score(right))
