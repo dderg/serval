@@ -1875,19 +1875,40 @@ impl<'a> FollowerSignal<'a> {
         }
     }
 
+    /// `d²|v|/dt² = (|v|²|a|² − (v·a)²)/|v|³ + v·j/|v|`, with the first
+    /// numerator summed through Lagrange's identity as the squared pairwise
+    /// cross terms: the difference form cancels to rounding times `|a|²`,
+    /// which the division by a near-rest speed would amplify.
+    fn shaped_speed_second(&self, t: f64, speed: f64) -> f64 {
+        const MAX_LEADERS: usize = 3;
+        let leaders = self.shaped_axes.len();
+        assert!(
+            leaders <= MAX_LEADERS,
+            "a follower rides at most {MAX_LEADERS} leaders, got {leaders}"
+        );
+        let mut states = [(0.0, 0.0, 0.0, 0.0); MAX_LEADERS];
+        for (index, state) in states.iter_mut().take(leaders).enumerate() {
+            *state = self.leader_pvaj(index, t);
+        }
+        let states = &states[..leaders];
+        let mut cross_squared = 0.0;
+        for (index, &(_, v_i, a_i, _)) in states.iter().enumerate() {
+            for &(_, v_j, a_j, _) in &states[index + 1..] {
+                let cross = v_i * a_j - v_j * a_i;
+                cross_squared += cross * cross;
+            }
+        }
+        let velocity_dot_jerk = states.iter().map(|&(_, v, _, j)| v * j).sum::<f64>();
+        cross_squared / (speed * speed * speed) + velocity_dot_jerk / speed
+    }
+
     fn jerk(&self, t: f64) -> f64 {
         let speed = self.shaped_speed(t);
         let speed_derivative = self.shaped_speed_deriv_from_speed(t, speed);
         let speed_second = if speed == 0.0 || self.speed_zero_sliver(t).is_some() {
             0.0
         } else {
-            let numerator = (0..self.shaped_axes.len())
-                .map(|index| {
-                    let (_, velocity, acceleration, jerk) = self.leader_pvaj(index, t);
-                    acceleration * acceleration + velocity * jerk
-                })
-                .sum::<f64>();
-            (numerator - speed_derivative * speed_derivative) / speed
+            self.shaped_speed_second(t, speed)
         };
         let (ratio, slope) = self.state.ratio_and_slope(self.s_owned(t));
         let raw = self.raw_delta.map_or(0.0, |(axis, _)| {
