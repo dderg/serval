@@ -223,3 +223,64 @@ fn endpoint_velocity_zero_dedups_against_the_support_grid() {
     let at_start = breaks.iter().filter(|&&t| (t - t0).abs() <= 1e-12).count();
     assert_eq!(at_start, 1, "endpoint root duplicated in {breaks:?}");
 }
+
+const SEAM_PIECE_S: f64 = 0.01;
+
+fn velocity_seam_segment(pieces: usize, seam_velocity_jump: f64) -> ContinuousSegment {
+    let knot = |index: usize| 2.0 + index as f64 * SEAM_PIECE_S;
+    let (t0, t1) = (knot(0), knot(pieces));
+    let mut coeffs = vec![150.0, 100.0, 2_000.0, -30_000.0];
+    let mut x_pieces = Vec::with_capacity(pieces);
+    for index in 0..pieces {
+        let (u_start, u_end) = (knot(index), knot(index + 1));
+        let (position, velocity, acceleration) = super::polynomial_pva(&coeffs, u_end - u_start);
+        let next = vec![
+            position,
+            velocity + seam_velocity_jump,
+            0.5 * acceleration,
+            -coeffs[3],
+        ];
+        x_pieces.push(BezierPiece {
+            u_start,
+            u_end,
+            coeffs: std::mem::replace(&mut coeffs, next),
+        });
+    }
+    let x = bezier_pieces_to_nurbs(&x_pieces);
+    let piece = |coeffs| {
+        bezier_pieces_to_nurbs(&[BezierPiece {
+            u_start: t0,
+            u_end: t1,
+            coeffs,
+        }])
+    };
+    let held = Arc::new(piece(vec![0.0]));
+    ContinuousSegment {
+        axes: Arc::from([
+            ContinuousAxis::Spline(Arc::new(x)),
+            ContinuousAxis::Spline(Arc::new(piece(vec![157.0, -40.0, 3_000.0]))),
+            ContinuousAxis::Spline(Arc::clone(&held)),
+            ContinuousAxis::Spline(held),
+        ]),
+        followers: Arc::from([]),
+        spatial_path: true,
+        t_start: t0,
+        t_end: t1,
+        motor_mask: 0,
+        source_line: 1,
+        rest_at_end: false,
+    }
+}
+
+#[test]
+fn follower_odometer_measures_the_ingested_arc_across_a_velocity_seam() {
+    let shaped = velocity_seam_segment(8, 1e-6);
+    let state = FollowerState::default();
+    let sig = FollowerSignal::new(&shaped, &shaped, 3, &[0, 1], &state, 0.0, 0.0);
+    let ingested = super::leader_arc_length(&shaped, &[0, 1]);
+    let measured = sig.s_end() - sig.s_start;
+    assert!(
+        (measured - ingested).abs() <= super::span_alignment_envelope(ingested),
+        "follower odometer {measured} drifted from the ingested span length {ingested}"
+    );
+}

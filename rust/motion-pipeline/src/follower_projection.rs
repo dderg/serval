@@ -1292,19 +1292,10 @@ fn fit_continuous_axis(
 }
 
 fn leader_arc_length(seg: &ContinuousSegment, leaders: &[usize]) -> f64 {
-    let speed = |t: f64| {
-        leaders
-            .iter()
-            .map(|&axis| {
-                let velocity = axis_pva(&seg.axes[axis], t).1;
-                velocity * velocity
-            })
-            .sum::<f64>()
-            .sqrt()
-    };
+    let shaped = ShapedLeaders::of(seg, leaders);
     axis_grid(seg, leaders)
         .windows(2)
-        .map(|window| integrate(&speed, window[0], window[1]))
+        .map(|window| integrate(&|t| shaped.speed(t), window[0], window[1]))
         .sum()
 }
 
@@ -1501,13 +1492,45 @@ impl LeaderPieces {
     }
 }
 
+struct ShapedLeaders<'a> {
+    axes: Vec<&'a ContinuousAxis>,
+    pieces: Vec<Option<LeaderPieces>>,
+}
+
+impl<'a> ShapedLeaders<'a> {
+    fn of(seg: &'a ContinuousSegment, leaders: &[usize]) -> Self {
+        let axes: Vec<&'a ContinuousAxis> =
+            leaders.iter().map(|&leader| &seg.axes[leader]).collect();
+        let pieces = axes.iter().map(|axis| LeaderPieces::of(axis)).collect();
+        Self { axes, pieces }
+    }
+
+    fn pva(&self, index: usize, t: f64) -> (f64, f64, f64) {
+        if let Some(Some(pieces)) = self.pieces.get(index) {
+            if let Some(value) = pieces.pva(t) {
+                return value;
+            }
+        }
+        axis_pva(self.axes[index], t)
+    }
+
+    fn speed(&self, t: f64) -> f64 {
+        (0..self.axes.len())
+            .map(|index| {
+                let velocity = self.pva(index, t).1;
+                velocity * velocity
+            })
+            .sum::<f64>()
+            .sqrt()
+    }
+}
+
 pub(crate) struct FollowerSignal<'a> {
     state: &'a FollowerState,
     e_start: f64,
     s_start: f64,
     e_spans_start: f64,
-    shaped_axes: Vec<&'a ContinuousAxis>,
-    leader_pieces: Vec<Option<LeaderPieces>>,
+    shaped_leaders: ShapedLeaders<'a>,
     raw_delta: Option<(&'a ContinuousAxis, f64)>,
     grid: Vec<f64>,
     dense_t: Vec<f64>,
@@ -1529,12 +1552,7 @@ impl<'a> FollowerSignal<'a> {
         e_start: f64,
     ) -> Self {
         let (t0, t1) = projection_support(raw, shaped, axis, leaders);
-        let shaped_axes: Vec<&'a ContinuousAxis> =
-            leaders.iter().map(|&leader| &shaped.axes[leader]).collect();
-        let leader_pieces = shaped_axes
-            .iter()
-            .map(|axis| LeaderPieces::of(axis))
-            .collect();
+        let shaped_leaders = ShapedLeaders::of(shaped, leaders);
         let raw_delta =
             (!raw.spatial_path).then(|| (&raw.axes[axis], axis_pva(&raw.axes[axis], t0).0));
         let mut grid = vec![t0, t1];
@@ -1551,8 +1569,7 @@ impl<'a> FollowerSignal<'a> {
             e_start,
             s_start,
             e_spans_start: state.spans_e(s_start),
-            shaped_axes,
-            leader_pieces,
+            shaped_leaders,
             raw_delta,
             grid,
             dense_t: Vec::new(),
@@ -1587,29 +1604,18 @@ impl<'a> FollowerSignal<'a> {
     }
 
     fn leader_pva(&self, index: usize, t: f64) -> (f64, f64, f64) {
-        if let Some(Some(pieces)) = self.leader_pieces.get(index) {
-            if let Some(value) = pieces.pva(t) {
-                return value;
-            }
-        }
-        axis_pva(self.shaped_axes[index], t)
+        self.shaped_leaders.pva(index, t)
     }
 
     fn raw_shaped_speed(&self, t: f64) -> f64 {
-        (0..self.shaped_axes.len())
-            .map(|index| {
-                let velocity = self.leader_pva(index, t).1;
-                velocity * velocity
-            })
-            .sum::<f64>()
-            .sqrt()
+        self.shaped_leaders.speed(t)
     }
 
     fn raw_shaped_speed_deriv(&self, t: f64, speed: f64) -> f64 {
         if speed == 0.0 {
             return 0.0;
         }
-        (0..self.shaped_axes.len())
+        (0..self.shaped_leaders.axes.len())
             .map(|index| {
                 let (_, velocity, acceleration) = self.leader_pva(index, t);
                 velocity * acceleration
@@ -1619,7 +1625,7 @@ impl<'a> FollowerSignal<'a> {
     }
 
     fn raw_shaped_accel_norm(&self, t: f64) -> f64 {
-        (0..self.shaped_axes.len())
+        (0..self.shaped_leaders.axes.len())
             .map(|index| {
                 let acceleration = self.leader_pva(index, t).2;
                 acceleration * acceleration
@@ -1683,7 +1689,8 @@ impl<'a> FollowerSignal<'a> {
             0.0
         } else {
             let numerator = self
-                .shaped_axes
+                .shaped_leaders
+                .axes
                 .iter()
                 .map(|axis| {
                     let pvaj = axis
@@ -1863,7 +1870,7 @@ impl<'a> FollowerSignal<'a> {
         );
         nodes.push(support_end);
         let mut zeros = Vec::new();
-        for axis in &self.shaped_axes {
+        for axis in &self.shaped_leaders.axes {
             for window in nodes.windows(2) {
                 isolate_velocity_zeros(axis, window[0], window[1], &mut zeros);
             }
@@ -1993,7 +2000,8 @@ impl TrackSignal for FollowerSignal<'_> {
         let speed_deriv = self.shaped_speed_deriv_from_speed(t, speed);
         let (ratio, slope) = self.state.ratio_and_slope(s);
         let leaders = self
-            .shaped_axes
+            .shaped_leaders
+            .axes
             .iter()
             .enumerate()
             .map(|(index, axis)| (axis_pva(axis, t), self.leader_pva(index, t), axis.domain()))
