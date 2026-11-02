@@ -3936,3 +3936,59 @@ fn derivative_gains_preserve_one_sided_polynomial_law() {
         }
     }
 }
+
+/// A dwell after a drain leaves a time gap between stitched follower
+/// segments. The toolhead is at rest across it, so an advance before
+/// projection has no step to carry there: it must stitch straight across
+/// and leave the extruded total what it is without the advance.
+#[test]
+fn an_advance_before_projection_stitches_across_a_dwell_at_rest() {
+    let tanh = |e_smooth_time| {
+        nonlinear_e_chain(
+            &trajectory::algos::TanhPressureAdvance,
+            0.02,
+            0.05,
+            20.0,
+            e_smooth_time,
+        )
+    };
+    let unadvanced = |e_smooth_time| {
+        nonlinear_e_chain(
+            &trajectory::algos::TanhPressureAdvance,
+            0.0,
+            0.0,
+            20.0,
+            e_smooth_time,
+        )
+    };
+    let extruded = |leader_smooth_time, e_chain| {
+        let mut chains = follower_kernel_chains(leader_smooth_time, None, 0.0);
+        chains.chains[3] = e_chain;
+        let mut items = Vec::new();
+        for stroke in 0..3_u32 {
+            let x = 30.0 * f64::from(stroke);
+            items.push(StreamInput::Move(line(
+                stroke + 1,
+                [x, 0.0, 0.0],
+                [x + 30.0, 0.0, 0.0],
+                1.0,
+            )));
+            items.push(StreamInput::Drain);
+            items.push(StreamInput::Control(Control::Dwell { secs: 0.5 }));
+        }
+        let segs = replay_items(cfg(), chains, &[0.0, 0.0, 0.0, 0.0], items);
+        let last = segs.last().expect("the strokes produce segments");
+        eval_segment_axis(last, 3, last.t_end)
+    };
+    for leader_smooth_time in [Some(0.01), None] {
+        for e_smooth_time in [0.0, 0.02] {
+            let advanced = extruded(leader_smooth_time, tanh(e_smooth_time));
+            let plain = extruded(leader_smooth_time, unadvanced(e_smooth_time));
+            assert!(
+                (advanced - plain).abs() < 1e-9,
+                "leader smoothing {leader_smooth_time:?}, e smoothing {e_smooth_time}: the \
+                 advance changed the total across the dwells, {advanced} mm against {plain} mm"
+            );
+        }
+    }
+}

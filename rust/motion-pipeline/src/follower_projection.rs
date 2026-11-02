@@ -125,7 +125,26 @@ struct AdvanceStep {
     step_mm: f64,
 }
 
+/// Relative follower-velocity mismatch two evaluations of one continuous
+/// signal at a seam can show from rounding alone; measured mismatches sit
+/// near 1e-12.
+const ADVANCE_STEP_VELOCITY_ROUNDING: f64 = 1e-9;
+
+/// Follower velocity below which a stitch across a time gap counts as at
+/// rest.
+const REST_VELOCITY_MM_S: f64 = 1e-9;
+
 impl AdvanceStep {
+    fn is_rounding(&self) -> bool {
+        (self.velocity_after - self.velocity_before).abs()
+            <= ADVANCE_STEP_VELOCITY_ROUNDING
+                * self
+                    .velocity_before
+                    .abs()
+                    .max(self.velocity_after.abs())
+                    .max(1.0)
+    }
+
     fn between(stage: &ChainStage, t: f64, velocity_before: f64, velocity_after: f64) -> Self {
         Self {
             t,
@@ -184,16 +203,20 @@ fn fit_source_projection(
     let input_start = input_state(t_start);
     let input_end = input_state(t_end);
     let tolerance = follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis) * 0.5);
-    let window_advance_steps = match leading_stage {
+    let mut window_advance_steps = match leading_stage {
         Some(stage) => window_advance_steps(stage, &sig, &breakpoints.fit_seeds, (t_start, t_end))
-            .filter(|step| step.step_mm.abs() > tolerance.pos_mm)
+            .filter(|step| !step.is_rounding())
             .collect::<Vec<_>>(),
         None => Vec::new(),
     };
     if !kernel_follows {
-        if let Some(&step) = window_advance_steps.first() {
+        if let Some(&step) = window_advance_steps
+            .iter()
+            .find(|step| step.step_mm.abs() > tolerance.pos_mm)
+        {
             return Err(step.unrepresentable(axis, tolerance.pos_mm));
         }
+        window_advance_steps.clear();
     }
     let track = if let Some(value) = sig.constant_value() {
         bezier_pieces_to_nurbs(&[BezierPiece {
@@ -515,14 +538,14 @@ pub(crate) fn project_followers(
                     (t_start, input_start.1),
                 )
             }) {
-                Some(step) if kernel.is_some() => step.step_mm,
                 Some(step) => {
                     let tolerance =
-                        follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis)).pos_mm;
-                    if step.step_mm.abs() > tolerance {
+                        follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis) * 0.5)
+                            .pos_mm;
+                    if kernel.is_none() && step.step_mm.abs() > tolerance {
                         return Err(step.unrepresentable(axis, tolerance));
                     }
-                    0.0
+                    step.step_mm
                 }
                 None => 0.0,
             };
@@ -601,17 +624,12 @@ pub(crate) fn project_followers(
                     if join_step != 0.0 {
                         input_steps.push((segment.t_start, join_step));
                     }
-                    let mut pieces = split_at_steps(pieces, &segment.window_advance_steps);
-                    let mut window_steps = segment.window_advance_steps.iter().peekable();
-                    let mut stepped = join_step;
-                    for piece in &mut pieces {
-                        while let Some(step) = window_steps.next_if(|step| step.t <= piece.u_start)
-                        {
-                            stepped += step.step_mm;
-                            input_steps.push((piece.u_start, step.step_mm));
-                        }
-                        piece.coeffs[0] += segment_offset + stepped;
-                    }
+                    let pieces = with_window_steps(
+                        pieces,
+                        &segment.window_advance_steps,
+                        segment_offset + join_step,
+                        &mut input_steps,
+                    );
                     let tail = pieces.last().expect("a projected track has pieces");
                     carried = polynomial_pva(&tail.coeffs, tail.u_end - tail.u_start).0;
                     input_pieces.extend(pieces);
@@ -1020,9 +1038,10 @@ fn chain_output_velocity(chain: &CompiledChain, v: f64, a: f64, j: f64) -> f64 {
 /// Segment tracks are stitched end to start, which is exact only where the
 /// commanded signal is position-continuous. An advance applied before
 /// projection maps a follower velocity step at a join — an extrusion-ratio
-/// step taken at speed — onto a position step the stitch must carry: a
-/// kernel after the advance smooths it, and with none the step cannot be
-/// followed at all.
+/// step taken at speed — onto a position step the stitch must carry: the
+/// output base takes it, and the emission weld or a kernel after the
+/// advance spreads it. A time gap between the segments (a dwell after a
+/// drain) is legal only at rest, where there is nothing to carry.
 fn join_advance_step(
     stage: &ChainStage,
     axis: usize,
@@ -1030,17 +1049,23 @@ fn join_advance_step(
     (t_start, velocity_after): (f64, f64),
 ) -> Option<AdvanceStep> {
     let (previous_t_end, velocity_before) = previous_end?;
-    assert!(
-        (previous_t_end - t_start).abs() <= SEGMENT_TIME_EPS_S,
-        "follower axis {axis} stitches a segment starting at {t_start} onto one ending at \
-         {previous_t_end}"
-    );
+    if (previous_t_end - t_start).abs() > SEGMENT_TIME_EPS_S {
+        assert!(
+            velocity_before.abs() <= REST_VELOCITY_MM_S
+                && velocity_after.abs() <= REST_VELOCITY_MM_S,
+            "follower axis {axis} stitches a segment starting at {t_start} onto one ending at \
+             {previous_t_end} while moving ({velocity_before} -> {velocity_after} mm/s); a \
+             time gap between follower segments is legal only at rest"
+        );
+        return None;
+    }
     Some(AdvanceStep::between(
         stage,
         t_start,
         velocity_before,
         velocity_after,
     ))
+    .filter(|step| !step.is_rounding())
 }
 
 fn advance_offset(stage: &ChainStage, velocity: f64) -> f64 {
@@ -2472,6 +2497,36 @@ fn polynomial_pva(coeffs: &[f64], tau: f64) -> (f64, f64, f64) {
     (p, v, 2.0 * a)
 }
 
+/// One segment's fitted pieces, raised by `offset` and by every window step
+/// at and after its time, each step's time recorded in `steps_at`.
+fn with_window_steps(
+    pieces: Vec<BezierPiece>,
+    steps: &[AdvanceStep],
+    offset: f64,
+    steps_at: &mut Vec<(f64, f64)>,
+) -> Vec<BezierPiece> {
+    let mut pieces = split_at_steps(pieces, steps);
+    let mut pending = steps.iter().peekable();
+    let mut stepped = offset;
+    for piece in &mut pieces {
+        while let Some(step) = pending.next_if(|step| step.t <= piece.u_start) {
+            assert_eq!(
+                step.t, piece.u_start,
+                "advance step at {} was not split onto a piece start",
+                step.t
+            );
+            stepped += step.step_mm;
+            steps_at.push((piece.u_start, step.step_mm));
+        }
+        piece.coeffs[0] += stepped;
+    }
+    assert!(
+        pending.next().is_none(),
+        "advance step past the end of its segment's pieces"
+    );
+    pieces
+}
+
 /// Splits the pieces that straddle a step time there, so every step lands
 /// on a piece start: seed coalescing may have merged the step's seed into a
 /// neighbour.
@@ -2480,30 +2535,14 @@ fn split_at_steps(pieces: Vec<BezierPiece>, steps: &[AdvanceStep]) -> Vec<Bezier
     for mut piece in pieces {
         for step in steps {
             if step.t > piece.u_start && step.t < piece.u_end {
-                let tail = BezierPiece {
-                    u_start: step.t,
-                    u_end: piece.u_end,
-                    coeffs: taylor_shift(&piece.coeffs, step.t - piece.u_start),
-                };
-                piece.u_end = step.t;
-                out.push(piece);
+                let (head, tail) = nurbs::bezier::split_piece_at(&piece, step.t);
+                out.push(head);
                 piece = tail;
             }
         }
         out.push(piece);
     }
     out
-}
-
-/// The coefficients of `p(tau + shift)` from those of `p(tau)`.
-fn taylor_shift(coeffs: &[f64], shift: f64) -> Vec<f64> {
-    let mut shifted = coeffs.to_vec();
-    for start in 0..shifted.len() {
-        for index in (start..shifted.len() - 1).rev() {
-            shifted[index] = nurbs::fmadd(shifted[index + 1], shift, shifted[index]);
-        }
-    }
-    shifted
 }
 
 fn polynomial_pvaj(coeffs: &[f64], tau: f64) -> (f64, f64, f64, f64) {

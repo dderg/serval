@@ -1367,3 +1367,48 @@ fn an_advance_before_a_kernel_carries_its_ratio_steps_into_the_smoothing() {
         snap.seam_max_dp[EXTRUDER_AXIS]
     );
 }
+
+#[test]
+fn a_wipe_retract_before_a_kernel_conserves_extrusion() {
+    let mut waypoints = perimeter_waypoints(&[(10.0, 10.0), (20.0, 20.0)], [1.0; 4]);
+    let e = waypoints.last().expect("perimeter").3;
+    waypoints.push((20.0, 10.0, 0.0, e - 0.8, 150.0, 10_000.0));
+    waypoints.push((10.0, 5.0, 0.0, e - 0.8, 150.0, 10_000.0));
+    let unadvanced =
+        final_extruder_position(&extruder_snapshot(&waypoints, &[triangle_smoothing()]));
+    let snap = extruder_snapshot(&waypoints, &[tanh_advance(), triangle_smoothing()]);
+    let advanced = final_extruder_position(&snap);
+    assert!(
+        (advanced - unadvanced).abs() < 1e-6,
+        "a retract wiped along the path steps the ratio negative at speed; the advance \
+         must still leave the total alone: {advanced} mm with advance, {unadvanced} mm without"
+    );
+}
+
+/// Real slicer flow varies by fractions of a percent between moves, so
+/// most joins on a print carry an advance step well inside the fit
+/// tolerance. Each one is small; dropped, they add up.
+#[test]
+fn an_advance_with_no_kernel_conserves_extrusion_through_sub_tolerance_ratio_steps() {
+    let gcode = std::fs::read_to_string(format!(
+        "{}/../../snapshots/cases/neptune_cube/layer_5.gcode",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("read neptune cube layer");
+    let waypoints = waypoints::parse_gcode(&gcode, 300.0, 3000.0).expect("parse");
+    let final_e = |e_chain: &[planner_config::PostProcessorDecl]| {
+        let mut params = default_axis_snapshot_params();
+        let mut e = axis("e", &["x", "y", "z"]);
+        e.post_processors = e_chain.iter().map(|decl| decl.name.clone()).collect();
+        params.axis_decls = vec![e];
+        params.post_processor_decls = e_chain.to_vec();
+        final_extruder_position(&pipeline_snapshot(&waypoints, params).expect("snapshot"))
+    };
+    let unadvanced = final_e(&[]);
+    let advanced = final_e(&[linear_advance(0.03)]);
+    assert!(
+        (advanced - unadvanced).abs() < 1e-9,
+        "every advance step a join takes within the fit tolerance must be carried: \
+         {advanced} mm with advance, {unadvanced} mm without"
+    );
+}

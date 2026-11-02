@@ -248,3 +248,64 @@ fn follower_jerk_is_the_derivative_of_its_acceleration() {
         );
     }
 }
+
+fn window_step(t: f64, step_mm: f64) -> super::AdvanceStep {
+    super::AdvanceStep {
+        t,
+        velocity_before: 0.0,
+        velocity_after: 0.0,
+        step_mm,
+    }
+}
+
+fn piece_value(pieces: &[BezierPiece], t: f64) -> f64 {
+    let piece = pieces
+        .iter()
+        .rev()
+        .find(|piece| piece.u_start <= t)
+        .expect("t inside the pieces");
+    let tau = t - piece.u_start;
+    piece.coeffs.iter().rev().fold(0.0, |acc, &c| acc * tau + c)
+}
+
+#[test]
+fn a_window_step_inside_a_piece_splits_it_and_raises_what_follows() {
+    let pieces = vec![
+        BezierPiece {
+            u_start: 0.0,
+            u_end: 1.0,
+            coeffs: vec![1.0, 2.0, -3.0, 0.5],
+        },
+        BezierPiece {
+            u_start: 1.0,
+            u_end: 2.0,
+            coeffs: vec![0.5, 0.5, 1.5, -0.5],
+        },
+    ];
+    let steps = [window_step(0.25, 0.1), window_step(1.0, -0.2)];
+    let mut steps_at = Vec::new();
+    let stepped = super::with_window_steps(pieces.clone(), &steps, 10.0, &mut steps_at);
+    assert_eq!(
+        stepped
+            .iter()
+            .map(|piece| (piece.u_start, piece.u_end))
+            .collect::<Vec<_>>(),
+        vec![(0.0, 0.25), (0.25, 1.0), (1.0, 2.0)],
+        "the step inside the first piece must split it at its own time"
+    );
+    assert_eq!(steps_at, vec![(0.25, 0.1), (1.0, -0.2)]);
+    for (t, raised) in [
+        (0.1, 10.0),
+        (0.25, 10.1),
+        (0.7, 10.1),
+        (1.0, 9.9),
+        (1.6, 9.9),
+    ] {
+        let expected = piece_value(&pieces, t) + raised;
+        let got = piece_value(&stepped, t);
+        assert!(
+            (got - expected).abs() < 1e-12,
+            "at t={t} the stepped pieces read {got}, the source raised by {raised} {expected}"
+        );
+    }
+}
