@@ -2352,9 +2352,13 @@ fn edge_inset(h: f64, cubic_floor: f64, absorbed: f64) -> f64 {
 /// The velocity and acceleration a span is anchored to at one edge. Both
 /// are read at the seam itself, so neighbouring pieces meet with matching
 /// state wherever the signal is smooth — unless the acceleration past the
-/// edge's coalesced sliver differs from the seam reading by more than the
-/// fit tolerance: then a break hides in the sliver, and pinning the piece
-/// to the seam value would anchor it to the break's far side.
+/// edge's coalesced sliver, extrapolated back to the seam, misses the seam
+/// reading by more than the fit tolerance: then a break hides in the
+/// sliver, and pinning the piece to the seam value would anchor it to the
+/// break's far side. The extrapolation runs through a second read as far
+/// again past the sliver, so a smooth signal's jerk across a wide sliver
+/// cancels and only its snap times the squared sliver remains; the inset
+/// is at most a quarter span, so that read stays inside the span.
 fn edge_velocity_and_acceleration<S: TrackSignal>(
     sig: &S,
     axis: usize,
@@ -2366,7 +2370,10 @@ fn edge_velocity_and_acceleration<S: TrackSignal>(
     let velocity = exact_value(axis, velocity, seam)?;
     let seam_acceleration = exact_value(axis, seam_acceleration, seam)?;
     let past_acceleration = exact_value(axis, sig.second_deriv(past_sliver), past_sliver)?;
-    let acceleration = if (past_acceleration - seam_acceleration).abs() > fit_tol.accel_mm_s2 {
+    let beyond = nurbs::fmadd(2.0, past_sliver - seam, seam);
+    let beyond_acceleration = exact_value(axis, sig.second_deriv(beyond), beyond)?;
+    let extrapolated_to_seam = 2.0 * past_acceleration - beyond_acceleration;
+    let acceleration = if (extrapolated_to_seam - seam_acceleration).abs() > fit_tol.accel_mm_s2 {
         past_acceleration
     } else {
         seam_acceleration
