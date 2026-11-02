@@ -22,6 +22,9 @@ pub planner_config::AxisConfigError::UnknownFollowTarget::target: alloc::string:
 pub enum planner_config::PostProcessorConfigError
 pub planner_config::PostProcessorConfigError::Duplicate
 pub planner_config::PostProcessorConfigError::Duplicate::name: alloc::string::String
+pub planner_config::PostProcessorConfigError::FollowerAdvanceWithoutKernel
+pub planner_config::PostProcessorConfigError::FollowerAdvanceWithoutKernel::axis: alloc::string::String
+pub planner_config::PostProcessorConfigError::FollowerAdvanceWithoutKernel::name: alloc::string::String
 pub planner_config::PostProcessorConfigError::LeaderGainBeforeKernel
 pub planner_config::PostProcessorConfigError::LeaderGainBeforeKernel::axis: alloc::string::String
 pub planner_config::PostProcessorConfigError::LeaderGainBeforeKernel::name: alloc::string::String

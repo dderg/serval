@@ -8,10 +8,11 @@ use trajectory::{
     RelativeSplinePiece, ShapedSignal, next_toward,
 };
 
-use crate::follower_projection::{FollowerState, advance_before_projection, project_followers};
+use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
-    AccelerationTrend, FitTol, LADDER_PROBES_U, LadderBudget, LadderFailure, LadderPolicy,
-    LadderPva, LadderSpan, LadderTruth, VelocitySign, exact_piece, ladder_fit, quintic_in_u,
+    AccelerationTrend, FitTol, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget, LadderFailure,
+    LadderPolicy, LadderPva, LadderSpan, LadderTruth, VelocitySign, exact_piece, ladder_fit,
+    quintic_in_u,
 };
 use crate::types::{BaseItem, Control, PostProcessError, TrajectoryItem};
 
@@ -49,6 +50,30 @@ impl TrackSignal for ContinuousAxis {
     }
 }
 
+impl<S: TrackSignal> TrackSignal for &S {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        S::eval_pva(self, t)
+    }
+    fn eval(&self, t: f64) -> f64 {
+        S::eval(self, t)
+    }
+    fn deriv(&self, t: f64) -> f64 {
+        S::deriv(self, t)
+    }
+    fn second_deriv(&self, t: f64) -> f64 {
+        S::second_deriv(self, t)
+    }
+    fn position_delta(&self, from: (f64, f64), to: (f64, f64)) -> f64 {
+        S::position_delta(self, from, to)
+    }
+    fn acceleration_monotonicity(&self, start: f64, end: f64) -> Option<AccelerationTrend> {
+        S::acceleration_monotonicity(self, start, end)
+    }
+    fn diagnostic(&self, t: f64) -> Option<String> {
+        S::diagnostic(self, t)
+    }
+}
+
 impl<F> TrackSignal for ShapedSignal<'_, F>
 where
     F: Fn(f64) -> f64,
@@ -63,18 +88,18 @@ where
 /// `base`. Fitting a shifted view keeps every fit source near zero without
 /// changing what the convolution means, so the emitted track carries its own
 /// relative base instead of an unbounded cumulative one.
-pub(crate) struct ShiftedTrackSignal<'a, S: TrackSignal> {
-    inner: &'a S,
+pub(crate) struct ShiftedTrackSignal<S: TrackSignal> {
+    inner: S,
     base: f64,
 }
 
-impl<'a, S: TrackSignal> ShiftedTrackSignal<'a, S> {
-    pub(crate) fn new(inner: &'a S, base: f64) -> Self {
+impl<S: TrackSignal> ShiftedTrackSignal<S> {
+    pub(crate) fn new(inner: S, base: f64) -> Self {
         Self { inner, base }
     }
 }
 
-impl<S: TrackSignal> TrackSignal for ShiftedTrackSignal<'_, S> {
+impl<S: TrackSignal> TrackSignal for ShiftedTrackSignal<S> {
     fn eval(&self, t: f64) -> f64 {
         self.inner.eval(t) - self.base
     }
@@ -182,6 +207,7 @@ pub struct Shaper {
 
 impl Shaper {
     pub fn new(chains: AxisChainSet, fit_tol: FitTol) -> Self {
+        assert_followable(&chains);
         Self {
             forward_support: chains.forward_support(),
             back_support: chains.back_support(),
@@ -280,6 +306,7 @@ impl Shaper {
                                     state.clear_projected_history();
                                 }
                             }
+                            assert_followable(chains);
                             (self.forward_support, self.back_support) = (new_forward, new_back);
                             self.chains = chains.clone();
                         }
@@ -811,61 +838,99 @@ fn fit_axis_column(
     if let Some(column) = constant_axis_column(&signal_segments, targets, axis) {
         return Ok(Some(column));
     }
-    let input_breaks = signal_breakpoints(&signal_segments, axis);
-    let shaped_breaks = shaped_signal_breakpoints(kernel, &input_breaks);
-    let kernel_degree = kernel
-        .pieces
-        .iter()
-        .map(|piece| piece.degree())
-        .max()
-        .expect("shaper kernel has no pieces");
     let bounds = SignalBounds {
         first_t,
         last_t,
         boundary,
         lookahead,
     };
-    let table = Arc::new(
-        AxisSignalTable::build(&signal_segments, axis, bounds).with_piece_moments(kernel_degree),
-    );
-    let input_degree = table.max_degree();
     fit_axis_targets(
         axis,
         targets,
-        ShapedSignalSource {
+        ShapedSignalSource::new(
             kernel,
-            table,
-            input_breaks,
-            shaped_breaks,
-            input_degree,
-        },
+            AxisSignalTable::build(&signal_segments, axis, bounds),
+            signal_breakpoints(&signal_segments, axis),
+            targets[0].t_start,
+        ),
         fit_tol,
         target_workers,
-        rides_an_advanced_follower(request.chains, axis),
     )
     .map(Some)
-}
-
-fn rides_an_advanced_follower(chains: &AxisChainSet, leader: usize) -> bool {
-    chains.projected_followers().any(|(follower, leaders)| {
-        leaders.contains(&leader)
-            && chains
-                .chains
-                .get(follower)
-                .and_then(advance_before_projection)
-                .is_some()
-    })
 }
 
 /// The convolution's input for one axis, packaged for the target fits: the
 /// kernel, the flattened signal it integrates, and the breakpoint sets that
 /// seed the input and shaped partitions.
-struct ShapedSignalSource<'a> {
+pub(crate) struct ShapedSignalSource<'a> {
     kernel: &'a nurbs::algebra::PiecewisePolynomialKernel,
     table: Arc<AxisSignalTable>,
     input_breaks: Vec<f64>,
     shaped_breaks: Vec<f64>,
     input_degree: usize,
+    shaped_offset: f64,
+}
+
+const KERNEL_MASS_TOLERANCE: f64 = 1e-9;
+
+pub(crate) fn unit_kernel_mass(kernel: &nurbs::algebra::PiecewisePolynomialKernel) -> f64 {
+    let mass = trajectory::kernel_mass(kernel);
+    assert!(
+        (mass - 1.0).abs() <= KERNEL_MASS_TOLERANCE,
+        "shaper kernel integrates to {mass}, not 1: it would scale every position it shapes"
+    );
+    mass
+}
+
+impl<'a> ShapedSignalSource<'a> {
+    pub(crate) fn new(
+        kernel: &'a nurbs::algebra::PiecewisePolynomialKernel,
+        input: AxisSignalTable,
+        input_breaks: Vec<f64>,
+        offset_at: f64,
+    ) -> Self {
+        let kernel_degree = kernel
+            .pieces
+            .iter()
+            .map(|piece| piece.degree())
+            .max()
+            .expect("shaper kernel has no pieces");
+        let input_offset = input.eval_hinted(offset_at, &std::cell::Cell::new(0));
+        assert!(
+            input_offset.is_finite(),
+            "shaper: convolution input offset at t={offset_at} is not finite"
+        );
+        let table = Arc::new(
+            input
+                .offset_by(input_offset)
+                .with_piece_moments(kernel_degree),
+        );
+        Self {
+            kernel,
+            shaped_breaks: shaped_signal_breakpoints(kernel, &input_breaks),
+            input_degree: table.max_degree(),
+            table,
+            input_breaks,
+            shaped_offset: input_offset * unit_kernel_mass(kernel),
+        }
+    }
+
+    pub(crate) fn signal(&self) -> impl TrackSignal + use<'_, 'a> {
+        let eval_table = Arc::clone(&self.table);
+        let moment_table = Arc::clone(&self.table);
+        let piece_hint = std::cell::Cell::new(0);
+        let relative = ShapedSignal::new_from_polynomial_evaluator(
+            self.kernel,
+            move |t| eval_table.eval_hinted(t, &piece_hint),
+            self.input_breaks.clone(),
+            self.input_degree,
+            move |lo, hi, degree, origin, orders| {
+                moment_table.integrate_moments(lo, hi, degree, origin, orders)
+            },
+            self.table.input_jumps().to_vec(),
+        );
+        ShiftedTrackSignal::new(relative, -self.shaped_offset)
+    }
 }
 
 fn fit_axis_targets(
@@ -874,34 +939,12 @@ fn fit_axis_targets(
     source: ShapedSignalSource,
     fit_tol: FitTol,
     target_workers: usize,
-    velocity_continuous: bool,
 ) -> Result<Vec<nurbs::ScalarNurbs>, PostProcessError> {
-    let ShapedSignalSource {
-        kernel,
-        table,
-        input_breaks,
-        shaped_breaks,
-        input_degree,
-    } = source;
     if targets.is_empty() {
         return Ok(Vec::new());
     }
-    let input_jumps = table.input_jumps().to_vec();
-    let make_sig = || {
-        let eval_table = Arc::clone(&table);
-        let moment_table = Arc::clone(&table);
-        let piece_hint = std::cell::Cell::new(0);
-        ShapedSignal::new_from_polynomial_evaluator(
-            kernel,
-            move |t| eval_table.eval_hinted(t, &piece_hint),
-            input_breaks.clone(),
-            input_degree,
-            move |lo, hi, degree, origin, orders| {
-                moment_table.integrate_moments(lo, hi, degree, origin, orders)
-            },
-            input_jumps.clone(),
-        )
-    };
+    let shaped_breaks = &source.shaped_breaks;
+    let make_sig = || source.signal();
     let max_seed_spans = targets
         .iter()
         .map(|target| {
@@ -918,10 +961,10 @@ fn fit_axis_targets(
                     axis,
                     t_start: target.t_start,
                     t_end: target.t_end,
-                    seed_breakpoints: &shaped_breaks,
+                    seed_breakpoints: shaped_breaks,
                     fit_tol,
                     fit_context: "smooth_kernel_target",
-                    velocity_continuous,
+                    velocity_continuous: true,
                 },
                 sig,
             )?;
@@ -974,7 +1017,7 @@ fn fit_axis_targets(
     let plan_started = crate::timing::stopwatch();
     let seed_sets = targets
         .iter()
-        .map(|target| fit_seed_times(axis, target.t_start, target.t_end, &shaped_breaks))
+        .map(|target| fit_seed_times(axis, target.t_start, target.t_end, shaped_breaks))
         .collect::<Result<Vec<_>, _>>()?;
     let mut scale_times = seed_sets
         .iter()
@@ -1076,6 +1119,7 @@ fn fit_axis_targets(
             RefineSpan {
                 t0: t_start,
                 t1: t_end,
+                slivers: plan.slivers[span_index],
             },
             &SpanFitPolicy {
                 axis,
@@ -1084,7 +1128,7 @@ fn fit_axis_targets(
                 velocity_budget: f64::INFINITY,
                 floors: plan.floors,
                 velocity_sign: VelocitySign::Unconstrained,
-                velocity_continuous,
+                velocity_continuous: true,
             },
             SpanSeeds {
                 lower: t_start,
@@ -1180,10 +1224,10 @@ fn fit_axis_targets(
                     axis,
                     t_start: targets[target_index].t_start,
                     t_end: targets[target_index].t_end,
-                    seed_breakpoints: &shaped_breaks,
+                    seed_breakpoints: shaped_breaks,
                     fit_tol,
                     fit_context: "smooth_kernel_target",
-                    velocity_continuous,
+                    velocity_continuous: true,
                 },
                 &sig,
             )?
@@ -1604,6 +1648,13 @@ impl AxisSignalTable {
         table
     }
 
+    pub(crate) fn offset_by(mut self, offset: f64) -> Self {
+        for coefficients in &mut self.coeffs {
+            coefficients[0] -= offset;
+        }
+        self
+    }
+
     pub(crate) fn max_degree(&self) -> usize {
         self.coeffs
             .iter()
@@ -1899,6 +1950,18 @@ const MIN_DEVICE_INTERVAL_S: f64 = 2e-9;
 /// be handed — is the one that still leaves the budget to the signal.
 const LADDER_HIGH_DEGREE_ACCEL_NOISE_GAIN: f64 = 32.0;
 
+fn stored_acceleration_noise(position_scale: f64, span_s: f64) -> f64 {
+    let control_point_rounding = 0.5 * f64::EPSILON * position_scale;
+    let second_difference_rounding = 4.0 * control_point_rounding;
+    let degree = LADDER_MAX_DEGREE as f64;
+    degree * (degree - 1.0) * second_difference_rounding / (span_s * span_s)
+}
+
+fn stored_acceleration_floor(position_scale: f64, fit_tol: FitTol) -> f64 {
+    let storage_share_of_accel_budget = 0.5 * fit_tol.accel_mm_s2;
+    (stored_acceleration_noise(position_scale, 1.0) / storage_share_of_accel_budget).sqrt()
+}
+
 #[derive(Debug, Clone, Copy)]
 struct LadderFloors {
     high_degree: f64,
@@ -1939,7 +2002,9 @@ fn ladder_resolution_floor_from_scales(
     fit_tol: FitTol,
 ) -> LadderFloors {
     let sample_noise = f64::EPSILON * nurbs::fmadd(time_scale, velocity_scale, position_scale);
-    let representable = MIN_DEVICE_INTERVAL_S.max(8.0 * f64::EPSILON * time_scale);
+    let representable = MIN_DEVICE_INTERVAL_S
+        .max(8.0 * f64::EPSILON * time_scale)
+        .max(stored_acceleration_floor(position_scale, fit_tol));
     LadderFloors {
         high_degree: representable
             .max((LADDER_HIGH_DEGREE_ACCEL_NOISE_GAIN * sample_noise / fit_tol.accel_mm_s2).sqrt()),
@@ -1953,30 +2018,69 @@ fn ladder_resolution_floor_from_scales(
 /// full-width span evaluates to garbage. Exact convolution cut transitions
 /// land an ulp away from segment edges by construction, so the collision is
 /// routine rather than exceptional. Each cluster collapses to its rightmost
-/// member — the transitions are right-owned, and the sub-ulp interval that
+/// member — the transitions are right-owned, and the sub-floor interval that
 /// gets absorbed into the span on the left carries no integral. `t_start` and
 /// `t_end` are pinned, so a cluster touching the start keeps the start.
-fn coalesce_degenerate_seeds(seeds: &mut Vec<f64>, minimum_span: f64) {
+///
+/// The absorbed seeds may still be real breaks of the signal, so the plan
+/// records, per kept span, how far in from each edge they reach: the ladder
+/// must read that edge's state past them.
+fn coalesce_degenerate_seeds(seeds: &mut Vec<f64>, minimum_span: f64) -> Vec<EdgeSlivers> {
     let t_end = *seeds.last().expect("fit seeds are empty");
     let mut kept = Vec::with_capacity(seeds.len());
+    let mut absorbed_before = Vec::with_capacity(seeds.len());
+    let mut absorbed_after_start = 0.0_f64;
     kept.push(seeds[0]);
+    absorbed_before.push(0.0);
     for &seed in &seeds[1..seeds.len() - 1] {
-        if seed - *kept.last().expect("kept seeds are empty") >= minimum_span {
+        let last = *kept.last().expect("kept seeds are empty");
+        if seed - last >= minimum_span {
             kept.push(seed);
+            absorbed_before.push(0.0);
         } else if kept.len() > 1 {
             kept.pop();
+            let carried = absorbed_before
+                .pop()
+                .expect("absorbed widths track kept seeds");
             kept.push(seed);
+            absorbed_before.push(carried + (seed - last));
+        } else {
+            absorbed_after_start = absorbed_after_start.max(seed - last);
         }
     }
+    let mut absorbed_end = 0.0_f64;
     while kept.len() > 1 && t_end - *kept.last().expect("kept seeds are empty") < minimum_span {
-        kept.pop();
+        let dropped = kept.pop().expect("kept seeds are empty");
+        let carried = absorbed_before
+            .pop()
+            .expect("absorbed widths track kept seeds");
+        absorbed_end = absorbed_end.max(t_end - dropped + carried);
     }
     kept.push(t_end);
+    absorbed_before.push(absorbed_end);
     *seeds = kept;
+    (1..seeds.len())
+        .map(|span_end| EdgeSlivers {
+            start: if span_end == 1 {
+                absorbed_after_start
+            } else {
+                0.0
+            },
+            end: absorbed_before[span_end],
+        })
+        .collect()
+}
+
+/// How far into a span, from each edge, seeds absorbed by coalescing reach.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+struct EdgeSlivers {
+    start: f64,
+    end: f64,
 }
 
 struct FitPlan {
     seeds: Vec<f64>,
+    slivers: Vec<EdgeSlivers>,
     floors: LadderFloors,
 }
 
@@ -2010,8 +2114,12 @@ fn fit_seed_times(
 }
 
 fn fit_plan_from_seeds(mut seeds: Vec<f64>, floors: LadderFloors) -> FitPlan {
-    coalesce_degenerate_seeds(&mut seeds, floors.cubic);
-    FitPlan { seeds, floors }
+    let slivers = coalesce_degenerate_seeds(&mut seeds, floors.cubic);
+    FitPlan {
+        seeds,
+        slivers,
+        floors,
+    }
 }
 
 fn prepare_fit_plan<S: TrackSignal>(
@@ -2082,12 +2190,13 @@ pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
     };
     let mut refinement_splits = 0;
     let mut pieces = Vec::with_capacity(plan.seeds.len());
-    for span in plan.seeds.windows(2) {
+    for (span, &slivers) in plan.seeds.windows(2).zip(&plan.slivers) {
         refine_shaped_span(
             sig,
             RefineSpan {
                 t0: span[0],
                 t1: span[1],
+                slivers,
             },
             &policy,
             SpanSeeds {
@@ -2240,6 +2349,7 @@ struct SpanFitPolicy {
 struct RefineSpan {
     t0: f64,
     t1: f64,
+    slivers: EdgeSlivers,
 }
 
 /// The partition seeds the refined span sits between, reported by a fit
@@ -2259,10 +2369,50 @@ struct SpanSeeds {
 /// matter which rung wins. Returns the accepted monomial-in-u fit, or the
 /// quintic base with `fits = false` so the caller can bisect.
 #[allow(clippy::type_complexity)]
+/// How far inside a span edge the state the ladder anchors to is read: past
+/// whatever coalescing absorbed there, and at least a cubic floor, but no
+/// more than a quarter of the span.
+fn edge_inset(h: f64, cubic_floor: f64, absorbed: f64) -> f64 {
+    cubic_floor.max(absorbed).min(0.25 * h)
+}
+
+/// The velocity and acceleration a span is anchored to at one edge. Both
+/// are read at the seam itself, so neighbouring pieces meet with matching
+/// state wherever the signal is smooth — unless the acceleration past the
+/// edge's coalesced sliver, extrapolated back to the seam, misses the seam
+/// reading by more than the fit tolerance: then a break hides in the
+/// sliver, and pinning the piece to the seam value would anchor it to the
+/// break's far side. The extrapolation runs through a second read as far
+/// again past the sliver, so a smooth signal's jerk across a wide sliver
+/// cancels and only its snap times the squared sliver remains; the inset
+/// is at most a quarter span, so that read stays inside the span.
+fn edge_velocity_and_acceleration<S: TrackSignal>(
+    sig: &S,
+    axis: usize,
+    seam: f64,
+    past_sliver: f64,
+    fit_tol: FitTol,
+) -> Result<(f64, f64), PostProcessError> {
+    let (_, velocity, seam_acceleration) = sig.eval_pva(seam);
+    let velocity = exact_value(axis, velocity, seam)?;
+    let seam_acceleration = exact_value(axis, seam_acceleration, seam)?;
+    let past_acceleration = exact_value(axis, sig.second_deriv(past_sliver), past_sliver)?;
+    let beyond = nurbs::fmadd(2.0, past_sliver - seam, seam);
+    let beyond_acceleration = exact_value(axis, sig.second_deriv(beyond), beyond)?;
+    let extrapolated_to_seam = 2.0 * past_acceleration - beyond_acceleration;
+    let acceleration = if (extrapolated_to_seam - seam_acceleration).abs() > fit_tol.accel_mm_s2 {
+        past_acceleration
+    } else {
+        seam_acceleration
+    };
+    Ok((velocity, acceleration))
+}
+
 fn shaped_ladder<S: TrackSignal>(
     sig: &S,
     t0: f64,
     t1: f64,
+    slivers: EdgeSlivers,
     policy: &SpanFitPolicy,
 ) -> Result<(Vec<f64>, Option<LadderFailure>), PostProcessError> {
     let axis = policy.axis;
@@ -2280,14 +2430,22 @@ fn shaped_ladder<S: TrackSignal>(
     };
     let t0_inside = interior_t_of(-1.0);
     let p0 = exact_value(axis, sig.eval(t0), t0)?;
-    let (_, v0, a0) = sig.eval_pva(t0_inside);
-    let v0 = exact_value(axis, v0, t0_inside)?;
-    let a0 = exact_value(axis, a0, t0_inside)?;
+    let (v0, a0) = edge_velocity_and_acceleration(
+        sig,
+        axis,
+        t0_inside,
+        t0 + edge_inset(h, policy.floors.cubic, slivers.start),
+        fit_tol,
+    )?;
     let t1_inside = interior_t_of(1.0);
     let p1 = exact_value(axis, sig.eval(t1), t1)?;
-    let (_, v1, a1) = sig.eval_pva(t1_inside);
-    let v1 = exact_value(axis, v1, t1_inside)?;
-    let a1 = exact_value(axis, a1, t1_inside)?;
+    let (v1, a1) = edge_velocity_and_acceleration(
+        sig,
+        axis,
+        t1_inside,
+        t1 - edge_inset(h, policy.floors.cubic, slivers.end),
+        fit_tol,
+    )?;
     let base = quintic_in_u((p0, v0, a0), (p1, v1, a1), h);
     let endpoint_delta = exact_value(axis, sig.position_delta((t0, p0), (t1, p1)), t1)?;
 
@@ -2399,12 +2557,30 @@ fn refine_shaped_span<S: TrackSignal>(
     refinement_splits: &mut usize,
     out: &mut Vec<BezierPiece>,
 ) -> Result<(), PostProcessError> {
-    let RefineSpan { t0, t1 } = span;
+    let RefineSpan { t0, t1, slivers } = span;
     let fit_tol = policy.fit_tol;
     let velocity_budget = policy.velocity_budget;
     let floors = policy.floors;
-    let (mono_u, failure) = shaped_ladder(sig, t0, t1, policy)?;
+    let (mono_u, failure) = shaped_ladder(sig, t0, t1, slivers, policy)?;
     if failure.is_none() {
+        #[cfg(feature = "fit-audit")]
+        crate::fit_audit::check(
+            sig,
+            crate::fit_audit::AcceptedPiece {
+                fit_context: policy.fit_context,
+                axis: policy.axis,
+                fit_tol,
+                t0,
+                t1,
+                mono_u: &mono_u,
+                accepted_at_floor: false,
+                cubic_floor: floors.cubic,
+                edge_insets: (
+                    edge_inset(t1 - t0, floors.cubic, slivers.start),
+                    edge_inset(t1 - t0, floors.cubic, slivers.end),
+                ),
+            },
+        );
         out.push(exact_piece(&mono_u, t0, t1, t1 - t0));
         return Ok(());
     }
@@ -2419,6 +2595,24 @@ fn refine_shaped_span<S: TrackSignal>(
                 .acceleration_monotonicity(next_toward(t0, t1), next_toward(t1, t0))
                 .is_none()
         {
+            #[cfg(feature = "fit-audit")]
+            crate::fit_audit::check(
+                sig,
+                crate::fit_audit::AcceptedPiece {
+                    fit_context: policy.fit_context,
+                    axis: policy.axis,
+                    fit_tol,
+                    t0,
+                    t1,
+                    mono_u: &mono_u,
+                    accepted_at_floor: true,
+                    cubic_floor: floors.cubic,
+                    edge_insets: (
+                        edge_inset(t1 - t0, floors.cubic, slivers.start),
+                        edge_inset(t1 - t0, floors.cubic, slivers.end),
+                    ),
+                },
+            );
             out.push(exact_piece(&mono_u, t0, t1, t1 - t0));
             return Ok(());
         }
@@ -2459,7 +2653,14 @@ fn refine_shaped_span<S: TrackSignal>(
     *refinement_splits += 1;
     refine_shaped_span(
         sig,
-        RefineSpan { t0, t1: tm },
+        RefineSpan {
+            t0,
+            t1: tm,
+            slivers: EdgeSlivers {
+                start: slivers.start,
+                end: 0.0,
+            },
+        },
         policy,
         seeds,
         refinement_splits,
@@ -2467,7 +2668,14 @@ fn refine_shaped_span<S: TrackSignal>(
     )?;
     refine_shaped_span(
         sig,
-        RefineSpan { t0: tm, t1 },
+        RefineSpan {
+            t0: tm,
+            t1,
+            slivers: EdgeSlivers {
+                start: 0.0,
+                end: slivers.end,
+            },
+        },
         policy,
         seeds,
         refinement_splits,
@@ -2643,7 +2851,7 @@ pub(crate) fn apply_nonlinear_advance_to_track(
             seed_breakpoints: &breakpoints,
             fit_tol,
             fit_context: "nonlinear_advance",
-            velocity_continuous: false,
+            velocity_continuous: true,
         },
         &sig,
     )
@@ -2853,6 +3061,18 @@ pub(crate) fn apply_derivative_gains_to_track(
     nurbs::bezier::bezier_pieces_to_discontinuous_nurbs(&out_pieces)
 }
 
+/// The shaper refuses a chain set it cannot follow: configuration refuses
+/// the same set first, so this only trips on a chain set built by hand.
+fn assert_followable(chains: &AxisChainSet) {
+    if let Some(axis) = chains.kernel_free_follower_transform() {
+        panic!(
+            "shaper: axis {axis} follows other axes and its chain advances it with no \
+             smoothing kernel: {}",
+            trajectory::FOLLOWER_TRANSFORM_WITHOUT_KERNEL
+        );
+    }
+}
+
 #[cfg(test)]
 #[path = "shaper_moment_tests.rs"]
 mod shaper_moment_tests;
@@ -2860,3 +3080,15 @@ mod shaper_moment_tests;
 #[cfg(test)]
 #[path = "shaper_refinement_tests.rs"]
 mod shaper_refinement_tests;
+
+#[cfg(test)]
+#[path = "shaper_offset_tests.rs"]
+mod shaper_offset_tests;
+
+#[cfg(test)]
+#[path = "shaper_storage_tests.rs"]
+mod shaper_storage_tests;
+
+#[cfg(test)]
+#[path = "shaper_edge_tests.rs"]
+mod shaper_edge_tests;

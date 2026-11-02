@@ -76,6 +76,29 @@ fn from_bernstein_to_monomial_for_known_case() {
     assert!((p.coeffs[1] - 1.0).abs() < 1e-12);
 }
 
+#[test]
+fn from_bernstein_derivatives_ignore_the_offset_of_the_control_points() {
+    let offset = 300.0;
+    let h = 1.0e-6;
+    let local: Vec<f64> = (0..14)
+        .map(|i| {
+            let u = f64::from(i) / 13.0;
+            3.0e-4 * u + 1.0e-8 * u * u
+        })
+        .collect();
+    let far: Vec<f64> = local.iter().map(|b| b + offset).collect();
+    let exactly_local: Vec<f64> = far.iter().map(|b| b - offset).collect();
+    let near_piece = BezierPiece::from_bernstein(&exactly_local, 0.0, h);
+    let far_piece = BezierPiece::from_bernstein(&far, 0.0, h);
+    assert_eq!(far_piece.coeffs[0] - offset, near_piece.coeffs[0]);
+    for k in 1..far_piece.coeffs.len() {
+        assert_eq!(
+            far_piece.coeffs[k], near_piece.coeffs[k],
+            "monomial coefficient {k} depends on where the piece sits"
+        );
+    }
+}
+
 use crate::ScalarNurbs;
 
 #[test]
