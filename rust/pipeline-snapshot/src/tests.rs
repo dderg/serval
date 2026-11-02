@@ -1217,3 +1217,34 @@ fn default_gcode_circle_loops_stay_concentric_across_corner_deviation() {
         );
     }
 }
+
+#[test]
+fn pressure_advance_alone_follows_shaped_leaders_away_from_rest() {
+    let waypoints = vec![
+        (0.0, 0.0, 0.0, 0.0, 50.0, 10_000.0),
+        (60.0, 0.0, 0.0, 2.0, 50.0, 10_000.0),
+        (60.0, 60.0, 0.0, 4.0, 50.0, 10_000.0),
+    ];
+    let mut params = default_axis_snapshot_params();
+    params.max_velocity = 1000.0;
+    params.max_accel = 10_000.0;
+    params.corner_deviation = 0.04;
+    let mut x = axis("x", &[]);
+    x.post_processors = vec!["shx".to_string()];
+    let mut y = axis("y", &[]);
+    y.post_processors = vec!["shy".to_string()];
+    let mut e = axis("e", &["x", "y", "z"]);
+    e.post_processors = vec!["pa".to_string()];
+    params.axis_decls = vec![x, y, e];
+    params.post_processor_decls = vec![
+        pp("shx", "smooth_mzv", &[("frequency_hz", 191.0)]),
+        pp("shy", "smooth_mzv", &[("frequency_hz", 129.4)]),
+        pp("pa", "linear_pressure_advance", &[("k", 0.02)]),
+    ];
+    let snap = pipeline_snapshot(&waypoints, params).unwrap();
+    let e_end = position(&snap.trajectory, EXTRUDER_AXIS, snap.trajectory.t_end());
+    assert!(
+        (e_end - 4.0).abs() < 0.05,
+        "the extruder must end near the commanded 4 mm, ended at {e_end}"
+    );
+}

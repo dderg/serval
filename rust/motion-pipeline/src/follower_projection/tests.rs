@@ -4,6 +4,7 @@ use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 use trajectory::{ContinuousAxis, ContinuousSegment};
 
 use super::{FollowerSignal, FollowerState, integrate};
+use crate::shaper::TrackSignal;
 
 /// Regression for the bench crash "shaper: axis 3: shaped sample is
 /// non-finite": deep into a long stream the odometer's ulp exceeds
@@ -222,6 +223,29 @@ fn endpoint_velocity_zero_dedups_against_the_support_grid() {
     );
     let at_start = breaks.iter().filter(|&&t| (t - t0).abs() <= 1e-12).count();
     assert_eq!(at_start, 1, "endpoint root duplicated in {breaks:?}");
+}
+
+#[test]
+fn follower_jerk_is_the_derivative_of_its_acceleration() {
+    let shaped = cusp_segment(
+        vec![0.0, 0.0, 5000.0, -20000.0],
+        vec![0.0, 0.0, 0.0, 3000.0],
+        0.0,
+        0.05,
+    );
+    let mut state = FollowerState::default();
+    state.push_span(10.0, 0.05, 0.09);
+    let sig = FollowerSignal::new(&shaped, &shaped, 3, &[0, 1], &state, 0.0, 0.0);
+    let step = 1e-7;
+    for index in 1..50 {
+        let t = 0.001 * f64::from(index);
+        let expected = (sig.eval_pva(t + step).2 - sig.eval_pva(t - step).2) / (2.0 * step);
+        let jerk = sig.jerk(t);
+        assert!(
+            (jerk - expected).abs() <= 1e-4 * expected.abs().max(1e3),
+            "follower jerk at t={t} is {jerk}, its acceleration's derivative {expected}"
+        );
+    }
 }
 
 #[test]
