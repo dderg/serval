@@ -2,6 +2,10 @@
 
 mainmenu "Klipper Firmware Configuration"
 
+config SERVAL_CONFIG
+    bool
+    default y
+
 config LOW_LEVEL_OPTIONS
     bool "Enable extra low-level configuration options"
     help

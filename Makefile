@@ -9,9 +9,7 @@ OUT=out/
 
 $(shell ./scripts/find-firmware-extras.sh)
 
-# Kconfig includes
-export KCONFIG_CONFIG     ?= $(CURDIR)/.config
--include $(KCONFIG_CONFIG)
+export KCONFIG_CONFIG ?= $(CURDIR)/.config
 
 # Common command definitions
 CC=$(CROSS_PREFIX)gcc
@@ -22,6 +20,14 @@ OBJDUMP=$(CROSS_PREFIX)objdump
 STRIP=$(CROSS_PREFIX)strip
 CPP=$(CROSS_PREFIX)cpp
 PYTHON=python3
+
+ifeq ($(findstring CONFIG_SERVAL_CONFIG=y,$(file <$(KCONFIG_CONFIG))),)
+ifneq ($(wildcard $(KCONFIG_CONFIG)),)
+$(info Migrating imported firmware configuration)
+$(shell $(PYTHON) lib/kconfiglib/olddefconfig.py src/Kconfig)
+endif
+endif
+-include $(KCONFIG_CONFIG)
 
 # Source files
 src-y =
