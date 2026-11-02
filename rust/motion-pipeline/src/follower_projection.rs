@@ -137,14 +137,14 @@ fn fit_source_projection(
     let raw_axis = &raw.axes[axis];
     let (t_start, t_end) = projection_support(raw, shaped, axis, leaders);
     let sig = FollowerSignal::new(shaped, raw, axis, leaders, state, s_start, 0.0);
-    let breakpoints = sig.construction_breakpoints(raw_axis);
+    let tolerance = follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis) * 0.5);
+    let breakpoints = sig.construction_breakpoints(raw_axis, tolerance.accel_mm_s2);
     let input_state = |t| {
         let (p, v, a) = sig.eval_pva(t);
         (p, v, a, sig.jerk(t))
     };
     let input_start = input_state(t_start);
     let input_end = input_state(t_end);
-    let tolerance = follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis) * 0.5);
     let track = if let Some(value) = sig.constant_value() {
         bezier_pieces_to_nurbs(&[BezierPiece {
             u_start: t_start,
@@ -1774,7 +1774,11 @@ impl<'a> FollowerSignal<'a> {
         (overlapping_zero && tail_zero).then(|| self.eval(self.grid[0]))
     }
 
-    fn construction_breakpoints(&self, raw_axis: &ContinuousAxis) -> FollowerBreakpoints {
+    fn construction_breakpoints(
+        &self,
+        raw_axis: &ContinuousAxis,
+        acceleration_tol: f64,
+    ) -> FollowerBreakpoints {
         let raw_breaks = axis_breakpoints(raw_axis);
         let mut breaks = raw_breaks.clone();
         breaks.push(*self.grid.first().expect("follower grid is seeded"));
@@ -1833,6 +1837,9 @@ impl<'a> FollowerSignal<'a> {
         breaks.sort_by(f64::total_cmp);
         breaks.dedup();
         let semantic = breaks.clone();
+        breaks.extend(self.acceleration_steps_on_the_grid(acceleration_tol));
+        breaks.sort_by(f64::total_cmp);
+        breaks.dedup();
         let zeros = self.velocity_component_zeros(&breaks, support_start, support_end);
         for zero in zeros {
             let dominated = breaks.iter().any(|&b| (b - zero).abs() <= GRID_DEDUP_EPS_S);
@@ -1845,6 +1852,50 @@ impl<'a> FollowerSignal<'a> {
             semantic,
             fit_seeds: breaks,
         }
+    }
+
+    /// Interior leader-grid times where the follower's own acceleration
+    /// steps by more than `tolerance`: a shaped leader's pieces join with
+    /// their acceleration free to jump, and the projection inherits the
+    /// step. A fit span straddling one cannot hold the tolerance; every
+    /// other grid point is smooth enough to fit across, and seeding all of
+    /// them would multiply the follower's fit and kernel spans.
+    ///
+    /// The projection's acceleration step at a leader seam is at most the
+    /// largest extrusion ratio it rides times the leaders' own acceleration
+    /// step, so only seams where that bound exceeds the tolerance pay for
+    /// evaluating the projection itself on both sides.
+    fn acceleration_steps_on_the_grid(&self, tolerance: f64) -> Vec<f64> {
+        let s_end = self.s_end();
+        let ratio_bound = self
+            .state
+            .spans
+            .iter()
+            .filter(|span| {
+                span.s1 >= self.s_start - SPAN_LOOKUP_SLACK_MM
+                    && span.s0 <= s_end + SPAN_LOOKUP_SLACK_MM
+            })
+            .map(|span| span.r0.abs().max(span.r1.abs()))
+            .fold(0.0_f64, f64::max);
+        let interior = &self.grid[1..self.grid.len() - 1];
+        interior
+            .iter()
+            .copied()
+            .filter(|&t| {
+                let before = trajectory::next_toward(t, f64::NEG_INFINITY);
+                let after = trajectory::next_toward(t, f64::INFINITY);
+                let leader_step = (0..self.shaped_axes.len())
+                    .map(|index| {
+                        let step =
+                            self.leader_pva(index, after).2 - self.leader_pva(index, before).2;
+                        step * step
+                    })
+                    .sum::<f64>()
+                    .sqrt();
+                ratio_bound * leader_step > tolerance
+                    && (self.second_deriv(after) - self.second_deriv(before)).abs() > tolerance
+            })
+            .collect()
     }
 
     fn velocity_component_zeros(
