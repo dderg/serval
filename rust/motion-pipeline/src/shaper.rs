@@ -2360,15 +2360,6 @@ struct SpanSeeds {
     upper: f64,
 }
 
-/// Ladder fit of the shaped signal over one span: the endpoint-anchored
-/// quadratic carrying the span's own travel, the cubic through both endpoint
-/// velocities, then the quintic Hermite matching the convolution's exact
-/// (p, v, a) at both ends and degrees 6/7 from interior residuals — the
-/// lowering ladder against pre-sampled truth, with the shaper's own budgets.
-/// Every accepted piece is endpoint-anchored, so the span seams stay C0 no
-/// matter which rung wins. Returns the accepted monomial-in-u fit, or the
-/// quintic base with `fits = false` so the caller can bisect.
-#[allow(clippy::type_complexity)]
 /// How far inside a span edge the state the ladder anchors to is read: past
 /// whatever coalescing absorbed there, and at least a cubic floor, but no
 /// more than a quarter of the span.
@@ -2381,11 +2372,12 @@ fn edge_inset(h: f64, cubic_floor: f64, absorbed: f64) -> f64 {
 /// state wherever the signal is smooth — unless the acceleration past the
 /// edge's coalesced sliver, extrapolated back to the seam, misses the seam
 /// reading by more than the fit tolerance: then a break hides in the
-/// sliver, and pinning the piece to the seam value would anchor it to the
-/// break's far side. The extrapolation runs through a second read as far
-/// again past the sliver, so a smooth signal's jerk across a wide sliver
-/// cancels and only its snap times the squared sliver remains; the inset
-/// is at most a quarter span, so that read stays inside the span.
+/// sliver, and the piece anchors to that extrapolation, the break's far
+/// side as it would read at the seam. The extrapolation runs through a
+/// second read as far again past the sliver, so a smooth signal's jerk
+/// across a wide sliver cancels and only its snap times the squared sliver
+/// remains; the inset is at most a quarter span, so that read stays inside
+/// the span.
 fn edge_velocity_and_acceleration<S: TrackSignal>(
     sig: &S,
     axis: usize,
@@ -2401,13 +2393,22 @@ fn edge_velocity_and_acceleration<S: TrackSignal>(
     let beyond_acceleration = exact_value(axis, sig.second_deriv(beyond), beyond)?;
     let extrapolated_to_seam = 2.0 * past_acceleration - beyond_acceleration;
     let acceleration = if (extrapolated_to_seam - seam_acceleration).abs() > fit_tol.accel_mm_s2 {
-        past_acceleration
+        extrapolated_to_seam
     } else {
         seam_acceleration
     };
     Ok((velocity, acceleration))
 }
 
+/// Ladder fit of the shaped signal over one span: the endpoint-anchored
+/// quadratic carrying the span's own travel, the cubic through both endpoint
+/// velocities, then the quintic Hermite matching the convolution's exact
+/// (p, v, a) at both ends and degrees 6/7 from interior residuals — the
+/// lowering ladder against pre-sampled truth, with the shaper's own budgets.
+/// Every accepted piece is endpoint-anchored, so the span seams stay C0 no
+/// matter which rung wins. Returns the accepted monomial-in-u fit, or the
+/// quintic base with `fits = false` so the caller can bisect.
+#[allow(clippy::type_complexity)]
 fn shaped_ladder<S: TrackSignal>(
     sig: &S,
     t0: f64,
