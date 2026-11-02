@@ -249,6 +249,11 @@ pub(crate) struct LadderFailure {
     pub right: LadderPva,
 }
 
+pub(crate) struct LadderMiss {
+    pub closest_rung: Vec<f64>,
+    pub failure: LadderFailure,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AccelerationTrend {
     Increasing,
@@ -413,7 +418,7 @@ pub(crate) fn ladder_fit(
     truth: &LadderTruth,
     budget: LadderBudget,
     policy: LadderPolicy,
-) -> Result<Vec<f64>, LadderFailure> {
+) -> Result<Vec<f64>, LadderMiss> {
     let LadderSpan { h, endpoint_delta } = span;
     let truth_p = truth.position;
     let truth_v = truth.velocity;
@@ -445,63 +450,72 @@ pub(crate) fn ladder_fit(
             return Ok(cubic);
         }
     }
+    let dd_scale = (2.0 / h) * (2.0 / h);
+    let worst_probe = |candidate: &[f64]| {
+        LADDER_PROBES_U
+            .iter()
+            .map(|&probe| {
+                let position =
+                    (eval_mono(candidate, probe) - truth_p(probe)).abs() / budget.tol.pos_mm;
+                let velocity = (eval_mono_d(candidate, probe) * (2.0 / h) - truth_v(probe)).abs()
+                    / budget.velocity;
+                let acceleration = (eval_mono_dd(candidate, probe) * dd_scale - truth_a(probe))
+                    .abs()
+                    / budget.tol.accel_mm_s2;
+                (probe, position.max(velocity).max(acceleration))
+            })
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+            .expect("ladder probes are empty")
+    };
     let quintic = ladder_candidate(base, 5, truth_p);
     if candidate_ok(&quintic, h, truth, budget, policy) {
         return Ok(quintic);
     }
-    let mut last = quintic;
+    let (mut u, mut closest_score) = worst_probe(&quintic);
+    let mut closest = quintic;
     if h >= policy.high_degree_span_floor {
         for degree in [6, 7, 9, 11, LADDER_MAX_DEGREE] {
             let candidate = ladder_candidate(base, degree, truth_p);
             if candidate_ok(&candidate, h, truth, budget, policy) {
                 return Ok(candidate);
             }
-            last = candidate;
+            let (probe, score) = worst_probe(&candidate);
+            if score < closest_score {
+                (u, closest_score, closest) = (probe, score, candidate);
+            }
         }
     }
-    let dd_scale = (2.0 / h) * (2.0 / h);
-    let u = *LADDER_PROBES_U
-        .iter()
-        .max_by(|&&left, &&right| {
-            let score = |probe| {
-                let position = (eval_mono(&last, probe) - truth_p(probe)).abs() / budget.tol.pos_mm;
-                let velocity = (eval_mono_d(&last, probe) * (2.0 / h) - truth_v(probe)).abs()
-                    / budget.velocity;
-                let acceleration = (eval_mono_dd(&last, probe) * dd_scale - truth_a(probe)).abs()
-                    / budget.tol.accel_mm_s2;
-                position.max(velocity).max(acceleration)
-            };
-            score(left).total_cmp(&score(right))
-        })
-        .expect("ladder probes are empty");
     let source = LadderPva {
         position: truth_p(u),
         velocity: truth_v(u),
         acceleration: truth_a(u),
     };
     let candidate = LadderPva {
-        position: eval_mono(&last, u),
-        velocity: eval_mono_d(&last, u) * (2.0 / h),
-        acceleration: eval_mono_dd(&last, u) * dd_scale,
+        position: eval_mono(&closest, u),
+        velocity: eval_mono_d(&closest, u) * (2.0 / h),
+        acceleration: eval_mono_dd(&closest, u) * dd_scale,
     };
-    Err(LadderFailure {
-        u,
-        error: LadderPva {
-            position: (candidate.position - source.position).abs(),
-            velocity: (candidate.velocity - source.velocity).abs(),
-            acceleration: (candidate.acceleration - source.acceleration).abs(),
-        },
-        source,
-        candidate,
-        left: LadderPva {
-            position: truth_p(-1.0),
-            velocity: truth_v(-1.0),
-            acceleration: truth_a(-1.0),
-        },
-        right: LadderPva {
-            position: truth_p(1.0),
-            velocity: truth_v(1.0),
-            acceleration: truth_a(1.0),
+    Err(LadderMiss {
+        closest_rung: closest,
+        failure: LadderFailure {
+            u,
+            error: LadderPva {
+                position: (candidate.position - source.position).abs(),
+                velocity: (candidate.velocity - source.velocity).abs(),
+                acceleration: (candidate.acceleration - source.acceleration).abs(),
+            },
+            source,
+            candidate,
+            left: LadderPva {
+                position: truth_p(-1.0),
+                velocity: truth_v(-1.0),
+                acceleration: truth_a(-1.0),
+            },
+            right: LadderPva {
+                position: truth_p(1.0),
+                velocity: truth_v(1.0),
+                acceleration: truth_a(1.0),
+            },
         },
     })
 }

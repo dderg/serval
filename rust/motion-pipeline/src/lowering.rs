@@ -1,7 +1,7 @@
 mod ladder;
 
 pub(crate) use ladder::{
-    AccelerationTrend, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget, LadderFailure,
+    AccelerationTrend, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget, LadderFailure, LadderMiss,
     LadderPolicy, LadderPva, LadderSpan, LadderTruth, VelocitySign, eval_mono, eval_mono_d,
     eval_mono_dd, exact_piece, ladder_fit, quintic_in_u,
 };
