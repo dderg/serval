@@ -1438,12 +1438,7 @@ fn a_drain_declares_the_park_after_its_last_segment() {
             trajectory::CompiledChain::default(),
             trajectory::CompiledChain::default(),
             trajectory::CompiledChain::default(),
-            trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
-                "pa",
-                &trajectory::algos::LinearPressureAdvance,
-                vec![0.05],
-            )])
-            .expect("single post-processor always compiles"),
+            e_chain(Some(0.05), 0.005),
         ],
         followers: vec![(3, vec![0, 1, 2])],
     };
@@ -1456,7 +1451,7 @@ fn a_drain_declares_the_park_after_its_last_segment() {
         vec![
             line(1, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 5.0).into(),
             line(2, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 1.0).into(),
-            line(3, [10.0, 0.0, 0.0], [20.0, 0.0, 0.0], 0.0).into(),
+            line(3, [10.0, 0.0, 0.0], [20.0, 0.0, 0.0], 1.0).into(),
         ],
     );
 
@@ -3829,16 +3824,12 @@ fn projected_follower_seams_hold_velocity_across_emit_batches() {
 /// A follower that never extrudes must not inherit the kernel-shaped leader
 /// lattice: travel and homing windows project as one constant piece, not
 /// hundreds of flat spline pieces — that fit starved real-time drip streams
-/// on small hosts (StallGuard false triggers during sensorless homing).
+/// on small hosts (StallGuard false triggers during sensorless homing). The
+/// follower's own kernel then adds only its own few breakpoints per window.
 #[test]
 fn idle_follower_projects_as_a_single_constant_piece() {
     let config = cfg();
-    let pa = trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
-        "linear_pressure_advance",
-        &trajectory::algos::LinearPressureAdvance,
-        vec![0.04],
-    )])
-    .unwrap();
+    let pa = e_chain(Some(0.04), 0.005);
     let kernel = smooth_x_chains(0.044583333333333336).chains[0].clone();
     let chains = AxisChainSet {
         chains: vec![
@@ -3864,7 +3855,7 @@ fn idle_follower_projects_as_a_single_constant_piece() {
         let e = &seg.axes[3];
         if let ContinuousAxis::PiecewiseRelativeSpline(pieces) = e {
             assert!(
-                pieces.len() <= 2,
+                pieces.len() <= IDLE_FOLLOWER_KERNEL_PIECES,
                 "idle follower window [{}, {}] burst into {} pieces",
                 seg.t_start,
                 seg.t_end,
@@ -3999,5 +3990,427 @@ fn a_ratio_change_under_moving_shaped_leaders_is_a_follower_velocity_step() {
             (measured - ratio * speed).abs() <= tolerance,
             "{side} of the ratio change e runs {measured} mm/s, not {ratio} x {speed}"
         );
+    }
+}
+
+const IDLE_FOLLOWER_KERNEL_PIECES: usize = 5;
+
+fn worst_seam_velocity_step(segments: &[ContinuousSegment], axis: usize) -> (f64, f64) {
+    let mut worst = (0.0_f64, f64::NAN);
+    for pair in segments.windows(2) {
+        let seam = pair[0].t_end;
+        let left = pair[0].eval_axis(axis, seam).unwrap().velocity;
+        let right = pair[1].eval_axis(axis, seam).unwrap().velocity;
+        let step = (left - right).abs() / left.abs().max(right.abs()).max(1.0);
+        if step > worst.0 {
+            worst = (step, seam);
+        }
+    }
+    worst
+}
+
+/// A kernel's output is C1 wherever its input is C0, so a seam between two
+/// fitted stretches of it has no velocity step of its own: every fitted
+/// piece has to open and close on the signal's velocity, not on one solved
+/// from its travel.
+#[test]
+fn kernel_shaped_seams_carry_the_signal_velocity() {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 1.5),
+        line(2, [30.0, 0.0, 0.0], [30.0, 30.0, 0.0], 1.5),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let mut plain_axis = follower_kernel_chains(Some(0.044583333333333336), None, 0.02675);
+    plain_axis.followers.clear();
+    let shaped = replay(cfg(), plain_axis, &home, 0.0, &moves);
+    for axis in [0, 1, 3] {
+        let (step, seam) = worst_seam_velocity_step(&shaped, axis);
+        assert!(
+            step <= 1e-9,
+            "axis {axis} steps its velocity by {step} (relative) at the seam t={seam}"
+        );
+    }
+}
+
+fn exact_kernel_position(
+    kernel: &nurbs::algebra::PiecewisePolynomialKernel,
+    input: &[ContinuousSegment],
+    t: f64,
+) -> f64 {
+    const NODES: usize = 8_000;
+    let input_at = |time: f64| {
+        let first = input.first().expect("input stream is empty");
+        let last = input.last().expect("input stream is empty");
+        let clamped = time.clamp(first.t_start, last.t_end);
+        let segment = input
+            .iter()
+            .find(|segment| segment.t_start <= clamped && clamped <= segment.t_end)
+            .expect("input covers the clamped time");
+        eval_segment_axis(segment, 3, clamped)
+    };
+    let (lo, hi) = kernel.support();
+    let width = (hi - lo) / NODES as f64;
+    (0..NODES)
+        .map(|node| {
+            let tau = lo + (node as f64 + 0.5) * width;
+            let weight = kernel
+                .pieces
+                .iter()
+                .find(|piece| piece.u_start <= tau && tau <= piece.u_end)
+                .map_or(0.0, |piece| piece.evaluate(tau));
+            weight * input_at(t - tau) * width
+        })
+        .sum()
+}
+
+/// With raw leaders the projected follower is the raw extruder track, so its
+/// kernelled output must be that track's convolution to within the
+/// follower's own fit tolerance at every batch seam and inside every batch
+/// that extrudes; the opening and closing rest segments carry the rest
+/// tolerance instead.
+#[test]
+fn a_kernelled_follower_stays_on_its_convolution_across_batch_seams() {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 1.5),
+        line(2, [30.0, 0.0, 0.0], [30.0, 30.0, 0.0], 1.5),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let chains = follower_kernel_chains(None, None, 0.02675);
+    let kernel = chains.chains[3]
+        .kernel()
+        .expect("e chain has a kernel")
+        .clone();
+    let follower = replay(cfg(), chains, &home, 0.0, &moves);
+    let raw = replay(cfg(), follower_chains_without_kernels(), &home, 0.0, &moves);
+    let ratio = 1.5 / 30.0;
+    let budget = fit_tol(cfg()).pos_mm * ratio;
+    let delay = 0.5 * (kernel.support().1 - kernel.support().0);
+    let moving = &follower[1..follower.len() - 1];
+    for (t, e) in sample_extruder(moving) {
+        let exact = exact_kernel_position(&kernel, &raw, t - delay);
+        assert!(
+            (e - exact).abs() <= budget,
+            "follower e {e} departs from its convolution {exact} by {} > {budget} at t={t}",
+            (e - exact).abs()
+        );
+    }
+}
+
+struct PieceSeam {
+    t: f64,
+    left_velocity: f64,
+    right_velocity: f64,
+}
+
+fn fitted_piece_seams(segments: &[ContinuousSegment], axis: usize) -> Vec<PieceSeam> {
+    let pieces: Vec<nurbs::bezier::BezierPiece> = segments
+        .iter()
+        .flat_map(|segment| match &segment.axes[axis] {
+            ContinuousAxis::Spline(curve) | ContinuousAxis::RelativeSpline { curve, .. } => {
+                nurbs::bezier::extract_bezier_pieces(curve)
+            }
+            ContinuousAxis::PiecewiseRelativeSpline(relative) => relative
+                .iter()
+                .flat_map(|piece| nurbs::bezier::extract_bezier_pieces(&piece.curve))
+                .collect(),
+            other => panic!("axis {axis} is not a fitted track: {other:?}"),
+        })
+        .collect();
+    let velocity = |piece: &nurbs::bezier::BezierPiece, t: f64| {
+        let curve = nurbs::bezier::bezier_pieces_to_nurbs(std::slice::from_ref(piece));
+        eval(&nurbs::eval::derivative(&curve), t)
+    };
+    pieces
+        .windows(2)
+        .map(|pair| {
+            let t = pair[0].u_end;
+            assert_eq!(t, pair[1].u_start, "axis {axis} pieces leave a gap at {t}");
+            PieceSeam {
+                t,
+                left_velocity: velocity(&pair[0], t),
+                right_velocity: velocity(&pair[1], t),
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn a_plain_follower_carries_its_source_velocity_across_every_seam() {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 1.5),
+        line(2, [30.0, 0.0, 0.0], [30.0, 30.0, 0.0], 1.5),
+        line(3, [30.0, 30.0, 0.0], [0.0, 30.0, 0.0], 1.5),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let shaped = replay(
+        cfg(),
+        xy_shaper_follower_chains(0.044583333333333336),
+        &home,
+        0.0,
+        &moves,
+    );
+    let (_kernel_tail_past_the_last_extrusion, extruding) =
+        shaped.split_last().expect("segments emitted");
+    let seams = fitted_piece_seams(extruding, 3);
+    assert!(
+        seams.len() > extruding.len(),
+        "the follower fits interior seams"
+    );
+    for seam in seams {
+        let step = (seam.left_velocity - seam.right_velocity).abs()
+            / seam
+                .left_velocity
+                .abs()
+                .max(seam.right_velocity.abs())
+                .max(1.0);
+        assert!(
+            step <= 1e-9,
+            "follower steps its velocity from {} to {} at the seam t={}",
+            seam.left_velocity,
+            seam.right_velocity,
+            seam.t
+        );
+    }
+}
+
+#[test]
+fn a_leader_fit_ignores_the_advanced_follower_riding_it() {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 1.5),
+        line(2, [30.0, 0.0, 0.0], [30.0, 30.0, 0.0], 1.5),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let leader_smooth_time = Some(0.044583333333333336);
+    let e_smooth_time = 0.005;
+    let plain = replay(
+        cfg(),
+        follower_kernel_chains(leader_smooth_time, None, e_smooth_time),
+        &home,
+        0.0,
+        &moves,
+    );
+    let mut advanced_chains = follower_kernel_chains(leader_smooth_time, None, 0.0);
+    advanced_chains.chains[3] = nonlinear_e_chain(
+        &trajectory::algos::TanhPressureAdvance,
+        0.04,
+        0.05,
+        20.0,
+        e_smooth_time,
+    );
+    let advanced = replay(cfg(), advanced_chains, &home, 0.0, &moves);
+    assert_eq!(plain.len(), advanced.len());
+    for (left, right) in plain.iter().zip(&advanced) {
+        assert_eq!((left.t_start, left.t_end), (right.t_start, right.t_end));
+        for axis in [0, 1] {
+            for i in 0..=200 {
+                let t = left.t_start + (left.t_end - left.t_start) * f64::from(i) / 200.0;
+                let alone = left.eval_axis(axis, t).unwrap();
+                let ridden = right.eval_axis(axis, t).unwrap();
+                assert!(
+                    (alone.position - ridden.position).abs() <= 1e-12
+                        && (alone.velocity - ridden.velocity).abs() <= 1e-12,
+                    "leader {axis} at t={t} moves from {alone:?} to {ridden:?} under an \
+                     advanced follower"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn nonlinear_advance_pieces_open_and_close_on_the_advance_law_velocity() {
+    let drifting_deceleration =
+        nurbs::bezier::bezier_pieces_to_nurbs(&[nurbs::bezier::BezierPiece {
+            u_start: 0.3,
+            u_end: 0.3145,
+            coeffs: vec![0.0, 80.0, -2_500.0, 100.0],
+        }]);
+    let input_velocity = nurbs::eval::derivative(&drifting_deceleration);
+    let input_acceleration = nurbs::eval::derivative(&input_velocity);
+    for (model, linear_advance, nonlinear_offset, linearization_velocity) in [
+        (trajectory::AdvanceModel::Tanh, 0.02, 0.05, 2.0),
+        (trajectory::AdvanceModel::Tanh, 0.0, 0.06, 5.0),
+        (trajectory::AdvanceModel::Reciprocal, 0.02, 0.05, 2.0),
+    ] {
+        let advance = trajectory::NonlinearAdvance {
+            model,
+            linear_advance,
+            nonlinear_offset,
+            linearization_velocity,
+        };
+        let law_velocity = |t: f64| {
+            let velocity = eval(&input_velocity, t);
+            advance
+                .slope(velocity)
+                .mul_add(eval(&input_acceleration, t), velocity)
+        };
+        let output = crate::shaper::apply_nonlinear_advance_to_track(
+            0,
+            &drifting_deceleration,
+            advance,
+            fit_tol(cfg()),
+        )
+        .expect("a smooth deceleration fits its advance");
+        let pieces = nurbs::bezier::extract_bezier_pieces(&output);
+        assert!(
+            pieces.len() > 1,
+            "{advance:?}: fixture must fit with interior seams"
+        );
+        for piece in &pieces {
+            let velocity = nurbs::eval::derivative(&nurbs::bezier::bezier_pieces_to_nurbs(
+                std::slice::from_ref(piece),
+            ));
+            for end in [piece.u_start, piece.u_end] {
+                let fitted = eval(&velocity, end);
+                let law = law_velocity(end);
+                assert!(
+                    (fitted - law).abs() <= 1e-7 * law.abs().max(1.0),
+                    "{advance:?}: piece [{}, {}] meets the advance law velocity {law} with \
+                     {fitted} at {end}",
+                    piece.u_start,
+                    piece.u_end
+                );
+            }
+        }
+    }
+}
+
+/// A dwell after a drain leaves a time gap between stitched follower
+/// segments. The toolhead is at rest across it, so an advance before
+/// projection has no step to carry there: it must stitch straight across
+/// and leave the extruded total what it is without the advance.
+#[test]
+fn an_advance_before_projection_stitches_across_a_dwell_at_rest() {
+    let tanh = |e_smooth_time| {
+        nonlinear_e_chain(
+            &trajectory::algos::TanhPressureAdvance,
+            0.02,
+            0.05,
+            20.0,
+            e_smooth_time,
+        )
+    };
+    let unadvanced = |e_smooth_time| {
+        nonlinear_e_chain(
+            &trajectory::algos::TanhPressureAdvance,
+            0.0,
+            0.0,
+            20.0,
+            e_smooth_time,
+        )
+    };
+    let extruded = |leader_smooth_time, e_chain| {
+        let mut chains = follower_kernel_chains(leader_smooth_time, None, 0.0);
+        chains.chains[3] = e_chain;
+        let mut items = Vec::new();
+        for stroke in 0..3_u32 {
+            let x = 30.0 * f64::from(stroke);
+            items.push(StreamInput::Move(line(
+                stroke + 1,
+                [x, 0.0, 0.0],
+                [x + 30.0, 0.0, 0.0],
+                1.0,
+            )));
+            items.push(StreamInput::Drain);
+            items.push(StreamInput::Control(Control::Dwell { secs: 0.5 }));
+        }
+        let segs = replay_items(cfg(), chains, &[0.0, 0.0, 0.0, 0.0], items);
+        let last = segs.last().expect("the strokes produce segments");
+        eval_segment_axis(last, 3, last.t_end)
+    };
+    for leader_smooth_time in [Some(0.01), None] {
+        for e_smooth_time in [0.005, 0.02] {
+            let advanced = extruded(leader_smooth_time, tanh(e_smooth_time));
+            let plain = extruded(leader_smooth_time, unadvanced(e_smooth_time));
+            assert!(
+                (advanced - plain).abs() < 1e-9,
+                "leader smoothing {leader_smooth_time:?}, e smoothing {e_smooth_time}: the \
+                 advance changed the total across the dwells, {advanced} mm against {plain} mm"
+            );
+        }
+    }
+}
+
+/// The ratio change of
+/// `a_ratio_change_under_moving_shaped_leaders_is_a_follower_velocity_step`
+/// with pressure advance and a kernel on the follower. The seam carries the
+/// follower's velocity step as a C0 corner and the advance's position step
+/// `k·Δv` into the kernel; neither may count the other. A kernel-free
+/// advance chain is refused, linear gains after a kernel apply to the
+/// smoothed track, and a nonlinear advance (here all but linear) applies
+/// before projection: either way the output must be the unadvanced output
+/// plus `k` times its velocity.
+#[test]
+fn a_ratio_change_under_moving_shaped_leaders_with_advance_is_one_step() {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 1.5),
+        line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0], 3.0),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let leader_smooth_time = 0.044583333333333336;
+    let e_smooth_time = 0.01;
+    let k = 0.04;
+    let plain = replay(
+        cfg(),
+        follower_kernel_chains(Some(leader_smooth_time), None, e_smooth_time),
+        &home,
+        0.0,
+        &moves,
+    );
+    let linear = replay(
+        cfg(),
+        follower_kernel_chains(Some(leader_smooth_time), Some(k), e_smooth_time),
+        &home,
+        0.0,
+        &moves,
+    );
+    let nonlinear_offset = 1e-6;
+    let mut advanced_chains = follower_kernel_chains(Some(leader_smooth_time), None, 0.0);
+    advanced_chains.chains[3] = nonlinear_e_chain(
+        &trajectory::algos::TanhPressureAdvance,
+        k,
+        nonlinear_offset,
+        20.0,
+        e_smooth_time,
+    );
+    let advanced = replay(cfg(), advanced_chains, &home, 0.0, &moves);
+
+    let extruder_at = |segments: &[ContinuousSegment], t: f64| {
+        let segment = segments
+            .iter()
+            .find(|segment| segment.t_start <= t && t <= segment.t_end)
+            .unwrap_or_else(|| panic!("no segment covers t={t}"));
+        let pva = segment.eval_axis(3, t).unwrap();
+        (pva.position, pva.velocity)
+    };
+    let t_end = plain.last().expect("plain run has segments").t_end;
+    let tolerance = 2.0 * cfg().fit_tol_mm + nonlinear_offset;
+    for (label, run) in [
+        ("linear gains after the kernel", &linear),
+        ("advance before projection", &advanced),
+    ] {
+        for index in 0..=2000 {
+            let t = t_end * f64::from(index) / 2000.0;
+            let (plain_position, plain_velocity) = extruder_at(&plain, t);
+            let (position, _) = extruder_at(run, t);
+            let expected = plain_position + k * plain_velocity;
+            assert!(
+                (position - expected).abs() <= tolerance,
+                "{label}: at t={t} e is {position}, the unadvanced output plus k times its \
+                 velocity is {expected}"
+            );
+        }
+        for pair in run.windows(2) {
+            let seam = pair[0].t_end;
+            let (left, right) = (
+                pair[0].eval_axis(3, seam).unwrap().position,
+                pair[1].eval_axis(3, seam).unwrap().position,
+            );
+            assert!(
+                (left - right).abs() < 1e-9,
+                "{label}: e steps by {} mm at the seam t={seam}",
+                right - left
+            );
+        }
     }
 }
