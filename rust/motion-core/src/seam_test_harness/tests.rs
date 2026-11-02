@@ -79,8 +79,12 @@ fn extruder_pa_smooth_chain_set() -> trajectory::AxisChainSet {
     extruder_chain_set_with_k(0.03)
 }
 
+/// A follower's advance needs a smoothing kernel after it; this is the
+/// shortest the configs in the repo use.
+const SHORT_EXTRUDER_SMOOTH_TIME_S: f64 = 0.005;
+
 fn extruder_chain_set_with_k(k: f64) -> trajectory::AxisChainSet {
-    extruder_chain_set(k, None)
+    extruder_chain_set(k, Some(SHORT_EXTRUDER_SMOOTH_TIME_S))
 }
 
 /// Smooth pressure advance: the follower's own kernel convolves its

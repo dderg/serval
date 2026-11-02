@@ -404,12 +404,19 @@ fn gain_without_kernel_on_axis_leading_nobody_compiles() {
     );
 }
 
+fn e_smoothing() -> PostProcessorDecl {
+    pp("st", "smooth_triangle", &[("smooth_time", 0.01)])
+}
+
 #[test]
 fn happy_path_compiles_pa_on_follower_e() {
-    let registry = registry_with_e(&["pa"]);
+    let registry = registry_with_e(&["pa", "st"]);
     let set = PostProcessorSet::try_new(
         &registry,
-        &[pp("pa", "linear_pressure_advance", &[("k", 0.04)])],
+        &[
+            pp("pa", "linear_pressure_advance", &[("k", 0.04)]),
+            e_smoothing(),
+        ],
     )
     .unwrap();
     let chains = set.compile(&registry).unwrap();
@@ -422,10 +429,13 @@ fn happy_path_compiles_pa_on_follower_e() {
 
 #[test]
 fn set_param_updates_named_instance_and_recompile_reflects_it() {
-    let registry = registry_with_e(&["pa"]);
+    let registry = registry_with_e(&["pa", "st"]);
     let mut set = PostProcessorSet::try_new(
         &registry,
-        &[pp("pa", "linear_pressure_advance", &[("k", 0.04)])],
+        &[
+            pp("pa", "linear_pressure_advance", &[("k", 0.04)]),
+            e_smoothing(),
+        ],
     )
     .unwrap();
     set.set_param("pa", "k", 0.07).unwrap();
@@ -514,4 +524,74 @@ fn post_processor_missing_required_param_rejected() {
     let registry = registry_with_e(&[]);
     let err = PostProcessorSet::try_new(&registry, &[pp("is", "smooth_bell", &[])]).unwrap_err();
     assert!(err.to_string().contains("smooth_time"), "got: {err}");
+}
+
+#[test]
+fn a_follower_advance_needs_a_smoothing_kernel_on_its_axis() {
+    let advances = [
+        pp("pa", "linear_pressure_advance", &[("k", 0.04)]),
+        pp(
+            "pa",
+            "tanh_pressure_advance",
+            &[
+                ("linear_advance", 0.02),
+                ("nonlinear_offset", 0.05),
+                ("linearization_velocity", 20.0),
+            ],
+        ),
+    ];
+    for advance in advances {
+        let rejected = PostProcessorSet::try_new(&registry_with_e(&["pa"]), &[advance.clone()]);
+        assert!(
+            matches!(
+                rejected,
+                Err(PostProcessorConfigError::FollowerAdvanceWithoutKernel { ref axis, ref name })
+                    if axis == "e" && name == "pa"
+            ),
+            "{} with no kernel on a follower must be rejected, got {rejected:?}",
+            advance.ty
+        );
+        for chain in [["pa", "st"], ["st", "pa"]] {
+            assert!(
+                PostProcessorSet::try_new(
+                    &registry_with_e(&chain),
+                    &[advance.clone(), e_smoothing()]
+                )
+                .is_ok(),
+                "{} with a kernel ({chain:?}) is representable",
+                advance.ty
+            );
+        }
+    }
+}
+
+#[test]
+fn a_disabled_follower_advance_needs_no_kernel_until_it_is_raised() {
+    let registry = registry_with_e(&["pa"]);
+    let mut set = PostProcessorSet::try_new(
+        &registry,
+        &[pp("pa", "linear_pressure_advance", &[("k", 0.0)])],
+    )
+    .expect("a zero advance makes no steps");
+    set.set_param("pa", "k", 0.04).unwrap();
+    assert!(matches!(
+        set.compile(&registry),
+        Err(PostProcessorConfigError::FollowerAdvanceWithoutKernel { .. })
+    ));
+}
+
+#[test]
+fn an_advance_on_an_axis_that_follows_nothing_is_not_a_follower_advance() {
+    let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
+    let mut e = decl("e", &[]);
+    e.post_processors = vec!["pa".to_string()];
+    decls.push(e);
+    let registry = AxisRegistry::try_new(decls).unwrap();
+    assert!(
+        PostProcessorSet::try_new(
+            &registry,
+            &[pp("pa", "linear_pressure_advance", &[("k", 0.04)])]
+        )
+        .is_ok()
+    );
 }
