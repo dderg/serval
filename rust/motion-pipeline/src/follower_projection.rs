@@ -1068,9 +1068,13 @@ impl FollowerState {
     /// previous ratio) and starts the next move in it (its lead, extruded at
     /// the next one). Both are measured as the shaped leaders' distance
     /// from the rest point at the segment's edges, so the move on each side
-    /// extrudes over exactly the path it is shaped onto; any shaped arc
-    /// beyond them — the fit's back-and-forth near the rest point — moves
-    /// the nozzle without laying a bead.
+    /// extrudes exactly the material of the path it is shaped onto. Any
+    /// shaped arc beyond them — the fit's back-and-forth near the rest point
+    /// — joins the lead, which dips its ratio linearly to the arc's middle
+    /// and back by just enough to keep the lead's material: a separate idle
+    /// span would step the ratio, and so the follower's velocity, where the
+    /// leaders are already moving. Only a lead shorter than the idle arc,
+    /// whose dip would go below zero, is diluted evenly instead.
     fn ingest(
         &mut self,
         raw: &ContinuousSegment,
@@ -1121,16 +1125,22 @@ impl FollowerState {
         if tail > SPAN_MIN_LEN_MM {
             self.push_span(tail, tail_ratio, tail_ratio);
         }
-        if idle > SPAN_MIN_LEN_MM {
-            self.push_span(idle, 0.0, 0.0);
-        }
         let lead_ratio = upcoming
             .iter()
             .find(|seg| seg.spatial_path)
             .and_then(|seg| seg.followers.iter().find(|f| f.axis_index == axis))
             .map_or(0.0, |f| f.ratio);
-        if lead > SPAN_MIN_LEN_MM {
-            self.push_span(lead, lead_ratio, lead_ratio);
+        let lead_with_idle = lead + idle;
+        if lead < idle {
+            let diluted_ratio = lead_ratio * lead / lead_with_idle;
+            self.push_span(lead_with_idle, diluted_ratio, diluted_ratio);
+        } else if idle > SPAN_MIN_LEN_MM {
+            let half = 0.5 * lead_with_idle;
+            let dip_ratio = lead_ratio * (1.0 - idle / half);
+            self.push_span(half, lead_ratio, dip_ratio);
+            self.push_span(half, dip_ratio, lead_ratio);
+        } else if lead_with_idle > SPAN_MIN_LEN_MM {
+            self.push_span(lead_with_idle, lead_ratio, lead_ratio);
         }
         shaped_ds
     }
