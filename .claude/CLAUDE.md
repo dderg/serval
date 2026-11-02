@@ -83,6 +83,15 @@ Run it with plain `python3`, not `uv run` (uv's python breaks the pyo3 test
 binaries). Snapshot checks need the engine built first:
 `--run "make -f Makefile.rust motion-engine-fast && uv run python snapshots/run.py"`.
 
+`uv run python scripts/bench_compare.py <commitA> <commitB> [--configs fast,printer]
+[--runs 5] [--gcode PATH]` is the replay-throughput A/B: it builds
+`gcode_replay_bench` at both commits (one reusable worktree, shared target dir,
+binaries cached by commit under `~/.cache/pending-baselines/bench`), runs them
+interleaved with alternating order, and prints median wall seconds, realtime
+factor and the per-stage breakdown with the change B vs A. Use it instead of
+hand-rolled alternating runs; run it on an otherwise idle machine (the load
+average is printed).
+
 # Reference docs
 
 - **MCU C/Rust boundary — architectural invariant:** [`docs/rewrite/mcu-c-rust-boundary.md`](docs/rewrite/mcu-c-rust-boundary.md). Read this before adding shared state between C and Rust on the MCU, or before reaching for `#[link_section]` on a Rust static. Rules: C owns boot, safety-critical paths, and all shared-memory placement; Rust owns the motion engine; the seam is `extern "C"` + `#[repr(C)]` only.
