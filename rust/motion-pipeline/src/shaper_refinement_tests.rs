@@ -1,4 +1,7 @@
-use super::{AxisFit, FloorVelocityGate, MIN_DEVICE_INTERVAL_S, TrackSignal, fit_axis_from_signal};
+use super::{
+    AxisFit, FloorVelocityGate, KnotJumpBound, MIN_DEVICE_INTERVAL_S, TrackSignal,
+    fit_axis_from_signal,
+};
 use crate::lowering::{FitTol, LADDER_PROBES_U};
 use crate::types::PostProcessError;
 
@@ -260,5 +263,125 @@ fn an_accepted_piece_holds_the_position_tolerance_between_the_ladder_probes() {
         worst <= fit_tol.pos_mm,
         "the fit leaves the signal by {worst:e} mm at {at}, past the {:e} mm tolerance",
         fit_tol.pos_mm
+    );
+}
+
+struct JerkKink {
+    t0: f64,
+    h: f64,
+    knot: [f64; 1],
+    before: [f64; 4],
+    jerk_after: f64,
+}
+
+impl JerkKink {
+    fn new(t0: f64, h: f64, knot_fraction: f64, jerks: (f64, f64)) -> Self {
+        Self {
+            t0,
+            h,
+            knot: [t0 + knot_fraction * h],
+            before: [0.3, 10.0, 200.0, jerks.0],
+            jerk_after: jerks.1,
+        }
+    }
+
+    fn fit(&self, fit_tol: FitTol) -> nurbs::ScalarNurbs {
+        fit_axis_from_signal(
+            AxisFit {
+                axis: 3,
+                t_start: self.t0,
+                t_end: self.t0 + self.h,
+                seed_breakpoints: &[],
+                fit_tol,
+                fit_context: "unseeded jerk kink",
+                velocity_continuous: true,
+            },
+            self,
+        )
+        .expect("a kinked signal fits")
+    }
+
+    fn worst_deviation(
+        &self,
+        fitted: impl Fn(f64) -> f64,
+        exact: impl Fn(f64) -> f64,
+    ) -> (f64, f64) {
+        (0..2000)
+            .map(|k| {
+                let t = self.t0 + self.h * (f64::from(k) + 0.5) / 2000.0;
+                ((fitted(t) - exact(t)).abs(), t)
+            })
+            .fold((0.0, f64::NAN), |worst, sample| {
+                if sample.0 > worst.0 { sample } else { worst }
+            })
+    }
+}
+
+impl TrackSignal for JerkKink {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let [p, v, a, j] = self.before;
+        let along = |(p, v, a, j): (f64, f64, f64, f64), tau: f64| {
+            (
+                p + tau * (v + tau * (a / 2.0 + tau * j / 6.0)),
+                v + tau * (a + tau * j / 2.0),
+                a + tau * j,
+            )
+        };
+        let knot = self.knot[0] - self.t0;
+        let tau = t - self.t0;
+        if tau <= knot {
+            return along((p, v, a, j), tau);
+        }
+        let (p, v, a) = along((p, v, a, j), knot);
+        along((p, v, a, self.jerk_after), tau - knot)
+    }
+
+    fn interior_knots(&self, start: f64, end: f64) -> &[f64] {
+        if self.knot[0] > start && self.knot[0] < end {
+            &self.knot
+        } else {
+            &[]
+        }
+    }
+
+    fn knot_jump(&self, _knot: f64) -> KnotJumpBound {
+        KnotJumpBound {
+            acceleration: 0.0,
+            jerk: (self.jerk_after - self.before[3]).abs(),
+        }
+    }
+}
+
+const FOLLOWER_LIKE_TOLERANCE: FitTol = FitTol {
+    pos_mm: 1e-4,
+    accel_mm_s2: 50.0,
+};
+
+#[test]
+fn an_accepted_piece_holds_the_acceleration_tolerance_across_an_unseeded_jerk_kink() {
+    let sig = JerkKink::new(1.0, 0.01, 0.35, (1e5, -1e5));
+    let track = sig.fit(FOLLOWER_LIKE_TOLERANCE);
+    let acceleration = nurbs::eval::derivative(&nurbs::eval::derivative(&track));
+    let (worst, at) = sig.worst_deviation(
+        |t| nurbs::eval::eval(&acceleration, t),
+        |t| sig.second_deriv(t),
+    );
+    assert!(
+        worst <= FOLLOWER_LIKE_TOLERANCE.accel_mm_s2,
+        "the fit's acceleration leaves the signal's by {worst} mm/s² at {at}, past the {} mm/s² \
+         tolerance",
+        FOLLOWER_LIKE_TOLERANCE.accel_mm_s2
+    );
+}
+
+#[test]
+fn an_accepted_piece_holds_the_position_tolerance_across_an_unseeded_jerk_kink() {
+    let sig = JerkKink::new(1.0, 0.03, 0.41, (1e4, -1e4));
+    let track = sig.fit(FOLLOWER_LIKE_TOLERANCE);
+    let (worst, at) = sig.worst_deviation(|t| nurbs::eval::eval(&track, t), |t| sig.eval(t));
+    assert!(
+        worst <= FOLLOWER_LIKE_TOLERANCE.pos_mm,
+        "the fit leaves the signal by {worst:e} mm at {at}, past the {:e} mm tolerance",
+        FOLLOWER_LIKE_TOLERANCE.pos_mm
     );
 }

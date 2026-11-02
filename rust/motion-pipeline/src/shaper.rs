@@ -12,9 +12,51 @@ use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
     AccelerationTrend, FitTol, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget, LadderFailure,
     LadderPolicy, LadderPva, LadderSpan, LadderTruth, VelocitySign, eval_mono, eval_mono_d,
-    exact_piece, ladder_fit, quintic_in_u,
+    eval_mono_dd, exact_piece, ladder_fit, quintic_in_u,
 };
 use crate::types::{BaseItem, Control, PostProcessError, TrajectoryItem};
+
+#[derive(Clone, Copy)]
+pub(crate) struct KnotJumpBound {
+    pub acceleration: f64,
+    pub jerk: f64,
+}
+
+impl KnotJumpBound {
+    pub(crate) const UNBOUNDED: Self = Self {
+        acceleration: f64::INFINITY,
+        jerk: f64::INFINITY,
+    };
+
+    fn hermite_miss(self, half_span: f64, width: f64) -> HermiteMiss {
+        let step = self.acceleration * half_span * half_span;
+        let kink = self.jerk * half_span * half_span * half_span * width;
+        HermiteMiss {
+            curvature_per_u2: step * UNIT_ACCELERATION_STEP_HERMITE_MISS.curvature_per_u2
+                + kink * UNIT_JERK_KINK_HERMITE_MISS.curvature_per_u2,
+            position: (step * UNIT_ACCELERATION_STEP_HERMITE_MISS.position
+                + kink * UNIT_JERK_KINK_HERMITE_MISS.position)
+                * width
+                * width,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct HermiteMiss {
+    curvature_per_u2: f64,
+    position: f64,
+}
+
+const UNIT_ACCELERATION_STEP_HERMITE_MISS: HermiteMiss = HermiteMiss {
+    curvature_per_u2: 1.0,
+    position: 1.0 / 16.0,
+};
+
+const UNIT_JERK_KINK_HERMITE_MISS: HermiteMiss = HermiteMiss {
+    curvature_per_u2: 1.0 / 12.0,
+    position: 1.0 / 192.0,
+};
 
 pub(crate) trait TrackSignal {
     fn eval_pva(&self, t: f64) -> (f64, f64, f64);
@@ -36,6 +78,15 @@ pub(crate) trait TrackSignal {
     }
     fn acceleration_monotonicity(&self, _start: f64, _end: f64) -> Option<AccelerationTrend> {
         None
+    }
+    fn interior_knots(&self, _start: f64, _end: f64) -> &[f64] {
+        &[]
+    }
+    fn knot_jump(&self, _knot: f64) -> KnotJumpBound {
+        KnotJumpBound::UNBOUNDED
+    }
+    fn eval_pva_across(&self, knot: f64) -> [(f64, f64, f64); 2] {
+        [f64::NEG_INFINITY, f64::INFINITY].map(|side| self.eval_pva(next_toward(knot, side)))
     }
     fn diagnostic(&self, _t: f64) -> Option<String> {
         None
@@ -68,6 +119,15 @@ impl<S: TrackSignal> TrackSignal for &S {
     }
     fn acceleration_monotonicity(&self, start: f64, end: f64) -> Option<AccelerationTrend> {
         S::acceleration_monotonicity(self, start, end)
+    }
+    fn interior_knots(&self, start: f64, end: f64) -> &[f64] {
+        S::interior_knots(self, start, end)
+    }
+    fn knot_jump(&self, knot: f64) -> KnotJumpBound {
+        S::knot_jump(self, knot)
+    }
+    fn eval_pva_across(&self, knot: f64) -> [(f64, f64, f64); 2] {
+        S::eval_pva_across(self, knot)
     }
     fn diagnostic(&self, t: f64) -> Option<String> {
         S::diagnostic(self, t)
@@ -2539,7 +2599,7 @@ fn acceleration_interval_witness<S: TrackSignal>(
     })
 }
 
-const POSITION_WITNESS_MAX_DEPTH: u32 = 6;
+const WITNESS_MAX_DEPTH: u32 = 6;
 
 #[derive(Clone, Copy)]
 struct PositionErrorSample {
@@ -2577,17 +2637,47 @@ impl PositionErrorSample {
     }
 }
 
-struct PositionErrorWitness<'a, S> {
+#[derive(Clone, Copy)]
+struct ErrorSample {
+    position: PositionErrorSample,
+    curvature_per_u2: f64,
+}
+
+impl ErrorSample {
+    fn hermite_curvature_peak_to(self, right: Self) -> f64 {
+        let width = right.position.u - self.position.u;
+        let (f0, f1) = (
+            self.position.slope_per_u * width,
+            right.position.slope_per_u * width,
+        );
+        let (g0, g1) = (
+            self.curvature_per_u2 * width * width,
+            right.curvature_per_u2 * width * width,
+        );
+        let c2 = 3.0 * (f1 - f0) - 2.0 * g0 - g1;
+        let c3 = 2.0 * (f0 - f1) + g0 + g1;
+        let vertex = -c2 / (3.0 * c3);
+        let ends = g0.abs().max(g1.abs());
+        let peak = if c3 != 0.0 && (0.0..=1.0).contains(&vertex) {
+            ends.max((g0 + vertex * (2.0 * c2 + 3.0 * c3 * vertex)).abs())
+        } else {
+            ends
+        };
+        peak / (width * width)
+    }
+}
+
+struct RungWitness<'a, S> {
     axis: usize,
     sig: &'a S,
     coefficients: &'a [f64],
     t0: f64,
     h: f64,
-    budget: f64,
+    fit_tol: FitTol,
 }
 
-impl<S: TrackSignal> PositionErrorWitness<'_, S> {
-    fn sample(&self, u: f64, (position, velocity): (f64, f64)) -> PositionErrorSample {
+impl<S: TrackSignal> RungWitness<'_, S> {
+    fn position_sample(&self, u: f64, (position, velocity): (f64, f64)) -> PositionErrorSample {
         PositionErrorSample {
             u,
             error: eval_mono(self.coefficients, u) - position,
@@ -2595,9 +2685,49 @@ impl<S: TrackSignal> PositionErrorWitness<'_, S> {
         }
     }
 
+    fn sample(&self, u: f64, (position, velocity, acceleration): (f64, f64, f64)) -> ErrorSample {
+        let half_span = 0.5 * self.h;
+        ErrorSample {
+            position: self.position_sample(u, (position, velocity)),
+            curvature_per_u2: eval_mono_dd(self.coefficients, u)
+                - acceleration * half_span * half_span,
+        }
+    }
+
+    fn exact_sample(
+        &self,
+        u: f64,
+        t: f64,
+        (position, velocity, acceleration): (f64, f64, f64),
+    ) -> Result<ErrorSample, PostProcessError> {
+        Ok(self.sample(
+            u,
+            (
+                exact_value(self.axis, position, t)?,
+                exact_value(self.axis, velocity, t)?,
+                exact_value(self.axis, acceleration, t)?,
+            ),
+        ))
+    }
+
+    fn exact_sample_at(&self, u: f64) -> Result<ErrorSample, PostProcessError> {
+        let t = nurbs::fmadd(0.5 * (u + 1.0), self.h, self.t0);
+        self.exact_sample(u, t, self.sig.eval_pva(t))
+    }
+
+    fn curvature_budget(&self) -> f64 {
+        let half_span = 0.5 * self.h;
+        self.fit_tol.accel_mm_s2 * half_span * half_span
+    }
+
+    fn within(&self, sample: ErrorSample) -> bool {
+        sample.position.error.abs() <= self.fit_tol.pos_mm
+            && sample.curvature_per_u2.abs() <= self.curvature_budget()
+    }
+
     fn over_probes(&self, truth: &SpanTruth) -> Result<Option<f64>, PostProcessError> {
         let samples: [PositionErrorSample; LADDER_PROBES_U.len()] = std::array::from_fn(|index| {
-            self.sample(LADDER_PROBES_U[index], (truth.pos[index], truth.vel[index]))
+            self.position_sample(LADDER_PROBES_U[index], (truth.pos[index], truth.vel[index]))
         });
         for gap in samples.windows(2) {
             if let Some(u) = self.over_gap(gap[0], gap[1], 0)? {
@@ -2607,26 +2737,109 @@ impl<S: TrackSignal> PositionErrorWitness<'_, S> {
         Ok(None)
     }
 
+    fn over_pieces(
+        &self,
+        truth: &SpanTruth,
+        knots: &[f64],
+    ) -> Result<Option<f64>, PostProcessError> {
+        let probe = |index: usize| {
+            self.sample(
+                LADDER_PROBES_U[index],
+                (truth.pos[index], truth.vel[index], truth.acc[index]),
+            )
+        };
+        let half_span = 0.5 * self.h;
+        let mut knots = knots
+            .iter()
+            .map(|&t| (nurbs::fmadd(2.0 / self.h, t - self.t0, -1.0), t))
+            .peekable();
+        for index in 1..LADDER_PROBES_U.len() {
+            let (start, end) = (probe(index - 1), probe(index));
+            let width = end.position.u - start.position.u;
+            let mut curvature_margin =
+                self.curvature_budget() - start.hermite_curvature_peak_to(end);
+            let mut position_margin =
+                self.fit_tol.pos_mm - start.position.hermite_peak_to(end.position);
+            let mut previous = start;
+            while let Some((u, t)) = knots.next_if(|&(u, _)| u < end.position.u) {
+                let miss = self.sig.knot_jump(t).hermite_miss(half_span, width);
+                if miss.curvature_per_u2 <= curvature_margin && miss.position <= position_margin {
+                    curvature_margin -= miss.curvature_per_u2;
+                    position_margin -= miss.position;
+                    continue;
+                }
+                let [before, after] = self.sig.eval_pva_across(t);
+                let before = self.exact_sample(u, t, before)?;
+                let after = self.exact_sample(u, t, after)?;
+                if !self.within(before) || !self.within(after) {
+                    return Ok(Some(u));
+                }
+                if let Some(u) = self.over_piece(previous, before)? {
+                    return Ok(Some(u));
+                }
+                previous = after;
+            }
+            if let Some(u) = self.over_piece(previous, end)? {
+                return Ok(Some(u));
+            }
+        }
+        Ok(None)
+    }
+
+    fn over_piece(
+        &self,
+        left: ErrorSample,
+        right: ErrorSample,
+    ) -> Result<Option<f64>, PostProcessError> {
+        if right.position.u <= left.position.u {
+            return Ok(None);
+        }
+        match self.acceleration_between(left, right, 0)? {
+            Some(u) => Ok(Some(u)),
+            None => self.over_gap(left.position, right.position, 0),
+        }
+    }
+
+    fn acceleration_between(
+        &self,
+        left: ErrorSample,
+        right: ErrorSample,
+        depth: u32,
+    ) -> Result<Option<f64>, PostProcessError> {
+        if left.hermite_curvature_peak_to(right) <= self.curvature_budget() {
+            return Ok(None);
+        }
+        let u = 0.5 * (left.position.u + right.position.u);
+        let mid = self.exact_sample_at(u)?;
+        if !self.within(mid) || depth == WITNESS_MAX_DEPTH {
+            return Ok(Some(u));
+        }
+        match self.acceleration_between(left, mid, depth + 1)? {
+            Some(u) => Ok(Some(u)),
+            None => self.acceleration_between(mid, right, depth + 1),
+        }
+    }
+
     fn over_gap(
         &self,
         left: PositionErrorSample,
         right: PositionErrorSample,
         depth: u32,
     ) -> Result<Option<f64>, PostProcessError> {
-        if left.hermite_peak_to(right) <= self.budget {
+        if left.hermite_peak_to(right) <= self.fit_tol.pos_mm {
             return Ok(None);
         }
         let u = 0.5 * (left.u + right.u);
         let t = nurbs::fmadd(0.5 * (u + 1.0), self.h, self.t0);
         let (position, velocity, _) = self.sig.eval_pva(t);
-        let mid = self.sample(
+        let mid = self.position_sample(
             u,
             (
                 exact_value(self.axis, position, t)?,
                 exact_value(self.axis, velocity, t)?,
             ),
         );
-        if mid.error.abs() > self.budget || depth == POSITION_WITNESS_MAX_DEPTH {
+        if mid.error.abs() > self.fit_tol.pos_mm || depth == WITNESS_MAX_DEPTH {
             return Ok(Some(u));
         }
         match self.over_gap(left, mid, depth + 1)? {
@@ -2754,26 +2967,18 @@ fn shaped_ladder<S: TrackSignal>(
     let t_of = |u: f64| nurbs::fmadd(0.5 * (u + 1.0), h, t0);
     let t0_inside = span_probe_t(t0, t1, -1.0);
     let p0 = exact_value(axis, sig.eval(t0), t0)?;
-    let (seam_v0, a0) = edge_velocity_and_acceleration(
-        sig,
-        axis,
-        t0_inside,
-        t0 + edge_inset(h, policy.floors.cubic, slivers.start),
-        fit_tol,
-    )?;
+    let start_past_sliver = t0 + edge_inset(h, policy.floors.cubic, slivers.start);
+    let end_past_sliver = t1 - edge_inset(h, policy.floors.cubic, slivers.end);
+    let (seam_v0, a0) =
+        edge_velocity_and_acceleration(sig, axis, t0_inside, start_past_sliver, fit_tol)?;
     let v0 = match slivers.start_break {
         Some(break_at) => velocity_past_moved_break(sig, axis, break_at, t1, t0)?,
         None => seam_v0,
     };
     let t1_inside = span_probe_t(t0, t1, 1.0);
     let p1 = exact_value(axis, sig.eval(t1), t1)?;
-    let (seam_v1, a1) = edge_velocity_and_acceleration(
-        sig,
-        axis,
-        t1_inside,
-        t1 - edge_inset(h, policy.floors.cubic, slivers.end),
-        fit_tol,
-    )?;
+    let (seam_v1, a1) =
+        edge_velocity_and_acceleration(sig, axis, t1_inside, end_past_sliver, fit_tol)?;
     let v1 = match slivers.end_break {
         Some(break_at) => velocity_past_moved_break(sig, axis, break_at, t0, t1)?,
         None => seam_v1,
@@ -2832,18 +3037,21 @@ fn shaped_ladder<S: TrackSignal>(
         },
     ) {
         Ok(coefficients) => {
+            let rung_witness = RungWitness {
+                axis,
+                sig,
+                coefficients: &coefficients,
+                t0,
+                h,
+                fit_tol,
+            };
             let witness =
                 match acceleration_error_witness(sig, &coefficients, t0, t1, fit_tol.accel_mm_s2) {
                     Some(u) => Some(u),
-                    None => PositionErrorWitness {
-                        axis,
-                        sig,
-                        coefficients: &coefficients,
-                        t0,
-                        h,
-                        budget: fit_tol.pos_mm,
-                    }
-                    .over_probes(&truth)?,
+                    None => match sig.interior_knots(start_past_sliver, end_past_sliver) {
+                        [] => rung_witness.over_probes(&truth)?,
+                        knots => rung_witness.over_pieces(&truth, knots)?,
+                    },
                 };
             let Some(u) = witness else {
                 return Ok((coefficients, None));
