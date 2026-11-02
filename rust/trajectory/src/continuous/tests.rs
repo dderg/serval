@@ -2116,6 +2116,82 @@ fn carrier_breakpoints_are_publicly_exposed_and_bracket_the_domain() {
     close(segment.eval_axis_pvaj(0, 10.5).unwrap().acceleration, 6.0);
 }
 
+const SLIVER_TEST_EPOCHS_S: [f64; 2] = [0.0, 2.0e4];
+const SLIVER_ROUNDING_NOISE_MM: f64 = 1e-9;
+const RAMP_SPEED_MM_S: f64 = 1.0;
+
+fn two_ulps_above(t: f64) -> f64 {
+    interior_time_above(interior_time_above(t))
+}
+
+/// A unit-speed ramp through `knots` whose pieces all agree except the
+/// slivers, which carry position rounding noise a de Boor read amplifies by
+/// the reciprocal of their width.
+fn ramp_with_noisy_slivers(knots: Vec<f64>) -> ContinuousAxis {
+    let interior = &knots[1..knots.len() - 1];
+    let mut control_points = vec![10.0];
+    for window in interior.windows(2) {
+        let previous = *control_points.last().unwrap();
+        let width = window[1] - window[0];
+        let sliver = degenerate_knot_span(&knots, control_points.len());
+        let noise = if sliver {
+            SLIVER_ROUNDING_NOISE_MM
+        } else {
+            0.0
+        };
+        control_points.push(previous + RAMP_SPEED_MM_S * width + noise);
+    }
+    ContinuousAxis::Spline(Arc::new(
+        ScalarNurbs::try_new(1, knots, control_points).unwrap(),
+    ))
+}
+
+#[test]
+fn an_interior_sliver_reads_as_its_neighbour_at_any_stream_time() {
+    for epoch in SLIVER_TEST_EPOCHS_S {
+        let sliver_start = epoch + 1.0;
+        let sliver_end = two_ulps_above(sliver_start);
+        let end = epoch + 2.0;
+        let ramp = ramp_with_noisy_slivers(vec![epoch, epoch, sliver_start, sliver_end, end, end]);
+        let velocity = ramp.eval_pva(sliver_start).unwrap().velocity;
+        assert!(
+            (velocity - RAMP_SPEED_MM_S).abs() <= 1e-6,
+            "sliver [{sliver_start}, {sliver_end}] read its own noise: velocity {velocity}"
+        );
+    }
+}
+
+#[test]
+fn a_leading_sliver_reads_as_its_neighbour_at_any_stream_time() {
+    for epoch in SLIVER_TEST_EPOCHS_S {
+        let start = epoch + 1.0;
+        let sliver_end = two_ulps_above(start);
+        let end = epoch + 2.0;
+        let ramp = ramp_with_noisy_slivers(vec![start, start, sliver_end, end, end]);
+        let velocity = ramp.eval_pva(start).unwrap().velocity;
+        assert!(
+            (velocity - RAMP_SPEED_MM_S).abs() <= 1e-6,
+            "sliver [{start}, {sliver_end}] read its own noise: velocity {velocity}"
+        );
+    }
+}
+
+#[test]
+fn a_trailing_sliver_reads_as_its_neighbour_at_any_stream_time() {
+    for epoch in SLIVER_TEST_EPOCHS_S {
+        let start = epoch + 1.0;
+        let sliver_start = epoch + 2.0;
+        let end = two_ulps_above(sliver_start);
+        let ramp = ramp_with_noisy_slivers(vec![start, start, sliver_start, end, end]);
+        let inside_sliver = interior_time_above(sliver_start);
+        let velocity = ramp.eval_pva(inside_sliver).unwrap().velocity;
+        assert!(
+            (velocity - RAMP_SPEED_MM_S).abs() <= 1e-6,
+            "sliver [{sliver_start}, {end}] read its own noise: velocity {velocity}"
+        );
+    }
+}
+
 /// A degree-9 curve with interior knots, the shape a shaped move lowers to.
 fn lumpy_degree_nine() -> Arc<ScalarNurbs> {
     let degree = 9;

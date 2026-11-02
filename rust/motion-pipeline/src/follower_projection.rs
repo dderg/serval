@@ -105,8 +105,8 @@ struct SourceProjection {
     s_end: f64,
     e_end_relative: f64,
     semantic_cuts: Vec<f64>,
-    input_start: Pvaj4,
-    input_end: Pvaj4,
+    input_start: SeamInput,
+    input_end: SeamInput,
 }
 
 /// One raw segment's follower projection inputs: the shaped leader signal it
@@ -119,6 +119,7 @@ struct FollowerSource<'a> {
     leaders: &'a [usize],
     state: &'a FollowerState,
     s_start: f64,
+    s_length: f64,
 }
 
 fn fit_source_projection(
@@ -133,14 +134,32 @@ fn fit_source_projection(
         leaders,
         state,
         s_start,
+        s_length,
     } = source;
     let raw_axis = &raw.axes[axis];
     let (t_start, t_end) = projection_support(raw, shaped, axis, leaders);
-    let sig = FollowerSignal::new(shaped, raw, axis, leaders, state, s_start, 0.0);
+    let sig = FollowerSignal::new(
+        shaped,
+        raw,
+        axis,
+        leaders,
+        state,
+        Odometer {
+            start: s_start,
+            length: s_length,
+        },
+        0.0,
+    );
     let breakpoints = sig.construction_breakpoints(raw_axis);
     let input_state = |t| {
-        let (p, v, a) = sig.eval_pva(t);
-        (p, v, a, sig.jerk(t))
+        let (_, velocity, acceleration) = sig.eval_pva(t);
+        SeamInput {
+            velocity,
+            acceleration,
+            jerk: sig.jerk(t),
+            ratio: sig.state.ratio_and_slope(sig.s_owned(t)).0,
+            leader_speed: sig.shaped_speed(t),
+        }
     };
     let input_start = input_state(t_start);
     let input_end = input_state(t_end);
@@ -259,7 +278,7 @@ pub(crate) fn project_followers(
                 let shaped_ds =
                     state.ingest(&base[i], &frontier[i], axis, leaders, &base[i + 1..], arc);
                 let s_start = state.aligned_span_start(next_s);
-                source_jobs.push((i, s_start));
+                source_jobs.push((i, s_start, shaped_ds));
                 next_s = s_start + shaped_ds;
             }
             timing.ingest_us += ingest_started.elapsed_us();
@@ -286,7 +305,7 @@ pub(crate) fn project_followers(
                             loop {
                                 let job =
                                     next_job.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                let Some(&(index, s_start)) = source_jobs.get(job) else {
+                                let Some(&(index, s_start, s_length)) = source_jobs.get(job) else {
                                     return done;
                                 };
                                 done.push((
@@ -299,6 +318,7 @@ pub(crate) fn project_followers(
                                             leaders,
                                             state: state_ref,
                                             s_start,
+                                            s_length,
                                         },
                                         fit_tol,
                                         leading_stage,
@@ -316,7 +336,7 @@ pub(crate) fn project_followers(
         } else {
             source_jobs
                 .iter()
-                .map(|&(index, s_start)| {
+                .map(|&(index, s_start, s_length)| {
                     (
                         index,
                         fit_source_projection(
@@ -327,6 +347,7 @@ pub(crate) fn project_followers(
                                 leaders,
                                 state: state_ref,
                                 s_start,
+                                s_length,
                             },
                             fit_tol,
                             leading_stage,
@@ -402,8 +423,8 @@ pub(crate) fn project_followers(
             };
             let (input_start, input_end) = input_states.unwrap_or_else(|| {
                 (
-                    pvaj_of_track(&projected, t_start),
-                    pvaj_of_track(&projected, t_end),
+                    SeamInput::of_track(&projected, t_start),
+                    SeamInput::of_track(&projected, t_end),
                 )
             });
             let track = if projecting {
@@ -753,17 +774,25 @@ pub(crate) fn project_followers(
                 || (cached.base, extract_bezier_pieces(&cached.track)),
                 |(batch_base, bases, tracks)| (*batch_base + bases[i], tracks[i].clone()),
             );
-            let law_step = |previous_input: Option<Pvaj4>| {
+            let law_step = |previous_input: Option<SeamInput>| {
                 if kernel.is_some() {
                     return 0.0;
                 }
                 let previous = previous_input
                     .expect("an emitted endpoint always records its pre-transform state");
-                let shared_v = previous.1;
-                let (_, _, a_r, j_r) = input_start;
-                let (_, _, a_l, j_l) = previous;
-                chain_output_velocity(chain, shared_v, a_r, j_r)
-                    - chain_output_velocity(chain, shared_v, a_l, j_l)
+                let right_velocity =
+                    previous.velocity + previous.signal_velocity_step(&input_start);
+                chain_output_velocity(
+                    chain,
+                    right_velocity,
+                    input_start.acceleration,
+                    input_start.jerk,
+                ) - chain_output_velocity(
+                    chain,
+                    previous.velocity,
+                    previous.acceleration,
+                    previous.jerk,
+                )
             };
             if i == 0 {
                 if let (Some(previous), Some((emit_start, emit_end))) = (emitted_pv, emit_window) {
@@ -856,26 +885,51 @@ fn fit_kernel_window<S: TrackSignal>(
     Ok((local_base, pieces, started.elapsed_us()))
 }
 
-type Pvaj4 = (f64, f64, f64, f64);
-
-fn pvaj_of_track(track: &ScalarNurbs, t: f64) -> Pvaj4 {
-    let mut state = [nurbs::eval::eval(track, t), 0.0, 0.0, 0.0];
-    let mut current = track.clone();
-    for slot in state.iter_mut().skip(1) {
-        if current.degree() == 0 {
-            break;
-        }
-        current = nurbs::eval::derivative(&current);
-        *slot = nurbs::eval::eval(&current, t);
-    }
-    (state[0], state[1], state[2], state[3])
+/// A follower's pre-transform state at one side of a seam. Its velocity is
+/// `ratio · leader_speed` plus whatever the raw track adds on its own, so a
+/// velocity difference between two sides splits into the follower's own
+/// step (a ratio change or a raw step, which the seam must carry) and the
+/// part the leaders' speed residual explains (which a weld absorbs).
+#[derive(Debug, Clone, Copy)]
+struct SeamInput {
+    velocity: f64,
+    acceleration: f64,
+    jerk: f64,
+    ratio: f64,
+    leader_speed: f64,
 }
 
-/// The transformed output velocity the pre-kernel chain commands for a
-/// one-sided input `(a, j)` at a shared seam velocity `v` — the seam-side law
-/// value, so a weld can tell the law's own velocity step (driven by the input
-/// acceleration jumping across the seam) apart from the pipeline's fit
-/// residual (which lives in `v` and stays welded).
+impl SeamInput {
+    fn of_track(track: &ScalarNurbs, t: f64) -> Self {
+        let mut state = [0.0; 3];
+        let mut current = track.clone();
+        for slot in &mut state {
+            if current.degree() == 0 {
+                break;
+            }
+            current = nurbs::eval::derivative(&current);
+            *slot = nurbs::eval::eval(&current, t);
+        }
+        let [velocity, acceleration, jerk] = state;
+        Self {
+            velocity,
+            acceleration,
+            jerk,
+            ratio: 1.0,
+            leader_speed: velocity,
+        }
+    }
+
+    fn signal_velocity_step(&self, right: &Self) -> f64 {
+        right.velocity - self.velocity - right.ratio * (right.leader_speed - self.leader_speed)
+    }
+}
+
+/// The transformed output velocity the pre-kernel chain commands for one
+/// side's exact input state `(v, a, j)` at a seam — the seam-side law value,
+/// so a weld can tell the signal's own velocity step (an extrusion-ratio
+/// change under moving leaders, or the input acceleration jumping through
+/// the law) apart from the pipeline's fit residual, which alone is welded.
 fn chain_output_velocity(chain: &CompiledChain, v: f64, a: f64, j: f64) -> f64 {
     match chain.leading_transform() {
         Some(ChainStage::DerivativeGains { k1, k2 }) => v + k1 * a + k2 * j,
@@ -908,8 +962,8 @@ struct ProjSeg {
     t_start: f64,
     t_end: f64,
     base: f64,
-    input_start: Pvaj4,
-    input_end: Pvaj4,
+    input_start: SeamInput,
+    input_end: SeamInput,
     track: ScalarNurbs,
     semantic_cuts: Vec<f64>,
 }
@@ -958,7 +1012,7 @@ pub(crate) struct FollowerState {
     e_end: Option<f64>,
     projected_output_end: Option<f64>,
     emitted_output_pv: Option<(f64, f64)>,
-    committed_input_end: Option<Pvaj4>,
+    committed_input_end: Option<SeamInput>,
     projected: Vec<ProjSeg>,
     projected_through_t: Option<f64>,
     projected_trimmed: bool,
@@ -1292,10 +1346,10 @@ fn fit_continuous_axis(
 }
 
 fn leader_arc_length(seg: &ContinuousSegment, leaders: &[usize]) -> f64 {
-    let shaped = ShapedLeaders::of(seg, leaders);
+    let shaped_leaders = ShapedLeaders::of(seg, leaders);
     axis_grid(seg, leaders)
         .windows(2)
-        .map(|window| integrate(&|t| shaped.speed(t), window[0], window[1]))
+        .map(|window| integrate(&|t| shaped_leaders.speed(t), window[0], window[1]))
         .sum()
 }
 
@@ -1523,6 +1577,96 @@ impl<'a> ShapedLeaders<'a> {
             .sum::<f64>()
             .sqrt()
     }
+
+    fn speed_deriv(&self, t: f64, speed: f64) -> f64 {
+        if speed == 0.0 {
+            return 0.0;
+        }
+        (0..self.axes.len())
+            .map(|index| {
+                let (_, velocity, acceleration) = self.pva(index, t);
+                velocity * acceleration
+            })
+            .sum::<f64>()
+            / speed
+    }
+
+    fn accel_norm(&self, t: f64) -> f64 {
+        (0..self.axes.len())
+            .map(|index| {
+                let acceleration = self.pva(index, t).2;
+                acceleration * acceleration
+            })
+            .sum::<f64>()
+            .sqrt()
+    }
+}
+
+struct OdometerKnots {
+    t: Vec<f64>,
+    s: Vec<f64>,
+    leaf_magnitude: f64,
+}
+
+impl OdometerKnots {
+    fn starting_at(t: f64, capacity: usize) -> Self {
+        let mut knots = Self {
+            t: Vec::with_capacity(capacity),
+            s: Vec::with_capacity(capacity),
+            leaf_magnitude: 0.0,
+        };
+        knots.t.push(t);
+        knots.s.push(0.0);
+        knots
+    }
+
+    fn push_leaf(&mut self, end: f64, value: f64) {
+        let length = self.length() + value;
+        self.t.push(end);
+        self.s.push(length);
+        self.leaf_magnitude += value.abs();
+    }
+
+    fn length(&self) -> f64 {
+        *self.s.last().expect("odometer knots seeded")
+    }
+
+    fn leaves(&self) -> usize {
+        self.s.len() - 1
+    }
+
+    fn reassociation_bound(&self) -> f64 {
+        self.leaves() as f64 * f64::EPSILON * self.leaf_magnitude
+    }
+
+    fn scale_to(&self, ingested: f64) -> f64 {
+        let integrated = self.length();
+        let start = self.t[0];
+        let end = self.t[self.t.len() - 1];
+        if integrated == 0.0 {
+            assert_eq!(
+                ingested, 0.0,
+                "follower leaders stand still over [{start}, {end}] but the span table \
+                 ingested {ingested} mm"
+            );
+            return 1.0;
+        }
+        let bound = self.reassociation_bound();
+        assert!(
+            (integrated - ingested).abs() <= bound,
+            "follower odometer integrates {integrated} mm over [{start}, {end}] but the span \
+             table ingested {ingested} mm, beyond the {bound} mm that reordering its {} leaves \
+             can account for",
+            self.leaves()
+        );
+        ingested / integrated
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Odometer {
+    start: f64,
+    length: f64,
 }
 
 pub(crate) struct FollowerSignal<'a> {
@@ -1530,11 +1674,11 @@ pub(crate) struct FollowerSignal<'a> {
     e_start: f64,
     s_start: f64,
     e_spans_start: f64,
-    shaped_leaders: ShapedLeaders<'a>,
+    leaders: ShapedLeaders<'a>,
     raw_delta: Option<(&'a ContinuousAxis, f64)>,
     grid: Vec<f64>,
-    dense_t: Vec<f64>,
-    dense_s: Vec<f64>,
+    knots: OdometerKnots,
+    odometer_scale: f64,
     s_owned_end: f64,
     start_sliver: Option<SpeedZeroSliver>,
     end_sliver: Option<SpeedZeroSliver>,
@@ -1548,11 +1692,10 @@ impl<'a> FollowerSignal<'a> {
         axis: usize,
         leaders: &[usize],
         state: &'a FollowerState,
-        s_start: f64,
+        odometer: Odometer,
         e_start: f64,
     ) -> Self {
         let (t0, t1) = projection_support(raw, shaped, axis, leaders);
-        let shaped_leaders = ShapedLeaders::of(shaped, leaders);
         let raw_delta =
             (!raw.spatial_path).then(|| (&raw.axes[axis], axis_pva(&raw.axes[axis], t0).0));
         let mut grid = vec![t0, t1];
@@ -1563,17 +1706,23 @@ impl<'a> FollowerSignal<'a> {
         );
         grid.sort_by(f64::total_cmp);
         grid.dedup_by(|left, right| (*left - *right).abs() <= GRID_DEDUP_EPS_S);
+        let shaped_leaders = ShapedLeaders::of(shaped, leaders);
+        let mut knots = OdometerKnots::starting_at(grid[0], grid.len());
+        for w in grid.windows(2) {
+            integrate_recording(&|t| shaped_leaders.speed(t), w[0], w[1], &mut knots);
+        }
+        let odometer_scale = knots.scale_to(odometer.length);
 
         let mut sig = Self {
             state,
             e_start,
-            s_start,
-            e_spans_start: state.spans_e(s_start),
-            shaped_leaders,
+            s_start: odometer.start,
+            e_spans_start: state.spans_e(odometer.start),
+            leaders: shaped_leaders,
             raw_delta,
             grid,
-            dense_t: Vec::new(),
-            dense_s: Vec::new(),
+            knots,
+            odometer_scale,
             s_owned_end: f64::INFINITY,
             start_sliver: None,
             end_sliver: None,
@@ -1582,56 +1731,8 @@ impl<'a> FollowerSignal<'a> {
         let (start_sliver, end_sliver) = sig.speed_zero_slivers();
         sig.start_sliver = start_sliver;
         sig.end_sliver = end_sliver;
-        let mut dense_t = Vec::with_capacity(sig.grid.len());
-        let mut dense_s = Vec::with_capacity(sig.grid.len());
-        dense_t.push(sig.grid[0]);
-        dense_s.push(0.0);
-        let mut acc = 0.0;
-        for w in sig.grid.windows(2) {
-            integrate_recording(
-                &|t| sig.shaped_speed(t),
-                w[0],
-                w[1],
-                &mut acc,
-                &mut dense_t,
-                &mut dense_s,
-            );
-        }
-        sig.dense_t = dense_t;
-        sig.dense_s = dense_s;
         sig.s_owned_end = state.owned_span_end(sig.s_start, sig.s_end());
         sig
-    }
-
-    fn leader_pva(&self, index: usize, t: f64) -> (f64, f64, f64) {
-        self.shaped_leaders.pva(index, t)
-    }
-
-    fn raw_shaped_speed(&self, t: f64) -> f64 {
-        self.shaped_leaders.speed(t)
-    }
-
-    fn raw_shaped_speed_deriv(&self, t: f64, speed: f64) -> f64 {
-        if speed == 0.0 {
-            return 0.0;
-        }
-        (0..self.shaped_leaders.axes.len())
-            .map(|index| {
-                let (_, velocity, acceleration) = self.leader_pva(index, t);
-                velocity * acceleration
-            })
-            .sum::<f64>()
-            / speed
-    }
-
-    fn raw_shaped_accel_norm(&self, t: f64) -> f64 {
-        (0..self.shaped_leaders.axes.len())
-            .map(|index| {
-                let acceleration = self.leader_pva(index, t).2;
-                acceleration * acceleration
-            })
-            .sum::<f64>()
-            .sqrt()
     }
 
     fn endpoint_sliver(
@@ -1641,8 +1742,8 @@ impl<'a> FollowerSignal<'a> {
         interior_sign: f64,
     ) -> Option<SpeedZeroSliver> {
         let inner = endpoint + interior_sign * slack;
-        let speed = self.raw_shaped_speed(endpoint);
-        let secant = (self.raw_shaped_speed(inner) - speed) / (inner - endpoint);
+        let speed = self.leaders.speed(endpoint);
+        let secant = (self.leaders.speed(inner) - speed) / (inner - endpoint);
         (speed <= secant.abs() * slack).then(|| SpeedZeroSliver {
             inner,
             zero_time: if speed == 0.0 {
@@ -1650,7 +1751,7 @@ impl<'a> FollowerSignal<'a> {
             } else {
                 endpoint - speed / secant
             },
-            accel_norm: self.raw_shaped_accel_norm(endpoint),
+            accel_norm: self.leaders.accel_norm(endpoint),
             interior_sign,
         })
     }
@@ -1672,42 +1773,56 @@ impl<'a> FollowerSignal<'a> {
     }
 
     fn shaped_speed(&self, t: f64) -> f64 {
-        self.raw_shaped_speed(t)
+        self.odometer_scale * self.leaders.speed(t)
     }
 
-    fn shaped_speed_deriv_from_speed(&self, t: f64, speed: f64) -> f64 {
+    fn odometer_rate(&self, t: f64) -> (f64, f64) {
+        let speed = self.leaders.speed(t);
+        (
+            self.odometer_scale * speed,
+            self.odometer_scale * self.leader_speed_deriv(t, speed),
+        )
+    }
+
+    fn leader_speed_deriv(&self, t: f64, speed: f64) -> f64 {
         match self.speed_zero_sliver(t) {
             Some(sliver) => sliver.deriv_at(t),
-            None => self.raw_shaped_speed_deriv(t, speed),
+            None => self.leaders.speed_deriv(t, speed),
         }
     }
 
+    fn leader_speed_second_deriv(&self, t: f64, speed: f64, speed_derivative: f64) -> f64 {
+        if speed == 0.0 || self.speed_zero_sliver(t).is_some() {
+            return 0.0;
+        }
+        let numerator = self
+            .leaders
+            .axes
+            .iter()
+            .map(|axis| {
+                let pvaj = axis
+                    .eval_pvaj(t)
+                    .expect("follower leader has exact derivatives");
+                pvaj.acceleration * pvaj.acceleration + pvaj.velocity * pvaj.jerk
+            })
+            .sum::<f64>();
+        (numerator - speed_derivative * speed_derivative) / speed
+    }
+
     fn jerk(&self, t: f64) -> f64 {
-        let speed = self.shaped_speed(t);
-        let speed_derivative = self.shaped_speed_deriv_from_speed(t, speed);
-        let speed_second = if speed == 0.0 || self.speed_zero_sliver(t).is_some() {
-            0.0
-        } else {
-            let numerator = self
-                .shaped_leaders
-                .axes
-                .iter()
-                .map(|axis| {
-                    let pvaj = axis
-                        .eval_pvaj(t)
-                        .expect("follower leader has exact derivatives");
-                    pvaj.acceleration * pvaj.acceleration + pvaj.velocity * pvaj.jerk
-                })
-                .sum::<f64>();
-            (numerator - speed_derivative * speed_derivative) / speed
-        };
+        let speed = self.leaders.speed(t);
+        let speed_derivative = self.leader_speed_deriv(t, speed);
+        let speed_second = self.leader_speed_second_deriv(t, speed, speed_derivative);
+        let rate = self.odometer_scale * speed;
+        let rate_deriv = self.odometer_scale * speed_derivative;
+        let rate_second = self.odometer_scale * speed_second;
         let (ratio, slope) = self.state.ratio_and_slope(self.s_owned(t));
         let raw = self.raw_delta.map_or(0.0, |(axis, _)| {
             axis.eval_pvaj(t)
                 .expect("follower raw axis has exact derivatives")
                 .jerk
         });
-        ratio * speed_second + 3.0 * slope * speed * speed_derivative + raw
+        ratio * rate_second + 3.0 * slope * rate * rate_deriv + raw
     }
 
     fn s_offset(&self, t: f64) -> f64 {
@@ -1726,19 +1841,20 @@ impl<'a> FollowerSignal<'a> {
         } else {
             t
         };
-        match self.dense_t.binary_search_by(|dense| dense.total_cmp(&t)) {
-            Ok(index) => self.dense_s[index],
+        let integrated = match self.knots.t.binary_search_by(|knot| knot.total_cmp(&t)) {
+            Ok(index) => self.knots.s[index],
             Err(insertion) => {
                 assert!(
-                    insertion > 0 && insertion < self.dense_t.len(),
+                    insertion > 0 && insertion < self.knots.t.len(),
                     "follower distance query {t} outside [{}, {}]",
                     self.grid[0],
                     self.grid[self.grid.len() - 1]
                 );
                 let index = insertion - 1;
-                self.dense_s[index] + integrate(&|u| self.shaped_speed(u), self.dense_t[index], t)
+                self.knots.s[index] + integrate(&|u| self.leaders.speed(u), self.knots.t[index], t)
             }
-        }
+        };
+        integrated * self.odometer_scale
     }
     fn s_at(&self, t: f64) -> f64 {
         self.s_start + self.s_offset(t)
@@ -1750,7 +1866,7 @@ impl<'a> FollowerSignal<'a> {
         self.s_offset(t).min(self.s_owned_end - self.s_start)
     }
     fn s_end(&self) -> f64 {
-        self.s_start + self.dense_s.last().copied().expect("odometer knots seeded")
+        self.s_start + self.knots.length() * self.odometer_scale
     }
     /// The exact value of an identically-constant window — a follower whose
     /// span table commands zero extrusion ratio across the whole owned range
@@ -1870,7 +1986,7 @@ impl<'a> FollowerSignal<'a> {
         );
         nodes.push(support_end);
         let mut zeros = Vec::new();
-        for axis in &self.shaped_leaders.axes {
+        for axis in &self.leaders.axes {
             for window in nodes.windows(2) {
                 isolate_velocity_zeros(axis, window[0], window[1], &mut zeros);
             }
@@ -1962,10 +2078,10 @@ impl TrackSignal for FollowerSignal<'_> {
     }
 
     fn second_deriv(&self, t: f64) -> f64 {
-        let speed = self.shaped_speed(t);
+        let (rate, rate_deriv) = self.odometer_rate(t);
         let (ratio, slope) = self.state.ratio_and_slope(self.s_owned(t));
         let raw = self.raw_delta.map_or(0.0, |(axis, _)| axis_pva(axis, t).2);
-        slope * speed * speed + ratio * self.shaped_speed_deriv_from_speed(t, speed) + raw
+        slope * rate * rate + ratio * rate_deriv + raw
     }
 
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
@@ -1977,7 +2093,7 @@ impl TrackSignal for FollowerSignal<'_> {
             }
         }
         let s = self.s_owned(t);
-        let speed = self.shaped_speed(t);
+        let (rate, rate_deriv) = self.odometer_rate(t);
         let (ratio, slope) = self.state.ratio_and_slope(s);
         let spans = self.state.spans_e(s) - self.e_spans_start;
         let (raw_p, raw_v, raw_a) = self.raw_delta.map_or((0.0, 0.0, 0.0), |(axis, at_start)| {
@@ -1986,8 +2102,8 @@ impl TrackSignal for FollowerSignal<'_> {
         });
         let value = (
             self.e_start + spans + raw_p,
-            ratio * speed + raw_v,
-            slope * speed * speed + ratio * self.shaped_speed_deriv_from_speed(t, speed) + raw_a,
+            ratio * rate + raw_v,
+            slope * rate * rate + ratio * rate_deriv + raw_a,
         );
         self.pva_memo.borrow_mut()[slot] = Some((key, value));
         value
@@ -1996,15 +2112,14 @@ impl TrackSignal for FollowerSignal<'_> {
         let s = self.s_owned(t);
         let span_index = self.state.spans.partition_point(|span| span.s1 <= s);
         let span = self.state.spans.get(span_index);
-        let speed = self.shaped_speed(t);
-        let speed_deriv = self.shaped_speed_deriv_from_speed(t, speed);
+        let (speed, speed_deriv) = self.odometer_rate(t);
         let (ratio, slope) = self.state.ratio_and_slope(s);
         let leaders = self
-            .shaped_leaders
+            .leaders
             .axes
             .iter()
             .enumerate()
-            .map(|(index, axis)| (axis_pva(axis, t), self.leader_pva(index, t), axis.domain()))
+            .map(|(index, axis)| (axis_pva(axis, t), self.leaders.pva(index, t), axis.domain()))
             .collect::<Vec<_>>();
         let raw = self
             .raw_delta
@@ -2311,22 +2426,14 @@ fn integrate(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
 }
 
 /// `integrate`, but the converged leaves of the adaptive recursion are kept
-/// as odometer knots: `dense_t`/`dense_s` receive each leaf's right endpoint
-/// with the running prefix sum in `acc`, so later point queries integrate
-/// only the short residual past the nearest knot instead of re-descending
-/// the whole refinement tree from a grid boundary.
-fn integrate_recording(
-    f: &impl Fn(f64) -> f64,
-    a: f64,
-    b: f64,
-    acc: &mut f64,
-    dense_t: &mut Vec<f64>,
-    dense_s: &mut Vec<f64>,
-) {
+/// as odometer knots, so later point queries integrate only the short
+/// residual past the nearest knot instead of re-descending the whole
+/// refinement tree from a grid boundary.
+fn integrate_recording(f: &impl Fn(f64) -> f64, a: f64, b: f64, knots: &mut OdometerKnots) {
     if b - a <= 0.0 {
         return;
     }
-    adaptive_simpson_recording(f, SimpsonNode::root(f, a, b), acc, dense_t, dense_s);
+    adaptive_simpson_recording(f, SimpsonNode::root(f, a, b), knots);
 }
 
 /// One node of the adaptive Simpson tree: the interval, the three samples
@@ -2419,21 +2526,17 @@ impl SimpsonNode {
 fn adaptive_simpson_recording(
     f: &impl Fn(f64) -> f64,
     node: SimpsonNode,
-    acc: &mut f64,
-    dense_t: &mut Vec<f64>,
-    dense_s: &mut Vec<f64>,
+    knots: &mut OdometerKnots,
 ) {
     let (left, right) = match node.step(f) {
         SimpsonStep::Converged(value) => {
-            *acc += value;
-            dense_t.push(node.b);
-            dense_s.push(*acc);
+            knots.push_leaf(node.b, value);
             return;
         }
         SimpsonStep::Refine { left, right } => (left, right),
     };
-    adaptive_simpson_recording(f, left, acc, dense_t, dense_s);
-    adaptive_simpson_recording(f, right, acc, dense_t, dense_s);
+    adaptive_simpson_recording(f, left, knots);
+    adaptive_simpson_recording(f, right, knots);
 }
 
 fn adaptive_simpson(f: &impl Fn(f64) -> f64, node: SimpsonNode) -> f64 {

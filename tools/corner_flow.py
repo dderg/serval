@@ -1,0 +1,551 @@
+#!/usr/bin/env python3
+"""Bead-width quality of an extruder chain at corners, from the real planner.
+
+Plans a fixed set of moves (45/90/135 degree corners, a 2 mm zigzag, a
+perimeter with a 1.5x flow side, and one entered and left by travel at
+speed) under a printer config with the snapshot engine, then reads the
+exact planned x, y and e tracks. The commanded e track is passed through a first-order melt
+model (``e_cmd = e_out + K * d(e_out)/dt``, K defaulting to the configured
+linear pressure advance), and the material leaving the nozzle is measured per
+millimetre of the *shaped* nozzle path. Ideal flow lays the commanded bead
+everywhere: deviation 0. The commanded bead at each instant is the one the
+G-code asks for at the same instant of the unshaped plan, so ratio changes
+(travel to extrusion, flow changes) count against a sharp switch.
+
+    make -f Makefile.rust motion-engine-fast
+    python3 tools/corner_flow.py tools/bench/printer.cfg
+    python3 tools/corner_flow.py printer.cfg --sweep smooth_time=0,0.005,0.02
+    python3 tools/corner_flow.py printer.cfg --set pa.k=0.04 --json
+
+Columns, per case and speed (worst over the case's corners):
+
+- ``peak`` / ``dip``: largest bead over- / under-fill, % of the nominal
+  bead, along the path within a corner's window.
+- ``w>5%``: path length (mm) around one corner where the bead is off by
+  more than 5%.
+- ``blob``: over-filled volume per corner, nL (1 nL = 0.001 mm^3).
+- ``ve+`` / ``ve-`` / ``ae``: peak extruder velocity (mm/s) and
+  acceleration (mm/s^2) while the nozzle moves.
+- ``dE_gc``: final e minus the G-code's total E (mm). Negative by design
+  where the shaped path cuts a corner: the bead follows the shorter path.
+- ``dE_adv``: final e minus the same run without the advance stage(s), mm.
+  An advance vanishes at rest, so anything above ~1e-6 is lost or invented
+  material.
+"""
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import json
+import math
+import os
+import sys
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+import numpy as np
+
+REPO = Path(__file__).resolve().parent.parent
+for _path in (REPO / "klippy", REPO / "snapshots", REPO):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
+
+SAMPLE_DT_S = 10e-6
+PATH_STEP_MM = 0.02
+MOVING_SPEED_MM_S = 5.0
+WIDTH_THRESHOLD = 0.05
+CORNER_WINDOW_MM = 15.0
+APEX_SEARCH_MM = 2.0
+SPEEDS_MM_S = (50.0, 150.0, 300.0)
+ADVANCE_TYPES = {
+    "linear_pressure_advance": "k",
+    "tanh_pressure_advance": "linear_advance",
+    "recipr_pressure_advance": "linear_advance",
+}
+
+
+@dataclass
+class Move:
+    x: float
+    y: float
+    e: float
+
+
+@dataclass
+class Geometry:
+    name: str
+    moves: list[Move]
+    corners: list[tuple[float, float]]
+    window_mm: float = CORNER_WINDOW_MM
+
+
+@dataclass
+class Row:
+    case: str
+    speed: float
+    sweep: str = ""
+    peak: float = math.nan
+    dip: float = math.nan
+    width_mm: float = math.nan
+    blob_nl: float = math.nan
+    ve_max: float = math.nan
+    ve_min: float = math.nan
+    ae_max: float = math.nan
+    de_gcode: float = math.nan
+    de_advance: float = math.nan
+    error: str = ""
+    corners: list[dict] = field(default_factory=list)
+
+
+def corner(interior_deg: float, leg: float = 60.0) -> Geometry:
+    turn = math.radians(180.0 - interior_deg)
+    apex = (leg, 0.0)
+    end = (leg + leg * math.cos(turn), leg * math.sin(turn))
+    return Geometry(
+        f"c{interior_deg:g}",
+        [Move(*apex, 1.0), Move(*end, 1.0)],
+        [apex],
+    )
+
+
+def zigzag(leg: float = 2.0, turns: int = 20, lead: float = 30.0) -> Geometry:
+    rise = leg / math.sqrt(2.0)
+    moves = [Move(lead, 0.0, 1.0)]
+    x, y = lead, 0.0
+    apexes = []
+    for index in range(turns + 1):
+        apexes.append((x, y))
+        x += rise
+        y = rise if index % 2 == 0 else 0.0
+        moves.append(Move(x, y, 1.0))
+    apexes.append((x, y))
+    moves.append(Move(x + lead, y, 1.0))
+    return Geometry("zigzag", moves, apexes[3:-3], window_mm=leg / 2.0)
+
+
+def perimeter(name: str, flow: list[float], approach: float) -> Geometry:
+    """A 20 mm square loop entered and left along lines extruding at
+    `approach` times the nominal bead: 0 is travel at speed."""
+    loop = [(40.0, 20.0), (40.0, 40.0), (20.0, 40.0), (20.0, 20.0)]
+    moves = [Move(10.0, 10.0, approach), Move(20.0, 20.0, approach)]
+    moves += [Move(x, y, scale) for (x, y), scale in zip(loop, flow)]
+    moves += [Move(20.0, 5.0, approach), Move(5.0, 5.0, approach)]
+    corners = [(20.0, 20.0)] + loop
+    return Geometry(name, moves, corners, window_mm=10.0)
+
+
+GEOMETRIES = (
+    corner(45),
+    corner(90),
+    corner(135),
+    zigzag(),
+    perimeter("flow 1.5x", [1.0, 1.5, 1.0, 1.0], approach=1.0),
+    perimeter("travel", [1.0, 1.0, 1.0, 1.0], approach=0.0),
+)
+
+
+def gcode(geometry: Geometry, speed: float, ratio: float) -> str:
+    lines = ["G21", "G90", "M83", f"G1 X0 Y0 F{speed * 60:.0f}"]
+    x, y = 0.0, 0.0
+    for move in geometry.moves:
+        length = math.hypot(move.x - x, move.y - y)
+        e = move.e * ratio * length if length > 0 else move.e
+        if length > 0 and move.e == 0:
+            lines.append(f"G1 X{move.x:.5f} Y{move.y:.5f}")
+        elif length > 0:
+            lines.append(f"G1 X{move.x:.5f} Y{move.y:.5f} E{e:.6f}")
+        else:
+            lines.append(f"G1 E{e:.6f}")
+        x, y = move.x, move.y
+    return "\n".join(lines) + "\n"
+
+
+def gcode_total_e(geometry: Geometry, ratio: float) -> float:
+    total = 0.0
+    x, y = 0.0, 0.0
+    for move in geometry.moves:
+        length = math.hypot(move.x - x, move.y - y)
+        total += move.e * ratio * length if length > 0 else move.e
+        x, y = move.x, move.y
+    return total
+
+
+class PrinterConfig:
+    """The printer config as klippy reads it, editable by section."""
+
+    def __init__(self, fileconfig):
+        self.fileconfig = fileconfig
+
+    @classmethod
+    def load(cls, path: Path) -> PrinterConfig:
+        from klippy import configfile
+
+        loader = configfile.PrinterConfig.__new__(configfile.PrinterConfig)
+        loader.printer = None
+        return cls(loader.read_config(str(path)).fileconfig)
+
+    @classmethod
+    def parse(cls, text: str) -> PrinterConfig:
+        from klippy import configfile
+
+        loader = configfile.PrinterConfig.__new__(configfile.PrinterConfig)
+        loader.printer = None
+        return cls(loader._build_config_wrapper(text, "corner_flow").fileconfig)
+
+    def text(self) -> str:
+        return self.fileconfig.write_string()
+
+    def copy(self) -> PrinterConfig:
+        return PrinterConfig.parse(self.text())
+
+    def getfloat(self, section: str, option: str, default: float) -> float:
+        if self.fileconfig.has_option(section, option):
+            return float(self.fileconfig.get(section, option))
+        return default
+
+    def follower_axis(self) -> str:
+        followers = [
+            section
+            for section in self.fileconfig.sections()
+            if section.startswith("axis ")
+            and self.fileconfig.has_option(section, "follows")
+            and self.fileconfig.get(section, "follows").strip()
+        ]
+        if len(followers) != 1:
+            raise SystemExit(
+                f"expected exactly one following axis, found {followers}"
+            )
+        return followers[0]
+
+    def chain(self, axis: str) -> list[str]:
+        if not self.fileconfig.has_option(axis, "post_processors"):
+            return []
+        names = self.fileconfig.get(axis, "post_processors").split(",")
+        return [name.strip() for name in names if name.strip()]
+
+    def post_processor_type(self, name: str) -> str:
+        return self.fileconfig.get(f"post_processor {name}", "type").strip()
+
+    def set_param(self, target: str, value: str) -> None:
+        name, _, option = target.rpartition(".")
+        names = [name] if name else self.chain(self.follower_axis())
+        sections = [
+            f"post_processor {pp}"
+            for pp in names
+            if self.fileconfig.has_option(f"post_processor {pp}", option)
+        ]
+        if not sections:
+            raise SystemExit(f"no post-processor has '{target}'")
+        for section in sections:
+            self.fileconfig.set(section, option, value)
+
+    def unshaped(self) -> PrinterConfig:
+        clone = self.copy()
+        for section in clone.fileconfig.sections():
+            if section.startswith("axis ") and clone.fileconfig.has_option(
+                section, "post_processors"
+            ):
+                clone.fileconfig.set(section, "post_processors", "")
+        return clone
+
+    def without_advance(self) -> PrinterConfig:
+        clone = self.copy()
+        axis = clone.follower_axis()
+        kept = [
+            name
+            for name in clone.chain(axis)
+            if clone.post_processor_type(name) not in ADVANCE_TYPES
+        ]
+        clone.fileconfig.set(axis, "post_processors", ", ".join(kept))
+        return clone
+
+    def advance_k(self) -> float:
+        for name in self.chain(self.follower_axis()):
+            option = ADVANCE_TYPES.get(self.post_processor_type(name))
+            if option:
+                return self.getfloat(f"post_processor {name}", option, 0.0)
+        return 0.0
+
+
+def import_engine():
+    import harness
+
+    return harness._import_engine()
+
+
+def sample(config_text: str, program: str, limits: tuple[float, float]):
+    engine = import_engine()
+    waypoints = engine.parse_gcode(program, *limits)
+    probe, _ = engine.pipeline_snapshot_axis_samples(
+        waypoints, config_text, [0], 2
+    )
+    t_end = json.loads(probe)["trajectory"]["t_end"]
+    count = int(t_end / SAMPLE_DT_S) + 2
+    _, rows = engine.pipeline_snapshot_axis_samples(
+        waypoints, config_text, [0, 1, 3], count
+    )
+    return np.linspace(0.0, t_end, count), np.array(rows)
+
+
+def melted(t: np.ndarray, e_cmd: np.ndarray, melt_k: float) -> np.ndarray:
+    if melt_k <= 0.0:
+        return e_cmd
+    dt = t[1] - t[0]
+    alpha = math.exp(-dt / melt_k)
+    slope = np.diff(e_cmd) / dt
+    lag = np.zeros_like(e_cmd)
+    for index, drive in enumerate(melt_k * slope * (alpha - 1.0), start=1):
+        lag[index] = alpha * lag[index - 1] + drive
+    return e_cmd + lag
+
+
+def commanded_ratio(t: np.ndarray, raw: np.ndarray, t_at: np.ndarray):
+    """The extrusion per mm the G-code commands at each time, read off the
+    unshaped plan: the follower lays each move's ratio over the shaped path
+    the nozzle covers during that move. Where the unshaped toolhead rests,
+    the nearest moving instant's ratio stands."""
+    speed = np.hypot(raw[0][:, 1], raw[1][:, 1])
+    moving = speed > 1e-6
+    ratio = np.zeros_like(speed)
+    ratio[moving] = raw[2][moving, 1] / speed[moving]
+    indices = np.flatnonzero(moving)
+    nearest = np.clip(np.searchsorted(indices, np.arange(len(t))), 1, None)
+    nearest = np.minimum(nearest, len(indices) - 1)
+    previous = indices[nearest - 1]
+    following = indices[nearest]
+    here = np.arange(len(t))
+    chosen = np.where(here - previous <= following - here, previous, following)
+    ratio = ratio[chosen]
+    return np.interp(t_at, t, ratio)
+
+
+def timeline_offset(t, xy, t_raw, raw) -> float:
+    """How much later the shaped plan runs than the unshaped one: shaping
+    holds the start for its kernels' reach. Found as the shift that best
+    lays the unshaped toolhead path onto the shaped one."""
+    stride = max(len(t) // 4000, 1)
+    t_probe, xy_probe = t[::stride], xy[::stride]
+
+    def mismatch(shift: float) -> float:
+        x = np.interp(t_probe - shift, t_raw, raw[0][:, 0])
+        y = np.interp(t_probe - shift, t_raw, raw[1][:, 0])
+        return float(np.mean(np.hypot(x - xy_probe[:, 0], y - xy_probe[:, 1])))
+
+    coarse = min(np.arange(-0.1, 0.1, 5e-4), key=mismatch)
+    return float(
+        min(np.arange(coarse - 5e-4, coarse + 5e-4, 1e-5), key=mismatch)
+    )
+
+
+def apex_indices(xy: np.ndarray, corners) -> list[int]:
+    found = []
+    start = 0
+    for cx, cy in corners:
+        distance = np.hypot(xy[start:, 0] - cx, xy[start:, 1] - cy)
+        near = np.flatnonzero(distance < APEX_SEARCH_MM)
+        if near.size == 0:
+            raise RuntimeError(f"the planned path never nears ({cx}, {cy})")
+        run_end = near[0]
+        while run_end + 1 < distance.size and distance[run_end + 1] < (
+            APEX_SEARCH_MM
+        ):
+            run_end += 1
+        apex = near[0] + int(np.argmin(distance[near[0] : run_end + 1]))
+        found.append(start + apex)
+        start += run_end + 1
+    return found
+
+
+def measure(
+    geometry: Geometry,
+    speed: float,
+    config: PrinterConfig,
+    melt_k: float,
+    bead: tuple[float, float, float],
+) -> Row:
+    width, height, filament = bead
+    ratio = width * height / (math.pi * (filament / 2.0) ** 2)
+    row = Row(geometry.name, speed)
+    program = gcode(geometry, speed, ratio)
+    limits = (
+        config.getfloat("printer", "max_velocity", 300.0),
+        config.getfloat("printer", "max_accel", 3000.0),
+    )
+    try:
+        t, axes = sample(config.text(), program, limits)
+        _, plain = sample(config.without_advance().text(), program, limits)
+        t_raw, raw = sample(config.unshaped().text(), program, limits)
+    except Exception as error:  # noqa: BLE001
+        row.error = str(error).splitlines()[0][:200]
+        return row
+    x, vx = axes[0][:, 0], axes[0][:, 1]
+    y, vy = axes[1][:, 0], axes[1][:, 1]
+    e_cmd, ve, ae = axes[2][:, 0], axes[2][:, 1], axes[2][:, 2]
+    speed_xy = np.hypot(vx, vy)
+    dt = t[1] - t[0]
+    s = np.concatenate(
+        [[0.0], np.cumsum(0.5 * (speed_xy[1:] + speed_xy[:-1]) * dt)]
+    )
+    advancing = np.concatenate([[True], np.diff(s) > 0])
+    xy = np.column_stack([x, y])
+    offset = timeline_offset(t, xy, t_raw, raw)
+    r_cmd = commanded_ratio(t_raw + offset, raw, t)
+    e_out = melted(t, e_cmd, melt_k)
+    grid = np.arange(0.0, s[-1], PATH_STEP_MM)
+    e_grid = np.interp(grid, s[advancing], e_out[advancing])
+    r_grid = np.interp(grid[:-1] + 0.5 * PATH_STEP_MM, s, r_cmd)
+    deviation = (np.diff(e_grid) / PATH_STEP_MM - r_grid) / ratio
+    middle = grid[:-1] + 0.5 * PATH_STEP_MM
+    bead_area = width * height
+    for apex in apex_indices(xy, geometry.corners):
+        near = np.abs(middle - s[apex]) <= geometry.window_mm
+        local = deviation[near]
+        row.corners.append(
+            {
+                "s_mm": float(s[apex]),
+                "peak": float(local.max()),
+                "dip": float(local.min()),
+                "width_mm": float(
+                    np.count_nonzero(np.abs(local) > WIDTH_THRESHOLD)
+                    * PATH_STEP_MM
+                ),
+                "blob_nl": float(
+                    np.clip(local, 0.0, None).sum()
+                    * PATH_STEP_MM
+                    * bead_area
+                    * 1000.0
+                ),
+            }
+        )
+    row.peak = max(c["peak"] for c in row.corners) * 100.0
+    row.dip = min(c["dip"] for c in row.corners) * 100.0
+    row.width_mm = max(c["width_mm"] for c in row.corners)
+    row.blob_nl = max(c["blob_nl"] for c in row.corners)
+    moving = speed_xy > MOVING_SPEED_MM_S
+    row.ve_max = float(ve[moving].max())
+    row.ve_min = float(ve[moving].min())
+    row.ae_max = float(np.abs(ae[moving]).max())
+    row.de_gcode = float(e_cmd[-1] - gcode_total_e(geometry, ratio))
+    row.de_advance = float(e_cmd[-1] - plain[2][-1, 0])
+    return row
+
+
+def run_case(job) -> Row:
+    sweep_label, config_text, geometry_index, speed, melt_k, bead = job
+    config = PrinterConfig.parse(config_text)
+    row = measure(GEOMETRIES[geometry_index], speed, config, melt_k, bead)
+    row.sweep = sweep_label
+    return row
+
+
+def table(rows: list[Row], sweep_name: str) -> str:
+    head = (
+        f"{'case':<10} {'mm/s':>4} | {'peak':>6} {'dip':>5} {'w>5%':>5} "
+        f"{'blob':>6} | {'ve+':>6} {'ve-':>6} {'ae':>7} | {'dE_gc':>8} "
+        f"{'dE_adv':>8}"
+    )
+    if sweep_name:
+        head = f"{sweep_name:>11} " + head
+    lines = [head, "-" * len(head)]
+    for row in rows:
+        prefix = f"{row.sweep:>11} " if sweep_name else ""
+        if row.error:
+            lines.append(
+                f"{prefix}{row.case:<10} {row.speed:>4.0f} | ERROR "
+                f"{row.error[:90]}"
+            )
+            continue
+        lines.append(
+            f"{prefix}{row.case:<10} {row.speed:>4.0f} | {row.peak:>+5.0f}% "
+            f"{row.dip:>+4.0f}% {row.width_mm:>5.1f} {row.blob_nl:>6.1f} | "
+            f"{row.ve_max:>6.1f} {row.ve_min:>6.1f} {row.ae_max:>7.0f} | "
+            f"{row.de_gcode:>+8.4f} {row.de_advance:>+8.1e}"
+        )
+    return "\n".join(lines)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description=__doc__.split("\n\n")[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__.split("\n\n", 1)[1],
+    )
+    parser.add_argument("config", type=Path, help="printer.cfg to evaluate")
+    parser.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="[PP.]PARAM=VALUE",
+        help="override a post-processor parameter; a bare PARAM applies to "
+        "every post-processor of the following axis that has it",
+    )
+    parser.add_argument(
+        "--sweep",
+        metavar="[PP.]PARAM=V1,V2,...",
+        help="repeat the table for each value, as with --set",
+    )
+    parser.add_argument(
+        "--melt-k",
+        type=float,
+        help="melt time constant K in s (default: the configured advance)",
+    )
+    parser.add_argument(
+        "--bead",
+        default="0.4,0.2,1.75",
+        metavar="WIDTH,HEIGHT,FILAMENT",
+        help="nominal bead width and layer height, filament diameter (mm)",
+    )
+    parser.add_argument(
+        "--speeds",
+        default=",".join(f"{s:g}" for s in SPEEDS_MM_S),
+        help="comma-separated feed rates, mm/s",
+    )
+    parser.add_argument("--json", action="store_true", help="emit JSON rows")
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=os.cpu_count() or 1,
+        help="parallel planner runs",
+    )
+    args = parser.parse_args()
+
+    base = PrinterConfig.load(args.config)
+    for assignment in args.set:
+        target, _, value = assignment.partition("=")
+        base.set_param(target, value)
+    variants = [("", base)]
+    sweep_name = ""
+    if args.sweep:
+        sweep_name, _, values = args.sweep.partition("=")
+        variants = []
+        for value in values.split(","):
+            variant = base.copy()
+            variant.set_param(sweep_name, value)
+            variants.append((value, variant))
+    bead = tuple(float(v) for v in args.bead.split(","))
+    speeds = [float(v) for v in args.speeds.split(",")]
+
+    jobs = []
+    for label, variant in variants:
+        melt_k = args.melt_k if args.melt_k is not None else variant.advance_k()
+        for index in range(len(GEOMETRIES)):
+            for speed in speeds:
+                jobs.append((label, variant.text(), index, speed, melt_k, bead))
+    with concurrent.futures.ProcessPoolExecutor(max(args.jobs, 1)) as pool:
+        rows = list(pool.map(run_case, jobs))
+
+    if args.json:
+        print(json.dumps([asdict(row) for row in rows], indent=1))
+        return
+    melt = (
+        f"{args.melt_k:g} s"
+        if args.melt_k is not None
+        else "configured advance per variant"
+    )
+    print(f"{args.config}  melt K: {melt}  bead w,h,filament: {args.bead}")
+    print(table(rows, sweep_name))
+
+
+if __name__ == "__main__":
+    main()
