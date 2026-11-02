@@ -57,12 +57,28 @@ the wire-stable event table is `rust/runtime-contract/src/log_codes.rs`. To read
 logs — `DIAG_DUMP`, crash forensics, filtering — use the `mcu-diagnostics`
 and `query-logs` skills.
 
+# Build caches and CARGO_TARGET_DIR
+
+Never `export CARGO_TARGET_DIR` in a persistent shell: it leaks into the next
+task's builds and the engine `make` copies. `scripts/ci.sh` unsets an inherited
+value (set `CI_KEEP_CARGO_TARGET_DIR=1` to opt in); everything else uses the
+worktree's own `rust/target`. The only shared target dir is
+`~/.cache/pending-baselines/target`, which `pending_baselines.py`,
+`review_baselines.py` and `integrate_stack.py` set per subprocess. For a one-off
+variant build set `CARGO_TARGET_DIR=...` on that single command, not in the
+shell. `uv run python scripts/gc_caches.py [--days N] [--apply]` lists and
+removes stale `~/.cache/*-target` dirs and abandoned pending-baselines
+worktrees/stacks/samples.
+
 # Landing a PR
 
 `scripts/land-pr.sh <branch>` pushes the branch, opens the PR if needed, waits for
 the checks, merges with a merge commit and moves local `main` to `origin/main`
 without checking anything out. Red checks print the failed-run log tail and
-exit non-zero. `--dry-run` prints the plan.
+exit non-zero. `--dry-run` prints the plan. It is safe to run from the
+branch's own worktree (it leaves it before removing it) and updates the PR
+branch on GitHub and re-waits when `main` moved while the checks ran; no need to
+copy it elsewhere first.
 
 `uv run python scripts/pending_baselines.py [-v|--all]` lists every open PR with
 its stack parent, mergeability, CI state, the snapshot cases whose output
