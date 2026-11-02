@@ -182,7 +182,29 @@ const MOMENT_ORDERS: usize = 3;
 
 type MomentEvaluator<'a> = dyn Fn(f64, f64, usize, f64, [&mut [f64]; MOMENT_ORDERS]) -> bool + 'a;
 
-const PVA_MEMO_SLOTS: usize = 256;
+/// Hashes an exact time's bit pattern for the `eval_pva` memo: one multiply
+/// spreads the mantissa's varying low bits across the whole word, where both
+/// the bucket index and the control byte read them.
+#[derive(Default)]
+struct TimeBitsHasher(u64);
+
+impl std::hash::Hasher for TimeBitsHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, _bytes: &[u8]) {
+        panic!("TimeBitsHasher hashes f64 bit patterns through write_u64 only");
+    }
+
+    fn write_u64(&mut self, bits: u64) {
+        let mixed = bits.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        self.0 = mixed ^ (mixed >> 32);
+    }
+}
+
+type PvaMemo =
+    std::collections::HashMap<u64, (f64, f64, f64), std::hash::BuildHasherDefault<TimeBitsHasher>>;
 
 struct CenteredKernelPiece {
     u_mid: f64,
@@ -250,12 +272,13 @@ pub struct ShapedSignal<'a, F = Box<dyn Fn(f64) -> f64 + 'a>> {
     /// Reusable cut buffer for `convolve` — the merge of kernel-piece
     /// boundaries and in-window input breaks, rebuilt on every call.
     cuts: std::cell::RefCell<Vec<f64>>,
-    /// Recent `(t, (p, v, a))` results: adjacent fit spans share boundary
-    /// times (a segment's end is the next segment's start, and bisection
-    /// re-evaluates its parent's endpoints), so a tiny exact-`t` memo removes
-    /// whole convolution passes without changing any computed value.
-    pva_memo: std::cell::RefCell<[Option<(u64, (f64, f64, f64))>; PVA_MEMO_SLOTS]>,
-    pva_memo_next: std::cell::Cell<usize>,
+    /// Every `(t, (p, v, a))` this signal has computed, keyed by `t`'s bits:
+    /// adjacent fit spans share boundary times (a segment's end is the next
+    /// segment's start, and bisection re-evaluates its parent's endpoints),
+    /// and the fit's seam and edge checks revisit them from far apart, so an
+    /// exact-`t` memo removes whole convolution passes without changing any
+    /// computed value. A signal lives for one batch of fits, which bounds it.
+    pva_memo: std::cell::RefCell<PvaMemo>,
     kernel: &'a PiecewisePolynomialKernel,
     centered_kernel: Vec<CenteredKernelPiece>,
     /// `k′` and `k″` as piecewise polynomials over the same support, plus the
@@ -506,8 +529,7 @@ where
             gauss_weights,
             input_breaks,
             cuts: std::cell::RefCell::new(Vec::new()),
-            pva_memo: std::cell::RefCell::new([None; PVA_MEMO_SLOTS]),
-            pva_memo_next: std::cell::Cell::new(0),
+            pva_memo: std::cell::RefCell::new(PvaMemo::default()),
             kernel,
             centered_kernel: kernel.pieces.iter().map(CenteredKernelPiece::new).collect(),
             d_kernel,
@@ -542,21 +564,13 @@ where
     /// bit-identical to the separate `eval`/`deriv`/`second_deriv` calls.
     pub fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let key = t.to_bits();
-        if let Some(hit) = self
-            .pva_memo
-            .borrow()
-            .iter()
-            .flatten()
-            .find(|(bits, _)| *bits == key)
-        {
-            return hit.1;
+        if let Some(&hit) = self.pva_memo.borrow().get(&key) {
+            return hit;
         }
         let value = self
             .convolve_pva_from_moments(t)
             .unwrap_or_else(|| self.convolve_pva_quadrature(t));
-        let slot = self.pva_memo_next.get();
-        self.pva_memo.borrow_mut()[slot] = Some((key, value));
-        self.pva_memo_next.set((slot + 1) % PVA_MEMO_SLOTS);
+        self.pva_memo.borrow_mut().insert(key, value);
         value
     }
 
