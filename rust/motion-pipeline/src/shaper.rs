@@ -2186,6 +2186,31 @@ fn acceleration_error_witness<S: TrackSignal>(
     )
 }
 
+const DENSE_WITNESS_POINTS: u32 = 16;
+
+fn dense_error_witness<S: TrackSignal>(
+    sig: &S,
+    mono_u: &[f64],
+    (t0, t1): (f64, f64),
+    fit_tol: FitTol,
+    sliver: f64,
+) -> Option<f64> {
+    let h = t1 - t0;
+    let points = std::env::var("WITNESS_POINTS").ok().map_or(DENSE_WITNESS_POINTS, |v| v.parse().unwrap());
+    let edge = 2.0 * sliver / h;
+    let dd_scale = (2.0 / h) * (2.0 / h);
+    (0..points)
+        .map(|k| -1.0 + edge + (2.0 - 2.0 * edge) * (f64::from(k) + 0.5) / f64::from(points))
+        .find(|&x| {
+            let (position, _, acceleration) = sig.eval_pva(nurbs::fmadd(0.5 * (x + 1.0), h, t0));
+            position.is_finite()
+                && acceleration.is_finite()
+                && ((crate::lowering::eval_mono(mono_u, x) - position).abs() > fit_tol.pos_mm
+                    || (crate::lowering::eval_mono_dd(mono_u, x) * dd_scale - acceleration).abs()
+                        > fit_tol.accel_mm_s2)
+        })
+}
+
 fn acceleration_interval_witness<S: TrackSignal>(
     sig: &S,
     (t0, h, budget): (f64, f64, f64),
@@ -2366,9 +2391,12 @@ fn shaped_ladder<S: TrackSignal>(
         },
     ) {
         Ok(coefficients) => {
-            let Some(u) =
+            let witness = if sig.acceleration_monotonicity(t0_inside, t1_inside).is_some() {
                 acceleration_error_witness(sig, &coefficients, t0, t1, fit_tol.accel_mm_s2)
-            else {
+            } else {
+                dense_error_witness(sig, &coefficients, (t0, t1), fit_tol, coalesced_sliver)
+            };
+            let Some(u) = witness else {
                 return Ok((coefficients, None));
             };
             let t = t_of(u);
