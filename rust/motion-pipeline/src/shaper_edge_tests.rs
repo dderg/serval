@@ -4,7 +4,7 @@
 use super::{
     CrowdedVelocityBreaks, EdgeSlivers, FitTol, SINGULAR_SEED_GRADING_FLOOR_S, TrackSignal,
     VelocityBreak, coalesce_degenerate_seeds, edge_inset, edge_velocity_and_acceleration,
-    grade_seeds_toward, velocity_breaks_among,
+    seeds_graded_toward, velocity_breaks_among,
 };
 
 const FLOOR: f64 = 2e-9;
@@ -252,14 +252,10 @@ fn a_velocity_break_that_reads_its_left_value_on_the_seed_is_found() {
 #[test]
 fn seeds_grade_geometrically_toward_a_cap_contact_from_both_sides() {
     let contact = 4e-4;
-    let mut seeds = vec![0.0, 1e-3];
-    grade_seeds_toward(&mut seeds, &[contact]);
-    seeds.sort_by(f64::total_cmp);
-    let at = seeds
-        .iter()
-        .position(|&seed| seed == contact)
-        .expect("the contact is a seed");
-    for side in [&seeds[..at], &seeds[at + 1..]] {
+    let seeds = seeds_graded_toward(&[0.0, contact, 1e-3], &[contact]);
+    let at = seeds.partition_point(|&seed| seed < contact);
+    assert_ne!(seeds.get(at), Some(&contact), "the contact is an anchor, not a graded seed");
+    for side in [&seeds[..at], &seeds[at..]] {
         let nearest = side
             .iter()
             .map(|&seed| (seed - contact).abs())

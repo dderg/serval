@@ -258,6 +258,7 @@ pub struct Shaper {
     fit_tol: FitTol,
     history: VecDeque<ContinuousSegment>,
     pending: PendingSegments,
+    graded_knots: GradedSourceKnots,
     forward_support: f64,
     back_support: f64,
     history_trimmed: bool,
@@ -275,6 +276,7 @@ impl Shaper {
             fit_tol,
             history: VecDeque::new(),
             pending: PendingSegments::default(),
+            graded_knots: GradedSourceKnots::default(),
             history_trimmed: false,
             follower_states: Vec::new(),
             toolhead_tap: None,
@@ -292,8 +294,13 @@ impl Shaper {
 
     fn buffer_segment(&mut self, mut segment: ContinuousSegment) {
         let started = crate::timing::stopwatch();
-        let rebuilt = materialize_changed_sources(&mut segment, &self.chains, self.fit_tol)
-            .unwrap_or_else(|error| panic!("shaper: {error}"));
+        let rebuilt = materialize_changed_sources(
+            &mut segment,
+            &self.chains,
+            self.fit_tol,
+            &mut self.graded_knots,
+        )
+        .unwrap_or_else(|error| panic!("shaper: {error}"));
         let elapsed_us = started.elapsed_us();
         crate::timing::record_stage(crate::timing::Stage::MaterializeSource, elapsed_us);
         if crate::timing::is_slow_phase(elapsed_us) {
@@ -333,6 +340,7 @@ impl Shaper {
                     Control::Reset { .. } => {
                         self.pending.clear();
                         self.history.clear();
+                        self.graded_knots.clear();
                         self.history_trimmed = false;
                         for state in &mut self.follower_states {
                             state.reset_timeline();
@@ -361,6 +369,7 @@ impl Shaper {
                             // fall back to the stream-boundary clamp then.
                             if new_back > self.back_support {
                                 self.history.clear();
+                                self.graded_knots.clear();
                                 self.history_trimmed = false;
                                 for state in &mut self.follower_states {
                                     state.clear_projected_history();
@@ -463,6 +472,7 @@ impl Shaper {
                 base: segments,
                 chains: &self.chains,
                 fit_tol: self.fit_tol,
+                graded_knots: &self.graded_knots,
                 boundary: if self.history_trimmed {
                     FitBoundary::Interior
                 } else {
@@ -508,6 +518,8 @@ impl Shaper {
             self.history.pop_front();
             self.history_trimmed = true;
         }
+        let retained_from = self.history.front().expect("history keeps a segment").t_start;
+        self.graded_knots.retain_from(retained_from);
         true
     }
 }
@@ -516,6 +528,7 @@ fn materialize_changed_sources(
     segment: &mut ContinuousSegment,
     chains: &AxisChainSet,
     fit_tol: FitTol,
+    graded_knots: &mut GradedSourceKnots,
 ) -> Result<usize, PostProcessError> {
     let mut replacements = Vec::new();
     for (axis, source) in segment.axes.iter().enumerate() {
@@ -530,18 +543,26 @@ fn materialize_changed_sources(
             continue;
         }
         let mut breakpoints = vec![segment.t_start, segment.t_end];
+        let mut graded = Vec::new();
         if let ContinuousAxis::Analytic { span, .. } = source {
-            breakpoints.extend(span.phase_seam_times());
             let contacts: Vec<f64> = span
                 .cap_contact_times()
                 .filter(|&t| t >= segment.t_start && t <= segment.t_end)
                 .collect();
-            grade_seeds_toward(&mut breakpoints, &contacts);
+            breakpoints.extend(span.phase_seam_times());
+            breakpoints.extend_from_slice(&contacts);
+            breakpoints.sort_by(f64::total_cmp);
+            breakpoints.dedup();
+            graded = seeds_graded_toward(&breakpoints, &contacts);
             if variable_surface_z {
                 breakpoints.extend(span.surface_seam_times().ok_or_else(|| {
                     fit_tolerance_without_probe(axis, segment.t_start, segment.t_end)
                 })?);
+                breakpoints.sort_by(f64::total_cmp);
+                breakpoints.dedup();
             }
+            graded.retain(|seed| breakpoints.binary_search_by(|t| t.total_cmp(seed)).is_err());
+            breakpoints.extend_from_slice(&graded);
         }
         let mut curve = fit_axis_from_signal(
             AxisFit {
@@ -555,11 +576,16 @@ fn materialize_changed_sources(
             },
             source,
         )?;
-        if !chains.is_projected_follower(axis) {
-            if let Some(chain) = chains.chains.get(axis) {
-                curve =
-                    apply_zero_support_transform(chain.leading_transform(), axis, curve, fit_tol)?;
+        let leading_transform = chains
+            .chains
+            .get(axis)
+            .filter(|_| !chains.is_projected_follower(axis))
+            .and_then(CompiledChain::leading_transform);
+        match leading_transform {
+            Some(transform) => {
+                curve = apply_zero_support_transform(Some(transform), axis, curve, fit_tol)?;
             }
+            None => graded_knots.record(axis, &graded),
         }
         replacements.push((axis, ContinuousAxis::Spline(Arc::new(curve))));
     }
@@ -576,17 +602,20 @@ fn materialize_changed_sources(
 /// than its knot spacing, so finer seeds would split polynomial pieces.
 const SINGULAR_SEED_GRADING_FLOOR_S: f64 = 1e-6;
 
-/// Adds each singular time to the seeds, then seeds halving their distance
-/// to it from the neighbouring seed on either side. A polynomial cannot
+/// Seeds halving their distance to each singular time from the neighbouring
+/// anchor on either side, sorted and without repeats. A polynomial cannot
 /// follow a square-root shoulder across a span, but each graded span sees
 /// the same shoulder rescaled, which a ladder rung fits within tolerance.
-fn grade_seeds_toward(seeds: &mut Vec<f64>, singular: &[f64]) {
-    seeds.extend_from_slice(singular);
-    seeds.sort_by(f64::total_cmp);
-    seeds.dedup();
-    let anchors = seeds.clone();
+/// `anchors` are sorted and hold every singular time.
+fn seeds_graded_toward(anchors: &[f64], singular: &[f64]) -> Vec<f64> {
+    let mut graded = Vec::new();
     for &point in singular {
         let at = anchors.partition_point(|&seed| seed < point);
+        assert_eq!(
+            anchors.get(at),
+            Some(&point),
+            "singular time {point} is not among the grading anchors"
+        );
         let neighbours = [
             at.checked_sub(1).map(|i| anchors[i]),
             anchors.get(at + 1).copied(),
@@ -594,10 +623,57 @@ fn grade_seeds_toward(seeds: &mut Vec<f64>, singular: &[f64]) {
         for neighbour in neighbours.into_iter().flatten() {
             let mut offset = 0.5 * (neighbour - point);
             while offset.abs() >= SINGULAR_SEED_GRADING_FLOOR_S {
-                seeds.push(point + offset);
+                graded.push(point + offset);
                 offset *= 0.5;
             }
         }
+    }
+    graded.sort_by(f64::total_cmp);
+    graded.dedup();
+    graded
+}
+
+/// The materialize seeds graded toward curvature-cap contacts, per axis and
+/// in time order, across the buffered and retained segments. They let the
+/// source fit follow a contact's square-root shoulder; the knots they leave
+/// carry only fit-residual acceleration steps, which a kernel smooths, so
+/// the shaped partition does not break at their images.
+#[derive(Default)]
+pub(crate) struct GradedSourceKnots {
+    axes: Vec<VecDeque<f64>>,
+}
+
+impl GradedSourceKnots {
+    fn record(&mut self, axis: usize, knots: &[f64]) {
+        if knots.is_empty() {
+            return;
+        }
+        if self.axes.len() <= axis {
+            self.axes.resize_with(axis + 1, VecDeque::new);
+        }
+        let times = &mut self.axes[axis];
+        assert!(
+            knots.is_sorted() && times.back().is_none_or(|&last| last < knots[0]),
+            "graded source knots on axis {axis} arrived out of time order"
+        );
+        times.extend(knots);
+    }
+
+    fn retain_from(&mut self, t: f64) {
+        for times in &mut self.axes {
+            let stale = times.partition_point(|&knot| knot < t);
+            times.drain(..stale);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.axes.clear();
+    }
+
+    fn contains(&self, axis: usize, t: f64) -> bool {
+        self.axes
+            .get(axis)
+            .is_some_and(|times| times.binary_search_by(|knot| knot.total_cmp(&t)).is_ok())
     }
 }
 
@@ -632,14 +708,16 @@ impl Lookahead {
 }
 
 /// Everything one emit window's leader fits read: the signal the convolution
-/// integrates (history plus the buffered base), the chains and tolerance it
-/// is fitted with, and how the window's two edges behave.
+/// integrates (history plus the buffered base) and the source knots graded
+/// toward its cap contacts, the chains and tolerance it is fitted with, and
+/// how the window's two edges behave.
 #[derive(Clone, Copy)]
 struct AxisFitRequest<'a> {
     history: &'a VecDeque<ContinuousSegment>,
     base: &'a [ContinuousSegment],
     chains: &'a AxisChainSet,
     fit_tol: FitTol,
+    graded_knots: &'a GradedSourceKnots,
     boundary: FitBoundary,
     lookahead: Lookahead,
 }
@@ -947,6 +1025,27 @@ impl ColumnSignal {
             Self::MotorCommand { k1, k2 } => shaped_input.with_derivative_gains(k1, k2),
         }
     }
+
+    /// The input breaks whose kernel images seed the shaped partition. A
+    /// shaped column leaves out the knots graded toward a cap contact, whose
+    /// fit-residual acceleration steps the kernel smooths; the motor
+    /// command's derivative gains turn those steps into position steps the
+    /// kernel carries through, so it keeps every break.
+    fn shaped_break_seeds<'b>(
+        self,
+        axis: usize,
+        input_breaks: &'b [f64],
+        graded_knots: &GradedSourceKnots,
+    ) -> std::borrow::Cow<'b, [f64]> {
+        match self {
+            Self::Shaped => input_breaks
+                .iter()
+                .copied()
+                .filter(|&t| !graded_knots.contains(axis, t))
+                .collect(),
+            Self::MotorCommand { .. } => std::borrow::Cow::Borrowed(input_breaks),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -966,6 +1065,7 @@ fn fit_axis_column(
         history,
         base,
         fit_tol,
+        graded_knots,
         boundary,
         lookahead,
         ..
@@ -1004,13 +1104,19 @@ fn fit_axis_column(
         boundary,
         lookahead,
     };
+    let input_breaks = signal_breakpoints(&signal_segments, axis);
+    let shaped_breaks = shaped_signal_breakpoints(
+        kernel,
+        &signal.shaped_break_seeds(axis, &input_breaks, graded_knots),
+    );
     fit_axis_targets(
         axis,
         targets,
         ShapedSignalSource::new(
             kernel,
             signal.convolution_input(AxisSignalTable::build(&signal_segments, axis, bounds)),
-            signal_breakpoints(&signal_segments, axis),
+            input_breaks,
+            shaped_breaks,
             targets[0].t_start,
         ),
         fit_tol,
@@ -1021,8 +1127,8 @@ fn fit_axis_column(
 }
 
 /// The convolution's input for one axis, packaged for the target fits: the
-/// kernel, the flattened signal it integrates, and the breakpoint sets that
-/// seed the input and shaped partitions.
+/// kernel, the flattened signal it integrates, the input breaks its exact
+/// integration splits at, and the shaped breaks that seed the target fits.
 pub(crate) struct ShapedSignalSource<'a> {
     kernel: &'a nurbs::algebra::PiecewisePolynomialKernel,
     table: Arc<AxisSignalTable>,
@@ -1128,6 +1234,7 @@ impl<'a> ShapedSignalSource<'a> {
         kernel: &'a nurbs::algebra::PiecewisePolynomialKernel,
         input: AxisSignalTable,
         input_breaks: Vec<f64>,
+        shaped_breaks: Vec<f64>,
         offset_at: f64,
     ) -> Self {
         let kernel_degree = kernel
@@ -1148,7 +1255,7 @@ impl<'a> ShapedSignalSource<'a> {
         );
         Self {
             kernel,
-            shaped_breaks: shaped_signal_breakpoints(kernel, &input_breaks),
+            shaped_breaks,
             input_degree: table.max_degree(),
             gain_impulse_response: (!table.gain_impulses().is_empty())
                 .then(|| GainImpulseResponse::new(kernel, table.gain_impulses())),

@@ -3,7 +3,7 @@ use geometry::{CornerFitConfig, MoveContext, VelocityLimits, line_move};
 use nurbs::bezier::{BezierPiece, extract_bezier_pieces};
 use trajectory::{AxisChainSet, CompiledChain, ContinuousAxis, ContinuousSegment};
 
-use super::materialize_changed_sources;
+use super::{GradedSourceKnots, materialize_changed_sources};
 use crate::Pipeline;
 use crate::types::{BaseItem, StreamConfig, TrajectoryItem};
 
@@ -112,8 +112,13 @@ fn replay(chains: &AxisChainSet, moves: &[geometry::Move]) -> Replay {
     let mut shape = |item: BaseItem| {
         if let BaseItem::Seg(segment) = &item {
             let mut materialized = segment.clone();
-            materialize_changed_sources(&mut materialized, chains, config.fit_tol())
-                .expect("shaper input materializes");
+            materialize_changed_sources(
+                &mut materialized,
+                chains,
+                config.fit_tol(),
+                &mut GradedSourceKnots::default(),
+            )
+            .expect("shaper input materializes");
             shaper_input.push(materialized);
         }
         shaper.feed(item, &mut emit)
@@ -415,7 +420,9 @@ fn convolved<'a>(
         Some((k1, k2)) => table.with_derivative_gains(k1, k2),
         None => table,
     };
-    super::ShapedSignalSource::new(kernel, table, track.knots().to_vec(), 0.5)
+    let knots = track.knots().to_vec();
+    let shaped_breaks = super::shaped_signal_breakpoints(kernel, &knots);
+    super::ShapedSignalSource::new(kernel, table, knots, shaped_breaks, 0.5)
 }
 
 #[test]
