@@ -107,3 +107,46 @@ fn cut_transitions_land_on_the_exact_evaluator_comparison_flip() {
         "kernel/input pair set never exercises a window edge later than the ownership flip"
     );
 }
+
+fn line_moments(
+    intercept: f64,
+    slope: f64,
+) -> impl Fn(f64, f64, usize, f64, [&mut [f64]; super::MOMENT_ORDERS]) -> bool {
+    move |lo, hi, degree, origin, [position, velocity, acceleration]| {
+        let at_origin = intercept + slope * origin;
+        let span =
+            |power: i32| ((hi - origin).powi(power) - (lo - origin).powi(power)) / f64::from(power);
+        for power in 0..=degree {
+            let exponent = power as i32;
+            position[power] = at_origin * span(exponent + 1) + slope * span(exponent + 2);
+            velocity[power] = slope * span(exponent + 1);
+        }
+        acceleration.fill(0.0);
+        true
+    }
+}
+
+#[test]
+fn a_line_far_from_the_origin_shapes_to_a_line_within_a_few_ulps() {
+    let kernel = crate::build_smooth_mzv_kernel(50.0);
+    let (intercept, slope) = (134.7, 40.0);
+    let signal = ShapedSignal::new_from_polynomial_evaluator(
+        &kernel,
+        move |t| intercept + slope * t,
+        Vec::new(),
+        1,
+        line_moments(intercept, slope),
+        Vec::new(),
+    );
+    let step = 1e-6;
+    let worst_bend = (1..100)
+        .map(|k| {
+            let t = 0.095 + step * f64::from(k);
+            (signal.eval(t + step) - 2.0 * signal.eval(t) + signal.eval(t - step)).abs()
+        })
+        .fold(0.0, f64::max);
+    assert!(
+        worst_bend <= 64.0 * f64::EPSILON * intercept,
+        "the shaped line bends by {worst_bend:e} mm between 1 µs samples"
+    );
+}

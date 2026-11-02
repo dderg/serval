@@ -191,6 +191,30 @@ type MomentEvaluator<'a> = dyn Fn(f64, f64, usize, f64, [&mut [f64]; MOMENT_ORDE
 const PVA_MEMO_SLOTS: usize = 256;
 
 /// every span to the floor.
+struct CenteredKernelPiece {
+    u_mid: f64,
+    coeffs: Vec<f64>,
+}
+
+impl CenteredKernelPiece {
+    fn new(piece: &nurbs::bezier::BezierPiece) -> Self {
+        let half_width = 0.5 * (piece.u_end - piece.u_start);
+        Self {
+            u_mid: piece.u_start + half_width,
+            coeffs: nurbs::chebyshev::taylor_shift(&piece.coeffs, half_width),
+        }
+    }
+
+    fn integrate(&self, moments: &[f64]) -> f64 {
+        let mut value = 0.0;
+        for (power, (coefficient, moment)) in self.coeffs.iter().zip(moments).enumerate() {
+            let term = coefficient * moment;
+            value += if power % 2 == 0 { term } else { -term };
+        }
+        value
+    }
+}
+
 pub struct ShapedSignal<'a, F = Box<dyn Fn(f64) -> f64 + 'a>> {
     eval_input: F,
     moment_input: Option<Box<MomentEvaluator<'a>>>,
@@ -210,6 +234,7 @@ pub struct ShapedSignal<'a, F = Box<dyn Fn(f64) -> f64 + 'a>> {
     pva_memo: std::cell::RefCell<[Option<(u64, (f64, f64, f64))>; PVA_MEMO_SLOTS]>,
     pva_memo_next: std::cell::Cell<usize>,
     kernel: &'a PiecewisePolynomialKernel,
+    centered_kernel: Vec<CenteredKernelPiece>,
     /// `k′` and `k″` as piecewise polynomials over the same support, plus the
     /// jump of `k′` at each internal piece boundary (a delta in `k″` — the
     /// triangle kernel has them, the bell kernel does not). With these,
@@ -461,6 +486,7 @@ where
             pva_memo: std::cell::RefCell::new([None; PVA_MEMO_SLOTS]),
             pva_memo_next: std::cell::Cell::new(0),
             kernel,
+            centered_kernel: kernel.pieces.iter().map(CenteredKernelPiece::new).collect(),
             d_kernel,
             dd_kernel,
             d_kernel_jumps,
@@ -514,17 +540,16 @@ where
     fn convolve_pva_from_moments(&self, t: f64) -> Option<(f64, f64, f64)> {
         let moment_input = self.moment_input.as_ref()?;
         let (mut p, mut v, mut a) = (0.0, 0.0, 0.0);
-        for kernel in &self.kernel.pieces {
+        for (kernel, centered) in self.kernel.pieces.iter().zip(&self.centered_kernel) {
             let degree = kernel.degree();
             let mut position = [0.0; MAX_EXACT_PRODUCT_DEGREE + 1];
             let mut velocity = [0.0; MAX_EXACT_PRODUCT_DEGREE + 1];
             let mut acceleration = [0.0; MAX_EXACT_PRODUCT_DEGREE + 1];
-            let piece_origin = t - kernel.u_start;
             if !moment_input(
                 t - kernel.u_end,
-                piece_origin,
+                t - kernel.u_start,
                 degree,
-                piece_origin,
+                t - centered.u_mid,
                 [
                     &mut position[..=degree],
                     &mut velocity[..=degree],
@@ -533,9 +558,9 @@ where
             ) {
                 return None;
             }
-            p += Self::integrate_kernel_piece(kernel, &position);
-            v += Self::integrate_kernel_piece(kernel, &velocity);
-            a += Self::integrate_kernel_piece(kernel, &acceleration);
+            p += centered.integrate(&position);
+            v += centered.integrate(&velocity);
+            a += centered.integrate(&acceleration);
         }
         for &(break_t, position_jump, slope_jump) in self.input_jumps_in_support(t) {
             let offset = t - break_t;
@@ -554,19 +579,6 @@ where
             .input_jumps
             .partition_point(|&(break_t, _, _)| break_t <= t - self.k_lo);
         &self.input_jumps[lo..hi]
-    }
-
-    /// A kernel piece's coefficients are a power basis in `tau - u_start` and
-    /// the moments arrive about that same origin, so substituting
-    /// `x = t - tau` turns the piece's contribution into one alternating dot
-    /// product.
-    fn integrate_kernel_piece(kernel: &nurbs::bezier::BezierPiece, moments: &[f64]) -> f64 {
-        let mut value = 0.0;
-        for (power, (coefficient, moment)) in kernel.coeffs.iter().zip(moments).enumerate() {
-            let term = coefficient * moment;
-            value += if power % 2 == 0 { term } else { -term };
-        }
-        value
     }
 
     /// Merge the kernel-piece boundaries (ascending by construction) with the
