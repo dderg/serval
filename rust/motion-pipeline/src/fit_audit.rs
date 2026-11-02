@@ -10,6 +10,8 @@
 use std::sync::Mutex;
 
 use crate::lowering::{FitTol, eval_mono, eval_mono_dd};
+use trajectory::next_toward;
+
 use crate::shaper::TrackSignal;
 
 /// Interior points checked per accepted piece, spread uniformly so a feature
@@ -29,6 +31,11 @@ pub struct FitViolation {
     pub acceleration_over_tolerance: f64,
     pub worst_u: f64,
     pub accepted_at_floor: bool,
+    /// The exact acceleration changes by more than the tolerance between
+    /// one ulp inside an edge of the piece and a cubic floor inside it: a
+    /// break hidden in the edge sliver the ladder must not read its edge
+    /// state from.
+    pub break_in_edge_sliver: bool,
 }
 
 static VIOLATIONS: Mutex<Vec<FitViolation>> = Mutex::new(Vec::new());
@@ -76,6 +83,13 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
         }
     }
     if position > 1.0 || acceleration > 1.0 {
+        let sliver = piece.cubic_floor.min(0.25 * h);
+        let edge_change = |edge: f64, inside: f64, floor_inside: f64| {
+            (sig.eval_pva(next_toward(edge, inside)).2 - sig.eval_pva(floor_inside).2).abs()
+                > piece.fit_tol.accel_mm_s2
+        };
+        let break_in_edge_sliver = edge_change(piece.t0, piece.t1, piece.t0 + sliver)
+            || edge_change(piece.t1, piece.t0, piece.t1 - sliver);
         VIOLATIONS
             .lock()
             .expect("fit audit poisoned")
@@ -89,6 +103,7 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
                 acceleration_over_tolerance: acceleration,
                 worst_u,
                 accepted_at_floor: piece.accepted_at_floor,
+                break_in_edge_sliver,
             });
     }
 }
