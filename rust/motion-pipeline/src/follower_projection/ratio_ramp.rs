@@ -202,6 +202,11 @@ impl WidthField {
         self.push(s, Some(0.0));
     }
 
+    /// A node within [`REST_TARGET_MM`] past the last one stacks on it: the
+    /// leaders cover no more between them than the fit's back-and-forth
+    /// around a rest, and a node a rounding short of a rest would take the
+    /// rest's cone as a sliver of an envelope that the smootherstep
+    /// flattens onto, narrowing every window short of the rest to as much.
     fn push(&mut self, s: f64, target: Option<f64>) {
         let s = self.nodes.last().map_or(s, |last| {
             assert!(
@@ -209,7 +214,11 @@ impl WidthField {
                 "a ratio ramp width node at {s} mm falls behind the last one at {} mm",
                 last.s
             );
-            s.max(last.s)
+            if s <= last.s + REST_TARGET_MM {
+                last.s
+            } else {
+                s
+            }
         });
         self.nodes.push(WidthNode {
             s,
