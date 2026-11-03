@@ -492,6 +492,15 @@ fn reconstruct_runs(
     let n = caps.len();
     let v = &plan.v;
     let is_anchor = &plan.is_anchor;
+    let members: Vec<disk::RunMember> = (0..n)
+        .map(|j| disk::RunMember {
+            kin: &caps[j].kin,
+            exit_v: v[j + 1],
+            forward_rail: plan.forward_rails[j].as_ref(),
+            backward_rail: plan.backward_rails[j].as_ref(),
+        })
+        .collect();
+    let mut profiles = member_profiles(&members, is_anchor, v).into_iter();
     let mut out: Vec<MoveVelocity> = Vec::with_capacity(n);
     let mut boundaries: Vec<f64> = Vec::with_capacity(n + 1);
     boundaries.push(entry_v);
@@ -501,75 +510,11 @@ fn reconstruct_runs(
         while run_end < n && !is_anchor[run_end] {
             run_end += 1;
         }
-        let run_members: Vec<disk::RunMember> = (run_start..run_end)
-            .map(|j| disk::RunMember {
-                kin: &caps[j].kin,
-                exit_v: v[j + 1],
-                forward_rail: plan.forward_rails[j].as_ref(),
-                backward_rail: plan.backward_rails[j].as_ref(),
-            })
-            .collect();
         let run_start_line = moves[run_start].source.start_line;
-        let workers = if cfg!(not(target_arch = "wasm32")) {
-            std::thread::available_parallelism()
-                .map_or(1, |cores| cores.get())
-                .min(RECONSTRUCT_WORKERS_MAX)
-                .min(run_members.len())
-        } else {
-            1
-        };
-        let mut indexed_profiles = if workers > 1 {
-            let next_member = std::sync::atomic::AtomicUsize::new(0);
-            std::thread::scope(|scope| {
-                let next_member = &next_member;
-                let handles = (0..workers)
-                    .map(|_| {
-                        scope.spawn(|| {
-                            let mut profiles = Vec::new();
-                            loop {
-                                let idx =
-                                    next_member.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                let Some(member) = run_members.get(idx) else {
-                                    return profiles;
-                                };
-                                profiles.push((
-                                    idx,
-                                    reconstruct::member_profile(
-                                        idx,
-                                        member,
-                                        v[run_start + idx],
-                                        member.exit_v,
-                                    ),
-                                ));
-                            }
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                handles
-                    .into_iter()
-                    .flat_map(|handle| {
-                        handle
-                            .join()
-                            .expect("velocity reconstruction thread panicked")
-                    })
-                    .collect::<Vec<_>>()
-            })
-        } else {
-            run_members
-                .iter()
-                .enumerate()
-                .map(|(idx, member)| {
-                    (
-                        idx,
-                        reconstruct::member_profile(idx, member, v[run_start + idx], member.exit_v),
-                    )
-                })
-                .collect()
-        };
-        indexed_profiles.sort_by_key(|(idx, _)| *idx);
-        let reconstructed_phases = indexed_profiles
-            .into_iter()
-            .map(|(_, result)| {
+        let reconstructed_phases = profiles
+            .by_ref()
+            .take(run_end - run_start)
+            .map(|result| {
                 result.map_err(|error| match error {
                     reconstruct::ReconstructError::Diverged => VelocityError::Diverged {
                         line_no: run_start_line,
@@ -597,7 +542,7 @@ fn reconstruct_runs(
                     first.1 = entry_v;
                 }
                 if let Some(last) = samples.last_mut() {
-                    last.1 = run_members[idx].exit_v;
+                    last.1 = members[run_start + idx].exit_v;
                 }
                 samples
             })
@@ -659,6 +604,70 @@ fn reconstruct_runs(
     }
 
     Ok((out, boundaries))
+}
+
+/// Every member's profile, in member order, each in member-local terms of
+/// the run it belongs to (a run starts at each anchored seam). Profiles are
+/// independent of one another, so the whole plan's are built on one set of
+/// workers rather than a set per run.
+fn member_profiles(
+    members: &[disk::RunMember],
+    is_anchor: &[bool],
+    v: &[f64],
+) -> Vec<Result<Vec<LawSegment>, reconstruct::ReconstructError>> {
+    let run_starts: Vec<usize> = (0..members.len())
+        .scan(0, |run_start, j| {
+            if is_anchor[j] {
+                *run_start = j;
+            }
+            Some(*run_start)
+        })
+        .collect();
+    let profile = |j: usize| {
+        let member = &members[j];
+        reconstruct::member_profile(j - run_starts[j], member, v[j], member.exit_v)
+    };
+    let workers = if cfg!(not(target_arch = "wasm32")) {
+        std::thread::available_parallelism()
+            .map_or(1, |cores| cores.get())
+            .min(RECONSTRUCT_WORKERS_MAX)
+            .min(members.len())
+    } else {
+        1
+    };
+    if workers <= 1 {
+        return (0..members.len()).map(profile).collect();
+    }
+    let next_member = std::sync::atomic::AtomicUsize::new(0);
+    let mut indexed_profiles = std::thread::scope(|scope| {
+        let handles = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut profiles = Vec::new();
+                    loop {
+                        let j = next_member.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if j >= members.len() {
+                            return profiles;
+                        }
+                        profiles.push((j, profile(j)));
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .flat_map(|handle| {
+                handle
+                    .join()
+                    .expect("velocity reconstruction thread panicked")
+            })
+            .collect::<Vec<_>>()
+    });
+    indexed_profiles.sort_by_key(|(j, _)| *j);
+    indexed_profiles
+        .into_iter()
+        .map(|(_, profile)| profile)
+        .collect()
 }
 
 /// Dense-enough exact samples off a member's law segments: the segment
