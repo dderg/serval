@@ -393,13 +393,7 @@ impl ExactRounding {
     }
 
     pub(crate) fn gamma(depth: usize) -> f64 {
-        let unit = f64::EPSILON / 2.0;
-        let accumulated = depth as f64 * unit;
-        assert!(
-            accumulated < 0.5,
-            "rounding depth {depth} defeats the a-priori bound"
-        );
-        accumulated / (1.0 - accumulated)
+        taylor_model::gamma(depth)
     }
 }
 

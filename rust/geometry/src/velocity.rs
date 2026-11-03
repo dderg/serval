@@ -280,7 +280,6 @@ where
     let (barrier, v_barrier, reconstruct_count) =
         settled.expect("the lead settles every seam or fails")?;
     let profiles = shop.into_profiles(reconstruct_count);
-    law::trim_spare_full_rails();
     let (out, boundaries) = reconstruct_runs(
         &moves[..reconstruct_count],
         &caps[..reconstruct_count],
@@ -408,12 +407,10 @@ struct SeamPlan {
 }
 
 impl SeamPlan {
-    /// Hands member `j`'s rails back for later integrations to write into.
+    /// Drops member `j`'s rails once nothing reads them.
     fn release_rails(&mut self, j: usize) {
-        let rails = [self.forward_rails[j].take(), self.backward_rails[j].take()];
-        for rail in rails.into_iter().flatten() {
-            rail.recycle();
-        }
+        self.forward_rails[j] = None;
+        self.backward_rails[j] = None;
     }
 }
 
@@ -680,7 +677,6 @@ struct Handoff {
     queue: VecDeque<SettledMember>,
     lead_done: bool,
     built: Vec<(usize, MemberProfile)>,
-    spent_rails: Vec<LawSegment>,
 }
 
 /// Builds member profiles while the reverse pass is still running. A
@@ -760,9 +756,6 @@ impl<'a> ProfileShop<'a> {
         );
         let mut handoff = self.lock();
         handoff.built.push((j, profile));
-        handoff
-            .spent_rails
-            .extend(member.forward_rail.into_iter().chain(member.backward_rail));
     }
 
     /// Builds handed-over members until the lead is done and none is left.
@@ -788,18 +781,8 @@ impl<'a> ProfileShop<'a> {
         }
     }
 
-    /// Hands spent rails back to this thread for its next integrations to
-    /// write into.
-    fn recycle_spent(&self) {
-        let spent = std::mem::take(&mut self.lock().spent_rails);
-        for rail in spent {
-            rail.recycle();
-        }
-    }
-
     /// Every profile of the reconstructed prefix, in member order.
     fn into_profiles(self, prefix: usize) -> Vec<MemberProfile> {
-        self.recycle_spent();
         let handoff = self
             .handoff
             .into_inner()
@@ -890,7 +873,6 @@ impl<'s, 'a, F: FnOnce(usize) -> usize> Settler<'s, 'a, F> {
             }),
             Some(_) => plan.release_rails(j),
         }
-        self.shop.recycle_spent();
     }
 }
 

@@ -13,6 +13,8 @@
 //! enclosure follows the clothoid from the evaluator's reading at the
 //! window centre.
 
+use std::ops::{Add, Mul, Neg};
+
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{Arc as PathArc, Clothoid, Segment};
 use geometry::{FollowerDemand, LawSegment, RailPair, RailPairShape, ScalarLaw};
@@ -377,7 +379,7 @@ fn rail_enclosure(
     while index < pairs.len() {
         let (pair, interpolant) = &pairs[index];
         let lo = from.max(origin + pair.t_lo);
-        if interpolant.departure.is_some() {
+        if interpolant.variable != PairVariable::Time {
             let hi = to.min(origin + pair.t_hi);
             if lo < hi {
                 taylor::enclose(
@@ -397,7 +399,7 @@ fn rail_enclosure(
         }
         let end = pairs[index..]
             .iter()
-            .position(|(_, interpolant)| interpolant.departure.is_some())
+            .position(|(_, interpolant)| interpolant.variable != PairVariable::Time)
             .map_or(pairs.len(), |offset| index + offset);
         let run_pairs = &pairs[index..end];
         let run = QuinticRun {
@@ -439,6 +441,24 @@ fn rail_enclosure(
     }
 }
 
+/// The variable a rail pair's formula is a polynomial in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PairVariable {
+    /// Its time share `u`.
+    Time,
+    /// `z = √u`, leaving the cap from its low end.
+    FromLo,
+    /// `z = √(1 − u)`, leaving the cap from its high end.
+    FromHi,
+    /// `z = √(θ/parent_h)` at the departure-frame time `θ` running from
+    /// `theta_lo` to `theta_hi` across the pair, clear of the departure.
+    Clipped {
+        parent_h: f64,
+        theta_lo: f64,
+        theta_hi: f64,
+    },
+}
+
 /// A rail knot pair's formula as monomial coefficients: speed, `h·a` and
 /// `∫₀ v` in the pair's variable — its time `u` for a quintic, the square
 /// root `z` of the time from the departure end for a cap departure — and
@@ -447,7 +467,7 @@ struct PairInterpolant {
     t_lo: f64,
     inverse_h: Ball,
     h: f64,
-    departure: Option<bool>,
+    variable: PairVariable,
     speed: [Ball; 8],
     scaled_acceleration: [Ball; 8],
     mass: [Ball; 8],
@@ -468,7 +488,7 @@ impl PairInterpolant {
     fn new(pair: &RailPair, arc_base: f64) -> Self {
         let h = pair.t_hi - pair.t_lo;
         let zero = Ball::exact(0.0);
-        let (speed, scaled_acceleration, mass, full_mass, departure) = match pair.shape {
+        let (speed, scaled_acceleration, mass, full_mass, variable) = match pair.shape {
             RailPairShape::Quintic { rise, slopes } => {
                 let [m0, c0, m1, c1] = slopes.map(Ball::exact);
                 let cubic_terms = |delta: Ball| {
@@ -506,7 +526,13 @@ impl PairInterpolant {
                     mass[power + 1] = speed[power].mul(Ball::rounded(1.0 / (power + 1) as f64, 1));
                 }
                 let full_mass = mass.iter().fold(zero, |sum, &term| sum.add(term));
-                (speed, scaled_acceleration, mass, full_mass, None)
+                (
+                    speed,
+                    scaled_acceleration,
+                    mass,
+                    full_mass,
+                    PairVariable::Time,
+                )
             }
             RailPairShape::Departure {
                 from_lo,
@@ -536,12 +562,68 @@ impl PairInterpolant {
                     c5.mul(Ball::rounded(2.0 / 7.0, 1)),
                 ];
                 let full_mass = rise_mass.iter().fold(end_speed, |sum, &term| sum.add(term));
+                let variable = if from_lo {
+                    PairVariable::FromLo
+                } else {
+                    PairVariable::FromHi
+                };
+                (speed, scaled_acceleration, rise_mass, full_mass, variable)
+            }
+            RailPairShape::Clipped {
+                coefficients,
+                h: parent_h,
+                v_end,
+                theta_lo,
+                theta_hi,
+            } => {
+                let [c2, c3, c4, c5] = coefficients.map(Ball::exact);
+                let end_speed = Ball::exact(v_end);
+                let speed = [end_speed, zero, c2, c3, c4, c5, zero, zero];
+                let acceleration_scale =
+                    Ball::rounded((theta_hi - theta_lo).signum() * h / parent_h, 1);
+                let scaled_acceleration = [
+                    c2,
+                    c3.mul(Ball::exact(1.5)),
+                    c4.mul(Ball::exact(2.0)),
+                    c5.mul(Ball::exact(2.5)),
+                    zero,
+                    zero,
+                    zero,
+                    zero,
+                ]
+                .map(|c| c.mul(acceleration_scale));
+                let mass_scale = Ball::rounded(parent_h / (theta_hi - theta_lo), 1);
+                let rise_mass = [
+                    zero,
+                    zero,
+                    zero,
+                    zero,
+                    c2.mul(Ball::exact(0.5)),
+                    c3.mul(Ball::rounded(0.4, 1)),
+                    c4.mul(Ball::rounded(1.0 / 3.0, 1)),
+                    c5.mul(Ball::rounded(2.0 / 7.0, 1)),
+                ]
+                .map(|c| c.mul(mass_scale));
+                let rise_mass_at = |theta: f64| {
+                    let z = Ball::rounded((theta / parent_h).sqrt(), 2);
+                    rise_mass
+                        .iter()
+                        .rev()
+                        .fold(zero, |acc, &c| acc.mul(z).add(c))
+                };
+                let mut mass = rise_mass;
+                mass[0] = rise_mass_at(theta_lo).neg();
+                let full_mass = end_speed.add(rise_mass_at(theta_hi)).add(mass[0]);
                 (
                     speed,
                     scaled_acceleration,
-                    rise_mass,
+                    mass,
                     full_mass,
-                    Some(from_lo),
+                    PairVariable::Clipped {
+                        parent_h,
+                        theta_lo,
+                        theta_hi,
+                    },
                 )
             }
         };
@@ -549,7 +631,7 @@ impl PairInterpolant {
             t_lo: pair.t_lo,
             inverse_h: Ball::rounded(1.0 / h, 1),
             h,
-            departure,
+            variable,
             speed,
             scaled_acceleration,
             mass,
@@ -569,13 +651,13 @@ impl PairInterpolant {
             polynomial_of_balls(coefficients.iter().copied(), at)
         };
         let h = Ball::exact(self.h);
-        let (v, a, mass) = match self.departure {
-            None => (
+        let (v, a, mass) = match self.variable {
+            PairVariable::Time => (
                 poly(&self.speed, &u),
                 poly(&self.scaled_acceleration, &u),
                 poly(&self.mass, &u),
             ),
-            Some(true) => {
+            PairVariable::FromLo => {
                 let z = u.sqrt()?;
                 let mass = poly(&self.mass, &z).add(&u.scale(self.speed[0]));
                 (
@@ -584,7 +666,7 @@ impl PairInterpolant {
                     mass,
                 )
             }
-            Some(false) => {
+            PairVariable::FromHi => {
                 let remaining = u.scale(Ball::exact(-1.0)).add_ball(Ball::exact(1.0));
                 let z = remaining.sqrt()?;
                 let mass = poly(&self.mass, &z)
@@ -594,6 +676,22 @@ impl PairInterpolant {
                 (
                     poly(&self.speed, &z),
                     poly(&self.scaled_acceleration, &z).scale(Ball::exact(-1.0)),
+                    mass,
+                )
+            }
+            PairVariable::Clipped {
+                parent_h,
+                theta_lo,
+                theta_hi,
+            } => {
+                let theta = u
+                    .scale(Ball::rounded(theta_hi - theta_lo, 1))
+                    .add_ball(Ball::exact(theta_lo));
+                let z = theta.scale(Ball::rounded(1.0 / parent_h, 1)).sqrt()?;
+                let mass = poly(&self.mass, &z).add(&u.scale(self.speed[0]));
+                (
+                    poly(&self.speed, &z),
+                    poly(&self.scaled_acceleration, &z),
                     mass,
                 )
             }
