@@ -357,3 +357,21 @@ fn a_rail_hugging_its_cap_meets_the_ceiling_exactly() {
         "the accelerating rail ends on the ceiling the cruise starts at"
     );
 }
+
+/// #601: a 36 nm clothoid blend half curving down from a 12 nm radius,
+/// entered at its curvature cap and left 0.5 mm/s faster. Its rails rise
+/// 2e-5 mm/s in the last nanometre; the onset read off a rail snapped to
+/// its end there while the cuts solved the exact arc, so the two halves
+/// met 1e-5 mm/s apart and the member was refused as infeasible.
+#[test]
+fn a_steep_rail_onset_by_the_member_end_joins_its_halves() {
+    let kin = clothoid(
+        3.592_099_142_300_059e-5,
+        85_129.324_987_514_64,
+        -2_369_904_660.621_517,
+        20.0,
+        22_091.902_088_741_31,
+    );
+    let segments = profile(&kin, 0.509_421_136_019_198_5, 1.026_128_587_700_854);
+    assert_tiles(&segments, kin.length);
+}
