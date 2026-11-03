@@ -9,8 +9,8 @@
 //! Extruder mode is M82 (absolute) / M83 (relative), independent of the
 //! G90/G91 flag that governs X/Y/Z; under G91 an undeclared extruder rides
 //! along as relative, and an E word with no mode declared at all is refused
-//! rather than guessed. G92 resets any axis's position (commonly `G92 E0`)
-//! without emitting a move.
+//! rather than guessed. G92 moves the G-code origin, never the toolhead, as
+//! klippy's `GCodeMove` does.
 
 use planner_config::{CartesianLimits, RuntimeLimits};
 
@@ -269,6 +269,74 @@ impl Toolhead<'_> {
     }
 }
 
+/// klippy's `GCodeMove` coordinate state: `last_position` is the toolhead
+/// position G-code has commanded, `base_position` the origin G-code
+/// coordinates are measured from. `G92` moves only the origin, so a position
+/// reset never moves the toolhead.
+struct GCodeMove {
+    absolute_coord: bool,
+    extrude_relative: Option<bool>,
+    base_position: [f64; 4],
+    last_position: [f64; 4],
+    speed: f64,
+}
+
+impl GCodeMove {
+    /// `GCodeMove.cmd_G92`.
+    fn set_position(&mut self, params: &gcode::Params) {
+        let offsets = [params.x(), params.y(), params.z(), params.e()];
+        if offsets.iter().all(Option::is_none) {
+            self.base_position = self.last_position;
+            return;
+        }
+        for (axis, offset) in offsets.into_iter().enumerate() {
+            if let Some(offset) = offset {
+                self.base_position[axis] = self.last_position[axis] - offset;
+            }
+        }
+    }
+
+    /// `GCodeMove.cmd_G1` up to the `move_with_transform` call: the new
+    /// commanded position and speed.
+    fn linear_move(
+        &mut self,
+        command: u32,
+        params: &gcode::Params,
+        line: u32,
+    ) -> Result<(), WaypointError> {
+        for (axis, value) in [params.x(), params.y(), params.z()].into_iter().enumerate() {
+            if let Some(v) = value {
+                self.last_position[axis] = if self.absolute_coord {
+                    v + self.base_position[axis]
+                } else {
+                    self.last_position[axis] + v
+                };
+            }
+        }
+        if let Some(v) = params.e() {
+            if self.extrude_relative.is_none() && self.absolute_coord {
+                return Err(WaypointError::AmbiguousExtruderMode { line });
+            }
+            self.last_position[3] = if self.extrude_relative.unwrap_or(true) {
+                self.last_position[3] + v
+            } else {
+                v + self.base_position[3]
+            };
+        }
+        if let Some(f) = params.f() {
+            if f <= 0.0 {
+                return Err(WaypointError::InvalidSpeed {
+                    line,
+                    command,
+                    feedrate: f,
+                });
+            }
+            self.speed = f * LIVE_SPEED_FACTOR;
+        }
+        Ok(())
+    }
+}
+
 pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>, WaypointError> {
     let mut waypoints: Vec<Waypoint> = Vec::new();
     let mut toolhead = Toolhead {
@@ -276,10 +344,13 @@ pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>
         runtime: RuntimeLimits::default(),
         commanded: None,
     };
-    let (mut x, mut y, mut z, mut e) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
-    let mut speed = LIVE_DEFAULT_SPEED_MM_S;
-    let mut relative = false;
-    let mut e_relative: Option<bool> = None;
+    let mut gcode_move = GCodeMove {
+        absolute_coord: true,
+        extrude_relative: None,
+        base_position: [0.0; 4],
+        last_position: [0.0; 4],
+        speed: LIVE_DEFAULT_SPEED_MM_S,
+    };
 
     for tok in gcode::lex(text) {
         let tok = tok?;
@@ -316,17 +387,12 @@ pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>
             continue;
         }
         match (letter, major) {
-            (b'G', 90) => relative = false,
-            (b'G', 91) => relative = true,
-            (b'M', 82) => e_relative = Some(false),
-            (b'M', 83) => e_relative = Some(true),
+            (b'G', 90) => gcode_move.absolute_coord = true,
+            (b'G', 91) => gcode_move.absolute_coord = false,
+            (b'M', 82) => gcode_move.extrude_relative = Some(false),
+            (b'M', 83) => gcode_move.extrude_relative = Some(true),
             (b'M', 204) => m204(&params, line_no, &mut toolhead.runtime)?,
-            (b'G', 92) => {
-                x = params.x().unwrap_or(x);
-                y = params.y().unwrap_or(y);
-                z = params.z().unwrap_or(z);
-                e = params.e().unwrap_or(e);
-            }
+            (b'G', 92) => gcode_move.set_position(&params),
             (b'G', 2 | 3) => {
                 return Err(WaypointError::UnsupportedArc {
                     line: line_no,
@@ -336,51 +402,12 @@ pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>
             (b'G', cmd @ (0 | 1)) => {
                 let has_position =
                     params.x().is_some() || params.y().is_some() || params.z().is_some();
-
-                let (nx, ny, nz) = if relative {
-                    (
-                        x + params.x().unwrap_or(0.0),
-                        y + params.y().unwrap_or(0.0),
-                        z + params.z().unwrap_or(0.0),
-                    )
-                } else {
-                    (
-                        params.x().unwrap_or(x),
-                        params.y().unwrap_or(y),
-                        params.z().unwrap_or(z),
-                    )
-                };
-
-                let ne = match params.e() {
-                    Some(ev) => {
-                        if e_relative.is_none() && !relative {
-                            return Err(WaypointError::AmbiguousExtruderMode { line: line_no });
-                        }
-                        if e_relative.unwrap_or(true) {
-                            e + ev
-                        } else {
-                            ev
-                        }
-                    }
-                    None => e,
-                };
-
-                if let Some(f) = params.f() {
-                    if f <= 0.0 {
-                        return Err(WaypointError::InvalidSpeed {
-                            line: line_no,
-                            command: cmd,
-                            feedrate: f,
-                        });
-                    }
-                    speed = f * LIVE_SPEED_FACTOR;
-                }
-                (x, y, z, e) = (nx, ny, nz, ne);
-                let target = [x, y, z, e];
+                gcode_move.linear_move(cmd, &params, line_no)?;
+                let target = gcode_move.last_position;
                 let waypoint = match toolhead.commanded {
-                    None if has_position => Some(toolhead.anchor(target, speed)),
+                    None if has_position => Some(toolhead.anchor(target, gcode_move.speed)),
                     None => None,
-                    Some(_) => toolhead.move_to(target, speed),
+                    Some(_) => toolhead.move_to(target, gcode_move.speed),
                 };
                 waypoints.extend(waypoint);
             }
