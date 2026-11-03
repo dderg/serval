@@ -5,34 +5,24 @@
 //! `max_accel_deviation` and the acceleration that spends its position
 //! tolerance over the piece. This replays every snapshot case and a whole
 //! dense real print through the pipeline with the fit audit on, and fails
-//! on any accepted piece that leaves the tolerance.
+//! on any accepted piece that leaves the tolerance. Each set of cases is its
+//! own test, so the audited replays run side by side.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use motion_pipeline::fit_audit::{FitViolation, take_violations};
 mod corpus;
 
 const DENSE_PRINT: &str = "voron_dense_top_layers";
 
-/// Chains the bench configs leave out, held to the audit on the dense print
-/// too: a 70 000 mm/s² Trident whose kernel-free pressure advance under a
-/// ratio ramp fits the follower's advanced source to the position-equivalent
-/// budget, and the same Trident with a smoothing kernel after the advance,
-/// whose plain follower source fits to the absolute budget.
-const TRIDENT_CONFIGS: [&str; 2] = [
-    "tools/bench/configs/trident_ramp.cfg",
-    "tools/bench/configs/trident_kernel.cfg",
-];
-
-fn dense_cases() -> Vec<(String, String, PathBuf)> {
+fn dense_cases(configs: &[&str]) -> Vec<(String, String, PathBuf)> {
     let gcode = std::fs::read_to_string(
         corpus::repo().join(format!("tools/sim/gcode/{DENSE_PRINT}.gcode")),
     )
     .expect("read the dense print");
-    corpus::SIM_CONFIGS
+    configs
         .iter()
-        .chain(&TRIDENT_CONFIGS)
         .map(|config| {
             (
                 format!("{DENSE_PRINT}/{config}"),
@@ -43,18 +33,13 @@ fn dense_cases() -> Vec<(String, String, PathBuf)> {
         .collect()
 }
 
-fn run(name: &str, gcode: &str, config: &Path) -> Vec<FitViolation> {
-    take_violations();
-    corpus::plan(name, gcode, config);
-    take_violations()
-}
-
-fn audited_violations() -> Vec<(String, FitViolation)> {
-    corpus::snapshot_cases()
+fn audited_violations(cases: Vec<(String, String, PathBuf)>) -> Vec<(String, FitViolation)> {
+    cases
         .into_iter()
-        .chain(dense_cases())
         .flat_map(|(name, gcode, config)| {
-            run(&name, &gcode, &config)
+            take_violations();
+            corpus::plan(&name, &gcode, &config);
+            take_violations()
                 .into_iter()
                 .map(move |violation| (name.clone(), violation))
         })
@@ -92,37 +77,56 @@ fn assembled_from_pieces(fit_context: &str) -> bool {
     fit_context.starts_with("follower") || fit_context.starts_with("advanced_follower")
 }
 
-/// Where a span's edge acceleration changes by more than the tolerance
-/// across its edge sliver, the ladder reads it past the sliver. Read at the
-/// seam instead and a break that seed coalescing hid there pins the piece
-/// to the acceleration on the break's far side. The shaper's unit tests pin
-/// the read itself; this holds the whole pipeline to it.
-#[test]
-fn no_follower_fit_piece_is_pinned_to_a_break_hidden_in_its_edge_sliver() {
-    let pinned: Vec<(String, FitViolation)> = audited_violations()
-        .into_iter()
-        .filter(|(_, violation)| {
-            violation.break_in_edge_sliver && assembled_from_pieces(violation.fit_context)
-        })
-        .collect();
-    assert!(
-        pinned.is_empty(),
-        "{} accepted fit pieces leave the tolerance across a break in their edge sliver:\n{}",
-        pinned.len(),
-        table(&pinned)
-    );
-}
-
-#[test]
-fn every_accepted_fit_piece_holds_the_fit_tolerance_against_the_exact_signal() {
-    let violations: Vec<(String, FitViolation)> = audited_violations()
+/// Every accepted piece of `cases` holds the fit tolerance, bar the
+/// exempt. Where a span's edge acceleration changes by more than the
+/// tolerance across its edge sliver, the ladder reads it past the sliver;
+/// read at the seam instead, a break that seed coalescing hid there pins the
+/// piece to the acceleration on the break's far side, which the count of
+/// pinned follower pieces names. The shaper's unit tests pin the read
+/// itself; this holds the whole pipeline to it.
+fn assert_every_accepted_fit_piece_holds(cases: Vec<(String, String, PathBuf)>) {
+    let violations: Vec<(String, FitViolation)> = audited_violations(cases)
         .into_iter()
         .filter(|(_, violation)| violation.exemption.is_none())
         .collect();
+    let pinned = violations
+        .iter()
+        .filter(|(_, violation)| {
+            violation.break_in_edge_sliver && assembled_from_pieces(violation.fit_context)
+        })
+        .count();
     assert!(
         violations.is_empty(),
-        "{} accepted fit pieces leave the fit tolerance:\n{}",
+        "{} accepted fit pieces leave the fit tolerance, {pinned} of them follower pieces \
+         across a break in their edge sliver:\n{}",
         violations.len(),
         table(&violations)
     );
+}
+
+/// The snapshot cases; `scripts/review_baselines.py` reads this test's
+/// table by name.
+#[test]
+fn every_accepted_fit_piece_holds_the_fit_tolerance_against_the_exact_signal() {
+    assert_every_accepted_fit_piece_holds(corpus::snapshot_cases());
+}
+
+#[test]
+fn every_fit_piece_of_the_dense_print_holds_the_fit_tolerance_on_the_bench_configs() {
+    assert_every_accepted_fit_piece_holds(dense_cases(&corpus::SIM_CONFIGS));
+}
+
+/// A 70 000 mm/s² Trident whose kernel-free pressure advance under a ratio
+/// ramp fits the follower's advanced source to the position-equivalent
+/// budget.
+#[test]
+fn every_fit_piece_of_the_dense_print_holds_the_fit_tolerance_on_the_trident_ramp_chain() {
+    assert_every_accepted_fit_piece_holds(dense_cases(&["tools/bench/configs/trident_ramp.cfg"]));
+}
+
+/// The same Trident with a smoothing kernel after the advance, whose plain
+/// follower source fits to the absolute budget.
+#[test]
+fn every_fit_piece_of_the_dense_print_holds_the_fit_tolerance_on_the_trident_kernel_chain() {
+    assert_every_accepted_fit_piece_holds(dense_cases(&["tools/bench/configs/trident_kernel.cfg"]));
 }
