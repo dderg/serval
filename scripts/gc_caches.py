@@ -45,7 +45,14 @@ def size_bytes(path: Path) -> int:
 
 def candidates() -> list[Path]:
     found = sorted(CACHE.glob("*-target"))
-    for name in ("wt", "stack", "stack-logs", "review", "targets"):
+    for name in (
+        "wt",
+        "stack",
+        "stack-logs",
+        "review",
+        "targets",
+        "fuzz-triage",
+    ):
         directory = PENDING / name
         if directory.is_dir():
             found.extend(sorted(directory.iterdir()))

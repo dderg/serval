@@ -1,7 +1,19 @@
 use host_rt::host_io::parser::{decode_vlq, encode_vlq};
 use proptest::prelude::*;
+use proptest::test_runner::FileFailurePersistence;
+
+fn persisted() -> ProptestConfig {
+    ProptestConfig {
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
+            "proptest-regressions/parser_proptest.txt",
+        ))),
+        ..ProptestConfig::default()
+    }
+}
 
 proptest! {
+    #![proptest_config(persisted())]
+
     #[test]
     fn vlq_round_trip(v in i32::MIN..=i32::MAX) {
         let mut buf = Vec::new();

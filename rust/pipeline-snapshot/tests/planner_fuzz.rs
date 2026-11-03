@@ -613,6 +613,57 @@ fn arc_run_tail_blend_leaves_no_sliver_row() {
     assert!(report.hard_ok(), "{report}");
 }
 
+/// #619, found by `target_budgets_hold`: a junction turning 0.89 mrad, under
+/// the fitter's collinear threshold, passed unblended at 207 mm/s under a
+/// zero corner budget, and z stepped by 0.18 mm/s there. Travel only. A
+/// junction now passes as collinear only when `v·θ` at the fastest its
+/// pieces may cross it stays within the seam budget.
+#[test]
+fn a_nearly_collinear_z_junction_keeps_the_seam_velocity_budget() {
+    let limits = FuzzLimits {
+        max_velocity: 314.47805824987176,
+        max_accel: 500.0,
+        square_corner_velocity: 0.0,
+    };
+    let moves = [
+        MoveSpec {
+            turn: Turn::Continue,
+            length_mm: 46.522523281975396,
+            feed_mm_s: 604.447037922063,
+            extrude_ratio: 0.0,
+            z_step_mm: 0.04119073092929801,
+        },
+        MoveSpec {
+            turn: Turn::Continue,
+            length_mm: 39.702781729279174,
+            feed_mm_s: 505.4380942226453,
+            extrude_ratio: 0.0,
+            z_step_mm: 0.0,
+        },
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok() && report.target_ok(), "{report}");
+}
+
+/// #619 in the plane: a 0.6 mrad heading change between two fast extrusions
+/// under a corner budget blends instead of stepping 0.18 mm/s.
+#[test]
+fn a_nearly_collinear_planar_junction_at_speed_keeps_the_seam_velocity_budget() {
+    let limits = FuzzLimits {
+        max_velocity: 300.0,
+        max_accel: 5000.0,
+        square_corner_velocity: 5.0,
+    };
+    let moves = [
+        planar(Turn::Absolute(0.0), 40.0, 300.0, 0.05),
+        planar(Turn::Absolute(6e-4), 40.0, 300.0, 0.05),
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok(), "{report}");
+    let spikes = xy_smoothness_spikes(&report);
+    assert!(spikes.is_empty(), "{spikes:?}\n{report}");
+}
+
 /// #618: under a 0.016 mm/s square-corner velocity, a travel reversal that
 /// steps z planned a member its own rails could not join, and the planner
 /// panicked with `Infeasible`.

@@ -26,3 +26,31 @@ pub fn repo_root() -> PathBuf {
 pub fn repo_file(relative: &str) -> PathBuf {
     repo_root().join(relative)
 }
+
+const SKIPPED_DIRS: [&str; 1] = ["target"];
+
+fn collect_rust_sources(dir: &Path, found: &mut Vec<PathBuf>) {
+    let entries =
+        std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read source dir {}: {e}", dir.display()));
+    for entry in entries {
+        let path = entry.expect("dir entry").path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if path.is_dir() {
+            if !SKIPPED_DIRS.contains(&name) && !name.starts_with('.') {
+                collect_rust_sources(&path, found);
+            }
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            found.push(path);
+        }
+    }
+}
+
+pub fn rust_sources() -> Vec<PathBuf> {
+    let mut sources = Vec::new();
+    collect_rust_sources(&repo_root().join("rust"), &mut sources);
+    sources.sort();
+    sources
+}

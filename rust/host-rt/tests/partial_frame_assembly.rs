@@ -1,4 +1,14 @@
 use proptest::prelude::*;
+use proptest::test_runner::FileFailurePersistence;
+
+fn persisted() -> ProptestConfig {
+    ProptestConfig {
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
+            "proptest-regressions/partial_frame_assembly.txt",
+        ))),
+        ..ProptestConfig::default()
+    }
+}
 
 use host_rt::host_io::wire::{MESSAGE_SYNC, build_frame, extract_packet};
 
@@ -27,7 +37,7 @@ fn feed_with_splits(bytes: &[u8], splits: &[usize]) -> (Vec<Vec<u8>>, Vec<u8>) {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(ProptestConfig { cases: 64, ..persisted() })]
 
     #[test]
     fn mid_length_prefix_split_recovers_frame(
@@ -44,7 +54,7 @@ proptest! {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(ProptestConfig { cases: 64, ..persisted() })]
 
     #[test]
     fn mid_crc_split_recovers_frame(
@@ -61,7 +71,7 @@ proptest! {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(ProptestConfig { cases: 64, ..persisted() })]
 
     #[test]
     fn mid_payload_split_recovers_frame(
@@ -79,7 +89,7 @@ proptest! {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(ProptestConfig { cases: 64, ..persisted() })]
 
     #[test]
     fn multi_frame_single_chunk(count in 2usize..=8) {
@@ -97,7 +107,7 @@ proptest! {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(ProptestConfig { cases: 64, ..persisted() })]
 
     #[test]
     fn resync_after_invalid_prefix_byte(

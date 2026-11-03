@@ -18,6 +18,8 @@ PI_CONFIG = "printer_data/config/printer.cfg"
 PI_LOGS = "printer_data/logs"
 REPO_CFG = Path(__file__).with_name("printer.cfg")
 READY_TIMEOUT_S = 60.0
+SCP_ATTEMPTS = 3
+SCP_RETRY_DELAY_S = 2.0
 FORBIDDEN_PINS = {
     "PA13": "F401 SWD data pin",
     "PA14": "F401 SWD clock pin",
@@ -140,17 +142,31 @@ def ssh(command: str) -> str:
     return result.stdout
 
 
+def _scp(args: list[str]) -> None:
+    errors = []
+    for attempt in range(SCP_ATTEMPTS):
+        if attempt:
+            time.sleep(SCP_RETRY_DELAY_S)
+        result = subprocess.run(args, capture_output=True, text=True)
+        if result.returncode == 0:
+            return
+        errors.append(f"exit {result.returncode}: {result.stderr.strip()}")
+    raise BenchError(
+        f"{' '.join(args)} failed after {SCP_ATTEMPTS} attempts: "
+        + " | ".join(errors)
+    )
+
+
 def scp_to_pi(local: Path, remote: str) -> None:
-    subprocess.run(["scp", "-q", str(local), f"{PI_SSH}:{remote}"], check=True)
+    _scp(["scp", "-q", str(local), f"{PI_SSH}:{remote}"])
 
 
 def scp_from_pi(remote: str, local: Path, recursive: bool = False) -> None:
-    args = (
+    _scp(
         ["scp", "-q"]
         + (["-r"] if recursive else [])
         + [f"{PI_SSH}:{remote}", str(local)]
     )
-    subprocess.run(args, check=True)
 
 
 def validate_config(text: str) -> None:

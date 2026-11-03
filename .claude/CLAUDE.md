@@ -234,6 +234,22 @@ every time `main` moves before a merge the PR branch is updated and the whole
 suite reruns: land a batch with `scripts/land_queue.py` (one branch at a time,
 merging `main` first) rather than starting several `land-pr.sh` in parallel.
 
+`rust-fuzz` failures are triaged, not retried blindly. The job prints one
+`FUZZ_FAILURE {json}` line per failing test (test, seed, panic location, message;
+`scripts/fuzz_triage.py parse`). On a red run `land-pr.sh` calls `fuzz_triage.py triage`:
+it requires every red job to be `rust-fuzz` with a seed, replays the seed against
+`origin/main` in a scratch worktree under `~/.cache/pending-baselines/fuzz-triage/`
+(`cc` seeds through the suite's `proptest-regressions` file, `PROPTEST_RNG_SEED` seeds
+through the env). If main fails it too, the bug is pre-existing: an issue labelled
+`fuzz-triage` is found or opened, deduplicated by `fuzz-triage-key: <binary>::<test>@<panic
+location>` in its body, the seed is commented once, the failed job is rerun and landing
+continues (at most 3 reruns). If main passes the seed, the PR broke it or is behind a fix
+already on main: land-pr.sh stops with the repro command. Timeouts, other red jobs and
+seedless failures stop as before. Every proptest suite must keep its failing seed
+(`FileFailurePersistence::Direct("proptest-regressions/<file>.txt")` or a fixed `rng_seed`;
+the `source-tree` test `proptest_seeds` enforces it), because proptest's default
+persistence finds no crate root under nextest and silently drops the seed.
+
 A red check is investigated, not rerun, unless it is a known flake with an open
 issue; rerun those once and add the run id to the issue. Sim flakes so far were harness races between wall-clock threads and the free-running virtual clock, or reads of klippy's async log: look there first (`tools/sim/world.py` `settled_log_tail`, `HarnessPacer.hold_until`). `rust-fuzz` failures on a fresh
 seed are real counterexamples: commit the `cc` seed line to

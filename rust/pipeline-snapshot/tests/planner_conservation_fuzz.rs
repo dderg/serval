@@ -3,6 +3,16 @@ use pipeline_snapshot::{
     CartesianLimits, ExactTrajectory, SampleSide, SnapshotParams, pipeline_snapshot,
 };
 use proptest::prelude::*;
+use proptest::test_runner::FileFailurePersistence;
+
+fn persisted() -> ProptestConfig {
+    ProptestConfig {
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
+            "proptest-regressions/planner_conservation_fuzz.txt",
+        ))),
+        ..ProptestConfig::default()
+    }
+}
 
 const AXES: usize = 4;
 const E_AXIS: usize = 3;
@@ -345,6 +355,8 @@ fn toolhead_stays_within_the_corner_budget_of(
 }
 
 proptest! {
+    #![proptest_config(persisted())]
+
     #[test]
     fn the_toolhead_starts_and_ends_on_the_commanded_waypoints(
         limits in arb_limits(),

@@ -81,6 +81,30 @@ fn a_ramped_linear_advance_takes_k_and_its_leaders_kernels() {
 }
 
 #[test]
+fn the_reach_takes_the_ramp_time_and_the_widest_leader_kernel() {
+    let caps = caps_of(
+        limited(&["pa"]),
+        &[pp("pa", "linear_pressure_advance", &[("k", 0.03)])],
+    )
+    .unwrap()[0];
+    assert_eq!(caps.ratio_ramp_time_s, 0.015);
+    let (lo, hi) = trajectory::build_smooth_mzv_kernel(62.0).support();
+    assert_eq!(caps.leader_kernel_reach_s, hi.max(-lo));
+    let unramped = caps_of(
+        AxisDecl {
+            ratio_ramp_time: None,
+            ..limited(&["pa", "st"])
+        },
+        &[
+            pp("pa", "linear_pressure_advance", &[("k", 0.03)]),
+            pp("st", "smooth_triangle", &[("smooth_time", 0.01)]),
+        ],
+    )
+    .unwrap()[0];
+    assert_eq!(unramped.ratio_ramp_time_s, 0.0);
+}
+
+#[test]
 fn a_kernel_on_the_follower_bounds_its_own_jerk() {
     let caps = caps_of(
         limited(&["pa", "st"]),
