@@ -2,7 +2,10 @@ use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
-use super::{IdentifyOutcome, decode_identify_response, wait_for_klipper_frame};
+use super::{
+    IdentifyOutcome, MessageParams, MessageValue, decode_identify_response, identify_chunk,
+    wait_for_klipper_frame,
+};
 use crate::host_io::parser::encode_vlq;
 use crate::host_io::serial_frame_io::SerialFrameIo;
 use crate::host_io::wire::build_frame;
@@ -207,4 +210,15 @@ fn an_identify_chunk_offset_inside_u32_is_decoded() {
 #[test]
 fn a_negative_identify_chunk_offset_is_rejected_not_read_as_a_huge_one() {
     assert!(decode_identify_response(&identify_packet(-1)).is_none());
+}
+
+#[test]
+fn an_identify_response_without_a_data_parameter_is_an_error_not_an_empty_end_of_blob() {
+    let params = decode_identify_response(&identify_packet(0)).unwrap();
+    assert_eq!(identify_chunk(&params).unwrap(), &[] as &[u8]);
+
+    let mut without_data = MessageParams::new();
+    without_data.insert("offset", MessageValue::U32(0));
+    let error = identify_chunk(&without_data).unwrap_err();
+    assert!(error.to_string().contains("no data parameter"), "{error}");
 }

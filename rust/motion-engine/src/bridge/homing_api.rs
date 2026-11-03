@@ -283,13 +283,17 @@ impl PyMotionEngine {
                         return;
                     }
                     fired.store(true, Ordering::SeqCst);
-                    let clock32 = params.try_get_u32("clock").unwrap_or(0);
+                    let clock32 = params.try_get_u32("clock").unwrap_or_else(|| {
+                        panic!("mcu {mcu_handle}: trsync_state report carried no clock parameter")
+                    });
                     let reference = router
                         .lock_ok()
                         .compute_ack_clock(host_rt::passthrough_queue::McuHandle::from_raw(
                             mcu_handle,
                         ))
-                        .unwrap_or(0);
+                        .unwrap_or_else(|e| {
+                            panic!("mcu {mcu_handle}: trip relay has no clock estimate ({e:?}) to expand the trip clock against")
+                        });
                     let clock64 =
                         motion_services::remote_trigger::relay_trip_clock(clock32, reference);
                     tracing::info!(
@@ -622,12 +626,28 @@ impl PyMotionEngine {
         if !self.flush_aborted_cohort(py, ctx.all_axis_keys.clone(), ctx.cohort) {
             return None;
         }
-        py.detach(|| self.homing.wait_for_pending_suppresses(ctx.cohort))
-            .ok()?;
+        if let Err(e) = py.detach(|| self.homing.wait_for_pending_suppresses(ctx.cohort)) {
+            tracing::error!(
+                event = "home_abort_suppress_wait_failed",
+                error = %e,
+                "home_abort: a stepper suppress did not complete; a firmware restart is required"
+            );
+            return None;
+        }
         if !self.clear_all_suppress_masks() {
             return None;
         }
-        let machine = self.reconcile_aborted_position(ctx.axis_key).ok()?;
+        let machine = match self.reconcile_aborted_position(ctx.axis_key) {
+            Ok(machine) => machine,
+            Err(e) => {
+                tracing::error!(
+                    event = "home_abort_reconcile_failed",
+                    error = ?e,
+                    "home_abort: the aborted position could not be reconciled; a firmware restart is required"
+                );
+                return None;
+            }
+        };
         let drain = self.drain.clone();
         if let Err(e) = py.detach(|| drain.wait_drained(DRAIN_TIMEOUT)) {
             tracing::error!(

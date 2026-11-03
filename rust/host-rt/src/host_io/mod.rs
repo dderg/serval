@@ -298,7 +298,12 @@ impl McuHostIo {
         let mcu_can_data_rate = parser_owned
             .numeric_constant("CANBUS_DATA_FREQUENCY")
             .unwrap_or(0);
-        io.try_enable_fd(u32::try_from(mcu_can_data_rate).unwrap_or(0))
+        let can_data_rate = u32::try_from(mcu_can_data_rate).map_err(|_| {
+            TransportError::Parse(format!(
+                "CANBUS_DATA_FREQUENCY {mcu_can_data_rate} does not fit a u32 data rate"
+            ))
+        })?;
+        io.try_enable_fd(can_data_rate)
             .map_err(TransportError::Io)?;
 
         let parser = Arc::new(parser_owned);
