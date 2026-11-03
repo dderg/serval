@@ -10,6 +10,7 @@ mod runfit;
 use crate::vec3;
 
 use crate::GeometryError;
+use crate::MIN_DEVICE_INTERVAL_S;
 use crate::frontend::{Move, VelocityLimits};
 use crate::path::lowering::PositionProfile;
 use crate::path::{CurvatureProfile, Line};
@@ -233,6 +234,17 @@ const SHORTEST_LINE_BODY_S: f64 = 1e-5;
 
 fn shortest_line_body_mm(m: &Move) -> f64 {
     m.feedrate_mm_s.min(m.limits.max_velocity_mm_s) * SHORTEST_LINE_BODY_S
+}
+
+fn shortest_executable_mm(feedrate: f64, limits: VelocityLimits) -> f64 {
+    feedrate.min(limits.max_velocity_mm_s) * MIN_DEVICE_INTERVAL_S
+}
+
+fn shortest_executable_halves(m_in: &Move, m_out: &Move) -> [f64; 2] {
+    [
+        shortest_executable_mm(m_in.feedrate_mm_s, m_in.limits),
+        shortest_executable_mm(m_out.feedrate_mm_s, m_out.limits),
+    ]
 }
 
 /// The cocircularity tolerance the run detector derives from the moves' corner
@@ -465,7 +477,15 @@ pub fn plan_facet_consumption(
     let mut vertices = Vec::with_capacity(mids.len() + 1);
     vertices.push(line_in.point_at(line_in.s_len()));
     vertices.extend(facet_lines.iter().map(|l| l.end));
-    let Some(blend) = biclothoid::solve_consume_chain(&vertices, t_in, t_out, delta, t_cap) else {
+    let fastest_consumed = consumed_feedrate(mids);
+    let shortest_half = std::iter::once(m_in)
+        .chain(mids.iter().copied())
+        .chain(std::iter::once(m_out))
+        .map(|m| shortest_executable_mm(fastest_consumed, m.limits))
+        .fold(0.0, f64::max);
+    let Some(blend) =
+        biclothoid::solve_consume_chain(&vertices, t_in, t_out, delta, t_cap, shortest_half)
+    else {
         return Ok(None);
     };
 
@@ -543,10 +563,7 @@ fn consumption_feedrates(
     mids: &[&Move],
     m_out: &Move,
 ) -> Vec<f64> {
-    let mid_min = mids
-        .iter()
-        .map(|m| m.feedrate_mm_s)
-        .fold(f64::INFINITY, f64::min);
+    let mid_min = consumed_feedrate(mids);
     let last = blend.segments.len() - 1;
     (0..blend.segments.len())
         .map(|i| match i {
@@ -555,6 +572,12 @@ fn consumption_feedrates(
             _ => mid_min,
         })
         .collect()
+}
+
+fn consumed_feedrate(mids: &[&Move]) -> f64 {
+    mids.iter()
+        .map(|m| m.feedrate_mm_s)
+        .fold(f64::INFINITY, f64::min)
 }
 
 /// Each blend segment's velocity limits: the componentwise minimum over the
@@ -684,8 +707,14 @@ fn classify_junction(
         .iter()
         .filter(|&&trim_in| trim_in > BUDGET_EPS_MM && trim_out > BUDGET_EPS_MM)
         .find_map(|&trim_in| {
-            biclothoid::solve_line_line_trims(vertex, (t_in, t_out), (trim_in, trim_out), delta)
-                .filter(&admitted)
+            biclothoid::solve_line_line_trims(
+                vertex,
+                (t_in, t_out),
+                (trim_in, trim_out),
+                delta,
+                shortest_executable_halves(m_in, m_out),
+            )
+            .filter(&admitted)
         });
     if let Some(blend) = closing {
         return Ok(JunctionPlan::Blend(JunctionBlend(blend)));

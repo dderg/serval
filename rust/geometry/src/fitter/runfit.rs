@@ -6,7 +6,10 @@ use super::emit::{SeamSide, blend_followers};
 use super::kernels::RunEnd;
 use super::move_ops::{is_travel, line_of};
 use super::overlap::ArcSide;
-use super::{CornerFitConfig, FitError, causal, kernels, overlap, ramps_admitted, span_tolerance};
+use super::{
+    CornerFitConfig, FitError, causal, kernels, overlap, ramps_admitted,
+    shortest_executable_halves, span_tolerance,
+};
 
 /// A sealed arc run's reconstruction: the arc, its easing clothoids into the
 /// neighbor lines, and any boundary blends resolved against them. Built only
@@ -124,9 +127,14 @@ impl RunFit {
         let Some(line) = line_of(neighbor) else {
             return Ok(Vec::new());
         };
-        let Some(blend) =
-            overlap::resolve_arc_line(&self.recon.arc, line, ArcSide::Outbound, corner, self.tol)
-        else {
+        let Some(blend) = overlap::resolve_arc_line(
+            &self.recon.arc,
+            line,
+            ArcSide::Outbound,
+            corner,
+            self.tol,
+            shortest_executable_halves(neighbor, run_first),
+        ) else {
             return Ok(Vec::new());
         };
         let Some(out) = general_blend(
@@ -166,9 +174,14 @@ impl RunFit {
         let Some(line) = line_of(neighbor) else {
             return Ok(Vec::new());
         };
-        let Some(blend) =
-            overlap::resolve_arc_line(&self.recon.arc, line, ArcSide::Inbound, corner, self.tol)
-        else {
+        let Some(blend) = overlap::resolve_arc_line(
+            &self.recon.arc,
+            line,
+            ArcSide::Inbound,
+            corner,
+            self.tol,
+            shortest_executable_halves(run_last, neighbor),
+        ) else {
             return Ok(Vec::new());
         };
         let Some(out) = general_blend(
@@ -206,9 +219,13 @@ impl RunFit {
         if !(self.recon.down.is_empty() && next.recon.up.is_empty()) {
             return Ok(Vec::new());
         }
-        let Some(blend) =
-            overlap::resolve_arc_arc(&self.recon.arc, &next.recon.arc, corner, self.tol)
-        else {
+        let Some(blend) = overlap::resolve_arc_arc(
+            &self.recon.arc,
+            &next.recon.arc,
+            corner,
+            self.tol,
+            shortest_executable_halves(run_last, next_first),
+        ) else {
             return Ok(Vec::new());
         };
         let Some(out) = general_blend(
