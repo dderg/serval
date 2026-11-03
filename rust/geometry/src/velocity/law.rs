@@ -1051,6 +1051,17 @@ impl LawSegment {
             .map(|pair| self.law.rail_pair(&pair[0], &pair[1]))
     }
 
+    /// An upper bound on `|a|` of the rail's interpolated motion across
+    /// every knot pair reaching into segment-local time `(tau_lo, tau_hi)`:
+    /// the motion every later stage reads, which strays from the law's
+    /// own acceleration by up to its proven defect; zero for a
+    /// constant-acceleration segment.
+    pub fn interpolated_acceleration_bound(&self, tau_lo: f64, tau_hi: f64) -> f64 {
+        self.rail_pairs(tau_lo, tau_hi)
+            .map(|pair| defect::acceleration_bound(&pair))
+            .fold(0.0, f64::max)
+    }
+
     /// The proven defect of every knot pair of this rail against its law.
     pub fn rail_defects(&self) -> impl Iterator<Item = PairDefect> + '_ {
         self.rail_pairs(0.0, self.dt)

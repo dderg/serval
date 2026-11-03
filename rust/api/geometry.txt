@@ -546,6 +546,7 @@ pub fn geometry::velocity::law::LawSegment::end_distance(&self) -> f64
 pub fn geometry::velocity::law::LawSegment::end_state(&self) -> (f64, f64, f64)
 pub fn geometry::velocity::law::LawSegment::end_time(&self) -> f64
 pub fn geometry::velocity::law::LawSegment::flipped_cut(&self, f64, f64, geometry::velocity::law::ScalarLaw, f64) -> core::option::Option<(geometry::velocity::law::LawSegment, f64)>
+pub fn geometry::velocity::law::LawSegment::interpolated_acceleration_bound(&self, f64, f64) -> f64
 pub fn geometry::velocity::law::LawSegment::min_velocity(&self) -> f64
 pub fn geometry::velocity::law::LawSegment::new(f64, f64, f64, f64, geometry::velocity::law::ScalarLaw) -> Self
 pub fn geometry::velocity::law::LawSegment::rail_defects(&self) -> impl core::iter::traits::iterator::Iterator<Item = geometry::velocity::law::PairDefect> + '_
@@ -573,6 +574,7 @@ pub geometry::velocity::law::RailPair::v_hi: f64
 pub geometry::velocity::law::RailPair::v_lo: f64
 pub const geometry::velocity::law::RAIL_ACCELERATION_DEFECT: f64
 pub const geometry::velocity::law::RAIL_ARC_DEFECT: f64
+pub const geometry::velocity::law::RAIL_SPEED_SLACK: f64
 pub enum geometry::velocity::RailPairShape
 pub geometry::velocity::RailPairShape::Clipped
 pub geometry::velocity::RailPairShape::Clipped::coefficients: [f64; 4]
@@ -643,6 +645,7 @@ pub fn geometry::velocity::law::LawSegment::end_distance(&self) -> f64
 pub fn geometry::velocity::law::LawSegment::end_state(&self) -> (f64, f64, f64)
 pub fn geometry::velocity::law::LawSegment::end_time(&self) -> f64
 pub fn geometry::velocity::law::LawSegment::flipped_cut(&self, f64, f64, geometry::velocity::law::ScalarLaw, f64) -> core::option::Option<(geometry::velocity::law::LawSegment, f64)>
+pub fn geometry::velocity::law::LawSegment::interpolated_acceleration_bound(&self, f64, f64) -> f64
 pub fn geometry::velocity::law::LawSegment::min_velocity(&self) -> f64
 pub fn geometry::velocity::law::LawSegment::new(f64, f64, f64, f64, geometry::velocity::law::ScalarLaw) -> Self
 pub fn geometry::velocity::law::LawSegment::rail_defects(&self) -> impl core::iter::traits::iterator::Iterator<Item = geometry::velocity::law::PairDefect> + '_
@@ -911,6 +914,7 @@ pub fn geometry::velocity::law::LawSegment::end_distance(&self) -> f64
 pub fn geometry::velocity::law::LawSegment::end_state(&self) -> (f64, f64, f64)
 pub fn geometry::velocity::law::LawSegment::end_time(&self) -> f64
 pub fn geometry::velocity::law::LawSegment::flipped_cut(&self, f64, f64, geometry::velocity::law::ScalarLaw, f64) -> core::option::Option<(geometry::velocity::law::LawSegment, f64)>
+pub fn geometry::velocity::law::LawSegment::interpolated_acceleration_bound(&self, f64, f64) -> f64
 pub fn geometry::velocity::law::LawSegment::min_velocity(&self) -> f64
 pub fn geometry::velocity::law::LawSegment::new(f64, f64, f64, f64, geometry::velocity::law::ScalarLaw) -> Self
 pub fn geometry::velocity::law::LawSegment::rail_defects(&self) -> impl core::iter::traits::iterator::Iterator<Item = geometry::velocity::law::PairDefect> + '_

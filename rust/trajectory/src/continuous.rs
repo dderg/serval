@@ -2459,8 +2459,9 @@ fn scalar_phase_bounds(phases: &[LawSegment], t0: f64, t1: f64) -> (f64, f64, f6
             arc[slot] = distance - segment.s0;
             speed[slot] = velocity;
         }
-        acceleration_abs_max =
-            acceleration_abs_max.max(rail_acceleration_ceiling(&segment.law, arc, speed));
+        acceleration_abs_max = acceleration_abs_max
+            .max(rail_acceleration_ceiling(&segment.law, arc, speed))
+            .max(segment.interpolated_acceleration_bound(lo - segment.t0, hi - segment.t0));
     }
     (velocity_min, velocity_max, acceleration_abs_max)
 }

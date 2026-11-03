@@ -68,6 +68,12 @@ impl PairDefect {
     }
 }
 
+/// An upper bound on `|a|` of `pair`'s interpolant.
+pub(super) fn acceleration_bound(pair: &RailPair) -> f64 {
+    let ([_, acceleration, _], _) = pair_models(pair);
+    acceleration.bound()
+}
+
 /// The interpolant of `pair` as Taylor models of speed, acceleration and
 /// arc on the pair's variable, and the arc correction it adds.
 fn pair_models(pair: &RailPair) -> ([TaylorModel; 3], f64) {
