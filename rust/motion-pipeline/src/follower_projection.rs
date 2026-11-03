@@ -10,10 +10,10 @@ use trajectory::{
 
 use crate::lowering::{FitTol, follower_tol_scale};
 use crate::shaper::{
-    AxisFit, AxisSignalTable, FitBoundary, KnotJumpBound, Lookahead, MIN_DEVICE_INTERVAL_S,
-    SEGMENT_TIME_EPS_S, ShiftedTrackSignal, SignalBounds, TrackSignal,
-    apply_derivative_gains_to_track, fit_axis_from_signal, fit_resolution,
-    shaped_signal_breakpoints, unit_kernel_mass,
+    AxisFit, AxisSignalTable, ConvolutionSignal, ExactConvolution, ExactKernel, FitBoundary,
+    KnotJumpBound, Lookahead, MIN_DEVICE_INTERVAL_S, SEGMENT_TIME_EPS_S, ShiftedTrackSignal,
+    SignalBounds, TrackSignal, apply_derivative_gains_to_track, fit_axis_from_signal,
+    fit_resolution, shaped_signal_breakpoints, unit_kernel_mass,
 };
 use crate::types::PostProcessError;
 use crate::worker_pool::WorkerPool;
@@ -723,19 +723,28 @@ pub(crate) fn project_followers(
                 let shaped_breaks = shaped_signal_breakpoints(kernel, shaped_break_seeds);
                 timing.breakpoints_us += breaks_started.elapsed_us();
                 let input_jumps = table.input_jumps().to_vec();
+                let exact_kernel = ExactKernel::new(kernel);
                 let make_sig = || {
                     let eval_table = Arc::clone(&table);
                     let moment_table = Arc::clone(&table);
                     let piece_hint = std::cell::Cell::new(0);
-                    ShapedSignal::new_from_polynomial_evaluator(
-                        kernel,
-                        move |t| eval_table.eval_hinted(t, &piece_hint),
-                        exact_input_breaks.clone(),
-                        input_degree,
-                        move |lo, hi, degree, origin, orders| {
-                            moment_table.integrate_moments(lo, hi, degree, origin, orders)
+                    ConvolutionSignal::new(
+                        ShapedSignal::new_from_polynomial_evaluator(
+                            kernel,
+                            move |t| eval_table.eval_hinted(t, &piece_hint),
+                            exact_input_breaks.clone(),
+                            input_degree,
+                            move |lo, hi, degree, origin, orders| {
+                                moment_table.integrate_moments(lo, hi, degree, origin, orders)
+                            },
+                            input_jumps.clone(),
+                        ),
+                        ExactConvolution {
+                            table: &table,
+                            kernel: &exact_kernel,
+                            impulses: &[],
+                            position_offset: 0.0,
                         },
-                        input_jumps.clone(),
                     )
                 };
                 let tol_scale = (0..commit_count)

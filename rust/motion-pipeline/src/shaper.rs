@@ -20,6 +20,10 @@ use crate::worker_pool::WorkerPool;
 #[path = "shaper_hidden_breaks.rs"]
 mod hidden_breaks;
 
+#[path = "shaper_exact.rs"]
+mod exact;
+
+pub(crate) use exact::{ExactConvolution, ExactKernel, ExactPiece};
 use hidden_breaks::{
     HiddenBreak, HiddenBreakBound, LeaderSeeds, ShapedBreaks, hidden_break_bounds,
 };
@@ -104,6 +108,19 @@ pub(crate) trait TrackSignal {
     fn square_root_onsets(&self) -> &[f64] {
         &[]
     }
+    /// The signal's exact polynomial on every sub-interval of `[lo, hi]`
+    /// between its breaks, each with an a-priori bound on its rounding;
+    /// `None` for a signal that is not exactly piecewise polynomial there.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "TODO: the shaped ladder's hull acceptance reads this next"
+        )
+    )]
+    fn exact_polynomial_on(&self, _lo: f64, _hi: f64) -> Option<Vec<ExactPiece>> {
+        None
+    }
 }
 
 impl TrackSignal for ContinuousAxis {
@@ -147,6 +164,9 @@ impl<S: TrackSignal> TrackSignal for &S {
     }
     fn square_root_onsets(&self) -> &[f64] {
         S::square_root_onsets(self)
+    }
+    fn exact_polynomial_on(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
+        S::exact_polynomial_on(self, lo, hi)
     }
 }
 
@@ -199,6 +219,50 @@ impl<S: TrackSignal> TrackSignal for ShiftedTrackSignal<S> {
 
     fn diagnostic(&self, t: f64) -> Option<String> {
         self.inner.diagnostic(t)
+    }
+
+    fn exact_polynomial_on(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
+        let pieces = self.inner.exact_polynomial_on(lo, hi)?;
+        Some(
+            pieces
+                .into_iter()
+                .map(|piece| piece.offset_by(self.base))
+                .collect(),
+        )
+    }
+}
+
+/// A convolution read through its evaluator, which also holds the exact
+/// construction behind it.
+pub(crate) struct ConvolutionSignal<'a, S: TrackSignal> {
+    evaluated: S,
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "TODO: the shaped ladder's hull acceptance reads this next"
+        )
+    )]
+    exact: ExactConvolution<'a>,
+}
+
+impl<'a, S: TrackSignal> ConvolutionSignal<'a, S> {
+    pub(crate) fn new(evaluated: S, exact: ExactConvolution<'a>) -> Self {
+        Self { evaluated, exact }
+    }
+}
+
+impl<S: TrackSignal> TrackSignal for ConvolutionSignal<'_, S> {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        self.evaluated.eval_pva(t)
+    }
+
+    fn diagnostic(&self, t: f64) -> Option<String> {
+        self.evaluated.diagnostic(t)
+    }
+
+    fn exact_polynomial_on(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
+        self.exact.pieces_over(lo, hi)
     }
 }
 
@@ -1059,6 +1123,7 @@ pub(crate) struct ShapedSignalSource<'a> {
     input_degree: usize,
     shaped_offset: f64,
     gain_impulse_response: Option<GainImpulseResponse>,
+    exact_kernel: ExactKernel,
 }
 
 #[derive(Clone, Copy)]
@@ -1183,6 +1248,7 @@ impl<'a> ShapedSignalSource<'a> {
             table,
             input_breaks,
             shaped_offset: input_offset * unit_kernel_mass(kernel),
+            exact_kernel: ExactKernel::new(kernel),
         }
     }
 
@@ -1209,13 +1275,21 @@ impl<'a> ShapedSignalSource<'a> {
             },
             self.table.input_jumps().to_vec(),
         );
-        ShiftedTrackSignal::new(
-            WithGainImpulses {
-                convolved: relative,
-                response: self.gain_impulse_response.as_ref(),
+        ConvolutionSignal {
+            evaluated: ShiftedTrackSignal::new(
+                WithGainImpulses {
+                    convolved: relative,
+                    response: self.gain_impulse_response.as_ref(),
+                },
+                -self.shaped_offset,
+            ),
+            exact: ExactConvolution {
+                table: &self.table,
+                kernel: &self.exact_kernel,
+                impulses: self.table.gain_impulses(),
+                position_offset: self.shaped_offset,
             },
-            -self.shaped_offset,
-        )
+        }
     }
 }
 
@@ -1836,12 +1910,18 @@ impl MomentWindow {
 /// Segment-tree range sums of every piece's moments, for all
 /// `MOMENT_ORDERS` derivative orders at once: each node stores its orders
 /// contiguously, so one traversal translates every order with one set of
-/// origin-shift powers.
+/// origin-shift powers. Beside them each node bounds the magnitude of the
+/// terms its moments were summed from: `masses` bounds `∫|x⁽ⁿ⁾|` as it was
+/// evaluated, and `reaches` how far, through every translation below the
+/// node, a point of it lies from its origin, so the terms of its `q`-th
+/// moment sum to at most `mass·reach^q`.
 struct MomentTree {
     degree: usize,
     leaf_count: usize,
     origins: Vec<f64>,
     moments: Vec<f64>,
+    reaches: Vec<f64>,
+    masses: Vec<f64>,
 }
 
 impl MomentTree {
@@ -1857,10 +1937,19 @@ impl MomentTree {
         let node_count = 2 * leaf_count;
         let mut origins = vec![f64::NAN; node_count];
         let mut moments = vec![0.0; node_count * node_stride];
+        let mut reaches = vec![0.0; node_count];
+        let mut masses = vec![0.0; node_count * MOMENT_ORDERS];
         for i in 0..table.coeffs.len() {
             let node = leaf_count + i;
             let origin = table.starts[i] + 0.5 * (table.ends[i] - table.starts[i]);
             origins[node] = origin;
+            reaches[node] = (origin - table.starts[i]).max(table.ends[i] - origin);
+            for (order, mass) in masses[node * MOMENT_ORDERS..(node + 1) * MOMENT_ORDERS]
+                .iter_mut()
+                .enumerate()
+            {
+                *mass = (table.ends[i] - table.starts[i]) * table.piece_magnitude(i, order);
+            }
             let node_moments = &mut moments[node * node_stride..(node + 1) * node_stride];
             table.accumulate_piece_moments(
                 i,
@@ -1892,6 +1981,12 @@ impl MomentTree {
                     {
                         translation.accumulate(source, target);
                     }
+                    reaches[node] =
+                        reaches[node].max((origins[child] - origin).abs() + reaches[child]);
+                    for order in 0..MOMENT_ORDERS {
+                        masses[node * MOMENT_ORDERS + order] +=
+                            masses[child * MOMENT_ORDERS + order];
+                    }
                 }
             }
             moments[node * node_stride..(node + 1) * node_stride]
@@ -1902,6 +1997,8 @@ impl MomentTree {
             leaf_count,
             origins,
             moments,
+            reaches,
+            masses,
         }
     }
 
@@ -1949,6 +2046,7 @@ impl MomentTree {
         }
     }
 }
+
 /// One axis of the emit window, flattened to time-sorted monomial pieces so
 /// the convolution's Gauss sampling evaluates by binary search plus Horner
 /// instead of a de Boor pass per sample. Semantics match the NURBS window it
@@ -1969,6 +2067,7 @@ pub(crate) struct AxisSignalTable {
     entering_step: f64,
     leaving_step: f64,
     gain_impulses: Vec<GainImpulse>,
+    boundaries: Vec<f64>,
 }
 
 /// The time extent of a flattened signal window and how its two edges
@@ -2011,6 +2110,7 @@ impl AxisSignalTable {
             entering_step: 0.0,
             leaving_step: 0.0,
             gain_impulses: Vec::new(),
+            boundaries: Vec::new(),
         };
         for track in tracks {
             for piece in extract_bezier_pieces(track) {
@@ -2119,11 +2219,35 @@ impl AxisSignalTable {
         let input_jumps = self.collect_input_jumps();
         self.moment_tree = Some(tree);
         self.input_jumps = input_jumps;
+        let mut boundaries = self.starts.clone();
+        boundaries.extend([
+            *self.ends.last().expect("empty signal window"),
+            self.first_t,
+            self.last_t,
+        ]);
+        boundaries.sort_by(f64::total_cmp);
+        boundaries.dedup();
+        self.boundaries = boundaries;
         self
     }
 
     pub(crate) fn input_jumps(&self) -> &[(f64, f64, f64)] {
         &self.input_jumps
+    }
+
+    /// `Σₖ |cₖ| k!/(k−n)! hᵏ⁻ⁿ` for piece `piece`'s `order`-th derivative:
+    /// a bound, at any point of the piece, on the terms its re-expansion
+    /// about any point of the piece sums.
+    fn piece_magnitude(&self, piece: usize, order: usize) -> f64 {
+        let width = self.ends[piece] - self.starts[piece];
+        let mut magnitude = 0.0;
+        let mut reach = 1.0;
+        for power in order..self.coeffs[piece].len() {
+            let falling = ((power - order + 1)..=power).fold(1.0, |acc, k| acc * k as f64);
+            magnitude += self.coeffs[piece][power].abs() * falling * reach;
+            reach *= width;
+        }
+        magnitude
     }
 
     fn slope_at(&self, piece: usize, at: f64) -> f64 {
