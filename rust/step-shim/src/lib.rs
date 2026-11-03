@@ -547,6 +547,15 @@ impl StepShim {
         self.motors[motor].cursor.position()
     }
 
+    /// The earliest clock of queued motion the root search has not reached.
+    pub fn unrooted_from(&self, motor: usize) -> Option<u64> {
+        let state = &self.motors[motor];
+        state
+            .queue
+            .active()
+            .map(|view| view.start_clock.max(state.cursor.search_floor()))
+    }
+
     pub fn invert_dir(&self, motor: usize) -> bool {
         self.motors[motor].cfg.invert_dir
     }

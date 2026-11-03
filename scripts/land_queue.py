@@ -239,8 +239,17 @@ def land(tree: Path, entry: Entry, body: str) -> None:
 
 
 def process(entry: Entry, queue: Path, trees: Path) -> None:
-    body_file = queue.with_name(f"{entry.branch}.md")
-    accept_file = queue.with_name(f"{entry.branch}.accept.txt")
+    process_files(
+        entry,
+        queue.with_name(f"{entry.branch}.md"),
+        queue.with_name(f"{entry.branch}.accept.txt"),
+        trees,
+    )
+
+
+def process_files(
+    entry: Entry, body_file: Path, accept_file: Path, trees: Path
+) -> None:
     if not body_file.exists():
         raise QueueError(f"{entry.branch}: missing PR body {body_file}")
     if entry.expect and not accept_file.exists():
@@ -292,10 +301,31 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("queue", type=Path)
+    parser.add_argument("queue", type=Path, nargs="?")
     parser.add_argument("--trees", type=Path, default=DEFAULT_TREES)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--branch", help="land one branch without a queue file")
+    parser.add_argument("--title")
+    parser.add_argument("--body-file", type=Path)
+    parser.add_argument("--expect", default="")
+    parser.add_argument("--accept-msg", type=Path)
     args = parser.parse_args()
+    if args.branch:
+        if not (args.title and args.body_file):
+            raise QueueError("--branch needs --title and --body-file")
+        entry = Entry(args.branch, args.title, args.expect)
+        process_files(
+            entry,
+            args.body_file,
+            args.accept_msg or Path("/nonexistent"),
+            args.trees,
+        )
+        print(f"landed {entry.branch}", flush=True)
+        return 0
+    if args.queue is None:
+        raise QueueError(
+            "give a queue file, or --branch with --title and --body-file"
+        )
     entries = parse_queue(args.queue.read_text())
     landed_file = args.queue.with_name(args.queue.name + ".landed")
     landed = read_landed(landed_file)

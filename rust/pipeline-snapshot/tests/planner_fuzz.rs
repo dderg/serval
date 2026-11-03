@@ -663,3 +663,33 @@ fn a_nearly_collinear_planar_junction_at_speed_keeps_the_seam_velocity_budget() 
     let spikes = xy_smoothness_spikes(&report);
     assert!(spikes.is_empty(), "{spikes:?}\n{report}");
 }
+
+/// #618: under a 0.016 mm/s square-corner velocity, a travel reversal that
+/// steps z planned a member its own rails could not join, and the planner
+/// panicked with `Infeasible`.
+#[test]
+fn tiny_scv_reversal_with_z_step_plans() {
+    let limits = FuzzLimits {
+        max_velocity: 20.0,
+        max_accel: 38_054.585_539_152_91,
+        square_corner_velocity: 0.016_357_394_343_349_78,
+    };
+    let moves = [
+        MoveSpec {
+            turn: Turn::Absolute(0.0),
+            length_mm: 1.0,
+            feed_mm_s: 1.0,
+            extrude_ratio: 0.0,
+            z_step_mm: 0.0,
+        },
+        MoveSpec {
+            turn: Turn::Absolute(3.791_313_142_220_391),
+            length_mm: 1.0,
+            feed_mm_s: 1.0,
+            extrude_ratio: 0.0,
+            z_step_mm: -0.189_761_367_961_591_32,
+        },
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok(), "{report}");
+}

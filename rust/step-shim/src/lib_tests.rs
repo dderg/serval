@@ -1143,6 +1143,34 @@ fn halt_discards_queued_work_and_re_anchors_the_resumed_lane() {
 }
 
 #[test]
+fn unrooted_from_tracks_where_the_root_search_stopped() {
+    let mut shim = seeded(cfg(), 8);
+    shim.push_spans(
+        0,
+        &[
+            span(1_000, LATTICE_OFFSET, 0.1, 1_000),
+            span(2_000, 0.1 + LATTICE_OFFSET, 0.1, 1_000),
+        ],
+    )
+    .unwrap();
+    assert_eq!(shim.unrooted_from(0), Some(1_000));
+
+    shim.drain_budgeted(u64::MAX, Some(std::time::Instant::now()))
+        .unwrap();
+    assert_eq!(
+        shim.unrooted_from(0),
+        Some(1_000),
+        "a spent budget roots nothing"
+    );
+
+    shim.drain(1_500).unwrap();
+    assert_eq!(shim.unrooted_from(0), Some(1_501));
+
+    shim.drain(u64::MAX).unwrap();
+    assert_eq!(shim.unrooted_from(0), None);
+}
+
+#[test]
 fn a_cut_never_replays_steps_before_the_cut_clock() {
     let cut_at = 1_500;
     let mut shim = seeded(cfg(), 8);
