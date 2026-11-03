@@ -33,6 +33,7 @@ from unicorn.arm_const import (
 MIN_INSTRUCTIONS_PER_STEP = 40
 MAX_INSTRUCTIONS_PER_STEP = 600
 INSTRUCTION_LIMIT = 20_000_000
+CONFIGURED_MOVE_COUNT = 1024
 PAGE = 0x1000
 STACK_BASE = 0x70000000
 STACK_SIZE = 0x100000
@@ -97,17 +98,24 @@ def measure(out_dir: Path) -> tuple[int, int]:
         elf = ELFFile(handle)
         entry = symbol(elf, "stepper_bench_measure")
         result = symbol(elf, "bench_result")
+        move_count = symbol(elf, "move_count")
+        shutdown = symbol(elf, "sched_shutdown") & ~1
         uc = Uc(UC_ARCH_ARM, UC_MODE_THUMB | UC_MODE_MCLASS)
         uc.ctl_set_cpu_model(cpu_model(conf))
         map_image(uc, elf)
+    uc.mem_write(move_count, struct.pack("<I", CONFIGURED_MOVE_COUNT))
+    shut_down = False
     executed = 0
     timer_register = (
         G0_TIM2_CNT if conf.get("MACH_STM32G0") == "1" else DWT_CYCCNT
     )
 
-    def count(emu, _address, _size, _user):
-        nonlocal executed
+    def count(emu, address, _size, _user):
+        nonlocal executed, shut_down
         executed += 1
+        if address == shutdown:
+            shut_down = True
+            emu.emu_stop()
         if executed > INSTRUCTION_LIMIT:
             emu.emu_stop()
 
@@ -135,6 +143,11 @@ def measure(out_dir: Path) -> tuple[int, int]:
     uc.reg_write(UC_ARM_REG_R0, result)
     uc.reg_write(UC_ARM_REG_R1, result + 4)
     uc.emu_start(entry | 1, STOP)
+    if shut_down:
+        raise EmulationError(
+            f"{out_dir}: benchmark shut the MCU down (configured MCU, "
+            f"move_count={CONFIGURED_MOVE_COUNT})"
+        )
     if executed > INSTRUCTION_LIMIT:
         raise EmulationError(
             f"{out_dir}: benchmark ran past {INSTRUCTION_LIMIT} instructions"

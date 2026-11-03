@@ -53,8 +53,6 @@ stepper_setup_dispatch(struct stepper *s, uint_fast8_t both_edge,
     s->step_pulse_ticks = pulse_ticks;
     if (s->step_both_edge)
         s->flags |= SF_SINGLE_SCHED;
-    move_queue_setup(&s->mq, sizeof(struct stepper_move));
-    move_queue_setup(&s->completed_barriers, sizeof(struct stepper_move));
     if (HAVE_EDGE_OPTIMIZATION) {
         if (s->step_both_edge && s->step_pulse_ticks <= EDGE_STEP_TICKS)
             s->flags |= SF_OPTIMIZED_PATH;
@@ -90,6 +88,8 @@ command_config_stepper(uint32_t *args)
     s->step_pin = gpio_out_setup(args[1], s->step_idle_level);
     s->dir_pin = gpio_out_setup(args[2], 0);
     s->position = -POSITION_BIAS;
+    move_queue_setup(&s->mq, sizeof(struct stepper_move));
+    move_queue_setup(&s->completed_barriers, sizeof(struct stepper_move));
     stepper_setup_dispatch(s, invert_step < 0, args[4]);
     emit_mcu_ready_once();
 }
