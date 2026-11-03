@@ -31,6 +31,10 @@ pub const TAYLOR_LEN: usize = 18;
 const UNIT_ROUNDING: f64 = f64::EPSILON / 2.0;
 const BOUND_ROUNDING: f64 = 1.0 / (1_u64 << 40) as f64;
 
+/// The share of a product's magnitude below which its trailing
+/// coefficients join its bound.
+const TRIM_SHARE: f64 = 1.0 / (1_u64 << 36) as f64;
+
 /// Every libm elementary function the models read lands within this many
 /// ulps of its exact value (musl documents under one for `sin`/`cos` and
 /// under three for `tanh`).
@@ -323,11 +327,11 @@ impl TaylorModel {
         .trimmed()
     }
 
-    /// The model with its trailing coefficients at the rounding of its
+    /// The model with its trailing coefficients below [`TRIM_SHARE`] of its
     /// magnitude moved into the bound, where they cost every later product
-    /// a term and decide nothing.
+    /// a term and move the bound by a share no fit tolerance resolves.
     fn trimmed(mut self) -> Self {
-        let negligible = UNIT_ROUNDING * self.magnitude();
+        let negligible = TRIM_SHARE * self.magnitude();
         let mut dropped = 0.0;
         while self.len > 1 && self.coefficients[self.len - 1].abs() <= negligible {
             self.len -= 1;

@@ -771,6 +771,7 @@ fn materialize_source_axis(
     axis: usize,
     chains: &AxisChainSet,
     fit_tol: FitTol,
+    shared: Option<&SpanEnclosures>,
 ) -> Result<ContinuousAxis, PostProcessError> {
     let source = &segment.axes[axis];
     let variable_surface_z = axis == 2
@@ -800,7 +801,9 @@ fn materialize_source_axis(
         },
         &CapContactSource {
             source,
+            axis,
             cap_contacts: &cap_contacts,
+            shared,
             enclosure: std::cell::OnceCell::new(),
             whole: (segment.t_start, segment.t_end),
             accuracy: HullBudget {
@@ -841,6 +844,42 @@ fn materialize_changed_sources(
             .map_or(1, |cores| cores.get())
             .min(jobs.len())
     };
+    let accuracy = HullBudget {
+        tol: fit_tol,
+        velocity: f64::INFINITY,
+    }
+    .enclosure_accuracy();
+    let shared: Vec<Option<SpanEnclosures>> = segments
+        .iter()
+        .enumerate()
+        .map(|(index, segment)| {
+            let analytic = |axis: usize| match &segment.axes[axis] {
+                ContinuousAxis::Analytic { span, .. } if axis_enclosure::encloses(span, axis) => {
+                    Some(span)
+                }
+                _ => None,
+            };
+            let span = jobs
+                .iter()
+                .filter(|&&(job_index, _)| job_index == index)
+                .find_map(|&(_, axis)| analytic(axis))?;
+            let axes = jobs
+                .iter()
+                .filter(|&&(job_index, axis)| {
+                    job_index == index
+                        && analytic(axis).is_some_and(|other| Arc::ptr_eq(other, span))
+                })
+                .map(|&(_, axis)| axis)
+                .collect();
+            Some(SpanEnclosures {
+                span: Arc::clone(span),
+                axes,
+                whole: (segment.t_start, segment.t_end),
+                accuracy,
+                built: std::sync::OnceLock::new(),
+            })
+        })
+        .collect();
     let fitted = pool
         .map_indexed(
             participants,
@@ -848,7 +887,13 @@ fn materialize_changed_sources(
             || (),
             |(), job| {
                 let (index, axis) = jobs[job];
-                materialize_source_axis(&segments[index], axis, chains, fit_tol)
+                materialize_source_axis(
+                    &segments[index],
+                    axis,
+                    chains,
+                    fit_tol,
+                    shared[index].as_ref(),
+                )
             },
         )
         .expect("source materialize thread panicked");
@@ -899,13 +944,42 @@ fn cap_contact_seeds(span: &AnalyticMoveSpan) -> (Vec<f64>, Vec<f64>) {
     (seeds, cap_contacts)
 }
 
+/// The enclosures of a segment's analytic axes that read one span, built
+/// once for all of them by the first axis's fit that asks — the axes share
+/// each window's state and path trigonometry.
+struct SpanEnclosures {
+    span: Arc<AnalyticMoveSpan>,
+    axes: Vec<usize>,
+    whole: (f64, f64),
+    accuracy: [f64; 3],
+    built: std::sync::OnceLock<Option<Vec<Vec<ExactPiece>>>>,
+}
+
+impl SpanEnclosures {
+    fn of(&self, axis: usize) -> Option<&[ExactPiece]> {
+        let slot = self.axes.iter().position(|&shared| shared == axis)?;
+        let built = self.built.get_or_init(|| {
+            axis_enclosure::analytic_axes_enclosure(
+                &self.span,
+                &self.axes,
+                self.whole,
+                self.accuracy,
+            )
+        });
+        built.as_ref().map(|axes| axes[slot].as_slice())
+    }
+}
+
 /// A materialized source with the curvature-cap contacts its acceleration
 /// approaches as a square root, and its enclosure over the whole segment,
-/// built once at the fit's own accuracy: every rung of every span is proven
-/// against its stretch of it.
+/// built once at the fit's own accuracy — shared with the segment's other
+/// analytic axes where `shared` reads it: every rung of every span is
+/// proven against its stretch of it.
 struct CapContactSource<'a> {
     source: &'a ContinuousAxis,
+    axis: usize,
     cap_contacts: &'a [f64],
+    shared: Option<&'a SpanEnclosures>,
     enclosure: std::cell::OnceCell<Option<Vec<ExactPiece>>>,
     whole: (f64, f64),
     accuracy: [f64; 3],
@@ -921,13 +995,16 @@ impl TrackSignal for CapContactSource<'_> {
     }
 
     fn enclosure_on(&self, lo: f64, hi: f64, _accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
-        let whole = self
-            .enclosure
-            .get_or_init(|| {
-                self.source
-                    .enclosure_on(self.whole.0, self.whole.1, self.accuracy)
-            })
-            .as_ref()?;
+        let whole = match self.shared {
+            Some(shared) => shared.of(self.axis)?,
+            None => self
+                .enclosure
+                .get_or_init(|| {
+                    self.source
+                        .enclosure_on(self.whole.0, self.whole.1, self.accuracy)
+                })
+                .as_deref()?,
+        };
         let first = whole.partition_point(|piece| piece.hi < lo);
         let past = whole.partition_point(|piece| piece.lo <= hi);
         Some(whole[first..past.max(first)].to_vec())

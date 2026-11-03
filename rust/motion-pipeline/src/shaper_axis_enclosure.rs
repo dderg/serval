@@ -17,13 +17,17 @@ use std::ops::{Add, Mul, Neg};
 
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{Arc as PathArc, Clothoid, Segment};
-use geometry::{FollowerDemand, LawSegment, RailPair, RailPairShape, ScalarLaw};
+use geometry::{FollowerDemand, RailPair, RailPairShape, ScalarLaw};
 use nurbs::bezier::extract_bezier_pieces;
 use trajectory::{AnalyticMoveSpan, ContinuousAxis, RelativeSplinePiece, SurfaceMode};
 
 use super::ExactPiece;
-use super::exact::ExactRounding;
 use super::taylor::{self, Ball, TaylorModel, Window, derivative_of, polynomial_of_balls};
+
+/// Whether `axis` of `span` reads an analytic law its enclosure models.
+pub(crate) fn encloses(span: &AnalyticMoveSpan, axis: usize) -> bool {
+    AxisLaw::of(span, axis).is_some()
+}
 
 pub(crate) fn continuous_axis_enclosure(
     axis: &ContinuousAxis,
@@ -33,7 +37,9 @@ pub(crate) fn continuous_axis_enclosure(
     let mut out = Vec::new();
     match axis {
         ContinuousAxis::Analytic { span, axis } => {
-            analytic_enclosure(span, *axis, (lo, hi), accuracy, &mut out)?;
+            out = analytic_axes_enclosure(span, &[*axis], (lo, hi), accuracy)?
+                .pop()
+                .expect("one axis asked, one enclosure built");
         }
         ContinuousAxis::Spline(curve) => spline_enclosure(curve, 0.0, (lo, hi), accuracy, &mut out),
         ContinuousAxis::RelativeSpline {
@@ -171,8 +177,8 @@ impl AxisLaw<'_> {
         Some((law, 0.0))
     }
 
-    fn models(&self, law: &Tangential) -> [TaylorModel; 3] {
-        let Tangential { s, v, a } = law;
+    fn models(&self, window: &WindowReading) -> [TaylorModel; 3] {
+        let Tangential { s, v, a } = &window.state;
         match *self {
             AxisLaw::Constant(position) => [
                 TaylorModel::constant(Ball::exact(position)),
@@ -193,10 +199,11 @@ impl AxisLaw<'_> {
             }
             AxisLaw::Arc(arc, axis) => {
                 let sign = arc.sweep.signum();
-                let angle = s
-                    .scale(Ball::rounded(sign / arc.radius, 1))
-                    .add_ball(Ball::exact(arc.start_angle));
-                let (sine, cosine) = angle.sin_cos();
+                let (sine, cosine) = window.trig.get_or_init(|| {
+                    s.scale(Ball::rounded(sign / arc.radius, 1))
+                        .add_ball(Ball::exact(arc.start_angle))
+                        .sin_cos()
+                });
                 let (u, w) = (arc.u[axis], arc.v[axis]);
                 let position = cosine
                     .scale(Ball::rounded(arc.radius * u, 1))
@@ -215,7 +222,9 @@ impl AxisLaw<'_> {
                 ]
             }
             AxisLaw::Clothoid(clothoid, axis) => {
-                let (sine, cosine) = clothoid_angle(clothoid, s).sin_cos();
+                let (sine, cosine) = window
+                    .trig
+                    .get_or_init(|| clothoid_angle(clothoid, s).sin_cos());
                 let (u, w) = (clothoid.u[axis], clothoid.v[axis]);
                 let heading = cosine
                     .scale(Ball::exact(u))
@@ -229,7 +238,7 @@ impl AxisLaw<'_> {
                         .add(&cosine.scale(Ball::exact(w))),
                 );
                 [
-                    clothoid_position(clothoid, axis, s),
+                    clothoid_position(clothoid, axis, s, &window.spread_trig),
                     v.mul(&heading),
                     a.mul(&heading).add(&v.mul(v).mul(&turn)),
                 ]
@@ -271,16 +280,23 @@ fn clothoid_angle(clothoid: &Clothoid, s: &TaylorModel) -> TaylorModel {
 
 /// The clothoid's coordinate at `s`: its reading at the model's centre arc
 /// `s_c` plus `∫_{s_c}^{s}` of its heading, the heading's model built over
-/// the arc's whole spread and integrated there.
-fn clothoid_position(clothoid: &Clothoid, axis: usize, s: &TaylorModel) -> TaylorModel {
+/// the arc's whole spread and integrated there; `spread_trig` the sine and
+/// cosine of its angle over that spread, shared by every axis.
+fn clothoid_position(
+    clothoid: &Clothoid,
+    axis: usize,
+    s: &TaylorModel,
+    spread_trig: &std::cell::OnceCell<(TaylorModel, TaylorModel)>,
+) -> TaylorModel {
     let (centre, spread) = s.spread();
     let anchor = Ball::exact(clothoid.point_at(centre)[axis]);
     if spread == 0.0 {
         return TaylorModel::constant(anchor);
     }
     let reach = taylor::upper(spread * (1.0 + CLOTHOID_REACH_MARGIN));
-    let arc = TaylorModel::affine(Ball::exact(centre), reach);
-    let (sine, cosine) = clothoid_angle(clothoid, &arc).sin_cos();
+    let (sine, cosine) = spread_trig.get_or_init(|| {
+        clothoid_angle(clothoid, &TaylorModel::affine(Ball::exact(centre), reach)).sin_cos()
+    });
     let heading = cosine
         .scale(Ball::exact(clothoid.u[axis]))
         .add(&sine.scale(Ball::exact(clothoid.v[axis])));
@@ -304,8 +320,8 @@ struct AxisReading<'a> {
 }
 
 impl AxisReading<'_> {
-    fn models(&self, state: &Tangential) -> [TaylorModel; 3] {
-        let [position, velocity, acceleration] = self.law.models(state);
+    fn models(&self, window: &WindowReading) -> [TaylorModel; 3] {
+        let [position, velocity, acceleration] = self.law.models(window);
         [
             position.add_ball(Ball::exact(self.offset)),
             velocity,
@@ -314,16 +330,52 @@ impl AxisReading<'_> {
     }
 }
 
-fn analytic_enclosure(
+/// One window's tangential state, and the path trigonometry every axis of
+/// a curved segment reads off it, modelled once for all of them.
+struct WindowReading {
+    state: Tangential,
+    trig: std::cell::OnceCell<(TaylorModel, TaylorModel)>,
+    spread_trig: std::cell::OnceCell<(TaylorModel, TaylorModel)>,
+}
+
+/// The enclosures of the analytic `axes` of `span` over `(lo, hi)`, each
+/// window's state and path trigonometry modelled once for every axis;
+/// `None` where an axis has no analytic law.
+pub(crate) fn analytic_axes_enclosure(
     span: &AnalyticMoveSpan,
-    axis: usize,
+    axes: &[usize],
     (lo, hi): (f64, f64),
     accuracy: [f64; 3],
-    out: &mut Vec<ExactPiece>,
-) -> Option<()> {
-    let (law, offset) = AxisLaw::of(span, axis)?;
-    let law = AxisReading { law, offset };
+) -> Option<Vec<Vec<ExactPiece>>> {
+    let readings: Vec<AxisReading> = axes
+        .iter()
+        .map(|&axis| AxisLaw::of(span, axis).map(|(law, offset)| AxisReading { law, offset }))
+        .collect::<Option<_>>()?;
+    let mut outs = vec![Vec::new(); axes.len()];
     let (lo, hi) = (lo.max(span.t_start), hi.min(span.t_end));
+    let enclose = |range: (f64, f64),
+                   state: &dyn Fn(Window) -> Option<Tangential>,
+                   outs: &mut Vec<Vec<ExactPiece>>| {
+        taylor::enclose_axes(
+            range,
+            accuracy,
+            &|window: Window, axis: usize, shared: &mut Option<Option<WindowReading>>| {
+                let reading = shared.get_or_insert_with(|| {
+                    state(window).map(|state| WindowReading {
+                        state,
+                        trig: std::cell::OnceCell::new(),
+                        spread_trig: std::cell::OnceCell::new(),
+                    })
+                });
+                reading
+                    .as_ref()
+                    .map_or([TaylorModel::UNBOUNDED; 3], |reading| {
+                        readings[axis].models(reading)
+                    })
+            },
+            outs,
+        );
+    };
     for phase in span.phases.iter() {
         let origin = span.t_start + phase.t0;
         let (from, to) = (lo.max(origin), hi.min(span.t_start + phase.end_time()));
@@ -333,12 +385,11 @@ fn analytic_enclosure(
         match phase.law {
             ScalarLaw::ConstAccel { a0 } => {
                 let arc_origin = Ball::rounded(phase.s0 - span.source_distance_origin, 1);
-                taylor::enclose(
+                enclose(
                     (from, to),
-                    accuracy,
                     &|window: Window| {
                         let tau = window.time_since(origin);
-                        law.models(&Tangential {
+                        Some(Tangential {
                             s: polynomial_of_balls(
                                 [arc_origin, Ball::exact(phase.v0), Ball::exact(0.5 * a0)]
                                     .into_iter(),
@@ -351,94 +402,27 @@ fn analytic_enclosure(
                             a: TaylorModel::constant(Ball::exact(a0)),
                         })
                     },
-                    out,
+                    &mut outs,
                 );
             }
             ScalarLaw::DiskRail { .. } => {
-                rail_enclosure(span, phase, &law, (origin, (from, to)), accuracy, out);
+                let arc_base = phase.s0 - span.source_distance_origin;
+                for pair in phase.rail_pairs(from - origin, to - origin) {
+                    let range = (from.max(origin + pair.t_lo), to.min(origin + pair.t_hi));
+                    if range.0 >= range.1 {
+                        continue;
+                    }
+                    let interpolant = PairInterpolant::new(&pair, arc_base);
+                    enclose(
+                        range,
+                        &|window: Window| interpolant.state(&window.time_since(origin)),
+                        &mut outs,
+                    );
+                }
             }
         }
     }
-    Some(())
-}
-
-fn rail_enclosure(
-    span: &AnalyticMoveSpan,
-    phase: &LawSegment,
-    law: &AxisReading,
-    (origin, (from, to)): (f64, (f64, f64)),
-    accuracy: [f64; 3],
-    out: &mut Vec<ExactPiece>,
-) {
-    let arc_base = phase.s0 - span.source_distance_origin;
-    let pairs: Vec<(RailPair, PairInterpolant)> = phase
-        .rail_pairs(from - origin, to - origin)
-        .map(|pair| (pair, PairInterpolant::new(&pair, arc_base)))
-        .collect();
-    let mut index = 0;
-    while index < pairs.len() {
-        let (pair, interpolant) = &pairs[index];
-        let lo = from.max(origin + pair.t_lo);
-        if interpolant.variable != PairVariable::Time {
-            let hi = to.min(origin + pair.t_hi);
-            if lo < hi {
-                taylor::enclose(
-                    (lo, hi),
-                    accuracy,
-                    &|window: Window| {
-                        let tau = window.time_since(origin);
-                        interpolant
-                            .state(&tau)
-                            .map_or([TaylorModel::UNBOUNDED; 3], |state| law.models(&state))
-                    },
-                    out,
-                );
-            }
-            index += 1;
-            continue;
-        }
-        let end = pairs[index..]
-            .iter()
-            .position(|(_, interpolant)| interpolant.variable != PairVariable::Time)
-            .map_or(pairs.len(), |offset| index + offset);
-        let run_pairs = &pairs[index..end];
-        let run = QuinticRun {
-            t_lo: run_pairs.iter().map(|(pair, _)| pair.t_lo).collect(),
-            h: run_pairs
-                .iter()
-                .map(|(pair, _)| pair.t_hi - pair.t_lo)
-                .collect(),
-            polynomials: run_pairs
-                .iter()
-                .map(|(_, interpolant)| interpolant.quintic_polynomials())
-                .collect(),
-        };
-        let mut size = RUN_PAIRS_PER_WINDOW;
-        let mut start = 0;
-        while start < run_pairs.len() {
-            let chunk = &run_pairs[start..(start + size).min(run_pairs.len())];
-            start += chunk.len();
-            let chunk_lo = from.max(origin + chunk[0].0.t_lo);
-            let chunk_hi = to.min(origin + chunk[chunk.len() - 1].0.t_hi);
-            if chunk_lo >= chunk_hi {
-                continue;
-            }
-            let before = out.len();
-            taylor::enclose(
-                (chunk_lo, chunk_hi),
-                accuracy,
-                &|window: Window| law.models(&run.state(origin, window)),
-                out,
-            );
-            let windows = out.len() - before;
-            size = if windows == 1 {
-                (2 * size).min(RUN_PAIRS_PER_WINDOW_MAX)
-            } else {
-                (size / windows).max(1)
-            };
-        }
-        index = end;
-    }
+    Some(outs)
 }
 
 /// The variable a rail pair's formula is a polynomial in.
@@ -711,220 +695,6 @@ impl PairInterpolant {
             a: a.scale(self.inverse_h),
         })
     }
-
-    /// The pair's arc, speed and acceleration as polynomials in `u`, for a
-    /// quintic pair.
-    fn quintic_polynomials(&self) -> [[Ball; 8]; 3] {
-        let h = Ball::exact(self.h);
-        let mut arc: [Ball; 8] = std::array::from_fn(|k| self.mass[k].mul(h));
-        arc[0] = arc[0].add(self.arc_start);
-        arc[1] = arc[1].add(self.arc_correction);
-        let acceleration = self.scaled_acceleration.map(|c| c.mul(self.inverse_h));
-        [arc, self.speed, acceleration]
-    }
-}
-
-/// Nodes of the Chebyshev interpolant a run of quintic pairs is enclosed by.
-const RUN_NODES: usize = 12;
-
-/// Knot pairs a run's first window spans. Each next window spans twice the
-/// pairs where the last needed no halving, and the share a halved one
-/// settled on otherwise, up to `RUN_PAIRS_PER_WINDOW_MAX`: halving from a
-/// whole run re-verifies every pair at each level.
-const RUN_PAIRS_PER_WINDOW: usize = 48;
-const RUN_PAIRS_PER_WINDOW_MAX: usize = 4096;
-
-/// A run of consecutive quintic knot pairs: their times relative to the
-/// phase and their arc, speed and acceleration polynomials in `u`.
-struct QuinticRun {
-    t_lo: Vec<f64>,
-    h: Vec<f64>,
-    polynomials: Vec<[[Ball; 8]; 3]>,
-}
-
-impl QuinticRun {
-    fn pair_at(&self, tau: f64) -> usize {
-        self.t_lo
-            .partition_point(|&start| start <= tau)
-            .saturating_sub(1)
-            .min(self.t_lo.len() - 1)
-    }
-
-    /// The run's state on `window` (`origin` its phase's start): the
-    /// Chebyshev interpolant of its `(s, v, a)` through `RUN_NODES` nodes,
-    /// each order's bound the largest miss of a pair's own polynomial over
-    /// its stretch of the window. A pair is tiny against the window, so its
-    /// miss is bounded by the miss and its slope at the pair's midpoint and
-    /// the second derivatives of both over the pair.
-    fn state(&self, origin: f64, window: Window) -> Tangential {
-        let nodes = &CHEBYSHEV.nodes;
-        let read = |order: usize, tau: f64| {
-            let pair = self.pair_at(tau);
-            let u = (tau - self.t_lo[pair]) / self.h[pair];
-            self.polynomials[pair][order]
-                .iter()
-                .rev()
-                .fold(0.0, |acc, c| nurbs::fmadd(acc, u, c.mid))
-        };
-        let [s, v, a] = [0, 1, 2].map(|order| {
-            let values = nodes.map(|x| {
-                read(
-                    order,
-                    nurbs::fmadd(x, window.radius, window.center) - origin,
-                )
-            });
-            let interpolant = chebyshev_monomials(&values);
-            let miss = self.miss_of(
-                order,
-                &interpolant,
-                chebyshev_curvature(&values),
-                origin,
-                window,
-            );
-            TaylorModel::from_polynomial(&interpolant, miss)
-        });
-        let mut v = v;
-        let (centre, spread) = v.spread();
-        let lowest = centre - spread;
-        if lowest < 0.0 {
-            v.widen(-lowest);
-        }
-        Tangential { s, v, a }
-    }
-
-    /// `interpolant_curvature` bounds the interpolant's second derivative
-    /// in `x` over the window.
-    fn miss_of(
-        &self,
-        order: usize,
-        interpolant: &[f64],
-        interpolant_curvature: f64,
-        origin: f64,
-        window: Window,
-    ) -> f64 {
-        let interpolant_magnitude: f64 = interpolant.iter().map(|c| c.abs()).sum();
-        let rounding = ExactRounding::gamma(4 * RUN_NODES);
-        let (from, to) = (window.lo - origin, window.hi - origin);
-        let first = self.pair_at(from);
-        let mut worst = 0.0_f64;
-        for pair in first..self.t_lo.len() {
-            let (t_lo, h) = (self.t_lo[pair], self.h[pair]);
-            if t_lo >= to {
-                break;
-            }
-            let u_from = ((from - t_lo) / h).max(0.0);
-            let u_to = ((to - t_lo) / h).min(1.0);
-            if u_to < u_from {
-                continue;
-            }
-            let polynomial = &self.polynomials[pair][order];
-            let (middle, reach) = (0.5 * (u_from + u_to), 0.5 * (u_to - u_from));
-            let scale = h / window.radius;
-            let x = (origin + t_lo + middle * h - window.center) / window.radius;
-            let (value, slope) = polynomial.iter().rev().fold((0.0, 0.0), |(p, d), c| {
-                (nurbs::fmadd(p, middle, c.mid), nurbs::fmadd(d, middle, p))
-            });
-            let (r_value, r_slope) = interpolant.iter().rev().fold((0.0, 0.0), |(p, d), &c| {
-                (nurbs::fmadd(p, x, c), nurbs::fmadd(d, x, p))
-            });
-            let pair_curvature: f64 = polynomial
-                .iter()
-                .enumerate()
-                .map(|(k, c)| (k * k.saturating_sub(1)) as f64 * (c.mid.abs() + c.rad))
-                .sum();
-            let pair_radius: f64 = polynomial.iter().map(|c| c.rad).sum();
-            let pair_magnitude: f64 = polynomial.iter().map(|c| c.mid.abs()).sum();
-            let miss = (value - r_value).abs()
-                + (slope - r_slope * scale).abs() * reach
-                + (pair_curvature + interpolant_curvature * scale * scale) * reach * reach / 2.0
-                + pair_radius
-                + rounding * (pair_magnitude + interpolant_magnitude) * 4.0;
-            worst = worst.max(miss);
-        }
-        taylor::upper(worst)
-    }
-}
-
-/// The Chebyshev nodes, the matrix taking an interpolant's values there to
-/// its monomial coefficients in `x ∈ [−1, 1]`, and the one taking them to
-/// its Chebyshev coefficients.
-struct Chebyshev {
-    nodes: [f64; RUN_NODES],
-    monomials: [[f64; RUN_NODES]; RUN_NODES],
-    series: [[f64; RUN_NODES]; RUN_NODES],
-}
-
-static CHEBYSHEV: std::sync::LazyLock<Chebyshev> = std::sync::LazyLock::new(|| {
-    let nodes: [f64; RUN_NODES] = std::array::from_fn(|j| {
-        libm::cos(std::f64::consts::PI * (2 * j + 1) as f64 / (2 * RUN_NODES) as f64)
-    });
-    let mut basis = [[0.0; RUN_NODES]; RUN_NODES];
-    basis[0][0] = 1.0;
-    basis[1][1] = 1.0;
-    for k in 2..RUN_NODES {
-        for power in 0..RUN_NODES {
-            let raised = if power > 0 {
-                2.0 * basis[k - 1][power - 1]
-            } else {
-                0.0
-            };
-            basis[k][power] = raised - basis[k - 2][power];
-        }
-    }
-    let mut monomials = [[0.0; RUN_NODES]; RUN_NODES];
-    let mut series = [[0.0; RUN_NODES]; RUN_NODES];
-    for (k, row) in basis.iter().enumerate() {
-        let weight = if k == 0 { 1.0 } else { 2.0 } / RUN_NODES as f64;
-        for (j, &x) in nodes.iter().enumerate() {
-            let at_node = weight * libm::cos(k as f64 * libm::acos(x));
-            series[k][j] = at_node;
-            for (power, &term) in row.iter().enumerate() {
-                monomials[power][j] += at_node * term;
-            }
-        }
-    }
-    Chebyshev {
-        nodes,
-        monomials,
-        series,
-    }
-});
-
-fn apply(matrix: &[[f64; RUN_NODES]; RUN_NODES], values: &[f64; RUN_NODES]) -> [f64; RUN_NODES] {
-    std::array::from_fn(|row| {
-        matrix[row]
-            .iter()
-            .zip(values)
-            .map(|(weight, value)| weight * value)
-            .sum()
-    })
-}
-
-/// The monomial coefficients, in `x ∈ [−1, 1]`, of the Chebyshev
-/// interpolant through `values` at the Chebyshev nodes.
-fn chebyshev_monomials(values: &[f64; RUN_NODES]) -> [f64; RUN_NODES] {
-    apply(&CHEBYSHEV.monomials, values)
-}
-
-/// A bound on the second derivative over `[−1, 1]` of the interpolant whose
-/// monomials `chebyshev_monomials(values)` are: `|T_k''| ≤ k²(k²−1)/3`
-/// there, so `Σ|c_k|·k²(k²−1)/3` bounds the Chebyshev series, and the
-/// monomials' rounding off it adds at most `γ·Σ k(k−1)|r_k|`.
-fn chebyshev_curvature(values: &[f64; RUN_NODES]) -> f64 {
-    let series: f64 = apply(&CHEBYSHEV.series, values)
-        .iter()
-        .enumerate()
-        .map(|(k, c)| {
-            let k = k as f64;
-            c.abs() * k * k * (k * k - 1.0) / 3.0
-        })
-        .sum();
-    let monomial_curvature: f64 = chebyshev_monomials(values)
-        .iter()
-        .enumerate()
-        .map(|(k, r)| (k * k.saturating_sub(1)) as f64 * r.abs())
-        .sum();
-    taylor::upper(series + ExactRounding::gamma(4 * RUN_NODES) * monomial_curvature)
 }
 
 #[cfg(test)]

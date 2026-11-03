@@ -66,6 +66,52 @@ fn enclose_to_depth(
     enclose_to_depth((middle, hi), accuracy, model, depth + 1, out);
 }
 
+/// Encloses several signals over `[lo, hi]` whose windows share work:
+/// `model(window, axis, shared)` reads signal `axis` on `window`, `shared`
+/// holding what the window's first reading built for the rest. Each
+/// signal halves on its own, as [`enclose`] does, into `outs[axis]`.
+pub(crate) fn enclose_axes<S>(
+    (lo, hi): (f64, f64),
+    accuracy: [f64; 3],
+    model: &impl Fn(Window, usize, &mut Option<S>) -> [TaylorModel; 3],
+    outs: &mut [Vec<ExactPiece>],
+) {
+    let axes: Vec<usize> = (0..outs.len()).collect();
+    enclose_axes_to_depth((lo, hi), accuracy, model, &axes, 0, outs);
+}
+
+fn enclose_axes_to_depth<S>(
+    (lo, hi): (f64, f64),
+    accuracy: [f64; 3],
+    model: &impl Fn(Window, usize, &mut Option<S>) -> [TaylorModel; 3],
+    axes: &[usize],
+    depth: u32,
+    outs: &mut [Vec<ExactPiece>],
+) {
+    let window = Window::new(lo, hi);
+    let middle = window.center;
+    let last = depth == ENCLOSURE_MAX_DEPTH || middle <= lo || middle >= hi;
+    let mut shared = None;
+    let mut unresolved = Vec::new();
+    for &axis in axes {
+        let models = model(window, axis, &mut shared);
+        let resolved = models
+            .iter()
+            .zip(accuracy)
+            .all(|(model, accuracy)| model.rad() <= accuracy);
+        if resolved || last {
+            outs[axis].push(piece(window, &models));
+        } else {
+            unresolved.push(axis);
+        }
+    }
+    if unresolved.is_empty() {
+        return;
+    }
+    enclose_axes_to_depth((lo, middle), accuracy, model, &unresolved, depth + 1, outs);
+    enclose_axes_to_depth((middle, hi), accuracy, model, &unresolved, depth + 1, outs);
+}
+
 #[cfg(test)]
 #[path = "shaper_taylor_tests.rs"]
 mod tests;
