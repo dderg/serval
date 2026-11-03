@@ -123,12 +123,39 @@ def rsync_changes(tree: Path, files: list[str]) -> list[str]:
     return changed
 
 
+BUILD_OUTPUT_DIRS = ("rust/target/", ".git/")
+BUILD_OUTPUT_SUFFIXES = (".so", ".pyc")
+BUILD_OUTPUT_FILES = (".bench-deploy.json",)
+REMOTE_TREE_LISTING = (
+    "cd klipper && find . -path ./.git -prune -o -path ./rust/target -prune "
+    "-o \\( -type f -o -type l \\) -print"
+)
+
+
+def is_build_output(name: str) -> bool:
+    return (
+        name in BUILD_OUTPUT_FILES
+        or name.startswith(BUILD_OUTPUT_DIRS)
+        or name.endswith(BUILD_OUTPUT_SUFFIXES)
+        or "/__pycache__/" in name
+    )
+
+
+def stale_remote_files(remote: list[str], local: list[str]) -> list[str]:
+    return sorted(
+        name for name in set(remote) - set(local) if not is_build_output(name)
+    )
+
+
 def cmd_sync(tree: Path) -> None:
     files = local_files(tree)
     changed = rsync_changes(tree, files)
-    stale = sorted(
-        set(pi.ssh("cd klipper && git ls-files").splitlines()) - set(files)
-    )
+    remote = [
+        line.removeprefix("./")
+        for line in pi.ssh(REMOTE_TREE_LISTING).splitlines()
+        if line
+    ]
+    stale = stale_remote_files(remote, files)
     if stale:
         quoted = " ".join(f"'{name}'" for name in stale)
         pi.ssh(f"cd klipper && rm -f -- {quoted}")
