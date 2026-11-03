@@ -2416,8 +2416,8 @@ motors: e_motor
 post_processors: extruder_pa, extruder_smoothing
 #   Optional comma-separated named post-processors. Default is an empty list.
 #   On an axis that follows others, a pressure advance (or any derivative-gain
-#   stage) needs a smoothing kernel in the same list; the chain is rejected
-#   otherwise.
+#   stage) needs a smoothing kernel in the same list or a ratio_ramp_time on
+#   the axis; the chain is rejected otherwise.
 #ratio_ramp_time:
 #   Optional. Default is no ramp. If set, must be above 0 (seconds), the
 #   axis must follow others, and its post_processors must hold no smoothing

@@ -1918,7 +1918,7 @@
 <span class="na">post_processors</span><span class="o">:</span><span class="w"> </span><span class="s">extruder_pa, extruder_smoothing</span>
 </code></pre></div>
 
-<p>The smoothing kernel is required: on an axis that follows others, an advance with no smoothing kernel in its chain is rejected at config load, because it would turn every extrusion-ratio change taken at speed into an instant extruder step. Keep it short; see <a href="https://github.com/KalicoCrew/kalico//blob/main/README.md#evaluating-an-extruder-chain">Evaluating an extruder chain</a>.</p>
+<p>On an axis that follows others, an advance needs either a smoothing kernel in its chain or a <code>ratio_ramp_time</code> on the axis; with neither it is rejected at config load, because it would turn every extrusion-ratio change taken at speed into an instant extruder step. The kernel blurs every change of the extruder's motion over its width, corners included; the ratio ramp spreads only the extrusion-ratio steps over the path and leaves the advance unblurred (see <code>ratio_ramp_time</code> in the <a href="Config_Reference_Motion.html">Motion configuration reference</a>). Keep a kernel short; see <a href="https://github.com/KalicoCrew/kalico//blob/main/README.md#evaluating-an-extruder-chain">Evaluating an extruder chain</a>.</p>
 <p><code>recipr_pressure_advance</code> accepts the same three parameters and may be used instead of <code>tanh_pressure_advance</code>. Do not attach both nonlinear models, or a nonlinear and linear pressure-advance processor, to the same axis.</p>
 <h2 id="model-and-parameters">Model and parameters<a class="headerlink" href="#model-and-parameters" title="Permanent link">&para;</a></h2>
 <p>The commanded advance is:</p>
