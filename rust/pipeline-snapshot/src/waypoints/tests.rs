@@ -132,18 +132,87 @@ fn set_velocity_limit_accel_rides_on_subsequent_waypoints_as_the_runtime_cap() {
 }
 
 #[test]
-fn set_velocity_limit_rejects_unsupported_params() {
+fn set_velocity_limit_sets_every_runtime_limit_live_honours() {
+    let wp = parse(
+        "G1 X10 F6000\n\
+         SET_VELOCITY_LIMIT VELOCITY=100 ACCEL=500 SQUARE_CORNER_VELOCITY=8 MINIMUM_CRUISE_RATIO=0.5 ACCEL_TO_DECEL=200\n\
+         G1 X20\n\
+         SET_VELOCITY_LIMIT CORNER_DEVIATION=0.05\n\
+         G1 X30\n",
+    );
+    assert_eq!(
+        wp[1].runtime,
+        RuntimeLimits {
+            velocity: Some(100.0),
+            accel: Some(500.0),
+            corner_deviation: Some(geometry::corner_deviation_from_scv(8.0, 3000.0)),
+        }
+    );
+    assert_eq!(wp[2].runtime.corner_deviation, Some(0.05));
+    assert_eq!(wp[2].runtime.velocity, Some(100.0));
+}
+
+#[test]
+fn set_velocity_limit_square_corner_velocity_converts_at_the_config_accel() {
+    let wp = parse("G1 X10 F6000\nSET_VELOCITY_LIMIT ACCEL=500 SQUARE_CORNER_VELOCITY=8\nG1 X20\n");
+    assert_eq!(
+        wp[1].runtime.corner_deviation,
+        Some(geometry::corner_deviation_from_scv(8.0, 3000.0))
+    );
+}
+
+#[test]
+fn set_velocity_limit_ignores_unknown_parameters_like_klippy() {
+    let wp = parse("G1 X10 F6000\nSET_VELOCITY_LIMIT FOO=1\nG1 X20\n");
+    assert_eq!(wp[1].runtime, RuntimeLimits::default());
+}
+
+#[test]
+fn set_velocity_limit_refuses_both_corner_budget_aliases() {
     assert!(matches!(
-        parse_err("SET_VELOCITY_LIMIT VELOCITY=100\nG1 X10 F6000\n"),
-        WaypointError::UnsupportedVelocityLimitParam { line: 1, ref param } if &**param == "VELOCITY"
+        parse_err("SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY=5 CORNER_DEVIATION=0.05\n"),
+        WaypointError::CornerBudgetAliases { line: 1 }
     ));
 }
 
 #[test]
-fn set_velocity_limit_rejects_non_positive_accel() {
+fn set_velocity_limit_refuses_out_of_range_values_like_klippy() {
+    for bad in [
+        "SET_VELOCITY_LIMIT ACCEL=0\n",
+        "SET_VELOCITY_LIMIT VELOCITY=-1\n",
+        "SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY=-1\n",
+        "SET_VELOCITY_LIMIT CORNER_DEVIATION=-0.1\n",
+        "SET_VELOCITY_LIMIT ACCEL=fast\n",
+        "SET_VELOCITY_LIMIT MINIMUM_CRUISE_RATIO=half\n",
+    ] {
+        assert!(
+            matches!(parse_err(bad), WaypointError::InvalidParam { line: 1, .. }),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
+fn reset_velocity_limit_returns_to_the_config_base() {
+    let wp = parse(
+        "G1 X10 F6000\nSET_VELOCITY_LIMIT VELOCITY=100 ACCEL=500 CORNER_DEVIATION=0.05\nG1 X20\nRESET_VELOCITY_LIMIT\nG1 X30\n",
+    );
+    assert_eq!(wp[2].runtime, RuntimeLimits::default());
+}
+
+#[test]
+fn m204_sets_the_accel_cap_from_s_or_the_lower_of_p_and_t() {
+    let wp = parse("G1 X10 F6000\nM204 S700\nG1 X20\nM204 P900 T800\nG1 X30\nM204 P100\nG1 X40\n");
+    assert_eq!(wp[1].runtime.accel, Some(700.0));
+    assert_eq!(wp[2].runtime.accel, Some(800.0));
+    assert_eq!(
+        wp[3].runtime.accel,
+        Some(800.0),
+        "P without T is reported invalid and changes nothing"
+    );
     assert!(matches!(
-        parse_err("SET_VELOCITY_LIMIT ACCEL=0\nG1 X10 F6000\n"),
-        WaypointError::InvalidAccelLimit { line: 1, ref value } if value == "0"
+        parse_err("M204 S0\n"),
+        WaypointError::InvalidParam { line: 1, .. }
     ));
 }
 

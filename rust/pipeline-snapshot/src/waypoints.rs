@@ -45,12 +45,146 @@ pub enum WaypointError {
         "line {line}: E word before any M82/M83 (or G91) — the extruder mode is ambiguous, and guessing absolute turns relative-E slicer output into garbage extrusion ratios. Declare the mode (slicer excerpts printed with relative extrusion need an 'M83' line at the top)."
     )]
     AmbiguousExtruderMode { line: u32 },
+    #[error("line {line}: {command} {param}={value}: {reason}")]
+    InvalidParam {
+        line: u32,
+        command: Box<str>,
+        param: Box<str>,
+        value: Box<str>,
+        reason: &'static str,
+    },
     #[error(
-        "line {line}: SET_VELOCITY_LIMIT {param}=… is not supported here — only ACCEL is wired through the snapshot waypoints; silently ignoring the parameter would let a case claim limits it never exercised"
+        "line {line}: SET_VELOCITY_LIMIT: SQUARE_CORNER_VELOCITY and CORNER_DEVIATION are aliases for the same corner budget; set exactly one"
     )]
-    UnsupportedVelocityLimitParam { line: u32, param: Box<str> },
-    #[error("line {line}: SET_VELOCITY_LIMIT ACCEL={value} must be a positive finite number")]
-    InvalidAccelLimit { line: u32, value: String },
+    CornerBudgetAliases { line: u32 },
+    #[error(
+        "line {line}: {source} — the live host keeps the old limit with a warning; a snapshot refuses rather than plan a limit the G-code never got"
+    )]
+    RuntimeLimit {
+        line: u32,
+        source: planner_config::RuntimeLimitError,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum Bound {
+    Any,
+    Above(f64),
+    AtLeast(f64),
+}
+
+/// An extended command's `KEY=value` arguments as klippy's `GCodeCommand`
+/// reads them: keys case-insensitive, values parsed only when asked for.
+struct ExtendedArgs<'a> {
+    command: &'a str,
+    line: u32,
+    args: &'a [(Box<str>, Box<str>)],
+}
+
+impl ExtendedArgs<'_> {
+    fn raw(&self, key: &str) -> Option<&str> {
+        self.args
+            .iter()
+            .rev()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, v)| &**v)
+    }
+
+    fn float(&self, key: &str, bound: Bound) -> Result<Option<f64>, WaypointError> {
+        let Some(raw) = self.raw(key) else {
+            return Ok(None);
+        };
+        let invalid = |reason| WaypointError::InvalidParam {
+            line: self.line,
+            command: self.command.into(),
+            param: key.into(),
+            value: raw.into(),
+            reason,
+        };
+        let value: f64 = raw.trim().parse().map_err(|_| invalid("not a number"))?;
+        match bound {
+            Bound::Above(min) if value <= min => Err(invalid("must be above the minimum")),
+            Bound::AtLeast(min) if value < min => Err(invalid("must be at least the minimum")),
+            _ => Ok(Some(value)),
+        }
+    }
+}
+
+/// `SET_VELOCITY_LIMIT`, as `Motion.cmd_SET_VELOCITY_LIMIT` handles it.
+fn set_velocity_limit(
+    args: &ExtendedArgs<'_>,
+    config: &CartesianLimits,
+    runtime: &mut RuntimeLimits,
+) -> Result<(), WaypointError> {
+    args.float("MINIMUM_CRUISE_RATIO", Bound::Any)?;
+    args.float("ACCEL_TO_DECEL", Bound::Any)?;
+    let velocity = args.float("VELOCITY", Bound::Above(0.0))?;
+    let accel = args.float("ACCEL", Bound::Above(0.0))?;
+    let square_corner_velocity = args.float("SQUARE_CORNER_VELOCITY", Bound::AtLeast(0.0))?;
+    let corner_deviation = args.float("CORNER_DEVIATION", Bound::AtLeast(0.0))?;
+    if square_corner_velocity.is_some() && corner_deviation.is_some() {
+        return Err(WaypointError::CornerBudgetAliases { line: args.line });
+    }
+    let runtime_limit = |source| WaypointError::RuntimeLimit {
+        line: args.line,
+        source,
+    };
+    if velocity.is_some() {
+        runtime.set_velocity_cap(velocity).map_err(runtime_limit)?;
+    }
+    if accel.is_some() {
+        runtime.set_accel_cap(accel).map_err(runtime_limit)?;
+    }
+    let corner_deviation = square_corner_velocity
+        .map(|scv| geometry::corner_deviation_from_scv(scv, config.max_accel))
+        .or(corner_deviation);
+    if corner_deviation.is_some() {
+        runtime
+            .set_corner_deviation(corner_deviation)
+            .map_err(runtime_limit)?;
+    }
+    Ok(())
+}
+
+/// `RESET_VELOCITY_LIMIT`, as `Motion.cmd_RESET_VELOCITY_LIMIT` handles it.
+fn reset_velocity_limit(runtime: &mut RuntimeLimits) {
+    runtime
+        .set_velocity_cap(None)
+        .and_then(|()| runtime.set_accel_cap(None))
+        .and_then(|()| runtime.set_corner_deviation(None))
+        .expect("clearing a runtime limit is always valid");
+}
+
+/// `M204`, as `Motion.cmd_M204` handles it: `S`, else the lower of `P` and
+/// `T`; with neither, klippy only reports the command invalid.
+fn m204(
+    params: &gcode::Params,
+    line: u32,
+    runtime: &mut RuntimeLimits,
+) -> Result<(), WaypointError> {
+    let above_zero = |letter: u8| match params.get(letter) {
+        Some(value) if value <= 0.0 => Err(WaypointError::InvalidParam {
+            line,
+            command: "M204".into(),
+            param: char::from(letter).to_string().into(),
+            value: value.to_string().into(),
+            reason: "must be above the minimum",
+        }),
+        value => Ok(value),
+    };
+    let accel = match above_zero(b'S')? {
+        Some(s) => Some(s),
+        None => match (above_zero(b'P')?, above_zero(b'T')?) {
+            (Some(p), Some(t)) => Some(p.min(t)),
+            _ => None,
+        },
+    };
+    if accel.is_some() {
+        runtime
+            .set_accel_cap(accel)
+            .map_err(|source| WaypointError::RuntimeLimit { line, source })?;
+    }
+    Ok(())
 }
 
 pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>, WaypointError> {
@@ -76,21 +210,16 @@ pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>
                 name,
                 args,
                 line_no,
-            } if &*name == "SET_VELOCITY_LIMIT" => {
-                for (param, value) in args {
-                    if &*param != "ACCEL" {
-                        return Err(WaypointError::UnsupportedVelocityLimitParam {
-                            line: line_no,
-                            param,
-                        });
-                    }
-                    let parsed: f64 = value.parse().unwrap_or(f64::NAN);
-                    runtime.set_accel_cap(Some(parsed)).map_err(|_| {
-                        WaypointError::InvalidAccelLimit {
-                            line: line_no,
-                            value: value.into_string(),
-                        }
-                    })?;
+            } => {
+                let args = ExtendedArgs {
+                    command: &name,
+                    line: line_no,
+                    args: &args,
+                };
+                match &*name {
+                    "SET_VELOCITY_LIMIT" => set_velocity_limit(&args, config, &mut runtime)?,
+                    "RESET_VELOCITY_LIMIT" => reset_velocity_limit(&mut runtime),
+                    _ => {}
                 }
                 continue;
             }
@@ -104,6 +233,7 @@ pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>
             (b'G', 91) => relative = true,
             (b'M', 82) => e_relative = Some(false),
             (b'M', 83) => e_relative = Some(true),
+            (b'M', 204) => m204(&params, line_no, &mut runtime)?,
             (b'G', 92) => {
                 x = params.x().unwrap_or(x);
                 y = params.y().unwrap_or(y);
