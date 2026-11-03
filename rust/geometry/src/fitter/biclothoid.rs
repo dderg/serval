@@ -383,26 +383,29 @@ fn mid_facet_anchor(
     ))
 }
 
-const DEV_SAMPLES_PER_HALF: usize = 16;
+const DEV_SAMPLES_PER_PIECE: usize = 16;
 
-/// Sampled deviation of the blend from the polyline it replaces: the largest
-/// distance from any curve sample to the chain's segments. Sampling
+/// Sampled deviation of a piece from the polyline it replaces: the largest
+/// distance from any piece sample to the chain's segments. Sampling
 /// under-reads the true maximum by the sagitta between samples — negligible
 /// against junction deviations.
-fn max_dev_from_chain(pair: &ClothoidPair, chain: &[[f64; 3]]) -> f64 {
-    let mut worst = 0.0_f64;
-    for half in [&pair.half1, &pair.half2] {
-        for i in 0..=DEV_SAMPLES_PER_HALF {
-            let s = half.s_len() * (i as f64) / (DEV_SAMPLES_PER_HALF as f64);
-            let p = half.point_at(s);
-            let d = chain
+pub(super) fn piece_dev_from_chain(
+    piece: &(impl PositionProfile + CurvatureProfile),
+    chain: &[[f64; 3]],
+) -> f64 {
+    (0..=DEV_SAMPLES_PER_PIECE)
+        .map(|i| {
+            let p = piece.point_at(piece.s_len() * (i as f64) / (DEV_SAMPLES_PER_PIECE as f64));
+            chain
                 .windows(2)
                 .map(|seg| dist_to_segment(p, seg[0], seg[1]))
-                .fold(f64::INFINITY, f64::min);
-            worst = worst.max(d);
-        }
-    }
-    worst
+                .fold(f64::INFINITY, f64::min)
+        })
+        .fold(0.0, f64::max)
+}
+
+fn max_dev_from_chain(pair: &ClothoidPair, chain: &[[f64; 3]]) -> f64 {
+    piece_dev_from_chain(&pair.half1, chain).max(piece_dev_from_chain(&pair.half2, chain))
 }
 
 fn dist_to_segment(p: [f64; 3], s0: [f64; 3], s1: [f64; 3]) -> f64 {
