@@ -318,7 +318,7 @@ follows: x, y, z
 post_processors: extruder_pa, extruder_smoothing
 ```
 
-`pressure_advance_smooth_time` maps to the smoothing kernel, and on a following axis it is required: an advance with no smoothing kernel in its chain is rejected at config load, because it would turn every extrusion-ratio change taken at speed into an instant extruder step.
+`pressure_advance_smooth_time` maps to the smoothing kernel. On a following axis an advance needs either that kernel or a `ratio_ramp_time` on the axis: with neither it is rejected at config load, because it would turn every extrusion-ratio change taken at speed into an instant extruder step.
 
 The `linear_pressure_advance` parameter is named `k` and must be non-negative. For nonlinear pressure advance, the recommended models are `tanh_pressure_advance` and `recipr_pressure_advance`; each uses `linear_advance`, `nonlinear_offset`, and `linearization_velocity` parameters.
 

@@ -36,7 +36,7 @@ pub enum PostProcessorConfigError {
     LeaderGainBeforeKernel { axis: String, name: String },
     #[error(
         "axis '{axis}' follows other axes, and post_processor '{name}' advances it with no \
-         smoothing kernel in the axis post_processors: {}",
+         smoothing kernel in the axis post_processors and no ratio_ramp_time: {}",
         trajectory::FOLLOWER_TRANSFORM_WITHOUT_KERNEL
     )]
     FollowerAdvanceWithoutKernel { axis: String, name: String },

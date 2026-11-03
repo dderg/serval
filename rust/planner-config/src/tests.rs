@@ -724,3 +724,35 @@ fn a_ratio_ramp_requires_finite_extrude_only_caps() {
         "with no ratio ramp the caps stay optional"
     );
 }
+
+#[test]
+fn a_follower_advance_with_a_ratio_ramp_needs_no_kernel() {
+    let advances = [
+        pp("pa", "linear_pressure_advance", &[("k", 0.02)]),
+        pp(
+            "pa",
+            "tanh_pressure_advance",
+            &[
+                ("linear_advance", 0.02),
+                ("nonlinear_offset", 0.05),
+                ("linearization_velocity", 20.0),
+            ],
+        ),
+    ];
+    for advance in advances {
+        let registry = ramped_registry_with_e(&["pa"], 0.015);
+        let chains = PostProcessorSet::try_new(&registry, &[advance.clone()])
+            .unwrap_or_else(|error| panic!("{} on a ratio ramp is refused: {error}", advance.ty))
+            .compile(&registry)
+            .unwrap();
+        assert_eq!(chains.kernel_free_follower_transform(), None);
+        assert!(chains.chains[3].kernel().is_none());
+        let refused = PostProcessorSet::try_new(&registry_with_e(&["pa"]), &[advance.clone()]);
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("or set ratio_ramp_time")),
+            "with neither a kernel nor a ramp the refusal names ratio_ramp_time, got {refused:?}"
+        );
+    }
+}
