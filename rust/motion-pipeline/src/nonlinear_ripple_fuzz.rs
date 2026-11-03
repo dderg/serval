@@ -123,7 +123,7 @@ fn law(model: AdvanceModel, z: f64) -> (f64, f64, f64) {
 #[derive(Debug, Clone, Copy)]
 struct Ramp {
     axis: usize,
-    reciprocal: bool,
+    model: AdvanceModel,
     reverse: bool,
     decelerate: bool,
     crosses_zero: bool,
@@ -143,7 +143,7 @@ struct Ramp {
 fn ramp_invents_no_acceleration_reversal(ramp: Ramp) -> Result<(), TestCaseError> {
     let Ramp {
         axis,
-        reciprocal,
+        model,
         reverse,
         decelerate,
         crosses_zero,
@@ -155,11 +155,6 @@ fn ramp_invents_no_acceleration_reversal(ramp: Ramp) -> Result<(), TestCaseError
         offset,
         linear_gain,
     } = ramp;
-    let model = if reciprocal {
-        AdvanceModel::Reciprocal
-    } else {
-        AdvanceModel::Tanh
-    };
     let direction = if reverse { -1.0 } else { 1.0 };
     let low = if crosses_zero {
         -initial_fraction * velocity_sweep
@@ -200,7 +195,7 @@ fn ramp_invents_no_acceleration_reversal(ramp: Ramp) -> Result<(), TestCaseError
         .map(|span| &output.control_points()[span - degree..=span])
         .collect();
     let extremum_z = (1.0 / 3.0f64.sqrt()).atanh();
-    let critical_velocities = if reciprocal {
+    let critical_velocities = if model == AdvanceModel::Reciprocal {
         vec![0.0]
     } else {
         vec![-extremum_z * velocity_scale, extremum_z * velocity_scale]
@@ -339,7 +334,7 @@ proptest! {
     ) {
         ramp_invents_no_acceleration_reversal(Ramp {
             axis,
-            reciprocal,
+            model: if reciprocal { AdvanceModel::Reciprocal } else { AdvanceModel::Tanh },
             reverse,
             decelerate,
             crosses_zero,
@@ -360,7 +355,7 @@ fn ramp_with_its_first_extremum_at(extremum_after_start_s: f64) -> Ramp {
     let sweep_rate = velocity_sweep / duration;
     Ramp {
         axis: 0,
-        reciprocal: false,
+        model: AdvanceModel::Tanh,
         reverse: false,
         decelerate: false,
         crosses_zero: true,
@@ -383,7 +378,7 @@ fn ramp_with_its_first_extremum_at(extremum_after_start_s: f64) -> Ramp {
 fn a_ramp_starting_just_before_its_acceleration_extremum_keeps_it() {
     ramp_invents_no_acceleration_reversal(Ramp {
         axis: 0,
-        reciprocal: false,
+        model: AdvanceModel::Tanh,
         reverse: false,
         decelerate: false,
         crosses_zero: true,
