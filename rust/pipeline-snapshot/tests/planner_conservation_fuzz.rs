@@ -533,7 +533,6 @@ fn an_eased_arc_run_keeps_the_corner_budget_at_its_head() {
 /// the leaders' corner, where their speed dips sharply, and its position
 /// must follow its velocity there for the source fit to close.
 #[test]
-#[ignore = "derived-ratio-ramp: the follower's odometer position drifts from its velocity in the leaders' corner dip, and the plain source fit runs out of refinement splits"]
 fn a_near_reversal_off_a_fast_line_lays_its_ratio_along_the_path() {
     let limits = Limits {
         max_velocity: 477.1372504755238,

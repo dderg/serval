@@ -128,7 +128,7 @@ fn wiggling_leaders() -> ContinuousSegment {
             1.5,
             -7157.1,
             27_460_800.0,
-            804_354_666_666.6667,
+            804_354_666_666.666_7,
             3_392_574_814_814_816.5,
             3.673_197_037_037_039e19,
             -2.310_463_209_876_544_6e23,
@@ -189,6 +189,41 @@ fn the_odometer_is_continuous_between_its_knots() {
     );
 }
 
+/// A leaf's odometer grows at the leaders' speed everywhere inside it:
+/// a bump in the speed too narrow and too small for either quadrature to
+/// see, lying between two Kronrod nodes, still splits the leaf, because the
+/// follower's position must follow its velocity for its fit to close.
+#[test]
+fn an_odometer_leaf_grows_at_the_speed_between_its_nodes() {
+    let duration = 1e-4;
+    let half = 0.5 * duration;
+    let bump_at = half + half * 0.5 * 0.207_784_955_007_898_5;
+    let speed = |t: f64| {
+        let offset = (t - bump_at) / 2e-7;
+        1.0 + 1e-4 * libm::exp(-offset * offset)
+    };
+    let mut leaves = Vec::new();
+    super::odometer_leaves(&speed, 0.0, duration, &mut |end, leaf| {
+        leaves.push((end, leaf))
+    });
+    let mut start = 0.0;
+    let half_stencil = 1e-10;
+    for (end, leaf) in &leaves {
+        let probes = 2000;
+        for index in 1..probes {
+            let t = start + (end - start) * f64::from(index) / f64::from(probes);
+            let rate = (leaf.covered_until(t + half_stencil)
+                - leaf.covered_until(t - half_stencil))
+                / (2.0 * half_stencil);
+            assert!(
+                (rate - speed(t)).abs() <= 1e-5,
+                "the leaf over [{start}, {end}] grows at {rate} mm/s at t={t}, the speed is {}",
+                speed(t)
+            );
+        }
+        start = *end;
+    }
+}
 
 /// The distance the leaders cover is their speed's integral to well under
 /// the fit's resolution everywhere along the segment.
@@ -1821,4 +1856,3 @@ fn a_source_fitted_to_the_plain_projection_keeps_the_absolute_budget() {
         assert_eq!(source_budget(&chain), AccelBudget::Absolute);
     }
 }
-

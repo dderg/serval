@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use geometry::MIN_DEVICE_INTERVAL_S;
 use nurbs::ScalarNurbs;
@@ -24,6 +24,7 @@ mod ratio_ramp;
 use ratio_ramp::{RampLeg, RatioSmoothing};
 
 const INTEGRAL_TOL_MM: f64 = 1e-10;
+const ODOMETER_RATE_TOL_MM_S: f64 = 1e-6;
 const INTEGRAL_MAX_DEPTH: u32 = 24;
 const GRID_DEDUP_EPS_S: f64 = 1e-12;
 const SPAN_MIN_LEN_MM: f64 = 1e-12;
@@ -1878,7 +1879,18 @@ fn leader_arc_length(seg: &ContinuousSegment, leaders: &[usize]) -> f64 {
     let shaped_leaders = ShapedLeaders::of(seg, leaders);
     axis_grid(seg, leaders)
         .windows(2)
-        .map(|window| integrate(&|t| shaped_leaders.speed(t), window[0], window[1]))
+        .map(|window| {
+            let mut length = 0.0;
+            odometer_leaves(
+                &|t| shaped_leaders.speed(t),
+                window[0],
+                window[1],
+                &mut |end, leaf| {
+                    length += leaf.covered_until(end);
+                },
+            );
+            length
+        })
         .sum()
 }
 
@@ -2210,6 +2222,7 @@ fn speed_second_of(states: &[(f64, f64, f64, f64)], speed: f64) -> f64 {
 struct OdometerKnots {
     t: Vec<f64>,
     s: Vec<f64>,
+    leaves: Vec<OdometerLeaf>,
     leaf_magnitude: f64,
 }
 
@@ -2218,6 +2231,7 @@ impl OdometerKnots {
         let mut knots = Self {
             t: Vec::with_capacity(capacity),
             s: Vec::with_capacity(capacity),
+            leaves: Vec::with_capacity(capacity),
             leaf_magnitude: 0.0,
         };
         knots.t.push(t);
@@ -2225,10 +2239,12 @@ impl OdometerKnots {
         knots
     }
 
-    fn push_leaf(&mut self, end: f64, value: f64) {
+    fn push_leaf(&mut self, end: f64, leaf: OdometerLeaf) {
+        let value = leaf.covered_until(end);
         let length = self.length() + value;
         self.t.push(end);
         self.s.push(length);
+        self.leaves.push(leaf);
         self.leaf_magnitude += value.abs();
     }
 
@@ -2237,7 +2253,7 @@ impl OdometerKnots {
     }
 
     fn leaves(&self) -> usize {
-        self.s.len() - 1
+        self.leaves.len()
     }
 
     fn reassociation_bound(&self) -> f64 {
@@ -2368,7 +2384,14 @@ impl<'a> FollowerSignal<'a> {
         let shaped_leaders = ShapedLeaders::of(shaped, leaders);
         let mut knots = OdometerKnots::starting_at(grid[0], grid.len());
         for w in grid.windows(2) {
-            integrate_recording(&|t| shaped_leaders.speed(t), w[0], w[1], &mut knots);
+            odometer_leaves(
+                &|t| shaped_leaders.speed(t),
+                w[0],
+                w[1],
+                &mut |end, leaf| {
+                    knots.push_leaf(end, leaf);
+                },
+            );
         }
         let odometer_scale = knots.scale_to(odometer.length);
         let ratio_bounds = RatioBounds::ridden(
@@ -2599,8 +2622,7 @@ impl<'a> FollowerSignal<'a> {
                     self.grid[self.grid.len() - 1]
                 );
                 let index = insertion - 1;
-                self.knots.s[index]
-                    + integrate_within_leaf(&|u| self.leaders.speed(u), self.knots.t[index], t)
+                self.knots.s[index] + self.knots.leaves[index].covered_until(t)
             }
         };
         integrated * self.odometer_scale
@@ -3744,20 +3766,39 @@ const GAUSS_WEIGHTS: [f64; 4] = [
     0.417_959_183_673_469_4,
 ];
 
-/// The Kronrod and the embedded Gauss estimates of `∫f` over `[a, b]`.
-fn gauss_kronrod(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> (f64, f64) {
+const KRONROD_POINTS: usize = 15;
+
+/// The Kronrod nodes on `[-1, 1]` in ascending order.
+fn kronrod_abscissae() -> [f64; KRONROD_POINTS] {
+    let mut abscissae = [0.0; KRONROD_POINTS];
+    for (index, &node) in KRONROD_NODES[..7].iter().enumerate() {
+        abscissae[index] = -node;
+        abscissae[KRONROD_POINTS - 1 - index] = node;
+    }
+    abscissae
+}
+
+/// `f` at the Kronrod nodes of `[a, b]`, in ascending order.
+fn kronrod_samples(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> [f64; KRONROD_POINTS] {
     let centre = 0.5 * (a + b);
     let half = 0.5 * (b - a);
-    let at_centre = f(centre);
-    let mut kronrod = KRONROD_WEIGHTS[7] * at_centre;
-    let mut gauss = GAUSS_WEIGHTS[3] * at_centre;
-    for (index, (&node, &weight)) in KRONROD_NODES[..7]
-        .iter()
-        .zip(&KRONROD_WEIGHTS[..7])
-        .enumerate()
-    {
+    let mut samples = [0.0; KRONROD_POINTS];
+    samples[7] = f(centre);
+    for (index, &node) in KRONROD_NODES[..7].iter().enumerate() {
         let offset = half * node;
-        let pair = f(centre - offset) + f(centre + offset);
+        samples[index] = f(centre - offset);
+        samples[KRONROD_POINTS - 1 - index] = f(centre + offset);
+    }
+    samples
+}
+
+/// The Kronrod and the embedded Gauss estimates of `∫f` over an interval
+/// `2·half` long, from `f` at its Kronrod nodes.
+fn kronrod_and_gauss(samples: &[f64; KRONROD_POINTS], half: f64) -> (f64, f64) {
+    let mut kronrod = KRONROD_WEIGHTS[7] * samples[7];
+    let mut gauss = GAUSS_WEIGHTS[3] * samples[7];
+    for (index, &weight) in KRONROD_WEIGHTS[..7].iter().enumerate() {
+        let pair = samples[index] + samples[KRONROD_POINTS - 1 - index];
         kronrod += weight * pair;
         if index % 2 == 1 {
             gauss += GAUSS_WEIGHTS[index / 2] * pair;
@@ -3766,32 +3807,35 @@ fn gauss_kronrod(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> (f64, f64) {
     (kronrod * half, gauss * half)
 }
 
-/// Adaptive Gauss–Kronrod: an interval whose Kronrod and Gauss estimates
-/// agree within its share of the tolerance is a leaf, handed to `leaf`
-/// with its end and Kronrod value in order; Simpson's halves can agree by
-/// chance on a speed that bends often, these two rules all but never do.
-fn adaptive_gauss_kronrod(
-    f: &impl Fn(f64) -> f64,
+/// Adaptive Gauss–Kronrod: `rule` estimates `[a, b]` under its share of
+/// the tolerance and returns a leaf once it converges, or unconditionally
+/// when told it is the last chance; each leaf is handed to `leaf` with its
+/// end, in order. Simpson's halves can agree by chance on a speed that
+/// bends often, Kronrod and Gauss all but never do.
+fn adaptive_gauss_kronrod<L>(
+    rule: &impl Fn(f64, f64, f64, bool) -> Option<L>,
     (a, b): (f64, f64),
     tol: f64,
     depth: u32,
-    leaf: &mut impl FnMut(f64, f64),
+    leaf: &mut impl FnMut(f64, L),
 ) {
-    let (kronrod, gauss) = gauss_kronrod(f, a, b);
-    if depth == 0 || (kronrod - gauss).abs() <= tol {
-        leaf(b, kronrod);
+    if let Some(converged) = rule(a, b, tol, depth == 0) {
+        leaf(b, converged);
         return;
     }
     let middle = 0.5 * (a + b);
-    adaptive_gauss_kronrod(f, (a, middle), 0.5 * tol, depth - 1, leaf);
-    adaptive_gauss_kronrod(f, (middle, b), 0.5 * tol, depth - 1, leaf);
+    adaptive_gauss_kronrod(rule, (a, middle), 0.5 * tol, depth - 1, leaf);
+    adaptive_gauss_kronrod(rule, (middle, b), 0.5 * tol, depth - 1, leaf);
 }
 
 fn integrate(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
     let mut total = 0.0;
     if b - a > 0.0 {
         adaptive_gauss_kronrod(
-            f,
+            &|a, b, tol, last_chance| {
+                let (kronrod, gauss) = kronrod_and_gauss(&kronrod_samples(f, a, b), 0.5 * (b - a));
+                (last_chance || (kronrod - gauss).abs() <= tol).then_some(kronrod)
+            },
             (a, b),
             INTEGRAL_TOL_MM,
             INTEGRAL_MAX_DEPTH,
@@ -3801,33 +3845,168 @@ fn integrate(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
     total
 }
 
-/// `integrate`, but the converged leaves of the adaptive recursion are kept
-/// as odometer knots, so later point queries integrate only the short
-/// residual past the nearest knot instead of re-descending the whole
-/// refinement tree from a grid boundary.
-fn integrate_recording(f: &impl Fn(f64) -> f64, a: f64, b: f64, knots: &mut OdometerKnots) {
+/// Maps `f` at the Kronrod nodes to the Chebyshev coefficients of the
+/// degree-14 polynomial through them.
+static KRONROD_INTERPOLATION: LazyLock<[[f64; KRONROD_POINTS]; KRONROD_POINTS]> =
+    LazyLock::new(|| {
+        let abscissae = kronrod_abscissae();
+        let mut vandermonde = [[0.0; KRONROD_POINTS]; KRONROD_POINTS];
+        for (row, &x) in vandermonde.iter_mut().zip(&abscissae) {
+            row[0] = 1.0;
+            row[1] = x;
+            for degree in 2..KRONROD_POINTS {
+                row[degree] = 2.0 * x * row[degree - 1] - row[degree - 2];
+            }
+        }
+        inverse(vandermonde)
+    });
+
+/// Gauss–Jordan inversion with partial pivoting; panics on a singular
+/// matrix.
+fn inverse<const N: usize>(mut matrix: [[f64; N]; N]) -> [[f64; N]; N] {
+    let mut inverse = [[0.0; N]; N];
+    for (index, row) in inverse.iter_mut().enumerate() {
+        row[index] = 1.0;
+    }
+    for column in 0..N {
+        let pivot = (column..N)
+            .max_by(|&left, &right| {
+                matrix[left][column]
+                    .abs()
+                    .total_cmp(&matrix[right][column].abs())
+            })
+            .expect("a column below the diagonal is never empty");
+        assert!(matrix[pivot][column] != 0.0, "inverting a singular matrix");
+        matrix.swap(column, pivot);
+        inverse.swap(column, pivot);
+        let scale = 1.0 / matrix[column][column];
+        for entry in 0..N {
+            matrix[column][entry] *= scale;
+            inverse[column][entry] *= scale;
+        }
+        for row in 0..N {
+            if row == column {
+                continue;
+            }
+            let factor = matrix[row][column];
+            for entry in 0..N {
+                matrix[row][entry] -= factor * matrix[column][entry];
+                inverse[row][entry] -= factor * inverse[column][entry];
+            }
+        }
+    }
+    inverse
+}
+
+/// `Σ coefficients[k]·T_k(x)` by Clenshaw's recurrence.
+fn chebyshev_sum(coefficients: &[f64], x: f64) -> f64 {
+    let (mut next, mut after) = (0.0, 0.0);
+    for &coefficient in coefficients[1..].iter().rev() {
+        (next, after) = (2.0 * x * next - after + coefficient, next);
+    }
+    x * next - after + coefficients[0]
+}
+
+/// One leaf of the odometer: the integral, from the leaf's start, of the
+/// polynomial through the leaders' speed at its Kronrod nodes. Its total is
+/// the Kronrod estimate, and it grows at that polynomial's value, which the
+/// leaf only accepts where it stays on the leaders' speed: the follower's
+/// position must follow its velocity for its fit to close.
+struct OdometerLeaf {
+    centre: f64,
+    half: f64,
+    covered: [f64; KRONROD_POINTS + 1],
+}
+
+impl OdometerLeaf {
+    fn through(samples: &[f64; KRONROD_POINTS], a: f64, b: f64) -> (Self, [f64; KRONROD_POINTS]) {
+        let mut rate = [0.0; KRONROD_POINTS];
+        for (coefficient, row) in rate.iter_mut().zip(KRONROD_INTERPOLATION.iter()) {
+            *coefficient = row
+                .iter()
+                .zip(samples)
+                .map(|(weight, sample)| weight * sample)
+                .sum();
+        }
+        let mut covered = [0.0; KRONROD_POINTS + 1];
+        let beyond = |degree: usize| rate.get(degree).copied().unwrap_or(0.0);
+        covered[1] = rate[0] - 0.5 * beyond(2);
+        for degree in 2..=KRONROD_POINTS {
+            covered[degree] = (rate[degree - 1] - beyond(degree + 1)) / (2.0 * degree as f64);
+        }
+        covered[0] = -(1..=KRONROD_POINTS)
+            .map(|degree| {
+                if degree % 2 == 0 {
+                    covered[degree]
+                } else {
+                    -covered[degree]
+                }
+            })
+            .sum::<f64>();
+        let leaf = Self {
+            centre: 0.5 * (a + b),
+            half: 0.5 * (b - a),
+            covered,
+        };
+        (leaf, rate)
+    }
+
+    fn covered_until(&self, t: f64) -> f64 {
+        let x = ((t - self.centre) / self.half).clamp(-1.0, 1.0);
+        self.half * chebyshev_sum(&self.covered, x)
+    }
+}
+
+/// Where a leaf's rate is checked against the leaders' speed: midway
+/// between each pair of neighbouring Kronrod nodes, and between the
+/// outermost ones and the leaf's ends. Not at the ends themselves, where
+/// the leaders may cross a seam whose velocity steps by its fit's
+/// rounding.
+static ODOMETER_RATE_CHECKS: LazyLock<[f64; KRONROD_POINTS + 1]> = LazyLock::new(|| {
+    let mut bounded = [0.0; KRONROD_POINTS + 2];
+    bounded[0] = -1.0;
+    bounded[KRONROD_POINTS + 1] = 1.0;
+    bounded[1..=KRONROD_POINTS].copy_from_slice(&kronrod_abscissae());
+    let mut checks = [0.0; KRONROD_POINTS + 1];
+    for (check, pair) in checks.iter_mut().zip(bounded.windows(2)) {
+        *check = 0.5 * (pair[0] + pair[1]);
+    }
+    checks
+});
+
+/// The path `speed` covers over `[a, b]`, leaf by leaf, each converged on
+/// its total and on its rate. Where the leaders' speed bends sharply the
+/// total alone converges on intervals over which a leaf's rate runs
+/// tenths of a micrometre per second off the speed.
+fn odometer_leaves(
+    speed: &impl Fn(f64) -> f64,
+    a: f64,
+    b: f64,
+    leaf: &mut impl FnMut(f64, OdometerLeaf),
+) {
     if b - a <= 0.0 {
         return;
     }
     adaptive_gauss_kronrod(
-        f,
+        &|a, b, tol, last_chance| {
+            let samples = kronrod_samples(speed, a, b);
+            let half = 0.5 * (b - a);
+            let (kronrod, gauss) = kronrod_and_gauss(&samples, half);
+            if !last_chance && (kronrod - gauss).abs() > tol {
+                return None;
+            }
+            let (odometer_leaf, rate) = OdometerLeaf::through(&samples, a, b);
+            let centre = 0.5 * (a + b);
+            let follows_speed = ODOMETER_RATE_CHECKS.iter().all(|&x| {
+                (chebyshev_sum(&rate, x) - speed(centre + half * x)).abs() <= ODOMETER_RATE_TOL_MM_S
+            });
+            (last_chance || follows_speed).then_some(odometer_leaf)
+        },
         (a, b),
         INTEGRAL_TOL_MM,
         INTEGRAL_MAX_DEPTH,
-        &mut |end, value| knots.push_leaf(end, value),
+        leaf,
     );
-}
-
-/// The integral over `[a, b]`, inside one converged leaf of an
-/// [`integrate_recording`] tree, by the Kronrod rule the leaf converged
-/// under, applied once: a smooth function of `b` that meets the leaf's own
-/// value at its end, where refining wherever the error estimate crosses a
-/// tolerance would step the result there.
-fn integrate_within_leaf(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
-    if b - a <= 0.0 {
-        return 0.0;
-    }
-    gauss_kronrod(f, a, b).0
 }
 
 #[cfg(test)]
