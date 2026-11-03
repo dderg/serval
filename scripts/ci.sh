@@ -118,7 +118,7 @@ job_rust_test() {
 job_rust_fuzz() {
     cd "$RUST"
     local cases="${PROPTEST_CASES:-20000}"
-    local pipeline='binary(seam_schedule_fuzz) | binary(planner_fuzz)'
+    local pipeline='binary(seam_schedule_fuzz) | binary(planner_fuzz) | binary(planner_conservation_fuzz)'
     local profile="${FUZZ_NEXTEST_PROFILE:-ci}"
     local partition=()
     [ -z "${FUZZ_PARTITION:-}" ] || partition=(--partition "hash:$FUZZ_PARTITION")
