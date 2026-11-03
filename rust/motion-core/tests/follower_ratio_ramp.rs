@@ -87,7 +87,6 @@ fn sample(segments: &[ContinuousSegment]) -> Track {
         ve: Vec::new(),
     };
     let mut s = 0.0;
-    let mut previous: Option<(f64, f64)> = None;
     for segment in segments {
         let mut t = segment.t_start;
         while t < segment.t_end {
@@ -95,10 +94,7 @@ fn sample(segments: &[ContinuousSegment]) -> Track {
             let y = segment.eval_axis(1, t).expect("y evaluates");
             let e = segment.eval_axis(EXTRUDER_AXIS, t).expect("e evaluates");
             let speed = libm::hypot(x.velocity, y.velocity);
-            if let Some((previous_t, previous_speed)) = previous {
-                s += 0.5 * (previous_speed + speed) * (t - previous_t);
-            }
-            previous = Some((t, speed));
+            s += speed * SAMPLE_DT_S;
             track.path.push(s);
             track.speed.push(speed);
             track.e.push(e.position);
@@ -114,28 +110,6 @@ fn final_e(segments: &[ContinuousSegment]) -> f64 {
     last.eval_axis(EXTRUDER_AXIS, last.t_end)
         .expect("e evaluates at the end")
         .position
-}
-
-/// The source fit's position tolerance for a follower whose largest ratio
-/// is `largest_ratio`: the stream's path deviation scaled by that ratio,
-/// half of it left to any follower kernel after the source.
-fn follower_source_tolerance(largest_ratio: f64) -> f64 {
-    0.5 * config().fit_tol_mm * largest_ratio
-}
-
-/// The largest rise of `measure(e, path)` over any stretch of the track, and
-/// the path position the worst stretch ends at.
-fn largest_rise_over_a_stretch(track: &Track, measure: impl Fn(f64, f64) -> f64) -> (f64, f64) {
-    let mut least = f64::INFINITY;
-    let mut worst = (f64::NEG_INFINITY, f64::NAN);
-    for (&e, &path) in track.e.iter().zip(&track.path) {
-        let value = measure(e, path);
-        least = least.min(value);
-        if value - least > worst.0 {
-            worst = (value - least, path);
-        }
-    }
-    worst
 }
 
 /// The largest extruder velocity change between neighbouring samples.
@@ -249,20 +223,22 @@ fn ramps_on_segments_shorter_than_their_reach_stay_within_the_commanded_ratios()
         ],
     );
     let track = sample(&shaped(&gcode, ramped(0.02)));
-    let largest_ratio = 1.5 * RATIO;
-    let pinned_fit_error = 2.0 * follower_source_tolerance(largest_ratio);
-    let (taken_back, at) = largest_rise_over_a_stretch(&track, |e, _| -e);
-    assert!(
-        taken_back <= pinned_fit_error,
-        "the follower takes back {taken_back:e} mm by {at} mm, past the {pinned_fit_error:e} mm \
-         its fit tolerance allows at both ends of a stretch"
-    );
-    let (excess, at) = largest_rise_over_a_stretch(&track, |e, path| e - largest_ratio * path);
-    assert!(
-        excess <= pinned_fit_error,
-        "the follower lays {excess:e} mm beyond the largest commanded ratio by {at} mm, past the \
-         {pinned_fit_error:e} mm its fit tolerance allows at both ends of a stretch"
-    );
+    for index in 0..track.ve.len() {
+        assert!(
+            track.ve[index] >= -1e-6,
+            "the follower retracts at {} mm: {} mm/s",
+            track.path[index],
+            track.ve[index]
+        );
+        let moving = track.speed[index] > 1.0;
+        assert!(
+            !moving || track.ve[index] <= 1.5 * RATIO * track.speed[index] * (1.0 + 1e-3),
+            "the follower outruns the largest commanded ratio at {} mm: {} mm/s at {} mm/s",
+            track.path[index],
+            track.ve[index],
+            track.speed[index]
+        );
+    }
     let jump = largest_velocity_jump(&track);
     assert!(
         jump < 0.1,

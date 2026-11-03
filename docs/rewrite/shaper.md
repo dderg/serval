@@ -342,24 +342,30 @@ own raw fit when its leaders are unshaped — are therefore fitted with
 the signal's own velocity.
 
 A follower's fits are held to `max_path_deviation` times its largest demand
-ratio (`follower_tol_scale`; the projected source fit takes half of it),
-and each piece of duration `h` to the acceleration budget
+ratio (`follower_tol_scale`; the projected source fit takes half of it).
+Where an advance applies before projection — a kernel-free linear advance,
+with or without `ratio_ramp_time`, or a nonlinear advance before a kernel —
+the source fit fits the advanced signal itself, and each of its pieces of
+duration `h` is held to the acceleration budget
 `max(max_accel_deviation, 8ε/h²)` (`AccelBudget::PositionEquivalent`), `ε`
 being that position tolerance. Every rung meets the signal's position at
 both piece ends, and an error pinned there whose acceleration stays within
 `8ε/h²` stays within `ε` in between (`|δ(t)| ≤ max|δ''|·t(h−t)/2`): the
-acceleration budget spends the position budget, no more. That is all the
-bead can see. The melt lag `K` the bead model uses (`e_cmd = e_out +
-K·ė_out`, `tools/corner_flow.py`) turns any command error within `ε` into a
-nozzle-flow error of at most `2ε/K`, whatever its acceleration — `ε = 0.5 ·
-0.005 · 0.033 ≈ 83 nm` of filament and `K = 0.02 s` bound the flow error
-at 0.5 % of a 50 mm/s line and 0.08 % of a 300 mm/s one, before and after
-this budget, and `ε` is a thirtieth of a 7.73 mm / 3200-step extruder's
-step. An absolute 50 mm/s² on a pressure-advanced e, which carries
-`k·r·jerk` of the shaped path (~65 000 mm/s² on a 70 000 mm/s² Trident with
-`k = 0.02`), demanded pieces no deposition resolves. Leaders, and the
-follower's weld, edge-break and floor checks, keep the absolute budget; the
-fit audit holds every piece to the budget its fit resolved for it.
+acceleration budget spends the position budget, no more. The melt lag `K`
+the bead model uses (`e_cmd = e_out + K·ė_out`, `tools/corner_flow.py`)
+turns a command error within `ε` into a nozzle-flow error of at most
+`2ε/K` — `ε = 0.5 · 0.005 · 0.033 ≈ 83 nm` of filament and `K = 0.02 s`
+bound it at 0.5 % of a 50 mm/s line and 0.08 % of a 300 mm/s one. An
+absolute 50 mm/s² on that signal, which carries `k·r·jerk` of the shaped
+path (~65 000 mm/s² on a 70 000 mm/s² Trident with `k = 0.02`), demanded
+pieces no deposition resolves. Every other follower fit keeps the absolute
+budget: the plain projection a kernel chain's linear advance differentiates
+would turn velocity error `δ'` into `k·δ'` of command position, which the
+position-equivalent budget does not bound, and spending the position budget
+on a kernel's output moved the corner bead by up to 0.15 points at 50 mm/s.
+Leaders, and the follower's weld, edge-break and floor checks, keep the
+absolute budget; the fit audit holds every piece to the budget its fit
+resolved for it.
 
 Leader refits use ordered parallel work without changing the fitted signal.
 Axes run concurrently. Ordinary windows distribute whole target segments;

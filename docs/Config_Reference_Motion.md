@@ -33,9 +33,11 @@ max_accel: 3000
 #   (the extruder) are fitted to this times their largest extrusion ratio,
 #   clamped to 0.01..1.
 #max_accel_deviation: 50
-#   Optional. Default is 50 mm/s^2. Must be > 0. Follower axes hold each
-#   fitted piece of duration h to the looser of this and 8*e/h^2, e being
-#   their scaled path deviation: the acceleration error a piece pinned at
+#   Optional. Default is 50 mm/s^2. Must be > 0. A follower axis whose
+#   pressure advance applies before projection (no kernel after a linear
+#   advance, or a nonlinear advance before one) holds each piece of its
+#   advanced fit, of duration h, to the looser of this and 8*e/h^2, e being
+#   its scaled path deviation: the acceleration error a piece pinned at
 #   both ends can carry while staying within e.
 ```
 

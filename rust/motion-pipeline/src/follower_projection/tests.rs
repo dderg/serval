@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use nurbs::ScalarNurbs;
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
-use trajectory::{ContinuousAxis, ContinuousSegment};
+use trajectory::algos::{self, PostProcessorAlgo};
+use trajectory::{CompiledChain, ContinuousAxis, ContinuousSegment, PostProcessorInstance};
+
+use crate::lowering::AccelBudget;
 
 use super::{FollowerSignal, FollowerState, integrate};
 use crate::shaper::TrackSignal;
@@ -1657,12 +1660,76 @@ fn projection_starting_mid_window_skips_what_the_raw_fit_already_projected() {
 }
 
 #[test]
-fn a_follower_fit_scales_the_position_tolerance_and_spends_it_on_acceleration() {
-    let tolerance = super::follower_fit_tol(crate::lowering::FitTol::absolute(0.005, 50.0), 0.02);
-    assert_eq!(
-        tolerance.accel_budget,
-        crate::lowering::AccelBudget::PositionEquivalent
+fn a_follower_fit_scales_the_position_tolerance_and_keeps_its_acceleration_budget() {
+    let tolerance = super::follower_fit_tol(
+        crate::lowering::FitTol {
+            accel_budget: AccelBudget::PositionEquivalent,
+            ..crate::lowering::FitTol::absolute(0.005, 50.0)
+        },
+        0.02,
     );
+    assert_eq!(tolerance.accel_budget, AccelBudget::PositionEquivalent);
     assert!((tolerance.pos_mm - 1e-4).abs() < 1e-18);
     assert_eq!(tolerance.accel_mm_s2, 50.0);
+}
+
+fn e_chain(stages: &[(&str, &'static dyn PostProcessorAlgo, Vec<f64>)]) -> CompiledChain {
+    CompiledChain::compile(
+        &stages
+            .iter()
+            .map(|(name, algo, params)| PostProcessorInstance::new(name, *algo, params.clone()))
+            .collect::<Vec<_>>(),
+    )
+    .expect("extruder chain compiles")
+}
+
+fn source_budget(chain: &CompiledChain) -> AccelBudget {
+    super::source_accel_budget(super::LeadingAdvance::of(chain))
+}
+
+const LINEAR_ADVANCE: f64 = 0.02;
+const SMOOTH_TIME: f64 = 0.01;
+const TANH: [f64; 3] = [0.02, 0.05, 2.0];
+
+#[test]
+fn a_source_fitted_to_the_advanced_signal_spends_its_position_budget() {
+    for chain in [
+        e_chain(&[("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE])]),
+        e_chain(&[("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE])])
+            .with_ratio_ramp_time(0.015),
+        e_chain(&[
+            ("pa", &algos::TanhPressureAdvance, TANH.to_vec()),
+            ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
+        ]),
+    ] {
+        assert_eq!(source_budget(&chain), AccelBudget::PositionEquivalent);
+    }
+}
+
+#[test]
+fn a_source_fitted_to_the_plain_projection_keeps_the_absolute_budget() {
+    for chain in [
+        CompiledChain::default(),
+        CompiledChain::default().with_ratio_ramp_time(0.015),
+        e_chain(&[("st", &algos::SmoothTriangle, vec![SMOOTH_TIME])]),
+        e_chain(&[
+            ("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE]),
+            ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
+        ]),
+        e_chain(&[
+            ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
+            ("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE]),
+        ]),
+        e_chain(&[
+            ("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE]),
+            ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
+        ])
+        .with_ratio_ramp_time(0.015),
+        e_chain(&[
+            ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
+            ("pa", &algos::TanhPressureAdvance, TANH.to_vec()),
+        ]),
+    ] {
+        assert_eq!(source_budget(&chain), AccelBudget::Absolute);
+    }
 }
