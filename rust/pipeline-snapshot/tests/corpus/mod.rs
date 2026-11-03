@@ -28,7 +28,7 @@ pub struct Case {
 }
 
 pub fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    source_tree::repo_root()
 }
 
 fn motion_settings(config: &Path) -> planner_config::from_doc::MotionSettings {

@@ -34,10 +34,8 @@ fn every_command_is_distinct_and_carries_an_oid() {
 
 #[test]
 fn the_c_header_mirrors_every_argstring() {
-    let header = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src/sample_wire.h"),
-    )
-    .expect("src/sample_wire.h is the mirrored contract");
+    let header = std::fs::read_to_string(source_tree::repo_file("src/sample_wire.h"))
+        .expect("src/sample_wire.h is the mirrored contract");
     let flattened = header.replace("\\\n", "").replace('\n', " ");
     for argstring in SAMPLE_COMMANDS {
         assert!(
