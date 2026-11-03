@@ -50,7 +50,12 @@ pub fn stream_config(cfg: &PlannerConfig) -> Result<motion_pipeline::StreamConfi
         fit_tol_mm: cfg.fit_tolerance_mm,
         fit_tol_accel_mm_s2: cfg.fit_tolerance_accel_mm_s2,
         max_buffer_moves: STREAM_MAX_BUFFER_MOVES,
-        limits: z_capped_limits(cfg, cart.max_velocity, cart.max_accel, cart.corner_deviation)?,
+        limits: z_capped_limits(
+            cfg,
+            cart.max_velocity,
+            cart.max_accel,
+            cart.corner_deviation,
+        )?,
     })
 }
 

@@ -143,9 +143,17 @@ fn velocity_limits_z_caps_validate() {
     assert_eq!(path.max_z_velocity_mm_s, f64::INFINITY);
     assert_eq!(path.max_z_accel_mm_s2, f64::INFINITY);
     let capped = path.with_z_caps(25.0, 100.0).unwrap();
-    assert_eq!((capped.max_z_velocity_mm_s, capped.max_z_accel_mm_s2), (25.0, 100.0));
+    assert_eq!(
+        (capped.max_z_velocity_mm_s, capped.max_z_accel_mm_s2),
+        (25.0, 100.0)
+    );
     assert!(path.with_z_caps(f64::INFINITY, f64::INFINITY).is_ok());
-    for (velocity, accel) in [(0.0, 100.0), (25.0, -1.0), (f64::NAN, 100.0), (25.0, f64::NAN)] {
+    for (velocity, accel) in [
+        (0.0, 100.0),
+        (25.0, -1.0),
+        (f64::NAN, 100.0),
+        (25.0, f64::NAN),
+    ] {
         assert!(path.with_z_caps(velocity, accel).is_err());
     }
 }

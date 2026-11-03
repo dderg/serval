@@ -164,7 +164,10 @@ fn gentle_blend_at_printing_speed_keeps_its_speed_and_most_of_the_path_budget() 
     assert_eq!(ceiling, 200.0);
     let worst = worst_z_accel(&gentle, ceiling, accel);
     assert!((worst - MAX_Z_ACCEL).abs() < 1e-9 * MAX_Z_ACCEL, "{worst}");
-    assert!(accel > 300.0 * MAX_Z_ACCEL, "budget {accel} collapsed toward max_z_accel");
+    assert!(
+        accel > 300.0 * MAX_Z_ACCEL,
+        "budget {accel} collapsed toward max_z_accel"
+    );
 }
 
 /// The same blend at travel speed: the normal load alone would pass the z
@@ -216,7 +219,7 @@ fn tight_z_corner_cuts_the_whole_budget_to_the_z_cap() {
 fn line_caps_are_the_z_share_caps() {
     let moves = path(&[[0.0, 0.0, 0.0], [3.0, 4.0, 1.25]], &[1000.0]);
     let segment = moves[0].segment.spatial.as_ref().unwrap();
-    let z_share = 1.25 / 5.0f64.hypot(1.25);
+    let z_share = 1.25 / libm::hypot(5.0, 1.25);
     let (ceiling, accel) = z_capped(segment, &limits(), 0.0, 1000.0);
     assert!((ceiling - MAX_Z_VELOCITY / z_share).abs() < 1e-9);
     assert!((accel - MAX_Z_ACCEL / z_share).abs() < 1e-9);

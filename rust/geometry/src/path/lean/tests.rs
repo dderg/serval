@@ -25,10 +25,22 @@ fn sampled_lean(segment: &Segment) -> (f64, f64) {
 fn assert_lean_matches_samples(segment: &Segment) {
     let lean = segment.lean_on(Z);
     let (heading, normal) = sampled_lean(segment);
-    assert!(lean.heading >= heading - 1e-12, "{lean:?} vs sampled heading {heading}");
-    assert!(lean.heading <= heading + 1e-6, "{lean:?} vs sampled heading {heading}");
-    assert!(lean.normal >= normal - 1e-12, "{lean:?} vs sampled normal {normal}");
-    assert!(lean.normal <= normal + 1e-6, "{lean:?} vs sampled normal {normal}");
+    assert!(
+        lean.heading >= heading - 1e-12,
+        "{lean:?} vs sampled heading {heading}"
+    );
+    assert!(
+        lean.heading <= heading + 1e-6,
+        "{lean:?} vs sampled heading {heading}"
+    );
+    assert!(
+        lean.normal >= normal - 1e-12,
+        "{lean:?} vs sampled normal {normal}"
+    );
+    assert!(
+        lean.normal <= normal + 1e-6,
+        "{lean:?} vs sampled normal {normal}"
+    );
     assert!(lean.plane >= lean.heading.max(lean.normal) - 1e-12);
 }
 

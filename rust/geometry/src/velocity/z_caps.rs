@@ -28,10 +28,7 @@ pub(super) fn z_capped(
     let max_z_accel = limits.max_z_accel_mm_s2;
     let ceiling = path_ceiling.min(limits.max_z_velocity_mm_s / lean.heading);
     let split = split_z_accel(lean, max_z_accel, kappa_peak, ceiling, limits.accel_mm_s2);
-    let plane = (
-        ceiling,
-        limits.accel_mm_s2.min(max_z_accel / lean.plane),
-    );
+    let plane = (ceiling, limits.accel_mm_s2.min(max_z_accel / lean.plane));
     let length = segment.s_len();
     if crossing_time(length, kappa_peak, plane) < crossing_time(length, kappa_peak, split) {
         plane

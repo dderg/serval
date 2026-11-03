@@ -65,8 +65,8 @@ impl Clothoid {
 /// `−plane·sin(φ − α)` with `plane = |(u_k, v_k)|`, `α = atan2(v_k, u_k)`,
 /// maximised over the heading angles `[lo, hi]` the curve sweeps.
 fn planar_lean(u_k: f64, v_k: f64, lo: f64, hi: f64) -> AxisLean {
-    let plane = u_k.hypot(v_k);
-    let alpha = v_k.atan2(u_k);
+    let plane = libm::hypot(u_k, v_k);
+    let alpha = libm::atan2(v_k, u_k);
     AxisLean {
         heading: plane * max_abs_cos(lo - alpha, hi - alpha),
         normal: plane * max_abs_cos(lo - alpha - FRAC_PI_2, hi - alpha - FRAC_PI_2),
