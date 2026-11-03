@@ -691,3 +691,55 @@ fn an_apex_graded_step_ending_off_its_knot_recomputes_the_next_start() {
         }
     }
 }
+
+/// The worst the rail's interpolated acceleration leaves the law's own
+/// `a(s, v)` at the interpolated state, over dense times.
+fn worst_law_miss(seg: &LawSegment) -> f64 {
+    (0..=20_000)
+        .map(|i| {
+            let t = seg.dt * f64::from(i) / 20_000.0;
+            let (s, v, a) = seg.state_at(seg.t0 + t);
+            (a - seg.law.accel_at(s - seg.s0, v)).abs()
+        })
+        .fold(0.0_f64, f64::max)
+}
+
+/// A 70 000 mm/s² Trident corner's rail: it runs onto its curvature cap
+/// inside one grid step, rides it, and leaves it again before its end.
+fn rail_onto_and_off_its_cap() -> LawSegment {
+    rail(12.45, 70_000.0, 400.0, 634_643.703_105_817_3, false, 0.0007)
+}
+
+const LAW_MISS_SHARE: f64 = 1e-3;
+
+#[test]
+fn a_rail_running_onto_its_cap_inside_a_step_follows_the_law_through_the_contact() {
+    let seg = rail_onto_and_off_its_cap();
+    assert_eq!(
+        seg.cap_contact_times().len(),
+        2,
+        "the fixture must run onto its cap and leave it"
+    );
+    let worst = worst_law_miss(&seg);
+    assert!(
+        worst <= LAW_MISS_SHARE * 70_000.0,
+        "the interpolant leaves the law by {worst} mm/s² across the cap contacts"
+    );
+}
+
+#[test]
+fn a_cut_inside_the_step_that_runs_onto_the_cap_follows_the_law() {
+    let seg = rail_onto_and_off_its_cap();
+    let contact = seg.cap_contact_times()[0] - seg.t0;
+    let (contact_arc, _, _) = seg.state_at(seg.t0 + contact);
+    for share in [0.5, 0.9, 0.95, 0.97, 0.98, 0.99] {
+        let cut = seg
+            .cut_at_arc(share * (contact_arc - seg.s0))
+            .expect("the cut lies inside the rail");
+        let worst = worst_law_miss(&cut);
+        assert!(
+            worst <= LAW_MISS_SHARE * 70_000.0,
+            "cut at {share} of the contact arc: the interpolant leaves the law by {worst} mm/s²"
+        );
+    }
+}

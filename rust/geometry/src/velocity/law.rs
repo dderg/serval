@@ -261,6 +261,23 @@ impl ScalarLaw {
         }
     }
 
+    /// The `v²` at which the curvature at arc `ds` takes the whole budget,
+    /// `A/|κ|`; `None` for constant acceleration or a straight.
+    fn cap_speed_squared(&self, ds: f64) -> Option<f64> {
+        match *self {
+            ScalarLaw::ConstAccel { .. } => None,
+            ScalarLaw::DiskRail {
+                accel,
+                kappa0,
+                sigma,
+                ..
+            } => {
+                let kappa = (kappa0 + sigma * ds).abs();
+                (kappa > 0.0).then(|| accel / kappa)
+            }
+        }
+    }
+
     /// Time derivative of `accel_at` along the law's own trajectory, used to
     /// interpolate a velocity whose derivative is the law acceleration.
     fn accel_rate_at(&self, ds: f64, v: f64, a: f64) -> f64 {
@@ -1103,9 +1120,111 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<Vec<RailK
                 step
             }
         };
-        layout.lay(s_next, s + h, step, CapDeparture::None);
+        if !law.in_cap_contact(lo.a) && law.in_cap_contact(step.hi.a) {
+            lay_approach(law, &mut layout, &lo, (s, s_next, h), step, last)?;
+        } else if law.in_cap_contact(lo.a) && !law.in_cap_contact(step.hi.a) {
+            let increment = departure_increment(law, s, h, w);
+            let departure =
+                settle_rail_step(law, &lo, h, w, increment, last, departure_knot_duration)?;
+            layout.lay(s_next, s + h, departure, CapDeparture::FromLo);
+        } else {
+            layout.lay(s_next, s + h, step, CapDeparture::None);
+        }
     }
     Some(Arc::new(layout.knots))
+}
+
+/// Lays a step from `lo`, off the cap, whose end `step` reached reads in
+/// contact with it. Where the solution reaches the cap inside the step the
+/// step splits there: the approach onto the cap, whose acceleration falls
+/// to zero as the square root of the time left — the mirror of a departure
+/// — then the departure from the contact over the rest of the step. A step
+/// ending in the contact band short of the cap is the approach alone.
+fn lay_approach(
+    law: &ScalarLaw,
+    layout: &mut RailLayout,
+    lo: &RailState,
+    (s, s_next, h): (f64, f64, f64),
+    step: RailStep,
+    last: bool,
+) -> Option<()> {
+    let approach_duration = |hi: &RailState, ds: f64| {
+        departure_knot_duration(ds, (hi.v, -hi.a, hi.rate), (lo.v, -lo.a, lo.rate))
+    };
+    let Some((reach, w_contact)) = cap_contact_in_step(law, s, lo.v * lo.v, h) else {
+        let duration = approach_duration(&step.hi, h);
+        layout.lay(s_next, s + h, RailStep { duration, ..step }, CapDeparture::FromHi);
+        return Some(());
+    };
+    let s_contact = s + reach;
+    let rest = h - reach;
+    let contact = rail_state(law, s_contact, w_contact);
+    let approach = RailStep {
+        w_next: w_contact,
+        hi: contact,
+        rise: contact.v - lo.v,
+        duration: approach_duration(&contact, reach),
+    };
+    if rest <= 0.0 {
+        layout.lay(s_next, s + h, approach, CapDeparture::FromHi);
+        return Some(());
+    }
+    layout.lay(s_contact, s_contact, approach, CapDeparture::FromHi);
+    let increment = departure_increment(law, s_contact, rest, w_contact);
+    let departure = settle_rail_step(
+        law,
+        &contact,
+        rest,
+        w_contact,
+        increment,
+        last,
+        departure_knot_duration,
+    )?;
+    layout.lay(s_next, s + h, departure, CapDeparture::FromLo);
+    Some(())
+}
+
+/// Bisection steps locating a contact inside one grid step.
+const CONTACT_BISECTIONS: usize = 64;
+
+/// Where inside `(s, s + h]` the solution from `v² = w` at `s` reaches the
+/// cap `v² = A/|κ|`, as the arc past `s` and the cap's `v²` there: the
+/// contact whose approach, integrated back from the cap, lands on `w` at
+/// `s`. `None` when the step does not reach the cap.
+fn cap_contact_in_step(law: &ScalarLaw, s: f64, w: f64, h: f64) -> Option<(f64, f64)> {
+    let cap = law.cap_speed_squared(s + h)?;
+    let landing = |reach: f64| -> Option<f64> {
+        let cap = law.cap_speed_squared(s + reach)?;
+        Some(cap + approach_increment(law, s + reach, reach, cap) - w)
+    };
+    if landing(h)? > 0.0 || cap <= 0.0 {
+        return None;
+    }
+    let (mut short, mut reaches) = (0.0, h);
+    for _ in 0..CONTACT_BISECTIONS {
+        let middle = 0.5 * (short + reaches);
+        if middle <= short || middle >= reaches {
+            break;
+        }
+        if landing(middle)? > 0.0 {
+            short = middle;
+        } else {
+            reaches = middle;
+        }
+    }
+    Some((reaches, law.cap_speed_squared(s + reaches)?))
+}
+
+/// The change in `v²` from the cap at `s` back over `h` of arc, the mirror
+/// of [`departure_increment`]: the approach reaches the cap as
+/// `(s − s')^(3/2)`, smooth in `x = √((s − s')/h)`.
+fn approach_increment(law: &ScalarLaw, s: f64, h: f64, w: f64) -> f64 {
+    let slope = |x: f64, w: f64| -4.0 * h * x * law.accel_at(s - h * x * x, w.max(0.0).sqrt());
+    let k1 = slope(0.0, w);
+    let k2 = slope(0.5, w + 0.5 * k1);
+    let k3 = slope(0.5, w + 0.5 * k2);
+    let k4 = slope(1.0, w + k3);
+    (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0
 }
 
 /// The rail's knots as [`integrate_rail_arc`] lays them, with the state the
