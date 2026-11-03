@@ -605,11 +605,12 @@ impl LawSegment {
     fn cut_at_time(&self, tau: f64) -> LawSegment {
         let knots = self.rail_knots();
         let (s, v, _) = self.state_at(self.t0 + tau);
-        let mut cut: Vec<RailKnot> = knots
+        let kept = knots
             .iter()
-            .take_while(|knot| knot.t < tau)
-            .copied()
-            .collect();
+            .position(|knot| !(knot.t < tau))
+            .unwrap_or(knots.len());
+        let mut cut = Vec::with_capacity(kept + 2);
+        cut.extend_from_slice(&knots[..kept]);
         let (rise, departure) = match cut.last() {
             Some(lo) => {
                 let hi = &knots[cut.len()];
