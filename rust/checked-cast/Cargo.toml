@@ -1,0 +1,11 @@
+[package]
+name = "checked-cast"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "Float to integer conversions that refuse NaN, infinity and out-of-range values instead of saturating or truncating."
+license.workspace = true
+
+[lints]
+workspace = true

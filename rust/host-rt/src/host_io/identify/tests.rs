@@ -2,7 +2,8 @@ use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
-use super::{IdentifyOutcome, wait_for_klipper_frame};
+use super::{IdentifyOutcome, decode_identify_response, wait_for_klipper_frame};
+use crate::host_io::parser::encode_vlq;
 use crate::host_io::serial_frame_io::SerialFrameIo;
 use crate::host_io::wire::build_frame;
 
@@ -186,4 +187,24 @@ fn nak_seq_state_is_adopted_from_batch() {
     .expect("scripted port never errors fatally");
     assert!(matches!(outcome, IdentifyOutcome::Nak));
     assert_eq!(mcu_recv_abs, 7);
+}
+
+fn identify_packet(offset: i64) -> Vec<u8> {
+    let mut body = vec![0u8];
+    encode_vlq(&mut body, offset).unwrap();
+    encode_vlq(&mut body, 0).unwrap();
+    let mut packet = vec![0u8, 0u8];
+    packet.extend(body);
+    packet.extend([0u8, 0u8, 0u8]);
+    packet
+}
+
+#[test]
+fn an_identify_chunk_offset_inside_u32_is_decoded() {
+    assert!(decode_identify_response(&identify_packet(40)).is_some());
+}
+
+#[test]
+fn a_negative_identify_chunk_offset_is_rejected_not_read_as_a_huge_one() {
+    assert!(decode_identify_response(&identify_packet(-1)).is_none());
 }

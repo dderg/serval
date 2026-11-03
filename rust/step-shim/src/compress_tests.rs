@@ -228,3 +228,16 @@ fn step_clock_matches_recurrence() {
     }
     assert_eq!(m.last_clock(400), clock);
 }
+
+#[test]
+#[should_panic(expected = "beyond what a stepcompress window can represent")]
+fn a_step_more_than_i63_ticks_past_the_last_step_clock_is_refused() {
+    let steps = [u64::MAX];
+    let window = Window {
+        steps: &steps,
+        pos: 0,
+        last_step_clock: 0,
+        max_error: 1,
+    };
+    let _ = window.minmax_point(0);
+}

@@ -69,10 +69,20 @@ struct Window<'a> {
 }
 
 impl Window<'_> {
+    fn offset_of(&self, index: usize) -> i64 {
+        let ticks = self.steps[index] - self.last_step_clock;
+        i64::try_from(ticks).unwrap_or_else(|_| {
+            panic!(
+                "step {index} lies {ticks} ticks past the last step clock, beyond what a \
+                 stepcompress window can represent"
+            )
+        })
+    }
+
     fn minmax_point(&self, index: usize) -> Points {
-        let point = (self.steps[index] - self.last_step_clock) as i64;
+        let point = self.offset_of(index);
         let prevpoint = if index > self.pos {
-            (self.steps[index - 1] - self.last_step_clock) as i64
+            self.offset_of(index - 1)
         } else {
             0
         };

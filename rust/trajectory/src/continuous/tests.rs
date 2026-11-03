@@ -2526,3 +2526,26 @@ fn buzz_bounds_capture_extrema_hidden_between_partition_ends() {
         "ceiling {ceiling} is loose against the peak {peak}"
     );
 }
+
+#[test]
+fn a_span_whose_duration_has_no_cut_count_is_refused_not_cut_into_nothing() {
+    let signal = motor_span(
+        ContinuousAxis::Hold {
+            position: 4.0,
+            t_start: 0.0,
+            t_end: 0.061,
+        },
+        0.0,
+        0.061,
+    );
+    let mut clocked =
+        ClockedMotorSpan::try_new(signal, 0.0, 0.061, 3.0, 3.061, 500.25, 100_000.0).unwrap();
+    for end in [f64::INFINITY, f64::NAN, 1.0e300] {
+        clocked.stream_t_end = end;
+        let error = clocked.split_max_duration().unwrap_err();
+        assert!(
+            matches!(error, ContinuousError::NotRepresentable { .. }),
+            "{end}: {error:?}"
+        );
+    }
+}

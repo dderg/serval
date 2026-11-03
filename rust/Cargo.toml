@@ -23,6 +23,7 @@ members = [
     "ethercat-setpoint-fill",
     "shaper-ident",
     "step-shim",
+    "checked-cast",
 ]
 exclude = ["gcode/fuzz", "snapshot-viewer", "motion-playground"]
 resolver = "2"
@@ -201,6 +202,9 @@ debug = false
 # identical. The snapshot profile inherits this. nurbs, geometry and trajectory
 # are left out: their evaluation and fitting loops cost +2..6% CPU on the dense
 # replay with checks on, the rest +0.2..0.3% (scripts/bench_compare.py).
+[profile.release.package.checked-cast]
+overflow-checks = true
+
 [profile.release.package.config-doc]
 overflow-checks = true
 

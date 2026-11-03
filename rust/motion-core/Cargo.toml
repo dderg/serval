@@ -8,6 +8,7 @@ description = "PyO3-free core of the motion engine: pump, worker, enqueue, homin
 license.workspace = true
 
 [dependencies]
+checked-cast = { path = "../checked-cast" }
 host-rt = { path = "../host-rt" }
 mcu-protocol = { path = "../mcu-protocol" }
 trajectory = { path = "../trajectory" }
