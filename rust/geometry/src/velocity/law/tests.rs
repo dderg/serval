@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use super::{
-    CAP_CONTACT_FRACTION, CapDeparture, FULL_RAIL_KNOTS, LawSegment, RAIL_KNOT_DS, RAIL_KNOTS_MAX,
-    RAIL_KNOTS_MIN, RailKnot, SPARE_FULL_RAILS, ScalarLaw, departure_increment,
+    CAP_CONTACT_FRACTION, CapDeparture, FULL_RAIL_KNOTS, KnotSlopes, LawSegment, RAIL_KNOT_DS,
+    RAIL_KNOTS_MAX, RAIL_KNOTS_MIN, RailKnot, SPARE_FULL_RAILS, ScalarLaw, departure_increment,
     departure_knot_duration, knot_duration, trim_spare_full_rails,
 };
 
@@ -348,6 +348,104 @@ fn a_brake_landing_on_a_slowly_falling_cap_follows_the_law_through_its_contact_b
     );
 }
 
+/// A rail that runs into its curvature cap inside a knot pair — the reversed
+/// rail of a brake whose onset sits just past a cap contact runs on into the
+/// cap the forward rail left. Past the cap the law reads no tangential
+/// budget, so the pair's quintic misses the square-root approach and its
+/// acceleration leaves the law's by hundreds of mm/s² inside the pair.
+fn rail_running_into_its_cap() -> (LawSegment, f64, f64) {
+    let seg = rail(12.5556, 70_000.0, 422.616, 634_643.7, false, 1e-4);
+    let knots = seg.rail_knots();
+    let accel = |knot: &RailKnot| seg.law.accel_at(knot.s, knot.v);
+    let crossing = knots
+        .windows(2)
+        .find(|pair| accel(&pair[0]) > 0.0 && accel(&pair[1]) == 0.0)
+        .map(|pair| (pair[0].t, pair[1].t))
+        .expect("fixture must run into its cap inside a knot pair");
+    (seg, crossing.0, crossing.1)
+}
+
+/// The largest gaps in arc, speed and acceleration between two readings of
+/// a motion over `times`.
+fn worst_gap(
+    times: impl Iterator<Item = f64>,
+    reading: impl Fn(f64) -> ((f64, f64, f64), (f64, f64, f64)),
+) -> [f64; 3] {
+    times.fold([0.0; 3], |worst, t| {
+        let ((s, v, a), (other_s, other_v, other_a)) = reading(t);
+        [
+            worst[0].max((s - other_s).abs()),
+            worst[1].max((v - other_v).abs()),
+            worst[2].max((a - other_a).abs()),
+        ]
+    })
+}
+
+fn kept_stretch(lo: f64, tau: f64) -> impl Iterator<Item = f64> {
+    (0..=64).map(move |k| lo + (tau - lo) * f64::from(k) / 64.0)
+}
+
+#[test]
+fn a_rail_cut_inside_a_knot_pair_keeps_the_motion_its_interpolant_describes() {
+    let accel = 5000.0;
+    let departing = rail((accel / 2.0_f64).sqrt(), accel, 2.0, -40.0, false, 0.05);
+    let departure_pair = {
+        let knots = departing.rail_knots();
+        assert_eq!(
+            knots[1].departure,
+            CapDeparture::FromLo,
+            "fixture must depart its cap"
+        );
+        (knots[0].t, knots[1].t)
+    };
+    for (seg, (lo, hi)) in [
+        (departing.clone(), departure_pair),
+        {
+            let (seg, lo, hi) = rail_running_into_its_cap();
+            (seg, (lo, hi))
+        },
+    ] {
+        for share in [0.15, 0.5, 0.85] {
+            let tau = lo + share * (hi - lo);
+            let cut = seg.cut_at_time(tau);
+            let gap = worst_gap(kept_stretch(lo, tau), |t| {
+                (cut.state_at(t), seg.state_at(t))
+            });
+            assert!(
+                gap[0] <= 1e-15 && gap[1] <= 1e-12 && gap[2] <= 1e-6,
+                "cut {share} of the way into a pair, the kept stretch leaves the rail's motion \
+                 by {gap:?} in arc, speed and acceleration"
+            );
+        }
+    }
+}
+
+/// A brake is its reversed rail cut at the onset and flipped: the flip keeps
+/// the cut's motion, mirrored in time.
+#[test]
+fn a_brake_flipped_from_a_rail_cut_inside_a_knot_pair_keeps_its_motion() {
+    let (reversed, lo, hi) = rail_running_into_its_cap();
+    let onset = reversed.state_at(lo + 0.15 * (hi - lo)).0;
+    let brake_law = ScalarLaw::DiskRail {
+        accel: 70_000.0,
+        kappa0: 634_643.7_f64.mul_add(onset, 422.616),
+        sigma: -634_643.7,
+        brake: true,
+    };
+    let cut = reversed.cut_at_arc(onset).expect("the onset lies on the rail");
+    let (brake, _) = reversed
+        .flipped_cut(0.0, 0.0, brake_law, onset)
+        .expect("the onset lies on the rail");
+    let gap = worst_gap(kept_stretch(lo, cut.dt), |t| {
+        let (s, v, a) = cut.state_at(t);
+        (brake.state_at(cut.dt - t), (onset - s, v, -a))
+    });
+    assert!(
+        gap[0] <= 1e-15 && gap[1] <= 1e-12 && gap[2] <= 1e-6,
+        "the brake leaves its reversed cut's motion by {gap:?} in arc, speed and acceleration"
+    );
+}
+
 #[test]
 fn min_velocity_reports_the_brake_end() {
     let seg = rail(7.0, 1000.0, 0.0, 1838.0, true, 0.024);
@@ -373,6 +471,7 @@ fn integrate_rail_arc_recomputing_step_ends(
             v: v0,
             rise: 0.0,
             departure: CapDeparture::None,
+            slopes: KnotSlopes::Law,
         };
         return Some(Arc::new(vec![knot, knot]));
     }
@@ -401,6 +500,7 @@ fn integrate_rail_arc_recomputing_step_ends(
         v: v0,
         rise: 0.0,
         departure: CapDeparture::None,
+        slopes: KnotSlopes::Law,
     });
     let f = |s: f64, w: f64| 2.0 * law.accel_at(s, w.max(0.0).sqrt());
     for i in 0..steps {
@@ -452,6 +552,7 @@ fn integrate_rail_arc_recomputing_step_ends(
             v: w.sqrt(),
             rise,
             departure,
+            slopes: KnotSlopes::Law,
         });
     }
     Some(Arc::new(knots))
