@@ -16,16 +16,14 @@ G-code asks for at the same instant of the unshaped plan, so ratio changes
     python3 tools/corner_flow.py tools/bench/printer.cfg
     python3 tools/corner_flow.py printer.cfg --sweep smooth_time=0,0.005,0.02
     python3 tools/corner_flow.py printer.cfg --set pa.k=0.04 --json
-    python3 tools/corner_flow.py printer.cfg --ramp 0.015
-    python3 tools/corner_flow.py printer.cfg --ramp 0.015 \
-        --sweep ratio_ramp_time=0.005,0.01,0.02,0.04
+    python3 tools/corner_flow.py printer.cfg --kernel-free
 
-``--ramp TAU`` evaluates the config's chain with its extruder smoothing
-kernels taken out and ``[axis e] ratio_ramp_time: TAU`` in their place;
-``ratio_ramp_time`` sweeps and sets like a post-processor parameter. A
-ramp needs extrude-only caps, and the retract case is only comparable
-between chains under the same ones: ``--extrude-only V,A`` fills in
-whichever the config lacks, for every chain.
+``--kernel-free`` evaluates the config's chain with its extruder smoothing
+kernels taken out: every follower ramps its extrusion-ratio steps by the
+ramp time its limits derive, kernel or not. An advance with no kernel
+needs extrude-only caps, and the retract case is only comparable between
+chains under the same ones: ``--extrude-only V,A`` fills in whichever the
+config lacks, for every chain.
 
 Each case plans in a process of its own: a planner panic fails that case
 alone, as an ERROR row carrying the panic's message.
@@ -183,7 +181,6 @@ GEOMETRIES = (
     retract(),
 )
 KERNEL_TYPES = ("smooth_triangle", "smooth_bell", "smooth_mzv", "smooth_zv")
-AXIS_OPTIONS = ("ratio_ramp_time",)
 
 
 def gcode(geometry: Geometry, speed: float, ratio: float) -> str:
@@ -269,9 +266,6 @@ class PrinterConfig:
         return self.fileconfig.get(f"post_processor {name}", "type").strip()
 
     def set_param(self, target: str, value: str) -> None:
-        if target in AXIS_OPTIONS:
-            self.fileconfig.set(self.follower_axis(), target, value)
-            return
         name, _, option = target.rpartition(".")
         names = [name] if name else self.chain(self.follower_axis())
         sections = [
@@ -291,22 +285,7 @@ class PrinterConfig:
                 continue
             if clone.fileconfig.has_option(section, "post_processors"):
                 clone.fileconfig.set(section, "post_processors", "")
-            for option in AXIS_OPTIONS:
-                clone.drop_option(section, option)
         return clone
-
-    def drop_option(self, section: str, option: str) -> None:
-        if not self.fileconfig.has_option(section, option):
-            return
-        kept = [
-            (name, self.fileconfig.get(section, name))
-            for name in self.fileconfig.options(section)
-            if name != option
-        ]
-        self.fileconfig.remove_section(section)
-        self.fileconfig.add_section(section)
-        for name, value in kept:
-            self.fileconfig.set(section, name, value)
 
     def with_extrude_only_caps(self, caps: tuple[str, str]) -> PrinterConfig:
         clone = self.copy()
@@ -317,9 +296,8 @@ class PrinterConfig:
                 clone.fileconfig.set("extruder", option, value)
         return clone
 
-    def ramped(self, ramp_time: str) -> PrinterConfig:
-        """The chain with its follower smoothing kernels replaced by a
-        ratio ramp of `ramp_time` seconds."""
+    def kernel_free(self) -> PrinterConfig:
+        """The chain with its follower smoothing kernels taken out."""
         clone = self.copy()
         axis = clone.follower_axis()
         kept = [
@@ -328,7 +306,6 @@ class PrinterConfig:
             if clone.post_processor_type(name) not in KERNEL_TYPES
         ]
         clone.fileconfig.set(axis, "post_processors", ", ".join(kept))
-        clone.fileconfig.set(axis, "ratio_ramp_time", ramp_time)
         return clone
 
     def describe(self) -> str:
@@ -342,12 +319,7 @@ class PrinterConfig:
                 if option != "type"
             )
             stages.append(f"{self.post_processor_type(name)}({params})")
-        ramp = (
-            f" ratio_ramp_time={self.fileconfig.get(axis, 'ratio_ramp_time')}"
-            if self.fileconfig.has_option(axis, "ratio_ramp_time")
-            else ""
-        )
-        return f"[{axis}] " + " -> ".join(stages or ["(empty)"]) + ramp
+        return f"[{axis}] " + " -> ".join(stages or ["(empty)"])
 
     def without_advance(self) -> PrinterConfig:
         clone = self.copy()
@@ -648,9 +620,9 @@ def main() -> None:
         help="comma-separated feed rates, mm/s",
     )
     parser.add_argument(
-        "--ramp",
-        metavar="TAU",
-        help="replace the follower's smoothing kernels with ratio_ramp_time TAU",
+        "--kernel-free",
+        action="store_true",
+        help="take the follower's smoothing kernels out of its chain",
     )
     parser.add_argument(
         "--extrude-only",
@@ -672,8 +644,8 @@ def main() -> None:
     base = PrinterConfig.load(args.config).with_extrude_only_caps(
         (velocity, accel)
     )
-    if args.ramp:
-        base = base.ramped(args.ramp)
+    if args.kernel_free:
+        base = base.kernel_free()
     for assignment in args.set:
         target, _, value = assignment.partition("=")
         base.set_param(target, value)
