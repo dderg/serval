@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use motion_core::seam_test_harness::LiveReplay;
 use motion_pipeline::TrajectoryItem;
 
-const DENSE_PRINT_HEAD_LINES: usize = 200;
+const DENSE_PRINT_HEAD_LINES: usize = 1100;
 
 fn repo() -> PathBuf {
     source_tree::repo_root()

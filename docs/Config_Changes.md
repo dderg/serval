@@ -23,6 +23,19 @@ the extruder velocity steps a ratio-ramped advance makes where a followed
 axis, usually z, is not shaped; `[extruder] instantaneous_corner_velocity`
 is rejected with a pointer to it.
 
+20261103: A `[printer]` section that sets neither `corner_deviation`
+nor `square_corner_velocity` now plans corners with
+`corner_deviation: 0.04` (mm), at every `max_accel`. It used to
+inherit Klipper's implicit `square_corner_velocity: 5`: a budget of
+0.0035 mm at 3000 mm/s² and less at higher accelerations, which made
+nearly every corner a full stop. On a dense print the old default
+planned 15 times as many segments and took 1.3–1.9× as long. On fast
+machines it fell below 3× realtime on a single core. Configs that set
+either option keep it, and setting both is still an error. To keep
+the old corners, set `square_corner_velocity: 5` explicitly. The
+measurements behind the value are in the
+[motion config reference](Config_Reference_Motion.md#why-the-corner-budget-defaults-to-004-mm).
+
 20260729: CAN bus micro-controllers are supported again on this fork.
 `[mcu] canbus_uuid` is accepted instead of `serial`, alongside a new
 optional `canbus_interface` (default `can0`). A CAN micro-controller

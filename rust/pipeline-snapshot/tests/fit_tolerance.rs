@@ -130,3 +130,14 @@ fn every_fit_piece_of_the_dense_print_holds_the_fit_tolerance_on_the_trident_ram
 fn every_fit_piece_of_the_dense_print_holds_the_fit_tolerance_on_the_trident_kernel_chain() {
     assert_every_accepted_fit_piece_holds(dense_cases(&["tools/bench/configs/trident_kernel.cfg"]));
 }
+
+/// A 3 000 mm/s² bowden bedslinger planning its corners by deviation, whose
+/// source fit lays degree-13 pieces a tenth of a second long next to its
+/// cap contacts.
+#[test]
+fn every_fit_piece_of_the_dense_print_holds_the_fit_tolerance_on_the_bowden_corner_deviation_profile()
+ {
+    assert_every_accepted_fit_piece_holds(dense_cases(&[
+        "tools/bench/configs/p1_bowden_bedslinger_kernel_cd0.04.cfg",
+    ]));
+}

@@ -265,10 +265,10 @@ fn input_jumps_at(input: &AxisSignalTable, at: f64) -> Option<JumpSeries> {
         return None;
     }
     let left = right - 1;
-    let left_end = input.ends[left] - input.starts[left];
     Some(
-        JumpSeries::derivatives_at(&input.coeffs[right], 0.0)
-            .minus(JumpSeries::derivatives_at(&input.coeffs[left], left_end)),
+        JumpSeries::derivatives_at(&input.coeffs[right], at - input.origins[right]).minus(
+            JumpSeries::derivatives_at(&input.coeffs[left], at - input.origins[left]),
+        ),
     )
 }
 

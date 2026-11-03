@@ -1459,7 +1459,7 @@ fn a_piece_leaving_rest_is_made_monotone_whatever_its_offset() {
             .map(|step| super::polynomial_pva(&piece.coeffs, h * step as f64 / 64.0).1)
             .fold(f64::INFINITY, f64::min);
         assert!(
-            lowest_velocity >= -tol.accel_mm_s2 * crate::shaper::MIN_DEVICE_INTERVAL_S,
+            lowest_velocity >= -tol.accel_mm_s2 * geometry::MIN_DEVICE_INTERVAL_S,
             "at offset {offset} the piece leaving rest still retracts at {lowest_velocity} mm/s"
         );
         piece.coeffs[1..].to_vec()

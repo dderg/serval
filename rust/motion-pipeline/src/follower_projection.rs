@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
+use geometry::MIN_DEVICE_INTERVAL_S;
 use nurbs::ScalarNurbs;
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
 use trajectory::{
@@ -11,9 +12,9 @@ use trajectory::{
 use crate::lowering::{AccelBudget, FitTol, follower_tol_scale};
 use crate::shaper::{
     AxisFit, AxisSignalTable, BetweenProbes, ConvolutionSignal, ExactConvolution, ExactKernel,
-    FitBoundary, KnotJumpBound, Lookahead, MIN_DEVICE_INTERVAL_S, SEGMENT_TIME_EPS_S,
-    ShiftedTrackSignal, SignalBounds, TrackSignal, apply_derivative_gains_to_track,
-    fit_axis_from_signal, fit_resolution, shaped_signal_breakpoints, unit_kernel_mass,
+    FitBoundary, KnotJumpBound, Lookahead, SEGMENT_TIME_EPS_S, ShiftedTrackSignal, SignalBounds,
+    TrackSignal, apply_derivative_gains_to_track, fit_axis_from_signal, fit_resolution,
+    shaped_signal_breakpoints, unit_kernel_mass,
 };
 use crate::types::PostProcessError;
 use crate::worker_pool::WorkerPool;

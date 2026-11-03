@@ -16,12 +16,15 @@ max_accel: 3000
 #   Optional. Default is 0, i.e. jerk limiting is disabled. Only 0 is
 #   accepted — the continuous trajectory pipeline rejects a finite jerk
 #   limit.
-#square_corner_velocity: 5
-#   Optional legacy alias. Default is 5. Must be >= 0. Set this XOR
-#   corner_deviation; it is converted to the corner-deviation budget.
 #corner_deviation: 0.04
-#   Optional canonical corner budget in mm. Must be >= 0. 0.04 is a good
-#   starting value. Set this XOR square_corner_velocity.
+#   Optional canonical corner budget in mm: how far the planned path may
+#   cut a corner's vertex. Default is 0.04, at every max_accel, when
+#   neither corner option is set. Must be >= 0. Set this XOR
+#   square_corner_velocity.
+#square_corner_velocity:
+#   Optional legacy alias, no default. Must be >= 0. Set this XOR
+#   corner_deviation; it is converted to the corner-deviation budget
+#   scv^2 * (sqrt(2) - 1) / max_accel (5 mm/s at 3000 mm/s^2 is 0.0035 mm).
 #max_z_velocity: 300
 #   Optional. Default is max_velocity. Must be > 0 and <= max_velocity.
 #   Z speed limit in mm/s.
@@ -44,6 +47,29 @@ max_accel: 3000
 `corner_deviation` is the canonical corner budget. Setting both corner options is an error. `max_accel_to_decel` and `minimum_cruise_ratio` are explicitly unsupported rather than ignored.
 
 `max_z_velocity` and `max_z_accel` bound the z axis alone, not the toolhead path. The planner applies them to each fitted segment after corner blending, using the z share of that segment's heading and of its curvature. That covers corners between an XY line and an XYZ move, such as layer changes and z-hops: the turn can put z acceleration on the blend even where its heading barely climbs, so the planner slows the blend until z stays within both caps. The caps never raise a limit; they only lower the speed ceiling and the acceleration budget of segments that move z.
+
+### Why the corner budget defaults to 0.04 mm
+
+A config that sets neither corner option used to inherit Klipper's implicit `square_corner_velocity: 5`. That is a budget of 0.0035 mm at 3000 mm/s² and 0.00015 mm at 70000 mm/s², so every corner tighter than about 135° was close to a full stop. The default is now `corner_deviation: 0.04` at every `max_accel`. The value comes from a profile study of four machines, each replaying a dense top-layer print (`tools/sim/gcode/voron_dense_top_layers.gcode`) on one pinned core, as a proxy for a Pi-class host's realtime margin:
+
+- P1: bowden bedslinger, 3k mm/s², PA 0.5.
+- P2: i3 direct drive, 5k mm/s², PA 0.05.
+- P3: Voron direct drive, 15k mm/s², PA 0.03.
+- P4: Trident, 70k mm/s², PA 0.02.
+
+| Corner budget | Dense-print segments | Print time, P1 / P2 / P3 / P4 (s) | Worst single-core realtime factor | Nozzle miss at a vertex, P1 … P4 (mm) |
+|---|---|---|---|---|
+| `square_corner_velocity: 5` | 18.3k–19.7k | 65.2 / 51.9 / 39.3 / 29.1 | 1.2× (P4) | 0.081 … 0.128 |
+| 0.01 | 8.2k | 58.1 / 41.3 / 24.4 / 16.8 | 1.9× (P4) | 0.092 … 0.154 |
+| 0.02 | 1.27k | 50.3 / 35.3 / 20.9 / 15.4 | 6.2× (P4) | 0.106 … 0.170 |
+| **0.04** | **1.31k** | **50.0 / 35.1 / 20.7 / 15.3** | **6.3× (P4)** | **0.131 … 0.197** |
+| 0.08 | 1.21k | 49.8 / 34.9 / 20.7 / 15.3 | 7.9× (P4) | 0.175 … 0.245 |
+
+- **Throughput has a cliff.** The print's facets merge only once the budget exceeds about 0.015 mm: 11.7k segments at 0.005, 3.7k at 0.0125, 1.5k at 0.015, and flat from 0.0175 up. At 0.01 and below, P3 and P4 fall under 3× realtime on one core. 0.04 leaves more than twice the budget the cliff needs, for G-code with coarser facets than this print.
+- **Quality is nearly flat from 0.02 to 0.04.** The nozzle's miss at a vertex is mostly the input shaper's own smoothing (the scv-5 row). Going from 0.02 to 0.04 adds about 0.025 mm to it, some 6% of a 0.4 mm line. Corner bead error under exact pressure advance stays at about 0.1% on P2–P4 and 0.9% on P1. Peak extruder acceleration at corners falls 8–11% (P4: 58k to 54k mm/s²), which leaves the extruder more headroom.
+- **0.08 buys little.** Its throughput change is small and inconsistent: P4 with exact advance goes from 6.3× to 7.9×, the Trident bench config from 6.9× to 5.9×. It adds another 0.045 mm of vertex miss. With an extruder smoothing kernel, the corner bead error on P1 and P2 grows again (P1 1.5% to 2.8%, P2 1.7% to 2.9%).
+
+Configs that set either option keep it. To keep the old near-stop corners, set `square_corner_velocity: 5` explicitly.
 
 ## `[kinematics]`
 

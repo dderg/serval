@@ -662,10 +662,7 @@ impl Default for CartesianLimits {
             max_jerk: 100_000.0,
             max_z_velocity: 15.0,
             max_z_accel: 100.0,
-            corner_deviation: geometry::corner_deviation_from_scv(
-                DEFAULT_SQUARE_CORNER_VELOCITY_MM_S,
-                3000.0,
-            ),
+            corner_deviation: DEFAULT_CORNER_DEVIATION_MM,
         }
     }
 }
@@ -710,7 +707,10 @@ impl CartesianLimits {
     }
 }
 
-pub const DEFAULT_SQUARE_CORNER_VELOCITY_MM_S: f64 = 5.0;
+/// The corner budget of a `[printer]` that sets neither `corner_deviation`
+/// nor `square_corner_velocity`, in mm. The same at every `max_accel`:
+/// see `docs/Config_Reference_Motion.md` for the profile study behind it.
+pub const DEFAULT_CORNER_DEVIATION_MM: f64 = 0.04;
 
 impl PlannerConfig {
     pub fn compile_active_chains(&self) -> Result<AxisChainSet, PostProcessorConfigError> {
