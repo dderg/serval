@@ -140,8 +140,14 @@ impl LiveReplay {
     pub fn new(source: &str, planner: &planner_config::PlannerConfig) -> Result<Self, String> {
         let config = motion_pipeline::live_config::stream_config(planner)?;
         let chains = planner.compile_active_chains().map_err(|e| e.to_string())?;
-        let moves =
-            parse_gcode_to_moves(source, motion_pipeline::live_config::move_limits(planner)?);
+        let extruder = motion_pipeline::live_config::extruder_caps_on(
+            &motion_pipeline::live_config::extruder_caps(planner)?,
+            pipeline_snapshot::EXTRUDER_AXIS,
+        );
+        let moves = parse_gcode_to_moves(
+            source,
+            motion_pipeline::live_config::move_limits(planner, extruder)?,
+        );
         Ok(Self {
             config,
             chains,
