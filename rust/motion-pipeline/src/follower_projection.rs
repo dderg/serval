@@ -19,7 +19,7 @@ use crate::types::PostProcessError;
 use crate::worker_pool::WorkerPool;
 
 mod ratio_ramp;
-use ratio_ramp::{RampLeg, SeamRamps};
+use ratio_ramp::{RampLeg, RatioSmoothing};
 
 const INTEGRAL_TOL_MM: f64 = 1e-10;
 const INTEGRAL_MAX_DEPTH: u32 = 24;
@@ -163,7 +163,8 @@ impl AdvanceStep {
     }
 }
 
-/// What spares the motor the discontinuities a leading advance makes.
+/// What spares the motor the discontinuities a leading advance makes, and
+/// so what the advance reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdvanceSmoothing {
     /// A kernel after the projection: the advance reads the whole follower
@@ -177,6 +178,10 @@ enum AdvanceSmoothing {
     /// on its own pushes no bead to lead, and advancing it would step its
     /// velocity by `k·Δa` at every acceleration change of its trapezoid.
     RatioRamp,
+    /// A ratio ramp ahead of it and a kernel after: the advance reads the
+    /// path's velocity alone, as on a ramp, and the kernel spreads what
+    /// steps remain and bounds the extruder's acceleration.
+    RatioRampAndKernel,
 }
 
 #[derive(Clone, Copy)]
@@ -187,16 +192,18 @@ struct LeadingAdvance<'a> {
 
 impl<'a> LeadingAdvance<'a> {
     /// The advance a chain applies before projection, if any: with no
-    /// kernel to defer it to, a linear one too.
+    /// kernel to defer it to, a linear one too. A linear advance next to a
+    /// kernel commutes with it and is applied to the convolved signal.
     fn of(chain: &'a CompiledChain) -> Option<Self> {
         let stage = (!chain.follower_linear_transform())
             .then(|| chain.leading_transform())
             .flatten()?;
         Some(Self {
             stage,
-            smoothing: match chain.ratio_ramp_time() {
-                Some(_) => AdvanceSmoothing::RatioRamp,
-                None => AdvanceSmoothing::Kernel,
+            smoothing: match (chain.ratio_ramp_time(), chain.kernel()) {
+                (Some(_), None) => AdvanceSmoothing::RatioRamp,
+                (Some(_), Some(_)) => AdvanceSmoothing::RatioRampAndKernel,
+                (None, _) => AdvanceSmoothing::Kernel,
             },
         })
     }
@@ -209,38 +216,41 @@ impl<'a> LeadingAdvance<'a> {
         t: f64,
         (velocity, acceleration): (f64, f64),
     ) -> (f64, f64, f64) {
-        match self.smoothing {
-            AdvanceSmoothing::Kernel => (velocity, acceleration, sig.jerk(t)),
-            AdvanceSmoothing::RatioRamp => sig.ramped_advance_read(t),
+        if self.reads_path_only() {
+            return sig.ramped_advance_read(t);
         }
+        (velocity, acceleration, sig.jerk(t))
     }
 
     fn read_velocity(&self, sig: &FollowerSignal, t: f64) -> f64 {
-        match self.smoothing {
-            AdvanceSmoothing::Kernel => sig.deriv(t),
-            AdvanceSmoothing::RatioRamp => sig.ramped_advance_read(t).0,
+        if self.reads_path_only() {
+            return sig.ramped_advance_read(t).0;
         }
+        sig.deriv(t)
     }
 
     fn read_acceleration(&self, sig: &FollowerSignal, t: f64) -> f64 {
-        match self.smoothing {
-            AdvanceSmoothing::Kernel => sig.second_deriv(t),
-            AdvanceSmoothing::RatioRamp => sig.ramped_advance_read(t).1,
+        if self.reads_path_only() {
+            return sig.ramped_advance_read(t).1;
         }
+        sig.second_deriv(t)
     }
 
     fn read_seam_velocity(&self, input: &SeamInput) -> f64 {
-        match self.smoothing {
-            AdvanceSmoothing::Kernel => input.velocity,
-            AdvanceSmoothing::RatioRamp => {
-                input
-                    .ramped
-                    .expect("a ratio-ramped seam records what its advance reads")
-                    .read_velocity
-            }
+        if self.reads_path_only() {
+            return input
+                .ramped
+                .expect("a ratio-ramped seam records what its advance reads")
+                .read_velocity;
         }
+        input.velocity
     }
 
+    fn reads_path_only(&self) -> bool {
+        self.smoothing != AdvanceSmoothing::Kernel
+    }
+
+    /// No kernel follows the advance: a step it makes reaches the motor.
     fn is_ramped(&self) -> bool {
         self.smoothing == AdvanceSmoothing::RatioRamp
     }
@@ -305,22 +315,29 @@ fn fit_source_projection(
     );
     let tolerance = follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis) * 0.5);
     let breakpoints = sig.construction_breakpoints(raw_axis, tolerance.accel_mm_s2);
-    let input_state = |t| SeamInput {
-        velocity: sig.deriv(t),
-        ratio: sig.state.ratio_and_slope(sig.s_owned(t)).0,
-        leader_speed: sig.shaped_speed(t),
-        ramped: leading
-            .filter(LeadingAdvance::is_ramped)
-            .map(|advance| RampedSeam {
-                read_velocity: sig.ramped_advance_read(t).0,
-                advanced_velocity: AdvancedFollowerSignal {
-                    source: &sig,
-                    advance,
-                    steps: &[],
-                }
-                .eval_pva(t)
-                .1,
-            }),
+    let input_state = |t| {
+        let s = sig.s_owned(t);
+        let (ratio, ratio_slope) = sig.state.ratio_and_slope(s);
+        SeamInput {
+            velocity: sig.deriv(t),
+            ratio,
+            leader_speed: sig.shaped_speed(t),
+            s,
+            ratio_slope,
+            ramped: leading
+                .filter(LeadingAdvance::reads_path_only)
+                .map(|advance| RampedSeam {
+                    read_velocity: sig.ramped_advance_read(t).0,
+                    read_slope: sig.ramped_read_slope(s),
+                    advanced_velocity: AdvancedFollowerSignal {
+                        source: &sig,
+                        advance,
+                        steps: &[],
+                    }
+                    .eval_pva(t)
+                    .1,
+                }),
+        }
     };
     let input_start = input_state(t_start);
     let input_end = input_state(t_end);
@@ -330,9 +347,19 @@ fn fit_source_projection(
             .collect::<Vec<_>>(),
         None => Vec::new(),
     };
-    if let (Some(advance), Some(step)) = (leading, steps_beyond_rounding.first()) {
-        if advance.is_ramped() {
-            return Err(ramped_position_step(axis, step));
+    let unexplained = |steps: &[AdvanceStep]| {
+        steps
+            .iter()
+            .find(|step| !sig.leader_residual_explains(step, (t_start, t_end)))
+            .map(|step| ramped_position_step(axis, step))
+    };
+    if let Some(advance) = leading {
+        if let Some(refused) = advance
+            .is_ramped()
+            .then(|| unexplained(&steps_beyond_rounding))
+            .flatten()
+        {
+            return Err(refused);
         }
     }
     let (track, window_advance_steps) = if let Some(value) = sig.constant_value() {
@@ -385,8 +412,8 @@ fn fit_source_projection(
                     steps: &steps,
                 };
                 if advance.is_ramped() {
-                    if let Some(step) = steps.first() {
-                        return Err(ramped_position_step(axis, step));
+                    if let Some(refused) = unexplained(&steps) {
+                        return Err(refused);
                     }
                     advanced.refuse_velocity_steps(
                         axis,
@@ -502,14 +529,9 @@ pub(crate) fn project_followers(
                     .any(|&leader| raw.axes[leader] != shaped.axes[leader])
             });
         let ramp_time = chain.ratio_ramp_time();
-        assert!(
-            ramp_time.is_none() || kernel.is_none(),
-            "follower axis {axis} has both a ratio ramp and a smoothing kernel: a ramp \
-             replaces the kernel, use one of them"
-        );
         let state = &mut states[axis];
         assert!(
-            ramp_time.is_some() || !state.ramps.has_backlog(),
+            ramp_time.is_some() || !state.smoothing.has_backlog(),
             "follower axis {axis} lost its ratio ramp with segments still waiting on it"
         );
         let projecting = leaders_changed || state.active || ramp_time.is_some();
@@ -531,7 +553,7 @@ pub(crate) fn project_followers(
                 pool,
             );
             timing.ingests += lengths.len();
-            let mut next_s = state.ramps.backlog_end().unwrap_or(state.s_shaped);
+            let mut next_s = state.smoothing.backlog_end().unwrap_or(state.s_shaped);
             for (offset, &arc) in lengths.iter().enumerate() {
                 let i = first_new + offset;
                 let table_start = state.s_ingested_end;
@@ -547,8 +569,8 @@ pub(crate) fn project_followers(
                             start_s: table_start,
                             rests: arc.1 <= SPAN_MIN_LEN_MM,
                         };
-                        state.ramps.lay(&state.spans, &leg, ramp_time);
-                        state.ramps.queue(
+                        state.smoothing.lay(&state.spans, &leg, ramp_time);
+                        state.smoothing.queue(
                             base[i].t_end,
                             (s_start, shaped_ds),
                             state.s_ingested_end,
@@ -560,16 +582,16 @@ pub(crate) fn project_followers(
             }
             if ramp_time.is_some() {
                 if lookahead.clamps_past_signal() {
-                    state.ramps.close_at(state.s_ingested_end);
+                    state.smoothing.close_at(state.s_ingested_end);
                 }
-                for pending in state.ramps.take_final(&state.spans) {
+                for pending in state.smoothing.take_final(&state.spans) {
                     let index = base[..frontier.len()]
                         .partition_point(|raw| raw.t_end < pending.t_end - GRID_DEDUP_EPS_S);
                     assert!(
                         index < frontier.len()
                             && (base[index].t_end - pending.t_end).abs() <= GRID_DEDUP_EPS_S,
                         "follower axis {axis}: the segment ending at {} waited on its ratio \
-                         ramps past the shaped frontier",
+                         smoothing past the shaped frontier",
                         pending.t_end
                     );
                     source_jobs.push((index, pending.s_start, pending.s_length));
@@ -720,7 +742,12 @@ pub(crate) fn project_followers(
                         (t_start, input_start),
                     );
                     if advance.is_ramped() {
-                        if let Some(step) = step {
+                        let unexplained = step.filter(|step| {
+                            state.projected_input_end.is_none_or(|(_, before)| {
+                                !before.explains_ramped_read_step(&input_start, step)
+                            })
+                        });
+                        if let Some(step) = unexplained {
                             return Err(ramped_position_step(axis, &step));
                         }
                         refuse_ramped_join_velocity_step(
@@ -1176,20 +1203,25 @@ fn fit_kernel_window<S: TrackSignal>(
 /// `ratio · leader_speed` plus whatever the raw track adds on its own, so a
 /// velocity difference between two sides splits into the follower's own
 /// step (a ratio change or a raw step, which the seam must carry) and the
-/// part the leaders' speed residual explains (which a weld absorbs).
+/// part the leaders' speed residual explains (which a weld absorbs). Each
+/// side reads the ratio at its own odometer position `s`, with the ratio's
+/// path slope there.
 #[derive(Debug, Clone, Copy)]
 struct SeamInput {
     velocity: f64,
     ratio: f64,
     leader_speed: f64,
+    s: f64,
+    ratio_slope: f64,
     ramped: Option<RampedSeam>,
 }
 
-/// What a ratio-ramped advance reads at a seam and the velocity it makes
-/// of it, which no kernel smooths after it.
+/// What a ratio-ramped advance reads at a seam, its path slope, and the
+/// velocity the advance makes of it, which no kernel smooths after it.
 #[derive(Debug, Clone, Copy)]
 struct RampedSeam {
     read_velocity: f64,
+    read_slope: f64,
     advanced_velocity: f64,
 }
 
@@ -1204,12 +1236,42 @@ impl SeamInput {
             velocity,
             ratio: 1.0,
             leader_speed: velocity,
+            s: 0.0,
+            ratio_slope: 0.0,
             ramped: None,
         }
     }
 
     fn signal_velocity_step(&self, right: &Self) -> f64 {
         right.velocity - self.velocity - right.ratio * (right.leader_speed - self.leader_speed)
+    }
+
+    /// How far a velocity laid as `slope_of` along the path differs across
+    /// the seam because the two segments read it at odometer positions the
+    /// span alignment lets sit apart.
+    fn misalignment(&self, right: &Self, slope_of: impl Fn(&Self) -> f64) -> f64 {
+        (right.s - self.s).abs()
+            * slope_of(self).abs().max(slope_of(right).abs())
+            * self.leader_speed.abs().max(right.leader_speed.abs())
+    }
+
+    /// Whether a ratio-ramped advance's read velocity steps across the join
+    /// to `right` by no more than the odometer alignment and the leaders'
+    /// speed residual there explain: a position step the stitch carries as
+    /// it carries a kernel chain's, far under any the guard exists for.
+    fn explains_ramped_read_step(&self, right: &Self, step: &AdvanceStep) -> bool {
+        let read_slope = |side: &Self| side.ramped.map_or(0.0, |ramped| ramped.read_slope);
+        let explained = self.misalignment(right, read_slope)
+            + self.ratio.abs().max(right.ratio.abs())
+                * (right.leader_speed - self.leader_speed).abs();
+        (step.velocity_after - step.velocity_before).abs()
+            <= explained
+                + ADVANCE_STEP_VELOCITY_ROUNDING
+                    * step
+                        .velocity_before
+                        .abs()
+                        .max(step.velocity_after.abs())
+                        .max(1.0)
     }
 
     /// The velocity step a kernel-free emission carries at the seam as a
@@ -1292,8 +1354,9 @@ fn refuse_ramped_join_velocity_step(
         return Ok(());
     }
     let own_step = before.signal_velocity_step(&after);
-    let rounding =
-        ADVANCE_STEP_VELOCITY_ROUNDING * before.velocity.abs().max(after.velocity.abs()).max(1.0);
+    let rounding = ADVANCE_STEP_VELOCITY_ROUNDING
+        * before.velocity.abs().max(after.velocity.abs()).max(1.0)
+        + before.misalignment(&after, |side| side.ratio_slope);
     if own_step.abs() > rounding {
         return Err(PostProcessError::RatioRampedVelocityStep {
             axis,
@@ -1443,7 +1506,7 @@ pub(crate) struct FollowerState {
     projected: Vec<ProjSeg>,
     projected_through_t: Option<f64>,
     projected_trimmed: bool,
-    ramps: SeamRamps,
+    smoothing: RatioSmoothing,
 }
 
 impl FollowerState {
@@ -1465,7 +1528,7 @@ impl FollowerState {
         self.projected.clear();
         self.projected_through_t = None;
         self.projected_trimmed = false;
-        self.ramps.clear();
+        self.smoothing.clear();
     }
 
     /// Drops the cached projected tracks without forgetting how far the
@@ -1641,13 +1704,14 @@ impl FollowerState {
         self.s_ingested_end = s1;
     }
 
+    /// Drops the spans behind the committed path, but for those a window
+    /// there still averages over.
     fn prune_spans(&mut self) {
-        let keep_from = self
-            .spans
-            .partition_point(|span| span.s1 < self.s_shaped - SPAN_LOOKUP_SLACK_MM);
+        let committed = self.s_shaped - SPAN_LOOKUP_SLACK_MM;
+        let keep_after = committed - self.smoothing.reach_back(committed);
+        let keep_from = self.spans.partition_point(|span| span.s1 < keep_after);
         self.spans.drain(..keep_from);
-        self.ramps
-            .prune_before(self.s_shaped - SPAN_LOOKUP_SLACK_MM);
+        self.smoothing.prune_before(committed);
     }
 
     /// Cumulative projected spatial extrusion at shaped path distance `s`.
@@ -1671,10 +1735,7 @@ impl FollowerState {
                 last.e_at(last.s1) + last.r1 * (s - last.s1)
             }
         };
-        if self.ramps.is_empty() {
-            return table;
-        }
-        table + self.ramps.extrusion(s)
+        table + self.smoothing.correction(s).value
     }
 
     /// Projected extrusion accumulated between two shaped-path offsets
@@ -1711,8 +1772,9 @@ impl FollowerState {
         if hi > tail {
             delta += last.r1 * (hi - lo.max(tail));
         }
-        if !self.ramps.is_empty() {
-            delta += self.ramps.extrusion(s_base + hi) - self.ramps.extrusion(s_base + lo);
+        if !self.smoothing.is_inert() {
+            delta += self.smoothing.correction(s_base + hi).value
+                - self.smoothing.correction(s_base + lo).value;
         }
         sign * delta
     }
@@ -1724,15 +1786,14 @@ impl FollowerState {
             Some(span) => (span.r0, 0.0),
             None => (self.spans.last().map_or(0.0, |span| span.r1), 0.0),
         };
-        if self.ramps.is_empty() {
-            return (ratio, slope);
-        }
-        (ratio + self.ramps.ratio(s), slope + self.ramps.slope(s))
+        let correction = self.smoothing.correction(s);
+        (ratio + correction.d1, slope + correction.d2)
     }
 
-    /// `d²r/ds²`: the table's spans are linear, so only ramps bend it.
+    /// `d²r/ds²`: the table's spans are linear, so only the smoothing bends
+    /// it.
     fn ratio_curvature(&self, s: f64) -> f64 {
-        self.ramps.curvature(s)
+        self.smoothing.correction(s).d3
     }
 
     fn aligned_span_start(&self, s: f64) -> f64 {
@@ -2269,18 +2330,13 @@ impl RatioBounds {
                 .map(|span| span.ratio_slope().abs())
                 .fold(0.0_f64, f64::max),
         };
-        if state.ramps.is_empty() {
+        if state.smoothing.is_inert() {
             return table;
         }
-        let ramps = state
-            .ramps
-            .overlapping(s_start - SPAN_LOOKUP_SLACK_MM, s_end + SPAN_LOOKUP_SLACK_MM);
-        let (ratio, slope) = ramps.fold((0.0_f64, 0.0_f64), |(ratio, slope), ramp| {
-            (ratio.max(ramp.ratio_bound()), slope.max(ramp.slope_bound()))
-        });
+        let (ratio, slope) = state.smoothing.ratio_bounds(&state.spans, s_start, s_end);
         Self {
-            ratio: table.ratio + ratio,
-            slope: table.slope + slope,
+            ratio: table.ratio.max(ratio),
+            slope: table.slope.max(slope),
         }
     }
 }
@@ -2466,17 +2522,42 @@ impl<'a> FollowerSignal<'a> {
         let s = self.s_owned(t);
         let (ratio, slope) = self.state.ratio_and_slope(s);
         let laid = ratio * rate_second + 3.0 * slope * rate * rate_deriv;
-        if self.state.ramps.is_empty() {
+        if self.state.smoothing.is_inert() {
             return laid;
         }
         laid + self.state.ratio_curvature(s) * rate * rate * rate
+    }
+
+    /// `d(R·W)/ds` at `s`: the path slope of the ratio a ratio-ramped
+    /// advance reads.
+    fn ramped_read_slope(&self, s: f64) -> f64 {
+        let (ratio, slope) = self.state.ratio_and_slope(s);
+        let (weight, weight_slope, _) = self.state.smoothing.valley_weight(s);
+        slope * weight + ratio * weight_slope
+    }
+
+    /// Whether an advance step inside the segment is no more than the
+    /// leaders' own pieces explain where they meet with a speed residual,
+    /// which the ratio scales: rounding a weld at the next join absorbs.
+    fn leader_residual_explains(&self, step: &AdvanceStep, (t_start, t_end): (f64, f64)) -> bool {
+        let residual = (self.shaped_speed(trajectory::next_toward(step.t, t_end))
+            - self.shaped_speed(trajectory::next_toward(step.t, t_start)))
+        .abs();
+        (step.velocity_after - step.velocity_before).abs()
+            <= self.ratio_bounds.ratio * residual
+                + ADVANCE_STEP_VELOCITY_ROUNDING
+                    * step
+                        .velocity_before
+                        .abs()
+                        .max(step.velocity_after.abs())
+                        .max(1.0)
     }
 
     /// What a ratio-ramped advance reads at `t`: the velocity `R(s)·ṡ` the
     /// projection lays along the leaders' path and its first two time
     /// derivatives, leaving out what the raw track moves on its own. `R`
     /// is the laid ratio weighted down to zero at every turnaround of the
-    /// leaders ([`SeamRamps::valley_weight`]).
+    /// leaders ([`RatioSmoothing::valley_weight`]).
     fn ramped_advance_read(&self, t: f64) -> (f64, f64, f64) {
         let speed = self.leaders.speed(t);
         let rate = self.odometer_scale * speed;
@@ -2485,7 +2566,7 @@ impl<'a> FollowerSignal<'a> {
         let s = self.s_owned(t);
         let (ratio, slope) = self.state.ratio_and_slope(s);
         let curvature = self.state.ratio_curvature(s);
-        let (weight, weight_slope, weight_curvature) = self.state.ramps.valley_weight(s);
+        let (weight, weight_slope, weight_curvature) = self.state.smoothing.valley_weight(s);
         let read = ratio * weight;
         let read_slope = slope * weight + ratio * weight_slope;
         let read_curvature =
@@ -2568,13 +2649,11 @@ impl<'a> FollowerSignal<'a> {
             Some(last) if s_hi + SPAN_LOOKUP_SLACK_MM > last.s1 => last.r1 == 0.0,
             _ => true,
         };
-        let ramped = self
+        let smoothed = self
             .state
-            .ramps
-            .overlapping(s_lo - SPAN_LOOKUP_SLACK_MM, s_hi + SPAN_LOOKUP_SLACK_MM)
-            .next()
-            .is_some();
-        (overlapping_zero && tail_zero && !ramped).then(|| self.eval(self.grid[0]))
+            .smoothing
+            .touches(s_lo - SPAN_LOOKUP_SLACK_MM, s_hi + SPAN_LOOKUP_SLACK_MM);
+        (overlapping_zero && tail_zero && !smoothed).then(|| self.eval(self.grid[0]))
     }
 
     fn construction_breakpoints(
@@ -2601,19 +2680,10 @@ impl<'a> FollowerSignal<'a> {
             .spans
             .iter()
             .flat_map(|span| [span.s0, span.s1])
-            .chain(
-                self.state
-                    .ramps
-                    .overlapping(
-                        self.s_start - SPAN_LOOKUP_SLACK_MM,
-                        s_end + SPAN_LOOKUP_SLACK_MM,
-                    )
-                    .flat_map(|ramp| [ramp.start(), ramp.end()])
-                    .chain(self.state.ramps.valley_ends(
-                        self.s_start - SPAN_LOOKUP_SLACK_MM,
-                        s_end + SPAN_LOOKUP_SLACK_MM,
-                    )),
-            )
+            .chain(self.state.smoothing.bends(
+                self.s_start - SPAN_LOOKUP_SLACK_MM,
+                s_end + SPAN_LOOKUP_SLACK_MM,
+            ))
             .filter(|&s| {
                 s >= self.s_start - SPAN_LOOKUP_SLACK_MM && s <= s_end + SPAN_LOOKUP_SLACK_MM
             })

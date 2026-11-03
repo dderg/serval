@@ -270,3 +270,59 @@ fn a_ratio_ramp_lays_the_unramped_material_through_retracts_and_drains() {
         "the ramped follower ends at {ramped} mm, the unramped one at {plain}"
     );
 }
+
+/// A short smoothing kernel after a ratio ramp and an advance: the ramp
+/// takes the ratio steps, the kernel only bounds what the advance asks of
+/// the extruder.
+fn ramped_with_kernel(smooth_time: f64) -> AxisChainSet {
+    let chain = CompiledChain::compile(&[
+        PostProcessorInstance::new("pa", &algos::LinearPressureAdvance, vec![0.02]),
+        PostProcessorInstance::new("st", &algos::SmoothTriangle, vec![smooth_time]),
+    ])
+    .expect("advance and kernel compile")
+    .with_ratio_ramp_time(0.015);
+    trident_leaders_with(chain)
+}
+
+#[test]
+fn a_ratio_ramp_runs_ahead_of_a_short_kernel() {
+    let gcode = colinear(
+        150.0,
+        &[
+            (20.0, 1.0),
+            (0.4, 0.0),
+            (0.3, 1.0),
+            (0.2, 0.0),
+            (20.0, 1.5),
+            (20.0, 0.0),
+        ],
+    );
+    let kernel_only = |smooth_time: f64| {
+        let chain = CompiledChain::compile(&[
+            PostProcessorInstance::new("pa", &algos::LinearPressureAdvance, vec![0.02]),
+            PostProcessorInstance::new("st", &algos::SmoothTriangle, vec![smooth_time]),
+        ])
+        .expect("advance and kernel compile");
+        trident_leaders_with(chain)
+    };
+    let hybrid = sample(&shaped(&gcode, ramped_with_kernel(0.005)));
+    let kernel = sample(&shaped(&gcode, kernel_only(0.005)));
+    let plain = final_e(&shaped(
+        &gcode,
+        trident_leaders_with(CompiledChain::default()),
+    ));
+    let hybrid_end = *hybrid.e.last().expect("sampled");
+    assert!(
+        (hybrid_end - plain).abs() < 1e-6,
+        "the ramp under a kernel ends at {hybrid_end} mm, the unramped projection at {plain}"
+    );
+    let (hybrid_jump, kernel_jump) = (
+        largest_velocity_jump(&hybrid),
+        largest_velocity_jump(&kernel),
+    );
+    assert!(
+        hybrid_jump < 0.5 * kernel_jump,
+        "the ramp leaves the kernel {hybrid_jump} mm/s per sample to smooth, the kernel alone \
+         {kernel_jump}"
+    );
+}

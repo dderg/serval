@@ -638,17 +638,15 @@ fn a_bypassed_chain_set_carries_no_ratio_ramp() {
 }
 
 #[test]
-fn a_ratio_ramp_with_a_smoothing_kernel_is_rejected() {
+fn a_ratio_ramp_compiles_next_to_a_smoothing_kernel() {
     let registry = ramped_registry_with_e(&["st"], 0.015);
-    let rejected = PostProcessorSet::try_new(&registry, &[e_smoothing()]);
-    assert!(
-        matches!(
-            rejected,
-            Err(PostProcessorConfigError::RatioRampWithKernel { ref axis, ref name })
-                if axis == "e" && name == "st"
-        ),
-        "got {rejected:?}"
-    );
+    let chains = PostProcessorSet::try_new(&registry, &[e_smoothing()])
+        .unwrap()
+        .compile(&registry)
+        .unwrap();
+    assert!(chains.chains[3].kernel().is_some());
+    assert_eq!(chains.chains[3].ratio_ramp_time(), Some(0.015));
+    assert!(chains.has_ratio_ramped_follower());
 }
 
 #[test]

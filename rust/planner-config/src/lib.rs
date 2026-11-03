@@ -40,11 +40,6 @@ pub enum PostProcessorConfigError {
         trajectory::FOLLOWER_TRANSFORM_WITHOUT_KERNEL
     )]
     FollowerAdvanceWithoutKernel { axis: String, name: String },
-    #[error(
-        "axis '{axis}' has a ratio_ramp_time and the smoothing kernel '{name}' in its \
-         post_processors: the ramp replaces the kernel, keep one of them"
-    )]
-    RatioRampWithKernel { axis: String, name: String },
 }
 
 #[derive(Debug, Clone)]
@@ -118,7 +113,7 @@ impl PostProcessorSet {
                 CompiledChain::compile(&chain).map_err(PostProcessorConfigError::Param)
             })
             .collect::<Result<_, _>>()?;
-        let chains = self.with_ratio_ramps(registry, chains)?;
+        let chains = Self::with_ratio_ramps(registry, chains);
         let followers = registry.follower_index_map();
         self.reject_pre_kernel_gains_on_leaders(registry, &followers)?;
         let chains = AxisChainSet { chains, followers };
@@ -126,44 +121,15 @@ impl PostProcessorSet {
         Ok(chains)
     }
 
-    fn with_ratio_ramps(
-        &self,
-        registry: &AxisRegistry,
-        chains: Vec<CompiledChain>,
-    ) -> Result<Vec<CompiledChain>, PostProcessorConfigError> {
+    fn with_ratio_ramps(registry: &AxisRegistry, chains: Vec<CompiledChain>) -> Vec<CompiledChain> {
         chains
             .into_iter()
             .zip(registry.decls())
-            .enumerate()
-            .map(|(axis, (chain, decl))| {
-                let Some(ramp_time) = decl.ratio_ramp_time else {
-                    return Ok(chain);
-                };
-                if chain.kernel().is_some() {
-                    let name = self.per_axis[axis]
-                        .iter()
-                        .find(|name| {
-                            matches!(
-                                self.instance(name).compile_stage(),
-                                Some(trajectory::ChainStage::SmoothKernel(_))
-                            )
-                        })
-                        .expect("a chain with a kernel names the stage that compiled to it");
-                    return Err(PostProcessorConfigError::RatioRampWithKernel {
-                        axis: decl.name.clone(),
-                        name: name.clone(),
-                    });
-                }
-                Ok(chain.with_ratio_ramp_time(ramp_time))
+            .map(|(chain, decl)| match decl.ratio_ramp_time {
+                Some(ramp_time) => chain.with_ratio_ramp_time(ramp_time),
+                None => chain,
             })
             .collect()
-    }
-
-    fn instance(&self, name: &str) -> &PostProcessorInstance {
-        self.instances
-            .iter()
-            .find(|i| i.name() == name)
-            .expect("validated in try_new")
     }
 
     fn reject_follower_advance_without_kernel(
