@@ -180,12 +180,14 @@ impl SeamRamp {
 }
 
 /// One segment's shaped leaders as the ramp layout reads them: where on the
-/// span table it starts and the time it covers.
+/// span table it starts, the time it covers, and whether its raw leaders
+/// rest along it (an extrude-only move or a dwell).
 pub(super) struct RampLeg<'a> {
     pub(super) shaped: &'a ContinuousSegment,
     pub(super) leaders: &'a [usize],
     pub(super) support: (f64, f64),
     pub(super) start_s: f64,
+    pub(super) rests: bool,
 }
 
 /// A segment whose projection waits for every ramp that can reach into it.
@@ -204,12 +206,11 @@ pub(super) struct PendingSegment {
 /// ramp of half-width `h = min(reach, ℓ₋/2, ℓ₊/2)`: `ℓ±` are the spans on
 /// either side, so neighbouring ramps never overlap and each keeps its
 /// own exact material, and `reach = (v + |a|·τ/2)·τ/2` with the path speed
-/// `v` and its rate `a` where the leaders cross the seam, taken on the
-/// side that reaches further. At constant speed the ramp spans `v·τ` of
-/// path, crossed in τ; around a reversal, where the path speed passes
-/// through zero while its rate does not, it still spans the `a·τ²/4` the
-/// leaders turn around in; a seam crossed at rest gets no ramp, as an
-/// advance vanishes there.
+/// `v` and its rate `a` the leaders cross the seam with on both sides (see
+/// [`Crossing`]). At constant speed the ramp spans `v·τ` of path, crossed
+/// in τ; around a reversal, where the path speed passes through zero while
+/// its rate does not, it still spans the `a·τ²/4` the leaders turn around
+/// in; a seam crossed at rest gets no ramp, as an advance vanishes there.
 ///
 /// A ramp reaches up to half the span after its seam, so a segment's
 /// ratios are final only once the span after it is laid: up to the middle
@@ -218,9 +219,11 @@ pub(super) struct PendingSegment {
 #[derive(Debug, Default)]
 pub(super) struct SeamRamps {
     ramps: Vec<SeamRamp>,
+    valleys: Vec<AdvanceValley>,
+    resting: bool,
     examined_through: f64,
     floor: f64,
-    reach_into_next: Option<f64>,
+    reach_into_next: Option<Crossing>,
     backlog: VecDeque<PendingSegment>,
 }
 
@@ -245,10 +248,26 @@ impl SeamRamps {
     }
 
     /// No ramp may reach back past `s`: the leaders rest there, or the
-    /// stream drained there and what precedes it is already committed.
+    /// stream drained there and what precedes it is already committed. A
+    /// rest valley still open closes there, with nothing after it.
     pub(super) fn close_at(&mut self, s: f64) {
         self.floor = self.floor.max(s);
         self.reach_into_next = None;
+        self.close_rest(s, 0.0);
+    }
+
+    /// A rest valley opens with no end: the advance reads nothing from its
+    /// start on until a leg that moves again closes it.
+    fn close_rest(&mut self, end: f64, after: f64) {
+        if !std::mem::take(&mut self.resting) {
+            return;
+        }
+        let valley = self
+            .valleys
+            .last_mut()
+            .expect("an open rest valley is the last laid");
+        valley.end = end.max(valley.start);
+        valley.after = after;
     }
 
     /// Lays the ramps of every seam the table gained with `leg`'s spans:
@@ -261,6 +280,7 @@ impl SeamRamps {
         }
         let leaders = ShapedLeaders::of(leg.shaped, leg.leaders);
         let (t_start, t_end) = leg.support;
+        self.lay_rest_valley(spans, leg, &leaders, ramp_time);
         let first = spans
             .partition_point(|span| span.s0 <= self.examined_through)
             .max(1);
@@ -270,29 +290,43 @@ impl SeamRamps {
             self.examined_through = seam;
             let step = after.r0 - before.r1;
             let slope_step = after.ratio_slope() - before.ratio_slope();
-            if step == 0.0 && slope_step == 0.0 {
+            let opens_leg = seam <= leg.start_s;
+            if step == 0.0 && slope_step == 0.0 && !opens_leg {
                 continue;
             }
-            let reach = if seam <= leg.start_s {
+            let crossing = if opens_leg {
+                let opening = Crossing::at(&leaders, t_start);
                 self.reach_into_next
-                    .unwrap_or(0.0)
-                    .max(reach_at(&leaders, &[t_start], ramp_time))
+                    .map_or(opening, |closing| closing.common(opening))
             } else {
-                let crossing = time_at_arc(&leaders, leg, seam - leg.start_s);
-                reach_at(
+                let t = time_at_arc(&leaders, leg, seam - leg.start_s);
+                Crossing::at(
                     &leaders,
-                    &[
-                        trajectory::next_toward(crossing, f64::NEG_INFINITY).max(t_start),
-                        trajectory::next_toward(crossing, f64::INFINITY).min(t_end),
-                    ],
-                    ramp_time,
+                    trajectory::next_toward(t, f64::NEG_INFINITY).max(t_start),
                 )
+                .common(Crossing::at(
+                    &leaders,
+                    trajectory::next_toward(t, f64::INFINITY).min(t_end),
+                ))
             };
-            let half_width = reach
+            let half_width = crossing
+                .reach(ramp_time)
                 .min(0.5 * (before.s1 - before.s0))
                 .min(0.5 * (after.s1 - after.s0))
                 .min(seam - self.floor);
             if half_width <= SPAN_MIN_LEN_MM {
+                continue;
+            }
+            if opens_leg && !self.resting && crossing.turns_around() && !self.closes_a_rest_at(seam)
+            {
+                self.valleys.push(AdvanceValley {
+                    start: seam,
+                    end: seam,
+                    before: half_width,
+                    after: half_width,
+                });
+            }
+            if step == 0.0 && slope_step == 0.0 {
                 continue;
             }
             let compensation = CompensationSide::inward(
@@ -307,7 +341,7 @@ impl SeamRamps {
                 compensation,
             ));
         }
-        self.reach_into_next = Some(reach_at(&leaders, &[t_end], ramp_time));
+        self.reach_into_next = Some(Crossing::at(&leaders, t_end));
     }
 
     pub(super) fn queue(&mut self, t_end: f64, (s_start, s_length): (f64, f64), table_end: f64) {
@@ -368,24 +402,195 @@ impl SeamRamps {
     pub(super) fn prune_before(&mut self, s: f64) {
         let drop = self.ramps.partition_point(|ramp| ramp.end() < s);
         self.ramps.drain(..drop);
+        let drop = self
+            .valleys
+            .partition_point(|valley| valley.reach_end() < s);
+        self.valleys.drain(..drop);
+    }
+
+    /// A leg whose raw leaders rest opens a rest valley where it starts,
+    /// unless one is open already; the first leg that moves again closes it
+    /// where it starts. Each side reaches as a ramp at that seam would.
+    fn lay_rest_valley(
+        &mut self,
+        spans: &[RatioSpan],
+        leg: &RampLeg,
+        leaders: &ShapedLeaders,
+        ramp_time: f64,
+    ) {
+        if leg.rests == self.resting {
+            return;
+        }
+        let opening = Crossing::at(leaders, leg.support.0);
+        let crossing = self
+            .reach_into_next
+            .map_or(opening, |closing| closing.common(opening));
+        let seam = leg.start_s;
+        let span_before = spans
+            .iter()
+            .rev()
+            .find(|span| span.s1 <= seam + SPAN_LOOKUP_SLACK_MM && span.s0 < seam);
+        let span_after = spans
+            .iter()
+            .find(|span| span.s0 >= seam - SPAN_LOOKUP_SLACK_MM);
+        let reach = crossing.reach(ramp_time);
+        if leg.rests {
+            let before = span_before.map_or(0.0, |span| {
+                reach.min(0.5 * (span.s1 - span.s0)).min(seam - self.floor)
+            });
+            self.valleys.push(AdvanceValley {
+                start: seam,
+                end: f64::INFINITY,
+                before: before.max(0.0),
+                after: 0.0,
+            });
+            self.resting = true;
+        } else {
+            let after = span_after.map_or(0.0, |span| reach.min(0.5 * (span.s1 - span.s0)));
+            self.close_rest(seam, after);
+        }
+    }
+
+    fn closes_a_rest_at(&self, seam: f64) -> bool {
+        self.valleys
+            .last()
+            .is_some_and(|valley| valley.end == seam && valley.end > valley.start)
+    }
+
+    /// The weight `W` the advance reads the ratio with at `s`, with its
+    /// first two path derivatives: 1 away from every valley.
+    pub(super) fn valley_weight(&self, s: f64) -> (f64, f64, f64) {
+        let first = self
+            .valleys
+            .partition_point(|valley| valley.reach_end() <= s);
+        self.valleys[first..]
+            .iter()
+            .take_while(|valley| valley.reach_start() < s)
+            .fold((1.0, 0.0, 0.0), |(w, w1, w2), valley| {
+                let (v, v1, v2) = valley.weight(s);
+                (w * v, w1 * v + w * v1, w2 * v + 2.0 * w1 * v1 + w * v2)
+            })
+    }
+
+    /// Where the valleys overlapping `[lo, hi]` start and end bending.
+    pub(super) fn valley_ends(&self, lo: f64, hi: f64) -> impl Iterator<Item = f64> + '_ {
+        let first = self
+            .valleys
+            .partition_point(|valley| valley.reach_end() <= lo);
+        self.valleys[first..]
+            .iter()
+            .take_while(move |valley| valley.reach_start() < hi)
+            .flat_map(|valley| {
+                [
+                    valley.reach_start(),
+                    valley.start,
+                    valley.end,
+                    valley.reach_end(),
+                ]
+            })
     }
 }
 
-/// How far a ramp at a seam the leaders cross at `times` reaches, read on
-/// the side that reaches further.
-fn reach_at(leaders: &ShapedLeaders, times: &[f64], ramp_time: f64) -> f64 {
-    times
-        .iter()
-        .map(|&t| {
-            let speed = leaders.speed(t);
-            let rate = if speed > 0.0 {
-                leaders.speed_deriv(t, speed).abs()
-            } else {
-                leaders.accel_norm(t)
-            };
-            (speed + 0.5 * rate * ramp_time) * 0.5 * ramp_time
-        })
-        .fold(0.0, f64::max)
+/// A stretch of path where a ratio-ramped advance reads the laid ratio
+/// weighted down to zero: `W = 0` on `[start, end]` and `W = 3x² − 2x³`
+/// within `before`/`after` of it, `x` the distance out over that width, so
+/// the weight leaves zero with zero slope and meets 1 with zero slope. The
+/// laid ratio, and so the material, is untouched; only the lead the
+/// advance builds is released over the path before and rebuilt after.
+///
+/// - A turnaround: the leaders' path speed passes through zero at a seam
+///   while its rate does not, so the rate steps from `−a` to `+a`, and an
+///   advance reading `r·ṡ` would step the follower's velocity by `2·k·r·a`
+///   whatever the ratio's own shape. The valley is that seam, each side as
+///   wide as a ramp there.
+/// - A rest: an extrude-only move or a dwell, along which only the shaped
+///   kernel spill moves the leaders — the tail of the move before, the lead
+///   of the move after, and the fit's back-and-forth near the rest point,
+///   whose own turnarounds and short idle spans an advance would turn into
+///   steps. The valley is the rest's whole arc.
+#[derive(Debug, Clone, Copy)]
+struct AdvanceValley {
+    start: f64,
+    end: f64,
+    before: f64,
+    after: f64,
+}
+
+impl AdvanceValley {
+    fn reach_start(&self) -> f64 {
+        self.start - self.before
+    }
+
+    fn reach_end(&self) -> f64 {
+        self.end + self.after
+    }
+
+    fn weight(&self, s: f64) -> (f64, f64, f64) {
+        let (distance, width, outward) = if s < self.start {
+            (self.start - s, self.before, -1.0)
+        } else if s > self.end {
+            (s - self.end, self.after, 1.0)
+        } else {
+            return (0.0, 0.0, 0.0);
+        };
+        if distance >= width {
+            return (1.0, 0.0, 0.0);
+        }
+        let x = distance / width;
+        (
+            x * x * (3.0 - 2.0 * x),
+            outward * 6.0 * x * (1.0 - x) / width,
+            (6.0 - 12.0 * x) / (width * width),
+        )
+    }
+}
+
+/// The time a turnaround's rate takes to build the speed the leaders cross
+/// its seam with: the shaped leaders' velocities there are zero to their
+/// fit's rounding, far under the rate times this.
+const TURNAROUND_SPEED_TIME_S: f64 = 1e-6;
+
+/// How the leaders cross a seam: their path speed and the magnitude of its
+/// rate.
+#[derive(Debug, Clone, Copy)]
+struct Crossing {
+    speed: f64,
+    rate: f64,
+}
+
+impl Crossing {
+    fn at(leaders: &ShapedLeaders, t: f64) -> Self {
+        let speed = leaders.speed(t);
+        let rate = if speed > 0.0 {
+            leaders.speed_deriv(t, speed).abs()
+        } else {
+            leaders.accel_norm(t)
+        };
+        Self { speed, rate }
+    }
+
+    /// What both sides of a seam share. A rate on one side only — a leader
+    /// starting from rest with an acceleration step, as an unshaped z does
+    /// — leaves the seam crossed at rest: an advance steps the follower's
+    /// velocity there by `k·r·Δa` whether the ratio is ramped or not, so a
+    /// ramp would only carry the ratio step's material into the move.
+    fn common(self, other: Self) -> Self {
+        Self {
+            speed: self.speed.min(other.speed),
+            rate: self.rate.min(other.rate),
+        }
+    }
+
+    fn reach(self, ramp_time: f64) -> f64 {
+        (self.speed + 0.5 * self.rate * ramp_time) * 0.5 * ramp_time
+    }
+
+    /// The leaders turn around at the seam: they cross it at a speed their
+    /// rate builds within [`TURNAROUND_SPEED_TIME_S`], the rounding of an
+    /// exact zero, while that rate itself is no rounding.
+    fn turns_around(self) -> bool {
+        self.rate > 0.0 && self.speed <= self.rate * TURNAROUND_SPEED_TIME_S
+    }
 }
 
 /// When the leaders have covered `arc` of path into `leg`.

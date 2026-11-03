@@ -236,6 +236,17 @@ post_processors: extruder_pa, extruder_smoothing
 #   at speed v, half before the seam and half after, never more than half
 #   of either neighbouring move. A seam crossed at rest stays sharp. The
 #   extruded material is exactly the unramped projection's.
+#   A pressure advance in the same post_processors then needs no smoothing
+#   kernel. It advances only the extrusion laid along the leaders' path, as
+#   Klipper advances only extruding moves that travel: retracts, primes and
+#   other extrude-only moves keep their own motion, so ratio_ramp_time
+#   requires finite [extruder] max_extrude_only_velocity and
+#   max_extrude_only_accel. Where the leaders turn around (a wipe that
+#   reverses along the line) and across an extrude-only move or dwell, the
+#   advance releases its lead over the same reach before and rebuilds it
+#   after. Any extruder position step, or velocity step beyond the leaders'
+#   fit rounding, is refused before it is emitted; leaders without an
+#   acceleration-continuous kernel produce such steps.
 ```
 
 The kinematic lane constructor creates `AxisRail`/servo rails and applies the

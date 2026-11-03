@@ -91,6 +91,7 @@ pub planner_config::PlannerConfig::post_processors: planner_config::PostProcesso
 pub planner_config::PlannerConfig::runtime_caps: planner_config::RuntimeCaps
 pub planner_config::PlannerConfig::runtime_corner_deviation: core::option::Option<f64>
 impl planner_config::PlannerConfig
+pub fn planner_config::PlannerConfig::check_ratio_ramp_extrude_only_caps(&self) -> core::result::Result<(), alloc::string::String>
 pub fn planner_config::PlannerConfig::compile_active_chains(&self) -> core::result::Result<trajectory::chain::AxisChainSet, planner_config::PostProcessorConfigError>
 pub fn planner_config::PlannerConfig::corner_deviation(&self) -> f64
 pub fn planner_config::PlannerConfig::effective_limits(&self) -> (f64, f64, f64)

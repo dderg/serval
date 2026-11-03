@@ -163,6 +163,99 @@ impl AdvanceStep {
     }
 }
 
+/// What spares the motor the discontinuities a leading advance makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdvanceSmoothing {
+    /// A kernel after the projection: the advance reads the whole follower
+    /// velocity, and its steps are carried for the kernel to spread.
+    Kernel,
+    /// A ratio ramp ahead of it: the laid ratio is C1, so the advance has no
+    /// step to carry and nothing after it would spread one; a step that
+    /// would reach the motor is refused. The advance reads only the
+    /// velocity laid along the leaders' path, as Klipper advances only the
+    /// extruding moves that travel: a retract or prime the raw track makes
+    /// on its own pushes no bead to lead, and advancing it would step its
+    /// velocity by `k·Δa` at every acceleration change of its trapezoid.
+    RatioRamp,
+}
+
+#[derive(Clone, Copy)]
+struct LeadingAdvance<'a> {
+    stage: &'a ChainStage,
+    smoothing: AdvanceSmoothing,
+}
+
+impl<'a> LeadingAdvance<'a> {
+    /// The advance a chain applies before projection, if any: with no
+    /// kernel to defer it to, a linear one too.
+    fn of(chain: &'a CompiledChain) -> Option<Self> {
+        let stage = (!chain.follower_linear_transform())
+            .then(|| chain.leading_transform())
+            .flatten()?;
+        Some(Self {
+            stage,
+            smoothing: match chain.ratio_ramp_time() {
+                Some(_) => AdvanceSmoothing::RatioRamp,
+                None => AdvanceSmoothing::Kernel,
+            },
+        })
+    }
+
+    /// The follower velocity, acceleration and jerk the advance reads at
+    /// `t`, given the follower's own velocity and acceleration there.
+    fn read(
+        &self,
+        sig: &FollowerSignal,
+        t: f64,
+        (velocity, acceleration): (f64, f64),
+    ) -> (f64, f64, f64) {
+        match self.smoothing {
+            AdvanceSmoothing::Kernel => (velocity, acceleration, sig.jerk(t)),
+            AdvanceSmoothing::RatioRamp => sig.ramped_advance_read(t),
+        }
+    }
+
+    fn read_velocity(&self, sig: &FollowerSignal, t: f64) -> f64 {
+        match self.smoothing {
+            AdvanceSmoothing::Kernel => sig.deriv(t),
+            AdvanceSmoothing::RatioRamp => sig.ramped_advance_read(t).0,
+        }
+    }
+
+    fn read_acceleration(&self, sig: &FollowerSignal, t: f64) -> f64 {
+        match self.smoothing {
+            AdvanceSmoothing::Kernel => sig.second_deriv(t),
+            AdvanceSmoothing::RatioRamp => sig.ramped_advance_read(t).1,
+        }
+    }
+
+    fn read_seam_velocity(&self, input: &SeamInput) -> f64 {
+        match self.smoothing {
+            AdvanceSmoothing::Kernel => input.velocity,
+            AdvanceSmoothing::RatioRamp => {
+                input
+                    .ramped
+                    .expect("a ratio-ramped seam records what its advance reads")
+                    .read_velocity
+            }
+        }
+    }
+
+    fn is_ramped(&self) -> bool {
+        self.smoothing == AdvanceSmoothing::RatioRamp
+    }
+}
+
+fn ramped_position_step(axis: usize, step: &AdvanceStep) -> PostProcessError {
+    PostProcessError::RatioRampedPositionStep {
+        axis,
+        t: step.t,
+        step_mm: step.step_mm,
+        velocity_before: step.velocity_before,
+        velocity_after: step.velocity_after,
+    }
+}
+
 /// One raw segment's follower projection inputs: the shaped leader signal it
 /// rides, its own raw track, and where on the shaped path it starts.
 #[derive(Clone, Copy)]
@@ -179,11 +272,13 @@ struct FollowerSource<'a> {
 /// Fits one segment's projected follower source. Its pieces meet on the
 /// signal's own velocity: the plain source's always, an advanced one's once
 /// its in-window advance steps are taken out for the kernel after it to
-/// carry, which configuration and the shaper guarantee it has.
+/// carry, which configuration and the shaper guarantee it has. A
+/// ratio-ramped advance has no kernel after it, so it fits only a signal
+/// with no such step and no velocity step beyond the fit's resolution.
 fn fit_source_projection(
     source: FollowerSource,
     fit_tol: FitTol,
-    leading_stage: Option<&ChainStage>,
+    leading: Option<LeadingAdvance>,
 ) -> Result<SourceProjection, PostProcessError> {
     let FollowerSource {
         shaped,
@@ -214,15 +309,32 @@ fn fit_source_projection(
         velocity: sig.deriv(t),
         ratio: sig.state.ratio_and_slope(sig.s_owned(t)).0,
         leader_speed: sig.shaped_speed(t),
+        ramped: leading
+            .filter(LeadingAdvance::is_ramped)
+            .map(|advance| RampedSeam {
+                read_velocity: sig.ramped_advance_read(t).0,
+                advanced_velocity: AdvancedFollowerSignal {
+                    source: &sig,
+                    advance,
+                    steps: &[],
+                }
+                .eval_pva(t)
+                .1,
+            }),
     };
     let input_start = input_state(t_start);
     let input_end = input_state(t_end);
-    let steps_beyond_rounding = match leading_stage {
-        Some(stage) => advance_steps_at(stage, &sig, &breakpoints.fit_seeds, (t_start, t_end))
+    let steps_beyond_rounding = match leading {
+        Some(advance) => advance_steps_at(advance, &sig, &breakpoints.fit_seeds, (t_start, t_end))
             .filter(|step| !step.is_rounding())
             .collect::<Vec<_>>(),
         None => Vec::new(),
     };
+    if let (Some(advance), Some(step)) = (leading, steps_beyond_rounding.first()) {
+        if advance.is_ramped() {
+            return Err(ramped_position_step(axis, step));
+        }
+    }
     let (track, window_advance_steps) = if let Some(value) = sig.constant_value() {
         let track = bezier_pieces_to_nurbs(&[BezierPiece {
             u_start: t_start,
@@ -237,43 +349,63 @@ fn fit_source_projection(
             t_end,
             seed_breakpoints: &breakpoints.fit_seeds,
             fit_tol: tolerance,
-            fit_context: if leading_stage.is_some() {
+            fit_context: if leading.is_some() {
                 "advanced_follower_source"
             } else {
                 "follower_source"
             },
             velocity_continuous: true,
         };
-        match leading_stage {
-            Some(stage) => {
+        match leading {
+            Some(advance) => {
                 let resolution = fit_resolution(
                     &fit,
                     &AdvancedFollowerSignal {
                         source: &sig,
-                        stage,
+                        advance,
                         steps: &steps_beyond_rounding,
                     },
                 )?;
                 let mut seeds = breakpoints.fit_seeds.clone();
-                seeds.extend(sig.advance_velocity_steps_on_the_grid(stage, resolution.velocity));
+                seeds.extend(sig.advance_velocity_steps_on_the_grid(advance, resolution.velocity));
                 seeds.sort_by(f64::total_cmp);
                 seeds.dedup();
                 let mut step_candidates = [seeds.as_slice(), sig.grid.as_slice()].concat();
                 step_candidates.sort_by(f64::total_cmp);
                 step_candidates.dedup();
-                let steps = advance_steps_at(stage, &sig, &step_candidates, (t_start, t_end))
-                    .filter(|step| !step.is_rounding() || step.step_mm.abs() > resolution.position)
+                let steps = advance_steps_at(advance, &sig, &step_candidates, (t_start, t_end))
+                    .filter(|step| {
+                        !step.is_rounding()
+                            || (!advance.is_ramped() && step.step_mm.abs() > resolution.position)
+                    })
                     .collect::<Vec<_>>();
+                let advanced = AdvancedFollowerSignal {
+                    source: &sig,
+                    advance,
+                    steps: &steps,
+                };
+                if advance.is_ramped() {
+                    if let Some(step) = steps.first() {
+                        return Err(ramped_position_step(axis, step));
+                    }
+                    advanced.refuse_velocity_steps(
+                        axis,
+                        &step_candidates,
+                        (t_start, t_end),
+                        resolution.velocity
+                            + advanced_leader_rounding(
+                                advance.stage,
+                                sig.ratio_bounds.ratio,
+                                fit_tol.accel_mm_s2,
+                            ),
+                    )?;
+                }
                 let track = fit_axis_from_signal(
                     AxisFit {
                         seed_breakpoints: &seeds,
                         ..fit
                     },
-                    &AdvancedFollowerSignal {
-                        source: &sig,
-                        stage,
-                        steps: &steps,
-                    },
+                    &advanced,
                 )?;
                 (track, steps)
             }
@@ -301,7 +433,7 @@ fn fit_source_projection(
 /// yet through the advance a position step that spans down to the fit floor
 /// cannot absorb.
 fn advance_steps_at<'a>(
-    stage: &'a ChainStage,
+    advance: LeadingAdvance<'a>,
     sig: &'a FollowerSignal,
     times: &'a [f64],
     (t_start, t_end): (f64, f64),
@@ -312,10 +444,10 @@ fn advance_steps_at<'a>(
         .filter(move |&t| t > t_start && t < t_end)
         .map(move |t| {
             AdvanceStep::between(
-                stage,
+                advance.stage,
                 t,
-                sig.deriv(trajectory::next_toward(t, t_start)),
-                sig.deriv(trajectory::next_toward(t, t_end)),
+                advance.read_velocity(sig, trajectory::next_toward(t, t_start)),
+                advance.read_velocity(sig, trajectory::next_toward(t, t_end)),
             )
         })
 }
@@ -356,7 +488,7 @@ pub(crate) fn project_followers(
         let chain = &chains.chains[axis];
         let kernel = chain.kernel();
         let defer_linear_prefix = chain.follower_linear_transform();
-        let leading_stage = advance_before_projection(chain);
+        let leading = LeadingAdvance::of(chain);
         let leaders_transformed = leaders.iter().any(|&leader| {
             chains
                 .chains
@@ -413,6 +545,7 @@ pub(crate) fn project_followers(
                             leaders,
                             support: projection_support(&base[i], &frontier[i], axis, leaders),
                             start_s: table_start,
+                            rests: arc.1 <= SPAN_MIN_LEN_MM,
                         };
                         state.ramps.lay(&state.spans, &leg, ramp_time);
                         state.ramps.queue(
@@ -474,7 +607,7 @@ pub(crate) fn project_followers(
                                 s_length,
                             },
                             fit_tol,
-                            leading_stage,
+                            leading,
                         ),
                     )
                 },
@@ -549,7 +682,7 @@ pub(crate) fn project_followers(
                         base_position,
                         (t_start, t_end),
                         fit_tol,
-                        leading_stage.is_some(),
+                        leading.is_some(),
                     )?,
                     None,
                     None,
@@ -566,7 +699,7 @@ pub(crate) fn project_followers(
                 projected
             } else {
                 crate::shaper::apply_zero_support_transform(
-                    leading_stage,
+                    leading.map(|advance| advance.stage),
                     axis,
                     projected,
                     follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis)),
@@ -578,16 +711,30 @@ pub(crate) fn project_followers(
                     t: raw.t_start,
                 });
             }
-            let join_advance_step = leading_stage
-                .and_then(|stage| {
-                    join_advance_step(
-                        stage,
+            let join_advance_step = match leading {
+                Some(advance) => {
+                    let step = join_advance_step(
+                        advance,
                         axis,
                         state.projected_input_end,
                         (t_start, input_start),
-                    )
-                })
-                .map_or(0.0, |step| step.step_mm);
+                    );
+                    if advance.is_ramped() {
+                        if let Some(step) = step {
+                            return Err(ramped_position_step(axis, &step));
+                        }
+                        refuse_ramped_join_velocity_step(
+                            advance,
+                            axis,
+                            fit_tol.accel_mm_s2,
+                            state.projected_input_end,
+                            (t_start, input_start),
+                        )?;
+                    }
+                    step.map_or(0.0, |step| step.step_mm)
+                }
+                None => 0.0,
+            };
             let semantic_cuts = projected_cuts.unwrap_or_else(|| piece_boundaries(&track));
             let track_start = nurbs::eval::eval(&track, t_start);
             let output_base = state.projected_output_end.unwrap_or(base_position)
@@ -947,9 +1094,7 @@ pub(crate) fn project_followers(
                 }
             }
             if let Some(weld) = batch_weld {
-                for piece in &mut pieces {
-                    weld.apply(piece);
-                }
+                pieces = weld.apply(pieces);
             }
             if i > 0 {
                 let previous = emitted_pv.expect("an earlier commit emitted its endpoint state");
@@ -965,9 +1110,7 @@ pub(crate) fn project_followers(
                     base_position,
                     &pieces,
                 )?;
-                for piece in &mut pieces {
-                    weld.apply(piece);
-                }
+                pieces = weld.apply(pieces);
             }
             committed_input_end = Some(input_end);
             let (run_end, velocity_end) = piece_run_end_pv(&pieces);
@@ -1039,6 +1182,15 @@ struct SeamInput {
     velocity: f64,
     ratio: f64,
     leader_speed: f64,
+    ramped: Option<RampedSeam>,
+}
+
+/// What a ratio-ramped advance reads at a seam and the velocity it makes
+/// of it, which no kernel smooths after it.
+#[derive(Debug, Clone, Copy)]
+struct RampedSeam {
+    read_velocity: f64,
+    advanced_velocity: f64,
 }
 
 impl SeamInput {
@@ -1052,6 +1204,7 @@ impl SeamInput {
             velocity,
             ratio: 1.0,
             leader_speed: velocity,
+            ramped: None,
         }
     }
 
@@ -1074,7 +1227,7 @@ impl SeamInput {
 /// A time gap between the segments (a dwell after a drain) is legal only at
 /// rest, where there is nothing to carry.
 fn join_advance_step(
-    stage: &ChainStage,
+    advance: LeadingAdvance,
     axis: usize,
     previous_end: Option<(f64, SeamInput)>,
     (t_start, after): (f64, SeamInput),
@@ -1093,12 +1246,76 @@ fn join_advance_step(
         return None;
     }
     Some(AdvanceStep::between(
-        stage,
+        advance.stage,
         t_start,
-        before.velocity,
-        after.velocity,
+        advance.read_seam_velocity(&before),
+        advance.read_seam_velocity(&after),
     ))
     .filter(|step| !step.is_rounding())
+}
+
+/// A kernel-free emission carries a follower's own velocity step at a join
+/// as a C0 corner ([`SeamInput::signal_velocity_step`]) and welds what the
+/// advanced velocity differs by on top, straight to the motor. A ratio ramp
+/// leaves the projection no step of its own, and the advance none beyond
+/// what the leaders' acceleration rounding makes of it
+/// ([`advanced_leader_rounding`]), so a larger one on a
+/// ramped follower is refused.
+fn refuse_ramped_join_velocity_step(
+    advance: LeadingAdvance,
+    axis: usize,
+    leader_accel_tol: f64,
+    previous_end: Option<(f64, SeamInput)>,
+    (t_start, after): (f64, SeamInput),
+) -> Result<(), PostProcessError> {
+    let Some((previous_t_end, before)) = previous_end else {
+        return Ok(());
+    };
+    if (previous_t_end - t_start).abs() > SEGMENT_TIME_EPS_S {
+        return Ok(());
+    }
+    let own_step = before.signal_velocity_step(&after);
+    let rounding =
+        ADVANCE_STEP_VELOCITY_ROUNDING * before.velocity.abs().max(after.velocity.abs()).max(1.0);
+    if own_step.abs() > rounding {
+        return Err(PostProcessError::RatioRampedVelocityStep {
+            axis,
+            t: t_start,
+            velocity_before: before.velocity,
+            velocity_after: before.velocity + own_step,
+            resolution: rounding,
+        });
+    }
+    let (Some(before_ramped), Some(after_ramped)) = (before.ramped, after.ramped) else {
+        return Ok(());
+    };
+    let (advanced_before, advanced_after) = (
+        before_ramped.advanced_velocity,
+        after_ramped.advanced_velocity,
+    );
+    let leader_rounding = advanced_leader_rounding(
+        advance.stage,
+        before.ratio.abs().max(after.ratio.abs()),
+        leader_accel_tol,
+    );
+    if (advanced_after - advanced_before).abs() > rounding + leader_rounding {
+        return Err(PostProcessError::RatioRampedVelocityStep {
+            axis,
+            t: t_start,
+            velocity_before: advanced_before,
+            velocity_after: advanced_after,
+            resolution: rounding + leader_rounding,
+        });
+    }
+    Ok(())
+}
+
+/// The velocity step an advance makes of the leaders' own rounding: a
+/// shaped leader is fitted within `leader_accel_tol` on either side of its
+/// knots, so its acceleration may step by twice that there, which the
+/// projection scales by the ratio and the advance by its slope.
+fn advanced_leader_rounding(stage: &ChainStage, ratio_bound: f64, leader_accel_tol: f64) -> f64 {
+    2.0 * leader_accel_tol * ratio_bound * steepest_advance_slope(stage)
 }
 
 fn advance_offset(stage: &ChainStage, velocity: f64) -> f64 {
@@ -1128,12 +1345,6 @@ fn steepest_advance_slope(stage: &ChainStage) -> f64 {
         }
         ChainStage::SmoothKernel(_) => unreachable!("a leading advance is not a kernel"),
     }
-}
-
-fn advance_before_projection(chain: &CompiledChain) -> Option<&ChainStage> {
-    (!chain.follower_linear_transform())
-        .then(|| chain.leading_transform())
-        .flatten()
 }
 
 /// The convolution-relevant cuts of a projected follower source, split by
@@ -2198,6 +2409,26 @@ impl<'a> FollowerSignal<'a> {
     }
 
     fn jerk(&self, t: f64) -> f64 {
+        let raw = self.raw_delta.map_or(0.0, |(axis, _)| {
+            axis.eval_pvaj(t)
+                .expect("follower raw axis has exact derivatives")
+                .jerk
+        });
+        self.path_jerk(t) + raw
+    }
+
+    fn path_deriv(&self, t: f64) -> f64 {
+        let (ratio, _) = self.state.ratio_and_slope(self.s_owned(t));
+        ratio * self.shaped_speed(t)
+    }
+
+    fn path_second_deriv(&self, t: f64) -> f64 {
+        let (rate, rate_deriv) = self.odometer_rate(t);
+        let (ratio, slope) = self.state.ratio_and_slope(self.s_owned(t));
+        slope * rate * rate + ratio * rate_deriv
+    }
+
+    fn path_jerk(&self, t: f64) -> f64 {
         let speed = self.leaders.speed(t);
         let speed_derivative = self.leader_speed_deriv(t, speed);
         let speed_second = self.leader_speed_second_deriv(t, speed);
@@ -2206,16 +2437,38 @@ impl<'a> FollowerSignal<'a> {
         let rate_second = self.odometer_scale * speed_second;
         let s = self.s_owned(t);
         let (ratio, slope) = self.state.ratio_and_slope(s);
-        let raw = self.raw_delta.map_or(0.0, |(axis, _)| {
-            axis.eval_pvaj(t)
-                .expect("follower raw axis has exact derivatives")
-                .jerk
-        });
-        let laid = ratio * rate_second + 3.0 * slope * rate * rate_deriv + raw;
+        let laid = ratio * rate_second + 3.0 * slope * rate * rate_deriv;
         if self.state.ramps.is_empty() {
             return laid;
         }
         laid + self.state.ratio_curvature(s) * rate * rate * rate
+    }
+
+    /// What a ratio-ramped advance reads at `t`: the velocity `R(s)·ṡ` the
+    /// projection lays along the leaders' path and its first two time
+    /// derivatives, leaving out what the raw track moves on its own. `R`
+    /// is the laid ratio weighted down to zero at every turnaround of the
+    /// leaders ([`SeamRamps::valley_weight`]).
+    fn ramped_advance_read(&self, t: f64) -> (f64, f64, f64) {
+        let speed = self.leaders.speed(t);
+        let rate = self.odometer_scale * speed;
+        let rate_deriv = self.odometer_scale * self.leader_speed_deriv(t, speed);
+        let rate_second = self.odometer_scale * self.leader_speed_second_deriv(t, speed);
+        let s = self.s_owned(t);
+        let (ratio, slope) = self.state.ratio_and_slope(s);
+        let curvature = self.state.ratio_curvature(s);
+        let (weight, weight_slope, weight_curvature) = self.state.ramps.valley_weight(s);
+        let read = ratio * weight;
+        let read_slope = slope * weight + ratio * weight_slope;
+        let read_curvature =
+            curvature * weight + 2.0 * slope * weight_slope + ratio * weight_curvature;
+        (
+            read * rate,
+            read_slope * rate * rate + read * rate_deriv,
+            read * rate_second
+                + 3.0 * read_slope * rate * rate_deriv
+                + read_curvature * rate * rate * rate,
+        )
     }
 
     fn s_offset(&self, t: f64) -> f64 {
@@ -2327,7 +2580,11 @@ impl<'a> FollowerSignal<'a> {
                         self.s_start - SPAN_LOOKUP_SLACK_MM,
                         s_end + SPAN_LOOKUP_SLACK_MM,
                     )
-                    .flat_map(|ramp| [ramp.start(), ramp.end()]),
+                    .flat_map(|ramp| [ramp.start(), ramp.end()])
+                    .chain(self.state.ramps.valley_ends(
+                        self.s_start - SPAN_LOOKUP_SLACK_MM,
+                        s_end + SPAN_LOOKUP_SLACK_MM,
+                    )),
             )
             .filter(|&s| {
                 s >= self.s_start - SPAN_LOOKUP_SLACK_MM && s <= s_end + SPAN_LOOKUP_SLACK_MM
@@ -2407,26 +2664,33 @@ impl<'a> FollowerSignal<'a> {
     /// cover every span the signal rides and what the table holds beyond
     /// its ends.
     fn acceleration_steps_on_the_grid(&self, tolerance: f64) -> Vec<f64> {
-        self.grid_acceleration_steps(tolerance, |_, step| step > tolerance)
+        self.grid_acceleration_steps(
+            tolerance,
+            |t| self.second_deriv(t),
+            |_, step| step > tolerance,
+        )
     }
 
     /// Interior leader-grid times where a leading advance turns the
-    /// follower's acceleration step `Δa` into a velocity step `a'(v)·Δa`
-    /// wider than `velocity_resolution`. The follower's velocity is
+    /// acceleration step `Δa` it reads into a velocity step `a'(v)·Δa`
+    /// wider than `velocity_resolution`. The velocity it reads is
     /// continuous there, so the step is the advance slope at that velocity
     /// times `Δa`, and only seams whose `Δa` bound times the steepest slope
     /// the law reaches clears the resolution pay for evaluating it.
     fn advance_velocity_steps_on_the_grid(
         &self,
-        stage: &ChainStage,
+        advance: LeadingAdvance,
         velocity_resolution: f64,
     ) -> Vec<f64> {
         self.grid_acceleration_steps(
-            velocity_resolution / steepest_advance_slope(stage),
-            |t, step| advance_slope(stage, self.deriv(t)).abs() * step > velocity_resolution,
+            velocity_resolution / steepest_advance_slope(advance.stage),
+            |t| advance.read_acceleration(self, t),
+            |t, step| {
+                advance_slope(advance.stage, advance.read_velocity(self, t)).abs() * step
+                    > velocity_resolution
+            },
         )
     }
-
     fn velocity_steps_on_the_grid(&self, velocity_resolution: f64) -> Vec<f64> {
         let ratio_bound = self.ratio_bounds.ratio;
         let interior = &self.grid[1..self.grid.len() - 1];
@@ -2447,6 +2711,7 @@ impl<'a> FollowerSignal<'a> {
     fn grid_acceleration_steps(
         &self,
         step_bound_threshold: f64,
+        acceleration: impl Fn(f64) -> f64,
         step_exceeds: impl Fn(f64, f64) -> bool,
     ) -> Vec<f64> {
         let RatioBounds {
@@ -2481,10 +2746,7 @@ impl<'a> FollowerSignal<'a> {
                 let bound = ratio_bound * (rate_after - rate_before).abs()
                     + slope_bound * (speed_squared_after - speed_squared_before).abs();
                 bound > step_bound_threshold
-                    && step_exceeds(
-                        t,
-                        (self.second_deriv(after) - self.second_deriv(before)).abs(),
-                    )
+                    && step_exceeds(t, (acceleration(after) - acceleration(before)).abs())
             })
             .collect()
     }
@@ -2667,16 +2929,13 @@ impl TrackSignal for FollowerSignal<'_> {
     }
 
     fn deriv(&self, t: f64) -> f64 {
-        let (ratio, _) = self.state.ratio_and_slope(self.s_owned(t));
         let raw = self.raw_delta.map_or(0.0, |(axis, _)| axis_pva(axis, t).1);
-        ratio * self.shaped_speed(t) + raw
+        self.path_deriv(t) + raw
     }
 
     fn second_deriv(&self, t: f64) -> f64 {
-        let (rate, rate_deriv) = self.odometer_rate(t);
-        let (ratio, slope) = self.state.ratio_and_slope(self.s_owned(t));
         let raw = self.raw_delta.map_or(0.0, |(axis, _)| axis_pva(axis, t).2);
-        slope * rate * rate + ratio * rate_deriv + raw
+        self.path_second_deriv(t) + raw
     }
 
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
@@ -2759,7 +3018,7 @@ impl TrackSignal for FollowerSignal<'_> {
 /// the span after.
 struct AdvancedFollowerSignal<'a, 'b> {
     source: &'a FollowerSignal<'b>,
-    stage: &'a ChainStage,
+    advance: LeadingAdvance<'a>,
     steps: &'a [AdvanceStep],
 }
 
@@ -2769,6 +3028,32 @@ struct AdvanceInput {
 }
 
 impl AdvancedFollowerSignal<'_, '_> {
+    /// Refuses a velocity step wider than `resolution` at any of `times`
+    /// inside the window: with no kernel after the advance, the motor
+    /// would be asked to make it.
+    fn refuse_velocity_steps(
+        &self,
+        axis: usize,
+        times: &[f64],
+        (t_start, t_end): (f64, f64),
+        resolution: f64,
+    ) -> Result<(), PostProcessError> {
+        for &t in times.iter().filter(|&&t| t > t_start && t < t_end) {
+            let before = self.eval_pva(trajectory::next_toward(t, t_start)).1;
+            let after = self.eval_pva(trajectory::next_toward(t, t_end)).1;
+            if (after - before).abs() > resolution {
+                return Err(PostProcessError::RatioRampedVelocityStep {
+                    axis,
+                    t,
+                    velocity_before: before,
+                    velocity_after: after,
+                    resolution,
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn advance_input(&self, t: f64, velocity: f64) -> AdvanceInput {
         self.steps.iter().take_while(|step| step.t <= t).fold(
             AdvanceInput {
@@ -2795,18 +3080,18 @@ impl AdvancedFollowerSignal<'_, '_> {
 impl TrackSignal for AdvancedFollowerSignal<'_, '_> {
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let (p, v, a) = self.source.eval_pva(t);
-        let j = self.source.jerk(t);
-        let input = self.advance_input(t, v);
+        let (read_v, read_a, read_j) = self.advance.read(self.source, t, (v, a));
+        let input = self.advance_input(t, read_v);
         let p = p - input.steps_taken_out;
-        match self.stage {
+        match self.advance.stage {
             ChainStage::DerivativeGains { k1, k2 } => {
                 assert_eq!(*k2, 0.0, "leading acceleration gain is not supported");
-                (p + k1 * input.velocity, v + k1 * a, a + k1 * j)
+                (p + k1 * input.velocity, v + k1 * read_a, a + k1 * read_j)
             }
             ChainStage::NonlinearAdvance(advance) => (
                 p + advance.advance(input.velocity),
-                v + advance.slope(v) * a,
-                a + advance.slope(v) * j + advance.curvature(v) * a * a,
+                v + advance.slope(read_v) * read_a,
+                a + advance.slope(read_v) * read_j + advance.curvature(read_v) * read_a * read_a,
             ),
             ChainStage::SmoothKernel(_) => unreachable!("a leading advance is not a kernel"),
         }
@@ -2818,11 +3103,11 @@ impl TrackSignal for AdvancedFollowerSignal<'_, '_> {
 
     fn position_delta(&self, (t0, _): (f64, f64), (t1, _): (f64, f64)) -> f64 {
         let delta = self.source.position_delta((t0, 0.0), (t1, 0.0));
-        let start = self.advance_input(t0, self.source.deriv(t0));
-        let end = self.advance_input(t1, self.source.deriv(t1));
+        let start = self.advance_input(t0, self.advance.read_velocity(self.source, t0));
+        let end = self.advance_input(t1, self.advance.read_velocity(self.source, t1));
         let (v0, v1) = (start.velocity, end.velocity);
         delta - (end.steps_taken_out - start.steps_taken_out)
-            + match self.stage {
+            + match self.advance.stage {
                 ChainStage::DerivativeGains { k1, .. } => k1 * (v1 - v0),
                 ChainStage::NonlinearAdvance(advance) => advance.advance(v1) - advance.advance(v0),
                 ChainStage::SmoothKernel(_) => unreachable!("a leading advance is not a kernel"),
@@ -2893,10 +3178,15 @@ fn piece_run_end(pieces: &[BezierPiece]) -> f64 {
 /// carries the whole correction: the stretch opens on the emitted position
 /// *and* velocity, its settled total is untouched, and it closes on the
 /// natural endpoint state, so nothing downstream inherits a residual ramp and
-/// the correction cannot accumulate.
+/// the correction cannot accumulate. `L` is the whole window unless a
+/// velocity residual spread over it would displace the track past the
+/// tolerance — `4·|dv|·L/27` grows with the window — in which case the weld
+/// closes as early as that displacement allows.
 #[derive(Clone, Copy)]
 struct SeamWeld {
     origin: f64,
+    length: f64,
+    closes_inside: Option<f64>,
     coeffs: [f64; 4],
 }
 
@@ -2907,6 +3197,8 @@ struct WeldWindow {
     end: f64,
     tol: FitTol,
 }
+
+const WELD_REACH_BISECTIONS: usize = 64;
 
 impl SeamWeld {
     fn spanning(
@@ -2930,19 +3222,19 @@ impl SeamWeld {
         let (run_start, velocity_start) = piece_run_start_pv(pieces);
         let dp = emitted.0 - (base_position + run_start);
         let dv = emitted.1 + law_step - velocity_start;
-        let cubic = (2.0 * dp + dv * length) / (length * length * length);
-        let quadratic = -(3.0 * dp + 2.0 * dv * length) / (length * length);
-        let weld = Self {
-            origin: start,
-            coeffs: [dp, dv, quadratic, cubic],
+        let whole = Self::over(start, length, (dp, dv));
+        let weld = if whole.max_displacement() <= tol.pos_mm {
+            whole
+        } else {
+            Self::closing_within(start, length, (dp, dv), tol.pos_mm).unwrap_or(whole)
         };
-        let displacement = weld.max_displacement(length);
-        let acceleration = weld.max_acceleration(length);
+        let displacement = weld.max_displacement();
+        let acceleration = weld.max_acceleration();
         if displacement > tol.pos_mm || acceleration > tol.accel_mm_s2 {
             return Err(PostProcessError::SeamWeld {
                 axis,
                 t_start: start,
-                t_end: end,
+                t_end: weld.closes_inside.unwrap_or(end),
                 displacement_mm: displacement,
                 position_budget_mm: tol.pos_mm,
                 acceleration_mm_s2: acceleration,
@@ -2956,12 +3248,42 @@ impl SeamWeld {
         Ok(weld)
     }
 
+    fn over(origin: f64, length: f64, (dp, dv): (f64, f64)) -> Self {
+        let cubic = (2.0 * dp + dv * length) / (length * length * length);
+        let quadratic = -(3.0 * dp + 2.0 * dv * length) / (length * length);
+        Self {
+            origin,
+            length,
+            closes_inside: None,
+            coeffs: [dp, dv, quadratic, cubic],
+        }
+    }
+
+    /// The longest weld shorter than `window` that keeps its displacement
+    /// within `budget`, if any length does.
+    fn closing_within(origin: f64, window: f64, residual: (f64, f64), budget: f64) -> Option<Self> {
+        let (mut fits, mut exceeds) = (0.0_f64, window);
+        for _ in 0..WELD_REACH_BISECTIONS {
+            let length = 0.5 * (fits + exceeds);
+            if Self::over(origin, length, residual).max_displacement() <= budget {
+                fits = length;
+            } else {
+                exceeds = length;
+            }
+        }
+        (fits > 0.0).then(|| Self {
+            closes_inside: Some(origin + fits),
+            ..Self::over(origin, fits, residual)
+        })
+    }
+
     fn correction_at(&self, x: f64) -> f64 {
         let [c0, c1, c2, c3] = self.coeffs;
         c0 + x * (c1 + x * (c2 + x * c3))
     }
 
-    fn max_displacement(&self, length: f64) -> f64 {
+    fn max_displacement(&self) -> f64 {
+        let length = self.length;
         let [_, c1, c2, c3] = self.coeffs;
         let (a, b, c) = (3.0 * c3, 2.0 * c2, c1);
         let mut candidates = vec![0.0, length];
@@ -2984,12 +3306,44 @@ impl SeamWeld {
             .fold(0.0, f64::max)
     }
 
-    fn max_acceleration(&self, length: f64) -> f64 {
+    fn max_acceleration(&self) -> f64 {
         let [_, _, c2, c3] = self.coeffs;
-        (2.0 * c2).abs().max((2.0 * c2 + 6.0 * c3 * length).abs())
+        (2.0 * c2)
+            .abs()
+            .max((2.0 * c2 + 6.0 * c3 * self.length).abs())
     }
 
-    fn apply(&self, piece: &mut BezierPiece) {
+    /// `pieces` with the correction added over the weld, split where a
+    /// weld closing inside the window ends.
+    fn apply(&self, pieces: Vec<BezierPiece>) -> Vec<BezierPiece> {
+        let Some(close) = self.closes_inside else {
+            return pieces
+                .into_iter()
+                .map(|mut piece| {
+                    self.raise(&mut piece);
+                    piece
+                })
+                .collect();
+        };
+        let mut welded = Vec::with_capacity(pieces.len() + 1);
+        for piece in pieces {
+            if piece.u_start >= close {
+                welded.push(piece);
+            } else if piece.u_end > close {
+                let (mut head, tail) = nurbs::bezier::split_piece_at(&piece, close);
+                self.raise(&mut head);
+                welded.push(head);
+                welded.push(tail);
+            } else {
+                let mut piece = piece;
+                self.raise(&mut piece);
+                welded.push(piece);
+            }
+        }
+        welded
+    }
+
+    fn raise(&self, piece: &mut BezierPiece) {
         if piece.coeffs.len() < 4 {
             piece.coeffs.resize(4, 0.0);
         }

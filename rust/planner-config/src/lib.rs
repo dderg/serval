@@ -612,6 +612,31 @@ impl PlannerConfig {
             self.corner_deviation(),
         )
     }
+
+    /// A ratio ramp takes the place of the follower's smoothing kernel, so
+    /// the moves it makes on its own — retracts, primes, which its advance
+    /// leaves untouched — are bounded by the extrude-only caps alone, and
+    /// those must be set.
+    pub fn check_ratio_ramp_extrude_only_caps(&self) -> Result<(), String> {
+        let Some(ramped) = self
+            .axis_registry
+            .decls()
+            .iter()
+            .find(|decl| decl.ratio_ramp_time.is_some())
+        else {
+            return Ok(());
+        };
+        let finite = |cap: Option<f64>| cap.is_some_and(f64::is_finite);
+        if finite(self.max_extrude_only_velocity) && finite(self.max_extrude_only_accel) {
+            return Ok(());
+        }
+        Err(format!(
+            "axis '{}' has a ratio_ramp_time, so no smoothing kernel bounds the moves it makes \
+             on its own (retracts, primes): set finite [extruder] max_extrude_only_velocity \
+             and max_extrude_only_accel",
+            ramped.name
+        ))
+    }
 }
 
 impl Default for PlannerConfig {
