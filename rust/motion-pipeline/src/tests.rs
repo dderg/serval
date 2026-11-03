@@ -2400,7 +2400,7 @@ fn the_ladder_fits_a_resolution_scale_span_without_high_degree_amplification() {
             position: &truth_p,
             velocity: &truth_v,
             acceleration: &truth_a,
-            held: &|| &[],
+            held_miss: &|_| 0.0,
             held_ranks_misses: false,
         },
         crate::lowering::LadderBudget {
@@ -2503,7 +2503,7 @@ fn a_smooth_cusp_fits_below_the_high_degree_floor_without_bump_corrections() {
                 position: &truth_p,
                 velocity: &truth_v,
                 acceleration: &truth_a,
-                held: &|| &[],
+                held_miss: &|_| 0.0,
                 held_ranks_misses: false,
             },
             crate::lowering::LadderBudget {
@@ -2619,7 +2619,7 @@ fn a_constant_acceleration_resolution_span_fits_the_anchored_quadratic() {
             position: &truth_p,
             velocity: &truth_v,
             acceleration: &truth_a,
-            held: &|| &[],
+            held_miss: &|_| 0.0,
             held_ranks_misses: false,
         },
         crate::lowering::LadderBudget {
@@ -2758,7 +2758,7 @@ fn an_endpoint_anchored_fit_never_steps_the_right_seam() {
             position: &truth_p,
             velocity: &truth_v,
             acceleration: &truth_a,
-            held: &|| &[],
+            held_miss: &|_| 0.0,
             held_ranks_misses: false,
         },
         crate::lowering::LadderBudget {
@@ -2885,7 +2885,7 @@ fn the_closest_rung_at_a_square_root_onset_is_the_closest_between_the_probes() {
             position: &truth_p,
             velocity: &truth_v,
             acceleration: &truth_a,
-            held: &|| &held,
+            held_miss: &|rung| crate::lowering::held_miss(rung, h, &held, tolerance),
             held_ranks_misses: true,
         },
         crate::lowering::LadderBudget {
@@ -4527,4 +4527,35 @@ fn a_ratio_change_under_moving_shaped_leaders_with_advance_is_one_step() {
             );
         }
     }
+}
+
+#[test]
+#[should_panic(expected = "discontinuous move at line 1")]
+fn a_first_move_that_starts_away_from_home_is_refused() {
+    replay(
+        cfg(),
+        AxisChainSet::default(),
+        &[0.0; 4],
+        0.0,
+        &[line(1, [10.0, 0.0, 0.0], [20.0, 0.0, 0.0], 0.0)],
+    );
+}
+
+#[test]
+#[should_panic(expected = "discontinuous move at line 2")]
+fn a_move_after_a_reset_must_start_at_the_reset_position() {
+    replay_stream(
+        cfg(),
+        AxisChainSet::default(),
+        &[0.0; 4],
+        0.0,
+        vec![
+            line(1, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0).into(),
+            StreamInput::Drain,
+            StreamInput::Control(Control::Reset {
+                pos: vec![50.0, 0.0, 0.0, 0.0],
+            }),
+            line(2, [10.0, 0.0, 0.0], [20.0, 0.0, 0.0], 0.0).into(),
+        ],
+    );
 }

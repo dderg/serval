@@ -2,12 +2,8 @@
 //! real print, with drains, barriers and a reset mixed into the stream, it
 //! must emit exactly what the synchronous pipeline emits, item for item.
 
-use motion_core::live_config;
-use motion_core::seam_test_harness::parse_gcode_to_moves;
-use motion_pipeline::{
-    Control, DispatchCommand, Pipeline, StreamConfig, StreamInput, TrajectoryItem, advance_odometer,
-};
-use trajectory::AxisChainSet;
+use motion_core::seam_test_harness::LiveReplay;
+use motion_pipeline::{Control, DispatchCommand, StreamInput, TrajectoryItem, advance_odometer};
 
 const SLICE_MOVES: usize = 420;
 const DRAIN_EVERY: usize = 37;
@@ -19,31 +15,27 @@ fn repo_file(relative: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-fn live_setup() -> (StreamConfig, AxisChainSet, Vec<geometry::Move>) {
+fn live_setup() -> LiveReplay {
     let path = "tools/bench/configs/fast.cfg";
     let doc = config_doc::Document::parse(&repo_file(path), path).expect("config parses");
     let (settings, _) =
         planner_config::from_doc::read_motion_settings(&doc).expect("motion settings");
     let planner =
         planner_config::from_doc::planner_config_from_settings(&settings).expect("planner config");
-    let config = live_config::stream_config(&planner).expect("stream config");
-    let chains = planner.compile_active_chains().expect("chains compile");
-    let moves = parse_gcode_to_moves(
+    let mut replay = LiveReplay::new(
         &repo_file("tools/sim/gcode/voron_dense_top_layers.gcode"),
-        live_config::move_limits(&planner).expect("move limits"),
-    );
-    (
-        config,
-        chains,
-        moves.into_iter().take(SLICE_MOVES).collect(),
+        &planner,
     )
+    .expect("live replay");
+    replay.moves.truncate(SLICE_MOVES);
+    replay
 }
 
 /// The stream the ingress would send: the moves, a drain every
 /// `DRAIN_EVERY`, a drained barrier every `BARRIER_EVERY`, and one drained
 /// reset to where the toolhead already is.
-fn stream(moves: &[geometry::Move]) -> Vec<StreamInput> {
-    let mut position = vec![0.0; 4];
+fn stream(home: &[f64], moves: &[geometry::Move]) -> Vec<StreamInput> {
+    let mut position = home.to_vec();
     let mut items = Vec::new();
     for (index, m) in moves.iter().enumerate() {
         advance_odometer(&mut position, m);
@@ -82,24 +74,25 @@ fn describe(item: &TrajectoryItem) -> String {
 
 #[test]
 fn the_staged_pipeline_emits_what_the_synchronous_one_does_on_a_real_print() {
-    let (config, chains, moves) = live_setup();
-    assert_eq!(moves.len(), SLICE_MOVES);
+    let replay = live_setup();
+    assert_eq!(replay.moves.len(), SLICE_MOVES);
 
-    let mut synchronous = Pipeline::new(config, chains.clone(), vec![0.0; 4], 0.0);
+    let mut synchronous = replay.pipeline();
     let mut expected = Vec::new();
     let mut collect = |item: TrajectoryItem| {
         expected.push(describe(&item));
         true
     };
-    for item in stream(&moves) {
+    for item in stream(&replay.home, &replay.moves) {
         assert!(synchronous.feed(item, &mut collect));
     }
     assert!(synchronous.finish(&mut collect));
 
     let (emitted_tx, emitted) = crossbeam_channel::unbounded();
-    let mut staged = Pipeline::new(config, chains, vec![0.0; 4], 0.0)
+    let mut staged = replay
+        .pipeline()
         .into_staged(move |item| emitted_tx.send(describe(&item)).is_ok());
-    for item in stream(&moves) {
+    for item in stream(&replay.home, &replay.moves) {
         assert!(staged.feed(item));
     }
     assert!(staged.finish());

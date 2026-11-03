@@ -377,6 +377,14 @@ pub fn plan_moves(steps: &[PlanStep]) -> impl Iterator<Item = &geometry::Move> {
     })
 }
 
+pub fn rest_position_before<'a>(moves: impl IntoIterator<Item = &'a geometry::Move>) -> Vec<f64> {
+    let [x, y, z] = moves
+        .into_iter()
+        .find_map(|m| m.segment.spatial.as_ref())
+        .map_or([0.0, 0.0, 0.0], |seg| seg.point_at(0.0));
+    vec![x, y, z, 0.0]
+}
+
 pub fn extract_raw_path(steps: &[PlanStep]) -> Vec<(f64, f64)> {
     let mut points = Vec::with_capacity(steps.len() + 1);
     for (i, m) in plan_moves(steps).enumerate() {
@@ -490,10 +498,7 @@ pub fn run_pipeline_streaming(
     Vec<ContinuousSegment>,
     Option<Vec<ContinuousSegment>>,
 ) {
-    let spatial_home = plan_moves(steps)
-        .find_map(|m| m.segment.spatial.as_ref())
-        .map_or([0.0, 0.0, 0.0], |seg| seg.point_at(0.0));
-    let home_pos = vec![spatial_home[0], spatial_home[1], spatial_home[2], 0.0];
+    let home_pos = rest_position_before(plan_moves(steps));
 
     let (fitted_tx, fitted_rx) = unbounded();
     let capture_toolhead = axis_chains.has_motor_side_stages();

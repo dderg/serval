@@ -1,6 +1,6 @@
 use super::{
-    AxisFit, FloorVelocityGate, KnotJumpBound, MIN_DEVICE_INTERVAL_S, RungWitness, TrackSignal,
-    fit_axis_from_signal,
+    AxisFit, BetweenProbes, FloorVelocityGate, KnotJumpBound, MIN_DEVICE_INTERVAL_S, RungWitness,
+    TrackSignal, fit_axis_from_signal, seed_floors,
 };
 use crate::lowering::{AccelBudget, FitTol, LADDER_PROBES_U, eval_mono_dd, quintic_in_u};
 use crate::types::PostProcessError;
@@ -723,22 +723,32 @@ fn a_piece_starting_on_a_declared_square_root_onset_anchors_to_its_acceleration(
 }
 
 /// The largest acceleration miss of a fitted track against its signal,
-/// sampled densely inside each piece clear of a percent at either edge.
-fn worst_interior_acceleration_miss(track: &nurbs::ScalarNurbs, sig: &impl TrackSignal) -> f64 {
-    const POINTS: u32 = 256;
+/// sampled densely across the stretch of each piece its fit resolves: all
+/// of it but a cubic floor inside either edge.
+fn worst_resolved_acceleration_miss(
+    track: &nurbs::ScalarNurbs,
+    sig: &impl TrackSignal,
+    cubic_floor: f64,
+) -> f64 {
+    const INTERVALS: u32 = 4096;
     nurbs::bezier::extract_bezier_pieces(track)
         .iter()
         .flat_map(|piece| {
             let acceleration = piece.differentiate().differentiate();
             let h = piece.u_end - piece.u_start;
-            (0..POINTS).map(move |k| {
-                let t = piece.u_start + h * (0.01 + 0.98 * f64::from(k) / f64::from(POINTS - 1));
+            let inset = cubic_floor.min(0.25 * h);
+            (0..=INTERVALS).map(move |k| {
+                let t =
+                    piece.u_start + inset + (h - 2.0 * inset) * f64::from(k) / f64::from(INTERVALS);
                 (acceleration.evaluate(t) - sig.eval_pva(t).2).abs()
             })
         })
         .fold(0.0, f64::max)
 }
 
+/// Undeclared, the onset reads at the edge like a break hidden in its
+/// sliver, and the floor pieces the shoulder refines to keep rungs anchored
+/// to that extrapolation; declared, they anchor to the onset itself.
 #[test]
 fn a_declared_square_root_onset_is_refined_until_its_shoulder_holds_the_tolerance() {
     let fit_tol = FitTol::absolute(0.005, 50.0);
@@ -746,42 +756,73 @@ fn a_declared_square_root_onset_is_refined_until_its_shoulder_holds_the_toleranc
         at: 0.211_721_933,
         offset_mm: 150.0,
         velocity: 300.0,
-        coefficient: 6.1e5,
+        coefficient: 3e6,
     };
-    let span = 2e-3;
-    let fit_axis = |declared: bool| {
-        let axis_fit = AxisFit {
-            axis: 1,
-            t_start: onset().at,
-            t_end: onset().at + span,
-            seed_breakpoints: &[],
-            fit_tol,
-            fit_context: "square-root onset",
-            velocity_continuous: false,
-        };
-        if declared {
+    let axis_fit = AxisFit {
+        axis: 1,
+        t_start: onset().at,
+        t_end: onset().at + 2e-3,
+        seed_breakpoints: &[],
+        fit_tol,
+        fit_context: "square-root onset",
+        velocity_continuous: false,
+    };
+    let cubic_floor = seed_floors(&axis_fit, &onset(), &[axis_fit.t_start, axis_fit.t_end]).cubic;
+    let worst_miss = |declared: bool| {
+        let track = if declared {
             fit_axis_from_signal(axis_fit, &DeclaredOnset(onset()))
         } else {
             fit_axis_from_signal(axis_fit, &onset())
         }
-        .expect("a square-root onset fits")
+        .expect("a square-root onset fits");
+        worst_resolved_acceleration_miss(&track, &onset(), cubic_floor)
     };
-    let undeclared = worst_interior_acceleration_miss(&fit_axis(false), &onset());
-    let declared = worst_interior_acceleration_miss(&fit_axis(true), &onset());
-    eprintln!(
-        "undeclared {undeclared} declared {declared} pieces {} {}",
-        fit_axis(false).knots().len(),
-        fit_axis(true).knots().len()
-    );
+    let undeclared = worst_miss(false);
     assert!(
         undeclared > fit_tol.accel_mm_s2,
-        "the ladder's probes must miss the undeclared shoulder for this onset to test \
-         anything: worst miss {undeclared} mm/s²"
+        "the undeclared shoulder must leave the tolerance for this onset to test anything: \
+         worst miss {undeclared} mm/s²"
     );
+    let declared = worst_miss(true);
     assert!(
         declared <= fit_tol.accel_mm_s2,
         "the declared onset's shoulder leaves the tolerance by {declared} mm/s²"
     );
+}
+
+/// The rungs a declared onset's span is held to miss its shoulder most
+/// between the onset edge and the first point the onset check holds them
+/// at, past the reach of a grid: measured before, 1.03× the tolerance on a
+/// 250 µs piece, 0.995× on a 234 µs one.
+#[test]
+fn every_piece_on_a_declared_square_root_onset_holds_the_tolerance_up_to_its_resolved_edges() {
+    let fit_tol = FitTol::absolute(0.005, 50.0);
+    for span in [2e-3, 3e-2] {
+        for coefficient in [1.0e5, 1.468e5, 2.154e5] {
+            let declared = DeclaredOnset(SquareRootOnset {
+                at: 0.211_721_933,
+                offset_mm: 150.0,
+                velocity: 300.0,
+                coefficient,
+            });
+            let fit = AxisFit {
+                axis: 1,
+                t_start: declared.0.at,
+                t_end: declared.0.at + span,
+                seed_breakpoints: &[],
+                fit_tol,
+                fit_context: "square-root onset",
+                velocity_continuous: false,
+            };
+            let cubic_floor = seed_floors(&fit, &declared, &[fit.t_start, fit.t_end]).cubic;
+            let track = fit_axis_from_signal(fit, &declared).expect("a square-root onset fits");
+            let worst = worst_resolved_acceleration_miss(&track, &declared, cubic_floor);
+            assert!(
+                worst <= fit_tol.accel_mm_s2,
+                "over {span} s the onset {coefficient:e}·√τ leaves the tolerance by {worst} mm/s²"
+            );
+        }
+    }
 }
 
 /// An extruder command under pressure advance on a shaped path: the flow
@@ -882,6 +923,30 @@ fn a_position_equivalent_budget_fits_a_pressure_wave_in_fewer_pieces_within_each
     }
 }
 
+/// An acceleration rising from a span edge as `rise · (1 − e^(−τ/time))`,
+/// steep enough there that the reading past the edge sliver, extrapolated
+/// back, misses the seam reading by more than the tolerance: the edge
+/// anchors to the extrapolation, as it would past a break hidden in the
+/// sliver.
+struct SaturatingRise {
+    t0: f64,
+    rise: f64,
+    time: f64,
+}
+
+impl TrackSignal for SaturatingRise {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let tau = (t - self.t0).max(0.0);
+        let (rise, time) = (self.rise, self.time);
+        let settled = 1.0 - libm::exp(-tau / time);
+        (
+            100.0 - 10.0 * tau + rise * (0.5 * tau * tau - time * tau + time * time * settled),
+            -10.0 + rise * (tau - time * settled),
+            rise * settled,
+        )
+    }
+}
+
 /// A smooth extruder swell, `20·τ + 3·10⁴·τ² + 10⁷·τ³` mm.
 struct CubicSwell {
     t0: f64,
@@ -919,67 +984,190 @@ impl TrackSignal for CubicSwell {
     }
 }
 
-/// The witness's verdict between the two middle probes on a rung that
-/// meets the swell's position, slope and curvature at both and swings
-/// between them by `α·(u − a)³·(u − b)³`, whose curvature error peaks at
-/// `swing` times the position-equivalent budget midway.
-fn witness_between_middle_probes(swing: f64) -> Option<f64> {
-    let sig = CubicSwell { t0: 1.0 };
-    let h = 1e-3;
-    let fit_tol = FitTol {
-        accel_budget: AccelBudget::PositionEquivalent,
-        ..FitTol::absolute(1e-4, 50.0)
+/// The witnesses walked the first probe gap from the span edge, whose
+/// sample is the anchored edge state: past a steep edge that is the
+/// extrapolation, not the signal, so the miss between the resolved edge and
+/// the first probe was estimated from a zero. Measured before: 1.15× the
+/// tolerance on a 100 µs piece.
+#[test]
+fn a_piece_anchored_past_its_edge_sliver_holds_the_tolerance_from_its_resolved_edge() {
+    let fit_tol = FitTol::absolute(0.005, 50.0);
+    let sig = SaturatingRise {
+        t0: 24.907_472_866,
+        rise: 3e3,
+        time: 3e-6,
     };
-    let piece_tol = fit_tol.for_piece(h);
+    let fit = AxisFit {
+        axis: 0,
+        t_start: sig.t0,
+        t_end: sig.t0 + 2e-4,
+        seed_breakpoints: &[],
+        fit_tol,
+        fit_context: "steep edge",
+        velocity_continuous: false,
+    };
+    let cubic_floor = seed_floors(&fit, &sig, &[fit.t_start, fit.t_end]).cubic;
+    let track = fit_axis_from_signal(fit, &sig).expect("a smooth rise fits");
+    let worst = worst_resolved_acceleration_miss(&track, &sig, cubic_floor);
+    assert!(
+        worst <= fit_tol.accel_mm_s2,
+        "the steep edge leaves the tolerance by {worst} mm/s²"
+    );
+}
+
+/// The smooth swell with its positions read off by up to `noise_mm`, as an
+/// extruder's adaptively integrated odometer reads them; its speed and
+/// acceleration stay exact.
+struct NoisyPositions {
+    swell: CubicSwell,
+    noise_mm: f64,
+}
+
+impl TrackSignal for NoisyPositions {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let scrambled = t.to_bits().wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 11;
+        let unit = scrambled as f64 / (1_u64 << 53) as f64;
+        let (position, velocity, acceleration) = self.swell.eval_pva(t);
+        (
+            self.noise_mm.mul_add(2.0 * unit - 1.0, position),
+            velocity,
+            acceleration,
+        )
+    }
+}
+
+/// A swing `α·(u − a)^p·(u − b)^q` between the two middle probes, `p, q ≥ 3`
+/// so a rung carrying it meets the truth's position, slope and curvature at
+/// both, scaled for its curvature to peak at `peak` times `curvature_budget`.
+fn swing_between_middle_probes((p, q): (i32, i32), peak: f64, curvature_budget: f64) -> Vec<f64> {
     let (a, b) = (LADDER_PROBES_U[4], LADDER_PROBES_U[5]);
-    let half_width = 0.5 * (b - a);
-    let curvature_budget = piece_tol.accel_mm_s2 * (0.5 * h) * (0.5 * h);
-    let alpha = swing * curvature_budget / (6.0 * half_width.powi(4));
-    let quadratic = [a * b, -(a + b), 1.0];
-    let swing_polynomial = (0..3).fold(vec![alpha], |acc, _| {
-        let mut next = vec![0.0; acc.len() + 2];
-        for (power, &value) in acc.iter().enumerate() {
-            for (offset, &factor) in quadratic.iter().enumerate() {
-                next[power + offset] += value * factor;
-            }
+    let times_root = |polynomial: Vec<f64>, root: f64| {
+        let mut next = vec![0.0; polynomial.len() + 1];
+        for (power, &value) in polynomial.iter().enumerate() {
+            next[power] -= root * value;
+            next[power + 1] += value;
         }
         next
-    });
-    let mut coefficients = sig.in_u(h);
-    coefficients.resize(swing_polynomial.len(), 0.0);
-    for (coefficient, swing) in coefficients.iter_mut().zip(&swing_polynomial) {
+    };
+    let unit = (0..q).fold(
+        (0..p).fold(vec![1.0], |acc, _| times_root(acc, a)),
+        |acc, _| times_root(acc, b),
+    );
+    let unit_peak = (0..=4096)
+        .map(|k| eval_mono_dd(&unit, a + (b - a) * f64::from(k) / 4096.0).abs())
+        .fold(0.0, f64::max);
+    unit.iter()
+        .map(|value| value * peak * curvature_budget / unit_peak)
+        .collect()
+}
+
+/// The witness's verdict between the two middle probes on the swell's rung
+/// plus `swing`, held against the truth's interpolant.
+fn witness_between_middle_probes(
+    sig: &impl TrackSignal,
+    fit_tol: FitTol,
+    swing: impl Fn(f64) -> Vec<f64>,
+) -> Option<f64> {
+    let h = 1e-3;
+    let piece_tol = fit_tol.for_piece(h);
+    let swing = swing(piece_tol.accel_mm_s2 * (0.5 * h) * (0.5 * h));
+    let mut coefficients = CubicSwell { t0: 1.0 }.in_u(h);
+    coefficients.resize(swing.len().max(coefficients.len()), 0.0);
+    for (coefficient, swing) in coefficients.iter_mut().zip(&swing) {
         *coefficient += swing;
     }
     let witness = RungWitness {
         axis: 3,
-        sig: &sig,
+        sig,
         coefficients: &coefficients,
-        t0: sig.t0,
+        t0: 1.0,
         h,
         fit_tol: piece_tol,
-        accel_budget: fit_tol.accel_budget,
+        between_probes: BetweenProbes::TruthInterpolant,
     };
-    let left = witness.exact_sample_at(a).expect("the swell is finite");
-    let right = witness.exact_sample_at(b).expect("the swell is finite");
+    let left = witness
+        .exact_sample_at(LADDER_PROBES_U[4])
+        .expect("the swell is finite");
+    let right = witness
+        .exact_sample_at(LADDER_PROBES_U[5])
+        .expect("the swell is finite");
     witness
         .over_piece(left, right)
         .expect("the swell is finite")
 }
 
+const POSITION_EQUIVALENT: FitTol = FitTol {
+    accel_budget: AccelBudget::PositionEquivalent,
+    ..FitTol::absolute(1e-4, 50.0)
+};
+
+fn witness_of_swing(fit_tol: FitTol, shape: (i32, i32), peak: f64) -> Option<f64> {
+    witness_between_middle_probes(&CubicSwell { t0: 1.0 }, fit_tol, |budget| {
+        swing_between_middle_probes(shape, peak, budget)
+    })
+}
+
+fn caught_between_middle_probes(witness: Option<f64>) -> bool {
+    witness.is_some_and(|u| u > LADDER_PROBES_U[4] && u < LADDER_PROBES_U[5])
+}
+
 #[test]
 fn a_rung_swinging_past_the_position_equivalent_budget_between_probes_is_caught() {
-    let witness = witness_between_middle_probes(1.5);
+    let witness = witness_of_swing(POSITION_EQUIVALENT, (3, 3), 1.5);
     assert!(
-        witness.is_some_and(|u| u > LADDER_PROBES_U[4] && u < LADDER_PROBES_U[5]),
+        caught_between_middle_probes(witness),
         "a swing 1.5x the budget between the probes went unwitnessed: {witness:?}"
     );
 }
 
 #[test]
 fn a_rung_swinging_within_the_position_equivalent_budget_between_probes_is_kept() {
-    let witness = witness_between_middle_probes(0.8);
+    let witness = witness_of_swing(POSITION_EQUIVALENT, (3, 3), 0.8);
     assert!(
         witness.is_none(),
         "a swing 0.8x the budget between the probes was witnessed at {witness:?}"
+    );
+}
+
+/// A follower's plain source fits to the absolute budget, and the error's
+/// interpolant between probes reads a swing that meets the truth at both as
+/// no miss at all: measured before, 61 pieces up to 1.94x over on the
+/// Trident kernel chain's dense print.
+#[test]
+fn a_rung_swinging_past_the_absolute_budget_between_probes_is_caught_against_the_truth() {
+    let witness = witness_of_swing(FitTol::absolute(1e-4, 50.0), (3, 3), 1.5);
+    assert!(
+        caught_between_middle_probes(witness),
+        "a swing 1.5x the budget between the probes went unwitnessed: {witness:?}"
+    );
+}
+
+/// A lopsided swing peaks between the points the truth's interpolant is
+/// scanned at, where the scan reads it under the budget: measured before,
+/// an advanced extruder piece 1.000022x over on the Trident ramp chain.
+#[test]
+fn a_rung_swinging_just_past_the_budget_between_the_scan_points_is_caught() {
+    let witness = witness_of_swing(POSITION_EQUIVALENT, (3, 5), 1.01);
+    assert!(
+        caught_between_middle_probes(witness),
+        "a lopsided swing 1.01x the budget between the probes went unwitnessed: {witness:?}"
+    );
+}
+
+/// Split ever finer, the truth's interpolant is rebuilt from positions a
+/// hair apart, and their rounding reads as curvature that grows as the
+/// square of the split. Rejected at the deepest split, a rung that holds
+/// the truth exactly was split down to 2 ns pieces.
+#[test]
+fn a_rung_holding_the_truth_is_kept_however_noisy_its_positions_read() {
+    let noisy = NoisyPositions {
+        swell: CubicSwell { t0: 1.0 },
+        noise_mm: 1e-6,
+    };
+    let witness =
+        witness_between_middle_probes(&noisy, FitTol::absolute(1e-4, 50.0), |_| Vec::new());
+    assert!(
+        witness.is_none(),
+        "a rung on the truth was witnessed at {witness:?} through position noise"
     );
 }
