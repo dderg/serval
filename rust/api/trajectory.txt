@@ -134,6 +134,7 @@ pub fn trajectory::chain::AxisChainSet::leaders_support(&self, usize) -> (f64, f
 pub fn trajectory::chain::AxisChainSet::max_follower_own_forward_support(&self) -> f64
 pub fn trajectory::chain::AxisChainSet::n_axes(&self) -> usize
 pub fn trajectory::chain::AxisChainSet::projected_followers(&self) -> impl core::iter::traits::iterator::Iterator<Item = (usize, &[usize])>
+pub fn trajectory::chain::AxisChainSet::ratio_ramp_lookahead(&self) -> f64
 pub fn trajectory::chain::AxisChainSet::rest_support(&self) -> trajectory::chain::RestSupport
 pub fn trajectory::chain::AxisChainSet::spatial(trajectory::chain::CompiledChain, trajectory::chain::CompiledChain, trajectory::chain::CompiledChain) -> Self
 pub fn trajectory::chain::AxisChainSet::spatial_from_kernels(&[core::option::Option<nurbs::algebra::PiecewisePolynomialKernel>; 4]) -> Self
@@ -175,6 +176,7 @@ pub struct trajectory::chain::RestSupport
 pub trajectory::chain::RestSupport::after_motion: f64
 pub trajectory::chain::RestSupport::before_motion: f64
 pub const trajectory::chain::FOLLOWER_TRANSFORM_WITHOUT_KERNEL: &str
+pub const trajectory::chain::RATIO_RAMP_LOOKAHEAD_RAMP_TIMES: f64
 pub mod trajectory::continuous
 pub enum trajectory::continuous::ContinuousAxis
 pub trajectory::continuous::ContinuousAxis::Analytic
@@ -557,6 +559,7 @@ pub fn trajectory::chain::AxisChainSet::leaders_support(&self, usize) -> (f64, f
 pub fn trajectory::chain::AxisChainSet::max_follower_own_forward_support(&self) -> f64
 pub fn trajectory::chain::AxisChainSet::n_axes(&self) -> usize
 pub fn trajectory::chain::AxisChainSet::projected_followers(&self) -> impl core::iter::traits::iterator::Iterator<Item = (usize, &[usize])>
+pub fn trajectory::chain::AxisChainSet::ratio_ramp_lookahead(&self) -> f64
 pub fn trajectory::chain::AxisChainSet::rest_support(&self) -> trajectory::chain::RestSupport
 pub fn trajectory::chain::AxisChainSet::spatial(trajectory::chain::CompiledChain, trajectory::chain::CompiledChain, trajectory::chain::CompiledChain) -> Self
 pub fn trajectory::chain::AxisChainSet::spatial_from_kernels(&[core::option::Option<nurbs::algebra::PiecewisePolynomialKernel>; 4]) -> Self

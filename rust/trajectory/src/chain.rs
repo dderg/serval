@@ -388,6 +388,13 @@ pub const FOLLOWER_TRANSFORM_WITHOUT_KERNEL: &str = "an advance turns every \
     mid-way. Add a smoothing kernel (e.g. smooth_triangle) to the axis post_processors, or \
     set ratio_ramp_time on the axis to spread those changes over the path instead";
 
+/// A ratio-ramped follower's smoothing over a segment is final once the
+/// leaders are shaped this many ramp times past its end: half a ramp time
+/// for the width node after the segment, half for that node's own path
+/// ahead, and the two the width envelope reaches forward at cruise (its
+/// slope is a quarter, the width half the path a ramp time covers).
+pub const RATIO_RAMP_LOOKAHEAD_RAMP_TIMES: f64 = 4.0;
+
 impl AxisChainSet {
     #[must_use]
     pub fn spatial(x: CompiledChain, y: CompiledChain, z: CompiledChain) -> Self {
@@ -435,14 +442,24 @@ impl AxisChainSet {
             })
     }
 
-    /// Whether any projected follower spreads its extrusion-ratio steps
-    /// over a ramp, see [`CompiledChain::ratio_ramp_time`]. A ramp reaches
-    /// into the segment after its seam, so such a follower projects a
-    /// segment only once the next one is shaped.
+    /// Whether any projected follower smooths its extrusion ratio along the
+    /// path, see [`CompiledChain::ratio_ramp_time`].
     #[must_use]
     pub fn has_ratio_ramped_follower(&self) -> bool {
         self.projected_followers()
             .any(|(axis, _)| self.chains[axis].ratio_ramp_time().is_some())
+    }
+
+    /// How far past a segment's end, in time, a ratio-ramped follower's
+    /// smoothing reads before its projection over the segment is final:
+    /// its width nodes reach [`RATIO_RAMP_LOOKAHEAD_RAMP_TIMES`] ramp times
+    /// ahead at cruise.
+    #[must_use]
+    pub fn ratio_ramp_lookahead(&self) -> f64 {
+        self.projected_followers()
+            .filter_map(|(axis, _)| self.chains[axis].ratio_ramp_time())
+            .map(|ramp_time| RATIO_RAMP_LOOKAHEAD_RAMP_TIMES * ramp_time)
+            .fold(0.0, f64::max)
     }
 
     /// Follower axes that ride on at least one leader: their tracks are not
