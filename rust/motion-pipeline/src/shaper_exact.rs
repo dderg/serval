@@ -63,8 +63,8 @@ use nurbs::algebra::PiecewisePolynomialKernel;
 use trajectory::next_toward;
 
 use super::{
-    AxisSignalTable, GainImpulse, MOMENT_ORDERS, MOMENT_POWER_CAPACITY, MomentBounds, MomentTree,
-    TRANSLATION_BINOMIALS, taylor_shift,
+    AxisSignalTable, FALLING_FACTORIALS, GainImpulse, MOMENT_ORDERS, MOMENT_POWER_CAPACITY,
+    MomentBounds, MomentTree, TRANSLATION_BINOMIALS, taylor_shift,
 };
 
 pub(crate) const EXACT_CAPACITY: usize = MOMENT_POWER_CAPACITY;
@@ -175,7 +175,7 @@ impl Tracked {
         let mut derivative = Self::ZERO;
         derivative.len = self.len.saturating_sub(order);
         for power in 0..derivative.len {
-            let falling = ((power + 1)..=(power + order)).fold(1.0, |acc, k| acc * k as f64);
+            let falling = FALLING_FACTORIALS[power + order][order];
             derivative.values[power] = self.values[power + order] * falling;
             derivative.magnitudes[power] = self.magnitudes[power + order] * falling;
         }
@@ -676,6 +676,7 @@ impl ExactConvolution<'_> {
     fn polynomials_at(&self, center: f64, radius: f64) -> Option<[LocalPolynomial; 3]> {
         let mut total = [CentredSum::ZERO; MOMENT_ORDERS];
         let mut point_masses = 0;
+        let mut previous_lower: Option<(RealSum, EdgeSeries)> = None;
         for piece in &self.kernel.pieces {
             let lower = RealSum::of(center, -piece.end);
             let upper = RealSum::of(center, -piece.start);
@@ -709,8 +710,14 @@ impl ExactConvolution<'_> {
                     degree,
                 );
             }
+            let upper_series = match previous_lower {
+                Some((edge, series)) if edge.head == upper.head && edge.tail == upper.tail => {
+                    series
+                }
+                _ => self.table.series_past(upper)?,
+            };
             let lower_series = self.table.series_past(lower)?;
-            let upper_series = self.table.series_past(upper)?;
+            previous_lower = Some((lower, lower_series));
             for order in 0..MOMENT_ORDERS {
                 let mut at_upper =
                     frozen_window(&piece.at_start, &moments[order], &magnitudes[order]);
@@ -790,9 +797,8 @@ fn add_point_mass(
             }
             let sign = if derivative % 2 == 0 { 1.0 } else { -1.0 };
             for moment_power in derivative..=degree {
-                let falling = ((moment_power - derivative + 1)..=moment_power)
-                    .fold(1.0, |acc, k| acc * k as f64);
-                let term = falling * powers[moment_power - derivative];
+                let term = FALLING_FACTORIALS[moment_power][derivative]
+                    * powers[moment_power - derivative];
                 moments[order][moment_power] += sign * weight * term;
                 magnitudes[order][moment_power] += weight.abs() * term.abs();
             }
