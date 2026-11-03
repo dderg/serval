@@ -518,7 +518,7 @@ pub(crate) fn project_followers(
         }
         let mut source_jobs = Vec::new();
         if projecting {
-            state.active = true;
+            state.start_projecting();
             let ingest_started = crate::timing::stopwatch();
             let first_new = state.ingested_through_t.map_or(0, |through| {
                 base[..frontier.len()]
@@ -1479,6 +1479,17 @@ impl FollowerState {
 
     pub(crate) fn is_active(&self) -> bool {
         self.active
+    }
+
+    /// Moves the follower from its raw-axis fit onto its leaders' shaped
+    /// path. Whatever the raw fit already projected stays projected, so the
+    /// extrusion table starts where the raw fit stopped: a segment it covered
+    /// may still sit uncommitted in the window and must not be ingested.
+    fn start_projecting(&mut self) {
+        if !self.active {
+            self.active = true;
+            self.ingested_through_t = self.projected_through_t;
+        }
     }
 
     fn cached_projection(&self, t_start: f64, t_end: f64) -> &ProjSeg {

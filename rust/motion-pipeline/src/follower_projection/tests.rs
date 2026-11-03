@@ -1581,3 +1581,113 @@ fn a_ratio_ramped_advance_refuses_a_leader_acceleration_step() {
         refused.map(|_| ())
     );
 }
+
+fn four_axis_segment(
+    [x, y, z, e]: [Vec<f64>; 4],
+    (t0, t1): (f64, f64),
+    followers: &[geometry::FollowerDemand],
+) -> ContinuousSegment {
+    let axis = |coeffs| {
+        ContinuousAxis::Spline(Arc::new(bezier_pieces_to_nurbs(&[BezierPiece {
+            u_start: t0,
+            u_end: t1,
+            coeffs,
+        }])))
+    };
+    ContinuousSegment {
+        axes: Arc::from([axis(x), axis(y), axis(z), axis(e)]),
+        followers: Arc::from(followers),
+        spatial_path: true,
+        t_start: t0,
+        t_end: t1,
+        motor_mask: 0,
+        source_line: 1,
+        rest_at_end: false,
+    }
+}
+
+/// Regression for the corpus crash "follower source fit index 0 does not
+/// match segment 1" on `voron_first_layers`: a slow z-hop leaves the shaped
+/// x/y untouched, so the follower fits it straight from the raw axis and
+/// projects it before it is committed. When the next window's shaping moves
+/// the leaders, projection starts with that z-hop still in the window, and
+/// must not ingest it a second time.
+#[test]
+fn projection_starting_mid_window_skips_what_the_raw_fit_already_projected() {
+    let z_hop = four_axis_segment(
+        [vec![10.0], vec![20.0], vec![0.0, 0.2 / 0.09], vec![0.0]],
+        (0.0, 0.09),
+        &[],
+    );
+    let ratio = 0.05;
+    let extrusion_span = (0.09, 0.12);
+    let raw_line = four_axis_segment(
+        [
+            vec![10.0, 50.0],
+            vec![20.0],
+            vec![0.2],
+            vec![0.0, ratio * 50.0],
+        ],
+        extrusion_span,
+        &[geometry::FollowerDemand::constant(3, ratio)],
+    );
+    let shaped_line = four_axis_segment(
+        [
+            vec![10.0, 40.0, 0.3 / 0.03_f64.powi(2)],
+            vec![20.0],
+            vec![0.2],
+            vec![0.0, ratio * 50.0],
+        ],
+        extrusion_span,
+        &[geometry::FollowerDemand::constant(3, ratio)],
+    );
+    let smoothing = trajectory::CompiledChain::compile(&[trajectory::PostProcessorInstance::new(
+        "st",
+        &trajectory::algos::SmoothTriangle,
+        vec![0.04],
+    )])
+    .expect("a single smoothing kernel always compiles");
+    let chains = trajectory::AxisChainSet {
+        chains: vec![
+            trajectory::CompiledChain::default(),
+            trajectory::CompiledChain::default(),
+            trajectory::CompiledChain::default(),
+            smoothing,
+        ],
+        followers: vec![(3, vec![0, 1, 2])],
+    };
+    let pool = crate::worker_pool::WorkerPool::new();
+    let window = |base, frontier| super::ProjectionWindow {
+        base,
+        frontier,
+        chains: &chains,
+        fit_tol: crate::lowering::FitTol {
+            pos_mm: 1e-4,
+            accel_mm_s2: 50.0,
+        },
+        lookahead: crate::shaper::Lookahead::Forced,
+        pool: &pool,
+    };
+    let mut states = Vec::new();
+    let mut timing = super::ProjectionTiming::default();
+
+    let first = [z_hop.clone()];
+    super::project_followers(window(&first, &first), &mut [], &mut states, &mut timing)
+        .expect("the raw fit projects the z-hop");
+    assert!(
+        !states[3].is_active(),
+        "test premise: unshaped leaders keep the follower on its raw fit"
+    );
+
+    let base = [z_hop.clone(), raw_line];
+    let frontier = [z_hop.clone(), shaped_line];
+    let mut committed = [z_hop];
+    super::project_followers(
+        window(&base, &frontier),
+        &mut committed,
+        &mut states,
+        &mut timing,
+    )
+    .expect("projection picks up after the raw fit");
+    assert!(states[3].is_active());
+}
