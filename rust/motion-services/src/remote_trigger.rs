@@ -11,6 +11,24 @@ pub fn relay_decision(can_trigger: Option<u32>, already_fired: bool) -> RelayAct
     }
 }
 
+/// The 64-bit trip clock for a `trsync_state` report. A report without its
+/// clock parameter, or a router with no clock estimate to expand it against,
+/// cannot be relayed: reading either as 0 would fire at a wrong clock.
+pub fn trip_clock_from_report<E: std::fmt::Debug>(
+    mcu: impl std::fmt::Display,
+    clock32: Option<u32>,
+    reference: Result<u64, E>,
+) -> u64 {
+    let clock32 = clock32
+        .unwrap_or_else(|| panic!("mcu {mcu}: trsync_state report carried no clock parameter"));
+    let reference = reference.unwrap_or_else(|e| {
+        panic!(
+            "mcu {mcu}: trip relay has no clock estimate to expand the trip clock against ({e:?})"
+        )
+    });
+    relay_trip_clock(clock32, reference)
+}
+
 pub fn relay_trip_clock(clock32: u32, reference_clock64: u64) -> u64 {
     const HOST_COMMANDED_TRIGGER_CLOCK: u32 = 0;
     if clock32 == HOST_COMMANDED_TRIGGER_CLOCK {

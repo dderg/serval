@@ -265,10 +265,15 @@ fn classify_surface(
 
 fn rest_z_warp(mesh: Option<&SurfaceTransform>, odometer: &[f64]) -> f64 {
     mesh.map_or(0.0, |surface| {
-        surface.correction_at(
-            odometer.first().copied().unwrap_or(0.0),
-            odometer.get(1).copied().unwrap_or(0.0),
-            odometer.get(2).copied().unwrap_or(0.0),
-        )
+        let &[x, y, z, ..] = odometer else {
+            panic!(
+                "lowerer: a mesh needs the x, y and z odometer to warp a rest hold, got {} axes",
+                odometer.len()
+            );
+        };
+        surface.correction_at(x, y, z)
     })
 }
+
+#[cfg(test)]
+mod tests;

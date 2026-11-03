@@ -84,6 +84,7 @@ pub enum ParseError {
     UnknownMsgid(i32),
     BadMsgid,
     UnknownEnumName(String),
+    BadEnumRange { name: String },
     UnknownEnumValue { enum_name: String, value: String },
     MissingField(String),
     ArgTypeMismatch { field: String, got: &'static str },
@@ -195,7 +196,7 @@ pub struct EnumTable {
 }
 
 impl EnumTable {
-    pub fn from_dict(d: &IndexMap<String, EnumValue>) -> Self {
+    pub fn from_dict(d: &IndexMap<String, EnumValue>) -> Result<Self, ParseError> {
         let mut by_name = HashMap::new();
         let mut by_int = HashMap::new();
         for (name, value) in d {
@@ -208,17 +209,22 @@ impl EnumTable {
                     let root: String = name
                         .trim_end_matches(|c: char| c.is_ascii_digit())
                         .to_string();
-                    let prefix_num: i32 = name[root.len()..].parse().unwrap_or(0);
+                    let bad_range = || ParseError::BadEnumRange { name: name.clone() };
+                    let prefix_num: i32 = name[root.len()..].parse().map_err(|_| bad_range())?;
                     for i in 0..*count {
-                        let key = format!("{}{}", root, prefix_num + i);
-                        let val = start + i;
+                        let key = format!(
+                            "{}{}",
+                            root,
+                            prefix_num.checked_add(i).ok_or_else(bad_range)?
+                        );
+                        let val = start.checked_add(i).ok_or_else(bad_range)?;
                         by_name.insert(key.clone(), val);
                         by_int.insert(val, key);
                     }
                 }
             }
         }
-        Self { by_name, by_int }
+        Ok(Self { by_name, by_int })
     }
 }
 
@@ -321,7 +327,7 @@ impl MsgProtoParser {
 
         let mut enumerations: IndexMap<String, EnumTable> = IndexMap::new();
         for (enum_name, table) in &dict.enumerations {
-            enumerations.insert(enum_name.clone(), EnumTable::from_dict(table));
+            enumerations.insert(enum_name.clone(), EnumTable::from_dict(table)?);
         }
 
         let mut by_msgid: HashMap<i32, DispatchSpec> = HashMap::new();
