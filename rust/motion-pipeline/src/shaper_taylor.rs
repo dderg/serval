@@ -127,44 +127,90 @@ fn enclose_to_depth(
 
 /// [`enclose`] for a signal whose windows may have no model: halving a
 /// window without one, and giving up — `None` — where the halving depth
-/// runs out on one, or on an unbounded model.
+/// runs out on one, or on an unbounded model. A window whose bound
+/// halving twice running did not shrink by [`STALLED_SHARE`] — a jump or a
+/// rounding floor inside it no window resolves — is kept unresolved
+/// rather than halved down to the depth limit.
 pub(crate) fn try_enclose(
     (lo, hi): (f64, f64),
     accuracy: [f64; 3],
     model: &dyn Fn(Window) -> Option<[TaylorModel; 3]>,
     out: &mut Vec<ExactPiece>,
 ) -> Option<()> {
-    try_enclose_to_depth((lo, hi), accuracy, model, 0, out)
+    try_enclose_to_depth((lo, hi), accuracy, model, Halving::START, out)
+}
+
+/// The share of its parent's excess over the accuracy a halved window
+/// must stay under to count as progress.
+const STALLED_SHARE: f64 = 0.75;
+
+/// Where a halving stands: its depth, the excess of the window it halved,
+/// and how many halvings running made no progress.
+#[derive(Clone, Copy)]
+struct Halving {
+    depth: u32,
+    parent_excess: f64,
+    stalls: u32,
+}
+
+impl Halving {
+    const START: Self = Self {
+        depth: 0,
+        parent_excess: f64::INFINITY,
+        stalls: 0,
+    };
+
+    fn child(self, excess: f64) -> Self {
+        let stalled = excess > STALLED_SHARE * self.parent_excess;
+        Self {
+            depth: self.depth + 1,
+            parent_excess: excess,
+            stalls: if stalled { self.stalls + 1 } else { 0 },
+        }
+    }
+}
+
+/// How many times `models` miss `accuracy` by, at worst.
+fn excess(models: &[TaylorModel; 3], accuracy: [f64; 3]) -> f64 {
+    models
+        .iter()
+        .zip(accuracy)
+        .map(|(model, accuracy)| model.rad() / accuracy)
+        .fold(0.0, f64::max)
 }
 
 fn try_enclose_to_depth(
     (lo, hi): (f64, f64),
     accuracy: [f64; 3],
     model: &dyn Fn(Window) -> Option<[TaylorModel; 3]>,
-    depth: u32,
+    halving: Halving,
     out: &mut Vec<ExactPiece>,
 ) -> Option<()> {
     let window = Window::new(lo, hi);
     let models = model(window);
     let middle = window.center;
-    let last = depth == ENCLOSURE_MAX_DEPTH || middle <= lo || middle >= hi;
-    if let Some(models) = &models {
-        let resolved = models
-            .iter()
-            .zip(accuracy)
-            .all(|(model, accuracy)| model.rad() <= accuracy);
-        if resolved || last {
-            if !models.iter().all(|model| model.rad().is_finite()) {
-                return None;
+    let last = halving.depth == ENCLOSURE_MAX_DEPTH || middle <= lo || middle >= hi;
+    let child = match &models {
+        Some(models) => {
+            let excess = excess(models, accuracy);
+            let child = halving.child(excess);
+            if excess <= 1.0 || last || child.stalls >= 2 {
+                if !models.iter().all(|model| model.rad().is_finite()) {
+                    return None;
+                }
+                out.push(piece(window, models));
+                return Some(());
             }
-            out.push(piece(window, models));
-            return Some(());
+            child
         }
-    } else if last {
-        return None;
-    }
-    try_enclose_to_depth((lo, middle), accuracy, model, depth + 1, out)?;
-    try_enclose_to_depth((middle, hi), accuracy, model, depth + 1, out)
+        None if last => return None,
+        None => Halving {
+            depth: halving.depth + 1,
+            ..Halving::START
+        },
+    };
+    try_enclose_to_depth((lo, middle), accuracy, model, child, out)?;
+    try_enclose_to_depth((middle, hi), accuracy, model, child, out)
 }
 
 /// Encloses several signals over `[lo, hi]` whose windows share work:

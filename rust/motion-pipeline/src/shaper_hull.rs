@@ -27,8 +27,8 @@
 //! `δₖ` moves `e` by at most `Σ|δₖ|` on `|y| ≤ 1`, and a Bernstein error moves
 //! the hull bound by at most its own size, so the terms add.
 
+use super::TRANSLATION_BINOMIALS;
 use super::exact::{EXACT_CAPACITY, ExactPiece, ExactRounding};
-use super::{TRANSLATION_BINOMIALS, taylor_shift};
 use crate::lowering::FitTol;
 
 /// How many times a patch the hull cannot settle is halved before it is
@@ -72,6 +72,22 @@ impl HullBudget {
     }
 }
 
+/// `coefficients` re-expanded about `shift`, by repeated Horner passes of
+/// separate products and sums: two roundings a step, which the depths
+/// above count, where a fused step would cost a library call on targets
+/// without a fused multiply-add.
+fn unfused_taylor_shift(coefficients: &[f64], shift: f64, shifted: &mut [f64]) {
+    assert_eq!(coefficients.len(), shifted.len());
+    let mut work = [0.0; EXACT_CAPACITY];
+    work[..coefficients.len()].copy_from_slice(coefficients);
+    for (lowest, target) in shifted.iter_mut().enumerate() {
+        for power in (lowest + 1..coefficients.len()).rev() {
+            work[power - 1] += shift * work[power];
+        }
+        *target = work[lowest];
+    }
+}
+
 /// A coefficient vector beside the bound on its rounding error as a
 /// function on `|y| ≤ 1`.
 struct Bounded {
@@ -88,7 +104,7 @@ fn composed(coefficients: &[f64], mid: f64, half: f64) -> Bounded {
         "a {len}-coefficient polynomial exceeds the hull"
     );
     let mut shifted = [0.0; EXACT_CAPACITY];
-    taylor_shift(coefficients, mid, &mut shifted[..len]);
+    unfused_taylor_shift(coefficients, mid, &mut shifted[..len]);
     let mut scale = 1.0;
     let reach = mid.abs() + half.abs();
     let mut magnitude = 0.0;
@@ -125,9 +141,12 @@ fn bernstein(coefficients: &[f64]) -> (Vec<f64>, f64) {
     let degree = len - 1;
     let mut on_unit = [0.0; EXACT_CAPACITY];
     let mut magnitudes = [0.0; EXACT_CAPACITY];
-    taylor_shift(coefficients, -1.0, &mut on_unit[..len]);
-    let absolute: Vec<f64> = coefficients.iter().map(|c| c.abs()).collect();
-    taylor_shift(&absolute, 1.0, &mut magnitudes[..len]);
+    unfused_taylor_shift(coefficients, -1.0, &mut on_unit[..len]);
+    let mut absolute = [0.0; EXACT_CAPACITY];
+    for (magnitude, coefficient) in absolute.iter_mut().zip(coefficients) {
+        *magnitude = coefficient.abs();
+    }
+    unfused_taylor_shift(&absolute[..len], 1.0, &mut magnitudes[..len]);
     let mut doubling = 1.0;
     for power in 0..len {
         on_unit[power] *= doubling;

@@ -876,13 +876,13 @@ impl<'a> AxisWindows<'a> {
                     })
                     .collect(),
             ),
-            ContinuousAxis::Analytic { span, axis } => {
-                let (law, offset) = AxisLaw::of(span, *axis)?;
-                Self::Analytic {
+            ContinuousAxis::Analytic { span, axis } => match AxisLaw::of(span, *axis)? {
+                (AxisLaw::Constant(position), offset) => Self::Hold(position + offset),
+                (law, offset) => Self::Analytic {
                     span,
                     reading: AxisReading { law, offset },
-                }
-            }
+                },
+            },
             ContinuousAxis::Hold { position, .. } => Self::Hold(*position),
             ContinuousAxis::Nudge(_) | ContinuousAxis::Buzz { .. } => return None,
         })
@@ -892,6 +892,28 @@ impl<'a> AxisWindows<'a> {
     /// `with_jerk`, else unbounded —; `None` past a formula's end, or for a
     /// jerk where the law has none, at a cap departure's square root.
     pub(crate) fn models(&self, window: Window, with_jerk: bool) -> Option<[TaylorModel; 4]> {
+        self.models_from(window, with_jerk, 0)
+    }
+
+    /// `[v, a, j]` on `window`, as [`Self::models`] reads them, the
+    /// position left unmodelled where the formula allows.
+    pub(crate) fn motion_models(
+        &self,
+        window: Window,
+        with_jerk: bool,
+    ) -> Option<[TaylorModel; 3]> {
+        let [_, v, a, j] = self.models_from(window, with_jerk, 1)?;
+        Some([v, a, j])
+    }
+
+    /// [`Self::models`] with the polynomial pieces' orders below
+    /// `lowest_order` left unbounded.
+    fn models_from(
+        &self,
+        window: Window,
+        with_jerk: bool,
+        lowest_order: usize,
+    ) -> Option<[TaylorModel; 4]> {
         let covers = |lo: f64, hi: f64| {
             let slack = 1e-9 * (hi - lo).max(1.0);
             window.lo >= lo - slack && window.hi <= hi + slack
@@ -906,8 +928,13 @@ impl<'a> AxisWindows<'a> {
                     return None;
                 }
                 let tau = window.time_since(piece.u_start);
-                let [p, v, a, j] =
-                    [0, 1, 2, 3].map(|order| derivative_of(&piece.coeffs, order, &tau));
+                let [p, v, a, j] = [0, 1, 2, 3].map(|order| {
+                    if order < lowest_order {
+                        TaylorModel::UNBOUNDED
+                    } else {
+                        derivative_of(&piece.coeffs, order, &tau)
+                    }
+                });
                 Some([p.add_ball(Ball::exact(*base)), v, a, j])
             }
             Self::Analytic { span, reading } => {

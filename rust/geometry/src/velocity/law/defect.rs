@@ -33,6 +33,11 @@ pub const RAIL_ARC_DEFECT: f64 = 5e-4;
 /// the rail by a ten-millionth of a millimetre a second.
 pub const RAIL_SPEED_SLACK: f64 = 1e-7;
 
+/// The share of [`RAIL_ACCELERATION_DEFECT`] a pair's defect against the
+/// law at its own speed must pass before the law within
+/// [`RAIL_SPEED_SLACK`] of it is read: below it the pair holds anyway.
+const SLACK_TRIGGER_SHARE: f64 = 0.5;
+
 /// Coefficient roundings each interpolant coefficient below carries: at
 /// most four products and sums of the knot data.
 const COEFFICIENT_ROUNDINGS: usize = 8;
@@ -202,36 +207,41 @@ pub fn pair_defect(law: &ScalarLaw, pair: &RailPair) -> PairDefect {
             brake,
         } => {
             let kappa = s.scale(Ball::exact(sigma)).add_ball(Ball::exact(kappa0));
-            let law_squared_at = |v: &TaylorModel| {
-                let normal = kappa.mul(&v.mul(v));
+            let law_squared_of = |normal: &TaylorModel| {
                 normal
-                    .mul(&normal)
+                    .mul(normal)
                     .scale(Ball::exact(-1.0))
                     .add_ball(Ball::rounded(accel * accel, 1))
             };
-            let normal = kappa.mul(&v.mul(&v));
-            let law_squared = law_squared_at(&v);
+            let normal_at = |v: &TaylorModel| kappa.mul(&v.mul(v));
+            let normal = normal_at(&v);
+            let law_squared = law_squared_of(&normal);
             let sign = if brake { -1.0 } else { 1.0 };
             let departs = matches!(pair.shape, RailPairShape::Departure { .. });
             let (centre, spread) = law_squared.spread();
             let law_peak = upper((centre + spread).max(0.0).sqrt() * (1.0 + f64::EPSILON));
             let fallback =
                 either_side_defect(&a, law_peak, brake).min(squares_defect(&a, &law_squared));
-            let slack = |shift: f64| law_squared_at(&v.add_ball(Ball::exact(shift)));
-            let tangential = [
+            let direct = [
                 direct_root_defect(&a, &law_squared, sign),
                 departs
                     .then(|| departing_root_defect(&a, &law_squared, sign))
                     .flatten(),
-                slack_root_defect(
-                    &a,
-                    [slack(-RAIL_SPEED_SLACK), slack(RAIL_SPEED_SLACK)],
-                    sign,
-                ),
             ]
             .into_iter()
             .flatten()
             .fold(fallback, f64::min);
+            let slack = |shift: f64| law_squared_of(&normal_at(&v.add_ball(Ball::exact(shift))));
+            let tangential = if direct > SLACK_TRIGGER_SHARE * RAIL_ACCELERATION_DEFECT {
+                slack_root_defect(
+                    &a,
+                    [slack(-RAIL_SPEED_SLACK), slack(RAIL_SPEED_SLACK)],
+                    sign,
+                )
+                .map_or(direct, |slacked| slacked.min(direct))
+            } else {
+                direct
+            };
             let at_or_below_cap = |s: f64, v: f64| {
                 law.cap_speed_squared(s)
                     .is_none_or(|cap| v * v <= cap * (1.0 + f64::EPSILON))

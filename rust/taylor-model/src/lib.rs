@@ -26,7 +26,10 @@
 use std::ops::{Add, Mul, Neg};
 
 /// Coefficients a model keeps; a product's higher terms join its bound.
-pub const TAYLOR_LEN: usize = 18;
+pub const TAYLOR_LEN: usize = 8;
+
+/// The most coefficients a polynomial read into a model may have.
+const POLYNOMIAL_CAPACITY: usize = 32;
 
 const UNIT_ROUNDING: f64 = f64::EPSILON / 2.0;
 const BOUND_ROUNDING: f64 = 1.0 / (1_u64 << 40) as f64;
@@ -50,11 +53,11 @@ const TANH_DISK_RADII: [f64; 6] = [0.785, 1.0, 1.2, 1.35, 1.45, 1.52];
 
 /// `γₙ = n·u/(1 − n·u)`: the relative error of a float computed by `n`
 /// roundings of products and quotients of exact data (Higham, §3.1).
-pub fn gamma(roundings: usize) -> f64 {
+pub const fn gamma(roundings: usize) -> f64 {
     let accumulated = roundings as f64 * UNIT_ROUNDING;
     assert!(
         accumulated < 0.5,
-        "rounding depth {roundings} defeats the a-priori bound"
+        "a rounding depth defeats the a-priori bound"
     );
     accumulated / (1.0 - accumulated)
 }
@@ -167,11 +170,15 @@ fn inverse_factorials() -> [Ball; TAYLOR_LEN + 1] {
     out
 }
 
+/// `γ` of a product's coefficient sums.
+const PRODUCT_ROUNDING: f64 = gamma(2 * TAYLOR_LEN);
+
 #[derive(Clone, Copy, Debug)]
 pub struct TaylorModel {
     coefficients: [f64; TAYLOR_LEN],
     len: usize,
     rad: f64,
+    working_share: f64,
 }
 
 impl TaylorModel {
@@ -179,6 +186,7 @@ impl TaylorModel {
         coefficients: [0.0; TAYLOR_LEN],
         len: 0,
         rad: f64::INFINITY,
+        working_share: 0.0,
     };
 
     pub fn constant(value: Ball) -> Self {
@@ -188,6 +196,7 @@ impl TaylorModel {
             coefficients,
             len: 1,
             rad: value.rad,
+            working_share: 0.0,
         }
     }
 
@@ -205,6 +214,7 @@ impl TaylorModel {
             coefficients: kept,
             len: coefficients.len(),
             rad,
+            working_share: 0.0,
         }
     }
 
@@ -217,7 +227,19 @@ impl TaylorModel {
             coefficients,
             len: 2,
             rad: offset.rad,
+            working_share: 0.0,
         }
+    }
+
+    /// The model working to `share` of its spread: every model built from
+    /// it — and from it with others, at the coarsest of their shares —
+    /// moves trailing terms whose sum stays within that share of its
+    /// spread, and series terms past it, into its bound. A model whose
+    /// consumers resolve far coarser than its rounding keeps only the
+    /// terms they resolve.
+    pub fn working_to(mut self, share: f64) -> Self {
+        self.working_share = share;
+        self.trimmed()
     }
 
     pub fn rad(&self) -> f64 {
@@ -258,10 +280,16 @@ impl TaylorModel {
             *slot = self.coefficients[power] + sign * other.coefficients[power];
             rounding += slot.abs();
         }
-        Self {
+        let sum = Self {
             coefficients,
             len,
             rad: upper(self.rad + other.rad + UNIT_ROUNDING * rounding),
+            working_share: self.working_share.max(other.working_share),
+        };
+        if sum.working_share > 0.0 {
+            sum.trimmed()
+        } else {
+            sum
         }
     }
 
@@ -299,16 +327,29 @@ impl TaylorModel {
     }
 
     pub fn mul(&self, other: &Self) -> Self {
+        if self.len == 1 || other.len == 1 {
+            let (constant, model) = if self.len == 1 {
+                (self, other)
+            } else {
+                (other, self)
+            };
+            let mut product = model.scale(Ball {
+                mid: constant.coefficients[0],
+                rad: constant.rad,
+            });
+            product.working_share = self.working_share.max(other.working_share);
+            return product;
+        }
         let mut coefficients = [0.0; TAYLOR_LEN];
         let mut truncated = 0.0;
-        for (i, &a) in self.coefficients().iter().enumerate() {
-            for (j, &b) in other.coefficients().iter().enumerate() {
-                let term = a * b;
-                if i + j < TAYLOR_LEN {
-                    coefficients[i + j] += term;
-                } else {
-                    truncated += term.abs();
-                }
+        let (left, right) = (self.coefficients(), other.coefficients());
+        for (i, &a) in left.iter().enumerate() {
+            let kept = right.len().min(TAYLOR_LEN - i);
+            for (slot, &b) in coefficients[i..i + kept].iter_mut().zip(&right[..kept]) {
+                *slot += a * b;
+            }
+            for &b in &right[kept..] {
+                truncated += (a * b).abs();
             }
         }
         let len = (self.len + other.len).saturating_sub(1).min(TAYLOR_LEN);
@@ -321,8 +362,9 @@ impl TaylorModel {
                     + self.rad * b_magnitude
                     + self.rad * other.rad
                     + truncated
-                    + gamma(2 * TAYLOR_LEN) * a_magnitude * b_magnitude,
+                    + PRODUCT_ROUNDING * a_magnitude * b_magnitude,
             ),
+            working_share: self.working_share.max(other.working_share),
         }
         .trimmed()
     }
@@ -331,11 +373,20 @@ impl TaylorModel {
     /// magnitude moved into the bound, where they cost every later product
     /// a term and move the bound by a share no fit tolerance resolves.
     fn trimmed(mut self) -> Self {
-        let negligible = TRIM_SHARE * self.magnitude();
+        if self.len <= 1 {
+            return self;
+        }
+        let deviation: f64 = self.coefficients[1..self.len].iter().map(|c| c.abs()).sum();
+        let negligible = TRIM_SHARE * (self.coefficients[0].abs() + deviation);
+        let working = self.working_share * deviation;
         let mut dropped = 0.0;
-        while self.len > 1 && self.coefficients[self.len - 1].abs() <= negligible {
+        while self.len > 1 {
+            let last = self.coefficients[self.len - 1].abs();
+            if last > negligible && dropped + last > working {
+                break;
+            }
             self.len -= 1;
-            dropped += self.coefficients[self.len].abs();
+            dropped += last;
             self.coefficients[self.len] = 0.0;
         }
         self.rad = upper(self.rad + dropped);
@@ -353,9 +404,10 @@ impl TaylorModel {
         let leading = upper(
             UNIT_ROUNDING * (series[0].mid.abs() + series[1].mid.abs() * reach) + f64::MIN_POSITIVE,
         );
+        let working = self.working_share * series[1].mid.abs() * reach;
         let tail = |terms: usize| upper(tail(terms, reach));
         let terms = (1..series.len())
-            .find(|&terms| tail(terms) <= leading)
+            .find(|&terms| tail(terms) <= leading.max(working))
             .unwrap_or(series.len());
         let (last, rest) = series[..terms].split_last().expect("a series has terms");
         let mut out = Self::constant(*last);
@@ -474,6 +526,7 @@ impl TaylorModel {
             coefficients,
             len,
             rad: upper(self.rad + truncated + UNIT_ROUNDING * rounding),
+            working_share: self.working_share,
         }
     }
 
@@ -543,19 +596,101 @@ pub fn derivative_of(coefficients: &[f64], order: usize, tau: &TaylorModel) -> T
     )
 }
 
+/// `Σ cₖ τᵏ` for the model `tau` of `τ`: re-expanded about an affine
+/// `tau`'s centre directly, else by Horner's rule on the models.
 pub fn polynomial_of_balls(
     coefficients: impl DoubleEndedIterator<Item = Ball>,
     tau: &TaylorModel,
 ) -> TaylorModel {
-    coefficients
+    let mut kept = [Ball::exact(0.0); POLYNOMIAL_CAPACITY];
+    let mut len = 0;
+    for coefficient in coefficients {
+        assert!(
+            len < POLYNOMIAL_CAPACITY,
+            "a polynomial exceeds {POLYNOMIAL_CAPACITY} coefficients"
+        );
+        kept[len] = coefficient;
+        len += 1;
+    }
+    if tau.len <= 2 && len <= TAYLOR_LEN {
+        return polynomial_of_affine(&kept[..len], tau);
+    }
+    kept[..len]
+        .iter()
         .rev()
-        .fold(None, |acc: Option<TaylorModel>, c| {
+        .fold(None, |acc: Option<TaylorModel>, &c| {
             Some(match acc {
                 None => TaylorModel::constant(c),
                 Some(acc) => acc.mul(tau).add_ball(c),
             })
         })
         .unwrap_or_else(|| TaylorModel::constant(Ball::exact(0.0)))
+}
+
+/// `Σ cₖ τᵏ` for `τ = c + r·x ± ρ`, `|x| ≤ 1`: the coefficients' Taylor
+/// shift to `c`, each scaled by `rᵏ`. The shift's repeated Horner passes
+/// round each output coefficient `bⱼ` within `γ₂ₙ·Σₖ C(k,j)|aₖ||c|ᵏ⁻ʲ`,
+/// which the scaling sums over `j` to `γ₂ₙ·Σₖ|aₖ|(|c|+r)ᵏ`; the scaling
+/// rounds each `bⱼrʲ` within `γⱼ₊₁` of itself; the coefficients' own radii
+/// move the sum by `Σₖ radₖ(|c|+r)ᵏ`; and `ρ` moves it by at most
+/// `ρ·Σₖ k|aₖ|(|c|+r+ρ)ᵏ⁻¹`.
+fn polynomial_of_affine(coefficients: &[Ball], tau: &TaylorModel) -> TaylorModel {
+    let n = coefficients.len();
+    if n == 0 {
+        return TaylorModel::constant(Ball::exact(0.0));
+    }
+    let centre = tau.coefficients[0];
+    let slope = if tau.len == 2 {
+        tau.coefficients[1]
+    } else {
+        0.0
+    };
+    let offset_rad = tau.rad;
+    let mut work = [0.0; TAYLOR_LEN];
+    for (slot, coefficient) in work.iter_mut().zip(coefficients) {
+        *slot = coefficient.mid;
+    }
+    let mut out = TaylorModel {
+        coefficients: [0.0; TAYLOR_LEN],
+        len: n,
+        rad: 0.0,
+        working_share: tau.working_share,
+    };
+    let mut scale = 1.0;
+    let mut scaled_magnitude = 0.0;
+    for lowest in 0..n {
+        for power in (lowest + 1..n).rev() {
+            work[power - 1] += centre * work[power];
+        }
+        let scaled = work[lowest] * scale;
+        out.coefficients[lowest] = scaled;
+        scaled_magnitude += scaled.abs();
+        scale *= slope;
+    }
+    let reach = upper(centre.abs() + slope.abs());
+    let wide_reach = upper(reach + offset_rad);
+    let mut reach_power = 1.0;
+    let mut wide_power = 1.0;
+    let mut shifted = 0.0;
+    let mut radii = 0.0;
+    let mut derivative = 0.0;
+    for (power, coefficient) in coefficients.iter().enumerate() {
+        let magnitude = upper(coefficient.mid.abs() + coefficient.rad);
+        shifted += coefficient.mid.abs() * reach_power;
+        radii += coefficient.rad * reach_power;
+        if power > 0 {
+            derivative += power as f64 * magnitude * wide_power;
+            wide_power = upper(wide_power * wide_reach);
+        }
+        reach_power = upper(reach_power * reach);
+    }
+    out.rad = upper(
+        gamma(2 * n + 2) * upper(shifted)
+            + gamma(n + 2) * upper(scaled_magnitude)
+            + upper(radii)
+            + offset_rad * upper(derivative),
+    );
+    out.trimmed()
 }
 
 #[cfg(test)]

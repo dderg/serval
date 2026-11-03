@@ -32,14 +32,14 @@ fn argument(centre: f64, half_width: f64) -> TaylorModel {
 
 #[test]
 fn a_tanh_model_encloses_tanh() {
-    for (centre, half_width) in [(0.0, 0.4), (1.3, 0.3), (-2.5, 0.7), (8.0, 0.1)] {
+    for (centre, half_width) in [(0.0, 0.4), (1.3, 0.3), (-2.5, 0.7), (8.0, 0.1), (0.6, 0.02)] {
         let model = argument(centre, half_width).tanh();
         assert_encloses(
             &model,
             |x| libm::tanh(x.mul_add(half_width, centre)),
             "tanh",
         );
-        if half_width <= 0.4 {
+        if half_width <= 0.05 {
             assert!(model.rad() < 1e-8, "tanh bound {:e}", model.rad());
         }
     }

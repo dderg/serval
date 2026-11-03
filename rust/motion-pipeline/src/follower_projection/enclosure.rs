@@ -92,25 +92,19 @@ impl TableFormula {
     }
 }
 
-/// `d²|ẋ|/dt²` of leaders `[ẋᵢ, ẍᵢ, x⃛ᵢ]` at path speed `speed`:
-/// `Σ_{i<j}(ẋᵢẍⱼ − ẋⱼẍᵢ)²/|ẋ|³ + ẋ·x⃛/|ẋ|`, as the signal reads it.
-fn leader_speed_second(leaders: &[[TaylorModel; 3]], speed: &TaylorModel) -> Option<TaylorModel> {
-    let inverse = speed.reciprocal()?;
-    let mut cross_squared = TaylorModel::constant(Ball::exact(0.0));
-    let mut velocity_dot_jerk = TaylorModel::constant(Ball::exact(0.0));
-    for (index, [v_i, a_i, j_i]) in leaders.iter().enumerate() {
-        velocity_dot_jerk = velocity_dot_jerk.add(&v_i.mul(j_i));
-        for [v_j, a_j, _] in &leaders[index + 1..] {
-            let cross = v_i.mul(a_j).sub(&v_j.mul(a_i));
-            cross_squared = cross_squared.add(&cross.mul(&cross));
-        }
+/// `d²|ẋ|/dt²` of leaders `[ẋᵢ, ẍᵢ, x⃛ᵢ]` at path speed `1/inverse`, its
+/// rate `along = ẋ·ẍ/|ẋ|` already read: `(|ẍ|² + ẋ·x⃛ − along²)/|ẋ|`, which
+/// is `Σ_{i<j}(ẋᵢẍⱼ − ẋⱼẍᵢ)²/|ẋ|³ + ẋ·x⃛/|ẋ|` as the signal reads it.
+fn leader_speed_second(
+    leaders: &[[TaylorModel; 3]],
+    inverse: &TaylorModel,
+    along: &TaylorModel,
+) -> TaylorModel {
+    let mut curvature = along.mul(along).scale(Ball::exact(-1.0));
+    for [v, a, j] in leaders {
+        curvature = curvature.add(&a.mul(a)).add(&v.mul(j));
     }
-    let inverse_cubed = inverse.mul(&inverse).mul(&inverse);
-    Some(
-        cross_squared
-            .mul(&inverse_cubed)
-            .add(&velocity_dot_jerk.mul(&inverse)),
-    )
+    curvature.mul(inverse)
 }
 
 /// A signal's enclosure over its whole support, built once at the
@@ -197,6 +191,11 @@ impl WholeEnclosure {
     }
 }
 
+/// The share of each model's spread a follower window works to: its
+/// enclosure's accuracy is a far coarser share of every model's spread
+/// than the rounding the models would otherwise keep terms for.
+const FOLLOWER_WORKING_SHARE: f64 = 1.0 / (1_u64 << 24) as f64;
+
 /// A follower's models on one window: what the span table lays along the
 /// leaders' path, which an advance reads, and the raw track's extrude-only
 /// motion, which it does not; each `[p, v, a, j]`.
@@ -266,18 +265,31 @@ impl<'a> FollowerSignal<'a> {
         let mut speed_squared = TaylorModel::constant(Ball::exact(0.0));
         let mut power = TaylorModel::constant(Ball::exact(0.0));
         for axis in &windows.leaders {
-            let [_, velocity, acceleration, jerk] = axis.models(window, with_jerk)?;
+            let [velocity, acceleration, jerk] = axis
+                .motion_models(window, with_jerk)?
+                .map(|model| model.working_to(FOLLOWER_WORKING_SHARE));
             speed_squared = speed_squared.add(&velocity.mul(&velocity));
             power = power.add(&velocity.mul(&acceleration));
             leaders.push([velocity, acceleration, jerk]);
         }
-        let speed = taylor::root_or_range(&speed_squared);
+        let slivers = (
+            self.speed_zero_sliver(window.lo),
+            self.speed_zero_sliver(window.hi),
+        );
+        let (speed, inverse_speed) = match slivers {
+            (None, None) => {
+                let speed = taylor::root_or_range(&speed_squared);
+                let inverse = speed.reciprocal()?;
+                (speed, Some(inverse))
+            }
+            _ => (taylor::root_or_range(&speed_squared), None),
+        };
         let scale = Ball::exact(self.odometer_scale);
         let rate = speed.scale(scale);
-        let sliver = |t: f64| self.speed_zero_sliver(t);
-        let rate_deriv = match (sliver(window.lo), sliver(window.hi)) {
-            (None, None) => power.mul(&speed.reciprocal()?).scale(scale),
-            (Some(lo), Some(hi)) if lo.zero_time == hi.zero_time => {
+        let along = inverse_speed.as_ref().map(|inverse| power.mul(inverse));
+        let rate_deriv = match (slivers, &along) {
+            (_, Some(along)) => along.scale(scale),
+            ((Some(lo), Some(hi)), None) if lo.zero_time == hi.zero_time => {
                 let side = |t: f64| lo.deriv_at(t);
                 let (low, high) = (side(window.lo), side(window.hi));
                 if low != high {
@@ -301,8 +313,10 @@ impl<'a> FollowerSignal<'a> {
         let reach = (reach.0 - held, reach.1 + held);
         let formulas = self.table_formulas(centre, reach)?;
         let rate_second = if with_jerk {
-            match (sliver(window.lo), sliver(window.hi)) {
-                (None, None) => leader_speed_second(&leaders, &speed)?.scale(scale),
+            match (&inverse_speed, &along) {
+                (Some(inverse), Some(along)) => {
+                    leader_speed_second(&leaders, inverse, along).scale(scale)
+                }
                 _ => TaylorModel::constant(Ball::exact(0.0)),
             }
         } else {
@@ -392,7 +406,10 @@ impl<'a> FollowerSignal<'a> {
                         .leaders
                         .axes
                         .iter()
-                        .map(|axis| AxisWindows::of(axis))
+                        .filter_map(|axis| match AxisWindows::of(axis) {
+                            Some(AxisWindows::Hold(_)) => None,
+                            windows => Some(windows),
+                        })
                         .collect::<Option<_>>()?,
                     raw: match self.raw_delta {
                         Some((axis, _)) => Some(AxisWindows::of(axis)?),
