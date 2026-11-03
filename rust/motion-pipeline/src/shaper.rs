@@ -3358,6 +3358,18 @@ impl ErrorSample {
     }
 }
 
+/// The samples the witnesses walk a span through, in order.
+struct ProbeWalk {
+    samples: [ErrorSample; LADDER_PROBES_U.len()],
+    len: usize,
+}
+
+impl ProbeWalk {
+    fn samples(&self) -> &[ErrorSample] {
+        &self.samples[..self.len]
+    }
+}
+
 struct RungWitness<'a, S> {
     axis: usize,
     sig: &'a S,
@@ -3367,13 +3379,22 @@ struct RungWitness<'a, S> {
     fit_tol: FitTol,
 }
 
+/// The stretch of a span its fit resolves, and which of its edges anchor
+/// past their slivers.
+#[derive(Clone, Copy)]
+struct ResolvedStretch {
+    from: f64,
+    to: f64,
+    anchored_past_slivers: (bool, bool),
+}
+
 /// Where the witnesses estimate a rung leaves the tolerance between the
 /// probes, for a signal with no exact polynomials to prove it against.
 fn estimated_witness<S: TrackSignal>(
     witness: RungWitness<'_, S>,
     t1: f64,
     truth: &SpanTruth,
-    (resolved_from, resolved_to): (f64, f64),
+    stretch: ResolvedStretch,
 ) -> Result<Option<f64>, PostProcessError> {
     if let Some(u) = acceleration_error_witness(
         witness.sig,
@@ -3384,9 +3405,14 @@ fn estimated_witness<S: TrackSignal>(
     ) {
         return Ok(Some(u));
     }
-    match witness.sig.interior_knots(resolved_from, resolved_to) {
-        [] => witness.over_probes(truth),
-        knots => witness.over_pieces(truth, knots),
+    let u_of = |t: f64| nurbs::fmadd(2.0 / witness.h, t - witness.t0, -1.0);
+    let walked_from = (
+        stretch.anchored_past_slivers.0.then(|| u_of(stretch.from)),
+        stretch.anchored_past_slivers.1.then(|| u_of(stretch.to)),
+    );
+    match witness.sig.interior_knots(stretch.from, stretch.to) {
+        [] => witness.over_probes(truth, walked_from),
+        knots => witness.over_pieces(truth, knots, walked_from),
     }
 }
 
@@ -3439,22 +3465,71 @@ impl<S: TrackSignal> RungWitness<'_, S> {
             && sample.curvature_per_u2.abs() <= self.curvature_budget()
     }
 
-    fn over_probes(&self, truth: &SpanTruth) -> Result<Option<f64>, PostProcessError> {
-        let samples: [ErrorSample; LADDER_PROBES_U.len()] = std::array::from_fn(|index| {
+    fn probe_samples(&self, truth: &SpanTruth) -> [ErrorSample; LADDER_PROBES_U.len()] {
+        std::array::from_fn(|index| {
             self.sample(
                 LADDER_PROBES_U[index],
                 (truth.pos[index], truth.vel[index], truth.acc[index]),
             )
-        });
-        if let Some(u) = self.over_probe_interpolant(&samples)? {
+        })
+    }
+
+    /// The samples the witnesses walk a span through: the probes, but at an
+    /// edge anchored past its sliver an exact sample at its resolved edge in
+    /// place of the edge probe and the probes inside the sliver. That edge
+    /// probe carries the anchored state — the sliver's extrapolation, not the
+    /// signal — so a gap walked from it estimates the miss next to the edge
+    /// from a zero.
+    fn walk(
+        &self,
+        probes: &[ErrorSample; LADDER_PROBES_U.len()],
+        (from, to): (Option<f64>, Option<f64>),
+    ) -> Result<ProbeWalk, PostProcessError> {
+        let last = LADDER_PROBES_U.len() - 1;
+        let first = from.map_or(Ok(probes[0]), |u| self.exact_sample_at(u))?;
+        let final_sample = to.map_or(Ok(probes[last]), |u| self.exact_sample_at(u))?;
+        let mut walk = ProbeWalk {
+            samples: [first; LADDER_PROBES_U.len()],
+            len: 1,
+        };
+        for &probe in probes.iter().filter(|probe| {
+            first.position.u < probe.position.u && probe.position.u < final_sample.position.u
+        }) {
+            walk.samples[walk.len] = probe;
+            walk.len += 1;
+        }
+        walk.samples[walk.len] = final_sample;
+        walk.len += 1;
+        Ok(walk)
+    }
+
+    fn over_probes(
+        &self,
+        truth: &SpanTruth,
+        walked_from: (Option<f64>, Option<f64>),
+    ) -> Result<Option<f64>, PostProcessError> {
+        let probes = self.probe_samples(truth);
+        if let Some(u) = self.over_probe_interpolant(&probes)? {
             return Ok(Some(u));
         }
-        for gap in samples.windows(2) {
+        let walk = self.walk(&probes, walked_from)?;
+        if let Some(u) = self.outside_at_an_edge(&walk) {
+            return Ok(Some(u));
+        }
+        for gap in walk.samples().windows(2) {
             if let Some(u) = self.over_piece(gap[0], gap[1])? {
                 return Ok(Some(u));
             }
         }
         Ok(None)
+    }
+
+    fn outside_at_an_edge(&self, walk: &ProbeWalk) -> Option<f64> {
+        let samples = walk.samples();
+        [samples[0], samples[samples.len() - 1]]
+            .into_iter()
+            .find(|&edge| !self.within(edge))
+            .map(|edge| edge.position.u)
     }
 
     fn over_probe_interpolant(
@@ -3521,24 +3596,23 @@ impl<S: TrackSignal> RungWitness<'_, S> {
         &self,
         truth: &SpanTruth,
         knots: &[f64],
+        walked_from: (Option<f64>, Option<f64>),
     ) -> Result<Option<f64>, PostProcessError> {
-        let samples: [ErrorSample; LADDER_PROBES_U.len()] = std::array::from_fn(|index| {
-            self.sample(
-                LADDER_PROBES_U[index],
-                (truth.pos[index], truth.vel[index], truth.acc[index]),
-            )
-        });
-        if let Some(u) = self.over_probe_interpolant(&samples)? {
+        let probes = self.probe_samples(truth);
+        if let Some(u) = self.over_probe_interpolant(&probes)? {
             return Ok(Some(u));
         }
-        let probe = |index: usize| samples[index];
+        let walk = self.walk(&probes, walked_from)?;
+        if let Some(u) = self.outside_at_an_edge(&walk) {
+            return Ok(Some(u));
+        }
         let half_span = 0.5 * self.h;
         let mut knots = knots
             .iter()
             .map(|&t| (nurbs::fmadd(2.0 / self.h, t - self.t0, -1.0), t))
             .peekable();
-        for index in 1..LADDER_PROBES_U.len() {
-            let (start, end) = (probe(index - 1), probe(index));
+        for gap in walk.samples().windows(2) {
+            let (start, end) = (gap[0], gap[1]);
             let width = end.position.u - start.position.u;
             let mut curvature_margin =
                 self.curvature_budget() - start.hermite_curvature_peak_to(end);
@@ -3699,23 +3773,40 @@ fn edge_velocity_and_acceleration<S: TrackSignal>(
     past_sliver: f64,
     onset_on_edge: bool,
     fit_tol: FitTol,
-) -> Result<(f64, f64), PostProcessError> {
+) -> Result<EdgeAnchor, PostProcessError> {
     let (_, velocity, seam_acceleration) = sig.eval_pva(seam);
     let velocity = exact_value(axis, velocity, seam)?;
     let seam_acceleration = exact_value(axis, seam_acceleration, seam)?;
+    let at_seam = EdgeAnchor {
+        velocity,
+        acceleration: seam_acceleration,
+        past_sliver: false,
+    };
     if onset_on_edge {
-        return Ok((velocity, seam_acceleration));
+        return Ok(at_seam);
     }
     let past_acceleration = exact_value(axis, sig.second_deriv(past_sliver), past_sliver)?;
     let beyond = nurbs::fmadd(2.0, past_sliver - seam, seam);
     let beyond_acceleration = exact_value(axis, sig.second_deriv(beyond), beyond)?;
     let extrapolated_to_seam = 2.0 * past_acceleration - beyond_acceleration;
-    let acceleration = if (extrapolated_to_seam - seam_acceleration).abs() > fit_tol.accel_mm_s2 {
-        extrapolated_to_seam
-    } else {
-        seam_acceleration
-    };
-    Ok((velocity, acceleration))
+    if (extrapolated_to_seam - seam_acceleration).abs() > fit_tol.accel_mm_s2 {
+        return Ok(EdgeAnchor {
+            acceleration: extrapolated_to_seam,
+            past_sliver: true,
+            ..at_seam
+        });
+    }
+    Ok(at_seam)
+}
+
+/// The state a span edge anchors its rungs to, and whether any of it is
+/// read past the edge's sliver rather than at the seam: then it is not the
+/// signal's state at the edge.
+#[derive(Debug, Clone, Copy)]
+struct EdgeAnchor {
+    velocity: f64,
+    acceleration: f64,
+    past_sliver: bool,
 }
 
 /// The velocity a span anchors to at a seam where coalescing moved a velocity
@@ -3791,7 +3882,7 @@ fn shaped_ladder<S: TrackSignal>(
     let p0 = exact_value(axis, from_start.eval(t0), t0)?;
     let start_past_sliver = t0 + edge_inset(h, policy.floors.cubic, slivers.start);
     let end_past_sliver = t1 - edge_inset(h, policy.floors.cubic, slivers.end);
-    let (seam_v0, a0) = edge_velocity_and_acceleration(
+    let start = edge_velocity_and_acceleration(
         &from_start,
         axis,
         t0_inside,
@@ -3799,13 +3890,14 @@ fn shaped_ladder<S: TrackSignal>(
         square_root_onset_on_edge(sig, t0),
         fit_tol,
     )?;
+    let a0 = start.acceleration;
     let v0 = match slivers.start_break {
         Some(break_at) => velocity_past_moved_break(&from_start, axis, break_at, t1, t0)?,
-        None => seam_v0,
+        None => start.velocity,
     };
     let t1_inside = span_probe_t(t0, t1, 1.0);
     let p1 = exact_value(axis, from_end.eval(t1), t1)?;
-    let (seam_v1, a1) = edge_velocity_and_acceleration(
+    let end = edge_velocity_and_acceleration(
         &from_end,
         axis,
         t1_inside,
@@ -3813,10 +3905,15 @@ fn shaped_ladder<S: TrackSignal>(
         square_root_onset_on_edge(sig, t1),
         fit_tol,
     )?;
+    let a1 = end.acceleration;
     let v1 = match slivers.end_break {
         Some(break_at) => velocity_past_moved_break(&from_end, axis, break_at, t0, t1)?,
-        None => seam_v1,
+        None => end.velocity,
     };
+    let anchored_past_slivers = (
+        start.past_sliver || slivers.start_break.is_some(),
+        end.past_sliver || slivers.end_break.is_some(),
+    );
     let base = quintic_in_u((p0, v0, a0), (p1, v1, a1), h);
     let endpoint_delta = exact_value(axis, sig.position_delta((t0, p0), (t1, p1)), t1)?;
 
@@ -3911,7 +4008,11 @@ fn shaped_ladder<S: TrackSignal>(
                     },
                     t1,
                     &truth,
-                    resolved,
+                    ResolvedStretch {
+                        from: start_past_sliver,
+                        to: end_past_sliver,
+                        anchored_past_slivers,
+                    },
                 )?,
             };
             let Some(u) = witness else {

@@ -747,23 +747,6 @@ fn a_piece_starting_on_a_declared_square_root_onset_anchors_to_its_acceleration(
 }
 
 /// The largest acceleration miss of a fitted track against its signal,
-/// sampled densely inside each piece clear of a percent at either edge.
-fn worst_interior_acceleration_miss(track: &nurbs::ScalarNurbs, sig: &impl TrackSignal) -> f64 {
-    const POINTS: u32 = 256;
-    nurbs::bezier::extract_bezier_pieces(track)
-        .iter()
-        .flat_map(|piece| {
-            let acceleration = piece.differentiate().differentiate();
-            let h = piece.u_end - piece.u_start;
-            (0..POINTS).map(move |k| {
-                let t = piece.u_start + h * (0.01 + 0.98 * f64::from(k) / f64::from(POINTS - 1));
-                (acceleration.evaluate(t) - sig.eval_pva(t).2).abs()
-            })
-        })
-        .fold(0.0, f64::max)
-}
-
-/// The largest acceleration miss of a fitted track against its signal,
 /// sampled densely across the stretch of each piece its fit resolves: all
 /// of it but a cubic floor inside either edge.
 fn worst_resolved_acceleration_miss(
@@ -787,6 +770,9 @@ fn worst_resolved_acceleration_miss(
         .fold(0.0, f64::max)
 }
 
+/// Undeclared, the onset reads at the edge like a break hidden in its
+/// sliver, and the floor pieces the shoulder refines to keep rungs anchored
+/// to that extrapolation; declared, they anchor to the onset itself.
 #[test]
 fn a_declared_square_root_onset_is_refined_until_its_shoulder_holds_the_tolerance() {
     let fit_tol = FitTol {
@@ -797,38 +783,34 @@ fn a_declared_square_root_onset_is_refined_until_its_shoulder_holds_the_toleranc
         at: 0.211_721_933,
         offset_mm: 150.0,
         velocity: 300.0,
-        coefficient: 6.1e5,
+        coefficient: 3e6,
     };
-    let span = 2e-3;
-    let fit_axis = |declared: bool| {
-        let axis_fit = AxisFit {
-            axis: 1,
-            t_start: onset().at,
-            t_end: onset().at + span,
-            seed_breakpoints: &[],
-            fit_tol,
-            fit_context: "square-root onset",
-            velocity_continuous: false,
-        };
-        if declared {
+    let axis_fit = AxisFit {
+        axis: 1,
+        t_start: onset().at,
+        t_end: onset().at + 2e-3,
+        seed_breakpoints: &[],
+        fit_tol,
+        fit_context: "square-root onset",
+        velocity_continuous: false,
+    };
+    let cubic_floor = seed_floors(&axis_fit, &onset(), &[axis_fit.t_start, axis_fit.t_end]).cubic;
+    let worst_miss = |declared: bool| {
+        let track = if declared {
             fit_axis_from_signal(axis_fit, &DeclaredOnset(onset()))
         } else {
             fit_axis_from_signal(axis_fit, &onset())
         }
-        .expect("a square-root onset fits")
+        .expect("a square-root onset fits");
+        worst_resolved_acceleration_miss(&track, &onset(), cubic_floor)
     };
-    let undeclared = worst_interior_acceleration_miss(&fit_axis(false), &onset());
-    let declared = worst_interior_acceleration_miss(&fit_axis(true), &onset());
-    eprintln!(
-        "undeclared {undeclared} declared {declared} pieces {} {}",
-        fit_axis(false).knots().len(),
-        fit_axis(true).knots().len()
-    );
+    let undeclared = worst_miss(false);
     assert!(
         undeclared > fit_tol.accel_mm_s2,
-        "the ladder's probes must miss the undeclared shoulder for this onset to test \
-         anything: worst miss {undeclared} mm/s²"
+        "the undeclared shoulder must leave the tolerance for this onset to test anything: \
+         worst miss {undeclared} mm/s²"
     );
+    let declared = worst_miss(true);
     assert!(
         declared <= fit_tol.accel_mm_s2,
         "the declared onset's shoulder leaves the tolerance by {declared} mm/s²"
@@ -871,4 +853,62 @@ fn every_piece_on_a_declared_square_root_onset_holds_the_tolerance_up_to_its_res
             );
         }
     }
+}
+
+/// An acceleration rising from a span edge as `rise · (1 − e^(−τ/time))`,
+/// steep enough there that the reading past the edge sliver, extrapolated
+/// back, misses the seam reading by more than the tolerance: the edge
+/// anchors to the extrapolation, as it would past a break hidden in the
+/// sliver.
+struct SaturatingRise {
+    t0: f64,
+    rise: f64,
+    time: f64,
+}
+
+impl TrackSignal for SaturatingRise {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let tau = (t - self.t0).max(0.0);
+        let (rise, time) = (self.rise, self.time);
+        let settled = 1.0 - libm::exp(-tau / time);
+        (
+            100.0 - 10.0 * tau + rise * (0.5 * tau * tau - time * tau + time * time * settled),
+            -10.0 + rise * (tau - time * settled),
+            rise * settled,
+        )
+    }
+}
+
+/// The witnesses walked the first probe gap from the span edge, whose
+/// sample is the anchored edge state: past a steep edge that is the
+/// extrapolation, not the signal, so the miss between the resolved edge and
+/// the first probe was estimated from a zero. Measured before: 1.15× the
+/// tolerance on a 100 µs piece.
+#[test]
+fn a_piece_anchored_past_its_edge_sliver_holds_the_tolerance_from_its_resolved_edge() {
+    let fit_tol = FitTol {
+        pos_mm: 0.005,
+        accel_mm_s2: 50.0,
+    };
+    let sig = SaturatingRise {
+        t0: 24.907_472_866,
+        rise: 3e3,
+        time: 3e-6,
+    };
+    let fit = AxisFit {
+        axis: 0,
+        t_start: sig.t0,
+        t_end: sig.t0 + 2e-4,
+        seed_breakpoints: &[],
+        fit_tol,
+        fit_context: "steep edge",
+        velocity_continuous: false,
+    };
+    let cubic_floor = seed_floors(&fit, &sig, &[fit.t_start, fit.t_end]).cubic;
+    let track = fit_axis_from_signal(fit, &sig).expect("a smooth rise fits");
+    let worst = worst_resolved_acceleration_miss(&track, &sig, cubic_floor);
+    assert!(
+        worst <= fit_tol.accel_mm_s2,
+        "the steep edge leaves the tolerance by {worst} mm/s²"
+    );
 }
