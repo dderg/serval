@@ -97,6 +97,12 @@ pub(crate) trait TrackSignal {
         let _ = (t0, t1);
         p1 - p0
     }
+    /// The magnitude a sample reading `position` was rounded at: the
+    /// position itself, or for a view read through an offset the larger of
+    /// it and the position the offset was taken from.
+    fn position_rounding_scale(&self, position: f64) -> f64 {
+        position.abs()
+    }
     fn acceleration_monotonicity(&self, _start: f64, _end: f64) -> Option<AccelerationTrend> {
         None
     }
@@ -177,6 +183,9 @@ impl<S: TrackSignal> TrackSignal for &S {
     fn position_delta(&self, from: (f64, f64), to: (f64, f64)) -> f64 {
         S::position_delta(self, from, to)
     }
+    fn position_rounding_scale(&self, position: f64) -> f64 {
+        S::position_rounding_scale(self, position)
+    }
     fn acceleration_monotonicity(&self, start: f64, end: f64) -> Option<AccelerationTrend> {
         S::acceleration_monotonicity(self, start, end)
     }
@@ -248,6 +257,12 @@ impl<S: TrackSignal> TrackSignal for ShiftedTrackSignal<S> {
         self.inner.position_delta(from, to)
     }
 
+    fn position_rounding_scale(&self, position: f64) -> f64 {
+        position
+            .abs()
+            .max(self.inner.position_rounding_scale(position + self.base))
+    }
+
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let (position, velocity, acceleration) = self.inner.eval_pva(t);
         (position - self.base, velocity, acceleration)
@@ -294,6 +309,10 @@ impl<'a, S: TrackSignal> ConvolutionSignal<'a, S> {
 impl<S: TrackSignal> TrackSignal for ConvolutionSignal<'_, S> {
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         self.evaluated.eval_pva(t)
+    }
+
+    fn position_rounding_scale(&self, position: f64) -> f64 {
+        self.evaluated.position_rounding_scale(position)
     }
 
     fn diagnostic(&self, t: f64) -> Option<String> {
@@ -1548,8 +1567,8 @@ fn fit_axis_targets(
             let probe = scale_cache
                 .get(&t.to_bits())
                 .expect("leader scale probe is missing");
-            if probe.position.is_finite() {
-                position_scale = position_scale.max(probe.position.abs());
+            if probe.position_rounding_scale.is_finite() {
+                position_scale = position_scale.max(probe.position_rounding_scale);
             }
             if probe.velocity.is_finite() {
                 velocity_scale = velocity_scale.max(probe.velocity.abs());
@@ -2785,7 +2804,7 @@ fn ladder_resolution_floor<S: TrackSignal>(
     for &t in seeds {
         let (position, velocity, _) = sig.eval_pva(t);
         if position.is_finite() {
-            position_scale = position_scale.max(position.abs());
+            position_scale = position_scale.max(sig.position_rounding_scale(position));
         }
         if velocity.is_finite() {
             velocity_scale = velocity_scale.max(velocity.abs());
@@ -3118,7 +3137,7 @@ fn velocity_step_across<S: TrackSignal>(sig: &S, t: f64) -> f64 {
 }
 
 struct ScaleProbe {
-    position: f64,
+    position_rounding_scale: f64,
     velocity: f64,
     velocity_step: f64,
 }
@@ -3126,7 +3145,7 @@ struct ScaleProbe {
 fn scale_probe<S: TrackSignal>(sig: &S, t: f64) -> ScaleProbe {
     let (position, velocity, _) = sig.eval_pva(t);
     ScaleProbe {
-        position,
+        position_rounding_scale: sig.position_rounding_scale(position),
         velocity,
         velocity_step: velocity_step_across(sig, t),
     }
