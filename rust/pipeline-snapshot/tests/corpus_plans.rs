@@ -1,6 +1,7 @@
-//! Every corpus case plans through the production pipeline. Heavy (the full
-//! sim prints), so ignored by default; `scripts/corpus.sh` runs it. Every
-//! case runs even when an earlier one panics, and all failures are listed.
+//! Every corpus case plans through the production pipeline and holds the
+//! config's z caps. Heavy (the full sim prints), so ignored by default;
+//! `scripts/corpus.sh` runs it. Every case runs even when an earlier one
+//! panics, and all failures are listed.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Instant;
@@ -40,6 +41,9 @@ fn every_corpus_case_plans() {
                     snapshot.traversal_time_s,
                     started.elapsed().as_secs_f64()
                 );
+                if let Some(excess) = corpus::z_caps_excess(&snapshot, &case.config) {
+                    failures.push(format!("{}: {excess}", case.name));
+                }
             }
             Ok(snapshot) => failures.push(format!(
                 "{}: traversal time {}",

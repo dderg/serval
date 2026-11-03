@@ -6,7 +6,8 @@
 #   scripts/corpus.sh --probe FILE.rs [--configs ...] [-k ...]
 #
 # Without --probe it plans every selected case and checks the result is
-# finite. --probe copies FILE.rs to rust/pipeline-snapshot/tests/ for the run
+# finite and holds the config's z caps. --probe copies FILE.rs to
+# rust/pipeline-snapshot/tests/ for the run
 # and removes it afterwards; the probe starts with `mod corpus;` and iterates
 # `corpus::corpus()` (see tests/corpus/mod.rs), so nobody has to copy the case
 # list into a throwaway test. --audit builds with the fit-audit feature.
