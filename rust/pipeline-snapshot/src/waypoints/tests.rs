@@ -277,3 +277,60 @@ fn unknown_extended_commands_are_ignored() {
         1
     );
 }
+
+fn rests(waypoints: &[Waypoint]) -> Vec<Option<f64>> {
+    waypoints.iter().map(|w| w.dwell_before_s).collect()
+}
+
+#[test]
+fn stop_at_rest_commands_ride_on_the_next_move() {
+    let wp = parse(
+        "G1 X10 F6000\nG4 P250\nG1 X20\nM400\nG4 P100\nG1 X30\nG1 X40\nM84\n\
+         SET_KINEMATIC_POSITION\nG1 X50\nM400\n",
+    );
+    assert_eq!(rests(&wp), [None, Some(0.25), Some(0.1), None, Some(0.2)]);
+}
+
+#[test]
+fn a_rest_before_the_anchor_is_where_the_plan_starts() {
+    assert_eq!(
+        rests(&parse("G4 P500\nG1 X10 F6000\nG1 X20\n")),
+        [None, None]
+    );
+}
+
+#[test]
+fn negative_dwell_is_refused_like_klippy() {
+    assert!(matches!(
+        parse_err("G1 X10 F6000\nG4 P-1\n"),
+        WaypointError::InvalidParam { line: 2, .. }
+    ));
+}
+
+#[test]
+fn motors_off_unhomes_until_set_kinematic_position() {
+    assert!(matches!(
+        parse_err("G1 X10 F6000\nM18\nG1 Y5\n"),
+        WaypointError::Unhomed { line: 3, axis: 'Y' }
+    ));
+    assert_eq!(parse("G1 X10 F6000\nM84\nG1 E1\n").len(), 2);
+    assert!(matches!(
+        parse_err("G1 X10 F6000\nM84\nSET_KINEMATIC_POSITION CLEAR=Z\nG1 Y5\nG1 Z1\n"),
+        WaypointError::Unhomed { line: 5, axis: 'Z' }
+    ));
+}
+
+#[test]
+fn set_kinematic_position_names_the_start_before_the_anchor() {
+    let wp = parse("SET_KINEMATIC_POSITION X=5\nG91\nG1 X10 F6000\nG1 X1\n");
+    assert_eq!(wp[0].position[0], 15.0);
+    assert_eq!(wp[1].position[0], 16.0);
+}
+
+#[test]
+fn set_kinematic_position_away_from_the_toolhead_is_refused() {
+    assert!(matches!(
+        parse_err("G1 X10 F6000\nSET_KINEMATIC_POSITION X=0\n"),
+        WaypointError::PositionJump { line: 2, .. }
+    ));
+}

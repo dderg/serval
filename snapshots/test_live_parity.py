@@ -3,7 +3,12 @@
 Each case feeds the same G-code to klippy's own handlers (``live_replay``)
 and to ``_motion_engine.parse_gcode``, then compares the moves move for move:
 displacement, feedrate and the effective (velocity, accel, corner_deviation)
-the planner runs each under.
+the planner runs each under, plus every stop at rest between two moves and
+the time the toolhead holds there. Everything up to the first move with
+displacement is the snapshot's anchor and stays out of the comparison, as do
+rests after the last move: they leave the planned trajectory unchanged. Rest
+durations agree to 1e-12 s; the live host derives a hold from absolute print
+times, so it carries their rounding.
 """
 
 from __future__ import annotations
@@ -37,25 +42,35 @@ def live_steps(gcode: str, cfg: Path) -> list[tuple]:
         for i, step in enumerate(steps)
         if isinstance(step, live_replay.LiveMove) and any(step.delta[:3])
     )
-    return [
-        ("move", step.delta, step.feedrate, step.limits)
-        for step in steps[anchor + 1 :]
-        if isinstance(step, live_replay.LiveMove)
-    ]
+    compared = []
+    rest_s = None
+    for step in steps[anchor + 1 :]:
+        if isinstance(step, live_replay.LiveRest):
+            rest_s = (rest_s or 0.0) + step.dwell_s
+            continue
+        if rest_s is not None:
+            compared.append(("rest", round(rest_s, 12)))
+            rest_s = None
+        compared.append(("move", step.delta, step.feedrate, step.limits))
+    return compared
 
 
 def snapshot_steps(engine, gcode: str, cfg: Path) -> list[tuple]:
     config_text = harness.read_printer_config(cfg).config_text
     waypoints = engine.parse_gcode(gcode, config_text)
-    return [
-        (
-            "move",
-            tuple(e - s for s, e in zip(move["start"], move["end"])),
-            move["feedrate"],
-            (move["velocity"], move["accel"], move["corner_deviation"]),
+    compared = []
+    for move in engine.snapshot_moves(waypoints, config_text):
+        if move["dwell_before_s"] is not None:
+            compared.append(("rest", round(move["dwell_before_s"], 12)))
+        compared.append(
+            (
+                "move",
+                tuple(e - s for s, e in zip(move["start"], move["end"])),
+                move["feedrate"],
+                (move["velocity"], move["accel"], move["corner_deviation"]),
+            )
         )
-        for move in engine.snapshot_moves(waypoints, config_text)
-    ]
+    return compared
 
 
 def assert_parity(engine, gcode: str, cfg: Path = BENCH_CFG) -> list[tuple]:
@@ -135,8 +150,12 @@ def test_m204_matches_live(engine):
     ]
 
 
+def moves(steps: list[tuple]) -> list[tuple]:
+    return [step for step in steps if step[0] == "move"]
+
+
 def feedrates(steps: list[tuple]) -> list[float]:
-    return [feedrate for _, _, feedrate, _ in steps]
+    return [feedrate for _, _, feedrate, _ in moves(steps)]
 
 
 def test_g0_and_g1_feedrates_match_live(engine):
@@ -171,7 +190,7 @@ def test_feedrate_caps_match_live(engine):
 
 
 def extrusions(steps: list[tuple]) -> list[float]:
-    return [delta[3] for _, delta, _, _ in steps]
+    return [delta[3] for _, delta, _, _ in moves(steps)]
 
 
 def test_g92_shifts_the_coordinate_frame_like_live(engine):
@@ -216,3 +235,50 @@ def test_extrusion_mode_matches_live(engine):
         "G1 X10 E2\n",
     )
     assert extrusions(steps) == [2.0, 1.0, 1.0, 1.0, 1.0, 2.0]
+
+
+def rests(steps: list[tuple]) -> list[float]:
+    return [step[1] for step in steps if step[0] == "rest"]
+
+
+def test_stop_at_rest_commands_match_live(engine):
+    steps = assert_parity(
+        engine,
+        "G1 X10 Y10 F6000\n"
+        "G1 X20\n"
+        "G4 P250\n"
+        "G1 X30\n"
+        "M400\n"
+        "G4 P100\n"
+        "G1 X40\n"
+        "SET_KINEMATIC_POSITION X=40 Y=10 Z=0\n"
+        "G1 X50\n"
+        "M84\n"
+        "SET_KINEMATIC_POSITION X=50 Y=10 Z=0\n"
+        "G1 X60\n"
+        "G4\n"
+        "G1 X70\n"
+        "M18\n",
+    )
+    assert rests(steps) == [0.25, 0.1, 0.0, 0.2, 0.0]
+
+
+def snapshot_refusal(engine, gcode: str, cfg: Path = BENCH_CFG) -> str:
+    config_text = harness.read_printer_config(cfg).config_text
+    with pytest.raises(ValueError) as refused:
+        engine.parse_gcode(gcode, config_text)
+    return str(refused.value)
+
+
+def test_moves_after_motors_off_are_refused_like_live(engine):
+    gcode = "G1 X10 Y10 F6000\nM84\nG1 E1\nG1 X20\n"
+    with pytest.raises(Exception, match="Must home axis first"):
+        live_replay.replay(gcode, BENCH_CFG)
+    assert "Must home axis first" in snapshot_refusal(engine, gcode)
+
+
+def test_set_kinematic_position_away_from_the_toolhead_is_refused(engine):
+    refusal = snapshot_refusal(
+        engine, "G1 X10 Y10 F6000\nSET_KINEMATIC_POSITION X=0\nG1 X20\n"
+    )
+    assert "SET_KINEMATIC_POSITION" in refusal

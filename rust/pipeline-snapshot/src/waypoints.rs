@@ -17,16 +17,25 @@ pub struct Waypoint {
     pub position: [f64; 4],
     pub feedrate: f64,
     pub runtime: RuntimeLimits,
+    /// `Some(d)`: the toolhead comes to rest at the previous waypoint and
+    /// holds there `d` seconds before the move to this one starts, as the
+    /// live engine drains for `G4`, `M400`, `M18`/`M84` and
+    /// `SET_KINEMATIC_POSITION`; `None`: the move blends from the previous
+    /// one. A rest after the last move leaves the trajectory unchanged and
+    /// has no waypoint to ride on.
+    pub dwell_before_s: Option<f64>,
 }
 
 impl Waypoint {
-    /// A waypoint reached with no runtime limit override in force.
+    /// A waypoint reached with no runtime limit override in force, blending
+    /// from the previous one.
     #[must_use]
     pub fn at(position: [f64; 4], feedrate: f64) -> Self {
         Self {
             position,
             feedrate,
             runtime: RuntimeLimits::default(),
+            dwell_before_s: None,
         }
     }
 }
@@ -63,6 +72,18 @@ pub enum WaypointError {
     RuntimeLimit {
         line: u32,
         source: planner_config::RuntimeLimitError,
+    },
+    #[error(
+        "line {line}: Must home axis first: {axis} lost its homing when the motors went off (M18/M84), so the live host refuses the move"
+    )]
+    Unhomed { line: u32, axis: char },
+    #[error(
+        "line {line}: SET_KINEMATIC_POSITION renames the toolhead position {from:?} as {to:?} without moving it; a snapshot trajectory is one continuous path and cannot plan the jump"
+    )]
+    PositionJump {
+        line: u32,
+        from: [f64; 3],
+        to: [f64; 3],
     },
 }
 
@@ -194,33 +215,80 @@ const LIVE_SPEED_FACTOR: f64 = 1.0 / 60.0;
 /// klippy's `Move`: below this the move is extrude-only.
 const MOVE_EPSILON_MM: f64 = 0.000_000_001;
 
+/// `stepper_enable.DISABLE_STALL_TIME`: `M18`/`M84` dwell this long before
+/// the motors go off and hold the next move this long after.
+const DISABLE_STALL_TIME_S: f64 = 0.1;
+
 /// klippy's `Motion` as the snapshot sees it: the commanded position, the
-/// runtime limit overrides in force, and `Motion.move` turning a target and
-/// a speed into the move it submits.
+/// runtime limit overrides in force, which axes are homed, and `Motion.move`
+/// turning a target and a speed into the move it submits. The snapshot
+/// starts at the first move that names a position — the anchor — so a stop
+/// at rest before it is already where the plan begins.
 struct Toolhead<'a> {
     config: &'a CartesianLimits,
     runtime: RuntimeLimits,
-    commanded: Option<[f64; 4]>,
+    commanded: [f64; 4],
+    anchored: bool,
+    homed: [bool; 3],
+    rest_s: Option<f64>,
 }
 
 impl Toolhead<'_> {
-    fn anchor(&mut self, position: [f64; 4], speed: f64) -> Waypoint {
-        self.commanded = Some(position);
-        Waypoint {
-            position,
-            feedrate: speed,
-            runtime: self.runtime,
+    /// The engine drains to rest and holds `dwell_s` before the next move:
+    /// `Motion.dwell`, `Motion.wait_moves` and every forced fence.
+    fn rest(&mut self, dwell_s: f64) {
+        self.rest_s = Some(self.rest_s.unwrap_or(0.0) + dwell_s);
+    }
+
+    /// `PrinterStepperEnable.motor_off` with the host ahead of the MCU:
+    /// dwell, motors off, hold the next move past the disable, and the
+    /// kinematics forget every axis's homing.
+    fn motors_off(&mut self) {
+        self.rest(2.0 * DISABLE_STALL_TIME_S);
+        self.homed = [false; 3];
+    }
+
+    /// `ForceMove.cmd_SET_KINEMATIC_POSITION`: wait for the moves, rename
+    /// the toolhead position and home every axis but the cleared ones.
+    fn set_kinematic_position(&mut self, args: &ExtendedArgs<'_>) -> Result<(), WaypointError> {
+        self.rest(0.0);
+        let mut renamed = self.commanded;
+        for (axis, key) in ["X", "Y", "Z"].into_iter().enumerate() {
+            if let Some(value) = args.float(key, Bound::Any)? {
+                renamed[axis] = value;
+            }
         }
+        let jumps =
+            (0..3).any(|axis| (renamed[axis] - self.commanded[axis]).abs() >= MOVE_EPSILON_MM);
+        if self.anchored && jumps {
+            return Err(WaypointError::PositionJump {
+                line: args.line,
+                from: [self.commanded[0], self.commanded[1], self.commanded[2]],
+                to: [renamed[0], renamed[1], renamed[2]],
+            });
+        }
+        self.commanded = renamed;
+        let clear = args.raw("CLEAR").unwrap_or("").to_ascii_uppercase();
+        for (axis, name) in ['X', 'Y', 'Z'].into_iter().enumerate() {
+            self.homed[axis] = !clear.contains(name);
+        }
+        Ok(())
     }
 
     /// `Motion.move(newpos, speed)`: `Move` caps a kinematic move at the
-    /// effective velocity, the kinematics `check_move` caps its z share at
-    /// `max_z_velocity`, a pure-z move is capped outright; an extrude-only
-    /// move keeps its speed. `None` when klippy submits nothing.
-    fn move_to(&mut self, target: [f64; 4], speed: f64) -> Option<Waypoint> {
-        let start = self
-            .commanded
-            .expect("a move follows the anchor that sets the commanded position");
+    /// effective velocity, the kinematics `check_move` refuses an unhomed
+    /// axis and caps the z share at `max_z_velocity`, a pure-z move is capped
+    /// outright; an extrude-only move keeps its speed. `None` when klippy
+    /// submits nothing, and for the move onto the anchor, which the snapshot
+    /// starts from instead.
+    fn move_to(
+        &mut self,
+        target: [f64; 4],
+        speed: f64,
+        names_position: bool,
+        line: u32,
+    ) -> Result<Option<Waypoint>, WaypointError> {
+        let start = self.commanded;
         let (max_velocity, _, _) = self.runtime.effective(self.config);
         let mut velocity = speed.min(max_velocity);
         let mut delta = [0.0; 4];
@@ -236,8 +304,31 @@ impl Toolhead<'_> {
             move_d = delta[3].abs();
             velocity = speed;
         }
+        if kinematic {
+            if let Some(axis) = (0..3).find(|&axis| delta[axis] != 0.0 && !self.homed[axis]) {
+                return Err(WaypointError::Unhomed {
+                    line,
+                    axis: char::from(b"XYZ"[axis]),
+                });
+            }
+        }
+        if !self.anchored {
+            if !names_position {
+                self.commanded = end;
+                return Ok(None);
+            }
+            self.anchored = true;
+            self.commanded = target;
+            self.rest_s = None;
+            return Ok(Some(Waypoint {
+                position: target,
+                feedrate: speed,
+                runtime: self.runtime,
+                dwell_before_s: None,
+            }));
+        }
         if move_d == 0.0 {
-            return None;
+            return Ok(None);
         }
         let mut min_move_t = move_d / velocity;
         let max_cruise_v2 = velocity * velocity;
@@ -254,12 +345,13 @@ impl Toolhead<'_> {
         if pure_z {
             feedrate = feedrate.min(self.config.max_z_velocity);
         }
-        self.commanded = Some(end);
-        Some(Waypoint {
+        self.commanded = end;
+        Ok(Some(Waypoint {
             position: end,
             feedrate,
             runtime: self.runtime,
-        })
+            dwell_before_s: self.rest_s.take(),
+        }))
     }
 }
 
@@ -328,12 +420,30 @@ impl GCodeMove {
     }
 }
 
+/// `Motion.cmd_G4`: `P` milliseconds, at least zero.
+fn g4_dwell_s(params: &gcode::Params, line: u32) -> Result<f64, WaypointError> {
+    let milliseconds = params.get(b'P').unwrap_or(0.0);
+    if milliseconds < 0.0 {
+        return Err(WaypointError::InvalidParam {
+            line,
+            command: "G4".into(),
+            param: "P".into(),
+            value: milliseconds.to_string().into(),
+            reason: "must be at least the minimum",
+        });
+    }
+    Ok(milliseconds / 1000.0)
+}
+
 pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>, WaypointError> {
     let mut waypoints: Vec<Waypoint> = Vec::new();
     let mut toolhead = Toolhead {
         config,
         runtime: RuntimeLimits::default(),
-        commanded: None,
+        commanded: [0.0; 4],
+        anchored: false,
+        homed: [true; 3],
+        rest_s: None,
     };
     let mut gcode_move = GCodeMove {
         absolute_coord: true,
@@ -368,6 +478,10 @@ pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>
                         set_velocity_limit(&args, config, &mut toolhead.runtime)?;
                     }
                     "RESET_VELOCITY_LIMIT" => reset_velocity_limit(&mut toolhead.runtime),
+                    "SET_KINEMATIC_POSITION" => {
+                        toolhead.set_kinematic_position(&args)?;
+                        gcode_move.last_position = toolhead.commanded;
+                    }
                     _ => {}
                 }
                 continue;
@@ -384,6 +498,9 @@ pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>
             (b'M', 83) => gcode_move.absolute_extrude = false,
             (b'M', 204) => m204(&params, line_no, &mut toolhead.runtime)?,
             (b'G', 92) => gcode_move.set_position(&params),
+            (b'G', 4) => toolhead.rest(g4_dwell_s(&params, line_no)?),
+            (b'M', 400) => toolhead.rest(0.0),
+            (b'M', 18 | 84) => toolhead.motors_off(),
             (b'G', 2 | 3) => {
                 return Err(WaypointError::UnsupportedArc {
                     line: line_no,
@@ -394,12 +511,12 @@ pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>
                 let has_position =
                     params.x().is_some() || params.y().is_some() || params.z().is_some();
                 gcode_move.linear_move(cmd, &params, line_no)?;
-                let target = gcode_move.last_position;
-                let waypoint = match toolhead.commanded {
-                    None if has_position => Some(toolhead.anchor(target, gcode_move.speed)),
-                    None => None,
-                    Some(_) => toolhead.move_to(target, gcode_move.speed),
-                };
+                let waypoint = toolhead.move_to(
+                    gcode_move.last_position,
+                    gcode_move.speed,
+                    has_position,
+                    line_no,
+                )?;
                 waypoints.extend(waypoint);
             }
             _ => {}
