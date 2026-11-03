@@ -17,13 +17,16 @@ pub(crate) struct PyRuntimeLimits {
     corner_deviation: Option<f64>,
 }
 
-/// A waypoint as a Python dict: `position` is `[x, y, z, e]`.
+/// A waypoint as a Python dict: `position` is `[x, y, z, e]`;
+/// `dwell_before_s` is the stop at rest the move to it starts from, `None`
+/// when it blends from the previous move.
 #[derive(IntoPyObject, FromPyObject)]
 #[pyo3(from_item_all)]
 pub(crate) struct PyWaypoint {
     position: [f64; 4],
     feedrate: f64,
     runtime: PyRuntimeLimits,
+    dwell_before_s: Option<f64>,
 }
 
 impl From<Waypoint> for PyWaypoint {
@@ -36,6 +39,7 @@ impl From<Waypoint> for PyWaypoint {
                 accel: w.runtime.accel,
                 corner_deviation: w.runtime.corner_deviation,
             },
+            dwell_before_s: w.dwell_before_s,
         }
     }
 }
@@ -50,6 +54,7 @@ impl From<PyWaypoint> for Waypoint {
                 accel: w.runtime.accel,
                 corner_deviation: w.runtime.corner_deviation,
             },
+            dwell_before_s: w.dwell_before_s,
         }
     }
 }
@@ -64,6 +69,7 @@ pub(crate) struct PyMoveSpec {
     velocity: f64,
     accel: f64,
     corner_deviation: f64,
+    dwell_before_s: Option<f64>,
 }
 
 fn motion_settings(config_text: &str) -> PyResult<MotionSettings> {
@@ -155,6 +161,7 @@ pub(crate) fn snapshot_moves(
             velocity: spec.limits.max_velocity_mm_s,
             accel: spec.limits.accel_mm_s2,
             corner_deviation: spec.limits.corner_deviation_mm,
+            dwell_before_s: spec.dwell_before_s,
         })
         .collect())
 }

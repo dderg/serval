@@ -34,10 +34,63 @@ fn default_config(limits: geometry::VelocityLimits) -> StreamConfig {
     }
 }
 
+fn planned_moves(
+    waypoints: &[waypoints::Waypoint],
+    limits: geometry::VelocityLimits,
+) -> Vec<geometry::Move> {
+    plan_moves(&plan_steps(waypoints, limits).unwrap())
+        .cloned()
+        .collect()
+}
+
 #[test]
-fn build_moves_from_square() {
-    let moves = build_moves(&square_waypoints(), default_limits()).unwrap();
+fn plan_moves_from_square() {
+    let moves = planned_moves(&square_waypoints(), default_limits());
     assert_eq!(moves.len(), 4);
+}
+
+fn corner_after_rest(dwell_before_s: Option<f64>) -> Vec<waypoints::Waypoint> {
+    vec![
+        waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 100.0),
+        waypoints::Waypoint::at([10.0, 0.0, 0.0, 0.0], 100.0),
+        waypoints::Waypoint {
+            dwell_before_s,
+            ..waypoints::Waypoint::at([10.0, 10.0, 0.0, 0.0], 100.0)
+        },
+    ]
+}
+
+#[test]
+fn a_waypoint_after_a_stop_at_rest_plans_the_rest_before_its_move() {
+    let steps = plan_steps(&corner_after_rest(Some(0.25)), default_limits()).unwrap();
+    assert!(matches!(
+        steps[..],
+        [
+            PlanStep::Move(_),
+            PlanStep::Rest { dwell_s: 0.25 },
+            PlanStep::Move(_)
+        ]
+    ));
+}
+
+fn traversal_end_s(waypoints: &[waypoints::Waypoint]) -> f64 {
+    let limits = default_limits();
+    let (_, shaped, _) = run_pipeline_streaming(
+        &plan_steps(waypoints, limits).unwrap(),
+        default_config(limits),
+        AxisChainSet::default(),
+        |_, _| {},
+    );
+    shaped.last().expect("the corner plans").t_end
+}
+
+#[test]
+fn a_dwell_holds_the_toolhead_at_rest_for_its_duration() {
+    let blended = traversal_end_s(&corner_after_rest(None));
+    let stopped = traversal_end_s(&corner_after_rest(Some(0.0)));
+    let dwelled = traversal_end_s(&corner_after_rest(Some(0.5)));
+    assert!(stopped > blended, "a stop at rest brakes into the corner");
+    assert!((dwelled - stopped - 0.5).abs() < 1e-9);
 }
 
 #[test]
@@ -66,14 +119,14 @@ fn move_specs_clamp_runtime_caps_to_the_config_base_like_the_live_engine() {
 
 #[test]
 fn raw_path_has_correct_point_count() {
-    let moves = build_moves(&square_waypoints(), default_limits()).unwrap();
+    let moves = plan_steps(&square_waypoints(), default_limits()).unwrap();
     let points = extract_raw_path(&moves);
     assert_eq!(points.len(), 5);
 }
 
 #[test]
 fn raw_path_starts_at_origin() {
-    let moves = build_moves(&square_waypoints(), default_limits()).unwrap();
+    let moves = plan_steps(&square_waypoints(), default_limits()).unwrap();
     let points = extract_raw_path(&moves);
     assert!((points[0].0).abs() < 1e-9);
     assert!((points[0].1).abs() < 1e-9);
@@ -82,7 +135,7 @@ fn raw_path_starts_at_origin() {
 #[test]
 fn fitted_outcome_has_spatial_segments() {
     let limits = default_limits();
-    let moves = build_moves(&square_waypoints(), limits).unwrap();
+    let moves = plan_steps(&square_waypoints(), limits).unwrap();
     let (fitted, _, _) = run_pipeline_streaming(
         &moves,
         default_config(limits),
@@ -146,7 +199,7 @@ fn assert_axis_tiles_the_run(traj: &ExactTrajectory, axis: usize, lane: &str) {
 #[test]
 fn trajectory_carriers_tile_the_run_on_every_spatial_axis() {
     let limits = default_limits();
-    let moves = build_moves(&square_waypoints(), limits).unwrap();
+    let moves = plan_steps(&square_waypoints(), limits).unwrap();
     let (_, shaped, _) = run_pipeline_streaming(
         &moves,
         default_config(limits),
@@ -172,7 +225,7 @@ fn trajectory_carriers_tile_the_run_on_every_spatial_axis() {
 #[test]
 fn carriers_are_position_continuous_across_their_shared_instant() {
     let limits = default_limits();
-    let moves = build_moves(&square_waypoints(), limits).unwrap();
+    let moves = plan_steps(&square_waypoints(), limits).unwrap();
     let (_, shaped, _) = run_pipeline_streaming(
         &moves,
         default_config(limits),
@@ -199,7 +252,7 @@ fn single_move_skips_fitting() {
         waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 100.0),
         waypoints::Waypoint::at([10.0, 0.0, 0.0, 0.0], 100.0),
     ];
-    let moves = build_moves(&waypoints, limits).unwrap();
+    let moves = plan_steps(&waypoints, limits).unwrap();
     let (fitted, _, _) = run_pipeline_streaming(
         &moves,
         default_config(limits),
@@ -216,7 +269,7 @@ fn zero_displacement_filtered() {
         waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 100.0),
         waypoints::Waypoint::at([10.0, 0.0, 0.0, 0.0], 100.0),
     ];
-    let moves = build_moves(&waypoints, default_limits()).unwrap();
+    let moves = planned_moves(&waypoints, default_limits());
     assert_eq!(moves.len(), 1);
 }
 
@@ -236,7 +289,7 @@ fn spatial_move_with_extrusion_sets_follower_ratio() {
         waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 100.0),
         waypoints::Waypoint::at([10.0, 0.0, 0.0, 2.0], 100.0),
     ];
-    let moves = build_moves(&waypoints, default_limits()).unwrap();
+    let moves = planned_moves(&waypoints, default_limits());
     assert_eq!(moves.len(), 1);
     let ratio = follower_ratio(&moves[0], EXTRUDER_AXIS).expect("extruder follower present");
     assert!((ratio - 0.2).abs() < 1e-12, "ΔE/Δs should be 2/10 = 0.2");
@@ -249,7 +302,7 @@ fn diagonal_move_extrusion_ratio_uses_spatial_distance() {
         waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 100.0),
         waypoints::Waypoint::at([3.0, 4.0, 0.0, 1.0], 100.0),
     ];
-    let moves = build_moves(&waypoints, default_limits()).unwrap();
+    let moves = planned_moves(&waypoints, default_limits());
     let ratio = follower_ratio(&moves[0], EXTRUDER_AXIS).expect("extruder follower present");
     assert!((ratio - 0.2).abs() < 1e-12, "ΔE/Δs should be 1/5 = 0.2");
 }
@@ -262,7 +315,7 @@ fn pure_retract_is_a_non_spatial_follower_move() {
         waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 100.0),
         waypoints::Waypoint::at([0.0, 0.0, 0.0, -3.0], 100.0),
     ];
-    let moves = build_moves(&waypoints, default_limits()).unwrap();
+    let moves = planned_moves(&waypoints, default_limits());
     assert_eq!(
         moves.len(),
         1,
@@ -285,7 +338,7 @@ fn no_extrusion_means_no_follower() {
         waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 100.0),
         waypoints::Waypoint::at([10.0, 0.0, 0.0, 0.0], 100.0),
     ];
-    let moves = build_moves(&waypoints, default_limits()).unwrap();
+    let moves = planned_moves(&waypoints, default_limits());
     assert!(
         follower_ratio(&moves[0], EXTRUDER_AXIS).is_none(),
         "a travel move carries no extruder follower"
@@ -301,7 +354,7 @@ fn extrusion_lowers_to_a_moving_e_track() {
         waypoints::Waypoint::at([10.0, 0.0, 0.0, 1.0], 100.0),
         waypoints::Waypoint::at([10.0, 10.0, 0.0, 2.0], 100.0),
     ];
-    let moves = build_moves(&waypoints, limits).unwrap();
+    let moves = plan_steps(&waypoints, limits).unwrap();
     let (_, shaped, _) = run_pipeline_streaming(
         &moves,
         default_config(limits),
@@ -416,7 +469,7 @@ fn seam_metrics_flag_a_known_discontinuity() {
 #[test]
 fn continuous_carriers_report_no_seam_jumps() {
     let limits = default_limits();
-    let moves = build_moves(&square_waypoints(), limits).unwrap();
+    let moves = plan_steps(&square_waypoints(), limits).unwrap();
     let (_, shaped, _) = run_pipeline_streaming(
         &moves,
         default_config(limits),
@@ -1235,7 +1288,7 @@ fn default_gcode_circle_loops_stay_concentric_across_corner_deviation() {
         )
         .unwrap();
         let limits = geometry::VelocityLimits::try_new(300.0, 3000.0, cd, f64::INFINITY).unwrap();
-        let moves = build_moves(&waypoints, limits).unwrap();
+        let moves = plan_steps(&waypoints, limits).unwrap();
         let (fitted, _, _) = run_pipeline_streaming(
             &moves,
             default_config(limits),

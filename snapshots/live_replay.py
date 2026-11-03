@@ -1,12 +1,15 @@
 """Replay G-code through the live host's own command handlers.
 
 klippy's ``GCodeDispatch``, ``GCodeMove``, ``Motion`` (its ``Move``, velocity
-and accel limit commands, dwell and drain) and kinematics ``check_move`` run
+and accel limit commands, dwell and drain), kinematics ``check_move`` and
+motor-off homing loss, ``SET_KINEMATIC_POSITION`` and ``M18``/``M84`` run
 unmodified; only the motion engine underneath is replaced, by one that records
-every ``submit_move`` / dwell / drain the host issues. The engine's runtime
-limit state is the native ``PlannerLimits`` — the same ``RuntimeLimits``
-setters and clamp the live ``MotionEngine`` delegates to — so each recorded
-move carries the effective limits the live planner would plan it under.
+every ``submit_move`` / dwell / drain / hold the host issues. Its clock is the
+queued dwell time with the MCU caught up to it, the host running ahead as it
+does mid-print. The engine's runtime limit state is the native
+``PlannerLimits`` — the same ``RuntimeLimits`` setters and clamp the live
+``MotionEngine`` delegates to — so each recorded move carries the effective
+limits the live planner would plan it under.
 
 This is the live side of the snapshot path's parity tests: the same G-code
 fed to ``_motion_engine.parse_gcode`` must yield the same moves.
@@ -89,11 +92,18 @@ class _Printer:
 
 
 class _Mcu:
+    """An MCU exactly caught up with the queued dwell time: the host is
+    never behind, so a hold until a print time is measured from the
+    frontier the dwells reached."""
+
+    def __init__(self, engine):
+        self._engine = engine
+
     def get_engine_handle(self):
         return 0
 
     def estimated_print_time(self, eventtime):
-        return math.inf
+        return self._engine.frontier
 
 
 class _Rail:
@@ -109,6 +119,7 @@ class RecordingEngine:
         self._limits = engine.PlannerLimits(config_text)
         self.steps: list[LiveMove | LiveRest] = []
         self._position = [0.0, 0.0, 0.0, 0.0]
+        self.frontier = 0.0
 
     def set_velocity_cap(self, velocity):
         self._limits.set_velocity_cap(velocity)
@@ -134,6 +145,12 @@ class RecordingEngine:
 
     def submit_dwell(self, duration_s):
         self.steps.append(LiveRest(duration_s))
+        self.frontier += duration_s
+
+    def dwell_until(self, print_time, mcu_handle):
+        hold_s = print_time - self.frontier
+        self.steps.append(LiveRest(hold_s))
+        self.frontier = print_time
 
     def motion_drain_poll(self):
         self.steps.append(LiveRest(0.0))
@@ -148,10 +165,10 @@ class RecordingEngine:
         return 1
 
     def fence_print_time_poll(self, fence_id, mcu_handle):
-        return 0.0
+        return self.frontier
 
     def frontier_print_time(self, mcu_handle):
-        return 0.0
+        return self.frontier
 
     def set_position(self, x, y, z):
         self._position[:3] = [x, y, z]
@@ -174,7 +191,7 @@ def _motion(printer, config, engine):
     motion.printer = printer
     motion.reactor = printer.get_reactor()
     motion.engine = engine
-    motion.mcu = _Mcu()
+    motion.mcu = _Mcu(engine)
     motion.all_mcus = [motion.mcu]
     motion._cached_engine_mcus = [motion.mcu]
     motion.motion_lead = 0.0
@@ -196,6 +213,9 @@ def _motion(printer, config, engine):
     kin.rails = [_Rail(), _Rail(), _Rail()]
     kin.limits = [rail.get_range() for rail in kin.rails]
     kin._parked_dirty = [False, False, False]
+    printer.register_event_handler(
+        "stepper_enable:motor_off", kin._handle_motor_off
+    )
     motion.kin = kin
     return motion
 
@@ -215,7 +235,7 @@ def replay(gcode_text: str, cfg_path: Path) -> list[LiveMove | LiveRest]:
     """Every move and rest the live host submits for ``gcode_text``, in order."""
     from klippy import configfile
     from klippy import gcode as gcode_mod
-    from klippy.extras import force_move, gcode_move
+    from klippy.extras import force_move, gcode_move, stepper_enable
 
     printer = _Printer(gcode_mod, configfile)
     config = _load_config(cfg_path, printer)
@@ -234,6 +254,13 @@ def replay(gcode_text: str, cfg_path: Path) -> list[LiveMove | LiveRest]:
         "SET_KINEMATIC_POSITION",
         kinematic_position.cmd_SET_KINEMATIC_POSITION,
     )
+    motors = stepper_enable.PrinterStepperEnable.__new__(
+        stepper_enable.PrinterStepperEnable
+    )
+    motors.printer = printer
+    motors.enable_lines = {}
+    gcode.register_command("M18", motors.cmd_M18)
+    gcode.register_command("M84", motors.cmd_M18)
     gcode._handle_ready()
     move_handler._handle_ready()
     gcode.run_script(gcode_text)
