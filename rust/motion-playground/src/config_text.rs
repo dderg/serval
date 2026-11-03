@@ -53,13 +53,7 @@ pub fn parse(text: &str) -> Result<(Vec<AxisDecl>, Vec<PostProcessorDecl>), Conf
         if let Some(rest) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
             let rest = rest.trim();
             if let Some(name) = rest.strip_prefix("axis ") {
-                sections.push(Section::Axis(AxisDecl {
-                    name: name.trim().to_string(),
-                    follows: Vec::new(),
-                    motors: Vec::new(),
-                    post_processors: Vec::new(),
-                    ratio_ramp_time: None,
-                }));
+                sections.push(Section::Axis(AxisDecl { name: name.trim().to_string(), follows: Vec::new(), motors: Vec::new(), post_processors: Vec::new(), ratio_ramp_time: None, max_velocity: None, max_accel: None, instantaneous_corner_velocity: None }));
             } else if let Some(name) = rest.strip_prefix("post_processor ") {
                 sections.push(Section::PostProcessor {
                     name: name.trim().to_string(),

@@ -134,6 +134,27 @@ fn the_two_shapes_share_a_slope_at_rest_and_a_bound_at_speed() {
 }
 
 #[test]
+fn the_advance_bounds_hold_its_slope_and_curvature_everywhere() {
+    for model in [AdvanceModel::Tanh, AdvanceModel::Reciprocal] {
+        let advance = NonlinearAdvance {
+            model,
+            linear_advance: 0.01,
+            nonlinear_offset: 0.05,
+            linearization_velocity: 2.0,
+        };
+        let (mut slope, mut curvature) = (0.0_f64, 0.0_f64);
+        for step in -20_000..=20_000 {
+            let v = f64::from(step) * 1e-3;
+            slope = slope.max(advance.slope(v).abs());
+            curvature = curvature.max(advance.curvature(v).abs());
+        }
+        assert!((advance.max_slope() - slope).abs() < 1e-12, "{model:?}");
+        assert!(curvature <= advance.max_curvature() * (1.0 + 1e-12));
+        assert!(curvature >= 0.99 * advance.max_curvature(), "{model:?}");
+    }
+}
+
+#[test]
 fn compile_empty_chain_is_identity() {
     let c = CompiledChain::compile(&[]).unwrap();
     assert!(c.is_empty());
