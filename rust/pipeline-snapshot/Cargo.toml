@@ -26,6 +26,7 @@ name = "fit_tolerance"
 required-features = ["fit-audit"]
 
 [dev-dependencies]
+source-tree = { path = "../source-tree" }
 config-doc = { path = "../config-doc" }
 planner-config = { path = "../planner-config", features = ["doc"] }
 libm = { version = "0.2", default-features = false }

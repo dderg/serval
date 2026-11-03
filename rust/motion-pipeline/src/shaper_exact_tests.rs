@@ -6,7 +6,10 @@ use super::{
     CentredSum, EXACT_CAPACITY, ExactPiece, ExactRounding, ExactSpan, FIRST_ORDER_SHIFT_LIMIT,
     RealSum, Tracked,
 };
-use crate::shaper::{AxisSignalTable, FitBoundary, Lookahead, ShapedSignalSource, TrackSignal};
+use crate::shaper::{
+    AxisSignalTable, FitBoundary, Lookahead, ShapedSignalSource, SignalBounds, TrackSignal,
+    piece_midpoint, taylor_shift,
+};
 
 /// A value carried as an unevaluated sum of two floats, about 106 bits.
 #[derive(Clone, Copy, Debug)]
@@ -167,7 +170,7 @@ fn reference(source: &ShapedSignalSource, t: f64, order: usize) -> f64 {
                 .iter()
                 .rposition(|&s| s <= start)
                 .expect("a region starts inside a piece");
-            Wide::of(table.starts[piece])
+            Wide::of(table.origins[piece])
         }
     };
     let mut total = Wide::of(if order == 0 {
@@ -281,7 +284,22 @@ impl Rng {
 /// value and slope at every seam, degrees up to nine, and a few seams an
 /// ulp apart.
 fn random_table(rng: &mut Rng, start: f64, end: f64, gains: Option<(f64, f64)>) -> AxisSignalTable {
-    let (mut starts, mut ends, mut coeffs) = (Vec::new(), Vec::new(), Vec::new());
+    let mut table = AxisSignalTable {
+        starts: Vec::new(),
+        ends: Vec::new(),
+        origins: Vec::new(),
+        coeffs: Vec::new(),
+        first_t: start,
+        last_t: end,
+        boundary: FitBoundary::StreamBoundary,
+        lookahead: Lookahead::Forced,
+        moment_tree: None,
+        input_jumps: Vec::new(),
+        entering_step: 0.0,
+        leaving_step: 0.0,
+        gain_impulses: Vec::new(),
+        boundaries: Vec::new(),
+    };
     let mut at = start;
     let mut value = rng.between(-50.0, 50.0);
     while at < end {
@@ -300,26 +318,11 @@ fn random_table(rng: &mut Rng, start: f64, end: f64, gains: Option<(f64, f64)>) 
         }
         let tau = piece_end - at;
         value = piece.iter().rev().fold(0.0, |acc, &c| acc * tau + c);
-        starts.push(at);
-        ends.push(piece_end);
-        coeffs.push(piece);
+        let mut centered = vec![0.0; piece.len()];
+        taylor_shift(&piece, piece_midpoint(at, piece_end) - at, &mut centered);
+        table.push_piece(at, piece_end, centered);
         at = piece_end;
     }
-    let table = AxisSignalTable {
-        starts,
-        ends,
-        coeffs,
-        first_t: start,
-        last_t: end,
-        boundary: FitBoundary::StreamBoundary,
-        lookahead: Lookahead::Forced,
-        moment_tree: None,
-        input_jumps: Vec::new(),
-        entering_step: 0.0,
-        leaving_step: 0.0,
-        gain_impulses: Vec::new(),
-        boundaries: Vec::new(),
-    };
     match gains {
         Some((k1, k2)) => table.with_derivative_gains(k1, k2),
         None => table,
@@ -557,6 +560,63 @@ fn exact_pieces_split_at_every_break() {
             }
         }
     }
+}
+
+/// The degree-13 piece the source fit laid over 124 ms of the dense print's
+/// Y axis under a bowden profile at `corner_deviation: 0.04`, as its track
+/// stores it about its start: its values stay within 3.5 mm while those
+/// monomial terms swing past 10⁵.
+const DENSE_PRINT_DEGREE_13_PIECE: [f64; 14] = [
+    -1.498277337561234,
+    -80.34290769901087,
+    133.29081300507906,
+    29093.238628373114,
+    -1376200.889930974,
+    86358173.49058539,
+    -3325204560.854538,
+    80140902425.37823,
+    -1273500722382.6865,
+    13562912171021.732,
+    -95908575980999.06,
+    432506081340011.9,
+    -1126976833794649.5,
+    1292327102349403.8,
+];
+const DENSE_PRINT_PIECE_S: (f64, f64) = (1.7465212887583386, 1.8710579523872128);
+const SHAPER_POSITION_TOLERANCE_MM: f64 = 0.005;
+
+#[test]
+fn a_high_degree_input_piece_keeps_its_exact_polynomials_rounding_far_inside_the_fit_tolerance() {
+    let (start, end) = DENSE_PRINT_PIECE_S;
+    let track = nurbs::bezier::bezier_pieces_to_nurbs(&[BezierPiece {
+        u_start: start,
+        u_end: end,
+        coeffs: DENSE_PRINT_DEGREE_13_PIECE.to_vec(),
+    }]);
+    let table = AxisSignalTable::from_tracks(
+        std::iter::once(&track),
+        SignalBounds {
+            first_t: start,
+            last_t: end,
+            boundary: FitBoundary::StreamBoundary,
+            lookahead: Lookahead::Forced,
+        },
+    );
+    let breaks = table.starts.clone();
+    let kernel = build_smooth_mzv_kernel(36.0);
+    let source = ShapedSignalSource::new(&kernel, table, breaks, start);
+    let pieces = source
+        .signal()
+        .exact_polynomial_on(start, end)
+        .expect("clamped");
+    let worst = pieces
+        .iter()
+        .map(|piece| piece.pva[0].rounding)
+        .fold(0.0, f64::max);
+    assert!(
+        worst <= 0.01 * SHAPER_POSITION_TOLERANCE_MM,
+        "an exact polynomial over the degree-13 piece bounds its rounding at {worst:e} mm"
+    );
 }
 
 /// Where a kernel window reaches history an interior window does not hold,

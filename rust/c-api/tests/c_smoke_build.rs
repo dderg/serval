@@ -1,7 +1,8 @@
 #[test]
 fn c_smoke_compiles_and_links() {
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
-    let crate_dir = env!("CARGO_MANIFEST_DIR");
+    let crate_dir = source_tree::manifest_dir();
+    let crate_dir = crate_dir.to_str().expect("manifest dir is UTF-8");
     let c_src = format!("{crate_dir}/tests/c_smoke/main.c");
     let header_dir = format!("{crate_dir}/include");
     let target_dir =

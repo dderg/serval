@@ -235,7 +235,7 @@ fn is_allowlisted(path: &Path) -> Option<&'static str> {
 
 #[test]
 fn all_warn_and_error_emit_sites_carry_an_event_field() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest_dir = source_tree::manifest_dir();
     let workspace_root = manifest_dir
         .join("..")
         .join("..")

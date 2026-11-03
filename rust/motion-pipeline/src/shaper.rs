@@ -97,6 +97,12 @@ pub(crate) trait TrackSignal {
         let _ = (t0, t1);
         p1 - p0
     }
+    /// The magnitude a sample reading `position` was rounded at: the
+    /// position itself, or for a view read through an offset the larger of
+    /// it and the position the offset was taken from.
+    fn position_rounding_scale(&self, position: f64) -> f64 {
+        position.abs()
+    }
     fn acceleration_monotonicity(&self, _start: f64, _end: f64) -> Option<AccelerationTrend> {
         None
     }
@@ -177,6 +183,9 @@ impl<S: TrackSignal> TrackSignal for &S {
     fn position_delta(&self, from: (f64, f64), to: (f64, f64)) -> f64 {
         S::position_delta(self, from, to)
     }
+    fn position_rounding_scale(&self, position: f64) -> f64 {
+        S::position_rounding_scale(self, position)
+    }
     fn acceleration_monotonicity(&self, start: f64, end: f64) -> Option<AccelerationTrend> {
         S::acceleration_monotonicity(self, start, end)
     }
@@ -248,6 +257,12 @@ impl<S: TrackSignal> TrackSignal for ShiftedTrackSignal<S> {
         self.inner.position_delta(from, to)
     }
 
+    fn position_rounding_scale(&self, position: f64) -> f64 {
+        position
+            .abs()
+            .max(self.inner.position_rounding_scale(position + self.base))
+    }
+
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let (position, velocity, acceleration) = self.inner.eval_pva(t);
         (position - self.base, velocity, acceleration)
@@ -294,6 +309,10 @@ impl<'a, S: TrackSignal> ConvolutionSignal<'a, S> {
 impl<S: TrackSignal> TrackSignal for ConvolutionSignal<'_, S> {
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         self.evaluated.eval_pva(t)
+    }
+
+    fn position_rounding_scale(&self, position: f64) -> f64 {
+        self.evaluated.position_rounding_scale(position)
     }
 
     fn diagnostic(&self, t: f64) -> Option<String> {
@@ -569,10 +588,10 @@ impl Shaper {
     /// tracks have their own lookahead covered. The time-based bound already
     /// includes the cascaded width, but segment granularity can leave a long
     /// straddling segment unprojectable, so gate on the frontier explicitly.
-    /// A ratio-ramped follower cascades too: its smoothing reads the
-    /// leaders' path [`AxisChainSet::ratio_ramp_lookahead`] past a
-    /// segment's end before the projection over it is final, and a kernel
-    /// after the ramp reads every projected segment its window reaches.
+    /// A ratio-ramped follower needs no gate here: how far its smoothing
+    /// reads ahead depends on how the leaders come to rest, so the
+    /// projection itself commits only what it holds final (see
+    /// `follower_projection::project_followers`).
     ///
     /// Every gate compares `t_end + support` against the covered end with no
     /// slack — the same association and strictness as the fit-time
@@ -591,33 +610,16 @@ impl Shaper {
             .take_while(|seg| seg.t_end + self.forward_support <= last_t)
             .count();
         let own_hi = self.chains.max_follower_own_forward_support();
-        let ramp_lookahead = self.chains.ratio_ramp_lookahead();
-        if own_hi <= 0.0 && ramp_lookahead <= 0.0 {
+        if own_hi <= 0.0 {
             return plain;
         }
         let Some(frontier_t) = self.shaping_frontier_t(last_t) else {
             return 0;
         };
-        if ramp_lookahead <= 0.0 {
-            let gated = self
-                .pending
-                .iter()
-                .take_while(|seg| seg.t_end + own_hi <= frontier_t)
-                .count();
-            return plain.min(gated);
-        }
-        let ends: Vec<f64> = self.pending.iter().map(|seg| seg.t_end).collect();
-        let mut covering = 0;
         let gated = self
             .pending
             .iter()
-            .take_while(|seg| {
-                let needed = seg.t_end + own_hi;
-                while covering < ends.len() && ends[covering] < needed {
-                    covering += 1;
-                }
-                covering < ends.len() && ends[covering] + ramp_lookahead <= frontier_t
-            })
+            .take_while(|seg| seg.t_end + own_hi <= frontier_t)
             .count();
         plain.min(gated)
     }
@@ -687,13 +689,17 @@ impl Shaper {
             },
         )
         .unwrap_or_else(|e| panic!("shaper: {e}"));
+        let committed = shaped.len();
         for seg in shaped {
             if !output(TrajectoryItem::Seg(seg)) {
                 return false;
             }
         }
-        for _ in 0..count {
-            let raw = self.pending.pop_front().expect("count <= pending");
+        if committed == 0 {
+            return true;
+        }
+        for _ in 0..committed {
+            let raw = self.pending.pop_front().expect("committed <= pending");
             self.history.push_back(raw);
         }
         let emitted_through = self
@@ -1548,8 +1554,8 @@ fn fit_axis_targets(
             let probe = scale_cache
                 .get(&t.to_bits())
                 .expect("leader scale probe is missing");
-            if probe.position.is_finite() {
-                position_scale = position_scale.max(probe.position.abs());
+            if probe.position_rounding_scale.is_finite() {
+                position_scale = position_scale.max(probe.position_rounding_scale);
             }
             if probe.velocity.is_finite() {
                 velocity_scale = velocity_scale.max(probe.velocity.abs());
@@ -1980,7 +1986,7 @@ struct MomentWindow {
 
 impl MomentWindow {
     fn new(
-        polynomial_start: f64,
+        expansion_point: f64,
         lo: f64,
         hi: f64,
         origin: f64,
@@ -2008,14 +2014,14 @@ impl MomentWindow {
             *span = hi_power - lo_power;
         }
         Some(Self {
-            shift: base - polynomial_start,
+            shift: base - expansion_point,
             edge_power_spans,
             max_power,
             translation: MomentTranslation::new(base, origin, moment_len),
         })
     }
 
-    /// `coefficients`, given about `polynomial_start`, re-expanded about the
+    /// `coefficients`, given about `expansion_point`, re-expanded about the
     /// window's midpoint into `centered`.
     fn center(&self, coefficients: &[f64], centered: &mut [f64]) {
         taylor_shift(coefficients, self.shift, centered);
@@ -2101,9 +2107,9 @@ impl MomentTree {
         let mut masses = vec![0.0; node_count * MOMENT_ORDERS];
         for i in 0..table.coeffs.len() {
             let node = leaf_count + i;
-            let origin = table.starts[i] + 0.5 * (table.ends[i] - table.starts[i]);
+            let origin = table.origins[i];
             origins[node] = origin;
-            reaches[node] = (origin - table.starts[i]).max(table.ends[i] - origin);
+            reaches[node] = table.half_width(i);
             for (order, mass) in masses[node * MOMENT_ORDERS..(node + 1) * MOMENT_ORDERS]
                 .iter_mut()
                 .enumerate()
@@ -2217,9 +2223,17 @@ impl MomentTree {
     }
 }
 
+fn piece_midpoint(start: f64, end: f64) -> f64 {
+    start + 0.5 * (end - start)
+}
+
 /// One axis of the emit window, flattened to time-sorted monomial pieces so
 /// the convolution's Gauss sampling evaluates by binary search plus Horner
-/// instead of a de Boor pass per sample. Semantics match the NURBS window it
+/// instead of a de Boor pass per sample. Each piece is expanded about its
+/// midpoint, where a high-degree piece's monomial terms stay at the scale of
+/// its values: about an edge they swing by orders of magnitude more and
+/// cancel, and every moment and exact polynomial summed from them carries
+/// that swing in its rounding. Semantics match the NURBS window it
 /// is built from: before `first_t` the signal clamps at a stream boundary
 /// and is otherwise missing (NaN, surfaced as `MissingHistory`); past
 /// `last_t` it clamps under a drain flush and is otherwise missing; a time
@@ -2227,6 +2241,7 @@ impl MomentTree {
 pub(crate) struct AxisSignalTable {
     starts: Vec<f64>,
     ends: Vec<f64>,
+    origins: Vec<f64>,
     coeffs: Vec<Vec<f64>>,
     first_t: f64,
     last_t: f64,
@@ -2274,6 +2289,7 @@ impl AxisSignalTable {
         let mut table = Self {
             starts: Vec::new(),
             ends: Vec::new(),
+            origins: Vec::new(),
             coeffs: Vec::new(),
             first_t: bounds.first_t,
             last_t: bounds.last_t,
@@ -2297,14 +2313,13 @@ impl AxisSignalTable {
                     if piece.u_start > previous_end {
                         let previous = table.coeffs.len() - 1;
                         let held = table.piece_at(previous, previous_end);
-                        table.starts.push(previous_end);
-                        table.ends.push(piece.u_start);
-                        table.coeffs.push(vec![held]);
+                        table.push_piece(previous_end, piece.u_start, vec![held]);
                     }
                 }
-                table.starts.push(piece.u_start);
-                table.ends.push(piece.u_end);
-                table.coeffs.push(piece.coeffs);
+                let origin = piece_midpoint(piece.u_start, piece.u_end);
+                let mut centered = vec![0.0; piece.coeffs.len()];
+                taylor_shift(&piece.coeffs, origin - piece.u_start, &mut centered);
+                table.push_piece(piece.u_start, piece.u_end, centered);
             }
         }
         assert!(!table.coeffs.is_empty(), "empty signal window");
@@ -2409,17 +2424,33 @@ impl AxisSignalTable {
         &self.input_jumps
     }
 
-    /// `Σₖ |cₖ| k!/(k−n)! hᵏ⁻ⁿ` for piece `piece`'s `order`-th derivative:
-    /// a bound, at any point of the piece, on the terms its re-expansion
-    /// about any point of the piece sums.
+    fn push_piece(&mut self, start: f64, end: f64, centered: Vec<f64>) {
+        self.starts.push(start);
+        self.ends.push(end);
+        self.origins.push(piece_midpoint(start, end));
+        self.coeffs.push(centered);
+    }
+
+    fn half_width(&self, piece: usize) -> f64 {
+        (self.origins[piece] - self.starts[piece]).max(self.ends[piece] - self.origins[piece])
+    }
+
+    /// Piece `piece`'s offset from its origin at `t`, clamped onto the piece.
+    fn offset_in(&self, piece: usize, t: f64) -> f64 {
+        t.clamp(self.starts[piece], self.ends[piece]) - self.origins[piece]
+    }
+
+    /// `Σₖ |cₖ| k!/(k−n)! (h/2)ᵏ⁻ⁿ` for piece `piece`'s `order`-th
+    /// derivative: a bound, at any point of the piece, on the terms its
+    /// re-expansion about any point of the piece sums.
     fn piece_magnitude(&self, piece: usize, order: usize) -> f64 {
-        let width = self.ends[piece] - self.starts[piece];
+        let half_width = self.half_width(piece);
         let mut magnitude = 0.0;
         let mut reach = 1.0;
         for power in order..self.coeffs[piece].len() {
             let falling = ((power - order + 1)..=power).fold(1.0, |acc, k| acc * k as f64);
             magnitude += self.coeffs[piece][power].abs() * falling * reach;
-            reach *= width;
+            reach *= half_width;
         }
         magnitude
     }
@@ -2430,7 +2461,7 @@ impl AxisSignalTable {
         if length == 0 {
             return 0.0;
         }
-        let tau = (at - self.starts[piece]).clamp(0.0, self.ends[piece] - self.starts[piece]);
+        let tau = self.offset_in(piece, at);
         derivative[..length]
             .iter()
             .rev()
@@ -2610,7 +2641,7 @@ impl AxisSignalTable {
     ) {
         let coefficients = &self.coeffs[piece];
         let Some(window) = MomentWindow::new(
-            self.starts[piece],
+            self.origins[piece],
             lo,
             hi,
             origin,
@@ -2632,7 +2663,7 @@ impl AxisSignalTable {
     }
 
     fn piece_at(&self, i: usize, t: f64) -> f64 {
-        let tau = (t - self.starts[i]).clamp(0.0, self.ends[i] - self.starts[i]);
+        let tau = self.offset_in(i, t);
         self.coeffs[i]
             .iter()
             .rev()
@@ -2760,7 +2791,7 @@ fn ladder_resolution_floor<S: TrackSignal>(
     for &t in seeds {
         let (position, velocity, _) = sig.eval_pva(t);
         if position.is_finite() {
-            position_scale = position_scale.max(position.abs());
+            position_scale = position_scale.max(sig.position_rounding_scale(position));
         }
         if velocity.is_finite() {
             velocity_scale = velocity_scale.max(velocity.abs());
@@ -3093,7 +3124,7 @@ fn velocity_step_across<S: TrackSignal>(sig: &S, t: f64) -> f64 {
 }
 
 struct ScaleProbe {
-    position: f64,
+    position_rounding_scale: f64,
     velocity: f64,
     velocity_step: f64,
 }
@@ -3101,7 +3132,7 @@ struct ScaleProbe {
 fn scale_probe<S: TrackSignal>(sig: &S, t: f64) -> ScaleProbe {
     let (position, velocity, _) = sig.eval_pva(t);
     ScaleProbe {
-        position,
+        position_rounding_scale: sig.position_rounding_scale(position),
         velocity,
         velocity_step: velocity_step_across(sig, t),
     }

@@ -286,9 +286,14 @@ post_processors: extruder_pa, extruder_smoothing
 #   ramp, while a nonlinear advance still reads the path alone. Either way
 #   ratio_ramp_time requires finite [extruder]
 #   max_extrude_only_velocity and max_extrude_only_accel. Where the leaders
-#   turn around (a wipe that reverses along the line) and across an
-#   extrude-only move or dwell, the advance releases its lead over the same
-#   reach before and rebuilds it after. Any extruder position step, or
+#   turn around (a wipe that reverses along the line) or come to rest across
+#   an extrude-only move or dwell, the advance drops its lead to zero exactly
+#   where their speed does: it keeps the lead through the input shaper's
+#   spill around the rest, then releases it before the rest and rebuilds it
+#   after over that spill plus the same reach, rising from the rest point,
+#   so the extruder never asks much more than the advance's own k*r*accel
+#   there; a rest the leaders pass through without stopping keeps the full
+#   advance. Any extruder position step, or
 #   velocity step beyond the leaders' fit rounding, is refused before it is
 #   emitted; leaders without an acceleration-continuous kernel produce such
 #   steps. The trade-off against a kernel is measured in "Evaluating an
