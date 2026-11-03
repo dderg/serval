@@ -76,3 +76,60 @@ def test_set_velocity_limit_accel_above_the_config_clamps_like_live(engine):
         "G1 X50 Y50 E1 F6000\n",
     )
     assert [accel for _, _, _, (_, accel, _) in steps] == [10_000.0, 2000.0]
+
+
+def test_set_velocity_limit_velocity_and_corner_fields_match_live(engine):
+    steps = assert_parity(
+        engine,
+        "M83\n"
+        "G1 X10 Y10 F6000\n"
+        "SET_VELOCITY_LIMIT VELOCITY=2000 SQUARE_CORNER_VELOCITY=12\n"
+        "G1 X50 Y10 E1 F6000\n"
+        "SET_VELOCITY_LIMIT VELOCITY=400 CORNER_DEVIATION=0.05"
+        " MINIMUM_CRUISE_RATIO=0.5 ACCEL_TO_DECEL=100\n"
+        "G1 X50 Y50 E1 F6000\n"
+        "SET_VELOCITY_LIMIT\n"
+        "G1 X10 Y50 E1 F6000\n",
+    )
+    assert [limits for *_, limits in steps] == [
+        (1000.0, 10_000.0, steps[0][3][2]),
+        (400.0, 10_000.0, 0.05),
+        (400.0, 10_000.0, 0.05),
+    ]
+    assert steps[0][3][2] != 0.21
+
+
+def test_reset_velocity_limit_matches_live(engine):
+    steps = assert_parity(
+        engine,
+        "G1 X10 Y10 F6000\n"
+        "SET_VELOCITY_LIMIT VELOCITY=300 ACCEL=800 CORNER_DEVIATION=0.01\n"
+        "G1 X50 Y10 F6000\n"
+        "RESET_VELOCITY_LIMIT\n"
+        "G1 X50 Y50 F6000\n",
+    )
+    assert [limits for *_, limits in steps] == [
+        (300.0, 800.0, 0.01),
+        (1000.0, 10_000.0, 0.21),
+    ]
+
+
+def test_m204_matches_live(engine):
+    steps = assert_parity(
+        engine,
+        "G1 X10 Y10 F6000\n"
+        "M204 S700\n"
+        "G1 X50 Y10 F6000\n"
+        "M204 P900 T800\n"
+        "G1 X50 Y50 F6000\n"
+        "M204 P100\n"
+        "G1 X10 Y50 F6000\n"
+        "M204 S50000\n"
+        "G1 X10 Y10 F6000\n",
+    )
+    assert [accel for *_, (_, accel, _) in steps] == [
+        700.0,
+        800.0,
+        800.0,
+        10_000.0,
+    ]
