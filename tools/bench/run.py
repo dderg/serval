@@ -198,7 +198,10 @@ def execute(
     except BaseException as exc:
         failure = failure or exc
     if failure is not None:
-        cancel_active_print()
+        try:
+            cancel_active_print()
+        except Exception as exc:
+            failure.add_note(f"cancelling the print also failed: {exc!r}")
     ended = time.time()
 
     scp_from_pi(f"{PI_LOGS}/klippy.log", run_dir / "klippy.log")
