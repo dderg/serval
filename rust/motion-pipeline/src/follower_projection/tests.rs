@@ -522,6 +522,27 @@ fn a_fit_residual_is_welded_onto_the_emitted_state() {
     assert!((pieces[0].coeffs[1] - emitted.1).abs() <= 1e-12);
 }
 
+/// Corpus `voron_first_layers` on the fast bench config: a 33 ns segment
+/// whose fitted start sits one ulp of its 274 mm position off the emitted
+/// state. Closing that ulp over 33 ns reads as 307 mm/s² of acceleration —
+/// rounding, not a mismatch the weld should refuse.
+#[test]
+fn a_rounding_residual_welds_over_a_sliver_segment() {
+    let (start, end) = (106.952_914_632_029_94, 106.952_914_665_370_61);
+    let pieces = vec![ramp_piece(start, end, -0.189_501_874_886_035_84)];
+    let emitted = (274.421_090_221_286_93, -0.189_501_874_877_325_78);
+    let weld = super::SeamWeld::spanning(
+        weld_window(start, end),
+        emitted,
+        0.0,
+        274.421_090_221_287,
+        &pieces,
+    )
+    .expect("a one-ulp residual welds over any window");
+    let pieces = weld.apply(pieces);
+    assert_eq!(274.421_090_221_287 + pieces[0].coeffs[0], emitted.0);
+}
+
 fn leader_segment(
     x: nurbs::ScalarNurbs,
     y: nurbs::ScalarNurbs,
@@ -1710,6 +1731,15 @@ fn a_source_fitted_to_the_advanced_signal_spends_its_position_budget() {
             ("pa", &algos::TanhPressureAdvance, TANH.to_vec()),
             ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
         ]),
+        e_chain(&[
+            ("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE]),
+            ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
+        ]),
+        e_chain(&[
+            ("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE]),
+            ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
+        ])
+        .with_ratio_ramp_time(0.015),
     ] {
         assert_eq!(source_budget(&chain), AccelBudget::PositionEquivalent);
     }
@@ -1722,18 +1752,9 @@ fn a_source_fitted_to_the_plain_projection_keeps_the_absolute_budget() {
         CompiledChain::default().with_ratio_ramp_time(0.015),
         e_chain(&[("st", &algos::SmoothTriangle, vec![SMOOTH_TIME])]),
         e_chain(&[
-            ("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE]),
-            ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
-        ]),
-        e_chain(&[
             ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
             ("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE]),
         ]),
-        e_chain(&[
-            ("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE]),
-            ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
-        ])
-        .with_ratio_ramp_time(0.015),
         e_chain(&[
             ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
             ("pa", &algos::TanhPressureAdvance, TANH.to_vec()),

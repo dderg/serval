@@ -336,18 +336,18 @@ sees one degree per segment. Every rung is endpoint-anchored, so seams are
 C⁰ by construction; the quadratics solve an endpoint velocity from the
 travel, so a seam they win can step in velocity.
 
-A pressure advance applied before projection (`p + k·ṗ` without a follower
-kernel, or any nonlinear advance) turns such a velocity step into a position
-step the extruder would have to take in zero time. The tracks that advance
-differentiates — the leaders a projected follower rides, and the follower's
-own raw fit when its leaders are unshaped — are therefore fitted with
-`velocity_continuous`: the quadratics are withheld and every seam carries
-the signal's own velocity.
+A pressure advance applied before projection (`p + k·ṗ` before or without
+a follower kernel, or any nonlinear advance) turns such a velocity step
+into a position step the extruder would have to take in zero time. The
+tracks that advance differentiates — the leaders a projected follower
+rides, and the follower's own raw fit when its leaders are unshaped — are
+therefore fitted with `velocity_continuous`: the quadratics are withheld
+and every seam carries the signal's own velocity.
 
 A follower's fits are held to `max_path_deviation` times its largest demand
 ratio (`follower_tol_scale`; the projected source fit takes half of it).
-Where an advance applies before projection — a kernel-free linear advance,
-with or without `ratio_ramp_time`, or a nonlinear advance before a kernel —
+Where an advance applies before projection — any advance placed before a
+follower kernel or with none, with or without `ratio_ramp_time` —
 the source fit fits the advanced signal itself, and each of its pieces of
 duration `h` is held to the acceleration budget
 `max(max_accel_deviation, 8ε/h²)` (`AccelBudget::PositionEquivalent`), `ε`
@@ -361,14 +361,23 @@ turns a command error within `ε` into a nozzle-flow error of at most
 bound it at 0.5 % of a 50 mm/s line and 0.08 % of a 300 mm/s one. An
 absolute 50 mm/s² on that signal, which carries `k·r·jerk` of the shaped
 path (~65 000 mm/s² on a 70 000 mm/s² Trident with `k = 0.02`), demanded
-pieces no deposition resolves. Every other follower fit keeps the absolute
-budget: the plain projection a kernel chain's linear advance differentiates
-would turn velocity error `δ'` into `k·δ'` of command position, which the
-position-equivalent budget does not bound, and spending the position budget
-on a kernel's output moved the corner bead by up to 0.15 points at 50 mm/s.
-Leaders, and the follower's weld, edge-break and floor checks, keep the
-absolute budget; the fit audit holds every piece to the budget its fit
-resolved for it.
+pieces no deposition resolves. A linear advance commutes with the kernel,
+but applied after the source fit it would turn the fit's velocity error
+`δ'` into `k·δ'` of command position, and the melt lag that advance models
+undoes it: `δ'` reaches the nozzle flow whole, a bead error of `δ'/(r·v)`
+that grows as a corner slows. Under the absolute budget that left a 3–4
+point corner-error floor on every kernel chain at
+`square_corner_velocity: 5` (`smooth_time: 0.002` on a 3 000 mm/s² bowden
+with `k = 0.5` and a 5 000 mm/s² direct drive with `k = 0.05`: 4.2 % and
+5.1 % against the kernel's own 0.9 % and 1.6 %); fitted as an advanced
+source, kernel chains match an exact offline convolution of the same shaped
+path within 0.26 points. Only derivative gains placed after a kernel are
+still applied to the plain projection's fit, the kernel's input, where an
+acceleration gain must be. Every other follower fit keeps the absolute
+budget; spending the position budget on a kernel's output moved the corner
+bead by up to 0.15 points at 50 mm/s. Leaders, and the follower's weld,
+edge-break and floor checks, keep the absolute budget; the fit audit holds
+every piece to the budget its fit resolved for it.
 
 The advanced signal has no exact polynomials to prove a rung against, so a
 rung that passes the probes is held between them by estimates. Under the
@@ -380,7 +389,11 @@ the truth's quintic Hermite interpolant, the exact midpoint measures how far
 the truth leaves that interpolant, and a stretch whose estimate and miss
 together reach the budget is split there. The error's interpolant left 72
 pieces of the Trident ramp chain's dense print up to 1.83× over; the
-truth's leaves none.
+truth's leaves none. Position between two samples is estimated by the
+error's cubic Hermite interpolant, which misses the error by its fourth
+derivative; an estimate past 90 % of the budget is read exactly. Trusted
+to the budget itself, it let a cubic on the 3 000 mm/s² bowden's dense
+print 0.14 % past it.
 
 Leader refits use ordered parallel work without changing the fitted signal.
 Axes run concurrently. Ordinary windows distribute whole target segments;
