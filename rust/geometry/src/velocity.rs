@@ -13,10 +13,12 @@ use crate::segment::SourceRange;
 
 mod disk;
 mod extruder_caps;
+mod extrusion_reach;
 pub mod law;
 mod reconstruct;
 mod z_caps;
 
+pub use extrusion_reach::{ExtrusionReach, ratios_in_reach};
 pub use law::{LawSegment, ScalarLaw};
 
 use disk::Kinematics;
@@ -202,7 +204,7 @@ pub(crate) fn plan_velocity_warm_start(
 /// Plan over an already-fitted move sequence with explicit per-seam stop
 /// anchors: `stop_before[k]` forces rest at the seam entering `moves[k]`.
 /// `stop_before[0]` is ignored — the entry seam is anchored at
-/// `params.entry_v`.
+/// `params.entry_v`. Nothing comes before or after `moves`.
 pub fn plan_velocity_stops(
     moves: &[crate::Move],
     stop_before: &[bool],
@@ -217,14 +219,28 @@ pub fn plan_velocity_stops_reconstruct_prefix(
     params: VelocityPlanParams,
     reconstruct_count: usize,
 ) -> Result<VelocityProfile, VelocityError> {
-    plan_velocity_stops_select_prefix(moves, stop_before, params, &Serial, |_| reconstruct_count)
+    plan_velocity_stops_select_prefix(
+        moves,
+        stop_before,
+        &extrusion_reach::ratios_in_reach(
+            moves,
+            params.max_extrude_only_velocity_mm_s,
+            params.max_extrude_only_accel_mm_s2,
+        ),
+        params,
+        &Serial,
+        |_| reconstruct_count,
+    )
 }
 
 /// Plans the whole window and reconstructs the prefix `select_prefix` picks
 /// from the finality barrier, building member profiles on `workers`.
+/// `ratios_in_reach[k]` is the largest extrusion ratio `moves[k]`'s
+/// extruder demand can meet, see [`extrusion_reach::ExtrusionReach`].
 pub fn plan_velocity_stops_select_prefix<F, W>(
     moves: &[crate::Move],
     stop_before: &[bool],
+    ratios_in_reach: &[f64],
     params: VelocityPlanParams,
     workers: &W,
     select_prefix: F,
@@ -239,6 +255,7 @@ where
 
     let n = moves.len();
     assert_eq!(stop_before.len(), n, "one stop flag per move");
+    assert_eq!(ratios_in_reach.len(), n, "one ratio in reach per move");
     if let Some(m) = moves.iter().find(|m| m.limits.max_jerk_mm_s3.is_finite()) {
         return Err(VelocityError::FiniteJerkUnsupported {
             line_no: m.source.start_line,
@@ -256,7 +273,7 @@ where
     }
 
     let mut report = VelocityReport::default();
-    let caps = build_move_caps(moves, params, &mut report)?;
+    let caps = build_move_caps(moves, ratios_in_reach, params, &mut report)?;
     check_entry_ceiling(moves, &caps, entry_v, tol)?;
     let mut plan = seed_seam_velocities(&caps, stop_before, entry_v, &mut report);
     forward_pass(moves, &caps, &mut plan, tol)?;
@@ -321,11 +338,12 @@ fn validate_config(params: VelocityPlanParams) -> Result<(), VelocityError> {
 
 fn build_move_caps(
     moves: &[crate::Move],
+    ratios_in_reach: &[f64],
     params: VelocityPlanParams,
     report: &mut VelocityReport,
 ) -> Result<Vec<MoveCaps>, VelocityError> {
     let mut caps = Vec::with_capacity(moves.len());
-    for (index, m) in moves.iter().enumerate() {
+    for (m, &ratio_in_reach) in moves.iter().zip(ratios_in_reach) {
         let line_no = m.source.start_line;
         let path_ceiling = m.feedrate_mm_s.min(m.limits.max_velocity_mm_s);
         let (length, kappa0, sigma, kappa_peak, flat_ceiling, accel) = match &m.segment.spatial {
@@ -340,7 +358,7 @@ fn build_move_caps(
                     Some(extruder) => extruder_caps::extruder_capped(
                         seg,
                         extruder,
-                        extruding_ratios(moves, index, extruder.axis_index),
+                        ratio_in_reach,
                         kappa_peak,
                         z_capped,
                     ),
@@ -386,32 +404,6 @@ fn build_move_caps(
         });
     }
     Ok(caps)
-}
-
-/// The largest extrusion ratio the segment lays on `axis`; retractions
-/// (negative ratios) and travel extrude nothing.
-fn extruding_ratio(segment: &crate::path::PathSegment, axis: usize) -> f64 {
-    segment
-        .followers
-        .iter()
-        .filter(|follower| follower.axis_index == axis)
-        .map(|follower| follower.ratio.max(follower.ratio_end))
-        .fold(0.0, f64::max)
-}
-
-fn extruding_ratios(
-    moves: &[crate::Move],
-    index: usize,
-    axis: usize,
-) -> extruder_caps::ExtrudingRatios {
-    let own = extruding_ratio(&moves[index].segment, axis);
-    let neighbours = moves[index.saturating_sub(1)..moves.len().min(index + 2)].iter();
-    extruder_caps::ExtrudingRatios {
-        own,
-        at_joins: neighbours
-            .map(|m| extruding_ratio(&m.segment, axis))
-            .fold(own, f64::max),
-    }
 }
 
 fn check_entry_ceiling(

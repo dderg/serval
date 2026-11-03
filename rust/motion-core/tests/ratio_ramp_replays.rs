@@ -18,13 +18,16 @@ fn planner_config(name: &str) -> planner_config::PlannerConfig {
     planner_config::from_doc::planner_config_from_settings(&settings).expect("planner config")
 }
 
-fn dense_print_head(prologue: &str, lines: usize) -> String {
-    let print =
-        std::fs::read_to_string(repo().join("tools/sim/gcode/voron_dense_top_layers.gcode"))
-            .expect("read the dense print");
+fn print_head(print: &str, prologue: &str, lines: usize) -> String {
+    let print = std::fs::read_to_string(repo().join("tools/sim/gcode").join(print))
+        .unwrap_or_else(|e| panic!("read {print}: {e}"));
     std::iter::once(prologue)
         .chain(print.lines().take(lines).flat_map(|line| [line, "\n"]))
         .collect()
+}
+
+fn dense_print_head(prologue: &str, lines: usize) -> String {
+    print_head("voron_dense_top_layers.gcode", prologue, lines)
 }
 
 fn replays_to_the_end(config: &str, gcode: &str) {
@@ -87,4 +90,20 @@ fn zigzag_into_a_stop(speed_mm_s: f64) -> String {
 #[test]
 fn a_ratio_ramp_waits_for_how_far_a_stop_ahead_may_release_the_advance() {
     replays_to_the_end("p4_trident_ramp_slow.cfg", &zigzag_into_a_stop(100.0));
+}
+
+#[test]
+fn a_kernel_after_a_ratio_ramp_plans_the_first_layers_of_a_print() {
+    replays_to_the_end(
+        "bench_ramp_hybrid.cfg",
+        &print_head("voron_first_layers.gcode", "", 1820),
+    );
+}
+
+#[test]
+fn a_ratio_ramp_plans_the_first_layers_of_a_print() {
+    replays_to_the_end(
+        "bench_ramp.cfg",
+        &print_head("voron_first_layers.gcode", "", 2486),
+    );
 }

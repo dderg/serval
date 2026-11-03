@@ -710,3 +710,17 @@ def test_a_command_live_cannot_plan_offline_fails_the_analysis(tmp_path):
     )
     with pytest.raises(analyze.AnalysisError, match="line 3: G2"):
         analyze.plan_waypoints(analyze.load_job(tmp_path))
+
+
+def test_same_key_matching_stays_exact_over_millions_of_levels_and_long_runs():
+    ref_key = np.array([0, 5_000_000, 5_000_000], np.int64)
+    ref_t = np.array([0.0, 90.0, 90.000_000_05], np.float64)
+    query_key = np.array([5_000_000, 0], np.int64)
+    query_t = np.array([90.000_000_04, 0.000_000_02], np.float64)
+    nearest, delta = analyze.nearest_same_key(
+        query_key, query_t, ref_key, ref_t
+    )
+    assert nearest.tolist() == [2, 0]
+    assert delta == pytest.approx([-1e-8, 2e-8], abs=1e-9)
+    counts = analyze.same_key_count(query_key, query_t, ref_key, ref_t)
+    assert counts.tolist() == [2, 1]

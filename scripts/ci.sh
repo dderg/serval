@@ -112,16 +112,25 @@ job_rust_test() {
 job_rust_fuzz() {
     cd "$RUST"
     local cases="${PROPTEST_CASES:-20000}"
-    local pipeline='binary(seam_schedule_fuzz) | binary(planner_fuzz) | binary(planner_conservation_fuzz)'
+    local pipeline='binary(seam_schedule_fuzz) | binary(planner_fuzz) | binary(planner_conservation_fuzz) | test(/projection_fuzz::/)'
     local profile="${FUZZ_NEXTEST_PROFILE:-ci}"
     local partition=()
     [ -z "${FUZZ_PARTITION:-}" ] || partition=(--partition "hash:$FUZZ_PARTITION")
+    local log rc=0
+    log="$(mktemp)"
     PROPTEST_CASES="$cases" host_cargo nextest run --workspace --profile "$profile" \
         ${partition[@]+"${partition[@]}"} \
-        -E "(binary(/fuzz|proptest|^property_/) | test(/ripple_fuzz::/)) - ($pipeline)" || return 1
-    PROPTEST_CASES="$((cases / 64))" host_cargo nextest run --workspace --profile "$profile" \
-        ${partition[@]+"${partition[@]}"} \
-        -E "$pipeline"
+        -E "(binary(/fuzz|proptest|^property_/) | test(/ripple_fuzz::/)) - ($pipeline)" \
+        >"$log" 2>&1 || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        PROPTEST_CASES="$((cases / 64))" host_cargo nextest run --workspace --profile "$profile" \
+            ${partition[@]+"${partition[@]}"} \
+            -E "$pipeline" >>"$log" 2>&1 || rc=$?
+    fi
+    cat "$log"
+    [ "$rc" -eq 0 ] || python3 "$ROOT/scripts/fuzz_triage.py" parse <"$log"
+    rm -f "$log"
+    return "$rc"
 }
 
 # The fit audit checks every accepted fit piece densely and slows the
