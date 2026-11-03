@@ -451,17 +451,26 @@ def split_gcode(text: str) -> tuple[tuple[float, float, float], list[str]]:
     return start, ["\n".join(b) for b in blocks if b]
 
 
-def _live_move_limits(job: Job, waypoints: list[tuple]) -> list[tuple]:
+def _live_move_limits(job: Job, waypoints: list[dict]) -> list[dict]:
     limited = [waypoints[0]]
     for prev, cur in zip(waypoints, waypoints[1:]):
-        dx, dy, dz = (cur[i] - prev[i] for i in range(3))
+        dx, dy, dz = (
+            cur["position"][i] - prev["position"][i] for i in range(3)
+        )
         distance = math.sqrt(dx * dx + dy * dy + dz * dz)
-        velocity, accel = cur[4], cur[5]
+        velocity = cur["feedrate"]
+        accel = cur["runtime"]["accel"] or job.config.max_accel
         if distance > 1e-9 and abs(dz) > 1e-9:
             z_unit = abs(dz) / distance
             velocity = min(velocity, job.max_z_velocity / z_unit)
             accel = min(accel, job.max_z_accel / z_unit)
-        limited.append((*cur[:4], velocity, accel))
+        limited.append(
+            {
+                **cur,
+                "feedrate": velocity,
+                "runtime": {**cur["runtime"], "accel": accel},
+            }
+        )
     return limited
 
 
@@ -479,23 +488,23 @@ def plan_waypoints(
     blocks = []
     consumed = 1
     text = prefix
-    waypoints: list[tuple] = []
+    waypoints: list[dict] = []
     for block_text in block_texts:
         text += block_text + "\n"
-        waypoints = engine.parse_gcode(text, cfg.max_velocity, cfg.max_accel)
+        waypoints = engine.parse_gcode(text, cfg.config_text)
         if len(waypoints) > consumed:
             blocks.append(waypoints[consumed - 1 :])
         consumed = len(waypoints)
-    if not waypoints or tuple(waypoints[0][:4]) != (sx, sy, sz, 0.0):
+    if not waypoints or tuple(waypoints[0]["position"]) != (sx, sy, sz, 0.0):
         raise AnalysisError(
-            f"parsed start {waypoints[0][:4] if waypoints else None} differs "
-            f"from SET_KINEMATIC_POSITION {start} with E=0"
+            f"parsed start {waypoints[0]['position'] if waypoints else None} "
+            f"differs from SET_KINEMATIC_POSITION {start} with E=0"
         )
     if not blocks:
         raise AnalysisError("print.gcode contains no motion")
     return (
         start,
-        tuple(waypoints[-1][:4]),
+        tuple(waypoints[-1]["position"]),
         [_live_move_limits(job, b) for b in blocks],
     )
 

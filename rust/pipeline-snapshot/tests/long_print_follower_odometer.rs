@@ -46,8 +46,16 @@ fn dense_top_layer_lines(count: usize) -> String {
 }
 
 fn plan_from(stream_start_s: f64) -> Vec<ContinuousSegment> {
-    let waypoints =
-        parse_gcode(&dense_top_layer_lines(300), MAX_VELOCITY, MAX_ACCEL).expect("parse");
+    let waypoints = parse_gcode(
+        &dense_top_layer_lines(300),
+        &pipeline_snapshot::CartesianLimits::without_z_caps(
+            MAX_VELOCITY,
+            MAX_ACCEL,
+            f64::INFINITY,
+            0.0,
+        ),
+    )
+    .expect("parse");
     let limits = geometry::VelocityLimits::try_new(MAX_VELOCITY, MAX_ACCEL, 0.21, f64::INFINITY)
         .expect("limits");
     let moves = build_moves(&waypoints, limits).expect("moves");
@@ -78,7 +86,7 @@ fn plan_from(stream_start_s: f64) -> Vec<ContinuousSegment> {
     .expect("post-processors")
     .compile(&registry)
     .expect("chains");
-    let (x, y, z, ..) = waypoints[0];
+    let [x, y, z, _] = waypoints[0].position;
     let mut pipeline = Pipeline::new(config, chains, vec![x, y, z, 0.0], stream_start_s);
     let mut segments = Vec::new();
     let mut collect = |item| {
