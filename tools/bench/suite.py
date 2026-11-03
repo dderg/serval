@@ -26,6 +26,7 @@ REPO = BENCH.parents[1]
 SUITES_DIR = Path("~/bench/suites").expanduser()
 PRINTER_CFG = BENCH / "printer.cfg"
 FAST_CFG = BENCH / "configs" / "fast.cfg"
+CAPACITY_PA_CFG = BENCH / "configs" / "capacity_pa.cfg"
 SIM_GCODE = REPO / "tools" / "sim" / "gcode"
 RUN_TIMEOUT_S = 2400.0
 ANALYZE_TIMEOUT_S = 1200.0
@@ -47,6 +48,7 @@ MATRIX = [
     Row("speed_ladder_fast", BENCH / "gcode" / "speed_ladder.gcode", FAST_CFG),
     Row("extrude_ladder", BENCH / "gcode" / "extrude_ladder.gcode"),
     Row("epochs", BENCH / "gcode" / "epochs.gcode", quick=True),
+    Row("rest_ladder", BENCH / "gcode" / "rest_ladder.gcode", CAPACITY_PA_CFG),
     Row("dense_top", SIM_GCODE / "voron_dense_top_layers.gcode"),
     Row(
         "dense_top_fast_throttled",
