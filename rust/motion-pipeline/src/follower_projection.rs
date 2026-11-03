@@ -2420,14 +2420,24 @@ impl RestResolution {
         velocity.abs() <= self.velocity && acceleration.abs() <= self.acceleration
     }
 
-    /// The sign a component moves with, `None` where its velocity is
-    /// exactly zero or it rests.
+    /// The sign a component moves with, `None` at rest. A velocity exactly
+    /// zero off rest is a reversal landing on a float, which moves the way
+    /// it accelerates.
     fn direction(self, velocity: f64, acceleration: f64) -> Option<f64> {
-        let settled = velocity == 0.0 || self.holds(velocity, acceleration);
-        (!settled).then(|| velocity.signum())
+        if self.holds(velocity, acceleration) {
+            return None;
+        }
+        Some(if velocity == 0.0 {
+            acceleration.signum()
+        } else {
+            velocity.signum()
+        })
     }
 }
 
+/// Seeds every reversal between probes moving opposite ways, and every
+/// time a component starts or stops resting. The times a resting component
+/// is probed at are arbitrary, so rest itself seeds nothing.
 fn isolate_velocity_zeros(
     direction_at: &impl Fn(f64) -> Option<f64>,
     lo: f64,
@@ -2440,9 +2450,6 @@ fn isolate_velocity_zeros(
     let span = hi - lo;
     let mut previous_time = lo;
     let mut previous_direction = direction_at(lo);
-    if previous_direction.is_none() {
-        zeros.push(lo);
-    }
     for probe in 1..=COMPONENT_ZERO_PROBES {
         let time = if probe == COMPONENT_ZERO_PROBES {
             hi
@@ -2451,7 +2458,13 @@ fn isolate_velocity_zeros(
         };
         let direction = direction_at(time);
         match (previous_direction, direction) {
-            (_, None) => zeros.push(time),
+            (None, None) => {}
+            (Some(_), None) => {
+                zeros.push(refine_rest_boundary(direction_at, time, previous_time));
+            }
+            (None, Some(_)) => {
+                zeros.push(refine_rest_boundary(direction_at, previous_time, time));
+            }
             (Some(previous), Some(current)) if previous != current => {
                 zeros.push(refine_velocity_zero(
                     direction_at,
@@ -2460,7 +2473,7 @@ fn isolate_velocity_zeros(
                     previous,
                 ));
             }
-            _ => {}
+            (Some(_), Some(_)) => {}
         }
         previous_time = time;
         previous_direction = direction;
@@ -2482,6 +2495,26 @@ fn refine_velocity_zero(
             None => return mid,
             Some(direction) if direction == lo_direction => lo = mid,
             Some(_) => hi = mid,
+        }
+    }
+}
+
+/// The first time off rest next to it, between a resting time and a moving
+/// one in either order: where a component starts or stops moving, which
+/// is no crossing but changes the path speed's law all the same.
+fn refine_rest_boundary(
+    direction_at: &impl Fn(f64) -> Option<f64>,
+    mut resting: f64,
+    mut moving: f64,
+) -> f64 {
+    loop {
+        let mid = 0.5 * resting + 0.5 * moving;
+        if mid == resting || mid == moving {
+            return moving;
+        }
+        match direction_at(mid) {
+            None => resting = mid,
+            Some(_) => moving = mid,
         }
     }
 }
