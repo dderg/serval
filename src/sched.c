@@ -248,6 +248,10 @@ static volatile uint32_t sched_dispatch_history_addr[SCHED_DISPATCH_HISTORY_N];
 static volatile uint32_t sched_dispatch_history_func[SCHED_DISPATCH_HISTORY_N];
 static volatile uint32_t sched_dispatch_history_idx;
 
+#define DISPATCH_HISTORY_MASK (SCHED_DISPATCH_HISTORY_N - 1)
+_Static_assert((SCHED_DISPATCH_HISTORY_N & DISPATCH_HISTORY_MASK) == 0,
+               "dispatch history slot is a mask of the running index");
+
 void
 sched_get_dispatch_history(uint32_t *idx,
                            uint32_t addrs[SCHED_DISPATCH_HISTORY_N],
@@ -269,10 +273,32 @@ sched_last_dispatched_func(void)
     uint32_t idx = sched_dispatch_history_idx;
     if (idx == 0)
         return 0;
-    return sched_dispatch_history_func[(idx - 1) % SCHED_DISPATCH_HISTORY_N];
+    return sched_dispatch_history_func[(idx - 1) & DISPATCH_HISTORY_MASK];
 }
 
 extern void diag_note_timer_duration(uint32_t dur_cyc, uint32_t func);
+
+static __always_inline unsigned int
+reschedule_head(struct timer *t, uint_fast8_t res, struct timer *next,
+                uint32_t next_waketime)
+{
+    if (unlikely(res == SF_DONE)) {
+        SchedState.timer_list = next;
+        if (SchedState.last_insert == t)
+            SchedState.last_insert = next;
+        return next_waketime;
+    }
+    uint32_t updated_waketime = t->waketime;
+    if (timer_is_before(updated_waketime, next_waketime))
+        return updated_waketime;
+    SchedState.timer_list = next;
+    struct timer *pos = SchedState.last_insert;
+    if (timer_is_before(updated_waketime, pos->waketime))
+        pos = next;
+    insert_timer(pos, t, updated_waketime);
+    SchedState.last_insert = t;
+    return next_waketime;
+}
 
 #if CONFIG_INLINE_STEPPER_HACK
 #if CONFIG_MCU_SIM
@@ -281,27 +307,21 @@ extern void diag_note_timer_duration(uint32_t dur_cyc, uint32_t func);
 #define STEP_COINCIDENCE_TICKS (CONFIG_CLOCK_FREQ / 1000000)
 #endif
 
-static inline uint_fast8_t
+static __always_inline uint_fast8_t
 timer_is_step(struct timer *t)
 {
     return !t->func || t->func == stepper_event_full;
 }
 
-static inline uint_fast8_t
-step_joins_batch(struct timer *t, uint32_t horizon)
+static __always_inline uint_fast8_t
+step_joins_batch(struct timer *t, uint32_t waketime, uint32_t horizon)
 {
-    return timer_is_step(t) && !timer_is_before(horizon, t->waketime);
+    return !timer_is_before(horizon, waketime) && timer_is_step(t);
 }
 
-static struct timer *
-fire_coincident_step_edges(struct timer *leader)
+static __always_inline struct timer *
+fire_follower_step_edges(struct timer *t, uint32_t scheduled, uint32_t horizon)
 {
-    uint32_t scheduled = leader->waketime;
-    uint32_t horizon = scheduled + STEP_COINCIDENCE_TICKS;
-    stepper_step_edge(leader);
-    struct timer *t = leader->next;
-    if (likely(!step_joins_batch(t, horizon)))
-        return leader;
     int32_t leader_lag = timer_read_time() - scheduled;
     if (leader_lag < 0)
         shutdown("Step timer dispatched before its waketime");
@@ -310,10 +330,10 @@ fire_coincident_step_edges(struct timer *leader)
         uint32_t due = t->waketime + leader_lag;
         while (timer_is_before(timer_read_time(), due))
             ;
-        stepper_step_edge(t);
+        stepper_step_edge(t, stepper_timer_on_edge_path(t));
         last = t;
         t = t->next;
-    } while (step_joins_batch(t, horizon));
+    } while (step_joins_batch(t, t->waketime, horizon));
     return last;
 }
 
@@ -334,28 +354,50 @@ reinsert_detached_timer(struct timer *t)
     SchedState.last_insert = t;
 }
 
-static void
-finish_coincident_steps(struct timer *first, struct timer *last)
+static noinline void
+dispatch_coincident_steps(struct timer *leader, uint32_t scheduled,
+                          uint32_t horizon)
 {
+    struct timer *last = fire_follower_step_edges(leader->next, scheduled,
+                                                  horizon);
     struct timer *rest = last->next;
     SchedState.timer_list = rest;
-    for (struct timer *t = first; ; t = t->next) {
-        if (SchedState.last_insert == t)
-            SchedState.last_insert = rest;
-        if (t == last)
-            break;
-    }
-    struct timer *t = first;
+    SchedState.last_insert = rest;
+    struct timer *t = leader;
     for (;;) {
         struct timer *next = t->next;
-        if (stepper_step_finish(t) == SF_RESCHEDULE)
+        if (stepper_step_finish(t, stepper_timer_on_edge_path(t))
+            == SF_RESCHEDULE)
             reinsert_detached_timer(t);
         if (t == last)
             return;
         t = next;
     }
 }
+
+static __always_inline unsigned int
+dispatch_step_timer(struct timer *t, uint_fast8_t on_edge_path)
+{
+    uint32_t scheduled = t->waketime;
+    stepper_step_edge(t, on_edge_path);
+    struct timer *next = t->next;
+    uint32_t next_waketime = next->waketime;
+    uint32_t horizon = scheduled + STEP_COINCIDENCE_TICKS;
+    if (unlikely(step_joins_batch(next, next_waketime, horizon))) {
+        dispatch_coincident_steps(t, scheduled, horizon);
+        return SchedState.timer_list->waketime;
+    }
+    uint_fast8_t res = stepper_step_finish(t, on_edge_path);
+    return reschedule_head(t, res, next, next_waketime);
+}
 #endif
+
+static noinline unsigned int
+dispatch_callback_timer(struct timer *t)
+{
+    uint_fast8_t res = t->func(t);
+    return reschedule_head(t, res, t->next, t->next->waketime);
+}
 
 // Invoke the next timer - called from board hardware irq code.
 unsigned int
@@ -363,56 +405,33 @@ sched_timer_dispatch(void)
 {
     struct timer *t = SchedState.timer_list;
     uint32_t hidx = sched_dispatch_history_idx;
-    sched_dispatch_history_addr[hidx % SCHED_DISPATCH_HISTORY_N] = (uint32_t)t;
-    sched_dispatch_history_func[hidx % SCHED_DISPATCH_HISTORY_N] = (uint32_t)t->func;
+    uint32_t slot = hidx & DISPATCH_HISTORY_MASK;
+    sched_dispatch_history_addr[slot] = (uint32_t)t;
+    sched_dispatch_history_func[slot] = (uint32_t)t->func;
     sched_dispatch_history_idx = hidx + 1;
     extern void diag_note_dispatch(uint32_t func, uint32_t addr);
     diag_note_dispatch((uint32_t)t->func, (uint32_t)t);
 
-    uint_fast8_t res;
-    uint32_t updated_waketime;
     uint32_t diag_func = (uint32_t)(uintptr_t)t->func;
 #if CONFIG_INLINE_STEPPER_HACK
     if (!diag_func)
         diag_func = (uint32_t)(uintptr_t)&stepper_event_full;
 #endif
     uint32_t diag_start = timer_read_time();
+    unsigned int next_waketime;
 #if CONFIG_INLINE_STEPPER_HACK
     if (likely(timer_is_step(t))) {
-        struct timer *last = fire_coincident_step_edges(t);
-        if (unlikely(last != t)) {
-            finish_coincident_steps(t, last);
-            diag_note_timer_duration(timer_read_time() - diag_start,
-                                     diag_func);
-            return SchedState.timer_list->waketime;
-        }
-        res = stepper_step_finish(t);
+        if (stepper_timer_on_edge_path(t))
+            next_waketime = dispatch_step_timer(t, 1);
+        else
+            next_waketime = dispatch_step_timer(t, 0);
     } else {
-        res = t->func(t);
+        next_waketime = dispatch_callback_timer(t);
     }
 #else
-    res = t->func(t);
+    next_waketime = dispatch_callback_timer(t);
 #endif
-    updated_waketime = t->waketime;
     diag_note_timer_duration(timer_read_time() - diag_start, diag_func);
-
-    // Update timer_list (rescheduling current timer if necessary)
-    unsigned int next_waketime = updated_waketime;
-    if (unlikely(res == SF_DONE)) {
-        next_waketime = t->next->waketime;
-        SchedState.timer_list = t->next;
-        if (SchedState.last_insert == t)
-            SchedState.last_insert = t->next;
-    } else if (!timer_is_before(updated_waketime, t->next->waketime)) {
-        next_waketime = t->next->waketime;
-        SchedState.timer_list = t->next;
-        struct timer *pos = SchedState.last_insert;
-        if (timer_is_before(updated_waketime, pos->waketime))
-            pos = SchedState.timer_list;
-        insert_timer(pos, t, updated_waketime);
-        SchedState.last_insert = t;
-    }
-
     return next_waketime;
 }
 

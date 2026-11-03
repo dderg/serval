@@ -41,23 +41,6 @@ step_clock_check_horizon(int32_t distance, uint32_t clock, uint8_t oid)
     shutdown("Step clock beyond sync horizon");
 }
 
-#if CONFIG_HIGH_PREC_STEP
-static inline void
-add_interval(uint32_t *time, struct stepper *s)
-{
-    uint32_t interval = s->interval + s->int_low_acc;
-    *time += interval >> s->shift;
-    s->int_low_acc = interval - ((interval >> s->shift) << s->shift);
-}
-
-static inline void
-inc_interval(struct stepper *s)
-{
-    s->interval += s->add;
-    s->add += s->add2;
-}
-#endif
-
 static uint_fast8_t
 stepper_next_is_barrier(struct stepper *s)
 {
@@ -68,7 +51,7 @@ stepper_next_is_barrier(struct stepper *s)
     return m->flags & MF_BARRIER;
 }
 
-static uint_fast8_t
+uint_fast8_t
 stepper_load_next(struct stepper *s)
 {
     while (stepper_next_is_barrier(s)) {
@@ -190,102 +173,11 @@ stepper_load_next(struct stepper *s)
     return SF_RESCHEDULE;
 }
 
-static inline void
-stepper_full_edge(struct stepper *s)
-{
-    gpio_out_toggle_noirq(s->step_pin);
-#if CONFIG_MCU_SIM
-    s->time.waketime += s->step_pulse_ticks;
-#else
-    s->time.waketime = timer_read_time() + s->step_pulse_ticks;
-#endif
-}
-
-static uint_fast8_t
-stepper_edge_finish(struct stepper *s)
-{
-    uint32_t count = s->count - 1;
-    if (likely(count)) {
-        s->count = count;
-#if CONFIG_HIGH_PREC_STEP
-        if (s->flags & SF_HIGH_PREC_STEP) {
-            add_interval(&s->time.waketime, s);
-            inc_interval(s);
-        } else {
-            s->time.waketime += s->interval;
-            s->interval += s->add;
-        }
-#else
-        s->time.waketime += s->interval;
-        s->interval += s->add;
-#endif
-        return SF_RESCHEDULE;
-    }
-    return stepper_load_next(s);
-}
-
-static uint_fast8_t
-stepper_full_finish(struct stepper *s)
-{
-    uint32_t min_next_time = s->time.waketime;
-    uint32_t count = s->count - 1;
-    if (likely(count & 1 && !(s->flags & SF_SINGLE_SCHED)))
-        goto reschedule_min;
-    if (likely(count)) {
-#if CONFIG_HIGH_PREC_STEP
-        if (s->flags & SF_HIGH_PREC_STEP) {
-            add_interval(&s->next_step_time, s);
-            inc_interval(s);
-        } else {
-            s->next_step_time += s->interval;
-            s->interval += s->add;
-        }
-#else
-        s->next_step_time += s->interval;
-        s->interval += s->add;
-#endif
-        if (unlikely(timer_is_before(s->next_step_time, min_next_time)))
-            goto reschedule_min;
-        s->count = count;
-        s->time.waketime = s->next_step_time;
-        return SF_RESCHEDULE;
-    }
-    return stepper_load_next(s);
-reschedule_min:
-    s->count = count;
-    return SF_RESCHEDULE;
-}
-
 uint_fast8_t
 stepper_event_full(struct timer *t)
 {
     struct stepper *s = container_of(t, struct stepper, time);
     stepper_full_edge(s);
-    return stepper_full_finish(s);
-}
-
-static inline uint_fast8_t
-stepper_timer_on_edge_path(struct timer *t)
-{
-    return HAVE_EDGE_OPTIMIZATION && !t->func;
-}
-
-void
-stepper_step_edge(struct timer *t)
-{
-    struct stepper *s = container_of(t, struct stepper, time);
-    if (stepper_timer_on_edge_path(t))
-        gpio_out_toggle_noirq(s->step_pin);
-    else
-        stepper_full_edge(s);
-}
-
-uint_fast8_t
-stepper_step_finish(struct timer *t)
-{
-    struct stepper *s = container_of(t, struct stepper, time);
-    if (stepper_timer_on_edge_path(t))
-        return stepper_edge_finish(s);
     return stepper_full_finish(s);
 }
 
