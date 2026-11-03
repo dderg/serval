@@ -483,10 +483,27 @@ impl ExactConvolution<'_> {
         Some(pieces)
     }
 
-    fn point_masses(&self) -> impl Iterator<Item = PointMass> + '_ {
-        let jumps = self
-            .table
-            .input_jumps()
+    /// The point masses strictly inside the real window `(lower, upper)`:
+    /// both lists are in time order, so the window is two binary searches.
+    fn point_masses_within(
+        &self,
+        lower: RealSum,
+        upper: RealSum,
+    ) -> impl Iterator<Item = PointMass> + '_ {
+        let after_lower = move |at: f64| lower.order_of(at) == Ordering::Greater;
+        let before_upper = move |at: f64| upper.order_of(at) == Ordering::Less;
+        let jumps = self.table.input_jumps();
+        let jump_start = jumps.partition_point(|jump| !after_lower(jump.0));
+        let jump_end = jumps.partition_point(|jump| before_upper(jump.0));
+        let impulse_start = self
+            .impulses
+            .partition_point(|impulse| !after_lower(impulse.at));
+        let impulse_end = self
+            .impulses
+            .partition_point(|impulse| before_upper(impulse.at));
+        let jump_range = jump_start..jump_end.max(jump_start);
+        let impulse_range = impulse_start..impulse_end.max(impulse_start);
+        let jumps = jumps[jump_range]
             .iter()
             .map(|&(at, position_jump, slope_jump)| PointMass {
                 at,
@@ -496,14 +513,16 @@ impl ExactConvolution<'_> {
                     [slope_jump, position_jump, 0.0, 0.0],
                 ],
             });
-        let impulses = self.impulses.iter().map(|impulse| PointMass {
-            at: impulse.at,
-            weights: [
-                [impulse.delta, impulse.doublet, 0.0, 0.0],
-                [0.0, impulse.delta, impulse.doublet, 0.0],
-                [0.0, 0.0, impulse.delta, impulse.doublet],
-            ],
-        });
+        let impulses = self.impulses[impulse_range]
+            .iter()
+            .map(|impulse| PointMass {
+                at: impulse.at,
+                weights: [
+                    [impulse.delta, impulse.doublet, 0.0, 0.0],
+                    [0.0, impulse.delta, impulse.doublet, 0.0],
+                    [0.0, 0.0, impulse.delta, impulse.doublet],
+                ],
+            });
         jumps.chain(impulses)
     }
 
@@ -534,12 +553,7 @@ impl ExactConvolution<'_> {
             let mut magnitudes = self
                 .table
                 .moment_magnitudes(lower.head, upper.head, degree, upper.head);
-            for mass in self.point_masses() {
-                if lower.order_of(mass.at) != Ordering::Greater
-                    || upper.order_of(mass.at) != Ordering::Less
-                {
-                    continue;
-                }
+            for mass in self.point_masses_within(lower, upper) {
                 point_masses += 1;
                 add_point_mass(
                     &mut moments,
