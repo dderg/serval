@@ -16,6 +16,7 @@ from tools.sim.emulators.beacon_identify_dict import (
     CLOCK_FREQ,
     IDENTIFY_BLOB,
 )
+from tools.sim.emulators.restartable_thread import RestartableThread
 from tools.sim.world import HarnessPacer
 
 if TYPE_CHECKING:
@@ -93,7 +94,9 @@ class BeaconMcuStub:
         self._stream_en: bool = False
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._sample_thread: Optional[threading.Thread] = None
+        self._sample_runner = RestartableThread(
+            self._sample_loop, "beacon-stub-tx"
+        )
         self._master_fd: Optional[int] = None
         self._slave_fd: Optional[int] = None
         self._link = None
@@ -227,9 +230,7 @@ class BeaconMcuStub:
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
-        if self._sample_thread is not None:
-            self._sample_thread.join(timeout=2.0)
-            self._sample_thread = None
+        self._sample_runner.join(timeout=2.0)
         if self._accel_thread is not None:
             self._accel_thread.join(timeout=2.0)
             self._accel_thread = None
@@ -896,12 +897,7 @@ class BeaconMcuStub:
             last_clock = cur_clock
 
     def _start_sample_thread(self) -> None:
-        if self._sample_thread is not None and self._sample_thread.is_alive():
-            return
-        self._sample_thread = threading.Thread(
-            target=self._sample_loop, name="beacon-stub-tx", daemon=True
-        )
-        self._sample_thread.start()
+        self._sample_runner.ensure_running()
 
     def _stop_sample_thread(self) -> None:
         # No-op: the loop exits when _stream_en flips false, and stop() joins.
@@ -994,7 +990,9 @@ class BeaconMcuStub:
         loop_iter_count = 0
         batch_sock = None
 
-        while not self._stop.is_set() and self._stream_en:
+        while self._sample_runner.keep_running(
+            not self._stop.is_set() and self._stream_en
+        ):
             if pacer is not None:
                 pacer.hold_until(
                     self._next_batch_vt + self.SAMPLE_STALL_BUDGET_S
