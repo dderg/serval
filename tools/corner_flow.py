@@ -68,6 +68,7 @@ for _path in (REPO / "klippy", REPO / "snapshots", REPO):
 SAMPLE_DT_S = 10e-6
 PATH_STEP_MM = 0.02
 MOVING_SPEED_MM_S = 5.0
+RAW_REST_SPEED_MM_S = 1e-3
 WIDTH_THRESHOLD = 0.05
 CORNER_WINDOW_MM = 15.0
 APEX_SEARCH_MM = 2.0
@@ -486,7 +487,7 @@ def measure(
     r_cmd = commanded_ratio(t_raw + offset, raw, t)
     e_out = melted(t, e_cmd, melt_k)
     raw_speed = np.hypot(raw[0][:, 1], raw[1][:, 1])
-    raw_moving = np.interp(t, t_raw + offset, raw_speed) > MOVING_SPEED_MM_S
+    raw_moving = np.interp(t, t_raw + offset, raw_speed) > RAW_REST_SPEED_MM_S
     laying = advancing[1:] & raw_moving[1:]
     laid = np.concatenate([[0.0], np.where(laying, np.diff(e_out), 0.0)])
     e_out = e_out[0] + np.cumsum(laid)
