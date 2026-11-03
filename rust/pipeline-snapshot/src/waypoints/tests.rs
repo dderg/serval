@@ -334,3 +334,49 @@ fn set_kinematic_position_away_from_the_toolhead_is_refused() {
         WaypointError::PositionJump { line: 2, .. }
     ));
 }
+
+#[test]
+fn m220_scales_the_speed_and_m221_the_extrusion_like_klippy() {
+    let wp = parse("M83\nG1 X10 F6000\nM220 S50\nM221 S90\nG1 X20 E1\nM220\nG1 X30\n");
+    assert_eq!(wp[1].feedrate, 50.0);
+    assert!((wp[1].position[3] - 0.9).abs() < 1e-12);
+    assert_eq!(wp[2].feedrate, 100.0);
+}
+
+#[test]
+fn set_gcode_offset_shifts_later_targets_and_moves_only_when_asked() {
+    let wp = parse(
+        "G1 X10 F6000\nSET_GCODE_OFFSET Z=0.2\nG1 X20 Z1\n\
+         SET_GCODE_OFFSET Z_ADJUST=-0.05 MOVE=1 MOVE_SPEED=5\n",
+    );
+    assert_eq!(wp[1].position[2], 1.2);
+    assert!((wp[2].position[2] - 1.15).abs() < 1e-12);
+    assert_eq!(wp[2].feedrate, 5.0);
+}
+
+#[test]
+fn restore_gcode_state_returns_modes_speed_and_position() {
+    let wp = parse(
+        "G1 X10 F6000\nSAVE_GCODE_STATE NAME=park\nG91\nG1 X5 F600\n\
+         RESTORE_GCODE_STATE NAME=park MOVE=1\nG1 X20\n",
+    );
+    assert_eq!(wp[2].position[0], 10.0);
+    assert_eq!(wp[2].feedrate, 100.0);
+    assert_eq!(wp[3].position[0], 20.0);
+}
+
+#[test]
+fn gcode_state_errors_are_refused_like_klippy() {
+    assert!(matches!(
+        parse_err("G20\n"),
+        WaypointError::InchUnits { line: 1 }
+    ));
+    assert!(matches!(
+        parse_err("RESTORE_GCODE_STATE\n"),
+        WaypointError::UnknownGcodeState { line: 1, .. }
+    ));
+    assert!(matches!(
+        parse_err("M220 S0\n"),
+        WaypointError::InvalidParam { line: 1, .. }
+    ));
+}

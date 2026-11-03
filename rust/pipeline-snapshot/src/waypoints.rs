@@ -10,6 +10,8 @@
 //! under M83 or under G91 (even after M82), and G92 moves the G-code origin,
 //! never the toolhead.
 
+use std::collections::HashMap;
+
 use planner_config::{CartesianLimits, RuntimeLimits};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -85,6 +87,10 @@ pub enum WaypointError {
         from: [f64; 3],
         to: [f64; 3],
     },
+    #[error("line {line}: Machine does not support G20 (inches) command")]
+    InchUnits { line: u32 },
+    #[error("line {line}: Unknown g-code state: {name}")]
+    UnknownGcodeState { line: u32, name: Box<str> },
 }
 
 #[derive(Clone, Copy)]
@@ -128,6 +134,22 @@ impl ExtendedArgs<'_> {
             Bound::AtLeast(min) if value < min => Err(invalid("must be at least the minimum")),
             _ => Ok(Some(value)),
         }
+    }
+
+    fn int(&self, key: &str) -> Result<Option<i64>, WaypointError> {
+        let Some(raw) = self.raw(key) else {
+            return Ok(None);
+        };
+        raw.trim()
+            .parse()
+            .map(Some)
+            .map_err(|_| WaypointError::InvalidParam {
+                line: self.line,
+                command: self.command.into(),
+                param: key.into(),
+                value: raw.into(),
+                reason: "not an integer",
+            })
     }
 }
 
@@ -357,27 +379,71 @@ impl Toolhead<'_> {
 
 /// klippy's `GCodeMove` coordinate state: `last_position` is the toolhead
 /// position G-code has commanded, `base_position` the origin G-code
-/// coordinates are measured from. `G92` moves only the origin, so a position
-/// reset never moves the toolhead.
-struct GCodeMove {
+/// coordinates are measured from. `G92` and `SET_GCODE_OFFSET` move only the
+/// origin, so neither moves the toolhead unless asked to.
+#[derive(Clone)]
+struct GCodeState {
     absolute_coord: bool,
     absolute_extrude: bool,
     base_position: [f64; 4],
     last_position: [f64; 4],
+    homing_position: [f64; 4],
     speed: f64,
+    speed_factor: f64,
+    extrude_factor: f64,
+}
+
+struct GCodeMove {
+    state: GCodeState,
+    saved_states: HashMap<Box<str>, GCodeState>,
+}
+
+/// A numbered command's `S` percentage, as `get_float("S", 100., above=0.)`.
+fn percentage(params: &gcode::Params, command: &str, line: u32) -> Result<f64, WaypointError> {
+    let value = params.get(b'S').unwrap_or(100.0);
+    if value <= 0.0 {
+        return Err(WaypointError::InvalidParam {
+            line,
+            command: command.into(),
+            param: "S".into(),
+            value: value.to_string().into(),
+            reason: "must be above the minimum",
+        });
+    }
+    Ok(value)
 }
 
 impl GCodeMove {
+    fn new() -> Self {
+        Self {
+            state: GCodeState {
+                absolute_coord: true,
+                absolute_extrude: true,
+                base_position: [0.0; 4],
+                last_position: [0.0; 4],
+                homing_position: [0.0; 4],
+                speed: LIVE_DEFAULT_SPEED_MM_S,
+                speed_factor: LIVE_SPEED_FACTOR,
+                extrude_factor: 1.0,
+            },
+            saved_states: HashMap::new(),
+        }
+    }
+
     /// `GCodeMove.cmd_G92`.
     fn set_position(&mut self, params: &gcode::Params) {
+        let s = &mut self.state;
         let offsets = [params.x(), params.y(), params.z(), params.e()];
         if offsets.iter().all(Option::is_none) {
-            self.base_position = self.last_position;
+            s.base_position = s.last_position;
             return;
         }
         for (axis, offset) in offsets.into_iter().enumerate() {
-            if let Some(offset) = offset {
-                self.base_position[axis] = self.last_position[axis] - offset;
+            if let Some(mut offset) = offset {
+                if axis == 3 {
+                    offset *= s.extrude_factor;
+                }
+                s.base_position[axis] = s.last_position[axis] - offset;
             }
         }
     }
@@ -390,20 +456,22 @@ impl GCodeMove {
         params: &gcode::Params,
         line: u32,
     ) -> Result<(), WaypointError> {
+        let s = &mut self.state;
         for (axis, value) in [params.x(), params.y(), params.z()].into_iter().enumerate() {
             if let Some(v) = value {
-                self.last_position[axis] = if self.absolute_coord {
-                    v + self.base_position[axis]
+                s.last_position[axis] = if s.absolute_coord {
+                    v + s.base_position[axis]
                 } else {
-                    self.last_position[axis] + v
+                    s.last_position[axis] + v
                 };
             }
         }
-        if let Some(v) = params.e() {
-            self.last_position[3] = if self.absolute_coord && self.absolute_extrude {
-                v + self.base_position[3]
+        if let Some(e) = params.e() {
+            let v = e * s.extrude_factor;
+            s.last_position[3] = if s.absolute_coord && s.absolute_extrude {
+                v + s.base_position[3]
             } else {
-                self.last_position[3] + v
+                s.last_position[3] + v
             };
         }
         if let Some(f) = params.f() {
@@ -414,9 +482,105 @@ impl GCodeMove {
                     feedrate: f,
                 });
             }
-            self.speed = f * LIVE_SPEED_FACTOR;
+            s.speed = f * s.speed_factor;
         }
         Ok(())
+    }
+
+    /// `GCodeMove.cmd_M220`.
+    fn set_speed_factor(&mut self, params: &gcode::Params, line: u32) -> Result<(), WaypointError> {
+        let value = percentage(params, "M220", line)? / (60.0 * 100.0);
+        let s = &mut self.state;
+        s.speed = s.speed / s.speed_factor * value;
+        s.speed_factor = value;
+        Ok(())
+    }
+
+    /// `GCodeMove.cmd_M221`.
+    fn set_extrude_factor(
+        &mut self,
+        params: &gcode::Params,
+        line: u32,
+    ) -> Result<(), WaypointError> {
+        let new_extrude_factor = percentage(params, "M221", line)? / 100.0;
+        let s = &mut self.state;
+        let last_e_pos = s.last_position[3];
+        let e_value = (last_e_pos - s.base_position[3]) / s.extrude_factor;
+        s.base_position[3] = last_e_pos - e_value * new_extrude_factor;
+        s.extrude_factor = new_extrude_factor;
+        Ok(())
+    }
+
+    /// `MOVE=1` asks the toolhead onto the new position, at `MOVE_SPEED` or
+    /// the current speed.
+    fn requested_move_speed(&self, args: &ExtendedArgs<'_>) -> Result<Option<f64>, WaypointError> {
+        if args.int("MOVE")?.unwrap_or(0) == 0 {
+            return Ok(None);
+        }
+        Ok(Some(
+            args.float("MOVE_SPEED", Bound::Above(0.0))?
+                .unwrap_or(self.state.speed),
+        ))
+    }
+
+    /// `GCodeMove.cmd_SET_GCODE_OFFSET`; `Some(speed)` when it moves.
+    fn set_gcode_offset(&mut self, args: &ExtendedArgs<'_>) -> Result<Option<f64>, WaypointError> {
+        let mut move_delta = [0.0; 4];
+        for (axis, key) in ["X", "Y", "Z", "E"].into_iter().enumerate() {
+            let homing = self.state.homing_position[axis];
+            let offset = match args.float(key, Bound::Any)? {
+                Some(offset) => offset,
+                None => match args.float(&format!("{key}_ADJUST"), Bound::Any)? {
+                    Some(adjust) => adjust + homing,
+                    None => continue,
+                },
+            };
+            let delta = offset - homing;
+            move_delta[axis] = delta;
+            self.state.base_position[axis] += delta;
+            self.state.homing_position[axis] = offset;
+        }
+        let speed = self.requested_move_speed(args)?;
+        if speed.is_some() {
+            for (last, delta) in self.state.last_position.iter_mut().zip(move_delta) {
+                *last += delta;
+            }
+        }
+        Ok(speed)
+    }
+
+    fn state_name<'a>(args: &'a ExtendedArgs<'_>) -> &'a str {
+        args.raw("NAME").unwrap_or("default")
+    }
+
+    /// `GCodeMove.cmd_SAVE_GCODE_STATE`.
+    fn save_state(&mut self, args: &ExtendedArgs<'_>) {
+        self.saved_states
+            .insert(Self::state_name(args).into(), self.state.clone());
+    }
+
+    /// `GCodeMove.cmd_RESTORE_GCODE_STATE`; `Some(speed)` when it moves.
+    fn restore_state(&mut self, args: &ExtendedArgs<'_>) -> Result<Option<f64>, WaypointError> {
+        let name = Self::state_name(args);
+        let saved = self
+            .saved_states
+            .get(name)
+            .ok_or_else(|| WaypointError::UnknownGcodeState {
+                line: args.line,
+                name: name.into(),
+            })?
+            .clone();
+        let last_position = self.state.last_position;
+        self.state = GCodeState {
+            last_position,
+            ..saved.clone()
+        };
+        self.state.base_position[3] += last_position[3] - saved.last_position[3];
+        let speed = self.requested_move_speed(args)?;
+        if speed.is_some() {
+            self.state.last_position[..3].copy_from_slice(&saved.last_position[..3]);
+        }
+        Ok(speed)
     }
 }
 
@@ -445,13 +609,7 @@ pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>
         homed: [true; 3],
         rest_s: None,
     };
-    let mut gcode_move = GCodeMove {
-        absolute_coord: true,
-        absolute_extrude: true,
-        base_position: [0.0; 4],
-        last_position: [0.0; 4],
-        speed: LIVE_DEFAULT_SPEED_MM_S,
-    };
+    let mut gcode_move = GCodeMove::new();
 
     for tok in gcode::lex(text) {
         let tok = tok?;
@@ -473,16 +631,32 @@ pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>
                     line: line_no,
                     args: &args,
                 };
-                match &*name {
+                let move_speed = match &*name {
                     "SET_VELOCITY_LIMIT" => {
                         set_velocity_limit(&args, config, &mut toolhead.runtime)?;
+                        None
                     }
-                    "RESET_VELOCITY_LIMIT" => reset_velocity_limit(&mut toolhead.runtime),
+                    "RESET_VELOCITY_LIMIT" => {
+                        reset_velocity_limit(&mut toolhead.runtime);
+                        None
+                    }
                     "SET_KINEMATIC_POSITION" => {
                         toolhead.set_kinematic_position(&args)?;
-                        gcode_move.last_position = toolhead.commanded;
+                        gcode_move.state.last_position = toolhead.commanded;
+                        None
                     }
-                    _ => {}
+                    "SET_GCODE_OFFSET" => gcode_move.set_gcode_offset(&args)?,
+                    "SAVE_GCODE_STATE" => {
+                        gcode_move.save_state(&args);
+                        None
+                    }
+                    "RESTORE_GCODE_STATE" => gcode_move.restore_state(&args)?,
+                    _ => None,
+                };
+                if let Some(speed) = move_speed {
+                    let waypoint =
+                        toolhead.move_to(gcode_move.state.last_position, speed, true, line_no)?;
+                    waypoints.extend(waypoint);
                 }
                 continue;
             }
@@ -492,10 +666,13 @@ pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>
             continue;
         }
         match (letter, major) {
-            (b'G', 90) => gcode_move.absolute_coord = true,
-            (b'G', 91) => gcode_move.absolute_coord = false,
-            (b'M', 82) => gcode_move.absolute_extrude = true,
-            (b'M', 83) => gcode_move.absolute_extrude = false,
+            (b'G', 90) => gcode_move.state.absolute_coord = true,
+            (b'G', 91) => gcode_move.state.absolute_coord = false,
+            (b'M', 82) => gcode_move.state.absolute_extrude = true,
+            (b'M', 83) => gcode_move.state.absolute_extrude = false,
+            (b'G', 20) => return Err(WaypointError::InchUnits { line: line_no }),
+            (b'M', 220) => gcode_move.set_speed_factor(&params, line_no)?,
+            (b'M', 221) => gcode_move.set_extrude_factor(&params, line_no)?,
             (b'M', 204) => m204(&params, line_no, &mut toolhead.runtime)?,
             (b'G', 92) => gcode_move.set_position(&params),
             (b'G', 4) => toolhead.rest(g4_dwell_s(&params, line_no)?),
@@ -512,8 +689,8 @@ pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>
                     params.x().is_some() || params.y().is_some() || params.z().is_some();
                 gcode_move.linear_move(cmd, &params, line_no)?;
                 let waypoint = toolhead.move_to(
-                    gcode_move.last_position,
-                    gcode_move.speed,
+                    gcode_move.state.last_position,
+                    gcode_move.state.speed,
                     has_position,
                     line_no,
                 )?;
