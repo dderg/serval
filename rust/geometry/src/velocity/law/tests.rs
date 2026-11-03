@@ -398,13 +398,10 @@ fn a_rail_cut_inside_a_knot_pair_keeps_the_motion_its_interpolant_describes() {
         );
         (knots[0].t, knots[1].t)
     };
-    for (seg, (lo, hi)) in [
-        (departing.clone(), departure_pair),
-        {
-            let (seg, lo, hi) = rail_running_into_its_cap();
-            (seg, (lo, hi))
-        },
-    ] {
+    for (seg, (lo, hi)) in [(departing, departure_pair), {
+        let (seg, lo, hi) = rail_running_into_its_cap();
+        (seg, (lo, hi))
+    }] {
         for share in [0.15, 0.5, 0.85] {
             let tau = lo + share * (hi - lo);
             let cut = seg.cut_at_time(tau);
@@ -432,7 +429,9 @@ fn a_brake_flipped_from_a_rail_cut_inside_a_knot_pair_keeps_its_motion() {
         sigma: -634_643.7,
         brake: true,
     };
-    let cut = reversed.cut_at_arc(onset).expect("the onset lies on the rail");
+    let cut = reversed
+        .cut_at_arc(onset)
+        .expect("the onset lies on the rail");
     let (brake, _) = reversed
         .flipped_cut(0.0, 0.0, brake_law, onset)
         .expect("the onset lies on the rail");
