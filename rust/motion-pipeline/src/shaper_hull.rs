@@ -230,6 +230,69 @@ fn first_unproven_patch(
     })
 }
 
+/// One order's error `P − S` on one sub-interval of the domain, in the
+/// Bernstein basis over `[from, to]`, with its rounding term and the
+/// rounding each de Casteljau level adds.
+struct ErrorPatch {
+    controls: Vec<f64>,
+    from: f64,
+    to: f64,
+    rounding: f64,
+    level_rounding: f64,
+}
+
+/// Every sub-interval's error patch for `order`, the fitted piece's
+/// derivatives already taken.
+fn error_patches<'a>(
+    exact: &'a [ExactPiece],
+    piece: FittedPiece<'a>,
+    derivatives: &'a [Vec<f64>],
+    domain: (f64, f64),
+    order: usize,
+) -> impl Iterator<Item = ErrorPatch> + 'a {
+    let h = piece.t1 - piece.t0;
+    let u_of = move |t: f64| 2.0 * (t - piece.t0) / h - 1.0;
+    exact.iter().filter_map(move |sub| {
+        let (from, to) = (sub.lo.max(domain.0), sub.hi.min(domain.1));
+        if from > to {
+            return None;
+        }
+        let middle = 0.5 * (from + to);
+        let half = 0.5 * (to - from);
+        let fitted = composed(&derivatives[order], u_of(middle), half * (2.0 / h));
+        let signal = &sub.pva[order];
+        let truth = composed(
+            &signal.coefficients[..signal.len],
+            (middle - sub.center) / sub.radius,
+            half / sub.radius,
+        );
+        let len = fitted.len.max(truth.len).max(1);
+        let mut error = vec![0.0; len];
+        let mut subtraction = 0.0;
+        for (power, slot) in error.iter_mut().enumerate() {
+            let (p, s) = (fitted.coefficients[power], truth.coefficients[power]);
+            *slot = p - s;
+            subtraction += f64::EPSILON * 0.5 * (p.abs() + s.abs());
+        }
+        let (controls, conversion) = bernstein(&error);
+        let largest = controls.iter().fold(0.0_f64, |m, c| m.max(c.abs()));
+        Some(ErrorPatch {
+            level_rounding: ExactRounding::gamma(controls.len()) * largest,
+            controls,
+            from,
+            to,
+            rounding: signal.rounding + fitted.rounding + truth.rounding + subtraction + conversion,
+        })
+    })
+}
+
+fn derivatives_of(piece: FittedPiece) -> Vec<Vec<f64>> {
+    let h = piece.t1 - piece.t0;
+    (0..3)
+        .map(|order| piece_derivative(piece.mono_u, order, h))
+        .collect()
+}
+
 /// The `u` of a point of `[domain]` where `piece` is not proven within
 /// `budget` of the signal whose exact polynomials over that domain are
 /// `exact`, or `None` when every order holds its budget everywhere there.
@@ -240,56 +303,69 @@ pub(crate) fn first_unproven(
     budget: HullBudget,
 ) -> Option<f64> {
     let h = piece.t1 - piece.t0;
-    let u_of = |t: f64| 2.0 * (t - piece.t0) / h - 1.0;
     let orders: &[usize] = if budget.velocity.is_finite() {
         &[0, 1, 2]
     } else {
         &[0, 2]
     };
-    let derivatives: Vec<Vec<f64>> = (0..3)
-        .map(|order| piece_derivative(piece.mono_u, order, h))
-        .collect();
-    for sub in exact {
-        let (from, to) = (sub.lo.max(domain.0), sub.hi.min(domain.1));
-        if from > to {
-            continue;
-        }
-        let middle = 0.5 * (from + to);
-        let half = 0.5 * (to - from);
-        for &order in orders {
-            let fitted = composed(&derivatives[order], u_of(middle), half * (2.0 / h));
-            let signal = &sub.pva[order];
-            let truth = composed(
-                &signal.coefficients[..signal.len],
-                (middle - sub.center) / sub.radius,
-                half / sub.radius,
-            );
-            let len = fitted.len.max(truth.len).max(1);
-            let mut error = vec![0.0; len];
-            let mut subtraction = 0.0;
-            for (power, slot) in error.iter_mut().enumerate() {
-                let (p, s) = (fitted.coefficients[power], truth.coefficients[power]);
-                *slot = p - s;
-                subtraction += f64::EPSILON * 0.5 * (p.abs() + s.abs());
-            }
-            let (controls, conversion) = bernstein(&error);
-            let rounding =
-                signal.rounding + fitted.rounding + truth.rounding + subtraction + conversion;
-            let largest = controls.iter().fold(0.0_f64, |m, c| m.max(c.abs()));
-            let level_rounding = ExactRounding::gamma(controls.len()) * largest;
+    let derivatives = derivatives_of(piece);
+    for &order in orders {
+        for patch in error_patches(exact, piece, &derivatives, domain, order) {
             if let Some(t) = first_unproven_patch(
-                &controls,
-                (from, to),
+                &patch.controls,
+                (patch.from, patch.to),
                 budget.of_order(order),
-                rounding,
-                level_rounding,
+                patch.rounding,
+                patch.level_rounding,
                 0,
             ) {
-                return Some(u_of(t).clamp(-1.0, 1.0));
+                return Some((2.0 * (t - piece.t0) / h - 1.0).clamp(-1.0, 1.0));
             }
         }
     }
     None
+}
+
+/// A proven upper bound on a patch's error, refined only as far as it
+/// takes to settle it against `budget`: a bound within it is final, one
+/// whose end controls already exceed it by the rounding is a proven miss,
+/// and anything else is halved down to [`HULL_MAX_DEPTH`] — the same
+/// settling the hull accepts a rung by, so a piece it proved is bounded
+/// within its budget here.
+#[cfg(feature = "fit-audit")]
+fn patch_bound(controls: &[f64], patch: &ErrorPatch, budget: f64, depth: u32) -> f64 {
+    let slack = patch.rounding + f64::from(depth) * patch.level_rounding;
+    let peak = controls.iter().fold(0.0_f64, |m, c| m.max(c.abs()));
+    let ends = controls[0].abs().max(controls[controls.len() - 1].abs());
+    let bound = peak + slack;
+    if !peak.is_finite() {
+        return f64::INFINITY;
+    }
+    if bound <= budget || ends - slack > budget || depth == HULL_MAX_DEPTH || controls.len() == 1 {
+        return bound;
+    }
+    let (left, right) = de_casteljau_halves(controls);
+    patch_bound(&left, patch, budget, depth + 1)
+        .max(patch_bound(&right, patch, budget, depth + 1))
+        .min(bound)
+}
+
+/// Proven upper bounds on how far `piece`'s position and acceleration
+/// stray from the signal whose exact polynomials or enclosure over
+/// `domain` are `exact`, everywhere on it, settled against `budget`.
+#[cfg(feature = "fit-audit")]
+pub(crate) fn error_bounds(
+    exact: &[ExactPiece],
+    piece: FittedPiece,
+    domain: (f64, f64),
+    budget: FitTol,
+) -> [f64; 2] {
+    let derivatives = derivatives_of(piece);
+    [(0, budget.pos_mm), (2, budget.accel_mm_s2)].map(|(order, budget)| {
+        error_patches(exact, piece, &derivatives, domain, order)
+            .map(|patch| patch_bound(&patch.controls, &patch, budget, 0))
+            .fold(0.0_f64, f64::max)
+    })
 }
 
 #[cfg(test)]

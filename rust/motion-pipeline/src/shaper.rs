@@ -819,6 +819,32 @@ fn materialize_changed_sources(
     Ok(jobs.len())
 }
 
+/// The share of a piece's tolerance the audit lets an enclosure's bound
+/// spend before refining it.
+#[cfg(feature = "fit-audit")]
+const AUDIT_ENCLOSURE_SHARE: f64 = 1.0 / 1024.0;
+
+/// Proven upper bounds on a fitted piece's position and acceleration error
+/// over `resolved`, from the signal's exact polynomials or enclosure there.
+#[cfg(feature = "fit-audit")]
+pub(crate) fn proven_error_bounds<S: TrackSignal>(
+    sig: &S,
+    mono_u: &[f64],
+    (t0, t1): (f64, f64),
+    resolved: (f64, f64),
+    tol: FitTol,
+) -> Option<[f64; 2]> {
+    let accuracy =
+        [tol.pos_mm, f64::INFINITY, tol.accel_mm_s2].map(|budget| budget * AUDIT_ENCLOSURE_SHARE);
+    let enclosure = sig.enclosure_on(resolved.0, resolved.1, accuracy)?;
+    Some(hull::error_bounds(
+        &enclosure,
+        FittedPiece { mono_u, t0, t1 },
+        resolved,
+        tol,
+    ))
+}
+
 /// An analytic source's materialize seeds — its ends, phase seams and
 /// curvature-cap contacts — and those contacts.
 fn cap_contact_seeds(span: &AnalyticMoveSpan) -> (Vec<f64>, Vec<f64>) {

@@ -37,7 +37,7 @@ fn moves_through(points: &[[f64; 2]], feedrate: f64) -> Vec<geometry::Move> {
             line_move(
                 [pair[0][0], pair[0][1], 0.2],
                 [pair[1][0], pair[1][1], 0.2],
-                0.03 * (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1]),
+                0.03 * libm::hypot(pair[1][0] - pair[0][0], pair[1][1] - pair[0][1]),
                 MoveContext {
                     extruder_axis: 3,
                     feedrate_mm_s: feedrate,

@@ -1,12 +1,14 @@
 //! Checks every piece a fit accepts against the exact signal it was fitted
-//! to, at dense interior points rather than only at the ladder's probes, and
-//! keeps the ones that break the fit tolerance as resolved for the piece's
-//! duration (`FitTol::for_piece`). What the fit does not resolve
-//! is not held to it: pieces narrower than the cubic floor, and the slivers
-//! inside a piece's edges that the ladder reads its anchoring state past,
-//! which seed coalescing treats as carrying no integral. Compiled only for
-//! tests that hold the shaper to its `max_path_deviation` /
-//! `max_accel_deviation` promise; the live host never pays for it.
+//! to and keeps the ones that break the fit tolerance as resolved for the
+//! piece's duration (`FitTol::for_piece`). Where the signal has exact
+//! polynomials or an enclosure over the piece, the Bernstein hull's proven
+//! bound on the error is the measure; elsewhere dense interior points are.
+//! What the fit does not resolve is not held to it: pieces narrower than
+//! the cubic floor, and the slivers inside a piece's edges that the ladder
+//! reads its anchoring state past, which seed coalescing treats as carrying
+//! no integral. Compiled only for tests that hold the shaper to its
+//! `max_path_deviation` / `max_accel_deviation` promise; the live host
+//! never pays for it.
 
 use std::cell::RefCell;
 use std::sync::Mutex;
@@ -14,7 +16,7 @@ use std::sync::Mutex;
 use crate::lowering::{FitTol, eval_mono, eval_mono_dd};
 use trajectory::next_toward;
 
-use crate::shaper::{SQUARE_ROOT_ONSET_EDGE_SLACK_S, TrackSignal};
+use crate::shaper::{SQUARE_ROOT_ONSET_EDGE_SLACK_S, TrackSignal, proven_error_bounds};
 
 /// Interior points checked per accepted piece, spread uniformly so a feature
 /// the ladder's nine probes straddle cannot hide between them.
@@ -99,6 +101,16 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
             acceleration = over;
             worst_u = u;
         }
+    }
+    let resolved = (
+        piece.t0 + piece.edge_insets.0,
+        piece.t1 - piece.edge_insets.1,
+    );
+    if let Some([position_bound, acceleration_bound]) =
+        proven_error_bounds(sig, piece.mono_u, (piece.t0, piece.t1), resolved, piece_tol)
+    {
+        position = position_bound / piece_tol.pos_mm;
+        acceleration = acceleration_bound / piece_tol.accel_mm_s2;
     }
     if position > 1.0 || acceleration > 1.0 {
         let exemption = (position <= 1.0)
