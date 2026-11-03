@@ -332,8 +332,9 @@ job_sim_image() { "$ROOT/tools/sim/run.sh" save-image; }
 # without output; a planner that cannot commit past a layer change holds
 # thousands (3480 before the finality barrier alone gated commits). Every
 # config under tools/bench/configs then replays the same print through the
-# same live construction, held only to finishing: the snapshot path plans
-# those configs in rust-fit-audit, so a panic here is a live/snapshot split.
+# same live construction, held only to finishing. CI runners say nothing
+# about the printer host: the Pi 5 realtime factors per config and core
+# count are in tools/bench/README.md ("Replay throughput (Pi 5)").
 job_replay_budget() {
     cd "$RUST" && cargo run --release -p motion-core --example gcode_replay_bench -- \
         "$ROOT/tools/sim/gcode/voron_dense_top_layers.gcode" \

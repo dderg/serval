@@ -14,13 +14,21 @@ fn dense_top_layer_lines(count: usize) -> String {
     text.lines().take(count).collect::<Vec<_>>().join("\n")
 }
 
+/// An extruder this test never lets bind: it exercises the chain, not the
+/// extruder's limits.
+const UNBINDING_EXTRUDER_LIMIT: f64 = 1e12;
+
 fn axis(name: &str, follows: &[&str], post_processors: &[&str]) -> AxisDecl {
+    let limit = (!follows.is_empty()).then_some(UNBINDING_EXTRUDER_LIMIT);
     AxisDecl {
         name: name.into(),
         follows: follows.iter().map(|s| (*s).into()).collect(),
         motors: Vec::new(),
         post_processors: post_processors.iter().map(|s| (*s).into()).collect(),
         ratio_ramp_time: None,
+        max_velocity: limit,
+        max_accel: limit,
+        instantaneous_corner_velocity: None,
     }
 }
 
