@@ -3,6 +3,7 @@
 //! same way, and each segment's extrusion starts on the span table boundary
 //! its predecessor ended on instead of a sliver past it.
 
+use geometry::MIN_DEVICE_INTERVAL_S;
 use motion_pipeline::{Pipeline, TrajectoryItem, live_config};
 use pipeline_snapshot::waypoints::parse_gcode;
 use pipeline_snapshot::{AxisDecl, CartesianLimits, PlannerConfig, PostProcessorDecl, plan_steps};
@@ -13,7 +14,6 @@ const MAX_ACCEL: f64 = 10_000.0;
 const EXTRUDER: usize = 3;
 const EIGHTEEN_HOURS_S: f64 = 65_536.0;
 const SAMPLES_PER_SEGMENT: usize = 64;
-const MIN_DEVICE_INTERVAL_S: f64 = 2e-9;
 
 fn axis(name: &str, follows: &[&str], post_processors: &[&str]) -> AxisDecl {
     AxisDecl {

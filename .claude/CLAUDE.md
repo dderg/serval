@@ -74,25 +74,24 @@ and `query-logs` skills.
 # Build caches and CARGO_TARGET_DIR
 
 Never `export CARGO_TARGET_DIR` in a persistent shell: it leaks into the next
-task's builds and the engine `make` copies. `scripts/ci.sh` replaces an inherited
-value (set `CI_KEEP_CARGO_TARGET_DIR=1` to opt in) with one target dir shared by
-every worktree, `~/.cache/serval-target` (`SERVAL_TARGET_DIR` moves it,
-`CI_OWN_TARGET=1` gives that run the worktree's own `rust/target`): a fresh
-worktree's `./scripts/ci.sh quick` takes ~85 s against the warm shared dir and
-~220 s with a cold own target, and gates need no per-task `*-target` dir.
-Cargo reuses a test binary built from identical sources in another worktree, so
-a test must find repo files through the `source-tree` crate
-(`source_tree::repo_file("snapshots/...")`, `manifest_dir()`), which reads
-`CARGO_MANIFEST_DIR` at run time; `env!("CARGO_MANIFEST_DIR")` would point at
-whichever worktree compiled the binary and break when it is removed.
-Everything else outside `ci.sh` uses the worktree's own `rust/target`; the other
-shared target dir is
-`~/.cache/pending-baselines/target`, which `pending_baselines.py`,
-`review_baselines.py` and `integrate_stack.py` set per subprocess. For a one-off
-variant build set `CARGO_TARGET_DIR=...` on that single command, not in the
-shell. `uv run python scripts/gc_caches.py [--days N] [--apply]` lists and
-removes stale `~/.cache/*-target` dirs and abandoned pending-baselines
-worktrees/stacks/samples.
+task's builds and the engine `make` copies. `scripts/ci.sh` unsets an inherited
+value (set `CI_KEEP_CARGO_TARGET_DIR=1` to opt in); gates use the worktree's own
+`rust/target`.
+
+Never share one target dir between worktrees. Cargo's unit hash omits the workspace
+path and its freshness test compares source mtimes with the artifact's, so a worktree
+whose sources are older than another's build links that build's crates (reproduced:
+an example using a constant only the other worktree's `geometry` defined compiled and
+ran; bound-ext hit it in `ci.sh`). The tools that build for review and bench give every
+worktree its own dir, `pending_baselines.target_dir_for(tree)` under
+`~/.cache/pending-baselines/targets/` (`pending_baselines.py`, `integrate_stack.py`,
+`bench_compare.py`, `accept_reviewed.py`, `land_queue.py`, the audit in
+`review_baselines.py`). A test must still find repo files through the `source-tree`
+crate (`source_tree::repo_file("snapshots/...")`), never `env!("CARGO_MANIFEST_DIR")`.
+For a one-off variant build set `CARGO_TARGET_DIR=...` on that single command, not in
+the shell. `uv run python scripts/gc_caches.py [--days N] [--apply]` lists and removes
+stale `~/.cache/*-target` dirs, per-worktree targets and abandoned pending-baselines
+worktrees/stacks.
 
 # Never work in ~/Developer/serval
 
@@ -153,7 +152,7 @@ binaries). Snapshot checks need the engine built first:
 
 `uv run python scripts/bench_compare.py <commitA> <commitB> [--configs fast,printer]
 [--runs 5] [--gcode PATH]` is the replay-throughput A/B: it builds
-`gcode_replay_bench` at both commits (one reusable worktree, shared target dir,
+`gcode_replay_bench` at both commits (one reusable worktree with its own target dir,
 binaries cached by commit under `~/.cache/pending-baselines/bench`), runs them
 interleaved with alternating order, and prints median wall seconds, realtime
 factor and the per-stage breakdown with the change B vs A. Use it instead of
@@ -211,7 +210,7 @@ issue; rerun those once and add the run id to the issue. Sim flakes so far were 
 seed are real counterexamples: commit the `cc` seed line to
 `proptest-regressions/` and file an issue.
 
-When delegating: give the worker the worktree path to use, say that gates share `~/.cache/serval-target`, and have it end
+When delegating: give the worker the worktree path to use, say that gates use that worktree's own `rust/target`, and have it end
 with a named list of checks for the lead to run once, since parallel
 `ci.sh quick` runs from several workers contend for the same CPUs. Do not have
 a worker re-derive repo context that is in this file or a skill; point to it.

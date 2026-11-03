@@ -154,7 +154,7 @@ def review_snapshots(tree: Path, entry: Entry) -> dict:
     pending.run(
         ["make", "-f", "Makefile.rust", "motion-engine-fast"],
         tree,
-        {"CARGO_TARGET_DIR": str(pending.TARGET_DIR)},
+        {"CARGO_TARGET_DIR": str(pending.target_dir_for(tree))},
     )
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "review.json"

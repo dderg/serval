@@ -118,7 +118,7 @@ def checkout_and_build(sha: str) -> Path:
         flush=True,
     )
     env = {
-        "CARGO_TARGET_DIR": str(pending.TARGET_DIR),
+        "CARGO_TARGET_DIR": str(pending.target_dir_for(WORKTREE)),
         "PATH": f"{Path.home() / '.cargo/bin'}:{os.environ['PATH']}",
     }
     pending.run(
@@ -134,7 +134,12 @@ def checkout_and_build(sha: str) -> Path:
         WORKTREE / "rust",
         env,
     )
-    built = pending.TARGET_DIR / "release" / "examples" / "gcode_replay_bench"
+    built = (
+        pending.target_dir_for(WORKTREE)
+        / "release"
+        / "examples"
+        / "gcode_replay_bench"
+    )
     binary.parent.mkdir(parents=True, exist_ok=True)
     binary.write_bytes(built.read_bytes())
     binary.chmod(0o755)
