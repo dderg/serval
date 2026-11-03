@@ -64,7 +64,16 @@ fn bench_shapers_with_unkerneled_e() -> SnapshotParams {
 #[test]
 fn dense_top_layer_shapes_with_an_unkerneled_extruder() {
     let gcode = dense_top_layer_lines(30);
-    let waypoints = parse_gcode(&gcode, MAX_VELOCITY, MAX_ACCEL).expect("parse");
+    let waypoints = parse_gcode(
+        &gcode,
+        &pipeline_snapshot::CartesianLimits::without_z_caps(
+            MAX_VELOCITY,
+            MAX_ACCEL,
+            f64::INFINITY,
+            0.0,
+        ),
+    )
+    .expect("parse");
     let snapshot =
         pipeline_snapshot(&waypoints, bench_shapers_with_unkerneled_e()).expect("snapshot");
     assert!(snapshot.traversal_time_s > 0.0);
@@ -78,7 +87,16 @@ fn neptune_discontinuity_with_tanh_advance(
         env!("CARGO_MANIFEST_DIR")
     );
     let gcode = std::fs::read_to_string(path).expect("read neptune discontinuity gcode");
-    let waypoints = parse_gcode(&gcode, MAX_VELOCITY, MAX_ACCEL).expect("parse");
+    let waypoints = parse_gcode(
+        &gcode,
+        &pipeline_snapshot::CartesianLimits::without_z_caps(
+            MAX_VELOCITY,
+            MAX_ACCEL,
+            f64::INFINITY,
+            0.0,
+        ),
+    )
+    .expect("parse");
     let params = SnapshotParams {
         max_velocity: MAX_VELOCITY,
         max_accel: MAX_ACCEL,
