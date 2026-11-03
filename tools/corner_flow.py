@@ -27,6 +27,9 @@ ramp needs extrude-only caps, and the retract case is only comparable
 between chains under the same ones: ``--extrude-only V,A`` fills in
 whichever the config lacks, for every chain.
 
+Each case plans in a process of its own: a planner panic fails that case
+alone, as an ERROR row carrying the panic's message.
+
 Columns, per case and speed (worst over the case's corners):
 
 - ``peak`` / ``dip``: largest bead over- / under-fill, % of the nominal
@@ -54,6 +57,7 @@ import concurrent.futures
 import json
 import math
 import os
+import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -71,6 +75,8 @@ MOVING_SPEED_MM_S = 5.0
 RAW_REST_SPEED_MM_S = 1e-3
 WIDTH_THRESHOLD = 0.05
 CORNER_WINDOW_MM = 15.0
+CASE_JOB_FLAG = "--case-job"
+ERROR_CHARS = 200
 APEX_SEARCH_MM = 2.0
 SPEEDS_MM_S = (50.0, 150.0, 300.0)
 ADVANCE_TYPES = {
@@ -467,7 +473,7 @@ def measure(
         _, plain = sample(config.without_advance().text(), program)
         t_raw, raw = sample(config.unshaped().text(), program)
     except Exception as error:  # noqa: BLE001
-        row.error = str(error).splitlines()[0][:200]
+        row.error = str(error).splitlines()[0][:ERROR_CHARS]
         return row
     x, vx = axes[0][:, 0], axes[0][:, 1]
     y, vy = axes[1][:, 0], axes[1][:, 1]
@@ -536,6 +542,45 @@ def run_case(job) -> Row:
     return row
 
 
+def case_command() -> list[str]:
+    return [sys.executable, str(Path(__file__).resolve()), CASE_JOB_FLAG]
+
+
+def run_isolated(job, command: list[str] | None = None) -> Row:
+    """Runs one case in a process of its own, `command` reading the job as
+    JSON on stdin and printing its row as JSON last on stdout. A planner
+    panic aborts that process, so it fails this case alone, reported with
+    the panic's message, and every other case still runs."""
+    sweep_label, _, geometry_index, speed, _, _ = job
+    done = subprocess.run(
+        command or case_command(),
+        input=json.dumps(job),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if done.returncode == 0:
+        return Row(**json.loads(done.stdout.splitlines()[-1]))
+    return Row(
+        GEOMETRIES[geometry_index].name,
+        speed,
+        sweep=sweep_label,
+        error=crash_message(done.stderr, done.returncode)[:ERROR_CHARS],
+    )
+
+
+def crash_message(stderr: str, returncode: int) -> str:
+    lines = [line for line in stderr.splitlines() if line.strip()]
+    for panic, message in zip(lines, lines[1:]):
+        if " panicked at " in panic:
+            return f"engine panic: {message}"
+    return f"engine exited {returncode}"
+
+
+def run_case_job() -> None:
+    print(json.dumps(asdict(run_case(json.loads(sys.stdin.read())))))
+
+
 def table(rows: list[Row], sweep_name: str) -> str:
     head = (
         f"{'case':<10} {'mm/s':>4} | {'peak':>6} {'dip':>5} {'w>5%':>5} "
@@ -564,6 +609,9 @@ def table(rows: list[Row], sweep_name: str) -> str:
 
 
 def main() -> None:
+    if sys.argv[1:] == [CASE_JOB_FLAG]:
+        run_case_job()
+        return
     parser = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0],
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -647,8 +695,8 @@ def main() -> None:
         for index in range(len(GEOMETRIES)):
             for speed in speeds:
                 jobs.append((label, variant.text(), index, speed, melt_k, bead))
-    with concurrent.futures.ProcessPoolExecutor(max(args.jobs, 1)) as pool:
-        rows = list(pool.map(run_case, jobs))
+    with concurrent.futures.ThreadPoolExecutor(max(args.jobs, 1)) as pool:
+        rows = list(pool.map(run_isolated, jobs))
 
     if args.json:
         print(json.dumps([asdict(row) for row in rows], indent=1))
