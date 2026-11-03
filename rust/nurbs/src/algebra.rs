@@ -2,6 +2,7 @@ use crate::AlgebraError;
 use crate::bezier::binomial;
 
 const PEAK_GRID_STEPS: usize = 512;
+const MOMENT_GRID_STEPS: usize = 1024;
 const PEAK_BISECTION_STEPS: u32 = 60;
 
 #[derive(Debug, Clone)]
@@ -92,6 +93,22 @@ impl PiecewisePolynomialKernel {
                 peak
             })
             .fold(0.0, f64::max)
+    }
+
+    /// `(∫|w|, ∫|u|·|w(u)| du)` over the support, by the midpoint rule on
+    /// [`MOMENT_GRID_STEPS`] steps per piece.
+    #[must_use]
+    pub fn absolute_moments(&self) -> (f64, f64) {
+        self.pieces
+            .iter()
+            .fold((0.0, 0.0), |(mass, moment), piece| {
+                let h = (piece.u_end - piece.u_start) / MOMENT_GRID_STEPS as f64;
+                (0..MOMENT_GRID_STEPS).fold((mass, moment), |(mass, moment), step| {
+                    let u = piece.u_start + (step as f64 + 0.5) * h;
+                    let weight = piece.evaluate(u).abs() * h;
+                    (mass + weight, moment + u.abs() * weight)
+                })
+            })
     }
 
     pub fn from_pieces(pieces: Vec<crate::bezier::BezierPiece>) -> Result<Self, AlgebraError> {

@@ -69,6 +69,43 @@ pub struct ExtruderCaps {
     /// the advance: an unshaped followed axis steps the shaped path's
     /// acceleration, and the advance turns each step into one.
     pub instantaneous_corner_velocity_mm_s: f64,
+    /// How far the shaped path's speed may exceed the planned speed at a
+    /// moment, through the kernels of the spatial axes the follower follows
+    /// (see [`LeaderSpill`]): the planner bounds the shaped speed at a ratio
+    /// step with it.
+    pub leader_spill: LeaderSpill,
+}
+
+/// A kernel `w` turns a planned speed `v(t) ≤ v₀ + A·|t − t₀|` around `t₀`
+/// into a shaped speed at `t₀` of at most `v₀·∫|w| + A·∫|u|·|w(u)| du`:
+/// `mass` and `moment_s`, the largest among the followed axes' kernels
+/// (1 and 0 where no kernel shapes them).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LeaderSpill {
+    pub mass: f64,
+    pub moment_s: f64,
+}
+
+impl LeaderSpill {
+    pub const UNSHAPED: Self = Self {
+        mass: 1.0,
+        moment_s: 0.0,
+    };
+
+    /// The largest planned speed whose shaped speed stays within `shaped`
+    /// under an acceleration budget of `accel`; zero where the spill alone
+    /// exceeds it.
+    #[must_use]
+    pub fn planned_speed(&self, shaped: f64, accel: f64) -> f64 {
+        ((shaped - self.moment_s * accel) / self.mass).max(0.0)
+    }
+
+    fn wider(self, other: Self) -> Self {
+        Self {
+            mass: self.mass.max(other.mass),
+            moment_s: self.moment_s.max(other.moment_s),
+        }
+    }
 }
 
 impl ExtruderCaps {
@@ -103,7 +140,18 @@ impl ExtruderCaps {
             instantaneous_corner_velocity_mm_s: a
                 .instantaneous_corner_velocity_mm_s
                 .min(b.instantaneous_corner_velocity_mm_s),
+            leader_spill: a.leader_spill.wider(b.leader_spill),
         })
+    }
+
+    /// The rule the follower's ratio ramp derives each step's ramp time by.
+    #[must_use]
+    pub fn ratio_ramp_rule(&self) -> crate::RatioRampRule {
+        crate::RatioRampRule {
+            advance_slope_s: self.advance_slope_s,
+            max_velocity_mm_s: self.max_velocity_mm_s,
+            max_accel_mm_s2: self.max_accel_mm_s2,
+        }
     }
 
     fn check(&self) -> Result<(), &'static str> {
@@ -129,6 +177,10 @@ impl ExtruderCaps {
             .any(|gain| !(*gain >= 0.0))
         {
             return Err("jerk gains must be non-negative");
+        }
+        let LeaderSpill { mass, moment_s } = self.leader_spill;
+        if !(mass.is_finite() && mass >= 1.0 && moment_s.is_finite() && moment_s >= 0.0) {
+            return Err("the leaders' spill must be finite, its mass at least 1");
         }
         Ok(())
     }

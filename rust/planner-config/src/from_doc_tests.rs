@@ -121,18 +121,16 @@ fn axis_sections_parse_lists() {
 }
 
 #[test]
-fn a_ratio_ramp_time_is_read_from_its_axis() {
-    let s = settings(&format!(
-        "{MINIMAL}[axis x]\n[axis e]\nfollows: x\nratio_ramp_time: 0.015\n"
-    ));
-    assert_eq!(s.axes[0].ratio_ramp_time, None);
-    assert_eq!(s.axes[1].ratio_ramp_time, Some(0.015));
+fn a_ratio_ramp_time_is_refused_with_a_pointer_to_the_automatic_rule() {
     let err = read_err(&format!(
-        "{MINIMAL}[axis x]\n[axis e]\nfollows: x\nratio_ramp_time: 0\n"
+        "{MINIMAL}[axis x]\n[axis e]\nfollows: x\nratio_ramp_time: 0.015\n"
     ));
     assert_eq!(
         err,
-        "Option 'ratio_ramp_time' in section 'axis e' must be above 0"
+        format!(
+            "[axis e] option 'ratio_ramp_time' was removed: {}",
+            crate::RATIO_RAMP_RULE
+        )
     );
 }
 

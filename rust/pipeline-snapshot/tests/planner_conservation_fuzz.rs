@@ -527,3 +527,27 @@ fn an_eased_arc_run_keeps_the_corner_budget_at_its_head() {
     ];
     toolhead_stays_within_the_corner_budget(limits, &steps).unwrap();
 }
+
+/// Found once every follower ramps its ratio: a fast 1 mm line and a
+/// 4.6 µm move nearly reversing off it, at one ratio. The follower rides
+/// the leaders' corner, where their speed dips sharply, and its position
+/// must follow its velocity there for the source fit to close.
+#[test]
+#[ignore = "derived-ratio-ramp: the follower's odometer position drifts from its velocity in the leaders' corner dip, and the plain source fit runs out of refinement splits"]
+fn a_near_reversal_off_a_fast_line_lays_its_ratio_along_the_path() {
+    let limits = Limits {
+        max_velocity: 477.1372504755238,
+        max_accel: 46370.99632569863,
+        square_corner_velocity: 13.517812626216859,
+    };
+    let steps = [
+        step(std::f64::consts::PI, 1.0, 593.262836305538, 0.06452893755225318),
+        step(
+            0.1662771977788236,
+            0.004608638732611155,
+            278.9544117803534,
+            0.06452893755225318,
+        ),
+    ];
+    extruder_lays_its_ratio_along_the_path(limits, &steps).unwrap();
+}

@@ -4073,12 +4073,12 @@ fn a_shaped_stroke_from_rest_to_rest_extrudes_its_command() {
 }
 
 /// Raw leaders stop at an abrupt extrusion-ratio change, but the shaped
-/// leaders are still moving through it, so a projected follower with no
-/// kernel of its own changes ratio at speed: a real velocity step. The seam
-/// has to carry it as a C0 corner, each side running at its own ratio,
-/// rather than bending the stretch after it toward the previous rate.
+/// leaders are still moving through it, so a projected follower changes
+/// ratio at speed: its ratio ramp spreads the change along the path, so
+/// the seam carries no velocity step, and beyond the longest ramp each side
+/// runs at its own ratio.
 #[test]
-fn a_ratio_change_under_moving_shaped_leaders_is_a_follower_velocity_step() {
+fn a_ratio_change_under_moving_shaped_leaders_is_ramped() {
     let moves = [
         line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 1.5),
         line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0], 3.0),
@@ -4098,11 +4098,21 @@ fn a_ratio_change_under_moving_shaped_leaders_is_a_follower_velocity_step() {
     );
     let left = seam[0].eval_axis(3, at).unwrap().velocity;
     let right = seam[1].eval_axis(3, at).unwrap().velocity;
-    let tolerance = 1e-3 * speed;
-    for (side, measured, ratio) in [("left", left, 0.05), ("right", right, 0.1)] {
+    assert!(
+        (left - right).abs() <= 1e-3 * speed,
+        "the ratio change steps e from {left} to {right} mm/s"
+    );
+    let beyond = geometry::RATIO_RAMP_MAX_TIME_S;
+    for (side, t, ratio) in [("before", at - beyond, 0.05), ("after", at + beyond, 0.1)] {
+        let segment = segments
+            .iter()
+            .find(|segment| segment.t_start <= t && t <= segment.t_end)
+            .expect("the replay covers both sides of the ramp");
+        let speed = segment.eval_axis(0, t).unwrap().velocity;
+        let measured = segment.eval_axis(3, t).unwrap().velocity;
         assert!(
-            (measured - ratio * speed).abs() <= tolerance,
-            "{side} of the ratio change e runs {measured} mm/s, not {ratio} x {speed}"
+            (measured - ratio * speed).abs() <= 1e-3 * speed.max(1.0),
+            "{side} the ratio ramp e runs {measured} mm/s, not {ratio} x {speed}"
         );
     }
 }
@@ -4445,15 +4455,14 @@ fn an_advance_before_projection_stitches_across_a_dwell_at_rest() {
     }
 }
 
-/// The ratio change of
-/// `a_ratio_change_under_moving_shaped_leaders_is_a_follower_velocity_step`
+/// The ratio change of `a_ratio_change_under_moving_shaped_leaders_is_ramped`
 /// with pressure advance and a kernel on the follower. The seam carries the
-/// follower's velocity step as a C0 corner and the advance's position step
-/// `k·Δv` into the kernel; neither may count the other. A kernel-free
-/// advance chain is refused, linear gains after a kernel apply to the
-/// smoothed track, and a nonlinear advance (here all but linear) applies
-/// before projection: either way the output must be the unadvanced output
-/// plus `k` times its velocity.
+/// ramped ratio and the advance's position step `k·Δv` into the kernel;
+/// neither may count the other. Linear gains before a kernel and a
+/// nonlinear advance (here all but linear) both apply before projection:
+/// away from the rests at either end, where the advance builds and
+/// releases its lead over a valley, the output must be the unadvanced
+/// output plus `k` times its velocity.
 #[test]
 fn a_ratio_change_under_moving_shaped_leaders_with_advance_is_one_step() {
     let moves = [
@@ -4500,11 +4509,11 @@ fn a_ratio_change_under_moving_shaped_leaders_with_advance_is_one_step() {
     let t_end = plain.last().expect("plain run has segments").t_end;
     let tolerance = 2.0 * cfg().fit_tol_mm + nonlinear_offset;
     for (label, run) in [
-        ("linear gains after the kernel", &linear),
+        ("linear gains before the kernel", &linear),
         ("advance before projection", &advanced),
     ] {
         for index in 0..=2000 {
-            let t = t_end * f64::from(index) / 2000.0;
+            let t = t_end * (0.2 + 0.6 * f64::from(index) / 2000.0);
             let (plain_position, plain_velocity) = extruder_at(&plain, t);
             let (position, _) = extruder_at(run, t);
             let expected = plain_position + k * plain_velocity;

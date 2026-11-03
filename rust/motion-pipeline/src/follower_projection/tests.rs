@@ -11,7 +11,7 @@ use super::{FollowerSignal, FollowerState, integrate};
 use crate::shaper::TrackSignal;
 
 fn jerk_at(sig: &FollowerSignal, t: f64) -> f64 {
-    sig.jerk_read(t, &sig.path_read(t))
+    sig.ramped_read(t, &sig.path_read(t)).2
 }
 
 /// Regression for the bench crash "shaper: axis 3: shaped sample is
@@ -118,6 +118,115 @@ fn incremental_arc_cache_matches_direct_integration_in_any_query_order() {
     }
 }
 
+/// Leaders riding one ninth-degree piece whose speed bends hard and
+/// often, as a planned corner's does: where a quadrature's error is
+/// largest, and where Simpson's halves can agree by chance.
+fn wiggling_leaders() -> ContinuousSegment {
+    cusp_segment(
+        vec![
+            0.0,
+            1.5,
+            -7157.1,
+            27_460_800.0,
+            804_354_666_666.6667,
+            3_392_574_814_814_816.5,
+            3.673_197_037_037_039e19,
+            -2.310_463_209_876_544_6e23,
+            -1.442_361_591_220_850_8e26,
+            8.428_521_993_598_543e30,
+        ],
+        vec![
+            0.0,
+            0.5,
+            12_896.4,
+            -8_841_466.666_666_67,
+            -74_469_333_333.333_37,
+            5_479_490_370_370_372.0,
+            -6.636_800_000_000_003e18,
+            -8.843_851_851_851_857e22,
+            -1.714_717_146_776_407e27,
+            -6.875_010_516_689_539e29,
+        ],
+        0.0,
+        0.15e-3,
+    )
+}
+
+/// The distance the leaders cover is continuous in time between odometer
+/// knots: each step of a fine scan covers what their speed says it does,
+/// so no query lands on a different quadrature than its neighbour.
+#[test]
+fn the_odometer_is_continuous_between_its_knots() {
+    let shaped = wiggling_leaders();
+    let (t0, t1) = (shaped.t_start, shaped.t_end);
+    let state = FollowerState::default();
+    let sig = FollowerSignal::new(
+        &shaped,
+        &shaped,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    let steps = 30_000;
+    let dt = (t1 - t0) / f64::from(steps);
+    let mut worst = (0.0_f64, t0);
+    for index in 1..steps - 1 {
+        let t = t0 + dt * f64::from(index);
+        let covered = sig.s_at(t + dt) - sig.s_at(t);
+        let trapezoid = 0.5 * dt * (sig.shaped_speed(t) + sig.shaped_speed(t + dt));
+        let jump = (covered - trapezoid).abs();
+        if jump > worst.0 {
+            worst = (jump, t);
+        }
+    }
+    assert!(
+        worst.0 <= 1e-13,
+        "the odometer steps by {} mm at t={}",
+        worst.0,
+        worst.1
+    );
+}
+
+
+/// The distance the leaders cover is their speed's integral to well under
+/// the fit's resolution everywhere along the segment.
+#[test]
+fn the_odometer_integrates_the_leaders_speed() {
+    let shaped = wiggling_leaders();
+    let (t0, t1) = (shaped.t_start, shaped.t_end);
+    let state = FollowerState::default();
+    let sig = FollowerSignal::new(
+        &shaped,
+        &shaped,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    let steps = 20_000;
+    let h = (t1 - t0) / f64::from(steps);
+    let mut reference = 0.0;
+    let mut worst = (0.0_f64, t0);
+    for index in 0..steps {
+        let a = t0 + h * f64::from(index);
+        reference += h / 6.0
+            * (sig.shaped_speed(a) + 4.0 * sig.shaped_speed(a + 0.5 * h) + sig.shaped_speed(a + h));
+        let error = (sig.s_at(a + h) - sig.s_start - reference).abs();
+        if error > worst.0 {
+            worst = (error, a + h);
+        }
+    }
+    assert!(
+        worst.0 <= 1e-12,
+        "the odometer is off its speed's integral by {} mm at t={}",
+        worst.0,
+        worst.1
+    );
+}
+
 fn cusp_segment(x_coeffs: Vec<f64>, y_coeffs: Vec<f64>, t0: f64, t1: f64) -> ContinuousSegment {
     let curve = |coeffs| {
         bezier_pieces_to_nurbs(&[BezierPiece {
@@ -131,7 +240,7 @@ fn cusp_segment(x_coeffs: Vec<f64>, y_coeffs: Vec<f64>, t0: f64, t1: f64) -> Con
 fn kernel_advance(stage: &trajectory::ChainStage) -> super::LeadingAdvance<'_> {
     super::LeadingAdvance {
         stage,
-        smoothing: super::AdvanceSmoothing::Kernel,
+        smoothing: super::AdvanceSmoothing::RatioRampAndKernel,
         instantaneous_corner_velocity: trajectory::DEFAULT_INSTANTANEOUS_CORNER_VELOCITY_MM_S,
     }
 }
@@ -1451,6 +1560,57 @@ fn a_follower_reports_its_steps_across_a_leader_knot() {
     );
 }
 
+/// A long slow move that ends in a brake shorter than a millionth of the
+/// move: the follower reads the leaders' acceleration only where they
+/// brake, not over a stretch of the cruise sized by the whole move.
+#[test]
+fn a_long_cruise_ending_in_a_short_brake_keeps_its_cruise_unaccelerated() {
+    let (cruise_end, brake_accel, speed, ratio) = (100.0, 37_419.9, 1.0, 0.04166);
+    let end = cruise_end + speed / brake_accel;
+    let x = bezier_pieces_to_nurbs(&[
+        BezierPiece {
+            u_start: 0.0,
+            u_end: cruise_end,
+            coeffs: vec![0.0, speed, 0.0],
+        },
+        BezierPiece {
+            u_start: cruise_end,
+            u_end: end,
+            coeffs: vec![speed * cruise_end, speed, -0.5 * brake_accel],
+        },
+    ]);
+    let y = bezier_pieces_to_nurbs(&[BezierPiece {
+        u_start: 0.0,
+        u_end: end,
+        coeffs: vec![0.0],
+    }]);
+    let shaped = leader_segment(x, y, 0.0, end);
+    let mut state = FollowerState::default();
+    state.push_span(2.0 * cruise_end, ratio, ratio);
+    let sig = FollowerSignal::new(
+        &shaped,
+        &shaped,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    let brake = end - cruise_end;
+    for t in [cruise_end - 4.0 * brake, cruise_end - 0.25 * brake] {
+        let acceleration = sig.second_deriv(t);
+        assert!(
+            acceleration.abs() < 1e-6,
+            "the follower accelerates at {acceleration} mm/s² while the leaders cruise at {t}"
+        );
+    }
+    let braking = sig.second_deriv(cruise_end + 0.5 * brake);
+    assert!(
+        (braking + ratio * brake_accel).abs() < 1e-6 * brake_accel,
+        "the follower brakes at {braking} mm/s² with the leaders"
+    );
+}
+
 /// The kernel input re-projects its whole cached history every batch, each
 /// time offset by a different carried position. A piece leaving rest with
 /// a start velocity of rounding (here the one that broke the extruder seam
@@ -1595,118 +1755,6 @@ fn a_ratio_ramped_advance_takes_a_leader_acceleration_step_within_its_allowance(
         .expect("a 0.45 mm/s advance velocity step is within the extruder's allowance");
 }
 
-fn four_axis_segment(
-    [x, y, z, e]: [Vec<f64>; 4],
-    (t0, t1): (f64, f64),
-    followers: &[geometry::FollowerDemand],
-) -> ContinuousSegment {
-    let axis = |coeffs| {
-        ContinuousAxis::Spline(Arc::new(bezier_pieces_to_nurbs(&[BezierPiece {
-            u_start: t0,
-            u_end: t1,
-            coeffs,
-        }])))
-    };
-    ContinuousSegment {
-        axes: Arc::from([axis(x), axis(y), axis(z), axis(e)]),
-        followers: Arc::from(followers),
-        spatial_path: true,
-        t_start: t0,
-        t_end: t1,
-        motor_mask: 0,
-        source_line: 1,
-        rest_at_end: false,
-    }
-}
-
-/// Regression for the corpus crash "follower source fit index 0 does not
-/// match segment 1" on `voron_first_layers`: a slow z-hop leaves the shaped
-/// x/y untouched, so the follower fits it straight from the raw axis and
-/// projects it before it is committed. When the next window's shaping moves
-/// the leaders, projection starts with that z-hop still in the window, and
-/// must not ingest it a second time.
-#[test]
-fn projection_starting_mid_window_skips_what_the_raw_fit_already_projected() {
-    let z_hop = four_axis_segment(
-        [vec![10.0], vec![20.0], vec![0.0, 0.2 / 0.09], vec![0.0]],
-        (0.0, 0.09),
-        &[],
-    );
-    let ratio = 0.05;
-    let extrusion_span = (0.09, 0.12);
-    let raw_line = four_axis_segment(
-        [
-            vec![10.0, 50.0],
-            vec![20.0],
-            vec![0.2],
-            vec![0.0, ratio * 50.0],
-        ],
-        extrusion_span,
-        &[geometry::FollowerDemand::constant(3, ratio)],
-    );
-    let shaped_line = four_axis_segment(
-        [
-            vec![10.0, 40.0, 0.3 / 0.03_f64.powi(2)],
-            vec![20.0],
-            vec![0.2],
-            vec![0.0, ratio * 50.0],
-        ],
-        extrusion_span,
-        &[geometry::FollowerDemand::constant(3, ratio)],
-    );
-    let smoothing = trajectory::CompiledChain::compile(&[trajectory::PostProcessorInstance::new(
-        "st",
-        &trajectory::algos::SmoothTriangle,
-        vec![0.04],
-    )])
-    .expect("a single smoothing kernel always compiles");
-    let chains = trajectory::AxisChainSet {
-        chains: vec![
-            trajectory::CompiledChain::default(),
-            trajectory::CompiledChain::default(),
-            trajectory::CompiledChain::default(),
-            smoothing,
-        ],
-        followers: vec![(3, vec![0, 1, 2])],
-    };
-    let pool = crate::worker_pool::WorkerPool::new();
-    let window = |base, frontier| super::ProjectionWindow {
-        base,
-        frontier,
-        chains: &chains,
-        fit_tol: crate::lowering::FitTol::absolute(1e-4, 50.0),
-        lookahead: crate::shaper::Lookahead::Forced,
-        pool: &pool,
-    };
-    let mut states = Vec::new();
-    let mut timing = super::ProjectionTiming::default();
-
-    let first = [z_hop.clone()];
-    super::project_followers(
-        window(&first, &first),
-        &mut Vec::new(),
-        &mut states,
-        &mut timing,
-    )
-    .expect("the raw fit projects the z-hop");
-    assert!(
-        !states[3].is_active(),
-        "test premise: unshaped leaders keep the follower on its raw fit"
-    );
-
-    let base = [z_hop.clone(), raw_line];
-    let frontier = [z_hop.clone(), shaped_line];
-    let mut committed = vec![z_hop];
-    super::project_followers(
-        window(&base, &frontier),
-        &mut committed,
-        &mut states,
-        &mut timing,
-    )
-    .expect("projection picks up after the raw fit");
-    assert!(states[3].is_active());
-}
-
 #[test]
 fn a_follower_fit_scales_the_position_tolerance_and_keeps_its_acceleration_budget() {
     let tolerance = super::follower_fit_tol(
@@ -1743,8 +1791,6 @@ const TANH: [f64; 3] = [0.02, 0.05, 2.0];
 fn a_source_fitted_to_the_advanced_signal_spends_its_position_budget() {
     for chain in [
         e_chain(&[("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE])]),
-        e_chain(&[("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE])])
-            .with_ratio_ramp_time(0.015),
         e_chain(&[
             ("pa", &algos::TanhPressureAdvance, TANH.to_vec()),
             ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
@@ -1753,11 +1799,6 @@ fn a_source_fitted_to_the_advanced_signal_spends_its_position_budget() {
             ("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE]),
             ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
         ]),
-        e_chain(&[
-            ("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE]),
-            ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
-        ])
-        .with_ratio_ramp_time(0.015),
     ] {
         assert_eq!(source_budget(&chain), AccelBudget::PositionEquivalent);
     }
@@ -1767,7 +1808,6 @@ fn a_source_fitted_to_the_advanced_signal_spends_its_position_budget() {
 fn a_source_fitted_to_the_plain_projection_keeps_the_absolute_budget() {
     for chain in [
         CompiledChain::default(),
-        CompiledChain::default().with_ratio_ramp_time(0.015),
         e_chain(&[("st", &algos::SmoothTriangle, vec![SMOOTH_TIME])]),
         e_chain(&[
             ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
@@ -1781,3 +1821,4 @@ fn a_source_fitted_to_the_plain_projection_keeps_the_absolute_budget() {
         assert_eq!(source_budget(&chain), AccelBudget::Absolute);
     }
 }
+

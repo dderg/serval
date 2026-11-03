@@ -72,6 +72,9 @@ pub struct VelocityReport {
     pub curvature_bound: u32,
     pub feedrate_bound: u32,
     pub limit_ride: u32,
+    /// Joins whose speed the follower's ratio ramp lowered: a ratio step
+    /// too large for the longest ramp at the speed the path allows.
+    pub ratio_step_bound: u32,
     pub traversal_time_s: f64,
 }
 
@@ -258,7 +261,7 @@ where
     let mut report = VelocityReport::default();
     let caps = build_move_caps(moves, params, &mut report)?;
     check_entry_ceiling(moves, &caps, entry_v, tol)?;
-    let mut plan = seed_seam_velocities(&caps, stop_before, entry_v, &mut report);
+    let mut plan = seed_seam_velocities(moves, &caps, stop_before, entry_v, &mut report);
     forward_pass(moves, &caps, &mut plan, tol)?;
     let shop = ProfileShop::new(&caps, &plan.is_anchor);
     let mut settled = None;
@@ -454,6 +457,7 @@ impl SeamPlan {
 }
 
 fn seed_seam_velocities(
+    moves: &[crate::Move],
     caps: &[MoveCaps],
     stop_before: &[bool],
     entry_v: f64,
@@ -478,6 +482,12 @@ fn seed_seam_velocities(
                 disk::limit_speed(kappa_up, up.accel).min(disk::limit_speed(kappa_dn, dn.accel));
             let ceiling = up.flat_ceiling.min(dn.flat_ceiling);
             v[k] = ceiling.min(disk::notch_free_min(ceiling, boundary_vlim));
+            let step_ceiling =
+                extruder_caps::ratio_step_ceiling(&moves[k - 1], &moves[k], up.accel.max(dn.accel));
+            if step_ceiling < v[k] {
+                report.ratio_step_bound += 1;
+                v[k] = step_ceiling;
+            }
         }
     }
     SeamPlan {

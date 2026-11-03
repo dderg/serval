@@ -612,3 +612,50 @@ fn arc_run_tail_blend_leaves_no_sliver_row() {
     let (_, report) = run_case(limits, &moves);
     assert!(report.hard_ok(), "{report}");
 }
+
+/// Found by `target_budgets_hold`: once every follower ramps its ratio, a
+/// slow z-carrying move, a fast 1 mm travel and a slow extrusion left the
+/// follower's source fit facing a velocity step narrower than the
+/// resolution floor at the travel → extrusion seam.
+#[test]
+fn slow_extrusion_after_a_short_fast_travel_ramps_its_ratio() {
+    let limits = FuzzLimits {
+        max_velocity: 369.8,
+        max_accel: 37419.9,
+        square_corner_velocity: 0.0,
+    };
+    let moves = [
+        MoveSpec {
+            z_step_mm: -0.185,
+            ..planar(Turn::Continue, 1.0, 1.0, 0.0)
+        },
+        planar(Turn::Continue, 1.0, 472.3, 0.0),
+        planar(Turn::Continue, 37.57, 1.0, 0.04166),
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok(), "{report}");
+}
+
+/// Found by `planner_conservation_fuzz`: a fast 1 mm extrusion, a
+/// micrometre extrusion turning off it, and a slow travel; the follower's
+/// plain source fit ran out of refinement splits on the ramp.
+#[test]
+fn a_micrometre_extrusion_between_a_fast_line_and_a_slow_travel_ramps_its_ratio() {
+    let limits = FuzzLimits {
+        max_velocity: 127.389385959449,
+        max_accel: 39584.86189423528,
+        square_corner_velocity: 7.296773245024728,
+    };
+    let moves = [
+        planar(Turn::Absolute(2.9053886486487226), 1.0, 546.924938602993, 0.0765246174258583),
+        planar(
+            Turn::Absolute(5.682024081779053),
+            0.0009566603280114744,
+            90.87832523810361,
+            0.09079521363142903,
+        ),
+        planar(Turn::Absolute(4.323424096437546), 1.0, 1.0, 0.0),
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok(), "{report}");
+}

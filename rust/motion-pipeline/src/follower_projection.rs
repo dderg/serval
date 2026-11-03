@@ -31,6 +31,10 @@ const SPAN_LOOKUP_SLACK_MM: f64 = 1e-6;
 const PVA_MEMO_SLOTS: usize = 64;
 const BASIS_CONVERSION_ROUNDOFF_ENVELOPE: f64 = (1_u64 << 20) as f64;
 const ODOMETER_ALIGNMENT_ULPS: f64 = (1_u64 << 12) as f64;
+/// The share of the leaders' first or last piece next to an endpoint at
+/// rest over which the follower reads their speed as leaving or reaching
+/// zero at the endpoint's acceleration ([`SpeedZeroSliver`]): within one
+/// piece, so a sliver never reads a brake into the cruise before it.
 const SPEED_ZERO_SLIVER_FRACTION: f64 = 1e-6;
 const COMPONENT_ZERO_PROBES: usize = 16;
 /// The share of the acceleration tolerance under which a slow leader
@@ -184,13 +188,11 @@ impl AdvanceStep {
     }
 }
 
-/// What spares the motor the discontinuities a leading advance makes, and
-/// so what the advance reads.
+/// What spares the motor the discontinuities a leading advance makes. Every
+/// projected follower ramps its ratio, so the advance reads only the
+/// velocity laid along the leaders' path either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdvanceSmoothing {
-    /// A kernel after the projection: the advance reads the whole follower
-    /// velocity, and its steps are carried for the kernel to spread.
-    Kernel,
     /// A ratio ramp ahead of it: the laid ratio is C1, so the advance has no
     /// step to carry and nothing after it would spread one; a step that
     /// would reach the motor is refused. The advance reads only the
@@ -232,63 +234,34 @@ impl<'a> LeadingAdvance<'a> {
             .filter(|stage| chain.kernel().is_none() || !acceleration_gain(stage))?;
         Some(Self {
             stage,
-            smoothing: match (chain.ratio_ramp_time(), chain.kernel()) {
-                (Some(_), None) => AdvanceSmoothing::RatioRamp,
-                (Some(_), Some(_)) => AdvanceSmoothing::RatioRampAndKernel,
-                (None, _) => AdvanceSmoothing::Kernel,
+            smoothing: match chain.kernel() {
+                None => AdvanceSmoothing::RatioRamp,
+                Some(_) => AdvanceSmoothing::RatioRampAndKernel,
             },
             instantaneous_corner_velocity: chain.instantaneous_corner_velocity(),
         })
     }
 
     /// The follower velocity, acceleration and jerk the advance reads at
-    /// `t`, given the follower's path state and its own velocity and
-    /// acceleration there: the extrusion laid along the path, never the
-    /// extrude-only motion folded into the follower.
-    fn read(
-        &self,
-        sig: &FollowerSignal,
-        t: f64,
-        read: &PathRead,
-        (velocity, acceleration): (f64, f64),
-    ) -> (f64, f64, f64) {
-        if self.reads_path_only() {
-            return sig.ramped_read(t, read);
-        }
-        let (raw_velocity, raw_acceleration, raw_jerk) = sig.extrude_only_derivatives(t);
-        (
-            velocity - raw_velocity,
-            acceleration - raw_acceleration,
-            sig.jerk_read(t, read) - raw_jerk,
-        )
+    /// `t`: the extrusion laid along the path, never the extrude-only motion
+    /// folded into the follower.
+    fn read(&self, sig: &FollowerSignal, t: f64, read: &PathRead) -> (f64, f64, f64) {
+        sig.ramped_read(t, read)
     }
 
     fn read_velocity(&self, sig: &FollowerSignal, t: f64) -> f64 {
-        if self.reads_path_only() {
-            return sig.ramped_advance_read(t).0;
-        }
-        sig.deriv(t) - sig.extrude_only_derivatives(t).0
+        sig.ramped_advance_read(t).0
     }
 
     fn read_acceleration(&self, sig: &FollowerSignal, t: f64) -> f64 {
-        if self.reads_path_only() {
-            return sig.ramped_advance_read(t).1;
-        }
-        sig.second_deriv(t) - sig.extrude_only_derivatives(t).1
+        sig.ramped_advance_read(t).1
     }
 
     fn read_seam_velocity(&self, input: &SeamInput) -> f64 {
-        if self.reads_path_only() {
-            return input
-                .ramped
-                .expect("a ratio-ramped seam records what its advance reads")
-                .read_velocity;
-        }
-        input.path_velocity
-    }
-
-    fn reads_path_only(&self) -> bool {
-        self.smoothing != AdvanceSmoothing::Kernel
+        input
+            .ramped
+            .expect("a ratio-ramped seam records what its advance reads")
+            .read_velocity
     }
 
     /// No kernel follows the advance: a step it makes reaches the motor.
@@ -361,24 +334,21 @@ fn fit_source_projection(
         let (ratio, ratio_slope) = sig.state.ratio_and_slope(s);
         SeamInput {
             velocity: sig.deriv(t),
-            path_velocity: sig.deriv(t) - sig.extrude_only_derivatives(t).0,
             ratio,
             leader_speed: sig.shaped_speed(t),
             s,
             ratio_slope,
-            ramped: leading
-                .filter(LeadingAdvance::reads_path_only)
-                .map(|advance| RampedSeam {
-                    read_velocity: sig.ramped_advance_read(t).0,
-                    read_slope: sig.ramped_read_slope(s),
-                    advanced_velocity: AdvancedFollowerSignal {
-                        source: &sig,
-                        advance,
-                        steps: &[],
-                    }
-                    .eval_pva(t)
-                    .1,
-                }),
+            ramped: leading.map(|advance| RampedSeam {
+                read_velocity: sig.ramped_advance_read(t).0,
+                read_slope: sig.ramped_read_slope(s),
+                advanced_velocity: AdvancedFollowerSignal {
+                    source: &sig,
+                    advance,
+                    steps: &[],
+                }
+                .eval_pva(t)
+                .1,
+            }),
         }
     };
     let input_start = input_state(t_start);
@@ -569,30 +539,10 @@ pub(crate) fn project_followers(
             accel_budget: source_accel_budget(leading),
             ..fit_tol
         };
-        let leaders_transformed = leaders.iter().any(|&leader| {
-            chains
-                .chains
-                .get(leader)
-                .is_some_and(CompiledChain::is_zero_support_only)
-        });
-        let leaders_changed = leaders_transformed
-            || base.iter().zip(frontier).any(|(raw, shaped)| {
-                leaders
-                    .iter()
-                    .any(|&leader| raw.axes[leader] != shaped.axes[leader])
-            });
-        let ramp_time = chain.ratio_ramp_time();
+        let rule = chain.ratio_ramp_rule();
         let state = &mut states[axis];
-        assert!(
-            ramp_time.is_some() || !state.smoothing.has_backlog(),
-            "follower axis {axis} lost its ratio ramp with segments still waiting on it"
-        );
-        let projecting = leaders_changed || state.active || ramp_time.is_some();
-        if !projecting && chain.is_empty() {
-            continue;
-        }
         let mut source_jobs = Vec::new();
-        if projecting {
+        {
             state.start_projecting();
             let ingest_started = crate::timing::stopwatch();
             let first_new = state.ingested_through_t.map_or(0, |through| {
@@ -613,42 +563,33 @@ pub(crate) fn project_followers(
                 let shaped_ds =
                     state.ingest(&base[i], &frontier[i], axis, leaders, &base[i + 1..], arc);
                 let s_start = state.aligned_span_start(next_s);
-                match ramp_time {
-                    Some(ramp_time) => {
-                        let leg = RampLeg {
-                            shaped: &frontier[i],
-                            leaders,
-                            support: projection_support(&base[i], &frontier[i], axis, leaders),
-                            start_s: table_start,
-                            rests: arc.1 <= SPAN_MIN_LEN_MM,
-                        };
-                        state.smoothing.lay(&state.spans, &leg, ramp_time);
-                        state.smoothing.queue(
-                            base[i].t_end,
-                            (s_start, shaped_ds),
-                            state.s_ingested_end,
-                        );
-                    }
-                    None => source_jobs.push((i, s_start, shaped_ds)),
-                }
+                let leg = RampLeg {
+                    shaped: &frontier[i],
+                    leaders,
+                    support: projection_support(&base[i], &frontier[i], axis, leaders),
+                    start_s: table_start,
+                    rests: arc.1 <= SPAN_MIN_LEN_MM,
+                };
+                state.smoothing.lay(&state.spans, &leg, &rule);
+                state
+                    .smoothing
+                    .queue(base[i].t_end, (s_start, shaped_ds), state.s_ingested_end);
                 next_s = s_start + shaped_ds;
             }
-            if ramp_time.is_some() {
-                if lookahead.clamps_past_signal() {
-                    state.smoothing.close_at(state.s_ingested_end);
-                }
-                for pending in state.smoothing.take_final(&state.spans) {
-                    let index = base[..frontier.len()]
-                        .partition_point(|raw| raw.t_end < pending.t_end - GRID_DEDUP_EPS_S);
-                    assert!(
-                        index < frontier.len()
-                            && (base[index].t_end - pending.t_end).abs() <= GRID_DEDUP_EPS_S,
-                        "follower axis {axis}: the segment ending at {} waited on its ratio \
-                         smoothing past the shaped frontier",
-                        pending.t_end
-                    );
-                    source_jobs.push((index, pending.s_start, pending.s_length));
-                }
+            if lookahead.clamps_past_signal() {
+                state.smoothing.close_at(state.s_ingested_end);
+            }
+            for pending in state.smoothing.take_final(&state.spans) {
+                let index = base[..frontier.len()]
+                    .partition_point(|raw| raw.t_end < pending.t_end - GRID_DEDUP_EPS_S);
+                assert!(
+                    index < frontier.len()
+                        && (base[index].t_end - pending.t_end).abs() <= GRID_DEDUP_EPS_S,
+                    "follower axis {axis}: the segment ending at {} waited on its ratio \
+                     smoothing past the shaped frontier",
+                    pending.t_end
+                );
+                source_jobs.push((index, pending.s_start, pending.s_length));
             }
             timing.ingest_us += ingest_started.elapsed_us();
         }
@@ -712,8 +653,7 @@ pub(crate) fn project_followers(
                     raw.t_start,
                 );
             }
-            let awaiting_ramps =
-                ramp_time.is_some() && source_fits.peek().is_none_or(|(index, _)| *index != i);
+            let awaiting_ramps = source_fits.peek().is_none_or(|(index, _)| *index != i);
             if awaiting_ramps {
                 break;
             }
@@ -724,62 +664,24 @@ pub(crate) fn project_followers(
                 "follower axis {axis} has no support in segment"
             );
             let base_position = state.e_end.unwrap_or_else(|| axis_pva(raw_axis, t_start).0);
-            let (projected, projected_cuts, input_states, window_advance_steps) = if projecting {
-                let (source_index, source_result) = source_fits
-                    .next()
-                    .expect("every unprojected follower segment has a source fit");
-                assert_eq!(
-                    source_index, i,
-                    "follower source fit index {source_index} does not match segment {i}"
-                );
-                let SourceProjection {
-                    track,
-                    s_end,
-                    e_end_relative,
-                    semantic_cuts,
-                    input_start,
-                    input_end,
-                    window_advance_steps,
-                } = source_result?;
-                state.s_shaped = s_end;
-                state.e_end = Some(base_position + e_end_relative);
-                (
-                    track,
-                    Some(semantic_cuts),
-                    Some((input_start, input_end)),
-                    window_advance_steps,
-                )
-            } else {
-                (
-                    fit_continuous_axis(
-                        axis,
-                        raw_axis,
-                        base_position,
-                        (t_start, t_end),
-                        fit_tol,
-                        leading.is_some(),
-                    )?,
-                    None,
-                    None,
-                    Vec::new(),
-                )
-            };
-            let (input_start, input_end) = input_states.unwrap_or_else(|| {
-                (
-                    SeamInput::of_track(&projected, t_start, raw.spatial_path),
-                    SeamInput::of_track(&projected, t_end, raw.spatial_path),
-                )
-            });
-            let track = if projecting || !raw.spatial_path {
-                projected
-            } else {
-                crate::shaper::apply_zero_support_transform(
-                    leading.map(|advance| advance.stage),
-                    axis,
-                    projected,
-                    follower_fit_tol(source_tol, follower_tol_scale(&raw.followers, axis)),
-                )?
-            };
+            let (source_index, source_result) = source_fits
+                .next()
+                .expect("every unprojected follower segment has a source fit");
+            assert_eq!(
+                source_index, i,
+                "follower source fit index {source_index} does not match segment {i}"
+            );
+            let SourceProjection {
+                track,
+                s_end,
+                e_end_relative,
+                semantic_cuts,
+                input_start,
+                input_end,
+                window_advance_steps,
+            } = source_result?;
+            state.s_shaped = s_end;
+            state.e_end = Some(base_position + e_end_relative);
             if !track.control_points().iter().all(|v| v.is_finite()) {
                 return Err(PostProcessError::NonFiniteSample {
                     axis,
@@ -815,7 +717,6 @@ pub(crate) fn project_followers(
                 }
                 None => 0.0,
             };
-            let semantic_cuts = projected_cuts.unwrap_or_else(|| piece_boundaries(&track));
             let track_start = nurbs::eval::eval(&track, t_start);
             let output_base = state.projected_output_end.unwrap_or(base_position)
                 + join_advance_step
@@ -849,20 +750,18 @@ pub(crate) fn project_followers(
             source_fits.next().is_none(),
             "follower source fit has no matching projection segment"
         );
-        if ramp_time.is_some() {
-            let kernel_lo = match kernel {
-                Some(kernel) if !lookahead.clamps_past_signal() => kernel.support().0,
-                _ => 0.0,
-            };
-            commit_count = commit_count.min(final_ramped_commits(
-                state,
-                (base, frontier),
-                commit_count,
-                kernel_lo,
-                (axis, leaders),
-            ));
-        }
-        committing.push((axis, leaders, projecting));
+        let kernel_lo = match kernel {
+            Some(kernel) if !lookahead.clamps_past_signal() => kernel.support().0,
+            _ => 0.0,
+        };
+        commit_count = commit_count.min(final_ramped_commits(
+            state,
+            (base, frontier),
+            commit_count,
+            kernel_lo,
+            (axis, leaders),
+        ));
+        committing.push((axis, leaders));
     }
     assert!(
         commit_count == requested || !lookahead.clamps_past_signal(),
@@ -870,7 +769,7 @@ pub(crate) fn project_followers(
         requested - commit_count
     );
     out.truncate(commit_count);
-    for (axis, leaders, projecting) in committing {
+    for (axis, leaders) in committing {
         let chain = &chains.chains[axis];
         let kernel = chain.kernel();
         let defer_linear_prefix =
@@ -944,22 +843,15 @@ pub(crate) fn project_followers(
                     .spans
                     .iter()
                     .all(|span| span.r0 >= 0.0 && span.r1 >= 0.0);
-                if projecting {
-                    assert_piece_seams(axis, "projected input", &input_pieces, &input_steps);
-                    if nonnegative_demand {
-                        let correction_tol = follower_fit_tol(
-                            fit_tol,
-                            base.iter()
-                                .map(|segment| follower_tol_scale(&segment.followers, axis))
-                                .fold(1.0, f64::min),
-                        );
-                        project_monotone(
-                            axis,
-                            "projected input",
-                            &mut input_pieces,
-                            correction_tol,
-                        );
-                    }
+                assert_piece_seams(axis, "projected input", &input_pieces, &input_steps);
+                if nonnegative_demand {
+                    let correction_tol = follower_fit_tol(
+                        fit_tol,
+                        base.iter()
+                            .map(|segment| follower_tol_scale(&segment.followers, axis))
+                            .fold(1.0, f64::min),
+                    );
+                    project_monotone(axis, "projected input", &mut input_pieces, correction_tol);
                 }
                 let unified_input_degree = input_pieces
                     .iter()
@@ -1234,9 +1126,7 @@ pub(crate) fn project_followers(
             let back = kernel.map_or(0.0, |k| k.support().1.max(0.0));
             state.trim_projected(emitted_through - back);
         }
-        if projecting {
-            state.prune_spans();
-        }
+        state.prune_spans();
     }
     Ok(())
 }
@@ -1313,8 +1203,6 @@ fn fit_kernel_window<S: TrackSignal>(
 #[derive(Debug, Clone, Copy)]
 struct SeamInput {
     velocity: f64,
-    /// `velocity` less the extrude-only motion's, what an advance reads.
-    path_velocity: f64,
     ratio: f64,
     leader_speed: f64,
     s: f64,
@@ -1332,25 +1220,6 @@ struct RampedSeam {
 }
 
 impl SeamInput {
-    /// A track that is the follower's raw motion passed through, laid along
-    /// the path when it has one and extrude-only otherwise.
-    fn of_track(track: &ScalarNurbs, t: f64, spatial_path: bool) -> Self {
-        let velocity = if track.degree() == 0 {
-            0.0
-        } else {
-            nurbs::eval::eval(&nurbs::eval::derivative(track), t)
-        };
-        Self {
-            velocity,
-            path_velocity: if spatial_path { velocity } else { 0.0 },
-            ratio: 1.0,
-            leader_speed: velocity,
-            s: 0.0,
-            ratio_slope: 0.0,
-            ramped: None,
-        }
-    }
-
     fn signal_velocity_step(&self, right: &Self) -> f64 {
         right.velocity - self.velocity - right.ratio * (right.leader_speed - self.leader_speed)
     }
@@ -1664,15 +1533,9 @@ impl FollowerState {
         self.active
     }
 
-    /// Moves the follower from its raw-axis fit onto its leaders' shaped
-    /// path. Whatever the raw fit already projected stays projected, so the
-    /// extrusion table starts where the raw fit stopped: a segment it covered
-    /// may still sit uncommitted in the window and must not be ingested.
+    /// Marks the follower as projected onto its leaders' shaped path.
     fn start_projecting(&mut self) {
-        if !self.active {
-            self.active = true;
-            self.ingested_through_t = self.projected_through_t;
-        }
+        self.active = true;
     }
 
     fn cached_projection(&self, t_start: f64, t_end: f64) -> &ProjSeg {
@@ -2009,41 +1872,6 @@ fn axis_breakpoints(axis: &ContinuousAxis) -> Vec<f64> {
             Vec::new()
         }
     }
-}
-
-struct AxisSignal<'a> {
-    axis: &'a ContinuousAxis,
-    base: f64,
-}
-
-impl TrackSignal for AxisSignal<'_> {
-    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
-        let (position, velocity, acceleration) = axis_pva(self.axis, t);
-        (position - self.base, velocity, acceleration)
-    }
-}
-
-fn fit_continuous_axis(
-    axis_index: usize,
-    axis: &ContinuousAxis,
-    base: f64,
-    (t_start, t_end): (f64, f64),
-    fit_tol: FitTol,
-    velocity_continuous: bool,
-) -> Result<ScalarNurbs, PostProcessError> {
-    let breakpoints = axis_breakpoints(axis);
-    fit_axis_from_signal(
-        AxisFit {
-            axis: axis_index,
-            t_start,
-            t_end,
-            seed_breakpoints: &breakpoints,
-            fit_tol,
-            fit_context: "follower_axis",
-            velocity_continuous,
-        },
-        &AxisSignal { axis, base },
-    )
 }
 
 fn leader_arc_length(seg: &ContinuousSegment, leaders: &[usize]) -> f64 {
@@ -2594,12 +2422,15 @@ impl<'a> FollowerSignal<'a> {
     }
 
     fn speed_zero_slivers(&self) -> (Option<SpeedZeroSliver>, Option<SpeedZeroSliver>) {
-        let t0 = self.grid[0];
-        let t1 = self.grid[self.grid.len() - 1];
-        let slack = SPEED_ZERO_SLIVER_FRACTION * (t1 - t0);
+        let [t0, first_knot, ..] = self.grid[..] else {
+            unreachable!("a follower signal's grid holds both ends of its support")
+        };
+        let [.., last_knot, t1] = self.grid[..] else {
+            unreachable!("a follower signal's grid holds both ends of its support")
+        };
         (
-            self.endpoint_sliver(t0, slack, 1.0),
-            self.endpoint_sliver(t1, slack, -1.0),
+            self.endpoint_sliver(t0, SPEED_ZERO_SLIVER_FRACTION * (first_knot - t0), 1.0),
+            self.endpoint_sliver(t1, SPEED_ZERO_SLIVER_FRACTION * (t1 - last_knot), -1.0),
         )
     }
 
@@ -2669,28 +2500,6 @@ impl<'a> FollowerSignal<'a> {
         )
     }
 
-    fn jerk_read(&self, t: f64, read: &PathRead) -> f64 {
-        let raw = self.raw_delta.map_or(0.0, |(axis, _)| {
-            axis.eval_pvaj(t)
-                .expect("follower raw axis has exact derivatives")
-                .jerk
-        });
-        self.path_jerk(t, read) + raw
-    }
-
-    /// The velocity, acceleration and jerk of the extrude-only motion folded
-    /// into the follower at `t`, zero along a spatial path.
-    fn extrude_only_derivatives(&self, t: f64) -> (f64, f64, f64) {
-        self.raw_delta.map_or((0.0, 0.0, 0.0), |(axis, _)| {
-            let (_, velocity, acceleration) = axis_pva(axis, t);
-            let jerk = axis
-                .eval_pvaj(t)
-                .expect("follower raw axis has exact derivatives")
-                .jerk;
-            (velocity, acceleration, jerk)
-        })
-    }
-
     fn path_deriv(&self, t: f64) -> f64 {
         let (ratio, _) = self.state.ratio_and_slope(self.s_owned(t));
         ratio * self.shaped_speed(t)
@@ -2704,21 +2513,6 @@ impl<'a> FollowerSignal<'a> {
 
     fn rate_second(&self, t: f64, read: &PathRead) -> f64 {
         self.odometer_scale * self.leader_speed_second_deriv(t, read.speed)
-    }
-
-    fn path_jerk(&self, t: f64, read: &PathRead) -> f64 {
-        let PathRead {
-            rate,
-            rate_deriv,
-            laid,
-            ..
-        } = *read;
-        let laid_jerk =
-            laid.ratio * self.rate_second(t, read) + 3.0 * laid.slope * rate * rate_deriv;
-        if self.state.smoothing.is_inert() {
-            return laid_jerk;
-        }
-        laid_jerk + laid.curvature * rate * rate * rate
     }
 
     /// `d(R·W)/ds` at `s`: the path slope of the ratio a ratio-ramped
@@ -2805,7 +2599,8 @@ impl<'a> FollowerSignal<'a> {
                     self.grid[self.grid.len() - 1]
                 );
                 let index = insertion - 1;
-                self.knots.s[index] + integrate(&|u| self.leaders.speed(u), self.knots.t[index], t)
+                self.knots.s[index]
+                    + integrate_within_leaf(&|u| self.leaders.speed(u), self.knots.t[index], t)
             }
         };
         integrated * self.odometer_scale
@@ -3386,7 +3181,7 @@ impl TrackSignal for AdvancedFollowerSignal<'_, '_> {
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let read = self.source.path_read(t);
         let (p, v, a) = self.source.pva_read(t, &read);
-        let (read_v, read_a, read_j) = self.advance.read(self.source, t, &read, (v, a));
+        let (read_v, read_a, read_j) = self.advance.read(self.source, t, &read);
         let input = self.advance_input(t, read_v);
         let p = p - input.steps_taken_out;
         match self.advance.stage {
@@ -3445,16 +3240,6 @@ fn localize_pieces(base: f64, pieces: &[BezierPiece]) -> Arc<[RelativeSplinePiec
         origin += travel;
     }
     Arc::from(out)
-}
-
-fn piece_boundaries(track: &ScalarNurbs) -> Vec<f64> {
-    let mut breaks = extract_bezier_pieces(track)
-        .iter()
-        .flat_map(|piece| [piece.u_start, piece.u_end])
-        .collect::<Vec<_>>();
-    breaks.sort_by(f64::total_cmp);
-    breaks.dedup();
-    breaks
 }
 
 fn piece_run_start_pv(pieces: &[BezierPiece]) -> (f64, f64) {
@@ -3929,11 +3714,91 @@ fn assert_piece_seams(
         );
     }
 }
-fn integrate(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
-    if b - a <= 0.0 {
-        return 0.0;
+/// The 15-point Gauss–Kronrod rule on `[-1, 1]`: its nodes from the end
+/// in, the centre last, their Kronrod weights, and the weights of the
+/// 7-point Gauss rule on the odd-indexed ones it embeds.
+const KRONROD_NODES: [f64; 8] = [
+    0.991_455_371_120_812_6,
+    0.949_107_912_342_758_5,
+    0.864_864_423_359_769_1,
+    0.741_531_185_599_394_4,
+    0.586_087_235_467_691_1,
+    0.405_845_151_377_397_2,
+    0.207_784_955_007_898_5,
+    0.0,
+];
+const KRONROD_WEIGHTS: [f64; 8] = [
+    0.022_935_322_010_529_225,
+    0.063_092_092_629_978_55,
+    0.104_790_010_322_250_18,
+    0.140_653_259_715_525_92,
+    0.169_004_726_639_267_9,
+    0.190_350_578_064_785_4,
+    0.204_432_940_075_298_9,
+    0.209_482_141_084_727_83,
+];
+const GAUSS_WEIGHTS: [f64; 4] = [
+    0.129_484_966_168_869_7,
+    0.279_705_391_489_276_7,
+    0.381_830_050_505_118_9,
+    0.417_959_183_673_469_4,
+];
+
+/// The Kronrod and the embedded Gauss estimates of `∫f` over `[a, b]`.
+fn gauss_kronrod(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> (f64, f64) {
+    let centre = 0.5 * (a + b);
+    let half = 0.5 * (b - a);
+    let at_centre = f(centre);
+    let mut kronrod = KRONROD_WEIGHTS[7] * at_centre;
+    let mut gauss = GAUSS_WEIGHTS[3] * at_centre;
+    for (index, (&node, &weight)) in KRONROD_NODES[..7]
+        .iter()
+        .zip(&KRONROD_WEIGHTS[..7])
+        .enumerate()
+    {
+        let offset = half * node;
+        let pair = f(centre - offset) + f(centre + offset);
+        kronrod += weight * pair;
+        if index % 2 == 1 {
+            gauss += GAUSS_WEIGHTS[index / 2] * pair;
+        }
     }
-    adaptive_simpson(f, SimpsonNode::root(f, a, b))
+    (kronrod * half, gauss * half)
+}
+
+/// Adaptive Gauss–Kronrod: an interval whose Kronrod and Gauss estimates
+/// agree within its share of the tolerance is a leaf, handed to `leaf`
+/// with its end and Kronrod value in order; Simpson's halves can agree by
+/// chance on a speed that bends often, these two rules all but never do.
+fn adaptive_gauss_kronrod(
+    f: &impl Fn(f64) -> f64,
+    (a, b): (f64, f64),
+    tol: f64,
+    depth: u32,
+    leaf: &mut impl FnMut(f64, f64),
+) {
+    let (kronrod, gauss) = gauss_kronrod(f, a, b);
+    if depth == 0 || (kronrod - gauss).abs() <= tol {
+        leaf(b, kronrod);
+        return;
+    }
+    let middle = 0.5 * (a + b);
+    adaptive_gauss_kronrod(f, (a, middle), 0.5 * tol, depth - 1, leaf);
+    adaptive_gauss_kronrod(f, (middle, b), 0.5 * tol, depth - 1, leaf);
+}
+
+fn integrate(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
+    let mut total = 0.0;
+    if b - a > 0.0 {
+        adaptive_gauss_kronrod(
+            f,
+            (a, b),
+            INTEGRAL_TOL_MM,
+            INTEGRAL_MAX_DEPTH,
+            &mut |_, value| total += value,
+        );
+    }
+    total
 }
 
 /// `integrate`, but the converged leaves of the adaptive recursion are kept
@@ -3944,119 +3809,25 @@ fn integrate_recording(f: &impl Fn(f64) -> f64, a: f64, b: f64, knots: &mut Odom
     if b - a <= 0.0 {
         return;
     }
-    adaptive_simpson_recording(f, SimpsonNode::root(f, a, b), knots);
+    adaptive_gauss_kronrod(
+        f,
+        (a, b),
+        INTEGRAL_TOL_MM,
+        INTEGRAL_MAX_DEPTH,
+        &mut |end, value| knots.push_leaf(end, value),
+    );
 }
 
-/// One node of the adaptive Simpson tree: the interval, the three samples
-/// the parent already paid for, the parent's estimate over it, and the error
-/// budget and depth left to it.
-#[derive(Clone, Copy)]
-struct SimpsonNode {
-    a: f64,
-    b: f64,
-    fa: f64,
-    fm: f64,
-    fb: f64,
-    whole: f64,
-    tol: f64,
-    depth: u32,
-}
-
-/// One evaluation of a node: either it converged to a value, or it produced
-/// the two halves that must be refined.
-enum SimpsonStep {
-    Converged(f64),
-    Refine {
-        left: SimpsonNode,
-        right: SimpsonNode,
-    },
-}
-
-impl SimpsonNode {
-    fn root(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> Self {
-        let m = 0.5 * (a + b);
-        let (fa, fm, fb) = (f(a), f(m), f(b));
-        let whole = (b - a) / 6.0 * (fa + 4.0 * fm + fb);
-        Self {
-            a,
-            b,
-            fa,
-            fm,
-            fb,
-            whole,
-            tol: INTEGRAL_TOL_MM,
-            depth: INTEGRAL_MAX_DEPTH,
-        }
+/// The integral over `[a, b]`, inside one converged leaf of an
+/// [`integrate_recording`] tree, by the Kronrod rule the leaf converged
+/// under, applied once: a smooth function of `b` that meets the leaf's own
+/// value at its end, where refining wherever the error estimate crosses a
+/// tolerance would step the result there.
+fn integrate_within_leaf(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
+    if b - a <= 0.0 {
+        return 0.0;
     }
-
-    fn step(self, f: &impl Fn(f64) -> f64) -> SimpsonStep {
-        let Self {
-            a,
-            b,
-            fa,
-            fm,
-            fb,
-            whole,
-            tol,
-            depth,
-        } = self;
-        let m = 0.5 * (a + b);
-        let (lm, rm) = (0.5 * (a + m), 0.5 * (m + b));
-        let (flm, frm) = (f(lm), f(rm));
-        let left = (m - a) / 6.0 * (fa + 4.0 * flm + fm);
-        let right = (b - m) / 6.0 * (fm + 4.0 * frm + fb);
-        let delta = left + right - whole;
-        if depth == 0 || delta.abs() <= 15.0 * tol {
-            return SimpsonStep::Converged(left + right + delta / 15.0);
-        }
-        SimpsonStep::Refine {
-            left: Self {
-                a,
-                b: m,
-                fa,
-                fm: flm,
-                fb: fm,
-                whole: left,
-                tol: 0.5 * tol,
-                depth: depth - 1,
-            },
-            right: Self {
-                a: m,
-                b,
-                fa: fm,
-                fm: frm,
-                fb,
-                whole: right,
-                tol: 0.5 * tol,
-                depth: depth - 1,
-            },
-        }
-    }
-}
-
-fn adaptive_simpson_recording(
-    f: &impl Fn(f64) -> f64,
-    node: SimpsonNode,
-    knots: &mut OdometerKnots,
-) {
-    let (left, right) = match node.step(f) {
-        SimpsonStep::Converged(value) => {
-            knots.push_leaf(node.b, value);
-            return;
-        }
-        SimpsonStep::Refine { left, right } => (left, right),
-    };
-    adaptive_simpson_recording(f, left, knots);
-    adaptive_simpson_recording(f, right, knots);
-}
-
-fn adaptive_simpson(f: &impl Fn(f64) -> f64, node: SimpsonNode) -> f64 {
-    match node.step(f) {
-        SimpsonStep::Converged(value) => value,
-        SimpsonStep::Refine { left, right } => {
-            adaptive_simpson(f, left) + adaptive_simpson(f, right)
-        }
-    }
+    gauss_kronrod(f, a, b).0
 }
 
 #[cfg(test)]

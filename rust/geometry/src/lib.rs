@@ -21,8 +21,8 @@ pub mod velocity;
 pub use error::GeometryError;
 pub use fitter::{CornerFitConfig, FitError, UnblendReason, seam_requires_stop};
 pub use frontend::{
-    CORNER_DEVIATION_SCV_FACTOR, ExtruderCaps, FrontendError, Move, MoveContext, VelocityLimits,
-    corner_deviation_from_scv, line_move, scv_from_corner_deviation,
+    CORNER_DEVIATION_SCV_FACTOR, ExtruderCaps, FrontendError, LeaderSpill, Move, MoveContext,
+    VelocityLimits, corner_deviation_from_scv, line_move, scv_from_corner_deviation,
 };
 pub use ratio_ramp::{RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep};
 pub use segment::{CubicSegment, FollowerDemand, SourceRange};

@@ -1,5 +1,5 @@
 use super::super::FollowerState;
-use super::{ENVELOPE_SLOPE, KERNEL_PEAK, WIDTH_SLOPE_BOUND, WidthField};
+use super::{ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_S, WIDTH_SLOPE_BOUND, WidthField};
 
 /// `(length, ratio at start, ratio at end)` per span.
 type Table = Vec<(f64, f64, f64)>;
@@ -58,17 +58,14 @@ fn length(table: &Table) -> f64 {
 /// A width field with a rest at both ends of `[0, length]` and nodes every
 /// `spacing` mm in between, each asking for `target(s)`.
 fn width(length: f64, spacing: f64, target: impl Fn(f64) -> f64) -> WidthField {
-    let mut field = WidthField {
-        spacing,
-        ..WidthField::default()
-    };
-    field.place_rest(0.0);
+    let mut field = WidthField::default();
+    field.push_rest(0.0);
     let mut s = spacing;
     while s < length {
-        field.push(s, Some(target(s)));
+        field.push(s, target(s));
         s += spacing;
     }
-    field.place_rest(length);
+    field.push_rest(length);
     field
 }
 
@@ -301,20 +298,17 @@ fn the_slope_bound_covers_every_window() {
 fn a_zero_length_stretch_on_stacked_rest_nodes_is_bounded() {
     let table = line_table();
     let total = length(&table);
-    let mut field = WidthField {
-        spacing: 0.5,
-        ..WidthField::default()
-    };
-    field.place_rest(0.0);
+    let mut field = WidthField::default();
+    field.push_rest(0.0);
     for target in [0.0, 0.0, 0.2] {
-        field.push(0.0, Some(target));
+        field.push(0.0, target);
     }
     let mut s = 0.5;
     while s < total {
-        field.push(s, Some(1.0));
+        field.push(s, 1.0);
         s += 0.5;
     }
-    field.place_rest(total);
+    field.push_rest(total);
     let state = smoothed(&table, field);
     let (ratio_bound, slope_bound) = state.smoothing.ratio_bounds(&state.spans, 0.0, 0.0);
     let (ratio, slope) = state.ratio_and_slope(0.0);
@@ -324,11 +318,8 @@ fn a_zero_length_stretch_on_stacked_rest_nodes_is_bounded() {
 
 #[test]
 fn the_width_is_c2_lipschitz_and_closes_on_every_rest() {
-    let mut field = WidthField {
-        spacing: 0.3,
-        ..WidthField::default()
-    };
-    field.place_rest(0.0);
+    let mut field = WidthField::default();
+    field.push_rest(0.0);
     let targets = [
         (0.3, 1.0),
         (0.6, 1.4),
@@ -342,9 +333,9 @@ fn the_width_is_c2_lipschitz_and_closes_on_every_rest() {
         (9.0, 3.0),
     ];
     for (s, target) in targets {
-        field.push(s, Some(target));
+        field.push(s, target);
     }
-    field.place_rest(12.0);
+    field.push_rest(12.0);
     let rests: Vec<f64> = field
         .nodes
         .iter()
@@ -407,10 +398,7 @@ fn the_width_is_c2_lipschitz_and_closes_on_every_rest() {
 
 #[test]
 fn a_final_width_node_never_moves_again() {
-    let mut field = WidthField {
-        spacing: 0.5,
-        ..WidthField::default()
-    };
+    let mut field = WidthField::default();
     field.place_rest(0.0);
     let speeds = [
         2.0, 3.0, 3.0, 3.0, 2.5, 0.4, 0.05, 0.4, 2.0, 3.0, 3.0, 3.0, 3.0, 1.0, 0.0, 0.0, 1.5, 3.0,
@@ -418,9 +406,10 @@ fn a_final_width_node_never_moves_again() {
     ];
     let mut s = 0.0;
     let mut frozen: Vec<(usize, f64)> = Vec::new();
-    for speed in speeds {
+    for (tick, speed) in speeds.into_iter().enumerate() {
         s += speed;
-        field.place_time_node(s);
+        field.place_sample(s, tick as f64 * NODE_SPACING_S);
+        field.assign(f64::INFINITY);
         for &(index, envelope) in &frozen {
             assert_eq!(
                 field.nodes[index].envelope, envelope,

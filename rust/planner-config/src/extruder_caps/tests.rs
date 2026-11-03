@@ -7,7 +7,6 @@ fn decl(name: &str, follows: &[&str], post_processors: &[&str]) -> AxisDecl {
         follows: follows.iter().map(|s| (*s).to_string()).collect(),
         motors: vec![],
         post_processors: post_processors.iter().map(|s| (*s).to_string()).collect(),
-        ratio_ramp_time: None,
         max_velocity: None,
         max_accel: None,
         instantaneous_corner_velocity: None,
@@ -46,7 +45,6 @@ fn limited(post_processors: &[&str]) -> AxisDecl {
     AxisDecl {
         max_velocity: Some(100.0),
         max_accel: Some(10_000.0),
-        ratio_ramp_time: Some(0.015),
         ..decl("e", &["x", "y", "z"], post_processors)
     }
 }
