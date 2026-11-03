@@ -309,13 +309,20 @@ impl WidthField {
         self.jet(s).value
     }
 
-    /// The nodes bounding `[lo, hi]` and every node between.
+    /// The nodes bounding `[lo, hi]` and every node between: the last node
+    /// at or before `lo` through the first at or past `hi`. On nodes stacked
+    /// at a rest the first at `hi == lo` comes before the last at `lo`, and
+    /// the last at `lo` bounds both ends.
     fn covering(&self, lo: f64, hi: f64) -> &[WidthNode] {
+        assert!(
+            lo <= hi,
+            "the ratio ramp width is bounded over [{lo}, {hi}] mm, a reversed stretch"
+        );
         let first = self
             .nodes
             .partition_point(|node| node.s <= lo)
             .saturating_sub(1);
-        let last = self.nodes.partition_point(|node| node.s < hi);
+        let last = self.nodes.partition_point(|node| node.s < hi).max(first);
         &self.nodes[first..=last.min(self.nodes.len() - 1)]
     }
 

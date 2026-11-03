@@ -294,6 +294,34 @@ fn the_slope_bound_covers_every_window() {
     }
 }
 
+/// A move that leaves the leaders at rest — an extrude-only move, a dwell
+/// — stacks its width nodes on the rest node, and the zero-length stretch
+/// it rides there is bounded like any other.
+#[test]
+fn a_zero_length_stretch_on_stacked_rest_nodes_is_bounded() {
+    let table = line_table();
+    let total = length(&table);
+    let mut field = WidthField {
+        spacing: 0.5,
+        ..WidthField::default()
+    };
+    field.place_rest(0.0);
+    for target in [0.0, 0.0, 0.2] {
+        field.push(0.0, Some(target));
+    }
+    let mut s = 0.5;
+    while s < total {
+        field.push(s, Some(1.0));
+        s += 0.5;
+    }
+    field.place_rest(total);
+    let state = smoothed(&table, field);
+    let (ratio_bound, slope_bound) = state.smoothing.ratio_bounds(&state.spans, 0.0, 0.0);
+    let (ratio, slope) = state.ratio_and_slope(0.0);
+    assert!(ratio.abs() <= ratio_bound && slope.abs() <= slope_bound);
+    assert!(state.smoothing.bends(0.0, 0.0).contains(&0.0));
+}
+
 #[test]
 fn the_width_is_c2_lipschitz_and_closes_on_every_rest() {
     let mut field = WidthField {
