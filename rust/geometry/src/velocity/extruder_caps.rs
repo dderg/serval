@@ -21,15 +21,6 @@ fn budgeted_ratio(ratio: f64) -> f64 {
     libm::exp2(level / RATIO_LEVELS_PER_OCTAVE)
 }
 
-/// What a segment extrudes per path millimetre: `own` along itself, and
-/// `at_joins` the largest of it and its neighbours', which a ratio ramp
-/// carries across the joins where the planned acceleration steps.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct ExtrudingRatios {
-    pub own: f64,
-    pub at_joins: f64,
-}
-
 /// One extruding segment's demand on the extruder motor under a speed
 /// ceiling `v` and an acceleration budget `A`, from the bounds
 /// [`ExtruderCaps`] documents: velocity `r·v + k·r·A`, acceleration
@@ -56,7 +47,7 @@ struct Demand {
     own_gain: f64,
     kappa_peak: f64,
     unshaped_share: f64,
-    ratio_at_joins: f64,
+    ratio_in_reach: f64,
 }
 
 impl Demand {
@@ -81,9 +72,9 @@ impl Demand {
     }
 
     /// The largest budget whose advance velocity steps, `k·r·2A·U` at the
-    /// joins' ratio, stay within `instantaneous_corner_velocity`.
+    /// ratio in reach, stay within `instantaneous_corner_velocity`.
     fn velocity_step_accel_cap(&self, instantaneous_corner_velocity: f64) -> f64 {
-        let step_per_accel = 2.0 * self.slope * self.ratio_at_joins * self.unshaped_share;
+        let step_per_accel = 2.0 * self.slope * self.ratio_in_reach * self.unshaped_share;
         if self.own_gain.is_finite() || step_per_accel <= 0.0 {
             return f64::INFINITY;
         }
@@ -91,8 +82,9 @@ impl Demand {
     }
 }
 
-/// The speed ceiling and acceleration budget under which `segment`,
-/// extruding `ratios` per path millimetre, asks the extruder for no more than
+/// The speed ceiling and acceleration budget under which `segment`, with
+/// `ratio_in_reach` the largest ratio its extruder demand can meet (see
+/// [`super::extrusion_reach::ExtrusionReach`]), asks the extruder for no more than
 /// its caps. The velocity steps an unshaped leader makes cap the budget
 /// first, then the acceleration cap takes the largest budget whose demand
 /// fits; when the velocity cap still binds, the ceiling or the budget gives
@@ -100,7 +92,7 @@ impl Demand {
 pub(super) fn extruder_capped(
     segment: &Segment,
     caps: &ExtruderCaps,
-    ratios: ExtrudingRatios,
+    ratio_in_reach: f64,
     kappa_peak: f64,
     (ceiling, accel): (f64, f64),
 ) -> (f64, f64) {
@@ -119,14 +111,14 @@ pub(super) fn extruder_capped(
         }
     }
     let demand = Demand {
-        ratio: budgeted_ratio(ratios.at_joins),
+        ratio: budgeted_ratio(ratio_in_reach),
         slope: caps.advance_slope_s,
         curvature: caps.advance_curvature_s2_per_mm,
         path_gain,
         own_gain: caps.own_jerk_per_accel_hz,
         kappa_peak,
         unshaped_share: unshaped_plane_sq.sqrt().min(1.0),
-        ratio_at_joins: ratios.at_joins.max(0.0),
+        ratio_in_reach: ratio_in_reach.max(0.0),
     };
     let accel = accel.min(demand.velocity_step_accel_cap(caps.instantaneous_corner_velocity_mm_s));
     if demand.ratio == 0.0 {

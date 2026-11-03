@@ -74,6 +74,10 @@ pub struct ExtruderCaps {
     /// (see [`LeaderSpill`]): the planner bounds the shaped speed at a ratio
     /// step with it.
     pub leader_spill: LeaderSpill,
+    /// How far either side of an instant the kernels of the leaders the
+    /// follower rides reach: the shaped path there averages the planned
+    /// path within it.
+    pub leader_kernel_reach_s: f64,
 }
 
 /// A kernel `w` turns a planned speed `v(t) ≤ v₀ + A·|t − t₀|` around `t₀`
@@ -141,6 +145,7 @@ impl ExtruderCaps {
                 .instantaneous_corner_velocity_mm_s
                 .min(b.instantaneous_corner_velocity_mm_s),
             leader_spill: a.leader_spill.wider(b.leader_spill),
+            leader_kernel_reach_s: a.leader_kernel_reach_s.max(b.leader_kernel_reach_s),
         })
     }
 
@@ -181,6 +186,9 @@ impl ExtruderCaps {
         let LeaderSpill { mass, moment_s } = self.leader_spill;
         if !(mass.is_finite() && mass >= 1.0 && moment_s.is_finite() && moment_s >= 0.0) {
             return Err("the leaders' spill must be finite, its mass at least 1");
+        }
+        if !(self.leader_kernel_reach_s.is_finite() && self.leader_kernel_reach_s >= 0.0) {
+            return Err("the leaders' kernel reach must be finite and non-negative");
         }
         Ok(())
     }

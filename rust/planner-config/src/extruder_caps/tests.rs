@@ -79,6 +79,17 @@ fn a_ramped_linear_advance_takes_k_and_its_leaders_kernels() {
 }
 
 #[test]
+fn the_reach_takes_the_widest_leader_kernel() {
+    let caps = caps_of(
+        limited(&["pa"]),
+        &[pp("pa", "linear_pressure_advance", &[("k", 0.03)])],
+    )
+    .unwrap()[0];
+    let (lo, hi) = trajectory::build_smooth_mzv_kernel(62.0).support();
+    assert_eq!(caps.leader_kernel_reach_s, hi.max(-lo));
+}
+
+#[test]
 fn a_kernel_on_the_follower_bounds_its_own_jerk() {
     let caps = caps_of(
         limited(&["pa", "st"]),

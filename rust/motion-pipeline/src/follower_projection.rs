@@ -4013,3 +4013,6 @@ fn odometer_leaves(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod projection_fuzz;

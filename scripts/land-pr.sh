@@ -19,26 +19,30 @@ reexec_current_copy() {
     top="$(git rev-parse --show-toplevel)" || { echo "land-pr: run it inside the repository" >&2; exit 1; }
     git -C "$top" fetch -q origin || { echo "land-pr: git fetch origin failed" >&2; exit 1; }
     fresh="$(mktemp -d)"
-    git -C "$top" show origin/main:scripts/land-pr.sh >"$fresh/land-pr.sh" \
+    git -C "$top" archive origin/main scripts | tar -x -C "$fresh" \
+        || { echo "land-pr: could not extract scripts/ from origin/main" >&2; exit 1; }
+    [ -f "$fresh/scripts/land-pr.sh" ] \
         || { echo "land-pr: origin/main has no scripts/land-pr.sh" >&2; exit 1; }
-    git -C "$top" show origin/main:scripts/gh_util.py >"$fresh/gh_util.py" \
-        || { echo "land-pr: origin/main has no scripts/gh_util.py" >&2; exit 1; }
-    if cmp -s "$fresh/land-pr.sh" "$0"; then
+    if cmp -s "$fresh/scripts/land-pr.sh" "$0"; then
         rm -rf "$fresh"
         return 0
     fi
     echo "land-pr: this copy differs from origin/main's; running origin/main's" >&2
-    LAND_PR_REEXEC=1 GH_UTIL="$fresh/gh_util.py" exec bash "$fresh/land-pr.sh" "$@"
+    LAND_PR_REEXEC=1 GH_UTIL="$fresh/scripts/gh_util.py" SERVAL_REPO_ROOT="$top" \
+        exec bash "$fresh/scripts/land-pr.sh" "$@"
 }
 reexec_current_copy "$@"
 
 FAILED_LOG_TAIL_LINES=80
 POLL_SECONDS=60
 MAX_UPDATES=3
+MAX_FUZZ_RERUNS=3
 
 gh_util="${GH_UTIL:-$(cd "$(dirname "$0")" && pwd)/gh_util.py}"
 [ -f "$gh_util" ] || gh_util="$(git rev-parse --show-toplevel)/scripts/gh_util.py"
 [ -f "$gh_util" ] || { echo "land-pr: scripts/gh_util.py not found" >&2; exit 1; }
+fuzz_triage="$(dirname "$gh_util")/fuzz_triage.py"
+[ -f "$fuzz_triage" ] || { echo "land-pr: scripts/fuzz_triage.py not found beside gh_util.py" >&2; exit 1; }
 gh() { python3 "$gh_util" "$@"; }
 
 usage() { echo "usage: $0 <branch> [--title T] [--body B] [--dry-run]" >&2; exit 2; }
@@ -73,15 +77,27 @@ open_pr() {
 }
 
 await_checks() {
-    sleep "$POLL_SECONDS"
-    if gh pr checks "$number" --watch --interval "$POLL_SECONDS"; then
-        return 0
-    fi
-    echo "land-pr: checks failed on PR #$number" >&2
-    local run_id
-    run_id="$(gh run list --branch "$branch" --status failure --limit 1 --json databaseId --jq '.[0].databaseId')"
-    [ -z "$run_id" ] || gh run view "$run_id" --log-failed | tail -n "$FAILED_LOG_TAIL_LINES" >&2
-    return 1
+    local fuzz_reruns=0
+    while true; do
+        sleep "$POLL_SECONDS"
+        if gh pr checks "$number" --watch --interval "$POLL_SECONDS"; then
+            return 0
+        fi
+        echo "land-pr: checks failed on PR #$number" >&2
+        local run_id head
+        head="$(git rev-parse "$branch")"
+        run_id="$(gh run list --branch "$branch" --status failure --limit 20 --json databaseId,headSha --jq "[.[] | select(.headSha == \"$head\")][0].databaseId")"
+        [ -z "$run_id" ] || gh run view "$run_id" --log-failed | tail -n "$FAILED_LOG_TAIL_LINES" >&2
+        [ -n "$run_id" ] && [ "$fuzz_reruns" -lt "$MAX_FUZZ_RERUNS" ] || return 1
+        local rc=0
+        python3 "$fuzz_triage" triage "$branch" "$run_id" || rc=$?
+        case "$rc" in
+            0) fuzz_reruns=$((fuzz_reruns + 1))
+               echo "land-pr: a failure that main has too; reran the failed job ($fuzz_reruns/$MAX_FUZZ_RERUNS)" >&2 ;;
+            10) die "a property-test failure that is this PR's to fix (see above)" ;;
+            *) return 1 ;;
+        esac
+    done
 }
 
 merge_when_current() {
