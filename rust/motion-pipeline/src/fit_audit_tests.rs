@@ -80,6 +80,94 @@ fn a_floor_piece_away_from_any_cap_contact_stays_a_violation() {
     assert_eq!(violations.len(), 1);
 }
 
+/// A straight line whose exact acceleration carries a Gaussian bump the
+/// line itself does not follow.
+struct AccelerationBump {
+    t0: f64,
+    h: f64,
+    center_u: f64,
+    width_u: f64,
+    height_mm_s2: f64,
+}
+
+impl TrackSignal for AccelerationBump {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let from_center = ((t - self.t0) / self.h - self.center_u) / self.width_u;
+        (
+            150.0 + 300.0 * (t - self.t0),
+            300.0,
+            self.height_mm_s2 * libm::exp(-0.5 * from_center * from_center),
+        )
+    }
+}
+
+const BUMP_TOLERANCE: FitTol = FitTol::absolute(0.005, 50.0);
+
+fn audit_line_against(
+    bump: &AccelerationBump,
+    edge_insets: (f64, f64),
+) -> Vec<super::FitViolation> {
+    let line_in_u = [150.0 + 150.0 * bump.h, 150.0 * bump.h];
+    take_violations();
+    check(
+        bump,
+        AcceptedPiece {
+            fit_context: "materialize_source",
+            axis: 0,
+            fit_tol: BUMP_TOLERANCE,
+            t0: bump.t0,
+            t1: bump.t0 + bump.h,
+            mono_u: &line_in_u,
+            accepted_at_floor: false,
+            cubic_floor: 0.62e-6,
+            edge_insets,
+            exact: None,
+        },
+    );
+    take_violations()
+}
+
+fn the_one_violation(violations: &[super::FitViolation]) -> &super::FitViolation {
+    let [violation] = violations else {
+        panic!("the bump breaks the tolerance in exactly one piece: {violations:?}");
+    };
+    violation
+}
+
+#[test]
+fn a_miss_between_the_onset_check_points_of_the_fit_is_found_at_its_peak() {
+    let bump = AccelerationBump {
+        t0: 3.0,
+        h: 2e-3,
+        center_u: 1.0 / 64.0,
+        width_u: 3e-3,
+        height_mm_s2: 1.5 * BUMP_TOLERANCE.accel_mm_s2,
+    };
+    let violations = audit_line_against(&bump, (0.0, 0.0));
+    let violation = the_one_violation(&violations);
+    assert!(
+        (violation.acceleration_over_tolerance - 1.5).abs() < 0.01
+            && (violation.worst_u - bump.center_u).abs() < 1e-4,
+        "{violation:?}"
+    );
+}
+
+#[test]
+fn a_miss_at_a_resolved_edge_is_a_violation() {
+    let h = 2e-3;
+    let inset = 0.01 * h;
+    let bump = AccelerationBump {
+        t0: 3.0,
+        h,
+        center_u: 0.01,
+        width_u: 2e-3,
+        height_mm_s2: 1.5 * BUMP_TOLERANCE.accel_mm_s2,
+    };
+    let violations = audit_line_against(&bump, (inset, inset));
+    let violation = the_one_violation(&violations);
+    assert!(violation.acceleration_over_tolerance > 1.4, "{violation:?}");
+}
+
 /// The signal a flat piece over `[0, h]` misses by an error pinned at both
 /// ends, bending at a constant `bend_mm_s2`.
 struct PinnedParabola {

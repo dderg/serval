@@ -10,8 +10,8 @@ use trajectory::{
 
 use crate::lowering::{AccelBudget, FitTol, follower_tol_scale};
 use crate::shaper::{
-    AxisFit, AxisSignalTable, ConvolutionSignal, ExactConvolution, ExactKernel, ExactPiece,
-    FitBoundary, KnotJumpBound, Lookahead, MIN_DEVICE_INTERVAL_S, SEGMENT_TIME_EPS_S,
+    AxisFit, AxisSignalTable, BetweenProbes, ConvolutionSignal, ExactConvolution, ExactKernel,
+    ExactPiece, FitBoundary, KnotJumpBound, Lookahead, MIN_DEVICE_INTERVAL_S, SEGMENT_TIME_EPS_S,
     ShiftedTrackSignal, SignalBounds, TrackSignal, apply_derivative_gains_to_track,
     fit_axis_from_signal, fit_resolution, shaped_signal_breakpoints, unit_kernel_mass,
 };
@@ -3102,6 +3102,10 @@ fn refine_rest_boundary(
 }
 
 impl TrackSignal for FollowerSignal<'_> {
+    fn between_probes(&self) -> BetweenProbes {
+        BetweenProbes::TruthInterpolant
+    }
+
     fn eval(&self, t: f64) -> f64 {
         let spans = self.state.spans_e(self.s_owned(t)) - self.e_spans_start;
         let raw = self
@@ -3277,6 +3281,10 @@ impl AdvancedFollowerSignal<'_, '_> {
 }
 
 impl TrackSignal for AdvancedFollowerSignal<'_, '_> {
+    fn between_probes(&self) -> BetweenProbes {
+        BetweenProbes::TruthInterpolant
+    }
+
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let read = self.source.path_read(t);
         let (p, v, a) = self.source.pva_read(t, &read);

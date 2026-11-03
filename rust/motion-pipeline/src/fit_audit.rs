@@ -2,25 +2,59 @@
 //! to and keeps the ones that break the fit tolerance as resolved for the
 //! piece's duration (`FitTol::for_piece`). Where the signal has exact
 //! polynomials or an enclosure over the piece, the Bernstein hull's proven
-//! bound on the error is the measure; elsewhere dense interior points are.
-//! What the fit does not resolve is not held to it: pieces narrower than
-//! the cubic floor, and the slivers inside a piece's edges that the ladder
-//! reads its anchoring state past, which seed coalescing treats as carrying
-//! no integral. Compiled only for tests that hold the shaper to its
-//! `max_path_deviation` / `max_accel_deviation` promise; the live host
-//! never pays for it.
+//! bound on the error is the measure; elsewhere a dense scan of its resolved
+//! stretch, edges included, and an exact search around every scanned peak,
+//! never only at points the fit itself sampled. What the fit does not
+//! resolve is not held to it: pieces narrower than the cubic floor, and the
+//! slivers inside a piece's edges that the ladder reads its anchoring state
+//! past, which seed coalescing treats as carrying no integral. Compiled only
+//! for tests that hold the shaper to its `max_path_deviation` /
+//! `max_accel_deviation` promise; the live host never pays for it.
 
 use std::cell::RefCell;
+use std::convert::Infallible;
 use std::sync::Mutex;
 
 use crate::lowering::{FitTol, eval_mono, eval_mono_dd};
 use trajectory::next_toward;
 
-use crate::shaper::{SQUARE_ROOT_ONSET_EDGE_SLACK_S, TrackSignal, proven_error_bounds};
+use crate::shaper::{
+    SQUARE_ROOT_ONSET_EDGE_SLACK_S, TrackSignal, golden_section_peak, proven_error_bounds,
+};
 
-/// Interior points checked per accepted piece, spread uniformly so a feature
-/// the ladder's nine probes straddle cannot hide between them.
-const AUDIT_POINTS: u32 = 64;
+/// Intervals each accepted piece's resolved stretch is scanned at, its
+/// edges included. Prime, so no scan point but the edges lands on the fit's
+/// own probes, nodes or onset check points: the audit never looks only
+/// where the fit already looked.
+const AUDIT_SCAN_INTERVALS: u32 = 97;
+
+/// Share of the tolerance above which a local peak of the scanned miss is
+/// searched for exactly between its scan neighbours.
+const AUDIT_PEAK_SEARCH_SHARE: f64 = 0.25;
+
+/// A piece's miss of the exact signal at one point, over the tolerance.
+#[derive(Clone, Copy)]
+struct Miss {
+    position: f64,
+    acceleration: f64,
+}
+
+#[derive(Default)]
+struct WorstMiss {
+    position: f64,
+    acceleration: f64,
+    worst_u: f64,
+}
+
+impl WorstMiss {
+    fn take(&mut self, u: f64, miss: Miss) {
+        self.position = self.position.max(miss.position);
+        if miss.acceleration > self.acceleration {
+            self.acceleration = miss.acceleration;
+            self.worst_u = u;
+        }
+    }
+}
 
 /// One accepted piece whose position or acceleration leaves the fit
 /// tolerance somewhere inside it.
@@ -96,11 +130,7 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
     }) {
         return;
     }
-    let (mut position, mut acceleration, mut worst_u) = (0.0_f64, 0.0_f64, 0.0);
-    let (start_inset, end_inset) = (piece.edge_insets.0 / h, piece.edge_insets.1 / h);
-    for k in 0..AUDIT_POINTS {
-        let u = start_inset
-            + (1.0 - start_inset - end_inset) * (f64::from(k) + 0.5) / f64::from(AUDIT_POINTS);
+    let miss_at = |u: f64| {
         let x = 2.0 * u - 1.0;
         let t = piece.t0 + h * u;
         let (truth_position, _, truth_acceleration) = sig.eval_pva(t);
@@ -113,15 +143,56 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
             piece.t0,
             piece.t1
         );
-        position =
-            position.max((eval_mono(piece.mono_u, x) - truth_position).abs() / piece_tol.pos_mm);
-        let over = (eval_mono_dd(piece.mono_u, x) * acceleration_scale - truth_acceleration).abs()
-            / piece_tol.accel_mm_s2;
-        if over > acceleration {
-            acceleration = over;
-            worst_u = u;
+        Miss {
+            position: (eval_mono(piece.mono_u, x) - truth_position).abs() / piece_tol.pos_mm,
+            acceleration: (eval_mono_dd(piece.mono_u, x) * acceleration_scale - truth_acceleration)
+                .abs()
+                / piece_tol.accel_mm_s2,
+        }
+    };
+    let (resolved_from, resolved_to) = (piece.edge_insets.0 / h, 1.0 - piece.edge_insets.1 / h);
+    let step = (resolved_to - resolved_from) / f64::from(AUDIT_SCAN_INTERVALS);
+    let scan: [(f64, Miss); AUDIT_SCAN_INTERVALS as usize + 1] = std::array::from_fn(|k| {
+        let u = if k == AUDIT_SCAN_INTERVALS as usize {
+            resolved_to
+        } else {
+            (k as f64).mul_add(step, resolved_from)
+        };
+        (u, miss_at(u))
+    });
+    let mut worst = WorstMiss::default();
+    for &(u, miss) in &scan {
+        worst.take(u, miss);
+    }
+    let by_position: fn(&Miss) -> f64 = |miss| miss.position;
+    let by_acceleration: fn(&Miss) -> f64 = |miss| miss.acceleration;
+    for measure in [by_position, by_acceleration] {
+        for (index, (u, miss)) in scan.iter().enumerate() {
+            let value = measure(miss);
+            let neighbour = |offset: Option<usize>| {
+                offset
+                    .and_then(|k| scan.get(k))
+                    .map_or(0.0, |(_, miss)| measure(miss))
+            };
+            if value <= AUDIT_PEAK_SEARCH_SHARE
+                || value < neighbour(index.checked_sub(1))
+                || value < neighbour(Some(index + 1))
+            {
+                continue;
+            }
+            let Ok((peak_u, _)) = golden_section_peak(
+                |u| Ok::<_, Infallible>(measure(&miss_at(u))),
+                (u - step).max(resolved_from),
+                (u + step).min(resolved_to),
+            );
+            worst.take(peak_u, miss_at(peak_u));
         }
     }
+    let WorstMiss {
+        mut position,
+        mut acceleration,
+        worst_u,
+    } = worst;
     if let Some([position_bound, acceleration_bound]) = proven {
         position = position_bound / piece_tol.pos_mm;
         acceleration = acceleration_bound / piece_tol.accel_mm_s2;

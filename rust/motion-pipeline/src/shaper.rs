@@ -12,7 +12,8 @@ use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
     AccelBudget, AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE, LADDER_PROBES_U,
     LadderBudget, LadderFailure, LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth,
-    VelocitySign, eval_mono, eval_mono_d, eval_mono_dd, exact_piece, ladder_fit, quintic_in_u,
+    VelocitySign, eval_mono, eval_mono_d, eval_mono_dd, exact_piece, held_miss, ladder_fit,
+    quintic_in_u,
 };
 use crate::types::{BaseItem, Control, PostProcessError, TrajectoryItem};
 use crate::worker_pool::WorkerPool;
@@ -135,12 +136,24 @@ pub(crate) trait TrackSignal {
         let _ = accuracy;
         self.exact_polynomial_on(lo, hi)
     }
-    /// Whether every time the signal's acceleration steps seeds the fit's
-    /// partition, so no step can hide in a span edge's sliver unless a seed
-    /// was coalesced there.
-    fn seeds_every_break(&self) -> bool {
-        false
+    /// What a rung that passes the probes is held against between them,
+    /// where the signal has no enclosure.
+    fn between_probes(&self) -> BetweenProbes {
+        BetweenProbes::ErrorInterpolant
     }
+}
+
+/// How a rung is held between two samples of a signal with no enclosure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BetweenProbes {
+    /// Against the error's cubic Hermite interpolant: the rung and the truth
+    /// interpolated together.
+    ErrorInterpolant,
+    /// Against the truth's quintic Hermite interpolant, the rung read
+    /// exactly. A signal composed from other tracks' pieces bends between
+    /// samples where the high-degree rungs fitted to it swing, and an
+    /// interpolant of their difference follows neither.
+    TruthInterpolant,
 }
 
 impl TrackSignal for ContinuousAxis {
@@ -195,8 +208,8 @@ impl<S: TrackSignal> TrackSignal for &S {
     fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
         S::enclosure_on(self, lo, hi, accuracy)
     }
-    fn seeds_every_break(&self) -> bool {
-        S::seeds_every_break(self)
+    fn between_probes(&self) -> BetweenProbes {
+        S::between_probes(self)
     }
 }
 
@@ -874,13 +887,6 @@ impl TrackSignal for CapContactSource<'_> {
 
     fn square_root_onsets(&self) -> &[f64] {
         self.cap_contacts
-    }
-
-    fn seeds_every_break(&self) -> bool {
-        matches!(
-            self.source,
-            ContinuousAxis::Analytic { .. } | ContinuousAxis::Hold { .. }
-        )
     }
 
     fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
@@ -3405,7 +3411,7 @@ const INTERPOLANT_SUSPICION_SHARE: f64 = 0.9;
 const INTERPOLANT_REFINE_SHARE: f64 = 0.5;
 const GOLDEN_SECTION_STEPS: u32 = 16;
 
-fn golden_section_peak<E>(
+pub(crate) fn golden_section_peak<E>(
     mut value: impl FnMut(f64) -> Result<f64, E>,
     mut low: f64,
     mut high: f64,
@@ -3540,6 +3546,18 @@ impl ErrorSample {
     }
 }
 
+/// The samples the witnesses walk a span through, in order.
+struct ProbeWalk {
+    samples: [ErrorSample; LADDER_PROBES_U.len()],
+    len: usize,
+}
+
+impl ProbeWalk {
+    fn samples(&self) -> &[ErrorSample] {
+        &self.samples[..self.len]
+    }
+}
+
 struct RungWitness<'a, S> {
     axis: usize,
     sig: &'a S,
@@ -3547,7 +3565,16 @@ struct RungWitness<'a, S> {
     t0: f64,
     h: f64,
     fit_tol: FitTol,
-    accel_budget: AccelBudget,
+    between_probes: BetweenProbes,
+}
+
+/// The stretch of a span its fit resolves, and which of its edges anchor
+/// past their slivers.
+#[derive(Clone, Copy)]
+struct ResolvedStretch {
+    from: f64,
+    to: f64,
+    anchored_past_slivers: (bool, bool),
 }
 
 /// Where the witnesses estimate a rung leaves the tolerance between the
@@ -3557,7 +3584,7 @@ fn estimated_witness<S: TrackSignal>(
     witness: RungWitness<'_, S>,
     t1: f64,
     truth: &SpanTruth,
-    (resolved_from, resolved_to): (f64, f64),
+    stretch: ResolvedStretch,
 ) -> Result<Option<f64>, PostProcessError> {
     if let Some(u) = acceleration_error_witness(
         witness.sig,
@@ -3568,9 +3595,14 @@ fn estimated_witness<S: TrackSignal>(
     ) {
         return Ok(Some(u));
     }
-    match witness.sig.interior_knots(resolved_from, resolved_to) {
-        [] => witness.over_probes(truth),
-        knots => witness.over_pieces(truth, knots),
+    let u_of = |t: f64| nurbs::fmadd(2.0 / witness.h, t - witness.t0, -1.0);
+    let walked_from = (
+        stretch.anchored_past_slivers.0.then(|| u_of(stretch.from)),
+        stretch.anchored_past_slivers.1.then(|| u_of(stretch.to)),
+    );
+    match witness.sig.interior_knots(stretch.from, stretch.to) {
+        [] => witness.over_probes(truth, walked_from),
+        knots => witness.over_pieces(truth, knots, walked_from),
     }
 }
 
@@ -3666,22 +3698,71 @@ impl<S: TrackSignal> RungWitness<'_, S> {
             .fold(0.0, f64::max)
     }
 
-    fn over_probes(&self, truth: &SpanTruth) -> Result<Option<f64>, PostProcessError> {
-        let samples: [ErrorSample; LADDER_PROBES_U.len()] = std::array::from_fn(|index| {
+    fn probe_samples(&self, truth: &SpanTruth) -> [ErrorSample; LADDER_PROBES_U.len()] {
+        std::array::from_fn(|index| {
             self.sample(
                 LADDER_PROBES_U[index],
                 (truth.pos[index], truth.vel[index], truth.acc[index]),
             )
-        });
-        if let Some(u) = self.over_probe_interpolant(&samples)? {
+        })
+    }
+
+    /// The samples the witnesses walk a span through: the probes, but at an
+    /// edge anchored past its sliver an exact sample at its resolved edge in
+    /// place of the edge probe and the probes inside the sliver. That edge
+    /// probe carries the anchored state — the sliver's extrapolation, not the
+    /// signal — so a gap walked from it estimates the miss next to the edge
+    /// from a zero.
+    fn walk(
+        &self,
+        probes: &[ErrorSample; LADDER_PROBES_U.len()],
+        (from, to): (Option<f64>, Option<f64>),
+    ) -> Result<ProbeWalk, PostProcessError> {
+        let last = LADDER_PROBES_U.len() - 1;
+        let first = from.map_or(Ok(probes[0]), |u| self.exact_sample_at(u))?;
+        let final_sample = to.map_or(Ok(probes[last]), |u| self.exact_sample_at(u))?;
+        let mut walk = ProbeWalk {
+            samples: [first; LADDER_PROBES_U.len()],
+            len: 1,
+        };
+        for &probe in probes.iter().filter(|probe| {
+            first.position.u < probe.position.u && probe.position.u < final_sample.position.u
+        }) {
+            walk.samples[walk.len] = probe;
+            walk.len += 1;
+        }
+        walk.samples[walk.len] = final_sample;
+        walk.len += 1;
+        Ok(walk)
+    }
+
+    fn over_probes(
+        &self,
+        truth: &SpanTruth,
+        walked_from: (Option<f64>, Option<f64>),
+    ) -> Result<Option<f64>, PostProcessError> {
+        let probes = self.probe_samples(truth);
+        if let Some(u) = self.over_probe_interpolant(&probes)? {
             return Ok(Some(u));
         }
-        for gap in samples.windows(2) {
+        let walk = self.walk(&probes, walked_from)?;
+        if let Some(u) = self.outside_at_an_edge(&walk) {
+            return Ok(Some(u));
+        }
+        for gap in walk.samples().windows(2) {
             if let Some(u) = self.over_piece(gap[0], gap[1])? {
                 return Ok(Some(u));
             }
         }
         Ok(None)
+    }
+
+    fn outside_at_an_edge(&self, walk: &ProbeWalk) -> Option<f64> {
+        let samples = walk.samples();
+        [samples[0], samples[samples.len() - 1]]
+            .into_iter()
+            .find(|&edge| !self.within(edge))
+            .map(|edge| edge.position.u)
     }
 
     fn over_probe_interpolant(
@@ -3748,24 +3829,23 @@ impl<S: TrackSignal> RungWitness<'_, S> {
         &self,
         truth: &SpanTruth,
         knots: &[f64],
+        walked_from: (Option<f64>, Option<f64>),
     ) -> Result<Option<f64>, PostProcessError> {
-        let samples: [ErrorSample; LADDER_PROBES_U.len()] = std::array::from_fn(|index| {
-            self.sample(
-                LADDER_PROBES_U[index],
-                (truth.pos[index], truth.vel[index], truth.acc[index]),
-            )
-        });
-        if let Some(u) = self.over_probe_interpolant(&samples)? {
+        let probes = self.probe_samples(truth);
+        if let Some(u) = self.over_probe_interpolant(&probes)? {
             return Ok(Some(u));
         }
-        let probe = |index: usize| samples[index];
+        let walk = self.walk(&probes, walked_from)?;
+        if let Some(u) = self.outside_at_an_edge(&walk) {
+            return Ok(Some(u));
+        }
         let half_span = 0.5 * self.h;
         let mut knots = knots
             .iter()
             .map(|&t| (nurbs::fmadd(2.0 / self.h, t - self.t0, -1.0), t))
             .peekable();
-        for index in 1..LADDER_PROBES_U.len() {
-            let (start, end) = (probe(index - 1), probe(index));
+        for gap in walk.samples().windows(2) {
+            let (start, end) = (gap[0], gap[1]);
             let width = end.position.u - start.position.u;
             let mut curvature_margin =
                 self.curvature_budget() - start.hermite_curvature_peak_to(end);
@@ -3805,9 +3885,9 @@ impl<S: TrackSignal> RungWitness<'_, S> {
         if right.position.u <= left.position.u {
             return Ok(None);
         }
-        let acceleration = match self.accel_budget {
-            AccelBudget::Absolute => self.acceleration_between(left, right, 0)?,
-            AccelBudget::PositionEquivalent => {
+        let acceleration = match self.between_probes {
+            BetweenProbes::ErrorInterpolant => self.acceleration_between(left, right, 0)?,
+            BetweenProbes::TruthInterpolant => {
                 self.acceleration_against_hermite_truth(left, right, 0)?
             }
         };
@@ -3845,13 +3925,14 @@ impl<S: TrackSignal> RungWitness<'_, S> {
     /// held against the truth's quintic Hermite interpolant rather than
     /// the error's: the rung is known exactly, and a high-degree rung swings
     /// between samples where no interpolant of the error follows it. The
-    /// position-equivalent budget accepts such rungs: its curvature error
-    /// runs to `8·ε/h²`, hundreds of mm/s² on an advanced extruder whose
-    /// signal swings by tens of thousands. The stretch's exact midpoint
-    /// measures how far the truth leaves its interpolant, and a stretch
-    /// whose estimate and that miss together reach the budget is split
-    /// there. The absolute budget keeps the error's interpolant, which the
-    /// fit audit already holds every absolute fit to.
+    /// stretch's exact midpoint measures how far the truth leaves its
+    /// interpolant; a stretch whose estimate and that miss together stay
+    /// under the suspicion share of the budget holds, one past the budget is
+    /// split there, and one in between is read exactly. So is a stretch
+    /// still past the budget at the deepest split: there the truth's
+    /// interpolant is rebuilt from samples a hair apart, whose positions'
+    /// rounding — an extruder's odometer integrates adaptively — swamps the
+    /// curvature it reconstructs, and only an exact sample may reject.
     fn acceleration_against_hermite_truth(
         &self,
         left: ErrorSample,
@@ -3869,11 +3950,12 @@ impl<S: TrackSignal> RungWitness<'_, S> {
             return Ok(Some(u));
         }
         let truth_miss = (mid.curvature_per_u2 - self.curvature_error_against(&truth, u)).abs();
-        if estimated_peak + truth_miss <= self.curvature_budget() {
+        let bound = estimated_peak + truth_miss;
+        if bound <= INTERPOLANT_SUSPICION_SHARE * self.curvature_budget() {
             return Ok(None);
         }
-        if depth == WITNESS_MAX_DEPTH {
-            return Ok(Some(u));
+        if bound <= self.curvature_budget() || depth == WITNESS_MAX_DEPTH {
+            return self.exact_witness_in(left.position.u, right.position.u);
         }
         match self.acceleration_against_hermite_truth(left, mid, depth + 1)? {
             Some(u) => Ok(Some(u)),
@@ -3961,36 +4043,51 @@ fn edge_inset(h: f64, cubic_floor: f64, absorbed: f64) -> f64 {
 /// second read as far again past the sliver, so a smooth signal's jerk
 /// across a wide sliver cancels and only its snap times the squared sliver
 /// remains; the inset is at most a quarter span, so that read stays inside
-/// the span. Where nothing can hide in the sliver the edge anchors to the
-/// seam reading: at a square-root onset the signal declares on the edge,
-/// whose acceleration is steep past any extrapolation but breaks nowhere,
-/// and at an edge no seed was coalesced onto of a signal that seeds every
-/// break it has — the shoulder next to an onset bends its acceleration as
-/// steeply without a break there.
+/// the span. At a square-root onset the signal declares on the edge the
+/// acceleration is steep past any extrapolation but hides no break: the
+/// edge anchors to the seam reading, where the span across the onset
+/// anchors too.
 fn edge_velocity_and_acceleration<S: TrackSignal>(
     sig: &S,
     axis: usize,
     seam: f64,
     past_sliver: f64,
-    hides_no_break: bool,
+    onset_on_edge: bool,
     fit_tol: FitTol,
-) -> Result<(f64, f64), PostProcessError> {
+) -> Result<EdgeAnchor, PostProcessError> {
     let (_, velocity, seam_acceleration) = sig.eval_pva(seam);
     let velocity = exact_value(axis, velocity, seam)?;
     let seam_acceleration = exact_value(axis, seam_acceleration, seam)?;
-    if hides_no_break {
-        return Ok((velocity, seam_acceleration));
+    let at_seam = EdgeAnchor {
+        velocity,
+        acceleration: seam_acceleration,
+        past_sliver: false,
+    };
+    if onset_on_edge {
+        return Ok(at_seam);
     }
     let past_acceleration = exact_value(axis, sig.second_deriv(past_sliver), past_sliver)?;
     let beyond = nurbs::fmadd(2.0, past_sliver - seam, seam);
     let beyond_acceleration = exact_value(axis, sig.second_deriv(beyond), beyond)?;
     let extrapolated_to_seam = 2.0 * past_acceleration - beyond_acceleration;
-    let acceleration = if (extrapolated_to_seam - seam_acceleration).abs() > fit_tol.accel_mm_s2 {
-        extrapolated_to_seam
-    } else {
-        seam_acceleration
-    };
-    Ok((velocity, acceleration))
+    if (extrapolated_to_seam - seam_acceleration).abs() > fit_tol.accel_mm_s2 {
+        return Ok(EdgeAnchor {
+            acceleration: extrapolated_to_seam,
+            past_sliver: true,
+            ..at_seam
+        });
+    }
+    Ok(at_seam)
+}
+
+/// The state a span edge anchors its rungs to, and whether any of it is
+/// read past the edge's sliver rather than at the seam: then it is not the
+/// signal's state at the edge.
+#[derive(Debug, Clone, Copy)]
+struct EdgeAnchor {
+    velocity: f64,
+    acceleration: f64,
+    past_sliver: bool,
 }
 
 /// The velocity a span anchors to at a seam where coalescing moved a velocity
@@ -4026,13 +4123,12 @@ fn span_probe_t(t0: f64, t1: f64, u: f64) -> f64 {
 /// Every accepted piece is endpoint-anchored, so the span seams stay C0 no
 /// matter which rung wins. On a span reaching a square-root onset the
 /// acceleration's shoulder bends between the probes, so the rungs are also
-/// held to the tolerance at points spread between the resolved edges as the
-/// fit audit spreads them: a miss there splits a splittable span — grading
-/// the partition toward the onset only as deep as its fit needs — and at the
-/// floor, where the closest rung is kept, it is the closest there too. The
-/// points are sampled only once a rung passes the probes or a kept closest
-/// rung is ranked. Returns the accepted
-/// monomial-in-u fit, or the closest rung with the ladder's miss.
+/// held to the tolerance across the resolved stretch by `OnsetHold`: a miss
+/// there splits a splittable span — grading the partition toward the onset
+/// only as deep as its fit needs — and at the floor, where the closest rung
+/// is kept, it is the closest there too. The stretch is sampled only once a
+/// rung passes the probes or a kept closest rung is ranked. Returns the
+/// accepted monomial-in-u fit, or the closest rung with the ladder's miss.
 ///
 /// A rung that passes the probes is then held between them: proven by the
 /// Bernstein hull of its error against the signal's exact polynomials
@@ -4069,34 +4165,38 @@ fn shaped_ladder<S: TrackSignal>(
     let p0 = exact_value(axis, from_start.eval(t0), t0)?;
     let start_past_sliver = t0 + edge_inset(h, policy.floors.cubic, slivers.start);
     let end_past_sliver = t1 - edge_inset(h, policy.floors.cubic, slivers.end);
-    let (seam_v0, a0) = edge_velocity_and_acceleration(
+    let start = edge_velocity_and_acceleration(
         &from_start,
         axis,
         t0_inside,
         start_past_sliver,
-        square_root_onset_on_edge(sig, t0)
-            || (sig.seeds_every_break() && slivers.start == 0.0 && slivers.start_break.is_none()),
+        square_root_onset_on_edge(sig, t0),
         fit_tol,
     )?;
+    let a0 = start.acceleration;
     let v0 = match slivers.start_break {
         Some(break_at) => velocity_past_moved_break(&from_start, axis, break_at, t1, t0)?,
-        None => seam_v0,
+        None => start.velocity,
     };
     let t1_inside = span_probe_t(t0, t1, 1.0);
     let p1 = exact_value(axis, from_end.eval(t1), t1)?;
-    let (seam_v1, a1) = edge_velocity_and_acceleration(
+    let end = edge_velocity_and_acceleration(
         &from_end,
         axis,
         t1_inside,
         end_past_sliver,
-        square_root_onset_on_edge(sig, t1)
-            || (sig.seeds_every_break() && slivers.end == 0.0 && slivers.end_break.is_none()),
+        square_root_onset_on_edge(sig, t1),
         fit_tol,
     )?;
+    let a1 = end.acceleration;
     let v1 = match slivers.end_break {
         Some(break_at) => velocity_past_moved_break(&from_end, axis, break_at, t0, t1)?,
-        None => seam_v1,
+        None => end.velocity,
     };
+    let anchored_past_slivers = (
+        start.past_sliver || slivers.start_break.is_some(),
+        end.past_sliver || slivers.end_break.is_some(),
+    );
     let base = quintic_in_u((p0, v0, a0), (p1, v1, a1), h);
     let endpoint_delta = exact_value(axis, sig.position_delta((t0, p0), (t1, p1)), t1)?;
 
@@ -4131,25 +4231,18 @@ fn shaped_ladder<S: TrackSignal>(
         };
     }
 
-    let held_samples = std::cell::OnceCell::new();
-    let reaches_onset = square_root_onset_within(sig, t0, t1);
-    let held = || -> &[HeldSample] {
-        if !reaches_onset {
-            return &[];
-        }
-        held_samples.get_or_init(|| {
-            let resolved = end_past_sliver - start_past_sliver;
-            std::array::from_fn::<_, SQUARE_ROOT_ONSET_CHECK_POINTS, _>(|k| {
-                let t = start_past_sliver
-                    + resolved * (k as f64 + 0.5) / SQUARE_ROOT_ONSET_CHECK_POINTS as f64;
-                let (position, _, acceleration) = from_start.eval_pva(t);
-                HeldSample {
-                    x: 2.0 * (t - t0) / h - 1.0,
-                    position,
-                    acceleration,
-                }
-            })
-        })
+    let onset_hold = square_root_onset_within(sig, t0, t1).then(|| OnsetHold {
+        read: &from_start,
+        span: (t0, t1),
+        resolved: (start_past_sliver, end_past_sliver),
+        tol: piece_tol,
+        samples: std::cell::OnceCell::new(),
+        edge_scans: std::cell::OnceCell::new(),
+    });
+    let held_miss = |rung: &[f64]| {
+        onset_hold
+            .as_ref()
+            .map_or(0.0, |hold| hold.worst_miss(rung))
     };
     match ladder_fit(
         &base,
@@ -4158,7 +4251,7 @@ fn shaped_ladder<S: TrackSignal>(
             position: &|u| truth.pos_at(u),
             velocity: &|u| truth.vel_at(u),
             acceleration: &|u| truth.acc_at(u),
-            held: &held,
+            held_miss: &held_miss,
             held_ranks_misses: keeps_closest_rung,
         },
         LadderBudget {
@@ -4201,11 +4294,18 @@ fn shaped_ladder<S: TrackSignal>(
                             t0,
                             h,
                             fit_tol: piece_tol,
-                            accel_budget: fit_tol.accel_budget,
+                            between_probes: match fit_tol.accel_budget {
+                                AccelBudget::Absolute => sig.between_probes(),
+                                AccelBudget::PositionEquivalent => BetweenProbes::TruthInterpolant,
+                            },
                         },
                         t1,
                         &truth,
-                        resolved,
+                        ResolvedStretch {
+                            from: start_past_sliver,
+                            to: end_past_sliver,
+                            anchored_past_slivers,
+                        },
                     )?,
                 },
             };
@@ -4260,9 +4360,168 @@ fn shaped_ladder<S: TrackSignal>(
     }
 }
 
-/// Points at which a span reaching a square-root onset is held to the fit
-/// tolerance between the ladder's probes.
-const SQUARE_ROOT_ONSET_CHECK_POINTS: usize = 64;
+/// Intervals between the check points a span reaching a square-root onset
+/// is held to the fit tolerance at between the ladder's probes.
+const SQUARE_ROOT_ONSET_CHECK_INTERVALS: usize = 64;
+
+/// Exact samples the stretch between a resolved edge and the check point
+/// next to it is scanned at before its peak is searched.
+const SQUARE_ROOT_ONSET_EDGE_SCAN_POINTS: u32 = 8;
+
+/// Share of the tolerance above which a rung's miss peaking at a check
+/// point is searched for exactly between that point's neighbours.
+const SQUARE_ROOT_ONSET_PEAK_SEARCH_SHARE: f64 = 0.25;
+
+/// Where a span reaching a square-root onset holds its rungs to the fit
+/// tolerance between the ladder's probes: at check points spread evenly
+/// across the resolved stretch, its edges included, then — for a rung they
+/// all hold — at the exact peaks between them. Next to an edge a rung's
+/// miss of an onset there rises as the root of the distance from it, a
+/// shoulder narrower than any grid of check points, so the stretch from
+/// each resolved edge to the check point next to it is searched in that
+/// root, where the shoulder is smooth.
+struct OnsetHold<'a, S> {
+    read: &'a FacingRead<'a, S>,
+    span: (f64, f64),
+    resolved: (f64, f64),
+    tol: FitTol,
+    samples: std::cell::OnceCell<[HeldSample; SQUARE_ROOT_ONSET_CHECK_INTERVALS + 1]>,
+    edge_scans: std::cell::OnceCell<[EdgeScan; 2]>,
+}
+
+/// The stretch between a resolved edge and the check point next to it, in
+/// the root of the distance from the span edge.
+#[derive(Clone, Copy)]
+struct EdgeRoots {
+    span_edge: f64,
+    inward: f64,
+    from: f64,
+    to: f64,
+    step: f64,
+}
+
+impl EdgeRoots {
+    fn t_of_root(&self, root: f64) -> f64 {
+        nurbs::fmadd(self.inward * root, root, self.span_edge)
+    }
+
+    fn scan_root(&self, k: u32) -> f64 {
+        nurbs::fmadd(f64::from(k + 1), self.step, self.from)
+    }
+}
+
+/// The exact samples of an edge stretch, evenly spaced in its root: the
+/// same for every rung of the span.
+struct EdgeScan {
+    roots: EdgeRoots,
+    samples: [HeldSample; SQUARE_ROOT_ONSET_EDGE_SCAN_POINTS as usize],
+}
+
+impl<S: TrackSignal> OnsetHold<'_, S> {
+    fn check_t(&self, k: usize) -> f64 {
+        if k == SQUARE_ROOT_ONSET_CHECK_INTERVALS {
+            return self.resolved.1;
+        }
+        nurbs::fmadd(
+            k as f64 / SQUARE_ROOT_ONSET_CHECK_INTERVALS as f64,
+            self.resolved.1 - self.resolved.0,
+            self.resolved.0,
+        )
+    }
+
+    fn h(&self) -> f64 {
+        self.span.1 - self.span.0
+    }
+
+    fn sample_at(&self, t: f64) -> HeldSample {
+        let (position, _, acceleration) = self.read.eval_pva(t);
+        HeldSample {
+            x: 2.0 * (t - self.span.0) / self.h() - 1.0,
+            position,
+            acceleration,
+        }
+    }
+
+    fn miss_at(&self, rung: &[f64], t: f64) -> f64 {
+        held_miss(rung, self.h(), &[self.sample_at(t)], self.tol)
+    }
+
+    fn worst_miss(&self, rung: &[f64]) -> f64 {
+        let samples = self
+            .samples
+            .get_or_init(|| std::array::from_fn(|k| self.sample_at(self.check_t(k))));
+        let misses = samples.map(|sample| held_miss(rung, self.h(), &[sample], self.tol));
+        let at_checks = misses.iter().copied().fold(0.0, f64::max);
+        if at_checks > 1.0 {
+            return at_checks;
+        }
+        let last = SQUARE_ROOT_ONSET_CHECK_INTERVALS;
+        let edge_scans = self.edge_scans.get_or_init(|| {
+            [
+                self.edge_scan(self.span.0, self.check_t(0), self.check_t(1)),
+                self.edge_scan(self.span.1, self.check_t(last), self.check_t(last - 1)),
+            ]
+        });
+        let mut worst = edge_scans
+            .iter()
+            .map(|scan| self.edge_peak(rung, scan))
+            .fold(at_checks, f64::max);
+        for (before, around) in misses.windows(3).enumerate() {
+            if around[1] > SQUARE_ROOT_ONSET_PEAK_SEARCH_SHARE
+                && around[1] >= around[0]
+                && around[1] >= around[2]
+            {
+                let Ok((_, peak)) = golden_section_peak(
+                    |t| Ok::<_, std::convert::Infallible>(self.miss_at(rung, t)),
+                    self.check_t(before),
+                    self.check_t(before + 2),
+                );
+                worst = worst.max(peak);
+            }
+        }
+        worst
+    }
+
+    fn edge_scan(&self, span_edge: f64, resolved_edge: f64, next_check: f64) -> EdgeScan {
+        let (from, to) = (
+            (resolved_edge - span_edge).abs().sqrt(),
+            (next_check - span_edge).abs().sqrt(),
+        );
+        let roots = EdgeRoots {
+            span_edge,
+            inward: (next_check - span_edge).signum(),
+            from,
+            to,
+            step: (to - from) / f64::from(SQUARE_ROOT_ONSET_EDGE_SCAN_POINTS + 1),
+        };
+        EdgeScan {
+            roots,
+            samples: std::array::from_fn(|k| {
+                let k = u32::try_from(k).expect("the edge scan has a handful of points");
+                self.sample_at(roots.t_of_root(roots.scan_root(k)))
+            }),
+        }
+    }
+
+    /// The rung's largest miss between a resolved edge and the check point
+    /// next to it, read in the root of the distance from the span edge.
+    fn edge_peak(&self, rung: &[f64], scan: &EdgeScan) -> f64 {
+        let roots = scan.roots;
+        let mut scan_peak = (roots.from, 0.0);
+        for (k, sample) in (0..).zip(&scan.samples) {
+            let miss = held_miss(rung, self.h(), &[*sample], self.tol);
+            if miss >= scan_peak.1 {
+                scan_peak = (roots.scan_root(k), miss);
+            }
+        }
+        let Ok((_, peak)) = golden_section_peak(
+            |root| Ok::<_, std::convert::Infallible>(self.miss_at(rung, roots.t_of_root(root))),
+            (scan_peak.0 - roots.step).max(roots.from),
+            (scan_peak.0 + roots.step).min(roots.to),
+        );
+        peak.max(scan_peak.1)
+    }
+}
 
 /// How far from a span edge a declared square-root onset still lies on it:
 /// the onsets and the seeds the edges come from are computed apart, ulps of

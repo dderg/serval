@@ -8,6 +8,12 @@ pub struct motion_pipeline::fit_stage::FitStage
 impl motion_pipeline::fit_stage::FitStage
 pub fn motion_pipeline::fit_stage::FitStage::into_driver(self) -> motion_pipeline::fit_stage::FitDriver
 pub fn motion_pipeline::fit_stage::FitStage::new(geometry::fitter::config::CornerFitConfig) -> Self
+pub mod motion_pipeline::live_config
+pub const motion_pipeline::live_config::STREAM_INTEGRATION_TOL: f64
+pub const motion_pipeline::live_config::STREAM_MAX_BUFFER_MOVES: usize
+pub fn motion_pipeline::live_config::move_limits(&planner_config::PlannerConfig) -> core::result::Result<geometry::frontend::VelocityLimits, alloc::string::String>
+pub fn motion_pipeline::live_config::require_unlimited_config_jerk(f64) -> core::result::Result<(), &'static str>
+pub fn motion_pipeline::live_config::stream_config(&planner_config::PlannerConfig) -> core::result::Result<motion_pipeline::types::StreamConfig, alloc::string::String>
 pub mod motion_pipeline::planner
 pub struct motion_pipeline::planner::Planner
 impl motion_pipeline::planner::Planner
