@@ -8,7 +8,8 @@ the pending_baselines.py cache (worktrees, stacks, logs, reviews) and
 abandoned /tmp/bench-ab-* worktree directories. Anything not touched for
 --days days is stale, unless a git worktree of any repo lives in it or under
 it, or a running process has its cwd or an open file there. The reused caches
-~/.cache/pending-baselines/{target,samples,audit} are always kept.
+~/.cache/pending-baselines/{samples,audit} are always kept; the per-worktree
+cargo target dirs in pending-baselines/targets age out like the rest.
 Dry run unless --apply.
 """
 
@@ -23,12 +24,7 @@ from pathlib import Path
 
 CACHE = Path("~/.cache").expanduser()
 PENDING = CACHE / "pending-baselines"
-KEPT = (
-    PENDING / "target",
-    PENDING / "samples",
-    PENDING / "audit",
-    CACHE / "serval-target",
-)
+KEPT = (PENDING / "samples", PENDING / "audit")
 SECONDS_PER_DAY = 86400.0
 
 
@@ -49,7 +45,7 @@ def size_bytes(path: Path) -> int:
 
 def candidates() -> list[Path]:
     found = sorted(CACHE.glob("*-target"))
-    for name in ("wt", "stack", "stack-logs", "review"):
+    for name in ("wt", "stack", "stack-logs", "review", "targets"):
         directory = PENDING / name
         if directory.is_dir():
             found.extend(sorted(directory.iterdir()))
