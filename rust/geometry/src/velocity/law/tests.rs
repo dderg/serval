@@ -2,8 +2,19 @@ use std::sync::Arc;
 
 use super::{
     CAP_CONTACT_FRACTION, CapDeparture, LawSegment, RAIL_ACCELERATION_DEFECT, RAIL_ARC_DEFECT,
-    RailKnot, ScalarLaw, defect::pair_defect,
+    RAIL_SPEED_SLACK, RailKnot, ScalarLaw, defect::pair_defect,
 };
+
+/// How far acceleration `a` lies from the law read at arc `s` and any speed
+/// within [`RAIL_SPEED_SLACK`] of `v` — the law the rail is held to.
+fn law_miss(law: &ScalarLaw, s: f64, v: f64, a: f64) -> f64 {
+    let slower = law.accel_at(s, (v - RAIL_SPEED_SLACK).max(0.0));
+    let faster = law.accel_at(s, v + RAIL_SPEED_SLACK);
+    let (low, high) = (slower.min(faster), slower.max(faster));
+    (a - law.accel_at(s, v))
+        .abs()
+        .min((low - a).max(a - high).max(0.0))
+}
 
 fn rail(v0: f64, accel: f64, kappa0: f64, sigma: f64, brake: bool, ds: f64) -> LawSegment {
     LawSegment::until_arc(
@@ -441,7 +452,7 @@ fn a_cut_approach_keeps_its_law_within_the_proven_allowance() {
         for k in 0..=64 {
             let t = last.t_lo + (last.t_hi - last.t_lo) * f64::from(k) / 64.0;
             let (s, v, a) = cut.state_at(t);
-            let miss = (a - cut.law.accel_at(s - cut.s0, v)).abs();
+            let miss = law_miss(&cut.law, s - cut.s0, v, a);
             assert!(
                 miss <= proven.acceleration + 1e-9 * (1.0 + a.abs()),
                 "cut {share}: the law is missed by {miss} at t={t}, proven {proven:?}"
@@ -556,7 +567,7 @@ fn no_sample_of_a_rail_pair_leaves_the_law_by_more_than_its_proven_defect() {
             for i in 0..=64 {
                 let t = pair[0].t + (pair[1].t - pair[0].t) * f64::from(i) / 64.0;
                 let (s, v, a) = seg.state_at(t);
-                let miss = (a - law.accel_at(s, v)).abs();
+                let miss = law_miss(&law, s, v, a);
                 let float_noise = 1e-9 * (1.0 + a.abs());
                 assert!(
                     miss <= proven + float_noise,
@@ -578,13 +589,13 @@ fn a_smooth_rail_lays_knots_only_where_its_law_asks_for_them() {
 }
 
 /// The worst the rail's interpolated acceleration leaves the law's own
-/// `a(s, v)` at the interpolated state, over dense times.
+/// `a(s, v)` near the interpolated state, over dense times.
 fn worst_law_miss(seg: &LawSegment) -> f64 {
     (0..=20_000)
         .map(|i| {
             let t = seg.dt * f64::from(i) / 20_000.0;
             let (s, v, a) = seg.state_at(seg.t0 + t);
-            (a - seg.law.accel_at(s - seg.s0, v)).abs()
+            law_miss(&seg.law, s - seg.s0, v, a)
         })
         .fold(0.0_f64, f64::max)
 }
@@ -627,4 +638,21 @@ fn a_cut_inside_the_step_that_runs_onto_the_cap_follows_the_law() {
             "cut at {share} of the contact arc: the interpolant leaves the law by {worst} mm/s²"
         );
     }
+}
+
+#[test]
+fn a_rail_riding_a_stiff_rising_cap_lays_its_curve_in_few_knots() {
+    let seg = rail(
+        3.617_106_127_137_380_8,
+        47_884.320_049_387_56,
+        33.215_730_573_950_42,
+        -0.417_370_919_017_468_3,
+        false,
+        3.574_240_610_783_556,
+    );
+    assert!(
+        seg.rail_knots().len() < 2_000,
+        "a 3.6 mm rail riding a stiff rising cap lays {} knots",
+        seg.rail_knots().len()
+    );
 }

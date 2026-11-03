@@ -32,6 +32,49 @@ fn piece(window: Window, models: &[TaylorModel; 3]) -> ExactPiece {
     }
 }
 
+/// Relative share of a reading its evaluator's own rounding may move it by,
+/// past an enclosure's bound.
+const EVALUATOR_NOISE_SHARE: f64 = 1e-9;
+
+/// How many of the steps one ulp of time moves a reading the evaluator's
+/// own rounding of its time may move it by, past an enclosure's bound.
+const EVALUATOR_TIME_ULPS: f64 = 8.0;
+
+/// Debug builds hold every piece of an enclosure to the signal's own
+/// evaluator `truth` at the piece's centre: an enclosure modelling another
+/// formula than the signal evaluates would prove fits against the wrong
+/// signal, and fails loudly here instead.
+pub(crate) fn debug_assert_holds(
+    pieces: &[ExactPiece],
+    truth: impl Fn(f64) -> (f64, f64, f64),
+    what: &str,
+) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    for piece in pieces {
+        let (p, v, a) = truth(piece.center);
+        let later = piece.center + piece.center.abs() * f64::EPSILON;
+        let (p_later, v_later, a_later) = truth(later);
+        let readings = [(p, p_later), (v, v_later), (a, a_later)];
+        for (order, (value, value_later)) in readings.into_iter().enumerate() {
+            let model = &piece.pva[order];
+            let miss = (model.eval(0.0) - value).abs();
+            let noise = EVALUATOR_NOISE_SHARE * (1.0 + value.abs())
+                + EVALUATOR_TIME_ULPS * (value_later - value).abs();
+            assert!(
+                !(miss > model.rounding + noise),
+                "{what}: the enclosure of order {order} on [{}, {}] reads {} at its centre, \
+                 the signal {value}, past its bound {}",
+                piece.lo,
+                piece.hi,
+                model.eval(0.0),
+                model.rounding
+            );
+        }
+    }
+}
+
 /// A model of `√argument`, or the root's range as a constant where its
 /// model does not exist or is wider than that range.
 pub(crate) fn root_or_range(argument: &TaylorModel) -> TaylorModel {

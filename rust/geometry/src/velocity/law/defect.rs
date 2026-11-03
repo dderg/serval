@@ -26,6 +26,13 @@ pub const RAIL_ACCELERATION_DEFECT: f64 = 5.0;
 /// position.
 pub const RAIL_ARC_DEFECT: f64 = 5e-4;
 
+/// How far from a pair's own speed, in mm/s, the law its acceleration is
+/// held to may be read: near a rising cap the law's acceleration is so
+/// steep in the speed that the rounding of any interpolated speed moves it
+/// by more than [`RAIL_ACCELERATION_DEFECT`]. A speed this far off moves
+/// the rail by a ten-millionth of a millimetre a second.
+pub const RAIL_SPEED_SLACK: f64 = 1e-7;
+
 /// Coefficient roundings each interpolant coefficient below carries: at
 /// most four products and sums of the knot data.
 const COEFFICIENT_ROUNDINGS: usize = 8;
@@ -195,22 +202,32 @@ pub fn pair_defect(law: &ScalarLaw, pair: &RailPair) -> PairDefect {
             brake,
         } => {
             let kappa = s.scale(Ball::exact(sigma)).add_ball(Ball::exact(kappa0));
+            let law_squared_at = |v: &TaylorModel| {
+                let normal = kappa.mul(&v.mul(v));
+                normal
+                    .mul(&normal)
+                    .scale(Ball::exact(-1.0))
+                    .add_ball(Ball::rounded(accel * accel, 1))
+            };
             let normal = kappa.mul(&v.mul(&v));
-            let law_squared = normal
-                .mul(&normal)
-                .scale(Ball::exact(-1.0))
-                .add_ball(Ball::rounded(accel * accel, 1));
+            let law_squared = law_squared_at(&v);
             let sign = if brake { -1.0 } else { 1.0 };
             let departs = matches!(pair.shape, RailPairShape::Departure { .. });
             let (centre, spread) = law_squared.spread();
             let law_peak = upper((centre + spread).max(0.0).sqrt() * (1.0 + f64::EPSILON));
             let fallback =
                 either_side_defect(&a, law_peak, brake).min(squares_defect(&a, &law_squared));
+            let slack = |shift: f64| law_squared_at(&v.add_ball(Ball::exact(shift)));
             let tangential = [
                 direct_root_defect(&a, &law_squared, sign),
                 departs
                     .then(|| departing_root_defect(&a, &law_squared, sign))
                     .flatten(),
+                slack_root_defect(
+                    &a,
+                    [slack(-RAIL_SPEED_SLACK), slack(RAIL_SPEED_SLACK)],
+                    sign,
+                ),
             ]
             .into_iter()
             .flatten()
@@ -245,6 +262,31 @@ pub fn pair_defect(law: &ScalarLaw, pair: &RailPair) -> PairDefect {
 fn direct_root_defect(a: &TaylorModel, law_squared: &TaylorModel, sign: f64) -> Option<f64> {
     let root = law_squared.sqrt()?;
     Some(a.sub(&root.scale(Ball::exact(sign))).bound())
+}
+
+/// The defect of acceleration `a` against the law read anywhere within
+/// [`RAIL_SPEED_SLACK`] of its own speed: `law_squared` at the speed less
+/// and more the slack, between whose roots the law lies; the distance from
+/// `a` to that range.
+fn slack_root_defect(
+    a: &TaylorModel,
+    [slower, faster]: [TaylorModel; 2],
+    sign: f64,
+) -> Option<f64> {
+    let (slower, faster) = (slower.sqrt()?, faster.sqrt()?);
+    let (low, high) = if sign > 0.0 {
+        (faster, slower)
+    } else {
+        (
+            slower.scale(Ball::exact(-1.0)),
+            faster.scale(Ball::exact(-1.0)),
+        )
+    };
+    let past = |model: TaylorModel| {
+        let (centre, spread) = model.spread();
+        upper((centre + spread).max(0.0))
+    };
+    Some(past(a.sub(&high)).max(past(low.sub(a))))
 }
 
 /// The defect of acceleration `a` against the law `sign·√law_squared` on a

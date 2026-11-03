@@ -5189,9 +5189,14 @@ impl NonlinearAdvanceSignal {
     fn models_on(&self, piece: usize, window: taylor::Window) -> [TaylorModel; 3] {
         let coefficients = &self.coeffs[piece];
         let tau = window.time_since(self.starts[piece]);
-        let input = [0, 1, 2, 3].map(|order| taylor::derivative_of(coefficients, order, &tau));
-        let mut models = nonlinear_advance_models(&self.adv, &input);
-        let [_, velocity, acceleration, _] = &input;
+        let [position, velocity, acceleration, jerk] =
+            [0, 1, 2, 3].map(|order| taylor::derivative_of(coefficients, order, &tau));
+        let mut models = nonlinear_advance_models(
+            &self.adv,
+            &[position, velocity, acceleration],
+            &[velocity, acceleration, jerk],
+        );
+        let (velocity, acceleration) = (&velocity, &acceleration);
         if models[2].rad().is_finite()
             && self.curvature_velocity_may_flip(piece, window, velocity, acceleration)
         {
@@ -5226,13 +5231,14 @@ impl NonlinearAdvanceSignal {
     }
 }
 
-/// Taylor models of `[p, v, a]` advanced by `adv` from the models
-/// `[p, v, a, j]` of its input: `p + advance(v)`, `v + slope(v)·a`,
-/// `a + slope(v)·j + curvature(v)·a²`, each widened by how far the shape
-/// may miss a branch its velocity's range reaches.
+/// Taylor models of `[p, v, a]` advanced by `adv`: the track `[p, v, a]`
+/// plus the advance of the motion it reads, `[v, a, j]` — `p + advance(v)`,
+/// `v + slope(v)·a`, `a + slope(v)·j + curvature(v)·a²` — each widened by
+/// how far the shape may miss a branch its velocity's range reaches.
 pub(crate) fn nonlinear_advance_models(
     adv: &trajectory::NonlinearAdvance,
-    [position, velocity, acceleration, jerk]: &[TaylorModel; 4],
+    [position, track_velocity, track_acceleration]: &[TaylorModel; 3],
+    [velocity, acceleration, jerk]: &[TaylorModel; 3],
 ) -> [TaylorModel; 3] {
     let vl = adv.linearization_velocity;
     let unit = velocity.scale(Ball::rounded(1.0 / vl, 1));
@@ -5251,8 +5257,8 @@ pub(crate) fn nonlinear_advance_models(
         position
             .add(&velocity.scale(Ball::exact(adv.linear_advance)))
             .add(&shape.value.scale(Ball::exact(adv.nonlinear_offset))),
-        velocity.add(&slope.mul(acceleration)),
-        acceleration
+        track_velocity.add(&slope.mul(acceleration)),
+        track_acceleration
             .add(&curvature.mul(&squared))
             .add(&slope.mul(jerk)),
     ];

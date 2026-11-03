@@ -197,6 +197,21 @@ impl WholeEnclosure {
     }
 }
 
+/// A follower's models on one window: what the span table lays along the
+/// leaders' path, which an advance reads, and the raw track's extrude-only
+/// motion, which it does not; each `[p, v, a, j]`.
+pub(super) struct FollowerModels {
+    path: [TaylorModel; 4],
+    raw: [TaylorModel; 4],
+}
+
+impl FollowerModels {
+    /// The follower's own model of derivative `order`.
+    fn total(&self, order: usize) -> TaylorModel {
+        self.path[order].add(&self.raw[order])
+    }
+}
+
 /// The axes a follower reads, window by window.
 pub(super) struct FollowerAxisWindows<'a> {
     leaders: Vec<AxisWindows<'a>>,
@@ -238,12 +253,14 @@ impl<'a> FollowerSignal<'a> {
         Some(formulas)
     }
 
-    /// The follower's `[p, v, a, j]` on `window` — `j` only `with_jerk` —,
-    /// `None` where a model is out of reach: an axis past one of its
-    /// formulas or without a jerk, the smoothing, or a speed zero the rate
-    /// divides by. An odometer reaching past the owned span, where the
-    /// signal holds its distance, is widened by how far it reaches.
-    fn window_models(&self, window: Window, with_jerk: bool) -> Option<[TaylorModel; 4]> {
+    /// The follower's `[p, v, a, j]` on `window` — `j` only `with_jerk` —
+    /// split into what the span table lays along the leaders' path and the
+    /// extrude-only motion of the raw track; `None` where a model is out of
+    /// reach: an axis past one of its formulas or without a jerk, the
+    /// smoothing, or a speed zero the rate divides by. An odometer reaching
+    /// past the owned span, where the signal holds its distance, is widened
+    /// by how far it reaches.
+    fn window_models(&self, window: Window, with_jerk: bool) -> Option<FollowerModels> {
         let windows = self.axis_windows()?;
         let mut leaders = Vec::with_capacity(windows.leaders.len());
         let mut speed_squared = TaylorModel::constant(Ball::exact(0.0));
@@ -298,36 +315,30 @@ impl<'a> FollowerSignal<'a> {
             }
             _ => [(); 4].map(|()| TaylorModel::constant(Ball::exact(0.0))),
         };
-        let follower = |formula: &TableFormula| {
+        let laid = |formula: &TableFormula| {
             let [e, ratio, slope] = formula.laid(&s);
             [
-                e.add_ball(Ball::exact(self.e_start - self.e_spans_start))
-                    .add(&raw[0]),
-                ratio.mul(&rate).add(&raw[1]),
-                slope
-                    .mul(&rate)
-                    .mul(&rate)
-                    .add(&ratio.mul(&rate_deriv))
-                    .add(&raw[2]),
+                e.add_ball(Ball::exact(self.e_start - self.e_spans_start)),
+                ratio.mul(&rate),
+                slope.mul(&rate).mul(&rate).add(&ratio.mul(&rate_deriv)),
                 ratio
                     .mul(&rate_second)
-                    .add(&slope.mul(&rate).mul(&rate_deriv).scale(Ball::exact(3.0)))
-                    .add(&raw[3]),
+                    .add(&slope.mul(&rate).mul(&rate_deriv).scale(Ball::exact(3.0))),
             ]
         };
-        let mut models = follower(&formulas[0]);
+        let mut path = laid(&formulas[0]);
         let [rate, rate_deriv, rate_second] =
             [&rate, &rate_deriv, &rate_second].map(TaylorModel::bound);
         for formula in &formulas[1..] {
             let Some([e, ratio, slope]) = formula.departure_from(&formulas[0], reach) else {
                 continue;
             };
-            models[0].widen(e);
-            models[1].widen(ratio * rate);
-            models[2].widen(slope * rate * rate + ratio * rate_deriv);
-            models[3].widen(ratio * rate_second + 3.0 * slope * rate * rate_deriv);
+            path[0].widen(e);
+            path[1].widen(ratio * rate);
+            path[2].widen(slope * rate * rate + ratio * rate_deriv);
+            path[3].widen(ratio * rate_second + 3.0 * slope * rate * rate_deriv);
         }
-        Some(models)
+        Some(FollowerModels { path, raw })
     }
 
     /// The follower's enclosure over `[lo, hi]`, a window per stretch
@@ -341,10 +352,16 @@ impl<'a> FollowerSignal<'a> {
         accuracy: [f64; 3],
     ) -> Option<Vec<ExactPiece>> {
         let breaks = self.breaks_between(lo, hi, &[])?;
-        enclose_between(&breaks, accuracy, &|window| {
+        let pieces = enclose_between(&breaks, accuracy, &|window| {
             self.window_models(window, false)
-                .map(|[p, v, a, _]| [p, v, a])
-        })
+                .map(|models| std::array::from_fn(|order| models.total(order)))
+        })?;
+        taylor::debug_assert_holds(
+            &pieces,
+            |t| crate::shaper::TrackSignal::eval_pva(self, t),
+            "follower",
+        );
+        Some(pieces)
     }
 
     /// `lo`, the grid times, the axes' formula changes and `extra` inside
@@ -403,10 +420,11 @@ fn enclose_between(
 
 impl AdvancedFollowerSignal<'_, '_> {
     /// The advanced follower's enclosure over `[lo, hi]`: the follower's
-    /// models with jerk, less the advance steps behind each window, through
-    /// the advance. `None` for an advance reading the ramped path velocity
-    /// — its valley weights are the smoothing's — or where the follower has
-    /// no bounded model.
+    /// models less the advance steps behind each window, plus the advance
+    /// of the motion laid along the path — never the extrude-only motion of
+    /// the raw track, which keeps its own. `None` for an advance reading the
+    /// ramped path velocity — its valley weights are the smoothing's — or
+    /// where the follower has no bounded model.
     pub(super) fn enclosure(
         &self,
         lo: f64,
@@ -418,32 +436,41 @@ impl AdvancedFollowerSignal<'_, '_> {
         }
         let step_times: Vec<f64> = self.steps.iter().map(|step| step.t).collect();
         let breaks = self.source.breaks_between(lo, hi, &step_times)?;
-        enclose_between(&breaks, accuracy, &|window: Window| {
-            let [position, velocity, acceleration, jerk] =
-                self.source.window_models(window, true)?;
+        let pieces = enclose_between(&breaks, accuracy, &|window: Window| {
+            let models = self.source.window_models(window, true)?;
             let taken: f64 = self
                 .steps
                 .iter()
                 .take_while(|step| step.t < window.center)
                 .map(|step| step.step_mm)
                 .sum();
+            let [position, velocity, acceleration] =
+                std::array::from_fn(|order| models.total(order));
             let position = position.add_ball(Ball::exact(-taken));
+            let [_, read_velocity, read_acceleration, read_jerk] = models.path;
             Some(match self.advance.stage {
                 ChainStage::DerivativeGains { k1, k2 } => {
                     assert_eq!(*k2, 0.0, "leading acceleration gain is not supported");
                     let gain = Ball::exact(*k1);
                     [
-                        position.add(&velocity.scale(gain)),
-                        velocity.add(&acceleration.scale(gain)),
-                        acceleration.add(&jerk.scale(gain)),
+                        position.add(&read_velocity.scale(gain)),
+                        velocity.add(&read_acceleration.scale(gain)),
+                        acceleration.add(&read_jerk.scale(gain)),
                     ]
                 }
                 ChainStage::NonlinearAdvance(advance) => crate::shaper::nonlinear_advance_models(
                     advance,
-                    &[position, velocity, acceleration, jerk],
+                    &[position, velocity, acceleration],
+                    &[read_velocity, read_acceleration, read_jerk],
                 ),
                 ChainStage::SmoothKernel(_) => unreachable!("a leading advance is not a kernel"),
             })
-        })
+        })?;
+        taylor::debug_assert_holds(
+            &pieces,
+            |t| crate::shaper::TrackSignal::eval_pva(self, t),
+            "advanced follower",
+        );
+        Some(pieces)
     }
 }

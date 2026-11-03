@@ -37,7 +37,7 @@ use std::sync::{Arc, OnceLock};
 
 mod defect;
 
-pub use defect::{PairDefect, RAIL_ACCELERATION_DEFECT, RAIL_ARC_DEFECT};
+pub use defect::{PairDefect, RAIL_ACCELERATION_DEFECT, RAIL_ARC_DEFECT, RAIL_SPEED_SLACK};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ScalarLaw {
@@ -474,6 +474,55 @@ impl ScalarLaw {
             return None;
         }
         Some(cap * (1.0 - follow * follow).sqrt())
+    }
+
+    /// The `v²` of the curve [`Self::settle_crossed_cap`] settles a rail on
+    /// at arc `ds`, where its cap rises; `None` elsewhere.
+    fn settled_speed_squared(&self, ds: f64) -> Option<f64> {
+        let (settled, _) = self.settled_slopes(ds, 0.0)?;
+        let ScalarLaw::DiskRail {
+            accel,
+            kappa0,
+            sigma,
+            ..
+        } = *self
+        else {
+            return None;
+        };
+        let kappa = (kappa0 + sigma * ds).abs();
+        let follow = 0.5 * sigma / (kappa * kappa);
+        (settled > 0.0).then(|| accel / kappa * (1.0 - follow * follow).sqrt())
+    }
+
+    /// The acceleration and its rate along the curve
+    /// [`Self::settle_crossed_cap`] settles a rail on at arc `ds`, speed `v`:
+    /// `w(s) = A·√(k⁻² − c·k⁻⁶)`, `k = |κ(s)|`, `c = σ²/4`, read as
+    /// `a = ½·w'` and `ȧ = v·½·w''`; `None` where no such curve exists — a
+    /// falling cap, a straight, or one rising faster than a rail can climb.
+    fn settled_slopes(&self, ds: f64, v: f64) -> Option<(f64, f64)> {
+        let ScalarLaw::DiskRail {
+            accel,
+            kappa0,
+            sigma,
+            ..
+        } = *self
+        else {
+            return None;
+        };
+        let signed = kappa0 + sigma * ds;
+        let k = signed.abs();
+        let dk = sigma * signed.signum();
+        let c = 0.25 * sigma * sigma;
+        if k == 0.0 || dk > 0.0 || c >= k.powi(4) {
+            return None;
+        }
+        let u = k.powi(-2) - c * k.powi(-6);
+        let du = -2.0 * k.powi(-3) + 6.0 * c * k.powi(-7);
+        let ddu = 6.0 * k.powi(-4) - 42.0 * c * k.powi(-8);
+        let root = u.sqrt();
+        let dw = accel * du / (2.0 * root) * dk;
+        let ddw = accel * (ddu / (2.0 * root) - du * du / (4.0 * u * root)) * dk * dk;
+        Some((0.5 * dw, v * 0.5 * ddw))
     }
 }
 
@@ -1297,6 +1346,9 @@ fn rail_step(
     if s == 0.0 && law.in_cap_contact(lo.a) {
         return Some((laid(departure()?, CapDeparture::FromLo), None));
     }
+    if let Some(step) = settled_step(law, lo, h) {
+        return Some((laid(step, CapDeparture::None), None));
+    }
     let f = |s: f64, w: f64| 2.0 * law.accel_at(s, w.max(0.0).sqrt());
     let k1 = 2.0 * lo.a;
     let k2 = f(s + 0.5 * h, w + 0.5 * h * k1);
@@ -1313,6 +1365,57 @@ fn rail_step(
     } else {
         Some((laid(step, CapDeparture::None), None))
     }
+}
+
+/// The share of [`RAIL_ACCELERATION_DEFECT`] within which the curve a
+/// rising cap draws must follow the law for a rail to ride it: the curve
+/// is the law's own to `O(f²)`, `f = σ/2κ²`, which only a stiff cap makes
+/// this close, and a gentle one the integrator steps across stably anyway.
+const SETTLED_CURVE_SHARE: f64 = 1.0 / 64.0;
+
+/// The step from `lo` along the curve a rising cap draws the rail on, where
+/// `lo` rides it and the curve follows the law: at both ends the law's
+/// acceleration within [`SETTLED_CURVE_SHARE`] of the curve's, and `lo`'s
+/// speed close enough that closing the gap over the step adds at most half
+/// [`RAIL_ACCELERATION_DEFECT`]. The solution is pulled onto the curve within
+/// `1/λ` of arc, `λ = ∂(2a)/∂(v²)` its stiffness there, far below any step
+/// an explicit integrator is stable at across it, so the rail rides the
+/// curve itself and the defect check holds its knots to the law. `None`
+/// off such a curve.
+fn settled_step(law: &ScalarLaw, lo: &RailState, h: f64) -> Option<RailStep> {
+    let follows = |s: f64, v: f64, settled: f64| {
+        settled > 0.0
+            && (law.accel_at(s, v) - settled).abs()
+                <= SETTLED_CURVE_SHARE * RAIL_ACCELERATION_DEFECT
+    };
+    let (settled, _) = law.settled_slopes(lo.s, lo.v)?;
+    let on_curve = law.settled_speed_squared(lo.s)?.sqrt();
+    let gap = (lo.v - on_curve).abs();
+    if !(follows(lo.s, on_curve, settled)
+        && gap * (lo.v + on_curve) <= RAIL_ACCELERATION_DEFECT * h)
+    {
+        return None;
+    }
+    let w_next = law.settled_speed_squared(lo.s + h)?;
+    let v = w_next.sqrt();
+    let (settled, rate) = law.settled_slopes(lo.s + h, v)?;
+    if !follows(lo.s + h, v, settled) {
+        return None;
+    }
+    let a = law.accel_at(lo.s + h, v);
+    let hi = RailState {
+        s: lo.s + h,
+        v,
+        a,
+        rate,
+        slopes: KnotSlopes::Interpolant { accel: a, rate },
+    };
+    Some(RailStep {
+        w_next,
+        hi,
+        rise: v - lo.v,
+        duration: knot_duration(h, (lo.v, lo.a, lo.rate), (hi.v, hi.a, hi.rate)),
+    })
 }
 
 /// The knots of a step from `lo`, short of the cap, whose end `step`
@@ -1499,7 +1602,7 @@ impl Laid {
             v: self.step.hi.v,
             rise: self.step.rise,
             departure: self.departure,
-            slopes: KnotSlopes::Law,
+            slopes: self.step.hi.slopes,
         }
     }
 }
@@ -1535,14 +1638,33 @@ impl RailLayout {
     }
 }
 
+/// The rail's state at arc `s` where `v² = w`: the law's acceleration, and
+/// its rate — the settled curve's where the state rides a rising cap's
+/// curve within [`RAIL_ACCELERATION_DEFECT`]: the curve draws the rail
+/// along it, and the law's own rate there is its stiffness pulling an
+/// ulp's departure back, not the motion's.
 fn rail_state(law: &ScalarLaw, s: f64, w: f64) -> RailState {
     let v = w.max(0.0).sqrt();
     let a = law.accel_at(s, v);
-    RailState {
-        s,
-        v,
-        a,
-        rate: law.accel_rate_at(s, v, a),
+    match law.settled_slopes(s, v) {
+        Some((settled, rate))
+            if settled > 0.0 && (a - settled).abs() <= RAIL_ACCELERATION_DEFECT =>
+        {
+            RailState {
+                s,
+                v,
+                a,
+                rate,
+                slopes: KnotSlopes::Interpolant { accel: a, rate },
+            }
+        }
+        _ => RailState {
+            s,
+            v,
+            a,
+            rate: law.accel_rate_at(s, v, a),
+            slopes: KnotSlopes::Law,
+        },
     }
 }
 
@@ -1613,6 +1735,7 @@ struct RailState {
     v: f64,
     a: f64,
     rate: f64,
+    slopes: KnotSlopes,
 }
 
 /// The duration `τ` under which the quintic Hermite through `(v, a, ȧ)` at
