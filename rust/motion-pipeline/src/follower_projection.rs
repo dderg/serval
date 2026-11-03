@@ -19,6 +19,7 @@ use crate::shaper::{
 use crate::types::PostProcessError;
 use crate::worker_pool::WorkerPool;
 
+mod enclosure;
 mod ratio_ramp;
 use ratio_ramp::{RampLeg, RatioSmoothing};
 
@@ -2477,6 +2478,11 @@ pub(crate) struct FollowerSignal<'a> {
     start_sliver: Option<SpeedZeroSliver>,
     end_sliver: Option<SpeedZeroSliver>,
     pva_memo: RefCell<[Option<(u64, (f64, f64, f64))>; PVA_MEMO_SLOTS]>,
+    /// The enclosure over the whole signal at the accuracy it was first
+    /// asked for, which every rung of the fit asks again.
+    enclosure: std::cell::OnceCell<([u64; 3], Option<Vec<ExactPiece>>)>,
+    /// The leaders and the raw track as the enclosure reads them.
+    axis_windows: std::cell::OnceCell<Option<enclosure::FollowerAxisWindows<'a>>>,
 }
 
 impl<'a> FollowerSignal<'a> {
@@ -2527,6 +2533,8 @@ impl<'a> FollowerSignal<'a> {
             start_sliver: None,
             end_sliver: None,
             pva_memo: RefCell::new([None; PVA_MEMO_SLOTS]),
+            enclosure: std::cell::OnceCell::new(),
+            axis_windows: std::cell::OnceCell::new(),
         };
         let (start_sliver, end_sliver) = sig.speed_zero_slivers();
         sig.start_sliver = start_sliver;
@@ -3206,6 +3214,20 @@ impl TrackSignal for FollowerSignal<'_> {
         [f64::NEG_INFINITY, f64::INFINITY]
             .map(|side| self.pva_at_distance(trajectory::next_toward(knot, side), s))
     }
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+        let key = accuracy.map(f64::to_bits);
+        let (built_for, whole) = self.enclosure.get_or_init(|| {
+            let (start, end) = (self.grid[0], self.grid[self.grid.len() - 1]);
+            (key, self.enclosure(start, end, accuracy))
+        });
+        if *built_for != key {
+            return self.enclosure(lo, hi, accuracy);
+        }
+        let whole = whole.as_ref()?;
+        let first = whole.partition_point(|piece| piece.hi < lo);
+        let past = whole.partition_point(|piece| piece.lo <= hi);
+        Some(whole[first..past.max(first)].to_vec())
+    }
     fn interior_knots(&self, start: f64, end: f64) -> &[f64] {
         let first = self.grid.partition_point(|&t| t <= start);
         let past_last = self.grid.partition_point(|&t| t < end);
@@ -3355,6 +3377,10 @@ impl TrackSignal for AdvancedFollowerSignal<'_, '_> {
 
     fn interior_knots(&self, start: f64, end: f64) -> &[f64] {
         self.source.interior_knots(start, end)
+    }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+        self.enclosure(lo, hi, accuracy)
     }
 
     fn position_delta(&self, (t0, _): (f64, f64), (t1, _): (f64, f64)) -> f64 {

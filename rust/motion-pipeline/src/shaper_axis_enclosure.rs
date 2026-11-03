@@ -314,7 +314,7 @@ fn clothoid_position(
 const CLOTHOID_REACH_MARGIN: f64 = 1.0 / (1_u64 << 30) as f64;
 
 /// An axis's law with the constant surface offset its position adds.
-struct AxisReading<'a> {
+pub(crate) struct AxisReading<'a> {
     law: AxisLaw<'a>,
     offset: f64,
 }
@@ -720,6 +720,168 @@ fn collapsed(model: &TaylorModel) -> TaylorModel {
         mid: centre,
         rad: spread,
     })
+}
+
+/// One axis read window by window, its formulas gathered once: the
+/// models of a window one formula covers, and the times its formula
+/// changes at.
+pub(crate) enum AxisWindows<'a> {
+    /// Polynomial pieces, each with the base position it is relative to.
+    Pieces(Vec<(f64, nurbs::bezier::BezierPiece)>),
+    Analytic {
+        span: &'a AnalyticMoveSpan,
+        reading: AxisReading<'a>,
+    },
+    Hold(f64),
+}
+
+impl<'a> AxisWindows<'a> {
+    /// `None` for an axis with no formula the windows can read: a nudge, a
+    /// buzz, or an analytic axis without a law.
+    pub(crate) fn of(axis: &'a ContinuousAxis) -> Option<Self> {
+        Some(match axis {
+            ContinuousAxis::Spline(curve) => Self::Pieces(
+                extract_bezier_pieces(curve)
+                    .into_iter()
+                    .map(|piece| (0.0, piece))
+                    .collect(),
+            ),
+            ContinuousAxis::RelativeSpline {
+                base_position,
+                curve,
+            } => Self::Pieces(
+                extract_bezier_pieces(curve)
+                    .into_iter()
+                    .map(|piece| (*base_position, piece))
+                    .collect(),
+            ),
+            ContinuousAxis::PiecewiseRelativeSpline(pieces) => Self::Pieces(
+                pieces
+                    .iter()
+                    .flat_map(|relative| {
+                        extract_bezier_pieces(&relative.curve)
+                            .into_iter()
+                            .map(|piece| (relative.base_position, piece))
+                    })
+                    .collect(),
+            ),
+            ContinuousAxis::Analytic { span, axis } => {
+                let (law, offset) = AxisLaw::of(span, *axis)?;
+                Self::Analytic {
+                    span,
+                    reading: AxisReading { law, offset },
+                }
+            }
+            ContinuousAxis::Hold { position, .. } => Self::Hold(*position),
+            ContinuousAxis::Nudge(_) | ContinuousAxis::Buzz { .. } => return None,
+        })
+    }
+
+    /// `[p, v, a, j]` on `window` where one formula covers it; `None` past
+    /// a formula's end, or asked `with_jerk` of an analytic law, whose
+    /// models stop at acceleration. Without it the jerk is unbounded.
+    pub(crate) fn models(&self, window: Window, with_jerk: bool) -> Option<[TaylorModel; 4]> {
+        let covers = |lo: f64, hi: f64| {
+            let slack = 1e-9 * (hi - lo).max(1.0);
+            window.lo >= lo - slack && window.hi <= hi + slack
+        };
+        match self {
+            Self::Pieces(pieces) => {
+                let index = pieces
+                    .partition_point(|(_, piece)| piece.u_end < window.center)
+                    .min(pieces.len().checked_sub(1)?);
+                let (base, piece) = &pieces[index];
+                if !covers(piece.u_start, piece.u_end) {
+                    return None;
+                }
+                let tau = window.time_since(piece.u_start);
+                let [p, v, a, j] =
+                    [0, 1, 2, 3].map(|order| derivative_of(&piece.coeffs, order, &tau));
+                Some([p.add_ball(Ball::exact(*base)), v, a, j])
+            }
+            Self::Analytic { span, reading } => {
+                if with_jerk {
+                    return None;
+                }
+                let phase = span
+                    .phases
+                    .iter()
+                    .find(|phase| window.center <= span.t_start + phase.end_time())
+                    .or_else(|| span.phases.last())?;
+                let origin = span.t_start + phase.t0;
+                if !covers(origin, span.t_start + phase.end_time()) {
+                    return None;
+                }
+                let tau = window.time_since(origin);
+                let state = match phase.law {
+                    ScalarLaw::ConstAccel { a0 } => Tangential {
+                        s: polynomial_of_balls(
+                            [
+                                Ball::rounded(phase.s0 - span.source_distance_origin, 1),
+                                Ball::exact(phase.v0),
+                                Ball::exact(0.5 * a0),
+                            ]
+                            .into_iter(),
+                            &tau,
+                        ),
+                        v: polynomial_of_balls(
+                            [Ball::exact(phase.v0), Ball::exact(a0)].into_iter(),
+                            &tau,
+                        ),
+                        a: TaylorModel::constant(Ball::exact(a0)),
+                    },
+                    ScalarLaw::DiskRail { .. } => {
+                        let mut pairs = phase.rail_pairs(window.lo - origin, window.hi - origin);
+                        let pair = pairs.next()?;
+                        if pairs.next().is_some() || !covers(origin + pair.t_lo, origin + pair.t_hi)
+                        {
+                            return None;
+                        }
+                        PairInterpolant::new(&pair, phase.s0 - span.source_distance_origin)
+                            .state(&tau)
+                    }
+                };
+                let [p, v, a] = reading.models(&WindowReading {
+                    state,
+                    trig: std::cell::OnceCell::new(),
+                    spread_trig: std::cell::OnceCell::new(),
+                });
+                Some([p, v, a, TaylorModel::UNBOUNDED])
+            }
+            Self::Hold(position) => Some([
+                TaylorModel::constant(Ball::exact(*position)),
+                TaylorModel::constant(Ball::exact(0.0)),
+                TaylorModel::constant(Ball::exact(0.0)),
+                TaylorModel::constant(Ball::exact(0.0)),
+            ]),
+        }
+    }
+
+    /// The times inside `(lo, hi)` at which the axis's formula changes.
+    pub(crate) fn breaks(&self, lo: f64, hi: f64) -> Vec<f64> {
+        let inside = |t: &f64| *t > lo && *t < hi;
+        match self {
+            Self::Pieces(pieces) => pieces
+                .iter()
+                .map(|(_, piece)| piece.u_end)
+                .filter(inside)
+                .collect(),
+            Self::Analytic { span, .. } => span
+                .phases
+                .iter()
+                .flat_map(|phase| {
+                    let origin = span.t_start + phase.t0;
+                    std::iter::once(span.t_start + phase.end_time()).chain(
+                        phase
+                            .rail_pairs(lo - origin, hi - origin)
+                            .map(move |pair| origin + pair.t_hi),
+                    )
+                })
+                .filter(inside)
+                .collect(),
+            Self::Hold(_) => Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]

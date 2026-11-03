@@ -32,7 +32,7 @@ mod hull;
 pub(crate) mod taylor;
 
 #[path = "shaper_axis_enclosure.rs"]
-mod axis_enclosure;
+pub(crate) mod axis_enclosure;
 
 use exact::ExactSpan;
 use hull::{FittedPiece, HullBudget};
@@ -5191,39 +5191,21 @@ impl NonlinearAdvanceSignal {
     fn models_on(&self, piece: usize, window: taylor::Window) -> [TaylorModel; 3] {
         let coefficients = &self.coeffs[piece];
         let tau = window.time_since(self.starts[piece]);
-        let [position, velocity, acceleration, jerk] =
-            [0, 1, 2, 3].map(|order| taylor::derivative_of(coefficients, order, &tau));
-        let adv = self.adv;
-        let vl = adv.linearization_velocity;
-        let unit = velocity.scale(Ball::rounded(1.0 / vl, 1));
-        let Some(shape) = AdvanceShape::of(adv.model, &unit) else {
-            return [TaylorModel::UNBOUNDED; 3];
-        };
-        let slope = shape
-            .slope
-            .scale(Ball::rounded(adv.nonlinear_offset / vl, 1))
-            .add_ball(Ball::exact(adv.linear_advance));
-        let curvature = shape
-            .curvature
-            .scale(Ball::rounded(adv.nonlinear_offset / (vl * vl), 2));
-        let squared = acceleration.mul(&acceleration);
-        let mut models = [
-            position
-                .add(&velocity.scale(Ball::exact(adv.linear_advance)))
-                .add(&shape.value.scale(Ball::exact(adv.nonlinear_offset))),
-            velocity.add(&slope.mul(&acceleration)),
-            acceleration
-                .add(&curvature.mul(&squared))
-                .add(&slope.mul(&jerk)),
-        ];
-        let offset = adv.nonlinear_offset.abs();
-        let [shape_miss, slope_miss, curvature_miss] = shape.branch_miss;
-        let slope_miss = offset / vl * slope_miss;
-        let curvature_miss = offset / (vl * vl) * curvature_miss;
-        models[0].widen(offset * shape_miss);
-        models[1].widen(slope_miss * acceleration.bound());
-        models[2].widen(curvature_miss * squared.bound() + slope_miss * jerk.bound());
-        if self.curvature_velocity_may_flip(piece, window, &velocity, &acceleration) {
+        let input = [0, 1, 2, 3].map(|order| taylor::derivative_of(coefficients, order, &tau));
+        let mut models = nonlinear_advance_models(&self.adv, &input);
+        let [_, velocity, acceleration, _] = &input;
+        if models[2].rad().is_finite()
+            && self.curvature_velocity_may_flip(piece, window, velocity, acceleration)
+        {
+            let vl = self.adv.linearization_velocity;
+            let unit = velocity.scale(Ball::rounded(1.0 / vl, 1));
+            let shape = AdvanceShape::of(self.adv.model, &unit)
+                .expect("the advance's shape modelled its own velocity");
+            let curvature = shape
+                .curvature
+                .scale(Ball::rounded(self.adv.nonlinear_offset / (vl * vl), 2));
+            let curvature_miss = self.adv.nonlinear_offset.abs() / (vl * vl) * shape.branch_miss[2];
+            let squared = acceleration.mul(acceleration);
             models[2].widen(2.0 * (curvature.bound() + curvature_miss) * squared.bound());
         }
         models
@@ -5244,6 +5226,46 @@ impl NonlinearAdvanceSignal {
         let (centre, spread) = velocity.spread();
         near_edge && centre.abs() - spread < MIN_DEVICE_INTERVAL_S * acceleration.bound()
     }
+}
+
+/// Taylor models of `[p, v, a]` advanced by `adv` from the models
+/// `[p, v, a, j]` of its input: `p + advance(v)`, `v + slope(v)·a`,
+/// `a + slope(v)·j + curvature(v)·a²`, each widened by how far the shape
+/// may miss a branch its velocity's range reaches.
+pub(crate) fn nonlinear_advance_models(
+    adv: &trajectory::NonlinearAdvance,
+    [position, velocity, acceleration, jerk]: &[TaylorModel; 4],
+) -> [TaylorModel; 3] {
+    let vl = adv.linearization_velocity;
+    let unit = velocity.scale(Ball::rounded(1.0 / vl, 1));
+    let Some(shape) = AdvanceShape::of(adv.model, &unit) else {
+        return [TaylorModel::UNBOUNDED; 3];
+    };
+    let slope = shape
+        .slope
+        .scale(Ball::rounded(adv.nonlinear_offset / vl, 1))
+        .add_ball(Ball::exact(adv.linear_advance));
+    let curvature = shape
+        .curvature
+        .scale(Ball::rounded(adv.nonlinear_offset / (vl * vl), 2));
+    let squared = acceleration.mul(acceleration);
+    let mut models = [
+        position
+            .add(&velocity.scale(Ball::exact(adv.linear_advance)))
+            .add(&shape.value.scale(Ball::exact(adv.nonlinear_offset))),
+        velocity.add(&slope.mul(acceleration)),
+        acceleration
+            .add(&curvature.mul(&squared))
+            .add(&slope.mul(jerk)),
+    ];
+    let offset = adv.nonlinear_offset.abs();
+    let [shape_miss, slope_miss, curvature_miss] = shape.branch_miss;
+    let slope_miss = offset / vl * slope_miss;
+    let curvature_miss = offset / (vl * vl) * curvature_miss;
+    models[0].widen(offset * shape_miss);
+    models[1].widen(slope_miss * acceleration.bound());
+    models[2].widen(curvature_miss * squared.bound() + slope_miss * jerk.bound());
+    models
 }
 
 /// How far a reciprocal advance's unit velocity may reach past zero onto

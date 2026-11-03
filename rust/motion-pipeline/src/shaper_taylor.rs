@@ -32,6 +32,22 @@ fn piece(window: Window, models: &[TaylorModel; 3]) -> ExactPiece {
     }
 }
 
+/// A model of `√argument`, or the root's range as a constant where its
+/// model does not exist or is wider than that range.
+pub(crate) fn root_or_range(argument: &TaylorModel) -> TaylorModel {
+    let (centre, spread) = argument.spread();
+    let lo = (centre - spread).max(0.0).sqrt();
+    let hi = upper(upper(centre + spread).max(0.0).sqrt());
+    let half_range = upper(0.5 * (hi - lo));
+    match argument.sqrt() {
+        Some(root) if root.rad() <= half_range => root,
+        _ => TaylorModel::constant(Ball {
+            mid: 0.5 * (lo + hi),
+            rad: half_range,
+        }),
+    }
+}
+
 /// Encloses a signal over `[lo, hi]`: the window's models, halved until
 /// every order's bound is within its `accuracy` or the halving depth runs
 /// out, where the closest models stand and the hull decides.
@@ -64,6 +80,48 @@ fn enclose_to_depth(
     }
     enclose_to_depth((lo, middle), accuracy, model, depth + 1, out);
     enclose_to_depth((middle, hi), accuracy, model, depth + 1, out);
+}
+
+/// [`enclose`] for a signal whose windows may have no model: halving a
+/// window without one, and giving up — `None` — where the halving depth
+/// runs out on one, or on an unbounded model.
+pub(crate) fn try_enclose(
+    (lo, hi): (f64, f64),
+    accuracy: [f64; 3],
+    model: &dyn Fn(Window) -> Option<[TaylorModel; 3]>,
+    out: &mut Vec<ExactPiece>,
+) -> Option<()> {
+    try_enclose_to_depth((lo, hi), accuracy, model, 0, out)
+}
+
+fn try_enclose_to_depth(
+    (lo, hi): (f64, f64),
+    accuracy: [f64; 3],
+    model: &dyn Fn(Window) -> Option<[TaylorModel; 3]>,
+    depth: u32,
+    out: &mut Vec<ExactPiece>,
+) -> Option<()> {
+    let window = Window::new(lo, hi);
+    let models = model(window);
+    let middle = window.center;
+    let last = depth == ENCLOSURE_MAX_DEPTH || middle <= lo || middle >= hi;
+    if let Some(models) = &models {
+        let resolved = models
+            .iter()
+            .zip(accuracy)
+            .all(|(model, accuracy)| model.rad() <= accuracy);
+        if resolved || last {
+            if !models.iter().all(|model| model.rad().is_finite()) {
+                return None;
+            }
+            out.push(piece(window, models));
+            return Some(());
+        }
+    } else if last {
+        return None;
+    }
+    try_enclose_to_depth((lo, middle), accuracy, model, depth + 1, out)?;
+    try_enclose_to_depth((middle, hi), accuracy, model, depth + 1, out)
 }
 
 /// Encloses several signals over `[lo, hi]` whose windows share work:
