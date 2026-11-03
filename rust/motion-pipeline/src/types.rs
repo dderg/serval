@@ -54,8 +54,10 @@ pub enum StreamError {
     /// A move entered the pipeline whose spatial start does not meet the
     /// toolhead where the previous move left it. Real slicer output is always
     /// position-contiguous; a gap means the move stream was stitched wrong
-    /// upstream. Caught at ingress so the offending move is named there, not
-    /// as a downstream `ZeroMotion` deep in the fit stage.
+    /// upstream. The live ingress names the offending move before it enters;
+    /// the lowerer refuses it for every other driver (a pipeline built at a
+    /// home the first move does not start from), before the shaper smooths
+    /// the jump into an unfittable pulse.
     Discontinuity {
         line_no: u32,
         expected: [f64; 3],

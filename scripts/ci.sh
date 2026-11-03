@@ -337,11 +337,19 @@ job_sim_e2e() { "$ROOT/tools/sim/run.sh" test "$@"; }
 # fitter merges ~10 slicer moves into each planned move here and the planner
 # re-plans every 64 planned moves, so a healthy stream goes ~650 slicer moves
 # without output; a planner that cannot commit past a layer change holds
-# thousands (3480 before the finality barrier alone gated commits).
+# thousands (3480 before the finality barrier alone gated commits). Every
+# config under tools/bench/configs then replays the same print through the
+# same live construction, held only to finishing: the snapshot path plans
+# those configs in rust-fit-audit, so a panic here is a live/snapshot split.
 job_replay_budget() {
     cd "$RUST" && cargo run --release -p motion-core --example gcode_replay_bench -- \
         "$ROOT/tools/sim/gcode/voron_dense_top_layers.gcode" \
-        --config "$ROOT/tools/bench/printer.cfg" --min-worst-x 1.3 --max-held-moves 1000
+        --config "$ROOT/tools/bench/printer.cfg" --min-worst-x 1.3 --max-held-moves 1000 || return
+    local config
+    for config in "$ROOT"/tools/bench/configs/*.cfg; do
+        cargo run --release -p motion-core --example gcode_replay_bench -- \
+            "$ROOT/tools/sim/gcode/voron_dense_top_layers.gcode" --config "$config" || return
+    done
 }
 
 job_docs() { cd "$ROOT/docs/_kalico" && uv run mkdocs build --strict; }
