@@ -844,13 +844,21 @@ fn a_follower_advance_without_a_smoothing_kernel_is_refused_at_configuration() {
     );
 }
 
+/// An extruder these tests never let bind: they exercise the chain, not the
+/// extruder's limits.
+const UNBINDING_EXTRUDER_LIMIT: f64 = 1e12;
+
 fn axis(name: &str, follows: &[&str]) -> planner_config::AxisDecl {
+    let limit = (!follows.is_empty()).then_some(UNBINDING_EXTRUDER_LIMIT);
     planner_config::AxisDecl {
         name: name.into(),
         follows: follows.iter().map(|s| s.to_string()).collect(),
         motors: Vec::new(),
         post_processors: Vec::new(),
         ratio_ramp_time: None,
+        max_velocity: limit,
+        max_accel: limit,
+        instantaneous_corner_velocity: None,
     }
 }
 

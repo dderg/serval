@@ -11,7 +11,7 @@ use crate::vec3;
 
 use crate::GeometryError;
 use crate::MIN_DEVICE_INTERVAL_S;
-use crate::frontend::{Move, VelocityLimits};
+use crate::frontend::{ExtruderCaps, Move, VelocityLimits};
 use crate::path::lowering::PositionProfile;
 use crate::path::{CurvatureProfile, Line};
 use crate::segment::FollowerDemand;
@@ -616,6 +616,7 @@ fn consumption_limits(
             max_jerk_mm_s3: a.max_jerk_mm_s3.min(b.max_jerk_mm_s3),
             max_z_velocity_mm_s: a.max_z_velocity_mm_s.min(b.max_z_velocity_mm_s),
             max_z_accel_mm_s2: a.max_z_accel_mm_s2.min(b.max_z_accel_mm_s2),
+            extruder: ExtruderCaps::stricter(a.extruder, b.extruder),
         })
         .expect("mids is non-empty");
     let last = blend.segments.len() - 1;

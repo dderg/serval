@@ -1,3 +1,5 @@
+import math
+
 import pytest
 from fakes import (
     FakeCommandError,
@@ -10,6 +12,7 @@ from fakes import (
     FakePrinter as FakePrinterBase,
 )
 
+from klippy import configfile
 from klippy.extras import extruder_stepper
 from klippy.kinematics.extruder import PrinterExtruder
 
@@ -24,9 +27,13 @@ _UNSET = object()
 class StubSection:
     error = ConfigError
 
-    def __init__(self, name, options):
+    def __init__(self, name, options, sections=None):
         self.name = name
         self.options = options
+        self.sections = sections or {}
+
+    def getsection(self, name):
+        return StubSection(name, self.sections.get(name, {}))
 
     def get_name(self):
         return self.name
@@ -101,6 +108,7 @@ def make_extruder_section(
     engine=None,
     mcu=None,
     axis_mcus=None,
+    axis_options=None,
     **options,
 ):
     printer = FakePrinter(axis_sections, can_extrude, engine, mcu, axis_mcus)
@@ -111,7 +119,7 @@ def make_extruder_section(
     if axis is not None:
         base["axis"] = axis
     base.update(options)
-    section = StubSection(name, base)
+    section = StubSection(name, base, {"axis %s" % axis: axis_options or {}})
     section.printer = printer
     return section
 
@@ -210,13 +218,20 @@ def test_extruder_check_move_cold_extrude_rejected():
     "key, value",
     [
         ("max_extrude_cross_section", 1.0),
-        ("instantaneous_corner_velocity", 1.0),
         ("max_extrude_only_distance", 500.0),
     ],
 )
 def test_extruder_removed_option_rejected(key, value):
     section = make_extruder_section(**{key: value})
     with pytest.raises(ConfigError, match="no longer supported"):
+        PrinterExtruder(section, 0)
+
+
+def test_extruder_instantaneous_corner_velocity_points_to_the_axis():
+    section = make_extruder_section(instantaneous_corner_velocity=1.0)
+    with pytest.raises(
+        ConfigError, match=r"moved to the extruder's axis: set it in \[axis"
+    ):
         PrinterExtruder(section, 0)
 
 
@@ -229,12 +244,38 @@ def test_extruder_extrude_only_limit_is_read_into_attribute(key):
     assert getattr(pe, key) == 100.0
 
 
-@pytest.mark.parametrize(
-    "key", ["max_extrude_only_velocity", "max_extrude_only_accel"]
-)
-def test_extruder_extrude_only_limit_defaults_to_none(key):
+def test_extruder_extrude_only_limits_default_like_upstream_klippy():
     pe = PrinterExtruder(make_extruder_section(), 0)
-    assert getattr(pe, key) is None
+    ratio = 4.0 * 0.4**2 / (math.pi * 0.875**2)
+    assert pe.max_extrude_only_velocity == pytest.approx(300.0 * ratio)
+    assert pe.max_extrude_only_accel == pytest.approx(3000.0 * ratio)
+
+
+def test_extruder_derived_caps_match_the_native_reader():
+    pe = PrinterExtruder(make_extruder_section(), 0)
+    consumed = configfile._config_doc.read_motion_settings(
+        "[printer]\nmax_velocity: 300\nmax_accel: 3000\n"
+        "[extruder]\naxis: e\nnozzle_diameter: 0.4\nfilament_diameter: 1.75\n"
+    )[3]
+    native = {
+        option: value
+        for section, option, value in consumed
+        if section == "extruder"
+    }
+    assert native["max_extrude_only_velocity"] == pe.max_extrude_only_velocity
+    assert native["max_extrude_only_accel"] == pe.max_extrude_only_accel
+
+
+def test_extruder_axis_inherits_each_unset_limit_from_extrude_only_caps():
+    pe = PrinterExtruder(
+        make_extruder_section(
+            axis_options={"max_accel": 8000.0},
+            max_extrude_only_velocity=45.0,
+            max_extrude_only_accel=2000.0,
+        ),
+        0,
+    )
+    assert (pe.max_velocity, pe.max_accel) == (45.0, 8000.0)
 
 
 def test_extruder_stepper_extra_rejected():

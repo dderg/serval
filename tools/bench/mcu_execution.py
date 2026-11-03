@@ -22,6 +22,7 @@ import step_tap
 
 KNOT_SECONDS = 2.0
 COINCIDENCE_SECONDS = 3e-6
+LEAD_BIN_SECONDS = 250e-9
 GAP_STIFFNESS = 1.0
 FIT_ROUNDS = 3
 INLIER_FLOOR_S = 100e-9
@@ -104,6 +105,42 @@ def isolated_steps(clocks: list[np.ndarray], window: float) -> list[np.ndarray]:
             alone &= nearest >= window
         isolated.append(alone)
     return isolated
+
+
+def preceding_lead(clocks: list[np.ndarray]) -> list[np.ndarray]:
+    leads = []
+    for index, own in enumerate(clocks):
+        lead = np.full(own.size, np.inf)
+        for other_index, other in enumerate(clocks):
+            if other_index == index or other.size == 0:
+                continue
+            at = np.searchsorted(other, own, "right") - 1
+            has = at >= 0
+            gap = np.full(own.size, np.inf)
+            gap[has] = own[has] - other[at[has]]
+            lead = np.minimum(lead, gap)
+        leads.append(lead)
+    return leads
+
+
+def _lateness_by_lead(lead_ns: np.ndarray, relative_ns: np.ndarray) -> list:
+    window_ns = COINCIDENCE_SECONDS * NS
+    bin_ns = LEAD_BIN_SECONDS * NS
+    rows = [(0, 0, lead_ns == 0)]
+    for lo in np.arange(0, window_ns, bin_ns):
+        hi = min(lo + bin_ns, window_ns)
+        rows.append(
+            (lo, hi, (lead_ns > lo) & (lead_ns <= hi) & (lead_ns < window_ns))
+        )
+    return [
+        {
+            "lead_ns_from": int(lo),
+            "lead_ns_to": int(hi),
+            "steps": int(np.count_nonzero(mask)),
+            **_stats_ns(relative_ns[mask]),
+        }
+        for lo, hi, mask in rows
+    ]
 
 
 def _stats_ns(values_ns: np.ndarray) -> dict:
@@ -199,6 +236,11 @@ def report(
             "every step has another motor's step within "
             f"{COINCIDENCE_SECONDS * NS:.0f} ns; no isolated step to fit the clock map"
         )
+    lead_ns = [
+        lead / tap.clock_freq * NS
+        for lead in preceding_lead([c for _, c, _, _ in paired])
+    ]
+    window_ns = COINCIDENCE_SECONDS * NS
     x = np.concatenate([c for _, c, _, _ in paired]).astype(np.float64)
     y = np.concatenate([t for _, _, t, _ in paired])
     evaluate, inliers = piecewise_fit(
@@ -210,10 +252,13 @@ def report(
     motors_report = {}
     offset = 0
     lows = {}
-    for (role, commanded, times, channel), alone in zip(paired, isolated):
+    for (role, commanded, times, channel), alone, lead in zip(
+        paired, isolated, lead_ns
+    ):
         rel = relative_ns[offset : offset + commanded.size]
         offset += commanded.size
         lows[role] = (commanded & 0xFFFFFFFF, rel)
+        follower = (lead > 0) & (lead < window_ns)
         interval_error = (
             np.diff(times) - np.diff(evaluate(commanded.astype(np.float64)))
         ) * NS
@@ -228,6 +273,8 @@ def report(
             "isolated_lateness_ns": _stats_ns(rel[alone]),
             "coincident_steps": int(np.count_nonzero(~alone)),
             "coincident_lateness_ns": _stats_ns(rel[~alone]),
+            "follower_steps": int(np.count_nonzero(follower)),
+            "follower_lateness_ns": _stats_ns(rel[follower]),
             **{
                 f"steps_late_over_{t}ns": int(np.count_nonzero(rel > t))
                 for t in LATE_THRESHOLDS_NS
@@ -264,6 +311,9 @@ def report(
             for t in LATE_THRESHOLDS_NS
         },
         "motors": motors_report,
+        "follower_lateness_by_lead_ns": _lateness_by_lead(
+            np.concatenate(lead_ns), relative_ns
+        ),
         "step_load_late_events": len(load_late),
         "step_load_late_matched": sum(1 for e in load_late if e["matched"]),
         "step_load_late_examples": load_late[:REPORTED_LOAD_LATE],

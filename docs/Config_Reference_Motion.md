@@ -262,7 +262,28 @@ post_processors: extruder_pa, extruder_smoothing
 #   Optional comma-separated named post-processors. Default is an empty list.
 #   On an axis that follows others, a pressure advance (or any derivative-gain
 #   stage) needs a smoothing kernel in the same list or a ratio_ramp_time on
-#   the axis; the chain is rejected otherwise.
+#   the axis, and the axis's max_velocity and max_accel; the chain is
+#   rejected otherwise.
+#max_velocity:
+#max_accel:
+#   Optional, on an axis that follows others. Must be above 0 (mm/s,
+#   mm/s^2). What the axis's motor can do for every move it makes, pressure
+#   advance included. The velocity planner slows each extruding move so the
+#   commanded extruder velocity and acceleration stay within them, corners
+#   and curves included. On the [extruder] axis each one left unset is
+#   inherited from max_extrude_only_velocity / max_extrude_only_accel (the
+#   same motor). An advance needs both, set or inherited.
+#instantaneous_corner_velocity: 1.0
+#   Optional, on an axis that follows others. Default is 1.0, as upstream
+#   Klipper's [extruder] option. Must be above 0 (mm/s). The velocity
+#   change the axis's motor takes at once. Where no smoothing kernel follows
+#   the advance (a ratio_ramp_time chain) and a followed axis has no shaping
+#   post_processor (commonly z), every acceleration step of that axis makes
+#   the advance step the extruder velocity by k * ratio * the step's share
+#   along the path. The velocity planner caps the acceleration of extruding
+#   moves that move such an axis, and of the moves next to them, so each
+#   step stays within this; a larger step is refused with the time it
+#   happens at.
 #ratio_ramp_time:
 #   Optional. Default is no ramp. If set, must be above 0 (seconds) and the
 #   axis must follow others. The extruded total of the projection is
@@ -278,12 +299,12 @@ post_processors: extruder_pa, extruder_smoothing
 #   is constant across the kernel and at every rest.
 #   A smoothing kernel may stay in post_processors next to the ramp.
 #   Without one, a pressure advance in the same post_processors needs no
-#   kernel: it advances only the extrusion laid along the leaders' path, as
-#   Klipper advances only extruding moves that travel, so retracts, primes
-#   and other extrude-only moves keep their own motion and caps. With a
-#   kernel, a linear_pressure_advance is applied after the kernel to the
-#   whole extruder motion, retracts included, as on a chain without the
-#   ramp, while a nonlinear advance still reads the path alone. Either way
+#   kernel. On every chain the advance applies only to the
+#   extrusion laid along the leaders' path, as Klipper advances only
+#   extruding moves that travel, so retracts, primes and other extrude-only
+#   moves keep their own motion and their extrude-only caps; with a kernel,
+#   the advance is fitted into that extrusion before the kernel smooths it.
+#   Either way
 #   ratio_ramp_time requires finite [extruder]
 #   max_extrude_only_velocity and max_extrude_only_accel. Where the leaders
 #   turn around (a wipe that reverses along the line) or come to rest across
@@ -403,11 +424,16 @@ The motion-owned portion of `[extruder]` is limited to the axis association and 
 ```
 [extruder]
 #axis: e
-#   Optional pressure-advance compatibility association. Default is None.
+#   The follower axis the extruder drives. Its [axis] max_velocity and
+#   max_accel inherit the caps below when unset.
 #max_extrude_only_velocity:
-#   Optional. Default is None. If set, must be above 0 (mm/s).
+#   Optional. Must be above 0 (mm/s). Default, as in upstream Klipper, is
+#   [printer] max_velocity * 4 * nozzle_diameter^2 / filament_area, with
+#   filament_area = pi * (filament_diameter/2)^2; no default without both
+#   diameters.
 #max_extrude_only_accel:
-#   Optional. Default is None. If set, must be above 0 (mm/s^2).
+#   Optional. Must be above 0 (mm/s^2). Default is [printer] max_accel
+#   scaled the same way.
 ```
 
 When using the pressure-advance compatibility command, `axis` identifies the `[axis <name>]` chain from which `linear_pressure_advance` (`k`) and `smooth_triangle` (`smooth_time`) targets are resolved. The compatibility command is documented in the migration guide; the configuration itself uses named post-processors.
