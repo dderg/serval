@@ -29,6 +29,9 @@ mod hull;
 #[path = "shaper_taylor.rs"]
 pub(crate) mod taylor;
 
+#[path = "shaper_axis_enclosure.rs"]
+mod axis_enclosure;
+
 use exact::ExactSpan;
 use hull::{FittedPiece, HullBudget};
 use taylor::{Ball, TaylorModel};
@@ -132,6 +135,12 @@ pub(crate) trait TrackSignal {
         let _ = accuracy;
         self.exact_polynomial_on(lo, hi)
     }
+    /// Whether every time the signal's acceleration steps seeds the fit's
+    /// partition, so no step can hide in a span edge's sliver unless a seed
+    /// was coalesced there.
+    fn seeds_every_break(&self) -> bool {
+        false
+    }
 }
 
 impl TrackSignal for ContinuousAxis {
@@ -139,6 +148,10 @@ impl TrackSignal for ContinuousAxis {
         ContinuousAxis::eval_pva(self, t).map_or((f64::NAN, f64::NAN, f64::NAN), |pva| {
             (pva.position, pva.velocity, pva.acceleration)
         })
+    }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+        axis_enclosure::continuous_axis_enclosure(self, (lo, hi), accuracy)
     }
 }
 
@@ -181,6 +194,9 @@ impl<S: TrackSignal> TrackSignal for &S {
     }
     fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
         S::enclosure_on(self, lo, hi, accuracy)
+    }
+    fn seeds_every_break(&self) -> bool {
+        S::seeds_every_break(self)
     }
 }
 
@@ -831,6 +847,17 @@ impl TrackSignal for CapContactSource<'_> {
 
     fn square_root_onsets(&self) -> &[f64] {
         self.cap_contacts
+    }
+
+    fn seeds_every_break(&self) -> bool {
+        matches!(
+            self.source,
+            ContinuousAxis::Analytic { .. } | ContinuousAxis::Hold { .. }
+        )
+    }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+        self.source.enclosure_on(lo, hi, accuracy)
     }
 }
 
@@ -3907,22 +3934,24 @@ fn edge_inset(h: f64, cubic_floor: f64, absorbed: f64) -> f64 {
 /// second read as far again past the sliver, so a smooth signal's jerk
 /// across a wide sliver cancels and only its snap times the squared sliver
 /// remains; the inset is at most a quarter span, so that read stays inside
-/// the span. At a square-root onset the signal declares on the edge the
-/// acceleration is steep past any extrapolation but hides no break: the
-/// edge anchors to the seam reading, where the span across the onset
-/// anchors too.
+/// the span. Where nothing can hide in the sliver the edge anchors to the
+/// seam reading: at a square-root onset the signal declares on the edge,
+/// whose acceleration is steep past any extrapolation but breaks nowhere,
+/// and at an edge no seed was coalesced onto of a signal that seeds every
+/// break it has — the shoulder next to an onset bends its acceleration as
+/// steeply without a break there.
 fn edge_velocity_and_acceleration<S: TrackSignal>(
     sig: &S,
     axis: usize,
     seam: f64,
     past_sliver: f64,
-    onset_on_edge: bool,
+    hides_no_break: bool,
     fit_tol: FitTol,
 ) -> Result<(f64, f64), PostProcessError> {
     let (_, velocity, seam_acceleration) = sig.eval_pva(seam);
     let velocity = exact_value(axis, velocity, seam)?;
     let seam_acceleration = exact_value(axis, seam_acceleration, seam)?;
-    if onset_on_edge {
+    if hides_no_break {
         return Ok((velocity, seam_acceleration));
     }
     let past_acceleration = exact_value(axis, sig.second_deriv(past_sliver), past_sliver)?;
@@ -4018,7 +4047,8 @@ fn shaped_ladder<S: TrackSignal>(
         axis,
         t0_inside,
         start_past_sliver,
-        square_root_onset_on_edge(sig, t0),
+        square_root_onset_on_edge(sig, t0)
+            || (sig.seeds_every_break() && slivers.start == 0.0 && slivers.start_break.is_none()),
         fit_tol,
     )?;
     let v0 = match slivers.start_break {
@@ -4032,7 +4062,8 @@ fn shaped_ladder<S: TrackSignal>(
         axis,
         t1_inside,
         end_past_sliver,
-        square_root_onset_on_edge(sig, t1),
+        square_root_onset_on_edge(sig, t1)
+            || (sig.seeds_every_break() && slivers.end == 0.0 && slivers.end_break.is_none()),
         fit_tol,
     )?;
     let v1 = match slivers.end_break {

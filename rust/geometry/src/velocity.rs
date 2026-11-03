@@ -16,7 +16,7 @@ pub mod law;
 mod reconstruct;
 mod z_caps;
 
-pub use law::{LawSegment, ScalarLaw};
+pub use law::{LawSegment, RailPair, RailPairShape, ScalarLaw};
 
 use disk::Kinematics;
 

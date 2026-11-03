@@ -51,7 +51,17 @@ const TANH_DISK_RADII: [f64; 6] = [0.785, 1.0, 1.2, 1.35, 1.45, 1.52];
 pub(crate) const ENCLOSURE_MAX_DEPTH: u32 = 12;
 
 pub(crate) fn upper(bound: f64) -> f64 {
-    bound * (1.0 + BOUND_ROUNDING) + f64::MIN_POSITIVE
+    let inflated = bound * (1.0 + BOUND_ROUNDING) + f64::MIN_POSITIVE;
+    if inflated.is_nan() {
+        f64::INFINITY
+    } else {
+        inflated
+    }
+}
+
+/// An upper bound on `baseⁿ` for a non-negative `base`.
+fn powi(base: f64, power: usize) -> f64 {
+    upper(base.powi(i32::try_from(power).expect("a series is short")))
 }
 
 fn lower(bound: f64) -> f64 {
@@ -125,6 +135,15 @@ impl Ball {
             rad: upper(self.rad / divisor + UNIT_ROUNDING * mid.abs()),
         }
     }
+}
+
+/// `1/k!` for every series term and the remainder's power.
+fn inverse_factorials() -> [Ball; TAYLOR_LEN + 1] {
+    let mut out = [Ball::exact(1.0); TAYLOR_LEN + 1];
+    for k in 1..=TAYLOR_LEN {
+        out[k] = out[k - 1].div_by_integer(k);
+    }
+    out
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -267,22 +286,68 @@ impl TaylorModel {
                     + ExactRounding::gamma(2 * TAYLOR_LEN) * a_magnitude * b_magnitude,
             ),
         }
+        .trimmed()
+    }
+
+    /// The model with its trailing coefficients at the rounding of its
+    /// magnitude moved into the bound, where they cost every later product
+    /// a term and decide nothing.
+    fn trimmed(mut self) -> Self {
+        let negligible = UNIT_ROUNDING * self.magnitude();
+        let mut dropped = 0.0;
+        while self.len > 1 && self.coefficients[self.len - 1].abs() <= negligible {
+            self.len -= 1;
+            dropped += self.coefficients[self.len].abs();
+            self.coefficients[self.len] = 0.0;
+        }
+        self.rad = upper(self.rad + dropped);
+        self
     }
 
     /// `f(self)` for an `f` with `f(c₀ + d) = Σₖ seriesₖ·dᵏ + R` on the
-    /// model's range, `|R| ≤ remainder_per_power·|d|ⁿ`, `n = series.len()`.
-    fn compose(&self, series: &[Ball], remainder_per_power: f64) -> Self {
+    /// model's range when `n` terms are kept, `|R| ≤ tail(n, reach)` for
+    /// `|d| ≤ reach`. The series stops at the first `n` whose tail is at the
+    /// rounding of its leading terms, so a narrow window costs few products.
+    fn compose(&self, series: &[Ball], tail: impl Fn(usize, f64) -> f64) -> Self {
         let mut deviation = *self;
         deviation.coefficients[0] = 0.0;
         let reach = deviation.bound();
-        let (last, rest) = series.split_last().expect("a series has terms");
+        let leading = upper(
+            UNIT_ROUNDING * (series[0].mid.abs() + series[1].mid.abs() * reach) + f64::MIN_POSITIVE,
+        );
+        let tail = |terms: usize| upper(tail(terms, reach));
+        let terms = (1..series.len())
+            .find(|&terms| tail(terms) <= leading)
+            .unwrap_or(series.len());
+        let (last, rest) = series[..terms].split_last().expect("a series has terms");
         let mut out = Self::constant(*last);
         for &term in rest.iter().rev() {
             out = out.mul(&deviation).add_ball(term);
         }
-        let powers = i32::try_from(series.len()).expect("a series is short");
-        out.rad = upper(out.rad + remainder_per_power * reach.powi(powers));
+        out.rad = upper(out.rad + tail(terms));
         out
+    }
+
+    pub(crate) fn sin_cos(&self) -> (Self, Self) {
+        let (sine, cosine) = libm::sincos(self.coefficients[0]);
+        let (sine, cosine) = (Ball::libm(sine), Ball::libm(cosine));
+        let inverse = inverse_factorials();
+        let cycle = |start: usize, k: usize| match (start + k) % 4 {
+            0 => sine,
+            1 => cosine,
+            2 => sine.neg(),
+            _ => cosine.neg(),
+        };
+        let series = |start: usize| -> [Ball; TAYLOR_LEN] {
+            std::array::from_fn(|k| cycle(start, k).mul(inverse[k]))
+        };
+        let tail = |terms: usize, reach: f64| {
+            upper(inverse[terms].mid + inverse[terms].rad) * powi(reach, terms)
+        };
+        (
+            self.compose(&series(0), tail),
+            self.compose(&series(1), tail),
+        )
     }
 
     pub(crate) fn tanh(&self) -> Self {
@@ -295,15 +360,18 @@ impl TaylorModel {
             });
             series[k + 1] = square.neg().div_by_integer(k + 1);
         }
-        let remainder = TANH_DISK_RADII
-            .iter()
-            .map(|&radius| {
-                let disk_bound =
-                    upper(libm::tan(radius) * (1.0 + LIBM_ULPS * f64::EPSILON)).max(1.0);
-                upper(disk_bound / lower(radius.powi(TAYLOR_LEN as i32)))
-            })
-            .fold(f64::INFINITY, f64::min);
-        self.compose(&series, remainder)
+        let disk_bounds = TANH_DISK_RADII.map(|radius| {
+            (
+                radius,
+                upper(libm::tan(radius) * (1.0 + LIBM_ULPS * f64::EPSILON)).max(1.0),
+            )
+        });
+        self.compose(&series, |terms, reach| {
+            disk_bounds
+                .iter()
+                .map(|&(radius, bound)| bound * powi(upper(reach / lower(radius)), terms))
+                .fold(f64::INFINITY, f64::min)
+        })
     }
 
     /// `1/f`, or `None` when the model's range reaches zero.
@@ -318,8 +386,73 @@ impl TaylorModel {
         for k in 1..TAYLOR_LEN {
             series[k] = series[k - 1].mul(first.neg());
         }
-        let remainder = upper(1.0 / floor.powi(TAYLOR_LEN as i32 + 1));
-        Some(self.compose(&series, remainder))
+        Some(self.compose(&series, |terms, reach| {
+            powi(upper(reach / floor), terms) * upper(1.0 / floor)
+        }))
+    }
+
+    /// `√f`, or `None` when the model's range reaches zero.
+    pub(crate) fn sqrt(&self) -> Option<Self> {
+        let (centre, spread) = self.spread();
+        let floor = lower(centre - spread);
+        if floor.is_nan() || floor <= 0.0 {
+            return None;
+        }
+        let inverse_centre = Ball::rounded(1.0 / centre, 1);
+        let mut series = [Ball::rounded(centre.sqrt(), 1); TAYLOR_LEN];
+        let mut binomials = [1.0_f64; TAYLOR_LEN + 1];
+        for k in 1..=TAYLOR_LEN {
+            let ratio = (3.0 - 2.0 * k as f64) / (2.0 * k as f64);
+            binomials[k] = upper(binomials[k - 1] * ratio.abs());
+            if k < TAYLOR_LEN {
+                series[k] = series[k - 1]
+                    .mul(Ball::rounded(ratio, 1))
+                    .mul(inverse_centre);
+            }
+        }
+        let root = upper(floor.sqrt());
+        Some(self.compose(&series, |terms, reach| {
+            binomials[terms] * root * powi(upper(reach / floor), terms)
+        }))
+    }
+
+    /// `∫₀ʸ f` in the model's own variable `y`: exact on the polynomial,
+    /// the bound grows by at most `rad·|y| ≤ rad`.
+    pub(crate) fn integral(&self) -> Self {
+        let len = (self.len + 1).min(TAYLOR_LEN);
+        let mut coefficients = [0.0; TAYLOR_LEN];
+        let mut rounding = 0.0;
+        let mut truncated = 0.0;
+        for (power, &c) in self.coefficients().iter().enumerate() {
+            let term = c / (power + 1) as f64;
+            if power + 1 < TAYLOR_LEN {
+                coefficients[power + 1] = term;
+                rounding += term.abs();
+            } else {
+                truncated += term.abs();
+            }
+        }
+        Self {
+            coefficients,
+            len,
+            rad: upper(self.rad + truncated + UNIT_ROUNDING * rounding),
+        }
+    }
+
+    /// `outer(self)`, `outer` a model in a variable this model's function
+    /// keeps within `[−1, 1]`; `None` when the range bound reaches past it.
+    pub(crate) fn compose_model(&self, outer: &Self) -> Option<Self> {
+        let (centre, spread) = self.spread();
+        if !(upper(centre.abs() + spread) <= 1.0) {
+            return None;
+        }
+        let (last, rest) = outer.coefficients().split_last()?;
+        let mut out = Self::constant(Ball::exact(*last));
+        for &c in rest.iter().rev() {
+            out = out.mul(self).add_ball(Ball::exact(c));
+        }
+        out.rad = upper(out.rad + outer.rad);
+        Some(out)
     }
 
     pub(crate) fn local_polynomial(&self) -> LocalPolynomial {
@@ -392,7 +525,7 @@ pub(crate) fn derivative_of(coefficients: &[f64], order: usize, tau: &TaylorMode
     )
 }
 
-fn polynomial_of_balls(
+pub(crate) fn polynomial_of_balls(
     coefficients: impl DoubleEndedIterator<Item = Ball>,
     tau: &TaylorModel,
 ) -> TaylorModel {

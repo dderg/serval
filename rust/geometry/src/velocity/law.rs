@@ -119,6 +119,40 @@ impl DepartureInterpolant {
     }
 }
 
+/// One knot pair of a disk rail: segment-local times, arc travelled since
+/// the segment start and speed at both knots, and how velocity
+/// interpolates between them. With `h = t_hi − t_lo` and
+/// `u = (τ − t_lo)/h`, [`LawSegment::state_at`] reads speed, `h·a` and
+/// `∫₀ᵘ v du` off the shape and the arc as
+/// `s_lo + h·∫₀ᵘ v + (s_hi − s_lo − h·∫₀¹ v)·u`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RailPair {
+    pub t_lo: f64,
+    pub t_hi: f64,
+    pub s_lo: f64,
+    pub s_hi: f64,
+    pub v_lo: f64,
+    pub v_hi: f64,
+    pub shape: RailPairShape,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RailPairShape {
+    /// The C2 quintic Hermite through both knots' speeds with end slopes
+    /// and curvatures `slopes = [h·a_lo, h²·ȧ_lo, h·a_hi, h²·ȧ_hi]`; `h·a`
+    /// is its derivative across the integrator's own speed `rise`.
+    Quintic { rise: f64, slopes: [f64; 4] },
+    /// Leaving the curvature cap from one end: with `z` the square root of
+    /// the time from that end over `h`, speed is that end's plus
+    /// `z²·(c₂ + z·(c₃ + z·(c₄ + z·c₅)))`, `coefficients = [c₂, c₃, c₄, c₅]`,
+    /// and `h·a` is `±(c₂ + z·(1.5c₃ + z·(2c₄ + z·2.5c₅)))`, negative
+    /// leaving from the high end.
+    Departure {
+        from_lo: bool,
+        coefficients: [f64; 4],
+    },
+}
+
 /// One law over one time interval, in chain-local time and run-frame arc.
 #[derive(Clone, Debug)]
 pub struct LawSegment {
@@ -804,6 +838,48 @@ impl LawSegment {
             ),
             CapDeparture::None => panic!("a pair that leaves no cap has no departure interpolant"),
         }
+    }
+
+    /// The knot pairs of a disk rail that reach into segment-local time
+    /// `(tau_lo, tau_hi)`, each with the formula [`Self::state_at`]
+    /// evaluates between its knots; empty for a constant-acceleration
+    /// segment. Pairs of zero duration hold no time and are skipped.
+    pub fn rail_pairs(&self, tau_lo: f64, tau_hi: f64) -> impl Iterator<Item = RailPair> + '_ {
+        let knots: &[RailKnot] = match self.law {
+            ScalarLaw::ConstAccel { .. } => &[],
+            ScalarLaw::DiskRail { .. } => self.rail_knots(),
+        };
+        let first = knots
+            .partition_point(|knot| knot.t <= tau_lo)
+            .saturating_sub(1);
+        knots
+            .windows(2)
+            .skip(first)
+            .take_while(move |pair| pair[0].t < tau_hi)
+            .filter(|pair| pair[1].t > pair[0].t)
+            .map(|pair| {
+                let (lo, hi) = (&pair[0], &pair[1]);
+                let h = hi.t - lo.t;
+                let shape = match hi.departure {
+                    CapDeparture::None => RailPairShape::Quintic {
+                        rise: hi.rise,
+                        slopes: self.pair_slopes(lo, hi, h),
+                    },
+                    departure => RailPairShape::Departure {
+                        from_lo: departure == CapDeparture::FromLo,
+                        coefficients: self.departure_interpolant(lo, hi, h).c,
+                    },
+                };
+                RailPair {
+                    t_lo: lo.t,
+                    t_hi: hi.t,
+                    s_lo: lo.s,
+                    s_hi: hi.s,
+                    v_lo: lo.v,
+                    v_hi: hi.v,
+                    shape,
+                }
+            })
     }
 }
 

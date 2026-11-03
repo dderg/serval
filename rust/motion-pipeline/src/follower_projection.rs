@@ -10,10 +10,10 @@ use trajectory::{
 
 use crate::lowering::{AccelBudget, FitTol, follower_tol_scale};
 use crate::shaper::{
-    AxisFit, AxisSignalTable, ConvolutionSignal, ExactConvolution, ExactKernel, FitBoundary,
-    KnotJumpBound, Lookahead, MIN_DEVICE_INTERVAL_S, SEGMENT_TIME_EPS_S, ShiftedTrackSignal,
-    SignalBounds, TrackSignal, apply_derivative_gains_to_track, fit_axis_from_signal,
-    fit_resolution, shaped_signal_breakpoints, unit_kernel_mass,
+    AxisFit, AxisSignalTable, ConvolutionSignal, ExactConvolution, ExactKernel, ExactPiece,
+    FitBoundary, KnotJumpBound, Lookahead, MIN_DEVICE_INTERVAL_S, SEGMENT_TIME_EPS_S,
+    ShiftedTrackSignal, SignalBounds, TrackSignal, apply_derivative_gains_to_track,
+    fit_axis_from_signal, fit_resolution, shaped_signal_breakpoints, unit_kernel_mass,
 };
 use crate::types::PostProcessError;
 use crate::worker_pool::WorkerPool;
@@ -1925,6 +1925,16 @@ impl TrackSignal for AxisSignal<'_> {
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let (position, velocity, acceleration) = axis_pva(self.axis, t);
         (position - self.base, velocity, acceleration)
+    }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+        let pieces = TrackSignal::enclosure_on(self.axis, lo, hi, accuracy)?;
+        Some(
+            pieces
+                .into_iter()
+                .map(|piece| piece.offset_by(self.base))
+                .collect(),
+        )
     }
 }
 
