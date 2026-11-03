@@ -154,7 +154,9 @@ def aggregate_step_rate_hz(clocks: np.ndarray, clock_freq: float) -> np.ndarray:
     return inside / RATE_WINDOW_SECONDS
 
 
-def _lateness_by_step_rate(rate_hz: np.ndarray, relative_ns: np.ndarray) -> list:
+def _lateness_by_step_rate(
+    rate_hz: np.ndarray, relative_ns: np.ndarray
+) -> list:
     bins = (rate_hz // RATE_BIN_HZ).astype(np.int64)
     rows = []
     for index in np.unique(bins):
