@@ -10,6 +10,10 @@ use crate::lowering::AccelBudget;
 use super::{FollowerSignal, FollowerState, integrate};
 use crate::shaper::TrackSignal;
 
+fn jerk_at(sig: &FollowerSignal, t: f64) -> f64 {
+    sig.jerk_read(t, &sig.path_read(t))
+}
+
 /// Regression for the bench crash "shaper: axis 3: shaped sample is
 /// non-finite": deep into a long stream the odometer's ulp exceeds
 /// SPAN_MIN_LEN_MM, so a kernel-creep span's length is float-absorbed
@@ -457,7 +461,7 @@ fn a_rescaled_odometer_carries_its_scale_into_every_derivative() {
         let after = sig.eval_pva(t + step);
         assert_close("velocity", t, velocity, central(before.0, after.0));
         assert_close("acceleration", t, acceleration, central(before.1, after.1));
-        assert_close("jerk", t, sig.jerk(t), central(before.2, after.2));
+        assert_close("jerk", t, jerk_at(&sig, t), central(before.2, after.2));
         assert_close("deriv", t, sig.deriv(t), velocity);
         assert_close("second_deriv", t, sig.second_deriv(t), acceleration);
     }
@@ -628,7 +632,7 @@ fn follower_jerk_is_the_derivative_of_its_acceleration() {
     for index in 1..50 {
         let t = 0.001 * f64::from(index);
         let expected = (sig.eval_pva(t + step).2 - sig.eval_pva(t - step).2) / (2.0 * step);
-        let jerk = sig.jerk(t);
+        let jerk = jerk_at(&sig, t);
         assert!(
             (jerk - expected).abs() <= 1e-4 * expected.abs().max(1e3),
             "follower jerk at t={t} is {jerk}, its acceleration's derivative {expected}"
@@ -1407,8 +1411,8 @@ fn a_follower_reports_its_steps_across_a_leader_knot() {
         }
     }
     let acceleration_step = (after.2 - before.2).abs();
-    let jerk_step = (sig.jerk(trajectory::next_toward(knot, f64::INFINITY))
-        - sig.jerk(trajectory::next_toward(knot, f64::NEG_INFINITY)))
+    let jerk_step = (jerk_at(&sig, trajectory::next_toward(knot, f64::INFINITY))
+        - jerk_at(&sig, trajectory::next_toward(knot, f64::NEG_INFINITY)))
     .abs();
     assert!(
         acceleration_step > 1.0 && jerk_step > 1_000.0,
