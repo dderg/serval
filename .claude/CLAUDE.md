@@ -94,11 +94,20 @@ shell. `uv run python scripts/gc_caches.py [--days N] [--apply]` lists and
 removes stale `~/.cache/*-target` dirs and abandoned pending-baselines
 worktrees/stacks/samples.
 
+# Never work in ~/Developer/serval
+
+`~/Developer/serval` is the shared checkout: it stays on `main` tracking `origin/main`
+and `land-pr.sh` fast-forwards it. Do not edit, commit, build or switch branches
+there; create a worktree (`git worktree add ~/Developer/serval-<topic> -b <branch>
+origin/main`) and work in that. Run the tools from your worktree, or from
+`~/Developer/serval/scripts/` when you have none: they are current there.
+
 # Landing a PR
 
 `scripts/land-pr.sh <branch>` pushes the branch, opens the PR if needed, waits for
 the checks, merges with a merge commit and moves local `main` to `origin/main`
-without checking anything out. Red checks print the failed-run log tail and
+without switching any checkout (a checked-out `main` is fast-forwarded only when it
+has no uncommitted changes, so `~/Developer/serval` stays current after every landing). Red checks print the failed-run log tail and
 exit non-zero. `--dry-run` prints the plan. It is safe to run from the
 branch's own worktree (it leaves it before removing it) and updates the PR
 branch on GitHub and re-waits when `main` moved while the checks ran; no need to
