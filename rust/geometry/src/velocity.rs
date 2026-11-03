@@ -279,6 +279,7 @@ where
     let (barrier, v_barrier, reconstruct_count) =
         settled.expect("the lead settles every seam or fails")?;
     let profiles = shop.into_profiles(reconstruct_count);
+    law::trim_spare_full_rails();
     let (out, boundaries) = reconstruct_runs(
         &moves[..reconstruct_count],
         &caps[..reconstruct_count],
