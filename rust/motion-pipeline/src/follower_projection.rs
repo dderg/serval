@@ -513,9 +513,15 @@ pub(crate) struct ProjectionWindow<'a> {
     pub pool: &'a WorkerPool,
 }
 
+/// Projects every follower over the frontier, then commits the segments of
+/// `out` every follower holds final: a ratio-ramped follower holds back a
+/// segment until no width node or seam still to come reaches into it, and
+/// a kernel after the ramp until its window finds every segment it reads
+/// projected (see [`final_ramped_commits`]). `out` is cut to the committed
+/// prefix; a forced lookahead closes every ramp, so it commits all of it.
 pub(crate) fn project_followers(
     window: ProjectionWindow,
-    out: &mut [ContinuousSegment],
+    out: &mut Vec<ContinuousSegment>,
     states: &mut Vec<FollowerState>,
     timing: &mut ProjectionTiming,
 ) -> Result<(), PostProcessError> {
@@ -527,15 +533,16 @@ pub(crate) fn project_followers(
         lookahead,
         pool,
     } = window;
-    let commit_count = out.len();
-    assert!(frontier.len() >= commit_count);
+    let requested = out.len();
+    assert!(frontier.len() >= requested);
     if states.len() < chains.n_axes() {
         states.resize_with(chains.n_axes(), FollowerState::default);
     }
+    let mut commit_count = requested;
+    let mut committing = Vec::new();
     for (axis, leaders) in chains.projected_followers() {
         let chain = &chains.chains[axis];
         let kernel = chain.kernel();
-        let defer_linear_prefix = chain.follower_linear_transform();
         let leading = LeadingAdvance::of(chain);
         let source_tol = FitTol {
             accel_budget: source_accel_budget(leading),
@@ -816,22 +823,32 @@ pub(crate) fn project_followers(
             source_fits.next().is_none(),
             "follower source fit has no matching projection segment"
         );
-        if ramp_time.is_some() && commit_count > 0 {
-            let committed_through = projection_support(
-                &base[commit_count - 1],
-                &frontier[commit_count - 1],
-                axis,
-                leaders,
-            )
-            .1;
-            assert!(
-                state
-                    .projected_through_t
-                    .is_some_and(|through| through >= committed_through - GRID_DEDUP_EPS_S),
-                "follower axis {axis}: the segment ending at {committed_through} is committed \
-                 before every ratio ramp reaching into it is laid"
-            );
+        if ramp_time.is_some() {
+            let kernel_lo = match kernel {
+                Some(kernel) if !lookahead.clamps_past_signal() => kernel.support().0,
+                _ => 0.0,
+            };
+            commit_count = commit_count.min(final_ramped_commits(
+                state,
+                (base, frontier),
+                commit_count,
+                kernel_lo,
+                (axis, leaders),
+            ));
         }
+        committing.push((axis, leaders, projecting));
+    }
+    assert!(
+        commit_count == requested || !lookahead.clamps_past_signal(),
+        "a forced follower projection left {} of {requested} segments short of final",
+        requested - commit_count
+    );
+    out.truncate(commit_count);
+    for (axis, leaders, projecting) in committing {
+        let chain = &chains.chains[axis];
+        let kernel = chain.kernel();
+        let defer_linear_prefix = chain.follower_linear_transform();
+        let state = &mut states[axis];
         let kernel_tracks = match kernel {
             Some(kernel) if commit_count > 0 => {
                 let first = state.projected.first().expect("cache covers commits");
@@ -1182,6 +1199,28 @@ pub(crate) fn project_followers(
         }
     }
     Ok(())
+}
+
+/// How many of the first `requested` segments a ratio-ramped follower can
+/// commit: each one's projection is laid, so no width node or seam still to
+/// come reaches into it, and a kernel after the ramp, reaching `-kernel_lo`
+/// past a segment's end (zero where the window clamps past the signal),
+/// finds that window projected too.
+fn final_ramped_commits(
+    state: &FollowerState,
+    (base, frontier): (&[ContinuousSegment], &[ContinuousSegment]),
+    requested: usize,
+    kernel_lo: f64,
+    (axis, leaders): (usize, &[usize]),
+) -> usize {
+    let Some(through) = state.projected_through_t else {
+        return 0;
+    };
+    (0..requested)
+        .take_while(|&i| {
+            projection_support(&base[i], &frontier[i], axis, leaders).1 - kernel_lo <= through
+        })
+        .count()
 }
 
 /// Whether a fitted follower output must be corrected back to monotone: a
