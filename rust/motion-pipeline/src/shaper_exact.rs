@@ -876,7 +876,7 @@ impl AxisSignalTable {
             edge.order_of(self.ends[piece]) == Ordering::Greater,
             "a window edge inside the signal lies past its last piece's end"
         );
-        let shifted = Tracked::exact(&self.coeffs[piece]).shifted(edge.head - self.starts[piece]);
+        let shifted = Tracked::exact(&self.coeffs[piece]).shifted(edge.head - self.origins[piece]);
         for (order, slot) in series.iter_mut().enumerate() {
             *slot = shifted.derivative(order);
         }
