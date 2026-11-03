@@ -238,6 +238,8 @@ pub geometry::path::Segment::Arc(geometry::path::arc::Arc)
 pub geometry::path::Segment::Clothoid(geometry::path::clothoid::Clothoid)
 pub geometry::path::Segment::Line(geometry::path::line::Line)
 impl geometry::path::Segment
+pub fn geometry::path::Segment::held_coordinate(&self, usize) -> core::option::Option<f64>
+impl geometry::path::Segment
 pub fn geometry::path::Segment::lean_on(&self, usize) -> geometry::path::AxisLean
 impl geometry::path::lowering::PositionProfile for geometry::path::Segment
 pub fn geometry::path::Segment::d2heading_ds2(&self, f64) -> [f64; 3]
