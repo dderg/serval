@@ -363,19 +363,9 @@ budget: the plain projection a kernel chain's linear advance differentiates
 would turn velocity error `δ'` into `k·δ'` of command position, which the
 position-equivalent budget does not bound, and spending the position budget
 on a kernel's output moved the corner bead by up to 0.15 points at 50 mm/s.
-The plain source's absolute budget scales like its position budget, to
-`0.5 · ratio · max_accel_deviation`: the melt lag undoes the advance that
-turned `δ'` into `k·δ'`, so `δ'` reaches the nozzle flow whole, a bead
-error of `δ'/(r·v)` that grows as a corner slows. Held to the leaders'
-unscaled 50 mm/s², 60× its scaled share at `r = 0.033`, the source left a
-3–4 point corner-error floor on every kernel chain at
-`square_corner_velocity: 5` (`smooth_time: 0.002` on a 3 000 mm/s² bowden
-with `k = 0.5` and a 5 000 mm/s² direct drive with `k = 0.05`: 4.2 % and
-5.1 % against the kernel's own 0.9 % and 1.6 %); scaled, the engine matches
-the exact convolution within 0.12 points. Leaders, the kernel's output fit,
-and the follower's weld, edge-break and floor checks, keep the absolute
-budget; the fit audit holds every piece to the budget its fit resolved for
-it.
+Leaders, and the follower's weld, edge-break and floor checks, keep the
+absolute budget; the fit audit holds every piece to the budget its fit
+resolved for it.
 
 The advanced signal has no exact polynomials to prove a rung against, so a
 rung that passes the probes is held between them by estimates. Under the
