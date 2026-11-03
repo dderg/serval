@@ -782,6 +782,13 @@ fn materialize_source_axis(
         &CapContactSource {
             source,
             cap_contacts: &cap_contacts,
+            enclosure: std::cell::OnceCell::new(),
+            whole: (segment.t_start, segment.t_end),
+            accuracy: HullBudget {
+                tol: fit_tol,
+                velocity: f64::INFINITY,
+            }
+            .enclosure_accuracy(),
         },
     )?;
     if !chains.is_projected_follower(axis) {
@@ -874,10 +881,15 @@ fn cap_contact_seeds(span: &AnalyticMoveSpan) -> (Vec<f64>, Vec<f64>) {
 }
 
 /// A materialized source with the curvature-cap contacts its acceleration
-/// approaches as a square root.
+/// approaches as a square root, and its enclosure over the whole segment,
+/// built once at the fit's own accuracy: every rung of every span is proven
+/// against its stretch of it.
 struct CapContactSource<'a> {
     source: &'a ContinuousAxis,
     cap_contacts: &'a [f64],
+    enclosure: std::cell::OnceCell<Option<Vec<ExactPiece>>>,
+    whole: (f64, f64),
+    accuracy: [f64; 3],
 }
 
 impl TrackSignal for CapContactSource<'_> {
@@ -889,8 +901,17 @@ impl TrackSignal for CapContactSource<'_> {
         self.cap_contacts
     }
 
-    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
-        self.source.enclosure_on(lo, hi, accuracy)
+    fn enclosure_on(&self, lo: f64, hi: f64, _accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+        let whole = self
+            .enclosure
+            .get_or_init(|| {
+                self.source
+                    .enclosure_on(self.whole.0, self.whole.1, self.accuracy)
+            })
+            .as_ref()?;
+        let first = whole.partition_point(|piece| piece.hi < lo);
+        let past = whole.partition_point(|piece| piece.lo <= hi);
+        Some(whole[first..past.max(first)].to_vec())
     }
 }
 
@@ -4285,24 +4306,7 @@ fn shaped_ladder<S: TrackSignal>(
                 ),
                 None => match sig.enclosure_on(resolved.0, resolved.1, budget.enclosure_accuracy())
                 {
-                    Some(enclosure) => {
-                        PROOF_PIECES.fetch_add(
-                            enclosure.len() as u64,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
-                        PROOF_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if std::env::var_os("SKIP_HULL").is_some() {
-                            None
-                        } else {
-                            let start = std::time::Instant::now();
-                            let verdict = hull::first_unproven(&enclosure, piece, resolved, budget);
-                            HULL_NANOS.fetch_add(
-                                start.elapsed().as_nanos() as u64,
-                                std::sync::atomic::Ordering::Relaxed,
-                            );
-                            verdict
-                        }
-                    }
+                    Some(enclosure) => hull::first_unproven(&enclosure, piece, resolved, budget),
                     None => estimated_witness(
                         RungWitness {
                             axis,
@@ -5363,7 +5367,3 @@ mod shaper_shaped_wave_tests;
 #[cfg(test)]
 #[path = "shaper_enclosure_tests.rs"]
 mod shaper_enclosure_tests;
-
-pub static PROOF_PIECES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub static PROOF_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub static HULL_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
