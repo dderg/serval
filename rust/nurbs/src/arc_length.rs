@@ -19,7 +19,7 @@ pub(crate) fn integrate_arc_length<F: Fn(f64) -> f64>(
     u_end: f64,
     quadrature_points: usize,
 ) -> f64 {
-    debug_assert_eq!(
+    assert_eq!(
         quadrature_points, 5,
         "v1 supports only 5-point Gauss-Legendre"
     );

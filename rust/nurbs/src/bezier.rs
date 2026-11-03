@@ -231,9 +231,9 @@ pub fn split_piece_at(piece: &BezierPiece, u_split: f64) -> (BezierPiece, Bezier
 }
 
 pub(crate) fn binomial(n: usize, k: usize) -> u64 {
-    debug_assert!(
+    assert!(
         n <= 50,
-        "binomial intermediate products overflow u64 above n = 50"
+        "binomial({n}, {k}): intermediate products overflow u64 above n = 50"
     );
     if k > n {
         return 0;

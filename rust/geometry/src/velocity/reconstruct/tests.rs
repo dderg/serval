@@ -1,5 +1,4 @@
-use super::super::disk::Kinematics;
-use super::super::disk::RunMember;
+use super::super::disk::{Kinematics, RunMember, disk_reach_v, disk_reach_v_rev};
 use super::super::law::ScalarLaw;
 use super::{ReconstructError, member_profile};
 
@@ -24,7 +23,12 @@ fn clothoid(length: f64, kappa0: f64, sigma: f64, ceiling: f64, accel: f64) -> K
 }
 
 fn profile(kin: &Kinematics, entry: f64, exit: f64) -> Vec<super::super::law::LawSegment> {
-    let m = RunMember { kin, exit_v: exit };
+    let m = RunMember {
+        kin,
+        exit_v: exit,
+        forward_rail: None,
+        backward_rail: None,
+    };
     member_profile(0, &m, entry, exit).unwrap()
 }
 
@@ -82,7 +86,9 @@ fn clothoid_brake_stays_on_the_disk() {
     // The printer 90-degree corner's decelerating half.
     let kin = clothoid(0.0292, 0.0, 1838.0, 300.0, 1000.0);
     let exit = (1000.0_f64 / (1838.0 * 0.0292)).sqrt();
-    let entry = super::super::disk::disk_reach_v_rev(&kin, exit, kin.length, 1e-9).unwrap();
+    let entry = super::super::disk::disk_reach_v_rev(&kin, exit, kin.length, 1e-9)
+        .unwrap()
+        .v;
     let segments = profile(&kin, entry, exit);
     assert_tiles(&segments, kin.length);
     for seg in &segments {
@@ -104,6 +110,7 @@ fn brake_lands_rest_exactly() {
     let kin = straight(10.0, 100.0, 2000.0);
     let entry = super::super::disk::disk_reach_v_rev(&kin, 0.0, kin.length, 1e-9)
         .unwrap()
+        .v
         .min(kin.flat_ceiling);
     let segments = profile(&kin, entry, 0.0);
     assert_tiles(&segments, 10.0);
@@ -132,9 +139,63 @@ fn infeasible_seam_pair_fails_loudly() {
     let m = RunMember {
         kin: &kin,
         exit_v: 200.0,
+        forward_rail: None,
+        backward_rail: None,
     };
     let err = member_profile(0, &m, 0.0, 200.0).unwrap_err();
     assert!(matches!(err, ReconstructError::Infeasible { .. }));
+}
+
+fn profile_with_seam_rails(
+    kin: &Kinematics,
+    entry: f64,
+    exit: f64,
+    rails_from: (f64, f64),
+) -> Vec<super::super::law::LawSegment> {
+    let forward = disk_reach_v(kin, rails_from.0, kin.length, 1e-9).unwrap();
+    let backward = disk_reach_v_rev(kin, rails_from.1, kin.length, 1e-9).unwrap();
+    let m = RunMember {
+        kin,
+        exit_v: exit,
+        forward_rail: forward.rail.as_ref(),
+        backward_rail: backward.rail.as_ref(),
+    };
+    member_profile(0, &m, entry, exit).unwrap()
+}
+
+fn profile_bits(segments: &[super::super::law::LawSegment]) -> Vec<u64> {
+    segments
+        .iter()
+        .flat_map(|seg| {
+            let header = [seg.t0, seg.dt, seg.s0, seg.v0];
+            let states = (0..=16).flat_map(|i| {
+                let (s, v, a) = seg.state_at(seg.t0 + seg.dt * f64::from(i) / 16.0);
+                [s, v, a]
+            });
+            header.into_iter().chain(states).collect::<Vec<_>>()
+        })
+        .map(f64::to_bits)
+        .collect()
+}
+
+#[test]
+fn seam_rails_from_the_member_speeds_reproduce_the_profile_bit_for_bit() {
+    let kin = clothoid(2.0, 0.0, 0.05, 300.0, 1000.0);
+    let (entry, exit) = (50.0, 50.0);
+    assert_eq!(
+        profile_bits(&profile_with_seam_rails(&kin, entry, exit, (entry, exit))),
+        profile_bits(&profile(&kin, entry, exit))
+    );
+}
+
+#[test]
+fn seam_rails_from_other_speeds_are_integrated_afresh() {
+    let kin = clothoid(2.0, 0.0, 0.05, 300.0, 1000.0);
+    let (entry, exit) = (50.0, 50.0);
+    assert_eq!(
+        profile_bits(&profile_with_seam_rails(&kin, entry, exit, (20.0, 30.0))),
+        profile_bits(&profile(&kin, entry, exit))
+    );
 }
 
 /// The onset is solved in arc but consumed as a speed seam, and `dv/ds = a/v`

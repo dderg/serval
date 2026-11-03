@@ -202,7 +202,11 @@ impl Planner {
         profile: &VelocityProfile,
         output: &mut impl FnMut(PlannedItem) -> bool,
     ) -> bool {
-        debug_assert_eq!(profile.moves.len(), count);
+        assert_eq!(
+            profile.moves.len(),
+            count,
+            "the velocity profile plans a different number of moves than were committed"
+        );
         self.entry_v = profile.boundary_speeds[count];
         for (geometry, velocity) in self.moves.drain(..count).zip(profile.moves.iter().cloned()) {
             if !output(PlannedItem::Move(PlannedMove { geometry, velocity })) {
