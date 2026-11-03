@@ -19,12 +19,18 @@ pub fn scv_from_corner_deviation(corner_deviation_mm: f64, accel_mm_s2: f64) -> 
     (corner_deviation_mm * accel_mm_s2 / CORNER_DEVIATION_SCV_FACTOR).sqrt()
 }
 
+/// A move's motion caps. The first four bound the toolhead path; the z caps
+/// bound the z axis alone, so the planner applies them to whatever share of
+/// the path's motion each fitted segment puts on z. `try_new` leaves z
+/// uncapped beyond the path caps; `with_z_caps` sets them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VelocityLimits {
     pub max_velocity_mm_s: f64,
     pub accel_mm_s2: f64,
     pub corner_deviation_mm: f64,
     pub max_jerk_mm_s3: f64,
+    pub max_z_velocity_mm_s: f64,
+    pub max_z_accel_mm_s2: f64,
 }
 
 impl VelocityLimits {
@@ -39,6 +45,22 @@ impl VelocityLimits {
             accel_mm_s2,
             corner_deviation_mm,
             max_jerk_mm_s3,
+            max_z_velocity_mm_s: f64::INFINITY,
+            max_z_accel_mm_s2: f64::INFINITY,
+        };
+        limits.check()?;
+        Ok(limits)
+    }
+
+    pub fn with_z_caps(
+        self,
+        max_z_velocity_mm_s: f64,
+        max_z_accel_mm_s2: f64,
+    ) -> Result<Self, &'static str> {
+        let limits = Self {
+            max_z_velocity_mm_s,
+            max_z_accel_mm_s2,
+            ..self
         };
         limits.check()?;
         Ok(limits)
@@ -56,6 +78,9 @@ impl VelocityLimits {
         }
         if !(self.max_jerk_mm_s3 > 0.0) {
             return Err("max_jerk must be positive (infinity disables jerk limiting)");
+        }
+        if !(self.max_z_velocity_mm_s > 0.0 && self.max_z_accel_mm_s2 > 0.0) {
+            return Err("z caps must be positive (infinity leaves z to the path caps)");
         }
         Ok(())
     }

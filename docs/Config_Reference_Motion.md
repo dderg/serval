@@ -24,8 +24,10 @@ max_accel: 3000
 #   starting value. Set this XOR square_corner_velocity.
 #max_z_velocity: 300
 #   Optional. Default is max_velocity. Must be > 0 and <= max_velocity.
+#   Z speed limit in mm/s.
 #max_z_accel: 3000
 #   Optional. Default is max_accel. Must be > 0 and <= max_accel.
+#   Z acceleration limit in mm/s^2.
 #max_path_deviation: 0.005
 #   Optional. Default is 0.005 mm. Must be > 0 and <= 1.
 #max_accel_deviation: 50
@@ -33,6 +35,8 @@ max_accel: 3000
 ```
 
 `corner_deviation` is the canonical corner budget. Setting both corner options is an error. `max_accel_to_decel` and `minimum_cruise_ratio` are explicitly unsupported rather than ignored.
+
+`max_z_velocity` and `max_z_accel` bound the z axis alone, not the toolhead path. The planner applies them to each fitted segment after corner blending, using the z share of that segment's heading and of its curvature. That covers corners between an XY line and an XYZ move, such as layer changes and z-hops: the turn can put z acceleration on the blend even where its heading barely climbs, so the planner slows the blend until z stays within both caps. The caps never raise a limit; they only lower the speed ceiling and the acceleration budget of segments that move z.
 
 ## `[kinematics]`
 

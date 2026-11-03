@@ -50,32 +50,32 @@ pub fn stream_config(cfg: &PlannerConfig) -> Result<motion_pipeline::StreamConfi
         fit_tol_mm: cfg.fit_tolerance_mm,
         fit_tol_accel_mm_s2: cfg.fit_tolerance_accel_mm_s2,
         max_buffer_moves: STREAM_MAX_BUFFER_MOVES,
-        limits: geometry::VelocityLimits::try_new(
+        limits: z_capped_limits(
+            cfg,
             cart.max_velocity,
             cart.max_accel,
             cart.corner_deviation,
-            f64::INFINITY,
         )?,
     })
 }
 
-pub fn move_limits(
+/// A G-code move's limits: the path caps and, for the planner to apply to
+/// whatever share of each fitted segment's motion lands on z, the z caps.
+pub fn move_limits(cfg: &PlannerConfig) -> Result<geometry::VelocityLimits, String> {
+    let (max_velocity, accel, corner_deviation) = cfg.effective_limits();
+    z_capped_limits(cfg, max_velocity, accel, corner_deviation)
+}
+
+fn z_capped_limits(
     cfg: &PlannerConfig,
-    delta: [f64; 3],
+    max_velocity: f64,
+    accel: f64,
+    corner_deviation: f64,
 ) -> Result<geometry::VelocityLimits, String> {
-    let (mut v, mut a) = cfg.cartesian.for_move(delta[0], delta[1], delta[2]);
-    if let Some(rv) = cfg.runtime_caps.velocity {
-        v = v.min(rv);
-    }
-    if let Some(ra) = cfg.runtime_caps.accel {
-        a = a.min(ra);
-    }
-    Ok(geometry::VelocityLimits::try_new(
-        v,
-        a,
-        cfg.corner_deviation(),
-        f64::INFINITY,
-    )?)
+    Ok(
+        geometry::VelocityLimits::try_new(max_velocity, accel, corner_deviation, f64::INFINITY)?
+            .with_z_caps(cfg.cartesian.max_z_velocity, cfg.cartesian.max_z_accel)?,
+    )
 }
 
 #[cfg(test)]

@@ -148,7 +148,8 @@ bridge.
 
 The mesh coupling is *additive* to commanded Z motion, and the planner
 already grants commanded ż_g the full Z limit on steep combined moves
-(`CartesianLimits::for_move` caps at `max_z_velocity / z_unit`). A
+(each fitted segment's speed is capped at `max_z_velocity` over its
+heading's z share). A
 statically *sound* activation check is therefore impossible without the
 planner reserving Z headroom per move while a mesh is active — cross-stage
 coupling that breaks the "planner never sees the mesh" property and costs

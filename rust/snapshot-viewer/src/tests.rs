@@ -310,6 +310,8 @@ fn real_snapshot(
             max_accel: 3000.0,
             corner_deviation: pipeline_snapshot::corner_deviation_from_scv(5.0, 3000.0),
             max_jerk: f64::INFINITY,
+            max_z_velocity: None,
+            max_z_accel: None,
             max_extrude_only_velocity: None,
             max_extrude_only_accel: None,
             max_path_deviation: None,

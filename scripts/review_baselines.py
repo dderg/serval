@@ -13,8 +13,10 @@ head is reviewed against physics rather than against its old numbers:
   whether that is within SEAM_WINDOW_S of a segment seam;
 - seams: the snapshot's own per-axis seam discontinuities, base and head;
 - limits: the planned phases against each span's velocity and acceleration
-  caps (which carry per-move, Z and extrude-only caps), the shaped toolhead
-  speed against max_velocity, extrude-only E motion against its caps;
+  caps (which carry per-move and extrude-only caps), the shaped toolhead
+  speed against max_velocity, the shaped z against max_z_velocity and
+  max_z_accel (within max_accel_deviation), extrude-only E motion against
+  its caps;
 - fit tolerance: the exact-signal fit audit (`fit_tolerance` with the
   `fit-audit` feature) where the commit has it, worst position and
   acceleration over max_path_deviation / max_accel_deviation;
@@ -215,8 +217,12 @@ def config_caps(text: str) -> dict:
             return float(parser.get(section, key).split()[0])
         return None
 
+    max_velocity = get("printer", "max_velocity")
+    max_accel = get("printer", "max_accel")
     return {
-        "max_velocity": get("printer", "max_velocity"),
+        "max_velocity": max_velocity,
+        "max_z_velocity": get("printer", "max_z_velocity") or max_velocity,
+        "max_z_accel": get("printer", "max_z_accel") or max_accel,
         "max_extrude_only_velocity": get(
             "extruder", "max_extrude_only_velocity"
         ),
@@ -301,7 +307,16 @@ def shaped_limits(pva, duration: float, caps: dict) -> dict:
 
     velocity = pva[:3, :, 1]
     speed = np.sqrt((velocity**2).sum(axis=0))
-    out = {"toolhead_speed_ratio": float(speed.max() / caps["max_velocity"])}
+    out = {
+        "toolhead_speed_ratio": float(speed.max() / caps["max_velocity"]),
+        "z_velocity_ratio": float(
+            np.abs(pva[2, :, 1]).max() / caps["max_z_velocity"]
+        ),
+        "z_accel_ratio": float(
+            np.abs(pva[2, :, 2]).max()
+            / (caps["max_z_accel"] + caps["max_accel_deviation"])
+        ),
+    }
     resting = speed <= REST_SPEED_MM_S
     if resting.any():
         e_velocity = np.abs(pva[3, resting, 1])

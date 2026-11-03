@@ -1,6 +1,6 @@
 // Replays a gcode file through the production streaming pipeline, built from
 // a printer.cfg exactly as the live path builds it (stream config, post-
-// processor chains, per-move limits including the Z caps, shaper on its own
+// processor chains, per-move limits including the z caps, shaper on its own
 // thread), and reports producer throughput as a sliding-window realtime
 // factor over stream time, the deepest run of moves absorbed without the
 // planner committing, and where the wall time went stage by stage.
@@ -19,7 +19,7 @@ use std::process;
 use std::time::Instant;
 
 use motion_core::live_config;
-use motion_core::seam_test_harness::parse_gcode_to_moves_with;
+use motion_core::seam_test_harness::parse_gcode_to_moves;
 use motion_pipeline::timing::stage_totals;
 use motion_pipeline::{Pipeline, TrajectoryItem};
 
@@ -85,9 +85,10 @@ fn main() {
         eprintln!("{config_path}: {e}");
         process::exit(1);
     });
-    let moves = parse_gcode_to_moves_with(&source, |delta| {
-        live_config::move_limits(&planner, delta).expect("config limits are valid")
-    });
+    let moves = parse_gcode_to_moves(
+        &source,
+        live_config::move_limits(&planner).expect("config limits are valid"),
+    );
 
     let wall = Instant::now();
     let (arrival_tx, arrival_rx) = crossbeam_channel::unbounded::<(f64, f64)>();

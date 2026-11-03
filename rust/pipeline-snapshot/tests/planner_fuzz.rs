@@ -139,6 +139,8 @@ fn run_waypoints(
             limits.max_accel,
         ),
         max_jerk: f64::INFINITY,
+        max_z_velocity: None,
+        max_z_accel: None,
         max_extrude_only_velocity: None,
         max_extrude_only_accel: None,
         max_path_deviation: None,

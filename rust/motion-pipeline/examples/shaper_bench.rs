@@ -23,14 +23,10 @@ fn limits() -> VelocityLimits {
     VelocityLimits::try_new(2800.0, 100_000.0, 0.04, 40_000_000.0).unwrap()
 }
 
-/// Klippy caps per-move limits for Z motion (`for_move`); mirror the bench's
-/// [printer] max_z_velocity/max_z_accel so layer changes fit realistically.
-fn limits_for(dz: f64) -> VelocityLimits {
-    if dz == 0.0 {
-        limits()
-    } else {
-        VelocityLimits::try_new(20.0, 1000.0, 0.04, 40_000_000.0).unwrap()
-    }
+/// The bench's [printer] max_z_velocity/max_z_accel, so layer changes fit
+/// realistically.
+fn z_capped_limits() -> VelocityLimits {
+    limits().with_z_caps(20.0, 1000.0).unwrap()
 }
 
 fn config() -> StreamConfig {
@@ -261,7 +257,7 @@ fn gcode_moves(path: &str) -> Vec<StreamInput> {
         let ctx = MoveContext {
             extruder_axis: 3,
             feedrate_mm_s: feed,
-            limits: limits_for(next[2] - pos[2]),
+            limits: z_capped_limits(),
             source: SourceRange {
                 start_line: line_no,
                 end_line: line_no,

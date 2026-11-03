@@ -60,6 +60,8 @@ fn bench_shapers_with_extruder_chain(e_chain: Vec<PostProcessorDecl>) -> Snapsho
         max_accel: MAX_ACCEL,
         corner_deviation: 0.04,
         max_jerk: f64::INFINITY,
+        max_z_velocity: None,
+        max_z_accel: None,
         max_extrude_only_velocity: None,
         max_extrude_only_accel: None,
         max_path_deviation: Some(0.005),

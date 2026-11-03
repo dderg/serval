@@ -65,12 +65,26 @@ pub struct SnapshotParams {
     pub max_accel: f64,
     pub corner_deviation: f64,
     pub max_jerk: f64,
+    /// `None` leaves z to the path caps — see [`SnapshotParams::binding_z_cap`].
+    pub max_z_velocity: Option<f64>,
+    pub max_z_accel: Option<f64>,
     pub max_extrude_only_velocity: Option<f64>,
     pub max_extrude_only_accel: Option<f64>,
     pub max_path_deviation: Option<f64>,
     pub max_accel_deviation: Option<f64>,
     pub axis_decls: Vec<AxisDecl>,
     pub post_processor_decls: Vec<PostProcessorDecl>,
+}
+
+impl SnapshotParams {
+    /// A config's z cap as the snapshot records it: none where it cannot
+    /// bind — no segment leans more than fully on z, so a z cap at or above
+    /// the path cap never lowers a plan — which keeps every snapshot of a
+    /// config without its own z limits free of them.
+    #[must_use]
+    pub fn binding_z_cap(z_cap: f64, path_cap: f64) -> Option<f64> {
+        (z_cap < path_cap).then_some(z_cap)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -155,6 +169,12 @@ pub fn pipeline_snapshot_streaming(
         corner_deviation_mm,
         params.max_jerk,
     )
+    .and_then(|path| {
+        path.with_z_caps(
+            params.max_z_velocity.unwrap_or(f64::INFINITY),
+            params.max_z_accel.unwrap_or(f64::INFINITY),
+        )
+    })
     .map_err(|e| SnapshotError::InvalidLimits(e.to_string()))?;
 
     let moves = build_moves(waypoints, limits)?;
@@ -239,6 +259,7 @@ pub fn build_moves(
             limits.corner_deviation_mm,
             limits.max_jerk_mm_s3,
         )
+        .and_then(|path| path.with_z_caps(limits.max_z_velocity_mm_s, limits.max_z_accel_mm_s2))
         .map_err(|e| SnapshotError::InvalidMove {
             index: i,
             detail: e.to_string(),
@@ -555,6 +576,12 @@ pub struct Limits {
     /// `None` is jerk limiting off: an infinite bound is JSON `null` on the
     /// way out and unrecoverable on the way back.
     pub max_jerk_mm_s3: Option<f64>,
+    /// `None` leaves z to the path caps; absent from a snapshot that never
+    /// had z caps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_z_velocity_mm_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_z_accel_mm_s2: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1230,14 +1257,14 @@ impl AnalyticSpan {
 
 impl Limits {
     fn capture(limits: VelocityLimits) -> Self {
+        let finite = |bound: f64| bound.is_finite().then_some(bound);
         Self {
             max_velocity_mm_s: limits.max_velocity_mm_s,
             accel_mm_s2: limits.accel_mm_s2,
             corner_deviation_mm: limits.corner_deviation_mm,
-            max_jerk_mm_s3: limits
-                .max_jerk_mm_s3
-                .is_finite()
-                .then_some(limits.max_jerk_mm_s3),
+            max_jerk_mm_s3: finite(limits.max_jerk_mm_s3),
+            max_z_velocity_mm_s: finite(limits.max_z_velocity_mm_s),
+            max_z_accel_mm_s2: finite(limits.max_z_accel_mm_s2),
         }
     }
 
@@ -1247,6 +1274,10 @@ impl Limits {
             self.accel_mm_s2,
             self.corner_deviation_mm,
             self.max_jerk_mm_s3.unwrap_or(f64::INFINITY),
+        )?
+        .with_z_caps(
+            self.max_z_velocity_mm_s.unwrap_or(f64::INFINITY),
+            self.max_z_accel_mm_s2.unwrap_or(f64::INFINITY),
         )
     }
 }

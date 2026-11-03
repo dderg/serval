@@ -71,7 +71,6 @@ pub planner_config::CartesianLimits::max_velocity: f64
 pub planner_config::CartesianLimits::max_z_accel: f64
 pub planner_config::CartesianLimits::max_z_velocity: f64
 impl planner_config::CartesianLimits
-pub fn planner_config::CartesianLimits::for_move(&self, f64, f64, f64) -> (f64, f64)
 pub fn planner_config::CartesianLimits::validate(&self) -> core::result::Result<(), &'static str>
 impl core::default::Default for planner_config::CartesianLimits
 pub fn planner_config::CartesianLimits::default() -> Self

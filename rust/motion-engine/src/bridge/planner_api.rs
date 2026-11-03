@@ -232,9 +232,8 @@ impl PyMotionEngine {
                 }
             };
             let pos = self.commanded_pos.lock_ok().0;
-            let limits =
-                motion_core::live_config::move_limits(&self.planner_config.lock_ok(), [dx, dy, dz])
-                    .map_err(PyRuntimeError::new_err)?;
+            let limits = motion_core::live_config::move_limits(&self.planner_config.lock_ok())
+                .map_err(PyRuntimeError::new_err)?;
             let line_no = self.move_seq.fetch_add(1, Ordering::Relaxed) as u32;
             let m = classify::build_move(
                 pos,
