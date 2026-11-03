@@ -275,6 +275,32 @@ shorter than the corner budget) lay more. `planner_conservation_fuzz` holds
 the planner to it. Extrude-only moves ride no spatial path and add in
 directly.
 
+The ratio is not projected raw. Every follower smooths `r(s)` along the path
+(`follower_projection/ratio_ramp.rs`) with the kernel `¾(1 − x²)` of
+half-width `h(s)`: half the path the shaped leaders cover in the ramp time
+`τ` around `s` — `v·τ/2` at cruise, `a·τ²/8` at a turnaround — closing to
+zero at every rest. A ratio step then reaches the follower as a smoothstep
+`S` over about `τ` (`S′ ≤ 3/2`, `|S″| ≤ 6`), however finely the path is cut
+into moves, and `|h′| ≤ 0.75` keeps the laid ratio a convex combination of
+the commanded ones. Each seam derives its own `τ`
+(`geometry::RatioRampRule::ramp_time`) from the leaders' shaped speed,
+acceleration and jerk there, the steps within half the longest ramp of it,
+the advance's slope `k` (`CompiledChain::advance_slope`: a linear
+advance's `k`, a nonlinear one's small-signal slope) and the axis's
+`max_velocity` / `max_accel` (`V_e`, `A_e`): the shortest in
+[`RATIO_RAMP_MIN_TIME_S`, `RATIO_RAMP_MAX_TIME_S`] = [5, 30] ms whose peak
+advanced follower velocity and acceleration stay within both. At a steady
+speed, with `Δ = |Δr|·v`, the acceleration bound is `τ ≥ √(6kΔ/A_e)` for
+`τ ≤ 2k` and `τ ≥ 1.5Δ/A_e` without an advance; the velocity bound is about
+`τ ≥ 1.45kΔ/(V_e − r·v)` for the larger flow `r·v` (the overshoot
+coefficient rises to 1.5 as `τ/k` shrinks). An unlimited follower takes
+5 ms everywhere. Around its seam a step's `τ` holds within `τ` of it and
+falls off by half the time beyond; the leaders are sampled every 2.5 ms.
+Where even 30 ms exceeds the limits, the velocity planner caps the speed at
+the join (`velocity::extruder_caps::ratio_step_ceiling`, through
+`RatioRampRule::step_speed_cap`) rather than smearing the step over more
+path.
+
 Critically, the projection reads the leaders' **toolhead signal**, not their
 motor command — the follower must track where the nozzle physically is, and
 the mode-inverse counter-drive is motion the toolhead never performs. This
@@ -347,7 +373,7 @@ and every seam carries the signal's own velocity.
 A follower's fits are held to `max_path_deviation` times its largest demand
 ratio (`follower_tol_scale`; the projected source fit takes half of it).
 Where an advance applies before projection — any advance placed before a
-follower kernel or with none, with or without `ratio_ramp_time` —
+follower kernel or with none —
 the source fit fits the advanced signal itself, and each of its pieces of
 duration `h` is held to the acceleration budget
 `max(max_accel_deviation, 8ε/h²)` (`AccelBudget::PositionEquivalent`), `ε`
@@ -388,7 +414,7 @@ sees nothing. Between each pair of samples the rung is read exactly against
 the truth's quintic Hermite interpolant, the exact midpoint measures how far
 the truth leaves that interpolant, and a stretch whose estimate and miss
 together reach the budget is split there. The error's interpolant left 72
-pieces of the Trident ramp chain's dense print up to 1.83× over; the
+pieces of the kernel-free Trident chain's dense print up to 1.83× over; the
 truth's leaves none. Position between two samples is estimated by the
 error's cubic Hermite interpolant, which misses the error by its fourth
 derivative; an estimate past 90 % of the budget is read exactly. Trusted

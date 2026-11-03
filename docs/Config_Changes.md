@@ -8,6 +8,27 @@ All dates in this document are approximate.
 
 ## Changes
 
+20261103: The `ratio_ramp_time` option of a follower axis is removed;
+setting it is a config error that names the rule replacing it. Every
+axis that follows others now ramps each extrusion-ratio step (travel to
+extrusion, a flow change, a wipe) along the path, with or without a
+smoothing kernel in its chain, over a ramp time τ that each seam derives
+from the axis's `max_velocity` and `max_accel` (V_e, A_e) and its
+advance's slope k (a linear advance's `k`, a nonlinear one's
+`linear_advance + nonlinear_offset / linearization_velocity`). τ is the
+shortest time between 5 and 30 ms that keeps the advanced extruder
+within both limits at the leaders' speed and acceleration there. For a
+step Δ = |Δr|·v at a steady speed v onto a flow r·v, that is about
+τ = max(5 ms, √(6kΔ/A_e), 1.45kΔ/(V_e − r·v)), capped at 30 ms;
+without an advance, τ = max(5 ms, 1.5Δ/A_e). Where 30 ms cannot meet
+the limits, the velocity planner lowers the toolhead speed at the step.
+An axis with neither limit set or inherited ramps every step over 5 ms.
+A pressure advance no longer needs a smoothing kernel next to it: the
+recommended chain is the advance alone with the axis's limits set, and
+a kernel is an explicit override that trades a bead bulge at every
+corner for lower extruder acceleration. See
+[Config_Migration](Config_Migration.md#pressure-advance).
+
 20261103: A follower axis declares what its motor can do:
 `[axis e] max_velocity` and `max_accel` cap every extruder motion, pressure
 advance included, and the velocity planner slows extruding moves so the
