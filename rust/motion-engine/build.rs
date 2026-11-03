@@ -55,21 +55,12 @@ fn tree_build_id(root: &Path) -> String {
     digest[..ID_HEX_CHARS].to_string()
 }
 
-fn watch_rust_dirs(root: &Path) {
-    let rust = root.join("rust");
-    let Ok(entries) = std::fs::read_dir(&rust) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if entry.file_name() != "target" {
-            println!("cargo:rerun-if-changed={}", entry.path().display());
-        }
-    }
-}
+const ALWAYS_RERUN: &str =
+    "cargo:rerun-if-changed=no-such-file-so-the-id-is-recomputed-every-build";
 
 fn main() {
     let root = repo_root();
-    watch_rust_dirs(&root);
+    println!("{ALWAYS_RERUN}");
     println!(
         "cargo:rustc-env=SERVAL_ENGINE_BUILD_ID={}",
         tree_build_id(&root)
