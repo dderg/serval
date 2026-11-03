@@ -196,3 +196,23 @@ def test_g92_shifts_the_coordinate_frame_like_live(engine):
         (10.0, 5.0),
         (5.0, 0.0),
     ]
+
+
+def test_extrusion_mode_matches_live(engine):
+    steps = assert_parity(
+        engine,
+        "G1 X10 Y10 E1 F6000\n"
+        "G1 X20 E3\n"
+        "G91\n"
+        "G1 X10 E1\n"
+        "M82\n"
+        "G1 X10 E1\n"
+        "G90\n"
+        "G1 X50 E6\n"
+        "M83\n"
+        "G1 X60 E1\n"
+        "G91\n"
+        "M82\n"
+        "G1 X10 E2\n",
+    )
+    assert extrusions(steps) == [2.0, 1.0, 1.0, 1.0, 1.0, 2.0]

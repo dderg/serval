@@ -6,11 +6,9 @@
 //! the runtime limit overrides in force for the move ending at it — the same
 //! [`RuntimeLimits`] state the live engine holds when that move is submitted —
 //! so the snapshot derives its effective limits through the live clamp.
-//! Extruder mode is M82 (absolute) / M83 (relative), independent of the
-//! G90/G91 flag that governs X/Y/Z; under G91 an undeclared extruder rides
-//! along as relative, and an E word with no mode declared at all is refused
-//! rather than guessed. G92 moves the G-code origin, never the toolhead, as
-//! klippy's `GCodeMove` does.
+//! Coordinates follow klippy's `GCodeMove`: absolute by default, E relative
+//! under M83 or under G91 (even after M82), and G92 moves the G-code origin,
+//! never the toolhead.
 
 use planner_config::{CartesianLimits, RuntimeLimits};
 
@@ -41,10 +39,6 @@ pub enum WaypointError {
         "line {line}: G{major} arc command is not supported: the motion engine has no native arc ingestion yet, and silently linearizing it here would claim to exercise an arc while feeding the engine straight segments"
     )]
     UnsupportedArc { line: u32, major: u32 },
-    #[error(
-        "line {line}: E word before any M82/M83 (or G91) — the extruder mode is ambiguous, and guessing absolute turns relative-E slicer output into garbage extrusion ratios. Declare the mode (slicer excerpts printed with relative extrusion need an 'M83' line at the top)."
-    )]
-    AmbiguousExtruderMode { line: u32 },
     #[error("line {line}: G{command} F{feedrate}: invalid speed")]
     InvalidSpeed {
         line: u32,
@@ -275,7 +269,7 @@ impl Toolhead<'_> {
 /// reset never moves the toolhead.
 struct GCodeMove {
     absolute_coord: bool,
-    extrude_relative: Option<bool>,
+    absolute_extrude: bool,
     base_position: [f64; 4],
     last_position: [f64; 4],
     speed: f64,
@@ -314,13 +308,10 @@ impl GCodeMove {
             }
         }
         if let Some(v) = params.e() {
-            if self.extrude_relative.is_none() && self.absolute_coord {
-                return Err(WaypointError::AmbiguousExtruderMode { line });
-            }
-            self.last_position[3] = if self.extrude_relative.unwrap_or(true) {
-                self.last_position[3] + v
-            } else {
+            self.last_position[3] = if self.absolute_coord && self.absolute_extrude {
                 v + self.base_position[3]
+            } else {
+                self.last_position[3] + v
             };
         }
         if let Some(f) = params.f() {
@@ -346,7 +337,7 @@ pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>
     };
     let mut gcode_move = GCodeMove {
         absolute_coord: true,
-        extrude_relative: None,
+        absolute_extrude: true,
         base_position: [0.0; 4],
         last_position: [0.0; 4],
         speed: LIVE_DEFAULT_SPEED_MM_S,
@@ -389,8 +380,8 @@ pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>
         match (letter, major) {
             (b'G', 90) => gcode_move.absolute_coord = true,
             (b'G', 91) => gcode_move.absolute_coord = false,
-            (b'M', 82) => gcode_move.extrude_relative = Some(false),
-            (b'M', 83) => gcode_move.extrude_relative = Some(true),
+            (b'M', 82) => gcode_move.absolute_extrude = true,
+            (b'M', 83) => gcode_move.absolute_extrude = false,
             (b'M', 204) => m204(&params, line_no, &mut toolhead.runtime)?,
             (b'G', 92) => gcode_move.set_position(&params),
             (b'G', 2 | 3) => {
