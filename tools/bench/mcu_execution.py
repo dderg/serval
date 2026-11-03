@@ -23,6 +23,8 @@ import step_tap
 KNOT_SECONDS = 2.0
 COINCIDENCE_SECONDS = 3e-6
 LEAD_BIN_SECONDS = 250e-9
+RATE_WINDOW_SECONDS = 1e-3
+RATE_BIN_HZ = 25_000
 GAP_STIFFNESS = 1.0
 FIT_ROUNDS = 3
 INLIER_FLOOR_S = 100e-9
@@ -141,6 +143,38 @@ def _lateness_by_lead(lead_ns: np.ndarray, relative_ns: np.ndarray) -> list:
         }
         for lo, hi, mask in rows
     ]
+
+
+def aggregate_step_rate_hz(clocks: np.ndarray, clock_freq: float) -> np.ndarray:
+    ordered = np.sort(clocks)
+    half = RATE_WINDOW_SECONDS * clock_freq / 2
+    inside = np.searchsorted(ordered, clocks + half, "right") - np.searchsorted(
+        ordered, clocks - half, "left"
+    )
+    return inside / RATE_WINDOW_SECONDS
+
+
+def _lateness_by_step_rate(
+    rate_hz: np.ndarray, relative_ns: np.ndarray
+) -> list:
+    bins = (rate_hz // RATE_BIN_HZ).astype(np.int64)
+    rows = []
+    for index in np.unique(bins):
+        mask = bins == index
+        late = relative_ns[mask]
+        rows.append(
+            {
+                "rate_hz_from": int(index * RATE_BIN_HZ),
+                "rate_hz_to": int((index + 1) * RATE_BIN_HZ),
+                "steps": int(np.count_nonzero(mask)),
+                **{
+                    f"steps_late_over_{t}ns": int(np.count_nonzero(late > t))
+                    for t in LATE_THRESHOLDS_NS
+                },
+                **_stats_ns(late),
+            }
+        )
+    return rows
 
 
 def _stats_ns(values_ns: np.ndarray) -> dict:
@@ -313,6 +347,9 @@ def report(
         "motors": motors_report,
         "follower_lateness_by_lead_ns": _lateness_by_lead(
             np.concatenate(lead_ns), relative_ns
+        ),
+        "lateness_by_step_rate_hz": _lateness_by_step_rate(
+            aggregate_step_rate_hz(x, tap.clock_freq), relative_ns
         ),
         "step_load_late_events": len(load_late),
         "step_load_late_matched": sum(1 for e in load_late if e["matched"]),
