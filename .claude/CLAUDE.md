@@ -99,6 +99,15 @@ Run it with plain `python3`, not `uv run` (uv's python breaks the pyo3 test
 binaries). Snapshot checks need the engine built first:
 `--run "make -f Makefile.rust motion-engine-fast && uv run python snapshots/run.py"`.
 
+`scripts/corpus.sh [--configs fast,printer] [-k SUBSTR] [--audit]` plans the
+59-case corpus (51 snapshot cases + the four `tools/sim/gcode` prints on
+`fast.cfg` and `printer.cfg`) through the production pipeline and checks each
+result is finite. To measure something across the corpus, write a probe test
+starting with `mod corpus;` that iterates `corpus::corpus()` and run it with
+`scripts/corpus.sh --probe FILE.rs`: the file is copied into
+`rust/pipeline-snapshot/tests/` for the run and removed afterwards. The corpus
+lives in `rust/pipeline-snapshot/tests/corpus/mod.rs`, shared with the fit audit.
+
 `uv run python scripts/accept_reviewed.py <pr> [--accept-suspicious CASE=REASON ...]`
 (from the PR branch's own worktree, pushed and clean) runs
 `scripts/review_baselines.py --pr N`, refuses on any REGRESSION or on a SUSPICIOUS
