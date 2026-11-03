@@ -22,8 +22,10 @@ would produce wrong motion or NaN is therefore `assert!` in host crates, with
 the offending values in the message. Keep `debug_assert!` only for expensive
 self-checks. On a hot path keep the check but put the failure out of line (a
 `#[cold] #[inline(never)]` panic function, as `geometry::vec3::normalize` does);
-measure with `scripts/bench_compare.py`. Arithmetic overflow is also unchecked in
-release.
+measure with `scripts/bench_compare.py` (its CPU row is steadier than wall time on a
+busy box). Arithmetic overflow is checked in release for the host crates
+(`rust/Cargo.toml` per-package `overflow-checks`; the MCU crates are untouched),
+except `nurbs`, `geometry` and `trajectory`, whose loops cost +2..6% CPU with it on.
 
 # Testing
 

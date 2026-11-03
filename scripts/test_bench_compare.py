@@ -29,19 +29,25 @@ def test_a_report_without_a_summary_fails_loudly():
 
 def test_medians_are_taken_per_field_and_stage_and_a_missing_stage_counts_as_zero():
     runs = [
-        {"wall_s": 10.0, "x": 5.0, "stages": {"fit": 6.0}},
-        {"wall_s": 12.0, "x": 4.0, "stages": {"fit": 8.0}},
-        {"wall_s": 11.0, "x": 4.5, "stages": {"fit": 7.0, "plan": 1.0}},
+        {"wall_s": 10.0, "cpu_s": 30.0, "x": 5.0, "stages": {"fit": 6.0}},
+        {"wall_s": 12.0, "cpu_s": 36.0, "x": 4.0, "stages": {"fit": 8.0}},
+        {
+            "wall_s": 11.0,
+            "cpu_s": 33.0,
+            "x": 4.5,
+            "stages": {"fit": 7.0, "plan": 1.0},
+        },
     ]
     assert bc.median_run(runs) == {
         "wall_s": 11.0,
+        "cpu_s": 33.0,
         "x": 4.5,
         "stages": {"fit": 7.0, "plan": 0.0},
     }
 
 
 def test_the_table_reports_the_change_of_b_against_a():
-    a = {"wall_s": 10.0, "x": 5.0, "stages": {"fit": 6.0}}
-    b = {"wall_s": 11.0, "x": 4.5, "stages": {"fit": 7.2}}
+    a = {"wall_s": 10.0, "cpu_s": 30.0, "x": 5.0, "stages": {"fit": 6.0}}
+    b = {"wall_s": 11.0, "cpu_s": 33.0, "x": 4.5, "stages": {"fit": 7.2}}
     table = bc.comparison_table("fast", a, b, (1.0, 2.0))
     assert "+10.0%" in table and "-10.0%" in table and "+20.0%" in table
