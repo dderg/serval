@@ -8,7 +8,7 @@
 //! no jerk parameter: a constant-jerk cubic is not a law any axis executes,
 //! it was only ever a grid-cell approximation of the rail.
 //!
-//! `ConstAccel` is closed-form. `DiskRail` is evaluated through a dense
+//! `ConstAccel` is closed-form. `DiskRail` is evaluated through a
 //! Runge–Kutta solution built deterministically from the law parameters and
 //! cached inside the segment; between knots a C2 quintic interpolates
 //! velocity, arc is its anchored integral, and acceleration is its
@@ -16,6 +16,22 @@
 //! produced it, not as the difference of two rounded knot speeds. A pair
 //! that leaves the curvature cap from one end interpolates in the square
 //! root of the time from that end instead: see [`CapDeparture`].
+//!
+//! # Accuracy contract
+//!
+//! The rail is the motion its interpolant describes, and that motion is
+//! what every later stage plans, shapes and fits against. The integrator
+//! places its knots so each pair provably holds two things
+//! ([`defect`]): its acceleration stays within
+//! [`RAIL_ACCELERATION_DEFECT`] of the law `a(s, v)` read at its own
+//! interpolated state — so its acceleration budget and its disk hold to
+//! that — and its arc stays within [`RAIL_ARC_DEFECT`] of the integral of
+//! its own speed, so arc, speed and time describe one consistent motion.
+//! Both are a tenth of the default fit tolerances. Nothing ties the rail
+//! to the exact solution of the ODE: that solution is no physical
+//! reference, only one more motion along the same path, and the rail's
+//! timing may drift from it by the defect integrated over the rail's
+//! duration while the path, the limits and the fit tolerances all hold.
 
 use std::sync::{Arc, OnceLock};
 
