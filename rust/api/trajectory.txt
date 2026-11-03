@@ -216,6 +216,9 @@ pub trajectory::continuous::ContinuousError::NonFinite::t: f64
 pub trajectory::continuous::ContinuousError::NonFiniteEvaluation
 pub trajectory::continuous::ContinuousError::NonFiniteEvaluation::source_axis: usize
 pub trajectory::continuous::ContinuousError::NonFiniteEvaluation::t: f64
+pub trajectory::continuous::ContinuousError::NotRepresentable
+pub trajectory::continuous::ContinuousError::NotRepresentable::value: f64
+pub trajectory::continuous::ContinuousError::NotRepresentable::what: &'static str
 pub trajectory::continuous::ContinuousError::PhaseEndpointMismatch
 pub trajectory::continuous::ContinuousError::PhaseEndpointMismatch::actual: f64
 pub trajectory::continuous::ContinuousError::PhaseEndpointMismatch::expected: f64
@@ -462,6 +465,9 @@ pub trajectory::ContinuousError::NonFinite::t: f64
 pub trajectory::ContinuousError::NonFiniteEvaluation
 pub trajectory::ContinuousError::NonFiniteEvaluation::source_axis: usize
 pub trajectory::ContinuousError::NonFiniteEvaluation::t: f64
+pub trajectory::ContinuousError::NotRepresentable
+pub trajectory::ContinuousError::NotRepresentable::value: f64
+pub trajectory::ContinuousError::NotRepresentable::what: &'static str
 pub trajectory::ContinuousError::PhaseEndpointMismatch
 pub trajectory::ContinuousError::PhaseEndpointMismatch::actual: f64
 pub trajectory::ContinuousError::PhaseEndpointMismatch::expected: f64
