@@ -228,17 +228,19 @@ impl<'a> LeadingAdvance<'a> {
     }
 
     /// The follower velocity, acceleration and jerk the advance reads at
-    /// `t`, given the follower's own velocity and acceleration there.
+    /// `t`, given the follower's path state and its own velocity and
+    /// acceleration there.
     fn read(
         &self,
         sig: &FollowerSignal,
         t: f64,
+        read: &PathRead,
         (velocity, acceleration): (f64, f64),
     ) -> (f64, f64, f64) {
         if self.reads_path_only() {
-            return sig.ramped_advance_read(t);
+            return sig.ramped_read(t, read);
         }
-        (velocity, acceleration, sig.jerk(t))
+        (velocity, acceleration, sig.jerk_read(t, read))
     }
 
     fn read_velocity(&self, sig: &FollowerSignal, t: f64) -> f64 {
@@ -1741,9 +1743,12 @@ impl FollowerState {
     /// A kernel with negative lobes can overshoot the ingested path by a
     /// whisker at a terminal flush; the terminal ratio extends it.
     fn spans_e(&self, s: f64) -> f64 {
-        let Some(first) = self.spans.first() else {
-            return 0.0;
-        };
+        self.table_e(s)
+            .map_or(0.0, |table| table + self.smoothing.correction(s).value)
+    }
+
+    fn table_e(&self, s: f64) -> Option<f64> {
+        let first = self.spans.first()?;
         assert!(
             s >= first.s0 - SPAN_LOOKUP_SLACK_MM,
             "shaped path odometer {s} fell behind the pruned span table \
@@ -1751,14 +1756,13 @@ impl FollowerState {
             first.s0
         );
         let idx = self.spans.partition_point(|span| span.s1 < s);
-        let table = match self.spans.get(idx) {
+        Some(match self.spans.get(idx) {
             Some(span) => span.e_at(s.max(span.s0)),
             None => {
                 let last = self.spans.last().expect("non-empty spans");
                 last.e_at(last.s1) + last.r1 * (s - last.s1)
             }
-        };
-        table + self.smoothing.correction(s).value
+        })
     }
 
     /// Projected extrusion accumulated between two shaped-path offsets
@@ -1803,20 +1807,35 @@ impl FollowerState {
     }
 
     fn ratio_and_slope(&self, s: f64) -> (f64, f64) {
-        let idx = self.spans.partition_point(|span| span.s1 <= s);
-        let (ratio, slope) = match self.spans.get(idx) {
-            Some(span) if s >= span.s0 => (span.ratio_at(s), span.ratio_slope()),
-            Some(span) => (span.r0, 0.0),
-            None => (self.spans.last().map_or(0.0, |span| span.r1), 0.0),
-        };
+        let (ratio, slope) = self.table_ratio_and_slope(s);
         let correction = self.smoothing.correction(s);
         (ratio + correction.d1, slope + correction.d2)
     }
 
-    /// `d²r/ds²`: the table's spans are linear, so only the smoothing bends
-    /// it.
-    fn ratio_curvature(&self, s: f64) -> f64 {
-        self.smoothing.correction(s).d3
+    fn table_ratio_and_slope(&self, s: f64) -> (f64, f64) {
+        let idx = self.spans.partition_point(|span| span.s1 <= s);
+        match self.spans.get(idx) {
+            Some(span) if s >= span.s0 => (span.ratio_at(s), span.ratio_slope()),
+            Some(span) => (span.r0, 0.0),
+            None => (self.spans.last().map_or(0.0, |span| span.r1), 0.0),
+        }
+    }
+
+    /// What the table and its smoothing lay at `s`, the smoothing's
+    /// correction read once: [`Self::spans_e`], [`Self::ratio_and_slope`]
+    /// and `d²r/ds²` (the table's spans are linear, so only the smoothing
+    /// bends it).
+    fn laid_at(&self, s: f64) -> LaidRead {
+        let (ratio, slope) = self.table_ratio_and_slope(s);
+        let correction = self.smoothing.correction(s);
+        LaidRead {
+            e: self
+                .table_e(s)
+                .map_or(0.0, |table| table + correction.value),
+            ratio: ratio + correction.d1,
+            slope: slope + correction.d2,
+            curvature: correction.d3,
+        }
     }
 
     fn aligned_span_start(&self, s: f64) -> f64 {
@@ -2364,6 +2383,27 @@ impl RatioBounds {
     }
 }
 
+/// What the span table and its smoothing lay at one shaped path distance.
+#[derive(Clone, Copy)]
+struct LaidRead {
+    e: f64,
+    ratio: f64,
+    slope: f64,
+    curvature: f64,
+}
+
+/// The follower's path state at one time, read once for every quantity
+/// derived from it: where the odometer stands, how fast it runs and turns,
+/// and what is laid there.
+#[derive(Clone, Copy)]
+struct PathRead {
+    speed: f64,
+    rate: f64,
+    rate_deriv: f64,
+    s: f64,
+    laid: LaidRead,
+}
+
 pub(crate) struct FollowerSignal<'a> {
     state: &'a FollowerState,
     e_start: f64,
@@ -2500,28 +2540,47 @@ impl<'a> FollowerSignal<'a> {
         self.leaders.speed_second(t, speed)
     }
 
+    fn path_read(&self, t: f64) -> PathRead {
+        let speed = self.leaders.speed(t);
+        let s = self.s_owned(t);
+        PathRead {
+            speed,
+            rate: self.odometer_scale * speed,
+            rate_deriv: self.odometer_scale * self.leader_speed_deriv(t, speed),
+            s,
+            laid: self.state.laid_at(s),
+        }
+    }
+
     fn pva_at_distance(&self, t: f64, s: f64) -> (f64, f64, f64) {
         let (rate, rate_deriv) = self.odometer_rate(t);
-        let (ratio, slope) = self.state.ratio_and_slope(s);
-        let spans = self.state.spans_e(s) - self.e_spans_start;
+        self.pva_laid(t, (rate, rate_deriv), self.state.laid_at(s))
+    }
+
+    fn pva_read(&self, t: f64, read: &PathRead) -> (f64, f64, f64) {
+        self.pva_laid(t, (read.rate, read.rate_deriv), read.laid)
+    }
+
+    fn pva_laid(&self, t: f64, (rate, rate_deriv): (f64, f64), laid: LaidRead) -> (f64, f64, f64) {
+        let spans = laid.e - self.e_spans_start;
         let (raw_p, raw_v, raw_a) = self.raw_delta.map_or((0.0, 0.0, 0.0), |(axis, at_start)| {
             let (position, velocity, acceleration) = axis_pva(axis, t);
             (position - at_start, velocity, acceleration)
         });
         (
             self.e_start + spans + raw_p,
-            ratio * rate + raw_v,
-            slope * rate * rate + ratio * rate_deriv + raw_a,
+            laid.ratio * rate + raw_v,
+            laid.slope * rate * rate + laid.ratio * rate_deriv + raw_a,
         )
     }
 
-    fn jerk(&self, t: f64) -> f64 {
+    fn jerk_read(&self, t: f64, read: &PathRead) -> f64 {
         let raw = self.raw_delta.map_or(0.0, |(axis, _)| {
             axis.eval_pvaj(t)
                 .expect("follower raw axis has exact derivatives")
                 .jerk
         });
-        self.path_jerk(t) + raw
+        self.path_jerk(t, read) + raw
     }
 
     fn path_deriv(&self, t: f64) -> f64 {
@@ -2535,20 +2594,23 @@ impl<'a> FollowerSignal<'a> {
         slope * rate * rate + ratio * rate_deriv
     }
 
-    fn path_jerk(&self, t: f64) -> f64 {
-        let speed = self.leaders.speed(t);
-        let speed_derivative = self.leader_speed_deriv(t, speed);
-        let speed_second = self.leader_speed_second_deriv(t, speed);
-        let rate = self.odometer_scale * speed;
-        let rate_deriv = self.odometer_scale * speed_derivative;
-        let rate_second = self.odometer_scale * speed_second;
-        let s = self.s_owned(t);
-        let (ratio, slope) = self.state.ratio_and_slope(s);
-        let laid = ratio * rate_second + 3.0 * slope * rate * rate_deriv;
+    fn rate_second(&self, t: f64, read: &PathRead) -> f64 {
+        self.odometer_scale * self.leader_speed_second_deriv(t, read.speed)
+    }
+
+    fn path_jerk(&self, t: f64, read: &PathRead) -> f64 {
+        let PathRead {
+            rate,
+            rate_deriv,
+            laid,
+            ..
+        } = *read;
+        let laid_jerk =
+            laid.ratio * self.rate_second(t, read) + 3.0 * laid.slope * rate * rate_deriv;
         if self.state.smoothing.is_inert() {
-            return laid;
+            return laid_jerk;
         }
-        laid + self.state.ratio_curvature(s) * rate * rate * rate
+        laid_jerk + laid.curvature * rate * rate * rate
     }
 
     /// `d(R·W)/ds` at `s`: the path slope of the ratio a ratio-ramped
@@ -2582,24 +2644,30 @@ impl<'a> FollowerSignal<'a> {
     /// is the laid ratio weighted down to zero at every turnaround of the
     /// leaders ([`RatioSmoothing::valley_weight`]).
     fn ramped_advance_read(&self, t: f64) -> (f64, f64, f64) {
-        let speed = self.leaders.speed(t);
-        let rate = self.odometer_scale * speed;
-        let rate_deriv = self.odometer_scale * self.leader_speed_deriv(t, speed);
-        let rate_second = self.odometer_scale * self.leader_speed_second_deriv(t, speed);
-        let s = self.s_owned(t);
-        let (ratio, slope) = self.state.ratio_and_slope(s);
-        let curvature = self.state.ratio_curvature(s);
+        self.ramped_read(t, &self.path_read(t))
+    }
+
+    fn ramped_read(&self, t: f64, read: &PathRead) -> (f64, f64, f64) {
+        let PathRead {
+            rate,
+            rate_deriv,
+            s,
+            laid,
+            ..
+        } = *read;
+        let rate_second = self.rate_second(t, read);
         let (weight, weight_slope, weight_curvature) = self.state.smoothing.valley_weight(s);
-        let read = ratio * weight;
-        let read_slope = slope * weight + ratio * weight_slope;
-        let read_curvature =
-            curvature * weight + 2.0 * slope * weight_slope + ratio * weight_curvature;
+        let weighted = laid.ratio * weight;
+        let weighted_slope = laid.slope * weight + laid.ratio * weight_slope;
+        let weighted_curvature = laid.curvature * weight
+            + 2.0 * laid.slope * weight_slope
+            + laid.ratio * weight_curvature;
         (
-            read * rate,
-            read_slope * rate * rate + read * rate_deriv,
-            read * rate_second
-                + 3.0 * read_slope * rate * rate_deriv
-                + read_curvature * rate * rate * rate,
+            weighted * rate,
+            weighted_slope * rate * rate + weighted * rate_deriv,
+            weighted * rate_second
+                + 3.0 * weighted_slope * rate * rate_deriv
+                + weighted_curvature * rate * rate * rate,
         )
     }
 
@@ -3200,8 +3268,9 @@ impl AdvancedFollowerSignal<'_, '_> {
 
 impl TrackSignal for AdvancedFollowerSignal<'_, '_> {
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
-        let (p, v, a) = self.source.eval_pva(t);
-        let (read_v, read_a, read_j) = self.advance.read(self.source, t, (v, a));
+        let read = self.source.path_read(t);
+        let (p, v, a) = self.source.pva_read(t, &read);
+        let (read_v, read_a, read_j) = self.advance.read(self.source, t, &read, (v, a));
         let input = self.advance_input(t, read_v);
         let p = p - input.steps_taken_out;
         match self.advance.stage {
