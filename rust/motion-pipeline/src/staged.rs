@@ -51,6 +51,7 @@ impl Pipeline {
         let (sender, rx) = bounded(SHAPER_INBOX_CAP);
         let shaper_thread = std::thread::Builder::new()
             .name("kalico-shaper".into())
+            .stack_size(crate::worker_pool::FAN_OUT_THREAD_STACK)
             .spawn(move || run_shaper(shaper, &rx, sink))
             .expect("spawn shaper thread");
         StagedPipeline {

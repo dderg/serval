@@ -97,11 +97,21 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--days", type=float, default=3.0)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument(
+        "--keep",
+        action="append",
+        default=[],
+        help="path (or ~/.cache name) never removed; repeatable",
+    )
     args = parser.parse_args()
     cutoff = time.time() - args.days * SECONDS_PER_DAY
     total = 0
     worktrees, busy = worktree_paths(), process_paths()
+    kept = [Path(k).expanduser() if "/" in k else CACHE / k for k in args.keep]
     for path in candidates():
+        if path in kept:
+            print(f"   kept  {path}  (--keep)")
+            continue
         if newest_mtime(path) >= cutoff:
             continue
         reason = holder(path, worktrees, busy)
