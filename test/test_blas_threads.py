@@ -9,7 +9,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def _thread_count_after(code, env):
     status = subprocess.run(
-        [sys.executable, "-c", code + "; print(open('/proc/self/status').read())"],
+        [
+            sys.executable,
+            "-c",
+            code + "; print(open('/proc/self/status').read())",
+        ],
         cwd=REPO_ROOT,
         env=env,
         capture_output=True,
