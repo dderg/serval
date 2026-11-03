@@ -522,6 +522,23 @@ fn a_fit_residual_is_welded_onto_the_emitted_state() {
     assert!((pieces[0].coeffs[1] - emitted.1).abs() <= 1e-12);
 }
 
+#[test]
+fn a_residual_too_short_a_window_cannot_close_is_carried_to_the_next_one() {
+    let window = 1.44e-7;
+    let pieces = vec![ramp_piece(0.0, window, 2.0)];
+    let emitted = (1.0 + 2e-9, 2.0);
+    let weld = super::SeamWeld::spanning(weld_window(0.0, window), emitted, 0.0, 1.0, &pieces)
+        .expect("a nanometre residual inside the position tolerance welds");
+    assert_eq!(weld.max_acceleration(), 0.0);
+    let pieces = weld.apply(pieces);
+    let (start, start_velocity) = super::piece_run_start_pv(&pieces);
+    let (end, end_velocity) = super::piece_run_end_pv(&pieces);
+    assert!((1.0 + start - emitted.0).abs() <= 1e-15);
+    assert_eq!(start_velocity, emitted.1);
+    assert!((end - (window * 2.0 + 2e-9)).abs() <= 1e-15);
+    assert_eq!(end_velocity, 2.0);
+}
+
 fn leader_segment(
     x: nurbs::ScalarNurbs,
     y: nurbs::ScalarNurbs,
