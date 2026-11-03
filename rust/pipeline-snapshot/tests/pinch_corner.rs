@@ -12,7 +12,7 @@ use motion_pipeline::{BaseItem, Lowerer, PlannedItem, StreamConfig};
 use pipeline_snapshot::waypoints::parse_gcode;
 use pipeline_snapshot::{
     ExactTrajectory, SNAPSHOT_MAX_BUFFER_MOVES, SampleSide, TRAJECTORY_FIT_TOL_ACCEL_MM_S2,
-    TRAJECTORY_FIT_TOL_MM, VELOCITY_INTEGRATION_TOL, build_moves,
+    TRAJECTORY_FIT_TOL_MM, VELOCITY_INTEGRATION_TOL, plan_steps,
 };
 
 fn stream_case(
@@ -26,12 +26,21 @@ fn stream_case(
         env!("CARGO_MANIFEST_DIR")
     );
     let text = std::fs::read_to_string(&path).expect("read case gcode");
-    let waypoints = parse_gcode(&text, max_velocity, max_accel).expect("parse");
+    let waypoints = parse_gcode(
+        &text,
+        &pipeline_snapshot::CartesianLimits::without_z_caps(
+            max_velocity,
+            max_accel,
+            f64::INFINITY,
+            0.0,
+        ),
+    )
+    .expect("parse");
     let corner_deviation = geometry::corner_deviation_from_scv(scv, max_accel);
     let limits =
         geometry::VelocityLimits::try_new(max_velocity, max_accel, corner_deviation, f64::INFINITY)
             .expect("limits");
-    let moves = build_moves(&waypoints, limits).expect("moves");
+    let steps = plan_steps(&waypoints, limits).expect("steps");
 
     let config = StreamConfig {
         corner: geometry::CornerFitConfig::default(),
@@ -52,8 +61,8 @@ fn stream_case(
         }
         true
     };
-    for m in moves {
-        assert!(fit.feed(m.into(), &mut |item| planner.feed(item, &mut collect)));
+    for step in steps {
+        assert!(step.feed(|input| fit.feed(input, &mut |item| planner.feed(item, &mut collect))));
     }
     assert!(fit.finish(&mut |item| planner.feed(item, &mut collect)));
     assert!(planner.finish(&mut collect));

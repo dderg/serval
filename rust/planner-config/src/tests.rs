@@ -30,10 +30,8 @@ fn effective_limits_without_overrides_are_the_config_base() {
 #[test]
 fn effective_limits_runtime_caps_clamp_but_never_raise() {
     let mut cfg = PlannerConfig::default();
-    cfg.runtime_caps = RuntimeCaps {
-        velocity: Some(50.0),
-        accel: Some(10_000_000.0),
-    };
+    cfg.runtime.set_velocity_cap(Some(50.0)).unwrap();
+    cfg.runtime.set_accel_cap(Some(10_000_000.0)).unwrap();
     let (v, a, _) = cfg.effective_limits();
     assert_eq!(v, 50.0);
     assert_eq!(a, cfg.cartesian.max_accel);
@@ -42,10 +40,32 @@ fn effective_limits_runtime_caps_clamp_but_never_raise() {
 #[test]
 fn effective_limits_runtime_corner_deviation_replaces_the_base() {
     let mut cfg = PlannerConfig::default();
-    cfg.runtime_corner_deviation = Some(0.01);
+    cfg.runtime.set_corner_deviation(Some(0.01)).unwrap();
     assert_eq!(cfg.effective_limits().2, 0.01);
-    cfg.runtime_corner_deviation = None;
+    cfg.runtime.set_corner_deviation(None).unwrap();
     assert_eq!(cfg.effective_limits().2, cfg.cartesian.corner_deviation);
+}
+
+#[test]
+fn runtime_caps_refuse_non_positive_or_non_finite_values_and_keep_the_old_cap() {
+    let mut runtime = RuntimeLimits::default();
+    runtime.set_accel_cap(Some(500.0)).unwrap();
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            runtime.set_accel_cap(Some(bad)),
+            Err(RuntimeLimitError::NotPositive { name: "accel" })
+        );
+        assert_eq!(
+            runtime.set_velocity_cap(Some(bad)),
+            Err(RuntimeLimitError::NotPositive { name: "velocity" })
+        );
+    }
+    assert_eq!(runtime.accel, Some(500.0));
+    assert_eq!(
+        runtime.set_corner_deviation(Some(-0.1)),
+        Err(RuntimeLimitError::InvalidCornerDeviation)
+    );
+    runtime.set_corner_deviation(Some(0.0)).unwrap();
 }
 
 #[test]
