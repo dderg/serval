@@ -369,8 +369,6 @@ impl AnalyticMoveSpan {
         if axis == 2 && matches!(&self.surface, SurfaceMode::Variable(_)) {
             return Err(ContinuousError::VariableSurfaceBeforeDispatch);
         }
-        let (s, velocity, acceleration, jerk) = self.tangential_state(t);
-        let length = self.source.segment.s_len();
         let result = if axis < 3 {
             let segment = self
                 .source
@@ -378,16 +376,28 @@ impl AnalyticMoveSpan {
                 .spatial
                 .as_ref()
                 .ok_or(ContinuousError::AxisOutsideMove { axis })?;
-            let heading = segment.heading_at(s);
-            let dheading = segment.dheading_ds(s);
-            let d2heading = segment.d2heading_ds2(s);
-            let mut result = Pvaj {
-                position: segment.point_at(s)[axis],
-                velocity: velocity * heading[axis],
-                acceleration: acceleration * heading[axis] + velocity * velocity * dheading[axis],
-                jerk: jerk * heading[axis]
-                    + 3.0 * velocity * acceleration * dheading[axis]
-                    + velocity * velocity * velocity * d2heading[axis],
+            let mut result = match segment.held_coordinate(axis) {
+                Some(coordinate) => Pvaj {
+                    position: coordinate,
+                    velocity: 0.0,
+                    acceleration: 0.0,
+                    jerk: 0.0,
+                },
+                None => {
+                    let (s, velocity, acceleration, jerk) = self.tangential_state(t);
+                    let heading = segment.heading_at(s);
+                    let dheading = segment.dheading_ds(s);
+                    let d2heading = segment.d2heading_ds2(s);
+                    Pvaj {
+                        position: segment.point_at(s)[axis],
+                        velocity: velocity * heading[axis],
+                        acceleration: acceleration * heading[axis]
+                            + velocity * velocity * dheading[axis],
+                        jerk: jerk * heading[axis]
+                            + 3.0 * velocity * acceleration * dheading[axis]
+                            + velocity * velocity * velocity * d2heading[axis],
+                    }
+                }
             };
             if axis == 2 {
                 if let SurfaceMode::Constant(offset) = &self.surface {
@@ -398,6 +408,8 @@ impl AnalyticMoveSpan {
         } else {
             match analytic_follower(&self.source, axis) {
                 Some(follower) => {
+                    let (s, velocity, acceleration, jerk) = self.tangential_state(t);
+                    let length = self.source.segment.s_len();
                     let start = *self
                         .axis_start_positions
                         .get(follower.axis_index)
