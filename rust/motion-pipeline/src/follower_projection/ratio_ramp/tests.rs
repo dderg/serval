@@ -396,6 +396,37 @@ fn the_width_is_c2_lipschitz_and_closes_on_every_rest() {
     }
 }
 
+/// A time sample taken as the leaders settle onto a rest lands on it to
+/// within rounding: a node that closes the window exactly as the rest
+/// itself does, not a moving node that flattens it to nothing ahead of
+/// the rest.
+#[test]
+fn a_node_on_a_rest_closes_the_window_as_the_rest_does() {
+    let rest = 437.884_982_825_248_9;
+    let on_the_rest = rest - 2.0 * f64::EPSILON * rest;
+    let field = |stray: bool| {
+        let mut field = WidthField::default();
+        field.push_rest(437.0);
+        field.push(rest - 0.2244, 0.4);
+        if stray {
+            field.push(on_the_rest, 3.7e-4);
+        }
+        field.push_rest(rest);
+        field
+    };
+    let (with, without) = (field(true), field(false));
+    for distance in [1e-2, 1e-3, 1.43e-4, 1e-5] {
+        let s = rest - distance;
+        assert!(
+            with.width(s) >= 0.5 * without.width(s),
+            "{distance} mm before the rest the window is {} mm wide, the rest alone \
+             leaves it {} mm",
+            with.width(s),
+            without.width(s)
+        );
+    }
+}
+
 #[test]
 fn a_final_width_node_never_moves_again() {
     let mut field = WidthField::default();
