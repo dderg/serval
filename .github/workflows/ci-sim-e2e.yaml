@@ -43,13 +43,16 @@ jobs:
       matrix:
         include:
           - shard: probe
-            targets: tools/sim/tests/test_probe.py
+            targets: >-
+              tools/sim/tests/test_probe.py
+              tools/sim/tests/test_homing_min_dist_corexy.py
           - shard: print
             targets: >-
               tools/sim/tests/test_neptune_print.py
               tools/sim/tests/test_print.py
               tools/sim/tests/test_first_extrude.py
               tools/sim/tests/test_print_pressure.py
+              tools/sim/tests/test_beacon_stream_stall.py
           - shard: beacon
             targets: >-
               tools/sim/tests/test_beacon.py
@@ -75,6 +78,8 @@ jobs:
               --ignore=tools/sim/tests/test_stepper_enable_print_end.py
               --ignore=tools/sim/tests/test_homing_pressed_endstop.py
               --ignore=tools/sim/tests/test_homing_multi_endstop.py
+              --ignore=tools/sim/tests/test_homing_min_dist_corexy.py
+              --ignore=tools/sim/tests/test_beacon_stream_stall.py
               --ignore=tools/sim/tests/test_probe.py
               --ignore=tools/sim/tests/test_neptune_print.py
               --ignore=tools/sim/tests/test_print.py

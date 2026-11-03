@@ -62,7 +62,8 @@ impl geometry::fitter::RunFit
 pub fn geometry::fitter::RunFit::blend_head_with_line(&mut self, &geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig) -> core::result::Result<alloc::vec::Vec<geometry::frontend::Move>, geometry::fitter::FitError>
 pub fn geometry::fitter::RunFit::blend_tail_with_line(&mut self, &geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig) -> core::result::Result<alloc::vec::Vec<geometry::frontend::Move>, geometry::fitter::FitError>
 pub fn geometry::fitter::RunFit::blend_tail_with_run(&mut self, &mut geometry::fitter::RunFit, &geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig) -> core::result::Result<alloc::vec::Vec<geometry::frontend::Move>, geometry::fitter::FitError>
-pub fn geometry::fitter::RunFit::fit(&[geometry::frontend::Move], core::option::Option<&geometry::frontend::Move>, core::option::Option<&geometry::frontend::Move>, geometry::CornerFitConfig) -> core::result::Result<core::option::Option<geometry::fitter::RunFit>, geometry::fitter::FitError>
+pub fn geometry::fitter::RunFit::end_tangent(&self) -> core::option::Option<[f64; 3]>
+pub fn geometry::fitter::RunFit::fit(&[geometry::frontend::Move], core::option::Option<&geometry::frontend::Move>, core::option::Option<&geometry::frontend::Move>, core::option::Option<[f64; 3]>, geometry::CornerFitConfig) -> core::result::Result<core::option::Option<geometry::fitter::RunFit>, geometry::fitter::FitError>
 pub fn geometry::fitter::RunFit::head_boundary_trim(&self) -> f64
 pub fn geometry::fitter::RunFit::head_consumption(&self) -> f64
 pub fn geometry::fitter::RunFit::head_line_trim(&self) -> f64

@@ -474,9 +474,13 @@ fn fitted_arcs(out: &[Move]) -> Vec<&geometry::path::Arc> {
 /// the endpoint bisector amplified quantization noise by r/offset (~75µm of
 /// center drift on a 20mm half-circle at 0.2mm deviation), and near-closed
 /// loops (tiny endpoint chord) swung the center by hundreds of µm until
-/// travel-bounded ends were freed to keep the least-squares circle.
+/// travel-bounded ends were freed to keep the least-squares circle. The
+/// circle is fitted minimax against the facet chords, so through a bound end
+/// it may sit up to half the facets' sagitta off the true center, plus the
+/// vertices' quantization.
 #[test]
 fn quantized_concentric_arcs_share_a_center_at_high_corner_deviation() {
+    const QUANTIZATION_MM: f64 = 1e-3;
     for (cd, n, sweep_deg) in [
         (0.005, 200u32, 180.0),
         (0.2, 60, 180.0),
@@ -501,11 +505,14 @@ fn quantized_concentric_arcs_share_a_center_at_high_corner_deviation() {
             2,
             "n={n} cd={cd} sweep={sweep_deg}: expected both loops to fit"
         );
+        let facet_rad = sweep_deg.to_radians() / f64::from(n);
+        let sagitta = 20.5 * (1.0 - libm::cos(0.5 * facet_rad));
+        let allowed = 0.5 * sagitta + QUANTIZATION_MM;
         for a in &arcs {
             let center_err = libm::hypot(a.origin[0] - c[0], a.origin[1] - c[1]);
             assert!(
-                center_err < 1e-3,
-                "n={n} cd={cd} sweep={sweep_deg}: center drifted {center_err:.6}mm"
+                center_err < allowed,
+                "n={n} cd={cd} sweep={sweep_deg}: center drifted {center_err:.6}mm, allowed {allowed:.6}"
             );
         }
     }
