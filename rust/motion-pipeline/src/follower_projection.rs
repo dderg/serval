@@ -60,6 +60,28 @@ fn source_accel_budget(leading: Option<LeadingAdvance>) -> AccelBudget {
     }
 }
 
+/// The source fit takes half of the follower's ratio-scaled position
+/// budget. Under the absolute budget its acceleration budget scales the
+/// same way: a kernel chain's linear advance turns the plain source's
+/// velocity error `δ'` into `k·δ'` of command position, the melt lag that
+/// advance models undoes it, and `δ'` reaches the nozzle flow whole — a
+/// bead error of `δ'/(r·v)`, largest at a slow corner. Held to the
+/// leaders' acceleration budget scaled by the ratio, the source carries
+/// the leaders' relative velocity error. The position-equivalent budget
+/// spends the scaled position budget already.
+fn source_fit_tol(fit_tol: FitTol, ratio_scale: f64) -> FitTol {
+    let share = 0.5 * ratio_scale;
+    let accel_mm_s2 = match fit_tol.accel_budget {
+        AccelBudget::Absolute => fit_tol.accel_mm_s2 * share,
+        AccelBudget::PositionEquivalent => fit_tol.accel_mm_s2,
+    };
+    FitTol {
+        pos_mm: fit_tol.pos_mm * share,
+        accel_mm_s2,
+        ..fit_tol
+    }
+}
+
 /// Rebuild every projected-follower track from its leaders' *toolhead*
 /// motion: the kernel-convolved signal, before any trailing derivative-gain
 /// stage. Trailing gains shape the motor command (a mode-inverse
@@ -334,7 +356,7 @@ fn fit_source_projection(
         },
         0.0,
     );
-    let tolerance = follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis) * 0.5);
+    let tolerance = source_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis));
     let breakpoints = sig.construction_breakpoints(raw_axis, tolerance.accel_mm_s2);
     let input_state = |t| {
         let s = sig.s_owned(t);

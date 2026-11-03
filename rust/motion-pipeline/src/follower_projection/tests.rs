@@ -609,6 +609,66 @@ fn a_plain_follower_source_fit_opens_and_closes_on_the_signal_velocity() {
     }
 }
 
+const EXTRUSION_RATIO: f64 = 0.0333;
+
+/// A kernel chain's linear advance differentiates the plain source, and the
+/// melt lag that advance models undoes it: the source's velocity error
+/// reaches the bead whole, as `δ'/(r·v)` of the flow. Held to the leaders'
+/// absolute acceleration budget, a 3% ratio source near a 10 mm/s corner
+/// left a 4% bead error a 2 ms kernel's own bulge (0.9%) does not explain.
+#[test]
+fn a_plain_follower_source_holds_its_acceleration_to_the_ratio_scaled_budget() {
+    let (t0, t1) = (0.0, 0.03);
+    let shaped = ContinuousSegment {
+        followers: Arc::from([geometry::FollowerDemand::constant(3, EXTRUSION_RATIO)]),
+        ..cusp_segment(
+            vec![0.0, 100.0, -1_500.0],
+            vec![0.0, 0.0, 0.0, 2_000.0],
+            t0,
+            t1,
+        )
+    };
+    let mut state = FollowerState::default();
+    state.push_span(10.0, EXTRUSION_RATIO, EXTRUSION_RATIO);
+    let fit_tol = crate::lowering::FitTol::absolute(0.005, 50.0);
+    let fitted = super::fit_source_projection(
+        super::FollowerSource {
+            shaped: &shaped,
+            raw: &shaped,
+            axis: 3,
+            leaders: &[0, 1],
+            state: &state,
+            s_start: 0.0,
+            s_length: super::leader_arc_length(&shaped, &[0, 1]),
+        },
+        fit_tol,
+        None,
+    )
+    .unwrap();
+    let sig = FollowerSignal::new(
+        &shaped,
+        &shaped,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    let acceleration = nurbs::eval::derivative(&nurbs::eval::derivative(&fitted.track));
+    let budget = 0.5 * EXTRUSION_RATIO * fit_tol.accel_mm_s2;
+    let samples = 3_000;
+    let worst = (1..samples)
+        .map(|index| {
+            let t = t0 + (t1 - t0) * f64::from(index) / f64::from(samples);
+            (nurbs::eval::eval(&acceleration, t) - sig.eval_pva(t).2).abs()
+        })
+        .fold(0.0, f64::max);
+    assert!(
+        worst <= budget,
+        "plain source acceleration error {worst} mm/s^2 exceeds the ratio-scaled budget {budget}"
+    );
+}
+
 #[test]
 fn follower_jerk_is_the_derivative_of_its_acceleration() {
     let shaped = cusp_segment(
