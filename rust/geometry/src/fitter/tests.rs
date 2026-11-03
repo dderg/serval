@@ -1,7 +1,7 @@
 use super::*;
 use crate::frontend::{MoveContext, line_move};
 use crate::path::lowering::PositionProfile;
-use crate::path::{Arc, Clothoid, CurvatureProfile, PathSegment, Segment};
+use crate::path::{Arc, Clothoid, CurvatureProfile, Line, PathSegment, Segment};
 use crate::segment::SourceRange;
 use crate::vec3::dist;
 use std::f64::consts::{PI, SQRT_2};
@@ -894,24 +894,44 @@ fn merge_deviation_budget_covers_absorbed_vertices() {
 }
 
 /// Anchoring the circle on a near-half-turn run (endpoint chord ≈ diameter)
-/// must not amplify least-squares noise: a µm-scale perturbation of the LS
-/// center moves the anchored center by the same order, not by
-/// sqrt(2·r·noise) ≈ 100µm as the old fixed-radius intersection did.
+/// must not amplify least-squares noise: µm-scale perturbations of the LS
+/// center leave the minimax circle where the exact seed puts it. Bulging
+/// past the vertices toward the chord midpoints, it keeps the chords closer
+/// than the circle through every vertex does.
 #[test]
-fn endpoint_anchored_center_is_well_conditioned_near_a_half_turn() {
+fn endpoint_anchored_minimax_circle_is_well_conditioned_near_a_half_turn() {
     let r = 20.0;
-    let (p0, p1) = ([r, 0.0, 0.0], [-r, 0.0, 0.0]);
+    let facets = 8;
+    let vertex = |k: usize| {
+        let angle = PI * k as f64 / facets as f64;
+        [r * libm::cos(angle), r * libm::sin(angle), 0.0]
+    };
+    let moves: Vec<Move> = (0..facets)
+        .map(|k| seg(k as u32, 10_000.0, 5.0, vertex(k), vertex(k + 1), 0.0))
+        .collect();
+    let lines: Vec<&Line> = moves.iter().map(|m| line_of(m).unwrap()).collect();
+    let (p0, p1) = (vertex(0), vertex(facets));
     let plane_normal = [0.0, 0.0, 1.0];
+    let (exact_center, exact_radius) =
+        kernels::minimax_through_endpoints(&lines, (p0, p1), [0.0; 3], plane_normal).unwrap();
+    let sagitta = r * (1.0 - libm::cos(0.5 * PI / facets as f64));
+    let deviation = kernels::max_chord_dev(&lines, exact_center, exact_radius);
+    assert!(
+        deviation < sagitta,
+        "minimax chord deviation {deviation} against a {sagitta} sagitta"
+    );
     for noise in [[1e-3, 0.0, 0.0], [0.0, 1e-3, 0.0], [-7e-4, 5e-4, 0.0]] {
-        let ls_origin = [noise[0], noise[1], noise[2]];
         let (center, radius) =
-            kernels::center_through_endpoints(p0, p1, ls_origin, plane_normal).unwrap();
-        let center_err = dist(center, [0.0, 0.0, 0.0]);
+            kernels::minimax_through_endpoints(&lines, (p0, p1), noise, plane_normal).unwrap();
+        let center_err = dist(center, exact_center);
         assert!(
-            center_err <= 1.1e-3,
-            "center error {center_err} amplifies the {noise:?} LS perturbation"
+            center_err <= 1e-6,
+            "center moved {center_err} under the {noise:?} LS perturbation"
         );
-        assert!((radius - r).abs() < 1e-6, "radius drifted to {radius}");
+        assert!(
+            (radius - exact_radius).abs() < 1e-6,
+            "radius drifted to {radius}"
+        );
         assert!(
             (dist(center, p0) - dist(center, p1)).abs() < 1e-9,
             "anchored center must be equidistant from both endpoints"

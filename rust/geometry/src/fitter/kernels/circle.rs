@@ -118,24 +118,20 @@ pub(super) fn cocircular(facets: &[Move], tol: f64) -> bool {
     let Some(fit) = circle_fit(facets) else {
         return false;
     };
-    if !(fit.residual <= tol && fit.radius.is_finite() && fit.radius > BUDGET_EPS_MM) {
+    if !(fit.radius.is_finite() && fit.radius > BUDGET_EPS_MM) {
         return false;
     }
     let Some(lines) = facets.iter().map(line_of).collect::<Option<Vec<_>>>() else {
         return false;
     };
-    if max_sagitta(&lines, fit.radius) > tol {
-        return false;
-    }
-    anchored_chord_dev_within(&lines, &fit, tol)
+    endpoint_anchored_chord_dev_within(&lines, &fit, tol)
 }
 
-/// Reconstruction anchors the circle through the run's endpoints
-/// (`center_through_endpoints`), which is stricter than the free
-/// least-squares residual — and ill-conditioned when the run nearly closes
+/// Reconstruction anchors the circle through the run's endpoints, which is
+/// stricter than a free fit — and ill-conditioned when the run nearly closes
 /// on itself (tiny endpoint chord). Checking it during candidate growth
 /// keeps every sealed run reconstructable instead of dissolving later.
-fn anchored_chord_dev_within(lines: &[&Line], fit: &CircleFit, tol: f64) -> bool {
+fn endpoint_anchored_chord_dev_within(lines: &[&Line], fit: &CircleFit, tol: f64) -> bool {
     let t0 = lines[0].heading_at(0.0);
     let Some(v0) = turn_normal(t0, lines[1].heading_at(0.0)) else {
         return false;
@@ -143,26 +139,8 @@ fn anchored_chord_dev_within(lines: &[&Line], fit: &CircleFit, tol: f64) -> bool
     let plane_normal = normalize(cross(t0, v0));
     let last = lines[lines.len() - 1];
     let p1 = last.point_at(last.s_len());
-    let Some((origin, rho)) =
-        center_through_endpoints(lines[0].start, p1, fit.origin, plane_normal)
-    else {
-        return false;
-    };
-    max_chord_dev(lines, origin, rho) <= tol
-}
-
-pub(super) fn max_sagitta(lines: &[&Line], radius: f64) -> f64 {
-    lines
-        .iter()
-        .map(|l| {
-            let half = 0.5 * l.s_len();
-            if half >= radius {
-                f64::INFINITY
-            } else {
-                radius - (radius * radius - half * half).sqrt()
-            }
-        })
-        .fold(0.0, f64::max)
+    minimax_through_endpoints(lines, (lines[0].start, p1), fit.origin, plane_normal)
+        .is_some_and(|(origin, rho)| max_chord_dev(lines, origin, rho) <= tol)
 }
 
 pub(super) fn circle_fit(facets: &[Move]) -> Option<CircleFit> {
@@ -221,67 +199,20 @@ pub(super) fn fit_circle_through_vertices(
         return None;
     }
     let radius = r2.sqrt();
-    let mut residual = 0.0_f64;
-    for &(x, y) in &pts {
-        residual = residual.max((((x - cx).powi(2) + (y - cy).powi(2)).sqrt() - radius).abs());
-    }
     let origin = add(q0, add(scale(e1, cx), scale(e2, cy)));
-    Some(CircleFit {
-        origin,
-        radius,
-        residual,
-    })
+    Some(CircleFit { origin, radius })
 }
 
 pub(super) struct CircleFit {
     pub origin: [f64; 3],
     pub radius: f64,
-    pub residual: f64,
-}
-
-/// The circle through both endpoints whose center is nearest the
-/// least-squares fit: the LS center projected onto the endpoints'
-/// perpendicular bisector (within the facet plane), with the radius
-/// recomputed from the anchored center. Intersecting a fixed-radius circle
-/// pair instead would amplify LS radius noise by `r/half` — divergent when
-/// the run spans close to a half turn and the bisector offset vanishes.
-pub(in crate::fitter) fn center_through_endpoints(
-    p0: [f64; 3],
-    p1: [f64; 3],
-    ls_origin: [f64; 3],
-    plane_normal: [f64; 3],
-) -> Option<([f64; 3], f64)> {
-    let chord = sub(p1, p0);
-    if norm(chord) < BUDGET_EPS_MM {
-        return None;
-    }
-    let mid = scale(add(p0, p1), 0.5);
-    let perp = normalize(cross(plane_normal, chord));
-    let center = madd(mid, dot(sub(ls_origin, mid), perp), perp);
-    let radius = 0.5 * (norm(sub(center, p0)) + norm(sub(center, p1)));
-    Some((center, radius))
-}
-
-/// The circle of the least-squares radius anchored to pass exactly through
-/// one boundary vertex: the center slides radially from the vertex toward
-/// the LS center, moving by only the vertex's own radial error.
-pub(super) fn center_through_vertex(
-    p: [f64; 3],
-    ls_origin: [f64; 3],
-    radius: f64,
-) -> Option<([f64; 3], f64)> {
-    let toward = sub(ls_origin, p);
-    if norm(toward) < BUDGET_EPS_MM {
-        return None;
-    }
-    Some((madd(p, radius, normalize(toward)), radius))
 }
 
 /// How far the facet chords stray from the circle: a chord point's distance
 /// to it is `||p − o| − ρ|`, and `|p − o|` is convex along the chord, so the
 /// worst sits at a vertex or at the chord's foot nearest the center — the
 /// vertices' radial error and the sagitta together.
-pub(super) fn max_chord_dev(lines: &[&Line], origin: [f64; 3], radius: f64) -> f64 {
+pub(in crate::fitter) fn max_chord_dev(lines: &[&Line], origin: [f64; 3], radius: f64) -> f64 {
     lines
         .iter()
         .map(|l| {
@@ -293,4 +224,106 @@ pub(super) fn max_chord_dev(lines: &[&Line], origin: [f64; 3], radius: f64) -> f
                 .fold(0.0, f64::max)
         })
         .fold(0.0, f64::max)
+}
+
+const MINIMAX_ITERS: usize = 40;
+const INV_PHI: f64 = 0.618_033_988_749_894_8;
+
+/// The minimum of `f` over `[lo, hi]` by golden-section search, never worse
+/// than `seed`: the chord deviation of a one-parameter circle family is a
+/// maximum of near-affine terms in absolute value, so unimodal in practice,
+/// and the seed guards the cases where it is not.
+fn golden_minimum(f: impl Fn(f64) -> f64, (lo, hi): (f64, f64), seed: f64) -> f64 {
+    let (mut a, mut b) = (lo, hi);
+    let mut c = b - INV_PHI * (b - a);
+    let mut d = a + INV_PHI * (b - a);
+    let (mut fc, mut fd) = (f(c), f(d));
+    for _ in 0..MINIMAX_ITERS {
+        if fc <= fd {
+            b = d;
+            d = c;
+            fd = fc;
+            c = b - INV_PHI * (b - a);
+            fc = f(c);
+        } else {
+            a = c;
+            c = d;
+            fc = fd;
+            d = a + INV_PHI * (b - a);
+            fd = f(d);
+        }
+    }
+    let (best, f_best) = if fc <= fd { (c, fc) } else { (d, fd) };
+    if f_best <= f(seed) { best } else { seed }
+}
+
+/// The circle through both endpoints that keeps the facet chords closest.
+/// Its bulge over the endpoint chord trades the vertices' radial error
+/// against the chords' sagitta, so the minimax circle sits between the
+/// vertices and the chord midpoints instead of through the vertices.
+pub(in crate::fitter) fn minimax_through_endpoints(
+    lines: &[&Line],
+    (p0, p1): ([f64; 3], [f64; 3]),
+    seed_origin: [f64; 3],
+    plane_normal: [f64; 3],
+) -> Option<([f64; 3], f64)> {
+    let chord = sub(p1, p0);
+    if norm(chord) < BUDGET_EPS_MM {
+        return None;
+    }
+    let half = 0.5 * norm(chord);
+    let mid = scale(add(p0, p1), 0.5);
+    let perp = normalize(cross(plane_normal, chord));
+    let circle = |bulge: f64| {
+        let radius = (half * half + bulge * bulge) / (2.0 * bulge);
+        (madd(mid, radius - bulge, perp), radius)
+    };
+    let offset = dot(sub(seed_origin, mid), perp);
+    let seed = (half * half + offset * offset).sqrt() - offset;
+    if !(seed > BUDGET_EPS_MM) {
+        return None;
+    }
+    let dev = |bulge: f64| {
+        let (origin, radius) = circle(bulge);
+        max_chord_dev(lines, origin, radius)
+    };
+    let spread = 2.0 * dev(seed);
+    let bracket = ((seed - spread).max(0.5 * seed), seed + spread);
+    Some(circle(golden_minimum(dev, bracket, seed)))
+}
+
+/// The circle through one boundary vertex `p` that keeps the facet chords
+/// closest, its center on the ray from `p` through the seed center.
+pub(super) fn minimax_through_vertex(
+    lines: &[&Line],
+    p: [f64; 3],
+    seed_origin: [f64; 3],
+) -> Option<([f64; 3], f64)> {
+    let toward = sub(seed_origin, p);
+    let seed = norm(toward);
+    if seed < BUDGET_EPS_MM {
+        return None;
+    }
+    let direction = normalize(toward);
+    let dev = |radius: f64| max_chord_dev(lines, madd(p, radius, direction), radius);
+    let spread = 2.0 * dev(seed);
+    let bracket = ((seed - spread).max(0.5 * seed), seed + spread);
+    let radius = golden_minimum(dev, bracket, seed);
+    Some((madd(p, radius, direction), radius))
+}
+
+/// The radius about a fixed center that keeps the facet chords closest: the
+/// midrange of the chord points' distances to it.
+pub(super) fn minimax_radius(lines: &[&Line], origin: [f64; 3]) -> f64 {
+    let (nearest, farthest) = lines
+        .iter()
+        .flat_map(|l| {
+            let along = dot(sub(origin, l.start), l.heading_at(0.0)).clamp(0.0, l.s_len());
+            [l.start, l.point_at(l.s_len()), l.point_at(along)]
+        })
+        .map(|p| norm(sub(p, origin)))
+        .fold((f64::INFINITY, 0.0_f64), |(lo, hi), d| {
+            (lo.min(d), hi.max(d))
+        });
+    0.5 * (nearest + farthest)
 }
