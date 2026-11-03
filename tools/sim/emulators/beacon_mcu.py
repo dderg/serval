@@ -52,6 +52,7 @@ class BeaconMcuStub:
     BATCH_HZ = 200.0
     SAMPLES_PER_BATCH = 8
     BATCH_PERIOD_S = 1.0 / BATCH_HZ
+    SAMPLE_STALL_BUDGET_S = 0.2
     IDENTIFY_BLOB = IDENTIFY_BLOB
     CLOCK_FREQ = CLOCK_FREQ
     STUB_NAME = "beacon-stub"
@@ -977,6 +978,13 @@ class BeaconMcuStub:
         self._next_batch_vt = batch_vt + self.BATCH_PERIOD_S
 
     def _sample_loop(self) -> None:
+        if self._clock is None:
+            self._emit_samples(None)
+            return
+        with HarnessPacer(self._clock) as pacer:
+            self._emit_samples(pacer)
+
+    def _emit_samples(self, pacer: Optional[HarnessPacer]) -> None:
         STATUS_HZ = 10.0
         status_period = 1.0 / STATUS_HZ
 
@@ -987,6 +995,10 @@ class BeaconMcuStub:
         batch_sock = None
 
         while not self._stop.is_set() and self._stream_en:
+            if pacer is not None:
+                pacer.hold_until(
+                    self._next_batch_vt + self.SAMPLE_STALL_BUDGET_S
+                )
             now_vt = self._monotonic()
             now = time.monotonic()
             if now_vt < self._next_batch_vt and now < next_status:

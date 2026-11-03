@@ -450,6 +450,10 @@ class HarnessPacer:
     def __exit__(self, *exc):
         self._clock.release_pacer(self._slot)
 
+    def hold_until(self, vtime_s: float) -> None:
+        """Virtual time may not pass `vtime_s` until the next hold."""
+        self._clock.hold_at(self._slot, int(vtime_s * 1e9))
+
     def sleep(
         self, seconds: float, stop: Optional[threading.Event] = None
     ) -> bool:
