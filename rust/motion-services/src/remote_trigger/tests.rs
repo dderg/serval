@@ -54,3 +54,9 @@ fn zero_clock_means_host_commanded_trigger_substitute_reference() {
         reference
     );
 }
+
+#[test]
+#[should_panic(expected = "reference is stale or wrong")]
+fn a_missing_reference_clock_is_refused_not_wrapped_into_a_wrong_trip_clock() {
+    let _ = relay_trip_clock(0x8000_0000, 0);
+}

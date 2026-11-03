@@ -170,6 +170,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "checked-cast"
+version = "0.1.0"
+
+[[package]]
 name = "clap"
 version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -489,6 +493,7 @@ name = "host-rt"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "checked-cast",
  "flate2",
  "indexmap",
  "libc",
@@ -663,6 +668,7 @@ dependencies = [
 name = "motion-core"
 version = "0.1.0"
 dependencies = [
+ "checked-cast",
  "config-doc",
  "crossbeam-channel",
  "ethercat-rt",
@@ -689,6 +695,7 @@ dependencies = [
 name = "motion-engine"
 version = "0.1.0"
 dependencies = [
+ "checked-cast",
  "config-doc",
  "crossbeam-channel",
  "ethercat-rt",
@@ -732,6 +739,7 @@ name = "motion-services"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "checked-cast",
  "host-rt",
  "log",
  "mcu-protocol",
@@ -1560,6 +1568,7 @@ dependencies = [
 name = "trajectory"
 version = "0.1.0"
 dependencies = [
+ "checked-cast",
  "geometry",
  "libm",
  "nurbs",
