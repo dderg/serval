@@ -518,9 +518,14 @@ impl FitStage {
                 .map(|e| piece_of(e).expect("scan matched pieces"))
                 .collect();
             let after = piece_of(&self.decided[n_mids + 1]).expect("scan matched the anchor piece");
-            let plan =
-                plan_facet_consumption(front, &mids, after, self.corner, self.seam_in_reduction)
-                    .unwrap_or_else(|e| panic!("fit_stage: facet consumption failed: {e:?}"));
+            let plan = plan_facet_consumption(
+                front,
+                &mids,
+                after,
+                self.corner,
+                (self.seam_in_reduction, self.seam_head_trim),
+            )
+            .unwrap_or_else(|e| panic!("fit_stage: facet consumption failed: {e:?}"));
             if let Some(fc) = plan {
                 self.consume_scan_start = n_mids;
                 return Some(self.emit_consumption(fc, n_mids, out));

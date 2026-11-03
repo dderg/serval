@@ -111,6 +111,10 @@ pub enum UnblendReason {
     /// than [`CornerFitConfig::ramp_accel_budget_mm_s2`] allows in the worst
     /// case, so the corner stays sharp and the planner stops there instead.
     ExtrusionRampInfeasible,
+    /// Every blend of the corner would leave a body of the inbound line
+    /// shorter than [`shortest_line_body_mm`] behind the blend before it, so
+    /// the corner stays sharp and the line keeps its whole remaining length.
+    LineSliver,
 }
 
 #[cfg(test)]
@@ -153,7 +157,8 @@ pub enum FitError {
     /// A corner blend would leave a body of its inbound line shorter than
     /// [`shortest_line_body_mm`] behind the blend before it, and neither a
     /// blend consuming that body nor one lengthening it to the floor fits the
-    /// corner's deviation and extrusion ramp.
+    /// corner's deviation and extrusion ramp, and even a sharp corner would
+    /// leave the line less than the floor.
     LineSliver {
         line_no: u32,
         body_mm: f64,
@@ -366,7 +371,7 @@ pub fn plan_facet_consumption(
     mids: &[&Move],
     m_out: &Move,
     config: CornerFitConfig,
-    in_reduction: f64,
+    (in_reduction, head_trim): (f64, f64),
 ) -> Result<Option<FacetConsumption>, FitError> {
     let [first_mid, ..] = mids else {
         return Ok(None);
@@ -448,7 +453,15 @@ pub fn plan_facet_consumption(
     let t_ad_ab = biclothoid::trim_at_delta(theta_ab, delta).map_err(internal_err)?;
     let t_cap = (0.5 * (line_in.s_len() - in_reduction))
         .min(0.5 * line_out.s_len())
-        .min(t_ad_ab);
+        .min(t_ad_ab)
+        .min(
+            LineRoom::of(line_in.s_len(), head_trim, shortest_line_body_mm(m_in))
+                .trim_leaving_the_floor(),
+        )
+        .min(
+            LineRoom::of(line_out.s_len(), 0.0, shortest_line_body_mm(m_out))
+                .trim_leaving_the_floor(),
+        );
     let mut vertices = Vec::with_capacity(mids.len() + 1);
     vertices.push(line_in.point_at(line_in.s_len()));
     vertices.extend(facet_lines.iter().map(|l| l.end));
@@ -655,26 +668,81 @@ fn classify_junction(
             UnblendReason::ExtrusionRampInfeasible,
         ));
     }
-    let body = line_in.s_len() - head_trim - bi.trim_in;
-    let shortest_body = shortest_line_body_mm(m_in);
-    let line_is_shorter_than_the_floor = line_in.s_len() < shortest_body;
-    if body <= BUDGET_EPS_MM || body >= shortest_body || line_is_shorter_than_the_floor {
+    let inbound = LineRoom::of(line_in.s_len(), head_trim, shortest_line_body_mm(m_in));
+    let outbound = LineRoom::of(
+        line_out.s_len(),
+        out_reduction,
+        shortest_line_body_mm(m_out),
+    );
+    let trims_in = inbound.trims_leaving_no_sliver(bi.trim_in);
+    let trims_out = outbound.trims_leaving_no_sliver(bi.trim_out);
+    if trims_in == [bi.trim_in; 2] && trims_out == [bi.trim_out; 2] {
         return Ok(JunctionPlan::Blend(JunctionBlend(bi)));
     }
-    let closing = [bi.trim_in + body, bi.trim_in + body - shortest_body]
-        .into_iter()
-        .filter(|&trim_in| trim_in > BUDGET_EPS_MM)
-        .find_map(|trim_in| {
-            biclothoid::solve_line_line_trims(vertex, (t_in, t_out), (trim_in, bi.trim_out), delta)
-                .filter(|blend| admitted(blend))
+    let trim_out = trims_out[1];
+    let closing = trims_in
+        .iter()
+        .filter(|&&trim_in| trim_in > BUDGET_EPS_MM && trim_out > BUDGET_EPS_MM)
+        .find_map(|&trim_in| {
+            biclothoid::solve_line_line_trims(vertex, (t_in, t_out), (trim_in, trim_out), delta)
+                .filter(&admitted)
         });
-    closing
-        .map(|blend| JunctionPlan::Blend(JunctionBlend(blend)))
-        .ok_or(FitError::LineSliver {
-            line_no: m_in.source.start_line,
-            body_mm: body,
-            shortest_mm: shortest_body,
-        })
+    if let Some(blend) = closing {
+        return Ok(JunctionPlan::Blend(JunctionBlend(blend)));
+    }
+    if inbound.keeps_no_sliver(0.0) {
+        return Ok(JunctionPlan::Unblended(UnblendReason::LineSliver));
+    }
+    Err(FitError::LineSliver {
+        line_no: m_in.source.start_line,
+        body_mm: inbound.room,
+        shortest_mm: inbound.floor,
+    })
+}
+
+/// What of a line a corner blend may trim: the length past what its other
+/// end already gave up, and the body floor [`shortest_line_body_mm`].
+#[derive(Clone, Copy)]
+struct LineRoom {
+    length: f64,
+    room: f64,
+    floor: f64,
+}
+
+impl LineRoom {
+    fn of(length: f64, claimed_at_other_end: f64, floor: f64) -> Self {
+        Self {
+            length,
+            room: length - claimed_at_other_end,
+            floor,
+        }
+    }
+
+    /// Whether trimming `trim` leaves the line no sliver: the body is gone,
+    /// at least the floor, or the G-code line itself is shorter than the
+    /// floor and is its own geometry.
+    fn keeps_no_sliver(self, trim: f64) -> bool {
+        let body = self.room - trim;
+        body <= BUDGET_EPS_MM || body >= self.floor || self.length < self.floor
+    }
+
+    /// The longest trim leaving at least the floor, unbounded on a line
+    /// shorter than the floor.
+    fn trim_leaving_the_floor(self) -> f64 {
+        if self.length < self.floor {
+            return f64::INFINITY;
+        }
+        self.room - self.floor
+    }
+
+    /// `trim` twice where it leaves no sliver; otherwise the trim consuming
+    /// the body, then the one leaving exactly the floor.
+    fn trims_leaving_no_sliver(self, trim: f64) -> [f64; 2] {
+        if self.keeps_no_sliver(trim) {
+            return [trim; 2];
+        }
+        [self.room, self.room - self.floor]
+    }
 }
 
 fn biclothoid_followers(

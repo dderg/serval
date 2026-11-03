@@ -173,7 +173,7 @@ fn assert_g2_chain(segments: &[&Clothoid]) {
 #[test]
 fn squeezed_chamfer_is_consumed_within_tolerance() {
     let (a, mid, b) = chamfered_corner(0.05, 0.1, 0.1, 0.1);
-    let fc = plan_facet_consumption(&a, &[&mid], &b, CornerFitConfig::default(), 0.0)
+    let fc = plan_facet_consumption(&a, &[&mid], &b, CornerFitConfig::default(), (0.0, 0.0))
         .unwrap()
         .expect("squeezed chamfer must be consumed");
     assert!(fc.trim_in() > 0.0 && fc.trim_out() > 0.0);
@@ -239,7 +239,7 @@ fn wide_cluster_is_consumed_by_a_split_blend() {
     // budget-crushed to 30µm trims), so the curvature gate admits it.
     let (a, mids, b, vertices) = faceted_corner(4, 0.06, &[0.1; 4]);
     let mid_refs: Vec<&Move> = mids.iter().collect();
-    let fc = plan_facet_consumption(&a, &mid_refs, &b, CornerFitConfig::default(), 0.0)
+    let fc = plan_facet_consumption(&a, &mid_refs, &b, CornerFitConfig::default(), (0.0, 0.0))
         .unwrap()
         .expect("the split blend must rescue the wide cluster");
 
@@ -280,7 +280,8 @@ fn consumption_that_corners_harder_than_pairwise_is_rejected() {
     // consumption must stand aside.
     let (accel, scv) = (5000.0, 5.0);
     let (a, mid, b) = chamfered_corner_at(0.025, 0.1, 0.1, 0.1, accel, scv);
-    let fc = plan_facet_consumption(&a, &[&mid], &b, CornerFitConfig::default(), 0.0).unwrap();
+    let fc =
+        plan_facet_consumption(&a, &[&mid], &b, CornerFitConfig::default(), (0.0, 0.0)).unwrap();
     assert!(
         fc.is_none(),
         "a blend curvier than the pairwise alternative must not consume"
@@ -291,7 +292,7 @@ fn consumption_that_corners_harder_than_pairwise_is_rejected() {
 fn facet_cluster_is_consumed_by_one_blend() {
     let (a, mids, b, vertices) = faceted_corner(3, 0.02, &[0.1, 0.1, 0.1]);
     let mid_refs: Vec<&Move> = mids.iter().collect();
-    let fc = plan_facet_consumption(&a, &mid_refs, &b, CornerFitConfig::default(), 0.0)
+    let fc = plan_facet_consumption(&a, &mid_refs, &b, CornerFitConfig::default(), (0.0, 0.0))
         .unwrap()
         .expect("the squeezed facet cluster must be consumed");
 
@@ -326,7 +327,8 @@ fn facet_cluster_is_consumed_by_one_blend() {
 fn cluster_with_a_travel_facet_is_not_consumed() {
     let (a, mids, b, _) = faceted_corner(3, 0.02, &[0.1, 0.0, 0.1]);
     let mid_refs: Vec<&Move> = mids.iter().collect();
-    let fc = plan_facet_consumption(&a, &mid_refs, &b, CornerFitConfig::default(), 0.0).unwrap();
+    let fc =
+        plan_facet_consumption(&a, &mid_refs, &b, CornerFitConfig::default(), (0.0, 0.0)).unwrap();
     assert!(
         fc.is_none(),
         "a travel facet inside an extruding cluster stays a sharp boundary"
@@ -336,14 +338,16 @@ fn cluster_with_a_travel_facet_is_not_consumed() {
 #[test]
 fn travel_facet_between_extrusions_is_not_consumed() {
     let (a, mid, b) = chamfered_corner(0.05, 0.1, 0.0, 0.1);
-    let fc = plan_facet_consumption(&a, &[&mid], &b, CornerFitConfig::default(), 0.0).unwrap();
+    let fc =
+        plan_facet_consumption(&a, &[&mid], &b, CornerFitConfig::default(), (0.0, 0.0)).unwrap();
     assert!(fc.is_none(), "a travel gap between extrusions stays sharp");
 }
 
 #[test]
 fn extruding_facet_between_travels_is_not_consumed() {
     let (a, mid, b) = chamfered_corner(0.05, 0.0, 0.1, 0.0);
-    let fc = plan_facet_consumption(&a, &[&mid], &b, CornerFitConfig::default(), 0.0).unwrap();
+    let fc =
+        plan_facet_consumption(&a, &[&mid], &b, CornerFitConfig::default(), (0.0, 0.0)).unwrap();
     assert!(
         fc.is_none(),
         "an extruding blip between travels stays sharp"
@@ -353,7 +357,8 @@ fn extruding_facet_between_travels_is_not_consumed() {
 #[test]
 fn travel_facet_between_travels_is_consumed() {
     let (a, mid, b) = chamfered_corner(0.05, 0.0, 0.0, 0.0);
-    let fc = plan_facet_consumption(&a, &[&mid], &b, CornerFitConfig::default(), 0.0).unwrap();
+    let fc =
+        plan_facet_consumption(&a, &[&mid], &b, CornerFitConfig::default(), (0.0, 0.0)).unwrap();
     assert!(fc.is_some(), "an all-travel chamfer may be consumed");
 }
 
@@ -365,7 +370,8 @@ fn s_jog_is_not_consumed() {
     let a = seg(1, [0.0, 0.0, 0.0], v1, 0.1);
     let mid = seg(2, v1, v2, 0.1);
     let b = seg(3, v2, [20.0 + d, d, 0.0], 0.1);
-    let fc = plan_facet_consumption(&a, &[&mid], &b, CornerFitConfig::default(), 0.0).unwrap();
+    let fc =
+        plan_facet_consumption(&a, &[&mid], &b, CornerFitConfig::default(), (0.0, 0.0)).unwrap();
     assert!(
         fc.is_none(),
         "opposite-turn jog cannot be one same-sign blend"
@@ -375,7 +381,8 @@ fn s_jog_is_not_consumed() {
 #[test]
 fn roomy_facet_is_not_consumed() {
     let (a, mid, b) = chamfered_corner(5.0, 0.1, 0.1, 0.1);
-    let fc = plan_facet_consumption(&a, &[&mid], &b, CornerFitConfig::default(), 0.0).unwrap();
+    let fc =
+        plan_facet_consumption(&a, &[&mid], &b, CornerFitConfig::default(), (0.0, 0.0)).unwrap();
     assert!(
         fc.is_none(),
         "a facet with room for its own blends keeps them"

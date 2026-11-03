@@ -949,7 +949,7 @@ fn facets_of_jittered_lengths_leave_no_line_body_briefer_than_the_floor() {
     let vertex = |k: usize| {
         let jitter = if k % 3 == 1 { 2e-3 } else { 0.0 };
         let angle = 2.0 * PI * (k as f64 + jitter) / facets as f64;
-        [radius * angle.cos(), radius * angle.sin(), 0.0]
+        [radius * libm::cos(angle), radius * libm::sin(angle), 0.0]
     };
     let moves: Vec<Move> = (0..facets)
         .map(|k| seg(k as u32 + 1, accel, scv, vertex(k), vertex(k + 1), 0.0))
@@ -968,7 +968,10 @@ fn facets_of_jittered_lengths_leave_no_line_body_briefer_than_the_floor() {
     }
     for pair in out.moves.windows(2) {
         assert!(
-            dist(spatial_end(&pair[0]).unwrap(), spatial_start(&pair[1]).unwrap()) <= 1e-7,
+            dist(
+                spatial_end(&pair[0]).unwrap(),
+                spatial_start(&pair[1]).unwrap()
+            ) <= 1e-7,
             "the fit opened a gap at line {}",
             pair[1].source.start_line
         );
