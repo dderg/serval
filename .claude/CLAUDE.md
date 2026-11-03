@@ -99,6 +99,15 @@ Run it with plain `python3`, not `uv run` (uv's python breaks the pyo3 test
 binaries). Snapshot checks need the engine built first:
 `--run "make -f Makefile.rust motion-engine-fast && uv run python snapshots/run.py"`.
 
+`uv run python scripts/bench_compare.py <commitA> <commitB> [--configs fast,printer]
+[--runs 5] [--gcode PATH]` is the replay-throughput A/B: it builds
+`gcode_replay_bench` at both commits (one reusable worktree, shared target dir,
+binaries cached by commit under `~/.cache/pending-baselines/bench`), runs them
+interleaved with alternating order, and prints median wall seconds, realtime
+factor and the per-stage breakdown with the change B vs A. Use it instead of
+hand-rolled alternating runs; run it on an otherwise idle machine (the load
+average is printed).
+
 `scripts/corpus.sh [--configs fast,printer] [-k SUBSTR] [--audit]` plans the
 59-case corpus (51 snapshot cases + the four `tools/sim/gcode` prints on
 `fast.cfg` and `printer.cfg`) through the production pipeline and checks each
