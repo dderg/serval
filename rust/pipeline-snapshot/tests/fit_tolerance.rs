@@ -9,119 +9,25 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use motion_pipeline::fit_audit::{FitViolation, take_violations};
-use pipeline_snapshot::waypoints::parse_gcode;
-use pipeline_snapshot::{SnapshotParams, pipeline_snapshot};
-use planner_config::from_doc::read_motion_settings;
+mod corpus;
 
 const DENSE_SLICE_LINES: usize = 2500;
 
-fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-fn run(name: &str, gcode: &str, config: &Path) -> Vec<FitViolation> {
-    let text = std::fs::read_to_string(config).expect("read config");
-    let doc =
-        config_doc::Document::parse(&text, &config.display().to_string()).expect("config parses");
-    let (settings, _) = read_motion_settings(&doc).expect("motion settings");
-    let waypoints = parse_gcode(
-        gcode,
-        settings.cartesian.max_velocity,
-        settings.cartesian.max_accel,
-    )
-    .expect("gcode parses");
-    take_violations();
-    if waypoints.len() >= 2 {
-        pipeline_snapshot(
-            &waypoints,
-            SnapshotParams {
-                max_velocity: settings.cartesian.max_velocity,
-                max_accel: settings.cartesian.max_accel,
-                corner_deviation: settings.cartesian.corner_deviation,
-                max_jerk: settings.cartesian.max_jerk,
-                max_extrude_only_velocity: settings.max_extrude_only_velocity,
-                max_extrude_only_accel: settings.max_extrude_only_accel,
-                max_path_deviation: Some(settings.fit_tolerance_mm),
-                max_accel_deviation: Some(settings.fit_tolerance_accel_mm_s2),
-                axis_decls: settings.axes,
-                post_processor_decls: settings.post_processors,
-            },
-        )
-        .unwrap_or_else(|e| panic!("{name}: {e}"));
-    }
-    take_violations()
-}
-
-fn snapshot_cases() -> Vec<(String, String, PathBuf)> {
-    let cases_dir = repo().join("snapshots/cases");
-    let mut groups: Vec<PathBuf> = std::fs::read_dir(&cases_dir)
-        .expect("snapshot cases")
-        .map(|entry| entry.expect("case entry").path())
-        .filter(|path| path.is_dir())
-        .collect();
-    groups.sort();
-    let files = |group: &Path, extension: &str| {
-        let mut found: Vec<PathBuf> = std::fs::read_dir(group)
-            .expect("case group")
-            .map(|entry| entry.expect("case file").path())
-            .filter(|path| path.extension().is_some_and(|e| e == extension))
-            .collect();
-        found.sort();
-        found
-    };
-    let mut cases = Vec::new();
-    for group in groups {
-        let group_name = group
-            .file_name()
-            .expect("group name")
-            .to_string_lossy()
-            .to_string();
-        for config in files(&group, "cfg") {
-            for gcode in files(&group, "gcode") {
-                let text = std::fs::read_to_string(&gcode).expect("read gcode");
-                if text.trim().is_empty() {
-                    continue;
-                }
-                let stem = |path: &Path| {
-                    path.file_stem()
-                        .expect("stem")
-                        .to_string_lossy()
-                        .to_string()
-                };
-                cases.push((
-                    format!("{group_name}/{}/{}", stem(&config), stem(&gcode)),
-                    text,
-                    config.clone(),
-                ));
-            }
-        }
-    }
-    cases
-}
-
 fn dense_cases() -> Vec<(String, String, PathBuf)> {
-    let print =
-        std::fs::read_to_string(repo().join("tools/sim/gcode/voron_dense_top_layers.gcode"))
-            .expect("read dense print");
-    let slice: String = print
-        .lines()
-        .take(DENSE_SLICE_LINES)
-        .flat_map(|line| [line, "\n"])
-        .collect();
-    ["tools/bench/configs/fast.cfg", "tools/bench/printer.cfg"]
+    corpus::sim_cases(Some(DENSE_SLICE_LINES))
         .into_iter()
-        .map(|config| {
-            (
-                format!("dense_top_layers/{config}"),
-                slice.clone(),
-                repo().join(config),
-            )
-        })
+        .filter(|(name, _, _)| name.starts_with("voron_dense_top_layers/"))
         .collect()
 }
 
+fn run(name: &str, gcode: &str, config: &Path) -> Vec<FitViolation> {
+    take_violations();
+    corpus::plan(name, gcode, config);
+    take_violations()
+}
+
 fn audited_violations() -> Vec<(String, FitViolation)> {
-    snapshot_cases()
+    corpus::snapshot_cases()
         .into_iter()
         .chain(dense_cases())
         .flat_map(|(name, gcode, config)| {
