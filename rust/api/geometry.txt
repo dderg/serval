@@ -21,6 +21,10 @@ pub enum geometry::fitter::FitError
 pub geometry::fitter::FitError::Internal
 pub geometry::fitter::FitError::Internal::line_no: u32
 pub geometry::fitter::FitError::Internal::source: geometry::error::GeometryError
+pub geometry::fitter::FitError::LineSliver
+pub geometry::fitter::FitError::LineSliver::body_mm: f64
+pub geometry::fitter::FitError::LineSliver::line_no: u32
+pub geometry::fitter::FitError::LineSliver::shortest_mm: f64
 pub geometry::fitter::FitError::OverTrimmedLine
 pub geometry::fitter::FitError::OverTrimmedLine::excess_mm: f64
 pub geometry::fitter::FitError::OverTrimmedLine::line_no: u32
@@ -32,6 +36,7 @@ pub geometry::fitter::UnblendReason::ArcIncident
 pub geometry::fitter::UnblendReason::Collinear
 pub geometry::fitter::UnblendReason::ExtrusionRampInfeasible
 pub geometry::fitter::UnblendReason::ExtrusionStep
+pub geometry::fitter::UnblendReason::LineSliver
 pub geometry::fitter::UnblendReason::NearReversal
 pub geometry::fitter::UnblendReason::NoBudget
 pub geometry::fitter::UnblendReason::NonSpatial
@@ -71,8 +76,8 @@ pub fn geometry::fitter::consumption_moves(&geometry::fitter::FacetConsumption, 
 pub fn geometry::fitter::facet_consumption_candidate(&geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig, f64) -> bool
 pub fn geometry::fitter::is_travel(&geometry::frontend::Move) -> bool
 pub fn geometry::fitter::merge_collinear_lines(&geometry::frontend::Move, &geometry::frontend::Move, &[[f64; 3]], geometry::CornerFitConfig) -> core::option::Option<geometry::frontend::Move>
-pub fn geometry::fitter::plan_facet_consumption(&geometry::frontend::Move, &[&geometry::frontend::Move], &geometry::frontend::Move, geometry::CornerFitConfig, f64) -> core::result::Result<core::option::Option<geometry::fitter::FacetConsumption>, geometry::fitter::FitError>
-pub fn geometry::fitter::plan_junction_reduced(&geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig, f64, f64) -> core::result::Result<geometry::fitter::JunctionPlan, geometry::fitter::FitError>
+pub fn geometry::fitter::plan_facet_consumption(&geometry::frontend::Move, &[&geometry::frontend::Move], &geometry::frontend::Move, geometry::CornerFitConfig, (f64, f64)) -> core::result::Result<core::option::Option<geometry::fitter::FacetConsumption>, geometry::fitter::FitError>
+pub fn geometry::fitter::plan_junction_reduced(&geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig, (f64, f64), f64) -> core::result::Result<geometry::fitter::JunctionPlan, geometry::fitter::FitError>
 pub fn geometry::fitter::seam_requires_stop(&geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig) -> bool
 pub fn geometry::fitter::spatial_end(&geometry::frontend::Move) -> core::option::Option<[f64; 3]>
 pub fn geometry::fitter::spatial_start(&geometry::frontend::Move) -> core::option::Option<[f64; 3]>
@@ -621,6 +626,10 @@ pub enum geometry::FitError
 pub geometry::FitError::Internal
 pub geometry::FitError::Internal::line_no: u32
 pub geometry::FitError::Internal::source: geometry::error::GeometryError
+pub geometry::FitError::LineSliver
+pub geometry::FitError::LineSliver::body_mm: f64
+pub geometry::FitError::LineSliver::line_no: u32
+pub geometry::FitError::LineSliver::shortest_mm: f64
 pub geometry::FitError::OverTrimmedLine
 pub geometry::FitError::OverTrimmedLine::excess_mm: f64
 pub geometry::FitError::OverTrimmedLine::line_no: u32
@@ -693,6 +702,7 @@ pub geometry::UnblendReason::ArcIncident
 pub geometry::UnblendReason::Collinear
 pub geometry::UnblendReason::ExtrusionRampInfeasible
 pub geometry::UnblendReason::ExtrusionStep
+pub geometry::UnblendReason::LineSliver
 pub geometry::UnblendReason::NearReversal
 pub geometry::UnblendReason::NoBudget
 pub geometry::UnblendReason::NonSpatial
@@ -903,6 +913,7 @@ pub geometry::VelocityReport::limit_ride: u32
 pub geometry::VelocityReport::stops: u32
 pub geometry::VelocityReport::traversal_time_s: f64
 pub const geometry::CORNER_DEVIATION_SCV_FACTOR: f64
+pub const geometry::MIN_DEVICE_INTERVAL_S: f64
 pub trait geometry::FanOut
 pub fn geometry::FanOut::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
 impl geometry::velocity::FanOut for geometry::velocity::Serial
