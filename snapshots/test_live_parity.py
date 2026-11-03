@@ -5,7 +5,8 @@ and to ``_motion_engine.parse_gcode``, then compares the moves move for move:
 displacement, feedrate and the effective (velocity, accel, corner_deviation)
 the planner runs each under, plus every stop at rest between two moves and
 the time the toolhead holds there. Everything up to the first move with
-displacement is the snapshot's anchor and stays out of the comparison, as do
+displacement, or a SET_KINEMATIC_POSITION before it, is the snapshot's anchor
+and stays out of the comparison, as do
 rests after the last move: they leave the planned trajectory unchanged. Rest
 durations agree to 1e-12 s; the live host derives a hold from absolute print
 times, so it carries their rounding.
@@ -40,11 +41,14 @@ def live_steps(gcode: str, cfg: Path) -> list[tuple]:
     anchor = next(
         i
         for i, step in enumerate(steps)
-        if isinstance(step, live_replay.LiveMove) and any(step.delta[:3])
+        if isinstance(step, live_replay.LivePosition)
+        or (isinstance(step, live_replay.LiveMove) and any(step.delta[:3]))
     )
     compared = []
     rest_s = None
     for step in steps[anchor + 1 :]:
+        if isinstance(step, live_replay.LivePosition):
+            continue
         if isinstance(step, live_replay.LiveRest):
             rest_s = (rest_s or 0.0) + step.dwell_s
             continue
@@ -390,3 +394,18 @@ def test_commands_the_snapshot_cannot_plan_are_refused_by_name(engine, command):
     name = command.split()[0]
     refusal = snapshot_refusal(engine, f"G1 X10 Y10 F6000\n{command}\nG1 X20\n")
     assert f"line 2: {name}:" in refusal
+
+
+def test_set_kinematic_position_before_any_move_is_where_both_start(engine):
+    steps = assert_parity(
+        engine,
+        "SET_KINEMATIC_POSITION X=5 Y=5 Z=0\n"
+        "G92 E0\n"
+        "M83\n"
+        "G1 X10 Y5 E1 F3000\n"
+        "G1 Y20\n",
+    )
+    assert [delta[:2] for _, delta, _, _ in moves(steps)] == [
+        (5.0, 0.0),
+        (0.0, 15.0),
+    ]

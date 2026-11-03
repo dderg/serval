@@ -252,8 +252,9 @@ const DISABLE_STALL_TIME_S: f64 = 0.1;
 /// klippy's `Motion` as the snapshot sees it: the commanded position, the
 /// runtime limit overrides in force, which axes are homed, and `Motion.move`
 /// turning a target and a speed into the move it submits. The snapshot
-/// starts at the first move that names a position — the anchor — so a stop
-/// at rest before it is already where the plan begins.
+/// starts at the anchor — the first position the G-code states: a
+/// `SET_KINEMATIC_POSITION` or the first move that names a coordinate — so a
+/// stop at rest before it is already where the plan begins.
 struct Toolhead<'a> {
     config: &'a CartesianLimits,
     runtime: RuntimeLimits,
@@ -280,7 +281,13 @@ impl Toolhead<'_> {
 
     /// `ForceMove.cmd_SET_KINEMATIC_POSITION`: wait for the moves, rename
     /// the toolhead position and home every axis but the cleared ones.
-    fn set_kinematic_position(&mut self, args: &ExtendedArgs<'_>) -> Result<(), WaypointError> {
+    /// Before the anchor it states where the toolhead is, so it anchors the
+    /// plan there.
+    fn set_kinematic_position(
+        &mut self,
+        args: &ExtendedArgs<'_>,
+        speed: f64,
+    ) -> Result<Option<Waypoint>, WaypointError> {
         self.rest(0.0);
         let mut renamed = self.commanded;
         for (axis, key) in ["X", "Y", "Z"].into_iter().enumerate() {
@@ -297,12 +304,27 @@ impl Toolhead<'_> {
                 to: [renamed[0], renamed[1], renamed[2]],
             });
         }
-        self.commanded = renamed;
         let clear = args.raw("CLEAR").unwrap_or("").to_ascii_uppercase();
         for (axis, name) in ['X', 'Y', 'Z'].into_iter().enumerate() {
             self.homed[axis] = !clear.contains(name);
         }
-        Ok(())
+        if self.anchored {
+            self.commanded = renamed;
+            return Ok(None);
+        }
+        Ok(Some(self.anchor(renamed, speed)))
+    }
+
+    fn anchor(&mut self, position: [f64; 4], speed: f64) -> Waypoint {
+        self.anchored = true;
+        self.commanded = position;
+        self.rest_s = None;
+        Waypoint {
+            position,
+            feedrate: speed,
+            runtime: self.runtime,
+            dwell_before_s: None,
+        }
     }
 
     /// `Motion.move(newpos, speed)`: `Move` caps a kinematic move at the
@@ -347,15 +369,7 @@ impl Toolhead<'_> {
                 self.commanded = end;
                 return Ok(None);
             }
-            self.anchored = true;
-            self.commanded = target;
-            self.rest_s = None;
-            return Ok(Some(Waypoint {
-                position: target,
-                feedrate: speed,
-                runtime: self.runtime,
-                dwell_before_s: None,
-            }));
+            return Ok(Some(self.anchor(target, speed)));
         }
         if move_d == 0.0 {
             return Ok(None);
@@ -702,7 +716,10 @@ impl Interpreter<'_> {
                 None
             }
             "SET_KINEMATIC_POSITION" => {
-                self.toolhead.set_kinematic_position(&args)?;
+                let anchor = self
+                    .toolhead
+                    .set_kinematic_position(&args, self.gcode_move.state.speed)?;
+                self.waypoints.extend(anchor);
                 self.gcode_move.state.last_position = self.toolhead.commanded;
                 None
             }

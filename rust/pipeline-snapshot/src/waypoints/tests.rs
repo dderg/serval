@@ -168,11 +168,23 @@ fn commands_the_snapshot_cannot_plan_are_refused_by_name() {
         ("G1 X10 F6000\nG10\n", "G10"),
         ("G1 X10 F6000\nG11\n", "G11"),
         ("G1 X10 F6000\nG28 X\n", "G28"),
-        ("G1 X10 F6000\nSET_PRESSURE_ADVANCE ADVANCE=0.02\n", "SET_PRESSURE_ADVANCE"),
-        ("G1 X10 F6000\nSET_POST_PROCESSOR NAME=pa K=1\n", "SET_POST_PROCESSOR"),
-        ("G1 X10 F6000\nBED_MESH_PROFILE LOAD=default\n", "BED_MESH_PROFILE"),
+        (
+            "G1 X10 F6000\nSET_PRESSURE_ADVANCE ADVANCE=0.02\n",
+            "SET_PRESSURE_ADVANCE",
+        ),
+        (
+            "G1 X10 F6000\nSET_POST_PROCESSOR NAME=pa K=1\n",
+            "SET_POST_PROCESSOR",
+        ),
+        (
+            "G1 X10 F6000\nBED_MESH_PROFILE LOAD=default\n",
+            "BED_MESH_PROFILE",
+        ),
         ("G1 X10 F6000\nBED_MESH_CALIBRATE\n", "BED_MESH_CALIBRATE"),
-        ("G1 X10 F6000\nFORCE_MOVE STEPPER=x DISTANCE=5 VELOCITY=5\n", "FORCE_MOVE"),
+        (
+            "G1 X10 F6000\nFORCE_MOVE STEPPER=x DISTANCE=5 VELOCITY=5\n",
+            "FORCE_MOVE",
+        ),
         ("G1 X10 F6000\nEXCLUDE_OBJECT NAME=a\n", "EXCLUDE_OBJECT"),
         ("G1 X10 F6000\nM109 S210\n", "M109"),
     ] {
@@ -351,10 +363,15 @@ fn motors_off_unhomes_until_set_kinematic_position() {
 }
 
 #[test]
-fn set_kinematic_position_names_the_start_before_the_anchor() {
-    let wp = parse("SET_KINEMATIC_POSITION X=5\nG91\nG1 X10 F6000\nG1 X1\n");
-    assert_eq!(wp[0].position[0], 15.0);
-    assert_eq!(wp[1].position[0], 16.0);
+fn set_kinematic_position_before_any_move_anchors_the_plan_there() {
+    let wp = parse("G4 P100\nSET_KINEMATIC_POSITION X=5 Y=2\nG91\nG1 X10 F6000\nG1 X1\n");
+    assert_eq!(
+        wp.iter()
+            .map(|w| w.position[..2].to_vec())
+            .collect::<Vec<_>>(),
+        [[5.0, 2.0], [15.0, 2.0], [16.0, 2.0]]
+    );
+    assert_eq!(rests(&wp), [None, None, None]);
 }
 
 #[test]
