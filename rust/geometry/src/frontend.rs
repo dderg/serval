@@ -69,6 +69,14 @@ pub struct ExtruderCaps {
     /// the advance: an unshaped followed axis steps the shaped path's
     /// acceleration, and the advance turns each step into one.
     pub instantaneous_corner_velocity_mm_s: f64,
+    /// The longest a ratio ramp spreads a ratio step over, 0 where the
+    /// follower lays its ratios unramped: a ramp's half-width is at most
+    /// half the path the leaders cover in it.
+    pub ratio_ramp_time_s: f64,
+    /// How far either side of an instant the kernels of the leaders the
+    /// follower rides reach: the shaped path there averages the planned
+    /// path within it.
+    pub leader_kernel_reach_s: f64,
 }
 
 impl ExtruderCaps {
@@ -103,6 +111,8 @@ impl ExtruderCaps {
             instantaneous_corner_velocity_mm_s: a
                 .instantaneous_corner_velocity_mm_s
                 .min(b.instantaneous_corner_velocity_mm_s),
+            ratio_ramp_time_s: a.ratio_ramp_time_s.max(b.ratio_ramp_time_s),
+            leader_kernel_reach_s: a.leader_kernel_reach_s.max(b.leader_kernel_reach_s),
         })
     }
 
@@ -129,6 +139,15 @@ impl ExtruderCaps {
             .any(|gain| !(*gain >= 0.0))
         {
             return Err("jerk gains must be non-negative");
+        }
+        if ![self.ratio_ramp_time_s, self.leader_kernel_reach_s]
+            .iter()
+            .all(|time| time.is_finite() && *time >= 0.0)
+        {
+            return Err(
+                "the ratio ramp time and the leaders' kernel reach must be finite and \
+                        non-negative",
+            );
         }
         Ok(())
     }

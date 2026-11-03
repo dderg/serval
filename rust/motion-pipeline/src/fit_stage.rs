@@ -232,7 +232,14 @@ impl FitStage {
             }
             let head = (idx > 0).then(|| &self.decided[idx - 1]).and_then(piece_of);
             let tail = self.decided.get(idx + 1).and_then(piece_of);
-            let fit = RunFit::fit(&re.facets, head, tail, self.corner)
+            let head_arc_tangent =
+                (idx > 0)
+                    .then(|| &self.decided[idx - 1])
+                    .and_then(|prev| match prev {
+                        Element::Run(prev) => prev.fit.as_ref().and_then(RunFit::end_tangent),
+                        Element::Piece(_) => None,
+                    });
+            let fit = RunFit::fit(&re.facets, head, tail, head_arc_tangent, self.corner)
                 .unwrap_or_else(|e| panic!("fit_stage: run reconstruction failed: {e:?}"));
             let head = head.cloned();
             match fit {
@@ -378,7 +385,7 @@ impl FitStage {
                             match self.consumable_cluster(eof) {
                                 ClusterScan::WaitForInput => return true,
                                 ClusterScan::Anchor(max_mids) => {
-                                    match self.try_consumption(max_mids, out) {
+                                    match self.try_consumption(max_mids, eof, out) {
                                         Some(false) => return false,
                                         Some(true) => continue,
                                         None => {}
@@ -387,15 +394,10 @@ impl FitStage {
                                 ClusterScan::NoAnchor => {}
                             }
                         }
-                        let out_reduction = match self.decided.get(2) {
-                            None if !eof => return true,
-                            None | Some(Element::Piece(_)) => 0.0,
-                            Some(Element::Run(after)) => match &after.fit {
-                                None => return true,
-                                Some(fit) => fit.head_line_trim(),
-                            },
+                        let Some(out_claims) = self.tail_claims(1, eof) else {
+                            return true;
                         };
-                        if !self.emit_pairwise(out_reduction, out) {
+                        if !self.emit_pairwise(out_claims, out) {
                             return false;
                         }
                     }
@@ -412,9 +414,28 @@ impl FitStage {
         }
     }
 
+    /// What the element after `decided[idx]` takes from that piece's tail —
+    /// a run's easing, then easing plus boundary blend — or `None` until
+    /// that element and its reconstruction are known.
+    fn tail_claims(&self, idx: usize, eof: bool) -> Option<(f64, f64)> {
+        match self.decided.get(idx + 1) {
+            None if !eof => None,
+            None | Some(Element::Piece(_)) => Some((0.0, 0.0)),
+            Some(Element::Run(after)) => after
+                .fit
+                .as_ref()
+                .map(|fit| (fit.head_line_trim(), fit.head_boundary_trim())),
+        }
+    }
+
     /// Emit the front piece's body and its exit-junction blend against the
     /// piece after it, carrying the blend trim to that piece's head.
-    fn emit_pairwise(&mut self, out_reduction: f64, out: &mut TravelAligningSender<'_>) -> bool {
+    /// `out_claims` is that piece's [`Self::tail_claims`].
+    fn emit_pairwise(
+        &mut self,
+        out_claims: (f64, f64),
+        out: &mut TravelAligningSender<'_>,
+    ) -> bool {
         let (Some(m), Some(next)) = (piece_of(&self.decided[0]), piece_of(&self.decided[1])) else {
             unreachable!("caller matched two front pieces")
         };
@@ -423,7 +444,7 @@ impl FitStage {
             next,
             self.corner,
             (self.seam_in_reduction, self.seam_head_trim),
-            out_reduction,
+            out_claims,
         )
         .unwrap_or_else(|e| panic!("fit_stage: junction plan failed: {e:?}"));
         let (trim_end, next_head_trim, blend) = match plan {
@@ -468,14 +489,19 @@ impl FitStage {
     /// before it, and report the first piece that isn't as the far anchor.
     /// When the chain runs into a run or end-of-stream instead of an anchor
     /// piece, the last facet itself can still anchor a shorter consumption.
+    /// The anchor is reported only once its tail claims are known.
     fn consumable_cluster(&self, eof: bool) -> ClusterScan {
+        let anchored = |max_mids: usize| match self.tail_claims(max_mids + 1, eof) {
+            Some(_) => ClusterScan::Anchor(max_mids),
+            None => ClusterScan::WaitForInput,
+        };
         let mut n = 1;
         loop {
             match self.decided.get(n + 1) {
                 None if !eof => return ClusterScan::WaitForInput,
                 None | Some(Element::Run(_)) => {
                     return if n >= 2 {
-                        ClusterScan::Anchor(n - 1)
+                        anchored(n - 1)
                     } else {
                         ClusterScan::NoAnchor
                     };
@@ -485,7 +511,7 @@ impl FitStage {
                     if n == MAX_CONSUMED_FACETS
                         || !facet_consumption_candidate(prev, next, self.corner, 0.0)
                     {
-                        return ClusterScan::Anchor(n);
+                        return anchored(n);
                     }
                     n += 1;
                 }
@@ -506,6 +532,7 @@ impl FitStage {
     fn try_consumption(
         &mut self,
         max_mids: usize,
+        eof: bool,
         out: &mut TravelAligningSender<'_>,
     ) -> Option<bool> {
         let start_mids = max_mids
@@ -518,12 +545,16 @@ impl FitStage {
                 .map(|e| piece_of(e).expect("scan matched pieces"))
                 .collect();
             let after = piece_of(&self.decided[n_mids + 1]).expect("scan matched the anchor piece");
+            let (_, after_tail_trim) = self
+                .tail_claims(n_mids + 1, eof)
+                .expect("the cluster scan waited for the anchor's tail claims");
             let plan = plan_facet_consumption(
                 front,
                 &mids,
                 after,
                 self.corner,
                 (self.seam_in_reduction, self.seam_head_trim),
+                after_tail_trim,
             )
             .unwrap_or_else(|e| panic!("fit_stage: facet consumption failed: {e:?}"));
             if let Some(fc) = plan {

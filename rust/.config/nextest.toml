@@ -31,6 +31,13 @@ status-level = "slow"
 period = "60s"
 terminate-after = 3
 
+# The fit audit replays a whole dense print per test (~65 s on an idle
+# runner, over 180 s on a loaded workstation, where the default limit killed
+# the kernel-chain test in `ci.sh quick`).
+[[profile.ci.overrides]]
+filter = "binary(fit_tolerance)"
+slow-timeout = { period = "60s", terminate-after = 10 }
+
 # Nightly property suites run ten times the PR case count and exceed the ci
 # profile's 180 s limit (seven to nine of them timed out on every nightly run
 # so far). Only a test running for half an hour is terminated.

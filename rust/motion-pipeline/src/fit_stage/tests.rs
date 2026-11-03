@@ -474,9 +474,13 @@ fn fitted_arcs(out: &[Move]) -> Vec<&geometry::path::Arc> {
 /// the endpoint bisector amplified quantization noise by r/offset (~75µm of
 /// center drift on a 20mm half-circle at 0.2mm deviation), and near-closed
 /// loops (tiny endpoint chord) swung the center by hundreds of µm until
-/// travel-bounded ends were freed to keep the least-squares circle.
+/// travel-bounded ends were freed to keep the least-squares circle. The
+/// circle is fitted minimax against the facet chords, so through a bound end
+/// it may sit up to half the facets' sagitta off the true center, plus the
+/// vertices' quantization.
 #[test]
 fn quantized_concentric_arcs_share_a_center_at_high_corner_deviation() {
+    const QUANTIZATION_MM: f64 = 1e-3;
     for (cd, n, sweep_deg) in [
         (0.005, 200u32, 180.0),
         (0.2, 60, 180.0),
@@ -501,11 +505,14 @@ fn quantized_concentric_arcs_share_a_center_at_high_corner_deviation() {
             2,
             "n={n} cd={cd} sweep={sweep_deg}: expected both loops to fit"
         );
+        let facet_rad = sweep_deg.to_radians() / f64::from(n);
+        let sagitta = 20.5 * (1.0 - libm::cos(0.5 * facet_rad));
+        let allowed = 0.5 * sagitta + QUANTIZATION_MM;
         for a in &arcs {
             let center_err = libm::hypot(a.origin[0] - c[0], a.origin[1] - c[1]);
             assert!(
-                center_err < 1e-3,
-                "n={n} cd={cd} sweep={sweep_deg}: center drifted {center_err:.6}mm"
+                center_err < allowed,
+                "n={n} cd={cd} sweep={sweep_deg}: center drifted {center_err:.6}mm, allowed {allowed:.6}"
             );
         }
     }
@@ -591,4 +598,163 @@ fn shallow_arc_ease_never_wraps_into_a_full_circle() {
             );
         }
     }
+}
+
+const LINE_FEED_MM_S: f64 = 80.0;
+const LINE_BODY_FLOOR_MM: f64 = LINE_FEED_MM_S * 1e-5;
+const RATIO: f64 = 0.05;
+
+fn ratio_line(line_no: u32, start: [f64; 3], end: [f64; 3]) -> Move {
+    let len = libm::hypot(end[0] - start[0], end[1] - start[1]);
+    line(line_no, start, end, RATIO * len)
+}
+
+fn heading_step(p: [f64; 3], heading_deg: f64, len: f64) -> [f64; 3] {
+    let h = heading_deg.to_radians();
+    [p[0] + len * libm::cos(h), p[1] + len * libm::sin(h), 0.0]
+}
+
+/// Facets of a counter-clockwise arc leaving `start` along `heading_deg`.
+fn arc_leaving(first_line_no: u32, start: [f64; 3], heading_deg: f64, r: f64, n: u32) -> Vec<Move> {
+    let a0 = heading_deg.to_radians() - std::f64::consts::FRAC_PI_2;
+    let c = [start[0] - r * libm::cos(a0), start[1] - r * libm::sin(a0)];
+    let mut prev = start;
+    (1..=n)
+        .map(|i| {
+            let a = a0 + 0.5 * std::f64::consts::PI * f64::from(i) / f64::from(n);
+            let end = [c[0] + r * libm::cos(a), c[1] + r * libm::sin(a), 0.0];
+            let m = ratio_line(first_line_no + i - 1, prev, end);
+            prev = end;
+            m
+        })
+        .collect()
+}
+
+fn arc_end_heading_deg(heading_deg: f64) -> f64 {
+    heading_deg + 90.0
+}
+
+/// Every emitted line body is gone, at least the line-body floor, or cut
+/// from a G-code line itself shorter than the floor.
+fn line_bodies_below_the_floor(input: &[Move], output: &[Move]) -> Vec<(u32, f64)> {
+    output
+        .iter()
+        .filter_map(|m| {
+            let Some(geometry::path::Segment::Line(body)) = &m.segment.spatial else {
+                return None;
+            };
+            let source = input
+                .iter()
+                .find(|i| i.source.start_line == m.source.start_line)
+                .expect("every emitted line has a source line");
+            let source_len = source.segment.s_len();
+            let body_len = body.length();
+            (source_len >= LINE_BODY_FLOOR_MM
+                && body_len > 1e-9
+                && body_len < LINE_BODY_FLOOR_MM - 1e-9)
+                .then_some((m.source.start_line, body_len))
+        })
+        .collect()
+}
+
+fn line_then_short_line_then_arc(short_len: f64, turn_in_deg: f64, turn_out_deg: f64) -> Vec<Move> {
+    let p0 = [0.0, 0.0, 0.0];
+    let p1 = [10.0, 0.0, 0.0];
+    let p2 = heading_step(p1, turn_in_deg, short_len);
+    let mut moves = vec![ratio_line(1, p0, p1), ratio_line(2, p1, p2)];
+    moves.extend(arc_leaving(3, p2, turn_in_deg + turn_out_deg, 5.0, 24));
+    moves
+}
+
+fn arc_then_short_line_then_arc(short_len: f64, turn_in_deg: f64, turn_out_deg: f64) -> Vec<Move> {
+    let start = [0.0, 0.0, 0.0];
+    let mut moves = arc_leaving(1, start, 0.0, 5.0, 24);
+    let p = geometry::fitter::spatial_end(moves.last().unwrap()).unwrap();
+    let heading = arc_end_heading_deg(0.0) + turn_in_deg;
+    let q = heading_step(p, heading, short_len);
+    moves.push(ratio_line(25, p, q));
+    moves.extend(arc_leaving(26, q, heading + turn_out_deg, 5.0, 24));
+    moves
+}
+
+fn short_lengths() -> impl Iterator<Item = f64> {
+    (0..=80).map(|i| 1e-3 * libm::pow(10.0, f64::from(i) / 40.0 - 0.5))
+}
+
+#[test]
+fn no_line_body_before_an_arc_run_falls_below_the_floor() {
+    let mut slivers = Vec::new();
+    for short_len in short_lengths() {
+        for turn_in in [15.0, 40.0, 75.0] {
+            for turn_out in [15.0, 40.0, 75.0] {
+                let input = line_then_short_line_then_arc(short_len, turn_in, turn_out);
+                let output = run_fit_stage(&input, CornerFitConfig::default());
+                for sliver in line_bodies_below_the_floor(&input, &output) {
+                    slivers.push((short_len, turn_in, turn_out, sliver));
+                }
+            }
+        }
+    }
+    assert!(
+        slivers.is_empty(),
+        "sub-floor bodies (len, in, out, (line, body)): {slivers:?}"
+    );
+}
+
+#[test]
+fn no_short_straight_between_two_arc_runs_falls_below_the_floor() {
+    let mut slivers = Vec::new();
+    for short_len in short_lengths() {
+        for turn_in in [-40.0, -15.0, 15.0, 40.0] {
+            for turn_out in [-40.0, -15.0, 15.0, 40.0] {
+                let input = arc_then_short_line_then_arc(short_len, turn_in, turn_out);
+                let output = run_fit_stage(&input, CornerFitConfig::default());
+                for sliver in line_bodies_below_the_floor(&input, &output) {
+                    slivers.push((short_len, turn_in, turn_out, sliver));
+                }
+            }
+        }
+    }
+    assert!(
+        slivers.is_empty(),
+        "sub-floor bodies (len, in, out, (line, body)): {slivers:?}"
+    );
+}
+
+fn line_then_facet_then_short_line_then_arc(
+    facet_len: f64,
+    short_len: f64,
+    (turn_facet, turn_in, turn_out): (f64, f64, f64),
+) -> Vec<Move> {
+    let p0 = [0.0, 0.0, 0.0];
+    let p1 = [10.0, 0.0, 0.0];
+    let p2 = heading_step(p1, turn_facet, facet_len);
+    let p3 = heading_step(p2, turn_facet + turn_in, short_len);
+    let mut moves = vec![
+        ratio_line(1, p0, p1),
+        ratio_line(2, p1, p2),
+        ratio_line(3, p2, p3),
+    ];
+    moves.extend(arc_leaving(4, p3, turn_facet + turn_in + turn_out, 5.0, 24));
+    moves
+}
+
+#[test]
+fn no_line_body_between_a_consumed_facet_and_an_arc_run_falls_below_the_floor() {
+    let mut slivers = Vec::new();
+    for short_len in short_lengths() {
+        for facet_len in [0.002, 0.005, 0.01] {
+            for turns in [(10.0, 10.0, 40.0), (20.0, 20.0, 75.0), (15.0, 30.0, 15.0)] {
+                let input = line_then_facet_then_short_line_then_arc(facet_len, short_len, turns);
+                let output = run_fit_stage(&input, CornerFitConfig::default());
+                for sliver in line_bodies_below_the_floor(&input, &output) {
+                    slivers.push((short_len, facet_len, turns, sliver));
+                }
+            }
+        }
+    }
+    assert!(
+        slivers.is_empty(),
+        "sub-floor bodies (len, facet, turns, (line, body)): {slivers:?}"
+    );
 }

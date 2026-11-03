@@ -103,6 +103,8 @@ Reference is offline `_motion_engine.pipeline_snapshot_axis_samples`; needs loca
 ## Recovery
 
 - F401: hard reset via NRST from the Pi always works. `uhubctl` does NOT power-cycle it (Pi 5 port power stays on).
+- NRST (Pi GPIO23) is an input with the Pi's pull-up whenever openocd does not hold it: `gpio=23=ip,pu` in the Pi's `/boot/firmware/config.txt` covers boot, and `-pull-up` on the srst line in `openocd-target.cfg` restores the bias when openocd releases the line (without it the release leaves the pin unbiased). Check with `ssh bench-pi pinctrl get 23` → `ip pu | hi`.
+- A pin-only reset (`runtime.mcu_reset` cause bits `0x04000000`, PINRSTF without SFTRSTF/IWDGRSTF) comes from openocd srst (or the board's reset button): `deploy.py reset-target`/`flash-target`, which `suite.py` also runs on its own after any failed row (the row then carries `recovered_with_reset_target`). `FIRMWARE_RESTART` shows `0x14000000` (PINRSTF + SFTRSTF).
 - F407: if its firmware ever disables the SWD pins, set BOOT0=1 and press reset (manual).
 - Config validation forbids PA13/PA14 (SWD) and PA8 (reserved for clock output).
 

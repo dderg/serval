@@ -6,7 +6,7 @@ use crate::path::lowering::PositionProfile;
 use crate::path::{Arc, Clothoid, CurvatureProfile, Line};
 use crate::segment::FollowerDemand;
 
-use super::super::biclothoid::piece_dev_from_chain;
+use super::super::biclothoid::{DEV_SAMPLES_PER_PIECE, piece_dev_from_chain};
 use super::super::vec3::{add, cross, dot, madd, norm, normalize, scale, signed_angle, sub};
 use super::super::{BUDGET_EPS_MM, FitError, internal, line_claim_cap, line_of};
 use super::Reconstruction;
@@ -300,8 +300,11 @@ impl EaseFit {
         [&self.head, &self.tail]
             .into_iter()
             .flatten()
-            .map(|s| piece_dev_from_chain(&s.clo, &chain))
-            .fold(piece_dev_from_chain(&self.arc, &chain), f64::max)
+            .map(|s| piece_dev_from_chain(&s.clo, &chain, DEV_SAMPLES_PER_PIECE))
+            .fold(
+                piece_dev_from_chain(&self.arc, &chain, DEV_SAMPLES_PER_PIECE * chain.len()),
+                f64::max,
+            )
     }
 }
 

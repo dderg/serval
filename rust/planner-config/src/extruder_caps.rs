@@ -53,6 +53,7 @@ pub fn extruder_caps(
             path_jerk_per_accel_hz[leader] =
                 jerk_per_accel(chains.chains[leader].kernel().map(|k| k.peak_abs()));
         }
+        let (leaders_back, leaders_forward) = chains.leaders_support(*axis);
         caps.push(ExtruderCaps {
             axis_index: *axis,
             max_velocity_mm_s: decl.max_velocity.unwrap_or(f64::INFINITY),
@@ -62,6 +63,8 @@ pub fn extruder_caps(
             path_jerk_per_accel_hz,
             own_jerk_per_accel_hz: jerk_per_accel(chain.kernel().map(|k| k.peak_abs())),
             instantaneous_corner_velocity_mm_s: chain.instantaneous_corner_velocity(),
+            ratio_ramp_time_s: chain.ratio_ramp_time().unwrap_or(0.0),
+            leader_kernel_reach_s: leaders_forward.max(-leaders_back),
         });
     }
     Ok(caps)
