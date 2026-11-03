@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import resource
 import statistics
 import subprocess
 import sys
@@ -63,6 +64,7 @@ def median_run(runs: list[dict]) -> dict:
     names = sorted({name for run in runs for name in run["stages"]})
     return {
         "wall_s": statistics.median(r["wall_s"] for r in runs),
+        "cpu_s": statistics.median(r["cpu_s"] for r in runs),
         "x": statistics.median(r["x"] for r in runs),
         "stages": {
             name: statistics.median(r["stages"].get(name, 0.0) for r in runs)
@@ -82,6 +84,7 @@ def comparison_table(
         f"\n{config}: median of {{runs}}; wall spread A {spread[0]:.1f}%, B {spread[1]:.1f}%",
         f"  {'':<30}{'A':>10}{'B':>10}{'B vs A':>10}",
         f"  {'wall s':<30}{a['wall_s']:>10.2f}{b['wall_s']:>10.2f}{percent(b['wall_s'], a['wall_s']):>10}",
+        f"  {'cpu s (user+sys, steadier)':<30}{a['cpu_s']:>10.3f}{b['cpu_s']:>10.3f}{percent(b['cpu_s'], a['cpu_s']):>10}",
         f"  {'realtime x':<30}{a['x']:>10.2f}{b['x']:>10.2f}{percent(b['x'], a['x']):>10}",
     ]
     names = sorted(
@@ -139,6 +142,7 @@ def checkout_and_build(sha: str) -> Path:
 
 
 def replay(binary: Path, gcode: Path, config: Path, env: dict) -> dict:
+    before = resource.getrusage(resource.RUSAGE_CHILDREN)
     result = subprocess.run(
         [str(binary), str(gcode), "--config", str(config)],
         capture_output=True,
@@ -146,11 +150,16 @@ def replay(binary: Path, gcode: Path, config: Path, env: dict) -> dict:
         env={**os.environ, **env},
         cwd=WORKTREE,
     )
+    after = resource.getrusage(resource.RUSAGE_CHILDREN)
     if result.returncode != 0:
         raise BenchCompareError(
             f"{binary.parent.name} failed ({result.returncode}): {result.stderr[-800:]}"
         )
-    return parse_run(result.stdout)
+    run = parse_run(result.stdout)
+    run["cpu_s"] = (after.ru_utime - before.ru_utime) + (
+        after.ru_stime - before.ru_stime
+    )
+    return run
 
 
 def main() -> int:

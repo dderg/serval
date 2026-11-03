@@ -1,3 +1,5 @@
+use super::law::{LawSegment, ScalarLaw};
+
 /// A curvature (or boundary) speed limit this close to the flat ceiling is
 /// the fitter's own blend sizing — it solves the corner radius so the apex
 /// speed lands *at* the feedrate, to float tolerance. Taking the raw `min`
@@ -51,36 +53,51 @@ pub(super) fn limit_speed(kappa_abs: f64, accel: f64) -> f64 {
     }
 }
 
+/// A member's disk reach and, when the member is curved, the rail it was read
+/// off: the member profile reuses that rail instead of integrating it again.
+pub(super) struct DiskReach {
+    pub v: f64,
+    pub rail: Option<LawSegment>,
+}
+
 /// Forward disk reach through the member: the exact rail law integrated over
 /// the arc, capped by the feed ceiling. One integrator serves the seam plan
 /// and the member profiles, so their reaches agree to the float.
-pub(super) fn disk_reach_v(kin: &Kinematics, v_in: f64, s: f64, _tol: f64) -> Option<f64> {
+pub(super) fn disk_reach_v(kin: &Kinematics, v_in: f64, s: f64, _tol: f64) -> Option<DiskReach> {
     let v_in = v_in.min(kin.flat_ceiling);
     if kin.is_straight() {
         let w = v_in * v_in + 2.0 * kin.accel * s;
-        return Some(w.max(0.0).sqrt().min(kin.flat_ceiling));
+        return Some(DiskReach {
+            v: w.max(0.0).sqrt().min(kin.flat_ceiling),
+            rail: None,
+        });
     }
-    let law = super::law::ScalarLaw::DiskRail {
+    let law = ScalarLaw::DiskRail {
         accel: kin.accel,
         kappa0: kin.kappa0,
         sigma: kin.sigma,
         brake: false,
     };
     let end_cap = limit_speed(kin.kappa_abs(s), kin.accel);
-    Some(
-        super::law::LawSegment::reach_over(law, v_in, s)?
-            .min(kin.flat_ceiling)
-            .min(end_cap),
-    )
+    let rail = LawSegment::until_arc(0.0, 0.0, v_in, law, s)?;
+    Some(DiskReach {
+        v: rail.rail_end_speed().min(kin.flat_ceiling).min(end_cap),
+        rail: Some(rail),
+    })
 }
 
-pub(super) fn disk_reach_v_rev(kin: &Kinematics, v_in: f64, s: f64, tol: f64) -> Option<f64> {
+pub(super) fn disk_reach_v_rev(kin: &Kinematics, v_in: f64, s: f64, tol: f64) -> Option<DiskReach> {
     disk_reach_v(&kin.reversed(), v_in, s, tol)
 }
 
+/// A member's planned exit speed, with the seam plan's forward rail from its
+/// entry and reversed rail from its exit for the profile to reuse when it
+/// integrates from the same speeds.
 pub(super) struct RunMember<'a> {
     pub kin: &'a Kinematics,
     pub exit_v: f64,
+    pub forward_rail: Option<&'a LawSegment>,
+    pub backward_rail: Option<&'a LawSegment>,
 }
 
 #[cfg(test)]
