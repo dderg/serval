@@ -105,6 +105,7 @@ def run_row(row: Row, suite_dir: Path, lock_timeout_s: float) -> dict:
         result["run_dir"] = str(run_dirs[-1])
     if run.returncode != 0:
         result["error"] = f"run.py: {last_lines(run.stderr)}"
+        result["recovered_with_reset_target"] = True
         recovery = python("deploy.py", "reset-target", timeout_s=600)
         if recovery.returncode != 0:
             result["error"] += f"; reset-target: {last_lines(recovery.stderr)}"
