@@ -8,6 +8,7 @@ description = "PyO3-free engine services: servo calls, background endpoint calls
 license.workspace = true
 
 [dependencies]
+checked-cast = { path = "../checked-cast" }
 host-rt = { path = "../host-rt" }
 mcu-protocol = { path = "../mcu-protocol" }
 runtime-contract = { path = "../runtime-contract" }

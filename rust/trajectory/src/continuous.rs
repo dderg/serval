@@ -177,6 +177,8 @@ pub enum ContinuousError {
     },
     #[error("invalid continuous span: {reason}")]
     InvalidSpan { reason: &'static str },
+    #[error("{what} ({value}) is not representable")]
+    NotRepresentable { what: &'static str, value: f64 },
     #[error("analytic phase gap from {previous_end} to {next_start}")]
     PhaseGap { previous_end: f64, next_start: f64 },
     #[error("analytic phase overlap from {next_start} to {previous_end}")]
@@ -1276,7 +1278,13 @@ impl ClockedMotorSpan {
     /// piece instead.
     pub fn split_max_duration(&self) -> Result<Vec<Self>, ContinuousError> {
         let duration = self.stream_t_end - self.stream_t_start;
-        let grid_cuts = (duration / MAX_SPAN_SECS).ceil() as u32;
+        let grid_cuts =
+            checked_cast::f64_to_u32((duration / MAX_SPAN_SECS).ceil()).map_err(|e| {
+                ContinuousError::NotRepresentable {
+                    what: "the span's grid cut count",
+                    value: e.value,
+                }
+            })?;
         let mut cuts: Vec<f64> = (1..grid_cuts)
             .map(|index| f64::from(index) * MAX_SPAN_SECS)
             .take_while(|&offset| self.stream_t_start + offset < self.stream_t_end)

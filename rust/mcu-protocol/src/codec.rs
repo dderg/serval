@@ -188,6 +188,22 @@ pub fn get_f32(c: &mut Cursor<'_>) -> Result<f32, DecodeError> {
     Ok(f32::from_le_bytes([s[0], s[1], s[2], s[3]]))
 }
 
+pub fn put_len_u8(out: &mut Vec<u8>, len: usize, what: &str) {
+    let prefix = u8::try_from(len)
+        .unwrap_or_else(|_| panic!("{what}: {len} elements exceed the u8 count prefix (max 255)"));
+    put_u8(out, prefix);
+}
+
+pub fn put_len_u32(out: &mut Vec<u8>, len: usize, what: &str) {
+    let prefix = u32::try_from(len)
+        .unwrap_or_else(|_| panic!("{what}: {len} elements exceed the u32 count prefix"));
+    put_u32(out, prefix);
+}
+
+pub(crate) fn claimed_len(count: usize) -> u32 {
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
 pub fn put_str(out: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
     assert!(

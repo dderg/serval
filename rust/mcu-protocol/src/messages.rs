@@ -4,8 +4,9 @@
 //! plus the protocol constants that are not part of any one message.
 
 use crate::codec::{
-    Cursor, Decode, DecodeError, Encode, get_f32, get_i16, get_i32, get_str, get_u8, get_u16,
-    get_u32, get_u64, put_f32, put_i16, put_i32, put_str, put_u8, put_u16, put_u32, put_u64,
+    Cursor, Decode, DecodeError, Encode, claimed_len, get_f32, get_i16, get_i32, get_str, get_u8,
+    get_u16, get_u32, get_u64, put_f32, put_i16, put_i32, put_len_u8, put_len_u32, put_str, put_u8,
+    put_u16, put_u32, put_u64,
 };
 
 mod generated;
@@ -175,7 +176,7 @@ impl Encode for PushSampleRunsResponse {
         put_u64(out, self.arrival_clock);
         put_u64(out, self.grid_index);
         put_u64(out, self.grid_clock);
-        put_u8(out, self.lanes.len() as u8);
+        put_len_u8(out, self.lanes.len(), "PushSampleRunsResponse.lanes");
         for lane in &self.lanes {
             put_u8(out, lane.axis_idx);
             put_u32(out, lane.free_cycles);
@@ -242,7 +243,7 @@ impl Encode for StartCapture {
     fn encode(&self, out: &mut Vec<u8>) {
         put_str(out, &self.path);
         put_str(out, &self.started_utc);
-        put_u8(out, self.drives.len() as u8);
+        put_len_u8(out, self.drives.len(), "StartCapture.drives");
         for d in &self.drives {
             put_u8(out, d.slot);
             put_str(out, &d.name);
@@ -301,8 +302,11 @@ impl Encode for StatusHeartbeat {
             self.playback_clocks.len(),
             "StatusHeartbeat carries one retired count and one playback clock per axis"
         );
-        let num_axes = self.retired_counts.len() as u8;
-        put_u8(out, num_axes);
+        put_len_u8(
+            out,
+            self.retired_counts.len(),
+            "StatusHeartbeat.retired_counts",
+        );
         for &count in &self.retired_counts {
             put_u32(out, count);
         }
@@ -385,7 +389,7 @@ pub struct MotorStateResponse {
 
 impl Encode for MotorStateResponse {
     fn encode(&self, out: &mut Vec<u8>) {
-        put_u8(out, self.motors.len() as u8);
+        put_len_u8(out, self.motors.len(), "MotorStateResponse.motors");
         for m in &self.motors {
             put_u8(out, m.slot);
             put_i32(out, m.pos_q16);
@@ -439,7 +443,7 @@ pub struct SetDriveLimits {
 
 impl Encode for SetDriveLimits {
     fn encode(&self, out: &mut Vec<u8>) {
-        put_u8(out, self.drives.len() as u8);
+        put_len_u8(out, self.drives.len(), "SetDriveLimits.drives");
         for d in &self.drives {
             put_u8(out, d.slot);
             put_u32(out, d.following_error_counts);
@@ -499,7 +503,7 @@ impl Encode for SetStrainComp {
         put_f32(out, self.y0);
         put_f32(out, self.dx);
         put_f32(out, self.dy);
-        put_u32(out, self.values_um.len() as u32);
+        put_len_u32(out, self.values_um.len(), "SetStrainComp.values_um");
         for v in &self.values_um {
             put_i32(out, *v);
         }
@@ -604,7 +608,7 @@ impl Encode for SetDynamicsModel {
         }
         put_f32(out, self.pin_lead_us);
         assert!(u8::try_from(self.pairs.len()).is_ok());
-        put_u8(out, self.pairs.len() as u8);
+        put_len_u8(out, self.pairs.len(), "SetDynamicsModel.pairs");
         for pair in &self.pairs {
             put_u8(out, pair.first);
             put_u8(out, pair.second);
@@ -617,12 +621,12 @@ fn get_f32_vec(c: &mut Cursor<'_>, count: usize) -> Result<Vec<f32>, DecodeError
     let need = count
         .checked_mul(4)
         .ok_or(DecodeError::ArrayLengthExceedsBuffer {
-            claimed: count as u32,
+            claimed: claimed_len(count),
             available: c.remaining(),
         })?;
     if need > c.remaining() {
         return Err(DecodeError::ArrayLengthExceedsBuffer {
-            claimed: count as u32,
+            claimed: claimed_len(count),
             available: c.remaining(),
         });
     }
@@ -705,7 +709,11 @@ pub struct ClaimHandshakeReply {
 
 impl Encode for ClaimHandshakeReply {
     fn encode(&self, out: &mut Vec<u8>) {
-        put_u8(out, self.slave_statuses.len() as u8);
+        put_len_u8(
+            out,
+            self.slave_statuses.len(),
+            "ClaimHandshakeReply.slave_statuses",
+        );
         for s in &self.slave_statuses {
             put_u8(out, s.slave_idx);
             put_u8(out, s.state as u8);

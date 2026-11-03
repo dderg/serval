@@ -1145,4 +1145,32 @@ mod stepcompress_reconcile_tests {
             );
         }
     }
+
+    #[test]
+    #[should_panic(expected = "mm_to_steps(NaN mm")]
+    fn mm_to_steps_refuses_nan_instead_of_reading_it_as_zero() {
+        let lane = StepcompressLane {
+            mcu_id: MCU_ID,
+            axis: 0,
+            motor: 0,
+            oid: 11,
+            microstep_distance: MICROSTEP,
+            invert_dir: false,
+        };
+        let _ = lane.mm_to_steps(f64::NAN);
+    }
+
+    #[test]
+    #[should_panic(expected = "is not representable as i64")]
+    fn mm_to_steps_refuses_a_position_past_the_step_counter() {
+        let lane = StepcompressLane {
+            mcu_id: MCU_ID,
+            axis: 0,
+            motor: 0,
+            oid: 11,
+            microstep_distance: MICROSTEP,
+            invert_dir: false,
+        };
+        let _ = lane.mm_to_steps(1.0e300);
+    }
 }
