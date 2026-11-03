@@ -65,3 +65,28 @@ fn a_kernel_after_a_ratio_ramp_commits_only_what_its_window_finds_projected() {
         &dense_print_head("G1 X0 Y0 Z0 F60000\n", 50),
     );
 }
+
+fn zigzag_into_a_stop(speed_mm_s: f64) -> String {
+    let ratio = 0.4 * 0.2 / (std::f64::consts::PI * 0.875 * 0.875);
+    let rise = 2.0 / std::f64::consts::SQRT_2;
+    let mut points = vec![(30.0, 0.0)];
+    for turn in 0..=20 {
+        let (x, _) = points[points.len() - 1];
+        points.push((x + rise, if turn % 2 == 0 { rise } else { 0.0 }));
+    }
+    let (x, y) = points[points.len() - 1];
+    points.push((x + 30.0, y));
+    let mut gcode = format!("G90\nM83\nG1 X0 Y0 F{:.0}\n", speed_mm_s * 60.0);
+    let mut from = (0.0, 0.0);
+    for to in points {
+        let length = f64::hypot(to.0 - from.0, to.1 - from.1);
+        gcode += &format!("G1 X{:.5} Y{:.5} E{:.6}\n", to.0, to.1, ratio * length);
+        from = to;
+    }
+    gcode
+}
+
+#[test]
+fn a_ratio_ramp_waits_for_how_far_a_stop_ahead_may_release_the_advance() {
+    replays_to_the_end("p4_trident_ramp_slow.cfg", &zigzag_into_a_stop(100.0));
+}

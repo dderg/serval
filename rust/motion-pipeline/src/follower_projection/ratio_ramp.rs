@@ -538,11 +538,14 @@ impl RatioSmoothing {
         });
     }
 
-    /// The queued segments no node or seam still to come can reach into, in
-    /// order.
+    /// The queued segments no node, seam or valley still to come can reach
+    /// into, in order.
     pub(super) fn take_final(&mut self, spans: &[RatioSpan]) -> Vec<PendingSegment> {
         let table_end = spans.last().map_or(self.floor, |last| last.s1);
-        let final_through = self.final_through(table_end).max(self.floor);
+        let final_through = self
+            .final_through(table_end)
+            .min(table_end - self.unlaid_valley_reach(table_end))
+            .max(self.floor);
         let ready = self
             .backlog
             .iter()
@@ -552,6 +555,18 @@ impl RatioSmoothing {
             })
             .count();
         self.backlog.drain(..ready).collect()
+    }
+
+    /// How far back from the table's end a valley the next leg may open
+    /// there reaches: a rest or a turnaround releases the advance over the
+    /// leaders' reach at that seam, which is no further than the reach of
+    /// the crossing the last leg closed on.
+    fn unlaid_valley_reach(&self, table_end: f64) -> f64 {
+        self.reach_into_next.map_or(0.0, |closing| {
+            closing
+                .reach(WIDTH_NODES_PER_RAMP_TIME * self.width.spacing)
+                .min(table_end - self.floor)
+        })
     }
 
     /// How far the smoothed ratio is final: its width there is, and every
