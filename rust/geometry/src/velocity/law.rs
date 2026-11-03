@@ -621,6 +621,25 @@ impl LawSegment {
             .expect("a DiskRail segment always carries its dense solution")
     }
 
+    /// Hands a rail built by [`Self::until_arc`] back to this thread's spare
+    /// knot buffers when nothing else shares its knots, so the next
+    /// full-length rail integrated here writes into memory already mapped
+    /// rather than faulting in a fresh mebibyte.
+    pub(crate) fn recycle(self) {
+        let Some(Ok(mut knots)) = self.dense.into_inner().map(Arc::try_unwrap) else {
+            return;
+        };
+        if knots.capacity() < FULL_RAIL_KNOTS {
+            return;
+        }
+        knots.clear();
+        SPARE_FULL_RAILS.with_borrow_mut(|spare| {
+            if spare.len() < SPARE_FULL_RAILS_MAX {
+                spare.push(knots);
+            }
+        });
+    }
+
     fn pair_slopes(&self, lo: &RailKnot, hi: &RailKnot, h: f64) -> [f64; 4] {
         let a_lo = self.law.accel_at(lo.s, lo.v);
         let a_hi = self.law.accel_at(hi.s, hi.v);
@@ -704,6 +723,29 @@ fn hermite(p0: f64, m0: f64, p1: f64, m1: f64, u: f64) -> f64 {
 /// Target dense-knot spacing along the arc, in millimetres.
 const RAIL_KNOT_DS: f64 = 2.5e-4;
 
+/// Knots of a rail the knot-count clamp caps: one mebibyte each.
+const FULL_RAIL_KNOTS: usize = RAIL_KNOTS_MAX + 1;
+
+/// Full-length knot buffers kept per thread for reuse; bounds what a thread
+/// holds between plans to 64 MiB.
+const SPARE_FULL_RAILS_MAX: usize = 64;
+
+thread_local! {
+    static SPARE_FULL_RAILS: std::cell::RefCell<Vec<Vec<RailKnot>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// An empty knot vector with room for `len` knots, reusing a recycled
+/// full-length buffer when one is spare.
+fn knot_buffer(len: usize) -> Vec<RailKnot> {
+    let spare = if len == FULL_RAIL_KNOTS {
+        SPARE_FULL_RAILS.with_borrow_mut(Vec::pop)
+    } else {
+        None
+    };
+    spare.unwrap_or_else(|| Vec::with_capacity(len))
+}
+
 /// Dense arc-uniform solution of the rail ODE `d(v²)/ds = 2·a(s, v)` from
 /// `(0, v0)` over `ds`. Each knot pair's duration is the one under which the
 /// quintic state interpolant [`LawSegment::state_at`] reads between them
@@ -736,7 +778,7 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<Vec<RailK
         let u = k as f64 / n as f64;
         if apex_start { ds * u * u } else { ds * u }
     };
-    let mut knots = Vec::with_capacity(n + 1);
+    let mut knots = knot_buffer(n + 1);
     let mut w = v0 * v0;
     let mut t = 0.0_f64;
     knots.push(RailKnot {

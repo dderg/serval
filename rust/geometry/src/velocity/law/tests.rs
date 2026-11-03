@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use super::{
-    CAP_CONTACT_FRACTION, LawSegment, RAIL_KNOT_DS, RAIL_KNOTS_MAX, RAIL_KNOTS_MIN, RailKnot,
-    ScalarLaw, knot_duration,
+    CAP_CONTACT_FRACTION, FULL_RAIL_KNOTS, LawSegment, RAIL_KNOT_DS, RAIL_KNOTS_MAX,
+    RAIL_KNOTS_MIN, RailKnot, SPARE_FULL_RAILS, ScalarLaw, knot_duration,
 };
 
 fn rail(v0: f64, accel: f64, kappa0: f64, sigma: f64, brake: bool, ds: f64) -> LawSegment {
@@ -380,6 +380,42 @@ fn memoized_steps_of_constant_curvature_rails_change_no_knot() {
             }
         }
     }
+}
+
+fn knot_bits(seg: &LawSegment) -> Vec<[u64; 4]> {
+    seg.rail_knots()
+        .iter()
+        .map(|k| {
+            [
+                k.t.to_bits(),
+                k.s.to_bits(),
+                k.v.to_bits(),
+                k.rise.to_bits(),
+            ]
+        })
+        .collect()
+}
+
+#[test]
+fn recycled_full_rail_buffers_carry_nothing_into_the_next_rail() {
+    let spare = || SPARE_FULL_RAILS.with_borrow(Vec::len);
+    let ds = 1.5 * RAIL_KNOTS_MAX as f64 * RAIL_KNOT_DS;
+    let first = rail(30.0, 5000.0, 0.05, 0.3, false, ds);
+    assert_eq!(first.rail_knots().len(), FULL_RAIL_KNOTS);
+    let first_bits = knot_bits(&first);
+    let shared = first.clone();
+    first.recycle();
+    assert_eq!(spare(), 0, "a rail still shared is not recycled");
+    assert_eq!(knot_bits(&shared), first_bits);
+    shared.recycle();
+    assert_eq!(spare(), 1);
+
+    let second = rail(120.0, 20_000.0, 1.25, 0.0, false, ds);
+    assert_eq!(spare(), 0, "the next full rail reuses the spare buffer");
+    let fresh = std::thread::spawn(move || knot_bits(&rail(120.0, 20_000.0, 1.25, 0.0, false, ds)))
+        .join()
+        .unwrap();
+    assert_eq!(knot_bits(&second), fresh);
 }
 
 /// Steps of the quadratically graded grid near an apex whose `s + h` lands
