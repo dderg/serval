@@ -6,19 +6,10 @@ pub(crate) use crate::knot::find_knot_span;
 
 #[inline]
 pub(crate) fn de_boor_inner(cps: &[f64], knots: &[f64], degree: u8, u: f64) -> f64 {
-    assert!(
-        (degree as usize) <= MAX_DEGREE,
-        "degree {degree} exceeds the evaluator workspace (max {MAX_DEGREE})"
-    );
     let p = degree as usize;
     let n = cps.len();
     let k = find_knot_span(knots, p, n, u);
 
-    assert!(
-        k >= p && k < n,
-        "find_knot_span invariant: k {k} not in [{p}, {}]",
-        n - 1
-    );
     assert!(
         knots.len() == n + p + 1,
         "{} knots for {n} control points of degree {p}",
@@ -56,11 +47,6 @@ pub fn eval(curve: &crate::ScalarNurbs, u: f64) -> f64 {
 
 #[inline]
 pub fn vector_eval<const N: usize>(curve: &crate::VectorNurbs<N>, u: f64) -> [f64; N] {
-    assert!(
-        (curve.degree() as usize) <= MAX_DEGREE,
-        "degree {} exceeds the evaluator workspace (max {MAX_DEGREE})",
-        curve.degree()
-    );
     let p = curve.degree() as usize;
     let knots = curve.knots();
     let cps = curve.control_points();
@@ -69,11 +55,6 @@ pub fn vector_eval<const N: usize>(curve: &crate::VectorNurbs<N>, u: f64) -> [f6
 
     let mut d_axes: [[f64; WORKSPACE_SIZE]; N] = [[0.0; WORKSPACE_SIZE]; N];
 
-    assert!(
-        k >= p && k < n,
-        "find_knot_span invariant: k {k} not in [{p}, {}]",
-        n - 1
-    );
     assert!(
         knots.len() == n + p + 1,
         "{} knots for {n} control points of degree {p}",
