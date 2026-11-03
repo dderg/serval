@@ -295,9 +295,9 @@ x/y shapers at 191 and 129.4 Hz and z unshaped.
 | bench | kernel st 0.01 | 24.1% | 2,611 | 13,966 | 179 |
 | bench | kernel st 0.02 | 71.9% | 1,612 | 3,990 | 142 |
 | bench | kernel st 0.04 | 181% | 923 | 1,247 | 78 |
-| bench | ramp τ 0.01 | 0.0% | 25,984 | 17,957 | 50 |
-| bench | ramp τ 0.015 | 0.0% | 19,629 | 7,982 | 50 |
-| bench | ramp τ 0.03 | 0.1% | 13,768 | 2,364 | 50 |
+| bench | ramp τ 0.01 | 0.1% | 4,081 | 17,957 | 50 |
+| bench | ramp τ 0.015 | 0.1% | 3,956 | 7,982 | 50 |
+| bench | ramp τ 0.03 | 0.1% | 3,956 | 2,433 | 50 |
 | bench | hybrid τ 0.015 + st 0.001 | 1.6% | 5,420 | 7,588 | 198 |
 | bench | hybrid τ 0.015 + st 0.002 | 1.4% | 4,305 | 7,207 | 196 |
 | bench | hybrid τ 0.015 + st 0.003 | 2.9% | 3,960 | 6,839 | 194 |
@@ -305,8 +305,8 @@ x/y shapers at 191 and 129.4 Hz and z unshaped.
 | Trident | kernel st 0.002 | 13.2% | 46,580 | 209,537 | 145 |
 | Trident | kernel st 0.005 | 59.4% | 25,796 | 35,921 | 138 |
 | Trident | kernel st 0.013 | 192% | 7,757 | 6,837 | 123 |
-| Trident | ramp τ 0.015 | 0.1% | 64,576 | 41,369 | 54 |
-| Trident | ramp τ 0.03 | 0.6% | 64,576 | 41,369 | 50 |
+| Trident | ramp τ 0.015 | 0.1% | 64,615 | 41,293 | 53 |
+| Trident | ramp τ 0.03 | 0.2% | 64,615 | 41,293 | 50 |
 | Trident | hybrid τ 0.015 + st 0.001 | 3.6% | 57,418 | 38,993 | 148 |
 | Trident | hybrid τ 0.015 + st 0.002 | 13.2% | 46,688 | 33,150 | 145 |
 
@@ -314,13 +314,12 @@ x/y shapers at 191 and 129.4 Hz and z unshaped.
   extruder acceleration along every family; pick the least error the
   extruder can follow. A hybrid kernel shorter than 0.002 s gains nothing
   on the bench config.
-- **On the bench config the hybrid τ 0.015 + st 0.002 meets ±2%** (1.4%)
-  at 4,300 mm/s² on corners and 7,200 mm/s² on travel, where the bare
-  0.002 s kernel spikes to 309,000. Its retracts peak at 196 mm/s against
-  the 50 mm/s extrude-only cap: a linear advance next to a kernel is
-  applied after the kernel, retracts included, exactly as on a kernel
-  chain. The ramp alone keeps retracts at the cap and lays corners to
-  0.0%, for 19,600 mm/s² at the corners.
+- **On the bench config the ramp alone lays corners to 0.1%** at 3,960
+  mm/s² on corners and 8,000 mm/s² on travel at τ 0.015, and keeps
+  retracts at the 50 mm/s extrude-only cap. The hybrid τ 0.015 + st 0.002
+  (1.4%, 4,300 mm/s²) peaks its retracts at 196 mm/s: a linear advance next
+  to a kernel is applied after the kernel, retracts included, exactly as on
+  a kernel chain. The bare 0.002 s kernel spikes to 309,000 on travel.
 - **On a high-acceleration machine (Trident, 70000 mm/s²) only the ramp
   alone reaches ±2%**, at about 65,000 mm/s² of extruder acceleration: the
   exact advance asks that much at every corner for any τ from 0.015 s up.

@@ -1458,7 +1458,7 @@ fn a_piece_leaving_rest_is_made_monotone_whatever_its_offset() {
             .map(|step| super::polynomial_pva(&piece.coeffs, h * step as f64 / 64.0).1)
             .fold(f64::INFINITY, f64::min);
         assert!(
-            lowest_velocity >= -tol.accel_mm_s2 * crate::shaper::MIN_DEVICE_INTERVAL_S,
+            lowest_velocity >= -tol.accel_mm_s2 * geometry::MIN_DEVICE_INTERVAL_S,
             "at offset {offset} the piece leaving rest still retracts at {lowest_velocity} mm/s"
         );
         piece.coeffs[1..].to_vec()
@@ -1643,8 +1643,13 @@ fn projection_starting_mid_window_skips_what_the_raw_fit_already_projected() {
     let mut timing = super::ProjectionTiming::default();
 
     let first = [z_hop.clone()];
-    super::project_followers(window(&first, &first), &mut [], &mut states, &mut timing)
-        .expect("the raw fit projects the z-hop");
+    super::project_followers(
+        window(&first, &first),
+        &mut Vec::new(),
+        &mut states,
+        &mut timing,
+    )
+    .expect("the raw fit projects the z-hop");
     assert!(
         !states[3].is_active(),
         "test premise: unshaped leaders keep the follower on its raw fit"
@@ -1652,7 +1657,7 @@ fn projection_starting_mid_window_skips_what_the_raw_fit_already_projected() {
 
     let base = [z_hop.clone(), raw_line];
     let frontier = [z_hop.clone(), shaped_line];
-    let mut committed = [z_hop];
+    let mut committed = vec![z_hop];
     super::project_followers(
         window(&base, &frontier),
         &mut committed,

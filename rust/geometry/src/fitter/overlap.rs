@@ -35,6 +35,7 @@ pub(super) fn resolve_arc_arc(
     arc_out: &Arc,
     config: CornerFitConfig,
     delta: f64,
+    shortest_halves: [f64; 2],
 ) -> Option<GeneralBlend> {
     let plane_n = plane_of(arc_in);
     // Anchor curvature is signed relative to the shared blend plane. Each
@@ -62,6 +63,7 @@ pub(super) fn resolve_arc_arc(
             delta,
             budget_in: 0.5 * arc_len(arc_in),
             budget_out: 0.5 * arc_len(arc_out),
+            shortest_halves,
         },
         config,
     )
@@ -73,6 +75,7 @@ pub(super) fn resolve_arc_line(
     side: ArcSide,
     config: CornerFitConfig,
     delta: f64,
+    shortest_halves: [f64; 2],
 ) -> Option<GeneralBlend> {
     let plane_n = plane_of(arc);
     let along_the_normal = |tangent: [f64; 3]| norm(cross(plane_n, tangent)) < OUT_OF_PLANE_EPS;
@@ -120,6 +123,7 @@ pub(super) fn resolve_arc_line(
             delta,
             budget_in,
             budget_out,
+            shortest_halves,
         },
         config,
     )
