@@ -114,6 +114,15 @@ body. A red "Sim e2e" run is rerun once, loudly; any other red check stops the q
 QUEUE lines are `branch|title|expect`; landed branches are appended to `QUEUE.landed`
 so a stopped queue resumes. Use it instead of a hand-written loop around `land-pr.sh`.
 
+Every `gh` call in the tooling goes through `scripts/gh_util.py` (`pending_baselines.run`
+routes `gh` there; `land-pr.sh` defines `gh()` as the wrapper). Many agents polling
+GitHub trip its secondary rate limit, and a bare `gh pr checks --watch` then exits
+non-zero with "API rate limit exceeded", which looks like a red check. The wrapper
+retries only on that error (Retry-After if sent, else 30 s doubling to 300 s with 25 %
+jitter, 8 attempts, then a loud failure) and returns any other failure at once.
+Wait with one `gh pr checks --watch --interval 60`, never a loop of short polls; read PR
+metadata once per run and pass it along; use `gh_util.py <gh args>` in new scripts.
+
 `uv run python scripts/pending_baselines.py [-v|--all]` lists every open PR with
 its stack parent, mergeability, CI state, the snapshot cases whose output
 changes (max |dp|/|dv|/|da| per axis against its base, plus the cases differing

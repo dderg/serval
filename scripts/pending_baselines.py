@@ -49,6 +49,8 @@ class PendingBaselinesError(RuntimeError):
 
 
 def run(args: list[str], cwd: Path = ROOT, env: dict | None = None) -> str:
+    if args[0] == "gh":
+        args = [sys.executable, str(Path(__file__).with_name("gh_util.py")), *args[1:]]
     result = subprocess.run(
         args,
         cwd=cwd,
