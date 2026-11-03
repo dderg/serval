@@ -54,16 +54,8 @@ struct MoveSpec {
     z_step_mm: f64,
 }
 
-/// `full` fuzzes the entire config space. The CI tier excludes the one
-/// known-broken family, pinned as `#[ignore]`d regression tests below: tiny
-/// positive square-corner velocities (scv in roughly (0, 0.1) makes sharp
-/// corners NaN the velocity plan; exactly 0 and >= 0.5 are safe).
-fn limits_strategy(full: bool) -> impl Strategy<Value = FuzzLimits> {
-    let scv = if full {
-        (0.0..20.0_f64).boxed()
-    } else {
-        prop_oneof![1 => Just(0.0), 9 => 0.5..20.0_f64].boxed()
-    };
+fn limits_strategy() -> impl Strategy<Value = FuzzLimits> {
+    let scv = prop_oneof![1 => Just(0.0), 3 => 1e-4..0.5_f64, 6 => 0.5..20.0_f64];
     (20.0..600.0_f64, 500.0..50_000.0_f64, scv).prop_map(|(v, a, scv)| FuzzLimits {
         max_velocity: v,
         max_accel: a,
@@ -203,7 +195,7 @@ proptest! {
 
     #[test]
     fn hard_invariants_hold(
-        limits in limits_strategy(false),
+        limits in limits_strategy(),
         moves in prop::collection::vec(move_strategy(false), 2..40),
     ) {
         let (traj, report) = run_case(limits, &moves);
@@ -221,7 +213,7 @@ proptest! {
 
     #[test]
     fn hard_invariants_hold_on_the_pinned_corpus(
-        limits in limits_strategy(false),
+        limits in limits_strategy(),
         moves in prop::collection::vec(move_strategy(false), 2..40),
     ) {
         let (traj, report) = run_case(limits, &moves);
@@ -234,7 +226,7 @@ proptest! {
     #[test]
     #[ignore = "#575: E seam velocity budget fails at every ratio step"]
     fn target_budgets_hold(
-        limits in limits_strategy(true),
+        limits in limits_strategy(),
         moves in prop::collection::vec(move_strategy(true), 2..40),
     ) {
         let (_, report) = run_case(limits, &moves);
@@ -249,7 +241,6 @@ proptest! {
 /// tiny-positive-scv family as the two tests below — all three pass with
 /// scv = 0 or scv >= 0.1.
 #[test]
-#[ignore = "#575: tiny scv makes the velocity plan NonFinite"]
 fn reversal_with_z_step_makes_velocity_plan_non_finite() {
     let limits = FuzzLimits {
         max_velocity: 20.0,
@@ -315,8 +306,11 @@ fn z_step_then_micro_reversal_escapes_profile_window() {
 /// Sweeping the space: scv = 0 exactly is safe at every corner angle, scv of
 /// 0.005 fails from 146° up, and no failures were found at scv >= 0.1. Same
 /// tiny-positive-scv family as its neighbors.
+///
+/// Root cause: `solve_line_line` admitted a blend on its trim (> 1 nm) while
+/// the clothoid halves came out 2.6e-10 mm long, below the length the velocity
+/// plan accepts. Such a corner now stays sharp.
 #[test]
-#[ignore = "#575: tiny scv + sharp planar corner yields a NonFinite velocity plan"]
 fn near_reversal_planar_corner_makes_velocity_plan_non_finite() {
     let limits = FuzzLimits {
         max_velocity: 20.0,

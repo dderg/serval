@@ -55,6 +55,9 @@ pub(super) fn solve_line_line(
 
     let kappa_peak = trim_ref * theta / trim;
     let length = theta / kappa_peak;
+    if length <= crate::LENGTH_EPS_MM {
+        return Ok(None);
+    }
     let sigma = kappa_peak / length;
 
     let a_start = madd(vertex, -trim, t_in);
