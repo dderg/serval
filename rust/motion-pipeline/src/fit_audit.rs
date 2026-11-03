@@ -4,12 +4,14 @@
 //! polynomials or an enclosure over the piece, the Bernstein hull's proven
 //! bound on the error is the measure; elsewhere a dense scan of its resolved
 //! stretch, edges included, and an exact search around every scanned peak,
-//! never only at points the fit itself sampled. What the fit does not
-//! resolve is not held to it: pieces narrower than the cubic floor, and the
-//! slivers inside a piece's edges that the ladder reads its anchoring state
-//! past, which seed coalescing treats as carrying no integral. Compiled only
-//! for tests that hold the shaper to its `max_path_deviation` /
-//! `max_accel_deviation` promise; the live host never pays for it.
+//! never only at points the fit itself sampled. Where the fit's span has
+//! exact polynomials, they are held to the signal's own evaluator at one
+//! point of each sub-interval. What the fit does not resolve is not held to
+//! it: pieces narrower than the cubic floor, and the slivers inside a
+//! piece's edges that the ladder reads its anchoring state past, which seed
+//! coalescing treats as carrying no integral. Compiled only for tests that
+//! hold the shaper to its `max_path_deviation` / `max_accel_deviation`
+//! promise; the live host never pays for it.
 
 use std::cell::RefCell;
 use std::convert::Infallible;
@@ -18,6 +20,7 @@ use std::sync::Mutex;
 use crate::lowering::{FitTol, eval_mono, eval_mono_dd};
 use trajectory::next_toward;
 
+use crate::shaper::exact::ExactSpan;
 use crate::shaper::{
     SQUARE_ROOT_ONSET_EDGE_SLACK_S, TrackSignal, golden_section_peak, proven_error_bounds,
 };
@@ -31,6 +34,15 @@ const AUDIT_SCAN_INTERVALS: u32 = 97;
 /// Share of the tolerance above which a local peak of the scanned miss is
 /// searched for exactly between its scan neighbours.
 const AUDIT_PEAK_SEARCH_SHARE: f64 = 0.25;
+
+/// Share of a piece's tolerance by which the span's exact polynomials may
+/// differ from the signal's evaluator: a verdict read off the one holds for
+/// the other to within it.
+const EXACT_EVALUATOR_AGREEMENT_SHARE: f64 = 1e-6;
+
+/// Where across its stretch of the piece each exact sub-interval is held to
+/// the evaluator: the golden section, which no probe ladder lands on.
+const EXACT_EVALUATOR_CHECK_AT: f64 = 0.381_966_011_250_105_1;
 
 /// A piece's miss of the exact signal at one point, over the tolerance.
 #[derive(Clone, Copy)]
@@ -101,9 +113,9 @@ pub(crate) struct AcceptedPiece<'a> {
     /// How far inside each edge the ladder read the piece's anchoring
     /// state; what lies closer to an edge is not resolved by the fit.
     pub edge_insets: (f64, f64),
-    /// The exact polynomials the fit proved the piece against, where the
-    /// signal has them.
-    pub exact: Option<&'a [crate::shaper::ExactPiece]>,
+    /// The span's exact polynomials the fit read its truth off, where it
+    /// had them.
+    pub exact: Option<&'a ExactSpan>,
 }
 
 pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
@@ -113,13 +125,16 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
     }
     let acceleration_scale = (2.0 / h) * (2.0 / h);
     let piece_tol = piece.fit_tol.for_piece(h);
+    if let Some(exact) = piece.exact {
+        hold_exact_to_evaluator(sig, exact, &piece, piece_tol);
+    }
     let resolved = (
         piece.t0 + piece.edge_insets.0,
         piece.t1 - piece.edge_insets.1,
     );
     let proven = proven_error_bounds(
         sig,
-        piece.exact,
+        piece.exact.map(|exact| exact.over(resolved.0, resolved.1)),
         piece.mono_u,
         (piece.t0, piece.t1),
         resolved,
@@ -130,10 +145,15 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
     }) {
         return;
     }
+    let midpoint = 0.5 * (piece.t0 + piece.t1);
+    let truth_at = |t: f64| match piece.exact {
+        Some(exact) => exact.pva(t, if t < midpoint { piece.t1 } else { piece.t0 }),
+        None => sig.eval_pva(t),
+    };
     let miss_at = |u: f64| {
         let x = 2.0 * u - 1.0;
         let t = piece.t0 + h * u;
-        let (truth_position, _, truth_acceleration) = sig.eval_pva(t);
+        let (truth_position, _, truth_acceleration) = truth_at(t);
         assert!(
             truth_position.is_finite() && truth_acceleration.is_finite(),
             "{} axis {}: the exact signal the fit accepted [{}, {}] against is not finite \
@@ -223,6 +243,41 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
                 break_in_edge_sliver,
                 exemption,
             });
+    }
+}
+
+/// Holds every exact sub-interval reaching into the piece's resolved stretch
+/// to the signal's evaluator at one point strictly inside it.
+fn hold_exact_to_evaluator<S: TrackSignal>(
+    sig: &S,
+    exact: &ExactSpan,
+    piece: &AcceptedPiece,
+    piece_tol: FitTol,
+) {
+    let (from, to) = (
+        piece.t0 + piece.edge_insets.0,
+        piece.t1 - piece.edge_insets.1,
+    );
+    for polynomial in exact.over(from, to) {
+        let (lo, hi) = (polynomial.lo.max(from), polynomial.hi.min(to));
+        let t = (hi - lo).mul_add(EXACT_EVALUATOR_CHECK_AT, lo);
+        if t <= lo || t >= hi {
+            continue;
+        }
+        let (exact_position, _, exact_acceleration) = polynomial.eval_pva(t);
+        let (position, _, acceleration) = sig.eval_pva(t);
+        assert!(
+            (exact_position - position).abs() <= EXACT_EVALUATOR_AGREEMENT_SHARE * piece_tol.pos_mm
+                && (exact_acceleration - acceleration).abs()
+                    <= EXACT_EVALUATOR_AGREEMENT_SHARE * piece_tol.accel_mm_s2,
+            "{} axis {}: the exact polynomials the fit read [{}, {}] off disagree with the \
+             signal's evaluator at {t}: position {exact_position} against {position}, \
+             acceleration {exact_acceleration} against {acceleration}",
+            piece.fit_context,
+            piece.axis,
+            piece.t0,
+            piece.t1
+        );
     }
 }
 

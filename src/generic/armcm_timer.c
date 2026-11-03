@@ -186,12 +186,14 @@ timer_dispatch_many(void)
                        haddrs[1], hfuncs[1],
                        haddrs[2], hfuncs[2],
                        (int32_t)(diff / (int32_t)timer_from_us(1)));
-                // Split: MESSAGE_MAX (64 B) can't fit all 6 (addr, func) pairs.
                 output("rsched_past_more a3 %u f3 %u a4 %u f4 %u"
                        " a5 %u f5 %u",
                        haddrs[3], hfuncs[3],
                        haddrs[4], hfuncs[4],
                        haddrs[5], hfuncs[5]);
+                output("rsched_past_tail a6 %u f6 %u a7 %u f7 %u",
+                       haddrs[6], hfuncs[6],
+                       haddrs[7], hfuncs[7]);
                 extern volatile uint32_t sched_bad_add_caller;
                 extern volatile uint32_t sched_bad_add_value;
                 extern volatile uint32_t sched_bad_add_stack0;

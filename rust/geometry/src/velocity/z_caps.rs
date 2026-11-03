@@ -67,7 +67,7 @@ fn split_z_accel(
 /// How long a profile starting from rest takes to cross `length` under
 /// `(ceiling, accel)`: accelerating to the apex speed the ceiling and the
 /// disk on the curvature peak allow, then holding it.
-fn crossing_time(length: f64, kappa_peak: f64, (ceiling, accel): (f64, f64)) -> f64 {
+pub(super) fn crossing_time(length: f64, kappa_peak: f64, (ceiling, accel): (f64, f64)) -> f64 {
     let apex = ceiling.min((accel / kappa_peak).sqrt());
     let ramp = apex * apex / (2.0 * accel);
     if ramp >= length {

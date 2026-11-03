@@ -20,6 +20,7 @@ use crate::types::PostProcessError;
 use crate::worker_pool::WorkerPool;
 
 mod enclosure;
+mod extrude_only;
 mod ratio_ramp;
 use ratio_ramp::{RampLeg, RatioSmoothing};
 
@@ -209,6 +210,10 @@ enum AdvanceSmoothing {
 struct LeadingAdvance<'a> {
     stage: &'a ChainStage,
     smoothing: AdvanceSmoothing,
+    /// How far a velocity step the advance makes of a leader's acceleration
+    /// step may reach the motor of a ratio-ramped follower, see
+    /// [`CompiledChain::instantaneous_corner_velocity`].
+    instantaneous_corner_velocity: f64,
 }
 
 impl<'a> LeadingAdvance<'a> {
@@ -233,12 +238,14 @@ impl<'a> LeadingAdvance<'a> {
                 (Some(_), Some(_)) => AdvanceSmoothing::RatioRampAndKernel,
                 (None, _) => AdvanceSmoothing::Kernel,
             },
+            instantaneous_corner_velocity: chain.instantaneous_corner_velocity(),
         })
     }
 
     /// The follower velocity, acceleration and jerk the advance reads at
     /// `t`, given the follower's path state and its own velocity and
-    /// acceleration there.
+    /// acceleration there: the extrusion laid along the path, never the
+    /// extrude-only motion folded into the follower.
     fn read(
         &self,
         sig: &FollowerSignal,
@@ -249,21 +256,26 @@ impl<'a> LeadingAdvance<'a> {
         if self.reads_path_only() {
             return sig.ramped_read(t, read);
         }
-        (velocity, acceleration, sig.jerk_read(t, read))
+        let (raw_velocity, raw_acceleration, raw_jerk) = sig.extrude_only_derivatives(t);
+        (
+            velocity - raw_velocity,
+            acceleration - raw_acceleration,
+            sig.jerk_read(t, read) - raw_jerk,
+        )
     }
 
     fn read_velocity(&self, sig: &FollowerSignal, t: f64) -> f64 {
         if self.reads_path_only() {
             return sig.ramped_advance_read(t).0;
         }
-        sig.deriv(t)
+        sig.deriv(t) - sig.extrude_only_derivatives(t).0
     }
 
     fn read_acceleration(&self, sig: &FollowerSignal, t: f64) -> f64 {
         if self.reads_path_only() {
             return sig.ramped_advance_read(t).1;
         }
-        sig.second_deriv(t)
+        sig.second_deriv(t) - sig.extrude_only_derivatives(t).1
     }
 
     fn read_seam_velocity(&self, input: &SeamInput) -> f64 {
@@ -273,7 +285,7 @@ impl<'a> LeadingAdvance<'a> {
                 .expect("a ratio-ramped seam records what its advance reads")
                 .read_velocity;
         }
-        input.velocity
+        input.path_velocity
     }
 
     fn reads_path_only(&self) -> bool {
@@ -350,6 +362,7 @@ fn fit_source_projection(
         let (ratio, ratio_slope) = sig.state.ratio_and_slope(s);
         SeamInput {
             velocity: sig.deriv(t),
+            path_velocity: sig.deriv(t) - sig.extrude_only_derivatives(t).0,
             ratio,
             leader_speed: sig.shaped_speed(t),
             s,
@@ -438,8 +451,8 @@ fn fit_source_projection(
                         &step_candidates,
                         (t_start, t_end),
                         resolution.velocity
-                            + advanced_leader_rounding(
-                                advance.stage,
+                            + advance_velocity_step_allowance(
+                                advance,
                                 sig.ratio_bounds.ratio,
                                 fit_tol.accel_mm_s2,
                             ),
@@ -742,11 +755,11 @@ pub(crate) fn project_followers(
             };
             let (input_start, input_end) = input_states.unwrap_or_else(|| {
                 (
-                    SeamInput::of_track(&projected, t_start),
-                    SeamInput::of_track(&projected, t_end),
+                    SeamInput::of_track(&projected, t_start, raw.spatial_path),
+                    SeamInput::of_track(&projected, t_end, raw.spatial_path),
                 )
             });
-            let track = if projecting {
+            let track = if projecting || !raw.spatial_path {
                 projected
             } else {
                 crate::shaper::apply_zero_support_transform(
@@ -814,6 +827,11 @@ pub(crate) fn project_followers(
                 semantic_cuts,
                 join_advance_step,
                 window_advance_steps,
+                extrude_only: if raw.spatial_path {
+                    Vec::new()
+                } else {
+                    extrude_only::extrude_only_pieces(axis, raw_axis, (t_start, t_end))
+                },
             });
         }
         assert!(
@@ -955,7 +973,20 @@ pub(crate) fn project_followers(
                 let mut gained_input = chain.leading_transform().is_some();
                 if defer_linear_prefix {
                     if let Some(ChainStage::DerivativeGains { k1, k2 }) = chain.transform() {
-                        kernel_input = apply_derivative_gains_to_track(&kernel_input, *k1, *k2);
+                        kernel_input = nurbs::bezier::bezier_pieces_to_discontinuous_nurbs(
+                            &extrude_only::without_extrude_only_gain(
+                                extract_bezier_pieces(&apply_derivative_gains_to_track(
+                                    &kernel_input,
+                                    *k1,
+                                    *k2,
+                                )),
+                                state
+                                    .projected
+                                    .iter()
+                                    .flat_map(|segment| &segment.extrude_only),
+                                (*k1, *k2),
+                            ),
+                        );
                         gained_input = true;
                     }
                 }
@@ -1271,6 +1302,8 @@ fn fit_kernel_window<S: TrackSignal>(
 #[derive(Debug, Clone, Copy)]
 struct SeamInput {
     velocity: f64,
+    /// `velocity` less the extrude-only motion's, what an advance reads.
+    path_velocity: f64,
     ratio: f64,
     leader_speed: f64,
     s: f64,
@@ -1288,7 +1321,9 @@ struct RampedSeam {
 }
 
 impl SeamInput {
-    fn of_track(track: &ScalarNurbs, t: f64) -> Self {
+    /// A track that is the follower's raw motion passed through, laid along
+    /// the path when it has one and extrude-only otherwise.
+    fn of_track(track: &ScalarNurbs, t: f64, spatial_path: bool) -> Self {
         let velocity = if track.degree() == 0 {
             0.0
         } else {
@@ -1296,6 +1331,7 @@ impl SeamInput {
         };
         Self {
             velocity,
+            path_velocity: if spatial_path { velocity } else { 0.0 },
             ratio: 1.0,
             leader_speed: velocity,
             s: 0.0,
@@ -1399,8 +1435,8 @@ fn join_advance_step(
 /// as a C0 corner ([`SeamInput::signal_velocity_step`]) and welds what the
 /// advanced velocity differs by on top, straight to the motor. A ratio ramp
 /// leaves the projection no step of its own, and the advance none beyond
-/// what the leaders' acceleration rounding makes of it
-/// ([`advanced_leader_rounding`]), so a larger one on a
+/// its allowance for the leaders' acceleration steps
+/// ([`advance_velocity_step_allowance`]), so a larger one on a
 /// ramped follower is refused.
 fn refuse_ramped_join_velocity_step(
     advance: LeadingAdvance,
@@ -1435,29 +1471,37 @@ fn refuse_ramped_join_velocity_step(
         before_ramped.advanced_velocity,
         after_ramped.advanced_velocity,
     );
-    let leader_rounding = advanced_leader_rounding(
-        advance.stage,
+    let allowance = advance_velocity_step_allowance(
+        advance,
         before.ratio.abs().max(after.ratio.abs()),
         leader_accel_tol,
     );
-    if (advanced_after - advanced_before).abs() > rounding + leader_rounding {
+    if (advanced_after - advanced_before).abs() > rounding + allowance {
         return Err(PostProcessError::RatioRampedVelocityStep {
             axis,
             t: t_start,
             velocity_before: advanced_before,
             velocity_after: advanced_after,
-            resolution: rounding + leader_rounding,
+            resolution: rounding + allowance,
         });
     }
     Ok(())
 }
 
-/// The velocity step an advance makes of the leaders' own rounding: a
-/// shaped leader is fitted within `leader_accel_tol` on either side of its
-/// knots, so its acceleration may step by twice that there, which the
-/// projection scales by the ratio and the advance by its slope.
-fn advanced_leader_rounding(stage: &ChainStage, ratio_bound: f64, leader_accel_tol: f64) -> f64 {
-    2.0 * leader_accel_tol * ratio_bound * steepest_advance_slope(stage)
+/// The velocity step an advance may make of the leaders' acceleration
+/// steps: the follower's instantaneous corner velocity, which the planner
+/// keeps an unshaped leader's steps within, plus what the leaders' own
+/// rounding makes. A shaped leader is fitted within `leader_accel_tol` on
+/// either side of its knots, so its acceleration may step by twice that
+/// there, which the projection scales by the ratio and the advance by its
+/// slope.
+fn advance_velocity_step_allowance(
+    advance: LeadingAdvance,
+    ratio_bound: f64,
+    leader_accel_tol: f64,
+) -> f64 {
+    advance.instantaneous_corner_velocity
+        + 2.0 * leader_accel_tol * ratio_bound * steepest_advance_slope(advance.stage)
 }
 
 fn advance_offset(stage: &ChainStage, velocity: f64) -> f64 {
@@ -1515,6 +1559,9 @@ struct ProjSeg {
     join_advance_step: f64,
     /// The advance steps inside the segment, also left out of `track`.
     window_advance_steps: Vec<AdvanceStep>,
+    /// The extrude-only motion folded into `track`, which a kernel's linear
+    /// advance leaves unadvanced.
+    extrude_only: Vec<extrude_only::ExtrudeOnlyPiece>,
 }
 
 /// One segment's stretch of path: shaped arc length `[s0, s1]` carrying a
@@ -2635,6 +2682,19 @@ impl<'a> FollowerSignal<'a> {
                 .jerk
         });
         self.path_jerk(t, read) + raw
+    }
+
+    /// The velocity, acceleration and jerk of the extrude-only motion folded
+    /// into the follower at `t`, zero along a spatial path.
+    fn extrude_only_derivatives(&self, t: f64) -> (f64, f64, f64) {
+        self.raw_delta.map_or((0.0, 0.0, 0.0), |(axis, _)| {
+            let (_, velocity, acceleration) = axis_pva(axis, t);
+            let jerk = axis
+                .eval_pvaj(t)
+                .expect("follower raw axis has exact derivatives")
+                .jerk;
+            (velocity, acceleration, jerk)
+        })
     }
 
     fn path_deriv(&self, t: f64) -> f64 {

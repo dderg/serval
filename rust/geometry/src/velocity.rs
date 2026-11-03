@@ -12,6 +12,7 @@ use crate::path::Segment;
 use crate::segment::SourceRange;
 
 mod disk;
+mod extruder_caps;
 pub mod law;
 mod reconstruct;
 mod z_caps;
@@ -323,7 +324,7 @@ fn build_move_caps(
     report: &mut VelocityReport,
 ) -> Result<Vec<MoveCaps>, VelocityError> {
     let mut caps = Vec::with_capacity(moves.len());
-    for m in moves {
+    for (index, m) in moves.iter().enumerate() {
         let line_no = m.source.start_line;
         let path_ceiling = m.feedrate_mm_s.min(m.limits.max_velocity_mm_s);
         let (length, kappa0, sigma, kappa_peak, flat_ceiling, accel) = match &m.segment.spatial {
@@ -333,8 +334,17 @@ fn build_move_caps(
                 let (kappa_start, _) = seg.kappa_endpoints();
                 let sigma = seg.dkappa_ds(0.0);
                 let (_, kappa_peak) = seg.kappa_peak();
-                let (flat_ceiling, accel) =
-                    z_caps::z_capped(seg, &m.limits, kappa_peak, path_ceiling);
+                let z_capped = z_caps::z_capped(seg, &m.limits, kappa_peak, path_ceiling);
+                let (flat_ceiling, accel) = match &m.limits.extruder {
+                    Some(extruder) => extruder_caps::extruder_capped(
+                        seg,
+                        extruder,
+                        extruding_ratios(moves, index, extruder.axis_index),
+                        kappa_peak,
+                        z_capped,
+                    ),
+                    None => z_capped,
+                };
                 (length, kappa_start, sigma, kappa_peak, flat_ceiling, accel)
             }
             None => {
@@ -375,6 +385,32 @@ fn build_move_caps(
         });
     }
     Ok(caps)
+}
+
+/// The largest extrusion ratio the segment lays on `axis`; retractions
+/// (negative ratios) and travel extrude nothing.
+fn extruding_ratio(segment: &crate::path::PathSegment, axis: usize) -> f64 {
+    segment
+        .followers
+        .iter()
+        .filter(|follower| follower.axis_index == axis)
+        .map(|follower| follower.ratio.max(follower.ratio_end))
+        .fold(0.0, f64::max)
+}
+
+fn extruding_ratios(
+    moves: &[crate::Move],
+    index: usize,
+    axis: usize,
+) -> extruder_caps::ExtrudingRatios {
+    let own = extruding_ratio(&moves[index].segment, axis);
+    let neighbours = moves[index.saturating_sub(1)..moves.len().min(index + 2)].iter();
+    extruder_caps::ExtrudingRatios {
+        own,
+        at_joins: neighbours
+            .map(|m| extruding_ratio(&m.segment, axis))
+            .fold(own, f64::max),
+    }
 }
 
 fn check_entry_ceiling(

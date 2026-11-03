@@ -36,7 +36,7 @@ fn stream_case(
         max_extrude_only_accel: Some(1000.0),
         ..PlannerConfig::default()
     };
-    let limits = live_config::move_limits(&planner_config).expect("limits");
+    let limits = live_config::move_limits(&planner_config, None).expect("limits");
     let steps = plan_steps(&waypoints, limits).expect("steps");
 
     let config = live_config::stream_config(&planner_config).expect("stream config");
