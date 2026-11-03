@@ -1,6 +1,6 @@
 use super::{
     AxisFit, FloorVelocityGate, KnotJumpBound, MIN_DEVICE_INTERVAL_S, TrackSignal,
-    fit_axis_from_signal,
+    fit_axis_from_signal, seed_floors,
 };
 use crate::lowering::{FitTol, LADDER_PROBES_U, eval_mono_dd, quintic_in_u};
 use crate::types::PostProcessError;
@@ -763,6 +763,30 @@ fn worst_interior_acceleration_miss(track: &nurbs::ScalarNurbs, sig: &impl Track
         .fold(0.0, f64::max)
 }
 
+/// The largest acceleration miss of a fitted track against its signal,
+/// sampled densely across the stretch of each piece its fit resolves: all
+/// of it but a cubic floor inside either edge.
+fn worst_resolved_acceleration_miss(
+    track: &nurbs::ScalarNurbs,
+    sig: &impl TrackSignal,
+    cubic_floor: f64,
+) -> f64 {
+    const INTERVALS: u32 = 4096;
+    nurbs::bezier::extract_bezier_pieces(track)
+        .iter()
+        .flat_map(|piece| {
+            let acceleration = piece.differentiate().differentiate();
+            let h = piece.u_end - piece.u_start;
+            let inset = cubic_floor.min(0.25 * h);
+            (0..=INTERVALS).map(move |k| {
+                let t =
+                    piece.u_start + inset + (h - 2.0 * inset) * f64::from(k) / f64::from(INTERVALS);
+                (acceleration.evaluate(t) - sig.eval_pva(t).2).abs()
+            })
+        })
+        .fold(0.0, f64::max)
+}
+
 #[test]
 fn a_declared_square_root_onset_is_refined_until_its_shoulder_holds_the_tolerance() {
     let fit_tol = FitTol {
@@ -809,4 +833,42 @@ fn a_declared_square_root_onset_is_refined_until_its_shoulder_holds_the_toleranc
         declared <= fit_tol.accel_mm_s2,
         "the declared onset's shoulder leaves the tolerance by {declared} mm/s²"
     );
+}
+
+/// The rungs a declared onset's span is held to miss its shoulder most
+/// between the onset edge and the first point the onset check holds them
+/// at, past the reach of a grid: measured before, 1.03× the tolerance on a
+/// 250 µs piece, 0.995× on a 234 µs one.
+#[test]
+fn every_piece_on_a_declared_square_root_onset_holds_the_tolerance_up_to_its_resolved_edges() {
+    let fit_tol = FitTol {
+        pos_mm: 0.005,
+        accel_mm_s2: 50.0,
+    };
+    for span in [2e-3, 3e-2] {
+        for coefficient in [1.0e5, 1.468e5, 2.154e5] {
+            let declared = DeclaredOnset(SquareRootOnset {
+                at: 0.211_721_933,
+                offset_mm: 150.0,
+                velocity: 300.0,
+                coefficient,
+            });
+            let fit = AxisFit {
+                axis: 1,
+                t_start: declared.0.at,
+                t_end: declared.0.at + span,
+                seed_breakpoints: &[],
+                fit_tol,
+                fit_context: "square-root onset",
+                velocity_continuous: false,
+            };
+            let cubic_floor = seed_floors(&fit, &declared, &[fit.t_start, fit.t_end]).cubic;
+            let track = fit_axis_from_signal(fit, &declared).expect("a square-root onset fits");
+            let worst = worst_resolved_acceleration_miss(&track, &declared, cubic_floor);
+            assert!(
+                worst <= fit_tol.accel_mm_s2,
+                "over {span} s the onset {coefficient:e}·√τ leaves the tolerance by {worst} mm/s²"
+            );
+        }
+    }
 }

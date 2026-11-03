@@ -12,7 +12,7 @@ use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
     AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget,
     LadderFailure, LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth, VelocitySign,
-    eval_mono, eval_mono_d, eval_mono_dd, exact_piece, ladder_fit, quintic_in_u,
+    eval_mono, eval_mono_d, eval_mono_dd, exact_piece, held_miss, ladder_fit, quintic_in_u,
 };
 use crate::types::{BaseItem, Control, PostProcessError, TrajectoryItem};
 use crate::worker_pool::WorkerPool;
@@ -3751,13 +3751,12 @@ fn span_probe_t(t0: f64, t1: f64, u: f64) -> f64 {
 /// Every accepted piece is endpoint-anchored, so the span seams stay C0 no
 /// matter which rung wins. On a span reaching a square-root onset the
 /// acceleration's shoulder bends between the probes, so the rungs are also
-/// held to the tolerance at points spread between the resolved edges as the
-/// fit audit spreads them: a miss there splits a splittable span — grading
-/// the partition toward the onset only as deep as its fit needs — and at the
-/// floor, where the closest rung is kept, it is the closest there too. The
-/// points are sampled only once a rung passes the probes or a kept closest
-/// rung is ranked. Returns the accepted
-/// monomial-in-u fit, or the closest rung with the ladder's miss.
+/// held to the tolerance across the resolved stretch by `OnsetHold`: a miss
+/// there splits a splittable span — grading the partition toward the onset
+/// only as deep as its fit needs — and at the floor, where the closest rung
+/// is kept, it is the closest there too. The stretch is sampled only once a
+/// rung passes the probes or a kept closest rung is ranked. Returns the
+/// accepted monomial-in-u fit, or the closest rung with the ladder's miss.
 ///
 /// A rung that passes the probes is then held between them: proven by the
 /// Bernstein hull of its error against the signal's exact polynomials
@@ -3852,25 +3851,17 @@ fn shaped_ladder<S: TrackSignal>(
         };
     }
 
-    let held_samples = std::cell::OnceCell::new();
-    let reaches_onset = square_root_onset_within(sig, t0, t1);
-    let held = || -> &[HeldSample] {
-        if !reaches_onset {
-            return &[];
-        }
-        held_samples.get_or_init(|| {
-            let resolved = end_past_sliver - start_past_sliver;
-            std::array::from_fn::<_, SQUARE_ROOT_ONSET_CHECK_POINTS, _>(|k| {
-                let t = start_past_sliver
-                    + resolved * (k as f64 + 0.5) / SQUARE_ROOT_ONSET_CHECK_POINTS as f64;
-                let (position, _, acceleration) = from_start.eval_pva(t);
-                HeldSample {
-                    x: 2.0 * (t - t0) / h - 1.0,
-                    position,
-                    acceleration,
-                }
-            })
-        })
+    let onset_hold = square_root_onset_within(sig, t0, t1).then(|| OnsetHold {
+        read: &from_start,
+        span: (t0, t1),
+        resolved: (start_past_sliver, end_past_sliver),
+        tol: fit_tol,
+        samples: std::cell::OnceCell::new(),
+    });
+    let held_miss = |rung: &[f64]| {
+        onset_hold
+            .as_ref()
+            .map_or(0.0, |hold| hold.worst_miss(rung))
     };
     match ladder_fit(
         &base,
@@ -3879,7 +3870,7 @@ fn shaped_ladder<S: TrackSignal>(
             position: &|u| truth.pos_at(u),
             velocity: &|u| truth.vel_at(u),
             acceleration: &|u| truth.acc_at(u),
-            held: &held,
+            held_miss: &held_miss,
             held_ranks_misses: keeps_closest_rung,
         },
         LadderBudget {
@@ -3974,9 +3965,123 @@ fn shaped_ladder<S: TrackSignal>(
     }
 }
 
-/// Points at which a span reaching a square-root onset is held to the fit
-/// tolerance between the ladder's probes.
-const SQUARE_ROOT_ONSET_CHECK_POINTS: usize = 64;
+/// Intervals between the check points a span reaching a square-root onset
+/// is held to the fit tolerance at between the ladder's probes.
+const SQUARE_ROOT_ONSET_CHECK_INTERVALS: usize = 64;
+
+/// Exact samples the stretch between a resolved edge and the check point
+/// next to it is scanned at before its peak is searched.
+const SQUARE_ROOT_ONSET_EDGE_SCAN_POINTS: u32 = 8;
+
+/// Share of the tolerance above which a rung's miss peaking at a check
+/// point is searched for exactly between that point's neighbours.
+const SQUARE_ROOT_ONSET_PEAK_SEARCH_SHARE: f64 = 0.25;
+
+/// Where a span reaching a square-root onset holds its rungs to the fit
+/// tolerance between the ladder's probes: at check points spread evenly
+/// across the resolved stretch, its edges included, then — for a rung they
+/// all hold — at the exact peaks between them. Next to an edge a rung's
+/// miss of an onset there rises as the root of the distance from it, a
+/// shoulder narrower than any grid of check points, so the stretch from
+/// each resolved edge to the check point next to it is searched in that
+/// root, where the shoulder is smooth.
+struct OnsetHold<'a, S> {
+    read: &'a FacingRead<'a, S>,
+    span: (f64, f64),
+    resolved: (f64, f64),
+    tol: FitTol,
+    samples: std::cell::OnceCell<[HeldSample; SQUARE_ROOT_ONSET_CHECK_INTERVALS + 1]>,
+}
+
+impl<S: TrackSignal> OnsetHold<'_, S> {
+    fn check_t(&self, k: usize) -> f64 {
+        if k == SQUARE_ROOT_ONSET_CHECK_INTERVALS {
+            return self.resolved.1;
+        }
+        nurbs::fmadd(
+            k as f64 / SQUARE_ROOT_ONSET_CHECK_INTERVALS as f64,
+            self.resolved.1 - self.resolved.0,
+            self.resolved.0,
+        )
+    }
+
+    fn h(&self) -> f64 {
+        self.span.1 - self.span.0
+    }
+
+    fn sample_at(&self, t: f64) -> HeldSample {
+        let (position, _, acceleration) = self.read.eval_pva(t);
+        HeldSample {
+            x: 2.0 * (t - self.span.0) / self.h() - 1.0,
+            position,
+            acceleration,
+        }
+    }
+
+    fn miss_at(&self, rung: &[f64], t: f64) -> f64 {
+        held_miss(rung, self.h(), &[self.sample_at(t)], self.tol)
+    }
+
+    fn worst_miss(&self, rung: &[f64]) -> f64 {
+        let samples = self
+            .samples
+            .get_or_init(|| std::array::from_fn(|k| self.sample_at(self.check_t(k))));
+        let misses = samples.map(|sample| held_miss(rung, self.h(), &[sample], self.tol));
+        let at_checks = misses.iter().copied().fold(0.0, f64::max);
+        if at_checks > 1.0 {
+            return at_checks;
+        }
+        let last = SQUARE_ROOT_ONSET_CHECK_INTERVALS;
+        let mut worst = at_checks
+            .max(self.edge_peak(rung, self.span.0, self.check_t(0), self.check_t(1)))
+            .max(self.edge_peak(
+                rung,
+                self.span.1,
+                self.check_t(last),
+                self.check_t(last - 1),
+            ));
+        for (before, around) in misses.windows(3).enumerate() {
+            if around[1] > SQUARE_ROOT_ONSET_PEAK_SEARCH_SHARE
+                && around[1] >= around[0]
+                && around[1] >= around[2]
+            {
+                let Ok((_, peak)) = golden_section_peak(
+                    |t| Ok::<_, std::convert::Infallible>(self.miss_at(rung, t)),
+                    self.check_t(before),
+                    self.check_t(before + 2),
+                );
+                worst = worst.max(peak);
+            }
+        }
+        worst
+    }
+
+    /// The rung's largest miss between a resolved edge and the check point
+    /// next to it, read in the root of the distance from the span edge.
+    fn edge_peak(&self, rung: &[f64], span_edge: f64, resolved_edge: f64, next_check: f64) -> f64 {
+        let inward = (next_check - span_edge).signum();
+        let t_of_root = |root: f64| nurbs::fmadd(inward * root, root, span_edge);
+        let (low, high) = (
+            (resolved_edge - span_edge).abs().sqrt(),
+            (next_check - span_edge).abs().sqrt(),
+        );
+        let step = (high - low) / f64::from(SQUARE_ROOT_ONSET_EDGE_SCAN_POINTS + 1);
+        let mut scan_peak = (low, 0.0);
+        for k in 1..=SQUARE_ROOT_ONSET_EDGE_SCAN_POINTS {
+            let root = nurbs::fmadd(f64::from(k), step, low);
+            let miss = self.miss_at(rung, t_of_root(root));
+            if miss >= scan_peak.1 {
+                scan_peak = (root, miss);
+            }
+        }
+        let Ok((_, peak)) = golden_section_peak(
+            |root| Ok::<_, std::convert::Infallible>(self.miss_at(rung, t_of_root(root))),
+            (scan_peak.0 - step).max(low),
+            (scan_peak.0 + step).min(high),
+        );
+        peak.max(scan_peak.1)
+    }
+}
 
 /// How far from a span edge a declared square-root onset still lies on it:
 /// the onsets and the seeds the edges come from are computed apart, ulps of
