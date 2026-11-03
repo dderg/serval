@@ -493,6 +493,8 @@ fn micron_moves_after_a_run_leave_no_line_sliver() {
         step(0.0, 0.001424, 1.0, 0.0),
     ];
     extruder_lays_its_ratio_along_the_path(limits, &steps).unwrap();
+}
+
 /// #550: a 0.31 mm corner budget around 1 mm moves. The blends leave the
 /// waypoints' bounding box by up to 51 µm, inside the budget they may spend.
 #[test]
