@@ -112,12 +112,6 @@ pub(crate) trait TrackSignal {
     fn square_root_onsets(&self) -> &[f64] {
         &[]
     }
-    /// Whether every break of the signal is a fit seed or a knot it reports:
-    /// then a sliver nothing was coalesced into, and no knot lies in, hides
-    /// no break, however steeply the signal leaves the seam.
-    fn seeds_every_break(&self) -> bool {
-        false
-    }
     /// The signal's exact polynomial on every sub-interval of `[lo, hi]`
     /// between its breaks, each with an a-priori bound on its rounding;
     /// `None` for a signal that is not exactly piecewise polynomial there.
@@ -167,9 +161,6 @@ impl<S: TrackSignal> TrackSignal for &S {
     }
     fn square_root_onsets(&self) -> &[f64] {
         S::square_root_onsets(self)
-    }
-    fn seeds_every_break(&self) -> bool {
-        S::seeds_every_break(self)
     }
     fn exact_polynomial_on(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
         S::exact_polynomial_on(self, lo, hi)
@@ -725,8 +716,7 @@ fn cap_contact_seeds(span: &AnalyticMoveSpan) -> (Vec<f64>, Vec<f64>) {
 }
 
 /// A materialized source with the curvature-cap contacts its acceleration
-/// approaches as a square root. Its breaks are its phase seams, which seed
-/// its fit with its ends and those contacts.
+/// approaches as a square root.
 struct CapContactSource<'a> {
     source: &'a ContinuousAxis,
     cap_contacts: &'a [f64],
@@ -739,10 +729,6 @@ impl TrackSignal for CapContactSource<'_> {
 
     fn square_root_onsets(&self) -> &[f64] {
         self.cap_contacts
-    }
-
-    fn seeds_every_break(&self) -> bool {
-        true
     }
 }
 
@@ -3776,17 +3762,16 @@ fn edge_inset(h: f64, cubic_floor: f64, absorbed: f64) -> f64 {
 /// second read as far again past the sliver, so a smooth signal's jerk
 /// across a wide sliver cancels and only its snap times the squared sliver
 /// remains; the inset is at most a quarter span, so that read stays inside
-/// the span. Where no break can hide in the sliver — a square-root onset
-/// the signal declares on the edge, or a sliver nothing was coalesced into
-/// and no knot of the signal lies in — the acceleration may still leave
-/// the seam steeper than any extrapolation follows: the edge anchors to the
-/// seam reading, where the span on its other side anchors too.
+/// the span. At a square-root onset the signal declares on the edge the
+/// acceleration is steep past any extrapolation but hides no break: the
+/// edge anchors to the seam reading, where the span across the onset
+/// anchors too.
 fn edge_velocity_and_acceleration<S: TrackSignal>(
     sig: &S,
     axis: usize,
     seam: f64,
     past_sliver: f64,
-    no_break_can_hide: bool,
+    onset_on_edge: bool,
     fit_tol: FitTol,
 ) -> Result<EdgeAnchor, PostProcessError> {
     let (_, velocity, seam_acceleration) = sig.eval_pva(seam);
@@ -3797,7 +3782,7 @@ fn edge_velocity_and_acceleration<S: TrackSignal>(
         acceleration: seam_acceleration,
         past_sliver: false,
     };
-    if no_break_can_hide {
+    if onset_on_edge {
         return Ok(at_seam);
     }
     let past_acceleration = exact_value(axis, sig.second_deriv(past_sliver), past_sliver)?;
@@ -3897,18 +3882,12 @@ fn shaped_ladder<S: TrackSignal>(
     let p0 = exact_value(axis, from_start.eval(t0), t0)?;
     let start_past_sliver = t0 + edge_inset(h, policy.floors.cubic, slivers.start);
     let end_past_sliver = t1 - edge_inset(h, policy.floors.cubic, slivers.end);
-    let no_break_can_hide = |edge: f64, absorbed: f64, sliver: (f64, f64)| {
-        square_root_onset_on_edge(sig, edge)
-            || (sig.seeds_every_break()
-                && absorbed == 0.0
-                && sig.interior_knots(sliver.0, sliver.1).is_empty())
-    };
     let start = edge_velocity_and_acceleration(
         &from_start,
         axis,
         t0_inside,
         start_past_sliver,
-        no_break_can_hide(t0, slivers.start, (t0, start_past_sliver)),
+        square_root_onset_on_edge(sig, t0),
         fit_tol,
     )?;
     let a0 = start.acceleration;
@@ -3923,7 +3902,7 @@ fn shaped_ladder<S: TrackSignal>(
         axis,
         t1_inside,
         end_past_sliver,
-        no_break_can_hide(t1, slivers.end, (end_past_sliver, t1)),
+        square_root_onset_on_edge(sig, t1),
         fit_tol,
     )?;
     let a1 = end.acceleration;
