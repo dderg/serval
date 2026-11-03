@@ -1,7 +1,8 @@
-//! The shaper's persistent fan-out threads. Fitting a window splits into
-//! independent jobs; spawning threads per call cost more than many of the
-//! jobs, so the shaper keeps idle helpers parked on a queue instead and hands
-//! each fan-out to the calling thread plus whichever helpers are free.
+//! The pipeline's persistent fan-out threads. Planning a window and fitting
+//! it both split into independent jobs; spawning threads per call cost more
+//! than many of the jobs, so the planner and the shaper share idle helpers
+//! parked on a queue instead and hand each fan-out to the calling thread plus
+//! whichever helpers are free.
 
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -20,10 +21,11 @@ type Panic = Box<dyn Any + Send>;
 /// one helper and three already cover a four-core host's spare cores.
 const HELPERS_MAX: usize = 3;
 
-/// Helper threads shared by every fan-out of one shaper. They are spawned on
-/// the first fan-out, so they inherit the scheduling of the thread that runs
-/// the shaper, and a shaper that never fans out never spawns any.
-pub(crate) struct WorkerPool {
+/// Helper threads shared by every fan-out of one pipeline: the planner's
+/// member profiles and the shaper's fits. They are spawned on the first
+/// fan-out, so they inherit the scheduling of the thread that makes it, and a
+/// pipeline that never fans out never spawns any.
+pub struct WorkerPool {
     helper_count: usize,
     helpers: OnceLock<Helpers>,
 }
@@ -51,7 +53,7 @@ impl Call {
     fn lock(&self) -> MutexGuard<'_, CallState> {
         self.state
             .lock()
-            .expect("shaper worker call state poisoned")
+            .expect("pipeline worker call state poisoned")
     }
 
     fn help(&self) {
@@ -79,7 +81,7 @@ impl Call {
             state = self
                 .left
                 .wait(state)
-                .expect("shaper worker call state poisoned");
+                .expect("pipeline worker call state poisoned");
         }
         state.panic.take()
     }
@@ -96,7 +98,7 @@ impl Drop for OpenCall<'_> {
 impl WorkerPool {
     /// A pool sized to the cores the calling thread does not occupy, up to
     /// [`HELPERS_MAX`].
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::with_helpers(
             std::thread::available_parallelism()
                 .map_or(0, |cores| (cores.get() - 1).min(HELPERS_MAX)),
@@ -117,13 +119,13 @@ impl WorkerPool {
                 .map(|index| {
                     let queue: Receiver<Arc<Call>> = queue.clone();
                     std::thread::Builder::new()
-                        .name(format!("kalico-shaper-{index}"))
+                        .name(format!("kalico-pool-{index}"))
                         .spawn(move || {
                             for call in queue {
                                 call.help();
                             }
                         })
-                        .expect("spawn shaper worker thread")
+                        .expect("spawn pipeline worker thread")
                 })
                 .collect();
             Helpers { calls, threads }
@@ -163,12 +165,12 @@ impl WorkerPool {
                 index = next_job.fetch_add(1, Ordering::Relaxed);
             }
             done.lock()
-                .expect("shaper worker results poisoned")
+                .expect("pipeline worker results poisoned")
                 .append(&mut local);
         };
         self.fan_out(participants, &participate)?;
-        let mut done = done.into_inner().expect("shaper worker results poisoned");
-        assert_eq!(done.len(), jobs, "shaper workers dropped jobs");
+        let mut done = done.into_inner().expect("pipeline worker results poisoned");
+        assert_eq!(done.len(), jobs, "pipeline workers dropped jobs");
         done.sort_by_key(|(index, _)| *index);
         Ok(done.into_iter().map(|(_, result)| result).collect())
     }
@@ -195,13 +197,31 @@ impl WorkerPool {
             helpers
                 .calls
                 .send(Arc::clone(&call))
-                .expect("shaper worker queue closed");
+                .expect("pipeline worker queue closed");
         }
         let own = catch_unwind(AssertUnwindSafe(task));
         std::mem::forget(open);
         let helper_panic = call.close_and_wait();
         own?;
         helper_panic.map_or(Ok(()), Err)
+    }
+}
+
+impl Default for WorkerPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl geometry::FanOut for WorkerPool {
+    fn map_jobs<T: Send>(
+        &self,
+        participants: usize,
+        jobs: usize,
+        job: impl Fn(usize) -> T + Sync,
+    ) -> Vec<T> {
+        self.map_indexed(participants, jobs, || (), |(), index| job(index))
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
     }
 }
 
@@ -212,7 +232,7 @@ impl Drop for WorkerPool {
         };
         drop(calls);
         for thread in threads {
-            thread.join().expect("shaper worker thread panicked");
+            thread.join().expect("pipeline worker thread panicked");
         }
     }
 }

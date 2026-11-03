@@ -14,7 +14,7 @@ impl motion_pipeline::planner::Planner
 pub fn motion_pipeline::planner::Planner::feed(&mut self, motion_pipeline::types::StreamInput, &mut impl core::ops::function::FnMut(motion_pipeline::types::PlannedItem) -> bool) -> bool
 pub fn motion_pipeline::planner::Planner::finish(&mut self, &mut impl core::ops::function::FnMut(motion_pipeline::types::PlannedItem) -> bool) -> bool
 pub fn motion_pipeline::planner::Planner::idle(&mut self, &mut impl core::ops::function::FnMut(motion_pipeline::types::PlannedItem) -> bool) -> bool
-pub fn motion_pipeline::planner::Planner::new(motion_pipeline::types::StreamConfig) -> Self
+pub fn motion_pipeline::planner::Planner::new(motion_pipeline::types::StreamConfig, alloc::rcs::arc::Arc<motion_pipeline::WorkerPool>) -> Self
 pub mod motion_pipeline::timing
 pub fn motion_pipeline::timing::mono_us() -> u64
 pub mod motion_pipeline::types
@@ -156,6 +156,15 @@ pub motion_pipeline::StreamConfig::limits: geometry::frontend::VelocityLimits
 pub motion_pipeline::StreamConfig::max_buffer_moves: usize
 pub motion_pipeline::StreamConfig::max_extrude_only_accel_mm_s2: f64
 pub motion_pipeline::StreamConfig::max_extrude_only_velocity_mm_s: f64
+pub struct motion_pipeline::WorkerPool
+impl motion_pipeline::WorkerPool
+pub fn motion_pipeline::WorkerPool::new() -> Self
+impl core::default::Default for motion_pipeline::WorkerPool
+pub fn motion_pipeline::WorkerPool::default() -> Self
+impl core::ops::drop::Drop for motion_pipeline::WorkerPool
+pub fn motion_pipeline::WorkerPool::drop(&mut self)
+impl geometry::velocity::FanOut for motion_pipeline::WorkerPool
+pub fn motion_pipeline::WorkerPool::map_jobs<T: core::marker::Send>(&self, usize, usize, impl core::ops::function::Fn(usize) -> T + core::marker::Sync) -> alloc::vec::Vec<T>
 pub const motion_pipeline::CONTIGUITY_EPS_MM: f64
 pub const motion_pipeline::SHAPER_INBOX_CAP: usize
 pub fn motion_pipeline::advance_odometer(&mut [f64], &geometry::frontend::Move)
