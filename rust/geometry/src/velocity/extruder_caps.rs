@@ -119,7 +119,7 @@ pub(super) fn extruder_capped(
         }
     }
     let demand = Demand {
-        ratio: budgeted_ratio(ratios.own),
+        ratio: budgeted_ratio(ratios.at_joins),
         slope: caps.advance_slope_s,
         curvature: caps.advance_curvature_s2_per_mm,
         path_gain,

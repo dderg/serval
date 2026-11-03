@@ -185,18 +185,21 @@ fn an_unshaped_leader_spends_the_budget_the_shaped_ones_leave() {
 }
 
 #[test]
-fn travel_next_to_an_extrusion_keeps_the_ramped_advance_steps_within_the_allowance() {
+fn travel_next_to_an_extrusion_takes_the_budget_of_the_extrusion_its_joins_carry() {
     let caps = unshaped_z(1.0);
     let ratios = ExtrudingRatios {
         own: 0.0,
         at_joins: RATIO,
     };
-    let (ceiling, accel) = extruder_capped(&climbing(), &caps, ratios, 0.0, (150.0, 3000.0));
-    assert_eq!(ceiling, 150.0);
-    let exact = 1.0 / (2.0 * 0.5 * RATIO / 101.0_f64.sqrt());
-    assert!((accel - exact).abs() < 1e-9 * exact);
-    let flat = extruder_capped(&line_x(10.0), &caps, ratios, 0.0, (150.0, 3000.0));
-    assert_eq!(flat, (150.0, 3000.0));
+    let exact = 2000.0 / (RATIO * (1.0 + 0.5 * SMOOTHED[0]));
+    for segment in [climbing(), line_x(10.0)] {
+        let (ceiling, accel) = extruder_capped(&segment, &caps, ratios, 0.0, (150.0, 3000.0));
+        assert_eq!(ceiling, 150.0);
+        assert!(
+            (accel - exact).abs() < 1e-9 * exact,
+            "{accel} against {exact}"
+        );
+    }
 }
 
 #[test]
@@ -283,8 +286,9 @@ fn the_planner_caps_the_climbing_travel_after_an_extrusion_on_an_unshaped_leader
             .map(|sample| sample.a.abs())
             .fold(0.0, f64::max)
     };
+    let cap = 2000.0 / (RATIO * (1.0 + 0.5 * SMOOTHED[0]));
     let z_share = 5.0 / 2525.0_f64.sqrt();
-    let cap = 1.0 / (2.0 * 0.5 * RATIO * z_share);
+    assert!(velocity_step(&extruder, RATIO, cap, z_share) <= 1.0);
     assert!(
         (peak_on(1) - cap).abs() < 1e-6 * cap,
         "{} against {cap}",
