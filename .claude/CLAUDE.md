@@ -106,6 +106,34 @@ engine whose id differs from the tree its `.so` sits in, or that has none, with
 `motion`/`engine_build` event; `tools/bench/deploy.py` records `rust_build_id` in the deploy
 identity. An engine built outside a git tree reports `unknown` and is refused by the tools.
 
+# Starting and shipping a change
+
+Start in a warm worktree: `scripts/wt.sh new <topic>` prints the path of an idle pool
+worktree (`~/Developer/serval-pool-N`, detached and clean) switched to a new branch cut
+from `origin/main`, creating one only when none is idle. A fresh worktree's first
+`ci.sh quick` is ~250-310 s of cold compile; a reused pool worktree with a one-crate
+edit took 131 s under load 60 (cold 310 s on the same box), and ~40 s when nothing
+changed. `land-pr.sh` returns a pool worktree to idle (detached at `origin/main`, its
+branch deleted) instead of removing it. Other worktree names are removed after landing
+as before.
+
+Ship with one command from the branch's worktree: `python3 scripts/ship.py --title T
+--body-file F [--expect SPEC --accept-msg FILE]`. It refuses a dirty tree, merges
+`origin/main` (naming conflicted files), runs `cargo fmt` and `ruff format` (committing
+the result), `ci.sh quick` (+ `ci.sh py` when klippy/, test/ or Python under tools/ or
+scripts/ changed), then `land_queue.py --branch`: snapshot review against `origin/main`
+(nothing may move without `--expect`; with it every case must be EXPECTED and is accepted
+from the message file), then `land-pr.sh`. Do not hand-roll fetch/merge/fmt/clippy/
+review/accept/land sequences; they were ~10 calls per landing across 64 landings.
+
+Edit tool failures are 23% of all edit calls in the audited sessions (164 of 701), each
+costing a re-read and a retry: the causes are anchoring to lines the last read did not
+display (a partial range, a grep hit) and a stale file tag after another edit. Read the
+exact range you edit with the same call that gave you the tag, send all changes to a file
+in one `edit`, and take the tag from the previous edit's response. Do not fall back to
+`python3 - <<EOF` replace scripts (261 in those sessions): they skip the anchors that make
+edits reviewable and silently match more than you meant.
+
 # Never work in ~/Developer/serval
 
 `~/Developer/serval` is the shared checkout: it stays on `main` tracking `origin/main`

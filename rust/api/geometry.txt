@@ -45,6 +45,7 @@ pub geometry::fitter::UnblendReason::ZeroDeviation
 pub struct geometry::fitter::CornerFitConfig
 pub geometry::fitter::CornerFitConfig::extrusion_ramp_rel_tol: f64
 pub geometry::fitter::CornerFitConfig::ramp_accel_budget_mm_s2: f64
+pub geometry::fitter::CornerFitConfig::seam_velocity_step_mm_s: f64
 pub geometry::fitter::CornerFitConfig::theta_max_rad: f64
 pub geometry::fitter::CornerFitConfig::theta_min_rad: f64
 impl core::default::Default for geometry::CornerFitConfig
@@ -71,6 +72,7 @@ pub fn geometry::fitter::RunFit::pieces(&self, &geometry::frontend::Move, &geome
 pub fn geometry::fitter::RunFit::tail_boundary_trim(&self) -> f64
 pub fn geometry::fitter::RunFit::tail_consumption(&self) -> f64
 pub fn geometry::fitter::RunFit::tail_line_trim(&self) -> f64
+pub const geometry::fitter::SEAM_VELOCITY_STEP_MM_S: f64
 pub fn geometry::fitter::arc_candidate_fits(&[geometry::frontend::Move], geometry::CornerFitConfig) -> bool
 pub fn geometry::fitter::blend_moves(&geometry::fitter::JunctionBlend, &geometry::frontend::Move, &geometry::frontend::Move) -> core::result::Result<alloc::vec::Vec<geometry::frontend::Move>, geometry::fitter::FitError>
 pub fn geometry::fitter::consumption_moves(&geometry::fitter::FacetConsumption, &geometry::frontend::Move, &[&geometry::frontend::Move], &geometry::frontend::Move) -> core::result::Result<alloc::vec::Vec<geometry::frontend::Move>, geometry::fitter::FitError>
@@ -765,6 +767,7 @@ pub fn geometry::velocity::VelocityError::fmt(&self, &mut core::fmt::Formatter<'
 pub struct geometry::CornerFitConfig
 pub geometry::CornerFitConfig::extrusion_ramp_rel_tol: f64
 pub geometry::CornerFitConfig::ramp_accel_budget_mm_s2: f64
+pub geometry::CornerFitConfig::seam_velocity_step_mm_s: f64
 pub geometry::CornerFitConfig::theta_max_rad: f64
 pub geometry::CornerFitConfig::theta_min_rad: f64
 impl core::default::Default for geometry::CornerFitConfig
@@ -968,6 +971,7 @@ pub geometry::VelocityReport::stops: u32
 pub geometry::VelocityReport::traversal_time_s: f64
 pub const geometry::CORNER_DEVIATION_SCV_FACTOR: f64
 pub const geometry::MIN_DEVICE_INTERVAL_S: f64
+pub const geometry::SEAM_VELOCITY_STEP_MM_S: f64
 pub trait geometry::FanOut
 pub fn geometry::FanOut::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
 impl geometry::velocity::FanOut for geometry::velocity::Serial

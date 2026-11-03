@@ -18,6 +18,8 @@ PI_CONFIG = "printer_data/config/printer.cfg"
 PI_LOGS = "printer_data/logs"
 REPO_CFG = Path(__file__).with_name("printer.cfg")
 READY_TIMEOUT_S = 60.0
+SCP_ATTEMPTS = 3
+SCP_RETRY_DELAY_S = 2.0
 FORBIDDEN_PINS = {
     "PA13": "F401 SWD data pin",
     "PA14": "F401 SWD clock pin",
@@ -75,16 +77,34 @@ def printer_state() -> str:
     return http("GET", "/printer/info")["state"]
 
 
-def wait_ready() -> None:
+def wait_state(accepted: tuple[str, ...]) -> str:
     deadline = time.monotonic() + READY_TIMEOUT_S
+    state = "unreachable"
     while time.monotonic() < deadline:
         try:
-            if printer_state() == "ready":
-                return
+            state = printer_state()
         except OSError:
-            pass
+            state = "unreachable"
+        if state in accepted:
+            return state
         time.sleep(1)
-    raise BenchError("printer did not become ready")
+    raise BenchError(
+        f"printer did not reach {'/'.join(accepted)} within "
+        f"{READY_TIMEOUT_S:.0f} s (last state: {state})"
+    )
+
+
+def wait_ready() -> None:
+    wait_state(("ready",))
+
+
+def wait_settled() -> str:
+    return wait_state(("ready", "shutdown", "error"))
+
+
+def ensure_ready() -> None:
+    if wait_settled() != "ready":
+        firmware_restart()
 
 
 def firmware_restart() -> None:
@@ -126,7 +146,7 @@ def klipper_pid() -> int:
 def restart_klipper() -> None:
     ssh("sudo systemctl restart klipper")
     time.sleep(2)
-    wait_ready()
+    ensure_ready()
 
 
 def ssh(command: str) -> str:
@@ -140,17 +160,31 @@ def ssh(command: str) -> str:
     return result.stdout
 
 
+def _scp(args: list[str]) -> None:
+    errors = []
+    for attempt in range(SCP_ATTEMPTS):
+        if attempt:
+            time.sleep(SCP_RETRY_DELAY_S)
+        result = subprocess.run(args, capture_output=True, text=True)
+        if result.returncode == 0:
+            return
+        errors.append(f"exit {result.returncode}: {result.stderr.strip()}")
+    raise BenchError(
+        f"{' '.join(args)} failed after {SCP_ATTEMPTS} attempts: "
+        + " | ".join(errors)
+    )
+
+
 def scp_to_pi(local: Path, remote: str) -> None:
-    subprocess.run(["scp", "-q", str(local), f"{PI_SSH}:{remote}"], check=True)
+    _scp(["scp", "-q", str(local), f"{PI_SSH}:{remote}"])
 
 
 def scp_from_pi(remote: str, local: Path, recursive: bool = False) -> None:
-    args = (
+    _scp(
         ["scp", "-q"]
         + (["-r"] if recursive else [])
         + [f"{PI_SSH}:{remote}", str(local)]
     )
-    subprocess.run(args, check=True)
 
 
 def validate_config(text: str) -> None:
@@ -174,6 +208,6 @@ def push_config(config: Path = REPO_CFG) -> bool:
 
 
 def prepare_printer(config: Path = REPO_CFG) -> None:
-    wait_ready()
+    wait_settled()
     push_config(config)
     firmware_restart()
