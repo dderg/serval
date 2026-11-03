@@ -17,7 +17,7 @@ use crate::path::{CurvatureProfile, Line};
 use crate::segment::FollowerDemand;
 use vec3::{cross, dot, turn_normal};
 
-pub use config::CornerFitConfig;
+pub use config::{CornerFitConfig, SEAM_VELOCITY_STEP_MM_S};
 pub use move_ops::{
     blend_moves, consumption_moves, is_travel, merge_collinear_lines, spatial_end, spatial_start,
     trim_line_move,
@@ -43,7 +43,12 @@ pub fn seam_requires_stop(prev: &Move, next: &Move, config: CornerFitConfig) -> 
     };
     let t_in = a.heading_at(a.s_len());
     let t_out = b.heading_at(0.0);
-    if libm::acos(dot(t_in, t_out).clamp(-1.0, 1.0)) > config.theta_min_rad {
+    if !passes_as_collinear(
+        libm::acos(dot(t_in, t_out).clamp(-1.0, 1.0)),
+        prev,
+        next,
+        config,
+    ) {
         return true;
     }
     emit::extrusion_step(
@@ -51,6 +56,20 @@ pub fn seam_requires_stop(prev: &Move, next: &Move, config: CornerFitConfig) -> 
         &next.segment.followers,
         config.extrusion_ramp_rel_tol,
     )
+}
+
+/// Whether a junction turning `theta` may pass unblended: under the
+/// collinear threshold, and stepping the velocity by no more than the seam
+/// budget at the fastest the two pieces may cross it.
+fn passes_as_collinear(theta: f64, prev: &Move, next: &Move, config: CornerFitConfig) -> bool {
+    let fastest = [prev, next]
+        .iter()
+        .map(|m| m.feedrate_mm_s.min(m.limits.max_velocity_mm_s))
+        .fold(f64::INFINITY, f64::min);
+    theta
+        <= config
+            .theta_min_rad
+            .min(config.seam_velocity_step_mm_s / fastest)
 }
 
 /// The fastest the planner can drive a piece: its feedrate, the machine cap,
@@ -657,7 +676,7 @@ fn classify_junction(
     let t_in = line_in.heading_at(line_in.s_len());
     let t_out = line_out.heading_at(0.0);
     let theta = libm::acos(dot(t_in, t_out).clamp(-1.0, 1.0));
-    if theta <= config.theta_min_rad {
+    if passes_as_collinear(theta, m_in, m_out, config) {
         return Ok(JunctionPlan::Unblended(UnblendReason::Collinear));
     }
     if theta >= config.theta_max_rad {

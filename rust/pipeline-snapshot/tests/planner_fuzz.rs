@@ -255,80 +255,15 @@ proptest! {
 proptest! {
     #![proptest_config(fresh_seed_config())]
 
-    /// Planar moves only until #618 and #619 close: z steps still break
-    /// the velocity plan under a tiny square-corner velocity and the seam
-    /// velocity budget at nearly collinear junctions.
     #[test]
     fn target_budgets_hold(
         limits in limits_strategy(),
-        moves in prop::collection::vec(move_strategy(false), 2..40),
+        moves in prop::collection::vec(move_strategy(true), 2..40),
     ) {
         let (_, report) = run_case(limits, &moves);
         prop_assert!(report.hard_ok(), "{report}");
         prop_assert!(report.target_ok(), "{report}");
     }
-}
-
-/// Found by `target_budgets_hold`: under a tiny square-corner velocity
-/// (0.016 mm/s), a 143° turn onto a move with a z step makes the velocity
-/// plan's member reconstruction fail with `Infeasible`. Travel only.
-#[test]
-#[ignore = "#618: velocity plan Infeasible under a tiny square-corner velocity with a z step"]
-fn tiny_scv_reversal_with_z_step_makes_velocity_plan_infeasible() {
-    let limits = FuzzLimits {
-        max_velocity: 20.0,
-        max_accel: 38054.58553915291,
-        square_corner_velocity: 0.01635739434334978,
-    };
-    let moves = [
-        MoveSpec {
-            turn: Turn::Absolute(0.0),
-            length_mm: 1.0,
-            feed_mm_s: 1.0,
-            extrude_ratio: 0.0,
-            z_step_mm: 0.0,
-        },
-        MoveSpec {
-            turn: Turn::Absolute(3.791313142220391),
-            length_mm: 1.0,
-            feed_mm_s: 1.0,
-            extrude_ratio: 0.0,
-            z_step_mm: -0.18976136796159132,
-        },
-    ];
-    let (_, report) = run_case(limits, &moves);
-    assert!(report.hard_ok(), "{report}");
-}
-
-/// Found by `target_budgets_hold`: a junction turning 0.89 mrad, under the
-/// fitter's collinear threshold, passes unblended at 207 mm/s under a zero
-/// corner budget, and z steps by 0.18 mm/s there. Travel only.
-#[test]
-#[ignore = "#619: a junction under the collinear threshold steps its velocity past the seam budget"]
-fn a_nearly_collinear_z_junction_keeps_the_seam_velocity_budget() {
-    let limits = FuzzLimits {
-        max_velocity: 314.47805824987176,
-        max_accel: 500.0,
-        square_corner_velocity: 0.0,
-    };
-    let moves = [
-        MoveSpec {
-            turn: Turn::Continue,
-            length_mm: 46.522523281975396,
-            feed_mm_s: 604.447037922063,
-            extrude_ratio: 0.0,
-            z_step_mm: 0.04119073092929801,
-        },
-        MoveSpec {
-            turn: Turn::Continue,
-            length_mm: 39.702781729279174,
-            feed_mm_s: 505.4380942226453,
-            extrude_ratio: 0.0,
-            z_step_mm: 0.0,
-        },
-    ];
-    let (_, report) = run_case(limits, &moves);
-    assert!(report.hard_ok() && report.target_ok(), "{report}");
 }
 
 /// Found by `hard_invariants_hold`: under a tiny square-corner velocity
@@ -756,6 +691,87 @@ fn a_micrometre_extrusion_between_a_fast_line_and_a_slow_travel_ramps_its_ratio(
             0.09079521363142903,
         ),
         planar(Turn::Absolute(4.323424096437546), 1.0, 1.0, 0.0),
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok(), "{report}");
+}
+
+/// #619, found by `target_budgets_hold`: a junction turning 0.89 mrad, under
+/// the fitter's collinear threshold, passed unblended at 207 mm/s under a
+/// zero corner budget, and z stepped by 0.18 mm/s there. Travel only. A
+/// junction now passes as collinear only when `v·θ` at the fastest its
+/// pieces may cross it stays within the seam budget.
+#[test]
+fn a_nearly_collinear_z_junction_keeps_the_seam_velocity_budget() {
+    let limits = FuzzLimits {
+        max_velocity: 314.47805824987176,
+        max_accel: 500.0,
+        square_corner_velocity: 0.0,
+    };
+    let moves = [
+        MoveSpec {
+            turn: Turn::Continue,
+            length_mm: 46.522523281975396,
+            feed_mm_s: 604.447037922063,
+            extrude_ratio: 0.0,
+            z_step_mm: 0.04119073092929801,
+        },
+        MoveSpec {
+            turn: Turn::Continue,
+            length_mm: 39.702781729279174,
+            feed_mm_s: 505.4380942226453,
+            extrude_ratio: 0.0,
+            z_step_mm: 0.0,
+        },
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok() && report.target_ok(), "{report}");
+}
+
+/// #619 in the plane: a 0.6 mrad heading change between two fast extrusions
+/// under a corner budget blends instead of stepping 0.18 mm/s.
+#[test]
+fn a_nearly_collinear_planar_junction_at_speed_keeps_the_seam_velocity_budget() {
+    let limits = FuzzLimits {
+        max_velocity: 300.0,
+        max_accel: 5000.0,
+        square_corner_velocity: 5.0,
+    };
+    let moves = [
+        planar(Turn::Absolute(0.0), 40.0, 300.0, 0.05),
+        planar(Turn::Absolute(6e-4), 40.0, 300.0, 0.05),
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok(), "{report}");
+    let spikes = xy_smoothness_spikes(&report);
+    assert!(spikes.is_empty(), "{spikes:?}\n{report}");
+}
+
+/// #618: under a 0.016 mm/s square-corner velocity, a travel reversal that
+/// steps z planned a member its own rails could not join, and the planner
+/// panicked with `Infeasible`.
+#[test]
+fn tiny_scv_reversal_with_z_step_plans() {
+    let limits = FuzzLimits {
+        max_velocity: 20.0,
+        max_accel: 38_054.585_539_152_91,
+        square_corner_velocity: 0.016_357_394_343_349_78,
+    };
+    let moves = [
+        MoveSpec {
+            turn: Turn::Absolute(0.0),
+            length_mm: 1.0,
+            feed_mm_s: 1.0,
+            extrude_ratio: 0.0,
+            z_step_mm: 0.0,
+        },
+        MoveSpec {
+            turn: Turn::Absolute(3.791_313_142_220_391),
+            length_mm: 1.0,
+            feed_mm_s: 1.0,
+            extrude_ratio: 0.0,
+            z_step_mm: -0.189_761_367_961_591_32,
+        },
     ];
     let (_, report) = run_case(limits, &moves);
     assert!(report.hard_ok(), "{report}");
