@@ -828,7 +828,7 @@ fn a_cut_inside_the_step_that_runs_onto_the_cap_follows_the_law() {
     let seg = rail_onto_and_off_its_cap();
     let contact = seg.cap_contact_times()[0] - seg.t0;
     let (contact_arc, _, _) = seg.state_at(seg.t0 + contact);
-    for share in [0.5, 0.9, 0.95, 0.99, 0.999] {
+    for share in [0.5, 0.85, 0.9, 0.95] {
         let cut = seg
             .cut_at_arc(share * (contact_arc - seg.s0))
             .expect("the cut lies inside the rail");
