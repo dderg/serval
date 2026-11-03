@@ -2824,30 +2824,38 @@ const INTERPOLANT_SUSPICION_SHARE: f64 = 0.9;
 const INTERPOLANT_REFINE_SHARE: f64 = 0.5;
 const GOLDEN_SECTION_STEPS: u32 = 16;
 
-fn golden_section_peak(value: impl Fn(f64) -> f64, mut low: f64, mut high: f64) -> (f64, f64) {
+fn golden_section_peak<E>(
+    mut value: impl FnMut(f64) -> Result<f64, E>,
+    mut low: f64,
+    mut high: f64,
+) -> Result<(f64, f64), E> {
     let shrink = 0.5 * (5.0_f64.sqrt() - 1.0);
     let mut left = high - shrink * (high - low);
     let mut right = low + shrink * (high - low);
-    let (mut left_value, mut right_value) = (value(left), value(right));
+    let (mut left_value, mut right_value) = (value(left)?, value(right)?);
     for _ in 0..GOLDEN_SECTION_STEPS {
         if left_value >= right_value {
             high = right;
             (right, right_value) = (left, left_value);
             left = high - shrink * (high - low);
-            left_value = value(left);
+            left_value = value(left)?;
         } else {
             low = left;
             (left, left_value) = (right, right_value);
             right = low + shrink * (high - low);
-            right_value = value(right);
+            right_value = value(right)?;
         }
     }
-    if left_value >= right_value {
+    Ok(if left_value >= right_value {
         (left, left_value)
     } else {
         (right, right_value)
-    }
+    })
 }
+
+/// Exact samples a suspicious stretch is scanned at before its peak is
+/// searched: the error between the probes is not unimodal near a knot.
+const EXACT_PEAK_SCAN_POINTS: u32 = 8;
 
 const WITNESS_MAX_DEPTH: u32 = 6;
 
@@ -3021,16 +3029,44 @@ impl<S: TrackSignal> RungWitness<'_, S> {
         if coarse_peak <= INTERPOLANT_REFINE_SHARE * self.curvature_budget() {
             return Ok(None);
         }
-        let (peak_u, peak) = golden_section_peak(
-            interpolated,
+        let Ok((peak_u, peak)) = golden_section_peak(
+            |u| Ok::<_, std::convert::Infallible>(interpolated(u)),
             (coarse_u - spacing).max(-1.0),
             (coarse_u + spacing).min(1.0),
         );
         if peak <= INTERPOLANT_SUSPICION_SHARE * self.curvature_budget() {
             return Ok(None);
         }
-        let at_peak = self.exact_sample_at(peak_u)?;
-        Ok((at_peak.curvature_per_u2.abs() > self.curvature_budget()).then_some(peak_u))
+        let gap = LADDER_PROBES_U
+            .windows(2)
+            .find(|gap| peak_u <= gap[1])
+            .expect("the interpolant peak lies between the probes");
+        self.exact_witness_in(gap[0], gap[1])
+    }
+
+    /// Where the error between `low` and `high` leaves the tolerance, read
+    /// from exact samples: a scan, then a golden-section search around its
+    /// largest curvature miss. Spent only on stretches an estimate already
+    /// puts near the budget, where the estimate itself decides nothing.
+    fn exact_witness_in(&self, low: f64, high: f64) -> Result<Option<f64>, PostProcessError> {
+        let step = (high - low) / f64::from(EXACT_PEAK_SCAN_POINTS);
+        let mut scan_peak = (f64::NAN, 0.0);
+        for k in 0..EXACT_PEAK_SCAN_POINTS {
+            let u = nurbs::fmadd(f64::from(k) + 0.5, step, low);
+            let sample = self.exact_sample_at(u)?;
+            if !self.within(sample) {
+                return Ok(Some(u));
+            }
+            if sample.curvature_per_u2.abs() >= scan_peak.1 {
+                scan_peak = (u, sample.curvature_per_u2.abs());
+            }
+        }
+        let (peak_u, _) = golden_section_peak(
+            |u| Ok(self.exact_sample_at(u)?.curvature_per_u2.abs()),
+            (scan_peak.0 - step).max(low),
+            (scan_peak.0 + step).min(high),
+        )?;
+        Ok((!self.within(self.exact_sample_at(peak_u)?)).then_some(peak_u))
     }
 
     fn over_pieces(
@@ -3106,15 +3142,12 @@ impl<S: TrackSignal> RungWitness<'_, S> {
         right: ErrorSample,
         depth: u32,
     ) -> Result<Option<f64>, PostProcessError> {
-        if left.hermite_curvature_peak_to(right) <= self.curvature_budget() {
-            return match left.hermite_curvature_vertex_to(right) {
-                Some((u, vertex))
-                    if vertex > INTERPOLANT_SUSPICION_SHARE * self.curvature_budget() =>
-                {
-                    Ok((!self.within(self.exact_sample_at(u)?)).then_some(u))
-                }
-                _ => Ok(None),
-            };
+        let estimated_peak = left.hermite_curvature_peak_to(right);
+        if estimated_peak <= INTERPOLANT_SUSPICION_SHARE * self.curvature_budget() {
+            return Ok(None);
+        }
+        if estimated_peak <= self.curvature_budget() {
+            return self.exact_witness_in(left.position.u, right.position.u);
         }
         let u = 0.5 * (left.position.u + right.position.u);
         let mid = self.exact_sample_at(u)?;
