@@ -352,7 +352,7 @@ jobs:
   # by construction — healthy code clears 2.5x on the slowest runner, the
   # anchor-underrun class lands under 1x — so this can block merges without
   # flaking. The same print then replays live on every tools/bench/configs
-  # config and must finish. The gcode path also triggers the `rust` filter
+  # config and machine profile and must finish. The gcode path also triggers the `rust` filter
   # via scripts/ci.sh.
   rust-replay-budget:
     needs: changes
