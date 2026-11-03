@@ -55,6 +55,34 @@ def test_ratio_ramp_time_must_be_above_zero():
         load("[axis e]\nfollows: x,y,z\nratio_ramp_time: 0\n")
 
 
+def test_extruder_limits_are_read_from_the_follower_axis():
+    consumed = configfile._config_doc.read_motion_settings(
+        MINIMAL
+        + SPATIAL
+        + "[axis e]\nfollows: x,y,z\nmax_velocity: 60\nmax_accel: 8000\n"
+    )[3]
+    assert ("axis e", "max_velocity", 60.0) in consumed
+    assert ("axis e", "max_accel", 8000.0) in consumed
+
+
+def test_extruder_limits_must_be_above_zero():
+    with pytest.raises(configfile.error, match="max_accel.*above 0"):
+        load("[axis e]\nfollows: x,y,z\nmax_accel: 0\n")
+
+
+def test_the_instantaneous_corner_velocity_is_read_from_the_follower_axis():
+    consumed = configfile._config_doc.read_motion_settings(
+        MINIMAL
+        + SPATIAL
+        + "[axis e]\nfollows: x,y,z\ninstantaneous_corner_velocity: 2.5\n"
+    )[3]
+    assert ("axis e", "instantaneous_corner_velocity", 2.5) in consumed
+    with pytest.raises(
+        configfile.error, match="instantaneous_corner_velocity.*above 0"
+    ):
+        load("[axis e]\nfollows: x,y,z\ninstantaneous_corner_velocity: 0\n")
+
+
 def make_toolhead():
     return Motion.__new__(Motion)
 
