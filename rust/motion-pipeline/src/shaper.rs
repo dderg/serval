@@ -4049,18 +4049,18 @@ fn edge_inset(h: f64, cubic_floor: f64, absorbed: f64) -> f64 {
 
 /// The velocity and acceleration a span is anchored to at one edge. Both
 /// are read at the seam itself, so neighbouring pieces meet with matching
-/// state wherever the signal is smooth — unless the acceleration past the
-/// edge's coalesced sliver, extrapolated back to the seam, misses the seam
-/// reading by more than the fit tolerance: then a break hides in the
-/// sliver, and the piece anchors to that extrapolation, the break's far
-/// side as it would read at the seam. The extrapolation runs through a
-/// second read as far again past the sliver, so a smooth signal's jerk
-/// across a wide sliver cancels and only its snap times the squared sliver
-/// remains; the inset is at most a quarter span, so that read stays inside
-/// the span. At a square-root onset the signal declares on the edge the
-/// acceleration is steep past any extrapolation but hides no break: the
-/// edge anchors to the seam reading, where the span across the onset
-/// anchors too.
+/// state wherever the signal is smooth — unless a break hides in the edge's
+/// sliver: then the piece anchors to the acceleration past the sliver,
+/// extrapolated back to the seam, the break's far side as it would read
+/// there. The extrapolation runs through a second read as far again past
+/// the sliver, so a smooth signal's jerk across a wide sliver cancels; the
+/// inset is at most a quarter span, so that read stays inside the span. Its
+/// miss of the seam reading only flags a candidate break: a smooth edge
+/// whose jerk changes within the sliver misses as well, so the candidate is
+/// confirmed by [`sliver_hides_break`]. At a square-root onset the signal
+/// declares on the edge the acceleration is steep past any extrapolation
+/// but hides no break: the edge anchors to the seam reading, where the span
+/// across the onset anchors too.
 fn edge_velocity_and_acceleration<S: TrackSignal>(
     sig: &S,
     axis: usize,
@@ -4084,7 +4084,16 @@ fn edge_velocity_and_acceleration<S: TrackSignal>(
     let beyond = nurbs::fmadd(2.0, past_sliver - seam, seam);
     let beyond_acceleration = exact_value(axis, sig.second_deriv(beyond), beyond)?;
     let extrapolated_to_seam = 2.0 * past_acceleration - beyond_acceleration;
-    if (extrapolated_to_seam - seam_acceleration).abs() > fit_tol.accel_mm_s2 {
+    if (extrapolated_to_seam - seam_acceleration).abs() > fit_tol.accel_mm_s2
+        && sliver_hides_break(
+            sig,
+            axis,
+            (seam, seam_acceleration),
+            (past_sliver, past_acceleration),
+            (beyond, beyond_acceleration),
+            fit_tol,
+        )?
+    {
         return Ok(EdgeAnchor {
             acceleration: extrapolated_to_seam,
             past_sliver: true,
@@ -4092,6 +4101,39 @@ fn edge_velocity_and_acceleration<S: TrackSignal>(
         });
     }
     Ok(at_seam)
+}
+
+/// Whether the acceleration between the `seam` and `past` reads jumps rather
+/// than bends. Less the line through the `past` and `beyond` reads, the
+/// signal misses at the seam by what the extrapolation missed and not at
+/// all past the sliver; bisecting toward where it crosses half that miss
+/// closes in on a break, whose step stays across the crossing however close
+/// the reads, while a smooth signal's change between them vanishes.
+fn sliver_hides_break<S: TrackSignal>(
+    sig: &S,
+    axis: usize,
+    seam: (f64, f64),
+    past: (f64, f64),
+    beyond: (f64, f64),
+    fit_tol: FitTol,
+) -> Result<bool, PostProcessError> {
+    let slope = (beyond.1 - past.1) / (beyond.0 - past.0);
+    let residual =
+        |(t, acceleration): (f64, f64)| acceleration - nurbs::fmadd(slope, t - past.0, past.1);
+    let half_miss = 0.5 * residual(seam);
+    let (mut near, mut far) = (seam, past);
+    loop {
+        let mid = 0.5 * near.0 + 0.5 * far.0;
+        if mid == near.0 || mid == far.0 {
+            return Ok((far.1 - near.1).abs() > fit_tol.accel_mm_s2);
+        }
+        let read = (mid, exact_value(axis, sig.second_deriv(mid), mid)?);
+        if (residual(read) - half_miss) * half_miss > 0.0 {
+            near = read;
+        } else {
+            far = read;
+        }
+    }
 }
 
 /// The state a span edge anchors its rungs to, and whether any of it is
