@@ -40,6 +40,7 @@ fn audit_floor_quintic_at_onset(contacts: &[f64]) -> Vec<super::FitViolation> {
             accepted_at_floor: true,
             cubic_floor: 0.62e-6,
             edge_insets: (0.0, 0.0),
+            exact: None,
         },
     );
     take_violations()
@@ -123,6 +124,7 @@ fn audit_flat_piece_over_pinned_parabola(
             accepted_at_floor: false,
             cubic_floor: 1e-9,
             edge_insets: (0.0, 0.0),
+            exact: None,
         },
     );
     take_violations()

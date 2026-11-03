@@ -1197,28 +1197,55 @@ const CONTACT_BISECTIONS: usize = 64;
 /// contact whose approach, integrated back from the cap, lands on `w` at
 /// `s`. `None` when the step does not reach the cap.
 fn cap_contact_in_step(law: &ScalarLaw, s: f64, w: f64, h: f64) -> Option<(f64, f64)> {
-    let cap = law.cap_speed_squared(s + h)?;
     let landing = |reach: f64| -> Option<f64> {
         let cap = law.cap_speed_squared(s + reach)?;
         Some(cap + approach_increment(law, s + reach, reach, cap) - w)
     };
-    if landing(h)? > 0.0 || cap <= 0.0 {
+    let (mut short, mut short_landing) = (0.0, landing(0.0)?);
+    let (mut reaches, mut reaches_landing) = (h, landing(h)?);
+    if reaches_landing > 0.0 || short_landing <= 0.0 {
         return None;
     }
-    let (mut short, mut reaches) = (0.0, h);
+    let mut kept_side = 0_i8;
     for _ in 0..CONTACT_BISECTIONS {
-        let middle = 0.5 * (short + reaches);
+        let secant = reaches
+            - reaches_landing * (reaches - short) / (reaches_landing - short_landing);
+        let middle = if secant > short && secant < reaches {
+            secant
+        } else {
+            0.5 * (short + reaches)
+        };
         if middle <= short || middle >= reaches {
             break;
         }
-        if landing(middle)? > 0.0 {
-            short = middle;
+        let middle_landing = landing(middle)?;
+        if middle_landing > 0.0 {
+            (short, short_landing) = (middle, middle_landing);
+            if kept_side == 1 {
+                reaches_landing *= 0.5;
+            }
+            kept_side = 1;
         } else {
-            reaches = middle;
+            (reaches, reaches_landing) = (middle, middle_landing);
+            if kept_side == -1 {
+                short_landing *= 0.5;
+            }
+            kept_side = -1;
+            if middle_landing == 0.0 {
+                break;
+            }
+        }
+        if reaches - short <= CONTACT_ARC_RESOLUTION * (s.abs() + h) {
+            break;
         }
     }
     Some((reaches, law.cap_speed_squared(s + reaches)?))
 }
+
+/// How finely a contact's arc is located, relative to the arc it sits at:
+/// far below any step the rail is integrated in, and above the ulp noise
+/// the landing reads with.
+const CONTACT_ARC_RESOLUTION: f64 = 1e-13;
 
 /// The change in `v²` from the cap at `s` back over `h` of arc, the mirror
 /// of [`departure_increment`]: the approach reaches the cap as

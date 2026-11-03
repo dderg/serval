@@ -67,6 +67,9 @@ pub(crate) struct AcceptedPiece<'a> {
     /// How far inside each edge the ladder read the piece's anchoring
     /// state; what lies closer to an edge is not resolved by the fit.
     pub edge_insets: (f64, f64),
+    /// The exact polynomials the fit proved the piece against, where the
+    /// signal has them.
+    pub exact: Option<&'a [crate::shaper::ExactPiece]>,
 }
 
 pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
@@ -76,6 +79,23 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
     }
     let acceleration_scale = (2.0 / h) * (2.0 / h);
     let piece_tol = piece.fit_tol.for_piece(h);
+    let resolved = (
+        piece.t0 + piece.edge_insets.0,
+        piece.t1 - piece.edge_insets.1,
+    );
+    let proven = proven_error_bounds(
+        sig,
+        piece.exact,
+        piece.mono_u,
+        (piece.t0, piece.t1),
+        resolved,
+        piece_tol,
+    );
+    if proven.is_some_and(|[position, acceleration]| {
+        position <= piece_tol.pos_mm && acceleration <= piece_tol.accel_mm_s2
+    }) {
+        return;
+    }
     let (mut position, mut acceleration, mut worst_u) = (0.0_f64, 0.0_f64, 0.0);
     let (start_inset, end_inset) = (piece.edge_insets.0 / h, piece.edge_insets.1 / h);
     for k in 0..AUDIT_POINTS {
@@ -102,13 +122,7 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
             worst_u = u;
         }
     }
-    let resolved = (
-        piece.t0 + piece.edge_insets.0,
-        piece.t1 - piece.edge_insets.1,
-    );
-    if let Some([position_bound, acceleration_bound]) =
-        proven_error_bounds(sig, piece.mono_u, (piece.t0, piece.t1), resolved, piece_tol)
-    {
+    if let Some([position_bound, acceleration_bound]) = proven {
         position = position_bound / piece_tol.pos_mm;
         acceleration = acceleration_bound / piece_tol.accel_mm_s2;
     }

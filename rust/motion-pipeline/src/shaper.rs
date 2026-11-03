@@ -825,24 +825,25 @@ fn materialize_changed_sources(
 const AUDIT_ENCLOSURE_SHARE: f64 = 1.0 / 1024.0;
 
 /// Proven upper bounds on a fitted piece's position and acceleration error
-/// over `resolved`, from the signal's exact polynomials or enclosure there.
+/// over `resolved`: against the exact polynomials the fit proved it by
+/// where it had them, else against the signal's enclosure there.
 #[cfg(feature = "fit-audit")]
 pub(crate) fn proven_error_bounds<S: TrackSignal>(
     sig: &S,
+    exact: Option<&[ExactPiece]>,
     mono_u: &[f64],
     (t0, t1): (f64, f64),
     resolved: (f64, f64),
     tol: FitTol,
 ) -> Option<[f64; 2]> {
+    let piece = FittedPiece { mono_u, t0, t1 };
+    if let Some(exact) = exact {
+        return Some(hull::error_bounds(exact, piece, resolved, tol));
+    }
     let accuracy =
         [tol.pos_mm, f64::INFINITY, tol.accel_mm_s2].map(|budget| budget * AUDIT_ENCLOSURE_SHARE);
     let enclosure = sig.enclosure_on(resolved.0, resolved.1, accuracy)?;
-    Some(hull::error_bounds(
-        &enclosure,
-        FittedPiece { mono_u, t0, t1 },
-        resolved,
-        tol,
-    ))
+    Some(hull::error_bounds(&enclosure, piece, resolved, tol))
 }
 
 /// An analytic source's materialize seeds — its ends, phase seams and
@@ -4340,6 +4341,8 @@ fn refine_span_against<S: TrackSignal>(
         edge_inset(t1 - t0, floors.cubic, slivers.start),
         edge_inset(t1 - t0, floors.cubic, slivers.end),
     );
+    #[cfg(feature = "fit-audit")]
+    let audited_exact = exact.map(|exact| exact.over(t0 + edge_insets.0, t1 - edge_insets.1));
     if failure.is_none() {
         #[cfg(feature = "fit-audit")]
         crate::fit_audit::check(
@@ -4354,6 +4357,7 @@ fn refine_span_against<S: TrackSignal>(
                 accepted_at_floor: false,
                 cubic_floor: floors.cubic,
                 edge_insets,
+                exact: audited_exact,
             },
         );
         out.push(exact_piece(&mono_u, t0, t1, t1 - t0));
@@ -4399,10 +4403,8 @@ fn refine_span_against<S: TrackSignal>(
                     mono_u: &mono_u,
                     accepted_at_floor: true,
                     cubic_floor: floors.cubic,
-                    edge_insets: (
-                        edge_inset(t1 - t0, floors.cubic, slivers.start),
-                        edge_inset(t1 - t0, floors.cubic, slivers.end),
-                    ),
+                    edge_insets,
+                    exact: audited_exact,
                 },
             );
             out.push(exact_piece(&mono_u, t0, t1, t1 - t0));
