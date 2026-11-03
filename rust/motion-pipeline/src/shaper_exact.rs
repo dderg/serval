@@ -245,6 +245,7 @@ struct ExactKernelPiece {
 pub(crate) struct ExactKernel {
     pieces: Vec<ExactKernelPiece>,
     cuts: Vec<f64>,
+    narrowest_piece: f64,
 }
 
 impl ExactKernel {
@@ -272,6 +273,11 @@ impl ExactKernel {
         Self {
             pieces,
             cuts: trajectory::ShapedSignal::kernel_cut_boundaries(kernel).collect(),
+            narrowest_piece: kernel
+                .pieces
+                .iter()
+                .map(|piece| piece.u_end - piece.u_start)
+                .fold(f64::INFINITY, f64::min),
         }
     }
 }
@@ -411,7 +417,10 @@ impl ExactConvolution<'_> {
     /// The signal's exact polynomial on every real sub-interval of
     /// `[lo, hi]` between its breaks that holds a float time, or `None`
     /// where the convolution reads history or lookahead the table does
-    /// not hold.
+    /// not hold. A sub-interval wider than the kernel's narrowest piece is
+    /// cut into chunks no wider: the slivers carry the kernel's series
+    /// across the chunk, which is as well conditioned as the kernel only
+    /// within the kernel's own width.
     pub(crate) fn pieces_over(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
         assert!(
             lo <= hi,
@@ -446,18 +455,30 @@ impl ExactConvolution<'_> {
             if first_inside > last_inside {
                 continue;
             }
-            let center = (first_inside + 0.5 * (last_inside - first_inside))
-                .clamp(first_inside, last_inside);
             let piece_lo = next_toward(first_inside, f64::NEG_INFINITY).max(lo);
             let piece_hi = next_toward(last_inside, f64::INFINITY).min(hi);
-            let radius = next_toward((center - piece_lo).max(piece_hi - center), f64::INFINITY);
-            pieces.push(ExactPiece {
-                lo: piece_lo,
-                hi: piece_hi,
-                center,
-                radius,
-                pva: self.polynomials_at(center, radius)?,
-            });
+            let chunks = ((piece_hi - piece_lo) / self.kernel.narrowest_piece)
+                .ceil()
+                .max(1.0);
+            let chunk_count = chunks as usize;
+            let chunk_edge = |chunk: usize| match chunk {
+                0 => piece_lo,
+                _ if chunk == chunk_count => piece_hi,
+                _ => piece_lo + (piece_hi - piece_lo) * (chunk as f64 / chunks),
+            };
+            for chunk in 0..chunk_count {
+                let (chunk_lo, chunk_hi) = (chunk_edge(chunk), chunk_edge(chunk + 1));
+                let center =
+                    (chunk_lo + 0.5 * (chunk_hi - chunk_lo)).clamp(first_inside, last_inside);
+                let radius = next_toward((center - chunk_lo).max(chunk_hi - center), f64::INFINITY);
+                pieces.push(ExactPiece {
+                    lo: chunk_lo,
+                    hi: chunk_hi,
+                    center,
+                    radius,
+                    pva: self.polynomials_at(center, radius)?,
+                });
+            }
         }
         Some(pieces)
     }
