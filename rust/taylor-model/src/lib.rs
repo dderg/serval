@@ -352,7 +352,7 @@ impl TaylorModel {
         deviation.coefficients[0] = 0.0;
         let reach = deviation.bound();
         let leading = upper(
-            TRIM_SHARE * (series[0].mid.abs() + series[1].mid.abs() * reach) + f64::MIN_POSITIVE,
+            UNIT_ROUNDING * (series[0].mid.abs() + series[1].mid.abs() * reach) + f64::MIN_POSITIVE,
         );
         let tail = |terms: usize| upper(tail(terms, reach));
         let terms = (1..series.len())
