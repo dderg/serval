@@ -1121,7 +1121,7 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<Vec<RailK
             }
         };
         if !law.in_cap_contact(lo.a) && law.in_cap_contact(step.hi.a) {
-            lay_approach(law, &mut layout, &lo, (s, s_next, h), step, last)?;
+            lay_approach(law, &mut layout, &lo, (s, s_next, h, w), step, last)?;
         } else if law.in_cap_contact(lo.a) && !law.in_cap_contact(step.hi.a) {
             let increment = departure_increment(law, s, h, w);
             let departure =
@@ -1144,16 +1144,21 @@ fn lay_approach(
     law: &ScalarLaw,
     layout: &mut RailLayout,
     lo: &RailState,
-    (s, s_next, h): (f64, f64, f64),
+    (s, s_next, h, w): (f64, f64, f64, f64),
     step: RailStep,
     last: bool,
 ) -> Option<()> {
     let approach_duration = |hi: &RailState, ds: f64| {
         departure_knot_duration(ds, (hi.v, -hi.a, hi.rate), (lo.v, -lo.a, lo.rate))
     };
-    let Some((reach, w_contact)) = cap_contact_in_step(law, s, lo.v * lo.v, h) else {
+    let Some((reach, w_contact)) = cap_contact_in_step(law, s, w, h) else {
         let duration = approach_duration(&step.hi, h);
-        layout.lay(s_next, s + h, RailStep { duration, ..step }, CapDeparture::FromHi);
+        layout.lay(
+            s_next,
+            s + h,
+            RailStep { duration, ..step },
+            CapDeparture::FromHi,
+        );
         return Some(());
     };
     let s_contact = s + reach;
@@ -1180,7 +1185,7 @@ fn lay_approach(
         last,
         departure_knot_duration,
     )?;
-    layout.lay(s_next, s + h, departure, CapDeparture::FromLo);
+    layout.lay(s_next, s_contact + rest, departure, CapDeparture::FromLo);
     Some(())
 }
 

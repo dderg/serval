@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc dba7c9d4bc76e6ea06cb5be936fffc4d89aa9aaa2212349462e9dc595f3139b7 # shrinks to case = PlanCase { moves: [Move { segment: PathSegment { spatial: Some(Line(Line { start: [0.0, 0.0, 0.0], end: [1.0, 0.0, 0.0] })), followers: [], virtual_path_mm: None }, feedrate_mm_s: 10.000000000000002, limits: VelocityLimits { max_velocity_mm_s: 600.0, accel_mm_s2: 100.00000000000004, corner_deviation_mm: 0.02, max_jerk_mm_s3: inf, max_z_velocity_mm_s: inf, max_z_accel_mm_s2: inf }, source: SourceRange { start_line: 1, end_line: 1 } }, Move { segment: PathSegment { spatial: Some(Clothoid(Clothoid { start_pose: [0.0, 0.0, 0.0], u: [1.0, 0.0, 0.0], v: [0.0, 1.0, 0.0], kappa_0: -44.14316237227975, sigma: 13.988722042650526, length: 1.7818308009578545 })), followers: [], virtual_path_mm: None }, feedrate_mm_s: 10.000000000000002, limits: VelocityLimits { max_velocity_mm_s: 600.0, accel_mm_s2: 100.00000000000004, corner_deviation_mm: 0.02, max_jerk_mm_s3: inf, max_z_velocity_mm_s: inf, max_z_accel_mm_s2: inf }, source: SourceRange { start_line: 2, end_line: 2 } }], stop_before: [false, false], entry: 0.0 }
