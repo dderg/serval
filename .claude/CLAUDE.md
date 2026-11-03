@@ -13,6 +13,18 @@
 
 - Unit tests live in a separate file from the tested code.
 
+# Release assertions
+
+`debug_assert!` does not exist in release builds, which are what the live path
+and the snapshot cdylib run (no CI job builds release with `debug-assertions`;
+tests run in the dev profile where they are on). An invariant whose violation
+would produce wrong motion or NaN is therefore `assert!` in host crates, with
+the offending values in the message. Keep `debug_assert!` only for expensive
+self-checks. On a hot path keep the check but put the failure out of line (a
+`#[cold] #[inline(never)]` panic function, as `geometry::vec3::normalize` does);
+measure with `scripts/bench_compare.py`. Arithmetic overflow is also unchecked in
+release.
+
 # Testing
 
 Run the Rust suite with `cargo nextest run` from `rust/`, not `cargo test`.
