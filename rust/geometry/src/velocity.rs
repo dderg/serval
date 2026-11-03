@@ -239,8 +239,6 @@ where
         reconstruct_count <= n,
         "cannot reconstruct {reconstruct_count} moves from a {n}-move plan"
     );
-    plan.forward_rails.truncate(reconstruct_count);
-    plan.backward_rails.truncate(reconstruct_count);
     let (out, boundaries) = reconstruct_runs(
         &moves[..reconstruct_count],
         &caps[..reconstruct_count],
@@ -248,6 +246,7 @@ where
         entry_v,
         &mut report,
     )?;
+    plan.recycle_rails();
 
     Ok(VelocityProfile {
         moves: out,
@@ -360,6 +359,21 @@ struct SeamPlan {
     is_anchor: Vec<bool>,
     forward_rails: Vec<Option<LawSegment>>,
     backward_rails: Vec<Option<LawSegment>>,
+}
+
+impl SeamPlan {
+    /// Hands the passes' rails back for the next plan's integrations to
+    /// write into, once the member profiles no longer share them.
+    fn recycle_rails(self) {
+        for rail in self
+            .forward_rails
+            .into_iter()
+            .chain(self.backward_rails)
+            .flatten()
+        {
+            rail.recycle();
+        }
+    }
 }
 
 fn seed_seam_velocities(
