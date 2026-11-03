@@ -35,11 +35,13 @@
 //! |rᵢ″| ≤ Σ_{m≥2} |Jₘ| wᵢᵐ⁻²/(m−2)!    =: εₐ
 //! ```
 //!
-//! (A `J₁` is a velocity step of `s`: an impulse in `rᵢ″` that no pointwise
-//! acceleration sample, the fit's or the audit's, reads; it costs position
-//! only.) Every sub-span of a bisected span holds a subset of its breaks at
-//! no greater reach, so the span's bound holds for every piece refined from
-//! it.
+//! A `J₁` is a velocity step of `s`, an impulse in `rᵢ″`. One wide enough
+//! for any resolution floor to call it a velocity break is a knot the plan
+//! must anchor, so that image stays a seed; a narrower one is read by no
+//! pointwise acceleration sample, the fit's or the audit's, and costs
+//! position only. Every sub-span of a bisected span holds a subset of its
+//! breaks at no greater reach, so the span's bound holds for every piece
+//! refined from it.
 //!
 //! # The tolerance a span with hidden breaks is fitted to
 //!
@@ -62,7 +64,7 @@
 use nurbs::algebra::PiecewisePolynomialKernel;
 use trajectory::ShapedSignal;
 
-use super::{AxisSignalTable, MOMENT_POWER_CAPACITY, differentiate_into};
+use super::{AxisSignalTable, MIN_DEVICE_INTERVAL_S, MOMENT_POWER_CAPACITY, differentiate_into};
 use crate::lowering::FitTol;
 
 /// Holds the derivative series of an input piece and a kernel piece, and
@@ -136,6 +138,13 @@ impl JumpSeries {
             }
         }
         Self { orders, len }
+    }
+
+    /// Whether the velocity step `J₁` is below every velocity break the plan
+    /// can resolve: those exceed the acceleration tolerance carried across a
+    /// resolution floor, and no floor is narrower than `MIN_DEVICE_INTERVAL_S`.
+    fn below_any_velocity_break(&self, fit_tol: FitTol) -> bool {
+        self.len < 2 || self.orders[1].abs() <= fit_tol.accel_mm_s2 * MIN_DEVICE_INTERVAL_S
     }
 
     /// `εₚ` and `εₐ` of a break with these jumps at reach `reach`.
@@ -296,6 +305,7 @@ impl ShapedBreaks {
             let charged = self
                 .image_at(t)
                 .and_then(|image| self.image_jumps(input, image))
+                .filter(|jumps| jumps.below_any_velocity_break(fit_tol))
                 .map(|jumps| (jumps, spent.plus(jumps.bound_over(t - last_kept))))
                 .filter(|(_, total)| total.within_share_of(fit_tol));
             match charged {

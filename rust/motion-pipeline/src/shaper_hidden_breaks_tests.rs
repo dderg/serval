@@ -1,6 +1,9 @@
 use std::iter::once;
 
-use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
+use nurbs::bezier::{
+    BezierPiece, bezier_pieces_to_discontinuous_nurbs, bezier_pieces_to_nurbs,
+    extract_bezier_pieces,
+};
 use trajectory::build_smooth_zv_kernel;
 
 use super::{
@@ -131,6 +134,49 @@ fn an_image_is_hidden_only_while_its_span_stays_within_its_share() {
     );
     assert_eq!(far.kept, vec![image_t - 5e-2, image_t, image_t + 5e-2]);
     assert!(far.hidden.is_empty());
+}
+
+/// A box kernel turns an input position step into a velocity step of the
+/// shaped signal at each image: a velocity break the plan must anchor a knot
+/// at, so it stays a seed however little position it costs.
+#[test]
+fn an_image_carrying_a_resolvable_velocity_step_stays_a_seed() {
+    let width = 0.02;
+    let kernel = nurbs::algebra::PiecewisePolynomialKernel::single_poly_from_absolute(
+        vec![1.0 / width],
+        (-0.5 * width, 0.5 * width),
+    );
+    let track = bezier_pieces_to_discontinuous_nurbs(&[
+        BezierPiece {
+            u_start: 0.0,
+            u_end: BREAK_S,
+            coeffs: vec![0.0],
+        },
+        BezierPiece {
+            u_start: BREAK_S,
+            u_end: 2.0 * BREAK_S,
+            coeffs: vec![1e-6],
+        },
+    ]);
+    let source = ShapedSignalSource::new(
+        &kernel,
+        table_over(&track, 0.0, 2.0 * BREAK_S),
+        track.knots().to_vec(),
+        0.0,
+    );
+    let image_t = *source
+        .shaped_breaks
+        .times()
+        .iter()
+        .find(|&&t| (t - (BREAK_S - 0.5 * width)).abs() < 1e-12)
+        .expect("the step's first image is a shaped break");
+    let seeds = vec![image_t - 1e-5, image_t, image_t + 1e-5];
+    let selected =
+        source
+            .shaped_breaks
+            .select_seeds(seeds.clone(), source.hidden_break_input(), FIT_TOL);
+    assert_eq!(selected.kept, seeds);
+    assert!(selected.hidden.is_empty());
 }
 
 #[test]
