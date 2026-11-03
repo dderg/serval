@@ -149,6 +149,7 @@ def run_command(tree: Path, command: str, index: int) -> CommandResult:
     env = {
         **os.environ,
         "CARGO_TARGET_DIR": str(pending.TARGET_DIR),
+        "CI_KEEP_CARGO_TARGET_DIR": "1",
         "PATH": f"{Path.home() / '.cargo/bin'}:{os.environ['PATH']}",
     }
     result = subprocess.run(
