@@ -4103,3 +4103,6 @@ fn adaptive_simpson(f: &impl Fn(f64) -> f64, node: SimpsonNode) -> f64 {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod projection_fuzz;

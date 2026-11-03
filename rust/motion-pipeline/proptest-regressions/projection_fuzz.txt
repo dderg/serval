@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 95a71447d31ab293db20f8e520daaddb8118ff1c911b695fc72f3fe6b88440d8 # shrinks to heading = 0.0, steps = [Stroke { reverse: false, length: 0.05, pace: 1.0, end_speed: 0.0, shaped_speed_scale: 0.5, ratio: 0.0 }, Stroke { reverse: false, length: 15.220279550408753, pace: 94.43220163513546, end_speed: 0.0, shaped_speed_scale: 0.5, ratio: 0.0 }, Stroke { reverse: false, length: 1.5644828259728039, pace: 108.70175410311828, end_speed: 0.0, shaped_speed_scale: 0.5, ratio: 0.01 }], batch_sizes = [1], smooth_time = 0.021323183251188614
