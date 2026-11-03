@@ -362,6 +362,54 @@ fn a_smooth_edge_keeps_its_seam_acceleration_across_a_wide_sliver() {
     );
 }
 
+/// Acceleration rising at `jerk` until `kink`, at `jerk_after` from there.
+struct JerkKink {
+    kink: f64,
+    jerk: f64,
+    jerk_after: f64,
+}
+
+impl TrackSignal for JerkKink {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let past_kink = (t - self.kink).max(0.0);
+        let extra = self.jerk_after - self.jerk;
+        let j = self.jerk;
+        (
+            j * t * t * t / 6.0 + extra * past_kink * past_kink * past_kink / 6.0,
+            0.5 * j * t * t + 0.5 * extra * past_kink * past_kink,
+            j * t + extra * past_kink,
+        )
+    }
+}
+
+/// A rail barely off its curvature cap changes its jerk this way a
+/// microsecond past a phase seam: the extrapolation through the reads past
+/// the sliver misses the seam, but the acceleration is continuous.
+#[test]
+fn a_jerk_change_within_the_extrapolation_is_no_break() {
+    let t0 = 1.0;
+    let sig = JerkKink {
+        kink: t0 + 1.4 * WIDE_SLIVER_S,
+        jerk: 2e8,
+        jerk_after: 4e8,
+    };
+    let seam = trajectory::next_toward(t0, 2.0);
+    let past_sliver = t0 + edge_inset(SPAN_S, FLOOR, WIDE_SLIVER_S);
+    let extrapolated = 2.0 * sig.eval_pva(past_sliver).2 - sig.eval_pva(2.0 * past_sliver - seam).2;
+    assert!(
+        (extrapolated - sig.eval_pva(seam).2).abs() > TOL.accel_mm_s2,
+        "the jerk change must move the extrapolation past the tolerance"
+    );
+    let acceleration = edge_velocity_and_acceleration(&sig, 0, seam, past_sliver, false, TOL)
+        .unwrap()
+        .acceleration;
+    assert_eq!(
+        acceleration,
+        sig.eval_pva(seam).2,
+        "a continuous acceleration hides no break: the edge must keep its seam acceleration"
+    );
+}
+
 #[test]
 fn a_break_in_a_wide_sliver_anchors_to_its_far_side_at_the_seam() {
     let t0 = 1.0;
