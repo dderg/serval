@@ -236,6 +236,19 @@ fn shortest_line_body_mm(m: &Move) -> f64 {
     m.feedrate_mm_s.min(m.limits.max_velocity_mm_s) * SHORTEST_LINE_BODY_S
 }
 
+/// The most of a line a run's easing or boundary blend may claim from one
+/// end: half the line, so whatever claims the other end keeps the far half,
+/// and no more than leaves the body floor, so that claimer can still keep the
+/// body whole or at least the floor. A line shorter than the floor is its own
+/// geometry and keeps the half rule alone.
+pub(super) fn line_claim_cap(m: &Move, length: f64) -> f64 {
+    let floor = shortest_line_body_mm(m);
+    if length < floor {
+        return 0.5 * length;
+    }
+    (0.5 * length).min(length - floor)
+}
+
 fn shortest_executable_mm(feedrate: f64, limits: VelocityLimits) -> f64 {
     feedrate.min(limits.max_velocity_mm_s) * MIN_DEVICE_INTERVAL_S
 }
@@ -751,7 +764,7 @@ impl LineRoom {
     /// floor and is its own geometry.
     fn keeps_no_sliver(self, trim: f64) -> bool {
         let body = self.room - trim;
-        body <= BUDGET_EPS_MM || body >= self.floor || self.length < self.floor
+        body <= BUDGET_EPS_MM || body >= self.floor - BUDGET_EPS_MM || self.length < self.floor
     }
 
     /// The longest trim leaving at least the floor, unbounded on a line
