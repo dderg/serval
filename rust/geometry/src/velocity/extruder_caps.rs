@@ -17,8 +17,8 @@ fn budgeted_ratio(ratio: f64) -> f64 {
     if ratio <= 0.0 {
         return 0.0;
     }
-    let level = (ratio.log2() * RATIO_LEVELS_PER_OCTAVE).ceil();
-    (level / RATIO_LEVELS_PER_OCTAVE).exp2()
+    let level = libm::ceil(libm::log2(ratio) * RATIO_LEVELS_PER_OCTAVE);
+    libm::exp2(level / RATIO_LEVELS_PER_OCTAVE)
 }
 
 /// What a segment extrudes per path millimetre: `own` along itself, and

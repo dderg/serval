@@ -24,7 +24,7 @@ fn caps(max_velocity: f64, max_accel: f64, slope: f64) -> ExtruderCaps {
 #[test]
 fn ratios_are_budgeted_at_the_quarter_octave_level_above_them() {
     assert_eq!(budgeted_ratio(RATIO), RATIO);
-    let level_above = RATIO * 2.0_f64.powf(0.25);
+    let level_above = RATIO * libm::pow(2.0, 0.25);
     for ratio in [RATIO * 1.001, RATIO * 1.1, level_above] {
         assert!(
             (budgeted_ratio(ratio) - level_above).abs() < 1e-15,
