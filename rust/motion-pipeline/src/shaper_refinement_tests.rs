@@ -703,6 +703,49 @@ impl TrackSignal for DeclaredOnset {
     }
 }
 
+/// A square-root onset on a span's edge is steep enough that the
+/// acceleration read past the edge sliver, extrapolated back, misses the
+/// seam reading — the sign of a break hidden in the sliver — yet the signal
+/// is continuous there: the piece must anchor to the onset's own
+/// acceleration, where the piece before the onset anchors too.
+#[test]
+fn a_piece_starting_on_a_declared_square_root_onset_anchors_to_its_acceleration() {
+    let onset = SquareRootOnset {
+        at: 0.211_721_933,
+        offset_mm: 150.0,
+        velocity: 300.0,
+        coefficient: 9.8e6,
+    };
+    let fit_tol = FitTol {
+        pos_mm: 0.005,
+        accel_mm_s2: 50.0,
+    };
+    let declared = DeclaredOnset(onset);
+    let track = fit_axis_from_signal(
+        AxisFit {
+            axis: 1,
+            t_start: declared.0.at,
+            t_end: declared.0.at + 4e-6,
+            seed_breakpoints: &[],
+            fit_tol,
+            fit_context: "square-root onset",
+            velocity_continuous: false,
+        },
+        &declared,
+    )
+    .expect("a square-root onset fits down to the floor");
+    let first = &nurbs::bezier::extract_bezier_pieces(&track)[0];
+    let anchored = first
+        .differentiate()
+        .differentiate()
+        .evaluate(first.u_start);
+    let onset_acceleration = declared.eval_pva(declared.0.at).2;
+    assert!(
+        (anchored - onset_acceleration).abs() <= fit_tol.accel_mm_s2,
+        "the piece on the onset starts at {anchored} mm/s², the onset at {onset_acceleration}"
+    );
+}
+
 /// The largest acceleration miss of a fitted track against its signal,
 /// sampled densely inside each piece clear of a percent at either edge.
 fn worst_interior_acceleration_miss(track: &nurbs::ScalarNurbs, sig: &impl TrackSignal) -> f64 {
