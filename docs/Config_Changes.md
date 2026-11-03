@@ -21,7 +21,11 @@ follower with a pressure advance and no limits, set or inherited, is
 rejected. `[axis e] instantaneous_corner_velocity` (default 1 mm/s) bounds
 the extruder velocity steps a ratio-ramped advance makes where a followed
 axis, usually z, is not shaped; `[extruder] instantaneous_corner_velocity`
-is rejected with a pointer to it.
+is rejected with a pointer to it. A linear pressure advance next to a
+smoothing kernel no longer advances retracts, primes and other
+extrude-only moves: like the ratio-ramped advance it applies only to the
+extrusion laid along the path, so those moves keep their extrude-only
+caps.
 
 20261103: A `[printer]` section that sets neither `corner_deviation`
 nor `square_corner_velocity` now plans corners with

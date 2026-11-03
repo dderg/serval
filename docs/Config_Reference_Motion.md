@@ -299,12 +299,12 @@ post_processors: extruder_pa, extruder_smoothing
 #   is constant across the kernel and at every rest.
 #   A smoothing kernel may stay in post_processors next to the ramp.
 #   Without one, a pressure advance in the same post_processors needs no
-#   kernel: it advances only the extrusion laid along the leaders' path, as
-#   Klipper advances only extruding moves that travel, so retracts, primes
-#   and other extrude-only moves keep their own motion and caps. With a
-#   kernel, a linear_pressure_advance is applied after the kernel to the
-#   whole extruder motion, retracts included, as on a chain without the
-#   ramp, while a nonlinear advance still reads the path alone. Either way
+#   kernel. On every chain the advance applies only to the
+#   extrusion laid along the leaders' path, as Klipper advances only
+#   extruding moves that travel, so retracts, primes and other extrude-only
+#   moves keep their own motion and their extrude-only caps; with a kernel,
+#   a linear_pressure_advance is applied after the kernel to that
+#   extrusion. Either way
 #   ratio_ramp_time requires finite [extruder]
 #   max_extrude_only_velocity and max_extrude_only_accel. Where the leaders
 #   turn around (a wipe that reverses along the line) or come to rest across

@@ -19,6 +19,7 @@ use crate::shaper::{
 use crate::types::PostProcessError;
 use crate::worker_pool::WorkerPool;
 
+mod extrude_only;
 mod ratio_ramp;
 use ratio_ramp::{RampLeg, RatioSmoothing};
 
@@ -823,6 +824,11 @@ pub(crate) fn project_followers(
                 semantic_cuts,
                 join_advance_step,
                 window_advance_steps,
+                extrude_only: if raw.spatial_path {
+                    Vec::new()
+                } else {
+                    extrude_only::extrude_only_pieces(axis, raw_axis, (t_start, t_end))
+                },
             });
         }
         assert!(
@@ -963,7 +969,20 @@ pub(crate) fn project_followers(
                 let mut gained_input = chain.leading_transform().is_some();
                 if defer_linear_prefix {
                     if let Some(ChainStage::DerivativeGains { k1, k2 }) = chain.transform() {
-                        kernel_input = apply_derivative_gains_to_track(&kernel_input, *k1, *k2);
+                        kernel_input = nurbs::bezier::bezier_pieces_to_discontinuous_nurbs(
+                            &extrude_only::without_extrude_only_gain(
+                                extract_bezier_pieces(&apply_derivative_gains_to_track(
+                                    &kernel_input,
+                                    *k1,
+                                    *k2,
+                                )),
+                                state
+                                    .projected
+                                    .iter()
+                                    .flat_map(|segment| &segment.extrude_only),
+                                (*k1, *k2),
+                            ),
+                        );
                         gained_input = true;
                     }
                 }
@@ -1531,6 +1550,9 @@ struct ProjSeg {
     join_advance_step: f64,
     /// The advance steps inside the segment, also left out of `track`.
     window_advance_steps: Vec<AdvanceStep>,
+    /// The extrude-only motion folded into `track`, which a kernel's linear
+    /// advance leaves unadvanced.
+    extrude_only: Vec<extrude_only::ExtrudeOnlyPiece>,
 }
 
 /// One segment's stretch of path: shaped arc length `[s0, s1]` carrying a

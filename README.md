@@ -317,9 +317,11 @@ x/y shapers at 191 and 129.4 Hz and z unshaped.
 - **On the bench config the ramp alone lays corners to 0.1%** at 3,960
   mm/s² on corners and 8,000 mm/s² on travel at τ 0.015, and keeps
   retracts at the 50 mm/s extrude-only cap. The hybrid τ 0.015 + st 0.002
-  (1.4%, 4,300 mm/s²) peaks its retracts at 196 mm/s: a linear advance next
-  to a kernel is applied after the kernel, retracts included, exactly as on
-  a kernel chain. The bare 0.002 s kernel spikes to 309,000 on travel.
+  (1.4%, 4,300 mm/s²) peaked its retracts at 196 mm/s when a linear advance
+  next to a kernel still advanced retracts; it no longer does, so the
+  retract column of every kernel and hybrid row above is stale and their
+  retracts now keep the extrude-only cap too. The bare 0.002 s kernel
+  spikes to 309,000 on travel.
 - **On a high-acceleration machine (Trident, 70000 mm/s²) only the ramp
   alone reaches ±2%**, at about 65,000 mm/s² of extruder acceleration: the
   exact advance asks that much at every corner for any τ from 0.015 s up.
