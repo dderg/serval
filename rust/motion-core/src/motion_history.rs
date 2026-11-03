@@ -6,14 +6,17 @@ use trajectory::{ClockedMotorSpan, ContinuousError, Pva};
 use crate::kinematics::{KinematicsKind, KinematicsModule};
 use crate::types::AxisKey;
 
-/// How far behind the newest recorded motion the history answers. It is
-/// Klipper's `MOVE_HISTORY_EXPIRE`, the window the position queries written
-/// against it (Beacon scans, angle and filament sensors) rely on. A span
-/// carries the dense law of its moves, hundreds of kilobytes for a long
-/// accelerating one, and the host runs under `mlockall`, so the bound is the
-/// time the queries need rather than a span count that a few long moves
-/// could fill with gigabytes.
-pub const HISTORY_HORIZON_S: f64 = 30.0;
+/// How far behind the newest recorded motion the history answers. Every
+/// position query asks about the estimated print time now or shortly before
+/// it (the longest lookback in klippy is belay's 0.3 s), and the newest span
+/// is dispatched ahead of now by the pipeline's lead, so 10 s covers both
+/// many times over. A span carries the dense law of its moves, hundreds of
+/// kilobytes for a long accelerating one, and the host runs under `mlockall`:
+/// the dense top layers record about 265 spans a second per axis and pin
+/// about 7 MB per second of history, so the bound is the time the queries
+/// need rather than a span count, which a few long moves could fill with
+/// gigabytes.
+pub const HISTORY_HORIZON_S: f64 = 10.0;
 
 /// Rebase boundaries kept per axis: a rebase is an operator action, so this
 /// many cover any horizon.
