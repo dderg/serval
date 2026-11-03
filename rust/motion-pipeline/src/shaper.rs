@@ -17,6 +17,13 @@ use crate::lowering::{
 use crate::types::{BaseItem, Control, PostProcessError, TrajectoryItem};
 use crate::worker_pool::WorkerPool;
 
+#[path = "shaper_hidden_breaks.rs"]
+mod hidden_breaks;
+
+use hidden_breaks::{
+    HiddenBreak, HiddenBreakBound, LeaderSeeds, ShapedBreaks, hidden_break_bounds,
+};
+
 #[derive(Clone, Copy)]
 pub(crate) struct KnotJumpBound {
     pub acceleration: f64,
@@ -1047,7 +1054,7 @@ pub(crate) struct ShapedSignalSource<'a> {
     kernel: &'a nurbs::algebra::PiecewisePolynomialKernel,
     table: Arc<AxisSignalTable>,
     input_breaks: Vec<f64>,
-    shaped_breaks: Vec<f64>,
+    shaped_breaks: ShapedBreaks,
     input_degree: usize,
     shaped_offset: f64,
     gain_impulse_response: Option<GainImpulseResponse>,
@@ -1168,7 +1175,7 @@ impl<'a> ShapedSignalSource<'a> {
         );
         Self {
             kernel,
-            shaped_breaks: shaped_signal_breakpoints(kernel, &input_breaks),
+            shaped_breaks: ShapedBreaks::new(kernel, &input_breaks),
             input_degree: table.max_degree(),
             gain_impulse_response: (!table.gain_impulses().is_empty())
                 .then(|| GainImpulseResponse::new(kernel, table.gain_impulses())),
@@ -1176,6 +1183,15 @@ impl<'a> ShapedSignalSource<'a> {
             input_breaks,
             shaped_offset: input_offset * unit_kernel_mass(kernel),
         }
+    }
+
+    /// The convolution's input where it is the table alone, so its jumps
+    /// are the table's: derivative gains add impulses the table does not
+    /// hold.
+    fn hidden_break_input(&self) -> Option<&AxisSignalTable> {
+        self.gain_impulse_response
+            .is_none()
+            .then_some(self.table.as_ref())
     }
 
     pub(crate) fn signal(&self) -> impl TrackSignal + use<'_, 'a> {
@@ -1215,29 +1231,33 @@ fn fit_axis_targets(
         return Ok(Vec::new());
     }
     let shaped_breaks = &source.shaped_breaks;
+    let hidden_break_input = source.hidden_break_input();
+    let shaped_times = shaped_breaks.times();
     let make_sig = || source.signal();
     let max_seed_spans = targets
         .iter()
         .map(|target| {
-            let first = shaped_breaks.partition_point(|time| *time <= target.t_start);
-            let last = shaped_breaks.partition_point(|time| *time < target.t_end);
+            let first = shaped_times.partition_point(|time| *time <= target.t_start);
+            let last = shaped_times.partition_point(|time| *time < target.t_end);
             last.saturating_sub(first) + 1
         })
         .max()
         .unwrap_or(0);
     if max_seed_spans < LEADER_SPAN_PARALLEL_THRESHOLD {
         let fit_target = |target: &ContinuousSegment, sig: &_| {
-            let track = fit_axis_from_signal(
+            let track = fit_leader_target(
                 AxisFit {
                     axis,
                     t_start: target.t_start,
                     t_end: target.t_end,
-                    seed_breakpoints: shaped_breaks,
+                    seed_breakpoints: shaped_times,
                     fit_tol,
                     fit_context,
                     velocity_continuous: true,
                 },
                 sig,
+                shaped_breaks,
+                hidden_break_input,
             )?;
             if !track.control_points().iter().all(|value| value.is_finite()) {
                 return Err(PostProcessError::NonFiniteSample {
@@ -1259,11 +1279,14 @@ fn fit_axis_targets(
     let plan_started = crate::timing::stopwatch();
     let seed_sets = targets
         .iter()
-        .map(|target| fit_seed_times(axis, target.t_start, target.t_end, shaped_breaks))
+        .map(|target| {
+            fit_seed_times(axis, target.t_start, target.t_end, shaped_times)
+                .map(|seeds| shaped_breaks.select_seeds(seeds, hidden_break_input, fit_tol))
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let mut scale_times = seed_sets
         .iter()
-        .flat_map(|seeds| seeds.iter().copied())
+        .flat_map(|seeds| seeds.kept.iter().copied())
         .collect::<Vec<_>>();
     scale_times.sort_by(f64::total_cmp);
     scale_times.dedup();
@@ -1277,7 +1300,14 @@ fn fit_axis_targets(
         .into_iter()
         .collect::<HashMap<_, _>>();
     let mut plans = Vec::with_capacity(targets.len());
-    for (target, seeds) in targets.iter().zip(seed_sets) {
+    for (
+        target,
+        LeaderSeeds {
+            kept: seeds,
+            hidden,
+        },
+    ) in targets.iter().zip(seed_sets)
+    {
         let (mut position_scale, mut velocity_scale) = (0.0_f64, 0.0_f64);
         for &t in &seeds {
             let probe = scale_cache
@@ -1307,7 +1337,7 @@ fn fit_axis_targets(
             .filter(|velocity_break| velocity_break.step.abs() > resolution)
             .collect::<Vec<_>>();
         plans.push(
-            fit_plan_from_seeds(seeds, &velocity_breaks, floors, fit_tol.pos_mm).map_err(
+            fit_plan_from_seeds(seeds, &velocity_breaks, floors, fit_tol.pos_mm, &hidden).map_err(
                 |crowded| {
                     crowded_velocity_breaks_error(axis, fit_context, floors, fit_tol, crowded)
                 },
@@ -1347,6 +1377,7 @@ fn fit_axis_targets(
                 t0: t_start,
                 t1: t_end,
                 slivers: plan.slivers[span_index],
+                hidden: plan.hidden[span_index],
             },
             &SpanFitPolicy {
                 axis,
@@ -1413,17 +1444,19 @@ fn fit_axis_targets(
         }
         let track = if needs_serial_fit || refinement_splits > MAX_FIT_REFINEMENT_SPLITS {
             let sig = make_sig();
-            fit_axis_from_signal(
+            fit_leader_target(
                 AxisFit {
                     axis,
                     t_start: targets[target_index].t_start,
                     t_end: targets[target_index].t_end,
-                    seed_breakpoints: shaped_breaks,
+                    seed_breakpoints: shaped_times,
                     fit_tol,
                     fit_context,
                     velocity_continuous: true,
                 },
                 &sig,
+                shaped_breaks,
+                hidden_break_input,
             )?
         } else {
             fit_pieces_to_nurbs(axis, pieces)?
@@ -2445,6 +2478,7 @@ struct EdgeSlivers {
 struct FitPlan {
     seeds: Vec<f64>,
     slivers: Vec<EdgeSlivers>,
+    hidden: Vec<HiddenBreakBound>,
     floors: LadderFloors,
 }
 
@@ -2482,6 +2516,7 @@ fn fit_plan_from_seeds(
     velocity_breaks: &[VelocityBreak],
     floors: LadderFloors,
     position_tolerance: f64,
+    hidden: &[HiddenBreak],
 ) -> Result<FitPlan, CrowdedVelocityBreaks> {
     let slivers = coalesce_degenerate_seeds(
         &mut seeds,
@@ -2490,6 +2525,7 @@ fn fit_plan_from_seeds(
         position_tolerance,
     )?;
     Ok(FitPlan {
+        hidden: hidden_break_bounds(&seeds, hidden),
         seeds,
         slivers,
         floors,
@@ -2520,18 +2556,34 @@ fn plan_seeds_and_floors<S: TrackSignal>(
     sig: &S,
 ) -> Result<(Vec<f64>, LadderFloors), PostProcessError> {
     let seeds = fit_seed_times(fit.axis, fit.t_start, fit.t_end, fit.seed_breakpoints)?;
-    let time_scale = fit.t_start.abs().max(fit.t_end.abs());
-    let floors = ladder_resolution_floor(sig, &seeds, time_scale, fit.fit_tol);
+    let floors = seed_floors(fit, sig, &seeds);
     Ok((seeds, floors))
 }
 
+fn seed_floors<S: TrackSignal>(fit: &AxisFit, sig: &S, seeds: &[f64]) -> LadderFloors {
+    let time_scale = fit.t_start.abs().max(fit.t_end.abs());
+    ladder_resolution_floor(sig, seeds, time_scale, fit.fit_tol)
+}
+
 fn prepare_fit_plan<S: TrackSignal>(fit: &AxisFit, sig: &S) -> Result<FitPlan, PostProcessError> {
-    let (seeds, floors) = plan_seeds_and_floors(fit, sig)?;
+    let seeds = fit_seed_times(fit.axis, fit.t_start, fit.t_end, fit.seed_breakpoints)?;
+    plan_over_seeds(fit, sig, seeds, &[])
+}
+
+fn plan_over_seeds<S: TrackSignal>(
+    fit: &AxisFit,
+    sig: &S,
+    seeds: Vec<f64>,
+    hidden: &[HiddenBreak],
+) -> Result<FitPlan, PostProcessError> {
+    let floors = seed_floors(fit, sig, &seeds);
     let velocity_breaks =
         velocity_breaks_among(sig, &seeds, velocity_resolution(fit.fit_tol, floors));
-    fit_plan_from_seeds(seeds, &velocity_breaks, floors, fit.fit_tol.pos_mm).map_err(|crowded| {
-        crowded_velocity_breaks_error(fit.axis, fit.fit_context, floors, fit.fit_tol, crowded)
-    })
+    fit_plan_from_seeds(seeds, &velocity_breaks, floors, fit.fit_tol.pos_mm, hidden).map_err(
+        |crowded| {
+            crowded_velocity_breaks_error(fit.axis, fit.fit_context, floors, fit.fit_tol, crowded)
+        },
+    )
 }
 
 /// The widest velocity step a span at the resolution floor can carry and
@@ -2637,6 +2689,30 @@ pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
     sig: &S,
 ) -> Result<nurbs::ScalarNurbs, PostProcessError> {
     let plan = prepare_fit_plan(&fit, sig)?;
+    fit_axis_over_plan(&fit, sig, plan)
+}
+
+/// One leader target's fit, seeded with the shaped breaks it cannot hide.
+fn fit_leader_target<S: TrackSignal>(
+    fit: AxisFit,
+    sig: &S,
+    shaped_breaks: &ShapedBreaks,
+    hidden_break_input: Option<&AxisSignalTable>,
+) -> Result<nurbs::ScalarNurbs, PostProcessError> {
+    let LeaderSeeds { kept, hidden } = shaped_breaks.select_seeds(
+        fit_seed_times(fit.axis, fit.t_start, fit.t_end, fit.seed_breakpoints)?,
+        hidden_break_input,
+        fit.fit_tol,
+    );
+    let plan = plan_over_seeds(&fit, sig, kept, &hidden)?;
+    fit_axis_over_plan(&fit, sig, plan)
+}
+
+fn fit_axis_over_plan<S: TrackSignal>(
+    fit: &AxisFit,
+    sig: &S,
+    plan: FitPlan,
+) -> Result<nurbs::ScalarNurbs, PostProcessError> {
     let policy = SpanFitPolicy {
         axis: fit.axis,
         fit_tol: fit.fit_tol,
@@ -2648,13 +2724,14 @@ pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
     };
     let mut refinement_splits = 0;
     let mut pieces = Vec::with_capacity(plan.seeds.len());
-    for (span, &slivers) in plan.seeds.windows(2).zip(&plan.slivers) {
+    for ((span, &slivers), &hidden) in plan.seeds.windows(2).zip(&plan.slivers).zip(&plan.hidden) {
         refine_shaped_span(
             sig,
             RefineSpan {
                 t0: span[0],
                 t1: span[1],
                 slivers,
+                hidden,
             },
             &policy,
             SpanSeeds {
@@ -3171,12 +3248,14 @@ struct SpanFitPolicy {
     velocity_continuous: bool,
 }
 
-/// One span of a refinement tree: its bounds.
+/// One span of a refinement tree: its bounds, and the bound on the breaks
+/// it hides, which every piece refined from it pays out of its tolerance.
 #[derive(Clone, Copy)]
 struct RefineSpan {
     t0: f64,
     t1: f64,
     slivers: EdgeSlivers,
+    hidden: HiddenBreakBound,
 }
 
 /// The partition seeds the refined span sits between, reported by a fit
@@ -3469,11 +3548,17 @@ fn refine_shaped_span<S: TrackSignal>(
     refinement_splits: &mut usize,
     out: &mut Vec<BezierPiece>,
 ) -> Result<(), PostProcessError> {
-    let RefineSpan { t0, t1, slivers } = span;
-    let fit_tol = policy.fit_tol;
+    let RefineSpan {
+        t0,
+        t1,
+        slivers,
+        hidden,
+    } = span;
+    let fit_tol = hidden.tolerance_left(policy.fit_tol);
     let velocity_budget = policy.velocity_budget;
     let floors = policy.floors;
-    let (mono_u, failure) = shaped_ladder(sig, t0, t1, slivers, policy)?;
+    let (mono_u, failure) =
+        shaped_ladder(sig, t0, t1, slivers, &SpanFitPolicy { fit_tol, ..*policy })?;
     let edge_insets = (
         edge_inset(t1 - t0, floors.cubic, slivers.start),
         edge_inset(t1 - t0, floors.cubic, slivers.end),
@@ -3500,7 +3585,7 @@ fn refine_shaped_span<S: TrackSignal>(
             crate::fit_audit::AcceptedPiece {
                 fit_context: policy.fit_context,
                 axis: policy.axis,
-                fit_tol,
+                fit_tol: policy.fit_tol,
                 t0,
                 t1,
                 mono_u: &mono_u,
@@ -3546,7 +3631,7 @@ fn refine_shaped_span<S: TrackSignal>(
                 crate::fit_audit::AcceptedPiece {
                     fit_context: policy.fit_context,
                     axis: policy.axis,
-                    fit_tol,
+                    fit_tol: policy.fit_tol,
                     t0,
                     t1,
                     mono_u: &mono_u,
@@ -3606,6 +3691,7 @@ fn refine_shaped_span<S: TrackSignal>(
                 end_break: None,
                 ..slivers
             },
+            hidden,
         },
         policy,
         seeds,
@@ -3622,6 +3708,7 @@ fn refine_shaped_span<S: TrackSignal>(
                 start_break: None,
                 ..slivers
             },
+            hidden,
         },
         policy,
         seeds,
