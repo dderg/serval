@@ -460,3 +460,24 @@ fn a_cut_corner_between_two_ratios_lays_between_them() {
     ];
     material_per_mm_of_path_stays_within_the_ratios(limits, &steps).unwrap();
 }
+
+/// #586: a run of micron-scale moves after a long one under a large corner
+/// budget. The arc run's tail blend claimed half the 3.7 um line after it,
+/// leaving the corner beyond a 1.8 um body no blend or sharp corner could
+/// lift to the line-body floor.
+#[test]
+fn micron_moves_after_a_run_leave_no_line_sliver() {
+    let limits = Limits {
+        max_velocity: 210.699,
+        max_accel: 500.0,
+        square_corner_velocity: 16.7316,
+    };
+    let steps = [
+        step(0.17258, 1.0, 1.0, 0.0),
+        step(std::f64::consts::PI, 0.001575, 1.0, 0.0),
+        step(3.49493, 0.000496, 1.0, 0.0),
+        step(2.14118, 0.003686, 293.85, 0.0),
+        step(0.0, 0.001424, 1.0, 0.0),
+    ];
+    extruder_lays_its_ratio_along_the_path(limits, &steps).unwrap();
+}
