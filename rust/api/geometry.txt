@@ -76,8 +76,8 @@ pub fn geometry::fitter::consumption_moves(&geometry::fitter::FacetConsumption, 
 pub fn geometry::fitter::facet_consumption_candidate(&geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig, f64) -> bool
 pub fn geometry::fitter::is_travel(&geometry::frontend::Move) -> bool
 pub fn geometry::fitter::merge_collinear_lines(&geometry::frontend::Move, &geometry::frontend::Move, &[[f64; 3]], geometry::CornerFitConfig) -> core::option::Option<geometry::frontend::Move>
-pub fn geometry::fitter::plan_facet_consumption(&geometry::frontend::Move, &[&geometry::frontend::Move], &geometry::frontend::Move, geometry::CornerFitConfig, (f64, f64)) -> core::result::Result<core::option::Option<geometry::fitter::FacetConsumption>, geometry::fitter::FitError>
-pub fn geometry::fitter::plan_junction_reduced(&geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig, (f64, f64), f64) -> core::result::Result<geometry::fitter::JunctionPlan, geometry::fitter::FitError>
+pub fn geometry::fitter::plan_facet_consumption(&geometry::frontend::Move, &[&geometry::frontend::Move], &geometry::frontend::Move, geometry::CornerFitConfig, (f64, f64), f64) -> core::result::Result<core::option::Option<geometry::fitter::FacetConsumption>, geometry::fitter::FitError>
+pub fn geometry::fitter::plan_junction_reduced(&geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig, (f64, f64), (f64, f64)) -> core::result::Result<geometry::fitter::JunctionPlan, geometry::fitter::FitError>
 pub fn geometry::fitter::seam_requires_stop(&geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig) -> bool
 pub fn geometry::fitter::spatial_end(&geometry::frontend::Move) -> core::option::Option<[f64; 3]>
 pub fn geometry::fitter::spatial_start(&geometry::frontend::Move) -> core::option::Option<[f64; 3]>
