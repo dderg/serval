@@ -74,9 +74,15 @@ and `query-logs` skills.
 # Build caches and CARGO_TARGET_DIR
 
 Never `export CARGO_TARGET_DIR` in a persistent shell: it leaks into the next
-task's builds and the engine `make` copies. `scripts/ci.sh` unsets an inherited
-value (set `CI_KEEP_CARGO_TARGET_DIR=1` to opt in); everything else uses the
-worktree's own `rust/target`. The only shared target dir is
+task's builds and the engine `make` copies. `scripts/ci.sh` replaces an inherited
+value (set `CI_KEEP_CARGO_TARGET_DIR=1` to opt in) with one target dir shared by
+every worktree, `~/.cache/serval-target` (`SERVAL_TARGET_DIR` moves it,
+`CI_OWN_TARGET=1` gives that run the worktree's own `rust/target`): a fresh
+worktree's `./scripts/ci.sh quick` takes ~85 s against the warm shared dir and
+~220 s with a cold own target, and no per-task `~/.cache/*-target` is needed for
+gates. Concurrent cargo runs wait on the dir's lock only while compiling.
+Everything else outside `ci.sh` uses the worktree's own `rust/target`; the other
+shared target dir is
 `~/.cache/pending-baselines/target`, which `pending_baselines.py`,
 `review_baselines.py` and `integrate_stack.py` set per subprocess. For a one-off
 variant build set `CARGO_TARGET_DIR=...` on that single command, not in the

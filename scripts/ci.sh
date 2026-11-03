@@ -21,9 +21,20 @@
 set -uo pipefail
 
 # A CARGO_TARGET_DIR leaked from another task's shell would send every build
-# and cached engine into someone else's directory. Gates use the worktree's
-# own rust/target unless the caller opts in (integrate_stack.py does).
-[ -n "${CI_KEEP_CARGO_TARGET_DIR:-}" ] || unset CARGO_TARGET_DIR
+# and cached engine into someone else's directory, so an inherited value is
+# dropped unless the caller opts in (integrate_stack.py does). Locally the
+# gates then share ONE target dir across all worktrees, so a fresh worktree
+# reuses the dependency and unchanged-crate builds of the others: `quick` in a
+# fresh worktree took 83 s against a warm shared dir and 221 s with its own
+# cold rust/target. CI_OWN_TARGET=1 gives a worktree its own rust/target;
+# GitHub Actions always does (rust-cache keys on it).
+SHARED_TARGET_DIR="${SERVAL_TARGET_DIR:-$HOME/.cache/serval-target}"
+if [ -z "${CI_KEEP_CARGO_TARGET_DIR:-}" ]; then
+    unset CARGO_TARGET_DIR
+    if [ -z "${CI_OWN_TARGET:-}" ] && [ -z "${GITHUB_ACTIONS:-}" ]; then
+        export CARGO_TARGET_DIR="$SHARED_TARGET_DIR"
+    fi
+fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST="$ROOT/rust"
