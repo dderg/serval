@@ -125,7 +125,7 @@ job_rust_fuzz() {
 }
 
 # The fit audit checks every accepted fit piece densely and slows the
-# pipeline ~2.5x, so it is compiled only here: as a feature of the default
+# pipeline ~2x, so it is compiled only here: as a feature of the default
 # test build it would unify into every workspace test binary.
 job_rust_fit_audit() {
     cd "$RUST"
