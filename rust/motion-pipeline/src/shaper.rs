@@ -84,6 +84,40 @@ const UNIT_JERK_KINK_HERMITE_MISS: HermiteMiss = HermiteMiss {
     position: 1.0 / 192.0,
 };
 
+/// A signal's enclosure over a stretch: a slice of one the signal keeps,
+/// borrowed for the asking, or one built for it.
+pub(crate) enum Enclosure<'a> {
+    Kept(&'a [ExactPiece]),
+    Held(std::cell::Ref<'a, [ExactPiece]>),
+    Built(Vec<ExactPiece>),
+}
+
+impl Enclosure<'_> {
+    /// The enclosure with every piece's position moved by `base`.
+    pub(crate) fn offset_by(self, base: f64) -> Enclosure<'static> {
+        Enclosure::Built(self.iter().map(|piece| piece.offset_by(base)).collect())
+    }
+
+    pub(crate) fn into_owned(self) -> Vec<ExactPiece> {
+        match self {
+            Enclosure::Built(pieces) => pieces,
+            kept => kept.to_vec(),
+        }
+    }
+}
+
+impl std::ops::Deref for Enclosure<'_> {
+    type Target = [ExactPiece];
+
+    fn deref(&self) -> &[ExactPiece] {
+        match self {
+            Enclosure::Kept(pieces) => pieces,
+            Enclosure::Held(pieces) => pieces,
+            Enclosure::Built(pieces) => pieces,
+        }
+    }
+}
+
 pub(crate) trait TrackSignal {
     fn eval_pva(&self, t: f64) -> (f64, f64, f64);
     fn eval(&self, t: f64) -> f64 {
@@ -147,9 +181,9 @@ pub(crate) trait TrackSignal {
     /// order's bound is within its `accuracy` where the signal resolves
     /// that. Exact polynomials are their own enclosure; `None` for a
     /// signal with neither.
-    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
         let _ = accuracy;
-        self.exact_polynomial_on(lo, hi)
+        self.exact_polynomial_on(lo, hi).map(Enclosure::Built)
     }
     /// What a rung that passes the probes is held against between them,
     /// where the signal has no enclosure.
@@ -178,8 +212,8 @@ impl TrackSignal for ContinuousAxis {
         })
     }
 
-    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
-        axis_enclosure::continuous_axis_enclosure(self, (lo, hi), accuracy)
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
+        axis_enclosure::continuous_axis_enclosure(self, (lo, hi), accuracy).map(Enclosure::Built)
     }
 }
 
@@ -227,7 +261,7 @@ impl<S: TrackSignal> TrackSignal for &S {
     fn exact_polynomial_on(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
         S::exact_polynomial_on(self, lo, hi)
     }
-    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
         S::enclosure_on(self, lo, hi, accuracy)
     }
     fn between_probes(&self) -> BetweenProbes {
@@ -302,13 +336,11 @@ impl<S: TrackSignal> TrackSignal for ShiftedTrackSignal<S> {
         )
     }
 
-    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
-        let pieces = self.inner.enclosure_on(lo, hi, accuracy)?;
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
         Some(
-            pieces
-                .into_iter()
-                .map(|piece| piece.offset_by(self.base))
-                .collect(),
+            self.inner
+                .enclosure_on(lo, hi, accuracy)?
+                .offset_by(self.base),
         )
     }
 }
@@ -1048,7 +1080,7 @@ impl TrackSignal for CapContactSource<'_> {
         self.cap_contacts
     }
 
-    fn enclosure_on(&self, lo: f64, hi: f64, _accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+    fn enclosure_on(&self, lo: f64, hi: f64, _accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
         let whole = match self.shared {
             Some(shared) => shared.of(self.axis)?,
             None => self
@@ -1056,12 +1088,13 @@ impl TrackSignal for CapContactSource<'_> {
                 .get_or_init(|| {
                     self.source
                         .enclosure_on(self.whole.0, self.whole.1, self.accuracy)
+                        .map(Enclosure::into_owned)
                 })
                 .as_deref()?,
         };
         let first = whole.partition_point(|piece| piece.hi < lo);
         let past = whole.partition_point(|piece| piece.lo <= hi);
-        Some(whole[first..past.max(first)].to_vec())
+        Some(Enclosure::Kept(&whole[first..past.max(first)]))
     }
 }
 
@@ -5619,7 +5652,7 @@ impl TrackSignal for NonlinearAdvanceSignal {
         ))
     }
 
-    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
         let mut pieces = Vec::new();
         let first = self.ends.partition_point(|&end| end <= lo);
         for piece in first..self.coeffs.len() {
@@ -5634,7 +5667,7 @@ impl TrackSignal for NonlinearAdvanceSignal {
                 &mut pieces,
             );
         }
-        Some(pieces)
+        Some(Enclosure::Built(pieces))
     }
 }
 

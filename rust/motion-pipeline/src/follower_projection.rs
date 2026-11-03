@@ -11,8 +11,8 @@ use trajectory::{
 
 use crate::lowering::{AccelBudget, FitTol, follower_tol_scale};
 use crate::shaper::{
-    AxisFit, AxisSignalTable, BetweenProbes, ConvolutionSignal, ExactConvolution, ExactKernel,
-    ExactPiece, FitBoundary, KnotJumpBound, Lookahead, SEGMENT_TIME_EPS_S, ShiftedTrackSignal,
+    AxisFit, AxisSignalTable, BetweenProbes, ConvolutionSignal, Enclosure, ExactConvolution,
+    ExactKernel, FitBoundary, KnotJumpBound, Lookahead, SEGMENT_TIME_EPS_S, ShiftedTrackSignal,
     SignalBounds, TrackSignal, apply_derivative_gains_to_track, fit_axis_from_signal,
     fit_resolution, shaped_signal_breakpoints, unit_kernel_mass,
 };
@@ -2011,14 +2011,8 @@ impl TrackSignal for AxisSignal<'_> {
         (position - self.base, velocity, acceleration)
     }
 
-    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
-        let pieces = TrackSignal::enclosure_on(self.axis, lo, hi, accuracy)?;
-        Some(
-            pieces
-                .into_iter()
-                .map(|piece| piece.offset_by(self.base))
-                .collect(),
-        )
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
+        Some(TrackSignal::enclosure_on(self.axis, lo, hi, accuracy)?.offset_by(self.base))
     }
 }
 
@@ -3295,7 +3289,7 @@ impl TrackSignal for FollowerSignal<'_> {
         [f64::NEG_INFINITY, f64::INFINITY]
             .map(|side| self.pva_at_distance(trajectory::next_toward(knot, side), s))
     }
-    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
         let support = (self.grid[0], self.grid[self.grid.len() - 1]);
         self.whole_enclosure
             .over((lo, hi), accuracy, support, |(lo, hi), accuracy| {
@@ -3471,7 +3465,7 @@ impl TrackSignal for AdvancedFollowerSignal<'_, '_> {
         self.source.interior_knots(start, end)
     }
 
-    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
         let grid = &self.source.grid;
         let support = (grid[0], grid[grid.len() - 1]);
         self.whole_enclosure

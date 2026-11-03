@@ -1804,7 +1804,7 @@ fn assert_enclosure_holds_every_sample(signal: &impl TrackSignal, (lo, hi): (f64
         pieces.len() > 1,
         "the fixture's odometer crosses a span seam"
     );
-    for piece in &pieces {
+    for piece in pieces.iter() {
         for k in 0..=32 {
             let t = piece.lo + (piece.hi - piece.lo) * f64::from(k) / 32.0;
             let read = signal.eval_pva(t);

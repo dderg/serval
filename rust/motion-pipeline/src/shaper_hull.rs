@@ -136,7 +136,7 @@ fn piece_derivative(mono_u: &[f64], order: usize, h: f64) -> Vec<f64> {
 
 /// The Bernstein coefficients on `y ∈ [−1, 1]` of a polynomial in `y`,
 /// and the rounding bound of the conversion.
-fn bernstein(coefficients: &[f64]) -> (Vec<f64>, f64) {
+fn bernstein(coefficients: &[f64]) -> (Controls, f64) {
     let len = coefficients.len();
     let degree = len - 1;
     let mut on_unit = [0.0; EXACT_CAPACITY];
@@ -153,12 +153,16 @@ fn bernstein(coefficients: &[f64]) -> (Vec<f64>, f64) {
         magnitudes[power] *= doubling;
         doubling *= 2.0;
     }
-    let mut controls = vec![0.0; len];
+    let weights = &bernstein_weights()[degree];
+    let mut controls = Controls {
+        values: [0.0; EXACT_CAPACITY],
+        len,
+    };
     let mut worst_terms = 0.0_f64;
-    for (index, control) in controls.iter_mut().enumerate() {
+    for (index, control) in controls.values[..len].iter_mut().enumerate() {
         let mut terms = 0.0;
         for power in 0..=index {
-            let weight = TRANSLATION_BINOMIALS[index][power] / TRANSLATION_BINOMIALS[degree][power];
+            let weight = weights[index][power];
             *control += weight * on_unit[power];
             terms += weight * magnitudes[power];
         }
@@ -168,6 +172,41 @@ fn bernstein(coefficients: &[f64]) -> (Vec<f64>, f64) {
         controls,
         ExactRounding::gamma(CONVERSION_DEPTH) * worst_terms,
     )
+}
+
+/// Bernstein controls on `y ∈ [−1, 1]`.
+struct Controls {
+    values: [f64; EXACT_CAPACITY],
+    len: usize,
+}
+
+impl std::ops::Deref for Controls {
+    type Target = [f64];
+
+    fn deref(&self) -> &[f64] {
+        &self.values[..self.len]
+    }
+}
+
+/// The conversion's weights `C(i, p)/C(n, p)` for each degree `n`, row
+/// `i ≤ n` and power `p ≤ i`, each one rounded division.
+fn bernstein_weights() -> &'static [[[f64; EXACT_CAPACITY]; EXACT_CAPACITY]] {
+    static WEIGHTS: std::sync::OnceLock<Vec<[[f64; EXACT_CAPACITY]; EXACT_CAPACITY]>> =
+        std::sync::OnceLock::new();
+    WEIGHTS.get_or_init(|| {
+        (0..EXACT_CAPACITY)
+            .map(|degree| {
+                let mut weights = [[0.0; EXACT_CAPACITY]; EXACT_CAPACITY];
+                for (index, row) in weights.iter_mut().enumerate().take(degree + 1) {
+                    for (power, weight) in row.iter_mut().enumerate().take(index + 1) {
+                        *weight = TRANSLATION_BINOMIALS[index][power]
+                            / TRANSLATION_BINOMIALS[degree][power];
+                    }
+                }
+                weights
+            })
+            .collect()
+    })
 }
 
 /// Halves Bernstein controls at their midpoint.
@@ -253,7 +292,7 @@ fn first_unproven_patch(
 /// Bernstein basis over `[from, to]`, with its rounding term and the
 /// rounding each de Casteljau level adds.
 struct ErrorPatch {
-    controls: Vec<f64>,
+    controls: Controls,
     from: f64,
     to: f64,
     rounding: f64,
@@ -286,14 +325,14 @@ fn error_patches<'a>(
             half / sub.radius,
         );
         let len = fitted.len.max(truth.len).max(1);
-        let mut error = vec![0.0; len];
+        let mut error = [0.0; EXACT_CAPACITY];
         let mut subtraction = 0.0;
-        for (power, slot) in error.iter_mut().enumerate() {
+        for (power, slot) in error[..len].iter_mut().enumerate() {
             let (p, s) = (fitted.coefficients[power], truth.coefficients[power]);
             *slot = p - s;
             subtraction += f64::EPSILON * 0.5 * (p.abs() + s.abs());
         }
-        let (controls, conversion) = bernstein(&error);
+        let (controls, conversion) = bernstein(&error[..len]);
         let largest = controls.iter().fold(0.0_f64, |m, c| m.max(c.abs()));
         Some(ErrorPatch {
             level_rounding: ExactRounding::gamma(controls.len()) * largest,

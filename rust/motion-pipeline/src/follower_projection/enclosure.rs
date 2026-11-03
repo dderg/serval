@@ -14,9 +14,9 @@
 //! its own tolerance, which, like the evaluator's rounding, lies outside
 //! the bound.
 
-use crate::shaper::ExactPiece;
 use crate::shaper::axis_enclosure::AxisWindows;
 use crate::shaper::taylor::{self, Ball, TaylorModel, Window};
+use crate::shaper::{Enclosure, ExactPiece};
 
 use super::{AdvancedFollowerSignal, ChainStage, FollowerSignal, RatioSpan};
 
@@ -116,78 +116,104 @@ fn leader_speed_second(
 /// smaller than it.
 #[derive(Default)]
 pub(super) struct WholeEnclosure {
-    built: std::cell::RefCell<Option<Option<Vec<(ExactPiece, [f64; 3])>>>>,
+    built: std::cell::RefCell<Option<Option<Built>>>,
+}
+
+/// The pieces built so far, each beside the accuracy it was built at.
+struct Built {
+    pieces: Vec<ExactPiece>,
+    tried: Vec<[f64; 3]>,
+}
+
+impl Built {
+    fn new(pieces: Vec<ExactPiece>, accuracy: [f64; 3]) -> Self {
+        let tried = vec![accuracy; pieces.len()];
+        Self { pieces, tried }
+    }
+
+    /// The pieces reaching into `[lo, hi]`.
+    fn span(&self, (lo, hi): (f64, f64)) -> std::ops::Range<usize> {
+        let first = self.pieces.partition_point(|piece| piece.hi < lo);
+        let past = self.pieces.partition_point(|piece| piece.lo <= hi);
+        first..past.max(first)
+    }
+}
+
+/// Whether every order of `piece` is within `accuracy`.
+fn resolves(piece: &ExactPiece, accuracy: [f64; 3]) -> bool {
+    piece
+        .pva
+        .iter()
+        .zip(accuracy)
+        .all(|(order, accuracy)| order.rounding <= accuracy)
 }
 
 impl WholeEnclosure {
     /// The enclosure over `[lo, hi]` at `accuracy` or as close as the
     /// signal's models get, `build` enclosing a stretch at a given accuracy
-    /// and `whole` the support; `None` where the signal has none.
+    /// and `whole` the support; `None` where the signal has none. Borrowed
+    /// from the whole where its pieces there resolve the accuracy.
     pub(super) fn over(
         &self,
         (lo, hi): (f64, f64),
         accuracy: [f64; 3],
         whole: (f64, f64),
         build: impl Fn((f64, f64), [f64; 3]) -> Option<Vec<ExactPiece>>,
-    ) -> Option<Vec<ExactPiece>> {
-        let mut built = self.built.borrow_mut();
-        let pieces = built
-            .get_or_insert_with(|| {
-                build(whole, accuracy)
-                    .map(|pieces| pieces.into_iter().map(|piece| (piece, accuracy)).collect())
-            })
-            .as_mut()?;
-        let span = |pieces: &[(ExactPiece, [f64; 3])]| {
-            let first = pieces.partition_point(|(piece, _)| piece.hi < lo);
-            let past = pieces.partition_point(|(piece, _)| piece.lo <= hi);
-            (first, past.max(first))
-        };
-        let refines = |(piece, tried): &(ExactPiece, [f64; 3])| {
-            let tried_tighter = tried
-                .iter()
-                .zip(accuracy)
-                .all(|(&tried, asked)| tried <= asked);
-            !tried_tighter
-                && piece
-                    .pva
+    ) -> Option<Enclosure<'_>> {
+        {
+            let mut built = self.built.borrow_mut();
+            let built = built
+                .get_or_insert_with(|| {
+                    build(whole, accuracy).map(|pieces| Built::new(pieces, accuracy))
+                })
+                .as_mut()?;
+            let span = built.span((lo, hi));
+            let (mut index, mut end) = (span.start, span.end);
+            while index < end {
+                let tried_tighter = built.tried[index]
                     .iter()
                     .zip(accuracy)
-                    .any(|(order, accuracy)| order.rounding > accuracy)
-        };
-        let (first, past) = span(pieces);
-        let mut index = first;
-        let mut end = past;
-        while index < end {
-            if !refines(&pieces[index]) {
-                index += 1;
-                continue;
+                    .all(|(&tried, asked)| tried <= asked);
+                if tried_tighter || resolves(&built.pieces[index], accuracy) {
+                    index += 1;
+                    continue;
+                }
+                let piece = built.pieces[index];
+                let refined = build((piece.lo, piece.hi), accuracy)?;
+                let added = refined.len();
+                built.pieces.splice(index..=index, refined);
+                built
+                    .tried
+                    .splice(index..=index, std::iter::repeat_n(accuracy, added));
+                index += added;
+                end += added - 1;
             }
-            let (piece, _) = &pieces[index];
-            let refined: Vec<(ExactPiece, [f64; 3])> = build((piece.lo, piece.hi), accuracy)?
-                .into_iter()
-                .map(|piece| (piece, accuracy))
-                .collect();
-            let added = refined.len();
-            pieces.splice(index..=index, refined);
-            index += added;
-            end += added - 1;
         }
-        let (first, past) = span(pieces);
-        let mut out = Vec::with_capacity(past - first);
-        for (piece, _) in &pieces[first..past] {
-            let resolved = piece
-                .pva
-                .iter()
-                .zip(accuracy)
-                .all(|(order, accuracy)| order.rounding <= accuracy);
-            let overlap = (lo.max(piece.lo), hi.min(piece.hi));
-            if resolved || (overlap.0 <= piece.lo && overlap.1 >= piece.hi) {
+        let built = self.built.borrow();
+        let pieces = &built.as_ref()?.as_ref()?.pieces;
+        let span = built.as_ref()?.as_ref()?.span((lo, hi));
+        let whole_piece = |piece: &ExactPiece| piece.lo >= lo && piece.hi <= hi;
+        if pieces[span.clone()]
+            .iter()
+            .all(|piece| resolves(piece, accuracy) || whole_piece(piece))
+        {
+            return Some(Enclosure::Held(std::cell::Ref::map(built, |built| {
+                &built
+                    .as_ref()
+                    .and_then(Option::as_ref)
+                    .expect("the enclosure was built above")
+                    .pieces[span]
+            })));
+        }
+        let mut out = Vec::with_capacity(span.len());
+        for piece in &pieces[span] {
+            if resolves(piece, accuracy) || whole_piece(piece) {
                 out.push(*piece);
             } else {
-                out.extend(build(overlap, accuracy)?);
+                out.extend(build((lo.max(piece.lo), hi.min(piece.hi)), accuracy)?);
             }
         }
-        Some(out)
+        Some(Enclosure::Built(out))
     }
 }
 
