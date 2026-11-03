@@ -226,3 +226,55 @@ def test_a_majority_of_coincident_late_steps_does_not_drag_the_clock_map(
         assert motors[role]["coincident_lateness_ns"]["p50"] == pytest.approx(
             COINCIDENT_LATE_NS, abs=30
         )
+
+
+def test_lead_is_the_gap_back_to_the_latest_other_motor_step():
+    a = np.array([1_000, 2_000, 3_000], np.int64)
+    b = np.array([1_000, 2_100, 5_000], np.int64)
+    lead_a, lead_b = mcu_execution.preceding_lead([a, b])
+    assert lead_a.tolist() == [0, 1_000, 900]
+    assert lead_b.tolist() == [0, 100, 2_000]
+
+
+def test_a_step_with_no_earlier_other_motor_step_has_no_lead():
+    lead_a, _ = mcu_execution.preceding_lead(
+        [np.array([5], np.int64), np.array([9], np.int64)]
+    )
+    assert np.isinf(lead_a).all()
+
+
+def test_follower_lateness_is_binned_by_its_lead_and_ties_stand_apart(
+    tmp_path,
+):
+    follower_late_ticks = 50
+    quarter = STEPS // 4
+    ties = quarter - 1
+    _write_tap(
+        tmp_path,
+        _lane(1, 0, STEPS, INTERVAL),
+        _lane(2, 1, quarter, 4 * INTERVAL, COINCIDENT_OFFSET_TICKS),
+        _lane(3, 2, ties, 4 * INTERVAL, 2 * INTERVAL),
+    )
+    a = _commanded(STEPS, INTERVAL)
+    b = _commanded(
+        quarter, 4 * INTERVAL, COINCIDENT_OFFSET_TICKS + follower_late_ticks
+    )
+    z = _commanded(ties, 4 * INTERVAL, 2 * INTERVAL)
+    report = mcu_execution.report(
+        tmp_path, _events(_channel(a), _channel(b), _channel(z)), MOTORS
+    )
+    bins = {
+        (row["lead_ns_from"], row["lead_ns_to"]): row
+        for row in report["follower_lateness_by_lead_ns"]
+    }
+    tie = bins[(0, 0)]
+    assert tie["steps"] == 2 * ties
+    assert tie["p50"] == pytest.approx(0, abs=30)
+    lead = bins[(1_000, 1_250)]
+    assert lead["steps"] == quarter
+    assert lead["p50"] == pytest.approx(
+        follower_late_ticks / FREQ * 1e9, abs=30
+    )
+    assert sum(row["steps"] for row in bins.values()) == 2 * ties + quarter
+    assert report["motors"]["b"]["follower_steps"] == quarter
+    assert report["motors"]["a"]["follower_steps"] == 0

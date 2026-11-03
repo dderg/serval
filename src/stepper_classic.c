@@ -190,12 +190,20 @@ stepper_load_next(struct stepper *s)
     return SF_RESCHEDULE;
 }
 
-// Optimized step function to step on each step pin edge
-static uint_fast8_t
-stepper_event_edge(struct timer *t)
+static inline void
+stepper_full_edge(struct stepper *s)
 {
-    struct stepper *s = container_of(t, struct stepper, time);
     gpio_out_toggle_noirq(s->step_pin);
+#if CONFIG_MCU_SIM
+    s->time.waketime += s->step_pulse_ticks;
+#else
+    s->time.waketime = timer_read_time() + s->step_pulse_ticks;
+#endif
+}
+
+static uint_fast8_t
+stepper_edge_finish(struct stepper *s)
+{
     uint32_t count = s->count - 1;
     if (likely(count)) {
         s->count = count;
@@ -216,21 +224,12 @@ stepper_event_edge(struct timer *t)
     return stepper_load_next(s);
 }
 
-// Regular "fully scheduled" step function
-uint_fast8_t
-stepper_event_full(struct timer *t)
+static uint_fast8_t
+stepper_full_finish(struct stepper *s)
 {
-    struct stepper *s = container_of(t, struct stepper, time);
-    gpio_out_toggle_noirq(s->step_pin);
-#if CONFIG_MCU_SIM
-    uint32_t min_next_time = s->time.waketime + s->step_pulse_ticks;
-#else
-    uint32_t curtime = timer_read_time();
-    uint32_t min_next_time = curtime + s->step_pulse_ticks;
-#endif
+    uint32_t min_next_time = s->time.waketime;
     uint32_t count = s->count - 1;
     if (likely(count & 1 && !(s->flags & SF_SINGLE_SCHED)))
-        // Schedule unstep event
         goto reschedule_min;
     if (likely(count)) {
 #if CONFIG_HIGH_PREC_STEP
@@ -246,27 +245,48 @@ stepper_event_full(struct timer *t)
         s->interval += s->add;
 #endif
         if (unlikely(timer_is_before(s->next_step_time, min_next_time)))
-            // The next step event is too close - push it back
             goto reschedule_min;
         s->count = count;
         s->time.waketime = s->next_step_time;
         return SF_RESCHEDULE;
     }
-    s->time.waketime = min_next_time;
     return stepper_load_next(s);
 reschedule_min:
     s->count = count;
-    s->time.waketime = min_next_time;
     return SF_RESCHEDULE;
 }
 
-// Optimized entry point for step function (may be inlined into sched.c code)
 uint_fast8_t
-stepper_event(struct timer *t)
+stepper_event_full(struct timer *t)
 {
-    if (HAVE_EDGE_OPTIMIZATION)
-        return stepper_event_edge(t);
-    return stepper_event_full(t);
+    struct stepper *s = container_of(t, struct stepper, time);
+    stepper_full_edge(s);
+    return stepper_full_finish(s);
+}
+
+static inline uint_fast8_t
+stepper_timer_on_edge_path(struct timer *t)
+{
+    return HAVE_EDGE_OPTIMIZATION && !t->func;
+}
+
+void
+stepper_step_edge(struct timer *t)
+{
+    struct stepper *s = container_of(t, struct stepper, time);
+    if (stepper_timer_on_edge_path(t))
+        gpio_out_toggle_noirq(s->step_pin);
+    else
+        stepper_full_edge(s);
+}
+
+uint_fast8_t
+stepper_step_finish(struct timer *t)
+{
+    struct stepper *s = container_of(t, struct stepper, time);
+    if (stepper_timer_on_edge_path(t))
+        return stepper_edge_finish(s);
+    return stepper_full_finish(s);
 }
 
 // Record late idle re-arms before the scheduler applies its canonical

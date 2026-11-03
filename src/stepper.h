@@ -98,8 +98,9 @@ enum {
 #define EDGE_STEP_TICKS DIV_ROUND_UP(CONFIG_CLOCK_FREQ, 8000000)
 #define AVR_STEP_TICKS 40 // minimum instructions between step gpio pulses
 
-uint_fast8_t stepper_event(struct timer *t);
 uint_fast8_t stepper_event_full(struct timer *t);
+void stepper_step_edge(struct timer *t);
+uint_fast8_t stepper_step_finish(struct timer *t);
 uint32_t stepper_get_position(struct stepper *s);
 int32_t stepper_classic_wire_position(struct stepper *s);
 void stepper_classic_halt(struct stepper *s);

@@ -272,11 +272,95 @@ sched_last_dispatched_func(void)
     return sched_dispatch_history_func[(idx - 1) % SCHED_DISPATCH_HISTORY_N];
 }
 
+extern void diag_note_timer_duration(uint32_t dur_cyc, uint32_t func);
+
+#if CONFIG_INLINE_STEPPER_HACK
+#if CONFIG_MCU_SIM
+#define STEP_COINCIDENCE_TICKS 0
+#else
+#define STEP_COINCIDENCE_TICKS (CONFIG_CLOCK_FREQ / 1000000)
+#endif
+
+static inline uint_fast8_t
+timer_is_step(struct timer *t)
+{
+    return !t->func || t->func == stepper_event_full;
+}
+
+static inline uint_fast8_t
+step_joins_batch(struct timer *t, uint32_t horizon)
+{
+    return timer_is_step(t) && !timer_is_before(horizon, t->waketime);
+}
+
+static struct timer *
+fire_coincident_step_edges(struct timer *leader)
+{
+    uint32_t scheduled = leader->waketime;
+    uint32_t horizon = scheduled + STEP_COINCIDENCE_TICKS;
+    stepper_step_edge(leader);
+    struct timer *t = leader->next;
+    if (likely(!step_joins_batch(t, horizon)))
+        return leader;
+    int32_t leader_lag = timer_read_time() - scheduled;
+    if (leader_lag < 0)
+        shutdown("Step timer dispatched before its waketime");
+    struct timer *last;
+    do {
+        uint32_t due = t->waketime + leader_lag;
+        while (timer_is_before(timer_read_time(), due))
+            ;
+        stepper_step_edge(t);
+        last = t;
+        t = t->next;
+    } while (step_joins_batch(t, horizon));
+    return last;
+}
+
+static void
+reinsert_detached_timer(struct timer *t)
+{
+    uint32_t waketime = t->waketime;
+    struct timer *head = SchedState.timer_list;
+    if (timer_is_before(waketime, head->waketime)) {
+        t->next = head;
+        SchedState.timer_list = t;
+        return;
+    }
+    struct timer *pos = SchedState.last_insert;
+    if (timer_is_before(waketime, pos->waketime))
+        pos = head;
+    insert_timer(pos, t, waketime);
+    SchedState.last_insert = t;
+}
+
+static void
+finish_coincident_steps(struct timer *first, struct timer *last)
+{
+    struct timer *rest = last->next;
+    SchedState.timer_list = rest;
+    for (struct timer *t = first; ; t = t->next) {
+        if (SchedState.last_insert == t)
+            SchedState.last_insert = rest;
+        if (t == last)
+            break;
+    }
+    struct timer *t = first;
+    for (;;) {
+        struct timer *next = t->next;
+        if (stepper_step_finish(t) == SF_RESCHEDULE)
+            reinsert_detached_timer(t);
+        if (t == last)
+            return;
+        t = next;
+    }
+}
+#endif
+
 // Invoke the next timer - called from board hardware irq code.
 unsigned int
 sched_timer_dispatch(void)
 {
-    // Invoke timer callback
     struct timer *t = SchedState.timer_list;
     uint32_t hidx = sched_dispatch_history_idx;
     sched_dispatch_history_addr[hidx % SCHED_DISPATCH_HISTORY_N] = (uint32_t)t;
@@ -290,22 +374,26 @@ sched_timer_dispatch(void)
     uint32_t diag_func = (uint32_t)(uintptr_t)t->func;
 #if CONFIG_INLINE_STEPPER_HACK
     if (!diag_func)
-        diag_func = (uint32_t)(uintptr_t)&stepper_event;
+        diag_func = (uint32_t)(uintptr_t)&stepper_event_full;
 #endif
     uint32_t diag_start = timer_read_time();
 #if CONFIG_INLINE_STEPPER_HACK
-    if (likely(!t->func)) {
-        res = stepper_event(t);
-        updated_waketime = t->waketime;
+    if (likely(timer_is_step(t))) {
+        struct timer *last = fire_coincident_step_edges(t);
+        if (unlikely(last != t)) {
+            finish_coincident_steps(t, last);
+            diag_note_timer_duration(timer_read_time() - diag_start,
+                                     diag_func);
+            return SchedState.timer_list->waketime;
+        }
+        res = stepper_step_finish(t);
     } else {
         res = t->func(t);
-        updated_waketime = t->waketime;
     }
 #else
     res = t->func(t);
-    updated_waketime = t->waketime;
 #endif
-    extern void diag_note_timer_duration(uint32_t dur_cyc, uint32_t func);
+    updated_waketime = t->waketime;
     diag_note_timer_duration(timer_read_time() - diag_start, diag_func);
 
     // Update timer_list (rescheduling current timer if necessary)
