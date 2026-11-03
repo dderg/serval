@@ -9,11 +9,11 @@
 //! resolution, no acceleration explosion, C0 position seams, and valid
 //! velocity bounds.
 //!
-//! `hard_invariants_hold` runs in CI on a fixed RNG seed — a deterministic
-//! 256-case corpus verified green — so CI never flakes on a fresh fuzz
-//! discovery. Hunting happens on the `#[ignore]`d `target_budgets_hold`,
-//! which uses random seeds, fuzzes the full input space (including the
-//! known-broken families the CI tier steers around), and additionally
+//! `hard_invariants_hold` draws a fresh seed per run and prints it
+//! (`PROPTEST_RNG_SEED=<seed>` reproduces); `hard_invariants_hold_on_the_pinned_corpus`
+//! is the same property on a fixed 256-case corpus. Hunting for the smoothness
+//! budgets happens on the `#[ignore]`d `target_budgets_hold`, which fuzzes the
+//! full input space (including the known-broken families the CI tier steers around), and additionally
 //! asserts the intended smoothness budgets (seam C0/C1, velocity limits)
 //! that current lowering is known to violate. Run it with
 //! `cargo nextest run -p pipeline-snapshot --run-ignored all`, ideally with
@@ -178,12 +178,28 @@ fn xy_smoothness_spikes(report: &AuditReport) -> Vec<&Violation> {
         .collect()
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig {
-        cases: 256,
-        rng_seed: RngSeed::Fixed(20260708),
+const PINNED_SEED: u64 = 20260708;
+
+fn fresh_seed_config() -> ProptestConfig {
+    let seed = std::env::var("PROPTEST_RNG_SEED")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after the epoch")
+                .as_nanos();
+            (nanos as u64) ^ u64::from(std::process::id()).rotate_left(40)
+        });
+    eprintln!("planner_fuzz seed: reproduce with PROPTEST_RNG_SEED={seed}");
+    ProptestConfig {
+        rng_seed: RngSeed::Fixed(seed),
         ..ProptestConfig::default()
-    })]
+    }
+}
+
+proptest! {
+    #![proptest_config(fresh_seed_config())]
 
     #[test]
     fn hard_invariants_hold(
@@ -197,8 +213,26 @@ proptest! {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 256,
+        rng_seed: RngSeed::Fixed(PINNED_SEED),
+        ..ProptestConfig::default()
+    })]
+
     #[test]
-    #[ignore = "intended smoothness budgets; current lowering is known to violate them"]
+    fn hard_invariants_hold_on_the_pinned_corpus(
+        limits in limits_strategy(false),
+        moves in prop::collection::vec(move_strategy(false), 2..40),
+    ) {
+        let (traj, report) = run_case(limits, &moves);
+        prop_assert!(!traj.rows(0).is_empty(), "pipeline produced no X trajectory");
+        prop_assert!(report.hard_ok(), "{report}");
+    }
+}
+
+proptest! {
+    #[test]
+    #[ignore = "#575: E seam velocity budget fails at every ratio step"]
     fn target_budgets_hold(
         limits in limits_strategy(true),
         moves in prop::collection::vec(move_strategy(true), 2..40),
@@ -215,7 +249,7 @@ proptest! {
 /// tiny-positive-scv family as the two tests below — all three pass with
 /// scv = 0 or scv >= 0.1.
 #[test]
-#[ignore = "known planner bug: tiny scv makes the velocity plan NonFinite"]
+#[ignore = "#575: tiny scv makes the velocity plan NonFinite"]
 fn reversal_with_z_step_makes_velocity_plan_non_finite() {
     let limits = FuzzLimits {
         max_velocity: 20.0,
@@ -282,7 +316,7 @@ fn z_step_then_micro_reversal_escapes_profile_window() {
 /// 0.005 fails from 146° up, and no failures were found at scv >= 0.1. Same
 /// tiny-positive-scv family as its neighbors.
 #[test]
-#[ignore = "known planner bug: tiny scv + sharp planar corner yields a NonFinite velocity plan"]
+#[ignore = "#575: tiny scv + sharp planar corner yields a NonFinite velocity plan"]
 fn near_reversal_planar_corner_makes_velocity_plan_non_finite() {
     let limits = FuzzLimits {
         max_velocity: 20.0,
@@ -477,4 +511,110 @@ fn slow_corner_rail_ramp_survives_nurbs_round_trip() {
         spikes.is_empty(),
         "X/Y seam-velocity or velocity past budget: {spikes:?}\n{report}"
     );
+}
+
+fn planar(turn: Turn, length_mm: f64, feed_mm_s: f64, extrude_ratio: f64) -> MoveSpec {
+    MoveSpec {
+        turn,
+        length_mm,
+        feed_mm_s,
+        extrude_ratio,
+        z_step_mm: 0.0,
+    }
+}
+
+/// Found by `hard_invariants_hold` (#562): a free clothoid-pair solve — the
+/// facet-consumption chain split at the facet's midpoint, or an arc run's
+/// boundary blend — sat at the edge of the pair's existence region, where one
+/// half carries the whole turn and the other shrinks to nanometres, emitting
+/// a row of a nanosecond or two. A pair half shorter than a device interval
+/// at its fastest speed is now infeasible for every free solve.
+#[test]
+fn facet_consumption_split_leaves_no_sliver_row() {
+    let limits = FuzzLimits {
+        max_velocity: 20.0,
+        max_accel: 42552.63125816086,
+        square_corner_velocity: 5.0,
+    };
+    let moves = [
+        planar(
+            Turn::Absolute(2.968191818487306),
+            0.002493439626094711,
+            165.95540533434988,
+            0.0,
+        ),
+        planar(
+            Turn::Absolute(1.387277182399567),
+            0.0006359771117086327,
+            588.2719245715481,
+            0.0,
+        ),
+        planar(Turn::Absolute(1.9715280945107174), 1.0, 1.0, 0.0),
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok(), "{report}");
+}
+
+#[test]
+fn same_sense_facet_consumption_leaves_no_sliver_row() {
+    let limits = FuzzLimits {
+        max_velocity: 100.85130229005617,
+        max_accel: 21853.28686118798,
+        square_corner_velocity: 10.295157997623004,
+    };
+    let moves = [
+        planar(Turn::Absolute(2.260652648254229), 1.0, 1.0, 0.0),
+        planar(
+            Turn::Absolute(0.8069452807702043),
+            0.004896715143695845,
+            1.0,
+            0.0,
+        ),
+        planar(Turn::Absolute(4.586520500087806), 1.0, 1.0, 0.0),
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok(), "{report}");
+}
+
+#[test]
+fn arc_run_tail_blend_leaves_no_sliver_row() {
+    let limits = FuzzLimits {
+        max_velocity: 579.9040202955272,
+        max_accel: 45069.717321302596,
+        square_corner_velocity: 17.587166725605982,
+    };
+    let moves = [
+        planar(
+            Turn::Absolute(3.942866479434897),
+            1.0,
+            1.0,
+            0.09312678484514826,
+        ),
+        planar(
+            Turn::Continue,
+            0.0008990155284484794,
+            1.0,
+            0.059730024030819666,
+        ),
+        planar(
+            Turn::Absolute(4.4081876990164295),
+            0.0005882210496939083,
+            1.0,
+            0.073725797059201,
+        ),
+        planar(
+            Turn::Absolute(5.384155481070599),
+            0.0007041462012606629,
+            543.1019473451835,
+            0.06929877228620371,
+        ),
+        planar(
+            Turn::Continue,
+            1.0,
+            158.99678961430908,
+            0.047124637386670276,
+        ),
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok(), "{report}");
 }
