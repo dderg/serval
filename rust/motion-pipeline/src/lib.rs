@@ -14,6 +14,7 @@ mod shaper;
 mod staged;
 pub mod timing;
 pub mod types;
+mod worker_pool;
 
 use fit_stage::{FitDriver, FitStage};
 use planner::Planner;

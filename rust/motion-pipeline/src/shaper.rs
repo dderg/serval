@@ -15,6 +15,7 @@ use crate::lowering::{
     eval_mono_d, eval_mono_dd, exact_piece, ladder_fit, quintic_in_u,
 };
 use crate::types::{BaseItem, Control, PostProcessError, TrajectoryItem};
+use crate::worker_pool::WorkerPool;
 
 #[derive(Clone, Copy)]
 pub(crate) struct KnotJumpBound {
@@ -271,6 +272,7 @@ pub struct Shaper {
     history_trimmed: bool,
     follower_states: Vec<FollowerState>,
     toolhead_tap: Option<Sender<ContinuousSegment>>,
+    pool: WorkerPool,
 }
 
 impl Shaper {
@@ -286,6 +288,7 @@ impl Shaper {
             history_trimmed: false,
             follower_states: Vec::new(),
             toolhead_tap: None,
+            pool: WorkerPool::new(),
         }
     }
 
@@ -481,6 +484,7 @@ impl Shaper {
                 } else {
                     Lookahead::Required
                 },
+                pool: &self.pool,
             },
             count,
             frontier_count,
@@ -653,6 +657,7 @@ struct AxisFitRequest<'a> {
     fit_tol: FitTol,
     boundary: FitBoundary,
     lookahead: Lookahead,
+    pool: &'a WorkerPool,
 }
 
 /// The shaper state one emit writes through: the follower projection states,
@@ -685,6 +690,7 @@ fn apply_axis_chains(
         chains,
         fit_tol,
         lookahead,
+        pool,
         ..
     } = request;
     if chains.chains.iter().all(CompiledChain::is_empty)
@@ -741,6 +747,7 @@ fn apply_axis_chains(
             chains,
             fit_tol,
             lookahead,
+            pool,
         },
         &mut out,
         outputs.follower_states,
@@ -979,6 +986,7 @@ fn fit_axis_column(
         fit_tol,
         boundary,
         lookahead,
+        pool,
         ..
     } = request;
     let FitColumn {
@@ -1027,6 +1035,7 @@ fn fit_axis_column(
         fit_tol,
         signal.fit_context(),
         target_workers,
+        pool,
     )
     .map(Some)
 }
@@ -1200,6 +1209,7 @@ fn fit_axis_targets(
     fit_tol: FitTol,
     fit_context: &'static str,
     target_workers: usize,
+    pool: &WorkerPool,
 ) -> Result<Vec<nurbs::ScalarNurbs>, PostProcessError> {
     if targets.is_empty() {
         return Ok(Vec::new());
@@ -1238,42 +1248,13 @@ fn fit_axis_targets(
             Ok(track)
         };
         let workers = target_workers.max(1).min(targets.len());
-        let mut fitted = if workers > 1 {
-            let next_target = std::sync::atomic::AtomicUsize::new(0);
-            std::thread::scope(|scope| {
-                let next_target = &next_target;
-                let fit_target = &fit_target;
-                let handles: Vec<_> = (0..workers)
-                    .map(|_| {
-                        scope.spawn(move || {
-                            let sig = make_sig();
-                            let mut done = Vec::new();
-                            loop {
-                                let index =
-                                    next_target.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                let Some(target) = targets.get(index) else {
-                                    return done;
-                                };
-                                done.push((index, fit_target(target, &sig)));
-                            }
-                        })
-                    })
-                    .collect();
-                handles
-                    .into_iter()
-                    .flat_map(|handle| handle.join().expect("leader target fit thread panicked"))
-                    .collect::<Vec<_>>()
+        return pool
+            .map_indexed(workers, targets.len(), make_sig, |sig, index| {
+                fit_target(&targets[index], sig)
             })
-        } else {
-            let sig = make_sig();
-            targets
-                .iter()
-                .enumerate()
-                .map(|(index, target)| (index, fit_target(target, &sig)))
-                .collect()
-        };
-        fitted.sort_by_key(|(index, _)| *index);
-        return fitted.into_iter().map(|(_, result)| result).collect();
+            .expect("leader target fit thread panicked")
+            .into_iter()
+            .collect();
     }
     let plan_started = crate::timing::stopwatch();
     let seed_sets = targets
@@ -1287,40 +1268,14 @@ fn fit_axis_targets(
     scale_times.sort_by(f64::total_cmp);
     scale_times.dedup();
     let plan_workers = target_workers.max(1).min(scale_times.len());
-    let scale_samples = if plan_workers > 1 {
-        let next_time = std::sync::atomic::AtomicUsize::new(0);
-        std::thread::scope(|scope| {
-            let next_time = &next_time;
-            let scale_times = &scale_times;
-            let handles: Vec<_> = (0..plan_workers)
-                .map(|_| {
-                    scope.spawn(move || {
-                        let sig = make_sig();
-                        let mut done = Vec::new();
-                        loop {
-                            let index =
-                                next_time.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            let Some(&t) = scale_times.get(index) else {
-                                return done;
-                            };
-                            done.push((t.to_bits(), scale_probe(&sig, t)));
-                        }
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .flat_map(|handle| handle.join().expect("leader scale probe thread panicked"))
-                .collect::<Vec<_>>()
+    let scale_cache = pool
+        .map_indexed(plan_workers, scale_times.len(), make_sig, |sig, index| {
+            let t = scale_times[index];
+            (t.to_bits(), scale_probe(sig, t))
         })
-    } else {
-        let sig = make_sig();
-        scale_times
-            .iter()
-            .map(|&t| (t.to_bits(), scale_probe(&sig, t)))
-            .collect()
-    };
-    let scale_cache = scale_samples.into_iter().collect::<HashMap<_, _>>();
+        .expect("leader scale probe thread panicked")
+        .into_iter()
+        .collect::<HashMap<_, _>>();
     let mut plans = Vec::with_capacity(targets.len());
     for (target, seeds) in targets.iter().zip(seed_sets) {
         let (mut position_scale, mut velocity_scale) = (0.0_f64, 0.0_f64);
@@ -1414,49 +1369,16 @@ fn fit_axis_targets(
     type SpanFit = Result<(Vec<BezierPiece>, usize), PostProcessError>;
     let workers = target_workers.max(1).min(jobs.len());
     let spans_started = crate::timing::stopwatch();
-    let mut fitted: Vec<(usize, usize, SpanFit)> = if workers > 1 {
-        let next_job = std::sync::atomic::AtomicUsize::new(0);
-        std::thread::scope(|scope| {
-            let next_job = &next_job;
-            let fit_span = &fit_span;
-            let jobs = &jobs;
-            let handles: Vec<_> = (0..workers)
-                .map(|_| {
-                    scope.spawn(move || {
-                        let sig = make_sig();
-                        let mut done = Vec::new();
-                        loop {
-                            let index = next_job.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            let Some(&(target_index, span_index)) = jobs.get(index) else {
-                                return done;
-                            };
-                            done.push((
-                                target_index,
-                                span_index,
-                                fit_span(target_index, span_index, &sig),
-                            ));
-                        }
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .flat_map(|handle| handle.join().expect("leader span fit thread panicked"))
-                .collect()
+    let fitted: Vec<(usize, usize, SpanFit)> = pool
+        .map_indexed(workers, jobs.len(), make_sig, |sig, index| {
+            let (target_index, span_index) = jobs[index];
+            (
+                target_index,
+                span_index,
+                fit_span(target_index, span_index, sig),
+            )
         })
-    } else {
-        let sig = make_sig();
-        jobs.iter()
-            .map(|&(target_index, span_index)| {
-                (
-                    target_index,
-                    span_index,
-                    fit_span(target_index, span_index, &sig),
-                )
-            })
-            .collect()
-    };
-    fitted.sort_by_key(|(target_index, span_index, _)| (*target_index, *span_index));
+        .expect("leader span fit thread panicked");
     let spans_us = spans_started.elapsed_us();
     if crate::timing::is_slow_phase(spans_us) {
         crate::timing::log_slow_phase(
@@ -1541,26 +1463,21 @@ fn fit_columns(
             .min(4)
             .min(targets.len())
     };
-    let fit_timed = |column: FitColumn| {
-        let column_started = crate::timing::stopwatch();
-        let fitted = fit_axis_column(request, targets, column, target_workers);
-        (column.axis, fitted, column_started.elapsed_us())
-    };
-    if parallel {
-        let fit_timed = &fit_timed;
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = columns
-                .iter()
-                .map(|&column| scope.spawn(move || fit_timed(column)))
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| h.join().expect("axis fit thread panicked"))
-                .collect()
-        })
-    } else {
-        columns.iter().map(|&column| fit_timed(column)).collect()
-    }
+    let column_workers = if parallel { columns.len() } else { 1 };
+    request
+        .pool
+        .map_indexed(
+            column_workers,
+            columns.len(),
+            || (),
+            |(), index| {
+                let column = columns[index];
+                let column_started = crate::timing::stopwatch();
+                let fitted = fit_axis_column(request, targets, column, target_workers);
+                (column.axis, fitted, column_started.elapsed_us())
+            },
+        )
+        .expect("axis fit thread panicked")
 }
 
 fn fit_leader_axes(

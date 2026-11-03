@@ -16,6 +16,7 @@ use crate::shaper::{
     shaped_signal_breakpoints, unit_kernel_mass,
 };
 use crate::types::PostProcessError;
+use crate::worker_pool::WorkerPool;
 
 const INTEGRAL_TOL_MM: f64 = 1e-10;
 const INTEGRAL_MAX_DEPTH: u32 = 24;
@@ -314,8 +315,8 @@ fn advance_steps_at<'a>(
 }
 
 /// One emit window's projection inputs: the raw segments, the shaped leader
-/// frontier they ride, and the chains and tolerance the followers are fitted
-/// with.
+/// frontier they ride, the chains and tolerance the followers are fitted
+/// with, and the shaper's worker pool the fits fan out on.
 #[derive(Clone, Copy)]
 pub(crate) struct ProjectionWindow<'a> {
     pub base: &'a [ContinuousSegment],
@@ -323,6 +324,7 @@ pub(crate) struct ProjectionWindow<'a> {
     pub chains: &'a AxisChainSet,
     pub fit_tol: FitTol,
     pub lookahead: Lookahead,
+    pub pool: &'a WorkerPool,
 }
 
 pub(crate) fn project_followers(
@@ -337,6 +339,7 @@ pub(crate) fn project_followers(
         chains,
         fit_tol,
         lookahead,
+        pool,
     } = window;
     let commit_count = out.len();
     assert!(frontier.len() >= commit_count);
@@ -377,6 +380,7 @@ pub(crate) fn project_followers(
                 &base[first_new..frontier.len()],
                 &frontier[first_new..],
                 leaders,
+                pool,
             );
             timing.ingests += lengths.len();
             let mut next_s = state.s_shaped;
@@ -400,50 +404,13 @@ pub(crate) fn project_followers(
             })
         };
         let state_ref: &FollowerState = &*state;
-        let mut source_fits = if workers > 1 {
-            let next_job = std::sync::atomic::AtomicUsize::new(0);
-            std::thread::scope(|scope| {
-                let next_job = &next_job;
-                let source_jobs = &source_jobs;
-                let handles = (0..workers)
-                    .map(|_| {
-                        scope.spawn(move || {
-                            let mut done = Vec::new();
-                            loop {
-                                let job =
-                                    next_job.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                let Some(&(index, s_start, s_length)) = source_jobs.get(job) else {
-                                    return done;
-                                };
-                                done.push((
-                                    index,
-                                    fit_source_projection(
-                                        FollowerSource {
-                                            shaped: &frontier[index],
-                                            raw: &base[index],
-                                            axis,
-                                            leaders,
-                                            state: state_ref,
-                                            s_start,
-                                            s_length,
-                                        },
-                                        fit_tol,
-                                        leading_stage,
-                                    ),
-                                ));
-                            }
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                handles
-                    .into_iter()
-                    .flat_map(|handle| handle.join().expect("follower source fit thread panicked"))
-                    .collect::<Vec<_>>()
-            })
-        } else {
-            source_jobs
-                .iter()
-                .map(|&(index, s_start, s_length)| {
+        let source_fits = pool
+            .map_indexed(
+                workers,
+                source_jobs.len(),
+                || (),
+                |(), job| {
+                    let (index, s_start, s_length) = source_jobs[job];
                     (
                         index,
                         fit_source_projection(
@@ -460,10 +427,9 @@ pub(crate) fn project_followers(
                             leading_stage,
                         ),
                     )
-                })
-                .collect()
-        };
-        source_fits.sort_by_key(|(index, _)| *index);
+                },
+            )
+            .expect("follower source fit thread panicked");
         timing.source_fit_us += source_started.elapsed_us();
         let mut source_fits = source_fits.into_iter();
         for i in 0..frontier.len() {
@@ -790,75 +756,23 @@ pub(crate) fn project_followers(
                         cores.get().saturating_sub(1).max(1).min(supports.len())
                     })
                 };
-                let mut fitted: Vec<(
-                    usize,
-                    Result<(f64, Vec<BezierPiece>, u128), PostProcessError>,
-                )> = if workers > 1 {
-                    let next_window = std::sync::atomic::AtomicUsize::new(0);
-                    std::thread::scope(|scope| {
-                        let next_window = &next_window;
-                        let supports = &supports;
-                        let make_sig = &make_sig;
-                        let shaped_breaks = &shaped_breaks;
-                        let handles: Vec<_> = (0..workers)
-                            .map(|_| {
-                                scope.spawn(move || {
-                                    let sig = make_sig();
-                                    let mut done = Vec::new();
-                                    loop {
-                                        let index = next_window
-                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                        let Some(&(start, end)) = supports.get(index) else {
-                                            return done;
-                                        };
-                                        done.push((
-                                            index,
-                                            fit_kernel_window(
-                                                axis,
-                                                start,
-                                                end,
-                                                shaped_breaks,
-                                                &sig,
-                                                target_tol,
-                                                output_monotonicity,
-                                            ),
-                                        ));
-                                    }
-                                })
-                            })
-                            .collect();
-                        handles
-                            .into_iter()
-                            .flat_map(|handle| {
-                                handle.join().expect("follower kernel fit thread panicked")
-                            })
-                            .collect()
+                let fitted = pool
+                    .map_indexed(workers, supports.len(), &make_sig, |sig, index| {
+                        let (start, end) = supports[index];
+                        fit_kernel_window(
+                            axis,
+                            start,
+                            end,
+                            &shaped_breaks,
+                            sig,
+                            target_tol,
+                            output_monotonicity,
+                        )
                     })
-                } else {
-                    let sig = make_sig();
-                    supports
-                        .iter()
-                        .enumerate()
-                        .map(|(index, &(start, end))| {
-                            (
-                                index,
-                                fit_kernel_window(
-                                    axis,
-                                    start,
-                                    end,
-                                    &shaped_breaks,
-                                    &sig,
-                                    target_tol,
-                                    output_monotonicity,
-                                ),
-                            )
-                        })
-                        .collect()
-                };
-                fitted.sort_by_key(|(index, _)| *index);
+                    .expect("follower kernel fit thread panicked");
                 let mut bases = Vec::with_capacity(supports.len());
                 let mut tracks: Vec<Vec<BezierPiece>> = Vec::with_capacity(supports.len());
-                for (_, result) in fitted {
+                for result in fitted {
                     let (local_base, pieces, window_us) = result?;
                     timing.kernel_fit_max_us = timing.kernel_fit_max_us.max(window_us);
                     bases.push(local_base);
@@ -1610,14 +1524,9 @@ fn leader_arc_lengths(
     raw: &[ContinuousSegment],
     shaped: &[ContinuousSegment],
     leaders: &[usize],
+    pool: &WorkerPool,
 ) -> Vec<(f64, f64)> {
     assert_eq!(raw.len(), shaped.len());
-    let measure = |i: usize| {
-        (
-            leader_arc_length(&shaped[i], leaders),
-            leader_arc_length(&raw[i], leaders),
-        )
-    };
     let workers = if cfg!(target_arch = "wasm32") {
         1
     } else {
@@ -1625,34 +1534,18 @@ fn leader_arc_lengths(
             cores.get().saturating_sub(1).max(1).min(raw.len())
         })
     };
-    if workers <= 1 {
-        return (0..raw.len()).map(measure).collect();
-    }
-    let next_job = std::sync::atomic::AtomicUsize::new(0);
-    let mut out: Vec<(usize, (f64, f64))> = std::thread::scope(|scope| {
-        let next_job = &next_job;
-        let measure = &measure;
-        let handles = (0..workers)
-            .map(|_| {
-                scope.spawn(move || {
-                    let mut done = Vec::new();
-                    loop {
-                        let job = next_job.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if job >= raw.len() {
-                            return done;
-                        }
-                        done.push((job, measure(job)));
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
-        handles
-            .into_iter()
-            .flat_map(|handle| handle.join().expect("leader arc length thread panicked"))
-            .collect()
-    });
-    out.sort_by_key(|(index, _)| *index);
-    out.into_iter().map(|(_, lengths)| lengths).collect()
+    pool.map_indexed(
+        workers,
+        raw.len(),
+        || (),
+        |(), i| {
+            (
+                leader_arc_length(&shaped[i], leaders),
+                leader_arc_length(&raw[i], leaders),
+            )
+        },
+    )
+    .expect("leader arc length thread panicked")
 }
 
 #[derive(Clone, Copy)]
