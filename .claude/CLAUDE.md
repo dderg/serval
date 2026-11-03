@@ -75,12 +75,15 @@ and `query-logs` skills.
 
 Never `export CARGO_TARGET_DIR` in a persistent shell: it leaks into the next
 task's builds and the engine `make` copies. `scripts/ci.sh` replaces an inherited
-value (set `CI_KEEP_CARGO_TARGET_DIR=1` to opt in) with one target dir shared by
-every worktree, `~/.cache/serval-target` (`SERVAL_TARGET_DIR` moves it,
-`CI_OWN_TARGET=1` gives that run the worktree's own `rust/target`): a fresh
-worktree's `./scripts/ci.sh quick` takes ~85 s against the warm shared dir and
-~220 s with a cold own target, and no per-task `~/.cache/*-target` is needed for
-gates. Concurrent cargo runs wait on the dir's lock only while compiling.
+value (set `CI_KEEP_CARGO_TARGET_DIR=1` to opt in); gates use the worktree's own
+`rust/target`. `CI_SHARED_TARGET=1` points them at `~/.cache/serval-target`
+(`SERVAL_TARGET_DIR` moves it) shared by every worktree, which cut a fresh
+worktree's `quick` from ~220 s to ~85 s, but it is NOT the default: cargo reuses a
+test binary built from identical sources in another worktree, and tests that bake
+in `env!("CARGO_MANIFEST_DIR")` (c-api `headers_no_drift`, nurbs `geomdl_oracle`,
+runtime-contract `sample_wire_tests`) then read that other worktree's files and
+fail once it is removed. Use it only for throwaway comparisons, or after making
+those tests resolve their paths at runtime.
 Everything else outside `ci.sh` uses the worktree's own `rust/target`; the other
 shared target dir is
 `~/.cache/pending-baselines/target`, which `pending_baselines.py`,
