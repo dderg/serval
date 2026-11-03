@@ -104,7 +104,14 @@ pub(crate) trait TrackSignal {
     fn position_rounding_scale(&self, position: f64) -> f64 {
         position.abs()
     }
-    fn acceleration_monotonicity(&self, _start: f64, _end: f64) -> Option<AccelerationTrend> {
+    /// The acceleration's trend over `span` as a fit resolving only
+    /// `resolved` sees it: none across a break anywhere in the span, but a
+    /// smooth extremum in an edge sliver outside `resolved` is not one.
+    fn acceleration_monotonicity(
+        &self,
+        _span: (f64, f64),
+        _resolved: (f64, f64),
+    ) -> Option<AccelerationTrend> {
         None
     }
     fn interior_knots(&self, _start: f64, _end: f64) -> &[f64] {
@@ -187,8 +194,12 @@ impl<S: TrackSignal> TrackSignal for &S {
     fn position_rounding_scale(&self, position: f64) -> f64 {
         S::position_rounding_scale(self, position)
     }
-    fn acceleration_monotonicity(&self, start: f64, end: f64) -> Option<AccelerationTrend> {
-        S::acceleration_monotonicity(self, start, end)
+    fn acceleration_monotonicity(
+        &self,
+        span: (f64, f64),
+        resolved: (f64, f64),
+    ) -> Option<AccelerationTrend> {
+        S::acceleration_monotonicity(self, span, resolved)
     }
     fn interior_knots(&self, start: f64, end: f64) -> &[f64] {
         S::interior_knots(self, start, end)
@@ -3295,7 +3306,8 @@ fn acceleration_error_witness<S: TrackSignal>(
     t1: f64,
     budget: f64,
 ) -> Option<f64> {
-    sig.acceleration_monotonicity(next_toward(t0, t1), next_toward(t1, t0))?;
+    let span = (next_toward(t0, t1), next_toward(t1, t0));
+    sig.acceleration_monotonicity(span, span)?;
     let h = t1 - t0;
     let acceleration = exact_piece(coefficients, 0.0, h, h)
         .differentiate()
@@ -4274,7 +4286,10 @@ fn shaped_ladder<S: TrackSignal>(
         },
         LadderPolicy {
             velocity_sign: policy.velocity_sign,
-            acceleration_monotonicity: sig.acceleration_monotonicity(t0_inside, t1_inside),
+            acceleration_monotonicity: sig.acceleration_monotonicity(
+                (t0_inside, t1_inside),
+                (start_past_sliver, end_past_sliver),
+            ),
             high_degree_span_floor: policy.floors.high_degree,
             velocity_continuous: policy.velocity_continuous,
         },
@@ -4640,7 +4655,10 @@ fn refine_span_against<S: TrackSignal>(
             && failure.error.velocity <= velocity_budget
             && (at_resolution_floor || t1 - t0 <= floors.high_degree)
             && sig
-                .acceleration_monotonicity(next_toward(t0, t1), next_toward(t1, t0))
+                .acceleration_monotonicity(
+                    (next_toward(t0, t1), next_toward(t1, t0)),
+                    (next_toward(t0, t1), next_toward(t1, t0)),
+                )
                 .is_none()
         {
             let velocity_change = failure.right.velocity - failure.left.velocity;
@@ -4937,6 +4955,32 @@ pub(crate) fn apply_nonlinear_advance_to_track(
     adv: trajectory::NonlinearAdvance,
     fit_tol: FitTol,
 ) -> Result<nurbs::ScalarNurbs, PostProcessError> {
+    with_nonlinear_advance_fit(axis, track, adv, fit_tol, |fit, sig| {
+        fit_axis_from_signal(fit, sig)
+    })
+}
+
+/// The shortest span the nonlinear-advance refit of `track` resolves: seed
+/// times closer than this to a kept seed are coalesced onto it.
+#[cfg(test)]
+pub(crate) fn nonlinear_advance_resolution_floor(
+    axis: usize,
+    track: &nurbs::ScalarNurbs,
+    adv: trajectory::NonlinearAdvance,
+    fit_tol: FitTol,
+) -> Result<f64, PostProcessError> {
+    with_nonlinear_advance_fit(axis, track, adv, fit_tol, |fit, sig| {
+        Ok(plan_seeds_and_floors(&fit, sig)?.1.cubic)
+    })
+}
+
+fn with_nonlinear_advance_fit<R>(
+    axis: usize,
+    track: &nurbs::ScalarNurbs,
+    adv: trajectory::NonlinearAdvance,
+    fit_tol: FitTol,
+    fit: impl FnOnce(AxisFit, &NonlinearAdvanceSignal) -> R,
+) -> R {
     let sig = NonlinearAdvanceSignal::new(track, adv);
     let pieces = extract_bezier_pieces(track);
     let t_start = pieces
@@ -4946,7 +4990,7 @@ pub(crate) fn apply_nonlinear_advance_to_track(
     let t_end = pieces.last().expect("nonlinear advance: empty track").u_end;
     let mut breakpoints = track.knots().to_vec();
     breakpoints.extend(nonlinear_transition_breakpoints(&sig));
-    fit_axis_from_signal(
+    fit(
         AxisFit {
             axis,
             t_start,
@@ -5209,7 +5253,11 @@ impl TrackSignal for NonlinearAdvanceSignal {
         )
     }
 
-    fn acceleration_monotonicity(&self, start: f64, end: f64) -> Option<AccelerationTrend> {
+    fn acceleration_monotonicity(
+        &self,
+        (start, end): (f64, f64),
+        (resolved_start, resolved_end): (f64, f64),
+    ) -> Option<AccelerationTrend> {
         let piece = self.piece_at(start);
         if self.piece_at(end) != piece
             || self.coeffs[piece]
@@ -5235,9 +5283,9 @@ impl TrackSignal for NonlinearAdvanceSignal {
                 let second = self.starts[piece] + (extremum - initial_velocity) / acceleration;
                 let lower = first.min(second);
                 let upper = first.max(second);
-                if end <= lower || start >= upper {
+                if resolved_end <= lower || resolved_start >= upper {
                     Some(AccelerationTrend::of_direction(direction))
-                } else if start >= lower && end <= upper {
+                } else if resolved_start >= lower && resolved_end <= upper {
                     Some(AccelerationTrend::of_direction(-direction))
                 } else {
                     None
