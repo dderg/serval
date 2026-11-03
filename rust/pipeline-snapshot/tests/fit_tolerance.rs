@@ -1,7 +1,7 @@
 //! `max_path_deviation` and `max_accel_deviation` are promises: every piece
 //! a fit accepts must stay within them against the exact signal it replaces,
 //! everywhere inside the piece — not just at the ladder's probe points. This
-//! replays every snapshot case and a slice of a dense real print through the
+//! replays every snapshot case and a whole dense real print through the
 //! pipeline with the fit audit on, and fails on any accepted piece that
 //! leaves the tolerance.
 
@@ -11,10 +11,8 @@ use std::path::{Path, PathBuf};
 use motion_pipeline::fit_audit::{FitViolation, take_violations};
 mod corpus;
 
-const DENSE_SLICE_LINES: usize = 2500;
-
 fn dense_cases() -> Vec<(String, String, PathBuf)> {
-    corpus::sim_cases(Some(DENSE_SLICE_LINES))
+    corpus::sim_cases(None)
         .into_iter()
         .filter(|(name, _, _)| name.starts_with("voron_dense_top_layers/"))
         .collect()
