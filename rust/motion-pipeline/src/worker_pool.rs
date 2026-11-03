@@ -14,6 +14,12 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 type Task<'a> = dyn Fn() + Sync + 'a;
 type Panic = Box<dyn Any + Send>;
 
+/// The most helpers a pool keeps. klippy runs under `mlockall`, so every
+/// helper pins a full stack and its own malloc arena for the life of the
+/// process; on the dense replay at 16 cores, throughput stopped growing at
+/// one helper and three already cover a four-core host's spare cores.
+const HELPERS_MAX: usize = 3;
+
 /// Helper threads shared by every fan-out of one shaper. They are spawned on
 /// the first fan-out, so they inherit the scheduling of the thread that runs
 /// the shaper, and a shaper that never fans out never spawns any.
@@ -88,9 +94,13 @@ impl Drop for OpenCall<'_> {
 }
 
 impl WorkerPool {
-    /// A pool sized to the cores the calling thread does not occupy.
+    /// A pool sized to the cores the calling thread does not occupy, up to
+    /// [`HELPERS_MAX`].
     pub(crate) fn new() -> Self {
-        Self::with_helpers(std::thread::available_parallelism().map_or(0, |cores| cores.get() - 1))
+        Self::with_helpers(
+            std::thread::available_parallelism()
+                .map_or(0, |cores| (cores.get() - 1).min(HELPERS_MAX)),
+        )
     }
 
     pub(crate) fn with_helpers(helper_count: usize) -> Self {
