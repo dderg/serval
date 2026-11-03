@@ -489,3 +489,44 @@ fn kernel_free_followers_do_not_gate_the_shaper() {
     assert_eq!(set.forward_support(), lead_hi);
     assert_eq!(set.max_follower_own_forward_support(), 0.0);
 }
+
+#[test]
+fn only_a_kernel_free_advance_over_an_unshaped_leader_may_step_the_follower() {
+    let shaped = CompiledChain::compile(&[bell(0.01605)]).unwrap();
+    let set = |leaders: [&CompiledChain; 3], follower: CompiledChain| AxisChainSet {
+        chains: vec![
+            leaders[0].clone(),
+            leaders[1].clone(),
+            leaders[2].clone(),
+            follower,
+        ],
+        followers: vec![(3, vec![0, 1, 2])],
+    };
+    let unshaped = CompiledChain::default();
+    let advance = || CompiledChain::compile(&[pa(0.04)]).unwrap();
+    assert_eq!(
+        set(
+            [&shaped, &shaped, &unshaped],
+            advance().with_instantaneous_corner_velocity(2.5)
+        )
+        .follower_velocity_step_allowance(3),
+        2.5
+    );
+    assert_eq!(
+        set([&shaped, &shaped, &shaped], advance()).follower_velocity_step_allowance(3),
+        0.0
+    );
+    assert_eq!(
+        set(
+            [&unshaped, &unshaped, &unshaped],
+            CompiledChain::compile(&[pa(0.04), st(0.002)]).unwrap()
+        )
+        .follower_velocity_step_allowance(3),
+        0.0
+    );
+    assert_eq!(
+        set([&unshaped, &unshaped, &unshaped], CompiledChain::default())
+            .follower_velocity_step_allowance(3),
+        0.0
+    );
+}
