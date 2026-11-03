@@ -133,3 +133,38 @@ def test_m204_matches_live(engine):
         800.0,
         10_000.0,
     ]
+
+
+def feedrates(steps: list[tuple]) -> list[float]:
+    return [feedrate for _, _, feedrate, _ in steps]
+
+
+def test_g0_and_g1_feedrates_match_live(engine):
+    steps = assert_parity(
+        engine,
+        "G1 X10 Y10\n"
+        "G1 X20 Y10\n"
+        "G0 X40 F12000\n"
+        "G1 X60\n"
+        "G0 Y40\n"
+        "G1 X60 Y40 F600\n"
+        "G1 X70\n",
+    )
+    assert feedrates(steps) == [25.0, 200.0, 200.0, 200.0, 10.0]
+
+
+def test_feedrate_caps_match_live(engine):
+    steps = assert_parity(
+        engine,
+        "M83\n"
+        "G1 X10 Y10 F120000\n"
+        "G1 X50 Y10\n"
+        "SET_VELOCITY_LIMIT VELOCITY=80\n"
+        "G1 X50 Y50\n"
+        "G1 X60 Y50 Z3\n"
+        "G1 Z6 F3000\n"
+        "G1 X60 Y50 Z7 F120000\n"
+        "G1 E-2 F120000\n"
+        "G1 X60.0000000001 Y50 E2\n",
+    )
+    assert feedrates(steps) == [1000.0, 80.0, 80.0, 25.0, 25.0, 2000.0, 2000.0]

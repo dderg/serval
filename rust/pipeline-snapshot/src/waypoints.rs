@@ -45,6 +45,12 @@ pub enum WaypointError {
         "line {line}: E word before any M82/M83 (or G91) — the extruder mode is ambiguous, and guessing absolute turns relative-E slicer output into garbage extrusion ratios. Declare the mode (slicer excerpts printed with relative extrusion need an 'M83' line at the top)."
     )]
     AmbiguousExtruderMode { line: u32 },
+    #[error("line {line}: G{command} F{feedrate}: invalid speed")]
+    InvalidSpeed {
+        line: u32,
+        command: u32,
+        feedrate: f64,
+    },
     #[error("line {line}: {command} {param}={value}: {reason}")]
     InvalidParam {
         line: u32,
@@ -187,12 +193,91 @@ fn m204(
     Ok(())
 }
 
+/// klippy's default `GCodeMove.speed`, in mm/s, before any `F` word.
+const LIVE_DEFAULT_SPEED_MM_S: f64 = 25.0;
+/// klippy's `GCodeMove.speed_factor` at 100 %: `F` is mm/min.
+const LIVE_SPEED_FACTOR: f64 = 1.0 / 60.0;
+/// klippy's `Move`: below this the move is extrude-only.
+const MOVE_EPSILON_MM: f64 = 0.000_000_001;
+
+/// klippy's `Motion` as the snapshot sees it: the commanded position, the
+/// runtime limit overrides in force, and `Motion.move` turning a target and
+/// a speed into the move it submits.
+struct Toolhead<'a> {
+    config: &'a CartesianLimits,
+    runtime: RuntimeLimits,
+    commanded: Option<[f64; 4]>,
+}
+
+impl Toolhead<'_> {
+    fn anchor(&mut self, position: [f64; 4], speed: f64) -> Waypoint {
+        self.commanded = Some(position);
+        Waypoint {
+            position,
+            feedrate: speed,
+            runtime: self.runtime,
+        }
+    }
+
+    /// `Motion.move(newpos, speed)`: `Move` caps a kinematic move at the
+    /// effective velocity, the kinematics `check_move` caps its z share at
+    /// `max_z_velocity`, a pure-z move is capped outright; an extrude-only
+    /// move keeps its speed. `None` when klippy submits nothing.
+    fn move_to(&mut self, target: [f64; 4], speed: f64) -> Option<Waypoint> {
+        let start = self
+            .commanded
+            .expect("a move follows the anchor that sets the commanded position");
+        let (max_velocity, _, _) = self.runtime.effective(self.config);
+        let mut velocity = speed.min(max_velocity);
+        let mut delta = [0.0; 4];
+        for (axis, d) in delta.iter_mut().enumerate() {
+            *d = target[axis] - start[axis];
+        }
+        let mut end = target;
+        let mut move_d = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+        let kinematic = move_d >= MOVE_EPSILON_MM;
+        if !kinematic {
+            end = [start[0], start[1], start[2], target[3]];
+            delta[..3].fill(0.0);
+            move_d = delta[3].abs();
+            velocity = speed;
+        }
+        if move_d == 0.0 {
+            return None;
+        }
+        let mut min_move_t = move_d / velocity;
+        let max_cruise_v2 = velocity * velocity;
+        if kinematic && delta[2] != 0.0 {
+            let z_speed = self.config.max_z_velocity * (move_d / delta[2].abs());
+            if z_speed * z_speed < max_cruise_v2 {
+                min_move_t = move_d / z_speed;
+            }
+        }
+        let mut feedrate = move_d / min_move_t;
+        let pure_z = delta[2].abs() > MOVE_EPSILON_MM
+            && delta[0].abs() < MOVE_EPSILON_MM
+            && delta[1].abs() < MOVE_EPSILON_MM;
+        if pure_z {
+            feedrate = feedrate.min(self.config.max_z_velocity);
+        }
+        self.commanded = Some(end);
+        Some(Waypoint {
+            position: end,
+            feedrate,
+            runtime: self.runtime,
+        })
+    }
+}
+
 pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>, WaypointError> {
-    let max_velocity = config.max_velocity;
     let mut waypoints: Vec<Waypoint> = Vec::new();
+    let mut toolhead = Toolhead {
+        config,
+        runtime: RuntimeLimits::default(),
+        commanded: None,
+    };
     let (mut x, mut y, mut z, mut e) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
-    let mut feedrate = max_velocity;
-    let mut runtime = RuntimeLimits::default();
+    let mut speed = LIVE_DEFAULT_SPEED_MM_S;
     let mut relative = false;
     let mut e_relative: Option<bool> = None;
 
@@ -217,8 +302,10 @@ pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>
                     args: &args,
                 };
                 match &*name {
-                    "SET_VELOCITY_LIMIT" => set_velocity_limit(&args, config, &mut runtime)?,
-                    "RESET_VELOCITY_LIMIT" => reset_velocity_limit(&mut runtime),
+                    "SET_VELOCITY_LIMIT" => {
+                        set_velocity_limit(&args, config, &mut toolhead.runtime)?;
+                    }
+                    "RESET_VELOCITY_LIMIT" => reset_velocity_limit(&mut toolhead.runtime),
                     _ => {}
                 }
                 continue;
@@ -233,7 +320,7 @@ pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>
             (b'G', 91) => relative = true,
             (b'M', 82) => e_relative = Some(false),
             (b'M', 83) => e_relative = Some(true),
-            (b'M', 204) => m204(&params, line_no, &mut runtime)?,
+            (b'M', 204) => m204(&params, line_no, &mut toolhead.runtime)?,
             (b'G', 92) => {
                 x = params.x().unwrap_or(x);
                 y = params.y().unwrap_or(y);
@@ -278,23 +365,24 @@ pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>
                     None => e,
                 };
 
-                if cmd == 1 {
-                    feedrate = params.f().map_or(feedrate, |f| f / 60.0);
-                }
-                if !(has_position || ne != e) {
-                    continue;
+                if let Some(f) = params.f() {
+                    if f <= 0.0 {
+                        return Err(WaypointError::InvalidSpeed {
+                            line: line_no,
+                            command: cmd,
+                            feedrate: f,
+                        });
+                    }
+                    speed = f * LIVE_SPEED_FACTOR;
                 }
                 (x, y, z, e) = (nx, ny, nz, ne);
-                let e_only_before_any_position = waypoints.is_empty() && !has_position;
-                if e_only_before_any_position {
-                    continue;
-                }
-                let move_feedrate = if cmd == 0 { max_velocity } else { feedrate };
-                waypoints.push(Waypoint {
-                    position: [x, y, z, e],
-                    feedrate: move_feedrate,
-                    runtime,
-                });
+                let target = [x, y, z, e];
+                let waypoint = match toolhead.commanded {
+                    None if has_position => Some(toolhead.anchor(target, speed)),
+                    None => None,
+                    Some(_) => toolhead.move_to(target, speed),
+                };
+                waypoints.extend(waypoint);
             }
             _ => {}
         }

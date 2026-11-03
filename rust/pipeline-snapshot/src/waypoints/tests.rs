@@ -24,16 +24,59 @@ fn absolute_moves_produce_anchor_plus_targets() {
 }
 
 #[test]
-fn g0_travels_at_max_velocity_regardless_of_feedrate() {
-    let wp = parse("G1 X5 F600\nG0 X10\n");
-    assert_eq!(wp[0].feedrate, 10.0);
-    assert_eq!(wp[1].feedrate, 300.0);
+fn g0_is_g1_and_takes_and_keeps_its_feedrate() {
+    let wp = parse("G1 X5 F600\nG0 X10\nG0 X20 F1200\nG1 X30\n");
+    assert_eq!(
+        wp.iter().map(|w| w.feedrate).collect::<Vec<_>>(),
+        [10.0, 10.0, 20.0, 20.0]
+    );
 }
 
 #[test]
-fn feedrate_persists_across_moves_and_survives_g0() {
-    let wp = parse("G1 X5 F600\nG0 X10\nG1 X20\n");
-    assert_eq!(wp[2].feedrate, 10.0, "G1 reuses the last G1 feedrate");
+fn moves_before_any_feedrate_run_at_klippys_default_speed() {
+    let wp = parse("G1 X5\nG1 X10\n");
+    assert_eq!(wp[1].feedrate, LIVE_DEFAULT_SPEED_MM_S);
+}
+
+#[test]
+fn non_positive_feedrate_is_refused_like_klippy() {
+    assert!(matches!(
+        parse_err("G1 X5 F0\n"),
+        WaypointError::InvalidSpeed { line: 1, .. }
+    ));
+}
+
+#[test]
+fn kinematic_feedrate_is_capped_at_the_effective_velocity_but_extrude_only_is_not() {
+    let wp =
+        parse("M83\nG1 X5 F60000\nG1 X10\nSET_VELOCITY_LIMIT VELOCITY=40\nG1 X20\nG1 E-2 F60000\n");
+    assert_eq!(wp[1].feedrate, 300.0);
+    assert_eq!(wp[2].feedrate, 40.0);
+    assert_eq!(wp[3].feedrate, 1000.0);
+}
+
+#[test]
+fn z_share_of_a_move_is_capped_at_max_z_velocity_like_check_move() {
+    let config = CartesianLimits {
+        max_z_velocity: 15.0,
+        ..limits()
+    };
+    let wp = parse_gcode("G1 X0 Y0 Z0 F6000\nG1 X3 Z4\nG1 Z10\n", &config).unwrap();
+    assert!((wp[1].feedrate - 15.0 * 5.0 / 4.0).abs() < 1e-12);
+    assert_eq!(wp[2].feedrate, 15.0);
+}
+
+#[test]
+fn a_move_to_the_commanded_position_submits_nothing() {
+    let wp = parse("G1 X5 F600\nG1 X5\nG1 X10\n");
+    assert_eq!(wp.len(), 2);
+}
+
+#[test]
+fn a_sub_nanometre_xyz_move_with_extrusion_is_extrude_only_in_place() {
+    let wp = parse("M83\nG1 X5 F600\nG1 X5.0000000001 E1 F60000\n");
+    assert_eq!(wp[1].position, [5.0, 0.0, 0.0, 1.0]);
+    assert_eq!(wp[1].feedrate, 1000.0);
 }
 
 #[test]
