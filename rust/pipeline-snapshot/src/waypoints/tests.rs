@@ -91,11 +91,9 @@ fn relative_mode_accumulates() {
 }
 
 #[test]
-fn absolute_e_needs_declared_mode() {
-    assert!(matches!(
-        parse_err("G90\nG1 X10 E1 F6000\n"),
-        WaypointError::AmbiguousExtruderMode { line: 2 }
-    ));
+fn e_is_absolute_by_default_like_klippy() {
+    let wp = parse("G1 X10 E1 F6000\nG1 X20 E3\n");
+    assert_eq!(wp[1].position[3], 3.0);
 }
 
 #[test]
@@ -113,8 +111,8 @@ fn m82_makes_e_absolute() {
 }
 
 #[test]
-fn g91_implies_relative_e_when_undeclared() {
-    let wp = parse("G91\nG1 X10 E1 F6000\nG1 X10 E1\n");
+fn g91_makes_e_relative_even_after_m82() {
+    let wp = parse("M82\nG91\nG1 X10 E1 F6000\nG1 X10 E1\n");
     assert_eq!(wp[1].position[3], 2.0);
 }
 
