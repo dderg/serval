@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use super::{
     CAP_CONTACT_FRACTION, CapDeparture, FULL_RAIL_KNOTS, LawSegment, RAIL_KNOT_DS, RAIL_KNOTS_MAX,
-    RAIL_KNOTS_MIN, RailKnot, SPARE_FULL_RAILS, ScalarLaw, departure_increment, knot_duration,
+    RAIL_KNOTS_MIN, RailKnot, SPARE_FULL_RAILS, ScalarLaw, departure_increment,
+    departure_knot_duration, knot_duration,
 };
 
 fn rail(v0: f64, accel: f64, kappa0: f64, sigma: f64, brake: bool, ds: f64) -> LawSegment {
@@ -439,7 +440,11 @@ fn integrate_rail_arc_recomputing_step_ends(
         let a_hi = law.accel_at(s + h, v_hi);
         let r_lo = law.accel_rate_at(s, v_lo, a_lo);
         let r_hi = law.accel_rate_at(s + h, v_hi, a_hi);
-        t += knot_duration(h, departure, (v_lo, a_lo, r_lo), (v_hi, a_hi, r_hi));
+        let duration = match departure {
+            CapDeparture::FromLo => departure_knot_duration,
+            _ => knot_duration,
+        };
+        t += duration(h, (v_lo, a_lo, r_lo), (v_hi, a_hi, r_hi));
         w = w_next.max(0.0);
         knots.push(RailKnot {
             t,

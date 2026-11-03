@@ -941,108 +941,144 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<Vec<RailK
         let u = k as f64 / n as f64;
         if apex_start { ds * u * u } else { ds * u }
     };
-    let departs_cap = law.in_cap_contact(law.accel_at(0.0, v0));
-    let steps = if departs_cap { n - 1 } else { n };
-    let grid_at = |i: usize| arc_at(if departs_cap && i > 0 { i + 1 } else { i });
-    let mut knots = knot_buffer(n + 1);
-    let mut w = v0 * v0;
-    let mut t = 0.0_f64;
-    knots.push(RailKnot {
-        t,
+    let mut layout = RailLayout {
+        knots: knot_buffer(n + 1),
+        t: 0.0,
+        w: v0 * v0,
+        carried: None,
+    };
+    layout.knots.push(RailKnot {
+        t: 0.0,
         s: 0.0,
         v: v0,
         rise: 0.0,
         departure: CapDeparture::None,
     });
-    let state_at = |s: f64, w: f64| {
-        let v = w.max(0.0).sqrt();
-        let a = law.accel_at(s, v);
-        RailState {
-            s,
-            v,
-            a,
-            rate: law.accel_rate_at(s, v, a),
-        }
-    };
+    let mut first_regular = 0;
+    if law.in_cap_contact(law.accel_at(0.0, v0)) {
+        let h = arc_at(2);
+        let w = layout.w;
+        let lo = rail_state(law, 0.0, w);
+        let increment = departure_increment(law, 0.0, h, w);
+        let step = settle_rail_step(law, &lo, h, w, increment, n == 2, departure_knot_duration)?;
+        layout.lay(h, h, step, CapDeparture::FromLo);
+        first_regular = 2;
+    }
     let f = |s: f64, w: f64| 2.0 * law.accel_at(s, w.max(0.0).sqrt());
-    let mut carried: Option<RailState> = None;
     let mut memo = law.is_autonomous().then(StepMemo::new);
-    for i in 0..steps {
-        let s = grid_at(i);
-        let s_next = grid_at(i + 1);
+    for i in first_regular..n {
+        let s = arc_at(i);
+        let s_next = arc_at(i + 1);
         let h = s_next - s;
-        let lo = carried
+        let w = layout.w;
+        let lo = layout
+            .carried
             .take()
             .filter(|end| end.s == s)
-            .unwrap_or_else(|| state_at(s, w));
-        let last = i == steps - 1;
-        let departure = if departs_cap && i == 0 {
-            CapDeparture::FromLo
-        } else {
-            CapDeparture::None
-        };
-        let settle_step = |increment: f64| -> Option<RailStep> {
-            let stepped = w + increment;
-            let settled = law.settle_crossed_cap(s, s + h, stepped);
-            let w_next = settled.unwrap_or(stepped);
-            if w_next <= 0.0 && !last {
-                return None;
-            }
-            let hi = state_at(s + h, w_next);
-            if lo.v + hi.v <= 0.0 {
-                return None;
-            }
-            let rise = match settled {
-                None if w_next > 0.0 => increment / (lo.v + hi.v),
-                _ => hi.v - lo.v,
-            };
-            Some(RailStep {
-                w_next,
-                hi,
-                rise,
-                duration: knot_duration(h, departure, (lo.v, lo.a, lo.rate), (hi.v, hi.a, hi.rate)),
-            })
-        };
-        let step = match departure {
-            CapDeparture::FromLo => settle_step(departure_increment(law, s, h, w))?,
-            _ => match memo.as_ref().and_then(|memo| memo.get(w, h)) {
-                Some(step) => {
-                    if step.w_next <= 0.0 && !last {
-                        return None;
-                    }
-                    if lo.v + step.hi.v <= 0.0 {
-                        return None;
-                    }
-                    step
+            .unwrap_or_else(|| rail_state(law, s, w));
+        let last = i == n - 1;
+        let step = match memo.as_ref().and_then(|memo| memo.get(w, h)) {
+            Some(step) => {
+                if step.w_next <= 0.0 && !last {
+                    return None;
                 }
-                None => {
-                    let k1 = 2.0 * lo.a;
-                    let k2 = f(s + 0.5 * h, w + 0.5 * h * k1);
-                    let k3 = f(s + 0.5 * h, w + 0.5 * h * k2);
-                    let k4 = f(s + h, w + h * k3);
-                    let step = settle_step(h * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0)?;
-                    if let Some(memo) = memo.as_mut() {
-                        memo.put(w, h, step);
-                    }
-                    step
+                if lo.v + step.hi.v <= 0.0 {
+                    return None;
                 }
-            },
+                step
+            }
+            None => {
+                let k1 = 2.0 * lo.a;
+                let k2 = f(s + 0.5 * h, w + 0.5 * h * k1);
+                let k3 = f(s + 0.5 * h, w + 0.5 * h * k2);
+                let k4 = f(s + h, w + h * k3);
+                let increment = h * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0;
+                let step = settle_rail_step(law, &lo, h, w, increment, last, knot_duration)?;
+                if let Some(memo) = memo.as_mut() {
+                    memo.put(w, h, step);
+                }
+                step
+            }
         };
-        t += step.duration;
-        w = step.w_next.max(0.0);
-        knots.push(RailKnot {
-            t,
+        layout.lay(s_next, s + h, step, CapDeparture::None);
+    }
+    Some(Arc::new(layout.knots))
+}
+
+/// The rail's knots as [`integrate_rail_arc`] lays them, with the state the
+/// next step starts from.
+struct RailLayout {
+    knots: Vec<RailKnot>,
+    t: f64,
+    w: f64,
+    carried: Option<RailState>,
+}
+
+impl RailLayout {
+    /// Lays the knot at grid arc `s_next` that `step` reached at `s_end`,
+    /// the arc its own sum lands on.
+    fn lay(&mut self, s_next: f64, s_end: f64, step: RailStep, departure: CapDeparture) {
+        self.t += step.duration;
+        self.w = step.w_next.max(0.0);
+        self.knots.push(RailKnot {
+            t: self.t,
             s: s_next,
             v: step.hi.v,
             rise: step.rise,
             departure,
         });
-        carried = Some(RailState {
-            s: s + h,
+        self.carried = Some(RailState {
+            s: s_end,
             ..step.hi
         });
     }
-    Some(Arc::new(knots))
+}
+
+fn rail_state(law: &ScalarLaw, s: f64, w: f64) -> RailState {
+    let v = w.max(0.0).sqrt();
+    let a = law.accel_at(s, v);
+    RailState {
+        s,
+        v,
+        a,
+        rate: law.accel_rate_at(s, v, a),
+    }
+}
+
+/// The step from `lo`, where `v² = w`, that raises `v²` by `increment` over
+/// `h` of arc, settled onto the cap where it crosses it, and lasts the
+/// `duration` its pair's interpolant takes. `None` when the speed folds to
+/// rest before the rail's `last` step.
+fn settle_rail_step(
+    law: &ScalarLaw,
+    lo: &RailState,
+    h: f64,
+    w: f64,
+    increment: f64,
+    last: bool,
+    duration: impl Fn(f64, (f64, f64, f64), (f64, f64, f64)) -> f64,
+) -> Option<RailStep> {
+    let s = lo.s;
+    let stepped = w + increment;
+    let settled = law.settle_crossed_cap(s, s + h, stepped);
+    let w_next = settled.unwrap_or(stepped);
+    if w_next <= 0.0 && !last {
+        return None;
+    }
+    let hi = rail_state(law, s + h, w_next);
+    if lo.v + hi.v <= 0.0 {
+        return None;
+    }
+    let rise = match settled {
+        None if w_next > 0.0 => increment / (lo.v + hi.v),
+        _ => hi.v - lo.v,
+    };
+    Some(RailStep {
+        w_next,
+        hi,
+        rise,
+        duration: duration(h, (lo.v, lo.a, lo.rate), (hi.v, hi.a, hi.rate)),
+    })
 }
 
 /// One completed integrator step: the state it reached and the knot it laid.
@@ -1118,33 +1154,50 @@ struct RailState {
     rate: f64,
 }
 
-/// The duration `τ` under which the pair's interpolant through `(v, a, ȧ)`
-/// at both ends integrates to exactly `ds`. For the quintic Hermite,
-/// `ds = τ·(v_lo+v_hi)/2 + τ²·(a_lo−a_hi)/10 + τ³·(ȧ_lo+ȧ_hi)/120`: the
-/// leading term alone is the trapezoid, exact for constant acceleration at
-/// any speed ratio — including a rest end, where a quadrature in `1/v`
-/// diverges; the corrections carry the acceleration's change across the
-/// pair. Departing the cap from `lo`, whose rate the square root leaves
-/// unbounded, `ds = τ·(2v_lo+5v_hi)/7 + τ²·(a_lo/70 − 8a_hi/35) + τ³·4ȧ_hi/105`.
+/// The duration `τ` under which the quintic Hermite through `(v, a, ȧ)` at
+/// both ends integrates to exactly `ds`:
+/// `ds = τ·(v_lo+v_hi)/2 + τ²·(a_lo−a_hi)/10 + τ³·(ȧ_lo+ȧ_hi)/120`.
+/// The leading term alone is the trapezoid, exact for constant acceleration
+/// at any speed ratio — including a rest end, where a quadrature in `1/v`
+/// diverges; the corrections carry the acceleration's change across the pair.
 fn knot_duration(
     ds: f64,
-    departure: CapDeparture,
     (v_lo, a_lo, r_lo): (f64, f64, f64),
     (v_hi, a_hi, r_hi): (f64, f64, f64),
 ) -> f64 {
-    let (c1, c2, c3) = match departure {
-        CapDeparture::None => (
+    pair_duration(
+        ds,
+        (
             0.5 * (v_lo + v_hi),
             (a_lo - a_hi) / 10.0,
             (r_lo + r_hi) / 120.0,
         ),
-        CapDeparture::FromLo => (
+        (v_lo, v_hi),
+    )
+}
+
+/// The duration `τ` under which the square-root interpolant departing the
+/// cap from `lo`, whose rate the square root leaves unbounded, integrates to
+/// exactly `ds`: `ds = τ·(2v_lo+5v_hi)/7 + τ²·(a_lo/70 − 8a_hi/35) + τ³·4ȧ_hi/105`.
+fn departure_knot_duration(
+    ds: f64,
+    (v_lo, a_lo, _): (f64, f64, f64),
+    (v_hi, a_hi, r_hi): (f64, f64, f64),
+) -> f64 {
+    pair_duration(
+        ds,
+        (
             (2.0 * v_lo + 5.0 * v_hi) / 7.0,
             a_lo / 70.0 - 8.0 * a_hi / 35.0,
             4.0 * r_hi / 105.0,
         ),
-        CapDeparture::FromHi => panic!("rails integrate forward from the cap they depart"),
-    };
+        (v_lo, v_hi),
+    )
+}
+
+/// The positive root of `c3·τ³ + c2·τ² + c1·τ = ds`, by Newton's method from
+/// the leading term's root.
+fn pair_duration(ds: f64, (c1, c2, c3): (f64, f64, f64), (v_lo, v_hi): (f64, f64)) -> f64 {
     let mut tau = ds / c1;
     for _ in 0..8 {
         let residual = ((c3 * tau + c2) * tau + c1) * tau - ds;
