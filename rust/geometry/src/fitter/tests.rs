@@ -917,3 +917,26 @@ fn endpoint_anchored_center_is_well_conditioned_near_a_half_turn() {
         );
     }
 }
+
+#[test]
+fn a_run_beside_a_move_along_its_plane_normal_gets_neither_ease_nor_blend_from_it() {
+    // trident_mesh_clock_regression.gcode: a Z lift, then three XY facets
+    // forming a shallow arc in the plane the lift is perpendicular to. No
+    // spiral joins a line along the arc plane's normal to the arc.
+    let mk = |line_no: u32, a: [f64; 3], b: [f64; 3]| seg(line_no, 10_000.0, 71.2, a, b, 0.0);
+    let head = mk(1, [169.513, 158.329, 0.0], [169.513, 158.329, 0.2]);
+    let facets = vec![
+        mk(2, [169.513, 158.329, 0.2], [170.254, 158.769, 0.2]),
+        mk(3, [170.254, 158.769, 0.2], [171.048, 159.137, 0.2]),
+        mk(4, [171.048, 159.137, 0.2], [171.481, 159.297, 0.2]),
+    ];
+    let corner = CornerFitConfig::default();
+    let fit = RunFit::fit(&facets, Some(&head), None, corner).unwrap();
+    if let Some(mut fit) = fit {
+        let blend = fit.blend_head_with_line(&head, &facets[0], corner).unwrap();
+        assert!(
+            blend.is_empty(),
+            "a lift along the arc plane's normal is not blended"
+        );
+    }
+}

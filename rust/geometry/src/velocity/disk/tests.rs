@@ -15,7 +15,7 @@ fn arc_reach_matches_the_closed_form() {
     // On a constant-curvature arc the rail has the closed form
     // w(s) = w_lim * sin(2*kappa*s + asin(w0/w_lim)).
     let k = kin(4.0, 1000.0, 0.12, 0.0, f64::INFINITY);
-    let v = disk_reach_v(&k, 5.0, 4.0, 1e-9).unwrap();
+    let v = disk_reach_v(&k, 5.0, 4.0, 1e-9).unwrap().v;
     let w_lim = 1000.0 / 0.12;
     let arg = 2.0 * 0.12 * 4.0 + libm::asin(25.0 / w_lim);
     let closed = if arg >= std::f64::consts::FRAC_PI_2 {
@@ -33,14 +33,14 @@ fn arc_reach_matches_the_closed_form() {
 #[test]
 fn line_reach_is_constant_accel() {
     let k = kin(10.0, 500.0, 0.0, 0.0, f64::INFINITY);
-    let v = disk_reach_v(&k, 3.0, 10.0, 1e-9).unwrap();
+    let v = disk_reach_v(&k, 3.0, 10.0, 1e-9).unwrap().v;
     assert!((v - (9.0_f64 + 2.0 * 500.0 * 10.0).sqrt()).abs() < 1e-9);
 }
 
 #[test]
 fn clothoid_reach_respects_the_curvature_ceiling() {
     let k = kin(4.0, 1000.0, 0.0, 0.05, 300.0);
-    let v = disk_reach_v(&k, 5.0, 4.0, 1e-9).unwrap();
+    let v = disk_reach_v(&k, 5.0, 4.0, 1e-9).unwrap().v;
     let cap_end = limit_speed(k.kappa_abs(4.0), 1000.0);
     assert!(
         v <= cap_end * (1.0 + 1e-9),
@@ -51,8 +51,8 @@ fn clothoid_reach_respects_the_curvature_ceiling() {
 #[test]
 fn reverse_reach_mirrors_the_member() {
     let k = kin(4.0, 1000.0, 0.0, 0.05, 300.0);
-    let fwd = disk_reach_v(&k.reversed(), 5.0, 4.0, 1e-9).unwrap();
-    let rev = disk_reach_v_rev(&k, 5.0, 4.0, 1e-9).unwrap();
+    let fwd = disk_reach_v(&k.reversed(), 5.0, 4.0, 1e-9).unwrap().v;
+    let rev = disk_reach_v_rev(&k, 5.0, 4.0, 1e-9).unwrap().v;
     assert_eq!(fwd, rev);
 }
 
