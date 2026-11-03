@@ -10,9 +10,9 @@ use trajectory::{
 
 use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
-    AccelerationTrend, FitTol, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget, LadderFailure,
-    LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth, VelocitySign, eval_mono,
-    eval_mono_d, eval_mono_dd, exact_piece, ladder_fit, quintic_in_u,
+    AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget,
+    LadderFailure, LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth, VelocitySign,
+    eval_mono, eval_mono_d, eval_mono_dd, exact_piece, ladder_fit, quintic_in_u,
 };
 use crate::types::{BaseItem, Control, PostProcessError, TrajectoryItem};
 use crate::worker_pool::WorkerPool;
@@ -3298,8 +3298,13 @@ fn span_probe_t(t0: f64, t1: f64, u: f64) -> f64 {
 /// (p, v, a) at both ends and degrees 6/7 from interior residuals — the
 /// lowering ladder against pre-sampled truth, with the shaper's own budgets.
 /// Every accepted piece is endpoint-anchored, so the span seams stay C0 no
-/// matter which rung wins. Returns the accepted monomial-in-u fit, or the
-/// quintic base with `fits = false` so the caller can bisect.
+/// matter which rung wins. On a span reaching a square-root onset the
+/// acceleration's shoulder bends between the probes, so the rungs are also
+/// held to the tolerance at points spread between the resolved edges as the
+/// fit audit spreads them: a miss there splits a splittable span — grading
+/// the partition toward the onset only as deep as its fit needs — and at the
+/// floor the closest rung is the closest there too. Returns the accepted
+/// monomial-in-u fit, or the closest rung with the ladder's miss.
 #[allow(clippy::type_complexity)]
 fn shaped_ladder<S: TrackSignal>(
     sig: &S,
@@ -3376,6 +3381,23 @@ fn shaped_ladder<S: TrackSignal>(
         };
     }
 
+    let mut held_samples = [HeldSample::default(); SQUARE_ROOT_ONSET_CHECK_POINTS];
+    let held: &[HeldSample] = if square_root_onset_within(sig, t0, t1) {
+        let resolved = end_past_sliver - start_past_sliver;
+        for (k, sample) in held_samples.iter_mut().enumerate() {
+            let t = start_past_sliver
+                + resolved * (k as f64 + 0.5) / SQUARE_ROOT_ONSET_CHECK_POINTS as f64;
+            let (position, _, acceleration) = sig.eval_pva(t);
+            *sample = HeldSample {
+                x: 2.0 * (t - t0) / h - 1.0,
+                position,
+                acceleration,
+            };
+        }
+        &held_samples
+    } else {
+        &[]
+    };
     match ladder_fit(
         &base,
         LadderSpan { h, endpoint_delta },
@@ -3383,6 +3405,7 @@ fn shaped_ladder<S: TrackSignal>(
             position: &|u| truth.pos_at(u),
             velocity: &|u| truth.vel_at(u),
             acceleration: &|u| truth.acc_at(u),
+            held,
         },
         LadderBudget {
             tol: fit_tol,
@@ -3462,54 +3485,9 @@ fn shaped_ladder<S: TrackSignal>(
     }
 }
 
-/// Points at which a candidate next to a square-root onset is held to the
-/// fit tolerance, spread between its resolved edges as the fit audit
-/// spreads them.
-const SQUARE_ROOT_ONSET_CHECK_POINTS: u32 = 64;
-
-/// A ladder candidate over `[t0, t1]` in the ladder's `[-1, 1]` monomial
-/// coordinate, and how far inside each edge the fit resolves it.
-#[derive(Clone, Copy)]
-struct OnsetCandidate<'a> {
-    mono_u: &'a [f64],
-    t0: f64,
-    t1: f64,
-    edge_insets: (f64, f64),
-}
-
-/// Whether a candidate the ladder accepted at its probes leaves the fit
-/// tolerance between them, checked only on a span reaching a square-root
-/// onset: there the acceleration's shoulder bends between the probes, and
-/// splitting the span grades the partition toward the onset only as deep
-/// as its fit needs.
-fn misses_square_root_onset<S: TrackSignal>(
-    sig: &S,
-    candidate: OnsetCandidate,
-    fit_tol: FitTol,
-) -> bool {
-    let OnsetCandidate {
-        mono_u,
-        t0,
-        t1,
-        edge_insets: (start_inset, end_inset),
-    } = candidate;
-    if !square_root_onset_within(sig, t0, t1) {
-        return false;
-    }
-    let h = t1 - t0;
-    let acceleration_scale = (2.0 / h) * (2.0 / h);
-    let resolved = h - start_inset - end_inset;
-    (0..SQUARE_ROOT_ONSET_CHECK_POINTS).any(|k| {
-        let u = (start_inset
-            + resolved * (f64::from(k) + 0.5) / f64::from(SQUARE_ROOT_ONSET_CHECK_POINTS))
-            / h;
-        let x = 2.0 * u - 1.0;
-        let (position, _, acceleration) = sig.eval_pva(t0 + h * u);
-        (eval_mono(mono_u, x) - position).abs() > fit_tol.pos_mm
-            || (eval_mono_dd(mono_u, x) * acceleration_scale - acceleration).abs()
-                > fit_tol.accel_mm_s2
-    })
-}
+/// Points at which a span reaching a square-root onset is held to the fit
+/// tolerance between the ladder's probes.
+const SQUARE_ROOT_ONSET_CHECK_POINTS: usize = 64;
 
 /// How far from a span edge a declared square-root onset still lies on it:
 /// the onsets and the seeds the edges come from are computed apart, ulps of
@@ -3544,6 +3522,7 @@ fn refine_shaped_span<S: TrackSignal>(
     let velocity_budget = policy.velocity_budget;
     let floors = policy.floors;
     let (mono_u, failure) = shaped_ladder(sig, t0, t1, slivers, policy)?;
+    #[cfg(feature = "fit-audit")]
     let edge_insets = (
         edge_inset(t1 - t0, floors.cubic, slivers.start),
         edge_inset(t1 - t0, floors.cubic, slivers.end),
@@ -3551,19 +3530,7 @@ fn refine_shaped_span<S: TrackSignal>(
     let tm = 0.5 * t0 + 0.5 * t1;
     let at_resolution_floor = tm - t0 < floors.cubic || t1 - tm < floors.cubic;
     let splittable = !at_resolution_floor && *refinement_splits < MAX_FIT_REFINEMENT_SPLITS;
-    if failure.is_none()
-        && !(splittable
-            && misses_square_root_onset(
-                sig,
-                OnsetCandidate {
-                    mono_u: &mono_u,
-                    t0,
-                    t1,
-                    edge_insets,
-                },
-                fit_tol,
-            ))
-    {
+    if failure.is_none() {
         #[cfg(feature = "fit-audit")]
         crate::fit_audit::check(
             sig,

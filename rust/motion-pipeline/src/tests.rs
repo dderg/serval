@@ -2406,6 +2406,7 @@ fn the_ladder_fits_a_resolution_scale_span_without_high_degree_amplification() {
             position: &truth_p,
             velocity: &truth_v,
             acceleration: &truth_a,
+            held: &[],
         },
         crate::lowering::LadderBudget {
             tol: tolerance,
@@ -2510,6 +2511,7 @@ fn a_smooth_cusp_fits_below_the_high_degree_floor_without_bump_corrections() {
                 position: &truth_p,
                 velocity: &truth_v,
                 acceleration: &truth_a,
+                held: &[],
             },
             crate::lowering::LadderBudget {
                 tol: tolerance,
@@ -2627,6 +2629,7 @@ fn a_constant_acceleration_resolution_span_fits_the_anchored_quadratic() {
             position: &truth_p,
             velocity: &truth_v,
             acceleration: &truth_a,
+            held: &[],
         },
         crate::lowering::LadderBudget {
             tol: tolerance,
@@ -2767,6 +2770,7 @@ fn an_endpoint_anchored_fit_never_steps_the_right_seam() {
             position: &truth_p,
             velocity: &truth_v,
             acceleration: &truth_a,
+            held: &[],
         },
         crate::lowering::LadderBudget {
             tol: tolerance,
@@ -2798,6 +2802,132 @@ fn an_endpoint_anchored_fit_never_steps_the_right_seam() {
             "endpoint u={u} must be anchored, stepped by {seam_step}"
         );
     }
+}
+
+/// The x axis of a brake landing on its curvature cap at `t1`, from the
+/// dense top layers of the Voron print on the fast bench config: the
+/// acceleration leaves the landing as `−B·√τ` plus a gentle slope, read
+/// back from `τ = t1 − t`.
+struct CapLanding {
+    t1: f64,
+    position: f64,
+    velocity: f64,
+    acceleration: f64,
+    root_coefficient: f64,
+    slope: f64,
+}
+
+impl CapLanding {
+    fn pva(&self, t: f64) -> (f64, f64, f64) {
+        let tau = self.t1 - t;
+        let root = tau.sqrt();
+        let (b, c) = (self.root_coefficient, self.slope);
+        (
+            self.position - self.velocity * tau + 0.5 * self.acceleration * tau * tau
+                - 4.0 / 15.0 * b * tau * tau * root
+                + c * tau * tau * tau / 6.0,
+            self.velocity - self.acceleration * tau + 2.0 / 3.0 * b * tau * root
+                - 0.5 * c * tau * tau,
+            self.acceleration - b * root + c * tau,
+        )
+    }
+}
+
+/// Every rung but the cubic family reads the endpoint state, so at a
+/// square-root onset each one bends between the probes differently: the one
+/// a floor keeps must be the one closest where the onset is held, not the
+/// one closest at the nine probes.
+#[test]
+fn the_closest_rung_at_a_square_root_onset_is_the_closest_between_the_probes() {
+    let landing = CapLanding {
+        t1: 9.033_494_529_868_939,
+        position: 120.468_406_580,
+        velocity: 72.506_679,
+        acceleration: 4187.074,
+        root_coefficient: 1.578e6,
+        slope: 7.83e7,
+    };
+    let h = 8.105_897_855_159_583e-7;
+    let t0 = landing.t1 - h;
+    let t_of = |u: f64| nurbs::fmadd(0.5 * (u + 1.0), h, t0);
+    let truth_p = |u: f64| landing.pva(t_of(u)).0;
+    let truth_v = |u: f64| landing.pva(t_of(u)).1;
+    let inset = 0.25 * h;
+    let anchored_end_acceleration =
+        2.0 * landing.pva(landing.t1 - inset).2 - landing.pva(landing.t1 - 2.0 * inset).2;
+    let truth_a = |u: f64| {
+        if u == 1.0 {
+            anchored_end_acceleration
+        } else {
+            landing.pva(t_of(u)).2
+        }
+    };
+    let tolerance = crate::lowering::FitTol {
+        pos_mm: 0.005,
+        accel_mm_s2: 50.0,
+    };
+    let base = crate::lowering::quintic_in_u(
+        landing.pva(t0),
+        (
+            landing.position,
+            landing.velocity,
+            anchored_end_acceleration,
+        ),
+        h,
+    );
+    let held: Vec<crate::lowering::HeldSample> = (0..64)
+        .map(|k| {
+            let t = t0 + inset + (h - 2.0 * inset) * (f64::from(k) + 0.5) / 64.0;
+            let (position, _, acceleration) = landing.pva(t);
+            crate::lowering::HeldSample {
+                x: 2.0 * (t - t0) / h - 1.0,
+                position,
+                acceleration,
+            }
+        })
+        .collect();
+    let miss_between_probes = |rung: &[f64]| {
+        crate::lowering::held_miss(rung, h, &held, tolerance) * tolerance.accel_mm_s2
+    };
+    let kept_rung = match crate::lowering::ladder_fit(
+        &base,
+        crate::lowering::LadderSpan {
+            h,
+            endpoint_delta: truth_p(1.0) - truth_p(-1.0),
+        },
+        &crate::lowering::LadderTruth {
+            position: &truth_p,
+            velocity: &truth_v,
+            acceleration: &truth_a,
+            held: &held,
+        },
+        crate::lowering::LadderBudget {
+            tol: tolerance,
+            velocity: f64::INFINITY,
+        },
+        crate::lowering::LadderPolicy {
+            velocity_sign: crate::lowering::VelocitySign::Unconstrained,
+            acceleration_monotonicity: None,
+            high_degree_span_floor: 0.0,
+            velocity_continuous: false,
+        },
+    ) {
+        Ok(fit) => fit,
+        Err(crate::lowering::LadderMiss { closest_rung, .. }) => closest_rung,
+    };
+    let best = [5, 6, 7, 9, 11, crate::lowering::LADDER_MAX_DEGREE]
+        .into_iter()
+        .map(|degree| {
+            miss_between_probes(&crate::lowering::ladder_candidate(&base, degree, &truth_p))
+        })
+        .fold(f64::INFINITY, f64::min);
+    let kept = miss_between_probes(&kept_rung);
+    assert!(
+        kept <= best,
+        "the kept degree-{} rung misses the onset by {kept} mm/s² between the probes, a \
+         closer rung by {best}",
+        kept_rung.len() - 1
+    );
 }
 
 struct SineTrackSignal {
