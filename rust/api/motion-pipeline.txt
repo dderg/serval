@@ -164,7 +164,7 @@ pub fn motion_pipeline::WorkerPool::default() -> Self
 impl core::ops::drop::Drop for motion_pipeline::WorkerPool
 pub fn motion_pipeline::WorkerPool::drop(&mut self)
 impl geometry::velocity::FanOut for motion_pipeline::WorkerPool
-pub fn motion_pipeline::WorkerPool::map_jobs<T: core::marker::Send>(&self, usize, usize, impl core::ops::function::Fn(usize) -> T + core::marker::Sync) -> alloc::vec::Vec<T>
+pub fn motion_pipeline::WorkerPool::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
 pub const motion_pipeline::CONTIGUITY_EPS_MM: f64
 pub const motion_pipeline::SHAPER_INBOX_CAP: usize
 pub fn motion_pipeline::advance_odometer(&mut [f64], &geometry::frontend::Move)

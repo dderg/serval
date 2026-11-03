@@ -577,7 +577,7 @@ pub geometry::velocity::MoveVelocity::samples: alloc::vec::Vec<geometry::velocit
 pub geometry::velocity::MoveVelocity::source: geometry::segment::SourceRange
 pub struct geometry::velocity::Serial
 impl geometry::velocity::FanOut for geometry::velocity::Serial
-pub fn geometry::velocity::Serial::map_jobs<T: core::marker::Send>(&self, usize, usize, impl core::ops::function::Fn(usize) -> T + core::marker::Sync) -> alloc::vec::Vec<T>
+pub fn geometry::velocity::Serial::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
 pub struct geometry::velocity::VelSample
 pub geometry::velocity::VelSample::a: f64
 pub geometry::velocity::VelSample::s: f64
@@ -600,9 +600,9 @@ pub geometry::velocity::VelocityReport::limit_ride: u32
 pub geometry::velocity::VelocityReport::stops: u32
 pub geometry::velocity::VelocityReport::traversal_time_s: f64
 pub trait geometry::velocity::FanOut
-pub fn geometry::velocity::FanOut::map_jobs<T: core::marker::Send>(&self, usize, usize, impl core::ops::function::Fn(usize) -> T + core::marker::Sync) -> alloc::vec::Vec<T>
+pub fn geometry::velocity::FanOut::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
 impl geometry::velocity::FanOut for geometry::velocity::Serial
-pub fn geometry::velocity::Serial::map_jobs<T: core::marker::Send>(&self, usize, usize, impl core::ops::function::Fn(usize) -> T + core::marker::Sync) -> alloc::vec::Vec<T>
+pub fn geometry::velocity::Serial::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
 pub fn geometry::velocity::plan_velocity_stops(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
 pub fn geometry::velocity::plan_velocity_stops_reconstruct_prefix(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams, usize) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
 pub fn geometry::velocity::plan_velocity_stops_select_prefix<F, W>(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams, &W, F) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError> where F: core::ops::function::FnOnce(usize) -> usize, W: geometry::velocity::FanOut
@@ -829,7 +829,7 @@ pub geometry::MoveVelocity::samples: alloc::vec::Vec<geometry::velocity::VelSamp
 pub geometry::MoveVelocity::source: geometry::segment::SourceRange
 pub struct geometry::Serial
 impl geometry::velocity::FanOut for geometry::velocity::Serial
-pub fn geometry::velocity::Serial::map_jobs<T: core::marker::Send>(&self, usize, usize, impl core::ops::function::Fn(usize) -> T + core::marker::Sync) -> alloc::vec::Vec<T>
+pub fn geometry::velocity::Serial::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
 pub struct geometry::SourceRange
 pub geometry::SourceRange::end_line: u32
 pub geometry::SourceRange::start_line: u32
@@ -890,9 +890,9 @@ pub geometry::VelocityReport::stops: u32
 pub geometry::VelocityReport::traversal_time_s: f64
 pub const geometry::CORNER_DEVIATION_SCV_FACTOR: f64
 pub trait geometry::FanOut
-pub fn geometry::FanOut::map_jobs<T: core::marker::Send>(&self, usize, usize, impl core::ops::function::Fn(usize) -> T + core::marker::Sync) -> alloc::vec::Vec<T>
+pub fn geometry::FanOut::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
 impl geometry::velocity::FanOut for geometry::velocity::Serial
-pub fn geometry::velocity::Serial::map_jobs<T: core::marker::Send>(&self, usize, usize, impl core::ops::function::Fn(usize) -> T + core::marker::Sync) -> alloc::vec::Vec<T>
+pub fn geometry::velocity::Serial::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
 pub fn geometry::corner_deviation_from_scv(f64, f64) -> f64
 pub fn geometry::line_move([f64; 3], [f64; 3], f64, geometry::frontend::MoveContext) -> core::result::Result<geometry::frontend::Move, geometry::frontend::FrontendError>
 pub fn geometry::plan_velocity_stops_reconstruct_prefix(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams, usize) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
