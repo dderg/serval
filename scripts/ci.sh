@@ -116,21 +116,33 @@ job_rust_fuzz() {
     local profile="${FUZZ_NEXTEST_PROFILE:-ci}"
     local partition=()
     [ -z "${FUZZ_PARTITION:-}" ] || partition=(--partition "hash:$FUZZ_PARTITION")
+    local log rc=0
+    log="$(mktemp)"
     PROPTEST_CASES="$cases" host_cargo nextest run --workspace --profile "$profile" \
         ${partition[@]+"${partition[@]}"} \
-        -E "(binary(/fuzz|proptest|^property_/) | test(/ripple_fuzz::/)) - ($pipeline)" || return 1
-    PROPTEST_CASES="$((cases / 64))" host_cargo nextest run --workspace --profile "$profile" \
-        ${partition[@]+"${partition[@]}"} \
-        -E "$pipeline"
+        -E "(binary(/fuzz|proptest|^property_/) | test(/ripple_fuzz::/)) - ($pipeline)" \
+        >"$log" 2>&1 || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        PROPTEST_CASES="$((cases / 64))" host_cargo nextest run --workspace --profile "$profile" \
+            ${partition[@]+"${partition[@]}"} \
+            -E "$pipeline" >>"$log" 2>&1 || rc=$?
+    fi
+    cat "$log"
+    [ "$rc" -eq 0 ] || python3 "$ROOT/scripts/fuzz_triage.py" parse <"$log"
+    rm -f "$log"
+    return "$rc"
 }
 
 # The fit audit checks every accepted fit piece densely and slows the
-# pipeline ~2.5x, so it is compiled only here: as a feature of the default
+# pipeline ~2x, so it is compiled only here: as a feature of the default
 # test build it would unify into every workspace test binary.
 job_rust_fit_audit() {
     cd "$RUST"
+    host_cargo nextest run --profile ci -p motion-pipeline --features fit-audit \
+        -E 'test(/^fit_audit::/)'
     host_cargo nextest run --profile ci -p pipeline-snapshot --features fit-audit \
         --test fit_tolerance
+    cargo clippy -p motion-pipeline --features fit-audit --all-targets -- -D warnings
     cargo clippy -p pipeline-snapshot --features fit-audit --all-targets -- -D warnings
 }
 
@@ -331,16 +343,18 @@ job_sim_image() { "$ROOT/tools/sim/run.sh" save-image; }
 # re-plans every 64 planned moves, so a healthy stream goes ~650 slicer moves
 # without output; a planner that cannot commit past a layer change holds
 # thousands (3480 before the finality barrier alone gated commits). Every
-# config under tools/bench/configs then replays the same print through the
-# same live construction, held only to finishing. CI runners say nothing
-# about the printer host: the Pi 5 realtime factors per config and core
-# count are in tools/bench/README.md ("Replay throughput (Pi 5)").
+# config under tools/bench/configs and its machine profiles then replays the
+# same print through the same live construction, held only to finishing.
+# CI runners say nothing about the printer host: the Pi 5 realtime factors
+# per config and core count are in tools/bench/README.md ("Replay
+# throughput (Pi 5)").
 job_replay_budget() {
     cd "$RUST" && cargo run --release -p motion-core --example gcode_replay_bench -- \
         "$ROOT/tools/sim/gcode/voron_dense_top_layers.gcode" \
         --config "$ROOT/tools/bench/printer.cfg" --min-worst-x 1.3 --max-held-moves 1000 || return
     local config
-    for config in "$ROOT"/tools/bench/configs/*.cfg; do
+    for config in "$ROOT"/tools/bench/configs/*.cfg "$ROOT"/tools/bench/configs/profiles/*.cfg; do
+        echo "replay-budget: ${config#"$ROOT"/}"
         cargo run --release -p motion-core --example gcode_replay_bench -- \
             "$ROOT/tools/sim/gcode/voron_dense_top_layers.gcode" --config "$config" || return
     done

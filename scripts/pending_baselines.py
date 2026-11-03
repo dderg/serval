@@ -31,7 +31,9 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(
+    os.environ.get("SERVAL_REPO_ROOT") or Path(__file__).resolve().parent.parent
+)
 CACHE = Path(
     os.environ.get("PENDING_BASELINES_CACHE", "~/.cache/pending-baselines")
 ).expanduser()

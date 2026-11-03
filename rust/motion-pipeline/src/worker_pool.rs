@@ -19,7 +19,15 @@ type Panic = Box<dyn Any + Send>;
 /// helper pins a full stack and its own malloc arena for the life of the
 /// process; on the dense replay at 16 cores, throughput stopped growing at
 /// one helper and three already cover a four-core host's spare cores.
+#[cfg(not(feature = "fit-audit"))]
 const HELPERS_MAX: usize = 3;
+
+/// An audited replay checks every piece its fan-out jobs accept, which
+/// costs more than the fits themselves, and never runs on a printer: it
+/// takes a helper for every core. Fan-outs return their results in job
+/// order, so the helper count changes no fit.
+#[cfg(feature = "fit-audit")]
+const HELPERS_MAX: usize = usize::MAX;
 
 /// Stack of every thread that takes fan-out jobs. klippy runs under
 /// `mlockall`, so a thread's whole stack is resident from its spawn; the

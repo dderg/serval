@@ -84,3 +84,11 @@ def test_landed_branches_are_read_back(tmp_path):
     assert lq.read_landed(path) == set()
     path.write_text("a\nb\n")
     assert lq.read_landed(path) == {"a", "b"}
+
+
+def test_reexec_is_skipped_when_already_running_the_current_copy(monkeypatch):
+    monkeypatch.setenv(lq.REEXEC_VAR, "1")
+    monkeypatch.setattr(
+        lq.pending, "run", lambda *a, **k: pytest.fail("fetched")
+    )
+    lq.reexec_current_copy()

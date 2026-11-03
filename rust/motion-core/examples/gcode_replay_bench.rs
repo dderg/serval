@@ -7,25 +7,37 @@
 //
 //   cargo run --release -p motion-core --example gcode_replay_bench -- \
 //       <file.gcode> --config <printer.cfg> [t_lo t_hi] \
-//       [--min-worst-x <x>] [--max-held-moves <n>]
+//       [--min-worst-x <x>] [--max-held-moves <n>] [--digest]
 //
 // With t_lo/t_hi only moves whose stream window overlaps [t_lo, t_hi] stream
 // seconds are interesting; the whole file still replays (stream time only
-// exists downstream), but the report highlights that range.
+// exists downstream), but the report highlights that range. --digest hashes
+// every emitted segment, so a throughput change can be held to an identical
+// trajectory.
 
 use std::env;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::process;
 use std::time::Instant;
 
 use motion_core::seam_test_harness::LiveReplay;
 use motion_pipeline::TrajectoryItem;
 use motion_pipeline::timing::stage_totals;
+use trajectory::ContinuousSegment;
 
 fn take_flag(args: &mut Vec<String>, flag: &str) -> Option<String> {
     let i = args.iter().position(|a| a == flag)?;
     args.remove(i);
     Some(args.remove(i))
+}
+
+fn take_switch(args: &mut Vec<String>, switch: &str) -> bool {
+    let Some(i) = args.iter().position(|a| a == switch) else {
+        return false;
+    };
+    args.remove(i);
+    true
 }
 
 fn planner_config(path: &str) -> planner_config::PlannerConfig {
@@ -53,10 +65,11 @@ fn main() {
         .map(|v| v.parse::<f64>().expect("--min-worst-x takes a number"));
     let max_held_moves = take_flag(&mut args, "--max-held-moves")
         .map(|v| v.parse::<u64>().expect("--max-held-moves takes a count"));
+    let digest = take_switch(&mut args, "--digest");
     let Some(config_path) = take_flag(&mut args, "--config") else {
         eprintln!(
             "usage: gcode_replay_bench <in.gcode> --config <printer.cfg> [t_lo t_hi] \
-             [--min-worst-x <x>] [--max-held-moves <n>]"
+             [--min-worst-x <x>] [--max-held-moves <n>] [--digest]"
         );
         process::exit(1);
     };
@@ -83,11 +96,15 @@ fn main() {
 
     let wall = Instant::now();
     let (arrival_tx, arrival_rx) = crossbeam_channel::unbounded::<(f64, f64)>();
+    let (digest_tx, digest_rx) = crossbeam_channel::unbounded::<ContinuousSegment>();
     let mut pipeline = replay.pipeline().into_staged(move |item| {
         if let TrajectoryItem::Seg(seg) = item {
             arrival_tx
                 .send((wall.elapsed().as_secs_f64(), seg.t_end))
                 .expect("bench collects every arrival");
+            if digest {
+                digest_tx.send(seg).expect("bench digests every segment");
+            }
         }
         true
     });
@@ -118,6 +135,13 @@ fn main() {
         arrivals.len(),
         stream_s / wall_s
     );
+    if digest {
+        let mut hasher = std::hash::DefaultHasher::new();
+        for seg in digest_rx.try_iter() {
+            format!("{seg:?}").hash(&mut hasher);
+        }
+        println!("trajectory_digest={:016x}", hasher.finish());
+    }
     println!("stage breakdown (wall share, calls, per move):");
     for total in stage_totals() {
         let secs = total.total_us as f64 * 1e-6;
