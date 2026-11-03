@@ -116,4 +116,4 @@ pub fn planner_config::RuntimeLimits::effective(&self, &planner_config::Cartesia
 pub fn planner_config::RuntimeLimits::set_accel_cap(&mut self, core::option::Option<f64>) -> core::result::Result<(), planner_config::RuntimeLimitError>
 pub fn planner_config::RuntimeLimits::set_corner_deviation(&mut self, core::option::Option<f64>) -> core::result::Result<(), planner_config::RuntimeLimitError>
 pub fn planner_config::RuntimeLimits::set_velocity_cap(&mut self, core::option::Option<f64>) -> core::result::Result<(), planner_config::RuntimeLimitError>
-pub const planner_config::DEFAULT_SQUARE_CORNER_VELOCITY_MM_S: f64
+pub const planner_config::DEFAULT_CORNER_DEVIATION_MM: f64

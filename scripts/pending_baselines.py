@@ -21,6 +21,7 @@ accepted; commit the written baselines there and push them to the PR branch.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -34,7 +35,18 @@ ROOT = Path(__file__).resolve().parent.parent
 CACHE = Path(
     os.environ.get("PENDING_BASELINES_CACHE", "~/.cache/pending-baselines")
 ).expanduser()
-TARGET_DIR = CACHE / "target"
+TARGETS = CACHE / "targets"
+
+
+def target_dir_for(tree: Path, purpose: str = "build") -> Path:
+    """A cargo target dir private to one worktree path. Cargo's unit hash does
+    not include the workspace path and its freshness test compares source
+    mtimes with the artifact's, so two worktrees with different sources in
+    one target dir can link each other's crates."""
+    digest = hashlib.sha1(str(tree.resolve()).encode()).hexdigest()[:8]
+    return TARGETS / f"{tree.name}-{digest}-{purpose}"
+
+
 SAMPLE_DT_S = 1e-3
 AXES = ("x", "y", "z", "e")
 DETAIL_CASES = 6
@@ -174,7 +186,7 @@ def sample_commit(sha: str) -> Path:
     shutil.rmtree(tree, ignore_errors=True)
     run(["git", "worktree", "add", "--detach", "--force", str(tree), sha])
     try:
-        env = {"CARGO_TARGET_DIR": str(TARGET_DIR)}
+        env = {"CARGO_TARGET_DIR": str(target_dir_for(tree))}
         print(
             f"building engine at {short(sha)} ...", file=sys.stderr, flush=True
         )
@@ -547,11 +559,13 @@ def review(number: int, dry_run: bool) -> None:
         ],
     ]
     launch = [str(tree / "snapshots" / "snapshot-tests.sh")]
-    env = {"CARGO_TARGET_DIR": str(TARGET_DIR)}
+    env = {"CARGO_TARGET_DIR": str(target_dir_for(tree))}
     if dry_run:
         for command in commands:
             print("+", " ".join(command))
-        print(f"+ (cwd {tree}) CARGO_TARGET_DIR={TARGET_DIR} {launch[0]}")
+        print(
+            f"+ (cwd {tree}) CARGO_TARGET_DIR={target_dir_for(tree)} {launch[0]}"
+        )
         return
     if tree.exists():
         raise PendingBaselinesError(
