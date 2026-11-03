@@ -2219,6 +2219,8 @@ fn speed_second_of(states: &[(f64, f64, f64, f64)], speed: f64) -> f64 {
     cross_squared / (speed * speed * speed) + velocity_dot_jerk / speed
 }
 
+/// The odometer's leaves: each knot's time, the distance to it, and the
+/// leaders' speed there.
 struct OdometerKnots {
     t: Vec<f64>,
     s: Vec<f64>,

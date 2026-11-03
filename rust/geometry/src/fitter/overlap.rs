@@ -76,6 +76,7 @@ pub(super) fn resolve_arc_line(
     config: CornerFitConfig,
     delta: f64,
     shortest_halves: [f64; 2],
+    line_claim: f64,
 ) -> Option<GeneralBlend> {
     let plane_n = plane_of(arc);
     let along_the_normal = |tangent: [f64; 3]| norm(cross(plane_n, tangent)) < OUT_OF_PLANE_EPS;
@@ -83,7 +84,7 @@ pub(super) fn resolve_arc_line(
         return None;
     }
     let arc_budget = 0.5 * arc_len(arc);
-    let line_budget = 0.5 * line.s_len();
+    let line_budget = line_claim;
     let (anchor_in, anchor_out, budget_in, budget_out) = match side {
         ArcSide::Inbound => (
             Anchor {

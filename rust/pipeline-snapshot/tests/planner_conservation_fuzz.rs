@@ -1,5 +1,7 @@
-use pipeline_snapshot::waypoints::Waypoint;
-use pipeline_snapshot::{ExactTrajectory, SampleSide, SnapshotParams, pipeline_snapshot};
+use pipeline_snapshot::waypoints::{Waypoint, parse_gcode};
+use pipeline_snapshot::{
+    CartesianLimits, ExactTrajectory, SampleSide, SnapshotParams, pipeline_snapshot,
+};
 use proptest::prelude::*;
 
 const AXES: usize = 4;
@@ -322,11 +324,17 @@ fn toolhead_stays_within_the_corner_budget(
     limits: Limits,
     steps: &[Step],
 ) -> Result<(), TestCaseError> {
-    let points = waypoints(steps);
-    let trajectory = plan(limits, &points);
+    toolhead_stays_within_the_corner_budget_of(limits, &waypoints(steps))
+}
+
+fn toolhead_stays_within_the_corner_budget_of(
+    limits: Limits,
+    points: &[Waypoint],
+) -> Result<(), TestCaseError> {
+    let trajectory = plan(limits, points);
     let budget = corner_deviation(limits) + FIT_TOL_MM;
     for sample in walk_path(&trajectory)? {
-        let off = distance_to_polyline(sample.xy, &points);
+        let off = distance_to_polyline(sample.xy, points);
         prop_assert!(
             off <= budget,
             "at t={} the toolhead is {off} mm off the polyline, budget {budget}",
@@ -474,6 +482,27 @@ fn a_cut_corner_between_two_ratios_lays_between_them() {
     material_per_mm_of_path_stays_within_the_ratios(limits, &steps).unwrap();
 }
 
+/// #586: a run of micron-scale moves after a long one under a large corner
+/// budget. The arc run's tail blend claimed half the 3.7 um line after it,
+/// leaving the corner beyond a 1.8 um body no blend or sharp corner could
+/// lift to the line-body floor.
+#[test]
+fn micron_moves_after_a_run_leave_no_line_sliver() {
+    let limits = Limits {
+        max_velocity: 210.699,
+        max_accel: 500.0,
+        square_corner_velocity: 16.7316,
+    };
+    let steps = [
+        step(0.17258, 1.0, 1.0, 0.0),
+        step(std::f64::consts::PI, 0.001575, 1.0, 0.0),
+        step(3.49493, 0.000496, 1.0, 0.0),
+        step(2.14118, 0.003686, 293.85, 0.0),
+        step(0.0, 0.001424, 1.0, 0.0),
+    ];
+    extruder_lays_its_ratio_along_the_path(limits, &steps).unwrap();
+}
+
 /// #550: a 0.31 mm corner budget around 1 mm moves. The blends leave the
 /// waypoints' bounding box by up to 51 µm, inside the budget they may spend.
 #[test]
@@ -540,7 +569,12 @@ fn a_near_reversal_off_a_fast_line_lays_its_ratio_along_the_path() {
         square_corner_velocity: 13.517812626216859,
     };
     let steps = [
-        step(std::f64::consts::PI, 1.0, 593.262836305538, 0.06452893755225318),
+        step(
+            std::f64::consts::PI,
+            1.0,
+            593.262836305538,
+            0.06452893755225318,
+        ),
         step(
             0.1662771977788236,
             0.004608638732611155,
@@ -549,4 +583,87 @@ fn a_near_reversal_off_a_fast_line_lays_its_ratio_along_the_path() {
         ),
     ];
     extruder_lays_its_ratio_along_the_path(limits, &steps).unwrap();
+}
+
+/// #550: a slicer's faceted inner corner (neptune_cube/discontinuity around
+/// X124.6 Y102.7, G-code lifted verbatim). The run detector held the
+/// vertices and the facets' sagitta to the corner budget separately, so the
+/// arc it fitted strayed from the chords by both together — 22 µm under a
+/// 16.6 µm budget. A run now forms only where every chord stays within the
+/// budget of its circle.
+#[test]
+fn a_faceted_curve_keeps_the_corner_budget_between_its_vertices() {
+    let limits = Limits {
+        max_velocity: 1000.0,
+        max_accel: 10_000.0,
+        square_corner_velocity: 20.0,
+    };
+    let gcode = "M83\nG92 X125.277 Y98.999\nG1 F5933.255\n\
+        G1 X124.831 Y99.192 E.01633\nG1 X124.495 Y99.625 E.01846\n\
+        G1 X124.414 Y100.026 E.01376\nG1 X124.414 Y101.022 E.03348\n\
+        G1 X124.446 Y101.278 E.00867\nG1 X124.627 Y101.652 E.01398\n\
+        G1 X124.883 Y101.893 E.01183\nG1 F5341.575\nG1 X125.002 Y101.958 E.00505\n\
+        G1 F4857.86\nG1 X125.121 Y102.022 E.00556\nG1 F4454.477\n\
+        G1 X125.239 Y102.087 E.00606\nG1 F4112.949\nG1 X125.358 Y102.152 E.00656\n\
+        G1 X125.239 Y102.217 E.00656\nG1 F4454.477\nG1 X125.121 Y102.282 E.00606\n\
+        G1 F4857.86\nG1 X125.002 Y102.347 E.00556\nG1 F5341.575\n\
+        G1 X124.883 Y102.412 E.00505\nG1 F5932.273\nG1 X124.627 Y102.653 E.01184\n\
+        G1 X124.482 Y102.913 E.01002\nG1 X124.449 Y103.097 E.00628\n\
+        G1 X124.85 Y103.223 F9000\n";
+    let points = parse_gcode(
+        gcode,
+        &CartesianLimits::without_z_caps(
+            limits.max_velocity,
+            limits.max_accel,
+            f64::INFINITY,
+            corner_deviation(limits),
+        ),
+    )
+    .expect("G-code parses");
+    toolhead_stays_within_the_corner_budget_of(limits, &points).unwrap();
+}
+
+/// #550: holding arc-run chords to the corner budget splits the slicer's
+/// faceted circle into two runs whose minimax circles differ by microns.
+/// Each anchored through the shared vertex on its own, they met at a
+/// 0.2 mrad kink — too small to blend, a 0.019 mm/s velocity step at curve
+/// speed. A run after a sealed run is now anchored tangent to it.
+#[test]
+fn adjacent_arc_runs_meet_without_a_velocity_step() {
+    let limits = Limits {
+        max_velocity: 300.0,
+        max_accel: 1000.0,
+        square_corner_velocity: 8.0,
+    };
+    let gcode = std::fs::read_to_string(
+        source_tree::repo_root().join("snapshots/cases/arc_fit/circle.gcode"),
+    )
+    .expect("circle case");
+    let points = parse_gcode(
+        &gcode,
+        &CartesianLimits::without_z_caps(
+            limits.max_velocity,
+            limits.max_accel,
+            f64::INFINITY,
+            corner_deviation(limits),
+        ),
+    )
+    .expect("G-code parses");
+    let trajectory = plan(limits, &points);
+    for axis in 0..2 {
+        for (index, pair) in trajectory.rows(axis).windows(2).enumerate() {
+            let before = trajectory
+                .eval_row(axis, index, pair[0].t1, SampleSide::Left)
+                .unwrap();
+            let after = trajectory
+                .eval_row(axis, index + 1, pair[1].t0, SampleSide::Right)
+                .unwrap();
+            let step = (after.velocity - before.velocity).abs();
+            assert!(
+                step < 1e-6,
+                "axis {axis} steps {step} mm/s at t={}",
+                pair[0].t1
+            );
+        }
+    }
 }

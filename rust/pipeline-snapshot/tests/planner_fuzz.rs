@@ -647,7 +647,12 @@ fn a_micrometre_extrusion_between_a_fast_line_and_a_slow_travel_ramps_its_ratio(
         square_corner_velocity: 7.296773245024728,
     };
     let moves = [
-        planar(Turn::Absolute(2.9053886486487226), 1.0, 546.924938602993, 0.0765246174258583),
+        planar(
+            Turn::Absolute(2.9053886486487226),
+            1.0,
+            546.924938602993,
+            0.0765246174258583,
+        ),
         planar(
             Turn::Absolute(5.682024081779053),
             0.0009566603280114744,

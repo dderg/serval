@@ -8,7 +8,9 @@ use motion_core::seam_test_harness::{
     collect_shaped_segments_from_script, default_stream_config, parse_gcode_to_moves,
 };
 use motion_pipeline::{StreamConfig, StreamInput};
-use trajectory::{AxisChainSet, CompiledChain, ContinuousSegment, FollowerLimits, PostProcessorInstance, algos};
+use trajectory::{
+    AxisChainSet, CompiledChain, ContinuousSegment, FollowerLimits, PostProcessorInstance, algos,
+};
 
 const EXTRUDER_AXIS: usize = 3;
 const SAMPLE_DT_S: f64 = 1e-5;
@@ -39,10 +41,12 @@ fn plain() -> AxisChainSet {
 }
 
 fn accel_limited(max_accel_mm_s2: f64) -> AxisChainSet {
-    trident_leaders_with(CompiledChain::default().with_follower_limits(FollowerLimits {
-        max_velocity_mm_s: f64::INFINITY,
-        max_accel_mm_s2,
-    }))
+    trident_leaders_with(
+        CompiledChain::default().with_follower_limits(FollowerLimits {
+            max_velocity_mm_s: f64::INFINITY,
+            max_accel_mm_s2,
+        }),
+    )
 }
 
 fn config() -> StreamConfig {
@@ -147,7 +151,11 @@ fn rise_width(track: &Track) -> f64 {
 fn planned_e(script: Vec<StreamInput>) -> f64 {
     let mut chains = plain();
     chains.followers.clear();
-    final_e(&collect_shaped_segments_from_script(script, config(), chains))
+    final_e(&collect_shaped_segments_from_script(
+        script,
+        config(),
+        chains,
+    ))
 }
 
 fn script(gcode: &str) -> Vec<StreamInput> {
@@ -286,7 +294,12 @@ fn a_ratio_ramp_lays_the_planned_material_through_retracts_and_drains() {
     let print = "G90\nM83\nG1 X0 Y0 F9000\nG1 X20 Y0 E0.666\nG1 E-0.8 F2400\n\
                  G1 X20 Y20 F9000\nG1 E0.8 F2400\nG1 X40 Y20 E0.666 F9000\nG1 X60 Y20\n\
                  G1 X60 Y40 E0.666\nG1 X0 Y0\n";
-    let twice = || script(print).into_iter().chain(script(print)).collect::<Vec<_>>();
+    let twice = || {
+        script(print)
+            .into_iter()
+            .chain(script(print))
+            .collect::<Vec<_>>()
+    };
     let laid = final_e(&collect_shaped_segments_from_script(
         twice(),
         config(),
