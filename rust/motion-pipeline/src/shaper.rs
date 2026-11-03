@@ -23,6 +23,11 @@ mod hidden_breaks;
 #[path = "shaper_exact.rs"]
 mod exact;
 
+#[path = "shaper_hull.rs"]
+mod hull;
+
+use hull::{FittedPiece, HullBudget};
+
 pub(crate) use exact::{ExactConvolution, ExactKernel, ExactPiece};
 use hidden_breaks::{
     HiddenBreak, HiddenBreakBound, LeaderSeeds, ShapedBreaks, hidden_break_bounds,
@@ -111,13 +116,6 @@ pub(crate) trait TrackSignal {
     /// The signal's exact polynomial on every sub-interval of `[lo, hi]`
     /// between its breaks, each with an a-priori bound on its rounding;
     /// `None` for a signal that is not exactly piecewise polynomial there.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "TODO: the shaped ladder's hull acceptance reads this next"
-        )
-    )]
     fn exact_polynomial_on(&self, _lo: f64, _hi: f64) -> Option<Vec<ExactPiece>> {
         None
     }
@@ -236,13 +234,6 @@ impl<S: TrackSignal> TrackSignal for ShiftedTrackSignal<S> {
 /// construction behind it.
 pub(crate) struct ConvolutionSignal<'a, S: TrackSignal> {
     evaluated: S,
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "TODO: the shaped ladder's hull acceptance reads this next"
-        )
-    )]
     exact: ExactConvolution<'a>,
 }
 
@@ -3274,6 +3265,29 @@ struct RungWitness<'a, S> {
     fit_tol: FitTol,
 }
 
+/// Where the witnesses estimate a rung leaves the tolerance between the
+/// probes, for a signal with no exact polynomials to prove it against.
+fn estimated_witness<S: TrackSignal>(
+    witness: RungWitness<'_, S>,
+    t1: f64,
+    truth: &SpanTruth,
+    (resolved_from, resolved_to): (f64, f64),
+) -> Result<Option<f64>, PostProcessError> {
+    if let Some(u) = acceleration_error_witness(
+        witness.sig,
+        witness.coefficients,
+        witness.t0,
+        t1,
+        witness.fit_tol.accel_mm_s2,
+    ) {
+        return Ok(Some(u));
+    }
+    match witness.sig.interior_knots(resolved_from, resolved_to) {
+        [] => witness.over_probes(truth),
+        knots => witness.over_pieces(truth, knots),
+    }
+}
+
 impl<S: TrackSignal> RungWitness<'_, S> {
     fn position_sample(&self, u: f64, (position, velocity): (f64, f64)) -> PositionErrorSample {
         PositionErrorSample {
@@ -3641,6 +3655,10 @@ fn span_probe_t(t0: f64, t1: f64, u: f64) -> f64 {
 /// points are sampled only once a rung passes the probes or a kept closest
 /// rung is ranked. Returns the accepted
 /// monomial-in-u fit, or the closest rung with the ladder's miss.
+///
+/// A rung that passes the probes is then held between them: proven by the
+/// Bernstein hull of its error against the signal's exact polynomials
+/// where the signal has them, estimated by the witnesses where it does not.
 #[allow(clippy::type_complexity)]
 fn shaped_ladder<S: TrackSignal>(
     sig: &S,
@@ -3760,22 +3778,35 @@ fn shaped_ladder<S: TrackSignal>(
         },
     ) {
         Ok(coefficients) => {
-            let rung_witness = RungWitness {
-                axis,
-                sig,
-                coefficients: &coefficients,
-                t0,
-                h,
-                fit_tol,
-            };
-            let witness =
-                match acceleration_error_witness(sig, &coefficients, t0, t1, fit_tol.accel_mm_s2) {
-                    Some(u) => Some(u),
-                    None => match sig.interior_knots(start_past_sliver, end_past_sliver) {
-                        [] => rung_witness.over_probes(&truth)?,
-                        knots => rung_witness.over_pieces(&truth, knots)?,
+            let resolved = (start_past_sliver, end_past_sliver);
+            let witness = match sig.exact_polynomial_on(resolved.0, resolved.1) {
+                Some(exact) => hull::first_unproven(
+                    &exact,
+                    FittedPiece {
+                        mono_u: &coefficients,
+                        t0,
+                        t1,
                     },
-                };
+                    resolved,
+                    HullBudget {
+                        tol: fit_tol,
+                        velocity: policy.velocity_budget,
+                    },
+                ),
+                None => estimated_witness(
+                    RungWitness {
+                        axis,
+                        sig,
+                        coefficients: &coefficients,
+                        t0,
+                        h,
+                        fit_tol,
+                    },
+                    t1,
+                    &truth,
+                    resolved,
+                )?,
+            };
             let Some(u) = witness else {
                 return Ok((coefficients, None));
             };
@@ -4473,3 +4504,7 @@ mod shaper_motor_command_tests;
 #[cfg(test)]
 #[path = "shaper_cap_contact_tests.rs"]
 mod shaper_cap_contact_tests;
+
+#[cfg(test)]
+#[path = "shaper_shaped_wave_tests.rs"]
+mod shaper_shaped_wave_tests;

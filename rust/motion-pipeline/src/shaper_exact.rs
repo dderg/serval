@@ -54,14 +54,6 @@
 //! Real sub-intervals holding a float time; one narrower than an ulp holds
 //! no time any evaluation can name, so it is left to its neighbours, whose
 //! polynomials are bounded to one ulp past their own breaks.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "TODO: the shaped ladder's hull acceptance reads these next"
-    )
-)]
-
 use std::cmp::Ordering;
 
 use nurbs::algebra::PiecewisePolynomialKernel;
@@ -381,13 +373,9 @@ pub(crate) struct ExactPiece {
 }
 
 impl ExactPiece {
-    pub(crate) fn local(&self, t: f64) -> f64 {
-        (t - self.center) / self.radius
-    }
-
     #[cfg(test)]
     pub(crate) fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
-        let x = self.local(t);
+        let x = (t - self.center) / self.radius;
         (
             self.pva[0].eval(x),
             self.pva[1].eval(x),
