@@ -3249,7 +3249,7 @@ const INTERPOLANT_SUSPICION_SHARE: f64 = 0.9;
 const INTERPOLANT_REFINE_SHARE: f64 = 0.5;
 const GOLDEN_SECTION_STEPS: u32 = 16;
 
-fn golden_section_peak<E>(
+pub(crate) fn golden_section_peak<E>(
     mut value: impl FnMut(f64) -> Result<f64, E>,
     mut low: f64,
     mut high: f64,
