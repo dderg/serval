@@ -10,9 +10,9 @@ use trajectory::{
 
 use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
-    AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget,
-    LadderFailure, LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth, VelocitySign,
-    eval_mono, eval_mono_d, eval_mono_dd, exact_piece, ladder_fit, quintic_in_u,
+    AccelBudget, AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE, LADDER_PROBES_U,
+    LadderBudget, LadderFailure, LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth,
+    VelocitySign, eval_mono, eval_mono_d, eval_mono_dd, exact_piece, ladder_fit, quintic_in_u,
 };
 use crate::types::{BaseItem, Control, PostProcessError, TrajectoryItem};
 use crate::worker_pool::WorkerPool;
@@ -3283,6 +3283,32 @@ fn golden_section_peak<E>(
 const EXACT_PEAK_SCAN_POINTS: u32 = 8;
 
 const WITNESS_MAX_DEPTH: u32 = 6;
+const HERMITE_TRUTH_SCAN_POINTS: u32 = 16;
+
+/// A quintic Hermite interpolant over `[from, from + width]` in `u`, its
+/// end slopes and curvatures scaled to the stretch: `width·f'` and
+/// `width²·f''`.
+#[derive(Clone, Copy)]
+struct HermiteTruth {
+    from: f64,
+    width: f64,
+    travel: f64,
+    slopes: (f64, f64),
+    curvatures: (f64, f64),
+}
+
+impl HermiteTruth {
+    fn curvature_per_u2(&self, u: f64) -> f64 {
+        let s = (u - self.from) / self.width;
+        let ((d0, d1), (c0, c1)) = (self.slopes, self.curvatures);
+        let scaled = -self.travel * s * (-60.0 + s * (180.0 - 120.0 * s))
+            + d0 * s * (-36.0 + s * (96.0 - 60.0 * s))
+            + c0 * (1.0 + s * (-9.0 + s * (18.0 - 10.0 * s)))
+            + c1 * s * (3.0 + s * (-12.0 + 10.0 * s))
+            + d1 * s * (-24.0 + s * (84.0 - 60.0 * s));
+        scaled / (self.width * self.width)
+    }
+}
 
 #[derive(Clone, Copy)]
 struct PositionErrorSample {
@@ -3365,6 +3391,7 @@ struct RungWitness<'a, S> {
     t0: f64,
     h: f64,
     fit_tol: FitTol,
+    accel_budget: AccelBudget,
 }
 
 /// Where the witnesses estimate a rung leaves the tolerance between the
@@ -3437,6 +3464,49 @@ impl<S: TrackSignal> RungWitness<'_, S> {
     fn within(&self, sample: ErrorSample) -> bool {
         sample.position.error.abs() <= self.fit_tol.pos_mm
             && sample.curvature_per_u2.abs() <= self.curvature_budget()
+    }
+
+    /// The truth's quintic Hermite interpolant between two samples: the
+    /// rung's travel, slope and curvature there less its errors.
+    fn hermite_truth(&self, left: ErrorSample, right: ErrorSample) -> HermiteTruth {
+        let width = right.position.u - left.position.u;
+        let travel = |u: f64| u * eval_mono(&self.coefficients[1..], u);
+        let slope = |sample: ErrorSample| {
+            (eval_mono_d(self.coefficients, sample.position.u) - sample.position.slope_per_u)
+                * width
+        };
+        let curvature = |sample: ErrorSample| {
+            (eval_mono_dd(self.coefficients, sample.position.u) - sample.curvature_per_u2)
+                * width
+                * width
+        };
+        HermiteTruth {
+            from: left.position.u,
+            width,
+            travel: travel(right.position.u) - travel(left.position.u) - right.position.error
+                + left.position.error,
+            slopes: (slope(left), slope(right)),
+            curvatures: (curvature(left), curvature(right)),
+        }
+    }
+
+    fn curvature_error_against(&self, truth: &HermiteTruth, u: f64) -> f64 {
+        eval_mono_dd(self.coefficients, u) - truth.curvature_per_u2(u)
+    }
+
+    /// The largest curvature error against `truth` over a scan of its
+    /// stretch.
+    fn curvature_error_peak_against(&self, truth: &HermiteTruth) -> f64 {
+        (1..HERMITE_TRUTH_SCAN_POINTS)
+            .map(|k| {
+                let u = nurbs::fmadd(
+                    f64::from(k) / f64::from(HERMITE_TRUTH_SCAN_POINTS),
+                    truth.width,
+                    truth.from,
+                );
+                self.curvature_error_against(truth, u).abs()
+            })
+            .fold(0.0, f64::max)
     }
 
     fn over_probes(&self, truth: &SpanTruth) -> Result<Option<f64>, PostProcessError> {
@@ -3578,7 +3648,13 @@ impl<S: TrackSignal> RungWitness<'_, S> {
         if right.position.u <= left.position.u {
             return Ok(None);
         }
-        match self.acceleration_between(left, right, 0)? {
+        let acceleration = match self.accel_budget {
+            AccelBudget::Absolute => self.acceleration_between(left, right, 0)?,
+            AccelBudget::PositionEquivalent => {
+                self.acceleration_against_hermite_truth(left, right, 0)?
+            }
+        };
+        match acceleration {
             Some(u) => Ok(Some(u)),
             None => self.over_gap(left.position, right.position, 0),
         }
@@ -3605,6 +3681,46 @@ impl<S: TrackSignal> RungWitness<'_, S> {
         match self.acceleration_between(left, mid, depth + 1)? {
             Some(u) => Ok(Some(u)),
             None => self.acceleration_between(mid, right, depth + 1),
+        }
+    }
+
+    /// Where the rung's curvature leaves the budget between two samples,
+    /// held against the truth's quintic Hermite interpolant rather than
+    /// the error's: the rung is known exactly, and a high-degree rung swings
+    /// between samples where no interpolant of the error follows it. The
+    /// position-equivalent budget accepts such rungs: its curvature error
+    /// runs to `8·ε/h²`, hundreds of mm/s² on an advanced extruder whose
+    /// signal swings by tens of thousands. The stretch's exact midpoint
+    /// measures how far the truth leaves its interpolant, and a stretch
+    /// whose estimate and that miss together reach the budget is split
+    /// there. The absolute budget keeps the error's interpolant, which the
+    /// fit audit already holds every absolute fit to.
+    fn acceleration_against_hermite_truth(
+        &self,
+        left: ErrorSample,
+        right: ErrorSample,
+        depth: u32,
+    ) -> Result<Option<f64>, PostProcessError> {
+        let truth = self.hermite_truth(left, right);
+        let estimated_peak = self.curvature_error_peak_against(&truth);
+        if estimated_peak <= INTERPOLANT_REFINE_SHARE * self.curvature_budget() {
+            return Ok(None);
+        }
+        let u = 0.5 * (left.position.u + right.position.u);
+        let mid = self.exact_sample_at(u)?;
+        if !self.within(mid) {
+            return Ok(Some(u));
+        }
+        let truth_miss = (mid.curvature_per_u2 - self.curvature_error_against(&truth, u)).abs();
+        if estimated_peak + truth_miss <= self.curvature_budget() {
+            return Ok(None);
+        }
+        if depth == WITNESS_MAX_DEPTH {
+            return Ok(Some(u));
+        }
+        match self.acceleration_against_hermite_truth(left, mid, depth + 1)? {
+            Some(u) => Ok(Some(u)),
+            None => self.acceleration_against_hermite_truth(mid, right, depth + 1),
         }
     }
 
@@ -3918,6 +4034,7 @@ fn shaped_ladder<S: TrackSignal>(
                         t0,
                         h,
                         fit_tol: piece_tol,
+                        accel_budget: fit_tol.accel_budget,
                     },
                     t1,
                     &truth,
