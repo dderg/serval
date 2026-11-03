@@ -386,7 +386,11 @@ the truth's quintic Hermite interpolant, the exact midpoint measures how far
 the truth leaves that interpolant, and a stretch whose estimate and miss
 together reach the budget is split there. The error's interpolant left 72
 pieces of the Trident ramp chain's dense print up to 1.83× over; the
-truth's leaves none.
+truth's leaves none. Position between two samples is estimated by the
+error's cubic Hermite interpolant, which misses the error by its fourth
+derivative; an estimate past 90 % of the budget is read exactly. Trusted
+to the budget itself, it let a cubic on the 3 000 mm/s² bowden's dense
+print 0.14 % past it.
 
 Leader refits use ordered parallel work without changing the fitted signal.
 Axes run concurrently. Ordinary windows distribute whole target segments;
