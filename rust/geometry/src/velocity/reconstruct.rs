@@ -58,7 +58,8 @@ fn member_law(kin: &Kinematics, local: f64, sense: RailSense) -> ScalarLaw {
 
 /// The member's exact profile as at most three law segments in member-local
 /// time and arc: the forward rail from the entry, the reversed rail from the
-/// exit, each integrated once over the whole member, and the cuts of those
+/// exit, each integrated once over the whole member (or taken from the seam
+/// plan when it already integrated the same rail), and the cuts of those
 /// two that meet at the onset. Every seam is closed on the interpolant the
 /// onset was solved on, so no seam depends on re-integrating a rail over a
 /// different grid.
@@ -86,28 +87,26 @@ pub(super) fn member_profile(
         flat_ceiling: kin.flat_ceiling,
     };
     let at_ceiling = entry_v >= ceiling * (1.0 - 1e-12);
+    let rail = |seam_rail: Option<&LawSegment>, v0: f64, law: ScalarLaw| match seam_rail
+        .filter(|seam_rail| seam_rail.is_origin_rail(v0, law, len))
+    {
+        Some(seam_rail) => Ok(seam_rail.clone()),
+        None => LawSegment::until_arc(0.0, 0.0, v0, law, len).ok_or(ReconstructError::Diverged),
+    };
     let forward = if at_ceiling {
         None
     } else {
-        Some(
-            LawSegment::until_arc(
-                0.0,
-                0.0,
-                entry_v,
-                member_law(kin, 0.0, RailSense::Forward),
-                len,
-            )
-            .ok_or(ReconstructError::Diverged)?,
-        )
+        Some(rail(
+            m.forward_rail,
+            entry_v,
+            member_law(kin, 0.0, RailSense::Forward),
+        )?)
     };
-    let backward = LawSegment::until_arc(
-        0.0,
-        0.0,
+    let backward = rail(
+        m.backward_rail,
         exit_v,
         member_law(&reversed, 0.0, RailSense::Forward),
-        len,
-    )
-    .ok_or(ReconstructError::Diverged)?;
+    )?;
     let forward_at = |x: f64| -> Option<f64> {
         let Some(forward) = &forward else {
             return Some(ceiling);
