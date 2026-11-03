@@ -574,19 +574,6 @@ impl CartesianLimits {
         }
         Ok(())
     }
-
-    #[must_use]
-    pub fn for_move(&self, dx: f64, dy: f64, dz: f64) -> (f64, f64) {
-        let d = (dx * dx + dy * dy + dz * dz).sqrt();
-        let mut v = self.max_velocity;
-        let mut a = self.max_accel;
-        if d > 1e-9 && dz.abs() > 1e-9 {
-            let z_unit = dz.abs() / d;
-            v = v.min(self.max_z_velocity / z_unit);
-            a = a.min(self.max_z_accel / z_unit);
-        }
-        (v, a)
-    }
 }
 
 pub const DEFAULT_SQUARE_CORNER_VELOCITY_MM_S: f64 = 5.0;

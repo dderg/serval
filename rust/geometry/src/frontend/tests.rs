@@ -3,12 +3,7 @@ use super::*;
 use crate::path::{Line, Segment};
 
 fn limits() -> VelocityLimits {
-    VelocityLimits {
-        max_velocity_mm_s: 300.0,
-        accel_mm_s2: 3000.0,
-        corner_deviation_mm: 5.0,
-        max_jerk_mm_s3: 100_000.0,
-    }
+    VelocityLimits::try_new(300.0, 3000.0, 5.0, 100_000.0).unwrap()
 }
 
 fn ctx() -> MoveContext {
@@ -119,6 +114,7 @@ fn invalid_limits_rejected() {
             accel_mm_s2: ac,
             corner_deviation_mm: scv,
             max_jerk_mm_s3: jerk,
+            ..limits()
         };
         let err = line_move([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 0.0, bad).unwrap_err();
         assert!(matches!(
@@ -139,4 +135,17 @@ fn velocity_limits_try_new_validates() {
     assert!(VelocityLimits::try_new(300.0, 3000.0, 5.0, 0.0).is_err());
     assert!(VelocityLimits::try_new(300.0, 3000.0, 5.0, -1.0).is_err());
     assert!(VelocityLimits::try_new(300.0, 3000.0, 5.0, f64::NAN).is_err());
+}
+
+#[test]
+fn velocity_limits_z_caps_validate() {
+    let path = VelocityLimits::try_new(300.0, 3000.0, 5.0, 100_000.0).unwrap();
+    assert_eq!(path.max_z_velocity_mm_s, f64::INFINITY);
+    assert_eq!(path.max_z_accel_mm_s2, f64::INFINITY);
+    let capped = path.with_z_caps(25.0, 100.0).unwrap();
+    assert_eq!((capped.max_z_velocity_mm_s, capped.max_z_accel_mm_s2), (25.0, 100.0));
+    assert!(path.with_z_caps(f64::INFINITY, f64::INFINITY).is_ok());
+    for (velocity, accel) in [(0.0, 100.0), (25.0, -1.0), (f64::NAN, 100.0), (25.0, f64::NAN)] {
+        assert!(path.with_z_caps(velocity, accel).is_err());
+    }
 }

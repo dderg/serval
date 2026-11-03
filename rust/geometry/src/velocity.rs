@@ -14,6 +14,7 @@ use crate::segment::SourceRange;
 mod disk;
 pub mod law;
 mod reconstruct;
+mod z_caps;
 
 pub use law::{LawSegment, ScalarLaw};
 
@@ -325,16 +326,17 @@ fn build_move_caps(
     let mut caps = Vec::with_capacity(moves.len());
     for m in moves {
         let line_no = m.source.start_line;
-        let mut accel = m.limits.accel_mm_s2;
-        let mut extrude_only_velocity_cap = f64::INFINITY;
-        let (length, kappa0, sigma, kappa_peak) = match &m.segment.spatial {
+        let path_ceiling = m.feedrate_mm_s.min(m.limits.max_velocity_mm_s);
+        let (length, kappa0, sigma, kappa_peak, flat_ceiling, accel) = match &m.segment.spatial {
             Some(seg) => {
                 let length = seg.s_len();
                 validate_segment(seg, length, line_no, CONSISTENCY_TOL)?;
                 let (kappa_start, _) = seg.kappa_endpoints();
                 let sigma = seg.dkappa_ds(0.0);
                 let (_, kappa_peak) = seg.kappa_peak();
-                (length, kappa_start, sigma, kappa_peak)
+                let (flat_ceiling, accel) =
+                    z_caps::z_capped(seg, &m.limits, kappa_peak, path_ceiling);
+                (length, kappa_start, sigma, kappa_peak, flat_ceiling, accel)
             }
             None => {
                 let length = m
@@ -344,16 +346,19 @@ fn build_move_caps(
                 if !(length.is_finite() && length > LENGTH_EPS_MM) {
                     return Err(VelocityError::NonFinite { line_no });
                 }
-                accel = accel.min(params.max_extrude_only_accel_mm_s2);
-                extrude_only_velocity_cap = params.max_extrude_only_velocity_mm_s;
-                (length, 0.0, 0.0, 0.0)
+                (
+                    length,
+                    0.0,
+                    0.0,
+                    0.0,
+                    path_ceiling.min(params.max_extrude_only_velocity_mm_s),
+                    m.limits
+                        .accel_mm_s2
+                        .min(params.max_extrude_only_accel_mm_s2),
+                )
             }
         };
 
-        let flat_ceiling = m
-            .feedrate_mm_s
-            .min(m.limits.max_velocity_mm_s)
-            .min(extrude_only_velocity_cap);
         if disk::limit_speed(kappa_peak, accel) < flat_ceiling {
             report.curvature_bound += 1;
         } else {

@@ -106,8 +106,11 @@ pub geometry::frontend::VelocityLimits::accel_mm_s2: f64
 pub geometry::frontend::VelocityLimits::corner_deviation_mm: f64
 pub geometry::frontend::VelocityLimits::max_jerk_mm_s3: f64
 pub geometry::frontend::VelocityLimits::max_velocity_mm_s: f64
+pub geometry::frontend::VelocityLimits::max_z_accel_mm_s2: f64
+pub geometry::frontend::VelocityLimits::max_z_velocity_mm_s: f64
 impl geometry::frontend::VelocityLimits
 pub fn geometry::frontend::VelocityLimits::try_new(f64, f64, f64, f64) -> core::result::Result<Self, &'static str>
+pub fn geometry::frontend::VelocityLimits::with_z_caps(self, f64, f64) -> core::result::Result<Self, &'static str>
 pub const geometry::frontend::CORNER_DEVIATION_SCV_FACTOR: f64
 pub fn geometry::frontend::corner_deviation_from_scv(f64, f64) -> f64
 pub fn geometry::frontend::line_move([f64; 3], [f64; 3], f64, geometry::frontend::MoveContext) -> core::result::Result<geometry::frontend::Move, geometry::frontend::FrontendError>
@@ -234,6 +237,8 @@ pub enum geometry::path::Segment
 pub geometry::path::Segment::Arc(geometry::path::arc::Arc)
 pub geometry::path::Segment::Clothoid(geometry::path::clothoid::Clothoid)
 pub geometry::path::Segment::Line(geometry::path::line::Line)
+impl geometry::path::Segment
+pub fn geometry::path::Segment::lean_on(&self, usize) -> geometry::path::AxisLean
 impl geometry::path::lowering::PositionProfile for geometry::path::Segment
 pub fn geometry::path::Segment::d2heading_ds2(&self, f64) -> [f64; 3]
 pub fn geometry::path::Segment::dheading_ds(&self, f64) -> [f64; 3]
@@ -265,6 +270,10 @@ pub fn geometry::path::arc::Arc::kappa(&self, f64) -> f64
 pub fn geometry::path::arc::Arc::kappa_endpoints(&self) -> (f64, f64)
 pub fn geometry::path::arc::Arc::kappa_peak(&self) -> (f64, f64)
 pub fn geometry::path::arc::Arc::s_len(&self) -> f64
+pub struct geometry::path::AxisLean
+pub geometry::path::AxisLean::heading: f64
+pub geometry::path::AxisLean::normal: f64
+pub geometry::path::AxisLean::plane: f64
 pub struct geometry::path::Clothoid
 pub geometry::path::Clothoid::kappa_0: f64
 pub geometry::path::Clothoid::length: f64
@@ -869,8 +878,11 @@ pub geometry::VelocityLimits::accel_mm_s2: f64
 pub geometry::VelocityLimits::corner_deviation_mm: f64
 pub geometry::VelocityLimits::max_jerk_mm_s3: f64
 pub geometry::VelocityLimits::max_velocity_mm_s: f64
+pub geometry::VelocityLimits::max_z_accel_mm_s2: f64
+pub geometry::VelocityLimits::max_z_velocity_mm_s: f64
 impl geometry::frontend::VelocityLimits
 pub fn geometry::frontend::VelocityLimits::try_new(f64, f64, f64, f64) -> core::result::Result<Self, &'static str>
+pub fn geometry::frontend::VelocityLimits::with_z_caps(self, f64, f64) -> core::result::Result<Self, &'static str>
 pub struct geometry::VelocityPlanParams
 pub geometry::VelocityPlanParams::entry_v: f64
 pub geometry::VelocityPlanParams::integration_tol: f64

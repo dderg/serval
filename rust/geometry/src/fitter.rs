@@ -522,6 +522,8 @@ fn consumption_limits(
             accel_mm_s2: a.accel_mm_s2.min(b.accel_mm_s2),
             corner_deviation_mm: a.corner_deviation_mm.min(b.corner_deviation_mm),
             max_jerk_mm_s3: a.max_jerk_mm_s3.min(b.max_jerk_mm_s3),
+            max_z_velocity_mm_s: a.max_z_velocity_mm_s.min(b.max_z_velocity_mm_s),
+            max_z_accel_mm_s2: a.max_z_accel_mm_s2.min(b.max_z_accel_mm_s2),
         })
         .expect("mids is non-empty");
     let last = blend.segments.len() - 1;

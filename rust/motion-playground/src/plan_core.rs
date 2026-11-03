@@ -70,6 +70,8 @@ fn parse_inputs(
                 )
             }),
             max_jerk,
+            max_z_velocity: None,
+            max_z_accel: None,
             max_extrude_only_velocity: cfg.max_extrude_only_velocity,
             max_extrude_only_accel: cfg.max_extrude_only_accel,
             max_path_deviation: cfg.max_path_deviation,

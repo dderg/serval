@@ -52,6 +52,14 @@ pub fn plan(name: &str, gcode: &str, config: &Path) -> Option<pipeline_snapshot:
             max_accel: settings.cartesian.max_accel,
             corner_deviation: settings.cartesian.corner_deviation,
             max_jerk: settings.cartesian.max_jerk,
+            max_z_velocity: SnapshotParams::binding_z_cap(
+                settings.cartesian.max_z_velocity,
+                settings.cartesian.max_velocity,
+            ),
+            max_z_accel: SnapshotParams::binding_z_cap(
+                settings.cartesian.max_z_accel,
+                settings.cartesian.max_accel,
+            ),
             max_extrude_only_velocity: settings.max_extrude_only_velocity,
             max_extrude_only_accel: settings.max_extrude_only_accel,
             max_path_deviation: Some(settings.fit_tolerance_mm),

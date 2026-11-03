@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use motion_core::live_config;
-use motion_core::seam_test_harness::parse_gcode_to_moves_with;
+use motion_core::seam_test_harness::parse_gcode_to_moves;
 use motion_pipeline::{
     Control, DispatchCommand, Pipeline, StreamConfig, StreamInput, TrajectoryItem, advance_odometer,
 };
@@ -32,9 +32,9 @@ fn live_setup() -> (StreamConfig, AxisChainSet, Vec<geometry::Move>) {
         planner_config::from_doc::planner_config_from_settings(&settings).expect("planner config");
     let config = live_config::stream_config(&planner).expect("stream config");
     let chains = planner.compile_active_chains().expect("chains compile");
-    let moves = parse_gcode_to_moves_with(
+    let moves = parse_gcode_to_moves(
         &repo_file("tools/sim/gcode/voron_dense_top_layers.gcode"),
-        |delta| live_config::move_limits(&planner, delta).expect("move limits"),
+        live_config::move_limits(&planner).expect("move limits"),
     );
     (
         config,
