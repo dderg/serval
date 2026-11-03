@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Land a branch through a pull request: push, open the PR if missing, wait for
 # the checks, merge with a merge commit, then move local main to origin/main
-# and remove the branch's worktree. Never checks anything out.
+# and remove the branch's worktree. Never switches a checkout; a checked-out
+# main is fast-forwarded only when it has no uncommitted changes.
 #
 #   scripts/land-pr.sh <branch> [--title T] [--body B] [--dry-run]
 #
@@ -13,8 +14,13 @@
 set -euo pipefail
 
 FAILED_LOG_TAIL_LINES=80
-POLL_SECONDS=30
+POLL_SECONDS=60
 MAX_UPDATES=3
+
+gh_util="${GH_UTIL:-$(cd "$(dirname "$0")" && pwd)/gh_util.py}"
+[ -f "$gh_util" ] || gh_util="$(git rev-parse --show-toplevel)/scripts/gh_util.py"
+[ -f "$gh_util" ] || { echo "land-pr: scripts/gh_util.py not found" >&2; exit 1; }
+gh() { python3 "$gh_util" "$@"; }
 
 usage() { echo "usage: $0 <branch> [--title T] [--body B] [--dry-run]" >&2; exit 2; }
 die() { echo "land-pr: $*" >&2; exit 1; }
@@ -28,7 +34,7 @@ main_worktree() {
 }
 
 worktree_of_branch() {
-    git worktree list --porcelain | awk -v b="refs/heads/$branch" '
+    git worktree list --porcelain | awk -v b="refs/heads/${1:-$branch}" '
         /^worktree / { path = substr($0, 10) }
         $0 == "branch " b { print path }'
 }
@@ -75,9 +81,24 @@ merge_when_current() {
     die "PR #$number is still behind main after $MAX_UPDATES updates"
 }
 
+advance_main() {
+    local tree
+    tree="$(worktree_of_branch main)"
+    if [ -z "$tree" ]; then
+        run git branch -f main origin/main
+    elif [ "$dry_run" -eq 1 ]; then
+        echo "+ git -C $tree merge --ff-only origin/main"
+    elif [ -n "$(git -C "$tree" status --porcelain --untracked-files=no)" ]; then
+        echo "land-pr: $tree has main checked out with uncommitted changes; main was not advanced" >&2
+    else
+        git -C "$tree" merge --ff-only origin/main \
+            || echo "land-pr: $tree has a main that is not a fast-forward of origin/main; main was not advanced" >&2
+    fi
+}
+
 finish() {
     run git fetch origin
-    run git branch -f main origin/main
+    advance_main
     local tree
     tree="$(worktree_of_branch)"
     if [ -n "$tree" ] && [ "$dry_run" -eq 0 ]; then

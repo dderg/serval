@@ -94,11 +94,20 @@ shell. `uv run python scripts/gc_caches.py [--days N] [--apply]` lists and
 removes stale `~/.cache/*-target` dirs and abandoned pending-baselines
 worktrees/stacks/samples.
 
+# Never work in ~/Developer/serval
+
+`~/Developer/serval` is the shared checkout: it stays on `main` tracking `origin/main`
+and `land-pr.sh` fast-forwards it. Do not edit, commit, build or switch branches
+there; create a worktree (`git worktree add ~/Developer/serval-<topic> -b <branch>
+origin/main`) and work in that. Run the tools from your worktree, or from
+`~/Developer/serval/scripts/` when you have none: they are current there.
+
 # Landing a PR
 
 `scripts/land-pr.sh <branch>` pushes the branch, opens the PR if needed, waits for
 the checks, merges with a merge commit and moves local `main` to `origin/main`
-without checking anything out. Red checks print the failed-run log tail and
+without switching any checkout (a checked-out `main` is fast-forwarded only when it
+has no uncommitted changes, so `~/Developer/serval` stays current after every landing). Red checks print the failed-run log tail and
 exit non-zero. `--dry-run` prints the plan. It is safe to run from the
 branch's own worktree (it leaves it before removing it) and updates the PR
 branch on GitHub and re-waits when `main` moved while the checks ran; no need to
@@ -113,6 +122,15 @@ must be EXPECTED, and the changed cases are accepted and committed from the
 body. A red "Sim e2e" run is rerun once, loudly; any other red check stops the queue.
 QUEUE lines are `branch|title|expect`; landed branches are appended to `QUEUE.landed`
 so a stopped queue resumes. Use it instead of a hand-written loop around `land-pr.sh`.
+
+Every `gh` call in the tooling goes through `scripts/gh_util.py` (`pending_baselines.run`
+routes `gh` there; `land-pr.sh` defines `gh()` as the wrapper). Many agents polling
+GitHub trip its secondary rate limit, and a bare `gh pr checks --watch` then exits
+non-zero with "API rate limit exceeded", which looks like a red check. The wrapper
+retries only on that error (Retry-After if sent, else 30 s doubling to 300 s with 25 %
+jitter, 8 attempts, then a loud failure) and returns any other failure at once.
+Wait with one `gh pr checks --watch --interval 60`, never a loop of short polls; read PR
+metadata once per run and pass it along; use `gh_util.py <gh args>` in new scripts.
 
 `uv run python scripts/pending_baselines.py [-v|--all]` lists every open PR with
 its stack parent, mergeability, CI state, the snapshot cases whose output
