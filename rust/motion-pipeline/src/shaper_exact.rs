@@ -348,7 +348,6 @@ pub(crate) struct LocalPolynomial {
 }
 
 impl LocalPolynomial {
-    #[cfg(test)]
     pub(crate) fn eval(&self, x: f64) -> f64 {
         self.coefficients[..self.len]
             .iter()
@@ -379,7 +378,6 @@ pub(crate) struct ExactPiece {
 }
 
 impl ExactPiece {
-    #[cfg(test)]
     pub(crate) fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let x = (t - self.center) / self.radius;
         (
@@ -392,6 +390,56 @@ impl ExactPiece {
     pub(crate) fn offset_by(mut self, base: f64) -> Self {
         self.pva[0] = self.pva[0].offset_by(base);
         self
+    }
+}
+
+/// A span's exact polynomials in time order: every truth sample of its fit
+/// is read off them, and the hull proves its pieces against them.
+pub(crate) struct ExactSpan {
+    pieces: Vec<ExactPiece>,
+}
+
+impl ExactSpan {
+    pub(crate) fn new(pieces: Vec<ExactPiece>) -> Self {
+        assert!(
+            pieces
+                .windows(2)
+                .all(|pair| pair[0].lo <= pair[1].lo && pair[0].hi <= pair[1].hi),
+            "exact polynomials of a span are not in time order"
+        );
+        Self { pieces }
+    }
+
+    /// The signal's value and derivatives at `t`, from the sub-interval on
+    /// the side of `t` facing `toward`: at a break both neighbours'
+    /// polynomials reach `t`, and each is the signal's limit from its own
+    /// side. Where breaks crowd within an ulp of `t`, the sub-intervals
+    /// between them hold no float and the nearest polynomial facing
+    /// `toward` is read, as the hull bounds it.
+    pub(crate) fn pva(&self, t: f64, toward: f64) -> (f64, f64, f64) {
+        let next = next_toward(t, toward);
+        let piece = match ordered(t, toward) {
+            Ordering::Less => self
+                .pieces
+                .get(self.pieces.partition_point(|piece| piece.hi <= t))
+                .filter(|piece| piece.lo <= next),
+            Ordering::Greater => self
+                .pieces
+                .partition_point(|piece| piece.lo < t)
+                .checked_sub(1)
+                .and_then(|index| self.pieces.get(index))
+                .filter(|piece| piece.hi >= next),
+            Ordering::Equal => panic!("an exact read at {t} faces no side"),
+        }
+        .unwrap_or_else(|| panic!("an exact read at {t} lies outside its span"));
+        piece.eval_pva(t)
+    }
+
+    /// The polynomials whose sub-intervals reach into `(lo, hi)`.
+    pub(crate) fn over(&self, lo: f64, hi: f64) -> &[ExactPiece] {
+        let first = self.pieces.partition_point(|piece| piece.hi <= lo);
+        let past = self.pieces.partition_point(|piece| piece.lo < hi);
+        &self.pieces[first..past.max(first)]
     }
 }
 
@@ -414,13 +462,15 @@ struct PointMass {
 }
 
 impl ExactConvolution<'_> {
-    /// The signal's exact polynomial on every real sub-interval of
-    /// `[lo, hi]` between its breaks that holds a float time, or `None`
-    /// where the convolution reads history or lookahead the table does
-    /// not hold. A sub-interval wider than the kernel's narrowest piece is
-    /// cut into chunks no wider: the slivers carry the kernel's series
-    /// across the chunk, which is as well conditioned as the kernel only
-    /// within the kernel's own width.
+    /// The signal's exact polynomial on every real sub-interval between its
+    /// breaks that reaches into `[lo, hi]` and holds a float time, or
+    /// `None` where the convolution reads history or lookahead the table
+    /// does not hold. A sub-interval wider than the kernel's narrowest
+    /// piece is cut into chunks no wider: the slivers carry the kernel's
+    /// series across the chunk, which is as well conditioned as the kernel
+    /// only within the kernel's own width. Chunks and their centres follow
+    /// from the whole sub-interval, not from `[lo, hi]`, so two spans
+    /// meeting inside one read the same polynomial at their seam.
     pub(crate) fn pieces_over(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
         assert!(
             lo <= hi,
@@ -428,7 +478,8 @@ impl ExactConvolution<'_> {
         );
         let mut breaks = Vec::new();
         let boundaries = self.table.boundaries();
-        let (lo_real, hi_real) = (RealSum::float(lo), RealSum::float(hi));
+        let mut below: Option<RealSum> = None;
+        let mut above: Option<RealSum> = None;
         for &cut in &self.kernel.cuts {
             let first = boundaries.partition_point(|&boundary| {
                 RealSum::of(boundary, cut).order_of(lo) != Ordering::Less
@@ -436,6 +487,18 @@ impl ExactConvolution<'_> {
             let past = boundaries.partition_point(|&boundary| {
                 RealSum::of(boundary, cut).order_of(hi) == Ordering::Greater
             });
+            if let Some(&boundary) = first.checked_sub(1).and_then(|last| boundaries.get(last)) {
+                let candidate = RealSum::of(boundary, cut);
+                if below.is_none_or(|below| candidate.cmp(below) == Ordering::Greater) {
+                    below = Some(candidate);
+                }
+            }
+            if let Some(&boundary) = boundaries.get(past) {
+                let candidate = RealSum::of(boundary, cut);
+                if above.is_none_or(|above| candidate.cmp(above) == Ordering::Less) {
+                    above = Some(candidate);
+                }
+            }
             breaks.extend(
                 boundaries[first..past.max(first)]
                     .iter()
@@ -444,9 +507,9 @@ impl ExactConvolution<'_> {
         }
         breaks.sort_by(|left, right| left.cmp(*right));
         breaks.dedup();
-        let points: Vec<RealSum> = std::iter::once(lo_real)
+        let points: Vec<RealSum> = std::iter::once(below.unwrap_or(RealSum::float(lo)))
             .chain(breaks)
-            .chain(std::iter::once(hi_real))
+            .chain(std::iter::once(above.unwrap_or(RealSum::float(hi))))
             .collect();
         let mut pieces = Vec::with_capacity(points.len() - 1);
         for pair in points.windows(2) {
@@ -455,25 +518,31 @@ impl ExactConvolution<'_> {
             if first_inside > last_inside {
                 continue;
             }
-            let piece_lo = next_toward(first_inside, f64::NEG_INFINITY).max(lo);
-            let piece_hi = next_toward(last_inside, f64::INFINITY).min(hi);
-            let chunks = ((piece_hi - piece_lo) / self.kernel.narrowest_piece)
-                .ceil()
-                .max(1.0);
+            let extent_lo = next_toward(first_inside, f64::NEG_INFINITY);
+            let extent_hi = next_toward(last_inside, f64::INFINITY);
+            let extent = extent_hi - extent_lo;
+            let chunks = (extent / self.kernel.narrowest_piece).ceil().max(1.0);
             let chunk_count = chunks as usize;
             let chunk_edge = |chunk: usize| match chunk {
-                0 => piece_lo,
-                _ if chunk == chunk_count => piece_hi,
-                _ => piece_lo + (piece_hi - piece_lo) * (chunk as f64 / chunks),
+                0 => extent_lo,
+                _ if chunk == chunk_count => extent_hi,
+                _ => extent_lo + extent * (chunk as f64 / chunks),
             };
-            for chunk in 0..chunk_count {
+            let chunk_near = |t: f64| ((t - extent_lo) / extent * chunks).max(0.0) as usize;
+            let first_chunk = chunk_near(lo).saturating_sub(1);
+            let past_chunk = (chunk_near(hi) + 2).min(chunk_count);
+            for chunk in first_chunk..past_chunk {
                 let (chunk_lo, chunk_hi) = (chunk_edge(chunk), chunk_edge(chunk + 1));
+                let (piece_lo, piece_hi) = (chunk_lo.max(lo), chunk_hi.min(hi));
+                if piece_lo > piece_hi || (piece_lo == piece_hi && lo < hi) {
+                    continue;
+                }
                 let center =
                     (chunk_lo + 0.5 * (chunk_hi - chunk_lo)).clamp(first_inside, last_inside);
                 let radius = next_toward((center - chunk_lo).max(chunk_hi - center), f64::INFINITY);
                 pieces.push(ExactPiece {
-                    lo: chunk_lo,
-                    hi: chunk_hi,
+                    lo: piece_lo,
+                    hi: piece_hi,
                     center,
                     radius,
                     pva: self.polynomials_at(center, radius)?,
