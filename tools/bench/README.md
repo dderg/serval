@@ -76,6 +76,18 @@ uv run python tools/bench/ab.py --ref origin/main --ref HEAD --gcode G [--config
 
 Repo dev tooling: `scripts/land-pr.sh <branch> [--title T --body B] [--dry-run]` pushes, opens the PR if missing, waits for the checks (prints the failed-log tail and exits non-zero on red), merges with a merge commit, then `git branch -f main origin/main` and removes the branch's worktree.
 
+Planner-side tools (offline, repo `scripts/`) for changes that alter the reference the analyzer judges against, since the analyzer plans with the same engine:
+
+```
+uv run python scripts/review_baselines.py --pr N          # physical review of the snapshot cases a PR moves (REGRESSION / SUSPICIOUS / EXPECTED)
+uv run python scripts/accept_reviewed.py N                # accept + commit baselines after review (refuses on REGRESSION / unexplained SUSPICIOUS)
+uv run python scripts/bench_compare.py A B [--runs 5]     # interleaved replay throughput A/B (use the CPU row on a busy box)
+scripts/corpus.sh [--configs fast,printer] [-k S]         # plan the 59-case corpus (51 snapshots + 4 sim prints x 2 configs)
+python3 scripts/integrate_stack.py 443 444 [--run CMD]    # try a PR stack on a throwaway worktree before syncing it to the Pi
+```
+
+`land-pr.sh` can be run from the branch's own worktree and re-updates the PR branch when main moves. Sync the committed, integrated tree to the Pi (`deploy.py sync --tree`), not a worktree with other agents' edits.
+
 ## Run dir (`~/bench/runs/<YYYYmmdd-HHMMSS>/`)
 
 `print.gcode`, `printer.cfg`, `capture.bin` (count mode: int8, N×4, one row per 25 µs tick; channels a b z e; + = DIR high) or `events.bin` (event mode), `capture.json` (`mode`, `tick_hz`), `klippy.log`, `events/` (structured logs), `run.json`, and after analysis `analysis.json`, `*.png`.
