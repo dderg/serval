@@ -25,12 +25,16 @@ class AxisSection:
         self.post_processors = [
             p.strip() for p in config.getlist("post_processors", [])
         ]
+        self.ratio_ramp_time = config.getfloat(
+            "ratio_ramp_time", None, above=0.0
+        )
 
     def get_status(self, eventtime):
         return {
             "follows": list(self.follows),
             "motors": list(self.motors),
             "post_processors": list(self.post_processors),
+            "ratio_ramp_time": self.ratio_ramp_time,
         }
 
 

@@ -93,6 +93,7 @@ fn decl(name: &str, follows: &[&str]) -> AxisDecl {
         follows: follows.iter().map(|s| s.to_string()).collect(),
         motors: vec![],
         post_processors: vec![],
+        ratio_ramp_time: None,
     }
 }
 
@@ -152,6 +153,7 @@ fn decl_with_motors(name: &str, follows: &[&str], motors: &[&str]) -> AxisDecl {
         follows: follows.iter().map(|s| s.to_string()).collect(),
         motors: motors.iter().map(|s| s.to_string()).collect(),
         post_processors: vec![],
+        ratio_ramp_time: None,
     }
 }
 
@@ -594,4 +596,92 @@ fn an_advance_on_an_axis_that_follows_nothing_is_not_a_follower_advance() {
         )
         .is_ok()
     );
+}
+
+fn ramped_registry_with_e(e_post_processors: &[&str], ratio_ramp_time: f64) -> AxisRegistry {
+    let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
+    let mut e = decl("e", &["x", "y", "z"]);
+    e.post_processors = e_post_processors.iter().map(|s| (*s).to_string()).collect();
+    e.ratio_ramp_time = Some(ratio_ramp_time);
+    decls.push(e);
+    AxisRegistry::try_new(decls).unwrap()
+}
+
+#[test]
+fn a_ratio_ramp_compiles_onto_its_follower_chain_and_nowhere_else() {
+    let registry = ramped_registry_with_e(&[], 0.015);
+    let chains = PostProcessorSet::try_new(&registry, &[])
+        .unwrap()
+        .compile(&registry)
+        .unwrap();
+    assert_eq!(chains.chains[3].ratio_ramp_time(), Some(0.015));
+    assert!(
+        chains.chains[..3]
+            .iter()
+            .all(|chain| chain.ratio_ramp_time().is_none())
+    );
+    assert!(chains.has_ratio_ramped_follower());
+    let plain = registry_with_e(&[]);
+    let chains = PostProcessorSet::try_new(&plain, &[])
+        .unwrap()
+        .compile(&plain)
+        .unwrap();
+    assert!(!chains.has_ratio_ramped_follower());
+}
+
+#[test]
+fn a_bypassed_chain_set_carries_no_ratio_ramp() {
+    let registry = ramped_registry_with_e(&[], 0.015);
+    let set = PostProcessorSet::try_new(&registry, &[]).unwrap();
+    let bypassed = set.compile_active_chains(&registry, true).unwrap();
+    assert!(!bypassed.has_ratio_ramped_follower());
+}
+
+#[test]
+fn a_ratio_ramp_with_a_smoothing_kernel_is_rejected() {
+    let registry = ramped_registry_with_e(&["st"], 0.015);
+    let rejected = PostProcessorSet::try_new(&registry, &[e_smoothing()]);
+    assert!(
+        matches!(
+            rejected,
+            Err(PostProcessorConfigError::RatioRampWithKernel { ref axis, ref name })
+                if axis == "e" && name == "st"
+        ),
+        "got {rejected:?}"
+    );
+}
+
+#[test]
+fn a_ratio_ramp_needs_an_axis_that_follows_others() {
+    let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
+    decls[0].ratio_ramp_time = Some(0.01);
+    assert!(matches!(
+        AxisRegistry::try_new(decls),
+        Err(AxisConfigError::RatioRampWithoutLeaders { ref axis }) if axis == "x"
+    ));
+    let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
+    let mut e = decl("e", &[]);
+    e.ratio_ramp_time = Some(0.01);
+    decls.push(e);
+    assert!(matches!(
+        AxisRegistry::try_new(decls),
+        Err(AxisConfigError::RatioRampWithoutLeaders { ref axis }) if axis == "e"
+    ));
+}
+
+#[test]
+fn a_ratio_ramp_time_must_be_finite_and_positive() {
+    for value in [0.0, -0.01, f64::NAN, f64::INFINITY] {
+        let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
+        let mut e = decl("e", &["x", "y", "z"]);
+        e.ratio_ramp_time = Some(value);
+        decls.push(e);
+        assert!(
+            matches!(
+                AxisRegistry::try_new(decls),
+                Err(AxisConfigError::BadRatioRampTime { .. })
+            ),
+            "ratio_ramp_time {value} must be rejected"
+        );
+    }
 }
