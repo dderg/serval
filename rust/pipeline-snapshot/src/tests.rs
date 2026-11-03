@@ -3,11 +3,11 @@ use motion_pipeline::StreamConfig;
 
 fn square_waypoints() -> Vec<waypoints::Waypoint> {
     vec![
-        (0.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
-        (10.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
-        (10.0, 10.0, 0.0, 0.0, 100.0, 3000.0),
-        (0.0, 10.0, 0.0, 0.0, 100.0, 3000.0),
-        (0.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
+        waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 100.0),
+        waypoints::Waypoint::at([10.0, 0.0, 0.0, 0.0], 100.0),
+        waypoints::Waypoint::at([10.0, 10.0, 0.0, 0.0], 100.0),
+        waypoints::Waypoint::at([0.0, 10.0, 0.0, 0.0], 100.0),
+        waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 100.0),
     ]
 }
 
@@ -34,22 +34,99 @@ fn default_config(limits: geometry::VelocityLimits) -> StreamConfig {
     }
 }
 
+fn planned_moves(
+    waypoints: &[waypoints::Waypoint],
+    limits: geometry::VelocityLimits,
+) -> Vec<geometry::Move> {
+    plan_moves(&plan_steps(waypoints, limits).unwrap())
+        .cloned()
+        .collect()
+}
+
 #[test]
-fn build_moves_from_square() {
-    let moves = build_moves(&square_waypoints(), default_limits()).unwrap();
+fn plan_moves_from_square() {
+    let moves = planned_moves(&square_waypoints(), default_limits());
     assert_eq!(moves.len(), 4);
+}
+
+fn corner_after_rest(dwell_before_s: Option<f64>) -> Vec<waypoints::Waypoint> {
+    vec![
+        waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 100.0),
+        waypoints::Waypoint::at([10.0, 0.0, 0.0, 0.0], 100.0),
+        waypoints::Waypoint {
+            dwell_before_s,
+            ..waypoints::Waypoint::at([10.0, 10.0, 0.0, 0.0], 100.0)
+        },
+    ]
+}
+
+#[test]
+fn a_waypoint_after_a_stop_at_rest_plans_the_rest_before_its_move() {
+    let steps = plan_steps(&corner_after_rest(Some(0.25)), default_limits()).unwrap();
+    assert!(matches!(
+        steps[..],
+        [
+            PlanStep::Move(_),
+            PlanStep::Rest { dwell_s: 0.25 },
+            PlanStep::Move(_)
+        ]
+    ));
+}
+
+fn traversal_end_s(waypoints: &[waypoints::Waypoint]) -> f64 {
+    let limits = default_limits();
+    let (_, shaped, _) = run_pipeline_streaming(
+        &plan_steps(waypoints, limits).unwrap(),
+        default_config(limits),
+        AxisChainSet::default(),
+        |_, _| {},
+    );
+    shaped.last().expect("the corner plans").t_end
+}
+
+#[test]
+fn a_dwell_holds_the_toolhead_at_rest_for_its_duration() {
+    let blended = traversal_end_s(&corner_after_rest(None));
+    let stopped = traversal_end_s(&corner_after_rest(Some(0.0)));
+    let dwelled = traversal_end_s(&corner_after_rest(Some(0.5)));
+    assert!(stopped > blended, "a stop at rest brakes into the corner");
+    assert!((dwelled - stopped - 0.5).abs() < 1e-9);
+}
+
+#[test]
+fn move_specs_clamp_runtime_caps_to_the_config_base_like_the_live_engine() {
+    let mut runtime = RuntimeLimits::default();
+    runtime.set_accel_cap(Some(50_000.0)).unwrap();
+    runtime.set_velocity_cap(Some(120.0)).unwrap();
+    let mut lowered = runtime;
+    lowered.set_accel_cap(Some(500.0)).unwrap();
+    let waypoints = vec![
+        waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 100.0),
+        waypoints::Waypoint {
+            runtime,
+            ..waypoints::Waypoint::at([10.0, 0.0, 0.0, 0.0], 100.0)
+        },
+        waypoints::Waypoint {
+            runtime: lowered,
+            ..waypoints::Waypoint::at([20.0, 0.0, 0.0, 0.0], 100.0)
+        },
+    ];
+    let specs = move_specs(&waypoints, default_limits()).unwrap();
+    assert_eq!(specs[0].limits.accel_mm_s2, 3000.0);
+    assert_eq!(specs[0].limits.max_velocity_mm_s, 120.0);
+    assert_eq!(specs[1].limits.accel_mm_s2, 500.0);
 }
 
 #[test]
 fn raw_path_has_correct_point_count() {
-    let moves = build_moves(&square_waypoints(), default_limits()).unwrap();
+    let moves = plan_steps(&square_waypoints(), default_limits()).unwrap();
     let points = extract_raw_path(&moves);
     assert_eq!(points.len(), 5);
 }
 
 #[test]
 fn raw_path_starts_at_origin() {
-    let moves = build_moves(&square_waypoints(), default_limits()).unwrap();
+    let moves = plan_steps(&square_waypoints(), default_limits()).unwrap();
     let points = extract_raw_path(&moves);
     assert!((points[0].0).abs() < 1e-9);
     assert!((points[0].1).abs() < 1e-9);
@@ -58,7 +135,7 @@ fn raw_path_starts_at_origin() {
 #[test]
 fn fitted_outcome_has_spatial_segments() {
     let limits = default_limits();
-    let moves = build_moves(&square_waypoints(), limits).unwrap();
+    let moves = plan_steps(&square_waypoints(), limits).unwrap();
     let (fitted, _, _) = run_pipeline_streaming(
         &moves,
         default_config(limits),
@@ -122,7 +199,7 @@ fn assert_axis_tiles_the_run(traj: &ExactTrajectory, axis: usize, lane: &str) {
 #[test]
 fn trajectory_carriers_tile_the_run_on_every_spatial_axis() {
     let limits = default_limits();
-    let moves = build_moves(&square_waypoints(), limits).unwrap();
+    let moves = plan_steps(&square_waypoints(), limits).unwrap();
     let (_, shaped, _) = run_pipeline_streaming(
         &moves,
         default_config(limits),
@@ -148,7 +225,7 @@ fn trajectory_carriers_tile_the_run_on_every_spatial_axis() {
 #[test]
 fn carriers_are_position_continuous_across_their_shared_instant() {
     let limits = default_limits();
-    let moves = build_moves(&square_waypoints(), limits).unwrap();
+    let moves = plan_steps(&square_waypoints(), limits).unwrap();
     let (_, shaped, _) = run_pipeline_streaming(
         &moves,
         default_config(limits),
@@ -172,10 +249,10 @@ fn carriers_are_position_continuous_across_their_shared_instant() {
 fn single_move_skips_fitting() {
     let limits = default_limits();
     let waypoints = vec![
-        (0.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
-        (10.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
+        waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 100.0),
+        waypoints::Waypoint::at([10.0, 0.0, 0.0, 0.0], 100.0),
     ];
-    let moves = build_moves(&waypoints, limits).unwrap();
+    let moves = plan_steps(&waypoints, limits).unwrap();
     let (fitted, _, _) = run_pipeline_streaming(
         &moves,
         default_config(limits),
@@ -188,11 +265,11 @@ fn single_move_skips_fitting() {
 #[test]
 fn zero_displacement_filtered() {
     let waypoints = vec![
-        (0.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
-        (0.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
-        (10.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
+        waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 100.0),
+        waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 100.0),
+        waypoints::Waypoint::at([10.0, 0.0, 0.0, 0.0], 100.0),
     ];
-    let moves = build_moves(&waypoints, default_limits()).unwrap();
+    let moves = planned_moves(&waypoints, default_limits());
     assert_eq!(moves.len(), 1);
 }
 
@@ -209,10 +286,10 @@ fn spatial_move_with_extrusion_sets_follower_ratio() {
     // 10 mm move in X, extruding 2 mm of filament: the E follower ratio is
     // ΔE / Δs on the real extruder axis (index 3).
     let waypoints = vec![
-        (0.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
-        (10.0, 0.0, 0.0, 2.0, 100.0, 3000.0),
+        waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 100.0),
+        waypoints::Waypoint::at([10.0, 0.0, 0.0, 2.0], 100.0),
     ];
-    let moves = build_moves(&waypoints, default_limits()).unwrap();
+    let moves = planned_moves(&waypoints, default_limits());
     assert_eq!(moves.len(), 1);
     let ratio = follower_ratio(&moves[0], EXTRUDER_AXIS).expect("extruder follower present");
     assert!((ratio - 0.2).abs() < 1e-12, "ΔE/Δs should be 2/10 = 0.2");
@@ -222,10 +299,10 @@ fn spatial_move_with_extrusion_sets_follower_ratio() {
 fn diagonal_move_extrusion_ratio_uses_spatial_distance() {
     // 3-4-5 triangle: Δs = 5, ΔE = 1, ratio = 0.2.
     let waypoints = vec![
-        (0.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
-        (3.0, 4.0, 0.0, 1.0, 100.0, 3000.0),
+        waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 100.0),
+        waypoints::Waypoint::at([3.0, 4.0, 0.0, 1.0], 100.0),
     ];
-    let moves = build_moves(&waypoints, default_limits()).unwrap();
+    let moves = planned_moves(&waypoints, default_limits());
     let ratio = follower_ratio(&moves[0], EXTRUDER_AXIS).expect("extruder follower present");
     assert!((ratio - 0.2).abs() < 1e-12, "ΔE/Δs should be 1/5 = 0.2");
 }
@@ -235,10 +312,10 @@ fn pure_retract_is_a_non_spatial_follower_move() {
     // E-only retract: no XYZ change, ΔE = -3. It must survive as a virtual
     // (non-spatial) move carrying only the extruder follower.
     let waypoints = vec![
-        (0.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
-        (0.0, 0.0, 0.0, -3.0, 100.0, 3000.0),
+        waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 100.0),
+        waypoints::Waypoint::at([0.0, 0.0, 0.0, -3.0], 100.0),
     ];
-    let moves = build_moves(&waypoints, default_limits()).unwrap();
+    let moves = planned_moves(&waypoints, default_limits());
     assert_eq!(
         moves.len(),
         1,
@@ -258,10 +335,10 @@ fn pure_retract_is_a_non_spatial_follower_move() {
 #[test]
 fn no_extrusion_means_no_follower() {
     let waypoints = vec![
-        (0.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
-        (10.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
+        waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 100.0),
+        waypoints::Waypoint::at([10.0, 0.0, 0.0, 0.0], 100.0),
     ];
-    let moves = build_moves(&waypoints, default_limits()).unwrap();
+    let moves = planned_moves(&waypoints, default_limits());
     assert!(
         follower_ratio(&moves[0], EXTRUDER_AXIS).is_none(),
         "a travel move carries no extruder follower"
@@ -273,11 +350,11 @@ fn extrusion_lowers_to_a_moving_e_track() {
     let limits = default_limits();
     // Extrude the whole way around the square so every axis[3] track moves.
     let waypoints = vec![
-        (0.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
-        (10.0, 0.0, 0.0, 1.0, 100.0, 3000.0),
-        (10.0, 10.0, 0.0, 2.0, 100.0, 3000.0),
+        waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 100.0),
+        waypoints::Waypoint::at([10.0, 0.0, 0.0, 1.0], 100.0),
+        waypoints::Waypoint::at([10.0, 10.0, 0.0, 2.0], 100.0),
     ];
-    let moves = build_moves(&waypoints, limits).unwrap();
+    let moves = plan_steps(&waypoints, limits).unwrap();
     let (_, shaped, _) = run_pipeline_streaming(
         &moves,
         default_config(limits),
@@ -392,7 +469,7 @@ fn seam_metrics_flag_a_known_discontinuity() {
 #[test]
 fn continuous_carriers_report_no_seam_jumps() {
     let limits = default_limits();
-    let moves = build_moves(&square_waypoints(), limits).unwrap();
+    let moves = plan_steps(&square_waypoints(), limits).unwrap();
     let (_, shaped, _) = run_pipeline_streaming(
         &moves,
         default_config(limits),
@@ -581,9 +658,9 @@ fn curved_analytic_carriers_keep_their_geometry() {
 #[test]
 fn clothoid_disk_ride_tracks_scalar_acceleration_without_phase_steps() {
     let waypoints = vec![
-        (0.0, 0.0, 0.0, 0.0, 300.0, 1000.0),
-        (10.0, 0.0, 0.0, 0.0, 300.0, 1000.0),
-        (10.0, 10.0, 0.0, 0.0, 300.0, 1000.0),
+        waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 300.0),
+        waypoints::Waypoint::at([10.0, 0.0, 0.0, 0.0], 300.0),
+        waypoints::Waypoint::at([10.0, 10.0, 0.0, 0.0], 300.0),
     ];
     let mut params = default_axis_snapshot_params();
     params.max_velocity = 300.0;
@@ -646,9 +723,9 @@ fn clothoid_disk_ride_tracks_scalar_acceleration_without_phase_steps() {
 #[test]
 fn low_feed_corner_from_rest_rides_the_disk() {
     let waypoints = vec![
-        (0.0, 0.0, 0.0, 0.0, 4.5, 1000.0),
-        (0.5, 0.0, 0.0, 0.0, 4.5, 1000.0),
-        (0.5, 0.5, 0.0, 0.0, 4.5, 1000.0),
+        waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 4.5),
+        waypoints::Waypoint::at([0.5, 0.0, 0.0, 0.0], 4.5),
+        waypoints::Waypoint::at([0.5, 0.5, 0.0, 0.0], 4.5),
     ];
     let mut params = default_axis_snapshot_params();
     params.max_velocity = 4.5;
@@ -866,7 +943,7 @@ fn follower_projection_scaling() {
         ("bare follower", vec![]),
     ] {
         for count in [100_usize] {
-            let mut waypoints = vec![(0.0, 0.0, 0.0, 0.0, 100.0, 3000.0)];
+            let mut waypoints = vec![waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 100.0)];
             let mut e = 0.0;
             let mut x = 0.0_f64;
             let mut y = 0.0_f64;
@@ -876,12 +953,12 @@ fn follower_projection_scaling() {
                 y += 0.6 * libm::sin(angle);
                 if i % 24 == 23 {
                     e -= 0.8;
-                    waypoints.push((x, y, 0.0, e, 35.0, 3000.0));
+                    waypoints.push(waypoints::Waypoint::at([x, y, 0.0, e], 35.0));
                     e += 0.8;
-                    waypoints.push((x, y, 0.0, e, 35.0, 3000.0));
+                    waypoints.push(waypoints::Waypoint::at([x, y, 0.0, e], 35.0));
                 }
                 e += 0.025;
-                waypoints.push((x, y, 0.0, e, 120.0, 3000.0));
+                waypoints.push(waypoints::Waypoint::at([x, y, 0.0, e], 120.0));
             }
             let mut params = default_axis_snapshot_params();
             let mut x = axis("x", &[]);
@@ -912,10 +989,10 @@ fn follower_projection_scaling() {
 #[test]
 fn linear_advance_speed_ramp_never_retracts() {
     let waypoints = vec![
-        (0.0, 0.0, 0.0, 0.0, 10.0, 3000.0),
-        (40.0, 0.0, 0.0, 2.0, 10.0, 3000.0),
-        (80.0, 0.0, 0.0, 4.0, 30.0, 3000.0),
-        (120.0, 0.0, 0.0, 6.0, 80.0, 3000.0),
+        waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 10.0),
+        waypoints::Waypoint::at([40.0, 0.0, 0.0, 2.0], 10.0),
+        waypoints::Waypoint::at([80.0, 0.0, 0.0, 4.0], 30.0),
+        waypoints::Waypoint::at([120.0, 0.0, 0.0, 6.0], 80.0),
     ];
     let mut params = default_axis_snapshot_params();
     let mut e = axis("e", &["x", "y", "z"]);
@@ -952,9 +1029,9 @@ fn linear_advance_speed_ramp_never_retracts() {
 #[test]
 fn reciprocal_advance_handles_a_fast_corner_endpoint_transition() {
     let waypoints = vec![
-        (0.0, 0.0, 0.0, 0.0, 200.0, 3000.0),
-        (60.0, 0.0, 0.0, 3.0, 200.0, 3000.0),
-        (60.0, 60.0, 0.0, 6.0, 200.0, 3000.0),
+        waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 200.0),
+        waypoints::Waypoint::at([60.0, 0.0, 0.0, 3.0], 200.0),
+        waypoints::Waypoint::at([60.0, 60.0, 0.0, 6.0], 200.0),
     ];
     let mut params = default_axis_snapshot_params();
     let mut e = axis("e", &["x", "y", "z"]);
@@ -979,9 +1056,9 @@ fn reciprocal_advance_handles_a_fast_corner_endpoint_transition() {
 #[test]
 fn nonlinear_advance_before_follower_smoothing_preserves_input_seams() {
     let waypoints = vec![
-        (0.0, 0.0, 0.0, 0.0, 300.0, 3000.0),
-        (40.0, 0.0, 0.0, 2.0, 300.0, 3000.0),
-        (40.0, 40.0, 0.0, 4.0, 300.0, 3000.0),
+        waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 300.0),
+        waypoints::Waypoint::at([40.0, 0.0, 0.0, 2.0], 300.0),
+        waypoints::Waypoint::at([40.0, 40.0, 0.0, 4.0], 300.0),
     ];
     let mut params = default_axis_snapshot_params();
     let mut x = axis("x", &[]);
@@ -1205,9 +1282,13 @@ fn default_gcode_circle_loops_stay_concentric_across_corner_deviation() {
     let mut loop_centers = Vec::new();
     let mut radii_per_cd: Vec<Vec<f64>> = Vec::new();
     for cd in [0.05, 0.3] {
-        let waypoints = waypoints::parse_gcode(&text, 300.0, 3000.0).unwrap();
+        let waypoints = waypoints::parse_gcode(
+            &text,
+            &CartesianLimits::without_z_caps(300.0, 3000.0, f64::INFINITY, cd),
+        )
+        .unwrap();
         let limits = geometry::VelocityLimits::try_new(300.0, 3000.0, cd, f64::INFINITY).unwrap();
-        let moves = build_moves(&waypoints, limits).unwrap();
+        let moves = plan_steps(&waypoints, limits).unwrap();
         let (fitted, _, _) = run_pipeline_streaming(
             &moves,
             default_config(limits),
@@ -1297,14 +1378,18 @@ const PERIMETER_RATIO: f64 = 0.0333;
 /// along its last side; `flow` scales each side's extrusion.
 fn perimeter_waypoints(entry: &[(f64, f64)], flow: [f64; 4]) -> Vec<waypoints::Waypoint> {
     let mut e = 0.0;
-    let mut waypoints = vec![(0.0, 0.0, 0.0, 0.0, 150.0, 10_000.0)];
-    waypoints.extend(entry.iter().map(|&(x, y)| (x, y, 0.0, e, 150.0, 10_000.0)));
+    let mut waypoints = vec![waypoints::Waypoint::at([0.0, 0.0, 0.0, 0.0], 150.0)];
+    waypoints.extend(
+        entry
+            .iter()
+            .map(|&(x, y)| waypoints::Waypoint::at([x, y, 0.0, e], 150.0)),
+    );
     for ((x, y), scale) in [(40.0, 20.0), (40.0, 40.0), (20.0, 40.0), (20.0, 20.0)]
         .into_iter()
         .zip(flow)
     {
         e += PERIMETER_RATIO * 20.0 * scale;
-        waypoints.push((x, y, 0.0, e, 150.0, 10_000.0));
+        waypoints.push(waypoints::Waypoint::at([x, y, 0.0, e], 150.0));
     }
     waypoints
 }
@@ -1324,8 +1409,8 @@ fn final_extruder_position(snap: &Snapshot) -> f64 {
 /// extrusion-ratio steps taken while the toolhead moves.
 fn perimeter_with_ratio_steps_at_speed() -> Vec<waypoints::Waypoint> {
     let mut waypoints = perimeter_waypoints(&[(10.0, 10.0), (20.0, 20.0)], [1.0, 1.5, 1.0, 1.0]);
-    let e = waypoints.last().expect("perimeter").3;
-    waypoints.push((20.0, 5.0, 0.0, e, 150.0, 10_000.0));
+    let e = waypoints.last().expect("perimeter").position[3];
+    waypoints.push(waypoints::Waypoint::at([20.0, 5.0, 0.0, e], 150.0));
     waypoints
 }
 
@@ -1352,9 +1437,9 @@ fn an_advance_before_a_kernel_carries_its_ratio_steps_into_the_smoothing() {
 #[test]
 fn a_wipe_retract_before_a_kernel_conserves_extrusion() {
     let mut waypoints = perimeter_waypoints(&[(10.0, 10.0), (20.0, 20.0)], [1.0; 4]);
-    let e = waypoints.last().expect("perimeter").3;
-    waypoints.push((20.0, 10.0, 0.0, e - 0.8, 150.0, 10_000.0));
-    waypoints.push((10.0, 5.0, 0.0, e - 0.8, 150.0, 10_000.0));
+    let e = waypoints.last().expect("perimeter").position[3];
+    waypoints.push(waypoints::Waypoint::at([20.0, 10.0, 0.0, e - 0.8], 150.0));
+    waypoints.push(waypoints::Waypoint::at([10.0, 5.0, 0.0, e - 0.8], 150.0));
     let unadvanced =
         final_extruder_position(&extruder_snapshot(&waypoints, &[triangle_smoothing()]));
     let snap = extruder_snapshot(&waypoints, &[tanh_advance(), triangle_smoothing()]);

@@ -224,9 +224,7 @@ def run_case(case: Case) -> dict:
 
     cfg = read_printer_config(case.config_path)
     engine = _import_engine()
-    waypoints = engine.parse_gcode(
-        case.gcode_path.read_text(), cfg.max_velocity, cfg.max_accel
-    )
+    waypoints = engine.parse_gcode(case.gcode_path.read_text(), cfg.config_text)
     if len(waypoints) < 2:
         raise ValueError(
             f"case '{case.name}': fewer than two spatial moves in "

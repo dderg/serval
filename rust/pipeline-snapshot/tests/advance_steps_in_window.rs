@@ -88,8 +88,16 @@ fn triangle_smoothing() -> PostProcessorDecl {
 }
 
 fn final_extruder_position(e_chain: Vec<PostProcessorDecl>) -> (f64, f64) {
-    let waypoints =
-        parse_gcode(&dense_top_layer_lines(120), MAX_VELOCITY, MAX_ACCEL).expect("parse");
+    let waypoints = parse_gcode(
+        &dense_top_layer_lines(120),
+        &pipeline_snapshot::CartesianLimits::without_z_caps(
+            MAX_VELOCITY,
+            MAX_ACCEL,
+            f64::INFINITY,
+            0.0,
+        ),
+    )
+    .expect("parse");
     let snap = pipeline_snapshot(&waypoints, bench_shapers_with_extruder_chain(e_chain))
         .expect("snapshot");
     let end = snap.trajectory.t_end();

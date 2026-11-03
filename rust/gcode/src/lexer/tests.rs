@@ -281,3 +281,33 @@ fn lowercase_commands_and_parameters_are_normalized() {
         other => panic!("expected normalized command, got {other:?}"),
     }
 }
+
+#[test]
+fn lines_split_the_head_without_reading_the_arguments() {
+    let line = lines("M117 Hello world 1.2.3\n")
+        .next()
+        .expect("one line")
+        .expect("the head is valid");
+    assert_eq!(
+        line.head,
+        Head::Numbered {
+            letter: b'M',
+            major: 117,
+            minor: None
+        }
+    );
+    assert!(matches!(
+        line.params(),
+        Err(ParseError::MalformedNumber { line_no: 1, .. })
+    ));
+}
+
+#[test]
+fn lines_name_extended_commands_in_upper_case() {
+    let line = lines("respond msg=\"hi there\"\n")
+        .next()
+        .expect("one line")
+        .expect("the head is valid");
+    assert_eq!(line.head, Head::Extended("RESPOND".into()));
+    assert!(line.extended_args().is_err());
+}

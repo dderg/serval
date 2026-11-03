@@ -90,6 +90,7 @@ pythonpath = [".", "klippy", "scripts"]
 testpaths = [
   "test",
   "snapshots/test_harness.py",
+  "snapshots/test_live_parity.py",
   "scripts/test_review_baselines.py",
 ]
 markers = [
