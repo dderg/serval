@@ -121,18 +121,28 @@ impl PyMotionEngine {
         Ok((ethercat_mcu_ids, host_ios))
     }
 
-    pub(super) fn seed_ethercat_clock_estimates(&self, ethercat_mcu_ids: &HashSet<u32>) {
+    pub(super) fn seed_ethercat_clock_estimates(
+        &self,
+        ethercat_mcu_ids: &HashSet<u32>,
+    ) -> PyResult<()> {
         let mut router = self.router.lock_ok();
         let now_ns = host_rt::clock::monotonic_raw_ns();
         for &mcu_id in ethercat_mcu_ids {
             let mcu_h = McuHandle::from_raw(mcu_id);
-            let _ = router.set_clock_est_from_sample(
-                mcu_h,
-                f64::from(ETHERCAT_CLOCK_FREQ_HZ),
-                Instant::now(),
-                now_ns,
-            );
+            router
+                .set_clock_est_from_sample(
+                    mcu_h,
+                    f64::from(ETHERCAT_CLOCK_FREQ_HZ),
+                    Instant::now(),
+                    now_ns,
+                )
+                .map_err(|e| {
+                    PyRuntimeError::new_err(format!(
+                        "mcu {mcu_id}: cannot seed the EtherCAT clock estimate: {e:?}"
+                    ))
+                })?;
         }
+        Ok(())
     }
 
     /// Build one endpoint per transport per mcu and index them by mcu for the

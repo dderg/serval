@@ -80,7 +80,13 @@ impl Projection {
     /// clocksync record.
     fn live_projection_exact(&self, mcu_id: u32, host_secs: f64) -> f64 {
         let record = self.live_clock_record(mcu_id);
-        record.last_clock as f64 + ((host_secs - record.clock_offset) * record.clock_freq).max(0.0)
+        record.last_clock as f64
+            + host_rt::clock_projection::ticks_from_reference(
+                record.clock_offset,
+                record.clock_freq,
+                host_secs,
+            )
+            .unwrap_or_else(|e| panic!("mcu {mcu_id}: {e}"))
     }
 
     fn reanchor_projection(&mut self, mcu_id: u32, host_now: f64) -> Result<(), DispatchError> {
@@ -206,7 +212,10 @@ impl Projection {
     }
 
     fn project(&self, mcu_id: u32, host_secs: f64) -> u64 {
-        self.project_exact(mcu_id, host_secs).round().max(0.0) as u64
+        let exact = self.project_exact(mcu_id, host_secs);
+        checked_cast::f64_to_u64(exact.round()).unwrap_or_else(|e| {
+            panic!("mcu {mcu_id}: host time {host_secs} projects to a clock that {e}")
+        })
     }
 
     /// The cycle rate every clocked span on this mcu is cut against: the
