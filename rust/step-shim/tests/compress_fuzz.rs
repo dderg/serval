@@ -207,4 +207,43 @@ proptest! {
 
         prop_assert!(compress_with_max_error(&steps, case.last_step_clock, case.max_error).is_err());
     }
+
+    #[test]
+    fn a_stream_split_at_any_step_resumes_from_the_last_decoded_clock_without_loss(
+        case in arb_case(),
+        cut in 1usize..MAX_STEPS,
+    ) {
+        let steps = case.steps();
+        prop_assume!(steps.len() >= 2);
+        let cut = 1 + cut % (steps.len() - 1);
+
+        let (head_moves, head_consumed) =
+            compress_with_max_error(&steps[..cut], case.last_step_clock, case.max_error)
+                .expect("monotonic reachable steps compress");
+        let head = decode(&head_moves, case.last_step_clock);
+        prop_assert_eq!(head_consumed, cut);
+        let resume_from = head.last().expect("a consumed head has a last step").clock;
+
+        let (tail_moves, tail_consumed) =
+            compress_with_max_error(&steps[cut..], resume_from, case.max_error)
+                .expect("a tail reachable from the head's last clock compresses");
+        let tail = decode(&tail_moves, resume_from);
+        prop_assert_eq!(tail_consumed, steps.len() - cut);
+
+        let mut previous = case.last_step_clock;
+        for (index, (step, target)) in head.iter().chain(&tail).zip(&steps).enumerate() {
+            prop_assert!(
+                step.clock > previous,
+                "step {index} at {} does not advance past {previous} (cut at {cut})",
+                step.clock
+            );
+            prop_assert!(
+                step.clock <= *target && target - step.clock <= u64::from(case.max_error),
+                "step {index} at {} misses its target {target} by more than {} (cut at {cut})",
+                step.clock,
+                case.max_error
+            );
+            previous = step.clock;
+        }
+    }
 }
