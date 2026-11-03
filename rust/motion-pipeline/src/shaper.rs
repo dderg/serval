@@ -1655,25 +1655,34 @@ const fn translation_binomials() -> [[f64; MOMENT_POWER_CAPACITY]; MOMENT_POWER_
     table
 }
 
-fn accumulate_translated_moments(
-    source_origin: f64,
-    source: &[f64],
-    target_origin: f64,
-    target: &mut [f64],
-) {
-    assert_eq!(source.len(), target.len());
-    assert!(target.len() <= MOMENT_POWER_CAPACITY);
-    let delta = source_origin - target_origin;
-    let mut delta_powers = [1.0; MOMENT_POWER_CAPACITY];
-    for power in 1..target.len() {
-        delta_powers[power] = delta_powers[power - 1] * delta;
+/// The powers of one origin shift, built once and shared by every moment
+/// order translated between the same two origins.
+struct MomentTranslation {
+    delta_powers: [f64; MOMENT_POWER_CAPACITY],
+    len: usize,
+}
+
+impl MomentTranslation {
+    fn new(source_origin: f64, target_origin: f64, len: usize) -> Self {
+        assert!(len <= MOMENT_POWER_CAPACITY);
+        let delta = source_origin - target_origin;
+        let mut delta_powers = [1.0; MOMENT_POWER_CAPACITY];
+        for power in 1..len {
+            delta_powers[power] = delta_powers[power - 1] * delta;
+        }
+        Self { delta_powers, len }
     }
-    for (moment_power, moment) in target.iter_mut().enumerate() {
-        let binomials = &TRANSLATION_BINOMIALS[moment_power];
-        for source_power in 0..=moment_power {
-            *moment += binomials[source_power]
-                * delta_powers[moment_power - source_power]
-                * source[source_power];
+
+    fn accumulate(&self, source: &[f64], target: &mut [f64]) {
+        assert_eq!(source.len(), target.len());
+        assert!(target.len() <= self.len);
+        for (moment_power, moment) in target.iter_mut().enumerate() {
+            let binomials = &TRANSLATION_BINOMIALS[moment_power];
+            for source_power in 0..=moment_power {
+                *moment += binomials[source_power]
+                    * self.delta_powers[moment_power - source_power]
+                    * source[source_power];
+            }
         }
     }
 }
@@ -1691,6 +1700,93 @@ fn taylor_shift(coefficients: &[f64], shift: f64, shifted: &mut [f64]) {
     }
 }
 
+const POWER_DIVISORS: [f64; MOMENT_POWER_CAPACITY] = power_divisors();
+
+const fn power_divisors() -> [f64; MOMENT_POWER_CAPACITY] {
+    let mut divisors = [0.0; MOMENT_POWER_CAPACITY];
+    let mut power = 0;
+    while power < MOMENT_POWER_CAPACITY {
+        divisors[power] = power as f64;
+        power += 1;
+    }
+    divisors
+}
+
+/// One polynomial's moments over `[lo, hi]` about `origin`, with everything
+/// that depends only on the window — the local base, the power differences
+/// of its edges, the translation back to `origin` — built once for all of a
+/// piece's derivative orders.
+struct MomentWindow {
+    shift: f64,
+    edge_power_spans: [f64; MOMENT_POWER_CAPACITY],
+    max_power: usize,
+    translation: MomentTranslation,
+}
+
+impl MomentWindow {
+    fn new(
+        polynomial_start: f64,
+        lo: f64,
+        hi: f64,
+        origin: f64,
+        coefficient_len: usize,
+        moment_len: usize,
+    ) -> Option<Self> {
+        if hi <= lo {
+            return None;
+        }
+        let max_power = coefficient_len + moment_len - 1;
+        assert!(
+            max_power < MOMENT_POWER_CAPACITY,
+            "moment product degree {} exceeds capacity {}",
+            max_power - 1,
+            MOMENT_POWER_CAPACITY - 2
+        );
+        let base = lo + 0.5 * (hi - lo);
+        let x_lo = lo - base;
+        let x_hi = hi - base;
+        let (mut lo_power, mut hi_power) = (1.0_f64, 1.0_f64);
+        let mut edge_power_spans = [0.0; MOMENT_POWER_CAPACITY];
+        for span in &mut edge_power_spans[1..=max_power] {
+            lo_power *= x_lo;
+            hi_power *= x_hi;
+            *span = hi_power - lo_power;
+        }
+        Some(Self {
+            shift: base - polynomial_start,
+            edge_power_spans,
+            max_power,
+            translation: MomentTranslation::new(base, origin, moment_len),
+        })
+    }
+
+    fn accumulate(&self, coefficients: &[f64], moments: &mut [f64]) {
+        let length = coefficients.len();
+        let moment_len = moments.len();
+        assert_eq!(moment_len, self.translation.len);
+        assert!(length + moment_len - 1 <= self.max_power);
+        let mut local_coefficients = [0.0; MOMENT_POWER_CAPACITY];
+        taylor_shift(coefficients, self.shift, &mut local_coefficients[..length]);
+        let mut local_moments = [0.0; MOMENT_POWER_CAPACITY];
+        for (polynomial_power, &coefficient) in local_coefficients[..length].iter().enumerate() {
+            let powers = polynomial_power + 1..polynomial_power + 1 + moment_len;
+            for ((moment, &span), &divisor) in local_moments[..moment_len]
+                .iter_mut()
+                .zip(&self.edge_power_spans[powers.clone()])
+                .zip(&POWER_DIVISORS[powers])
+            {
+                *moment += coefficient * span / divisor;
+            }
+        }
+        self.translation
+            .accumulate(&local_moments[..moment_len], moments);
+    }
+}
+
+/// Segment-tree range sums of every piece's moments, for all
+/// `MOMENT_ORDERS` derivative orders at once: each node stores its orders
+/// contiguously, so one traversal translates every order with one set of
+/// origin-shift powers.
 struct MomentTree {
     degree: usize,
     leaf_count: usize,
@@ -1699,33 +1795,30 @@ struct MomentTree {
 }
 
 impl MomentTree {
-    fn build(table: &AxisSignalTable, degree: usize, order: usize) -> Self {
+    fn build(table: &AxisSignalTable, degree: usize) -> Self {
         let stride = degree + 1;
         assert!(
             stride <= MOMENT_POWER_CAPACITY,
             "moment degree {degree} exceeds capacity {}",
             MOMENT_POWER_CAPACITY - 1
         );
+        let node_stride = MOMENT_ORDERS * stride;
         let leaf_count = table.coeffs.len().next_power_of_two();
         let node_count = 2 * leaf_count;
         let mut origins = vec![f64::NAN; node_count];
-        let mut moments = vec![0.0; node_count * stride];
+        let mut moments = vec![0.0; node_count * node_stride];
         for i in 0..table.coeffs.len() {
             let node = leaf_count + i;
             let origin = table.starts[i] + 0.5 * (table.ends[i] - table.starts[i]);
             origins[node] = origin;
-            let mut derivative = [0.0; MOMENT_POWER_CAPACITY];
-            let length = differentiate_into(&table.coeffs[i], order, &mut derivative);
-            if length == 0 {
-                continue;
-            }
-            AxisSignalTable::accumulate_polynomial_moments(
-                &derivative[..length],
-                table.starts[i],
+            let node_moments = &mut moments[node * node_stride..(node + 1) * node_stride];
+            table.accumulate_piece_moments(
+                i,
                 table.starts[i],
                 table.ends[i],
                 origin,
-                &mut moments[node * stride..(node + 1) * stride],
+                stride,
+                node_moments.chunks_exact_mut(stride),
             );
         }
         for node in (1..leaf_count).rev() {
@@ -1738,18 +1831,21 @@ impl MomentTree {
                 (false, false) => continue,
             };
             origins[node] = origin;
-            let mut combined = [0.0; MOMENT_POWER_CAPACITY];
+            let mut combined = [0.0; MOMENT_ORDERS * MOMENT_POWER_CAPACITY];
             for child in [left, right] {
                 if origins[child].is_finite() {
-                    accumulate_translated_moments(
-                        origins[child],
-                        &moments[child * stride..(child + 1) * stride],
-                        origin,
-                        &mut combined[..stride],
-                    );
+                    let translation = MomentTranslation::new(origins[child], origin, stride);
+                    let child_moments = &moments[child * node_stride..(child + 1) * node_stride];
+                    for (source, target) in child_moments
+                        .chunks_exact(stride)
+                        .zip(combined[..node_stride].chunks_exact_mut(stride))
+                    {
+                        translation.accumulate(source, target);
+                    }
                 }
             }
-            moments[node * stride..(node + 1) * stride].copy_from_slice(&combined[..stride]);
+            moments[node * node_stride..(node + 1) * node_stride]
+                .copy_from_slice(&combined[..node_stride]);
         }
         Self {
             degree,
@@ -1759,7 +1855,13 @@ impl MomentTree {
         }
     }
 
-    fn accumulate(&self, start: usize, end: usize, degree: usize, origin: f64, target: &mut [f64]) {
+    fn accumulate(
+        &self,
+        start: usize,
+        end: usize,
+        origin: f64,
+        targets: &mut [&mut [f64]; MOMENT_ORDERS],
+    ) {
         if start >= end {
             return;
         }
@@ -1769,7 +1871,7 @@ impl MomentTree {
         let mut right_count = 0;
         while left < right {
             if left & 1 != 0 {
-                self.accumulate_node(left, degree, origin, target);
+                self.accumulate_node(left, origin, targets);
                 left += 1;
             }
             if right & 1 != 0 {
@@ -1782,18 +1884,19 @@ impl MomentTree {
         }
         while right_count > 0 {
             right_count -= 1;
-            self.accumulate_node(right_nodes[right_count], degree, origin, target);
+            self.accumulate_node(right_nodes[right_count], origin, targets);
         }
     }
 
-    fn accumulate_node(&self, node: usize, degree: usize, origin: f64, target: &mut [f64]) {
+    fn accumulate_node(&self, node: usize, origin: f64, targets: &mut [&mut [f64]; MOMENT_ORDERS]) {
         let stride = self.degree + 1;
-        accumulate_translated_moments(
-            self.origins[node],
-            &self.moments[node * stride..node * stride + degree + 1],
-            origin,
-            target,
-        );
+        let node_moments =
+            &self.moments[node * MOMENT_ORDERS * stride..(node + 1) * MOMENT_ORDERS * stride];
+        let moment_len = targets[0].len();
+        let translation = MomentTranslation::new(self.origins[node], origin, moment_len);
+        for (source, target) in node_moments.chunks_exact(stride).zip(targets.iter_mut()) {
+            translation.accumulate(&source[..moment_len], target);
+        }
     }
 }
 /// One axis of the emit window, flattened to time-sorted monomial pieces so
@@ -1811,7 +1914,7 @@ pub(crate) struct AxisSignalTable {
     last_t: f64,
     boundary: FitBoundary,
     lookahead: Lookahead,
-    moment_trees: Option<[MomentTree; MOMENT_ORDERS]>,
+    moment_tree: Option<MomentTree>,
     input_jumps: Vec<(f64, f64, f64)>,
     entering_step: f64,
     leaving_step: f64,
@@ -1853,7 +1956,7 @@ impl AxisSignalTable {
             last_t: bounds.last_t,
             boundary: bounds.boundary,
             lookahead: bounds.lookahead,
-            moment_trees: None,
+            moment_tree: None,
             input_jumps: Vec::new(),
             entering_step: 0.0,
             leaving_step: 0.0,
@@ -1893,7 +1996,7 @@ impl AxisSignalTable {
 
     pub(crate) fn with_derivative_gains(mut self, k1: f64, k2: f64) -> Self {
         assert!(
-            self.moment_trees.is_none(),
+            self.moment_tree.is_none(),
             "derivative gains must reshape the signal before its moments are built"
         );
         let last = self.coeffs.len() - 1;
@@ -1962,9 +2065,9 @@ impl AxisSignalTable {
             .expect("empty signal window")
     }
     pub(crate) fn with_piece_moments(mut self, degree: usize) -> Self {
-        let trees = std::array::from_fn(|order| MomentTree::build(&self, degree, order));
+        let tree = MomentTree::build(&self, degree);
         let input_jumps = self.collect_input_jumps();
-        self.moment_trees = Some(trees);
+        self.moment_tree = Some(tree);
         self.input_jumps = input_jumps;
         self
     }
@@ -2012,16 +2115,16 @@ impl AxisSignalTable {
         hi: f64,
         degree: usize,
         origin: f64,
-        orders: [&mut [f64]; MOMENT_ORDERS],
+        mut orders: [&mut [f64]; MOMENT_ORDERS],
     ) -> bool {
-        let trees = self
-            .moment_trees
+        let tree = self
+            .moment_tree
             .as_ref()
             .expect("moment integration requested before moments were built");
         assert!(
-            degree <= trees[0].degree,
+            degree <= tree.degree,
             "requested moment degree {degree} exceeds prepared degree {}",
-            trees[0].degree
+            tree.degree
         );
         if !lo.is_finite() || !hi.is_finite() || !origin.is_finite() || lo > hi {
             return false;
@@ -2031,129 +2134,102 @@ impl AxisSignalTable {
         {
             return false;
         }
+        let moment_len = degree + 1;
+        for moments in &mut orders {
+            assert_eq!(moments.len(), moment_len);
+            moments.fill(0.0);
+        }
+        if lo < self.first_t {
+            Self::accumulate_held(
+                self.held_before(),
+                lo,
+                hi.min(self.first_t),
+                origin,
+                orders[0],
+            );
+        }
         let interior_lo = lo.max(self.first_t);
         let interior_hi = hi.min(self.last_t);
-        let interior = (interior_hi > interior_lo).then(|| {
+        if interior_hi > interior_lo {
             let first_piece = self.ends.partition_point(|&end| end <= interior_lo);
             let end_piece = self.starts.partition_point(|&start| start < interior_hi);
             let mut full_start = first_piece;
             let mut full_end = end_piece;
-            let left_partial = (self.starts[first_piece] < interior_lo).then(|| {
+            if self.starts[first_piece] < interior_lo {
                 full_start += 1;
-                first_piece
-            });
-            let right_partial = (full_start < full_end && self.ends[full_end - 1] > interior_hi)
-                .then(|| {
-                    full_end -= 1;
-                    full_end
-                });
-            (left_partial, full_start, full_end, right_partial)
-        });
-        let mut derivative = [0.0; MOMENT_POWER_CAPACITY];
-        for (order, moments) in orders.into_iter().enumerate() {
-            assert_eq!(moments.len(), degree + 1);
-            moments.fill(0.0);
-            if lo < self.first_t && order == 0 {
-                let held = [self.held_before()];
-                Self::accumulate_polynomial_moments(
-                    &held,
-                    lo,
-                    lo,
-                    hi.min(self.first_t),
+                self.accumulate_piece_moments(
+                    first_piece,
+                    interior_lo,
+                    interior_hi.min(self.ends[first_piece]),
                     origin,
-                    moments,
+                    moment_len,
+                    orders.iter_mut().map(|moments| &mut **moments),
                 );
             }
-            if let Some((left_partial, full_start, full_end, right_partial)) = interior {
-                if let Some(piece) = left_partial {
-                    let length = differentiate_into(&self.coeffs[piece], order, &mut derivative);
-                    if length > 0 {
-                        Self::accumulate_polynomial_moments(
-                            &derivative[..length],
-                            self.starts[piece],
-                            interior_lo,
-                            interior_hi.min(self.ends[piece]),
-                            origin,
-                            moments,
-                        );
-                    }
-                }
-                trees[order].accumulate(full_start, full_end, degree, origin, moments);
-                if let Some(piece) = right_partial {
-                    let length = differentiate_into(&self.coeffs[piece], order, &mut derivative);
-                    if length > 0 {
-                        Self::accumulate_polynomial_moments(
-                            &derivative[..length],
-                            self.starts[piece],
-                            self.starts[piece],
-                            interior_hi,
-                            origin,
-                            moments,
-                        );
-                    }
-                }
+            let right_partial = full_start < full_end && self.ends[full_end - 1] > interior_hi;
+            if right_partial {
+                full_end -= 1;
             }
-            if hi > self.last_t && order == 0 {
-                let held = [self.held_after()];
-                Self::accumulate_polynomial_moments(
-                    &held,
-                    self.last_t,
-                    lo.max(self.last_t),
-                    hi,
+            tree.accumulate(full_start, full_end, origin, &mut orders);
+            if right_partial {
+                self.accumulate_piece_moments(
+                    full_end,
+                    self.starts[full_end],
+                    interior_hi,
                     origin,
-                    moments,
+                    moment_len,
+                    orders.iter_mut().map(|moments| &mut **moments),
                 );
             }
+        }
+        if hi > self.last_t {
+            Self::accumulate_held(
+                self.held_after(),
+                lo.max(self.last_t),
+                hi,
+                origin,
+                orders[0],
+            );
         }
         true
     }
 
-    fn accumulate_polynomial_moments(
-        coefficients: &[f64],
-        polynomial_start: f64,
+    fn accumulate_held(value: f64, lo: f64, hi: f64, origin: f64, moments: &mut [f64]) {
+        if let Some(window) = MomentWindow::new(lo, lo, hi, origin, 1, moments.len()) {
+            window.accumulate(&[value], moments);
+        }
+    }
+
+    /// Adds piece `piece`'s moments over `[lo, hi]` about `origin` to each
+    /// target in turn, the `order`-th target receiving the piece's
+    /// `order`-th derivative.
+    fn accumulate_piece_moments<'m>(
+        &self,
+        piece: usize,
         lo: f64,
         hi: f64,
         origin: f64,
-        moments: &mut [f64],
+        moment_len: usize,
+        orders: impl Iterator<Item = &'m mut [f64]>,
     ) {
-        if hi <= lo {
+        let coefficients = &self.coeffs[piece];
+        let Some(window) = MomentWindow::new(
+            self.starts[piece],
+            lo,
+            hi,
+            origin,
+            coefficients.len(),
+            moment_len,
+        ) else {
             return;
-        }
-        let max_power = coefficients.len() + moments.len() - 1;
-        assert!(
-            max_power < MOMENT_POWER_CAPACITY,
-            "moment product degree {} exceeds capacity {}",
-            max_power - 1,
-            MOMENT_POWER_CAPACITY - 2
-        );
-        let base = lo + 0.5 * (hi - lo);
-        let mut local_coefficients = [0.0; MOMENT_POWER_CAPACITY];
-        taylor_shift(
-            coefficients,
-            base - polynomial_start,
-            &mut local_coefficients[..coefficients.len()],
-        );
-        let mut lo_powers = [1.0; MOMENT_POWER_CAPACITY];
-        let mut hi_powers = [1.0; MOMENT_POWER_CAPACITY];
-        let x_lo = lo - base;
-        let x_hi = hi - base;
-        for power in 1..=max_power {
-            lo_powers[power] = lo_powers[power - 1] * x_lo;
-            hi_powers[power] = hi_powers[power - 1] * x_hi;
-        }
-        let mut local_moments = [0.0; MOMENT_POWER_CAPACITY];
-        for (moment_power, moment) in local_moments[..moments.len()].iter_mut().enumerate() {
-            for (polynomial_power, coefficient) in local_coefficients
-                .iter()
-                .copied()
-                .take(coefficients.len())
-                .enumerate()
-            {
-                let power = polynomial_power + moment_power + 1;
-                *moment += coefficient * (hi_powers[power] - lo_powers[power]) / power as f64;
+        };
+        let mut derivative = [0.0; MOMENT_POWER_CAPACITY];
+        for (order, moments) in orders.enumerate() {
+            let length = differentiate_into(coefficients, order, &mut derivative);
+            if length > 0 {
+                window.accumulate(&derivative[..length], moments);
             }
         }
-        accumulate_translated_moments(base, &local_moments[..moments.len()], origin, moments);
     }
 
     fn piece_at(&self, i: usize, t: f64) -> f64 {
