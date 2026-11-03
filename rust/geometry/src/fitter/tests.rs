@@ -605,7 +605,7 @@ fn corner_ramp_beyond_extruder_budget_leaves_the_junction_unblended() {
 
     let open = CornerFitConfig::default();
     assert!(matches!(
-        plan_junction_reduced(&a, &b, open, (0.0, 0.0), 0.0).unwrap(),
+        plan_junction_reduced(&a, &b, open, (0.0, 0.0), (0.0, 0.0)).unwrap(),
         JunctionPlan::Blend(_)
     ));
 
@@ -614,7 +614,7 @@ fn corner_ramp_beyond_extruder_budget_leaves_the_junction_unblended() {
         ..CornerFitConfig::default()
     };
     assert!(matches!(
-        plan_junction_reduced(&a, &b, tight, (0.0, 0.0), 0.0).unwrap(),
+        plan_junction_reduced(&a, &b, tight, (0.0, 0.0), (0.0, 0.0)).unwrap(),
         JunctionPlan::Unblended(UnblendReason::ExtrusionRampInfeasible)
     ));
 }
@@ -646,7 +646,7 @@ fn disabled_jerk_limiting_never_rejects_ramps_on_its_own() {
         ..CornerFitConfig::default()
     };
     assert!(matches!(
-        plan_junction_reduced(&a, &b, config, (0.0, 0.0), 0.0).unwrap(),
+        plan_junction_reduced(&a, &b, config, (0.0, 0.0), (0.0, 0.0)).unwrap(),
         JunctionPlan::Blend(_)
     ));
 }

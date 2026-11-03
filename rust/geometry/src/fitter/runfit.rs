@@ -7,7 +7,7 @@ use super::kernels::RunEnd;
 use super::move_ops::{is_travel, line_of};
 use super::overlap::ArcSide;
 use super::{
-    CornerFitConfig, FitError, causal, kernels, overlap, ramps_admitted,
+    CornerFitConfig, FitError, causal, kernels, overlap, ramps_admitted, run_reach_into_line,
     shortest_executable_halves, span_tolerance,
 };
 
@@ -129,7 +129,7 @@ impl RunFit {
         };
         let Some(blend) = overlap::resolve_arc_line(
             &self.recon.arc,
-            line,
+            (line, run_reach_into_line(neighbor, line.s_len())),
             ArcSide::Outbound,
             corner,
             self.tol,
@@ -176,7 +176,7 @@ impl RunFit {
         };
         let Some(blend) = overlap::resolve_arc_line(
             &self.recon.arc,
-            line,
+            (line, run_reach_into_line(neighbor, line.s_len())),
             ArcSide::Inbound,
             corner,
             self.tol,

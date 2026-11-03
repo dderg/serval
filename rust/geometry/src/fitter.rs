@@ -112,9 +112,10 @@ pub enum UnblendReason {
     /// than [`CornerFitConfig::ramp_accel_budget_mm_s2`] allows in the worst
     /// case, so the corner stays sharp and the planner stops there instead.
     ExtrusionRampInfeasible,
-    /// Every blend of the corner would leave a body of the inbound line
-    /// shorter than [`shortest_line_body_mm`] behind the blend before it, so
-    /// the corner stays sharp and the line keeps its whole remaining length.
+    /// Every blend of the corner would leave a body of an adjoining line
+    /// shorter than [`shortest_line_body_mm`] beside what its other end
+    /// already gave up, so the corner stays sharp and the lines keep their
+    /// whole remaining length.
     LineSliver,
 }
 
@@ -155,11 +156,12 @@ pub enum FitError {
         line_no: u32,
         excess_mm: f64,
     },
-    /// A corner blend would leave a body of its inbound line shorter than
-    /// [`shortest_line_body_mm`] behind the blend before it, and neither a
-    /// blend consuming that body nor one lengthening it to the floor fits the
-    /// corner's deviation and extrusion ramp, and even a sharp corner would
-    /// leave the line less than the floor.
+    /// A corner blend would leave a body of an adjoining line shorter than
+    /// [`shortest_line_body_mm`] beside what its other end already gave up,
+    /// neither a blend consuming that body nor one lengthening it to the
+    /// floor fits the corner's deviation and extrusion ramp, and even a sharp
+    /// corner would leave the line less than the floor: the claims at its
+    /// other end broke the contract that a sharp corner always remains.
     LineSliver {
         line_no: u32,
         body_mm: f64,
@@ -204,23 +206,24 @@ pub fn arc_candidate_fits(facets: &[Move], config: CornerFitConfig) -> bool {
 /// Classify a line-line junction whose adjoining lengths are partly consumed
 /// by neighboring arc-run easing: `in_reduction` is spent from `m_in`'s length
 /// (a run behind it eased into its head), `out_reduction` from `m_out`'s (a
-/// run ahead eases into its tail). `head_trim` is what the blend before
-/// `m_in` already took from its head, so the blend leaves the body between
-/// them either whole or no shorter than [`shortest_line_body_mm`], unless
-/// the G-code line itself is shorter than that.
+/// run ahead eases into its tail). `head_trim` is what the element before
+/// `m_in` already took from its head and `tail_trim` what the run after
+/// `m_out` takes from its tail, so the blend leaves each body between them
+/// either gone or no shorter than [`shortest_line_body_mm`], unless the
+/// G-code line itself is shorter than that.
 pub fn plan_junction_reduced(
     m_in: &Move,
     m_out: &Move,
     config: CornerFitConfig,
     (in_reduction, head_trim): (f64, f64),
-    out_reduction: f64,
+    (out_reduction, tail_trim): (f64, f64),
 ) -> Result<JunctionPlan, FitError> {
     classify_junction(
         m_in,
         m_out,
         config,
         (in_reduction, head_trim),
-        out_reduction,
+        (out_reduction, tail_trim),
     )
 }
 
@@ -234,6 +237,18 @@ const SHORTEST_LINE_BODY_S: f64 = 1e-5;
 
 fn shortest_line_body_mm(m: &Move) -> f64 {
     m.feedrate_mm_s.min(m.limits.max_velocity_mm_s) * SHORTEST_LINE_BODY_S
+}
+
+/// The most an arc run's boundary — its easing spiral or its boundary blend —
+/// may take from a neighbor line: half of what the line holds past the body
+/// floor, so the claims at both its ends leave it at least the floor and
+/// the junction at its other end can always stay sharp.
+fn run_reach_into_line(m: &Move, line_len: f64) -> f64 {
+    let floor = shortest_line_body_mm(m);
+    if line_len < floor {
+        return 0.5 * line_len;
+    }
+    0.5 * (line_len - floor)
 }
 
 fn shortest_executable_mm(feedrate: f64, limits: VelocityLimits) -> f64 {
@@ -276,7 +291,7 @@ pub fn fit_corners(moves: &[Move], config: CornerFitConfig) -> Result<FitOutcome
             &pair[1],
             config,
             (0.0, head_trim),
-            0.0,
+            (0.0, 0.0),
         )?);
     }
 
@@ -377,13 +392,15 @@ pub fn facet_consumption_candidate(
 /// per-junction blends it replaces (near the squeeze limit, two blends with
 /// their own footprints traverse faster than one blend squeezed through the
 /// whole turn); every facet's extrusion fits the ramp the anchors span; and
-/// the blend's extrusion ramps pass the kinematic gate.
+/// the blend's extrusion ramps pass the kinematic gate. `tail_trim` is what
+/// the run after `m_out` takes from its tail.
 pub fn plan_facet_consumption(
     m_in: &Move,
     mids: &[&Move],
     m_out: &Move,
     config: CornerFitConfig,
     (in_reduction, head_trim): (f64, f64),
+    tail_trim: f64,
 ) -> Result<Option<FacetConsumption>, FitError> {
     let [first_mid, ..] = mids else {
         return Ok(None);
@@ -471,7 +488,7 @@ pub fn plan_facet_consumption(
                 .trim_leaving_the_floor(),
         )
         .min(
-            LineRoom::of(line_out.s_len(), 0.0, shortest_line_body_mm(m_out))
+            LineRoom::of(line_out.s_len(), tail_trim, shortest_line_body_mm(m_out))
                 .trim_leaving_the_floor(),
         );
     let mut vertices = Vec::with_capacity(mids.len() + 1);
@@ -616,7 +633,7 @@ fn classify_junction(
     m_out: &Move,
     config: CornerFitConfig,
     (in_reduction, head_trim): (f64, f64),
-    out_reduction: f64,
+    (out_reduction, tail_trim): (f64, f64),
 ) -> Result<JunctionPlan, FitError> {
     let (line_in, line_out) = match (move_ops::line_of(m_in), move_ops::line_of(m_out)) {
         (Some(a), Some(b)) => (a, b),
@@ -692,11 +709,7 @@ fn classify_junction(
         ));
     }
     let inbound = LineRoom::of(line_in.s_len(), head_trim, shortest_line_body_mm(m_in));
-    let outbound = LineRoom::of(
-        line_out.s_len(),
-        out_reduction,
-        shortest_line_body_mm(m_out),
-    );
+    let outbound = LineRoom::of(line_out.s_len(), tail_trim, shortest_line_body_mm(m_out));
     let trims_in = inbound.trims_leaving_no_sliver(bi.trim_in);
     let trims_out = outbound.trims_leaving_no_sliver(bi.trim_out);
     if trims_in == [bi.trim_in; 2] && trims_out == [bi.trim_out; 2] {
@@ -719,14 +732,17 @@ fn classify_junction(
     if let Some(blend) = closing {
         return Ok(JunctionPlan::Blend(JunctionBlend(blend)));
     }
-    if inbound.keeps_no_sliver(0.0) {
-        return Ok(JunctionPlan::Unblended(UnblendReason::LineSliver));
+    let sharp_sliver = [(m_in, inbound), (m_out, outbound)]
+        .into_iter()
+        .find(|(_, room)| !room.keeps_no_sliver(0.0));
+    if let Some((m, room)) = sharp_sliver {
+        return Err(FitError::LineSliver {
+            line_no: m.source.start_line,
+            body_mm: room.room,
+            shortest_mm: room.floor,
+        });
     }
-    Err(FitError::LineSliver {
-        line_no: m_in.source.start_line,
-        body_mm: inbound.room,
-        shortest_mm: inbound.floor,
-    })
+    Ok(JunctionPlan::Unblended(UnblendReason::LineSliver))
 }
 
 /// What of a line a corner blend may trim: the length past what its other

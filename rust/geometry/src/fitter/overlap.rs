@@ -71,7 +71,7 @@ pub(super) fn resolve_arc_arc(
 
 pub(super) fn resolve_arc_line(
     arc: &Arc,
-    line: &Line,
+    (line, line_budget): (&Line, f64),
     side: ArcSide,
     config: CornerFitConfig,
     delta: f64,
@@ -83,7 +83,6 @@ pub(super) fn resolve_arc_line(
         return None;
     }
     let arc_budget = 0.5 * arc_len(arc);
-    let line_budget = 0.5 * line.s_len();
     let (anchor_in, anchor_out, budget_in, budget_out) = match side {
         ArcSide::Inbound => (
             Anchor {

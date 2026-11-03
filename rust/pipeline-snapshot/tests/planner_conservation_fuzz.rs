@@ -527,3 +527,29 @@ fn an_eased_arc_run_keeps_the_corner_budget_at_its_head() {
     ];
     toolhead_stays_within_the_corner_budget(limits, &steps).unwrap();
 }
+
+/// #586: a run of micron-scale moves after a long one, under a large corner
+/// budget. The blend into line 3 trimmed its head so far that the junction
+/// after it could neither close nor stay sharp without leaving a body under
+/// the 10 µs device floor, and the fitter refused the valid G-code.
+#[test]
+fn a_run_of_micron_moves_plans_without_a_line_sliver() {
+    let limits = Limits {
+        max_velocity: 210.69895897866493,
+        max_accel: 500.0,
+        square_corner_velocity: 16.7316163706545,
+    };
+    let steps = [
+        step(0.17258132179524352, 1.0, 1.0, 0.0),
+        step(std::f64::consts::PI, 0.0015750201235553752, 1.0, 0.0),
+        step(3.4949334148393745, 0.0004964162195518926, 1.0, 0.0),
+        step(
+            2.1411789906452703,
+            0.003685926278257218,
+            293.85117380669965,
+            0.0,
+        ),
+        step(0.0, 0.0014242313971949004, 1.0, 0.0),
+    ];
+    extruder_lays_its_ratio_along_the_path(limits, &steps).unwrap();
+}
