@@ -656,3 +656,20 @@ fn a_rail_riding_a_stiff_rising_cap_lays_its_curve_in_few_knots() {
         seg.rail_knots().len()
     );
 }
+
+#[test]
+fn a_rail_holding_a_held_cap_lays_it_in_few_knots() {
+    let seg = rail(
+        0.0,
+        320_032.091_245_085,
+        -33.613_536_838_661_12,
+        0.0,
+        false,
+        2.893_100_978_587_263,
+    );
+    assert!(
+        seg.rail_knots().len() < 2_000,
+        "a 2.9 mm rail holding its cap lays {} knots",
+        seg.rail_knots().len()
+    );
+}

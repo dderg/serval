@@ -1653,11 +1653,23 @@ impl RailLayout {
 /// its rate — the settled curve's where the state rides a rising cap's
 /// curve within [`RAIL_ACCELERATION_DEFECT`]: the curve draws the rail
 /// along it, and the law's own rate there is its stiffness pulling an
-/// ulp's departure back, not the motion's.
+/// ulp's departure back, not the motion's. A state holding a held cap
+/// rides it flat: the law's acceleration there is the rounding of its
+/// speed against the cap, which a rail holding the cap does not follow.
 fn rail_state(law: &ScalarLaw, s: f64, w: f64) -> RailState {
     let v = w.max(0.0).sqrt();
     let a = law.accel_at(s, v);
     match law.settled_slopes(s, v) {
+        Some((settled, rate)) if settled == 0.0 && rate == 0.0 && law.holds_cap(a) => RailState {
+            s,
+            v,
+            a: 0.0,
+            rate: 0.0,
+            slopes: KnotSlopes::Interpolant {
+                accel: 0.0,
+                rate: 0.0,
+            },
+        },
         Some((settled, rate))
             if settled > 0.0 && (a - settled).abs() <= RAIL_ACCELERATION_DEFECT =>
         {
