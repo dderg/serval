@@ -57,12 +57,28 @@ the wire-stable event table is `rust/runtime-contract/src/log_codes.rs`. To read
 logs — `DIAG_DUMP`, crash forensics, filtering — use the `mcu-diagnostics`
 and `query-logs` skills.
 
+# Build caches and CARGO_TARGET_DIR
+
+Never `export CARGO_TARGET_DIR` in a persistent shell: it leaks into the next
+task's builds and the engine `make` copies. `scripts/ci.sh` unsets an inherited
+value (set `CI_KEEP_CARGO_TARGET_DIR=1` to opt in); everything else uses the
+worktree's own `rust/target`. The only shared target dir is
+`~/.cache/pending-baselines/target`, which `pending_baselines.py`,
+`review_baselines.py` and `integrate_stack.py` set per subprocess. For a one-off
+variant build set `CARGO_TARGET_DIR=...` on that single command, not in the
+shell. `uv run python scripts/gc_caches.py [--days N] [--apply]` lists and
+removes stale `~/.cache/*-target` dirs and abandoned pending-baselines
+worktrees/stacks/samples.
+
 # Landing a PR
 
 `scripts/land-pr.sh <branch>` pushes the branch, opens the PR if needed, waits for
 the checks, merges with a merge commit and moves local `main` to `origin/main`
 without checking anything out. Red checks print the failed-run log tail and
-exit non-zero. `--dry-run` prints the plan.
+exit non-zero. `--dry-run` prints the plan. It is safe to run from the
+branch's own worktree (it leaves it before removing it) and updates the PR
+branch on GitHub and re-waits when `main` moved while the checks ran; no need to
+copy it elsewhere first.
 
 `uv run python scripts/pending_baselines.py [-v|--all]` lists every open PR with
 its stack parent, mergeability, CI state, the snapshot cases whose output
@@ -91,6 +107,24 @@ interleaved with alternating order, and prints median wall seconds, realtime
 factor and the per-stage breakdown with the change B vs A. Use it instead of
 hand-rolled alternating runs; run it on an otherwise idle machine (the load
 average is printed).
+
+`scripts/corpus.sh [--configs fast,printer] [-k SUBSTR] [--audit]` plans the
+59-case corpus (51 snapshot cases + the four `tools/sim/gcode` prints on
+`fast.cfg` and `printer.cfg`) through the production pipeline and checks each
+result is finite. To measure something across the corpus, write a probe test
+starting with `mod corpus;` that iterates `corpus::corpus()` and run it with
+`scripts/corpus.sh --probe FILE.rs`: the file is copied into
+`rust/pipeline-snapshot/tests/` for the run and removed afterwards. The corpus
+lives in `rust/pipeline-snapshot/tests/corpus/mod.rs`, shared with the fit audit.
+
+`uv run python scripts/accept_reviewed.py <pr> [--accept-suspicious CASE=REASON ...]`
+(from the PR branch's own worktree, pushed and clean) runs
+`scripts/review_baselines.py --pr N`, refuses on any REGRESSION or on a SUSPICIOUS
+case without a stated reason, writes the EXPECTED, reasoned and new baselines
+through `snapshots/run.py --accept`, checks every snapshot is exact and commits
+`snapshots/baselines` with the review summary and reasons in the body. Run the
+snapshot tools with `uv run python` (they need numpy); a cache entry in which
+every case failed identically is never kept.
 
 # Reference docs
 
