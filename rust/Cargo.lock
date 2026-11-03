@@ -717,6 +717,7 @@ dependencies = [
  "runtime-contract",
  "serde_json",
  "serialport",
+ "sha2",
  "thiserror",
  "tracing",
  "trajectory",

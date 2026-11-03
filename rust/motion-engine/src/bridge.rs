@@ -153,6 +153,9 @@ pub struct PyMotionEngine {
     mcus: Arc<Mutex<HashMap<u32, McuConnection>>>,
     planner: Mutex<Option<StreamWorkerHandle>>,
     planner_config: Mutex<PlannerConfig>,
+    /// The extruder caps of the chains last published to the planner, one
+    /// per limited follower axis; each submitted move carries its axis's.
+    extruder_caps: Mutex<Vec<geometry::ExtruderCaps>>,
     commanded_pos: Mutex<geometry::GcodePos>,
     bed_mesh: Mutex<Option<Arc<geometry::SurfaceTransform>>>,
     last_g5_pq: Mutex<Option<(f64, f64)>>,
@@ -197,6 +200,7 @@ impl PyMotionEngine {
             mcus: Arc::new(Mutex::new(HashMap::new())),
             planner: Mutex::new(None),
             planner_config: Mutex::new(PlannerConfig::default()),
+            extruder_caps: Mutex::new(Vec::new()),
             commanded_pos: Mutex::new(geometry::GcodePos([0.0; 3])),
             bed_mesh: Mutex::new(None),
             last_g5_pq: Mutex::new(None),

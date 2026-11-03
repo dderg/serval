@@ -73,6 +73,10 @@ def attach_structured_logging(native, printer, events_dir):
     native.set_session_context(
         structured_log.get_session(), structured_log.get_print()
     )
+    if _native is not None:
+        structured_log.event(
+            "motion", "engine_build", build_id=_native.build_id()
+        )
 
     def _push_ctx(*_args):
         native.set_session_context(

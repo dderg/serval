@@ -93,6 +93,19 @@ the shell. `uv run python scripts/gc_caches.py [--days N] [--apply]` lists and r
 stale `~/.cache/*-target` dirs, per-worktree targets and abandoned pending-baselines
 worktrees/stacks.
 
+# Engine provenance
+
+`_motion_engine.build_id()` is the sha256 (first 40 hex) over every file under `rust/`
+that git tracks or would add (path, length, content, sorted), read from the working
+tree at build time by `rust/motion-engine/build.rs`, so dirty and new files count and
+`git rev-parse HEAD` is not involved. `snapshots/engine_build_id.py` computes the same
+value from a tree. `harness._import_engine()` (snapshots/run.py, tools/bench/analyze.py,
+moves.py, tools/corner_flow.py, the review/pending/accept tools, live_replay) refuses an
+engine whose id differs from the tree its `.so` sits in, or that has none, with
+"rebuild with make -f Makefile.rust motion-engine-fast". klippy logs it at startup as the
+`motion`/`engine_build` event; `tools/bench/deploy.py` records `rust_build_id` in the deploy
+identity. An engine built outside a git tree reports `unknown` and is refused by the tools.
+
 # Never work in ~/Developer/serval
 
 `~/Developer/serval` is the shared checkout: it stays on `main` tracking `origin/main`
