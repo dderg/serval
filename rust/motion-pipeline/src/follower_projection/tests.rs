@@ -764,11 +764,7 @@ fn an_advanced_follower_source_fit_opens_and_closes_on_the_signal_velocity() {
         odometer_from_start(&shaped),
         0.0,
     );
-    let advanced = super::AdvancedFollowerSignal {
-        source: &sig,
-        advance: kernel_advance(&stage),
-        steps: &[],
-    };
+    let advanced = super::AdvancedFollowerSignal::new(&sig, kernel_advance(&stage), &[]);
     let pieces = nurbs::bezier::extract_bezier_pieces(&fitted.track);
     assert!(pieces.len() > 1, "fixture must fit with an interior seam");
     for piece in &pieces {
@@ -1340,11 +1336,11 @@ fn an_advanced_follower_source_holds_the_tolerance_past_a_leader_seam_velocity_r
         odometer_from_start(&shaped),
         0.0,
     );
-    let advanced = super::AdvancedFollowerSignal {
-        source: &sig,
-        advance: kernel_advance(&stage),
-        steps: &fitted.window_advance_steps,
-    };
+    let advanced = super::AdvancedFollowerSignal::new(
+        &sig,
+        kernel_advance(&stage),
+        &fitted.window_advance_steps,
+    );
     for piece in nurbs::bezier::extract_bezier_pieces(&fitted.track) {
         let duration = piece.u_end - piece.u_start;
         for sample in 0..64 {
@@ -1850,11 +1846,7 @@ fn an_advanced_follower_enclosure_holds_every_sample_of_its_signal() {
             linearization_velocity: 1.0,
         }),
     ] {
-        let advanced = super::AdvancedFollowerSignal {
-            source: &sig,
-            advance: kernel_advance(&stage),
-            steps: &[],
-        };
+        let advanced = super::AdvancedFollowerSignal::new(&sig, kernel_advance(&stage), &[]);
         assert_enclosure_holds_every_sample(&advanced, (sig.grid[0], sig.grid[sig.grid.len() - 1]));
     }
 }

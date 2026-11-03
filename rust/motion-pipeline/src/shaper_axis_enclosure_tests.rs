@@ -4,6 +4,7 @@ use geometry::{CornerFitConfig, MoveContext, ScalarLaw, VelocityLimits, line_mov
 use trajectory::{AxisChainSet, ContinuousAxis, ContinuousSegment};
 
 use super::continuous_axis_enclosure;
+use super::taylor::Window;
 use crate::Pipeline;
 use crate::shaper::SQUARE_ROOT_ONSET_EDGE_SLACK_S;
 use crate::types::{BaseItem, StreamConfig};
@@ -199,4 +200,62 @@ fn analytic_lines_corners_and_arcs_are_enclosed_by_their_formulas() {
             && coverage.followers > 0,
         "the moves cover too little: {coverage:?}"
     );
+}
+
+/// Every analytic axis read window by window with its jerk: each stretch
+/// one formula covers is read where its jerk exists, and no sample of the
+/// axis's own jerk leaves the model's bound.
+#[test]
+fn analytic_axis_windows_enclose_the_axis_jerk() {
+    let circle = polygon(48, 10.0);
+    let square = [
+        [0.0, 0.0],
+        [20.0, 0.0],
+        [20.0, 20.0],
+        [0.0, 20.0],
+        [0.0, 0.0],
+    ];
+    let mut read = 0usize;
+    for segments in [
+        lowered(moves_through(&square, 200.0), [0.0, 0.0]),
+        lowered(moves_through(&circle, 150.0), circle[0]),
+    ] {
+        for segment in &segments {
+            for axis in segment.axes.iter() {
+                let Some(windows) = super::AxisWindows::of(axis) else {
+                    continue;
+                };
+                let mut breaks = vec![segment.t_start, segment.t_end];
+                breaks.extend(windows.breaks(segment.t_start, segment.t_end));
+                breaks.sort_by(f64::total_cmp);
+                for stretch in breaks.windows(2).filter(|stretch| stretch[1] > stretch[0]) {
+                    let quarter = 0.25 * (stretch[1] - stretch[0]);
+                    let window = Window::new(stretch[0] + quarter, stretch[1] - quarter);
+                    let Some([_, _, _, jerk]) = windows.models(window, true) else {
+                        continue;
+                    };
+                    read += 1;
+                    for k in 0..=8 {
+                        let t = window.lo + (window.hi - window.lo) * f64::from(k) / 8.0;
+                        let truth = axis
+                            .eval_pvaj(t)
+                            .expect("the axis has exact derivatives")
+                            .jerk;
+                        let x = (t - window.center) / window.radius;
+                        let value: f64 = jerk
+                            .coefficients()
+                            .iter()
+                            .rev()
+                            .fold(0.0, |acc, c| acc * x + c);
+                        assert!(
+                            (truth - value).abs() <= jerk.rad() + 1e-6 * (1.0 + truth.abs()),
+                            "at t={t} the axis's jerk {truth} leaves its model {value} ± {}",
+                            jerk.rad()
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(read > 0, "no window read a jerk");
 }

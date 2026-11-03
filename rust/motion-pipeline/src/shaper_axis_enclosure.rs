@@ -271,6 +271,73 @@ impl AxisLaw<'_> {
             }
         }
     }
+
+    /// The axis's jerk on the window, the tangential jerk `jerk` given:
+    /// `j·h + 3·a·v·h' + v³·h''`, `h` the axis's heading along the path and
+    /// `'` its arc derivatives.
+    fn jerk(&self, window: &WindowReading, jerk: &TaylorModel) -> TaylorModel {
+        let Tangential { s, v, a } = &window.state;
+        let zero = TaylorModel::constant(Ball::exact(0.0));
+        let (heading, turn, bend) = match *self {
+            AxisLaw::Constant(_) => return zero,
+            AxisLaw::Line { extent, length, .. } => {
+                return jerk.scale(Ball::rounded(extent / length, 1));
+            }
+            AxisLaw::Arc(arc, axis) => {
+                let sign = arc.sweep.signum();
+                let (sine, cosine) = window.trig.get_or_init(|| {
+                    s.scale(Ball::rounded(sign / arc.radius, 1))
+                        .add_ball(Ball::exact(arc.start_angle))
+                        .sin_cos()
+                });
+                let (u, w) = (arc.u[axis], arc.v[axis]);
+                let heading = sine
+                    .scale(Ball::exact(-sign * u))
+                    .add(&cosine.scale(Ball::exact(sign * w)));
+                let turn = cosine
+                    .scale(Ball::rounded(-u / arc.radius, 1))
+                    .add(&sine.scale(Ball::rounded(-w / arc.radius, 1)));
+                let bend = heading.scale(Ball::rounded(-1.0 / (arc.radius * arc.radius), 2));
+                (heading, turn, bend)
+            }
+            AxisLaw::Clothoid(clothoid, axis) => {
+                let (sine, cosine) = window
+                    .trig
+                    .get_or_init(|| clothoid_angle(clothoid, s).sin_cos());
+                let (u, w) = (clothoid.u[axis], clothoid.v[axis]);
+                let heading = cosine
+                    .scale(Ball::exact(u))
+                    .add(&sine.scale(Ball::exact(w)));
+                let normal = sine
+                    .scale(Ball::exact(-u))
+                    .add(&cosine.scale(Ball::exact(w)));
+                let curvature = s
+                    .scale(Ball::exact(clothoid.sigma))
+                    .add_ball(Ball::exact(clothoid.kappa_0));
+                let bend = normal
+                    .scale(Ball::exact(clothoid.sigma))
+                    .sub(&curvature.mul(&curvature).mul(&heading));
+                (heading, curvature.mul(&normal), bend)
+            }
+            AxisLaw::Follower { demand, length, .. } => {
+                let (ratio, slope) = if demand.ratio_end == demand.ratio {
+                    (TaylorModel::constant(Ball::exact(demand.ratio)), 0.0)
+                } else {
+                    let ramp = Ball::rounded((demand.ratio_end - demand.ratio) / length, 2);
+                    (
+                        s.scale(ramp).add_ball(Ball::exact(demand.ratio)),
+                        demand.ratio_slope(length),
+                    )
+                };
+                return ratio
+                    .mul(jerk)
+                    .add(&a.mul(v).scale(Ball::rounded(3.0 * slope, 2)));
+            }
+        };
+        jerk.mul(&heading)
+            .add(&a.mul(v).mul(&turn).scale(Ball::exact(3.0)))
+            .add(&v.mul(v).mul(v).mul(&bend))
+    }
 }
 
 fn clothoid_angle(clothoid: &Clothoid, s: &TaylorModel) -> TaylorModel {
@@ -695,6 +762,50 @@ impl PairInterpolant {
     }
 }
 
+/// Below this the evaluator reads a rail's jerk as zero: an acceleration
+/// that small is a held cap's rounding.
+const RAIL_JERK_ACCELERATION_FLOOR: f64 = 1e-15;
+
+/// The jerk the rail's law reads at the interpolated state as the
+/// evaluator computes it: the time derivative of `√(A² − κ²v⁴)` along it,
+/// `−κv³·(σv² + 2κa)/a`, and zero below [`RAIL_JERK_ACCELERATION_FLOOR`].
+/// On constant curvature that is `−2κ²v³` off the floor, enclosed with
+/// zero where the acceleration's range reaches the floor; on a turning one
+/// `None` there, where it is unbounded.
+fn rail_law_jerk(kappa: &TaylorModel, sigma: f64, state: &Tangential) -> Option<TaylorModel> {
+    let Tangential { v, a, .. } = state;
+    let speed_squared = v.mul(v);
+    let (centre, spread) = a.spread();
+    let reaches_floor = centre.abs() - spread < RAIL_JERK_ACCELERATION_FLOOR;
+    if sigma == 0.0 {
+        let mut jerk = kappa
+            .mul(kappa)
+            .mul(&speed_squared)
+            .mul(v)
+            .scale(Ball::exact(-2.0));
+        if reaches_floor {
+            let reach = jerk.bound();
+            jerk = TaylorModel::constant(Ball::exact(0.0));
+            jerk.widen(reach);
+        }
+        return Some(jerk);
+    }
+    if reaches_floor {
+        return None;
+    }
+    let bracket = speed_squared
+        .scale(Ball::exact(sigma))
+        .add(&kappa.mul(a).scale(Ball::exact(2.0)));
+    Some(
+        kappa
+            .mul(&speed_squared)
+            .mul(v)
+            .mul(&bracket)
+            .mul(&a.reciprocal()?)
+            .scale(Ball::exact(-1.0)),
+    )
+}
+
 /// A model of `√argument`, or — where the argument's range reaches zero,
 /// or the root's model is wider than that range — an affine model spanning
 /// the root's range in its own variable, flagged so what is built on it
@@ -777,9 +888,9 @@ impl<'a> AxisWindows<'a> {
         })
     }
 
-    /// `[p, v, a, j]` on `window` where one formula covers it; `None` past
-    /// a formula's end, or asked `with_jerk` of an analytic law, whose
-    /// models stop at acceleration. Without it the jerk is unbounded.
+    /// `[p, v, a, j]` on `window` where one formula covers it — `j` only
+    /// `with_jerk`, else unbounded —; `None` past a formula's end, or for a
+    /// jerk where the law has none, at a cap departure's square root.
     pub(crate) fn models(&self, window: Window, with_jerk: bool) -> Option<[TaylorModel; 4]> {
         let covers = |lo: f64, hi: f64| {
             let slack = 1e-9 * (hi - lo).max(1.0);
@@ -800,9 +911,6 @@ impl<'a> AxisWindows<'a> {
                 Some([p.add_ball(Ball::exact(*base)), v, a, j])
             }
             Self::Analytic { span, reading } => {
-                if with_jerk {
-                    return None;
-                }
                 let phase = span
                     .phases
                     .iter()
@@ -813,40 +921,60 @@ impl<'a> AxisWindows<'a> {
                     return None;
                 }
                 let tau = window.time_since(origin);
-                let state = match phase.law {
-                    ScalarLaw::ConstAccel { a0 } => Tangential {
-                        s: polynomial_of_balls(
-                            [
-                                Ball::rounded(phase.s0 - span.source_distance_origin, 1),
-                                Ball::exact(phase.v0),
-                                Ball::exact(0.5 * a0),
-                            ]
-                            .into_iter(),
-                            &tau,
-                        ),
-                        v: polynomial_of_balls(
-                            [Ball::exact(phase.v0), Ball::exact(a0)].into_iter(),
-                            &tau,
-                        ),
-                        a: TaylorModel::constant(Ball::exact(a0)),
-                    },
-                    ScalarLaw::DiskRail { .. } => {
-                        let mut pairs = phase.rail_pairs(window.lo - origin, window.hi - origin);
-                        let pair = pairs.next()?;
-                        if pairs.next().is_some() || !covers(origin + pair.t_lo, origin + pair.t_hi)
-                        {
+                let (state, tangential_jerk) = match phase.law {
+                    ScalarLaw::ConstAccel { a0 } => (
+                        Tangential {
+                            s: polynomial_of_balls(
+                                [
+                                    Ball::rounded(phase.s0 - span.source_distance_origin, 1),
+                                    Ball::exact(phase.v0),
+                                    Ball::exact(0.5 * a0),
+                                ]
+                                .into_iter(),
+                                &tau,
+                            ),
+                            v: polynomial_of_balls(
+                                [Ball::exact(phase.v0), Ball::exact(a0)].into_iter(),
+                                &tau,
+                            ),
+                            a: TaylorModel::constant(Ball::exact(a0)),
+                        },
+                        TaylorModel::constant(Ball::exact(0.0)),
+                    ),
+                    ScalarLaw::DiskRail { kappa0, sigma, .. } => {
+                        let centre = window.center - origin;
+                        let pair = phase.rail_pairs(centre, centre).next()?;
+                        if !covers(origin + pair.t_lo, origin + pair.t_hi) {
                             return None;
                         }
-                        PairInterpolant::new(&pair, phase.s0 - span.source_distance_origin)
-                            .state(&tau)
+                        let state =
+                            PairInterpolant::new(&pair, phase.s0 - span.source_distance_origin)
+                                .state(&tau);
+                        let jerk = if with_jerk {
+                            let kappa = state
+                                .s
+                                .add_ball(Ball::rounded(span.source_distance_origin - phase.s0, 1))
+                                .scale(Ball::exact(sigma))
+                                .add_ball(Ball::exact(kappa0));
+                            rail_law_jerk(&kappa, sigma, &state)?
+                        } else {
+                            TaylorModel::UNBOUNDED
+                        };
+                        (state, jerk)
                     }
                 };
-                let [p, v, a] = reading.models(&WindowReading {
+                let reading_window = WindowReading {
                     state,
                     trig: std::cell::OnceCell::new(),
                     spread_trig: std::cell::OnceCell::new(),
-                });
-                Some([p, v, a, TaylorModel::UNBOUNDED])
+                };
+                let [p, v, a] = reading.models(&reading_window);
+                let j = if with_jerk {
+                    reading.law.jerk(&reading_window, &tangential_jerk)
+                } else {
+                    TaylorModel::UNBOUNDED
+                };
+                Some([p, v, a, j])
             }
             Self::Hold(position) => Some([
                 TaylorModel::constant(Ball::exact(*position)),

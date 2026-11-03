@@ -359,13 +359,9 @@ fn fit_source_projection(
                 .map(|advance| RampedSeam {
                     read_velocity: sig.ramped_advance_read(t).0,
                     read_slope: sig.ramped_read_slope(s),
-                    advanced_velocity: AdvancedFollowerSignal {
-                        source: &sig,
-                        advance,
-                        steps: &[],
-                    }
-                    .eval_pva(t)
-                    .1,
+                    advanced_velocity: AdvancedFollowerSignal::new(&sig, advance, &[])
+                        .eval_pva(t)
+                        .1,
                 }),
         }
     };
@@ -417,11 +413,7 @@ fn fit_source_projection(
             Some(advance) => {
                 let resolution = fit_resolution(
                     &fit,
-                    &AdvancedFollowerSignal {
-                        source: &sig,
-                        advance,
-                        steps: &steps_beyond_rounding,
-                    },
+                    &AdvancedFollowerSignal::new(&sig, advance, &steps_beyond_rounding),
                 )?;
                 let mut seeds = breakpoints.fit_seeds.clone();
                 seeds.extend(sig.advance_velocity_steps_on_the_grid(advance, resolution.velocity));
@@ -436,11 +428,7 @@ fn fit_source_projection(
                             || (!advance.is_ramped() && step.step_mm.abs() > resolution.position)
                     })
                     .collect::<Vec<_>>();
-                let advanced = AdvancedFollowerSignal {
-                    source: &sig,
-                    advance,
-                    steps: &steps,
-                };
+                let advanced = AdvancedFollowerSignal::new(&sig, advance, &steps);
                 if advance.is_ramped() {
                     if let Some(refused) = unexplained(&steps) {
                         return Err(refused);
@@ -3293,6 +3281,24 @@ struct AdvancedFollowerSignal<'a, 'b> {
     source: &'a FollowerSignal<'b>,
     advance: LeadingAdvance<'a>,
     steps: &'a [AdvanceStep],
+    /// The enclosure over the whole signal at the accuracy it was first
+    /// asked for, which every rung of the fit asks again.
+    enclosure: std::cell::OnceCell<([u64; 3], Option<Vec<ExactPiece>>)>,
+}
+
+impl<'a, 'b> AdvancedFollowerSignal<'a, 'b> {
+    fn new(
+        source: &'a FollowerSignal<'b>,
+        advance: LeadingAdvance<'a>,
+        steps: &'a [AdvanceStep],
+    ) -> Self {
+        Self {
+            source,
+            advance,
+            steps,
+            enclosure: std::cell::OnceCell::new(),
+        }
+    }
 }
 
 struct AdvanceInput {
@@ -3380,7 +3386,18 @@ impl TrackSignal for AdvancedFollowerSignal<'_, '_> {
     }
 
     fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
-        self.enclosure(lo, hi, accuracy)
+        let key = accuracy.map(f64::to_bits);
+        let (built_for, whole) = self.enclosure.get_or_init(|| {
+            let grid = &self.source.grid;
+            (key, self.enclosure(grid[0], grid[grid.len() - 1], accuracy))
+        });
+        if *built_for != key {
+            return self.enclosure(lo, hi, accuracy);
+        }
+        let whole = whole.as_ref()?;
+        let first = whole.partition_point(|piece| piece.hi < lo);
+        let past = whole.partition_point(|piece| piece.lo <= hi);
+        Some(whole[first..past.max(first)].to_vec())
     }
 
     fn position_delta(&self, (t0, _): (f64, f64), (t1, _): (f64, f64)) -> f64 {
