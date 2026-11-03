@@ -435,7 +435,7 @@ impl LawSegment {
                 if ds > end + 1e-9 {
                     return None;
                 }
-                if ds >= end - 1e-9 * (1.0 + end.abs()) {
+                if ds >= end {
                     return Some(self.t0 + self.dt);
                 }
                 let idx = knots

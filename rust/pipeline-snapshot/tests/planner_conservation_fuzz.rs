@@ -639,3 +639,70 @@ fn adjacent_arc_runs_meet_without_a_velocity_step() {
         }
     }
 }
+
+/// #601: a sub-micron near-reversal between a 1 mm move and a 17 mm move.
+/// The velocity plan found its third member infeasible and the planner
+/// panicked on valid G-code.
+#[test]
+fn a_micro_reversal_beside_a_long_move_plans() {
+    let limits = Limits {
+        max_velocity: 20.0,
+        max_accel: 22_091.902_088_741_31,
+        square_corner_velocity: 5.0,
+    };
+    let steps = [
+        step(0.0, 1.0, 1.0, 0.0),
+        step(
+            3.225_255_554_463_734,
+            0.000_795_910_078_020_218_4,
+            342.818_433_733_820_6,
+            0.0,
+        ),
+        step(0.0, 17.421_155_443_729_54, 586.017_478_285_331_4, 0.0),
+        step(
+            0.011_203_848_420_787_5,
+            0.002_656_347_454_013_613,
+            610.579_170_740_636_6,
+            0.0,
+        ),
+    ];
+    extruder_lays_its_ratio_along_the_path(limits, &steps).unwrap();
+}
+
+/// #602: a short extruding chain under a 58.5 µm corner budget, which the
+/// toolhead left by 1.05 µm.
+#[test]
+fn a_short_extruding_chain_stays_within_the_corner_budget() {
+    let limits = Limits {
+        max_velocity: 370.699_002_838_312_94,
+        max_accel: 2_016.947_732_549_113_9,
+        square_corner_velocity: 16.142_811_791_324_302,
+    };
+    let steps = [
+        step(
+            std::f64::consts::PI,
+            0.101_152_989_029_350_9,
+            1.0,
+            0.098_761_684_149_198_46,
+        ),
+        step(
+            1.511_623_333_021_075_3,
+            0.006_659_278_788_284_534,
+            1.0,
+            0.081_544_338_949_842_41,
+        ),
+        step(
+            5.150_028_819_654_135,
+            0.054_845_953_608_860_8,
+            1.0,
+            0.096_951_422_948_677_59,
+        ),
+        step(
+            5.087_202_241_462_601_5,
+            0.142_377_809_250_912_8,
+            1.0,
+            0.081_233_359_727_510_15,
+        ),
+    ];
+    toolhead_stays_within_the_corner_budget(limits, &steps).unwrap();
+}
