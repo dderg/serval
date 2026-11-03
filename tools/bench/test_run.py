@@ -45,4 +45,6 @@ def test_a_failing_cancel_does_not_hide_why_the_print_failed(
         run.execute(tmp_path, "x.gcode", {}, 1.0, False, False)
     assert any("No registered callback" in n for n in raised.value.__notes__)
     assert any(src.endswith("klippy.log") for src in bench)
-    assert json.loads((tmp_path / "run.json").read_text())["print_state"] is None
+    assert (
+        json.loads((tmp_path / "run.json").read_text())["print_state"] is None
+    )
