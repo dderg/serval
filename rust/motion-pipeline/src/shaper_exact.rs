@@ -60,7 +60,7 @@ use nurbs::algebra::PiecewisePolynomialKernel;
 use trajectory::next_toward;
 
 use super::{
-    AxisSignalTable, GainImpulse, MOMENT_ORDERS, MOMENT_POWER_CAPACITY, MomentTree,
+    AxisSignalTable, GainImpulse, MOMENT_ORDERS, MOMENT_POWER_CAPACITY, MomentBounds, MomentTree,
     TRANSLATION_BINOMIALS, taylor_shift,
 };
 
@@ -603,9 +603,10 @@ impl ExactConvolution<'_> {
             let upper = RealSum::of(center, -piece.start);
             let degree = piece.at_start.len - 1;
             let mut moments = [[0.0; EXACT_CAPACITY]; MOMENT_ORDERS];
+            let mut magnitudes: MomentBounds = [[0.0; EXACT_CAPACITY]; MOMENT_ORDERS];
             {
                 let [position, velocity, acceleration] = &mut moments;
-                if !self.table.integrate_moments(
+                if !self.table.integrate_bounded_moments(
                     lower.head,
                     upper.head,
                     degree,
@@ -615,13 +616,11 @@ impl ExactConvolution<'_> {
                         &mut velocity[..=degree],
                         &mut acceleration[..=degree],
                     ],
+                    Some(&mut magnitudes),
                 ) {
                     return None;
                 }
             }
-            let mut magnitudes = self
-                .table
-                .moment_magnitudes(lower.head, upper.head, degree, upper.head);
             for mass in self.point_masses_within(lower, upper) {
                 point_masses += 1;
                 add_point_mass(
@@ -743,83 +742,33 @@ impl AxisSignalTable {
             .height()
     }
 
-    /// Bounds on the terms `integrate_moments` sums for each order's
-    /// moments over `[lo, hi]` about `origin`: each partial piece, hold and
-    /// tree node contributes its mass times `(|δ| + reach)^q`.
-    fn moment_magnitudes(
+    /// Bounds the terms a clamped hold of `value` over `[from, to]` adds to
+    /// the position moments about `origin`.
+    pub(super) fn bound_held(value: f64, (from, to): (f64, f64), origin: f64, targets: &mut [f64]) {
+        add_reach_powers(
+            value.abs() * (to - from),
+            window_reach(from, to, origin),
+            targets,
+        );
+    }
+
+    /// Bounds the terms part `[from, to]` of piece `piece` adds to every
+    /// order's moments about `origin`.
+    pub(super) fn bound_partial_piece(
         &self,
-        lo: f64,
-        hi: f64,
-        degree: usize,
+        piece: usize,
+        (from, to): (f64, f64),
         origin: f64,
-    ) -> [[f64; MOMENT_POWER_CAPACITY]; MOMENT_ORDERS] {
-        let tree = self
-            .moment_tree
-            .as_ref()
-            .expect("moment magnitudes requested before moments were built");
-        let moment_len = degree + 1;
-        let mut magnitudes = [[0.0; MOMENT_POWER_CAPACITY]; MOMENT_ORDERS];
-        let window = |from: f64, to: f64| (0.5 * (from + to) - origin).abs() + 0.5 * (to - from);
-        if lo < self.first_t {
-            let to = hi.min(self.first_t);
+        bounds: &mut MomentBounds,
+        moment_len: usize,
+    ) {
+        for (order, target) in bounds.iter_mut().enumerate() {
             add_reach_powers(
-                self.held_before().abs() * (to - lo),
-                window(lo, to),
-                &mut magnitudes[0][..moment_len],
+                self.piece_magnitude(piece, order) * (to - from),
+                window_reach(from, to, origin),
+                &mut target[..moment_len],
             );
         }
-        let interior_lo = lo.max(self.first_t);
-        let interior_hi = hi.min(self.last_t);
-        if interior_hi > interior_lo {
-            let first_piece = self.ends.partition_point(|&end| end <= interior_lo);
-            let end_piece = self.starts.partition_point(|&start| start < interior_hi);
-            let mut full_start = first_piece;
-            let mut full_end = end_piece;
-            let partial =
-                |piece: usize,
-                 from: f64,
-                 to: f64,
-                 magnitudes: &mut [[f64; MOMENT_POWER_CAPACITY]; MOMENT_ORDERS]| {
-                    for (order, target) in magnitudes.iter_mut().enumerate() {
-                        add_reach_powers(
-                            self.piece_magnitude(piece, order) * (to - from),
-                            window(from, to),
-                            &mut target[..moment_len],
-                        );
-                    }
-                };
-            if self.starts[first_piece] < interior_lo {
-                full_start += 1;
-                partial(
-                    first_piece,
-                    interior_lo,
-                    interior_hi.min(self.ends[first_piece]),
-                    &mut magnitudes,
-                );
-            }
-            let right_partial = full_start < full_end && self.ends[full_end - 1] > interior_hi;
-            if right_partial {
-                full_end -= 1;
-            }
-            tree.accumulate_magnitudes(full_start, full_end, origin, &mut magnitudes, moment_len);
-            if right_partial {
-                partial(
-                    full_end,
-                    self.starts[full_end],
-                    interior_hi,
-                    &mut magnitudes,
-                );
-            }
-        }
-        if hi > self.last_t {
-            let from = lo.max(self.last_t);
-            add_reach_powers(
-                self.held_after().abs() * (hi - from),
-                window(from, hi),
-                &mut magnitudes[0][..moment_len],
-            );
-        }
-        magnitudes
     }
 
     /// The Taylor series, about `edge.head`, of every derivative order of
@@ -864,37 +813,13 @@ impl MomentTree {
         self.leaf_count.trailing_zeros() as usize
     }
 
-    /// Adds, for every node `accumulate` would read over `[start, end)`,
-    /// the bound `mass·(|δ| + reach)^q` on the terms of its moments about
-    /// `origin`.
-    fn accumulate_magnitudes(
-        &self,
-        start: usize,
-        end: usize,
-        origin: f64,
-        targets: &mut [[f64; MOMENT_POWER_CAPACITY]; MOMENT_ORDERS],
-        moment_len: usize,
-    ) {
-        let (mut left, mut right) = (start + self.leaf_count, end + self.leaf_count);
-        while left < right {
-            if left & 1 != 0 {
-                self.accumulate_node_magnitudes(left, origin, targets, moment_len);
-                left += 1;
-            }
-            if right & 1 != 0 {
-                right -= 1;
-                self.accumulate_node_magnitudes(right, origin, targets, moment_len);
-            }
-            left /= 2;
-            right /= 2;
-        }
-    }
-
-    fn accumulate_node_magnitudes(
+    /// Adds the bound `mass·(|δ| + reach)^q` on the terms of node `node`'s
+    /// moments about `origin`.
+    pub(super) fn accumulate_node_magnitudes(
         &self,
         node: usize,
         origin: f64,
-        targets: &mut [[f64; MOMENT_POWER_CAPACITY]; MOMENT_ORDERS],
+        targets: &mut MomentBounds,
         moment_len: usize,
     ) {
         if !self.origins[node].is_finite() {
@@ -909,6 +834,11 @@ impl MomentTree {
             );
         }
     }
+}
+
+/// How far from `origin` a point of `[from, to]` lies.
+fn window_reach(from: f64, to: f64, origin: f64) -> f64 {
+    (0.5 * (from + to) - origin).abs() + 0.5 * (to - from)
 }
 
 /// `targets[q] += mass · reach^q`.

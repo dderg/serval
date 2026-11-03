@@ -2026,23 +2026,33 @@ impl MomentTree {
         }
     }
 
+    /// Adds every node's moments over `[start, end)` about `origin`, and
+    /// with `bounds` each node's bound on the terms of its moments.
     fn accumulate(
         &self,
         start: usize,
         end: usize,
         origin: f64,
         targets: &mut [&mut [f64]; MOMENT_ORDERS],
+        mut bounds: Option<&mut MomentBounds>,
     ) {
         if start >= end {
             return;
         }
+        let moment_len = targets[0].len();
+        let mut visit = |node: usize, targets: &mut [&mut [f64]; MOMENT_ORDERS]| {
+            self.accumulate_node(node, origin, targets);
+            if let Some(bounds) = bounds.as_deref_mut() {
+                self.accumulate_node_magnitudes(node, origin, bounds, moment_len);
+            }
+        };
         let mut left = start + self.leaf_count;
         let mut right = end + self.leaf_count;
         let mut right_nodes = [0usize; usize::BITS as usize];
         let mut right_count = 0;
         while left < right {
             if left & 1 != 0 {
-                self.accumulate_node(left, origin, targets);
+                visit(left, targets);
                 left += 1;
             }
             if right & 1 != 0 {
@@ -2055,7 +2065,7 @@ impl MomentTree {
         }
         while right_count > 0 {
             right_count -= 1;
-            self.accumulate_node(right_nodes[right_count], origin, targets);
+            visit(right_nodes[right_count], targets);
         }
     }
 
@@ -2105,6 +2115,10 @@ pub(crate) struct SignalBounds {
 }
 
 const MOMENT_ORDERS: usize = 3;
+
+/// For each derivative order and moment power, a bound on the magnitude of
+/// the terms that moment is summed from.
+type MomentBounds = [[f64; MOMENT_POWER_CAPACITY]; MOMENT_ORDERS];
 
 impl AxisSignalTable {
     fn build(segments: &[&ContinuousSegment], axis: usize, bounds: SignalBounds) -> Self {
@@ -2313,7 +2327,22 @@ impl AxisSignalTable {
         hi: f64,
         degree: usize,
         origin: f64,
+        orders: [&mut [f64]; MOMENT_ORDERS],
+    ) -> bool {
+        self.integrate_bounded_moments(lo, hi, degree, origin, orders, None)
+    }
+
+    /// `integrate_moments`, and with `bounds` the magnitude of the terms
+    /// each moment sums, gathered in the same walk: every partial piece,
+    /// hold and tree node adds its mass times `(|δ| + reach)^q`.
+    fn integrate_bounded_moments(
+        &self,
+        lo: f64,
+        hi: f64,
+        degree: usize,
+        origin: f64,
         mut orders: [&mut [f64]; MOMENT_ORDERS],
+        mut bounds: Option<&mut MomentBounds>,
     ) -> bool {
         let tree = self
             .moment_tree
@@ -2338,13 +2367,16 @@ impl AxisSignalTable {
             moments.fill(0.0);
         }
         if lo < self.first_t {
-            Self::accumulate_held(
-                self.held_before(),
-                lo,
-                hi.min(self.first_t),
-                origin,
-                orders[0],
-            );
+            let to = hi.min(self.first_t);
+            Self::accumulate_held(self.held_before(), lo, to, origin, orders[0]);
+            if let Some(bounds) = bounds.as_deref_mut() {
+                Self::bound_held(
+                    self.held_before(),
+                    (lo, to),
+                    origin,
+                    &mut bounds[0][..moment_len],
+                );
+            }
         }
         let interior_lo = lo.max(self.first_t);
         let interior_hi = hi.min(self.last_t);
@@ -2355,39 +2387,68 @@ impl AxisSignalTable {
             let mut full_end = end_piece;
             if self.starts[first_piece] < interior_lo {
                 full_start += 1;
+                let to = interior_hi.min(self.ends[first_piece]);
                 self.accumulate_piece_moments(
                     first_piece,
                     interior_lo,
-                    interior_hi.min(self.ends[first_piece]),
+                    to,
                     origin,
                     moment_len,
                     orders.iter_mut().map(|moments| &mut **moments),
                 );
+                if let Some(bounds) = bounds.as_deref_mut() {
+                    self.bound_partial_piece(
+                        first_piece,
+                        (interior_lo, to),
+                        origin,
+                        bounds,
+                        moment_len,
+                    );
+                }
             }
             let right_partial = full_start < full_end && self.ends[full_end - 1] > interior_hi;
             if right_partial {
                 full_end -= 1;
             }
-            tree.accumulate(full_start, full_end, origin, &mut orders);
+            tree.accumulate(
+                full_start,
+                full_end,
+                origin,
+                &mut orders,
+                bounds.as_deref_mut(),
+            );
             if right_partial {
+                let from = self.starts[full_end];
                 self.accumulate_piece_moments(
                     full_end,
-                    self.starts[full_end],
+                    from,
                     interior_hi,
                     origin,
                     moment_len,
                     orders.iter_mut().map(|moments| &mut **moments),
                 );
+                if let Some(bounds) = bounds.as_deref_mut() {
+                    self.bound_partial_piece(
+                        full_end,
+                        (from, interior_hi),
+                        origin,
+                        bounds,
+                        moment_len,
+                    );
+                }
             }
         }
         if hi > self.last_t {
-            Self::accumulate_held(
-                self.held_after(),
-                lo.max(self.last_t),
-                hi,
-                origin,
-                orders[0],
-            );
+            let from = lo.max(self.last_t);
+            Self::accumulate_held(self.held_after(), from, hi, origin, orders[0]);
+            if let Some(bounds) = bounds {
+                Self::bound_held(
+                    self.held_after(),
+                    (from, hi),
+                    origin,
+                    &mut bounds[0][..moment_len],
+                );
+            }
         }
         true
     }
