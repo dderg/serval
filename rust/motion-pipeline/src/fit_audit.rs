@@ -75,8 +75,6 @@ pub struct FitViolation {
     /// other tracks' pieces.
     pub break_in_edge_sliver: bool,
     pub exemption: Option<Exemption>,
-    pub scratch_contact_distance: f64,
-    pub scratch_insets: (f64, f64),
 }
 
 static VIOLATIONS: Mutex<Vec<FitViolation>> = Mutex::new(Vec::new());
@@ -197,14 +195,6 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
                 accepted_at_floor: piece.accepted_at_floor,
                 break_in_edge_sliver,
                 exemption,
-                scratch_contact_distance: CAP_CONTACTS.with(|held| {
-                    held.borrow()
-                        .iter()
-                        .map(|&c| (c - piece.t0) / h)
-                        .min_by(|a, b| (a - worst_u).abs().total_cmp(&(b - worst_u).abs()))
-                        .unwrap_or(f64::NAN)
-                }),
-                scratch_insets: (piece.edge_insets.0 / h, piece.edge_insets.1 / h),
             });
     }
 }
