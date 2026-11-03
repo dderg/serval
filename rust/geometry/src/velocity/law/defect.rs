@@ -30,17 +30,29 @@ pub const RAIL_ARC_DEFECT: f64 = 5e-4;
 /// most four products and sums of the knot data.
 const COEFFICIENT_ROUNDINGS: usize = 8;
 
-/// The proven defects of one knot pair against its law.
+/// Roundings a knot's speed and its pair's rise carry, at most.
+pub(super) const SPEED_NOISE_ULPS: f64 = 8.0;
+
+/// The proven defects of one knot pair against its law, and the floor its
+/// knots' speed rounding puts under its acceleration: `8ε·v/h`, which no
+/// shorter pair resolves.
 #[derive(Clone, Copy, Debug)]
 pub struct PairDefect {
     pub acceleration: f64,
     pub arc: f64,
+    pub speed_noise: f64,
 }
 
 impl PairDefect {
+    /// How far the pair may stray from its law in acceleration:
+    /// [`RAIL_ACCELERATION_DEFECT`] over its speed-rounding floor.
+    pub fn allowance(&self) -> f64 {
+        RAIL_ACCELERATION_DEFECT + self.speed_noise
+    }
+
     /// How many times over its allowance the worse defect is.
     pub fn excess(&self) -> f64 {
-        (self.acceleration / RAIL_ACCELERATION_DEFECT).max(self.arc / RAIL_ARC_DEFECT)
+        (self.acceleration / self.allowance()).max(self.arc / RAIL_ARC_DEFECT)
     }
 }
 
@@ -217,7 +229,14 @@ pub fn pair_defect(law: &ScalarLaw, pair: &RailPair) -> PairDefect {
             tangential.max(overshoot)
         }
     };
-    PairDefect { acceleration, arc }
+    let h = pair.t_hi - pair.t_lo;
+    let speed_noise =
+        upper(SPEED_NOISE_ULPS * f64::EPSILON * pair.v_lo.abs().max(pair.v_hi.abs()) / h);
+    PairDefect {
+        acceleration,
+        arc,
+        speed_noise,
+    }
 }
 
 /// The defect of acceleration `a` against the law `sign·√law_squared`

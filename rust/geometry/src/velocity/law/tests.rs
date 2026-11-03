@@ -352,20 +352,18 @@ fn a_brake_landing_on_a_slowly_falling_cap_follows_the_law_through_its_contact_b
     );
 }
 
-/// A rail that runs into its curvature cap inside a knot pair — the reversed
+/// A rail that runs into its curvature cap inside a step — the reversed
 /// rail of a brake whose onset sits just past a cap contact runs on into the
-/// cap the forward rail left. Past the cap the law reads no tangential
-/// budget, so the pair's quintic misses the square-root approach and its
-/// acceleration leaves the law's by hundreds of mm/s² inside the pair.
+/// cap the forward rail left — and the times of the pair approaching it as
+/// the square root of the time left.
 fn rail_running_into_its_cap() -> (LawSegment, f64, f64) {
     let seg = rail(12.5556, 70_000.0, 422.616, 634_643.7, false, 1e-4);
     let knots = seg.rail_knots();
-    let accel = |knot: &RailKnot| seg.law.accel_at(knot.s, knot.v);
     let crossing = knots
         .windows(2)
-        .find(|pair| accel(&pair[0]) > 0.0 && accel(&pair[1]) == 0.0)
+        .find(|pair| pair[1].departure == CapDeparture::FromHi && pair[1].t > pair[0].t)
         .map(|pair| (pair[0].t, pair[1].t))
-        .expect("fixture must run into its cap inside a knot pair");
+        .expect("fixture must approach its cap inside a knot pair");
     (seg, crossing.0, crossing.1)
 }
 
@@ -437,7 +435,7 @@ fn a_cut_approach_keeps_its_law_within_the_proven_allowance() {
         );
         let proven = pair_defect(&cut.law, &last);
         assert!(
-            proven.acceleration <= RAIL_ACCELERATION_DEFECT,
+            proven.acceleration <= proven.allowance(),
             "cut {share} into the approach proves {proven:?}"
         );
         for k in 0..=64 {
@@ -532,7 +530,7 @@ fn every_rail_knot_pair_holds_its_law_within_the_proven_allowance() {
         for pair in knots.windows(2).filter(|pair| pair[1].t > pair[0].t) {
             let defect = pair_defect(&law, &law.rail_pair(&pair[0], &pair[1]));
             assert!(
-                defect.acceleration <= RAIL_ACCELERATION_DEFECT && defect.arc <= RAIL_ARC_DEFECT,
+                defect.acceleration <= defect.allowance() && defect.arc <= RAIL_ARC_DEFECT,
                 "{law:?} from v0={v0} over {ds}: pair at t={} proves {defect:?}",
                 pair[0].t
             );

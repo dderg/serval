@@ -1379,14 +1379,11 @@ fn approach(
     Some((onto, Some(off)))
 }
 
-/// Speed roundings a knot's speed and its pair's rise carry, at most.
-const SPEED_NOISE_ULPS: f64 = 8.0;
-
 /// The shortest pair from speed `v` whose acceleration its speeds' rounding
 /// leaves within [`RAIL_ACCELERATION_DEFECT`]: a contact closer than this
 /// is the step's own start.
 fn speed_noise_duration(v: f64) -> f64 {
-    SPEED_NOISE_ULPS * f64::EPSILON * v.abs() / RAIL_ACCELERATION_DEFECT
+    defect::SPEED_NOISE_ULPS * f64::EPSILON * v.abs() / RAIL_ACCELERATION_DEFECT
 }
 
 /// Bisection steps locating a contact inside one grid step.
