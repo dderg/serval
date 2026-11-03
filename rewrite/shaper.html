@@ -1945,12 +1945,13 @@ a bounded inbox (<code>SHAPER_INBOX_CAP</code>), so a slow shaper backpressures 
 and a barrier still acknowledges only after everything ahead of it has been
 shaped. Snapshot generation runs the same four stages synchronously through
 <code>motion_pipeline::Pipeline</code>; numerical parallel work within a stage remains.
-That parallel work — leader target and span fits, follower source and
-kernel fits, arc lengths — fans out on the shaper's persistent worker pool
-(<code>kalico-shaper-N</code> threads, one per spare core up to three, spawned on the
-first fan-out): the shaper's own thread takes jobs alongside whichever
+That parallel work — the planner's member profiles, the shaper's leader
+target and span fits, follower source and kernel fits, arc lengths — fans
+out on one persistent worker pool the pipeline shares between the two
+stages (<code>kalico-pool-N</code> threads, one per spare core up to three, spawned on
+the first fan-out): the calling thread takes jobs alongside whichever
 helpers are idle, results merge in job order, and a job's panic resurfaces
-on the shaper thread.</p>
+on the calling thread.</p>
 <p>The core idea: <strong>resonance suppression and mechanical compensation are
 per-axis linear operators on the planned trajectory</strong>, and there are exactly
 two kinds worth having:</p>
