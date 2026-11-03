@@ -727,9 +727,10 @@ fn apply_axis_chains(
         }
         prev = Some(seg);
     }
-    debug_assert!(
+    assert!(
         outputs.shaped_cache.len() <= window,
-        "frontier retreated below the shaped-leader cache"
+        "frontier retreated below the shaped-leader cache: {} cached, window {window}",
+        outputs.shaped_cache.len()
     );
     let work = crate::timing::PhaseWorkload {
         window,
