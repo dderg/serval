@@ -11,6 +11,7 @@ pub mod error;
 pub mod fitter;
 pub mod frontend;
 pub mod path;
+pub mod ratio_ramp;
 pub mod segment;
 pub mod space;
 pub mod surface;
@@ -23,6 +24,7 @@ pub use frontend::{
     CORNER_DEVIATION_SCV_FACTOR, ExtruderCaps, FrontendError, Move, MoveContext, VelocityLimits,
     corner_deviation_from_scv, line_move, scv_from_corner_deviation,
 };
+pub use ratio_ramp::{RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep};
 pub use segment::{CubicSegment, FollowerDemand, SourceRange};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
