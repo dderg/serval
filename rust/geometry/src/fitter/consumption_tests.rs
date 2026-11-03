@@ -431,8 +431,8 @@ fn two_turns(first: f64, second: f64, facet_mm: f64) -> (Move, Move, Move) {
 #[test]
 fn s_jog_after_a_sharp_turn_is_not_consumed() {
     let (a, mid, b) = two_turns(-100.0, 30.0, 0.01);
-    let fc =
-        plan_facet_consumption(&a, &[&mid], &b, CornerFitConfig::default(), (0.0, 0.0)).unwrap();
+    let fc = plan_facet_consumption(&a, &[&mid], &b, CornerFitConfig::default(), (0.0, 0.0), 0.0)
+        .unwrap();
     assert!(
         fc.is_none(),
         "opposite-turn jog cannot be one same-sign blend"
@@ -442,7 +442,7 @@ fn s_jog_after_a_sharp_turn_is_not_consumed() {
 #[test]
 fn large_same_sense_turns_are_consumed() {
     let (a, mid, b) = two_turns(95.0, 50.0, 0.01);
-    let fc =
-        plan_facet_consumption(&a, &[&mid], &b, CornerFitConfig::default(), (0.0, 0.0)).unwrap();
+    let fc = plan_facet_consumption(&a, &[&mid], &b, CornerFitConfig::default(), (0.0, 0.0), 0.0)
+        .unwrap();
     assert!(fc.is_some(), "two left turns may be one blend");
 }
