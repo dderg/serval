@@ -3419,12 +3419,6 @@ fn piece_run_end(pieces: &[BezierPiece]) -> f64 {
 /// velocity residual spread over it would displace the track past the
 /// tolerance — `4·|dv|·L/27` grows with the window — in which case the weld
 /// closes as early as that displacement allows.
-///
-/// A window too short to close the residual within the acceleration budget
-/// (a sub-microsecond segment closing a rounding-level join residual asks
-/// `6·dp/L²`) carries it instead: the correction `dp + dv·x` adds no
-/// acceleration, and the next weld, over its own window, takes up where it
-/// ends.
 #[derive(Clone, Copy)]
 struct SeamWeld {
     origin: f64,
@@ -3466,15 +3460,10 @@ impl SeamWeld {
         let dp = emitted.0 - (base_position + run_start);
         let dv = emitted.1 + law_step - velocity_start;
         let whole = Self::over(start, length, (dp, dv));
-        let closing = if whole.max_displacement() <= tol.pos_mm {
+        let weld = if whole.max_displacement() <= tol.pos_mm {
             whole
         } else {
             Self::closing_within(start, length, (dp, dv), tol.pos_mm).unwrap_or(whole)
-        };
-        let weld = if closing.max_acceleration() <= tol.accel_mm_s2 {
-            closing
-        } else {
-            Self::carrying(start, length, (dp, dv))
         };
         let displacement = weld.max_displacement();
         let acceleration = weld.max_acceleration();
@@ -3504,15 +3493,6 @@ impl SeamWeld {
             length,
             closes_inside: None,
             coeffs: [dp, dv, quadratic, cubic],
-        }
-    }
-
-    fn carrying(origin: f64, length: f64, (dp, dv): (f64, f64)) -> Self {
-        Self {
-            origin,
-            length,
-            closes_inside: None,
-            coeffs: [dp, dv, 0.0, 0.0],
         }
     }
 

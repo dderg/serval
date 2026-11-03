@@ -88,8 +88,3 @@ fn zigzag_into_a_stop(speed_mm_s: f64) -> String {
 fn a_ratio_ramp_waits_for_how_far_a_stop_ahead_may_release_the_advance() {
     replays_to_the_end("p4_trident_ramp_slow.cfg", &zigzag_into_a_stop(100.0));
 }
-
-#[test]
-fn a_ratio_ramp_carries_a_join_residual_past_a_segment_too_short_to_weld_it() {
-    replays_to_the_end("p1_bowden_ramp.cfg", &dense_print_head("", 1548));
-}
