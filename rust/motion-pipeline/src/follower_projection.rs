@@ -551,7 +551,6 @@ pub(crate) fn project_followers(
         let chain = &chains.chains[axis];
         let kernel = chain.kernel();
         let leading = LeadingAdvance::of(chain);
-        let defer_linear_prefix = leading.is_none() && chain.follower_linear_transform();
         let source_tol = FitTol {
             accel_budget: source_accel_budget(leading),
             ..fit_tol
@@ -855,7 +854,8 @@ pub(crate) fn project_followers(
     for (axis, leaders, projecting) in committing {
         let chain = &chains.chains[axis];
         let kernel = chain.kernel();
-        let defer_linear_prefix = chain.follower_linear_transform();
+        let defer_linear_prefix =
+            LeadingAdvance::of(chain).is_none() && chain.follower_linear_transform();
         let state = &mut states[axis];
         let kernel_tracks = match kernel {
             Some(kernel) if commit_count > 0 => {

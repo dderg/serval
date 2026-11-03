@@ -113,7 +113,7 @@ fn a_follower_advance_on_a_ratio_ramp_is_accepted_at_a_chain_swap() {
 const BOWDEN_RATIO: f64 = 0.0333;
 const BOWDEN_ADVANCE: f64 = 0.5;
 
-fn bowden_kernel_chain() -> AxisChainSet {
+fn bowden_chain(e: Vec<PostProcessorInstance>) -> AxisChainSet {
     AxisChainSet {
         chains: vec![
             compiled(vec![PostProcessorInstance::new(
@@ -127,16 +127,17 @@ fn bowden_kernel_chain() -> AxisChainSet {
                 vec![36.0],
             )]),
             CompiledChain::default(),
-            compiled(vec![
-                linear_advance(BOWDEN_ADVANCE),
-                PostProcessorInstance::new("st", &algos::SmoothTriangle, vec![0.002]),
-            ]),
+            compiled(e),
         ],
         followers: vec![(EXTRUDER_AXIS, vec![0, 1, 2])],
     }
 }
 
-fn bowden_corner(fit_tol_mm: f64) -> Vec<ContinuousSegment> {
+fn bowden_kernel() -> PostProcessorInstance {
+    PostProcessorInstance::new("st", &algos::SmoothTriangle, vec![0.002])
+}
+
+fn bowden_corner(fit_tol_mm: f64, e: Vec<PostProcessorInstance>) -> Vec<ContinuousSegment> {
     let mut config = default_stream_config();
     config.fit_tol_mm = fit_tol_mm;
     config.limits = geometry::VelocityLimits::try_new(
@@ -152,17 +153,46 @@ fn bowden_corner(fit_tol_mm: f64) -> Vec<ContinuousSegment> {
         .map(StreamInput::from)
         .collect();
     script.push(StreamInput::Drain);
-    collect_shaped_segments_from_script(script, config, bowden_kernel_chain())
+    collect_shaped_segments_from_script(script, config, bowden_chain(e))
 }
 
-fn axis_at(segments: &[ContinuousSegment], axis: usize, t: f64) -> f64 {
+fn segment_at(segments: &[ContinuousSegment], t: f64) -> &ContinuousSegment {
     segments
         .iter()
         .find(|segment| t >= segment.t_start && t <= segment.t_end)
         .expect("the sample lies inside the plan")
+}
+
+/// At cruise the advance only offsets the extruder by `k·ė`; an advance
+/// applied both to the fitted source and to the kernel's input doubles it.
+#[test]
+fn an_advance_before_a_kernel_offsets_the_cruise_once() {
+    let advanced = bowden_corner(0.005, vec![linear_advance(0.05), bowden_kernel()]);
+    let plain = bowden_corner(0.005, vec![bowden_kernel()]);
+    let cruise = 0.3;
+    let plain_state = segment_at(&plain, cruise)
+        .eval_axis(EXTRUDER_AXIS, cruise)
+        .expect("the extruder evaluates");
+    let offset = axis_at(&advanced, EXTRUDER_AXIS, cruise) - plain_state.position;
+    let expected = 0.05 * plain_state.velocity;
+    assert!(
+        (offset - expected).abs() <= 1e-3 * expected,
+        "the advance offsets the cruise by {offset} mm, not k·ė = {expected} mm"
+    );
+}
+
+fn axis_at(segments: &[ContinuousSegment], axis: usize, t: f64) -> f64 {
+    segment_at(segments, t)
         .eval_axis(axis, t)
         .expect("the axis evaluates")
         .position
+}
+
+fn bowden_advanced_corner(fit_tol_mm: f64) -> Vec<ContinuousSegment> {
+    bowden_corner(
+        fit_tol_mm,
+        vec![linear_advance(BOWDEN_ADVANCE), bowden_kernel()],
+    )
 }
 
 /// An advance turns its source's velocity error `δ'` into `k·δ'` of
@@ -175,8 +205,8 @@ fn axis_at(segments: &[ContinuousSegment], axis: usize, t: f64) -> f64 {
 #[test]
 fn an_advance_before_a_kernel_holds_the_command_to_the_position_budget() {
     let fit_tol_mm = 0.005;
-    let fitted = bowden_corner(fit_tol_mm);
-    let reference = bowden_corner(fit_tol_mm / 25.0);
+    let fitted = bowden_advanced_corner(fit_tol_mm);
+    let reference = bowden_advanced_corner(fit_tol_mm / 25.0);
     let t_end = fitted
         .last()
         .expect("the corner plans")
