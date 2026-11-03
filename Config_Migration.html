@@ -2264,7 +2264,7 @@
 <span class="na">max_extrude_only_accel</span><span class="o">:</span><span class="w"> </span><span class="s">5000</span>
 </code></pre></div>
 
-<p><code>corner_deviation</code> is the canonical corner budget in mm; 0.04 is a good starting value. <code>square_corner_velocity</code> is still accepted as a legacy alias, converted internally as <code>scv² · (√2 − 1) / max_accel</code> — note this maps typical mainline values to a far tighter budget than intended (5 mm/s at 3000 mm/s² ≈ 0.0035 mm), so prefer setting <code>corner_deviation</code> directly. Set exactly one of the two. <code>max_z_velocity</code> and <code>max_z_accel</code> must be at most the corresponding global caps and default to them.</p>
+<p><code>corner_deviation</code> is the canonical corner budget in mm. It defaults to 0.04 when neither corner option is set (<a href="Config_Reference_Motion.html#why-the-corner-budget-defaults-to-004-mm">why</a>). <code>square_corner_velocity</code> is still accepted as a legacy alias, converted internally as <code>scv² · (√2 − 1) / max_accel</code> — note this maps typical mainline values to a far tighter budget than intended (5 mm/s at 3000 mm/s² ≈ 0.0035 mm), so prefer setting <code>corner_deviation</code> directly or leaving both unset. Set at most one of the two. <code>max_z_velocity</code> and <code>max_z_accel</code> must be at most the corresponding global caps and default to them.</p>
 <p><code>[motor &lt;name&gt;]</code> requires <code>drive</code>, <code>step_pin</code>, <code>dir_pin</code>, <code>microsteps</code>, and either <code>rotation_distance</code> or gear-ratio mode. Enable pins, if needed by the hardware integration, belong to the relevant stepper/driver support rather than the topology declaration above. Axis endstop and homing options belong on <code>[axis &lt;name&gt;]</code>, not on <code>[motor &lt;name&gt;]</code>.</p>
 <h2 id="corexy">CoreXY<a class="headerlink" href="#corexy" title="Permanent link">&para;</a></h2>
 <p>CoreXY declares the same three lanes, but the belt motors are named by
@@ -2334,7 +2334,7 @@ naming the axis they belong to.</p>
 </tr>
 <tr>
 <td><code>[printer] square_corner_velocity</code></td>
-<td>Still accepted as a legacy alias. The canonical option is <code>[printer] corner_deviation</code> (= <code>scv² · (√2 − 1) / max_accel</code>). Set exactly one.</td>
+<td>Still accepted as a legacy alias, but no longer the default: a config that sets neither corner option gets <code>corner_deviation: 0.04</code>, not the old implicit <code>square_corner_velocity: 5</code>. The canonical option is <code>[printer] corner_deviation</code> (= <code>scv² · (√2 − 1) / max_accel</code>). Set at most one.</td>
 </tr>
 <tr>
 <td><code>[printer] max_jerk</code></td>

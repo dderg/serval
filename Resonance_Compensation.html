@@ -2242,10 +2242,11 @@ by printing a test model.</p>
 <h3 id="ringing-frequency">Ringing frequency<a class="headerlink" href="#ringing-frequency" title="Permanent link">&para;</a></h3>
 <p>First, measure the <strong>ringing frequency</strong>.</p>
 <ol>
-<li>If <code>square_corner_velocity</code> parameter was changed, revert it back
-   to 5.0. It is not advised to increase it when using input shaper
-   because it can cause more smoothing in parts - it is better to use
-   higher acceleration value instead.</li>
+<li>If the corner budget (<code>corner_deviation</code> or <code>square_corner_velocity</code>)
+   was changed, remove it to get the default <code>corner_deviation: 0.04</code>. It
+   is not advised to increase it when using input shaper because it can
+   cause more smoothing in parts - it is better to use higher acceleration
+   value instead.</li>
 <li>Disable the <code>minimum_cruise_ratio</code> feature by issuing the following
    command: <code>SET_VELOCITY_LIMIT MINIMUM_CRUISE_RATIO=0</code></li>
 <li>Disable Pressure Advance: <code>SET_PRESSURE_ADVANCE ADVANCE=0</code></li>
@@ -2391,8 +2392,9 @@ Note that at very high accelerations, depending on the resonance frequency and
 the input shaper you chose (e.g. EI shaper creates more smoothing than MZV),
 input shaping may cause too much smoothing and rounding of the parts. So,
 max_accel should be chosen such as to prevent that. Another parameter that can
-impact smoothing is <code>square_corner_velocity</code>, so it is not advisable to increase
-it above the default 5 mm/sec to prevent increased smoothing.</p>
+impact smoothing is the corner budget (<code>corner_deviation</code>), so it is not
+advisable to increase it above the default 0.04 mm to prevent increased
+smoothing.</p>
 <p>In order to select a suitable max_accel value, inspect the model for the chosen
 input shaper. First, take a note at which acceleration ringing is still small -
 that you are comfortable with it.</p>

@@ -1901,6 +1901,18 @@ are not backwards compatible. It is a good idea to review this
 document when upgrading the Kalico software.</p>
 <p>All dates in this document are approximate.</p>
 <h2 id="changes">Changes<a class="headerlink" href="#changes" title="Permanent link">&para;</a></h2>
+<p>20261103: A <code>[printer]</code> section that sets neither <code>corner_deviation</code>
+nor <code>square_corner_velocity</code> now plans corners with
+<code>corner_deviation: 0.04</code> (mm), at every <code>max_accel</code>. It used to
+inherit Klipper's implicit <code>square_corner_velocity: 5</code>: a budget of
+0.0035 mm at 3000 mm/s² and less at higher accelerations, which made
+nearly every corner a full stop. On a dense print the old default
+planned 15 times as many segments and took 1.3–1.9× as long. On fast
+machines it fell below 3× realtime on a single core. Configs that set
+either option keep it, and setting both is still an error. To keep
+the old corners, set <code>square_corner_velocity: 5</code> explicitly. The
+measurements behind the value are in the
+<a href="Config_Reference_Motion.html#why-the-corner-budget-defaults-to-004-mm">motion config reference</a>.</p>
 <p>20260729: CAN bus micro-controllers are supported again on this fork.
 <code>[mcu] canbus_uuid</code> is accepted instead of <code>serial</code>, alongside a new
 optional <code>canbus_interface</code> (default <code>can0</code>). A CAN micro-controller
