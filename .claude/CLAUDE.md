@@ -59,7 +59,7 @@ with `-D warnings`, `cargo fmt --check`, the public-API baseline diff
 contract change is intended), and the watchdog canary. This is
 the same set CI runs first, so a red gate here is a red PR. `quick` does
 NOT include the Python host tests — if the change touches `klippy/`, also
-run `./scripts/ci.sh py`. Individual jobs: `./scripts/ci.sh <job>` (see
+run `./scripts/ci.sh py`. The `quick` gates run concurrently and report in a fixed order, so wall time is the slowest gate (cold worktree ~220 s, warm ~40 s on this box; the serial run was ~320 s / ~210 s); each gate's full log is still `.ci-logs/<gate>.log`. Individual jobs: `./scripts/ci.sh <job>` (see
 the header of `scripts/ci.sh` for the full list, e.g. `ruff`,
 `rust-clippy`, `rust-mcu-h7`).
 
