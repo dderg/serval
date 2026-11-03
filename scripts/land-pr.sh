@@ -13,8 +13,13 @@
 set -euo pipefail
 
 FAILED_LOG_TAIL_LINES=80
-POLL_SECONDS=30
+POLL_SECONDS=60
 MAX_UPDATES=3
+
+gh_util="$(cd "$(dirname "$0")" && pwd)/gh_util.py"
+[ -f "$gh_util" ] || gh_util="$(git rev-parse --show-toplevel)/scripts/gh_util.py"
+[ -f "$gh_util" ] || { echo "land-pr: scripts/gh_util.py not found" >&2; exit 1; }
+gh() { python3 "$gh_util" "$@"; }
 
 usage() { echo "usage: $0 <branch> [--title T] [--body B] [--dry-run]" >&2; exit 2; }
 die() { echo "land-pr: $*" >&2; exit 1; }
