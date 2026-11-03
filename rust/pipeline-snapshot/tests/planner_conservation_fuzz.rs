@@ -586,10 +586,9 @@ fn adjacent_arc_runs_meet_without_a_velocity_step() {
         max_accel: 1000.0,
         square_corner_velocity: 8.0,
     };
-    let gcode = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../snapshots/cases/arc_fit/circle.gcode"
-    ))
+    let gcode = std::fs::read_to_string(
+        source_tree::repo_root().join("snapshots/cases/arc_fit/circle.gcode"),
+    )
     .expect("circle case");
     let points = parse_gcode(
         &gcode,
