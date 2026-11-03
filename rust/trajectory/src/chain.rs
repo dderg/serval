@@ -422,13 +422,16 @@ impl AxisChainSet {
     }
 
     /// The first projected follower whose chain transforms it with no
-    /// smoothing kernel: the configuration this pipeline refuses, see
-    /// [`FOLLOWER_TRANSFORM_WITHOUT_KERNEL`].
+    /// smoothing kernel and no ratio ramp: the configuration this pipeline
+    /// refuses, see [`FOLLOWER_TRANSFORM_WITHOUT_KERNEL`].
     #[must_use]
     pub fn kernel_free_follower_transform(&self) -> Option<usize> {
         self.projected_followers()
             .map(|(axis, _)| axis)
-            .find(|&axis| self.chains[axis].is_zero_support_only())
+            .find(|&axis| {
+                let chain = &self.chains[axis];
+                chain.is_zero_support_only() && chain.ratio_ramp_time().is_none()
+            })
     }
 
     /// Whether any projected follower spreads its extrusion-ratio steps

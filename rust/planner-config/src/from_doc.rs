@@ -172,6 +172,7 @@ pub fn planner_config_from_settings(
     cfg.max_extrude_only_accel = settings.max_extrude_only_accel;
     cfg.fit_tolerance_mm = settings.fit_tolerance_mm;
     cfg.fit_tolerance_accel_mm_s2 = settings.fit_tolerance_accel_mm_s2;
+    cfg.check_ratio_ramp_extrude_only_caps()?;
     Ok(cfg)
 }
 

@@ -121,6 +121,12 @@ fn cusp_segment(x_coeffs: Vec<f64>, y_coeffs: Vec<f64>, t0: f64, t1: f64) -> Con
     };
     leader_segment(curve(x_coeffs), curve(y_coeffs), t0, t1)
 }
+fn kernel_advance(stage: &trajectory::ChainStage) -> super::LeadingAdvance<'_> {
+    super::LeadingAdvance {
+        stage,
+        smoothing: super::AdvanceSmoothing::Kernel,
+    }
+}
 
 #[test]
 fn follower_advance_fits_the_transformed_acceleration() {
@@ -151,7 +157,7 @@ fn follower_advance_fits_the_transformed_acceleration() {
                 pos_mm: 5e-5,
                 accel_mm_s2: 0.5,
             },
-            Some(&stage),
+            Some(kernel_advance(&stage)),
         )
         .unwrap();
         let acceleration = nurbs::eval::derivative(&nurbs::eval::derivative(&fitted.track));
@@ -506,11 +512,11 @@ fn a_weld_that_would_shift_the_track_past_the_tolerance_is_refused() {
 
 #[test]
 fn a_fit_residual_is_welded_onto_the_emitted_state() {
-    let mut pieces = [ramp_piece(0.0, 0.01, 2.0)];
+    let pieces = vec![ramp_piece(0.0, 0.01, 2.0)];
     let emitted = (1.0 + 1e-9, 2.0 + 1e-6);
     let weld = super::SeamWeld::spanning(weld_window(0.0, 0.01), emitted, 0.0, 1.0, &pieces)
         .expect("a residual well inside the tolerance welds");
-    weld.apply(&mut pieces[0]);
+    let pieces = weld.apply(pieces);
     assert!((1.0 + pieces[0].coeffs[0] - emitted.0).abs() <= 1e-15);
     assert!((pieces[0].coeffs[1] - emitted.1).abs() <= 1e-12);
 }
@@ -731,7 +737,8 @@ fn an_advanced_follower_source_fit_opens_and_closes_on_the_signal_velocity() {
         nonlinear_offset: 0.03,
         linearization_velocity: 1.0,
     });
-    let fitted = super::fit_source_projection(source, fit_tol, Some(&stage)).unwrap();
+    let fitted =
+        super::fit_source_projection(source, fit_tol, Some(kernel_advance(&stage))).unwrap();
     let sig = FollowerSignal::new(
         &shaped,
         &shaped,
@@ -743,7 +750,7 @@ fn an_advanced_follower_source_fit_opens_and_closes_on_the_signal_velocity() {
     );
     let advanced = super::AdvancedFollowerSignal {
         source: &sig,
-        stage: &stage,
+        advance: kernel_advance(&stage),
         steps: &[],
     };
     let pieces = nurbs::bezier::extract_bezier_pieces(&fitted.track);
@@ -1253,7 +1260,7 @@ fn advance_steps_at_leader_knots_closer_than_the_floor_plan() {
         nonlinear_offset: 0.03,
         linearization_velocity: 1.0,
     });
-    super::fit_source_projection(source, fit_tol, Some(&stage)).expect(
+    super::fit_source_projection(source, fit_tol, Some(kernel_advance(&stage))).expect(
         "the advance turns both leader acceleration steps into velocity steps a sub-floor \
          interval apart, which one knot carries within the position tolerance",
     );
@@ -1318,7 +1325,8 @@ fn an_advanced_follower_source_holds_the_tolerance_past_a_leader_seam_velocity_r
         nonlinear_offset: 0.03,
         linearization_velocity: 1.0,
     });
-    let fitted = super::fit_source_projection(source, fit_tol, Some(&stage)).unwrap();
+    let fitted =
+        super::fit_source_projection(source, fit_tol, Some(kernel_advance(&stage))).unwrap();
     let sig = FollowerSignal::new(
         &shaped,
         &shaped,
@@ -1330,7 +1338,7 @@ fn an_advanced_follower_source_holds_the_tolerance_past_a_leader_seam_velocity_r
     );
     let advanced = super::AdvancedFollowerSignal {
         source: &sig,
-        stage: &stage,
+        advance: kernel_advance(&stage),
         steps: &fitted.window_advance_steps,
     };
     for piece in nurbs::bezier::extract_bezier_pieces(&fitted.track) {
@@ -1483,4 +1491,93 @@ fn a_piece_leaving_rest_is_made_monotone_whatever_its_offset() {
             corrected[1]
         );
     }
+}
+
+fn ramped_advance(stage: &trajectory::ChainStage) -> super::LeadingAdvance<'_> {
+    super::LeadingAdvance {
+        stage,
+        smoothing: super::AdvanceSmoothing::RatioRamp,
+    }
+}
+
+const RAMPED_ADVANCE_STAGE: trajectory::ChainStage =
+    trajectory::ChainStage::DerivativeGains { k1: 0.02, k2: 0.0 };
+
+#[test]
+fn a_ratio_ramped_advance_refuses_a_ratio_step_taken_at_speed() {
+    let shaped = cusp_segment(vec![0.0, 100.0], vec![0.0, 0.0], 0.0, 0.2);
+    let mut state = FollowerState::default();
+    state.push_span(10.0, 0.03, 0.03);
+    state.push_span(10.0, 0.06, 0.06);
+    let source = super::FollowerSource {
+        shaped: &shaped,
+        raw: &shaped,
+        axis: 3,
+        leaders: &[0, 1],
+        state: &state,
+        s_start: 0.0,
+        s_length: super::leader_arc_length(&shaped, &[0, 1]),
+    };
+    let fit_tol = crate::lowering::FitTol {
+        pos_mm: 1e-4,
+        accel_mm_s2: 50.0,
+    };
+    let refused =
+        super::fit_source_projection(source, fit_tol, Some(ramped_advance(&RAMPED_ADVANCE_STAGE)));
+    assert!(
+        matches!(
+            refused,
+            Err(crate::types::PostProcessError::RatioRampedPositionStep { step_mm, .. })
+                if (step_mm - 0.02 * 0.03 * 100.0).abs() < 1e-9
+        ),
+        "an unramped 0.03 ratio step at 100 mm/s is a 0.06 mm position step through the \
+         advance, got {:?}",
+        refused.map(|_| ())
+    );
+}
+
+#[test]
+fn a_ratio_ramped_advance_refuses_a_leader_acceleration_step() {
+    let (t0, seam, t1) = (300.0, 300.01, 300.02);
+    let x = bezier_pieces_to_nurbs(&[
+        BezierPiece {
+            u_start: t0,
+            u_end: seam,
+            coeffs: vec![0.0, 100.0, 0.0],
+        },
+        BezierPiece {
+            u_start: seam,
+            u_end: t1,
+            coeffs: vec![1.0, 100.0, 2_500.0],
+        },
+    ]);
+    let mut shaped = cusp_segment(vec![0.0, 100.0], vec![0.0, 50.0], t0, t1);
+    Arc::make_mut(&mut shaped.axes)[0] = ContinuousAxis::Spline(Arc::new(x));
+    let mut state = FollowerState::default();
+    state.push_span(10.0, 0.05, 0.05);
+    let source = super::FollowerSource {
+        shaped: &shaped,
+        raw: &shaped,
+        axis: 3,
+        leaders: &[0, 1],
+        state: &state,
+        s_start: 0.0,
+        s_length: super::leader_arc_length(&shaped, &[0, 1]),
+    };
+    let fit_tol = crate::lowering::FitTol {
+        pos_mm: 1e-4,
+        accel_mm_s2: 50.0,
+    };
+    let refused =
+        super::fit_source_projection(source, fit_tol, Some(ramped_advance(&RAMPED_ADVANCE_STAGE)));
+    assert!(
+        matches!(
+            refused,
+            Err(crate::types::PostProcessError::RatioRampedVelocityStep { t, .. })
+                if (t - seam).abs() < 1e-9
+        ),
+        "the leader's acceleration jumps by 5000 mm/s² at {seam}, which the advance turns \
+         into a velocity step, got {:?}",
+        refused.map(|_| ())
+    );
 }

@@ -98,6 +98,33 @@ pub(crate) enum PostProcessError {
     #[error("axis {axis}: shaping window needs unavailable lookahead at t={t}")]
     MissingLookahead { axis: usize, t: f64 },
     #[error(
+        "axis {axis}: the advance on this ratio-ramped follower would step its position by \
+         {step_mm} mm at t={t}, where the velocity it reads steps from {velocity_before} to \
+         {velocity_after} mm/s. A ratio ramp leaves the projected extrusion velocity-continuous \
+         and no kernel follows the advance, so the step would reach the motor as is"
+    )]
+    RatioRampedPositionStep {
+        axis: usize,
+        t: f64,
+        step_mm: f64,
+        velocity_before: f64,
+        velocity_after: f64,
+    },
+    #[error(
+        "axis {axis}: this ratio-ramped follower would step its velocity from \
+         {velocity_before} to {velocity_after} mm/s at t={t}, beyond the {resolution} mm/s \
+         resolution. No kernel follows a ratio ramp, so the step would reach the motor as is. \
+         The advance turns every acceleration step of the leaders it rides into one: shape \
+         them with kernels whose output is acceleration-continuous"
+    )]
+    RatioRampedVelocityStep {
+        axis: usize,
+        t: f64,
+        velocity_before: f64,
+        velocity_after: f64,
+        resolution: f64,
+    },
+    #[error(
         "axis {axis}: {fit_context} span [{t_start}, {t_end}] leaves breaks to the hull, but the \
          signal has no exact polynomial there to prove a piece against"
     )]

@@ -685,3 +685,42 @@ fn a_ratio_ramp_time_must_be_finite_and_positive() {
         );
     }
 }
+
+#[test]
+fn a_ratio_ramp_requires_finite_extrude_only_caps() {
+    let ramped = PlannerConfig {
+        axis_registry: ramped_registry_with_e(&[], 0.015),
+        ..PlannerConfig::default()
+    };
+    for (velocity, accel) in [
+        (None, Some(2000.0)),
+        (Some(40.0), None),
+        (Some(f64::INFINITY), Some(2000.0)),
+        (Some(40.0), Some(f64::INFINITY)),
+    ] {
+        let config = PlannerConfig {
+            max_extrude_only_velocity: velocity,
+            max_extrude_only_accel: accel,
+            ..ramped.clone()
+        };
+        let refused = config.check_ratio_ramp_extrude_only_caps();
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|message| message.contains("axis 'e' has a ratio_ramp_time")),
+            "caps {velocity:?}/{accel:?} must be refused, got {refused:?}"
+        );
+    }
+    let capped = PlannerConfig {
+        max_extrude_only_velocity: Some(40.0),
+        max_extrude_only_accel: Some(2000.0),
+        ..ramped
+    };
+    assert!(capped.check_ratio_ramp_extrude_only_caps().is_ok());
+    assert!(
+        PlannerConfig::default()
+            .check_ratio_ramp_extrude_only_caps()
+            .is_ok(),
+        "with no ratio ramp the caps stay optional"
+    );
+}
