@@ -1,5 +1,7 @@
-use pipeline_snapshot::waypoints::Waypoint;
-use pipeline_snapshot::{ExactTrajectory, SampleSide, SnapshotParams, pipeline_snapshot};
+use pipeline_snapshot::waypoints::{Waypoint, parse_gcode};
+use pipeline_snapshot::{
+    CartesianLimits, ExactTrajectory, SampleSide, SnapshotParams, pipeline_snapshot,
+};
 use proptest::prelude::*;
 
 const AXES: usize = 4;
@@ -322,11 +324,17 @@ fn toolhead_stays_within_the_corner_budget(
     limits: Limits,
     steps: &[Step],
 ) -> Result<(), TestCaseError> {
-    let points = waypoints(steps);
-    let trajectory = plan(limits, &points);
+    toolhead_stays_within_the_corner_budget_of(limits, &waypoints(steps))
+}
+
+fn toolhead_stays_within_the_corner_budget_of(
+    limits: Limits,
+    points: &[Waypoint],
+) -> Result<(), TestCaseError> {
+    let trajectory = plan(limits, points);
     let budget = corner_deviation(limits) + FIT_TOL_MM;
     for sample in walk_path(&trajectory)? {
-        let off = distance_to_polyline(sample.xy, &points);
+        let off = distance_to_polyline(sample.xy, points);
         prop_assert!(
             off <= budget,
             "at t={} the toolhead is {off} mm off the polyline, budget {budget}",
@@ -526,4 +534,42 @@ fn an_eased_arc_run_keeps_the_corner_budget_at_its_head() {
         step(0.0, 0.0020136098647930614, 1.0, 0.051993597253804556),
     ];
     toolhead_stays_within_the_corner_budget(limits, &steps).unwrap();
+}
+
+/// #550: a slicer's faceted inner corner (neptune_cube/discontinuity around
+/// X124.6 Y102.7, G-code lifted verbatim). The run detector held the
+/// vertices and the facets' sagitta to the corner budget separately, so the
+/// arc it fitted strayed from the chords by both together — 22 µm under a
+/// 16.6 µm budget. A run now forms only where every chord stays within the
+/// budget of its circle.
+#[test]
+fn a_faceted_curve_keeps_the_corner_budget_between_its_vertices() {
+    let limits = Limits {
+        max_velocity: 1000.0,
+        max_accel: 10_000.0,
+        square_corner_velocity: 20.0,
+    };
+    let gcode = "M83\nG92 X125.277 Y98.999\nG1 F5933.255\n\
+        G1 X124.831 Y99.192 E.01633\nG1 X124.495 Y99.625 E.01846\n\
+        G1 X124.414 Y100.026 E.01376\nG1 X124.414 Y101.022 E.03348\n\
+        G1 X124.446 Y101.278 E.00867\nG1 X124.627 Y101.652 E.01398\n\
+        G1 X124.883 Y101.893 E.01183\nG1 F5341.575\nG1 X125.002 Y101.958 E.00505\n\
+        G1 F4857.86\nG1 X125.121 Y102.022 E.00556\nG1 F4454.477\n\
+        G1 X125.239 Y102.087 E.00606\nG1 F4112.949\nG1 X125.358 Y102.152 E.00656\n\
+        G1 X125.239 Y102.217 E.00656\nG1 F4454.477\nG1 X125.121 Y102.282 E.00606\n\
+        G1 F4857.86\nG1 X125.002 Y102.347 E.00556\nG1 F5341.575\n\
+        G1 X124.883 Y102.412 E.00505\nG1 F5932.273\nG1 X124.627 Y102.653 E.01184\n\
+        G1 X124.482 Y102.913 E.01002\nG1 X124.449 Y103.097 E.00628\n\
+        G1 X124.85 Y103.223 F9000\n";
+    let points = parse_gcode(
+        gcode,
+        &CartesianLimits::without_z_caps(
+            limits.max_velocity,
+            limits.max_accel,
+            f64::INFINITY,
+            corner_deviation(limits),
+        ),
+    )
+    .expect("G-code parses");
+    toolhead_stays_within_the_corner_budget_of(limits, &points).unwrap();
 }

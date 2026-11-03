@@ -332,7 +332,7 @@ fn mid_facet_anchor(
     ))
 }
 
-const DEV_SAMPLES_PER_PIECE: usize = 16;
+pub(super) const DEV_SAMPLES_PER_PIECE: usize = 16;
 
 /// Sampled deviation of a piece from the polyline it replaces: the largest
 /// distance from any piece sample to the chain's segments. Sampling
@@ -341,10 +341,11 @@ const DEV_SAMPLES_PER_PIECE: usize = 16;
 pub(super) fn piece_dev_from_chain(
     piece: &(impl PositionProfile + CurvatureProfile),
     chain: &[[f64; 3]],
+    samples: usize,
 ) -> f64 {
-    (0..=DEV_SAMPLES_PER_PIECE)
+    (0..=samples)
         .map(|i| {
-            let p = piece.point_at(piece.s_len() * (i as f64) / (DEV_SAMPLES_PER_PIECE as f64));
+            let p = piece.point_at(piece.s_len() * (i as f64) / (samples as f64));
             chain
                 .windows(2)
                 .map(|seg| dist_to_segment(p, seg[0], seg[1]))
@@ -354,7 +355,11 @@ pub(super) fn piece_dev_from_chain(
 }
 
 fn max_dev_from_chain(pair: &ClothoidPair, chain: &[[f64; 3]]) -> f64 {
-    piece_dev_from_chain(&pair.half1, chain).max(piece_dev_from_chain(&pair.half2, chain))
+    piece_dev_from_chain(&pair.half1, chain, DEV_SAMPLES_PER_PIECE).max(piece_dev_from_chain(
+        &pair.half2,
+        chain,
+        DEV_SAMPLES_PER_PIECE,
+    ))
 }
 
 fn dist_to_segment(p: [f64; 3], s0: [f64; 3], s1: [f64; 3]) -> f64 {

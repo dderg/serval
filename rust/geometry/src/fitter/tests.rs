@@ -437,11 +437,12 @@ fn extrusion_rate_survives_a_short_leg_consumed_by_two_blends() {
 #[test]
 fn run_whose_tail_spiral_overclaims_its_neighbor_still_touches_the_run_endpoints() {
     // Slicer polyline from neptune_cube/discontinuity.gcode around Y=105: at
-    // accel 10000 / scv 20 the tail easing spiral wants 0.246mm of a 0.313mm
+    // accel 10000 / scv 22 the tail easing spiral wants 0.246mm of a 0.313mm
     // neighbor — over the half-line claim limit — which used to strand the
-    // arc's tail end ~15µm off the neighbor line.
+    // arc's tail end ~15µm off the neighbor line. At scv 20 the facets stray
+    // past the corner budget from the run's circle and the run does not form.
     let accel = 10_000.0;
-    let scv = 20.0;
+    let scv = 22.0;
     let ratio = 0.0337;
     let mk =
         |line_no: u32, a: [f64; 3], b: [f64; 3]| seg(line_no, accel, scv, a, b, ratio * dist(a, b));

@@ -127,7 +127,7 @@ pub(super) fn cocircular(facets: &[Move], tol: f64) -> bool {
     if max_sagitta(&lines, fit.radius) > tol {
         return false;
     }
-    anchored_radial_dev_within(&lines, &fit, tol)
+    anchored_chord_dev_within(&lines, &fit, tol)
 }
 
 /// Reconstruction anchors the circle through the run's endpoints
@@ -135,7 +135,7 @@ pub(super) fn cocircular(facets: &[Move], tol: f64) -> bool {
 /// least-squares residual — and ill-conditioned when the run nearly closes
 /// on itself (tiny endpoint chord). Checking it during candidate growth
 /// keeps every sealed run reconstructable instead of dissolving later.
-fn anchored_radial_dev_within(lines: &[&Line], fit: &CircleFit, tol: f64) -> bool {
+fn anchored_chord_dev_within(lines: &[&Line], fit: &CircleFit, tol: f64) -> bool {
     let t0 = lines[0].heading_at(0.0);
     let Some(v0) = turn_normal(t0, lines[1].heading_at(0.0)) else {
         return false;
@@ -148,7 +148,7 @@ fn anchored_radial_dev_within(lines: &[&Line], fit: &CircleFit, tol: f64) -> boo
     else {
         return false;
     };
-    max_radial_dev(lines, origin, rho) <= tol
+    max_chord_dev(lines, origin, rho) <= tol
 }
 
 pub(super) fn max_sagitta(lines: &[&Line], radius: f64) -> f64 {
@@ -277,11 +277,20 @@ pub(super) fn center_through_vertex(
     Some((madd(p, radius, normalize(toward)), radius))
 }
 
-pub(super) fn max_radial_dev(lines: &[&Line], origin: [f64; 3], radius: f64) -> f64 {
-    let mut worst = 0.0_f64;
-    for l in lines {
-        worst = worst.max((norm(sub(l.start, origin)) - radius).abs());
-    }
-    let last = lines[lines.len() - 1];
-    worst.max((norm(sub(last.point_at(last.s_len()), origin)) - radius).abs())
+/// How far the facet chords stray from the circle: a chord point's distance
+/// to it is `||p − o| − ρ|`, and `|p − o|` is convex along the chord, so the
+/// worst sits at a vertex or at the chord's foot nearest the center — the
+/// vertices' radial error and the sagitta together.
+pub(super) fn max_chord_dev(lines: &[&Line], origin: [f64; 3], radius: f64) -> f64 {
+    lines
+        .iter()
+        .map(|l| {
+            let end = l.point_at(l.s_len());
+            let along = dot(sub(origin, l.start), l.heading_at(0.0)).clamp(0.0, l.s_len());
+            [l.start, end, l.point_at(along)]
+                .into_iter()
+                .map(|p| (norm(sub(p, origin)) - radius).abs())
+                .fold(0.0, f64::max)
+        })
+        .fold(0.0, f64::max)
 }

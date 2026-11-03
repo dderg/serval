@@ -103,7 +103,7 @@ pub(super) fn reconstruct(
     let Some((origin, rho)) = anchored else {
         return Ok(None);
     };
-    if circle::max_radial_dev(&lines, origin, rho) > tol {
+    if circle::max_chord_dev(&lines, origin, rho) > tol {
         return Ok(None);
     }
     let Some(plane_normal) = anchored_plane_normal(plane_normal, origin, p0, p1, anchors) else {
