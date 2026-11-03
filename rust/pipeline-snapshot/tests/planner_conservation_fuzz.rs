@@ -573,3 +573,49 @@ fn a_faceted_curve_keeps_the_corner_budget_between_its_vertices() {
     .expect("G-code parses");
     toolhead_stays_within_the_corner_budget_of(limits, &points).unwrap();
 }
+
+/// #550: holding arc-run chords to the corner budget splits the slicer's
+/// faceted circle into two runs whose minimax circles differ by microns.
+/// Each anchored through the shared vertex on its own, they met at a
+/// 0.2 mrad kink — too small to blend, a 0.019 mm/s velocity step at curve
+/// speed. A run after a sealed run is now anchored tangent to it.
+#[test]
+fn adjacent_arc_runs_meet_without_a_velocity_step() {
+    let limits = Limits {
+        max_velocity: 300.0,
+        max_accel: 1000.0,
+        square_corner_velocity: 8.0,
+    };
+    let gcode = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../snapshots/cases/arc_fit/circle.gcode"
+    ))
+    .expect("circle case");
+    let points = parse_gcode(
+        &gcode,
+        &CartesianLimits::without_z_caps(
+            limits.max_velocity,
+            limits.max_accel,
+            f64::INFINITY,
+            corner_deviation(limits),
+        ),
+    )
+    .expect("G-code parses");
+    let trajectory = plan(limits, &points);
+    for axis in 0..2 {
+        for (index, pair) in trajectory.rows(axis).windows(2).enumerate() {
+            let before = trajectory
+                .eval_row(axis, index, pair[0].t1, SampleSide::Left)
+                .unwrap();
+            let after = trajectory
+                .eval_row(axis, index + 1, pair[1].t0, SampleSide::Right)
+                .unwrap();
+            let step = (after.velocity - before.velocity).abs();
+            assert!(
+                step < 1e-6,
+                "axis {axis} steps {step} mm/s at t={}",
+                pair[0].t1
+            );
+        }
+    }
+}

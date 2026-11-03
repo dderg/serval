@@ -459,6 +459,7 @@ fn run_whose_tail_spiral_overclaims_its_neighbor_still_touches_the_run_endpoints
         &facets,
         Some(&head),
         Some(&tail),
+        None,
         CornerFitConfig::default(),
     )
     .unwrap()
@@ -524,6 +525,7 @@ fn displaced_spiral_keeps_extrusion_rate_continuous_and_within_commanded_band() 
         &facets,
         Some(&head),
         Some(&tail),
+        None,
         CornerFitConfig::default(),
     )
     .unwrap()
@@ -670,7 +672,7 @@ fn arc_ramp_beyond_extruder_budget_dissolves_the_run() {
         ramp_accel_budget_mm_s2: 0.01,
         ..CornerFitConfig::default()
     };
-    let fit = RunFit::fit(&facets, Some(&head), Some(&tail), tight).unwrap();
+    let fit = RunFit::fit(&facets, Some(&head), Some(&tail), None, tight).unwrap();
     assert!(
         fit.is_none(),
         "an arc ramp the extruder cannot follow must dissolve the run"
@@ -964,7 +966,7 @@ fn a_run_beside_a_move_along_its_plane_normal_gets_neither_ease_nor_blend_from_i
         mk(4, [171.048, 159.137, 0.2], [171.481, 159.297, 0.2]),
     ];
     let corner = CornerFitConfig::default();
-    let fit = RunFit::fit(&facets, Some(&head), None, corner).unwrap();
+    let fit = RunFit::fit(&facets, Some(&head), None, None, corner).unwrap();
     if let Some(mut fit) = fit {
         let blend = fit.blend_head_with_line(&head, &facets[0], corner).unwrap();
         assert!(

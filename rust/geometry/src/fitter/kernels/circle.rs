@@ -346,3 +346,52 @@ pub(super) fn minimax_radius(lines: &[&Line], origin: [f64; 3]) -> f64 {
         });
     0.5 * (nearest + farthest)
 }
+
+/// The center side of a circle tangent to `tangent` at a point: the in-plane
+/// normal turned toward `toward`.
+fn normal_toward(tangent: [f64; 3], plane_normal: [f64; 3], toward: [f64; 3]) -> [f64; 3] {
+    let normal = normalize(cross(plane_normal, tangent));
+    if dot(normal, toward) < 0.0 {
+        scale(normal, -1.0)
+    } else {
+        normal
+    }
+}
+
+/// The one circle tangent to `tangent` at `p0` that also passes through
+/// `p1`.
+pub(super) fn tangent_through_both(
+    (p0, p1): ([f64; 3], [f64; 3]),
+    tangent: [f64; 3],
+    plane_normal: [f64; 3],
+) -> Option<([f64; 3], f64)> {
+    let chord = sub(p1, p0);
+    let normal = normal_toward(tangent, plane_normal, chord);
+    let rise = dot(chord, normal);
+    if rise <= BUDGET_EPS_MM {
+        return None;
+    }
+    let radius = dot(chord, chord) / (2.0 * rise);
+    Some((madd(p0, radius, normal), radius))
+}
+
+/// The circle tangent to `tangent` at `p` that keeps the facet chords
+/// closest: its center on the normal at `p` toward the seed center.
+pub(super) fn minimax_tangent_at(
+    lines: &[&Line],
+    p: [f64; 3],
+    tangent: [f64; 3],
+    seed_origin: [f64; 3],
+    plane_normal: [f64; 3],
+) -> Option<([f64; 3], f64)> {
+    let normal = normal_toward(tangent, plane_normal, sub(seed_origin, p));
+    let seed = dot(sub(seed_origin, p), normal);
+    if seed < BUDGET_EPS_MM {
+        return None;
+    }
+    let dev = |radius: f64| max_chord_dev(lines, madd(p, radius, normal), radius);
+    let spread = 2.0 * dev(seed);
+    let bracket = ((seed - spread).max(0.5 * seed), seed + spread);
+    let radius = golden_minimum(dev, bracket, seed);
+    Some((madd(p, radius, normal), radius))
+}

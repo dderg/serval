@@ -39,13 +39,17 @@ pub(super) struct Reconstruction {
 /// the chord deviation every reconstruction is held to, so the travel
 /// qualifies only when it is long enough to absorb that without
 /// degenerating. A welded end leaves the circle free there; a bound end
-/// anchors it through the vertex. Within those anchors the circle is the
-/// one whose facet chords stray least from it.
+/// anchors it through the vertex. `head_tangent` is the end heading of an
+/// arc run the head vertex is shared with: the circle is anchored tangent to
+/// it there when the chords allow, so the two runs meet without a kink.
+/// Within those anchors the circle is the one whose facet chords stray least
+/// from it.
 pub(super) fn reconstruct(
     facets: &[Move],
     tol: f64,
     head_travel_len: Option<f64>,
     tail_travel_len: Option<f64>,
+    head_tangent: Option<[f64; 3]>,
 ) -> Result<Option<Reconstruction>, FitError> {
     let line_no = facets[0].source.start_line;
     let lines: Vec<&Line> = match facets.iter().map(line_of).collect::<Option<Vec<_>>>() {
@@ -84,7 +88,7 @@ pub(super) fn reconstruct(
         head: welded(head_travel_len),
         tail: welded(tail_travel_len),
     };
-    let anchored = match (anchors.head, anchors.tail) {
+    let free = || match (anchors.head, anchors.tail) {
         (EndAnchor::Welded, EndAnchor::Welded) => {
             Some((fit.origin, circle::minimax_radius(&lines, fit.origin)))
         }
@@ -102,12 +106,22 @@ pub(super) fn reconstruct(
             (0.0, f64::INFINITY),
         ),
     };
-    let Some((origin, rho)) = anchored else {
+    let tangent_to_head = |tangent: [f64; 3]| match anchors.tail {
+        EndAnchor::Welded => {
+            circle::minimax_tangent_at(&lines, p0, tangent, fit.origin, plane_normal)
+        }
+        EndAnchor::Bound => circle::tangent_through_both((p0, p1), tangent, plane_normal),
+    };
+    let within_budget =
+        |circle: &([f64; 3], f64)| circle::max_chord_dev(&lines, circle.0, circle.1) <= tol;
+    let Some((origin, rho)) = head_tangent
+        .filter(|_| anchors.head == EndAnchor::Bound)
+        .and_then(tangent_to_head)
+        .filter(within_budget)
+        .or_else(|| free().filter(within_budget))
+    else {
         return Ok(None);
     };
-    if circle::max_chord_dev(&lines, origin, rho) > tol {
-        return Ok(None);
-    }
     let Some(plane_normal) = anchored_plane_normal(plane_normal, origin, p0, p1, anchors) else {
         return Ok(None);
     };
