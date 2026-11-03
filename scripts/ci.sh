@@ -22,16 +22,18 @@ set -uo pipefail
 
 # A CARGO_TARGET_DIR leaked from another task's shell would send every build
 # and cached engine into someone else's directory, so an inherited value is
-# dropped unless the caller opts in (integrate_stack.py does). Locally the
-# gates then share ONE target dir across all worktrees, so a fresh worktree
-# reuses the dependency and unchanged-crate builds of the others: `quick` in a
-# fresh worktree took 83 s against a warm shared dir and 221 s with its own
-# cold rust/target. CI_OWN_TARGET=1 gives a worktree its own rust/target;
-# GitHub Actions always does (rust-cache keys on it).
+# dropped unless the caller opts in (integrate_stack.py does). CI_SHARED_TARGET=1
+# points the gates at one target dir for all worktrees: a fresh worktree's
+# `quick` then took 83 s against 221 s with its own cold rust/target. It is
+# opt-in because cargo reuses a test binary built from identical sources in
+# another worktree, and tests that bake env!("CARGO_MANIFEST_DIR") in at
+# compile time (c-api headers_no_drift, nurbs geomdl_oracle, runtime-contract
+# sample_wire_tests) then read the other worktree's files and fail once it is
+# removed.
 SHARED_TARGET_DIR="${SERVAL_TARGET_DIR:-$HOME/.cache/serval-target}"
 if [ -z "${CI_KEEP_CARGO_TARGET_DIR:-}" ]; then
     unset CARGO_TARGET_DIR
-    if [ -z "${CI_OWN_TARGET:-}" ] && [ -z "${GITHUB_ACTIONS:-}" ]; then
+    if [ -n "${CI_SHARED_TARGET:-}" ] && [ -z "${GITHUB_ACTIONS:-}" ]; then
         export CARGO_TARGET_DIR="$SHARED_TARGET_DIR"
     fi
 fi

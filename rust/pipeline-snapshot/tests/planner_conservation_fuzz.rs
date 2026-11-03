@@ -220,4 +220,32 @@ proptest! {
             "{chord} mm in {duration} s outruns max_velocity {}", limits.max_velocity
         );
     }
+
+    #[test]
+    fn every_axis_is_continuous_across_every_row_seam_and_hold_gap(
+        limits in arb_limits(),
+        steps in prop::collection::vec(arb_step(), 1..30),
+    ) {
+        let points = waypoints(&steps);
+        let trajectory = plan(limits, &points);
+        for axis in 0..AXES {
+            let rows = trajectory.rows(axis);
+            for (index, pair) in rows.windows(2).enumerate() {
+                let before = trajectory
+                    .eval_row(axis, index, pair[0].t1, SampleSide::Left)
+                    .map_err(|error| TestCaseError::fail(format!("axis {axis} row {index}: {error}")))?;
+                let after = trajectory
+                    .eval_row(axis, index + 1, pair[1].t0, SampleSide::Right)
+                    .map_err(|error| TestCaseError::fail(format!("axis {axis} row {}: {error}", index + 1)))?;
+                prop_assert!(
+                    (after.position - before.position).abs() <= FIT_SLACK_MM,
+                    "axis {axis} jumps {} mm between row {index} ending t={} and row {} starting t={}",
+                    after.position - before.position,
+                    pair[0].t1,
+                    index + 1,
+                    pair[1].t0
+                );
+            }
+        }
+    }
 }
