@@ -158,6 +158,12 @@ class MCU:
 
     def _query_step_benchmark(self):
         parser = self._serial.get_msgparser()
+        if "config_stepper" not in parser.messages_by_name:
+            logging.info(
+                "MCU '%s' firmware cannot drive steppers; no step benchmark",
+                self._name,
+            )
+            return None
         if "get_step_benchmark" not in parser.messages_by_name:
             raise error(
                 "MCU '%s' firmware does not report its step dispatch cost "
