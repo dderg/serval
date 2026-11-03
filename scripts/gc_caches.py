@@ -4,15 +4,18 @@
     uv run python scripts/gc_caches.py [--days 3] [--apply]
 
 Covers ~/.cache/*-target (ad-hoc cargo target dirs left by finished tasks),
-the pending_baselines.py cache (worktrees, stacks, logs, per-commit samples)
-and abandoned /tmp/bench-ab-* worktree directories. Anything not touched for
---days days is stale. The shared ~/.cache/pending-baselines/target dir is
-kept: it is the one target dir the tools reuse. Dry run unless --apply.
+the pending_baselines.py cache (worktrees, stacks, logs, reviews) and
+abandoned /tmp/bench-ab-* worktree directories. Anything not touched for
+--days days is stale, unless a git worktree of any repo lives in it or under
+it, or a running process has its cwd or an open file there. The reused caches
+~/.cache/pending-baselines/{target,samples,audit} are always kept.
+Dry run unless --apply.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import time
@@ -20,7 +23,7 @@ from pathlib import Path
 
 CACHE = Path("~/.cache").expanduser()
 PENDING = CACHE / "pending-baselines"
-SHARED_TARGET = PENDING / "target"
+KEPT = (PENDING / "target", PENDING / "samples", PENDING / "audit")
 SECONDS_PER_DAY = 86400.0
 
 
@@ -41,12 +44,53 @@ def size_bytes(path: Path) -> int:
 
 def candidates() -> list[Path]:
     found = sorted(CACHE.glob("*-target"))
-    for name in ("wt", "stack", "stack-logs", "samples", "review"):
+    for name in ("wt", "stack", "stack-logs", "review"):
         directory = PENDING / name
         if directory.is_dir():
             found.extend(sorted(directory.iterdir()))
     found.extend(sorted(Path("/tmp").glob("bench-ab-*")))
-    return [p for p in found if p != SHARED_TARGET]
+    return [p for p in found if p not in KEPT]
+
+
+def worktree_paths() -> list[Path]:
+    paths = []
+    repos = [Path("~/Developer/serval").expanduser()]
+    for repo in repos:
+        listing = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        paths += [
+            Path(line.split(" ", 1)[1])
+            for line in listing.splitlines()
+            if line.startswith("worktree ")
+        ]
+    return paths
+
+
+def process_paths() -> list[Path]:
+    found = []
+    for proc in Path("/proc").glob("[0-9]*"):
+        try:
+            found.append(Path(os.readlink(proc / "cwd")))
+            for fd in (proc / "fd").iterdir():
+                found.append(Path(os.readlink(fd)))
+        except OSError:
+            continue
+    return found
+
+
+def holder(path: Path, worktrees: list[Path], busy: list[Path]) -> str | None:
+    for other in worktrees:
+        if other == path or path in other.parents or other in path.parents:
+            return f"git worktree {other}"
+    for other in busy:
+        if other == path or path in other.parents:
+            return f"open by a process: {other}"
+    return None
 
 
 def main() -> None:
@@ -56,8 +100,13 @@ def main() -> None:
     args = parser.parse_args()
     cutoff = time.time() - args.days * SECONDS_PER_DAY
     total = 0
+    worktrees, busy = worktree_paths(), process_paths()
     for path in candidates():
         if newest_mtime(path) >= cutoff:
+            continue
+        reason = holder(path, worktrees, busy)
+        if reason:
+            print(f"   kept  {path}  ({reason})")
             continue
         size = size_bytes(path)
         total += size

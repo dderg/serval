@@ -47,6 +47,8 @@ Offline, on run dirs under `~/bench/runs`: `uv run python tools/bench/summarize.
 
 On hardware (lock-taking, re-entrant under `lock.py hold`): `gcode.py "G1 X10" ...` sends lines and fails on error; `state.py` reports printer state, deployed identity, klipper pid, MCU serial and capture board (read-only); `ab.py --ref A --ref B --gcode G [--runs 3] [--config C] [--host-cpus N --host-max-mhz M] [--dry-run]` runs the same gcode on clean worktrees of each ref in one lock hold and prints a side-by-side table. Landing a PR: `scripts/land-pr.sh <branch>`.
 
+Planner-side tools for changes the analyzer's reference depends on (it plans with the same engine): `scripts/review_baselines.py --pr N` (physical review of moved snapshot cases), `scripts/accept_reviewed.py N` (accept + commit baselines after review), `scripts/bench_compare.py A B` (interleaved replay A/B; trust its CPU row on a busy box), `scripts/corpus.sh` (59-case planner corpus), `scripts/integrate_stack.py 443 444 --run CMD` (try a PR stack on a throwaway worktree before `deploy.py sync --tree`). `scripts/land-pr.sh` runs from the branch's own worktree and re-updates the PR branch when main moves.
+
 ## Reading analysis.json
 
 `ok` = all four `checks`:
