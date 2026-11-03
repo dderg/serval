@@ -1,5 +1,6 @@
 use super::WorkerPool;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
@@ -147,4 +148,91 @@ fn a_pool_that_never_fans_out_spawns_no_threads() {
         .expect("no job panics");
     assert_eq!(results, (0..5).collect::<Vec<_>>());
     assert!(pool.helpers.get().is_none());
+}
+
+/// Items a test lead hands its followers, and whether it is done handing.
+#[derive(Default)]
+struct Handoff {
+    queue: Mutex<(Vec<usize>, bool)>,
+    handed: Condvar,
+}
+
+impl Handoff {
+    fn hand(&self, item: usize) {
+        self.queue.lock().unwrap().0.push(item);
+        self.handed.notify_one();
+    }
+
+    fn finish(&self) {
+        self.queue.lock().unwrap().1 = true;
+        self.handed.notify_all();
+    }
+
+    fn take(&self) -> Option<usize> {
+        let mut queue = self.queue.lock().unwrap();
+        loop {
+            if let Some(item) = queue.0.pop() {
+                return Some(item);
+            }
+            if queue.1 {
+                return None;
+            }
+            queue = self.handed.wait(queue).unwrap();
+        }
+    }
+}
+
+struct FinishOnDrop<'a>(&'a Handoff);
+
+impl Drop for FinishOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.finish();
+    }
+}
+
+#[test]
+fn followers_drain_what_the_lead_hands_over_and_leave_when_it_is_done() {
+    let pool = WorkerPool::with_helpers(3);
+    let handoff = Handoff::default();
+    let taken = Mutex::new(Vec::new());
+    let caller = std::thread::current().id();
+    let lead_thread = Mutex::new(None);
+    pool.lead_with_followers(
+        4,
+        || {
+            let _finish = FinishOnDrop(&handoff);
+            *lead_thread.lock().unwrap() = Some(std::thread::current().id());
+            for item in 0..200 {
+                handoff.hand(item);
+            }
+        },
+        || {
+            while let Some(item) = handoff.take() {
+                taken.lock().unwrap().push(item);
+            }
+        },
+    )
+    .expect("nothing panics");
+    let mut taken = taken.into_inner().unwrap();
+    taken.sort_unstable();
+    assert_eq!(taken, (0..200).collect::<Vec<_>>());
+    assert_eq!(lead_thread.into_inner().unwrap(), Some(caller));
+}
+
+#[test]
+fn a_panicking_lead_releases_its_followers_and_reaches_the_caller() {
+    let pool = WorkerPool::with_helpers(3);
+    let handoff = Handoff::default();
+    let payload = pool
+        .lead_with_followers(
+            4,
+            || {
+                let _finish = FinishOnDrop(&handoff);
+                handoff.hand(1);
+                panic!("lead failed");
+            },
+            || while handoff.take().is_some() {},
+        )
+        .expect_err("the lead panics");
+    assert_eq!(panic_message(&*payload), "lead failed");
 }

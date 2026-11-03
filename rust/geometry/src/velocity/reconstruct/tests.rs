@@ -25,7 +25,6 @@ fn clothoid(length: f64, kappa0: f64, sigma: f64, ceiling: f64, accel: f64) -> K
 fn profile(kin: &Kinematics, entry: f64, exit: f64) -> Vec<super::super::law::LawSegment> {
     let m = RunMember {
         kin,
-        exit_v: exit,
         forward_rail: None,
         backward_rail: None,
     };
@@ -138,7 +137,6 @@ fn infeasible_seam_pair_fails_loudly() {
     let kin = straight(1.0, 300.0, 1000.0);
     let m = RunMember {
         kin: &kin,
-        exit_v: 200.0,
         forward_rail: None,
         backward_rail: None,
     };
@@ -156,7 +154,6 @@ fn profile_with_seam_rails(
     let backward = disk_reach_v_rev(kin, rails_from.1, kin.length, 1e-9).unwrap();
     let m = RunMember {
         kin,
-        exit_v: exit,
         forward_rail: forward.rail.as_ref(),
         backward_rail: backward.rail.as_ref(),
     };

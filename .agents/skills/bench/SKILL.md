@@ -41,6 +41,14 @@ uv run python tools/bench/analyze.py ~/bench/runs/<dir> [--gap S]       # writes
 
 Run dirs: `~/bench/runs/<YYYYmmdd-HHMMSS>/` — `print.gcode`, `printer.cfg` (the one used), `capture.bin/json`, `klippy.log`, `events/*.jsonl` (structured logs; query with the query-logs/mcu-diagnostics skills, files hold the Pi's whole history so filter by the run's time window), `run.json`, `analysis.json`.
 
+## Helpers
+
+Offline, on run dirs under `~/bench/runs`: `uv run python tools/bench/summarize.py '<run_dir|glob>'... [--json]` (one diffable line per run: verdict, failed checks, stalls, abs_max/p99 per motor, epochs, mcu lateness, deployed head) and `uv run python tools/bench/events.py <run_dir> [--around T] [--names a,b]` (event counts in the run's time window, errors verbatim, klippy Stats trend for crashes). Use these instead of ad-hoc /tmp scripts.
+
+On hardware (lock-taking, re-entrant under `lock.py hold`): `gcode.py "G1 X10" ...` sends lines and fails on error; `state.py` reports printer state, deployed identity, klipper pid, MCU serial and capture board (read-only); `ab.py --ref A --ref B --gcode G [--runs 3] [--config C] [--host-cpus N --host-max-mhz M] [--dry-run]` runs the same gcode on clean worktrees of each ref in one lock hold and prints a side-by-side table. Landing a PR: `scripts/land-pr.sh <branch>`.
+
+Planner-side tools for changes the analyzer's reference depends on (it plans with the same engine): `scripts/review_baselines.py --pr N` (physical review of moved snapshot cases), `scripts/accept_reviewed.py N` (accept + commit baselines after review), `scripts/bench_compare.py A B` (interleaved replay A/B; trust its CPU row on a busy box), `scripts/corpus.sh` (59-case planner corpus), `scripts/integrate_stack.py 443 444 --run CMD` (try a PR stack on a throwaway worktree before `deploy.py sync --tree`). `scripts/land-pr.sh` runs from the branch's own worktree and re-updates the PR branch when main moves.
+
 ## Reading analysis.json
 
 `ok` = all four `checks`:

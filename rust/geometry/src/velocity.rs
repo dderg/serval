@@ -1,5 +1,7 @@
 #[cfg(test)]
 use std::collections::HashSet;
+use std::collections::VecDeque;
+use std::sync::{Condvar, Mutex, MutexGuard};
 
 use crate::LENGTH_EPS_MM;
 #[cfg(test)]
@@ -22,6 +24,26 @@ const MIN_INTEGRATION_TOL: f64 = 1e-9;
 const NEGATIVE_VELOCITY_TOL_MM_S: f64 = 1e-6;
 const CONSISTENCY_TOL: f64 = 1e-6;
 const RECONSTRUCT_WORKERS_MAX: usize = 4;
+
+/// Where the planner runs its member profiles alongside the reverse pass.
+pub trait FanOut {
+    /// Runs `lead` on the calling thread while up to `participants - 1`
+    /// other threads run `follow`, then runs `follow` on the calling thread
+    /// too. `follow` must return once `lead` has finished, or unwound, and
+    /// left it nothing to do. A panic on any thread resurfaces on the calling
+    /// thread.
+    fn lead_and_follow(&self, participants: usize, lead: impl FnOnce(), follow: impl Fn() + Sync);
+}
+
+/// Everything on the calling thread.
+pub struct Serial;
+
+impl FanOut for Serial {
+    fn lead_and_follow(&self, _participants: usize, lead: impl FnOnce(), follow: impl Fn() + Sync) {
+        lead();
+        follow();
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VelSample {
@@ -193,17 +215,21 @@ pub fn plan_velocity_stops_reconstruct_prefix(
     params: VelocityPlanParams,
     reconstruct_count: usize,
 ) -> Result<VelocityProfile, VelocityError> {
-    plan_velocity_stops_select_prefix(moves, stop_before, params, |_| reconstruct_count)
+    plan_velocity_stops_select_prefix(moves, stop_before, params, &Serial, |_| reconstruct_count)
 }
 
-pub fn plan_velocity_stops_select_prefix<F>(
+/// Plans the whole window and reconstructs the prefix `select_prefix` picks
+/// from the finality barrier, building member profiles on `workers`.
+pub fn plan_velocity_stops_select_prefix<F, W>(
     moves: &[crate::Move],
     stop_before: &[bool],
     params: VelocityPlanParams,
+    workers: &W,
     select_prefix: F,
 ) -> Result<VelocityProfile, VelocityError>
 where
     F: FnOnce(usize) -> usize,
+    W: FanOut,
 {
     let tol = params.integration_tol;
     let entry_v = params.entry_v;
@@ -232,21 +258,36 @@ where
     check_entry_ceiling(moves, &caps, entry_v, tol)?;
     let mut plan = seed_seam_velocities(&caps, stop_before, entry_v, &mut report);
     forward_pass(moves, &caps, &mut plan, tol)?;
-    let (barrier, v_barrier) = reverse_brake_envelope(moves, &caps, &mut plan, tol)?;
-    check_entry_brake(moves, &caps, &mut plan, entry_v, tol)?;
-    let reconstruct_count = select_prefix(barrier);
-    assert!(
-        reconstruct_count <= n,
-        "cannot reconstruct {reconstruct_count} moves from a {n}-move plan"
+    let shop = ProfileShop::new(&caps, &plan.is_anchor);
+    let mut settled = None;
+    workers.lead_and_follow(
+        shop.participants,
+        || {
+            let _lead_done = LeadDone(&shop);
+            let mut settler = Settler::new(&shop, select_prefix);
+            settled = Some(settle_seams(
+                moves,
+                &caps,
+                &mut plan,
+                &mut settler,
+                entry_v,
+                tol,
+            ));
+        },
+        || shop.follow(),
     );
+    let (barrier, v_barrier, reconstruct_count) =
+        settled.expect("the lead settles every seam or fails")?;
+    let profiles = shop.into_profiles(reconstruct_count);
+    law::trim_spare_full_rails();
     let (out, boundaries) = reconstruct_runs(
         &moves[..reconstruct_count],
         &caps[..reconstruct_count],
         &plan,
         entry_v,
+        profiles,
         &mut report,
     )?;
-    plan.recycle_rails();
 
     Ok(VelocityProfile {
         moves: out,
@@ -362,15 +403,10 @@ struct SeamPlan {
 }
 
 impl SeamPlan {
-    /// Hands the passes' rails back for the next plan's integrations to
-    /// write into, once the member profiles no longer share them.
-    fn recycle_rails(self) {
-        for rail in self
-            .forward_rails
-            .into_iter()
-            .chain(self.backward_rails)
-            .flatten()
-        {
+    /// Hands member `j`'s rails back for later integrations to write into.
+    fn release_rails(&mut self, j: usize) {
+        let rails = [self.forward_rails[j].take(), self.backward_rails[j].take()];
+        for rail in rails.into_iter().flatten() {
             rail.recycle();
         }
     }
@@ -434,30 +470,48 @@ fn forward_pass(
     Ok(())
 }
 
-fn reverse_brake_envelope(
+/// The reverse pass and the entry brake check, settling every member's seam
+/// speeds as it goes; returns the finality barrier, its speed, and how many
+/// members the plan reconstructs.
+fn settle_seams<F: FnOnce(usize) -> usize>(
     moves: &[crate::Move],
     caps: &[MoveCaps],
     plan: &mut SeamPlan,
+    settler: &mut Settler<F>,
+    entry_v: f64,
+    tol: f64,
+) -> Result<(usize, f64, usize), VelocityError> {
+    let (barrier, v_barrier) = reverse_brake_envelope(moves, caps, plan, settler, tol)?;
+    check_entry_brake(moves, caps, plan, entry_v, tol)?;
+    settler.settle(plan, 0);
+    let prefix = settler.prefix_or_select(plan, barrier);
+    Ok((barrier, v_barrier, prefix))
+}
+
+fn reverse_brake_envelope<F: FnOnce(usize) -> usize>(
+    moves: &[crate::Move],
+    caps: &[MoveCaps],
+    plan: &mut SeamPlan,
+    settler: &mut Settler<F>,
     tol: f64,
 ) -> Result<(usize, f64), VelocityError> {
     let n = caps.len();
-    let v = &mut plan.v;
     let mut barrier = 0usize;
     for k in (1..n).rev() {
-        let j = k;
-        let line_no = moves[j].source.start_line;
-        let kin = &caps[j].kin;
-        let disk = disk::disk_reach_v_rev(kin, v[k + 1], kin.length, tol)
+        let line_no = moves[k].source.start_line;
+        let kin = &caps[k].kin;
+        let disk = disk::disk_reach_v_rev(kin, plan.v[k + 1], kin.length, tol)
             .ok_or(VelocityError::Diverged { line_no })?;
-        let forward_ceiling = v[k];
-        v[k] = v[k].min(disk.v);
-        plan.backward_rails[j] = disk.rail;
-        if barrier == 0 && !(v[k] < forward_ceiling) {
+        let forward_ceiling = plan.v[k];
+        plan.v[k] = plan.v[k].min(disk.v);
+        plan.backward_rails[k] = disk.rail;
+        if barrier == 0 && !(plan.v[k] < forward_ceiling) {
             barrier = k;
+            settler.select(plan, barrier);
         }
+        settler.settle(plan, k);
     }
-    let v_barrier = v[barrier];
-    Ok((barrier, v_barrier))
+    Ok((barrier, plan.v[barrier]))
 }
 
 fn check_entry_brake(
@@ -487,20 +541,13 @@ fn reconstruct_runs(
     caps: &[MoveCaps],
     plan: &SeamPlan,
     entry_v: f64,
+    profiles: Vec<MemberProfile>,
     report: &mut VelocityReport,
 ) -> Result<(Vec<MoveVelocity>, Vec<f64>), VelocityError> {
     let n = caps.len();
     let v = &plan.v;
     let is_anchor = &plan.is_anchor;
-    let members: Vec<disk::RunMember> = (0..n)
-        .map(|j| disk::RunMember {
-            kin: &caps[j].kin,
-            exit_v: v[j + 1],
-            forward_rail: plan.forward_rails[j].as_ref(),
-            backward_rail: plan.backward_rails[j].as_ref(),
-        })
-        .collect();
-    let mut profiles = member_profiles(&members, is_anchor, v).into_iter();
+    let mut profiles = profiles.into_iter();
     let mut out: Vec<MoveVelocity> = Vec::with_capacity(n);
     let mut boundaries: Vec<f64> = Vec::with_capacity(n + 1);
     boundaries.push(entry_v);
@@ -542,7 +589,7 @@ fn reconstruct_runs(
                     first.1 = entry_v;
                 }
                 if let Some(last) = samples.last_mut() {
-                    last.1 = members[run_start + idx].exit_v;
+                    last.1 = v[run_start + idx + 1];
                 }
                 samples
             })
@@ -606,68 +653,240 @@ fn reconstruct_runs(
     Ok((out, boundaries))
 }
 
-/// Every member's profile, in member order, each in member-local terms of
-/// the run it belongs to (a run starts at each anchored seam). Profiles are
-/// independent of one another, so the whole plan's are built on one set of
-/// workers rather than a set per run.
-fn member_profiles(
-    members: &[disk::RunMember],
-    is_anchor: &[bool],
-    v: &[f64],
-) -> Vec<Result<Vec<LawSegment>, reconstruct::ReconstructError>> {
-    let run_starts: Vec<usize> = (0..members.len())
-        .scan(0, |run_start, j| {
-            if is_anchor[j] {
-                *run_start = j;
-            }
-            Some(*run_start)
-        })
-        .collect();
-    let profile = |j: usize| {
-        let member = &members[j];
-        reconstruct::member_profile(j - run_starts[j], member, v[j], member.exit_v)
-    };
-    let workers = if cfg!(not(target_arch = "wasm32")) {
-        std::thread::available_parallelism()
-            .map_or(1, |cores| cores.get())
-            .min(RECONSTRUCT_WORKERS_MAX)
-            .min(members.len())
-    } else {
-        1
-    };
-    if workers <= 1 {
-        return (0..members.len()).map(profile).collect();
+type MemberProfile = Result<Vec<LawSegment>, reconstruct::ReconstructError>;
+
+/// Settled members the reverse pass queues for other threads before it
+/// builds the next one itself: enough to keep every participant busy, few
+/// enough that their rails stay a small slice of the window's.
+const SETTLED_BACKLOG_MAX: usize = 4 * RECONSTRUCT_WORKERS_MAX;
+
+/// A member whose entry and exit seam speeds are final, with the rails its
+/// profile may reuse.
+struct SettledMember {
+    j: usize,
+    entry_v: f64,
+    exit_v: f64,
+    forward_rail: Option<LawSegment>,
+    backward_rail: Option<LawSegment>,
+}
+
+#[derive(Default)]
+struct Handoff {
+    queue: VecDeque<SettledMember>,
+    lead_done: bool,
+    built: Vec<(usize, MemberProfile)>,
+    spent_rails: Vec<LawSegment>,
+}
+
+/// Builds member profiles while the reverse pass is still running. A
+/// member's profile needs only its two seam speeds, final once the reverse
+/// pass has passed its entry seam, so the pass hands each member over as it
+/// settles and the other participants build it meanwhile; its rails are
+/// spent the moment its profile exists rather than the whole window's rails
+/// living until the end of the plan. Each profile is in member-local terms of
+/// the run it belongs to (a run starts at each anchored seam).
+struct ProfileShop<'a> {
+    caps: &'a [MoveCaps],
+    run_starts: Vec<usize>,
+    participants: usize,
+    handoff: Mutex<Handoff>,
+    settled: Condvar,
+}
+
+impl<'a> ProfileShop<'a> {
+    fn new(caps: &'a [MoveCaps], is_anchor: &[bool]) -> Self {
+        let run_starts = (0..caps.len())
+            .scan(0, |run_start, j| {
+                if is_anchor[j] {
+                    *run_start = j;
+                }
+                Some(*run_start)
+            })
+            .collect();
+        let participants = if cfg!(not(target_arch = "wasm32")) {
+            std::thread::available_parallelism()
+                .map_or(1, |cores| cores.get())
+                .min(RECONSTRUCT_WORKERS_MAX)
+        } else {
+            1
+        };
+        Self {
+            caps,
+            run_starts,
+            participants,
+            handoff: Mutex::new(Handoff::default()),
+            settled: Condvar::new(),
+        }
     }
-    let next_member = std::sync::atomic::AtomicUsize::new(0);
-    let mut indexed_profiles = std::thread::scope(|scope| {
-        let handles = (0..workers)
-            .map(|_| {
-                scope.spawn(|| {
-                    let mut profiles = Vec::new();
-                    loop {
-                        let j = next_member.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if j >= members.len() {
-                            return profiles;
-                        }
-                        profiles.push((j, profile(j)));
-                    }
+
+    fn lock(&self) -> MutexGuard<'_, Handoff> {
+        self.handoff
+            .lock()
+            .expect("member profile hand-off poisoned")
+    }
+
+    /// Queues `member` for another participant, or builds it on this thread
+    /// when there is none or the backlog is full.
+    fn hand_over(&self, member: SettledMember) {
+        if self.participants > 1 {
+            let mut handoff = self.lock();
+            if handoff.queue.len() < SETTLED_BACKLOG_MAX {
+                handoff.queue.push_back(member);
+                drop(handoff);
+                self.settled.notify_one();
+                return;
+            }
+        }
+        self.build(member);
+    }
+
+    fn build(&self, member: SettledMember) {
+        let j = member.j;
+        let run_member = disk::RunMember {
+            kin: &self.caps[j].kin,
+            forward_rail: member.forward_rail.as_ref(),
+            backward_rail: member.backward_rail.as_ref(),
+        };
+        let profile = reconstruct::member_profile(
+            j - self.run_starts[j],
+            &run_member,
+            member.entry_v,
+            member.exit_v,
+        );
+        let mut handoff = self.lock();
+        handoff.built.push((j, profile));
+        handoff
+            .spent_rails
+            .extend(member.forward_rail.into_iter().chain(member.backward_rail));
+    }
+
+    /// Builds handed-over members until the lead is done and none is left.
+    fn follow(&self) {
+        while let Some(member) = self.next_settled() {
+            self.build(member);
+        }
+    }
+
+    fn next_settled(&self) -> Option<SettledMember> {
+        let mut handoff = self.lock();
+        loop {
+            if let Some(member) = handoff.queue.pop_front() {
+                return Some(member);
+            }
+            if handoff.lead_done {
+                return None;
+            }
+            handoff = self
+                .settled
+                .wait(handoff)
+                .expect("member profile hand-off poisoned");
+        }
+    }
+
+    /// Hands spent rails back to this thread for its next integrations to
+    /// write into.
+    fn recycle_spent(&self) {
+        let spent = std::mem::take(&mut self.lock().spent_rails);
+        for rail in spent {
+            rail.recycle();
+        }
+    }
+
+    /// Every profile of the reconstructed prefix, in member order.
+    fn into_profiles(self, prefix: usize) -> Vec<MemberProfile> {
+        self.recycle_spent();
+        let handoff = self
+            .handoff
+            .into_inner()
+            .expect("member profile hand-off poisoned");
+        let mut profiles: Vec<Option<MemberProfile>> = vec![None; prefix];
+        for (j, profile) in handoff.built {
+            profiles[j] = Some(profile);
+        }
+        profiles
+            .into_iter()
+            .enumerate()
+            .map(|(j, profile)| {
+                profile.unwrap_or_else(|| {
+                    panic!("member {j} of the reconstructed prefix has no profile")
                 })
             })
-            .collect::<Vec<_>>();
-        handles
-            .into_iter()
-            .flat_map(|handle| {
-                handle
-                    .join()
-                    .expect("velocity reconstruction thread panicked")
-            })
-            .collect::<Vec<_>>()
-    });
-    indexed_profiles.sort_by_key(|(j, _)| *j);
-    indexed_profiles
-        .into_iter()
-        .map(|(_, profile)| profile)
-        .collect()
+            .collect()
+    }
+}
+
+/// Tells the followers the lead hands over nothing more, also when it
+/// unwinds.
+struct LeadDone<'s, 'a>(&'s ProfileShop<'a>);
+
+impl Drop for LeadDone<'_, '_> {
+    fn drop(&mut self) {
+        self.0.lock().lead_done = true;
+        self.0.settled.notify_all();
+    }
+}
+
+/// The reverse pass's side of the shop: routes each member as its seams
+/// settle — handed over when the plan reconstructs it, its rails spent when
+/// it does not, held until the prefix is known otherwise.
+struct Settler<'s, 'a, F> {
+    shop: &'s ProfileShop<'a>,
+    select_prefix: Option<F>,
+    prefix: Option<usize>,
+    awaiting_prefix: Vec<usize>,
+}
+
+impl<'s, 'a, F: FnOnce(usize) -> usize> Settler<'s, 'a, F> {
+    fn new(shop: &'s ProfileShop<'a>, select_prefix: F) -> Self {
+        Self {
+            shop,
+            select_prefix: Some(select_prefix),
+            prefix: None,
+            awaiting_prefix: Vec::new(),
+        }
+    }
+
+    /// Fixes how many members the plan reconstructs from the finality
+    /// barrier, and routes every member held for it.
+    fn select(&mut self, plan: &mut SeamPlan, barrier: usize) {
+        let select_prefix = self
+            .select_prefix
+            .take()
+            .expect("the reconstructed prefix is selected once per plan");
+        let prefix = select_prefix(barrier);
+        let n = self.shop.caps.len();
+        assert!(
+            prefix <= n,
+            "cannot reconstruct {prefix} moves from a {n}-move plan"
+        );
+        self.prefix = Some(prefix);
+        for j in std::mem::take(&mut self.awaiting_prefix) {
+            self.settle(plan, j);
+        }
+    }
+
+    fn prefix_or_select(&mut self, plan: &mut SeamPlan, barrier: usize) -> usize {
+        if self.prefix.is_none() {
+            self.select(plan, barrier);
+        }
+        self.prefix.expect("select fixes the prefix")
+    }
+
+    /// Member `j`'s entry and exit seam speeds are final.
+    fn settle(&mut self, plan: &mut SeamPlan, j: usize) {
+        match self.prefix {
+            None => self.awaiting_prefix.push(j),
+            Some(prefix) if j < prefix => self.shop.hand_over(SettledMember {
+                j,
+                entry_v: plan.v[j],
+                exit_v: plan.v[j + 1],
+                forward_rail: plan.forward_rails[j].take(),
+                backward_rail: plan.backward_rails[j].take(),
+            }),
+            Some(_) => plan.release_rails(j),
+        }
+        self.shop.recycle_spent();
+    }
 }
 
 /// Dense-enough exact samples off a member's law segments: the segment

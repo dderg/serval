@@ -1,5 +1,7 @@
 #![allow(clippy::result_large_err)]
 
+use std::sync::Arc;
+
 use crossbeam_channel::Sender;
 use trajectory::{AxisChainSet, ContinuousSegment};
 
@@ -26,6 +28,7 @@ pub use types::{
     BarrierAck, BaseItem, CONTIGUITY_EPS_MM, Control, DispatchCommand, PlannedItem, StreamConfig,
     StreamError, StreamInput, TrajectoryItem, advance_odometer,
 };
+pub use worker_pool::WorkerPool;
 
 pub struct Pipeline {
     front: PlanningFront,
@@ -39,14 +42,15 @@ impl Pipeline {
         home_pos: Vec<f64>,
         t_start: f64,
     ) -> Self {
+        let workers = Arc::new(WorkerPool::new());
         Self {
             front: PlanningFront {
                 fit: FitStage::new(config.corner).into_driver(),
-                planner: Planner::new(config),
+                planner: Planner::new(config, Arc::clone(&workers)),
                 lowerer: Lowerer::new(chains.rest_support(), home_pos, t_start),
                 fitted_tap: None,
             },
-            shaper: Shaper::new(chains, config.fit_tol()),
+            shaper: Shaper::new(chains, config.fit_tol(), workers),
         }
     }
 
