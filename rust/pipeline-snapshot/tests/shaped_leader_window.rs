@@ -9,10 +9,7 @@ const MAX_VELOCITY: f64 = 1000.0;
 const MAX_ACCEL: f64 = 10_000.0;
 
 fn dense_top_layer_lines(count: usize) -> String {
-    let path = format!(
-        "{}/../../tools/sim/gcode/voron_dense_top_layers.gcode",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = source_tree::repo_file("tools/sim/gcode/voron_dense_top_layers.gcode");
     let text = std::fs::read_to_string(path).expect("read dense top layer gcode");
     text.lines().take(count).collect::<Vec<_>>().join("\n")
 }
@@ -82,10 +79,7 @@ fn dense_top_layer_shapes_with_an_unkerneled_extruder() {
 fn neptune_discontinuity_with_tanh_advance(
     extrude_only: Option<(f64, f64)>,
 ) -> (Vec<pipeline_snapshot::waypoints::Waypoint>, SnapshotParams) {
-    let path = format!(
-        "{}/../../snapshots/cases/neptune_cube/discontinuity.gcode",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = source_tree::repo_file("snapshots/cases/neptune_cube/discontinuity.gcode");
     let gcode = std::fs::read_to_string(path).expect("read neptune discontinuity gcode");
     let waypoints = parse_gcode(
         &gcode,
