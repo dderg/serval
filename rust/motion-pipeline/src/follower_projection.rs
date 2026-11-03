@@ -3445,6 +3445,17 @@ struct WeldWindow {
 
 const WELD_REACH_BISECTIONS: usize = 64;
 
+/// A residual this many ulps of the emitted position is the seam's
+/// rounding, whatever acceleration closing it over a sliver window reads as.
+const WELD_ROUNDING_ULPS: f64 = 4.0;
+
+/// The acceleration a weld spends closing [`WELD_ROUNDING_ULPS`] of
+/// `position` over `length` (`6·dp/L²`): over a window of nanoseconds it
+/// passes any budget, so a weld is refused only beyond it.
+fn weld_rounding_acceleration(position: f64, length: f64) -> f64 {
+    6.0 * WELD_ROUNDING_ULPS * f64::EPSILON * position.abs().max(1.0) / (length * length)
+}
+
 impl SeamWeld {
     fn spanning(
         window: WeldWindow,
@@ -3475,7 +3486,10 @@ impl SeamWeld {
         };
         let displacement = weld.max_displacement();
         let acceleration = weld.max_acceleration();
-        if displacement > tol.pos_mm || acceleration > tol.accel_mm_s2 {
+        let acceleration_budget = tol
+            .accel_mm_s2
+            .max(weld_rounding_acceleration(emitted.0, weld.length));
+        if displacement > tol.pos_mm || acceleration > acceleration_budget {
             return Err(PostProcessError::SeamWeld {
                 axis,
                 t_start: start,
