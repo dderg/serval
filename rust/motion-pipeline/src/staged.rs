@@ -1,16 +1,17 @@
 //! The live pipeline with its shaper on a dedicated thread. Fitting, velocity
-//! planning and lowering stay on the caller's thread; the lowerer's items
-//! cross a bounded FIFO to the shaper, which emits into the caller-supplied
-//! sink. Every item — segments, drains and control tokens — keeps its order,
-//! so a barrier still acknowledges only after everything ahead of it has
-//! been shaped and emitted, and no arithmetic moves between threads.
+//! planning, lowering and the shaper's per-segment source fits stay on the
+//! caller's thread; the lowerer's items cross a bounded FIFO to the shaper,
+//! which emits into the caller-supplied sink. Every item — segments, drains
+//! and control tokens — keeps its order, so a barrier still acknowledges only
+//! after everything ahead of it has been shaped and emitted, and no
+//! arithmetic moves between threads in a way that changes its result.
 
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, bounded};
 
-use crate::shaper::Shaper;
+use crate::shaper::{Shaper, SourceMaterializer};
 use crate::{BaseItem, Pipeline, PlanningFront, StreamInput, TrajectoryItem};
 
 /// Lowered items the shaper may lag behind the planner. Bounded so a slow
@@ -38,6 +39,7 @@ enum ShaperExit {
 /// exactly as the synchronous [`Pipeline`] reports a refusing sink.
 pub struct StagedPipeline {
     front: PlanningFront,
+    materializer: SourceMaterializer,
     shaper_inbox: Option<ShaperInbox>,
     shaper_thread: Option<JoinHandle<ShaperExit>>,
 }
@@ -48,6 +50,7 @@ impl Pipeline {
         sink: impl FnMut(TrajectoryItem) -> bool + Send + 'static,
     ) -> StagedPipeline {
         let Self { front, shaper } = self;
+        let materializer = SourceMaterializer::of(&shaper);
         let (sender, rx) = bounded(SHAPER_INBOX_CAP);
         let shaper_thread = std::thread::Builder::new()
             .name("kalico-shaper".into())
@@ -56,6 +59,7 @@ impl Pipeline {
             .expect("spawn shaper thread");
         StagedPipeline {
             front,
+            materializer,
             shaper_inbox: Some(ShaperInbox {
                 sender,
                 #[cfg(feature = "bench-metrics")]
@@ -125,19 +129,30 @@ impl ShaperInbox {
 
 impl StagedPipeline {
     pub fn feed(&mut self, item: StreamInput) -> bool {
-        let inbox = self
-            .shaper_inbox
-            .as_mut()
-            .expect("pipeline already finished");
-        self.front.feed(item, &mut |item| inbox.send(item))
+        let mut lowered = Vec::new();
+        let fed = self.front.feed(item, &mut |item| {
+            lowered.push(item);
+            true
+        });
+        self.deliver(lowered) && fed
     }
 
     pub fn idle(&mut self) -> bool {
+        let mut lowered = Vec::new();
+        let idled = self.front.idle(&mut |item| {
+            lowered.push(item);
+            true
+        });
+        self.deliver(lowered) && idled
+    }
+
+    fn deliver(&mut self, mut lowered: Vec<BaseItem>) -> bool {
         let inbox = self
             .shaper_inbox
             .as_mut()
             .expect("pipeline already finished");
-        self.front.idle(&mut |item| inbox.send(item))
+        self.materializer.materialize(&mut lowered);
+        lowered.into_iter().all(|item| inbox.send(item))
     }
 
     /// Segments the planning side has committed to the shaper so far.
@@ -152,10 +167,19 @@ impl StagedPipeline {
 
     /// Flush every stage into the sink and wait for the shaper to finish.
     pub fn finish(&mut self) -> bool {
-        let mut inbox = self.shaper_inbox.take().expect("pipeline already finished");
-        let finish_sent = self.front.finish(&mut |item| inbox.send(item))
-            && inbox.send_input(ShaperInput::Finish);
-        drop(inbox);
+        let mut lowered = Vec::new();
+        let flushed = self.front.finish(&mut |item| {
+            lowered.push(item);
+            true
+        });
+        let finish_sent = self.deliver(lowered)
+            && flushed
+            && self
+                .shaper_inbox
+                .as_ref()
+                .expect("pipeline already finished")
+                .send_input(ShaperInput::Finish);
+        self.shaper_inbox.take();
         let handle = self
             .shaper_thread
             .take()
