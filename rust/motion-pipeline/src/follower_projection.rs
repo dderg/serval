@@ -2379,33 +2379,46 @@ fn speed_second_of(states: &[(f64, f64, f64, f64)], speed: f64) -> f64 {
     cross_squared / (speed * speed * speed) + velocity_dot_jerk / speed
 }
 
+/// The odometer's leaves: each knot's time, the distance to it, and the
+/// leaders' speed there.
 struct OdometerKnots {
     t: Vec<f64>,
     s: Vec<f64>,
+    speed: Vec<f64>,
     leaf_magnitude: f64,
 }
 
 impl OdometerKnots {
-    fn starting_at(t: f64, capacity: usize) -> Self {
+    fn starting_at(t: f64, speed: f64, capacity: usize) -> Self {
         let mut knots = Self {
             t: Vec::with_capacity(capacity),
             s: Vec::with_capacity(capacity),
+            speed: Vec::with_capacity(capacity),
             leaf_magnitude: 0.0,
         };
         knots.t.push(t);
         knots.s.push(0.0);
+        knots.speed.push(speed);
         knots
     }
 
-    fn push_leaf(&mut self, end: f64, value: f64) {
+    fn push_leaf(&mut self, end: f64, value: f64, speed: f64) {
         let length = self.length() + value;
         self.t.push(end);
         self.s.push(length);
+        self.speed.push(speed);
         self.leaf_magnitude += value.abs();
     }
 
     fn length(&self) -> f64 {
         *self.s.last().expect("odometer knots seeded")
+    }
+
+    fn last(&self) -> (f64, f64) {
+        (
+            *self.t.last().expect("odometer knots seeded"),
+            *self.speed.last().expect("odometer knots seeded"),
+        )
     }
 
     fn leaves(&self) -> usize {
@@ -2538,9 +2551,10 @@ impl<'a> FollowerSignal<'a> {
         grid.sort_by(f64::total_cmp);
         grid.dedup_by(|left, right| (*left - *right).abs() <= GRID_DEDUP_EPS_S);
         let shaped_leaders = ShapedLeaders::of(shaped, leaders);
-        let mut knots = OdometerKnots::starting_at(grid[0], grid.len());
-        for w in grid.windows(2) {
-            integrate_recording(&|t| shaped_leaders.speed(t), w[0], w[1], &mut knots);
+        let mut knots =
+            OdometerKnots::starting_at(grid[0], shaped_leaders.speed(grid[0]), grid.len());
+        for &end in &grid[1..] {
+            integrate_recording(&|t| shaped_leaders.speed(t), end, &mut knots);
         }
         let odometer_scale = knots.scale_to(odometer.length);
         let ratio_bounds = RatioBounds::ridden(
@@ -2637,7 +2651,15 @@ impl<'a> FollowerSignal<'a> {
 
     fn path_read(&self, t: f64) -> PathRead {
         let speed = self.leaders.speed(t);
-        let s = self.s_owned(t);
+        let s = (self.s_start
+            + self.s_offset_reading(t, |at| {
+                if at.to_bits() == t.to_bits() {
+                    speed
+                } else {
+                    self.leaders.speed(at)
+                }
+            }))
+        .min(self.s_owned_end);
         PathRead {
             speed,
             rate: self.odometer_scale * speed,
@@ -2780,6 +2802,12 @@ impl<'a> FollowerSignal<'a> {
     }
 
     fn s_offset(&self, t: f64) -> f64 {
+        self.s_offset_reading(t, |at| self.leaders.speed(at))
+    }
+
+    /// `s_offset`, the leaders' speed at the queried time read through
+    /// `speed`, which a caller that has read it already answers.
+    fn s_offset_reading(&self, t: f64, speed: impl Fn(f64) -> f64) -> f64 {
         let start = self.grid[0];
         let end = self.grid[self.grid.len() - 1];
         let scale = t.abs().max(start.abs()).max(end.abs());
@@ -2805,7 +2833,12 @@ impl<'a> FollowerSignal<'a> {
                     self.grid[self.grid.len() - 1]
                 );
                 let index = insertion - 1;
-                self.knots.s[index] + integrate(&|u| self.leaders.speed(u), self.knots.t[index], t)
+                self.knots.s[index]
+                    + integrate_between(
+                        &|u| self.leaders.speed(u),
+                        (self.knots.t[index], self.knots.speed[index]),
+                        (t, speed(t)),
+                    )
             }
         };
         integrated * self.odometer_scale
@@ -3933,18 +3966,27 @@ fn integrate(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
     if b - a <= 0.0 {
         return 0.0;
     }
-    adaptive_simpson(f, SimpsonNode::root(f, a, b))
+    adaptive_simpson(f, SimpsonNode::root(f, (a, f(a)), (b, f(b))))
 }
 
-/// `integrate`, but the converged leaves of the adaptive recursion are kept
-/// as odometer knots, so later point queries integrate only the short
-/// residual past the nearest knot instead of re-descending the whole
-/// refinement tree from a grid boundary.
-fn integrate_recording(f: &impl Fn(f64) -> f64, a: f64, b: f64, knots: &mut OdometerKnots) {
+/// `integrate` from `a` to `b`, `f` already read at both.
+fn integrate_between(f: &impl Fn(f64) -> f64, (a, fa): (f64, f64), (b, fb): (f64, f64)) -> f64 {
     if b - a <= 0.0 {
+        return 0.0;
+    }
+    adaptive_simpson(f, SimpsonNode::root(f, (a, fa), (b, fb)))
+}
+
+/// `integrate` from the last odometer knot to `b`, but the converged leaves
+/// of the adaptive recursion are kept as odometer knots, so later point
+/// queries integrate only the short residual past the nearest knot instead
+/// of re-descending the whole refinement tree from a grid boundary.
+fn integrate_recording(f: &impl Fn(f64) -> f64, b: f64, knots: &mut OdometerKnots) {
+    let last = knots.last();
+    if b - last.0 <= 0.0 {
         return;
     }
-    adaptive_simpson_recording(f, SimpsonNode::root(f, a, b), knots);
+    adaptive_simpson_recording(f, SimpsonNode::root(f, last, (b, f(b))), knots);
 }
 
 /// One node of the adaptive Simpson tree: the interval, the three samples
@@ -3973,9 +4015,9 @@ enum SimpsonStep {
 }
 
 impl SimpsonNode {
-    fn root(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> Self {
+    fn root(f: &impl Fn(f64) -> f64, (a, fa): (f64, f64), (b, fb): (f64, f64)) -> Self {
         let m = 0.5 * (a + b);
-        let (fa, fm, fb) = (f(a), f(m), f(b));
+        let fm = f(m);
         let whole = (b - a) / 6.0 * (fa + 4.0 * fm + fb);
         Self {
             a,
@@ -4041,7 +4083,7 @@ fn adaptive_simpson_recording(
 ) {
     let (left, right) = match node.step(f) {
         SimpsonStep::Converged(value) => {
-            knots.push_leaf(node.b, value);
+            knots.push_leaf(node.b, value, node.fb);
             return;
         }
         SimpsonStep::Refine { left, right } => (left, right),
