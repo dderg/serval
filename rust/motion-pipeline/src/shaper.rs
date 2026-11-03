@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use crossbeam_channel::Sender;
+use geometry::MIN_DEVICE_INTERVAL_S;
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
 use trajectory::{
     AnalyticMoveSpan, AxisChainSet, ChainStage, CompiledChain, ContinuousAxis, ContinuousSegment,
@@ -2755,7 +2756,6 @@ fn eval_segment_axis(seg: &ContinuousSegment, axis: usize, t: f64) -> f64 {
 
 const MAX_FIT_REFINEMENT_SPLITS: usize = 512;
 const LEADER_SPAN_PARALLEL_THRESHOLD: usize = 512;
-pub(crate) const MIN_DEVICE_INTERVAL_S: f64 = 2e-9;
 
 /// A span's acceleration is read off a quintic whose odd coefficients are
 /// solved from the endpoint positions, so one ulp of sampling noise reaches
