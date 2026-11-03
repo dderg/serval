@@ -354,24 +354,18 @@ pub(crate) fn analytic_axes_enclosure(
     let mut outs = vec![Vec::new(); axes.len()];
     let (lo, hi) = (lo.max(span.t_start), hi.min(span.t_end));
     let enclose = |range: (f64, f64),
-                   state: &dyn Fn(Window) -> Option<Tangential>,
+                   state: &dyn Fn(Window) -> Tangential,
                    outs: &mut Vec<Vec<ExactPiece>>| {
         taylor::enclose_axes(
             range,
             accuracy,
-            &|window: Window, axis: usize, shared: &mut Option<Option<WindowReading>>| {
-                let reading = shared.get_or_insert_with(|| {
-                    state(window).map(|state| WindowReading {
-                        state,
-                        trig: std::cell::OnceCell::new(),
-                        spread_trig: std::cell::OnceCell::new(),
-                    })
+            &|window: Window, axis: usize, shared: &mut Option<WindowReading>| {
+                let reading = shared.get_or_insert_with(|| WindowReading {
+                    state: state(window),
+                    trig: std::cell::OnceCell::new(),
+                    spread_trig: std::cell::OnceCell::new(),
                 });
-                reading
-                    .as_ref()
-                    .map_or([TaylorModel::UNBOUNDED; 3], |reading| {
-                        readings[axis].models(reading)
-                    })
+                readings[axis].models(reading)
             },
             outs,
         );
@@ -389,7 +383,7 @@ pub(crate) fn analytic_axes_enclosure(
                     (from, to),
                     &|window: Window| {
                         let tau = window.time_since(origin);
-                        Some(Tangential {
+                        Tangential {
                             s: polynomial_of_balls(
                                 [arc_origin, Ball::exact(phase.v0), Ball::exact(0.5 * a0)]
                                     .into_iter(),
@@ -400,7 +394,7 @@ pub(crate) fn analytic_axes_enclosure(
                                 &tau,
                             ),
                             a: TaylorModel::constant(Ball::exact(a0)),
-                        })
+                        }
                     },
                     &mut outs,
                 );
@@ -627,14 +621,18 @@ impl PairInterpolant {
         }
     }
 
-    /// The pair's `(s, v, a)` for the model `tau` of segment-local time, or
-    /// `None` where a departure's square root reaches its singular end.
-    fn state(&self, tau: &TaylorModel) -> Option<Tangential> {
+    /// The pair's `(s, v, a)` for the model `tau` of segment-local time. A
+    /// departure window reaching its singular end, where the square root
+    /// has no model, is enclosed by the formula's range over the window.
+    fn state(&self, tau: &TaylorModel) -> Tangential {
         let u = tau.add_ball(Ball::exact(-self.t_lo)).scale(self.inverse_h);
         let poly = |coefficients: &[Ball; 8], at: &TaylorModel| {
             polynomial_of_balls(coefficients.iter().copied(), at)
         };
         let h = Ball::exact(self.h);
+        let in_root = |z: (TaylorModel, bool), model: TaylorModel| {
+            if z.1 { collapsed(&model) } else { model }
+        };
         let (v, a, mass) = match self.variable {
             PairVariable::Time => (
                 poly(&self.speed, &u),
@@ -642,24 +640,24 @@ impl PairInterpolant {
                 poly(&self.mass, &u),
             ),
             PairVariable::FromLo => {
-                let z = u.sqrt()?;
-                let mass = poly(&self.mass, &z).add(&u.scale(self.speed[0]));
+                let z = root_of(&u);
+                let mass = in_root(z, poly(&self.mass, &z.0)).add(&u.scale(self.speed[0]));
                 (
-                    poly(&self.speed, &z),
-                    poly(&self.scaled_acceleration, &z),
+                    in_root(z, poly(&self.speed, &z.0)),
+                    in_root(z, poly(&self.scaled_acceleration, &z.0)),
                     mass,
                 )
             }
             PairVariable::FromHi => {
                 let remaining = u.scale(Ball::exact(-1.0)).add_ball(Ball::exact(1.0));
-                let z = remaining.sqrt()?;
-                let mass = poly(&self.mass, &z)
+                let z = root_of(&remaining);
+                let mass = in_root(z, poly(&self.mass, &z.0))
                     .add(&remaining.scale(self.speed[0]))
                     .scale(Ball::exact(-1.0))
                     .add_ball(self.full_mass);
                 (
-                    poly(&self.speed, &z),
-                    poly(&self.scaled_acceleration, &z).scale(Ball::exact(-1.0)),
+                    in_root(z, poly(&self.speed, &z.0)),
+                    in_root(z, poly(&self.scaled_acceleration, &z.0)).scale(Ball::exact(-1.0)),
                     mass,
                 )
             }
@@ -671,11 +669,11 @@ impl PairInterpolant {
                 let theta = u
                     .scale(Ball::rounded(theta_hi - theta_lo, 1))
                     .add_ball(Ball::exact(theta_lo));
-                let z = theta.scale(Ball::rounded(1.0 / parent_h, 1)).sqrt()?;
-                let mass = poly(&self.mass, &z).add(&u.scale(self.speed[0]));
+                let z = root_of(&theta.scale(Ball::rounded(1.0 / parent_h, 1)));
+                let mass = in_root(z, poly(&self.mass, &z.0)).add(&u.scale(self.speed[0]));
                 (
-                    poly(&self.speed, &z),
-                    poly(&self.scaled_acceleration, &z),
+                    in_root(z, poly(&self.speed, &z.0)),
+                    in_root(z, poly(&self.scaled_acceleration, &z.0)),
                     mass,
                 )
             }
@@ -686,15 +684,42 @@ impl PairInterpolant {
         if lowest < 0.0 {
             v.widen(-lowest);
         }
-        Some(Tangential {
+        Tangential {
             s: mass
                 .scale(h)
                 .add(&u.scale(self.arc_correction))
                 .add_ball(self.arc_start),
             v,
             a: a.scale(self.inverse_h),
-        })
+        }
     }
+}
+
+/// A model of `√argument`, or — where the argument's range reaches zero,
+/// or the root's model is wider than that range — an affine model spanning
+/// the root's range in its own variable, flagged so what is built on it
+/// collapses to its range.
+fn root_of(argument: &TaylorModel) -> (TaylorModel, bool) {
+    let (centre, spread) = argument.spread();
+    let lo = (centre - spread).max(0.0).sqrt();
+    let hi = taylor::upper(taylor::upper(centre + spread).max(0.0).sqrt());
+    let half_range = taylor::upper(0.5 * (hi - lo));
+    match argument.sqrt() {
+        Some(root) if root.rad() <= half_range => (root, false),
+        _ => (
+            TaylorModel::affine(Ball::rounded(0.5 * (lo + hi), 1), half_range),
+            true,
+        ),
+    }
+}
+
+/// A constant model of `model`'s range.
+fn collapsed(model: &TaylorModel) -> TaylorModel {
+    let (centre, spread) = model.spread();
+    TaylorModel::constant(Ball {
+        mid: centre,
+        rad: spread,
+    })
 }
 
 #[cfg(test)]
