@@ -244,7 +244,8 @@ naming the axis they belong to.
 | `[stepper_*] high_precision_step_compress` | Same opt-in, moved with the stepper fields to `[motor <name>] high_precision_step_compress: True`. Motors default to classic compression. |
 | `[extruder] pressure_advance` | `[post_processor <name>] type: linear_pressure_advance`, `k: ...`; put its name in the extruder axis chain. |
 | `[extruder] pressure_advance_smooth_time` | `[post_processor <name>] type: smooth_triangle`, `smooth_time: ...`; put its name in the extruder axis chain. |
-| `[extruder] max_extrude_cross_section`, `max_extrude_only_distance`, `instantaneous_corner_velocity` | **Rejected loudly** — "the planner has no such concept". Delete them. |
+| `[extruder] max_extrude_cross_section`, `max_extrude_only_distance` | **Rejected loudly** — "the planner has no such concept". Delete them. |
+| `[extruder] instantaneous_corner_velocity` | **Rejected with a pointer.** Move it to the extruder's `[axis e] instantaneous_corner_velocity`; same meaning, same 1 mm/s default. |
 | `[extruder] step_pin`, `dir_pin`, `rotation_distance`, `microsteps` | **Rejected.** Move them to a `[motor <name>]` and name it in `[axis e] motors:`. |
 | `[extruder]` with no stepper (heater only) | **Not expressible.** `axis:` is required, the named axis must be a follower, and every declared axis must be motor-mapped — a hotend with no extruder motor is rejected with `axis 'e' is not motor-mapped`. |
 | `max_x_velocity`, `max_y_velocity`, and other old per-axis velocity limits | **No equivalent.** The fork exposes global velocity/acceleration plus Z-only caps, not independent X/Y limits. |

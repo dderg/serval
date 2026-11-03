@@ -207,6 +207,10 @@ enum AdvanceSmoothing {
 struct LeadingAdvance<'a> {
     stage: &'a ChainStage,
     smoothing: AdvanceSmoothing,
+    /// How far a velocity step the advance makes of a leader's acceleration
+    /// step may reach the motor of a ratio-ramped follower, see
+    /// [`CompiledChain::instantaneous_corner_velocity`].
+    instantaneous_corner_velocity: f64,
 }
 
 impl<'a> LeadingAdvance<'a> {
@@ -224,6 +228,7 @@ impl<'a> LeadingAdvance<'a> {
                 (Some(_), Some(_)) => AdvanceSmoothing::RatioRampAndKernel,
                 (None, _) => AdvanceSmoothing::Kernel,
             },
+            instantaneous_corner_velocity: chain.instantaneous_corner_velocity(),
         })
     }
 
@@ -441,8 +446,8 @@ fn fit_source_projection(
                         &step_candidates,
                         (t_start, t_end),
                         resolution.velocity
-                            + advanced_leader_rounding(
-                                advance.stage,
+                            + advance_velocity_step_allowance(
+                                advance,
                                 sig.ratio_bounds.ratio,
                                 fit_tol.accel_mm_s2,
                             ),
@@ -1401,8 +1406,8 @@ fn join_advance_step(
 /// as a C0 corner ([`SeamInput::signal_velocity_step`]) and welds what the
 /// advanced velocity differs by on top, straight to the motor. A ratio ramp
 /// leaves the projection no step of its own, and the advance none beyond
-/// what the leaders' acceleration rounding makes of it
-/// ([`advanced_leader_rounding`]), so a larger one on a
+/// its allowance for the leaders' acceleration steps
+/// ([`advance_velocity_step_allowance`]), so a larger one on a
 /// ramped follower is refused.
 fn refuse_ramped_join_velocity_step(
     advance: LeadingAdvance,
@@ -1437,29 +1442,37 @@ fn refuse_ramped_join_velocity_step(
         before_ramped.advanced_velocity,
         after_ramped.advanced_velocity,
     );
-    let leader_rounding = advanced_leader_rounding(
-        advance.stage,
+    let allowance = advance_velocity_step_allowance(
+        advance,
         before.ratio.abs().max(after.ratio.abs()),
         leader_accel_tol,
     );
-    if (advanced_after - advanced_before).abs() > rounding + leader_rounding {
+    if (advanced_after - advanced_before).abs() > rounding + allowance {
         return Err(PostProcessError::RatioRampedVelocityStep {
             axis,
             t: t_start,
             velocity_before: advanced_before,
             velocity_after: advanced_after,
-            resolution: rounding + leader_rounding,
+            resolution: rounding + allowance,
         });
     }
     Ok(())
 }
 
-/// The velocity step an advance makes of the leaders' own rounding: a
-/// shaped leader is fitted within `leader_accel_tol` on either side of its
-/// knots, so its acceleration may step by twice that there, which the
-/// projection scales by the ratio and the advance by its slope.
-fn advanced_leader_rounding(stage: &ChainStage, ratio_bound: f64, leader_accel_tol: f64) -> f64 {
-    2.0 * leader_accel_tol * ratio_bound * steepest_advance_slope(stage)
+/// The velocity step an advance may make of the leaders' acceleration
+/// steps: the follower's instantaneous corner velocity, which the planner
+/// keeps an unshaped leader's steps within, plus what the leaders' own
+/// rounding makes. A shaped leader is fitted within `leader_accel_tol` on
+/// either side of its knots, so its acceleration may step by twice that
+/// there, which the projection scales by the ratio and the advance by its
+/// slope.
+fn advance_velocity_step_allowance(
+    advance: LeadingAdvance,
+    ratio_bound: f64,
+    leader_accel_tol: f64,
+) -> f64 {
+    advance.instantaneous_corner_velocity
+        + 2.0 * leader_accel_tol * ratio_bound * steepest_advance_slope(advance.stage)
 }
 
 fn advance_offset(stage: &ChainStage, velocity: f64) -> f64 {

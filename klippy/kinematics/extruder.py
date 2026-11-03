@@ -8,8 +8,8 @@ import math
 _OPTIONS_WITHOUT_A_PLANNER_CONCEPT = (
     "max_extrude_cross_section",
     "max_extrude_only_distance",
-    "instantaneous_corner_velocity",
 )
+_OPTIONS_OF_THE_AXIS = ("instantaneous_corner_velocity",)
 
 
 def default_extrude_ratio(nozzle_diameter, filament_diameter):
@@ -140,6 +140,12 @@ class PrinterExtruder:
                 raise config.error(
                     "[%s] option '%s' is no longer supported: the planner "
                     "has no such concept" % (self.name, key)
+                )
+        for key in _OPTIONS_OF_THE_AXIS:
+            if config.get(key, None) is not None:
+                raise config.error(
+                    "[%s] option '%s' moved to the extruder's axis: set it "
+                    "in [axis %s]" % (self.name, key, config.get("axis", "e"))
                 )
 
     def check_move(self, move):

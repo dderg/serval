@@ -62,6 +62,7 @@ pub planner_config::RuntimeLimitError::NotPositive
 pub planner_config::RuntimeLimitError::NotPositive::name: &'static str
 pub struct planner_config::AxisDecl
 pub planner_config::AxisDecl::follows: alloc::vec::Vec<alloc::string::String>
+pub planner_config::AxisDecl::instantaneous_corner_velocity: core::option::Option<f64>
 pub planner_config::AxisDecl::max_accel: core::option::Option<f64>
 pub planner_config::AxisDecl::max_velocity: core::option::Option<f64>
 pub planner_config::AxisDecl::motors: alloc::vec::Vec<alloc::string::String>
@@ -129,3 +130,4 @@ pub fn planner_config::RuntimeLimits::set_accel_cap(&mut self, core::option::Opt
 pub fn planner_config::RuntimeLimits::set_corner_deviation(&mut self, core::option::Option<f64>) -> core::result::Result<(), planner_config::RuntimeLimitError>
 pub fn planner_config::RuntimeLimits::set_velocity_cap(&mut self, core::option::Option<f64>) -> core::result::Result<(), planner_config::RuntimeLimitError>
 pub const planner_config::DEFAULT_SQUARE_CORNER_VELOCITY_MM_S: f64
+pub fn planner_config::extruder_caps(&planner_config::AxisRegistry, &trajectory::chain::AxisChainSet) -> core::result::Result<alloc::vec::Vec<geometry::frontend::ExtruderCaps>, alloc::string::String>

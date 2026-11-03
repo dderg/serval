@@ -28,6 +28,7 @@ fn axis(name: &str, follows: &[&str], post_processors: &[&str]) -> AxisDecl {
         ratio_ramp_time: None,
         max_velocity: limit,
         max_accel: limit,
+        instantaneous_corner_velocity: None,
     }
 }
 

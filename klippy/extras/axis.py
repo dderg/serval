@@ -30,6 +30,9 @@ class AxisSection:
         )
         self.max_velocity = config.getfloat("max_velocity", None, above=0.0)
         self.max_accel = config.getfloat("max_accel", None, above=0.0)
+        self.instantaneous_corner_velocity = config.getfloat(
+            "instantaneous_corner_velocity", None, above=0.0
+        )
 
     def get_status(self, eventtime):
         return {
@@ -39,6 +42,7 @@ class AxisSection:
             "ratio_ramp_time": self.ratio_ramp_time,
             "max_velocity": self.max_velocity,
             "max_accel": self.max_accel,
+            "instantaneous_corner_velocity": self.instantaneous_corner_velocity,
         }
 
 

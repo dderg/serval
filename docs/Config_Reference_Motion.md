@@ -247,6 +247,17 @@ post_processors: extruder_pa, extruder_smoothing
 #   and curves included. On the [extruder] axis each one left unset is
 #   inherited from max_extrude_only_velocity / max_extrude_only_accel (the
 #   same motor). An advance needs both, set or inherited.
+#instantaneous_corner_velocity: 1.0
+#   Optional, on an axis that follows others. Default is 1.0, as upstream
+#   Klipper's [extruder] option. Must be above 0 (mm/s). The velocity
+#   change the axis's motor takes at once. Where no smoothing kernel follows
+#   the advance (a ratio_ramp_time chain) and a followed axis has no shaping
+#   post_processor (commonly z), every acceleration step of that axis makes
+#   the advance step the extruder velocity by k * ratio * the step's share
+#   along the path. The velocity planner caps the acceleration of extruding
+#   moves that move such an axis, and of the moves next to them, so each
+#   step stays within this; a larger step is refused with the time it
+#   happens at.
 #ratio_ramp_time:
 #   Optional. Default is no ramp. If set, must be above 0 (seconds) and the
 #   axis must follow others. The extruded total of the projection is

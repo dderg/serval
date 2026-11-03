@@ -157,7 +157,12 @@ pub fn pipeline_snapshot_streaming(
         ));
     }
     let planner = planner_config(&params)?;
-    let limits = live_config::move_limits(&planner).map_err(SnapshotError::InvalidLimits)?;
+    let extruder = live_config::extruder_caps_on(
+        &live_config::extruder_caps(&planner).map_err(SnapshotError::InvalidChain)?,
+        EXTRUDER_AXIS,
+    );
+    let limits =
+        live_config::move_limits(&planner, extruder).map_err(SnapshotError::InvalidLimits)?;
     let config = live_config::stream_config(&planner).map_err(SnapshotError::InvalidLimits)?;
     let axis_chains = planner
         .compile_active_chains()
@@ -257,6 +262,7 @@ pub fn move_specs(
                 limits.max_jerk_mm_s3,
             )
             .and_then(|path| path.with_z_caps(limits.max_z_velocity_mm_s, limits.max_z_accel_mm_s2))
+            .and_then(|path| path.with_extruder_caps(limits.extruder))
             .map_err(|e| SnapshotError::InvalidMove {
                 index: i,
                 detail: e.to_string(),
@@ -380,6 +386,7 @@ fn default_axis_decls() -> Vec<AxisDecl> {
         ratio_ramp_time: None,
         max_velocity: None,
         max_accel: None,
+        instantaneous_corner_velocity: None,
     };
     vec![
         axis("x", Vec::new()),

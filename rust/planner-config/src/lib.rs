@@ -121,7 +121,7 @@ impl PostProcessorSet {
                 CompiledChain::compile(&chain).map_err(PostProcessorConfigError::Param)
             })
             .collect::<Result<_, _>>()?;
-        let chains = Self::with_ratio_ramps(registry, chains);
+        let chains = Self::with_follower_options(registry, chains);
         let followers = registry.follower_index_map();
         self.reject_pre_kernel_gains_on_leaders(registry, &followers)?;
         let chains = AxisChainSet { chains, followers };
@@ -167,13 +167,22 @@ impl PostProcessorSet {
             .expect("a transformed chain names the stage that transforms it")
     }
 
-    fn with_ratio_ramps(registry: &AxisRegistry, chains: Vec<CompiledChain>) -> Vec<CompiledChain> {
+    fn with_follower_options(
+        registry: &AxisRegistry,
+        chains: Vec<CompiledChain>,
+    ) -> Vec<CompiledChain> {
         chains
             .into_iter()
             .zip(registry.decls())
-            .map(|(chain, decl)| match decl.ratio_ramp_time {
-                Some(ramp_time) => chain.with_ratio_ramp_time(ramp_time),
-                None => chain,
+            .map(|(chain, decl)| {
+                let chain = match decl.ratio_ramp_time {
+                    Some(ramp_time) => chain.with_ratio_ramp_time(ramp_time),
+                    None => chain,
+                };
+                match decl.instantaneous_corner_velocity {
+                    Some(mm_s) => chain.with_instantaneous_corner_velocity(mm_s),
+                    None => chain,
+                }
             })
             .collect()
     }
@@ -330,6 +339,10 @@ pub struct AxisDecl {
     /// `max_accel`, inherited like [`AxisDecl::max_velocity`] from
     /// `max_extrude_only_accel`.
     pub max_accel: Option<f64>,
+    /// `instantaneous_corner_velocity`: the velocity change the motor of an
+    /// axis that follows others takes at once, see
+    /// [`trajectory::CompiledChain::instantaneous_corner_velocity`].
+    pub instantaneous_corner_velocity: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -411,7 +424,14 @@ impl AxisRegistry {
                     });
                 }
             }
-            for (option, value) in [("max_velocity", d.max_velocity), ("max_accel", d.max_accel)] {
+            for (option, value) in [
+                ("max_velocity", d.max_velocity),
+                ("max_accel", d.max_accel),
+                (
+                    "instantaneous_corner_velocity",
+                    d.instantaneous_corner_velocity,
+                ),
+            ] {
                 let Some(value) = value else { continue };
                 if !(value.is_finite() && value > 0.0) {
                     return Err(AxisConfigError::BadLimit {
@@ -537,6 +557,7 @@ impl Default for AxisRegistry {
                     ratio_ramp_time: None,
                     max_velocity: None,
                     max_accel: None,
+                    instantaneous_corner_velocity: None,
                 })
                 .collect(),
         )
@@ -747,6 +768,9 @@ impl Default for PlannerConfig {
         }
     }
 }
+
+mod extruder_caps;
+pub use extruder_caps::extruder_caps;
 
 #[cfg(feature = "doc")]
 pub mod from_doc;

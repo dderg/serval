@@ -185,6 +185,8 @@ pub fn planner_config_from_settings(
     cfg.fit_tolerance_mm = settings.fit_tolerance_mm;
     cfg.fit_tolerance_accel_mm_s2 = settings.fit_tolerance_accel_mm_s2;
     cfg.check_ratio_ramp_extrude_only_caps()?;
+    let chains = cfg.compile_active_chains().map_err(|e| e.to_string())?;
+    crate::extruder_caps(&cfg.axis_registry, &chains)?;
     Ok(cfg)
 }
 
@@ -595,6 +597,11 @@ impl Reader<'_> {
             let ratio_ramp_time = self.getfloat(&section, "ratio_ramp_time", Bounds::above(0.0))?;
             let max_velocity = self.getfloat(&section, "max_velocity", Bounds::above(0.0))?;
             let max_accel = self.getfloat(&section, "max_accel", Bounds::above(0.0))?;
+            let instantaneous_corner_velocity = self.getfloat(
+                &section,
+                "instantaneous_corner_velocity",
+                Bounds::above(0.0),
+            )?;
             axes.push(AxisDecl {
                 name: name.to_owned(),
                 follows,
@@ -603,6 +610,7 @@ impl Reader<'_> {
                 ratio_ramp_time,
                 max_velocity,
                 max_accel,
+                instantaneous_corner_velocity,
             });
         }
         Ok(axes)

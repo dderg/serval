@@ -24,6 +24,7 @@ fn axis(name: &str, follows: &[&str], post_processors: &[&str]) -> AxisDecl {
         ratio_ramp_time: None,
         max_velocity: None,
         max_accel: None,
+        instantaneous_corner_velocity: None,
     }
 }
 
@@ -56,7 +57,7 @@ fn plan_from(stream_start_s: f64) -> Vec<ContinuousSegment> {
         cartesian: CartesianLimits::without_z_caps(MAX_VELOCITY, MAX_ACCEL, f64::INFINITY, 0.21),
         ..PlannerConfig::default()
     };
-    let limits = live_config::move_limits(&planner).expect("limits");
+    let limits = live_config::move_limits(&planner, None).expect("limits");
     let steps = plan_steps(&waypoints, limits).expect("steps");
     let config = live_config::stream_config(&planner).expect("stream config");
     let registry = planner_config::AxisRegistry::try_new(vec![

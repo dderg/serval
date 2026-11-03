@@ -218,13 +218,20 @@ def test_extruder_check_move_cold_extrude_rejected():
     "key, value",
     [
         ("max_extrude_cross_section", 1.0),
-        ("instantaneous_corner_velocity", 1.0),
         ("max_extrude_only_distance", 500.0),
     ],
 )
 def test_extruder_removed_option_rejected(key, value):
     section = make_extruder_section(**{key: value})
     with pytest.raises(ConfigError, match="no longer supported"):
+        PrinterExtruder(section, 0)
+
+
+def test_extruder_instantaneous_corner_velocity_points_to_the_axis():
+    section = make_extruder_section(instantaneous_corner_velocity=1.0)
+    with pytest.raises(
+        ConfigError, match=r"moved to the extruder's axis: set it in \[axis"
+    ):
         PrinterExtruder(section, 0)
 
 

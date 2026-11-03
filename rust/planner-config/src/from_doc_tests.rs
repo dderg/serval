@@ -540,3 +540,19 @@ fn inverse_without_kernel_rejected_at_read_time() {
     ));
     assert!(err.contains("belt"), "{err}");
 }
+
+#[test]
+fn a_follower_axis_reads_its_instantaneous_corner_velocity() {
+    let s = settings(&format!(
+        "{MINIMAL}{EXTRUDER_AXIS}instantaneous_corner_velocity: 2.5\n"
+    ));
+    let e = s.axes.iter().find(|a| a.name == "e").unwrap();
+    assert_eq!(e.instantaneous_corner_velocity, Some(2.5));
+    let err = read_err(&format!(
+        "{MINIMAL}{EXTRUDER_AXIS}instantaneous_corner_velocity: 0\n"
+    ));
+    assert_eq!(
+        err,
+        "Option 'instantaneous_corner_velocity' in section 'axis e' must be above 0"
+    );
+}

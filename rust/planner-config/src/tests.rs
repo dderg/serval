@@ -116,6 +116,7 @@ fn decl(name: &str, follows: &[&str]) -> AxisDecl {
         ratio_ramp_time: None,
         max_velocity: None,
         max_accel: None,
+        instantaneous_corner_velocity: None,
     }
 }
 
@@ -178,6 +179,7 @@ fn decl_with_motors(name: &str, follows: &[&str], motors: &[&str]) -> AxisDecl {
         ratio_ramp_time: None,
         max_velocity: None,
         max_accel: None,
+        instantaneous_corner_velocity: None,
     }
 }
 
@@ -769,6 +771,35 @@ fn follower_limits_belong_to_followers_and_must_be_positive() {
                 })
             ),
             "max_accel {value} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn the_instantaneous_corner_velocity_belongs_to_followers_and_must_be_positive() {
+    let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
+    decls[2].instantaneous_corner_velocity = Some(1.0);
+    assert!(matches!(
+        AxisRegistry::try_new(decls),
+        Err(AxisConfigError::LimitWithoutLeaders {
+            ref axis,
+            option: "instantaneous_corner_velocity"
+        }) if axis == "z"
+    ));
+    for value in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
+        let mut e = decl("e", &["x", "y", "z"]);
+        e.instantaneous_corner_velocity = Some(value);
+        decls.push(e);
+        assert!(
+            matches!(
+                AxisRegistry::try_new(decls),
+                Err(AxisConfigError::BadLimit {
+                    option: "instantaneous_corner_velocity",
+                    ..
+                })
+            ),
+            "instantaneous_corner_velocity {value} must be rejected"
         );
     }
 }

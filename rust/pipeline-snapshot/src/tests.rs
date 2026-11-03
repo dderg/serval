@@ -858,6 +858,7 @@ fn axis(name: &str, follows: &[&str]) -> planner_config::AxisDecl {
         ratio_ramp_time: None,
         max_velocity: limit,
         max_accel: limit,
+        instantaneous_corner_velocity: None,
     }
 }
 
