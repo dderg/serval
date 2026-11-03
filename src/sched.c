@@ -435,6 +435,12 @@ sched_timer_dispatch(void)
     return next_waketime;
 }
 
+struct timer *
+sched_peek_timer(void)
+{
+    return SchedState.timer_list;
+}
+
 // Remove all user timers
 void
 sched_timer_reset(void)

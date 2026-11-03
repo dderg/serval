@@ -46,27 +46,11 @@ emit_mcu_ready_once(void)
 }
 
 void
-command_config_stepper(uint32_t *args)
+stepper_setup_dispatch(struct stepper *s, uint_fast8_t both_edge,
+                       uint32_t pulse_ticks)
 {
-    {
-        uint8_t oid = args[0] & 0xFFu;
-        if (oid < 32)
-            config_stepper_oids_seen |= (1u << oid);
-    }
-    {
-        extern void runtime_diag_progress(uint32_t tag, uint32_t stage,
-                                          uint32_t value);
-        uint32_t exp_lo = (uint32_t)((uintptr_t)command_config_stepper & 0xFFu);
-        runtime_diag_progress(0xCD, args[0] & 0xFFu, exp_lo);
-    }
-    struct stepper *s = oid_alloc(args[0], command_config_stepper, sizeof(*s));
-    int_fast8_t invert_step = (int_fast8_t)args[3];
-    s->step_both_edge = invert_step < 0;
-    s->step_idle_level = invert_step > 0;
-    s->step_pulse_ticks = args[4];
-    s->step_pin = gpio_out_setup(args[1], s->step_idle_level);
-    s->dir_pin = gpio_out_setup(args[2], 0);
-    s->position = -POSITION_BIAS;
+    s->step_both_edge = both_edge;
+    s->step_pulse_ticks = pulse_ticks;
     if (s->step_both_edge)
         s->flags |= SF_SINGLE_SCHED;
     move_queue_setup(&s->mq, sizeof(struct stepper_move));
@@ -84,6 +68,29 @@ command_config_stepper(uint32_t *args)
     } else if (!CONFIG_INLINE_STEPPER_HACK) {
         s->time.func = stepper_event_full;
     }
+}
+
+void
+command_config_stepper(uint32_t *args)
+{
+    {
+        uint8_t oid = args[0] & 0xFFu;
+        if (oid < 32)
+            config_stepper_oids_seen |= (1u << oid);
+    }
+    {
+        extern void runtime_diag_progress(uint32_t tag, uint32_t stage,
+                                          uint32_t value);
+        uint32_t exp_lo = (uint32_t)((uintptr_t)command_config_stepper & 0xFFu);
+        runtime_diag_progress(0xCD, args[0] & 0xFFu, exp_lo);
+    }
+    struct stepper *s = oid_alloc(args[0], command_config_stepper, sizeof(*s));
+    int_fast8_t invert_step = (int_fast8_t)args[3];
+    s->step_idle_level = invert_step > 0;
+    s->step_pin = gpio_out_setup(args[1], s->step_idle_level);
+    s->dir_pin = gpio_out_setup(args[2], 0);
+    s->position = -POSITION_BIAS;
+    stepper_setup_dispatch(s, invert_step < 0, args[4]);
     emit_mcu_ready_once();
 }
 DECL_COMMAND(command_config_stepper, "config_stepper oid=%c step_pin=%c"
