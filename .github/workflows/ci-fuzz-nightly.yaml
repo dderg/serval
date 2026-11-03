@@ -38,4 +38,5 @@ jobs:
       - name: property suites
         env:
           PROPTEST_CASES: ${{ github.event.inputs.cases || '200000' }}
+          FUZZ_NEXTEST_PROFILE: nightly
         run: ./scripts/ci.sh rust-fuzz
