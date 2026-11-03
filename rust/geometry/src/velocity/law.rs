@@ -764,8 +764,8 @@ impl LawSegment {
         }
         knots.clear();
         SPARE_FULL_RAILS.with_borrow_mut(|spare| {
-            if spare.len() < SPARE_FULL_RAILS_MAX {
-                spare.push(knots);
+            if spare.buffers.len() < SPARE_FULL_RAILS_MAX {
+                spare.buffers.push(knots);
             }
         });
     }
@@ -885,24 +885,50 @@ const RAIL_KNOT_DS: f64 = 2.5e-4;
 /// Knots of a rail the knot-count clamp caps: one mebibyte each.
 const FULL_RAIL_KNOTS: usize = RAIL_KNOTS_MAX + 1;
 
-/// Full-length knot buffers kept per thread for reuse; bounds what a thread
-/// holds between plans to 64 MiB.
-const SPARE_FULL_RAILS_MAX: usize = 64;
+/// Full-length knot buffers a thread keeps for reuse, at most. The reverse
+/// pass recycles each member's rails as soon as its profile is built, so the
+/// spares only have to bridge the members in flight, not a whole window.
+const SPARE_FULL_RAILS_MAX: usize = 4;
+
+/// A thread's recycled full-length knot buffers, and how many full-length
+/// buffers it has asked for since the last [`trim_spare_full_rails`].
+struct SpareFullRails {
+    buffers: Vec<Vec<RailKnot>>,
+    requested: usize,
+}
 
 thread_local! {
-    static SPARE_FULL_RAILS: std::cell::RefCell<Vec<Vec<RailKnot>>> =
-        const { std::cell::RefCell::new(Vec::new()) };
+    static SPARE_FULL_RAILS: std::cell::RefCell<SpareFullRails> =
+        const {
+            std::cell::RefCell::new(SpareFullRails {
+                buffers: Vec::new(),
+                requested: 0,
+            })
+        };
 }
 
 /// An empty knot vector with room for `len` knots, reusing a recycled
 /// full-length buffer when one is spare.
 fn knot_buffer(len: usize) -> Vec<RailKnot> {
     let spare = if len == FULL_RAIL_KNOTS {
-        SPARE_FULL_RAILS.with_borrow_mut(Vec::pop)
+        SPARE_FULL_RAILS.with_borrow_mut(|spare| {
+            spare.requested += 1;
+            spare.buffers.pop()
+        })
     } else {
         None
     };
     spare.unwrap_or_else(|| Vec::with_capacity(len))
+}
+
+/// Keeps no more of this thread's spare full-length buffers than the plan it
+/// just finished asked for, so a plan without full-length rails leaves none
+/// pinned for the next.
+pub(crate) fn trim_spare_full_rails() {
+    SPARE_FULL_RAILS.with_borrow_mut(|spare| {
+        spare.buffers.truncate(spare.requested);
+        spare.requested = 0;
+    });
 }
 
 /// Dense arc-uniform solution of the rail ODE `d(v²)/ds = 2·a(s, v)` from
