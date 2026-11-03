@@ -21,10 +21,10 @@ use trajectory::{AxisChainSet, ContinuousAxis, ContinuousSegment};
 pub mod audit;
 pub mod waypoints;
 
-use motion_pipeline::{Pipeline, StreamConfig, TrajectoryItem};
+use motion_pipeline::{Control, Pipeline, StreamConfig, StreamInput, TrajectoryItem};
 
 pub use geometry::corner_deviation_from_scv;
-pub use planner_config::{AxisDecl, PostProcessorDecl};
+pub use planner_config::{AxisDecl, CartesianLimits, PostProcessorDecl, RuntimeLimits};
 
 pub const SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 /// The E lane rides as axis 3, past the three spatial axes — the same index the
@@ -177,8 +177,8 @@ pub fn pipeline_snapshot_streaming(
     })
     .map_err(|e| SnapshotError::InvalidLimits(e.to_string()))?;
 
-    let moves = build_moves(waypoints, limits)?;
-    let raw_points = extract_raw_path(&moves);
+    let steps = plan_steps(waypoints, limits)?;
+    let raw_points = extract_raw_path(&steps);
 
     let axis_chains = build_axis_chains(&params).map_err(SnapshotError::InvalidChain)?;
     let corner = geometry::CornerFitConfig::default();
@@ -196,7 +196,7 @@ pub fn pipeline_snapshot_streaming(
     };
     let mut next_partial_at = partial_batch_segments;
     let (_fitted, shaped, toolhead) =
-        run_pipeline_streaming(&moves, config, axis_chains, |shaped, toolhead| {
+        run_pipeline_streaming(&steps, config, axis_chains, |shaped, toolhead| {
             if shaped.len() < next_partial_at {
                 return;
             }
@@ -242,39 +242,119 @@ fn exact_trajectory(shaped: &[ContinuousSegment]) -> ExactTrajectory {
         .unwrap_or_else(|error| panic!("pipeline-snapshot: {error}"))
 }
 
-pub fn build_moves(
+/// One move as the live host submits it — endpoints, feedrate, the rest it
+/// starts from — together with the limits the live engine plans it under:
+/// the runtime overrides in force, applied to the config base through
+/// [`planner_config::RuntimeLimits::effective`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MoveSpec {
+    pub start: [f64; 4],
+    pub end: [f64; 4],
+    pub feedrate: f64,
+    pub limits: geometry::VelocityLimits,
+    pub dwell_before_s: Option<f64>,
+}
+
+/// The config limits `limits` were built from: the base the runtime
+/// overrides of [`waypoints::parse_gcode`] are clamped against.
+#[must_use]
+pub fn config_base(limits: geometry::VelocityLimits) -> planner_config::CartesianLimits {
+    planner_config::CartesianLimits {
+        max_velocity: limits.max_velocity_mm_s,
+        max_accel: limits.accel_mm_s2,
+        max_jerk: limits.max_jerk_mm_s3,
+        max_z_velocity: limits.max_z_velocity_mm_s,
+        max_z_accel: limits.max_z_accel_mm_s2,
+        corner_deviation: limits.corner_deviation_mm,
+    }
+}
+
+pub fn move_specs(
     waypoints: &[waypoints::Waypoint],
     limits: geometry::VelocityLimits,
-) -> Result<Vec<geometry::Move>, SnapshotError> {
-    let mut moves = Vec::with_capacity(waypoints.len() - 1);
-    for (i, pair) in waypoints.windows(2).enumerate() {
-        let (x0, y0, z0, e0, _, _) = pair[0];
-        let (x1, y1, z1, e1, feedrate, accel) = pair[1];
-        let start = [x0, y0, z0];
-        let end = [x1, y1, z1];
-        let e_delta = e1 - e0;
-        let move_limits = geometry::VelocityLimits::try_new(
-            limits.max_velocity_mm_s,
-            accel,
-            limits.corner_deviation_mm,
-            limits.max_jerk_mm_s3,
-        )
-        .and_then(|path| path.with_z_caps(limits.max_z_velocity_mm_s, limits.max_z_accel_mm_s2))
-        .map_err(|e| SnapshotError::InvalidMove {
-            index: i,
-            detail: e.to_string(),
-        })?;
+) -> Result<Vec<MoveSpec>, SnapshotError> {
+    let config_base = config_base(limits);
+    waypoints
+        .windows(2)
+        .enumerate()
+        .map(|(i, pair)| {
+            let (velocity, accel, corner_deviation) = pair[1].runtime.effective(&config_base);
+            let move_limits = geometry::VelocityLimits::try_new(
+                velocity,
+                accel,
+                corner_deviation,
+                limits.max_jerk_mm_s3,
+            )
+            .and_then(|path| path.with_z_caps(limits.max_z_velocity_mm_s, limits.max_z_accel_mm_s2))
+            .map_err(|e| SnapshotError::InvalidMove {
+                index: i,
+                detail: e.to_string(),
+            })?;
+            Ok(MoveSpec {
+                start: pair[0].position,
+                end: pair[1].position,
+                feedrate: pair[1].feedrate,
+                limits: move_limits,
+                dwell_before_s: pair[1].dwell_before_s,
+            })
+        })
+        .collect()
+}
+
+/// What the snapshot feeds the pipeline: a move, or a stop at rest — the
+/// live engine's `StreamMsg::Dwell`, a drain followed by a dwell when it is
+/// positive.
+#[derive(Debug, Clone)]
+pub enum PlanStep {
+    Move(geometry::Move),
+    Rest { dwell_s: f64 },
+}
+
+impl PlanStep {
+    /// Sends the step as the stream inputs the live engine produces for it;
+    /// `false` once `send` refuses one.
+    pub fn feed(self, mut send: impl FnMut(StreamInput) -> bool) -> bool {
+        match self {
+            Self::Move(m) => send(m.into()),
+            Self::Rest { dwell_s } => {
+                send(StreamInput::Drain)
+                    && (dwell_s <= 0.0
+                        || send(StreamInput::Control(Control::Dwell { secs: dwell_s })))
+            }
+        }
+    }
+}
+
+/// The pipeline input the live engine receives for these waypoints: each
+/// move, preceded by the stop at rest its waypoint starts from.
+pub fn plan_steps(
+    waypoints: &[waypoints::Waypoint],
+    limits: geometry::VelocityLimits,
+) -> Result<Vec<PlanStep>, SnapshotError> {
+    let mut steps = Vec::with_capacity(waypoints.len().saturating_sub(1));
+    let mut rest_s: Option<f64> = None;
+    for (i, spec) in move_specs(waypoints, limits)?.into_iter().enumerate() {
+        if let Some(dwell_s) = spec.dwell_before_s {
+            rest_s = Some(rest_s.unwrap_or(0.0) + dwell_s);
+        }
+        let [x0, y0, z0, e0] = spec.start;
+        let [x1, y1, z1, e1] = spec.end;
         let ctx = geometry::MoveContext {
             extruder_axis: EXTRUDER_AXIS,
-            feedrate_mm_s: feedrate,
-            limits: move_limits,
+            feedrate_mm_s: spec.feedrate,
+            limits: spec.limits,
             source: geometry::SourceRange {
                 start_line: i as u32,
                 end_line: i as u32,
             },
         };
-        match geometry::line_move(start, end, e_delta, ctx) {
-            Ok(m) => moves.push(m),
+        match geometry::line_move([x0, y0, z0], [x1, y1, z1], e1 - e0, ctx) {
+            Ok(m) => {
+                if let Some(dwell_s) = rest_s.take() {
+                    steps.push(PlanStep::Rest { dwell_s });
+                }
+                steps.push(PlanStep::Move(m));
+            }
             Err(geometry::FrontendError::ZeroMotion { .. }) => {}
             Err(e) => {
                 return Err(SnapshotError::InvalidMove {
@@ -284,15 +364,22 @@ pub fn build_moves(
             }
         }
     }
-    if moves.is_empty() {
+    if plan_moves(&steps).next().is_none() {
         return Err(SnapshotError::NoSpatialMoves);
     }
-    Ok(moves)
+    Ok(steps)
 }
 
-pub fn extract_raw_path(moves: &[geometry::Move]) -> Vec<(f64, f64)> {
-    let mut points = Vec::with_capacity(moves.len() + 1);
-    for (i, m) in moves.iter().enumerate() {
+pub fn plan_moves(steps: &[PlanStep]) -> impl Iterator<Item = &geometry::Move> {
+    steps.iter().filter_map(|step| match step {
+        PlanStep::Move(m) => Some(m),
+        PlanStep::Rest { .. } => None,
+    })
+}
+
+pub fn extract_raw_path(steps: &[PlanStep]) -> Vec<(f64, f64)> {
+    let mut points = Vec::with_capacity(steps.len() + 1);
+    for (i, m) in plan_moves(steps).enumerate() {
         if let Some(spatial) = &m.segment.spatial {
             let start = spatial.point_at(0.0);
             if i == 0 {
@@ -394,7 +481,7 @@ fn build_axis_chains(params: &SnapshotParams) -> Result<AxisChainSet, String> {
 /// a single-threaded host (wasm) observe the trajectory growing while
 /// planning is still under way.
 pub fn run_pipeline_streaming(
-    moves: &[geometry::Move],
+    steps: &[PlanStep],
     config: StreamConfig,
     axis_chains: AxisChainSet,
     mut on_progress: impl FnMut(&[ContinuousSegment], Option<&[ContinuousSegment]>),
@@ -403,8 +490,7 @@ pub fn run_pipeline_streaming(
     Vec<ContinuousSegment>,
     Option<Vec<ContinuousSegment>>,
 ) {
-    let spatial_home = moves
-        .iter()
+    let spatial_home = plan_moves(steps)
         .find_map(|m| m.segment.spatial.as_ref())
         .map_or([0.0, 0.0, 0.0], |seg| seg.point_at(0.0));
     let home_pos = vec![spatial_home[0], spatial_home[1], spatial_home[2], 0.0];
@@ -421,13 +507,13 @@ pub fn run_pipeline_streaming(
     };
     let mut shaped = Vec::new();
     let mut toolhead = Vec::new();
-    for m in moves.iter().cloned() {
-        assert!(pipeline.feed(m.into(), &mut |item| {
+    for step in steps.iter().cloned() {
+        assert!(step.feed(|input| pipeline.feed(input, &mut |item| {
             if let TrajectoryItem::Seg(segment) = item {
                 shaped.push(segment);
             }
             true
-        }));
+        })));
         if let Some(rx) = &toolhead_rx {
             toolhead.extend(rx.try_iter());
         }

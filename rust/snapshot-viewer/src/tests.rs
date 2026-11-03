@@ -302,7 +302,11 @@ fn real_snapshot(
     post_processor_decls: Vec<pipeline_snapshot::PostProcessorDecl>,
 ) -> Snapshot {
     let gcode = "G90\nM83\nG1 X60 Y0 F9000\nG1 X60 Y60\nG1 X0 Y60\n";
-    let waypoints = pipeline_snapshot::waypoints::parse_gcode(gcode, 300.0, 3000.0).unwrap();
+    let waypoints = pipeline_snapshot::waypoints::parse_gcode(
+        gcode,
+        &pipeline_snapshot::CartesianLimits::without_z_caps(300.0, 3000.0, f64::INFINITY, 0.0),
+    )
+    .unwrap();
     pipeline_snapshot::pipeline_snapshot(
         &waypoints,
         pipeline_snapshot::SnapshotParams {

@@ -52,8 +52,7 @@ use motion_caps::{drip_cohort_participants, require_events_dir_for_mcu_transport
 #[cfg(test)]
 use runtime_caps::place_motor_response;
 use runtime_caps::{
-    collect_motor_positions_inner, query_ethercat_runtime_caps, query_runtime_caps,
-    require_positive, slots_for_axis,
+    collect_motor_positions_inner, query_ethercat_runtime_caps, query_runtime_caps, slots_for_axis,
 };
 use state::{
     EthercatDrive, EthercatNodeClaim, EthercatRegistration, FlushState, HomingRun, HomingState,
