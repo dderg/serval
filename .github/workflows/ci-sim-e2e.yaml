@@ -40,9 +40,21 @@ jobs:
               tools/sim/tests/test_heaters_fans.py
               tools/sim/tests/test_phase_stepping.py
               tools/sim/tests/test_probe_calibrate.py
+          - shard: rest-slow
+            targets: >-
+              tools/sim/tests/test_clock_estimate.py
+              tools/sim/tests/test_cartographer.py
+              tools/sim/tests/test_stepper_enable_print_end.py
+              tools/sim/tests/test_homing_pressed_endstop.py
+              tools/sim/tests/test_homing_multi_endstop.py
           - shard: rest
             targets: >-
               tools/sim/tests
+              --ignore=tools/sim/tests/test_clock_estimate.py
+              --ignore=tools/sim/tests/test_cartographer.py
+              --ignore=tools/sim/tests/test_stepper_enable_print_end.py
+              --ignore=tools/sim/tests/test_homing_pressed_endstop.py
+              --ignore=tools/sim/tests/test_homing_multi_endstop.py
               --ignore=tools/sim/tests/test_probe.py
               --ignore=tools/sim/tests/test_neptune_print.py
               --ignore=tools/sim/tests/test_print.py

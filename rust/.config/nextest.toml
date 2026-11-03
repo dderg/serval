@@ -30,3 +30,16 @@ status-level = "slow"
 [profile.ci.slow-timeout]
 period = "60s"
 terminate-after = 3
+
+# Nightly property suites run ten times the PR case count and exceed the ci
+# profile's 180 s limit (seven to nine of them timed out on every nightly run
+# so far). Only a test running for half an hour is terminated.
+[profile.nightly]
+retries = 0
+fail-fast = false
+final-status-level = "fail"
+status-level = "slow"
+
+[profile.nightly.slow-timeout]
+period = "300s"
+terminate-after = 6
