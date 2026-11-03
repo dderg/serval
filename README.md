@@ -234,23 +234,28 @@ Design detail: [docs/rewrite/shaper.md](docs/rewrite/shaper.md).
 
 ### Evaluating an extruder chain
 
-`tools/corner_flow.py` plans standard corners, a zigzag and two perimeters
-under a printer config and measures the bead the nozzle lays along the
-shaped path, through a first-order melt model with time constant K (by
-default the configured pressure advance):
+`tools/corner_flow.py` plans standard corners, a zigzag, two perimeters
+and a retract under a printer config and measures the bead the nozzle lays
+along the shaped path, through a first-order melt model with time constant
+K (by default the configured pressure advance):
 
 ```
 make -f Makefile.rust motion-engine-fast
 python3 tools/corner_flow.py printer.cfg
 python3 tools/corner_flow.py printer.cfg --sweep smooth_time=0.005,0.01,0.02
 python3 tools/corner_flow.py printer.cfg --set pa.k=0.04 --melt-k 0.03 --json
+python3 tools/corner_flow.py printer.cfg --ramp 0.015 --sweep ratio_ramp_time=0.01,0.02
 ```
 
 - **`peak` / `dip`** are the worst bead over- and under-fill at a corner,
   in % of the nominal bead. **`w>5%`** is how far along the path it stays
   off by more than 5%, and **`blob`** the over-filled volume per corner,
   in nL. Where flow changes or stops at speed, any smoothing sits at about
-  ±50% at the switch itself, so read `w>5%` and `blob` there.
+  ±50% at the switch itself, so read `w>5%` and `blob` there. Material moved
+  while the toolhead rests (a retract and its prime) is left out.
+- **`ve±` / `ae`** are the extruder's peak velocity and acceleration while
+  the nozzle moves; **`|ve|*` / `|ae|*`** the same over the whole run,
+  retracts and primes included.
 - **`dE_gc`** is the extruded total minus the G-code's. It is negative by
   design where corners are cut: the bead follows the shorter path.
   **`dE_adv`** compares against the same chain without its advance. The
@@ -263,6 +268,17 @@ python3 tools/corner_flow.py printer.cfg --set pa.k=0.04 --melt-k 0.03 --json
   with 0.02, +24% with 0.01 and +7% with 0.005, at matched K. A shorter
   kernel costs extruder acceleration (the `ae` column, 597 → 3436 mm/s²
   on the same corner), so keep it as short as the extruder tolerates.
+- **`--ramp TAU` replaces the kernel with `ratio_ramp_time`.** The advance
+  then runs unblurred: every corner lays the commanded bead to 0%, a 1.5×
+  flow change spreads over `v·τ` (`w>5%` 0.4 mm against 5.2 mm with the
+  0.04 s kernel at 150 mm/s) and retracts keep their extrude-only caps. The
+  price is the extruder acceleration an exact advance asks for at every
+  corner: 7600–19600 mm/s² on the bench config at 50–300 mm/s, 10–30× the
+  kernel's. It is not the default: a ramp is capped at half its shortest
+  neighbouring span, so the tiny corner blends of a high-acceleration,
+  low-deviation printer (Trident: 70000 mm/s², scv 5) and a dense real print
+  leave near-steps — 500 mm/s extruder spikes on the travel perimeter, and
+  the dense top layers refused outright.
 
 ---
 
