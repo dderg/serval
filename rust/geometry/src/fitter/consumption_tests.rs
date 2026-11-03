@@ -409,3 +409,40 @@ fn roomy_facet_is_not_consumed() {
         "a facet with room for its own blends keeps them"
     );
 }
+
+fn heading(degrees: f64) -> [f64; 3] {
+    let radians = degrees.to_radians();
+    [libm::cos(radians), libm::sin(radians), 0.0]
+}
+
+/// In along +x, a `facet_mm` facet turned `first` degrees, then out turned a
+/// further `second` degrees.
+fn two_turns(first: f64, second: f64, facet_mm: f64) -> (Move, Move, Move) {
+    let v1 = [10.0, 0.0, 0.0];
+    let v2 = crate::vec3::madd(v1, facet_mm, heading(first));
+    let end = crate::vec3::madd(v2, 10.0, heading(first + second));
+    (
+        seg(1, [0.0, 0.0, 0.0], v1, 0.1),
+        seg(2, v1, v2, 0.1),
+        seg(3, v2, end, 0.1),
+    )
+}
+
+#[test]
+fn s_jog_after_a_sharp_turn_is_not_consumed() {
+    let (a, mid, b) = two_turns(-100.0, 30.0, 0.01);
+    let fc =
+        plan_facet_consumption(&a, &[&mid], &b, CornerFitConfig::default(), (0.0, 0.0)).unwrap();
+    assert!(
+        fc.is_none(),
+        "opposite-turn jog cannot be one same-sign blend"
+    );
+}
+
+#[test]
+fn large_same_sense_turns_are_consumed() {
+    let (a, mid, b) = two_turns(95.0, 50.0, 0.01);
+    let fc =
+        plan_facet_consumption(&a, &[&mid], &b, CornerFitConfig::default(), (0.0, 0.0)).unwrap();
+    assert!(fc.is_some(), "two left turns may be one blend");
+}

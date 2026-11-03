@@ -23,7 +23,7 @@ use crate::worker_pool::WorkerPool;
 mod hidden_breaks;
 
 #[path = "shaper_exact.rs"]
-mod exact;
+pub(crate) mod exact;
 
 #[path = "shaper_hull.rs"]
 mod hull;
@@ -4628,6 +4628,7 @@ fn refine_span_against<S: TrackSignal>(
                 accepted_at_floor: false,
                 cubic_floor: floors.cubic,
                 edge_insets,
+                exact,
             },
         );
         out.push(exact_piece(&mono_u, t0, t1, t1 - t0));
@@ -4673,10 +4674,8 @@ fn refine_span_against<S: TrackSignal>(
                     mono_u: &mono_u,
                     accepted_at_floor: true,
                     cubic_floor: floors.cubic,
-                    edge_insets: (
-                        edge_inset(t1 - t0, floors.cubic, slivers.start),
-                        edge_inset(t1 - t0, floors.cubic, slivers.end),
-                    ),
+                    edge_insets,
+                    exact,
                 },
             );
             out.push(exact_piece(&mono_u, t0, t1, t1 - t0));
