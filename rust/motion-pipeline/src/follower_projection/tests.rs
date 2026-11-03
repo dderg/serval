@@ -322,6 +322,36 @@ fn rounding_noise_on_a_resting_leader_leaves_the_follower_partition_unchanged() 
     }
 }
 
+/// The times a resting leader component is probed at are arbitrary, so its
+/// rest seeds no fit piece of the follower.
+#[test]
+fn a_resting_leader_seeds_nothing_inside_its_rest() {
+    let (t0, rest, t1) = (300.0, 0.01, 300.02);
+    let x = bezier_pieces_to_nurbs(&[BezierPiece {
+        u_start: t0,
+        u_end: t1,
+        coeffs: vec![1.0, 20.0, 500.0],
+    }]);
+    let shaped = leader_segment(x, resting_y(t0, rest, t1, false), t0, t1);
+    let raw = shaped.clone();
+    let state = FollowerState::default();
+    let sig = FollowerSignal::new(
+        &shaped,
+        &raw,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    let seeds = sig.construction_breakpoints(&raw.axes[3], 50.0).fit_seeds;
+    assert!(
+        seeds.iter().all(|&seed| seed <= t0 || seed >= t0 + rest),
+        "the rest over [{t0}, {}] seeded {seeds:?}",
+        t0 + rest
+    );
+}
+
 #[test]
 fn leader_speed_step_on_the_grid_is_seeded_as_a_construction_breakpoint() {
     let (t0, step_at, t1) = (0.0, 0.01, 0.02);
