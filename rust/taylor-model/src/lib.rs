@@ -344,9 +344,8 @@ impl TaylorModel {
 
     /// `f(self)` for an `f` with `f(c₀ + d) = Σₖ seriesₖ·dᵏ + R` on the
     /// model's range when `n` terms are kept, `|R| ≤ tail(n, reach)` for
-    /// `|d| ≤ reach`. The series stops at the first `n` whose tail is
-    /// within [`TRIM_SHARE`] of its leading terms, where a product would
-    /// trim what the next terms add, so a narrow window costs few products.
+    /// `|d| ≤ reach`. The series stops at the first `n` whose tail is at the
+    /// rounding of its leading terms, so a narrow window costs few products.
     fn compose(&self, series: &[Ball], tail: impl Fn(usize, f64) -> f64) -> Self {
         let mut deviation = *self;
         deviation.coefficients[0] = 0.0;

@@ -144,5 +144,8 @@ fn a_rung_or_an_enclosure_with_a_nan_is_never_proven() {
         (T0, T1),
         POSITION_ONLY,
     );
-    assert!(verdict.is_some(), "a NaN signal is proven within the budget");
+    assert!(
+        verdict.is_some(),
+        "a NaN signal is proven within the budget"
+    );
 }
