@@ -8,7 +8,7 @@ use trajectory::{
     RelativeSplinePiece, ShapedSignal,
 };
 
-use crate::lowering::{FitTol, follower_tol_scale};
+use crate::lowering::{AccelBudget, FitTol, follower_tol_scale};
 use crate::shaper::{
     AxisFit, AxisSignalTable, ConvolutionSignal, ExactConvolution, ExactKernel, FitBoundary,
     KnotJumpBound, Lookahead, MIN_DEVICE_INTERVAL_S, SEGMENT_TIME_EPS_S, ShiftedTrackSignal,
@@ -37,7 +37,26 @@ const REST_ACCELERATION_SHARE: f64 = 1.0 / (1_u64 << 30) as f64;
 fn follower_fit_tol(fit_tol: FitTol, position_scale: f64) -> FitTol {
     FitTol {
         pos_mm: fit_tol.pos_mm * position_scale,
-        accel_mm_s2: fit_tol.accel_mm_s2,
+        ..fit_tol
+    }
+}
+
+/// What a follower's source fit spends on acceleration. An advance applied
+/// before projection makes the source the advanced signal, read on the
+/// shaped path: its acceleration carries `k·r·jerk` of the path while the
+/// extruder moves a fraction of its position tolerance, and nothing after
+/// it differentiates the fit, so it spends its position budget
+/// ([`AccelBudget::PositionEquivalent`]). Every other follower fit keeps
+/// the absolute budget. The plain projection a kernel chain's linear
+/// advance differentiates would turn its velocity error `δ'` into `k·δ'`
+/// of command position, which the position-equivalent budget does not
+/// bound; a kernel's output carries only the path's own acceleration,
+/// which the absolute budget resolves in long pieces, and spending its
+/// position budget there moves the bead the melt lag lays.
+fn source_accel_budget(leading: Option<LeadingAdvance>) -> AccelBudget {
+    match leading {
+        Some(_) => AccelBudget::PositionEquivalent,
+        None => AccelBudget::Absolute,
     }
 }
 
@@ -516,6 +535,10 @@ pub(crate) fn project_followers(
         let kernel = chain.kernel();
         let defer_linear_prefix = chain.follower_linear_transform();
         let leading = LeadingAdvance::of(chain);
+        let source_tol = FitTol {
+            accel_budget: source_accel_budget(leading),
+            ..fit_tol
+        };
         let leaders_transformed = leaders.iter().any(|&leader| {
             chains
                 .chains
@@ -628,7 +651,7 @@ pub(crate) fn project_followers(
                                 s_start,
                                 s_length,
                             },
-                            fit_tol,
+                            source_tol,
                             leading,
                         ),
                     )
@@ -724,7 +747,7 @@ pub(crate) fn project_followers(
                     leading.map(|advance| advance.stage),
                     axis,
                     projected,
-                    follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis)),
+                    follower_fit_tol(source_tol, follower_tol_scale(&raw.followers, axis)),
                 )?
             };
             if !track.control_points().iter().all(|v| v.is_finite()) {

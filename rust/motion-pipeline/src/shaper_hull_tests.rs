@@ -3,18 +3,12 @@ use crate::lowering::FitTol;
 use crate::shaper::exact::{EXACT_CAPACITY, ExactPiece, LocalPolynomial};
 
 const POSITION_ONLY: HullBudget = HullBudget {
-    tol: FitTol {
-        pos_mm: 1.0,
-        accel_mm_s2: f64::INFINITY,
-    },
+    tol: FitTol::absolute(1.0, f64::INFINITY),
     velocity: f64::INFINITY,
 };
 
 const ACCELERATION_ONLY: HullBudget = HullBudget {
-    tol: FitTol {
-        pos_mm: f64::INFINITY,
-        accel_mm_s2: 1.0,
-    },
+    tol: FitTol::absolute(f64::INFINITY, 1.0),
     velocity: f64::INFINITY,
 };
 

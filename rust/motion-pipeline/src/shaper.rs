@@ -3777,6 +3777,7 @@ fn shaped_ladder<S: TrackSignal>(
     let axis = policy.axis;
     let fit_tol = policy.fit_tol;
     let h = t1 - t0;
+    let piece_tol = fit_tol.for_piece(h);
     let t_of = |u: f64| nurbs::fmadd(0.5 * (u + 1.0), h, t0);
     let from_start = FacingRead {
         sig,
@@ -3883,7 +3884,7 @@ fn shaped_ladder<S: TrackSignal>(
             held_ranks_misses: keeps_closest_rung,
         },
         LadderBudget {
-            tol: fit_tol,
+            tol: piece_tol,
             velocity: policy.velocity_budget,
         },
         LadderPolicy {
@@ -3905,7 +3906,7 @@ fn shaped_ladder<S: TrackSignal>(
                     },
                     resolved,
                     HullBudget {
-                        tol: fit_tol,
+                        tol: piece_tol,
                         velocity: policy.velocity_budget,
                     },
                 ),
@@ -3916,7 +3917,7 @@ fn shaped_ladder<S: TrackSignal>(
                         coefficients: &coefficients,
                         t0,
                         h,
-                        fit_tol,
+                        fit_tol: piece_tol,
                     },
                     t1,
                     &truth,
@@ -4099,7 +4100,7 @@ fn refine_span_against<S: TrackSignal>(
                     position_budget: fit_tol.pos_mm,
                     velocity_error: failure.error.velocity,
                     acceleration_error: failure.error.acceleration,
-                    acceleration_budget: fit_tol.accel_mm_s2,
+                    acceleration_budget: fit_tol.for_piece(t1 - t0).accel_mm_s2,
                 });
             }
             #[cfg(feature = "fit-audit")]
@@ -4148,7 +4149,7 @@ fn refine_span_against<S: TrackSignal>(
             velocity_error: failure.error.velocity,
             velocity_budget,
             acceleration_error: failure.error.acceleration,
-            acceleration_budget: fit_tol.accel_mm_s2,
+            acceleration_budget: fit_tol.for_piece(t1 - t0).accel_mm_s2,
             source_position: failure.source.position,
             source_velocity: failure.source.velocity,
             source_acceleration: failure.source.acceleration,

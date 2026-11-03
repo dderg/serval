@@ -1,9 +1,11 @@
 //! `max_path_deviation` and `max_accel_deviation` are promises: every piece
 //! a fit accepts must stay within them against the exact signal it replaces,
-//! everywhere inside the piece — not just at the ladder's probe points. This
-//! replays every snapshot case and a whole dense real print through the
-//! pipeline with the fit audit on, and fails on any accepted piece that
-//! leaves the tolerance.
+//! everywhere inside the piece — not just at the ladder's probe points. A
+//! follower's acceleration promise is per piece: the looser of
+//! `max_accel_deviation` and the acceleration that spends its position
+//! tolerance over the piece. This replays every snapshot case and a whole
+//! dense real print through the pipeline with the fit audit on, and fails
+//! on any accepted piece that leaves the tolerance.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
