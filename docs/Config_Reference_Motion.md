@@ -302,13 +302,17 @@ extruded material equals the unsmoothed projection's wherever the ratio is
 constant across the kernel and at every rest.
 
 Each step takes its own τ: the shortest between 5 and 30 ms that keeps the
-advanced extruder within the axis's `max_velocity` and `max_accel` at the
-leaders' speed and acceleration there. Without an advance a step `Δr` at
-speed `v` needs `τ ≥ 1.5·Δr·v/A_e`; with a linear advance `k`, at a steady
-speed, `τ ≥ √(6·k·Δr·v/A_e)`. Where even 30 ms would exceed the limits at
-the speed the path allows, the velocity planner slows the toolhead at the
-step instead, and that time is the cost. The former `ratio_ramp_time`
-option was removed; setting it is a config error.
+advanced extruder within the axis's `max_velocity` and `max_accel` (V_e,
+A_e) at the leaders' speed, acceleration and jerk there, reading the
+advance through its slope `k` (a linear advance's `k`, a nonlinear one's
+`linear_advance + nonlinear_offset / linearization_velocity`). For a step
+`Δ = |Δr|·v` at a steady speed `v` onto a flow `r·v`, that is about
+`τ = max(5 ms, √(6·k·Δ/A_e), 1.45·k·Δ/(V_e − r·v))`; without an advance,
+`τ = max(5 ms, 1.5·Δ/A_e)`. An axis with neither limit set or inherited
+ramps every step over 5 ms. Where even 30 ms would exceed the limits at
+the speed the path allows, the velocity planner lowers the toolhead speed
+at the step instead, and that time is the cost. The former
+`ratio_ramp_time` option was removed; setting it is a config error.
 
 On every chain the advance applies only to the extrusion laid along the
 leaders' path, as Klipper advances only extruding moves that travel, so
