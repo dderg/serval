@@ -859,11 +859,12 @@ fn every_piece_on_a_declared_square_root_onset_holds_the_tolerance_up_to_its_res
 /// steep enough there that the reading past the edge sliver, extrapolated
 /// back, misses the seam reading by more than the tolerance: the edge
 /// anchors to the extrapolation, as it would past a break hidden in the
-/// sliver.
+/// sliver, unless the signal seeds every break it has.
 struct SaturatingRise {
     t0: f64,
     rise: f64,
     time: f64,
+    seeds_every_break: bool,
 }
 
 impl TrackSignal for SaturatingRise {
@@ -876,6 +877,10 @@ impl TrackSignal for SaturatingRise {
             -10.0 + rise * (tau - time * settled),
             rise * settled,
         )
+    }
+
+    fn seeds_every_break(&self) -> bool {
+        self.seeds_every_break
     }
 }
 
@@ -894,11 +899,47 @@ fn a_piece_anchored_past_its_edge_sliver_holds_the_tolerance_from_its_resolved_e
         t0: 24.907_472_866,
         rise: 3e3,
         time: 3e-6,
+        seeds_every_break: false,
     };
     let fit = AxisFit {
         axis: 0,
         t_start: sig.t0,
         t_end: sig.t0 + 2e-4,
+        seed_breakpoints: &[],
+        fit_tol,
+        fit_context: "steep edge",
+        velocity_continuous: false,
+    };
+    let cubic_floor = seed_floors(&fit, &sig, &[fit.t_start, fit.t_end]).cubic;
+    let track = fit_axis_from_signal(fit, &sig).expect("a smooth rise fits");
+    let worst = worst_resolved_acceleration_miss(&track, &sig, cubic_floor);
+    assert!(
+        worst <= fit_tol.accel_mm_s2,
+        "the steep edge leaves the tolerance by {worst} mm/s²"
+    );
+}
+
+/// On a signal that seeds every break, a sliver nothing was coalesced
+/// into, with no knot of the signal in it, hides no break, yet a rise this
+/// steep at the edge reads like one past it: the floor pieces it refined
+/// to anchored to the extrapolation and missed the rise by 1.59× the
+/// tolerance.
+#[test]
+fn a_steep_edge_with_nothing_absorbed_into_its_sliver_anchors_to_the_seam_reading() {
+    let fit_tol = FitTol {
+        pos_mm: 0.005,
+        accel_mm_s2: 50.0,
+    };
+    let sig = SaturatingRise {
+        t0: 24.907_472_866,
+        rise: 1e4,
+        time: 1e-6,
+        seeds_every_break: true,
+    };
+    let fit = AxisFit {
+        axis: 0,
+        t_start: sig.t0,
+        t_end: sig.t0 + 6e-5,
         seed_breakpoints: &[],
         fit_tol,
         fit_context: "steep edge",
