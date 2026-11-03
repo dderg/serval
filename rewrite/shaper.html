@@ -2223,8 +2223,8 @@ carry, so each emitted segment is refit (<code>fit_axis_from_signal</code>) with
 ladder the lowerer uses: two endpoint-anchored quadratics that carry the
 span's travel, a cubic through both endpoint velocities, a quintic Hermite
 base matching the signal's exact <code>(p, v, a)</code> at both span ends, then degree
-6/7 from interior residuals — bisecting spans until the fit meets
-<code>SHAPED_FIT_TOL_MM = 1e-3</code> and <code>SHAPED_FIT_TOL_ACCEL_MM_S2 = 50</code>. Sliver spans
+6/7 from interior residuals — bisecting spans until the fit meets the
+configured <code>max_path_deviation</code> and <code>max_accel_deviation</code>. Sliver spans
 below <code>SHAPED_FIT_MIN_SPAN_S</code> are carried as exact-endpoint linear pieces
 instead of dividing by a near-zero duration. Finally
 <code>pad_segment_axes_to_uniform_degree</code> zero-pads so kinematics lane mixing
@@ -2238,6 +2238,31 @@ differentiates — the leaders a projected follower rides, and the follower's
 own raw fit when its leaders are unshaped — are therefore fitted with
 <code>velocity_continuous</code>: the quadratics are withheld and every seam carries
 the signal's own velocity.</p>
+<p>A follower's fits are held to <code>max_path_deviation</code> times its largest demand
+ratio (<code>follower_tol_scale</code>; the projected source fit takes half of it).
+Where an advance applies before projection — a kernel-free linear advance,
+with or without <code>ratio_ramp_time</code>, or a nonlinear advance before a kernel —
+the source fit fits the advanced signal itself, and each of its pieces of
+duration <code>h</code> is held to the acceleration budget
+<code>max(max_accel_deviation, 8ε/h²)</code> (<code>AccelBudget::PositionEquivalent</code>), <code>ε</code>
+being that position tolerance. Every rung meets the signal's position at
+both piece ends, and an error pinned there whose acceleration stays within
+<code>8ε/h²</code> stays within <code>ε</code> in between (<code>|δ(t)| ≤ max|δ''|·t(h−t)/2</code>): the
+acceleration budget spends the position budget, no more. The melt lag <code>K</code>
+the bead model uses (<code>e_cmd = e_out + K·ė_out</code>, <code>tools/corner_flow.py</code>)
+turns a command error within <code>ε</code> into a nozzle-flow error of at most
+<code>2ε/K</code> — <code>ε = 0.5 · 0.005 · 0.033 ≈ 83 nm</code> of filament and <code>K = 0.02 s</code>
+bound it at 0.5 % of a 50 mm/s line and 0.08 % of a 300 mm/s one. An
+absolute 50 mm/s² on that signal, which carries <code>k·r·jerk</code> of the shaped
+path (~65 000 mm/s² on a 70 000 mm/s² Trident with <code>k = 0.02</code>), demanded
+pieces no deposition resolves. Every other follower fit keeps the absolute
+budget: the plain projection a kernel chain's linear advance differentiates
+would turn velocity error <code>δ'</code> into <code>k·δ'</code> of command position, which the
+position-equivalent budget does not bound, and spending the position budget
+on a kernel's output moved the corner bead by up to 0.15 points at 50 mm/s.
+Leaders, and the follower's weld, edge-break and floor checks, keep the
+absolute budget; the fit audit holds every piece to the budget its fit
+resolved for it.</p>
 <p>Leader refits use ordered parallel work without changing the fitted signal.
 Axes run concurrently. Ordinary windows distribute whole target segments;
 a target with at least 512 exact cut spans distributes those spans instead.

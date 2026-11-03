@@ -2247,9 +2247,16 @@ max_accel: 3000
 #   Optional. Default is max_accel. Must be &gt; 0 and &lt;= max_accel.
 #   Z acceleration limit in mm/s^2.
 #max_path_deviation: 0.005
-#   Optional. Default is 0.005 mm. Must be &gt; 0 and &lt;= 1.
+#   Optional. Default is 0.005 mm. Must be &gt; 0 and &lt;= 1. Follower axes
+#   (the extruder) are fitted to this times their largest extrusion ratio,
+#   clamped to 0.01..1.
 #max_accel_deviation: 50
-#   Optional. Default is 50 mm/s^2. Must be &gt; 0.
+#   Optional. Default is 50 mm/s^2. Must be &gt; 0. A follower axis whose
+#   pressure advance applies before projection (no kernel after a linear
+#   advance, or a nonlinear advance before one) holds each piece of its
+#   advanced fit, of duration h, to the looser of this and 8*e/h^2, e being
+#   its scaled path deviation: the acceleration error a piece pinned at
+#   both ends can carry while staying within e.
 </code></pre></div>
 
 <p><code>corner_deviation</code> is the canonical corner budget. Setting both corner options is an error. <code>max_accel_to_decel</code> and <code>minimum_cruise_ratio</code> are explicitly unsupported rather than ignored.</p>
