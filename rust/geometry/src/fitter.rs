@@ -204,23 +204,25 @@ pub fn arc_candidate_fits(facets: &[Move], config: CornerFitConfig) -> bool {
 /// Classify a line-line junction whose adjoining lengths are partly consumed
 /// by neighboring arc-run easing: `in_reduction` is spent from `m_in`'s length
 /// (a run behind it eased into its head), `out_reduction` from `m_out`'s (a
-/// run ahead eases into its tail). `head_trim` is what the blend before
-/// `m_in` already took from its head, so the blend leaves the body between
-/// them either whole or no shorter than [`shortest_line_body_mm`], unless
-/// the G-code line itself is shorter than that.
+/// run ahead eases into its tail). `head_trim` is what the element before
+/// `m_in` already took from its head and `tail_trim` what the run after
+/// `m_out` takes from its tail — easing plus boundary blend — so the blend
+/// leaves each body between them either gone or no shorter than
+/// [`shortest_line_body_mm`], unless the G-code line itself is shorter than
+/// that.
 pub fn plan_junction_reduced(
     m_in: &Move,
     m_out: &Move,
     config: CornerFitConfig,
     (in_reduction, head_trim): (f64, f64),
-    out_reduction: f64,
+    (out_reduction, tail_trim): (f64, f64),
 ) -> Result<JunctionPlan, FitError> {
     classify_junction(
         m_in,
         m_out,
         config,
         (in_reduction, head_trim),
-        out_reduction,
+        (out_reduction, tail_trim),
     )
 }
 
@@ -237,16 +239,16 @@ fn shortest_line_body_mm(m: &Move) -> f64 {
 }
 
 /// The most of a line a run's easing or boundary blend may claim from one
-/// end: half the line, so whatever claims the other end keeps the far half,
-/// and no more than leaves the body floor, so that claimer can still keep the
-/// body whole or at least the floor. A line shorter than the floor is its own
-/// geometry and keeps the half rule alone.
+/// end: half of what the line holds past the body floor, so the claims at
+/// both its ends — two runs, or a run and a corner — leave it at least the
+/// floor and the corner at its other end can always stay sharp. A line
+/// shorter than the floor is its own geometry and keeps the half rule alone.
 pub(super) fn line_claim_cap(m: &Move, length: f64) -> f64 {
     let floor = shortest_line_body_mm(m);
     if length < floor {
         return 0.5 * length;
     }
-    (0.5 * length).min(length - floor)
+    0.5 * (length - floor)
 }
 
 fn shortest_executable_mm(feedrate: f64, limits: VelocityLimits) -> f64 {
@@ -289,7 +291,7 @@ pub fn fit_corners(moves: &[Move], config: CornerFitConfig) -> Result<FitOutcome
             &pair[1],
             config,
             (0.0, head_trim),
-            0.0,
+            (0.0, 0.0),
         )?);
     }
 
@@ -390,13 +392,15 @@ pub fn facet_consumption_candidate(
 /// per-junction blends it replaces (near the squeeze limit, two blends with
 /// their own footprints traverse faster than one blend squeezed through the
 /// whole turn); every facet's extrusion fits the ramp the anchors span; and
-/// the blend's extrusion ramps pass the kinematic gate.
+/// the blend's extrusion ramps pass the kinematic gate. `tail_trim` is what
+/// the run after `m_out` takes from its tail.
 pub fn plan_facet_consumption(
     m_in: &Move,
     mids: &[&Move],
     m_out: &Move,
     config: CornerFitConfig,
     (in_reduction, head_trim): (f64, f64),
+    tail_trim: f64,
 ) -> Result<Option<FacetConsumption>, FitError> {
     let [first_mid, ..] = mids else {
         return Ok(None);
@@ -482,7 +486,7 @@ pub fn plan_facet_consumption(
                 .trim_leaving_the_floor(),
         )
         .min(
-            LineRoom::of(line_out.s_len(), 0.0, shortest_line_body_mm(m_out))
+            LineRoom::of(line_out.s_len(), tail_trim, shortest_line_body_mm(m_out))
                 .trim_leaving_the_floor(),
         );
     let mut vertices = Vec::with_capacity(mids.len() + 1);
@@ -628,7 +632,7 @@ fn classify_junction(
     m_out: &Move,
     config: CornerFitConfig,
     (in_reduction, head_trim): (f64, f64),
-    out_reduction: f64,
+    (out_reduction, tail_trim): (f64, f64),
 ) -> Result<JunctionPlan, FitError> {
     let (line_in, line_out) = match (move_ops::line_of(m_in), move_ops::line_of(m_out)) {
         (Some(a), Some(b)) => (a, b),
@@ -704,11 +708,7 @@ fn classify_junction(
         ));
     }
     let inbound = LineRoom::of(line_in.s_len(), head_trim, shortest_line_body_mm(m_in));
-    let outbound = LineRoom::of(
-        line_out.s_len(),
-        out_reduction,
-        shortest_line_body_mm(m_out),
-    );
+    let outbound = LineRoom::of(line_out.s_len(), tail_trim, shortest_line_body_mm(m_out));
     let trims_in = inbound.trims_leaving_no_sliver(bi.trim_in);
     let trims_out = outbound.trims_leaving_no_sliver(bi.trim_out);
     if trims_in == [bi.trim_in; 2] && trims_out == [bi.trim_out; 2] {
