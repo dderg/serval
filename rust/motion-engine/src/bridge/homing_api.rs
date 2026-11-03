@@ -283,19 +283,14 @@ impl PyMotionEngine {
                         return;
                     }
                     fired.store(true, Ordering::SeqCst);
-                    let clock32 = params.try_get_u32("clock").unwrap_or_else(|| {
-                        panic!("mcu {mcu_handle}: trsync_state report carried no clock parameter")
-                    });
-                    let reference = router
-                        .lock_ok()
-                        .compute_ack_clock(host_rt::passthrough_queue::McuHandle::from_raw(
-                            mcu_handle,
-                        ))
-                        .unwrap_or_else(|e| {
-                            panic!("mcu {mcu_handle}: trip relay has no clock estimate ({e:?}) to expand the trip clock against")
-                        });
-                    let clock64 =
-                        motion_services::remote_trigger::relay_trip_clock(clock32, reference);
+                    let clock32 = params.try_get_u32("clock");
+                    let clock64 = motion_services::remote_trigger::trip_clock_from_report(
+                        mcu_handle,
+                        clock32,
+                        router.lock_ok().compute_ack_clock(
+                            host_rt::passthrough_queue::McuHandle::from_raw(mcu_handle),
+                        ),
+                    );
                     tracing::info!(
                         subsystem = "trip-relay",
                         event = "remote_trigger_fired",

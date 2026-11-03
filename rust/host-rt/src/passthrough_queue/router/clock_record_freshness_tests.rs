@@ -195,3 +195,29 @@ fn a_capture_stamp_ahead_of_the_router_is_rejected() {
     ));
     assert!(router.clock_record(mcu).is_none());
 }
+
+#[test]
+fn a_host_time_within_the_centroid_lag_projects_but_one_beyond_the_bound_is_refused() {
+    let (mut router, _clock) = router();
+    let mcu = router.claim_mcu("mcu");
+    publish_with_centroid_lag(&mut router, mcu, 1_000, 10.0);
+    let record = router.clock_record(mcu).expect("record present");
+    let reference = record.clock_offset;
+
+    let before_reference = router
+        .host_time_to_mcu_clock(mcu, reference - 5.0)
+        .expect("an instant a few seconds before the centroid is inside the window");
+    assert_eq!(before_reference, record.last_clock);
+
+    let beyond = reference - crate::clock_projection::NEGATIVE_PROJECTION_BOUND_SECS - 1.0;
+    match router.host_time_to_mcu_clock(mcu, beyond) {
+        Err(RouterError::ProjectionBeyondBound { error, .. }) => {
+            assert_eq!(error.host_secs, beyond);
+        }
+        other => panic!("expected ProjectionBeyondBound, got {other:?}"),
+    }
+    match router.host_time_to_mcu_clock(mcu, -1.0e6) {
+        Err(RouterError::ProjectionBeyondBound { .. }) => {}
+        other => panic!("a wildly stale host time must be refused, got {other:?}"),
+    }
+}

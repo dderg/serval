@@ -373,3 +373,42 @@ fn a_reanchor_reseeds_from_the_live_clock_not_the_drifted_frozen_slope() {
          clock), got {err_secs:.6} s of error — the chained drift must not survive"
     );
 }
+
+fn ethercat_pump_sink(router: PassthroughRouter) -> Projection {
+    let mut sink = pump_sink(router);
+    sink.mcu_configs[0].ethercat = true;
+    sink
+}
+
+#[test]
+fn a_live_projection_allows_a_host_time_before_the_centroid_but_not_one_beyond_the_bound() {
+    let clock = MockClock::new();
+    let mut router =
+        PassthroughRouter::with_clock(Arc::clone(&clock) as Arc<dyn Clock + Send + Sync>);
+    router.claim_mcu("mcu");
+    seed_clock(&mut router, F_TRUE, 10.0, 1_000_000);
+    let sink = ethercat_pump_sink(router);
+    let record = sink.live_clock_record(MCU_ID);
+
+    let inside = record.clock_offset - 5.0;
+    assert_eq!(
+        sink.project_exact(MCU_ID, inside),
+        record.last_clock as f64,
+        "an instant before the centroid projects to the reference clock"
+    );
+}
+
+#[test]
+#[should_panic(expected = "beyond the")]
+fn a_live_projection_of_a_host_time_beyond_the_bound_is_refused() {
+    let clock = MockClock::new();
+    let mut router =
+        PassthroughRouter::with_clock(Arc::clone(&clock) as Arc<dyn Clock + Send + Sync>);
+    router.claim_mcu("mcu");
+    seed_clock(&mut router, F_TRUE, 10.0, 1_000_000);
+    let sink = ethercat_pump_sink(router);
+    let record = sink.live_clock_record(MCU_ID);
+    let beyond =
+        record.clock_offset - host_rt::clock_projection::NEGATIVE_PROJECTION_BOUND_SECS - 1.0;
+    let _ = sink.project_exact(MCU_ID, beyond);
+}
