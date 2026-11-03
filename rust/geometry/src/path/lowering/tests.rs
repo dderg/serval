@@ -1,6 +1,6 @@
 use super::PositionProfile;
 use super::fresnel::clothoid_offset;
-use crate::path::{Arc, Clothoid, CurvatureProfile, Line};
+use crate::path::{Arc, Clothoid, CurvatureProfile, Line, Segment};
 
 const UNIT_U: [f64; 3] = [1.0, 0.0, 0.0];
 const UNIT_V: [f64; 3] = [0.0, 1.0, 0.0];
@@ -344,4 +344,34 @@ fn ac_fres1_constant_curvature_sagitta_survives_a_vanishing_turn() {
             "turn={turn}: sagitta {cy} vs {sagitta}"
         );
     }
+}
+
+/// A segment lying in a plane normal to an axis never leaves its coordinate
+/// there: every point reads it and the heading has no component along it.
+#[test]
+fn held_coordinate_is_the_plane_every_point_lies_in() {
+    let z = 0.35;
+    let segments = [
+        Segment::Line(Line::try_new([1.0, 2.0, z], [4.0, -3.0, z]).expect("line")),
+        Segment::Arc(Arc::try_new([1.0, 2.0, z], UNIT_U, UNIT_V, 2.5, 0.3, 1.7).expect("arc")),
+        Segment::Clothoid(
+            Clothoid::try_new([1.0, 2.0, z], UNIT_U, UNIT_V, 0.4, 0.9, 3.0).expect("clothoid"),
+        ),
+    ];
+    for segment in &segments {
+        assert_eq!(segment.held_coordinate(2), Some(z), "{segment:?}");
+        assert_eq!(segment.held_coordinate(0), None, "{segment:?}");
+        assert_eq!(segment.held_coordinate(1), None, "{segment:?}");
+        let length = segment.s_len();
+        for k in 0..=16 {
+            let s = length * f64::from(k) / 16.0;
+            assert_eq!(segment.point_at(s)[2], z, "{segment:?} at s={s}");
+            assert_eq!(segment.heading_at(s)[2], 0.0, "{segment:?} at s={s}");
+            assert_eq!(segment.dheading_ds(s)[2], 0.0, "{segment:?} at s={s}");
+            assert_eq!(segment.d2heading_ds2(s)[2], 0.0, "{segment:?} at s={s}");
+        }
+    }
+    let rising = Segment::Line(Line::try_new([0.0, 0.0, 0.0], [1.0, 0.0, 0.2]).expect("line"));
+    assert_eq!(rising.held_coordinate(2), None);
+    assert_eq!(rising.held_coordinate(1), Some(0.0));
 }
