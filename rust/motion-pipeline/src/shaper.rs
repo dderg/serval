@@ -4285,7 +4285,24 @@ fn shaped_ladder<S: TrackSignal>(
                 ),
                 None => match sig.enclosure_on(resolved.0, resolved.1, budget.enclosure_accuracy())
                 {
-                    Some(enclosure) => hull::first_unproven(&enclosure, piece, resolved, budget),
+                    Some(enclosure) => {
+                        PROOF_PIECES.fetch_add(
+                            enclosure.len() as u64,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        PROOF_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if std::env::var_os("SKIP_HULL").is_some() {
+                            None
+                        } else {
+                            let start = std::time::Instant::now();
+                            let verdict = hull::first_unproven(&enclosure, piece, resolved, budget);
+                            HULL_NANOS.fetch_add(
+                                start.elapsed().as_nanos() as u64,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                            verdict
+                        }
+                    }
                     None => estimated_witness(
                         RungWitness {
                             axis,
@@ -5346,3 +5363,7 @@ mod shaper_shaped_wave_tests;
 #[cfg(test)]
 #[path = "shaper_enclosure_tests.rs"]
 mod shaper_enclosure_tests;
+
+pub static PROOF_PIECES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROOF_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static HULL_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

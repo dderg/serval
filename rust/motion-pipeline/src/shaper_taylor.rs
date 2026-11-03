@@ -170,6 +170,23 @@ impl TaylorModel {
         }
     }
 
+    /// The polynomial `coefficients` in the window's variable, within `rad`
+    /// of the modelled function.
+    pub(crate) fn from_polynomial(coefficients: &[f64], rad: f64) -> Self {
+        assert!(
+            coefficients.len() <= TAYLOR_LEN,
+            "a {}-coefficient polynomial exceeds a Taylor model",
+            coefficients.len()
+        );
+        let mut kept = [0.0; TAYLOR_LEN];
+        kept[..coefficients.len()].copy_from_slice(coefficients);
+        Self {
+            coefficients: kept,
+            len: coefficients.len(),
+            rad,
+        }
+    }
+
     /// `offset + slope·x`, `slope` exact.
     pub(crate) fn affine(offset: Ball, slope: f64) -> Self {
         let mut coefficients = [0.0; TAYLOR_LEN];
