@@ -7,9 +7,8 @@
 
 use std::path::Path;
 
-use motion_core::live_config;
-use motion_core::seam_test_harness::parse_gcode_to_moves;
-use motion_pipeline::{Pipeline, TrajectoryItem};
+use motion_core::seam_test_harness::LiveReplay;
+use motion_pipeline::TrajectoryItem;
 use planner_config::PlannerConfig;
 
 const Z_AXIS: usize = 2;
@@ -90,12 +89,7 @@ fn first_lines(relative: &str, count: usize) -> String {
 
 /// Peak |z velocity| and |z acceleration| over every emitted carrier.
 fn z_peaks(gcode: &str, planner: &PlannerConfig) -> (f64, f64) {
-    let config = live_config::stream_config(planner).expect("stream config");
-    let chains = planner.compile_active_chains().expect("chains compile");
-    let moves = parse_gcode_to_moves(
-        gcode,
-        live_config::move_limits(planner).expect("move limits"),
-    );
+    let replay = LiveReplay::new(gcode, planner).expect("live replay");
     let mut segments = Vec::new();
     let mut collect = |item| {
         if let TrajectoryItem::Seg(segment) = item {
@@ -103,8 +97,8 @@ fn z_peaks(gcode: &str, planner: &PlannerConfig) -> (f64, f64) {
         }
         true
     };
-    let mut pipeline = Pipeline::new(config, chains, vec![0.0; 4], 0.0);
-    for m in moves {
+    let mut pipeline = replay.pipeline();
+    for m in replay.moves {
         assert!(pipeline.feed(m.into(), &mut collect));
     }
     assert!(pipeline.finish(&mut collect));

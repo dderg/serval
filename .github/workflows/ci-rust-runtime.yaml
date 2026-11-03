@@ -344,7 +344,9 @@ jobs:
   # if the worst 5 s stream window drops below 1.3x realtime. The gap is wide
   # by construction — healthy code clears 2.5x on the slowest runner, the
   # anchor-underrun class lands under 1x — so this can block merges without
-  # flaking. The gcode path also triggers the `rust` filter via scripts/ci.sh.
+  # flaking. The same print then replays live on every tools/bench/configs
+  # config and must finish. The gcode path also triggers the `rust` filter
+  # via scripts/ci.sh.
   rust-replay-budget:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
@@ -363,7 +365,7 @@ jobs:
         with:
           workspaces: rust
           key: replay-budget
-      - name: Replay the bench-killer region against the 1.3x floor
+      - name: Replay the bench-killer region against the 1.3x floor and on every bench config
         run: ./scripts/ci.sh replay-budget
 
   rust-ethercat-hw:
