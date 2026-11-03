@@ -569,10 +569,10 @@ impl Shaper {
     /// tracks have their own lookahead covered. The time-based bound already
     /// includes the cascaded width, but segment granularity can leave a long
     /// straddling segment unprojectable, so gate on the frontier explicitly.
-    /// A ratio-ramped follower cascades too: its smoothing reads the
-    /// leaders' path [`AxisChainSet::ratio_ramp_lookahead`] past a
-    /// segment's end before the projection over it is final, and a kernel
-    /// after the ramp reads every projected segment its window reaches.
+    /// A ratio-ramped follower needs no gate here: how far its smoothing
+    /// reads ahead depends on how the leaders come to rest, so the
+    /// projection itself commits only what it holds final (see
+    /// `follower_projection::project_followers`).
     ///
     /// Every gate compares `t_end + support` against the covered end with no
     /// slack — the same association and strictness as the fit-time
@@ -591,33 +591,16 @@ impl Shaper {
             .take_while(|seg| seg.t_end + self.forward_support <= last_t)
             .count();
         let own_hi = self.chains.max_follower_own_forward_support();
-        let ramp_lookahead = self.chains.ratio_ramp_lookahead();
-        if own_hi <= 0.0 && ramp_lookahead <= 0.0 {
+        if own_hi <= 0.0 {
             return plain;
         }
         let Some(frontier_t) = self.shaping_frontier_t(last_t) else {
             return 0;
         };
-        if ramp_lookahead <= 0.0 {
-            let gated = self
-                .pending
-                .iter()
-                .take_while(|seg| seg.t_end + own_hi <= frontier_t)
-                .count();
-            return plain.min(gated);
-        }
-        let ends: Vec<f64> = self.pending.iter().map(|seg| seg.t_end).collect();
-        let mut covering = 0;
         let gated = self
             .pending
             .iter()
-            .take_while(|seg| {
-                let needed = seg.t_end + own_hi;
-                while covering < ends.len() && ends[covering] < needed {
-                    covering += 1;
-                }
-                covering < ends.len() && ends[covering] + ramp_lookahead <= frontier_t
-            })
+            .take_while(|seg| seg.t_end + own_hi <= frontier_t)
             .count();
         plain.min(gated)
     }
@@ -687,13 +670,17 @@ impl Shaper {
             },
         )
         .unwrap_or_else(|e| panic!("shaper: {e}"));
+        let committed = shaped.len();
         for seg in shaped {
             if !output(TrajectoryItem::Seg(seg)) {
                 return false;
             }
         }
-        for _ in 0..count {
-            let raw = self.pending.pop_front().expect("count <= pending");
+        if committed == 0 {
+            return true;
+        }
+        for _ in 0..committed {
+            let raw = self.pending.pop_front().expect("committed <= pending");
             self.history.push_back(raw);
         }
         let emitted_through = self

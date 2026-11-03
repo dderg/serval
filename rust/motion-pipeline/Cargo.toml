@@ -15,6 +15,7 @@ libm = { version = "0.2", default-features = false }
 geometry = { path = "../geometry" }
 trajectory = { path = "../trajectory" }
 nurbs = { path = "../nurbs" }
+planner-config = { path = "../planner-config" }
 crossbeam-channel = "0.5"
 thiserror = { workspace = true }
 tracing = "0.1"

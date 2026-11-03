@@ -8,12 +8,9 @@ use geometry::path::lowering::PositionProfile;
 use motion_pipeline::fit_stage::FitStage;
 use motion_pipeline::planner::Planner;
 use motion_pipeline::types::PlannedMove;
-use motion_pipeline::{BaseItem, Lowerer, PlannedItem, StreamConfig};
+use motion_pipeline::{BaseItem, Lowerer, PlannedItem, live_config};
 use pipeline_snapshot::waypoints::parse_gcode;
-use pipeline_snapshot::{
-    ExactTrajectory, SNAPSHOT_MAX_BUFFER_MOVES, SampleSide, TRAJECTORY_FIT_TOL_ACCEL_MM_S2,
-    TRAJECTORY_FIT_TOL_MM, VELOCITY_INTEGRATION_TOL, plan_steps,
-};
+use pipeline_snapshot::{CartesianLimits, ExactTrajectory, PlannerConfig, SampleSide, plan_steps};
 
 fn stream_case(
     case_rel_path: &str,
@@ -21,37 +18,28 @@ fn stream_case(
     max_accel: f64,
     scv: f64,
 ) -> Vec<PlannedMove> {
-    let path = format!(
-        "{}/../../snapshots/cases/{case_rel_path}",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = source_tree::repo_file(&format!("snapshots/cases/{case_rel_path}"));
     let text = std::fs::read_to_string(&path).expect("read case gcode");
     let waypoints = parse_gcode(
         &text,
-        &pipeline_snapshot::CartesianLimits::without_z_caps(
+        &CartesianLimits::without_z_caps(max_velocity, max_accel, f64::INFINITY, 0.0),
+    )
+    .expect("parse");
+    let planner_config = PlannerConfig {
+        cartesian: CartesianLimits::without_z_caps(
             max_velocity,
             max_accel,
             f64::INFINITY,
-            0.0,
+            geometry::corner_deviation_from_scv(scv, max_accel),
         ),
-    )
-    .expect("parse");
-    let corner_deviation = geometry::corner_deviation_from_scv(scv, max_accel);
-    let limits =
-        geometry::VelocityLimits::try_new(max_velocity, max_accel, corner_deviation, f64::INFINITY)
-            .expect("limits");
+        max_extrude_only_velocity: Some(100.0),
+        max_extrude_only_accel: Some(1000.0),
+        ..PlannerConfig::default()
+    };
+    let limits = live_config::move_limits(&planner_config).expect("limits");
     let steps = plan_steps(&waypoints, limits).expect("steps");
 
-    let config = StreamConfig {
-        corner: geometry::CornerFitConfig::default(),
-        integration_tol: VELOCITY_INTEGRATION_TOL,
-        max_extrude_only_velocity_mm_s: 100.0,
-        max_extrude_only_accel_mm_s2: 1000.0,
-        fit_tol_mm: TRAJECTORY_FIT_TOL_MM,
-        fit_tol_accel_mm_s2: TRAJECTORY_FIT_TOL_ACCEL_MM_S2,
-        max_buffer_moves: SNAPSHOT_MAX_BUFFER_MOVES,
-        limits,
-    };
+    let config = live_config::stream_config(&planner_config).expect("stream config");
     let mut fit = FitStage::new(config.corner).into_driver();
     let mut planner = Planner::new(config, Arc::default());
     let mut planned = Vec::new();

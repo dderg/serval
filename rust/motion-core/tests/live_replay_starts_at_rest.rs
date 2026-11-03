@@ -6,7 +6,7 @@ use motion_pipeline::TrajectoryItem;
 const DENSE_PRINT_HEAD_LINES: usize = 200;
 
 fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    source_tree::repo_root()
 }
 
 fn bench_configs() -> Vec<PathBuf> {
