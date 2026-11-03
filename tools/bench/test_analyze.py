@@ -240,8 +240,10 @@ def test_a_late_step_mid_move_is_still_unmatched(tie_run):
     verdict_with_z_step_at, z, landing = tie_run
     mid_move = landing // 2
     assert z.rate_hz[mid_move] > 100.0
-    delay_s = 0.5 * (z.time[landing + 1] - z.time[landing])
-    verdict = verdict_with_z_step_at(mid_move, z.time[mid_move] + delay_s)
+    window_s = analyze.REPORT_MATCH_WINDOW_S
+    late_s = z.time[landing] + 1.5 * window_s
+    assert late_s + 1.5 * window_s < z.time[landing + 1]
+    verdict = verdict_with_z_step_at(mid_move, late_s)
     motor = verdict["motors"]["z"]
     assert motor["unmatched_capture_steps"] > 0
     assert motor["unmatched_reference_steps"] > 0
@@ -566,3 +568,89 @@ def test_merged_epoch_is_cut_at_the_rest_nearest_the_reference_count():
         capture, capture_epochs, reference, reference_epochs
     )
     assert [e.start_s for e in split] == pytest.approx([0.0, 5.0, 5.12])
+
+
+LIVE_SEMANTICS_GCODE = """\
+SET_KINEMATIC_POSITION X=0 Y=0 Z=0
+G92 E0
+G1 X10 Y5 E1
+G92 E0
+G1 X20 E0.5 F3000
+G1 Z1
+G4 P200
+M83
+G1 X0 Y0 E1 F9000
+G92 E0
+G1 X5 E0.2
+G91
+M82
+G1 X5 E0.3
+M400
+G90
+G1 X30 Y30 Z0.4 E2 F1200
+SET_VELOCITY_LIMIT ACCEL=2000
+G1 X40 Y30 F120000
+M400
+"""
+
+
+def _live_epochs(gcode: str, cfg: Path) -> list[list[tuple]]:
+    import live_replay
+
+    steps = live_replay.replay(gcode, cfg)
+    anchor = next(
+        i
+        for i, s in enumerate(steps)
+        if isinstance(s, live_replay.LivePosition)
+    )
+    epochs: list[list[tuple]] = [[]]
+    for step in steps[anchor + 1 :]:
+        if isinstance(step, live_replay.LiveRest) and epochs[-1]:
+            epochs.append([])
+        elif isinstance(step, live_replay.LiveMove):
+            epochs[-1].append((step.delta, step.feedrate, step.limits))
+    return [epoch for epoch in epochs if epoch]
+
+
+def _reference_epochs(job: analyze.Job) -> list[list[tuple]]:
+    engine = analyze.harness._import_engine()
+    _, _, blocks = analyze.plan_waypoints(job)
+    epochs = []
+    for block in blocks:
+        moves = engine.snapshot_moves(block, job.config.config_text)
+        assert all(m["dwell_before_s"] is None for m in moves)
+        epochs.append(
+            [
+                (
+                    tuple(e - s for s, e in zip(m["start"], m["end"])),
+                    m["feedrate"],
+                    (m["velocity"], m["accel"], m["corner_deviation"]),
+                )
+                for m in moves
+            ]
+        )
+    return epochs
+
+
+def test_reference_epochs_plan_exactly_the_moves_live_submits(tmp_path):
+    _require_snapshot_engine()
+    shutil.copy(BENCH_DIR / "printer.cfg", tmp_path / "printer.cfg")
+    (tmp_path / "print.gcode").write_text(LIVE_SEMANTICS_GCODE)
+    job = analyze.load_job(tmp_path)
+    reference = _reference_epochs(job)
+    assert reference == _live_epochs(
+        LIVE_SEMANTICS_GCODE, tmp_path / "printer.cfg"
+    )
+    assert [len(epoch) for epoch in reference] == [3, 3, 2]
+    _, final_xyze, _ = analyze.plan_waypoints(job)
+    assert final_xyze == pytest.approx((40.0, 30.0, 0.4, 4.5))
+
+
+def test_a_command_live_cannot_plan_offline_fails_the_analysis(tmp_path):
+    _require_snapshot_engine()
+    shutil.copy(BENCH_DIR / "printer.cfg", tmp_path / "printer.cfg")
+    (tmp_path / "print.gcode").write_text(
+        "SET_KINEMATIC_POSITION X=0 Y=0 Z=0\nG1 X10 F3000\nG2 X20 I5 J0\n"
+    )
+    with pytest.raises(analyze.AnalysisError, match="line 3: G2"):
+        analyze.plan_waypoints(analyze.load_job(tmp_path))
