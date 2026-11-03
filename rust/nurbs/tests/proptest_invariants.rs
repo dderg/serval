@@ -1,4 +1,14 @@
 use proptest::prelude::*;
+use proptest::test_runner::FileFailurePersistence;
+
+fn persisted() -> ProptestConfig {
+    ProptestConfig {
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
+            "proptest-regressions/proptest_invariants.txt",
+        ))),
+        ..ProptestConfig::default()
+    }
+}
 
 fn arb_degree() -> impl Strategy<Value = u8> {
     1u8..=5
@@ -29,6 +39,8 @@ fn arb_curve() -> impl Strategy<Value = nurbs::ScalarNurbs> {
 }
 
 proptest! {
+    #![proptest_config(persisted())]
+
     #[test]
     fn eval_at_first_knot_returns_first_cp(curve in arb_curve()) {
         let view = &curve;

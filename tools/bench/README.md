@@ -40,7 +40,7 @@ Run from the repo root.
 
 ```
 uv run python tools/bench/deploy.py sync [--tree DIR]  # rsync a worktree (default: this one) to Pi ~/klipper, delete stale, build-native.sh if rust/ changed, restart klipper, write ~/klipper/.bench-deploy.json
-uv run python tools/bench/deploy.py reset-target   # SWD-reset the F401 (clears a latched MCU shutdown), restart klipper
+uv run python tools/bench/deploy.py reset-target   # SWD-reset the F401 (for an MCU that no longer answers; a latched shutdown is already cleared by the FIRMWARE_RESTART that restart_klipper/prepare_printer send when klippy settles in shutdown), restart klipper
 uv run python tools/bench/lock.py hold -- <cmd...> # run a multi-step session under the bench lock
 uv run python tools/bench/suite.py [--quick] [--expect-fail NAME]  # regression matrix: sync + 8 runs (3 with --quick) + analyze, table, ~/bench/suites/<ts>/summary.json
 uv run python tools/bench/deploy.py flash-target   # build F401 fw (f401.config), flash via Pi SWD, restart klippy
@@ -133,6 +133,33 @@ Any tool that touches the Pi or the boards (`run.py`, every `deploy.py` subcomma
 | `configs/profiles/p4_high_accel_ramp.cfg` | 19670 | 1.29 | 0.99 | 0.71 |
 
 The ~19 670-segment chains are bound by the single `kalico-shaper` thread (`shaper_busy` ≈ 100 % of wall, the planner blocked on it ≈ 97 %); with 4 cores the pool helpers sit ~50 % idle. `perf`: `ExactConvolution::pieces_over` 7–14 %, moment accumulation 9–12 %, trajectory/law/NURBS evaluation 12–22 %, and on ratio-ramp chains `ratio_ramp::{RatioSmoothing::correction, WidthField::jet}` 8–13 %.
+
+## MCU step-rate capacity (F401, classic host-stepped path)
+
+`gcode/capacity_ladder.gcode` (generator `gen_capacity_ladder.py`) steps all four motors at once, at the same rate each, in rungs of 31–283 kHz aggregate; `capacity_ladder_high.gcode` continues from 283 kHz in 31 kHz rungs, in count mode only because event mode's USB budget ends near 300 k steps/s. Both run with `configs/capacity.cfg` (printer.cfg with raised limits and no pressure advance or smoothing on E). The rungs follow each other without rests, and E has no PA chain, because both runs at first halted on the host with `LatticeDrift` (a reanchor at a rest whose clock-sync drain ran out of budget; owned and fixed separately). PA was dropped before that cause was known and is not the trigger, but the published numbers are without it. `analysis.json` → `mcu_execution.lateness_by_step_rate_hz` bins every step's MCU lateness by the aggregate commanded step rate within ±0.5 ms.
+
+Runs `20261103-231302` and `-232815` (F401 firmware from main 439bcff00; `src/` unchanged through the host tree's 98a751318; single-edge 2 µs pulse = two timer events per step), lateness relative to the isolated-step floor:
+
+| aggregate steps/s | p99 lateness | p99.9 | max | steps > 5 µs late |
+|---|---|---|---|---|
+| 25–100 k | 2.9–4.4 µs | 4.6–5.2 µs | 13.8 µs | 0.03–0.3 % |
+| 100–200 k | 4.1–4.8 µs | 6.3–9.9 µs | 15.6 µs | 0.1–0.6 % |
+| 200–225 k | 4.7–5.1 µs | 9.7–10.2 µs | 15.8 µs | 0.9–1.0 % |
+| 225–250 k | 7.2–7.7 µs | 10.8–11.3 µs | 16.0 µs | 2.2–2.7 % |
+| 250–275 k | 7.7–8.4 µs | 10.4–11.0 µs | 21.5 µs | 4–5 % |
+| 275–300 k | 9.9–10.7 µs | 15.8–16.6 µs | 30.3 µs | 10–12 % |
+
+The ceiling: both `capacity_ladder_high` runs (`-232624`, `-232717`) held the 283 kHz rung and shut down with `Stepper too far in past` within 20 ms of the 314 kHz rung starting (last 10 ms window ≈ 300 kHz). That is about 600 k timer events/s, 140 F401 cycles per event, so the hard ceiling is ≈ 300 k steps/s and lateness grows past ≈ 225 k (75 %). The TMC both-edge path takes one event per step and is not measured here (no TMC on the bench).
+
+Other families, scaled from the F401 by clock and by the instructions one more step event adds to a dispatch (unicorn run of each CI build's real timer IRQ). The effective cycles per instruction are assumptions, not measurements:
+
+| build | clock | instructions / event | assumed cycles / instruction | estimated ceiling, single-edge |
+|---|---|---|---|---|
+| F401 (measured) | 84 MHz | 91 | 1.54 (fitted) | 300 k steps/s |
+| F446 | 180 MHz | 91 | 1.54 | ≈ 640 k |
+| F103 | 72 MHz | 96 | ≈ 1.7 (flash wait states, no ART) | ≈ 220 k |
+| G0B1 | 64 MHz | 109–123 | ≈ 1.6 (M0+) | ≈ 160–180 k |
+| H723 | 520 MHz | 81 | ≈ 2.5 (GPIO and DWT behind slower buses) | ≈ 1.3 M |
 
 ## Limits
 
