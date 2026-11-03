@@ -18,10 +18,7 @@ fn stream_case(
     max_accel: f64,
     scv: f64,
 ) -> Vec<PlannedMove> {
-    let path = format!(
-        "{}/../../snapshots/cases/{case_rel_path}",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = source_tree::repo_file(&format!("snapshots/cases/{case_rel_path}"));
     let text = std::fs::read_to_string(&path).expect("read case gcode");
     let waypoints = parse_gcode(
         &text,

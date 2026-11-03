@@ -13,10 +13,7 @@ const MAX_VELOCITY: f64 = 1000.0;
 const MAX_ACCEL: f64 = 10_000.0;
 
 fn dense_top_layer_lines(count: usize) -> String {
-    let path = format!(
-        "{}/../../tools/sim/gcode/voron_dense_top_layers.gcode",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = source_tree::repo_file("tools/sim/gcode/voron_dense_top_layers.gcode");
     let text = std::fs::read_to_string(path).expect("read dense top layer gcode");
     text.lines().take(count).collect::<Vec<_>>().join("\n")
 }

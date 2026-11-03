@@ -1273,11 +1273,9 @@ fn streaming_partials_carry_toolhead_lanes_when_the_chain_has_motor_side_stages(
 /// scattering the loop centers by ~0.25mm at 0.3mm deviation.
 #[test]
 fn default_gcode_circle_loops_stay_concentric_across_corner_deviation() {
-    let text = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../snapshots/web/static/default.gcode"
-    ))
-    .unwrap();
+    let text =
+        std::fs::read_to_string(source_tree::repo_file("snapshots/web/static/default.gcode"))
+            .unwrap();
     let mut loop_centers = Vec::new();
     let mut radii_per_cd: Vec<Vec<f64>> = Vec::new();
     for cd in [0.05, 0.3] {
