@@ -6,6 +6,7 @@ use trajectory::{AxisChainSet, CompiledChain, ContinuousAxis, ContinuousSegment}
 use super::materialize_changed_sources;
 use crate::Pipeline;
 use crate::types::{BaseItem, StreamConfig, TrajectoryItem};
+use crate::worker_pool::WorkerPool;
 
 const MAX_VELOCITY: f64 = 300.0;
 const MAX_ACCEL: f64 = 3000.0;
@@ -103,6 +104,7 @@ fn replay(chains: &AxisChainSet, moves: &[geometry::Move]) -> Replay {
     let Pipeline { front, shaper } = &mut pipeline;
     let mut shaper_input = Vec::new();
     let mut motor_command = Vec::new();
+    let pool = WorkerPool::default();
     let mut emit = |item| {
         if let TrajectoryItem::Seg(segment) = item {
             motor_command.push(segment);
@@ -112,8 +114,13 @@ fn replay(chains: &AxisChainSet, moves: &[geometry::Move]) -> Replay {
     let mut shape = |item: BaseItem| {
         if let BaseItem::Seg(segment) = &item {
             let mut materialized = segment.clone();
-            materialize_changed_sources(&mut materialized, chains, config.fit_tol())
-                .expect("shaper input materializes");
+            materialize_changed_sources(
+                std::slice::from_mut(&mut materialized),
+                chains,
+                config.fit_tol(),
+                &pool,
+            )
+            .expect("shaper input materializes");
             shaper_input.push(materialized);
         }
         shaper.feed(item, &mut emit)

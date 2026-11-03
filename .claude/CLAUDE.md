@@ -94,6 +94,16 @@ branch's own worktree (it leaves it before removing it) and updates the PR
 branch on GitHub and re-waits when `main` moved while the checks ran; no need to
 copy it elsewhere first.
 
+`python3 scripts/land_queue.py QUEUE [--trees DIR] [--dry-run]` lands several
+branches in order (a stack, or a batch of independent PRs): per branch it merges
+`origin/main` if behind, builds the snapshot engine, reviews against `origin/main`
+(no expectation: any moved snapshot stops the queue; with an expectation every case
+must be EXPECTED, and the changed cases are accepted and committed from the
+`<branch>.accept.txt` message), then runs `land-pr.sh` with `<branch>.md` as the PR
+body. A red "Sim e2e" run is rerun once, loudly; any other red check stops the queue.
+QUEUE lines are `branch|title|expect`; landed branches are appended to `QUEUE.landed`
+so a stopped queue resumes. Use it instead of a hand-written loop around `land-pr.sh`.
+
 `uv run python scripts/pending_baselines.py [-v|--all]` lists every open PR with
 its stack parent, mergeability, CI state, the snapshot cases whose output
 changes (max |dp|/|dv|/|da| per axis against its base, plus the cases differing

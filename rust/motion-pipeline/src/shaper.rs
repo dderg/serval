@@ -327,6 +327,7 @@ pub(crate) const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 struct PendingSegments {
     segments: VecDeque<ContinuousSegment>,
     shaped: VecDeque<ContinuousSegment>,
+    materialized: usize,
 }
 
 impl PendingSegments {
@@ -337,6 +338,7 @@ impl PendingSegments {
     fn clear(&mut self) {
         self.segments.clear();
         self.shaped.clear();
+        self.materialized = 0;
     }
 
     fn len(&self) -> usize {
@@ -361,10 +363,31 @@ impl PendingSegments {
         self.segments.iter()
     }
 
+    /// Fits the changed sources of the segments buffered since the last
+    /// call; returns how many segments and axes that was.
+    fn materialize(
+        &mut self,
+        chains: &AxisChainSet,
+        fit_tol: FitTol,
+        pool: &WorkerPool,
+    ) -> Result<(usize, usize), PostProcessError> {
+        let fresh = &mut self.segments.make_contiguous()[self.materialized..];
+        let rebuilt = materialize_changed_sources(fresh, chains, fit_tol, pool)?;
+        let segments = fresh.len();
+        self.materialized = self.segments.len();
+        Ok((segments, rebuilt))
+    }
+
     fn pop_front(&mut self) -> Option<ContinuousSegment> {
         let segment = self.segments.pop_front();
-        if segment.is_some() && !self.shaped.is_empty() {
-            self.shaped.pop_front();
+        if segment.is_some() {
+            self.materialized = self
+                .materialized
+                .checked_sub(1)
+                .expect("shaper committed a segment whose sources were never materialized");
+            if !self.shaped.is_empty() {
+                self.shaped.pop_front();
+            }
         }
         assert!(
             self.shaped.len() <= self.segments.len(),
@@ -421,9 +444,13 @@ impl Shaper {
         self
     }
 
-    fn buffer_segment(&mut self, mut segment: ContinuousSegment) {
+    /// Fits the changed sources of every segment buffered since the last
+    /// emit, which the window about to be shaped reads.
+    fn materialize_pending(&mut self) {
         let started = crate::timing::stopwatch();
-        let rebuilt = materialize_changed_sources(&mut segment, &self.chains, self.fit_tol)
+        let (segments, rebuilt) = self
+            .pending
+            .materialize(&self.chains, self.fit_tol, &self.pool)
             .unwrap_or_else(|error| panic!("shaper: {error}"));
         let elapsed_us = started.elapsed_us();
         crate::timing::record_stage(crate::timing::Stage::MaterializeSource, elapsed_us);
@@ -432,14 +459,13 @@ impl Shaper {
                 "materialize_source",
                 elapsed_us,
                 crate::timing::PhaseWorkload {
-                    segments: 1,
+                    segments,
                     axes: rebuilt,
                     ..Default::default()
                 },
                 "",
             );
         }
-        self.pending.push(segment);
     }
 
     pub fn feed(
@@ -449,7 +475,7 @@ impl Shaper {
     ) -> bool {
         match item {
             BaseItem::Seg(item) => {
-                self.buffer_segment(item);
+                self.pending.push(item);
                 self.emit(self.supported_count(), false, output)
             }
             BaseItem::Drain => {
@@ -594,6 +620,7 @@ impl Shaper {
         if count == 0 {
             return true;
         }
+        self.materialize_pending();
         let beyond_commit = self.chains.max_follower_own_forward_support() > 0.0
             || self.chains.has_ratio_ramped_follower();
         let frontier_count = if !beyond_commit {
@@ -667,65 +694,113 @@ impl Shaper {
     }
 }
 
-fn materialize_changed_sources(
-    segment: &mut ContinuousSegment,
+/// The axes of `segment` whose source is fitted before shaping: every
+/// non-follower axis a chain changes, and a z read through a variable bed
+/// surface. A source already fitted is kept.
+fn axes_to_materialize<'a>(
+    segment: &'a ContinuousSegment,
+    chains: &'a AxisChainSet,
+) -> impl Iterator<Item = usize> + 'a {
+    segment
+        .axes
+        .iter()
+        .enumerate()
+        .filter(|(axis, source)| {
+            let variable_surface_z = *axis == 2
+                && matches!(source, ContinuousAxis::Analytic { span, .. } if span.has_variable_surface());
+            let changed = chains
+                .chains
+                .get(*axis)
+                .is_some_and(|chain| !chain.is_empty())
+                && !chains.is_projected_follower(*axis);
+            (variable_surface_z || changed) && !matches!(source, ContinuousAxis::Spline(_))
+        })
+        .map(|(axis, _)| axis)
+}
+
+fn materialize_source_axis(
+    segment: &ContinuousSegment,
+    axis: usize,
     chains: &AxisChainSet,
     fit_tol: FitTol,
+) -> Result<ContinuousAxis, PostProcessError> {
+    let source = &segment.axes[axis];
+    let variable_surface_z = axis == 2
+        && matches!(source, ContinuousAxis::Analytic { span, .. } if span.has_variable_surface());
+    let (mut breakpoints, cap_contacts) = match source {
+        ContinuousAxis::Analytic { span, .. } => cap_contact_seeds(span),
+        _ => (vec![segment.t_start, segment.t_end], Vec::new()),
+    };
+    if let ContinuousAxis::Analytic { span, .. } = source {
+        if variable_surface_z {
+            breakpoints.extend(span.surface_seam_times().ok_or_else(|| {
+                fit_tolerance_without_probe(axis, segment.t_start, segment.t_end)
+            })?);
+        }
+    }
+    #[cfg(feature = "fit-audit")]
+    let _cap_contacts_audited = crate::fit_audit::CapContactScope::enter(&cap_contacts);
+    let mut curve = fit_axis_from_signal(
+        AxisFit {
+            axis,
+            t_start: segment.t_start,
+            t_end: segment.t_end,
+            seed_breakpoints: &breakpoints,
+            fit_tol,
+            fit_context: "materialize_source",
+            velocity_continuous: false,
+        },
+        &CapContactSource {
+            source,
+            cap_contacts: &cap_contacts,
+        },
+    )?;
+    if !chains.is_projected_follower(axis) {
+        if let Some(chain) = chains.chains.get(axis) {
+            curve = apply_zero_support_transform(chain.leading_transform(), axis, curve, fit_tol)?;
+        }
+    }
+    Ok(ContinuousAxis::Spline(Arc::new(curve)))
+}
+
+/// Fits the changed sources of every segment in `segments`, one pool job
+/// per axis: each fit reads only its own segment's source, so the batch an
+/// emit needs fans out whole. Returns how many axes it rebuilt.
+fn materialize_changed_sources(
+    segments: &mut [ContinuousSegment],
+    chains: &AxisChainSet,
+    fit_tol: FitTol,
+    pool: &WorkerPool,
 ) -> Result<usize, PostProcessError> {
-    let mut replacements = Vec::new();
-    for (axis, source) in segment.axes.iter().enumerate() {
-        let variable_surface_z = axis == 2
-            && matches!(source, ContinuousAxis::Analytic { span, .. } if span.has_variable_surface());
-        let changed = chains
-            .chains
-            .get(axis)
-            .is_some_and(|chain| !chain.is_empty())
-            && !chains.is_projected_follower(axis);
-        if !(variable_surface_z || changed) || matches!(source, ContinuousAxis::Spline(_)) {
-            continue;
-        }
-        let (mut breakpoints, cap_contacts) = match source {
-            ContinuousAxis::Analytic { span, .. } => cap_contact_seeds(span),
-            _ => (vec![segment.t_start, segment.t_end], Vec::new()),
-        };
-        if let ContinuousAxis::Analytic { span, .. } = source {
-            if variable_surface_z {
-                breakpoints.extend(span.surface_seam_times().ok_or_else(|| {
-                    fit_tolerance_without_probe(axis, segment.t_start, segment.t_end)
-                })?);
-            }
-        }
-        #[cfg(feature = "fit-audit")]
-        let _cap_contacts_audited = crate::fit_audit::CapContactScope::enter(&cap_contacts);
-        let mut curve = fit_axis_from_signal(
-            AxisFit {
-                axis,
-                t_start: segment.t_start,
-                t_end: segment.t_end,
-                seed_breakpoints: &breakpoints,
-                fit_tol,
-                fit_context: "materialize_source",
-                velocity_continuous: false,
+    let jobs: Vec<(usize, usize)> = segments
+        .iter()
+        .enumerate()
+        .flat_map(|(index, segment)| {
+            axes_to_materialize(segment, chains).map(move |axis| (index, axis))
+        })
+        .collect();
+    let participants = if cfg!(target_arch = "wasm32") {
+        1
+    } else {
+        std::thread::available_parallelism()
+            .map_or(1, |cores| cores.get())
+            .min(jobs.len())
+    };
+    let fitted = pool
+        .map_indexed(
+            participants,
+            jobs.len(),
+            || (),
+            |(), job| {
+                let (index, axis) = jobs[job];
+                materialize_source_axis(&segments[index], axis, chains, fit_tol)
             },
-            &CapContactSource {
-                source,
-                cap_contacts: &cap_contacts,
-            },
-        )?;
-        if !chains.is_projected_follower(axis) {
-            if let Some(chain) = chains.chains.get(axis) {
-                curve =
-                    apply_zero_support_transform(chain.leading_transform(), axis, curve, fit_tol)?;
-            }
-        }
-        replacements.push((axis, ContinuousAxis::Spline(Arc::new(curve))));
+        )
+        .expect("source materialize thread panicked");
+    for (&(index, axis), source) in jobs.iter().zip(fitted) {
+        Arc::make_mut(&mut segments[index].axes)[axis] = source?;
     }
-    let rebuilt = replacements.len();
-    let axes = Arc::make_mut(&mut segment.axes);
-    for (axis, replacement) in replacements {
-        axes[axis] = replacement;
-    }
-    Ok(rebuilt)
+    Ok(jobs.len())
 }
 
 /// An analytic source's materialize seeds — its ends, phase seams and
