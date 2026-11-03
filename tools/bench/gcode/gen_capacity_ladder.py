@@ -28,7 +28,6 @@ def rung(speed_mm_s: int) -> list[str]:
     for _ in range(ROUND_TRIPS):
         for x, z in ((X_ENDS[1], Z_ENDS[1]), (X_ENDS[0], Z_ENDS[0])):
             lines.append(f"G1 X{x} Y{Y} Z{z} E{E_PER_MOVE_MM} F{feed}")
-    lines.append("G4 P200")
     return lines
 
 
