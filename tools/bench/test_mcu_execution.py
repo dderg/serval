@@ -278,3 +278,28 @@ def test_follower_lateness_is_binned_by_its_lead_and_ties_stand_apart(
     assert sum(row["steps"] for row in bins.values()) == 2 * ties + quarter
     assert report["motors"]["b"]["follower_steps"] == quarter
     assert report["motors"]["a"]["follower_steps"] == 0
+
+
+def test_lateness_is_binned_by_the_aggregate_commanded_step_rate(tmp_path):
+    slow_steps, burst_steps = 2_000, 200
+    burst_interval = 840
+    burst_late_ticks = 50
+    burst_start = 500 * INTERVAL + 37
+    _write_tap(
+        tmp_path,
+        _lane(1, 0, slow_steps, INTERVAL),
+        _lane(2, 2, burst_steps, burst_interval, burst_start),
+    )
+    a = _commanded(slow_steps, INTERVAL)
+    z = _commanded(burst_steps, burst_interval, burst_start + burst_late_ticks)
+    report = mcu_execution.report(
+        tmp_path, _events(_channel(a), _channel(EMPTY), _channel(z)), MOTORS
+    )
+    rows = report["lateness_by_step_rate_hz"]
+    by_floor = {row["rate_hz_from"]: row for row in rows}
+    assert sum(row["steps"] for row in rows) == slow_steps + burst_steps
+    assert by_floor[0]["p50"] == pytest.approx(0, abs=30)
+    burst = by_floor[100_000]
+    assert burst["steps"] > burst_steps // 2
+    assert burst["p50"] == pytest.approx(burst_late_ticks / FREQ * 1e9, abs=30)
+    assert burst["rate_hz_to"] - burst["rate_hz_from"] == 25_000
