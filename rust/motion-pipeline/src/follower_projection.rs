@@ -28,6 +28,9 @@ const BASIS_CONVERSION_ROUNDOFF_ENVELOPE: f64 = (1_u64 << 20) as f64;
 const ODOMETER_ALIGNMENT_ULPS: f64 = (1_u64 << 12) as f64;
 const SPEED_ZERO_SLIVER_FRACTION: f64 = 1e-6;
 const COMPONENT_ZERO_PROBES: usize = 16;
+/// The share of the acceleration tolerance under which a slow leader
+/// component counts as at rest ([`RestResolution`]).
+const REST_ACCELERATION_SHARE: f64 = 1.0 / (1_u64 << 30) as f64;
 fn follower_fit_tol(fit_tol: FitTol, position_scale: f64) -> FitTol {
     FitTol {
         pos_mm: fit_tol.pos_mm * position_scale,
@@ -1769,11 +1772,12 @@ impl<'a> ShapedLeaders<'a> {
             / speed
     }
 
-    fn never_moves(&self, index: usize, t0: f64, t1: f64) -> bool {
+    fn never_moves(&self, index: usize, t0: f64, t1: f64, rest: RestResolution) -> bool {
         let bounds = self.axes[index].pva_bounds(t0, t1).unwrap_or_else(|error| {
             panic!("leader {index} has no velocity bounds over [{t0}, {t1}]: {error}")
         });
-        bounds.velocity_min == 0.0 && bounds.velocity_max == 0.0
+        rest.holds(bounds.velocity_min, bounds.acceleration_abs_max)
+            && rest.holds(bounds.velocity_max, bounds.acceleration_abs_max)
     }
 
     /// The leader's state to third order, read from the same representation
@@ -2243,11 +2247,16 @@ impl<'a> FollowerSignal<'a> {
         breaks.sort_by(f64::total_cmp);
         breaks.dedup();
         let semantic = breaks.clone();
+        let velocity_resolution = acceleration_tol * MIN_DEVICE_INTERVAL_S;
         breaks.extend(self.acceleration_steps_on_the_grid(acceleration_tol));
-        breaks.extend(self.velocity_steps_on_the_grid(acceleration_tol * MIN_DEVICE_INTERVAL_S));
+        breaks.extend(self.velocity_steps_on_the_grid(velocity_resolution));
         breaks.sort_by(f64::total_cmp);
         breaks.dedup();
-        let zeros = self.velocity_component_zeros(&breaks, support_start, support_end);
+        let rest = RestResolution {
+            velocity: velocity_resolution,
+            acceleration: acceleration_tol * REST_ACCELERATION_SHARE,
+        };
+        let zeros = self.velocity_component_zeros(&breaks, support_start, support_end, rest);
         for zero in zeros {
             let dominated = breaks.iter().any(|&b| (b - zero).abs() <= GRID_DEDUP_EPS_S);
             if !dominated {
@@ -2364,6 +2373,7 @@ impl<'a> FollowerSignal<'a> {
         sorted_breaks: &[f64],
         support_start: f64,
         support_end: f64,
+        rest: RestResolution,
     ) -> Vec<f64> {
         let mut nodes = Vec::with_capacity(sorted_breaks.len() + 2);
         nodes.push(support_start);
@@ -2375,20 +2385,51 @@ impl<'a> FollowerSignal<'a> {
         );
         nodes.push(support_end);
         let mut zeros = Vec::new();
-        let moving_leaders = (0..self.leaders.axes.len())
-            .filter(|&leader| !self.leaders.never_moves(leader, support_start, support_end));
+        let moving_leaders = (0..self.leaders.axes.len()).filter(|&leader| {
+            !self
+                .leaders
+                .never_moves(leader, support_start, support_end, rest)
+        });
         for leader in moving_leaders {
-            let velocity = |t| self.leaders.pva(leader, t).1;
+            let direction = |t| {
+                let (_, velocity, acceleration) = self.leaders.pva(leader, t);
+                rest.direction(velocity, acceleration)
+            };
             for window in nodes.windows(2) {
-                isolate_velocity_zeros(&velocity, window[0], window[1], &mut zeros);
+                isolate_velocity_zeros(&direction, window[0], window[1], &mut zeros);
             }
         }
         zeros
     }
 }
 
+/// A leader component at rest as far as the follower's fit can tell: its
+/// velocity under the fit's velocity resolution and its acceleration under
+/// a share of the acceleration tolerance so small that a stop made at it
+/// stays negligible even through an advance. A resting leader's fit moves
+/// at the rounding of its exact signal with either sign, so rest is read
+/// by this resolution and never by that sign.
+#[derive(Clone, Copy, Debug)]
+struct RestResolution {
+    velocity: f64,
+    acceleration: f64,
+}
+
+impl RestResolution {
+    fn holds(self, velocity: f64, acceleration: f64) -> bool {
+        velocity.abs() <= self.velocity && acceleration.abs() <= self.acceleration
+    }
+
+    /// The sign a component moves with, `None` where its velocity is
+    /// exactly zero or it rests.
+    fn direction(self, velocity: f64, acceleration: f64) -> Option<f64> {
+        let settled = velocity == 0.0 || self.holds(velocity, acceleration);
+        (!settled).then(|| velocity.signum())
+    }
+}
+
 fn isolate_velocity_zeros(
-    velocity_at: &impl Fn(f64) -> f64,
+    direction_at: &impl Fn(f64) -> Option<f64>,
     lo: f64,
     hi: f64,
     zeros: &mut Vec<f64>,
@@ -2398,8 +2439,8 @@ fn isolate_velocity_zeros(
     }
     let span = hi - lo;
     let mut previous_time = lo;
-    let mut previous_velocity = velocity_at(lo);
-    if previous_velocity == 0.0 {
+    let mut previous_direction = direction_at(lo);
+    if previous_direction.is_none() {
         zeros.push(lo);
     }
     for probe in 1..=COMPONENT_ZERO_PROBES {
@@ -2408,41 +2449,39 @@ fn isolate_velocity_zeros(
         } else {
             lo + span * (probe as f64 / COMPONENT_ZERO_PROBES as f64)
         };
-        let velocity = velocity_at(time);
-        if velocity == 0.0 {
-            zeros.push(time);
-        } else if previous_velocity != 0.0 && previous_velocity.signum() != velocity.signum() {
-            zeros.push(refine_velocity_zero(
-                velocity_at,
-                previous_time,
-                time,
-                previous_velocity,
-            ));
+        let direction = direction_at(time);
+        match (previous_direction, direction) {
+            (_, None) => zeros.push(time),
+            (Some(previous), Some(current)) if previous != current => {
+                zeros.push(refine_velocity_zero(
+                    direction_at,
+                    previous_time,
+                    time,
+                    previous,
+                ));
+            }
+            _ => {}
         }
         previous_time = time;
-        previous_velocity = velocity;
+        previous_direction = direction;
     }
 }
 
 fn refine_velocity_zero(
-    velocity_at: &impl Fn(f64) -> f64,
+    direction_at: &impl Fn(f64) -> Option<f64>,
     mut lo: f64,
     mut hi: f64,
-    lo_velocity: f64,
+    lo_direction: f64,
 ) -> f64 {
     loop {
         let mid = 0.5 * lo + 0.5 * hi;
         if mid <= lo || mid >= hi {
             return hi;
         }
-        let velocity = velocity_at(mid);
-        if velocity == 0.0 {
-            return mid;
-        }
-        if velocity.signum() == lo_velocity.signum() {
-            lo = mid;
-        } else {
-            hi = mid;
+        match direction_at(mid) {
+            None => return mid,
+            Some(direction) if direction == lo_direction => lo = mid,
+            Some(_) => hi = mid,
         }
     }
 }
