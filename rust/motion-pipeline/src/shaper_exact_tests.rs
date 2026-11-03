@@ -2,7 +2,10 @@ use nurbs::algebra::PiecewisePolynomialKernel;
 use nurbs::bezier::BezierPiece;
 use trajectory::{build_smooth_mzv_kernel, build_smooth_zv_kernel, next_toward};
 
-use super::{ExactPiece, ExactSpan, RealSum};
+use super::{
+    CentredSum, EXACT_CAPACITY, ExactPiece, ExactRounding, ExactSpan, FIRST_ORDER_SHIFT_LIMIT,
+    RealSum, Tracked,
+};
 use crate::shaper::{AxisSignalTable, FitBoundary, Lookahead, ShapedSignalSource, TrackSignal};
 
 /// A value carried as an unevaluated sum of two floats, about 106 bits.
@@ -394,66 +397,81 @@ fn assert_piece_matches_reference(
 /// rounding term, at random times, at both ends of every piece, and an ulp
 /// either side of every break, across kernels with one and two pieces,
 /// with and without derivative-gain impulses, through clamped history and
-/// lookahead.
+/// lookahead. Late in a long print an edge's rounding grows past the
+/// first-order shift's limit against the narrower chunks, so both shifts
+/// are held to the reference.
 #[test]
 fn exact_polynomials_match_a_double_double_convolution_within_their_rounding_bound() {
     let mut rng = Rng(0x2545_F491_4F6C_DD1D);
     let mut worst = [0.0_f64; 3];
-    for (name, kernel) in kernels() {
-        for gains in [None, Some((0.02, 1.5e-4))] {
-            let table = random_table(&mut rng, SIGNAL_START_S, SIGNAL_END_S, gains);
-            let breaks = table.starts.clone();
-            let source = ShapedSignalSource::new(&kernel, table, breaks, SIGNAL_START_S + 0.01);
-            let signal = source.signal();
-            for window in 0..16 {
-                let lo = if window % 2 == 0 {
-                    rng.between(SIGNAL_START_S - 0.01, SIGNAL_END_S)
-                } else {
-                    let boundaries = source.table.boundaries();
-                    let cuts = &source.exact_kernel.cuts;
-                    let boundary = boundaries[(rng.next() * boundaries.len() as f64) as usize];
-                    boundary + cuts[(rng.next() * cuts.len() as f64) as usize]
-                };
-                let hi = (lo + rng.between(1e-5, 8e-3)).min(SIGNAL_END_S + 0.01);
-                let pieces = signal
-                    .exact_polynomial_on(lo, hi)
-                    .unwrap_or_else(|| panic!("{name}: a clamped table has every window"));
-                assert!(!pieces.is_empty(), "{name}: [{lo}, {hi}] has no pieces");
-                assert_eq!(
-                    pieces[0].lo, lo,
-                    "{name}: the first piece starts at the interval"
-                );
-                assert_eq!(
-                    pieces.last().expect("non-empty").hi,
-                    hi,
-                    "{name}: the last piece ends at the interval"
-                );
-                for pair in pieces.windows(2) {
-                    assert!(
-                        pair[1].lo <= next_toward(pair[0].hi, f64::INFINITY),
-                        "{name}: pieces [{}, {}] and [{}, {}] leave a gap",
-                        pair[0].lo,
-                        pair[0].hi,
-                        pair[1].lo,
-                        pair[1].hi
-                    );
-                }
-                for piece in &pieces {
-                    let first_inside = next_toward(piece.lo, f64::INFINITY);
-                    let last_inside = next_toward(piece.hi, f64::NEG_INFINITY);
-                    if first_inside > last_inside {
-                        continue;
-                    }
-                    let mut times = vec![first_inside, last_inside];
-                    times.extend((0..4).map(|_| rng.between(first_inside, last_inside)));
-                    for t in times {
-                        assert_piece_matches_reference(&source, piece, t, &mut worst);
-                    }
-                }
+    for start in [SIGNAL_START_S, 3000.0, 86400.0] {
+        let end = start + (SIGNAL_END_S - SIGNAL_START_S);
+        for (name, kernel) in kernels() {
+            for gains in [None, Some((0.02, 1.5e-4))] {
+                let table = random_table(&mut rng, start, end, gains);
+                let breaks = table.starts.clone();
+                let source = ShapedSignalSource::new(&kernel, table, breaks, start + 0.01);
+                assert_windows_match_reference(&mut rng, name, &source, (start, end), &mut worst);
             }
         }
     }
     eprintln!("worst miss over rounding bound: {worst:?}");
+}
+
+fn assert_windows_match_reference(
+    rng: &mut Rng,
+    name: &str,
+    source: &ShapedSignalSource,
+    (start, end): (f64, f64),
+    worst: &mut [f64; 3],
+) {
+    let signal = source.signal();
+    for window in 0..16 {
+        let lo = if window % 2 == 0 {
+            rng.between(start - 0.01, end)
+        } else {
+            let boundaries = source.table.boundaries();
+            let cuts = &source.exact_kernel.cuts;
+            let boundary = boundaries[(rng.next() * boundaries.len() as f64) as usize];
+            boundary + cuts[(rng.next() * cuts.len() as f64) as usize]
+        };
+        let hi = (lo + rng.between(1e-5, 8e-3)).min(end + 0.01);
+        let pieces = signal
+            .exact_polynomial_on(lo, hi)
+            .unwrap_or_else(|| panic!("{name}: a clamped table has every window"));
+        assert!(!pieces.is_empty(), "{name}: [{lo}, {hi}] has no pieces");
+        assert_eq!(
+            pieces[0].lo, lo,
+            "{name}: the first piece starts at the interval"
+        );
+        assert_eq!(
+            pieces.last().expect("non-empty").hi,
+            hi,
+            "{name}: the last piece ends at the interval"
+        );
+        for pair in pieces.windows(2) {
+            assert!(
+                pair[1].lo <= next_toward(pair[0].hi, f64::INFINITY),
+                "{name}: pieces [{}, {}] and [{}, {}] leave a gap",
+                pair[0].lo,
+                pair[0].hi,
+                pair[1].lo,
+                pair[1].hi
+            );
+        }
+        for piece in &pieces {
+            let first_inside = next_toward(piece.lo, f64::INFINITY);
+            let last_inside = next_toward(piece.hi, f64::NEG_INFINITY);
+            if first_inside > last_inside {
+                continue;
+            }
+            let mut times = vec![first_inside, last_inside];
+            times.extend((0..4).map(|_| rng.between(first_inside, last_inside)));
+            for t in times {
+                assert_piece_matches_reference(source, piece, t, worst);
+            }
+        }
+    }
 }
 
 const EVALUATOR_BREAK_ULPS: u32 = 16;
@@ -633,6 +651,141 @@ fn exact_reads_take_the_sub_interval_they_face() {
                 assert_eq!(
                     bits(span.pva(before.hi, toward)),
                     bits(after.eval_pva(before.hi))
+                );
+            }
+        }
+    }
+}
+
+/// A random polynomial of `len` coefficients whose terms are of order one
+/// on `|w| ≤ radius`, all positive when `positive`.
+fn scaled_polynomial(rng: &mut Rng, len: usize, radius: f64, positive: bool) -> Vec<f64> {
+    let mut scale = 1.0;
+    (0..len)
+        .map(|_| {
+            let value = if positive {
+                rng.between(0.5, 1.0)
+            } else {
+                rng.between(-1.0, 1.0)
+            };
+            let coefficient = value / scale;
+            scale *= radius;
+            coefficient
+        })
+        .collect()
+}
+
+fn wide_shifted_value(coefficients: &[f64], shift: f64, w: f64) -> Wide {
+    let wide: Vec<Wide> = coefficients.iter().map(|&c| Wide::of(c)).collect();
+    wide_poly_eval(&wide, Wide::of(w).add(Wide::of(shift)))
+}
+
+const SHIFT_SAMPLES: usize = 9;
+
+fn shift_samples(rng: &mut Rng, radius: f64) -> Vec<f64> {
+    let mut samples = vec![-radius, radius, 0.0];
+    samples.extend((3..SHIFT_SAMPLES).map(|_| rng.between(-radius, radius)));
+    samples
+}
+
+/// The first-order shift drops `Σⱼ pⱼ[(w+ε)ʲ − wʲ − jεwʲ⁻¹]`, which the
+/// Taylor remainder bounds by `Σⱼ |pⱼ|·C(j,2)·ε²·(r+|ε|)^{j−2}` on
+/// `|w| ≤ r`. In double-double the dropped part stays within the
+/// truncation `add_shifted` reports, and for positive coefficients at
+/// `w = r` it reaches at least half of it, the bound's own factor two.
+#[test]
+fn a_first_order_shift_drops_no_more_than_its_truncation_bound() {
+    let mut rng = Rng(0x6A09_E667_F3BC_C909);
+    for len in 3..=EXACT_CAPACITY {
+        for ratio in [
+            2f64.powi(-50),
+            2f64.powi(-40),
+            2f64.powi(-31),
+            FIRST_ORDER_SHIFT_LIMIT,
+        ] {
+            for positive in [false, true] {
+                let radius = libm::pow(10.0, rng.between(-7.0, -2.0));
+                let sign = if positive || rng.next() < 0.5 {
+                    1.0
+                } else {
+                    -1.0
+                };
+                let shift = sign * ratio * radius;
+                let coefficients = scaled_polynomial(&mut rng, len, radius, positive);
+                let mut sum = CentredSum::ZERO;
+                sum.add_shifted(&Tracked::exact(&coefficients), shift, 1.0, radius);
+                assert!(
+                    sum.truncation > 0.0,
+                    "a first-order shift reports no truncation"
+                );
+                let first_order: Vec<Wide> = (0..len)
+                    .map(|power| {
+                        let slope = coefficients.get(power + 1).map_or(Wide::ZERO, |&next| {
+                            Wide::of(next).scale(shift).scale((power + 1) as f64)
+                        });
+                        Wide::of(coefficients[power]).add(slope)
+                    })
+                    .collect();
+                for w in shift_samples(&mut rng, radius) {
+                    let dropped = wide_shifted_value(&coefficients, shift, w)
+                        .sub(wide_poly_eval(&first_order, Wide::of(w)))
+                        .value()
+                        .abs();
+                    assert!(
+                        dropped <= sum.truncation,
+                        "len {len} ratio {ratio:e} at {w}: dropped {dropped:e} past the \
+                         truncation bound {:e}",
+                        sum.truncation
+                    );
+                    if positive && w == radius {
+                        assert!(
+                            dropped >= 0.49 * sum.truncation,
+                            "len {len} ratio {ratio:e}: dropped {dropped:e} is far inside the \
+                             truncation bound {:e}",
+                            sum.truncation
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Either side of the first-order limit, the shifted coefficients land on
+/// the double-double shift to within their rounding and truncation, and
+/// past the limit the full shift reports no truncation.
+#[test]
+fn a_shift_by_an_edge_rounding_matches_the_double_double_shift_within_its_bound() {
+    let mut rng = Rng(0xBB67_AE85_84CA_A73B);
+    let gamma = ExactRounding::gamma(ExactRounding::SHIFT + 2 * EXACT_CAPACITY);
+    for len in 1..=EXACT_CAPACITY {
+        for ratio in [
+            2f64.powi(-40),
+            FIRST_ORDER_SHIFT_LIMIT,
+            2.0 * FIRST_ORDER_SHIFT_LIMIT,
+            2f64.powi(-10),
+            0.5,
+        ] {
+            let radius = libm::pow(10.0, rng.between(-7.0, -2.0));
+            let sign = if rng.next() < 0.5 { 1.0 } else { -1.0 };
+            let shift = sign * ratio * radius;
+            let coefficients = scaled_polynomial(&mut rng, len, radius, false);
+            let mut sum = CentredSum::ZERO;
+            sum.add_shifted(&Tracked::exact(&coefficients), shift, -1.0, radius);
+            if ratio > FIRST_ORDER_SHIFT_LIMIT {
+                assert_eq!(sum.truncation, 0.0, "a full shift reports a truncation");
+            }
+            let bound = 2.0 * gamma * sum.magnitude + sum.truncation;
+            for w in shift_samples(&mut rng, radius) {
+                let computed = sum.values[..sum.len]
+                    .iter()
+                    .rev()
+                    .fold(0.0, |acc, &c| nurbs::fmadd(acc, w, c));
+                let truth = wide_shifted_value(&coefficients, shift, w).neg().value();
+                let miss = (computed - truth).abs();
+                assert!(
+                    miss <= bound,
+                    "len {len} ratio {ratio:e} at {w}: misses by {miss:e}, past {bound:e}"
                 );
             }
         }

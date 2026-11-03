@@ -236,6 +236,122 @@ fn endpoint_velocity_zero_dedups_against_the_support_grid() {
     assert_eq!(at_start, 1, "endpoint root duplicated in {breaks:?}");
 }
 
+const REST_NOISE_MM: f64 = 1e-18;
+
+/// A y leader resting at the origin over `[t0, t0 + rest]`, then
+/// accelerating away. `noisy` adds position noise of about `REST_NOISE_MM`
+/// whose velocity changes sign at a quarter, half and three quarters of the
+/// rest: the rounding a fit of an exact convolution leaves on a leader at
+/// rest, which only a position near zero can carry.
+fn resting_y(t0: f64, rest: f64, t1: f64, noisy: bool) -> ScalarNurbs {
+    let scale = if noisy {
+        256.0 * REST_NOISE_MM / rest.powi(4)
+    } else {
+        0.0
+    };
+    let mut pieces = vec![BezierPiece {
+        u_start: t0,
+        u_end: t0 + rest,
+        coeffs: vec![
+            0.0,
+            -3.0 / 32.0 * scale * rest.powi(3),
+            11.0 / 32.0 * scale * rest.powi(2),
+            -0.5 * scale * rest,
+            0.25 * scale,
+        ],
+    }];
+    if t0 + rest < t1 {
+        pieces.push(BezierPiece {
+            u_start: t0 + rest,
+            u_end: t1,
+            coeffs: vec![0.0, 0.0, 800.0, 0.0, 0.0],
+        });
+    }
+    bezier_pieces_to_nurbs(&pieces)
+}
+
+/// Rounding noise of either sign on a resting leader is rest to the
+/// follower: its partition is the one of the exactly resting leader, both
+/// where the leader rests through the support and where it starts moving
+/// inside it.
+#[test]
+fn rounding_noise_on_a_resting_leader_leaves_the_follower_partition_unchanged() {
+    let (t0, t1) = (300.0, 300.02);
+    let x = |coeffs: Vec<f64>| {
+        bezier_pieces_to_nurbs(&[BezierPiece {
+            u_start: t0,
+            u_end: t1,
+            coeffs,
+        }])
+    };
+    for rest in [0.01, t1 - t0] {
+        let seeds = |noisy: bool| {
+            let shaped = leader_segment(
+                x(vec![1.0, 20.0, 500.0]),
+                resting_y(t0, rest, t1, noisy),
+                t0,
+                t1,
+            );
+            let raw = shaped.clone();
+            let state = FollowerState::default();
+            let sig = FollowerSignal::new(
+                &shaped,
+                &raw,
+                3,
+                &[0, 1],
+                &state,
+                odometer_from_start(&shaped),
+                0.0,
+            );
+            let noisy_velocity_changes_sign = (0..15).any(|probe| {
+                let at = |probe: i32| t0 + rest * (f64::from(probe) + 0.5) / 16.0;
+                let vy = |t: f64| super::axis_pva(&shaped.axes[1], t).1;
+                vy(at(probe)) * vy(at(probe + 1)) < 0.0
+            });
+            assert_eq!(
+                noisy_velocity_changes_sign, noisy,
+                "fixture: only the noisy rest reverses"
+            );
+            sig.construction_breakpoints(&raw.axes[3], 50.0).fit_seeds
+        };
+        assert_eq!(
+            seeds(true),
+            seeds(false),
+            "resting for {rest} s: noise of {REST_NOISE_MM} mm moved the follower's seeds"
+        );
+    }
+}
+
+/// The times a resting leader component is probed at are arbitrary, so its
+/// rest seeds no fit piece of the follower.
+#[test]
+fn a_resting_leader_seeds_nothing_inside_its_rest() {
+    let (t0, rest, t1) = (300.0, 0.01, 300.02);
+    let x = bezier_pieces_to_nurbs(&[BezierPiece {
+        u_start: t0,
+        u_end: t1,
+        coeffs: vec![1.0, 20.0, 500.0],
+    }]);
+    let shaped = leader_segment(x, resting_y(t0, rest, t1, false), t0, t1);
+    let raw = shaped.clone();
+    let state = FollowerState::default();
+    let sig = FollowerSignal::new(
+        &shaped,
+        &raw,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    let seeds = sig.construction_breakpoints(&raw.axes[3], 50.0).fit_seeds;
+    assert!(
+        seeds.iter().all(|&seed| seed <= t0 || seed >= t0 + rest),
+        "the rest over [{t0}, {}] seeded {seeds:?}",
+        t0 + rest
+    );
+}
+
 #[test]
 fn leader_speed_step_on_the_grid_is_seeded_as_a_construction_breakpoint() {
     let (t0, step_at, t1) = (0.0, 0.01, 0.02);
@@ -1320,4 +1436,51 @@ fn a_follower_reports_its_steps_across_a_leader_knot() {
         bound.acceleration,
         bound.jerk
     );
+}
+
+/// The kernel input re-projects its whole cached history every batch, each
+/// time offset by a different carried position. A piece leaving rest with
+/// a start velocity of rounding (here the one that broke the extruder seam
+/// weld in the voron cube replay) must be corrected the same way whatever
+/// that offset, or two batches shape the same history differently.
+#[test]
+fn a_piece_leaving_rest_is_made_monotone_whatever_its_offset() {
+    let tol = crate::lowering::FitTol {
+        pos_mm: 3.4e-5,
+        accel_mm_s2: 50.0,
+    };
+    let leaving_rest = |offset: f64| BezierPiece {
+        u_start: 2.312095117306531,
+        u_end: 2.320504875762939,
+        coeffs: vec![
+            offset,
+            -5.128971379577607e-26,
+            -7.911937594636813,
+            1883.275503327643,
+            0.0,
+            0.0,
+        ],
+    };
+    let corrected = [1.4377803477359528e-28, 0.0011216116926244801].map(|offset| {
+        let mut pieces = [leaving_rest(offset)];
+        super::project_monotone(3, "test input", &mut pieces, tol);
+        let [piece] = pieces;
+        let h = piece.u_end - piece.u_start;
+        let lowest_velocity = (0..=64)
+            .map(|step| super::polynomial_pva(&piece.coeffs, h * step as f64 / 64.0).1)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            lowest_velocity >= -tol.accel_mm_s2 * crate::shaper::MIN_DEVICE_INTERVAL_S,
+            "at offset {offset} the piece leaving rest still retracts at {lowest_velocity} mm/s"
+        );
+        piece.coeffs[1..].to_vec()
+    });
+    for (low, high) in corrected[0].iter().zip(&corrected[1]) {
+        assert!(
+            (low - high).abs() <= 1e-9 * low.abs().max(high.abs()).max(1.0),
+            "the same piece is corrected to {:?} at one offset and {:?} at another",
+            corrected[0],
+            corrected[1]
+        );
+    }
 }

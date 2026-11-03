@@ -6,14 +6,13 @@ use nurbs::bezier::{
 };
 use trajectory::build_smooth_zv_kernel;
 
-use super::{
-    HiddenBreak, HiddenBreakBound, JumpSeries, hidden_break_bounds, input_jumps_at, kernel_jumps_at,
-};
+use super::{JumpSeries, input_jumps_at, kernel_jumps_at};
 use crate::lowering::FitTol;
 use crate::shaper::{
     AxisFit, AxisSignalTable, FitBoundary, Lookahead, ShapedSignalSource, SignalBounds,
     TrackSignal, fit_leader_target,
 };
+use crate::types::PostProcessError;
 
 const FIT_TOL: FitTol = FitTol {
     pos_mm: 0.005,
@@ -86,18 +85,14 @@ fn past_an_image_the_shaped_acceleration_is_its_jump_polynomial() {
             "{reach} s past the image the shaped acceleration is {shaped}, its jump \
              polynomial {predicted}"
         );
-        let bound = image.bound_over(reach);
-        assert!(
-            shaped.abs() <= bound.acceleration_mm_s2,
-            "the bound {bound:?} misses the shaped acceleration {shaped} at reach {reach}"
-        );
     }
 }
 
-/// An image whose bound fits the span's share of the tolerance is hidden,
-/// and the span it lands in pays for it at its reach from the nearer edge.
+/// An image without a velocity step is left to the fit while it lies
+/// within the minimum span of the last seed, and seeded past it; the image
+/// where the shaped signal leaves rest stays a seed however close.
 #[test]
-fn an_image_is_hidden_only_while_its_span_stays_within_its_share() {
+fn an_image_is_seeded_only_past_the_minimum_span_or_at_a_rest() {
     let kernel = build_smooth_zv_kernel(44.0);
     let track = rest_then_accelerate();
     let source = ShapedSignalSource::new(
@@ -107,33 +102,34 @@ fn an_image_is_hidden_only_while_its_span_stays_within_its_share() {
         0.0,
     );
     let breaks = &source.shaped_breaks;
-    let (k_lo, _) = kernel.support();
-    let image_t = *breaks
-        .times()
-        .iter()
-        .find(|&&t| (t - (BREAK_S + k_lo)).abs() < 1e-12)
-        .expect("the break's first image is a shaped break");
-    let close = breaks.select_seeds(
-        vec![image_t - 1e-5, image_t, image_t + 1e-5],
-        source.hidden_break_input(),
-        FIT_TOL,
-    );
-    assert_eq!(close.kept, vec![image_t - 1e-5, image_t + 1e-5]);
-    let [hidden] = close.hidden[..] else {
-        panic!("one image is hidden: {:?}", close.hidden)
+    let (k_lo, k_hi) = kernel.support();
+    let image = |cut: f64| {
+        *breaks
+            .times()
+            .iter()
+            .find(|&&t| (t - (BREAK_S + cut)).abs() < 1e-12)
+            .expect("the break's images are shaped breaks")
     };
-    let [bound] = hidden_break_bounds(&close.kept, &close.hidden)[..] else {
-        panic!("one span")
+    let select = |around: f64, by: f64| {
+        breaks.select_seeds(
+            vec![around - by, around, around + by],
+            source.hidden_break_input(),
+            FIT_TOL,
+        )
     };
-    let reach = (image_t - close.kept[0]).min(close.kept[1] - image_t);
-    assert_eq!(bound, hidden.jumps.bound_over(reach));
-    let far = breaks.select_seeds(
-        vec![image_t - 5e-2, image_t, image_t + 5e-2],
-        source.hidden_break_input(),
-        FIT_TOL,
+    let moving = image(k_hi);
+    let close = 0.5 * breaks.minimum_span;
+    assert_eq!(select(moving, close), vec![moving - close, moving + close]);
+    let far = 2.0 * breaks.minimum_span;
+    assert_eq!(
+        select(moving, far),
+        vec![moving - far, moving, moving + far]
     );
-    assert_eq!(far.kept, vec![image_t - 5e-2, image_t, image_t + 5e-2]);
-    assert!(far.hidden.is_empty());
+    let leaving_rest = image(k_lo);
+    assert_eq!(
+        select(leaving_rest, close),
+        vec![leaving_rest - close, leaving_rest, leaving_rest + close]
+    );
 }
 
 /// A box kernel turns an input position step into a velocity step of the
@@ -171,47 +167,12 @@ fn an_image_carrying_a_resolvable_velocity_step_stays_a_seed() {
         .find(|&&t| (t - (BREAK_S - 0.5 * width)).abs() < 1e-12)
         .expect("the step's first image is a shaped break");
     let seeds = vec![image_t - 1e-5, image_t, image_t + 1e-5];
-    let selected =
+    assert_eq!(
         source
             .shaped_breaks
-            .select_seeds(seeds.clone(), source.hidden_break_input(), FIT_TOL);
-    assert_eq!(selected.kept, seeds);
-    assert!(selected.hidden.is_empty());
-}
-
-#[test]
-fn a_span_with_no_hidden_breaks_keeps_its_whole_tolerance() {
-    let left = HiddenBreakBound::default().tolerance_left(FIT_TOL);
-    assert_eq!(
-        (left.pos_mm, left.accel_mm_s2),
-        (FIT_TOL.pos_mm, FIT_TOL.accel_mm_s2)
+            .select_seeds(seeds.clone(), source.hidden_break_input(), FIT_TOL),
+        seeds
     );
-    let bound = HiddenBreakBound {
-        position_mm: 1e-4,
-        acceleration_mm_s2: 2.0,
-    };
-    let left = bound.tolerance_left(FIT_TOL);
-    assert_eq!(
-        (left.pos_mm, left.accel_mm_s2),
-        (FIT_TOL.pos_mm - 2e-4, FIT_TOL.accel_mm_s2 - 4.0)
-    );
-}
-
-#[test]
-#[should_panic(expected = "leave no tolerance")]
-fn hidden_breaks_that_would_spend_the_whole_tolerance_are_refused() {
-    HiddenBreakBound {
-        position_mm: 0.0,
-        acceleration_mm_s2: 0.5 * FIT_TOL.accel_mm_s2,
-    }
-    .tolerance_left(FIT_TOL);
-}
-
-#[test]
-#[should_panic(expected = "fall past the partition")]
-fn a_hidden_break_outside_the_partition_is_refused() {
-    let jumps = JumpSeries::derivatives_at(&[0.0, 1.0], 0.0);
-    hidden_break_bounds(&[0.0, 1.0], &[HiddenBreak { t: 2.0, jumps }]);
 }
 
 const SINE_MM: f64 = 10.0;
@@ -245,9 +206,10 @@ fn piecewise_sine() -> nurbs::ScalarNurbs {
     bezier_pieces_to_nurbs(&pieces)
 }
 
-/// A leader fit over an input whose seams barely break it hides their
-/// images, fits fewer pieces than it would seed, and every piece still holds
-/// the tolerance against the shaped signal at dense interior points.
+/// A leader fit over an input whose seams barely break it seeds few of
+/// their images, fits fewer pieces than it would seed, and every piece
+/// still holds the tolerance against the shaped signal at dense interior
+/// points.
 #[test]
 fn a_leader_fit_hides_near_smooth_images_and_holds_the_tolerance() {
     let kernel = build_smooth_zv_kernel(44.0);
@@ -307,4 +269,48 @@ fn a_leader_fit_hides_near_smooth_images_and_holds_the_tolerance() {
             );
         }
     }
+}
+
+/// The shaped signal read through its evaluator alone, with no exact
+/// polynomials to prove a fit against.
+struct EvaluatedOnly<S>(S);
+
+impl<S: TrackSignal> TrackSignal for EvaluatedOnly<S> {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        self.0.eval_pva(t)
+    }
+}
+
+/// A leader plan leaves images inside its spans for the hull to hold, so a
+/// leader span the signal has no exact polynomials over is refused, not
+/// estimated.
+#[test]
+fn a_leader_span_without_exact_polynomials_is_refused() {
+    let kernel = build_smooth_zv_kernel(44.0);
+    let track = piecewise_sine();
+    let last_t = f64::from(SINE_PIECES) * SINE_PIECE_S;
+    let source = ShapedSignalSource::new(
+        &kernel,
+        table_over(&track, 0.0, last_t),
+        track.knots().to_vec(),
+        0.0,
+    );
+    let refused = fit_leader_target(
+        AxisFit {
+            axis: 0,
+            t_start: 0.05,
+            t_end: 0.15,
+            seed_breakpoints: source.shaped_breaks.times(),
+            fit_tol: FIT_TOL,
+            fit_context: "hidden-break test",
+            velocity_continuous: true,
+        },
+        &EvaluatedOnly(source.signal()),
+        &source.shaped_breaks,
+        source.hidden_break_input(),
+    );
+    assert!(
+        matches!(refused, Err(PostProcessError::UnprovableSpan { .. })),
+        "a span without exact polynomials was fitted: {refused:?}"
+    );
 }

@@ -47,7 +47,10 @@
 //! On `|x| ≤ 1` a coefficient error `eₖ` moves the polynomial by at most
 //! `Σ|eₖ|`, so each order's rounding term is `2·γ_N·Σₖ magnitudeₖ`, the factor
 //! two covering the magnitudes' own rounding. `N` is
-//! [`ExactRounding::depth`].
+//! [`ExactRounding::depth`]. Where an edge's rounding `ε` is tiny against
+//! the radius, the window's shift by it stops at first order and the
+//! dropped terms' bound joins the rounding term
+//! ([`CentredSum::add_shifted`]).
 //!
 //! # What it covers
 //!
@@ -210,6 +213,70 @@ impl Tracked {
             }
         }
         product
+    }
+}
+
+/// A first-order Taylor shift by `ε` truncates `Σⱼ pⱼ·C(j,2)·ε²·ξ^{j−2}` for
+/// some `|ξ| ≤ r + |ε|`; up to this `|ε|/r` that is below the coefficients'
+/// own rounding, and past it the full shift is cheaper than the slack.
+const FIRST_ORDER_SHIFT_LIMIT: f64 = 1.0 / (1u64 << 30) as f64;
+
+/// One derivative order of the signal about a sub-interval's centre, in the
+/// centre's offset `w` with `|w| ≤ radius`, summed from contributions each
+/// written in its own window's motion `z = w + ε`. `magnitude` bounds the
+/// terms' sum on `|w| ≤ radius` and `truncation` the polynomial dropped by
+/// first-order shifts there.
+#[derive(Clone, Copy, Debug)]
+struct CentredSum {
+    values: [f64; EXACT_CAPACITY],
+    len: usize,
+    magnitude: f64,
+    truncation: f64,
+}
+
+impl CentredSum {
+    const ZERO: Self = Self {
+        values: [0.0; EXACT_CAPACITY],
+        len: 0,
+        magnitude: 0.0,
+        truncation: 0.0,
+    };
+
+    /// Adds `sign · term(w + shift)`. Shifting `|w|^j` by `shift` gives
+    /// `(r + |shift|)^j` on `|w| ≤ r`, so the shifted terms' magnitude is
+    /// `Σⱼ mⱼ·(r + |shift|)ʲ` without shifting the magnitudes. A shift
+    /// within [`FIRST_ORDER_SHIFT_LIMIT`] of the radius keeps
+    /// `pₖ + (k+1)·shift·pₖ₊₁` and adds the remainder's bound
+    /// `Σⱼ 2·mⱼ·C(j,2)·shift²·(r + |shift|)^{j−2}` to the truncation, the
+    /// factor two covering the magnitudes' rounding.
+    fn add_shifted(&mut self, term: &Tracked, shift: f64, sign: f64, radius: f64) {
+        let len = term.len;
+        self.len = self.len.max(len);
+        let reach = radius + shift.abs();
+        self.magnitude += term.magnitudes[..len]
+            .iter()
+            .rev()
+            .fold(0.0, |acc, &magnitude| acc * reach + magnitude);
+        if shift.abs() <= radius * FIRST_ORDER_SHIFT_LIMIT {
+            for power in 0..len {
+                let slope = if power + 1 < len {
+                    (power + 1) as f64 * shift * term.values[power + 1]
+                } else {
+                    0.0
+                };
+                self.values[power] += sign * (term.values[power] + slope);
+            }
+            let remainder = (2..len).rev().fold(0.0, |acc, power| {
+                acc * reach + TRANSLATION_BINOMIALS[power][2] * term.magnitudes[power]
+            });
+            self.truncation += 2.0 * shift * shift * remainder;
+        } else {
+            let mut shifted = [0.0; EXACT_CAPACITY];
+            taylor_shift(&term.values[..len], shift, &mut shifted[..len]);
+            for (value, shifted) in self.values.iter_mut().zip(&shifted[..len]) {
+                *value += sign * shifted;
+            }
+        }
     }
 }
 
@@ -470,7 +537,11 @@ impl ExactConvolution<'_> {
     /// series across the chunk, which is as well conditioned as the kernel
     /// only within the kernel's own width. Chunks and their centres follow
     /// from the whole sub-interval, not from `[lo, hi]`, so two spans
-    /// meeting inside one read the same polynomial at their seam.
+    /// meeting inside one read the same polynomial at their seam. Where a
+    /// break an ulp inside `lo` or `hi` ends the history or lookahead the
+    /// table holds, the float past it reads the table only by rounding: it
+    /// is left to its neighbour, whose polynomial reaches an ulp past its
+    /// break.
     pub(crate) fn pieces_over(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
         assert!(
             lo <= hi,
@@ -540,12 +611,19 @@ impl ExactConvolution<'_> {
                 let center =
                     (chunk_lo + 0.5 * (chunk_hi - chunk_lo)).clamp(first_inside, last_inside);
                 let radius = next_toward((center - chunk_lo).max(chunk_hi - center), f64::INFINITY);
+                let Some(pva) = self.polynomials_at(center, radius) else {
+                    let (first_held, last_held) = (first_inside.max(lo), last_inside.min(hi));
+                    if first_held == last_held && (first_held == lo || first_held == hi) {
+                        continue;
+                    }
+                    return None;
+                };
                 pieces.push(ExactPiece {
                     lo: piece_lo,
                     hi: piece_hi,
                     center,
                     radius,
-                    pva: self.polynomials_at(center, radius)?,
+                    pva,
                 });
             }
         }
@@ -596,7 +674,7 @@ impl ExactConvolution<'_> {
     }
 
     fn polynomials_at(&self, center: f64, radius: f64) -> Option<[LocalPolynomial; 3]> {
-        let mut total = [Tracked::ZERO; MOMENT_ORDERS];
+        let mut total = [CentredSum::ZERO; MOMENT_ORDERS];
         let mut point_masses = 0;
         for piece in &self.kernel.pieces {
             let lower = RealSum::of(center, -piece.end);
@@ -637,9 +715,9 @@ impl ExactConvolution<'_> {
                 let mut at_upper =
                     frozen_window(&piece.at_start, &moments[order], &magnitudes[order]);
                 at_upper.add(&piece.at_start.beta_convolution(&upper_series[order]), 1.0);
-                total[order].add(&at_upper.shifted(upper.tail), 1.0);
+                total[order].add_shifted(&at_upper, upper.tail, 1.0, radius);
                 let at_lower = piece.at_end.beta_convolution(&lower_series[order]);
-                total[order].add(&at_lower.shifted(lower.tail), -1.0);
+                total[order].add_shifted(&at_lower, lower.tail, -1.0, radius);
             }
         }
         let gamma = ExactRounding::gamma(ExactRounding::depth(
@@ -648,28 +726,26 @@ impl ExactConvolution<'_> {
             point_masses,
         ));
         Some(std::array::from_fn(|order| {
-            let mut tracked = total[order];
+            let mut sum = total[order];
             if order == 0 {
-                tracked.len = tracked.len.max(1);
-                tracked.values[0] += self.position_offset;
-                tracked.magnitudes[0] += self.position_offset.abs();
+                sum.len = sum.len.max(1);
+                sum.values[0] += self.position_offset;
+                sum.magnitude += self.position_offset.abs();
             }
             let mut scale = 1.0;
-            let mut magnitude = 0.0;
             let mut coefficients = [0.0; EXACT_CAPACITY];
-            for power in 0..tracked.len {
-                coefficients[power] = tracked.values[power] * scale;
-                magnitude += tracked.magnitudes[power] * scale;
+            for power in 0..sum.len {
+                coefficients[power] = sum.values[power] * scale;
                 scale *= radius;
             }
             assert!(
-                coefficients[..tracked.len].iter().all(|c| c.is_finite()),
+                coefficients[..sum.len].iter().all(|c| c.is_finite()),
                 "exact polynomial of order {order} at {center} is not finite"
             );
             LocalPolynomial {
                 coefficients,
-                len: tracked.len,
-                rounding: 2.0 * gamma * magnitude,
+                len: sum.len,
+                rounding: 2.0 * gamma * sum.magnitude + sum.truncation,
             }
         }))
     }

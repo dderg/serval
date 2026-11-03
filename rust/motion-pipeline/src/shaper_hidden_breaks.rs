@@ -1,5 +1,4 @@
-//! Which of the shaped signal's breakpoints a leader fit seeds, and what the
-//! ones it leaves inside a span cost that span's tolerance.
+//! Which of the shaped signal's breakpoints a leader fit seeds.
 //!
 //! # The jump a kernel image carries
 //!
@@ -20,46 +19,29 @@
 //! at `t*` minus the left one is `D(t) = Σₘ Jₘ (t − t*)ᵐ/m!` with
 //! `Jₘ = Σ_{p+q+1=m} Δx⁽ᵖ⁾ Δk⁽ᵠ⁾`, for `m ≥ 1`: the jump of `s⁽ᵐ⁾` at `t*`.
 //!
-//! # What a hidden image costs a span
+//! A `J₁` is a velocity step of `s`; the rest bend it smoothly from `t*`.
 //!
-//! Let a span `[t₀, t₁]` hold breaks `tᵢ` that are not seeds, each the image
-//! of exactly one `(b, c)` pair. On the span, `s = g + Σᵢ rᵢ` with each `rᵢ`
-//! either `Dᵢ(t)·H(t − tᵢ)` or `−Dᵢ(t)·H(tᵢ − t)`, chosen per break: both
-//! choices leave `g` the one polynomial `P₀ + Σ_{left} Dᵢ` on the whole span
-//! (`P₀` the span's leftmost piece), so `g` is exactly what an unhidden span
-//! fits. `rᵢ` is nonzero only over the reach `wᵢ = min(tᵢ − t₀, t₁ − tᵢ)`,
-//! where
+//! # Which images a leader fit seeds
 //!
-//! ```text
-//! |rᵢ|  ≤ Σ_{m≥1} |Jₘ| wᵢᵐ/m!          =: εₚ
-//! |rᵢ″| ≤ Σ_{m≥2} |Jₘ| wᵢᵐ⁻²/(m−2)!    =: εₐ
-//! ```
+//! A leader fit is proven against the shaped signal's exact polynomials
+//! (`shaper_hull`), which follow every break inside a span, so no image
+//! needs a seed for a piece to hold the tolerance, and every piece is held
+//! to the whole of it. The partition is left to the fit, which halves a span
+//! no rung fits. Three kinds of image stay seeds:
 //!
-//! A `J₁` is a velocity step of `s`, an impulse in `rᵢ″`. One wide enough
-//! for any resolution floor to call it a velocity break is a knot the plan
-//! must anchor, so that image stays a seed; a narrower one is read by no
-//! pointwise acceleration sample, the fit's or the audit's, and costs
-//! position only. Every sub-span of a bisected span holds a subset of its
-//! breaks at no greater reach, so the span's bound holds for every piece
-//! refined from it.
-//!
-//! # The tolerance a span with hidden breaks is fitted to
-//!
-//! A fit `F` accepted against `s` to `tol′` at its probes errs against the
-//! polynomial `g` by at most `tol′ + ε` there, since `s − g` is at most `ε`.
-//! `F − g` is an error between two polynomials, exactly what an unhidden span
-//! hands the probes and their witness, so it is held between the probes as
-//! every seed span's is: by at most `tol′ + ε`. Against `s` it then errs by
-//! at most `tol′ + 2ε`. Fitting to `tol′ = tol − 2ε` keeps every accepted
-//! piece within `tol`, position and acceleration alike.
-//!
-//! # Which images are hidden
-//!
-//! Seeds are walked in order, and an image is hidden while the bounds of the
-//! images hidden since the last kept seed, each charged at its distance from
-//! that seed, stay within a sixteenth of the tolerance. Coalescing then moves
-//! seeds by at most a resolution floor, so the span bounds are recomputed on
-//! the final partition, and those are what each span's tolerance pays.
+//! - one that may carry a velocity step wide enough for a resolution floor
+//!   to call it a velocity break, a knot the plan must anchor: a `J₁` past
+//!   the acceleration tolerance carried across the narrowest floor, or
+//!   jumps that are not known — an image of more than one pair, of a clamp
+//!   edge, or of an input the table alone does not describe;
+//! - one where the shaped signal enters or leaves exact rest: the image of
+//!   a break into a resting input under the kernel's last cut, or out of
+//!   one under its first. A piece across it could only approximate the
+//!   rest, moving within tolerance where nothing moves;
+//! - the first image at least `minimum_span` past the last seed. Halving a
+//!   span across many images pays a ladder per level for rungs that cannot
+//!   reach across it, so the seeds cut a target into spans a rung usually
+//!   fits outright, and no finer.
 
 use nurbs::algebra::PiecewisePolynomialKernel;
 use trajectory::ShapedSignal;
@@ -71,12 +53,10 @@ use crate::lowering::FitTol;
 /// their image's, which runs one order past both together.
 const SERIES_CAPACITY: usize = 2 * MOMENT_POWER_CAPACITY;
 
-/// The share of the fit tolerance the images hidden in one span may bound.
-const HIDDEN_SHARE_OF_TOLERANCE: f64 = 1.0 / 16.0;
-
-/// Tolerance a span gives up per unit of its hidden-break bound: one for the
-/// probes reading `s` instead of `g`, one for `s` leaving `g` between them.
-const HIDDEN_BREAK_TOLERANCE_COST: f64 = 2.0;
+/// The shortest span between seeds, as a share of the kernel's support:
+/// the shaped signal bends on the scale of the kernel, so a span this much
+/// shorter than it is one a rung fits outright.
+const MINIMUM_SPAN_OF_SUPPORT: f64 = 0.25;
 
 /// The input break and kernel cut whose sum an output break is.
 #[derive(Clone, Copy, Debug)]
@@ -146,72 +126,6 @@ impl JumpSeries {
     fn below_any_velocity_break(&self, fit_tol: FitTol) -> bool {
         self.len < 2 || self.orders[1].abs() <= fit_tol.accel_mm_s2 * MIN_DEVICE_INTERVAL_S
     }
-
-    /// `εₚ` and `εₐ` of a break with these jumps at reach `reach`.
-    fn bound_over(&self, reach: f64) -> HiddenBreakBound {
-        let mut bound = HiddenBreakBound::default();
-        let mut power_over_factorial = 1.0;
-        for power in 0..self.len {
-            if power >= 1 {
-                bound.position_mm += self.orders[power].abs() * power_over_factorial;
-            }
-            if power + 2 < self.len {
-                bound.acceleration_mm_s2 += self.orders[power + 2].abs() * power_over_factorial;
-            }
-            power_over_factorial *= reach / (power + 1) as f64;
-        }
-        bound
-    }
-}
-
-/// How far the breaks hidden in a span can move the shaped signal from the
-/// polynomial the span is fitted as.
-#[derive(Clone, Copy, Default, Debug, PartialEq)]
-pub(crate) struct HiddenBreakBound {
-    pub position_mm: f64,
-    pub acceleration_mm_s2: f64,
-}
-
-impl HiddenBreakBound {
-    fn plus(self, other: Self) -> Self {
-        Self {
-            position_mm: self.position_mm + other.position_mm,
-            acceleration_mm_s2: self.acceleration_mm_s2 + other.acceleration_mm_s2,
-        }
-    }
-
-    fn within_share_of(self, fit_tol: FitTol) -> bool {
-        self.position_mm <= HIDDEN_SHARE_OF_TOLERANCE * fit_tol.pos_mm
-            && self.acceleration_mm_s2 <= HIDDEN_SHARE_OF_TOLERANCE * fit_tol.accel_mm_s2
-    }
-
-    /// The tolerance a span hiding these breaks is fitted to, so that what
-    /// it accepts still holds `fit_tol` against the shaped signal.
-    pub(crate) fn tolerance_left(self, fit_tol: FitTol) -> FitTol {
-        let left = FitTol {
-            pos_mm: fit_tol.pos_mm - HIDDEN_BREAK_TOLERANCE_COST * self.position_mm,
-            accel_mm_s2: fit_tol.accel_mm_s2
-                - HIDDEN_BREAK_TOLERANCE_COST * self.acceleration_mm_s2,
-        };
-        assert!(
-            left.pos_mm > 0.0 && left.accel_mm_s2 > 0.0,
-            "hidden breaks bounded by {self:?} leave no tolerance of {fit_tol:?}"
-        );
-        left
-    }
-}
-
-/// An output break left out of the seeds, with the jumps it carries.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct HiddenBreak {
-    t: f64,
-    jumps: JumpSeries,
-}
-
-/// A target's seeds, and the breaks between them it does not seed.
-pub(crate) struct LeaderSeeds {
-    pub kept: Vec<f64>,
-    pub hidden: Vec<HiddenBreak>,
 }
 
 /// Every output break of the shaped signal — each input break moved by each
@@ -221,6 +135,7 @@ pub(crate) struct ShapedBreaks {
     times: Vec<f64>,
     images: Vec<Option<KernelImage>>,
     kernel_jumps: Vec<JumpSeries>,
+    minimum_span: f64,
 }
 
 impl ShapedBreaks {
@@ -257,6 +172,7 @@ impl ShapedBreaks {
                 images.push(Some(image));
             }
         }
+        let (support_start, support_end) = kernel.support();
         Self {
             times,
             images,
@@ -264,6 +180,7 @@ impl ShapedBreaks {
                 .iter()
                 .map(|&cut| kernel_jumps_at(kernel, cut))
                 .collect(),
+            minimum_span: MINIMUM_SPAN_OF_SUPPORT * (support_end - support_start),
         }
     }
 
@@ -279,80 +196,61 @@ impl ShapedBreaks {
         self.images[index]
     }
 
-    /// Keeps `seeds`' first and last, and every interior seed that is not
-    /// the image of one input break with known jumps or whose bound would
-    /// take the span it falls in past its share of `fit_tol`. `input` is
-    /// `None` where the convolution's input is not the table alone.
+    /// Keeps `seeds`' first and last, every interior seed that may carry a
+    /// velocity break or bounds an exact rest, and the first seed at least
+    /// `minimum_span` past the last one kept. `input` is `None` where the
+    /// convolution's input is not the table alone, and no seed's jumps are
+    /// known.
     pub(crate) fn select_seeds(
         &self,
         seeds: Vec<f64>,
         input: Option<&AxisSignalTable>,
         fit_tol: FitTol,
-    ) -> LeaderSeeds {
+    ) -> Vec<f64> {
         let Some(input) = input else {
-            return LeaderSeeds {
-                kept: seeds,
-                hidden: Vec::new(),
-            };
+            return seeds;
         };
         let (&last, interior) = seeds[1..].split_last().expect("fit seeds span no interval");
         let mut kept = Vec::with_capacity(seeds.len());
         kept.push(seeds[0]);
-        let mut hidden = Vec::new();
-        let mut spent = HiddenBreakBound::default();
         for &t in interior {
             let last_kept = *kept.last().expect("kept seeds start with the first");
-            let charged = self
-                .image_at(t)
-                .and_then(|image| self.image_jumps(input, image))
-                .filter(|jumps| jumps.below_any_velocity_break(fit_tol))
-                .map(|jumps| (jumps, spent.plus(jumps.bound_over(t - last_kept))))
-                .filter(|(_, total)| total.within_share_of(fit_tol));
-            match charged {
-                Some((jumps, total)) => {
-                    spent = total;
-                    hidden.push(HiddenBreak { t, jumps });
-                }
-                None => {
-                    kept.push(t);
-                    spent = HiddenBreakBound::default();
-                }
+            let anchors = self.image_at(t).is_none_or(|image| {
+                self.bounds_rest(input, image)
+                    || self
+                        .image_jumps(input, image)
+                        .is_none_or(|jumps| !jumps.below_any_velocity_break(fit_tol))
+            });
+            if anchors || t - last_kept >= self.minimum_span {
+                kept.push(t);
             }
         }
         kept.push(last);
-        LeaderSeeds { kept, hidden }
+        kept
     }
 
     fn image_jumps(&self, input: &AxisSignalTable, image: KernelImage) -> Option<JumpSeries> {
         Some(input_jumps_at(input, image.input_break)?.image_through(self.kernel_jumps[image.cut]))
     }
-}
 
-/// The bound each span of the final partition `seeds` pays for the breaks
-/// `hidden` among them, each charged at its reach in that span.
-pub(crate) fn hidden_break_bounds(seeds: &[f64], hidden: &[HiddenBreak]) -> Vec<HiddenBreakBound> {
-    let mut next = 0;
-    let bounds = seeds
-        .windows(2)
-        .map(|span| {
-            let mut bound = HiddenBreakBound::default();
-            while let Some(inside) = hidden.get(next).filter(|inside| inside.t < span[1]) {
-                bound = bound.plus(
-                    inside
-                        .jumps
-                        .bound_over((inside.t - span[0]).min(span[1] - inside.t)),
-                );
-                next += 1;
-            }
-            bound
-        })
-        .collect();
-    assert_eq!(
-        next,
-        hidden.len(),
-        "hidden breaks fall past the partition's last seed"
-    );
-    bounds
+    /// Whether the shaped signal enters or leaves exact rest at `image`:
+    /// the input rests past its break and the kernel's last cut closes the
+    /// window behind it, or the input rests before it and the first cut
+    /// opens the window onto it.
+    fn bounds_rest(&self, input: &AxisSignalTable, image: KernelImage) -> bool {
+        let at_rest = |piece: usize| input.coeffs[piece][1..].iter().all(|&c| c == 0.0);
+        let after = input
+            .starts
+            .partition_point(|&start| start < image.input_break);
+        let enters = image.cut == self.kernel_jumps.len() - 1
+            && input.starts.get(after) == Some(&image.input_break)
+            && at_rest(after);
+        let leaves = image.cut == 0
+            && after > 0
+            && input.ends[after - 1] == image.input_break
+            && at_rest(after - 1);
+        enters || leaves
+    }
 }
 
 /// The input's derivative jumps at a seam between two of its pieces; `None`

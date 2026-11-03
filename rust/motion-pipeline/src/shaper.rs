@@ -30,9 +30,7 @@ use exact::ExactSpan;
 use hull::{FittedPiece, HullBudget};
 
 pub(crate) use exact::{ExactConvolution, ExactKernel, ExactPiece};
-use hidden_breaks::{
-    HiddenBreak, HiddenBreakBound, LeaderSeeds, ShapedBreaks, hidden_break_bounds,
-};
+use hidden_breaks::ShapedBreaks;
 
 #[derive(Clone, Copy)]
 pub(crate) struct KnotJumpBound {
@@ -1383,10 +1381,7 @@ fn fit_axis_targets(
                 .map(|seeds| shaped_breaks.select_seeds(seeds, hidden_break_input, fit_tol))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut scale_times = seed_sets
-        .iter()
-        .flat_map(|seeds| seeds.kept.iter().copied())
-        .collect::<Vec<_>>();
+    let mut scale_times = seed_sets.iter().flatten().copied().collect::<Vec<_>>();
     scale_times.sort_by(f64::total_cmp);
     scale_times.dedup();
     let plan_workers = target_workers.max(1).min(scale_times.len());
@@ -1399,14 +1394,7 @@ fn fit_axis_targets(
         .into_iter()
         .collect::<HashMap<_, _>>();
     let mut plans = Vec::with_capacity(targets.len());
-    for (
-        target,
-        LeaderSeeds {
-            kept: seeds,
-            hidden,
-        },
-    ) in targets.iter().zip(seed_sets)
-    {
+    for (target, seeds) in targets.iter().zip(seed_sets) {
         let (mut position_scale, mut velocity_scale) = (0.0_f64, 0.0_f64);
         for &t in &seeds {
             let probe = scale_cache
@@ -1436,7 +1424,7 @@ fn fit_axis_targets(
             .filter(|velocity_break| velocity_break.step.abs() > resolution)
             .collect::<Vec<_>>();
         plans.push(
-            fit_plan_from_seeds(seeds, &velocity_breaks, floors, fit_tol.pos_mm, &hidden).map_err(
+            fit_plan_from_seeds(seeds, &velocity_breaks, floors, fit_tol.pos_mm).map_err(
                 |crowded| {
                     crowded_velocity_breaks_error(axis, fit_context, floors, fit_tol, crowded)
                 },
@@ -1476,7 +1464,6 @@ fn fit_axis_targets(
                 t0: t_start,
                 t1: t_end,
                 slivers: plan.slivers[span_index],
-                hidden: plan.hidden[span_index],
             },
             &SpanFitPolicy {
                 axis,
@@ -1486,6 +1473,7 @@ fn fit_axis_targets(
                 floors: plan.floors,
                 velocity_sign: VelocitySign::Unconstrained,
                 velocity_continuous: true,
+                requires_hull: true,
             },
             SpanSeeds {
                 lower: t_start,
@@ -2818,7 +2806,6 @@ struct EdgeSlivers {
 struct FitPlan {
     seeds: Vec<f64>,
     slivers: Vec<EdgeSlivers>,
-    hidden: Vec<HiddenBreakBound>,
     floors: LadderFloors,
 }
 
@@ -2856,7 +2843,6 @@ fn fit_plan_from_seeds(
     velocity_breaks: &[VelocityBreak],
     floors: LadderFloors,
     position_tolerance: f64,
-    hidden: &[HiddenBreak],
 ) -> Result<FitPlan, CrowdedVelocityBreaks> {
     let slivers = coalesce_degenerate_seeds(
         &mut seeds,
@@ -2865,7 +2851,6 @@ fn fit_plan_from_seeds(
         position_tolerance,
     )?;
     Ok(FitPlan {
-        hidden: hidden_break_bounds(&seeds, hidden),
         seeds,
         slivers,
         floors,
@@ -2907,23 +2892,20 @@ fn seed_floors<S: TrackSignal>(fit: &AxisFit, sig: &S, seeds: &[f64]) -> LadderF
 
 fn prepare_fit_plan<S: TrackSignal>(fit: &AxisFit, sig: &S) -> Result<FitPlan, PostProcessError> {
     let seeds = fit_seed_times(fit.axis, fit.t_start, fit.t_end, fit.seed_breakpoints)?;
-    plan_over_seeds(fit, sig, seeds, &[])
+    plan_over_seeds(fit, sig, seeds)
 }
 
 fn plan_over_seeds<S: TrackSignal>(
     fit: &AxisFit,
     sig: &S,
     seeds: Vec<f64>,
-    hidden: &[HiddenBreak],
 ) -> Result<FitPlan, PostProcessError> {
     let floors = seed_floors(fit, sig, &seeds);
     let velocity_breaks =
         velocity_breaks_among(sig, &seeds, velocity_resolution(fit.fit_tol, floors));
-    fit_plan_from_seeds(seeds, &velocity_breaks, floors, fit.fit_tol.pos_mm, hidden).map_err(
-        |crowded| {
-            crowded_velocity_breaks_error(fit.axis, fit.fit_context, floors, fit.fit_tol, crowded)
-        },
-    )
+    fit_plan_from_seeds(seeds, &velocity_breaks, floors, fit.fit_tol.pos_mm).map_err(|crowded| {
+        crowded_velocity_breaks_error(fit.axis, fit.fit_context, floors, fit.fit_tol, crowded)
+    })
 }
 
 /// The widest velocity step a span at the resolution floor can carry and
@@ -3029,29 +3011,31 @@ pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
     sig: &S,
 ) -> Result<nurbs::ScalarNurbs, PostProcessError> {
     let plan = prepare_fit_plan(&fit, sig)?;
-    fit_axis_over_plan(&fit, sig, plan)
+    fit_axis_over_plan(&fit, sig, plan, false)
 }
 
-/// One leader target's fit, seeded with the shaped breaks it cannot hide.
+/// One leader target's fit, seeded with the shaped breaks the hull cannot
+/// stand in for, and every span proven by it.
 fn fit_leader_target<S: TrackSignal>(
     fit: AxisFit,
     sig: &S,
     shaped_breaks: &ShapedBreaks,
     hidden_break_input: Option<&AxisSignalTable>,
 ) -> Result<nurbs::ScalarNurbs, PostProcessError> {
-    let LeaderSeeds { kept, hidden } = shaped_breaks.select_seeds(
+    let seeds = shaped_breaks.select_seeds(
         fit_seed_times(fit.axis, fit.t_start, fit.t_end, fit.seed_breakpoints)?,
         hidden_break_input,
         fit.fit_tol,
     );
-    let plan = plan_over_seeds(&fit, sig, kept, &hidden)?;
-    fit_axis_over_plan(&fit, sig, plan)
+    let plan = plan_over_seeds(&fit, sig, seeds)?;
+    fit_axis_over_plan(&fit, sig, plan, true)
 }
 
 fn fit_axis_over_plan<S: TrackSignal>(
     fit: &AxisFit,
     sig: &S,
     plan: FitPlan,
+    requires_hull: bool,
 ) -> Result<nurbs::ScalarNurbs, PostProcessError> {
     let policy = SpanFitPolicy {
         axis: fit.axis,
@@ -3061,17 +3045,17 @@ fn fit_axis_over_plan<S: TrackSignal>(
         floors: plan.floors,
         velocity_sign: VelocitySign::Unconstrained,
         velocity_continuous: fit.velocity_continuous,
+        requires_hull,
     };
     let mut refinement_splits = 0;
     let mut pieces = Vec::with_capacity(plan.seeds.len());
-    for ((span, &slivers), &hidden) in plan.seeds.windows(2).zip(&plan.slivers).zip(&plan.hidden) {
+    for (span, &slivers) in plan.seeds.windows(2).zip(&plan.slivers) {
         refine_shaped_span(
             sig,
             RefineSpan {
                 t0: span[0],
                 t1: span[1],
                 slivers,
-                hidden,
             },
             &policy,
             SpanSeeds {
@@ -3632,7 +3616,9 @@ impl<S: TrackSignal> RungWitness<'_, S> {
 const LADDER_FIT_NODES_U: [f64; 3] = [0.0, 0.5, -0.5];
 
 /// Everything one fit's spans are refined against: the axis being fitted,
-/// its budgets, the resolution floors of the signal, and the rung rules.
+/// its budgets, the resolution floors of the signal, the rung rules, and
+/// whether the plan left breaks inside its spans that only the hull over
+/// the signal's exact polynomials can hold a piece across.
 #[derive(Clone, Copy)]
 struct SpanFitPolicy {
     axis: usize,
@@ -3642,16 +3628,15 @@ struct SpanFitPolicy {
     floors: LadderFloors,
     velocity_sign: VelocitySign,
     velocity_continuous: bool,
+    requires_hull: bool,
 }
 
-/// One span of a refinement tree: its bounds, and the bound on the breaks
-/// it hides, which every piece refined from it pays out of its tolerance.
+/// One span of a refinement tree.
 #[derive(Clone, Copy)]
 struct RefineSpan {
     t0: f64,
     t1: f64,
     slivers: EdgeSlivers,
-    hidden: HiddenBreakBound,
 }
 
 /// The partition seeds the refined span sits between, reported by a fit
@@ -3991,7 +3976,9 @@ fn square_root_onset_on_edge<S: TrackSignal>(sig: &S, edge: f64) -> bool {
 
 /// Refines one partition span. Where the signal has exact polynomials over
 /// it they are built once, up front, and every piece refined from the span
-/// reads its truth off them and is proven against them.
+/// reads its truth off them and is proven against them. A plan that left
+/// breaks for the hull alone to hold has no other proof: a span without
+/// exact polynomials is an error there.
 fn refine_shaped_span<S: TrackSignal>(
     sig: &S,
     span: RefineSpan,
@@ -4003,6 +3990,14 @@ fn refine_shaped_span<S: TrackSignal>(
     let exact = sig
         .exact_polynomial_on(span.t0, span.t1)
         .map(ExactSpan::new);
+    if policy.requires_hull && exact.is_none() {
+        return Err(PostProcessError::UnprovableSpan {
+            axis: policy.axis,
+            fit_context: policy.fit_context,
+            t_start: span.t0,
+            t_end: span.t1,
+        });
+    }
     refine_span_against(
         sig,
         exact.as_ref(),
@@ -4023,27 +4018,14 @@ fn refine_span_against<S: TrackSignal>(
     refinement_splits: &mut usize,
     out: &mut Vec<BezierPiece>,
 ) -> Result<(), PostProcessError> {
-    let RefineSpan {
-        t0,
-        t1,
-        slivers,
-        hidden,
-    } = span;
-    let fit_tol = hidden.tolerance_left(policy.fit_tol);
+    let RefineSpan { t0, t1, slivers } = span;
+    let fit_tol = policy.fit_tol;
     let velocity_budget = policy.velocity_budget;
     let floors = policy.floors;
     let tm = 0.5 * t0 + 0.5 * t1;
     let at_resolution_floor = tm - t0 < floors.cubic || t1 - tm < floors.cubic;
     let splittable = !at_resolution_floor && *refinement_splits < MAX_FIT_REFINEMENT_SPLITS;
-    let (mono_u, failure) = shaped_ladder(
-        sig,
-        exact,
-        t0,
-        t1,
-        slivers,
-        &SpanFitPolicy { fit_tol, ..*policy },
-        !splittable,
-    )?;
+    let (mono_u, failure) = shaped_ladder(sig, exact, t0, t1, slivers, policy, !splittable)?;
     #[cfg(feature = "fit-audit")]
     let edge_insets = (
         edge_inset(t1 - t0, floors.cubic, slivers.start),
@@ -4163,7 +4145,6 @@ fn refine_span_against<S: TrackSignal>(
                 end_break: None,
                 ..slivers
             },
-            hidden,
         },
         policy,
         seeds,
@@ -4181,7 +4162,6 @@ fn refine_span_against<S: TrackSignal>(
                 start_break: None,
                 ..slivers
             },
-            hidden,
         },
         policy,
         seeds,

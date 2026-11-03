@@ -28,6 +28,9 @@ const BASIS_CONVERSION_ROUNDOFF_ENVELOPE: f64 = (1_u64 << 20) as f64;
 const ODOMETER_ALIGNMENT_ULPS: f64 = (1_u64 << 12) as f64;
 const SPEED_ZERO_SLIVER_FRACTION: f64 = 1e-6;
 const COMPONENT_ZERO_PROBES: usize = 16;
+/// The share of the acceleration tolerance under which a slow leader
+/// component counts as at rest ([`RestResolution`]).
+const REST_ACCELERATION_SHARE: f64 = 1.0 / (1_u64 << 30) as f64;
 fn follower_fit_tol(fit_tol: FitTol, position_scale: f64) -> FitTol {
     FitTol {
         pos_mm: fit_tol.pos_mm * position_scale,
@@ -1769,11 +1772,12 @@ impl<'a> ShapedLeaders<'a> {
             / speed
     }
 
-    fn never_moves(&self, index: usize, t0: f64, t1: f64) -> bool {
+    fn never_moves(&self, index: usize, t0: f64, t1: f64, rest: RestResolution) -> bool {
         let bounds = self.axes[index].pva_bounds(t0, t1).unwrap_or_else(|error| {
             panic!("leader {index} has no velocity bounds over [{t0}, {t1}]: {error}")
         });
-        bounds.velocity_min == 0.0 && bounds.velocity_max == 0.0
+        rest.holds(bounds.velocity_min, bounds.acceleration_abs_max)
+            && rest.holds(bounds.velocity_max, bounds.acceleration_abs_max)
     }
 
     /// The leader's state to third order, read from the same representation
@@ -2243,11 +2247,16 @@ impl<'a> FollowerSignal<'a> {
         breaks.sort_by(f64::total_cmp);
         breaks.dedup();
         let semantic = breaks.clone();
+        let velocity_resolution = acceleration_tol * MIN_DEVICE_INTERVAL_S;
         breaks.extend(self.acceleration_steps_on_the_grid(acceleration_tol));
-        breaks.extend(self.velocity_steps_on_the_grid(acceleration_tol * MIN_DEVICE_INTERVAL_S));
+        breaks.extend(self.velocity_steps_on_the_grid(velocity_resolution));
         breaks.sort_by(f64::total_cmp);
         breaks.dedup();
-        let zeros = self.velocity_component_zeros(&breaks, support_start, support_end);
+        let rest = RestResolution {
+            velocity: velocity_resolution,
+            acceleration: acceleration_tol * REST_ACCELERATION_SHARE,
+        };
+        let zeros = self.velocity_component_zeros(&breaks, support_start, support_end, rest);
         for zero in zeros {
             let dominated = breaks.iter().any(|&b| (b - zero).abs() <= GRID_DEDUP_EPS_S);
             if !dominated {
@@ -2364,6 +2373,7 @@ impl<'a> FollowerSignal<'a> {
         sorted_breaks: &[f64],
         support_start: f64,
         support_end: f64,
+        rest: RestResolution,
     ) -> Vec<f64> {
         let mut nodes = Vec::with_capacity(sorted_breaks.len() + 2);
         nodes.push(support_start);
@@ -2375,20 +2385,61 @@ impl<'a> FollowerSignal<'a> {
         );
         nodes.push(support_end);
         let mut zeros = Vec::new();
-        let moving_leaders = (0..self.leaders.axes.len())
-            .filter(|&leader| !self.leaders.never_moves(leader, support_start, support_end));
+        let moving_leaders = (0..self.leaders.axes.len()).filter(|&leader| {
+            !self
+                .leaders
+                .never_moves(leader, support_start, support_end, rest)
+        });
         for leader in moving_leaders {
-            let velocity = |t| self.leaders.pva(leader, t).1;
+            let direction = |t| {
+                let (_, velocity, acceleration) = self.leaders.pva(leader, t);
+                rest.direction(velocity, acceleration)
+            };
             for window in nodes.windows(2) {
-                isolate_velocity_zeros(&velocity, window[0], window[1], &mut zeros);
+                isolate_velocity_zeros(&direction, window[0], window[1], &mut zeros);
             }
         }
         zeros
     }
 }
 
+/// A leader component at rest as far as the follower's fit can tell: its
+/// velocity under the fit's velocity resolution and its acceleration under
+/// a share of the acceleration tolerance so small that a stop made at it
+/// stays negligible even through an advance. A resting leader's fit moves
+/// at the rounding of its exact signal with either sign, so rest is read
+/// by this resolution and never by that sign.
+#[derive(Clone, Copy, Debug)]
+struct RestResolution {
+    velocity: f64,
+    acceleration: f64,
+}
+
+impl RestResolution {
+    fn holds(self, velocity: f64, acceleration: f64) -> bool {
+        velocity.abs() <= self.velocity && acceleration.abs() <= self.acceleration
+    }
+
+    /// The sign a component moves with, `None` at rest. A velocity exactly
+    /// zero off rest is a reversal landing on a float, which moves the way
+    /// it accelerates.
+    fn direction(self, velocity: f64, acceleration: f64) -> Option<f64> {
+        if self.holds(velocity, acceleration) {
+            return None;
+        }
+        Some(if velocity == 0.0 {
+            acceleration.signum()
+        } else {
+            velocity.signum()
+        })
+    }
+}
+
+/// Seeds every reversal between probes moving opposite ways, and every
+/// time a component starts or stops resting. The times a resting component
+/// is probed at are arbitrary, so rest itself seeds nothing.
 fn isolate_velocity_zeros(
-    velocity_at: &impl Fn(f64) -> f64,
+    direction_at: &impl Fn(f64) -> Option<f64>,
     lo: f64,
     hi: f64,
     zeros: &mut Vec<f64>,
@@ -2398,51 +2449,72 @@ fn isolate_velocity_zeros(
     }
     let span = hi - lo;
     let mut previous_time = lo;
-    let mut previous_velocity = velocity_at(lo);
-    if previous_velocity == 0.0 {
-        zeros.push(lo);
-    }
+    let mut previous_direction = direction_at(lo);
     for probe in 1..=COMPONENT_ZERO_PROBES {
         let time = if probe == COMPONENT_ZERO_PROBES {
             hi
         } else {
             lo + span * (probe as f64 / COMPONENT_ZERO_PROBES as f64)
         };
-        let velocity = velocity_at(time);
-        if velocity == 0.0 {
-            zeros.push(time);
-        } else if previous_velocity != 0.0 && previous_velocity.signum() != velocity.signum() {
-            zeros.push(refine_velocity_zero(
-                velocity_at,
-                previous_time,
-                time,
-                previous_velocity,
-            ));
+        let direction = direction_at(time);
+        match (previous_direction, direction) {
+            (None, None) => {}
+            (Some(_), None) => {
+                zeros.push(refine_rest_boundary(direction_at, time, previous_time));
+            }
+            (None, Some(_)) => {
+                zeros.push(refine_rest_boundary(direction_at, previous_time, time));
+            }
+            (Some(previous), Some(current)) if previous != current => {
+                zeros.push(refine_velocity_zero(
+                    direction_at,
+                    previous_time,
+                    time,
+                    previous,
+                ));
+            }
+            (Some(_), Some(_)) => {}
         }
         previous_time = time;
-        previous_velocity = velocity;
+        previous_direction = direction;
     }
 }
 
 fn refine_velocity_zero(
-    velocity_at: &impl Fn(f64) -> f64,
+    direction_at: &impl Fn(f64) -> Option<f64>,
     mut lo: f64,
     mut hi: f64,
-    lo_velocity: f64,
+    lo_direction: f64,
 ) -> f64 {
     loop {
         let mid = 0.5 * lo + 0.5 * hi;
         if mid <= lo || mid >= hi {
             return hi;
         }
-        let velocity = velocity_at(mid);
-        if velocity == 0.0 {
-            return mid;
+        match direction_at(mid) {
+            None => return mid,
+            Some(direction) if direction == lo_direction => lo = mid,
+            Some(_) => hi = mid,
         }
-        if velocity.signum() == lo_velocity.signum() {
-            lo = mid;
-        } else {
-            hi = mid;
+    }
+}
+
+/// The first time off rest next to it, between a resting time and a moving
+/// one in either order: where a component starts or stops moving, which
+/// is no crossing but changes the path speed's law all the same.
+fn refine_rest_boundary(
+    direction_at: &impl Fn(f64) -> Option<f64>,
+    mut resting: f64,
+    mut moving: f64,
+) -> f64 {
+    loop {
+        let mid = 0.5 * resting + 0.5 * moving;
+        if mid == resting || mid == moving {
+            return moving;
+        }
+        match direction_at(mid) {
+            None => resting = mid,
+            Some(_) => moving = mid,
         }
     }
 }
@@ -2809,12 +2881,19 @@ impl SeamWeld {
     }
 }
 
+/// Lifts every piece whose velocity dips under the fit's velocity resolution
+/// back to a monotone one by projecting its velocity's Bernstein coefficients
+/// onto the nonnegative ones. The velocity is read off the piece's own
+/// derivative, never off differences of its positions, so the offset a piece
+/// rides at (a batch's carried position) cannot change what it becomes, and
+/// an end velocity within the resolution of zero is rest, not a retraction.
 fn project_monotone(
     axis: usize,
     label: &str,
     pieces: &mut [nurbs::bezier::BezierPiece],
     tol: FitTol,
 ) {
+    let velocity_resolution = tol.accel_mm_s2 * MIN_DEVICE_INTERVAL_S;
     let total_at_end = |pieces: &[nurbs::bezier::BezierPiece]| {
         pieces
             .last()
@@ -2825,25 +2904,33 @@ fn project_monotone(
     for piece in pieces.iter_mut() {
         let h = piece.u_end - piece.u_start;
         let degree = piece.degree();
+        if h <= SEGMENT_TIME_EPS_S || degree < 3 {
+            continue;
+        }
         let probe_tau = |u: f64| 0.5 * (u + 1.0) * h;
         let sweep = 4 * degree;
         let dips = (0..=sweep).any(|step| {
             let tau = h * step as f64 / sweep as f64;
-            polynomial_pva(&piece.coeffs, tau).1 < 0.0
+            polynomial_pva(&piece.coeffs, tau).1 < -velocity_resolution
         });
-        if h <= SEGMENT_TIME_EPS_S || !dips {
+        if !dips {
             continue;
         }
-        let bernstein = piece.to_bernstein();
-        let mut derivative = bernstein
-            .windows(2)
-            .map(|pair| degree as f64 * (pair[1] - pair[0]) / h)
-            .collect::<Vec<_>>();
-        if degree < 3 || derivative[0] < 0.0 || derivative[degree - 1] < 0.0 {
+        let mut derivative = piece_velocity(piece).to_bernstein();
+        let ends = [0, degree - 1];
+        if ends
+            .iter()
+            .any(|&end| derivative[end] < -velocity_resolution)
+        {
             continue;
+        }
+        let mut perturbation = 0.0_f64;
+        for end in ends {
+            let rested = derivative[end].max(0.0);
+            perturbation = perturbation.max(rested - derivative[end]);
+            derivative[end] = rested;
         }
         let mut deficit = 0.0_f64;
-        let mut perturbation = 0.0_f64;
         for rate in &mut derivative[1..degree - 1] {
             let available = *rate + deficit;
             let projected = available.max(0.0);
@@ -2856,12 +2943,10 @@ fn project_monotone(
         }
         let accel_envelope = tol.accel_mm_s2 + 2.0 * (degree - 1) as f64 * perturbation / h;
         let source = piece.clone();
-        let mut reintegrated = vec![bernstein[0]; degree + 1];
-        for i in 0..degree {
-            reintegrated[i + 1] = reintegrated[i] + derivative[i] * h / degree as f64;
-        }
-        let corrected_piece =
-            nurbs::bezier::BezierPiece::from_bernstein(&reintegrated, piece.u_start, piece.u_end);
+        let corrected_piece = integrate_velocity(
+            piece.coeffs[0],
+            &nurbs::bezier::BezierPiece::from_bernstein(&derivative, piece.u_start, piece.u_end),
+        );
         let within_budget = crate::lowering::LADDER_PROBES_U.iter().all(|&u| {
             let corrected = polynomial_pva(&corrected_piece.coeffs, probe_tau(u));
             let uncorrected = polynomial_pva(&source.coeffs, probe_tau(u));
@@ -2881,6 +2966,32 @@ fn project_monotone(
         "follower axis {axis} {label} monotone correction moved the total from \
          {source_total} to {corrected_total}"
     );
+}
+
+fn piece_velocity(piece: &BezierPiece) -> BezierPiece {
+    BezierPiece {
+        u_start: piece.u_start,
+        u_end: piece.u_end,
+        coeffs: (1..piece.coeffs.len())
+            .map(|power| power as f64 * piece.coeffs[power])
+            .collect(),
+    }
+}
+
+fn integrate_velocity(start_position: f64, velocity: &BezierPiece) -> BezierPiece {
+    BezierPiece {
+        u_start: velocity.u_start,
+        u_end: velocity.u_end,
+        coeffs: std::iter::once(start_position)
+            .chain(
+                velocity
+                    .coeffs
+                    .iter()
+                    .enumerate()
+                    .map(|(power, &coefficient)| coefficient / (power + 1) as f64),
+            )
+            .collect(),
+    }
 }
 
 fn polynomial_pv(coeffs: &[f64], tau: f64) -> (f64, f64) {
