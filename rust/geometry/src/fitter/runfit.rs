@@ -7,7 +7,7 @@ use super::kernels::RunEnd;
 use super::move_ops::{is_travel, line_of};
 use super::overlap::ArcSide;
 use super::{
-    CornerFitConfig, FitError, causal, kernels, overlap, ramps_admitted,
+    CornerFitConfig, FitError, causal, kernels, line_claim_cap, overlap, ramps_admitted,
     shortest_executable_halves, span_tolerance,
 };
 
@@ -134,6 +134,7 @@ impl RunFit {
             corner,
             self.tol,
             shortest_executable_halves(neighbor, run_first),
+            line_claim_cap(neighbor, line.s_len()),
         ) else {
             return Ok(Vec::new());
         };
@@ -181,6 +182,7 @@ impl RunFit {
             corner,
             self.tol,
             shortest_executable_halves(run_last, neighbor),
+            line_claim_cap(neighbor, line.s_len()),
         ) else {
             return Ok(Vec::new());
         };

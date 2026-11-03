@@ -112,9 +112,11 @@ pub(crate) enum PostProcessError {
     #[error(
         "axis {axis}: this ratio-ramped follower would step its velocity from \
          {velocity_before} to {velocity_after} mm/s at t={t}, beyond the {resolution} mm/s \
-         resolution. No kernel follows a ratio ramp, so the step would reach the motor as is. \
-         The advance turns every acceleration step of the leaders it rides into one: shape \
-         them with kernels whose output is acceleration-continuous"
+         allowance (its instantaneous_corner_velocity plus the fit resolution). No kernel \
+         follows a ratio ramp, so the step would reach the motor as is. The advance turns \
+         every acceleration step of the leaders it rides into one, and the planner holds \
+         those of unshaped leaders within instantaneous_corner_velocity: a larger one is a \
+         planner bug, or comes from a leader stepping where the planner cannot see it"
     )]
     RatioRampedVelocityStep {
         axis: usize,

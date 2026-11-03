@@ -1,7 +1,8 @@
 //! A ratio-ramped advance builds its lead as the leaders leave a rest and
 //! releases it as they come to one no faster than the advance itself would:
 //! the extruder demand at a start or a stop stays within the advance's
-//! natural rate, `k·r·A` in velocity, and under its demand at a corner.
+//! natural rate, `k·r·A` in velocity, and like the corner's within the
+//! extruder's limits the planner holds it to.
 
 use motion_core::seam_test_harness::LiveReplay;
 use motion_pipeline::TrajectoryItem;
@@ -14,6 +15,8 @@ const CORNER_WINDOW_MM: f64 = 15.0;
 const RATIO: f64 = 0.4 * 0.2 / (std::f64::consts::PI * 0.875 * 0.875);
 const P1_ADVANCE_K: f64 = 0.5;
 const P1_MAX_ACCEL: f64 = 3000.0;
+const P1_EXTRUDER_MAX_VELOCITY: f64 = 45.0;
+const P1_EXTRUDER_MAX_ACCEL: f64 = 2000.0;
 /// `max (d/du)(u·ψ(u²))` for the rise `ψ(x) = 1 − (1 − x)³` a valley side
 /// takes from a rest: how far the lead's rate overshoots `k·r·A` while it
 /// catches up with the advance under a constant acceleration.
@@ -127,10 +130,16 @@ fn a_ratio_ramp_builds_and_releases_the_lead_at_rest_within_the_advance_rate() {
             "at {speed} mm/s the lead at rest moves the extruder at {rest_ve:.1} mm/s, past \
              the advance's rate {natural_ve:.1}"
         );
-        assert!(
-            rest_ae <= corner_ae,
-            "at {speed} mm/s the lead at rest accelerates the extruder at {rest_ae:.0} \
-             mm/s^2, past the advance's {corner_ae:.0} at the corner (velocity {corner_ve:.1})"
-        );
+        for (place, ve, ae) in [
+            ("at rest", rest_ve, rest_ae),
+            ("at the corner", corner_ve, corner_ae),
+        ] {
+            assert!(
+                ve <= P1_EXTRUDER_MAX_VELOCITY && ae <= P1_EXTRUDER_MAX_ACCEL,
+                "at {speed} mm/s the lead {place} drives the extruder at {ve:.1} mm/s and \
+                 {ae:.0} mm/s^2, past its {P1_EXTRUDER_MAX_VELOCITY} mm/s and \
+                 {P1_EXTRUDER_MAX_ACCEL} mm/s^2"
+            );
+        }
     }
 }

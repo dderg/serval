@@ -60,11 +60,33 @@ pub fn stream_config(cfg: &PlannerConfig) -> Result<crate::StreamConfig, String>
     })
 }
 
-/// A G-code move's limits: the path caps and, for the planner to apply to
-/// whatever share of each fitted segment's motion lands on z, the z caps.
-pub fn move_limits(cfg: &PlannerConfig) -> Result<geometry::VelocityLimits, String> {
+/// A G-code move's limits: the path caps, the z caps for the planner to
+/// apply to whatever share of each fitted segment's motion lands on z, and
+/// the caps of the extruder the move extrudes on.
+pub fn move_limits(
+    cfg: &PlannerConfig,
+    extruder: Option<geometry::ExtruderCaps>,
+) -> Result<geometry::VelocityLimits, String> {
     let (max_velocity, accel, corner_deviation) = cfg.effective_limits();
-    z_capped_limits(cfg, max_velocity, accel, corner_deviation)
+    Ok(
+        z_capped_limits(cfg, max_velocity, accel, corner_deviation)?
+            .with_extruder_caps(extruder)?,
+    )
+}
+
+/// Every limited follower's extruder caps under the chains `cfg` runs.
+pub fn extruder_caps(cfg: &PlannerConfig) -> Result<Vec<geometry::ExtruderCaps>, String> {
+    let chains = cfg.compile_active_chains().map_err(|e| e.to_string())?;
+    planner_config::extruder_caps(&cfg.axis_registry, &chains)
+}
+
+/// The caps of the follower axis `axis` among `caps`, if it has limits.
+#[must_use]
+pub fn extruder_caps_on(
+    caps: &[geometry::ExtruderCaps],
+    axis: usize,
+) -> Option<geometry::ExtruderCaps> {
+    caps.iter().copied().find(|caps| caps.axis_index == axis)
 }
 
 fn z_capped_limits(
