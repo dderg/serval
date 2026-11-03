@@ -15,14 +15,15 @@ mod corpus;
 
 const DENSE_PRINT: &str = "voron_dense_top_layers";
 
-/// A chain the bench configs leave out, held to the audit on the dense print
+/// Chains the bench configs leave out, held to the audit on the dense print
 /// too: a 70 000 mm/s² Trident whose kernel-free pressure advance under a
 /// ratio ramp fits the follower's advanced source to the position-equivalent
-/// budget.
-/// TODO: the same Trident with a smoothing kernel after the advance leaves
-/// 61 `follower_source` pieces up to 1.94x over the absolute budget, which
-/// the error's interpolant between probes does not see.
-const TRIDENT_CONFIGS: [&str; 1] = ["tools/bench/configs/trident_ramp.cfg"];
+/// budget, and the same Trident with a smoothing kernel after the advance,
+/// whose plain follower source fits to the absolute budget.
+const TRIDENT_CONFIGS: [&str; 2] = [
+    "tools/bench/configs/trident_ramp.cfg",
+    "tools/bench/configs/trident_kernel.cfg",
+];
 
 fn dense_cases() -> Vec<(String, String, PathBuf)> {
     let gcode = std::fs::read_to_string(
