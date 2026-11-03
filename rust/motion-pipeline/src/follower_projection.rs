@@ -448,16 +448,39 @@ fn fit_source_projection(
                             ),
                     )?;
                 }
-                let track = fit_axis_from_signal(
-                    AxisFit {
-                        seed_breakpoints: &seeds,
-                        ..fit
-                    },
-                    &advanced,
-                )?;
+                let fit_advanced = || {
+                    fit_axis_from_signal(
+                        AxisFit {
+                            seed_breakpoints: &seeds,
+                            ..fit
+                        },
+                        &advanced,
+                    )
+                };
+                #[cfg(feature = "fit-audit")]
+                let track = crate::fit_audit::audit_apart(&sig, fit_advanced, |sig, piece| {
+                    crate::fit_audit::check(
+                        &AdvancedFollowerSignal {
+                            source: sig,
+                            advance,
+                            steps: &steps,
+                        },
+                        piece,
+                    );
+                })?;
+                #[cfg(not(feature = "fit-audit"))]
+                let track = fit_advanced()?;
                 (track, steps)
             }
-            None => (fit_axis_from_signal(fit, &sig)?, steps_beyond_rounding),
+            None => {
+                let fit_plain = || fit_axis_from_signal(fit, &sig);
+                #[cfg(feature = "fit-audit")]
+                let track =
+                    crate::fit_audit::audit_apart(&sig, fit_plain, crate::fit_audit::check)?;
+                #[cfg(not(feature = "fit-audit"))]
+                let track = fit_plain()?;
+                (track, steps_beyond_rounding)
+            }
         }
     };
     let e_end_relative = sig.eval(t_end);
@@ -2072,6 +2095,7 @@ impl SpeedZeroSliver {
     }
 }
 
+#[derive(Clone)]
 struct LeaderPieces {
     base: f64,
     pieces: Vec<BezierPiece>,
@@ -2157,6 +2181,7 @@ impl LeaderPieces {
     }
 }
 
+#[derive(Clone)]
 struct ShapedLeaders<'a> {
     axes: Vec<&'a ContinuousAxis>,
     pieces: Vec<Option<LeaderPieces>>,
@@ -2284,6 +2309,7 @@ fn speed_second_of(states: &[(f64, f64, f64, f64)], speed: f64) -> f64 {
     cross_squared / (speed * speed * speed) + velocity_dot_jerk / speed
 }
 
+#[derive(Clone)]
 struct OdometerKnots {
     t: Vec<f64>,
     s: Vec<f64>,
@@ -2404,6 +2430,7 @@ struct PathRead {
     laid: LaidRead,
 }
 
+#[derive(Clone)]
 pub(crate) struct FollowerSignal<'a> {
     state: &'a FollowerState,
     e_start: f64,

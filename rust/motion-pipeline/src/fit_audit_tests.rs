@@ -1,6 +1,6 @@
 use std::cell::Cell;
 
-use super::{AcceptedPiece, CapContactScope, Exemption, check, take_violations};
+use super::{AcceptedPiece, CapContactScope, Exemption, audit_apart, check, take_violations};
 use crate::lowering::{AccelBudget, FitTol, quintic_in_u};
 use crate::shaper::TrackSignal;
 use crate::shaper::exact::{EXACT_CAPACITY, ExactPiece, ExactSpan, LocalPolynomial};
@@ -173,6 +173,7 @@ fn a_miss_at_a_resolved_edge_is_a_violation() {
 
 /// The signal a flat piece over `[0, h]` misses by an error pinned at both
 /// ends, bending at a constant `bend_mm_s2`.
+#[derive(Clone)]
 struct PinnedParabola {
     h: f64,
     bend_mm_s2: f64,
@@ -191,30 +192,31 @@ impl TrackSignal for PinnedParabola {
 const PINNED_SPAN_S: f64 = 1e-3;
 const FOLLOWER_POSITION_TOL_MM: f64 = 1e-4;
 
+fn flat_piece(accel_budget: AccelBudget, exact: Option<&ExactSpan>) -> AcceptedPiece<'_> {
+    AcceptedPiece {
+        fit_context: "follower_source",
+        axis: 3,
+        fit_tol: FitTol {
+            accel_budget,
+            ..FitTol::absolute(FOLLOWER_POSITION_TOL_MM, 50.0)
+        },
+        t0: 0.0,
+        t1: PINNED_SPAN_S,
+        mono_u: &[0.0],
+        accepted_at_floor: false,
+        cubic_floor: 1e-9,
+        edge_insets: (0.0, 0.0),
+        exact,
+    }
+}
+
 fn audit_flat_piece<S: TrackSignal>(
     sig: &S,
     accel_budget: AccelBudget,
     exact: Option<&ExactSpan>,
 ) -> Vec<super::FitViolation> {
     take_violations();
-    check(
-        sig,
-        AcceptedPiece {
-            fit_context: "follower_source",
-            axis: 3,
-            fit_tol: FitTol {
-                accel_budget,
-                ..FitTol::absolute(FOLLOWER_POSITION_TOL_MM, 50.0)
-            },
-            t0: 0.0,
-            t1: PINNED_SPAN_S,
-            mono_u: &[0.0],
-            accepted_at_floor: false,
-            cubic_floor: 1e-9,
-            edge_insets: (0.0, 0.0),
-            exact,
-        },
-    );
+    check(sig, flat_piece(accel_budget, exact));
     take_violations()
 }
 
@@ -263,6 +265,7 @@ fn a_follower_piece_bending_past_its_position_budget_breaks_a_position_equivalen
 }
 
 /// A signal that counts its evaluations.
+#[derive(Clone)]
 struct Counted<S> {
     signal: S,
     evaluations: Cell<usize>,
@@ -362,4 +365,60 @@ fn exact_polynomials_the_evaluator_disagrees_with_fail_the_audit() {
     };
     let exact = exact_pinned_parabola(&disagreeing, &[]);
     audit_flat_piece(&sig, AccelBudget::PositionEquivalent, Some(&exact));
+}
+
+#[test]
+fn pieces_audited_apart_are_checked_against_clones_of_the_source() {
+    let sig = counted_pinned_parabola(2.0 * position_equivalent_acceleration());
+    take_violations();
+    audit_apart(
+        &sig,
+        || {
+            for _ in 0..3 {
+                check(&sig, flat_piece(AccelBudget::PositionEquivalent, None));
+            }
+        },
+        check,
+    );
+    let violations = take_violations();
+    assert_eq!(sig.evaluations.get(), 0);
+    assert_eq!(violations.len(), 3, "{violations:?}");
+    assert!(
+        violations
+            .iter()
+            .all(|violation| (violation.acceleration_over_tolerance - 2.0).abs() < 1e-9),
+        "{violations:?}"
+    );
+}
+
+#[test]
+fn a_piece_with_exact_polynomials_is_checked_on_the_fitting_thread_while_auditing_apart() {
+    let sig = counted_pinned_parabola(0.5 * position_equivalent_acceleration());
+    let exact = exact_pinned_parabola(&sig.signal, &[0.5 * PINNED_SPAN_S]);
+    audit_apart(
+        &sig,
+        || {
+            check(
+                &sig,
+                flat_piece(AccelBudget::PositionEquivalent, Some(&exact)),
+            )
+        },
+        |_, _| panic!("a piece with exact polynomials is never set aside"),
+    );
+    assert_eq!(sig.evaluations.get(), 2);
+}
+
+#[test]
+#[should_panic(expected = "is not finite")]
+fn a_failing_audit_apart_fails_the_fit() {
+    let sig = counted_pinned_parabola(f64::NAN);
+    audit_apart(
+        &sig,
+        || {
+            for _ in 0..3 {
+                check(&sig, flat_piece(AccelBudget::PositionEquivalent, None));
+            }
+        },
+        check,
+    );
 }

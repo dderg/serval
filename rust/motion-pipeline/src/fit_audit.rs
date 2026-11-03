@@ -14,9 +14,11 @@
 
 use std::cell::RefCell;
 use std::convert::Infallible;
-use std::sync::Mutex;
+use std::num::NonZeroUsize;
+use std::sync::{LazyLock, Mutex};
 
 use crate::lowering::{FitTol, eval_mono, eval_mono_dd};
+use crate::worker_pool::WorkerPool;
 use trajectory::next_toward;
 
 use crate::shaper::exact::ExactSpan;
@@ -115,11 +117,27 @@ pub(crate) struct AcceptedPiece<'a> {
     pub exact: Option<&'a ExactSpan>,
 }
 
+/// Checks `piece` against `sig` now, or sets it aside for
+/// [`audit_apart`] while one is fitting on this thread and the piece has no
+/// exact polynomials to read cheaply.
 pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
-    let h = piece.t1 - piece.t0;
-    if h < piece.cubic_floor {
+    if piece.t1 - piece.t0 < piece.cubic_floor {
         return;
     }
+    let set_aside = piece.exact.is_none()
+        && SET_ASIDE.with_borrow_mut(|set_aside| {
+            set_aside
+                .as_mut()
+                .map(|pieces| pieces.push(SetAsidePiece::of(&piece)))
+                .is_some()
+        });
+    if !set_aside {
+        check_now(sig, piece);
+    }
+}
+
+fn check_now<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
+    let h = piece.t1 - piece.t0;
     let acceleration_scale = (2.0 / h) * (2.0 / h);
     let piece_tol = piece.fit_tol.for_piece(h);
     let midpoint = 0.5 * (piece.t0 + piece.t1);
@@ -220,6 +238,129 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
                 exemption,
             });
     }
+}
+
+thread_local! {
+    static SET_ASIDE: RefCell<Option<Vec<SetAsidePiece>>> = const { RefCell::new(None) };
+}
+
+/// An accepted piece without exact polynomials, owned so that another
+/// thread can audit it.
+struct SetAsidePiece {
+    fit_context: &'static str,
+    axis: usize,
+    fit_tol: FitTol,
+    t0: f64,
+    t1: f64,
+    mono_u: Vec<f64>,
+    accepted_at_floor: bool,
+    cubic_floor: f64,
+    edge_insets: (f64, f64),
+}
+
+impl SetAsidePiece {
+    fn of(piece: &AcceptedPiece) -> Self {
+        Self {
+            fit_context: piece.fit_context,
+            axis: piece.axis,
+            fit_tol: piece.fit_tol,
+            t0: piece.t0,
+            t1: piece.t1,
+            mono_u: piece.mono_u.to_vec(),
+            accepted_at_floor: piece.accepted_at_floor,
+            cubic_floor: piece.cubic_floor,
+            edge_insets: piece.edge_insets,
+        }
+    }
+
+    fn accepted(&self) -> AcceptedPiece<'_> {
+        AcceptedPiece {
+            fit_context: self.fit_context,
+            axis: self.axis,
+            fit_tol: self.fit_tol,
+            t0: self.t0,
+            t1: self.t1,
+            mono_u: &self.mono_u,
+            accepted_at_floor: self.accepted_at_floor,
+            cubic_floor: self.cubic_floor,
+            edge_insets: self.edge_insets,
+            exact: None,
+        }
+    }
+}
+
+/// Clears this thread's set-aside pieces however the fit setting them
+/// aside ends.
+struct SettingAside;
+
+impl SettingAside {
+    fn begin() -> Self {
+        let enclosing = SET_ASIDE.replace(Some(Vec::new()));
+        assert!(
+            enclosing.is_none(),
+            "fit audit: a fit is already setting its pieces aside on this thread"
+        );
+        Self
+    }
+
+    fn end(self) -> Vec<SetAsidePiece> {
+        SET_ASIDE
+            .take()
+            .expect("fit audit: the set-aside pieces vanished during the fit")
+    }
+}
+
+impl Drop for SettingAside {
+    fn drop(&mut self) {
+        SET_ASIDE.set(None);
+    }
+}
+
+/// Helpers that audit set-aside pieces, one for every core the calling
+/// thread does not occupy.
+static AUDIT_POOL: LazyLock<WorkerPool> =
+    LazyLock::new(|| WorkerPool::with_helpers(audit_participants_max() - 1));
+
+fn audit_participants_max() -> usize {
+    std::thread::available_parallelism().map_or(1, NonZeroUsize::get)
+}
+
+/// Runs `fit` with the pieces it accepts without exact polynomials set
+/// aside, then audits them across the audit pool: each participant reads
+/// its own clone of `source` through `audit`, so a fit whose signal one
+/// thread alone may evaluate does not wait out its audit serially.
+pub(crate) fn audit_apart<T, C: Clone + Send>(
+    source: &C,
+    fit: impl FnOnce() -> T,
+    audit: impl Fn(&C, AcceptedPiece) + Sync,
+) -> T {
+    assert!(
+        CAP_CONTACTS.with_borrow(Vec::is_empty),
+        "fit audit: pieces set aside would lose this thread's cap contacts"
+    );
+    let setting_aside = SettingAside::begin();
+    let fitted = fit();
+    let pieces = setting_aside.end();
+    if pieces.is_empty() {
+        return fitted;
+    }
+    let participants = audit_participants_max().min(pieces.len());
+    let clones = Mutex::new(vec![source.clone(); participants]);
+    AUDIT_POOL
+        .map_indexed(
+            participants,
+            pieces.len(),
+            || {
+                clones
+                    .lock()
+                    .expect("fit audit clones poisoned")
+                    .pop()
+                    .expect("every audit participant has a clone of the source")
+            },
+            |clone, index| audit(clone, pieces[index].accepted()),
+        )
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    fitted
 }
 
 /// Holds every exact sub-interval reaching into the piece's resolved stretch
