@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use crate::lowering::{FitTol, eval_mono, eval_mono_dd};
 use trajectory::next_toward;
 
-use crate::shaper::TrackSignal;
+use crate::shaper::{SQUARE_ROOT_ONSET_EDGE_SLACK_S, TrackSignal};
 
 /// Interior points checked per accepted piece, spread uniformly so a feature
 /// the ladder's nine probes straddle cannot hide between them.
@@ -156,8 +156,6 @@ const SQRT_MINIMAX_ERROR: [f64; 12] = [
 /// applies to them.
 pub const ANCHORED_RUNG_EXCESS_CEILING: f64 = 3.3;
 
-pub const CAP_CONTACT_EDGE_SLACK_S: f64 = 1e-9;
-
 thread_local! {
     static CAP_CONTACTS: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
 }
@@ -199,7 +197,7 @@ fn cap_contact_onset<S: TrackSignal>(
         CAP_CONTACTS.with(|held| {
             held.borrow()
                 .iter()
-                .any(|&contact| (contact - edge).abs() <= CAP_CONTACT_EDGE_SLACK_S)
+                .any(|&contact| (contact - edge).abs() <= SQUARE_ROOT_ONSET_EDGE_SLACK_S)
         })
     };
     let (onset, far) = if touches(piece.t0) {

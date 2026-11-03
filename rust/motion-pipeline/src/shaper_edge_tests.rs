@@ -84,6 +84,7 @@ fn a_break_hidden_in_the_edge_sliver_is_read_past() {
         0,
         trajectory::next_toward(t0, 2.0),
         t0 + edge_inset(1e-3, FLOOR, 0.0),
+        false,
         TOL,
     )
     .unwrap();
@@ -99,9 +100,15 @@ fn a_smooth_edge_keeps_its_seam_acceleration() {
     let t0 = 1.0;
     let sig = ConstantJerk { jerk: 1e9 };
     let seam = trajectory::next_toward(t0, 2.0);
-    let (_, acceleration) =
-        edge_velocity_and_acceleration(&sig, 0, seam, t0 + edge_inset(1e-3, FLOOR, 0.0), TOL)
-            .unwrap();
+    let (_, acceleration) = edge_velocity_and_acceleration(
+        &sig,
+        0,
+        seam,
+        t0 + edge_inset(1e-3, FLOOR, 0.0),
+        false,
+        TOL,
+    )
+    .unwrap();
     assert_eq!(
         acceleration,
         sig.eval_pva(seam).2,
@@ -347,7 +354,7 @@ fn a_smooth_edge_keeps_its_seam_acceleration_across_a_wide_sliver() {
          tolerance"
     );
     let (_, acceleration) =
-        edge_velocity_and_acceleration(&sig, 0, seam, past_sliver, TOL).unwrap();
+        edge_velocity_and_acceleration(&sig, 0, seam, past_sliver, false, TOL).unwrap();
     assert_eq!(
         acceleration,
         sig.eval_pva(seam).2,
@@ -367,7 +374,7 @@ fn a_break_in_a_wide_sliver_anchors_to_its_far_side_at_the_seam() {
     let seam = trajectory::next_toward(t0, 2.0);
     let past_sliver = t0 + edge_inset(SPAN_S, FLOOR, WIDE_SLIVER_S);
     let (_, acceleration) =
-        edge_velocity_and_acceleration(&sig, 0, seam, past_sliver, TOL).unwrap();
+        edge_velocity_and_acceleration(&sig, 0, seam, past_sliver, false, TOL).unwrap();
     let far_side_at_seam = STEEP_JERK * seam + step_by;
     assert!(
         (acceleration - far_side_at_seam).abs() <= 1e-3 * TOL.accel_mm_s2,
@@ -388,7 +395,7 @@ fn a_break_in_a_wide_sliver_at_the_span_end_anchors_to_its_near_side_at_the_seam
     let seam = trajectory::next_toward(t1, 0.0);
     let past_sliver = t1 - edge_inset(SPAN_S, FLOOR, WIDE_SLIVER_S);
     let (_, acceleration) =
-        edge_velocity_and_acceleration(&sig, 0, seam, past_sliver, TOL).unwrap();
+        edge_velocity_and_acceleration(&sig, 0, seam, past_sliver, false, TOL).unwrap();
     let inside_side_at_seam = STEEP_JERK * seam;
     assert!(
         (acceleration - inside_side_at_seam).abs() <= 1e-3 * TOL.accel_mm_s2,

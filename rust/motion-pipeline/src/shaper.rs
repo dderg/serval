@@ -10,9 +10,9 @@ use trajectory::{
 
 use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
-    AccelerationTrend, FitTol, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget, LadderFailure,
-    LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth, VelocitySign, eval_mono,
-    eval_mono_d, eval_mono_dd, exact_piece, ladder_fit, quintic_in_u,
+    AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget,
+    LadderFailure, LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth, VelocitySign,
+    eval_mono, eval_mono_d, eval_mono_dd, exact_piece, ladder_fit, quintic_in_u,
 };
 use crate::types::{BaseItem, Control, PostProcessError, TrajectoryItem};
 use crate::worker_pool::WorkerPool;
@@ -3032,30 +3032,38 @@ const INTERPOLANT_SUSPICION_SHARE: f64 = 0.9;
 const INTERPOLANT_REFINE_SHARE: f64 = 0.5;
 const GOLDEN_SECTION_STEPS: u32 = 16;
 
-fn golden_section_peak(value: impl Fn(f64) -> f64, mut low: f64, mut high: f64) -> (f64, f64) {
+fn golden_section_peak<E>(
+    mut value: impl FnMut(f64) -> Result<f64, E>,
+    mut low: f64,
+    mut high: f64,
+) -> Result<(f64, f64), E> {
     let shrink = 0.5 * (5.0_f64.sqrt() - 1.0);
     let mut left = high - shrink * (high - low);
     let mut right = low + shrink * (high - low);
-    let (mut left_value, mut right_value) = (value(left), value(right));
+    let (mut left_value, mut right_value) = (value(left)?, value(right)?);
     for _ in 0..GOLDEN_SECTION_STEPS {
         if left_value >= right_value {
             high = right;
             (right, right_value) = (left, left_value);
             left = high - shrink * (high - low);
-            left_value = value(left);
+            left_value = value(left)?;
         } else {
             low = left;
             (left, left_value) = (right, right_value);
             right = low + shrink * (high - low);
-            right_value = value(right);
+            right_value = value(right)?;
         }
     }
-    if left_value >= right_value {
+    Ok(if left_value >= right_value {
         (left, left_value)
     } else {
         (right, right_value)
-    }
+    })
 }
+
+/// Exact samples a suspicious stretch is scanned at before its peak is
+/// searched: the error between the probes is not unimodal near a knot.
+const EXACT_PEAK_SCAN_POINTS: u32 = 8;
 
 const WITNESS_MAX_DEPTH: u32 = 6;
 
@@ -3229,16 +3237,44 @@ impl<S: TrackSignal> RungWitness<'_, S> {
         if coarse_peak <= INTERPOLANT_REFINE_SHARE * self.curvature_budget() {
             return Ok(None);
         }
-        let (peak_u, peak) = golden_section_peak(
-            interpolated,
+        let Ok((peak_u, peak)) = golden_section_peak(
+            |u| Ok::<_, std::convert::Infallible>(interpolated(u)),
             (coarse_u - spacing).max(-1.0),
             (coarse_u + spacing).min(1.0),
         );
         if peak <= INTERPOLANT_SUSPICION_SHARE * self.curvature_budget() {
             return Ok(None);
         }
-        let at_peak = self.exact_sample_at(peak_u)?;
-        Ok((at_peak.curvature_per_u2.abs() > self.curvature_budget()).then_some(peak_u))
+        let gap = LADDER_PROBES_U
+            .windows(2)
+            .find(|gap| peak_u <= gap[1])
+            .expect("the interpolant peak lies between the probes");
+        self.exact_witness_in(gap[0], gap[1])
+    }
+
+    /// Where the error between `low` and `high` leaves the tolerance, read
+    /// from exact samples: a scan, then a golden-section search around its
+    /// largest curvature miss. Spent only on stretches an estimate already
+    /// puts near the budget, where the estimate itself decides nothing.
+    fn exact_witness_in(&self, low: f64, high: f64) -> Result<Option<f64>, PostProcessError> {
+        let step = (high - low) / f64::from(EXACT_PEAK_SCAN_POINTS);
+        let mut scan_peak = (f64::NAN, 0.0);
+        for k in 0..EXACT_PEAK_SCAN_POINTS {
+            let u = nurbs::fmadd(f64::from(k) + 0.5, step, low);
+            let sample = self.exact_sample_at(u)?;
+            if !self.within(sample) {
+                return Ok(Some(u));
+            }
+            if sample.curvature_per_u2.abs() >= scan_peak.1 {
+                scan_peak = (u, sample.curvature_per_u2.abs());
+            }
+        }
+        let (peak_u, _) = golden_section_peak(
+            |u| Ok(self.exact_sample_at(u)?.curvature_per_u2.abs()),
+            (scan_peak.0 - step).max(low),
+            (scan_peak.0 + step).min(high),
+        )?;
+        Ok((!self.within(self.exact_sample_at(peak_u)?)).then_some(peak_u))
     }
 
     fn over_pieces(
@@ -3314,15 +3350,12 @@ impl<S: TrackSignal> RungWitness<'_, S> {
         right: ErrorSample,
         depth: u32,
     ) -> Result<Option<f64>, PostProcessError> {
-        if left.hermite_curvature_peak_to(right) <= self.curvature_budget() {
-            return match left.hermite_curvature_vertex_to(right) {
-                Some((u, vertex))
-                    if vertex > INTERPOLANT_SUSPICION_SHARE * self.curvature_budget() =>
-                {
-                    Ok((!self.within(self.exact_sample_at(u)?)).then_some(u))
-                }
-                _ => Ok(None),
-            };
+        let estimated_peak = left.hermite_curvature_peak_to(right);
+        if estimated_peak <= INTERPOLANT_SUSPICION_SHARE * self.curvature_budget() {
+            return Ok(None);
+        }
+        if estimated_peak <= self.curvature_budget() {
+            return self.exact_witness_in(left.position.u, right.position.u);
         }
         let u = 0.5 * (left.position.u + right.position.u);
         let mid = self.exact_sample_at(u)?;
@@ -3414,17 +3447,24 @@ fn edge_inset(h: f64, cubic_floor: f64, absorbed: f64) -> f64 {
 /// second read as far again past the sliver, so a smooth signal's jerk
 /// across a wide sliver cancels and only its snap times the squared sliver
 /// remains; the inset is at most a quarter span, so that read stays inside
-/// the span.
+/// the span. At a square-root onset the signal declares on the edge the
+/// acceleration is steep past any extrapolation but hides no break: the
+/// edge anchors to the seam reading, where the span across the onset
+/// anchors too.
 fn edge_velocity_and_acceleration<S: TrackSignal>(
     sig: &S,
     axis: usize,
     seam: f64,
     past_sliver: f64,
+    onset_on_edge: bool,
     fit_tol: FitTol,
 ) -> Result<(f64, f64), PostProcessError> {
     let (_, velocity, seam_acceleration) = sig.eval_pva(seam);
     let velocity = exact_value(axis, velocity, seam)?;
     let seam_acceleration = exact_value(axis, seam_acceleration, seam)?;
+    if onset_on_edge {
+        return Ok((velocity, seam_acceleration));
+    }
     let past_acceleration = exact_value(axis, sig.second_deriv(past_sliver), past_sliver)?;
     let beyond = nurbs::fmadd(2.0, past_sliver - seam, seam);
     let beyond_acceleration = exact_value(axis, sig.second_deriv(beyond), beyond)?;
@@ -3468,8 +3508,15 @@ fn span_probe_t(t0: f64, t1: f64, u: f64) -> f64 {
 /// (p, v, a) at both ends and degrees 6/7 from interior residuals — the
 /// lowering ladder against pre-sampled truth, with the shaper's own budgets.
 /// Every accepted piece is endpoint-anchored, so the span seams stay C0 no
-/// matter which rung wins. Returns the accepted monomial-in-u fit, or the
-/// quintic base with `fits = false` so the caller can bisect.
+/// matter which rung wins. On a span reaching a square-root onset the
+/// acceleration's shoulder bends between the probes, so the rungs are also
+/// held to the tolerance at points spread between the resolved edges as the
+/// fit audit spreads them: a miss there splits a splittable span — grading
+/// the partition toward the onset only as deep as its fit needs — and at the
+/// floor, where the closest rung is kept, it is the closest there too. The
+/// points are sampled only once a rung passes the probes or a kept closest
+/// rung is ranked. Returns the accepted
+/// monomial-in-u fit, or the closest rung with the ladder's miss.
 #[allow(clippy::type_complexity)]
 fn shaped_ladder<S: TrackSignal>(
     sig: &S,
@@ -3477,6 +3524,7 @@ fn shaped_ladder<S: TrackSignal>(
     t1: f64,
     slivers: EdgeSlivers,
     policy: &SpanFitPolicy,
+    keeps_closest_rung: bool,
 ) -> Result<(Vec<f64>, Option<LadderFailure>), PostProcessError> {
     let axis = policy.axis;
     let fit_tol = policy.fit_tol;
@@ -3486,16 +3534,28 @@ fn shaped_ladder<S: TrackSignal>(
     let p0 = exact_value(axis, sig.eval(t0), t0)?;
     let start_past_sliver = t0 + edge_inset(h, policy.floors.cubic, slivers.start);
     let end_past_sliver = t1 - edge_inset(h, policy.floors.cubic, slivers.end);
-    let (seam_v0, a0) =
-        edge_velocity_and_acceleration(sig, axis, t0_inside, start_past_sliver, fit_tol)?;
+    let (seam_v0, a0) = edge_velocity_and_acceleration(
+        sig,
+        axis,
+        t0_inside,
+        start_past_sliver,
+        square_root_onset_on_edge(sig, t0),
+        fit_tol,
+    )?;
     let v0 = match slivers.start_break {
         Some(break_at) => velocity_past_moved_break(sig, axis, break_at, t1, t0)?,
         None => seam_v0,
     };
     let t1_inside = span_probe_t(t0, t1, 1.0);
     let p1 = exact_value(axis, sig.eval(t1), t1)?;
-    let (seam_v1, a1) =
-        edge_velocity_and_acceleration(sig, axis, t1_inside, end_past_sliver, fit_tol)?;
+    let (seam_v1, a1) = edge_velocity_and_acceleration(
+        sig,
+        axis,
+        t1_inside,
+        end_past_sliver,
+        square_root_onset_on_edge(sig, t1),
+        fit_tol,
+    )?;
     let v1 = match slivers.end_break {
         Some(break_at) => velocity_past_moved_break(sig, axis, break_at, t0, t1)?,
         None => seam_v1,
@@ -3534,6 +3594,26 @@ fn shaped_ladder<S: TrackSignal>(
         };
     }
 
+    let held_samples = std::cell::OnceCell::new();
+    let reaches_onset = square_root_onset_within(sig, t0, t1);
+    let held = || -> &[HeldSample] {
+        if !reaches_onset {
+            return &[];
+        }
+        held_samples.get_or_init(|| {
+            let resolved = end_past_sliver - start_past_sliver;
+            std::array::from_fn::<_, SQUARE_ROOT_ONSET_CHECK_POINTS, _>(|k| {
+                let t = start_past_sliver
+                    + resolved * (k as f64 + 0.5) / SQUARE_ROOT_ONSET_CHECK_POINTS as f64;
+                let (position, _, acceleration) = sig.eval_pva(t);
+                HeldSample {
+                    x: 2.0 * (t - t0) / h - 1.0,
+                    position,
+                    acceleration,
+                }
+            })
+        })
+    };
     match ladder_fit(
         &base,
         LadderSpan { h, endpoint_delta },
@@ -3541,6 +3621,8 @@ fn shaped_ladder<S: TrackSignal>(
             position: &|u| truth.pos_at(u),
             velocity: &|u| truth.vel_at(u),
             acceleration: &|u| truth.acc_at(u),
+            held: &held,
+            held_ranks_misses: keeps_closest_rung,
         },
         LadderBudget {
             tol: fit_tol,
@@ -3620,55 +3702,28 @@ fn shaped_ladder<S: TrackSignal>(
     }
 }
 
-/// Points at which a candidate next to a square-root onset is held to the
-/// fit tolerance, spread between its resolved edges as the fit audit
-/// spreads them.
-const SQUARE_ROOT_ONSET_CHECK_POINTS: u32 = 64;
+/// Points at which a span reaching a square-root onset is held to the fit
+/// tolerance between the ladder's probes.
+const SQUARE_ROOT_ONSET_CHECK_POINTS: usize = 64;
 
-/// A ladder candidate over `[t0, t1]` in the ladder's `[-1, 1]` monomial
-/// coordinate, and how far inside each edge the fit resolves it.
-#[derive(Clone, Copy)]
-struct OnsetCandidate<'a> {
-    mono_u: &'a [f64],
-    t0: f64,
-    t1: f64,
-    edge_insets: (f64, f64),
+/// How far from a span edge a declared square-root onset still lies on it:
+/// the onsets and the seeds the edges come from are computed apart, ulps of
+/// a print's time apart, and no fit resolves anything this short.
+pub(crate) const SQUARE_ROOT_ONSET_EDGE_SLACK_S: f64 = 1e-9;
+
+fn square_root_onset_within<S: TrackSignal>(sig: &S, from: f64, to: f64) -> bool {
+    let onsets = sig.square_root_onsets();
+    onsets
+        .get(onsets.partition_point(|&onset| onset < from))
+        .is_some_and(|&onset| onset <= to)
 }
 
-/// Whether a candidate the ladder accepted at its probes leaves the fit
-/// tolerance between them, checked only on a span reaching a square-root
-/// onset: there the acceleration's shoulder bends between the probes, and
-/// splitting the span grades the partition toward the onset only as deep
-/// as its fit needs.
-fn misses_square_root_onset<S: TrackSignal>(
-    sig: &S,
-    candidate: OnsetCandidate,
-    fit_tol: FitTol,
-) -> bool {
-    let OnsetCandidate {
-        mono_u,
-        t0,
-        t1,
-        edge_insets: (start_inset, end_inset),
-    } = candidate;
-    let onsets = sig.square_root_onsets();
-    let first_reached = onsets.partition_point(|&onset| onset < t0);
-    if onsets.get(first_reached).is_none_or(|&onset| onset > t1) {
-        return false;
-    }
-    let h = t1 - t0;
-    let acceleration_scale = (2.0 / h) * (2.0 / h);
-    let resolved = h - start_inset - end_inset;
-    (0..SQUARE_ROOT_ONSET_CHECK_POINTS).any(|k| {
-        let u = (start_inset
-            + resolved * (f64::from(k) + 0.5) / f64::from(SQUARE_ROOT_ONSET_CHECK_POINTS))
-            / h;
-        let x = 2.0 * u - 1.0;
-        let (position, _, acceleration) = sig.eval_pva(t0 + h * u);
-        (eval_mono(mono_u, x) - position).abs() > fit_tol.pos_mm
-            || (eval_mono_dd(mono_u, x) * acceleration_scale - acceleration).abs()
-                > fit_tol.accel_mm_s2
-    })
+fn square_root_onset_on_edge<S: TrackSignal>(sig: &S, edge: f64) -> bool {
+    square_root_onset_within(
+        sig,
+        edge - SQUARE_ROOT_ONSET_EDGE_SLACK_S,
+        edge + SQUARE_ROOT_ONSET_EDGE_SLACK_S,
+    )
 }
 
 fn refine_shaped_span<S: TrackSignal>(
@@ -3688,28 +3743,23 @@ fn refine_shaped_span<S: TrackSignal>(
     let fit_tol = hidden.tolerance_left(policy.fit_tol);
     let velocity_budget = policy.velocity_budget;
     let floors = policy.floors;
-    let (mono_u, failure) =
-        shaped_ladder(sig, t0, t1, slivers, &SpanFitPolicy { fit_tol, ..*policy })?;
+    let tm = 0.5 * t0 + 0.5 * t1;
+    let at_resolution_floor = tm - t0 < floors.cubic || t1 - tm < floors.cubic;
+    let splittable = !at_resolution_floor && *refinement_splits < MAX_FIT_REFINEMENT_SPLITS;
+    let (mono_u, failure) = shaped_ladder(
+        sig,
+        t0,
+        t1,
+        slivers,
+        &SpanFitPolicy { fit_tol, ..*policy },
+        !splittable,
+    )?;
+    #[cfg(feature = "fit-audit")]
     let edge_insets = (
         edge_inset(t1 - t0, floors.cubic, slivers.start),
         edge_inset(t1 - t0, floors.cubic, slivers.end),
     );
-    let tm = 0.5 * t0 + 0.5 * t1;
-    let at_resolution_floor = tm - t0 < floors.cubic || t1 - tm < floors.cubic;
-    let splittable = !at_resolution_floor && *refinement_splits < MAX_FIT_REFINEMENT_SPLITS;
-    if failure.is_none()
-        && !(splittable
-            && misses_square_root_onset(
-                sig,
-                OnsetCandidate {
-                    mono_u: &mono_u,
-                    t0,
-                    t1,
-                    edge_insets,
-                },
-                fit_tol,
-            ))
-    {
+    if failure.is_none() {
         #[cfg(feature = "fit-audit")]
         crate::fit_audit::check(
             sig,

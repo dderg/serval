@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use super::{
-    CAP_CONTACT_FRACTION, FULL_RAIL_KNOTS, LawSegment, RAIL_KNOT_DS, RAIL_KNOTS_MAX,
-    RAIL_KNOTS_MIN, RailKnot, SPARE_FULL_RAILS, ScalarLaw, knot_duration,
+    CAP_CONTACT_FRACTION, CapDeparture, FULL_RAIL_KNOTS, LawSegment, RAIL_KNOT_DS, RAIL_KNOTS_MAX,
+    RAIL_KNOTS_MIN, RailKnot, SPARE_FULL_RAILS, ScalarLaw, departure_increment,
+    departure_knot_duration, knot_duration,
 };
 
 fn rail(v0: f64, accel: f64, kappa0: f64, sigma: f64, brake: bool, ds: f64) -> LawSegment {
@@ -206,6 +207,147 @@ fn disk_rail_matches_fine_reference_integration() {
     assert!((v_seg - v).abs() < 1e-6, "speed {v_seg} vs reference {v}");
 }
 
+/// The worst gap, over the first `window` away from the apex, between the
+/// rail's acceleration and the law integrated finely in time from the apex:
+/// forward from a launch, backward from a landing.
+fn worst_departure_from_the_law_at_the_apex(
+    seg: &LawSegment,
+    accel: f64,
+    apex_kappa: f64,
+    sigma_away: f64,
+    window: f64,
+) -> (f64, f64) {
+    let ScalarLaw::DiskRail { brake, .. } = seg.law else {
+        panic!("an apex belongs to a disk rail");
+    };
+    let away = |s: f64, v: f64| -> f64 {
+        let a_n = (apex_kappa + sigma_away * s).abs() * v * v;
+        (accel * accel - a_n * a_n).max(0.0).sqrt()
+    };
+    let steps = 400_000;
+    let h = window / f64::from(steps);
+    let (mut s, mut v) = (0.0_f64, (accel / apex_kappa.abs()).sqrt());
+    let mut worst = (0.0_f64, 0.0_f64);
+    for i in 1..=steps {
+        let (k1s, k1v) = (v, away(s, v));
+        let (k2s, k2v) = (
+            v + 0.5 * h * k1v,
+            away(s + 0.5 * h * k1s, v + 0.5 * h * k1v),
+        );
+        let (k3s, k3v) = (
+            v + 0.5 * h * k2v,
+            away(s + 0.5 * h * k2s, v + 0.5 * h * k2v),
+        );
+        let (k4s, k4v) = (v + h * k3v, away(s + h * k3s, v + h * k3v));
+        s += h * (k1s + 2.0 * k2s + 2.0 * k3s + k4s) / 6.0;
+        v += h * (k1v + 2.0 * k2v + 2.0 * k3v + k4v) / 6.0;
+        if i % 100 == 0 {
+            let from_apex = h * f64::from(i);
+            let (t, truth) = if brake {
+                (seg.dt - from_apex, -away(s, v))
+            } else {
+                (from_apex, away(s, v))
+            };
+            let off = (seg.state_at(t).2 - truth).abs();
+            if off > worst.0 {
+                worst = (off, from_apex);
+            }
+        }
+    }
+    worst
+}
+
+/// A corner blend's two clothoids meet at its apex on the curvature cap,
+/// whose rise there outruns any rail (`|σ| > 2κ²`): the tangential
+/// acceleration leaves zero as `√τ` on both sides. Taken from the dense top
+/// layers of the Voron print on the fast bench config.
+#[test]
+fn a_rail_follows_the_square_root_departure_from_the_cap_at_a_blend_apex() {
+    let accel = 50_000.0_f64;
+    let apex_kappa = -575.525_278_267_944_3_f64;
+    let apex_speed = (accel / apex_kappa.abs()).sqrt();
+    let launch_sigma = 821_979.862_028_279;
+    let launch = rail(
+        apex_speed,
+        accel,
+        apex_kappa,
+        launch_sigma,
+        false,
+        0.000_700_169_559_930_343_1,
+    );
+    let (landing_kappa0, landing_sigma, landing_ds) = (
+        0.306_152_858_833_640_6,
+        -821_972.640_474_798_4,
+        0.000_700_548_172_496_542_9,
+    );
+    let (landing, _) = LawSegment::brake_to(
+        0.0,
+        0.0,
+        ScalarLaw::DiskRail {
+            accel,
+            kappa0: landing_kappa0,
+            sigma: landing_sigma,
+            brake: true,
+        },
+        landing_ds,
+        (accel / (landing_kappa0 + landing_sigma * landing_ds).abs()).sqrt(),
+    )
+    .expect("the landing reaches its apex");
+    for (name, seg, kappa, sigma_away) in [
+        ("launch", &launch, apex_kappa, launch_sigma),
+        (
+            "landing",
+            &landing,
+            landing_kappa0 + landing_sigma * landing_ds,
+            -landing_sigma,
+        ),
+    ] {
+        let (off, from_apex) =
+            worst_departure_from_the_law_at_the_apex(seg, accel, kappa, sigma_away, 4e-6);
+        assert!(
+            off <= 1e-4 * accel,
+            "the {name}'s acceleration strays {off} mm/s² from the law {from_apex} s from \
+             the apex"
+        );
+    }
+}
+
+/// A long brake landing on the curvature cap of a gentle clothoid, whose cap
+/// falls toward the rail slower than it can follow (`|σ| < 2κ²`): seen from
+/// the landing, the acceleration departs zero as `√τ` and stays inside the
+/// cap-contact band for many dense steps before settling toward the cap's
+/// own slope. Taken from the dense top layers of the Voron print on the
+/// fast bench config.
+#[test]
+fn a_brake_landing_on_a_slowly_falling_cap_follows_the_law_through_its_contact_band() {
+    let accel = 50_000.0_f64;
+    let (kappa0, sigma, ds) = (
+        0.465_069_159_612_022_44_f64,
+        -65.027_205_501_112_82,
+        0.152_383_992_972_882_74,
+    );
+    let landing_kappa = kappa0 + sigma * ds;
+    let (landing, _) = LawSegment::brake_to(
+        0.0,
+        0.0,
+        ScalarLaw::DiskRail {
+            accel,
+            kappa0,
+            sigma,
+            brake: true,
+        },
+        ds,
+        (accel / landing_kappa.abs()).sqrt(),
+    )
+    .expect("the brake reaches its landing");
+    let (off, from_apex) =
+        worst_departure_from_the_law_at_the_apex(&landing, accel, landing_kappa, -sigma, 2e-6);
+    assert!(
+        off <= 1e-4 * accel,
+        "the landing's acceleration strays {off} mm/s² from the law {from_apex} s before it"
+    );
+}
+
 #[test]
 fn min_velocity_reports_the_brake_end() {
     let seg = rail(7.0, 1000.0, 0.0, 1838.0, true, 0.024);
@@ -216,8 +358,9 @@ fn min_velocity_reports_the_brake_end() {
 }
 
 /// The rail integration as it was before each step reused the state its
-/// predecessor ended on, or a memoized step of an autonomous law: the oracle
-/// the integrator must match bit for bit.
+/// predecessor ended on, or a memoized step of an autonomous law: every step
+/// recomputed from its start, the departure from a cap by its own step. The
+/// oracle the integrator must match bit for bit.
 fn integrate_rail_arc_recomputing_step_ends(
     law: &ScalarLaw,
     v0: f64,
@@ -229,6 +372,7 @@ fn integrate_rail_arc_recomputing_step_ends(
             s: 0.0,
             v: v0,
             rise: 0.0,
+            departure: CapDeparture::None,
         };
         return Some(Arc::new(vec![knot, knot]));
     }
@@ -245,7 +389,10 @@ fn integrate_rail_arc_recomputing_step_ends(
         let u = k as f64 / n as f64;
         if apex_start { ds * u * u } else { ds * u }
     };
-    let mut knots = Vec::with_capacity(n + 1);
+    let departs_cap = law.in_cap_contact(law.accel_at(0.0, v0));
+    let steps = if departs_cap { n - 1 } else { n };
+    let grid_at = |i: usize| arc_at(if departs_cap && i > 0 { i + 1 } else { i });
+    let mut knots = Vec::with_capacity(steps + 1);
     let mut w = v0 * v0;
     let mut t = 0.0_f64;
     knots.push(RailKnot {
@@ -253,20 +400,30 @@ fn integrate_rail_arc_recomputing_step_ends(
         s: 0.0,
         v: v0,
         rise: 0.0,
+        departure: CapDeparture::None,
     });
     let f = |s: f64, w: f64| 2.0 * law.accel_at(s, w.max(0.0).sqrt());
-    for i in 0..n {
-        let s = arc_at(i);
-        let h = arc_at(i + 1) - s;
-        let k1 = f(s, w);
-        let k2 = f(s + 0.5 * h, w + 0.5 * h * k1);
-        let k3 = f(s + 0.5 * h, w + 0.5 * h * k2);
-        let k4 = f(s + h, w + h * k3);
-        let increment = h * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0;
+    for i in 0..steps {
+        let s = grid_at(i);
+        let h = grid_at(i + 1) - s;
+        let departure = if departs_cap && i == 0 {
+            CapDeparture::FromLo
+        } else {
+            CapDeparture::None
+        };
+        let increment = if departure == CapDeparture::FromLo {
+            departure_increment(law, s, h, w)
+        } else {
+            let k1 = f(s, w);
+            let k2 = f(s + 0.5 * h, w + 0.5 * h * k1);
+            let k3 = f(s + 0.5 * h, w + 0.5 * h * k2);
+            let k4 = f(s + h, w + h * k3);
+            h * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0
+        };
         let stepped = w + increment;
         let settled = law.settle_crossed_cap(s, s + h, stepped);
         let w_next = settled.unwrap_or(stepped);
-        let last = i == n - 1;
+        let last = i == steps - 1;
         if w_next <= 0.0 && !last {
             return None;
         }
@@ -283,13 +440,18 @@ fn integrate_rail_arc_recomputing_step_ends(
         let a_hi = law.accel_at(s + h, v_hi);
         let r_lo = law.accel_rate_at(s, v_lo, a_lo);
         let r_hi = law.accel_rate_at(s + h, v_hi, a_hi);
-        t += knot_duration(h, (v_lo, a_lo, r_lo), (v_hi, a_hi, r_hi));
+        let duration = match departure {
+            CapDeparture::FromLo => departure_knot_duration,
+            _ => knot_duration,
+        };
+        t += duration(h, (v_lo, a_lo, r_lo), (v_hi, a_hi, r_hi));
         w = w_next.max(0.0);
         knots.push(RailKnot {
             t,
-            s: arc_at(i + 1),
+            s: grid_at(i + 1),
             v: w.sqrt(),
             rise,
+            departure,
         });
     }
     Some(Arc::new(knots))
@@ -318,25 +480,29 @@ fn rail_laws() -> Vec<ScalarLaw> {
     laws
 }
 
-fn assert_carrying_matches_recomputing(law: &ScalarLaw, v0: f64, ds: f64) {
-    let bits = |knots: &Option<Arc<Vec<RailKnot>>>| {
-        knots.as_ref().map(|knots| {
-            knots
-                .iter()
-                .map(|k| {
-                    [
-                        k.t.to_bits(),
-                        k.s.to_bits(),
-                        k.v.to_bits(),
-                        k.rise.to_bits(),
-                    ]
-                })
-                .collect::<Vec<_>>()
+fn knots_bits(knots: &Arc<Vec<RailKnot>>) -> Vec<[u64; 5]> {
+    knots
+        .iter()
+        .map(|k| {
+            [
+                k.t.to_bits(),
+                k.s.to_bits(),
+                k.v.to_bits(),
+                k.rise.to_bits(),
+                k.departure as u64,
+            ]
         })
-    };
+        .collect()
+}
+
+fn assert_carrying_matches_recomputing(law: &ScalarLaw, v0: f64, ds: f64) {
     assert_eq!(
-        bits(&super::integrate_rail_arc(law, v0, ds)),
-        bits(&integrate_rail_arc_recomputing_step_ends(law, v0, ds)),
+        super::integrate_rail_arc(law, v0, ds)
+            .as_ref()
+            .map(knots_bits),
+        integrate_rail_arc_recomputing_step_ends(law, v0, ds)
+            .as_ref()
+            .map(knots_bits),
         "{law:?} from v0={v0} over ds={ds}"
     );
 }
@@ -377,6 +543,34 @@ fn memoized_steps_of_constant_curvature_rails_change_no_knot() {
                     brake,
                 };
                 assert_carrying_matches_recomputing(&law, v0, ds);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_constant_curvature_rail_departs_its_cap_by_its_own_step_not_a_memoized_one() {
+    let rails: [(f64, f64, f64); 3] = [
+        (50_000.0, 0.305_837_469_599_224_14, 0.8),
+        (20_000.0, -1.25, 0.2),
+        (5000.0, 2.0, 0.01),
+    ];
+    for sigma in [0.0, -0.0] {
+        for &(accel, kappa0, ds) in &rails {
+            let cap_speed = (accel / kappa0.abs()).sqrt();
+            for v0 in [cap_speed, cap_speed * (1.0 - 1e-6), cap_speed * 1.5] {
+                for brake in [false, true] {
+                    let law = ScalarLaw::DiskRail {
+                        accel,
+                        kappa0,
+                        sigma,
+                        brake,
+                    };
+                    let knots = super::integrate_rail_arc(&law, v0, ds).unwrap();
+                    assert_eq!(knots[1].departure, CapDeparture::FromLo, "{law:?} v0={v0}");
+                    assert_eq!(knots[2].departure, CapDeparture::None, "{law:?} v0={v0}");
+                    assert_carrying_matches_recomputing(&law, v0, ds);
+                }
             }
         }
     }
