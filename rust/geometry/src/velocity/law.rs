@@ -1208,8 +1208,8 @@ fn cap_contact_in_step(law: &ScalarLaw, s: f64, w: f64, h: f64) -> Option<(f64, 
     }
     let mut kept_side = 0_i8;
     for _ in 0..CONTACT_BISECTIONS {
-        let secant = reaches
-            - reaches_landing * (reaches - short) / (reaches_landing - short_landing);
+        let secant =
+            reaches - reaches_landing * (reaches - short) / (reaches_landing - short_landing);
         let middle = if secant > short && secant < reaches {
             secant
         } else {
