@@ -3203,10 +3203,11 @@ impl TrackSignal for FollowerSignal<'_> {
             .map(|side| self.pva_at_distance(trajectory::next_toward(knot, side), s))
     }
     fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
-        let (start, end) = (self.grid[0], self.grid[self.grid.len() - 1]);
-        self.whole_enclosure.over((lo, hi), accuracy, |accuracy| {
-            self.enclosure(start, end, accuracy)
-        })
+        let support = (self.grid[0], self.grid[self.grid.len() - 1]);
+        self.whole_enclosure
+            .over((lo, hi), accuracy, support, |(lo, hi), accuracy| {
+                self.enclosure(lo, hi, accuracy)
+            })
     }
     fn interior_knots(&self, start: f64, end: f64) -> &[f64] {
         let first = self.grid.partition_point(|&t| t <= start);
@@ -3379,9 +3380,11 @@ impl TrackSignal for AdvancedFollowerSignal<'_, '_> {
 
     fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
         let grid = &self.source.grid;
-        self.whole_enclosure.over((lo, hi), accuracy, |accuracy| {
-            self.enclosure(grid[0], grid[grid.len() - 1], accuracy)
-        })
+        let support = (grid[0], grid[grid.len() - 1]);
+        self.whole_enclosure
+            .over((lo, hi), accuracy, support, |(lo, hi), accuracy| {
+                self.enclosure(lo, hi, accuracy)
+            })
     }
 
     fn position_delta(&self, (t0, _): (f64, f64), (t1, _): (f64, f64)) -> f64 {

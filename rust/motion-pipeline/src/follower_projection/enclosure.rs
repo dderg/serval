@@ -116,20 +116,23 @@ fn leader_speed_second(leaders: &[[TaylorModel; 3]], speed: &TaylorModel) -> Opt
 /// A signal's enclosure over its whole support, built once at the
 /// tightest accuracy asked so far: a tighter enclosure proves a looser
 /// request as well, so it is rebuilt only for a tighter one, at the
-/// tightest of both.
+/// tightest of both. Where its pieces over a stretch miss the accuracy
+/// asked — a window the halving depth stopped on, wider than the stretch
+/// — the stretch is enclosed on its own.
 #[derive(Default)]
 pub(super) struct WholeEnclosure {
     built: std::cell::RefCell<Option<([f64; 3], Option<Vec<ExactPiece>>)>>,
 }
 
 impl WholeEnclosure {
-    /// The pieces of the whole enclosure over `[lo, hi]` at `accuracy` or
-    /// tighter, `build` enclosing the whole support at a given accuracy.
+    /// The enclosure over `[lo, hi]` at `accuracy` or tighter, `build`
+    /// enclosing a stretch at a given accuracy and `whole` the support.
     pub(super) fn over(
         &self,
         (lo, hi): (f64, f64),
         accuracy: [f64; 3],
-        build: impl FnOnce([f64; 3]) -> Option<Vec<ExactPiece>>,
+        whole: (f64, f64),
+        build: impl Fn((f64, f64), [f64; 3]) -> Option<Vec<ExactPiece>>,
     ) -> Option<Vec<ExactPiece>> {
         let stale = match &*self.built.borrow() {
             Some((built, _)) => built
@@ -143,14 +146,26 @@ impl WholeEnclosure {
                 Some((built, _)) => std::array::from_fn(|order| built[order].min(accuracy[order])),
                 None => accuracy,
             };
-            let whole = build(tightest);
-            *self.built.borrow_mut() = Some((tightest, whole));
+            let pieces = build(whole, tightest);
+            *self.built.borrow_mut() = Some((tightest, pieces));
         }
         let built = self.built.borrow();
-        let whole = built.as_ref().and_then(|(_, whole)| whole.as_ref())?;
-        let first = whole.partition_point(|piece| piece.hi < lo);
-        let past = whole.partition_point(|piece| piece.lo <= hi);
-        Some(whole[first..past.max(first)].to_vec())
+        let pieces = built.as_ref().and_then(|(_, pieces)| pieces.as_ref())?;
+        let first = pieces.partition_point(|piece| piece.hi < lo);
+        let past = pieces.partition_point(|piece| piece.lo <= hi);
+        let stretch = &pieces[first..past.max(first)];
+        let resolved = stretch.iter().all(|piece| {
+            piece
+                .pva
+                .iter()
+                .zip(accuracy)
+                .all(|(order, accuracy)| order.rounding <= accuracy)
+        });
+        if resolved {
+            Some(stretch.to_vec())
+        } else {
+            build((lo, hi), accuracy)
+        }
     }
 }
 
