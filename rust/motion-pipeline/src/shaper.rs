@@ -3303,7 +3303,9 @@ fn span_probe_t(t0: f64, t1: f64, u: f64) -> f64 {
 /// held to the tolerance at points spread between the resolved edges as the
 /// fit audit spreads them: a miss there splits a splittable span — grading
 /// the partition toward the onset only as deep as its fit needs — and at the
-/// floor the closest rung is the closest there too. Returns the accepted
+/// floor, where the closest rung is kept, it is the closest there too. The
+/// points are sampled only once a rung passes the probes or a kept closest
+/// rung is ranked. Returns the accepted
 /// monomial-in-u fit, or the closest rung with the ladder's miss.
 #[allow(clippy::type_complexity)]
 fn shaped_ladder<S: TrackSignal>(
@@ -3312,6 +3314,7 @@ fn shaped_ladder<S: TrackSignal>(
     t1: f64,
     slivers: EdgeSlivers,
     policy: &SpanFitPolicy,
+    keeps_closest_rung: bool,
 ) -> Result<(Vec<f64>, Option<LadderFailure>), PostProcessError> {
     let axis = policy.axis;
     let fit_tol = policy.fit_tol;
@@ -3381,22 +3384,25 @@ fn shaped_ladder<S: TrackSignal>(
         };
     }
 
-    let mut held_samples = [HeldSample::default(); SQUARE_ROOT_ONSET_CHECK_POINTS];
-    let held: &[HeldSample] = if square_root_onset_within(sig, t0, t1) {
-        let resolved = end_past_sliver - start_past_sliver;
-        for (k, sample) in held_samples.iter_mut().enumerate() {
-            let t = start_past_sliver
-                + resolved * (k as f64 + 0.5) / SQUARE_ROOT_ONSET_CHECK_POINTS as f64;
-            let (position, _, acceleration) = sig.eval_pva(t);
-            *sample = HeldSample {
-                x: 2.0 * (t - t0) / h - 1.0,
-                position,
-                acceleration,
-            };
+    let held_samples = std::cell::OnceCell::new();
+    let reaches_onset = square_root_onset_within(sig, t0, t1);
+    let held = || -> &[HeldSample] {
+        if !reaches_onset {
+            return &[];
         }
-        &held_samples
-    } else {
-        &[]
+        held_samples.get_or_init(|| {
+            let resolved = end_past_sliver - start_past_sliver;
+            std::array::from_fn::<_, SQUARE_ROOT_ONSET_CHECK_POINTS, _>(|k| {
+                let t = start_past_sliver
+                    + resolved * (k as f64 + 0.5) / SQUARE_ROOT_ONSET_CHECK_POINTS as f64;
+                let (position, _, acceleration) = sig.eval_pva(t);
+                HeldSample {
+                    x: 2.0 * (t - t0) / h - 1.0,
+                    position,
+                    acceleration,
+                }
+            })
+        })
     };
     match ladder_fit(
         &base,
@@ -3405,7 +3411,8 @@ fn shaped_ladder<S: TrackSignal>(
             position: &|u| truth.pos_at(u),
             velocity: &|u| truth.vel_at(u),
             acceleration: &|u| truth.acc_at(u),
-            held,
+            held: &held,
+            held_ranks_misses: keeps_closest_rung,
         },
         LadderBudget {
             tol: fit_tol,
@@ -3521,15 +3528,15 @@ fn refine_shaped_span<S: TrackSignal>(
     let fit_tol = policy.fit_tol;
     let velocity_budget = policy.velocity_budget;
     let floors = policy.floors;
-    let (mono_u, failure) = shaped_ladder(sig, t0, t1, slivers, policy)?;
+    let tm = 0.5 * t0 + 0.5 * t1;
+    let at_resolution_floor = tm - t0 < floors.cubic || t1 - tm < floors.cubic;
+    let splittable = !at_resolution_floor && *refinement_splits < MAX_FIT_REFINEMENT_SPLITS;
+    let (mono_u, failure) = shaped_ladder(sig, t0, t1, slivers, policy, !splittable)?;
     #[cfg(feature = "fit-audit")]
     let edge_insets = (
         edge_inset(t1 - t0, floors.cubic, slivers.start),
         edge_inset(t1 - t0, floors.cubic, slivers.end),
     );
-    let tm = 0.5 * t0 + 0.5 * t1;
-    let at_resolution_floor = tm - t0 < floors.cubic || t1 - tm < floors.cubic;
-    let splittable = !at_resolution_floor && *refinement_splits < MAX_FIT_REFINEMENT_SPLITS;
     if failure.is_none() {
         #[cfg(feature = "fit-audit")]
         crate::fit_audit::check(
