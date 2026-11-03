@@ -2881,12 +2881,19 @@ impl SeamWeld {
     }
 }
 
+/// Lifts every piece whose velocity dips under the fit's velocity resolution
+/// back to a monotone one by projecting its velocity's Bernstein coefficients
+/// onto the nonnegative ones. The velocity is read off the piece's own
+/// derivative, never off differences of its positions, so the offset a piece
+/// rides at (a batch's carried position) cannot change what it becomes, and
+/// an end velocity within the resolution of zero is rest, not a retraction.
 fn project_monotone(
     axis: usize,
     label: &str,
     pieces: &mut [nurbs::bezier::BezierPiece],
     tol: FitTol,
 ) {
+    let velocity_resolution = tol.accel_mm_s2 * MIN_DEVICE_INTERVAL_S;
     let total_at_end = |pieces: &[nurbs::bezier::BezierPiece]| {
         pieces
             .last()
@@ -2897,25 +2904,33 @@ fn project_monotone(
     for piece in pieces.iter_mut() {
         let h = piece.u_end - piece.u_start;
         let degree = piece.degree();
+        if h <= SEGMENT_TIME_EPS_S || degree < 3 {
+            continue;
+        }
         let probe_tau = |u: f64| 0.5 * (u + 1.0) * h;
         let sweep = 4 * degree;
         let dips = (0..=sweep).any(|step| {
             let tau = h * step as f64 / sweep as f64;
-            polynomial_pva(&piece.coeffs, tau).1 < 0.0
+            polynomial_pva(&piece.coeffs, tau).1 < -velocity_resolution
         });
-        if h <= SEGMENT_TIME_EPS_S || !dips {
+        if !dips {
             continue;
         }
-        let bernstein = piece.to_bernstein();
-        let mut derivative = bernstein
-            .windows(2)
-            .map(|pair| degree as f64 * (pair[1] - pair[0]) / h)
-            .collect::<Vec<_>>();
-        if degree < 3 || derivative[0] < 0.0 || derivative[degree - 1] < 0.0 {
+        let mut derivative = piece_velocity(piece).to_bernstein();
+        let ends = [0, degree - 1];
+        if ends
+            .iter()
+            .any(|&end| derivative[end] < -velocity_resolution)
+        {
             continue;
+        }
+        let mut perturbation = 0.0_f64;
+        for end in ends {
+            let rested = derivative[end].max(0.0);
+            perturbation = perturbation.max(rested - derivative[end]);
+            derivative[end] = rested;
         }
         let mut deficit = 0.0_f64;
-        let mut perturbation = 0.0_f64;
         for rate in &mut derivative[1..degree - 1] {
             let available = *rate + deficit;
             let projected = available.max(0.0);
@@ -2928,12 +2943,10 @@ fn project_monotone(
         }
         let accel_envelope = tol.accel_mm_s2 + 2.0 * (degree - 1) as f64 * perturbation / h;
         let source = piece.clone();
-        let mut reintegrated = vec![bernstein[0]; degree + 1];
-        for i in 0..degree {
-            reintegrated[i + 1] = reintegrated[i] + derivative[i] * h / degree as f64;
-        }
-        let corrected_piece =
-            nurbs::bezier::BezierPiece::from_bernstein(&reintegrated, piece.u_start, piece.u_end);
+        let corrected_piece = integrate_velocity(
+            piece.coeffs[0],
+            &nurbs::bezier::BezierPiece::from_bernstein(&derivative, piece.u_start, piece.u_end),
+        );
         let within_budget = crate::lowering::LADDER_PROBES_U.iter().all(|&u| {
             let corrected = polynomial_pva(&corrected_piece.coeffs, probe_tau(u));
             let uncorrected = polynomial_pva(&source.coeffs, probe_tau(u));
@@ -2953,6 +2966,32 @@ fn project_monotone(
         "follower axis {axis} {label} monotone correction moved the total from \
          {source_total} to {corrected_total}"
     );
+}
+
+fn piece_velocity(piece: &BezierPiece) -> BezierPiece {
+    BezierPiece {
+        u_start: piece.u_start,
+        u_end: piece.u_end,
+        coeffs: (1..piece.coeffs.len())
+            .map(|power| power as f64 * piece.coeffs[power])
+            .collect(),
+    }
+}
+
+fn integrate_velocity(start_position: f64, velocity: &BezierPiece) -> BezierPiece {
+    BezierPiece {
+        u_start: velocity.u_start,
+        u_end: velocity.u_end,
+        coeffs: std::iter::once(start_position)
+            .chain(
+                velocity
+                    .coeffs
+                    .iter()
+                    .enumerate()
+                    .map(|(power, &coefficient)| coefficient / (power + 1) as f64),
+            )
+            .collect(),
+    }
 }
 
 fn polynomial_pv(coeffs: &[f64], tau: f64) -> (f64, f64) {

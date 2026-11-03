@@ -1407,3 +1407,50 @@ fn a_follower_reports_its_steps_across_a_leader_knot() {
         bound.jerk
     );
 }
+
+/// The kernel input re-projects its whole cached history every batch, each
+/// time offset by a different carried position. A piece leaving rest with
+/// a start velocity of rounding (here the one that broke the extruder seam
+/// weld in the voron cube replay) must be corrected the same way whatever
+/// that offset, or two batches shape the same history differently.
+#[test]
+fn a_piece_leaving_rest_is_made_monotone_whatever_its_offset() {
+    let tol = crate::lowering::FitTol {
+        pos_mm: 3.4e-5,
+        accel_mm_s2: 50.0,
+    };
+    let leaving_rest = |offset: f64| BezierPiece {
+        u_start: 2.312095117306531,
+        u_end: 2.320504875762939,
+        coeffs: vec![
+            offset,
+            -5.128971379577607e-26,
+            -7.911937594636813,
+            1883.275503327643,
+            0.0,
+            0.0,
+        ],
+    };
+    let corrected = [1.4377803477359528e-28, 0.0011216116926244801].map(|offset| {
+        let mut pieces = [leaving_rest(offset)];
+        super::project_monotone(3, "test input", &mut pieces, tol);
+        let [piece] = pieces;
+        let h = piece.u_end - piece.u_start;
+        let lowest_velocity = (0..=64)
+            .map(|step| super::polynomial_pva(&piece.coeffs, h * step as f64 / 64.0).1)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            lowest_velocity >= -tol.accel_mm_s2 * crate::shaper::MIN_DEVICE_INTERVAL_S,
+            "at offset {offset} the piece leaving rest still retracts at {lowest_velocity} mm/s"
+        );
+        piece.coeffs[1..].to_vec()
+    });
+    for (low, high) in corrected[0].iter().zip(&corrected[1]) {
+        assert!(
+            (low - high).abs() <= 1e-9 * low.abs().max(high.abs()).max(1.0),
+            "the same piece is corrected to {:?} at one offset and {:?} at another",
+            corrected[0],
+            corrected[1]
+        );
+    }
+}
