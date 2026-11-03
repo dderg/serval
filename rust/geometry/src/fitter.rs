@@ -200,7 +200,8 @@ pub fn arc_candidate_fits(facets: &[Move], config: CornerFitConfig) -> bool {
 /// (a run behind it eased into its head), `out_reduction` from `m_out`'s (a
 /// run ahead eases into its tail). `head_trim` is what the blend before
 /// `m_in` already took from its head, so the blend leaves the body between
-/// them either whole or no shorter than [`shortest_line_body_mm`].
+/// them either whole or no shorter than [`shortest_line_body_mm`], unless
+/// the G-code line itself is shorter than that.
 pub fn plan_junction_reduced(
     m_in: &Move,
     m_out: &Move,
@@ -656,7 +657,8 @@ fn classify_junction(
     }
     let body = line_in.s_len() - head_trim - bi.trim_in;
     let shortest_body = shortest_line_body_mm(m_in);
-    if body <= BUDGET_EPS_MM || body >= shortest_body {
+    let line_is_shorter_than_the_floor = line_in.s_len() < shortest_body;
+    if body <= BUDGET_EPS_MM || body >= shortest_body || line_is_shorter_than_the_floor {
         return Ok(JunctionPlan::Blend(JunctionBlend(bi)));
     }
     let closing = [bi.trim_in + body, bi.trim_in + body - shortest_body]
