@@ -1395,8 +1395,14 @@ impl StepcompressEndpoint {
     }
 
     fn retirement_batch_ready(&self, snapshot: &[u32]) -> bool {
+        let baseline = self.retirement_baseline();
+        assert_eq!(
+            baseline.len(),
+            snapshot.len(),
+            "retirement snapshot and baseline cover different motor counts"
+        );
         snapshot.iter().enumerate().any(|(motor, &after)| {
-            let before = self.retirement_baseline().get(motor).copied().unwrap_or(0);
+            let before = baseline[motor];
             after.wrapping_sub(before) >= RETIREMENT_BATCH
         })
     }
@@ -1408,9 +1414,16 @@ impl StepcompressEndpoint {
         }
         self.deferred_retirement = false;
         let mut waits = Vec::new();
+        assert!(
+            self.published.len() == self.lanes.len() && snapshot.len() == self.lanes.len(),
+            "retirement snapshot ({}) and published counts ({}) must cover every lane ({})",
+            snapshot.len(),
+            self.published.len(),
+            self.lanes.len()
+        );
         for motor in 0..self.lanes.len() {
-            let before = self.published.get(motor).copied().unwrap_or(0);
-            let after = snapshot.get(motor).copied().unwrap_or(0);
+            let before = self.published[motor];
+            let after = snapshot[motor];
             if before == after {
                 continue;
             }

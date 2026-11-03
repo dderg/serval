@@ -168,14 +168,21 @@ pub(super) fn dispatch_endstop_trip(
                         .ok_or_else(|| {
                             format!("StepperSuppress: no transport for mcu {}", freeze.motor_mcu)
                         })
-                        .and_then(|t| suppress_call(t.as_ref(), freeze));
-                    match outcome {
-                        Ok(clock32) => {
-                            let reference = deps
-                                .router
+                        .and_then(|t| suppress_call(t.as_ref(), freeze))
+                        .and_then(|clock32| {
+                            deps.router
                                 .lock_ok()
                                 .compute_ack_clock(McuHandle::from_raw(freeze.motor_mcu))
-                                .unwrap_or(0);
+                                .map(|reference| (clock32, reference))
+                                .map_err(|e| {
+                                    format!(
+                                        "StepperSuppress: no clock estimate for mcu {} to expand the suppress clock against: {e:?}",
+                                        freeze.motor_mcu
+                                    )
+                                })
+                        });
+                    match outcome {
+                        Ok((clock32, reference)) => {
                             suppression_clock = Some((
                                 freeze.motor_mcu,
                                 motion_services::remote_trigger::relay_trip_clock(

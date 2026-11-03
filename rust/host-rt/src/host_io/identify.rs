@@ -67,10 +67,7 @@ pub fn identify_handshake(
                     if offset != identify_data.len() {
                         continue;
                     }
-                    let chunk = params
-                        .get_bytes("data")
-                        .map(<[u8]>::to_vec)
-                        .unwrap_or_default();
+                    let chunk = identify_chunk(&params)?.to_vec();
                     if chunk.is_empty() {
                         break 'outer;
                     }
@@ -185,6 +182,12 @@ fn build_parser_from_identify(identify_data: &[u8]) -> Result<MsgProtoParser, Tr
     MsgProtoParser::from_dictionary(dict).map_err(|e| {
         TransportError::Parse(format!("MsgProtoParser::from_dictionary failed: {e:?}"))
     })
+}
+
+fn identify_chunk(params: &MessageParams) -> Result<&[u8], TransportError> {
+    params
+        .get_bytes("data")
+        .ok_or_else(|| TransportError::Parse("identify response carried no data parameter".into()))
 }
 
 fn decode_identify_response(packet: &[u8]) -> Option<MessageParams> {

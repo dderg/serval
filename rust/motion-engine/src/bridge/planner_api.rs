@@ -181,7 +181,7 @@ impl PyMotionEngine {
         self.rebase_motion_history_after_position_set(machine);
 
         let (ethercat_mcu_ids, host_ios) = self.build_transport_maps(&mcu_configs)?;
-        self.seed_ethercat_clock_estimates(&ethercat_mcu_ids);
+        self.seed_ethercat_clock_estimates(&ethercat_mcu_ids)?;
 
         host_rt::memory_lock::HOST_MEMORY_LOCK
             .start_pipeline_threads(|| {

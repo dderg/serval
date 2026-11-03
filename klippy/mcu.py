@@ -286,9 +286,9 @@ class MCU:
 
     def _handle_runtime_fault(self, params):
         fault = format_runtime_fault(
-            params.get("fault_code", 0),
-            params.get("fault_detail", 0),
-            params.get("segment_id", 0),
+            params["fault_code"],
+            params["fault_detail"],
+            params["segment_id"],
         )
         self._last_runtime_fault = fault
         logging.error("MCU '%s' runtime fault: %s", self._name, fault)

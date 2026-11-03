@@ -516,7 +516,19 @@ impl PassthroughRouter {
         let delta = (seg0_host_secs - rec.clock_offset) * rec.clock_freq;
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let start_time = rec.last_clock.wrapping_add(delta.max(0.0) as u64);
-        let ack_now = self.compute_ack_clock(mcu).unwrap_or(0);
+        let ack_now = match self.compute_ack_clock(mcu) {
+            Ok(clock) => clock,
+            Err(e) => {
+                tracing::error!(
+                    subsystem = "motion",
+                    event = "seg0_lead_no_ack_clock",
+                    mcu = ?mcu,
+                    error = ?e,
+                    "[seg0-lead] no ack clock to measure the start lead against"
+                );
+                return;
+            }
+        };
         let lead_ticks = start_time as i64 - ack_now as i64;
         let lead_us = (lead_ticks as f64 / rec.clock_freq) * 1e6;
         if lead_ticks < 0 {
