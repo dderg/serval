@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Motion Playground</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1 13 Q5 13 8 8 T15 3' stroke='%234a9eff' stroke-width='2' fill='none'/%3E%3C/svg%3E">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,sans-serif;overflow:hidden}
+.app{display:grid;grid-template-columns:260px 1fr;height:100vh}
+.app.gcode-collapsed{grid-template-columns:30px 1fr}
+.sidebar{display:flex;flex-direction:column;background:#1d2026;border-right:1px solid #2a2d35;min-height:0}
+.side-head{display:flex;align-items:center;justify-content:space-between;padding:10px 10px 6px 0}
+.sidebar h1{font-size:14px;font-weight:600;color:#fff;padding:0 0 0 14px}
+#gcode-collapse{background:none;border:1px solid #2a2d35;border-radius:4px;color:#888;cursor:pointer;font-size:12px;line-height:1;padding:3px 7px}
+#gcode-collapse:hover{color:#e0e0e0;border-color:#4a9eff}
+.gcode-collapsed .sidebar h1,.gcode-collapsed .sidebar .hint,.gcode-collapsed .sidebar textarea{display:none}
+.gcode-collapsed .side-head{flex:1;padding:0}
+.gcode-collapsed #gcode-collapse{flex:1;margin:8px 4px;writing-mode:vertical-rl;letter-spacing:0.08em}
+.sidebar .hint{font-size:11px;color:#777;padding:0 14px 8px}
+.sidebar textarea{flex:1;min-height:120px;margin:0 10px 10px;background:#14161a;color:#d7dbe2;border:1px solid #2a2d35;border-radius:4px;padding:8px;font-family:'Courier Prime',monospace;font-size:12px;resize:none;white-space:pre;overflow:auto}
+.sidebar textarea:focus{outline:none;border-color:#4a9eff}
+.config{padding:10px 14px;overflow-y:auto;min-height:0}
+.config .row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
+.config label{font-size:11px;color:#9aa3b2;font-family:'Courier Prime',monospace;white-space:nowrap}
+.config input{width:104px;background:#14161a;color:#e0e0e0;border:1px solid #2a2d35;border-radius:4px;padding:3px 6px;font-size:12px;font-family:'Courier Prime',monospace;text-align:right}
+.config input:focus{outline:none;border-color:#4a9eff}
+.config input::placeholder{color:#4d5560;font-style:italic}
+.config .section{font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:#666;margin:10px 0 6px}
+.config .section:first-child{margin-top:0}
+.error{display:none;position:fixed;left:12px;bottom:12px;max-width:460px;z-index:60;padding:8px 10px;background:rgba(32,17,19,0.95);border:1px solid rgba(239,83,80,0.5);border-radius:4px;color:#ef9a9a;font-size:12px;font-family:'Courier Prime',monospace;white-space:pre-wrap;max-height:160px;overflow-y:auto}
+.error.on{display:block}
+.main{display:grid;grid-template-rows:auto auto 1fr;min-width:0;min-height:0}
+.toolbar{display:flex;align-items:center;gap:10px;padding:8px 16px;background:#1d2026;border-bottom:1px solid #2a2d35;font-size:13px}
+.toolbar .meta{color:#888}
+.toolbar .meta.planning{opacity:0.45}
+.toolbar .meta.planning::after{content:"  ⟳ planning…";color:#f5a623;opacity:1}
+.toolbar .spacer{flex:1}
+.toolbar .tb-group{display:flex;align-items:center;gap:6px}
+.toolbar .tb-sep{width:1px;align-self:stretch;background:#3a3d45;margin:2px 0}
+.toolbar button{background:#2a2d35;color:#e0e0e0;border:1px solid #3a3d45;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px}
+.toolbar button:hover{background:#3a3d45}
+.toolbar button.active{background:rgba(224,81,138,0.2);border-color:#e0518a;color:#e0518a}
+.toolbar button:disabled{opacity:0.4;cursor:default}
+.toolbar select{background:#2a2d35;color:#e0e0e0;border:1px solid #3a3d45;border-radius:4px;padding:4px 8px;font-size:12px;max-width:220px;cursor:pointer}
+.toolbar select:hover{background:#3a3d45}
+.toolbar button.slot{min-width:34px;font-weight:600}
+.toolbar button.slot.on{background:rgba(78,203,113,0.18);border-color:#4ecb71;color:#4ecb71}
+.toolbar button.slot.empty{border-style:dashed;color:#777;font-weight:400}
+.readout{font-family:'Courier Prime',monospace;font-size:12px;color:#9aa3b2;padding:4px 16px;background:#1d2026;border-bottom:1px solid #2a2d35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:22px;display:flex;align-items:center;gap:14px}
+.readout .v{color:#4a9eff}
+.readout .p{color:#4ecb71}
+.readout .r{color:#ef5350}
+.readout .g{color:#888}
+.panels{display:grid;grid-template-columns:var(--path-w,60%) 6px 1fr;grid-template-rows:1fr;gap:1px;background:#2a2d35;overflow:hidden}
+.left-col{grid-column:1;grid-row:1;display:flex;flex-direction:column;gap:1px;background:#2a2d35;min-width:0;min-height:0}
+.settings{position:relative;flex:0 1 auto;max-height:46%;display:grid;grid-template-columns:1fr 1fr;gap:1px;background:#2a2d35;min-height:0}
+#settings-collapse{position:absolute;top:6px;right:8px;z-index:2;background:#1d2026;border:1px solid #2a2d35;border-radius:4px;color:#888;cursor:pointer;font-size:12px;line-height:1;padding:3px 7px}
+#settings-collapse:hover{color:#e0e0e0;border-color:#4a9eff}
+.settings-collapsed .settings{display:block;flex:0 0 auto;max-height:none;background:#1d2026}
+.settings-collapsed .settings-fields,.settings-collapsed .settings-pp{display:none}
+.settings-collapsed #settings-collapse{position:static;display:block;width:100%;border:none;border-radius:0;padding:6px 0;letter-spacing:0.08em}
+.settings-fields{background:#1d2026;min-height:0}
+.settings-pp{background:#1d2026;display:flex;flex-direction:column;min-height:0;padding:10px 12px}
+.settings-pp .section{font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:#666;margin:0 0 6px}
+.settings-pp textarea{flex:1;min-height:0;width:100%;background:#14161a;color:#d7dbe2;border:1px solid #2a2d35;border-radius:4px;padding:8px;font-family:'Courier Prime',monospace;font-size:12px;resize:none;white-space:pre;overflow:auto}
+.settings-pp textarea:focus{outline:none;border-color:#4a9eff}
+#panel-path{grid-column:auto;grid-row:auto;flex:1 1 0;min-height:120px}
+.splitter{grid-column:2;grid-row:1;background:#2a2d35;cursor:col-resize}
+.splitter:hover{background:#4a4f5a}
+.graphs-col{grid-column:3;grid-row:1;display:grid;grid-template-rows:1fr 1fr 1fr 1fr;gap:1px;background:#2a2d35;min-width:0;min-height:0}
+.panel{position:relative;background:#1a1c22;overflow:hidden;min-width:0;min-height:0}
+.panel canvas{position:absolute;inset:0;width:100%;height:100%}
+.cursor{position:absolute;inset:0;pointer-events:none;z-index:1;display:none}
+.cursor.on{display:block}
+.cursor i{position:absolute;top:0;left:0;will-change:transform}
+.cursor .cv{width:1px;background:repeating-linear-gradient(to bottom,rgba(255,255,255,0.35) 0 4px,transparent 4px 7px)}
+.cursor .ch{height:1px;display:none;background:repeating-linear-gradient(to right,rgba(255,255,255,0.35) 0 3px,transparent 3px 6px)}
+.cursor .cdot{width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;background:#e0518a;border:2px solid #14161a;box-sizing:border-box;display:none}
+.panel-label{position:absolute;top:4px;left:8px;font-size:11px;color:#888;pointer-events:none;z-index:2}
+.panel-label .lg{cursor:pointer;pointer-events:auto;padding:0 2px}
+.panel-label .lg:hover{text-decoration:underline}
+.panel-label .lg.off{opacity:0.35;text-decoration:line-through}
+.panel-label .lg.off:hover{text-decoration:line-through underline}
+.drawer{position:fixed;top:0;right:-320px;width:300px;height:100%;background:#1d2026;border-left:1px solid #2a2d35;box-shadow:-8px 0 24px rgba(0,0,0,0.35);transition:right 0.15s ease;z-index:70;display:flex;flex-direction:column}
+.drawer.open{right:0}
+.drawer-head{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid #2a2d35;font-size:13px;font-weight:600;color:#fff}
+.drawer-head button{background:none;border:none;color:#888;font-size:18px;line-height:1;cursor:pointer;padding:0 2px}
+.drawer-head button:hover{color:#e0e0e0}
+.drawer-new{display:flex;gap:6px;padding:10px 14px;border-bottom:1px solid #2a2d35}
+.drawer-new input{flex:1;min-width:0;background:#14161a;color:#e0e0e0;border:1px solid #2a2d35;border-radius:4px;padding:5px 8px;font-size:12px}
+.drawer-new input:focus{outline:none;border-color:#4a9eff}
+.drawer-new button{background:#2a2d35;color:#e0e0e0;border:1px solid #3a3d45;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:12px;white-space:nowrap}
+.drawer-new button:hover{background:#3a3d45}
+.drawer-new button:disabled{opacity:0.4;cursor:default}
+.drawer-list{flex:1;overflow-y:auto;padding:6px 0}
+.drawer-list .empty{padding:14px;font-size:12px;color:#666}
+.preset-row{display:flex;align-items:center;gap:6px;padding:6px 14px;font-size:12px}
+.preset-row:hover{background:#22252c}
+.preset-row.active{background:rgba(74,158,255,0.08);box-shadow:inset 2px 0 0 #4a9eff}
+.preset-row .pname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#d7dbe2}
+.preset-row .dirty{color:#f5a623}
+.preset-row button{background:none;border:1px solid #3a3d45;border-radius:4px;color:#9aa3b2;padding:2px 8px;cursor:pointer;font-size:11px}
+.preset-row button:hover{color:#e0e0e0;background:#2a2d35}
+.preset-row button.danger:hover{color:#ef9a9a;border-color:rgba(239,83,80,0.5)}
+.spin{position:absolute;top:50%;left:50%;width:28px;height:28px;margin:-14px 0 0 -14px;border:3px solid rgba(74,158,255,0.25);border-top-color:#4a9eff;border-radius:50%;z-index:3;opacity:0;pointer-events:none;animation:spin 0.8s linear infinite}
+.spin.on{opacity:1;transition:opacity 0.15s 0.2s}
+@keyframes spin{to{transform:rotate(360deg)}}
+.tooltip{position:fixed;pointer-events:none;background:rgba(20,22,26,0.92);border:1px solid #3a3d45;border-radius:4px;padding:6px 10px;font-size:12px;font-family:'Courier Prime',monospace;color:#e0e0e0;z-index:100;white-space:pre-line;display:none}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="sidebar">
+    <div class="side-head">
+      <h1>Motion Playground</h1>
+      <button id="gcode-collapse" title="Collapse the gcode pane">⟨</button>
+    </div>
+    <div class="hint">Paste G-code below — it re-plans as you type. G0/G1, G90/G91, G92, M82/M83.</div>
+    <textarea id="gcode" spellcheck="false"></textarea>
+    <div class="error" id="error"></div>
+  </div>
+  <div class="main">
+    <div class="toolbar">
+      <span class="meta" id="meta"></span>
+      <span class="spacer"></span>
+      <span class="tb-group" id="case-group">
+        <select id="case-select" title="Load a snapshot case"><option value="">Open case…</option></select>
+      </span>
+      <button id="preset-toggle" title="Open the presets drawer">Presets</button>
+      <span class="tb-sep"></span>
+      <span class="tb-group">
+        <button id="slot-a" class="slot">A</button>
+        <button id="slot-b" class="slot">B</button>
+      </span>
+      <button id="reset-zoom">Reset Zoom</button>
+    </div>
+    <div class="readout" id="readout"><span class="g">hover a panel to scrub</span></div>
+    <div class="panels">
+      <div class="left-col">
+        <div class="settings">
+          <button id="settings-collapse" title="Collapse the settings pane">⌃</button>
+          <div class="settings-fields config">
+            <div class="section">[printer]</div>
+            <div class="row"><label for="cfg-max_velocity">max_velocity</label><input id="cfg-max_velocity" type="number" step="10" value="300"></div>
+            <div class="row"><label for="cfg-max_accel">max_accel</label><input id="cfg-max_accel" type="number" step="100" value="3000"></div>
+            <div class="row"><label for="cfg-corner_deviation" title="Canonical corner budget in mm; square_corner_velocity is its legacy alias — set exactly one">corner_deviation</label><input id="cfg-corner_deviation" type="number" step="0.001" min="0" value="0.05"></div>
+            <div class="row"><label for="cfg-square_corner_velocity" title="Legacy alias of corner_deviation — set exactly one">square_corner_velocity</label><input id="cfg-square_corner_velocity" type="number" step="1" placeholder="use corner_deviation"></div>
+            <div class="row"><label for="cfg-max_jerk">max_jerk (0 = off)</label><input id="cfg-max_jerk" type="number" step="10000" min="0" value="2000000"></div>
+            <div class="row"><label for="cfg-max_path_deviation">max_path_deviation</label><input id="cfg-max_path_deviation" type="number" step="0.001" placeholder="0.005"></div>
+            <div class="row"><label for="cfg-max_accel_deviation">max_accel_deviation</label><input id="cfg-max_accel_deviation" type="number" step="10" placeholder="50"></div>
+            <div class="section">[extruder]</div>
+            <div class="row"><label for="cfg-max_extrude_only_velocity">max_extrude_only_velocity</label><input id="cfg-max_extrude_only_velocity" type="number" step="5" placeholder="∞"></div>
+            <div class="row"><label for="cfg-max_extrude_only_accel">max_extrude_only_accel</label><input id="cfg-max_extrude_only_accel" type="number" step="100" placeholder="∞"></div>
+            <div class="section" title="Simulates the physical toolhead as a damped resonant mode driven by the motor command — view only, does not affect planning">toolhead sim (view only)</div>
+            <div class="row"><label for="sim-x-freq">x frequency_hz</label><input id="sim-x-freq" type="number" step="5" min="0" placeholder="off" value="185"></div>
+            <div class="row"><label for="sim-x-zeta">x damping_ratio</label><input id="sim-x-zeta" type="number" step="0.01" min="0" max="1" placeholder="0.1"></div>
+            <div class="row"><label for="sim-y-freq">y frequency_hz</label><input id="sim-y-freq" type="number" step="5" min="0" placeholder="off" value="120"></div>
+            <div class="row"><label for="sim-y-zeta">y damping_ratio</label><input id="sim-y-zeta" type="number" step="0.01" min="0" max="1" placeholder="0.1"></div>
+          </div>
+          <div class="settings-pp">
+            <div class="section">[axis] / [post_processor]</div>
+            <textarea id="cfg-post_processor_config" class="pp-config" spellcheck="false">[axis x]
+post_processors: shaper_x
+
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 185
+
+[axis y]
+post_processors: shaper_y
+
+[post_processor shaper_y]
+type: smooth_mzv
+frequency_hz: 120
+
+[axis e]
+follows: x, y, z
+post_processors: pa, st
+
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.03
+
+[post_processor st]
+type: smooth_triangle
+smooth_time: 0.02</textarea>
+          </div>
+        </div>
+        <div class="panel" id="panel-path">
+          <span class="panel-label">Path</span>
+          <div class="spin" id="path-spinner"></div>
+          <canvas id="canvas-path"></canvas>
+          <div class="cursor" id="cursor-path"><i class="cv"></i><i class="ch"></i><i class="cdot"></i></div>
+        </div>
+      </div>
+      <div class="splitter" id="splitter" title="Drag to resize"></div>
+      <div class="graphs-col">
+        <div class="panel" id="panel-vel">
+          <span class="panel-label">Velocity</span>
+          <canvas id="canvas-vel"></canvas>
+          <div class="cursor" id="cursor-vel"><i class="cv"></i><i class="ch"></i><i class="cdot"></i></div>
+        </div>
+        <div class="panel" id="panel-acc">
+          <span class="panel-label">Acceleration</span>
+          <canvas id="canvas-acc"></canvas>
+          <div class="cursor" id="cursor-acc"><i class="cv"></i><i class="ch"></i><i class="cdot"></i></div>
+        </div>
+        <div class="panel" id="panel-jrk">
+          <span class="panel-label">Jerk</span>
+          <canvas id="canvas-jrk"></canvas>
+          <div class="cursor" id="cursor-jrk"><i class="cv"></i><i class="ch"></i><i class="cdot"></i></div>
+        </div>
+        <div class="panel" id="panel-kappa">
+          <span class="panel-label">Curvature</span>
+          <canvas id="canvas-kappa"></canvas>
+          <div class="cursor" id="cursor-kappa"><i class="cv"></i><i class="ch"></i><i class="cdot"></i></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="tooltip" id="tooltip"></div>
+<div class="drawer" id="preset-drawer">
+  <div class="drawer-head">
+    <span>Presets</span>
+    <button id="drawer-close" title="Close (esc)">×</button>
+  </div>
+  <div class="drawer-new">
+    <input id="preset-name" type="text" placeholder="preset name" spellcheck="false">
+    <button id="preset-create" disabled>Save</button>
+  </div>
+  <div class="drawer-list" id="preset-list"></div>
+</div>
+<script>
+// A failed module or wasm load otherwise leaves the page silently blank —
+// the most common cause is an unbuilt wasm bundle in a fresh checkout.
+(function () {
+  const explain = (detail) => {
+    const el = document.getElementById("error");
+    if (!el || el.classList.contains("on")) return;
+    el.textContent =
+      "Failed to load the playground: " + detail + "\n" +
+      "If this is a fresh checkout, the WASM bundles are not built yet — " +
+      "run snapshots/snapshot-tests.sh once (it builds static/wasm/ and " +
+      "static/wasm-playground/).";
+    el.classList.add("on");
+  };
+  window.addEventListener("error", (e) => {
+    if (e.message) explain(e.message);
+    else if (e.target && e.target.src) explain("cannot fetch " + e.target.src);
+  }, true);
+  window.addEventListener("unhandledrejection", (e) => explain(String(e.reason)));
+})();
+</script>
+<script type="module" src="./playground.js"></script>
+</body>
+</html>
