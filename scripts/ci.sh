@@ -100,15 +100,22 @@ job_rust_test() {
 # Every proptest suite (tests/*fuzz*.rs, *proptest*.rs, property_*.rs) at a
 # case count far above the per-file default, with a fresh random seed per
 # run. rust-test already runs the same suites at their defaults; this gate is
-# the one that keeps exploring. Suites that run the whole streaming pipeline
+# the one that keeps exploring. FUZZ_PARTITION=N/M runs shard N of M (the PR
+# workflow uses 3) and FUZZ_NEXTEST_PROFILE picks the nextest profile (the
+# nightly run uses the one without the 180 s limit). Suites that run the whole streaming pipeline
 # per case cost ~20 ms each, so they take a 64th of the count.
 job_rust_fuzz() {
     cd "$RUST"
     local cases="${PROPTEST_CASES:-20000}"
     local pipeline='binary(seam_schedule_fuzz) | binary(planner_fuzz)'
-    PROPTEST_CASES="$cases" host_cargo nextest run --workspace --profile ci \
+    local profile="${FUZZ_NEXTEST_PROFILE:-ci}"
+    local partition=()
+    [ -z "${FUZZ_PARTITION:-}" ] || partition=(--partition "hash:$FUZZ_PARTITION")
+    PROPTEST_CASES="$cases" host_cargo nextest run --workspace --profile "$profile" \
+        ${partition[@]+"${partition[@]}"} \
         -E "(binary(/fuzz|proptest|^property_/) | test(/ripple_fuzz::/)) - ($pipeline)" || return 1
-    PROPTEST_CASES="$((cases / 64))" host_cargo nextest run --workspace --profile ci \
+    PROPTEST_CASES="$((cases / 64))" host_cargo nextest run --workspace --profile "$profile" \
+        ${partition[@]+"${partition[@]}"} \
         -E "$pipeline"
 }
 
