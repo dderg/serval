@@ -1,6 +1,6 @@
 use super::{
     Arc, ArgValue, DRAIN_TIMEOUT, HashSet, McuTopologyInput, Ordering, PyMotionEngine, PyResult,
-    PyRuntimeError, PyValueError, Python, classify, planner_err, pymethods, require_positive,
+    PyRuntimeError, PyValueError, Python, classify, planner_err, pymethods,
 };
 use motion_core::lock_ext::LockExt;
 use planner_config::from_doc::{planner_config_from_settings, read_motion_settings};
@@ -386,15 +386,19 @@ impl PyMotionEngine {
     }
     #[pyo3(signature = (velocity))]
     fn set_velocity_cap(&self, velocity: Option<f64>) -> PyResult<()> {
-        require_positive(velocity, "velocity")?;
-        self.planner_config.lock_ok().runtime_caps.velocity = velocity;
-        Ok(())
+        self.planner_config
+            .lock_ok()
+            .runtime
+            .set_velocity_cap(velocity)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     }
     #[pyo3(signature = (accel))]
     fn set_accel_cap(&self, accel: Option<f64>) -> PyResult<()> {
-        require_positive(accel, "accel")?;
-        self.planner_config.lock_ok().runtime_caps.accel = accel;
-        Ok(())
+        self.planner_config
+            .lock_ok()
+            .runtime
+            .set_accel_cap(accel)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     }
     pub(super) fn set_post_processor_bypass(&self, enabled: bool) -> PyResult<()> {
         self.publish_post_processors(|_, bypass| {
@@ -404,15 +408,11 @@ impl PyMotionEngine {
     }
     #[pyo3(signature = (corner_deviation))]
     fn set_corner_deviation(&self, corner_deviation: Option<f64>) -> PyResult<()> {
-        if let Some(deviation) = corner_deviation {
-            if !(deviation.is_finite() && deviation >= 0.0) {
-                return Err(PyValueError::new_err(
-                    "corner_deviation must be finite and non-negative",
-                ));
-            }
-        }
-        self.planner_config.lock_ok().runtime_corner_deviation = corner_deviation;
-        Ok(())
+        self.planner_config
+            .lock_ok()
+            .runtime
+            .set_corner_deviation(corner_deviation)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     }
     pub(super) fn update_post_processor(&self, name: &str, key: &str, value: f64) -> PyResult<()> {
         self.publish_post_processors(|processors, _| processors.set_param(name, key, value))

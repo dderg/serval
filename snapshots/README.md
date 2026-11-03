@@ -37,10 +37,33 @@ snapshots/snapshot-tests.sh --view       # read-only baseline gallery
 - `--view` starts the browser UI in read-only mode and renders the
   committed baselines without running the planner or offering accept actions.
 
+## G-code
+
+Cases, the playground and `tools/bench/analyze.py` read G-code through one
+interpreter (`rust/pipeline-snapshot/src/waypoints.rs`) that plans each file
+move for move as the live host would submit it
+(`snapshots/test_live_parity.py` replays the same files through klippy's own
+handlers and compares).
+
+- **Mirrored:**
+  - Moves and coordinates: `G0`/`G1`, `G90`/`G91`, `G92`, `M82`/`M83`.
+  - Limits: `M204`, `SET_VELOCITY_LIMIT`, `RESET_VELOCITY_LIMIT`.
+  - Overrides and state: `M220`, `M221`, `SET_GCODE_OFFSET`, `SAVE_GCODE_STATE`/`RESTORE_GCODE_STATE`.
+  - Stops at rest: `G4`, `M400`, `M18`/`M84`, `SET_KINEMATIC_POSITION`.
+  - Defaults match klippy: E is absolute until `M83`, and the speed is 25 mm/s until the first `F`.
+- **Refused by name, with the reason:**
+  - `G2`/`G3`, `G5`, `G10`/`G11`, `G28`, `G20`.
+  - Probing, levelling and calibration moves; `FORCE_MOVE` and stepper buzz or resonance tests.
+  - `SET_PRESSURE_ADVANCE`, `SET_POST_PROCESSOR`, `SET_INPUT_SHAPER`, `BED_MESH_PROFILE`/`CLEAR`/`OFFSET` and other planner-setup commands.
+  - `PAUSE`/`RESUME`/`CANCEL_PRINT`/`EXCLUDE_OBJECT`.
+  - `M109`/`M190`/`TEMPERATURE_WAIT` after the first move.
+  - A `SET_KINEMATIC_POSITION` that moves the position after the first move.
+- **Ignored, as live ignores them:** every other command, such as temperatures, fans, `M117` and `M73`.
+
 ## Playground
 
 `web/static/playground.html` is an interactive spin-off of the review viewer:
-paste any G-code (G0/G1, G90/G91, G92, M82/M83), tweak the planner config
+paste any G-code (read as described under [G-code](#g-code)), tweak the planner config
 (velocity/accel/scv/jerk limits, deviation tolerances) and watch
 the toolpath, velocity, acceleration and jerk panels re-plan live. It runs the
 **real pipeline** — the same `Fitter → Planner → run_lowerer → Shaper` stages —

@@ -18,12 +18,7 @@ fn mode_inverse_snapshot(gcode_name: &str) -> (Snapshot, f64) {
     let (settings, _) = read_motion_settings(&doc).expect("motion settings");
     let gcode =
         std::fs::read_to_string(post_processor_cases().join(gcode_name)).expect("read gcode");
-    let waypoints = parse_gcode(
-        &gcode,
-        settings.cartesian.max_velocity,
-        settings.cartesian.max_accel,
-    )
-    .expect("gcode parses");
+    let waypoints = parse_gcode(&gcode, &settings.cartesian).expect("gcode parses");
     let snapshot = pipeline_snapshot(
         &waypoints,
         SnapshotParams {
