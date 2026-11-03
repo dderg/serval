@@ -106,6 +106,12 @@ engine whose id differs from the tree its `.so` sits in, or that has none, with
 `motion`/`engine_build` event; `tools/bench/deploy.py` records `rust_build_id` in the deploy
 identity. An engine built outside a git tree reports `unknown` and is refused by the tools.
 
+# Hardware lock
+
+The Pi bench is shared: every use goes through `tools/bench/lock.py hold -- <cmd>`, which
+queues behind the current holder and prints who holds it and for how long (waits of
+20 minutes were seen). Hold it for the whole session script, not per command.
+
 # Never work in ~/Developer/serval
 
 `~/Developer/serval` is the shared checkout: it stays on `main` tracking `origin/main`
