@@ -4274,7 +4274,8 @@ fn shaped_ladder<S: TrackSignal>(
         },
         LadderPolicy {
             velocity_sign: policy.velocity_sign,
-            acceleration_monotonicity: sig.acceleration_monotonicity(t0_inside, t1_inside),
+            acceleration_monotonicity: sig
+                .acceleration_monotonicity(start_past_sliver, end_past_sliver),
             high_degree_span_floor: policy.floors.high_degree,
             velocity_continuous: policy.velocity_continuous,
         },
@@ -4938,6 +4939,32 @@ pub(crate) fn apply_nonlinear_advance_to_track(
     adv: trajectory::NonlinearAdvance,
     fit_tol: FitTol,
 ) -> Result<nurbs::ScalarNurbs, PostProcessError> {
+    with_nonlinear_advance_fit(axis, track, adv, fit_tol, |fit, sig| {
+        fit_axis_from_signal(fit, sig)
+    })
+}
+
+/// The shortest span the nonlinear-advance refit of `track` resolves: seed
+/// times closer than this to a kept seed are coalesced onto it.
+#[cfg(test)]
+pub(crate) fn nonlinear_advance_resolution_floor(
+    axis: usize,
+    track: &nurbs::ScalarNurbs,
+    adv: trajectory::NonlinearAdvance,
+    fit_tol: FitTol,
+) -> Result<f64, PostProcessError> {
+    with_nonlinear_advance_fit(axis, track, adv, fit_tol, |fit, sig| {
+        Ok(plan_seeds_and_floors(&fit, sig)?.1.cubic)
+    })
+}
+
+fn with_nonlinear_advance_fit<R>(
+    axis: usize,
+    track: &nurbs::ScalarNurbs,
+    adv: trajectory::NonlinearAdvance,
+    fit_tol: FitTol,
+    fit: impl FnOnce(AxisFit, &NonlinearAdvanceSignal) -> R,
+) -> R {
     let sig = NonlinearAdvanceSignal::new(track, adv);
     let pieces = extract_bezier_pieces(track);
     let t_start = pieces
@@ -4947,7 +4974,7 @@ pub(crate) fn apply_nonlinear_advance_to_track(
     let t_end = pieces.last().expect("nonlinear advance: empty track").u_end;
     let mut breakpoints = track.knots().to_vec();
     breakpoints.extend(nonlinear_transition_breakpoints(&sig));
-    fit_axis_from_signal(
+    fit(
         AxisFit {
             axis,
             t_start,
