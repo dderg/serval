@@ -83,12 +83,7 @@ pub fn z_caps_excess(snapshot: &pipeline_snapshot::Snapshot, config: &Path) -> O
 
 pub fn plan(name: &str, gcode: &str, config: &Path) -> Option<pipeline_snapshot::Snapshot> {
     let settings = motion_settings(config);
-    let waypoints = parse_gcode(
-        gcode,
-        settings.cartesian.max_velocity,
-        settings.cartesian.max_accel,
-    )
-    .expect("gcode parses");
+    let waypoints = parse_gcode(gcode, &settings.cartesian).expect("gcode parses");
     if waypoints.len() < 2 {
         return None;
     }

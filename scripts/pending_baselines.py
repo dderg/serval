@@ -274,9 +274,7 @@ def sample_case(harness, engine, case, out: Path) -> dict:
     import numpy as np
 
     cfg = harness.read_printer_config(case.config_path)
-    waypoints = engine.parse_gcode(
-        case.gcode_path.read_text(), cfg.max_velocity, cfg.max_accel
-    )
+    waypoints = engine.parse_gcode(case.gcode_path.read_text(), cfg.config_text)
     snapshot = harness.run_case(case)
     duration = float(snapshot["traversal_time_s"])
     count = max(2, math.ceil(duration / SAMPLE_DT_S) + 1)

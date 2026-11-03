@@ -368,9 +368,9 @@ def import_engine():
     return harness._import_engine()
 
 
-def sample(config_text: str, program: str, limits: tuple[float, float]):
+def sample(config_text: str, program: str):
     engine = import_engine()
-    waypoints = engine.parse_gcode(program, *limits)
+    waypoints = engine.parse_gcode(program, config_text)
     probe, _ = engine.pipeline_snapshot_axis_samples(
         waypoints, config_text, [0], 2
     )
@@ -462,14 +462,10 @@ def measure(
     ratio = width * height / (math.pi * (filament / 2.0) ** 2)
     row = Row(geometry.name, speed)
     program = gcode(geometry, speed, ratio)
-    limits = (
-        config.getfloat("printer", "max_velocity", 300.0),
-        config.getfloat("printer", "max_accel", 3000.0),
-    )
     try:
-        t, axes = sample(config.text(), program, limits)
-        _, plain = sample(config.without_advance().text(), program, limits)
-        t_raw, raw = sample(config.unshaped().text(), program, limits)
+        t, axes = sample(config.text(), program)
+        _, plain = sample(config.without_advance().text(), program)
+        t_raw, raw = sample(config.unshaped().text(), program)
     except Exception as error:  # noqa: BLE001
         row.error = str(error).splitlines()[0][:200]
         return row
