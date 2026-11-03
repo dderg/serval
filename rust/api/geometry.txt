@@ -577,13 +577,16 @@ pub geometry::velocity::VelocityError::OverCommitted::line_no: u32
 impl core::error::Error for geometry::velocity::VelocityError
 impl core::fmt::Display for geometry::velocity::VelocityError
 pub fn geometry::velocity::VelocityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct geometry::velocity::ExtrusionBudget
+pub geometry::velocity::ExtrusionBudget::ratio_in_reach: f64
+pub geometry::velocity::ExtrusionBudget::rest_holds_s: [f64; 2]
 pub struct geometry::velocity::ExtrusionReach
 impl geometry::ExtrusionReach
 pub fn geometry::ExtrusionReach::clear(&mut self)
 pub fn geometry::ExtrusionReach::close(&mut self)
 pub fn geometry::ExtrusionReach::is_empty(&self) -> bool
 pub fn geometry::ExtrusionReach::new(f64, f64) -> Self
-pub fn geometry::ExtrusionReach::pop(&mut self) -> core::option::Option<(geometry::frontend::Move, f64)>
+pub fn geometry::ExtrusionReach::pop(&mut self) -> core::option::Option<(geometry::frontend::Move, geometry::ExtrusionBudget)>
 pub fn geometry::ExtrusionReach::push(&mut self, geometry::frontend::Move)
 pub struct geometry::velocity::LawSegment
 pub geometry::velocity::LawSegment::dt: f64
@@ -645,10 +648,10 @@ pub trait geometry::velocity::FanOut
 pub fn geometry::velocity::FanOut::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
 impl geometry::velocity::FanOut for geometry::velocity::Serial
 pub fn geometry::velocity::Serial::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
+pub fn geometry::velocity::extrusion_budgets(&[geometry::frontend::Move], f64, f64) -> alloc::vec::Vec<geometry::ExtrusionBudget>
 pub fn geometry::velocity::plan_velocity_stops(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
 pub fn geometry::velocity::plan_velocity_stops_reconstruct_prefix(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams, usize) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
-pub fn geometry::velocity::plan_velocity_stops_select_prefix<F, W>(&[geometry::frontend::Move], &[bool], &[f64], geometry::velocity::VelocityPlanParams, &W, F) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError> where F: core::ops::function::FnOnce(usize) -> usize, W: geometry::velocity::FanOut
-pub fn geometry::velocity::ratios_in_reach(&[geometry::frontend::Move], f64, f64) -> alloc::vec::Vec<f64>
+pub fn geometry::velocity::plan_velocity_stops_select_prefix<F, W>(&[geometry::frontend::Move], &[bool], &[geometry::ExtrusionBudget], geometry::velocity::VelocityPlanParams, &W, F) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError> where F: core::ops::function::FnOnce(usize) -> usize, W: geometry::velocity::FanOut
 pub enum geometry::FitError
 pub geometry::FitError::Internal
 pub geometry::FitError::Internal::line_no: u32
@@ -791,13 +794,16 @@ pub geometry::ExtruderCaps::path_jerk_per_accel_hz: [f64; 3]
 pub geometry::ExtruderCaps::ratio_ramp_time_s: f64
 impl geometry::frontend::ExtruderCaps
 pub fn geometry::frontend::ExtruderCaps::stricter(core::option::Option<Self>, core::option::Option<Self>) -> core::option::Option<Self>
+pub struct geometry::ExtrusionBudget
+pub geometry::ExtrusionBudget::ratio_in_reach: f64
+pub geometry::ExtrusionBudget::rest_holds_s: [f64; 2]
 pub struct geometry::ExtrusionReach
 impl geometry::ExtrusionReach
 pub fn geometry::ExtrusionReach::clear(&mut self)
 pub fn geometry::ExtrusionReach::close(&mut self)
 pub fn geometry::ExtrusionReach::is_empty(&self) -> bool
 pub fn geometry::ExtrusionReach::new(f64, f64) -> Self
-pub fn geometry::ExtrusionReach::pop(&mut self) -> core::option::Option<(geometry::frontend::Move, f64)>
+pub fn geometry::ExtrusionReach::pop(&mut self) -> core::option::Option<(geometry::frontend::Move, geometry::ExtrusionBudget)>
 pub fn geometry::ExtrusionReach::push(&mut self, geometry::frontend::Move)
 pub struct geometry::Fade
 pub geometry::Fade::target: f64
@@ -971,9 +977,9 @@ pub fn geometry::FanOut::lead_and_follow(&self, usize, impl core::ops::function:
 impl geometry::velocity::FanOut for geometry::velocity::Serial
 pub fn geometry::velocity::Serial::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
 pub fn geometry::corner_deviation_from_scv(f64, f64) -> f64
+pub fn geometry::extrusion_budgets(&[geometry::frontend::Move], f64, f64) -> alloc::vec::Vec<geometry::ExtrusionBudget>
 pub fn geometry::line_move([f64; 3], [f64; 3], f64, geometry::frontend::MoveContext) -> core::result::Result<geometry::frontend::Move, geometry::frontend::FrontendError>
 pub fn geometry::plan_velocity_stops_reconstruct_prefix(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams, usize) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
-pub fn geometry::plan_velocity_stops_select_prefix<F, W>(&[geometry::frontend::Move], &[bool], &[f64], geometry::velocity::VelocityPlanParams, &W, F) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError> where F: core::ops::function::FnOnce(usize) -> usize, W: geometry::velocity::FanOut
-pub fn geometry::ratios_in_reach(&[geometry::frontend::Move], f64, f64) -> alloc::vec::Vec<f64>
+pub fn geometry::plan_velocity_stops_select_prefix<F, W>(&[geometry::frontend::Move], &[bool], &[geometry::ExtrusionBudget], geometry::velocity::VelocityPlanParams, &W, F) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError> where F: core::ops::function::FnOnce(usize) -> usize, W: geometry::velocity::FanOut
 pub fn geometry::scv_from_corner_deviation(f64, f64) -> f64
 pub fn geometry::seam_requires_stop(&geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig) -> bool
