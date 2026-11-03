@@ -146,9 +146,68 @@ def test_recovers_injected_timing_errors(synthesized):
         stats = motor["timing_error_capture_minus_reference_us"]
         if role == "z":
             assert stats["max_late"] == pytest.approx(STALL_S * 1e6, rel=0.1)
+            assert motor["timing_violation_steps"] > 0
+            assert motor["timing_beyond_time_bound_worst_position"][
+                "timing_error_us"
+            ] == pytest.approx(STALL_S * 1e6, rel=0.1)
         else:
             assert stats["abs_max"] <= JITTER_US + quantization_us + 2.0
             assert abs(stats["p50"]) <= 2.0
+            assert motor["timing_violation_steps"] == 0
+    assert not verdict["checks"][analyze.TIMING_CHECK]
+
+
+TURNAROUND_NEIGHBOUR_RATE_HZ = 2900.0
+TURNAROUND_RATE_HZ = 227.0
+
+
+def _timing_report_with(late_s: float, rate_hz: float) -> dict:
+    neighbours = 20
+    late = np.full(2 * neighbours + 1, 1e-6)
+    rate = np.full(late.size, TURNAROUND_NEIGHBOUR_RATE_HZ)
+    late[neighbours] = late_s
+    rate[neighbours] = rate_hz
+    capture_time = np.arange(late.size) / TURNAROUND_NEIGHBOUR_RATE_HZ
+    return analyze.timing_report(late, capture_time, rate)
+
+
+def test_a_turnaround_step_far_off_in_time_but_close_in_position_passes():
+    report = _timing_report_with(-57.3e-6, TURNAROUND_RATE_HZ)
+    assert report["timing_error_capture_minus_reference_us"][
+        "abs_max"
+    ] == pytest.approx(57.3)
+    assert report["timing_beyond_time_bound_steps"] == 1
+    assert report["timing_violation_steps"] == 0
+    excused = report["timing_beyond_time_bound_worst_position"]
+    assert excused["position_equivalent_steps"] == pytest.approx(
+        0.013, abs=1e-3
+    )
+    assert excused["reference_rate_hz"] == TURNAROUND_RATE_HZ
+    assert report["position_equivalent_error_abs_max"] == excused
+
+
+def test_a_low_rate_step_misplaced_by_a_large_step_fraction_fails():
+    report = _timing_report_with(-1e-3, TURNAROUND_RATE_HZ)
+    assert report["timing_violation_steps"] == 1
+    worst = report["timing_beyond_time_bound_worst_position"]
+    assert worst["timing_error_us"] == pytest.approx(-1000.0)
+    assert worst["position_equivalent_steps"] == pytest.approx(0.227)
+
+
+@pytest.mark.parametrize(
+    "rate_hz",
+    [analyze.POSITION_BOUND_RELAXES_BELOW_HZ * 1.01, 20e3, 140e3],
+)
+def test_a_step_beyond_the_time_bound_fails_at_every_rate_the_time_bound_owns(
+    rate_hz,
+):
+    late_s = (analyze.TIMING_TOLERANCE_US + 1.0) * 1e-6
+    report = _timing_report_with(late_s, rate_hz)
+    assert report["timing_violation_steps"] == 1
+    worst = report["timing_beyond_time_bound_worst_position"]
+    assert worst["timing_error_us"] == pytest.approx(
+        analyze.TIMING_TOLERANCE_US + 1.0
+    )
 
 
 def test_reports_injected_stall(synthesized):
@@ -163,6 +222,62 @@ def test_reports_injected_stall(synthesized):
     assert stall_from - 0.01 <= z_idle[0]["capture_start_s"] <= stall_to
     assert z_idle[0]["duration_ms"] >= 0.5 * STALL_S * 1e3
     assert all(s["role"] == "z" for s in stalls)
+
+
+def test_a_capture_on_the_plans_pace_passes_the_pace_check(synthesized):
+    verdict, _, _ = synthesized
+    assert verdict["checks"]["pace_matches_reference"]
+    for epoch in verdict["epochs"]:
+        assert epoch["pace_within_tolerance"]
+        assert epoch["pace_max_abs_lag_ms"] <= STALL_S * 1e3 + 1.0
+
+
+def _uniform_steps(times: np.ndarray) -> analyze.StepEvents:
+    return analyze.StepEvents(
+        times,
+        np.arange(1, times.size + 1, dtype=np.int64),
+        np.ones(times.size, np.int8),
+        np.full(times.size, np.nan),
+    )
+
+
+def _paced(capture_times: np.ndarray, reference_times: np.ndarray) -> dict:
+    return analyze.epoch_pace(
+        analyze.EpochSteps(
+            capture={"a": _uniform_steps(capture_times)},
+            reference={"a": _uniform_steps(reference_times)},
+        )
+    )
+
+
+PACE_REFERENCE_S = np.arange(0.0, 20.0, 1e-3)
+
+
+def test_a_capture_one_percent_faster_than_the_plan_fails_the_pace_check():
+    pace = _paced(16.6 + 0.99 * PACE_REFERENCE_S, PACE_REFERENCE_S)
+    assert not pace["pace_within_tolerance"]
+    assert pace["pace_capture_over_stream"] == pytest.approx(0.99, abs=1e-4)
+    assert pace["pace_worst_lag_ms"] == pytest.approx(-200.0, abs=1.0)
+    assert pace["pace_worst_at_stream_s"] == pytest.approx(20.0, abs=1e-2)
+
+
+def test_a_local_burst_that_runs_ahead_and_resyncs_fails_the_pace_check():
+    capture = PACE_REFERENCE_S.copy()
+    ahead = (PACE_REFERENCE_S > 5.0) & (PACE_REFERENCE_S < 10.0)
+    capture[ahead] -= 0.1 * (PACE_REFERENCE_S[ahead] - 5.0)
+    capture[PACE_REFERENCE_S >= 10.0] -= 0.5
+    capture[PACE_REFERENCE_S >= 12.0] += 0.5
+    pace = _paced(capture, PACE_REFERENCE_S)
+    assert not pace["pace_within_tolerance"]
+    assert pace["pace_capture_over_stream"] == pytest.approx(1.0)
+
+
+def test_crystal_ppm_and_a_short_stall_stay_within_the_pace_tolerance():
+    capture = (1.0 + 150e-6) * PACE_REFERENCE_S
+    capture[(PACE_REFERENCE_S > 3.0) & (PACE_REFERENCE_S < 3.06)] += STALL_S
+    pace = _paced(capture, PACE_REFERENCE_S)
+    assert pace["pace_within_tolerance"]
+    assert pace["pace_max_abs_lag_ms"] == pytest.approx(STALL_S * 1e3, abs=0.5)
 
 
 TIE_GCODE = """\

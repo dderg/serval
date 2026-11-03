@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import struct
+import threading
 import time
 import zlib
 
@@ -392,3 +393,48 @@ def test_beacon_accel_stream_emits_data_batches(stub):
         assert params2["start_clock"] != params["start_clock"]
     finally:
         os.close(fd)
+
+
+def test_stream_restarted_while_the_old_sample_thread_finishes_keeps_streaming(
+    tmp_path, monkeypatch
+):
+    """klippy turns the stream off and back on ~67 µs apart between probe
+    commands. The old sample thread has left its loop but is still finishing
+    when the restart arrives; the stub must end up with a thread streaming,
+    not with none (the plugin's STREAM_TIMEOUT then shut the printer down)."""
+    finishing = threading.Event()
+    release = threading.Event()
+    original = BeaconMcuStub._sample_loop
+
+    def slow_to_finish(self):
+        original(self)
+        finishing.set()
+        release.wait(timeout=5.0)
+
+    monkeypatch.setattr(BeaconMcuStub, "_sample_loop", slow_to_finish)
+    pty_path = str(tmp_path / "beacon_pty")
+    s = BeaconMcuStub(pty_path)
+    s.start()
+    deadline = time.monotonic() + 2.0
+    while not os.path.exists(pty_path) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    parser = msgproto.MessageParser()
+    parser.process_identify(IDENTIFY_BLOB, decompress=True)
+    fd = _open_pty_writer(pty_path)
+    try:
+        os.write(fd, _frame(parser, 1, "beacon_stream en=%u", en=1))
+        _read_frames(fd, parser, "beacon_data", 2.0)
+        os.write(fd, _frame(parser, 2, "beacon_stream en=%u", en=0))
+        assert finishing.wait(timeout=2.0), (
+            "the sample thread never left its loop"
+        )
+        os.write(fd, _frame(parser, 3, "beacon_stream en=%u", en=1))
+        time.sleep(0.05)
+        release.set()
+        first = _read_frames(fd, parser, "beacon_data", 2.0)
+        second = _read_frames(fd, parser, "beacon_data", 2.0)
+        assert second["start_clock"] != first["start_clock"]
+    finally:
+        release.set()
+        os.close(fd)
+        s.stop()

@@ -2111,6 +2111,32 @@ const fn translation_binomials() -> [[f64; MOMENT_POWER_CAPACITY]; MOMENT_POWER_
     table
 }
 
+/// `FALLING_FACTORIALS[p][n] = p!/(p−n)!`, the factor the `n`-th derivative
+/// of `xᵖ` carries, as the ascending product `(p−n+1)···p` the per-term
+/// fold computed, so a lookup reproduces it bit for bit.
+pub(crate) const FALLING_FACTORIALS: [[f64; MOMENT_POWER_CAPACITY]; MOMENT_POWER_CAPACITY] =
+    falling_factorials();
+
+const fn falling_factorials() -> [[f64; MOMENT_POWER_CAPACITY]; MOMENT_POWER_CAPACITY] {
+    let mut table = [[0.0; MOMENT_POWER_CAPACITY]; MOMENT_POWER_CAPACITY];
+    let mut power = 0;
+    while power < MOMENT_POWER_CAPACITY {
+        let mut order = 0;
+        while order <= power {
+            let mut product = 1.0;
+            let mut factor = power - order + 1;
+            while factor <= power {
+                product *= factor as f64;
+                factor += 1;
+            }
+            table[power][order] = product;
+            order += 1;
+        }
+        power += 1;
+    }
+    table
+}
+
 /// The powers of one origin shift, built once and shared by every moment
 /// order translated between the same two origins.
 struct MomentTranslation {
@@ -2664,7 +2690,7 @@ impl AxisSignalTable {
         let mut magnitude = 0.0;
         let mut reach = 1.0;
         for power in order..self.coeffs[piece].len() {
-            let falling = ((power - order + 1)..=power).fold(1.0, |acc, k| acc * k as f64);
+            let falling = FALLING_FACTORIALS[power][order];
             magnitude += self.coeffs[piece][power].abs() * falling * reach;
             reach *= half_width;
         }

@@ -89,7 +89,7 @@ impl AuditBudgets {
     pub fn for_config(config: &StreamConfig) -> Self {
         Self {
             seam_pos_mm: 1e-4,
-            seam_vel_mm_s: 0.1,
+            seam_vel_mm_s: geometry::SEAM_VELOCITY_STEP_MM_S,
             seam_accel_mm_s2: 0.5,
             velocity_slack_mm_s: 1e-3 * config.limits.max_velocity_mm_s,
             accel_slack_mm_s2: config.fit_tol_accel_mm_s2,
