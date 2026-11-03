@@ -318,7 +318,7 @@ follows: x, y, z
 post_processors: extruder_pa, extruder_smoothing
 ```
 
-`pressure_advance_smooth_time` maps to the smoothing kernel. On a following axis an advance needs either that kernel or a `ratio_ramp_time` on the axis: with neither it is rejected at config load, because it would turn every extrusion-ratio change taken at speed into an instant extruder step.
+`pressure_advance_smooth_time` maps to the smoothing kernel. On a following axis an advance needs that kernel, a `ratio_ramp_time` on the axis, or both: with neither it is rejected at config load, because it would turn every extrusion-ratio change taken at speed into an instant extruder step. The kernel blurs flow in time, corners included; `ratio_ramp_time` smooths only the extrusion ratio, along the path, and leaves the advance unblurred. What the extruder can follow decides the chain. On the 10000 mm/s² bench config, `ratio_ramp_time: 0.015` with a 0.002 s `smooth_triangle` keeps corners within ±2%, with retracts peaking at 196 mm/s because a linear advance next to a kernel advances them too. On a 70000 mm/s² printer only `ratio_ramp_time` alone keeps corners within ±2%, at about 65000 mm/s² of extruder acceleration, and it currently needs z shaped there ([#525](https://github.com/dderg/serval/issues/525)). The measured trade-off is in [Evaluating an extruder chain](../README.md#evaluating-an-extruder-chain).
 
 The `linear_pressure_advance` parameter is named `k` and must be non-negative. For nonlinear pressure advance, the recommended models are `tanh_pressure_advance` and `recipr_pressure_advance`; each uses `linear_advance`, `nonlinear_offset`, and `linearization_velocity` parameters.
 

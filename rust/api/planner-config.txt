@@ -37,9 +37,6 @@ pub planner_config::PostProcessorConfigError::MissingParam
 pub planner_config::PostProcessorConfigError::MissingParam::key: alloc::string::String
 pub planner_config::PostProcessorConfigError::MissingParam::name: alloc::string::String
 pub planner_config::PostProcessorConfigError::Param(trajectory::chain::PostProcessorError)
-pub planner_config::PostProcessorConfigError::RatioRampWithKernel
-pub planner_config::PostProcessorConfigError::RatioRampWithKernel::axis: alloc::string::String
-pub planner_config::PostProcessorConfigError::RatioRampWithKernel::name: alloc::string::String
 pub planner_config::PostProcessorConfigError::UnknownAxisReference
 pub planner_config::PostProcessorConfigError::UnknownAxisReference::axis: alloc::string::String
 pub planner_config::PostProcessorConfigError::UnknownAxisReference::name: alloc::string::String
