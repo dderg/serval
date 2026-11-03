@@ -3,7 +3,8 @@ the tree the engine sits in.
 
 The engine carries a build id: the first ID_HEX_CHARS of the sha256 over every
 file under rust/ that git tracks or would add (path, length, content, sorted by
-path), read from the working tree at build time, so dirty and new files count.
+path), except the crates the workspace excludes (NOT_ENGINE_SOURCES: the wasm
+viewer builds its pkg/ and lockfile into rust/ after the engine), read from the working tree at build time, so dirty and new files count.
 motion-engine's build.rs computes it; tree_build_id() computes the same value
 from a tree. A snapshot, analyzer or review that loads an engine built from
 other sources than the tree it sits in reports a reference that is not the
@@ -19,6 +20,11 @@ from pathlib import Path
 
 ID_HEX_CHARS = 40
 UNKNOWN = "unknown"
+NOT_ENGINE_SOURCES = (
+    "rust/snapshot-viewer/",
+    "rust/motion-playground/",
+    "rust/gcode/fuzz/",
+)
 REBUILD_HINT = "make -f Makefile.rust motion-engine-fast"
 
 
@@ -45,7 +51,12 @@ def source_names(repo_root: Path) -> list[str]:
         capture_output=True,
     ).stdout
     names = {n for n in listing.decode().split("\0") if n}
-    return sorted(n for n in names if os.path.lexists(repo_root / n))
+    return sorted(
+        n
+        for n in names
+        if os.path.lexists(repo_root / n)
+        and not n.startswith(NOT_ENGINE_SOURCES)
+    )
 
 
 @functools.lru_cache(maxsize=None)

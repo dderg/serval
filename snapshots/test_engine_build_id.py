@@ -87,3 +87,11 @@ def test_a_git_less_tree_with_an_unknown_engine_has_nothing_to_compare(
 def test_a_git_less_tree_with_an_identified_engine_is_refused(tmp_path):
     with pytest.raises(ebi.EngineMismatch, match="not a git tree"):
         ebi.verify(engine(tmp_path, "a" * ebi.ID_HEX_CHARS))
+
+
+def test_files_the_wasm_viewer_generates_under_rust_do_not_count(repo):
+    before = build_id(repo)
+    viewer = repo / "rust" / "snapshot-viewer" / "pkg"
+    viewer.mkdir(parents=True)
+    (viewer / "snapshot_viewer.js").write_text("generated\n")
+    assert build_id(repo) == before

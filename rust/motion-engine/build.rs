@@ -5,6 +5,11 @@ use std::process::Command;
 
 const ID_HEX_CHARS: usize = 40;
 const UNKNOWN: &str = "unknown";
+const NOT_ENGINE_SOURCES: [&[u8]; 3] = [
+    b"rust/snapshot-viewer/",
+    b"rust/motion-playground/",
+    b"rust/gcode/fuzz/",
+];
 
 fn repo_root() -> PathBuf {
     let manifest =
@@ -25,6 +30,11 @@ fn source_listing(root: &Path) -> Option<Vec<Vec<u8>>> {
         .stdout
         .split(|byte| *byte == 0)
         .filter(|name| !name.is_empty())
+        .filter(|name| {
+            !NOT_ENGINE_SOURCES
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+        })
         .map(<[u8]>::to_vec)
         .collect();
     names.sort();
