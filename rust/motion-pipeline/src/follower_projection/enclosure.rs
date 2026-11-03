@@ -114,19 +114,21 @@ fn leader_speed_second(leaders: &[[TaylorModel; 3]], speed: &TaylorModel) -> Opt
 }
 
 /// A signal's enclosure over its whole support, built once at the
-/// tightest accuracy asked so far: a tighter enclosure proves a looser
-/// request as well, so it is rebuilt only for a tighter one, at the
-/// tightest of both. Where its pieces over a stretch miss the accuracy
-/// asked — a window the halving depth stopped on, wider than the stretch
-/// — the stretch is enclosed on its own.
+/// accuracy first asked and refined where asked tighter: a piece missing
+/// the accuracy a stretch asks tighter than it was enclosed at is enclosed
+/// again over its own span at that accuracy, halving afresh from there,
+/// and replaced. A piece that still misses it — a window the halving depth
+/// stopped on — is enclosed afresh over its overlap with each stretch
+/// smaller than it.
 #[derive(Default)]
 pub(super) struct WholeEnclosure {
-    built: std::cell::RefCell<Option<([f64; 3], Option<Vec<ExactPiece>>)>>,
+    built: std::cell::RefCell<Option<Option<Vec<(ExactPiece, [f64; 3])>>>>,
 }
 
 impl WholeEnclosure {
-    /// The enclosure over `[lo, hi]` at `accuracy` or tighter, `build`
-    /// enclosing a stretch at a given accuracy and `whole` the support.
+    /// The enclosure over `[lo, hi]` at `accuracy` or as close as the
+    /// signal's models get, `build` enclosing a stretch at a given accuracy
+    /// and `whole` the support; `None` where the signal has none.
     pub(super) fn over(
         &self,
         (lo, hi): (f64, f64),
@@ -134,38 +136,64 @@ impl WholeEnclosure {
         whole: (f64, f64),
         build: impl Fn((f64, f64), [f64; 3]) -> Option<Vec<ExactPiece>>,
     ) -> Option<Vec<ExactPiece>> {
-        let stale = match &*self.built.borrow() {
-            Some((built, _)) => built
+        let mut built = self.built.borrow_mut();
+        let pieces = built
+            .get_or_insert_with(|| {
+                build(whole, accuracy)
+                    .map(|pieces| pieces.into_iter().map(|piece| (piece, accuracy)).collect())
+            })
+            .as_mut()?;
+        let span = |pieces: &[(ExactPiece, [f64; 3])]| {
+            let first = pieces.partition_point(|(piece, _)| piece.hi < lo);
+            let past = pieces.partition_point(|(piece, _)| piece.lo <= hi);
+            (first, past.max(first))
+        };
+        let refines = |(piece, tried): &(ExactPiece, [f64; 3])| {
+            let tried_tighter = tried
                 .iter()
                 .zip(accuracy)
-                .any(|(&built, asked)| built > asked),
-            None => true,
+                .all(|(&tried, asked)| tried <= asked);
+            !tried_tighter
+                && piece
+                    .pva
+                    .iter()
+                    .zip(accuracy)
+                    .any(|(order, accuracy)| order.rounding > accuracy)
         };
-        if stale {
-            let tightest = match &*self.built.borrow() {
-                Some((built, _)) => std::array::from_fn(|order| built[order].min(accuracy[order])),
-                None => accuracy,
-            };
-            let pieces = build(whole, tightest);
-            *self.built.borrow_mut() = Some((tightest, pieces));
+        let (first, past) = span(pieces);
+        let mut index = first;
+        let mut end = past;
+        while index < end {
+            if !refines(&pieces[index]) {
+                index += 1;
+                continue;
+            }
+            let (piece, _) = &pieces[index];
+            let refined: Vec<(ExactPiece, [f64; 3])> = build((piece.lo, piece.hi), accuracy)?
+                .into_iter()
+                .map(|piece| (piece, accuracy))
+                .collect();
+            let added = refined.len();
+            pieces.splice(index..=index, refined);
+            index += added;
+            end += added - 1;
         }
-        let built = self.built.borrow();
-        let pieces = built.as_ref().and_then(|(_, pieces)| pieces.as_ref())?;
-        let first = pieces.partition_point(|piece| piece.hi < lo);
-        let past = pieces.partition_point(|piece| piece.lo <= hi);
-        let stretch = &pieces[first..past.max(first)];
-        let resolved = stretch.iter().all(|piece| {
-            piece
+        let (first, past) = span(pieces);
+        let mut out = Vec::with_capacity(past - first);
+        for (piece, _) in &pieces[first..past] {
+            let resolved = piece
                 .pva
                 .iter()
                 .zip(accuracy)
-                .all(|(order, accuracy)| order.rounding <= accuracy)
-        });
-        if resolved {
-            Some(stretch.to_vec())
-        } else {
-            build((lo, hi), accuracy)
+                .all(|(order, accuracy)| order.rounding <= accuracy);
+            let overlap = (lo.max(piece.lo), hi.min(piece.hi));
+            if resolved || (overlap.0 <= piece.lo && overlap.1 >= piece.hi) {
+                out.push(*piece);
+            } else {
+                out.extend(build(overlap, accuracy)?);
+            }
         }
+        Some(out)
     }
 }
 
