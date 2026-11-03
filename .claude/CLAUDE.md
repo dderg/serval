@@ -135,6 +135,13 @@ body. A red "Sim e2e" run is rerun once, loudly; any other red check stops the q
 QUEUE lines are `branch|title|expect`; landed branches are appended to `QUEUE.landed`
 so a stopped queue resumes. Use it instead of a hand-written loop around `land-pr.sh`.
 
+`land-pr.sh` and `land_queue.py` re-run themselves from `origin/main` after fetching
+(`land-pr.sh` copies `scripts/land-pr.sh` and `gh_util.py` into a temp dir; `land_queue.py`
+extracts `scripts/` from `git archive origin/main`; `LAND_PR_REEXEC` / `LAND_QUEUE_REEXEC`
+stop the loop, `SERVAL_REPO_ROOT` keeps the repo root), so a branch carrying an older copy
+still lands with the current logic (including fast-forwarding `~/Developer/serval`). They
+fail loudly when the fetch fails.
+
 Every `gh` call in the tooling goes through `scripts/gh_util.py` (`pending_baselines.run`
 routes `gh` there; `land-pr.sh` defines `gh()` as the wrapper). Many agents polling
 GitHub trip its secondary rate limit, and a bare `gh pr checks --watch` then exits
