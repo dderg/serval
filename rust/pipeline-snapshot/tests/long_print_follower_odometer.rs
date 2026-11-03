@@ -3,6 +3,7 @@
 //! same way, and each segment's extrusion starts on the span table boundary
 //! its predecessor ended on instead of a sliver past it.
 
+use geometry::MIN_DEVICE_INTERVAL_S;
 use motion_pipeline::{Pipeline, TrajectoryItem, live_config};
 use pipeline_snapshot::waypoints::parse_gcode;
 use pipeline_snapshot::{AxisDecl, CartesianLimits, PlannerConfig, PostProcessorDecl, plan_steps};
@@ -13,7 +14,6 @@ const MAX_ACCEL: f64 = 10_000.0;
 const EXTRUDER: usize = 3;
 const EIGHTEEN_HOURS_S: f64 = 65_536.0;
 const SAMPLES_PER_SEGMENT: usize = 64;
-const MIN_DEVICE_INTERVAL_S: f64 = 2e-9;
 
 fn axis(name: &str, follows: &[&str], post_processors: &[&str]) -> AxisDecl {
     AxisDecl {
@@ -22,6 +22,9 @@ fn axis(name: &str, follows: &[&str], post_processors: &[&str]) -> AxisDecl {
         motors: Vec::new(),
         post_processors: post_processors.iter().map(|s| (*s).into()).collect(),
         ratio_ramp_time: None,
+        max_velocity: None,
+        max_accel: None,
+        instantaneous_corner_velocity: None,
     }
 }
 
@@ -54,7 +57,7 @@ fn plan_from(stream_start_s: f64) -> Vec<ContinuousSegment> {
         cartesian: CartesianLimits::without_z_caps(MAX_VELOCITY, MAX_ACCEL, f64::INFINITY, 0.21),
         ..PlannerConfig::default()
     };
-    let limits = live_config::move_limits(&planner).expect("limits");
+    let limits = live_config::move_limits(&planner, None).expect("limits");
     let steps = plan_steps(&waypoints, limits).expect("steps");
     let config = live_config::stream_config(&planner).expect("stream config");
     let registry = planner_config::AxisRegistry::try_new(vec![

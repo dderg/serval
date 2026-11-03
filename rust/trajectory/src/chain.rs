@@ -46,6 +46,14 @@ impl AdvanceModel {
             }
         }
     }
+
+    /// `sup |s''|`: tanh's at `tanh u = 1/√3`, the reciprocal's at rest.
+    fn max_shape_curvature(self) -> f64 {
+        match self {
+            Self::Tanh => 4.0 / (3.0 * 3.0_f64.sqrt()),
+            Self::Reciprocal => 2.0,
+        }
+    }
 }
 
 /// The operator `y = x + a(ẋ)` with the saturating advance law
@@ -83,6 +91,19 @@ impl NonlinearAdvance {
         let (_, _, dds) = self.model.shape(v / vl);
         self.nonlinear_offset / (vl * vl) * dds
     }
+
+    /// `sup |da/dv|`: both shapes peak in slope at rest, where `s' = 1`.
+    #[must_use]
+    pub fn max_slope(&self) -> f64 {
+        self.linear_advance.abs() + self.nonlinear_offset.abs() / self.linearization_velocity
+    }
+
+    /// `sup |d²a/dv²|`
+    #[must_use]
+    pub fn max_curvature(&self) -> f64 {
+        let vl = self.linearization_velocity;
+        self.nonlinear_offset.abs() / (vl * vl) * self.model.max_shape_curvature()
+    }
 }
 
 impl ChainStage {
@@ -117,6 +138,9 @@ impl ChainStage {
     }
 }
 
+/// Upstream Klipper's default extruder `instantaneous_corner_velocity`.
+pub const DEFAULT_INSTANTANEOUS_CORNER_VELOCITY_MM_S: f64 = 1.0;
+
 #[derive(Debug, Clone, Default)]
 pub struct CompiledChain {
     kernel: Option<PiecewisePolynomialKernel>,
@@ -126,6 +150,9 @@ pub struct CompiledChain {
     /// around it. It shapes the projection, not the signal, so it is no
     /// stage of the chain.
     ratio_ramp_time: Option<f64>,
+    /// A projected follower's allowance for instantaneous velocity changes,
+    /// see [`Self::instantaneous_corner_velocity`].
+    instantaneous_corner_velocity: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,6 +347,7 @@ impl CompiledChain {
             kernel,
             transform,
             ratio_ramp_time: None,
+            instantaneous_corner_velocity: None,
         }
     }
 
@@ -366,6 +394,31 @@ impl CompiledChain {
     pub fn ratio_ramp_time(&self) -> Option<f64> {
         self.ratio_ramp_time
     }
+
+    /// This chain with an allowance of `mm_s` for instantaneous follower
+    /// velocity changes, see [`Self::instantaneous_corner_velocity`].
+    #[must_use]
+    pub fn with_instantaneous_corner_velocity(self, mm_s: f64) -> Self {
+        assert!(
+            mm_s.is_finite() && mm_s > 0.0,
+            "an instantaneous corner velocity must be finite and positive, got {mm_s}"
+        );
+        Self {
+            instantaneous_corner_velocity: Some(mm_s),
+            ..self
+        }
+    }
+
+    /// The velocity change a projected follower may make at once (mm/s,
+    /// upstream Klipper's extruder `instantaneous_corner_velocity`): where
+    /// no kernel smooths its advance, an unshaped leader's acceleration
+    /// steps become advance velocity steps, and the planner keeps them
+    /// within it. [`DEFAULT_INSTANTANEOUS_CORNER_VELOCITY_MM_S`] unless set.
+    #[must_use]
+    pub fn instantaneous_corner_velocity(&self) -> f64 {
+        self.instantaneous_corner_velocity
+            .unwrap_or(DEFAULT_INSTANTANEOUS_CORNER_VELOCITY_MM_S)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -387,13 +440,6 @@ pub const FOLLOWER_TRANSFORM_WITHOUT_KERNEL: &str = "an advance turns every \
     into an instant position step the motor cannot make, so nearly any print would abort \
     mid-way. Add a smoothing kernel (e.g. smooth_triangle) to the axis post_processors, or \
     set ratio_ramp_time on the axis to spread those changes over the path instead";
-
-/// A ratio-ramped follower's smoothing over a segment is final once the
-/// leaders are shaped this many ramp times past its end: half a ramp time
-/// for the width node after the segment, half for that node's own path
-/// ahead, and the two the width envelope reaches forward at cruise (its
-/// slope is a quarter, the width half the path a ramp time covers).
-pub const RATIO_RAMP_LOOKAHEAD_RAMP_TIMES: f64 = 4.0;
 
 impl AxisChainSet {
     #[must_use]
@@ -418,6 +464,7 @@ impl AxisChainSet {
                     kernel: k.clone(),
                     transform: None,
                     ratio_ramp_time: None,
+                    instantaneous_corner_velocity: None,
                 })
                 .collect(),
             followers: Vec::new(),
@@ -448,18 +495,6 @@ impl AxisChainSet {
     pub fn has_ratio_ramped_follower(&self) -> bool {
         self.projected_followers()
             .any(|(axis, _)| self.chains[axis].ratio_ramp_time().is_some())
-    }
-
-    /// How far past a segment's end, in time, a ratio-ramped follower's
-    /// smoothing reads before its projection over the segment is final:
-    /// its width nodes reach [`RATIO_RAMP_LOOKAHEAD_RAMP_TIMES`] ramp times
-    /// ahead at cruise.
-    #[must_use]
-    pub fn ratio_ramp_lookahead(&self) -> f64 {
-        self.projected_followers()
-            .filter_map(|(axis, _)| self.chains[axis].ratio_ramp_time())
-            .map(|ramp_time| RATIO_RAMP_LOOKAHEAD_RAMP_TIMES * ramp_time)
-            .fold(0.0, f64::max)
     }
 
     /// Follower axes that ride on at least one leader: their tracks are not

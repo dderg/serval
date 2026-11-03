@@ -36,6 +36,10 @@ const SMOOTHED_RAMP: [f64; 5] = [0.1875, 0.5, 0.375, 0.0, -0.0625];
 /// `∫₋₁ˣ` of [`SMOOTHED_RAMP`]: `x₊²/2` smoothed by the kernel.
 const SMOOTHED_HALF_SQUARE: [f64; 6] = [0.05, 0.1875, 0.25, 0.125, 0.0, -0.0125];
 const WIDTH_BISECTIONS: usize = 64;
+/// Speed probes per leader knot interval a rest leg is searched with for
+/// where the shaped leaders come to rest.
+const REST_PROBES_PER_INTERVAL: usize = 8;
+const REST_REFINEMENTS: usize = 64;
 
 /// One segment's shaped leaders as the smoothing reads them: where on the
 /// span table it starts, the time it covers, and whether its raw leaders
@@ -412,8 +416,10 @@ pub(super) struct RatioSmoothing {
     base_slope: Option<f64>,
     valleys: Vec<AdvanceValley>,
     resting: bool,
+    rest_end: f64,
     examined_through: f64,
     floor: f64,
+    taken_through: f64,
     reach_into_next: Option<Crossing>,
     backlog: VecDeque<PendingSegment>,
 }
@@ -491,16 +497,12 @@ impl RatioSmoothing {
             self.width.place_rest(seam);
         }
         self.width.extend(&leaders, leg, table_end);
-        self.lay_rest_valley(leg, crossing, ramp_time);
-        if reach > SPAN_MIN_LEN_MM
-            && !self.resting
-            && crossing.turns_around()
-            && !self.closes_a_rest_at(seam)
-        {
+        let closes_a_rest = self.lay_rest_valley(leg, &leaders, crossing, ramp_time, table_end);
+        if reach > SPAN_MIN_LEN_MM && !self.resting && !closes_a_rest && crossing.turns_around() {
             self.valleys.push(AdvanceValley {
                 start: seam,
                 end: seam,
-                before: reach,
+                before: reach.min(self.back_reach_limit(seam)),
                 after: reach,
             });
         }
@@ -538,11 +540,14 @@ impl RatioSmoothing {
         });
     }
 
-    /// The queued segments no node or seam still to come can reach into, in
-    /// order.
+    /// The queued segments no node, seam or valley still to come can reach
+    /// into, in order.
     pub(super) fn take_final(&mut self, spans: &[RatioSpan]) -> Vec<PendingSegment> {
         let table_end = spans.last().map_or(self.floor, |last| last.s1);
-        let final_through = self.final_through(table_end).max(self.floor);
+        let final_through = self
+            .final_through(table_end)
+            .min(table_end - self.unlaid_valley_reach(table_end))
+            .max(self.floor);
         let ready = self
             .backlog
             .iter()
@@ -551,7 +556,37 @@ impl RatioSmoothing {
                     || segment.table_end + SPAN_LOOKUP_SLACK_MM <= final_through
             })
             .count();
-        self.backlog.drain(..ready).collect()
+        let drained: Vec<PendingSegment> = self.backlog.drain(..ready).collect();
+        if let Some(last) = drained.last() {
+            self.taken_through = self
+                .taken_through
+                .max(last.table_end)
+                .max(last.s_start + last.s_length);
+        }
+        drained
+    }
+
+    /// How far back from `seam` a valley laid there may reach: not past a
+    /// floor, and not into a segment already taken for projection, whose
+    /// advance read the weight before the valley existed. The reserve
+    /// [`Self::unlaid_valley_reach`] keeps this from binding where the
+    /// leaders' reach changes slowly; a seam whose crossing reaches much
+    /// further than the one the reserve was taken at (hard braking into a
+    /// rest right after a cruise) releases the advance over what is left.
+    fn back_reach_limit(&self, seam: f64) -> f64 {
+        (seam - self.floor.max(self.taken_through)).max(0.0)
+    }
+
+    /// How far back from the table's end a valley the next leg may open
+    /// there reaches: a rest or a turnaround releases the advance over the
+    /// leaders' reach at that seam, which is no further than the reach of
+    /// the crossing the last leg closed on.
+    fn unlaid_valley_reach(&self, table_end: f64) -> f64 {
+        self.reach_into_next.map_or(0.0, |closing| {
+            closing
+                .reach(WIDTH_NODES_PER_RAMP_TIME * self.width.spacing)
+                .min(table_end - self.floor)
+        })
     }
 
     /// How far the smoothed ratio is final: its width there is, and every
@@ -765,33 +800,49 @@ impl RatioSmoothing {
         }
     }
 
-    /// A leg whose raw leaders rest opens a rest valley where it starts,
-    /// unless one is open already; the first leg that moves again closes it
-    /// where it starts. Each side reaches as far as the leaders cover in
-    /// half the ramp time there.
-    fn lay_rest_valley(&mut self, leg: &RampLeg, crossing: Crossing, ramp_time: f64) {
-        if leg.rests == self.resting {
-            return;
-        }
+    /// Within a leg whose raw leaders rest, the shaped leaders rest where
+    /// their speed is down to [`rest_speed`]: a rest valley opens where they
+    /// first come to rest, unless one is open already, and the first leg
+    /// that moves again closes it where they last rested. Each side spans
+    /// the shaped spill between that rest and the raw seam plus as far as
+    /// the leaders cover in half the ramp time at the seam, so the advance
+    /// keeps its lead through the spill and builds or releases it from the
+    /// rest out. A rest leg the leaders cross without coming to rest opens
+    /// none. Returns whether `leg` closes a rest valley.
+    fn lay_rest_valley(
+        &mut self,
+        leg: &RampLeg,
+        leaders: &ShapedLeaders,
+        crossing: Crossing,
+        ramp_time: f64,
+        table_end: f64,
+    ) -> bool {
         let seam = leg.start_s;
         let reach = crossing.reach(ramp_time);
-        if leg.rests {
+        if !leg.rests {
+            if !self.resting {
+                return false;
+            }
+            let rest_end = self.rest_end;
+            self.close_rest(rest_end, seam - rest_end + reach);
+            return true;
+        }
+        let Some((rest_start, rest_end)) =
+            resting_stretch(leaders, leg, rest_speed(ramp_time), table_end)
+        else {
+            return false;
+        };
+        if !self.resting {
             self.valleys.push(AdvanceValley {
-                start: seam,
+                start: rest_start,
                 end: f64::INFINITY,
-                before: reach.min(seam - self.floor).max(0.0),
+                before: rest_start - seam + reach.min(self.back_reach_limit(seam)),
                 after: 0.0,
             });
             self.resting = true;
-        } else {
-            self.close_rest(seam, reach);
         }
-    }
-
-    fn closes_a_rest_at(&self, seam: f64) -> bool {
-        self.valleys
-            .last()
-            .is_some_and(|valley| valley.end == seam && valley.end > valley.start)
+        self.rest_end = rest_end;
+        false
     }
 
     /// The weight `W` the advance reads the ratio with at `s`, with its
@@ -826,22 +877,30 @@ impl RatioSmoothing {
 }
 
 /// A stretch of path where a ratio-ramped advance reads the laid ratio
-/// weighted down to zero: `W = 0` on `[start, end]` and `W = 3x² − 2x³`
-/// within `before`/`after` of it, `x` the distance out over that width, so
-/// the weight leaves zero with zero slope and meets 1 with zero slope. The
-/// laid ratio, and so the material, is untouched; only the lead the
-/// advance builds is released over the path before and rebuilt after.
+/// weighted down to zero: `W = 0` on `[start, end]`, where the leaders'
+/// path speed is zero, and `W = ψ(x) = 1 − (1 − x)³` within
+/// `before`/`after` of it, `x` the distance out over that width, so the
+/// weight rises off the rest with a slope the leaders' zero speed makes
+/// harmless and meets 1 flat to second order. The laid ratio, and so the
+/// material, is untouched; only the lead the advance builds is released
+/// over the path before and rebuilt after.
+///
+/// Rising from a rest the leaders leave at acceleration `a`, the lead
+/// `k·r·W·ṡ` catches up with the advance's `k·r·ṡ` at a rate of at most
+/// `1.653·k·r·a` (the peak of `d/du (u·ψ(u²))`): the advance's natural
+/// rate, overshot by what catching up from zero takes, and over a shaped
+/// start whose acceleration builds from zero, much less.
 ///
 /// - A turnaround: the leaders' path speed passes through zero at a seam
 ///   while its rate does not, so the rate steps from `−a` to `+a`, and an
 ///   advance reading `r·ṡ` would step the follower's velocity by `2·k·r·a`
 ///   whatever the ratio's own shape. The valley is that seam, each side
 ///   reaching as far as the leaders turn around in half the ramp time.
-/// - A rest: an extrude-only move or a dwell, along which only the shaped
-///   kernel spill moves the leaders — the tail of the move before, the lead
-///   of the move after, and the fit's back-and-forth near the rest point,
-///   whose own turnarounds and short idle spans an advance would turn into
-///   steps. The valley is the rest's whole arc.
+/// - A rest: an extrude-only move or a dwell, where the shaped leaders come
+///   to rest between the kernel spill of the move before and of the move
+///   after, and the fit's back-and-forth near the rest point has its own
+///   turnarounds and short idle spans an advance would turn into steps. The
+///   valley is the stretch where the leaders rest.
 #[derive(Debug, Clone, Copy)]
 struct AdvanceValley {
     start: f64,
@@ -870,13 +929,93 @@ impl AdvanceValley {
         if distance >= width {
             return (1.0, 0.0, 0.0);
         }
-        let x = distance / width;
+        let inside = 1.0 - distance / width;
         (
-            x * x * (3.0 - 2.0 * x),
-            outward * 6.0 * x * (1.0 - x) / width,
-            (6.0 - 12.0 * x) / (width * width),
+            1.0 - inside * inside * inside,
+            outward * 3.0 * inside * inside / width,
+            -6.0 * inside / (width * width),
         )
     }
+}
+
+/// The speed under which the leaders rest: they cover no more than
+/// [`REST_TARGET_MM`], the width field's rest, in half the ramp time.
+fn rest_speed(ramp_time: f64) -> f64 {
+    REST_TARGET_MM / (0.5 * ramp_time)
+}
+
+/// Where along `leg` the shaped leaders rest, first to last: the path at
+/// the first and the last time their speed is down to `rest_speed`, the
+/// minimum of each probe interval refined so that a turnaround, at rest
+/// for an instant only, is found.
+fn resting_stretch(
+    leaders: &ShapedLeaders,
+    leg: &RampLeg,
+    rest_speed: f64,
+    table_end: f64,
+) -> Option<(f64, f64)> {
+    let grid = axis_grid(leg.shaped, leg.leaders);
+    let speed = |t: f64| leaders.speed(t);
+    let probes: Vec<f64> = grid
+        .windows(2)
+        .flat_map(|pair| {
+            (0..REST_PROBES_PER_INTERVAL).map(move |index| {
+                pair[0] + (pair[1] - pair[0]) * index as f64 / REST_PROBES_PER_INTERVAL as f64
+            })
+        })
+        .chain(std::iter::once(grid[grid.len() - 1]))
+        .collect();
+    let resting = |t: f64| speed(t) <= rest_speed;
+    let slowest_near = |index: usize| {
+        let (mut lo, mut hi) = (
+            probes[index.saturating_sub(1)],
+            probes[(index + 1).min(probes.len() - 1)],
+        );
+        for _ in 0..REST_REFINEMENTS {
+            let (left, right) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+            if speed(left) <= speed(right) {
+                hi = right;
+            } else {
+                lo = left;
+            }
+        }
+        0.5 * (lo + hi)
+    };
+    let rest_time = |index: usize| {
+        if resting(probes[index]) {
+            return Some(probes[index]);
+        }
+        let slowest = slowest_near(index);
+        resting(slowest).then_some(slowest)
+    };
+    let first = (0..probes.len()).find_map(rest_time)?;
+    let last = (0..probes.len())
+        .rev()
+        .find_map(rest_time)
+        .expect("a first rest is also a last");
+    let edge = |moving: f64, rest: f64| {
+        let (mut moving, mut rest) = (moving, rest);
+        for _ in 0..REST_REFINEMENTS {
+            let mid = 0.5 * (moving + rest);
+            if resting(mid) {
+                rest = mid;
+            } else {
+                moving = mid;
+            }
+        }
+        rest
+    };
+    let first = edge(grid[0], first);
+    let last = edge(grid[grid.len() - 1], last);
+    let path_at = |t: f64| {
+        let covered = grid
+            .windows(2)
+            .take_while(|pair| pair[0] < t)
+            .map(|pair| integrate(&speed, pair[0], pair[1].min(t)))
+            .sum::<f64>();
+        (leg.start_s + covered).min(table_end)
+    };
+    Some((path_at(first), path_at(last)))
 }
 
 /// The time a turnaround's rate takes to build the speed the leaders cross

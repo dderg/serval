@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use crossbeam_channel::Sender;
+use geometry::MIN_DEVICE_INTERVAL_S;
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
 use trajectory::{
     AnalyticMoveSpan, AxisChainSet, ChainStage, CompiledChain, ContinuousAxis, ContinuousSegment,
@@ -588,10 +589,10 @@ impl Shaper {
     /// tracks have their own lookahead covered. The time-based bound already
     /// includes the cascaded width, but segment granularity can leave a long
     /// straddling segment unprojectable, so gate on the frontier explicitly.
-    /// A ratio-ramped follower cascades too: its smoothing reads the
-    /// leaders' path [`AxisChainSet::ratio_ramp_lookahead`] past a
-    /// segment's end before the projection over it is final, and a kernel
-    /// after the ramp reads every projected segment its window reaches.
+    /// A ratio-ramped follower needs no gate here: how far its smoothing
+    /// reads ahead depends on how the leaders come to rest, so the
+    /// projection itself commits only what it holds final (see
+    /// `follower_projection::project_followers`).
     ///
     /// Every gate compares `t_end + support` against the covered end with no
     /// slack — the same association and strictness as the fit-time
@@ -610,33 +611,16 @@ impl Shaper {
             .take_while(|seg| seg.t_end + self.forward_support <= last_t)
             .count();
         let own_hi = self.chains.max_follower_own_forward_support();
-        let ramp_lookahead = self.chains.ratio_ramp_lookahead();
-        if own_hi <= 0.0 && ramp_lookahead <= 0.0 {
+        if own_hi <= 0.0 {
             return plain;
         }
         let Some(frontier_t) = self.shaping_frontier_t(last_t) else {
             return 0;
         };
-        if ramp_lookahead <= 0.0 {
-            let gated = self
-                .pending
-                .iter()
-                .take_while(|seg| seg.t_end + own_hi <= frontier_t)
-                .count();
-            return plain.min(gated);
-        }
-        let ends: Vec<f64> = self.pending.iter().map(|seg| seg.t_end).collect();
-        let mut covering = 0;
         let gated = self
             .pending
             .iter()
-            .take_while(|seg| {
-                let needed = seg.t_end + own_hi;
-                while covering < ends.len() && ends[covering] < needed {
-                    covering += 1;
-                }
-                covering < ends.len() && ends[covering] + ramp_lookahead <= frontier_t
-            })
+            .take_while(|seg| seg.t_end + own_hi <= frontier_t)
             .count();
         plain.min(gated)
     }
@@ -706,13 +690,17 @@ impl Shaper {
             },
         )
         .unwrap_or_else(|e| panic!("shaper: {e}"));
+        let committed = shaped.len();
         for seg in shaped {
             if !output(TrajectoryItem::Seg(seg)) {
                 return false;
             }
         }
-        for _ in 0..count {
-            let raw = self.pending.pop_front().expect("count <= pending");
+        if committed == 0 {
+            return true;
+        }
+        for _ in 0..committed {
+            let raw = self.pending.pop_front().expect("committed <= pending");
             self.history.push_back(raw);
         }
         let emitted_through = self
@@ -2755,7 +2743,6 @@ fn eval_segment_axis(seg: &ContinuousSegment, axis: usize, t: f64) -> f64 {
 
 const MAX_FIT_REFINEMENT_SPLITS: usize = 512;
 const LEADER_SPAN_PARALLEL_THRESHOLD: usize = 512;
-pub(crate) const MIN_DEVICE_INTERVAL_S: f64 = 2e-9;
 
 /// A span's acceleration is read off a quintic whose odd coefficients are
 /// solved from the endpoint positions, so one ulp of sampling noise reaches
@@ -3803,14 +3790,19 @@ impl<S: TrackSignal> RungWitness<'_, S> {
             .windows(2)
             .find(|gap| peak_u <= gap[1])
             .expect("the interpolant peak lies between the probes");
-        self.exact_witness_in(gap[0], gap[1])
+        self.exact_witness_in(gap[0], gap[1], curvature_miss)
     }
 
     /// Where the error between `low` and `high` leaves the tolerance, read
-    /// from exact samples: a scan, then a golden-section search around its
-    /// largest curvature miss. Spent only on stretches an estimate already
+    /// from exact samples: a scan, then a golden-section search around the
+    /// largest miss by `measure`. Spent only on stretches an estimate already
     /// puts near the budget, where the estimate itself decides nothing.
-    fn exact_witness_in(&self, low: f64, high: f64) -> Result<Option<f64>, PostProcessError> {
+    fn exact_witness_in(
+        &self,
+        low: f64,
+        high: f64,
+        measure: fn(&ErrorSample) -> f64,
+    ) -> Result<Option<f64>, PostProcessError> {
         let step = (high - low) / f64::from(EXACT_PEAK_SCAN_POINTS);
         let mut scan_peak = (f64::NAN, 0.0);
         for k in 0..EXACT_PEAK_SCAN_POINTS {
@@ -3819,12 +3811,12 @@ impl<S: TrackSignal> RungWitness<'_, S> {
             if !self.within(sample) {
                 return Ok(Some(u));
             }
-            if sample.curvature_per_u2.abs() >= scan_peak.1 {
-                scan_peak = (u, sample.curvature_per_u2.abs());
+            if measure(&sample) >= scan_peak.1 {
+                scan_peak = (u, measure(&sample));
             }
         }
         let (peak_u, _) = golden_section_peak(
-            |u| Ok(self.exact_sample_at(u)?.curvature_per_u2.abs()),
+            |u| Ok(measure(&self.exact_sample_at(u)?)),
             (scan_peak.0 - step).max(low),
             (scan_peak.0 + step).min(high),
         )?;
@@ -3914,7 +3906,7 @@ impl<S: TrackSignal> RungWitness<'_, S> {
             return Ok(None);
         }
         if estimated_peak <= self.curvature_budget() {
-            return self.exact_witness_in(left.position.u, right.position.u);
+            return self.exact_witness_in(left.position.u, right.position.u, curvature_miss);
         }
         let u = 0.5 * (left.position.u + right.position.u);
         let mid = self.exact_sample_at(u)?;
@@ -3961,7 +3953,7 @@ impl<S: TrackSignal> RungWitness<'_, S> {
             return Ok(None);
         }
         if bound <= self.curvature_budget() || depth == WITNESS_MAX_DEPTH {
-            return self.exact_witness_in(left.position.u, right.position.u);
+            return self.exact_witness_in(left.position.u, right.position.u, curvature_miss);
         }
         match self.acceleration_against_hermite_truth(left, mid, depth + 1)? {
             Some(u) => Ok(Some(u)),
@@ -3969,14 +3961,22 @@ impl<S: TrackSignal> RungWitness<'_, S> {
         }
     }
 
+    /// Where the rung's position leaves the budget between two samples. The
+    /// error's cubic Hermite interpolant misses its truth by the error's
+    /// fourth derivative, so an estimate within reach of the budget is read
+    /// exactly rather than trusted.
     fn over_gap(
         &self,
         left: PositionErrorSample,
         right: PositionErrorSample,
         depth: u32,
     ) -> Result<Option<f64>, PostProcessError> {
-        if left.hermite_peak_to(right) <= self.fit_tol.pos_mm {
+        let estimated_peak = left.hermite_peak_to(right);
+        if estimated_peak <= INTERPOLANT_SUSPICION_SHARE * self.fit_tol.pos_mm {
             return Ok(None);
+        }
+        if estimated_peak <= self.fit_tol.pos_mm {
+            return self.exact_witness_in(left.u, right.u, position_miss);
         }
         let u = 0.5 * (left.u + right.u);
         let t = nurbs::fmadd(0.5 * (u + 1.0), self.h, self.t0);
@@ -3996,6 +3996,14 @@ impl<S: TrackSignal> RungWitness<'_, S> {
             None => self.over_gap(mid, right, depth + 1),
         }
     }
+}
+
+fn curvature_miss(sample: &ErrorSample) -> f64 {
+    sample.curvature_per_u2.abs()
+}
+
+fn position_miss(sample: &ErrorSample) -> f64 {
+    sample.position.error.abs()
 }
 
 const LADDER_FIT_NODES_U: [f64; 3] = [0.0, 0.5, -0.5];

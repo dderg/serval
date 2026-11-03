@@ -8,6 +8,38 @@ All dates in this document are approximate.
 
 ## Changes
 
+20261103: A follower axis declares what its motor can do:
+`[axis e] max_velocity` and `max_accel` cap every extruder motion, pressure
+advance included, and the velocity planner slows extruding moves so the
+commanded extruder velocity and acceleration stay within them. On the
+`[extruder]` axis each unset one inherits `max_extrude_only_velocity` /
+`max_extrude_only_accel`, which now default as in upstream Klipper to the
+printer's `max_velocity` / `max_accel` times `4 * nozzle_diameter^2 /
+filament_area` when both diameters are set; configs that set no
+extrude-only caps get these derived caps on retracts and primes too. A
+follower with a pressure advance and no limits, set or inherited, is
+rejected. `[axis e] instantaneous_corner_velocity` (default 1 mm/s) bounds
+the extruder velocity steps a ratio-ramped advance makes where a followed
+axis, usually z, is not shaped; `[extruder] instantaneous_corner_velocity`
+is rejected with a pointer to it. A linear pressure advance next to a
+smoothing kernel no longer advances retracts, primes and other
+extrude-only moves: like the ratio-ramped advance it applies only to the
+extrusion laid along the path, so those moves keep their extrude-only
+caps.
+
+20261103: A `[printer]` section that sets neither `corner_deviation`
+nor `square_corner_velocity` now plans corners with
+`corner_deviation: 0.04` (mm), at every `max_accel`. It used to
+inherit Klipper's implicit `square_corner_velocity: 5`: a budget of
+0.0035 mm at 3000 mm/s² and less at higher accelerations, which made
+nearly every corner a full stop. On a dense print the old default
+planned 15 times as many segments and took 1.3–1.9× as long. On fast
+machines it fell below 3× realtime on a single core. Configs that set
+either option keep it, and setting both is still an error. To keep
+the old corners, set `square_corner_velocity: 5` explicitly. The
+measurements behind the value are in the
+[motion config reference](Config_Reference_Motion.md#why-the-corner-budget-defaults-to-004-mm).
+
 20260729: CAN bus micro-controllers are supported again on this fork.
 `[mcu] canbus_uuid` is accepted instead of `serial`, alongside a new
 optional `canbus_interface` (default `can0`). A CAN micro-controller

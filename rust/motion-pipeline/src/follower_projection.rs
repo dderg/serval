@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
+use geometry::MIN_DEVICE_INTERVAL_S;
 use nurbs::ScalarNurbs;
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
 use trajectory::{
@@ -11,13 +12,14 @@ use trajectory::{
 use crate::lowering::{AccelBudget, FitTol, follower_tol_scale};
 use crate::shaper::{
     AxisFit, AxisSignalTable, BetweenProbes, ConvolutionSignal, ExactConvolution, ExactKernel,
-    FitBoundary, KnotJumpBound, Lookahead, MIN_DEVICE_INTERVAL_S, SEGMENT_TIME_EPS_S,
-    ShiftedTrackSignal, SignalBounds, TrackSignal, apply_derivative_gains_to_track,
-    fit_axis_from_signal, fit_resolution, shaped_signal_breakpoints, unit_kernel_mass,
+    FitBoundary, KnotJumpBound, Lookahead, SEGMENT_TIME_EPS_S, ShiftedTrackSignal, SignalBounds,
+    TrackSignal, apply_derivative_gains_to_track, fit_axis_from_signal, fit_resolution,
+    shaped_signal_breakpoints, unit_kernel_mass,
 };
 use crate::types::PostProcessError;
 use crate::worker_pool::WorkerPool;
 
+mod extrude_only;
 mod ratio_ramp;
 use ratio_ramp::{RampLeg, RatioSmoothing};
 
@@ -47,12 +49,12 @@ fn follower_fit_tol(fit_tol: FitTol, position_scale: f64) -> FitTol {
 /// extruder moves a fraction of its position tolerance, and nothing after
 /// it differentiates the fit, so it spends its position budget
 /// ([`AccelBudget::PositionEquivalent`]). Every other follower fit keeps
-/// the absolute budget. The plain projection a kernel chain's linear
-/// advance differentiates would turn its velocity error `δ'` into `k·δ'`
-/// of command position, which the position-equivalent budget does not
-/// bound; a kernel's output carries only the path's own acceleration,
-/// which the absolute budget resolves in long pieces, and spending its
-/// position budget there moves the bead the melt lag lays.
+/// the absolute budget. The plain projection trailing derivative gains
+/// differentiate would turn its velocity error `δ'` into `k·δ'` of command
+/// position, which the position-equivalent budget does not bound; a
+/// kernel's output carries only the path's own acceleration, which the
+/// absolute budget resolves in long pieces, and spending its position
+/// budget there moves the bead the melt lag lays.
 fn source_accel_budget(leading: Option<LeadingAdvance>) -> AccelBudget {
     match leading {
         Some(_) => AccelBudget::PositionEquivalent,
@@ -207,16 +209,27 @@ enum AdvanceSmoothing {
 struct LeadingAdvance<'a> {
     stage: &'a ChainStage,
     smoothing: AdvanceSmoothing,
+    /// How far a velocity step the advance makes of a leader's acceleration
+    /// step may reach the motor of a ratio-ramped follower, see
+    /// [`CompiledChain::instantaneous_corner_velocity`].
+    instantaneous_corner_velocity: f64,
 }
 
 impl<'a> LeadingAdvance<'a> {
-    /// The advance a chain applies before projection, if any: with no
-    /// kernel to defer it to, a linear one too. A linear advance next to a
-    /// kernel commutes with it and is applied to the convolved signal.
+    /// The advance a chain applies before its kernel, or with no kernel at
+    /// all. A linear one commutes with the kernel, yet applied to the fitted
+    /// source it would turn the fit's velocity error `δ'` into `k·δ'` of
+    /// command, and the melt lag the advance models hands `δ'` back to the
+    /// nozzle flow whole: a bead error of `δ'/(r·v)`, largest where a corner
+    /// slows. The source fits the advanced signal instead, whose position
+    /// error that lag filters. An acceleration gain, which only a chain
+    /// built outside configuration places before a kernel, stays on the
+    /// kernel input, where the convolution differentiates it exactly.
     fn of(chain: &'a CompiledChain) -> Option<Self> {
-        let stage = (!chain.follower_linear_transform())
-            .then(|| chain.leading_transform())
-            .flatten()?;
+        let acceleration_gain = |stage: &&ChainStage| matches!(stage, ChainStage::DerivativeGains { k2, .. } if *k2 != 0.0);
+        let stage = chain
+            .leading_transform()
+            .filter(|stage| chain.kernel().is_none() || !acceleration_gain(stage))?;
         Some(Self {
             stage,
             smoothing: match (chain.ratio_ramp_time(), chain.kernel()) {
@@ -224,12 +237,14 @@ impl<'a> LeadingAdvance<'a> {
                 (Some(_), Some(_)) => AdvanceSmoothing::RatioRampAndKernel,
                 (None, _) => AdvanceSmoothing::Kernel,
             },
+            instantaneous_corner_velocity: chain.instantaneous_corner_velocity(),
         })
     }
 
     /// The follower velocity, acceleration and jerk the advance reads at
     /// `t`, given the follower's path state and its own velocity and
-    /// acceleration there.
+    /// acceleration there: the extrusion laid along the path, never the
+    /// extrude-only motion folded into the follower.
     fn read(
         &self,
         sig: &FollowerSignal,
@@ -240,21 +255,26 @@ impl<'a> LeadingAdvance<'a> {
         if self.reads_path_only() {
             return sig.ramped_read(t, read);
         }
-        (velocity, acceleration, sig.jerk_read(t, read))
+        let (raw_velocity, raw_acceleration, raw_jerk) = sig.extrude_only_derivatives(t);
+        (
+            velocity - raw_velocity,
+            acceleration - raw_acceleration,
+            sig.jerk_read(t, read) - raw_jerk,
+        )
     }
 
     fn read_velocity(&self, sig: &FollowerSignal, t: f64) -> f64 {
         if self.reads_path_only() {
             return sig.ramped_advance_read(t).0;
         }
-        sig.deriv(t)
+        sig.deriv(t) - sig.extrude_only_derivatives(t).0
     }
 
     fn read_acceleration(&self, sig: &FollowerSignal, t: f64) -> f64 {
         if self.reads_path_only() {
             return sig.ramped_advance_read(t).1;
         }
-        sig.second_deriv(t)
+        sig.second_deriv(t) - sig.extrude_only_derivatives(t).1
     }
 
     fn read_seam_velocity(&self, input: &SeamInput) -> f64 {
@@ -264,7 +284,7 @@ impl<'a> LeadingAdvance<'a> {
                 .expect("a ratio-ramped seam records what its advance reads")
                 .read_velocity;
         }
-        input.velocity
+        input.path_velocity
     }
 
     fn reads_path_only(&self) -> bool {
@@ -341,6 +361,7 @@ fn fit_source_projection(
         let (ratio, ratio_slope) = sig.state.ratio_and_slope(s);
         SeamInput {
             velocity: sig.deriv(t),
+            path_velocity: sig.deriv(t) - sig.extrude_only_derivatives(t).0,
             ratio,
             leader_speed: sig.shaped_speed(t),
             s,
@@ -441,8 +462,8 @@ fn fit_source_projection(
                         &step_candidates,
                         (t_start, t_end),
                         resolution.velocity
-                            + advanced_leader_rounding(
-                                advance.stage,
+                            + advance_velocity_step_allowance(
+                                advance,
                                 sig.ratio_bounds.ratio,
                                 fit_tol.accel_mm_s2,
                             ),
@@ -513,9 +534,15 @@ pub(crate) struct ProjectionWindow<'a> {
     pub pool: &'a WorkerPool,
 }
 
+/// Projects every follower over the frontier, then commits the segments of
+/// `out` every follower holds final: a ratio-ramped follower holds back a
+/// segment until no width node or seam still to come reaches into it, and
+/// a kernel after the ramp until its window finds every segment it reads
+/// projected (see [`final_ramped_commits`]). `out` is cut to the committed
+/// prefix; a forced lookahead closes every ramp, so it commits all of it.
 pub(crate) fn project_followers(
     window: ProjectionWindow,
-    out: &mut [ContinuousSegment],
+    out: &mut Vec<ContinuousSegment>,
     states: &mut Vec<FollowerState>,
     timing: &mut ProjectionTiming,
 ) -> Result<(), PostProcessError> {
@@ -527,15 +554,16 @@ pub(crate) fn project_followers(
         lookahead,
         pool,
     } = window;
-    let commit_count = out.len();
-    assert!(frontier.len() >= commit_count);
+    let requested = out.len();
+    assert!(frontier.len() >= requested);
     if states.len() < chains.n_axes() {
         states.resize_with(chains.n_axes(), FollowerState::default);
     }
+    let mut commit_count = requested;
+    let mut committing = Vec::new();
     for (axis, leaders) in chains.projected_followers() {
         let chain = &chains.chains[axis];
         let kernel = chain.kernel();
-        let defer_linear_prefix = chain.follower_linear_transform();
         let leading = LeadingAdvance::of(chain);
         let source_tol = FitTol {
             accel_budget: source_accel_budget(leading),
@@ -738,11 +766,11 @@ pub(crate) fn project_followers(
             };
             let (input_start, input_end) = input_states.unwrap_or_else(|| {
                 (
-                    SeamInput::of_track(&projected, t_start),
-                    SeamInput::of_track(&projected, t_end),
+                    SeamInput::of_track(&projected, t_start, raw.spatial_path),
+                    SeamInput::of_track(&projected, t_end, raw.spatial_path),
                 )
             });
-            let track = if projecting {
+            let track = if projecting || !raw.spatial_path {
                 projected
             } else {
                 crate::shaper::apply_zero_support_transform(
@@ -810,28 +838,44 @@ pub(crate) fn project_followers(
                 semantic_cuts,
                 join_advance_step,
                 window_advance_steps,
+                extrude_only: if raw.spatial_path {
+                    Vec::new()
+                } else {
+                    extrude_only::extrude_only_pieces(axis, raw_axis, (t_start, t_end))
+                },
             });
         }
         assert!(
             source_fits.next().is_none(),
             "follower source fit has no matching projection segment"
         );
-        if ramp_time.is_some() && commit_count > 0 {
-            let committed_through = projection_support(
-                &base[commit_count - 1],
-                &frontier[commit_count - 1],
-                axis,
-                leaders,
-            )
-            .1;
-            assert!(
-                state
-                    .projected_through_t
-                    .is_some_and(|through| through >= committed_through - GRID_DEDUP_EPS_S),
-                "follower axis {axis}: the segment ending at {committed_through} is committed \
-                 before every ratio ramp reaching into it is laid"
-            );
+        if ramp_time.is_some() {
+            let kernel_lo = match kernel {
+                Some(kernel) if !lookahead.clamps_past_signal() => kernel.support().0,
+                _ => 0.0,
+            };
+            commit_count = commit_count.min(final_ramped_commits(
+                state,
+                (base, frontier),
+                commit_count,
+                kernel_lo,
+                (axis, leaders),
+            ));
         }
+        committing.push((axis, leaders, projecting));
+    }
+    assert!(
+        commit_count == requested || !lookahead.clamps_past_signal(),
+        "a forced follower projection left {} of {requested} segments short of final",
+        requested - commit_count
+    );
+    out.truncate(commit_count);
+    for (axis, leaders, projecting) in committing {
+        let chain = &chains.chains[axis];
+        let kernel = chain.kernel();
+        let defer_linear_prefix =
+            LeadingAdvance::of(chain).is_none() && chain.follower_linear_transform();
+        let state = &mut states[axis];
         let kernel_tracks = match kernel {
             Some(kernel) if commit_count > 0 => {
                 let first = state.projected.first().expect("cache covers commits");
@@ -940,7 +984,20 @@ pub(crate) fn project_followers(
                 let mut gained_input = chain.leading_transform().is_some();
                 if defer_linear_prefix {
                     if let Some(ChainStage::DerivativeGains { k1, k2 }) = chain.transform() {
-                        kernel_input = apply_derivative_gains_to_track(&kernel_input, *k1, *k2);
+                        kernel_input = nurbs::bezier::bezier_pieces_to_discontinuous_nurbs(
+                            &extrude_only::without_extrude_only_gain(
+                                extract_bezier_pieces(&apply_derivative_gains_to_track(
+                                    &kernel_input,
+                                    *k1,
+                                    *k2,
+                                )),
+                                state
+                                    .projected
+                                    .iter()
+                                    .flat_map(|segment| &segment.extrude_only),
+                                (*k1, *k2),
+                            ),
+                        );
                         gained_input = true;
                     }
                 }
@@ -1184,6 +1241,28 @@ pub(crate) fn project_followers(
     Ok(())
 }
 
+/// How many of the first `requested` segments a ratio-ramped follower can
+/// commit: each one's projection is laid, so no width node or seam still to
+/// come reaches into it, and a kernel after the ramp, reaching `-kernel_lo`
+/// past a segment's end (zero where the window clamps past the signal),
+/// finds that window projected too.
+fn final_ramped_commits(
+    state: &FollowerState,
+    (base, frontier): (&[ContinuousSegment], &[ContinuousSegment]),
+    requested: usize,
+    kernel_lo: f64,
+    (axis, leaders): (usize, &[usize]),
+) -> usize {
+    let Some(through) = state.projected_through_t else {
+        return 0;
+    };
+    (0..requested)
+        .take_while(|&i| {
+            projection_support(&base[i], &frontier[i], axis, leaders).1 - kernel_lo <= through
+        })
+        .count()
+}
+
 /// Whether a fitted follower output must be corrected back to monotone: a
 /// nonnegative extrusion demand may never emit a retraction, but a track the
 /// derivative-gain stages have already shaped legitimately reverses.
@@ -1234,6 +1313,8 @@ fn fit_kernel_window<S: TrackSignal>(
 #[derive(Debug, Clone, Copy)]
 struct SeamInput {
     velocity: f64,
+    /// `velocity` less the extrude-only motion's, what an advance reads.
+    path_velocity: f64,
     ratio: f64,
     leader_speed: f64,
     s: f64,
@@ -1251,7 +1332,9 @@ struct RampedSeam {
 }
 
 impl SeamInput {
-    fn of_track(track: &ScalarNurbs, t: f64) -> Self {
+    /// A track that is the follower's raw motion passed through, laid along
+    /// the path when it has one and extrude-only otherwise.
+    fn of_track(track: &ScalarNurbs, t: f64, spatial_path: bool) -> Self {
         let velocity = if track.degree() == 0 {
             0.0
         } else {
@@ -1259,6 +1342,7 @@ impl SeamInput {
         };
         Self {
             velocity,
+            path_velocity: if spatial_path { velocity } else { 0.0 },
             ratio: 1.0,
             leader_speed: velocity,
             s: 0.0,
@@ -1362,8 +1446,8 @@ fn join_advance_step(
 /// as a C0 corner ([`SeamInput::signal_velocity_step`]) and welds what the
 /// advanced velocity differs by on top, straight to the motor. A ratio ramp
 /// leaves the projection no step of its own, and the advance none beyond
-/// what the leaders' acceleration rounding makes of it
-/// ([`advanced_leader_rounding`]), so a larger one on a
+/// its allowance for the leaders' acceleration steps
+/// ([`advance_velocity_step_allowance`]), so a larger one on a
 /// ramped follower is refused.
 fn refuse_ramped_join_velocity_step(
     advance: LeadingAdvance,
@@ -1398,29 +1482,37 @@ fn refuse_ramped_join_velocity_step(
         before_ramped.advanced_velocity,
         after_ramped.advanced_velocity,
     );
-    let leader_rounding = advanced_leader_rounding(
-        advance.stage,
+    let allowance = advance_velocity_step_allowance(
+        advance,
         before.ratio.abs().max(after.ratio.abs()),
         leader_accel_tol,
     );
-    if (advanced_after - advanced_before).abs() > rounding + leader_rounding {
+    if (advanced_after - advanced_before).abs() > rounding + allowance {
         return Err(PostProcessError::RatioRampedVelocityStep {
             axis,
             t: t_start,
             velocity_before: advanced_before,
             velocity_after: advanced_after,
-            resolution: rounding + leader_rounding,
+            resolution: rounding + allowance,
         });
     }
     Ok(())
 }
 
-/// The velocity step an advance makes of the leaders' own rounding: a
-/// shaped leader is fitted within `leader_accel_tol` on either side of its
-/// knots, so its acceleration may step by twice that there, which the
-/// projection scales by the ratio and the advance by its slope.
-fn advanced_leader_rounding(stage: &ChainStage, ratio_bound: f64, leader_accel_tol: f64) -> f64 {
-    2.0 * leader_accel_tol * ratio_bound * steepest_advance_slope(stage)
+/// The velocity step an advance may make of the leaders' acceleration
+/// steps: the follower's instantaneous corner velocity, which the planner
+/// keeps an unshaped leader's steps within, plus what the leaders' own
+/// rounding makes. A shaped leader is fitted within `leader_accel_tol` on
+/// either side of its knots, so its acceleration may step by twice that
+/// there, which the projection scales by the ratio and the advance by its
+/// slope.
+fn advance_velocity_step_allowance(
+    advance: LeadingAdvance,
+    ratio_bound: f64,
+    leader_accel_tol: f64,
+) -> f64 {
+    advance.instantaneous_corner_velocity
+        + 2.0 * leader_accel_tol * ratio_bound * steepest_advance_slope(advance.stage)
 }
 
 fn advance_offset(stage: &ChainStage, velocity: f64) -> f64 {
@@ -1478,6 +1570,9 @@ struct ProjSeg {
     join_advance_step: f64,
     /// The advance steps inside the segment, also left out of `track`.
     window_advance_steps: Vec<AdvanceStep>,
+    /// The extrude-only motion folded into `track`, which a kernel's linear
+    /// advance leaves unadvanced.
+    extrude_only: Vec<extrude_only::ExtrudeOnlyPiece>,
 }
 
 /// One segment's stretch of path: shaped arc length `[s0, s1]` carrying a
@@ -2583,6 +2678,19 @@ impl<'a> FollowerSignal<'a> {
         self.path_jerk(t, read) + raw
     }
 
+    /// The velocity, acceleration and jerk of the extrude-only motion folded
+    /// into the follower at `t`, zero along a spatial path.
+    fn extrude_only_derivatives(&self, t: f64) -> (f64, f64, f64) {
+        self.raw_delta.map_or((0.0, 0.0, 0.0), |(axis, _)| {
+            let (_, velocity, acceleration) = axis_pva(axis, t);
+            let jerk = axis
+                .eval_pvaj(t)
+                .expect("follower raw axis has exact derivatives")
+                .jerk;
+            (velocity, acceleration, jerk)
+        })
+    }
+
     fn path_deriv(&self, t: f64) -> f64 {
         let (ratio, _) = self.state.ratio_and_slope(self.s_owned(t));
         ratio * self.shaped_speed(t)
@@ -3398,6 +3506,17 @@ struct WeldWindow {
 
 const WELD_REACH_BISECTIONS: usize = 64;
 
+/// A residual this many ulps of the emitted position is the seam's
+/// rounding, whatever acceleration closing it over a sliver window reads as.
+const WELD_ROUNDING_ULPS: f64 = 4.0;
+
+/// The acceleration a weld spends closing [`WELD_ROUNDING_ULPS`] of
+/// `position` over `length` (`6·dp/L²`): over a window of nanoseconds it
+/// passes any budget, so a weld is refused only beyond it.
+fn weld_rounding_acceleration(position: f64, length: f64) -> f64 {
+    6.0 * WELD_ROUNDING_ULPS * f64::EPSILON * position.abs().max(1.0) / (length * length)
+}
+
 impl SeamWeld {
     fn spanning(
         window: WeldWindow,
@@ -3428,7 +3547,10 @@ impl SeamWeld {
         };
         let displacement = weld.max_displacement();
         let acceleration = weld.max_acceleration();
-        if displacement > tol.pos_mm || acceleration > tol.accel_mm_s2 {
+        let acceleration_budget = tol
+            .accel_mm_s2
+            .max(weld_rounding_acceleration(emitted.0, weld.length));
+        if displacement > tol.pos_mm || acceleration > acceleration_budget {
             return Err(PostProcessError::SeamWeld {
                 axis,
                 t_start: start,

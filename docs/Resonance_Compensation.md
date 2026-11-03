@@ -44,10 +44,11 @@ Slice the ringing test model, which can be found in
 
 First, measure the **ringing frequency**.
 
-1. If `square_corner_velocity` parameter was changed, revert it back
-   to 5.0. It is not advised to increase it when using input shaper
-   because it can cause more smoothing in parts - it is better to use
-   higher acceleration value instead.
+1. If the corner budget (`corner_deviation` or `square_corner_velocity`)
+   was changed, remove it to get the default `corner_deviation: 0.04`. It
+   is not advised to increase it when using input shaper because it can
+   cause more smoothing in parts - it is better to use higher acceleration
+   value instead.
 2. Disable the `minimum_cruise_ratio` feature by issuing the following
    command: `SET_VELOCITY_LIMIT MINIMUM_CRUISE_RATIO=0`
 3. Disable Pressure Advance: `SET_PRESSURE_ADVANCE ADVANCE=0`
@@ -207,8 +208,9 @@ Note that at very high accelerations, depending on the resonance frequency and
 the input shaper you chose (e.g. EI shaper creates more smoothing than MZV),
 input shaping may cause too much smoothing and rounding of the parts. So,
 max_accel should be chosen such as to prevent that. Another parameter that can
-impact smoothing is `square_corner_velocity`, so it is not advisable to increase
-it above the default 5 mm/sec to prevent increased smoothing.
+impact smoothing is the corner budget (`corner_deviation`), so it is not
+advisable to increase it above the default 0.04 mm to prevent increased
+smoothing.
 
 In order to select a suitable max_accel value, inspect the model for the chosen
 input shaper. First, take a note at which acceleration ringing is still small -

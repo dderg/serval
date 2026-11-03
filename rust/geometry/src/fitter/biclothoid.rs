@@ -11,6 +11,12 @@ pub(super) struct ClothoidPair {
     pub half2: Clothoid,
 }
 
+impl ClothoidPair {
+    fn halves_reach(&self, [shortest_half1, shortest_half2]: [f64; 2]) -> bool {
+        self.half1.s_len() >= shortest_half1 && self.half2.s_len() >= shortest_half2
+    }
+}
+
 const DEGENERATE_EPS: f64 = 1e-12;
 /// Position tolerance in canonical units (fractions of the chord): the
 /// Hermite solve is scale-normalized, so this is a relative tolerance.
@@ -49,6 +55,9 @@ pub(super) fn solve_line_line(
 
     let kappa_peak = trim_ref * theta / trim;
     let length = theta / kappa_peak;
+    if length <= crate::LENGTH_EPS_MM {
+        return Ok(None);
+    }
     let sigma = kappa_peak / length;
 
     let a_start = madd(vertex, -trim, t_in);
@@ -64,6 +73,42 @@ pub(super) fn solve_line_line(
         trim_in: trim,
         trim_out: trim,
     }))
+}
+
+/// Blend a line-line corner at `vertex` from a contact `trim_in` before it
+/// to one `trim_out` past it, both tangent and curvature-free, with one G2
+/// clothoid pair; `None` where no pair joins them within `delta` of the
+/// corner's polyline with halves no shorter than `shortest_halves`.
+pub(super) fn solve_line_line_trims(
+    vertex: [f64; 3],
+    (t_in, t_out): ([f64; 3], [f64; 3]),
+    (trim_in, trim_out): (f64, f64),
+    delta: f64,
+    shortest_halves: [f64; 2],
+) -> Option<GeneralBlend> {
+    let start = madd(vertex, -trim_in, t_in);
+    let end = madd(vertex, trim_out, t_out);
+    let pair = hermite_g2(
+        Anchor {
+            pose: start,
+            tangent: t_in,
+            kappa: 0.0,
+        },
+        Anchor {
+            pose: end,
+            tangent: t_out,
+            kappa: 0.0,
+        },
+        normalize(cross(t_in, t_out)),
+    )?;
+    (max_dev_from_chain(&pair, &[start, vertex, end]) <= delta
+        && pair.halves_reach(shortest_halves))
+    .then_some(GeneralBlend {
+        half1: pair.half1,
+        half2: pair.half2,
+        trim_in,
+        trim_out,
+    })
 }
 
 /// The line-line trim at which a symmetric corner blend's deviation reaches
@@ -113,14 +158,16 @@ pub(super) struct ChainBlend {
 /// solves recursively. Each pass picks the largest feasible `t` up to
 /// `t_cap`; the deviation is not monotone in `t` (the blend first hugs the
 /// chain, then cuts deeper), so a coarse top-down scan finds the feasible
-/// band's upper edge before bisecting it. `vertices` runs from the inbound
-/// line's end to the outbound line's start.
+/// band's upper edge before bisecting it. A pair with a half shorter than
+/// `shortest_half` is infeasible. `vertices` runs from the inbound line's end
+/// to the outbound line's start.
 pub(super) fn solve_consume_chain(
     vertices: &[[f64; 3]],
     t_a: [f64; 3],
     t_b: [f64; 3],
     delta: f64,
     t_cap: f64,
+    shortest_half: f64,
 ) -> Option<ChainBlend> {
     assert!(
         vertices.len() >= 2,
@@ -138,6 +185,7 @@ pub(super) fn solve_consume_chain(
         t_cap,
         delta,
         plane_n,
+        shortest_half,
     };
     let mut hint = None;
     [0, CONSUME_SPLIT_DEPTH]
@@ -149,6 +197,7 @@ struct DeviationTube<'a> {
     chain: &'a [[f64; 3]],
     delta: f64,
     plane_n: [f64; 3],
+    shortest_half: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -159,6 +208,7 @@ struct ChainReach<'a> {
     t_cap: f64,
     delta: f64,
     plane_n: [f64; 3],
+    shortest_half: f64,
 }
 
 fn scan_consume_reach(
@@ -173,6 +223,7 @@ fn scan_consume_reach(
         t_cap,
         delta,
         plane_n,
+        shortest_half,
     } = *reach;
     let mut eval = |t: f64| -> Option<Vec<ClothoidPair>> {
         let a = madd(vertices[0], -t, t_a);
@@ -195,6 +246,7 @@ fn scan_consume_reach(
             chain: &chain,
             delta,
             plane_n,
+            shortest_half,
         };
         let (pairs, solved) = consume_pairs(&start, &end, vertices, &tube, depth, *hint);
         *hint = solved.or(*hint);
@@ -253,7 +305,9 @@ fn consume_pairs(
     let solved = hermite_g2_hinted(*start, *end, tube.plane_n, hint);
     let top_hint = solved.as_ref().map(|(_, x)| *x);
     if let Some((pair, _)) = solved {
-        if max_dev_from_chain(&pair, tube.chain) <= tube.delta {
+        if max_dev_from_chain(&pair, tube.chain) <= tube.delta
+            && pair.halves_reach([tube.shortest_half; 2])
+        {
             return (Some(vec![pair]), top_hint);
         }
     }
@@ -332,26 +386,29 @@ fn mid_facet_anchor(
     ))
 }
 
-const DEV_SAMPLES_PER_HALF: usize = 16;
+const DEV_SAMPLES_PER_PIECE: usize = 16;
 
-/// Sampled deviation of the blend from the polyline it replaces: the largest
-/// distance from any curve sample to the chain's segments. Sampling
+/// Sampled deviation of a piece from the polyline it replaces: the largest
+/// distance from any piece sample to the chain's segments. Sampling
 /// under-reads the true maximum by the sagitta between samples — negligible
 /// against junction deviations.
-fn max_dev_from_chain(pair: &ClothoidPair, chain: &[[f64; 3]]) -> f64 {
-    let mut worst = 0.0_f64;
-    for half in [&pair.half1, &pair.half2] {
-        for i in 0..=DEV_SAMPLES_PER_HALF {
-            let s = half.s_len() * (i as f64) / (DEV_SAMPLES_PER_HALF as f64);
-            let p = half.point_at(s);
-            let d = chain
+pub(super) fn piece_dev_from_chain(
+    piece: &(impl PositionProfile + CurvatureProfile),
+    chain: &[[f64; 3]],
+) -> f64 {
+    (0..=DEV_SAMPLES_PER_PIECE)
+        .map(|i| {
+            let p = piece.point_at(piece.s_len() * (i as f64) / (DEV_SAMPLES_PER_PIECE as f64));
+            chain
                 .windows(2)
                 .map(|seg| dist_to_segment(p, seg[0], seg[1]))
-                .fold(f64::INFINITY, f64::min);
-            worst = worst.max(d);
-        }
-    }
-    worst
+                .fold(f64::INFINITY, f64::min)
+        })
+        .fold(0.0, f64::max)
+}
+
+fn max_dev_from_chain(pair: &ClothoidPair, chain: &[[f64; 3]]) -> f64 {
+    piece_dev_from_chain(&pair.half1, chain).max(piece_dev_from_chain(&pair.half2, chain))
 }
 
 fn dist_to_segment(p: [f64; 3], s0: [f64; 3], s1: [f64; 3]) -> f64 {
@@ -645,6 +702,7 @@ pub(super) struct GeneralBlendRequest {
     pub delta: f64,
     pub budget_in: f64,
     pub budget_out: f64,
+    pub shortest_halves: [f64; 2],
 }
 
 pub(super) fn solve_general(req: GeneralBlendRequest) -> Option<GeneralBlend> {
@@ -656,6 +714,7 @@ pub(super) fn solve_general(req: GeneralBlendRequest) -> Option<GeneralBlend> {
         delta,
         budget_in,
         budget_out,
+        shortest_halves,
     } = req;
     if delta <= 0.0 {
         return None;
@@ -678,7 +737,7 @@ pub(super) fn solve_general(req: GeneralBlendRequest) -> Option<GeneralBlend> {
     for s in 1..=samples {
         let rho = rho_max * (s as f64) / (samples as f64);
         if let Some((pair, dev)) = eval(rho) {
-            if dev <= delta {
+            if dev <= delta && pair.halves_reach(shortest_halves) {
                 best = Some((pair, rho));
             }
         }

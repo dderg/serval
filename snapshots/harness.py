@@ -198,6 +198,8 @@ def _remove_empty_dirs(root: Path) -> None:
 
 
 def _import_engine():
+    import engine_build_id
+
     try:
         import _motion_engine
     except ModuleNotFoundError as exc:
@@ -211,6 +213,7 @@ def _import_engine():
             "pipeline_snapshot is unavailable. Rebuild with: "
             "make -f Makefile.rust motion-engine-fast"
         )
+    engine_build_id.verify(_motion_engine)
     return _motion_engine
 
 

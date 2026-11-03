@@ -164,7 +164,7 @@ max_extrude_only_velocity: 50
 max_extrude_only_accel: 5000
 ```
 
-`corner_deviation` is the canonical corner budget in mm; 0.04 is a good starting value. `square_corner_velocity` is still accepted as a legacy alias, converted internally as `scv² · (√2 − 1) / max_accel` — note this maps typical mainline values to a far tighter budget than intended (5 mm/s at 3000 mm/s² ≈ 0.0035 mm), so prefer setting `corner_deviation` directly. Set exactly one of the two. `max_z_velocity` and `max_z_accel` must be at most the corresponding global caps and default to them.
+`corner_deviation` is the canonical corner budget in mm. It defaults to 0.04 when neither corner option is set ([why](Config_Reference_Motion.md#why-the-corner-budget-defaults-to-004-mm)). `square_corner_velocity` is still accepted as a legacy alias, converted internally as `scv² · (√2 − 1) / max_accel` — note this maps typical mainline values to a far tighter budget than intended (5 mm/s at 3000 mm/s² ≈ 0.0035 mm), so prefer setting `corner_deviation` directly or leaving both unset. Set at most one of the two. `max_z_velocity` and `max_z_accel` must be at most the corresponding global caps and default to them.
 
 `[motor <name>]` requires `drive`, `step_pin`, `dir_pin`, `microsteps`, and either `rotation_distance` or gear-ratio mode. Enable pins, if needed by the hardware integration, belong to the relevant stepper/driver support rather than the topology declaration above. Axis endstop and homing options belong on `[axis <name>]`, not on `[motor <name>]`.
 
@@ -228,7 +228,7 @@ naming the axis they belong to.
 | `[printer] max_accel` | `[printer] max_accel` |
 | `[printer] max_z_velocity` | `[printer] max_z_velocity` (must be `<= max_velocity`) |
 | `[printer] max_z_accel` | `[printer] max_z_accel` (must be `<= max_accel`) |
-| `[printer] square_corner_velocity` | Still accepted as a legacy alias. The canonical option is `[printer] corner_deviation` (= `scv² · (√2 − 1) / max_accel`). Set exactly one. |
+| `[printer] square_corner_velocity` | Still accepted as a legacy alias, but no longer the default: a config that sets neither corner option gets `corner_deviation: 0.04`, not the old implicit `square_corner_velocity: 5`. The canonical option is `[printer] corner_deviation` (= `scv² · (√2 − 1) / max_accel`). Set at most one. |
 | `[printer] max_jerk` | Still parsed, but only `max_jerk: 0` (unlimited) is accepted; a finite jerk limit is rejected at config load. |
 | `[printer] max_path_deviation` | Same option; fitter path-deviation tolerance. |
 | `[printer] max_accel_deviation` | Same option; fitter acceleration-deviation tolerance. |
@@ -244,7 +244,8 @@ naming the axis they belong to.
 | `[stepper_*] high_precision_step_compress` | Same opt-in, moved with the stepper fields to `[motor <name>] high_precision_step_compress: True`. Motors default to classic compression. |
 | `[extruder] pressure_advance` | `[post_processor <name>] type: linear_pressure_advance`, `k: ...`; put its name in the extruder axis chain. |
 | `[extruder] pressure_advance_smooth_time` | `[post_processor <name>] type: smooth_triangle`, `smooth_time: ...`; put its name in the extruder axis chain. |
-| `[extruder] max_extrude_cross_section`, `max_extrude_only_distance`, `instantaneous_corner_velocity` | **Rejected loudly** — "the planner has no such concept". Delete them. |
+| `[extruder] max_extrude_cross_section`, `max_extrude_only_distance` | **Rejected loudly** — "the planner has no such concept". Delete them. |
+| `[extruder] instantaneous_corner_velocity` | **Rejected with a pointer.** Move it to the extruder's `[axis e] instantaneous_corner_velocity`; same meaning, same 1 mm/s default. |
 | `[extruder] step_pin`, `dir_pin`, `rotation_distance`, `microsteps` | **Rejected.** Move them to a `[motor <name>]` and name it in `[axis e] motors:`. |
 | `[extruder]` with no stepper (heater only) | **Not expressible.** `axis:` is required, the named axis must be a follower, and every declared axis must be motor-mapped — a hotend with no extruder motor is rejected with `axis 'e' is not motor-mapped`. |
 | `max_x_velocity`, `max_y_velocity`, and other old per-axis velocity limits | **No equivalent.** The fork exposes global velocity/acceleration plus Z-only caps, not independent X/Y limits. |
@@ -318,7 +319,7 @@ follows: x, y, z
 post_processors: extruder_pa, extruder_smoothing
 ```
 
-`pressure_advance_smooth_time` maps to the smoothing kernel. On a following axis an advance needs that kernel, a `ratio_ramp_time` on the axis, or both: with neither it is rejected at config load, because it would turn every extrusion-ratio change taken at speed into an instant extruder step. The kernel blurs flow in time, corners included; `ratio_ramp_time` smooths only the extrusion ratio, along the path, and leaves the advance unblurred. What the extruder can follow decides the chain. On the 10000 mm/s² bench config, `ratio_ramp_time: 0.015` with a 0.002 s `smooth_triangle` keeps corners within ±2%, with retracts peaking at 196 mm/s because a linear advance next to a kernel advances them too. On a 70000 mm/s² printer only `ratio_ramp_time` alone keeps corners within ±2%, at about 65000 mm/s² of extruder acceleration, and it currently needs z shaped there ([#525](https://github.com/dderg/serval/issues/525)). The measured trade-off is in [Evaluating an extruder chain](../README.md#evaluating-an-extruder-chain).
+`pressure_advance_smooth_time` maps to the smoothing kernel. On a following axis an advance needs that kernel, a `ratio_ramp_time` on the axis, or both: with neither it is rejected at config load, because it would turn every extrusion-ratio change taken at speed into an instant extruder step. The kernel blurs flow in time, corners included; `ratio_ramp_time` smooths only the extrusion ratio, along the path, and leaves the advance unblurred. What the extruder can follow decides the chain. On the 10000 mm/s² bench config, `ratio_ramp_time: 0.015` with a 0.002 s `smooth_triangle` keeps corners within ±2% (1.2%) and retracts at the extrude-only cap, since that advance reads the ratio-ramped path; a kernel chain alone advances its retracts to 196 mm/s. On a 70000 mm/s² printer only `ratio_ramp_time` alone keeps corners within ±2%, at about 65000 mm/s² of extruder acceleration, and it currently needs z shaped there ([#525](https://github.com/dderg/serval/issues/525)). The measured trade-off is in [Evaluating an extruder chain](../README.md#evaluating-an-extruder-chain).
 
 The `linear_pressure_advance` parameter is named `k` and must be non-negative. For nonlinear pressure advance, the recommended models are `tanh_pressure_advance` and `recipr_pressure_advance`; each uses `linear_advance`, `nonlinear_offset`, and `linearization_velocity` parameters.
 

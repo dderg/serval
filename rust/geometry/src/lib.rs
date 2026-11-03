@@ -2,6 +2,10 @@
 
 pub(crate) const LENGTH_EPS_MM: f64 = 1e-9;
 
+/// The device's step-time resolution: the narrowest interval a trajectory
+/// piece can mean anything over.
+pub const MIN_DEVICE_INTERVAL_S: f64 = 2e-9;
+
 pub mod curve;
 pub mod error;
 pub mod fitter;
@@ -16,7 +20,7 @@ pub mod velocity;
 pub use error::GeometryError;
 pub use fitter::{CornerFitConfig, FitError, UnblendReason, seam_requires_stop};
 pub use frontend::{
-    CORNER_DEVIATION_SCV_FACTOR, FrontendError, Move, MoveContext, VelocityLimits,
+    CORNER_DEVIATION_SCV_FACTOR, ExtruderCaps, FrontendError, Move, MoveContext, VelocityLimits,
     corner_deviation_from_scv, line_move, scv_from_corner_deviation,
 };
 pub use segment::{CubicSegment, FollowerDemand, SourceRange};

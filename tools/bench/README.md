@@ -110,6 +110,28 @@ Any tool that touches the Pi or the boards (`run.py`, every `deploy.py` subcomma
 
 `run.json` records `deployed` (the Pi's `.bench-deploy.json`: HEAD, branch, `git diff HEAD` sha256, dirty paths, worktree); `run.py` fails if it is missing. `suite.py` is the one-command regression check: it takes the lock once, syncs, runs each row (first_layers, speed_ladder, speed_ladder_fast, extrude_ladder, epochs, dense_top, dense_top_fast_throttled), records crashed rows and recovers with `reset-target`, and exits non-zero if any row fails; rows expected to fail must be named with `--expect-fail` (an expected-fail row that passes also fails the suite). Agent usage guide: `.claude/skills/bench/SKILL.md`.
 
+## Replay throughput (Pi 5)
+
+`gcode_replay_bench` on the bench Pi 5 (2.4 GHz, `ondemand` pinned at max, `throttled=0x0`, 54–60 °C, klippy idle), full `voron_dense_top_layers.gcode`, worst 5 s stream window realtime factor (`ci.sh replay-budget`'s metric), cores limited with `taskset`. Lower of two runs; runs agreed within 2 %. Main `c53486ec9`, 2026-11-03.
+
+| config | segments | 4 cores | 2 cores | 1 core |
+|---|---:|---:|---:|---:|
+| `printer.cfg` | 807 | 19.2 | 17.3 | 11.7 |
+| `configs/fast.cfg` | 712 | 9.4 | 8.4 | 5.5 |
+| `configs/p1_bowden_bedslinger_kernel_cd0.04.cfg` | 1309 | 22.4 | 21.9 | 15.8 |
+| `configs/trident_kernel.cfg` | 19670 | 2.11 | 1.66 | 1.09 |
+| `configs/trident_ramp.cfg` | 19670 | 1.34 | 1.00 | 0.74 |
+| `configs/profiles/p1_bowden_bedslinger_kernel.cfg` | 18282 | 3.45 | 3.19 | 2.18 |
+| `configs/profiles/p1_bowden_bedslinger_ramp.cfg` | — | panics | panics | panics |
+| `configs/profiles/p2_i3_direct_drive_kernel.cfg` | 19566 | 3.34 | 3.10 | 2.07 |
+| `configs/profiles/p2_i3_direct_drive_ramp.cfg` | 19566 | 2.87 | 2.42 | 1.69 |
+| `configs/profiles/p3_voron_direct_drive_kernel.cfg` | 19669 | 2.27 | 1.92 | 1.24 |
+| `configs/profiles/p3_voron_direct_drive_ramp.cfg` | 19669 | 1.59 | 1.38 | 0.96 |
+| `configs/profiles/p4_high_accel_kernel.cfg` | 19670 | 2.22 | 1.74 | 1.14 |
+| `configs/profiles/p4_high_accel_ramp.cfg` | 19670 | 1.29 | 0.99 | 0.71 |
+
+The ~19 670-segment chains are bound by the single `kalico-shaper` thread (`shaper_busy` ≈ 100 % of wall, the planner blocked on it ≈ 97 %); with 4 cores the pool helpers sit ~50 % idle. `perf`: `ExactConvolution::pieces_over` 7–14 %, moment accumulation 9–12 %, trajectory/law/NURBS evaluation 12–22 %, and on ratio-ramp chains `ratio_ramp::{RatioSmoothing::correction, WidthField::jet}` 8–13 %.
+
 ## Limits
 
 - No endstops, heaters or TMC wired: no homing (`run.py` uses `SET_KINEMATIC_POSITION`).
