@@ -40,7 +40,7 @@ Run from the repo root.
 
 ```
 uv run python tools/bench/deploy.py sync [--tree DIR]  # rsync a worktree (default: this one) to Pi ~/klipper, delete stale, build-native.sh if rust/ changed, restart klipper, write ~/klipper/.bench-deploy.json
-uv run python tools/bench/deploy.py reset-target   # SWD-reset the F401 (clears a latched MCU shutdown), restart klipper
+uv run python tools/bench/deploy.py reset-target   # SWD-reset the F401 (for an MCU that no longer answers; a latched shutdown is already cleared by the FIRMWARE_RESTART that restart_klipper/prepare_printer send when klippy settles in shutdown), restart klipper
 uv run python tools/bench/lock.py hold -- <cmd...> # run a multi-step session under the bench lock
 uv run python tools/bench/suite.py [--quick] [--expect-fail NAME]  # regression matrix: sync + 7 runs (3 with --quick) + analyze, table, ~/bench/suites/<ts>/summary.json
 uv run python tools/bench/deploy.py flash-target   # build F401 fw (f401.config), flash via Pi SWD, restart klippy
@@ -99,6 +99,12 @@ Count mode: 40 kHz snapshots, i8 step delta per channel. Event mode: every STEP 
 ## Analyzer
 
 Reference is offline `_motion_engine.pipeline_snapshot_axis_samples`; needs local `make -f Makefile.rust motion-engine-fast`. Extruder total is shorter than gcode E by design (`docs/rewrite/shaper.md`, "Followers").
+
+Timing check `timing_within_50us_or_0.05_step` (constants `TIMING_TOLERANCE_US`, `POSITION_EQUIVALENT_TOLERANCE_STEPS`). A step with reference rate ≥ 200 Hz fails only when it is both more than 50 µs off the aligned reference and more than 0.05 step off in position. Position error is |time error| × reference step rate. Near zero velocity, a tiny position difference becomes a large time difference.
+
+Run `20261103-231302` (capacity ladder, event mode) failed the old time-only check on 1 of 1.62 M E steps. That step sat at a turnaround: reference rate 227 Hz, against 2.9 kHz on either side. It was −57.3 µs off, which is 0.013 step (0.03 µm of filament). The MCU ran the commanded schedule faithfully there: commanded and captured intervals agree within ~1 µs. So the gap is between the host's schedule and the offline reference, not a firmware fault. The run's next-worst steps were −29.2 and −27.7 µs below 2 kHz, and above 2 kHz its extremes were −25.6/+22.7 µs.
+
+The bound 0.05 step / 50 µs puts the crossover at 1 kHz. From 1 kHz up, any step more than 50 µs off is also more than 0.05 step off, so high-rate steps are judged by the 50 µs bound exactly as before. Below 1 kHz the time allowance grows to 0.05 step / rate, which is 250 µs at the 200 Hz floor. The turnaround step above sits 4× inside that. A step misplaced by more than a twentieth of a step still fails at every rate. Lost or extra steps fail `all_steps_matched` and `net_steps_match`.
 
 ## Recovery
 

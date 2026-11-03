@@ -146,9 +146,68 @@ def test_recovers_injected_timing_errors(synthesized):
         stats = motor["timing_error_capture_minus_reference_us"]
         if role == "z":
             assert stats["max_late"] == pytest.approx(STALL_S * 1e6, rel=0.1)
+            assert motor["timing_violation_steps"] > 0
+            assert motor["timing_beyond_time_bound_worst_position"][
+                "timing_error_us"
+            ] == pytest.approx(STALL_S * 1e6, rel=0.1)
         else:
             assert stats["abs_max"] <= JITTER_US + quantization_us + 2.0
             assert abs(stats["p50"]) <= 2.0
+            assert motor["timing_violation_steps"] == 0
+    assert not verdict["checks"][analyze.TIMING_CHECK]
+
+
+TURNAROUND_NEIGHBOUR_RATE_HZ = 2900.0
+TURNAROUND_RATE_HZ = 227.0
+
+
+def _timing_report_with(late_s: float, rate_hz: float) -> dict:
+    neighbours = 20
+    late = np.full(2 * neighbours + 1, 1e-6)
+    rate = np.full(late.size, TURNAROUND_NEIGHBOUR_RATE_HZ)
+    late[neighbours] = late_s
+    rate[neighbours] = rate_hz
+    capture_time = np.arange(late.size) / TURNAROUND_NEIGHBOUR_RATE_HZ
+    return analyze.timing_report(late, capture_time, rate)
+
+
+def test_a_turnaround_step_far_off_in_time_but_close_in_position_passes():
+    report = _timing_report_with(-57.3e-6, TURNAROUND_RATE_HZ)
+    assert report["timing_error_capture_minus_reference_us"][
+        "abs_max"
+    ] == pytest.approx(57.3)
+    assert report["timing_beyond_time_bound_steps"] == 1
+    assert report["timing_violation_steps"] == 0
+    excused = report["timing_beyond_time_bound_worst_position"]
+    assert excused["position_equivalent_steps"] == pytest.approx(
+        0.013, abs=1e-3
+    )
+    assert excused["reference_rate_hz"] == TURNAROUND_RATE_HZ
+    assert report["position_equivalent_error_abs_max"] == excused
+
+
+def test_a_low_rate_step_misplaced_by_a_large_step_fraction_fails():
+    report = _timing_report_with(-1e-3, TURNAROUND_RATE_HZ)
+    assert report["timing_violation_steps"] == 1
+    worst = report["timing_beyond_time_bound_worst_position"]
+    assert worst["timing_error_us"] == pytest.approx(-1000.0)
+    assert worst["position_equivalent_steps"] == pytest.approx(0.227)
+
+
+@pytest.mark.parametrize(
+    "rate_hz",
+    [analyze.POSITION_BOUND_RELAXES_BELOW_HZ * 1.01, 20e3, 140e3],
+)
+def test_a_step_beyond_the_time_bound_fails_at_every_rate_the_time_bound_owns(
+    rate_hz,
+):
+    late_s = (analyze.TIMING_TOLERANCE_US + 1.0) * 1e-6
+    report = _timing_report_with(late_s, rate_hz)
+    assert report["timing_violation_steps"] == 1
+    worst = report["timing_beyond_time_bound_worst_position"]
+    assert worst["timing_error_us"] == pytest.approx(
+        analyze.TIMING_TOLERANCE_US + 1.0
+    )
 
 
 def test_reports_injected_stall(synthesized):

@@ -423,10 +423,14 @@ class MCU:
             "runtime_reset" in self._serial.get_msgparser().messages_by_name
         )
         if is_motion_mcu:
+            has_reset = not (
+                self._reset_cmd is None and self._config_reset_cmd is None
+            )
+            remedy = "FIRMWARE_RESTART" if has_reset else "a power cycle"
             raise error(
-                "MCU '%s' is latched in shutdown and requires a power"
-                " cycle (clear_shutdown cannot reset its timer and runtime"
-                " state): %s" % (self._name, exc)
+                "MCU '%s' is latched in shutdown and requires %s"
+                " (clear_shutdown cannot reset its timer and runtime"
+                " state): %s" % (self._name, remedy, exc)
             )
         logging.info(
             "MCU '%s' latched the shutdown broadcast from a previous host"

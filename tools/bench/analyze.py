@@ -60,6 +60,14 @@ EPOCH_DURATION_TOLERANCE_FRACTION = 0.5
 TIMING_TOLERANCE_US = 50.0
 PACE_TOLERANCE_S = 20e-3
 PACE_TOLERANCE_PPM = 500.0
+POSITION_EQUIVALENT_TOLERANCE_STEPS = 0.05
+POSITION_BOUND_RELAXES_BELOW_HZ = POSITION_EQUIVALENT_TOLERANCE_STEPS / (
+    TIMING_TOLERANCE_US * 1e-6
+)
+TIMING_CHECK = (
+    f"timing_within_{TIMING_TOLERANCE_US:g}us"
+    f"_or_{POSITION_EQUIVALENT_TOLERANCE_STEPS:g}_step"
+)
 CONDITIONED_RATE_HZ = 200.0
 COUNT_ERROR_MARGIN_S = 0.05
 INLIER_FLOOR_S = 200e-6
@@ -1358,6 +1366,54 @@ def _timing_stats(late_s: np.ndarray, capture_time_s: np.ndarray) -> dict:
     }
 
 
+def _step_at(
+    late_s: np.ndarray,
+    capture_time_s: np.ndarray,
+    rate_hz: np.ndarray,
+    index: int,
+) -> dict:
+    return {
+        "capture_s": float(capture_time_s[index]),
+        "timing_error_us": float(late_s[index] * 1e6),
+        "reference_rate_hz": float(rate_hz[index]),
+        "position_equivalent_steps": float(abs(late_s[index]) * rate_hz[index]),
+    }
+
+
+def timing_report(
+    late_s: np.ndarray, capture_time_s: np.ndarray, rate_hz: np.ndarray
+) -> dict:
+    position_steps = np.abs(late_s) * rate_hz
+    beyond_time_bound = np.flatnonzero(
+        np.abs(late_s) * 1e6 > TIMING_TOLERANCE_US
+    )
+    beyond_position_bound = (
+        position_steps[beyond_time_bound] > POSITION_EQUIVALENT_TOLERANCE_STEPS
+    )
+    return {
+        "timing_error_capture_minus_reference_us": _timing_stats(
+            late_s, capture_time_s
+        ),
+        "position_equivalent_error_abs_max": _step_at(
+            late_s, capture_time_s, rate_hz, int(np.argmax(position_steps))
+        )
+        if late_s.size
+        else {},
+        "timing_beyond_time_bound_steps": int(beyond_time_bound.size),
+        "timing_beyond_time_bound_worst_position": _step_at(
+            late_s,
+            capture_time_s,
+            rate_hz,
+            int(
+                beyond_time_bound[np.argmax(position_steps[beyond_time_bound])]
+            ),
+        )
+        if beyond_time_bound.size
+        else {},
+        "timing_violation_steps": int(np.count_nonzero(beyond_position_bound)),
+    }
+
+
 def _gcode_net_steps(motor: Motor, reference: Reference) -> int:
     weights = np.asarray(motor.axis_weights)
     start = float(weights @ np.array([*reference.start_xyz, 0.0]))
@@ -1486,15 +1542,16 @@ def analyze(
             ),
             "edge_tie_steps": sum(e.matches[role].edge_ties for e in epochs),
             "rest_tie_steps": sum(e.matches[role].rest_ties for e in epochs),
-            "timing_error_capture_minus_reference_us": _timing_stats(
-                late[conditioned], late_at[conditioned]
+            **timing_report(
+                late[conditioned], late_at[conditioned], rate[conditioned]
             ),
             "timing_reference_rate_floor_hz": CONDITIONED_RATE_HZ,
+            "timing_position_bound_steps": POSITION_EQUIVALENT_TOLERANCE_STEPS,
+            "timing_position_bound_relaxes_below_hz": (
+                POSITION_BOUND_RELAXES_BELOW_HZ
+            ),
             "timing_steps_below_rate_floor": int(
                 np.count_nonzero(~conditioned)
-            ),
-            "max_abs_position_equivalent_error_steps": float(
-                np.max(np.abs(late) * rate, initial=0.0)
             ),
             "max_abs_count_error_steps": int(abs(error.error_steps[worst]))
             if worst is not None
@@ -1514,13 +1571,6 @@ def analyze(
                 np.abs(inputs.capture.deltas[:, motor.channel]).max()
             ),
         }
-    timing_abs_max_us = max(
-        (
-            r["timing_error_capture_minus_reference_us"].get("abs_max", 0.0)
-            for r in motors_report.values()
-        ),
-        default=0.0,
-    )
     paces = [epoch_pace(e.steps) for e in epochs]
     checks = {
         "net_steps_match": all(
@@ -1533,8 +1583,9 @@ def analyze(
             and r["unmatched_reference_steps"] == 0
             for r in motors_report.values()
         ),
-        f"timing_abs_max_within_{TIMING_TOLERANCE_US:g}us": timing_abs_max_us
-        <= TIMING_TOLERANCE_US,
+        TIMING_CHECK: all(
+            r["timing_violation_steps"] == 0 for r in motors_report.values()
+        ),
         "pace_matches_reference": all(
             p["pace_within_tolerance"] for p in paces
         ),
