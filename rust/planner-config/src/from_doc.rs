@@ -579,11 +579,13 @@ impl Reader<'_> {
             let post_processors = self
                 .get_list(&section, "post_processors")?
                 .unwrap_or_default();
+            let ratio_ramp_time = self.getfloat(&section, "ratio_ramp_time", Bounds::above(0.0))?;
             axes.push(AxisDecl {
                 name: name.to_owned(),
                 follows,
                 motors,
                 post_processors,
+                ratio_ramp_time,
             });
         }
         Ok(axes)

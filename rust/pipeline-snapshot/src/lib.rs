@@ -291,24 +291,28 @@ fn default_axis_decls() -> Vec<AxisDecl> {
             follows: Vec::new(),
             motors: Vec::new(),
             post_processors: Vec::new(),
+            ratio_ramp_time: None,
         },
         AxisDecl {
             name: "y".into(),
             follows: Vec::new(),
             motors: Vec::new(),
             post_processors: Vec::new(),
+            ratio_ramp_time: None,
         },
         AxisDecl {
             name: "z".into(),
             follows: Vec::new(),
             motors: Vec::new(),
             post_processors: Vec::new(),
+            ratio_ramp_time: None,
         },
         AxisDecl {
             name: "e".into(),
             follows: vec!["x".into(), "y".into(), "z".into()],
             motors: Vec::new(),
             post_processors: Vec::new(),
+            ratio_ramp_time: None,
         },
     ]
 }

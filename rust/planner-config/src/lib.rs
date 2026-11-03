@@ -40,6 +40,11 @@ pub enum PostProcessorConfigError {
         trajectory::FOLLOWER_TRANSFORM_WITHOUT_KERNEL
     )]
     FollowerAdvanceWithoutKernel { axis: String, name: String },
+    #[error(
+        "axis '{axis}' has a ratio_ramp_time and the smoothing kernel '{name}' in its \
+         post_processors: the ramp replaces the kernel, keep one of them"
+    )]
+    RatioRampWithKernel { axis: String, name: String },
 }
 
 #[derive(Debug, Clone)]
@@ -113,11 +118,52 @@ impl PostProcessorSet {
                 CompiledChain::compile(&chain).map_err(PostProcessorConfigError::Param)
             })
             .collect::<Result<_, _>>()?;
+        let chains = self.with_ratio_ramps(registry, chains)?;
         let followers = registry.follower_index_map();
         self.reject_pre_kernel_gains_on_leaders(registry, &followers)?;
         let chains = AxisChainSet { chains, followers };
         self.reject_follower_advance_without_kernel(registry, &chains)?;
         Ok(chains)
+    }
+
+    fn with_ratio_ramps(
+        &self,
+        registry: &AxisRegistry,
+        chains: Vec<CompiledChain>,
+    ) -> Result<Vec<CompiledChain>, PostProcessorConfigError> {
+        chains
+            .into_iter()
+            .zip(registry.decls())
+            .enumerate()
+            .map(|(axis, (chain, decl))| {
+                let Some(ramp_time) = decl.ratio_ramp_time else {
+                    return Ok(chain);
+                };
+                if chain.kernel().is_some() {
+                    let name = self.per_axis[axis]
+                        .iter()
+                        .find(|name| {
+                            matches!(
+                                self.instance(name).compile_stage(),
+                                Some(trajectory::ChainStage::SmoothKernel(_))
+                            )
+                        })
+                        .expect("a chain with a kernel names the stage that compiled to it");
+                    return Err(PostProcessorConfigError::RatioRampWithKernel {
+                        axis: decl.name.clone(),
+                        name: name.clone(),
+                    });
+                }
+                Ok(chain.with_ratio_ramp_time(ramp_time))
+            })
+            .collect()
+    }
+
+    fn instance(&self, name: &str) -> &PostProcessorInstance {
+        self.instances
+            .iter()
+            .find(|i| i.name() == name)
+            .expect("validated in try_new")
     }
 
     fn reject_follower_advance_without_kernel(
@@ -271,6 +317,10 @@ pub struct AxisDecl {
     pub follows: Vec<String>,
     pub motors: Vec<String>,
     pub post_processors: Vec<String>,
+    /// `ratio_ramp_time`: on an axis that follows others, the time over
+    /// which its extrusion-ratio steps are spread along the path, see
+    /// [`trajectory::CompiledChain::ratio_ramp_time`].
+    pub ratio_ramp_time: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -300,6 +350,13 @@ pub enum AxisConfigError {
     MotorMappingMissing { axis: String },
     #[error("[kinematics] claims axis '{axis}' but no [axis {axis}] section is declared")]
     UnknownClaimedAxis { axis: String },
+    #[error(
+        "axis '{axis}': ratio_ramp_time spreads the extrusion-ratio steps of an axis that \
+         follows others, and '{axis}' follows none"
+    )]
+    RatioRampWithoutLeaders { axis: String },
+    #[error("axis '{axis}': ratio_ramp_time must be finite and above 0, got {value}")]
+    BadRatioRampTime { axis: String, value: f64 },
 }
 
 impl AxisRegistry {
@@ -320,6 +377,19 @@ impl AxisRegistry {
                 return Err(AxisConfigError::Duplicate {
                     name: d.name.clone(),
                 });
+            }
+            if let Some(value) = d.ratio_ramp_time {
+                if !(value.is_finite() && value > 0.0) {
+                    return Err(AxisConfigError::BadRatioRampTime {
+                        axis: d.name.clone(),
+                        value,
+                    });
+                }
+                if d.follows.is_empty() {
+                    return Err(AxisConfigError::RatioRampWithoutLeaders {
+                        axis: d.name.clone(),
+                    });
+                }
             }
         }
         let mut ordered = Vec::with_capacity(decls.len());
@@ -428,6 +498,7 @@ impl Default for AxisRegistry {
                     follows: vec![],
                     motors: vec![],
                     post_processors: vec![],
+                    ratio_ramp_time: None,
                 })
                 .collect(),
         )

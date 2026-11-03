@@ -27,6 +27,7 @@ fn axis(name: &str, follows: &[&str], post_processors: &[&str]) -> AxisDecl {
         follows: follows.iter().map(|s| (*s).into()).collect(),
         motors: Vec::new(),
         post_processors: post_processors.iter().map(|s| (*s).into()).collect(),
+        ratio_ramp_time: None,
     }
 }
 

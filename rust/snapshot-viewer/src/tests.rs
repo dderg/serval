@@ -418,6 +418,7 @@ fn a_chained_snapshot_renders_the_toolhead_lane_on_the_shared_grid() {
         follows: Vec::new(),
         motors: Vec::new(),
         post_processors: vec!["slew".to_string(), "belt".to_string()],
+        ratio_ramp_time: None,
     };
     let snap = real_snapshot(
         vec![axis("x"), axis("y")],

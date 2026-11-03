@@ -768,6 +768,7 @@ fn axis(name: &str, follows: &[&str]) -> planner_config::AxisDecl {
         follows: follows.iter().map(|s| s.to_string()).collect(),
         motors: Vec::new(),
         post_processors: Vec::new(),
+        ratio_ramp_time: None,
     }
 }
 

@@ -2,6 +2,9 @@ pub mod planner_config
 pub enum planner_config::AxisConfigError
 pub planner_config::AxisConfigError::BadName
 pub planner_config::AxisConfigError::BadName::name: alloc::string::String
+pub planner_config::AxisConfigError::BadRatioRampTime
+pub planner_config::AxisConfigError::BadRatioRampTime::axis: alloc::string::String
+pub planner_config::AxisConfigError::BadRatioRampTime::value: f64
 pub planner_config::AxisConfigError::Duplicate
 pub planner_config::AxisConfigError::Duplicate::name: alloc::string::String
 pub planner_config::AxisConfigError::MissingSpatialAxis
@@ -10,6 +13,8 @@ pub planner_config::AxisConfigError::MotorMappingDuplicate
 pub planner_config::AxisConfigError::MotorMappingDuplicate::axis: alloc::string::String
 pub planner_config::AxisConfigError::MotorMappingMissing
 pub planner_config::AxisConfigError::MotorMappingMissing::axis: alloc::string::String
+pub planner_config::AxisConfigError::RatioRampWithoutLeaders
+pub planner_config::AxisConfigError::RatioRampWithoutLeaders::axis: alloc::string::String
 pub planner_config::AxisConfigError::ReservedLetter
 pub planner_config::AxisConfigError::ReservedLetter::name: alloc::string::String
 pub planner_config::AxisConfigError::SpatialAxisCannotFollow
@@ -32,6 +37,9 @@ pub planner_config::PostProcessorConfigError::MissingParam
 pub planner_config::PostProcessorConfigError::MissingParam::key: alloc::string::String
 pub planner_config::PostProcessorConfigError::MissingParam::name: alloc::string::String
 pub planner_config::PostProcessorConfigError::Param(trajectory::chain::PostProcessorError)
+pub planner_config::PostProcessorConfigError::RatioRampWithKernel
+pub planner_config::PostProcessorConfigError::RatioRampWithKernel::axis: alloc::string::String
+pub planner_config::PostProcessorConfigError::RatioRampWithKernel::name: alloc::string::String
 pub planner_config::PostProcessorConfigError::UnknownAxisReference
 pub planner_config::PostProcessorConfigError::UnknownAxisReference::axis: alloc::string::String
 pub planner_config::PostProcessorConfigError::UnknownAxisReference::name: alloc::string::String
@@ -46,6 +54,7 @@ pub planner_config::AxisDecl::follows: alloc::vec::Vec<alloc::string::String>
 pub planner_config::AxisDecl::motors: alloc::vec::Vec<alloc::string::String>
 pub planner_config::AxisDecl::name: alloc::string::String
 pub planner_config::AxisDecl::post_processors: alloc::vec::Vec<alloc::string::String>
+pub planner_config::AxisDecl::ratio_ramp_time: core::option::Option<f64>
 pub struct planner_config::AxisRegistry
 impl planner_config::AxisRegistry
 pub fn planner_config::AxisRegistry::axis_index(&self, &str) -> core::result::Result<usize, planner_config::AxisConfigError>

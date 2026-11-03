@@ -43,6 +43,18 @@ def test_happy_path_parses_sections_for_init_planner():
     assert ("e", ["x", "y", "z"], [], ["is", "pa"]) in sections
 
 
+def test_ratio_ramp_time_is_read_from_the_follower_axis():
+    consumed = configfile._config_doc.read_motion_settings(
+        MINIMAL + SPATIAL + "[axis e]\nfollows: x,y,z\nratio_ramp_time: 0.015\n"
+    )[3]
+    assert ("axis e", "ratio_ramp_time", 0.015) in consumed
+
+
+def test_ratio_ramp_time_must_be_above_zero():
+    with pytest.raises(configfile.error, match="ratio_ramp_time.*above 0"):
+        load("[axis e]\nfollows: x,y,z\nratio_ramp_time: 0\n")
+
+
 def make_toolhead():
     return Motion.__new__(Motion)
 

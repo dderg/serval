@@ -226,6 +226,16 @@ post_processors: extruder_pa, extruder_smoothing
 #   On an axis that follows others, a pressure advance (or any derivative-gain
 #   stage) needs a smoothing kernel in the same list; the chain is rejected
 #   otherwise.
+#ratio_ramp_time:
+#   Optional. Default is no ramp. If set, must be above 0 (seconds), the
+#   axis must follow others, and its post_processors must hold no smoothing
+#   kernel: the ramp replaces it. Every extrusion-ratio step of the
+#   projection (travel to extrusion, a flow change, a wipe) and every step
+#   in the ratio's slope (a corner blend's flow ramp) is spread over the
+#   path the leaders cover in about this time around it: v*ratio_ramp_time
+#   at speed v, half before the seam and half after, never more than half
+#   of either neighbouring move. A seam crossed at rest stays sharp. The
+#   extruded material is exactly the unramped projection's.
 ```
 
 The kinematic lane constructor creates `AxisRail`/servo rails and applies the
