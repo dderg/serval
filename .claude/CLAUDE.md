@@ -106,6 +106,19 @@ engine whose id differs from the tree its `.so` sits in, or that has none, with
 `motion`/`engine_build` event; `tools/bench/deploy.py` records `rust_build_id` in the deploy
 identity. An engine built outside a git tree reports `unknown` and is refused by the tools.
 
+# Heavy-job slots
+
+The box is shared by many agents; stacked builds and test runs pushed load to 25-60, which
+timed out nextest and distorted benchmarks. Heavy commands queue for one of
+`SERVAL_SLOTS` (default 3) machine-wide slots via `scripts/slots.py` (flock files under
+`~/.cache/serval-slots`, freed by the kernel when the holder dies): every `ci.sh` job
+except in CI takes one for its whole run (`CI_NO_SLOT=1` opts out), the `make`/`cargo` builds in
+`pending_baselines`, the fit audit and the fuzz replay take one, and `bench_compare.py`
+builds in a normal slot but measures in an exclusive one (all slots, nothing else heavy
+runs). Wrap your own loops: `python3 scripts/slots.py run [--exclusive] -- <cmd>`;
+`slots.py status` shows who holds the slots. Waiting is queued, prints the holders every
+60 s and fails after 2 h. Nested calls under a held slot do not take a second one.
+
 # Starting and shipping a change
 
 Start in a warm worktree: `scripts/wt.sh new <topic>` prints the path of an idle pool
