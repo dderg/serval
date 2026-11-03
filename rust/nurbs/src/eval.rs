@@ -51,11 +51,6 @@ pub(crate) fn de_boor_inner(cps: &[f64], knots: &[f64], degree: u8, u: f64) -> f
 
 #[inline]
 pub fn eval(curve: &crate::ScalarNurbs, u: f64) -> f64 {
-    assert!(
-        (curve.degree() as usize) <= MAX_DEGREE,
-        "degree {} exceeds the evaluator workspace (max {MAX_DEGREE})",
-        curve.degree()
-    );
     de_boor_inner(curve.control_points(), curve.knots(), curve.degree(), u)
 }
 
