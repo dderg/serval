@@ -411,14 +411,29 @@ fn rail_enclosure(
                 .map(|(_, interpolant)| interpolant.quintic_polynomials())
                 .collect(),
         };
-        let hi = to.min(origin + run_pairs[run_pairs.len() - 1].0.t_hi);
-        if lo < hi {
+        let mut size = RUN_PAIRS_PER_WINDOW;
+        let mut start = 0;
+        while start < run_pairs.len() {
+            let chunk = &run_pairs[start..(start + size).min(run_pairs.len())];
+            start += chunk.len();
+            let chunk_lo = from.max(origin + chunk[0].0.t_lo);
+            let chunk_hi = to.min(origin + chunk[chunk.len() - 1].0.t_hi);
+            if chunk_lo >= chunk_hi {
+                continue;
+            }
+            let before = out.len();
             taylor::enclose(
-                (lo, hi),
+                (chunk_lo, chunk_hi),
                 accuracy,
                 &|window: Window| law.models(&run.state(origin, window)),
                 out,
             );
+            let windows = out.len() - before;
+            size = if windows == 1 {
+                (2 * size).min(RUN_PAIRS_PER_WINDOW_MAX)
+            } else {
+                (size / windows).max(1)
+            };
         }
         index = end;
     }
@@ -614,6 +629,13 @@ impl PairInterpolant {
 /// Nodes of the Chebyshev interpolant a run of quintic pairs is enclosed by.
 const RUN_NODES: usize = 12;
 
+/// Knot pairs a run's first window spans. Each next window spans twice the
+/// pairs where the last needed no halving, and the share a halved one
+/// settled on otherwise, up to `RUN_PAIRS_PER_WINDOW_MAX`: halving from a
+/// whole run re-verifies every pair at each level.
+const RUN_PAIRS_PER_WINDOW: usize = 48;
+const RUN_PAIRS_PER_WINDOW_MAX: usize = 4096;
+
 /// A run of consecutive quintic knot pairs: their times relative to the
 /// phase and their arc, speed and acceleration polynomials in `u`.
 struct QuinticRun {
@@ -637,9 +659,7 @@ impl QuinticRun {
     /// miss is bounded by the miss and its slope at the pair's midpoint and
     /// the second derivatives of both over the pair.
     fn state(&self, origin: f64, window: Window) -> Tangential {
-        let nodes: [f64; RUN_NODES] = std::array::from_fn(|j| {
-            libm::cos(std::f64::consts::PI * (2 * j + 1) as f64 / (2 * RUN_NODES) as f64)
-        });
+        let nodes = &CHEBYSHEV.nodes;
         let read = |order: usize, tau: f64| {
             let pair = self.pair_at(tau);
             let u = (tau - self.t_lo[pair]) / self.h[pair];
@@ -655,8 +675,14 @@ impl QuinticRun {
                     nurbs::fmadd(x, window.radius, window.center) - origin,
                 )
             });
-            let interpolant = chebyshev_monomials(&nodes, &values);
-            let miss = self.miss_of(order, &interpolant, origin, window);
+            let interpolant = chebyshev_monomials(&values);
+            let miss = self.miss_of(
+                order,
+                &interpolant,
+                chebyshev_curvature(&values),
+                origin,
+                window,
+            );
             TaylorModel::from_polynomial(&interpolant, miss)
         });
         let mut v = v;
@@ -668,13 +694,17 @@ impl QuinticRun {
         Tangential { s, v, a }
     }
 
-    fn miss_of(&self, order: usize, interpolant: &[f64], origin: f64, window: Window) -> f64 {
+    /// `interpolant_curvature` bounds the interpolant's second derivative
+    /// in `x` over the window.
+    fn miss_of(
+        &self,
+        order: usize,
+        interpolant: &[f64],
+        interpolant_curvature: f64,
+        origin: f64,
+        window: Window,
+    ) -> f64 {
         let interpolant_magnitude: f64 = interpolant.iter().map(|c| c.abs()).sum();
-        let interpolant_curvature: f64 = interpolant
-            .iter()
-            .enumerate()
-            .map(|(k, c)| (k * k.saturating_sub(1)) as f64 * c.abs())
-            .sum();
         let rounding = ExactRounding::gamma(4 * RUN_NODES);
         let (from, to) = (window.lo - origin, window.hi - origin);
         let first = self.pair_at(from);
@@ -717,10 +747,20 @@ impl QuinticRun {
     }
 }
 
-/// The monomial coefficients, in `x ∈ [−1, 1]`, of the Chebyshev
-/// interpolant through `values` at the Chebyshev nodes `nodes`.
-fn chebyshev_monomials(nodes: &[f64; RUN_NODES], values: &[f64; RUN_NODES]) -> Vec<f64> {
-    let mut basis = vec![vec![0.0; RUN_NODES]; RUN_NODES];
+/// The Chebyshev nodes, the matrix taking an interpolant's values there to
+/// its monomial coefficients in `x ∈ [−1, 1]`, and the one taking them to
+/// its Chebyshev coefficients.
+struct Chebyshev {
+    nodes: [f64; RUN_NODES],
+    monomials: [[f64; RUN_NODES]; RUN_NODES],
+    series: [[f64; RUN_NODES]; RUN_NODES],
+}
+
+static CHEBYSHEV: std::sync::LazyLock<Chebyshev> = std::sync::LazyLock::new(|| {
+    let nodes: [f64; RUN_NODES] = std::array::from_fn(|j| {
+        libm::cos(std::f64::consts::PI * (2 * j + 1) as f64 / (2 * RUN_NODES) as f64)
+    });
+    let mut basis = [[0.0; RUN_NODES]; RUN_NODES];
     basis[0][0] = 1.0;
     basis[1][1] = 1.0;
     for k in 2..RUN_NODES {
@@ -733,20 +773,60 @@ fn chebyshev_monomials(nodes: &[f64; RUN_NODES], values: &[f64; RUN_NODES]) -> V
             basis[k][power] = raised - basis[k - 2][power];
         }
     }
-    let mut monomials = vec![0.0; RUN_NODES];
+    let mut monomials = [[0.0; RUN_NODES]; RUN_NODES];
+    let mut series = [[0.0; RUN_NODES]; RUN_NODES];
     for (k, row) in basis.iter().enumerate() {
         let weight = if k == 0 { 1.0 } else { 2.0 } / RUN_NODES as f64;
-        let coefficient = weight
-            * nodes
-                .iter()
-                .zip(values)
-                .map(|(&x, &value)| value * libm::cos(k as f64 * libm::acos(x)))
-                .sum::<f64>();
-        for (slot, &power) in monomials.iter_mut().zip(row) {
-            *slot += coefficient * power;
+        for (j, &x) in nodes.iter().enumerate() {
+            let at_node = weight * libm::cos(k as f64 * libm::acos(x));
+            series[k][j] = at_node;
+            for (power, &term) in row.iter().enumerate() {
+                monomials[power][j] += at_node * term;
+            }
         }
     }
-    monomials
+    Chebyshev {
+        nodes,
+        monomials,
+        series,
+    }
+});
+
+fn apply(matrix: &[[f64; RUN_NODES]; RUN_NODES], values: &[f64; RUN_NODES]) -> [f64; RUN_NODES] {
+    std::array::from_fn(|row| {
+        matrix[row]
+            .iter()
+            .zip(values)
+            .map(|(weight, value)| weight * value)
+            .sum()
+    })
+}
+
+/// The monomial coefficients, in `x ∈ [−1, 1]`, of the Chebyshev
+/// interpolant through `values` at the Chebyshev nodes.
+fn chebyshev_monomials(values: &[f64; RUN_NODES]) -> [f64; RUN_NODES] {
+    apply(&CHEBYSHEV.monomials, values)
+}
+
+/// A bound on the second derivative over `[−1, 1]` of the interpolant whose
+/// monomials `chebyshev_monomials(values)` are: `|T_k''| ≤ k²(k²−1)/3`
+/// there, so `Σ|c_k|·k²(k²−1)/3` bounds the Chebyshev series, and the
+/// monomials' rounding off it adds at most `γ·Σ k(k−1)|r_k|`.
+fn chebyshev_curvature(values: &[f64; RUN_NODES]) -> f64 {
+    let series: f64 = apply(&CHEBYSHEV.series, values)
+        .iter()
+        .enumerate()
+        .map(|(k, c)| {
+            let k = k as f64;
+            c.abs() * k * k * (k * k - 1.0) / 3.0
+        })
+        .sum();
+    let monomial_curvature: f64 = chebyshev_monomials(values)
+        .iter()
+        .enumerate()
+        .map(|(k, r)| (k * k.saturating_sub(1)) as f64 * r.abs())
+        .sum();
+    taylor::upper(series + ExactRounding::gamma(4 * RUN_NODES) * monomial_curvature)
 }
 
 #[cfg(test)]
