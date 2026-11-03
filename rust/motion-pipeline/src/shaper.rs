@@ -26,6 +26,7 @@ mod exact;
 #[path = "shaper_hull.rs"]
 mod hull;
 
+use exact::ExactSpan;
 use hull::{FittedPiece, HullBudget};
 
 pub(crate) use exact::{ExactConvolution, ExactKernel, ExactPiece};
@@ -254,6 +255,38 @@ impl<S: TrackSignal> TrackSignal for ConvolutionSignal<'_, S> {
 
     fn exact_polynomial_on(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
         self.exact.pieces_over(lo, hi)
+    }
+}
+
+/// A signal read from one side of its breaks: off a span's exact
+/// polynomials, from the sub-interval facing `toward`, where it has them;
+/// through its own evaluator where it does not.
+struct FacingRead<'a, S> {
+    sig: &'a S,
+    exact: Option<&'a ExactSpan>,
+    toward: f64,
+}
+
+impl<S: TrackSignal> TrackSignal for FacingRead<'_, S> {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        match self.exact {
+            Some(exact) => exact.pva(t, self.toward),
+            None => self.sig.eval_pva(t),
+        }
+    }
+
+    fn eval(&self, t: f64) -> f64 {
+        match self.exact {
+            Some(exact) => exact.pva(t, self.toward).0,
+            None => self.sig.eval(t),
+        }
+    }
+
+    fn second_deriv(&self, t: f64) -> f64 {
+        match self.exact {
+            Some(exact) => exact.pva(t, self.toward).2,
+            None => self.sig.second_deriv(t),
+        }
     }
 }
 
@@ -1993,23 +2026,33 @@ impl MomentTree {
         }
     }
 
+    /// Adds every node's moments over `[start, end)` about `origin`, and
+    /// with `bounds` each node's bound on the terms of its moments.
     fn accumulate(
         &self,
         start: usize,
         end: usize,
         origin: f64,
         targets: &mut [&mut [f64]; MOMENT_ORDERS],
+        mut bounds: Option<&mut MomentBounds>,
     ) {
         if start >= end {
             return;
         }
+        let moment_len = targets[0].len();
+        let mut visit = |node: usize, targets: &mut [&mut [f64]; MOMENT_ORDERS]| {
+            self.accumulate_node(node, origin, targets);
+            if let Some(bounds) = bounds.as_deref_mut() {
+                self.accumulate_node_magnitudes(node, origin, bounds, moment_len);
+            }
+        };
         let mut left = start + self.leaf_count;
         let mut right = end + self.leaf_count;
         let mut right_nodes = [0usize; usize::BITS as usize];
         let mut right_count = 0;
         while left < right {
             if left & 1 != 0 {
-                self.accumulate_node(left, origin, targets);
+                visit(left, targets);
                 left += 1;
             }
             if right & 1 != 0 {
@@ -2022,7 +2065,7 @@ impl MomentTree {
         }
         while right_count > 0 {
             right_count -= 1;
-            self.accumulate_node(right_nodes[right_count], origin, targets);
+            visit(right_nodes[right_count], targets);
         }
     }
 
@@ -2072,6 +2115,10 @@ pub(crate) struct SignalBounds {
 }
 
 const MOMENT_ORDERS: usize = 3;
+
+/// For each derivative order and moment power, a bound on the magnitude of
+/// the terms that moment is summed from.
+type MomentBounds = [[f64; MOMENT_POWER_CAPACITY]; MOMENT_ORDERS];
 
 impl AxisSignalTable {
     fn build(segments: &[&ContinuousSegment], axis: usize, bounds: SignalBounds) -> Self {
@@ -2280,7 +2327,22 @@ impl AxisSignalTable {
         hi: f64,
         degree: usize,
         origin: f64,
+        orders: [&mut [f64]; MOMENT_ORDERS],
+    ) -> bool {
+        self.integrate_bounded_moments(lo, hi, degree, origin, orders, None)
+    }
+
+    /// `integrate_moments`, and with `bounds` the magnitude of the terms
+    /// each moment sums, gathered in the same walk: every partial piece,
+    /// hold and tree node adds its mass times `(|δ| + reach)^q`.
+    fn integrate_bounded_moments(
+        &self,
+        lo: f64,
+        hi: f64,
+        degree: usize,
+        origin: f64,
         mut orders: [&mut [f64]; MOMENT_ORDERS],
+        mut bounds: Option<&mut MomentBounds>,
     ) -> bool {
         let tree = self
             .moment_tree
@@ -2305,13 +2367,16 @@ impl AxisSignalTable {
             moments.fill(0.0);
         }
         if lo < self.first_t {
-            Self::accumulate_held(
-                self.held_before(),
-                lo,
-                hi.min(self.first_t),
-                origin,
-                orders[0],
-            );
+            let to = hi.min(self.first_t);
+            Self::accumulate_held(self.held_before(), lo, to, origin, orders[0]);
+            if let Some(bounds) = bounds.as_deref_mut() {
+                Self::bound_held(
+                    self.held_before(),
+                    (lo, to),
+                    origin,
+                    &mut bounds[0][..moment_len],
+                );
+            }
         }
         let interior_lo = lo.max(self.first_t);
         let interior_hi = hi.min(self.last_t);
@@ -2322,39 +2387,68 @@ impl AxisSignalTable {
             let mut full_end = end_piece;
             if self.starts[first_piece] < interior_lo {
                 full_start += 1;
+                let to = interior_hi.min(self.ends[first_piece]);
                 self.accumulate_piece_moments(
                     first_piece,
                     interior_lo,
-                    interior_hi.min(self.ends[first_piece]),
+                    to,
                     origin,
                     moment_len,
                     orders.iter_mut().map(|moments| &mut **moments),
                 );
+                if let Some(bounds) = bounds.as_deref_mut() {
+                    self.bound_partial_piece(
+                        first_piece,
+                        (interior_lo, to),
+                        origin,
+                        bounds,
+                        moment_len,
+                    );
+                }
             }
             let right_partial = full_start < full_end && self.ends[full_end - 1] > interior_hi;
             if right_partial {
                 full_end -= 1;
             }
-            tree.accumulate(full_start, full_end, origin, &mut orders);
+            tree.accumulate(
+                full_start,
+                full_end,
+                origin,
+                &mut orders,
+                bounds.as_deref_mut(),
+            );
             if right_partial {
+                let from = self.starts[full_end];
                 self.accumulate_piece_moments(
                     full_end,
-                    self.starts[full_end],
+                    from,
                     interior_hi,
                     origin,
                     moment_len,
                     orders.iter_mut().map(|moments| &mut **moments),
                 );
+                if let Some(bounds) = bounds.as_deref_mut() {
+                    self.bound_partial_piece(
+                        full_end,
+                        (from, interior_hi),
+                        origin,
+                        bounds,
+                        moment_len,
+                    );
+                }
             }
         }
         if hi > self.last_t {
-            Self::accumulate_held(
-                self.held_after(),
-                lo.max(self.last_t),
-                hi,
-                origin,
-                orders[0],
-            );
+            let from = lo.max(self.last_t);
+            Self::accumulate_held(self.held_after(), from, hi, origin, orders[0]);
+            if let Some(bounds) = bounds {
+                Self::bound_held(
+                    self.held_after(),
+                    (from, hi),
+                    origin,
+                    &mut bounds[0][..moment_len],
+                );
+            }
         }
         true
     }
@@ -3659,9 +3753,12 @@ fn span_probe_t(t0: f64, t1: f64, u: f64) -> f64 {
 /// A rung that passes the probes is then held between them: proven by the
 /// Bernstein hull of its error against the signal's exact polynomials
 /// where the signal has them, estimated by the witnesses where it does not.
+/// Where it has them every truth sample is read off them too, each edge's
+/// from the side facing into the span.
 #[allow(clippy::type_complexity)]
 fn shaped_ladder<S: TrackSignal>(
     sig: &S,
+    exact: Option<&ExactSpan>,
     t0: f64,
     t1: f64,
     slivers: EdgeSlivers,
@@ -3672,12 +3769,22 @@ fn shaped_ladder<S: TrackSignal>(
     let fit_tol = policy.fit_tol;
     let h = t1 - t0;
     let t_of = |u: f64| nurbs::fmadd(0.5 * (u + 1.0), h, t0);
+    let from_start = FacingRead {
+        sig,
+        exact,
+        toward: t1,
+    };
+    let from_end = FacingRead {
+        sig,
+        exact,
+        toward: t0,
+    };
     let t0_inside = span_probe_t(t0, t1, -1.0);
-    let p0 = exact_value(axis, sig.eval(t0), t0)?;
+    let p0 = exact_value(axis, from_start.eval(t0), t0)?;
     let start_past_sliver = t0 + edge_inset(h, policy.floors.cubic, slivers.start);
     let end_past_sliver = t1 - edge_inset(h, policy.floors.cubic, slivers.end);
     let (seam_v0, a0) = edge_velocity_and_acceleration(
-        sig,
+        &from_start,
         axis,
         t0_inside,
         start_past_sliver,
@@ -3685,13 +3792,13 @@ fn shaped_ladder<S: TrackSignal>(
         fit_tol,
     )?;
     let v0 = match slivers.start_break {
-        Some(break_at) => velocity_past_moved_break(sig, axis, break_at, t1, t0)?,
+        Some(break_at) => velocity_past_moved_break(&from_start, axis, break_at, t1, t0)?,
         None => seam_v0,
     };
     let t1_inside = span_probe_t(t0, t1, 1.0);
-    let p1 = exact_value(axis, sig.eval(t1), t1)?;
+    let p1 = exact_value(axis, from_end.eval(t1), t1)?;
     let (seam_v1, a1) = edge_velocity_and_acceleration(
-        sig,
+        &from_end,
         axis,
         t1_inside,
         end_past_sliver,
@@ -3699,7 +3806,7 @@ fn shaped_ladder<S: TrackSignal>(
         fit_tol,
     )?;
     let v1 = match slivers.end_break {
-        Some(break_at) => velocity_past_moved_break(sig, axis, break_at, t0, t1)?,
+        Some(break_at) => velocity_past_moved_break(&from_end, axis, break_at, t0, t1)?,
         None => seam_v1,
     };
     let base = quintic_in_u((p0, v0, a0), (p1, v1, a1), h);
@@ -3717,7 +3824,7 @@ fn shaped_ladder<S: TrackSignal>(
             1.0 => (p1, v1, a1),
             _ => {
                 let t = t_of(u);
-                let (pos, vel, acc) = sig.eval_pva(t);
+                let (pos, vel, acc) = from_start.eval_pva(t);
                 (
                     exact_value(axis, pos, t)?,
                     exact_value(axis, vel, t)?,
@@ -3732,7 +3839,7 @@ fn shaped_ladder<S: TrackSignal>(
     for (index, &u) in LADDER_FIT_NODES_U.iter().enumerate() {
         truth.fit_pos[index] = match SpanTruth::probe_index(u) {
             Some(probe) => truth.pos[probe],
-            None => finite_sample(axis, sig, t_of(u))?,
+            None => finite_sample(axis, &from_start, t_of(u))?,
         };
     }
 
@@ -3747,7 +3854,7 @@ fn shaped_ladder<S: TrackSignal>(
             std::array::from_fn::<_, SQUARE_ROOT_ONSET_CHECK_POINTS, _>(|k| {
                 let t = start_past_sliver
                     + resolved * (k as f64 + 0.5) / SQUARE_ROOT_ONSET_CHECK_POINTS as f64;
-                let (position, _, acceleration) = sig.eval_pva(t);
+                let (position, _, acceleration) = from_start.eval_pva(t);
                 HeldSample {
                     x: 2.0 * (t - t0) / h - 1.0,
                     position,
@@ -3779,9 +3886,9 @@ fn shaped_ladder<S: TrackSignal>(
     ) {
         Ok(coefficients) => {
             let resolved = (start_past_sliver, end_past_sliver);
-            let witness = match sig.exact_polynomial_on(resolved.0, resolved.1) {
+            let witness = match exact {
                 Some(exact) => hull::first_unproven(
-                    &exact,
+                    exact.over(resolved.0, resolved.1),
                     FittedPiece {
                         mono_u: &coefficients,
                         t0,
@@ -3811,7 +3918,8 @@ fn shaped_ladder<S: TrackSignal>(
                 return Ok((coefficients, None));
             };
             let t = t_of(u);
-            let (source_position, source_velocity, source_acceleration) = sig.eval_pva(t);
+            let read = if t < t1 { &from_start } else { &from_end };
+            let (source_position, source_velocity, source_acceleration) = read.eval_pva(t);
             let piece = exact_piece(&coefficients, t0, t1, h);
             let velocity = piece.differentiate();
             let acceleration = velocity.differentiate();
@@ -3881,8 +3989,34 @@ fn square_root_onset_on_edge<S: TrackSignal>(sig: &S, edge: f64) -> bool {
     )
 }
 
+/// Refines one partition span. Where the signal has exact polynomials over
+/// it they are built once, up front, and every piece refined from the span
+/// reads its truth off them and is proven against them.
 fn refine_shaped_span<S: TrackSignal>(
     sig: &S,
+    span: RefineSpan,
+    policy: &SpanFitPolicy,
+    seeds: SpanSeeds,
+    refinement_splits: &mut usize,
+    out: &mut Vec<BezierPiece>,
+) -> Result<(), PostProcessError> {
+    let exact = sig
+        .exact_polynomial_on(span.t0, span.t1)
+        .map(ExactSpan::new);
+    refine_span_against(
+        sig,
+        exact.as_ref(),
+        span,
+        policy,
+        seeds,
+        refinement_splits,
+        out,
+    )
+}
+
+fn refine_span_against<S: TrackSignal>(
+    sig: &S,
+    exact: Option<&ExactSpan>,
     span: RefineSpan,
     policy: &SpanFitPolicy,
     seeds: SpanSeeds,
@@ -3903,6 +4037,7 @@ fn refine_shaped_span<S: TrackSignal>(
     let splittable = !at_resolution_floor && *refinement_splits < MAX_FIT_REFINEMENT_SPLITS;
     let (mono_u, failure) = shaped_ladder(
         sig,
+        exact,
         t0,
         t1,
         slivers,
@@ -4017,8 +4152,9 @@ fn refine_shaped_span<S: TrackSignal>(
         });
     }
     *refinement_splits += 1;
-    refine_shaped_span(
+    refine_span_against(
         sig,
+        exact,
         RefineSpan {
             t0,
             t1: tm,
@@ -4034,8 +4170,9 @@ fn refine_shaped_span<S: TrackSignal>(
         refinement_splits,
         out,
     )?;
-    refine_shaped_span(
+    refine_span_against(
         sig,
+        exact,
         RefineSpan {
             t0: tm,
             t1,

@@ -2,7 +2,7 @@ use nurbs::algebra::PiecewisePolynomialKernel;
 use nurbs::bezier::BezierPiece;
 use trajectory::{build_smooth_mzv_kernel, build_smooth_zv_kernel, next_toward};
 
-use super::{ExactPiece, RealSum};
+use super::{ExactPiece, ExactSpan, RealSum};
 use crate::shaper::{AxisSignalTable, FitBoundary, Lookahead, ShapedSignalSource, TrackSignal};
 
 /// A value carried as an unevaluated sum of two floats, about 106 bits.
@@ -563,4 +563,78 @@ fn a_window_reaching_unheld_history_has_no_exact_polynomial() {
             .exact_polynomial_on(SIGNAL_START_S + 0.02, SIGNAL_START_S + 0.03)
             .is_some()
     );
+}
+
+/// Two spans meeting inside a sub-interval build its polynomials on the
+/// same chunks about the same centres, so they read one value, bit for
+/// bit, at the seam they share.
+#[test]
+fn spans_meeting_between_breaks_read_one_state_at_their_seam() {
+    let mut rng = Rng(0x5851_F42D_4C95_7F2D);
+    for (name, kernel) in kernels() {
+        let table = random_table(&mut rng, SIGNAL_START_S, SIGNAL_END_S, Some((0.01, 0.0)));
+        let breaks = table.starts.clone();
+        let source = ShapedSignalSource::new(&kernel, table, breaks, SIGNAL_START_S + 0.02);
+        let signal = source.signal();
+        for _ in 0..32 {
+            let seam = rng.between(SIGNAL_START_S + 0.03, SIGNAL_END_S - 0.03);
+            let (lo, hi) = (
+                seam - rng.between(1e-4, 8e-3),
+                seam + rng.between(1e-4, 8e-3),
+            );
+            let before = ExactSpan::new(signal.exact_polynomial_on(lo, seam).expect("clamped"));
+            let after = ExactSpan::new(signal.exact_polynomial_on(seam, hi).expect("clamped"));
+            let (left, right) = (before.pva(seam, lo), after.pva(seam, hi));
+            assert!(
+                left.0.to_bits() == right.0.to_bits()
+                    || source.table.boundaries().iter().any(|&boundary| {
+                        source
+                            .exact_kernel
+                            .cuts
+                            .iter()
+                            .any(|&cut| RealSum::of(boundary, cut).order_of(seam).is_eq())
+                    }),
+                "{name}: spans meeting at {seam} read {left:?} and {right:?}"
+            );
+        }
+    }
+}
+
+/// A read takes the polynomial of the sub-interval holding its time, and
+/// at a time two sub-intervals share, the one it faces.
+#[test]
+fn exact_reads_take_the_sub_interval_they_face() {
+    let mut rng = Rng(0x2127_599B_F432_5C37);
+    let kernel = triangle_kernel(0.008);
+    let table = random_table(&mut rng, SIGNAL_START_S, SIGNAL_END_S, None);
+    let breaks = table.starts.clone();
+    let source = ShapedSignalSource::new(&kernel, table, breaks, SIGNAL_START_S + 0.01);
+    let (lo, hi) = (SIGNAL_START_S + 0.012, SIGNAL_START_S + 0.04);
+    let pieces = source
+        .signal()
+        .exact_polynomial_on(lo, hi)
+        .expect("clamped");
+    let span = ExactSpan::new(pieces.clone());
+    let bits = |pva: (f64, f64, f64)| [pva.0.to_bits(), pva.1.to_bits(), pva.2.to_bits()];
+    for pair in pieces.windows(2) {
+        let [before, after] = pair else {
+            unreachable!("windows of two")
+        };
+        if before.hi == after.lo {
+            let shared = before.hi;
+            assert_eq!(bits(span.pva(shared, lo)), bits(before.eval_pva(shared)));
+            assert_eq!(bits(span.pva(shared, hi)), bits(after.eval_pva(shared)));
+        } else {
+            for toward in [lo, hi] {
+                assert_eq!(
+                    bits(span.pva(after.lo, toward)),
+                    bits(before.eval_pva(after.lo))
+                );
+                assert_eq!(
+                    bits(span.pva(before.hi, toward)),
+                    bits(after.eval_pva(before.hi))
+                );
+            }
+        }
+    }
 }
