@@ -130,7 +130,7 @@ def _home_y_against_wall_at_60(world):
     evidence this test is after.
     """
     resp = world.gcode("G28 Y", timeout=300)
-    records = _needs_rehome_records(world.log_tail(), "Y")
+    records = _needs_rehome_records(world.settled_log_tail(), "Y")
     assert records, (
         f"no needs_rehome decision logged for Y; G28 response: {resp}"
     )
@@ -171,7 +171,7 @@ def test_false_trigger_far_from_endstop_fails_loudly(sim_world):
     g28.join(timeout=200)
     assert not g28.is_alive(), "G28 Y did not finish"
 
-    records = _needs_rehome_records(world.log_tail(), "Y")
+    records = _needs_rehome_records(world.settled_log_tail(), "Y")
     assert records and records[0][0], (
         f"the staged false trigger should have tripped the guard: {records}"
     )
@@ -192,7 +192,7 @@ def test_long_travel_y_after_x_early_rehome(sim_world):
         tracker, control, 0, X_ENDSTOP, wall_mm=3.0, clock=world.vclock
     ):
         world.gcode_ok("G28 X", timeout=300)
-    x_records = _needs_rehome_records(world.log_tail(), "X")
+    x_records = _needs_rehome_records(world.settled_log_tail(), "X")
     assert x_records and x_records[0][0], (
         f"X was set up to trip 3mm from start (< min_home_dist) and should "
         f"have taken the rehome path; decisions: {x_records}"
@@ -233,7 +233,7 @@ def test_false_trigger_with_real_endstop_beyond_window_still_fails(sim_world):
         g28.join(timeout=200)
     assert not g28.is_alive(), "G28 Y did not finish"
 
-    records = _needs_rehome_records(world.log_tail(), "Y")
+    records = _needs_rehome_records(world.settled_log_tail(), "Y")
     assert records and records[0][0], (
         f"the staged false trigger should have tripped the guard: {records}"
     )
