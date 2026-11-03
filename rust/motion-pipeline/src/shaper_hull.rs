@@ -53,6 +53,11 @@ pub(crate) struct HullBudget {
     pub velocity: f64,
 }
 
+/// The share of each order's budget an enclosure's bound may take before
+/// its window is halved: the hull spends the bound as slack, so a rung
+/// within the rest of the budget is still proven.
+const ENCLOSURE_BUDGET_SHARE: f64 = 1.0 / 64.0;
+
 impl HullBudget {
     fn of_order(self, order: usize) -> f64 {
         match order {
@@ -60,6 +65,10 @@ impl HullBudget {
             1 => self.velocity,
             _ => self.tol.accel_mm_s2,
         }
+    }
+
+    pub(crate) fn enclosure_accuracy(self) -> [f64; 3] {
+        [0, 1, 2].map(|order| self.of_order(order) * ENCLOSURE_BUDGET_SHARE)
     }
 }
 

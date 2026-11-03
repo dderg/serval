@@ -26,8 +26,12 @@ mod exact;
 #[path = "shaper_hull.rs"]
 mod hull;
 
+#[path = "shaper_taylor.rs"]
+pub(crate) mod taylor;
+
 use exact::ExactSpan;
 use hull::{FittedPiece, HullBudget};
+use taylor::{Ball, TaylorModel};
 
 pub(crate) use exact::{ExactConvolution, ExactKernel, ExactPiece};
 use hidden_breaks::ShapedBreaks;
@@ -118,6 +122,16 @@ pub(crate) trait TrackSignal {
     fn exact_polynomial_on(&self, _lo: f64, _hi: f64) -> Option<Vec<ExactPiece>> {
         None
     }
+    /// Rigorous polynomial enclosures of the signal over `[lo, hi]`: on each
+    /// sub-interval between its breaks every order lies within its
+    /// polynomial's `rounding` of it, sub-intervals refined until each
+    /// order's bound is within its `accuracy` where the signal resolves
+    /// that. Exact polynomials are their own enclosure; `None` for a
+    /// signal with neither.
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+        let _ = accuracy;
+        self.exact_polynomial_on(lo, hi)
+    }
 }
 
 impl TrackSignal for ContinuousAxis {
@@ -164,6 +178,9 @@ impl<S: TrackSignal> TrackSignal for &S {
     }
     fn exact_polynomial_on(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
         S::exact_polynomial_on(self, lo, hi)
+    }
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+        S::enclosure_on(self, lo, hi, accuracy)
     }
 }
 
@@ -220,6 +237,16 @@ impl<S: TrackSignal> TrackSignal for ShiftedTrackSignal<S> {
 
     fn exact_polynomial_on(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
         let pieces = self.inner.exact_polynomial_on(lo, hi)?;
+        Some(
+            pieces
+                .into_iter()
+                .map(|piece| piece.offset_by(self.base))
+                .collect(),
+        )
+    }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+        let pieces = self.inner.enclosure_on(lo, hi, accuracy)?;
         Some(
             pieces
                 .into_iter()
@@ -3470,7 +3497,8 @@ struct RungWitness<'a, S> {
 }
 
 /// Where the witnesses estimate a rung leaves the tolerance between the
-/// probes, for a signal with no exact polynomials to prove it against.
+/// probes, for a signal with neither exact polynomials nor an enclosure to
+/// prove it against.
 fn estimated_witness<S: TrackSignal>(
     witness: RungWitness<'_, S>,
     t1: f64,
@@ -3952,8 +3980,9 @@ fn span_probe_t(t0: f64, t1: f64, u: f64) -> f64 {
 ///
 /// A rung that passes the probes is then held between them: proven by the
 /// Bernstein hull of its error against the signal's exact polynomials
-/// where the signal has them, estimated by the witnesses where it does not.
-/// Where it has them every truth sample is read off them too, each edge's
+/// where the signal has them, against its Taylor-model enclosure where it
+/// has one, estimated by the witnesses where it has neither. Where it has
+/// exact polynomials every truth sample is read off them too, each edge's
 /// from the side facing into the span.
 #[allow(clippy::type_complexity)]
 fn shaped_ladder<S: TrackSignal>(
@@ -4087,34 +4116,40 @@ fn shaped_ladder<S: TrackSignal>(
     ) {
         Ok(coefficients) => {
             let resolved = (start_past_sliver, end_past_sliver);
+            let piece = FittedPiece {
+                mono_u: &coefficients,
+                t0,
+                t1,
+            };
+            let budget = HullBudget {
+                tol: piece_tol,
+                velocity: policy.velocity_budget,
+            };
             let witness = match exact {
                 Some(exact) => hull::first_unproven(
                     exact.over(resolved.0, resolved.1),
-                    FittedPiece {
-                        mono_u: &coefficients,
-                        t0,
-                        t1,
-                    },
+                    piece,
                     resolved,
-                    HullBudget {
-                        tol: piece_tol,
-                        velocity: policy.velocity_budget,
-                    },
+                    budget,
                 ),
-                None => estimated_witness(
-                    RungWitness {
-                        axis,
-                        sig,
-                        coefficients: &coefficients,
-                        t0,
-                        h,
-                        fit_tol: piece_tol,
-                        accel_budget: fit_tol.accel_budget,
-                    },
-                    t1,
-                    &truth,
-                    resolved,
-                )?,
+                None => match sig.enclosure_on(resolved.0, resolved.1, budget.enclosure_accuracy())
+                {
+                    Some(enclosure) => hull::first_unproven(&enclosure, piece, resolved, budget),
+                    None => estimated_witness(
+                        RungWitness {
+                            axis,
+                            sig,
+                            coefficients: &coefficients,
+                            t0,
+                            h,
+                            fit_tol: piece_tol,
+                            accel_budget: fit_tol.accel_budget,
+                        },
+                        t1,
+                        &truth,
+                        resolved,
+                    )?,
+                },
             };
             let Some(u) = witness else {
                 return Ok((coefficients, None));
@@ -4681,6 +4716,135 @@ impl NonlinearAdvanceSignal {
         }
         velocity
     }
+
+    /// Taylor models of the advanced track's position, velocity and
+    /// acceleration over `window` inside input piece `piece`: the formulas
+    /// `eval_pva` evaluates, enclosed term by term.
+    fn models_on(&self, piece: usize, window: taylor::Window) -> [TaylorModel; 3] {
+        let coefficients = &self.coeffs[piece];
+        let tau = window.time_since(self.starts[piece]);
+        let [position, velocity, acceleration, jerk] =
+            [0, 1, 2, 3].map(|order| taylor::derivative_of(coefficients, order, &tau));
+        let adv = self.adv;
+        let vl = adv.linearization_velocity;
+        let unit = velocity.scale(Ball::rounded(1.0 / vl, 1));
+        let Some(shape) = AdvanceShape::of(adv.model, &unit) else {
+            return [TaylorModel::UNBOUNDED; 3];
+        };
+        let slope = shape
+            .slope
+            .scale(Ball::rounded(adv.nonlinear_offset / vl, 1))
+            .add_ball(Ball::exact(adv.linear_advance));
+        let curvature = shape
+            .curvature
+            .scale(Ball::rounded(adv.nonlinear_offset / (vl * vl), 2));
+        let squared = acceleration.mul(&acceleration);
+        let mut models = [
+            position
+                .add(&velocity.scale(Ball::exact(adv.linear_advance)))
+                .add(&shape.value.scale(Ball::exact(adv.nonlinear_offset))),
+            velocity.add(&slope.mul(&acceleration)),
+            acceleration
+                .add(&curvature.mul(&squared))
+                .add(&slope.mul(&jerk)),
+        ];
+        let offset = adv.nonlinear_offset.abs();
+        let [shape_miss, slope_miss, curvature_miss] = shape.branch_miss;
+        let slope_miss = offset / vl * slope_miss;
+        let curvature_miss = offset / (vl * vl) * curvature_miss;
+        models[0].widen(offset * shape_miss);
+        models[1].widen(slope_miss * acceleration.bound());
+        models[2].widen(curvature_miss * squared.bound() + slope_miss * jerk.bound());
+        if self.curvature_velocity_may_flip(piece, window, &velocity, &acceleration) {
+            models[2].widen(2.0 * (curvature.bound() + curvature_miss) * squared.bound());
+        }
+        models
+    }
+
+    /// Whether `resolution_owned_curvature_velocity` may read the velocity
+    /// with its other sign somewhere on the window: next to a piece edge,
+    /// where the velocity is within a device interval's travel of zero.
+    fn curvature_velocity_may_flip(
+        &self,
+        piece: usize,
+        window: taylor::Window,
+        velocity: &TaylorModel,
+        acceleration: &TaylorModel,
+    ) -> bool {
+        let near_edge = window.reaches(self.starts[piece], MIN_DEVICE_INTERVAL_S)
+            || window.reaches(self.ends[piece], MIN_DEVICE_INTERVAL_S);
+        let (centre, spread) = velocity.spread();
+        near_edge && centre.abs() - spread < MIN_DEVICE_INTERVAL_S * acceleration.bound()
+    }
+}
+
+/// How far a reciprocal advance's unit velocity may reach past zero onto
+/// the branch opposite the one its window is modelled on. Within it the
+/// branches `u/(1 ± u)` differ from `u/(1 + |u|)` by at most `3S²`, their
+/// slopes by `5S` and their curvatures by `4.1`.
+const RECIPROCAL_BRANCH_SLACK: f64 = 1e-9;
+
+/// The unit-scaled advance shape `s(u)`, `s'(u)`, `s''(u)` of a velocity's
+/// model, and how far each may miss the shape where the model's range
+/// reaches a branch it does not follow.
+struct AdvanceShape {
+    value: TaylorModel,
+    slope: TaylorModel,
+    curvature: TaylorModel,
+    branch_miss: [f64; 3],
+}
+
+impl AdvanceShape {
+    fn of(model: trajectory::AdvanceModel, unit: &TaylorModel) -> Option<Self> {
+        let one = TaylorModel::constant(Ball::exact(1.0));
+        match model {
+            trajectory::AdvanceModel::Tanh => {
+                let value = unit.tanh();
+                let slope = one.sub(&value.mul(&value));
+                Some(Self {
+                    curvature: value.mul(&slope).scale(Ball::exact(-2.0)),
+                    value,
+                    slope,
+                    branch_miss: [0.0; 3],
+                })
+            }
+            trajectory::AdvanceModel::Reciprocal => {
+                let (centre, spread) = unit.spread();
+                let subtraction = f64::EPSILON * (centre.abs() + spread);
+                let sign = if centre - spread >= -RECIPROCAL_BRANCH_SLACK {
+                    1.0
+                } else if centre + spread <= RECIPROCAL_BRANCH_SLACK {
+                    -1.0
+                } else {
+                    return None;
+                };
+                let reaches_other_branch = sign * centre - spread - subtraction < 0.0;
+                let reciprocal = unit
+                    .scale(Ball::exact(sign))
+                    .add_ball(Ball::exact(1.0))
+                    .reciprocal()?;
+                let slope = reciprocal.mul(&reciprocal);
+                Some(Self {
+                    value: if sign > 0.0 {
+                        one.sub(&reciprocal)
+                    } else {
+                        reciprocal.sub(&one)
+                    },
+                    curvature: slope.mul(&reciprocal).scale(Ball::exact(-2.0 * sign)),
+                    slope,
+                    branch_miss: if reaches_other_branch {
+                        [
+                            3.0 * RECIPROCAL_BRANCH_SLACK * RECIPROCAL_BRANCH_SLACK,
+                            5.0 * RECIPROCAL_BRANCH_SLACK,
+                            4.1,
+                        ]
+                    } else {
+                        [0.0; 3]
+                    },
+                })
+            }
+        }
+    }
 }
 
 impl TrackSignal for NonlinearAdvanceSignal {
@@ -4765,6 +4929,24 @@ impl TrackSignal for NonlinearAdvanceSignal {
             self.adv.curvature(curvature_velocity),
         ))
     }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+        let mut pieces = Vec::new();
+        let first = self.ends.partition_point(|&end| end <= lo);
+        for piece in first..self.coeffs.len() {
+            if self.starts[piece] >= hi {
+                break;
+            }
+            let span = (lo.max(self.starts[piece]), hi.min(self.ends[piece]));
+            taylor::enclose(
+                span,
+                accuracy,
+                &|window| self.models_on(piece, window),
+                &mut pieces,
+            );
+        }
+        Some(pieces)
+    }
 }
 
 pub(crate) fn apply_derivative_gains_to_track(
@@ -4842,3 +5024,7 @@ mod shaper_cap_contact_tests;
 #[cfg(test)]
 #[path = "shaper_shaped_wave_tests.rs"]
 mod shaper_shaped_wave_tests;
+
+#[cfg(test)]
+#[path = "shaper_enclosure_tests.rs"]
+mod shaper_enclosure_tests;

@@ -21,9 +21,20 @@
 set -uo pipefail
 
 # A CARGO_TARGET_DIR leaked from another task's shell would send every build
-# and cached engine into someone else's directory. Gates use the worktree's
-# own rust/target unless the caller opts in (integrate_stack.py does).
-[ -n "${CI_KEEP_CARGO_TARGET_DIR:-}" ] || unset CARGO_TARGET_DIR
+# and cached engine into someone else's directory, so an inherited value is
+# dropped unless the caller opts in (integrate_stack.py does). Locally the
+# gates then share ONE target dir across all worktrees, so a fresh worktree
+# reuses the dependency and unchanged-crate builds of the others: `quick` in a
+# fresh worktree took 83 s against a warm shared dir and 221 s with its own
+# cold rust/target. CI_OWN_TARGET=1 gives a worktree its own rust/target;
+# GitHub Actions always does (rust-cache keys on it).
+SHARED_TARGET_DIR="${SERVAL_TARGET_DIR:-$HOME/.cache/serval-target}"
+if [ -z "${CI_KEEP_CARGO_TARGET_DIR:-}" ]; then
+    unset CARGO_TARGET_DIR
+    if [ -z "${CI_OWN_TARGET:-}" ] && [ -z "${GITHUB_ACTIONS:-}" ]; then
+        export CARGO_TARGET_DIR="$SHARED_TARGET_DIR"
+    fi
+fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST="$ROOT/rust"
@@ -100,15 +111,22 @@ job_rust_test() {
 # Every proptest suite (tests/*fuzz*.rs, *proptest*.rs, property_*.rs) at a
 # case count far above the per-file default, with a fresh random seed per
 # run. rust-test already runs the same suites at their defaults; this gate is
-# the one that keeps exploring. Suites that run the whole streaming pipeline
+# the one that keeps exploring. FUZZ_PARTITION=N/M runs shard N of M (the PR
+# workflow uses 3) and FUZZ_NEXTEST_PROFILE picks the nextest profile (the
+# nightly run uses the one without the 180 s limit). Suites that run the whole streaming pipeline
 # per case cost ~20 ms each, so they take a 64th of the count.
 job_rust_fuzz() {
     cd "$RUST"
     local cases="${PROPTEST_CASES:-20000}"
-    local pipeline='binary(seam_schedule_fuzz) | binary(planner_fuzz)'
-    PROPTEST_CASES="$cases" host_cargo nextest run --workspace --profile ci \
+    local pipeline='binary(seam_schedule_fuzz) | binary(planner_fuzz) | binary(planner_conservation_fuzz)'
+    local profile="${FUZZ_NEXTEST_PROFILE:-ci}"
+    local partition=()
+    [ -z "${FUZZ_PARTITION:-}" ] || partition=(--partition "hash:$FUZZ_PARTITION")
+    PROPTEST_CASES="$cases" host_cargo nextest run --workspace --profile "$profile" \
+        ${partition[@]+"${partition[@]}"} \
         -E "(binary(/fuzz|proptest|^property_/) | test(/ripple_fuzz::/)) - ($pipeline)" || return 1
-    PROPTEST_CASES="$((cases / 64))" host_cargo nextest run --workspace --profile ci \
+    PROPTEST_CASES="$((cases / 64))" host_cargo nextest run --workspace --profile "$profile" \
+        ${partition[@]+"${partition[@]}"} \
         -E "$pipeline"
 }
 
