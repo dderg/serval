@@ -9,10 +9,7 @@ use super::{
 };
 use crate::lowering::FitTol;
 
-const TOLERANCE: FitTol = FitTol {
-    pos_mm: 1e-4,
-    accel_mm_s2: 50.0,
-};
+const TOLERANCE: FitTol = FitTol::absolute(1e-4, 50.0);
 
 const TAYLOR_DEGREE: usize = 9;
 const PIECE_S: f64 = 5e-4;

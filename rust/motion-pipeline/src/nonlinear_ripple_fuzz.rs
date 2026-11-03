@@ -158,7 +158,7 @@ proptest! {
             nonlinear_offset: offset,
             linearization_velocity: velocity_scale,
         };
-        let tolerance = FitTol { pos_mm: 1e-3, accel_mm_s2: 50.0 };
+        let tolerance = FitTol::absolute(1e-3, 50.0);
         let output = crate::shaper::apply_nonlinear_advance_to_track(axis, &track, advance, tolerance);
         prop_assert!(output.is_ok(), "axis={axis} advance={advance:?}: {output:?}");
         let output = nurbs::knot::refined_to_full_multiplicity(&output.unwrap());

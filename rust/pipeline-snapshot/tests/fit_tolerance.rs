@@ -1,9 +1,11 @@
 //! `max_path_deviation` and `max_accel_deviation` are promises: every piece
 //! a fit accepts must stay within them against the exact signal it replaces,
-//! everywhere inside the piece — not just at the ladder's probe points. This
-//! replays every snapshot case and a whole dense real print through the
-//! pipeline with the fit audit on, and fails on any accepted piece that
-//! leaves the tolerance.
+//! everywhere inside the piece — not just at the ladder's probe points. A
+//! follower's acceleration promise is per piece: the looser of
+//! `max_accel_deviation` and the acceleration that spends its position
+//! tolerance over the piece. This replays every snapshot case and a whole
+//! dense real print through the pipeline with the fit audit on, and fails
+//! on any accepted piece that leaves the tolerance.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -11,10 +13,32 @@ use std::path::{Path, PathBuf};
 use motion_pipeline::fit_audit::{FitViolation, take_violations};
 mod corpus;
 
+const DENSE_PRINT: &str = "voron_dense_top_layers";
+
+/// A chain the bench configs leave out, held to the audit on the dense print
+/// too: a 70 000 mm/s² Trident whose kernel-free pressure advance under a
+/// ratio ramp fits the follower's advanced source to the position-equivalent
+/// budget.
+/// TODO: the same Trident with a smoothing kernel after the advance leaves
+/// 61 `follower_source` pieces up to 1.94x over the absolute budget, which
+/// the error's interpolant between probes does not see.
+const TRIDENT_CONFIGS: [&str; 1] = ["tools/bench/configs/trident_ramp.cfg"];
+
 fn dense_cases() -> Vec<(String, String, PathBuf)> {
-    corpus::sim_cases(None)
-        .into_iter()
-        .filter(|(name, _, _)| name.starts_with("voron_dense_top_layers/"))
+    let gcode = std::fs::read_to_string(
+        corpus::repo().join(format!("tools/sim/gcode/{DENSE_PRINT}.gcode")),
+    )
+    .expect("read the dense print");
+    corpus::SIM_CONFIGS
+        .iter()
+        .chain(&TRIDENT_CONFIGS)
+        .map(|config| {
+            (
+                format!("{DENSE_PRINT}/{config}"),
+                gcode.clone(),
+                corpus::repo().join(config),
+            )
+        })
         .collect()
 }
 

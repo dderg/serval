@@ -197,7 +197,7 @@ proptest! {
                 t_start: signal.start,
                 t_end: signal.end,
                 seed_breakpoints: &[signal.boundary],
-                fit_tol: FitTol { pos_mm: 0.005, accel_mm_s2: 50.0 },
+                fit_tol: FitTol::absolute(0.005, 50.0),
                 fit_context: "phase_ripple_fuzz",
                 velocity_continuous: false,
             },
@@ -235,7 +235,7 @@ proptest! {
             },
         ]);
         let output = apply_nonlinear_advance_to_track(
-            axis, &track, advance, FitTol { pos_mm: 0.005, accel_mm_s2: 50.0 },
+            axis, &track, advance, FitTol::absolute(0.005, 50.0),
         ).map_err(|error| TestCaseError::fail(format!("{signal:?}, {advance:?}: {error:?}")))?;
         let advance_position_scale = advance.linear_advance * signal.velocity.abs() * 1.8
             + advance.nonlinear_offset;

@@ -255,18 +255,25 @@ pub struct MoveSpec {
     pub dwell_before_s: Option<f64>,
 }
 
-pub fn move_specs(
-    waypoints: &[waypoints::Waypoint],
-    limits: geometry::VelocityLimits,
-) -> Result<Vec<MoveSpec>, SnapshotError> {
-    let config_base = planner_config::CartesianLimits {
+/// The config limits `limits` were built from: the base the runtime
+/// overrides of [`waypoints::parse_gcode`] are clamped against.
+#[must_use]
+pub fn config_base(limits: geometry::VelocityLimits) -> planner_config::CartesianLimits {
+    planner_config::CartesianLimits {
         max_velocity: limits.max_velocity_mm_s,
         max_accel: limits.accel_mm_s2,
         max_jerk: limits.max_jerk_mm_s3,
         max_z_velocity: limits.max_z_velocity_mm_s,
         max_z_accel: limits.max_z_accel_mm_s2,
         corner_deviation: limits.corner_deviation_mm,
-    };
+    }
+}
+
+pub fn move_specs(
+    waypoints: &[waypoints::Waypoint],
+    limits: geometry::VelocityLimits,
+) -> Result<Vec<MoveSpec>, SnapshotError> {
+    let config_base = config_base(limits);
     waypoints
         .windows(2)
         .enumerate()

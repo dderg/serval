@@ -1,10 +1,11 @@
 //! Checks every piece a fit accepts against the exact signal it was fitted
 //! to — on a dense scan of its resolved stretch, edges included, and by an
 //! exact search around every scanned peak, never only at points the fit
-//! itself sampled — and keeps the ones that break the fit tolerance. What
-//! the fit does not resolve is not held to it: pieces narrower than the
-//! cubic floor, and the slivers inside a piece's edges that the ladder reads
-//! its anchoring state past, which seed coalescing treats as carrying no
+//! itself sampled — and keeps the ones that break the fit tolerance as
+//! resolved for the piece's duration (`FitTol::for_piece`). What the fit
+//! does not resolve is not held to it: pieces narrower than the cubic floor,
+//! and the slivers inside a piece's edges that the ladder reads its
+//! anchoring state past, which seed coalescing treats as carrying no
 //! integral. Compiled only for tests that hold the shaper to its
 //! `max_path_deviation` / `max_accel_deviation` promise; the live host never
 //! pays for it.
@@ -74,6 +75,8 @@ pub struct FitViolation {
     /// other tracks' pieces.
     pub break_in_edge_sliver: bool,
     pub exemption: Option<Exemption>,
+    pub scratch_contact_distance: f64,
+    pub scratch_insets: (f64, f64),
 }
 
 static VIOLATIONS: Mutex<Vec<FitViolation>> = Mutex::new(Vec::new());
@@ -105,6 +108,7 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
         return;
     }
     let acceleration_scale = (2.0 / h) * (2.0 / h);
+    let piece_tol = piece.fit_tol.for_piece(h);
     let miss_at = |u: f64| {
         let x = 2.0 * u - 1.0;
         let t = piece.t0 + h * u;
@@ -119,10 +123,10 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
             piece.t1
         );
         Miss {
-            position: (eval_mono(piece.mono_u, x) - truth_position).abs() / piece.fit_tol.pos_mm,
+            position: (eval_mono(piece.mono_u, x) - truth_position).abs() / piece_tol.pos_mm,
             acceleration: (eval_mono_dd(piece.mono_u, x) * acceleration_scale - truth_acceleration)
                 .abs()
-                / piece.fit_tol.accel_mm_s2,
+                / piece_tol.accel_mm_s2,
         }
     };
     let (resolved_from, resolved_to) = (piece.edge_insets.0 / h, 1.0 - piece.edge_insets.1 / h);
@@ -193,6 +197,14 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
                 accepted_at_floor: piece.accepted_at_floor,
                 break_in_edge_sliver,
                 exemption,
+                scratch_contact_distance: CAP_CONTACTS.with(|held| {
+                    held.borrow()
+                        .iter()
+                        .map(|&c| (c - piece.t0) / h)
+                        .min_by(|a, b| (a - worst_u).abs().total_cmp(&(b - worst_u).abs()))
+                        .unwrap_or(f64::NAN)
+                }),
+                scratch_insets: (piece.edge_insets.0 / h, piece.edge_insets.1 / h),
             });
     }
 }
@@ -287,7 +299,7 @@ fn cap_contact_onset<S: TrackSignal>(
     let acceleration_degree = (piece.mono_u.len() - 1).checked_sub(2)?;
     let minimax = *SQRT_MINIMAX_ERROR.get(acceleration_degree)?;
     let bound_mm_s2 = ANCHORED_RUNG_EXCESS_CEILING * minimax * onset_coefficient.abs() * h.sqrt();
-    let error_mm_s2 = acceleration_over_tolerance * piece.fit_tol.accel_mm_s2;
+    let error_mm_s2 = acceleration_over_tolerance * piece.fit_tol.for_piece(h).accel_mm_s2;
     (error_mm_s2 <= bound_mm_s2).then_some(Exemption::CapContactOnset {
         onset_coefficient,
         error_mm_s2,

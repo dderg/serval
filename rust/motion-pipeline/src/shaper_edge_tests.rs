@@ -14,10 +14,7 @@ use super::{
 
 const FLOOR: f64 = 2e-9;
 const POSITION_TOL: f64 = 1e-4;
-const TOL: FitTol = FitTol {
-    pos_mm: 1e-3,
-    accel_mm_s2: 50.0,
-};
+const TOL: FitTol = FitTol::absolute(1e-3, 50.0);
 
 /// Constant acceleration that steps from `before` to `after` at `step`.
 struct AccelerationStep {

@@ -42,24 +42,6 @@ ROLE_AXIS_WEIGHTS = {
     "e": (0.0, 0.0, 0.0, 1.0),
 }
 FOLLOWER_ROLES = frozenset({"e"})
-LIVE_DEFAULT_SPEED_MM_S = 25.0
-QUEUE_DRAIN_COMMANDS = frozenset(
-    {"M400", "G4", "M109", "M190", "TEMPERATURE_WAIT"}
-)
-UNMIRRORED_COMMANDS = frozenset(
-    {
-        "M220",
-        "M221",
-        "G28",
-        "SET_KINEMATIC_POSITION",
-        "SET_PRESSURE_ADVANCE",
-        "SET_INPUT_SHAPER",
-        "FORCE_MOVE",
-        "MANUAL_STEPPER",
-        "SAVE_GCODE_STATE",
-        "RESTORE_GCODE_STATE",
-    }
-)
 REFERENCE_SAMPLE_PERIOD_S = 0.5e-3
 REFERENCE_FINE_FACTOR = 50
 REFERENCE_CHUNK_INTERVALS = 20_000
@@ -220,8 +202,6 @@ class Job:
     run_dir: Path
     motors: list[Motor]
     config: harness.PrinterConfigData
-    max_z_velocity: float
-    max_z_accel: float
     gcode_text: str
 
 
@@ -359,12 +339,6 @@ def load_job(run_dir: Path) -> Job:
         run_dir=run_dir,
         motors=read_motors(sections),
         config=config,
-        max_z_velocity=sections.getfloat(
-            "printer", "max_z_velocity", fallback=config.max_velocity
-        ),
-        max_z_accel=sections.getfloat(
-            "printer", "max_z_accel", fallback=config.max_accel
-        ),
         gcode_text=(run_dir / "print.gcode").read_text(),
     )
 
@@ -387,126 +361,47 @@ def _kinematic_start(line: str) -> tuple[float, float, float]:
     return float(params["X"]), float(params["Y"]), float(params["Z"])
 
 
-@dataclass
-class ExtrusionTracker:
-    absolute_coord: bool = True
-    absolute_extrude: bool = True
-    position: float = 0.0
-
-    def normalize(self, line: str) -> str | None:
-        code = line.split(";", 1)[0].strip().upper()
-        word = code.split(None, 1)[0]
-        words = re.findall(r"([A-Z])\s*([-+]?[0-9.]+)", code[len(word) :])
-        if word in ("G90", "G91"):
-            self.absolute_coord = word == "G90"
-            return code
-        if word in ("M82", "M83"):
-            self.absolute_extrude = word == "M82"
-            return None
-        if word == "G92":
-            letters = {letter for letter, _ in words} or {"X", "Y", "Z", "E"}
-            moved = letters - {"E"}
-            if moved:
-                raise AnalysisError(
-                    f"{line.strip()!r}: G92 on {sorted(moved)} shifts the "
-                    "coordinate frame mid-print; the reference cannot mirror it"
-                )
-            self.position = float(dict(words).get("E", self.position))
-            return None
-        if word not in ("G0", "G1"):
-            return code
-        rebuilt = []
-        for letter, value in words:
-            if letter == "E":
-                requested = float(value)
-                relative = not (self.absolute_coord and self.absolute_extrude)
-                delta = requested if relative else requested - self.position
-                self.position += delta
-                value = repr(delta)
-            rebuilt.append(f"{letter}{value}")
-        return " ".join(["G1", *rebuilt])
-
-
-def split_gcode(text: str) -> tuple[tuple[float, float, float], list[str]]:
+def _start_position(text: str) -> tuple[float, float, float]:
     lines = [ln for ln in text.splitlines() if _command_word(ln)]
     if not lines or _command_word(lines[0]) != "SET_KINEMATIC_POSITION":
         raise AnalysisError(
             "print.gcode must start with SET_KINEMATIC_POSITION X= Y= Z="
         )
-    start = _kinematic_start(lines[0])
-    extrusion = ExtrusionTracker()
-    blocks: list[list[str]] = [[]]
-    for line in lines[1:]:
-        word = _command_word(line)
-        if word in UNMIRRORED_COMMANDS:
-            raise AnalysisError(
-                f"{line.strip()!r}: the offline reference cannot mirror {word}"
-            )
-        if word in QUEUE_DRAIN_COMMANDS:
-            blocks.append([])
-            continue
-        normalized = extrusion.normalize(line)
-        if normalized is not None:
-            blocks[-1].append(normalized)
-    return start, ["\n".join(b) for b in blocks if b]
+    return _kinematic_start(lines[0])
 
 
-def _live_move_limits(job: Job, waypoints: list[dict]) -> list[dict]:
-    limited = [waypoints[0]]
-    for prev, cur in zip(waypoints, waypoints[1:]):
-        dx, dy, dz = (
-            cur["position"][i] - prev["position"][i] for i in range(3)
-        )
-        distance = math.sqrt(dx * dx + dy * dy + dz * dz)
-        velocity = cur["feedrate"]
-        accel = cur["runtime"]["accel"] or job.config.max_accel
-        if distance > 1e-9 and abs(dz) > 1e-9:
-            z_unit = abs(dz) / distance
-            velocity = min(velocity, job.max_z_velocity / z_unit)
-            accel = min(accel, job.max_z_accel / z_unit)
-        limited.append(
-            {
-                **cur,
-                "feedrate": velocity,
-                "runtime": {**cur["runtime"], "accel": accel},
-            }
-        )
-    return limited
+def split_at_rests(waypoints: list[dict]) -> list[list[dict]]:
+    """The print as motion epochs: the runs of moves between two stops at
+    rest, each planned from rest on the waypoint the previous run ended on.
+    Live, the gap at a stop is the dwell plus host latency; the capture
+    alignment measures it per epoch, so an epoch's plan leaves it out."""
+    blocks = [[waypoints[0]]]
+    for waypoint in waypoints[1:]:
+        if waypoint["dwell_before_s"] is not None:
+            blocks.append([blocks[-1][-1]])
+            waypoint = {**waypoint, "dwell_before_s": None}
+        blocks[-1].append(waypoint)
+    return [block for block in blocks if len(block) > 1]
 
 
 def plan_waypoints(
     job: Job,
-) -> tuple[tuple[float, float, float], tuple, list[list[tuple]]]:
+) -> tuple[tuple[float, float, float], tuple, list[list[dict]]]:
+    start = _start_position(job.gcode_text)
     engine = harness._import_engine()
-    start, block_texts = split_gcode(job.gcode_text)
-    sx, sy, sz = start
-    prefix = (
-        f"G90\nM83\nG92 X{sx!r} Y{sy!r} Z{sz!r} E0\n"
-        f"G1 X{sx!r} Y{sy!r} Z{sz!r} F{LIVE_DEFAULT_SPEED_MM_S * 60.0!r}\n"
-    )
-    cfg = job.config
-    blocks = []
-    consumed = 1
-    text = prefix
-    waypoints: list[dict] = []
-    for block_text in block_texts:
-        text += block_text + "\n"
-        waypoints = engine.parse_gcode(text, cfg.config_text)
-        if len(waypoints) > consumed:
-            blocks.append(waypoints[consumed - 1 :])
-        consumed = len(waypoints)
-    if not waypoints or tuple(waypoints[0]["position"]) != (sx, sy, sz, 0.0):
+    try:
+        waypoints = engine.parse_gcode(job.gcode_text, job.config.config_text)
+    except ValueError as exc:
+        raise AnalysisError(f"print.gcode: {exc}") from exc
+    if tuple(waypoints[0]["position"][:3]) != start:
         raise AnalysisError(
-            f"parsed start {waypoints[0]['position'] if waypoints else None} "
-            f"differs from SET_KINEMATIC_POSITION {start} with E=0"
+            f"parsed start {waypoints[0]['position']} differs from "
+            f"SET_KINEMATIC_POSITION {start}"
         )
+    blocks = split_at_rests(waypoints)
     if not blocks:
         raise AnalysisError("print.gcode contains no motion")
-    return (
-        start,
-        tuple(waypoints[-1]["position"]),
-        [_live_move_limits(job, b) for b in blocks],
-    )
+    return start, tuple(waypoints[-1]["position"]), blocks
 
 
 def _motor_pva_steps(motor: Motor, axes_pva: np.ndarray) -> np.ndarray:

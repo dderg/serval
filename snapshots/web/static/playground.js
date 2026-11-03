@@ -39,7 +39,7 @@ async function defaultGcode() {
     if (resp.ok) return await resp.text();
   } catch (e) { /* offline / stripped-down deploy — fall through */ }
   return [
-    "; Motion playground — edit me. G0/G1, G90/G91, G92, M82/M83.",
+    "; Motion playground — edit me. Commands as on a printer; arcs, retraction, homing and probing are refused.",
     "G90",
     "G1 X0 Y0 F9000",
     "G1 X40 Y0",

@@ -27,10 +27,7 @@ fn cfg() -> StreamConfig {
     }
 }
 fn fit_tol(config: StreamConfig) -> FitTol {
-    FitTol {
-        pos_mm: config.fit_tol_mm,
-        accel_mm_s2: config.fit_tol_accel_mm_s2,
-    }
+    FitTol::absolute(config.fit_tol_mm, config.fit_tol_accel_mm_s2)
 }
 
 fn eval_segment_axis(segment: &ContinuousSegment, axis: usize, t: f64) -> f64 {
@@ -2387,10 +2384,7 @@ fn the_ladder_fits_a_resolution_scale_span_without_high_degree_amplification() {
     let truth_p = |u: f64| position(t_of(u));
     let truth_v = |u: f64| velocity(t_of(u));
     let truth_a = |u: f64| acceleration(t_of(u));
-    let tolerance = crate::lowering::FitTol {
-        pos_mm: 5e-5,
-        accel_mm_s2: 2.5,
-    };
+    let tolerance = crate::lowering::FitTol::absolute(5e-5, 2.5);
     let base = crate::lowering::quintic_in_u(
         (truth_p(-1.0), truth_v(-1.0), truth_a(-1.0)),
         (truth_p(1.0), truth_v(1.0), truth_a(1.0)),
@@ -2484,10 +2478,7 @@ fn a_smooth_cusp_fits_below_the_high_degree_floor_without_bump_corrections() {
     };
     let velocity = |t: f64| base_speed + ramp(t);
     let acceleration = |t: f64| cusp_accel * cusp_accel * (t - cusp_time) / ramp(t);
-    let tolerance = crate::lowering::FitTol {
-        pos_mm: 5e-5,
-        accel_mm_s2: 1.5,
-    };
+    let tolerance = crate::lowering::FitTol::absolute(5e-5, 1.5);
     let high_degree_span_floor = 3.6e-7;
     let mut span_start = t0;
     let span_end = t1;
@@ -2611,10 +2602,7 @@ fn a_constant_acceleration_resolution_span_fits_the_anchored_quadratic() {
     let truth_p = |u: f64| position(t_of(u));
     let truth_v = |u: f64| velocity(t_of(u));
     let truth_a = |_: f64| accel;
-    let tolerance = crate::lowering::FitTol {
-        pos_mm: 3e-5,
-        accel_mm_s2: 1.5,
-    };
+    let tolerance = crate::lowering::FitTol::absolute(3e-5, 1.5);
     let velocity_budget = 1e-6;
     let base = crate::lowering::quintic_in_u(
         (truth_p(-1.0), truth_v(-1.0), truth_a(-1.0)),
@@ -2743,10 +2731,7 @@ fn an_endpoint_anchored_fit_never_steps_the_right_seam() {
     let truth_p = |u: f64| position(t_of(u));
     let truth_v = |u: f64| velocity(t_of(u));
     let truth_a = |u: f64| acceleration(t_of(u));
-    let tolerance = crate::lowering::FitTol {
-        pos_mm: 5e-5,
-        accel_mm_s2: 50.0,
-    };
+    let tolerance = crate::lowering::FitTol::absolute(5e-5, 50.0);
     let base = crate::lowering::quintic_in_u(
         (truth_p(-1.0), truth_v(-1.0), truth_a(-1.0)),
         (truth_p(1.0), truth_v(1.0), truth_a(1.0)),
@@ -2866,10 +2851,7 @@ fn the_closest_rung_at_a_square_root_onset_is_the_closest_between_the_probes() {
             landing.pva(t_of(u)).2
         }
     };
-    let tolerance = crate::lowering::FitTol {
-        pos_mm: 0.005,
-        accel_mm_s2: 50.0,
-    };
+    let tolerance = crate::lowering::FitTol::absolute(0.005, 50.0);
     let base = crate::lowering::quintic_in_u(
         landing.pva(t0),
         (
@@ -2961,10 +2943,7 @@ fn accepted_seed_intervals_do_not_spend_the_split_budget() {
         amplitude: 1.0,
         omega: 300.0,
     };
-    let tolerance = crate::lowering::FitTol {
-        pos_mm: 5e-5,
-        accel_mm_s2: 50.0,
-    };
+    let tolerance = crate::lowering::FitTol::absolute(5e-5, 50.0);
     let dense = |from: f64, to: f64| -> Vec<f64> {
         (0..=600)
             .map(|k| from + (to - from) * f64::from(k) / 600.0)

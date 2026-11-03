@@ -116,7 +116,7 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
       <h1>Motion Playground</h1>
       <button id="gcode-collapse" title="Collapse the gcode pane">⟨</button>
     </div>
-    <div class="hint">Paste G-code below — it re-plans as you type. G0/G1, G90/G91, G92, M82/M83.</div>
+    <div class="hint" title="Refused by name: G2/G3, G5, G10/G11, G28, G20, probing/levelling/calibration, FORCE_MOVE, stepper buzz and resonance tests, SET_PRESSURE_ADVANCE, SET_POST_PROCESSOR, SET_INPUT_SHAPER, BED_MESH_PROFILE/CLEAR/OFFSET, PAUSE/RESUME/CANCEL_PRINT/EXCLUDE_OBJECT, M109/M190/TEMPERATURE_WAIT after the first move. Any other command is ignored, as on a printer.">Paste G-code below — it re-plans as you type, read as the printer reads it: G0/G1, G90/G91, G92, M82/M83, M204, M220/M221, SET_VELOCITY_LIMIT, RESET_VELOCITY_LIMIT, SET_GCODE_OFFSET, SAVE/RESTORE_GCODE_STATE, and G4, M400, M18/M84, SET_KINEMATIC_POSITION as stops at rest. Arcs, firmware retraction, homing and probing are refused (hover for the full list).</div>
     <textarea id="gcode" spellcheck="false"></textarea>
     <div class="error" id="error"></div>
   </div>

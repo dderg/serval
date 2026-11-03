@@ -14,10 +14,7 @@ use crate::shaper::{
 };
 use crate::types::PostProcessError;
 
-const FIT_TOL: FitTol = FitTol {
-    pos_mm: 0.005,
-    accel_mm_s2: 50.0,
-};
+const FIT_TOL: FitTol = FitTol::absolute(0.005, 50.0);
 
 fn table_over(track: &nurbs::ScalarNurbs, first_t: f64, last_t: f64) -> AxisSignalTable {
     AxisSignalTable::from_tracks(

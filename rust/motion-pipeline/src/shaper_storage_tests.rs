@@ -3,10 +3,7 @@ use nurbs::bezier::BezierPiece;
 use crate::lowering::FitTol;
 use crate::shaper::{AxisFit, TrackSignal, apply_derivative_gains_to_track, fit_axis_from_signal};
 
-const BENCH_TOL: FitTol = FitTol {
-    pos_mm: 0.005,
-    accel_mm_s2: 50.0,
-};
+const BENCH_TOL: FitTol = FitTol::absolute(0.005, 50.0);
 const FAR_FROM_ORIGIN_MM: f64 = 300.0;
 
 fn mode_inverse_gains(frequency_hz: f64, damping_ratio: f64) -> (f64, f64) {
