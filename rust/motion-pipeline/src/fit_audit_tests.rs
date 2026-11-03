@@ -1,6 +1,9 @@
+use std::cell::Cell;
+
 use super::{AcceptedPiece, CapContactScope, Exemption, check, take_violations};
 use crate::lowering::{AccelBudget, FitTol, quintic_in_u};
 use crate::shaper::TrackSignal;
+use crate::shaper::exact::{EXACT_CAPACITY, ExactPiece, ExactSpan, LocalPolynomial};
 
 struct SquareRootOnset {
     at: f64,
@@ -40,6 +43,7 @@ fn audit_floor_quintic_at_onset(contacts: &[f64]) -> Vec<super::FitViolation> {
             accepted_at_floor: true,
             cubic_floor: 0.62e-6,
             edge_insets: (0.0, 0.0),
+            exact: None,
         },
     );
     take_violations()
@@ -120,6 +124,7 @@ fn audit_line_against(
             accepted_at_floor: false,
             cubic_floor: 0.62e-6,
             edge_insets,
+            exact: None,
         },
     );
     take_violations()
@@ -186,17 +191,14 @@ impl TrackSignal for PinnedParabola {
 const PINNED_SPAN_S: f64 = 1e-3;
 const FOLLOWER_POSITION_TOL_MM: f64 = 1e-4;
 
-fn audit_flat_piece_over_pinned_parabola(
-    bend_mm_s2: f64,
+fn audit_flat_piece<S: TrackSignal>(
+    sig: &S,
     accel_budget: AccelBudget,
+    exact: Option<&ExactSpan>,
 ) -> Vec<super::FitViolation> {
-    let sig = PinnedParabola {
-        h: PINNED_SPAN_S,
-        bend_mm_s2,
-    };
     take_violations();
     check(
-        &sig,
+        sig,
         AcceptedPiece {
             fit_context: "follower_source",
             axis: 3,
@@ -210,9 +212,21 @@ fn audit_flat_piece_over_pinned_parabola(
             accepted_at_floor: false,
             cubic_floor: 1e-9,
             edge_insets: (0.0, 0.0),
+            exact,
         },
     );
     take_violations()
+}
+
+fn audit_flat_piece_over_pinned_parabola(
+    bend_mm_s2: f64,
+    accel_budget: AccelBudget,
+) -> Vec<super::FitViolation> {
+    let sig = PinnedParabola {
+        h: PINNED_SPAN_S,
+        bend_mm_s2,
+    };
+    audit_flat_piece(&sig, accel_budget, None)
 }
 
 fn position_equivalent_acceleration() -> f64 {
@@ -246,4 +260,106 @@ fn a_follower_piece_bending_past_its_position_budget_breaks_a_position_equivalen
         (violation.acceleration_over_tolerance - 2.0).abs() < 1e-9,
         "{violation:?}"
     );
+}
+
+/// A signal that counts its evaluations.
+struct Counted<S> {
+    signal: S,
+    evaluations: Cell<usize>,
+}
+
+impl<S: TrackSignal> TrackSignal for Counted<S> {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        self.evaluations.set(self.evaluations.get() + 1);
+        self.signal.eval_pva(t)
+    }
+}
+
+fn local(coefficients: &[f64]) -> LocalPolynomial {
+    let mut padded = [0.0; EXACT_CAPACITY];
+    padded[..coefficients.len()].copy_from_slice(coefficients);
+    LocalPolynomial {
+        coefficients: padded,
+        len: coefficients.len(),
+        rounding: 0.0,
+    }
+}
+
+/// The pinned parabola's exact polynomials over `[0, h]`, split into
+/// sub-intervals at `breaks`.
+fn exact_pinned_parabola(sig: &PinnedParabola, breaks: &[f64]) -> ExactSpan {
+    let edges: Vec<f64> = std::iter::once(0.0)
+        .chain(breaks.iter().copied())
+        .chain(std::iter::once(sig.h))
+        .collect();
+    let half_bend = 0.5 * sig.bend_mm_s2;
+    ExactSpan::new(
+        edges
+            .windows(2)
+            .map(|edge| {
+                let (lo, hi) = (edge[0], edge[1]);
+                let (center, radius) = (0.5 * (lo + hi), 0.5 * (hi - lo));
+                ExactPiece {
+                    lo,
+                    hi,
+                    center,
+                    radius,
+                    pva: [
+                        local(&[
+                            half_bend * center * (sig.h - center),
+                            half_bend * radius * (sig.h - 2.0 * center),
+                            -half_bend * radius * radius,
+                        ]),
+                        local(&[half_bend * (sig.h - 2.0 * center), -sig.bend_mm_s2 * radius]),
+                        local(&[-sig.bend_mm_s2]),
+                    ],
+                }
+            })
+            .collect(),
+    )
+}
+
+fn counted_pinned_parabola(bend_mm_s2: f64) -> Counted<PinnedParabola> {
+    Counted {
+        signal: PinnedParabola {
+            h: PINNED_SPAN_S,
+            bend_mm_s2,
+        },
+        evaluations: Cell::new(0),
+    }
+}
+
+#[test]
+fn a_piece_with_exact_polynomials_reads_the_evaluator_once_per_sub_interval() {
+    let sig = counted_pinned_parabola(0.5 * position_equivalent_acceleration());
+    let exact = exact_pinned_parabola(&sig.signal, &[0.3 * PINNED_SPAN_S, 0.7 * PINNED_SPAN_S]);
+    let violations = audit_flat_piece(&sig, AccelBudget::PositionEquivalent, Some(&exact));
+    assert!(violations.is_empty(), "{violations:?}");
+    assert_eq!(sig.evaluations.get(), 3);
+}
+
+#[test]
+fn a_violation_is_measured_off_the_exact_polynomials() {
+    let sig = counted_pinned_parabola(2.0 * position_equivalent_acceleration());
+    let exact = exact_pinned_parabola(&sig.signal, &[0.5 * PINNED_SPAN_S]);
+    let violations = audit_flat_piece(&sig, AccelBudget::PositionEquivalent, Some(&exact));
+    let [violation] = violations.as_slice() else {
+        panic!("a bend of twice the position-equivalent acceleration must be a violation");
+    };
+    assert!(
+        (violation.acceleration_over_tolerance - 2.0).abs() < 1e-9,
+        "{violation:?}"
+    );
+}
+
+#[test]
+#[should_panic(expected = "disagree with the signal's evaluator")]
+fn exact_polynomials_the_evaluator_disagrees_with_fail_the_audit() {
+    let sig = counted_pinned_parabola(0.5 * position_equivalent_acceleration());
+    let disagreeing = PinnedParabola {
+        h: PINNED_SPAN_S,
+        bend_mm_s2: sig.signal.bend_mm_s2 * (1.0 + 1e-4),
+    };
+    let exact = exact_pinned_parabola(&disagreeing, &[]);
+    audit_flat_piece(&sig, AccelBudget::PositionEquivalent, Some(&exact));
 }
