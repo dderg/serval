@@ -1,3 +1,4 @@
+use std::borrow::BorrowMut;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
@@ -104,7 +105,14 @@ pub(crate) trait TrackSignal {
     fn position_rounding_scale(&self, position: f64) -> f64 {
         position.abs()
     }
-    fn acceleration_monotonicity(&self, _start: f64, _end: f64) -> Option<AccelerationTrend> {
+    /// The acceleration's trend over `span` as a fit resolving only
+    /// `resolved` sees it: none across a break anywhere in the span, but a
+    /// smooth extremum in an edge sliver outside `resolved` is not one.
+    fn acceleration_monotonicity(
+        &self,
+        _span: (f64, f64),
+        _resolved: (f64, f64),
+    ) -> Option<AccelerationTrend> {
         None
     }
     fn interior_knots(&self, _start: f64, _end: f64) -> &[f64] {
@@ -187,8 +195,12 @@ impl<S: TrackSignal> TrackSignal for &S {
     fn position_rounding_scale(&self, position: f64) -> f64 {
         S::position_rounding_scale(self, position)
     }
-    fn acceleration_monotonicity(&self, start: f64, end: f64) -> Option<AccelerationTrend> {
-        S::acceleration_monotonicity(self, start, end)
+    fn acceleration_monotonicity(
+        &self,
+        span: (f64, f64),
+        resolved: (f64, f64),
+    ) -> Option<AccelerationTrend> {
+        S::acceleration_monotonicity(self, span, resolved)
     }
     fn interior_knots(&self, start: f64, end: f64) -> &[f64] {
         S::interior_knots(self, start, end)
@@ -795,8 +807,8 @@ fn materialize_source_axis(
 /// Fits the changed sources of every segment in `segments`, one pool job
 /// per axis: each fit reads only its own segment's source, so the batch an
 /// emit needs fans out whole. Returns how many axes it rebuilt.
-fn materialize_changed_sources(
-    segments: &mut [ContinuousSegment],
+fn materialize_changed_sources<S: BorrowMut<ContinuousSegment> + Sync>(
+    segments: &mut [S],
     chains: &AxisChainSet,
     fit_tol: FitTol,
     pool: &WorkerPool,
@@ -805,7 +817,7 @@ fn materialize_changed_sources(
         .iter()
         .enumerate()
         .flat_map(|(index, segment)| {
-            axes_to_materialize(segment, chains).map(move |axis| (index, axis))
+            axes_to_materialize(segment.borrow(), chains).map(move |axis| (index, axis))
         })
         .collect();
     let participants = if cfg!(target_arch = "wasm32") {
@@ -822,14 +834,67 @@ fn materialize_changed_sources(
             || (),
             |(), job| {
                 let (index, axis) = jobs[job];
-                materialize_source_axis(&segments[index], axis, chains, fit_tol)
+                materialize_source_axis(segments[index].borrow(), axis, chains, fit_tol)
             },
         )
         .expect("source materialize thread panicked");
     for (&(index, axis), source) in jobs.iter().zip(fitted) {
-        Arc::make_mut(&mut segments[index].axes)[axis] = source?;
+        Arc::make_mut(&mut segments[index].borrow_mut().axes)[axis] = source?;
     }
     Ok(jobs.len())
+}
+
+/// Fits the shaper's changed sources ahead of it, on the thread that lowers
+/// the segments: a source fit reads only its own segment, so fitting it
+/// before the shaper sees it is the fit the shaper would make, and the
+/// planning side that waits on the shaper does it in parallel instead.
+/// Chain swaps travel in order with the segments, so every segment is
+/// fitted with the chains the shaper shapes it with.
+pub(crate) struct SourceMaterializer {
+    chains: AxisChainSet,
+    fit_tol: FitTol,
+    pool: Arc<WorkerPool>,
+}
+
+impl SourceMaterializer {
+    pub(crate) fn of(shaper: &Shaper) -> Self {
+        Self {
+            chains: shaper.chains.clone(),
+            fit_tol: shaper.fit_tol,
+            pool: Arc::clone(&shaper.pool),
+        }
+    }
+
+    pub(crate) fn materialize(&mut self, items: &mut [BaseItem]) {
+        let started = crate::timing::stopwatch();
+        let mut rest = items;
+        while !rest.is_empty() {
+            let swap = rest
+                .iter()
+                .position(|item| matches!(item, BaseItem::Control(Control::SetAxisChains(_))));
+            let (run, after) = rest.split_at_mut(swap.unwrap_or(rest.len()));
+            let mut segments: Vec<&mut ContinuousSegment> = run
+                .iter_mut()
+                .filter_map(|item| match item {
+                    BaseItem::Seg(segment) => Some(segment),
+                    BaseItem::Drain | BaseItem::Control(_) => None,
+                })
+                .collect();
+            materialize_changed_sources(&mut segments, &self.chains, self.fit_tol, &self.pool)
+                .unwrap_or_else(|error| panic!("shaper: {error}"));
+            let Some((swap, after)) = after.split_first_mut() else {
+                break;
+            };
+            if let BaseItem::Control(Control::SetAxisChains(chains)) = swap {
+                self.chains = chains.clone();
+            }
+            rest = after;
+        }
+        crate::timing::record_stage(
+            crate::timing::Stage::MaterializeSource,
+            started.elapsed_us(),
+        );
+    }
 }
 
 /// An analytic source's materialize seeds — its ends, phase seams and
@@ -1252,7 +1317,7 @@ fn fit_axis_column(
         .or_else(|| base.first())
         .map_or(0.0, |seg| seg.t_start);
     let last_t = base.last().map_or(first_t, |seg| seg.t_end);
-    let signal_segments: Vec<&ContinuousSegment> = history.iter().chain(base.iter()).collect();
+    let window_segments: Vec<&ContinuousSegment> = history.iter().chain(base.iter()).collect();
     for seg in targets {
         let need_lo = seg.t_start - k_hi;
         let need_hi = seg.t_end - k_lo;
@@ -1263,22 +1328,29 @@ fn fit_axis_column(
             return Err(PostProcessError::MissingLookahead { axis, t: need_hi });
         }
     }
-    if let Some(column) = constant_axis_column(&signal_segments, targets, axis) {
+    let (signal_segments, bounds) = read_window(
+        &window_segments,
+        (
+            targets[0].t_start - k_hi,
+            targets[targets.len() - 1].t_end - k_lo,
+        ),
+        SignalBounds {
+            first_t,
+            last_t,
+            boundary,
+            lookahead,
+        },
+    );
+    if let Some(column) = constant_axis_column(signal_segments, targets, axis) {
         return Ok(Some(column));
     }
-    let bounds = SignalBounds {
-        first_t,
-        last_t,
-        boundary,
-        lookahead,
-    };
     fit_axis_targets(
         axis,
         targets,
         ShapedSignalSource::new(
             kernel,
-            signal.convolution_input(AxisSignalTable::build(&signal_segments, axis, bounds)),
-            signal_breakpoints(&signal_segments, axis),
+            signal.convolution_input(AxisSignalTable::build(signal_segments, axis, bounds)),
+            signal_breakpoints(signal_segments, axis),
             targets[0].t_start,
         ),
         fit_tol,
@@ -1287,6 +1359,49 @@ fn fit_axis_column(
         pool,
     )
     .map(Some)
+}
+
+/// The segments a convolution over `[read_lo, read_hi]` reads, one segment
+/// of margin on each side so the edges of the slice (and a gain impulse a
+/// cut edge carries) stay outside every read, with the bounds of that
+/// slice: an edge that is not the window's own is an interior cut.
+fn read_window<'s, 'a>(
+    segments: &'s [&'a ContinuousSegment],
+    (read_lo, read_hi): (f64, f64),
+    window: SignalBounds,
+) -> (&'s [&'a ContinuousSegment], SignalBounds) {
+    let lo = segments
+        .partition_point(|seg| seg.t_start <= read_lo)
+        .saturating_sub(2);
+    let hi = (segments.partition_point(|seg| seg.t_start <= read_hi) + 1).min(segments.len());
+    let slice = &segments[lo..hi];
+    let at_window_start = lo == 0;
+    let at_window_end = hi == segments.len();
+    (
+        slice,
+        SignalBounds {
+            first_t: if at_window_start {
+                window.first_t
+            } else {
+                slice[0].t_start
+            },
+            last_t: if at_window_end {
+                window.last_t
+            } else {
+                slice[slice.len() - 1].t_end
+            },
+            boundary: if at_window_start {
+                window.boundary
+            } else {
+                FitBoundary::Interior
+            },
+            lookahead: if at_window_end {
+                window.lookahead
+            } else {
+                Lookahead::Required
+            },
+        },
+    )
 }
 
 /// The convolution's input for one axis, packaged for the target fits: the
@@ -3295,7 +3410,8 @@ fn acceleration_error_witness<S: TrackSignal>(
     t1: f64,
     budget: f64,
 ) -> Option<f64> {
-    sig.acceleration_monotonicity(next_toward(t0, t1), next_toward(t1, t0))?;
+    let span = (next_toward(t0, t1), next_toward(t1, t0));
+    sig.acceleration_monotonicity(span, span)?;
     let h = t1 - t0;
     let acceleration = exact_piece(coefficients, 0.0, h, h)
         .differentiate()
@@ -4316,7 +4432,10 @@ fn shaped_ladder<S: TrackSignal>(
         },
         LadderPolicy {
             velocity_sign: policy.velocity_sign,
-            acceleration_monotonicity: sig.acceleration_monotonicity(t0_inside, t1_inside),
+            acceleration_monotonicity: sig.acceleration_monotonicity(
+                (t0_inside, t1_inside),
+                (start_past_sliver, end_past_sliver),
+            ),
             high_degree_span_floor: policy.floors.high_degree,
             velocity_continuous: policy.velocity_continuous,
         },
@@ -4682,7 +4801,10 @@ fn refine_span_against<S: TrackSignal>(
             && failure.error.velocity <= velocity_budget
             && (at_resolution_floor || t1 - t0 <= floors.high_degree)
             && sig
-                .acceleration_monotonicity(next_toward(t0, t1), next_toward(t1, t0))
+                .acceleration_monotonicity(
+                    (next_toward(t0, t1), next_toward(t1, t0)),
+                    (next_toward(t0, t1), next_toward(t1, t0)),
+                )
                 .is_none()
         {
             let velocity_change = failure.right.velocity - failure.left.velocity;
@@ -4979,6 +5101,32 @@ pub(crate) fn apply_nonlinear_advance_to_track(
     adv: trajectory::NonlinearAdvance,
     fit_tol: FitTol,
 ) -> Result<nurbs::ScalarNurbs, PostProcessError> {
+    with_nonlinear_advance_fit(axis, track, adv, fit_tol, |fit, sig| {
+        fit_axis_from_signal(fit, sig)
+    })
+}
+
+/// The shortest span the nonlinear-advance refit of `track` resolves: seed
+/// times closer than this to a kept seed are coalesced onto it.
+#[cfg(test)]
+pub(crate) fn nonlinear_advance_resolution_floor(
+    axis: usize,
+    track: &nurbs::ScalarNurbs,
+    adv: trajectory::NonlinearAdvance,
+    fit_tol: FitTol,
+) -> Result<f64, PostProcessError> {
+    with_nonlinear_advance_fit(axis, track, adv, fit_tol, |fit, sig| {
+        Ok(plan_seeds_and_floors(&fit, sig)?.1.cubic)
+    })
+}
+
+fn with_nonlinear_advance_fit<R>(
+    axis: usize,
+    track: &nurbs::ScalarNurbs,
+    adv: trajectory::NonlinearAdvance,
+    fit_tol: FitTol,
+    fit: impl FnOnce(AxisFit, &NonlinearAdvanceSignal) -> R,
+) -> R {
     let sig = NonlinearAdvanceSignal::new(track, adv);
     let pieces = extract_bezier_pieces(track);
     let t_start = pieces
@@ -4988,7 +5136,7 @@ pub(crate) fn apply_nonlinear_advance_to_track(
     let t_end = pieces.last().expect("nonlinear advance: empty track").u_end;
     let mut breakpoints = track.knots().to_vec();
     breakpoints.extend(nonlinear_transition_breakpoints(&sig));
-    fit_axis_from_signal(
+    fit(
         AxisFit {
             axis,
             t_start,
@@ -5251,7 +5399,11 @@ impl TrackSignal for NonlinearAdvanceSignal {
         )
     }
 
-    fn acceleration_monotonicity(&self, start: f64, end: f64) -> Option<AccelerationTrend> {
+    fn acceleration_monotonicity(
+        &self,
+        (start, end): (f64, f64),
+        (resolved_start, resolved_end): (f64, f64),
+    ) -> Option<AccelerationTrend> {
         let piece = self.piece_at(start);
         if self.piece_at(end) != piece
             || self.coeffs[piece]
@@ -5277,9 +5429,9 @@ impl TrackSignal for NonlinearAdvanceSignal {
                 let second = self.starts[piece] + (extremum - initial_velocity) / acceleration;
                 let lower = first.min(second);
                 let upper = first.max(second);
-                if end <= lower || start >= upper {
+                if resolved_end <= lower || resolved_start >= upper {
                     Some(AccelerationTrend::of_direction(direction))
-                } else if start >= lower && end <= upper {
+                } else if resolved_start >= lower && resolved_end <= upper {
                     Some(AccelerationTrend::of_direction(-direction))
                 } else {
                     None

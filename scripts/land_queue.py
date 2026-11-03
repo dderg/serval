@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -43,6 +45,7 @@ DEFAULT_TREES = Path("~/.cache/land-queue").expanduser()
 FLAKY_WORKFLOW = "Sim e2e"
 MAX_FLAKE_RERUNS = 1
 RERUN_SETTLE_SECONDS = 30
+REEXEC_VAR = "LAND_QUEUE_REEXEC"
 
 
 class QueueError(RuntimeError):
@@ -255,7 +258,36 @@ def process(entry: Entry, queue: Path, trees: Path) -> None:
     land(tree, entry, body_file.read_text())
 
 
+def reexec_current_copy() -> None:
+    if os.environ.get(REEXEC_VAR):
+        return
+    pending.run(["git", "fetch", "-q", "origin"], ROOT)
+    fresh = Path(tempfile.mkdtemp(prefix="land-queue-"))
+    archive = subprocess.run(
+        ["git", "archive", "origin/main", "scripts"],
+        cwd=ROOT,
+        capture_output=True,
+        check=True,
+    ).stdout
+    subprocess.run(["tar", "-x", "-C", str(fresh)], input=archive, check=True)
+    current = fresh / "scripts" / Path(__file__).name
+    if current.read_bytes() == Path(__file__).read_bytes():
+        shutil.rmtree(fresh)
+        return
+    print(
+        "land_queue: this copy differs from origin/main's; running origin/main's",
+        file=sys.stderr,
+        flush=True,
+    )
+    os.execve(
+        sys.executable,
+        [sys.executable, str(current), *sys.argv[1:]],
+        {**os.environ, REEXEC_VAR: "1", "SERVAL_REPO_ROOT": str(ROOT)},
+    )
+
+
 def main() -> int:
+    reexec_current_copy()
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,

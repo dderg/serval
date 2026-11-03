@@ -13,6 +13,25 @@
 # the failed run's log.
 set -euo pipefail
 
+reexec_current_copy() {
+    [ -z "${LAND_PR_REEXEC:-}" ] || return 0
+    local top fresh
+    top="$(git rev-parse --show-toplevel)" || { echo "land-pr: run it inside the repository" >&2; exit 1; }
+    git -C "$top" fetch -q origin || { echo "land-pr: git fetch origin failed" >&2; exit 1; }
+    fresh="$(mktemp -d)"
+    git -C "$top" show origin/main:scripts/land-pr.sh >"$fresh/land-pr.sh" \
+        || { echo "land-pr: origin/main has no scripts/land-pr.sh" >&2; exit 1; }
+    git -C "$top" show origin/main:scripts/gh_util.py >"$fresh/gh_util.py" \
+        || { echo "land-pr: origin/main has no scripts/gh_util.py" >&2; exit 1; }
+    if cmp -s "$fresh/land-pr.sh" "$0"; then
+        rm -rf "$fresh"
+        return 0
+    fi
+    echo "land-pr: this copy differs from origin/main's; running origin/main's" >&2
+    LAND_PR_REEXEC=1 GH_UTIL="$fresh/gh_util.py" exec bash "$fresh/land-pr.sh" "$@"
+}
+reexec_current_copy "$@"
+
 FAILED_LOG_TAIL_LINES=80
 POLL_SECONDS=60
 MAX_UPDATES=3

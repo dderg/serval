@@ -125,12 +125,15 @@ job_rust_fuzz() {
 }
 
 # The fit audit checks every accepted fit piece densely and slows the
-# pipeline ~2.5x, so it is compiled only here: as a feature of the default
+# pipeline ~2x, so it is compiled only here: as a feature of the default
 # test build it would unify into every workspace test binary.
 job_rust_fit_audit() {
     cd "$RUST"
+    host_cargo nextest run --profile ci -p motion-pipeline --features fit-audit \
+        -E 'test(/^fit_audit::/)'
     host_cargo nextest run --profile ci -p pipeline-snapshot --features fit-audit \
         --test fit_tolerance
+    cargo clippy -p motion-pipeline --features fit-audit --all-targets -- -D warnings
     cargo clippy -p pipeline-snapshot --features fit-audit --all-targets -- -D warnings
 }
 
