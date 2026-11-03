@@ -195,7 +195,7 @@ def main() -> None:
         return
     base = AB_DIR / datetime.now().strftime("%Y%m%d-%H%M%S")
     with lock.bench_lock(args.lock_timeout, command=" ".join(sys.argv)):
-        os.environ[lock.TOKEN_ENV] = str(os.getpid())
+        lock.export_holder_token()
         by_ref = {ref: ab_ref(ref, args, base) for ref in args.ref}
     print_report(args.ref, by_ref)
     print(f"\nruns under {base}")
