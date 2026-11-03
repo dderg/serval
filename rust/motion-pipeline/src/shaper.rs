@@ -10,10 +10,9 @@ use trajectory::{
 
 use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
-    AccelBudget, AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE, LADDER_PROBES_U,
-    LadderBudget, LadderFailure, LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth,
-    VelocitySign, eval_mono, eval_mono_d, eval_mono_dd, exact_piece, held_miss, ladder_fit,
-    quintic_in_u,
+    AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget,
+    LadderFailure, LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth, VelocitySign,
+    eval_mono, eval_mono_d, eval_mono_dd, exact_piece, held_miss, ladder_fit, quintic_in_u,
 };
 use crate::types::{BaseItem, Control, PostProcessError, TrajectoryItem};
 use crate::worker_pool::WorkerPool;
@@ -119,6 +118,25 @@ pub(crate) trait TrackSignal {
     fn exact_polynomial_on(&self, _lo: f64, _hi: f64) -> Option<Vec<ExactPiece>> {
         None
     }
+    /// What a rung that passes the probes is held against between them,
+    /// where the signal has no exact polynomials.
+    fn between_probes(&self) -> BetweenProbes {
+        BetweenProbes::ErrorInterpolant
+    }
+}
+
+/// How a rung is held between two samples of a signal with no exact
+/// polynomials.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BetweenProbes {
+    /// Against the error's cubic Hermite interpolant: the rung and the truth
+    /// interpolated together.
+    ErrorInterpolant,
+    /// Against the truth's quintic Hermite interpolant, the rung read
+    /// exactly. A signal composed from other tracks' pieces bends between
+    /// samples where the high-degree rungs fitted to it swing, and an
+    /// interpolant of their difference follows neither.
+    TruthInterpolant,
 }
 
 impl TrackSignal for ContinuousAxis {
@@ -165,6 +183,9 @@ impl<S: TrackSignal> TrackSignal for &S {
     }
     fn exact_polynomial_on(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
         S::exact_polynomial_on(self, lo, hi)
+    }
+    fn between_probes(&self) -> BetweenProbes {
+        S::between_probes(self)
     }
 }
 
@@ -3404,7 +3425,7 @@ struct RungWitness<'a, S> {
     t0: f64,
     h: f64,
     fit_tol: FitTol,
-    accel_budget: AccelBudget,
+    between_probes: BetweenProbes,
 }
 
 /// The stretch of a span its fit resolves, and which of its edges anchor
@@ -3723,9 +3744,9 @@ impl<S: TrackSignal> RungWitness<'_, S> {
         if right.position.u <= left.position.u {
             return Ok(None);
         }
-        let acceleration = match self.accel_budget {
-            AccelBudget::Absolute => self.acceleration_between(left, right, 0)?,
-            AccelBudget::PositionEquivalent => {
+        let acceleration = match self.between_probes {
+            BetweenProbes::ErrorInterpolant => self.acceleration_between(left, right, 0)?,
+            BetweenProbes::TruthInterpolant => {
                 self.acceleration_against_hermite_truth(left, right, 0)?
             }
         };
@@ -3763,13 +3784,14 @@ impl<S: TrackSignal> RungWitness<'_, S> {
     /// held against the truth's quintic Hermite interpolant rather than
     /// the error's: the rung is known exactly, and a high-degree rung swings
     /// between samples where no interpolant of the error follows it. The
-    /// position-equivalent budget accepts such rungs: its curvature error
-    /// runs to `8·ε/h²`, hundreds of mm/s² on an advanced extruder whose
-    /// signal swings by tens of thousands. The stretch's exact midpoint
-    /// measures how far the truth leaves its interpolant, and a stretch
-    /// whose estimate and that miss together reach the budget is split
-    /// there. The absolute budget keeps the error's interpolant, which the
-    /// fit audit already holds every absolute fit to.
+    /// stretch's exact midpoint measures how far the truth leaves its
+    /// interpolant; a stretch whose estimate and that miss together stay
+    /// under the suspicion share of the budget holds, one past the budget is
+    /// split there, and one in between is read exactly. So is a stretch
+    /// still past the budget at the deepest split: there the truth's
+    /// interpolant is rebuilt from samples a hair apart, whose positions'
+    /// rounding — an extruder's odometer integrates adaptively — swamps the
+    /// curvature it reconstructs, and only an exact sample may reject.
     fn acceleration_against_hermite_truth(
         &self,
         left: ErrorSample,
@@ -3787,11 +3809,12 @@ impl<S: TrackSignal> RungWitness<'_, S> {
             return Ok(Some(u));
         }
         let truth_miss = (mid.curvature_per_u2 - self.curvature_error_against(&truth, u)).abs();
-        if estimated_peak + truth_miss <= self.curvature_budget() {
+        let bound = estimated_peak + truth_miss;
+        if bound <= INTERPOLANT_SUSPICION_SHARE * self.curvature_budget() {
             return Ok(None);
         }
-        if depth == WITNESS_MAX_DEPTH {
-            return Ok(Some(u));
+        if bound <= self.curvature_budget() || depth == WITNESS_MAX_DEPTH {
+            return self.exact_witness_in(left.position.u, right.position.u);
         }
         match self.acceleration_against_hermite_truth(left, mid, depth + 1)? {
             Some(u) => Ok(Some(u)),
@@ -4123,7 +4146,7 @@ fn shaped_ladder<S: TrackSignal>(
                         t0,
                         h,
                         fit_tol: piece_tol,
-                        accel_budget: fit_tol.accel_budget,
+                        between_probes: sig.between_probes(),
                     },
                     t1,
                     &truth,
