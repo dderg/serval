@@ -58,7 +58,14 @@ class CartographerMcuStub(BeaconMcuStub):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self._sample_thread: threading.Thread | None = None
         self._sample_thread_lock = threading.Lock()
+
+    def stop(self) -> None:
+        super().stop()
+        if self._sample_thread is not None:
+            self._sample_thread.join(timeout=2.0)
+            self._sample_thread = None
 
     def _start_sample_thread(self) -> None:
         with self._sample_thread_lock:

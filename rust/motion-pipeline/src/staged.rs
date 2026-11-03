@@ -129,30 +129,29 @@ impl ShaperInbox {
 
 impl StagedPipeline {
     pub fn feed(&mut self, item: StreamInput) -> bool {
-        let mut lowered = Vec::new();
-        let fed = self.front.feed(item, &mut |item| {
-            lowered.push(item);
-            true
-        });
-        self.deliver(lowered) && fed
+        let (front, mut handoff) = self.handoff();
+        front.feed(item, &mut handoff)
     }
 
     pub fn idle(&mut self) -> bool {
-        let mut lowered = Vec::new();
-        let idled = self.front.idle(&mut |item| {
-            lowered.push(item);
-            true
-        });
-        self.deliver(lowered) && idled
+        let (front, mut handoff) = self.handoff();
+        front.idle(&mut handoff)
     }
 
-    fn deliver(&mut self, mut lowered: Vec<BaseItem>) -> bool {
+    /// The planning front and what it hands each lowered item to: the
+    /// item's sources are fitted, then it is queued for the shaper. One item
+    /// at a time, so the shaper starts on a planned window's first segment
+    /// while the rest of the window is still being fitted.
+    fn handoff(&mut self) -> (&mut PlanningFront, impl FnMut(BaseItem) -> bool + '_) {
         let inbox = self
             .shaper_inbox
             .as_mut()
             .expect("pipeline already finished");
-        self.materializer.materialize(&mut lowered);
-        lowered.into_iter().all(|item| inbox.send(item))
+        let materializer = &mut self.materializer;
+        (&mut self.front, move |mut item| {
+            materializer.materialize(std::slice::from_mut(&mut item));
+            inbox.send(item)
+        })
     }
 
     /// Segments the planning side has committed to the shaper so far.
@@ -167,13 +166,11 @@ impl StagedPipeline {
 
     /// Flush every stage into the sink and wait for the shaper to finish.
     pub fn finish(&mut self) -> bool {
-        let mut lowered = Vec::new();
-        let flushed = self.front.finish(&mut |item| {
-            lowered.push(item);
-            true
-        });
-        let finish_sent = self.deliver(lowered)
-            && flushed
+        let flushed = {
+            let (front, mut handoff) = self.handoff();
+            front.finish(&mut handoff)
+        };
+        let finish_sent = flushed
             && self
                 .shaper_inbox
                 .as_ref()

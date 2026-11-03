@@ -54,6 +54,7 @@ OFFSET_SEARCH_BIN_S = 1e-3
 FIT_WINDOWS_S = (10e-3, 2e-3, 2e-3, 2e-3)
 REPORT_MATCH_WINDOW_S = 100e-3
 PAIR_WINDOW_S = 2e-3
+NS_PER_S = 1e9
 EPOCH_DURATION_TOLERANCE_S = 1.0
 EPOCH_DURATION_TOLERANCE_FRACTION = 0.5
 TIMING_TOLERANCE_US = 50.0
@@ -727,6 +728,39 @@ def _step_keys(events: StepEvents) -> np.ndarray:
     return events.level * 2 + (events.direction > 0)
 
 
+def _key_time_composite(
+    query_key: np.ndarray,
+    query_t: np.ndarray,
+    ref_key: np.ndarray,
+    ref_t: np.ndarray,
+    margin_s: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    keys, rank = np.unique(
+        np.concatenate([ref_key, query_key]), return_inverse=True
+    )
+    ref_rank, query_rank = rank[: ref_key.size], rank[ref_key.size :]
+    t_floor = min(ref_t.min(), query_t.min()) - margin_s
+    span_ns = (
+        int(
+            np.ceil(
+                (max(ref_t.max(), query_t.max()) - t_floor + margin_s)
+                * NS_PER_S
+            )
+        )
+        + 1
+    )
+    if keys.size * span_ns >= 1 << 62:
+        raise AnalysisError(
+            f"{keys.size} step keys over {span_ns} ns overflow the key/time index"
+        )
+    ref_ns = np.rint((ref_t - t_floor) * NS_PER_S).astype(np.int64)
+    query_ns = np.rint((query_t - t_floor) * NS_PER_S).astype(np.int64)
+    order = np.argsort(ref_rank * span_ns + ref_ns, kind="stable")
+    ref_composite = (ref_rank * span_ns + ref_ns)[order]
+    query_composite = query_rank * span_ns + query_ns
+    return order, ref_composite, query_composite, span_ns
+
+
 def nearest_same_key(
     query_key: np.ndarray,
     query_t: np.ndarray,
@@ -737,18 +771,10 @@ def nearest_same_key(
     delta = np.full(query_t.size, np.inf)
     if query_t.size == 0 or ref_t.size == 0:
         return nearest, delta
-    order = np.lexsort((ref_t, ref_key))
+    order, ref_composite, query_composite, _ = _key_time_composite(
+        query_key, query_t, ref_key, ref_t, 0.0
+    )
     sorted_key, sorted_t = ref_key[order], ref_t[order]
-    key_floor = min(sorted_key.min(), query_key.min())
-    t_floor = min(sorted_t.min(), query_t.min())
-    span = max(sorted_t.max(), query_t.max()) - t_floor + 1.0
-    ref_composite = (sorted_key - key_floor) * span + (sorted_t - t_floor)
-    query_composite = (query_key - key_floor) * span + (query_t - t_floor)
-    resolution = np.spacing(max(ref_composite.max(), query_composite.max()))
-    if resolution > 1e-8:
-        raise AnalysisError(
-            f"step-key composite resolution {resolution:.2e}s too coarse"
-        )
     position = np.searchsorted(ref_composite, query_composite)
     for candidate in (position - 1, position):
         valid = (candidate >= 0) & (candidate < sorted_t.size)
@@ -1035,28 +1061,13 @@ def same_key_count(
 ) -> np.ndarray:
     if query_t.size == 0 or ref_t.size == 0:
         return np.zeros(query_t.size, np.int64)
-    order = np.lexsort((ref_t, ref_key))
-    sorted_key, sorted_t = ref_key[order], ref_t[order]
-    key_floor = min(sorted_key.min(), query_key.min())
-    t_floor = min(sorted_t.min(), query_t.min()) - REPORT_MATCH_WINDOW_S
-    span = (
-        max(sorted_t.max(), query_t.max())
-        - t_floor
-        + REPORT_MATCH_WINDOW_S
-        + 1.0
+    _, ref_composite, query_composite, _ = _key_time_composite(
+        query_key, query_t, ref_key, ref_t, REPORT_MATCH_WINDOW_S
     )
-    ref_composite = (sorted_key - key_floor) * span + (sorted_t - t_floor)
-    query_composite = (query_key - key_floor) * span + (query_t - t_floor)
-    resolution = np.spacing(max(ref_composite.max(), query_composite.max()))
-    if resolution > 1e-8:
-        raise AnalysisError(
-            f"step-key composite resolution {resolution:.2e}s too coarse"
-        )
+    window_ns = round(REPORT_MATCH_WINDOW_S * NS_PER_S)
     return np.searchsorted(
-        ref_composite, query_composite + REPORT_MATCH_WINDOW_S, "right"
-    ) - np.searchsorted(
-        ref_composite, query_composite - REPORT_MATCH_WINDOW_S, "left"
-    )
+        ref_composite, query_composite + window_ns, "right"
+    ) - np.searchsorted(ref_composite, query_composite - window_ns, "left")
 
 
 def _is_pair(

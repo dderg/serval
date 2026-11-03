@@ -18,7 +18,9 @@ pub mod vec3;
 pub mod velocity;
 
 pub use error::GeometryError;
-pub use fitter::{CornerFitConfig, FitError, UnblendReason, seam_requires_stop};
+pub use fitter::{
+    CornerFitConfig, FitError, SEAM_VELOCITY_STEP_MM_S, UnblendReason, seam_requires_stop,
+};
 pub use frontend::{
     CORNER_DEVIATION_SCV_FACTOR, ExtruderCaps, FrontendError, Move, MoveContext, VelocityLimits,
     corner_deviation_from_scv, line_move, scv_from_corner_deviation,
