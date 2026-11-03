@@ -21,8 +21,8 @@
 //!
 //! The rail is the motion its interpolant describes, and that motion is
 //! what every later stage plans, shapes and fits against. The integrator
-//! places its knots so each pair provably holds two things
-//! ([`defect`]): its acceleration stays within
+//! places its knots so each pair provably holds two things — bounded by
+//! Taylor models of its interpolant: its acceleration stays within
 //! [`RAIL_ACCELERATION_DEFECT`] of the law `a(s, v)` read at its own
 //! interpolated state — so its acceleration budget and its disk hold to
 //! that — and its arc stays within [`RAIL_ARC_DEFECT`] of the integral of
