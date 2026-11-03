@@ -18,9 +18,10 @@ shaped. Snapshot generation runs the same four stages synchronously through
 `motion_pipeline::Pipeline`; numerical parallel work within a stage remains.
 That parallel work — leader target and span fits, follower source and
 kernel fits, arc lengths — fans out on the shaper's persistent worker pool
-(`kalico-shaper-N` threads, spawned on the first fan-out): the shaper's own
-thread takes jobs alongside whichever helpers are idle, results merge in job
-order, and a job's panic resurfaces on the shaper thread.
+(`kalico-shaper-N` threads, one per spare core up to three, spawned on the
+first fan-out): the shaper's own thread takes jobs alongside whichever
+helpers are idle, results merge in job order, and a job's panic resurfaces
+on the shaper thread.
 
 The core idea: **resonance suppression and mechanical compensation are
 per-axis linear operators on the planned trajectory**, and there are exactly
