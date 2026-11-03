@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Usage:
 #   ./scripts/ci.sh                 # run all gates with a summary (local)
-#   ./scripts/ci.sh quick           # fast subset: ruff + rust test/clippy/fmt
+#   ./scripts/ci.sh quick           # fast subset: ruff + rust test/clippy/fmt (gates run concurrently)
 #   ./scripts/ci.sh install-hooks   # enable the pre-push hook (runs `quick` per push)
 #   ./scripts/ci.sh <job>           # run one gate, exit with its status (CI)
 #   ./scripts/ci.sh -v <job>        # stream the gate's output live
@@ -21,9 +21,22 @@
 set -uo pipefail
 
 # A CARGO_TARGET_DIR leaked from another task's shell would send every build
-# and cached engine into someone else's directory. Gates use the worktree's
-# own rust/target unless the caller opts in (integrate_stack.py does).
-[ -n "${CI_KEEP_CARGO_TARGET_DIR:-}" ] || unset CARGO_TARGET_DIR
+# and cached engine into someone else's directory, so an inherited value is
+# dropped unless the caller opts in (integrate_stack.py does). CI_SHARED_TARGET=1
+# points the gates at one target dir for all worktrees: a fresh worktree's
+# `quick` then took 83 s against 221 s with its own cold rust/target. It is
+# opt-in because cargo reuses a test binary built from identical sources in
+# another worktree, and tests that bake env!("CARGO_MANIFEST_DIR") in at
+# compile time (c-api headers_no_drift, nurbs geomdl_oracle, runtime-contract
+# sample_wire_tests) then read the other worktree's files and fail once it is
+# removed.
+SHARED_TARGET_DIR="${SERVAL_TARGET_DIR:-$HOME/.cache/serval-target}"
+if [ -z "${CI_KEEP_CARGO_TARGET_DIR:-}" ]; then
+    unset CARGO_TARGET_DIR
+    if [ -n "${CI_SHARED_TARGET:-}" ] && [ -z "${GITHUB_ACTIONS:-}" ]; then
+        export CARGO_TARGET_DIR="$SHARED_TARGET_DIR"
+    fi
+fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST="$ROOT/rust"
@@ -100,15 +113,22 @@ job_rust_test() {
 # Every proptest suite (tests/*fuzz*.rs, *proptest*.rs, property_*.rs) at a
 # case count far above the per-file default, with a fresh random seed per
 # run. rust-test already runs the same suites at their defaults; this gate is
-# the one that keeps exploring. Suites that run the whole streaming pipeline
+# the one that keeps exploring. FUZZ_PARTITION=N/M runs shard N of M (the PR
+# workflow uses 3) and FUZZ_NEXTEST_PROFILE picks the nextest profile (the
+# nightly run uses the one without the 180 s limit). Suites that run the whole streaming pipeline
 # per case cost ~20 ms each, so they take a 64th of the count.
 job_rust_fuzz() {
     cd "$RUST"
     local cases="${PROPTEST_CASES:-20000}"
-    local pipeline='binary(seam_schedule_fuzz) | binary(planner_fuzz)'
-    PROPTEST_CASES="$cases" host_cargo nextest run --workspace --profile ci \
+    local pipeline='binary(seam_schedule_fuzz) | binary(planner_fuzz) | binary(planner_conservation_fuzz)'
+    local profile="${FUZZ_NEXTEST_PROFILE:-ci}"
+    local partition=()
+    [ -z "${FUZZ_PARTITION:-}" ] || partition=(--partition "hash:$FUZZ_PARTITION")
+    PROPTEST_CASES="$cases" host_cargo nextest run --workspace --profile "$profile" \
+        ${partition[@]+"${partition[@]}"} \
         -E "(binary(/fuzz|proptest|^property_/) | test(/ripple_fuzz::/)) - ($pipeline)" || return 1
-    PROPTEST_CASES="$((cases / 64))" host_cargo nextest run --workspace --profile ci \
+    PROPTEST_CASES="$((cases / 64))" host_cargo nextest run --workspace --profile "$profile" \
+        ${partition[@]+"${partition[@]}"} \
         -E "$pipeline"
 }
 
@@ -317,11 +337,19 @@ job_sim_e2e() { "$ROOT/tools/sim/run.sh" test "$@"; }
 # fitter merges ~10 slicer moves into each planned move here and the planner
 # re-plans every 64 planned moves, so a healthy stream goes ~650 slicer moves
 # without output; a planner that cannot commit past a layer change holds
-# thousands (3480 before the finality barrier alone gated commits).
+# thousands (3480 before the finality barrier alone gated commits). Every
+# config under tools/bench/configs then replays the same print through the
+# same live construction, held only to finishing: the snapshot path plans
+# those configs in rust-fit-audit, so a panic here is a live/snapshot split.
 job_replay_budget() {
     cd "$RUST" && cargo run --release -p motion-core --example gcode_replay_bench -- \
         "$ROOT/tools/sim/gcode/voron_dense_top_layers.gcode" \
-        --config "$ROOT/tools/bench/printer.cfg" --min-worst-x 1.3 --max-held-moves 1000
+        --config "$ROOT/tools/bench/printer.cfg" --min-worst-x 1.3 --max-held-moves 1000 || return
+    local config
+    for config in "$ROOT"/tools/bench/configs/*.cfg; do
+        cargo run --release -p motion-core --example gcode_replay_bench -- \
+            "$ROOT/tools/sim/gcode/voron_dense_top_layers.gcode" --config "$config" || return
+    done
 }
 
 job_docs() { cd "$ROOT/docs/_kalico" && uv run mkdocs build --strict; }
@@ -344,9 +372,8 @@ tally() { sed -e '/^[[:space:]]*$/d' -e 's/^[[:space:]]*//' "$1" | tail -1 | cut
 
 job_log() { mkdir -p "$LOG_DIR"; echo "$LOG_DIR/$1.log"; }
 
-run_check() {
+execute_check() {
     local name="$1"; shift
-    printf '%-20s ' "$name"
     local log rc=0
     log="$(job_log "$name")"
     # Standalone statement, NOT `... && rc=0 || rc=$?`: in a `&&`/`||`
@@ -355,6 +382,16 @@ run_check() {
     # nextest run could hide behind passing doc-tests.
     ( set -e; "$@" ) >"$log" 2>&1
     rc=$?
+    echo "$rc" >"$log.rc"
+}
+
+report_check() {
+    local name="$1"
+    printf '%-20s ' "$name"
+    local log rc
+    log="$(job_log "$name")"
+    rc="$(cat "$log.rc")"
+    rm -f "$log.rc"
     if [ "$rc" -eq 0 ]; then
         printf '\033[1;32mPASS\033[0m  %s  \033[2m[%s]\033[0m\n' \
             "$(tally "$log")" ".ci-logs/$name.log"; PASS=$((PASS + 1))
@@ -366,15 +403,48 @@ run_check() {
     return "$rc"
 }
 
+run_check() {
+    execute_check "$@"
+    report_check "$1"
+}
+
+# The quick gates are independent (cargo serialises only the compile step on
+# the target dir lock, not a test run), so they run concurrently and report in
+# a fixed order: wall time is the slowest gate, not the sum.
+run_quick_gates() {
+    local gates=(
+        "ruff job_ruff"
+        "rust-test job_rust_test"
+        "rust-fit-audit job_rust_fit_audit"
+        "rust-clippy job_rust_clippy"
+        "rust-fmt job_rust_fmt"
+        "public-api job_public_api"
+        "watchdog-canary job_watchdog_canary"
+    )
+    local gate
+    for gate in "${gates[@]}"; do
+        # shellcheck disable=SC2086
+        execute_check $gate &
+    done
+    wait
+    for gate in "${gates[@]}"; do
+        report_check "${gate%% *}" || true
+    done
+}
+
 run_all() {
     local quick="${1:-false}"
-    run_check "ruff"            job_ruff
-    run_check "rust-test"       job_rust_test
-    run_check "rust-fit-audit"  job_rust_fit_audit
-    run_check "rust-clippy"     job_rust_clippy
-    run_check "rust-fmt"        job_rust_fmt
-    run_check "public-api"      job_public_api
-    run_check "watchdog-canary" job_watchdog_canary
+    if [ "$quick" = "true" ]; then
+        run_quick_gates
+    else
+        run_check "ruff"            job_ruff
+        run_check "rust-test"       job_rust_test
+        run_check "rust-fit-audit"  job_rust_fit_audit
+        run_check "rust-clippy"     job_rust_clippy
+        run_check "rust-fmt"        job_rust_fmt
+        run_check "public-api"      job_public_api
+        run_check "watchdog-canary" job_watchdog_canary
+    fi
     if [ "$quick" != "true" ]; then
         run_check "cbindgen-drift"  job_cbindgen_drift
         run_check "c-smoke"         job_c_smoke

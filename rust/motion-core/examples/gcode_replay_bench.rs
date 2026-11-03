@@ -18,10 +18,9 @@ use std::fs;
 use std::process;
 use std::time::Instant;
 
-use motion_core::live_config;
-use motion_core::seam_test_harness::parse_gcode_to_moves;
+use motion_core::seam_test_harness::LiveReplay;
+use motion_pipeline::TrajectoryItem;
 use motion_pipeline::timing::stage_totals;
-use motion_pipeline::{Pipeline, TrajectoryItem};
 
 fn take_flag(args: &mut Vec<String>, flag: &str) -> Option<String> {
     let i = args.iter().position(|a| a == flag)?;
@@ -77,22 +76,14 @@ fn main() {
     });
 
     let planner = planner_config(&config_path);
-    let cfg = live_config::stream_config(&planner).unwrap_or_else(|e| {
+    let replay = LiveReplay::new(&source, &planner).unwrap_or_else(|e| {
         eprintln!("{config_path}: {e}");
         process::exit(1);
     });
-    let chains = planner.compile_active_chains().unwrap_or_else(|e| {
-        eprintln!("{config_path}: {e}");
-        process::exit(1);
-    });
-    let moves = parse_gcode_to_moves(
-        &source,
-        live_config::move_limits(&planner).expect("config limits are valid"),
-    );
 
     let wall = Instant::now();
     let (arrival_tx, arrival_rx) = crossbeam_channel::unbounded::<(f64, f64)>();
-    let mut pipeline = Pipeline::new(cfg, chains, vec![0.0; 4], 0.0).into_staged(move |item| {
+    let mut pipeline = replay.pipeline().into_staged(move |item| {
         if let TrajectoryItem::Seg(seg) = item {
             arrival_tx
                 .send((wall.elapsed().as_secs_f64(), seg.t_end))
@@ -104,7 +95,7 @@ fn main() {
     let mut submitted = 0u64;
     let mut held = 0u64;
     let mut deepest_held = 0u64;
-    for m in moves {
+    for m in replay.moves {
         let planned_before = pipeline.segments_planned();
         if !pipeline.feed(m.into()) {
             eprintln!("pipeline input closed at move {submitted}");

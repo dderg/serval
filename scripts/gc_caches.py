@@ -23,7 +23,12 @@ from pathlib import Path
 
 CACHE = Path("~/.cache").expanduser()
 PENDING = CACHE / "pending-baselines"
-KEPT = (PENDING / "target", PENDING / "samples", PENDING / "audit")
+KEPT = (
+    PENDING / "target",
+    PENDING / "samples",
+    PENDING / "audit",
+    CACHE / "serval-target",
+)
 SECONDS_PER_DAY = 86400.0
 
 

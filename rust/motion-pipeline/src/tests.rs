@@ -4528,3 +4528,34 @@ fn a_ratio_change_under_moving_shaped_leaders_with_advance_is_one_step() {
         }
     }
 }
+
+#[test]
+#[should_panic(expected = "discontinuous move at line 1")]
+fn a_first_move_that_starts_away_from_home_is_refused() {
+    replay(
+        cfg(),
+        AxisChainSet::default(),
+        &[0.0; 4],
+        0.0,
+        &[line(1, [10.0, 0.0, 0.0], [20.0, 0.0, 0.0], 0.0)],
+    );
+}
+
+#[test]
+#[should_panic(expected = "discontinuous move at line 2")]
+fn a_move_after_a_reset_must_start_at_the_reset_position() {
+    replay_stream(
+        cfg(),
+        AxisChainSet::default(),
+        &[0.0; 4],
+        0.0,
+        vec![
+            line(1, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0).into(),
+            StreamInput::Drain,
+            StreamInput::Control(Control::Reset {
+                pos: vec![50.0, 0.0, 0.0, 0.0],
+            }),
+            line(2, [10.0, 0.0, 0.0], [20.0, 0.0, 0.0], 0.0).into(),
+        ],
+    );
+}
