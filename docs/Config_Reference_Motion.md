@@ -268,9 +268,14 @@ post_processors: extruder_pa, extruder_smoothing
 #max_accel:
 #   Optional, on an axis that follows others. Must be above 0 (mm/s,
 #   mm/s^2). What the axis's motor can do for every move it makes, pressure
-#   advance included. The velocity planner slows each extruding move so the
-#   commanded extruder velocity and acceleration stay within them, corners
-#   and curves included. On the [extruder] axis each one left unset is
+#   advance included. The velocity planner slows each move so the commanded
+#   extruder velocity and acceleration stay within them, corners and curves
+#   included. A move is held to the largest extrusion ratio within its
+#   reach: its own, and that of every move the followed axes' shaping
+#   post_processors and the ratio ramp carry onto it however short the moves
+#   between, so a short travel between two extrusions accelerates as they
+#   do. An extrude-only move that outlasts the shapers' reach separates the
+#   moves on either side. On the [extruder] axis each one left unset is
 #   inherited from max_extrude_only_velocity / max_extrude_only_accel (the
 #   same motor). An advance needs both, set or inherited.
 #instantaneous_corner_velocity: 1.0
@@ -281,7 +286,7 @@ post_processors: extruder_pa, extruder_smoothing
 #   post_processor (commonly z), every acceleration step of that axis makes
 #   the advance step the extruder velocity by k * ratio * the step's share
 #   along the path. The velocity planner caps the acceleration of extruding
-#   moves that move such an axis, and of the moves next to them, so each
+#   moves that move such an axis, and of the moves within their reach, so each
 #   step stays within this; a larger step is refused with the time it
 #   happens at.
 #ratio_ramp_time:
