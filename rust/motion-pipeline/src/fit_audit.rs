@@ -1,6 +1,7 @@
 //! Checks every piece a fit accepts against the exact signal it was fitted
 //! to, at dense interior points rather than only at the ladder's probes, and
-//! keeps the ones that break the fit tolerance. What the fit does not resolve
+//! keeps the ones that break the fit tolerance as resolved for the piece's
+//! duration (`FitTol::for_piece`). What the fit does not resolve
 //! is not held to it: pieces narrower than the cubic floor, and the slivers
 //! inside a piece's edges that the ladder reads its anchoring state past,
 //! which seed coalescing treats as carrying no integral. Compiled only for
@@ -72,6 +73,7 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
         return;
     }
     let acceleration_scale = (2.0 / h) * (2.0 / h);
+    let piece_tol = piece.fit_tol.for_piece(h);
     let (mut position, mut acceleration, mut worst_u) = (0.0_f64, 0.0_f64, 0.0);
     let (start_inset, end_inset) = (piece.edge_insets.0 / h, piece.edge_insets.1 / h);
     for k in 0..AUDIT_POINTS {
@@ -89,10 +91,10 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
             piece.t0,
             piece.t1
         );
-        position = position
-            .max((eval_mono(piece.mono_u, x) - truth_position).abs() / piece.fit_tol.pos_mm);
+        position =
+            position.max((eval_mono(piece.mono_u, x) - truth_position).abs() / piece_tol.pos_mm);
         let over = (eval_mono_dd(piece.mono_u, x) * acceleration_scale - truth_acceleration).abs()
-            / piece.fit_tol.accel_mm_s2;
+            / piece_tol.accel_mm_s2;
         if over > acceleration {
             acceleration = over;
             worst_u = u;
@@ -217,7 +219,7 @@ fn cap_contact_onset<S: TrackSignal>(
     let acceleration_degree = (piece.mono_u.len() - 1).checked_sub(2)?;
     let minimax = *SQRT_MINIMAX_ERROR.get(acceleration_degree)?;
     let bound_mm_s2 = ANCHORED_RUNG_EXCESS_CEILING * minimax * onset_coefficient.abs() * h.sqrt();
-    let error_mm_s2 = acceleration_over_tolerance * piece.fit_tol.accel_mm_s2;
+    let error_mm_s2 = acceleration_over_tolerance * piece.fit_tol.for_piece(h).accel_mm_s2;
     (error_mm_s2 <= bound_mm_s2).then_some(Exemption::CapContactOnset {
         onset_coefficient,
         error_mm_s2,

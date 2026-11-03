@@ -45,10 +45,7 @@ pub struct StreamConfig {
 
 impl StreamConfig {
     pub(crate) fn fit_tol(&self) -> crate::lowering::FitTol {
-        crate::lowering::FitTol {
-            pos_mm: self.fit_tol_mm,
-            accel_mm_s2: self.fit_tol_accel_mm_s2,
-        }
+        crate::lowering::FitTol::absolute(self.fit_tol_mm, self.fit_tol_accel_mm_s2)
     }
 }
 

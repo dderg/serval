@@ -8,7 +8,7 @@ use trajectory::{
     RelativeSplinePiece, ShapedSignal,
 };
 
-use crate::lowering::{FitTol, follower_tol_scale};
+use crate::lowering::{AccelBudget, FitTol, follower_tol_scale};
 use crate::shaper::{
     AxisFit, AxisSignalTable, ConvolutionSignal, ExactConvolution, ExactKernel, FitBoundary,
     KnotJumpBound, Lookahead, MIN_DEVICE_INTERVAL_S, SEGMENT_TIME_EPS_S, ShiftedTrackSignal,
@@ -36,8 +36,8 @@ const COMPONENT_ZERO_PROBES: usize = 16;
 const REST_ACCELERATION_SHARE: f64 = 1.0 / (1_u64 << 30) as f64;
 fn follower_fit_tol(fit_tol: FitTol, position_scale: f64) -> FitTol {
     FitTol {
-        pos_mm: fit_tol.pos_mm * position_scale,
-        accel_mm_s2: fit_tol.accel_mm_s2,
+        accel_budget: AccelBudget::PositionEquivalent,
+        ..FitTol::absolute(fit_tol.pos_mm * position_scale, fit_tol.accel_mm_s2)
     }
 }
 

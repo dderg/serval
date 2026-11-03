@@ -153,10 +153,7 @@ fn follower_advance_fits_the_transformed_acceleration() {
                 s_start: 0.0,
                 s_length: super::leader_arc_length(&shaped, &[0, 1]),
             },
-            crate::lowering::FitTol {
-                pos_mm: 5e-5,
-                accel_mm_s2: 0.5,
-            },
+            crate::lowering::FitTol::absolute(5e-5, 0.5),
             Some(kernel_advance(&stage)),
         )
         .unwrap();
@@ -483,10 +480,7 @@ fn weld_window(start: f64, end: f64) -> super::WeldWindow {
         axis: 3,
         start,
         end,
-        tol: crate::lowering::FitTol {
-            pos_mm: 0.005,
-            accel_mm_s2: 50.0,
-        },
+        tol: crate::lowering::FitTol::absolute(0.005, 50.0),
     }
 }
 
@@ -568,10 +562,7 @@ fn a_plain_follower_source_fit_opens_and_closes_on_the_signal_velocity() {
         s_start: 0.0,
         s_length: super::leader_arc_length(&shaped, &[0, 1]),
     };
-    let fit_tol = crate::lowering::FitTol {
-        pos_mm: 1e-4,
-        accel_mm_s2: 50.0,
-    };
+    let fit_tol = crate::lowering::FitTol::absolute(1e-4, 50.0);
     let fitted = super::fit_source_projection(source, fit_tol, None).unwrap();
     let sig = FollowerSignal::new(
         &shaped,
@@ -727,10 +718,7 @@ fn an_advanced_follower_source_fit_opens_and_closes_on_the_signal_velocity() {
         s_start: 0.0,
         s_length: super::leader_arc_length(&shaped, &[0, 1]),
     };
-    let fit_tol = crate::lowering::FitTol {
-        pos_mm: 1e-4,
-        accel_mm_s2: 50.0,
-    };
+    let fit_tol = crate::lowering::FitTol::absolute(1e-4, 50.0);
     let stage = trajectory::ChainStage::NonlinearAdvance(trajectory::NonlinearAdvance {
         model: trajectory::AdvanceModel::Tanh,
         linear_advance: 0.02,
@@ -883,10 +871,7 @@ fn a_plain_follower_source_fits_through_a_leader_reversal() {
         s_start: 0.0,
         s_length: super::leader_arc_length(&shaped, &[0, 1]),
     };
-    let fit_tol = crate::lowering::FitTol {
-        pos_mm: 1e-3,
-        accel_mm_s2: 50.0,
-    };
+    let fit_tol = crate::lowering::FitTol::absolute(1e-3, 50.0);
     super::fit_source_projection(source, fit_tol, None)
         .unwrap_or_else(|error| panic!("reversal fit failed: {error:?}"));
 }
@@ -1160,10 +1145,7 @@ fn fit_dense_extrusion_stopping_before_the_end(
         s_start: odometer.start,
         s_length: odometer.length,
     };
-    let fit_tol = crate::lowering::FitTol {
-        pos_mm: 0.0025,
-        accel_mm_s2: 50.0,
-    };
+    let fit_tol = crate::lowering::FitTol::absolute(0.0025, 50.0);
     super::fit_source_projection(source, fit_tol, None)
 }
 
@@ -1250,10 +1232,7 @@ fn advance_steps_at_leader_knots_closer_than_the_floor_plan() {
         s_start: 0.0,
         s_length: super::leader_arc_length(&shaped, &[0, 1]),
     };
-    let fit_tol = crate::lowering::FitTol {
-        pos_mm: 0.0025,
-        accel_mm_s2: 50.0,
-    };
+    let fit_tol = crate::lowering::FitTol::absolute(0.0025, 50.0);
     let stage = trajectory::ChainStage::NonlinearAdvance(trajectory::NonlinearAdvance {
         model: trajectory::AdvanceModel::Tanh,
         linear_advance: 0.02,
@@ -1315,10 +1294,7 @@ fn an_advanced_follower_source_holds_the_tolerance_past_a_leader_seam_velocity_r
         s_start: 0.0,
         s_length: super::leader_arc_length(&shaped, &[0, 1]),
     };
-    let fit_tol = crate::lowering::FitTol {
-        pos_mm: 0.000_125,
-        accel_mm_s2: 50.0,
-    };
+    let fit_tol = crate::lowering::FitTol::absolute(0.000_125, 50.0);
     let stage = trajectory::ChainStage::NonlinearAdvance(trajectory::NonlinearAdvance {
         model: trajectory::AdvanceModel::Tanh,
         linear_advance: 0.02,
@@ -1453,10 +1429,7 @@ fn a_follower_reports_its_steps_across_a_leader_knot() {
 /// that offset, or two batches shape the same history differently.
 #[test]
 fn a_piece_leaving_rest_is_made_monotone_whatever_its_offset() {
-    let tol = crate::lowering::FitTol {
-        pos_mm: 3.4e-5,
-        accel_mm_s2: 50.0,
-    };
+    let tol = crate::lowering::FitTol::absolute(3.4e-5, 50.0);
     let leaving_rest = |offset: f64| BezierPiece {
         u_start: 2.312095117306531,
         u_end: 2.320504875762939,
@@ -1518,10 +1491,7 @@ fn a_ratio_ramped_advance_refuses_a_ratio_step_taken_at_speed() {
         s_start: 0.0,
         s_length: super::leader_arc_length(&shaped, &[0, 1]),
     };
-    let fit_tol = crate::lowering::FitTol {
-        pos_mm: 1e-4,
-        accel_mm_s2: 50.0,
-    };
+    let fit_tol = crate::lowering::FitTol::absolute(1e-4, 50.0);
     let refused =
         super::fit_source_projection(source, fit_tol, Some(ramped_advance(&RAMPED_ADVANCE_STAGE)));
     assert!(
@@ -1564,10 +1534,7 @@ fn a_ratio_ramped_advance_refuses_a_leader_acceleration_step() {
         s_start: 0.0,
         s_length: super::leader_arc_length(&shaped, &[0, 1]),
     };
-    let fit_tol = crate::lowering::FitTol {
-        pos_mm: 1e-4,
-        accel_mm_s2: 50.0,
-    };
+    let fit_tol = crate::lowering::FitTol::absolute(1e-4, 50.0);
     let refused =
         super::fit_source_projection(source, fit_tol, Some(ramped_advance(&RAMPED_ADVANCE_STAGE)));
     assert!(
@@ -1661,10 +1628,7 @@ fn projection_starting_mid_window_skips_what_the_raw_fit_already_projected() {
         base,
         frontier,
         chains: &chains,
-        fit_tol: crate::lowering::FitTol {
-            pos_mm: 1e-4,
-            accel_mm_s2: 50.0,
-        },
+        fit_tol: crate::lowering::FitTol::absolute(1e-4, 50.0),
         lookahead: crate::shaper::Lookahead::Forced,
         pool: &pool,
     };
@@ -1690,4 +1654,15 @@ fn projection_starting_mid_window_skips_what_the_raw_fit_already_projected() {
     )
     .expect("projection picks up after the raw fit");
     assert!(states[3].is_active());
+}
+
+#[test]
+fn a_follower_fit_scales_the_position_tolerance_and_spends_it_on_acceleration() {
+    let tolerance = super::follower_fit_tol(crate::lowering::FitTol::absolute(0.005, 50.0), 0.02);
+    assert_eq!(
+        tolerance.accel_budget,
+        crate::lowering::AccelBudget::PositionEquivalent
+    );
+    assert!((tolerance.pos_mm - 1e-4).abs() < 1e-18);
+    assert_eq!(tolerance.accel_mm_s2, 50.0);
 }
