@@ -47,8 +47,14 @@ fn explicit_corner_deviation_wins() {
 #[test]
 fn neither_corner_option_defaults_to_the_same_deviation_at_any_accel() {
     for accel in ["1000", "3000", "70000"] {
-        let s = settings(&format!("[printer]\nmax_velocity: 300\nmax_accel: {accel}\n"));
-        assert_eq!(s.cartesian.corner_deviation, crate::DEFAULT_CORNER_DEVIATION_MM, "{accel}");
+        let s = settings(&format!(
+            "[printer]\nmax_velocity: 300\nmax_accel: {accel}\n"
+        ));
+        assert_eq!(
+            s.cartesian.corner_deviation,
+            crate::DEFAULT_CORNER_DEVIATION_MM,
+            "{accel}"
+        );
     }
 }
 
