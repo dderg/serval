@@ -21,6 +21,13 @@ type Panic = Box<dyn Any + Send>;
 /// one helper and three already cover a four-core host's spare cores.
 const HELPERS_MAX: usize = 3;
 
+/// Stack of every thread that takes fan-out jobs. klippy runs under
+/// `mlockall`, so a thread's whole stack is resident from its spawn; the
+/// deepest such stack measured over the snapshot and bench G-code corpus
+/// reached 120 KiB, so a quarter of Rust's 2 MiB default leaves four times
+/// that.
+pub(crate) const FAN_OUT_THREAD_STACK: usize = 512 * 1024;
+
 /// Helper threads shared by every fan-out of one pipeline: the planner's
 /// member profiles and the shaper's fits. They are spawned on the first
 /// fan-out, so they inherit the scheduling of the thread that makes it, and a
@@ -120,6 +127,7 @@ impl WorkerPool {
                     let queue: Receiver<Arc<Call>> = queue.clone();
                     std::thread::Builder::new()
                         .name(format!("kalico-pool-{index}"))
+                        .stack_size(FAN_OUT_THREAD_STACK)
                         .spawn(move || {
                             for call in queue {
                                 call.help();
