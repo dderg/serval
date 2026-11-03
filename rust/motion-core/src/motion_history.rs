@@ -6,7 +6,21 @@ use trajectory::{ClockedMotorSpan, ContinuousError, Pva};
 use crate::kinematics::{KinematicsKind, KinematicsModule};
 use crate::types::AxisKey;
 
-pub const HISTORY_CAPACITY: usize = 4096;
+/// How far behind the newest recorded motion the history answers. Every
+/// position query asks about the estimated print time now or shortly before
+/// it (the longest lookback in klippy is belay's 0.3 s), and the newest span
+/// is dispatched ahead of now by the pipeline's lead, so 10 s covers both
+/// many times over. A span carries the dense law of its moves, hundreds of
+/// kilobytes for a long accelerating one, and the host runs under `mlockall`:
+/// the dense top layers record about 265 spans a second per axis and pin
+/// about 7 MB per second of history, so the bound is the time the queries
+/// need rather than a span count, which a few long moves could fill with
+/// gigabytes.
+pub const HISTORY_HORIZON_S: f64 = 10.0;
+
+/// Rebase boundaries kept per axis: a rebase is an operator action, so this
+/// many cover any horizon.
+const REBASE_BOUNDARY_CAPACITY: usize = 4096;
 
 pub const AXIS_NAMES: [&str; 4] = ["x", "y", "z", "e"];
 
@@ -319,7 +333,11 @@ impl HistoryStore {
                 }
             }
         }
-        if ring.len() == HISTORY_CAPACITY {
+        let horizon_start = start_host - HISTORY_HORIZON_S;
+        while ring
+            .front()
+            .is_some_and(|oldest| oldest.end_host() <= horizon_start)
+        {
             ring.pop_front();
             *self.evicted.entry(key).or_default() += 1;
         }
@@ -377,7 +395,7 @@ impl HistoryStore {
         while boundaries.back().is_some_and(|prior| prior.host >= host) {
             boundaries.pop_back();
         }
-        if boundaries.len() == HISTORY_CAPACITY {
+        if boundaries.len() == REBASE_BOUNDARY_CAPACITY {
             boundaries.pop_front();
         }
         boundaries.push_back(boundary);

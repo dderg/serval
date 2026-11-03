@@ -1,10 +1,13 @@
 use geometry::path::Segment;
+use std::sync::Arc;
+
 use geometry::{
     Move, VelocityPlanParams, VelocityProfile, plan_velocity_stops_select_prefix,
     seam_requires_stop,
 };
 
 use crate::types::{Control, PlannedItem, PlannedMove, StreamConfig, StreamInput};
+use crate::worker_pool::WorkerPool;
 
 /// Cost governor, not a lookahead bound: velocity planning is ~linear in the
 /// window, so re-planning on every arriving move would be quadratic. The window
@@ -27,15 +30,17 @@ pub struct Planner {
     entry_v: f64,
     moves_since_plan: usize,
     config: StreamConfig,
+    workers: Arc<WorkerPool>,
 }
 
 impl Planner {
-    pub fn new(config: StreamConfig) -> Self {
+    pub fn new(config: StreamConfig, workers: Arc<WorkerPool>) -> Self {
         Self {
             moves: Vec::new(),
             entry_v: 0.0,
             moves_since_plan: 0,
             config,
+            workers,
         }
     }
 
@@ -143,6 +148,7 @@ impl Planner {
                 max_extrude_only_accel_mm_s2: self.config.max_extrude_only_accel_mm_s2,
                 entry_v: self.entry_v,
             },
+            &*self.workers,
             select_prefix,
         )
         .unwrap_or_else(|e| panic!("planner: velocity plan failed: {e:?}"));

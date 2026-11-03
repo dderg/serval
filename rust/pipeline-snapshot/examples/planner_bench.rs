@@ -6,6 +6,7 @@
 //!
 //! Run: cargo run --release --example planner_bench
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -178,7 +179,7 @@ fn run_planner(items: Vec<StreamInput>, config: StreamConfig, trickle: bool) -> 
     PLAN_US_MAX.store(0, Ordering::Relaxed);
 
     let start = Instant::now();
-    let mut planner = Planner::new(config);
+    let mut planner = Planner::new(config, Arc::default());
     for item in items {
         assert!(planner.feed(item, &mut collect));
         if trickle {

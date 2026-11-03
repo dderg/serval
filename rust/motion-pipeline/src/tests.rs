@@ -3753,7 +3753,7 @@ fn lower_to_base_items(
     items: Vec<StreamInput>,
 ) -> Vec<BaseItem> {
     let mut fit = FitStage::new(config.corner).into_driver();
-    let mut planner = Planner::new(config);
+    let mut planner = Planner::new(config, Arc::default());
     let mut lowerer = Lowerer::new(chains.rest_support(), home.to_vec(), 0.0);
     let mut out = Vec::new();
     let mut collect = |item| {
@@ -3782,7 +3782,7 @@ fn shape_one_at_a_time(
         out.push(item);
         true
     };
-    let mut shaper = Shaper::new(chains, fit_tol);
+    let mut shaper = Shaper::new(chains, fit_tol, Arc::default());
     for item in items {
         assert!(shaper.feed(item, &mut collect));
     }

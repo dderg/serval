@@ -334,11 +334,11 @@ pub struct Shaper {
     history_trimmed: bool,
     follower_states: Vec<FollowerState>,
     toolhead_tap: Option<Sender<ContinuousSegment>>,
-    pool: WorkerPool,
+    pool: Arc<WorkerPool>,
 }
 
 impl Shaper {
-    pub fn new(chains: AxisChainSet, fit_tol: FitTol) -> Self {
+    pub fn new(chains: AxisChainSet, fit_tol: FitTol, pool: Arc<WorkerPool>) -> Self {
         assert_followable(&chains);
         Self {
             forward_support: chains.forward_support(),
@@ -350,7 +350,7 @@ impl Shaper {
             history_trimmed: false,
             follower_states: Vec::new(),
             toolhead_tap: None,
-            pool: WorkerPool::new(),
+            pool,
         }
     }
 

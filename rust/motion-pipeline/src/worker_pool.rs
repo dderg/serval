@@ -1,7 +1,8 @@
-//! The shaper's persistent fan-out threads. Fitting a window splits into
-//! independent jobs; spawning threads per call cost more than many of the
-//! jobs, so the shaper keeps idle helpers parked on a queue instead and hands
-//! each fan-out to the calling thread plus whichever helpers are free.
+//! The pipeline's persistent fan-out threads. Planning a window and fitting
+//! it both split into independent jobs; spawning threads per call cost more
+//! than many of the jobs, so the planner and the shaper share idle helpers
+//! parked on a queue instead and hand each fan-out to the calling thread plus
+//! whichever helpers are free.
 
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -14,10 +15,24 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 type Task<'a> = dyn Fn() + Sync + 'a;
 type Panic = Box<dyn Any + Send>;
 
-/// Helper threads shared by every fan-out of one shaper. They are spawned on
-/// the first fan-out, so they inherit the scheduling of the thread that runs
-/// the shaper, and a shaper that never fans out never spawns any.
-pub(crate) struct WorkerPool {
+/// The most helpers a pool keeps. klippy runs under `mlockall`, so every
+/// helper pins a full stack and its own malloc arena for the life of the
+/// process; on the dense replay at 16 cores, throughput stopped growing at
+/// one helper and three already cover a four-core host's spare cores.
+const HELPERS_MAX: usize = 3;
+
+/// Stack of every thread that takes fan-out jobs. klippy runs under
+/// `mlockall`, so a thread's whole stack is resident from its spawn; the
+/// deepest such stack measured over the snapshot and bench G-code corpus
+/// reached 120 KiB, so a quarter of Rust's 2 MiB default leaves four times
+/// that.
+pub(crate) const FAN_OUT_THREAD_STACK: usize = 512 * 1024;
+
+/// Helper threads shared by every fan-out of one pipeline: the planner's
+/// member profiles and the shaper's fits. They are spawned on the first
+/// fan-out, so they inherit the scheduling of the thread that makes it, and a
+/// pipeline that never fans out never spawns any.
+pub struct WorkerPool {
     helper_count: usize,
     helpers: OnceLock<Helpers>,
 }
@@ -45,7 +60,7 @@ impl Call {
     fn lock(&self) -> MutexGuard<'_, CallState> {
         self.state
             .lock()
-            .expect("shaper worker call state poisoned")
+            .expect("pipeline worker call state poisoned")
     }
 
     fn help(&self) {
@@ -73,7 +88,7 @@ impl Call {
             state = self
                 .left
                 .wait(state)
-                .expect("shaper worker call state poisoned");
+                .expect("pipeline worker call state poisoned");
         }
         state.panic.take()
     }
@@ -88,9 +103,13 @@ impl Drop for OpenCall<'_> {
 }
 
 impl WorkerPool {
-    /// A pool sized to the cores the calling thread does not occupy.
-    pub(crate) fn new() -> Self {
-        Self::with_helpers(std::thread::available_parallelism().map_or(0, |cores| cores.get() - 1))
+    /// A pool sized to the cores the calling thread does not occupy, up to
+    /// [`HELPERS_MAX`].
+    pub fn new() -> Self {
+        Self::with_helpers(
+            std::thread::available_parallelism()
+                .map_or(0, |cores| (cores.get() - 1).min(HELPERS_MAX)),
+        )
     }
 
     pub(crate) fn with_helpers(helper_count: usize) -> Self {
@@ -107,13 +126,14 @@ impl WorkerPool {
                 .map(|index| {
                     let queue: Receiver<Arc<Call>> = queue.clone();
                     std::thread::Builder::new()
-                        .name(format!("kalico-shaper-{index}"))
+                        .name(format!("kalico-pool-{index}"))
+                        .stack_size(FAN_OUT_THREAD_STACK)
                         .spawn(move || {
                             for call in queue {
                                 call.help();
                             }
                         })
-                        .expect("spawn shaper worker thread")
+                        .expect("spawn pipeline worker thread")
                 })
                 .collect();
             Helpers { calls, threads }
@@ -153,23 +173,50 @@ impl WorkerPool {
                 index = next_job.fetch_add(1, Ordering::Relaxed);
             }
             done.lock()
-                .expect("shaper worker results poisoned")
+                .expect("pipeline worker results poisoned")
                 .append(&mut local);
         };
-        self.fan_out(participants, &participate)?;
-        let mut done = done.into_inner().expect("shaper worker results poisoned");
-        assert_eq!(done.len(), jobs, "shaper workers dropped jobs");
+        self.fan_out(participants, &participate, &participate)?;
+        let mut done = done.into_inner().expect("pipeline worker results poisoned");
+        assert_eq!(done.len(), jobs, "pipeline workers dropped jobs");
         done.sort_by_key(|(index, _)| *index);
         Ok(done.into_iter().map(|(_, result)| result).collect())
     }
 
-    /// Runs `task` on the calling thread and on up to `participants - 1`
-    /// helpers at once. Helpers reach `task` with its lifetime erased, which
-    /// is sound because `OpenCall` closes the call and waits out every helper
-    /// that took it before this returns or unwinds, and a closed call hands
-    /// the task to no one.
+    /// Runs `lead` on the calling thread while up to `participants - 1`
+    /// helpers run `follow`, then runs `follow` on the calling thread too.
+    /// `follow` must return once `lead` has finished, or unwound, and left it
+    /// nothing to do. A panic on any participant is caught and returned as
+    /// `Err` once every helper has left.
+    fn lead_with_followers(
+        &self,
+        participants: usize,
+        lead: impl FnOnce(),
+        follow: impl Fn() + Sync,
+    ) -> std::thread::Result<()> {
+        if participants <= 1 {
+            lead();
+            follow();
+            return Ok(());
+        }
+        self.fan_out(participants, &follow, || {
+            lead();
+            follow();
+        })
+    }
+
+    /// Hands `task` to up to `participants - 1` helpers at once while the
+    /// calling thread runs `own`. Helpers reach `task` with its lifetime
+    /// erased, which is sound because `OpenCall` closes the call and waits out
+    /// every helper that took it before this returns or unwinds, and a closed
+    /// call hands the task to no one.
     #[allow(unsafe_code)]
-    fn fan_out(&self, participants: usize, task: &Task<'_>) -> std::thread::Result<()> {
+    fn fan_out(
+        &self,
+        participants: usize,
+        task: &Task<'_>,
+        own: impl FnOnce(),
+    ) -> std::thread::Result<()> {
         let helpers = self.helpers();
         let task = unsafe { std::mem::transmute::<&Task<'_>, &'static Task<'static>>(task) };
         let call = Arc::new(Call {
@@ -185,13 +232,26 @@ impl WorkerPool {
             helpers
                 .calls
                 .send(Arc::clone(&call))
-                .expect("shaper worker queue closed");
+                .expect("pipeline worker queue closed");
         }
-        let own = catch_unwind(AssertUnwindSafe(task));
+        let own = catch_unwind(AssertUnwindSafe(own));
         std::mem::forget(open);
         let helper_panic = call.close_and_wait();
         own?;
         helper_panic.map_or(Ok(()), Err)
+    }
+}
+
+impl Default for WorkerPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl geometry::FanOut for WorkerPool {
+    fn lead_and_follow(&self, participants: usize, lead: impl FnOnce(), follow: impl Fn() + Sync) {
+        self.lead_with_followers(participants, lead, follow)
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     }
 }
 
@@ -202,7 +262,7 @@ impl Drop for WorkerPool {
         };
         drop(calls);
         for thread in threads {
-            thread.join().expect("shaper worker thread panicked");
+            thread.join().expect("pipeline worker thread panicked");
         }
     }
 }
