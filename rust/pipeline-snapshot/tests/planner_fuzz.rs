@@ -9,11 +9,11 @@
 //! resolution, no acceleration explosion, C0 position seams, and valid
 //! velocity bounds.
 //!
-//! `hard_invariants_hold` runs in CI on a fixed RNG seed — a deterministic
-//! 256-case corpus verified green — so CI never flakes on a fresh fuzz
-//! discovery. Hunting happens on the `#[ignore]`d `target_budgets_hold`,
-//! which uses random seeds, fuzzes the full input space (including the
-//! known-broken families the CI tier steers around), and additionally
+//! `hard_invariants_hold` draws a fresh seed per run and prints it
+//! (`PROPTEST_RNG_SEED=<seed>` reproduces); `hard_invariants_hold_on_the_pinned_corpus`
+//! is the same property on a fixed 256-case corpus. Hunting for the smoothness
+//! budgets happens on the `#[ignore]`d `target_budgets_hold`, which fuzzes the
+//! full input space (including the known-broken families the CI tier steers around), and additionally
 //! asserts the intended smoothness budgets (seam C0/C1, velocity limits)
 //! that current lowering is known to violate. Run it with
 //! `cargo nextest run -p pipeline-snapshot --run-ignored all`, ideally with
@@ -178,12 +178,28 @@ fn xy_smoothness_spikes(report: &AuditReport) -> Vec<&Violation> {
         .collect()
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig {
-        cases: 256,
-        rng_seed: RngSeed::Fixed(20260708),
+const PINNED_SEED: u64 = 20260708;
+
+fn fresh_seed_config() -> ProptestConfig {
+    let seed = std::env::var("PROPTEST_RNG_SEED")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after the epoch")
+                .as_nanos();
+            (nanos as u64) ^ u64::from(std::process::id()).rotate_left(40)
+        });
+    eprintln!("planner_fuzz seed: reproduce with PROPTEST_RNG_SEED={seed}");
+    ProptestConfig {
+        rng_seed: RngSeed::Fixed(seed),
         ..ProptestConfig::default()
-    })]
+    }
+}
+
+proptest! {
+    #![proptest_config(fresh_seed_config())]
 
     #[test]
     fn hard_invariants_hold(
@@ -197,8 +213,26 @@ proptest! {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 256,
+        rng_seed: RngSeed::Fixed(PINNED_SEED),
+        ..ProptestConfig::default()
+    })]
+
     #[test]
-    #[ignore = "intended smoothness budgets; current lowering is known to violate them"]
+    fn hard_invariants_hold_on_the_pinned_corpus(
+        limits in limits_strategy(false),
+        moves in prop::collection::vec(move_strategy(false), 2..40),
+    ) {
+        let (traj, report) = run_case(limits, &moves);
+        prop_assert!(!traj.rows(0).is_empty(), "pipeline produced no X trajectory");
+        prop_assert!(report.hard_ok(), "{report}");
+    }
+}
+
+proptest! {
+    #[test]
+    #[ignore = "#575: E seam velocity budget fails at every ratio step"]
     fn target_budgets_hold(
         limits in limits_strategy(true),
         moves in prop::collection::vec(move_strategy(true), 2..40),
@@ -215,7 +249,7 @@ proptest! {
 /// tiny-positive-scv family as the two tests below — all three pass with
 /// scv = 0 or scv >= 0.1.
 #[test]
-#[ignore = "known planner bug: tiny scv makes the velocity plan NonFinite"]
+#[ignore = "#575: tiny scv makes the velocity plan NonFinite"]
 fn reversal_with_z_step_makes_velocity_plan_non_finite() {
     let limits = FuzzLimits {
         max_velocity: 20.0,
@@ -282,7 +316,7 @@ fn z_step_then_micro_reversal_escapes_profile_window() {
 /// 0.005 fails from 146° up, and no failures were found at scv >= 0.1. Same
 /// tiny-positive-scv family as its neighbors.
 #[test]
-#[ignore = "known planner bug: tiny scv + sharp planar corner yields a NonFinite velocity plan"]
+#[ignore = "#575: tiny scv + sharp planar corner yields a NonFinite velocity plan"]
 fn near_reversal_planar_corner_makes_velocity_plan_non_finite() {
     let limits = FuzzLimits {
         max_velocity: 20.0,

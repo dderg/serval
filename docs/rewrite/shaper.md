@@ -268,9 +268,12 @@ leaders' kernels and not planned against the leaders' timing; it is
 This makes extrusion physically consistent with what the nozzle actually
 does: the follower keeps moving through rest holds (kernel creep is real
 traversal of the raw path's tail), it is continuous across every seam, and
-the total extruded amount tracks the shaped path's true length — permanently
-short of the commanded total by exactly the corner-cut length. Extrude-only
-moves ride no spatial path and add in directly.
+the total extruded amount tracks the shaped path's true length, not the
+G-code's: a blend that cuts a corner lays that much less than the commanded
+total, and blends that run longer than their polyline (a loop of moves
+shorter than the corner budget) lay more. `planner_conservation_fuzz` holds
+the planner to it. Extrude-only moves ride no spatial path and add in
+directly.
 
 Critically, the projection reads the leaders' **toolhead signal**, not their
 motor command — the follower must track where the nozzle physically is, and
