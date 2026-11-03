@@ -127,6 +127,7 @@ pub fn trajectory::chain::AxisChainSet::direct_forward_support(&self) -> f64
 pub fn trajectory::chain::AxisChainSet::forward_support(&self) -> f64
 pub fn trajectory::chain::AxisChainSet::has_motor_side_stages(&self) -> bool
 pub fn trajectory::chain::AxisChainSet::has_own_kernel(&self, usize) -> bool
+pub fn trajectory::chain::AxisChainSet::has_ratio_ramped_follower(&self) -> bool
 pub fn trajectory::chain::AxisChainSet::is_projected_follower(&self, usize) -> bool
 pub fn trajectory::chain::AxisChainSet::kernel_free_follower_transform(&self) -> core::option::Option<usize>
 pub fn trajectory::chain::AxisChainSet::leaders_support(&self, usize) -> (f64, f64)
@@ -148,8 +149,10 @@ pub fn trajectory::chain::CompiledChain::kernel(&self) -> core::option::Option<&
 pub fn trajectory::chain::CompiledChain::kernel_variance_s2(&self) -> f64
 pub fn trajectory::chain::CompiledChain::leading_transform(&self) -> core::option::Option<&trajectory::chain::ChainStage>
 pub fn trajectory::chain::CompiledChain::max_input_window(&self) -> (f64, f64)
+pub fn trajectory::chain::CompiledChain::ratio_ramp_time(&self) -> core::option::Option<f64>
 pub fn trajectory::chain::CompiledChain::trailing_transform(&self) -> core::option::Option<&trajectory::chain::ChainStage>
 pub fn trajectory::chain::CompiledChain::transform(&self) -> core::option::Option<&trajectory::chain::ChainStage>
+pub fn trajectory::chain::CompiledChain::with_ratio_ramp_time(self, f64) -> Self
 pub struct trajectory::chain::NonlinearAdvance
 pub trajectory::chain::NonlinearAdvance::linear_advance: f64
 pub trajectory::chain::NonlinearAdvance::linearization_velocity: f64
@@ -547,6 +550,7 @@ pub fn trajectory::chain::AxisChainSet::direct_forward_support(&self) -> f64
 pub fn trajectory::chain::AxisChainSet::forward_support(&self) -> f64
 pub fn trajectory::chain::AxisChainSet::has_motor_side_stages(&self) -> bool
 pub fn trajectory::chain::AxisChainSet::has_own_kernel(&self, usize) -> bool
+pub fn trajectory::chain::AxisChainSet::has_ratio_ramped_follower(&self) -> bool
 pub fn trajectory::chain::AxisChainSet::is_projected_follower(&self, usize) -> bool
 pub fn trajectory::chain::AxisChainSet::kernel_free_follower_transform(&self) -> core::option::Option<usize>
 pub fn trajectory::chain::AxisChainSet::leaders_support(&self, usize) -> (f64, f64)
@@ -606,8 +610,10 @@ pub fn trajectory::chain::CompiledChain::kernel(&self) -> core::option::Option<&
 pub fn trajectory::chain::CompiledChain::kernel_variance_s2(&self) -> f64
 pub fn trajectory::chain::CompiledChain::leading_transform(&self) -> core::option::Option<&trajectory::chain::ChainStage>
 pub fn trajectory::chain::CompiledChain::max_input_window(&self) -> (f64, f64)
+pub fn trajectory::chain::CompiledChain::ratio_ramp_time(&self) -> core::option::Option<f64>
 pub fn trajectory::chain::CompiledChain::trailing_transform(&self) -> core::option::Option<&trajectory::chain::ChainStage>
 pub fn trajectory::chain::CompiledChain::transform(&self) -> core::option::Option<&trajectory::chain::ChainStage>
+pub fn trajectory::chain::CompiledChain::with_ratio_ramp_time(self, f64) -> Self
 pub struct trajectory::ContinuousSegment
 pub trajectory::ContinuousSegment::axes: alloc::rcs::arc::Arc<[trajectory::continuous::ContinuousAxis]>
 pub trajectory::ContinuousSegment::followers: alloc::rcs::arc::Arc<[geometry::segment::FollowerDemand]>

@@ -494,6 +494,9 @@ impl Shaper {
     /// tracks have their own lookahead covered. The time-based bound already
     /// includes the cascaded width, but segment granularity can leave a long
     /// straddling segment unprojectable, so gate on the frontier explicitly.
+    /// A ratio-ramped follower cascades by one segment instead: a seam's
+    /// ramp reaches into the segment after it, which must be shaped before
+    /// the ramp is laid, so it commits one segment short of the frontier.
     ///
     /// Every gate compares `t_end + support` against the covered end with no
     /// slack — the same association and strictness as the fit-time
@@ -512,7 +515,8 @@ impl Shaper {
             .take_while(|seg| seg.t_end + self.forward_support <= last_t)
             .count();
         let own_hi = self.chains.max_follower_own_forward_support();
-        if own_hi <= 0.0 {
+        let ramped = self.chains.has_ratio_ramped_follower();
+        if own_hi <= 0.0 && !ramped {
             return plain;
         }
         let Some(frontier_t) = self.shaping_frontier_t(last_t) else {
@@ -523,6 +527,11 @@ impl Shaper {
             .iter()
             .take_while(|seg| seg.t_end + own_hi <= frontier_t)
             .count();
+        let gated = if ramped {
+            gated.saturating_sub(1)
+        } else {
+            gated
+        };
         plain.min(gated)
     }
 
@@ -546,7 +555,9 @@ impl Shaper {
         if count == 0 {
             return true;
         }
-        let frontier_count = if self.chains.max_follower_own_forward_support() <= 0.0 {
+        let beyond_commit = self.chains.max_follower_own_forward_support() > 0.0
+            || self.chains.has_ratio_ramped_follower();
+        let frontier_count = if !beyond_commit {
             count
         } else if force {
             self.pending.len()
@@ -787,6 +798,7 @@ fn apply_axis_chains(
         ..
     } = request;
     if chains.chains.iter().all(CompiledChain::is_empty)
+        && !chains.has_ratio_ramped_follower()
         && outputs.follower_states.iter().all(|s| !s.is_active())
     {
         let out: Vec<ContinuousSegment> = base.iter().take(commit_count).cloned().collect();
