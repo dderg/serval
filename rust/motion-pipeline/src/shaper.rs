@@ -4170,6 +4170,7 @@ fn shaped_ladder<S: TrackSignal>(
         resolved: (start_past_sliver, end_past_sliver),
         tol: piece_tol,
         samples: std::cell::OnceCell::new(),
+        edge_scans: std::cell::OnceCell::new(),
     });
     let held_miss = |rung: &[f64]| {
         onset_hold
@@ -4309,6 +4310,35 @@ struct OnsetHold<'a, S> {
     resolved: (f64, f64),
     tol: FitTol,
     samples: std::cell::OnceCell<[HeldSample; SQUARE_ROOT_ONSET_CHECK_INTERVALS + 1]>,
+    edge_scans: std::cell::OnceCell<[EdgeScan; 2]>,
+}
+
+/// The stretch between a resolved edge and the check point next to it, in
+/// the root of the distance from the span edge.
+#[derive(Clone, Copy)]
+struct EdgeRoots {
+    span_edge: f64,
+    inward: f64,
+    from: f64,
+    to: f64,
+    step: f64,
+}
+
+impl EdgeRoots {
+    fn t_of_root(&self, root: f64) -> f64 {
+        nurbs::fmadd(self.inward * root, root, self.span_edge)
+    }
+
+    fn scan_root(&self, k: u32) -> f64 {
+        nurbs::fmadd(f64::from(k + 1), self.step, self.from)
+    }
+}
+
+/// The exact samples of an edge stretch, evenly spaced in its root: the
+/// same for every rung of the span.
+struct EdgeScan {
+    roots: EdgeRoots,
+    samples: [HeldSample; SQUARE_ROOT_ONSET_EDGE_SCAN_POINTS as usize],
 }
 
 impl<S: TrackSignal> OnsetHold<'_, S> {
@@ -4350,14 +4380,16 @@ impl<S: TrackSignal> OnsetHold<'_, S> {
             return at_checks;
         }
         let last = SQUARE_ROOT_ONSET_CHECK_INTERVALS;
-        let mut worst = at_checks
-            .max(self.edge_peak(rung, self.span.0, self.check_t(0), self.check_t(1)))
-            .max(self.edge_peak(
-                rung,
-                self.span.1,
-                self.check_t(last),
-                self.check_t(last - 1),
-            ));
+        let edge_scans = self.edge_scans.get_or_init(|| {
+            [
+                self.edge_scan(self.span.0, self.check_t(0), self.check_t(1)),
+                self.edge_scan(self.span.1, self.check_t(last), self.check_t(last - 1)),
+            ]
+        });
+        let mut worst = edge_scans
+            .iter()
+            .map(|scan| self.edge_peak(rung, scan))
+            .fold(at_checks, f64::max);
         for (before, around) in misses.windows(3).enumerate() {
             if around[1] > SQUARE_ROOT_ONSET_PEAK_SEARCH_SHARE
                 && around[1] >= around[0]
@@ -4374,28 +4406,42 @@ impl<S: TrackSignal> OnsetHold<'_, S> {
         worst
     }
 
-    /// The rung's largest miss between a resolved edge and the check point
-    /// next to it, read in the root of the distance from the span edge.
-    fn edge_peak(&self, rung: &[f64], span_edge: f64, resolved_edge: f64, next_check: f64) -> f64 {
-        let inward = (next_check - span_edge).signum();
-        let t_of_root = |root: f64| nurbs::fmadd(inward * root, root, span_edge);
-        let (low, high) = (
+    fn edge_scan(&self, span_edge: f64, resolved_edge: f64, next_check: f64) -> EdgeScan {
+        let (from, to) = (
             (resolved_edge - span_edge).abs().sqrt(),
             (next_check - span_edge).abs().sqrt(),
         );
-        let step = (high - low) / f64::from(SQUARE_ROOT_ONSET_EDGE_SCAN_POINTS + 1);
-        let mut scan_peak = (low, 0.0);
-        for k in 1..=SQUARE_ROOT_ONSET_EDGE_SCAN_POINTS {
-            let root = nurbs::fmadd(f64::from(k), step, low);
-            let miss = self.miss_at(rung, t_of_root(root));
+        let roots = EdgeRoots {
+            span_edge,
+            inward: (next_check - span_edge).signum(),
+            from,
+            to,
+            step: (to - from) / f64::from(SQUARE_ROOT_ONSET_EDGE_SCAN_POINTS + 1),
+        };
+        EdgeScan {
+            roots,
+            samples: std::array::from_fn(|k| {
+                let k = u32::try_from(k).expect("the edge scan has a handful of points");
+                self.sample_at(roots.t_of_root(roots.scan_root(k)))
+            }),
+        }
+    }
+
+    /// The rung's largest miss between a resolved edge and the check point
+    /// next to it, read in the root of the distance from the span edge.
+    fn edge_peak(&self, rung: &[f64], scan: &EdgeScan) -> f64 {
+        let roots = scan.roots;
+        let mut scan_peak = (roots.from, 0.0);
+        for (k, sample) in (0..).zip(&scan.samples) {
+            let miss = held_miss(rung, self.h(), &[*sample], self.tol);
             if miss >= scan_peak.1 {
-                scan_peak = (root, miss);
+                scan_peak = (roots.scan_root(k), miss);
             }
         }
         let Ok((_, peak)) = golden_section_peak(
-            |root| Ok::<_, std::convert::Infallible>(self.miss_at(rung, t_of_root(root))),
-            (scan_peak.0 - step).max(low),
-            (scan_peak.0 + step).min(high),
+            |root| Ok::<_, std::convert::Infallible>(self.miss_at(rung, roots.t_of_root(root))),
+            (scan_peak.0 - roots.step).max(roots.from),
+            (scan_peak.0 + roots.step).min(roots.to),
         );
         peak.max(scan_peak.1)
     }
