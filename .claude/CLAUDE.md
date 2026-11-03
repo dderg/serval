@@ -193,8 +193,7 @@ those once and add the run id to the issue. `rust-fuzz` failures on a fresh
 seed are real counterexamples: commit the `cc` seed line to
 `proptest-regressions/` and file an issue.
 
-When delegating: give the worker the worktree path to use, say that gates share
-`~/.cache/serval-target` (no private `*-target` for `ci.sh`), and have it end
+When delegating: give the worker the worktree path to use, say that gates use that worktree's own `rust/target`, and have it end
 with a named list of checks for the lead to run once, since parallel
 `ci.sh quick` runs from several workers contend for the same CPUs. Do not have
 a worker re-derive repo context that is in this file or a skill; point to it.
