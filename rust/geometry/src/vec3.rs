@@ -38,9 +38,17 @@ pub(crate) fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     ]
 }
 
+#[cold]
+#[inline(never)]
+fn normalize_of_degenerate_vector(a: [f64; 3]) -> ! {
+    panic!("normalize of zero-length vector {a:?}")
+}
+
 pub(crate) fn normalize(a: [f64; 3]) -> [f64; 3] {
     let n = norm(a);
-    assert!(n > 0.0, "normalize of zero-length vector {a:?}");
+    if !(n > 0.0) {
+        normalize_of_degenerate_vector(a);
+    }
     [a[0] / n, a[1] / n, a[2] / n]
 }
 
