@@ -1642,6 +1642,27 @@ impl MomentTranslation {
     fn accumulate(&self, source: &[f64], target: &mut [f64]) {
         assert_eq!(source.len(), target.len());
         assert!(target.len() <= self.len);
+        match target.len() {
+            1 => self.accumulate_fixed::<1>(source, target),
+            2 => self.accumulate_fixed::<2>(source, target),
+            3 => self.accumulate_fixed::<3>(source, target),
+            4 => self.accumulate_fixed::<4>(source, target),
+            5 => self.accumulate_fixed::<5>(source, target),
+            6 => self.accumulate_fixed::<6>(source, target),
+            7 => self.accumulate_fixed::<7>(source, target),
+            8 => self.accumulate_fixed::<8>(source, target),
+            _ => self.accumulate_terms(source, target),
+        }
+    }
+
+    fn accumulate_fixed<const LEN: usize>(&self, source: &[f64], target: &mut [f64]) {
+        let source: &[f64; LEN] = source.try_into().expect("source moment length");
+        let target: &mut [f64; LEN] = target.try_into().expect("target moment length");
+        self.accumulate_terms(source, target);
+    }
+
+    #[inline]
+    fn accumulate_terms(&self, source: &[f64], target: &mut [f64]) {
         for (moment_power, moment) in target.iter_mut().enumerate() {
             let binomials = &TRANSLATION_BINOMIALS[moment_power];
             for source_power in 0..=moment_power {
@@ -1735,14 +1756,39 @@ impl MomentWindow {
     /// Adds the moments of a polynomial whose coefficients are already
     /// about the window's midpoint.
     fn accumulate_centered(&self, centered: &[f64], moments: &mut [f64]) {
-        let length = centered.len();
-        let moment_len = moments.len();
-        assert_eq!(moment_len, self.translation.len);
-        assert!(length + moment_len - 1 <= self.max_power);
-        let mut local_moments = [0.0; MOMENT_POWER_CAPACITY];
+        assert_eq!(moments.len(), self.translation.len);
+        assert!(centered.len() + moments.len() - 1 <= self.max_power);
+        match moments.len() {
+            1 => self.accumulate_centered_fixed::<1>(centered, moments),
+            2 => self.accumulate_centered_fixed::<2>(centered, moments),
+            3 => self.accumulate_centered_fixed::<3>(centered, moments),
+            4 => self.accumulate_centered_fixed::<4>(centered, moments),
+            5 => self.accumulate_centered_fixed::<5>(centered, moments),
+            6 => self.accumulate_centered_fixed::<6>(centered, moments),
+            7 => self.accumulate_centered_fixed::<7>(centered, moments),
+            8 => self.accumulate_centered_fixed::<8>(centered, moments),
+            _ => {
+                let mut local_moments = [0.0; MOMENT_POWER_CAPACITY];
+                let local_moments = &mut local_moments[..moments.len()];
+                self.integrate_centered(centered, local_moments);
+                self.translation.accumulate_terms(local_moments, moments);
+            }
+        }
+    }
+
+    fn accumulate_centered_fixed<const LEN: usize>(&self, centered: &[f64], moments: &mut [f64]) {
+        let mut local_moments = [0.0; LEN];
+        self.integrate_centered(centered, &mut local_moments);
+        self.translation
+            .accumulate_fixed::<LEN>(&local_moments, moments);
+    }
+
+    #[inline]
+    fn integrate_centered(&self, centered: &[f64], local_moments: &mut [f64]) {
+        let moment_len = local_moments.len();
         for (polynomial_power, &coefficient) in centered.iter().enumerate() {
             let powers = polynomial_power + 1..polynomial_power + 1 + moment_len;
-            for ((moment, &span), &divisor) in local_moments[..moment_len]
+            for ((moment, &span), &divisor) in local_moments
                 .iter_mut()
                 .zip(&self.edge_power_spans[powers.clone()])
                 .zip(&POWER_DIVISORS[powers])
@@ -1750,8 +1796,6 @@ impl MomentWindow {
                 *moment += coefficient * span / divisor;
             }
         }
-        self.translation
-            .accumulate(&local_moments[..moment_len], moments);
     }
 }
 
