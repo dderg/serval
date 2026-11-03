@@ -28,7 +28,7 @@
 //! the hull bound by at most its own size, so the terms add.
 
 use super::exact::{EXACT_CAPACITY, ExactPiece, ExactRounding};
-use super::taylor_shift;
+use super::{TRANSLATION_BINOMIALS, taylor_shift};
 use crate::lowering::FitTol;
 
 /// How many times a patch the hull cannot settle is halved before it is
@@ -130,7 +130,7 @@ fn bernstein(coefficients: &[f64]) -> (Vec<f64>, f64) {
     for (index, control) in controls.iter_mut().enumerate() {
         let mut terms = 0.0;
         for power in 0..=index {
-            let weight = binomial(index, power) / binomial(degree, power);
+            let weight = TRANSLATION_BINOMIALS[index][power] / TRANSLATION_BINOMIALS[degree][power];
             *control += weight * on_unit[power];
             terms += weight * magnitudes[power];
         }
@@ -140,10 +140,6 @@ fn bernstein(coefficients: &[f64]) -> (Vec<f64>, f64) {
         controls,
         ExactRounding::gamma(CONVERSION_DEPTH) * worst_terms,
     )
-}
-
-fn binomial(n: usize, k: usize) -> f64 {
-    (0..k).fold(1.0, |acc, i| acc * (n - i) as f64 / (i + 1) as f64)
 }
 
 /// Halves Bernstein controls at their midpoint.
