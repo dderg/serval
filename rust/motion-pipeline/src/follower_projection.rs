@@ -37,6 +37,10 @@ const ODOMETER_ALIGNMENT_ULPS: f64 = (1_u64 << 12) as f64;
 /// zero at the endpoint's acceleration ([`SpeedZeroSliver`]): within one
 /// piece, so a sliver never reads a brake into the cruise before it.
 const SPEED_ZERO_SLIVER_FRACTION: f64 = 1e-6;
+/// Relative mismatch between a sliver's speed rate and the leaders' own
+/// at its inner edge that rounding alone leaves where the leaders brake
+/// straight into the rest.
+const SLIVER_RATE_ROUNDING: f64 = 1e-9;
 const COMPONENT_ZERO_PROBES: usize = 16;
 /// The share of the acceleration tolerance under which a slow leader
 /// component counts as at rest ([`RestResolution`]).
@@ -2465,6 +2469,19 @@ impl<'a> FollowerSignal<'a> {
             .or_else(|| self.end_sliver.filter(|sliver| t >= sliver.inner))
     }
 
+    /// How far the sliver's speed rate steps from the leaders' own where it
+    /// takes over.
+    fn sliver_rate_step(&self, sliver: &SpeedZeroSliver) -> f64 {
+        let speed = self.leaders.speed(sliver.inner);
+        (sliver.deriv_at(sliver.inner) - self.leaders.speed_deriv(sliver.inner, speed)).abs()
+    }
+
+    /// The sliver's speed rate is the leaders' where it takes over, to
+    /// within rounding: its inner edge is no break of the signal.
+    fn sliver_joins_the_leaders(&self, sliver: &SpeedZeroSliver) -> bool {
+        self.sliver_rate_step(sliver) <= SLIVER_RATE_ROUNDING * sliver.accel_norm.max(1.0)
+    }
+
     fn shaped_speed(&self, t: f64) -> f64 {
         self.odometer_scale * self.leaders.speed(t)
     }
@@ -2689,6 +2706,7 @@ impl<'a> FollowerSignal<'a> {
         for sliver in [self.start_sliver, self.end_sliver].into_iter().flatten() {
             if sliver.inner > support_start + GRID_DEDUP_EPS_S
                 && sliver.inner < support_end - GRID_DEDUP_EPS_S
+                && !self.sliver_joins_the_leaders(&sliver)
             {
                 breaks.push(sliver.inner);
             }
@@ -2725,7 +2743,10 @@ impl<'a> FollowerSignal<'a> {
                     hi = mid;
                 }
             }
-            if hi - support_start > GRID_DEDUP_EPS_S && support_end - hi > GRID_DEDUP_EPS_S {
+            if hi - support_start > GRID_DEDUP_EPS_S
+                && support_end - hi > GRID_DEDUP_EPS_S
+                && self.speed_zero_sliver(hi).is_none()
+            {
                 breaks.push(hi);
             }
         }

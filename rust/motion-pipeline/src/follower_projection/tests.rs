@@ -391,6 +391,41 @@ fn endpoint_velocity_zero_dedups_against_the_support_grid() {
     assert_eq!(at_start, 1, "endpoint root duplicated in {breaks:?}");
 }
 
+/// Leaders braking to rest at the end of a segment 732 mm into the print:
+/// the path distance reaches the span table's end to within its ulp some
+/// 15 ns before the stop, and the speed-zero sliver begins 20 ns before
+/// it. Neither is a break of the follower's signal — the sliver's speed
+/// rate is the leaders' own there — and a fit piece that short reads its
+/// acceleration off positions rounded at the distance's ulp, so neither
+/// may seed one.
+#[test]
+fn a_stop_at_the_end_of_a_segment_seeds_no_break_within_rounding_of_it() {
+    let (t0, t1) = (13.2, 13.22);
+    let shaped = cusp_segment(vec![100.0, 20.0, -500.0], vec![50.0], t0, t1);
+    let raw = shaped.clone();
+    let length = super::leader_arc_length(&shaped, &[0, 1]);
+    let start = 732.4;
+    let mut state = FollowerState {
+        s_ingested_end: start,
+        ..FollowerState::default()
+    };
+    state.push_span(length, 0.034, 0.034);
+    let sig = FollowerSignal::new(
+        &shaped,
+        &raw,
+        3,
+        &[0, 1],
+        &state,
+        super::Odometer { start, length },
+        0.0,
+    );
+    let seeds = sig.construction_breakpoints(&raw.axes[3], 50.0).fit_seeds;
+    assert!(
+        seeds.iter().all(|&t| t >= t1 || t1 - t > 1e-6),
+        "a seed within a microsecond of the stop at {t1}: {seeds:?}"
+    );
+}
+
 const REST_NOISE_MM: f64 = 1e-18;
 
 /// A y leader resting at the origin over `[t0, t0 + rest]`, then
