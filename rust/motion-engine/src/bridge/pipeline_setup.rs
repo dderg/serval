@@ -489,7 +489,7 @@ impl PyMotionEngine {
             self.build_execution_resources(mcu_configs, host_ios, ec_conns, &pump_tx)?;
 
         let stream_cfg =
-            motion_core::live_config::stream_config(cfg).map_err(PyValueError::new_err)?;
+            motion_pipeline::live_config::stream_config(cfg).map_err(PyValueError::new_err)?;
         let axis_chains = cfg
             .compile_active_chains()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
