@@ -38,6 +38,11 @@ class LiveRest:
     dwell_s: float
 
 
+@dataclass(frozen=True)
+class LivePosition:
+    position: tuple[float, float, float]
+
+
 class _Reactor:
     NOW = 0.0
     NEVER = math.inf
@@ -117,7 +122,7 @@ class RecordingEngine:
     def __init__(self, config_text: str):
         engine = harness._import_engine()
         self._limits = engine.PlannerLimits(config_text)
-        self.steps: list[LiveMove | LiveRest] = []
+        self.steps: list[LiveMove | LiveRest | LivePosition] = []
         self._position = [0.0, 0.0, 0.0, 0.0]
         self.frontier = 0.0
 
@@ -172,6 +177,7 @@ class RecordingEngine:
 
     def set_position(self, x, y, z):
         self._position[:3] = [x, y, z]
+        self.steps.append(LivePosition((x, y, z)))
 
 
 def _load_config(cfg_path: Path, printer):
@@ -231,8 +237,11 @@ def _register_motion_commands(gcode, motion):
         gcode.register_command(name, handler)
 
 
-def replay(gcode_text: str, cfg_path: Path) -> list[LiveMove | LiveRest]:
-    """Every move and rest the live host submits for ``gcode_text``, in order."""
+def replay(
+    gcode_text: str, cfg_path: Path
+) -> list[LiveMove | LiveRest | LivePosition]:
+    """Every move, rest and position rename the live host submits for
+    ``gcode_text``, in order."""
     from klippy import configfile
     from klippy import gcode as gcode_mod
     from klippy.extras import force_move, gcode_move, stepper_enable

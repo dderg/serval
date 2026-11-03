@@ -1,18 +1,24 @@
-//! G-code text → absolute waypoints, mirroring `snapshots/harness.py::parse_gcode`
-//! move for move so the playground and the snapshot harness agree on what a
-//! pasted file means. E rides as the fourth coordinate so retracts (E-only
-//! moves) and extruding moves flow through the pipeline as followers; the
-//! engine differences consecutive E to a per-move delta. Each waypoint carries
-//! the runtime limit overrides in force for the move ending at it — the same
-//! [`RuntimeLimits`] state the live engine holds when that move is submitted —
-//! so the snapshot derives its effective limits through the live clamp.
+//! G-code text → absolute waypoints, mirroring what the live host submits
+//! move for move, so the playground, the snapshot harness and the bench
+//! analyzer agree with a printer on what a file means. E rides as the fourth
+//! coordinate so retracts (E-only moves) and extruding moves flow through the
+//! pipeline as followers; the engine differences consecutive E to a per-move
+//! delta. Each waypoint carries the runtime limit overrides in force for the
+//! move ending at it — the same [`RuntimeLimits`] state the live engine holds
+//! when that move is submitted — so the snapshot derives its effective limits
+//! through the live clamp.
 //! Coordinates follow klippy's `GCodeMove`: absolute by default, E relative
-//! under M83 or under G91 (even after M82), and G92 moves the G-code origin,
-//! never the toolhead.
+//! under M83 or under G91 (even after M82), G92 and `SET_GCODE_OFFSET` move
+//! the G-code origin, never the toolhead, M220/M221 scale speed and
+//! extrusion, and `SAVE_GCODE_STATE`/`RESTORE_GCODE_STATE` keep all of it.
+//! A command the snapshot cannot plan is refused by name (see `refused`);
+//! any other is ignored, as the live host ignores it.
 
 use std::collections::HashMap;
 
 use planner_config::{CartesianLimits, RuntimeLimits};
+
+mod refused;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Waypoint {
@@ -46,10 +52,12 @@ impl Waypoint {
 pub enum WaypointError {
     #[error(transparent)]
     Lex(#[from] gcode::ParseError),
-    #[error(
-        "line {line}: G{major} arc command is not supported: the motion engine has no native arc ingestion yet, and silently linearizing it here would claim to exercise an arc while feeding the engine straight segments"
-    )]
-    UnsupportedArc { line: u32, major: u32 },
+    #[error("line {line}: {command}: {reason}")]
+    Unplannable {
+        line: u32,
+        command: Box<str>,
+        reason: &'static str,
+    },
     #[error("line {line}: G{command} F{feedrate}: invalid speed")]
     InvalidSpeed {
         line: u32,
@@ -244,8 +252,9 @@ const DISABLE_STALL_TIME_S: f64 = 0.1;
 /// klippy's `Motion` as the snapshot sees it: the commanded position, the
 /// runtime limit overrides in force, which axes are homed, and `Motion.move`
 /// turning a target and a speed into the move it submits. The snapshot
-/// starts at the first move that names a position — the anchor — so a stop
-/// at rest before it is already where the plan begins.
+/// starts at the anchor — the first position the G-code states: a
+/// `SET_KINEMATIC_POSITION` or the first move that names a coordinate — so a
+/// stop at rest before it is already where the plan begins.
 struct Toolhead<'a> {
     config: &'a CartesianLimits,
     runtime: RuntimeLimits,
@@ -272,7 +281,13 @@ impl Toolhead<'_> {
 
     /// `ForceMove.cmd_SET_KINEMATIC_POSITION`: wait for the moves, rename
     /// the toolhead position and home every axis but the cleared ones.
-    fn set_kinematic_position(&mut self, args: &ExtendedArgs<'_>) -> Result<(), WaypointError> {
+    /// Before the anchor it states where the toolhead is, so it anchors the
+    /// plan there.
+    fn set_kinematic_position(
+        &mut self,
+        args: &ExtendedArgs<'_>,
+        speed: f64,
+    ) -> Result<Option<Waypoint>, WaypointError> {
         self.rest(0.0);
         let mut renamed = self.commanded;
         for (axis, key) in ["X", "Y", "Z"].into_iter().enumerate() {
@@ -289,12 +304,27 @@ impl Toolhead<'_> {
                 to: [renamed[0], renamed[1], renamed[2]],
             });
         }
-        self.commanded = renamed;
         let clear = args.raw("CLEAR").unwrap_or("").to_ascii_uppercase();
         for (axis, name) in ['X', 'Y', 'Z'].into_iter().enumerate() {
             self.homed[axis] = !clear.contains(name);
         }
-        Ok(())
+        if self.anchored {
+            self.commanded = renamed;
+            return Ok(None);
+        }
+        Ok(Some(self.anchor(renamed, speed)))
+    }
+
+    fn anchor(&mut self, position: [f64; 4], speed: f64) -> Waypoint {
+        self.anchored = true;
+        self.commanded = position;
+        self.rest_s = None;
+        Waypoint {
+            position,
+            feedrate: speed,
+            runtime: self.runtime,
+            dwell_before_s: None,
+        }
     }
 
     /// `Motion.move(newpos, speed)`: `Move` caps a kinematic move at the
@@ -339,15 +369,7 @@ impl Toolhead<'_> {
                 self.commanded = end;
                 return Ok(None);
             }
-            self.anchored = true;
-            self.commanded = target;
-            self.rest_s = None;
-            return Ok(Some(Waypoint {
-                position: target,
-                feedrate: speed,
-                runtime: self.runtime,
-                dwell_before_s: None,
-            }));
+            return Ok(Some(self.anchor(target, speed)));
         }
         if move_d == 0.0 {
             return Ok(None);
@@ -599,107 +621,158 @@ fn g4_dwell_s(params: &gcode::Params, line: u32) -> Result<f64, WaypointError> {
     Ok(milliseconds / 1000.0)
 }
 
-pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>, WaypointError> {
-    let mut waypoints: Vec<Waypoint> = Vec::new();
-    let mut toolhead = Toolhead {
-        config,
-        runtime: RuntimeLimits::default(),
-        commanded: [0.0; 4],
-        anchored: false,
-        homed: [true; 3],
-        rest_s: None,
-    };
-    let mut gcode_move = GCodeMove::new();
+/// The live host's G-code handlers over the snapshot's toolhead: each
+/// command a handler would act on is mirrored, each the snapshot cannot plan
+/// is refused by name, and the rest are ignored as live ignores them —
+/// their arguments are never read, so `M117 Hello` is as harmless here.
+struct Interpreter<'a> {
+    config: &'a CartesianLimits,
+    toolhead: Toolhead<'a>,
+    gcode_move: GCodeMove,
+    waypoints: Vec<Waypoint>,
+}
 
-    for tok in gcode::lex(text) {
-        let tok = tok?;
-        let (letter, major, minor, params, line_no) = match tok {
-            gcode::Token::Command {
-                letter,
-                major,
-                minor,
-                params,
-                line_no,
-            } => (letter, major, minor, params, line_no),
-            gcode::Token::Extended {
-                name,
-                args,
-                line_no,
-            } => {
-                let args = ExtendedArgs {
-                    command: &name,
-                    line: line_no,
-                    args: &args,
-                };
-                let move_speed = match &*name {
-                    "SET_VELOCITY_LIMIT" => {
-                        set_velocity_limit(&args, config, &mut toolhead.runtime)?;
-                        None
-                    }
-                    "RESET_VELOCITY_LIMIT" => {
-                        reset_velocity_limit(&mut toolhead.runtime);
-                        None
-                    }
-                    "SET_KINEMATIC_POSITION" => {
-                        toolhead.set_kinematic_position(&args)?;
-                        gcode_move.state.last_position = toolhead.commanded;
-                        None
-                    }
-                    "SET_GCODE_OFFSET" => gcode_move.set_gcode_offset(&args)?,
-                    "SAVE_GCODE_STATE" => {
-                        gcode_move.save_state(&args);
-                        None
-                    }
-                    "RESTORE_GCODE_STATE" => gcode_move.restore_state(&args)?,
-                    _ => None,
-                };
-                if let Some(speed) = move_speed {
-                    let waypoint =
-                        toolhead.move_to(gcode_move.state.last_position, speed, true, line_no)?;
-                    waypoints.extend(waypoint);
-                }
-                continue;
-            }
-            _ => continue,
-        };
-        if minor.is_some() {
-            continue;
+impl Interpreter<'_> {
+    fn submit(&mut self, speed: f64, names_position: bool, line: u32) -> Result<(), WaypointError> {
+        let waypoint = self.toolhead.move_to(
+            self.gcode_move.state.last_position,
+            speed,
+            names_position,
+            line,
+        )?;
+        self.waypoints.extend(waypoint);
+        Ok(())
+    }
+
+    fn numbered(
+        &mut self,
+        line: &gcode::Line<'_>,
+        letter: u8,
+        major: u32,
+        minor: Option<u32>,
+    ) -> Result<(), WaypointError> {
+        let line_no = line.line_no;
+        if let Some(reason) = refused::numbered(letter, major, minor, self.toolhead.anchored) {
+            let minor = minor.map(|m| format!(".{m}")).unwrap_or_default();
+            return Err(WaypointError::Unplannable {
+                line: line_no,
+                command: format!("{}{major}{minor}", char::from(letter)).into(),
+                reason,
+            });
         }
-        match (letter, major) {
-            (b'G', 90) => gcode_move.state.absolute_coord = true,
-            (b'G', 91) => gcode_move.state.absolute_coord = false,
-            (b'M', 82) => gcode_move.state.absolute_extrude = true,
-            (b'M', 83) => gcode_move.state.absolute_extrude = false,
-            (b'G', 20) => return Err(WaypointError::InchUnits { line: line_no }),
-            (b'M', 220) => gcode_move.set_speed_factor(&params, line_no)?,
-            (b'M', 221) => gcode_move.set_extrude_factor(&params, line_no)?,
-            (b'M', 204) => m204(&params, line_no, &mut toolhead.runtime)?,
-            (b'G', 92) => gcode_move.set_position(&params),
-            (b'G', 4) => toolhead.rest(g4_dwell_s(&params, line_no)?),
-            (b'M', 400) => toolhead.rest(0.0),
-            (b'M', 18 | 84) => toolhead.motors_off(),
-            (b'G', 2 | 3) => {
-                return Err(WaypointError::UnsupportedArc {
-                    line: line_no,
-                    major,
-                });
-            }
-            (b'G', cmd @ (0 | 1)) => {
-                let has_position =
+        let state = &mut self.gcode_move.state;
+        match (letter, major, minor) {
+            (b'G', 90, None) => state.absolute_coord = true,
+            (b'G', 91, None) => state.absolute_coord = false,
+            (b'M', 82, None) => state.absolute_extrude = true,
+            (b'M', 83, None) => state.absolute_extrude = false,
+            (b'G', 20, None) => return Err(WaypointError::InchUnits { line: line_no }),
+            (b'M', 220, None) => self.gcode_move.set_speed_factor(&line.params()?, line_no)?,
+            (b'M', 221, None) => self
+                .gcode_move
+                .set_extrude_factor(&line.params()?, line_no)?,
+            (b'M', 204, None) => m204(&line.params()?, line_no, &mut self.toolhead.runtime)?,
+            (b'G', 92, None) => self.gcode_move.set_position(&line.params()?),
+            (b'G', 4, None) => self.toolhead.rest(g4_dwell_s(&line.params()?, line_no)?),
+            (b'M', 400, None) => self.toolhead.rest(0.0),
+            (b'M', 18 | 84, None) => self.toolhead.motors_off(),
+            (b'G', command @ (0 | 1), None) => {
+                let params = line.params()?;
+                let names_position =
                     params.x().is_some() || params.y().is_some() || params.z().is_some();
-                gcode_move.linear_move(cmd, &params, line_no)?;
-                let waypoint = toolhead.move_to(
-                    gcode_move.state.last_position,
-                    gcode_move.state.speed,
-                    has_position,
-                    line_no,
-                )?;
-                waypoints.extend(waypoint);
+                self.gcode_move.linear_move(command, &params, line_no)?;
+                self.submit(self.gcode_move.state.speed, names_position, line_no)?;
             }
             _ => {}
         }
+        Ok(())
     }
-    Ok(waypoints)
+
+    fn extended(&mut self, line: &gcode::Line<'_>, name: &str) -> Result<(), WaypointError> {
+        let line_no = line.line_no;
+        if let Some(reason) = refused::extended(name, self.toolhead.anchored) {
+            return Err(WaypointError::Unplannable {
+                line: line_no,
+                command: name.into(),
+                reason,
+            });
+        }
+        if !MIRRORED_EXTENDED.contains(&name) {
+            return Ok(());
+        }
+        let raw_args = line.extended_args()?;
+        let args = ExtendedArgs {
+            command: name,
+            line: line_no,
+            args: &raw_args,
+        };
+        let move_speed = match name {
+            "SET_VELOCITY_LIMIT" => {
+                set_velocity_limit(&args, self.config, &mut self.toolhead.runtime)?;
+                None
+            }
+            "RESET_VELOCITY_LIMIT" => {
+                reset_velocity_limit(&mut self.toolhead.runtime);
+                None
+            }
+            "SET_KINEMATIC_POSITION" => {
+                let anchor = self
+                    .toolhead
+                    .set_kinematic_position(&args, self.gcode_move.state.speed)?;
+                self.waypoints.extend(anchor);
+                self.gcode_move.state.last_position = self.toolhead.commanded;
+                None
+            }
+            "SET_GCODE_OFFSET" => self.gcode_move.set_gcode_offset(&args)?,
+            "SAVE_GCODE_STATE" => {
+                self.gcode_move.save_state(&args);
+                None
+            }
+            "RESTORE_GCODE_STATE" => self.gcode_move.restore_state(&args)?,
+            _ => unreachable!("{name} is listed as mirrored but has no handler"),
+        };
+        if let Some(speed) = move_speed {
+            self.submit(speed, true, line_no)?;
+        }
+        Ok(())
+    }
+}
+
+const MIRRORED_EXTENDED: [&str; 6] = [
+    "SET_VELOCITY_LIMIT",
+    "RESET_VELOCITY_LIMIT",
+    "SET_KINEMATIC_POSITION",
+    "SET_GCODE_OFFSET",
+    "SAVE_GCODE_STATE",
+    "RESTORE_GCODE_STATE",
+];
+
+pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>, WaypointError> {
+    let mut interpreter = Interpreter {
+        config,
+        toolhead: Toolhead {
+            config,
+            runtime: RuntimeLimits::default(),
+            commanded: [0.0; 4],
+            anchored: false,
+            homed: [true; 3],
+            rest_s: None,
+        },
+        gcode_move: GCodeMove::new(),
+        waypoints: Vec::new(),
+    };
+    for line in gcode::lines(text) {
+        let line = line?;
+        match &line.head {
+            gcode::Head::Numbered {
+                letter,
+                major,
+                minor,
+            } => interpreter.numbered(&line, *letter, *major, *minor)?,
+            gcode::Head::Extended(name) => interpreter.extended(&line, name)?,
+        }
+    }
+    Ok(interpreter.waypoints)
 }
 
 #[cfg(test)]

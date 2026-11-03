@@ -5,5 +5,5 @@ pub mod lexer;
 pub mod token;
 
 pub use error::ParseError;
-pub use lexer::lex;
+pub use lexer::{Head, Line, Lines, lex, lines};
 pub use token::{Params, Token};
