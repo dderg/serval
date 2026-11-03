@@ -6,6 +6,7 @@ use crate::path::lowering::PositionProfile;
 use crate::path::{Arc, Clothoid, CurvatureProfile, Line};
 use crate::segment::FollowerDemand;
 
+use super::super::biclothoid::piece_dev_from_chain;
 use super::super::vec3::{add, cross, dot, madd, norm, normalize, scale, signed_angle, sub};
 use super::super::{BUDGET_EPS_MM, FitError, internal, line_of};
 use super::Reconstruction;
@@ -229,11 +230,13 @@ struct EaseFit {
 /// Solve one easing configuration end to end: refit the circle for the given
 /// end plans, then build every planned spiral and validate its line trim, and
 /// rebuild the residual mid-arc between the spiral contacts. A planned end
-/// whose spiral is degenerate or over-claims its neighbor — or a pair of
+/// whose spiral is degenerate or over-claims its neighbor — a pair of
 /// spirals that would consume more angle than the arc has, leaving a residual
-/// sweep that runs backward — rejects the whole attempt: the caller retries
-/// with a smaller lead angle or fewer eased ends, because the refit circle is
-/// only valid together with the spirals it was solved for.
+/// sweep that runs backward — or an eased curve straying farther than `tol`
+/// from the polyline it replaces (the run's facets and the neighbor lines
+/// the spirals trim) rejects the whole attempt: the caller retries with a
+/// smaller lead angle or fewer eased ends, because the refit circle is only
+/// valid together with the spirals it was solved for.
 fn try_ease(
     ends: EaseEnds,
     arc: &ArcFrame,
@@ -279,7 +282,25 @@ fn try_ease(
     let Some(arc) = build_arc(origin, radius, b_head, b_tail, pn, expected_sweep)? else {
         return Ok(None);
     };
-    Ok(Some(EaseFit { head, tail, arc }))
+    let fit = EaseFit { head, tail, arc };
+    Ok((fit.deviation_from_polyline(verts) <= tol).then_some(fit))
+}
+
+impl EaseFit {
+    fn deviation_from_polyline(&self, verts: &[[f64; 3]]) -> f64 {
+        let line_contact =
+            |spiral: &Option<SpiralFit>| spiral.as_ref().map(|s| s.clo.point_at(0.0));
+        let chain: Vec<[f64; 3]> = line_contact(&self.head)
+            .into_iter()
+            .chain(verts.iter().copied())
+            .chain(line_contact(&self.tail))
+            .collect();
+        [&self.head, &self.tail]
+            .into_iter()
+            .flatten()
+            .map(|s| piece_dev_from_chain(&s.clo, &chain))
+            .fold(piece_dev_from_chain(&self.arc, &chain), f64::max)
+    }
 }
 
 fn max_ease_angle(radius: f64, neighbor_len: f64) -> f64 {

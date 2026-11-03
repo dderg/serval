@@ -23,6 +23,9 @@ import pi
 from capture import DEVICE as CAPTURE_DEVICE
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "snapshots"))
+import engine_build_id  # noqa: E402
+
 BENCH = REPO / "tools" / "bench"
 TARGET_CONFIG = BENCH / "f401.config"
 TARGET_OUT = Path("~/bench/fw/f401").expanduser()
@@ -76,6 +79,7 @@ def deploy_identity(tree: Path) -> dict:
         "head": git_output(tree, "rev-parse", "HEAD").strip(),
         "branch": git_output(tree, "rev-parse", "--abbrev-ref", "HEAD").strip(),
         "diff_sha256": hashlib.sha256(diff).hexdigest(),
+        "rust_build_id": engine_build_id.tree_build_id(tree),
         "dirty_paths": dirty,
         "timestamp": datetime.now().astimezone().isoformat(),
         "worktree": str(tree),
