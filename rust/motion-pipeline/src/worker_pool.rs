@@ -168,20 +168,47 @@ impl WorkerPool {
                 .expect("pipeline worker results poisoned")
                 .append(&mut local);
         };
-        self.fan_out(participants, &participate)?;
+        self.fan_out(participants, &participate, &participate)?;
         let mut done = done.into_inner().expect("pipeline worker results poisoned");
         assert_eq!(done.len(), jobs, "pipeline workers dropped jobs");
         done.sort_by_key(|(index, _)| *index);
         Ok(done.into_iter().map(|(_, result)| result).collect())
     }
 
-    /// Runs `task` on the calling thread and on up to `participants - 1`
-    /// helpers at once. Helpers reach `task` with its lifetime erased, which
-    /// is sound because `OpenCall` closes the call and waits out every helper
-    /// that took it before this returns or unwinds, and a closed call hands
-    /// the task to no one.
+    /// Runs `lead` on the calling thread while up to `participants - 1`
+    /// helpers run `follow`, then runs `follow` on the calling thread too.
+    /// `follow` must return once `lead` has finished, or unwound, and left it
+    /// nothing to do. A panic on any participant is caught and returned as
+    /// `Err` once every helper has left.
+    fn lead_with_followers(
+        &self,
+        participants: usize,
+        lead: impl FnOnce(),
+        follow: impl Fn() + Sync,
+    ) -> std::thread::Result<()> {
+        if participants <= 1 {
+            lead();
+            follow();
+            return Ok(());
+        }
+        self.fan_out(participants, &follow, || {
+            lead();
+            follow();
+        })
+    }
+
+    /// Hands `task` to up to `participants - 1` helpers at once while the
+    /// calling thread runs `own`. Helpers reach `task` with its lifetime
+    /// erased, which is sound because `OpenCall` closes the call and waits out
+    /// every helper that took it before this returns or unwinds, and a closed
+    /// call hands the task to no one.
     #[allow(unsafe_code)]
-    fn fan_out(&self, participants: usize, task: &Task<'_>) -> std::thread::Result<()> {
+    fn fan_out(
+        &self,
+        participants: usize,
+        task: &Task<'_>,
+        own: impl FnOnce(),
+    ) -> std::thread::Result<()> {
         let helpers = self.helpers();
         let task = unsafe { std::mem::transmute::<&Task<'_>, &'static Task<'static>>(task) };
         let call = Arc::new(Call {
@@ -199,7 +226,7 @@ impl WorkerPool {
                 .send(Arc::clone(&call))
                 .expect("pipeline worker queue closed");
         }
-        let own = catch_unwind(AssertUnwindSafe(task));
+        let own = catch_unwind(AssertUnwindSafe(own));
         std::mem::forget(open);
         let helper_panic = call.close_and_wait();
         own?;
@@ -214,14 +241,9 @@ impl Default for WorkerPool {
 }
 
 impl geometry::FanOut for WorkerPool {
-    fn map_jobs<T: Send>(
-        &self,
-        participants: usize,
-        jobs: usize,
-        job: impl Fn(usize) -> T + Sync,
-    ) -> Vec<T> {
-        self.map_indexed(participants, jobs, || (), |(), index| job(index))
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    fn lead_and_follow(&self, participants: usize, lead: impl FnOnce(), follow: impl Fn() + Sync) {
+        self.lead_with_followers(participants, lead, follow)
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     }
 }
 
