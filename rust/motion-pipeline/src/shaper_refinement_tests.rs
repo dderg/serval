@@ -1,6 +1,13 @@
+use std::sync::Arc;
+
+use geometry::path::{Clothoid, PathSegment, Segment};
+use geometry::{LawSegment, Move, ScalarLaw, SourceRange, VelocityLimits};
+use trajectory::{AnalyticMoveSpan, ContinuousAxis, SurfaceMode};
+
 use super::{
-    AxisFit, BetweenProbes, FloorVelocityGate, KnotJumpBound, MIN_DEVICE_INTERVAL_S, RungWitness,
-    TrackSignal, fit_axis_from_signal, seed_floors,
+    AxisFit, BetweenProbes, CapContactSource, FloorVelocityGate, KnotJumpBound,
+    MIN_DEVICE_INTERVAL_S, RungWitness, TrackSignal, cap_contact_seeds, edge_inset,
+    edge_velocity_and_acceleration, fit_axis_from_signal, fit_seed_times, seed_floors,
 };
 use crate::lowering::{AccelBudget, FitTol, LADDER_PROBES_U, eval_mono_dd, quintic_in_u};
 use crate::types::PostProcessError;
@@ -746,11 +753,14 @@ fn worst_resolved_acceleration_miss(
         .fold(0.0, f64::max)
 }
 
-/// Undeclared, the onset reads at the edge like a break hidden in its
-/// sliver, and the floor pieces the shoulder refines to keep rungs anchored
-/// to that extrapolation; declared, they anchor to the onset itself.
+/// A square-root onset's shoulder is steep enough that the acceleration
+/// read past a refined piece's edge sliver, extrapolated back, misses the
+/// seam reading, yet it hides no break: declared or not, the pieces the
+/// shoulder refines to anchor to the signal and hold the tolerance.
+/// Measured before, undeclared: 96.6 mm/s², its floor pieces anchored to
+/// the extrapolation.
 #[test]
-fn a_declared_square_root_onset_is_refined_until_its_shoulder_holds_the_tolerance() {
+fn a_square_root_onset_is_refined_until_its_shoulder_holds_the_tolerance() {
     let fit_tol = FitTol::absolute(0.005, 50.0);
     let onset = || SquareRootOnset {
         at: 0.211_721_933,
@@ -768,26 +778,19 @@ fn a_declared_square_root_onset_is_refined_until_its_shoulder_holds_the_toleranc
         velocity_continuous: false,
     };
     let cubic_floor = seed_floors(&axis_fit, &onset(), &[axis_fit.t_start, axis_fit.t_end]).cubic;
-    let worst_miss = |declared: bool| {
+    for declared in [false, true] {
         let track = if declared {
             fit_axis_from_signal(axis_fit, &DeclaredOnset(onset()))
         } else {
             fit_axis_from_signal(axis_fit, &onset())
         }
         .expect("a square-root onset fits");
-        worst_resolved_acceleration_miss(&track, &onset(), cubic_floor)
-    };
-    let undeclared = worst_miss(false);
-    assert!(
-        undeclared > fit_tol.accel_mm_s2,
-        "the undeclared shoulder must leave the tolerance for this onset to test anything: \
-         worst miss {undeclared} mm/s²"
-    );
-    let declared = worst_miss(true);
-    assert!(
-        declared <= fit_tol.accel_mm_s2,
-        "the declared onset's shoulder leaves the tolerance by {declared} mm/s²"
-    );
+        let worst = worst_resolved_acceleration_miss(&track, &onset(), cubic_floor);
+        assert!(
+            worst <= fit_tol.accel_mm_s2,
+            "the onset's shoulder (declared: {declared}) leaves the tolerance by {worst} mm/s²"
+        );
+    }
 }
 
 /// The rungs a declared onset's span is held to miss its shoulder most
@@ -923,13 +926,14 @@ fn a_position_equivalent_budget_fits_a_pressure_wave_in_fewer_pieces_within_each
     }
 }
 
-/// An acceleration rising from a span edge as `rise · (1 − e^(−τ/time))`,
-/// steep enough there that the reading past the edge sliver, extrapolated
-/// back, misses the seam reading by more than the tolerance: the edge
-/// anchors to the extrapolation, as it would past a break hidden in the
-/// sliver.
+/// An acceleration stepping to `step` a sliver `delay` past a span edge and
+/// rising from there as `rise · (1 − e^(−τ/time))`: the break hides in the
+/// edge sliver, so the edge anchors to the reading past it extrapolated
+/// back, which the steep rise bends away from the signal.
 struct SaturatingRise {
     t0: f64,
+    delay: f64,
+    step: f64,
     rise: f64,
     time: f64,
 }
@@ -937,12 +941,19 @@ struct SaturatingRise {
 impl TrackSignal for SaturatingRise {
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let tau = (t - self.t0).max(0.0);
-        let (rise, time) = (self.rise, self.time);
-        let settled = 1.0 - libm::exp(-tau / time);
+        let risen = (tau - self.delay).max(0.0);
+        let (step, rise, time) = (self.step, self.rise, self.time);
+        let settled = 1.0 - libm::exp(-risen / time);
         (
-            100.0 - 10.0 * tau + rise * (0.5 * tau * tau - time * tau + time * time * settled),
-            -10.0 + rise * (tau - time * settled),
-            rise * settled,
+            100.0 - 10.0 * tau
+                + 0.5 * step * risen * risen
+                + rise * (0.5 * risen * risen - time * risen + time * time * settled),
+            -10.0 + step * risen + rise * (risen - time * settled),
+            if tau < self.delay {
+                0.0
+            } else {
+                step + rise * settled
+            },
         )
     }
 }
@@ -994,6 +1005,8 @@ fn a_piece_anchored_past_its_edge_sliver_holds_the_tolerance_from_its_resolved_e
     let fit_tol = FitTol::absolute(0.005, 50.0);
     let sig = SaturatingRise {
         t0: 24.907_472_866,
+        delay: 1e-7,
+        step: 500.0,
         rise: 3e3,
         time: 3e-6,
     };
@@ -1007,11 +1020,158 @@ fn a_piece_anchored_past_its_edge_sliver_holds_the_tolerance_from_its_resolved_e
         velocity_continuous: false,
     };
     let cubic_floor = seed_floors(&fit, &sig, &[fit.t_start, fit.t_end]).cubic;
-    let track = fit_axis_from_signal(fit, &sig).expect("a smooth rise fits");
+    let anchor = edge_velocity_and_acceleration(
+        &sig,
+        0,
+        trajectory::next_toward(fit.t_start, fit.t_end),
+        fit.t_start + edge_inset(fit.t_end - fit.t_start, cubic_floor, 0.0),
+        false,
+        fit_tol,
+    )
+    .expect("the edge reads");
+    assert!(
+        anchor.past_sliver,
+        "the step must hide in the edge sliver for the edge to anchor past it"
+    );
+    let track = fit_axis_from_signal(fit, &sig).expect("a stepped rise fits");
     let worst = worst_resolved_acceleration_miss(&track, &sig, cubic_floor);
     assert!(
         worst <= fit_tol.accel_mm_s2,
         "the steep edge leaves the tolerance by {worst} mm/s²"
+    );
+}
+
+/// A 0.7 µm clothoid blend into a travel braking on its curvature cap
+/// (dense print line 6152 at 18 807 mm/s²): the brake phase opens with its
+/// rail barely off the cap, where the X acceleration's jerk doubles a
+/// microsecond in. Reading that jerk change as a break hidden in the edge
+/// sliver anchored the phase's piece 64 mm/s² off its seam acceleration;
+/// measured before: 1.05× the tolerance just past the resolved edge.
+fn rail_braking_off_its_curvature_cap() -> AnalyticMoveSpan {
+    let accel = 18_807.145_631_480_93;
+    let sigma = -634_643.703_105_817_3;
+    let clothoid = Clothoid::try_new(
+        [120.187_021_840_770_68, 151.117_030_045_951_57, 47.6],
+        [-0.808_874_754_419_684_5, 0.587_980_978_997_191, 0.0],
+        [0.587_980_978_997_191_2, 0.808_874_754_419_684_5, 0.0],
+        446.174_956_630_218_96,
+        sigma,
+        0.000_703_032_196_564_354_8,
+    )
+    .expect("clothoid");
+    let rail = |kappa0: f64, brake: bool| ScalarLaw::DiskRail {
+        accel,
+        kappa0,
+        sigma,
+        brake,
+    };
+    let (kappa0, length) = (446.174_956_630_218_96, 0.000_703_032_196_564_354_8);
+    let onset = 3.712_156_576_679_695e-5;
+    let approach =
+        LawSegment::until_arc(0.0, 0.0, 6.492_453_513_009_977, rail(kappa0, false), length)
+            .expect("the cap approach advances")
+            .cut_at_arc(onset)
+            .expect("the approach reaches the onset");
+    let (brake, entry) = LawSegment::until_arc(
+        0.0,
+        0.0,
+        4.607_922_821_670_433,
+        ScalarLaw::DiskRail {
+            accel,
+            kappa0: kappa0 + sigma * length,
+            sigma: -sigma,
+            brake: false,
+        },
+        length,
+    )
+    .expect("the reversed brake advances")
+    .flipped_cut(
+        approach.dt,
+        onset,
+        rail(kappa0 + sigma * onset, true),
+        length - onset,
+    )
+    .expect("the brake lands");
+    assert_eq!(
+        (approach.dt, entry, brake.dt),
+        (
+            5.709_841_167_112_868e-6,
+            6.514_339_472_230_706,
+            0.000_117_682_229_731_783_8
+        ),
+        "the rail must be the one the dense print planned"
+    );
+    let t_start = 43.239_506_820_289_584;
+    let t_end = t_start + approach.dt + brake.dt;
+    AnalyticMoveSpan::try_new(
+        Move {
+            segment: PathSegment::try_new(Segment::Clothoid(clothoid), Vec::new()).expect("path"),
+            feedrate_mm_s: 432.560_933_333_333_3,
+            limits: VelocityLimits::try_new(
+                1000.0,
+                70_000.0,
+                0.000_147_933_415_133_248_27,
+                f64::INFINITY,
+            )
+            .expect("limits"),
+            source: SourceRange {
+                start_line: 6152,
+                end_line: 6152,
+            },
+        },
+        Arc::from([approach, brake]),
+        0.0,
+        t_start,
+        t_end,
+        Arc::from([
+            120.187_021_840_770_68,
+            151.117_030_045_951_57,
+            47.6,
+            73.249_169_637_384_63,
+        ]),
+        SurfaceMode::None,
+    )
+    .expect("span")
+}
+
+#[test]
+fn a_rail_braking_off_its_curvature_cap_holds_the_tolerance_past_its_phase_seam() {
+    let fit_tol = FitTol::absolute(0.005, 50.0);
+    let span = Arc::new(rail_braking_off_its_curvature_cap());
+    let (seeds, cap_contacts) = cap_contact_seeds(&span);
+    let source = ContinuousAxis::Analytic {
+        span: Arc::clone(&span),
+        axis: 0,
+    };
+    let sig = CapContactSource {
+        source: &source,
+        axis: 0,
+        cap_contacts: &cap_contacts,
+        shared: None,
+        enclosure: std::cell::OnceCell::new(),
+        whole: (span.t_start, span.t_end),
+        accuracy: super::hull::HullBudget {
+            tol: fit_tol,
+            velocity: f64::INFINITY,
+        }
+        .enclosure_accuracy(),
+    };
+    let fit = AxisFit {
+        axis: 0,
+        t_start: span.t_start,
+        t_end: span.t_end,
+        seed_breakpoints: &seeds,
+        fit_tol,
+        fit_context: "materialize_source",
+        velocity_continuous: false,
+    };
+    let fit_seeds = fit_seed_times(0, fit.t_start, fit.t_end, &seeds).expect("seeds");
+    let cubic_floor = seed_floors(&fit, &sig, &fit_seeds).cubic;
+    let track = fit_axis_from_signal(fit, &sig).expect("the braking rail fits");
+    let worst = worst_resolved_acceleration_miss(&track, &sig, cubic_floor);
+    assert!(
+        worst <= fit_tol.accel_mm_s2,
+        "the braking rail leaves the tolerance by {worst} mm/s²"
     );
 }
 

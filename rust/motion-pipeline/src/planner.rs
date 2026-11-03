@@ -2,7 +2,7 @@ use geometry::path::Segment;
 use std::sync::Arc;
 
 use geometry::{
-    Move, VelocityPlanParams, VelocityProfile, plan_velocity_stops_select_prefix,
+    ExtrusionReach, Move, VelocityPlanParams, VelocityProfile, plan_velocity_stops_select_prefix,
     seam_requires_stop,
 };
 
@@ -25,8 +25,13 @@ const REPLAN_BATCH_MOVES: usize = 64;
 /// decides whether planning keeps up with the print.
 const QUIET_PLAN_MIN_MOVES: usize = 32;
 
+/// Moves enter the window once their ratio in reach has settled (see
+/// [`ExtrusionReach`]): a move's budget never changes after it is planned,
+/// so the forward ceilings the finality barrier rests on stay final.
 pub struct Planner {
+    reach: ExtrusionReach,
     moves: Vec<Move>,
+    ratios_in_reach: Vec<f64>,
     entry_v: f64,
     moves_since_plan: usize,
     config: StreamConfig,
@@ -36,7 +41,12 @@ pub struct Planner {
 impl Planner {
     pub fn new(config: StreamConfig, workers: Arc<WorkerPool>) -> Self {
         Self {
+            reach: ExtrusionReach::new(
+                config.max_extrude_only_velocity_mm_s,
+                config.max_extrude_only_accel_mm_s2,
+            ),
             moves: Vec::new(),
+            ratios_in_reach: Vec::new(),
             entry_v: 0.0,
             moves_since_plan: 0,
             config,
@@ -81,7 +91,9 @@ impl Planner {
     ) -> bool {
         match &ctrl {
             Control::Reset { .. } => {
+                self.reach.clear();
                 self.moves.clear();
+                self.ratios_in_reach.clear();
                 self.entry_v = 0.0;
                 self.moves_since_plan = 0;
             }
@@ -90,7 +102,7 @@ impl Planner {
             | Control::SetMesh { .. }
             | Control::Dispatch(_) => {
                 assert!(
-                    self.moves.is_empty(),
+                    self.moves.is_empty() && self.reach.is_empty(),
                     "planner: control token arrived with {} undrained moves — a Drain must \
                      precede it",
                     self.moves.len()
@@ -101,7 +113,8 @@ impl Planner {
     }
 
     fn absorb(&mut self, m: Move, output: &mut impl FnMut(PlannedItem) -> bool) -> bool {
-        self.moves.push(m);
+        self.reach.push(m);
+        self.admit_settled();
         self.moves_since_plan += 1;
         if self.moves_since_plan < REPLAN_BATCH_MOVES
             && self.moves.len() < self.config.max_buffer_moves
@@ -127,6 +140,13 @@ impl Planner {
         true
     }
 
+    fn admit_settled(&mut self) {
+        while let Some((m, ratio_in_reach)) = self.reach.pop() {
+            self.moves.push(m);
+            self.ratios_in_reach.push(ratio_in_reach);
+        }
+    }
+
     fn plan(&self, reconstruct_count: usize) -> VelocityProfile {
         self.plan_selected(|_| reconstruct_count)
     }
@@ -142,6 +162,7 @@ impl Planner {
         let profile = plan_velocity_stops_select_prefix(
             &self.moves,
             &stop_before,
+            &self.ratios_in_reach,
             VelocityPlanParams {
                 integration_tol: self.config.integration_tol,
                 max_extrude_only_velocity_mm_s: self.config.max_extrude_only_velocity_mm_s,
@@ -175,6 +196,8 @@ impl Planner {
     /// and emit everything.
     fn drain_to_rest(&mut self, output: &mut impl FnMut(PlannedItem) -> bool) -> bool {
         self.moves_since_plan = 0;
+        self.reach.close();
+        self.admit_settled();
         if self.moves.is_empty() {
             return true;
         }
@@ -214,6 +237,7 @@ impl Planner {
             "the velocity profile plans a different number of moves than were committed"
         );
         self.entry_v = profile.boundary_speeds[count];
+        self.ratios_in_reach.drain(..count);
         for (geometry, velocity) in self.moves.drain(..count).zip(profile.moves.iter().cloned()) {
             if !output(PlannedItem::Move(PlannedMove { geometry, velocity })) {
                 return false;

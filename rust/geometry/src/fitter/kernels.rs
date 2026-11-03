@@ -12,7 +12,7 @@ mod follower;
 
 pub(super) use circle::arc_candidate;
 #[cfg(test)]
-pub(super) use circle::center_through_endpoints;
+pub(super) use circle::{max_chord_dev, minimax_through_endpoints};
 pub(super) use ease::{RunEnd, ease_run, neighbor};
 pub(super) use follower::arc_len;
 
@@ -35,15 +35,21 @@ pub(super) struct Reconstruction {
 /// `head_travel_len`/`tail_travel_len`: the length of that end's neighbor
 /// when it is a travel the emission stage re-anchors onto whatever the run
 /// emits (`TravelAligningSender`), so the arc need not pass through the
-/// run's boundary vertex there. Welding moves the vertex by at most the
-/// fit residual, so the travel qualifies only when it is long enough to
-/// absorb that without degenerating. A welded end keeps the least-squares
-/// circle exactly; a bound end anchors it through the vertex.
+/// run's boundary vertex there. Welding moves the vertex by at most `tol`,
+/// the chord deviation every reconstruction is held to, so the travel
+/// qualifies only when it is long enough to absorb that without
+/// degenerating. A welded end leaves the circle free there; a bound end
+/// anchors it through the vertex. `head_tangent` is the end heading of an
+/// arc run the head vertex is shared with: the circle is anchored tangent to
+/// it there when the chords allow, so the two runs meet without a kink.
+/// Within those anchors the circle is the one whose facet chords stray least
+/// from it.
 pub(super) fn reconstruct(
     facets: &[Move],
     tol: f64,
     head_travel_len: Option<f64>,
     tail_travel_len: Option<f64>,
+    head_tangent: Option<[f64; 3]>,
 ) -> Result<Option<Reconstruction>, FitError> {
     let line_no = facets[0].source.start_line;
     let lines: Vec<&Line> = match facets.iter().map(line_of).collect::<Option<Vec<_>>>() {
@@ -64,13 +70,7 @@ pub(super) fn reconstruct(
         Some(f) => f,
         None => return Ok(None),
     };
-    if fit.residual > tol {
-        return Ok(None);
-    }
     if !(fit.radius.is_finite() && fit.radius > BUDGET_EPS_MM) {
-        return Ok(None);
-    }
-    if circle::max_sagitta(&lines, fit.radius) > tol {
         return Ok(None);
     }
 
@@ -78,7 +78,7 @@ pub(super) fn reconstruct(
     let p0 = lines[0].start;
     let p1 = last.point_at(last.s_len());
     let welded = |travel_len: Option<f64>| {
-        if travel_len.is_some_and(|len| len > fit.residual + BUDGET_EPS_MM) {
+        if travel_len.is_some_and(|len| len > tol + BUDGET_EPS_MM) {
             EndAnchor::Welded
         } else {
             EndAnchor::Bound
@@ -88,24 +88,40 @@ pub(super) fn reconstruct(
         head: welded(head_travel_len),
         tail: welded(tail_travel_len),
     };
-    let anchored = match (anchors.head, anchors.tail) {
-        (EndAnchor::Welded, EndAnchor::Welded) => Some((fit.origin, fit.radius)),
+    let free = || match (anchors.head, anchors.tail) {
+        (EndAnchor::Welded, EndAnchor::Welded) => {
+            Some((fit.origin, circle::minimax_radius(&lines, fit.origin)))
+        }
         (EndAnchor::Bound, EndAnchor::Welded) => {
-            circle::center_through_vertex(p0, fit.origin, fit.radius)
+            circle::minimax_through_vertex(&lines, p0, fit.origin)
         }
         (EndAnchor::Welded, EndAnchor::Bound) => {
-            circle::center_through_vertex(p1, fit.origin, fit.radius)
+            circle::minimax_through_vertex(&lines, p1, fit.origin)
         }
-        (EndAnchor::Bound, EndAnchor::Bound) => {
-            circle::center_through_endpoints(p0, p1, fit.origin, plane_normal)
-        }
+        (EndAnchor::Bound, EndAnchor::Bound) => circle::minimax_through_endpoints(
+            &lines,
+            (p0, p1),
+            fit.origin,
+            plane_normal,
+            (0.0, f64::INFINITY),
+        ),
     };
-    let Some((origin, rho)) = anchored else {
+    let tangent_to_head = |tangent: [f64; 3]| match anchors.tail {
+        EndAnchor::Welded => {
+            circle::minimax_tangent_at(&lines, p0, tangent, fit.origin, plane_normal)
+        }
+        EndAnchor::Bound => circle::tangent_through_both((p0, p1), tangent, plane_normal),
+    };
+    let within_budget =
+        |circle: &([f64; 3], f64)| circle::max_chord_dev(&lines, circle.0, circle.1) <= tol;
+    let Some((origin, rho)) = head_tangent
+        .filter(|_| anchors.head == EndAnchor::Bound)
+        .and_then(tangent_to_head)
+        .filter(within_budget)
+        .or_else(|| free().filter(within_budget))
+    else {
         return Ok(None);
     };
-    if circle::max_radial_dev(&lines, origin, rho) > tol {
-        return Ok(None);
-    }
     let Some(plane_normal) = anchored_plane_normal(plane_normal, origin, p0, p1, anchors) else {
         return Ok(None);
     };

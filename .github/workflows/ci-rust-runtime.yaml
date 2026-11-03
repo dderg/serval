@@ -65,7 +65,7 @@ jobs:
         run: ./scripts/ci.sh rust-test
 
   # Every accepted fit piece checked densely against its exact signal. The
-  # audit feature slows the pipeline ~2.5x, so it builds only in this job.
+  # audit feature slows the pipeline ~2x, so it builds only in this job.
   rust-fit-audit:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
@@ -352,7 +352,7 @@ jobs:
   # by construction — healthy code clears 2.5x on the slowest runner, the
   # anchor-underrun class lands under 1x — so this can block merges without
   # flaking. The same print then replays live on every tools/bench/configs
-  # config and must finish. The gcode path also triggers the `rust` filter
+  # config and machine profile and must finish. The gcode path also triggers the `rust` filter
   # via scripts/ci.sh.
   rust-replay-budget:
     needs: changes

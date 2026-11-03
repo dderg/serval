@@ -1,5 +1,6 @@
 use crate::frontend::Move;
 use crate::path::CurvatureProfile;
+use crate::path::lowering::PositionProfile;
 use crate::segment::FollowerDemand;
 
 use super::emit::{SeamSide, blend_followers};
@@ -29,6 +30,8 @@ impl RunFit {
     /// moves when they are plain (not part of another run); `None` when the
     /// run abuts another run, a stream edge, or nothing. Returns `Ok(None)`
     /// when no valid reconstruction exists — the facets stay plain lines.
+    /// `head_arc_tangent` is the [`RunFit::end_tangent`] of a sealed run
+    /// sharing the head vertex.
     /// A bare reconstruction whose extrusion ramp fails the kinematic gate
     /// dissolves the same way; an easing that fails it is dropped while the
     /// bare reconstruction stands.
@@ -36,6 +39,7 @@ impl RunFit {
         facets: &[Move],
         head: Option<&Move>,
         tail: Option<&Move>,
+        head_arc_tangent: Option<[f64; 3]>,
         corner: CornerFitConfig,
     ) -> Result<Option<RunFit>, FitError> {
         let tol = span_tolerance(facets);
@@ -52,6 +56,7 @@ impl RunFit {
             tol,
             head.and_then(travel_len),
             tail.and_then(travel_len),
+            head_arc_tangent,
         )?
         else {
             return Ok(None);
@@ -74,6 +79,17 @@ impl RunFit {
             head_line_extra: 0.0,
             tail_line_extra: 0.0,
         }))
+    }
+
+    /// The heading the run's arc ends on, when nothing eases it into a line
+    /// after it — what a run sharing its tail vertex anchors tangent to.
+    #[must_use]
+    pub fn end_tangent(&self) -> Option<[f64; 3]> {
+        let arc = &self.recon.arc;
+        self.recon
+            .down
+            .is_empty()
+            .then(|| arc.heading_at(arc.s_len()))
     }
 
     /// Length consumed from the head neighbor's tail (easing plus boundary
