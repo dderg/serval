@@ -23,6 +23,33 @@ const NEGATIVE_VELOCITY_TOL_MM_S: f64 = 1e-6;
 const CONSISTENCY_TOL: f64 = 1e-6;
 const RECONSTRUCT_WORKERS_MAX: usize = 4;
 
+/// Where the planner runs its independent per-member jobs.
+pub trait FanOut {
+    /// Runs `job` for every index in `0..jobs` on up to `participants`
+    /// threads, the calling thread among them, and returns the results in
+    /// index order. A job's panic resurfaces on the calling thread.
+    fn map_jobs<T: Send>(
+        &self,
+        participants: usize,
+        jobs: usize,
+        job: impl Fn(usize) -> T + Sync,
+    ) -> Vec<T>;
+}
+
+/// Every job on the calling thread.
+pub struct Serial;
+
+impl FanOut for Serial {
+    fn map_jobs<T: Send>(
+        &self,
+        _participants: usize,
+        jobs: usize,
+        job: impl Fn(usize) -> T + Sync,
+    ) -> Vec<T> {
+        (0..jobs).map(job).collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VelSample {
     pub s: f64,
@@ -193,17 +220,23 @@ pub fn plan_velocity_stops_reconstruct_prefix(
     params: VelocityPlanParams,
     reconstruct_count: usize,
 ) -> Result<VelocityProfile, VelocityError> {
-    plan_velocity_stops_select_prefix(moves, stop_before, params, |_| reconstruct_count)
+    plan_velocity_stops_select_prefix(moves, stop_before, params, &Serial, |_| {
+        reconstruct_count
+    })
 }
 
-pub fn plan_velocity_stops_select_prefix<F>(
+/// Plans the whole window and reconstructs the prefix `select_prefix` picks
+/// from the finality barrier, building member profiles on `workers`.
+pub fn plan_velocity_stops_select_prefix<F, W>(
     moves: &[crate::Move],
     stop_before: &[bool],
     params: VelocityPlanParams,
+    workers: &W,
     select_prefix: F,
 ) -> Result<VelocityProfile, VelocityError>
 where
     F: FnOnce(usize) -> usize,
+    W: FanOut,
 {
     let tol = params.integration_tol;
     let entry_v = params.entry_v;
@@ -244,6 +277,7 @@ where
         &caps[..reconstruct_count],
         &plan,
         entry_v,
+        workers,
         &mut report,
     )?;
     plan.recycle_rails();
@@ -487,6 +521,7 @@ fn reconstruct_runs(
     caps: &[MoveCaps],
     plan: &SeamPlan,
     entry_v: f64,
+    workers: &impl FanOut,
     report: &mut VelocityReport,
 ) -> Result<(Vec<MoveVelocity>, Vec<f64>), VelocityError> {
     let n = caps.len();
@@ -500,7 +535,7 @@ fn reconstruct_runs(
             backward_rail: plan.backward_rails[j].as_ref(),
         })
         .collect();
-    let mut profiles = member_profiles(&members, is_anchor, v).into_iter();
+    let mut profiles = member_profiles(&members, is_anchor, v, workers).into_iter();
     let mut out: Vec<MoveVelocity> = Vec::with_capacity(n);
     let mut boundaries: Vec<f64> = Vec::with_capacity(n + 1);
     boundaries.push(entry_v);
@@ -608,12 +643,13 @@ fn reconstruct_runs(
 
 /// Every member's profile, in member order, each in member-local terms of
 /// the run it belongs to (a run starts at each anchored seam). Profiles are
-/// independent of one another, so the whole plan's are built on one set of
-/// workers rather than a set per run.
+/// independent of one another, so the whole plan's are built in one fan-out
+/// rather than one per run.
 fn member_profiles(
     members: &[disk::RunMember],
     is_anchor: &[bool],
     v: &[f64],
+    workers: &impl FanOut,
 ) -> Vec<Result<Vec<LawSegment>, reconstruct::ReconstructError>> {
     let run_starts: Vec<usize> = (0..members.len())
         .scan(0, |run_start, j| {
@@ -623,11 +659,7 @@ fn member_profiles(
             Some(*run_start)
         })
         .collect();
-    let profile = |j: usize| {
-        let member = &members[j];
-        reconstruct::member_profile(j - run_starts[j], member, v[j], member.exit_v)
-    };
-    let workers = if cfg!(not(target_arch = "wasm32")) {
+    let participants = if cfg!(not(target_arch = "wasm32")) {
         std::thread::available_parallelism()
             .map_or(1, |cores| cores.get())
             .min(RECONSTRUCT_WORKERS_MAX)
@@ -635,39 +667,10 @@ fn member_profiles(
     } else {
         1
     };
-    if workers <= 1 {
-        return (0..members.len()).map(profile).collect();
-    }
-    let next_member = std::sync::atomic::AtomicUsize::new(0);
-    let mut indexed_profiles = std::thread::scope(|scope| {
-        let handles = (0..workers)
-            .map(|_| {
-                scope.spawn(|| {
-                    let mut profiles = Vec::new();
-                    loop {
-                        let j = next_member.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if j >= members.len() {
-                            return profiles;
-                        }
-                        profiles.push((j, profile(j)));
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
-        handles
-            .into_iter()
-            .flat_map(|handle| {
-                handle
-                    .join()
-                    .expect("velocity reconstruction thread panicked")
-            })
-            .collect::<Vec<_>>()
-    });
-    indexed_profiles.sort_by_key(|(j, _)| *j);
-    indexed_profiles
-        .into_iter()
-        .map(|(_, profile)| profile)
-        .collect()
+    workers.map_jobs(participants, members.len(), |j| {
+        let member = &members[j];
+        reconstruct::member_profile(j - run_starts[j], member, v[j], member.exit_v)
+    })
 }
 
 /// Dense-enough exact samples off a member's law segments: the segment

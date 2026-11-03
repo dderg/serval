@@ -2,6 +2,8 @@
 //! exactly on the curvature ceiling (disk rail = 0) and tiny debris features
 //! whose curvature spikes collapse the feasible speed at printing feeds.
 
+use std::sync::Arc;
+
 use geometry::path::lowering::PositionProfile;
 use motion_pipeline::fit_stage::FitStage;
 use motion_pipeline::planner::Planner;
@@ -42,7 +44,7 @@ fn stream_case(
         limits,
     };
     let mut fit = FitStage::new(config.corner).into_driver();
-    let mut planner = Planner::new(config);
+    let mut planner = Planner::new(config, Arc::default());
     let mut planned = Vec::new();
     let mut collect = |item| {
         if let PlannedItem::Move(m) = item {
