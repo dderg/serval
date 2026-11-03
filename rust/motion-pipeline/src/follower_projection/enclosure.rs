@@ -113,6 +113,47 @@ fn leader_speed_second(leaders: &[[TaylorModel; 3]], speed: &TaylorModel) -> Opt
     )
 }
 
+/// A signal's enclosure over its whole support, built once at the
+/// tightest accuracy asked so far: a tighter enclosure proves a looser
+/// request as well, so it is rebuilt only for a tighter one, at the
+/// tightest of both.
+#[derive(Default)]
+pub(super) struct WholeEnclosure {
+    built: std::cell::RefCell<Option<([f64; 3], Option<Vec<ExactPiece>>)>>,
+}
+
+impl WholeEnclosure {
+    /// The pieces of the whole enclosure over `[lo, hi]` at `accuracy` or
+    /// tighter, `build` enclosing the whole support at a given accuracy.
+    pub(super) fn over(
+        &self,
+        (lo, hi): (f64, f64),
+        accuracy: [f64; 3],
+        build: impl FnOnce([f64; 3]) -> Option<Vec<ExactPiece>>,
+    ) -> Option<Vec<ExactPiece>> {
+        let stale = match &*self.built.borrow() {
+            Some((built, _)) => built
+                .iter()
+                .zip(accuracy)
+                .any(|(&built, asked)| built > asked),
+            None => true,
+        };
+        if stale {
+            let tightest = match &*self.built.borrow() {
+                Some((built, _)) => std::array::from_fn(|order| built[order].min(accuracy[order])),
+                None => accuracy,
+            };
+            let whole = build(tightest);
+            *self.built.borrow_mut() = Some((tightest, whole));
+        }
+        let built = self.built.borrow();
+        let whole = built.as_ref().and_then(|(_, whole)| whole.as_ref())?;
+        let first = whole.partition_point(|piece| piece.hi < lo);
+        let past = whole.partition_point(|piece| piece.lo <= hi);
+        Some(whole[first..past.max(first)].to_vec())
+    }
+}
+
 /// The axes a follower reads, window by window.
 pub(super) struct FollowerAxisWindows<'a> {
     leaders: Vec<AxisWindows<'a>>,

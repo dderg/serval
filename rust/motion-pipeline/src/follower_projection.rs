@@ -2466,9 +2466,9 @@ pub(crate) struct FollowerSignal<'a> {
     start_sliver: Option<SpeedZeroSliver>,
     end_sliver: Option<SpeedZeroSliver>,
     pva_memo: RefCell<[Option<(u64, (f64, f64, f64))>; PVA_MEMO_SLOTS]>,
-    /// The enclosure over the whole signal at the accuracy it was first
-    /// asked for, which every rung of the fit asks again.
-    enclosure: std::cell::OnceCell<([u64; 3], Option<Vec<ExactPiece>>)>,
+    /// The enclosure over the whole signal, which every rung of the fit
+    /// asks again.
+    whole_enclosure: enclosure::WholeEnclosure,
     /// The leaders and the raw track as the enclosure reads them.
     axis_windows: std::cell::OnceCell<Option<enclosure::FollowerAxisWindows<'a>>>,
 }
@@ -2521,7 +2521,7 @@ impl<'a> FollowerSignal<'a> {
             start_sliver: None,
             end_sliver: None,
             pva_memo: RefCell::new([None; PVA_MEMO_SLOTS]),
-            enclosure: std::cell::OnceCell::new(),
+            whole_enclosure: enclosure::WholeEnclosure::default(),
             axis_windows: std::cell::OnceCell::new(),
         };
         let (start_sliver, end_sliver) = sig.speed_zero_slivers();
@@ -3203,18 +3203,10 @@ impl TrackSignal for FollowerSignal<'_> {
             .map(|side| self.pva_at_distance(trajectory::next_toward(knot, side), s))
     }
     fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
-        let key = accuracy.map(f64::to_bits);
-        let (built_for, whole) = self.enclosure.get_or_init(|| {
-            let (start, end) = (self.grid[0], self.grid[self.grid.len() - 1]);
-            (key, self.enclosure(start, end, accuracy))
-        });
-        if *built_for != key {
-            return self.enclosure(lo, hi, accuracy);
-        }
-        let whole = whole.as_ref()?;
-        let first = whole.partition_point(|piece| piece.hi < lo);
-        let past = whole.partition_point(|piece| piece.lo <= hi);
-        Some(whole[first..past.max(first)].to_vec())
+        let (start, end) = (self.grid[0], self.grid[self.grid.len() - 1]);
+        self.whole_enclosure.over((lo, hi), accuracy, |accuracy| {
+            self.enclosure(start, end, accuracy)
+        })
     }
     fn interior_knots(&self, start: f64, end: f64) -> &[f64] {
         let first = self.grid.partition_point(|&t| t <= start);
@@ -3281,9 +3273,9 @@ struct AdvancedFollowerSignal<'a, 'b> {
     source: &'a FollowerSignal<'b>,
     advance: LeadingAdvance<'a>,
     steps: &'a [AdvanceStep],
-    /// The enclosure over the whole signal at the accuracy it was first
-    /// asked for, which every rung of the fit asks again.
-    enclosure: std::cell::OnceCell<([u64; 3], Option<Vec<ExactPiece>>)>,
+    /// The enclosure over the whole signal, which every rung of the fit
+    /// asks again.
+    whole_enclosure: enclosure::WholeEnclosure,
 }
 
 impl<'a, 'b> AdvancedFollowerSignal<'a, 'b> {
@@ -3296,7 +3288,7 @@ impl<'a, 'b> AdvancedFollowerSignal<'a, 'b> {
             source,
             advance,
             steps,
-            enclosure: std::cell::OnceCell::new(),
+            whole_enclosure: enclosure::WholeEnclosure::default(),
         }
     }
 }
@@ -3386,18 +3378,10 @@ impl TrackSignal for AdvancedFollowerSignal<'_, '_> {
     }
 
     fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
-        let key = accuracy.map(f64::to_bits);
-        let (built_for, whole) = self.enclosure.get_or_init(|| {
-            let grid = &self.source.grid;
-            (key, self.enclosure(grid[0], grid[grid.len() - 1], accuracy))
-        });
-        if *built_for != key {
-            return self.enclosure(lo, hi, accuracy);
-        }
-        let whole = whole.as_ref()?;
-        let first = whole.partition_point(|piece| piece.hi < lo);
-        let past = whole.partition_point(|piece| piece.lo <= hi);
-        Some(whole[first..past.max(first)].to_vec())
+        let grid = &self.source.grid;
+        self.whole_enclosure.over((lo, hi), accuracy, |accuracy| {
+            self.enclosure(grid[0], grid[grid.len() - 1], accuracy)
+        })
     }
 
     fn position_delta(&self, (t0, _): (f64, f64), (t1, _): (f64, f64)) -> f64 {
