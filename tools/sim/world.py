@@ -30,6 +30,8 @@ VTIME_SHM_SIZE = 8192
 UNBOUNDED_VTIME_SPEED = 1000.0
 
 READY_POLL_S = 0.05
+LOG_FENCE_GCODE = "M115"
+LOG_FENCE_NEEDLE = b"FIRMWARE_NAME"
 PRINT_POLL_S = 0.2
 CLOCK_SYNC_BOOT_TIMEOUT = 120.0
 
@@ -174,6 +176,24 @@ def configured_step_tracks(
                 )
             )
     return tracks
+
+
+def log_through_fence(read_log, fence_offset, expired, poll):
+    """The klippy log once the fence record, written after `fence_offset`,
+    is in it. The log writer is a queue drained by a thread that a starved
+    runner can delay, so a record logged before an API response may land
+    after it; the queue is FIFO, so every record logged before the fence is
+    in the file by the time the fence is."""
+    while True:
+        data = read_log()
+        if LOG_FENCE_NEEDLE in data[fence_offset:]:
+            return data
+        if expired():
+            raise SimError(
+                f"log fence {LOG_FENCE_NEEDLE!r} did not appear in klippy.log"
+                f" after offset {fence_offset}"
+            )
+        poll()
 
 
 class SimError(Exception):
@@ -1282,6 +1302,26 @@ class SimWorld:
 
     def mark_log(self) -> None:
         self.log_tail()
+
+    def _read_klippy_log(self) -> bytes:
+        return self.klippy_log.read_bytes() if self.klippy_log.exists() else b""
+
+    @_runs_free
+    def settled_log_tail(self, timeout: float = 10.0) -> str:
+        """log_tail() that includes every record klippy logged before this
+        call, however far its async log writer lags an API response."""
+        fence_offset = len(self._read_klippy_log())
+        self.gcode_ok(LOG_FENCE_GCODE, timeout=timeout)
+        deadline = self.vclock.deadline(timeout)
+        data = log_through_fence(
+            self._read_klippy_log,
+            fence_offset,
+            deadline.expired,
+            lambda: time.sleep(READY_POLL_S),
+        )
+        out = data[self._log_offset :].decode(errors="replace")
+        self._log_offset = len(data)
+        return out
 
     @_runs_free
     def expect_log(self, needle: str, timeout: float = 10.0) -> str:
