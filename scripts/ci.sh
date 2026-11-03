@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Usage:
 #   ./scripts/ci.sh                 # run all gates with a summary (local)
-#   ./scripts/ci.sh quick           # fast subset: ruff + rust test/clippy/fmt
+#   ./scripts/ci.sh quick           # fast subset: ruff + rust test/clippy/fmt (gates run concurrently)
 #   ./scripts/ci.sh install-hooks   # enable the pre-push hook (runs `quick` per push)
 #   ./scripts/ci.sh <job>           # run one gate, exit with its status (CI)
 #   ./scripts/ci.sh -v <job>        # stream the gate's output live
@@ -344,9 +344,8 @@ tally() { sed -e '/^[[:space:]]*$/d' -e 's/^[[:space:]]*//' "$1" | tail -1 | cut
 
 job_log() { mkdir -p "$LOG_DIR"; echo "$LOG_DIR/$1.log"; }
 
-run_check() {
+execute_check() {
     local name="$1"; shift
-    printf '%-20s ' "$name"
     local log rc=0
     log="$(job_log "$name")"
     # Standalone statement, NOT `... && rc=0 || rc=$?`: in a `&&`/`||`
@@ -355,6 +354,16 @@ run_check() {
     # nextest run could hide behind passing doc-tests.
     ( set -e; "$@" ) >"$log" 2>&1
     rc=$?
+    echo "$rc" >"$log.rc"
+}
+
+report_check() {
+    local name="$1"
+    printf '%-20s ' "$name"
+    local log rc
+    log="$(job_log "$name")"
+    rc="$(cat "$log.rc")"
+    rm -f "$log.rc"
     if [ "$rc" -eq 0 ]; then
         printf '\033[1;32mPASS\033[0m  %s  \033[2m[%s]\033[0m\n' \
             "$(tally "$log")" ".ci-logs/$name.log"; PASS=$((PASS + 1))
@@ -366,15 +375,48 @@ run_check() {
     return "$rc"
 }
 
+run_check() {
+    execute_check "$@"
+    report_check "$1"
+}
+
+# The quick gates are independent (cargo serialises only the compile step on
+# the target dir lock, not a test run), so they run concurrently and report in
+# a fixed order: wall time is the slowest gate, not the sum.
+run_quick_gates() {
+    local gates=(
+        "ruff job_ruff"
+        "rust-test job_rust_test"
+        "rust-fit-audit job_rust_fit_audit"
+        "rust-clippy job_rust_clippy"
+        "rust-fmt job_rust_fmt"
+        "public-api job_public_api"
+        "watchdog-canary job_watchdog_canary"
+    )
+    local gate
+    for gate in "${gates[@]}"; do
+        # shellcheck disable=SC2086
+        execute_check $gate &
+    done
+    wait
+    for gate in "${gates[@]}"; do
+        report_check "${gate%% *}" || true
+    done
+}
+
 run_all() {
     local quick="${1:-false}"
-    run_check "ruff"            job_ruff
-    run_check "rust-test"       job_rust_test
-    run_check "rust-fit-audit"  job_rust_fit_audit
-    run_check "rust-clippy"     job_rust_clippy
-    run_check "rust-fmt"        job_rust_fmt
-    run_check "public-api"      job_public_api
-    run_check "watchdog-canary" job_watchdog_canary
+    if [ "$quick" = "true" ]; then
+        run_quick_gates
+    else
+        run_check "ruff"            job_ruff
+        run_check "rust-test"       job_rust_test
+        run_check "rust-fit-audit"  job_rust_fit_audit
+        run_check "rust-clippy"     job_rust_clippy
+        run_check "rust-fmt"        job_rust_fmt
+        run_check "public-api"      job_public_api
+        run_check "watchdog-canary" job_watchdog_canary
+    fi
     if [ "$quick" != "true" ]; then
         run_check "cbindgen-drift"  job_cbindgen_drift
         run_check "c-smoke"         job_c_smoke
