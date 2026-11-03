@@ -121,6 +121,11 @@ impl ChainStage {
 pub struct CompiledChain {
     kernel: Option<PiecewisePolynomialKernel>,
     transform: Option<(TransformPlacement, ChainStage)>,
+    /// A projected follower's extrusion-ratio ramp time τ: every ratio step
+    /// or slope step is spread over the path the leaders cover in about τ
+    /// around it. It shapes the projection, not the signal, so it is no
+    /// stage of the chain.
+    ratio_ramp_time: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,7 +316,11 @@ impl CompiledChain {
             kernel.is_some() || !matches!(transform, Some((TransformPlacement::AfterKernel, _))),
             "a trailing transform requires a kernel"
         );
-        Self { kernel, transform }
+        Self {
+            kernel,
+            transform,
+            ratio_ramp_time: None,
+        }
     }
 
     pub fn kernel(&self) -> Option<&PiecewisePolynomialKernel> {
@@ -337,6 +346,25 @@ impl CompiledChain {
 
     pub fn transform(&self) -> Option<&ChainStage> {
         self.transform.as_ref().map(|(_, transform)| transform)
+    }
+
+    /// This chain with a follower ratio ramp of time `seconds`, see
+    /// [`Self::ratio_ramp_time`].
+    #[must_use]
+    pub fn with_ratio_ramp_time(self, seconds: f64) -> Self {
+        assert!(
+            seconds.is_finite() && seconds > 0.0,
+            "a ratio ramp time must be finite and positive, got {seconds}"
+        );
+        Self {
+            ratio_ramp_time: Some(seconds),
+            ..self
+        }
+    }
+
+    #[must_use]
+    pub fn ratio_ramp_time(&self) -> Option<f64> {
+        self.ratio_ramp_time
     }
 }
 
@@ -381,6 +409,7 @@ impl AxisChainSet {
                 .map(|k| CompiledChain {
                     kernel: k.clone(),
                     transform: None,
+                    ratio_ramp_time: None,
                 })
                 .collect(),
             followers: Vec::new(),
@@ -400,6 +429,16 @@ impl AxisChainSet {
         self.projected_followers()
             .map(|(axis, _)| axis)
             .find(|&axis| self.chains[axis].is_zero_support_only())
+    }
+
+    /// Whether any projected follower spreads its extrusion-ratio steps
+    /// over a ramp, see [`CompiledChain::ratio_ramp_time`]. A ramp reaches
+    /// into the segment after its seam, so such a follower projects a
+    /// segment only once the next one is shaped.
+    #[must_use]
+    pub fn has_ratio_ramped_follower(&self) -> bool {
+        self.projected_followers()
+            .any(|(axis, _)| self.chains[axis].ratio_ramp_time().is_some())
     }
 
     /// Follower axes that ride on at least one leader: their tracks are not

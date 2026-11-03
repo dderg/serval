@@ -18,6 +18,9 @@ use crate::shaper::{
 use crate::types::PostProcessError;
 use crate::worker_pool::WorkerPool;
 
+mod ratio_ramp;
+use ratio_ramp::{RampLeg, SeamRamps};
+
 const INTEGRAL_TOL_MM: f64 = 1e-10;
 const INTEGRAL_MAX_DEPTH: u32 = 24;
 const GRID_DEDUP_EPS_S: f64 = 1e-12;
@@ -366,8 +369,18 @@ pub(crate) fn project_followers(
                     .iter()
                     .any(|&leader| raw.axes[leader] != shaped.axes[leader])
             });
+        let ramp_time = chain.ratio_ramp_time();
+        assert!(
+            ramp_time.is_none() || kernel.is_none(),
+            "follower axis {axis} has both a ratio ramp and a smoothing kernel: a ramp \
+             replaces the kernel, use one of them"
+        );
         let state = &mut states[axis];
-        let projecting = leaders_changed || state.active;
+        assert!(
+            ramp_time.is_some() || !state.ramps.has_backlog(),
+            "follower axis {axis} lost its ratio ramp with segments still waiting on it"
+        );
+        let projecting = leaders_changed || state.active || ramp_time.is_some();
         if !projecting && chain.is_empty() {
             continue;
         }
@@ -386,14 +399,48 @@ pub(crate) fn project_followers(
                 pool,
             );
             timing.ingests += lengths.len();
-            let mut next_s = state.s_shaped;
+            let mut next_s = state.ramps.backlog_end().unwrap_or(state.s_shaped);
             for (offset, &arc) in lengths.iter().enumerate() {
                 let i = first_new + offset;
+                let table_start = state.s_ingested_end;
                 let shaped_ds =
                     state.ingest(&base[i], &frontier[i], axis, leaders, &base[i + 1..], arc);
                 let s_start = state.aligned_span_start(next_s);
-                source_jobs.push((i, s_start, shaped_ds));
+                match ramp_time {
+                    Some(ramp_time) => {
+                        let leg = RampLeg {
+                            shaped: &frontier[i],
+                            leaders,
+                            support: projection_support(&base[i], &frontier[i], axis, leaders),
+                            start_s: table_start,
+                        };
+                        state.ramps.lay(&state.spans, &leg, ramp_time);
+                        state.ramps.queue(
+                            base[i].t_end,
+                            (s_start, shaped_ds),
+                            state.s_ingested_end,
+                        );
+                    }
+                    None => source_jobs.push((i, s_start, shaped_ds)),
+                }
                 next_s = s_start + shaped_ds;
+            }
+            if ramp_time.is_some() {
+                if lookahead.clamps_past_signal() {
+                    state.ramps.close_at(state.s_ingested_end);
+                }
+                for pending in state.ramps.take_final(&state.spans) {
+                    let index = base[..frontier.len()]
+                        .partition_point(|raw| raw.t_end < pending.t_end - GRID_DEDUP_EPS_S);
+                    assert!(
+                        index < frontier.len()
+                            && (base[index].t_end - pending.t_end).abs() <= GRID_DEDUP_EPS_S,
+                        "follower axis {axis}: the segment ending at {} waited on its ratio \
+                         ramps past the shaped frontier",
+                        pending.t_end
+                    );
+                    source_jobs.push((index, pending.s_start, pending.s_length));
+                }
             }
             timing.ingest_us += ingest_started.elapsed_us();
         }
@@ -434,7 +481,7 @@ pub(crate) fn project_followers(
             )
             .expect("follower source fit thread panicked");
         timing.source_fit_us += source_started.elapsed_us();
-        let mut source_fits = source_fits.into_iter();
+        let mut source_fits = source_fits.into_iter().peekable();
         for i in 0..frontier.len() {
             let raw = &base[i];
             if axis >= raw.axes.len() {
@@ -456,6 +503,11 @@ pub(crate) fn project_followers(
                      before projected-through {through}",
                     raw.t_start,
                 );
+            }
+            let awaiting_ramps =
+                ramp_time.is_some() && source_fits.peek().is_none_or(|(index, _)| *index != i);
+            if awaiting_ramps {
+                break;
             }
             let raw_axis = &raw.axes[axis];
             let (t_start, t_end) = projection_support(raw, &frontier[i], axis, leaders);
@@ -565,6 +617,22 @@ pub(crate) fn project_followers(
             source_fits.next().is_none(),
             "follower source fit has no matching projection segment"
         );
+        if ramp_time.is_some() && commit_count > 0 {
+            let committed_through = projection_support(
+                &base[commit_count - 1],
+                &frontier[commit_count - 1],
+                axis,
+                leaders,
+            )
+            .1;
+            assert!(
+                state
+                    .projected_through_t
+                    .is_some_and(|through| through >= committed_through - GRID_DEDUP_EPS_S),
+                "follower axis {axis}: the segment ending at {committed_through} is committed \
+                 before every ratio ramp reaching into it is laid"
+            );
+        }
         let kernel_tracks = match kernel {
             Some(kernel) if commit_count > 0 => {
                 let first = state.projected.first().expect("cache covers commits");
@@ -1147,6 +1215,7 @@ pub(crate) struct FollowerState {
     projected: Vec<ProjSeg>,
     projected_through_t: Option<f64>,
     projected_trimmed: bool,
+    ramps: SeamRamps,
 }
 
 impl FollowerState {
@@ -1168,6 +1237,7 @@ impl FollowerState {
         self.projected.clear();
         self.projected_through_t = None;
         self.projected_trimmed = false;
+        self.ramps.clear();
     }
 
     /// Drops the cached projected tracks without forgetting how far the
@@ -1337,6 +1407,8 @@ impl FollowerState {
             .spans
             .partition_point(|span| span.s1 < self.s_shaped - SPAN_LOOKUP_SLACK_MM);
         self.spans.drain(..keep_from);
+        self.ramps
+            .prune_before(self.s_shaped - SPAN_LOOKUP_SLACK_MM);
     }
 
     /// Cumulative projected spatial extrusion at shaped path distance `s`.
@@ -1353,13 +1425,17 @@ impl FollowerState {
             first.s0
         );
         let idx = self.spans.partition_point(|span| span.s1 < s);
-        match self.spans.get(idx) {
+        let table = match self.spans.get(idx) {
             Some(span) => span.e_at(s.max(span.s0)),
             None => {
                 let last = self.spans.last().expect("non-empty spans");
                 last.e_at(last.s1) + last.r1 * (s - last.s1)
             }
+        };
+        if self.ramps.is_empty() {
+            return table;
         }
+        table + self.ramps.extrusion(s)
     }
 
     /// Projected extrusion accumulated between two shaped-path offsets
@@ -1396,16 +1472,28 @@ impl FollowerState {
         if hi > tail {
             delta += last.r1 * (hi - lo.max(tail));
         }
+        if !self.ramps.is_empty() {
+            delta += self.ramps.extrusion(s_base + hi) - self.ramps.extrusion(s_base + lo);
+        }
         sign * delta
     }
 
     fn ratio_and_slope(&self, s: f64) -> (f64, f64) {
         let idx = self.spans.partition_point(|span| span.s1 <= s);
-        match self.spans.get(idx) {
+        let (ratio, slope) = match self.spans.get(idx) {
             Some(span) if s >= span.s0 => (span.ratio_at(s), span.ratio_slope()),
             Some(span) => (span.r0, 0.0),
             None => (self.spans.last().map_or(0.0, |span| span.r1), 0.0),
+        };
+        if self.ramps.is_empty() {
+            return (ratio, slope);
         }
+        (ratio + self.ramps.ratio(s), slope + self.ramps.slope(s))
+    }
+
+    /// `d²r/ds²`: the table's spans are linear, so only ramps bend it.
+    fn ratio_curvature(&self, s: f64) -> f64 {
+        self.ramps.curvature(s)
     }
 
     fn aligned_span_start(&self, s: f64) -> f64 {
@@ -1932,7 +2020,7 @@ impl RatioBounds {
         let ridden = state.spans.iter().filter(|span| {
             span.s1 >= s_start - SPAN_LOOKUP_SLACK_MM && span.s0 <= s_end + SPAN_LOOKUP_SLACK_MM
         });
-        Self {
+        let table = Self {
             ratio: ridden
                 .clone()
                 .map(|span| span.r0.abs().max(span.r1.abs()))
@@ -1941,6 +2029,19 @@ impl RatioBounds {
             slope: ridden
                 .map(|span| span.ratio_slope().abs())
                 .fold(0.0_f64, f64::max),
+        };
+        if state.ramps.is_empty() {
+            return table;
+        }
+        let ramps = state
+            .ramps
+            .overlapping(s_start - SPAN_LOOKUP_SLACK_MM, s_end + SPAN_LOOKUP_SLACK_MM);
+        let (ratio, slope) = ramps.fold((0.0_f64, 0.0_f64), |(ratio, slope), ramp| {
+            (ratio.max(ramp.ratio_bound()), slope.max(ramp.slope_bound()))
+        });
+        Self {
+            ratio: table.ratio + ratio,
+            slope: table.slope + slope,
         }
     }
 }
@@ -2103,13 +2204,18 @@ impl<'a> FollowerSignal<'a> {
         let rate = self.odometer_scale * speed;
         let rate_deriv = self.odometer_scale * speed_derivative;
         let rate_second = self.odometer_scale * speed_second;
-        let (ratio, slope) = self.state.ratio_and_slope(self.s_owned(t));
+        let s = self.s_owned(t);
+        let (ratio, slope) = self.state.ratio_and_slope(s);
         let raw = self.raw_delta.map_or(0.0, |(axis, _)| {
             axis.eval_pvaj(t)
                 .expect("follower raw axis has exact derivatives")
                 .jerk
         });
-        ratio * rate_second + 3.0 * slope * rate * rate_deriv + raw
+        let laid = ratio * rate_second + 3.0 * slope * rate * rate_deriv + raw;
+        if self.state.ramps.is_empty() {
+            return laid;
+        }
+        laid + self.state.ratio_curvature(s) * rate * rate * rate
     }
 
     fn s_offset(&self, t: f64) -> f64 {
@@ -2181,7 +2287,13 @@ impl<'a> FollowerSignal<'a> {
             Some(last) if s_hi + SPAN_LOOKUP_SLACK_MM > last.s1 => last.r1 == 0.0,
             _ => true,
         };
-        (overlapping_zero && tail_zero).then(|| self.eval(self.grid[0]))
+        let ramped = self
+            .state
+            .ramps
+            .overlapping(s_lo - SPAN_LOOKUP_SLACK_MM, s_hi + SPAN_LOOKUP_SLACK_MM)
+            .next()
+            .is_some();
+        (overlapping_zero && tail_zero && !ramped).then(|| self.eval(self.grid[0]))
     }
 
     fn construction_breakpoints(
@@ -2208,6 +2320,15 @@ impl<'a> FollowerSignal<'a> {
             .spans
             .iter()
             .flat_map(|span| [span.s0, span.s1])
+            .chain(
+                self.state
+                    .ramps
+                    .overlapping(
+                        self.s_start - SPAN_LOOKUP_SLACK_MM,
+                        s_end + SPAN_LOOKUP_SLACK_MM,
+                    )
+                    .flat_map(|ramp| [ramp.start(), ramp.end()]),
+            )
             .filter(|&s| {
                 s >= self.s_start - SPAN_LOOKUP_SLACK_MM && s <= s_end + SPAN_LOOKUP_SLACK_MM
             })
