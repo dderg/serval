@@ -23,6 +23,7 @@
 use pipeline_snapshot::audit::{
     AuditBudgets, AuditReport, Violation, ViolationKind, audit_trajectory,
 };
+use pipeline_snapshot::waypoints::Waypoint;
 use pipeline_snapshot::{
     ExactTrajectory, SnapshotParams, TRAJECTORY_FIT_TOL_ACCEL_MM_S2, TRAJECTORY_FIT_TOL_MM,
     VELOCITY_INTEGRATION_TOL, pipeline_snapshot,
@@ -104,10 +105,10 @@ fn move_strategy(full: bool) -> impl Strategy<Value = MoveSpec> {
         })
 }
 
-fn waypoints(moves: &[MoveSpec], max_accel: f64) -> Vec<pipeline_snapshot::waypoints::Waypoint> {
+fn waypoints(moves: &[MoveSpec]) -> Vec<Waypoint> {
     let (mut x, mut y, mut z, mut e) = (150.0, 150.0, 0.2, 0.0);
     let mut heading = 0.0_f64;
-    let mut points = vec![(x, y, z, e, 0.0, max_accel)];
+    let mut points = vec![Waypoint::at([x, y, z, e], 0.0)];
     for m in moves {
         heading = match m.turn {
             Turn::Continue => heading,
@@ -118,19 +119,16 @@ fn waypoints(moves: &[MoveSpec], max_accel: f64) -> Vec<pipeline_snapshot::waypo
         y += m.length_mm * libm::sin(heading);
         z = (z + m.z_step_mm).max(0.0);
         e += m.extrude_ratio * m.length_mm;
-        points.push((x, y, z, e, m.feed_mm_s, max_accel));
+        points.push(Waypoint::at([x, y, z, e], m.feed_mm_s));
     }
     points
 }
 
 fn run_case(limits: FuzzLimits, moves: &[MoveSpec]) -> (ExactTrajectory, AuditReport) {
-    run_waypoints(limits, &waypoints(moves, limits.max_accel))
+    run_waypoints(limits, &waypoints(moves))
 }
 
-fn run_waypoints(
-    limits: FuzzLimits,
-    waypoints: &[pipeline_snapshot::waypoints::Waypoint],
-) -> (ExactTrajectory, AuditReport) {
+fn run_waypoints(limits: FuzzLimits, waypoints: &[Waypoint]) -> (ExactTrajectory, AuditReport) {
     let params = SnapshotParams {
         max_velocity: limits.max_velocity,
         max_accel: limits.max_accel,
@@ -475,9 +473,9 @@ fn slow_corner_rail_ramp_survives_nurbs_round_trip() {
     };
     let feed = 5932.264 / 60.0;
     let waypoints = [
-        (121.401, 114.125, 0.0, 0.0, feed, 1000.0),
-        (121.527, 113.034, 0.0, 0.03696, feed, 1000.0),
-        (126.102, 117.608, 0.0, 0.25458, feed, 1000.0),
+        Waypoint::at([121.401, 114.125, 0.0, 0.0], feed),
+        Waypoint::at([121.527, 113.034, 0.0, 0.03696], feed),
+        Waypoint::at([126.102, 117.608, 0.0, 0.25458], feed),
     ];
     let (_, report) = run_waypoints(limits, &waypoints);
     assert!(report.hard_ok(), "{report}");

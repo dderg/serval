@@ -476,8 +476,7 @@ impl Default for AxisRegistry {
 pub struct PlannerConfig {
     pub axis_registry: AxisRegistry,
     pub cartesian: CartesianLimits,
-    pub runtime_caps: RuntimeCaps,
-    pub runtime_corner_deviation: Option<f64>,
+    pub runtime: RuntimeLimits,
     pub corner: geometry::CornerFitConfig,
     pub post_processors: PostProcessorSet,
     /// While set, `compile_active_chains` yields identity chains — the
@@ -490,10 +489,66 @@ pub struct PlannerConfig {
     pub fit_tolerance_accel_mm_s2: f64,
 }
 
+/// The `SET_VELOCITY_LIMIT` / `M204` / `RESET_VELOCITY_LIMIT` overrides in
+/// force. Velocity and accel caps clamp the config base but never raise it;
+/// a runtime corner deviation replaces the base outright.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct RuntimeCaps {
+pub struct RuntimeLimits {
     pub velocity: Option<f64>,
     pub accel: Option<f64>,
+    pub corner_deviation: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum RuntimeLimitError {
+    #[error("{name} must be finite and positive")]
+    NotPositive { name: &'static str },
+    #[error("corner_deviation must be finite and non-negative")]
+    InvalidCornerDeviation,
+}
+
+impl RuntimeLimits {
+    pub fn set_velocity_cap(&mut self, velocity: Option<f64>) -> Result<(), RuntimeLimitError> {
+        self.velocity = require_positive(velocity, "velocity")?;
+        Ok(())
+    }
+
+    pub fn set_accel_cap(&mut self, accel: Option<f64>) -> Result<(), RuntimeLimitError> {
+        self.accel = require_positive(accel, "accel")?;
+        Ok(())
+    }
+
+    pub fn set_corner_deviation(
+        &mut self,
+        corner_deviation: Option<f64>,
+    ) -> Result<(), RuntimeLimitError> {
+        if corner_deviation.is_some_and(|d| !(d.is_finite() && d >= 0.0)) {
+            return Err(RuntimeLimitError::InvalidCornerDeviation);
+        }
+        self.corner_deviation = corner_deviation;
+        Ok(())
+    }
+
+    /// `(velocity, accel, corner_deviation)` a move submitted now runs under.
+    #[must_use]
+    pub fn effective(&self, base: &CartesianLimits) -> (f64, f64, f64) {
+        let clamp = |cap: Option<f64>, base: f64| cap.map_or(base, |c| c.min(base));
+        (
+            clamp(self.velocity, base.max_velocity),
+            clamp(self.accel, base.max_accel),
+            self.corner_deviation.unwrap_or(base.corner_deviation),
+        )
+    }
+}
+
+fn require_positive(
+    value: Option<f64>,
+    name: &'static str,
+) -> Result<Option<f64>, RuntimeLimitError> {
+    if value.is_some_and(|v| !(v.is_finite() && v > 0.0)) {
+        return Err(RuntimeLimitError::NotPositive { name });
+    }
+    Ok(value)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -523,6 +578,26 @@ impl Default for CartesianLimits {
 }
 
 impl CartesianLimits {
+    /// Limits for a printer without z caps of its own: the z caps sit at the
+    /// path caps, where they can never bind (no move leans more than fully
+    /// on z).
+    #[must_use]
+    pub fn without_z_caps(
+        max_velocity: f64,
+        max_accel: f64,
+        max_jerk: f64,
+        corner_deviation: f64,
+    ) -> Self {
+        Self {
+            max_velocity,
+            max_accel,
+            max_jerk,
+            max_z_velocity: max_velocity,
+            max_z_accel: max_accel,
+            corner_deviation,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         let ok = |c: f64| c.is_finite() && c > 0.0;
         if !(ok(self.max_velocity)
@@ -545,12 +620,6 @@ impl CartesianLimits {
 pub const DEFAULT_SQUARE_CORNER_VELOCITY_MM_S: f64 = 5.0;
 
 impl PlannerConfig {
-    #[must_use]
-    pub fn corner_deviation(&self) -> f64 {
-        self.runtime_corner_deviation
-            .unwrap_or(self.cartesian.corner_deviation)
-    }
-
     pub fn compile_active_chains(&self) -> Result<AxisChainSet, PostProcessorConfigError> {
         self.post_processors
             .compile_active_chains(&self.axis_registry, self.post_processor_bypass)
@@ -558,12 +627,7 @@ impl PlannerConfig {
 
     #[must_use]
     pub fn effective_limits(&self) -> (f64, f64, f64) {
-        let clamp = |cap: Option<f64>, base: f64| cap.map_or(base, |c| c.min(base));
-        (
-            clamp(self.runtime_caps.velocity, self.cartesian.max_velocity),
-            clamp(self.runtime_caps.accel, self.cartesian.max_accel),
-            self.corner_deviation(),
-        )
+        self.runtime.effective(&self.cartesian)
     }
 
     /// A ratio ramp takes the place of the follower's smoothing kernel, so
@@ -600,8 +664,7 @@ impl Default for PlannerConfig {
         Self {
             axis_registry,
             cartesian: CartesianLimits::default(),
-            runtime_caps: RuntimeCaps::default(),
-            runtime_corner_deviation: None,
+            runtime: RuntimeLimits::default(),
             corner: geometry::CornerFitConfig::default(),
             post_processors,
             post_processor_bypass: false,
