@@ -470,7 +470,11 @@ impl ExactConvolution<'_> {
     /// series across the chunk, which is as well conditioned as the kernel
     /// only within the kernel's own width. Chunks and their centres follow
     /// from the whole sub-interval, not from `[lo, hi]`, so two spans
-    /// meeting inside one read the same polynomial at their seam.
+    /// meeting inside one read the same polynomial at their seam. Where a
+    /// break an ulp inside `lo` or `hi` ends the history or lookahead the
+    /// table holds, the float past it reads the table only by rounding: it
+    /// is left to its neighbour, whose polynomial reaches an ulp past its
+    /// break.
     pub(crate) fn pieces_over(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
         assert!(
             lo <= hi,
@@ -540,12 +544,19 @@ impl ExactConvolution<'_> {
                 let center =
                     (chunk_lo + 0.5 * (chunk_hi - chunk_lo)).clamp(first_inside, last_inside);
                 let radius = next_toward((center - chunk_lo).max(chunk_hi - center), f64::INFINITY);
+                let Some(pva) = self.polynomials_at(center, radius) else {
+                    let (first_held, last_held) = (first_inside.max(lo), last_inside.min(hi));
+                    if first_held == last_held && (first_held == lo || first_held == hi) {
+                        continue;
+                    }
+                    return None;
+                };
                 pieces.push(ExactPiece {
                     lo: piece_lo,
                     hi: piece_hi,
                     center,
                     radius,
-                    pva: self.polynomials_at(center, radius)?,
+                    pva,
                 });
             }
         }

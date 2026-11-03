@@ -98,6 +98,16 @@ pub(crate) enum PostProcessError {
     #[error("axis {axis}: shaping window needs unavailable lookahead at t={t}")]
     MissingLookahead { axis: usize, t: f64 },
     #[error(
+        "axis {axis}: {fit_context} span [{t_start}, {t_end}] leaves breaks to the hull, but the \
+         signal has no exact polynomial there to prove a piece against"
+    )]
+    UnprovableSpan {
+        axis: usize,
+        fit_context: &'static str,
+        t_start: f64,
+        t_end: f64,
+    },
+    #[error(
         "axis {axis}: follower seam weld over [{t_start}, {t_end}] would move the emitted track \
          by up to {displacement_mm} mm (budget {position_budget_mm}) and its acceleration by up \
          to {acceleration_mm_s2} mm/s^2 (budget {acceleration_budget_mm_s2}): the emitted state \
