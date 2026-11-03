@@ -151,18 +151,48 @@ fn retract_after_position_is_a_waypoint() {
     assert_eq!(wp[1], Waypoint::at([10.0, 0.0, 0.0, -2.0], 30.0));
 }
 
-#[test]
-fn arcs_are_rejected() {
-    assert!(matches!(
-        parse_err("G1 X10 F6000\nG2 X20 I5 J0\n"),
-        WaypointError::UnsupportedArc { line: 2, major: 2 }
-    ));
+fn refused_command(text: &str) -> (u32, String) {
+    match parse_err(text) {
+        WaypointError::Unplannable { line, command, .. } => (line, command.into()),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
 }
 
 #[test]
-fn comments_and_unknown_commands_are_ignored() {
+fn commands_the_snapshot_cannot_plan_are_refused_by_name() {
+    for (text, command) in [
+        ("G1 X10 F6000\nG2 X20 I5 J0\n", "G2"),
+        ("G1 X10 F6000\nG3 X20 I5 J0\n", "G3"),
+        ("G1 X10 F6000\nG5 X20 I1 J1 P1 Q1\n", "G5"),
+        ("G1 X10 F6000\nG5.1 X20 I1 J1\n", "G5.1"),
+        ("G1 X10 F6000\nG10\n", "G10"),
+        ("G1 X10 F6000\nG11\n", "G11"),
+        ("G1 X10 F6000\nG28 X\n", "G28"),
+        ("G1 X10 F6000\nSET_PRESSURE_ADVANCE ADVANCE=0.02\n", "SET_PRESSURE_ADVANCE"),
+        ("G1 X10 F6000\nSET_POST_PROCESSOR NAME=pa K=1\n", "SET_POST_PROCESSOR"),
+        ("G1 X10 F6000\nBED_MESH_PROFILE LOAD=default\n", "BED_MESH_PROFILE"),
+        ("G1 X10 F6000\nBED_MESH_CALIBRATE\n", "BED_MESH_CALIBRATE"),
+        ("G1 X10 F6000\nFORCE_MOVE STEPPER=x DISTANCE=5 VELOCITY=5\n", "FORCE_MOVE"),
+        ("G1 X10 F6000\nEXCLUDE_OBJECT NAME=a\n", "EXCLUDE_OBJECT"),
+        ("G1 X10 F6000\nM109 S210\n", "M109"),
+    ] {
+        assert_eq!(refused_command(text), (2, command.to_string()), "{text}");
+    }
+}
+
+#[test]
+fn a_heater_wait_before_the_anchor_is_where_the_plan_starts() {
+    assert_eq!(parse("M190 S60\nM109 S210\nG1 X10 F6000\n").len(), 1);
+}
+
+#[test]
+fn comments_and_unknown_commands_are_ignored_whatever_their_arguments() {
     assert_eq!(
-        parse("; header\nM104 S200\nG28\nG1 X10 F6000 ; move\n").len(),
+        parse(
+            "; header\nM104 S200\nM117 Layer 1 of 2.5.6\nRESPOND MSG=\"hello world\"\n\
+             M73 P10 R5\nEXCLUDE_OBJECT_START NAME=a b\nT0\nG1 X10 F6000 ; move\n"
+        )
+        .len(),
         1
     );
 }

@@ -349,3 +349,44 @@ def test_gcode_state_errors_are_refused_like_live(engine, gcode, error):
     with pytest.raises(Exception, match=error):
         live_replay.replay(gcode, BENCH_CFG)
     assert error in snapshot_refusal(engine, gcode)
+
+
+def test_unknown_commands_are_ignored_whatever_their_arguments_like_live(
+    engine,
+):
+    steps = assert_parity(
+        engine,
+        "G1 X10 Y10 F6000\n"
+        "M117 Layer 2 of 10.5.1\n"
+        "M118 hello: world\n"
+        'RESPOND MSG="half done"\n'
+        "M73 P50 R3\n"
+        "M104 S0\n"
+        "T0\n"
+        "G1 X20\n",
+    )
+    assert len(steps) == 1
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "G2 X20 Y10 I5 J0",
+        "G3 X20 Y10 I5 J0",
+        "G5 X20 Y10 I1 J1 P1 Q1",
+        "G5.1 X20 Y10 I1 J1",
+        "G10",
+        "G11",
+        "G28",
+        "SET_PRESSURE_ADVANCE ADVANCE=0.03",
+        "SET_POST_PROCESSOR NAME=pa K=0.5",
+        "BED_MESH_PROFILE LOAD=default",
+        "BED_MESH_CLEAR",
+        "FORCE_MOVE STEPPER=stepper_x DISTANCE=5 VELOCITY=10",
+        "M109 S215",
+    ],
+)
+def test_commands_the_snapshot_cannot_plan_are_refused_by_name(engine, command):
+    name = command.split()[0]
+    refusal = snapshot_refusal(engine, f"G1 X10 Y10 F6000\n{command}\nG1 X20\n")
+    assert f"line 2: {name}:" in refusal
