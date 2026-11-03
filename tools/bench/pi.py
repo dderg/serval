@@ -75,16 +75,34 @@ def printer_state() -> str:
     return http("GET", "/printer/info")["state"]
 
 
-def wait_ready() -> None:
+def wait_state(accepted: tuple[str, ...]) -> str:
     deadline = time.monotonic() + READY_TIMEOUT_S
+    state = "unreachable"
     while time.monotonic() < deadline:
         try:
-            if printer_state() == "ready":
-                return
+            state = printer_state()
         except OSError:
-            pass
+            state = "unreachable"
+        if state in accepted:
+            return state
         time.sleep(1)
-    raise BenchError("printer did not become ready")
+    raise BenchError(
+        f"printer did not reach {'/'.join(accepted)} within "
+        f"{READY_TIMEOUT_S:.0f} s (last state: {state})"
+    )
+
+
+def wait_ready() -> None:
+    wait_state(("ready",))
+
+
+def wait_settled() -> str:
+    return wait_state(("ready", "shutdown", "error"))
+
+
+def ensure_ready() -> None:
+    if wait_settled() != "ready":
+        firmware_restart()
 
 
 def firmware_restart() -> None:
@@ -126,7 +144,7 @@ def klipper_pid() -> int:
 def restart_klipper() -> None:
     ssh("sudo systemctl restart klipper")
     time.sleep(2)
-    wait_ready()
+    ensure_ready()
 
 
 def ssh(command: str) -> str:
@@ -174,6 +192,6 @@ def push_config(config: Path = REPO_CFG) -> bool:
 
 
 def prepare_printer(config: Path = REPO_CFG) -> None:
-    wait_ready()
+    wait_settled()
     push_config(config)
     firmware_restart()

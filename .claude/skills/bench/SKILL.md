@@ -67,7 +67,7 @@ Crash triage: `journalctl -u klipper` on the Pi (`ssh bench-pi`) and `events/hos
 ## Recovery
 
 - klippy aborted: systemd restarts it after ~10 s; `prepare_printer` waits for ready.
-- MCU latched in shutdown (survives klippy restarts; `prepare_printer` times out "printer did not become ready"): `deploy.py reset-target`. Full reflash: `deploy.py flash-target` (F401 fw from `f401.config` via Pi SWD). Capture board: `deploy.py flash-capture`.
+- MCU latched in shutdown (survives klippy restarts; klippy comes up in `shutdown` "Previous MCU 'mcu' shutdown"): `restart_klipper`/`prepare_printer` (so `deploy.py sync`, `run.py`, `suite.py`) FIRMWARE_RESTART a printer that settles in `shutdown`/`error`, which resets the F401. `deploy.py reset-target` (SWD reset) is for an MCU that no longer answers. Full reflash: `deploy.py flash-target` (F401 fw from `f401.config` via Pi SWD). Capture board: `deploy.py flash-capture`.
 - F407 whose firmware disabled SWD: set BOOT0=1 and press reset (manual). Ask the user for wiring changes (endstops, TMC UART, clock wire are planned, see README).
 
 ## Limits
