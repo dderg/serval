@@ -553,6 +553,7 @@ class MCU:
             return
         config_params = self._send_get_config()
         self._step_benchmark = self._query_step_benchmark()
+        self._get_status_info["step_benchmark"] = self._step_benchmark
         if not config_params["is_config"]:
             if self._restart_method == "rpi_usb":
                 # Only configure mcu after usb power reset
