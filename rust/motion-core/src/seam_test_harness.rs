@@ -138,9 +138,10 @@ pub struct LiveReplay {
 
 impl LiveReplay {
     pub fn new(source: &str, planner: &planner_config::PlannerConfig) -> Result<Self, String> {
-        let config = crate::live_config::stream_config(planner)?;
+        let config = motion_pipeline::live_config::stream_config(planner)?;
         let chains = planner.compile_active_chains().map_err(|e| e.to_string())?;
-        let moves = parse_gcode_to_moves(source, crate::live_config::move_limits(planner)?);
+        let moves =
+            parse_gcode_to_moves(source, motion_pipeline::live_config::move_limits(planner)?);
         Ok(Self {
             config,
             chains,

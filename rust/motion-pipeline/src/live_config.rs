@@ -1,5 +1,6 @@
-//! The planner settings the live path derives from `PlannerConfig`, shared
-//! with offline replays so a replay plans exactly what the printer plans.
+//! The planner settings the live printer derives from `PlannerConfig`. The
+//! snapshot path, replays and the bench analyzer plan through the same
+//! derivation, so every offline plan is the plan the printer executes.
 
 use planner_config::PlannerConfig;
 
@@ -34,12 +35,12 @@ pub fn require_unlimited_config_jerk(max_jerk: f64) -> Result<(), &'static str> 
     Ok(())
 }
 
-pub fn stream_config(cfg: &PlannerConfig) -> Result<motion_pipeline::StreamConfig, String> {
+pub fn stream_config(cfg: &PlannerConfig) -> Result<crate::StreamConfig, String> {
     let cart = cfg.cartesian;
     require_unlimited_config_jerk(cart.max_jerk)?;
     cfg.check_ratio_ramp_extrude_only_caps()?;
     let max_extrude_only_accel_mm_s2 = cfg.max_extrude_only_accel.unwrap_or(f64::INFINITY);
-    Ok(motion_pipeline::StreamConfig {
+    Ok(crate::StreamConfig {
         corner: geometry::CornerFitConfig {
             ramp_accel_budget_mm_s2: max_extrude_only_accel_mm_s2,
             ..cfg.corner

@@ -1,12 +1,11 @@
 use pipeline_snapshot::waypoints::Waypoint;
-use pipeline_snapshot::{
-    ExactTrajectory, SampleSide, SnapshotParams, TRAJECTORY_FIT_TOL_MM, pipeline_snapshot,
-};
+use pipeline_snapshot::{ExactTrajectory, SampleSide, SnapshotParams, pipeline_snapshot};
 use proptest::prelude::*;
 
 const AXES: usize = 4;
 const E_AXIS: usize = 3;
-const FIT_SLACK_MM: f64 = 4.0 * TRAJECTORY_FIT_TOL_MM;
+const FIT_TOL_MM: f64 = 0.005;
+const FIT_SLACK_MM: f64 = 4.0 * FIT_TOL_MM;
 const START: [f64; AXES] = [150.0, 150.0, 0.2, 0.0];
 
 #[derive(Debug, Clone, Copy)]
@@ -79,7 +78,7 @@ fn plan(limits: Limits, points: &[Waypoint]) -> ExactTrajectory {
         max_z_accel: None,
         max_extrude_only_velocity: None,
         max_extrude_only_accel: None,
-        max_path_deviation: None,
+        max_path_deviation: Some(FIT_TOL_MM),
         max_accel_deviation: None,
         axis_decls: Vec::new(),
         post_processor_decls: Vec::new(),

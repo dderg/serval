@@ -728,6 +728,7 @@ dependencies = [
  "geometry",
  "libm",
  "nurbs",
+ "planner-config",
  "proptest",
  "thiserror",
  "tracing",

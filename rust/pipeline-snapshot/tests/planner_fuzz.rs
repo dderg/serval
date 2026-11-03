@@ -20,13 +20,13 @@
 //! a large `PROPTEST_CASES`. Every bug it finds gets pinned below as an
 //! `#[ignore]`d regression test until fixed.
 
+use motion_pipeline::live_config;
 use pipeline_snapshot::audit::{
     AuditBudgets, AuditReport, Violation, ViolationKind, audit_trajectory,
 };
 use pipeline_snapshot::waypoints::Waypoint;
 use pipeline_snapshot::{
-    ExactTrajectory, SnapshotParams, TRAJECTORY_FIT_TOL_ACCEL_MM_S2, TRAJECTORY_FIT_TOL_MM,
-    VELOCITY_INTEGRATION_TOL, pipeline_snapshot,
+    CartesianLimits, ExactTrajectory, PlannerConfig, SnapshotParams, pipeline_snapshot,
 };
 use proptest::prelude::*;
 use proptest::test_runner::RngSeed;
@@ -129,13 +129,12 @@ fn run_case(limits: FuzzLimits, moves: &[MoveSpec]) -> (ExactTrajectory, AuditRe
 }
 
 fn run_waypoints(limits: FuzzLimits, waypoints: &[Waypoint]) -> (ExactTrajectory, AuditReport) {
+    let corner_deviation =
+        geometry::corner_deviation_from_scv(limits.square_corner_velocity, limits.max_accel);
     let params = SnapshotParams {
         max_velocity: limits.max_velocity,
         max_accel: limits.max_accel,
-        corner_deviation: geometry::corner_deviation_from_scv(
-            limits.square_corner_velocity,
-            limits.max_accel,
-        ),
+        corner_deviation,
         max_jerk: f64::INFINITY,
         max_z_velocity: None,
         max_z_accel: None,
@@ -148,22 +147,16 @@ fn run_waypoints(limits: FuzzLimits, waypoints: &[Waypoint]) -> (ExactTrajectory
     };
     let snapshot = pipeline_snapshot(waypoints, params).expect("valid fuzz input");
     let traj = snapshot.trajectory;
-    let config = motion_pipeline::StreamConfig {
-        corner: geometry::CornerFitConfig::default(),
-        integration_tol: VELOCITY_INTEGRATION_TOL,
-        max_extrude_only_velocity_mm_s: f64::INFINITY,
-        max_extrude_only_accel_mm_s2: f64::INFINITY,
-        fit_tol_mm: TRAJECTORY_FIT_TOL_MM,
-        fit_tol_accel_mm_s2: TRAJECTORY_FIT_TOL_ACCEL_MM_S2,
-        max_buffer_moves: 65_536,
-        limits: geometry::VelocityLimits::try_new(
+    let config = live_config::stream_config(&PlannerConfig {
+        cartesian: CartesianLimits::without_z_caps(
             limits.max_velocity,
             limits.max_accel,
-            limits.square_corner_velocity,
             f64::INFINITY,
-        )
-        .expect("strategy generates valid limits"),
-    };
+            corner_deviation,
+        ),
+        ..PlannerConfig::default()
+    })
+    .expect("strategy generates valid limits");
     let report = audit_trajectory(&traj, &config, &AuditBudgets::for_config(&config));
     (traj, report)
 }
