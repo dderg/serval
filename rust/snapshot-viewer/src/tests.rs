@@ -419,13 +419,7 @@ fn a_chained_snapshot_renders_the_toolhead_lane_on_the_shared_grid() {
             .map(|(k, v)| ((*k).to_string(), *v))
             .collect(),
     };
-    let axis = |name: &str| pipeline_snapshot::AxisDecl {
-        name: name.to_string(),
-        follows: Vec::new(),
-        motors: Vec::new(),
-        post_processors: vec!["slew".to_string(), "belt".to_string()],
-        ratio_ramp_time: None,
-    };
+    let axis = |name: &str| pipeline_snapshot::AxisDecl { name: name.to_string(), follows: Vec::new(), motors: Vec::new(), post_processors: vec!["slew".to_string(), "belt".to_string()], ratio_ramp_time: None, max_velocity: None, max_accel: None, instantaneous_corner_velocity: None };
     let snap = real_snapshot(
         vec![axis("x"), axis("y")],
         vec![

@@ -132,6 +132,7 @@ fn kernel_advance(stage: &trajectory::ChainStage) -> super::LeadingAdvance<'_> {
     super::LeadingAdvance {
         stage,
         smoothing: super::AdvanceSmoothing::Kernel,
+        instantaneous_corner_velocity: trajectory::DEFAULT_INSTANTANEOUS_CORNER_VELOCITY_MM_S,
     }
 }
 
@@ -1498,6 +1499,7 @@ fn ramped_advance(stage: &trajectory::ChainStage) -> super::LeadingAdvance<'_> {
     super::LeadingAdvance {
         stage,
         smoothing: super::AdvanceSmoothing::RatioRamp,
+        instantaneous_corner_velocity: trajectory::DEFAULT_INSTANTANEOUS_CORNER_VELOCITY_MM_S,
     }
 }
 
@@ -1534,9 +1536,12 @@ fn a_ratio_ramped_advance_refuses_a_ratio_step_taken_at_speed() {
     );
 }
 
-#[test]
-fn a_ratio_ramped_advance_refuses_a_leader_acceleration_step() {
-    let (t0, seam, t1) = (300.0, 300.01, 300.02);
+const LEADER_STEP_SEAM: f64 = 300.01;
+
+fn project_over_a_leader_acceleration_step(
+    accel_step: f64,
+) -> Result<super::SourceProjection, crate::types::PostProcessError> {
+    let (t0, seam, t1) = (300.0, LEADER_STEP_SEAM, 300.02);
     let x = bezier_pieces_to_nurbs(&[
         BezierPiece {
             u_start: t0,
@@ -1546,7 +1551,7 @@ fn a_ratio_ramped_advance_refuses_a_leader_acceleration_step() {
         BezierPiece {
             u_start: seam,
             u_end: t1,
-            coeffs: vec![1.0, 100.0, 2_500.0],
+            coeffs: vec![1.0, 100.0, 0.5 * accel_step],
         },
     ]);
     let mut shaped = cusp_segment(vec![0.0, 100.0], vec![0.0, 50.0], t0, t1);
@@ -1563,18 +1568,31 @@ fn a_ratio_ramped_advance_refuses_a_leader_acceleration_step() {
         s_length: super::leader_arc_length(&shaped, &[0, 1]),
     };
     let fit_tol = crate::lowering::FitTol::absolute(1e-4, 50.0);
-    let refused =
-        super::fit_source_projection(source, fit_tol, Some(ramped_advance(&RAMPED_ADVANCE_STAGE)));
+    super::fit_source_projection(source, fit_tol, Some(ramped_advance(&RAMPED_ADVANCE_STAGE)))
+}
+
+#[test]
+fn a_ratio_ramped_advance_refuses_a_leader_acceleration_step_beyond_the_allowance() {
+    let refused = project_over_a_leader_acceleration_step(5000.0);
     assert!(
         matches!(
             refused,
             Err(crate::types::PostProcessError::RatioRampedVelocityStep { t, .. })
-                if (t - seam).abs() < 1e-9
+                if (t - LEADER_STEP_SEAM).abs() < 1e-9
         ),
-        "the leader's acceleration jumps by 5000 mm/s² at {seam}, which the advance turns \
-         into a velocity step, got {:?}",
+        "the leader's acceleration jumps by 5000 mm/s² at {LEADER_STEP_SEAM}, which the \
+         advance turns into a 4.5 mm/s velocity step, got {:?}",
         refused.map(|_| ())
     );
+}
+
+#[test]
+fn a_ratio_ramped_advance_takes_a_leader_acceleration_step_within_its_allowance() {
+    let tangent_share = 100.0 / 12_500.0_f64.sqrt();
+    let step = 0.02 * 0.05 * 500.0 * tangent_share;
+    assert!(step > 0.4 && step < trajectory::DEFAULT_INSTANTANEOUS_CORNER_VELOCITY_MM_S);
+    project_over_a_leader_acceleration_step(500.0)
+        .expect("a 0.45 mm/s advance velocity step is within the extruder's allowance");
 }
 
 fn four_axis_segment(

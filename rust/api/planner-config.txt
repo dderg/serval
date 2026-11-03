@@ -1,5 +1,9 @@
 pub mod planner_config
 pub enum planner_config::AxisConfigError
+pub planner_config::AxisConfigError::BadLimit
+pub planner_config::AxisConfigError::BadLimit::axis: alloc::string::String
+pub planner_config::AxisConfigError::BadLimit::option: &'static str
+pub planner_config::AxisConfigError::BadLimit::value: f64
 pub planner_config::AxisConfigError::BadName
 pub planner_config::AxisConfigError::BadName::name: alloc::string::String
 pub planner_config::AxisConfigError::BadRatioRampTime
@@ -7,6 +11,9 @@ pub planner_config::AxisConfigError::BadRatioRampTime::axis: alloc::string::Stri
 pub planner_config::AxisConfigError::BadRatioRampTime::value: f64
 pub planner_config::AxisConfigError::Duplicate
 pub planner_config::AxisConfigError::Duplicate::name: alloc::string::String
+pub planner_config::AxisConfigError::LimitWithoutLeaders
+pub planner_config::AxisConfigError::LimitWithoutLeaders::axis: alloc::string::String
+pub planner_config::AxisConfigError::LimitWithoutLeaders::option: &'static str
 pub planner_config::AxisConfigError::MissingSpatialAxis
 pub planner_config::AxisConfigError::MissingSpatialAxis::name: alloc::string::String
 pub planner_config::AxisConfigError::MotorMappingDuplicate
@@ -30,6 +37,9 @@ pub planner_config::PostProcessorConfigError::Duplicate::name: alloc::string::St
 pub planner_config::PostProcessorConfigError::FollowerAdvanceWithoutKernel
 pub planner_config::PostProcessorConfigError::FollowerAdvanceWithoutKernel::axis: alloc::string::String
 pub planner_config::PostProcessorConfigError::FollowerAdvanceWithoutKernel::name: alloc::string::String
+pub planner_config::PostProcessorConfigError::FollowerAdvanceWithoutLimits
+pub planner_config::PostProcessorConfigError::FollowerAdvanceWithoutLimits::axis: alloc::string::String
+pub planner_config::PostProcessorConfigError::FollowerAdvanceWithoutLimits::name: alloc::string::String
 pub planner_config::PostProcessorConfigError::LeaderGainBeforeKernel
 pub planner_config::PostProcessorConfigError::LeaderGainBeforeKernel::axis: alloc::string::String
 pub planner_config::PostProcessorConfigError::LeaderGainBeforeKernel::name: alloc::string::String
@@ -52,6 +62,9 @@ pub planner_config::RuntimeLimitError::NotPositive
 pub planner_config::RuntimeLimitError::NotPositive::name: &'static str
 pub struct planner_config::AxisDecl
 pub planner_config::AxisDecl::follows: alloc::vec::Vec<alloc::string::String>
+pub planner_config::AxisDecl::instantaneous_corner_velocity: core::option::Option<f64>
+pub planner_config::AxisDecl::max_accel: core::option::Option<f64>
+pub planner_config::AxisDecl::max_velocity: core::option::Option<f64>
 pub planner_config::AxisDecl::motors: alloc::vec::Vec<alloc::string::String>
 pub planner_config::AxisDecl::name: alloc::string::String
 pub planner_config::AxisDecl::post_processors: alloc::vec::Vec<alloc::string::String>
@@ -117,3 +130,4 @@ pub fn planner_config::RuntimeLimits::set_accel_cap(&mut self, core::option::Opt
 pub fn planner_config::RuntimeLimits::set_corner_deviation(&mut self, core::option::Option<f64>) -> core::result::Result<(), planner_config::RuntimeLimitError>
 pub fn planner_config::RuntimeLimits::set_velocity_cap(&mut self, core::option::Option<f64>) -> core::result::Result<(), planner_config::RuntimeLimitError>
 pub const planner_config::DEFAULT_CORNER_DEVIATION_MM: f64
+pub fn planner_config::extruder_caps(&planner_config::AxisRegistry, &trajectory::chain::AxisChainSet) -> core::result::Result<alloc::vec::Vec<geometry::frontend::ExtruderCaps>, alloc::string::String>

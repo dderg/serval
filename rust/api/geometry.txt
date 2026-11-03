@@ -96,6 +96,17 @@ pub geometry::frontend::FrontendError::Segment::line_no: u32
 pub geometry::frontend::FrontendError::Segment::source: geometry::error::GeometryError
 pub geometry::frontend::FrontendError::ZeroMotion
 pub geometry::frontend::FrontendError::ZeroMotion::line_no: u32
+pub struct geometry::frontend::ExtruderCaps
+pub geometry::frontend::ExtruderCaps::advance_curvature_s2_per_mm: f64
+pub geometry::frontend::ExtruderCaps::advance_slope_s: f64
+pub geometry::frontend::ExtruderCaps::axis_index: usize
+pub geometry::frontend::ExtruderCaps::instantaneous_corner_velocity_mm_s: f64
+pub geometry::frontend::ExtruderCaps::max_accel_mm_s2: f64
+pub geometry::frontend::ExtruderCaps::max_velocity_mm_s: f64
+pub geometry::frontend::ExtruderCaps::own_jerk_per_accel_hz: f64
+pub geometry::frontend::ExtruderCaps::path_jerk_per_accel_hz: [f64; 3]
+impl geometry::frontend::ExtruderCaps
+pub fn geometry::frontend::ExtruderCaps::stricter(core::option::Option<Self>, core::option::Option<Self>) -> core::option::Option<Self>
 pub struct geometry::frontend::Move
 pub geometry::frontend::Move::feedrate_mm_s: f64
 pub geometry::frontend::Move::limits: geometry::frontend::VelocityLimits
@@ -109,12 +120,14 @@ pub geometry::frontend::MoveContext::source: geometry::segment::SourceRange
 pub struct geometry::frontend::VelocityLimits
 pub geometry::frontend::VelocityLimits::accel_mm_s2: f64
 pub geometry::frontend::VelocityLimits::corner_deviation_mm: f64
+pub geometry::frontend::VelocityLimits::extruder: core::option::Option<geometry::frontend::ExtruderCaps>
 pub geometry::frontend::VelocityLimits::max_jerk_mm_s3: f64
 pub geometry::frontend::VelocityLimits::max_velocity_mm_s: f64
 pub geometry::frontend::VelocityLimits::max_z_accel_mm_s2: f64
 pub geometry::frontend::VelocityLimits::max_z_velocity_mm_s: f64
 impl geometry::frontend::VelocityLimits
 pub fn geometry::frontend::VelocityLimits::try_new(f64, f64, f64, f64) -> core::result::Result<Self, &'static str>
+pub fn geometry::frontend::VelocityLimits::with_extruder_caps(self, core::option::Option<geometry::frontend::ExtruderCaps>) -> core::result::Result<Self, &'static str>
 pub fn geometry::frontend::VelocityLimits::with_z_caps(self, f64, f64) -> core::result::Result<Self, &'static str>
 pub const geometry::frontend::CORNER_DEVIATION_SCV_FACTOR: f64
 pub fn geometry::frontend::corner_deviation_from_scv(f64, f64) -> f64
@@ -750,6 +763,17 @@ pub geometry::CubicSegment::xyz: nurbs::vector::VectorNurbs<3>
 impl geometry::segment::CubicSegment
 pub fn geometry::segment::CubicSegment::try_new(nurbs::vector::VectorNurbs<3>, alloc::vec::Vec<geometry::segment::FollowerDemand>, f64, geometry::segment::SourceRange) -> core::result::Result<Self, geometry::error::GeometryError>
 pub fn geometry::segment::CubicSegment::try_new_virtual(nurbs::vector::VectorNurbs<3>, alloc::vec::Vec<geometry::segment::FollowerDemand>, f64, geometry::segment::SourceRange, f64) -> core::result::Result<Self, geometry::error::GeometryError>
+pub struct geometry::ExtruderCaps
+pub geometry::ExtruderCaps::advance_curvature_s2_per_mm: f64
+pub geometry::ExtruderCaps::advance_slope_s: f64
+pub geometry::ExtruderCaps::axis_index: usize
+pub geometry::ExtruderCaps::instantaneous_corner_velocity_mm_s: f64
+pub geometry::ExtruderCaps::max_accel_mm_s2: f64
+pub geometry::ExtruderCaps::max_velocity_mm_s: f64
+pub geometry::ExtruderCaps::own_jerk_per_accel_hz: f64
+pub geometry::ExtruderCaps::path_jerk_per_accel_hz: [f64; 3]
+impl geometry::frontend::ExtruderCaps
+pub fn geometry::frontend::ExtruderCaps::stricter(core::option::Option<Self>, core::option::Option<Self>) -> core::option::Option<Self>
 pub struct geometry::Fade
 pub geometry::Fade::target: f64
 impl geometry::surface::Fade
@@ -888,12 +912,14 @@ pub geometry::VelSample::v: f64
 pub struct geometry::VelocityLimits
 pub geometry::VelocityLimits::accel_mm_s2: f64
 pub geometry::VelocityLimits::corner_deviation_mm: f64
+pub geometry::VelocityLimits::extruder: core::option::Option<geometry::frontend::ExtruderCaps>
 pub geometry::VelocityLimits::max_jerk_mm_s3: f64
 pub geometry::VelocityLimits::max_velocity_mm_s: f64
 pub geometry::VelocityLimits::max_z_accel_mm_s2: f64
 pub geometry::VelocityLimits::max_z_velocity_mm_s: f64
 impl geometry::frontend::VelocityLimits
 pub fn geometry::frontend::VelocityLimits::try_new(f64, f64, f64, f64) -> core::result::Result<Self, &'static str>
+pub fn geometry::frontend::VelocityLimits::with_extruder_caps(self, core::option::Option<geometry::frontend::ExtruderCaps>) -> core::result::Result<Self, &'static str>
 pub fn geometry::frontend::VelocityLimits::with_z_caps(self, f64, f64) -> core::result::Result<Self, &'static str>
 pub struct geometry::VelocityPlanParams
 pub geometry::VelocityPlanParams::entry_v: f64

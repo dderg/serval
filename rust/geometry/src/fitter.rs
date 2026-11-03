@@ -11,11 +11,11 @@ use crate::vec3;
 
 use crate::GeometryError;
 use crate::MIN_DEVICE_INTERVAL_S;
-use crate::frontend::{Move, VelocityLimits};
+use crate::frontend::{ExtruderCaps, Move, VelocityLimits};
 use crate::path::lowering::PositionProfile;
 use crate::path::{CurvatureProfile, Line};
 use crate::segment::FollowerDemand;
-use vec3::{dot, turn_normal};
+use vec3::{cross, dot, turn_normal};
 
 pub use config::CornerFitConfig;
 pub use move_ops::{
@@ -412,16 +412,14 @@ pub fn plan_facet_consumption(
     tangents.push(t_out);
 
     let mut thetas = Vec::with_capacity(tangents.len() - 1);
-    let mut first_normal = None;
+    let mut first_turn_axis = None;
     for w in tangents.windows(2) {
         let theta = libm::acos(dot(w[0], w[1]).clamp(-1.0, 1.0));
         if theta <= config.theta_min_rad || theta >= config.theta_max_rad {
             return Ok(None);
         }
-        let Some(n) = turn_normal(w[0], w[1]) else {
-            return Ok(None);
-        };
-        if dot(n, *first_normal.get_or_insert(n)) <= 0.0 {
+        let turn_axis = cross(w[0], w[1]);
+        if dot(turn_axis, *first_turn_axis.get_or_insert(turn_axis)) <= 0.0 {
             return Ok(None);
         }
         thetas.push(theta);
@@ -599,6 +597,7 @@ fn consumption_limits(
             max_jerk_mm_s3: a.max_jerk_mm_s3.min(b.max_jerk_mm_s3),
             max_z_velocity_mm_s: a.max_z_velocity_mm_s.min(b.max_z_velocity_mm_s),
             max_z_accel_mm_s2: a.max_z_accel_mm_s2.min(b.max_z_accel_mm_s2),
+            extruder: ExtruderCaps::stricter(a.extruder, b.extruder),
         })
         .expect("mids is non-empty");
     let last = blend.segments.len() - 1;

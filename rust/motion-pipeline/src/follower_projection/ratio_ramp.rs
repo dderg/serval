@@ -419,6 +419,7 @@ pub(super) struct RatioSmoothing {
     rest_end: f64,
     examined_through: f64,
     floor: f64,
+    taken_through: f64,
     reach_into_next: Option<Crossing>,
     backlog: VecDeque<PendingSegment>,
 }
@@ -501,7 +502,7 @@ impl RatioSmoothing {
             self.valleys.push(AdvanceValley {
                 start: seam,
                 end: seam,
-                before: reach,
+                before: reach.min(self.back_reach_limit(seam)),
                 after: reach,
             });
         }
@@ -555,7 +556,25 @@ impl RatioSmoothing {
                     || segment.table_end + SPAN_LOOKUP_SLACK_MM <= final_through
             })
             .count();
-        self.backlog.drain(..ready).collect()
+        let drained: Vec<PendingSegment> = self.backlog.drain(..ready).collect();
+        if let Some(last) = drained.last() {
+            self.taken_through = self
+                .taken_through
+                .max(last.table_end)
+                .max(last.s_start + last.s_length);
+        }
+        drained
+    }
+
+    /// How far back from `seam` a valley laid there may reach: not past a
+    /// floor, and not into a segment already taken for projection, whose
+    /// advance read the weight before the valley existed. The reserve
+    /// [`Self::unlaid_valley_reach`] keeps this from binding where the
+    /// leaders' reach changes slowly; a seam whose crossing reaches much
+    /// further than the one the reserve was taken at (hard braking into a
+    /// rest right after a cruise) releases the advance over what is left.
+    fn back_reach_limit(&self, seam: f64) -> f64 {
+        (seam - self.floor.max(self.taken_through)).max(0.0)
     }
 
     /// How far back from the table's end a valley the next leg may open
@@ -817,7 +836,7 @@ impl RatioSmoothing {
             self.valleys.push(AdvanceValley {
                 start: rest_start,
                 end: f64::INFINITY,
-                before: rest_start - seam + reach.min(seam - self.floor).max(0.0),
+                before: rest_start - seam + reach.min(self.back_reach_limit(seam)),
                 after: 0.0,
             });
             self.resting = true;

@@ -173,6 +173,8 @@ impl PyMotionEngine {
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (settings, _consumed) = read_motion_settings(&doc).map_err(PyValueError::new_err)?;
         let cfg = planner_config_from_settings(&settings).map_err(PyValueError::new_err)?;
+        *self.extruder_caps.lock_ok() =
+            motion_pipeline::live_config::extruder_caps(&cfg).map_err(PyValueError::new_err)?;
         *self.planner_config.lock_ok() = cfg.clone();
 
         let mcus: Vec<McuTopologyInput> = mcus.into_iter().map(McuTopology::into_core).collect();
@@ -232,8 +234,13 @@ impl PyMotionEngine {
                 }
             };
             let pos = self.commanded_pos.lock_ok().0;
-            let limits = motion_pipeline::live_config::move_limits(&self.planner_config.lock_ok())
-                .map_err(PyRuntimeError::new_err)?;
+            let extruder = motion_pipeline::live_config::extruder_caps_on(
+                &self.extruder_caps.lock_ok(),
+                extruder_axis,
+            );
+            let limits =
+                motion_pipeline::live_config::move_limits(&self.planner_config.lock_ok(), extruder)
+                    .map_err(PyRuntimeError::new_err)?;
             let line_no = self.move_seq.fetch_add(1, Ordering::Relaxed) as u32;
             let m = classify::build_move(
                 pos,
@@ -557,6 +564,8 @@ impl PyMotionEngine {
         let axis_chains = processors
             .compile_active_chains(&cfg.axis_registry, bypass)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let extruder_caps = planner_config::extruder_caps(&cfg.axis_registry, &axis_chains)
+            .map_err(PyValueError::new_err)?;
         if let Some(handle) = self.planner.lock_ok().as_ref() {
             handle
                 .update_axis_chains(axis_chains)
@@ -564,6 +573,7 @@ impl PyMotionEngine {
         }
         cfg.post_processors = processors;
         cfg.post_processor_bypass = bypass;
+        *self.extruder_caps.lock_ok() = extruder_caps;
         Ok(())
     }
 
