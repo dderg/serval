@@ -47,12 +47,12 @@ fn follower_fit_tol(fit_tol: FitTol, position_scale: f64) -> FitTol {
 /// extruder moves a fraction of its position tolerance, and nothing after
 /// it differentiates the fit, so it spends its position budget
 /// ([`AccelBudget::PositionEquivalent`]). Every other follower fit keeps
-/// the absolute budget. The plain projection a kernel chain's linear
-/// advance differentiates would turn its velocity error `δ'` into `k·δ'`
-/// of command position, which the position-equivalent budget does not
-/// bound; a kernel's output carries only the path's own acceleration,
-/// which the absolute budget resolves in long pieces, and spending its
-/// position budget there moves the bead the melt lag lays.
+/// the absolute budget. The plain projection trailing derivative gains
+/// differentiate would turn its velocity error `δ'` into `k·δ'` of command
+/// position, which the position-equivalent budget does not bound; a
+/// kernel's output carries only the path's own acceleration, which the
+/// absolute budget resolves in long pieces, and spending its position
+/// budget there moves the bead the melt lag lays.
 fn source_accel_budget(leading: Option<LeadingAdvance>) -> AccelBudget {
     match leading {
         Some(_) => AccelBudget::PositionEquivalent,
@@ -210,13 +210,20 @@ struct LeadingAdvance<'a> {
 }
 
 impl<'a> LeadingAdvance<'a> {
-    /// The advance a chain applies before projection, if any: with no
-    /// kernel to defer it to, a linear one too. A linear advance next to a
-    /// kernel commutes with it and is applied to the convolved signal.
+    /// The advance a chain applies before its kernel, or with no kernel at
+    /// all. A linear one commutes with the kernel, yet applied to the fitted
+    /// source it would turn the fit's velocity error `δ'` into `k·δ'` of
+    /// command, and the melt lag the advance models hands `δ'` back to the
+    /// nozzle flow whole: a bead error of `δ'/(r·v)`, largest where a corner
+    /// slows. The source fits the advanced signal instead, whose position
+    /// error that lag filters. An acceleration gain, which only a chain
+    /// built outside configuration places before a kernel, stays on the
+    /// kernel input, where the convolution differentiates it exactly.
     fn of(chain: &'a CompiledChain) -> Option<Self> {
-        let stage = (!chain.follower_linear_transform())
-            .then(|| chain.leading_transform())
-            .flatten()?;
+        let acceleration_gain = |stage: &&ChainStage| matches!(stage, ChainStage::DerivativeGains { k2, .. } if *k2 != 0.0);
+        let stage = chain
+            .leading_transform()
+            .filter(|stage| chain.kernel().is_none() || !acceleration_gain(stage))?;
         Some(Self {
             stage,
             smoothing: match (chain.ratio_ramp_time(), chain.kernel()) {
@@ -535,8 +542,8 @@ pub(crate) fn project_followers(
     for (axis, leaders) in chains.projected_followers() {
         let chain = &chains.chains[axis];
         let kernel = chain.kernel();
-        let defer_linear_prefix = chain.follower_linear_transform();
         let leading = LeadingAdvance::of(chain);
+        let defer_linear_prefix = leading.is_none() && chain.follower_linear_transform();
         let source_tol = FitTol {
             accel_budget: source_accel_budget(leading),
             ..fit_tol

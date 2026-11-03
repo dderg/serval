@@ -1705,6 +1705,15 @@ fn a_source_fitted_to_the_advanced_signal_spends_its_position_budget() {
             ("pa", &algos::TanhPressureAdvance, TANH.to_vec()),
             ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
         ]),
+        e_chain(&[
+            ("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE]),
+            ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
+        ]),
+        e_chain(&[
+            ("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE]),
+            ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
+        ])
+        .with_ratio_ramp_time(0.015),
     ] {
         assert_eq!(source_budget(&chain), AccelBudget::PositionEquivalent);
     }
@@ -1717,18 +1726,9 @@ fn a_source_fitted_to_the_plain_projection_keeps_the_absolute_budget() {
         CompiledChain::default().with_ratio_ramp_time(0.015),
         e_chain(&[("st", &algos::SmoothTriangle, vec![SMOOTH_TIME])]),
         e_chain(&[
-            ("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE]),
-            ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
-        ]),
-        e_chain(&[
             ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
             ("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE]),
         ]),
-        e_chain(&[
-            ("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE]),
-            ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
-        ])
-        .with_ratio_ramp_time(0.015),
         e_chain(&[
             ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
             ("pa", &algos::TanhPressureAdvance, TANH.to_vec()),
