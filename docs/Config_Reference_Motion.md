@@ -236,7 +236,17 @@ post_processors: extruder_pa, extruder_smoothing
 #   Optional comma-separated named post-processors. Default is an empty list.
 #   On an axis that follows others, a pressure advance (or any derivative-gain
 #   stage) needs a smoothing kernel in the same list or a ratio_ramp_time on
-#   the axis; the chain is rejected otherwise.
+#   the axis, and the axis's max_velocity and max_accel; the chain is
+#   rejected otherwise.
+#max_velocity:
+#max_accel:
+#   Optional, on an axis that follows others. Must be above 0 (mm/s,
+#   mm/s^2). What the axis's motor can do for every move it makes, pressure
+#   advance included. The velocity planner slows each extruding move so the
+#   commanded extruder velocity and acceleration stay within them, corners
+#   and curves included. On the [extruder] axis each one left unset is
+#   inherited from max_extrude_only_velocity / max_extrude_only_accel (the
+#   same motor). An advance needs both, set or inherited.
 #ratio_ramp_time:
 #   Optional. Default is no ramp. If set, must be above 0 (seconds) and the
 #   axis must follow others. The extruded total of the projection is
@@ -372,11 +382,16 @@ The motion-owned portion of `[extruder]` is limited to the axis association and 
 ```
 [extruder]
 #axis: e
-#   Optional pressure-advance compatibility association. Default is None.
+#   The follower axis the extruder drives. Its [axis] max_velocity and
+#   max_accel inherit the caps below when unset.
 #max_extrude_only_velocity:
-#   Optional. Default is None. If set, must be above 0 (mm/s).
+#   Optional. Must be above 0 (mm/s). Default, as in upstream Klipper, is
+#   [printer] max_velocity * 4 * nozzle_diameter^2 / filament_area, with
+#   filament_area = pi * (filament_diameter/2)^2; no default without both
+#   diameters.
 #max_extrude_only_accel:
-#   Optional. Default is None. If set, must be above 0 (mm/s^2).
+#   Optional. Must be above 0 (mm/s^2). Default is [printer] max_accel
+#   scaled the same way.
 ```
 
 When using the pressure-advance compatibility command, `axis` identifies the `[axis <name>]` chain from which `linear_pressure_advance` (`k`) and `smooth_triangle` (`smooth_time`) targets are resolved. The compatibility command is documented in the migration guide; the configuration itself uses named post-processors.

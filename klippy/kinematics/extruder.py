@@ -3,12 +3,21 @@
 # Copyright (C) 2016-2022  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
+import math
 
 _OPTIONS_WITHOUT_A_PLANNER_CONCEPT = (
     "max_extrude_cross_section",
     "max_extrude_only_distance",
     "instantaneous_corner_velocity",
 )
+
+
+def default_extrude_ratio(nozzle_diameter, filament_diameter):
+    """Upstream klippy's scale from the printer's limits to the default
+    extrude-only caps: a bead of four nozzle diameters squared in cross
+    section, per filament area."""
+    filament_area = math.pi * (0.5 * filament_diameter) ** 2
+    return 4.0 * nozzle_diameter**2 / filament_area
 
 
 # Tracking for hotend heater, extrusion motion queue, and extruder stepper
@@ -26,11 +35,24 @@ class PrinterExtruder:
         self.filament_diameter = config.getfloat(
             "filament_diameter", minval=self.nozzle_diameter
         )
+        self.motion = self.printer.lookup_object("motion", None)
+        if self.motion is None:
+            raise config.error(
+                "[%s] axis: requires the [motion] object, which was not "
+                "available at extruder load time" % self.name
+            )
+        extrude_ratio = default_extrude_ratio(
+            self.nozzle_diameter, self.filament_diameter
+        )
         self.max_extrude_only_velocity = config.getfloat(
-            "max_extrude_only_velocity", None, above=0.0
+            "max_extrude_only_velocity",
+            self.motion.max_velocity * extrude_ratio,
+            above=0.0,
         )
         self.max_extrude_only_accel = config.getfloat(
-            "max_extrude_only_accel", None, above=0.0
+            "max_extrude_only_accel",
+            self.motion.max_accel * extrude_ratio,
+            above=0.0,
         )
         self.trapq = None
         self.trapq_finalize_moves = lambda *a: None
@@ -49,12 +71,6 @@ class PrinterExtruder:
                     "[axis e] motors:" % self.name
                 )
         axis_name = config.get("axis")
-        self.motion = self.printer.lookup_object("motion", None)
-        if self.motion is None:
-            raise config.error(
-                "[%s] axis: requires the [motion] object, which was not "
-                "available at extruder load time" % self.name
-            )
         declared = {
             n: follows for n, follows, motors, _pp in self.motion.axis_sections
         }
@@ -70,6 +86,13 @@ class PrinterExtruder:
                 % (self.name, axis_name, axis_name)
             )
         self.axis_name = axis_name
+        axis_config = config.getsection("axis %s" % (axis_name,))
+        self.max_velocity = axis_config.getfloat(
+            "max_velocity", self.max_extrude_only_velocity, above=0.0
+        )
+        self.max_accel = axis_config.getfloat(
+            "max_accel", self.max_extrude_only_accel, above=0.0
+        )
         self.pa_compat = self.printer.lookup_object(
             "pressure_advance_compat", None
         )

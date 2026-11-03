@@ -40,6 +40,14 @@ pub enum PostProcessorConfigError {
         trajectory::FOLLOWER_TRANSFORM_WITHOUT_KERNEL
     )]
     FollowerAdvanceWithoutKernel { axis: String, name: String },
+    #[error(
+        "axis '{axis}' follows other axes, and post_processor '{name}' advances it: the \
+         planner holds the advance within the motor's limits, so set [axis {axis}] \
+         max_velocity and max_accel (the [extruder] axis inherits them from \
+         max_extrude_only_velocity and max_extrude_only_accel, which default from \
+         nozzle_diameter and filament_diameter)"
+    )]
+    FollowerAdvanceWithoutLimits { axis: String, name: String },
 }
 
 #[derive(Debug, Clone)]
@@ -118,7 +126,45 @@ impl PostProcessorSet {
         self.reject_pre_kernel_gains_on_leaders(registry, &followers)?;
         let chains = AxisChainSet { chains, followers };
         self.reject_follower_advance_without_kernel(registry, &chains)?;
+        self.reject_follower_advance_without_limits(registry, &chains)?;
         Ok(chains)
+    }
+
+    fn reject_follower_advance_without_limits(
+        &self,
+        registry: &AxisRegistry,
+        chains: &AxisChainSet,
+    ) -> Result<(), PostProcessorConfigError> {
+        for (axis, leaders) in &chains.followers {
+            let decl = &registry.decls()[*axis];
+            if leaders.is_empty()
+                || chains.chains[*axis].transform().is_none()
+                || (decl.max_velocity.is_some() && decl.max_accel.is_some())
+            {
+                continue;
+            }
+            return Err(PostProcessorConfigError::FollowerAdvanceWithoutLimits {
+                axis: decl.name.clone(),
+                name: self.transform_name(*axis).clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn transform_name(&self, axis: usize) -> &String {
+        self.per_axis[axis]
+            .iter()
+            .find(|name| {
+                !matches!(
+                    self.instances
+                        .iter()
+                        .find(|i| i.name() == name.as_str())
+                        .expect("validated in try_new")
+                        .compile_stage(),
+                    None | Some(trajectory::ChainStage::SmoothKernel(_))
+                )
+            })
+            .expect("a transformed chain names the stage that transforms it")
     }
 
     fn with_ratio_ramps(registry: &AxisRegistry, chains: Vec<CompiledChain>) -> Vec<CompiledChain> {
@@ -140,20 +186,9 @@ impl PostProcessorSet {
         let Some(axis) = chains.kernel_free_follower_transform() else {
             return Ok(());
         };
-        let name = self.per_axis[axis]
-            .iter()
-            .find(|name| {
-                self.instances
-                    .iter()
-                    .find(|i| i.name() == name.as_str())
-                    .expect("validated in try_new")
-                    .compile_stage()
-                    .is_some()
-            })
-            .expect("a transformed chain names the stage that transforms it");
         Err(PostProcessorConfigError::FollowerAdvanceWithoutKernel {
             axis: registry.axis_name(axis).to_string(),
-            name: name.clone(),
+            name: self.transform_name(axis).clone(),
         })
     }
 
@@ -287,6 +322,14 @@ pub struct AxisDecl {
     /// which its extrusion-ratio steps are spread along the path, see
     /// [`trajectory::CompiledChain::ratio_ramp_time`].
     pub ratio_ramp_time: Option<f64>,
+    /// `max_velocity`: what the motor of an axis that follows others can
+    /// do for every move it makes, its advance included. For the
+    /// `[extruder]` axis the reader inherits `max_extrude_only_velocity`
+    /// when it is unset.
+    pub max_velocity: Option<f64>,
+    /// `max_accel`, inherited like [`AxisDecl::max_velocity`] from
+    /// `max_extrude_only_accel`.
+    pub max_accel: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -323,6 +366,17 @@ pub enum AxisConfigError {
     RatioRampWithoutLeaders { axis: String },
     #[error("axis '{axis}': ratio_ramp_time must be finite and above 0, got {value}")]
     BadRatioRampTime { axis: String, value: f64 },
+    #[error(
+        "axis '{axis}': {option} is the capability of an axis that follows others, and \
+         '{axis}' follows none (spatial limits live in [printer])"
+    )]
+    LimitWithoutLeaders { axis: String, option: &'static str },
+    #[error("axis '{axis}': {option} must be finite and above 0, got {value}")]
+    BadLimit {
+        axis: String,
+        option: &'static str,
+        value: f64,
+    },
 }
 
 impl AxisRegistry {
@@ -354,6 +408,22 @@ impl AxisRegistry {
                 if d.follows.is_empty() {
                     return Err(AxisConfigError::RatioRampWithoutLeaders {
                         axis: d.name.clone(),
+                    });
+                }
+            }
+            for (option, value) in [("max_velocity", d.max_velocity), ("max_accel", d.max_accel)] {
+                let Some(value) = value else { continue };
+                if !(value.is_finite() && value > 0.0) {
+                    return Err(AxisConfigError::BadLimit {
+                        axis: d.name.clone(),
+                        option,
+                        value,
+                    });
+                }
+                if d.follows.is_empty() {
+                    return Err(AxisConfigError::LimitWithoutLeaders {
+                        axis: d.name.clone(),
+                        option,
                     });
                 }
             }
@@ -465,6 +535,8 @@ impl Default for AxisRegistry {
                     motors: vec![],
                     post_processors: vec![],
                     ratio_ramp_time: None,
+                    max_velocity: None,
+                    max_accel: None,
                 })
                 .collect(),
         )

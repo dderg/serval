@@ -114,6 +114,8 @@ fn decl(name: &str, follows: &[&str]) -> AxisDecl {
         motors: vec![],
         post_processors: vec![],
         ratio_ramp_time: None,
+        max_velocity: None,
+        max_accel: None,
     }
 }
 
@@ -174,6 +176,8 @@ fn decl_with_motors(name: &str, follows: &[&str], motors: &[&str]) -> AxisDecl {
         motors: motors.iter().map(|s| s.to_string()).collect(),
         post_processors: vec![],
         ratio_ramp_time: None,
+        max_velocity: None,
+        max_accel: None,
     }
 }
 
@@ -245,12 +249,51 @@ fn pp(name: &str, ty: &str, params: &[(&str, f64)]) -> PostProcessorDecl {
     }
 }
 
+fn limited_e() -> AxisDecl {
+    AxisDecl {
+        max_velocity: Some(80.0),
+        max_accel: Some(10_000.0),
+        ..decl("e", &["x", "y", "z"])
+    }
+}
+
 fn registry_with_e(e_post_processors: &[&str]) -> AxisRegistry {
     let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
-    let mut e = decl("e", &["x", "y", "z"]);
+    let mut e = limited_e();
     e.post_processors = e_post_processors.iter().map(|s| (*s).to_string()).collect();
     decls.push(e);
     AxisRegistry::try_new(decls).unwrap()
+}
+
+#[test]
+fn a_follower_advance_needs_both_follower_limits() {
+    let advance = [
+        pp("pa", "linear_pressure_advance", &[("k", 0.04)]),
+        e_smoothing(),
+    ];
+    for (max_velocity, max_accel) in [(None, None), (Some(80.0), None), (None, Some(10_000.0))] {
+        let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
+        decls.push(AxisDecl {
+            post_processors: vec!["pa".into(), "st".into()],
+            max_velocity,
+            max_accel,
+            ..decl("e", &["x", "y", "z"])
+        });
+        let refused = PostProcessorSet::try_new(&AxisRegistry::try_new(decls).unwrap(), &advance);
+        assert!(
+            matches!(
+                refused,
+                Err(PostProcessorConfigError::FollowerAdvanceWithoutLimits { ref axis, ref name })
+                    if axis == "e" && name == "pa"
+            ),
+            "limits {max_velocity:?}/{max_accel:?} must be refused, got {refused:?}"
+        );
+    }
+    assert!(PostProcessorSet::try_new(&registry_with_e(&["pa", "st"]), &advance).is_ok());
+    assert!(
+        PostProcessorSet::try_new(&registry_with_e(&["st"]), &advance).is_ok(),
+        "a follower without an advance needs no limits"
+    );
 }
 
 #[test]
@@ -620,7 +663,7 @@ fn an_advance_on_an_axis_that_follows_nothing_is_not_a_follower_advance() {
 
 fn ramped_registry_with_e(e_post_processors: &[&str], ratio_ramp_time: f64) -> AxisRegistry {
     let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
-    let mut e = decl("e", &["x", "y", "z"]);
+    let mut e = limited_e();
     e.post_processors = e_post_processors.iter().map(|s| (*s).to_string()).collect();
     e.ratio_ramp_time = Some(ratio_ramp_time);
     decls.push(e);
@@ -700,6 +743,32 @@ fn a_ratio_ramp_time_must_be_finite_and_positive() {
                 Err(AxisConfigError::BadRatioRampTime { .. })
             ),
             "ratio_ramp_time {value} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn follower_limits_belong_to_followers_and_must_be_positive() {
+    let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
+    decls[0].max_velocity = Some(60.0);
+    assert!(matches!(
+        AxisRegistry::try_new(decls),
+        Err(AxisConfigError::LimitWithoutLeaders { ref axis, option: "max_velocity" }) if axis == "x"
+    ));
+    for value in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
+        let mut e = decl("e", &["x", "y", "z"]);
+        e.max_accel = Some(value);
+        decls.push(e);
+        assert!(
+            matches!(
+                AxisRegistry::try_new(decls),
+                Err(AxisConfigError::BadLimit {
+                    option: "max_accel",
+                    ..
+                })
+            ),
+            "max_accel {value} must be rejected"
         );
     }
 }

@@ -401,35 +401,20 @@ pub fn extract_raw_path(steps: &[PlanStep]) -> Vec<(f64, f64)> {
 }
 
 fn default_axis_decls() -> Vec<AxisDecl> {
+    let axis = |name: &str, follows: Vec<String>| AxisDecl {
+        name: name.into(),
+        follows,
+        motors: Vec::new(),
+        post_processors: Vec::new(),
+        ratio_ramp_time: None,
+        max_velocity: None,
+        max_accel: None,
+    };
     vec![
-        AxisDecl {
-            name: "x".into(),
-            follows: Vec::new(),
-            motors: Vec::new(),
-            post_processors: Vec::new(),
-            ratio_ramp_time: None,
-        },
-        AxisDecl {
-            name: "y".into(),
-            follows: Vec::new(),
-            motors: Vec::new(),
-            post_processors: Vec::new(),
-            ratio_ramp_time: None,
-        },
-        AxisDecl {
-            name: "z".into(),
-            follows: Vec::new(),
-            motors: Vec::new(),
-            post_processors: Vec::new(),
-            ratio_ramp_time: None,
-        },
-        AxisDecl {
-            name: "e".into(),
-            follows: vec!["x".into(), "y".into(), "z".into()],
-            motors: Vec::new(),
-            post_processors: Vec::new(),
-            ratio_ramp_time: None,
-        },
+        axis("x", Vec::new()),
+        axis("y", Vec::new()),
+        axis("z", Vec::new()),
+        axis("e", vec!["x".into(), "y".into(), "z".into()]),
     ]
 }
 
