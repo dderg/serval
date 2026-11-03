@@ -7,7 +7,6 @@ use geometry::path::lowering::PositionProfile;
 use geometry::{CornerFitConfig, VelocityLimits};
 use trajectory::{AxisChainSet, ClockedMotorSpan, ContinuousSegment};
 
-use crate::classify::build_move;
 use crate::enqueue::enqueue_segment;
 use crate::mcu_config::{McuAxisConfig, McuHardware};
 use crate::pump::{
@@ -19,7 +18,6 @@ use motion_pipeline::{Pipeline, StreamConfig, TrajectoryItem};
 const HARNESS_MCU_ID: u32 = 0;
 const HARNESS_MCU_FREQ_HZ: f64 = 64.0e6;
 const HARNESS_T0_SECS: f64 = 1.0;
-const EXTRUDER_AXIS: usize = 3;
 
 #[must_use]
 pub fn default_stream_config() -> StreamConfig {
@@ -108,120 +106,25 @@ impl SeamReport {
     }
 }
 
-struct PosTracker {
-    pos: [f64; 3],
-    e_pos: f64,
-    feed: f64,
-    absolute: bool,
-    absolute_e: bool,
-    established: bool,
-}
-
-impl PosTracker {
-    fn new() -> Self {
-        Self {
-            pos: [0.0; 3],
-            e_pos: 0.0,
-            feed: 80.0,
-            absolute: true,
-            absolute_e: true,
-            established: false,
-        }
-    }
-
-    fn apply(
-        &mut self,
-        x: Option<f64>,
-        y: Option<f64>,
-        z: Option<f64>,
-        e: Option<f64>,
-        f: Option<f64>,
-    ) -> Option<([f64; 3], f64, f64, f64, f64)> {
-        if let Some(fv) = f {
-            self.feed = fv / 60.0;
-        }
-        let target = if self.absolute {
-            [
-                x.unwrap_or(self.pos[0]),
-                y.unwrap_or(self.pos[1]),
-                z.unwrap_or(self.pos[2]),
-            ]
-        } else {
-            [
-                self.pos[0] + x.unwrap_or(0.0),
-                self.pos[1] + y.unwrap_or(0.0),
-                self.pos[2] + z.unwrap_or(0.0),
-            ]
-        };
-        let e_target = if self.absolute_e {
-            e.unwrap_or(self.e_pos)
-        } else {
-            self.e_pos + e.unwrap_or(0.0)
-        };
-        let d = [
-            target[0] - self.pos[0],
-            target[1] - self.pos[1],
-            target[2] - self.pos[2],
-        ];
-        let de = e_target - self.e_pos;
-        let start = self.pos;
-        self.pos = target;
-        self.e_pos = e_target;
-        if !self.established {
-            self.established = true;
-            return None;
-        }
-        Some((start, d[0], d[1], d[2], de))
-    }
-}
-
+/// The moves the live host submits for `source`, through the shared snapshot
+/// G-code interpreter (`pipeline_snapshot::waypoints::parse_gcode`). Panics
+/// on G-code the snapshot refuses and on a stop at rest, which a move list
+/// cannot carry.
 #[must_use]
 pub fn parse_gcode_to_moves(source: &str, limits: VelocityLimits) -> Vec<Move> {
-    let mut p = PosTracker::new();
-    let mut moves = Vec::new();
-    let mut submitted: u32 = 0;
-    for tok in gcode::lex(source) {
-        let Ok(t) = tok else { continue };
-        let gcode::Token::Command {
-            letter,
-            major,
-            params,
-            ..
-        } = t
-        else {
-            continue;
-        };
-        match (letter, major) {
-            (b'G', 0 | 1) => {
-                let Some((start, dx, dy, dz, de)) =
-                    p.apply(params.x(), params.y(), params.z(), params.e(), params.f())
-                else {
-                    continue;
-                };
-                if dx.abs() < 1e-9 && dy.abs() < 1e-9 && dz.abs() < 1e-9 && de.abs() < 1e-9 {
-                    continue;
-                }
-                match build_move(
-                    start,
-                    [dx, dy, dz],
-                    EXTRUDER_AXIS,
-                    de,
-                    limits,
-                    p.feed,
-                    submitted,
-                ) {
-                    Ok(m) => {
-                        moves.push(m);
-                        submitted += 1;
-                    }
-                    Err(_) => continue,
-                }
-            }
-            (b'G', 90) => p.absolute = true,
-            (b'G', 91) => p.absolute = false,
-            (b'M', 82) => p.absolute_e = true,
-            (b'M', 83) => p.absolute_e = false,
-            _ => {}
+    let waypoints =
+        pipeline_snapshot::waypoints::parse_gcode(source, &pipeline_snapshot::config_base(limits))
+            .unwrap_or_else(|e| panic!("seam harness: {e}"));
+    let steps = pipeline_snapshot::plan_steps(&waypoints, limits)
+        .unwrap_or_else(|e| panic!("seam harness: {e}"));
+    let mut moves = Vec::with_capacity(steps.len());
+    for step in steps {
+        match step {
+            pipeline_snapshot::PlanStep::Move(m) => moves.push(m),
+            pipeline_snapshot::PlanStep::Rest { dwell_s } => panic!(
+                "seam harness: the G-code stops at rest (dwell {dwell_s} s) after move {}; a move list cannot carry it",
+                moves.len()
+            ),
         }
     }
     moves

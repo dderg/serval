@@ -15,7 +15,7 @@ trajectory = { path = "../trajectory" }
 geometry = { path = "../geometry" }
 motion-pipeline = { path = "../motion-pipeline" }
 planner-config = { path = "../planner-config" }
-gcode = { path = "../gcode", optional = true }
+pipeline-snapshot = { path = "../pipeline-snapshot", optional = true }
 nurbs = { path = "../nurbs" }
 runtime-contract = { path = "../runtime-contract" }
 step-shim = { path = "../step-shim" }
@@ -26,7 +26,7 @@ tracing = "0.1"
 thiserror = { workspace = true }
 
 [features]
-test-support = ["gcode"]
+test-support = ["pipeline-snapshot"]
 
 [dev-dependencies]
 motion-pipeline = { path = "../motion-pipeline", features = ["bench-metrics"] }
