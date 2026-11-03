@@ -79,7 +79,7 @@ fn zigzag_into_a_stop(speed_mm_s: f64) -> String {
     let mut gcode = format!("G90\nM83\nG1 X0 Y0 F{:.0}\n", speed_mm_s * 60.0);
     let mut from = (0.0, 0.0);
     for to in points {
-        let length = f64::hypot(to.0 - from.0, to.1 - from.1);
+        let length = libm::hypot(to.0 - from.0, to.1 - from.1);
         gcode += &format!("G1 X{:.5} Y{:.5} E{:.6}\n", to.0, to.1, ratio * length);
         from = to;
     }
