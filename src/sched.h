@@ -46,7 +46,7 @@ void mpu_protect_init(void);
 // Diagnostic ring buffer of the last N dispatched timers. Each entry is
 // recorded BEFORE running the callback, so a crash inside a callback leaves
 // the entry for the offending timer in the ring.
-#define SCHED_DISPATCH_HISTORY_N 6
+#define SCHED_DISPATCH_HISTORY_N 8
 void sched_get_dispatch_history(uint32_t *idx,
                                 uint32_t addrs[SCHED_DISPATCH_HISTORY_N],
                                 uint32_t funcs[SCHED_DISPATCH_HISTORY_N]);
