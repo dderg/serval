@@ -150,6 +150,15 @@ pub enum FitError {
         line_no: u32,
         excess_mm: f64,
     },
+    /// A corner blend would leave a body of its inbound line shorter than
+    /// [`shortest_line_body_mm`] behind the blend before it, and neither a
+    /// blend consuming that body nor one lengthening it to the floor fits the
+    /// corner's deviation and extrusion ramp.
+    LineSliver {
+        line_no: u32,
+        body_mm: f64,
+        shortest_mm: f64,
+    },
 }
 
 /// A solved clothoid-pair corner blend, opaque outside the fitter. The trims
@@ -189,15 +198,35 @@ pub fn arc_candidate_fits(facets: &[Move], config: CornerFitConfig) -> bool {
 /// Classify a line-line junction whose adjoining lengths are partly consumed
 /// by neighboring arc-run easing: `in_reduction` is spent from `m_in`'s length
 /// (a run behind it eased into its head), `out_reduction` from `m_out`'s (a
-/// run ahead eases into its tail).
+/// run ahead eases into its tail). `head_trim` is what the blend before
+/// `m_in` already took from its head, so the blend leaves the body between
+/// them either whole or no shorter than [`shortest_line_body_mm`].
 pub fn plan_junction_reduced(
     m_in: &Move,
     m_out: &Move,
     config: CornerFitConfig,
-    in_reduction: f64,
+    (in_reduction, head_trim): (f64, f64),
     out_reduction: f64,
 ) -> Result<JunctionPlan, FitError> {
-    classify_junction(m_in, m_out, config, in_reduction, out_reduction)
+    classify_junction(
+        m_in,
+        m_out,
+        config,
+        (in_reduction, head_trim),
+        out_reduction,
+    )
+}
+
+/// How long, crossed at the fastest it may be, the shortest line body two
+/// corner blends leave between them lasts. A body briefer than this is a
+/// sliver of their trim budgets, not geometry: shaped, its segment is far
+/// shorter than the span over which an absolute-position track can carry
+/// acceleration, so every follower riding it reads its leaders' acceleration
+/// unresolved.
+const SHORTEST_LINE_BODY_S: f64 = 1e-5;
+
+fn shortest_line_body_mm(m: &Move) -> f64 {
+    m.feedrate_mm_s.min(m.limits.max_velocity_mm_s) * SHORTEST_LINE_BODY_S
 }
 
 /// The cocircularity tolerance the run detector derives from the moves' corner
@@ -219,9 +248,18 @@ pub fn fit_corners(moves: &[Move], config: CornerFitConfig) -> Result<FitOutcome
         });
     }
 
-    let mut plans = Vec::with_capacity(moves.len() - 1);
+    let mut plans: Vec<JunctionPlan> = Vec::with_capacity(moves.len() - 1);
     for pair in moves.windows(2) {
-        plans.push(classify_junction(&pair[0], &pair[1], config, 0.0, 0.0)?);
+        let head_trim = plans
+            .last()
+            .map_or(0.0, |plan| blend_trim(plan, JunctionBlend::trim_out));
+        plans.push(classify_junction(
+            &pair[0],
+            &pair[1],
+            config,
+            (0.0, head_trim),
+            0.0,
+        )?);
     }
 
     let mut out = Vec::new();
@@ -540,7 +578,7 @@ fn classify_junction(
     m_in: &Move,
     m_out: &Move,
     config: CornerFitConfig,
-    in_reduction: f64,
+    (in_reduction, head_trim): (f64, f64),
     out_reduction: f64,
 ) -> Result<JunctionPlan, FitError> {
     let (line_in, line_out) = match (move_ops::line_of(m_in), move_ops::line_of(m_out)) {
@@ -595,26 +633,46 @@ fn classify_junction(
         return Ok(JunctionPlan::Unblended(UnblendReason::NoBudget));
     };
 
-    let (f_in, f_out) = biclothoid_followers(&bi, m_in, m_out, line_in, line_out);
-    let admitted = ramps_admitted(
-        config.ramp_accel_budget_mm_s2,
-        &f_in,
-        &bi.half1,
-        m_in.feedrate_mm_s,
-        m_in.limits,
-    ) && ramps_admitted(
-        config.ramp_accel_budget_mm_s2,
-        &f_out,
-        &bi.half2,
-        m_out.feedrate_mm_s,
-        m_out.limits,
-    );
-    if !admitted {
+    let admitted = |blend: &biclothoid::GeneralBlend| {
+        let (f_in, f_out) = biclothoid_followers(blend, m_in, m_out, line_in, line_out);
+        ramps_admitted(
+            config.ramp_accel_budget_mm_s2,
+            &f_in,
+            &blend.half1,
+            m_in.feedrate_mm_s,
+            m_in.limits,
+        ) && ramps_admitted(
+            config.ramp_accel_budget_mm_s2,
+            &f_out,
+            &blend.half2,
+            m_out.feedrate_mm_s,
+            m_out.limits,
+        )
+    };
+    if !admitted(&bi) {
         return Ok(JunctionPlan::Unblended(
             UnblendReason::ExtrusionRampInfeasible,
         ));
     }
-    Ok(JunctionPlan::Blend(JunctionBlend(bi)))
+    let body = line_in.s_len() - head_trim - bi.trim_in;
+    let shortest_body = shortest_line_body_mm(m_in);
+    if body <= BUDGET_EPS_MM || body >= shortest_body {
+        return Ok(JunctionPlan::Blend(JunctionBlend(bi)));
+    }
+    let closing = [bi.trim_in + body, bi.trim_in + body - shortest_body]
+        .into_iter()
+        .filter(|&trim_in| trim_in > BUDGET_EPS_MM)
+        .find_map(|trim_in| {
+            biclothoid::solve_line_line_trims(vertex, (t_in, t_out), (trim_in, bi.trim_out), delta)
+                .filter(|blend| admitted(blend))
+        });
+    closing
+        .map(|blend| JunctionPlan::Blend(JunctionBlend(blend)))
+        .ok_or(FitError::LineSliver {
+            line_no: m_in.source.start_line,
+            body_mm: body,
+            shortest_mm: shortest_body,
+        })
 }
 
 fn biclothoid_followers(

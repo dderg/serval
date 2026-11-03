@@ -418,9 +418,14 @@ impl FitStage {
         let (Some(m), Some(next)) = (piece_of(&self.decided[0]), piece_of(&self.decided[1])) else {
             unreachable!("caller matched two front pieces")
         };
-        let plan =
-            plan_junction_reduced(m, next, self.corner, self.seam_in_reduction, out_reduction)
-                .unwrap_or_else(|e| panic!("fit_stage: junction plan failed: {e:?}"));
+        let plan = plan_junction_reduced(
+            m,
+            next,
+            self.corner,
+            (self.seam_in_reduction, self.seam_head_trim),
+            out_reduction,
+        )
+        .unwrap_or_else(|e| panic!("fit_stage: junction plan failed: {e:?}"));
         let (trim_end, next_head_trim, blend) = match plan {
             JunctionPlan::Blend(b) => (b.trim_in(), b.trim_out(), Some(b)),
             JunctionPlan::Unblended(_) => (0.0, 0.0, None),
