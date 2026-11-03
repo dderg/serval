@@ -310,3 +310,17 @@ fn general_blend_clamps_to_runway_budget() {
         "trims must respect runway budget"
     );
 }
+
+#[test]
+fn a_corner_whose_halves_fall_below_the_representable_length_stays_sharp() {
+    let vertex = [3.0, -2.0, 0.0];
+    let theta = 3.1332;
+    let (t_in, _, v) = corner_setup(theta);
+    let delta = crate::corner_deviation_from_scv(0.047081100007714954, 33192.99751381838);
+    let blend = solve_line_line(vertex, t_in, v, theta, delta, 1.0).expect("solver ok");
+    assert!(
+        blend.is_none(),
+        "a blend with halves of {:?} mm cannot be walked by the velocity plan",
+        blend.map(|b| b.half1.s_len())
+    );
+}
