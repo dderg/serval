@@ -227,6 +227,18 @@ def run_sample_worker(tree: Path, out: Path) -> None:
             },
         )
     done, _ = read_progress(out)
+    errors = {
+        info["error"] for info in done.values() if info["status"] == "error"
+    }
+    if (
+        done
+        and len(errors) == 1
+        and all(info["status"] == "error" for info in done.values())
+    ):
+        shutil.rmtree(out)
+        raise PendingBaselinesError(
+            f"every case failed the same way, not caching: {errors.pop()}"
+        )
     (out / "meta.json").write_text(json.dumps(done, indent=1))
 
 
