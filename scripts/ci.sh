@@ -20,6 +20,11 @@
 #   cargo install cargo-deny                     # optional
 set -uo pipefail
 
+# A CARGO_TARGET_DIR leaked from another task's shell would send every build
+# and cached engine into someone else's directory. Gates use the worktree's
+# own rust/target unless the caller opts in (integrate_stack.py does).
+[ -n "${CI_KEEP_CARGO_TARGET_DIR:-}" ] || unset CARGO_TARGET_DIR
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST="$ROOT/rust"
 LOG_DIR="$ROOT/.ci-logs"
