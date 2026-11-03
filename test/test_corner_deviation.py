@@ -40,8 +40,13 @@ def test_both_corner_keys_is_a_config_error():
         )
 
 
-def test_neither_key_defaults_to_converted_default_scv():
-    assert corner_deviation() == pytest.approx(
+@pytest.mark.parametrize("max_accel", [1000.0, 3000.0, 70000.0])
+def test_neither_key_defaults_to_corner_deviation_0_04(max_accel):
+    assert cartesian_limits(max_accel=max_accel)[5] == 0.04
+
+
+def test_explicit_legacy_scv_5_keeps_its_converted_budget():
+    assert corner_deviation("square_corner_velocity: 5\n") == pytest.approx(
         motion_setup.corner_deviation_from_scv(5.0, 3000.0)
     )
 

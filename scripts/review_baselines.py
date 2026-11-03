@@ -69,7 +69,6 @@ import pending_baselines as pending
 
 ROOT = pending.ROOT
 AUDIT_DIR = pending.CACHE / "audit"
-AUDIT_TARGET_DIR = pending.CACHE / "target-audit"
 SEAM_WINDOW_S = 2e-3
 LIMIT_SLACK = 1e-9
 SHAPED_LIMIT_SLACK = 1e-6
@@ -436,7 +435,10 @@ def fit_audit(sha: str) -> dict | None:
                 "every_accepted_fit_piece_holds_the_fit_tolerance_against_the_exact_signal",
             ],
             cwd=tree / "rust",
-            env={**os.environ, "CARGO_TARGET_DIR": str(AUDIT_TARGET_DIR)},
+            env={
+                **os.environ,
+                "CARGO_TARGET_DIR": str(pending.target_dir_for(tree, "audit")),
+            },
             capture_output=True,
             text=True,
         )
