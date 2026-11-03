@@ -1,7 +1,7 @@
 #[test]
 #[cfg(all(feature = "host", feature = "header-runtime"))]
 fn runtime_header_generates_successfully() {
-    let crate_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let crate_dir = source_tree::manifest_dir();
     let config = cbindgen::Config::from_file(crate_dir.join("cbindgen-runtime.toml"))
         .expect("cbindgen-runtime config");
     cbindgen::Builder::new()

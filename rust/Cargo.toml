@@ -24,6 +24,7 @@ members = [
     "shaper-ident",
     "step-shim",
     "checked-cast",
+    "source-tree",
 ]
 exclude = ["gcode/fuzz", "snapshot-viewer", "motion-playground"]
 resolver = "2"

@@ -3,12 +3,9 @@
 //! same way, and each segment's extrusion starts on the span table boundary
 //! its predecessor ended on instead of a sliver past it.
 
-use motion_pipeline::{Pipeline, StreamConfig, TrajectoryItem};
+use motion_pipeline::{Pipeline, TrajectoryItem, live_config};
 use pipeline_snapshot::waypoints::parse_gcode;
-use pipeline_snapshot::{
-    AxisDecl, PostProcessorDecl, SNAPSHOT_MAX_BUFFER_MOVES, TRAJECTORY_FIT_TOL_ACCEL_MM_S2,
-    TRAJECTORY_FIT_TOL_MM, VELOCITY_INTEGRATION_TOL, plan_steps,
-};
+use pipeline_snapshot::{AxisDecl, CartesianLimits, PlannerConfig, PostProcessorDecl, plan_steps};
 use trajectory::ContinuousSegment;
 
 const MAX_VELOCITY: f64 = 1000.0;
@@ -37,10 +34,7 @@ fn shaper(name: &str, ty: &str, frequency_hz: f64) -> PostProcessorDecl {
 }
 
 fn dense_top_layer_lines(count: usize) -> String {
-    let path = format!(
-        "{}/../../tools/sim/gcode/voron_dense_top_layers.gcode",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = source_tree::repo_file("tools/sim/gcode/voron_dense_top_layers.gcode");
     let text = std::fs::read_to_string(path).expect("read dense top layer gcode");
     text.lines().take(count).collect::<Vec<_>>().join("\n")
 }
@@ -56,19 +50,13 @@ fn plan_from(stream_start_s: f64) -> Vec<ContinuousSegment> {
         ),
     )
     .expect("parse");
-    let limits = geometry::VelocityLimits::try_new(MAX_VELOCITY, MAX_ACCEL, 0.21, f64::INFINITY)
-        .expect("limits");
-    let steps = plan_steps(&waypoints, limits).expect("steps");
-    let config = StreamConfig {
-        corner: geometry::CornerFitConfig::default(),
-        integration_tol: VELOCITY_INTEGRATION_TOL,
-        max_extrude_only_velocity_mm_s: f64::INFINITY,
-        max_extrude_only_accel_mm_s2: f64::INFINITY,
-        fit_tol_mm: TRAJECTORY_FIT_TOL_MM,
-        fit_tol_accel_mm_s2: TRAJECTORY_FIT_TOL_ACCEL_MM_S2,
-        max_buffer_moves: SNAPSHOT_MAX_BUFFER_MOVES,
-        limits,
+    let planner = PlannerConfig {
+        cartesian: CartesianLimits::without_z_caps(MAX_VELOCITY, MAX_ACCEL, f64::INFINITY, 0.21),
+        ..PlannerConfig::default()
     };
+    let limits = live_config::move_limits(&planner).expect("limits");
+    let steps = plan_steps(&waypoints, limits).expect("steps");
+    let config = live_config::stream_config(&planner).expect("stream config");
     let registry = planner_config::AxisRegistry::try_new(vec![
         axis("x", &[], &["shaper_x"]),
         axis("y", &[], &["shaper_y"]),
@@ -128,7 +116,7 @@ fn a_layer_extrudes_the_same_eighteen_hours_into_the_stream() {
         }
     }
     assert!(
-        worst.0 <= TRAJECTORY_FIT_TOL_MM,
+        worst.0 <= PlannerConfig::default().fit_tolerance_mm,
         "e differs by {} mm at t={} once the stream starts {EIGHTEEN_HOURS_S} s later",
         worst.0,
         worst.1

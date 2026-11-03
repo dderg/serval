@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use pipeline_snapshot::waypoints::parse_gcode;
 use pipeline_snapshot::{Snapshot, SnapshotParams, pipeline_snapshot};
@@ -7,7 +7,7 @@ use planner_config::from_doc::read_motion_settings;
 const SEAM_VELOCITY_ROUNDING_PER_SPEED: f64 = 1e-9;
 
 fn post_processor_cases() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../snapshots/cases/post_processor")
+    source_tree::repo_file("snapshots/cases/post_processor")
 }
 
 fn mode_inverse_snapshot(gcode_name: &str) -> (Snapshot, f64) {
