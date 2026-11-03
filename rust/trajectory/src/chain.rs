@@ -380,12 +380,13 @@ pub struct AxisChainSet {
     pub followers: Vec<(usize, Vec<usize>)>,
 }
 
-/// Why a projected follower's advance needs a smoothing kernel in its
-/// chain, shared by every place that refuses one.
+/// Why a projected follower's advance needs a smoothing kernel or a ratio
+/// ramp in its chain, shared by every place that refuses one.
 pub const FOLLOWER_TRANSFORM_WITHOUT_KERNEL: &str = "an advance turns every \
     extrusion-ratio change taken at speed — travel to extrusion, a flow change, a wipe — \
     into an instant position step the motor cannot make, so nearly any print would abort \
-    mid-way. Add a smoothing kernel (e.g. smooth_triangle) to the axis post_processors";
+    mid-way. Add a smoothing kernel (e.g. smooth_triangle) to the axis post_processors, or \
+    set ratio_ramp_time on the axis to spread those changes over the path instead";
 
 impl AxisChainSet {
     #[must_use]

@@ -21,7 +21,7 @@ motors: extruder_motor
 post_processors: extruder_pa, extruder_smoothing
 ```
 
-The smoothing kernel is required: on an axis that follows others, an advance with no smoothing kernel in its chain is rejected at config load, because it would turn every extrusion-ratio change taken at speed into an instant extruder step. Keep it short; see [Evaluating an extruder chain](../README.md#evaluating-an-extruder-chain).
+On an axis that follows others, an advance needs either a smoothing kernel in its chain or a `ratio_ramp_time` on the axis; with neither it is rejected at config load, because it would turn every extrusion-ratio change taken at speed into an instant extruder step. The kernel blurs every change of the extruder's motion over its width, corners included; the ratio ramp spreads only the extrusion-ratio steps over the path and leaves the advance unblurred (see `ratio_ramp_time` in the [Motion configuration reference](Config_Reference_Motion.md)). Keep a kernel short; see [Evaluating an extruder chain](../README.md#evaluating-an-extruder-chain).
 
 `recipr_pressure_advance` accepts the same three parameters and may be used instead of `tanh_pressure_advance`. Do not attach both nonlinear models, or a nonlinear and linear pressure-advance processor, to the same axis.
 

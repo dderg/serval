@@ -4600,7 +4600,7 @@ fn assert_followable(chains: &AxisChainSet) {
     if let Some(axis) = chains.kernel_free_follower_transform() {
         panic!(
             "shaper: axis {axis} follows other axes and its chain advances it with no \
-             smoothing kernel: {}",
+             smoothing kernel and no ratio ramp: {}",
             trajectory::FOLLOWER_TRANSFORM_WITHOUT_KERNEL
         );
     }
