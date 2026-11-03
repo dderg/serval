@@ -222,7 +222,7 @@ fn integrate_rail_arc_recomputing_step_ends(
     law: &ScalarLaw,
     v0: f64,
     ds: f64,
-) -> Option<Arc<[RailKnot]>> {
+) -> Option<Arc<Vec<RailKnot>>> {
     if ds <= 0.0 {
         let knot = RailKnot {
             t: 0.0,
@@ -230,7 +230,7 @@ fn integrate_rail_arc_recomputing_step_ends(
             v: v0,
             rise: 0.0,
         };
-        return Some(Arc::from(vec![knot, knot]));
+        return Some(Arc::new(vec![knot, knot]));
     }
     let n = ((ds / RAIL_KNOT_DS).ceil() as usize).clamp(RAIL_KNOTS_MIN, RAIL_KNOTS_MAX);
     let apex_start = {
@@ -292,7 +292,7 @@ fn integrate_rail_arc_recomputing_step_ends(
             rise,
         });
     }
-    Some(Arc::from(knots))
+    Some(Arc::new(knots))
 }
 
 fn rail_laws() -> Vec<ScalarLaw> {
@@ -319,7 +319,7 @@ fn rail_laws() -> Vec<ScalarLaw> {
 }
 
 fn assert_carrying_matches_recomputing(law: &ScalarLaw, v0: f64, ds: f64) {
-    let bits = |knots: &Option<Arc<[RailKnot]>>| {
+    let bits = |knots: &Option<Arc<Vec<RailKnot>>>| {
         knots.as_ref().map(|knots| {
             knots
                 .iter()

@@ -53,7 +53,7 @@ pub struct LawSegment {
     pub s0: f64,
     pub v0: f64,
     pub law: ScalarLaw,
-    dense: OnceLock<Arc<[RailKnot]>>,
+    dense: OnceLock<Arc<Vec<RailKnot>>>,
 }
 
 impl PartialEq for LawSegment {
@@ -519,7 +519,7 @@ impl LawSegment {
             law: self.law,
             dense: OnceLock::new(),
         };
-        let _ = seg.dense.set(Arc::from(cut));
+        let _ = seg.dense.set(Arc::new(cut));
         seg
     }
 
@@ -615,7 +615,7 @@ impl LawSegment {
         times
     }
 
-    fn rail_knots(&self) -> &Arc<[RailKnot]> {
+    fn rail_knots(&self) -> &Arc<Vec<RailKnot>> {
         self.dense
             .get()
             .expect("a DiskRail segment always carries its dense solution")
@@ -656,7 +656,7 @@ fn flipped_rail(rev: &[RailKnot], t0: f64, s0: f64, law: ScalarLaw, ds: f64) -> 
         law,
         dense: OnceLock::new(),
     };
-    let _ = seg.dense.set(Arc::from(knots));
+    let _ = seg.dense.set(Arc::new(knots));
     (seg, v0)
 }
 
@@ -710,7 +710,7 @@ const RAIL_KNOT_DS: f64 = 2.5e-4;
 /// covers exactly the pair's arc, so the knot times, the interpolated
 /// velocity and the interpolated arc describe one motion. `None` when the
 /// speed folds to rest strictly inside the span.
-fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<[RailKnot]>> {
+fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<Vec<RailKnot>>> {
     if ds <= 0.0 {
         let knot = RailKnot {
             t: 0.0,
@@ -718,7 +718,7 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<[RailKnot
             v: v0,
             rise: 0.0,
         };
-        return Some(Arc::from(vec![knot, knot]));
+        return Some(Arc::new(vec![knot, knot]));
     }
     let n = ((ds / RAIL_KNOT_DS).ceil() as usize).clamp(RAIL_KNOTS_MIN, RAIL_KNOTS_MAX);
     // Near an apex the rail acceleration vanishes and w(s) leaves the cap as
@@ -823,7 +823,7 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<[RailKnot
             ..step.hi
         });
     }
-    Some(Arc::from(knots))
+    Some(Arc::new(knots))
 }
 
 /// One completed integrator step: the state it reached and the knot it laid.
