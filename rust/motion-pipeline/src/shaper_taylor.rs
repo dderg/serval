@@ -1,0 +1,446 @@
+//! Taylor models: rigorous polynomial enclosures of signals that are not
+//! polynomial between their breaks.
+//!
+//! A model of a function `f` on a window `[center − radius, center + radius]`
+//! is a polynomial `P(x) = Σ cₖ xᵏ` in `x = (t − center) / radius` and a bound
+//! `rad` with `|f − P(x)| ≤ rad` for every `|x| ≤ 1`, `P` evaluated exactly.
+//! Every operation models the exact result of the operation on the modelled
+//! functions, so a signal built from them — a polynomial track through an
+//! advance law, a path's speed, an arc's cosine — is enclosed by the formula
+//! its evaluator computes, and the hull proves a fitted piece against the
+//! enclosure as it proves one against an exact polynomial.
+//!
+//! # The bound
+//!
+//! An operation's `rad` gathers the operands' bounds as they propagate
+//! (`‖a‖·rad_b` for a product, `‖a‖ = Σ|aₖ|` bounding `|P_a|` on `|x| ≤ 1`),
+//! the coefficients' rounding (one float operation errs by at most
+//! `u = 2⁻⁵³` of its result, a coefficient summed from `n` products by
+//! `γ_{2n}` of its terms' magnitudes), the terms of a product past
+//! [`TAYLOR_LEN`] (`|x|ᵏ ≤ 1`, so bounded by their magnitudes), and the
+//! Lagrange remainder of an elementary function's series. The bounds are
+//! themselves sums and products of non-negative floats, each computed by
+//! fewer than 2¹² operations, so they err by less than 2⁻⁴⁰ of themselves;
+//! [`upper`] inflates them by that, and by the smallest normal float
+//! against underflow.
+
+use super::exact::{EXACT_CAPACITY, ExactPiece, ExactRounding, LocalPolynomial};
+
+/// Coefficients a model keeps; a product's higher terms join its bound.
+pub(crate) const TAYLOR_LEN: usize = 18;
+
+const _: () = assert!(TAYLOR_LEN <= EXACT_CAPACITY);
+
+const UNIT_ROUNDING: f64 = f64::EPSILON / 2.0;
+const BOUND_ROUNDING: f64 = 1.0 / (1_u64 << 40) as f64;
+
+/// Every libm elementary function the models read lands within this many
+/// ulps of its exact value (musl documents under one for `sin`/`cos` and
+/// under three for `tanh`).
+const LIBM_ULPS: f64 = 4.0;
+
+/// Disk radii around a real point the tanh remainder is tried at.
+/// `|tanh(x + iy)|² = (cosh 2x − c)/(cosh 2x + c)` with `c = cos 2y`: for
+/// `c ≥ 0` it is below one, for `c < 0` it falls with `x` from `tan² y`, so
+/// on the disk of radius `ρ < π/2` about any real point `|tanh| ≤ max(1,
+/// tan ρ)`, and by Cauchy's estimate `|tanh⁽ⁿ⁾/n!| ≤ max(1, tan ρ)·ρ⁻ⁿ` on
+/// the real line.
+const TANH_DISK_RADII: [f64; 6] = [0.785, 1.0, 1.2, 1.35, 1.45, 1.52];
+
+/// How many times a window whose models miss their accuracy is halved.
+pub(crate) const ENCLOSURE_MAX_DEPTH: u32 = 12;
+
+pub(crate) fn upper(bound: f64) -> f64 {
+    bound * (1.0 + BOUND_ROUNDING) + f64::MIN_POSITIVE
+}
+
+fn lower(bound: f64) -> f64 {
+    bound * (1.0 - BOUND_ROUNDING) - f64::MIN_POSITIVE
+}
+
+/// A real number as a float and a bound on its distance from it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Ball {
+    pub mid: f64,
+    pub rad: f64,
+}
+
+impl Ball {
+    pub(crate) const fn exact(value: f64) -> Self {
+        Self {
+            mid: value,
+            rad: 0.0,
+        }
+    }
+
+    /// A float that `roundings` multiplications and divisions of exact
+    /// data produced: within `γ_n` of its own magnitude.
+    pub(crate) fn rounded(value: f64, roundings: usize) -> Self {
+        Self {
+            mid: value,
+            rad: upper(ExactRounding::gamma(roundings) * value.abs()),
+        }
+    }
+
+    fn libm(value: f64) -> Self {
+        Self {
+            mid: value,
+            rad: upper(LIBM_ULPS * f64::EPSILON * value.abs()),
+        }
+    }
+
+    pub(crate) fn add(self, other: Self) -> Self {
+        let mid = self.mid + other.mid;
+        Self {
+            mid,
+            rad: upper(self.rad + other.rad + UNIT_ROUNDING * mid.abs()),
+        }
+    }
+
+    pub(crate) fn mul(self, other: Self) -> Self {
+        let mid = self.mid * other.mid;
+        Self {
+            mid,
+            rad: upper(
+                self.mid.abs() * other.rad
+                    + self.rad * other.mid.abs()
+                    + self.rad * other.rad
+                    + UNIT_ROUNDING * mid.abs(),
+            ),
+        }
+    }
+
+    pub(crate) fn neg(self) -> Self {
+        Self {
+            mid: -self.mid,
+            rad: self.rad,
+        }
+    }
+
+    fn div_by_integer(self, divisor: usize) -> Self {
+        let divisor = divisor as f64;
+        let mid = self.mid / divisor;
+        Self {
+            mid,
+            rad: upper(self.rad / divisor + UNIT_ROUNDING * mid.abs()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TaylorModel {
+    coefficients: [f64; TAYLOR_LEN],
+    len: usize,
+    rad: f64,
+}
+
+impl TaylorModel {
+    pub(crate) const UNBOUNDED: Self = Self {
+        coefficients: [0.0; TAYLOR_LEN],
+        len: 0,
+        rad: f64::INFINITY,
+    };
+
+    pub(crate) fn constant(value: Ball) -> Self {
+        let mut coefficients = [0.0; TAYLOR_LEN];
+        coefficients[0] = value.mid;
+        Self {
+            coefficients,
+            len: 1,
+            rad: value.rad,
+        }
+    }
+
+    /// `offset + slope·x`, `slope` exact.
+    pub(crate) fn affine(offset: Ball, slope: f64) -> Self {
+        let mut coefficients = [0.0; TAYLOR_LEN];
+        coefficients[0] = offset.mid;
+        coefficients[1] = slope;
+        Self {
+            coefficients,
+            len: 2,
+            rad: offset.rad,
+        }
+    }
+
+    pub(crate) fn rad(&self) -> f64 {
+        self.rad
+    }
+
+    pub(crate) fn coefficients(&self) -> &[f64] {
+        &self.coefficients[..self.len]
+    }
+
+    /// Loosens the bound by `extra`, what the model's formula is known to
+    /// miss the modelled function by.
+    pub(crate) fn widen(&mut self, extra: f64) {
+        self.rad = upper(self.rad + extra);
+    }
+
+    fn magnitude(&self) -> f64 {
+        self.coefficients().iter().map(|c| c.abs()).sum()
+    }
+
+    /// An upper bound on `|f|` over the window.
+    pub(crate) fn bound(&self) -> f64 {
+        upper(self.magnitude() + self.rad)
+    }
+
+    /// The constant term and an upper bound on how far `f` strays from it.
+    pub(crate) fn spread(&self) -> (f64, f64) {
+        let centre = self.coefficients.first().copied().unwrap_or(0.0);
+        let others: f64 = self.coefficients().iter().skip(1).map(|c| c.abs()).sum();
+        (centre, upper(others + self.rad))
+    }
+
+    fn combined(&self, other: &Self, sign: f64) -> Self {
+        let len = self.len.max(other.len);
+        let mut coefficients = [0.0; TAYLOR_LEN];
+        let mut rounding = 0.0;
+        for (power, slot) in coefficients.iter_mut().enumerate().take(len) {
+            *slot = self.coefficients[power] + sign * other.coefficients[power];
+            rounding += slot.abs();
+        }
+        Self {
+            coefficients,
+            len,
+            rad: upper(self.rad + other.rad + UNIT_ROUNDING * rounding),
+        }
+    }
+
+    pub(crate) fn add(&self, other: &Self) -> Self {
+        self.combined(other, 1.0)
+    }
+
+    pub(crate) fn sub(&self, other: &Self) -> Self {
+        self.combined(other, -1.0)
+    }
+
+    pub(crate) fn add_ball(&self, value: Ball) -> Self {
+        let mut out = *self;
+        if out.len == 0 {
+            out.len = 1;
+        }
+        out.coefficients[0] += value.mid;
+        out.rad = upper(self.rad + value.rad + UNIT_ROUNDING * out.coefficients[0].abs());
+        out
+    }
+
+    pub(crate) fn scale(&self, factor: Ball) -> Self {
+        let mut out = *self;
+        let mut rounding = 0.0;
+        for coefficient in &mut out.coefficients[..out.len] {
+            *coefficient *= factor.mid;
+            rounding += coefficient.abs();
+        }
+        out.rad = upper(
+            factor.mid.abs() * self.rad
+                + factor.rad * (self.magnitude() + self.rad)
+                + UNIT_ROUNDING * rounding,
+        );
+        out
+    }
+
+    pub(crate) fn mul(&self, other: &Self) -> Self {
+        let mut coefficients = [0.0; TAYLOR_LEN];
+        let mut truncated = 0.0;
+        for (i, &a) in self.coefficients().iter().enumerate() {
+            for (j, &b) in other.coefficients().iter().enumerate() {
+                let term = a * b;
+                if i + j < TAYLOR_LEN {
+                    coefficients[i + j] += term;
+                } else {
+                    truncated += term.abs();
+                }
+            }
+        }
+        let len = (self.len + other.len).saturating_sub(1).min(TAYLOR_LEN);
+        let (a_magnitude, b_magnitude) = (self.magnitude(), other.magnitude());
+        Self {
+            coefficients,
+            len,
+            rad: upper(
+                a_magnitude * other.rad
+                    + self.rad * b_magnitude
+                    + self.rad * other.rad
+                    + truncated
+                    + ExactRounding::gamma(2 * TAYLOR_LEN) * a_magnitude * b_magnitude,
+            ),
+        }
+    }
+
+    /// `f(self)` for an `f` with `f(c₀ + d) = Σₖ seriesₖ·dᵏ + R` on the
+    /// model's range, `|R| ≤ remainder_per_power·|d|ⁿ`, `n = series.len()`.
+    fn compose(&self, series: &[Ball], remainder_per_power: f64) -> Self {
+        let mut deviation = *self;
+        deviation.coefficients[0] = 0.0;
+        let reach = deviation.bound();
+        let (last, rest) = series.split_last().expect("a series has terms");
+        let mut out = Self::constant(*last);
+        for &term in rest.iter().rev() {
+            out = out.mul(&deviation).add_ball(term);
+        }
+        let powers = i32::try_from(series.len()).expect("a series is short");
+        out.rad = upper(out.rad + remainder_per_power * reach.powi(powers));
+        out
+    }
+
+    pub(crate) fn tanh(&self) -> Self {
+        let mut series = [Ball::exact(0.0); TAYLOR_LEN];
+        series[0] = Ball::libm(libm::tanh(self.coefficients[0]));
+        series[1] = Ball::exact(1.0).add(series[0].mul(series[0]).neg());
+        for k in 1..TAYLOR_LEN - 1 {
+            let square = (0..=k).fold(Ball::exact(0.0), |sum, i| {
+                sum.add(series[i].mul(series[k - i]))
+            });
+            series[k + 1] = square.neg().div_by_integer(k + 1);
+        }
+        let remainder = TANH_DISK_RADII
+            .iter()
+            .map(|&radius| {
+                let disk_bound =
+                    upper(libm::tan(radius) * (1.0 + LIBM_ULPS * f64::EPSILON)).max(1.0);
+                upper(disk_bound / lower(radius.powi(TAYLOR_LEN as i32)))
+            })
+            .fold(f64::INFINITY, f64::min);
+        self.compose(&series, remainder)
+    }
+
+    /// `1/f`, or `None` when the model's range reaches zero.
+    pub(crate) fn reciprocal(&self) -> Option<Self> {
+        let (centre, spread) = self.spread();
+        let floor = lower(centre.abs() - spread);
+        if floor.is_nan() || floor <= 0.0 {
+            return None;
+        }
+        let first = Ball::rounded(1.0 / centre, 1);
+        let mut series = [first; TAYLOR_LEN];
+        for k in 1..TAYLOR_LEN {
+            series[k] = series[k - 1].mul(first.neg());
+        }
+        let remainder = upper(1.0 / floor.powi(TAYLOR_LEN as i32 + 1));
+        Some(self.compose(&series, remainder))
+    }
+
+    pub(crate) fn local_polynomial(&self) -> LocalPolynomial {
+        let mut coefficients = [0.0; EXACT_CAPACITY];
+        coefficients[..self.len].copy_from_slice(self.coefficients());
+        LocalPolynomial {
+            coefficients,
+            len: self.len,
+            rounding: self.rad,
+        }
+    }
+}
+
+/// The sub-interval a model is built on, and its local variable's map.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Window {
+    pub lo: f64,
+    pub hi: f64,
+    pub center: f64,
+    pub radius: f64,
+}
+
+impl Window {
+    pub(crate) fn new(lo: f64, hi: f64) -> Self {
+        let center = 0.5 * lo + 0.5 * hi;
+        Self {
+            lo,
+            hi,
+            center,
+            radius: upper((hi - center).max(center - lo)),
+        }
+    }
+
+    /// `t − origin` on the window.
+    pub(crate) fn time_since(&self, origin: f64) -> TaylorModel {
+        TaylorModel::affine(Ball::rounded(self.center - origin, 1), self.radius)
+    }
+
+    pub(crate) fn reaches(&self, t: f64, slack: f64) -> bool {
+        self.lo - slack <= t && t <= self.hi + slack
+    }
+
+    fn piece(&self, models: &[TaylorModel; 3]) -> ExactPiece {
+        ExactPiece {
+            lo: self.lo,
+            hi: self.hi,
+            center: self.center,
+            radius: self.radius,
+            pva: models.map(|model| model.local_polynomial()),
+        }
+    }
+}
+
+/// The `order`-th derivative of `Σ cₖ τᵏ` for the model `tau` of `τ`, its
+/// falling-factorial scaled coefficients rounded once each.
+pub(crate) fn derivative_of(coefficients: &[f64], order: usize, tau: &TaylorModel) -> TaylorModel {
+    polynomial_of_balls(
+        coefficients
+            .iter()
+            .enumerate()
+            .skip(order)
+            .map(|(power, &c)| {
+                if order == 0 {
+                    return Ball::exact(c);
+                }
+                let falling = ((power + 1 - order)..=power).fold(1.0, |acc, k| acc * k as f64);
+                Ball::rounded(c * falling, 1)
+            }),
+        tau,
+    )
+}
+
+fn polynomial_of_balls(
+    coefficients: impl DoubleEndedIterator<Item = Ball>,
+    tau: &TaylorModel,
+) -> TaylorModel {
+    coefficients
+        .rev()
+        .fold(None, |acc: Option<TaylorModel>, c| {
+            Some(match acc {
+                None => TaylorModel::constant(c),
+                Some(acc) => acc.mul(tau).add_ball(c),
+            })
+        })
+        .unwrap_or_else(|| TaylorModel::constant(Ball::exact(0.0)))
+}
+
+/// Encloses a signal over `[lo, hi]`: the window's models, halved until
+/// every order's bound is within its `accuracy` or the halving depth runs
+/// out, where the closest models stand and the hull decides.
+pub(crate) fn enclose(
+    (lo, hi): (f64, f64),
+    accuracy: [f64; 3],
+    model: &impl Fn(Window) -> [TaylorModel; 3],
+    out: &mut Vec<ExactPiece>,
+) {
+    enclose_to_depth((lo, hi), accuracy, model, 0, out);
+}
+
+fn enclose_to_depth(
+    (lo, hi): (f64, f64),
+    accuracy: [f64; 3],
+    model: &impl Fn(Window) -> [TaylorModel; 3],
+    depth: u32,
+    out: &mut Vec<ExactPiece>,
+) {
+    let window = Window::new(lo, hi);
+    let models = model(window);
+    let resolved = models
+        .iter()
+        .zip(accuracy)
+        .all(|(model, accuracy)| model.rad() <= accuracy);
+    let middle = window.center;
+    if resolved || depth == ENCLOSURE_MAX_DEPTH || middle <= lo || middle >= hi {
+        out.push(window.piece(&models));
+        return;
+    }
+    enclose_to_depth((lo, middle), accuracy, model, depth + 1, out);
+    enclose_to_depth((middle, hi), accuracy, model, depth + 1, out);
+}
+
+#[cfg(test)]
+#[path = "shaper_taylor_tests.rs"]
+mod tests;
