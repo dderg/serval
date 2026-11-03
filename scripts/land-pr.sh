@@ -140,8 +140,18 @@ finish() {
         local safe
         safe="$(main_worktree)"
         cd "$safe"
-        git worktree remove "$tree" \
-            || echo "land-pr: $tree has uncommitted or untracked files and was kept; remove it with 'git worktree remove --force $tree' when done" >&2
+        case "$(basename "$tree")" in
+            serval-pool-*)
+                git -C "$tree" switch -q --detach origin/main \
+                    && git branch -D "$branch" >/dev/null \
+                    && echo "land-pr: $tree is idle again (warm target kept; scripts/wt.sh new reuses it)" \
+                    || echo "land-pr: $tree has uncommitted changes and stays on $branch" >&2
+                ;;
+            *)
+                git worktree remove "$tree" \
+                    || echo "land-pr: $tree has uncommitted or untracked files and was kept; remove it with 'git worktree remove --force $tree' when done" >&2
+                ;;
+        esac
     elif [ -n "$tree" ]; then
         echo "+ git worktree remove $tree"
     fi

@@ -180,11 +180,7 @@ struct TimedSeam {
 /// `h` blends neighbouring envelope values by a smootherstep (flat to
 /// second order at each node, so `h` is C2), or rises off a rest node as
 /// `ψ`, linearly at first: a window shrinks to nothing at a rest at most as
-/// fast as the distance to it, so it never reaches across. A node within
-/// [`REST_TARGET_MM`] of a rest node — a sample the leaders take as they
-/// settle onto the rest — rests too: a moving node's flat blend into an
-/// envelope of a rounding's width would close the window long before the
-/// rest.
+/// fast as the distance to it, so it never reaches across.
 ///
 /// `|h'| ≤ WIDTH_SLOPE_BOUND < 1` everywhere, which keeps the smoothed
 /// ratio a convex combination of the table's (see [`RatioSmoothing`]).
@@ -376,6 +372,11 @@ impl WidthField {
         self.push(s, 0.0);
     }
 
+    /// A node within [`REST_TARGET_MM`] past the last one stacks on it: the
+    /// leaders cover no more between them than the fit's back-and-forth
+    /// around a rest, and a node a rounding short of a rest would take the
+    /// rest's cone as a sliver of an envelope that the smootherstep
+    /// flattens onto, narrowing every window short of the rest to as much.
     fn push(&mut self, s: f64, target: f64) {
         let s = self.nodes.last().map_or(s, |last| {
             assert!(
@@ -383,7 +384,11 @@ impl WidthField {
                 "a ratio ramp width node at {s} mm falls behind the last one at {} mm",
                 last.s
             );
-            s.max(last.s)
+            if s <= last.s + REST_TARGET_MM {
+                last.s
+            } else {
+                s
+            }
         });
         self.nodes.push(WidthNode {
             s,
@@ -394,10 +399,7 @@ impl WidthField {
     }
 
     fn cone(&self, from: usize, to: usize) -> f64 {
-        cone_width(
-            self.nodes[from].envelope,
-            (self.nodes[to].s - self.nodes[from].s).abs(),
-        )
+        self.nodes[from].envelope + ENVELOPE_SLOPE * (self.nodes[to].s - self.nodes[from].s).abs()
     }
 
     fn settle(&mut self, index: usize) {
@@ -424,7 +426,7 @@ impl WidthField {
             || self.nodes.last().map_or(node.s, |last| last.s),
             Candidate::s,
         );
-        node.envelope <= cone_width(0.0, frontier - node.s)
+        node.envelope <= ENVELOPE_SLOPE * (frontier - node.s)
     }
 
     /// The width is final up to the last node of the final prefix.
@@ -523,17 +525,6 @@ impl WidthField {
             .min(self.final_prefix.saturating_sub(1));
         self.nodes.drain(..keep);
         self.final_prefix -= keep;
-    }
-}
-
-/// The widest envelope `distance` from a node of `envelope` allows: the
-/// node's cone, closed to the rest itself within [`REST_TARGET_MM`] of a
-/// rest node.
-fn cone_width(envelope: f64, distance: f64) -> f64 {
-    if envelope == 0.0 && distance <= REST_TARGET_MM {
-        0.0
-    } else {
-        envelope + ENVELOPE_SLOPE * distance
     }
 }
 
