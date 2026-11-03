@@ -132,6 +132,7 @@ fn kernel_advance(stage: &trajectory::ChainStage) -> super::LeadingAdvance<'_> {
     super::LeadingAdvance {
         stage,
         smoothing: super::AdvanceSmoothing::Kernel,
+        instantaneous_corner_velocity: trajectory::DEFAULT_INSTANTANEOUS_CORNER_VELOCITY_MM_S,
     }
 }
 
@@ -520,6 +521,27 @@ fn a_fit_residual_is_welded_onto_the_emitted_state() {
     let pieces = weld.apply(pieces);
     assert!((1.0 + pieces[0].coeffs[0] - emitted.0).abs() <= 1e-15);
     assert!((pieces[0].coeffs[1] - emitted.1).abs() <= 1e-12);
+}
+
+/// Corpus `voron_first_layers` on the fast bench config: a 33 ns segment
+/// whose fitted start sits one ulp of its 274 mm position off the emitted
+/// state. Closing that ulp over 33 ns reads as 307 mm/s² of acceleration —
+/// rounding, not a mismatch the weld should refuse.
+#[test]
+fn a_rounding_residual_welds_over_a_sliver_segment() {
+    let (start, end) = (106.952_914_632_029_94, 106.952_914_665_370_61);
+    let pieces = vec![ramp_piece(start, end, -0.189_501_874_886_035_84)];
+    let emitted = (274.421_090_221_286_93, -0.189_501_874_877_325_78);
+    let weld = super::SeamWeld::spanning(
+        weld_window(start, end),
+        emitted,
+        0.0,
+        274.421_090_221_287,
+        &pieces,
+    )
+    .expect("a one-ulp residual welds over any window");
+    let pieces = weld.apply(pieces);
+    assert_eq!(274.421_090_221_287 + pieces[0].coeffs[0], emitted.0);
 }
 
 fn leader_segment(
@@ -1477,6 +1499,7 @@ fn ramped_advance(stage: &trajectory::ChainStage) -> super::LeadingAdvance<'_> {
     super::LeadingAdvance {
         stage,
         smoothing: super::AdvanceSmoothing::RatioRamp,
+        instantaneous_corner_velocity: trajectory::DEFAULT_INSTANTANEOUS_CORNER_VELOCITY_MM_S,
     }
 }
 
@@ -1513,9 +1536,12 @@ fn a_ratio_ramped_advance_refuses_a_ratio_step_taken_at_speed() {
     );
 }
 
-#[test]
-fn a_ratio_ramped_advance_refuses_a_leader_acceleration_step() {
-    let (t0, seam, t1) = (300.0, 300.01, 300.02);
+const LEADER_STEP_SEAM: f64 = 300.01;
+
+fn project_over_a_leader_acceleration_step(
+    accel_step: f64,
+) -> Result<super::SourceProjection, crate::types::PostProcessError> {
+    let (t0, seam, t1) = (300.0, LEADER_STEP_SEAM, 300.02);
     let x = bezier_pieces_to_nurbs(&[
         BezierPiece {
             u_start: t0,
@@ -1525,7 +1551,7 @@ fn a_ratio_ramped_advance_refuses_a_leader_acceleration_step() {
         BezierPiece {
             u_start: seam,
             u_end: t1,
-            coeffs: vec![1.0, 100.0, 2_500.0],
+            coeffs: vec![1.0, 100.0, 0.5 * accel_step],
         },
     ]);
     let mut shaped = cusp_segment(vec![0.0, 100.0], vec![0.0, 50.0], t0, t1);
@@ -1542,18 +1568,31 @@ fn a_ratio_ramped_advance_refuses_a_leader_acceleration_step() {
         s_length: super::leader_arc_length(&shaped, &[0, 1]),
     };
     let fit_tol = crate::lowering::FitTol::absolute(1e-4, 50.0);
-    let refused =
-        super::fit_source_projection(source, fit_tol, Some(ramped_advance(&RAMPED_ADVANCE_STAGE)));
+    super::fit_source_projection(source, fit_tol, Some(ramped_advance(&RAMPED_ADVANCE_STAGE)))
+}
+
+#[test]
+fn a_ratio_ramped_advance_refuses_a_leader_acceleration_step_beyond_the_allowance() {
+    let refused = project_over_a_leader_acceleration_step(5000.0);
     assert!(
         matches!(
             refused,
             Err(crate::types::PostProcessError::RatioRampedVelocityStep { t, .. })
-                if (t - seam).abs() < 1e-9
+                if (t - LEADER_STEP_SEAM).abs() < 1e-9
         ),
-        "the leader's acceleration jumps by 5000 mm/s² at {seam}, which the advance turns \
-         into a velocity step, got {:?}",
+        "the leader's acceleration jumps by 5000 mm/s² at {LEADER_STEP_SEAM}, which the \
+         advance turns into a 4.5 mm/s velocity step, got {:?}",
         refused.map(|_| ())
     );
+}
+
+#[test]
+fn a_ratio_ramped_advance_takes_a_leader_acceleration_step_within_its_allowance() {
+    let tangent_share = 100.0 / 12_500.0_f64.sqrt();
+    let step = 0.02 * 0.05 * 500.0 * tangent_share;
+    assert!(step > 0.4 && step < trajectory::DEFAULT_INSTANTANEOUS_CORNER_VELOCITY_MM_S);
+    project_over_a_leader_acceleration_step(500.0)
+        .expect("a 0.45 mm/s advance velocity step is within the extruder's allowance");
 }
 
 fn four_axis_segment(
@@ -1710,6 +1749,15 @@ fn a_source_fitted_to_the_advanced_signal_spends_its_position_budget() {
             ("pa", &algos::TanhPressureAdvance, TANH.to_vec()),
             ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
         ]),
+        e_chain(&[
+            ("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE]),
+            ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
+        ]),
+        e_chain(&[
+            ("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE]),
+            ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
+        ])
+        .with_ratio_ramp_time(0.015),
     ] {
         assert_eq!(source_budget(&chain), AccelBudget::PositionEquivalent);
     }
@@ -1722,18 +1770,9 @@ fn a_source_fitted_to_the_plain_projection_keeps_the_absolute_budget() {
         CompiledChain::default().with_ratio_ramp_time(0.015),
         e_chain(&[("st", &algos::SmoothTriangle, vec![SMOOTH_TIME])]),
         e_chain(&[
-            ("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE]),
-            ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
-        ]),
-        e_chain(&[
             ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
             ("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE]),
         ]),
-        e_chain(&[
-            ("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE]),
-            ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
-        ])
-        .with_ratio_ramp_time(0.015),
         e_chain(&[
             ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
             ("pa", &algos::TanhPressureAdvance, TANH.to_vec()),
