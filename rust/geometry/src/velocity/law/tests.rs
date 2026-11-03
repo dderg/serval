@@ -3,7 +3,7 @@ use std::sync::Arc;
 use super::{
     CAP_CONTACT_FRACTION, CapDeparture, FULL_RAIL_KNOTS, LawSegment, RAIL_KNOT_DS, RAIL_KNOTS_MAX,
     RAIL_KNOTS_MIN, RailKnot, SPARE_FULL_RAILS, ScalarLaw, departure_increment,
-    departure_knot_duration, knot_duration,
+    departure_knot_duration, knot_duration, trim_spare_full_rails,
 };
 
 fn rail(v0: f64, accel: f64, kappa0: f64, sigma: f64, brake: bool, ds: f64) -> LawSegment {
@@ -592,7 +592,7 @@ fn knot_bits(seg: &LawSegment) -> Vec<[u64; 4]> {
 
 #[test]
 fn recycled_full_rail_buffers_carry_nothing_into_the_next_rail() {
-    let spare = || SPARE_FULL_RAILS.with_borrow(Vec::len);
+    let spare = || SPARE_FULL_RAILS.with_borrow(|spare| spare.buffers.len());
     let ds = 1.5 * RAIL_KNOTS_MAX as f64 * RAIL_KNOT_DS;
     let first = rail(30.0, 5000.0, 0.05, 0.3, false, ds);
     assert_eq!(first.rail_knots().len(), FULL_RAIL_KNOTS);
@@ -610,6 +610,30 @@ fn recycled_full_rail_buffers_carry_nothing_into_the_next_rail() {
         .join()
         .unwrap();
     assert_eq!(knot_bits(&second), fresh);
+}
+
+#[test]
+fn a_thread_keeps_no_more_spare_full_rails_than_its_last_plan_asked_for() {
+    let spare = || SPARE_FULL_RAILS.with_borrow(|spare| spare.buffers.len());
+    let ds = 1.5 * RAIL_KNOTS_MAX as f64 * RAIL_KNOT_DS;
+    let rails: Vec<LawSegment> = (0..3)
+        .map(|i| rail(30.0 + f64::from(i), 5000.0, 0.05, 0.3, false, ds))
+        .collect();
+    trim_spare_full_rails();
+    for rail in rails {
+        rail.recycle();
+    }
+    assert_eq!(spare(), 3);
+
+    let _next = rail(60.0, 5000.0, 0.05, 0.3, false, ds);
+    trim_spare_full_rails();
+    assert_eq!(
+        spare(),
+        1,
+        "a plan that asked for one full rail keeps one spare"
+    );
+    trim_spare_full_rails();
+    assert_eq!(spare(), 0, "a plan that asked for none keeps none");
 }
 
 /// Steps of the quadratically graded grid near an apex whose `s + h` lands

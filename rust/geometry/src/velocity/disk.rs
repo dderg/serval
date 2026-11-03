@@ -90,12 +90,11 @@ pub(super) fn disk_reach_v_rev(kin: &Kinematics, v_in: f64, s: f64, tol: f64) ->
     disk_reach_v(&kin.reversed(), v_in, s, tol)
 }
 
-/// A member's planned exit speed, with the seam plan's forward rail from its
-/// entry and reversed rail from its exit for the profile to reuse when it
-/// integrates from the same speeds.
+/// A member, with the seam plan's forward rail from its entry and reversed
+/// rail from its exit for the profile to reuse when it integrates from the
+/// same speeds.
 pub(super) struct RunMember<'a> {
     pub kin: &'a Kinematics,
-    pub exit_v: f64,
     pub forward_rail: Option<&'a LawSegment>,
     pub backward_rail: Option<&'a LawSegment>,
 }
