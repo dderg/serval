@@ -2397,8 +2397,12 @@ naming the axis they belong to.</p>
 <td><code>[post_processor &lt;name&gt;] type: smooth_triangle</code>, <code>smooth_time: ...</code>; put its name in the extruder axis chain.</td>
 </tr>
 <tr>
-<td><code>[extruder] max_extrude_cross_section</code>, <code>max_extrude_only_distance</code>, <code>instantaneous_corner_velocity</code></td>
+<td><code>[extruder] max_extrude_cross_section</code>, <code>max_extrude_only_distance</code></td>
 <td><strong>Rejected loudly</strong> — "the planner has no such concept". Delete them.</td>
+</tr>
+<tr>
+<td><code>[extruder] instantaneous_corner_velocity</code></td>
+<td><strong>Rejected with a pointer.</strong> Move it to the extruder's <code>[axis e] instantaneous_corner_velocity</code>; same meaning, same 1 mm/s default.</td>
 </tr>
 <tr>
 <td><code>[extruder] step_pin</code>, <code>dir_pin</code>, <code>rotation_distance</code>, <code>microsteps</code></td>

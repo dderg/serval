@@ -1901,6 +1901,24 @@ are not backwards compatible. It is a good idea to review this
 document when upgrading the Kalico software.</p>
 <p>All dates in this document are approximate.</p>
 <h2 id="changes">Changes<a class="headerlink" href="#changes" title="Permanent link">&para;</a></h2>
+<p>20261103: A follower axis declares what its motor can do:
+<code>[axis e] max_velocity</code> and <code>max_accel</code> cap every extruder motion, pressure
+advance included, and the velocity planner slows extruding moves so the
+commanded extruder velocity and acceleration stay within them. On the
+<code>[extruder]</code> axis each unset one inherits <code>max_extrude_only_velocity</code> /
+<code>max_extrude_only_accel</code>, which now default as in upstream Klipper to the
+printer's <code>max_velocity</code> / <code>max_accel</code> times <code>4 * nozzle_diameter^2 /
+filament_area</code> when both diameters are set; configs that set no
+extrude-only caps get these derived caps on retracts and primes too. A
+follower with a pressure advance and no limits, set or inherited, is
+rejected. <code>[axis e] instantaneous_corner_velocity</code> (default 1 mm/s) bounds
+the extruder velocity steps a ratio-ramped advance makes where a followed
+axis, usually z, is not shaped; <code>[extruder] instantaneous_corner_velocity</code>
+is rejected with a pointer to it. A linear pressure advance next to a
+smoothing kernel no longer advances retracts, primes and other
+extrude-only moves: like the ratio-ramped advance it applies only to the
+extrusion laid along the path, so those moves keep their extrude-only
+caps.</p>
 <p>20261103: A <code>[printer]</code> section that sets neither <code>corner_deviation</code>
 nor <code>square_corner_velocity</code> now plans corners with
 <code>corner_deviation: 0.04</code> (mm), at every <code>max_accel</code>. It used to
