@@ -6,8 +6,14 @@ use pyo3::prelude::*;
 
 use bridge::{PyClockSyncEstimator, PyDecayRegression, PyMotionEngine};
 
+#[pyfunction]
+fn build_id() -> &'static str {
+    env!("SERVAL_ENGINE_BUILD_ID")
+}
+
 #[pymodule]
 fn _motion_engine(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(build_id, m)?)?;
     m.add_class::<PyMotionEngine>()?;
     m.add_class::<PyClockSyncEstimator>()?;
     m.add_class::<PyDecayRegression>()?;
