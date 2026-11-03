@@ -1531,6 +1531,39 @@ fn a_bundle_spanning_the_epoch_boundary_is_cut_at_the_marked_view() {
 }
 
 #[test]
+fn an_unsent_cut_steps_the_whole_run_before_it_even_when_the_drain_budget_is_spent() {
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    let lead_end = 1_000 + (CYCLES_PER_SECOND * SEND_LEAD_SECONDS) as u64;
+    let head = ramp(2_000, 180);
+    let last = head.last().expect("the head carries views");
+    let cut_at = last.end_clock;
+    let head_end_mm = span_end_mm(last);
+    assert!(cut_at > lead_end, "the head must run past the lead horizon");
+    for stretch in [&head[..60], &head[60..120]] {
+        h.endpoint
+            .send_frames(MCU_ID, &[axis_frame(stretch.to_vec())])
+            .and_then(|()| h.endpoint.tick())
+            .unwrap();
+    }
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(head[120..].to_vec())])
+        .unwrap();
+
+    h.endpoint.set_drain_pass_budget(std::time::Duration::ZERO);
+    h.endpoint.mark_reanchor(0, cut_at, Some(CYCLES_PER_SECOND));
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp_from(cut_at, 4, head_end_mm))])
+        .expect("the cut lands between the old tail and the new head");
+
+    assert!(
+        (h.endpoint.shim.commanded_position(0) - head_end_mm).abs() < MICROSTEP,
+        "the cut reseeded the lattice at {} mm, but the run before it ends at {head_end_mm} mm",
+        h.endpoint.shim.commanded_position(0)
+    );
+}
+
+#[test]
 fn two_marked_gaps_in_one_buffered_stretch_both_apply_in_order() {
     // Two dwells inside one buffered stream (G4 G4, or stepper-enable
     // stalls) mark two seam gaps before any of their views reach the

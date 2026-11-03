@@ -1269,6 +1269,19 @@ impl StepcompressEndpoint {
             cut_at,
             "[reanchor] cutting unsent shim spans"
         );
+        if let Some(unrooted) = self
+            .shim
+            .unrooted_from(motor)
+            .filter(|&clock| clock <= cut_at)
+        {
+            return Err(self.motor_fatal(
+                motor,
+                &format!(
+                    "reanchor cut at clock {cut_at} would abandon the queued motion from clock \
+                     {unrooted} that the root search never reached"
+                ),
+            ));
+        }
         let (_expected, tail) = self
             .shim
             .halt_at(motor, cut_at)
@@ -1683,10 +1696,32 @@ impl StepcompressEndpoint {
         drain_to: u64,
         retire: Retire,
     ) -> Result<(), SendError> {
-        let drain_started = std::time::Instant::now();
         let deadline = self
             .drain_pass_budget
             .map(|budget| std::time::Instant::now() + budget);
+        self.drain_with_deadline(clock, drain_to, retire, deadline)
+    }
+
+    /// Drains every root up to `drain_to` regardless of the pass budget: a
+    /// cut abandons whatever the root search has not reached, so a run cut
+    /// short by the budget would reseed the lattice mid-run.
+    fn drain_through(
+        &mut self,
+        clock: McuClock,
+        drain_to: u64,
+        retire: Retire,
+    ) -> Result<(), SendError> {
+        self.drain_with_deadline(clock, drain_to, retire, None)
+    }
+
+    fn drain_with_deadline(
+        &mut self,
+        clock: McuClock,
+        drain_to: u64,
+        retire: Retire,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(), SendError> {
+        let drain_started = std::time::Instant::now();
         let frames = self
             .shim
             .drain_budgeted(drain_to, deadline)
@@ -2256,7 +2291,7 @@ impl StepcompressEndpoint {
                              producer's timeline",
                         ));
                     };
-                    self.drain_until(clock, at, Retire::Defer)?;
+                    self.drain_through(clock, at, Retire::Defer)?;
                     self.drain_until(clock, clock.lead_horizon(), Retire::Defer)?;
                     let sent = self.lanes[motor]
                         .last_sent_boundary
