@@ -57,6 +57,13 @@ def token_holds_lock(fd: int, path: Path) -> bool:
     return not try_lock(fd)
 
 
+def export_holder_token(path: Path = LOCK_PATH) -> None:
+    pid = holder_pid(path)
+    if pid is None:
+        raise pi.BenchError(f"bench lock {path} names no holder")
+    os.environ[TOKEN_ENV] = str(pid)
+
+
 def try_lock(fd: int) -> bool:
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

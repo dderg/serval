@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 import time
@@ -198,7 +197,7 @@ def main() -> None:
     suite_dir = SUITES_DIR / datetime.now().strftime("%Y%m%d-%H%M%S")
     suite_dir.mkdir(parents=True)
     with lock.bench_lock(args.lock_timeout, command=" ".join(sys.argv)):
-        os.environ[lock.TOKEN_ENV] = str(os.getpid())
+        lock.export_holder_token()
         sync = python("deploy.py", "sync", timeout_s=1800)
         if sync.returncode != 0:
             sys.exit(f"sync failed: {last_lines(sync.stderr, 8)}")
