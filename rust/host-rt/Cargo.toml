@@ -8,6 +8,7 @@ description = "Standalone Rust host runtime for kalico — owns USB-CDC fd, driv
 license.workspace = true
 
 [dependencies]
+checked-cast = { path = "../checked-cast" }
 serialport = "4"
 libc = "0.2"
 # `crc` was on the original plan ingredients list but we hand-roll

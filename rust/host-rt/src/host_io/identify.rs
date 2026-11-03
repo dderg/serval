@@ -205,10 +205,7 @@ fn decode_identify_response(packet: &[u8]) -> Option<MessageParams> {
     pos += n;
     let (data, _n) = decode_bytes(&body[pos..])?;
     let mut params = MessageParams::new();
-    #[allow(clippy::cast_sign_loss)]
-    {
-        params.insert("offset", MessageValue::U32(offset as u32));
-    }
+    params.insert("offset", MessageValue::U32(u32::try_from(offset).ok()?));
     params.insert("data", MessageValue::Bytes(data));
     Some(params)
 }

@@ -171,7 +171,12 @@ impl FitStage {
         self.resolve_runs(eof);
         let ok = self.emit_ready(eof, out);
         if eof && ok {
-            debug_assert!(self.decided.is_empty() && self.tail.is_empty());
+            assert!(
+                self.decided.is_empty() && self.tail.is_empty(),
+                "fit stage drained at end of stream with {} decided and {} tail elements left",
+                self.decided.len(),
+                self.tail.len()
+            );
             self.seam_head_trim = 0.0;
             self.seam_in_reduction = 0.0;
         }
@@ -723,7 +728,11 @@ impl TravelAligningSender<'_> {
 
     fn release(&mut self, next_start: Option<[f64; 3]>) -> bool {
         let Some(travel) = self.alignment.parked_travel.take() else {
-            debug_assert!(self.alignment.parked_tail.is_empty());
+            assert!(
+                self.alignment.parked_tail.is_empty(),
+                "{} parked tail elements without a parked travel",
+                self.alignment.parked_tail.len()
+            );
             return true;
         };
         let travel = align_travel(travel, self.alignment.last_spatial_end, next_start);
@@ -740,15 +749,21 @@ impl TravelAligningSender<'_> {
     }
 
     fn forward_drain(&mut self) -> bool {
-        debug_assert!(
-            self.alignment.parked_travel.is_none() && self.alignment.parked_tail.is_empty()
+        assert!(
+            self.alignment.parked_travel.is_none() && self.alignment.parked_tail.is_empty(),
+            "forward_drain with a parked travel ({}) or {} parked tail elements",
+            self.alignment.parked_travel.is_some(),
+            self.alignment.parked_tail.len()
         );
         (self.tx)(StreamInput::Drain)
     }
 
     fn forward(&mut self, item: StreamInput) -> bool {
-        debug_assert!(
-            self.alignment.parked_travel.is_none() && self.alignment.parked_tail.is_empty()
+        assert!(
+            self.alignment.parked_travel.is_none() && self.alignment.parked_tail.is_empty(),
+            "forward with a parked travel ({}) or {} parked tail elements",
+            self.alignment.parked_travel.is_some(),
+            self.alignment.parked_tail.len()
         );
         (self.tx)(item)
     }
@@ -757,8 +772,11 @@ impl TravelAligningSender<'_> {
     /// is invariant); the emitted-geometry anchor must adopt the new name or
     /// the next move looks discontinuous against a stale coordinate.
     fn rebase_gcode_z(&mut self, z: f64) {
-        debug_assert!(
-            self.alignment.parked_travel.is_none() && self.alignment.parked_tail.is_empty()
+        assert!(
+            self.alignment.parked_travel.is_none() && self.alignment.parked_tail.is_empty(),
+            "rebase_gcode_z with a parked travel ({}) or {} parked tail elements",
+            self.alignment.parked_travel.is_some(),
+            self.alignment.parked_tail.len()
         );
         if let Some(end) = self.alignment.last_spatial_end.as_mut() {
             end[2] = z;

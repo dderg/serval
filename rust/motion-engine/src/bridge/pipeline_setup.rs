@@ -397,8 +397,11 @@ impl PyMotionEngine {
                 {
                     if let Some((projected, freq)) = clock_of(mcu_id) {
                         use motion_core::pump::skew_monitor::SkewVerdict;
-                        let skew_ticks = (projected as u32).wrapping_sub(mcu_clock) as i32;
-                        let skew_secs = f64::from(skew_ticks) / freq;
+                        let skew_ticks = -checked_cast::clock32_delta(mcu_clock, projected)
+                            .unwrap_or_else(|e| {
+                                panic!("mcu {mcu_id}: barrier ack clock echo: {e}")
+                            });
+                        let skew_secs = skew_ticks as f64 / freq;
                         match skew_monitor.lock_ok().observe(skew_secs) {
                             SkewVerdict::Fatal => {
                                 tracing::error!(

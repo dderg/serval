@@ -54,7 +54,8 @@ pub fn monotonic_raw_ns() -> u64 {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        (monotonic_raw_secs() * 1e9) as u64
+        let ns = (monotonic_raw_secs() * 1e9).round();
+        checked_cast::f64_to_u64(ns).unwrap_or_else(|e| panic!("monotonic_raw_ns: {e}"))
     }
 }
 

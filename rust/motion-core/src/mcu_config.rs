@@ -512,11 +512,13 @@ pub fn sample_seed_counts(
     cfg: &McuAxisConfig,
     pos: geometry::MachinePos,
 ) -> Result<Vec<i64>, String> {
-    #[allow(clippy::cast_possible_truncation)]
-    Ok(seed_steps(cfg, pos, McuAxisConfig::phase_capable, "phase")?
+    seed_steps(cfg, pos, McuAxisConfig::phase_capable, "phase")?
         .into_iter()
-        .map(|steps| steps.round() as i64)
-        .collect())
+        .map(|steps| {
+            checked_cast::f64_to_i64(steps.round())
+                .map_err(|e| format!("position seed: phase lane step count: {e}"))
+        })
+        .collect()
 }
 
 fn seed_steps(

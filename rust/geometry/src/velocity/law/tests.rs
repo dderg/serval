@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use super::{
-    CAP_CONTACT_FRACTION, CapDeparture, LawSegment, RAIL_KNOT_DS, RAIL_KNOTS_MAX, RAIL_KNOTS_MIN,
-    RailKnot, ScalarLaw, departure_increment, knot_duration,
+    CAP_CONTACT_FRACTION, CapDeparture, FULL_RAIL_KNOTS, LawSegment, RAIL_KNOT_DS, RAIL_KNOTS_MAX,
+    RAIL_KNOTS_MIN, RailKnot, SPARE_FULL_RAILS, ScalarLaw, departure_increment, knot_duration,
 };
 
 fn rail(v0: f64, accel: f64, kappa0: f64, sigma: f64, brake: bool, ds: f64) -> LawSegment {
@@ -30,6 +30,25 @@ fn const_accel_matches_closed_form() {
     assert_eq!(a, -4.0);
     let t = seg.time_at_distance(s).unwrap();
     assert!((t - 1.25).abs() < 1e-12);
+}
+
+#[test]
+fn origin_rail_identity_is_bitwise_in_every_input() {
+    let law = |kappa0: f64| ScalarLaw::DiskRail {
+        accel: 1000.0,
+        kappa0,
+        sigma: 0.05,
+        brake: false,
+    };
+    let seg = rail(50.0, 1000.0, -0.0, 0.05, false, 2.0);
+    assert!(seg.is_origin_rail(50.0, law(-0.0), 2.0));
+    assert!(!seg.is_origin_rail(50.0, law(0.0), 2.0));
+    assert!(!seg.is_origin_rail(50.000_000_000_001, law(-0.0), 2.0));
+    assert!(!seg.is_origin_rail(50.0, law(-0.0), 2.000_000_000_001));
+    let shifted = LawSegment::until_arc(0.0, 1.0, 50.0, law(-0.0), 2.0).unwrap();
+    assert!(!shifted.is_origin_rail(50.0, law(-0.0), 2.0));
+    let line = LawSegment::new(0.0, 0.1, 0.0, 50.0, ScalarLaw::ConstAccel { a0: 1000.0 });
+    assert!(!line.is_origin_rail(50.0, ScalarLaw::ConstAccel { a0: 1000.0 }, 2.0));
 }
 
 #[test]
@@ -338,13 +357,14 @@ fn min_velocity_reports_the_brake_end() {
 }
 
 /// The rail integration as it was before each step reused the state its
-/// predecessor ended on: the oracle the carried version must match bit for
-/// bit.
+/// predecessor ended on, or a memoized step of an autonomous law: every step
+/// recomputed from its start, the departure from a cap by its own step. The
+/// oracle the integrator must match bit for bit.
 fn integrate_rail_arc_recomputing_step_ends(
     law: &ScalarLaw,
     v0: f64,
     ds: f64,
-) -> Option<Arc<[RailKnot]>> {
+) -> Option<Arc<Vec<RailKnot>>> {
     if ds <= 0.0 {
         let knot = RailKnot {
             t: 0.0,
@@ -353,7 +373,7 @@ fn integrate_rail_arc_recomputing_step_ends(
             rise: 0.0,
             departure: CapDeparture::None,
         };
-        return Some(Arc::from(vec![knot, knot]));
+        return Some(Arc::new(vec![knot, knot]));
     }
     let n = ((ds / RAIL_KNOT_DS).ceil() as usize).clamp(RAIL_KNOTS_MIN, RAIL_KNOTS_MAX);
     let apex_start = {
@@ -429,7 +449,7 @@ fn integrate_rail_arc_recomputing_step_ends(
             departure,
         });
     }
-    Some(Arc::from(knots))
+    Some(Arc::new(knots))
 }
 
 fn rail_laws() -> Vec<ScalarLaw> {
@@ -455,25 +475,29 @@ fn rail_laws() -> Vec<ScalarLaw> {
     laws
 }
 
-fn assert_carrying_matches_recomputing(law: &ScalarLaw, v0: f64, ds: f64) {
-    let bits = |knots: &Option<Arc<[RailKnot]>>| {
-        knots.as_ref().map(|knots| {
-            knots
-                .iter()
-                .map(|k| {
-                    [
-                        k.t.to_bits(),
-                        k.s.to_bits(),
-                        k.v.to_bits(),
-                        k.rise.to_bits(),
-                    ]
-                })
-                .collect::<Vec<_>>()
+fn knots_bits(knots: &Arc<Vec<RailKnot>>) -> Vec<[u64; 5]> {
+    knots
+        .iter()
+        .map(|k| {
+            [
+                k.t.to_bits(),
+                k.s.to_bits(),
+                k.v.to_bits(),
+                k.rise.to_bits(),
+                k.departure as u64,
+            ]
         })
-    };
+        .collect()
+}
+
+fn assert_carrying_matches_recomputing(law: &ScalarLaw, v0: f64, ds: f64) {
     assert_eq!(
-        bits(&super::integrate_rail_arc(law, v0, ds)),
-        bits(&integrate_rail_arc_recomputing_step_ends(law, v0, ds)),
+        super::integrate_rail_arc(law, v0, ds)
+            .as_ref()
+            .map(knots_bits),
+        integrate_rail_arc_recomputing_step_ends(law, v0, ds)
+            .as_ref()
+            .map(knots_bits),
         "{law:?} from v0={v0} over ds={ds}"
     );
 }
@@ -490,6 +514,97 @@ fn carrying_each_step_end_into_the_next_step_changes_no_knot() {
         }
     }
     assert!(compared > 1000);
+}
+
+#[test]
+fn memoized_steps_of_constant_curvature_rails_change_no_knot() {
+    for sigma in [0.0, -0.0] {
+        for &(accel, kappa0, v0, ds) in &[
+            (
+                50_000.0,
+                0.305_837_469_599_224_14,
+                0.0,
+                20.293_902_419_340_885,
+            ),
+            (50_000.0, -0.305_837_469_599_224_14, 120.0, 9.75),
+            (20_000.0, 1.25, 0.0, 3.3),
+            (20_000.0, 1.25, 400.0, 3.3),
+        ] {
+            for brake in [false, true] {
+                let law = ScalarLaw::DiskRail {
+                    accel,
+                    kappa0,
+                    sigma,
+                    brake,
+                };
+                assert_carrying_matches_recomputing(&law, v0, ds);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_constant_curvature_rail_departs_its_cap_by_its_own_step_not_a_memoized_one() {
+    let rails: [(f64, f64, f64); 3] = [
+        (50_000.0, 0.305_837_469_599_224_14, 0.8),
+        (20_000.0, -1.25, 0.2),
+        (5000.0, 2.0, 0.01),
+    ];
+    for sigma in [0.0, -0.0] {
+        for &(accel, kappa0, ds) in &rails {
+            let cap_speed = (accel / kappa0.abs()).sqrt();
+            for v0 in [cap_speed, cap_speed * (1.0 - 1e-6), cap_speed * 1.5] {
+                for brake in [false, true] {
+                    let law = ScalarLaw::DiskRail {
+                        accel,
+                        kappa0,
+                        sigma,
+                        brake,
+                    };
+                    let knots = super::integrate_rail_arc(&law, v0, ds).unwrap();
+                    assert_eq!(knots[1].departure, CapDeparture::FromLo, "{law:?} v0={v0}");
+                    assert_eq!(knots[2].departure, CapDeparture::None, "{law:?} v0={v0}");
+                    assert_carrying_matches_recomputing(&law, v0, ds);
+                }
+            }
+        }
+    }
+}
+
+fn knot_bits(seg: &LawSegment) -> Vec<[u64; 4]> {
+    seg.rail_knots()
+        .iter()
+        .map(|k| {
+            [
+                k.t.to_bits(),
+                k.s.to_bits(),
+                k.v.to_bits(),
+                k.rise.to_bits(),
+            ]
+        })
+        .collect()
+}
+
+#[test]
+fn recycled_full_rail_buffers_carry_nothing_into_the_next_rail() {
+    let spare = || SPARE_FULL_RAILS.with_borrow(Vec::len);
+    let ds = 1.5 * RAIL_KNOTS_MAX as f64 * RAIL_KNOT_DS;
+    let first = rail(30.0, 5000.0, 0.05, 0.3, false, ds);
+    assert_eq!(first.rail_knots().len(), FULL_RAIL_KNOTS);
+    let first_bits = knot_bits(&first);
+    let shared = first.clone();
+    first.recycle();
+    assert_eq!(spare(), 0, "a rail still shared is not recycled");
+    assert_eq!(knot_bits(&shared), first_bits);
+    shared.recycle();
+    assert_eq!(spare(), 1);
+
+    let second = rail(120.0, 20_000.0, 1.25, 0.0, false, ds);
+    assert_eq!(spare(), 0, "the next full rail reuses the spare buffer");
+    let fresh = std::thread::spawn(move || knot_bits(&rail(120.0, 20_000.0, 1.25, 0.0, false, ds)))
+        .join()
+        .unwrap();
+    assert_eq!(knot_bits(&second), fresh);
 }
 
 /// Steps of the quadratically graded grid near an apex whose `s + h` lands

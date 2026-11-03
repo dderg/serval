@@ -294,7 +294,11 @@ fn ease_plan(n: &Neighbor, spiral: Spiral, run_epmm: f64, arc: &ArcFrame) -> Opt
     if phi < ANGLE_EPS_RAD {
         return None;
     }
-    let normal = scale(normalize(cross(arc.plane_n, spiral.dir)), spiral.curve_sgn);
+    let tangent = cross(arc.plane_n, spiral.dir);
+    if norm(tangent) < ANGLE_EPS_RAD {
+        return None;
+    }
+    let normal = scale(normalize(tangent), spiral.curve_sgn);
     if dot(normal, sub(arc.origin, n.vertex)) <= 0.0 {
         return None;
     }

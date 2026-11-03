@@ -16,8 +16,9 @@ pub fn relay_trip_clock(clock32: u32, reference_clock64: u64) -> u64 {
     if clock32 == HOST_COMMANDED_TRIGGER_CLOCK {
         return reference_clock64;
     }
-    let delta = clock32.wrapping_sub(reference_clock64 as u32) as i32 as i64;
-    reference_clock64.wrapping_add(delta as u64)
+    let delta = checked_cast::clock32_delta(clock32, reference_clock64)
+        .unwrap_or_else(|e| panic!("relay_trip_clock: {e}"));
+    reference_clock64.wrapping_add_signed(delta)
 }
 
 #[cfg(test)]

@@ -127,7 +127,7 @@ pub struct LawSegment {
     pub s0: f64,
     pub v0: f64,
     pub law: ScalarLaw,
-    dense: OnceLock<Arc<[RailKnot]>>,
+    dense: OnceLock<Arc<Vec<RailKnot>>>,
 }
 
 impl PartialEq for LawSegment {
@@ -164,6 +164,49 @@ impl ScalarLaw {
         match *self {
             ScalarLaw::ConstAccel { .. } => false,
             ScalarLaw::DiskRail { accel, .. } => a.abs() <= CAP_CONTACT_FRACTION * accel,
+        }
+    }
+
+    /// Equal to the bit, so integrating either from the same state yields the
+    /// same knots; `==` would also identify `-0.0` with `0.0`.
+    fn is_bitwise(&self, other: &ScalarLaw) -> bool {
+        match (*self, *other) {
+            (ScalarLaw::ConstAccel { a0 }, ScalarLaw::ConstAccel { a0: other_a0 }) => {
+                a0.to_bits() == other_a0.to_bits()
+            }
+            (
+                ScalarLaw::DiskRail {
+                    accel,
+                    kappa0,
+                    sigma,
+                    brake,
+                },
+                ScalarLaw::DiskRail {
+                    accel: other_accel,
+                    kappa0: other_kappa0,
+                    sigma: other_sigma,
+                    brake: other_brake,
+                },
+            ) => {
+                accel.to_bits() == other_accel.to_bits()
+                    && kappa0.to_bits() == other_kappa0.to_bits()
+                    && sigma.to_bits() == other_sigma.to_bits()
+                    && brake == other_brake
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the law reads the arc nowhere along a rail: constant
+    /// acceleration, or a disk rail of constant curvature. With `σ = ±0`,
+    /// `σ·ds` is a zero of `σ`'s sign for every finite `ds ≥ 0`, so
+    /// `κ0 + σ·ds` is one float and [`Self::accel_at`],
+    /// [`Self::accel_rate_at`] and [`Self::settle_crossed_cap`] give the same
+    /// bits at every arc.
+    fn is_autonomous(&self) -> bool {
+        match *self {
+            ScalarLaw::ConstAccel { .. } => true,
+            ScalarLaw::DiskRail { sigma, .. } => sigma == 0.0,
         }
     }
 
@@ -447,6 +490,27 @@ impl LawSegment {
         }
     }
 
+    /// The speed at the far end of a rail built by [`Self::until_arc`],
+    /// exactly the speed [`Self::reach_over`] reports for the same span.
+    pub(crate) fn rail_end_speed(&self) -> f64 {
+        let knots = self.rail_knots();
+        knots[knots.len() - 1].v
+    }
+
+    /// Whether this rail, built by [`Self::until_arc`], is the one
+    /// `until_arc(0.0, 0.0, v0, law, ds)` builds: the same inputs to the bit,
+    /// so the same knots.
+    pub(crate) fn is_origin_rail(&self, v0: f64, law: ScalarLaw, ds: f64) -> bool {
+        let Some(knots) = self.dense.get() else {
+            return false;
+        };
+        self.t0.to_bits() == 0.0_f64.to_bits()
+            && self.s0.to_bits() == 0.0_f64.to_bits()
+            && self.v0.to_bits() == v0.to_bits()
+            && self.law.is_bitwise(&law)
+            && knots[knots.len() - 1].s.to_bits() == ds.to_bits()
+    }
+
     /// This rail cut at the first time its speed reaches `target`, on its
     /// own interpolant, so the cut ends at `target` exactly while its interior
     /// stays the motion this segment describes. `None` when the speed never
@@ -586,7 +650,7 @@ impl LawSegment {
             law: self.law,
             dense: OnceLock::new(),
         };
-        let _ = seg.dense.set(Arc::from(cut));
+        let _ = seg.dense.set(Arc::new(cut));
         seg
     }
 
@@ -681,10 +745,29 @@ impl LawSegment {
         times
     }
 
-    fn rail_knots(&self) -> &Arc<[RailKnot]> {
+    fn rail_knots(&self) -> &Arc<Vec<RailKnot>> {
         self.dense
             .get()
             .expect("a DiskRail segment always carries its dense solution")
+    }
+
+    /// Hands a rail built by [`Self::until_arc`] back to this thread's spare
+    /// knot buffers when nothing else shares its knots, so the next
+    /// full-length rail integrated here writes into memory already mapped
+    /// rather than faulting in a fresh mebibyte.
+    pub(crate) fn recycle(self) {
+        let Some(Ok(mut knots)) = self.dense.into_inner().map(Arc::try_unwrap) else {
+            return;
+        };
+        if knots.capacity() < FULL_RAIL_KNOTS {
+            return;
+        }
+        knots.clear();
+        SPARE_FULL_RAILS.with_borrow_mut(|spare| {
+            if spare.len() < SPARE_FULL_RAILS_MAX {
+                spare.push(knots);
+            }
+        });
     }
 
     fn pair_slopes(&self, lo: &RailKnot, hi: &RailKnot, h: f64) -> [f64; 4] {
@@ -751,7 +834,7 @@ fn flipped_rail(rev: &[RailKnot], t0: f64, s0: f64, law: ScalarLaw, ds: f64) -> 
         law,
         dense: OnceLock::new(),
     };
-    let _ = seg.dense.set(Arc::from(knots));
+    let _ = seg.dense.set(Arc::new(knots));
     (seg, v0)
 }
 
@@ -799,6 +882,29 @@ fn hermite(p0: f64, m0: f64, p1: f64, m1: f64, u: f64) -> f64 {
 /// Target dense-knot spacing along the arc, in millimetres.
 const RAIL_KNOT_DS: f64 = 2.5e-4;
 
+/// Knots of a rail the knot-count clamp caps: one mebibyte each.
+const FULL_RAIL_KNOTS: usize = RAIL_KNOTS_MAX + 1;
+
+/// Full-length knot buffers kept per thread for reuse; bounds what a thread
+/// holds between plans to 64 MiB.
+const SPARE_FULL_RAILS_MAX: usize = 64;
+
+thread_local! {
+    static SPARE_FULL_RAILS: std::cell::RefCell<Vec<Vec<RailKnot>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// An empty knot vector with room for `len` knots, reusing a recycled
+/// full-length buffer when one is spare.
+fn knot_buffer(len: usize) -> Vec<RailKnot> {
+    let spare = if len == FULL_RAIL_KNOTS {
+        SPARE_FULL_RAILS.with_borrow_mut(Vec::pop)
+    } else {
+        None
+    };
+    spare.unwrap_or_else(|| Vec::with_capacity(len))
+}
+
 /// Dense arc-uniform solution of the rail ODE `d(v²)/ds = 2·a(s, v)` from
 /// `(0, v0)` over `ds`. Each knot pair's duration is the one under which the
 /// state interpolant [`LawSegment::state_at`] reads between them covers
@@ -808,7 +914,7 @@ const RAIL_KNOT_DS: f64 = 2.5e-4;
 /// it then spans at most 9/4 of its start's time from the apex, which keeps
 /// the square root within a quintic's reach. `None` when the speed folds to
 /// rest strictly inside the span.
-fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<[RailKnot]>> {
+fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<Vec<RailKnot>>> {
     if ds <= 0.0 {
         let knot = RailKnot {
             t: 0.0,
@@ -817,7 +923,7 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<[RailKnot
             rise: 0.0,
             departure: CapDeparture::None,
         };
-        return Some(Arc::from(vec![knot, knot]));
+        return Some(Arc::new(vec![knot, knot]));
     }
     let n = ((ds / RAIL_KNOT_DS).ceil() as usize).clamp(RAIL_KNOTS_MIN, RAIL_KNOTS_MAX);
     // Near an apex the rail acceleration vanishes and w(s) leaves the cap as
@@ -838,7 +944,7 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<[RailKnot
     let departs_cap = law.in_cap_contact(law.accel_at(0.0, v0));
     let steps = if departs_cap { n - 1 } else { n };
     let grid_at = |i: usize| arc_at(if departs_cap && i > 0 { i + 1 } else { i });
-    let mut knots = Vec::with_capacity(steps + 1);
+    let mut knots = knot_buffer(n + 1);
     let mut w = v0 * v0;
     let mut t = 0.0_f64;
     knots.push(RailKnot {
@@ -860,6 +966,7 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<[RailKnot
     };
     let f = |s: f64, w: f64| 2.0 * law.accel_at(s, w.max(0.0).sqrt());
     let mut carried: Option<RailState> = None;
+    let mut memo = law.is_autonomous().then(StepMemo::new);
     for i in 0..steps {
         let s = grid_at(i);
         let s_next = grid_at(i + 1);
@@ -868,48 +975,123 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<[RailKnot
             .take()
             .filter(|end| end.s == s)
             .unwrap_or_else(|| state_at(s, w));
+        let last = i == steps - 1;
         let departure = if departs_cap && i == 0 {
             CapDeparture::FromLo
         } else {
             CapDeparture::None
         };
-        let increment = match departure {
-            CapDeparture::FromLo => departure_increment(law, s, h, w),
-            _ => {
-                let k1 = 2.0 * lo.a;
-                let k2 = f(s + 0.5 * h, w + 0.5 * h * k1);
-                let k3 = f(s + 0.5 * h, w + 0.5 * h * k2);
-                let k4 = f(s + h, w + h * k3);
-                h * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0
+        let settle_step = |increment: f64| -> Option<RailStep> {
+            let stepped = w + increment;
+            let settled = law.settle_crossed_cap(s, s + h, stepped);
+            let w_next = settled.unwrap_or(stepped);
+            if w_next <= 0.0 && !last {
+                return None;
             }
+            let hi = state_at(s + h, w_next);
+            if lo.v + hi.v <= 0.0 {
+                return None;
+            }
+            let rise = match settled {
+                None if w_next > 0.0 => increment / (lo.v + hi.v),
+                _ => hi.v - lo.v,
+            };
+            Some(RailStep {
+                w_next,
+                hi,
+                rise,
+                duration: knot_duration(h, departure, (lo.v, lo.a, lo.rate), (hi.v, hi.a, hi.rate)),
+            })
         };
-        let stepped = w + increment;
-        let settled = law.settle_crossed_cap(s, s + h, stepped);
-        let w_next = settled.unwrap_or(stepped);
-        let last = i == steps - 1;
-        if w_next <= 0.0 && !last {
-            return None;
-        }
-        let hi = state_at(s + h, w_next);
-        if lo.v + hi.v <= 0.0 {
-            return None;
-        }
-        let rise = match settled {
-            None if w_next > 0.0 => increment / (lo.v + hi.v),
-            _ => hi.v - lo.v,
+        let step = match departure {
+            CapDeparture::FromLo => settle_step(departure_increment(law, s, h, w))?,
+            _ => match memo.as_ref().and_then(|memo| memo.get(w, h)) {
+                Some(step) => {
+                    if step.w_next <= 0.0 && !last {
+                        return None;
+                    }
+                    if lo.v + step.hi.v <= 0.0 {
+                        return None;
+                    }
+                    step
+                }
+                None => {
+                    let k1 = 2.0 * lo.a;
+                    let k2 = f(s + 0.5 * h, w + 0.5 * h * k1);
+                    let k3 = f(s + 0.5 * h, w + 0.5 * h * k2);
+                    let k4 = f(s + h, w + h * k3);
+                    let step = settle_step(h * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0)?;
+                    if let Some(memo) = memo.as_mut() {
+                        memo.put(w, h, step);
+                    }
+                    step
+                }
+            },
         };
-        t += knot_duration(h, departure, (lo.v, lo.a, lo.rate), (hi.v, hi.a, hi.rate));
-        w = w_next.max(0.0);
+        t += step.duration;
+        w = step.w_next.max(0.0);
         knots.push(RailKnot {
             t,
             s: s_next,
-            v: hi.v,
-            rise,
+            v: step.hi.v,
+            rise: step.rise,
             departure,
         });
-        carried = Some(hi);
+        carried = Some(RailState {
+            s: s + h,
+            ..step.hi
+        });
     }
-    Some(Arc::from(knots))
+    Some(Arc::new(knots))
+}
+
+/// One completed integrator step: the state it reached and the knot it laid.
+#[derive(Clone, Copy)]
+struct RailStep {
+    w_next: f64,
+    hi: RailState,
+    rise: f64,
+    duration: f64,
+}
+
+const STEP_MEMO_SLOTS: usize = 64;
+
+/// Completed regular steps of an autonomous rail by the `(v², h)` they
+/// started from. Such a law reads the arc nowhere, so a regular step is a
+/// function of its start speed and size alone, and a rail riding its cap
+/// repeats a handful of `(v², h)` pairs — the grid's step sizes differ only
+/// in rounding — for thousands of steps. Direct-mapped on the step size; a
+/// collision only costs a recomputation. A rail's departure from the cap is
+/// a different step from the same `(v², h)`, so it neither reads nor fills
+/// the memo.
+struct StepMemo {
+    slots: [Option<(u64, u64, RailStep)>; STEP_MEMO_SLOTS],
+}
+
+impl StepMemo {
+    fn new() -> Self {
+        StepMemo {
+            slots: [None; STEP_MEMO_SLOTS],
+        }
+    }
+
+    fn slot(h: f64) -> usize {
+        (h.to_bits().wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (64 - STEP_MEMO_SLOTS.trailing_zeros()))
+            as usize
+    }
+
+    fn get(&self, w: f64, h: f64) -> Option<RailStep> {
+        match self.slots[Self::slot(h)] {
+            Some((w_bits, h_bits, step)) if w_bits == w.to_bits() && h_bits == h.to_bits() => {
+                Some(step)
+            }
+            _ => None,
+        }
+    }
+
+    fn put(&mut self, w: f64, h: f64, step: RailStep) {
+        self.slots[Self::slot(h)] = Some((w.to_bits(), h.to_bits(), step));
+    }
 }
 
 /// The rise in `v²` over `[s, s + h]` departing the cap at `s`. There `v²`

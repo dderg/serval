@@ -5,6 +5,7 @@ edition = "2021"
 license.workspace = true
 
 [dependencies]
+checked-cast = { path = "../checked-cast" }
 tracing = "0.1"
 nurbs = { path = "../nurbs" }
 geometry = { path = "../geometry" }
