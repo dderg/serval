@@ -438,3 +438,32 @@ fn a_final_width_node_never_moves_again() {
         field.final_prefix
     );
 }
+
+/// The shaped leaders creep into and out of a rest by rounding: a time node
+/// a few ulps off the rest is at the rest, so the width falls into it and
+/// rises out of it linearly rather than flattening onto a sliver of a
+/// window just short of it.
+#[test]
+fn a_time_node_a_rounding_off_a_rest_narrows_the_width_into_it_linearly() {
+    let mut field = WidthField {
+        spacing: 0.5,
+        ..WidthField::default()
+    };
+    field.place_rest(0.0);
+    let rest: f64 = 2.5;
+    let up = |s: f64| trajectory::next_toward(s, f64::INFINITY);
+    let leaving = up(up(rest));
+    for s in [1.0, 2.0, rest, up(rest), up(rest), leaving, 3.5, 4.5] {
+        field.place_time_node(s);
+    }
+    field.close(5.0);
+    for d in [1e-5, 1e-4, 1e-3] {
+        for s in [rest - d, leaving + d] {
+            let width = field.width(s);
+            assert!(
+                width >= 0.5 * d,
+                "a {width} mm window {d} mm off the rest at {rest} mm"
+            );
+        }
+    }
+}

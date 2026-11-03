@@ -18,7 +18,7 @@ pub mod law;
 mod reconstruct;
 mod z_caps;
 
-pub use extrusion_reach::{ExtrusionReach, ratios_in_reach};
+pub use extrusion_reach::{ExtrusionBudget, ExtrusionReach, extrusion_budgets};
 pub use law::{LawSegment, RailPair, RailPairShape, ScalarLaw};
 
 use disk::Kinematics;
@@ -222,7 +222,7 @@ pub fn plan_velocity_stops_reconstruct_prefix(
     plan_velocity_stops_select_prefix(
         moves,
         stop_before,
-        &extrusion_reach::ratios_in_reach(
+        &extrusion_reach::extrusion_budgets(
             moves,
             params.max_extrude_only_velocity_mm_s,
             params.max_extrude_only_accel_mm_s2,
@@ -235,12 +235,12 @@ pub fn plan_velocity_stops_reconstruct_prefix(
 
 /// Plans the whole window and reconstructs the prefix `select_prefix` picks
 /// from the finality barrier, building member profiles on `workers`.
-/// `ratios_in_reach[k]` is the largest extrusion ratio `moves[k]`'s
-/// extruder demand can meet, see [`extrusion_reach::ExtrusionReach`].
+/// `budgets[k]` is what `moves[k]`'s plan takes from the moves around it,
+/// see [`extrusion_reach::ExtrusionReach`].
 pub fn plan_velocity_stops_select_prefix<F, W>(
     moves: &[crate::Move],
     stop_before: &[bool],
-    ratios_in_reach: &[f64],
+    budgets: &[ExtrusionBudget],
     params: VelocityPlanParams,
     workers: &W,
     select_prefix: F,
@@ -255,7 +255,7 @@ where
 
     let n = moves.len();
     assert_eq!(stop_before.len(), n, "one stop flag per move");
-    assert_eq!(ratios_in_reach.len(), n, "one ratio in reach per move");
+    assert_eq!(budgets.len(), n, "one extrusion budget per move");
     if let Some(m) = moves.iter().find(|m| m.limits.max_jerk_mm_s3.is_finite()) {
         return Err(VelocityError::FiniteJerkUnsupported {
             line_no: m.source.start_line,
@@ -273,7 +273,7 @@ where
     }
 
     let mut report = VelocityReport::default();
-    let caps = build_move_caps(moves, ratios_in_reach, params, &mut report)?;
+    let caps = build_move_caps(moves, budgets, params, &mut report)?;
     check_entry_ceiling(moves, &caps, entry_v, tol)?;
     let mut plan = seed_seam_velocities(&caps, stop_before, entry_v, &mut report);
     forward_pass(moves, &caps, &mut plan, tol)?;
@@ -301,6 +301,7 @@ where
     let (out, boundaries) = reconstruct_runs(
         &moves[..reconstruct_count],
         &caps[..reconstruct_count],
+        &budgets[..reconstruct_count],
         &plan,
         entry_v,
         profiles,
@@ -337,12 +338,13 @@ fn validate_config(params: VelocityPlanParams) -> Result<(), VelocityError> {
 
 fn build_move_caps(
     moves: &[crate::Move],
-    ratios_in_reach: &[f64],
+    budgets: &[ExtrusionBudget],
     params: VelocityPlanParams,
     report: &mut VelocityReport,
 ) -> Result<Vec<MoveCaps>, VelocityError> {
     let mut caps = Vec::with_capacity(moves.len());
-    for (m, &ratio_in_reach) in moves.iter().zip(ratios_in_reach) {
+    for (m, budget) in moves.iter().zip(budgets) {
+        let ratio_in_reach = budget.ratio_in_reach;
         let line_no = m.source.start_line;
         let path_ceiling = m.feedrate_mm_s.min(m.limits.max_velocity_mm_s);
         let (length, kappa0, sigma, kappa_peak, flat_ceiling, accel) = match &m.segment.spatial {
@@ -569,6 +571,7 @@ fn check_entry_brake(
 fn reconstruct_runs(
     moves: &[crate::Move],
     caps: &[MoveCaps],
+    budgets: &[ExtrusionBudget],
     plan: &SeamPlan,
     entry_v: f64,
     profiles: Vec<MemberProfile>,
@@ -645,7 +648,11 @@ fn reconstruct_runs(
                 return Err(VelocityError::NegativeVelocity { line_no, v });
             }
             let peak_v = samples.iter().fold(0.0_f64, |acc, p| acc.max(p.v));
-            let phases = reconstructed_phases[idx].clone();
+            let phases = held_at_rest(
+                reconstructed_phases[idx].clone(),
+                budgets[j].rest_holds_s,
+                line_no,
+            );
             assert!(
                 !phases.is_empty(),
                 "line {line_no}: non-zero-duration velocity move has no phases"
@@ -681,6 +688,47 @@ fn reconstruct_runs(
     }
 
     Ok((out, boundaries))
+}
+
+/// `phases` with the toolhead held still for `before` ahead of them and
+/// `after` past them; only an extrude-only move, which runs from rest to
+/// rest on constant accelerations, is held.
+fn held_at_rest(
+    phases: Vec<LawSegment>,
+    [before, after]: [f64; 2],
+    line_no: u32,
+) -> Vec<LawSegment> {
+    if before == 0.0 && after == 0.0 {
+        return phases;
+    }
+    let first = phases
+        .first()
+        .expect("a member profile always carries a segment");
+    let (t0, s0) = (first.t0, first.s0);
+    let last = phases
+        .last()
+        .expect("a member profile always carries a segment");
+    let (s_end, v_end, _) = last.end_state();
+    let t_end = last.end_time();
+    assert!(
+        first.v0 <= VELOCITY_EPS_MM_S && v_end <= VELOCITY_EPS_MM_S,
+        "line {line_no}: only a move from rest to rest holds at rest, it runs {} -> {v_end} mm/s",
+        first.v0
+    );
+    let still = ScalarLaw::ConstAccel { a0: 0.0 };
+    let mut held = Vec::with_capacity(phases.len() + 2);
+    if before > 0.0 {
+        held.push(LawSegment::new(t0, before, s0, 0.0, still));
+    }
+    held.extend(
+        phases.iter().map(|phase| {
+            LawSegment::new(phase.t0 + before, phase.dt, phase.s0, phase.v0, phase.law)
+        }),
+    );
+    if after > 0.0 {
+        held.push(LawSegment::new(t_end + before, after, s_end, 0.0, still));
+    }
+    held
 }
 
 type MemberProfile = Result<Vec<LawSegment>, reconstruct::ReconstructError>;
