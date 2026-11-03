@@ -220,9 +220,7 @@ pub fn plan_velocity_stops_reconstruct_prefix(
     params: VelocityPlanParams,
     reconstruct_count: usize,
 ) -> Result<VelocityProfile, VelocityError> {
-    plan_velocity_stops_select_prefix(moves, stop_before, params, &Serial, |_| {
-        reconstruct_count
-    })
+    plan_velocity_stops_select_prefix(moves, stop_before, params, &Serial, |_| reconstruct_count)
 }
 
 /// Plans the whole window and reconstructs the prefix `select_prefix` picks
