@@ -24,7 +24,7 @@ pub mod waypoints;
 use motion_pipeline::{Pipeline, StreamConfig, TrajectoryItem};
 
 pub use geometry::corner_deviation_from_scv;
-pub use planner_config::{AxisDecl, PostProcessorDecl};
+pub use planner_config::{AxisDecl, CartesianLimits, PostProcessorDecl, RuntimeLimits};
 
 pub const SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 /// The E lane rides as axis 3, past the three spatial axes — the same index the
@@ -242,38 +242,73 @@ fn exact_trajectory(shaped: &[ContinuousSegment]) -> ExactTrajectory {
         .unwrap_or_else(|error| panic!("pipeline-snapshot: {error}"))
 }
 
+/// One move as the live host submits it — endpoints, feedrate — together
+/// with the limits the live engine plans it under: the runtime overrides in
+/// force, applied to the config base through [`planner_config::RuntimeLimits::effective`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MoveSpec {
+    pub start: [f64; 4],
+    pub end: [f64; 4],
+    pub feedrate: f64,
+    pub limits: geometry::VelocityLimits,
+}
+
+pub fn move_specs(
+    waypoints: &[waypoints::Waypoint],
+    limits: geometry::VelocityLimits,
+) -> Result<Vec<MoveSpec>, SnapshotError> {
+    let config_base = planner_config::CartesianLimits {
+        max_velocity: limits.max_velocity_mm_s,
+        max_accel: limits.accel_mm_s2,
+        max_jerk: limits.max_jerk_mm_s3,
+        max_z_velocity: limits.max_z_velocity_mm_s,
+        max_z_accel: limits.max_z_accel_mm_s2,
+        corner_deviation: limits.corner_deviation_mm,
+    };
+    waypoints
+        .windows(2)
+        .enumerate()
+        .map(|(i, pair)| {
+            let (velocity, accel, corner_deviation) = pair[1].runtime.effective(&config_base);
+            let move_limits = geometry::VelocityLimits::try_new(
+                velocity,
+                accel,
+                corner_deviation,
+                limits.max_jerk_mm_s3,
+            )
+            .and_then(|path| path.with_z_caps(limits.max_z_velocity_mm_s, limits.max_z_accel_mm_s2))
+            .map_err(|e| SnapshotError::InvalidMove {
+                index: i,
+                detail: e.to_string(),
+            })?;
+            Ok(MoveSpec {
+                start: pair[0].position,
+                end: pair[1].position,
+                feedrate: pair[1].feedrate,
+                limits: move_limits,
+            })
+        })
+        .collect()
+}
+
 pub fn build_moves(
     waypoints: &[waypoints::Waypoint],
     limits: geometry::VelocityLimits,
 ) -> Result<Vec<geometry::Move>, SnapshotError> {
-    let mut moves = Vec::with_capacity(waypoints.len() - 1);
-    for (i, pair) in waypoints.windows(2).enumerate() {
-        let (x0, y0, z0, e0, _, _) = pair[0];
-        let (x1, y1, z1, e1, feedrate, accel) = pair[1];
-        let start = [x0, y0, z0];
-        let end = [x1, y1, z1];
-        let e_delta = e1 - e0;
-        let move_limits = geometry::VelocityLimits::try_new(
-            limits.max_velocity_mm_s,
-            accel,
-            limits.corner_deviation_mm,
-            limits.max_jerk_mm_s3,
-        )
-        .and_then(|path| path.with_z_caps(limits.max_z_velocity_mm_s, limits.max_z_accel_mm_s2))
-        .map_err(|e| SnapshotError::InvalidMove {
-            index: i,
-            detail: e.to_string(),
-        })?;
+    let mut moves = Vec::with_capacity(waypoints.len().saturating_sub(1));
+    for (i, spec) in move_specs(waypoints, limits)?.into_iter().enumerate() {
+        let [x0, y0, z0, e0] = spec.start;
+        let [x1, y1, z1, e1] = spec.end;
         let ctx = geometry::MoveContext {
             extruder_axis: EXTRUDER_AXIS,
-            feedrate_mm_s: feedrate,
-            limits: move_limits,
+            feedrate_mm_s: spec.feedrate,
+            limits: spec.limits,
             source: geometry::SourceRange {
                 start_line: i as u32,
                 end_line: i as u32,
             },
         };
-        match geometry::line_move(start, end, e_delta, ctx) {
+        match geometry::line_move([x0, y0, z0], [x1, y1, z1], e1 - e0, ctx) {
             Ok(m) => moves.push(m),
             Err(geometry::FrontendError::ZeroMotion { .. }) => {}
             Err(e) => {

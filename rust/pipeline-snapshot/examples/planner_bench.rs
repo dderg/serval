@@ -79,17 +79,18 @@ fn faceted_circles(loops: usize, radius_mm: f64, chord_mm: f64) -> Vec<Waypoint>
     let facets = ((2.0 * std::f64::consts::PI * radius_mm) / chord_mm).ceil() as usize;
     let mut wp = Vec::with_capacity(loops * facets + 1);
     let mut e = 0.0;
-    wp.push((radius_mm, 0.0, 0.2, e, MAX_VELOCITY, MAX_ACCEL));
+    wp.push(Waypoint::at([radius_mm, 0.0, 0.2, e], MAX_VELOCITY));
     for k in 1..=loops * facets {
         let theta = 2.0 * std::f64::consts::PI * (k as f64) / (facets as f64);
         e += chord_mm * 0.04;
-        wp.push((
-            radius_mm * libm::cos(theta),
-            radius_mm * libm::sin(theta),
-            0.2,
-            e,
+        wp.push(Waypoint::at(
+            [
+                radius_mm * libm::cos(theta),
+                radius_mm * libm::sin(theta),
+                0.2,
+                e,
+            ],
             MAX_VELOCITY,
-            MAX_ACCEL,
         ));
     }
     wp
@@ -98,7 +99,7 @@ fn faceted_circles(loops: usize, radius_mm: f64, chord_mm: f64) -> Vec<Waypoint>
 fn zigzag_infill(lines: usize, line_mm: f64, pitch_mm: f64) -> Vec<Waypoint> {
     let mut wp = Vec::with_capacity(2 * lines + 1);
     let mut e = 0.0;
-    wp.push((0.0, 0.0, 0.2, e, MAX_VELOCITY, MAX_ACCEL));
+    wp.push(Waypoint::at([0.0, 0.0, 0.2, e], MAX_VELOCITY));
     for i in 0..lines {
         let y = (i as f64) * pitch_mm;
         let (x0, x1) = if i % 2 == 0 {
@@ -107,10 +108,10 @@ fn zigzag_infill(lines: usize, line_mm: f64, pitch_mm: f64) -> Vec<Waypoint> {
             (line_mm, 0.0)
         };
         e += line_mm * 0.04;
-        wp.push((x1, y, 0.2, e, MAX_VELOCITY, MAX_ACCEL));
+        wp.push(Waypoint::at([x1, y, 0.2, e], MAX_VELOCITY));
         let _ = x0;
         e += pitch_mm * 0.04;
-        wp.push((x1, y + pitch_mm, 0.2, e, MAX_VELOCITY, MAX_ACCEL));
+        wp.push(Waypoint::at([x1, y + pitch_mm, 0.2, e], MAX_VELOCITY));
     }
     wp
 }

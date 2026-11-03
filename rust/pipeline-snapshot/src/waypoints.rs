@@ -1,17 +1,37 @@
-//! G-code text → absolute `(x, y, z, e, feedrate, accel)` waypoints, mirroring
-//! `snapshots/harness.py::parse_gcode` move for move so the playground and
-//! the snapshot harness agree on what a pasted file means. E rides as a fifth
-//! coordinate so retracts (E-only moves) and extruding moves flow through the
-//! pipeline as followers; the engine differences consecutive E to a per-move
-//! delta. The sixth coordinate is the acceleration limit in force for the move
-//! ending at that waypoint — `max_accel` until a `SET_VELOCITY_LIMIT ACCEL=`
-//! line changes it. Extruder mode is M82 (absolute) / M83 (relative),
-//! independent of the G90/G91 flag that governs X/Y/Z; under G91 an undeclared
-//! extruder rides along as relative, and an E word with no mode declared at
-//! all is refused rather than guessed. G92 resets any axis's position
-//! (commonly `G92 E0`) without emitting a move.
+//! G-code text → absolute waypoints, mirroring `snapshots/harness.py::parse_gcode`
+//! move for move so the playground and the snapshot harness agree on what a
+//! pasted file means. E rides as the fourth coordinate so retracts (E-only
+//! moves) and extruding moves flow through the pipeline as followers; the
+//! engine differences consecutive E to a per-move delta. Each waypoint carries
+//! the runtime limit overrides in force for the move ending at it — the same
+//! [`RuntimeLimits`] state the live engine holds when that move is submitted —
+//! so the snapshot derives its effective limits through the live clamp.
+//! Extruder mode is M82 (absolute) / M83 (relative), independent of the
+//! G90/G91 flag that governs X/Y/Z; under G91 an undeclared extruder rides
+//! along as relative, and an E word with no mode declared at all is refused
+//! rather than guessed. G92 resets any axis's position (commonly `G92 E0`)
+//! without emitting a move.
 
-pub type Waypoint = (f64, f64, f64, f64, f64, f64);
+use planner_config::{CartesianLimits, RuntimeLimits};
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Waypoint {
+    pub position: [f64; 4],
+    pub feedrate: f64,
+    pub runtime: RuntimeLimits,
+}
+
+impl Waypoint {
+    /// A waypoint reached with no runtime limit override in force.
+    #[must_use]
+    pub fn at(position: [f64; 4], feedrate: f64) -> Self {
+        Self {
+            position,
+            feedrate,
+            runtime: RuntimeLimits::default(),
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum WaypointError {
@@ -33,15 +53,12 @@ pub enum WaypointError {
     InvalidAccelLimit { line: u32, value: String },
 }
 
-pub fn parse_gcode(
-    text: &str,
-    max_velocity: f64,
-    max_accel: f64,
-) -> Result<Vec<Waypoint>, WaypointError> {
+pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>, WaypointError> {
+    let max_velocity = config.max_velocity;
     let mut waypoints: Vec<Waypoint> = Vec::new();
     let (mut x, mut y, mut z, mut e) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
     let mut feedrate = max_velocity;
-    let mut accel = max_accel;
+    let mut runtime = RuntimeLimits::default();
     let mut relative = false;
     let mut e_relative: Option<bool> = None;
 
@@ -68,13 +85,12 @@ pub fn parse_gcode(
                         });
                     }
                     let parsed: f64 = value.parse().unwrap_or(f64::NAN);
-                    if !(parsed.is_finite() && parsed > 0.0) {
-                        return Err(WaypointError::InvalidAccelLimit {
+                    runtime.set_accel_cap(Some(parsed)).map_err(|_| {
+                        WaypointError::InvalidAccelLimit {
                             line: line_no,
                             value: value.into_string(),
-                        });
-                    }
-                    accel = parsed;
+                        }
+                    })?;
                 }
                 continue;
             }
@@ -144,7 +160,11 @@ pub fn parse_gcode(
                     continue;
                 }
                 let move_feedrate = if cmd == 0 { max_velocity } else { feedrate };
-                waypoints.push((x, y, z, e, move_feedrate, accel));
+                waypoints.push(Waypoint {
+                    position: [x, y, z, e],
+                    feedrate: move_feedrate,
+                    runtime,
+                });
             }
             _ => {}
         }
