@@ -57,6 +57,8 @@ PAIR_WINDOW_S = 2e-3
 EPOCH_DURATION_TOLERANCE_S = 1.0
 EPOCH_DURATION_TOLERANCE_FRACTION = 0.5
 TIMING_TOLERANCE_US = 50.0
+PACE_TOLERANCE_S = 20e-3
+PACE_TOLERANCE_PPM = 500.0
 CONDITIONED_RATE_HZ = 200.0
 COUNT_ERROR_MARGIN_S = 0.05
 INLIER_FLOOR_S = 200e-6
@@ -1142,6 +1144,30 @@ def conditioned_span(epoch: EpochResult) -> dict:
     }
 
 
+def _elapsed_since_first_step(events: dict[str, StepEvents]) -> np.ndarray:
+    times = np.sort(np.concatenate([ev.time for ev in events.values()]))
+    return times - times[0]
+
+
+def epoch_pace(steps: EpochSteps) -> dict:
+    capture = _elapsed_since_first_step(steps.capture)
+    stream = _elapsed_since_first_step(steps.reference)
+    shared = min(capture.size, stream.size)
+    capture, stream = capture[:shared], stream[:shared]
+    lag = capture - stream
+    allowed = PACE_TOLERANCE_S + PACE_TOLERANCE_PPM * 1e-6 * stream
+    worst = int(np.argmax(np.abs(lag) - allowed))
+    return {
+        "pace_capture_over_stream": float(capture[-1] / stream[-1])
+        if stream[-1] > 0.0
+        else 1.0,
+        "pace_max_abs_lag_ms": float(np.abs(lag).max() * 1e3),
+        "pace_worst_lag_ms": float(lag[worst] * 1e3),
+        "pace_worst_at_stream_s": float(stream[worst]),
+        "pace_within_tolerance": bool(np.all(np.abs(lag) <= allowed)),
+    }
+
+
 def residual_wander_us(matches: dict[str, MatchedSteps]) -> float:
     late = np.concatenate([m.late_s for m in matches.values()])
     times = np.concatenate([m.capture_time_s for m in matches.values()])
@@ -1484,6 +1510,7 @@ def analyze(
         ),
         default=0.0,
     )
+    paces = [epoch_pace(e.steps) for e in epochs]
     checks = {
         "net_steps_match": all(
             abs(r["net_steps_capture_minus_expected"]) <= r["rest_tie_steps"]
@@ -1497,6 +1524,9 @@ def analyze(
         ),
         f"timing_abs_max_within_{TIMING_TOLERANCE_US:g}us": timing_abs_max_us
         <= TIMING_TOLERANCE_US,
+        "pace_matches_reference": all(
+            p["pace_within_tolerance"] for p in paces
+        ),
     }
     verdict = {
         "ok": all(checks.values()),
@@ -1520,6 +1550,7 @@ def analyze(
                 "stream_start_s": e.reference.start_s,
                 "stream_duration_s": e.reference.duration_s,
                 **conditioned_span(e),
+                **pace,
                 "offset_s": e.alignment.offset_s,
                 "ppm": e.alignment.ppm,
                 "scale_fitted": e.alignment.scale_fitted,
@@ -1528,7 +1559,7 @@ def analyze(
                 ),
                 "residual_wander_us": residual_wander_us(e.matches),
             }
-            for e in epochs
+            for e, pace in zip(epochs, paces)
         ],
         "motors": motors_report,
         "corexy": corexy_report(inputs, reference, finals, errors),
