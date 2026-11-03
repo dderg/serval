@@ -107,6 +107,19 @@ impl ScalarLaw {
         }
     }
 
+    /// Whether the law reads the arc nowhere along a rail: constant
+    /// acceleration, or a disk rail of constant curvature. With `σ = ±0`,
+    /// `σ·ds` is a zero of `σ`'s sign for every finite `ds ≥ 0`, so
+    /// `κ0 + σ·ds` is one float and [`Self::accel_at`],
+    /// [`Self::accel_rate_at`] and [`Self::settle_crossed_cap`] give the same
+    /// bits at every arc.
+    fn is_autonomous(&self) -> bool {
+        match *self {
+            ScalarLaw::ConstAccel { .. } => true,
+            ScalarLaw::DiskRail { sigma, .. } => sigma == 0.0,
+        }
+    }
+
     /// Tangential acceleration commanded by the law at state `(ds, v)`,
     /// where `ds` is arc travelled since the segment start.
     fn accel_at(&self, ds: f64, v: f64) -> f64 {
@@ -744,6 +757,7 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<[RailKnot
     };
     let f = |s: f64, w: f64| 2.0 * law.accel_at(s, w.max(0.0).sqrt());
     let mut carried: Option<RailState> = None;
+    let mut memo = law.is_autonomous().then(StepMemo::new);
     for i in 0..n {
         let s = arc_at(i);
         let s_next = arc_at(i + 1);
@@ -752,37 +766,111 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<[RailKnot
             .take()
             .filter(|end| end.s == s)
             .unwrap_or_else(|| state_at(s, w));
-        let k1 = 2.0 * lo.a;
-        let k2 = f(s + 0.5 * h, w + 0.5 * h * k1);
-        let k3 = f(s + 0.5 * h, w + 0.5 * h * k2);
-        let k4 = f(s + h, w + h * k3);
-        let increment = h * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0;
-        let stepped = w + increment;
-        let settled = law.settle_crossed_cap(s, s + h, stepped);
-        let w_next = settled.unwrap_or(stepped);
         let last = i == n - 1;
-        if w_next <= 0.0 && !last {
-            return None;
-        }
-        let hi = state_at(s + h, w_next);
-        if lo.v + hi.v <= 0.0 {
-            return None;
-        }
-        let rise = match settled {
-            None if w_next > 0.0 => increment / (lo.v + hi.v),
-            _ => hi.v - lo.v,
+        let memoized = memo.as_ref().and_then(|memo| memo.get(w, h));
+        let step = match memoized {
+            Some(step) => {
+                if step.w_next <= 0.0 && !last {
+                    return None;
+                }
+                if lo.v + step.hi.v <= 0.0 {
+                    return None;
+                }
+                step
+            }
+            None => {
+                let k1 = 2.0 * lo.a;
+                let k2 = f(s + 0.5 * h, w + 0.5 * h * k1);
+                let k3 = f(s + 0.5 * h, w + 0.5 * h * k2);
+                let k4 = f(s + h, w + h * k3);
+                let increment = h * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0;
+                let stepped = w + increment;
+                let settled = law.settle_crossed_cap(s, s + h, stepped);
+                let w_next = settled.unwrap_or(stepped);
+                if w_next <= 0.0 && !last {
+                    return None;
+                }
+                let hi = state_at(s + h, w_next);
+                if lo.v + hi.v <= 0.0 {
+                    return None;
+                }
+                let rise = match settled {
+                    None if w_next > 0.0 => increment / (lo.v + hi.v),
+                    _ => hi.v - lo.v,
+                };
+                let step = RailStep {
+                    w_next,
+                    hi,
+                    rise,
+                    duration: knot_duration(h, (lo.v, lo.a, lo.rate), (hi.v, hi.a, hi.rate)),
+                };
+                if let Some(memo) = memo.as_mut() {
+                    memo.put(w, h, step);
+                }
+                step
+            }
         };
-        t += knot_duration(h, (lo.v, lo.a, lo.rate), (hi.v, hi.a, hi.rate));
-        w = w_next.max(0.0);
+        t += step.duration;
+        w = step.w_next.max(0.0);
         knots.push(RailKnot {
             t,
             s: s_next,
-            v: hi.v,
-            rise,
+            v: step.hi.v,
+            rise: step.rise,
         });
-        carried = Some(hi);
+        carried = Some(RailState {
+            s: s + h,
+            ..step.hi
+        });
     }
     Some(Arc::from(knots))
+}
+
+/// One completed integrator step: the state it reached and the knot it laid.
+#[derive(Clone, Copy)]
+struct RailStep {
+    w_next: f64,
+    hi: RailState,
+    rise: f64,
+    duration: f64,
+}
+
+const STEP_MEMO_SLOTS: usize = 64;
+
+/// Completed steps of an autonomous rail by the `(v², h)` they started
+/// from. Such a law reads the arc nowhere, so a step is a function of its
+/// start speed and size alone, and a rail riding its cap repeats a handful of
+/// `(v², h)` pairs — the grid's step sizes differ only in rounding — for
+/// thousands of steps. Direct-mapped on the step size; a collision only
+/// costs a recomputation.
+struct StepMemo {
+    slots: [Option<(u64, u64, RailStep)>; STEP_MEMO_SLOTS],
+}
+
+impl StepMemo {
+    fn new() -> Self {
+        StepMemo {
+            slots: [None; STEP_MEMO_SLOTS],
+        }
+    }
+
+    fn slot(h: f64) -> usize {
+        (h.to_bits().wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (64 - STEP_MEMO_SLOTS.trailing_zeros()))
+            as usize
+    }
+
+    fn get(&self, w: f64, h: f64) -> Option<RailStep> {
+        match self.slots[Self::slot(h)] {
+            Some((w_bits, h_bits, step)) if w_bits == w.to_bits() && h_bits == h.to_bits() => {
+                Some(step)
+            }
+            _ => None,
+        }
+    }
+
+    fn put(&mut self, w: f64, h: f64, step: RailStep) {
+        self.slots[Self::slot(h)] = Some((w.to_bits(), h.to_bits(), step));
+    }
 }
 
 /// The rail ODE's state at one arc position, with the law's acceleration
