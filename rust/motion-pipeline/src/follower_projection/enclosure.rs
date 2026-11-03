@@ -92,19 +92,26 @@ impl TableFormula {
     }
 }
 
-/// `d²|ẋ|/dt²` of leaders `[ẋᵢ, ẍᵢ, x⃛ᵢ]` at path speed `1/inverse`, its
-/// rate `along = ẋ·ẍ/|ẋ|` already read: `(|ẍ|² + ẋ·x⃛ − along²)/|ẋ|`, which
-/// is `Σ_{i<j}(ẋᵢẍⱼ − ẋⱼẍᵢ)²/|ẋ|³ + ẋ·x⃛/|ẋ|` as the signal reads it.
-fn leader_speed_second(
-    leaders: &[[TaylorModel; 3]],
-    inverse: &TaylorModel,
-    along: &TaylorModel,
-) -> TaylorModel {
-    let mut curvature = along.mul(along).scale(Ball::exact(-1.0));
-    for [v, a, j] in leaders {
-        curvature = curvature.add(&a.mul(a)).add(&v.mul(j));
+/// `d²|ẋ|/dt²` of leaders `[ẋᵢ, ẍᵢ, x⃛ᵢ]` at path speed `1/inverse`:
+/// `Σ_{i<j}(ẋᵢẍⱼ − ẋⱼẍᵢ)²/|ẋ|³ + ẋ·x⃛/|ẋ|`, as the signal reads it — the
+/// turning term from the cross products directly, which a straight path
+/// leaves small, not as the difference `|ẍ|² − (ẋ·ẍ/|ẋ|)²` of two large
+/// models.
+fn leader_speed_second(leaders: &[[TaylorModel; 3]], inverse: &TaylorModel) -> TaylorModel {
+    let mut cross_squared = TaylorModel::constant(Ball::exact(0.0));
+    let mut velocity_dot_jerk = TaylorModel::constant(Ball::exact(0.0));
+    for (index, [v_i, a_i, j_i]) in leaders.iter().enumerate() {
+        velocity_dot_jerk = velocity_dot_jerk.add(&v_i.mul(j_i));
+        for [v_j, a_j, _] in &leaders[index + 1..] {
+            let cross = v_i.mul(a_j).sub(&v_j.mul(a_i));
+            cross_squared = cross_squared.add(&cross.mul(&cross));
+        }
     }
-    curvature.mul(inverse)
+    let inverse_squared = inverse.mul(inverse);
+    cross_squared
+        .mul(&inverse_squared)
+        .add(&velocity_dot_jerk)
+        .mul(inverse)
 }
 
 /// A signal's enclosure over its whole support, built once at the
@@ -116,7 +123,7 @@ fn leader_speed_second(
 /// smaller than it.
 #[derive(Default)]
 pub(super) struct WholeEnclosure {
-    built: std::cell::RefCell<Option<Option<Built>>>,
+    built: std::cell::OnceCell<Option<std::cell::RefCell<Built>>>,
 }
 
 /// The pieces built so far, each beside the accuracy it was built at.
@@ -160,13 +167,15 @@ impl WholeEnclosure {
         whole: (f64, f64),
         build: impl Fn((f64, f64), [f64; 3]) -> Option<Vec<ExactPiece>>,
     ) -> Option<Enclosure<'_>> {
+        let kept = self
+            .built
+            .get_or_init(|| {
+                build(whole, accuracy)
+                    .map(|pieces| std::cell::RefCell::new(Built::new(pieces, accuracy)))
+            })
+            .as_ref()?;
         {
-            let mut built = self.built.borrow_mut();
-            let built = built
-                .get_or_insert_with(|| {
-                    build(whole, accuracy).map(|pieces| Built::new(pieces, accuracy))
-                })
-                .as_mut()?;
+            let mut built = kept.borrow_mut();
             let span = built.span((lo, hi));
             let (mut index, mut end) = (span.start, span.end);
             while index < end {
@@ -189,20 +198,16 @@ impl WholeEnclosure {
                 end += added - 1;
             }
         }
-        let built = self.built.borrow();
-        let pieces = &built.as_ref()?.as_ref()?.pieces;
-        let span = built.as_ref()?.as_ref()?.span((lo, hi));
+        let built = kept.borrow();
+        let span = built.span((lo, hi));
+        let pieces = &built.pieces;
         let whole_piece = |piece: &ExactPiece| piece.lo >= lo && piece.hi <= hi;
         if pieces[span.clone()]
             .iter()
             .all(|piece| resolves(piece, accuracy) || whole_piece(piece))
         {
             return Some(Enclosure::Held(std::cell::Ref::map(built, |built| {
-                &built
-                    .as_ref()
-                    .and_then(Option::as_ref)
-                    .expect("the enclosure was built above")
-                    .pieces[span]
+                &built.pieces[span]
             })));
         }
         let mut out = Vec::with_capacity(span.len());
@@ -330,7 +335,7 @@ impl<'a> FollowerSignal<'a> {
             .scale(Ball::exact(window.radius) * scale)
             .add_ball(Ball::exact(self.s_owned(window.center)));
         let (centre, spread) = s.spread();
-        let reach = (centre - spread, centre + spread);
+        let reach = self.reach_inside_crossings(window, (centre - spread, centre + spread));
         if self.state.smoothing.touches(reach.0, reach.1) {
             return None;
         }
@@ -339,11 +344,9 @@ impl<'a> FollowerSignal<'a> {
         let reach = (reach.0 - held, reach.1 + held);
         let formulas = self.table_formulas(centre, reach)?;
         let rate_second = if with_jerk {
-            match (&inverse_speed, &along) {
-                (Some(inverse), Some(along)) => {
-                    leader_speed_second(&leaders, inverse, along).scale(scale)
-                }
-                _ => TaylorModel::constant(Ball::exact(0.0)),
+            match &inverse_speed {
+                Some(inverse) => leader_speed_second(&leaders, inverse).scale(scale),
+                None => TaylorModel::constant(Ball::exact(0.0)),
             }
         } else {
             TaylorModel::UNBOUNDED
@@ -381,6 +384,31 @@ impl<'a> FollowerSignal<'a> {
         Some(FollowerModels { path, raw })
     }
 
+    /// `reach` held to the side of a ratio crossing a window ends or starts
+    /// at: the signal reads the formula before a crossing up to it and the
+    /// one after from it on, and a fit piece ending or starting there
+    /// holds the limit from inside, so a window ends on the one and starts
+    /// on the other, however close its odometer bound reaches across. A
+    /// bound wholly across the crossing it starts or ends at stays whole.
+    fn reach_inside_crossings(&self, window: Window, reach: (f64, f64)) -> (f64, f64) {
+        let (lo, hi) = reach;
+        let crossings = self.ratio_crossings();
+        let boundary_at = |t: f64| {
+            let index = crossings.partition_point(|&(time, _)| time < t);
+            crossings
+                .get(index)
+                .filter(|&&(time, _)| time == t)
+                .map(|&(_, boundary)| boundary)
+        };
+        let lo = boundary_at(window.lo).map_or(lo, |boundary| {
+            lo.max(trajectory::next_toward(boundary, f64::INFINITY))
+        });
+        let hi = boundary_at(window.hi).map_or(hi, |boundary| {
+            hi.min(trajectory::next_toward(boundary, f64::NEG_INFINITY))
+        });
+        if lo <= hi { (lo, hi) } else { reach }
+    }
+
     /// The follower's enclosure over `[lo, hi]`, a window per stretch
     /// between the signal's grid times and its axes' formula changes;
     /// `None` where an axis has no formula a window reads, or a window no
@@ -414,6 +442,7 @@ impl<'a> FollowerSignal<'a> {
                 .iter()
                 .chain(extra)
                 .copied()
+                .chain(self.ratio_crossings().iter().map(|&(time, _)| time))
                 .filter(|&t| t > lo && t < hi),
         );
         for axis in windows.leaders.iter().chain(&windows.raw) {

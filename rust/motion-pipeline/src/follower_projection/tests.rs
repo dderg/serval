@@ -1795,7 +1795,8 @@ fn turning_leaders_on_two_ramps() -> (ContinuousSegment, FollowerState) {
 }
 
 /// The enclosure of `signal` over `[lo, hi]` exists and no sample of the
-/// signal leaves any of its pieces' bounds.
+/// signal leaves any of its pieces' bounds, each piece's ends read from
+/// inside it, as the fit piece ending or starting there holds them.
 fn assert_enclosure_holds_every_sample(signal: &impl TrackSignal, (lo, hi): (f64, f64)) {
     let pieces = signal
         .enclosure_on(lo, hi, [1e-7, f64::INFINITY, 1e-2])
@@ -1806,7 +1807,11 @@ fn assert_enclosure_holds_every_sample(signal: &impl TrackSignal, (lo, hi): (f64
     );
     for piece in pieces.iter() {
         for k in 0..=32 {
-            let t = piece.lo + (piece.hi - piece.lo) * f64::from(k) / 32.0;
+            let t = match k {
+                0 => trajectory::next_toward(piece.lo, f64::INFINITY),
+                32 => trajectory::next_toward(piece.hi, f64::NEG_INFINITY),
+                _ => piece.lo + (piece.hi - piece.lo) * f64::from(k) / 32.0,
+            };
             let read = signal.eval_pva(t);
             let enclosed = piece.eval_pva(t);
             for (order, (read, model)) in [

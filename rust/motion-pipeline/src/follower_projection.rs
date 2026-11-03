@@ -2525,6 +2525,8 @@ pub(crate) struct FollowerSignal<'a> {
     whole_enclosure: enclosure::WholeEnclosure,
     /// The leaders and the raw track as the enclosure reads them.
     axis_windows: std::cell::OnceCell<Option<enclosure::FollowerAxisWindows<'a>>>,
+    /// See [`Self::ratio_crossings`].
+    ratio_crossings: std::cell::OnceCell<Vec<(f64, f64)>>,
 }
 
 impl<'a> FollowerSignal<'a> {
@@ -2578,6 +2580,7 @@ impl<'a> FollowerSignal<'a> {
             pva_memo: RefCell::new([None; PVA_MEMO_SLOTS]),
             whole_enclosure: enclosure::WholeEnclosure::default(),
             axis_windows: std::cell::OnceCell::new(),
+            ratio_crossings: std::cell::OnceCell::new(),
         };
         let (start_sliver, end_sliver) = sig.speed_zero_slivers();
         sig.start_sliver = start_sliver;
@@ -2888,6 +2891,56 @@ impl<'a> FollowerSignal<'a> {
         (overlapping_zero && tail_zero && !smoothed).then(|| self.eval(self.grid[0]))
     }
 
+    /// The times inside the support the odometer first reads a span or
+    /// smoothing boundary, each beside that boundary, in order: the
+    /// formula the table lays changes there, the signal reading the one
+    /// before up to the time and the one after from it on.
+    fn ratio_crossings(&self) -> &[(f64, f64)] {
+        self.ratio_crossings.get_or_init(|| {
+            let s_end = self.s_end();
+            let support_start = *self.grid.first().expect("follower grid is seeded");
+            let support_end = *self.grid.last().expect("follower grid is seeded");
+            let mut boundaries = self
+                .state
+                .spans
+                .iter()
+                .flat_map(|span| [span.s0, span.s1])
+                .chain(self.state.smoothing.bends(
+                    self.s_start - SPAN_LOOKUP_SLACK_MM,
+                    s_end + SPAN_LOOKUP_SLACK_MM,
+                ))
+                .filter(|&s| {
+                    s >= self.s_start - SPAN_LOOKUP_SLACK_MM && s <= s_end + SPAN_LOOKUP_SLACK_MM
+                })
+                .collect::<Vec<_>>();
+            boundaries.sort_by(f64::total_cmp);
+            boundaries.dedup();
+            let mut crossings = Vec::new();
+            for boundary in boundaries {
+                if self.s_at(support_start) >= boundary {
+                    continue;
+                }
+                let mut lo = support_start;
+                let mut hi = support_end;
+                loop {
+                    let mid = 0.5 * lo + 0.5 * hi;
+                    if mid <= lo || mid >= hi {
+                        break;
+                    }
+                    if self.s_at(mid) < boundary {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                if hi - support_start > GRID_DEDUP_EPS_S && support_end - hi > GRID_DEDUP_EPS_S {
+                    crossings.push((hi, boundary));
+                }
+            }
+            crossings
+        })
+    }
+
     fn construction_breakpoints(
         &self,
         raw_axis: &ContinuousAxis,
@@ -2897,7 +2950,6 @@ impl<'a> FollowerSignal<'a> {
         let mut breaks = raw_breaks.clone();
         breaks.push(*self.grid.first().expect("follower grid is seeded"));
         breaks.push(*self.grid.last().expect("follower grid is seeded"));
-        let s_end = self.s_end();
         let support_start = *self.grid.first().expect("follower grid is seeded");
         let support_end = *self.grid.last().expect("follower grid is seeded");
         for sliver in [self.start_sliver, self.end_sliver].into_iter().flatten() {
@@ -2907,42 +2959,7 @@ impl<'a> FollowerSignal<'a> {
                 breaks.push(sliver.inner);
             }
         }
-        let mut boundaries = self
-            .state
-            .spans
-            .iter()
-            .flat_map(|span| [span.s0, span.s1])
-            .chain(self.state.smoothing.bends(
-                self.s_start - SPAN_LOOKUP_SLACK_MM,
-                s_end + SPAN_LOOKUP_SLACK_MM,
-            ))
-            .filter(|&s| {
-                s >= self.s_start - SPAN_LOOKUP_SLACK_MM && s <= s_end + SPAN_LOOKUP_SLACK_MM
-            })
-            .collect::<Vec<_>>();
-        boundaries.sort_by(f64::total_cmp);
-        boundaries.dedup();
-        for boundary in boundaries {
-            if self.s_at(support_start) >= boundary {
-                continue;
-            }
-            let mut lo = support_start;
-            let mut hi = support_end;
-            loop {
-                let mid = 0.5 * lo + 0.5 * hi;
-                if mid <= lo || mid >= hi {
-                    break;
-                }
-                if self.s_at(mid) < boundary {
-                    lo = mid;
-                } else {
-                    hi = mid;
-                }
-            }
-            if hi - support_start > GRID_DEDUP_EPS_S && support_end - hi > GRID_DEDUP_EPS_S {
-                breaks.push(hi);
-            }
-        }
+        breaks.extend(self.ratio_crossings().iter().map(|&(time, _)| time));
         breaks.sort_by(f64::total_cmp);
         breaks.dedup_by(|left, right| (*left - *right).abs() <= GRID_DEDUP_EPS_S);
         for b in breaks.iter_mut() {
