@@ -367,6 +367,18 @@ Leaders, and the follower's weld, edge-break and floor checks, keep the
 absolute budget; the fit audit holds every piece to the budget its fit
 resolved for it.
 
+The advanced signal has no exact polynomials to prove a rung against, so a
+rung that passes the probes is held between them by estimates. Under the
+position-equivalent budget those estimate the truth, not the error: the
+ladder accepts high-degree rungs whose curvature error runs to `8ε/h²`, and
+such a rung swings between two samples where the error's own interpolant
+sees nothing. Between each pair of samples the rung is read exactly against
+the truth's quintic Hermite interpolant, the exact midpoint measures how far
+the truth leaves that interpolant, and a stretch whose estimate and miss
+together reach the budget is split there. The error's interpolant left 72
+pieces of the Trident ramp chain's dense print up to 1.83× over; the
+truth's leaves none.
+
 Leader refits use ordered parallel work without changing the fitted signal.
 Axes run concurrently. Ordinary windows distribute whole target segments;
 a target with at least 512 exact cut spans distributes those spans instead.

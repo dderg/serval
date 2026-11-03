@@ -1,5 +1,5 @@
 use super::{
-    AxisFit, FloorVelocityGate, KnotJumpBound, MIN_DEVICE_INTERVAL_S, TrackSignal,
+    AxisFit, FloorVelocityGate, KnotJumpBound, MIN_DEVICE_INTERVAL_S, RungWitness, TrackSignal,
     fit_axis_from_signal,
 };
 use crate::lowering::{AccelBudget, FitTol, LADDER_PROBES_U, eval_mono_dd, quintic_in_u};
@@ -880,4 +880,106 @@ fn a_position_equivalent_budget_fits_a_pressure_wave_in_fewer_pieces_within_each
             );
         }
     }
+}
+
+/// A smooth extruder swell, `20·τ + 3·10⁴·τ² + 10⁷·τ³` mm.
+struct CubicSwell {
+    t0: f64,
+}
+
+impl CubicSwell {
+    const COEFFICIENTS: [f64; 4] = [0.0, 20.0, 3e4, 1e7];
+
+    /// The swell over `[t0, t0 + h]` as a polynomial in `u ∈ [−1, 1]`.
+    fn in_u(&self, h: f64) -> Vec<f64> {
+        let half = 0.5 * h;
+        Self::COEFFICIENTS
+            .iter()
+            .rev()
+            .fold(vec![0.0], |acc, &coefficient| {
+                let mut next = vec![0.0; acc.len() + 1];
+                for (power, &value) in acc.iter().enumerate() {
+                    next[power] += half * value;
+                    next[power + 1] += half * value;
+                }
+                next[0] += coefficient;
+                next
+            })
+    }
+}
+
+impl TrackSignal for CubicSwell {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let tau = t - self.t0;
+        (
+            tau * (20.0 + tau * (3e4 + 1e7 * tau)),
+            20.0 + tau * (6e4 + 3e7 * tau),
+            6e4 + 6e7 * tau,
+        )
+    }
+}
+
+/// The witness's verdict between the two middle probes on a rung that
+/// meets the swell's position, slope and curvature at both and swings
+/// between them by `α·(u − a)³·(u − b)³`, whose curvature error peaks at
+/// `swing` times the position-equivalent budget midway.
+fn witness_between_middle_probes(swing: f64) -> Option<f64> {
+    let sig = CubicSwell { t0: 1.0 };
+    let h = 1e-3;
+    let fit_tol = FitTol {
+        accel_budget: AccelBudget::PositionEquivalent,
+        ..FitTol::absolute(1e-4, 50.0)
+    };
+    let piece_tol = fit_tol.for_piece(h);
+    let (a, b) = (LADDER_PROBES_U[4], LADDER_PROBES_U[5]);
+    let half_width = 0.5 * (b - a);
+    let curvature_budget = piece_tol.accel_mm_s2 * (0.5 * h) * (0.5 * h);
+    let alpha = swing * curvature_budget / (6.0 * half_width.powi(4));
+    let quadratic = [a * b, -(a + b), 1.0];
+    let swing_polynomial = (0..3).fold(vec![alpha], |acc, _| {
+        let mut next = vec![0.0; acc.len() + 2];
+        for (power, &value) in acc.iter().enumerate() {
+            for (offset, &factor) in quadratic.iter().enumerate() {
+                next[power + offset] += value * factor;
+            }
+        }
+        next
+    });
+    let mut coefficients = sig.in_u(h);
+    coefficients.resize(swing_polynomial.len(), 0.0);
+    for (coefficient, swing) in coefficients.iter_mut().zip(&swing_polynomial) {
+        *coefficient += swing;
+    }
+    let witness = RungWitness {
+        axis: 3,
+        sig: &sig,
+        coefficients: &coefficients,
+        t0: sig.t0,
+        h,
+        fit_tol: piece_tol,
+        accel_budget: fit_tol.accel_budget,
+    };
+    let left = witness.exact_sample_at(a).expect("the swell is finite");
+    let right = witness.exact_sample_at(b).expect("the swell is finite");
+    witness
+        .over_piece(left, right)
+        .expect("the swell is finite")
+}
+
+#[test]
+fn a_rung_swinging_past_the_position_equivalent_budget_between_probes_is_caught() {
+    let witness = witness_between_middle_probes(1.5);
+    assert!(
+        witness.is_some_and(|u| u > LADDER_PROBES_U[4] && u < LADDER_PROBES_U[5]),
+        "a swing 1.5x the budget between the probes went unwitnessed: {witness:?}"
+    );
+}
+
+#[test]
+fn a_rung_swinging_within_the_position_equivalent_budget_between_probes_is_kept() {
+    let witness = witness_between_middle_probes(0.8);
+    assert!(
+        witness.is_none(),
+        "a swing 0.8x the budget between the probes was witnessed at {witness:?}"
+    );
 }
