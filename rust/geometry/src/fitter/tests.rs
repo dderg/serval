@@ -605,7 +605,7 @@ fn corner_ramp_beyond_extruder_budget_leaves_the_junction_unblended() {
 
     let open = CornerFitConfig::default();
     assert!(matches!(
-        plan_junction_reduced(&a, &b, open, 0.0, 0.0).unwrap(),
+        plan_junction_reduced(&a, &b, open, (0.0, 0.0), 0.0).unwrap(),
         JunctionPlan::Blend(_)
     ));
 
@@ -614,7 +614,7 @@ fn corner_ramp_beyond_extruder_budget_leaves_the_junction_unblended() {
         ..CornerFitConfig::default()
     };
     assert!(matches!(
-        plan_junction_reduced(&a, &b, tight, 0.0, 0.0).unwrap(),
+        plan_junction_reduced(&a, &b, tight, (0.0, 0.0), 0.0).unwrap(),
         JunctionPlan::Unblended(UnblendReason::ExtrusionRampInfeasible)
     ));
 }
@@ -646,7 +646,7 @@ fn disabled_jerk_limiting_never_rejects_ramps_on_its_own() {
         ..CornerFitConfig::default()
     };
     assert!(matches!(
-        plan_junction_reduced(&a, &b, config, 0.0, 0.0).unwrap(),
+        plan_junction_reduced(&a, &b, config, (0.0, 0.0), 0.0).unwrap(),
         JunctionPlan::Blend(_)
     ));
 }
@@ -937,6 +937,43 @@ fn a_run_beside_a_move_along_its_plane_normal_gets_neither_ease_nor_blend_from_i
         assert!(
             blend.is_empty(),
             "a lift along the arc plane's normal is not blended"
+        );
+    }
+}
+
+#[test]
+fn facets_of_jittered_lengths_leave_no_line_body_briefer_than_the_floor() {
+    let (accel, scv) = (3000.0, 20.0);
+    let facets = 40;
+    let radius = 2.7;
+    let vertex = |k: usize| {
+        let jitter = if k % 3 == 1 { 2e-3 } else { 0.0 };
+        let angle = 2.0 * PI * (k as f64 + jitter) / facets as f64;
+        [radius * libm::cos(angle), radius * libm::sin(angle), 0.0]
+    };
+    let moves: Vec<Move> = (0..facets)
+        .map(|k| seg(k as u32 + 1, accel, scv, vertex(k), vertex(k + 1), 0.0))
+        .collect();
+    let out = fit_corners(&moves, CornerFitConfig::default()).unwrap();
+    let floor = shortest_line_body_mm(&moves[0]);
+    for m in &out.moves {
+        if let Some(Segment::Line(line)) = &m.segment.spatial {
+            assert!(
+                line.s_len() >= floor,
+                "line {} keeps a {:e} mm body, under the {floor:e} mm floor",
+                m.source.start_line,
+                line.s_len()
+            );
+        }
+    }
+    for pair in out.moves.windows(2) {
+        assert!(
+            dist(
+                spatial_end(&pair[0]).unwrap(),
+                spatial_start(&pair[1]).unwrap()
+            ) <= 1e-7,
+            "the fit opened a gap at line {}",
+            pair[1].source.start_line
         );
     }
 }

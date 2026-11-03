@@ -66,6 +66,39 @@ pub(super) fn solve_line_line(
     }))
 }
 
+/// Blend a line-line corner at `vertex` from a contact `trim_in` before it
+/// to one `trim_out` past it, both tangent and curvature-free, with one G2
+/// clothoid pair; `None` where no pair joins them within `delta` of the
+/// corner's polyline.
+pub(super) fn solve_line_line_trims(
+    vertex: [f64; 3],
+    (t_in, t_out): ([f64; 3], [f64; 3]),
+    (trim_in, trim_out): (f64, f64),
+    delta: f64,
+) -> Option<GeneralBlend> {
+    let start = madd(vertex, -trim_in, t_in);
+    let end = madd(vertex, trim_out, t_out);
+    let pair = hermite_g2(
+        Anchor {
+            pose: start,
+            tangent: t_in,
+            kappa: 0.0,
+        },
+        Anchor {
+            pose: end,
+            tangent: t_out,
+            kappa: 0.0,
+        },
+        normalize(cross(t_in, t_out)),
+    )?;
+    (max_dev_from_chain(&pair, &[start, vertex, end]) <= delta).then_some(GeneralBlend {
+        half1: pair.half1,
+        half2: pair.half2,
+        trim_in,
+        trim_out,
+    })
+}
+
 /// The line-line trim at which a symmetric corner blend's deviation reaches
 /// `delta` — the deviation-optimal blend footprint per side, unclamped.
 pub(super) fn trim_at_delta(theta: f64, delta: f64) -> Result<f64, GeometryError> {
