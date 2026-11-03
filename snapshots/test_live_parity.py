@@ -168,3 +168,31 @@ def test_feedrate_caps_match_live(engine):
         "G1 X60.0000000001 Y50 E2\n",
     )
     assert feedrates(steps) == [1000.0, 80.0, 80.0, 25.0, 25.0, 2000.0, 2000.0]
+
+
+def extrusions(steps: list[tuple]) -> list[float]:
+    return [delta[3] for _, delta, _, _ in steps]
+
+
+def test_g92_shifts_the_coordinate_frame_like_live(engine):
+    steps = assert_parity(
+        engine,
+        "M83\n"
+        "G1 X10 Y10 F6000\n"
+        "G1 X20 E1\n"
+        "G92 E0\n"
+        "G1 X30 E1\n"
+        "M82\n"
+        "G1 X40 E3\n"
+        "G92 E0\n"
+        "G1 X50 E0.5\n"
+        "G92 X0 Y0\n"
+        "G1 X10 Y5\n"
+        "G92\n"
+        "G1 X5\n",
+    )
+    assert extrusions(steps) == [1.0, 1.0, 2.0, 0.5, 0.0, 0.0]
+    assert [delta[:2] for _, delta, _, _ in steps[-2:]] == [
+        (10.0, 5.0),
+        (5.0, 0.0),
+    ]

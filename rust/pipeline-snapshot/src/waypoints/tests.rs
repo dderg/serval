@@ -119,10 +119,23 @@ fn g91_implies_relative_e_when_undeclared() {
 }
 
 #[test]
-fn g92_resets_e_without_a_move() {
+fn g92_moves_the_gcode_origin_not_the_toolhead() {
     let wp = parse("M82\nG1 X10 E5 F6000\nG92 E0\nG1 X20 E1\n");
     assert_eq!(wp.len(), 2);
-    assert_eq!(wp[1].position[3], 1.0);
+    assert_eq!(wp[1].position[3], 6.0);
+}
+
+#[test]
+fn g92_e0_under_relative_extrusion_leaves_later_extrusion_unchanged() {
+    let wp = parse("M83\nG1 X10 E1 F6000\nG1 X20 E1\nG92 E0\nG1 X30 E1\n");
+    assert_eq!(wp[2].position[3] - wp[1].position[3], 1.0);
+}
+
+#[test]
+fn g92_on_xyz_offsets_later_absolute_targets() {
+    let wp = parse("G1 X10 Y10 F6000\nG92 X0 Y0\nG1 X5 Y5\nG92\nG1 X1\n");
+    assert_eq!(wp[1].position[..2], [15.0, 15.0]);
+    assert_eq!(wp[2].position[..2], [16.0, 15.0]);
 }
 
 #[test]
