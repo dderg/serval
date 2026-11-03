@@ -1,0 +1,11 @@
+[package]
+name = "source-tree"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "Locates the source tree a test is running against from the runtime environment instead of the path baked in when the test binary was compiled."
+license.workspace = true
+
+[lints]
+workspace = true

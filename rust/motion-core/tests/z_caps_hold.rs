@@ -5,8 +5,6 @@
 //! path (per-move limits from `live_config`) and every emitted carrier's z
 //! state is held to the caps.
 
-use std::path::Path;
-
 use motion_core::live_config;
 use motion_core::seam_test_harness::parse_gcode_to_moves;
 use motion_pipeline::{Pipeline, TrajectoryItem};
@@ -53,9 +51,7 @@ G1 X160 Y10 E2 F12000
 ";
 
 fn repo_file(relative: &str) -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(relative);
+    let path = source_tree::repo_file(relative);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 

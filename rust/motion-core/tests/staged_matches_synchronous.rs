@@ -2,8 +2,6 @@
 //! real print, with drains, barriers and a reset mixed into the stream, it
 //! must emit exactly what the synchronous pipeline emits, item for item.
 
-use std::path::Path;
-
 use motion_core::live_config;
 use motion_core::seam_test_harness::parse_gcode_to_moves;
 use motion_pipeline::{
@@ -17,9 +15,7 @@ const BARRIER_EVERY: usize = 53;
 const RESET_AT: usize = 211;
 
 fn repo_file(relative: &str) -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(relative);
+    let path = source_tree::repo_file(relative);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
