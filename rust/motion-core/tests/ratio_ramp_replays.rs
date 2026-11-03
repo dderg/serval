@@ -1,16 +1,14 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use motion_core::seam_test_harness::LiveReplay;
 use motion_pipeline::TrajectoryItem;
 
 fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    source_tree::repo_root()
 }
 
 fn planner_config(name: &str) -> planner_config::PlannerConfig {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/configs")
-        .join(name);
+    let path = source_tree::manifest_dir().join("tests/configs").join(name);
     let text =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let doc =

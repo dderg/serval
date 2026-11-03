@@ -3,8 +3,6 @@
 //! the extruder demand at a start or a stop stays within the advance's
 //! natural rate, `k·r·A` in velocity, and under its demand at a corner.
 
-use std::path::Path;
-
 use motion_core::seam_test_harness::LiveReplay;
 use motion_pipeline::TrajectoryItem;
 use trajectory::ContinuousSegment;
@@ -22,9 +20,7 @@ const P1_MAX_ACCEL: f64 = 3000.0;
 const RISE_RATE_OVERSHOOT: f64 = 1.653;
 
 fn planner_config(name: &str) -> planner_config::PlannerConfig {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/configs")
-        .join(name);
+    let path = source_tree::manifest_dir().join("tests/configs").join(name);
     let text =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let doc =
