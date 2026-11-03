@@ -1,7 +1,0 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
-#
-# It is recommended to check this file in to source control so that
-# everyone who runs the test benefits from these saved cases.
-cc c464915ae1280aba20e6ac0aaa7530b05b303b6cdaf4463a402c016c65a66c8c # shrinks to limits = Limits { max_velocity: 376.7068063815277, max_accel: 23373.428796416283, square_corner_velocity: 5.107292880966574 }, steps = [Step { heading: 1.082249403158437, length_mm: 0.0036875319086787472, feed_mm_s: 1.0, extrude_ratio: 0.0, dwell_before_s: None }, Step { heading: 0.9283254673510041, length_mm: 0.018609387530706487, feed_mm_s: 1.0, extrude_ratio: 0.0, dwell_before_s: None }, Step { heading: 0.0, length_mm: 0.000545802218273663, feed_mm_s: 1.0, extrude_ratio: 0.0, dwell_before_s: None }, Step { heading: 0.0, length_mm: 0.006830044049787521, feed_mm_s: 549.555415206574, extrude_ratio: 0.0, dwell_before_s: None }, Step { heading: 3.594558550132543, length_mm: 1.0, feed_mm_s: 1.0, extrude_ratio: 0.0, dwell_before_s: None }], ratio = 0.055120031542556076

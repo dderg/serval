@@ -139,8 +139,15 @@ fn endpoint_anchored_chord_dev_within(lines: &[&Line], fit: &CircleFit, tol: f64
     let plane_normal = normalize(cross(t0, v0));
     let last = lines[lines.len() - 1];
     let p1 = last.point_at(last.s_len());
-    minimax_through_endpoints(lines, (lines[0].start, p1), fit.origin, plane_normal)
-        .is_some_and(|(origin, rho)| max_chord_dev(lines, origin, rho) <= tol)
+    let balancing_at_best_halves = (tol, 2.0 * tol);
+    minimax_through_endpoints(
+        lines,
+        (lines[0].start, p1),
+        fit.origin,
+        plane_normal,
+        balancing_at_best_halves,
+    )
+    .is_some_and(|(origin, rho)| max_chord_dev(lines, origin, rho) <= tol)
 }
 
 pub(super) fn circle_fit(facets: &[Move]) -> Option<CircleFit> {
@@ -226,7 +233,7 @@ pub(in crate::fitter) fn max_chord_dev(lines: &[&Line], origin: [f64; 3], radius
         .fold(0.0, f64::max)
 }
 
-const MINIMAX_ITERS: usize = 40;
+const MINIMAX_ITERS: usize = 30;
 const INV_PHI: f64 = 0.618_033_988_749_894_8;
 
 /// The minimum of `f` over `[lo, hi]` by golden-section search, never worse
@@ -260,12 +267,15 @@ fn golden_minimum(f: impl Fn(f64) -> f64, (lo, hi): (f64, f64), seed: f64) -> f6
 /// The circle through both endpoints that keeps the facet chords closest.
 /// Its bulge over the endpoint chord trades the vertices' radial error
 /// against the chords' sagitta, so the minimax circle sits between the
-/// vertices and the chord midpoints instead of through the vertices.
+/// vertices and the chord midpoints instead of through the vertices. A seed
+/// circle already within `good_enough` is returned as is; one past
+/// `hopeless`, beyond what balancing can recover, is not searched.
 pub(in crate::fitter) fn minimax_through_endpoints(
     lines: &[&Line],
     (p0, p1): ([f64; 3], [f64; 3]),
     seed_origin: [f64; 3],
     plane_normal: [f64; 3],
+    (good_enough, hopeless): (f64, f64),
 ) -> Option<([f64; 3], f64)> {
     let chord = sub(p1, p0);
     if norm(chord) < BUDGET_EPS_MM {
@@ -287,8 +297,17 @@ pub(in crate::fitter) fn minimax_through_endpoints(
         let (origin, radius) = circle(bulge);
         max_chord_dev(lines, origin, radius)
     };
-    let spread = 2.0 * dev(seed);
-    let bracket = ((seed - spread).max(0.5 * seed), seed + spread);
+    let seed_dev = dev(seed);
+    if seed_dev <= good_enough {
+        return Some(circle(seed));
+    }
+    if seed_dev > hopeless {
+        return None;
+    }
+    let bracket = (
+        (seed - 2.0 * seed_dev).max(0.5 * seed),
+        seed + 2.0 * seed_dev,
+    );
     Some(circle(golden_minimum(dev, bracket, seed)))
 }
 

@@ -94,9 +94,13 @@ pub(super) fn reconstruct(
         (EndAnchor::Welded, EndAnchor::Bound) => {
             circle::minimax_through_vertex(&lines, p1, fit.origin)
         }
-        (EndAnchor::Bound, EndAnchor::Bound) => {
-            circle::minimax_through_endpoints(&lines, (p0, p1), fit.origin, plane_normal)
-        }
+        (EndAnchor::Bound, EndAnchor::Bound) => circle::minimax_through_endpoints(
+            &lines,
+            (p0, p1),
+            fit.origin,
+            plane_normal,
+            (0.0, f64::INFINITY),
+        ),
     };
     let Some((origin, rho)) = anchored else {
         return Ok(None);

@@ -912,8 +912,14 @@ fn endpoint_anchored_minimax_circle_is_well_conditioned_near_a_half_turn() {
     let lines: Vec<&Line> = moves.iter().map(|m| line_of(m).unwrap()).collect();
     let (p0, p1) = (vertex(0), vertex(facets));
     let plane_normal = [0.0, 0.0, 1.0];
-    let (exact_center, exact_radius) =
-        kernels::minimax_through_endpoints(&lines, (p0, p1), [0.0; 3], plane_normal).unwrap();
+    let (exact_center, exact_radius) = kernels::minimax_through_endpoints(
+        &lines,
+        (p0, p1),
+        [0.0; 3],
+        plane_normal,
+        (0.0, f64::INFINITY),
+    )
+    .unwrap();
     let sagitta = r * (1.0 - libm::cos(0.5 * PI / facets as f64));
     let deviation = kernels::max_chord_dev(&lines, exact_center, exact_radius);
     assert!(
@@ -921,8 +927,14 @@ fn endpoint_anchored_minimax_circle_is_well_conditioned_near_a_half_turn() {
         "minimax chord deviation {deviation} against a {sagitta} sagitta"
     );
     for noise in [[1e-3, 0.0, 0.0], [0.0, 1e-3, 0.0], [-7e-4, 5e-4, 0.0]] {
-        let (center, radius) =
-            kernels::minimax_through_endpoints(&lines, (p0, p1), noise, plane_normal).unwrap();
+        let (center, radius) = kernels::minimax_through_endpoints(
+            &lines,
+            (p0, p1),
+            noise,
+            plane_normal,
+            (0.0, f64::INFINITY),
+        )
+        .unwrap();
         let center_err = dist(center, exact_center);
         assert!(
             center_err <= 1e-6,
