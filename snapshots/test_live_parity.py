@@ -282,3 +282,70 @@ def test_set_kinematic_position_away_from_the_toolhead_is_refused(engine):
         engine, "G1 X10 Y10 F6000\nSET_KINEMATIC_POSITION X=0\nG1 X20\n"
     )
     assert "SET_KINEMATIC_POSITION" in refusal
+
+
+def test_speed_and_extrude_factors_match_live(engine):
+    steps = assert_parity(
+        engine,
+        "M83\n"
+        "G1 X10 Y10 F6000\n"
+        "M220 S50\n"
+        "G1 X20 E1\n"
+        "G1 X30 E1 F3000\n"
+        "M221 S90\n"
+        "G1 X40 E1\n"
+        "M82\n"
+        "G92 E0\n"
+        "G1 X50 E2\n"
+        "M220\n"
+        "M221\n"
+        "G1 X60 E3\n",
+    )
+    assert feedrates(steps) == [50.0, 25.0, 25.0, 25.0, 50.0]
+    assert extrusions(steps) == pytest.approx([1.0, 1.0, 0.9, 1.8, 1.0])
+
+
+def test_gcode_offsets_and_saved_states_match_live(engine):
+    steps = assert_parity(
+        engine,
+        "G1 X10 Y10 F6000\n"
+        "SET_GCODE_OFFSET Z=0.2\n"
+        "G1 X20 Z1\n"
+        "SET_GCODE_OFFSET Z_ADJUST=-0.05 MOVE=1\n"
+        "G1 X30\n"
+        "SET_GCODE_OFFSET X=5 MOVE=1 MOVE_SPEED=20\n"
+        "G1 X40\n"
+        "SAVE_GCODE_STATE NAME=park\n"
+        "G91\n"
+        "M220 S200\n"
+        "G1 X5 Y5\n"
+        "RESTORE_GCODE_STATE NAME=park MOVE=1 MOVE_SPEED=50\n"
+        "G1 X50\n",
+    )
+    displacements = [v for _, delta, _, _ in moves(steps) for v in delta[:3]]
+    assert displacements == pytest.approx(
+        [10.0, 0.0, 1.2]
+        + [0.0, 0.0, -0.05]
+        + [10.0, 0.0, 0.0]
+        + [5.0, 0.0, 0.0]
+        + [10.0, 0.0, 0.0]
+        + [5.0, 5.0, 0.0]
+        + [-5.0, -5.0, 0.0]
+        + [10.0, 0.0, 0.0]
+    )
+    assert feedrates(steps)[-3:] == [200.0, 50.0, 100.0]
+
+
+@pytest.mark.parametrize(
+    ("gcode", "error"),
+    [
+        ("G1 X10 Y10 F6000\nG20\nG1 X20\n", "G20"),
+        ("G1 X10 Y10 F6000\nRESTORE_GCODE_STATE NAME=nope\n", "nope"),
+        ("G1 X10 Y10 F6000\nM220 S0\n", "S"),
+        ("G1 X10 Y10 F6000\nM221 S-5\n", "S"),
+    ],
+)
+def test_gcode_state_errors_are_refused_like_live(engine, gcode, error):
+    with pytest.raises(Exception, match=error):
+        live_replay.replay(gcode, BENCH_CFG)
+    assert error in snapshot_refusal(engine, gcode)
