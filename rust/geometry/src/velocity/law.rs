@@ -912,26 +912,18 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<[RailKnot
     Some(Arc::from(knots))
 }
 
-/// Runge–Kutta steps across a pair departing the curvature cap.
-const DEPARTURE_STEPS: u32 = 8;
-
 /// The rise in `v²` over `[s, s + h]` departing the cap at `s`. There `v²`
 /// leaves as `(s'−s)^(3/2)`, whose unbounded curvature a step in arc
-/// misses by a fixed fraction however short; stepped in
-/// `x = √((s'−s)/h)` instead, the slope `d(v²)/dx = 4h·x·a` is smooth.
+/// misses by a fixed fraction however short; one Runge–Kutta step in
+/// `x = √((s'−s)/h)` instead, where the slope `d(v²)/dx = 4h·x·a` is smooth,
+/// holds the launch and landing tests to the law as closely as eight do.
 fn departure_increment(law: &ScalarLaw, s: f64, h: f64, w: f64) -> f64 {
     let slope = |x: f64, w: f64| 4.0 * h * x * law.accel_at(s + h * x * x, w.max(0.0).sqrt());
-    let dx = 1.0 / f64::from(DEPARTURE_STEPS);
-    let mut w_x = w;
-    for j in 0..DEPARTURE_STEPS {
-        let x = f64::from(j) * dx;
-        let k1 = slope(x, w_x);
-        let k2 = slope(x + 0.5 * dx, w_x + 0.5 * dx * k1);
-        let k3 = slope(x + 0.5 * dx, w_x + 0.5 * dx * k2);
-        let k4 = slope(x + dx, w_x + dx * k3);
-        w_x += dx * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0;
-    }
-    w_x - w
+    let k1 = slope(0.0, w);
+    let k2 = slope(0.5, w + 0.5 * k1);
+    let k3 = slope(0.5, w + 0.5 * k2);
+    let k4 = slope(1.0, w + k3);
+    (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0
 }
 
 /// The rail ODE's state at one arc position, with the law's acceleration
