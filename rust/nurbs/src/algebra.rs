@@ -1,6 +1,9 @@
 use crate::AlgebraError;
 use crate::bezier::binomial;
 
+const PEAK_GRID_STEPS: usize = 512;
+const PEAK_BISECTION_STEPS: u32 = 60;
+
 #[derive(Debug, Clone)]
 pub struct PiecewisePolynomialKernel {
     pub pieces: Vec<crate::bezier::BezierPiece>,
@@ -51,6 +54,44 @@ impl PiecewisePolynomialKernel {
                     .sum::<f64>()
             })
             .sum()
+    }
+
+    /// `max |w|` over the support: each piece's value at its ends and at
+    /// every root of its derivative, the roots bracketed on a uniform grid
+    /// of [`PEAK_GRID_STEPS`] steps and closed by bisection.
+    #[must_use]
+    pub fn peak_abs(&self) -> f64 {
+        self.pieces
+            .iter()
+            .map(|piece| {
+                let slope = piece.differentiate();
+                let h = (piece.u_end - piece.u_start) / PEAK_GRID_STEPS as f64;
+                let mut peak = piece
+                    .evaluate(piece.u_start)
+                    .abs()
+                    .max(piece.evaluate(piece.u_end).abs());
+                for step in 0..PEAK_GRID_STEPS {
+                    let (mut lo, mut hi) = (
+                        piece.u_start + step as f64 * h,
+                        piece.u_start + (step + 1) as f64 * h,
+                    );
+                    let rising = slope.evaluate(lo) > 0.0;
+                    if rising == (slope.evaluate(hi) > 0.0) {
+                        continue;
+                    }
+                    for _ in 0..PEAK_BISECTION_STEPS {
+                        let mid = 0.5 * (lo + hi);
+                        if (slope.evaluate(mid) > 0.0) == rising {
+                            lo = mid;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    peak = peak.max(piece.evaluate(0.5 * (lo + hi)).abs());
+                }
+                peak
+            })
+            .fold(0.0, f64::max)
     }
 
     pub fn from_pieces(pieces: Vec<crate::bezier::BezierPiece>) -> Result<Self, AlgebraError> {

@@ -111,3 +111,19 @@ fn second_moment_sums_over_pieces() {
     .unwrap();
     assert!((split.second_moment() - 1.0 / 3.0).abs() < 1e-12);
 }
+
+#[test]
+fn peak_abs_finds_an_interior_extremum_and_the_ends() {
+    let parabola =
+        PiecewisePolynomialKernel::single_poly_from_absolute(vec![0.75, 0.0, -0.75], (-1.0, 1.0));
+    assert!((parabola.peak_abs() - 0.75).abs() < 1e-12);
+    let ramp = PiecewisePolynomialKernel::single_poly_from_absolute(vec![0.5, 0.5], (-1.0, 1.0));
+    assert!((ramp.peak_abs() - 1.0).abs() < 1e-12);
+    let shifted = PiecewisePolynomialKernel::single_poly_from_absolute(
+        vec![0.0, 1.0, 0.0, -1.0],
+        (-0.9, 0.9),
+    );
+    let at_root = 1.0 / 3.0_f64.sqrt();
+    let expected = at_root - at_root.powi(3);
+    assert!((shifted.peak_abs() - expected).abs() < 1e-12);
+}
