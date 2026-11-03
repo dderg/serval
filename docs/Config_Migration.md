@@ -164,7 +164,7 @@ max_extrude_only_velocity: 50
 max_extrude_only_accel: 5000
 ```
 
-`corner_deviation` is the canonical corner budget in mm; 0.04 is a good starting value. `square_corner_velocity` is still accepted as a legacy alias, converted internally as `scv² · (√2 − 1) / max_accel` — note this maps typical mainline values to a far tighter budget than intended (5 mm/s at 3000 mm/s² ≈ 0.0035 mm), so prefer setting `corner_deviation` directly. Set exactly one of the two. `max_z_velocity` and `max_z_accel` must be at most the corresponding global caps and default to them.
+`corner_deviation` is the canonical corner budget in mm. It defaults to 0.04 when neither corner option is set ([why](Config_Reference_Motion.md#why-the-corner-budget-defaults-to-004-mm)). `square_corner_velocity` is still accepted as a legacy alias, converted internally as `scv² · (√2 − 1) / max_accel` — note this maps typical mainline values to a far tighter budget than intended (5 mm/s at 3000 mm/s² ≈ 0.0035 mm), so prefer setting `corner_deviation` directly or leaving both unset. Set at most one of the two. `max_z_velocity` and `max_z_accel` must be at most the corresponding global caps and default to them.
 
 `[motor <name>]` requires `drive`, `step_pin`, `dir_pin`, `microsteps`, and either `rotation_distance` or gear-ratio mode. Enable pins, if needed by the hardware integration, belong to the relevant stepper/driver support rather than the topology declaration above. Axis endstop and homing options belong on `[axis <name>]`, not on `[motor <name>]`.
 
@@ -228,7 +228,7 @@ naming the axis they belong to.
 | `[printer] max_accel` | `[printer] max_accel` |
 | `[printer] max_z_velocity` | `[printer] max_z_velocity` (must be `<= max_velocity`) |
 | `[printer] max_z_accel` | `[printer] max_z_accel` (must be `<= max_accel`) |
-| `[printer] square_corner_velocity` | Still accepted as a legacy alias. The canonical option is `[printer] corner_deviation` (= `scv² · (√2 − 1) / max_accel`). Set exactly one. |
+| `[printer] square_corner_velocity` | Still accepted as a legacy alias, but no longer the default: a config that sets neither corner option gets `corner_deviation: 0.04`, not the old implicit `square_corner_velocity: 5`. The canonical option is `[printer] corner_deviation` (= `scv² · (√2 − 1) / max_accel`). Set at most one. |
 | `[printer] max_jerk` | Still parsed, but only `max_jerk: 0` (unlimited) is accepted; a finite jerk limit is rejected at config load. |
 | `[printer] max_path_deviation` | Same option; fitter path-deviation tolerance. |
 | `[printer] max_accel_deviation` | Same option; fitter acceleration-deviation tolerance. |
