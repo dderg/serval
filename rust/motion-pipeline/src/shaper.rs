@@ -1712,10 +1712,10 @@ const fn power_divisors() -> [f64; MOMENT_POWER_CAPACITY] {
     divisors
 }
 
-/// One polynomial's moments over `[lo, hi]` about `origin`, with everything
-/// that depends only on the window — the local base, the power differences
-/// of its edges, the translation back to `origin` — built once for all of a
-/// piece's derivative orders.
+/// Moments over `[lo, hi]` about `origin` of polynomials re-expanded about
+/// the window's midpoint, with everything that depends only on the window —
+/// the midpoint shift, the power differences of its edges, the translation
+/// back to `origin` — built once for all of a piece's derivative orders.
 struct MomentWindow {
     shift: f64,
     edge_power_spans: [f64; MOMENT_POWER_CAPACITY],
@@ -1760,15 +1760,21 @@ impl MomentWindow {
         })
     }
 
-    fn accumulate(&self, coefficients: &[f64], moments: &mut [f64]) {
-        let length = coefficients.len();
+    /// `coefficients`, given about `polynomial_start`, re-expanded about the
+    /// window's midpoint into `centered`.
+    fn center(&self, coefficients: &[f64], centered: &mut [f64]) {
+        taylor_shift(coefficients, self.shift, centered);
+    }
+
+    /// Adds the moments of a polynomial whose coefficients are already
+    /// about the window's midpoint.
+    fn accumulate_centered(&self, centered: &[f64], moments: &mut [f64]) {
+        let length = centered.len();
         let moment_len = moments.len();
         assert_eq!(moment_len, self.translation.len);
         assert!(length + moment_len - 1 <= self.max_power);
-        let mut local_coefficients = [0.0; MOMENT_POWER_CAPACITY];
-        taylor_shift(coefficients, self.shift, &mut local_coefficients[..length]);
         let mut local_moments = [0.0; MOMENT_POWER_CAPACITY];
-        for (polynomial_power, &coefficient) in local_coefficients[..length].iter().enumerate() {
+        for (polynomial_power, &coefficient) in centered.iter().enumerate() {
             let powers = polynomial_power + 1..polynomial_power + 1 + moment_len;
             for ((moment, &span), &divisor) in local_moments[..moment_len]
                 .iter_mut()
@@ -2196,13 +2202,14 @@ impl AxisSignalTable {
 
     fn accumulate_held(value: f64, lo: f64, hi: f64, origin: f64, moments: &mut [f64]) {
         if let Some(window) = MomentWindow::new(lo, lo, hi, origin, 1, moments.len()) {
-            window.accumulate(&[value], moments);
+            window.accumulate_centered(&[value], moments);
         }
     }
 
     /// Adds piece `piece`'s moments over `[lo, hi]` about `origin` to each
     /// target in turn, the `order`-th target receiving the piece's
-    /// `order`-th derivative.
+    /// `order`-th derivative. The piece is re-expanded about the window
+    /// once; each derivative is taken of that expansion.
     fn accumulate_piece_moments<'m>(
         &self,
         piece: usize,
@@ -2223,11 +2230,14 @@ impl AxisSignalTable {
         ) else {
             return;
         };
+        let mut centered = [0.0; MOMENT_POWER_CAPACITY];
+        window.center(coefficients, &mut centered[..coefficients.len()]);
         let mut derivative = [0.0; MOMENT_POWER_CAPACITY];
         for (order, moments) in orders.enumerate() {
-            let length = differentiate_into(coefficients, order, &mut derivative);
+            let length =
+                differentiate_into(&centered[..coefficients.len()], order, &mut derivative);
             if length > 0 {
-                window.accumulate(&derivative[..length], moments);
+                window.accumulate_centered(&derivative[..length], moments);
             }
         }
     }
