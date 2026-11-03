@@ -110,9 +110,23 @@ def _snapshot(axes, spans):
 
 
 def test_the_start_shift_reads_every_axis_not_only_the_analytic_spans():
-    retract = {"carrier": {"kind": "analytic", "span": 0}, "t0": 0.0, "t1": 0.057}
-    fitted = {"carrier": {"kind": "piecewise_relative_spline"}, "t0": 0.0, "t1": 0.057}
-    hold = {"carrier": {"kind": "hold", "position": 1.0}, "t0": 0.0, "t1": 0.057}
-    base = _snapshot([[hold], [retract]], [{"t_start": 0.0}, {"t_start": 0.057}])
+    retract = {
+        "carrier": {"kind": "analytic", "span": 0},
+        "t0": 0.0,
+        "t1": 0.057,
+    }
+    fitted = {
+        "carrier": {"kind": "piecewise_relative_spline"},
+        "t0": 0.0,
+        "t1": 0.057,
+    }
+    hold = {
+        "carrier": {"kind": "hold", "position": 1.0},
+        "t0": 0.0,
+        "t1": 0.057,
+    }
+    base = _snapshot(
+        [[hold], [retract]], [{"t_start": 0.0}, {"t_start": 0.057}]
+    )
     head = _snapshot([[hold], [fitted]], [{"t_start": 0.057}])
     assert rb.start_shift(base, head) == 0.0
