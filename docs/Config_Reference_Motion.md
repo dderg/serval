@@ -303,8 +303,8 @@ post_processors: extruder_pa, extruder_smoothing
 #   extrusion laid along the leaders' path, as Klipper advances only
 #   extruding moves that travel, so retracts, primes and other extrude-only
 #   moves keep their own motion and their extrude-only caps; with a kernel,
-#   a linear_pressure_advance is applied after the kernel to that
-#   extrusion. Either way
+#   the advance is fitted into that extrusion before the kernel smooths it.
+#   Either way
 #   ratio_ramp_time requires finite [extruder]
 #   max_extrude_only_velocity and max_extrude_only_accel. Where the leaders
 #   turn around (a wipe that reverses along the line) or come to rest across

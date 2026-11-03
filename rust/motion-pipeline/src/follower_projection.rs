@@ -243,7 +243,8 @@ impl<'a> LeadingAdvance<'a> {
 
     /// The follower velocity, acceleration and jerk the advance reads at
     /// `t`, given the follower's path state and its own velocity and
-    /// acceleration there.
+    /// acceleration there: the extrusion laid along the path, never the
+    /// extrude-only motion folded into the follower.
     fn read(
         &self,
         sig: &FollowerSignal,
@@ -254,21 +255,26 @@ impl<'a> LeadingAdvance<'a> {
         if self.reads_path_only() {
             return sig.ramped_read(t, read);
         }
-        (velocity, acceleration, sig.jerk_read(t, read))
+        let (raw_velocity, raw_acceleration, raw_jerk) = sig.extrude_only_derivatives(t);
+        (
+            velocity - raw_velocity,
+            acceleration - raw_acceleration,
+            sig.jerk_read(t, read) - raw_jerk,
+        )
     }
 
     fn read_velocity(&self, sig: &FollowerSignal, t: f64) -> f64 {
         if self.reads_path_only() {
             return sig.ramped_advance_read(t).0;
         }
-        sig.deriv(t)
+        sig.deriv(t) - sig.extrude_only_derivatives(t).0
     }
 
     fn read_acceleration(&self, sig: &FollowerSignal, t: f64) -> f64 {
         if self.reads_path_only() {
             return sig.ramped_advance_read(t).1;
         }
-        sig.second_deriv(t)
+        sig.second_deriv(t) - sig.extrude_only_derivatives(t).1
     }
 
     fn read_seam_velocity(&self, input: &SeamInput) -> f64 {
@@ -278,7 +284,7 @@ impl<'a> LeadingAdvance<'a> {
                 .expect("a ratio-ramped seam records what its advance reads")
                 .read_velocity;
         }
-        input.velocity
+        input.path_velocity
     }
 
     fn reads_path_only(&self) -> bool {
@@ -355,6 +361,7 @@ fn fit_source_projection(
         let (ratio, ratio_slope) = sig.state.ratio_and_slope(s);
         SeamInput {
             velocity: sig.deriv(t),
+            path_velocity: sig.deriv(t) - sig.extrude_only_derivatives(t).0,
             ratio,
             leader_speed: sig.shaped_speed(t),
             s,
@@ -759,11 +766,11 @@ pub(crate) fn project_followers(
             };
             let (input_start, input_end) = input_states.unwrap_or_else(|| {
                 (
-                    SeamInput::of_track(&projected, t_start),
-                    SeamInput::of_track(&projected, t_end),
+                    SeamInput::of_track(&projected, t_start, raw.spatial_path),
+                    SeamInput::of_track(&projected, t_end, raw.spatial_path),
                 )
             });
-            let track = if projecting {
+            let track = if projecting || !raw.spatial_path {
                 projected
             } else {
                 crate::shaper::apply_zero_support_transform(
@@ -1306,6 +1313,8 @@ fn fit_kernel_window<S: TrackSignal>(
 #[derive(Debug, Clone, Copy)]
 struct SeamInput {
     velocity: f64,
+    /// `velocity` less the extrude-only motion's, what an advance reads.
+    path_velocity: f64,
     ratio: f64,
     leader_speed: f64,
     s: f64,
@@ -1323,7 +1332,9 @@ struct RampedSeam {
 }
 
 impl SeamInput {
-    fn of_track(track: &ScalarNurbs, t: f64) -> Self {
+    /// A track that is the follower's raw motion passed through, laid along
+    /// the path when it has one and extrude-only otherwise.
+    fn of_track(track: &ScalarNurbs, t: f64, spatial_path: bool) -> Self {
         let velocity = if track.degree() == 0 {
             0.0
         } else {
@@ -1331,6 +1342,7 @@ impl SeamInput {
         };
         Self {
             velocity,
+            path_velocity: if spatial_path { velocity } else { 0.0 },
             ratio: 1.0,
             leader_speed: velocity,
             s: 0.0,
@@ -2664,6 +2676,19 @@ impl<'a> FollowerSignal<'a> {
                 .jerk
         });
         self.path_jerk(t, read) + raw
+    }
+
+    /// The velocity, acceleration and jerk of the extrude-only motion folded
+    /// into the follower at `t`, zero along a spatial path.
+    fn extrude_only_derivatives(&self, t: f64) -> (f64, f64, f64) {
+        self.raw_delta.map_or((0.0, 0.0, 0.0), |(axis, _)| {
+            let (_, velocity, acceleration) = axis_pva(axis, t);
+            let jerk = axis
+                .eval_pvaj(t)
+                .expect("follower raw axis has exact derivatives")
+                .jerk;
+            (velocity, acceleration, jerk)
+        })
     }
 
     fn path_deriv(&self, t: f64) -> f64 {
