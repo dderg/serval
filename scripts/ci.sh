@@ -21,21 +21,14 @@
 set -uo pipefail
 
 # A CARGO_TARGET_DIR leaked from another task's shell would send every build
-# and cached engine into someone else's directory, so an inherited value is
-# dropped unless the caller opts in (integrate_stack.py does). Locally the
-# gates then share ONE target dir across all worktrees: a fresh worktree's
-# `quick` took 83 s against 221 s with its own cold rust/target. Cargo reuses a
-# test binary built from identical sources in another worktree, so tests must
-# locate files through the source-tree crate (runtime CARGO_MANIFEST_DIR), never
-# env!("CARGO_MANIFEST_DIR"), which would point at the worktree that built it.
-# CI_OWN_TARGET=1 gives a run its own rust/target; GitHub Actions always does.
-SHARED_TARGET_DIR="${SERVAL_TARGET_DIR:-$HOME/.cache/serval-target}"
-if [ -z "${CI_KEEP_CARGO_TARGET_DIR:-}" ]; then
-    unset CARGO_TARGET_DIR
-    if [ -z "${CI_OWN_TARGET:-}" ] && [ -z "${GITHUB_ACTIONS:-}" ]; then
-        export CARGO_TARGET_DIR="$SHARED_TARGET_DIR"
-    fi
-fi
+# and cached engine into someone else's directory. Gates use the worktree's
+# own rust/target unless the caller opts in (integrate_stack.py does). Never
+# share one target dir between worktrees: cargo's unit hash omits the workspace
+# path and its freshness test compares source mtimes with the artifact's, so a
+# worktree with older sources links the crates another worktree built from
+# different ones (reproduced: an example using a constant only the other
+# worktree's geometry defined compiled and ran).
+[ -n "${CI_KEEP_CARGO_TARGET_DIR:-}" ] || unset CARGO_TARGET_DIR
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST="$ROOT/rust"
