@@ -148,7 +148,7 @@ def run_command(tree: Path, command: str, index: int) -> CommandResult:
     started = time.monotonic()
     env = {
         **os.environ,
-        "CARGO_TARGET_DIR": str(pending.TARGET_DIR),
+        "CARGO_TARGET_DIR": str(pending.target_dir_for(tree)),
         "CI_KEEP_CARGO_TARGET_DIR": "1",
         "PATH": f"{Path.home() / '.cargo/bin'}:{os.environ['PATH']}",
     }

@@ -59,7 +59,7 @@ with `-D warnings`, `cargo fmt --check`, the public-API baseline diff
 contract change is intended), and the watchdog canary. This is
 the same set CI runs first, so a red gate here is a red PR. `quick` does
 NOT include the Python host tests — if the change touches `klippy/`, also
-run `./scripts/ci.sh py`. Individual jobs: `./scripts/ci.sh <job>` (see
+run `./scripts/ci.sh py`. The `quick` gates run concurrently and report in a fixed order, so wall time is the slowest gate (cold worktree ~220 s, warm ~40 s on this box; the serial run was ~320 s / ~210 s); each gate's full log is still `.ci-logs/<gate>.log`. Individual jobs: `./scripts/ci.sh <job>` (see
 the header of `scripts/ci.sh` for the full list, e.g. `ruff`,
 `rust-clippy`, `rust-mcu-h7`).
 
@@ -75,24 +75,74 @@ and `query-logs` skills.
 
 Never `export CARGO_TARGET_DIR` in a persistent shell: it leaks into the next
 task's builds and the engine `make` copies. `scripts/ci.sh` unsets an inherited
-value (set `CI_KEEP_CARGO_TARGET_DIR=1` to opt in); everything else uses the
-worktree's own `rust/target`. The only shared target dir is
-`~/.cache/pending-baselines/target`, which `pending_baselines.py`,
-`review_baselines.py` and `integrate_stack.py` set per subprocess. For a one-off
-variant build set `CARGO_TARGET_DIR=...` on that single command, not in the
-shell. `uv run python scripts/gc_caches.py [--days N] [--apply]` lists and
-removes stale `~/.cache/*-target` dirs and abandoned pending-baselines
-worktrees/stacks/samples.
+value (set `CI_KEEP_CARGO_TARGET_DIR=1` to opt in); gates use the worktree's own
+`rust/target`.
+
+Never share one target dir between worktrees. Cargo's unit hash omits the workspace
+path and its freshness test compares source mtimes with the artifact's, so a worktree
+whose sources are older than another's build links that build's crates (reproduced:
+an example using a constant only the other worktree's `geometry` defined compiled and
+ran; bound-ext hit it in `ci.sh`). The tools that build for review and bench give every
+worktree its own dir, `pending_baselines.target_dir_for(tree)` under
+`~/.cache/pending-baselines/targets/` (`pending_baselines.py`, `integrate_stack.py`,
+`bench_compare.py`, `accept_reviewed.py`, `land_queue.py`, the audit in
+`review_baselines.py`). A test must still find repo files through the `source-tree`
+crate (`source_tree::repo_file("snapshots/...")`), never `env!("CARGO_MANIFEST_DIR")`.
+For a one-off variant build set `CARGO_TARGET_DIR=...` on that single command, not in
+the shell. `uv run python scripts/gc_caches.py [--days N] [--apply]` lists and removes
+stale `~/.cache/*-target` dirs, per-worktree targets and abandoned pending-baselines
+worktrees/stacks.
+
+# Engine provenance
+
+`_motion_engine.build_id()` is the sha256 (first 40 hex) over every file under `rust/`
+that git tracks or would add (path, length, content, sorted), read from the working
+tree at build time by `rust/motion-engine/build.rs`, so dirty and new files count and
+`git rev-parse HEAD` is not involved. `snapshots/engine_build_id.py` computes the same
+value from a tree. `harness._import_engine()` (snapshots/run.py, tools/bench/analyze.py,
+moves.py, tools/corner_flow.py, the review/pending/accept tools, live_replay) refuses an
+engine whose id differs from the tree its `.so` sits in, or that has none, with
+"rebuild with make -f Makefile.rust motion-engine-fast". klippy logs it at startup as the
+`motion`/`engine_build` event; `tools/bench/deploy.py` records `rust_build_id` in the deploy
+identity. An engine built outside a git tree reports `unknown` and is refused by the tools.
+
+# Never work in ~/Developer/serval
+
+`~/Developer/serval` is the shared checkout: it stays on `main` tracking `origin/main`
+and `land-pr.sh` fast-forwards it. Do not edit, commit, build or switch branches
+there; create a worktree (`git worktree add ~/Developer/serval-<topic> -b <branch>
+origin/main`) and work in that. Run the tools from your worktree, or from
+`~/Developer/serval/scripts/` when you have none: they are current there.
 
 # Landing a PR
 
 `scripts/land-pr.sh <branch>` pushes the branch, opens the PR if needed, waits for
 the checks, merges with a merge commit and moves local `main` to `origin/main`
-without checking anything out. Red checks print the failed-run log tail and
+without switching any checkout (a checked-out `main` is fast-forwarded only when it
+has no uncommitted changes, so `~/Developer/serval` stays current after every landing). Red checks print the failed-run log tail and
 exit non-zero. `--dry-run` prints the plan. It is safe to run from the
 branch's own worktree (it leaves it before removing it) and updates the PR
 branch on GitHub and re-waits when `main` moved while the checks ran; no need to
 copy it elsewhere first.
+
+`python3 scripts/land_queue.py QUEUE [--trees DIR] [--dry-run]` lands several
+branches in order (a stack, or a batch of independent PRs): per branch it merges
+`origin/main` if behind, builds the snapshot engine, reviews against `origin/main`
+(no expectation: any moved snapshot stops the queue; with an expectation every case
+must be EXPECTED, and the changed cases are accepted and committed from the
+`<branch>.accept.txt` message), then runs `land-pr.sh` with `<branch>.md` as the PR
+body. A red "Sim e2e" run is rerun once, loudly; any other red check stops the queue.
+QUEUE lines are `branch|title|expect`; landed branches are appended to `QUEUE.landed`
+so a stopped queue resumes. Use it instead of a hand-written loop around `land-pr.sh`.
+
+Every `gh` call in the tooling goes through `scripts/gh_util.py` (`pending_baselines.run`
+routes `gh` there; `land-pr.sh` defines `gh()` as the wrapper). Many agents polling
+GitHub trip its secondary rate limit, and a bare `gh pr checks --watch` then exits
+non-zero with "API rate limit exceeded", which looks like a red check. The wrapper
+retries only on that error (Retry-After if sent, else 30 s doubling to 300 s with 25 %
+jitter, 8 attempts, then a loud failure) and returns any other failure at once.
+Wait with one `gh pr checks --watch --interval 60`, never a loop of short polls; read PR
+metadata once per run and pass it along; use `gh_util.py <gh args>` in new scripts.
 
 `uv run python scripts/pending_baselines.py [-v|--all]` lists every open PR with
 its stack parent, mergeability, CI state, the snapshot cases whose output
@@ -115,7 +165,7 @@ binaries). Snapshot checks need the engine built first:
 
 `uv run python scripts/bench_compare.py <commitA> <commitB> [--configs fast,printer]
 [--runs 5] [--gcode PATH]` is the replay-throughput A/B: it builds
-`gcode_replay_bench` at both commits (one reusable worktree, shared target dir,
+`gcode_replay_bench` at both commits (one reusable worktree with its own target dir,
 binaries cached by commit under `~/.cache/pending-baselines/bench`), runs them
 interleaved with alternating order, and prints median wall seconds, realtime
 factor and the per-stage breakdown with the change B vs A. Use it instead of
@@ -155,3 +205,25 @@ Never rewrite git history, never amend commits, never force-push.
 Baseline files define how it is in the base branch. It doesn't mean baseline represents correct behavior. Snapshot tests exist so a reviewer can compare before/after to see what exactly changed in the motion planner behavior.
 
 Baselines are regenerated by the agent that owns the change, only after reviewing the diff with `scripts/review_baselines.py`, and the review verdict (what changed, why it is expected) goes in the PR or commit body. Never accept a change you can't explain. Accept without the review server: `uv run python snapshots/run.py --accept CASE...` or `--accept-all` (writes the baselines of the named, or all, CHANGED/NEW cases; the review server path is unchanged).
+
+# CI shape and delegating work
+
+A PR waits for the slowest check. Measured over the last ~200 PR runs
+(median job minutes): rust-fuzz 8.3 (three partitions now), sim-e2e `rest`
+8.0 (`rest-slow` split off), rust-test 5.9, sim-e2e shards 4–5 (of which
+~3.5 was each shard rebuilding the same docker image, now built once by the `sim-image` job and loaded by the shards: shard jobs 61-212 s instead of 240-480 s, total job time -47%, workflow wall ~7.7 min because the image build (240 s) is now serial before the slowest shard (`rest`, 212 s)), snapshot 3.8. The
+required checks are in branch protection; `rust-fuzz` and `replay-budget` are
+not required but `land-pr.sh` waits for them. Branch protection is strict, so
+every time `main` moves before a merge the PR branch is updated and the whole
+suite reruns: land a batch with `scripts/land_queue.py` (one branch at a time,
+merging `main` first) rather than starting several `land-pr.sh` in parallel.
+
+A red check is investigated, not rerun, unless it is a known flake with an open
+issue; rerun those once and add the run id to the issue. Sim flakes so far were harness races between wall-clock threads and the free-running virtual clock, or reads of klippy's async log: look there first (`tools/sim/world.py` `settled_log_tail`, `HarnessPacer.hold_until`). `rust-fuzz` failures on a fresh
+seed are real counterexamples: commit the `cc` seed line to
+`proptest-regressions/` and file an issue.
+
+When delegating: give the worker the worktree path to use, say that gates use that worktree's own `rust/target`, and have it end
+with a named list of checks for the lead to run once, since parallel
+`ci.sh quick` runs from several workers contend for the same CPUs. Do not have
+a worker re-derive repo context that is in this file or a skill; point to it.

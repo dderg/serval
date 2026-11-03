@@ -21,23 +21,17 @@ use trajectory::{AxisChainSet, ContinuousAxis, ContinuousSegment};
 pub mod audit;
 pub mod waypoints;
 
-use motion_pipeline::{Control, Pipeline, StreamConfig, StreamInput, TrajectoryItem};
+use motion_pipeline::{Control, Pipeline, StreamConfig, StreamInput, TrajectoryItem, live_config};
 
 pub use geometry::corner_deviation_from_scv;
-pub use planner_config::{AxisDecl, CartesianLimits, PostProcessorDecl, RuntimeLimits};
+pub use planner_config::{
+    AxisDecl, CartesianLimits, PlannerConfig, PostProcessorDecl, RuntimeLimits,
+};
 
 pub const SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 /// The E lane rides as axis 3, past the three spatial axes — the same index the
 /// production bridge and the seam harness assign the extruder.
 pub const EXTRUDER_AXIS: usize = 3;
-// Position tolerance used when a post-processor must fit a non-polynomial signal.
-pub const TRAJECTORY_FIT_TOL_MM: f64 = 0.005;
-pub const TRAJECTORY_FIT_TOL_ACCEL_MM_S2: f64 = 50.0;
-pub const VELOCITY_INTEGRATION_TOL: f64 = 1e-7;
-/// Comfortably above any snapshot case's move count, so a case is always
-/// planned as a single window instead of being split by the streaming
-/// planner's look-ahead backstop.
-pub const SNAPSHOT_MAX_BUFFER_MOVES: usize = 65_536;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
@@ -162,38 +156,15 @@ pub fn pipeline_snapshot_streaming(
             params.corner_deviation,
         ));
     }
-    let corner_deviation_mm = params.corner_deviation;
-    let limits = geometry::VelocityLimits::try_new(
-        params.max_velocity,
-        params.max_accel,
-        corner_deviation_mm,
-        params.max_jerk,
-    )
-    .and_then(|path| {
-        path.with_z_caps(
-            params.max_z_velocity.unwrap_or(f64::INFINITY),
-            params.max_z_accel.unwrap_or(f64::INFINITY),
-        )
-    })
-    .map_err(|e| SnapshotError::InvalidLimits(e.to_string()))?;
+    let planner = planner_config(&params)?;
+    let limits = live_config::move_limits(&planner).map_err(SnapshotError::InvalidLimits)?;
+    let config = live_config::stream_config(&planner).map_err(SnapshotError::InvalidLimits)?;
+    let axis_chains = planner
+        .compile_active_chains()
+        .map_err(|e| SnapshotError::InvalidChain(e.to_string()))?;
 
     let steps = plan_steps(waypoints, limits)?;
     let raw_points = extract_raw_path(&steps);
-
-    let axis_chains = build_axis_chains(&params).map_err(SnapshotError::InvalidChain)?;
-    let corner = geometry::CornerFitConfig::default();
-    let config = StreamConfig {
-        corner,
-        integration_tol: VELOCITY_INTEGRATION_TOL,
-        max_extrude_only_velocity_mm_s: params.max_extrude_only_velocity.unwrap_or(f64::INFINITY),
-        max_extrude_only_accel_mm_s2: params.max_extrude_only_accel.unwrap_or(f64::INFINITY),
-        fit_tol_mm: params.max_path_deviation.unwrap_or(TRAJECTORY_FIT_TOL_MM),
-        fit_tol_accel_mm_s2: params
-            .max_accel_deviation
-            .unwrap_or(TRAJECTORY_FIT_TOL_ACCEL_MM_S2),
-        max_buffer_moves: SNAPSHOT_MAX_BUFFER_MOVES,
-        limits,
-    };
     let mut next_partial_at = partial_batch_segments;
     let (_fitted, shaped, toolhead) =
         run_pipeline_streaming(&steps, config, axis_chains, |shaped, toolhead| {
@@ -377,6 +348,14 @@ pub fn plan_moves(steps: &[PlanStep]) -> impl Iterator<Item = &geometry::Move> {
     })
 }
 
+pub fn rest_position_before<'a>(moves: impl IntoIterator<Item = &'a geometry::Move>) -> Vec<f64> {
+    let [x, y, z] = moves
+        .into_iter()
+        .find_map(|m| m.segment.spatial.as_ref())
+        .map_or([0.0, 0.0, 0.0], |seg| seg.point_at(0.0));
+    vec![x, y, z, 0.0]
+}
+
 pub fn extract_raw_path(steps: &[PlanStep]) -> Vec<(f64, f64)> {
     let mut points = Vec::with_capacity(steps.len() + 1);
     for (i, m) in plan_moves(steps).enumerate() {
@@ -456,20 +435,41 @@ fn merge_axis_decls(explicit: &[AxisDecl]) -> Result<Vec<AxisDecl>, String> {
         .collect())
 }
 
-/// The snapshot's post-processor chains, compiled through the exact same
-/// path the live engine uses (`planner_config::AxisRegistry` +
-/// `PostProcessorSet`) so a case's `[axis]`/`[post_processor]` sections
-/// behave identically here as on a real printer. No axes declared at all
-/// falls back to the default x/y/z/e-follows-xyz topology with no
-/// post-processors — the historical no-shaping-no-PA behavior every
-/// existing baseline was recorded with.
-fn build_axis_chains(params: &SnapshotParams) -> Result<AxisChainSet, String> {
-    let axis_decls = merge_axis_decls(&params.axis_decls)?;
-    let registry = planner_config::AxisRegistry::try_new(axis_decls).map_err(|e| e.to_string())?;
-    planner_config::PostProcessorSet::try_new(&registry, &params.post_processor_decls)
-        .map_err(|e| e.to_string())?
-        .compile(&registry)
-        .map_err(|e| e.to_string())
+/// The `PlannerConfig` a printer with these settings runs, built the way
+/// `planner_config_from_settings` builds the live one minus the kinematics
+/// a planner-only case does not declare. No axes declared at all falls back
+/// to the default x/y/z/e-follows-xyz topology with no post-processors, and
+/// a z cap left unset sits at the path cap, as the live config reader puts
+/// it.
+fn planner_config(params: &SnapshotParams) -> Result<PlannerConfig, SnapshotError> {
+    let axis_decls = merge_axis_decls(&params.axis_decls).map_err(SnapshotError::InvalidChain)?;
+    let axis_registry = planner_config::AxisRegistry::try_new(axis_decls)
+        .map_err(|e| SnapshotError::InvalidChain(e.to_string()))?;
+    let post_processors =
+        planner_config::PostProcessorSet::try_new(&axis_registry, &params.post_processor_decls)
+            .map_err(|e| SnapshotError::InvalidChain(e.to_string()))?;
+    let defaults = PlannerConfig::default();
+    Ok(PlannerConfig {
+        axis_registry,
+        cartesian: CartesianLimits {
+            max_velocity: params.max_velocity,
+            max_accel: params.max_accel,
+            max_jerk: params.max_jerk,
+            max_z_velocity: params.max_z_velocity.unwrap_or(params.max_velocity),
+            max_z_accel: params.max_z_accel.unwrap_or(params.max_accel),
+            corner_deviation: params.corner_deviation,
+        },
+        post_processors,
+        max_extrude_only_velocity: params.max_extrude_only_velocity,
+        max_extrude_only_accel: params.max_extrude_only_accel,
+        fit_tolerance_mm: params
+            .max_path_deviation
+            .unwrap_or(defaults.fit_tolerance_mm),
+        fit_tolerance_accel_mm_s2: params
+            .max_accel_deviation
+            .unwrap_or(defaults.fit_tolerance_accel_mm_s2),
+        ..defaults
+    })
 }
 
 /// The third element is the toolhead signal — the shaped segments before the
@@ -490,10 +490,7 @@ pub fn run_pipeline_streaming(
     Vec<ContinuousSegment>,
     Option<Vec<ContinuousSegment>>,
 ) {
-    let spatial_home = plan_moves(steps)
-        .find_map(|m| m.segment.spatial.as_ref())
-        .map_or([0.0, 0.0, 0.0], |seg| seg.point_at(0.0));
-    let home_pos = vec![spatial_home[0], spatial_home[1], spatial_home[2], 0.0];
+    let home_pos = rest_position_before(plan_moves(steps));
 
     let (fitted_tx, fitted_rx) = unbounded();
     let capture_toolhead = axis_chains.has_motor_side_stages();

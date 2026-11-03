@@ -14,6 +14,7 @@
 
 use std::time::Instant;
 
+use geometry::path::lowering::PositionProfile;
 use geometry::segment::SourceRange;
 use geometry::{CornerFitConfig, MoveContext, VelocityLimits, line_move};
 use motion_pipeline::{Pipeline, StreamConfig, StreamInput, TrajectoryItem};
@@ -161,7 +162,15 @@ fn move_duration_estimate(m: &geometry::Move) -> f64 {
 /// Returns per-emit (wall_secs, stream_t_end) samples.
 fn run_case(name: &str, chains: AxisChainSet, inputs: Vec<StreamInput>) -> Vec<(f64, f64)> {
     let n_moves = inputs.len();
-    let mut pipeline = Pipeline::new(config(), chains, vec![100.0, 100.0, 0.2, 0.0], 0.0);
+    let [x, y, z] = inputs
+        .iter()
+        .find_map(|item| match item {
+            StreamInput::Move(m) => m.segment.spatial.as_ref(),
+            _ => None,
+        })
+        .expect("a shaper benchmark case moves the toolhead")
+        .point_at(0.0);
+    let mut pipeline = Pipeline::new(config(), chains, vec![x, y, z, 0.0], 0.0);
     let started = Instant::now();
     let mut emits: Vec<(f64, f64)> = Vec::new();
     let mut collect = |item| {

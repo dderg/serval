@@ -19,6 +19,11 @@ fn cartesian_validate_rejects_negative_or_nan_corner_deviation() {
 }
 
 #[test]
+fn default_limits_use_the_reader_default_corner_deviation() {
+    assert_eq!(CartesianLimits::default().corner_deviation, 0.04);
+}
+
+#[test]
 fn effective_limits_without_overrides_are_the_config_base() {
     let cfg = PlannerConfig::default();
     let (v, a, corner_deviation) = cfg.effective_limits();

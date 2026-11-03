@@ -22,16 +22,11 @@ fn default_limits() -> geometry::VelocityLimits {
 }
 
 fn default_config(limits: geometry::VelocityLimits) -> StreamConfig {
-    StreamConfig {
-        corner: geometry::CornerFitConfig::default(),
-        integration_tol: VELOCITY_INTEGRATION_TOL,
-        max_extrude_only_velocity_mm_s: f64::INFINITY,
-        max_extrude_only_accel_mm_s2: f64::INFINITY,
-        fit_tol_mm: TRAJECTORY_FIT_TOL_MM,
-        fit_tol_accel_mm_s2: 50.0,
-        max_buffer_moves: SNAPSHOT_MAX_BUFFER_MOVES,
-        limits,
-    }
+    live_config::stream_config(&PlannerConfig {
+        cartesian: config_base(limits),
+        ..PlannerConfig::default()
+    })
+    .unwrap()
 }
 
 fn planned_moves(
@@ -787,9 +782,8 @@ fn a_deserialized_snapshot_evaluates_identically() {
 }
 
 #[test]
-#[should_panic(expected = "FiniteJerkUnsupported")]
-fn finite_max_jerk_is_rejected_by_the_pipeline() {
-    let _ = pipeline_snapshot(
+fn finite_max_jerk_is_rejected_like_the_live_config() {
+    let refused = pipeline_snapshot(
         &square_waypoints(),
         SnapshotParams {
             max_velocity: 300.0,
@@ -805,6 +799,11 @@ fn finite_max_jerk_is_rejected_by_the_pipeline() {
             axis_decls: Vec::new(),
             post_processor_decls: Vec::new(),
         },
+    );
+    assert!(
+        matches!(&refused, Err(SnapshotError::InvalidLimits(message)) if message.contains("max_jerk")),
+        "a finite max_jerk must be refused before planning, got {:?}",
+        refused.map(|snapshot| snapshot.traversal_time_s)
     );
 }
 
@@ -1274,11 +1273,9 @@ fn streaming_partials_carry_toolhead_lanes_when_the_chain_has_motor_side_stages(
 /// scattering the loop centers by ~0.25mm at 0.3mm deviation.
 #[test]
 fn default_gcode_circle_loops_stay_concentric_across_corner_deviation() {
-    let text = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../snapshots/web/static/default.gcode"
-    ))
-    .unwrap();
+    let text =
+        std::fs::read_to_string(source_tree::repo_file("snapshots/web/static/default.gcode"))
+            .unwrap();
     let mut loop_centers = Vec::new();
     let mut radii_per_cd: Vec<Vec<f64>> = Vec::new();
     for cd in [0.05, 0.3] {

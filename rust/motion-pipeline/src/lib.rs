@@ -9,6 +9,7 @@ use trajectory::{AxisChainSet, ContinuousSegment};
 pub mod fit_audit;
 pub mod fit_stage;
 mod follower_projection;
+pub mod live_config;
 mod lower_stage;
 mod lowering;
 pub mod planner;

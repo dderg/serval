@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 
 pub use geometry::Move;
-use geometry::path::lowering::PositionProfile;
 use geometry::{CornerFitConfig, VelocityLimits};
 use trajectory::{AxisChainSet, ClockedMotorSpan, ContinuousSegment};
 
@@ -128,6 +127,33 @@ pub fn parse_gcode_to_moves(source: &str, limits: VelocityLimits) -> Vec<Move> {
         }
     }
     moves
+}
+
+pub struct LiveReplay {
+    pub config: StreamConfig,
+    pub chains: AxisChainSet,
+    pub home: Vec<f64>,
+    pub moves: Vec<Move>,
+}
+
+impl LiveReplay {
+    pub fn new(source: &str, planner: &planner_config::PlannerConfig) -> Result<Self, String> {
+        let config = motion_pipeline::live_config::stream_config(planner)?;
+        let chains = planner.compile_active_chains().map_err(|e| e.to_string())?;
+        let moves =
+            parse_gcode_to_moves(source, motion_pipeline::live_config::move_limits(planner)?);
+        Ok(Self {
+            config,
+            chains,
+            home: pipeline_snapshot::rest_position_before(&moves),
+            moves,
+        })
+    }
+
+    #[must_use]
+    pub fn pipeline(&self) -> Pipeline {
+        Pipeline::new(self.config, self.chains.clone(), self.home.clone(), 0.0)
+    }
 }
 
 fn span_velocity(span: &ClockedMotorSpan, t: f64) -> f64 {
@@ -281,15 +307,11 @@ pub fn collect_shaped_segments_from_script(
     config: StreamConfig,
     chains: AxisChainSet,
 ) -> Vec<ContinuousSegment> {
-    let spatial_home = script
-        .iter()
-        .find_map(|item| match item {
-            motion_pipeline::StreamInput::Move(m) => m.segment.spatial.as_ref(),
+    let home =
+        pipeline_snapshot::rest_position_before(script.iter().filter_map(|item| match item {
+            motion_pipeline::StreamInput::Move(m) => Some(m),
             _ => None,
-        })
-        .map_or([0.0, 0.0, 0.0], |seg| seg.point_at(0.0));
-    let mut home = spatial_home.to_vec();
-    home.push(0.0);
+        }));
     let mut pipeline = Pipeline::new(config, chains, home, 0.0);
     let mut segs = Vec::new();
     let mut output = |item| {

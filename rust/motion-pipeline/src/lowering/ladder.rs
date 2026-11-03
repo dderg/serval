@@ -333,10 +333,10 @@ pub(crate) struct LadderTruth<'a> {
     pub position: &'a dyn Fn(f64) -> f64,
     pub velocity: &'a dyn Fn(f64) -> f64,
     pub acceleration: &'a dyn Fn(f64) -> f64,
-    /// Where a span reaching a square-root onset is held to the tolerance
-    /// between the probes; empty elsewhere. Read only once a rung has
-    /// passed the probes, or to rank the misses.
-    pub held: &'a dyn Fn() -> &'a [HeldSample],
+    /// A rung's worst miss over the tolerance where a span reaching a
+    /// square-root onset is held to it between the probes; zero elsewhere.
+    /// Read only once a rung has passed the probes, or to rank the misses.
+    pub held_miss: &'a dyn Fn(&[f64]) -> f64,
     /// Whether a miss's closest rung is the closest at the held points as
     /// well: only where the closest rung is kept, at the floor.
     pub held_ranks_misses: bool,
@@ -440,7 +440,7 @@ fn candidate_ok(
                 && (eval_mono_dd(mono_u, u) * dd_scale - (truth.acceleration)(u)).abs()
                     <= budget.tol.accel_mm_s2
         })
-        && held_miss(mono_u, h, (truth.held)(), budget.tol) <= 1.0
+        && (truth.held_miss)(mono_u) <= 1.0
 }
 
 pub(crate) fn ladder_fit(
@@ -500,7 +500,7 @@ pub(crate) fn ladder_fit(
                 (
                     probe,
                     if truth.held_ranks_misses {
-                        score.max(held_miss(candidate, h, (truth.held)(), budget.tol))
+                        score.max((truth.held_miss)(candidate))
                     } else {
                         score
                     },

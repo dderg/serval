@@ -51,5 +51,8 @@ portable-atomic = { version = "1", default-features = false, features = ["fallba
 [package.metadata.cargo-machete]
 ignored = ["portable-atomic"]
 
+[dev-dependencies]
+source-tree = { path = "../source-tree" }
+
 [lints]
 workspace = true

@@ -154,7 +154,7 @@ def run_review(number: int) -> dict:
 
 
 def write_baselines(cases: list[str]) -> None:
-    env = {"CARGO_TARGET_DIR": str(pending.TARGET_DIR)}
+    env = {"CARGO_TARGET_DIR": str(pending.target_dir_for(ROOT))}
     pending.run(
         ["make", "-f", "Makefile.rust", "motion-engine-fast"], ROOT, env
     )

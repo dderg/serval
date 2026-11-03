@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use crossbeam_channel::Sender;
+use geometry::MIN_DEVICE_INTERVAL_S;
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
 use trajectory::{
     AnalyticMoveSpan, AxisChainSet, ChainStage, CompiledChain, ContinuousAxis, ContinuousSegment,
@@ -12,7 +13,8 @@ use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
     AccelBudget, AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE, LADDER_PROBES_U,
     LadderBudget, LadderFailure, LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth,
-    VelocitySign, eval_mono, eval_mono_d, eval_mono_dd, exact_piece, ladder_fit, quintic_in_u,
+    VelocitySign, eval_mono, eval_mono_d, eval_mono_dd, exact_piece, held_miss, ladder_fit,
+    quintic_in_u,
 };
 use crate::types::{BaseItem, Control, PostProcessError, TrajectoryItem};
 use crate::worker_pool::WorkerPool;
@@ -26,8 +28,12 @@ mod exact;
 #[path = "shaper_hull.rs"]
 mod hull;
 
+#[path = "shaper_taylor.rs"]
+pub(crate) mod taylor;
+
 use exact::ExactSpan;
 use hull::{FittedPiece, HullBudget};
+use taylor::{Ball, TaylorModel};
 
 pub(crate) use exact::{ExactConvolution, ExactKernel, ExactPiece};
 use hidden_breaks::ShapedBreaks;
@@ -92,6 +98,12 @@ pub(crate) trait TrackSignal {
         let _ = (t0, t1);
         p1 - p0
     }
+    /// The magnitude a sample reading `position` was rounded at: the
+    /// position itself, or for a view read through an offset the larger of
+    /// it and the position the offset was taken from.
+    fn position_rounding_scale(&self, position: f64) -> f64 {
+        position.abs()
+    }
     fn acceleration_monotonicity(&self, _start: f64, _end: f64) -> Option<AccelerationTrend> {
         None
     }
@@ -118,6 +130,34 @@ pub(crate) trait TrackSignal {
     fn exact_polynomial_on(&self, _lo: f64, _hi: f64) -> Option<Vec<ExactPiece>> {
         None
     }
+    /// Rigorous polynomial enclosures of the signal over `[lo, hi]`: on each
+    /// sub-interval between its breaks every order lies within its
+    /// polynomial's `rounding` of it, sub-intervals refined until each
+    /// order's bound is within its `accuracy` where the signal resolves
+    /// that. Exact polynomials are their own enclosure; `None` for a
+    /// signal with neither.
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+        let _ = accuracy;
+        self.exact_polynomial_on(lo, hi)
+    }
+    /// What a rung that passes the probes is held against between them,
+    /// where the signal has no enclosure.
+    fn between_probes(&self) -> BetweenProbes {
+        BetweenProbes::ErrorInterpolant
+    }
+}
+
+/// How a rung is held between two samples of a signal with no enclosure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BetweenProbes {
+    /// Against the error's cubic Hermite interpolant: the rung and the truth
+    /// interpolated together.
+    ErrorInterpolant,
+    /// Against the truth's quintic Hermite interpolant, the rung read
+    /// exactly. A signal composed from other tracks' pieces bends between
+    /// samples where the high-degree rungs fitted to it swing, and an
+    /// interpolant of their difference follows neither.
+    TruthInterpolant,
 }
 
 impl TrackSignal for ContinuousAxis {
@@ -144,6 +184,9 @@ impl<S: TrackSignal> TrackSignal for &S {
     fn position_delta(&self, from: (f64, f64), to: (f64, f64)) -> f64 {
         S::position_delta(self, from, to)
     }
+    fn position_rounding_scale(&self, position: f64) -> f64 {
+        S::position_rounding_scale(self, position)
+    }
     fn acceleration_monotonicity(&self, start: f64, end: f64) -> Option<AccelerationTrend> {
         S::acceleration_monotonicity(self, start, end)
     }
@@ -164,6 +207,12 @@ impl<S: TrackSignal> TrackSignal for &S {
     }
     fn exact_polynomial_on(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
         S::exact_polynomial_on(self, lo, hi)
+    }
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+        S::enclosure_on(self, lo, hi, accuracy)
+    }
+    fn between_probes(&self) -> BetweenProbes {
+        S::between_probes(self)
     }
 }
 
@@ -209,6 +258,12 @@ impl<S: TrackSignal> TrackSignal for ShiftedTrackSignal<S> {
         self.inner.position_delta(from, to)
     }
 
+    fn position_rounding_scale(&self, position: f64) -> f64 {
+        position
+            .abs()
+            .max(self.inner.position_rounding_scale(position + self.base))
+    }
+
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let (position, velocity, acceleration) = self.inner.eval_pva(t);
         (position - self.base, velocity, acceleration)
@@ -220,6 +275,16 @@ impl<S: TrackSignal> TrackSignal for ShiftedTrackSignal<S> {
 
     fn exact_polynomial_on(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
         let pieces = self.inner.exact_polynomial_on(lo, hi)?;
+        Some(
+            pieces
+                .into_iter()
+                .map(|piece| piece.offset_by(self.base))
+                .collect(),
+        )
+    }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+        let pieces = self.inner.enclosure_on(lo, hi, accuracy)?;
         Some(
             pieces
                 .into_iter()
@@ -245,6 +310,10 @@ impl<'a, S: TrackSignal> ConvolutionSignal<'a, S> {
 impl<S: TrackSignal> TrackSignal for ConvolutionSignal<'_, S> {
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         self.evaluated.eval_pva(t)
+    }
+
+    fn position_rounding_scale(&self, position: f64) -> f64 {
+        self.evaluated.position_rounding_scale(position)
     }
 
     fn diagnostic(&self, t: f64) -> Option<String> {
@@ -300,6 +369,7 @@ pub(crate) const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 struct PendingSegments {
     segments: VecDeque<ContinuousSegment>,
     shaped: VecDeque<ContinuousSegment>,
+    materialized: usize,
 }
 
 impl PendingSegments {
@@ -310,6 +380,7 @@ impl PendingSegments {
     fn clear(&mut self) {
         self.segments.clear();
         self.shaped.clear();
+        self.materialized = 0;
     }
 
     fn len(&self) -> usize {
@@ -334,10 +405,31 @@ impl PendingSegments {
         self.segments.iter()
     }
 
+    /// Fits the changed sources of the segments buffered since the last
+    /// call; returns how many segments and axes that was.
+    fn materialize(
+        &mut self,
+        chains: &AxisChainSet,
+        fit_tol: FitTol,
+        pool: &WorkerPool,
+    ) -> Result<(usize, usize), PostProcessError> {
+        let fresh = &mut self.segments.make_contiguous()[self.materialized..];
+        let rebuilt = materialize_changed_sources(fresh, chains, fit_tol, pool)?;
+        let segments = fresh.len();
+        self.materialized = self.segments.len();
+        Ok((segments, rebuilt))
+    }
+
     fn pop_front(&mut self) -> Option<ContinuousSegment> {
         let segment = self.segments.pop_front();
-        if segment.is_some() && !self.shaped.is_empty() {
-            self.shaped.pop_front();
+        if segment.is_some() {
+            self.materialized = self
+                .materialized
+                .checked_sub(1)
+                .expect("shaper committed a segment whose sources were never materialized");
+            if !self.shaped.is_empty() {
+                self.shaped.pop_front();
+            }
         }
         assert!(
             self.shaped.len() <= self.segments.len(),
@@ -394,9 +486,13 @@ impl Shaper {
         self
     }
 
-    fn buffer_segment(&mut self, mut segment: ContinuousSegment) {
+    /// Fits the changed sources of every segment buffered since the last
+    /// emit, which the window about to be shaped reads.
+    fn materialize_pending(&mut self) {
         let started = crate::timing::stopwatch();
-        let rebuilt = materialize_changed_sources(&mut segment, &self.chains, self.fit_tol)
+        let (segments, rebuilt) = self
+            .pending
+            .materialize(&self.chains, self.fit_tol, &self.pool)
             .unwrap_or_else(|error| panic!("shaper: {error}"));
         let elapsed_us = started.elapsed_us();
         crate::timing::record_stage(crate::timing::Stage::MaterializeSource, elapsed_us);
@@ -405,14 +501,13 @@ impl Shaper {
                 "materialize_source",
                 elapsed_us,
                 crate::timing::PhaseWorkload {
-                    segments: 1,
+                    segments,
                     axes: rebuilt,
                     ..Default::default()
                 },
                 "",
             );
         }
-        self.pending.push(segment);
     }
 
     pub fn feed(
@@ -422,7 +517,7 @@ impl Shaper {
     ) -> bool {
         match item {
             BaseItem::Seg(item) => {
-                self.buffer_segment(item);
+                self.pending.push(item);
                 self.emit(self.supported_count(), false, output)
             }
             BaseItem::Drain => {
@@ -494,10 +589,10 @@ impl Shaper {
     /// tracks have their own lookahead covered. The time-based bound already
     /// includes the cascaded width, but segment granularity can leave a long
     /// straddling segment unprojectable, so gate on the frontier explicitly.
-    /// A ratio-ramped follower cascades too: its smoothing reads the
-    /// leaders' path [`AxisChainSet::ratio_ramp_lookahead`] past a
-    /// segment's end before the projection over it is final, and a kernel
-    /// after the ramp reads every projected segment its window reaches.
+    /// A ratio-ramped follower needs no gate here: how far its smoothing
+    /// reads ahead depends on how the leaders come to rest, so the
+    /// projection itself commits only what it holds final (see
+    /// `follower_projection::project_followers`).
     ///
     /// Every gate compares `t_end + support` against the covered end with no
     /// slack — the same association and strictness as the fit-time
@@ -516,33 +611,16 @@ impl Shaper {
             .take_while(|seg| seg.t_end + self.forward_support <= last_t)
             .count();
         let own_hi = self.chains.max_follower_own_forward_support();
-        let ramp_lookahead = self.chains.ratio_ramp_lookahead();
-        if own_hi <= 0.0 && ramp_lookahead <= 0.0 {
+        if own_hi <= 0.0 {
             return plain;
         }
         let Some(frontier_t) = self.shaping_frontier_t(last_t) else {
             return 0;
         };
-        if ramp_lookahead <= 0.0 {
-            let gated = self
-                .pending
-                .iter()
-                .take_while(|seg| seg.t_end + own_hi <= frontier_t)
-                .count();
-            return plain.min(gated);
-        }
-        let ends: Vec<f64> = self.pending.iter().map(|seg| seg.t_end).collect();
-        let mut covering = 0;
         let gated = self
             .pending
             .iter()
-            .take_while(|seg| {
-                let needed = seg.t_end + own_hi;
-                while covering < ends.len() && ends[covering] < needed {
-                    covering += 1;
-                }
-                covering < ends.len() && ends[covering] + ramp_lookahead <= frontier_t
-            })
+            .take_while(|seg| seg.t_end + own_hi <= frontier_t)
             .count();
         plain.min(gated)
     }
@@ -567,6 +645,7 @@ impl Shaper {
         if count == 0 {
             return true;
         }
+        self.materialize_pending();
         let beyond_commit = self.chains.max_follower_own_forward_support() > 0.0
             || self.chains.has_ratio_ramped_follower();
         let frontier_count = if !beyond_commit {
@@ -611,13 +690,17 @@ impl Shaper {
             },
         )
         .unwrap_or_else(|e| panic!("shaper: {e}"));
+        let committed = shaped.len();
         for seg in shaped {
             if !output(TrajectoryItem::Seg(seg)) {
                 return false;
             }
         }
-        for _ in 0..count {
-            let raw = self.pending.pop_front().expect("count <= pending");
+        if committed == 0 {
+            return true;
+        }
+        for _ in 0..committed {
+            let raw = self.pending.pop_front().expect("committed <= pending");
             self.history.push_back(raw);
         }
         let emitted_through = self
@@ -640,65 +723,113 @@ impl Shaper {
     }
 }
 
-fn materialize_changed_sources(
-    segment: &mut ContinuousSegment,
+/// The axes of `segment` whose source is fitted before shaping: every
+/// non-follower axis a chain changes, and a z read through a variable bed
+/// surface. A source already fitted is kept.
+fn axes_to_materialize<'a>(
+    segment: &'a ContinuousSegment,
+    chains: &'a AxisChainSet,
+) -> impl Iterator<Item = usize> + 'a {
+    segment
+        .axes
+        .iter()
+        .enumerate()
+        .filter(|(axis, source)| {
+            let variable_surface_z = *axis == 2
+                && matches!(source, ContinuousAxis::Analytic { span, .. } if span.has_variable_surface());
+            let changed = chains
+                .chains
+                .get(*axis)
+                .is_some_and(|chain| !chain.is_empty())
+                && !chains.is_projected_follower(*axis);
+            (variable_surface_z || changed) && !matches!(source, ContinuousAxis::Spline(_))
+        })
+        .map(|(axis, _)| axis)
+}
+
+fn materialize_source_axis(
+    segment: &ContinuousSegment,
+    axis: usize,
     chains: &AxisChainSet,
     fit_tol: FitTol,
+) -> Result<ContinuousAxis, PostProcessError> {
+    let source = &segment.axes[axis];
+    let variable_surface_z = axis == 2
+        && matches!(source, ContinuousAxis::Analytic { span, .. } if span.has_variable_surface());
+    let (mut breakpoints, cap_contacts) = match source {
+        ContinuousAxis::Analytic { span, .. } => cap_contact_seeds(span),
+        _ => (vec![segment.t_start, segment.t_end], Vec::new()),
+    };
+    if let ContinuousAxis::Analytic { span, .. } = source {
+        if variable_surface_z {
+            breakpoints.extend(span.surface_seam_times().ok_or_else(|| {
+                fit_tolerance_without_probe(axis, segment.t_start, segment.t_end)
+            })?);
+        }
+    }
+    #[cfg(feature = "fit-audit")]
+    let _cap_contacts_audited = crate::fit_audit::CapContactScope::enter(&cap_contacts);
+    let mut curve = fit_axis_from_signal(
+        AxisFit {
+            axis,
+            t_start: segment.t_start,
+            t_end: segment.t_end,
+            seed_breakpoints: &breakpoints,
+            fit_tol,
+            fit_context: "materialize_source",
+            velocity_continuous: false,
+        },
+        &CapContactSource {
+            source,
+            cap_contacts: &cap_contacts,
+        },
+    )?;
+    if !chains.is_projected_follower(axis) {
+        if let Some(chain) = chains.chains.get(axis) {
+            curve = apply_zero_support_transform(chain.leading_transform(), axis, curve, fit_tol)?;
+        }
+    }
+    Ok(ContinuousAxis::Spline(Arc::new(curve)))
+}
+
+/// Fits the changed sources of every segment in `segments`, one pool job
+/// per axis: each fit reads only its own segment's source, so the batch an
+/// emit needs fans out whole. Returns how many axes it rebuilt.
+fn materialize_changed_sources(
+    segments: &mut [ContinuousSegment],
+    chains: &AxisChainSet,
+    fit_tol: FitTol,
+    pool: &WorkerPool,
 ) -> Result<usize, PostProcessError> {
-    let mut replacements = Vec::new();
-    for (axis, source) in segment.axes.iter().enumerate() {
-        let variable_surface_z = axis == 2
-            && matches!(source, ContinuousAxis::Analytic { span, .. } if span.has_variable_surface());
-        let changed = chains
-            .chains
-            .get(axis)
-            .is_some_and(|chain| !chain.is_empty())
-            && !chains.is_projected_follower(axis);
-        if !(variable_surface_z || changed) || matches!(source, ContinuousAxis::Spline(_)) {
-            continue;
-        }
-        let (mut breakpoints, cap_contacts) = match source {
-            ContinuousAxis::Analytic { span, .. } => cap_contact_seeds(span),
-            _ => (vec![segment.t_start, segment.t_end], Vec::new()),
-        };
-        if let ContinuousAxis::Analytic { span, .. } = source {
-            if variable_surface_z {
-                breakpoints.extend(span.surface_seam_times().ok_or_else(|| {
-                    fit_tolerance_without_probe(axis, segment.t_start, segment.t_end)
-                })?);
-            }
-        }
-        #[cfg(feature = "fit-audit")]
-        let _cap_contacts_audited = crate::fit_audit::CapContactScope::enter(&cap_contacts);
-        let mut curve = fit_axis_from_signal(
-            AxisFit {
-                axis,
-                t_start: segment.t_start,
-                t_end: segment.t_end,
-                seed_breakpoints: &breakpoints,
-                fit_tol,
-                fit_context: "materialize_source",
-                velocity_continuous: false,
+    let jobs: Vec<(usize, usize)> = segments
+        .iter()
+        .enumerate()
+        .flat_map(|(index, segment)| {
+            axes_to_materialize(segment, chains).map(move |axis| (index, axis))
+        })
+        .collect();
+    let participants = if cfg!(target_arch = "wasm32") {
+        1
+    } else {
+        std::thread::available_parallelism()
+            .map_or(1, |cores| cores.get())
+            .min(jobs.len())
+    };
+    let fitted = pool
+        .map_indexed(
+            participants,
+            jobs.len(),
+            || (),
+            |(), job| {
+                let (index, axis) = jobs[job];
+                materialize_source_axis(&segments[index], axis, chains, fit_tol)
             },
-            &CapContactSource {
-                source,
-                cap_contacts: &cap_contacts,
-            },
-        )?;
-        if !chains.is_projected_follower(axis) {
-            if let Some(chain) = chains.chains.get(axis) {
-                curve =
-                    apply_zero_support_transform(chain.leading_transform(), axis, curve, fit_tol)?;
-            }
-        }
-        replacements.push((axis, ContinuousAxis::Spline(Arc::new(curve))));
+        )
+        .expect("source materialize thread panicked");
+    for (&(index, axis), source) in jobs.iter().zip(fitted) {
+        Arc::make_mut(&mut segments[index].axes)[axis] = source?;
     }
-    let rebuilt = replacements.len();
-    let axes = Arc::make_mut(&mut segment.axes);
-    for (axis, replacement) in replacements {
-        axes[axis] = replacement;
-    }
-    Ok(rebuilt)
+    Ok(jobs.len())
 }
 
 /// An analytic source's materialize seeds — its ends, phase seams and
@@ -1424,8 +1555,8 @@ fn fit_axis_targets(
             let probe = scale_cache
                 .get(&t.to_bits())
                 .expect("leader scale probe is missing");
-            if probe.position.is_finite() {
-                position_scale = position_scale.max(probe.position.abs());
+            if probe.position_rounding_scale.is_finite() {
+                position_scale = position_scale.max(probe.position_rounding_scale);
             }
             if probe.velocity.is_finite() {
                 velocity_scale = velocity_scale.max(probe.velocity.abs());
@@ -1856,7 +1987,7 @@ struct MomentWindow {
 
 impl MomentWindow {
     fn new(
-        polynomial_start: f64,
+        expansion_point: f64,
         lo: f64,
         hi: f64,
         origin: f64,
@@ -1884,14 +2015,14 @@ impl MomentWindow {
             *span = hi_power - lo_power;
         }
         Some(Self {
-            shift: base - polynomial_start,
+            shift: base - expansion_point,
             edge_power_spans,
             max_power,
             translation: MomentTranslation::new(base, origin, moment_len),
         })
     }
 
-    /// `coefficients`, given about `polynomial_start`, re-expanded about the
+    /// `coefficients`, given about `expansion_point`, re-expanded about the
     /// window's midpoint into `centered`.
     fn center(&self, coefficients: &[f64], centered: &mut [f64]) {
         taylor_shift(coefficients, self.shift, centered);
@@ -1977,9 +2108,9 @@ impl MomentTree {
         let mut masses = vec![0.0; node_count * MOMENT_ORDERS];
         for i in 0..table.coeffs.len() {
             let node = leaf_count + i;
-            let origin = table.starts[i] + 0.5 * (table.ends[i] - table.starts[i]);
+            let origin = table.origins[i];
             origins[node] = origin;
-            reaches[node] = (origin - table.starts[i]).max(table.ends[i] - origin);
+            reaches[node] = table.half_width(i);
             for (order, mass) in masses[node * MOMENT_ORDERS..(node + 1) * MOMENT_ORDERS]
                 .iter_mut()
                 .enumerate()
@@ -2093,9 +2224,17 @@ impl MomentTree {
     }
 }
 
+fn piece_midpoint(start: f64, end: f64) -> f64 {
+    start + 0.5 * (end - start)
+}
+
 /// One axis of the emit window, flattened to time-sorted monomial pieces so
 /// the convolution's Gauss sampling evaluates by binary search plus Horner
-/// instead of a de Boor pass per sample. Semantics match the NURBS window it
+/// instead of a de Boor pass per sample. Each piece is expanded about its
+/// midpoint, where a high-degree piece's monomial terms stay at the scale of
+/// its values: about an edge they swing by orders of magnitude more and
+/// cancel, and every moment and exact polynomial summed from them carries
+/// that swing in its rounding. Semantics match the NURBS window it
 /// is built from: before `first_t` the signal clamps at a stream boundary
 /// and is otherwise missing (NaN, surfaced as `MissingHistory`); past
 /// `last_t` it clamps under a drain flush and is otherwise missing; a time
@@ -2103,6 +2242,7 @@ impl MomentTree {
 pub(crate) struct AxisSignalTable {
     starts: Vec<f64>,
     ends: Vec<f64>,
+    origins: Vec<f64>,
     coeffs: Vec<Vec<f64>>,
     first_t: f64,
     last_t: f64,
@@ -2150,6 +2290,7 @@ impl AxisSignalTable {
         let mut table = Self {
             starts: Vec::new(),
             ends: Vec::new(),
+            origins: Vec::new(),
             coeffs: Vec::new(),
             first_t: bounds.first_t,
             last_t: bounds.last_t,
@@ -2173,14 +2314,13 @@ impl AxisSignalTable {
                     if piece.u_start > previous_end {
                         let previous = table.coeffs.len() - 1;
                         let held = table.piece_at(previous, previous_end);
-                        table.starts.push(previous_end);
-                        table.ends.push(piece.u_start);
-                        table.coeffs.push(vec![held]);
+                        table.push_piece(previous_end, piece.u_start, vec![held]);
                     }
                 }
-                table.starts.push(piece.u_start);
-                table.ends.push(piece.u_end);
-                table.coeffs.push(piece.coeffs);
+                let origin = piece_midpoint(piece.u_start, piece.u_end);
+                let mut centered = vec![0.0; piece.coeffs.len()];
+                taylor_shift(&piece.coeffs, origin - piece.u_start, &mut centered);
+                table.push_piece(piece.u_start, piece.u_end, centered);
             }
         }
         assert!(!table.coeffs.is_empty(), "empty signal window");
@@ -2285,17 +2425,33 @@ impl AxisSignalTable {
         &self.input_jumps
     }
 
-    /// `Σₖ |cₖ| k!/(k−n)! hᵏ⁻ⁿ` for piece `piece`'s `order`-th derivative:
-    /// a bound, at any point of the piece, on the terms its re-expansion
-    /// about any point of the piece sums.
+    fn push_piece(&mut self, start: f64, end: f64, centered: Vec<f64>) {
+        self.starts.push(start);
+        self.ends.push(end);
+        self.origins.push(piece_midpoint(start, end));
+        self.coeffs.push(centered);
+    }
+
+    fn half_width(&self, piece: usize) -> f64 {
+        (self.origins[piece] - self.starts[piece]).max(self.ends[piece] - self.origins[piece])
+    }
+
+    /// Piece `piece`'s offset from its origin at `t`, clamped onto the piece.
+    fn offset_in(&self, piece: usize, t: f64) -> f64 {
+        t.clamp(self.starts[piece], self.ends[piece]) - self.origins[piece]
+    }
+
+    /// `Σₖ |cₖ| k!/(k−n)! (h/2)ᵏ⁻ⁿ` for piece `piece`'s `order`-th
+    /// derivative: a bound, at any point of the piece, on the terms its
+    /// re-expansion about any point of the piece sums.
     fn piece_magnitude(&self, piece: usize, order: usize) -> f64 {
-        let width = self.ends[piece] - self.starts[piece];
+        let half_width = self.half_width(piece);
         let mut magnitude = 0.0;
         let mut reach = 1.0;
         for power in order..self.coeffs[piece].len() {
             let falling = ((power - order + 1)..=power).fold(1.0, |acc, k| acc * k as f64);
             magnitude += self.coeffs[piece][power].abs() * falling * reach;
-            reach *= width;
+            reach *= half_width;
         }
         magnitude
     }
@@ -2306,7 +2462,7 @@ impl AxisSignalTable {
         if length == 0 {
             return 0.0;
         }
-        let tau = (at - self.starts[piece]).clamp(0.0, self.ends[piece] - self.starts[piece]);
+        let tau = self.offset_in(piece, at);
         derivative[..length]
             .iter()
             .rev()
@@ -2486,7 +2642,7 @@ impl AxisSignalTable {
     ) {
         let coefficients = &self.coeffs[piece];
         let Some(window) = MomentWindow::new(
-            self.starts[piece],
+            self.origins[piece],
             lo,
             hi,
             origin,
@@ -2508,7 +2664,7 @@ impl AxisSignalTable {
     }
 
     fn piece_at(&self, i: usize, t: f64) -> f64 {
-        let tau = (t - self.starts[i]).clamp(0.0, self.ends[i] - self.starts[i]);
+        let tau = self.offset_in(i, t);
         self.coeffs[i]
             .iter()
             .rev()
@@ -2587,7 +2743,6 @@ fn eval_segment_axis(seg: &ContinuousSegment, axis: usize, t: f64) -> f64 {
 
 const MAX_FIT_REFINEMENT_SPLITS: usize = 512;
 const LEADER_SPAN_PARALLEL_THRESHOLD: usize = 512;
-pub(crate) const MIN_DEVICE_INTERVAL_S: f64 = 2e-9;
 
 /// A span's acceleration is read off a quintic whose odd coefficients are
 /// solved from the endpoint positions, so one ulp of sampling noise reaches
@@ -2636,7 +2791,7 @@ fn ladder_resolution_floor<S: TrackSignal>(
     for &t in seeds {
         let (position, velocity, _) = sig.eval_pva(t);
         if position.is_finite() {
-            position_scale = position_scale.max(position.abs());
+            position_scale = position_scale.max(sig.position_rounding_scale(position));
         }
         if velocity.is_finite() {
             velocity_scale = velocity_scale.max(velocity.abs());
@@ -2969,7 +3124,7 @@ fn velocity_step_across<S: TrackSignal>(sig: &S, t: f64) -> f64 {
 }
 
 struct ScaleProbe {
-    position: f64,
+    position_rounding_scale: f64,
     velocity: f64,
     velocity_step: f64,
 }
@@ -2977,7 +3132,7 @@ struct ScaleProbe {
 fn scale_probe<S: TrackSignal>(sig: &S, t: f64) -> ScaleProbe {
     let (position, velocity, _) = sig.eval_pva(t);
     ScaleProbe {
-        position,
+        position_rounding_scale: sig.position_rounding_scale(position),
         velocity,
         velocity_step: velocity_step_across(sig, t),
     }
@@ -3249,7 +3404,7 @@ const INTERPOLANT_SUSPICION_SHARE: f64 = 0.9;
 const INTERPOLANT_REFINE_SHARE: f64 = 0.5;
 const GOLDEN_SECTION_STEPS: u32 = 16;
 
-fn golden_section_peak<E>(
+pub(crate) fn golden_section_peak<E>(
     mut value: impl FnMut(f64) -> Result<f64, E>,
     mut low: f64,
     mut high: f64,
@@ -3384,6 +3539,18 @@ impl ErrorSample {
     }
 }
 
+/// The samples the witnesses walk a span through, in order.
+struct ProbeWalk {
+    samples: [ErrorSample; LADDER_PROBES_U.len()],
+    len: usize,
+}
+
+impl ProbeWalk {
+    fn samples(&self) -> &[ErrorSample] {
+        &self.samples[..self.len]
+    }
+}
+
 struct RungWitness<'a, S> {
     axis: usize,
     sig: &'a S,
@@ -3391,16 +3558,26 @@ struct RungWitness<'a, S> {
     t0: f64,
     h: f64,
     fit_tol: FitTol,
-    accel_budget: AccelBudget,
+    between_probes: BetweenProbes,
+}
+
+/// The stretch of a span its fit resolves, and which of its edges anchor
+/// past their slivers.
+#[derive(Clone, Copy)]
+struct ResolvedStretch {
+    from: f64,
+    to: f64,
+    anchored_past_slivers: (bool, bool),
 }
 
 /// Where the witnesses estimate a rung leaves the tolerance between the
-/// probes, for a signal with no exact polynomials to prove it against.
+/// probes, for a signal with neither exact polynomials nor an enclosure to
+/// prove it against.
 fn estimated_witness<S: TrackSignal>(
     witness: RungWitness<'_, S>,
     t1: f64,
     truth: &SpanTruth,
-    (resolved_from, resolved_to): (f64, f64),
+    stretch: ResolvedStretch,
 ) -> Result<Option<f64>, PostProcessError> {
     if let Some(u) = acceleration_error_witness(
         witness.sig,
@@ -3411,9 +3588,14 @@ fn estimated_witness<S: TrackSignal>(
     ) {
         return Ok(Some(u));
     }
-    match witness.sig.interior_knots(resolved_from, resolved_to) {
-        [] => witness.over_probes(truth),
-        knots => witness.over_pieces(truth, knots),
+    let u_of = |t: f64| nurbs::fmadd(2.0 / witness.h, t - witness.t0, -1.0);
+    let walked_from = (
+        stretch.anchored_past_slivers.0.then(|| u_of(stretch.from)),
+        stretch.anchored_past_slivers.1.then(|| u_of(stretch.to)),
+    );
+    match witness.sig.interior_knots(stretch.from, stretch.to) {
+        [] => witness.over_probes(truth, walked_from),
+        knots => witness.over_pieces(truth, knots, walked_from),
     }
 }
 
@@ -3509,22 +3691,71 @@ impl<S: TrackSignal> RungWitness<'_, S> {
             .fold(0.0, f64::max)
     }
 
-    fn over_probes(&self, truth: &SpanTruth) -> Result<Option<f64>, PostProcessError> {
-        let samples: [ErrorSample; LADDER_PROBES_U.len()] = std::array::from_fn(|index| {
+    fn probe_samples(&self, truth: &SpanTruth) -> [ErrorSample; LADDER_PROBES_U.len()] {
+        std::array::from_fn(|index| {
             self.sample(
                 LADDER_PROBES_U[index],
                 (truth.pos[index], truth.vel[index], truth.acc[index]),
             )
-        });
-        if let Some(u) = self.over_probe_interpolant(&samples)? {
+        })
+    }
+
+    /// The samples the witnesses walk a span through: the probes, but at an
+    /// edge anchored past its sliver an exact sample at its resolved edge in
+    /// place of the edge probe and the probes inside the sliver. That edge
+    /// probe carries the anchored state — the sliver's extrapolation, not the
+    /// signal — so a gap walked from it estimates the miss next to the edge
+    /// from a zero.
+    fn walk(
+        &self,
+        probes: &[ErrorSample; LADDER_PROBES_U.len()],
+        (from, to): (Option<f64>, Option<f64>),
+    ) -> Result<ProbeWalk, PostProcessError> {
+        let last = LADDER_PROBES_U.len() - 1;
+        let first = from.map_or(Ok(probes[0]), |u| self.exact_sample_at(u))?;
+        let final_sample = to.map_or(Ok(probes[last]), |u| self.exact_sample_at(u))?;
+        let mut walk = ProbeWalk {
+            samples: [first; LADDER_PROBES_U.len()],
+            len: 1,
+        };
+        for &probe in probes.iter().filter(|probe| {
+            first.position.u < probe.position.u && probe.position.u < final_sample.position.u
+        }) {
+            walk.samples[walk.len] = probe;
+            walk.len += 1;
+        }
+        walk.samples[walk.len] = final_sample;
+        walk.len += 1;
+        Ok(walk)
+    }
+
+    fn over_probes(
+        &self,
+        truth: &SpanTruth,
+        walked_from: (Option<f64>, Option<f64>),
+    ) -> Result<Option<f64>, PostProcessError> {
+        let probes = self.probe_samples(truth);
+        if let Some(u) = self.over_probe_interpolant(&probes)? {
             return Ok(Some(u));
         }
-        for gap in samples.windows(2) {
+        let walk = self.walk(&probes, walked_from)?;
+        if let Some(u) = self.outside_at_an_edge(&walk) {
+            return Ok(Some(u));
+        }
+        for gap in walk.samples().windows(2) {
             if let Some(u) = self.over_piece(gap[0], gap[1])? {
                 return Ok(Some(u));
             }
         }
         Ok(None)
+    }
+
+    fn outside_at_an_edge(&self, walk: &ProbeWalk) -> Option<f64> {
+        let samples = walk.samples();
+        [samples[0], samples[samples.len() - 1]]
+            .into_iter()
+            .find(|&edge| !self.within(edge))
+            .map(|edge| edge.position.u)
     }
 
     fn over_probe_interpolant(
@@ -3559,14 +3790,19 @@ impl<S: TrackSignal> RungWitness<'_, S> {
             .windows(2)
             .find(|gap| peak_u <= gap[1])
             .expect("the interpolant peak lies between the probes");
-        self.exact_witness_in(gap[0], gap[1])
+        self.exact_witness_in(gap[0], gap[1], curvature_miss)
     }
 
     /// Where the error between `low` and `high` leaves the tolerance, read
-    /// from exact samples: a scan, then a golden-section search around its
-    /// largest curvature miss. Spent only on stretches an estimate already
+    /// from exact samples: a scan, then a golden-section search around the
+    /// largest miss by `measure`. Spent only on stretches an estimate already
     /// puts near the budget, where the estimate itself decides nothing.
-    fn exact_witness_in(&self, low: f64, high: f64) -> Result<Option<f64>, PostProcessError> {
+    fn exact_witness_in(
+        &self,
+        low: f64,
+        high: f64,
+        measure: fn(&ErrorSample) -> f64,
+    ) -> Result<Option<f64>, PostProcessError> {
         let step = (high - low) / f64::from(EXACT_PEAK_SCAN_POINTS);
         let mut scan_peak = (f64::NAN, 0.0);
         for k in 0..EXACT_PEAK_SCAN_POINTS {
@@ -3575,12 +3811,12 @@ impl<S: TrackSignal> RungWitness<'_, S> {
             if !self.within(sample) {
                 return Ok(Some(u));
             }
-            if sample.curvature_per_u2.abs() >= scan_peak.1 {
-                scan_peak = (u, sample.curvature_per_u2.abs());
+            if measure(&sample) >= scan_peak.1 {
+                scan_peak = (u, measure(&sample));
             }
         }
         let (peak_u, _) = golden_section_peak(
-            |u| Ok(self.exact_sample_at(u)?.curvature_per_u2.abs()),
+            |u| Ok(measure(&self.exact_sample_at(u)?)),
             (scan_peak.0 - step).max(low),
             (scan_peak.0 + step).min(high),
         )?;
@@ -3591,24 +3827,23 @@ impl<S: TrackSignal> RungWitness<'_, S> {
         &self,
         truth: &SpanTruth,
         knots: &[f64],
+        walked_from: (Option<f64>, Option<f64>),
     ) -> Result<Option<f64>, PostProcessError> {
-        let samples: [ErrorSample; LADDER_PROBES_U.len()] = std::array::from_fn(|index| {
-            self.sample(
-                LADDER_PROBES_U[index],
-                (truth.pos[index], truth.vel[index], truth.acc[index]),
-            )
-        });
-        if let Some(u) = self.over_probe_interpolant(&samples)? {
+        let probes = self.probe_samples(truth);
+        if let Some(u) = self.over_probe_interpolant(&probes)? {
             return Ok(Some(u));
         }
-        let probe = |index: usize| samples[index];
+        let walk = self.walk(&probes, walked_from)?;
+        if let Some(u) = self.outside_at_an_edge(&walk) {
+            return Ok(Some(u));
+        }
         let half_span = 0.5 * self.h;
         let mut knots = knots
             .iter()
             .map(|&t| (nurbs::fmadd(2.0 / self.h, t - self.t0, -1.0), t))
             .peekable();
-        for index in 1..LADDER_PROBES_U.len() {
-            let (start, end) = (probe(index - 1), probe(index));
+        for gap in walk.samples().windows(2) {
+            let (start, end) = (gap[0], gap[1]);
             let width = end.position.u - start.position.u;
             let mut curvature_margin =
                 self.curvature_budget() - start.hermite_curvature_peak_to(end);
@@ -3648,9 +3883,9 @@ impl<S: TrackSignal> RungWitness<'_, S> {
         if right.position.u <= left.position.u {
             return Ok(None);
         }
-        let acceleration = match self.accel_budget {
-            AccelBudget::Absolute => self.acceleration_between(left, right, 0)?,
-            AccelBudget::PositionEquivalent => {
+        let acceleration = match self.between_probes {
+            BetweenProbes::ErrorInterpolant => self.acceleration_between(left, right, 0)?,
+            BetweenProbes::TruthInterpolant => {
                 self.acceleration_against_hermite_truth(left, right, 0)?
             }
         };
@@ -3671,7 +3906,7 @@ impl<S: TrackSignal> RungWitness<'_, S> {
             return Ok(None);
         }
         if estimated_peak <= self.curvature_budget() {
-            return self.exact_witness_in(left.position.u, right.position.u);
+            return self.exact_witness_in(left.position.u, right.position.u, curvature_miss);
         }
         let u = 0.5 * (left.position.u + right.position.u);
         let mid = self.exact_sample_at(u)?;
@@ -3688,13 +3923,14 @@ impl<S: TrackSignal> RungWitness<'_, S> {
     /// held against the truth's quintic Hermite interpolant rather than
     /// the error's: the rung is known exactly, and a high-degree rung swings
     /// between samples where no interpolant of the error follows it. The
-    /// position-equivalent budget accepts such rungs: its curvature error
-    /// runs to `8·ε/h²`, hundreds of mm/s² on an advanced extruder whose
-    /// signal swings by tens of thousands. The stretch's exact midpoint
-    /// measures how far the truth leaves its interpolant, and a stretch
-    /// whose estimate and that miss together reach the budget is split
-    /// there. The absolute budget keeps the error's interpolant, which the
-    /// fit audit already holds every absolute fit to.
+    /// stretch's exact midpoint measures how far the truth leaves its
+    /// interpolant; a stretch whose estimate and that miss together stay
+    /// under the suspicion share of the budget holds, one past the budget is
+    /// split there, and one in between is read exactly. So is a stretch
+    /// still past the budget at the deepest split: there the truth's
+    /// interpolant is rebuilt from samples a hair apart, whose positions'
+    /// rounding — an extruder's odometer integrates adaptively — swamps the
+    /// curvature it reconstructs, and only an exact sample may reject.
     fn acceleration_against_hermite_truth(
         &self,
         left: ErrorSample,
@@ -3712,11 +3948,12 @@ impl<S: TrackSignal> RungWitness<'_, S> {
             return Ok(Some(u));
         }
         let truth_miss = (mid.curvature_per_u2 - self.curvature_error_against(&truth, u)).abs();
-        if estimated_peak + truth_miss <= self.curvature_budget() {
+        let bound = estimated_peak + truth_miss;
+        if bound <= INTERPOLANT_SUSPICION_SHARE * self.curvature_budget() {
             return Ok(None);
         }
-        if depth == WITNESS_MAX_DEPTH {
-            return Ok(Some(u));
+        if bound <= self.curvature_budget() || depth == WITNESS_MAX_DEPTH {
+            return self.exact_witness_in(left.position.u, right.position.u, curvature_miss);
         }
         match self.acceleration_against_hermite_truth(left, mid, depth + 1)? {
             Some(u) => Ok(Some(u)),
@@ -3724,14 +3961,22 @@ impl<S: TrackSignal> RungWitness<'_, S> {
         }
     }
 
+    /// Where the rung's position leaves the budget between two samples. The
+    /// error's cubic Hermite interpolant misses its truth by the error's
+    /// fourth derivative, so an estimate within reach of the budget is read
+    /// exactly rather than trusted.
     fn over_gap(
         &self,
         left: PositionErrorSample,
         right: PositionErrorSample,
         depth: u32,
     ) -> Result<Option<f64>, PostProcessError> {
-        if left.hermite_peak_to(right) <= self.fit_tol.pos_mm {
+        let estimated_peak = left.hermite_peak_to(right);
+        if estimated_peak <= INTERPOLANT_SUSPICION_SHARE * self.fit_tol.pos_mm {
             return Ok(None);
+        }
+        if estimated_peak <= self.fit_tol.pos_mm {
+            return self.exact_witness_in(left.u, right.u, position_miss);
         }
         let u = 0.5 * (left.u + right.u);
         let t = nurbs::fmadd(0.5 * (u + 1.0), self.h, self.t0);
@@ -3751,6 +3996,14 @@ impl<S: TrackSignal> RungWitness<'_, S> {
             None => self.over_gap(mid, right, depth + 1),
         }
     }
+}
+
+fn curvature_miss(sample: &ErrorSample) -> f64 {
+    sample.curvature_per_u2.abs()
+}
+
+fn position_miss(sample: &ErrorSample) -> f64 {
+    sample.position.error.abs()
 }
 
 const LADDER_FIT_NODES_U: [f64; 3] = [0.0, 0.5, -0.5];
@@ -3815,23 +4068,40 @@ fn edge_velocity_and_acceleration<S: TrackSignal>(
     past_sliver: f64,
     onset_on_edge: bool,
     fit_tol: FitTol,
-) -> Result<(f64, f64), PostProcessError> {
+) -> Result<EdgeAnchor, PostProcessError> {
     let (_, velocity, seam_acceleration) = sig.eval_pva(seam);
     let velocity = exact_value(axis, velocity, seam)?;
     let seam_acceleration = exact_value(axis, seam_acceleration, seam)?;
+    let at_seam = EdgeAnchor {
+        velocity,
+        acceleration: seam_acceleration,
+        past_sliver: false,
+    };
     if onset_on_edge {
-        return Ok((velocity, seam_acceleration));
+        return Ok(at_seam);
     }
     let past_acceleration = exact_value(axis, sig.second_deriv(past_sliver), past_sliver)?;
     let beyond = nurbs::fmadd(2.0, past_sliver - seam, seam);
     let beyond_acceleration = exact_value(axis, sig.second_deriv(beyond), beyond)?;
     let extrapolated_to_seam = 2.0 * past_acceleration - beyond_acceleration;
-    let acceleration = if (extrapolated_to_seam - seam_acceleration).abs() > fit_tol.accel_mm_s2 {
-        extrapolated_to_seam
-    } else {
-        seam_acceleration
-    };
-    Ok((velocity, acceleration))
+    if (extrapolated_to_seam - seam_acceleration).abs() > fit_tol.accel_mm_s2 {
+        return Ok(EdgeAnchor {
+            acceleration: extrapolated_to_seam,
+            past_sliver: true,
+            ..at_seam
+        });
+    }
+    Ok(at_seam)
+}
+
+/// The state a span edge anchors its rungs to, and whether any of it is
+/// read past the edge's sliver rather than at the seam: then it is not the
+/// signal's state at the edge.
+#[derive(Debug, Clone, Copy)]
+struct EdgeAnchor {
+    velocity: f64,
+    acceleration: f64,
+    past_sliver: bool,
 }
 
 /// The velocity a span anchors to at a seam where coalescing moved a velocity
@@ -3867,18 +4137,18 @@ fn span_probe_t(t0: f64, t1: f64, u: f64) -> f64 {
 /// Every accepted piece is endpoint-anchored, so the span seams stay C0 no
 /// matter which rung wins. On a span reaching a square-root onset the
 /// acceleration's shoulder bends between the probes, so the rungs are also
-/// held to the tolerance at points spread between the resolved edges as the
-/// fit audit spreads them: a miss there splits a splittable span — grading
-/// the partition toward the onset only as deep as its fit needs — and at the
-/// floor, where the closest rung is kept, it is the closest there too. The
-/// points are sampled only once a rung passes the probes or a kept closest
-/// rung is ranked. Returns the accepted
-/// monomial-in-u fit, or the closest rung with the ladder's miss.
+/// held to the tolerance across the resolved stretch by `OnsetHold`: a miss
+/// there splits a splittable span — grading the partition toward the onset
+/// only as deep as its fit needs — and at the floor, where the closest rung
+/// is kept, it is the closest there too. The stretch is sampled only once a
+/// rung passes the probes or a kept closest rung is ranked. Returns the
+/// accepted monomial-in-u fit, or the closest rung with the ladder's miss.
 ///
 /// A rung that passes the probes is then held between them: proven by the
 /// Bernstein hull of its error against the signal's exact polynomials
-/// where the signal has them, estimated by the witnesses where it does not.
-/// Where it has them every truth sample is read off them too, each edge's
+/// where the signal has them, against its Taylor-model enclosure where it
+/// has one, estimated by the witnesses where it has neither. Where it has
+/// exact polynomials every truth sample is read off them too, each edge's
 /// from the side facing into the span.
 #[allow(clippy::type_complexity)]
 fn shaped_ladder<S: TrackSignal>(
@@ -3909,7 +4179,7 @@ fn shaped_ladder<S: TrackSignal>(
     let p0 = exact_value(axis, from_start.eval(t0), t0)?;
     let start_past_sliver = t0 + edge_inset(h, policy.floors.cubic, slivers.start);
     let end_past_sliver = t1 - edge_inset(h, policy.floors.cubic, slivers.end);
-    let (seam_v0, a0) = edge_velocity_and_acceleration(
+    let start = edge_velocity_and_acceleration(
         &from_start,
         axis,
         t0_inside,
@@ -3917,13 +4187,14 @@ fn shaped_ladder<S: TrackSignal>(
         square_root_onset_on_edge(sig, t0),
         fit_tol,
     )?;
+    let a0 = start.acceleration;
     let v0 = match slivers.start_break {
         Some(break_at) => velocity_past_moved_break(&from_start, axis, break_at, t1, t0)?,
-        None => seam_v0,
+        None => start.velocity,
     };
     let t1_inside = span_probe_t(t0, t1, 1.0);
     let p1 = exact_value(axis, from_end.eval(t1), t1)?;
-    let (seam_v1, a1) = edge_velocity_and_acceleration(
+    let end = edge_velocity_and_acceleration(
         &from_end,
         axis,
         t1_inside,
@@ -3931,10 +4202,15 @@ fn shaped_ladder<S: TrackSignal>(
         square_root_onset_on_edge(sig, t1),
         fit_tol,
     )?;
+    let a1 = end.acceleration;
     let v1 = match slivers.end_break {
         Some(break_at) => velocity_past_moved_break(&from_end, axis, break_at, t0, t1)?,
-        None => seam_v1,
+        None => end.velocity,
     };
+    let anchored_past_slivers = (
+        start.past_sliver || slivers.start_break.is_some(),
+        end.past_sliver || slivers.end_break.is_some(),
+    );
     let base = quintic_in_u((p0, v0, a0), (p1, v1, a1), h);
     let endpoint_delta = exact_value(axis, sig.position_delta((t0, p0), (t1, p1)), t1)?;
 
@@ -3969,25 +4245,18 @@ fn shaped_ladder<S: TrackSignal>(
         };
     }
 
-    let held_samples = std::cell::OnceCell::new();
-    let reaches_onset = square_root_onset_within(sig, t0, t1);
-    let held = || -> &[HeldSample] {
-        if !reaches_onset {
-            return &[];
-        }
-        held_samples.get_or_init(|| {
-            let resolved = end_past_sliver - start_past_sliver;
-            std::array::from_fn::<_, SQUARE_ROOT_ONSET_CHECK_POINTS, _>(|k| {
-                let t = start_past_sliver
-                    + resolved * (k as f64 + 0.5) / SQUARE_ROOT_ONSET_CHECK_POINTS as f64;
-                let (position, _, acceleration) = from_start.eval_pva(t);
-                HeldSample {
-                    x: 2.0 * (t - t0) / h - 1.0,
-                    position,
-                    acceleration,
-                }
-            })
-        })
+    let onset_hold = square_root_onset_within(sig, t0, t1).then(|| OnsetHold {
+        read: &from_start,
+        span: (t0, t1),
+        resolved: (start_past_sliver, end_past_sliver),
+        tol: piece_tol,
+        samples: std::cell::OnceCell::new(),
+        edge_scans: std::cell::OnceCell::new(),
+    });
+    let held_miss = |rung: &[f64]| {
+        onset_hold
+            .as_ref()
+            .map_or(0.0, |hold| hold.worst_miss(rung))
     };
     match ladder_fit(
         &base,
@@ -3996,7 +4265,7 @@ fn shaped_ladder<S: TrackSignal>(
             position: &|u| truth.pos_at(u),
             velocity: &|u| truth.vel_at(u),
             acceleration: &|u| truth.acc_at(u),
-            held: &held,
+            held_miss: &held_miss,
             held_ranks_misses: keeps_closest_rung,
         },
         LadderBudget {
@@ -4012,34 +4281,47 @@ fn shaped_ladder<S: TrackSignal>(
     ) {
         Ok(coefficients) => {
             let resolved = (start_past_sliver, end_past_sliver);
+            let piece = FittedPiece {
+                mono_u: &coefficients,
+                t0,
+                t1,
+            };
+            let budget = HullBudget {
+                tol: piece_tol,
+                velocity: policy.velocity_budget,
+            };
             let witness = match exact {
                 Some(exact) => hull::first_unproven(
                     exact.over(resolved.0, resolved.1),
-                    FittedPiece {
-                        mono_u: &coefficients,
-                        t0,
-                        t1,
-                    },
+                    piece,
                     resolved,
-                    HullBudget {
-                        tol: piece_tol,
-                        velocity: policy.velocity_budget,
-                    },
+                    budget,
                 ),
-                None => estimated_witness(
-                    RungWitness {
-                        axis,
-                        sig,
-                        coefficients: &coefficients,
-                        t0,
-                        h,
-                        fit_tol: piece_tol,
-                        accel_budget: fit_tol.accel_budget,
-                    },
-                    t1,
-                    &truth,
-                    resolved,
-                )?,
+                None => match sig.enclosure_on(resolved.0, resolved.1, budget.enclosure_accuracy())
+                {
+                    Some(enclosure) => hull::first_unproven(&enclosure, piece, resolved, budget),
+                    None => estimated_witness(
+                        RungWitness {
+                            axis,
+                            sig,
+                            coefficients: &coefficients,
+                            t0,
+                            h,
+                            fit_tol: piece_tol,
+                            between_probes: match fit_tol.accel_budget {
+                                AccelBudget::Absolute => sig.between_probes(),
+                                AccelBudget::PositionEquivalent => BetweenProbes::TruthInterpolant,
+                            },
+                        },
+                        t1,
+                        &truth,
+                        ResolvedStretch {
+                            from: start_past_sliver,
+                            to: end_past_sliver,
+                            anchored_past_slivers,
+                        },
+                    )?,
+                },
             };
             let Some(u) = witness else {
                 return Ok((coefficients, None));
@@ -4092,9 +4374,168 @@ fn shaped_ladder<S: TrackSignal>(
     }
 }
 
-/// Points at which a span reaching a square-root onset is held to the fit
-/// tolerance between the ladder's probes.
-const SQUARE_ROOT_ONSET_CHECK_POINTS: usize = 64;
+/// Intervals between the check points a span reaching a square-root onset
+/// is held to the fit tolerance at between the ladder's probes.
+const SQUARE_ROOT_ONSET_CHECK_INTERVALS: usize = 64;
+
+/// Exact samples the stretch between a resolved edge and the check point
+/// next to it is scanned at before its peak is searched.
+const SQUARE_ROOT_ONSET_EDGE_SCAN_POINTS: u32 = 8;
+
+/// Share of the tolerance above which a rung's miss peaking at a check
+/// point is searched for exactly between that point's neighbours.
+const SQUARE_ROOT_ONSET_PEAK_SEARCH_SHARE: f64 = 0.25;
+
+/// Where a span reaching a square-root onset holds its rungs to the fit
+/// tolerance between the ladder's probes: at check points spread evenly
+/// across the resolved stretch, its edges included, then — for a rung they
+/// all hold — at the exact peaks between them. Next to an edge a rung's
+/// miss of an onset there rises as the root of the distance from it, a
+/// shoulder narrower than any grid of check points, so the stretch from
+/// each resolved edge to the check point next to it is searched in that
+/// root, where the shoulder is smooth.
+struct OnsetHold<'a, S> {
+    read: &'a FacingRead<'a, S>,
+    span: (f64, f64),
+    resolved: (f64, f64),
+    tol: FitTol,
+    samples: std::cell::OnceCell<[HeldSample; SQUARE_ROOT_ONSET_CHECK_INTERVALS + 1]>,
+    edge_scans: std::cell::OnceCell<[EdgeScan; 2]>,
+}
+
+/// The stretch between a resolved edge and the check point next to it, in
+/// the root of the distance from the span edge.
+#[derive(Clone, Copy)]
+struct EdgeRoots {
+    span_edge: f64,
+    inward: f64,
+    from: f64,
+    to: f64,
+    step: f64,
+}
+
+impl EdgeRoots {
+    fn t_of_root(&self, root: f64) -> f64 {
+        nurbs::fmadd(self.inward * root, root, self.span_edge)
+    }
+
+    fn scan_root(&self, k: u32) -> f64 {
+        nurbs::fmadd(f64::from(k + 1), self.step, self.from)
+    }
+}
+
+/// The exact samples of an edge stretch, evenly spaced in its root: the
+/// same for every rung of the span.
+struct EdgeScan {
+    roots: EdgeRoots,
+    samples: [HeldSample; SQUARE_ROOT_ONSET_EDGE_SCAN_POINTS as usize],
+}
+
+impl<S: TrackSignal> OnsetHold<'_, S> {
+    fn check_t(&self, k: usize) -> f64 {
+        if k == SQUARE_ROOT_ONSET_CHECK_INTERVALS {
+            return self.resolved.1;
+        }
+        nurbs::fmadd(
+            k as f64 / SQUARE_ROOT_ONSET_CHECK_INTERVALS as f64,
+            self.resolved.1 - self.resolved.0,
+            self.resolved.0,
+        )
+    }
+
+    fn h(&self) -> f64 {
+        self.span.1 - self.span.0
+    }
+
+    fn sample_at(&self, t: f64) -> HeldSample {
+        let (position, _, acceleration) = self.read.eval_pva(t);
+        HeldSample {
+            x: 2.0 * (t - self.span.0) / self.h() - 1.0,
+            position,
+            acceleration,
+        }
+    }
+
+    fn miss_at(&self, rung: &[f64], t: f64) -> f64 {
+        held_miss(rung, self.h(), &[self.sample_at(t)], self.tol)
+    }
+
+    fn worst_miss(&self, rung: &[f64]) -> f64 {
+        let samples = self
+            .samples
+            .get_or_init(|| std::array::from_fn(|k| self.sample_at(self.check_t(k))));
+        let misses = samples.map(|sample| held_miss(rung, self.h(), &[sample], self.tol));
+        let at_checks = misses.iter().copied().fold(0.0, f64::max);
+        if at_checks > 1.0 {
+            return at_checks;
+        }
+        let last = SQUARE_ROOT_ONSET_CHECK_INTERVALS;
+        let edge_scans = self.edge_scans.get_or_init(|| {
+            [
+                self.edge_scan(self.span.0, self.check_t(0), self.check_t(1)),
+                self.edge_scan(self.span.1, self.check_t(last), self.check_t(last - 1)),
+            ]
+        });
+        let mut worst = edge_scans
+            .iter()
+            .map(|scan| self.edge_peak(rung, scan))
+            .fold(at_checks, f64::max);
+        for (before, around) in misses.windows(3).enumerate() {
+            if around[1] > SQUARE_ROOT_ONSET_PEAK_SEARCH_SHARE
+                && around[1] >= around[0]
+                && around[1] >= around[2]
+            {
+                let Ok((_, peak)) = golden_section_peak(
+                    |t| Ok::<_, std::convert::Infallible>(self.miss_at(rung, t)),
+                    self.check_t(before),
+                    self.check_t(before + 2),
+                );
+                worst = worst.max(peak);
+            }
+        }
+        worst
+    }
+
+    fn edge_scan(&self, span_edge: f64, resolved_edge: f64, next_check: f64) -> EdgeScan {
+        let (from, to) = (
+            (resolved_edge - span_edge).abs().sqrt(),
+            (next_check - span_edge).abs().sqrt(),
+        );
+        let roots = EdgeRoots {
+            span_edge,
+            inward: (next_check - span_edge).signum(),
+            from,
+            to,
+            step: (to - from) / f64::from(SQUARE_ROOT_ONSET_EDGE_SCAN_POINTS + 1),
+        };
+        EdgeScan {
+            roots,
+            samples: std::array::from_fn(|k| {
+                let k = u32::try_from(k).expect("the edge scan has a handful of points");
+                self.sample_at(roots.t_of_root(roots.scan_root(k)))
+            }),
+        }
+    }
+
+    /// The rung's largest miss between a resolved edge and the check point
+    /// next to it, read in the root of the distance from the span edge.
+    fn edge_peak(&self, rung: &[f64], scan: &EdgeScan) -> f64 {
+        let roots = scan.roots;
+        let mut scan_peak = (roots.from, 0.0);
+        for (k, sample) in (0..).zip(&scan.samples) {
+            let miss = held_miss(rung, self.h(), &[*sample], self.tol);
+            if miss >= scan_peak.1 {
+                scan_peak = (roots.scan_root(k), miss);
+            }
+        }
+        let Ok((_, peak)) = golden_section_peak(
+            |root| Ok::<_, std::convert::Infallible>(self.miss_at(rung, roots.t_of_root(root))),
+            (scan_peak.0 - roots.step).max(roots.from),
+            (scan_peak.0 + roots.step).min(roots.to),
+        );
+        peak.max(scan_peak.1)
+    }
+}
 
 /// How far from a span edge a declared square-root onset still lies on it:
 /// the onsets and the seeds the edges come from are computed apart, ulps of
@@ -4606,6 +5047,135 @@ impl NonlinearAdvanceSignal {
         }
         velocity
     }
+
+    /// Taylor models of the advanced track's position, velocity and
+    /// acceleration over `window` inside input piece `piece`: the formulas
+    /// `eval_pva` evaluates, enclosed term by term.
+    fn models_on(&self, piece: usize, window: taylor::Window) -> [TaylorModel; 3] {
+        let coefficients = &self.coeffs[piece];
+        let tau = window.time_since(self.starts[piece]);
+        let [position, velocity, acceleration, jerk] =
+            [0, 1, 2, 3].map(|order| taylor::derivative_of(coefficients, order, &tau));
+        let adv = self.adv;
+        let vl = adv.linearization_velocity;
+        let unit = velocity.scale(Ball::rounded(1.0 / vl, 1));
+        let Some(shape) = AdvanceShape::of(adv.model, &unit) else {
+            return [TaylorModel::UNBOUNDED; 3];
+        };
+        let slope = shape
+            .slope
+            .scale(Ball::rounded(adv.nonlinear_offset / vl, 1))
+            .add_ball(Ball::exact(adv.linear_advance));
+        let curvature = shape
+            .curvature
+            .scale(Ball::rounded(adv.nonlinear_offset / (vl * vl), 2));
+        let squared = acceleration.mul(&acceleration);
+        let mut models = [
+            position
+                .add(&velocity.scale(Ball::exact(adv.linear_advance)))
+                .add(&shape.value.scale(Ball::exact(adv.nonlinear_offset))),
+            velocity.add(&slope.mul(&acceleration)),
+            acceleration
+                .add(&curvature.mul(&squared))
+                .add(&slope.mul(&jerk)),
+        ];
+        let offset = adv.nonlinear_offset.abs();
+        let [shape_miss, slope_miss, curvature_miss] = shape.branch_miss;
+        let slope_miss = offset / vl * slope_miss;
+        let curvature_miss = offset / (vl * vl) * curvature_miss;
+        models[0].widen(offset * shape_miss);
+        models[1].widen(slope_miss * acceleration.bound());
+        models[2].widen(curvature_miss * squared.bound() + slope_miss * jerk.bound());
+        if self.curvature_velocity_may_flip(piece, window, &velocity, &acceleration) {
+            models[2].widen(2.0 * (curvature.bound() + curvature_miss) * squared.bound());
+        }
+        models
+    }
+
+    /// Whether `resolution_owned_curvature_velocity` may read the velocity
+    /// with its other sign somewhere on the window: next to a piece edge,
+    /// where the velocity is within a device interval's travel of zero.
+    fn curvature_velocity_may_flip(
+        &self,
+        piece: usize,
+        window: taylor::Window,
+        velocity: &TaylorModel,
+        acceleration: &TaylorModel,
+    ) -> bool {
+        let near_edge = window.reaches(self.starts[piece], MIN_DEVICE_INTERVAL_S)
+            || window.reaches(self.ends[piece], MIN_DEVICE_INTERVAL_S);
+        let (centre, spread) = velocity.spread();
+        near_edge && centre.abs() - spread < MIN_DEVICE_INTERVAL_S * acceleration.bound()
+    }
+}
+
+/// How far a reciprocal advance's unit velocity may reach past zero onto
+/// the branch opposite the one its window is modelled on. Within it the
+/// branches `u/(1 ± u)` differ from `u/(1 + |u|)` by at most `3S²`, their
+/// slopes by `5S` and their curvatures by `4.1`.
+const RECIPROCAL_BRANCH_SLACK: f64 = 1e-9;
+
+/// The unit-scaled advance shape `s(u)`, `s'(u)`, `s''(u)` of a velocity's
+/// model, and how far each may miss the shape where the model's range
+/// reaches a branch it does not follow.
+struct AdvanceShape {
+    value: TaylorModel,
+    slope: TaylorModel,
+    curvature: TaylorModel,
+    branch_miss: [f64; 3],
+}
+
+impl AdvanceShape {
+    fn of(model: trajectory::AdvanceModel, unit: &TaylorModel) -> Option<Self> {
+        let one = TaylorModel::constant(Ball::exact(1.0));
+        match model {
+            trajectory::AdvanceModel::Tanh => {
+                let value = unit.tanh();
+                let slope = one.sub(&value.mul(&value));
+                Some(Self {
+                    curvature: value.mul(&slope).scale(Ball::exact(-2.0)),
+                    value,
+                    slope,
+                    branch_miss: [0.0; 3],
+                })
+            }
+            trajectory::AdvanceModel::Reciprocal => {
+                let (centre, spread) = unit.spread();
+                let subtraction = f64::EPSILON * (centre.abs() + spread);
+                let sign = if centre - spread >= -RECIPROCAL_BRANCH_SLACK {
+                    1.0
+                } else if centre + spread <= RECIPROCAL_BRANCH_SLACK {
+                    -1.0
+                } else {
+                    return None;
+                };
+                let reaches_other_branch = sign * centre - spread - subtraction < 0.0;
+                let reciprocal = unit
+                    .scale(Ball::exact(sign))
+                    .add_ball(Ball::exact(1.0))
+                    .reciprocal()?;
+                let slope = reciprocal.mul(&reciprocal);
+                Some(Self {
+                    value: if sign > 0.0 {
+                        one.sub(&reciprocal)
+                    } else {
+                        reciprocal.sub(&one)
+                    },
+                    curvature: slope.mul(&reciprocal).scale(Ball::exact(-2.0 * sign)),
+                    slope,
+                    branch_miss: if reaches_other_branch {
+                        [
+                            3.0 * RECIPROCAL_BRANCH_SLACK * RECIPROCAL_BRANCH_SLACK,
+                            5.0 * RECIPROCAL_BRANCH_SLACK,
+                            4.1,
+                        ]
+                    } else {
+                        [0.0; 3]
+                    },
+                })
+            }
+        }
+    }
 }
 
 impl TrackSignal for NonlinearAdvanceSignal {
@@ -4690,6 +5260,24 @@ impl TrackSignal for NonlinearAdvanceSignal {
             self.adv.curvature(curvature_velocity),
         ))
     }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+        let mut pieces = Vec::new();
+        let first = self.ends.partition_point(|&end| end <= lo);
+        for piece in first..self.coeffs.len() {
+            if self.starts[piece] >= hi {
+                break;
+            }
+            let span = (lo.max(self.starts[piece]), hi.min(self.ends[piece]));
+            taylor::enclose(
+                span,
+                accuracy,
+                &|window| self.models_on(piece, window),
+                &mut pieces,
+            );
+        }
+        Some(pieces)
+    }
 }
 
 pub(crate) fn apply_derivative_gains_to_track(
@@ -4767,3 +5355,7 @@ mod shaper_cap_contact_tests;
 #[cfg(test)]
 #[path = "shaper_shaped_wave_tests.rs"]
 mod shaper_shaped_wave_tests;
+
+#[cfg(test)]
+#[path = "shaper_enclosure_tests.rs"]
+mod shaper_enclosure_tests;
