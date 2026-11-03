@@ -1068,7 +1068,7 @@ pub(crate) fn project_followers(
                 }
                 previous_input
                     .expect("an emitted endpoint always records its pre-transform state")
-                    .signal_velocity_step(&input_start)
+                    .emitted_velocity_step(&input_start)
             };
             if i == 0 {
                 if let (Some(previous), Some((emit_start, emit_end))) = (emitted_pv, emit_window) {
@@ -1210,6 +1210,23 @@ impl SeamInput {
 
     fn signal_velocity_step(&self, right: &Self) -> f64 {
         right.velocity - self.velocity - right.ratio * (right.leader_speed - self.leader_speed)
+    }
+
+    /// The velocity step a kernel-free emission carries at the seam as a
+    /// C0 corner rather than weld: the follower's own step, and on a
+    /// ratio-ramped advance also what the leaders' acceleration rounding
+    /// makes of the advanced velocity there — a weld spreading it over a
+    /// segment shorter than a millisecond would exceed the acceleration
+    /// budget, and [`refuse_ramped_join_velocity_step`] has bounded it.
+    fn emitted_velocity_step(&self, right: &Self) -> f64 {
+        match (self.ramped, right.ramped) {
+            (Some(left_ramped), Some(right_ramped)) => {
+                right_ramped.advanced_velocity
+                    - left_ramped.advanced_velocity
+                    - right.ratio * (right.leader_speed - self.leader_speed)
+            }
+            _ => self.signal_velocity_step(right),
+        }
     }
 }
 

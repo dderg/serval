@@ -16,6 +16,16 @@ G-code asks for at the same instant of the unshaped plan, so ratio changes
     python3 tools/corner_flow.py tools/bench/printer.cfg
     python3 tools/corner_flow.py printer.cfg --sweep smooth_time=0,0.005,0.02
     python3 tools/corner_flow.py printer.cfg --set pa.k=0.04 --json
+    python3 tools/corner_flow.py printer.cfg --ramp 0.015
+    python3 tools/corner_flow.py printer.cfg --ramp 0.015 \
+        --sweep ratio_ramp_time=0.005,0.01,0.02,0.04
+
+``--ramp TAU`` evaluates the config's chain with its extruder smoothing
+kernels taken out and ``[axis e] ratio_ramp_time: TAU`` in their place;
+``ratio_ramp_time`` sweeps and sets like a post-processor parameter. A
+ramp needs extrude-only caps, and the retract case is only comparable
+between chains under the same ones: ``--extrude-only V,A`` fills in
+whichever the config lacks, for every chain.
 
 Columns, per case and speed (worst over the case's corners):
 
@@ -26,6 +36,10 @@ Columns, per case and speed (worst over the case's corners):
 - ``blob``: over-filled volume per corner, nL (1 nL = 0.001 mm^3).
 - ``ve+`` / ``ve-`` / ``ae``: peak extruder velocity (mm/s) and
   acceleration (mm/s^2) while the nozzle moves.
+- ``|ve|*`` / ``|ae|*``: the same peaks over the whole run, the travel,
+  retract and prime transitions at rest included.
+- Material the extruder moves while the unshaped toolhead rests (a retract
+  and its prime) lays no bead and is left out of the bead columns.
 - ``dE_gc``: final e minus the G-code's total E (mm). Negative by design
   where the shaped path cuts a corner: the bead follows the shorter path.
 - ``dE_adv``: final e minus the same run without the advance stage(s), mm.
@@ -92,6 +106,8 @@ class Row:
     ve_max: float = math.nan
     ve_min: float = math.nan
     ae_max: float = math.nan
+    ve_all: float = math.nan
+    ae_all: float = math.nan
     de_gcode: float = math.nan
     de_advance: float = math.nan
     error: str = ""
@@ -135,6 +151,21 @@ def perimeter(name: str, flow: list[float], approach: float) -> Geometry:
     return Geometry(name, moves, corners, window_mm=10.0)
 
 
+def retract(length: float = 0.8) -> Geometry:
+    """A line that stops, retracts, travels at speed, primes and extrudes
+    again; its corners are the two rest points."""
+    moves = [
+        Move(30.0, 0.0, 1.0),
+        Move(30.0, 0.0, -length),
+        Move(30.0, 20.0, 0.0),
+        Move(30.0, 20.0, length),
+        Move(60.0, 20.0, 1.0),
+    ]
+    return Geometry(
+        "retract", moves, [(30.0, 0.0), (30.0, 20.0)], window_mm=10.0
+    )
+
+
 GEOMETRIES = (
     corner(45),
     corner(90),
@@ -142,7 +173,10 @@ GEOMETRIES = (
     zigzag(),
     perimeter("flow 1.5x", [1.0, 1.5, 1.0, 1.0], approach=1.0),
     perimeter("travel", [1.0, 1.0, 1.0, 1.0], approach=0.0),
+    retract(),
 )
+KERNEL_TYPES = ("smooth_triangle", "smooth_bell", "smooth_mzv", "smooth_zv")
+AXIS_OPTIONS = ("ratio_ramp_time",)
 
 
 def gcode(geometry: Geometry, speed: float, ratio: float) -> str:
@@ -228,6 +262,9 @@ class PrinterConfig:
         return self.fileconfig.get(f"post_processor {name}", "type").strip()
 
     def set_param(self, target: str, value: str) -> None:
+        if target in AXIS_OPTIONS:
+            self.fileconfig.set(self.follower_axis(), target, value)
+            return
         name, _, option = target.rpartition(".")
         names = [name] if name else self.chain(self.follower_axis())
         sections = [
@@ -243,11 +280,67 @@ class PrinterConfig:
     def unshaped(self) -> PrinterConfig:
         clone = self.copy()
         for section in clone.fileconfig.sections():
-            if section.startswith("axis ") and clone.fileconfig.has_option(
-                section, "post_processors"
-            ):
+            if not section.startswith("axis "):
+                continue
+            if clone.fileconfig.has_option(section, "post_processors"):
                 clone.fileconfig.set(section, "post_processors", "")
+            for option in AXIS_OPTIONS:
+                clone.drop_option(section, option)
         return clone
+
+    def drop_option(self, section: str, option: str) -> None:
+        if not self.fileconfig.has_option(section, option):
+            return
+        kept = [
+            (name, self.fileconfig.get(section, name))
+            for name in self.fileconfig.options(section)
+            if name != option
+        ]
+        self.fileconfig.remove_section(section)
+        self.fileconfig.add_section(section)
+        for name, value in kept:
+            self.fileconfig.set(section, name, value)
+
+    def with_extrude_only_caps(self, caps: tuple[str, str]) -> PrinterConfig:
+        clone = self.copy()
+        for option, value in zip(
+            ("max_extrude_only_velocity", "max_extrude_only_accel"), caps
+        ):
+            if not clone.fileconfig.has_option("extruder", option):
+                clone.fileconfig.set("extruder", option, value)
+        return clone
+
+    def ramped(self, ramp_time: str) -> PrinterConfig:
+        """The chain with its follower smoothing kernels replaced by a
+        ratio ramp of `ramp_time` seconds."""
+        clone = self.copy()
+        axis = clone.follower_axis()
+        kept = [
+            name
+            for name in clone.chain(axis)
+            if clone.post_processor_type(name) not in KERNEL_TYPES
+        ]
+        clone.fileconfig.set(axis, "post_processors", ", ".join(kept))
+        clone.fileconfig.set(axis, "ratio_ramp_time", ramp_time)
+        return clone
+
+    def describe(self) -> str:
+        axis = self.follower_axis()
+        stages = []
+        for name in self.chain(axis):
+            section = f"post_processor {name}"
+            params = ",".join(
+                f"{option}={self.fileconfig.get(section, option)}"
+                for option in self.fileconfig.options(section)
+                if option != "type"
+            )
+            stages.append(f"{self.post_processor_type(name)}({params})")
+        ramp = (
+            f" ratio_ramp_time={self.fileconfig.get(axis, 'ratio_ramp_time')}"
+            if self.fileconfig.has_option(axis, "ratio_ramp_time")
+            else ""
+        )
+        return f"[{axis}] " + " -> ".join(stages or ["(empty)"]) + ramp
 
     def without_advance(self) -> PrinterConfig:
         clone = self.copy()
@@ -392,6 +485,11 @@ def measure(
     offset = timeline_offset(t, xy, t_raw, raw)
     r_cmd = commanded_ratio(t_raw + offset, raw, t)
     e_out = melted(t, e_cmd, melt_k)
+    raw_speed = np.hypot(raw[0][:, 1], raw[1][:, 1])
+    raw_moving = np.interp(t, t_raw + offset, raw_speed) > MOVING_SPEED_MM_S
+    laying = advancing[1:] & raw_moving[1:]
+    laid = np.concatenate([[0.0], np.where(laying, np.diff(e_out), 0.0)])
+    e_out = e_out[0] + np.cumsum(laid)
     grid = np.arange(0.0, s[-1], PATH_STEP_MM)
     e_grid = np.interp(grid, s[advancing], e_out[advancing])
     r_grid = np.interp(grid[:-1] + 0.5 * PATH_STEP_MM, s, r_cmd)
@@ -426,6 +524,8 @@ def measure(
     row.ve_max = float(ve[moving].max())
     row.ve_min = float(ve[moving].min())
     row.ae_max = float(np.abs(ae[moving]).max())
+    row.ve_all = float(np.abs(ve).max())
+    row.ae_all = float(np.abs(ae).max())
     row.de_gcode = float(e_cmd[-1] - gcode_total_e(geometry, ratio))
     row.de_advance = float(e_cmd[-1] - plain[2][-1, 0])
     return row
@@ -442,8 +542,8 @@ def run_case(job) -> Row:
 def table(rows: list[Row], sweep_name: str) -> str:
     head = (
         f"{'case':<10} {'mm/s':>4} | {'peak':>6} {'dip':>5} {'w>5%':>5} "
-        f"{'blob':>6} | {'ve+':>6} {'ve-':>6} {'ae':>7} | {'dE_gc':>8} "
-        f"{'dE_adv':>8}"
+        f"{'blob':>6} | {'ve+':>6} {'ve-':>6} {'ae':>7} | {'|ve|*':>6} "
+        f"{'|ae|*':>7} | {'dE_gc':>8} {'dE_adv':>8}"
     )
     if sweep_name:
         head = f"{sweep_name:>11} " + head
@@ -460,6 +560,7 @@ def table(rows: list[Row], sweep_name: str) -> str:
             f"{prefix}{row.case:<10} {row.speed:>4.0f} | {row.peak:>+5.0f}% "
             f"{row.dip:>+4.0f}% {row.width_mm:>5.1f} {row.blob_nl:>6.1f} | "
             f"{row.ve_max:>6.1f} {row.ve_min:>6.1f} {row.ae_max:>7.0f} | "
+            f"{row.ve_all:>6.1f} {row.ae_all:>7.0f} | "
             f"{row.de_gcode:>+8.4f} {row.de_advance:>+8.1e}"
         )
     return "\n".join(lines)
@@ -501,6 +602,18 @@ def main() -> None:
         default=",".join(f"{s:g}" for s in SPEEDS_MM_S),
         help="comma-separated feed rates, mm/s",
     )
+    parser.add_argument(
+        "--ramp",
+        metavar="TAU",
+        help="replace the follower's smoothing kernels with ratio_ramp_time TAU",
+    )
+    parser.add_argument(
+        "--extrude-only",
+        default="50,5000",
+        metavar="V,A",
+        help="extrude-only caps (mm/s, mm/s^2) filled in where the config "
+        "lacks them",
+    )
     parser.add_argument("--json", action="store_true", help="emit JSON rows")
     parser.add_argument(
         "--jobs",
@@ -510,7 +623,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    base = PrinterConfig.load(args.config)
+    velocity, _, accel = args.extrude_only.partition(",")
+    base = PrinterConfig.load(args.config).with_extrude_only_caps(
+        (velocity, accel)
+    )
+    if args.ramp:
+        base = base.ramped(args.ramp)
     for assignment in args.set:
         target, _, value = assignment.partition("=")
         base.set_param(target, value)
@@ -544,6 +662,8 @@ def main() -> None:
         else "configured advance per variant"
     )
     print(f"{args.config}  melt K: {melt}  bead w,h,filament: {args.bead}")
+    for label, variant in variants:
+        print(f"  {label or 'chain'}: {variant.describe()}")
     print(table(rows, sweep_name))
 
 
