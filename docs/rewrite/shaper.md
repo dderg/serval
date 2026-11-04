@@ -386,6 +386,32 @@ rounding makes.
   `2·G·J·√τ`, must stay within the allowance. A larger one is refused
   before the fit with `PostProcessError::UnshapedLeaderOnsetVelocityStep`.
 
+### The ratio ramp in enclosures
+
+Every follower ramps its ratio steps (`RatioSmoothing`), and every advance
+reads the laid velocity weighted by its valleys, `R = W·r̃`. A follower's
+enclosure window models both (`follower_projection/ratio_ramp/models.rs`):
+
+- **Correction.** The smoothing adds `X(s)` to the table: moments of the
+  seams inside the window, weighted by powers of the width `h(s)`
+  (`SeamMoments`). Over a window its formula is fixed: the width's node
+  interval, the seams inside the window and those behind its point. The
+  bends (`RatioSmoothing::bends`) are where these change, and windows
+  break there. Each derivative `X⁽ⁿ⁾`, `n ≤ 3`, is its Taylor polynomial
+  about the window's centre arc plus the Lagrange remainder past it. The
+  remainder is bounded by the same series computed over the window's
+  whole odometer reach, in ball arithmetic: an interval Taylor series.
+- **Valley weight.** `W`, `W'`, `W''` on the side of each valley the
+  window's reach lies on.
+- **Read.** The advance reads `R·ṡ`, `R'·ṡ² + R·s̈`, and
+  `R·s⃛ + 3R'·ṡ·s̈ + R''·ṡ³`.
+
+A reach a few ulps wide can straddle a bend located an ulp off from where
+the evaluator flips. Such a reach is enclosed by every formula its floats
+read, each widened by its departure from the others. A width node reads
+its jet from the interval it opens, so the evaluator keeps the width's
+third derivative there.
+
 ## Streaming mechanics: windows, frontier, drain
 
 The shaper is a streaming stage over channels; it never sees the whole
