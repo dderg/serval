@@ -9,7 +9,10 @@ from fakes import (
 )
 
 from klippy import motion_setup
-from klippy.mcu import STEPCOMPRESS_MAX_ERROR_DEFAULT
+from klippy.mcu import (
+    STEPCOMPRESS_DRAIN_BUDGET_DEFAULT,
+    STEPCOMPRESS_MAX_ERROR_DEFAULT,
+)
 from klippy.motion import Motion
 from klippy.motion_kinematics import _LinearKinematics
 from klippy.motion_setup import LANE_KIND_PULSE
@@ -39,6 +42,7 @@ def pulse_topology(
         [2e-06] * n,
         [False] * n,
         max_error,
+        STEPCOMPRESS_DRAIN_BUDGET_DEFAULT,
         0.0,
         0,
         str(handle) if name is None else name,

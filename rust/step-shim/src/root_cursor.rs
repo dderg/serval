@@ -3,7 +3,7 @@ use std::sync::Arc;
 use trajectory::{ClockedMotorSpan, LocalPolynomial, MotorSpan, Pva};
 
 use crate::ring::SpanQueue;
-use crate::{MotorConfig, ShimError};
+use crate::{DrainBudget, MotorConfig, ShimError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StepRoot {
@@ -93,7 +93,11 @@ thread_local! {
 
 #[derive(Debug)]
 pub struct StepRootCursor {
-    drain_deadline: Option<std::time::Instant>,
+    drain_budget: Option<DrainBudget>,
+    /// The end of the first window this drain pass roots: the deadline
+    /// halts a pass only once it is past here, so every pass makes progress
+    /// however little budget it was given.
+    pass_must_reach: Option<u64>,
     drain_halted: bool,
     microstep_mm: f64,
     lane: Lattice,
@@ -117,7 +121,8 @@ pub struct StepRootCursor {
 impl StepRootCursor {
     pub fn new(cfg: &MotorConfig) -> Self {
         Self {
-            drain_deadline: None,
+            drain_budget: None,
+            pass_must_reach: None,
             drain_halted: false,
             microstep_mm: cfg.microstep_distance,
             lane: Lattice {
@@ -213,10 +218,11 @@ impl StepRootCursor {
         queue: &mut SpanQueue,
         up_to_clock: u64,
         out: &mut Vec<StepRoot>,
-        deadline: Option<std::time::Instant>,
+        budget: Option<DrainBudget>,
     ) -> Result<(), ShimError> {
-        self.drain_deadline = deadline;
+        self.drain_budget = budget;
         self.drain_halted = false;
+        self.pass_must_reach = None;
         while let Some(view) = queue.active().cloned() {
             if view.clock_freq_hz != cfg.cycles_per_second {
                 return Err(ShimError::SpanFrequencyMismatch {
@@ -244,7 +250,7 @@ impl StepRootCursor {
             self.enter(lane, signal_start, begin)?;
             self.emit_roots(lane, begin, last_clock, out)?;
             if self.drain_halted {
-                self.drain_deadline = None;
+                self.drain_budget = None;
                 return Ok(());
             }
             self.frontier = last_clock + 1;
@@ -258,7 +264,7 @@ impl StepRootCursor {
             }
             queue.release_active();
         }
-        self.drain_deadline = None;
+        self.drain_budget = None;
         Ok(())
     }
 
@@ -307,6 +313,7 @@ impl StepRootCursor {
     ) -> Result<(), ShimError> {
         let view = lane.view;
         if begin == last_clock {
+            self.pass_must_reach.get_or_insert(begin + 1);
             return self.emit_window(lane, begin, last_clock, None, out);
         }
         let mut boundaries = vec![begin, last_clock];
@@ -330,6 +337,7 @@ impl StepRootCursor {
         boundaries.retain(|clock| *clock >= begin && *clock <= last_clock);
         boundaries.sort_unstable();
         boundaries.dedup();
+        self.pass_must_reach.get_or_insert(boundaries[1]);
         WINDOW_COUNT.with(|c| c.set(c.get() + boundaries.len() as u64 - 1));
         let mut models = vec![WindowModel::Unbuilt; boundaries.len() - 1];
         let mut index = 0;
@@ -461,13 +469,7 @@ impl StepRootCursor {
             roots_since_check += 1;
             if roots_since_check == 32 {
                 roots_since_check = 0;
-                if self
-                    .drain_deadline
-                    .is_some_and(|d| std::time::Instant::now() >= d)
-                    && clock < hi
-                {
-                    self.drain_halted = true;
-                    self.frontier = clock + 1;
+                if clock < hi && self.halt_if_past_deadline(clock + 1) {
                     return Ok(());
                 }
             }
@@ -808,10 +810,14 @@ impl StepRootCursor {
     }
 
     fn halt_if_past_deadline(&mut self, resume_clock: u64) -> bool {
-        if self
-            .drain_deadline
-            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
-        {
+        let Some(budget) = self.drain_budget else {
+            return false;
+        };
+        let progressed = resume_clock > budget.roots_through
+            && self
+                .pass_must_reach
+                .is_some_and(|must_reach| resume_clock >= must_reach);
+        if progressed && std::time::Instant::now() >= budget.deadline {
             self.drain_halted = true;
             self.frontier = resume_clock;
             return true;
