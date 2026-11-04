@@ -4,8 +4,8 @@ mod ladder;
 pub(crate) use ladder::ladder_candidate;
 pub(crate) use ladder::{
     AccelerationTrend, HeldSample, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget, LadderFailure,
-    LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth, VelocitySign, eval_mono,
-    eval_mono_d, eval_mono_dd, exact_piece, held_miss, ladder_fit, quintic_in_u,
+    LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth, SeamContinuity, VelocitySign,
+    eval_mono, eval_mono_d, eval_mono_dd, exact_piece, held_miss, ladder_fit, quintic_in_u,
 };
 
 use geometry::FollowerDemand;

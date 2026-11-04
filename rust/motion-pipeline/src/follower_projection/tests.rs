@@ -2396,3 +2396,38 @@ fn only_a_kernel_free_advance_over_an_unshaped_leader_may_step_the_follower() {
         0.0
     );
 }
+
+#[test]
+fn only_the_leaders_a_kernel_free_advance_reads_fit_acceleration_continuous_seams() {
+    use crate::lowering::SeamContinuity::{Acceleration, Velocity};
+    let compile = |instances: &[PostProcessorInstance]| CompiledChain::compile(instances).unwrap();
+    let pa = || PostProcessorInstance::new("pa", &algos::LinearPressureAdvance, vec![0.04]);
+    let shaped = || {
+        compile(&[PostProcessorInstance::new(
+            "is",
+            &algos::SmoothBell,
+            vec![0.01605],
+        )])
+    };
+    let continuity = |follower: CompiledChain| {
+        let chains = trajectory::AxisChainSet {
+            chains: vec![shaped(), shaped(), shaped(), follower],
+            followers: vec![(3, vec![0, 1])],
+        };
+        (0..3)
+            .map(|leader| super::leader_seam_continuity(&chains, leader))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        continuity(compile(&[pa()])),
+        [Acceleration, Acceleration, Velocity]
+    );
+    assert_eq!(
+        continuity(compile(&[
+            pa(),
+            PostProcessorInstance::new("st", &algos::SmoothTriangle, vec![0.002]),
+        ])),
+        [Velocity; 3]
+    );
+    assert_eq!(continuity(CompiledChain::default()), [Velocity; 3]);
+}
