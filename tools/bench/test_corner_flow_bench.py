@@ -77,6 +77,28 @@ def test_a_dry_move_between_extrusions_is_no_feature():
     assert corner_flow_bench.features(waypoints) == []
 
 
+def test_a_flow_change_between_extrusions_is_one_step_feature():
+    waypoints = _waypoints([(0.0, 0.0), (20.0, 0.0)], 100.0)
+    waypoints.append(
+        {
+            "position": [
+                40.0,
+                0.0,
+                0.0,
+                waypoints[-1]["position"][3]
+                + 1.5 * gen_corner_flow.RATIO * 20.0,
+            ],
+            "feedrate": 100.0,
+        }
+    )
+    (feature,) = corner_flow_bench.features(waypoints)
+    assert feature.kind == "step"
+    assert feature.apex_xy == pytest.approx((20.0, 0.0))
+    assert feature.ratio == pytest.approx(gen_corner_flow.RATIO)
+    assert feature.ratio_after == pytest.approx(1.5 * gen_corner_flow.RATIO)
+    assert feature.window_mm == pytest.approx(10.0)
+
+
 def _exact_capture(job, reference) -> analyze.Capture:
     """Every reference step as an edge the capture timestamps exactly, each
     block shifted by its own offset and the whole clock scaled by
@@ -104,15 +126,13 @@ def _exact_capture(job, reference) -> analyze.Capture:
     )
 
 
-@pytest.fixture(scope="module")
-def corner_run(tmp_path_factory):
+def _bench_run(tmp_path_factory, geometry):
     try:
         analyze.harness._import_engine()
     except ImportError as exc:
         pytest.skip(str(exc))
-    run_dir = tmp_path_factory.mktemp("corner")
+    run_dir = tmp_path_factory.mktemp(geometry.name.replace(" ", "_"))
     shutil.copy(BENCH_DIR / "printer.cfg", run_dir / "printer.cfg")
-    geometry = corner_flow.corner(90)
     ratio = BEAD[0] * BEAD[1] / (math.pi * (BEAD[2] / 2.0) ** 2)
     (run_dir / "print.gcode").write_text(
         "SET_KINEMATIC_POSITION X=0 Y=0 Z=0\nG92 E0\n"
@@ -133,10 +153,30 @@ def corner_run(tmp_path_factory):
     return job, geometry, report
 
 
+@pytest.fixture(scope="module")
+def corner_run(tmp_path_factory):
+    return _bench_run(tmp_path_factory, corner_flow.corner(90))
+
+
+@pytest.fixture(scope="module")
+def flow_step_run(tmp_path_factory):
+    (geometry,) = (g for g in corner_flow.GEOMETRIES if g.name == "flow 1.5x")
+    return _bench_run(tmp_path_factory, geometry)
+
+
+def _steps(report) -> list[dict]:
+    return [row for row in report["features"] if row["kind"] == "step"]
+
+
 def test_an_exact_capture_measures_what_its_reference_steps_command(corner_run):
     _, _, report = corner_run
     (row,) = report["features"]
-    for metric in (*corner_flow_bench.METRICS, "ve_max", "ve_min", "ae_max"):
+    for metric in (
+        *corner_flow_bench.CORNER_METRICS,
+        "ve_max",
+        "ve_min",
+        "ae_max",
+    ):
         assert row["capture"][metric] == pytest.approx(
             row["reference"][metric], rel=1e-4, abs=1e-4
         ), metric
@@ -170,3 +210,30 @@ def test_step_quantization_of_a_90_degree_corner_stays_within_its_bound(
         assert abs(row["reference"][metric] - row["offline"][metric]) < 0.01, (
             metric
         )
+
+
+def test_an_exact_capture_measures_the_steps_its_reference_commands(
+    flow_step_run,
+):
+    _, _, report = flow_step_run
+    steps = _steps(report)
+    assert len(steps) == 2
+    for row in steps:
+        for metric in corner_flow_bench.STEP_METRICS:
+            assert row["capture"][metric] == pytest.approx(
+                row["reference"][metric], rel=1e-4, abs=1e-4
+            ), metric
+
+
+def test_the_offline_steps_are_corner_flow_measure(flow_step_run):
+    job, geometry, report = flow_step_run
+    config = corner_flow.PrinterConfig.parse(job.config.config_text)
+    expected = corner_flow.measure(
+        geometry, SPEED_MM_S, config, config.advance_k(), BEAD
+    )
+    assert not expected.error
+    for row, step in zip(_steps(report), expected.steps, strict=True):
+        for metric in corner_flow_bench.STEP_METRICS:
+            assert row["offline"][metric] == pytest.approx(
+                step[metric], abs=0.05
+            ), metric

@@ -108,7 +108,7 @@ The bound 0.05 step / 50 µs puts the crossover at 1 kHz. From 1 kHz up, any ste
 
 ### Corner flow (`--corner-flow`)
 
-`analyze.py --corner-flow` adds `corner_flow` to `analysis.json`: the nozzle flow through every extruding corner (a turn ≥ 20° between two extruding moves) and short-segment curve (≥ 3 vertices turning ≥ 1° between extruding segments ≤ 2 mm) of the print. It uses the definition `tools/corner_flow.py` uses, from the shared `tools/flow_metric.py`. A first-order melt model (`e_cmd = e_out + K·de_out/dt`) runs with K set to the config's pressure-advance k. Its output is measured per mm of the nozzle path in 0.02 mm bins. The commanded bead is subtracted and the difference is divided by the nominal bead, so 0 means the commanded bead exactly and +0.5 means 50 % over. Each feature reports `apex` (the deviation at the apex), `peak`/`dip`/`width_mm` (bins beyond ±5 %) and `blob_nl` within ±15 mm, or ±half the shorter leg, around the apex. It also reports the extruder's `ve_max`/`ve_min`/`ae_max` over that span while the nozzle moves, from 2 ms / 5 ms box-smoothed derivatives.
+`analyze.py --corner-flow` adds `corner_flow` to `analysis.json`: the nozzle flow through every extruding corner (a turn ≥ 20° between two extruding moves), short-segment curve (≥ 3 vertices turning ≥ 1° between extruding segments ≤ 2 mm) and ratio step (two extruding moves whose beads differ by ≥ 5 %, turning or not) of the print. It uses the definition `tools/corner_flow.py` uses, from the shared `tools/flow_metric.py`. A first-order melt model (`e_cmd = e_out + K·de_out/dt`) runs with K set to the config's pressure-advance k. Its output is measured per mm of the nozzle path in 0.02 mm bins. The commanded bead is read off the unshaped plan where it passes the same place (the two plans paired at every vertex of the block) and subtracted, and the difference is divided by the nominal bead, so 0 means the commanded bead exactly and +0.5 means 50 % over. Each corner and curve reports `apex` (the deviation at the apex), `peak`/`dip`/`width_mm` (bins beyond ±5 %) and `blob_nl` within ±15 mm, or ±half the shorter leg, around the apex. A ratio step reports instead, over the same window, `moved_nl` (the material laid across the vertex against a sharp switch there), `net_nl` (what the step gains or loses) and `switch_mm` (the path the bead takes from 5 % to 95 % of the step). Every feature also reports the extruder's `ve_max`/`ve_min`/`ae_max` over that span while the nozzle moves, from 2 ms / 5 ms box-smoothed derivatives.
 
 Every feature is measured from three sources on the same block-local time grid (10 µs):
 - `offline`: the snapshot plan's continuous x, y and e.
@@ -235,10 +235,10 @@ CI runs the benchmark of every test/configs firmware and of `f401.config` in uni
 
 | firmware | pulsed | both-edge |
 |---|---|---|
-| F401 | 380 | 168 |
-| F103 | 371 | 176 |
-| G0B1 | 309 | 139 |
-| H723 | 343 | 182 |
+| F401 | 387 | 180 |
+| F103 | 387 | 191 |
+| G0B1 | 340 | 159 |
+| H723 | 357 | 189 |
 
 The pulsed figure includes the spin to the 2 µs unstep inside the interrupt. On H7 the unstep is far enough away that it gets its own interrupt.
 
@@ -246,10 +246,10 @@ The same run checks that a step edge comes as late after its waketime whether th
 
 | firmware | pulsed | both-edge |
 |---|---|---|
-| F401 | 25 / 25–27 | 23 / 23–25 |
-| F103 | 34 / 36 | 32 / 34 |
-| G0B1 | 36 / 35–36 | 33 / 32–33 |
-| H723 | 27 / 27–29 | 27 / 27–29 |
+| F401 | 26 / 25–27 | 25 / 24–26 |
+| F103 | 36 / 35–36 | 34 / 34 |
+| G0B1 | 37 / 36–40 | 34 / 33–37 |
+| H723 | 26 / 25–27 | 26 / 25–27 |
 
 H723 has no both-edge optimization, so both modes dispatch through the same function and are judged together. Both timer backends wake early and spin to the head timer's waketime: SysTick 100 ticks ahead, the G0's TIM2 64 ticks ahead (`TIMER_IRQ_LEAD_TICKS`). The dispatch loop ends its interrupts-enabled wait at the same lead, so both paths leave the same spin. Before that the G0 irq path was 61 instructions late against 43–48 in the loop, and SysTick's loop path came 12 instructions after its irq path. The G0 lead is the emulated 27 cycles from interrupt to the loop's first timer read, scaled by the F401's hardware-to-emulator ratio (44 emulated cycles against a measured p99.9 of 68–100). It is not measured on G0 hardware.
 
@@ -302,6 +302,48 @@ These were measured with an on-target probe: DWT-stamped histograms read over SW
 | SysTick entry from WFI | A constant 32 cycles. | None; the host's clock offset absorbs it. |
 
 What remains at the cap is queueing behind other events: about half the isolated steps wait, uniformly up to roughly 6 µs. That is load, and the capacity fraction trades it off.
+
+### Runtime headroom check
+
+The fraction leaves `1 − fraction` of each MCU's CPU for everything that is not a step. That covers tasks, USB and other interrupts, and non-step timers such as software PWM. The fraction was derived on this bench, where that load is small. On a real printer it is checked at run time.
+
+**What the MCU reports.** Every 250 ms the MCU sends `cpu_load` (`src/cpu_load.c`) with these fields:
+- the window length;
+- the time spent asleep (`irq_wait`, stamped before the wake is serviced);
+- the timer interrupt's busy time;
+- the part of that time that went to non-step timers;
+- the number of step timer events.
+
+Each timer dispatch is charged the interval since the previous dispatch ended, or since the interrupt fired. That covers its share of the entry, spin and exit, so a 50 kHz software PWM is charged its interrupt overhead, not just its callback.
+
+**What klippy does** (`klippy/mcu_cpu_headroom.py`):
+- The non-step share is what was neither asleep nor stepping.
+- The charged step share is the step events at their benchmarked cost: half a pulsed step, or one both-edge step. When an MCU uses both modes, the cheaper one is charged.
+- A window whose non-step share exceeds `1 − fraction` violates the cap's assumption. It is logged as `mcu.cpu_headroom_exceeded`, at most once every 30 s with the number of violating windows.
+- If, in the same window, the charged step share plus the non-step share exceeds 1, the steps are being squeezed and klippy shuts the printer down with the shares in the message.
+- The stats line carries `mcu_nonstep_max` and `mcu_idle_min` per stats period.
+
+There is no derating, so the plan stays deterministic.
+
+**Cost on the MCU** (emulator, instructions per isolated step, pulsed / both-edge, before → after):
+
+| firmware | pulsed | both-edge |
+|---|---|---|
+| F401 | 380 → 387 | 168 → 180 |
+| F103 | 371 → 387 | 176 → 191 |
+| G0B1 | 309 → 340 | 139 → 159 |
+| H723 | 343 → 357 | 182 → 189 |
+
+**Bench F401, `single_motor_cap`, fraction 0.80:**
+
+| extra load | non-step share | outcome |
+|---|---|---|
+| none | ≤ 8.8 % (idle ≥ 18 %) | nothing logged |
+| one software PWM pin at 50 kHz (`output_pin`, `cycle_time: 0.00002`), slow single-motor moves | 42 % | `cpu_headroom_exceeded` logged, no shutdown; steps were light |
+| the same PWM, single motor at the cap | 29 % | klippy shut down in the first loaded window with non-step 29 %, steps 64 % measured and 73 % charged, idle 6.6 %, before the MCU fell behind (`20261104-183119`) |
+| three PWM pins at 50 kHz, single motor at the cap | 86 % | the MCU shut itself down ("Stepper too far in past") within a second of reaching the cap, before a window could report. The violation had been logged for the preceding seconds. |
+
+A 250 ms window cannot pre-empt an overload that kills the MCU within milliseconds. In that case the MCU's own fail-loud check fires, and the logged violation names the cause.
 
 ## Limits
 

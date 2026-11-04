@@ -8,9 +8,12 @@ exact planned x, y and e tracks. The commanded e track is passed through a first
 model (``e_cmd = e_out + K * d(e_out)/dt``, K defaulting to the configured
 linear pressure advance), and the material leaving the nozzle is measured per
 millimetre of the *shaped* nozzle path. Ideal flow lays the commanded bead
-everywhere: deviation 0. The commanded bead at each instant is the one the
-G-code asks for at the same instant of the unshaped plan, so ratio changes
-(travel to extrusion, flow changes) count against a sharp switch.
+everywhere: deviation 0. The commanded bead at each point is the one the
+G-code asks for where the unshaped plan passes the same place: the two
+plans are paired at every vertex of the program, since the lag between
+them drifts along the path. A corner where the bead ratio steps (travel to
+extrusion, a flow change, a retract's rest) is read as the material the
+switch moves across the vertex and the path it takes, not as over-fill.
 
     make -f Makefile.rust motion-engine-fast
     python3 tools/corner_flow.py tools/bench/printer.cfg
@@ -28,13 +31,20 @@ config lacks, for every chain.
 Each case plans in a process of its own: a planner panic fails that case
 alone, as an ERROR row carrying the panic's message.
 
-Columns, per case and speed (worst over the case's corners):
+Columns, per case and speed (worst over the case's corners; ``-`` where it
+has none of that kind):
 
 - ``peak`` / ``dip``: largest bead over- / under-fill, % of the nominal
-  bead, along the path within a corner's window.
-- ``w>5%``: path length (mm) around one corner where the bead is off by
-  more than 5%.
-- ``blob``: over-filled volume per corner, nL (1 nL = 0.001 mm^3).
+  bead, along the path within the window of a corner the ratio does not
+  step at.
+- ``w>5%``: path length (mm) around one such corner where the bead is off
+  by more than 5%.
+- ``blob``: over-filled volume per such corner, nL (1 nL = 0.001 mm^3).
+- ``moved`` / ``net`` / ``sw``: at a corner where the ratio steps, the
+  material laid across the switch against the G-code's sharp switch at the
+  vertex (nL: the mean of the excess before and the shortfall after), the
+  material the step gains or loses (nL, signed), and the path the laid bead
+  takes from 5% to 95% of the step (mm).
 - ``ve+`` / ``ve-`` / ``ae``: peak extruder velocity (mm/s) and
   acceleration (mm/s^2) while the nozzle moves.
 - ``|ve|*`` / ``|ae|*``: the same peaks over the whole run, the travel,
@@ -78,6 +88,7 @@ from tools import flow_metric  # noqa: E402
 CASE_JOB_FLAG = "--case-job"
 ERROR_CHARS = 200
 SPEEDS_MM_S = (50.0, 150.0, 300.0)
+START = (0.0, 0.0)
 ADVANCE_TYPES = {
     "linear_pressure_advance": "k",
     "tanh_pressure_advance": "linear_advance",
@@ -99,6 +110,29 @@ class Geometry:
     corners: list[tuple[float, float]]
     window_mm: float = flow_metric.CORNER_WINDOW_MM
 
+    def vertices(self) -> list[tuple[float, float]]:
+        return flow_metric.path_vertices(
+            [START, *((move.x, move.y) for move in self.moves)]
+        )
+
+    def corner_ratios(self) -> list[tuple[float, float]]:
+        """The bead (over the nominal) of the path moves into and out of
+        each corner."""
+        ends, scales = [], []
+        x, y = START
+        for move in self.moves:
+            if (move.x, move.y) != (x, y):
+                ends.append((move.x, move.y))
+                scales.append(move.e)
+            x, y = move.x, move.y
+        found = []
+        index = 0
+        for corner_xy in self.corners:
+            index = ends.index(corner_xy, index)
+            found.append((scales[index], scales[index + 1]))
+            index += 1
+        return found
+
 
 @dataclass
 class Row:
@@ -109,6 +143,9 @@ class Row:
     dip: float = math.nan
     width_mm: float = math.nan
     blob_nl: float = math.nan
+    moved_nl: float = math.nan
+    net_nl: float = math.nan
+    switch_mm: float = math.nan
     ve_max: float = math.nan
     ve_min: float = math.nan
     ae_max: float = math.nan
@@ -118,6 +155,7 @@ class Row:
     de_advance: float = math.nan
     error: str = ""
     corners: list[dict] = field(default_factory=list)
+    steps: list[dict] = field(default_factory=list)
 
 
 def corner(interior_deg: float, leg: float = 60.0) -> Geometry:
@@ -185,8 +223,13 @@ KERNEL_TYPES = ("smooth_triangle", "smooth_bell", "smooth_mzv", "smooth_zv")
 
 
 def gcode(geometry: Geometry, speed: float, ratio: float) -> str:
-    lines = ["G21", "G90", "M83", f"G1 X0 Y0 F{speed * 60:.0f}"]
-    x, y = 0.0, 0.0
+    lines = [
+        "G21",
+        "G90",
+        "M83",
+        f"G1 X{START[0]:g} Y{START[1]:g} F{speed * 60:.0f}",
+    ]
+    x, y = START
     for move in geometry.moves:
         length = math.hypot(move.x - x, move.y - y)
         e = move.e * ratio * length if length > 0 else move.e
@@ -202,7 +245,7 @@ def gcode(geometry: Geometry, speed: float, ratio: float) -> str:
 
 def gcode_total_e(geometry: Geometry, ratio: float) -> float:
     total = 0.0
-    x, y = 0.0, 0.0
+    x, y = START
     for move in geometry.moves:
         length = math.hypot(move.x - x, move.y - y)
         total += move.e * ratio * length if length > 0 else move.e
@@ -389,19 +432,35 @@ def measure(
         t,
         xy,
         e_cmd,
-        flow_metric.commanded_bead(t, xy, t_raw, raw),
+        flow_metric.commanded_bead(t, xy, t_raw, raw, geometry.vertices()),
         melt_k,
         ratio,
     )
     bead_area = width * height
-    row.corners = [
-        flow_metric.corner_report(trace, apex, geometry.window_mm, bead_area)
-        for apex in flow_metric.apex_indices(xy, geometry.corners)
-    ]
-    row.peak = max(c["peak"] for c in row.corners) * 100.0
-    row.dip = min(c["dip"] for c in row.corners) * 100.0
-    row.width_mm = max(c["width_mm"] for c in row.corners)
-    row.blob_nl = max(c["blob_nl"] for c in row.corners)
+    for apex, ratios in zip(
+        flow_metric.apex_indices(xy, geometry.corners), geometry.corner_ratios()
+    ):
+        if flow_metric.is_ratio_step(*ratios):
+            row.steps.append(
+                flow_metric.step_report(
+                    trace, apex, ratios, geometry.window_mm, bead_area
+                )
+            )
+        else:
+            row.corners.append(
+                flow_metric.corner_report(
+                    trace, apex, geometry.window_mm, bead_area
+                )
+            )
+    if row.corners:
+        row.peak = max(c["peak"] for c in row.corners) * 100.0
+        row.dip = min(c["dip"] for c in row.corners) * 100.0
+        row.width_mm = max(c["width_mm"] for c in row.corners)
+        row.blob_nl = max(c["blob_nl"] for c in row.corners)
+    if row.steps:
+        row.moved_nl = max(s["moved_nl"] for s in row.steps)
+        row.net_nl = max((s["net_nl"] for s in row.steps), key=abs)
+        row.switch_mm = max(s["switch_mm"] for s in row.steps)
     moving = speed_xy > flow_metric.MOVING_SPEED_MM_S
     row.ve_max = float(ve[moving].max())
     row.ve_min = float(ve[moving].min())
@@ -418,6 +477,11 @@ def measure(
 
 def _signed(value: float) -> str:
     return "n/a" if math.isnan(value) else f"{value:+.1e}"
+
+
+def _cell(value: float, spec: str, width: int) -> str:
+    text = "-" if math.isnan(value) else format(value, spec)
+    return f"{text:>{width}}"
 
 
 def beyond_the_path(xy, e, ratio: float) -> float:
@@ -477,7 +541,8 @@ def run_case_job() -> None:
 def table(rows: list[Row], sweep_name: str) -> str:
     head = (
         f"{'case':<10} {'mm/s':>4} | {'peak':>6} {'dip':>5} {'w>5%':>5} "
-        f"{'blob':>6} | {'ve+':>6} {'ve-':>6} {'ae':>7} | {'|ve|*':>6} "
+        f"{'blob':>6} | {'moved':>6} {'net':>6} {'sw':>5} | "
+        f"{'ve+':>6} {'ve-':>6} {'ae':>7} | {'|ve|*':>6} "
         f"{'|ae|*':>7} | {'dE_gc':>8} {'dE_adv':>8}"
     )
     if sweep_name:
@@ -492,8 +557,11 @@ def table(rows: list[Row], sweep_name: str) -> str:
             )
             continue
         lines.append(
-            f"{prefix}{row.case:<10} {row.speed:>4.0f} | {row.peak:>+5.0f}% "
-            f"{row.dip:>+4.0f}% {row.width_mm:>5.1f} {row.blob_nl:>6.1f} | "
+            f"{prefix}{row.case:<10} {row.speed:>4.0f} | "
+            f"{_cell(row.peak, '+.0f', 5)}% {_cell(row.dip, '+.0f', 4)}% "
+            f"{_cell(row.width_mm, '.1f', 5)} {_cell(row.blob_nl, '.1f', 6)} | "
+            f"{_cell(row.moved_nl, '.1f', 6)} {_cell(row.net_nl, '+.1f', 6)} "
+            f"{_cell(row.switch_mm, '.2f', 5)} | "
             f"{row.ve_max:>6.1f} {row.ve_min:>6.1f} {row.ae_max:>7.0f} | "
             f"{row.ve_all:>6.1f} {row.ae_all:>7.0f} | "
             f"{row.de_gcode:>+8.4f} {_signed(row.de_advance):>8}"

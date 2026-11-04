@@ -5,6 +5,7 @@
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
 #include "board/internal.h" // __CORTEX_M
+#include "board/misc.h" // timer_read_time
 #include "irq.h" // irqstatus_t
 #include "sched.h" // DECL_SHUTDOWN
 
@@ -35,14 +36,32 @@ irq_restore(irqstatus_t flag)
     asm volatile("msr primask, %0" :: "r" (flag) : "memory");
 }
 
+static uint32_t idle_ticks;
+
+static inline void
+irq_sleep_until_pending(void)
+{
+    if (__CORTEX_M == 7)
+        while (!(SCB->ICSR & (SCB_ICSR_ISRPENDING_Msk
+                              | SCB_ICSR_PENDSTSET_Msk)))
+            ;
+    else
+        asm volatile("wfi" ::: "memory");
+}
+
 void
 irq_wait(void)
 {
-    if (__CORTEX_M == 7)
-        // Cortex-m7 may disable cpu counter on wfi, so use nop
-        asm volatile("cpsie i\n    nop\n    cpsid i\n" ::: "memory");
-    else
-        asm volatile("cpsie i\n    wfi\n    cpsid i\n" ::: "memory");
+    uint32_t slept = timer_read_time();
+    irq_sleep_until_pending();
+    idle_ticks += timer_read_time() - slept;
+    asm volatile("cpsie i\n    cpsid i\n" ::: "memory");
+}
+
+uint32_t
+irq_wait_idle_ticks(void)
+{
+    return idle_ticks;
 }
 
 void
