@@ -56,8 +56,12 @@ def bench_motors(both_edge=False, ab_step=AB_STEP):
         )
 
     return [
-        CapacityMotor(0, stepper("stepper_a", ab_step, COREXY_A, both_edge), True),
-        CapacityMotor(1, stepper("stepper_b", ab_step, COREXY_B, both_edge), True),
+        CapacityMotor(
+            0, stepper("stepper_a", ab_step, COREXY_A, both_edge), True
+        ),
+        CapacityMotor(
+            1, stepper("stepper_b", ab_step, COREXY_B, both_edge), True
+        ),
         CapacityMotor(2, stepper("stepper_z", Z_STEP, Z_LANE), True),
         CapacityMotor(3, stepper("extruder", E_STEP, None), True),
     ]
