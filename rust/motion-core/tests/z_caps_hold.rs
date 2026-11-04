@@ -85,7 +85,7 @@ fn first_lines(relative: &str, count: usize) -> String {
 
 /// Peak |z velocity| and |z acceleration| over every emitted carrier.
 fn z_peaks(gcode: &str, planner: &PlannerConfig) -> (f64, f64) {
-    let replay = LiveReplay::new(gcode, planner).expect("live replay");
+    let replay = LiveReplay::new(gcode, planner, None).expect("live replay");
     let mut segments = Vec::new();
     let mut collect = |item| {
         if let TrajectoryItem::Seg(segment) = item {

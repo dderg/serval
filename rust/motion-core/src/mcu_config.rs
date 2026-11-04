@@ -107,18 +107,6 @@ pub struct McuHardware {
     /// firmware's advertised `SAMPLE_RUNS_PER_LANE`. Zero when the mcu has no
     /// phase lane.
     pub phase_ring_depth: u32,
-    /// The step dispatch the mcu measured it can take, absent where it
-    /// steps nothing whose cost it measured (simulated mcus, endpoints).
-    pub step_capacity: Option<McuStepCapacity>,
-}
-
-/// One mcu's step-dispatch capacity, in mcu clock ticks per second, and
-/// what one step of each motor costs it, by the motor's step mode.
-#[derive(Debug, Clone, PartialEq)]
-pub struct McuStepCapacity {
-    pub mcu_name: String,
-    pub ticks_per_s: f64,
-    pub ticks_per_step: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -307,11 +295,6 @@ pub enum KinematicsConfigError {
          the host cannot pace its in-flight window and would overrun the lane ring"
     )]
     PhaseLaneRingDepth { handle: u32 },
-    #[error(
-        "mcu handle {handle}: its step capacity must be a finite positive rate of clock \
-         ticks per second, got {ticks_per_s}"
-    )]
-    StepCapacity { handle: u32, ticks_per_s: f64 },
 }
 
 pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
@@ -385,22 +368,6 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
                         field,
                         motor_count,
                         got,
-                    });
-                }
-            }
-            if let Some(capacity) = &topology.hw.step_capacity {
-                if !(capacity.ticks_per_s.is_finite() && capacity.ticks_per_s > 0.0) {
-                    return Err(KinematicsConfigError::StepCapacity {
-                        handle: topology.mcu_id,
-                        ticks_per_s: capacity.ticks_per_s,
-                    });
-                }
-                if capacity.ticks_per_step.len() != motor_count {
-                    return Err(KinematicsConfigError::PerMotorVectorLength {
-                        handle: topology.mcu_id,
-                        field: "ticks_per_step",
-                        motor_count,
-                        got: capacity.ticks_per_step.len(),
                     });
                 }
             }

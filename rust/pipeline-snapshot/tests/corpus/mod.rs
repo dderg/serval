@@ -88,7 +88,7 @@ pub fn plan(name: &str, gcode: &str, config: &Path) -> Option<pipeline_snapshot:
     if waypoints.len() < 2 {
         return None;
     }
-    let snapshot = pipeline_snapshot_for_config(&waypoints, &planner)
+    let snapshot = pipeline_snapshot_for_config(&waypoints, &planner, None)
         .unwrap_or_else(|e| panic!("{name}: {e}"));
     Some(snapshot)
 }

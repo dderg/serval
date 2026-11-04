@@ -92,6 +92,23 @@ def print_stats() -> dict:
     ]
 
 
+def mcu_step_benchmarks() -> list[dict]:
+    """Every MCU's step benchmark the live planner caps moves by, as klippy
+    reports it in the MCU's status: the analyzer plans its reference under
+    the same cap."""
+    objects = http("GET", "/printer/objects/list")["objects"]
+    mcus = [name for name in objects if name == "mcu" or name.startswith("mcu ")]
+    if not mcus:
+        raise BenchError(f"klippy reports no mcu objects: {objects}")
+    query = "&".join(urllib.parse.quote(name) for name in mcus)
+    status = http("GET", f"/printer/objects/query?{query}")["status"]
+    return [
+        status[name]["step_capacity"]
+        for name in mcus
+        if "step_capacity" in status[name]
+    ]
+
+
 def poll_print(capture: Capture, timeout_s: float) -> dict:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -158,6 +175,7 @@ def run(
         "deployed": deployed,
         "sanitized_lines": len(lines),
         **stats,
+        "step_benchmarks": mcu_step_benchmarks(),
     }
     with (
         throttle.throttled(host_throttle) as applied_throttle,

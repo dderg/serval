@@ -34,7 +34,7 @@ fn planner_config(name: &str) -> planner_config::PlannerConfig {
 }
 
 fn replay(config: &str, gcode: &str) -> Vec<ContinuousSegment> {
-    let replay = LiveReplay::new(gcode, &planner_config(config)).expect("the replay builds");
+    let replay = LiveReplay::new(gcode, &planner_config(config), None).expect("the replay builds");
     let (emitted_tx, emitted) = crossbeam_channel::unbounded();
     let mut pipeline = replay.pipeline().into_staged(move |item| {
         if let TrajectoryItem::Seg(segment) = item {

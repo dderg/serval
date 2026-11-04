@@ -5,7 +5,6 @@ import pytest
 from fakes import FakeMcu, FakePrinter, FakeStepper
 from fakes.printer import FakeConfigError
 
-from klippy import motion_step_capacity
 from klippy.kinematics.extruder import PrinterExtruder
 from klippy.motion_step_capacity import CapacityMotor, mcu_step_capacity
 
@@ -67,17 +66,34 @@ def bench_motors(both_edge=False, ab_step=AB_STEP):
     ]
 
 
-def test_the_bench_printer_is_capped_at_three_quarters_of_its_clock(caplog):
+def stepped(name, step_dist, mode="pulsed"):
+    return {"name": name, "step_distance": step_dist, "mode": mode}
+
+
+def test_the_bench_printer_hands_the_planner_its_benchmark(caplog):
+    mcu = bench_mcu()
     with caplog.at_level(logging.INFO):
-        ticks_per_s, ticks_per_step = mcu_step_capacity(
-            bench_motion(), "mcu", bench_mcu(), bench_motors()
+        step_benchmark = mcu_step_capacity(
+            bench_motion(), "mcu", mcu, bench_motors()
         )
-    assert ticks_per_s == 0.75 * F401_CLOCK
-    assert ticks_per_step == [301, 301, 301, 301]
+    assert step_benchmark == {
+        "mcu": "mcu",
+        "clock_freq": F401_CLOCK,
+        "pulsed_ticks_per_step": 301,
+        "both_edge_ticks_per_step": 160,
+        "simulated": False,
+        "motors": [
+            stepped("stepper_a", AB_STEP),
+            stepped("stepper_b", AB_STEP),
+            stepped("stepper_z", Z_STEP),
+            stepped("extruder", E_STEP),
+        ],
+    }
+    assert mcu.step_capacity == step_benchmark
     summary = caplog.text
     assert "mcu 'mcu' step capacity" in summary
     assert "301 ticks/step pulsed and 160 ticks/step both-edge" in summary
-    assert "209302 steps/s pulsed" in summary
+    assert "209302 steps/s pulsed (75 % of the 84000000 Hz clock)" in summary
     assert "stepper_a 113137 steps/s pulsed" in summary
     assert "stepper_z 10000 steps/s pulsed" in summary
     assert "extruder 110116 steps/s pulsed" in summary
@@ -86,10 +102,15 @@ def test_the_bench_printer_is_capped_at_three_quarters_of_its_clock(caplog):
 
 def test_both_edge_motors_cost_what_that_mode_measured(caplog):
     with caplog.at_level(logging.INFO):
-        _, ticks_per_step = mcu_step_capacity(
+        step_benchmark = mcu_step_capacity(
             bench_motion(), "mcu", bench_mcu(), bench_motors(both_edge=True)
         )
-    assert ticks_per_step == [160, 160, 301, 301]
+    assert [m["mode"] for m in step_benchmark["motors"]] == [
+        "both-edge",
+        "both-edge",
+        "pulsed",
+        "pulsed",
+    ]
     assert "393750 steps/s both-edge" in caplog.text
 
 
@@ -107,10 +128,14 @@ def test_slow_moves_never_bind(caplog):
 def test_phase_stepped_motors_dispatch_no_steps():
     motors = bench_motors()
     motors[0] = motors[0]._replace(stepping=False)
-    _, ticks_per_step = mcu_step_capacity(
+    step_benchmark = mcu_step_capacity(
         bench_motion(), "mcu", bench_mcu(), motors
     )
-    assert ticks_per_step == [0, 301, 301, 301]
+    assert [m["name"] for m in step_benchmark["motors"]] == [
+        "stepper_b",
+        "stepper_z",
+        "extruder",
+    ]
 
 
 def test_a_simulated_mcu_is_not_capped_and_says_so(caplog):
@@ -119,19 +144,25 @@ def test_a_simulated_mcu_is_not_capped_and_says_so(caplog):
         "both_edge_ticks_per_step": 0,
         "simulated": True,
     }
+    mcu = bench_mcu(simulated)
     with caplog.at_level(logging.INFO):
-        assert mcu_step_capacity(
-            bench_motion(), "mcu", bench_mcu(simulated), bench_motors()
-        ) == (None, [])
+        assert (
+            mcu_step_capacity(bench_motion(), "mcu", mcu, bench_motors())
+            is None
+        )
+    assert mcu.step_capacity is None
     assert "mcu 'mcu' is simulated; its step capacity is not modeled" in (
         caplog.text
     )
 
 
 def test_an_mcu_without_steppers_reports_no_benchmark_and_is_not_capped():
-    assert mcu_step_capacity(
-        bench_motion(), "beacon", bench_mcu(benchmark=None), []
-    ) == (None, [])
+    assert (
+        mcu_step_capacity(
+            bench_motion(), "beacon", bench_mcu(benchmark=None), []
+        )
+        is None
+    )
 
 
 def test_a_stepper_on_an_mcu_without_a_benchmark_is_a_config_error():
@@ -181,12 +212,8 @@ def test_z_only_has_to_reach_its_own_lower_limit():
     motors = bench_motors()[2:3]
     assert mcu_step_capacity(
         bench_motion(max_z_velocity=20.0), "mcu", slow_z, motors
-    )[0]
+    )
     with pytest.raises(FakeConfigError, match="pure Z move at 50.0 mm/s"):
         mcu_step_capacity(
             bench_motion(max_z_velocity=100.0), "mcu", slow_z, motors
         )
-
-
-def test_the_capacity_fraction_sits_at_the_measured_knee():
-    assert motion_step_capacity.STEP_CAPACITY_FRACTION == 0.75

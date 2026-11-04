@@ -89,9 +89,6 @@ struct McuTopology {
     stepcompress_max_error_secs: f64,
     phase_sample_rate: f64,
     phase_ring_depth: u32,
-    mcu_name: String,
-    step_capacity_ticks_per_s: Option<f64>,
-    ticks_per_step: Vec<u32>,
 }
 
 impl McuTopology {
@@ -113,13 +110,6 @@ impl McuTopology {
                 stepcompress_max_error_secs: self.stepcompress_max_error_secs,
                 phase_sample_rate: self.phase_sample_rate,
                 phase_ring_depth: self.phase_ring_depth,
-                step_capacity: self.step_capacity_ticks_per_s.map(|ticks_per_s| {
-                    motion_core::mcu_config::McuStepCapacity {
-                        mcu_name: self.mcu_name,
-                        ticks_per_s,
-                        ticks_per_step: self.ticks_per_step,
-                    }
-                }),
             },
         }
     }
@@ -223,7 +213,16 @@ impl PyMotionEngine {
     /// sections are re-read here with the same reader
     /// (`_config_doc.read_motion_settings`) klippy used at config time, so
     /// the planner cannot drift from what the host validated and reported.
-    fn init_planner(&self, config_text: &str, mcus: Vec<McuTopology>) -> PyResult<()> {
+    /// Every move is capped by the step capacity `step_benchmarks` derive.
+    fn init_planner(
+        &self,
+        config_text: &str,
+        mcus: Vec<McuTopology>,
+        step_benchmarks: Vec<crate::step_benchmarks::PyStepBenchmark>,
+    ) -> PyResult<()> {
+        let step_capacity =
+            crate::step_benchmarks::step_capacity_input(config_text, &step_benchmarks)
+                .map_err(PyValueError::new_err)?;
         let cfg = self.adopt_planner_config(config_text)?;
 
         let mcus: Vec<McuTopologyInput> = mcus.into_iter().map(McuTopology::into_core).collect();
@@ -236,8 +235,14 @@ impl PyMotionEngine {
 
         host_rt::memory_lock::HOST_MEMORY_LOCK
             .start_pipeline_threads(|| {
-                let pump_control =
-                    self.spawn_pipeline(&cfg, &mcu_configs, &host_ios, &ec_conns, None)?;
+                let pump_control = self.spawn_pipeline(
+                    &cfg,
+                    &mcu_configs,
+                    &host_ios,
+                    &ec_conns,
+                    None,
+                    Some(&step_capacity),
+                )?;
 
                 self.spawn_live_position_poll_thread();
 
@@ -253,8 +258,18 @@ impl PyMotionEngine {
     /// executes the trajectory, so the pacer never brakes for a playhead and
     /// no memory needs locking. It records every pipeline input and shaped
     /// segment for `take_detached_record`: the live half of the snapshot
-    /// parity gate.
-    fn init_planner_detached(&self, config_text: &str) -> PyResult<()> {
+    /// parity gate. `step_benchmarks` cap it as they cap `init_planner`;
+    /// `None` plans uncapped.
+    #[pyo3(signature = (config_text, step_benchmarks = None))]
+    fn init_planner_detached(
+        &self,
+        config_text: &str,
+        step_benchmarks: Option<Vec<crate::step_benchmarks::PyStepBenchmark>>,
+    ) -> PyResult<()> {
+        let step_capacity = crate::step_benchmarks::optional_step_capacity_input(
+            config_text,
+            step_benchmarks.as_deref(),
+        )?;
         let cfg = self.adopt_planner_config(config_text)?;
         let (inputs_tx, inputs) = crossbeam_channel::unbounded();
         let (segments_tx, segments) = crossbeam_channel::unbounded();
@@ -268,6 +283,7 @@ impl PyMotionEngine {
                 inputs: inputs_tx,
                 segments: segments_tx,
             }),
+            step_capacity.as_ref(),
         )?;
         Ok(())
     }

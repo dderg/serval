@@ -70,6 +70,7 @@ class FakeMcu:
         self._constants = {} if constants is None else dict(constants)
         self.missing_commands = tuple(missing_commands)
         self._step_benchmark = step_benchmark
+        self.step_capacity = None
 
     def get_printer(self):
         return self._printer
@@ -88,6 +89,9 @@ class FakeMcu:
 
     def get_step_benchmark(self):
         return self._step_benchmark
+
+    def report_step_capacity(self, step_benchmark):
+        self.step_capacity = step_benchmark
 
     def get_stepcompress_max_error(self):
         return self._stepcompress_max_error

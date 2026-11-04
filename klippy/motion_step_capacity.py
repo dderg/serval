@@ -1,13 +1,8 @@
-"""How many steps per second each MCU can dispatch, from the cost it measured
-for one step at connect (src/stepper_bench.c), and what the configured
-motors ask of it.
-
-STEP_CAPACITY_FRACTION: on the F401 (tools/bench/README.md, "MCU step-rate
-capacity") p99 step lateness holds at 4.1-5.1 us up to 225 k steps/s, rises
-to 7-8 us between 225 and 275 k and ~10 us beyond, and the MCU shuts down
-("Stepper too far in past") at ~300 k: the knee sits at 75 % of the ceiling.
-The self-benchmark reads 0.93 of that ceiling, so 0.75 of the benchmarked
-capacity keeps every move below the knee with margin.
+"""What each MCU measured one step costs it at connect (src/stepper_bench.c)
+and the motors it steps: the step benchmark the planner derives its step
+capacity cap from (motion_pipeline::live_config::step_capacity, which holds
+STEP_CAPACITY_FRACTION). This module only gathers that input, refuses
+configs the cap makes unusable, and summarizes the cap.
 
 STEP_CAPACITY_MIN_AXIS_VELOCITY: below 50 mm/s an axis cannot run the
 first-layer and perimeter speeds slicers default to (20-60 mm/s), so a
@@ -21,17 +16,13 @@ import math
 from collections import namedtuple
 
 from .kinematics.extruder import PrinterExtruder
+from .motion_engine import native
 
-STEP_CAPACITY_FRACTION = 0.75
 STEP_CAPACITY_MIN_AXIS_VELOCITY = 50.0
 SPATIAL_AXIS_NAMES = ("x", "y", "z")
 UNIT_COORDS = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
 MODE_PULSED = "pulsed"
 MODE_BOTH_EDGE = "both-edge"
-BENCHMARK_KEYS = {
-    MODE_PULSED: "pulsed_ticks_per_step",
-    MODE_BOTH_EDGE: "both_edge_ticks_per_step",
-}
 REMEDIES = (
     "use fewer microsteps or a larger rotation_distance on those motors, "
     "step them on both edges (a TMC driver's dedge), or move motors to "
@@ -50,11 +41,11 @@ def stepper_mode(stepper):
 
 
 def mcu_step_capacity(motion, name, mcu_obj, motors):
-    """The capacity in clock ticks per second the planner holds `mcu_obj` to
-    and each motor's ticks per step, in `motors` order; `(None, [])` where
-    nothing is capped."""
+    """The step benchmark `mcu_obj` hands the planner (`init_planner`'s
+    `step_benchmarks` entry, also reported as the mcu's `step_capacity`
+    status); None where nothing is capped."""
     if mcu_obj is None:
-        return None, []
+        return None
     stepped = [m for m in motors if m.stepping]
     benchmark = mcu_obj.get_step_benchmark()
     if benchmark is None:
@@ -64,22 +55,32 @@ def mcu_step_capacity(motion, name, mcu_obj, motors):
                 "steppers to report a step benchmark for"
                 % (name, sorted(m.stepper.get_name() for m in stepped))
             )
-        return None, []
+        return None
     if benchmark["simulated"]:
         logging.info(
             "Motion: mcu '%s' is simulated; its step capacity is not "
             "modeled and no move is capped by it",
             name,
         )
-        return None, []
+        return None
     if not stepped:
-        return None, []
-    clock_freq = mcu_obj.get_constant_float("CLOCK_FREQ")
-    ticks_per_s = STEP_CAPACITY_FRACTION * clock_freq
-    ticks_per_step = [
-        benchmark[BENCHMARK_KEYS[stepper_mode(m.stepper)]] if m.stepping else 0
-        for m in motors
-    ]
+        return None
+    step_benchmark = {
+        "mcu": name,
+        "clock_freq": mcu_obj.get_constant_float("CLOCK_FREQ"),
+        **benchmark,
+        "motors": [
+            {
+                "name": m.stepper.get_name(),
+                "step_distance": m.stepper.get_step_dist(),
+                "mode": stepper_mode(m.stepper),
+            }
+            for m in stepped
+        ],
+    }
+    ticks_per_s, ticks_per_step = native("step_capacity_budget")(
+        step_benchmark
+    )
     stepped_motors = [
         SteppedMotor(
             m.stepper.get_name(),
@@ -88,10 +89,11 @@ def mcu_step_capacity(motion, name, mcu_obj, motors):
             stepper_mode(m.stepper),
             ticks,
         )
-        for m, ticks in zip(motors, ticks_per_step)
-        if m.stepping
+        for m, ticks in zip(stepped, ticks_per_step)
     ]
-    capacity = _McuCapacity(name, benchmark, clock_freq, ticks_per_s)
+    capacity = _McuCapacity(
+        name, benchmark, step_benchmark["clock_freq"], ticks_per_s
+    )
     weights = {
         m.stepper.get_name(): _lane_weights(m.stepper)
         for m in stepped
@@ -99,7 +101,8 @@ def mcu_step_capacity(motion, name, mcu_obj, motors):
     }
     capacity.refuse_unreachable_axes(motion, stepped_motors, weights)
     capacity.log_summary(motion, stepped_motors, weights)
-    return ticks_per_s, ticks_per_step
+    mcu_obj.report_step_capacity(step_benchmark)
+    return step_benchmark
 
 
 def _lane_weights(stepper):
@@ -126,10 +129,8 @@ class _McuCapacity:
         self.clock_freq = clock_freq
         self.ticks_per_s = ticks_per_s
 
-    def steps_per_s(self, mode):
-        return self.ticks_per_s / self.benchmark[BENCHMARK_KEYS[mode]]
-
-    def describe(self, modes):
+    def describe(self, motors):
+        ticks_by_mode = {m.mode: m.ticks_per_step for m in motors}
         return (
             "%d ticks/step pulsed and %d ticks/step both-edge measured, "
             "capacity %s (%.0f %% of the %.0f Hz clock)"
@@ -137,10 +138,10 @@ class _McuCapacity:
                 self.benchmark["pulsed_ticks_per_step"],
                 self.benchmark["both_edge_ticks_per_step"],
                 ", ".join(
-                    "%.0f steps/s %s" % (self.steps_per_s(mode), mode)
-                    for mode in modes
+                    "%.0f steps/s %s" % (self.ticks_per_s / ticks, mode)
+                    for mode, ticks in sorted(ticks_by_mode.items())
                 ),
-                100.0 * STEP_CAPACITY_FRACTION,
+                100.0 * self.ticks_per_s / self.clock_freq,
                 self.clock_freq,
             )
         )
@@ -170,7 +171,7 @@ class _McuCapacity:
                     axis_name.upper(),
                     required,
                     STEP_CAPACITY_MIN_AXIS_VELOCITY,
-                    self.describe(sorted({m.mode for m, _ in demand})),
+                    self.describe([m for m, _ in demand]),
                     ", ".join(
                         "%s %.0f steps/s (%s, %.0f ticks/s)"
                         % (m.name, steps, m.mode, steps * m.ticks_per_step)
@@ -211,7 +212,7 @@ class _McuCapacity:
             "configured max speeds: %s; %.0f %% of capacity summed, an "
             "upper bound on any one move; step capacity caps %s",
             self.name,
-            self.describe(sorted({m.mode for m in motors})),
+            self.describe(motors),
             ", ".join(
                 "%s %s"
                 % (

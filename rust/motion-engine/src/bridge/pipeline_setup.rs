@@ -6,6 +6,7 @@ use super::{
     dispatch_endstop_trip, query_ethercat_runtime_caps, report_endpoint_death,
 };
 use motion_core::lock_ext::LockExt;
+use motion_pipeline::live_config::step_capacity::StepCapacityInput;
 fn escalate_endpoint_death(latch: &Arc<Mutex<HashMap<u32, String>>>, mcu_id: u32, reason: &str) {
     if report_endpoint_death(latch, mcu_id, reason) {
         arm_endpoint_death_watchdog(Arc::clone(latch), mcu_id);
@@ -485,18 +486,15 @@ impl PyMotionEngine {
         host_ios: &HashMap<u32, Arc<McuHostIo>>,
         ec_conns: &HashMap<u32, Arc<McuSerialConn>>,
         detached: Option<motion_core::worker::DetachedTaps>,
+        step_benchmarks: Option<&StepCapacityInput>,
     ) -> PyResult<crossbeam_channel::Sender<motion_core::pump::PumpMsg>> {
         let (pump_tx, pump_rx) = crossbeam_channel::unbounded::<motion_core::pump::PumpMsg>();
         let mut resources =
             self.build_execution_resources(mcu_configs, host_ios, ec_conns, &pump_tx)?;
         resources.detached = detached;
 
-        let mut stream_cfg =
-            motion_pipeline::live_config::stream_config(cfg).map_err(PyValueError::new_err)?;
-        stream_cfg.step_capacity =
-            live_step_capacity(cfg, mcu_configs, &self.extruder_caps.lock_ok())
-                .map_err(PyValueError::new_err)?
-                .map(Arc::new);
+        let stream_cfg = motion_pipeline::live_config::stream_config(cfg, step_benchmarks)
+            .map_err(PyValueError::new_err)?;
         let axis_chains = cfg
             .compile_active_chains()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -869,34 +867,4 @@ fn spawn_endpoint_liveness_poll(
             }
         })
         .expect("spawn ec-heartbeat-poll thread");
-}
-
-/// The step capacity the live planner holds every move to. A follower a
-/// capped mcu steps needs extruder caps: its advance's velocity gain is
-/// only known to the planner through them.
-fn live_step_capacity(
-    cfg: &planner_config::PlannerConfig,
-    mcu_configs: &[McuAxisConfig],
-    extruder_caps: &[geometry::ExtruderCaps],
-) -> Result<Option<geometry::StepCapacity>, String> {
-    let Some(capacity) = motion_core::step_capacity::step_capacity(mcu_configs) else {
-        return Ok(None);
-    };
-    for mcu in &capacity.mcus {
-        for follower in &mcu.followers {
-            if !extruder_caps
-                .iter()
-                .any(|caps| caps.axis_index == follower.axis_index)
-            {
-                return Err(format!(
-                    "mcu '{}' steps axis '{}', which has no limits the planner can bound its \
-                     step rate by: give [axis {}] a max_velocity or bind an [extruder] to it",
-                    mcu.mcu,
-                    cfg.axis_registry.axis_name(follower.axis_index),
-                    cfg.axis_registry.axis_name(follower.axis_index),
-                ));
-            }
-        }
-    }
-    Ok(Some(capacity))
 }

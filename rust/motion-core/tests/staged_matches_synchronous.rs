@@ -25,6 +25,7 @@ fn live_setup() -> LiveReplay {
     let mut replay = LiveReplay::new(
         &repo_file("tools/sim/gcode/voron_dense_top_layers.gcode"),
         &planner,
+        None,
     )
     .expect("live replay");
     replay.moves.truncate(SLICE_MOVES);
