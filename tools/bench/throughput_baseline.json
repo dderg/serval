@@ -2,45 +2,45 @@
   "slice_lines": 1000,
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 13703125158,
+      "ir": 13682843185,
       "stream_secs": 6.588,
       "reason": "Initial baselines: first 1000 lines of voron_dense_top_layers.gcode, synchronous single-thread replay",
-      "commit": "75129927f0c72f86312539f1720f71785f4411a8",
+      "commit": "d7e05da434d131b6108584625e9c40af24d1b094",
       "pi_2core": {
-        "k": 4555228638.205829,
+        "k": 4506947436.46782,
         "worst_x": [
           2.19,
-          2.19
+          2.17
         ],
-        "commit": "75129927f0c72f86312539f1720f71785f4411a8"
+        "commit": "d7e05da434d131b6108584625e9c40af24d1b094"
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 13451327776,
+      "ir": 13395874232,
       "stream_secs": 6.202,
       "reason": "Initial baselines: first 1000 lines of voron_dense_top_layers.gcode, synchronous single-thread replay",
-      "commit": "75129927f0c72f86312539f1720f71785f4411a8",
+      "commit": "d7e05da434d131b6108584625e9c40af24d1b094",
       "pi_2core": {
-        "k": 4793211808.321509,
+        "k": 4795040437.768462,
         "worst_x": [
-          2.21,
-          2.24
+          2.25,
+          2.22
         ],
-        "commit": "75129927f0c72f86312539f1720f71785f4411a8"
+        "commit": "d7e05da434d131b6108584625e9c40af24d1b094"
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 14118337955,
+      "ir": 13751512977,
       "stream_secs": 7.404,
       "reason": "Initial baselines: first 1000 lines of voron_dense_top_layers.gcode, synchronous single-thread replay",
-      "commit": "75129927f0c72f86312539f1720f71785f4411a8",
+      "commit": "d7e05da434d131b6108584625e9c40af24d1b094",
       "pi_2core": {
-        "k": 4423901608.698001,
+        "k": 4327529070.287683,
         "worst_x": [
-          2.33,
-          2.32
+          2.34,
+          2.33
         ],
-        "commit": "75129927f0c72f86312539f1720f71785f4411a8"
+        "commit": "d7e05da434d131b6108584625e9c40af24d1b094"
       }
     }
   }
