@@ -32,6 +32,14 @@ pub const RATIO_RAMP_MIN_TIME_S: f64 = 0.005;
 /// The longest ratio ramp: past it the planner slows the step instead of
 /// smearing the flow over more path.
 pub const RATIO_RAMP_MAX_TIME_S: f64 = 0.03;
+/// The shaped path speed under which a ratio-ramped advance releases its
+/// lead around the leaders' slowest point instead of reading the path
+/// speed through it. Near a reversal the path speed's second derivative
+/// carries the tangent's turning `a⊥²/v`, which grows without bound as the
+/// speed minimum `v` falls, whatever the planner bounds of the path's own
+/// acceleration and jerk; under this speed the lead the advance holds,
+/// `k·r·v`, is too small to matter to the flow.
+pub const ADVANCE_VALLEY_SPEED_MM_S: f64 = 2.0;
 
 const BISECTIONS: usize = 64;
 
