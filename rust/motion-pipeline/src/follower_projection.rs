@@ -1744,14 +1744,14 @@ impl FollowerState {
             .find(|seg| seg.spatial_path)
             .and_then(|seg| seg.followers.iter().find(|f| f.axis_index == axis))
             .map_or(0.0, |f| f.ratio);
-        let rest_arc = odometer.covered_until(closest_to_rest(raw, shaped, leaders));
+        let rest_arc = odometer.covered_until(arrival_at_rest(raw, shaped, leaders));
         self.push_rest_arcs((tail, idle, lead), rest_arc, (tail_ratio, lead_ratio));
         shaped_ds
     }
 
     /// Lays a rest segment's arcs, the ratio stepping from the tail's to
-    /// the lead's only `rest_arc` into the segment, where the leaders come
-    /// closest to the rest point. The tail's straight distance from the rest
+    /// the lead's only `rest_arc` into the segment, where the leaders reach
+    /// the rest point. The tail's straight distance from the rest
     /// point falls short of that arc where the shaped axes curve into the
     /// rest unlike each other or the fit wanders toward it: the tail joins
     /// what of the idle arc the leaders cover before they rest
@@ -2334,14 +2334,16 @@ impl OdometerLeaves {
 }
 
 /// Probes per leader knot interval the leaders of a rest segment are
-/// searched with for where they come closest to the rest point.
+/// searched with for where they reach the rest point.
 const REST_POINT_PROBES_PER_INTERVAL: usize = 8;
 const REST_POINT_REFINEMENTS: usize = 64;
 
-/// When the shaped leaders of `shaped` come closest to where the raw ones
-/// of `raw` rest: the probe nearest it, refined by golden-section search
-/// over the probes either side.
-fn closest_to_rest(raw: &ContinuousSegment, shaped: &ContinuousSegment, leaders: &[usize]) -> f64 {
+/// When the shaped leaders of `shaped` first stop closing on where the raw
+/// ones of `raw` rest: the first probe their distance from it grows after,
+/// refined by golden-section search over the probes either side. The fit's
+/// back-and-forth around the rest point after that changes nothing of how
+/// they arrived.
+fn arrival_at_rest(raw: &ContinuousSegment, shaped: &ContinuousSegment, leaders: &[usize]) -> f64 {
     let rest_at = leader_support(raw, leaders).0;
     let distance_sq = |t: f64| {
         leaders
@@ -2363,13 +2365,11 @@ fn closest_to_rest(raw: &ContinuousSegment, shaped: &ContinuousSegment, leaders:
         })
         .collect();
     probes.push(grid[grid.len() - 1]);
-    let nearest = probes
-        .iter()
-        .map(|&t| distance_sq(t))
-        .enumerate()
-        .min_by(|a, b| a.1.total_cmp(&b.1))
-        .expect("a segment's leader grid has probes")
-        .0;
+    let distances: Vec<f64> = probes.iter().map(|&t| distance_sq(t)).collect();
+    let nearest = distances
+        .windows(2)
+        .position(|pair| pair[1] > pair[0])
+        .unwrap_or(distances.len() - 1);
     let (mut lo, mut hi) = (
         probes[nearest.saturating_sub(1)],
         probes[(nearest + 1).min(probes.len() - 1)],
