@@ -746,3 +746,34 @@ fn a_short_extruding_chain_stays_within_the_corner_budget() {
     ];
     toolhead_stays_within_the_corner_budget(limits, &steps).unwrap();
 }
+
+#[test]
+fn an_extruding_sliver_between_a_travel_and_a_dwell_plans() {
+    let limits = Limits {
+        max_velocity: 419.929_159_141_074_76,
+        max_accel: 36_599.590_510_520_124,
+        square_corner_velocity: 0.0,
+    };
+    let steps = [
+        step(0.0, 0.000_721_076_174_676_573_8, 199.174_124_775_033_05, 0.0),
+        step(
+            0.0,
+            0.039_303_657_023_113_67,
+            125.984_810_051_814_62,
+            0.049_116_935_261_214_5,
+        ),
+        Step {
+            dwell_before_s: Some(0.001),
+            ..step(0.0, 1.0, 1.0, 0.0)
+        },
+    ];
+    let points = waypoints(&steps);
+    let trajectory = plan(limits, &points);
+    let last = points.last().expect("waypoints laid").position;
+    let end = position(&trajectory, E_AXIS, trajectory.t_end(), SampleSide::Left).unwrap();
+    assert!(
+        (end - last[E_AXIS]).abs() <= FIT_SLACK_MM,
+        "the extruder ends at {end}, commanded {}",
+        last[E_AXIS]
+    );
+}

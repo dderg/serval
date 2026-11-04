@@ -366,18 +366,28 @@ impl WidthField {
     /// either way, and a leg seam the leaders cross at rest needs its rest
     /// node on the seam itself, or the window there, however narrow,
     /// straddles the seam and reads half its ratio step.
+    ///
+    /// Leaders that leave a rest and come back to one within a node spacing
+    /// leave no time sample in between, and `h` would be zero all along the
+    /// path they cover: a ratio step there would step the follower's
+    /// velocity. A node halfway along it, its target half that path as a
+    /// sample's base, opens the widest window the rests' cones allow.
     fn push_rest(&mut self, s: f64) {
-        match self.nodes.last() {
-            Some(last) if last.envelope == 0.0 => {
-                if s > last.s {
-                    self.nodes.push(WidthNode {
-                        s,
-                        target: 0.0,
-                        envelope: 0.0,
-                    });
-                }
-            }
-            _ => self.push(s, 0.0),
+        let Some(&last) = self.nodes.last() else {
+            return self.push(s, 0.0);
+        };
+        if last.envelope != 0.0 {
+            return self.push(s, 0.0);
+        }
+        if s - last.s > REST_TARGET_MM {
+            self.push(0.5 * (last.s + s), 0.5 * (s - last.s));
+            self.push(s, 0.0);
+        } else if s > last.s {
+            self.nodes.push(WidthNode {
+                s,
+                target: 0.0,
+                envelope: 0.0,
+            });
         }
     }
 

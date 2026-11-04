@@ -331,6 +331,21 @@ fn a_rest_an_ulp_past_a_resting_node_closes_the_window_on_its_own_place() {
 }
 
 #[test]
+fn an_excursion_between_two_rests_within_a_node_spacing_opens_a_window() {
+    let mut field = WidthField::default();
+    field.push_rest(0.0);
+    field.push_rest(0.04);
+    let seam = 0.00072;
+    let width = field.width(seam);
+    assert!(
+        width > 0.0 && width <= WIDTH_SLOPE_BOUND * seam,
+        "a {width} mm window at {seam} mm off the rest"
+    );
+    assert_eq!(field.width(0.0), 0.0);
+    assert_eq!(field.width(0.04), 0.0);
+}
+
+#[test]
 fn the_width_is_c2_lipschitz_and_closes_on_every_rest() {
     let mut field = WidthField::default();
     field.push_rest(0.0);
