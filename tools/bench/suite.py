@@ -28,6 +28,7 @@ SUITES_DIR = Path("~/bench/suites").expanduser()
 PRINTER_CFG = BENCH / "printer.cfg"
 FAST_CFG = BENCH / "configs" / "fast.cfg"
 REST_LADDER_CFG = BENCH / "configs" / "rest_ladder.cfg"
+CAPACITY_CFG = BENCH / "configs" / "capacity.cfg"
 SIM_GCODE = REPO / "tools" / "sim" / "gcode"
 RUN_TIMEOUT_S = 2400.0
 ANALYZE_TIMEOUT_S = 1200.0
@@ -98,6 +99,13 @@ MATRIX = [
         BENCH / "gcode" / "corner_flow.gcode",
         run_args=["--events"],
         analyze_args=["--corner-flow"],
+    ),
+    Row(
+        "single_motor_cap",
+        BENCH / "gcode" / "single_motor_cap.gcode",
+        CAPACITY_CFG,
+        quick=True,
+        run_args=["--events", "--step-tap"],
     ),
 ]
 
