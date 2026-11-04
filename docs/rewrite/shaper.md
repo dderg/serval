@@ -285,6 +285,51 @@ stage order: leading gains (pressure advance) act on the projected track,
 the follower's kernel (e.g. `smooth_triangle`) convolves that, trailing
 gains act on the convolution.
 
+### Rests
+
+The projection reads the leaders' path speed `|v|` and, for an advance, its
+rate `d|v|/dt = v̂·a` and its derivative `v̂·j + |a⊥|²/|v|` off the leaders'
+*fitted* polynomials. Near a stop those fits move at their own fit noise. X
+and Y stop at slightly different times, and the direction `v̂` turns through
+nanometre loops that no toolhead makes. `|a⊥|²/|v|` then spikes without
+bound over a microsecond, and the advance would turn the spike into
+extruder acceleration.
+
+A **rest** (`follower_projection/rest.rs`) is a maximal stretch inside the
+support where the leaders' speed is at most the speed their fits cannot
+resolve. That speed is the leader fit's velocity resolution: the
+acceleration tolerance times the shortest span such a fit holds at the
+leaders' position, speed and time scales (`velocity_resolution_at_scales`).
+No constant of its own enters.
+
+Inside a rest:
+
+- `|v|` and so the odometer are unchanged. Path distance, and with it
+  material, is exactly what it is outside rests.
+- The rate and its derivative are read along a fixed direction: the unit
+  velocity the leaders enter the rest with, up to the rest's *split* (where
+  they are slowest), and the one they leave with from the split on.
+  `d|v|/dt = d̂·a` and `d²|v|/dt² = d̂·j`. The fit-noise curvature term is
+  dropped.
+
+The consequences:
+
+- A stop-and-go along a line enters and leaves along the same direction. It
+  reads smooth through the split.
+- A reversal, or a turn made at rest, enters and leaves along different
+  directions. Its rate steps at the split by what the two directions read
+  of the acceleration. That step is the jump the motion makes, kept and not
+  smoothed:
+  - the split is a semantic break of the fit;
+  - it is a knot the signal reports through `TrackSignal::knot_jump` and
+    `eval_pva_across`;
+  - it is a break of the follower's enclosure windows, each side enclosed
+    with its own direction.
+- The rest's ends are breaks too. There the dropped curvature term at the
+  floor speed is the only change.
+
+Rests never reach into the end slivers, which keep their own semantics.
+
 ## Streaming mechanics: windows, frontier, drain
 
 The shaper is a streaming stage over channels; it never sees the whole
