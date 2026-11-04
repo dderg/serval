@@ -55,15 +55,22 @@ pub struct ExtruderCaps {
     pub advance_slope_s: f64,
     /// The advance's largest `|d²a/dv²|`, 0 for a linear advance.
     pub advance_curvature_s2_per_mm: f64,
-    /// Per spatial axis, the shaped path's jerk per unit of planned
-    /// acceleration along it: a step `Δa` in an axis's planned acceleration
-    /// leaves its kernel as `Δa·w(t)`, a jerk of at most `Δa·max w`, and
-    /// one step under the acceleration disk changes the acceleration by at
-    /// most `2A`, so `2·max w`. Infinite on a followed axis without a
-    /// kernel, 0 on an axis the follower does not follow.
-    pub path_jerk_per_accel_hz: [f64; 3],
+    /// By the set of spatial axes the path moves on around a segment (see
+    /// [`ExtruderCaps::path_jerk_gain`]), the shaped path's tangential jerk
+    /// per unit of planned acceleration through the kernels of the shaped
+    /// axes the follower follows among them: a planned acceleration within
+    /// the disk anywhere in the kernels' reach leaves at most
+    /// `A·max_d ∫ |(dᵢ·wᵢ′(u))ᵢ| du` along the shaped tangent `d`
+    /// ([`nurbs::algebra::PiecewisePolynomialKernel::directional_variation`]),
+    /// every lobe of a multimodal kernel taking a fresh swing of it. 0 for a
+    /// set without a shaped followed axis.
+    pub path_jerk_per_accel_hz: [f64; SPATIAL_AXIS_SETS],
+    /// The followed spatial axes no kernel shapes: their planned
+    /// acceleration steps reach the advance unsmoothed.
+    pub unshaped_leaders: [bool; 3],
     /// The same bound through the follower's own kernel, which differentiates
-    /// the advance's input `σ̈ ≤ A` itself: `2·max w_e`, infinite without one.
+    /// the advance's input `σ̈ ≤ A` itself: the kernel's total variation,
+    /// infinite without one.
     pub own_jerk_per_accel_hz: f64,
     /// The velocity step the motor takes at once where no kernel smooths
     /// the advance: an unshaped followed axis steps the shaped path's
@@ -131,6 +138,8 @@ impl ExtruderCaps {
         {
             *gain = gain.max(other);
         }
+        let unshaped_leaders =
+            std::array::from_fn(|axis| a.unshaped_leaders[axis] || b.unshaped_leaders[axis]);
         Some(Self {
             axis_index: a.axis_index,
             max_velocity_mm_s: a.max_velocity_mm_s.min(b.max_velocity_mm_s),
@@ -140,6 +149,7 @@ impl ExtruderCaps {
                 .advance_curvature_s2_per_mm
                 .max(b.advance_curvature_s2_per_mm),
             path_jerk_per_accel_hz,
+            unshaped_leaders,
             own_jerk_per_accel_hz: a.own_jerk_per_accel_hz.max(b.own_jerk_per_accel_hz),
             instantaneous_corner_velocity_mm_s: a
                 .instantaneous_corner_velocity_mm_s
@@ -147,6 +157,12 @@ impl ExtruderCaps {
             leader_spill: a.leader_spill.wider(b.leader_spill),
             leader_kernel_reach_s: a.leader_kernel_reach_s.max(b.leader_kernel_reach_s),
         })
+    }
+
+    /// The jerk gain of the path around a segment that moves on `axes`.
+    #[must_use]
+    pub fn path_jerk_gain(&self, axes: [bool; 3]) -> f64 {
+        self.path_jerk_per_accel_hz[axis_set(axes)]
     }
 
     /// The rule the follower's ratio ramp derives each step's ramp time by.
@@ -175,13 +191,15 @@ impl ExtruderCaps {
         {
             return Err("the advance's slope and curvature must be finite and non-negative");
         }
-        if self
+        if !self
             .path_jerk_per_accel_hz
             .iter()
-            .chain([&self.own_jerk_per_accel_hz])
-            .any(|gain| !(*gain >= 0.0))
+            .all(|gain| gain.is_finite() && *gain >= 0.0)
         {
-            return Err("jerk gains must be non-negative");
+            return Err("path jerk gains must be finite and non-negative");
+        }
+        if !(self.own_jerk_per_accel_hz >= 0.0) {
+            return Err("the follower kernel's jerk gain must be non-negative");
         }
         let LeaderSpill { mass, moment_s } = self.leader_spill;
         if !(mass.is_finite() && mass >= 1.0 && moment_s.is_finite() && moment_s >= 0.0) {
@@ -192,6 +210,20 @@ impl ExtruderCaps {
         }
         Ok(())
     }
+}
+
+/// How many sets of spatial axes [`ExtruderCaps::path_jerk_per_accel_hz`]
+/// holds a gain for: bit `i` of a set's index stands for axis `i`.
+pub const SPATIAL_AXIS_SETS: usize = 8;
+
+/// The index of the set of the spatial axes `axes` marks.
+#[must_use]
+pub fn axis_set(axes: [bool; 3]) -> usize {
+    axes.iter()
+        .enumerate()
+        .filter(|(_, moves)| **moves)
+        .map(|(axis, _)| 1 << axis)
+        .sum()
 }
 
 impl VelocityLimits {

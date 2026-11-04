@@ -142,7 +142,7 @@ fn the_bench_printer_charges_each_motor_its_steps_per_mm_times_its_tick_cost() {
     );
     let pure_x_mm_s = 1.0 / (2.0 * capacity.mcus[0].lane_s_per_mm[0]);
     assert!(
-        (pure_x_mm_s - 1090.1).abs() < 0.1,
+        (pure_x_mm_s - 1395.3).abs() < 0.1,
         "a pure X move at 80 steps/mm on a and b: {pure_x_mm_s}"
     );
 }

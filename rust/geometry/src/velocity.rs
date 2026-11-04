@@ -367,13 +367,9 @@ fn build_move_caps(
                 let (_, kappa_peak) = seg.kappa_peak();
                 let z_capped = z_caps::z_capped(seg, &m.limits, kappa_peak, path_ceiling);
                 let limits = match &m.limits.extruder {
-                    Some(extruder) => extruder_caps::extruder_capped(
-                        seg,
-                        extruder,
-                        ratio_in_reach,
-                        kappa_peak,
-                        z_capped,
-                    ),
+                    Some(extruder) => {
+                        extruder_caps::extruder_capped(seg, extruder, budget, kappa_peak, z_capped)
+                    }
                     None => z_capped,
                 };
                 (length, kappa_start, sigma, kappa_peak, limits)

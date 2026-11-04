@@ -874,6 +874,7 @@ version = "0.1.0"
 dependencies = [
  "config-doc",
  "geometry",
+ "nurbs",
  "thiserror",
  "trajectory",
 ]
