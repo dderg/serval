@@ -17,7 +17,9 @@ use std::ops::{Add, Mul, Neg};
 
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{Arc as PathArc, Clothoid, Segment};
-use geometry::{FollowerDemand, RailPair, RailPairShape, ScalarLaw};
+use geometry::{
+    FollowerDemand, MeshPatch, PatchAxis, RailPair, RailPairShape, ScalarLaw, SurfaceTransform,
+};
 use nurbs::bezier::BezierPiece;
 use nurbs::bezier::extract_bezier_pieces;
 use trajectory::{
@@ -279,31 +281,30 @@ enum AxisLaw<'a> {
         demand: FollowerDemand,
         length: f64,
     },
+    /// The path's z carried onto a variable bed surface: `z + w(x, y, z)`,
+    /// the path's coordinates read by their own laws.
+    Warped {
+        surface: &'a SurfaceTransform,
+        path: Box<[AxisLaw<'a>; 3]>,
+    },
 }
 
-impl AxisLaw<'_> {
+impl<'a> AxisLaw<'a> {
     /// The axis's law and the constant surface offset its position adds.
-    fn of(span: &AnalyticMoveSpan, axis: usize) -> Option<(AxisLaw<'_>, f64)> {
+    fn of(span: &'a AnalyticMoveSpan, axis: usize) -> Option<(AxisLaw<'a>, f64)> {
         if axis < 3 {
             let segment = span.source.segment.spatial.as_ref()?;
-            let offset = match (&span.surface, axis) {
-                (SurfaceMode::Variable(_), 2) => return None,
-                (SurfaceMode::Constant(offset), 2) => *offset,
-                _ => 0.0,
-            };
-            if let Some(coordinate) = segment.held_coordinate(axis) {
-                return Some((AxisLaw::Constant(coordinate), offset));
-            }
-            let law = match segment {
-                Segment::Line(line) => AxisLaw::Line {
-                    start: line.start[axis],
-                    extent: line.end[axis] - line.start[axis],
-                    length: line.length(),
-                },
-                Segment::Arc(arc) => AxisLaw::Arc(arc, axis),
-                Segment::Clothoid(clothoid) => AxisLaw::Clothoid(clothoid, axis),
-            };
-            return Some((law, offset));
+            return Some(match (&span.surface, axis) {
+                (SurfaceMode::Variable(surface), 2) => (
+                    AxisLaw::Warped {
+                        surface,
+                        path: Box::new(std::array::from_fn(|axis| path_law(segment, axis))),
+                    },
+                    0.0,
+                ),
+                (SurfaceMode::Constant(offset), 2) => (path_law(segment, axis), *offset),
+                _ => (path_law(segment, axis), 0.0),
+            });
         }
         let demand = if span.source.segment.spatial.is_some() {
             span.source.segment.followers.get(axis - 3)
@@ -327,7 +328,23 @@ impl AxisLaw<'_> {
 
     fn models(&self, window: &WindowReading) -> [TaylorModel; 3] {
         let Tangential { s, v, a } = &window.state;
+        match self {
+            AxisLaw::Warped { surface, path } => {
+                warped_models(surface, path.each_ref().map(|law| law.models(window)))
+            }
+            _ => self.flat_models(window, s, v, a),
+        }
+    }
+
+    fn flat_models(
+        &self,
+        window: &WindowReading,
+        s: &TaylorModel,
+        v: &TaylorModel,
+        a: &TaylorModel,
+    ) -> [TaylorModel; 3] {
         match *self {
+            AxisLaw::Warped { .. } => unreachable!("a warped law reads its path's flat laws"),
             AxisLaw::Constant(position) => [
                 TaylorModel::constant(Ball::exact(position)),
                 TaylorModel::constant(Ball::exact(0.0)),
@@ -422,14 +439,16 @@ impl AxisLaw<'_> {
 
     /// The axis's jerk on the window, the tangential jerk `jerk` given:
     /// `j·h + 3·a·v·h' + v³·h''`, `h` the axis's heading along the path and
-    /// `'` its arc derivatives.
-    fn jerk(&self, window: &WindowReading, jerk: &TaylorModel) -> TaylorModel {
+    /// `'` its arc derivatives; `None` on a variable surface, whose z the
+    /// evaluator reads no jerk of.
+    fn jerk(&self, window: &WindowReading, jerk: &TaylorModel) -> Option<TaylorModel> {
         let Tangential { s, v, a } = &window.state;
         let zero = TaylorModel::constant(Ball::exact(0.0));
         let (heading, turn, bend) = match *self {
-            AxisLaw::Constant(_) => return zero,
+            AxisLaw::Warped { .. } => return None,
+            AxisLaw::Constant(_) => return Some(zero),
             AxisLaw::Line { extent, length, .. } => {
-                return jerk.scale(Ball::rounded(extent / length, 1));
+                return Some(jerk.scale(Ball::rounded(extent / length, 1)));
             }
             AxisLaw::Arc(arc, axis) => {
                 let sign = arc.sweep.signum();
@@ -477,15 +496,183 @@ impl AxisLaw<'_> {
                         demand.ratio_slope(length),
                     )
                 };
-                return ratio
-                    .mul(jerk)
-                    .add(&a.mul(v).scale(Ball::rounded(3.0 * slope, 2)));
+                return Some(
+                    ratio
+                        .mul(jerk)
+                        .add(&a.mul(v).scale(Ball::rounded(3.0 * slope, 2))),
+                );
             }
         };
-        jerk.mul(&heading)
-            .add(&a.mul(v).mul(&turn).scale(Ball::exact(3.0)))
-            .add(&v.mul(v).mul(v).mul(&bend))
+        Some(
+            jerk.mul(&heading)
+                .add(&a.mul(v).mul(&turn).scale(Ball::exact(3.0)))
+                .add(&v.mul(v).mul(v).mul(&bend)),
+        )
     }
+}
+
+/// The law `segment`'s point reads along `axis`.
+fn path_law(segment: &Segment, axis: usize) -> AxisLaw<'_> {
+    if let Some(coordinate) = segment.held_coordinate(axis) {
+        return AxisLaw::Constant(coordinate);
+    }
+    match segment {
+        Segment::Line(line) => AxisLaw::Line {
+            start: line.start[axis],
+            extent: line.end[axis] - line.start[axis],
+            length: line.length(),
+        },
+        Segment::Arc(arc) => AxisLaw::Arc(arc, axis),
+        Segment::Clothoid(clothoid) => AxisLaw::Clothoid(clothoid, axis),
+    }
+}
+
+/// `[p, v, a]` of the path's z on `surface`, `[x, y, z]` the path's own
+/// `[p, v, a]`: the chain rule `eval_warped_z` evaluates, on the mesh patch
+/// and fade stretch the models' centre reads.
+fn warped_models(surface: &SurfaceTransform, [x, y, z]: [[TaylorModel; 3]; 3]) -> [TaylorModel; 3] {
+    let centre = |model: &TaylorModel| model.coefficients()[0];
+    let patch = surface.mesh().patch_at(centre(&x[0]), centre(&y[0]));
+    let (u, du) = patch_parameter(patch.x, &x[0]);
+    let (v, dv) = patch_parameter(patch.y, &y[0]);
+    let mesh = PatchReading::of(&patch, &u, &v);
+    let fade = surface.fade();
+    let target = Ball::exact(fade.target);
+    let (factor, factor_slope) = if fade.is_disabled() {
+        (TaylorModel::constant(Ball::exact(1.0)), Ball::exact(0.0))
+    } else {
+        let (start, end) = fade.band();
+        let height = centre(&z[0]);
+        if height >= end {
+            (TaylorModel::constant(Ball::exact(0.0)), Ball::exact(0.0))
+        } else if height >= start {
+            let inverse_band = Ball::rounded(1.0 / (end - start), 2);
+            (
+                z[0].scale(Ball::exact(-1.0))
+                    .add_ball(Ball::exact(end))
+                    .scale(inverse_band),
+                -inverse_band,
+            )
+        } else {
+            (TaylorModel::constant(Ball::exact(1.0)), Ball::exact(0.0))
+        }
+    };
+    let deviation = mesh.value.add_ball(-target);
+    let mesh_x = mesh.du.scale(du);
+    let mesh_y = mesh.dv.scale(dv);
+    let w = factor.mul(&deviation).add_ball(target);
+    let wx = factor.mul(&mesh_x);
+    let wy = factor.mul(&mesh_y);
+    let wz = deviation.scale(factor_slope);
+    let wxx = factor.mul(&mesh.duu.scale(du * du));
+    let wxy = factor.mul(&mesh.duv.scale(du * dv));
+    let wyy = factor.mul(&mesh.dvv.scale(dv * dv));
+    let wxz = mesh_x.scale(factor_slope);
+    let wyz = mesh_y.scale(factor_slope);
+    let two = Ball::exact(2.0);
+    let [_, xv, xa] = &x;
+    let [_, yv, ya] = &y;
+    let [zp, zv, za] = &z;
+    [
+        zp.add(&w),
+        zv.add(&wx.mul(xv)).add(&wy.mul(yv)).add(&wz.mul(zv)),
+        za.add(&wx.mul(xa))
+            .add(&wy.mul(ya))
+            .add(&wz.mul(za))
+            .add(&wxx.mul(xv).mul(xv))
+            .add(&wxy.mul(xv).mul(yv).scale(two))
+            .add(&wyy.mul(yv).mul(yv))
+            .add(&wxz.mul(xv).mul(zv).scale(two))
+            .add(&wyz.mul(yv).mul(zv).scale(two)),
+    ]
+}
+
+/// A patch parameter's model along `coordinate` and its rate in it: the
+/// grid's inverse spacing inside, held flat past its edge.
+fn patch_parameter(axis: PatchAxis, coordinate: &TaylorModel) -> (TaylorModel, Ball) {
+    match axis {
+        PatchAxis::Inside { min, spacing, cell } => {
+            let rate = Ball::rounded(1.0 / spacing, 1);
+            (
+                coordinate
+                    .add_ball(Ball::exact(-min))
+                    .scale(rate)
+                    .add_ball(Ball::exact(-cell)),
+                rate,
+            )
+        }
+        PatchAxis::Held(parameter) => (
+            TaylorModel::constant(Ball::exact(parameter)),
+            Ball::exact(0.0),
+        ),
+    }
+}
+
+/// A mesh patch's height and its parameter derivatives on a window.
+struct PatchReading {
+    value: TaylorModel,
+    du: TaylorModel,
+    dv: TaylorModel,
+    duu: TaylorModel,
+    duv: TaylorModel,
+    dvv: TaylorModel,
+}
+
+impl PatchReading {
+    fn of(patch: &MeshPatch, u: &TaylorModel, v: &TaylorModel) -> Self {
+        let along_u = cardinal_weights(patch.tension, u);
+        let along_v = cardinal_weights(patch.tension, v);
+        let rows: [[TaylorModel; 3]; 4] = std::array::from_fn(|k| {
+            std::array::from_fn(|order| {
+                patch.points[k].iter().zip(&along_u).fold(
+                    TaylorModel::constant(Ball::exact(0.0)),
+                    |sum, (&point, weight)| sum.add(&weight[order].scale(Ball::exact(point))),
+                )
+            })
+        });
+        let combine = |row_order: usize, column_order: usize| {
+            rows.iter().zip(&along_v).fold(
+                TaylorModel::constant(Ball::exact(0.0)),
+                |sum, (row, weight)| sum.add(&weight[column_order].mul(&row[row_order])),
+            )
+        };
+        Self {
+            value: combine(0, 0),
+            du: combine(1, 0),
+            dv: combine(0, 1),
+            duu: combine(2, 0),
+            duv: combine(1, 1),
+            dvv: combine(0, 2),
+        }
+    }
+}
+
+/// The cardinal spline's four weights at the parameter `t` with their
+/// first two derivatives in it: the cubic Hermite basis `h₀₀ = 1 − 3t² +
+/// 2t³`, `h₁₀ = t − 2t² + t³`, `h₀₁ = 3t² − 2t³`, `h₁₁ = t³ − t²`
+/// combined as [`MeshPatch`] reads them.
+fn cardinal_weights(tension: f64, t: &TaylorModel) -> [[TaylorModel; 3]; 4] {
+    let tension = Ball::exact(tension);
+    let basis = |coeffs: [f64; 4]| coeffs.map(Ball::exact);
+    let h00 = basis([1.0, 0.0, -3.0, 2.0]);
+    let h10 = basis([0.0, 1.0, -2.0, 1.0]);
+    let h01 = basis([0.0, 0.0, 3.0, -2.0]);
+    let h11 = basis([0.0, 0.0, -1.0, 1.0]);
+    let weights: [[Ball; 4]; 4] = [
+        h10.map(|c| -(tension * c)),
+        std::array::from_fn(|n| h00[n].add(-(tension * h11[n]))),
+        std::array::from_fn(|n| h01[n].add(tension * h10[n])),
+        h11.map(|c| tension * c),
+    ];
+    weights.map(|[c0, c1, c2, c3]| {
+        let two = Ball::exact(2.0);
+        let three = Ball::exact(3.0);
+        [
+            polynomial_of_balls([c0, c1, c2, c3].into_iter(), t),
+            polynomial_of_balls([c1, two * c2, three * c3].into_iter(), t),
+            polynomial_of_balls([two * c2, Ball::exact(6.0) * c3].into_iter(), t),
+        ]
+    })
 }
 
 fn clothoid_angle(clothoid: &Clothoid, s: &TaylorModel) -> TaylorModel {
@@ -566,24 +753,43 @@ pub(crate) fn analytic_axes_enclosure(
         .iter()
         .map(|&axis| AxisLaw::of(span, axis).map(|(law, offset)| AxisReading { law, offset }))
         .collect::<Option<_>>()?;
+    let surface_seams = if readings
+        .iter()
+        .any(|reading| matches!(reading.law, AxisLaw::Warped { .. }))
+    {
+        span.surface_seam_times()?
+    } else {
+        Vec::new()
+    };
     let mut outs = vec![Vec::new(); axes.len()];
     let (lo, hi) = (lo.max(span.t_start), hi.min(span.t_end));
-    let enclose = |range: (f64, f64),
+    let enclose = |(from, to): (f64, f64),
                    state: &dyn Fn(Window) -> Tangential,
                    outs: &mut Vec<Vec<ExactPiece>>| {
-        taylor::enclose_axes(
-            range,
-            accuracy,
-            &|window: Window, axis: usize, shared: &mut Option<WindowReading>| {
-                let reading = shared.get_or_insert_with(|| WindowReading {
-                    state: state(window),
-                    trig: std::cell::OnceCell::new(),
-                    spread_trig: std::cell::OnceCell::new(),
-                });
-                readings[axis].models(reading)
-            },
-            outs,
+        let mut edges = vec![from];
+        edges.extend(
+            surface_seams
+                .iter()
+                .copied()
+                .filter(|&seam| seam > from && seam < to),
         );
+        edges.push(to);
+        edges.sort_by(f64::total_cmp);
+        for stretch in edges.windows(2) {
+            taylor::enclose_axes(
+                (stretch[0], stretch[1]),
+                accuracy,
+                &|window: Window, axis: usize, shared: &mut Option<WindowReading>| {
+                    let reading = shared.get_or_insert_with(|| WindowReading {
+                        state: state(window),
+                        trig: std::cell::OnceCell::new(),
+                        spread_trig: std::cell::OnceCell::new(),
+                    });
+                    readings[axis].models(reading)
+                },
+                outs,
+            );
+        }
     };
     for phase in span.phases.iter() {
         let origin = span.t_start + phase.t0;
@@ -990,6 +1196,8 @@ pub(crate) enum AxisWindows<'a> {
     Analytic {
         span: &'a AnalyticMoveSpan,
         reading: AxisReading<'a>,
+        /// Where a variable surface changes its formula along the path.
+        surface_seams: Vec<f64>,
     },
     Hold(f64),
     /// A buzz's carrier, with its envelope's stretches.
@@ -1034,6 +1242,14 @@ impl<'a> AxisWindows<'a> {
             ContinuousAxis::Analytic { span, axis } => match AxisLaw::of(span, *axis)? {
                 (AxisLaw::Constant(position), offset) => Self::Hold(position + offset),
                 (law, offset) => Self::Analytic {
+                    surface_seams: match law {
+                        AxisLaw::Warped { .. } => {
+                            let mut seams = span.surface_seam_times()?;
+                            seams.sort_by(f64::total_cmp);
+                            seams
+                        }
+                        _ => Vec::new(),
+                    },
                     span,
                     reading: AxisReading { law, offset },
                 },
@@ -1107,7 +1323,19 @@ impl<'a> AxisWindows<'a> {
                 });
                 Some([p.add_ball(Ball::exact(*base)), v, a, j])
             }
-            Self::Analytic { span, reading } => {
+            Self::Analytic {
+                span,
+                reading,
+                surface_seams,
+            } => {
+                let next_seam = surface_seams.partition_point(|&seam| seam <= window.center);
+                let seam_before = next_seam
+                    .checked_sub(1)
+                    .map_or(span.t_start, |index| surface_seams[index]);
+                let seam_after = surface_seams.get(next_seam).copied().unwrap_or(span.t_end);
+                if !covers(seam_before, seam_after) {
+                    return None;
+                }
                 let phase = span
                     .phases
                     .iter()
@@ -1167,7 +1395,7 @@ impl<'a> AxisWindows<'a> {
                 };
                 let [p, v, a] = reading.models(&reading_window);
                 let j = if with_jerk {
-                    reading.law.jerk(&reading_window, &tangential_jerk)
+                    reading.law.jerk(&reading_window, &tangential_jerk)?
                 } else {
                     TaylorModel::UNBOUNDED
                 };
@@ -1209,7 +1437,11 @@ impl<'a> AxisWindows<'a> {
                 .map(|(_, piece)| piece.u_end)
                 .filter(inside)
                 .collect(),
-            Self::Analytic { span, .. } => span
+            Self::Analytic {
+                span,
+                surface_seams,
+                ..
+            } => span
                 .phases
                 .iter()
                 .flat_map(|phase| {
@@ -1220,6 +1452,7 @@ impl<'a> AxisWindows<'a> {
                             .map(move |pair| origin + pair.t_hi),
                     )
                 })
+                .chain(surface_seams.iter().copied())
                 .filter(inside)
                 .collect(),
             Self::Hold(_) => Vec::new(),
