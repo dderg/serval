@@ -144,6 +144,7 @@ fn open_canbus_with_retry(
     })
 }
 
+#[cfg(feature = "snapshot")]
 struct DetachedRecordRx {
     inputs: crossbeam_channel::Receiver<motion_pipeline::InputTrace>,
     segments: crossbeam_channel::Receiver<trajectory::ContinuousSegment>,
@@ -161,6 +162,7 @@ pub struct PyMotionEngine {
     /// per limited follower axis; each submitted move carries its axis's.
     extruder_caps: Mutex<Vec<geometry::ExtruderCaps>>,
     /// What a detached planner (`init_planner_detached`) was fed and shaped.
+    #[cfg(feature = "snapshot")]
     detached_record: Mutex<Option<DetachedRecordRx>>,
     commanded_pos: Mutex<geometry::GcodePos>,
     bed_mesh: Mutex<Option<Arc<geometry::SurfaceTransform>>>,
@@ -207,6 +209,7 @@ impl PyMotionEngine {
             planner: Mutex::new(None),
             planner_config: Mutex::new(PlannerConfig::default()),
             extruder_caps: Mutex::new(Vec::new()),
+            #[cfg(feature = "snapshot")]
             detached_record: Mutex::new(None),
             commanded_pos: Mutex::new(geometry::GcodePos([0.0; 3])),
             bed_mesh: Mutex::new(None),

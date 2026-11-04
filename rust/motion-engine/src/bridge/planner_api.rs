@@ -31,6 +31,7 @@ impl PyMotionEngine {
         Ok(cfg)
     }
 
+    #[cfg(feature = "snapshot")]
     /// A fence of the detached planner, resolved to the stream time its
     /// fenced trajectory ends at (0 for an idle stream): with no MCU clock to
     /// project it through, the detached planner's print time is its stream
@@ -48,6 +49,7 @@ impl PyMotionEngine {
         Ok(planner.fence_take(id).map(|end| end.unwrap_or(0.0)))
     }
 
+    #[cfg(feature = "snapshot")]
     /// What the detached planner was fed and shaped since it started; call
     /// after a drain so the shaper has emitted everything.
     pub(crate) fn take_detached_record(
@@ -235,6 +237,7 @@ impl PyMotionEngine {
             })
             .map_err(|denied| PyRuntimeError::new_err(denied.to_string()))?
     }
+    #[cfg(feature = "snapshot")]
     /// The live planner with no MCU behind it: the same config reading, move
     /// construction, ingress and pipeline as `init_planner`, but nothing
     /// executes the trajectory, so the pacer never brakes for a playhead and
