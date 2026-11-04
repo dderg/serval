@@ -66,6 +66,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pending_baselines as pending
+import slots
 
 ROOT = pending.ROOT
 AUDIT_DIR = pending.CACHE / "audit"
@@ -417,31 +418,34 @@ def fit_audit(sha: str) -> dict | None:
             file=sys.stderr,
             flush=True,
         )
-        result = subprocess.run(
-            [
-                "cargo",
-                "test",
-                "--release",
-                "-p",
-                "pipeline-snapshot",
-                "--features",
-                "fit-audit",
-                "--test",
-                "fit_tolerance",
-                "every_accepted_fit_piece",
-                "--",
-                "--include-ignored",
-                "--exact",
-                "every_accepted_fit_piece_holds_the_fit_tolerance_against_the_exact_signal",
-            ],
-            cwd=tree / "rust",
-            env={
-                **os.environ,
-                "CARGO_TARGET_DIR": str(pending.target_dir_for(tree, "audit")),
-            },
-            capture_output=True,
-            text=True,
-        )
+        with slots.slot(label="fit audit"):
+            result = subprocess.run(
+                [
+                    "cargo",
+                    "test",
+                    "--release",
+                    "-p",
+                    "pipeline-snapshot",
+                    "--features",
+                    "fit-audit",
+                    "--test",
+                    "fit_tolerance",
+                    "every_accepted_fit_piece",
+                    "--",
+                    "--include-ignored",
+                    "--exact",
+                    "every_accepted_fit_piece_holds_the_fit_tolerance_against_the_exact_signal",
+                ],
+                cwd=tree / "rust",
+                env={
+                    **os.environ,
+                    "CARGO_TARGET_DIR": str(
+                        pending.target_dir_for(tree, "audit")
+                    ),
+                },
+                capture_output=True,
+                text=True,
+            )
     finally:
         pending.run(["git", "worktree", "remove", "--force", str(tree)])
     rows: dict = {}

@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 
 import pending_baselines as pending
+import slots
 
 ROOT = pending.ROOT
 BENCH_DIR = pending.CACHE / "bench"
@@ -192,7 +193,13 @@ def main() -> int:
         ).strip()
         for rev in (args.commit_a, args.commit_b)
     ]
-    binaries = [checkout_and_build(sha) for sha in shas]
+    with slots.slot(label="bench_compare build"):
+        binaries = [checkout_and_build(sha) for sha in shas]
+    with slots.slot(exclusive=True, label="bench_compare measure"):
+        return measure(args, shas, binaries, env)
+
+
+def measure(args, shas, binaries, env) -> int:
     gcode = ROOT / args.gcode
     load = os.getloadavg()[0]
     print(
