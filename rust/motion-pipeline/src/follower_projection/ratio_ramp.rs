@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 
 use geometry::{
-    ADVANCE_VALLEY_SPEED_MM_S, RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule,
-    RatioStep,
+    ADVANCE_VALLEY_SPEED_MM_S, RATIO_RAMP_ENVELOPE_SLOPE as ENVELOPE_SLOPE, RATIO_RAMP_MAX_TIME_S,
+    RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep,
 };
 use trajectory::ContinuousSegment;
 
@@ -18,9 +18,6 @@ pub(super) use jet::Jet;
 use jet::{horner, horner_with_slope};
 pub(super) use models::{ValleyWeight, narrow_floats};
 
-/// The steepest the width envelope climbs per unit of path away from a
-/// node (see [`WidthField`]).
-const ENVELOPE_SLOPE: f64 = 0.25;
 /// `max |h'|` the width reaches: `3·ENVELOPE_SLOPE` rising off a rest,
 /// `1.875·ENVELOPE_SLOPE` between two moving nodes.
 pub(super) const WIDTH_SLOPE_BOUND: f64 = 3.0 * ENVELOPE_SLOPE;
@@ -411,7 +408,8 @@ fn ramp_reach_within(t: f64, (start, end): (f64, f64)) -> (f64, f64) {
 /// also asks for its width ([`Self::seam_width_at`]): every node within
 /// [`SEAM_WIDTH_PLATEAU_WIDTHS`] widths of it on the path targets at least
 /// `H_σ`, falling off by [`ENVELOPE_SLOPE`] beyond, so only a rest narrows
-/// a seam's window below its width.
+/// a seam's window below its width, and the planner slows a step where the
+/// rest leaves its ramp too little path ([`geometry::rest_room_reach_mm`]).
 ///
 /// The leaders are sampled every half of the shortest ramp in time. A
 /// sample becomes a node once every seam that sets its ramp time `τ` or its

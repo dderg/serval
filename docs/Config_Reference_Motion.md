@@ -364,8 +364,13 @@ advance through its slope `k` (a linear advance's `k`, a nonlinear one's
 `τ = max(5 ms, 1.5·Δ/A_e)`. An axis with neither limit set or inherited
 ramps every step over 5 ms. Where even 30 ms would exceed the limits at
 the speed the path allows, the velocity planner lowers the toolhead speed
-at the step instead, and that time is the cost. The former
-`ratio_ramp_time` option was removed; setting it is a config error.
+at the step instead, and that time is the cost. Near a rest the kernel's
+half-width is at most a quarter of the path left to it, so a step a few
+ramp lengths short of an extrude-only move or the end of a print gets only
+a fifth of the path to that rest on its side; where that is less than its
+τ takes, the velocity planner slows the step until the shorter ramp fits
+the limits. The former `ratio_ramp_time` option was
+removed; setting it is a config error.
 
 On every chain the advance applies only to the extrusion laid along the
 leaders' path, as Klipper advances only extruding moves that travel, so
