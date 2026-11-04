@@ -1982,24 +1982,25 @@ impl Crossing {
     /// tangential acceleration read along it. The speed leaves a zero at
     /// the whole acceleration.
     fn at(leaders: &ShapedLeaders, t: f64) -> Self {
-        let speed = leaders.motion(t).speed();
+        let (speed, path_accel) = Self::speed_and_path_accel(leaders, t);
         Self {
             speed,
-            rate: Self::path_accel(leaders, t).abs(),
+            rate: path_accel.abs(),
             jerk: 0.0,
         }
     }
 
-    /// The leaders' path acceleration at `t`, signed, as they leave `t`:
-    /// from a zero of the speed, their whole acceleration.
-    fn path_accel(leaders: &ShapedLeaders, t: f64) -> f64 {
+    /// The leaders' path speed at `t` and their path acceleration, signed,
+    /// as they leave `t`: from a zero of the speed, their whole
+    /// acceleration.
+    fn speed_and_path_accel(leaders: &ShapedLeaders, t: f64) -> (f64, f64) {
         let motion = leaders.motion(t);
         let speed = motion.speed();
         let accel = motion.accel_norm();
         if speed > accel * TURNAROUND_SPEED_TIME_S {
-            motion.speed_deriv(speed)
+            (speed, motion.speed_deriv(speed))
         } else {
-            accel
+            (speed, accel)
         }
     }
 
@@ -2016,19 +2017,25 @@ impl Crossing {
     /// jerk.
     fn over(leaders: &ShapedLeaders, (from, until): (f64, f64)) -> Self {
         let probe_at = |index: usize| from + (until - from) * index as f64 / CROSSING_PROBES as f64;
-        let mut widest = Self::at(leaders, from);
-        let mut previous = (from, Self::path_accel(leaders, from));
+        let (speed, path_accel) = Self::speed_and_path_accel(leaders, from);
+        let mut widest = Self {
+            speed,
+            rate: path_accel.abs(),
+            jerk: 0.0,
+        };
+        let mut previous = (from, path_accel);
         for index in 1..=CROSSING_PROBES {
             let at = probe_at(index);
-            let path_accel = Self::path_accel(leaders, at);
+            let (speed, path_accel) = Self::speed_and_path_accel(leaders, at);
             let jerk = if at > previous.0 {
                 (path_accel - previous.1).abs() / (at - previous.0)
             } else {
                 0.0
             };
             widest = widest.widest(Self {
+                speed,
+                rate: path_accel.abs(),
                 jerk,
-                ..Self::at(leaders, at)
             });
             previous = (at, path_accel);
         }
