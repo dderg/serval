@@ -1,13 +1,13 @@
 {
   "slice_lines": 1000,
-  "commit": "6aa1cb2757343385a67c2bae4cef824a0b21e368",
-  "reason": "Kernel follower fits seed only the shaped breaks that can carry a velocity break: 10x fewer extruder pieces on the kernel configs",
+  "commit": "d33143f24fd2fd19b2203d946e79237570aee734",
+  "reason": "emit-invariance: travel and rest segments that ride an extrusion fit to its position budget (2c5d050a4, about +1 % Ir on p3 slices, +3 % live on p3 kernel); the crossing reads the leaders once per probe (trident_kernel -2.6 % Ir)",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 18416942932,
+      "ir": 18383764111,
       "stream_secs": 8.541,
       "pi_2core": {
-        "worst_x_reference": 4.23,
+        "worst_x_reference": 4.199244044441773,
         "worst_x": [
           4.23,
           4.26
@@ -16,10 +16,10 @@
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 25712366065,
+      "ir": 26043872293,
       "stream_secs": 6.202,
       "pi_2core": {
-        "worst_x_reference": 2.28,
+        "worst_x_reference": 2.2141956209066986,
         "worst_x": [
           2.28,
           2.28
@@ -28,10 +28,10 @@
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 26365381177,
+      "ir": 25770081934,
       "stream_secs": 7.543,
       "pi_2core": {
-        "worst_x_reference": 2.39,
+        "worst_x_reference": 2.385290011298007,
         "worst_x": [
           2.41,
           2.39
