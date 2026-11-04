@@ -31,6 +31,23 @@ impl Jet {
         }
     }
 
+    /// `Self::variable(value) * factor`, bit for bit, without the products
+    /// by the variable's zero derivatives: with `factor.value` positive
+    /// those are `+0`, and adding `+0.0` keeps what adding them makes of
+    /// each sum.
+    pub(in crate::follower_projection) fn variable_times(value: f64, factor: Self) -> Self {
+        assert!(
+            factor.value > 0.0 && factor.d1.is_finite(),
+            "a variable is multiplied by {factor:?}, not a positive jet with a finite slope"
+        );
+        Self {
+            value: value * factor.value,
+            d1: factor.value + value * factor.d1,
+            d2: (2.0 * factor.d1 + 0.0) + value * factor.d2,
+            d3: (3.0 * factor.d2 + 0.0) + value * factor.d3,
+        }
+    }
+
     pub(in crate::follower_projection) fn scale(self, factor: f64) -> Self {
         Self {
             value: self.value * factor,
@@ -60,13 +77,25 @@ impl Jet {
         }
     }
 
-    /// `Σ coeffs[i]·selfⁱ`.
+    /// `Σ coeffs[i]·selfⁱ`, by Horner's rule from the leading coefficient.
     pub(in crate::follower_projection) fn poly(self, coeffs: &[f64]) -> Self {
-        coeffs
+        let (&leading, lower) = coeffs.split_last().expect("a polynomial has coefficients");
+        lower
             .iter()
             .rev()
-            .fold(Self::ZERO, |acc, &coeff| (acc * self).offset(coeff))
+            .fold(Self::constant(leading), |acc, &coeff| {
+                (acc * self).offset(coeff)
+            })
     }
+}
+
+/// [`Jet::poly`]'s value alone, by the same arithmetic.
+pub(in crate::follower_projection) fn horner(x: f64, coeffs: &[f64]) -> f64 {
+    let (&leading, lower) = coeffs.split_last().expect("a polynomial has coefficients");
+    lower
+        .iter()
+        .rev()
+        .fold(leading, |acc, &coeff| acc * x + coeff)
 }
 
 impl Add for Jet {

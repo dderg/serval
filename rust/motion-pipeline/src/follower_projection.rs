@@ -2360,7 +2360,7 @@ pub(crate) struct FollowerSignal<'a> {
     ratio_bounds: RatioBounds,
     start_sliver: Option<SpeedZeroSliver>,
     end_sliver: Option<SpeedZeroSliver>,
-    pva_memo: RefCell<[Option<(u64, (f64, f64, f64))>; PVA_MEMO_SLOTS]>,
+    pva_memo: PvaMemo,
     /// The enclosure over the whole signal, which every rung of the fit
     /// asks again.
     whole_enclosure: enclosure::WholeEnclosure,
@@ -2424,7 +2424,7 @@ impl<'a> FollowerSignal<'a> {
             ratio_bounds,
             start_sliver: None,
             end_sliver: None,
-            pva_memo: RefCell::new([None; PVA_MEMO_SLOTS]),
+            pva_memo: PvaMemo::default(),
             whole_enclosure: enclosure::WholeEnclosure::default(),
             axis_windows: std::cell::OnceCell::new(),
             ratio_crossings: std::cell::OnceCell::new(),
@@ -3103,16 +3103,8 @@ impl TrackSignal for FollowerSignal<'_> {
     }
 
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
-        let key = t.to_bits();
-        let slot = ((key ^ key.rotate_right(32)) as usize) & (PVA_MEMO_SLOTS - 1);
-        if let Some((stored_key, value)) = self.pva_memo.borrow()[slot] {
-            if stored_key == key {
-                return value;
-            }
-        }
-        let value = self.pva_at_distance(t, self.s_owned(t));
-        self.pva_memo.borrow_mut()[slot] = Some((key, value));
-        value
+        self.pva_memo
+            .get_or(t, |t| self.pva_at_distance(t, self.s_owned(t)))
     }
     fn eval_pva_across(&self, knot: f64) -> [(f64, f64, f64); 2] {
         let s = self.s_owned(knot);
@@ -3191,6 +3183,7 @@ struct AdvancedFollowerSignal<'a, 'b> {
     source: &'a FollowerSignal<'b>,
     advance: LeadingAdvance<'a>,
     steps: &'a [AdvanceStep],
+    pva_memo: PvaMemo,
 }
 
 impl<'a, 'b> AdvancedFollowerSignal<'a, 'b> {
@@ -3203,7 +3196,54 @@ impl<'a, 'b> AdvancedFollowerSignal<'a, 'b> {
             source,
             advance,
             steps,
+            pva_memo: PvaMemo::default(),
         }
+    }
+
+    fn pva(&self, t: f64) -> (f64, f64, f64) {
+        let read = self.source.path_read(t);
+        let (p, v, a) = self.source.pva_read(t, &read);
+        let (read_v, read_a, read_j) = self.advance.read(self.source, t, &read);
+        let input = self.advance_input(t, read_v);
+        let p = p - input.steps_taken_out;
+        match self.advance.stage {
+            ChainStage::DerivativeGains { k1, k2 } => {
+                assert_eq!(*k2, 0.0, "leading acceleration gain is not supported");
+                (p + k1 * input.velocity, v + k1 * read_a, a + k1 * read_j)
+            }
+            ChainStage::NonlinearAdvance(advance) => (
+                p + advance.advance(input.velocity),
+                v + advance.slope(read_v) * read_a,
+                a + advance.slope(read_v) * read_j + advance.curvature(read_v) * read_a * read_a,
+            ),
+            ChainStage::SmoothKernel(_) => unreachable!("a leading advance is not a kernel"),
+        }
+    }
+}
+
+/// The last position, velocity and acceleration a signal evaluated, by
+/// the bits of their time: the fit asks a signal again at times it has
+/// probed.
+struct PvaMemo(RefCell<[Option<(u64, (f64, f64, f64))>; PVA_MEMO_SLOTS]>);
+
+impl Default for PvaMemo {
+    fn default() -> Self {
+        Self(RefCell::new([None; PVA_MEMO_SLOTS]))
+    }
+}
+
+impl PvaMemo {
+    fn get_or(&self, t: f64, eval: impl FnOnce(f64) -> (f64, f64, f64)) -> (f64, f64, f64) {
+        let key = t.to_bits();
+        let slot = ((key ^ key.rotate_right(32)) as usize) & (PVA_MEMO_SLOTS - 1);
+        if let Some((stored_key, value)) = self.0.borrow()[slot] {
+            if stored_key == key {
+                return value;
+            }
+        }
+        let value = eval(t);
+        self.0.borrow_mut()[slot] = Some((key, value));
+        value
     }
 }
 
@@ -3268,23 +3308,7 @@ impl TrackSignal for AdvancedFollowerSignal<'_, '_> {
     }
 
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
-        let read = self.source.path_read(t);
-        let (p, v, a) = self.source.pva_read(t, &read);
-        let (read_v, read_a, read_j) = self.advance.read(self.source, t, &read);
-        let input = self.advance_input(t, read_v);
-        let p = p - input.steps_taken_out;
-        match self.advance.stage {
-            ChainStage::DerivativeGains { k1, k2 } => {
-                assert_eq!(*k2, 0.0, "leading acceleration gain is not supported");
-                (p + k1 * input.velocity, v + k1 * read_a, a + k1 * read_j)
-            }
-            ChainStage::NonlinearAdvance(advance) => (
-                p + advance.advance(input.velocity),
-                v + advance.slope(read_v) * read_a,
-                a + advance.slope(read_v) * read_j + advance.curvature(read_v) * read_a * read_a,
-            ),
-            ChainStage::SmoothKernel(_) => unreachable!("a leading advance is not a kernel"),
-        }
+        self.pva_memo.get_or(t, |t| self.pva(t))
     }
 
     fn interior_knots(&self, start: f64, end: f64) -> &[f64] {

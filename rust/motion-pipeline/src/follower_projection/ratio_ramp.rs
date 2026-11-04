@@ -9,6 +9,7 @@ use super::{
 
 mod jet;
 pub(super) use jet::Jet;
+use jet::horner;
 
 /// The steepest the width envelope climbs per unit of path away from a
 /// node (see [`WidthField`]).
@@ -495,8 +496,33 @@ impl WidthField {
         }
     }
 
+    /// [`Self::jet`]'s value alone, by the same arithmetic.
     fn width(&self, s: f64) -> f64 {
-        self.jet(s).value
+        match self.interval(s) {
+            Ok(node) => self.nodes[node].envelope,
+            Err((a, _)) => self.width_after(a, s),
+        }
+    }
+
+    /// The width at `s`, strictly between node `a` and the next.
+    fn width_after(&self, a: usize, s: f64) -> f64 {
+        let (a, b) = (self.nodes[a], self.nodes[a + 1]);
+        let x = (s - a.s) * (1.0 / (b.s - a.s));
+        match (a.envelope == 0.0, b.envelope == 0.0) {
+            (true, true) => 0.0,
+            (true, false) => horner(x, &RISE_FROM_REST) * b.envelope,
+            (false, true) => horner(x, &FALL_TO_REST) * a.envelope,
+            (false, false) => horner(x, &SMOOTHERSTEP) * (b.envelope - a.envelope) + a.envelope,
+        }
+    }
+
+    /// A reader of [`Self::width`] for a search whose queries close in on
+    /// one point: it tries the node interval of its last query first.
+    fn searcher(&self) -> WidthSearch<'_> {
+        WidthSearch {
+            field: self,
+            last: std::cell::Cell::new(None),
+        }
     }
 
     /// The nodes bounding `[lo, hi]` and every node between: the last node
@@ -544,6 +570,32 @@ impl WidthField {
             .min(self.final_prefix.saturating_sub(1));
         self.nodes.drain(..keep);
         self.final_prefix -= keep;
+    }
+}
+
+/// See [`WidthField::searcher`].
+struct WidthSearch<'a> {
+    field: &'a WidthField,
+    last: std::cell::Cell<Option<usize>>,
+}
+
+impl WidthSearch<'_> {
+    /// [`WidthField::width`]: strictly inside the last query's node
+    /// interval, the interval search would find it again.
+    fn width(&self, s: f64) -> f64 {
+        let nodes = &self.field.nodes;
+        if let Some(a) = self.last.get() {
+            if nodes[a].s < s && s < nodes[a + 1].s {
+                return self.field.width_after(a, s);
+            }
+        }
+        match self.field.interval(s) {
+            Ok(node) => nodes[node].envelope,
+            Err((a, _)) => {
+                self.last.set(Some(a));
+                self.field.width_after(a, s)
+            }
+        }
     }
 }
 
@@ -812,7 +864,8 @@ impl RatioSmoothing {
         let Some(width_final) = self.width.final_through() else {
             return self.floor;
         };
-        let fits = |s: f64| s + self.width.width(s) <= table_end;
+        let width = self.width.searcher();
+        let fits = |s: f64| s + width.width(s) <= table_end;
         let mut hi = width_final.min(table_end);
         if fits(hi) {
             return hi;
@@ -823,6 +876,9 @@ impl RatioSmoothing {
         }
         for _ in 0..WIDTH_BISECTIONS {
             let mid = 0.5 * (lo + hi);
+            if mid == lo || mid == hi {
+                break;
+            }
             if fits(mid) {
                 lo = mid;
             } else {
@@ -852,22 +908,31 @@ impl RatioSmoothing {
             });
         let squared = h * h;
         let inverse = h.recip();
-        let position = Jet::variable(s);
         self.seams[first..]
             .iter()
             .take_while(|seam| seam.s < hi)
             .fold(
                 squared.scale(KERNEL_HALF_VARIANCE * slope_left),
                 |total, seam| {
-                    let x = position.offset(-seam.s) * inverse;
-                    let (ramp, half_square) = if x.value >= 0.0 {
-                        (x, (x * x).scale(0.5))
+                    let x = Jet::variable_times(s - seam.s, inverse);
+                    let past_seam = x.value >= 0.0;
+                    let total = if seam.step == 0.0 {
+                        total
                     } else {
-                        (Jet::ZERO, Jet::ZERO)
+                        let smoothed = x.poly(&SMOOTHED_RAMP);
+                        let g1 = if past_seam { smoothed - x } else { smoothed };
+                        total + (h * g1).scale(seam.step)
                     };
-                    let g1 = x.poly(&SMOOTHED_RAMP) - ramp;
-                    let g2 = x.poly(&SMOOTHED_HALF_SQUARE) - half_square;
-                    total + (h * g1).scale(seam.step) + (squared * g2).scale(seam.slope_step)
+                    if seam.slope_step == 0.0 {
+                        return total;
+                    }
+                    let smoothed = x.poly(&SMOOTHED_HALF_SQUARE);
+                    let g2 = if past_seam {
+                        smoothed - (x * x).scale(0.5)
+                    } else {
+                        smoothed
+                    };
+                    total + (squared * g2).scale(seam.slope_step)
                 },
             )
     }
@@ -970,7 +1035,8 @@ impl RatioSmoothing {
     /// The `s` on `side` of `seam` where `s ∓ h(s) = seam`: `s ± h(s)` is
     /// increasing since `|h'| < 1`.
     fn window_edge(&self, seam: f64, side: f64, widest: f64) -> f64 {
-        let reach = |s: f64| (s - seam) * side - self.width.width(s);
+        let width = self.width.searcher();
+        let reach = |s: f64| (s - seam) * side - width.width(s);
         let (first, last) = (
             self.width.nodes[0].s,
             self.width.nodes[self.width.nodes.len() - 1].s,
@@ -982,6 +1048,9 @@ impl RatioSmoothing {
         }
         for _ in 0..WIDTH_BISECTIONS {
             let mid = 0.5 * (near + far);
+            if mid == near || mid == far {
+                break;
+            }
             if reach(mid) < 0.0 {
                 near = mid;
             } else {
