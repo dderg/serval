@@ -239,3 +239,20 @@ fn a_turnaround_between_extruding_lines_keeps_the_advanced_velocity_continuous()
         "the extruder velocity moves {largest} mm/s within one sample around the turnarounds"
     );
 }
+
+#[test]
+fn a_travel_that_turns_back_along_the_line_just_laid_keeps_the_advanced_velocity_continuous() {
+    let track = sample(&shaped(
+        "G90\nM83\nG1 X0 Y0 F3000\nG1 X30 Y0 E1.0\nG1 X5 Y0 F9000\n",
+        leaders_with(true, ramped(Some(ADVANCE_S))),
+    ));
+    let largest = track
+        .ve
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]).abs())
+        .fold(0.0, f64::max);
+    assert!(
+        largest / SAMPLE_DT_S < STEP_FREE_ACCELERATION,
+        "the extruder velocity moves {largest} mm/s within one sample at the turnaround"
+    );
+}
