@@ -21,3 +21,11 @@ fn stream_config_rejects_finite_jerk() {
     );
     assert!(stream_config(&cfg).is_err());
 }
+
+#[test]
+fn the_offline_plans_carry_no_step_capacity() {
+    let mut cfg = PlannerConfig::default();
+    cfg.cartesian.max_jerk = f64::INFINITY;
+
+    assert_eq!(stream_config(&cfg).unwrap().step_capacity, None);
+}
