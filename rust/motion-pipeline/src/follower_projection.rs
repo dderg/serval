@@ -15,9 +15,9 @@ use trajectory::{
 use crate::lowering::{AccelBudget, FitTol, SeamContinuity, follower_tol_scale};
 use crate::shaper::{
     AxisFit, AxisSignalTable, BetweenProbes, ConvolutionSignal, Enclosure, ExactConvolution,
-    ExactKernel, FitBoundary, KnotJumpBound, Lookahead, SEGMENT_TIME_EPS_S, ShiftedTrackSignal,
-    SignalBounds, TrackSignal, apply_derivative_gains_to_track, fit_axis_from_signal,
-    fit_resolution, shaped_signal_breakpoints, unit_kernel_mass,
+    ExactKernel, FitBoundary, KnotJumpBound, Lookahead, SEGMENT_TIME_EPS_S, ShapedBreaks,
+    ShiftedTrackSignal, SignalBounds, TrackSignal, apply_derivative_gains_to_track,
+    fit_axis_from_signal, fit_resolution, fit_seed_times, unit_kernel_mass,
 };
 use crate::types::PostProcessError;
 use crate::worker_pool::WorkerPool;
@@ -970,7 +970,7 @@ pub(crate) fn project_followers(
                     &semantic_cuts
                 };
                 let breaks_started = crate::timing::stopwatch();
-                let shaped_breaks = shaped_signal_breakpoints(kernel, shaped_break_seeds);
+                let shaped_breaks = ShapedBreaks::new(kernel, shaped_break_seeds);
                 timing.breakpoints_us += breaks_started.elapsed_us();
                 let input_jumps = table.input_jumps().to_vec();
                 let exact_kernel = ExactKernel::new(kernel);
@@ -1018,11 +1018,16 @@ pub(crate) fn project_followers(
                 let fitted = pool
                     .map_indexed(workers, supports.len(), &make_sig, |sig, index| {
                         let (start, end) = supports[index];
+                        let seeds = shaped_breaks.select_seeds(
+                            fit_seed_times(axis, start, end, shaped_breaks.times())?,
+                            Some(table.as_ref()),
+                            target_tol,
+                        );
                         fit_kernel_window(
                             axis,
                             start,
                             end,
-                            &shaped_breaks,
+                            &seeds,
                             sig,
                             target_tol,
                             output_monotonicity,
@@ -2284,6 +2289,17 @@ struct LeaderReads {
     odometer: OdometerLeaves,
 }
 
+/// The leaders a [`ShapedLeaders::speed_floor`] bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FloorLeaders {
+    /// Every leader, so one no cached piece reads across the interval
+    /// leaves no floor.
+    Every,
+    /// Those a cached piece reads across the interval: the part of the
+    /// velocity they carry is never faster than the whole.
+    Cached,
+}
+
 struct ShapedLeaders<'a> {
     leaders: &'a [usize],
     axes: Vec<&'a ContinuousAxis>,
@@ -2373,12 +2389,11 @@ impl<'a> ShapedLeaders<'a> {
         norm_of((0..self.axes.len()).map(|index| self.pva(index, t).1))
     }
 
-    /// A lower bound on the leaders' speed over `[lo, hi]`, when every
-    /// leader holds or reads one cached piece across it: their velocity's
-    /// tangent line at `at`, at its nearest to rest over the interval, less
-    /// the most the pieces' higher terms add to it and their evaluation's
-    /// rounding.
-    fn speed_floor(&self, lo: f64, at: f64, hi: f64) -> Option<f64> {
+    /// A lower bound on the speed of `bounded` leaders over `[lo, hi]`, and
+    /// so on the leaders' own: their velocity's tangent line at `at`, at its
+    /// nearest to rest over the interval, less the most the pieces' higher
+    /// terms add to it and their evaluation's rounding.
+    fn speed_floor(&self, lo: f64, at: f64, hi: f64, bounded: FloorLeaders) -> Option<f64> {
         let leaders = self.axes.len();
         assert!(
             leaders <= MAX_LEADERS,
@@ -2394,7 +2409,15 @@ impl<'a> ShapedLeaders<'a> {
             if matches!(axis, ContinuousAxis::Hold { .. }) {
                 continue;
             }
-            let piece = pieces.as_ref()?.piece_over(lo, at, hi)?;
+            let Some(piece) = pieces
+                .as_ref()
+                .and_then(|pieces| pieces.piece_over(lo, at, hi))
+            else {
+                match bounded {
+                    FloorLeaders::Every => return None,
+                    FloorLeaders::Cached => continue,
+                }
+            };
             let shifted = taylor_shifted(&piece.coeffs, at - piece.u_start);
             velocity[index] = shifted.get(1).copied().unwrap_or(0.0);
             acceleration[index] = 2.0 * shifted.get(2).copied().unwrap_or(0.0);
