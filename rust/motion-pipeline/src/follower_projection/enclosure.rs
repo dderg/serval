@@ -335,13 +335,23 @@ impl<'a> FollowerSignal<'a> {
             .scale(Ball::exact(window.radius) * scale)
             .add_ball(Ball::exact(self.s_owned(window.center)));
         let (centre, spread) = s.spread();
-        let reach = self.reach_inside_crossings(window, (centre - spread, centre + spread));
+        let read = self.read_distances();
+        let inside_read = |(lo, hi): (f64, f64)| {
+            (
+                lo.max(read.0).min(read.1),
+                hi.min(read.1).max(read.0),
+            )
+        };
+        let reach = self.reach_inside_crossings(
+            window,
+            inside_read((centre - spread, centre + spread)),
+        );
         if self.state.smoothing.touches(reach.0, reach.1) {
             return None;
         }
-        let held = (reach.1 - self.s_owned_end).max(0.0);
+        let held = (centre + spread - self.s_owned_end).max(0.0);
         s.widen(held);
-        let reach = (reach.0 - held, reach.1 + held);
+        let reach = inside_read((reach.0 - held, reach.1 + held));
         let formulas = self.table_formulas(centre, reach)?;
         let rate_second = if with_jerk {
             match &inverse_speed {
@@ -382,6 +392,14 @@ impl<'a> FollowerSignal<'a> {
             path[3].widen(ratio * rate_second + 3.0 * slope * rate * rate_deriv);
         }
         Some(FollowerModels { path, raw })
+    }
+
+    /// The path distances the signal reads anywhere on its support: its
+    /// odometer only advances from its start, and holds at the owned end.
+    /// A window's bound on its odometer reaching past them reads no table
+    /// formula there.
+    fn read_distances(&self) -> (f64, f64) {
+        (self.s_start, self.s_end().min(self.s_owned_end))
     }
 
     /// `reach` held to the side of a ratio crossing a window ends or starts
