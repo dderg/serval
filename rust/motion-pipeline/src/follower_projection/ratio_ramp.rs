@@ -1690,8 +1690,8 @@ impl AdvanceValley {
             return (1.0, 0.0, 0.0);
         }
         let floor = self.floor.min(width);
-        let flattened = |d: f64| d * d / (d.hypot(floor) + floor);
-        let spread = distance.hypot(floor);
+        let flattened = |d: f64| d * d / (libm::hypot(d, floor) + floor);
+        let spread = libm::hypot(distance, floor);
         let slope = distance / spread;
         let bend = floor / spread * (floor / spread) / spread;
         let span = flattened(width);
