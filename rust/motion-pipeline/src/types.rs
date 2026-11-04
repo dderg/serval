@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use crossbeam_channel::Sender;
 use geometry::path::lowering::PositionProfile;
-use geometry::{CornerFitConfig, Move, MoveVelocity, SurfaceTransform, VelocityLimits};
+use geometry::{
+    CornerFitConfig, Move, MoveVelocity, StepCapacity, SurfaceTransform, VelocityLimits,
+};
 use trajectory::{AxisChainSet, ContinuousSegment, NudgeProfile};
 
 pub const CONTIGUITY_EPS_MM: f64 = 1e-6;
@@ -22,7 +24,7 @@ pub fn advance_odometer(pos: &mut [f64], movement: &Move) {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct StreamConfig {
     pub corner: CornerFitConfig,
     pub integration_tol: f64,
@@ -41,6 +43,10 @@ pub struct StreamConfig {
     /// through the bridge carry their own per-move limits; this is the fallback
     /// used when the engine constructs a move itself.
     pub limits: VelocityLimits,
+    /// The mcus' measured step-dispatch capacity every planned move is
+    /// held within; absent where no mcu steps the motors (snapshots,
+    /// replays, simulated mcus).
+    pub step_capacity: Option<Arc<StepCapacity>>,
 }
 
 impl StreamConfig {

@@ -85,6 +85,7 @@ pub motion_pipeline::types::StreamConfig::limits: geometry::frontend::VelocityLi
 pub motion_pipeline::types::StreamConfig::max_buffer_moves: usize
 pub motion_pipeline::types::StreamConfig::max_extrude_only_accel_mm_s2: f64
 pub motion_pipeline::types::StreamConfig::max_extrude_only_velocity_mm_s: f64
+pub motion_pipeline::types::StreamConfig::step_capacity: core::option::Option<alloc::rcs::arc::Arc<geometry::step_capacity::StepCapacity>>
 pub const motion_pipeline::types::CONTIGUITY_EPS_MM: f64
 pub fn motion_pipeline::types::advance_odometer(&mut [f64], &geometry::frontend::Move)
 pub enum motion_pipeline::BaseItem
@@ -164,6 +165,7 @@ pub motion_pipeline::StreamConfig::limits: geometry::frontend::VelocityLimits
 pub motion_pipeline::StreamConfig::max_buffer_moves: usize
 pub motion_pipeline::StreamConfig::max_extrude_only_accel_mm_s2: f64
 pub motion_pipeline::StreamConfig::max_extrude_only_velocity_mm_s: f64
+pub motion_pipeline::StreamConfig::step_capacity: core::option::Option<alloc::rcs::arc::Arc<geometry::step_capacity::StepCapacity>>
 pub struct motion_pipeline::WorkerPool
 impl motion_pipeline::WorkerPool
 pub fn motion_pipeline::WorkerPool::new() -> Self
