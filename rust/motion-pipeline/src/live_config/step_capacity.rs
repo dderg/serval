@@ -6,14 +6,14 @@ use geometry::step_capacity::SPATIAL_LANES;
 use geometry::{ExtruderCaps, FollowerStepLoad, McuStepLoad, StepCapacity};
 use planner_config::PlannerConfig;
 
-/// The share of each mcu's clock the live planner lets step dispatch take.
-/// Interim: verified to run a sustained single-motor move at the cap (bench
-/// suite row `single_motor_cap`) on the F401 without an MCU shutdown, where
-/// 0.625 shut it down with "Stepper too far in past". The
-/// self-benchmark times a cache-hot dispatch loop and under-counts a lone
-/// motor's steps, each of which takes a SysTick entry: tools/bench/README.md,
-/// "Capacity fraction from a timing budget".
-pub const STEP_CAPACITY_FRACTION: f64 = 0.5;
+/// The share of each mcu's clock the live planner lets step dispatch take:
+/// the largest fraction at which the F401, held at the cap, keeps p99.9 MCU
+/// step lateness × the motor's own step rate ≤ 0.5 microstep both for one
+/// motor alone (suite row `single_motor_cap`: 0.09 at 0.85, 0.69 at 0.9) and
+/// for four motors together (`capacity_ladder_high`: 0.24 even at 1.0), with
+/// the self-benchmark charging each step its isolated timer-IRQ cost:
+/// tools/bench/README.md, "Capacity fraction from a timing budget".
+pub const STEP_CAPACITY_FRACTION: f64 = 0.85;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepMode {

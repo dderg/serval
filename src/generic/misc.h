@@ -12,6 +12,7 @@ uint32_t timer_from_us(uint32_t us);
 uint8_t timer_is_before(uint32_t time1, uint32_t time2);
 uint32_t timer_read_time(void);
 void timer_kick(void);
+uint32_t timer_dispatch_busy_ticks(void);
 
 void *dynmem_start(void);
 void *dynmem_end(void);
