@@ -20,8 +20,8 @@ pub(crate) struct ParityRecord {
 
 /// The inputs that shape the trajectory: every move, dwell and reset, and a
 /// stop at rest only where moves precede it. A barrier only sequences
-/// dispatch, a drain of an already drained pipeline is no stop, and the
-/// stream's end drains whatever is left.
+/// dispatch, a drain of an already drained pipeline is no stop, and a rest
+/// after the last move leaves the trajectory as it is.
 fn shaping(inputs: Vec<InputTrace>) -> Vec<InputTrace> {
     let mut shaped = Vec::with_capacity(inputs.len());
     let mut undrained = false;
@@ -40,7 +40,10 @@ fn shaping(inputs: Vec<InputTrace>) -> Vec<InputTrace> {
             InputTrace::Dwell { .. } | InputTrace::Reset { .. } => shaped.push(input),
         }
     }
-    while shaped.last() == Some(&InputTrace::Drain) {
+    while matches!(
+        shaped.last(),
+        Some(InputTrace::Drain | InputTrace::Dwell { .. })
+    ) {
         shaped.pop();
     }
     shaped
