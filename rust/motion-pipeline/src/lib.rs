@@ -17,12 +17,14 @@ mod shaper;
 mod staged;
 mod step_capacity_log;
 pub mod timing;
+mod turning_guard;
 pub mod types;
 mod worker_pool;
 
 use fit_stage::{FitDriver, FitStage};
 use planner::Planner;
 use shaper::Shaper;
+use turning_guard::TurningGuard;
 
 pub use follower_projection::follower_velocity_step_allowance;
 pub use lower_stage::Lowerer;
@@ -50,6 +52,7 @@ impl Pipeline {
         Self {
             front: PlanningFront {
                 fit: FitStage::new(config.corner).into_driver(),
+                guard: TurningGuard::new(config.clone(), &chains),
                 planner: Planner::new(config, Arc::clone(&workers)),
                 lowerer: Lowerer::new(chains.rest_support(), home_pos, t_start),
                 fitted_tap: None,
@@ -97,10 +100,12 @@ impl Pipeline {
     }
 }
 
-/// Every stage ahead of the shaper: fitting, velocity planning, lowering.
+/// Every stage ahead of the shaper: fitting, velocity planning, the
+/// turning guard, lowering.
 struct PlanningFront {
     fit: FitDriver,
     planner: Planner,
+    guard: TurningGuard,
     lowerer: Lowerer,
     fitted_tap: Option<Sender<geometry::Move>>,
     input_tap: Option<Sender<InputTrace>>,
@@ -111,6 +116,7 @@ impl PlanningFront {
         let Self {
             fit,
             planner,
+            guard,
             lowerer,
             fitted_tap,
             input_tap,
@@ -121,29 +127,37 @@ impl PlanningFront {
         }
         fit.feed(item, &mut |item| {
             Self::tap_fitted(fitted_tap.as_ref(), &item);
-            planner.feed(item, &mut |item| lowerer.feed(item, shape))
+            planner.feed(item, &mut |item| {
+                guard.feed(item, &mut |item| lowerer.feed(item, shape))
+            })
         })
     }
 
     fn idle(&mut self, shape: &mut impl FnMut(BaseItem) -> bool) -> bool {
         let Self {
-            planner, lowerer, ..
+            planner,
+            guard,
+            lowerer,
+            ..
         } = self;
-        planner.idle(&mut |item| lowerer.feed(item, shape))
+        planner.idle(&mut |item| guard.feed(item, &mut |item| lowerer.feed(item, shape)))
     }
 
     fn finish(&mut self, shape: &mut impl FnMut(BaseItem) -> bool) -> bool {
         let Self {
             fit,
             planner,
+            guard,
             lowerer,
             fitted_tap,
             ..
         } = self;
         fit.finish(&mut |item| {
             Self::tap_fitted(fitted_tap.as_ref(), &item);
-            planner.feed(item, &mut |item| lowerer.feed(item, shape))
-        }) && planner.finish(&mut |item| lowerer.feed(item, shape))
+            planner.feed(item, &mut |item| {
+                guard.feed(item, &mut |item| lowerer.feed(item, shape))
+            })
+        }) && planner.finish(&mut |item| guard.feed(item, &mut |item| lowerer.feed(item, shape)))
     }
 
     fn tap_fitted(tap: Option<&Sender<geometry::Move>>, item: &StreamInput) {
