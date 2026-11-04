@@ -33,7 +33,10 @@ SIM_PRINTS = (
     "trident_mesh_clock_regression",
 )
 BENCH_CONFIGS = REPO / "tools" / "bench" / "configs"
-SIM_CONFIGS = (BENCH_CONFIGS / "fast.cfg", REPO / "tools" / "bench" / "printer.cfg")
+SIM_CONFIGS = (
+    BENCH_CONFIGS / "fast.cfg",
+    REPO / "tools" / "bench" / "printer.cfg",
+)
 DENSE_PRINT = SIM_GCODE / "voron_dense_top_layers.gcode"
 FIRST_MOTION = re.compile(r"^\s*(G0|G1|SET_KINEMATIC_POSITION)\b", re.I | re.M)
 
@@ -57,7 +60,11 @@ def corpus() -> list[tuple[str, Path, Path]]:
         for cfg in SIM_CONFIGS
     ]
     dense = [
-        (f"dense/{cfg.relative_to(BENCH_CONFIGS).with_suffix('')}", DENSE_PRINT, cfg)
+        (
+            f"dense/{cfg.relative_to(BENCH_CONFIGS).with_suffix('')}",
+            DENSE_PRINT,
+            cfg,
+        )
         for cfg in sorted(BENCH_CONFIGS.rglob("*.cfg"))
         if cfg.name not in {c.name for c in SIM_CONFIGS}
     ]
@@ -98,7 +105,11 @@ def test_a_limit_the_two_sides_disagree_on_names_the_move_and_field(
     cfg = REPO / "tools" / "bench" / "printer.cfg"
     live, config_text = live_bridge_parity.live_record(gcode, cfg)
     slower = re.sub(
-        r"^max_accel\s*[:=].*$", "max_accel = 5000", config_text, count=1, flags=re.M
+        r"^max_accel\s*[:=].*$",
+        "max_accel = 5000",
+        config_text,
+        count=1,
+        flags=re.M,
     )
     divergence = live_bridge_parity.first_divergence(
         live, live_bridge_parity.snapshot_record(gcode, slower)

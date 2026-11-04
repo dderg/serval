@@ -99,14 +99,26 @@ pub struct GcodeMoveBase {
 }
 
 impl GcodeMoveBase {
-    pub fn of(cfg: &PlannerConfig, extruder_caps: &[geometry::ExtruderCaps]) -> Result<Self, String> {
+    pub fn of(
+        cfg: &PlannerConfig,
+        extruder_caps: &[geometry::ExtruderCaps],
+    ) -> Result<Self, String> {
         let extruder_axis = cfg.axis_registry.axis_index(EXTRUSION_AXIS).ok();
-        let extruder = extruder_axis
-            .and_then(|axis| extruder_caps.iter().copied().find(|caps| caps.axis_index == axis));
+        let extruder = extruder_axis.and_then(|axis| {
+            extruder_caps
+                .iter()
+                .copied()
+                .find(|caps| caps.axis_index == axis)
+        });
         let cart = cfg.cartesian;
         Ok(Self {
-            limits: z_capped_limits(cfg, cart.max_velocity, cart.max_accel, cart.corner_deviation)?
-                .with_extruder_caps(extruder)?,
+            limits: z_capped_limits(
+                cfg,
+                cart.max_velocity,
+                cart.max_accel,
+                cart.corner_deviation,
+            )?
+            .with_extruder_caps(extruder)?,
             extruder_axis,
         })
     }
@@ -150,7 +162,10 @@ impl GcodeMoveBase {
             corner_deviation,
             self.limits.max_jerk_mm_s3,
         )?
-        .with_z_caps(self.limits.max_z_velocity_mm_s, self.limits.max_z_accel_mm_s2)?
+        .with_z_caps(
+            self.limits.max_z_velocity_mm_s,
+            self.limits.max_z_accel_mm_s2,
+        )?
         .with_extruder_caps(self.limits.extruder)
     }
 

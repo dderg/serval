@@ -218,7 +218,8 @@ fn bench(name: &str, waypoints: &[Waypoint], trickle: bool) {
             config.limits,
             Some(pipeline_snapshot::EXTRUDER_AXIS),
         ),
-    ).expect("valid waypoints");
+    )
+    .expect("valid waypoints");
     let fit_start = Instant::now();
     let fitted = run_fitter(&steps, &config);
     let fit_wall = fit_start.elapsed().as_secs_f64();

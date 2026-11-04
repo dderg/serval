@@ -114,7 +114,10 @@ fn runtime_overrides_clamp_against_the_config_and_keep_the_z_and_extruder_caps()
     assert_eq!(limits.max_velocity_mm_s, 1000.0);
     assert_eq!(limits.accel_mm_s2, 2000.0);
     assert_eq!(limits.extruder, base.limits().extruder);
-    assert_eq!(limits.max_z_velocity_mm_s, base.limits().max_z_velocity_mm_s);
+    assert_eq!(
+        limits.max_z_velocity_mm_s,
+        base.limits().max_z_velocity_mm_s
+    );
 }
 
 #[test]

@@ -18,7 +18,6 @@ pub(super) fn require_single_motor_mask(motor_mask: u8) -> Result<(), String> {
     Ok(())
 }
 
-
 impl PyMotionEngine {
     fn adopt_planner_config(&self, config_text: &str) -> PyResult<planner_config::PlannerConfig> {
         if self.planner.lock_ok().is_some() {
@@ -53,11 +52,14 @@ impl PyMotionEngine {
     /// after a drain so the shaper has emitted everything.
     pub(crate) fn take_detached_record(
         &self,
-    ) -> PyResult<(Vec<motion_pipeline::InputTrace>, Vec<trajectory::ContinuousSegment>)> {
+    ) -> PyResult<(
+        Vec<motion_pipeline::InputTrace>,
+        Vec<trajectory::ContinuousSegment>,
+    )> {
         let guard = self.detached_record.lock_ok();
-        let record = guard
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("no detached planner: call init_planner_detached"))?;
+        let record = guard.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("no detached planner: call init_planner_detached")
+        })?;
         Ok((
             record.inputs.try_iter().collect(),
             record.segments.try_iter().collect(),
