@@ -234,7 +234,7 @@ The pulsed figure includes the spin to the 2 µs unstep inside the interrupt. On
 
 ### How the capacity caps moves
 
-The planner turns the benchmark into a per-move speed cap (`rust/motion-pipeline/src/live_config/step_capacity.rs`, `docs/Config_Reference_Motion.md`, "MCU step capacity"); klippy (`klippy/motion_step_capacity.py`) only hands it each MCU's benchmark, clock and stepped motors. Each MCU gets `STEP_CAPACITY_FRACTION` × CLOCK_FREQ ticks per second; the fraction comes from the timing budget below. A motor costs its benchmarked ticks per step (pulsed or both-edge, by its own mode) times the steps per second the move asks of it. The planner keeps the sum over each MCU's motors within the capacity, counting pressure advance on the extruder. On this bench (F401, 497 ticks/step pulsed) the fraction of 0.85 gives 144 k steps/s. `capacity.cfg` raises the speed limits past the cap, so its ladder rungs above the cap are planned slower than the G-code asks and `step_capacity_capped` events report it.
+The planner turns the benchmark into a per-move speed cap (`rust/motion-pipeline/src/live_config/step_capacity.rs`, `docs/Config_Reference_Motion.md`, "MCU step capacity"); klippy (`klippy/motion_step_capacity.py`) only hands it each MCU's benchmark, clock and stepped motors. Each MCU gets `STEP_CAPACITY_FRACTION` × CLOCK_FREQ ticks per second; the fraction comes from the timing budget below. A motor costs its benchmarked ticks per step (pulsed or both-edge, by its own mode) times the steps per second the move asks of it. The planner keeps the sum over each MCU's motors within the capacity, counting pressure advance on the extruder. On this bench (F401, 497 ticks/step pulsed) the fraction of 0.80 gives 135 k steps/s. `capacity.cfg` raises the speed limits past the cap, so its ladder rungs above the cap are planned slower than the G-code asks and `step_capacity_capped` events report it.
 
 `run.py` records every MCU's step benchmark in `run.json` under `step_benchmarks`, taken from the MCU status `step_capacity`, together with the capacity fraction the live planner applied. `analyze.py` plans its reference under the same cap, so a run where the cap binds is analyzed against the plan the printer executed, even after the fraction changes. A `run.json` from before that recording plans an uncapped reference. For such a run, `--step-benchmark 301,160,84000000,0.75` supplies the F401's benchmark and the fraction live used then (0.75 until it became 0.625). It is charged to every captured motor, stepped pulsed, since the bench has one MCU and no `dedge` driver. `analysis.json` says which reference it judged in `reference_step_capacity`: `recorded`, `supplied` or `absent`.
 
@@ -252,10 +252,12 @@ The table gives `mcu_execution.lateness_by_step_rate_hz` → `position_p99_9_ste
 |---|---|---|---|
 | 1.0 | 169 k | 0.89 (`20261104-125307`) | 0.24 (`-125357`) |
 | 0.9 | 152 k | 0.69 (`-125811`) | 0.21 (`-125859`) |
-| **0.85** | 144 k | **0.09, 0.09** (`-131827`, `-131918`) | |
-| 0.8 | 135 k | 0.05, 0.05, 0.05 (`-130322`, `-132317`, `-132439`) | 0.19 (`-130412`) |
+| 0.85 | 144 k | 0.09, 0.09, 0.10 (`-131827`, `-131918`, suite `20261104-143747`) | 0.20 (`-143608`) |
+| **0.8** | 135 k | **0.05, 0.05, 0.05** (`-130322`, `-132317`, `-132439`) | **0.19** (`-130412`) |
 
-The single motor sets the fraction: 0.85 is the largest fraction measured within budget, and 0.9 misses it. The single-motor lateness rises steeply between the two, because a lone motor at 0.9 has the CPU nearly saturated; no fraction shut the MCU down. Four motors stay far inside the budget even at 1.0, because their steps are cheaper than the benchmark charges.
+The single motor sets the fraction. 0.85 is the largest fraction measured within budget, and 0.9 misses it. The single-motor lateness rises steeply between the two, because at 0.9 a lone motor has the CPU nearly saturated. No fraction shut the MCU down. Four motors stay far inside the budget even at 1.0, because their steps are cheaper than the benchmark charges.
+
+The live fraction is **0.80**, one step back from that cliff. A shutdown is catastrophic, and real printers run more MCU tasks than this bench, which has no heaters, no ADC sampling and no TMC UART yet. Re-derive the fraction under that load once the phase-2 wiring (`WIRING_PHASE2.md`) exists.
 
 Earlier derivations used the four-motor ladder only, against the cache-hot benchmark (301 ticks/step):
 - First: 0.625, the largest fraction under 0.5 microstep. At 0.65 the result was 0.52 on both runs; at 0.75, 0.62. Runs `20261104-044956` … `-051928`.
