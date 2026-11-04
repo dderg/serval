@@ -93,6 +93,7 @@ testpaths = [
   "snapshots/test_live_parity.py",
   "scripts/test_review_baselines.py",
   "scripts/test_throughput_gate.py",
+  "scripts/test_throughput_recheck.py",
 ]
 markers = [
   "sim_unit: in-process sim unit/contract test (CI-able, no ELF/hardware)",

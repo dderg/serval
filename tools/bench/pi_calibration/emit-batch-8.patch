@@ -1,0 +1,58 @@
+diff --git a/rust/motion-pipeline/src/shaper.rs b/rust/motion-pipeline/src/shaper.rs
+index c1c473214..a77c31aea 100644
+--- a/rust/motion-pipeline/src/shaper.rs
++++ b/rust/motion-pipeline/src/shaper.rs
+@@ -559,8 +559,18 @@ pub struct Shaper {
+     follower_states: Vec<FollowerState>,
+     toolhead_tap: Option<Sender<ContinuousSegment>>,
+     pool: Arc<WorkerPool>,
++    segments_since_emit: usize,
+ }
+ 
++/// Lowered segments the shaper takes in before it tries to emit again. An
++/// emit fits the leaders of every segment whose lookahead the buffer covers
++/// and projects the followers over them; one attempt per arriving segment
++/// pays each emit's fixed cost (the convolution tables over the window the
++/// fits read, the projection's pass over its state) once per segment, so
++/// the shaper waits for a few. A drain, a control token or the end of input
++/// still emits everything at once.
++const EMIT_BATCH_SEGMENTS: usize = 8;
++
+ impl Shaper {
+     pub fn new(chains: AxisChainSet, fit_tol: FitTol, pool: Arc<WorkerPool>) -> Self {
+         Self {
+@@ -574,6 +584,7 @@ impl Shaper {
+             follower_states: Vec::new(),
+             toolhead_tap: None,
+             pool,
++            segments_since_emit: 0,
+         }
+     }
+ 
+@@ -618,6 +629,10 @@ impl Shaper {
+         match item {
+             BaseItem::Seg(item) => {
+                 self.pending.push(item);
++                self.segments_since_emit += 1;
++                if self.segments_since_emit < EMIT_BATCH_SEGMENTS {
++                    return true;
++                }
+                 self.emit(self.supported_count(), false, output)
+             }
+             BaseItem::Drain => {
+@@ -631,6 +646,7 @@ impl Shaper {
+                 match &ctrl {
+                     Control::Reset { .. } => {
+                         self.pending.clear();
++                        self.segments_since_emit = 0;
+                         self.history.clear();
+                         self.history_trimmed = false;
+                         for state in &mut self.follower_states {
+@@ -741,6 +757,7 @@ impl Shaper {
+         force: bool,
+         output: &mut impl FnMut(TrajectoryItem) -> bool,
+     ) -> bool {
++        self.segments_since_emit = 0;
+         if count == 0 {
+             return true;
+         }
