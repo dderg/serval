@@ -24,7 +24,10 @@ the reference (reference_source "dispatch_record", reference time = host
 seconds since its first segment) and the brakes fail no_pacer_brakes. Any
 record is also compared with the plan segment for segment: outside the
 windows a pacer brake replanned, every dispatched segment must be the
-planned one (dispatch_matches_plan_outside_brakes).
+planned one (dispatch_matches_plan_outside_brakes). The extruder is held
+to the plan only until the first brake: a brake stops on a corner the plan
+cuts, so the extrusion the follower spreads over what follows differs, and
+dispatch_record.max_extruder_deviation_after_brakes_steps reports how far.
 
 Alignment model per motion epoch:
     t_capture = offset_s + (1 + ppm * 1e-6) * t_reference
@@ -881,6 +884,12 @@ def _motor_positions_steps(
     return record.samples[:, :, 0] @ per_step
 
 
+@dataclass(frozen=True)
+class SegmentDeviation:
+    leaders_steps: float
+    followers_steps: float
+
+
 @dataclass
 class DispatchComparison:
     job: Job
@@ -889,25 +898,28 @@ class DispatchComparison:
     live_steps: np.ndarray
     plan_steps: np.ndarray
 
-    def deviation_steps(self, i: int, j: int) -> float:
+    def deviation(self, i: int, j: int) -> SegmentDeviation:
         """How far live segment `i` strays from planned segment `j` in motor
         steps, wherever both stand at the same instant of their own. A
-        follower is compared from where the segment starts it: a brake
-        re-bases the extruder by a sliver the plan never sees."""
+        follower is compared from where the segment starts it."""
         live, plan = self.live, self.plan
         live_span = live.t_end[i] - live.t_start[i]
         plan_span = plan.t_end[j] - plan.t_start[j]
-        if abs(live_span - plan_span) > DISPATCH_DURATION_TOLERANCE_S:
-            return math.inf
         a = self.live_steps[live.sample_start[i] : live.sample_start[i + 1]]
         b = self.plan_steps[plan.sample_start[j] : plan.sample_start[j + 1]]
-        if a.shape != b.shape:
-            return math.inf
-        diff = a - b
-        for k, motor in enumerate(self.job.motors):
-            if motor.track_restarts_per_block:
-                diff[:, k] -= diff[0, k]
-        return float(np.abs(diff).max())
+        if (
+            abs(live_span - plan_span) > DISPATCH_DURATION_TOLERANCE_S
+            or a.shape != b.shape
+        ):
+            return SegmentDeviation(math.inf, math.inf)
+        diff = np.abs(a - b)
+        followers = [m.track_restarts_per_block for m in self.job.motors]
+        leaders = [not f for f in followers]
+        rebased = np.abs((a - a[0]) - (b - b[0]))[:, followers]
+        return SegmentDeviation(
+            float(diff[:, leaders].max(initial=0.0)),
+            float(rebased.max(initial=0.0)),
+        )
 
     def extruder_offset_mm(self, i: int, j: int) -> float:
         return float(
@@ -938,7 +950,12 @@ def compare_dispatch_with_plan(
     """Pair the live record's segments with the plan's by source line and
     hold each pair to the position-equivalent tolerance. A run of segments
     that pairs with nothing, or strays, is a brake window when a pacer brake
-    drained the stream inside it and a divergence otherwise."""
+    drained the stream inside it and a divergence otherwise.
+
+    The extruder is held to the plan only until the first brake. A brake
+    stops on a corner the plan cuts, so the path it lays, and with it the
+    extrusion budget the follower spreads over what follows, differs from
+    the plan's for the rest of the print; how far is reported, not judged."""
     plan = planned_dispatch_record(job)
     comparison = DispatchComparison(
         job,
@@ -953,25 +970,38 @@ def compare_dispatch_with_plan(
         plan.source_line.tolist(),
         autojunk=False,
     )
+    brakes = [d.after_segments for d in live.pacer_brakes()]
+    first_brake = min(brakes, default=len(live))
     runs: list[tuple[int, int]] = []
+    unpaired: set[int] = set()
     strays: dict[int, float] = {}
     matched = 0
     extruder_offset_mm = 0.0
+    replanned_extruder_steps = 0.0
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag != "equal":
             runs.append((i1, i2))
+            unpaired.update(range(i1, i2))
             continue
         for i, j in zip(range(i1, i2), range(j1, j2)):
-            deviation = comparison.deviation_steps(i, j)
-            if deviation > POSITION_EQUIVALENT_TOLERANCE_STEPS:
+            deviation = comparison.deviation(i, j)
+            followers_held = i < first_brake
+            stray = max(
+                deviation.leaders_steps,
+                deviation.followers_steps if followers_held else 0.0,
+            )
+            if stray > POSITION_EQUIVALENT_TOLERANCE_STEPS:
                 runs.append((i, i + 1))
-                strays[i] = deviation
+                strays[i] = stray
                 continue
             matched += 1
+            if not followers_held:
+                replanned_extruder_steps = max(
+                    replanned_extruder_steps, deviation.followers_steps
+                )
             extruder_offset_mm = max(
                 extruder_offset_mm, abs(comparison.extruder_offset_mm(i, j))
             )
-    brakes = [d.after_segments for d in live.pacer_brakes()]
     origin = float(live.host_start()[0])
     spans = live.t_end - live.t_start
     windows, divergences = [], []
@@ -989,15 +1019,16 @@ def compare_dispatch_with_plan(
         }
         if braked:
             windows.append({**window, "pacer_brakes": len(braked)})
-        else:
-            stray = [strays[i] for i in range(lo, hi) if i in strays]
-            divergences.append(
-                {
-                    **window,
-                    "max_deviation_steps": max(stray) if stray else None,
-                    "unpaired_segments": hi - lo - len(stray),
-                }
-            )
+            continue
+        stray = [strays[i] for i in range(lo, hi) if i in strays]
+        divergences.append(
+            {
+                **window,
+                "max_deviation_steps": max(stray, default=None),
+                "straying_segments": len(stray),
+                "unpaired_segments": len(unpaired.intersection(range(lo, hi))),
+            }
+        )
     return {
         "segments": len(live),
         "planned_segments": len(plan),
@@ -1009,6 +1040,7 @@ def compare_dispatch_with_plan(
             (w["motion_s"] for w in windows), default=0.0
         ),
         "max_extruder_offset_mm": extruder_offset_mm,
+        "max_extruder_deviation_after_brakes_steps": replanned_extruder_steps,
         "divergences": len(divergences),
         "first_divergences": divergences[:REPORTED_DIVERGENCES_LIMIT],
         "matches_plan_outside_brakes": not divergences,
@@ -1561,16 +1593,32 @@ def conditioned_span(epoch: EpochResult) -> dict:
     }
 
 
-def _elapsed_since_first_step(events: dict[str, StepEvents]) -> np.ndarray:
-    times = np.sort(np.concatenate([ev.time for ev in events.values()]))
-    return times - times[0]
+def paired_steps_s(epoch: EpochResult) -> tuple[np.ndarray, np.ndarray]:
+    """Every capture step matched to its reference step where the reference
+    moves at least CONDITIONED_RATE_HZ, as (capture, reference) times in
+    capture order. Pairing by match, not by index, keeps a tie step at an
+    edge (withheld at a rest on one side, taken on the other) from shifting
+    every later step against the wrong partner; a crawling step's time says
+    little about pace."""
+    matches = epoch.matches.values()
+    conditioned = np.concatenate([m.reference_rate_hz for m in matches]) >= (
+        CONDITIONED_RATE_HZ
+    )
+    capture = np.concatenate([m.capture_time_s for m in matches])[conditioned]
+    late = np.concatenate([m.late_s for m in matches])[conditioned]
+    if capture.size == 0:
+        raise AnalysisError(
+            f"epoch at capture {epoch.capture.start_s:.3f}s matched no step "
+            f"moving at {CONDITIONED_RATE_HZ:g} Hz or faster"
+        )
+    reference = epoch.alignment.to_stream(capture - late)
+    order = np.argsort(capture, kind="stable")
+    return capture[order], reference[order]
 
 
-def epoch_pace(steps: EpochSteps) -> dict:
-    capture = _elapsed_since_first_step(steps.capture)
-    stream = _elapsed_since_first_step(steps.reference)
-    shared = min(capture.size, stream.size)
-    capture, stream = capture[:shared], stream[:shared]
+def epoch_pace(capture_s: np.ndarray, reference_s: np.ndarray) -> dict:
+    capture = capture_s - capture_s[0]
+    stream = reference_s - reference_s[0]
     lag = capture - stream
     allowed = PACE_TOLERANCE_S + PACE_TOLERANCE_PPM * 1e-6 * stream
     worst = int(np.argmax(np.abs(lag) - allowed))
@@ -1983,7 +2031,7 @@ def analyze(
                 np.abs(inputs.capture.deltas[:, motor.channel]).max()
             ),
         }
-    paces = [epoch_pace(e.steps) for e in epochs]
+    paces = [epoch_pace(*paired_steps_s(e)) for e in epochs]
     checks = {
         "net_steps_match": all(
             abs(r["net_steps_capture_minus_expected"]) <= r["rest_tie_steps"]

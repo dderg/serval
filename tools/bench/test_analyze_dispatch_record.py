@@ -217,6 +217,33 @@ def test_a_dispatched_segment_off_the_plan_away_from_brakes_is_a_divergence(
     assert len(report["brake_windows"]) == 1
 
 
+@pytest.mark.parametrize(
+    ("waypoint", "judged"),
+    [(STRAYED_WAYPOINT, True), (BRAKE_AT_WAYPOINT + 6, False)],
+)
+def test_the_extruder_is_judged_only_until_the_first_brake(
+    tmp_path, waypoint, judged
+):
+    _require_snapshot_engine()
+    job = analyze.load_job(_write_run(tmp_path, None))
+    record = _live_record_braked_at(job, BRAKE_AT_WAYPOINT)
+    line = int(np.unique(record.source_line)[waypoint])
+    index = int(np.flatnonzero(record.source_line == line)[0])
+    samples = record.samples.copy()
+    rows = slice(record.sample_start[index], record.sample_start[index + 1])
+    samples[rows, analyze.EXTRUDER_AXIS, 0] += np.linspace(
+        0.0, 0.01, rows.stop - rows.start
+    )
+    report = analyze.compare_dispatch_with_plan(
+        job, replace(record, samples=samples)
+    )
+    assert report["matches_plan_outside_brakes"] is not judged
+    replanned = report["max_extruder_deviation_after_brakes_steps"]
+    assert (
+        replanned > analyze.POSITION_EQUIVALENT_TOLERANCE_STEPS
+    ) is not judged
+
+
 def test_a_record_of_the_plan_matches_it_and_keeps_the_plan_as_reference(
     tmp_path,
 ):
