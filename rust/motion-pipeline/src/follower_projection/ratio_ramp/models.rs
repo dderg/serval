@@ -34,14 +34,15 @@ const BINOMIALS: [[f64; 6]; 6] = [
 const REACH_INSET_ULPS: f64 = 4.0;
 
 /// The points `reach` is read at for its formula: its ends moved
-/// [`REACH_INSET_ULPS`] inside, or its middle where it is narrower.
+/// [`REACH_INSET_ULPS`] inside, or its ends themselves where it is no
+/// wider than that: a reach that narrow holds only floats a bend may
+/// separate.
 fn read_points((lo, hi): (f64, f64)) -> (f64, f64) {
     let inset = REACH_INSET_ULPS * f64::EPSILON * lo.abs().max(hi.abs()).max(1.0);
     if hi - lo > 2.0 * inset {
         (lo + inset, hi - inset)
     } else {
-        let middle = 0.5 * (lo + hi);
-        (middle, middle)
+        (lo, hi)
     }
 }
 
@@ -280,8 +281,8 @@ impl WidthField {
             return None;
         }
         let reach = read_points(reach);
-        let interval = self.interval(reach.0);
-        (self.interval(reach.1) == interval).then_some(interval)
+        let interval = self.formula_at(reach.0);
+        (self.formula_at(reach.1) == interval).then_some(interval)
     }
 
     /// The width read on `interval` as a polynomial in the distance from

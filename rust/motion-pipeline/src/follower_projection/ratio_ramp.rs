@@ -613,8 +613,23 @@ impl WidthField {
         Err((after - 1, after))
     }
 
+    /// The formula of the width at `s`: on a node that has a node past it,
+    /// the interval that node opens, whose derivatives it takes from its
+    /// start; else [`Self::interval`]'s.
+    fn formula_at(&self, s: f64) -> Result<usize, (usize, usize)> {
+        match self.interval(s) {
+            Ok(node)
+                if self.nodes[node].s == s
+                    && self.nodes.get(node + 1).is_some_and(|next| next.s > s) =>
+            {
+                Err((node, node + 1))
+            }
+            interval => interval,
+        }
+    }
+
     fn jet(&self, s: f64) -> Jet {
-        let (a, b) = match self.interval(s) {
+        let (a, b) = match self.formula_at(s) {
             Ok(node) => return Jet::constant(self.nodes[node].envelope),
             Err(interval) => interval,
         };
