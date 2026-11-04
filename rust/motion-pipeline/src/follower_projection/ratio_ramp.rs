@@ -72,6 +72,9 @@ const KERNEL_HALF_VARIANCE: f64 = 0.1;
 const SMOOTHED_RAMP: [f64; 5] = [0.1875, 0.5, 0.375, 0.0, -0.0625];
 /// `∫₋₁ˣ` of [`SMOOTHED_RAMP`]: `x₊²/2` smoothed by the kernel.
 const SMOOTHED_HALF_SQUARE: [f64; 6] = [0.05, 0.1875, 0.25, 0.125, 0.0, -0.0125];
+/// [`SMOOTHED_HALF_SQUARE`] about the window's edge, `P₂(w − 1)` in powers
+/// of `w = 1 + x`: a fourfold root there.
+const SMOOTHED_HALF_SQUARE_OFF_EDGE: [f64; 6] = [0.0, 0.0, 0.0, 0.0, 0.0625, -0.0125];
 const WIDTH_BISECTIONS: usize = 64;
 /// How close in ulps a Newton step on a window edge settles before the
 /// float the edge flips at is bracketed and bisected for.
@@ -109,7 +112,6 @@ pub(super) struct PendingSegment {
 struct Seam {
     s: f64,
     step: f64,
-    slope_step: f64,
     slope_after: f64,
 }
 
@@ -118,58 +120,80 @@ impl Seam {
     /// steps there.
     fn between(before: &RatioSpan, after: &RatioSpan) -> Option<Self> {
         let step = after.r0 - before.r1;
-        let slope_step = after.ratio_slope() - before.ratio_slope();
-        (step != 0.0 || slope_step != 0.0).then(|| Self {
+        let slope_after = after.ratio_slope();
+        (step != 0.0 || slope_after != before.ratio_slope()).then_some(Self {
             s: after.s0,
             step,
-            slope_step,
-            slope_after: after.ratio_slope(),
+            slope_after,
         })
     }
 }
 
 /// The seams inside one window as [`RatioSmoothing::correction`] sums
-/// them, each at `u = s − σ`: the moments `Σ Δ·uᵏ` of their ratio steps
-/// and `Σ Δm·uᵏ` of their slope steps, and the table's own kink the seams
-/// at or behind `s` carry, `Σ Δ·u + Δm·u²/2`, with its two derivatives.
+/// them, each at `u = s − σ`: the moments `Σ Δ·uᵏ` of their ratio steps,
+/// the moments `Σ m·(u_aᵏ − u_bᵏ)` of the table's slope over each span
+/// between two of them, and the table's own kink behind `s` they carry,
+/// with its two derivatives.
 ///
 /// With `a`, `b` the coefficients of [`SMOOTHED_RAMP`] and
 /// [`SMOOTHED_HALF_SQUARE`], `h·G₁(u/h) = Σₖ aₖ·uᵏ·h¹⁻ᵏ − u₊` and
-/// `h²·G₂(u/h) = Σₖ bₖ·uᵏ·h²⁻ᵏ − u₊²/2`, so the correction is the moments
+/// `h²·G₂(u/h) = Σₖ bₖ·uᵏ·h²⁻ᵏ − u₊²/2`. A ratio step adds `Δ·h·G₁`; the
+/// slope `m` over a span adds `m·h²·(G₂(x_a) − G₂(x_b))`, its ends'
+/// `x = u/h`, which sums to the slope steps' `Δm·h²·G₂` and the slope
+/// behind the window's `0.1·h²·m`. So the correction is the moments
 /// weighted by powers of `h`, and a moment's path derivative is
 /// `(Σ c·uᵏ)' = k·Σ c·uᵏ⁻¹`: each seam costs a few products whatever the
-/// jets of `h`. `|u| < h` inside the window bounds every term by its
-/// coefficient times `|Δ|·h` or `|Δm|·h²`, as the polynomials in `u/h`
-/// are bounded.
+/// jets of `h`. A span inside the window enters as its rise `m·(u_a − u_b)`
+/// times `(u_aᵏ − u_bᵏ)/(u_a − u_b)`, never as two slope steps of opposite
+/// sign: a corner blend nanometres long steps the slope by millions, and
+/// those would cancel only to an ulp of `m·h²`. The two spans running past
+/// the window's edges are [`edge_spans`].
 #[derive(Default)]
 struct SeamMoments {
     step: [f64; SMOOTHED_RAMP.len()],
-    slope_step: [f64; SMOOTHED_HALF_SQUARE.len()],
+    slope: [f64; SMOOTHED_HALF_SQUARE.len()],
     behind: [f64; 3],
     steps: bool,
 }
 
 impl SeamMoments {
-    fn add(&mut self, u: f64, seam: &Seam) {
-        let mut powers = [1.0; SMOOTHED_HALF_SQUARE.len()];
-        for k in 1..powers.len() {
-            powers[k] = powers[k - 1] * u;
+    fn add_step(&mut self, u: f64, step: f64) {
+        if step == 0.0 {
+            return;
         }
-        if seam.step != 0.0 {
-            self.steps = true;
-            for (moment, power) in self.step.iter_mut().zip(powers) {
-                *moment += seam.step * power;
-            }
-        }
-        if seam.slope_step != 0.0 {
-            for (moment, power) in self.slope_step.iter_mut().zip(powers) {
-                *moment += seam.slope_step * power;
-            }
+        self.steps = true;
+        let mut power = 1.0;
+        for moment in &mut self.step {
+            *moment += step * power;
+            power *= u;
         }
         if u >= 0.0 {
-            self.behind[0] += seam.step * u + 0.5 * seam.slope_step * powers[2];
-            self.behind[1] += seam.step + seam.slope_step * u;
-            self.behind[2] += seam.slope_step;
+            self.behind[0] += step * u;
+            self.behind[1] += step;
+        }
+    }
+
+    /// The span of slope `slope` and `length` between the seams at
+    /// `u_a > u_b`.
+    fn add_span(&mut self, (u_a, u_b): (f64, f64), slope: f64, length: f64) {
+        if slope == 0.0 {
+            return;
+        }
+        let rise = slope * length;
+        let mut divided_difference = 0.0;
+        let mut power_b = 1.0;
+        for moment in &mut self.slope[1..] {
+            divided_difference = divided_difference * u_a + power_b;
+            power_b *= u_b;
+            *moment += rise * divided_difference;
+        }
+        if u_b >= 0.0 {
+            self.behind[0] += rise * 0.5 * (u_a + u_b);
+            self.behind[1] += rise;
+        } else if u_a > 0.0 {
+            self.behind[0] += 0.5 * slope * u_a * u_a;
+            self.behind[1] += slope * u_a;
+            self.behind[2] += slope;
         }
     }
 
@@ -190,12 +214,10 @@ impl SeamMoments {
         }
     }
 
-    /// `X` with the width `h` and the table's slope `slope_left` at the
-    /// window's back edge: the moments of power `k` of the slope steps
-    /// weigh with `h²⁻ᵏ`, of the ratio steps with `h¹⁻ᵏ`; `h⁰` is no
-    /// product.
-    fn correction(&self, h: Jet, slope_left: f64) -> Jet {
-        let inverse = h.recip();
+    /// `X` but for [`edge_spans`] with the width `h` and its inverse: the
+    /// moments of power `k` of the slope weigh with `h²⁻ᵏ`, of the ratio
+    /// steps with `h¹⁻ᵏ`; `h⁰` is no product.
+    fn correction(&self, h: Jet, inverse: Jet) -> Jet {
         let inverse_squared = inverse * inverse;
         let powers_of_h = [
             Some(h * h),
@@ -216,16 +238,59 @@ impl SeamMoments {
             .enumerate()
             .fold(kink, |total, (index, &power)| {
                 let slope_term =
-                    Self::moment(&self.slope_step, index).scale(SMOOTHED_HALF_SQUARE[index]);
+                    Self::moment(&self.slope, index).scale(SMOOTHED_HALF_SQUARE[index]);
                 let weight = match index.checked_sub(1) {
                     Some(k) if self.steps => {
                         slope_term + Self::moment(&self.step, k).scale(SMOOTHED_RAMP[k])
                     }
-                    Some(_) => slope_term,
-                    None => slope_term.offset(KERNEL_HALF_VARIANCE * slope_left),
+                    _ => slope_term,
                 };
                 total + power.map_or(weight, |power| power * weight)
             })
+    }
+}
+
+/// What the two spans of the table running past the window's edges add to
+/// `X`: `slope_left` from behind the back edge up to the first seam inside,
+/// at `u_first`, `m·h²·(G₂(1) − G₂(x))`, and `slope_right` from the last,
+/// at `u_last`, on past the front edge, `m·h²·G₂(x)`. Each `G₂` is read
+/// about the edge it lies nearer, `P₂(x)` as `P₂(w − 1)` with `w = 1 + x`
+/// and `0.1 − G₂(x)` as `P₂(−x)` with `w = 1 − x`: a span that stops short
+/// of `s` is as steep as its rise over `w·h`, and `P₂`'s fourfold root
+/// there keeps the product of the two within an ulp of the rise. No seam
+/// inside: one span over the whole window, `0.1·h²·m`.
+fn edge_spans(h: Jet, inverse: Jet, slope_left: f64, ends: Option<(f64, f64, f64)>) -> Jet {
+    let Some((u_first, u_last, slope_right)) = ends else {
+        return (h * h).scale(KERNEL_HALF_VARIANCE * slope_left);
+    };
+    let back = if slope_left == 0.0 {
+        Jet::ZERO
+    } else {
+        half_square_about_edges(h, inverse, u_first)
+            .1
+            .scale(slope_left)
+    };
+    let front = if slope_right == 0.0 {
+        Jet::ZERO
+    } else {
+        half_square_about_edges(h, inverse, u_last)
+            .0
+            .scale(slope_right)
+    };
+    h * h * (back + front)
+}
+
+/// `(G₂(x), 0.1 − G₂(x))` at `x = u/h`, the one off the nearer edge read
+/// about it (see [`edge_spans`]).
+fn half_square_about_edges(h: Jet, inverse: Jet, u: f64) -> (Jet, Jet) {
+    let u = Jet::variable(u);
+    let complement = |part: Jet| part.scale(-1.0).offset(KERNEL_HALF_VARIANCE);
+    if u.value <= 0.0 {
+        let ahead = ((h + u) * inverse).poly(&SMOOTHED_HALF_SQUARE_OFF_EDGE);
+        (ahead, complement(ahead))
+    } else {
+        let behind = ((h + u.scale(-1.0)) * inverse).poly(&SMOOTHED_HALF_SQUARE_OFF_EDGE);
+        (complement(behind), behind)
     }
 }
 
@@ -1213,8 +1278,9 @@ impl RatioSmoothing {
 
     /// `X = Ẽ − E` at `s` with its first three path derivatives: the
     /// extrusion, ratio, slope and curvature the smoothing adds to the
-    /// table's, summed over the seams in the window by their moments
-    /// ([`SeamMoments`]).
+    /// table's, summed over the seams in the window and the spans between
+    /// them by their moments ([`SeamMoments`]), and over the spans running
+    /// past its edges ([`edge_spans`]).
     pub(super) fn correction(&self, s: f64) -> Jet {
         if self.is_inert() {
             return Jet::ZERO;
@@ -1230,11 +1296,23 @@ impl RatioSmoothing {
             .map_or(self.base_slope.unwrap_or(0.0), |last| {
                 self.seams[last].slope_after
             });
+        let window = self.seams_near(lo, hi);
         let mut moments = SeamMoments::default();
-        for seam in self.seams[first..].iter().take_while(|seam| seam.s < hi) {
-            moments.add(s - seam.s, seam);
+        for seam in window {
+            moments.add_step(s - seam.s, seam.step);
         }
-        moments.correction(h, slope_left)
+        for pair in window.windows(2) {
+            let (seam, next) = (pair[0], pair[1]);
+            moments.add_span((s - seam.s, s - next.s), seam.slope_after, next.s - seam.s);
+        }
+        let inverse = h.recip();
+        let ends = window
+            .first()
+            .zip(window.last())
+            .map(|(first_seam, last_seam)| {
+                (s - first_seam.s, s - last_seam.s, last_seam.slope_after)
+            });
+        moments.correction(h, inverse) + edge_spans(h, inverse, slope_left, ends)
     }
 
     fn seams_near(&self, lo: f64, hi: f64) -> &[Seam] {

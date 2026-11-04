@@ -871,3 +871,36 @@ fn moving_width_nodes_lie_a_window_apart() {
         }
     }
 }
+
+/// A corner blend tens of nanometres long ramps the table's ratio at
+/// millions per millimetre. Summed seam by seam, its two slope steps cancel
+/// only to an ulp of `m·h²`, and where the leaders crawl through a wide
+/// window the laid track jittered by 1e-10 mm, more than a source fit
+/// split down to nanoseconds can follow.
+#[test]
+fn a_nanometre_blend_lays_a_smooth_track_through_a_wide_window() {
+    let blend_start = 10.0;
+    let table = vec![
+        (blend_start, 0.0, 0.0),
+        (2.7e-8, 0.0, 0.085),
+        (10.0, 0.085, 0.085),
+    ];
+    let total = length(&table);
+    let state = smoothed(&table, cruise(total));
+    let h = state.smoothing.width.width(blend_start);
+    let step = 1e-9;
+    for centre in [-h, -0.5 * h, 0.5 * h, h].map(|offset| blend_start + offset) {
+        for k in 0..2_000 {
+            let s = centre - 1e-6 + step * f64::from(k);
+            let (a, b) = (
+                state.smoothing.correction(s),
+                state.smoothing.correction(s + step),
+            );
+            let drift = b.value - a.value - 0.5 * step * (a.d1 + b.d1);
+            assert!(
+                drift.abs() < 1e-14,
+                "the laid track drifts {drift} mm off its own ratio over {step} mm at {s} mm"
+            );
+        }
+    }
+}
