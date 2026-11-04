@@ -32,11 +32,11 @@ def test_stepper_firmware_without_the_benchmark_is_refused():
     with pytest.raises(mcu.error, match="flash firmware built from this"):
         fake._query_step_benchmark()
 
+
 def test_stepper_firmware_without_the_cpu_load_monitor_is_refused():
     fake = FakeMcu(["config_stepper", "get_step_benchmark"])
     with pytest.raises(mcu.error, match="lacks cpu_load"):
         fake._query_step_benchmark()
-
 
 
 def test_stepper_firmware_reports_its_measured_cost():

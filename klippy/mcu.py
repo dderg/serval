@@ -1086,14 +1086,11 @@ class MCU:
         return "\n".join(out)
 
     def stats(self, eventtime):
-        load = (
-            "mcu_awake=%.03f mcu_task_avg=%.06f mcu_task_stddev=%.06f %s"
-            % (
-                self._mcu_tick_awake,
-                self._mcu_tick_avg,
-                self._mcu_tick_stddev,
-                self._cpu_headroom.take_stats(),
-            )
+        load = "mcu_awake=%.03f mcu_task_avg=%.06f mcu_task_stddev=%.06f %s" % (
+            self._mcu_tick_awake,
+            self._mcu_tick_avg,
+            self._mcu_tick_stddev,
+            self._cpu_headroom.take_stats(),
         )
         stats = " ".join(
             [

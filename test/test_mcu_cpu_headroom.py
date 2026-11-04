@@ -101,7 +101,9 @@ def test_excess_non_step_load_with_steps_near_the_cap_shuts_down():
     monitor.observe(load(0.1, 0.6, 0.2, charged=0.75), 0.0, FREQ)
     (message,) = shutdowns
     assert "MCU 'mcu' non-step load took 30.0% of the CPU" in message
-    assert "more than the 20.0% the step capacity fraction 0.80 leaves" in message
+    assert (
+        "more than the 20.0% the step capacity fraction 0.80 leaves" in message
+    )
     assert "step capacity cap no longer holds" in message
 
 
