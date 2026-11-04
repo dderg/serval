@@ -1,6 +1,6 @@
 # Main code build rules
 
-src-y += sched.c command.c basecmd.c debugcmds.c
+src-y += sched.c command.c basecmd.c debugcmds.c cpu_load.c
 # Kalico-native transport — stream-level demuxer + Layer 4 dispatcher.
 src-y += mcu_demux.c mcu_transport_dispatch.c event_log.c
 src-$(CONFIG_MOTION_RUNTIME) += runtime_storage.c runtime_panic.c spi_queue.c

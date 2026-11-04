@@ -359,17 +359,27 @@ irq_restore(irqstatus_t flag)
 {
 }
 
+static uint32_t idle_ticks;
+
 void
 irq_wait(void)
 {
-    // Must atomically sleep until signaled
     if (!readl(&TimerInfo.must_wake_timers)) {
         timer_disable_signals();
-        if (!TimerInfo.must_wake_timers)
+        if (!TimerInfo.must_wake_timers) {
+            uint32_t slept = timer_read_time();
             console_sleep(&TimerInfo.ss_sleep);
+            idle_ticks += timer_read_time() - slept;
+        }
         timer_enable_signals();
     }
     irq_poll();
+}
+
+uint32_t
+irq_wait_idle_ticks(void)
+{
+    return idle_ticks;
 }
 
 void

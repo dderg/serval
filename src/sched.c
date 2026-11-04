@@ -392,11 +392,23 @@ dispatch_step_timer(struct timer *t, uint_fast8_t on_edge_path)
 }
 #endif
 
+static volatile uint32_t callback_busy_ticks;
+
 static noinline unsigned int
 dispatch_callback_timer(struct timer *t)
 {
+    uint32_t start = timer_read_time();
     uint_fast8_t res = t->func(t);
-    return reschedule_head(t, res, t->next, t->next->waketime);
+    unsigned int next_waketime = reschedule_head(t, res, t->next,
+                                                 t->next->waketime);
+    callback_busy_ticks += timer_read_time() - start;
+    return next_waketime;
+}
+
+uint32_t
+sched_callback_busy_ticks(void)
+{
+    return callback_busy_ticks;
 }
 
 // Invoke the next timer - called from board hardware irq code.
