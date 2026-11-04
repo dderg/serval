@@ -771,12 +771,14 @@ fn the_smoothing_models_hold_its_correction_and_valley_weight_between_bends() {
                     end: 0.3 * total,
                     before: 1.5,
                     after: 2.0,
+                    floor: 0.3,
                 },
                 super::AdvanceValley {
                     start: 0.6 * total,
                     end: 0.6 * total + 1.0,
                     before: 0.8,
                     after: 0.5,
+                    floor: 0.0,
                 },
             ];
             let mut points: Vec<f64> = state.spans.iter().map(|span| span.s0).collect();

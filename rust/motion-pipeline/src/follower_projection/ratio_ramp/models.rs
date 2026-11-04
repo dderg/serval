@@ -449,35 +449,77 @@ impl AdvanceValley {
         }
     }
 
-    /// `[w, w', w'']` on `side` at the model `s`.
+    /// `[w, w', w'']` on `side` at the model `s`, the distance `d` from
+    /// the valley flattened by its crawl floor `f` as the evaluator reads
+    /// it ([`AdvanceValley::weight`]): `d²/(√(d² + f²) + f) = √(d² + f²) − f`.
+    /// Where the root's model reaches zero it is its range instead, held at
+    /// `f` from below, which it never passes.
     fn weight_model(&self, side: ValleySide, s: &TaylorModel) -> [TaylorModel; 3] {
         let constant = |value: f64| TaylorModel::constant(Ball::exact(value));
-        let (inside, width, outward) = match side {
+        let (distance, width, outward) = match side {
             ValleySide::Outside => return [constant(1.0), constant(0.0), constant(0.0)],
             ValleySide::Inside => return [constant(0.0), constant(0.0), constant(0.0)],
             ValleySide::Before => (
-                s.add_ball(Ball::exact(-self.start))
-                    .scale(Ball::exact(1.0 / self.before))
-                    .add_ball(Ball::exact(1.0)),
+                s.scale(Ball::exact(-1.0)).add_ball(Ball::exact(self.start)),
                 self.before,
                 -1.0,
             ),
-            ValleySide::After => (
-                s.add_ball(Ball::exact(-self.end))
-                    .scale(Ball::exact(-1.0 / self.after))
-                    .add_ball(Ball::exact(1.0)),
-                self.after,
-                1.0,
-            ),
+            ValleySide::After => (s.add_ball(Ball::exact(-self.end)), self.after, 1.0),
         };
+        let floor = self.floor.min(width);
+        let (flattened, slope, bend) = if floor == 0.0 {
+            (distance, constant(1.0), constant(0.0))
+        } else {
+            let squared = distance
+                .mul(&distance)
+                .add_ball(Ball::rounded(floor * floor, 1));
+            let range = || {
+                let (centre, radius) = squared.spread();
+                let low = floor.max((centre - radius).max(0.0).sqrt());
+                let high = taylor::upper(taylor::upper(centre + radius).sqrt()).max(low);
+                TaylorModel::constant(Ball {
+                    mid: 0.5 * low + 0.5 * high,
+                    rad: taylor::upper(0.5 * (high - low)),
+                })
+            };
+            let spread = match squared.sqrt() {
+                Some(root) if root.reciprocal().is_some() => root,
+                _ => range(),
+            };
+            let inverse = spread
+                .reciprocal()
+                .expect("a crawl floor keeps the spread off zero");
+            let floor_over = inverse.scale(Ball::exact(floor));
+            (
+                spread.add_ball(Ball::exact(-floor)),
+                distance.mul(&inverse),
+                floor_over.mul(&floor_over).mul(&inverse),
+            )
+        };
+        let span = if floor == 0.0 {
+            width
+        } else {
+            width * width / (libm::hypot(width, floor) + floor)
+        };
+        let per_span = Ball::rounded(1.0 / span, 1);
+        let inside = flattened
+            .scale(per_span)
+            .scale(Ball::exact(-1.0))
+            .add_ball(Ball::exact(1.0));
         let inside_squared = inside.mul(&inside);
         [
             inside_squared
                 .mul(&inside)
                 .scale(Ball::exact(-1.0))
                 .add_ball(Ball::exact(1.0)),
-            inside_squared.scale(Ball::rounded(outward * 3.0 / width, 1)),
-            inside.scale(Ball::rounded(-6.0 / (width * width), 2)),
+            inside_squared
+                .mul(&slope)
+                .scale(per_span * Ball::exact(3.0 * outward)),
+            inside
+                .mul(&slope)
+                .mul(&slope)
+                .scale(per_span * per_span * Ball::exact(-6.0))
+                .add(&inside_squared.mul(&bend).scale(per_span * Ball::exact(3.0))),
         ]
     }
 }
