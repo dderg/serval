@@ -79,11 +79,12 @@ impl Ingress {
                 match rx.try_recv() {
                     Ok(msg) => Some(msg),
                     Err(crossbeam_channel::TryRecvError::Empty) => {
-                        let step = Instant::now();
+                        let runway_before_s = self.timeline.frontier.runway_secs();
                         let planned_from_s = self.pipeline.planned_through_s();
                         let planned = self.pipeline.idle();
                         self.hold_for_throttle(planned_from_s);
-                        self.pacer.note_step(step.elapsed().as_secs_f64());
+                        self.pacer
+                            .note_step(runway_before_s, self.timeline.frontier.runway_secs());
                         if !planned {
                             if self.links.shutting_down.load(Ordering::Acquire) {
                                 return;
@@ -111,9 +112,10 @@ impl Ingress {
             self.links.wakeup.notify_space_freed();
             match msg {
                 StreamMsg::Move(m) => {
-                    let step = Instant::now();
+                    let runway_before_s = self.timeline.frontier.runway_secs();
                     self.handle_move(m);
-                    self.pacer.note_step(step.elapsed().as_secs_f64());
+                    self.pacer
+                        .note_step(runway_before_s, self.timeline.frontier.runway_secs());
                     self.brake_if_busy_runway_falls();
                 }
                 other => {

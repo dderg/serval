@@ -64,7 +64,7 @@ pub(in crate::worker) enum IdleVerdict {
 pub(in crate::worker) struct Pacer {
     undrained_since: Option<Instant>,
     worst_drain_s: f64,
-    worst_step_s: f64,
+    worst_blind_drop_s: f64,
     busy: BusyRunwayWatch,
 }
 
@@ -76,16 +76,19 @@ impl Pacer {
     }
 
     /// The runway one brake to rest consumes, measured from the last
-    /// moment the pacer could decide on it: the slowest planning step it
-    /// was blind through, the slowest drain, and the transport floor the
-    /// brake's trajectory must still arrive ahead of the playhead by.
+    /// moment the pacer could decide on it: the most runway it lost while
+    /// planning between two decisions, the slowest drain, and the transport
+    /// floor the brake's trajectory must still arrive ahead of the playhead
+    /// by.
     fn one_brake_secs(&self) -> f64 {
-        self.worst_step_s + self.worst_drain_s + LOW_MARGIN_WARN_SECS
+        self.worst_blind_drop_s + self.worst_drain_s + LOW_MARGIN_WARN_SECS
     }
 
-    /// The ingress spent `step_s` planning, unable to pace.
-    pub(in crate::worker) fn note_step(&mut self, step_s: f64) {
-        self.worst_step_s = self.worst_step_s.max(step_s);
+    /// The runway fell from `before_s` to `after_s` while the ingress
+    /// planned, unable to pace. Runway the dispatcher kept extending while
+    /// planning waited on it costs nothing.
+    pub(in crate::worker) fn note_step(&mut self, before_s: f64, after_s: f64) {
+        self.worst_blind_drop_s = self.worst_blind_drop_s.max(before_s - after_s);
     }
 
     pub(in crate::worker) fn undrained(&self) -> bool {
@@ -144,7 +147,7 @@ impl Pacer {
         if at_rest {
             return IdleVerdict::Wait(prime_left);
         }
-        let spare_runway_s = runway_s - self.reserve_secs() / DRAIN_RESERVE_SAFETY;
+        let spare_runway_s = runway_s - self.one_brake_secs();
         if spare_runway_s <= 0.0 {
             return IdleVerdict::Brake;
         }

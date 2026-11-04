@@ -53,10 +53,11 @@ fn a_busy_stream_that_falls_from_the_reserve_past_half_of_it_unobserved_brakes_a
 }
 
 #[test]
-fn the_reserve_covers_a_brake_from_the_end_of_the_slowest_blind_planning_step() {
+fn the_reserve_covers_a_brake_after_the_most_runway_lost_planning_blind() {
     let mut pacer = Pacer::default();
     pacer.note_drain(0.3);
-    pacer.note_step(0.4);
+    pacer.note_step(1.0, 0.6);
+    pacer.note_step(0.6, 0.9);
     assert!(
         (pacer.reserve_secs() - DRAIN_RESERVE_SAFETY * (0.3 + 0.4 + LOW_MARGIN_WARN_SECS)).abs()
             < 1e-12
@@ -275,8 +276,10 @@ fn a_starved_stream_in_flight_brakes_before_its_prime_runs_out() {
 fn a_stream_in_flight_waits_out_its_prime_only_while_one_brake_still_fits() {
     let base = Instant::now();
     let mut pacer = Pacer::default();
+    pacer.note_drain(0.2);
+    pacer.note_step(0.6, 0.55);
     pacer.note_move(base);
-    let one_brake_s = pacer.reserve_secs() / DRAIN_RESERVE_SAFETY;
+    let one_brake_s = 0.2 + 0.05 + LOW_MARGIN_WARN_SECS;
     assert_eq!(
         pacer.idle_verdict(0.0, true, base),
         IdleVerdict::Wait(Duration::from_secs_f64(STARTUP_PRIME_S)),
