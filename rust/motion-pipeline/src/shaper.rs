@@ -615,6 +615,10 @@ pub struct Shaper {
     pool: Arc<WorkerPool>,
     emit_batch: usize,
     segments_since_emit: usize,
+    /// The commit and frontier counts of the last emit, while it committed
+    /// nothing: until the pending groups reach past either, an emit would
+    /// read exactly what that one read and commit nothing again.
+    stalled: Option<(usize, usize)>,
 }
 
 impl Shaper {
@@ -632,6 +636,7 @@ impl Shaper {
             pool,
             emit_batch: 1,
             segments_since_emit: 0,
+            stalled: None,
         }
     }
 
@@ -705,6 +710,7 @@ impl Shaper {
                     Control::Reset { .. } => {
                         self.pending.clear();
                         self.segments_since_emit = 0;
+                        self.stalled = None;
                         self.history.clear();
                         self.history_trimmed = false;
                         for state in &mut self.follower_states {
@@ -826,7 +832,6 @@ impl Shaper {
         if count == 0 {
             return true;
         }
-        self.materialize_pending();
         let beyond_commit = self.chains.max_follower_own_forward_support() > 0.0
             || self.chains.has_projected_follower();
         let frontier_count = if !beyond_commit {
@@ -843,6 +848,10 @@ impl Shaper {
                 .count();
             whole_groups(self.pending.segments.make_contiguous(), reached).max(count)
         };
+        if !force && self.stalled == Some((count, frontier_count)) {
+            return true;
+        }
+        self.materialize_pending();
         let pending = &mut self.pending;
         let segments = pending.segments.make_contiguous();
         let shaped = apply_axis_chains(
@@ -878,6 +887,7 @@ impl Shaper {
                 return false;
             }
         }
+        self.stalled = (committed == 0).then_some((count, frontier_count));
         if committed == 0 {
             return true;
         }
