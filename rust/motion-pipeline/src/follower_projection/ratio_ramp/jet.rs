@@ -1,4 +1,4 @@
-use std::ops::{Add, Mul, Sub};
+use std::ops::{Add, Mul};
 
 /// A value and its first three derivatives along one variable, carried
 /// through arithmetic by the product and chain rules.
@@ -28,23 +28,6 @@ impl Jet {
             d1: 1.0,
             d2: 0.0,
             d3: 0.0,
-        }
-    }
-
-    /// `Self::variable(value) * factor`, bit for bit, without the products
-    /// by the variable's zero derivatives: with `factor.value` positive
-    /// those are `+0`, and adding `+0.0` keeps what adding them makes of
-    /// each sum.
-    pub(in crate::follower_projection) fn variable_times(value: f64, factor: Self) -> Self {
-        assert!(
-            factor.value > 0.0 && factor.d1.is_finite(),
-            "a variable is multiplied by {factor:?}, not a positive jet with a finite slope"
-        );
-        Self {
-            value: value * factor.value,
-            d1: factor.value + value * factor.d1,
-            d2: (2.0 * factor.d1 + 0.0) + value * factor.d2,
-            d3: (3.0 * factor.d2 + 0.0) + value * factor.d3,
         }
     }
 
@@ -108,14 +91,6 @@ impl Add for Jet {
             d2: self.d2 + other.d2,
             d3: self.d3 + other.d3,
         }
-    }
-}
-
-impl Sub for Jet {
-    type Output = Self;
-
-    fn sub(self, other: Self) -> Self {
-        self + other.scale(-1.0)
     }
 }
 

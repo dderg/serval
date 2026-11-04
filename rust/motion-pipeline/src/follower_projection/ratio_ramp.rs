@@ -109,6 +109,101 @@ impl Seam {
     }
 }
 
+/// The seams inside one window as [`RatioSmoothing::correction`] sums
+/// them, each at `u = s − σ`: the moments `Σ Δ·uᵏ` of their ratio steps
+/// and `Σ Δm·uᵏ` of their slope steps, and the table's own kink the seams
+/// at or behind `s` carry, `Σ Δ·u + Δm·u²/2`, with its two derivatives.
+///
+/// With `a`, `b` the coefficients of [`SMOOTHED_RAMP`] and
+/// [`SMOOTHED_HALF_SQUARE`], `h·G₁(u/h) = Σₖ aₖ·uᵏ·h¹⁻ᵏ − u₊` and
+/// `h²·G₂(u/h) = Σₖ bₖ·uᵏ·h²⁻ᵏ − u₊²/2`, so the correction is the moments
+/// weighted by powers of `h`, and a moment's path derivative is
+/// `(Σ c·uᵏ)' = k·Σ c·uᵏ⁻¹`: each seam costs a few products whatever the
+/// jets of `h`. `|u| < h` inside the window bounds every term by its
+/// coefficient times `|Δ|·h` or `|Δm|·h²`, as the polynomials in `u/h`
+/// are bounded.
+#[derive(Default)]
+struct SeamMoments {
+    step: [f64; SMOOTHED_RAMP.len()],
+    slope_step: [f64; SMOOTHED_HALF_SQUARE.len()],
+    behind: [f64; 3],
+}
+
+impl SeamMoments {
+    fn add(&mut self, u: f64, seam: &Seam) {
+        let mut powers = [1.0; SMOOTHED_HALF_SQUARE.len()];
+        for k in 1..powers.len() {
+            powers[k] = powers[k - 1] * u;
+        }
+        if seam.step != 0.0 {
+            for (moment, power) in self.step.iter_mut().zip(powers) {
+                *moment += seam.step * power;
+            }
+        }
+        if seam.slope_step != 0.0 {
+            for (moment, power) in self.slope_step.iter_mut().zip(powers) {
+                *moment += seam.slope_step * power;
+            }
+        }
+        if u >= 0.0 {
+            self.behind[0] += seam.step * u + 0.5 * seam.slope_step * powers[2];
+            self.behind[1] += seam.step + seam.slope_step * u;
+            self.behind[2] += seam.slope_step;
+        }
+    }
+
+    /// The moment `moments[k]` with its path derivatives.
+    fn moment(moments: &[f64], k: usize) -> Jet {
+        let derivative = |order: usize| {
+            if order > k {
+                return 0.0;
+            }
+            let falling: usize = (k + 1 - order..=k).product();
+            falling as f64 * moments[k - order]
+        };
+        Jet {
+            value: moments[k],
+            d1: derivative(1),
+            d2: derivative(2),
+            d3: derivative(3),
+        }
+    }
+
+    /// `X` with the width `h` and the table's slope `slope_left` at the
+    /// window's back edge: the moments of power `k` of the slope steps
+    /// weigh with `h²⁻ᵏ`, of the ratio steps with `h¹⁻ᵏ`.
+    fn correction(&self, h: Jet, slope_left: f64) -> Jet {
+        let inverse = h.recip();
+        let inverse_squared = inverse * inverse;
+        let powers_of_h = [
+            h * h,
+            h,
+            Jet::constant(1.0),
+            inverse,
+            inverse_squared,
+            inverse_squared * inverse,
+        ];
+        let kink = Jet {
+            value: -self.behind[0],
+            d1: -self.behind[1],
+            d2: -self.behind[2],
+            d3: 0.0,
+        };
+        powers_of_h
+            .iter()
+            .enumerate()
+            .fold(kink, |total, (index, &power)| {
+                let slope_term =
+                    Self::moment(&self.slope_step, index).scale(SMOOTHED_HALF_SQUARE[index]);
+                let weight = match index.checked_sub(1) {
+                    Some(k) => slope_term + Self::moment(&self.step, k).scale(SMOOTHED_RAMP[k]),
+                    None => slope_term.offset(KERNEL_HALF_VARIANCE * slope_left),
+                };
+                total + power * weight
+            })
+    }
+}
+
 /// One node of the width field: its path position, the half-width its
 /// leaders ask for there, and the envelope the field takes.
 #[derive(Debug, Clone, Copy)]
@@ -915,7 +1010,8 @@ impl RatioSmoothing {
 
     /// `X = Ẽ − E` at `s` with its first three path derivatives: the
     /// extrusion, ratio, slope and curvature the smoothing adds to the
-    /// table's.
+    /// table's, summed over the seams in the window by their moments
+    /// ([`SeamMoments`]).
     pub(super) fn correction(&self, s: f64) -> Jet {
         if self.is_inert() {
             return Jet::ZERO;
@@ -931,35 +1027,11 @@ impl RatioSmoothing {
             .map_or(self.base_slope.unwrap_or(0.0), |last| {
                 self.seams[last].slope_after
             });
-        let squared = h * h;
-        let inverse = h.recip();
-        self.seams[first..]
-            .iter()
-            .take_while(|seam| seam.s < hi)
-            .fold(
-                squared.scale(KERNEL_HALF_VARIANCE * slope_left),
-                |total, seam| {
-                    let x = Jet::variable_times(s - seam.s, inverse);
-                    let past_seam = x.value >= 0.0;
-                    let total = if seam.step == 0.0 {
-                        total
-                    } else {
-                        let smoothed = x.poly(&SMOOTHED_RAMP);
-                        let g1 = if past_seam { smoothed - x } else { smoothed };
-                        total + (h * g1).scale(seam.step)
-                    };
-                    if seam.slope_step == 0.0 {
-                        return total;
-                    }
-                    let smoothed = x.poly(&SMOOTHED_HALF_SQUARE);
-                    let g2 = if past_seam {
-                        smoothed - (x * x).scale(0.5)
-                    } else {
-                        smoothed
-                    };
-                    total + (squared * g2).scale(seam.slope_step)
-                },
-            )
+        let mut moments = SeamMoments::default();
+        for seam in self.seams[first..].iter().take_while(|seam| seam.s < hi) {
+            moments.add(s - seam.s, seam);
+        }
+        moments.correction(h, slope_left)
     }
 
     fn seams_near(&self, lo: f64, hi: f64) -> &[Seam] {
