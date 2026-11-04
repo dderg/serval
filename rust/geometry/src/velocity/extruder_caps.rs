@@ -178,13 +178,19 @@ fn ratios_on(segment: &crate::path::PathSegment, axis: usize) -> (f64, f64) {
 /// ratio moves: the follower's ratio ramp spreads the step there, with the
 /// change along either segment (a blend's ratio slides from one move's to
 /// the next's over a path a window gathers whole), over at most the longest
-/// ramp time, so the leaders' shaped speed there must stay where that ramp
-/// keeps the advanced follower within its limits under the budget `accel`
-/// around the join ([`crate::RatioRampRule::step_speed_cap`]; the path's
-/// jerk is the budget's own to hold, no slower crossing lowers it), and the
-/// planned speed lower still by what the leaders' kernels spill into it.
-/// Infinite where the ratio does not move, or no path carries it.
-pub(super) fn ratio_step_ceiling(up: &crate::Move, dn: &crate::Move, accel: f64) -> f64 {
+/// ramp time, and over less where the leaders rest `rest_room_mm` along the
+/// path from the join, so the leaders' shaped speed there must stay where
+/// that ramp keeps the advanced follower within its limits under the budget
+/// `accel` around the join ([`crate::RatioRampRule::step_speed_cap`]; the
+/// path's jerk is the budget's own to hold, no slower crossing lowers it),
+/// and the planned speed lower still by what the leaders' kernels spill
+/// into it. Infinite where the ratio does not move, or no path carries it.
+pub(super) fn ratio_step_ceiling(
+    up: &crate::Move,
+    dn: &crate::Move,
+    accel: f64,
+    rest_room_mm: f64,
+) -> f64 {
     let Some(caps) = ExtruderCaps::stricter(up.limits.extruder, dn.limits.extruder) else {
         return f64::INFINITY;
     };
@@ -199,7 +205,7 @@ pub(super) fn ratio_step_ceiling(up: &crate::Move, dn: &crate::Move, accel: f64)
         .fold(0.0_f64, |peak, ratio| peak.max(ratio.abs()));
     let shaped = caps
         .ratio_ramp_rule()
-        .step_speed_cap(moved, peak, accel, 0.0);
+        .step_speed_cap(moved, peak, accel, 0.0, rest_room_mm);
     if shaped.is_infinite() {
         return shaped;
     }

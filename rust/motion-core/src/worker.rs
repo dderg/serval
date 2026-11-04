@@ -11,7 +11,10 @@ use motion_pipeline::{Pipeline, StreamConfig, TrajectoryItem};
 
 mod dispatch;
 mod ingress;
+mod producer_throttle;
 mod pump_sink;
+
+pub use producer_throttle::PRODUCER_THROTTLE_ENV;
 
 pub use dispatch::DispatchError;
 use dispatch::{Dispatcher, WorkerLinks};
@@ -388,9 +391,8 @@ impl StreamWorkerHandle {
             pipeline,
             links: Arc::clone(&links),
             timeline,
-            undrained_since: None,
-            worst_drain_s: 0.0,
-            busy_runway: ingress::BusyRunwayWatch::default(),
+            pacer: ingress::Pacer::default(),
+            throttle: producer_throttle::ProducerThrottle::from_env(),
             last_line: 0,
             pump: pump.clone(),
         };

@@ -282,6 +282,20 @@ def test_crystal_ppm_and_a_short_stall_stay_within_the_pace_tolerance():
     assert pace["pace_max_abs_lag_ms"] == pytest.approx(STALL_S * 1e3, abs=0.5)
 
 
+PACER_RESERVE_S = 1.056
+
+
+def test_a_capture_braked_to_rest_and_resumed_by_the_pacer_fails_the_pace_check():
+    capture = PACE_REFERENCE_S.copy()
+    for resume_at in (4.0, 9.0, 14.0):
+        capture[PACE_REFERENCE_S >= resume_at] += PACER_RESERVE_S
+    pace = _paced(capture, PACE_REFERENCE_S)
+    assert not pace["pace_within_tolerance"]
+    assert pace["pace_worst_lag_ms"] == pytest.approx(
+        3 * PACER_RESERVE_S * 1e3, rel=1e-3
+    )
+
+
 TIE_GCODE = """\
 SET_KINEMATIC_POSITION X=0 Y=0 Z=0
 G92 E0
