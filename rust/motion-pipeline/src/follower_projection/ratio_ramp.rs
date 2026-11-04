@@ -174,7 +174,8 @@ impl SeamMoments {
     }
 
     /// The span of slope `slope` and `length` between the seams at
-    /// `u_a > u_b`.
+    /// `u_a > u_b`. A seam at `s` lies behind it, as the table reads the
+    /// span it opens there.
     fn add_span(&mut self, (u_a, u_b): (f64, f64), slope: f64, length: f64) {
         if slope == 0.0 {
             return;
@@ -190,7 +191,7 @@ impl SeamMoments {
         if u_b >= 0.0 {
             self.behind[0] += rise * 0.5 * (u_a + u_b);
             self.behind[1] += rise;
-        } else if u_a > 0.0 {
+        } else if u_a >= 0.0 {
             self.behind[0] += 0.5 * slope * u_a * u_a;
             self.behind[1] += slope * u_a;
             self.behind[2] += slope;
@@ -285,7 +286,7 @@ fn edge_spans(h: Jet, inverse: Jet, slope_left: f64, ends: Option<(f64, f64, f64
 fn half_square_about_edges(h: Jet, inverse: Jet, u: f64) -> (Jet, Jet) {
     let u = Jet::variable(u);
     let complement = |part: Jet| part.scale(-1.0).offset(KERNEL_HALF_VARIANCE);
-    if u.value <= 0.0 {
+    if u.value < 0.0 {
         let ahead = ((h + u) * inverse).poly(&SMOOTHED_HALF_SQUARE_OFF_EDGE);
         (ahead, complement(ahead))
     } else {

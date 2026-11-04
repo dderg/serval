@@ -214,6 +214,7 @@ fn the_smoothed_ratio_is_c1_and_its_derivatives_are_exact() {
             for &s in &points {
                 let (left_ratio, left_slope) = state.ratio_and_slope(s - eps);
                 let (right_ratio, right_slope) = state.ratio_and_slope(s + eps);
+                let (_, slope_on) = state.ratio_and_slope(s);
                 assert!(
                     (left_ratio - right_ratio).abs() < 1e-9,
                     "the ratio jumps at {s} mm: {left_ratio} -> {right_ratio}"
@@ -221,6 +222,10 @@ fn the_smoothed_ratio_is_c1_and_its_derivatives_are_exact() {
                 assert!(
                     (left_slope - right_slope).abs() < 1e-5,
                     "the ratio's slope jumps at {s} mm: {left_slope} -> {right_slope}"
+                );
+                assert!(
+                    (slope_on - right_slope).abs() < 1e-5,
+                    "the ratio's slope on {s} mm is {slope_on}, beside it {right_slope}"
                 );
             }
             let h = 1e-6;
