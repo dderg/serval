@@ -102,7 +102,32 @@ DOCKER_RUN_AS_USER=(
 # rustflags in rust/.cargo/config.toml, so widening this past the host target
 # would drop the macOS cdylib `-undefined dynamic_lookup` and the cross-build
 # target-cpu/--nmagic flags.
+# pyo3 links the interpreter it finds (python3 on PATH): config-py and shaper-ident
+# fail with `ld.lld: unable to find library -lpython3.12` when the runner image has
+# the interpreter but not its development package (ubuntu-26.04 has no
+# libpython3.12-dev; 24.04 shipped it). Install the matching one when it is missing.
+# Only on GitHub runners; elsewhere a missing library is the developer's to fix.
+LIBPYTHON_CHECKED=""
+ensure_libpython() {
+    [ -z "$LIBPYTHON_CHECKED" ] || return 0
+    LIBPYTHON_CHECKED=1
+    [ -n "${GITHUB_ACTIONS:-}" ] && [ "$(uname -s)" = Linux ] || return 0
+    local have
+    have="$(python3 - <<'PY'
+import os, sysconfig
+libdir = sysconfig.get_config_var("LIBDIR") or ""
+names = [sysconfig.get_config_var(k) for k in ("LDLIBRARY", "LIBRARY")]
+print(any(n and os.path.exists(os.path.join(libdir, n)) for n in names))
+PY
+)"
+    [ "$have" = True ] && return 0
+    echo "ci.sh: no libpython for $(python3 --version 2>&1); installing libpython3-dev" >&2
+    sudo apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=15 update >&2
+    sudo apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=15 install -y libpython3-dev >&2
+}
+
 host_cargo() {
+    ensure_libpython
     if [ "$(uname -s)" = Linux ] && command -v ld.lld >/dev/null 2>&1; then
         RUSTFLAGS="-Clink-arg=-fuse-ld=lld" cargo "$@"
     else
