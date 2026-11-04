@@ -405,7 +405,8 @@ fn ramp_reach_within(t: f64, (start, end): (f64, f64)) -> (f64, f64) {
 /// also asks for its width ([`Self::seam_width_at`]): every node within
 /// [`SEAM_WIDTH_PLATEAU_WIDTHS`] widths of it on the path targets at least
 /// `H_σ`, falling off by [`ENVELOPE_SLOPE`] beyond, so only a rest narrows
-/// a seam's window below its width.
+/// a seam's window below its width, and the planner slows a step where the
+/// rest leaves its ramp too little path ([`geometry::rest_room_reach_mm`]).
 ///
 /// The leaders are sampled every half of the shortest ramp in time. A
 /// sample becomes a node once every seam that sets its ramp time `τ` or its
