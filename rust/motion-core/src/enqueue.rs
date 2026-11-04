@@ -362,10 +362,10 @@ where
     Ok(views)
 }
 
-/// Host-side mirror of the MCU's per-sample step budget (-310) and the
-/// runtime's -307 StepRateExceedsMcuCeiling: a track demanding more motor
-/// velocity than the MCU can physically step fails loud here, with the axis,
-/// the demand and the gcode line, instead of latching a bare fault mid-print.
+/// Backstop behind the planner's step capacity cap: a track demanding more
+/// motor velocity than the driver can physically be stepped at (its pulse
+/// width; -307 StepRateExceedsMcuCeiling on the MCU) fails loud here, with
+/// the axis, the demand and the gcode line, instead of mid-print.
 fn check_step_rate_ceiling(
     cfg: &McuAxisConfig,
     axis_idx: usize,
