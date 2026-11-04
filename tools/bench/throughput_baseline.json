@@ -1,14 +1,14 @@
 {
   "slice_lines": 1000,
-  "commit": "82471136fdc15e4918c287125562611c81df084c",
-  "reason": "New gate format: total Ir (every user-space instruction, not repo files only) over the 1000-line slice plus a live 2-core A/B of the full print against this reference commit. Pi 2-core worst windows measured at a5c9bfca0 (main 2797f4c50 merged): p3_voron_direct_drive_kernel 1.89/1.90, trident_kernel 1.88/1.90, p3_voron_direct_drive_ramp 2.79/2.76; carried by the live ratio through the merges of main up to d0bbc8c5c (#681, rail-integration reuse, #682 ramp-end-accel).",
+  "commit": "6aa1cb2757343385a67c2bae4cef824a0b21e368",
+  "reason": "Kernel follower fits seed only the shaped breaks that can carry a velocity break: 10x fewer extruder pieces on the kernel configs",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 18417100746,
+      "ir": 18416942932,
       "stream_secs": 8.541,
       "pi_2core": {
         "k_ir": 9114169275.97816,
-        "worst_x_reference": 4.165119366314405,
+        "worst_x_reference": 4.187364218623241,
         "worst_x": [
           2.79,
           2.76
@@ -17,29 +17,29 @@
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 28567827181,
+      "ir": 25712366065,
       "stream_secs": 6.202,
       "pi_2core": {
-        "k_ir": 9206017029.650112,
-        "worst_x_reference": 1.9357535808915818,
+        "k_ir": 9659757002.81361,
+        "worst_x_reference": 2.33,
         "worst_x": [
-          1.89,
-          1.9
+          2.33,
+          2.36
         ],
-        "commit": "a5c9bfca0a49fff520d699bef3b966c6a7f55fd6"
+        "commit": "6aa1cb2757343385a67c2bae4cef824a0b21e368"
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 30195937189,
+      "ir": 26365381177,
       "stream_secs": 7.543,
       "pi_2core": {
-        "k_ir": 8088130496.582261,
-        "worst_x_reference": 1.9681387183408123,
+        "k_ir": 8703407017.198727,
+        "worst_x_reference": 2.49,
         "worst_x": [
-          1.88,
-          1.9
+          2.5,
+          2.49
         ],
-        "commit": "a5c9bfca0a49fff520d699bef3b966c6a7f55fd6"
+        "commit": "6aa1cb2757343385a67c2bae4cef824a0b21e368"
       }
     }
   }
