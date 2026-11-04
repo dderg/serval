@@ -6,7 +6,7 @@ src-y += mcu_demux.c mcu_transport_dispatch.c event_log.c
 src-$(CONFIG_MOTION_RUNTIME) += runtime_storage.c runtime_panic.c spi_queue.c
 src-$(CONFIG_SAMPLE_STEPPING) += sample_commands.c
 src-$(CONFIG_HAVE_GPIO) += initial_pins.c gpiocmds.c stepper.c trsync.c endstop.c \
-    stepper_classic.c stepper_bench.c
+    stepper_classic.c stepper_bench.c cpu_load.c
 src-$(CONFIG_WANT_ADC) += adccmds.c
 src-$(CONFIG_WANT_SPI) += spicmds.c
 src-$(CONFIG_WANT_I2C) += i2ccmds.c

@@ -56,6 +56,8 @@ The planner holds every move within the capacity of every MCU it steps. A motor 
 
 The first move the cap slows emits a `step_capacity_capped` host event at once, later ones at most every 30 s. Each event carries the MCU name, the moves capped since the last report and the worst demand as a multiple of the capacity. At startup klippy logs one line per MCU: the measured ticks per step, the capacity in steps/s for each mode in use, each motor's worst-case steps/s at the configured maximum speeds (`max_velocity` in its worst XY direction, `max_z_velocity`, the extruder's velocity limit) and whether the cap can bind. Simulated MCUs log that their capacity is not modeled, and they are not capped.
 
+The fraction assumes everything else an MCU does fits in the remaining `1 − fraction` of its CPU. That covers tasks, USB and other interrupts, and non-step timers such as software PWM. Klippy checks this assumption while printing. Every 250 ms each stepping MCU reports where its CPU went (`cpu_load`). A window whose non-step share exceeds `1 − fraction` is logged as `mcu.cpu_headroom_exceeded`, at most every 30 s. If, in the same window, the steps at their benchmarked cost plus that non-step load exceed the whole CPU, klippy shuts down: the cap no longer protects step timing on that MCU. The message names the MCU and the shares. The stats line carries the worst window per period as `mcu_nonstep_max` and `mcu_idle_min`. Firmware without `cpu_load` is refused when it drives steppers (`tools/bench/README.md`, "Runtime headroom check").
+
 Klippy refuses a config only when an MCU cannot step a pure move along an axis at `min(that axis's max velocity, 50 mm/s)` with the extruder idle (`STEP_CAPACITY_MIN_AXIS_VELOCITY`; first-layer and perimeter speeds start around there). The error names the MCU, its measured cost and capacity, each motor's demand, and the remedies: fewer microsteps or a larger `rotation_distance`, both-edge stepping, or moving motors to another MCU. A stepper bound to an MCU that reports no step benchmark (a probe MCU without steppers) is also an error. Every axis that an MCU with a measured capacity steps needs extruder limits: `[axis] max_velocity`, or an `[extruder]` bound to it.
 
 Each motor is also limited to what its driver can physically be stepped at. That limit is one step per two pulse widths in pulsed mode (`stepper_full_finish` holds the next step until a pulse width after the unstep) and one per microsecond on both edges. The host checks every shaped track against it before sending.
@@ -352,13 +354,16 @@ their extrude-only caps; with a kernel, the advance is fitted into that
 extrusion before the kernel smooths it. Where the leaders turn around (a
 wipe that reverses along the line) or come to rest across an extrude-only
 move or dwell, the advance drops its lead to zero exactly where their speed
-does: it keeps the lead through the input shaper's spill around the rest,
-then releases it before the rest and rebuilds it after over that spill plus
-the reach of the longest ramp, rising from the rest point, so the extruder
-never asks much more than the advance's own `k·r·accel` there; a rest the
-leaders pass through without stopping keeps the full advance. Without a
-kernel, any extruder position step, or velocity step beyond the leaders'
-fit rounding, is refused before it is emitted; leaders without an
+does, rising from the rest point, so the extruder never asks much more than
+the advance's own `k·r·accel` there. At a rest it releases the lead before
+and rebuilds it after over the input shaper's spill around the rest alone
+wherever the shortest ramp the extruder's limits allow for that lead fits
+within the spill, over the spill plus that ramp's reach elsewhere, and over
+the spill plus the reach of the longest ramp where a ratio step lies so near
+the rest that its own ramp would leave those limits; a rest the leaders pass
+through without stopping keeps the full advance.
+Without a kernel, any extruder position step, or velocity step beyond the
+leaders' fit rounding, is refused before it is emitted; leaders without an
 acceleration-continuous kernel produce such steps. The trade-off against a
 kernel is measured in "Evaluating an extruder chain" in the README.
 

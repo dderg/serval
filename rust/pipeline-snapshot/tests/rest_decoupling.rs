@@ -1,7 +1,7 @@
 //! A full stop decouples planning: the motion after a rest plans the same
-//! from rest as it does after everything before it. analyze.py relies on
-//! this when it plans every rest-delimited epoch of a bench print as its
-//! own stream and holds the capture against that reference.
+//! from rest as it does after everything before it, within the followers'
+//! fit tolerance. analyze.py does not lean on it: it holds a bench capture
+//! against the print planned as one stream, as the live host plans it.
 
 use std::path::Path;
 

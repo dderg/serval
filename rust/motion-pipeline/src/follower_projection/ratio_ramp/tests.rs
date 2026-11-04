@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use geometry::RatioRampRule;
+use geometry::{RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule};
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 use trajectory::{ContinuousAxis, ContinuousSegment};
 
 use super::super::FollowerState;
 use super::{
-    Crossing, ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_PER_WIDTH, NODE_SPACING_S, RampLeg,
-    ShapedLeaders, TimedSeam, WIDTH_SLOPE_BOUND, WidthField,
+    AdvanceValley, Crossing, ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_PER_WIDTH, NODE_SPACING_S,
+    RampLeg, RestSide, ShapedLeaders, Spill, TimedSeam, WIDTH_SLOPE_BOUND, WidthField,
 };
 
 /// `(length, ratio at start, ratio at end)` per span.
@@ -908,4 +908,190 @@ fn a_nanometre_blend_lays_a_smooth_track_through_a_wide_window() {
             );
         }
     }
+}
+
+/// The leaders cross a crawl moving, so its valley leaves zero flat over
+/// its floor: `W'·ṡ²` of opposite signs either side would step the advanced
+/// velocity there. With no floor the valley is `ψ`, kinked, as at a
+/// turnaround, where the leaders' zero speed makes the slope harmless.
+#[test]
+fn a_crawl_valley_leaves_zero_flat_and_its_derivatives_are_exact() {
+    let crawl = AdvanceValley {
+        start: 5.0,
+        end: 5.0,
+        before: 2.0,
+        after: 1.5,
+        floor: 0.01,
+    };
+    for side in [-1.0, 1.0] {
+        let (weight, slope, _) = crawl.weight(5.0 + side * 1e-9);
+        assert!(
+            weight < 1e-12 && slope.abs() < 1e-6,
+            "the crawl valley leaves zero at {weight} with slope {slope}"
+        );
+    }
+    let h = 1e-6;
+    for k in 1..4_000 {
+        let s = 2.9 + 3.7 * f64::from(k) / 4_000.0;
+        if (s - 5.0).abs() < 4.0 * h {
+            continue;
+        }
+        let (weight, slope, curvature) = crawl.weight(s);
+        let (before, after) = (crawl.weight(s - h), crawl.weight(s + h));
+        assert!(
+            (0.0..=1.0).contains(&weight),
+            "the crawl valley weighs {weight} at {s} mm"
+        );
+        for (order, value, numeric) in [
+            (1, slope, (after.0 - before.0) / (2.0 * h)),
+            (2, curvature, (after.1 - before.1) / (2.0 * h)),
+        ] {
+            assert!(
+                (value - numeric).abs() < 1e-5 * (1.0 + numeric.abs()),
+                "derivative {order} of the crawl valley at {s} mm is {value}, its \
+                 difference quotient {numeric}"
+            );
+        }
+    }
+    let kinked = AdvanceValley {
+        floor: 0.0,
+        ..crawl
+    };
+    let (_, slope, _) = kinked.weight(5.0 + 1e-9);
+    assert!(
+        (slope - 3.0 / 1.5).abs() < 1e-6,
+        "a valley without a floor leaves zero with slope {slope}"
+    );
+}
+
+/// A crawl is worth a valley only where an advance reading the path speed
+/// through it would leave the follower's acceleration limit. The Bowden
+/// crawl of `voron_dense_top_layers` at t≈148.07 s on the P1 kernel config
+/// asks `r·(a + k·s⃛)` ≈ 370 mm/s² of its 2000; releasing its lead there
+/// asked 2610. A turnaround releases it whatever the advance asks.
+#[test]
+fn a_crawl_lays_a_valley_only_where_the_advance_would_leave_the_limit() {
+    let rule = RatioRampRule {
+        advance_slope_s: 0.5,
+        max_velocity_mm_s: 50.0,
+        max_accel_mm_s2: 2000.0,
+    };
+    let crawl = Crossing {
+        speed: 0.647,
+        rate: 119.0,
+        jerk: 119.0 * 119.0 / 0.647,
+    };
+    assert!(!crawl.needs_valley(&rule, 0.0337));
+    assert!(crawl.needs_valley(&rule, 0.2));
+    let cruise = Crossing {
+        speed: 2.5,
+        ..crawl
+    };
+    assert!(!cruise.needs_valley(&rule, 0.2));
+    let turnaround = Crossing {
+        speed: 0.0,
+        rate: 119.0,
+        jerk: 0.0,
+    };
+    let no_advance = RatioRampRule {
+        advance_slope_s: 0.0,
+        ..rule
+    };
+    assert!(turnaround.needs_valley(&no_advance, 0.0337));
+}
+
+const LINE_RATIO: f64 = 0.4 * 0.2 / (std::f64::consts::PI * 0.875 * 0.875);
+const STOP: Crossing = Crossing {
+    speed: 70.25,
+    rate: 15068.0,
+    jerk: 1.18e6,
+};
+const STOP_SPILL_MM: f64 = 0.25;
+const LINE_END_MM: f64 = 30.0;
+
+/// The table of a line ending in a rest at [`LINE_END_MM`], its ratio
+/// stepping to `last_ratio` `last_mm` before the end.
+fn line_into_rest(last_mm: f64, last_ratio: f64) -> Vec<super::super::RatioSpan> {
+    let mut state = FollowerState::default();
+    state.push_span(LINE_END_MM - last_mm, LINE_RATIO, LINE_RATIO);
+    state.push_span(last_mm, last_ratio, last_ratio);
+    state.spans
+}
+
+/// The side a line ending in a rest opens as the kernel-free fast bench
+/// config stops it from 300 mm/s, over a spill of `spill_s`.
+fn stopping_side(spill_s: f64) -> RestSide {
+    RestSide {
+        rest: LINE_END_MM,
+        seam: LINE_END_MM - STOP_SPILL_MM,
+        outward: -1.0,
+        crossing: STOP,
+        spill: Spill {
+            duration: spill_s,
+            crossing: STOP,
+        },
+        beyond: STOP,
+    }
+}
+
+const DIRECT_DRIVE: RatioRampRule = RatioRampRule {
+    advance_slope_s: 0.03,
+    max_velocity_mm_s: 50.0,
+    max_accel_mm_s2: 20000.0,
+};
+
+/// A rest valley's side spans the spill alone where the extruder releases
+/// the lead within the shortest ramp its limits allow and that fits within
+/// the spill: the kernel-free fast bench config's 20000 mm/s² extruder
+/// stopping a 300 mm/s line. A spill that takes no time ramps out over
+/// that shortest ramp.
+#[test]
+fn a_rest_side_spans_the_spill_alone_where_the_lead_releases_within_it() {
+    let table = line_into_rest(1.0, LINE_RATIO);
+    assert_eq!(
+        stopping_side(0.0074).width(&table, &DIRECT_DRIVE, LINE_END_MM),
+        STOP_SPILL_MM
+    );
+    assert_eq!(
+        stopping_side(0.0).width(&table, &DIRECT_DRIVE, LINE_END_MM),
+        STOP_SPILL_MM + STOP.reach(RATIO_RAMP_MIN_TIME_S)
+    );
+}
+
+/// A rest valley's side reaches as far as the longest ramp where a ratio
+/// step lies so near the rest that the width field narrows its ramp past
+/// the extruder's limits, where a Bowden advance's path alone leaves its
+/// limit, and where the table does not reach that far yet.
+#[test]
+fn a_rest_side_reaches_the_longest_ramp_where_the_lead_or_a_near_step_needs_it() {
+    let longest = STOP_SPILL_MM + STOP.reach(RATIO_RAMP_MAX_TIME_S);
+    assert_eq!(
+        stopping_side(0.0074).width(
+            &line_into_rest(0.4, 3.0 * LINE_RATIO),
+            &DIRECT_DRIVE,
+            LINE_END_MM
+        ),
+        longest
+    );
+    let bowden = RatioRampRule {
+        advance_slope_s: 0.5,
+        max_velocity_mm_s: 45.0,
+        max_accel_mm_s2: 2000.0,
+    };
+    let table = line_into_rest(1.0, LINE_RATIO);
+    assert_eq!(
+        stopping_side(0.0074).width(&table, &bowden, LINE_END_MM),
+        longest
+    );
+    let leaving = RestSide {
+        rest: 0.0,
+        seam: STOP_SPILL_MM,
+        outward: 1.0,
+        ..stopping_side(0.0074)
+    };
+    assert_eq!(leaving.width(&table, &DIRECT_DRIVE, 1.0), longest);
+    assert_eq!(
+        leaving.width(&table, &DIRECT_DRIVE, LINE_END_MM),
+        STOP_SPILL_MM
+    );
 }

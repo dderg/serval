@@ -1,0 +1,89 @@
+diff --git a/rust/motion-pipeline/src/follower_projection.rs b/rust/motion-pipeline/src/follower_projection.rs
+index 96c971211..7475f564d 100644
+--- a/rust/motion-pipeline/src/follower_projection.rs
++++ b/rust/motion-pipeline/src/follower_projection.rs
+@@ -15,9 +15,9 @@ use trajectory::{
+ use crate::lowering::{AccelBudget, FitTol, SeamContinuity, follower_tol_scale};
+ use crate::shaper::{
+     AxisFit, AxisSignalTable, BetweenProbes, ConvolutionSignal, Enclosure, ExactConvolution,
+-    ExactKernel, FitBoundary, KnotJumpBound, Lookahead, SEGMENT_TIME_EPS_S, ShapedBreaks,
+-    ShiftedTrackSignal, SignalBounds, TrackSignal, apply_derivative_gains_to_track,
+-    fit_axis_from_signal, fit_resolution, fit_seed_times, unit_kernel_mass,
++    ExactKernel, FitBoundary, KnotJumpBound, Lookahead, SEGMENT_TIME_EPS_S, ShiftedTrackSignal,
++    SignalBounds, TrackSignal, apply_derivative_gains_to_track, fit_axis_from_signal,
++    fit_resolution, shaped_signal_breakpoints, unit_kernel_mass,
+ };
+ use crate::types::PostProcessError;
+ use crate::worker_pool::WorkerPool;
+@@ -970,7 +970,7 @@ pub(crate) fn project_followers(
+                     &semantic_cuts
+                 };
+                 let breaks_started = crate::timing::stopwatch();
+-                let shaped_breaks = ShapedBreaks::new(kernel, shaped_break_seeds);
++                let shaped_breaks = shaped_signal_breakpoints(kernel, shaped_break_seeds);
+                 timing.breakpoints_us += breaks_started.elapsed_us();
+                 let input_jumps = table.input_jumps().to_vec();
+                 let exact_kernel = ExactKernel::new(kernel);
+@@ -1018,16 +1018,11 @@ pub(crate) fn project_followers(
+                 let fitted = pool
+                     .map_indexed(workers, supports.len(), &make_sig, |sig, index| {
+                         let (start, end) = supports[index];
+-                        let seeds = shaped_breaks.select_seeds(
+-                            fit_seed_times(axis, start, end, shaped_breaks.times())?,
+-                            Some(table.as_ref()),
+-                            target_tol,
+-                        );
+                         fit_kernel_window(
+                             axis,
+                             start,
+                             end,
+-                            &seeds,
++                            &shaped_breaks,
+                             sig,
+                             target_tol,
+                             output_monotonicity,
+diff --git a/rust/motion-pipeline/src/shaper.rs b/rust/motion-pipeline/src/shaper.rs
+index c1c473214..6f166e180 100644
+--- a/rust/motion-pipeline/src/shaper.rs
++++ b/rust/motion-pipeline/src/shaper.rs
+@@ -40,7 +40,7 @@ use hull::{FittedPiece, HullBudget};
+ use taylor::{Ball, TaylorModel};
+ 
+ pub(crate) use exact::{ExactConvolution, ExactKernel, ExactPiece};
+-pub(crate) use hidden_breaks::ShapedBreaks;
++use hidden_breaks::ShapedBreaks;
+ 
+ #[derive(Clone, Copy)]
+ pub(crate) struct KnotJumpBound {
+@@ -2241,6 +2241,22 @@ fn f64_from_ordered_key(key: u64) -> f64 {
+     f64::from_bits(bits)
+ }
+ 
++pub(crate) fn shaped_signal_breakpoints(
++    kernel: &nurbs::algebra::PiecewisePolynomialKernel,
++    input_breaks: &[f64],
++) -> Vec<f64> {
++    let kernel_breaks: Vec<f64> = ShapedSignal::kernel_cut_boundaries(kernel).collect();
++    let mut breaks = Vec::with_capacity(input_breaks.len() * (kernel_breaks.len() + 2));
++    for &input_break in input_breaks {
++        for &kernel_break in &kernel_breaks {
++            ShapedSignal::output_cut_transitions(kernel, input_break, kernel_break, &mut breaks);
++        }
++    }
++    breaks.sort_by(f64::total_cmp);
++    breaks.dedup();
++    breaks
++}
++
+ /// Sized for the deepest fit-ladder rung (degree 13, 14 coefficients) times
+ /// the widest kernel moment window the shaper builds.
+ const MOMENT_POWER_CAPACITY: usize = 24;
+@@ -3403,7 +3419,7 @@ struct FitPlan {
+     floors: LadderFloors,
+ }
+ 
+-pub(crate) fn fit_seed_times(
++fn fit_seed_times(
+     axis: usize,
+     t_start: f64,
+     t_end: f64,
