@@ -42,7 +42,7 @@ Run from the repo root.
 uv run python tools/bench/deploy.py sync [--tree DIR]  # rsync a worktree (default: this one) to Pi ~/klipper, delete stale, build-native.sh if rust/ changed, restart klipper, write ~/klipper/.bench-deploy.json
 uv run python tools/bench/deploy.py reset-target   # SWD-reset the F401 (for an MCU that no longer answers; a latched shutdown is already cleared by the FIRMWARE_RESTART that restart_klipper/prepare_printer send when klippy settles in shutdown), restart klipper
 uv run python tools/bench/lock.py hold -- <cmd...> # run a multi-step session under the bench lock
-uv run python tools/bench/suite.py [--quick] [--expect-fail NAME]  # regression matrix: sync + 7 runs (3 with --quick) + analyze, table, ~/bench/suites/<ts>/summary.json
+uv run python tools/bench/suite.py [--quick] [--expect-fail NAME]  # regression matrix: sync + 8 runs (3 with --quick) + analyze, table, ~/bench/suites/<ts>/summary.json
 uv run python tools/bench/deploy.py flash-target   # build F401 fw (f401.config), flash via Pi SWD, restart klippy
 uv run python tools/bench/deploy.py flash-capture  # build capture-fw, flash F407 via ST-Link
 uv run python tools/bench/deploy.py config         # validate + push printer.cfg, FIRMWARE_RESTART
@@ -116,29 +116,35 @@ The bound 0.05 step / 50 µs puts the crossover at 1 kHz. From 1 kHz up, any ste
 
 Any tool that touches the Pi or the boards (`run.py`, every `deploy.py` subcommand) takes an exclusive lock on `~/bench/.lock` and waits up to `--lock-timeout` seconds (default 1800), reporting the holder every 30 s, so several agents can share the bench safely. `lock.py hold -- <cmd>` keeps the lock across several steps (children inherit `BENCH_LOCK_TOKEN` and re-enter it).
 
-`run.json` records `deployed` (the Pi's `.bench-deploy.json`: HEAD, branch, `git diff HEAD` sha256, dirty paths, worktree); `run.py` fails if it is missing. `suite.py` is the one-command regression check: it takes the lock once, syncs, runs each row (first_layers, speed_ladder, speed_ladder_fast, extrude_ladder, epochs, dense_top, dense_top_fast_throttled), records crashed rows and recovers with `reset-target`, and exits non-zero if any row fails; rows expected to fail must be named with `--expect-fail` (an expected-fail row that passes also fails the suite). Agent usage guide: `.claude/skills/bench/SKILL.md`.
+`run.json` records `deployed` (the Pi's `.bench-deploy.json`: HEAD, branch, `git diff HEAD` sha256, dirty paths, worktree); `run.py` fails if it is missing. `suite.py` is the one-command regression check: it takes the lock once, syncs, runs each row (first_layers, speed_ladder, speed_ladder_fast, extrude_ladder, epochs, rest_ladder, dense_top, dense_top_fast_throttled; rest_ladder runs `configs/rest_ladder.cfg`, fast Z limits whose slow root searches meet the reanchor cuts its G4 rests trigger mid-print, the case a budget-truncated cut drain once turned into LatticeDrift), records crashed rows and recovers with `reset-target`, and exits non-zero if any row fails; rows expected to fail must be named with `--expect-fail` (an expected-fail row that passes also fails the suite). Agent usage guide: `.claude/skills/bench/SKILL.md`.
 
 ## Replay throughput (Pi 5)
 
-`gcode_replay_bench` on the bench Pi 5 (2.4 GHz, `ondemand` pinned at max, `throttled=0x0`, 54–60 °C, klippy idle), full `voron_dense_top_layers.gcode`, worst 5 s stream window realtime factor (`ci.sh replay-budget`'s metric), cores limited with `taskset`. Lower of two runs; runs agreed within 2 %. Main `c53486ec9`, 2026-11-03.
+`gcode_replay_bench` on the bench Pi 5 (2.4 GHz, `ondemand` pinned at max, `throttled=0x0`, 54–60 °C, klippy idle), full `voron_dense_top_layers.gcode`, worst 5 s stream window realtime factor (`ci.sh replay-budget`'s metric), cores limited with `taskset`. The target is ≥ 2× at 2 cores, which leaves the other two to klippy and the OS. Main `80ad5b4d8`, 2026-11-04; repeat runs agree within 2 %.
 
-| config | segments | 4 cores | 2 cores | 1 core |
-|---|---:|---:|---:|---:|
-| `printer.cfg` | 807 | 19.2 | 17.3 | 11.7 |
-| `configs/fast.cfg` | 712 | 9.4 | 8.4 | 5.5 |
-| `configs/p1_bowden_bedslinger_kernel_cd0.04.cfg` | 1309 | 22.4 | 21.9 | 15.8 |
-| `configs/trident_kernel.cfg` | 19670 | 2.11 | 1.66 | 1.09 |
-| `configs/trident_ramp.cfg` | 19670 | 1.34 | 1.00 | 0.74 |
-| `configs/profiles/p1_bowden_bedslinger_kernel.cfg` | 18282 | 3.45 | 3.19 | 2.18 |
-| `configs/profiles/p1_bowden_bedslinger_ramp.cfg` | — | panics | panics | panics |
-| `configs/profiles/p2_i3_direct_drive_kernel.cfg` | 19566 | 3.34 | 3.10 | 2.07 |
-| `configs/profiles/p2_i3_direct_drive_ramp.cfg` | 19566 | 2.87 | 2.42 | 1.69 |
-| `configs/profiles/p3_voron_direct_drive_kernel.cfg` | 19669 | 2.27 | 1.92 | 1.24 |
-| `configs/profiles/p3_voron_direct_drive_ramp.cfg` | 19669 | 1.59 | 1.38 | 0.96 |
-| `configs/profiles/p4_high_accel_kernel.cfg` | 19670 | 2.22 | 1.74 | 1.14 |
-| `configs/profiles/p4_high_accel_ramp.cfg` | 19670 | 1.29 | 0.99 | 0.71 |
+| config | 4 cores | 2 cores |
+|---|---:|---:|
+| `printer.cfg` | 15.8 | 15.1 |
+| `configs/capacity.cfg` | 8.90 | 7.68 |
+| `configs/fast.cfg` | 8.43 | 7.27 |
+| `configs/p1_bowden_bedslinger_kernel_cd0.04.cfg` | 44.3 | 42.3 |
+| `configs/p2_i3_direct_drive_ramp_cd0.01.cfg` | 6.96 | 5.92 |
+| `configs/p3_voron_direct_drive_ramp_cd0.01.cfg` | 4.09 | 3.35 |
+| `configs/p4_high_accel_kernel_cd0.01.cfg` | 5.72 | 5.21 |
+| `configs/p4_high_accel_ramp_cd0.01.cfg` | 6.30 | 5.30 |
+| `configs/ramp.cfg` | 13.8 | 11.5 |
+| `configs/trident_kernel.cfg` | 2.89 | 2.29 |
+| `configs/trident_ramp.cfg` | 6.96 | 5.01 |
+| `configs/profiles/p1_bowden_bedslinger_kernel.cfg` | 11.8 | 10.4 |
+| `configs/profiles/p1_bowden_bedslinger_ramp.cfg` | 18.7 | 15.8 |
+| `configs/profiles/p2_i3_direct_drive_kernel.cfg` | 4.87 | 4.00 |
+| `configs/profiles/p2_i3_direct_drive_ramp.cfg` | 4.83 | 3.44 |
+| `configs/profiles/p3_voron_direct_drive_kernel.cfg` | 2.82 | 2.16 |
+| `configs/profiles/p3_voron_direct_drive_ramp.cfg` | 3.18 | 2.12 |
+| `configs/profiles/p4_high_accel_kernel.cfg` | 4.38 | 3.71 |
+| `configs/profiles/p4_high_accel_ramp.cfg` | 7.29 | 5.25 |
 
-The ~19 670-segment chains are bound by the single `kalico-shaper` thread (`shaper_busy` ≈ 100 % of wall, the planner blocked on it ≈ 97 %); with 4 cores the pool helpers sit ~50 % idle. `perf`: `ExactConvolution::pieces_over` 7–14 %, moment accumulation 9–12 %, trajectory/law/NURBS evaluation 12–22 %, and on ratio-ramp chains `ratio_ramp::{RatioSmoothing::correction, WidthField::jet}` 8–13 %.
+At 2 cores the `kalico-shaper` thread is busy ≈ 100 % of the wall time and the process uses ≈ 1.8 cores: the planning thread fits each lowered segment's sources while the shaper shapes the ones before it. The cost is in the shaper's leader fits and follower projection (about half of all CPU, `ExactConvolution::pieces_over` the largest single item) and in the planning thread's source fits (about 40 %, analytic span evaluation and the ladder proofs). `gcode_replay_bench --digest` hashes the emitted trajectory, so a throughput change can be held to an identical output.
 
 ## MCU step-rate capacity (F401, classic host-stepped path)
 
@@ -166,6 +172,18 @@ Other families, scaled from the F401 by clock and by the instructions one more s
 | F103 | 72 MHz | 96 | ≈ 1.7 (flash wait states, no ART) | ≈ 220 k |
 | G0B1 | 64 MHz | 109–123 | ≈ 1.6 (M0+) | ≈ 160–180 k |
 | H723 | 520 MHz | 81 | ≈ 2.5 (GPIO and DWT behind slower buses) | ≈ 1.3 M |
+
+### Self-benchmark
+
+Every MCU now measures its own step cost. On the first `get_step_benchmark` (`src/stepper_bench.c`), it runs four benchmark steppers through the real classic dispatch path: `sched_timer_dispatch`, the batching, and the step and finish code. The pulses go to a RAM sink instead of a pin (`gpio_out_bench_sink`). The steppers run in two pairs 0.25 µs apart, like CoreXY a/b, 32 steps each at 10 µs intervals. The MCU sums the ticks spent inside dispatches and reports the worst of three runs as ticks per step, for the 2 µs pulsed mode and for the both-edge mode. Klippy queries it at connect and refuses firmware without the command. The result is in `printer.mcu.step_benchmark`. `CONFIG_MCU_SIM` builds report `simulated=1` and do not run it. On a real Linux MCU the sink is an invalid file descriptor, so the GPIO ioctl fails fast and the cost is a lower bound.
+
+F401: 301 ticks/step pulsed (279 k steps/s, 0.93 × the ladder ceiling) and 160 ticks/step both-edge (525 k steps/s). The values are identical across four resets. `suite.py` fails unless the pulsed capacity lies within `BENCHMARK_BAND` (0.85–1.10) of `LADDER_CEILING_STEPS_PER_S` (300 k).
+
+CI runs the benchmark of every test/configs firmware in unicorn (`step_benchmark_emu.py`, from `scripts/ci-build-mcu.sh`). In the emulator one instruction is one tick, the MCU is in its configured state, and the build fails on a shutdown or on a result outside 40–600 instructions/step. Instructions per step, pulsed / both-edge: F401 188 / 94, F103 172–174 / 95–96, G0B1 229–244 / 115–121, H723 300 / 154. The F401's 301 ticks over 188 instructions is 1.60 cycles per instruction.
+
+### How the capacity caps moves
+
+Klippy turns the benchmark into a per-move speed cap (`klippy/motion_step_capacity.py`, `docs/Config_Reference_Motion.md`, "MCU step capacity"). Each MCU gets 0.75 × CLOCK_FREQ ticks per second (`STEP_CAPACITY_FRACTION`). 0.75 is the ladder's knee above: p99 lateness holds at 4.1–5.1 µs up to 225 k steps/s, 75 % of the ~300 k ceiling. A motor costs its benchmarked ticks per step, pulsed or both-edge by its own mode, times the steps per second the move asks of it. The planner keeps the sum over each MCU's motors within the capacity, with pressure advance counted on the extruder. On this bench (F401, 301 ticks/step pulsed) that is 209 k steps/s. Pure X/Y travel reaches 1308 mm/s and is never capped at `max_velocity: 1000`. Only extrusions above a ratio of about 0.088 along X or Y at full speed are slowed, e.g. a 0.8 × 0.3 mm line to 964 mm/s. `capacity.cfg` raises the limits past the cap. Its ladder rungs above ~209 k aggregate are now planned slower than the G-code asks, and `step_capacity_capped` events report it.
 
 ## Limits
 

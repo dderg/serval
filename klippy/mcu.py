@@ -153,6 +153,49 @@ class MCU:
     def get_move_queue_slots(self):
         return self._move_queue_slots
 
+    def get_step_benchmark(self):
+        return self._step_benchmark
+
+    def _query_step_benchmark(self):
+        parser = self._serial.get_msgparser()
+        if "config_stepper" not in parser.messages_by_name:
+            logging.info(
+                "MCU '%s' firmware cannot drive steppers; no step benchmark",
+                self._name,
+            )
+            return None
+        if "get_step_benchmark" not in parser.messages_by_name:
+            raise error(
+                "MCU '%s' firmware does not report its step dispatch cost "
+                "(no get_step_benchmark command); flash firmware built from "
+                "this Serval version" % (self._name,)
+            )
+        result = self.lookup_query_command(
+            "get_step_benchmark",
+            "step_benchmark pulsed_ticks_per_step=%u"
+            " both_edge_ticks_per_step=%u simulated=%c",
+        ).send()
+        benchmark = {
+            "pulsed_ticks_per_step": result["pulsed_ticks_per_step"],
+            "both_edge_ticks_per_step": result["both_edge_ticks_per_step"],
+            "simulated": bool(result["simulated"]),
+        }
+        if not benchmark["simulated"] and not (
+            benchmark["pulsed_ticks_per_step"]
+            and benchmark["both_edge_ticks_per_step"]
+        ):
+            raise error(
+                "MCU '%s' reported an empty step benchmark: %s"
+                % (self._name, benchmark)
+            )
+        logging.info(
+            "MCU '%s' step benchmark: %s (clock %.0f Hz)",
+            self._name,
+            benchmark,
+            self._mcu_freq,
+        )
+        return benchmark
+
     def _init_identity(self, config, clocksync):
         self._config = config
         self._printer = printer = config.get_printer()
@@ -227,6 +270,7 @@ class MCU:
         self._mcu_freq = 0.0
         self._reserved_move_slots = 0
         self._move_queue_slots = 0
+        self._step_benchmark = None
         self._flush_callbacks = []
         self._get_status_info = {}
         self._stats_sumsq_base = 0.0
@@ -317,6 +361,9 @@ class MCU:
         prefix = "MCU '%s' shutdown: " % (self._name,)
         is_latched_shutdown = params["#name"] == "is_shutdown"
         if is_latched_shutdown:
+            connecting = self._printer.get_state_message()[1] == "startup"
+            if connecting and not self._resettable():
+                return
             prefix = "Previous MCU '%s' shutdown: " % (self._name,)
 
         self._printer.invoke_async_shutdown(
@@ -418,23 +465,25 @@ class MCU:
                 )
             raise
 
-    def _recover_latched_peripheral_shutdown(self, get_config_cmd, exc):
-        is_motion_mcu = (
-            "runtime_reset" in self._serial.get_msgparser().messages_by_name
-        )
-        if is_motion_mcu:
-            has_reset = not (
-                self._reset_cmd is None and self._config_reset_cmd is None
-            )
-            remedy = "FIRMWARE_RESTART" if has_reset else "a power cycle"
+    def _resettable(self):
+        return not (self._reset_cmd is None and self._config_reset_cmd is None)
+
+    def _recover_latched_shutdown(self, get_config_cmd, exc):
+        if self._resettable():
             raise error(
-                "MCU '%s' is latched in shutdown and requires %s"
-                " (clear_shutdown cannot reset its timer and runtime"
-                " state): %s" % (self._name, remedy, exc)
+                "MCU '%s' is latched in shutdown from a previous host"
+                " session; FIRMWARE_RESTART resets it: %s" % (self._name, exc)
+            )
+        if "runtime_reset" in self._serial.get_msgparser().messages_by_name:
+            raise error(
+                "MCU '%s' is latched in shutdown and requires a power cycle"
+                " (it has no reset command, and clear_shutdown cannot reset"
+                " its timer and runtime state): %s" % (self._name, exc)
             )
         logging.info(
-            "MCU '%s' latched the shutdown broadcast from a previous host"
-            " session; sending clear_shutdown and retrying: %s",
+            "MCU '%s' has no reset command and latched the shutdown broadcast"
+            " from a previous host session; sending clear_shutdown and"
+            " retrying: %s",
             self._name,
             exc,
         )
@@ -455,9 +504,7 @@ class MCU:
         except Exception as e:
             if "shutdown state" not in str(e):
                 raise
-            config_params = self._recover_latched_peripheral_shutdown(
-                get_config_cmd, e
-            )
+            config_params = self._recover_latched_shutdown(get_config_cmd, e)
         if self._is_shutdown:
             raise error(
                 "MCU '%s' error during config: %s"
@@ -518,6 +565,8 @@ class MCU:
             )
             return
         config_params = self._send_get_config()
+        self._step_benchmark = self._query_step_benchmark()
+        self._get_status_info["step_benchmark"] = self._step_benchmark
         if not config_params["is_config"]:
             if self._restart_method == "rpi_usb":
                 # Only configure mcu after usb power reset

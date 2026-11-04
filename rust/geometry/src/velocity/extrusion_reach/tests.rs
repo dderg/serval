@@ -54,7 +54,10 @@ fn stream(pieces: &[(f64, f64, f64)]) -> Vec<Move> {
 }
 
 fn batch(moves: &[Move]) -> Vec<f64> {
-    ratios_in_reach(moves, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
+    extrusion_budgets(moves, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
+        .iter()
+        .map(|budget| budget.ratio_in_reach)
+        .collect()
 }
 
 fn reach() -> ExtrusionReach {
@@ -62,7 +65,7 @@ fn reach() -> ExtrusionReach {
 }
 
 fn settled(reach: &mut ExtrusionReach) -> Vec<f64> {
-    std::iter::from_fn(|| reach.pop().map(|(_, ratio)| ratio)).collect()
+    std::iter::from_fn(|| reach.pop().map(|(_, budget)| budget.ratio_in_reach)).collect()
 }
 
 fn streamed(moves: &[Move]) -> Vec<f64> {
@@ -203,5 +206,30 @@ fn the_history_keeps_only_what_a_move_still_to_come_can_reach() {
     assert!(
         (longest as f64) < history_mm + waiting_mm + 3.0,
         "{longest} marks kept"
+    );
+}
+
+#[test]
+fn an_extrude_only_move_holds_still_for_the_kernel_reach_beside_motion_only() {
+    let moves = stream(&[
+        (10.0, RATIO, 150.0),
+        (0.0, -0.5, 40.0),
+        (0.0, 0.5, 40.0),
+        (10.0, RATIO, 150.0),
+        (0.0, -0.5, 40.0),
+    ]);
+    let holds: Vec<[f64; 2]> = extrusion_budgets(&moves, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
+        .iter()
+        .map(|budget| budget.rest_holds_s)
+        .collect();
+    assert_eq!(
+        holds,
+        [
+            [0.0, 0.0],
+            [KERNEL_REACH_S, 0.0],
+            [0.0, KERNEL_REACH_S],
+            [0.0, 0.0],
+            [KERNEL_REACH_S, 0.0],
+        ]
     );
 }

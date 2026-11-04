@@ -160,6 +160,10 @@ impl StepRootCursor {
         self.resume_floor
     }
 
+    pub fn search_floor(&self) -> u64 {
+        self.resume_floor.max(self.frontier)
+    }
+
     pub fn origin_clock(&self) -> Option<u64> {
         self.origin_clock
     }

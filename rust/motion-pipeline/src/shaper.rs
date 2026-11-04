@@ -32,6 +32,9 @@ mod hull;
 #[path = "shaper_taylor.rs"]
 pub(crate) mod taylor;
 
+#[path = "shaper_axis_enclosure.rs"]
+pub(crate) mod axis_enclosure;
+
 use exact::ExactSpan;
 use hull::{FittedPiece, HullBudget};
 use taylor::{Ball, TaylorModel};
@@ -80,6 +83,40 @@ const UNIT_JERK_KINK_HERMITE_MISS: HermiteMiss = HermiteMiss {
     curvature_per_u2: 1.0 / 12.0,
     position: 1.0 / 192.0,
 };
+
+/// A signal's enclosure over a stretch: a slice of one the signal keeps,
+/// borrowed for the asking, or one built for it.
+pub(crate) enum Enclosure<'a> {
+    Kept(&'a [ExactPiece]),
+    Held(std::cell::Ref<'a, [ExactPiece]>),
+    Built(Vec<ExactPiece>),
+}
+
+impl Enclosure<'_> {
+    /// The enclosure with every piece's position moved by `base`.
+    pub(crate) fn offset_by(self, base: f64) -> Enclosure<'static> {
+        Enclosure::Built(self.iter().map(|piece| piece.offset_by(base)).collect())
+    }
+
+    pub(crate) fn into_owned(self) -> Vec<ExactPiece> {
+        match self {
+            Enclosure::Built(pieces) => pieces,
+            kept => kept.to_vec(),
+        }
+    }
+}
+
+impl std::ops::Deref for Enclosure<'_> {
+    type Target = [ExactPiece];
+
+    fn deref(&self) -> &[ExactPiece] {
+        match self {
+            Enclosure::Kept(pieces) => pieces,
+            Enclosure::Held(pieces) => pieces,
+            Enclosure::Built(pieces) => pieces,
+        }
+    }
+}
 
 pub(crate) trait TrackSignal {
     fn eval_pva(&self, t: f64) -> (f64, f64, f64);
@@ -144,9 +181,9 @@ pub(crate) trait TrackSignal {
     /// order's bound is within its `accuracy` where the signal resolves
     /// that. Exact polynomials are their own enclosure; `None` for a
     /// signal with neither.
-    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
         let _ = accuracy;
-        self.exact_polynomial_on(lo, hi)
+        self.exact_polynomial_on(lo, hi).map(Enclosure::Built)
     }
     /// What a rung that passes the probes is held against between them,
     /// where the signal has no enclosure.
@@ -173,6 +210,10 @@ impl TrackSignal for ContinuousAxis {
         ContinuousAxis::eval_pva(self, t).map_or((f64::NAN, f64::NAN, f64::NAN), |pva| {
             (pva.position, pva.velocity, pva.acceleration)
         })
+    }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
+        axis_enclosure::continuous_axis_enclosure(self, (lo, hi), accuracy).map(Enclosure::Built)
     }
 }
 
@@ -220,7 +261,7 @@ impl<S: TrackSignal> TrackSignal for &S {
     fn exact_polynomial_on(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
         S::exact_polynomial_on(self, lo, hi)
     }
-    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
         S::enclosure_on(self, lo, hi, accuracy)
     }
     fn between_probes(&self) -> BetweenProbes {
@@ -295,13 +336,11 @@ impl<S: TrackSignal> TrackSignal for ShiftedTrackSignal<S> {
         )
     }
 
-    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
-        let pieces = self.inner.enclosure_on(lo, hi, accuracy)?;
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
         Some(
-            pieces
-                .into_iter()
-                .map(|piece| piece.offset_by(self.base))
-                .collect(),
+            self.inner
+                .enclosure_on(lo, hi, accuracy)?
+                .offset_by(self.base),
         )
     }
 }
@@ -371,7 +410,7 @@ impl<S: TrackSignal> TrackSignal for FacingRead<'_, S> {
 
 pub(crate) const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 
-/// Buffered lowered segments plus the shaped-leader cache: `shaped[i]` is
+/// Buffered lowered segments plus the shaped-leader cache: `shaped` holds
 /// `segments[i]` with every kerneled non-follower axis already fitted. A
 /// frontier segment's convolution window is fully covered when it is first
 /// fitted, so the fit is final — later emits reuse it bit-identically
@@ -380,8 +419,53 @@ pub(crate) const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 #[derive(Default)]
 struct PendingSegments {
     segments: VecDeque<ContinuousSegment>,
-    shaped: VecDeque<ContinuousSegment>,
+    shaped: ShapedCache,
     materialized: usize,
+}
+
+/// The pending segments' fitted leaders, as the motors run them and as
+/// the follower projection reads them (see [`ColumnTrack`]).
+#[derive(Default)]
+struct ShapedCache {
+    stored: VecDeque<ContinuousSegment>,
+    read: VecDeque<ContinuousSegment>,
+}
+
+impl ShapedCache {
+    fn len(&self) -> usize {
+        self.stored.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.stored.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.stored.clear();
+        self.read.clear();
+    }
+
+    fn pop_front(&mut self) {
+        self.stored.pop_front();
+        self.read.pop_front();
+    }
+
+    fn extend(&mut self, stored: Vec<ContinuousSegment>, read: Vec<ContinuousSegment>) {
+        assert_eq!(
+            stored.len(),
+            read.len(),
+            "every fitted leader segment has its read form"
+        );
+        self.stored.extend(stored);
+        self.read.extend(read);
+    }
+
+    fn window(&mut self, window: usize) -> (&[ContinuousSegment], &[ContinuousSegment]) {
+        (
+            &self.stored.make_contiguous()[..window],
+            &self.read.make_contiguous()[..window],
+        )
+    }
 }
 
 impl PendingSegments {
@@ -762,6 +846,7 @@ fn materialize_source_axis(
     axis: usize,
     chains: &AxisChainSet,
     fit_tol: FitTol,
+    shared: Option<&SpanEnclosures>,
 ) -> Result<ContinuousAxis, PostProcessError> {
     let source = &segment.axes[axis];
     let variable_surface_z = axis == 2
@@ -791,7 +876,16 @@ fn materialize_source_axis(
         },
         &CapContactSource {
             source,
+            axis,
             cap_contacts: &cap_contacts,
+            shared,
+            enclosure: std::cell::OnceCell::new(),
+            whole: (segment.t_start, segment.t_end),
+            accuracy: HullBudget {
+                tol: fit_tol,
+                velocity: f64::INFINITY,
+            }
+            .enclosure_accuracy(),
         },
     )?;
     if !chains.is_projected_follower(axis) {
@@ -825,6 +919,43 @@ fn materialize_changed_sources<S: BorrowMut<ContinuousSegment> + Sync>(
             .map_or(1, |cores| cores.get())
             .min(jobs.len())
     };
+    let accuracy = HullBudget {
+        tol: fit_tol,
+        velocity: f64::INFINITY,
+    }
+    .enclosure_accuracy();
+    let shared: Vec<Option<SpanEnclosures>> = segments
+        .iter()
+        .enumerate()
+        .map(|(index, segment)| {
+            let segment = segment.borrow();
+            let analytic = |axis: usize| match &segment.axes[axis] {
+                ContinuousAxis::Analytic { span, .. } if axis_enclosure::encloses(span, axis) => {
+                    Some(span)
+                }
+                _ => None,
+            };
+            let span = jobs
+                .iter()
+                .filter(|&&(job_index, _)| job_index == index)
+                .find_map(|&(_, axis)| analytic(axis))?;
+            let axes = jobs
+                .iter()
+                .filter(|&&(job_index, axis)| {
+                    job_index == index
+                        && analytic(axis).is_some_and(|other| Arc::ptr_eq(other, span))
+                })
+                .map(|&(_, axis)| axis)
+                .collect();
+            Some(SpanEnclosures {
+                span: Arc::clone(span),
+                axes,
+                whole: (segment.t_start, segment.t_end),
+                accuracy,
+                built: std::sync::OnceLock::new(),
+            })
+        })
+        .collect();
     let fitted = pool
         .map_indexed(
             participants,
@@ -832,7 +963,13 @@ fn materialize_changed_sources<S: BorrowMut<ContinuousSegment> + Sync>(
             || (),
             |(), job| {
                 let (index, axis) = jobs[job];
-                materialize_source_axis(segments[index].borrow(), axis, chains, fit_tol)
+                materialize_source_axis(
+                    segments[index].borrow(),
+                    axis,
+                    chains,
+                    fit_tol,
+                    shared[index].as_ref(),
+                )
             },
         )
         .expect("source materialize thread panicked");
@@ -840,6 +977,33 @@ fn materialize_changed_sources<S: BorrowMut<ContinuousSegment> + Sync>(
         Arc::make_mut(&mut segments[index].borrow_mut().axes)[axis] = source?;
     }
     Ok(jobs.len())
+}
+
+/// The share of a piece's tolerance the audit lets an enclosure's bound
+/// spend before refining it.
+#[cfg(feature = "fit-audit")]
+const AUDIT_ENCLOSURE_SHARE: f64 = 1.0 / 1024.0;
+
+/// Proven upper bounds on a fitted piece's position and acceleration error
+/// over `resolved`: against the exact polynomials the fit proved it by
+/// where it had them, else against the signal's enclosure there.
+#[cfg(feature = "fit-audit")]
+pub(crate) fn proven_error_bounds<S: TrackSignal>(
+    sig: &S,
+    exact: Option<&[ExactPiece]>,
+    mono_u: &[f64],
+    (t0, t1): (f64, f64),
+    resolved: (f64, f64),
+    tol: FitTol,
+) -> Option<[f64; 2]> {
+    let piece = FittedPiece { mono_u, t0, t1 };
+    if let Some(exact) = exact {
+        return Some(hull::error_bounds(exact, piece, resolved, tol));
+    }
+    let accuracy =
+        [tol.pos_mm, f64::INFINITY, tol.accel_mm_s2].map(|budget| budget * AUDIT_ENCLOSURE_SHARE);
+    let enclosure = sig.enclosure_on(resolved.0, resolved.1, accuracy)?;
+    Some(hull::error_bounds(&enclosure, piece, resolved, tol))
 }
 
 /// Fits the shaper's changed sources ahead of it, on the thread that lowers
@@ -909,11 +1073,45 @@ fn cap_contact_seeds(span: &AnalyticMoveSpan) -> (Vec<f64>, Vec<f64>) {
     (seeds, cap_contacts)
 }
 
+/// The enclosures of a segment's analytic axes that read one span, built
+/// once for all of them by the first axis's fit that asks — the axes share
+/// each window's state and path trigonometry.
+struct SpanEnclosures {
+    span: Arc<AnalyticMoveSpan>,
+    axes: Vec<usize>,
+    whole: (f64, f64),
+    accuracy: [f64; 3],
+    built: std::sync::OnceLock<Option<Vec<Vec<ExactPiece>>>>,
+}
+
+impl SpanEnclosures {
+    fn of(&self, axis: usize) -> Option<&[ExactPiece]> {
+        let slot = self.axes.iter().position(|&shared| shared == axis)?;
+        let built = self.built.get_or_init(|| {
+            axis_enclosure::analytic_axes_enclosure(
+                &self.span,
+                &self.axes,
+                self.whole,
+                self.accuracy,
+            )
+        });
+        built.as_ref().map(|axes| axes[slot].as_slice())
+    }
+}
+
 /// A materialized source with the curvature-cap contacts its acceleration
-/// approaches as a square root.
+/// approaches as a square root, and its enclosure over the whole segment,
+/// built once at the fit's own accuracy — shared with the segment's other
+/// analytic axes where `shared` reads it: every rung of every span is
+/// proven against its stretch of it.
 struct CapContactSource<'a> {
     source: &'a ContinuousAxis,
+    axis: usize,
     cap_contacts: &'a [f64],
+    shared: Option<&'a SpanEnclosures>,
+    enclosure: std::cell::OnceCell<Option<Vec<ExactPiece>>>,
+    whole: (f64, f64),
+    accuracy: [f64; 3],
 }
 
 impl TrackSignal for CapContactSource<'_> {
@@ -923,6 +1121,23 @@ impl TrackSignal for CapContactSource<'_> {
 
     fn square_root_onsets(&self) -> &[f64] {
         self.cap_contacts
+    }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, _accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
+        let whole = match self.shared {
+            Some(shared) => shared.of(self.axis)?,
+            None => self
+                .enclosure
+                .get_or_init(|| {
+                    self.source
+                        .enclosure_on(self.whole.0, self.whole.1, self.accuracy)
+                        .map(Enclosure::into_owned)
+                })
+                .as_deref()?,
+        };
+        let first = whole.partition_point(|piece| piece.hi < lo);
+        let past = whole.partition_point(|piece| piece.lo <= hi);
+        Some(Enclosure::Kept(&whole[first..past.max(first)]))
     }
 }
 
@@ -974,7 +1189,7 @@ struct AxisFitRequest<'a> {
 /// the shaped-leader cache, and the toolhead mirror.
 struct ShaperOutputs<'a> {
     follower_states: &'a mut Vec<FollowerState>,
-    shaped_cache: &'a mut VecDeque<ContinuousSegment>,
+    shaped_cache: &'a mut ShapedCache,
     toolhead_tap: Option<&'a Sender<ContinuousSegment>>,
 }
 
@@ -1045,17 +1260,17 @@ fn apply_axis_chains(
     };
     if window > outputs.shaped_cache.len() {
         let mut fresh: Vec<ContinuousSegment> = base[outputs.shaped_cache.len()..window].to_vec();
-        fit_leader_axes(request, &mut fresh, n_axes, work)?;
-        outputs.shaped_cache.extend(fresh);
+        let read = fit_leader_axes(request, &mut fresh, n_axes, work)?;
+        outputs.shaped_cache.extend(fresh, read);
     }
-    let frontier = &outputs.shaped_cache.make_contiguous()[..window];
+    let (frontier, read_frontier) = outputs.shaped_cache.window(window);
     let mut out: Vec<ContinuousSegment> = frontier.iter().take(commit_count).cloned().collect();
     let projection_started = crate::timing::stopwatch();
     let mut projection_timing = crate::follower_projection::ProjectionTiming::default();
     project_followers(
         crate::follower_projection::ProjectionWindow {
             base,
-            frontier,
+            frontier: read_frontier,
             chains,
             fit_tol,
             lookahead,
@@ -1189,7 +1404,7 @@ fn fit_motor_commands(
     for (axis, column, _) in fit_columns(request, out, &columns) {
         let column = column?.expect("a motor-command chain convolves with its kernel");
         for (seg, track) in out.iter_mut().zip(column) {
-            Arc::make_mut(&mut seg.axes)[axis] = ContinuousAxis::Spline(Arc::new(track));
+            Arc::make_mut(&mut seg.axes)[axis] = ContinuousAxis::Spline(track.stored);
             rebuilt += 1;
         }
     }
@@ -1233,7 +1448,7 @@ fn constant_axis_column(
     segments: &[&ContinuousSegment],
     targets: &[ContinuousSegment],
     axis: usize,
-) -> Option<Vec<nurbs::ScalarNurbs>> {
+) -> Option<Vec<ColumnTrack>> {
     let splines = segments
         .iter()
         .map(|seg| match &seg.axes[axis] {
@@ -1251,7 +1466,10 @@ fn constant_axis_column(
     targets
         .iter()
         .map(|seg| match &seg.axes[axis] {
-            ContinuousAxis::Spline(curve) => Some((**curve).clone()),
+            ContinuousAxis::Spline(curve) => Some(ColumnTrack {
+                stored: Arc::clone(curve),
+                read: None,
+            }),
             _ => None,
         })
         .collect()
@@ -1291,7 +1509,7 @@ fn fit_axis_column(
     targets: &[ContinuousSegment],
     column: FitColumn,
     target_workers: usize,
-) -> Result<Option<Vec<nurbs::ScalarNurbs>>, PostProcessError> {
+) -> Result<Option<Vec<ColumnTrack>>, PostProcessError> {
     let AxisFitRequest {
         history,
         base,
@@ -1352,7 +1570,7 @@ fn fit_axis_column(
             targets[0].t_start,
         ),
         fit_tol,
-        signal.fit_context(),
+        signal,
         target_workers,
         pool,
     )
@@ -1588,13 +1806,14 @@ fn fit_axis_targets(
     targets: &[ContinuousSegment],
     source: ShapedSignalSource,
     fit_tol: FitTol,
-    fit_context: &'static str,
+    signal: ColumnSignal,
     target_workers: usize,
     pool: &WorkerPool,
-) -> Result<Vec<nurbs::ScalarNurbs>, PostProcessError> {
+) -> Result<Vec<ColumnTrack>, PostProcessError> {
     if targets.is_empty() {
         return Ok(Vec::new());
     }
+    let fit_context = signal.fit_context();
     let shaped_breaks = &source.shaped_breaks;
     let hidden_break_input = source.hidden_break_input();
     let shaped_times = shaped_breaks.times();
@@ -1610,7 +1829,7 @@ fn fit_axis_targets(
         .unwrap_or(0);
     if max_seed_spans < LEADER_SPAN_PARALLEL_THRESHOLD {
         let fit_target = |target: &ContinuousSegment, sig: &_| {
-            let track = fit_leader_target(
+            let pieces = fit_leader_target(
                 AxisFit {
                     axis,
                     t_start: target.t_start,
@@ -1624,13 +1843,7 @@ fn fit_axis_targets(
                 shaped_breaks,
                 hidden_break_input,
             )?;
-            if !track.control_points().iter().all(|value| value.is_finite()) {
-                return Err(PostProcessError::NonFiniteSample {
-                    axis,
-                    t: target.t_start,
-                });
-            }
-            Ok(track)
+            column_track(signal, axis, pieces)
         };
         let workers = target_workers.max(1).min(targets.len());
         return pool
@@ -1797,7 +2010,7 @@ fn fit_axis_targets(
                 Err(_) => needs_serial_fit = true,
             }
         }
-        let track = if needs_serial_fit || refinement_splits > MAX_FIT_REFINEMENT_SPLITS {
+        let pieces = if needs_serial_fit || refinement_splits > MAX_FIT_REFINEMENT_SPLITS {
             let sig = make_sig();
             fit_leader_target(
                 AxisFit {
@@ -1814,22 +2027,71 @@ fn fit_axis_targets(
                 hidden_break_input,
             )?
         } else {
-            fit_pieces_to_nurbs(axis, pieces)?
+            pieces
         };
-        if !track.control_points().iter().all(|value| value.is_finite()) {
-            return Err(PostProcessError::NonFiniteSample {
-                axis,
-                t: targets[target_index].t_start,
-            });
-        }
-        tracks.push(track);
+        tracks.push(column_track(signal, axis, pieces)?);
     }
     Ok(tracks)
 }
 
+/// A fitted column track as the motors run it and, for a leader, as the
+/// follower projection reads it. `stored` raises every piece to the
+/// track's highest degree on absolute control points, which rounds a
+/// piece's jerk to about `n(n−1)(n−2)·ε·|p|/h³`; `read` keeps each piece
+/// at its own degree on its own origin, so an advance with no kernel after
+/// it, which reads the leaders' jerk, reads it at the piece's precision
+/// rather than at the track's distance from the origin. `None` where the
+/// stored track is read as it is: a constant, or a motor command no
+/// projection reads.
+pub(crate) struct ColumnTrack {
+    pub stored: Arc<nurbs::ScalarNurbs>,
+    pub read: Option<ContinuousAxis>,
+}
+
+fn column_track(
+    signal: ColumnSignal,
+    axis: usize,
+    pieces: Vec<BezierPiece>,
+) -> Result<ColumnTrack, PostProcessError> {
+    match signal {
+        ColumnSignal::Shaped => leader_track(axis, pieces),
+        ColumnSignal::MotorCommand { .. } => Ok(ColumnTrack {
+            stored: Arc::new(finite_track(axis, pieces)?),
+            read: None,
+        }),
+    }
+}
+
+pub(crate) fn leader_track(
+    axis: usize,
+    pieces: Vec<BezierPiece>,
+) -> Result<ColumnTrack, PostProcessError> {
+    let relative = crate::follower_projection::localize_pieces(0.0, &pieces);
+    let stored = finite_track(axis, pieces)?;
+    let read = ContinuousAxis::try_piecewise_relative_spline(relative).unwrap_or_else(|error| {
+        panic!("shaper: axis {axis}: the leader's own pieces do not join: {error}")
+    });
+    Ok(ColumnTrack {
+        stored: Arc::new(stored),
+        read: Some(read),
+    })
+}
+
+fn finite_track(
+    axis: usize,
+    pieces: Vec<BezierPiece>,
+) -> Result<nurbs::ScalarNurbs, PostProcessError> {
+    let t_start = pieces.first().map_or(f64::NAN, |piece| piece.u_start);
+    let track = fit_pieces_to_nurbs(axis, pieces)?;
+    if !track.control_points().iter().all(|value| value.is_finite()) {
+        return Err(PostProcessError::NonFiniteSample { axis, t: t_start });
+    }
+    Ok(track)
+}
+
 type TimedColumn = (
     usize,
-    Result<Option<Vec<nurbs::ScalarNurbs>>, PostProcessError>,
+    Result<Option<Vec<ColumnTrack>>, PostProcessError>,
     u128,
 );
 
@@ -1868,12 +2130,15 @@ fn fit_columns(
         .expect("axis fit thread panicked")
 }
 
+/// Fits the kerneled leader axes of `fresh` in place, as the motors run
+/// them, and returns the same segments with the leaders as the follower
+/// projection reads them (see [`ColumnTrack`]).
 fn fit_leader_axes(
     request: AxisFitRequest,
     fresh: &mut [ContinuousSegment],
     n_axes: usize,
     work: crate::timing::PhaseWorkload,
-) -> Result<(), PostProcessError> {
+) -> Result<Vec<ContinuousSegment>, PostProcessError> {
     let chains = request.chains;
     let default_chain = CompiledChain::default();
     let leader_columns: Vec<FitColumn> = (0..n_axes)
@@ -1906,13 +2171,18 @@ fn fit_leader_axes(
             &per_axis.join(" "),
         );
     }
+    let mut read_segments = fresh.to_vec();
     for (axis, column, _) in columns {
         let Some(column) = column? else { continue };
-        for (seg, track) in fresh.iter_mut().zip(column) {
-            Arc::make_mut(&mut seg.axes)[axis] = ContinuousAxis::Spline(Arc::new(track));
+        for ((seg, read_seg), track) in fresh.iter_mut().zip(&mut read_segments).zip(column) {
+            let read = track
+                .read
+                .unwrap_or_else(|| ContinuousAxis::Spline(Arc::clone(&track.stored)));
+            Arc::make_mut(&mut read_seg.axes)[axis] = read;
+            Arc::make_mut(&mut seg.axes)[axis] = ContinuousAxis::Spline(track.stored);
         }
     }
-    Ok(())
+    Ok(read_segments)
 }
 
 /// Every time the window's signal changes polynomial on this axis: each
@@ -3339,14 +3609,14 @@ fn fit_leader_target<S: TrackSignal>(
     sig: &S,
     shaped_breaks: &ShapedBreaks,
     hidden_break_input: Option<&AxisSignalTable>,
-) -> Result<nurbs::ScalarNurbs, PostProcessError> {
+) -> Result<Vec<BezierPiece>, PostProcessError> {
     let seeds = shaped_breaks.select_seeds(
         fit_seed_times(fit.axis, fit.t_start, fit.t_end, fit.seed_breakpoints)?,
         hidden_break_input,
         fit.fit_tol,
     );
     let plan = plan_over_seeds(&fit, sig, seeds)?;
-    fit_axis_over_plan(&fit, sig, plan, true)
+    fit_pieces_over_plan(&fit, sig, plan, true)
 }
 
 fn fit_axis_over_plan<S: TrackSignal>(
@@ -3355,6 +3625,18 @@ fn fit_axis_over_plan<S: TrackSignal>(
     plan: FitPlan,
     requires_hull: bool,
 ) -> Result<nurbs::ScalarNurbs, PostProcessError> {
+    fit_pieces_to_nurbs(
+        fit.axis,
+        fit_pieces_over_plan(fit, sig, plan, requires_hull)?,
+    )
+}
+
+fn fit_pieces_over_plan<S: TrackSignal>(
+    fit: &AxisFit,
+    sig: &S,
+    plan: FitPlan,
+    requires_hull: bool,
+) -> Result<Vec<BezierPiece>, PostProcessError> {
     let policy = SpanFitPolicy {
         axis: fit.axis,
         fit_tol: fit.fit_tol,
@@ -3384,7 +3666,7 @@ fn fit_axis_over_plan<S: TrackSignal>(
             &mut pieces,
         )?;
     }
-    fit_pieces_to_nurbs(fit.axis, pieces)
+    Ok(pieces)
 }
 
 /// The convolution samples one span is fitted against, held by node rather
@@ -5269,37 +5551,24 @@ impl NonlinearAdvanceSignal {
         let tau = window.time_since(self.starts[piece]);
         let [position, velocity, acceleration, jerk] =
             [0, 1, 2, 3].map(|order| taylor::derivative_of(coefficients, order, &tau));
-        let adv = self.adv;
-        let vl = adv.linearization_velocity;
-        let unit = velocity.scale(Ball::rounded(1.0 / vl, 1));
-        let Some(shape) = AdvanceShape::of(adv.model, &unit) else {
-            return [TaylorModel::UNBOUNDED; 3];
-        };
-        let slope = shape
-            .slope
-            .scale(Ball::rounded(adv.nonlinear_offset / vl, 1))
-            .add_ball(Ball::exact(adv.linear_advance));
-        let curvature = shape
-            .curvature
-            .scale(Ball::rounded(adv.nonlinear_offset / (vl * vl), 2));
-        let squared = acceleration.mul(&acceleration);
-        let mut models = [
-            position
-                .add(&velocity.scale(Ball::exact(adv.linear_advance)))
-                .add(&shape.value.scale(Ball::exact(adv.nonlinear_offset))),
-            velocity.add(&slope.mul(&acceleration)),
-            acceleration
-                .add(&curvature.mul(&squared))
-                .add(&slope.mul(&jerk)),
-        ];
-        let offset = adv.nonlinear_offset.abs();
-        let [shape_miss, slope_miss, curvature_miss] = shape.branch_miss;
-        let slope_miss = offset / vl * slope_miss;
-        let curvature_miss = offset / (vl * vl) * curvature_miss;
-        models[0].widen(offset * shape_miss);
-        models[1].widen(slope_miss * acceleration.bound());
-        models[2].widen(curvature_miss * squared.bound() + slope_miss * jerk.bound());
-        if self.curvature_velocity_may_flip(piece, window, &velocity, &acceleration) {
+        let mut models = nonlinear_advance_models(
+            &self.adv,
+            &[position, velocity, acceleration],
+            &[velocity, acceleration, jerk],
+        );
+        let (velocity, acceleration) = (&velocity, &acceleration);
+        if models[2].rad().is_finite()
+            && self.curvature_velocity_may_flip(piece, window, velocity, acceleration)
+        {
+            let vl = self.adv.linearization_velocity;
+            let unit = velocity.scale(Ball::rounded(1.0 / vl, 1));
+            let shape = AdvanceShape::of(self.adv.model, &unit)
+                .expect("the advance's shape modelled its own velocity");
+            let curvature = shape
+                .curvature
+                .scale(Ball::rounded(self.adv.nonlinear_offset / (vl * vl), 2));
+            let curvature_miss = self.adv.nonlinear_offset.abs() / (vl * vl) * shape.branch_miss[2];
+            let squared = acceleration.mul(acceleration);
             models[2].widen(2.0 * (curvature.bound() + curvature_miss) * squared.bound());
         }
         models
@@ -5320,6 +5589,47 @@ impl NonlinearAdvanceSignal {
         let (centre, spread) = velocity.spread();
         near_edge && centre.abs() - spread < MIN_DEVICE_INTERVAL_S * acceleration.bound()
     }
+}
+
+/// Taylor models of `[p, v, a]` advanced by `adv`: the track `[p, v, a]`
+/// plus the advance of the motion it reads, `[v, a, j]` — `p + advance(v)`,
+/// `v + slope(v)·a`, `a + slope(v)·j + curvature(v)·a²` — each widened by
+/// how far the shape may miss a branch its velocity's range reaches.
+pub(crate) fn nonlinear_advance_models(
+    adv: &trajectory::NonlinearAdvance,
+    [position, track_velocity, track_acceleration]: &[TaylorModel; 3],
+    [velocity, acceleration, jerk]: &[TaylorModel; 3],
+) -> [TaylorModel; 3] {
+    let vl = adv.linearization_velocity;
+    let unit = velocity.scale(Ball::rounded(1.0 / vl, 1));
+    let Some(shape) = AdvanceShape::of(adv.model, &unit) else {
+        return [TaylorModel::UNBOUNDED; 3];
+    };
+    let slope = shape
+        .slope
+        .scale(Ball::rounded(adv.nonlinear_offset / vl, 1))
+        .add_ball(Ball::exact(adv.linear_advance));
+    let curvature = shape
+        .curvature
+        .scale(Ball::rounded(adv.nonlinear_offset / (vl * vl), 2));
+    let squared = acceleration.mul(acceleration);
+    let mut models = [
+        position
+            .add(&velocity.scale(Ball::exact(adv.linear_advance)))
+            .add(&shape.value.scale(Ball::exact(adv.nonlinear_offset))),
+        track_velocity.add(&slope.mul(acceleration)),
+        track_acceleration
+            .add(&curvature.mul(&squared))
+            .add(&slope.mul(jerk)),
+    ];
+    let offset = adv.nonlinear_offset.abs();
+    let [shape_miss, slope_miss, curvature_miss] = shape.branch_miss;
+    let slope_miss = offset / vl * slope_miss;
+    let curvature_miss = offset / (vl * vl) * curvature_miss;
+    models[0].widen(offset * shape_miss);
+    models[1].widen(slope_miss * acceleration.bound());
+    models[2].widen(curvature_miss * squared.bound() + slope_miss * jerk.bound());
+    models
 }
 
 /// How far a reciprocal advance's unit velocity may reach past zero onto
@@ -5478,7 +5788,7 @@ impl TrackSignal for NonlinearAdvanceSignal {
         ))
     }
 
-    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Vec<ExactPiece>> {
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
         let mut pieces = Vec::new();
         let first = self.ends.partition_point(|&end| end <= lo);
         for piece in first..self.coeffs.len() {
@@ -5493,7 +5803,7 @@ impl TrackSignal for NonlinearAdvanceSignal {
                 &mut pieces,
             );
         }
-        Some(pieces)
+        Some(Enclosure::Built(pieces))
     }
 }
 

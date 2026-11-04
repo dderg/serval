@@ -317,6 +317,20 @@ fn a_zero_length_stretch_on_stacked_rest_nodes_is_bounded() {
 }
 
 #[test]
+fn a_rest_an_ulp_past_a_resting_node_closes_the_window_on_its_own_place() {
+    let mut field = WidthField::default();
+    field.push_rest(0.0);
+    field.push(10.0, 1.0);
+    let resting = 49.91556775667482;
+    let seam = trajectory::next_toward(resting, f64::INFINITY);
+    field.push_rest(resting);
+    field.push(resting, 0.01);
+    field.push_rest(seam);
+    field.push(50.0, 0.2);
+    assert_eq!(field.width(seam), 0.0);
+}
+
+#[test]
 fn the_width_is_c2_lipschitz_and_closes_on_every_rest() {
     let mut field = WidthField::default();
     field.push_rest(0.0);

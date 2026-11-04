@@ -9,6 +9,7 @@ license.workspace = true
 
 [dependencies]
 libm = { version = "0.2", default-features = false }
+taylor-model = { path = "../taylor-model" }
 nurbs = { path = "../nurbs" }
 
 [dev-dependencies]

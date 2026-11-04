@@ -58,6 +58,8 @@ NS_PER_S = 1e9
 EPOCH_DURATION_TOLERANCE_S = 1.0
 EPOCH_DURATION_TOLERANCE_FRACTION = 0.5
 TIMING_TOLERANCE_US = 50.0
+PACE_TOLERANCE_S = 20e-3
+PACE_TOLERANCE_PPM = 500.0
 POSITION_EQUIVALENT_TOLERANCE_STEPS = 0.05
 POSITION_BOUND_RELAXES_BELOW_HZ = POSITION_EQUIVALENT_TOLERANCE_STEPS / (
     TIMING_TOLERANCE_US * 1e-6
@@ -1161,6 +1163,30 @@ def conditioned_span(epoch: EpochResult) -> dict:
     }
 
 
+def _elapsed_since_first_step(events: dict[str, StepEvents]) -> np.ndarray:
+    times = np.sort(np.concatenate([ev.time for ev in events.values()]))
+    return times - times[0]
+
+
+def epoch_pace(steps: EpochSteps) -> dict:
+    capture = _elapsed_since_first_step(steps.capture)
+    stream = _elapsed_since_first_step(steps.reference)
+    shared = min(capture.size, stream.size)
+    capture, stream = capture[:shared], stream[:shared]
+    lag = capture - stream
+    allowed = PACE_TOLERANCE_S + PACE_TOLERANCE_PPM * 1e-6 * stream
+    worst = int(np.argmax(np.abs(lag) - allowed))
+    return {
+        "pace_capture_over_stream": float(capture[-1] / stream[-1])
+        if stream[-1] > 0.0
+        else 1.0,
+        "pace_max_abs_lag_ms": float(np.abs(lag).max() * 1e3),
+        "pace_worst_lag_ms": float(lag[worst] * 1e3),
+        "pace_worst_at_stream_s": float(stream[worst]),
+        "pace_within_tolerance": bool(np.all(np.abs(lag) <= allowed)),
+    }
+
+
 def residual_wander_us(matches: dict[str, MatchedSteps]) -> float:
     late = np.concatenate([m.late_s for m in matches.values()])
     times = np.concatenate([m.capture_time_s for m in matches.values()])
@@ -1175,6 +1201,21 @@ def residual_wander_us(matches: dict[str, MatchedSteps]) -> float:
         if np.count_nonzero(bins == b) >= MIN_FIT_PAIRS
     ]
     return float((max(medians) - min(medians)) * 1e6) if medians else 0.0
+
+
+def nearest_fitted_ppm(fitted_ppm: list[float | None], index: int) -> float:
+    """The rate an epoch too short to fit its own runs at. The live host
+    re-syncs its host→mcu map at every rest, so the stream's rate against
+    the mcu clock moves from epoch to epoch as the clock estimate
+    converges; the latest fitted epoch holds the estimate nearest the one
+    in force, and a median over the whole run can sit tens of ppm off it."""
+    for ppm in reversed(fitted_ppm[:index]):
+        if ppm is not None:
+            return ppm
+    for ppm in fitted_ppm[index + 1 :]:
+        if ppm is not None:
+            return ppm
+    return 0.0
 
 
 def align_all(
@@ -1200,12 +1241,11 @@ def align_all(
     for index, (cap, ref) in enumerate(pairs):
         if cap.duration_s >= MIN_SCALE_FIT_DURATION_S:
             alignments[index] = align_epoch(steps[index], cap, ref, None)
-    fitted = [a.ppm for a in alignments if a is not None]
-    fallback_ppm = float(np.median(fitted)) if fitted else 0.0
+    fitted_ppm = [None if a is None else a.ppm for a in alignments]
     results = []
     for index, (cap, ref) in enumerate(pairs):
         alignment = alignments[index] or align_epoch(
-            steps[index], cap, ref, fallback_ppm
+            steps[index], cap, ref, nearest_fitted_ppm(fitted_ppm, index)
         )
         results.append(
             EpochResult(
@@ -1545,6 +1585,7 @@ def analyze(
                 np.abs(inputs.capture.deltas[:, motor.channel]).max()
             ),
         }
+    paces = [epoch_pace(e.steps) for e in epochs]
     checks = {
         "net_steps_match": all(
             abs(r["net_steps_capture_minus_expected"]) <= r["rest_tie_steps"]
@@ -1558,6 +1599,9 @@ def analyze(
         ),
         TIMING_CHECK: all(
             r["timing_violation_steps"] == 0 for r in motors_report.values()
+        ),
+        "pace_matches_reference": all(
+            p["pace_within_tolerance"] for p in paces
         ),
     }
     verdict = {
@@ -1582,6 +1626,7 @@ def analyze(
                 "stream_start_s": e.reference.start_s,
                 "stream_duration_s": e.reference.duration_s,
                 **conditioned_span(e),
+                **pace,
                 "offset_s": e.alignment.offset_s,
                 "ppm": e.alignment.ppm,
                 "scale_fitted": e.alignment.scale_fitted,
@@ -1590,7 +1635,7 @@ def analyze(
                 ),
                 "residual_wander_us": residual_wander_us(e.matches),
             }
-            for e in epochs
+            for e, pace in zip(epochs, paces)
         ],
         "motors": motors_report,
         "corexy": corexy_report(inputs, reference, finals, errors),

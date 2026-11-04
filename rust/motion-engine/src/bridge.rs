@@ -33,6 +33,8 @@ mod pipeline_setup;
 #[cfg(test)]
 mod pipeline_setup_tests;
 mod planner_api;
+#[cfg(test)]
+mod planner_api_tests;
 mod runtime_caps;
 mod servo;
 #[cfg(test)]

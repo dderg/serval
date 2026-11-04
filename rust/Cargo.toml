@@ -25,6 +25,7 @@ members = [
     "step-shim",
     "checked-cast",
     "source-tree",
+    "taylor-model",
 ]
 exclude = ["gcode/fuzz", "snapshot-viewer", "motion-playground"]
 resolver = "2"

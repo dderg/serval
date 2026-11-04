@@ -1,9 +1,6 @@
 use std::iter::once;
 
-use nurbs::bezier::{
-    BezierPiece, bezier_pieces_to_discontinuous_nurbs, bezier_pieces_to_nurbs,
-    extract_bezier_pieces,
-};
+use nurbs::bezier::{BezierPiece, bezier_pieces_to_discontinuous_nurbs, bezier_pieces_to_nurbs};
 use trajectory::build_smooth_zv_kernel;
 
 use super::{JumpSeries, input_jumps_at, kernel_jumps_at};
@@ -220,7 +217,7 @@ fn a_leader_fit_hides_near_smooth_images_and_holds_the_tolerance() {
     );
     let signal = source.signal();
     let (t_start, t_end) = (0.05, 0.15);
-    let fitted = fit_leader_target(
+    let pieces = fit_leader_target(
         AxisFit {
             axis: 0,
             t_start,
@@ -235,7 +232,6 @@ fn a_leader_fit_hides_near_smooth_images_and_holds_the_tolerance() {
         source.hidden_break_input(),
     )
     .expect("a near-smooth input fits");
-    let pieces = extract_bezier_pieces(&fitted);
     let seeded = source
         .shaped_breaks
         .times()

@@ -21,6 +21,7 @@ accepted; commit the written baselines there and push them to the PR branch.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import math
@@ -28,8 +29,11 @@ import os
 import shutil
 import subprocess
 import sys
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import slots
 
 ROOT = Path(
     os.environ.get("SERVAL_REPO_ROOT") or Path(__file__).resolve().parent.parent
@@ -38,6 +42,7 @@ CACHE = Path(
     os.environ.get("PENDING_BASELINES_CACHE", "~/.cache/pending-baselines")
 ).expanduser()
 TARGETS = CACHE / "targets"
+LOCKS = CACHE / "locks"
 
 
 def target_dir_for(tree: Path, purpose: str = "build") -> Path:
@@ -52,6 +57,7 @@ def target_dir_for(tree: Path, purpose: str = "build") -> Path:
 SAMPLE_DT_S = 1e-3
 AXES = ("x", "y", "z", "e")
 DETAIL_CASES = 6
+HEAVY = ("make", "cargo")
 PR_FIELDS = (
     "number,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,"
     "statusCheckRollup"
@@ -69,13 +75,19 @@ def run(args: list[str], cwd: Path = ROOT, env: dict | None = None) -> str:
             str(Path(__file__).with_name("gh_util.py")),
             *args[1:],
         ]
-    result = subprocess.run(
-        args,
-        cwd=cwd,
-        env={**os.environ, **(env or {})},
-        capture_output=True,
-        text=True,
+    heavy = (
+        slots.slot(label=" ".join(args)[:80])
+        if args[0] in HEAVY
+        else nullcontext()
     )
+    with heavy:
+        result = subprocess.run(
+            args,
+            cwd=cwd,
+            env={**os.environ, **(env or {})},
+            capture_output=True,
+            text=True,
+        )
     if result.returncode != 0:
         raise PendingBaselinesError(
             f"{' '.join(args)} failed ({result.returncode}):\n"
@@ -177,11 +189,30 @@ def sample_dir(sha: str) -> Path:
     return CACHE / "samples" / sha
 
 
+@contextmanager
+def commit_lock(name: str):
+    """One process at a time per scratch worktree name. Two ships against the
+    same main sha used the same wt/<sha> and one failed with 'already exists'
+    or 'is not a working tree'; the second now waits and finds the first's
+    cached result."""
+    LOCKS.mkdir(parents=True, exist_ok=True)
+    with open(LOCKS / f"{name}.lock", "w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+
+
 def sample_commit(sha: str) -> Path:
     out = sample_dir(sha)
     if (out / "meta.json").exists():
         return out
     ensure_commit(sha)
+    with commit_lock(f"wt-{short(sha)}"):
+        if (out / "meta.json").exists():
+            return out
+        return sample_commit_locked(sha, out)
+
+
+def sample_commit_locked(sha: str, out: Path) -> Path:
     tree = CACHE / "wt" / short(sha)
     tree.parent.mkdir(parents=True, exist_ok=True)
     run(["git", "worktree", "prune"])

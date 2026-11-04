@@ -24,9 +24,10 @@ fn cfg() -> StreamConfig {
             f64::INFINITY,
         )
         .unwrap(),
+        step_capacity: None,
     }
 }
-fn fit_tol(config: StreamConfig) -> FitTol {
+fn fit_tol(config: &StreamConfig) -> FitTol {
     FitTol::absolute(config.fit_tol_mm, config.fit_tol_accel_mm_s2)
 }
 
@@ -126,6 +127,7 @@ fn cfg_bench() -> StreamConfig {
             f64::INFINITY,
         )
         .unwrap(),
+        step_capacity: None,
     }
 }
 
@@ -1119,7 +1121,7 @@ fn smooth_shaper_second_batch_window_before_stream_start_clamps() {
         )));
     }
 
-    let shaped = shape_one_at_a_time(chains, fit_tol(cfg()), lowered);
+    let shaped = shape_one_at_a_time(chains, fit_tol(&cfg()), lowered);
 
     let segs: Vec<ContinuousSegment> = shaped
         .into_iter()
@@ -1182,6 +1184,7 @@ fn arc_run_into_sharp_corner_stays_contiguous_at_high_scv() {
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 512,
         limits,
+        step_capacity: None,
     };
     let mut prev = [124.155, 100.313, 0.0];
     let mut moves = Vec::new();
@@ -1227,6 +1230,7 @@ fn blends_consuming_a_full_arc_emit_no_degenerate_remainder() {
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 512,
         limits,
+        step_capacity: None,
     };
     let points = [
         (118.225, 104.096, 0.0, 150.0),
@@ -1487,7 +1491,7 @@ fn extruder_end(segs: &[ContinuousSegment]) -> f64 {
 }
 
 fn assert_extruder_continuous_and_monotone(segs: &[ContinuousSegment]) {
-    let tolerance = fit_tol(cfg()).scaled(
+    let tolerance = fit_tol(&cfg()).scaled(
         segs.iter()
             .map(|seg| crate::lowering::follower_tol_scale(&seg.followers, 3))
             .fold(1.0, f64::min),
@@ -1754,7 +1758,7 @@ fn follower_frontier_waits_for_exact_kernel_lookahead() {
         lowered.push(BaseItem::Seg(segment(t_start, t_end)));
     }
 
-    let shaped = shape_one_at_a_time(chains, fit_tol(cfg()), lowered);
+    let shaped = shape_one_at_a_time(chains, fit_tol(&cfg()), lowered);
     let emitted = shaped
         .into_iter()
         .filter(|item| matches!(item, TrajectoryItem::Seg(_)))
@@ -1796,7 +1800,7 @@ fn sample_extruder(segs: &[ContinuousSegment]) -> Vec<(f64, f64)> {
 }
 
 fn assert_extruder_has_no_jumps(segs: &[ContinuousSegment]) {
-    let tolerance = fit_tol(cfg()).pos_mm;
+    let tolerance = fit_tol(&cfg()).pos_mm;
     for pair in segs.windows(2) {
         let left = pair[0].eval_axis(3, pair[0].t_end).unwrap();
         let right = pair[1].eval_axis(3, pair[1].t_start).unwrap();
@@ -1944,7 +1948,7 @@ fn follower_kernel_targets_carry_their_own_base_late_in_a_print() {
     let first = shaped.first().expect("segments emitted");
     let track_start = eval_segment_axis(first, 3, first.t_start);
     assert!(
-        (track_start - start_e).abs() <= 0.05 * fit_tol(cfg()).pos_mm,
+        (track_start - start_e).abs() <= 0.05 * fit_tol(&cfg()).pos_mm,
         "absolute track must still start at the print's cumulative position: \
          {track_start} vs {start_e}"
     );
@@ -2133,7 +2137,7 @@ fn linear_advance_on_a_feed_step_primes_forward() {
         nonlinear_offset: 0.0,
         linearization_velocity: 1.0,
     };
-    let out = crate::shaper::apply_nonlinear_advance_to_track(3, &track, adv, fit_tol(cfg()))
+    let out = crate::shaper::apply_nonlinear_advance_to_track(3, &track, adv, fit_tol(&cfg()))
         .expect("linear advance refits the feed step");
     let vel = nurbs::eval::derivative(&out);
     for i in 0..=200 {
@@ -2168,7 +2172,7 @@ fn nonlinear_advance_keeps_cruise_acceleration_zero_before_a_phase_boundary() {
         linearization_velocity: 2.0,
     };
     let output =
-        crate::shaper::apply_nonlinear_advance_to_track(3, &track, advance, fit_tol(cfg()))
+        crate::shaper::apply_nonlinear_advance_to_track(3, &track, advance, fit_tol(&cfg()))
             .expect("a cruise followed by deceleration fits its one-sided phase states");
     let velocity = nurbs::eval::derivative(&output);
     let acceleration = nurbs::eval::derivative(&velocity);
@@ -2206,13 +2210,17 @@ fn nonlinear_advance_preserves_monotone_acceleration_on_a_constant_acceleration_
                 nonlinear_offset: 0.06,
                 linearization_velocity: 2.0,
             };
-            let output =
-                crate::shaper::apply_nonlinear_advance_to_track(3, &track, advance, fit_tol(cfg()))
-                    .expect("nonlinear ramp fits without inventing acceleration extrema");
+            let output = crate::shaper::apply_nonlinear_advance_to_track(
+                3,
+                &track,
+                advance,
+                fit_tol(&cfg()),
+            )
+            .expect("nonlinear ramp fits without inventing acceleration extrema");
             let output_velocity = nurbs::eval::derivative(&output);
             let output_acceleration = nurbs::eval::derivative(&output_velocity);
             let output_jerk = nurbs::eval::derivative(&output_acceleration);
-            let tolerance = fit_tol(cfg());
+            let tolerance = fit_tol(&cfg());
             let mut previous = f64::NEG_INFINITY;
             for sample in 0..=2000 {
                 let time = 0.39 + 0.04 * sample as f64 / 2000.0;
@@ -2256,9 +2264,9 @@ fn nonlinear_advance_track_transform_matches_the_advance_law() {
             nonlinear_offset: 0.08,
             linearization_velocity: 5.0,
         };
-        let out = crate::shaper::apply_nonlinear_advance_to_track(3, &track, adv, fit_tol(cfg()))
+        let out = crate::shaper::apply_nonlinear_advance_to_track(3, &track, adv, fit_tol(&cfg()))
             .expect("nonlinear advance refits a polynomial track");
-        let tolerance = fit_tol(cfg());
+        let tolerance = fit_tol(&cfg());
         let first_derivative = nurbs::eval::derivative(&out);
         let second_derivative = nurbs::eval::derivative(&first_derivative);
         for output_piece in nurbs::bezier::extract_bezier_pieces(&out) {
@@ -2323,7 +2331,7 @@ fn nonlinear_advance_seeds_the_joined_velocity_zero() {
         nonlinear_offset: 0.08,
         linearization_velocity: 5.0,
     };
-    let out = crate::shaper::apply_nonlinear_advance_to_track(3, &track, adv, fit_tol(cfg()))
+    let out = crate::shaper::apply_nonlinear_advance_to_track(3, &track, adv, fit_tol(&cfg()))
         .expect("the joined velocity zero is seeded, so every span fits");
     let joined = |t: f64| {
         if t <= 1.0 {
@@ -2333,7 +2341,7 @@ fn nonlinear_advance_seeds_the_joined_velocity_zero() {
             (0.5005 + tau * (0.001 - 10.0 * tau), 0.001 - 20.0 * tau)
         }
     };
-    let tolerance = fit_tol(cfg()).pos_mm;
+    let tolerance = fit_tol(&cfg()).pos_mm;
     let pieces = nurbs::bezier::extract_bezier_pieces(&out);
     for output_piece in &pieces {
         let duration = output_piece.u_end - output_piece.u_start;
@@ -3376,6 +3384,7 @@ fn stroke_dwell_stroke_keeps_shaper_history() {
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 128,
         limits,
+        step_capacity: None,
     };
     let stroke_ctx = |line_no: u32| MoveContext {
         extruder_axis: 3,
@@ -3463,6 +3472,7 @@ fn beacon_scan_path_shaped_velocity_stays_bounded() {
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 128,
         limits,
+        step_capacity: None,
     };
     let pts: Vec<(f64, f64)> = include_str!("../beacon_scan_pts.txt")
         .lines()
@@ -3609,7 +3619,7 @@ fn moving_leader_across_a_short_follower_hold_keeps_c0_seams_and_total() {
     let e_with = extruder_end(&with_pa);
     let e_without = extruder_end(&without_pa);
     assert!(
-        (e_with - e_without).abs() <= 0.1 * fit_tol(cfg()).pos_mm,
+        (e_with - e_without).abs() <= 0.1 * fit_tol(&cfg()).pos_mm,
         "pressure advance must not move the total: {e_with} vs {e_without}"
     );
     assert!(
@@ -3650,6 +3660,7 @@ fn voron0_config() -> StreamConfig {
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 128,
         limits: VelocityLimits::try_new(600.0, 20000.0, 0.04, f64::INFINITY).unwrap(),
+        step_capacity: None,
     }
 }
 
@@ -3837,8 +3848,8 @@ fn projected_follower_output(chains: &AxisChainSet) -> Vec<TrajectoryItem> {
     ];
     let home = [0.0, 0.0, 0.0, 0.0];
     let items = || -> Vec<StreamInput> { moves.iter().map(|m| m.clone().into()).collect() };
-    let lowered = || lower_to_base_items(config, chains, &home, items());
-    shape_one_at_a_time(chains.clone(), fit_tol(config), lowered())
+    let lowered = || lower_to_base_items(config.clone(), chains, &home, items());
+    shape_one_at_a_time(chains.clone(), fit_tol(&config), lowered())
 }
 
 fn leader_zero_support_chains(advance_s: f64) -> AxisChainSet {
@@ -3896,7 +3907,7 @@ fn follower_observes_a_zero_support_leader_transform() {
         }
     }
     assert!(
-        worst.0 > 20.0 * fit_tol(cfg()).pos_mm,
+        worst.0 > 20.0 * fit_tol(&cfg()).pos_mm,
         "the follower ignored the leader's derivative gain: worst extruder \
          deviation from the ungained baseline is {} mm at t={}",
         worst.0,
@@ -3963,8 +3974,9 @@ fn idle_follower_projects_as_a_single_constant_piece() {
     }
     let home = [0.0, 0.0, 0.0, 0.0];
     let items: Vec<StreamInput> = segs.iter().map(|m| m.clone().into()).collect();
+    let tolerance = fit_tol(&config);
     let lowered = lower_to_base_items(config, &chains, &home, items);
-    let shaped = shape_one_at_a_time(chains, fit_tol(config), lowered);
+    let shaped = shape_one_at_a_time(chains, tolerance, lowered);
     for seg in trajectory_segments(&shaped) {
         let e = &seg.axes[3];
         if let ContinuousAxis::PiecewiseRelativeSpline(pieces) = e {
@@ -4207,7 +4219,7 @@ fn a_kernelled_follower_stays_on_its_convolution_across_batch_seams() {
     let follower = replay(cfg(), chains, &home, 0.0, &moves);
     let raw = replay(cfg(), follower_chains_without_kernels(), &home, 0.0, &moves);
     let ratio = 1.5 / 30.0;
-    let budget = fit_tol(cfg()).pos_mm * ratio;
+    let budget = fit_tol(&cfg()).pos_mm * ratio;
     let delay = 0.5 * (kernel.support().1 - kernel.support().0);
     let moving = &follower[1..follower.len() - 1];
     for (t, e) in sample_extruder(moving) {
@@ -4372,7 +4384,7 @@ fn nonlinear_advance_pieces_open_and_close_on_the_advance_law_velocity() {
             0,
             &drifting_deceleration,
             advance,
-            fit_tol(cfg()),
+            fit_tol(&cfg()),
         )
         .expect("a smooth deceleration fits its advance");
         let pieces = nurbs::bezier::extract_bezier_pieces(&output);

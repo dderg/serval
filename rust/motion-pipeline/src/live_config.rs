@@ -57,6 +57,7 @@ pub fn stream_config(cfg: &PlannerConfig) -> Result<crate::StreamConfig, String>
             cart.max_accel,
             cart.corner_deviation,
         )?,
+        step_capacity: None,
     })
 }
 

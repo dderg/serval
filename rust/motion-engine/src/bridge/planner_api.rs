@@ -19,6 +19,38 @@ pub(super) fn require_single_motor_mask(motor_mask: u8) -> Result<(), String> {
     Ok(())
 }
 
+pub(super) fn gcode_line_move(
+    cfg: &planner_config::PlannerConfig,
+    extruder_caps: &[geometry::ExtruderCaps],
+    start: [f64; 3],
+    delta: [f64; 3],
+    de: f64,
+    feedrate: f64,
+    line_no: u32,
+) -> Result<geometry::Move, String> {
+    let e_axis = cfg.axis_registry.axis_index("e").ok();
+    if de != 0.0 && e_axis.is_none() {
+        return Err(
+            "E word on a move but no [axis e] is declared — declare the follower axis or stop \
+             sending E"
+                .to_string(),
+        );
+    }
+    let extruder =
+        e_axis.and_then(|axis| motion_pipeline::live_config::extruder_caps_on(extruder_caps, axis));
+    let limits = motion_pipeline::live_config::move_limits(cfg, extruder)?;
+    classify::build_move(
+        start,
+        delta,
+        e_axis.unwrap_or_default(),
+        de,
+        limits,
+        feedrate,
+        line_no,
+    )
+    .map_err(|e| format!("{e:?}"))
+}
+
 pub(super) fn motion_history_host_now() -> f64 {
     host_rt::clock::instant_to_f64(std::time::Instant::now())
 }
@@ -40,6 +72,9 @@ struct McuTopology {
     stepcompress_max_error_secs: f64,
     phase_sample_rate: f64,
     phase_ring_depth: u32,
+    mcu_name: String,
+    step_capacity_ticks_per_s: Option<f64>,
+    ticks_per_step: Vec<u32>,
 }
 
 impl McuTopology {
@@ -61,6 +96,13 @@ impl McuTopology {
                 stepcompress_max_error_secs: self.stepcompress_max_error_secs,
                 phase_sample_rate: self.phase_sample_rate,
                 phase_ring_depth: self.phase_ring_depth,
+                step_capacity: self.step_capacity_ticks_per_s.map(|ticks_per_s| {
+                    motion_core::mcu_config::McuStepCapacity {
+                        mcu_name: self.mcu_name,
+                        ticks_per_s,
+                        ticks_per_step: self.ticks_per_step,
+                    }
+                }),
             },
         }
     }
@@ -223,35 +265,21 @@ impl PyMotionEngine {
                 feedrate,
                 "engine.submit_move enter"
             );
-            let followers = self.e_followers(de)?;
-            let (extruder_axis, e_delta) = match followers.as_slice() {
-                [] => (0usize, 0.0),
-                [(axis, delta)] => (*axis, *delta),
-                _ => {
-                    return Err(PyRuntimeError::new_err(
-                        "submit_move: multiple follower axes not yet supported by the new pipeline",
-                    ));
-                }
-            };
             let pos = self.commanded_pos.lock_ok().0;
-            let extruder = motion_pipeline::live_config::extruder_caps_on(
-                &self.extruder_caps.lock_ok(),
-                extruder_axis,
-            );
-            let limits =
-                motion_pipeline::live_config::move_limits(&self.planner_config.lock_ok(), extruder)
-                    .map_err(PyRuntimeError::new_err)?;
             let line_no = self.move_seq.fetch_add(1, Ordering::Relaxed) as u32;
-            let m = classify::build_move(
-                pos,
-                [dx, dy, dz],
-                extruder_axis,
-                e_delta,
-                limits,
-                feedrate,
-                line_no,
-            )
-            .map_err(|e| PyRuntimeError::new_err(format!("{e:?}")))?;
+            let m = {
+                let cfg = self.planner_config.lock_ok();
+                gcode_line_move(
+                    &cfg,
+                    &self.extruder_caps.lock_ok(),
+                    pos,
+                    [dx, dy, dz],
+                    de,
+                    feedrate,
+                    line_no,
+                )
+            }
+            .map_err(PyRuntimeError::new_err)?;
 
             {
                 let guard = self.planner.lock_ok();
@@ -714,20 +742,5 @@ impl PyMotionEngine {
     /// history are seeded with.
     pub(crate) fn machine_from_gcode(&self, pos: geometry::GcodePos) -> geometry::MachinePos {
         pos.to_machine(self.bed_mesh.lock_ok().as_deref())
-    }
-
-    fn e_followers(&self, de: f64) -> PyResult<Vec<(usize, f64)>> {
-        if de.abs() > 0.0 {
-            let cfg = self.planner_config.lock_ok();
-            let axis_index = cfg.axis_registry.axis_index("e").map_err(|_| {
-                PyRuntimeError::new_err(
-                    "E word on a move but no [axis e] is declared — declare the \
-                     follower axis or stop sending E",
-                )
-            })?;
-            Ok(vec![(axis_index, de)])
-        } else {
-            Ok(vec![])
-        }
     }
 }

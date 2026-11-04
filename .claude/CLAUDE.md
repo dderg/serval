@@ -106,6 +106,23 @@ engine whose id differs from the tree its `.so` sits in, or that has none, with
 `motion`/`engine_build` event; `tools/bench/deploy.py` records `rust_build_id` in the deploy
 identity. An engine built outside a git tree reports `unknown` and is refused by the tools.
 
+# Heavy-job slots
+
+The box is shared by many agents; stacked builds and test runs pushed load to 25-60, which
+timed out nextest and distorted benchmarks. Heavy commands queue for one of
+`SERVAL_SLOTS` (default 3) machine-wide slots via `scripts/slots.py` (flock files under
+`~/.cache/serval-slots`, freed by the kernel when the holder dies): every `ci.sh` job
+except in CI takes one for its whole run (`CI_NO_SLOT=1` opts out), the `make`/`cargo` builds in
+`pending_baselines`, the fit audit and the fuzz replay take one, and `bench_compare.py`
+builds in a normal slot but measures in an exclusive one (all slots, nothing else heavy
+runs). Wrap your own loops: `python3 scripts/slots.py run [--exclusive] -- <cmd>`;
+`slots.py status` shows who holds the slots. Waiting is queued, prints the holders every
+60 s and fails after 2 h. Waiters are served first come, first served (a pid queue), so a
+chain of exclusive jobs cannot starve the others (it did, with the first version: a series
+of exclusive bench runs held every slot for 25+ minutes). An exclusive job still blocks all
+other heavy work while it runs: keep each one short and do not hold it across a session.
+Nested calls under a held slot do not take a second one.
+
 # Starting and shipping a change
 
 Start in a warm worktree: `scripts/wt.sh new <topic>` prints the path of an idle pool
@@ -133,6 +150,11 @@ exact range you edit with the same call that gave you the tag, send all changes 
 in one `edit`, and take the tag from the previous edit's response. Do not fall back to
 `python3 - <<EOF` replace scripts (261 in those sessions): they skip the anchors that make
 edits reviewable and silently match more than you meant.
+# Hardware lock
+
+The Pi bench is shared: every use goes through `tools/bench/lock.py hold -- <cmd>`, which
+queues behind the current holder and prints who holds it and for how long (waits of
+20 minutes were seen). Hold it for the whole session script, not per command.
 
 # Never work in ~/Developer/serval
 
@@ -174,7 +196,8 @@ Every `gh` call in the tooling goes through `scripts/gh_util.py` (`pending_basel
 routes `gh` there; `land-pr.sh` defines `gh()` as the wrapper). Many agents polling
 GitHub trip its secondary rate limit, and a bare `gh pr checks --watch` then exits
 non-zero with "API rate limit exceeded", which looks like a red check. The wrapper
-retries only on that error (Retry-After if sent, else 30 s doubling to 300 s with 25 %
+retries only on that error and on transient network failures (a dropped connection
+made `--watch` exit like a red check on PR #652) (Retry-After if sent, else 30 s doubling to 300 s with 25 %
 jitter, 8 attempts, then a loud failure) and returns any other failure at once.
 Wait with one `gh pr checks --watch --interval 60`, never a loop of short polls; read PR
 metadata once per run and pass it along; use `gh_util.py <gh args>` in new scripts.

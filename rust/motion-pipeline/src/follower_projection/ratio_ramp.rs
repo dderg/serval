@@ -361,15 +361,24 @@ impl WidthField {
         self.candidates.push_back(Candidate::Rest(s));
     }
 
+    /// A rest past a node already at zero width keeps its own place rather
+    /// than stacking on it ([`Self::push`]): `h` is zero between the two
+    /// either way, and a leg seam the leaders cross at rest needs its rest
+    /// node on the seam itself, or the window there, however narrow,
+    /// straddles the seam and reads half its ratio step.
     fn push_rest(&mut self, s: f64) {
-        if self
-            .nodes
-            .last()
-            .is_some_and(|last| last.s >= s && last.envelope == 0.0)
-        {
-            return;
+        match self.nodes.last() {
+            Some(last) if last.envelope == 0.0 => {
+                if s > last.s {
+                    self.nodes.push(WidthNode {
+                        s,
+                        target: 0.0,
+                        envelope: 0.0,
+                    });
+                }
+            }
+            _ => self.push(s, 0.0),
         }
-        self.push(s, 0.0);
     }
 
     /// A node within [`REST_TARGET_MM`] past the last one stacks on it: the

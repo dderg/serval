@@ -224,6 +224,62 @@ def test_reports_injected_stall(synthesized):
     assert all(s["role"] == "z" for s in stalls)
 
 
+def test_a_capture_on_the_plans_pace_passes_the_pace_check(synthesized):
+    verdict, _, _ = synthesized
+    assert verdict["checks"]["pace_matches_reference"]
+    for epoch in verdict["epochs"]:
+        assert epoch["pace_within_tolerance"]
+        assert epoch["pace_max_abs_lag_ms"] <= STALL_S * 1e3 + 1.0
+
+
+def _uniform_steps(times: np.ndarray) -> analyze.StepEvents:
+    return analyze.StepEvents(
+        times,
+        np.arange(1, times.size + 1, dtype=np.int64),
+        np.ones(times.size, np.int8),
+        np.full(times.size, np.nan),
+    )
+
+
+def _paced(capture_times: np.ndarray, reference_times: np.ndarray) -> dict:
+    return analyze.epoch_pace(
+        analyze.EpochSteps(
+            capture={"a": _uniform_steps(capture_times)},
+            reference={"a": _uniform_steps(reference_times)},
+        )
+    )
+
+
+PACE_REFERENCE_S = np.arange(0.0, 20.0, 1e-3)
+
+
+def test_a_capture_one_percent_faster_than_the_plan_fails_the_pace_check():
+    pace = _paced(16.6 + 0.99 * PACE_REFERENCE_S, PACE_REFERENCE_S)
+    assert not pace["pace_within_tolerance"]
+    assert pace["pace_capture_over_stream"] == pytest.approx(0.99, abs=1e-4)
+    assert pace["pace_worst_lag_ms"] == pytest.approx(-200.0, abs=1.0)
+    assert pace["pace_worst_at_stream_s"] == pytest.approx(20.0, abs=1e-2)
+
+
+def test_a_local_burst_that_runs_ahead_and_resyncs_fails_the_pace_check():
+    capture = PACE_REFERENCE_S.copy()
+    ahead = (PACE_REFERENCE_S > 5.0) & (PACE_REFERENCE_S < 10.0)
+    capture[ahead] -= 0.1 * (PACE_REFERENCE_S[ahead] - 5.0)
+    capture[PACE_REFERENCE_S >= 10.0] -= 0.5
+    capture[PACE_REFERENCE_S >= 12.0] += 0.5
+    pace = _paced(capture, PACE_REFERENCE_S)
+    assert not pace["pace_within_tolerance"]
+    assert pace["pace_capture_over_stream"] == pytest.approx(1.0)
+
+
+def test_crystal_ppm_and_a_short_stall_stay_within_the_pace_tolerance():
+    capture = (1.0 + 150e-6) * PACE_REFERENCE_S
+    capture[(PACE_REFERENCE_S > 3.0) & (PACE_REFERENCE_S < 3.06)] += STALL_S
+    pace = _paced(capture, PACE_REFERENCE_S)
+    assert pace["pace_within_tolerance"]
+    assert pace["pace_max_abs_lag_ms"] == pytest.approx(STALL_S * 1e3, abs=0.5)
+
+
 TIE_GCODE = """\
 SET_KINEMATIC_POSITION X=0 Y=0 Z=0
 G92 E0
@@ -727,3 +783,17 @@ def test_same_key_matching_stays_exact_over_millions_of_levels_and_long_runs():
     assert delta == pytest.approx([-1e-8, 2e-8], abs=1e-9)
     counts = analyze.same_key_count(query_key, query_t, ref_key, ref_t)
     assert counts.tolist() == [2, 1]
+
+
+def test_a_short_epoch_runs_at_the_latest_fitted_rate_not_the_median():
+    fitted = [-47.0, -46.6, -45.5, -4.3, None, None]
+    assert analyze.nearest_fitted_ppm(fitted, 4) == -4.3
+    assert analyze.nearest_fitted_ppm(fitted, 5) == -4.3
+
+
+def test_a_short_first_epoch_runs_at_the_next_fitted_rate():
+    assert analyze.nearest_fitted_ppm([None, 12.0, -3.0], 0) == 12.0
+
+
+def test_a_run_with_no_fitted_epoch_runs_at_the_nominal_rate():
+    assert analyze.nearest_fitted_ppm([None, None], 1) == 0.0
