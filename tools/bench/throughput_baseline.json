@@ -1,13 +1,13 @@
 {
   "slice_lines": 1000,
-  "commit": "0f479e89e4a17d26ff754d7aead4611c9369393e",
-  "reason": "provable fits: the ratio ramp modelled in follower enclosures and every fitted piece proven (witnesses removed); Pi 2-core worst window >= 2.06x on every config",
+  "commit": "21efd24dc882b63fdeeeedb7cd8af7d248f33649",
+  "reason": "emit invariance at the merge with main 2beb5835d: riding tolerance (2c5d050a4) +1.2 % Ir on p3 kernel, one leader read per crossing probe -2.5 % Ir on trident_kernel",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 19914918820,
+      "ir": 19877524406,
       "stream_secs": 8.541,
       "pi_2core": {
-        "worst_x_reference": 3.811364395954888,
+        "worst_x_reference": 3.8389281206312384,
         "worst_x": [
           4.23,
           4.26
@@ -16,10 +16,10 @@
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 27371139757,
+      "ir": 27702349766,
       "stream_secs": 6.202,
       "pi_2core": {
-        "worst_x_reference": 2.070231256080688,
+        "worst_x_reference": 2.0271059618101406,
         "worst_x": [
           2.28,
           2.28
@@ -28,10 +28,10 @@
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 28256044081,
+      "ir": 27541529399,
       "stream_secs": 7.543,
       "pi_2core": {
-        "worst_x_reference": 2.128770844865244,
+        "worst_x_reference": 2.1491865334343223,
         "worst_x": [
           2.41,
           2.39
