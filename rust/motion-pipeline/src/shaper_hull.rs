@@ -55,8 +55,11 @@ pub(crate) struct HullBudget {
 
 /// The share of each order's budget an enclosure's bound may take before
 /// its window is halved: the hull spends the bound as slack, so a rung
-/// within the rest of the budget is still proven.
-pub(crate) const ENCLOSURE_BUDGET_SHARE: f64 = 1.0 / 64.0;
+/// within the rest of the budget is still proven, and one in the slack is
+/// split, never accepted. A sixteenth leaves rungs 94 % of the budget,
+/// where halving windows down to a sixty-fourth cost the followers' Taylor
+/// models a sixth of the Pi's replay.
+pub(crate) const ENCLOSURE_BUDGET_SHARE: f64 = 1.0 / 16.0;
 
 impl HullBudget {
     fn of_order(self, order: usize) -> f64 {
