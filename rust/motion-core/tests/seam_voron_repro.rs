@@ -32,7 +32,7 @@ fn voron_seam_repeat_sweep() {
 
     let mut fatal_runs = 0usize;
     for run in 1usize..=10 {
-        let report = run_moves(&moves, cfg);
+        let report = run_moves(&moves, cfg.clone());
         let fatal = report.fatal();
         eprintln!(
             "run={run:2}: segments={} fatal_c0_seams={fatal}",

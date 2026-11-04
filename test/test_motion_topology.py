@@ -14,14 +14,16 @@ from klippy.motion import Motion
 from klippy.motion_kinematics import _LinearKinematics
 from klippy.motion_setup import LANE_KIND_PULSE
 
-FAKE_STEPPER_VELOCITY_CEILING = 0.5 / (0.000001 + 0.000002) * 0.0125
+FAKE_STEPPER_VELOCITY_CEILING = 0.0125 / (2 * 0.000002)
 FAKE_STEP_DIST = 0.0125
 
 
 FAKE_MOVE_QUEUE_SLOTS = 128
 
 
-def pulse_topology(handle, axes, kin, move_queue_slots=0, max_error=0.0):
+def pulse_topology(
+    handle, axes, kin, move_queue_slots=0, max_error=0.0, name=None
+):
     n = len(axes)
     return (
         handle,
@@ -39,6 +41,9 @@ def pulse_topology(handle, axes, kin, move_queue_slots=0, max_error=0.0):
         max_error,
         0.0,
         0,
+        str(handle) if name is None else name,
+        None,
+        [],
     )
 
 
@@ -263,5 +268,6 @@ def test_init_planner_passes_config_text_and_topology(monkeypatch):
             0,
             move_queue_slots=FAKE_MOVE_QUEUE_SLOTS,
             max_error=STEPCOMPRESS_MAX_ERROR_DEFAULT,
+            name="mcu",
         )
     ]

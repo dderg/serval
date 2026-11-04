@@ -33,6 +33,7 @@ fn stepcompress_cfg() -> McuAxisConfig {
             phase_sample_rate: 0.0,
             phase_ring_depth: 0,
             stepcompress_max_error_secs: 0.0,
+            step_capacity: None,
         },
     }
 }
