@@ -101,7 +101,7 @@ impl ShapedWave {
                 seed_breakpoints: &[],
                 fit_tol: TOLERANCE,
                 fit_context: "shaped wave",
-                velocity_continuous: true,
+                seam_continuity: crate::lowering::SeamContinuity::Velocity,
             },
             &signal,
         )
