@@ -254,6 +254,7 @@ fn install_test_pipeline(
         mcu_configs: Vec::new(),
         counter: Arc::clone(&engine.dispatched_segments),
         transports,
+        detached: None,
     };
     let pipeline = motion_core::worker::setup_pipeline(
         config,

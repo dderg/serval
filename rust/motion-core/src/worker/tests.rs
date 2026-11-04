@@ -141,7 +141,10 @@ fn spawn_on_timeline(
         config,
         chains,
         home,
-        output,
+        PipelineOutput {
+            trajectory: output,
+            detached: None,
+        },
         links,
         timeline,
         control.clone(),
@@ -710,7 +713,10 @@ fn finite_homing_admission_and_cancellation_preserve_backpressure() {
         cfg_cap(1),
         AxisChainSet::default(),
         vec![0.0; 3],
-        output,
+        PipelineOutput {
+            trajectory: output,
+            detached: None,
+        },
         links,
         idle_timeline(frontier),
         control.clone(),

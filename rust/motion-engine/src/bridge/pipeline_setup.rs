@@ -365,6 +365,7 @@ impl PyMotionEngine {
             mcu_configs: mcu_configs.to_vec(),
             counter: Arc::clone(&self.dispatched_segments),
             transports,
+            detached: None,
         })
     }
 
@@ -483,10 +484,12 @@ impl PyMotionEngine {
         mcu_configs: &[McuAxisConfig],
         host_ios: &HashMap<u32, Arc<McuHostIo>>,
         ec_conns: &HashMap<u32, Arc<McuSerialConn>>,
+        detached: Option<motion_core::worker::DetachedTaps>,
     ) -> PyResult<crossbeam_channel::Sender<motion_core::pump::PumpMsg>> {
         let (pump_tx, pump_rx) = crossbeam_channel::unbounded::<motion_core::pump::PumpMsg>();
-        let resources =
+        let mut resources =
             self.build_execution_resources(mcu_configs, host_ios, ec_conns, &pump_tx)?;
+        resources.detached = detached;
 
         let stream_cfg =
             motion_pipeline::live_config::stream_config(cfg).map_err(PyValueError::new_err)?;

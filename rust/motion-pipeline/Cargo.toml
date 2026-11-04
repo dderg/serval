@@ -26,6 +26,7 @@ fit-audit = []
 
 [dev-dependencies]
 proptest = "1"
+planner-config = { path = "../planner-config", features = ["doc"] }
 
 [lints]
 workspace = true

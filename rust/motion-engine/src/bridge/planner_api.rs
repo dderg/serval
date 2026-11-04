@@ -1,9 +1,8 @@
 use super::{
     Arc, ArgValue, DRAIN_TIMEOUT, HashSet, McuTopologyInput, Ordering, PyMotionEngine, PyResult,
-    PyRuntimeError, PyValueError, Python, classify, planner_err, pymethods,
+    PyRuntimeError, PyValueError, Python, planner_err, pymethods,
 };
 use motion_core::lock_ext::LockExt;
-use planner_config::from_doc::{planner_config_from_settings, read_motion_settings};
 use pyo3::FromPyObject;
 
 fn unsupported_curve(py: Python<'_>, message: &'static str) -> PyResult<()> {
@@ -19,38 +18,52 @@ pub(super) fn require_single_motor_mask(motor_mask: u8) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn gcode_line_move(
-    cfg: &planner_config::PlannerConfig,
-    extruder_caps: &[geometry::ExtruderCaps],
-    start: [f64; 3],
-    delta: [f64; 3],
-    de: f64,
-    feedrate: f64,
-    line_no: u32,
-) -> Result<geometry::Move, String> {
-    let e_axis = cfg.axis_registry.axis_index("e").ok();
-    if de != 0.0 && e_axis.is_none() {
-        return Err(
-            "E word on a move but no [axis e] is declared — declare the follower axis or stop \
-             sending E"
-                .to_string(),
-        );
-    }
-    let extruder =
-        e_axis.and_then(|axis| motion_pipeline::live_config::extruder_caps_on(extruder_caps, axis));
-    let limits = motion_pipeline::live_config::move_limits(cfg, extruder)?;
-    classify::build_move(
-        start,
-        delta,
-        e_axis.unwrap_or_default(),
-        de,
-        limits,
-        feedrate,
-        line_no,
-    )
-    .map_err(|e| format!("{e:?}"))
-}
 
+impl PyMotionEngine {
+    fn adopt_planner_config(&self, config_text: &str) -> PyResult<planner_config::PlannerConfig> {
+        if self.planner.lock_ok().is_some() {
+            return Err(PyRuntimeError::new_err("planner already initialized"));
+        }
+        let cfg = planner_config::from_doc::planner_config_from_text(config_text)
+            .map_err(PyValueError::new_err)?;
+        *self.extruder_caps.lock_ok() =
+            motion_pipeline::live_config::extruder_caps(&cfg).map_err(PyValueError::new_err)?;
+        *self.planner_config.lock_ok() = cfg.clone();
+        Ok(cfg)
+    }
+
+    /// A fence of the detached planner, resolved to the stream time its
+    /// fenced trajectory ends at (0 for an idle stream): with no MCU clock to
+    /// project it through, the detached planner's print time is its stream
+    /// time.
+    pub(crate) fn detached_fence_end(&self, id: u64) -> PyResult<Option<f64>> {
+        if self.detached_record.lock_ok().is_none() {
+            return Err(PyRuntimeError::new_err(
+                "no detached planner: call init_planner_detached",
+            ));
+        }
+        let guard = self.planner.lock_ok();
+        let planner = guard.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("planner not initialized — call init_planner_detached first")
+        })?;
+        Ok(planner.fence_take(id).map(|end| end.unwrap_or(0.0)))
+    }
+
+    /// What the detached planner was fed and shaped since it started; call
+    /// after a drain so the shaper has emitted everything.
+    pub(crate) fn take_detached_record(
+        &self,
+    ) -> PyResult<(Vec<motion_pipeline::InputTrace>, Vec<trajectory::ContinuousSegment>)> {
+        let guard = self.detached_record.lock_ok();
+        let record = guard
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("no detached planner: call init_planner_detached"))?;
+        Ok((
+            record.inputs.try_iter().collect(),
+            record.segments.try_iter().collect(),
+        ))
+    }
+}
 pub(super) fn motion_history_host_now() -> f64 {
     host_rt::clock::instant_to_f64(std::time::Instant::now())
 }
@@ -197,17 +210,7 @@ impl PyMotionEngine {
     /// (`_config_doc.read_motion_settings`) klippy used at config time, so
     /// the planner cannot drift from what the host validated and reported.
     fn init_planner(&self, config_text: &str, mcus: Vec<McuTopology>) -> PyResult<()> {
-        if self.planner.lock_ok().is_some() {
-            return Err(PyRuntimeError::new_err("planner already initialized"));
-        }
-
-        let doc = config_doc::Document::parse(config_text, "<config>")
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let (settings, _consumed) = read_motion_settings(&doc).map_err(PyValueError::new_err)?;
-        let cfg = planner_config_from_settings(&settings).map_err(PyValueError::new_err)?;
-        *self.extruder_caps.lock_ok() =
-            motion_pipeline::live_config::extruder_caps(&cfg).map_err(PyValueError::new_err)?;
-        *self.planner_config.lock_ok() = cfg.clone();
+        let cfg = self.adopt_planner_config(config_text)?;
 
         let mcus: Vec<McuTopologyInput> = mcus.into_iter().map(McuTopology::into_core).collect();
         let (ec_conns, mcu_configs) = self.resolve_mcu_topology(&mcus)?;
@@ -219,7 +222,8 @@ impl PyMotionEngine {
 
         host_rt::memory_lock::HOST_MEMORY_LOCK
             .start_pipeline_threads(|| {
-                let pump_control = self.spawn_pipeline(&cfg, &mcu_configs, &host_ios, &ec_conns)?;
+                let pump_control =
+                    self.spawn_pipeline(&cfg, &mcu_configs, &host_ios, &ec_conns, None)?;
 
                 self.spawn_live_position_poll_thread();
 
@@ -228,6 +232,29 @@ impl PyMotionEngine {
                 Ok(())
             })
             .map_err(|denied| PyRuntimeError::new_err(denied.to_string()))?
+    }
+    /// The live planner with no MCU behind it: the same config reading, move
+    /// construction, ingress and pipeline as `init_planner`, but nothing
+    /// executes the trajectory, so the pacer never brakes for a playhead and
+    /// no memory needs locking. It records every pipeline input and shaped
+    /// segment for `take_detached_record`: the live half of the snapshot
+    /// parity gate.
+    fn init_planner_detached(&self, config_text: &str) -> PyResult<()> {
+        let cfg = self.adopt_planner_config(config_text)?;
+        let (inputs_tx, inputs) = crossbeam_channel::unbounded();
+        let (segments_tx, segments) = crossbeam_channel::unbounded();
+        *self.detached_record.lock_ok() = Some(super::DetachedRecordRx { inputs, segments });
+        self.spawn_pipeline(
+            &cfg,
+            &[],
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+            Some(motion_core::worker::DetachedTaps {
+                inputs: inputs_tx,
+                segments: segments_tx,
+            }),
+        )?;
+        Ok(())
     }
     /// Push one move into the pipe. Returns `false` when the pipe is full —
     /// queued motion has reached the configured depth, or the entry channel
@@ -255,23 +282,21 @@ impl PyMotionEngine {
                 feedrate,
                 "engine.submit_move enter"
             );
-            let pos = self.commanded_pos.lock_ok().0;
-            let line_no = self.move_seq.fetch_add(1, Ordering::Relaxed) as u32;
-            let m = {
+            let line = motion_pipeline::live_config::GcodeLine {
+                start: self.commanded_pos.lock_ok().0,
+                delta: [dx, dy, dz],
+                de,
+                feedrate_mm_s: feedrate,
+                seq: self.move_seq.load(Ordering::Relaxed) as u32,
+            };
+            let built = {
                 let cfg = self.planner_config.lock_ok();
-                gcode_line_move(
-                    &cfg,
-                    &self.extruder_caps.lock_ok(),
-                    pos,
-                    [dx, dy, dz],
-                    de,
-                    feedrate,
-                    line_no,
-                )
+                motion_pipeline::live_config::GcodeMoveBase::of(&cfg, &self.extruder_caps.lock_ok())
+                    .and_then(|base| base.line_move(&cfg.runtime, line))
             }
             .map_err(PyRuntimeError::new_err)?;
 
-            {
+            if let Some(m) = built {
                 let guard = self.planner.lock_ok();
                 let planner = guard.as_ref().ok_or_else(|| {
                     PyRuntimeError::new_err("planner not initialized — call init_planner first")
@@ -284,16 +309,14 @@ impl PyMotionEngine {
                 tracing::trace!(
                     subsystem = "motion",
                     event = "intake_submit",
-                    line_no,
+                    line_no = line.seq,
                     channel_pending = planner.pending_channel_moves(),
                     "[intake] move accepted into the pipe"
                 );
             }
 
-            let mut pos = self.commanded_pos.lock_ok();
-            pos.0[0] += dx;
-            pos.0[1] += dy;
-            pos.0[2] += dz;
+            self.move_seq.fetch_add(1, Ordering::Relaxed);
+            self.commanded_pos.lock_ok().0 = line.end();
             *self.last_g5_pq.lock_ok() = None;
             Ok(true)
         })

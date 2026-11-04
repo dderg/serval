@@ -21,9 +21,21 @@ use pump_sink::{Projection, PumpSink};
 #[derive(Debug, Default)]
 pub struct CommittedFrontier {
     deadline: Mutex<Option<Instant>>,
+    unexecuted: bool,
 }
 
+/// The runway of a pipeline no MCU executes: nothing ever plays its
+/// trajectory, so the pacer never has to brake for a playhead.
+const UNEXECUTED_RUNWAY_S: f64 = 1.0e9;
+
 impl CommittedFrontier {
+    fn unexecuted() -> Self {
+        Self {
+            deadline: Mutex::default(),
+            unexecuted: true,
+        }
+    }
+
     pub fn advance_to(&self, deadline: Instant) {
         let mut guard = self.deadline.lock_ok();
         *guard = Some(guard.map_or(deadline, |d| d.max(deadline)));
@@ -34,6 +46,9 @@ impl CommittedFrontier {
     }
 
     pub fn runway_secs(&self) -> f64 {
+        if self.unexecuted {
+            return UNEXECUTED_RUNWAY_S;
+        }
         self.deadline.lock_ok().map_or(0.0, |d| {
             d.saturating_duration_since(Instant::now()).as_secs_f64()
         })
@@ -199,6 +214,19 @@ pub struct ExecutionResources {
     pub mcu_configs: Vec<crate::mcu_config::McuAxisConfig>,
     pub counter: Arc<AtomicU64>,
     pub transports: Arc<crate::axis_transport::AxisTransports>,
+    /// `Some` for a pipeline that drives no MCU and reports what it was fed
+    /// and what it shaped: the live half of the snapshot parity gate.
+    pub detached: Option<DetachedTaps>,
+}
+
+pub(crate) struct PipelineOutput {
+    pub(crate) trajectory: Sender<TrajectoryItem>,
+    pub(crate) detached: Option<DetachedTaps>,
+}
+
+pub struct DetachedTaps {
+    pub inputs: Sender<motion_pipeline::InputTrace>,
+    pub segments: Sender<trajectory::ContinuousSegment>,
 }
 
 pub struct MotionPipeline {
@@ -223,7 +251,13 @@ pub fn setup_pipeline(
 ) -> MotionPipeline {
     let (pump_control, control_rx) = pump_channel;
     let (output, trajectory_rx) = bounded::<TrajectoryItem>(TRAJECTORY_CHANNEL_CAP);
-    let frontier: Arc<CommittedFrontier> = Arc::default();
+    let mut resources = resources;
+    let detached = resources.detached.take();
+    let frontier = Arc::new(if detached.is_some() {
+        CommittedFrontier::unexecuted()
+    } else {
+        CommittedFrontier::default()
+    });
     let links = Arc::new(WorkerLinks::default());
     let mut dispatcher = Dispatcher::new(Arc::clone(&links), Arc::clone(&frontier));
     let admission = Arc::clone(&links);
@@ -278,7 +312,10 @@ pub fn setup_pipeline(
         config,
         axis_chains,
         home_pos,
-        output,
+        PipelineOutput {
+            trajectory: output,
+            detached,
+        },
         links,
         timeline,
         pump_control.clone(),
@@ -295,14 +332,28 @@ impl StreamWorkerHandle {
         config: StreamConfig,
         axis_chains: AxisChainSet,
         home_pos: Vec<f64>,
-        output: Sender<TrajectoryItem>,
+        output: PipelineOutput,
         links: Arc<WorkerLinks>,
         timeline: ExecutionTimeline,
         pump: Sender<crate::pump::PumpMsg>,
     ) -> Self {
         let (tx, rx) = bounded(INPUT_CHANNEL_CAP);
-        let pipeline = Pipeline::new(config, axis_chains, home_pos.clone(), 0.0)
-            .into_staged(move |item| output.send(item).is_ok());
+        let PipelineOutput {
+            trajectory,
+            detached,
+        } = output;
+        let pipeline = Pipeline::new(config, axis_chains, home_pos.clone(), 0.0);
+        let (pipeline, segment_tap) = match detached {
+            Some(taps) => (pipeline.with_input_tap(taps.inputs), Some(taps.segments)),
+            None => (pipeline, None),
+        };
+        let pipeline = pipeline.into_staged(move |item| {
+            if let (Some(tap), TrajectoryItem::Seg(seg)) = (&segment_tap, &item) {
+                tap.send(seg.clone())
+                    .expect("detached segment observer disconnected");
+            }
+            trajectory.send(item).is_ok()
+        });
         let ingress = ingress::Ingress {
             config,
             odometer: home_pos,
