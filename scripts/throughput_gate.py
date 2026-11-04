@@ -28,15 +28,17 @@ pipeline (planning, shaper and pool threads sharing two cores) has. So the
 whole dense print also replays live (no --synchronous) under `taskset -c
 0,1`, built from this checkout and from the reference commit (extracted with
 `git archive`, built in its own target dir), LIVE_REPS times each, the two
-alternating. A config's live ratio is this checkout's median wall seconds
-per stream second over the reference's: the same machine runs both, so the
+alternating. A config's live ratio is this checkout's wall seconds per
+stream second over the reference's, each the mean of its LIVE_FASTEST
+fastest runs: a busy machine only ever slows a run down, and averaging two
+blunts one lucky run. The same machine runs both sides, so the
 ratio does not depend on the machine's speed, which a fixed synthetic
 workload could not normalise away (its ratio to the replay differed 5-11 %
 between a Ryzen 7800X3D and a GitHub EPYC runner). CPU seconds are no
 substitute for wall: on four kinds of runner #663 moved trident_kernel's by
 -0.2 to +2.3 % where its wall moved +4.8 to +7.6 %. Replaying one binary as
 both sides on three GitHub runners (2x EPYC 7763, Xeon 8370C) put the
-median ratio within 0.45 % of 1; #663 moved it by +2.6 % (Xeon) to +5.4 %
+ratio within 0.45 % of 1; #663 moved it by +2.6 % (Xeon) to +5.4 %
 (EPYC 9V74) on trident_kernel and by +4.4 to +7.8 % on
 p3_voron_direct_drive_kernel, so LIVE_TOLERANCE_PCT sits between the two.
 
@@ -111,6 +113,7 @@ CONFIGS = (
 SLICE_LINES = 1000
 IR_TOLERANCE_PCT = 2.0
 LIVE_REPS = 5
+LIVE_FASTEST = 2
 LIVE_TOLERANCE_PCT = 2.0
 LIVE_CORES = "0,1"
 PI_FLOOR_X = 2.0
@@ -190,13 +193,19 @@ def stream_secs(bench_stdout: str) -> float:
     return float(match.group(1))
 
 
+def fastest_mean(samples: list[float]) -> float:
+    if len(samples) < LIVE_FASTEST:
+        raise GateError(
+            f"the live A/B needs {LIVE_FASTEST} runs of each side, got {len(samples)}"
+        )
+    return statistics.fmean(sorted(samples)[:LIVE_FASTEST])
+
+
 def live_ratio(
     head_secs_per_stream_sec: list[float],
     reference_secs_per_stream_sec: list[float],
 ) -> float:
-    if not head_secs_per_stream_sec or not reference_secs_per_stream_sec:
-        raise GateError("the live A/B needs at least one run of each side")
-    return statistics.median(head_secs_per_stream_sec) / statistics.median(
+    return fastest_mean(head_secs_per_stream_sec) / fastest_mean(
         reference_secs_per_stream_sec
     )
 
@@ -414,8 +423,8 @@ def measure_live(
     return {
         config: (
             live_ratio(costs[config, "head"], costs[config, "reference"]),
-            statistics.median(walls[config, "head"]),
-            statistics.median(walls[config, "reference"]),
+            fastest_mean(walls[config, "head"]),
+            fastest_mean(walls[config, "reference"]),
         )
         for config in configs
     }
@@ -617,7 +626,8 @@ def report(verdicts: list[Verdict], reference_commit: str) -> None:
             f"{predicted[0]:>10} {predicted[1]:>12}"
         )
         print(
-            f"  live full print, median of {LIVE_REPS}: {m.live_wall_secs:.2f} s, "
+            f"  live full print, fastest {LIVE_FASTEST} of {LIVE_REPS}: "
+            f"{m.live_wall_secs:.2f} s, "
             f"reference {m.reference_wall_secs:.2f} s"
         )
         for problem in verdict.problems:

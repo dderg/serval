@@ -44,12 +44,15 @@ def test_stream_secs_comes_from_the_bench_summary_line():
         gate.stream_secs("no summary")
 
 
-def test_the_live_ratio_compares_the_median_run_of_each_side():
-    assert gate.live_ratio([0.30, 0.25, 0.90], [0.24, 0.10, 0.50]) == 1.25
+def test_the_live_ratio_compares_the_fastest_runs_of_each_side():
+    assert gate.LIVE_FASTEST == 2
+    assert gate.live_ratio(
+        [0.30, 0.20, 0.90], [0.24, 0.16, 0.50]
+    ) == pytest.approx(1.25)
     with pytest.raises(gate.GateError):
-        gate.live_ratio([], [0.2])
+        gate.live_ratio([0.2], [0.2, 0.3])
     with pytest.raises(gate.GateError):
-        gate.live_ratio([0.2], [])
+        gate.live_ratio([0.2, 0.3], [])
 
 
 def test_the_accept_reason_is_the_fenced_block_in_the_body():
