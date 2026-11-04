@@ -551,15 +551,16 @@ pub(crate) fn project_followers(
             );
             timing.ingests += lengths.len();
             let mut next_s = state.smoothing.backlog_end().unwrap_or(state.s_shaped);
-            for (offset, &arc) in lengths.iter().enumerate() {
+            for (offset, (arc, shaped_leaders)) in lengths.iter().enumerate() {
                 let i = first_new + offset;
                 let table_start = state.s_ingested_end;
                 let shaped_ds =
-                    state.ingest(&base[i], &frontier[i], axis, leaders, &base[i + 1..], arc);
+                    state.ingest(&base[i], &frontier[i], axis, leaders, &base[i + 1..], *arc);
                 let s_start = state.aligned_span_start(next_s);
                 let leg = RampLeg {
                     shaped: &frontier[i],
                     leaders,
+                    shaped_leaders,
                     support: projection_support(&base[i], &frontier[i], axis, leaders),
                     start_s: table_start,
                     rests: arc.1 <= SPAN_MIN_LEN_MM,
@@ -1869,7 +1870,14 @@ fn axis_breakpoints(axis: &ContinuousAxis) -> Vec<f64> {
 }
 
 fn leader_arc_length(seg: &ContinuousSegment, leaders: &[usize]) -> f64 {
-    let shaped_leaders = ShapedLeaders::of(seg, leaders);
+    shaped_leader_arc_length(seg, leaders, &ShapedLeaders::of(seg, leaders))
+}
+
+fn shaped_leader_arc_length(
+    seg: &ContinuousSegment,
+    leaders: &[usize],
+    shaped_leaders: &ShapedLeaders,
+) -> f64 {
     axis_grid(seg, leaders)
         .windows(2)
         .map(|window| {
@@ -1887,15 +1895,16 @@ fn leader_arc_length(seg: &ContinuousSegment, leaders: &[usize]) -> f64 {
         .sum()
 }
 
-/// Shaped and raw leader arc lengths for each newly ingested segment. The
-/// integrals are pure per-segment work, so they fan out across cores; results
-/// are ordered by segment and bit-identical to serial evaluation.
-fn leader_arc_lengths(
+/// Shaped and raw leader arc lengths for each newly ingested segment, with
+/// the shaped leaders read for them, which the ratio ramp reads again. The
+/// integrals are pure per-segment work, so they fan out across cores;
+/// results are ordered by segment and bit-identical to serial evaluation.
+fn leader_arc_lengths<'a>(
     raw: &[ContinuousSegment],
-    shaped: &[ContinuousSegment],
+    shaped: &'a [ContinuousSegment],
     leaders: &[usize],
     pool: &WorkerPool,
-) -> Vec<(f64, f64)> {
+) -> Vec<((f64, f64), ShapedLeaders<'a>)> {
     assert_eq!(raw.len(), shaped.len());
     let workers = if cfg!(target_arch = "wasm32") {
         1
@@ -1909,9 +1918,13 @@ fn leader_arc_lengths(
         raw.len(),
         || (),
         |(), i| {
+            let shaped_leaders = ShapedLeaders::of(&shaped[i], leaders);
             (
-                leader_arc_length(&shaped[i], leaders),
-                leader_arc_length(&raw[i], leaders),
+                (
+                    shaped_leader_arc_length(&shaped[i], leaders, &shaped_leaders),
+                    leader_arc_length(&raw[i], leaders),
+                ),
+                shaped_leaders,
             )
         },
     )

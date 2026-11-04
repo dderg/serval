@@ -69,6 +69,7 @@ const REST_REFINEMENTS: usize = 64;
 pub(super) struct RampLeg<'a> {
     pub(super) shaped: &'a ContinuousSegment,
     pub(super) leaders: &'a [usize],
+    pub(super) shaped_leaders: &'a ShapedLeaders<'a>,
     pub(super) support: (f64, f64),
     pub(super) start_s: f64,
     pub(super) rests: bool,
@@ -714,7 +715,7 @@ impl RatioSmoothing {
             self.width.rule
         );
         self.width.rule = Some(*rule);
-        let leaders = ShapedLeaders::of(leg.shaped, leg.leaders);
+        let leaders = leg.shaped_leaders;
         let table_end = spans.last().map_or(leg.start_s, |last| last.s1);
         if table_end <= leg.start_s {
             self.width.extend(&leaders, leg, table_end);
@@ -784,12 +785,13 @@ impl RatioSmoothing {
     /// Hands the width field the seams between consecutive `spans`, timed
     /// where the leaders of `leg` cross them.
     fn time_seams(&mut self, spans: &[RatioSpan], leaders: &ShapedLeaders, leg: &RampLeg) {
+        let path = LegPath::of(leaders, leg);
         for pair in spans.windows(2) {
             let (before, after) = (&pair[0], &pair[1]);
             let Some(seam) = Seam::between(before, after) else {
                 continue;
             };
-            let t = time_at_path(leaders, leg, after.s0);
+            let t = path.time_at(after.s0);
             self.width.add_seam(TimedSeam {
                 t,
                 crossing: Crossing::across(leaders, t, leg.support.1),
@@ -1227,45 +1229,90 @@ impl AdvanceValley {
 /// [`REST_TARGET_MM`], the width field's rest, between two width nodes.
 const REST_SPEED_MM_S: f64 = REST_TARGET_MM / NODE_SPACING_S;
 
-/// When on `leg` the leaders reach path `s`: its start for a seam laid
-/// there, else the time the path they cover from it reaches `s`.
-fn time_at_path(leaders: &ShapedLeaders, leg: &RampLeg, s: f64) -> f64 {
-    let grid = axis_grid(leg.shaped, leg.leaders);
-    if s <= leg.start_s + SPAN_LOOKUP_SLACK_MM {
-        return grid[0];
-    }
-    let speed = |t: f64| leaders.speed(t);
-    let covered = |t: f64| {
-        grid.windows(2)
-            .take_while(|pair| pair[0] < t)
-            .map(|pair| integrate(&speed, pair[0], pair[1].min(t)))
-            .sum::<f64>()
-    };
-    let (mut lo, mut hi) = (grid[0], grid[grid.len() - 1]);
-    for _ in 0..WIDTH_BISECTIONS {
-        let mid = 0.5 * (lo + hi);
-        if leg.start_s + covered(mid) < s {
-            lo = mid;
-        } else {
-            hi = mid;
+/// The path the leaders of a leg cover from its start, by time. The
+/// integral over each whole knot interval is taken once and the running
+/// sum kept, so a covered path sums the same terms in the same order as
+/// summing every interval afresh.
+struct LegPath<'l, 'a> {
+    leaders: &'l ShapedLeaders<'a>,
+    grid: Vec<f64>,
+    start_s: f64,
+    whole: std::cell::RefCell<Vec<f64>>,
+}
+
+impl<'l, 'a> LegPath<'l, 'a> {
+    fn of(leaders: &'l ShapedLeaders<'a>, leg: &RampLeg) -> Self {
+        Self {
+            leaders,
+            grid: axis_grid(leg.shaped, leg.leaders),
+            start_s: leg.start_s,
+            whole: std::cell::RefCell::new(vec![std::iter::empty::<f64>().sum()]),
         }
     }
-    hi
+
+    fn speed(&self, t: f64) -> f64 {
+        self.leaders.speed(t)
+    }
+
+    /// The path covered by `t`: every knot interval ending by it whole,
+    /// and the part of the next one up to it.
+    fn covered(&self, t: f64) -> f64 {
+        let grid = &self.grid;
+        let mut whole_intervals = grid[1..].partition_point(|&end| end <= t);
+        while whole_intervals > 0 && grid[whole_intervals - 1] >= t {
+            whole_intervals -= 1;
+        }
+        let mut whole = self.whole.borrow_mut();
+        while whole.len() <= whole_intervals {
+            let index = whole.len() - 1;
+            let sum =
+                whole[index] + integrate(&|time| self.speed(time), grid[index], grid[index + 1]);
+            whole.push(sum);
+        }
+        let through_whole = whole[whole_intervals];
+        match grid.get(whole_intervals + 1) {
+            Some(_) if grid[whole_intervals] < t => {
+                through_whole + integrate(&|time| self.speed(time), grid[whole_intervals], t)
+            }
+            _ => through_whole,
+        }
+    }
+
+    /// When the leaders reach path `s`: the leg's start for a seam laid
+    /// there, else the time the path they cover reaches `s`.
+    fn time_at(&self, s: f64) -> f64 {
+        let grid = &self.grid;
+        if s <= self.start_s + SPAN_LOOKUP_SLACK_MM {
+            return grid[0];
+        }
+        let (mut lo, mut hi) = (grid[0], grid[grid.len() - 1]);
+        for _ in 0..WIDTH_BISECTIONS {
+            let mid = 0.5 * (lo + hi);
+            if mid == lo || mid == hi {
+                break;
+            }
+            if self.start_s + self.covered(mid) < s {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        hi
+    }
 }
 
 /// The shaped leaders' speed along a leg, probed
 /// [`REST_PROBES_PER_INTERVAL`] times per knot interval.
 struct LegSpeed<'l, 'a> {
-    leaders: &'l ShapedLeaders<'a>,
-    grid: Vec<f64>,
+    path: LegPath<'l, 'a>,
     probes: Vec<f64>,
-    start_s: f64,
     table_end: f64,
 }
 
 impl<'l, 'a> LegSpeed<'l, 'a> {
     fn of(leaders: &'l ShapedLeaders<'a>, leg: &RampLeg, table_end: f64) -> Self {
-        let grid = axis_grid(leg.shaped, leg.leaders);
+        let path = LegPath::of(leaders, leg);
+        let grid = &path.grid;
         let probes = grid
             .windows(2)
             .flat_map(|pair| {
@@ -1276,16 +1323,14 @@ impl<'l, 'a> LegSpeed<'l, 'a> {
             .chain(std::iter::once(grid[grid.len() - 1]))
             .collect();
         Self {
-            leaders,
-            grid,
+            path,
             probes,
-            start_s: leg.start_s,
             table_end,
         }
     }
 
     fn at(&self, t: f64) -> f64 {
-        self.leaders.speed(t)
+        self.path.speed(t)
     }
 
     /// The slowest time between the probes either side of probe `index`.
@@ -1306,13 +1351,7 @@ impl<'l, 'a> LegSpeed<'l, 'a> {
     }
 
     fn path_at(&self, t: f64) -> f64 {
-        let covered = self
-            .grid
-            .windows(2)
-            .take_while(|pair| pair[0] < t)
-            .map(|pair| integrate(&|time| self.at(time), pair[0], pair[1].min(t)))
-            .sum::<f64>();
-        (self.start_s + covered).min(self.table_end)
+        (self.path.start_s + self.path.covered(t)).min(self.table_end)
     }
 }
 
@@ -1352,8 +1391,9 @@ fn resting_stretch(
         }
         rest
     };
-    let first = edge(speed.grid[0], first);
-    let last = edge(speed.grid[speed.grid.len() - 1], last);
+    let grid = &speed.path.grid;
+    let first = edge(grid[0], first);
+    let last = edge(grid[grid.len() - 1], last);
     Some((speed.path_at(first), speed.path_at(last)))
 }
 
