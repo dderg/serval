@@ -4127,6 +4127,11 @@ impl SeamWeld {
 /// derivative, never off differences of its positions, so the offset a piece
 /// rides at (a batch's carried position) cannot change what it becomes, and
 /// an end velocity within the resolution of zero is rest, not a retraction.
+/// The projection may lift the piece by the deepest retreat it removes plus
+/// the position tolerance, read with the offset taken out, and lower it by
+/// the tolerance; a piece it would move further keeps its dip: clamping a
+/// high-degree piece's Bernstein velocity and carrying the deficit forward
+/// can lift a steep rise far above the source it corrects.
 fn project_monotone(
     axis: usize,
     label: &str,
@@ -4182,6 +4187,7 @@ fn project_monotone(
             continue;
         }
         let accel_envelope = tol.accel_mm_s2 + 2.0 * (degree - 1) as f64 * perturbation / h;
+        let lift_budget = deepest_retreat(&piece.coeffs, h, sweep) + tol.pos_mm;
         let source = piece.clone();
         let corrected_piece = integrate_velocity(
             piece.coeffs[0],
@@ -4193,7 +4199,7 @@ fn project_monotone(
             [corrected.0, corrected.1, corrected.2]
                 .into_iter()
                 .all(f64::is_finite)
-                && corrected.0 - uncorrected.0 >= -tol.pos_mm
+                && (-tol.pos_mm..=lift_budget).contains(&(corrected.0 - uncorrected.0))
                 && corrected.2.abs() <= uncorrected.2.abs() + accel_envelope
         });
         if within_budget {
@@ -4206,6 +4212,20 @@ fn project_monotone(
         "follower axis {axis} {label} monotone correction moved the total from \
          {source_total} to {corrected_total}"
     );
+}
+
+/// How far the polynomial `coeffs` falls below the highest it has reached,
+/// at most, sampled `sweep` times over `[0, h]` with its offset taken out.
+fn deepest_retreat(coeffs: &[f64], h: f64, sweep: usize) -> f64 {
+    let mut rise = coeffs.to_vec();
+    rise[0] = 0.0;
+    (0..=sweep)
+        .map(|step| polynomial_pva(&rise, h * step as f64 / sweep as f64).0)
+        .fold((f64::NEG_INFINITY, 0.0_f64), |(peak, deepest), position| {
+            let peak = peak.max(position);
+            (peak, deepest.max(peak - position))
+        })
+        .1
 }
 
 fn piece_velocity(piece: &BezierPiece) -> BezierPiece {
