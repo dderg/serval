@@ -106,6 +106,7 @@ F401_STEP_BENCHMARKS = [
     {
         "mcu": "mcu",
         "clock_freq": 84_000_000.0,
+        "capacity_fraction": 0.625,
         "pulsed_ticks_per_step": 301,
         "both_edge_ticks_per_step": 160,
         "simulated": False,
