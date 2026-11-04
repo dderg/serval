@@ -309,12 +309,11 @@ impl<'a> FollowerSignal<'a> {
             Some(_) => return None,
             None => None,
         };
-        let slivers = (
-            self.speed_zero_sliver(window.lo),
-            self.speed_zero_sliver(window.hi),
-        );
-        let (speed, inverse_speed) = match (slivers, rest) {
-            ((None, None), None) => {
+        let sliver = self
+            .speed_zero_sliver(window.center)
+            .filter(|sliver| sliver.holds_window(window.lo, window.hi));
+        let (speed, inverse_speed) = match (sliver, rest) {
+            (None, None) => {
                 let speed = taylor::root_or_range(&speed_squared);
                 let inverse = speed.reciprocal()?;
                 (speed, Some(inverse))
@@ -335,18 +334,16 @@ impl<'a> FollowerSignal<'a> {
                 )
             })
         };
-        let rate_deriv = match (slivers, &along) {
+        let rate_deriv = match (sliver, &along) {
             (_, Some(along)) => along.scale(scale),
-            ((None, None), None) if rest.is_some() => along_rest(1)?.scale(scale),
-            ((Some(lo), Some(hi)), None) if lo.zero_time == hi.zero_time => {
-                let side = |t: f64| lo.deriv_at(t);
-                let (low, high) = (side(window.lo), side(window.hi));
+            (None, None) => along_rest(1)?.scale(scale),
+            (Some(sliver), None) => {
+                let (low, high) = (sliver.deriv_at(window.lo), sliver.deriv_at(window.hi));
                 if low != high {
                     return None;
                 }
                 TaylorModel::constant(Ball::exact(low)).scale(scale)
             }
-            _ => return None,
         };
         let mut s = speed
             .integral()
@@ -463,8 +460,10 @@ impl<'a> FollowerSignal<'a> {
         Some(pieces)
     }
 
-    /// `lo`, the grid times, the axes' formula changes and `extra` inside
-    /// `(lo, hi)` in order, and `hi`; `None` where an axis has no formula.
+    /// `lo`, the grid times, the ratio crossings, the rests' ends and splits,
+    /// the end slivers' inner edges and zero times, the axes' formula changes and `extra`
+    /// inside `(lo, hi)` in order, and `hi`; `None` where an axis has no
+    /// formula.
     pub(super) fn breaks_between(&self, lo: f64, hi: f64, extra: &[f64]) -> Option<Vec<f64>> {
         let windows = self.axis_windows()?;
         let mut breaks = vec![lo, hi];
@@ -475,6 +474,12 @@ impl<'a> FollowerSignal<'a> {
                 .copied()
                 .chain(self.ratio_crossings().iter().map(|&(time, _)| time))
                 .chain(self.rests.iter().flat_map(super::rest::Rest::breaks))
+                .chain(
+                    [self.start_sliver, self.end_sliver]
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|sliver| [sliver.inner, sliver.zero_time]),
+                )
                 .filter(|&t| t > lo && t < hi),
         );
         for axis in windows

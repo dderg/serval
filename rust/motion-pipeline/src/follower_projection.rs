@@ -2150,6 +2150,16 @@ struct SpeedZeroSliver {
 }
 
 impl SpeedZeroSliver {
+    /// Whether the sliver holds the window `[lo, hi]` whose interior reads
+    /// it: the window lies on its side of its inner edge.
+    fn holds_window(&self, lo: f64, hi: f64) -> bool {
+        if self.interior_sign > 0.0 {
+            hi <= self.inner
+        } else {
+            lo >= self.inner
+        }
+    }
+
     fn deriv_at(&self, t: f64) -> f64 {
         let sign = if t > self.zero_time {
             1.0
