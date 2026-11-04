@@ -1,13 +1,13 @@
 {
   "slice_lines": 1000,
-  "commit": "d33143f24fd2fd19b2203d946e79237570aee734",
-  "reason": "emit-invariance: travel and rest segments that ride an extrusion fit to its position budget (2c5d050a4, about +1 % Ir on p3 slices, +3 % live on p3 kernel); the crossing reads the leaders once per probe (trident_kernel -2.6 % Ir)",
+  "commit": "0f479e89e4a17d26ff754d7aead4611c9369393e",
+  "reason": "provable fits: the ratio ramp modelled in follower enclosures and every fitted piece proven (witnesses removed); Pi 2-core worst window >= 2.06x on every config",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 18383764111,
+      "ir": 19914918820,
       "stream_secs": 8.541,
       "pi_2core": {
-        "worst_x_reference": 4.199244044441773,
+        "worst_x_reference": 3.811364395954888,
         "worst_x": [
           4.23,
           4.26
@@ -16,10 +16,10 @@
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 26043872293,
+      "ir": 27371139757,
       "stream_secs": 6.202,
       "pi_2core": {
-        "worst_x_reference": 2.2141956209066986,
+        "worst_x_reference": 2.070231256080688,
         "worst_x": [
           2.28,
           2.28
@@ -28,10 +28,10 @@
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 25770081934,
+      "ir": 28256044081,
       "stream_secs": 7.543,
       "pi_2core": {
-        "worst_x_reference": 2.385290011298007,
+        "worst_x_reference": 2.128770844865244,
         "worst_x": [
           2.41,
           2.39

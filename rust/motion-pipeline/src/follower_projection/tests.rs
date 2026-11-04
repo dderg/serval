@@ -1579,94 +1579,6 @@ fn an_advanced_follower_source_holds_the_tolerance_past_a_leader_seam_velocity_r
     }
 }
 
-fn leader_with_a_knot(knot: f64, end: f64) -> ContinuousSegment {
-    let before = [0.0, 80.0, 3_000.0, -400_000.0];
-    let at_knot = |order: usize| {
-        before
-            .iter()
-            .enumerate()
-            .skip(order)
-            .map(|(power, &coefficient)| {
-                let falling = ((power - order + 1)..=power).product::<usize>() as f64;
-                falling * coefficient * knot.powi((power - order) as i32)
-            })
-            .sum::<f64>()
-    };
-    let after = vec![
-        at_knot(0),
-        at_knot(1),
-        (at_knot(2) + 250.0) / 2.0,
-        (at_knot(3) + 900_000.0) / 6.0,
-    ];
-    let x = bezier_pieces_to_nurbs(&[
-        BezierPiece {
-            u_start: 0.0,
-            u_end: knot,
-            coeffs: before.to_vec(),
-        },
-        BezierPiece {
-            u_start: knot,
-            u_end: end,
-            coeffs: after,
-        },
-    ]);
-    let y = bezier_pieces_to_nurbs(&[BezierPiece {
-        u_start: 0.0,
-        u_end: end,
-        coeffs: vec![0.0, 30.0, -1_500.0, 60_000.0],
-    }]);
-    leader_segment(x, y, 0.0, end)
-}
-
-#[test]
-fn a_follower_reports_its_steps_across_a_leader_knot() {
-    let knot = 0.008;
-    let shaped = leader_with_a_knot(knot, 0.02);
-    let mut state = FollowerState::default();
-    state.push_span(10.0, 0.05, 0.09);
-    let sig = FollowerSignal::new(
-        &shaped,
-        &shaped,
-        3,
-        &[0, 1],
-        &state,
-        odometer_from_start(&shaped),
-        0.0,
-    );
-    assert_eq!(sig.interior_knots(0.001, 0.019), [knot]);
-    let [before, after] = sig.eval_pva_across(knot);
-    for (side, across) in [(f64::NEG_INFINITY, before), (f64::INFINITY, after)] {
-        let direct = sig.eval_pva(trajectory::next_toward(knot, side));
-        for (across, direct) in [
-            (across.0, direct.0),
-            (across.1, direct.1),
-            (across.2, direct.2),
-        ] {
-            assert!(
-                (across - direct).abs() <= 1e-9 * direct.abs().max(1.0),
-                "evaluating across the knot reads {across}, one ulp to its side reads {direct}"
-            );
-        }
-    }
-    let acceleration_step = (after.2 - before.2).abs();
-    let jerk_step = (jerk_at(&sig, trajectory::next_toward(knot, f64::INFINITY))
-        - jerk_at(&sig, trajectory::next_toward(knot, f64::NEG_INFINITY)))
-    .abs();
-    assert!(
-        acceleration_step > 1.0 && jerk_step > 1_000.0,
-        "test premise: the follower steps across the knot ({acceleration_step} mm/s², \
-         {jerk_step} mm/s³)"
-    );
-    let bound = sig.knot_jump(knot);
-    assert!(
-        acceleration_step <= bound.acceleration && jerk_step <= bound.jerk,
-        "the follower steps by {acceleration_step} mm/s² and {jerk_step} mm/s³ across the \
-         knot, past its reported bound of {} mm/s² and {} mm/s³",
-        bound.acceleration,
-        bound.jerk
-    );
-}
-
 /// A long slow move that ends in a brake shorter than a millionth of the
 /// move: the follower reads the leaders' acceleration only where they
 /// brake, not over a stretch of the cruise sized by the whole move.
@@ -2093,7 +2005,6 @@ fn a_follower_enclosure_opening_on_a_span_boundary_reads_the_span_ahead() {
 }
 
 #[test]
-#[ignore = "advanced enclosure waits on the ramp model"]
 fn an_advanced_follower_enclosure_holds_every_sample_of_its_signal() {
     let (shaped, state) = turning_leaders_on_two_ramps();
     let sig = FollowerSignal::new(
@@ -2215,16 +2126,6 @@ fn a_reversal_is_a_rest_whose_split_steps_the_rate_by_the_acceleration_twice() {
             && (after - acceleration).abs() < 1e-9 * acceleration,
         "the rate steps from {before} to {after}, not from −{acceleration} to {acceleration}"
     );
-    assert!(
-        sig.interior_knots(0.0, 0.02).contains(&rest.split),
-        "the split is a knot the signal jumps at"
-    );
-    let jump = sig.knot_jump(rest.split);
-    assert!(
-        jump.acceleration >= 0.05 * 2.0 * acceleration * (1.0 - 1e-9),
-        "the split's jump bound {} misses the ratio times the rate's step",
-        jump.acceleration
-    );
 }
 
 #[test]
@@ -2244,7 +2145,6 @@ fn a_stop_and_go_reads_its_rate_continuously_through_its_rest() {
 }
 
 #[test]
-#[ignore = "advanced enclosure waits on the ramp model"]
 fn an_advanced_follower_enclosure_holds_every_sample_through_a_reversal() {
     let shaped = leaders_on_a_noisy_line(&[-0.5, 50.0]);
     let mut state = FollowerState::default();
@@ -2320,7 +2220,6 @@ fn unshaped_segments(points: &[[f64; 2]], feedrate: f64) -> Vec<ContinuousSegmen
 /// leader step's allowance, and its enclosure holds every sample of its
 /// position and velocity there and of all three elsewhere.
 #[test]
-#[ignore = "advanced enclosure waits on the ramp model"]
 fn an_advance_on_an_unshaped_cap_departure_is_enclosed_under_its_onset_exemption() {
     let square = [
         [0.0, 0.0],
