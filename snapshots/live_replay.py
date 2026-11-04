@@ -242,13 +242,20 @@ def replay(
 ) -> list[LiveMove | LiveRest | LivePosition]:
     """Every move, rest and position rename the live host submits for
     ``gcode_text``, in order."""
+    return drive(gcode_text, cfg_path, RecordingEngine).steps
+
+
+def drive(gcode_text: str, cfg_path: Path, make_engine):
+    """Run ``gcode_text`` through klippy's own command handlers on the
+    engine ``make_engine(config_text)`` builds from the serialized config
+    document, and return that engine."""
     from klippy import configfile
     from klippy import gcode as gcode_mod
     from klippy.extras import force_move, gcode_move, stepper_enable
 
     printer = _Printer(gcode_mod, configfile)
     config = _load_config(cfg_path, printer)
-    engine = RecordingEngine(config.fileconfig.write_string())
+    engine = make_engine(config.fileconfig.write_string())
     gcode = gcode_mod.GCodeDispatch(printer)
     printer.add_object("gcode", gcode)
     motion = _motion(printer, config, engine)
@@ -273,4 +280,4 @@ def replay(
     gcode._handle_ready()
     move_handler._handle_ready()
     gcode.run_script(gcode_text)
-    return engine.steps
+    return engine

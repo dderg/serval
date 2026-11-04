@@ -365,6 +365,7 @@ impl PyMotionEngine {
             mcu_configs: mcu_configs.to_vec(),
             counter: Arc::clone(&self.dispatched_segments),
             transports,
+            detached: None,
         })
     }
 
@@ -483,10 +484,12 @@ impl PyMotionEngine {
         mcu_configs: &[McuAxisConfig],
         host_ios: &HashMap<u32, Arc<McuHostIo>>,
         ec_conns: &HashMap<u32, Arc<McuSerialConn>>,
+        detached: Option<motion_core::worker::DetachedTaps>,
     ) -> PyResult<crossbeam_channel::Sender<motion_core::pump::PumpMsg>> {
         let (pump_tx, pump_rx) = crossbeam_channel::unbounded::<motion_core::pump::PumpMsg>();
-        let resources =
+        let mut resources =
             self.build_execution_resources(mcu_configs, host_ios, ec_conns, &pump_tx)?;
+        resources.detached = detached;
 
         let mut stream_cfg =
             motion_pipeline::live_config::stream_config(cfg).map_err(PyValueError::new_err)?;
@@ -881,8 +884,9 @@ fn live_step_capacity(
     };
     for mcu in &capacity.mcus {
         for follower in &mcu.followers {
-            if motion_pipeline::live_config::extruder_caps_on(extruder_caps, follower.axis_index)
-                .is_none()
+            if !extruder_caps
+                .iter()
+                .any(|caps| caps.axis_index == follower.axis_index)
             {
                 return Err(format!(
                     "mcu '{}' steps axis '{}', which has no limits the planner can bound its \
