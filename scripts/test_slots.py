@@ -190,3 +190,34 @@ def test_zero_slots_is_refused(monkeypatch):
     monkeypatch.setenv("SERVAL_SLOTS", "0")
     with pytest.raises(ValueError):
         slots.slot_count()
+
+
+def test_a_back_to_back_exclusive_chain_does_not_starve_a_waiting_normal_job(
+    tmp_path,
+):
+    first = start(tmp_path, 3, "A", "--exclusive")
+    time.sleep(0.3)
+    normal = start(tmp_path, 3, "N")
+    time.sleep(0.3)
+    second = start(tmp_path, 3, "B", "--exclusive")
+    for job in (first, normal, second):
+        assert job.wait(timeout=60) == 0
+    rows = {name: (s, e) for name, s, e in records(tmp_path)}
+    assert rows["N"][0] >= rows["A"][1] - 0.05, (
+        "N ran inside the first exclusive job"
+    )
+    assert rows["N"][0] < rows["B"][0], (
+        "the exclusive job queued later jumped the queue"
+    )
+    assert rows["B"][0] >= rows["N"][1] - 0.05, "B overlapped the normal job"
+
+
+def test_a_dead_waiter_is_dropped_from_the_queue(tmp_path, monkeypatch):
+    monkeypatch.setenv("SERVAL_SLOTS_DIR", str(tmp_path / "slots"))
+    monkeypatch.setenv("SERVAL_SLOTS", "1")
+    (tmp_path / "slots").mkdir()
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    (tmp_path / "slots" / "queue").write_text(f"{gone.pid}\n")
+    lease = slots.acquire(timeout=5)
+    lease.release()

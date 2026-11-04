@@ -14,8 +14,10 @@ slots, every 60 s) and bounded: after --timeout (default 2 h) it fails.
 
 The locks are flock(2) files under SERVAL_SLOTS_DIR (default
 ~/.cache/serval-slots): the kernel frees them when the holder dies, so a
-crashed job cannot wedge the queue. A `gate` lock serialises entry, so an
-exclusive waiter is not starved by a stream of normal jobs.
+crashed job cannot wedge the queue. Waiters
+form a first-come-first-served queue (a pid file), so an exclusive request is
+not starved by a stream of normal jobs and cannot starve them by being
+re-queued back to back.
 """
 
 from __future__ import annotations
@@ -110,6 +112,79 @@ def poll_until(attempt, deadline, notify, waiting_for, started):
         time.sleep(POLL_SECONDS * (0.5 + random.random()))
 
 
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+class Queue:
+    """A first-come-first-served line of waiting pids, in a file guarded by
+    its own flock. Only the pid at the head may take slots, so an exclusive
+    request is neither starved by a stream of normal jobs nor able to starve
+    them by being re-queued back to back: whoever asked first goes first."""
+
+    def __init__(self, directory: Path):
+        self.path = directory / "queue"
+        self.guard = directory / "queue.lock"
+
+    @contextlib.contextmanager
+    def locked(self):
+        fd = open_lock(self.guard)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
+    def read(self) -> list[int]:
+        if not self.path.exists():
+            return []
+        return [int(x) for x in self.path.read_text().split() if x.isdigit()]
+
+    def write(self, pids: list[int]) -> None:
+        self.path.write_text("".join(f"{pid}\n" for pid in pids))
+
+    def join(self, pid: int) -> None:
+        with self.locked():
+            self.write(
+                [p for p in self.read() if pid_alive(p) and p != pid] + [pid]
+            )
+
+    def is_head(self, pid: int) -> bool:
+        with self.locked():
+            live = [p for p in self.read() if pid_alive(p)]
+            self.write(live)
+            return bool(live) and live[0] == pid
+
+    def leave(self, pid: int) -> None:
+        with self.locked():
+            self.write([p for p in self.read() if p != pid])
+
+
+def take_free(directory: Path, count: int, exclusive: bool) -> list[int] | None:
+    held: list[int] = []
+    for index in range(count):
+        fd = open_lock(directory / f"slot-{index}")
+        if try_lock(fd):
+            held.append(fd)
+            if not exclusive:
+                return held
+        else:
+            os.close(fd)
+            if exclusive:
+                break
+    if exclusive and len(held) == count:
+        return held
+    for fd in held:
+        os.close(fd)
+    return None
+
+
 def acquire(
     exclusive: bool = False,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
@@ -120,78 +195,30 @@ def acquire(
     directory.mkdir(parents=True, exist_ok=True)
     count = slot_count()
     started = time.monotonic()
-    deadline = started + timeout
-    who = f"pid {os.getpid()} {label or ' '.join(sys.argv)[:80]}".strip()
+    pid = os.getpid()
+    who = f"pid {pid} {label or ' '.join(sys.argv)[:80]}".strip()
+    queue = Queue(directory)
+    queue.join(pid)
+
+    def attempt():
+        if not queue.is_head(pid):
+            return None
+        return take_free(directory, count, exclusive)
 
     def waiting_for() -> str:
         what = "every slot" if exclusive else "a slot"
-        return f"{what} ({describe_holders(directory, count)})"
+        return f"{what} ({describe_holders(directory, count)}; queue {queue.read()})"
 
-    if exclusive:
-        held = take_all(
-            directory, count, deadline, notify, waiting_for, started
+    try:
+        held = poll_until(
+            attempt, started + timeout, notify, waiting_for, started
         )
-    else:
-        held = [
-            poll_until(
-                lambda: first_free(directory, count),
-                deadline,
-                notify,
-                waiting_for,
-                started,
-            )
-        ]
+    finally:
+        queue.leave(pid)
     for fd in held:
         os.ftruncate(fd, 0)
         os.write(fd, f"{who}\n".encode())
     return Lease(held)
-
-
-def take_all(
-    directory, count, deadline, notify, waiting_for, started
-) -> list[int]:
-    gate = open_lock(directory / "gate")
-    held: list[int] = []
-    try:
-        poll_until(
-            lambda: True if try_lock(gate) else None,
-            deadline,
-            notify,
-            lambda: "the entry gate",
-            started,
-        )
-        for index in range(count):
-            fd = open_lock(directory / f"slot-{index}")
-            held.append(fd)
-            poll_until(
-                lambda fd=fd: True if try_lock(fd) else None,
-                deadline,
-                notify,
-                waiting_for,
-                started,
-            )
-        return held
-    except BaseException:
-        for fd in held:
-            os.close(fd)
-        raise
-    finally:
-        os.close(gate)
-
-
-def first_free(directory: Path, count: int) -> int | None:
-    gate = open_lock(directory / "gate")
-    try:
-        if not try_lock(gate):
-            return None
-        for index in range(count):
-            fd = open_lock(directory / f"slot-{index}")
-            if try_lock(fd):
-                return fd
-            os.close(fd)
-        return None
-    finally:
-        os.close(gate)
 
 
 @contextlib.contextmanager
