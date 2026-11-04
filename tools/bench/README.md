@@ -215,7 +215,7 @@ CI runs the benchmark of every test/configs firmware in unicorn (`step_benchmark
 
 ### How the capacity caps moves
 
-The planner turns the benchmark into a per-move speed cap (`rust/motion-pipeline/src/live_config/step_capacity.rs`, `docs/Config_Reference_Motion.md`, "MCU step capacity"); klippy (`klippy/motion_step_capacity.py`) only hands it each MCU's benchmark, clock and stepped motors. Each MCU gets `STEP_CAPACITY_FRACTION` × CLOCK_FREQ ticks per second; the fraction comes from the timing budget below. A motor costs its benchmarked ticks per step (pulsed or both-edge, by its own mode) times the steps per second the move asks of it. The planner keeps the sum over each MCU's motors within the capacity, counting pressure advance on the extruder. On this bench (F401, 301 ticks/step pulsed) the fraction of 0.625 gives 174 k steps/s. `capacity.cfg` raises the speed limits past the cap, so its ladder rungs above the cap are planned slower than the G-code asks and `step_capacity_capped` events report it.
+The planner turns the benchmark into a per-move speed cap (`rust/motion-pipeline/src/live_config/step_capacity.rs`, `docs/Config_Reference_Motion.md`, "MCU step capacity"); klippy (`klippy/motion_step_capacity.py`) only hands it each MCU's benchmark, clock and stepped motors. Each MCU gets `STEP_CAPACITY_FRACTION` × CLOCK_FREQ ticks per second; the fraction comes from the timing budget and the single-motor limit below. A motor costs its benchmarked ticks per step (pulsed or both-edge, by its own mode) times the steps per second the move asks of it. The planner keeps the sum over each MCU's motors within the capacity, counting pressure advance on the extruder. On this bench (F401, 301 ticks/step pulsed) the fraction of 0.50 gives 140 k steps/s. `capacity.cfg` raises the speed limits past the cap, so its ladder rungs above the cap are planned slower than the G-code asks and `step_capacity_capped` events report it.
 
 `run.py` records every MCU's step benchmark in `run.json` under `step_benchmarks`, taken from the MCU status `step_capacity`, together with the capacity fraction the live planner applied. `analyze.py` plans its reference under the same cap, so a run where the cap binds is analyzed against the plan the printer executed, even after the fraction changes. A `run.json` from before that recording plans an uncapped reference. For such a run, `--step-benchmark 301,160,84000000,0.75` supplies the F401's benchmark and the fraction live used then (0.75 until it became 0.625). It is charged to every captured motor, stepped pulsed, since the bench has one MCU and no `dedge` driver. `analysis.json` says which reference it judged in `reference_step_capacity`: `recorded`, `supplied` or `absent`.
 
@@ -237,6 +237,20 @@ Sweep: `capacity_ladder_high` in event mode with the step tap and `configs/capac
 | 0.25 | 70 k | 5.2 µs | 0.09 | 0.24 | 0 |
 
 The largest fraction measured within budget is 0.625; 0.65 misses it by 0.02 step, and it did so on both runs. Runs: `20261104-044956` … `-045817` and `-051422` … `-051928`. In time terms, lateness is flat at 5–7 µs up to 0.45 and the queueing knee appears from 0.55 upward.
+
+### Single motor at the cap (interim fraction 0.50)
+
+The sweep above used the four-motor ladder only. On that ladder, steps of different motors fall close together and the dispatch loop takes them in turn without leaving the SysTick handler. A single motor held at the cap behaves differently: suite row `single_motor_cap` runs `gcode/single_motor_cap.gcode`, a CoreXY 45° diagonal at F150000 that steps only `a`, with `capacity.cfg`. Each of its steps pays a cold SysTick entry, the dispatch prologue and the exit. The self-benchmark never sees that cost, because it times `sched_timer_dispatch` in a cache-hot loop. A lone motor at the cap therefore needs more CPU than the benchmark charges, and the MCU falls more than 1 ms behind and shuts down with `Stepper too far in past`:
+
+| firmware | 0.50 | 0.625 | 0.775 |
+|---|---|---|---|
+| before #670/#671 (`481397432`) | shutdown (`-114535`) | shutdown (`-114149`) | shutdown (`-111157`) |
+| #670 + #671 (lead 190, 1 ms defer) | — | shutdown (`-110500`) | — |
+| lead 100, 1 ms defer | — | shutdown (`-110625`) | shutdown (`-111026`) |
+| lead 100, 100 µs defer | pass (`-114634`) | shutdown (`-115032`) | — |
+| main + #683 (lead 100, 1 ms defer), this fraction | pass (`-122013`, suite `20261104-122102`) | | |
+
+0.50 is interim. The self-benchmark is being reworked to measure an isolated step through the real SysTick path, and the fraction will then be re-derived against both this row and the timing budget.
 
 ## Limits
 
