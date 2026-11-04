@@ -755,7 +755,12 @@ fn an_extruding_sliver_between_a_travel_and_a_dwell_plans() {
         square_corner_velocity: 0.0,
     };
     let steps = [
-        step(0.0, 0.000_721_076_174_676_573_8, 199.174_124_775_033_05, 0.0),
+        step(
+            0.0,
+            0.000_721_076_174_676_573_8,
+            199.174_124_775_033_05,
+            0.0,
+        ),
         step(
             0.0,
             0.039_303_657_023_113_67,
