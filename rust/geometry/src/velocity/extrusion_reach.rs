@@ -49,10 +49,11 @@ impl Reach {
 }
 
 /// One move as the reach reads it: where it lies along the stream's path,
-/// the fastest the leaders can cross it and the least time they take, what
-/// it extrudes, the reach of the extruder it is budgeted for, and how long
-/// the leaders' shaped path moves on past a raw stop and before a raw
-/// start. An extrude-only move is a rest of the leaders.
+/// the fastest the leaders can cross it and the least time they take, the
+/// spatial axes it moves on, what it extrudes, the reach of the extruder it
+/// is budgeted for, and how long the leaders' shaped path moves on past a
+/// raw stop and before a raw start. An extrude-only move is a rest of the
+/// leaders.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Mark {
     start_mm: f64,
@@ -60,6 +61,7 @@ struct Mark {
     ceiling_mm_s: f64,
     least_time_s: f64,
     rest: bool,
+    moves_on: [bool; 3],
     extruding: Option<(usize, f64)>,
     reach: Option<Reach>,
     leader_kernel_reach_s: f64,
@@ -122,6 +124,15 @@ impl Dropped {
             .find(|(on, _)| *on == axis)
             .map_or(0.0, |(_, ratio)| *ratio)
     }
+}
+
+fn either(a: [bool; 3], b: [bool; 3]) -> [bool; 3] {
+    std::array::from_fn(|axis| a[axis] || b[axis])
+}
+
+/// The spatial axes `segment` moves on.
+fn moves_on(segment: &crate::path::Segment) -> [bool; 3] {
+    std::array::from_fn(|axis| segment.lean_on(axis).plane != 0.0)
 }
 
 /// Where the leaders' spill ends on one side of a move, and whether they
@@ -190,6 +201,7 @@ impl Marks {
             ceiling_mm_s,
             least_time_s,
             rest: m.segment.spatial.is_none(),
+            moves_on: m.segment.spatial.as_ref().map_or([false; 3], moves_on),
             extruding: m
                 .limits
                 .extruder
@@ -216,6 +228,37 @@ impl Marks {
         (1..=count).map(move |step| &self.marks[if ahead { index + step } else { index - step }])
     }
 
+    /// What `absorb` folds from the marks on one side of `marks[index]` the
+    /// leaders can reach within `window_s`, and from the dropped marks
+    /// behind, `None` while moves still to come could add to it.
+    fn fold_beside<T>(
+        &self,
+        (index, ahead): (usize, bool),
+        window_s: f64,
+        closed: bool,
+        init: T,
+        absorb: impl Fn(T, &Mark) -> T,
+        absorb_dropped: impl FnOnce(T, &Dropped) -> T,
+    ) -> Option<T> {
+        let mut elapsed = 0.0;
+        let mut folded = init;
+        for other in self.beside(index, ahead) {
+            if elapsed > window_s {
+                return Some(folded);
+            }
+            folded = absorb(folded, other);
+            elapsed += other.least_time_s;
+        }
+        if elapsed > window_s {
+            return Some(folded);
+        }
+        match (ahead, closed) {
+            (true, true) => Some(folded),
+            (true, false) => None,
+            (false, _) => Some(absorb_dropped(folded, &self.dropped)),
+        }
+    }
+
     /// The fastest ceiling on one side of `marks[index]` the leaders can
     /// reach within `window_s`, `None` while moves still to come could.
     fn fastest_beside(
@@ -225,23 +268,46 @@ impl Marks {
         window_s: f64,
         closed: bool,
     ) -> Option<f64> {
-        let mut elapsed = 0.0;
-        let mut fastest: f64 = 0.0;
-        for other in self.beside(index, ahead) {
-            if elapsed > window_s {
-                return Some(fastest);
-            }
-            fastest = fastest.max(other.ceiling_mm_s);
-            elapsed += other.least_time_s;
+        self.fold_beside(
+            (index, ahead),
+            window_s,
+            closed,
+            0.0,
+            |fastest: f64, other| fastest.max(other.ceiling_mm_s),
+            |fastest, dropped| fastest.max(dropped.ceiling_mm_s),
+        )
+    }
+
+    /// The spatial axes the path moves on within the leaders' spill of
+    /// `marks[index]`, up to the first rest either side, which the rest
+    /// holds keep the shaped path still across: the shaped path there moves
+    /// only on them, and only their planned acceleration reaches its jerk.
+    /// Without a spill the shaped path is the planned one, the move's own.
+    /// `None` while moves still to come could add to them. The history
+    /// behind always covers the spill, so the dropped marks never reach it.
+    fn axes_in_reach(&self, index: usize, closed: bool) -> Option<[bool; 3]> {
+        let mark = self.marks[index];
+        let Some(reach) = mark.reach.filter(|reach| reach.spill_s > 0.0) else {
+            return Some(mark.moves_on);
+        };
+        let mut axes = mark.moves_on;
+        for ahead in [false, true] {
+            (axes, _) = self.fold_beside(
+                (index, ahead),
+                reach.spill_s,
+                closed,
+                (axes, false),
+                |(axes, rested), other| {
+                    if rested || other.rest {
+                        (axes, true)
+                    } else {
+                        (either(axes, other.moves_on), false)
+                    }
+                },
+                |folded, _| folded,
+            )?;
         }
-        if elapsed > window_s {
-            return Some(fastest);
-        }
-        match (ahead, closed) {
-            (true, true) => Some(fastest),
-            (true, false) => None,
-            (false, _) => Some(fastest.max(self.dropped.ceiling_mm_s)),
-        }
+        Some(axes)
     }
 
     /// The largest ratio on one side of `marks[index]` its demand meets:
@@ -353,6 +419,7 @@ impl Marks {
     fn budget(&self, index: usize, closed: bool) -> Option<ExtrusionBudget> {
         Some(ExtrusionBudget {
             ratio_in_reach: self.ratio_in_reach(index, closed)?,
+            axes_in_reach: self.axes_in_reach(index, closed)?,
             rest_holds_s: self.rest_holds(index, closed)?,
         })
     }
@@ -364,12 +431,15 @@ impl Marks {
 }
 
 /// What a move's plan takes from the moves around it: the largest
-/// extrusion ratio its extruder demand can meet, and for an extrude-only
-/// move how long it holds the toolhead still before and after its own
-/// motion, so the extruder never adds the leaders' spill to it.
+/// extrusion ratio its extruder demand can meet, the spatial axes the path
+/// moves on within the leaders' spill of it, whose kernels the shaped
+/// path's jerk there passes through, and for an extrude-only move how long
+/// it holds the toolhead still before and after its own motion, so the
+/// extruder never adds the leaders' spill to it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExtrusionBudget {
     pub ratio_in_reach: f64,
+    pub axes_in_reach: [bool; 3],
     pub rest_holds_s: [f64; 2],
 }
 
@@ -402,7 +472,13 @@ impl ExtrusionReach {
         }
     }
 
+    /// Adds the stream's next move. After the stream came to rest and
+    /// settled every move, the next one starts a new stream: the toolhead
+    /// rests between them, so nothing before reaches it.
     pub fn push(&mut self, m: Move) {
+        if self.closed && self.pending.is_empty() {
+            self.clear();
+        }
         if let Some(caps) = m.limits.extruder {
             self.history_mm = self
                 .history_mm
