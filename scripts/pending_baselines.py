@@ -21,6 +21,7 @@ accepted; commit the written baselines there and push them to the PR branch.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import math
@@ -28,7 +29,7 @@ import os
 import shutil
 import subprocess
 import sys
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -41,6 +42,7 @@ CACHE = Path(
     os.environ.get("PENDING_BASELINES_CACHE", "~/.cache/pending-baselines")
 ).expanduser()
 TARGETS = CACHE / "targets"
+LOCKS = CACHE / "locks"
 
 
 def target_dir_for(tree: Path, purpose: str = "build") -> Path:
@@ -187,11 +189,30 @@ def sample_dir(sha: str) -> Path:
     return CACHE / "samples" / sha
 
 
+@contextmanager
+def commit_lock(name: str):
+    """One process at a time per scratch worktree name. Two ships against the
+    same main sha used the same wt/<sha> and one failed with 'already exists'
+    or 'is not a working tree'; the second now waits and finds the first's
+    cached result."""
+    LOCKS.mkdir(parents=True, exist_ok=True)
+    with open(LOCKS / f"{name}.lock", "w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+
+
 def sample_commit(sha: str) -> Path:
     out = sample_dir(sha)
     if (out / "meta.json").exists():
         return out
     ensure_commit(sha)
+    with commit_lock(f"wt-{short(sha)}"):
+        if (out / "meta.json").exists():
+            return out
+        return sample_commit_locked(sha, out)
+
+
+def sample_commit_locked(sha: str, out: Path) -> Path:
     tree = CACHE / "wt" / short(sha)
     tree.parent.mkdir(parents=True, exist_ok=True)
     run(["git", "worktree", "prune"])

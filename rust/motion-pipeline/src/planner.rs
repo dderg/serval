@@ -6,6 +6,7 @@ use geometry::{
     plan_velocity_stops_select_prefix, seam_requires_stop,
 };
 
+use crate::step_capacity_log::{StepCapacityLog, StepCapacityReport};
 use crate::types::{Control, PlannedItem, PlannedMove, StreamConfig, StreamInput};
 use crate::worker_pool::WorkerPool;
 
@@ -36,6 +37,7 @@ pub struct Planner {
     moves_since_plan: usize,
     config: StreamConfig,
     workers: Arc<WorkerPool>,
+    step_capacity_log: StepCapacityLog,
 }
 
 impl Planner {
@@ -51,6 +53,7 @@ impl Planner {
             moves_since_plan: 0,
             config,
             workers,
+            step_capacity_log: StepCapacityLog::default(),
         }
     }
 
@@ -168,6 +171,7 @@ impl Planner {
                 max_extrude_only_velocity_mm_s: self.config.max_extrude_only_velocity_mm_s,
                 max_extrude_only_accel_mm_s2: self.config.max_extrude_only_accel_mm_s2,
                 entry_v: self.entry_v,
+                step_capacity: self.config.step_capacity.as_deref(),
             },
             &*self.workers,
             select_prefix,
@@ -239,6 +243,16 @@ impl Planner {
         self.entry_v = profile.boundary_speeds[count];
         self.budgets.drain(..count);
         for (geometry, velocity) in self.moves.drain(..count).zip(profile.moves.iter().cloned()) {
+            if let (Some(capacity), Some(overload)) = (
+                self.config.step_capacity.as_deref(),
+                velocity.step_capacity_overload,
+            ) {
+                log_step_capacity(self.step_capacity_log.record(
+                    capacity,
+                    overload,
+                    std::time::Instant::now(),
+                ));
+            }
             if !output(PlannedItem::Move(PlannedMove { geometry, velocity })) {
                 return false;
             }
@@ -252,6 +266,23 @@ impl Planner {
 
     fn stop_at_seam(&self, i: usize) -> bool {
         seam_requires_stop(&self.moves[i - 1], &self.moves[i], self.config.corner)
+    }
+}
+
+fn log_step_capacity(reports: Vec<StepCapacityReport>) {
+    for report in reports {
+        tracing::warn!(
+            subsystem = "motion",
+            event = "step_capacity_capped",
+            mcu = %report.mcu,
+            moves_capped = report.moves_capped,
+            worst_demand_over_capacity = report.worst_demand_over_capacity,
+            "step capacity of mcu '{}' capped {} move(s) since the last report; the \
+             worst asked {:.2}x what the mcu can step",
+            report.mcu,
+            report.moves_capped,
+            report.worst_demand_over_capacity,
+        );
     }
 }
 

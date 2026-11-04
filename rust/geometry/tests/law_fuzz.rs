@@ -250,6 +250,7 @@ impl PlanCase {
                 max_extrude_only_velocity_mm_s: EXTRUDE_ONLY_V,
                 max_extrude_only_accel_mm_s2: EXTRUDE_ONLY_A,
                 entry_v: self.entry,
+                step_capacity: None,
             },
         )
     }

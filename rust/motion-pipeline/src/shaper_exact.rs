@@ -796,21 +796,32 @@ fn add_point_mass(
     offset: f64,
     degree: usize,
 ) {
+    let len = degree + 1;
     let mut powers = [1.0; EXACT_CAPACITY];
-    for power in 1..=degree {
+    for power in 1..len {
         powers[power] = powers[power - 1] * offset;
     }
-    for order in 0..MOMENT_ORDERS {
-        for (derivative, &weight) in mass.weights[order].iter().enumerate() {
-            if weight == 0.0 {
+    for ((weights, moments), magnitudes) in mass
+        .weights
+        .iter()
+        .zip(moments.iter_mut())
+        .zip(magnitudes.iter_mut())
+    {
+        for (derivative, &weight) in weights.iter().enumerate() {
+            if weight == 0.0 || derivative >= len {
                 continue;
             }
-            let sign = if derivative % 2 == 0 { 1.0 } else { -1.0 };
-            for moment_power in derivative..=degree {
-                let term = FALLING_FACTORIALS[moment_power][derivative]
-                    * powers[moment_power - derivative];
-                moments[order][moment_power] += sign * weight * term;
-                magnitudes[order][moment_power] += weight.abs() * term.abs();
+            let signed = if derivative % 2 == 0 { weight } else { -weight };
+            let scale = weight.abs();
+            for (((moment, magnitude), falling), power) in moments[derivative..len]
+                .iter_mut()
+                .zip(&mut magnitudes[derivative..len])
+                .zip(&FALLING_FACTORIALS[derivative..len])
+                .zip(&powers[..len - derivative])
+            {
+                let term = falling[derivative] * power;
+                *moment += signed * term;
+                *magnitude += scale * term.abs();
             }
         }
     }

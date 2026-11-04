@@ -38,6 +38,7 @@ fn config() -> StreamConfig {
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 64,
         limits: limits(),
+        step_capacity: None,
     }
 }
 
@@ -100,7 +101,7 @@ struct Replay {
 
 fn replay(chains: &AxisChainSet, moves: &[geometry::Move]) -> Replay {
     let config = config();
-    let mut pipeline = Pipeline::new(config, chains.clone(), vec![0.0; 4], 0.0);
+    let mut pipeline = Pipeline::new(config.clone(), chains.clone(), vec![0.0; 4], 0.0);
     let Pipeline { front, shaper } = &mut pipeline;
     let mut shaper_input = Vec::new();
     let mut motor_command = Vec::new();
