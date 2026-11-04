@@ -480,24 +480,28 @@ impl ExactSpan {
     /// The signal's value and derivatives at `t`, from the sub-interval on
     /// the side of `t` facing `toward`: at a break both neighbours'
     /// polynomials reach `t`, and each is the signal's limit from its own
-    /// side. Where breaks crowd within an ulp of `t`, the sub-intervals
-    /// between them hold no float and the nearest polynomial facing
-    /// `toward` is read, as the hull bounds it.
+    /// side. Where breaks crowd within ulps of `t`, the sub-intervals
+    /// between them hold no float and no polynomial; the nearest polynomial
+    /// facing `toward` is read, as the hull bounds it.
     pub(crate) fn pva(&self, t: f64, toward: f64) -> (f64, f64, f64) {
         let next = next_toward(t, toward);
+        let within_span = self
+            .pieces
+            .first()
+            .zip(self.pieces.last())
+            .is_some_and(|(first, last)| first.lo <= next && next <= last.hi);
         let piece = match ordered(t, toward) {
             Ordering::Less => self
                 .pieces
-                .get(self.pieces.partition_point(|piece| piece.hi <= t))
-                .filter(|piece| piece.lo <= next),
+                .get(self.pieces.partition_point(|piece| piece.hi <= t)),
             Ordering::Greater => self
                 .pieces
                 .partition_point(|piece| piece.lo < t)
                 .checked_sub(1)
-                .and_then(|index| self.pieces.get(index))
-                .filter(|piece| piece.hi >= next),
+                .and_then(|index| self.pieces.get(index)),
             Ordering::Equal => panic!("an exact read at {t} faces no side"),
         }
+        .filter(|_| within_span)
         .unwrap_or_else(|| panic!("an exact read at {t} lies outside its span"));
         piece.eval_pva(t)
     }
@@ -626,6 +630,12 @@ impl ExactConvolution<'_> {
                     pva,
                 });
             }
+        }
+        if let Some(first) = pieces.first_mut() {
+            first.lo = first.lo.min(lo);
+        }
+        if let Some(last) = pieces.last_mut() {
+            last.hi = last.hi.max(hi);
         }
         Some(pieces)
     }
@@ -786,21 +796,32 @@ fn add_point_mass(
     offset: f64,
     degree: usize,
 ) {
+    let len = degree + 1;
     let mut powers = [1.0; EXACT_CAPACITY];
-    for power in 1..=degree {
+    for power in 1..len {
         powers[power] = powers[power - 1] * offset;
     }
-    for order in 0..MOMENT_ORDERS {
-        for (derivative, &weight) in mass.weights[order].iter().enumerate() {
-            if weight == 0.0 {
+    for ((weights, moments), magnitudes) in mass
+        .weights
+        .iter()
+        .zip(moments.iter_mut())
+        .zip(magnitudes.iter_mut())
+    {
+        for (derivative, &weight) in weights.iter().enumerate() {
+            if weight == 0.0 || derivative >= len {
                 continue;
             }
-            let sign = if derivative % 2 == 0 { 1.0 } else { -1.0 };
-            for moment_power in derivative..=degree {
-                let term = FALLING_FACTORIALS[moment_power][derivative]
-                    * powers[moment_power - derivative];
-                moments[order][moment_power] += sign * weight * term;
-                magnitudes[order][moment_power] += weight.abs() * term.abs();
+            let signed = if derivative % 2 == 0 { weight } else { -weight };
+            let scale = weight.abs();
+            for (((moment, magnitude), falling), power) in moments[derivative..len]
+                .iter_mut()
+                .zip(&mut magnitudes[derivative..len])
+                .zip(&FALLING_FACTORIALS[derivative..len])
+                .zip(&powers[..len - derivative])
+            {
+                let term = falling[derivative] * power;
+                *moment += signed * term;
+                *magnitude += scale * term.abs();
             }
         }
     }

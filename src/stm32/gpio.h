@@ -13,6 +13,7 @@ struct gpio_out {
 struct gpio_out gpio_out_setup(uint32_t pin, uint32_t val);
 void gpio_out_reset(struct gpio_out g, uint32_t val);
 void gpio_out_toggle_noirq(struct gpio_out g);
+struct gpio_out gpio_out_bench_sink(void);
 void gpio_out_toggle(struct gpio_out g);
 void gpio_out_write(struct gpio_out g, uint32_t val);
 
