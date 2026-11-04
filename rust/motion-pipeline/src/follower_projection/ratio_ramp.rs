@@ -7,8 +7,8 @@ use geometry::{
 use trajectory::ContinuousSegment;
 
 use super::{
-    LeaderReads, RatioSpan, SPAN_LOOKUP_SLACK_MM, SPAN_MIN_LEN_MM, ShapedLeaders, axis_grid,
-    integrate,
+    FloorLeaders, LeaderReads, RatioSpan, SPAN_LOOKUP_SLACK_MM, SPAN_MIN_LEN_MM, ShapedLeaders,
+    axis_grid, integrate,
 };
 
 mod jet;
@@ -1784,7 +1784,12 @@ impl<'l, 'a> LegPath<'l, 'a> {
     fn outruns(&self, speed: f64) -> bool {
         self.grid.windows(2).all(|pair| {
             self.leaders
-                .speed_floor(pair[0], 0.5 * (pair[0] + pair[1]), pair[1])
+                .speed_floor(
+                    pair[0],
+                    0.5 * (pair[0] + pair[1]),
+                    pair[1],
+                    FloorLeaders::Cached,
+                )
                 .is_some_and(|floor| floor >= speed)
         })
     }
@@ -1849,7 +1854,7 @@ impl<'l, 'a> LegSpeed<'l, 'a> {
         let (lo, hi) = self.around(index);
         self.path
             .leaders
-            .speed_floor(lo, self.probes[index], hi)
+            .speed_floor(lo, self.probes[index], hi, FloorLeaders::Every)
             .is_some_and(|floor| floor > rest_speed)
     }
 

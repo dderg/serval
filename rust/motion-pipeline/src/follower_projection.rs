@@ -2284,6 +2284,17 @@ struct LeaderReads {
     odometer: OdometerLeaves,
 }
 
+/// The leaders a [`ShapedLeaders::speed_floor`] bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FloorLeaders {
+    /// Every leader, so one no cached piece reads across the interval
+    /// leaves no floor.
+    Every,
+    /// Those a cached piece reads across the interval: the part of the
+    /// velocity they carry is never faster than the whole.
+    Cached,
+}
+
 struct ShapedLeaders<'a> {
     leaders: &'a [usize],
     axes: Vec<&'a ContinuousAxis>,
@@ -2373,12 +2384,11 @@ impl<'a> ShapedLeaders<'a> {
         norm_of((0..self.axes.len()).map(|index| self.pva(index, t).1))
     }
 
-    /// A lower bound on the leaders' speed over `[lo, hi]`, when every
-    /// leader holds or reads one cached piece across it: their velocity's
-    /// tangent line at `at`, at its nearest to rest over the interval, less
-    /// the most the pieces' higher terms add to it and their evaluation's
-    /// rounding.
-    fn speed_floor(&self, lo: f64, at: f64, hi: f64) -> Option<f64> {
+    /// A lower bound on the speed of `bounded` leaders over `[lo, hi]`, and
+    /// so on the leaders' own: their velocity's tangent line at `at`, at its
+    /// nearest to rest over the interval, less the most the pieces' higher
+    /// terms add to it and their evaluation's rounding.
+    fn speed_floor(&self, lo: f64, at: f64, hi: f64, bounded: FloorLeaders) -> Option<f64> {
         let leaders = self.axes.len();
         assert!(
             leaders <= MAX_LEADERS,
@@ -2394,7 +2404,15 @@ impl<'a> ShapedLeaders<'a> {
             if matches!(axis, ContinuousAxis::Hold { .. }) {
                 continue;
             }
-            let piece = pieces.as_ref()?.piece_over(lo, at, hi)?;
+            let Some(piece) = pieces
+                .as_ref()
+                .and_then(|pieces| pieces.piece_over(lo, at, hi))
+            else {
+                match bounded {
+                    FloorLeaders::Every => return None,
+                    FloorLeaders::Cached => continue,
+                }
+            };
             let shifted = taylor_shifted(&piece.coeffs, at - piece.u_start);
             velocity[index] = shifted.get(1).copied().unwrap_or(0.0);
             acceleration[index] = 2.0 * shifted.get(2).copied().unwrap_or(0.0);
