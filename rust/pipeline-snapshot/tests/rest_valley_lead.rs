@@ -104,8 +104,8 @@ fn a_kernel_free_advance_keeps_its_lead_into_and_out_of_a_rest_it_can_afford() {
         let config = corpus::kernel_free(bench_config, EXTRUDER_MAX_ACCEL_MM_S2);
         for heading_deg in HEADINGS_DEG {
             let heading = (
-                heading_deg.to_radians().cos(),
-                heading_deg.to_radians().sin(),
+                libm::cos(heading_deg.to_radians()),
+                libm::sin(heading_deg.to_radians()),
             );
             let reading = read_lead(&plan(&config, heading), heading);
             let line = format!("{bench_config}, heading {heading_deg}°");
