@@ -531,7 +531,8 @@ impl WidthField {
     /// flattens onto, narrowing every window short of the rest to as much.
     /// The stack sits where the leaders rest: a rest pulls the moving nodes
     /// stacked short of it onto itself, as the window must close exactly
-    /// there whatever the leaders do after.
+    /// there whatever the leaders do after, while a rest sampled as the
+    /// leaders creep through a hold stacks on the rest already there.
     fn push(&mut self, s: f64, target: f64) {
         let s = match self.nodes.last() {
             None => s,
@@ -543,7 +544,7 @@ impl WidthField {
                 );
                 if s > last.s + REST_TARGET_MM {
                     s
-                } else if target == 0.0 && s > last.s {
+                } else if target == 0.0 && s > last.s && last.envelope > 0.0 {
                     self.pull_moving_stack_onto_rest(s);
                     s
                 } else {
@@ -569,7 +570,7 @@ impl WidthField {
             .count();
         let first_pulled = self.nodes.len() - moving;
         assert!(
-            moving == 0 || first_pulled >= self.final_prefix,
+            first_pulled >= self.final_prefix,
             "a rest at {rest} mm would pull the final ratio ramp width node at {stacked_at} mm \
              onto itself"
         );
