@@ -6,14 +6,17 @@ use geometry::step_capacity::SPATIAL_LANES;
 use geometry::{ExtruderCaps, FollowerStepLoad, McuStepLoad, StepCapacity};
 use planner_config::PlannerConfig;
 
-/// The share of each mcu's clock the live planner lets step dispatch take:
-/// the largest fraction at which the F401, held at the cap, keeps p99.9 MCU
-/// step lateness × the motor's own step rate ≤ 0.5 microstep both for one
-/// motor alone (suite row `single_motor_cap`: 0.09 at 0.85, 0.69 at 0.9) and
-/// for four motors together (`capacity_ladder_high`: 0.24 even at 1.0), with
-/// the self-benchmark charging each step its isolated timer-IRQ cost:
-/// tools/bench/README.md, "Capacity fraction from a timing budget".
-pub const STEP_CAPACITY_FRACTION: f64 = 0.85;
+/// The share of each mcu's clock the live planner lets step dispatch take.
+/// On the F401, held at the cap, p99.9 MCU step lateness × the motor's own
+/// step rate stays ≤ 0.5 microstep up to 0.85 for one motor alone (suite row
+/// `single_motor_cap`: 0.05 at 0.8, 0.09 at 0.85, then 0.69 at 0.9) and up
+/// to 1.0 for four motors together (`capacity_ladder_high`: 0.19 at 0.8).
+/// 0.8 keeps a step back from that cliff, since a shutdown is catastrophic
+/// and real printers run more MCU tasks than the bench: tools/bench/README.md,
+/// "Capacity fraction from a timing budget".
+/// TODO: re-derive with heater, ADC and TMC UART load once the phase-2 bench
+/// wiring (tools/bench/WIRING_PHASE2.md) exists.
+pub const STEP_CAPACITY_FRACTION: f64 = 0.8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepMode {

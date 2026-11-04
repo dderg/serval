@@ -79,7 +79,7 @@ def test_the_bench_printer_hands_the_planner_its_benchmark(caplog):
     assert step_benchmark == {
         "mcu": "mcu",
         "clock_freq": F401_CLOCK,
-        "capacity_fraction": 0.85,
+        "capacity_fraction": 0.8,
         "pulsed_ticks_per_step": 301,
         "both_edge_ticks_per_step": 160,
         "simulated": False,
@@ -94,7 +94,7 @@ def test_the_bench_printer_hands_the_planner_its_benchmark(caplog):
     summary = caplog.text
     assert "mcu 'mcu' step capacity" in summary
     assert "301 ticks/step pulsed and 160 ticks/step both-edge" in summary
-    assert "237209 steps/s pulsed (85.0 % of the 84000000 Hz clock)" in summary
+    assert "223256 steps/s pulsed (80.0 % of the 84000000 Hz clock)" in summary
     assert "stepper_a 113137 steps/s pulsed" in summary
     assert "stepper_z 10000 steps/s pulsed" in summary
     assert "extruder 110116 steps/s pulsed" in summary
@@ -112,7 +112,7 @@ def test_both_edge_motors_cost_what_that_mode_measured(caplog):
         "pulsed",
         "pulsed",
     ]
-    assert "446250 steps/s both-edge" in caplog.text
+    assert "420000 steps/s both-edge" in caplog.text
 
 
 def test_slow_moves_never_bind(caplog):
@@ -192,10 +192,10 @@ def test_an_mcu_that_cannot_step_a_sane_axis_speed_is_refused():
     message = str(refused.value)
     assert "mcu 'mcu' cannot step a pure X move at 50.0 mm/s" in message
     assert "600 ticks/step pulsed and 300 ticks/step both-edge" in message
-    assert "22667 steps/s pulsed" in message
+    assert "21333 steps/s pulsed" in message
     assert "stepper_a 16000 steps/s (pulsed, 9600000 ticks/s)" in message
     assert "stepper_b 16000 steps/s" in message
-    assert "reaches only 35.4 mm/s" in message
+    assert "reaches only 33.3 mm/s" in message
     assert "fewer microsteps" in message
     assert "dedge" in message
     assert "another MCU" in message
