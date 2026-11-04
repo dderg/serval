@@ -5,8 +5,9 @@ uv run python tools/bench/ab.py --ref origin/main --ref HEAD --gcode G
 
 Each ref is checked out clean (committed content only, no working-tree
 edits) in a temporary worktree, synced to the Pi with deploy.py sync --tree,
-run N times and analyzed. The Pi is left on the last ref. Worktrees are
-always removed.
+run N times and analyzed by that worktree's own analyzer and engine, so each
+ref's capture is held against the plan its code commands. The Pi is left on
+the last ref. Worktrees are always removed.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ AB_DIR = Path("~/bench/ab").expanduser()
 SYNC_TIMEOUT_S = 1800
 RUN_TIMEOUT_S = 2400.0
 ANALYZE_TIMEOUT_S = 1200.0
+ENGINE_BUILD_TIMEOUT_S = 3600
 RECOVERY_TIMEOUT_S = 600
 
 
@@ -65,7 +67,7 @@ def worktree(ref: str) -> Iterator[Path]:
         shutil.rmtree(path, ignore_errors=True)
 
 
-def run_once(args: argparse.Namespace, runs_dir: Path) -> dict:
+def run_once(args: argparse.Namespace, runs_dir: Path, tree: Path) -> dict:
     run = python(
         "run.py",
         str(args.gcode),
@@ -85,8 +87,15 @@ def run_once(args: argparse.Namespace, runs_dir: Path) -> dict:
         return {"run": None, "error": error, "summary": None}
     run_dir = run_dirs[-1]
     if (run_dir / "capture.bin").exists():
-        analysis = python(
-            "analyze.py", str(run_dir), timeout_s=ANALYZE_TIMEOUT_S
+        analysis = subprocess.run(
+            [
+                sys.executable,
+                str(tree / "tools/bench/analyze.py"),
+                str(run_dir),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=ANALYZE_TIMEOUT_S,
         )
         if analysis.returncode != 0:
             error = f"{error or ''} analyze.py: {last_lines(analysis.stderr)}"
@@ -106,9 +115,24 @@ def throttle_args(args: argparse.Namespace) -> list[str]:
     return out
 
 
+def build_analyzer_engine(tree: Path, ref: str) -> None:
+    build = subprocess.run(
+        ["make", "-f", "Makefile.rust", "config-doc", "motion-engine-fast"],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+        timeout=ENGINE_BUILD_TIMEOUT_S,
+    )
+    if build.returncode != 0:
+        sys.exit(
+            f"building {ref}'s analyzer engine failed: {last_lines(build.stderr, 8)}"
+        )
+
+
 def ab_ref(ref: str, args: argparse.Namespace, base: Path) -> list[dict]:
     results = []
     with worktree(ref) as tree:
+        build_analyzer_engine(tree, ref)
         sync = python(
             "deploy.py", "sync", "--tree", str(tree), timeout_s=SYNC_TIMEOUT_S
         )
@@ -116,7 +140,7 @@ def ab_ref(ref: str, args: argparse.Namespace, base: Path) -> list[dict]:
             sys.exit(f"sync of {ref} failed: {last_lines(sync.stderr, 8)}")
         for index in range(args.runs):
             print(f"{ref}: run {index + 1}/{args.runs}", flush=True)
-            results.append(run_once(args, base / slug(ref)))
+            results.append(run_once(args, base / slug(ref), tree))
     return results
 
 
@@ -172,8 +196,11 @@ def print_plan(args: argparse.Namespace) -> None:
     for ref in args.ref:
         print(f"ref {ref} = {resolve(ref)[:12]}")
         print("  git worktree add --detach <tmp> <ref>")
+        print(
+            "  make -f Makefile.rust config-doc motion-engine-fast  (in <tmp>)"
+        )
         print("  deploy.py sync --tree <tmp>")
-        print(f"  run.py + analyze.py x{args.runs}")
+        print(f"  run.py + <tmp>/tools/bench/analyze.py x{args.runs}")
         print("  git worktree remove <tmp>")
     print("all under one bench lock hold")
 

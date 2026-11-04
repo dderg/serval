@@ -82,15 +82,29 @@ pub fn z_caps_excess(snapshot: &pipeline_snapshot::Snapshot, config: &Path) -> O
 }
 
 pub fn plan(name: &str, gcode: &str, config: &Path) -> Option<pipeline_snapshot::Snapshot> {
-    let text = std::fs::read_to_string(config).expect("read config");
-    let planner = planner_config_from_text(&text).unwrap_or_else(|e| panic!("{name}: {e}"));
-    let waypoints = parse_gcode(gcode, &planner.cartesian).expect("gcode parses");
+    let waypoints = waypoints(gcode, config);
     if waypoints.len() < 2 {
         return None;
     }
-    let snapshot = pipeline_snapshot_for_config(&waypoints, &planner)
-        .unwrap_or_else(|e| panic!("{name}: {e}"));
-    Some(snapshot)
+    Some(plan_waypoints(name, &waypoints, config))
+}
+
+fn planner(name: &str, config: &Path) -> planner_config::PlannerConfig {
+    let text = std::fs::read_to_string(config).expect("read config");
+    planner_config_from_text(&text).unwrap_or_else(|e| panic!("{name}: {e}"))
+}
+
+pub fn waypoints(gcode: &str, config: &Path) -> Vec<pipeline_snapshot::waypoints::Waypoint> {
+    parse_gcode(gcode, &planner("waypoints", config).cartesian).expect("gcode parses")
+}
+
+pub fn plan_waypoints(
+    name: &str,
+    waypoints: &[pipeline_snapshot::waypoints::Waypoint],
+    config: &Path,
+) -> pipeline_snapshot::Snapshot {
+    pipeline_snapshot_for_config(waypoints, &planner(name, config))
+        .unwrap_or_else(|e| panic!("{name}: {e}"))
 }
 
 pub fn snapshot_cases() -> Vec<(String, String, PathBuf)> {
