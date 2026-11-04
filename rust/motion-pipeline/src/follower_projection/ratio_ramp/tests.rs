@@ -1151,7 +1151,7 @@ fn reversing_just_before_its_end(t0: f64, end_excess_mm_s: f64) -> (ContinuousSe
             coeffs: vec![sideways * piece, sideways],
         },
     ];
-    let reversal_t = t_mid + piece * ((v0 + gain) / drop).powf(1.0 / f64::from(power));
+    let reversal_t = t_mid + piece * libm::pow((v0 + gain) / drop, 1.0 / f64::from(power));
     (leaders(&x, &y, (t0, t1)), reversal_t)
 }
 

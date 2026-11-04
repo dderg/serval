@@ -2143,9 +2143,9 @@ fn slowest_crawl(
         .min_by(|left, right| left.1.total_cmp(&right.1))
         .expect("a leg has probes");
     let last_probe = speed.probes.len() - 1;
-    let next_to_a_fast_seam = [0, last_probe].into_iter().filter(|&end| {
-        end != slowest_probe && probe_speed(end) >= ADVANCE_VALLEY_SPEED_MM_S
-    });
+    let next_to_a_fast_seam = [0, last_probe]
+        .into_iter()
+        .filter(|&end| end != slowest_probe && probe_speed(end) >= ADVANCE_VALLEY_SPEED_MM_S);
     let (turn, _) = std::iter::once(slowest_probe)
         .chain(next_to_a_fast_seam)
         .filter_map(|index| {
