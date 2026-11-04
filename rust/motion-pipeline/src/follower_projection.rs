@@ -15,9 +15,9 @@ use trajectory::{
 use crate::lowering::{AccelBudget, FitTol, SeamContinuity, follower_tol_scale};
 use crate::shaper::{
     AxisFit, AxisSignalTable, BetweenProbes, ConvolutionSignal, Enclosure, ExactConvolution,
-    ExactKernel, FitBoundary, KnotJumpBound, Lookahead, SEGMENT_TIME_EPS_S, ShiftedTrackSignal,
-    SignalBounds, TrackSignal, apply_derivative_gains_to_track, fit_axis_from_signal,
-    fit_resolution, shaped_signal_breakpoints, unit_kernel_mass,
+    ExactKernel, FitBoundary, KnotJumpBound, Lookahead, SEGMENT_TIME_EPS_S, ShapedBreaks,
+    ShiftedTrackSignal, SignalBounds, TrackSignal, apply_derivative_gains_to_track,
+    fit_axis_from_signal, fit_resolution, fit_seed_times, unit_kernel_mass,
 };
 use crate::types::PostProcessError;
 use crate::worker_pool::WorkerPool;
@@ -1145,7 +1145,7 @@ impl KernelFit<'_> {
             &semantic_cuts
         };
         let breaks_started = crate::timing::stopwatch();
-        let shaped_breaks = shaped_signal_breakpoints(kernel, shaped_break_seeds);
+        let shaped_breaks = ShapedBreaks::new(kernel, shaped_break_seeds);
         let breakpoints_us = breaks_started.elapsed_us();
         let input_jumps = table.input_jumps().to_vec();
         let exact_kernel = ExactKernel::new(kernel);
@@ -1179,13 +1179,24 @@ impl KernelFit<'_> {
         let mut fitted = Vec::with_capacity(group.len());
         let mut fit_us = 0;
         for target in group {
+            let target_tol = follower_fit_tol(fit_tol, target.tol_scale);
+            let seeds = shaped_breaks.select_seeds(
+                fit_seed_times(
+                    axis,
+                    target.support.0,
+                    target.support.1,
+                    shaped_breaks.times(),
+                )?,
+                Some(&table),
+                target_tol,
+            );
             let (local_base, pieces, target_us) = fit_kernel_window(
                 axis,
                 target.support.0,
                 target.support.1,
-                &shaped_breaks,
+                &seeds,
                 &sig,
-                follower_fit_tol(fit_tol, target.tol_scale),
+                target_tol,
                 output_monotonicity,
             )?;
             fit_us += target_us;
