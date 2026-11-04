@@ -125,7 +125,7 @@ fn a_nanosecond_seed_cluster_far_from_the_origin_keeps_the_motor_command_in_budg
             seed_breakpoints: &clusters,
             fit_tol: BENCH_TOL,
             fit_context: "test fit",
-            velocity_continuous: false,
+            seam_continuity: crate::lowering::SeamContinuity::Position,
         },
         &sig,
     )

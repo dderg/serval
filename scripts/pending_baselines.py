@@ -58,6 +58,7 @@ SAMPLE_DT_S = 1e-3
 AXES = ("x", "y", "z", "e")
 DETAIL_CASES = 6
 HEAVY = ("make", "cargo")
+NETWORK_GIT = ("fetch", "push", "pull", "ls-remote")
 PR_FIELDS = (
     "number,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,"
     "statusCheckRollup"
@@ -73,6 +74,13 @@ def run(args: list[str], cwd: Path = ROOT, env: dict | None = None) -> str:
         args = [
             sys.executable,
             str(Path(__file__).with_name("gh_util.py")),
+            *args[1:],
+        ]
+    elif args[0] == "git" and len(args) > 1 and args[1] in NETWORK_GIT:
+        args = [
+            sys.executable,
+            str(Path(__file__).with_name("gh_util.py")),
+            "--git",
             *args[1:],
         ]
     heavy = (
