@@ -554,6 +554,8 @@ pub struct Shaper {
     follower_states: Vec<FollowerState>,
     toolhead_tap: Option<Sender<ContinuousSegment>>,
     pool: Arc<WorkerPool>,
+    emit_batch: usize,
+    segments_since_emit: usize,
 }
 
 impl Shaper {
@@ -570,6 +572,8 @@ impl Shaper {
             follower_states: Vec::new(),
             toolhead_tap: None,
             pool,
+            emit_batch: 1,
+            segments_since_emit: 0,
         }
     }
 
@@ -579,6 +583,17 @@ impl Shaper {
     #[must_use]
     pub fn with_toolhead_tap(mut self, tap: Sender<ContinuousSegment>) -> Self {
         self.toolhead_tap = Some(tap);
+        self
+    }
+
+    /// Takes in `segments` lowered segments before each emit instead of
+    /// one, so a test can hold the output to the same trajectory however
+    /// the emits are cut.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn with_emit_batch(mut self, segments: usize) -> Self {
+        assert!(segments > 0, "an emit batch holds at least one segment");
+        self.emit_batch = segments;
         self
     }
 
@@ -614,6 +629,10 @@ impl Shaper {
         match item {
             BaseItem::Seg(item) => {
                 self.pending.push(item);
+                self.segments_since_emit += 1;
+                if self.segments_since_emit < self.emit_batch {
+                    return true;
+                }
                 self.emit(self.supported_count(), false, output)
             }
             BaseItem::Drain => {
@@ -627,6 +646,7 @@ impl Shaper {
                 match &ctrl {
                     Control::Reset { .. } => {
                         self.pending.clear();
+                        self.segments_since_emit = 0;
                         self.history.clear();
                         self.history_trimmed = false;
                         for state in &mut self.follower_states {
@@ -738,6 +758,7 @@ impl Shaper {
         force: bool,
         output: &mut impl FnMut(TrajectoryItem) -> bool,
     ) -> bool {
+        self.segments_since_emit = 0;
         if count == 0 {
             return true;
         }
@@ -1546,74 +1567,100 @@ fn fit_axis_column(
             return Err(PostProcessError::MissingLookahead { axis, t: need_hi });
         }
     }
-    let (signal_segments, bounds) = read_window(
-        &window_segments,
-        (
-            targets[0].t_start - k_hi,
-            targets[targets.len() - 1].t_end - k_lo,
-        ),
-        SignalBounds {
-            first_t,
-            last_t,
-            boundary,
-            lookahead,
-        },
-    );
-    if let Some(column) = constant_axis_column(signal_segments, targets, axis) {
-        return Ok(Some(column));
+    let window = SignalBounds {
+        first_t,
+        last_t,
+        boundary,
+        lookahead,
+    };
+    let workers = target_workers.max(1).min(targets.len());
+    let fitted = pool
+        .map_indexed(
+            workers,
+            targets.len(),
+            || (),
+            |(), index| {
+                fit_target_alone(
+                    axis,
+                    std::slice::from_ref(&targets[index]),
+                    kernel,
+                    read_window(&window_segments, &targets[index], kernel, window),
+                    fit_tol,
+                    signal,
+                    pool,
+                )
+            },
+        )
+        .expect("leader target fit thread panicked");
+    let mut tracks = Vec::with_capacity(targets.len());
+    for result in fitted {
+        tracks.extend(result?);
+    }
+    Ok(Some(tracks))
+}
+
+/// One target's fit from the signal it reads alone, about its own start:
+/// what else shares its emit never reaches the fit, so the leader comes out
+/// the same however the shaper batches its emits.
+fn fit_target_alone(
+    axis: usize,
+    target: &[ContinuousSegment],
+    kernel: &nurbs::algebra::PiecewisePolynomialKernel,
+    (signal_segments, bounds): (&[&ContinuousSegment], SignalBounds),
+    fit_tol: FitTol,
+    signal: ColumnSignal,
+    pool: &WorkerPool,
+) -> Result<Vec<ColumnTrack>, PostProcessError> {
+    if let Some(column) = constant_axis_column(signal_segments, target, axis) {
+        return Ok(column);
     }
     fit_axis_targets(
         axis,
-        targets,
+        target,
         ShapedSignalSource::new(
             kernel,
             signal.convolution_input(AxisSignalTable::build(signal_segments, axis, bounds)),
             signal_breakpoints(signal_segments, axis),
-            targets[0].t_start,
+            target[0].t_start,
         ),
         fit_tol,
         signal,
-        target_workers,
+        1,
         pool,
     )
-    .map(Some)
 }
 
-/// The segments a convolution over `[read_lo, read_hi]` reads, one segment
-/// of margin on each side so the edges of the slice (and a gain impulse a
-/// cut edge carries) stay outside every read, with the bounds of that
-/// slice: an edge that is not the window's own is an interior cut.
+/// The segments a convolution of `kernel` over `target` reads: from the one
+/// holding the earliest time read to the first one reaching the latest, so
+/// a gap a read lands in carries its hold. The slice depends on the target
+/// and the segments alone, never on how far the window around them reaches;
+/// an edge clamps only where the read passes it, as the window's own edge
+/// would.
 fn read_window<'s, 'a>(
     segments: &'s [&'a ContinuousSegment],
-    (read_lo, read_hi): (f64, f64),
+    target: &ContinuousSegment,
+    kernel: &nurbs::algebra::PiecewisePolynomialKernel,
     window: SignalBounds,
 ) -> (&'s [&'a ContinuousSegment], SignalBounds) {
+    let (k_lo, k_hi) = kernel.support();
+    let (read_lo, read_hi) = (target.t_start - k_hi, target.t_end - k_lo);
     let lo = segments
         .partition_point(|seg| seg.t_start <= read_lo)
-        .saturating_sub(2);
-    let hi = (segments.partition_point(|seg| seg.t_start <= read_hi) + 1).min(segments.len());
+        .saturating_sub(1);
+    let hi = (segments.partition_point(|seg| seg.t_end < read_hi) + 1).min(segments.len());
     let slice = &segments[lo..hi];
-    let at_window_start = lo == 0;
-    let at_window_end = hi == segments.len();
+    let (first_t, last_t) = (slice[0].t_start, slice[slice.len() - 1].t_end);
     (
         slice,
         SignalBounds {
-            first_t: if at_window_start {
-                window.first_t
-            } else {
-                slice[0].t_start
-            },
-            last_t: if at_window_end {
-                window.last_t
-            } else {
-                slice[slice.len() - 1].t_end
-            },
-            boundary: if at_window_start {
+            first_t,
+            last_t,
+            boundary: if read_lo < first_t {
                 window.boundary
             } else {
                 FitBoundary::Interior
             },
-            lookahead: if at_window_end {
+            lookahead: if read_hi > last_t {
                 window.lookahead
             } else {
                 Lookahead::Required

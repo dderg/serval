@@ -69,6 +69,13 @@ impl Pipeline {
         self
     }
 
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn with_emit_batch(mut self, segments: usize) -> Self {
+        self.shaper = self.shaper.with_emit_batch(segments);
+        self
+    }
+
     pub fn feed(
         &mut self,
         item: StreamInput,
