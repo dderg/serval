@@ -7,27 +7,14 @@ M83
 G1 X240 Y150 Z50 E38.6 F12000
 ";
 
-const PRESSURE_ADVANCE_ON_E: &str = "motors: extruder
-post_processors: pa, st
-
-[post_processor pa]
-type: linear_pressure_advance
-k: 0.03
-
-[post_processor st]
-type: smooth_triangle
-smooth_time: 0.04
-";
-
-/// Plans `gcode` under the bench rest ladder's fast-Z limits with pressure
-/// advance and a smoothing kernel on E, edited by `edit`.
+/// Plans `gcode` under the bench rest ladder's config — fast-Z limits with
+/// pressure advance and a smoothing kernel on E — edited by `edit`.
 fn plans_with_pressure_advance(name: &str, gcode: &str, edit: impl Fn(String) -> String) {
     let base = std::fs::read_to_string(corpus::repo().join("tools/bench/configs/rest_ladder.cfg"))
         .expect("rest ladder config");
-    assert!(base.contains("motors: extruder\n"));
-    let config = edit(base.replacen("motors: extruder\n", PRESSURE_ADVANCE_ON_E, 1));
+    assert!(base.contains("post_processors: pa, st\n"));
     let path = std::env::temp_dir().join(format!("{name}_{}.cfg", std::process::id()));
-    std::fs::write(&path, config).expect("temp config");
+    std::fs::write(&path, edit(base)).expect("temp config");
     let snapshot = corpus::plan(name, gcode, &path).expect("waypoints");
     std::fs::remove_file(&path).expect("temp config removed");
     assert!(snapshot.traversal_time_s > 0.0, "{name}");
