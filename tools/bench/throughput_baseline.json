@@ -1,14 +1,14 @@
 {
   "slice_lines": 1000,
-  "commit": "b840795b59fcb04bc7fcc6e1e3568b3d25436d50",
+  "commit": "b26e13936584b00df1f70627c8d101375be4affa",
   "reason": "provable fits: the ratio ramp modelled in follower enclosures and every fitted piece proven (witnesses removed); Pi 2-core worst window >= 2.06x on every config",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 19874703749,
+      "ir": 19914991960,
       "stream_secs": 8.541,
       "pi_2core": {
         "k_ir": 9114169275.97816,
-        "worst_x_reference": 3.7361088158977878,
+        "worst_x_reference": 3.4026614926228427,
         "worst_x": [
           2.79,
           2.76
@@ -17,11 +17,11 @@
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 27318566262,
+      "ir": 27374209107,
       "stream_secs": 6.202,
       "pi_2core": {
         "k_ir": 9659757002.81361,
-        "worst_x_reference": 2.0947100890278123,
+        "worst_x_reference": 1.9563745755023743,
         "worst_x": [
           2.33,
           2.36
@@ -30,11 +30,11 @@
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 28150571355,
+      "ir": 28254422098,
       "stream_secs": 7.543,
       "pi_2core": {
         "k_ir": 8703407017.198727,
-        "worst_x_reference": 2.249867949505665,
+        "worst_x_reference": 2.2485438951082384,
         "worst_x": [
           2.5,
           2.49
