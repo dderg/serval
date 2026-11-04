@@ -331,11 +331,10 @@ pub fn brake_horizon(
     let mut brake = 0.0_f64;
     for k in (0..n).rev() {
         let kin = &caps[k].kin;
-        let reach = disk::disk_reach_v_rev(kin, brake, kin.length, tol).ok_or(
-            VelocityError::Diverged {
+        let reach =
+            disk::disk_reach_v_rev(kin, brake, kin.length, tol).ok_or(VelocityError::Diverged {
                 line_no: moves[k].source.start_line,
-            },
-        )?;
+            })?;
         brake = if k == 0 {
             reach.v
         } else {
@@ -402,14 +401,8 @@ where
     let mut report = VelocityReport::default();
     let caps = build_move_caps(moves, budgets, ends.accel_scales, params, &mut report)?;
     check_entry_ceiling(moves, &caps, entry_v, tol)?;
-    let mut plan = seed_seam_velocities(
-        moves,
-        &caps,
-        stop_before,
-        entry_v,
-        ends.exit_v,
-        &mut report,
-    );
+    let mut plan =
+        seed_seam_velocities(moves, &caps, stop_before, entry_v, ends.exit_v, &mut report);
     forward_pass(moves, &caps, &mut plan, tol)?;
     let shop = ProfileShop::new(&caps, &plan.is_anchor);
     let mut settled = None;
@@ -1176,6 +1169,6 @@ fn validate_segment<P: CurvatureProfile>(
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod replan_tests;
+#[cfg(test)]
+mod tests;

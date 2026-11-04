@@ -17,14 +17,14 @@ mod shaper;
 mod staged;
 mod step_capacity_log;
 pub mod timing;
-pub mod types;
 mod turning_guard;
+pub mod types;
 mod worker_pool;
 
 use fit_stage::{FitDriver, FitStage};
 use planner::Planner;
-use turning_guard::TurningGuard;
 use shaper::Shaper;
+use turning_guard::TurningGuard;
 
 pub use follower_projection::follower_velocity_step_allowance;
 pub use lower_stage::Lowerer;

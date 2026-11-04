@@ -2,17 +2,17 @@ use nurbs::algebra::PiecewisePolynomialKernel;
 use trajectory::{build_smooth_mzv_kernel, build_smooth_zv_kernel};
 
 use super::screen::MoveSummary;
-use super::shadow::{FollowerKernels, GridSample, PlannedGrid};
+use super::shadow::{FollowerKernels, GridSample, PlannedGrid, Ride};
 
 /// Gauss–Legendre nodes and weights on `[-1, 1]`, exact for polynomials
 /// up to degree 15.
 const GAUSS: [(f64, f64); 8] = [
     (-0.960_289_856_497_536_3, 0.101_228_536_290_376_26),
     (-0.796_666_477_413_626_7, 0.222_381_034_453_374_47),
-    (-0.525_532_409_916_329_0, 0.313_706_645_877_887_3),
+    (-0.525_532_409_916_329, 0.313_706_645_877_887_3),
     (-0.183_434_642_495_649_8, 0.362_683_783_378_362),
     (0.183_434_642_495_649_8, 0.362_683_783_378_362),
-    (0.525_532_409_916_329_0, 0.313_706_645_877_887_3),
+    (0.525_532_409_916_329, 0.313_706_645_877_887_3),
     (0.796_666_477_413_626_7, 0.222_381_034_453_374_47),
     (0.960_289_856_497_536_3, 0.101_228_536_290_376_26),
 ];
@@ -57,7 +57,10 @@ impl Leaders {
     }
 
     pub fn grid_kernels(&self, h: f64) -> FollowerKernels {
-        FollowerKernels::new([Some(Some(&self.x)), Some(Some(&self.y)), None], h)
+        FollowerKernels::new(
+            [Ride::Through(&self.x), Ride::Through(&self.y), Ride::Not],
+            h,
+        )
     }
 
     pub fn jerk_gain(&self, axes: [bool; 3]) -> f64 {
@@ -84,14 +87,21 @@ impl Leaders {
 pub(super) fn random_motion(rng: &mut Rng) -> Motion {
     let heading = rng.between(0.0, std::f64::consts::TAU);
     let speed = rng.between(0.0, 500.0);
-    let v0 = [speed * heading.cos(), speed * heading.sin(), 0.0];
+    let v0 = [speed * libm::cos(heading), speed * libm::sin(heading), 0.0];
     let count = 2 + (rng.unit() * 6.0) as usize;
     let pieces = (0..count)
         .map(|_| {
             let dt = rng.between(5e-4, 0.02);
             let direction = rng.between(0.0, std::f64::consts::TAU);
             let accel = rng.between(0.0, 40_000.0);
-            (dt, [accel * direction.cos(), accel * direction.sin(), 0.0])
+            (
+                dt,
+                [
+                    accel * libm::cos(direction),
+                    accel * libm::sin(direction),
+                    0.0,
+                ],
+            )
         })
         .collect();
     Motion::new(v0, pieces)
@@ -140,7 +150,11 @@ impl Motion {
 
     pub fn state(&self, t: f64) -> ([f64; 3], [f64; 3], [f64; 3]) {
         if t < 0.0 {
-            return (std::array::from_fn(|axis| self.v0[axis] * t), self.v0, [0.0; 3]);
+            return (
+                std::array::from_fn(|axis| self.v0[axis] * t),
+                self.v0,
+                [0.0; 3],
+            );
         }
         let index = self
             .starts
@@ -260,7 +274,11 @@ impl Motion {
             .filter(|&(t0, t1)| t1 > from && t0 < to)
             .map(|(t0, t1)| {
                 let (a, b) = (t0.max(from), t1.min(to));
-                let (v_a, v_b, accel) = (self.state(a).1, self.state(b).1, self.state(0.5 * (a + b)).2);
+                let (v_a, v_b, accel) = (
+                    self.state(a).1,
+                    self.state(b).1,
+                    self.state(0.5 * (a + b)).2,
+                );
                 let slowest = distance_to_segment(v_a, v_b);
                 let fastest = norm(v_a).max(norm(v_b));
                 MoveSummary {
@@ -335,7 +353,7 @@ fn heading_spans(a: [f64; 3], b: [f64; 3]) -> [(f64, f64); 3] {
     let u = a.map(|x| x / na);
     let w = b.map(|x| x / nb);
     let cos = (u[0] * w[0] + u[1] * w[1] + u[2] * w[2]).clamp(-1.0, 1.0);
-    let sweep = cos.acos();
+    let sweep = libm::acos(cos);
     let normal = sub(w, u.map(|x| x * cos));
     let normal_len = norm(normal);
     std::array::from_fn(|axis| {
@@ -344,14 +362,23 @@ fn heading_spans(a: [f64; 3], b: [f64; 3]) -> [(f64, f64); 3] {
         }
         let v = normal[axis] / normal_len;
         let plane = (u[axis] * u[axis] + v * v).sqrt();
-        let alpha = v.atan2(u[axis]);
+        let alpha = libm::atan2(v, u[axis]);
         let (from, to) = (-alpha, sweep - alpha);
-        let ends = [from.cos(), to.cos()];
+        let ends = [libm::cos(from), libm::cos(to)];
         let two_pi = 2.0 * std::f64::consts::PI;
         let crest = (from / two_pi).ceil() * two_pi;
-        let trough = ((from - std::f64::consts::PI) / two_pi).ceil() * two_pi + std::f64::consts::PI;
-        let top = if crest <= to { 1.0 } else { ends[0].max(ends[1]) };
-        let bottom = if trough <= to { -1.0 } else { ends[0].min(ends[1]) };
+        let trough =
+            ((from - std::f64::consts::PI) / two_pi).ceil() * two_pi + std::f64::consts::PI;
+        let top = if crest <= to {
+            1.0
+        } else {
+            ends[0].max(ends[1])
+        };
+        let bottom = if trough <= to {
+            -1.0
+        } else {
+            ends[0].min(ends[1])
+        };
         (plane * bottom, plane * top)
     })
 }

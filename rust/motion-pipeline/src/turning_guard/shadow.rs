@@ -97,6 +97,23 @@ pub(super) enum Leader {
     Unfollowed,
 }
 
+/// How a follower rides one spatial axis, before the guard grids it.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Ride<'a> {
+    Through(&'a PiecewisePolynomialKernel),
+    Raw,
+    Not,
+}
+
+impl<'a> Ride<'a> {
+    pub fn kernel(self) -> Option<&'a PiecewisePolynomialKernel> {
+        match self {
+            Self::Through(kernel) => Some(kernel),
+            Self::Raw | Self::Not => None,
+        }
+    }
+}
+
 /// The kernels of the spatial axes a follower rides, on the guard's grid.
 #[derive(Debug, Clone)]
 pub(super) struct FollowerKernels {
@@ -105,13 +122,13 @@ pub(super) struct FollowerKernels {
 }
 
 impl FollowerKernels {
-    pub fn new(axes: [Option<Option<&PiecewisePolynomialKernel>>; 3], h: f64) -> Self {
+    pub fn new(axes: [Ride<'_>; 3], h: f64) -> Self {
         Self {
             h,
             axes: axes.map(|axis| match axis {
-                None => Leader::Unfollowed,
-                Some(None) => Leader::Unshaped,
-                Some(Some(kernel)) => Leader::Shaped(KernelCells::new(kernel, h)),
+                Ride::Not => Leader::Unfollowed,
+                Ride::Raw => Leader::Unshaped,
+                Ride::Through(kernel) => Leader::Shaped(KernelCells::new(kernel, h)),
             }),
         }
     }
@@ -119,13 +136,15 @@ impl FollowerKernels {
     /// How many grid samples before and after `t_n` the shaped motion
     /// there reads: kernel cell `j` reads samples `n − j − 1` and `n − j`.
     pub fn sample_span(&self) -> (i64, i64) {
-        self.axes.iter().fold((1, 0), |(back, ahead), axis| match axis {
-            Leader::Shaped(cells) => (
-                back.max(cells.first + cells.value.len() as i64),
-                ahead.max(-cells.first),
-            ),
-            Leader::Unshaped | Leader::Unfollowed => (back, ahead),
-        })
+        self.axes
+            .iter()
+            .fold((1, 0), |(back, ahead), axis| match axis {
+                Leader::Shaped(cells) => (
+                    back.max(cells.first + cells.value.len() as i64),
+                    ahead.max(-cells.first),
+                ),
+                Leader::Unshaped | Leader::Unfollowed => (back, ahead),
+            })
     }
 
     /// Upper bounds on the leaders' kernel masses, `(∫w⁺, ∫w⁻)` per axis.
@@ -168,7 +187,11 @@ pub(super) struct ShapedSample {
 /// but the bound: its planned acceleration steps reach the advance as
 /// velocity steps, which the planner holds within the extruder's
 /// instantaneous corner velocity instead.
-pub(super) fn shaped_at(kernels: &FollowerKernels, grid: &PlannedGrid, n: i64) -> Option<ShapedSample> {
+pub(super) fn shaped_at(
+    kernels: &FollowerKernels,
+    grid: &PlannedGrid,
+    n: i64,
+) -> Option<ShapedSample> {
     let h = kernels.h;
     let mut out = ShapedSample::default();
     for (axis, leader) in kernels.axes.iter().enumerate() {
@@ -196,7 +219,8 @@ pub(super) fn shaped_at(kernels: &FollowerKernels, grid: &PlannedGrid, n: i64) -
                     let defect = 0.5 * h * (hi.velocity[axis] + lo.velocity[axis]) - moved;
                     let travelled = hi.arc - lo.arc;
                     sums[0] += value.at * moved;
-                    sums[1] += value.slope.abs() * accel * h * h * h / 12.0 + value.miss * travelled;
+                    sums[1] +=
+                        value.slope.abs() * accel * h * h * h / 12.0 + value.miss * travelled;
                     sums[2] += value.at * turned - value.slope * defect;
                     sums[3] += value.miss * accel * h;
                     sums[4] += slope.at * turned - slope.slope * defect;
@@ -295,10 +319,7 @@ impl CellMotion {
                 let speeds = (product / slowest, product / fastest_bound);
                 (speeds.0.min(speeds.1), speeds.0.max(speeds.1))
             };
-            (
-                over(least).0.max(-ceiling),
-                over(most).1.min(ceiling),
-            )
+            (over(least).0.max(-ceiling), over(most).1.min(ceiling))
         };
         Self {
             speed_floor,

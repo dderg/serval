@@ -148,7 +148,11 @@ fn planar_heading_span(u_k: f64, v_k: f64, lo: f64, hi: f64) -> (f64, f64) {
     let ends = [libm::cos(from), libm::cos(to)];
     let crest = (from / (2.0 * PI)).ceil() * 2.0 * PI;
     let trough = ((from - PI) / (2.0 * PI)).ceil() * 2.0 * PI + PI;
-    let top = if crest <= to { 1.0 } else { ends[0].max(ends[1]) };
+    let top = if crest <= to {
+        1.0
+    } else {
+        ends[0].max(ends[1])
+    };
     let bottom = if trough <= to {
         -1.0
     } else {

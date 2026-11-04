@@ -1,4 +1,5 @@
 use proptest::prelude::*;
+use proptest::test_runner::FileFailurePersistence;
 
 use super::*;
 use crate::fitter::{CornerFitConfig, fit_corners, seam_requires_stop};
@@ -93,7 +94,8 @@ fn arb_stream() -> impl Strategy<Value = Stream> {
                 let mut at = [100.0, 100.0, 0.2];
                 let mut heading = 0.0_f64;
                 let mut raw = Vec::new();
-                for (line, (step, turn, climbs, feed, log_length)) in steps.into_iter().enumerate() {
+                for (line, (step, turn, climbs, feed, log_length)) in steps.into_iter().enumerate()
+                {
                     let context = MoveContext {
                         extruder_axis: EXTRUDER_AXIS,
                         feedrate_mm_s: feed,
@@ -109,8 +111,8 @@ fn arb_stream() -> impl Strategy<Value = Stream> {
                             heading += turn;
                             let length = libm::pow(10.0, log_length);
                             let end = [
-                                at[0] + length * heading.cos(),
-                                at[1] + length * heading.sin(),
+                                at[0] + length * libm::cos(heading),
+                                at[1] + length * libm::sin(heading),
                                 at[2] + if climbs { 0.4 } else { 0.0 },
                             ];
                             let e = match step {
@@ -127,7 +129,12 @@ fn arb_stream() -> impl Strategy<Value = Stream> {
                 let moves = fit_corners(&raw, CornerFitConfig::default()).ok()?.moves;
                 let stop_before: Vec<bool> = (0..moves.len())
                     .map(|k| {
-                        k > 0 && seam_requires_stop(&moves[k - 1], &moves[k], CornerFitConfig::default())
+                        k > 0
+                            && seam_requires_stop(
+                                &moves[k - 1],
+                                &moves[k],
+                                CornerFitConfig::default(),
+                            )
                     })
                     .collect();
                 let budgets = extrusion_budgets(&moves, EXTRUDE_ONLY_V, EXTRUDE_ONLY_A);
@@ -158,7 +165,11 @@ impl Stream {
         (lo, hi)
     }
 
-    fn replan(&self, (lo, hi): (usize, usize), scales: &[f64]) -> Result<VelocityProfile, VelocityError> {
+    fn replan(
+        &self,
+        (lo, hi): (usize, usize),
+        scales: &[f64],
+    ) -> Result<VelocityProfile, VelocityError> {
         replan_span(
             &self.moves[lo..hi],
             &self.stop_before[lo..hi],
@@ -192,7 +203,10 @@ fn close(what: &str, got: f64, want: f64) -> Result<(), TestCaseError> {
 }
 
 fn within(what: &str, got: f64, bound: f64) -> Result<(), TestCaseError> {
-    prop_assert!(got <= bound + TOL * (1.0 + bound.abs()), "{what}: {got} exceeds {bound}");
+    prop_assert!(
+        got <= bound + TOL * (1.0 + bound.abs()),
+        "{what}: {got} exceeds {bound}"
+    );
     Ok(())
 }
 
@@ -220,7 +234,9 @@ fn assert_physical_limits(m: &Move, velocity: &MoveVelocity) -> Result<(), TestC
         .followers
         .iter()
         .find(|follower| follower.axis_index == EXTRUDER_AXIS)
-        .map_or(0.0, |follower| follower.ratio.abs().max(follower.ratio_end.abs()));
+        .map_or(0.0, |follower| {
+            follower.ratio.abs().max(follower.ratio_end.abs())
+        });
     let budget = velocity.accel + law::RAIL_ACCELERATION_DEFECT;
     for (s, v, a) in states(velocity) {
         within("tangential acceleration", a.abs(), budget)?;
@@ -231,7 +247,11 @@ fn assert_physical_limits(m: &Move, velocity: &MoveVelocity) -> Result<(), TestC
             }
             Some(segment) => {
                 let s = s.clamp(0.0, segment.s_len());
-                within("path speed", v, m.feedrate_mm_s.min(limits.max_velocity_mm_s))?;
+                within(
+                    "path speed",
+                    v,
+                    m.feedrate_mm_s.min(limits.max_velocity_mm_s),
+                )?;
                 within(
                     "z speed",
                     v * segment.heading_at(s)[2].abs(),
@@ -260,7 +280,9 @@ fn assert_physical_limits(m: &Move, velocity: &MoveVelocity) -> Result<(), TestC
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 128,
-        failure_persistence: None,
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
+            "proptest-regressions/replan_tests.txt",
+        ))),
         ..ProptestConfig::default()
     })]
 

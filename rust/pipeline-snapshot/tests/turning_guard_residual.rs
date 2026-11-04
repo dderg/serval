@@ -150,10 +150,8 @@ max_extrude_only_accel: 5000
 
 #[test]
 fn a_reversal_the_kernels_fold_asks_the_extruder_no_more_than_its_limit() {
-    let config = std::env::temp_dir().join(format!(
-        "turning_guard_residual_{}.cfg",
-        std::process::id()
-    ));
+    let config =
+        std::env::temp_dir().join(format!("turning_guard_residual_{}.cfg", std::process::id()));
     std::fs::write(&config, FAST_COREXY_WITH_RAW_ADVANCE).expect("temp config");
     let snapshot = corpus::plan("reversal", REVERSAL, &config).expect("the excerpt plans");
     let audit = corpus::extruder::extruder_audit(&snapshot, REVERSAL, &config)

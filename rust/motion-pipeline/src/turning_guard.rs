@@ -6,7 +6,6 @@ use geometry::{
     ExtrusionBudget, Move, MoveVelocity, ScalarLaw, VelocityError, VelocityPlanParams,
     brake_horizon, replan_span, seam_requires_stop,
 };
-use nurbs::algebra::PiecewisePolynomialKernel;
 use trajectory::AxisChainSet;
 
 use crate::types::{Control, PlannedItem, PlannedMove, StreamConfig};
@@ -16,7 +15,9 @@ mod screen;
 mod shadow;
 
 use screen::{MoveSummary, Read};
-use shadow::{AdvanceDemand, CellMotion, FollowerKernels, GridSample, PlannedGrid, shaped_at};
+use shadow::{
+    AdvanceDemand, CellMotion, FollowerKernels, GridSample, PlannedGrid, Ride, shaped_at,
+};
 
 /// The guard's coarsest grid step: the planned motion is sampled, and the
 /// shaped motion bounded, every this many seconds or finer.
@@ -181,7 +182,12 @@ fn expect_sample(kernels: &FollowerKernels, grid: &PlannedGrid, n: i64) -> shado
 enum Check {
     Passed,
     NotReady,
-    Binds { from: f64, to: f64, demand: f64, max_accel: f64 },
+    Binds {
+        from: f64,
+        to: f64,
+        demand: f64,
+        max_accel: f64,
+    },
 }
 
 enum Resettle {
@@ -207,7 +213,11 @@ impl TurningGuard {
         }
     }
 
-    pub fn feed(&mut self, item: PlannedItem, output: &mut impl FnMut(PlannedItem) -> bool) -> bool {
+    pub fn feed(
+        &mut self,
+        item: PlannedItem,
+        output: &mut impl FnMut(PlannedItem) -> bool,
+    ) -> bool {
         if self.followers.is_empty() {
             return output(item);
         }
@@ -391,7 +401,10 @@ impl TurningGuard {
         let mut grid = PlannedGrid::default();
         for k in n * GRID_ZOOM - back - 1..=(n + 1) * GRID_ZOOM + ahead + 1 {
             let sample = self.sample(k, fine.h).unwrap_or_else(|| {
-                panic!("turning guard: the planned motion misses t={}", k as f64 * fine.h)
+                panic!(
+                    "turning guard: the planned motion misses t={}",
+                    k as f64 * fine.h
+                )
             });
             grid.push(k, sample);
         }
@@ -410,7 +423,10 @@ impl TurningGuard {
     /// planner's own bound already holds the turning term: no extrusion in
     /// reach, no advance, or the follower's own kernel bounding the
     /// advance's jerk.
-    fn demand_of(&self, index: usize) -> Option<(&Follower, AdvanceDemand, geometry::ExtruderCaps)> {
+    fn demand_of(
+        &self,
+        index: usize,
+    ) -> Option<(&Follower, AdvanceDemand, geometry::ExtruderCaps)> {
         let caps = self.entries.moves[index].limits.extruder?;
         let ratio = self.entries.budgets[index].ratio_in_reach;
         if ratio <= 0.0 || caps.advance_slope_s == 0.0 || caps.own_jerk_per_accel_hz.is_finite() {
@@ -451,7 +467,7 @@ impl TurningGuard {
     /// and re-plans around them; the moves whose stretch reads what moved
     /// are checked again.
     fn back_off(&mut self, from: f64, to: f64, demand: f64, max_accel: f64) -> Resettle {
-        let step = ((max_accel / demand).powf(BACKOFF_EXPONENT) * BACKOFF_AIM)
+        let step = (libm::pow(max_accel / demand, BACKOFF_EXPONENT) * BACKOFF_AIM)
             .clamp(BACKOFF_STEP_MIN, BACKOFF_STEP_MAX);
         let timing = &self.entries.timing;
         let first = timing.partition_point(|timing| timing.t1() <= from);
@@ -629,7 +645,11 @@ impl TurningGuard {
         let keep_from = (first.t0 / h).floor() as i64 - back - 4;
         self.grid.trim_before(keep_from);
         let forget = keep_from as f64 * h - h;
-        while self.history.front().is_some_and(|summary| summary.t1 < forget) {
+        while self
+            .history
+            .front()
+            .is_some_and(|summary| summary.t1 < forget)
+        {
             self.history.pop_front();
         }
     }
@@ -664,7 +684,11 @@ impl TurningGuard {
         let (position, heading, s, speed) = match &self.entries.moves[index].segment.spatial {
             None => (at.start?, [0.0; 3], 0.0, 0.0),
             Some(segment) => {
-                let (s, speed) = state_at(&self.entries.velocities[index], tau - at.t0, segment.s_len());
+                let (s, speed) = state_at(
+                    &self.entries.velocities[index],
+                    tau - at.t0,
+                    segment.s_len(),
+                );
                 (segment.point_at(s), segment.heading_at(s), s, speed)
             }
         };
@@ -730,10 +754,11 @@ impl TurningGuard {
         let Some(standing) = self.horizon(reach) else {
             return 0;
         };
-        let standing_t = timing.get(standing).map_or(self.segment_end(), |timing| timing.t0);
-        timing[..standing].partition_point(|timing| {
-            timing.t1() + (back + ahead + 4) as f64 * h <= standing_t
-        })
+        let standing_t = timing
+            .get(standing)
+            .map_or(self.segment_end(), |timing| timing.t0);
+        timing[..standing]
+            .partition_point(|timing| timing.t1() + (back + ahead + 4) as f64 * h <= standing_t)
     }
 
     /// The last seam at or before `reach` a rest at seam `reach` leaves
@@ -812,7 +837,7 @@ fn count_backoff(backoffs: &mut u32, line: u32, t0: f64, (demand, max_accel): (f
 /// The kernel-free followers with an advance, each with the kernels of the
 /// spatial axes it rides on a grid fine enough for the narrowest of them.
 fn guarded_followers(chains: &AxisChainSet) -> Vec<(usize, Follower)> {
-    let guarded: Vec<(usize, [Option<Option<&PiecewisePolynomialKernel>>; 3])> = chains
+    let guarded: Vec<(usize, [Ride<'_>; 3])> = chains
         .projected_followers()
         .filter(|(axis, _)| {
             let chain = &chains.chains[*axis];
@@ -820,16 +845,19 @@ fn guarded_followers(chains: &AxisChainSet) -> Vec<(usize, Follower)> {
         })
         .map(|(axis, leaders)| {
             let rides = |spatial: usize| {
-                leaders
-                    .contains(&spatial)
-                    .then(|| chains.chains[spatial].kernel())
+                if !leaders.contains(&spatial) {
+                    return Ride::Not;
+                }
+                chains.chains[spatial]
+                    .kernel()
+                    .map_or(Ride::Raw, Ride::Through)
             };
             (axis, [rides(0), rides(1), rides(2)])
         })
         .collect();
     let narrowest = guarded
         .iter()
-        .flat_map(|(_, axes)| axes.iter().flatten().flatten())
+        .flat_map(|(_, axes)| axes.iter().filter_map(|ride| ride.kernel()))
         .map(|kernel| {
             let (lo, hi) = kernel.support();
             hi - lo
@@ -900,7 +928,9 @@ fn accel_bound(segment: &Segment, velocity: &MoveVelocity) -> f64 {
         .fold(0.0, f64::max);
     let (_, kappa_peak) = segment.kappa_peak();
     let normal = (velocity.peak_v * velocity.peak_v * kappa_peak.abs()).min(velocity.accel);
-    velocity.accel.max((tangential * tangential + normal * normal).sqrt())
+    velocity
+        .accel
+        .max((tangential * tangential + normal * normal).sqrt())
 }
 
 /// The arc into the move and the speed at move-local time `t`.
@@ -931,16 +961,17 @@ fn summary_of(
     let Some(segment) = &m.segment.spatial else {
         return MoveSummary::rest(timing.t0, timing.t1());
     };
-    let (slowest, fastest) = velocity.phases.iter().fold(
-        (f64::INFINITY, 0.0_f64),
-        |(slowest, fastest), phase| {
-            let (_, end, _) = phase.end_state();
-            (
-                slowest.min(phase.v0).min(end),
-                fastest.max(phase.v0).max(end),
-            )
-        },
-    );
+    let (slowest, fastest) =
+        velocity
+            .phases
+            .iter()
+            .fold((f64::INFINITY, 0.0_f64), |(slowest, fastest), phase| {
+                let (_, end, _) = phase.end_state();
+                (
+                    slowest.min(phase.v0).min(end),
+                    fastest.max(phase.v0).max(end),
+                )
+            });
     MoveSummary {
         t0: timing.t0,
         t1: timing.t1(),
@@ -957,6 +988,6 @@ fn summary_of(
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod test_motion;
+#[cfg(test)]
+mod tests;

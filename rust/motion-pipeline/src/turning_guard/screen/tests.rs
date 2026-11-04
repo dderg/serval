@@ -30,7 +30,7 @@ fn exact_demand(leaders: &Leaders, motion: &Motion, t: f64) -> Option<f64> {
 fn a_move_the_screen_passes_never_asks_more_than_the_limit_of_the_exact_shaped_motion() {
     let leaders = Leaders::new();
     let kernels = leaders.grid_kernels(H);
-    let mut rng = Rng::new(0x5C2E_E7);
+    let mut rng = Rng::new(0x005C_2EE7);
     let mut checked = 0;
     for _ in 0..CASES {
         let motion = random_motion(&mut rng);
@@ -61,5 +61,8 @@ fn a_move_the_screen_passes_never_asks_more_than_the_limit_of_the_exact_shaped_m
              {window:#?}"
         );
     }
-    assert!(checked * 2 > CASES as usize, "only {checked} cases asked anything");
+    assert!(
+        checked * 2 > CASES as usize,
+        "only {checked} cases asked anything"
+    );
 }

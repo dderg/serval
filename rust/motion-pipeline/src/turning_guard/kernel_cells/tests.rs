@@ -33,8 +33,14 @@ fn each_cell_bounds_the_kernel_and_its_slope_about_their_linearisation() {
                 worst.0 = worst.0.max((value(&kernel, u) - line(value_cell)).abs());
                 worst.1 = worst.1.max((slope(&kernel, u) - line(slope_cell)).abs());
             }
-            assert!(worst.0 <= value_cell.miss * (1.0 + 1e-9) + 1e-12, "{worst:?} {value_cell:?}");
-            assert!(worst.1 <= slope_cell.miss * (1.0 + 1e-9) + 1e-9, "{worst:?} {slope_cell:?}");
+            assert!(
+                worst.0 <= value_cell.miss * (1.0 + 1e-9) + 1e-12,
+                "{worst:?} {value_cell:?}"
+            );
+            assert!(
+                worst.1 <= slope_cell.miss * (1.0 + 1e-9) + 1e-9,
+                "{worst:?} {slope_cell:?}"
+            );
             assert!(
                 value_cell.miss <= 4.0 * worst.0 + 1e-9 * value_cell.at.abs().max(1.0),
                 "the bound is loose: {} against {}",
@@ -56,8 +62,16 @@ fn the_masses_bound_the_kernel_parts() {
             let w = value(&kernel, lo + (f64::from(step) + 0.5) * width) * width;
             if w >= 0.0 { (p + w, n) } else { (p, n - w) }
         });
-        assert!(cells.positive_mass >= positive * (1.0 - 1e-6), "{} < {positive}", cells.positive_mass);
-        assert!(cells.negative_mass >= negative * (1.0 - 1e-6), "{} < {negative}", cells.negative_mass);
+        assert!(
+            cells.positive_mass >= positive * (1.0 - 1e-6),
+            "{} < {positive}",
+            cells.positive_mass
+        );
+        assert!(
+            cells.negative_mass >= negative * (1.0 - 1e-6),
+            "{} < {negative}",
+            cells.negative_mass
+        );
     }
 }
 
