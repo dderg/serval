@@ -49,8 +49,12 @@ fn limited(post_processors: &[&str]) -> AxisDecl {
     }
 }
 
-fn mzv_peak(frequency_hz: f64) -> f64 {
-    trajectory::build_smooth_mzv_kernel(frequency_hz).peak_abs()
+fn mzv_variation(frequencies_hz: &[f64]) -> f64 {
+    let kernels: Vec<_> = frequencies_hz
+        .iter()
+        .map(|&f| trajectory::build_smooth_mzv_kernel(f))
+        .collect();
+    PiecewisePolynomialKernel::directional_variation(&kernels.iter().collect::<Vec<_>>())
 }
 
 #[test]
@@ -73,9 +77,38 @@ fn a_ramped_linear_advance_takes_k_and_its_leaders_kernels() {
     );
     assert_eq!(
         caps.path_jerk_per_accel_hz,
-        [2.0 * mzv_peak(75.0), 2.0 * mzv_peak(62.0), f64::INFINITY]
+        [
+            0.0,
+            mzv_variation(&[75.0]),
+            mzv_variation(&[62.0]),
+            mzv_variation(&[75.0, 62.0]),
+            0.0,
+            mzv_variation(&[75.0]),
+            mzv_variation(&[62.0]),
+            mzv_variation(&[75.0, 62.0]),
+        ]
     );
+    assert_eq!(caps.unshaped_leaders, [false, false, true]);
     assert!(caps.own_jerk_per_accel_hz.is_infinite());
+}
+
+#[test]
+fn the_bimodal_mzv_kernel_gains_more_than_twice_its_peak_and_the_plane_more_than_either_axis() {
+    let caps = caps_of(
+        limited(&["pa"]),
+        &[pp("pa", "linear_pressure_advance", &[("k", 0.03)])],
+    )
+    .unwrap()[0];
+    let x = caps.path_jerk_gain([true, false, false]);
+    let samples = 100_000;
+    let kernel = trajectory::build_smooth_mzv_kernel(75.0);
+    let (lo, hi) = kernel.support();
+    let peak = (0..=samples)
+        .map(|i| kernel.pieces[0].evaluate(lo + (hi - lo) * f64::from(i) / f64::from(samples)))
+        .fold(0.0, f64::max);
+    assert!(x > 2.1 * peak, "{x} vs twice the peak {}", 2.0 * peak);
+    let plane = caps.path_jerk_gain([true, true, false]);
+    assert!(plane > x && plane > caps.path_jerk_gain([false, true, false]));
 }
 
 #[test]
