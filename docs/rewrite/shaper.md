@@ -2,14 +2,14 @@
 
 The shaper is the last stage of the streaming motion pipeline
 (`setup_pipeline` in `rust/motion-core/src/worker.rs`: fitter → planner →
-lowerer → **shaper**). It takes the lowered trajectory — per-axis piecewise
+turning guard → lowerer → **shaper**). It takes the lowered trajectory — per-axis piecewise
 polynomial tracks that already satisfy the velocity/accel/jerk limits and the
 clothoid corner blending — and turns it into what each motor should actually
 be commanded to do. Everything the classic Klipper stack does after the
 trapezoid generator (input shaping, smoothers, pressure advance) lives here,
 unified under one model, plus things that stack cannot express.
 
-In the live host, fitting, planning and lowering run on `kalico-planning`,
+In the live host, fitting, planning, the turning guard and lowering run on `kalico-planning`,
 and the shaper runs on its own `kalico-shaper` thread
 (`motion_pipeline::StagedPipeline`). Lowered items reach it in order through
 a bounded inbox (`SHAPER_INBOX_CAP`), so a slow shaper backpressures planning
@@ -333,6 +333,60 @@ The follower's own chain then applies on top of the projection in the same
 stage order: leading gains (pressure advance) act on the projected track,
 the follower's kernel (e.g. `smooth_triangle`) convolves that, trailing
 gains act on the convolution.
+
+### The turning guard
+
+An advance reads the shaped path's arc length `σ`: it asks the extruder for
+`r·(σ̈ + k·σ⃛) + c·(r·σ̈)²`, with `σ̈ = a·v̂` and `σ⃛ = j·v̂ + a⊥²/|v|`. The
+planner bounds that per move from the *planned* path, where `a⊥²/|v|` is at
+most `v³κ²` under the disk. On the shaped path the turning term reads the
+*shaped* speed, which the leaders' kernels fold far under the planned one
+wherever turns lie closer together than their reach — a reversal the
+kernels round into a crawl of a few mm/s asked a kernel-free advance for
+33 kmm/s² against a 20 kmm/s² limit. A follower kernel bounds the same term
+on its own (`own_jerk_per_accel_hz`), so only kernel-free followers with an
+advance need more.
+
+For them `motion_pipeline::turning_guard::TurningGuard` sits between the
+planner and the lowerer, in the one pipeline the live host and the
+snapshots share. It holds committed moves until every instant whose kernels
+read them is proven to fit the extruder's `max_accel`:
+
+- **Screen** (`screen::passes`): from the planned moves within the kernels'
+  reach alone, per-axis boxes of planned velocity and acceleration, split by
+  each kernel's positive and negative mass, bound the shaped speed below and
+  the shaped acceleration, `|a × v|` and the tangential jerk (`G·A`) above.
+  A move whose bound fits passes; nearly all do.
+- **Shadow** (`shadow::shaped_at`, `CellMotion::between`): otherwise the
+  planned motion, sampled every ≤ 0.25 ms (48 cells across the narrowest
+  leader kernel), is convolved with each leader kernel linearised cell by
+  cell, every term carrying an explicit error radius, and every grid cell
+  across the move gets rigorous bounds on the shaped speed, acceleration,
+  `|a × v|`, jerk and their parts along the velocity, including between the
+  grid instants. A cell that binds is checked again on a grid 8× finer.
+  Below `ADVANCE_VALLEY_SPEED_MM_S` the advance lays a valley instead and the
+  cell asks nothing of the turning term.
+- **Back-off**: a cell that still binds scales the acceleration budgets of
+  the moves it reads by `(limit/demand)^(2/3)`, clamped to [0.5, 0.95], and
+  re-plans the span around them between two seams whose speeds it keeps
+  (`geometry::replan_span`): the same caps, stops, seam ceilings and
+  extrusion budgets the planner applies, on the lowered budgets. The
+  re-planned moves are checked again; a move backed off 64 times fails
+  loudly.
+- **Release**: a move leaves once no pending check can back off a move it
+  depends on: the earliest planned time a pending check reads, less the
+  kernels' backward reach, has a brake horizon
+  (`geometry::brake_horizon`) — the last seam a rest there cannot lower on
+  the current budgets — and moves whose kernels read only before that seam
+  are emitted. The guard's output thus reads its input sequence alone,
+  however the planner batches its commits.
+
+The guard holds up to the last committed move plus the brake horizon and
+the kernels' reach: on the dense print about 0.2 s of planned motion at the
+median and 0.3–0.4 s at worst (a single long slow move on the first layers
+holds its whole length). The pacer reads the dispatched runway, past the
+guard, so the hold makes it drain earlier, never late; a drain flushes the
+guard in under a millisecond. Kernel followers pass straight through.
 
 ### Rests
 

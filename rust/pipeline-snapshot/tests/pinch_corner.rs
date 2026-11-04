@@ -147,6 +147,7 @@ fn lower_run(planned: &[PlannedMove]) -> Vec<trajectory::ContinuousSegment> {
         let item = PlannedItem::Move(PlannedMove {
             geometry: pm.geometry.clone(),
             velocity: pm.velocity.clone(),
+            budget: pm.budget,
         });
         assert!(lowerer.feed(item, &mut collect), "lowerer rejected input");
     }
