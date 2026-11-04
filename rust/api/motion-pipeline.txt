@@ -133,6 +133,7 @@ pub struct motion_pipeline::types::BarrierAck
 pub motion_pipeline::types::BarrierAck::dispatched_through: core::option::Option<f64>
 pub motion_pipeline::types::BarrierAck::result: core::result::Result<(), alloc::string::String>
 pub struct motion_pipeline::types::PlannedMove
+pub motion_pipeline::types::PlannedMove::budget: geometry::velocity::extrusion_reach::ExtrusionBudget
 pub motion_pipeline::types::PlannedMove::geometry: geometry::frontend::Move
 pub motion_pipeline::types::PlannedMove::velocity: geometry::velocity::MoveVelocity
 pub struct motion_pipeline::types::StreamConfig
