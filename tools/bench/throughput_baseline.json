@@ -2,45 +2,45 @@
   "slice_lines": 1000,
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 9634095497,
-      "stream_secs": 6.594,
-      "reason": "Kernel follower fits seed only the shaped breaks that can carry a velocity break: 10x fewer extruder pieces on the kernel configs",
-      "commit": "8e7843d68c5c4a6f1c090b06ad647976309afcc5",
+      "ir": 8396715192,
+      "stream_secs": 8.541,
+      "reason": "extruder-jerk-gain: the kernel-free advance cap now bounds the shaped path jerk by the leader kernels' directional total variation (2.26x the old peak gain for smooth_mzv). p3_voron_direct_drive_ramp (kernel-free advance, A_e inherits 10000) plans its 1000-line slice slower and its repo Ir drops; the kernel chains barely move.",
+      "commit": "58dff9d8ff8d4b3d1483aacf3a042a1ed2d35427",
       "pi_2core": {
-        "k": 4426950160.131938,
+        "k": 4587316424.936247,
         "worst_x": [
-          3.03,
-          3.03
+          2.28,
+          2.29
         ],
-        "commit": "8e7843d68c5c4a6f1c090b06ad647976309afcc5"
+        "commit": "d2ce24fed9e01838bd790176d0d3499568e85fdf"
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 11395632936,
+      "ir": 12496701422,
       "stream_secs": 6.202,
-      "reason": "Kernel follower fits seed only the shaped breaks that can carry a velocity break: 10x fewer extruder pieces on the kernel configs",
-      "commit": "8e7843d68c5c4a6f1c090b06ad647976309afcc5",
+      "reason": "extruder-jerk-gain: the kernel-free advance cap now bounds the shaped path jerk by the leader kernels' directional total variation (2.26x the old peak gain for smooth_mzv). p3_voron_direct_drive_ramp (kernel-free advance, A_e inherits 10000) plans its 1000-line slice slower and its repo Ir drops; the kernel chains barely move.",
+      "commit": "58dff9d8ff8d4b3d1483aacf3a042a1ed2d35427",
       "pi_2core": {
-        "k": 4281171354.543696,
+        "k": 4582331787.594325,
         "worst_x": [
-          2.33,
-          2.36
+          2.18,
+          2.19
         ],
-        "commit": "8e7843d68c5c4a6f1c090b06ad647976309afcc5"
+        "commit": "d2ce24fed9e01838bd790176d0d3499568e85fdf"
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 11565309200,
+      "ir": 12861738205,
       "stream_secs": 7.543,
-      "reason": "Kernel follower fits seed only the shaped breaks that can carry a velocity break: 10x fewer extruder pieces on the kernel configs",
-      "commit": "8e7843d68c5c4a6f1c090b06ad647976309afcc5",
+      "reason": "extruder-jerk-gain: the kernel-free advance cap now bounds the shaped path jerk by the leader kernels' directional total variation (2.26x the old peak gain for smooth_mzv). p3_voron_direct_drive_ramp (kernel-free advance, A_e inherits 10000) plans its 1000-line slice slower and its repo Ir drops; the kernel chains barely move.",
+      "commit": "58dff9d8ff8d4b3d1483aacf3a042a1ed2d35427",
       "pi_2core": {
-        "k": 3817793968.977861,
+        "k": 4388809054.193679,
         "worst_x": [
-          2.5,
-          2.49
+          2.25,
+          2.25
         ],
-        "commit": "8e7843d68c5c4a6f1c090b06ad647976309afcc5"
+        "commit": "d2ce24fed9e01838bd790176d0d3499568e85fdf"
       }
     }
   }

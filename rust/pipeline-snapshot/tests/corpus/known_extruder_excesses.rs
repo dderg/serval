@@ -45,12 +45,7 @@ pub struct KnownExcesses {
     pub worst: f64,
 }
 
-pub const KNOWN: &[KnownExcesses] = &[KnownExcesses {
-    config: "tools/bench/configs/trident_ramp.cfg",
-    class: ExcessClass::RampEndAccel,
-    count: 8,
-    worst: 5889.2,
-}];
+pub const KNOWN: &[KnownExcesses] = &[];
 
 fn printed(worst: f64) -> f64 {
     (worst * 10.0).round() / 10.0
