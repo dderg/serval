@@ -1787,7 +1787,7 @@ fn near_rest_leader(velocity: [f64; 2], acceleration: [f64; 2], jerk: [f64; 2]) 
         (0.0, velocity[0], acceleration[0], jerk[0]),
         (0.0, velocity[1], acceleration[1], jerk[1]),
     ];
-    let speed = velocity[0].hypot(velocity[1]);
+    let speed = (velocity[0] * velocity[0] + velocity[1] * velocity[1]).sqrt();
     super::speed_second_of(&states, speed)
 }
 
