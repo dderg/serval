@@ -7,8 +7,34 @@ use trajectory::{CompiledChain, ContinuousAxis, ContinuousSegment, PostProcessor
 
 use crate::lowering::AccelBudget;
 
-use super::{FollowerSignal, FollowerState, integrate};
+use super::{FollowerSignal, FollowerState, LeaderPieces, ShapedLeaders, integrate};
 use crate::shaper::TrackSignal;
+
+impl<'a> FollowerSignal<'a> {
+    fn new(
+        shaped: &'a ContinuousSegment,
+        raw: &'a ContinuousSegment,
+        axis: usize,
+        leaders: &'a [usize],
+        state: &'a FollowerState,
+        odometer: super::Odometer,
+        e_start: f64,
+    ) -> Self {
+        Self::riding(
+            shaped,
+            raw,
+            axis,
+            ShapedLeaders::of(shaped, leaders),
+            state,
+            odometer,
+            e_start,
+        )
+    }
+}
+
+fn leader_pieces(shaped: &ContinuousSegment, leaders: &[usize]) -> Vec<Option<LeaderPieces>> {
+    ShapedLeaders::of(shaped, leaders).into_pieces()
+}
 
 fn jerk_at(sig: &FollowerSignal, t: f64) -> f64 {
     sig.ramped_read(t, &sig.path_read(t)).2
@@ -301,6 +327,7 @@ fn follower_advance_fits_the_transformed_acceleration() {
                 raw: &shaped,
                 axis: 3,
                 leaders: &[0, 1],
+                leader_pieces: &leader_pieces(&shaped, &[0, 1]),
                 state: &state,
                 s_start: 0.0,
                 s_length: super::leader_arc_length(&shaped, &[0, 1]),
@@ -766,6 +793,7 @@ fn a_plain_follower_source_fit_opens_and_closes_on_the_signal_velocity() {
         raw: &shaped,
         axis: 3,
         leaders: &[0, 1],
+        leader_pieces: &leader_pieces(&shaped, &[0, 1]),
         state: &state,
         s_start: 0.0,
         s_length: super::leader_arc_length(&shaped, &[0, 1]),
@@ -922,6 +950,7 @@ fn an_advanced_follower_source_fit_opens_and_closes_on_the_signal_velocity() {
         raw: &shaped,
         axis: 3,
         leaders: &[0, 1],
+        leader_pieces: &leader_pieces(&shaped, &[0, 1]),
         state: &state,
         s_start: 0.0,
         s_length: super::leader_arc_length(&shaped, &[0, 1]),
@@ -1071,6 +1100,7 @@ fn a_plain_follower_source_fits_through_a_leader_reversal() {
         raw: &shaped,
         axis: 3,
         leaders: &[0, 1],
+        leader_pieces: &leader_pieces(&shaped, &[0, 1]),
         state: &state,
         s_start: 0.0,
         s_length: super::leader_arc_length(&shaped, &[0, 1]),
@@ -1345,6 +1375,7 @@ fn fit_dense_extrusion_stopping_before_the_end(
         raw: &shaped,
         axis: 3,
         leaders: &DENSE_LEADERS,
+        leader_pieces: &leader_pieces(&shaped, &DENSE_LEADERS),
         state: &state,
         s_start: odometer.start,
         s_length: odometer.length,
@@ -1432,6 +1463,7 @@ fn advance_steps_at_leader_knots_closer_than_the_floor_plan() {
         raw: &shaped,
         axis: 3,
         leaders: &[0, 1],
+        leader_pieces: &leader_pieces(&shaped, &[0, 1]),
         state: &state,
         s_start: 0.0,
         s_length: super::leader_arc_length(&shaped, &[0, 1]),
@@ -1494,6 +1526,7 @@ fn an_advanced_follower_source_holds_the_tolerance_past_a_leader_seam_velocity_r
         raw: &shaped,
         axis: 3,
         leaders: &[0, 1],
+        leader_pieces: &leader_pieces(&shaped, &[0, 1]),
         state: &state,
         s_start: 0.0,
         s_length: super::leader_arc_length(&shaped, &[0, 1]),
@@ -1743,6 +1776,7 @@ fn a_ratio_ramped_advance_refuses_a_ratio_step_taken_at_speed() {
         raw: &shaped,
         axis: 3,
         leaders: &[0, 1],
+        leader_pieces: &leader_pieces(&shaped, &[0, 1]),
         state: &state,
         s_start: 0.0,
         s_length: super::leader_arc_length(&shaped, &[0, 1]),
@@ -1789,6 +1823,7 @@ fn project_over_a_leader_acceleration_step(
         raw: &shaped,
         axis: 3,
         leaders: &[0, 1],
+        leader_pieces: &leader_pieces(&shaped, &[0, 1]),
         state: &state,
         s_start: 0.0,
         s_length: super::leader_arc_length(&shaped, &[0, 1]),

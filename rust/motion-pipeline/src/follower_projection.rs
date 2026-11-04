@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::sync::{Arc, LazyLock};
 
@@ -287,13 +288,15 @@ fn ramped_position_step(axis: usize, step: &AdvanceStep) -> PostProcessError {
 }
 
 /// One raw segment's follower projection inputs: the shaped leader signal it
-/// rides, its own raw track, and where on the shaped path it starts.
+/// rides, the leader pieces its ingest read off it, its own raw track, and
+/// where on the shaped path it starts.
 #[derive(Clone, Copy)]
 struct FollowerSource<'a> {
     shaped: &'a ContinuousSegment,
     raw: &'a ContinuousSegment,
     axis: usize,
     leaders: &'a [usize],
+    leader_pieces: &'a [Option<LeaderPieces>],
     state: &'a FollowerState,
     s_start: f64,
     s_length: f64,
@@ -315,17 +318,18 @@ fn fit_source_projection(
         raw,
         axis,
         leaders,
+        leader_pieces,
         state,
         s_start,
         s_length,
     } = source;
     let raw_axis = &raw.axes[axis];
     let (t_start, t_end) = projection_support(raw, shaped, axis, leaders);
-    let sig = FollowerSignal::new(
+    let sig = FollowerSignal::riding(
         shaped,
         raw,
         axis,
-        leaders,
+        ShapedLeaders::with_pieces(shaped, leaders, leader_pieces),
         state,
         Odometer {
             start: s_start,
@@ -551,24 +555,27 @@ pub(crate) fn project_followers(
             );
             timing.ingests += lengths.len();
             let mut next_s = state.smoothing.backlog_end().unwrap_or(state.s_shaped);
-            for (offset, (arc, shaped_leaders)) in lengths.iter().enumerate() {
+            for (offset, (arc, shaped_leaders)) in lengths.into_iter().enumerate() {
                 let i = first_new + offset;
                 let table_start = state.s_ingested_end;
                 let shaped_ds =
-                    state.ingest(&base[i], &frontier[i], axis, leaders, &base[i + 1..], *arc);
+                    state.ingest(&base[i], &frontier[i], axis, leaders, &base[i + 1..], arc);
                 let s_start = state.aligned_span_start(next_s);
                 let leg = RampLeg {
                     shaped: &frontier[i],
                     leaders,
-                    shaped_leaders,
+                    shaped_leaders: &shaped_leaders,
                     support: projection_support(&base[i], &frontier[i], axis, leaders),
                     start_s: table_start,
                     rests: arc.1 <= SPAN_MIN_LEN_MM,
                 };
                 state.smoothing.lay(&state.spans, &leg, &rule);
-                state
-                    .smoothing
-                    .queue(base[i].t_end, (s_start, shaped_ds), state.s_ingested_end);
+                state.smoothing.queue(
+                    base[i].t_end,
+                    (s_start, shaped_ds),
+                    state.s_ingested_end,
+                    shaped_leaders.into_pieces(),
+                );
                 next_s = s_start + shaped_ds;
             }
             if lookahead.clamps_past_signal() {
@@ -584,7 +591,7 @@ pub(crate) fn project_followers(
                      smoothing past the shaped frontier",
                     pending.t_end
                 );
-                source_jobs.push((index, pending.s_start, pending.s_length));
+                source_jobs.push((index, pending));
             }
             timing.ingest_us += ingest_started.elapsed_us();
         }
@@ -604,18 +611,19 @@ pub(crate) fn project_followers(
                 source_jobs.len(),
                 || (),
                 |(), job| {
-                    let (index, s_start, s_length) = source_jobs[job];
+                    let (index, pending) = &source_jobs[job];
                     (
-                        index,
+                        *index,
                         fit_source_projection(
                             FollowerSource {
-                                shaped: &frontier[index],
-                                raw: &base[index],
+                                shaped: &frontier[*index],
+                                raw: &base[*index],
                                 axis,
                                 leaders,
+                                leader_pieces: &pending.leader_pieces,
                                 state: state_ref,
-                                s_start,
-                                s_length,
+                                s_start: pending.s_start,
+                                s_length: pending.s_length,
                             },
                             source_tol,
                             leading,
@@ -1902,7 +1910,7 @@ fn shaped_leader_arc_length(
 fn leader_arc_lengths<'a>(
     raw: &[ContinuousSegment],
     shaped: &'a [ContinuousSegment],
-    leaders: &[usize],
+    leaders: &'a [usize],
     pool: &WorkerPool,
 ) -> Vec<((f64, f64), ShapedLeaders<'a>)> {
     assert_eq!(raw.len(), shaped.len());
@@ -2013,6 +2021,7 @@ impl SpeedZeroSliver {
     }
 }
 
+#[derive(Debug, Clone)]
 struct LeaderPieces {
     base: f64,
     pieces: Vec<BezierPiece>,
@@ -2099,16 +2108,44 @@ impl LeaderPieces {
 }
 
 struct ShapedLeaders<'a> {
+    leaders: &'a [usize],
     axes: Vec<&'a ContinuousAxis>,
-    pieces: Vec<Option<LeaderPieces>>,
+    pieces: Cow<'a, [Option<LeaderPieces>]>,
 }
 
 impl<'a> ShapedLeaders<'a> {
-    fn of(seg: &'a ContinuousSegment, leaders: &[usize]) -> Self {
+    fn of(seg: &'a ContinuousSegment, leaders: &'a [usize]) -> Self {
         let axes: Vec<&'a ContinuousAxis> =
             leaders.iter().map(|&leader| &seg.axes[leader]).collect();
         let pieces = axes.iter().map(|axis| LeaderPieces::of(axis)).collect();
-        Self { axes, pieces }
+        Self {
+            leaders,
+            axes,
+            pieces: Cow::Owned(pieces),
+        }
+    }
+
+    /// The leaders of `seg` read through `pieces`, which
+    /// [`Self::into_pieces`] took from [`Self::of`] over the same segment.
+    fn with_pieces(
+        seg: &'a ContinuousSegment,
+        leaders: &'a [usize],
+        pieces: &'a [Option<LeaderPieces>],
+    ) -> Self {
+        assert_eq!(
+            leaders.len(),
+            pieces.len(),
+            "cached leader pieces belong to a different leader set"
+        );
+        Self {
+            leaders,
+            axes: leaders.iter().map(|&leader| &seg.axes[leader]).collect(),
+            pieces: Cow::Borrowed(pieces),
+        }
+    }
+
+    fn into_pieces(self) -> Vec<Option<LeaderPieces>> {
+        self.pieces.into_owned()
     }
 
     fn pva(&self, index: usize, t: f64) -> (f64, f64, f64) {
@@ -2384,15 +2421,25 @@ pub(crate) struct FollowerSignal<'a> {
 }
 
 impl<'a> FollowerSignal<'a> {
-    fn new(
+    /// The follower track of `raw` riding the shaped path of `shaped`, whose
+    /// leaders `shaped_leaders` reads.
+    fn riding(
         shaped: &'a ContinuousSegment,
         raw: &'a ContinuousSegment,
         axis: usize,
-        leaders: &[usize],
+        shaped_leaders: ShapedLeaders<'a>,
         state: &'a FollowerState,
         odometer: Odometer,
         e_start: f64,
     ) -> Self {
+        let leaders = shaped_leaders.leaders;
+        assert!(
+            leaders
+                .iter()
+                .zip(&shaped_leaders.axes)
+                .all(|(&leader, &read)| std::ptr::eq(read, &shaped.axes[leader])),
+            "the shaped leaders read another segment than the one the follower rides"
+        );
         let (t0, t1) = projection_support(raw, shaped, axis, leaders);
         let raw_delta =
             (!raw.spatial_path).then(|| (&raw.axes[axis], axis_pva(&raw.axes[axis], t0).0));
@@ -2404,7 +2451,6 @@ impl<'a> FollowerSignal<'a> {
         );
         grid.sort_by(f64::total_cmp);
         grid.dedup_by(|left, right| (*left - *right).abs() <= GRID_DEDUP_EPS_S);
-        let shaped_leaders = ShapedLeaders::of(shaped, leaders);
         let mut knots = OdometerKnots::starting_at(grid[0], grid.len());
         for w in grid.windows(2) {
             odometer_leaves(
