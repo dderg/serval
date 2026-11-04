@@ -29,8 +29,8 @@ pub use frontend::{
     scv_from_corner_deviation,
 };
 pub use ratio_ramp::{
-    ADVANCE_VALLEY_SPEED_MM_S, RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule,
-    RatioStep,
+    ADVANCE_VALLEY_SPEED_MM_S, RATIO_RAMP_ENVELOPE_SLOPE, RATIO_RAMP_MAX_TIME_S,
+    RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep, rest_room_reach_mm,
 };
 pub use segment::{CubicSegment, FollowerDemand, SourceRange};
 pub use step_capacity::{FollowerStepLoad, McuStepLoad, StepCapacity, StepCapacityOverload};
