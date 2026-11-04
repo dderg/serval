@@ -3112,7 +3112,8 @@ fn shaped_seeds_carry_every_cut_transition_exactly_once() {
         3.0128303182171217,
         18.4517596196437,
     ];
-    let seeds = crate::shaper::shaped_signal_breakpoints(&kernel, &input_breaks);
+    let shaped = crate::shaper::ShapedBreaks::new(&kernel, &input_breaks);
+    let seeds = shaped.times();
     assert!(seeds.windows(2).all(|pair| pair[0] < pair[1]));
     let mut transitions = Vec::new();
     for &input_break in &input_breaks {

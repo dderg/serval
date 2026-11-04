@@ -16,7 +16,7 @@ use crate::shaper::taylor::{self, Ball, TaylorModel};
 
 use super::{
     AdvanceValley, FALL_TO_REST, KERNEL_HALF_VARIANCE, RISE_FROM_REST, RatioSmoothing,
-    SMOOTHED_HALF_SQUARE, SMOOTHED_RAMP, SMOOTHERSTEP, SPAN_LOOKUP_SLACK_MM, WidthField,
+    SMOOTHED_HALF_SQUARE, SMOOTHED_RAMP, SMOOTHERSTEP, SPAN_LOOKUP_SLACK_MM, Seam, WidthField,
 };
 
 /// `C(n, k)` for the moments' expansions about a window's centre.
@@ -215,7 +215,18 @@ struct CorrectionPolynomials {
     width: [Ball; 6],
     weights: [[Ball; 6]; 6],
     kink: [Ball; 3],
-    seams: bool,
+    edges: Option<EdgeSpans>,
+}
+
+/// The two spans of the table running past a window's edges with seams
+/// inside ([`super::edge_spans`]): the slope behind the back edge and past
+/// the front one, and the first and last seam's offset from the model's
+/// centre with whether each lies behind its point.
+struct EdgeSpans {
+    slope_left: f64,
+    slope_right: f64,
+    first: (Ball, bool),
+    last: (Ball, bool),
 }
 
 impl CorrectionPolynomials {
@@ -224,12 +235,14 @@ impl CorrectionPolynomials {
     fn series(&self, at: Lean) -> Option<Series> {
         let h = series_about(&self.width, at);
         let weight = |index: usize| series_about(&self.weights[index], at);
-        let h_squared_weight = series_mul(&h, &series_mul(&h, &weight(0)));
-        if !self.seams {
+        let h_squared = series_mul(&h, &h);
+        let h_squared_weight = series_mul(&h_squared, &weight(0));
+        let Some(edges) = &self.edges else {
             return Some(h_squared_weight);
-        }
+        };
         let growing = series_add(&h_squared_weight, &series_mul(&h, &weight(1)));
         let inverse = series_reciprocal(&h)?;
+        let edge = edges.series(&h, &h_squared, &inverse, at);
         let shrinking = series_mul(
             &inverse,
             &series_add(
@@ -241,19 +254,66 @@ impl CorrectionPolynomials {
             ),
         );
         Some(series_add(
-            &series_add(&series_about(&self.kink, at), &growing),
-            &series_add(&weight(2), &shrinking),
+            &series_add(
+                &series_add(&series_about(&self.kink, at), &growing),
+                &series_add(&weight(2), &shrinking),
+            ),
+            &edge,
         ))
     }
+}
+
+impl EdgeSpans {
+    /// `h²·(m_left·back + m_right·front)` as the evaluator's
+    /// [`super::edge_spans`] reads it, each edge's `G₂` about the edge it
+    /// lies nearer: `h²·P₂(g/h) = 0.0625·g⁴/h² − 0.0125·g⁵/h³` at
+    /// `g = h ∓ u`.
+    fn series(&self, h: &Series, h_squared: &Series, inverse: &Series, at: Lean) -> Series {
+        let inverse_squared = series_mul(inverse, inverse);
+        let inverse_cubed = series_mul(&inverse_squared, inverse);
+        let off_edge = |g: &Series| {
+            let g_squared = series_mul(g, g);
+            let g_fourth = series_mul(&g_squared, &g_squared);
+            let g_fifth = series_mul(&g_fourth, g);
+            series_add(
+                &series_scale(&series_mul(&g_fourth, &inverse_squared), 0.0625),
+                &series_scale(&series_mul(&g_fifth, &inverse_cubed), -0.0125),
+            )
+        };
+        let complement = |part: &Series| {
+            series_add(
+                &series_scale(h_squared, KERNEL_HALF_VARIANCE),
+                &series_scale(part, -1.0),
+            )
+        };
+        let toward = |(offset, behind): (Ball, bool)| {
+            let u = series_about(&[offset, Ball::exact(1.0)], at);
+            let sign = if behind { -1.0 } else { 1.0 };
+            (off_edge(&series_add(h, &series_scale(&u, sign))), behind)
+        };
+        let back = match toward(self.first) {
+            (behind, true) => behind,
+            (ahead, false) => complement(&ahead),
+        };
+        let front = match toward(self.last) {
+            (behind, true) => complement(&behind),
+            (ahead, false) => ahead,
+        };
+        series_add(
+            &series_scale(&back, self.slope_left),
+            &series_scale(&front, self.slope_right),
+        )
+    }
+}
+
+fn series_scale(a: &Series, factor: f64) -> Series {
+    let factor = Lean::of(Ball::exact(factor));
+    std::array::from_fn(|k| a[k] * factor)
 }
 
 /// The most floats a narrow reach is read at one by one.
 const NARROW_FLOATS: usize = 64;
 
-/// Every float of `reach` where it is no wider than its read points inset
-/// ([`read_points`]) and holds at most [`NARROW_FLOATS`] of them: a reach
-/// that narrow that reads more than one formula reads each at some of its
-/// floats, and the evaluator reads no other.
 /// `reach` split off from each of its end floats in turn: where the
 /// evaluator flips a formula on an end float itself, the float reads one
 /// and the rest of the reach the other.
@@ -264,6 +324,10 @@ fn end_apart((lo, hi): (f64, f64)) -> [[(f64, f64); 2]; 2] {
     ]
 }
 
+/// Every float of `reach` where it is no wider than its read points inset
+/// ([`read_points`]) and holds at most [`NARROW_FLOATS`] of them: a reach
+/// that narrow that reads more than one formula reads each at some of its
+/// floats, and the evaluator reads no other.
 pub(in crate::follower_projection) fn narrow_floats((lo, hi): (f64, f64)) -> Option<Vec<f64>> {
     let inset = REACH_INSET_ULPS * f64::EPSILON * lo.abs().max(hi.abs()).max(1.0);
     if hi - lo > 2.0 * inset {
@@ -622,31 +686,53 @@ impl RatioSmoothing {
         else {
             return None;
         };
-        let window = first..past;
+        let seams = &self.seams[first..past];
+        let is_behind = |index: usize| first + index < behind_end;
+        let offset_of = |seam: &Seam| Ball::rounded(centre - seam.s, 1);
         let zero = Ball::exact(0.0);
         let mut step = [zero; SMOOTHED_RAMP.len()];
-        let mut slope_step = [zero; SMOOTHED_HALF_SQUARE.len()];
+        let mut slope = [zero; SMOOTHED_HALF_SQUARE.len()];
         let mut kink = [zero; 3];
         let mut steps = false;
-        for (index, seam) in self.seams[window.clone()].iter().enumerate() {
-            let offset = Ball::rounded(centre - seam.s, 1);
-            let (ratio_step, slope_change) = (Ball::exact(seam.step), Ball::exact(seam.slope_step));
+        for (index, seam) in seams
+            .iter()
+            .enumerate()
+            .filter(|(_, seam)| seam.step != 0.0)
+        {
+            steps = true;
+            let (offset, ratio_step) = (offset_of(seam), Ball::exact(seam.step));
             let mut power = Ball::exact(1.0);
-            for k in 0..SMOOTHED_HALF_SQUARE.len() {
-                if k < SMOOTHED_RAMP.len() && seam.step != 0.0 {
-                    step[k] = step[k] + ratio_step * power;
-                }
-                if seam.slope_step != 0.0 {
-                    slope_step[k] = slope_step[k] + slope_change * power;
-                }
+            for moment in &mut step {
+                *moment = *moment + ratio_step * power;
                 power = power * offset;
             }
-            steps |= seam.step != 0.0;
-            if window.start + index < behind_end {
-                let half_slope = slope_change * Ball::exact(0.5);
-                kink[0] = kink[0] + ratio_step * offset + half_slope * offset * offset;
-                kink[1] = kink[1] + ratio_step + slope_change * offset;
-                kink[2] = kink[2] + half_slope;
+            if is_behind(index) {
+                kink[0] = kink[0] + ratio_step * offset;
+                kink[1] = kink[1] + ratio_step;
+            }
+        }
+        for (index, pair) in seams.windows(2).enumerate() {
+            let (seam, next) = (&pair[0], &pair[1]);
+            if seam.slope_after == 0.0 {
+                continue;
+            }
+            let (ahead, behind) = (offset_of(seam), offset_of(next));
+            let span_slope = Ball::exact(seam.slope_after);
+            let rise = span_slope * Ball::rounded(next.s - seam.s, 1);
+            let (mut divided, mut power) = (zero, Ball::exact(1.0));
+            for moment in &mut slope[1..] {
+                divided = divided * ahead + power;
+                power = power * behind;
+                *moment = *moment + rise * divided;
+            }
+            let half = Ball::exact(0.5);
+            if is_behind(index + 1) {
+                kink[0] = kink[0] + rise * half * (ahead + behind);
+                kink[1] = kink[1] + rise;
+            } else if is_behind(index) {
+                kink[0] = kink[0] + span_slope * half * ahead * ahead;
+                kink[1] = kink[1] + span_slope * ahead;
+                kink[2] = kink[2] + span_slope * half;
             }
         }
         let weight = |index: usize| {
@@ -657,21 +743,30 @@ impl RatioSmoothing {
                     *slot = *slot + Ball::exact(scale) * sums[k - power];
                 }
             };
-            moment(&slope_step, index, SMOOTHED_HALF_SQUARE[index]);
+            moment(&slope, index, SMOOTHED_HALF_SQUARE[index]);
             if let Some(k) = index.checked_sub(1).filter(|_| steps) {
                 moment(&step, k, SMOOTHED_RAMP[k]);
             }
-            if index == 0 {
+            if index == 0 && seams.is_empty() {
                 coefficients[0] =
                     coefficients[0] + Ball::exact(KERNEL_HALF_VARIANCE) * Ball::exact(slope_left);
             }
             coefficients
         };
+        let edges = seams
+            .first()
+            .zip(seams.last())
+            .map(|(first_seam, last_seam)| EdgeSpans {
+                slope_left,
+                slope_right: last_seam.slope_after,
+                first: (offset_of(first_seam), is_behind(0)),
+                last: (offset_of(last_seam), is_behind(seams.len() - 1)),
+            });
         Some(CorrectionPolynomials {
             width: self.width.width_polynomial(interval, centre),
             weights: std::array::from_fn(weight),
             kink: kink.map(|term| -term),
-            seams: !window.is_empty(),
+            edges,
         })
     }
 

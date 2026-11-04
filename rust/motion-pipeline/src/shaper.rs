@@ -39,7 +39,7 @@ use hull::{FittedPiece, HullBudget};
 use taylor::{Ball, TaylorModel};
 
 pub(crate) use exact::{ExactConvolution, ExactKernel, ExactPiece};
-use hidden_breaks::ShapedBreaks;
+pub(crate) use hidden_breaks::ShapedBreaks;
 
 /// A signal's enclosure over a stretch: a slice of one the signal keeps,
 /// borrowed for the asking, or one built for it.
@@ -2159,22 +2159,6 @@ fn f64_from_ordered_key(key: u64) -> f64 {
     f64::from_bits(bits)
 }
 
-pub(crate) fn shaped_signal_breakpoints(
-    kernel: &nurbs::algebra::PiecewisePolynomialKernel,
-    input_breaks: &[f64],
-) -> Vec<f64> {
-    let kernel_breaks: Vec<f64> = ShapedSignal::kernel_cut_boundaries(kernel).collect();
-    let mut breaks = Vec::with_capacity(input_breaks.len() * (kernel_breaks.len() + 2));
-    for &input_break in input_breaks {
-        for &kernel_break in &kernel_breaks {
-            ShapedSignal::output_cut_transitions(kernel, input_break, kernel_break, &mut breaks);
-        }
-    }
-    breaks.sort_by(f64::total_cmp);
-    breaks.dedup();
-    breaks
-}
-
 /// Sized for the deepest fit-ladder rung (degree 13, 14 coefficients) times
 /// the widest kernel moment window the shaper builds.
 const MOMENT_POWER_CAPACITY: usize = 24;
@@ -3337,7 +3321,7 @@ struct FitPlan {
     floors: LadderFloors,
 }
 
-fn fit_seed_times(
+pub(crate) fn fit_seed_times(
     axis: usize,
     t_start: f64,
     t_end: f64,
