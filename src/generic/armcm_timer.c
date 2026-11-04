@@ -153,7 +153,7 @@ static uint32_t timer_repeat_until;
 #if CONFIG_MCU_SIM
 #define TIMER_SYSTICK_LEAD_TICKS 0
 #else
-#define TIMER_SYSTICK_LEAD_TICKS 190
+#define TIMER_SYSTICK_LEAD_TICKS 100
 #endif
 #define TIMER_MIN_TRY_TICKS (TIMER_SYSTICK_LEAD_TICKS + 90)
 #define TIMER_DEFER_REPEAT_TICKS timer_from_us(5)
