@@ -185,9 +185,28 @@ CI runs the benchmark of every test/configs firmware in unicorn (`step_benchmark
 
 ### How the capacity caps moves
 
-The planner turns the benchmark into a per-move speed cap (`rust/motion-pipeline/src/live_config/step_capacity.rs`, `docs/Config_Reference_Motion.md`, "MCU step capacity"); klippy (`klippy/motion_step_capacity.py`) only hands it each MCU's benchmark, clock and stepped motors. Each MCU gets 0.75 × CLOCK_FREQ ticks per second (`STEP_CAPACITY_FRACTION`). 0.75 is the ladder's knee above: p99 lateness holds at 4.1–5.1 µs up to 225 k steps/s, 75 % of the ~300 k ceiling. A motor costs its benchmarked ticks per step, pulsed or both-edge by its own mode, times the steps per second the move asks of it. The planner keeps the sum over each MCU's motors within the capacity, with pressure advance counted on the extruder. On this bench (F401, 301 ticks/step pulsed) that is 209 k steps/s. Pure X/Y travel reaches 1308 mm/s and is never capped at `max_velocity: 1000`. Only extrusions above a ratio of about 0.088 along X or Y at full speed are slowed, e.g. a 0.8 × 0.3 mm line to 964 mm/s. `capacity.cfg` raises the limits past the cap. Its ladder rungs above ~209 k aggregate are now planned slower than the G-code asks, and `step_capacity_capped` events report it.
+The planner turns the benchmark into a per-move speed cap (`rust/motion-pipeline/src/live_config/step_capacity.rs`, `docs/Config_Reference_Motion.md`, "MCU step capacity"); klippy (`klippy/motion_step_capacity.py`) only hands it each MCU's benchmark, clock and stepped motors. Each MCU gets `STEP_CAPACITY_FRACTION` × CLOCK_FREQ ticks per second; the fraction comes from the timing budget below. A motor costs its benchmarked ticks per step (pulsed or both-edge, by its own mode) times the steps per second the move asks of it. The planner keeps the sum over each MCU's motors within the capacity, counting pressure advance on the extruder. On this bench (F401, 301 ticks/step pulsed) the fraction of 0.625 gives 174 k steps/s. `capacity.cfg` raises the speed limits past the cap, so its ladder rungs above the cap are planned slower than the G-code asks and `step_capacity_capped` events report it.
 
 `run.py` records every MCU's step benchmark (the MCU status `step_capacity`) in `run.json` under `step_benchmarks`, and `analyze.py` plans its reference under the same cap, so a run where the cap binds analyzes against the plan the printer executed. A `run.json` from before that recording plans an uncapped reference; `--step-benchmark 301,160,84000000` supplies the F401's benchmark for such a run, charged to every captured motor stepped pulsed (the bench has one MCU and no `dedge` driver). `analysis.json` says which reference it judged in `reference_step_capacity`: `recorded`, `supplied` or `absent`.
+
+### Capacity fraction from a timing budget
+
+Budget: at the load the cap allows, p99.9 MCU step lateness × that motor's own step rate (lateness in microsteps of position) must stay ≤ 0.5 microstep. A step that is 0.5 microstep late is still nearer its own lattice point than the next one. The host's step compression already allows 25 µs by design, which is 1.3 microsteps at the 52 k steps/s per motor these runs reach. The analyzer's 0.05-step criterion is not usable here: the MCU's intrinsic ~5 µs p99.9 dispatch jitter alone exceeds it at any useful speed, even at a quarter of capacity. That criterion measures speed, not load.
+
+Sweep: `capacity_ladder_high` in event mode with the step tap and `configs/capacity.cfg`, so every rung asks more than the cap and the run sits at the cap. F401, 301 ticks/step pulsed, four motors stepping at equal rates. The fraction was set per run in a throwaway tree. `mcu_execution.lateness_by_step_rate_hz` → `position_p99_9_steps` in the dominant (capped) rate bin:
+
+| fraction | cap | p99.9 lateness | p99.9 position | max position | step_load_late |
+|---|---|---|---|---|---|
+| 0.75 | 209 k | 12.2 µs | 0.62 | 1.01 | 456 |
+| 0.65 | 181 k | 11.7–11.8 µs | 0.52 (×2) | 0.82 | 167–169 |
+| **0.625** | 174 k | 11.2 µs | **0.47** | 0.81 | 121 |
+| 0.60 | 167 k | 10.7–10.8 µs | 0.44 (×2) | 0.82 | 90–189 |
+| 0.55 | 153 k | 9.5 µs | 0.36 | 0.68 | 48 |
+| 0.45 | 126 k | 6.9 µs | 0.21 | 0.65 | 0 |
+| 0.35 | 98 k | 6.3 µs | 0.15 | 0.34 | 0 |
+| 0.25 | 70 k | 5.2 µs | 0.09 | 0.24 | 0 |
+
+The largest fraction measured within budget is 0.625; 0.65 misses it by 0.02 step, and it did so on both runs. Runs: `20261104-044956` … `-045817` and `-051422` … `-051928`. In time terms, lateness is flat at 5–7 µs up to 0.45 and the queueing knee appears from 0.55 upward.
 
 ## Limits
 
