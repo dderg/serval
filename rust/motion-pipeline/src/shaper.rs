@@ -410,6 +410,65 @@ impl<S: TrackSignal> TrackSignal for FacingRead<'_, S> {
 
 pub(crate) const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 
+const FIT_GROUP_SEGMENTS: usize = 4;
+const FIT_GROUP_SPAN_S: f64 = 0.02;
+
+/// The ends of the complete fit groups among `segments`, whose first opens
+/// one. A group closes on its fourth segment, on the segment that carries
+/// it `FIT_GROUP_SPAN_S` past its start, or on a segment ending at rest.
+/// Every target in a group reads one signal table laid about the group's
+/// start, so the shaper shapes and commits whole groups, and each group —
+/// and with it every fit — depends on its own segments alone, never on how
+/// the emits are cut.
+pub(crate) fn fit_group_ends(segments: &[ContinuousSegment]) -> Vec<usize> {
+    let mut ends = Vec::new();
+    let mut start = 0;
+    for (index, segment) in segments.iter().enumerate() {
+        if index + 1 - start == FIT_GROUP_SEGMENTS
+            || segment.t_end - segments[start].t_start >= FIT_GROUP_SPAN_S
+            || segment.rest_at_end
+        {
+            ends.push(index + 1);
+            start = index + 1;
+        }
+    }
+    ends
+}
+
+/// The most of the first `count` segments that fill whole fit groups.
+pub(crate) fn whole_groups(segments: &[ContinuousSegment], count: usize) -> usize {
+    fit_group_ends(&segments[..count])
+        .last()
+        .copied()
+        .unwrap_or(0)
+}
+
+/// The fit groups `segments` falls into, every one of them whole unless
+/// `clamps_past_signal` lets the last close where the signal ends.
+pub(crate) fn fit_groups(
+    segments: &[ContinuousSegment],
+    clamps_past_signal: bool,
+) -> Vec<std::ops::Range<usize>> {
+    let mut ends = fit_group_ends(segments);
+    if ends.last().copied().unwrap_or(0) < segments.len() {
+        assert!(
+            clamps_past_signal,
+            "shaper: {} segments past the last whole fit group are being shaped before \
+             their group closed",
+            segments.len() - ends.last().copied().unwrap_or(0)
+        );
+        ends.push(segments.len());
+    }
+    let mut start = 0;
+    ends.into_iter()
+        .map(|end| {
+            let group = start..end;
+            start = end;
+            group
+        })
+        .collect()
+}
+
 /// Buffered lowered segments plus the shaped-leader cache: `shaped` holds
 /// `segments[i]` with every kerneled non-follower axis already fitted. A
 /// frontier segment's convolution window is fully covered when it is first
@@ -759,6 +818,11 @@ impl Shaper {
         output: &mut impl FnMut(TrajectoryItem) -> bool,
     ) -> bool {
         self.segments_since_emit = 0;
+        let count = if force {
+            count
+        } else {
+            whole_groups(self.pending.segments.make_contiguous(), count)
+        };
         if count == 0 {
             return true;
         }
@@ -772,11 +836,12 @@ impl Shaper {
         } else {
             let last_t = self.pending.back().expect("count > 0").t_end;
             let direct_hi = self.chains.direct_forward_support();
-            self.pending
+            let reached = self
+                .pending
                 .iter()
                 .take_while(|seg| seg.t_end + direct_hi < last_t)
-                .count()
-                .max(count)
+                .count();
+            whole_groups(self.pending.segments.make_contiguous(), reached).max(count)
         };
         let pending = &mut self.pending;
         let segments = pending.segments.make_contiguous();
@@ -1587,9 +1652,13 @@ fn fit_axis_column(
         boundary,
         lookahead,
     };
-    let reads: Vec<(std::ops::Range<usize>, SignalBounds)> = targets
+    let groups = fit_groups(targets, lookahead.clamps_past_signal());
+    let reads: Vec<(std::ops::Range<usize>, SignalBounds)> = groups
         .iter()
-        .map(|target| read_window(&window_segments, target, kernel, window))
+        .map(|group| {
+            let span = (targets[group.start].t_start, targets[group.end - 1].t_end);
+            read_window(&window_segments, span, kernel, window)
+        })
         .collect();
     let read_from = reads
         .iter()
@@ -1604,19 +1673,19 @@ fn fit_axis_column(
             _ => panic!("shaper: changed axis was not materialized"),
         })
         .collect();
-    let workers = target_workers.max(1).min(targets.len());
+    let workers = target_workers.max(1).min(groups.len());
     let fitted = pool
         .map_indexed(
             workers,
-            targets.len(),
+            groups.len(),
             || (),
             |(), index| {
                 let (range, bounds) = reads[index].clone();
-                fit_target_alone(
+                fit_group_alone(
                     axis,
-                    std::slice::from_ref(&targets[index]),
+                    &targets[groups[index].clone()],
                     kernel,
-                    TargetRead {
+                    GroupRead {
                         segments: &window_segments[range.clone()],
                         pieces: &pieces[range.start - read_from..range.end - read_from],
                         bounds,
@@ -1635,32 +1704,32 @@ fn fit_axis_column(
     Ok(Some(tracks))
 }
 
-/// The segments one target's convolution reads, their axis pieces and the
-/// bounds of that slice.
-struct TargetRead<'r, 'a> {
+/// The segments one fit group's convolution reads, their axis pieces and
+/// the bounds of that slice.
+struct GroupRead<'r, 'a> {
     segments: &'r [&'a ContinuousSegment],
     pieces: &'r [Vec<BezierPiece>],
     bounds: SignalBounds,
 }
 
-/// One target's fit from the signal it reads alone, about its own start:
-/// what else shares its emit never reaches the fit, so the leader comes out
-/// the same however the shaper batches its emits.
-fn fit_target_alone(
+/// One fit group's targets from the signal the group reads alone, about
+/// the group's start: what else shares its emit never reaches the fit, so
+/// the leader comes out the same however the shaper batches its emits.
+fn fit_group_alone(
     axis: usize,
-    target: &[ContinuousSegment],
+    group: &[ContinuousSegment],
     kernel: &nurbs::algebra::PiecewisePolynomialKernel,
-    read: TargetRead,
+    read: GroupRead,
     fit_tol: FitTol,
     signal: ColumnSignal,
     pool: &WorkerPool,
 ) -> Result<Vec<ColumnTrack>, PostProcessError> {
-    if let Some(column) = constant_axis_column(read.segments, target, axis) {
+    if let Some(column) = constant_axis_column(read.segments, group, axis) {
         return Ok(column);
     }
     fit_axis_targets(
         axis,
-        target,
+        group,
         ShapedSignalSource::new(
             kernel,
             signal.convolution_input(AxisSignalTable::from_pieces(
@@ -1668,7 +1737,7 @@ fn fit_target_alone(
                 read.bounds,
             )),
             signal_breakpoints(read.segments, axis),
-            target[0].t_start,
+            group[0].t_start,
         ),
         fit_tol,
         signal,
@@ -1677,22 +1746,22 @@ fn fit_target_alone(
     )
 }
 
-/// The segments a convolution of `kernel` over `target` reads: from the one
-/// starting strictly before the earliest time read to the first one reaching
-/// strictly past the latest, so a gap a read lands in carries its hold and a
-/// one-sided read at either edge of the window finds signal. The slice
-/// depends on the target and the segments alone, never on how far the
-/// window around them reaches (the lookahead gates and the history
-/// retention hold both neighbours); an edge clamps only where the read
-/// passes it, as the window's own edge would.
+/// The segments a convolution of `kernel` over a fit group spanning `span`
+/// reads: from the one starting strictly before the earliest time read to
+/// the first one reaching strictly past the latest, so a gap a read lands
+/// in carries its hold and a one-sided read at either edge of the window
+/// finds signal. The slice depends on the group and the segments alone,
+/// never on how far the window around them reaches (the lookahead gates
+/// and the history retention hold both neighbours); an edge clamps only
+/// where the read passes it, as the window's own edge would.
 fn read_window(
     segments: &[&ContinuousSegment],
-    target: &ContinuousSegment,
+    (span_start, span_end): (f64, f64),
     kernel: &nurbs::algebra::PiecewisePolynomialKernel,
     window: SignalBounds,
 ) -> (std::ops::Range<usize>, SignalBounds) {
     let (k_lo, k_hi) = kernel.support();
-    let (read_lo, read_hi) = (target.t_start - k_hi, target.t_end - k_lo);
+    let (read_lo, read_hi) = (span_start - k_hi, span_end - k_lo);
     let lo = segments
         .partition_point(|seg| seg.t_start < read_lo)
         .saturating_sub(1);

@@ -799,6 +799,9 @@ pub(crate) fn project_followers(
         "a forced follower projection left {} of {requested} segments short of final",
         requested - commit_count
     );
+    if !lookahead.clamps_past_signal() {
+        commit_count = crate::shaper::whole_groups(base, commit_count);
+    }
     out.truncate(commit_count);
     for (axis, leaders) in committing {
         let chain = &chains.chains[axis];
@@ -824,28 +827,32 @@ pub(crate) fn project_followers(
                 };
                 let kernel_started = crate::timing::stopwatch();
                 timing.kernel_fits += targets.len();
+                let groups = crate::shaper::fit_groups(
+                    &base[..commit_count],
+                    lookahead.clamps_past_signal(),
+                );
                 let workers = if cfg!(target_arch = "wasm32") {
                     1
                 } else {
                     std::thread::available_parallelism().map_or(1, |cores| {
-                        cores.get().saturating_sub(1).max(1).min(targets.len())
+                        cores.get().saturating_sub(1).max(1).min(groups.len())
                     })
                 };
                 let state_ref: &FollowerState = &*state;
                 let fitted = pool
                     .map_indexed(
                         workers,
-                        targets.len(),
+                        groups.len(),
                         || (),
-                        |(), index| fit.target_alone(state_ref, targets[index]),
+                        |(), index| fit.group_alone(state_ref, &targets[groups[index].clone()]),
                     )
                     .expect("follower kernel fit thread panicked");
                 let mut tracks = Vec::with_capacity(targets.len());
                 for result in fitted {
-                    let (base_position, pieces, window) = result?;
+                    let (group_tracks, window) = result?;
                     timing.kernel_fit_max_us = timing.kernel_fit_max_us.max(window.fit_us);
                     timing.breakpoints_us += window.breakpoints_us;
-                    tracks.push((base_position, pieces));
+                    tracks.extend(group_tracks);
                 }
                 timing.kernel_fit_us += kernel_started.elapsed_us();
                 Some(tracks)
@@ -959,16 +966,17 @@ struct KernelFit<'a> {
 }
 
 impl KernelFit<'_> {
-    /// The kernel output over `target` from the projected segments its
-    /// window reads alone, assembled from the first of them and offset at
-    /// the target's own start, so the fit is the same whichever other
-    /// segments share its emit or are still cached around it. Returns the
-    /// absolute base its pieces sit on.
-    fn target_alone(
+    /// The kernel output over each target of one fit group from the
+    /// projected segments the group's window reads alone, assembled from the
+    /// first of them and offset at the group's start, so the fits are the
+    /// same whichever other segments share its emit or are still cached
+    /// around it. Returns each target's pieces with the absolute base they
+    /// sit on.
+    fn group_alone(
         &self,
         state: &FollowerState,
-        target: KernelTarget,
-    ) -> Result<(f64, Vec<BezierPiece>, KernelWindowTiming), PostProcessError> {
+        group: &[KernelTarget],
+    ) -> Result<(Vec<(f64, Vec<BezierPiece>)>, KernelWindowTiming), PostProcessError> {
         let Self {
             axis,
             chain,
@@ -977,7 +985,10 @@ impl KernelFit<'_> {
             fit_tol,
             lookahead,
         } = *self;
-        let (target_start, target_end) = target.support;
+        let (target_start, target_end) = (
+            group.first().expect("a fit group holds targets").support.0,
+            group.last().expect("a fit group holds targets").support.1,
+        );
         let (k_lo, k_hi) = kernel.support();
         let (read_lo, read_hi) = (target_start - k_hi, target_end - k_lo);
         let projected = &state.projected;
@@ -1044,10 +1055,16 @@ impl KernelFit<'_> {
             .spans
             .iter()
             .all(|span| span.r0 >= 0.0 && span.r1 >= 0.0);
-        let target_tol = follower_fit_tol(fit_tol, target.tol_scale);
+        let group_tol = follower_fit_tol(
+            fit_tol,
+            group
+                .iter()
+                .map(|target| target.tol_scale)
+                .fold(f64::INFINITY, f64::min),
+        );
         assert_piece_seams(axis, "projected input", &input_pieces, &input_steps);
         if nonnegative_demand {
-            project_monotone(axis, "projected input", &mut input_pieces, target_tol);
+            project_monotone(axis, "projected input", &mut input_pieces, group_tol);
         }
         let unified_input_degree = input_pieces
             .iter()
@@ -1159,18 +1176,26 @@ impl KernelFit<'_> {
         } else {
             OutputMonotonicity::Free
         };
-        let (local_base, pieces, fit_us) = fit_kernel_window(
-            axis,
-            target_start,
-            target_end,
-            &shaped_breaks,
-            &sig,
-            target_tol,
-            output_monotonicity,
-        )?;
+        let mut fitted = Vec::with_capacity(group.len());
+        let mut fit_us = 0;
+        for target in group {
+            let (local_base, pieces, target_us) = fit_kernel_window(
+                axis,
+                target.support.0,
+                target.support.1,
+                &shaped_breaks,
+                &sig,
+                follower_fit_tol(fit_tol, target.tol_scale),
+                output_monotonicity,
+            )?;
+            fit_us += target_us;
+            fitted.push((
+                window_base + local_base - piece_run_start_pv(&pieces).0,
+                pieces,
+            ));
+        }
         Ok((
-            window_base + local_base - piece_run_start_pv(&pieces).0,
-            pieces,
+            fitted,
             KernelWindowTiming {
                 fit_us,
                 breakpoints_us,
