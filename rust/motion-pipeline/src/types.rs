@@ -273,6 +273,38 @@ impl From<Move> for StreamInput {
     }
 }
 
+/// What a pipeline was fed, as the parity gate compares it: every move in
+/// full, the stops at rest, dwells and resets, and any other control token
+/// by kind.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InputTrace {
+    Move(Move),
+    Drain,
+    Dwell { secs: f64 },
+    Reset { pos: Vec<f64> },
+    Control(&'static str),
+}
+
+impl InputTrace {
+    #[must_use]
+    pub fn of(input: &StreamInput) -> Self {
+        match input {
+            StreamInput::Move(m) => Self::Move(m.clone()),
+            StreamInput::Drain => Self::Drain,
+            StreamInput::Control(Control::Dwell { secs }) => Self::Dwell { secs: *secs },
+            StreamInput::Control(Control::Reset { pos }) => Self::Reset { pos: pos.clone() },
+            StreamInput::Control(Control::SetAxisChains(_)) => Self::Control("SetAxisChains"),
+            StreamInput::Control(Control::SetMesh { .. }) => Self::Control("SetMesh"),
+            StreamInput::Control(Control::Dispatch(DispatchCommand::Nudge { .. })) => {
+                Self::Control("Nudge")
+            }
+            StreamInput::Control(Control::Dispatch(DispatchCommand::Barrier(_))) => {
+                Self::Control("Barrier")
+            }
+        }
+    }
+}
+
 /// Ordered control tokens that flow through every stage with the geometry.
 /// The pipeline is set up once and lives forever; these replace the old
 /// teardown-and-rebuild lifecycle. Every token except `Reset` requires the
