@@ -54,6 +54,26 @@ impl Segment {
             }
         }
     }
+
+    /// The least and largest component on `axis` of the unit heading
+    /// anywhere along the segment.
+    #[must_use]
+    pub fn heading_span_on(&self, axis: usize) -> (f64, f64) {
+        match self {
+            Segment::Line(line) => {
+                let heading = (line.end[axis] - line.start[axis]) / line.length();
+                (heading, heading)
+            }
+            Segment::Arc(arc) => {
+                let (lo, hi) = arc.heading_range();
+                planar_heading_span(arc.u[axis], arc.v[axis], lo, hi)
+            }
+            Segment::Clothoid(clothoid) => {
+                let (lo, hi) = clothoid.heading_range();
+                planar_heading_span(clothoid.u[axis], clothoid.v[axis], lo, hi)
+            }
+        }
+    }
 }
 
 impl Line {
@@ -118,6 +138,23 @@ fn planar_heading_lean(u_k: f64, v_k: f64, lo: f64, hi: f64) -> f64 {
     let plane = libm::hypot(u_k, v_k);
     let alpha = libm::atan2(v_k, u_k);
     plane * max_abs_cos(lo - alpha, hi - alpha)
+}
+
+/// The range of `plane·cos(φ − α)` over the heading angles `[lo, hi]`.
+fn planar_heading_span(u_k: f64, v_k: f64, lo: f64, hi: f64) -> (f64, f64) {
+    let plane = libm::hypot(u_k, v_k);
+    let alpha = libm::atan2(v_k, u_k);
+    let (from, to) = (lo - alpha, hi - alpha);
+    let ends = [libm::cos(from), libm::cos(to)];
+    let crest = (from / (2.0 * PI)).ceil() * 2.0 * PI;
+    let trough = ((from - PI) / (2.0 * PI)).ceil() * 2.0 * PI + PI;
+    let top = if crest <= to { 1.0 } else { ends[0].max(ends[1]) };
+    let bottom = if trough <= to {
+        -1.0
+    } else {
+        ends[0].min(ends[1])
+    };
+    (plane * bottom, plane * top)
 }
 
 fn max_abs_cos(lo: f64, hi: f64) -> f64 {

@@ -1,0 +1,80 @@
+use super::*;
+use trajectory::{build_smooth_mzv_kernel, build_smooth_zv_kernel};
+
+const H: f64 = 2.5e-4;
+
+fn kernels() -> Vec<PiecewisePolynomialKernel> {
+    vec![
+        build_smooth_mzv_kernel(50.0),
+        build_smooth_zv_kernel(44.0),
+        build_smooth_mzv_kernel(191.0),
+    ]
+}
+
+fn value(kernel: &PiecewisePolynomialKernel, u: f64) -> f64 {
+    piece_at(&kernel.pieces, u).map_or(0.0, |piece| piece.evaluate(u))
+}
+
+fn slope(kernel: &PiecewisePolynomialKernel, u: f64) -> f64 {
+    piece_at(&kernel.pieces, u).map_or(0.0, |piece| piece.differentiate().evaluate(u))
+}
+
+#[test]
+fn each_cell_bounds_the_kernel_and_its_slope_about_their_linearisation() {
+    for kernel in kernels() {
+        let cells = KernelCells::new(&kernel, H);
+        for (offset, (value_cell, slope_cell)) in cells.value.iter().zip(&cells.slope).enumerate() {
+            let a = (cells.first + offset as i64) as f64 * H;
+            let mid = a + 0.5 * H;
+            let mut worst = (0.0_f64, 0.0_f64);
+            for step in 0..=400 {
+                let u = a + H * f64::from(step) / 400.0;
+                let line = |cell: &Linear| cell.at + cell.slope * (u - mid);
+                worst.0 = worst.0.max((value(&kernel, u) - line(value_cell)).abs());
+                worst.1 = worst.1.max((slope(&kernel, u) - line(slope_cell)).abs());
+            }
+            assert!(worst.0 <= value_cell.miss * (1.0 + 1e-9) + 1e-12, "{worst:?} {value_cell:?}");
+            assert!(worst.1 <= slope_cell.miss * (1.0 + 1e-9) + 1e-9, "{worst:?} {slope_cell:?}");
+            assert!(
+                value_cell.miss <= 4.0 * worst.0 + 1e-9 * value_cell.at.abs().max(1.0),
+                "the bound is loose: {} against {}",
+                value_cell.miss,
+                worst.0
+            );
+        }
+    }
+}
+
+#[test]
+fn the_masses_bound_the_kernel_parts() {
+    for kernel in kernels() {
+        let cells = KernelCells::new(&kernel, H);
+        let (lo, hi) = kernel.support();
+        let steps = 20_000;
+        let width = (hi - lo) / f64::from(steps);
+        let (positive, negative) = (0..steps).fold((0.0, 0.0), |(p, n), step| {
+            let w = value(&kernel, lo + (f64::from(step) + 0.5) * width) * width;
+            if w >= 0.0 { (p + w, n) } else { (p, n - w) }
+        });
+        assert!(cells.positive_mass >= positive * (1.0 - 1e-6), "{} < {positive}", cells.positive_mass);
+        assert!(cells.negative_mass >= negative * (1.0 - 1e-6), "{} < {negative}", cells.negative_mass);
+    }
+}
+
+#[test]
+fn the_jerk_rate_bounds_the_slope_variation() {
+    for kernel in kernels() {
+        let cells = KernelCells::new(&kernel, H);
+        let (lo, hi) = kernel.support();
+        let steps = 20_000;
+        let width = (hi - lo) / f64::from(steps);
+        let variation: f64 = (0..steps)
+            .map(|step| {
+                let u = lo + f64::from(step) * width;
+                (slope(&kernel, u + width) - slope(&kernel, u)).abs()
+            })
+            .sum();
+        assert!(cells.jerk_rate_per_accel >= variation * (1.0 - 1e-6));
+        assert!(cells.jerk_rate_per_accel <= 2.0 * variation + 1e-6);
+    }
+}
