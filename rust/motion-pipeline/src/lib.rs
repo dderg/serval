@@ -15,7 +15,7 @@ mod lowering;
 pub mod planner;
 mod shaper;
 mod staged;
-pub mod step_capacity_log;
+mod step_capacity_log;
 pub mod timing;
 pub mod types;
 mod worker_pool;
