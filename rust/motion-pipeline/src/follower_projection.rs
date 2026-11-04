@@ -12,7 +12,7 @@ use trajectory::{
     RelativeSplinePiece, ShapedSignal,
 };
 
-use crate::lowering::{AccelBudget, FitTol, SeamContinuity, follower_tol_scale, riding_tol_scale};
+use crate::lowering::{AccelBudget, FitTol, SeamContinuity, riding_tol_scale};
 use crate::shaper::{
     AxisFit, AxisSignalTable, BetweenProbes, ConvolutionSignal, Enclosure, ExactConvolution,
     ExactKernel, FitBoundary, KnotJumpBound, Lookahead, SEGMENT_TIME_EPS_S, ShapedBreaks,
@@ -819,9 +819,12 @@ pub(crate) fn project_followers(
         let kernel_tracks = match kernel {
             Some(kernel) if commit_count > 0 => {
                 let targets = (0..commit_count)
-                    .map(|i| KernelTarget {
-                        support: projection_support(&base[i], &frontier[i], axis, leaders),
-                        tol_scale: follower_tol_scale(&base[i].followers, axis),
+                    .map(|i| {
+                        let support = projection_support(&base[i], &frontier[i], axis, leaders);
+                        KernelTarget {
+                            support,
+                            tol_scale: state.cached_projection(support.0, support.1).tol_scale,
+                        }
                     })
                     .collect::<Vec<_>>();
                 let fit = KernelFit {
