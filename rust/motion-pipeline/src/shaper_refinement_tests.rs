@@ -1095,12 +1095,14 @@ fn rail_braking_off_its_curvature_cap() -> AnalyticMoveSpan {
     assert_eq!(
         (approach.dt, entry, brake.dt),
         (
-            5.709_841_965_286_438e-6,
-            6.514_429_454_740_081,
-            0.000_117_682_091_288_695_36
+            5.709_841_167_112_868e-6,
+            6.514_339_472_230_706,
+            0.000_117_682_229_731_783_8
         ),
         "the rail must be the one the dense print planned"
     );
+    let t_start = 43.239_506_820_289_584;
+    let t_end = t_start + approach.dt + brake.dt;
     AnalyticMoveSpan::try_new(
         Move {
             segment: PathSegment::try_new(Segment::Clothoid(clothoid), Vec::new()).expect("path"),
@@ -1119,8 +1121,8 @@ fn rail_braking_off_its_curvature_cap() -> AnalyticMoveSpan {
         },
         Arc::from([approach, brake]),
         0.0,
-        43.239_506_820_289_584,
-        43.239_630_212_222_835,
+        t_start,
+        t_end,
         Arc::from([
             120.187_021_840_770_68,
             151.117_030_045_951_57,
@@ -1143,7 +1145,16 @@ fn a_rail_braking_off_its_curvature_cap_holds_the_tolerance_past_its_phase_seam(
     };
     let sig = CapContactSource {
         source: &source,
+        axis: 0,
         cap_contacts: &cap_contacts,
+        shared: None,
+        enclosure: std::cell::OnceCell::new(),
+        whole: (span.t_start, span.t_end),
+        accuracy: super::hull::HullBudget {
+            tol: fit_tol,
+            velocity: f64::INFINITY,
+        }
+        .enclosure_accuracy(),
     };
     let fit = AxisFit {
         axis: 0,

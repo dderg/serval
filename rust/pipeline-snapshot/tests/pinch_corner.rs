@@ -199,13 +199,14 @@ fn cap_starved_clothoid_holds_per_axis_accel_budget() {
 /// caps what one substep may build, so the fly-over arrives near the notch
 /// bottom while the debris field is still crossed at the disk-planned speed
 /// instead of the old frozen crawl (~16.6 mm/s vs ~13.1), the executed
-/// carrier holds the configured per-axis acceleration budget, and every
-/// snapshot row is a finite, continuously joined window.
+/// carrier holds the configured per-axis acceleration budget to within the
+/// rail's proven defect, and every snapshot row is a finite, continuously
+/// joined window.
 #[test]
 fn debris_notch_fly_over_holds_per_axis_accel_budget() {
     let planned = stream_case("facet_debris/debris_corners.gcode", 300.0, 3000.0, 9.0);
     let max_a = carrier_max_accel(&planned);
-    let budget = 3000.0 * (1.0 + 1e-9);
+    let budget = 3000.0 + geometry::velocity::law::RAIL_ACCELERATION_DEFECT;
     assert!(max_a <= budget, "carrier accel {max_a:.6} exceeds {budget}");
     assert_carriers_are_finite_and_continuous(&planned);
 }
