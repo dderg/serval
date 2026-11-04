@@ -88,6 +88,58 @@ def test_an_uncalibrated_config_fails():
     assert "calibrat" in verdict.problems[0]
 
 
+def pinned(predicted_x: float) -> dict[str, gate.FloorShortfall]:
+    return {"c": gate.FloorShortfall(issue=693, predicted_x=predicted_x)}
+
+
+def test_a_pinned_floor_shortfall_passes_at_its_pinned_prediction():
+    k = 2.5 * 1000 / 10.0
+    verdict = gate.judge(
+        "c", entry(1000, k), gate.Measurement(1000, 0, 6.4), pinned(1.6)
+    )
+    assert verdict.predicted_x == pytest.approx(1.6)
+    assert verdict.problems == ()
+
+
+def test_a_pinned_floor_shortfall_that_grows_fails_naming_its_issue():
+    k = 2.5 * 1000 / 10.0
+    verdict = gate.judge(
+        "c", entry(1000, k), gate.Measurement(1000, 0, 6.0), pinned(1.6)
+    )
+    assert "grew" in verdict.problems[0]
+    assert "#693" in verdict.problems[0]
+
+
+def test_a_pinned_floor_shortfall_that_shrinks_fails_until_repinned():
+    k = 2.5 * 1000 / 10.0
+    verdict = gate.judge(
+        "c", entry(1000, k), gate.Measurement(1000, 0, 7.2), pinned(1.6)
+    )
+    assert "re-pin" in verdict.problems[0]
+
+
+def test_a_pinned_floor_shortfall_that_vanishes_fails_until_unpinned():
+    k = 2.5 * 1000 / 10.0
+    verdict = gate.judge(
+        "c", entry(1000, k), gate.Measurement(1000, 0, 8.4), pinned(1.6)
+    )
+    assert "unpin" in verdict.problems[0]
+    assert "#693" in verdict.problems[0]
+
+
+def test_a_pin_on_another_config_leaves_the_floor_in_force():
+    k = 2.5 * 1000 / 10.0
+    verdict = gate.judge(
+        "other", entry(1000, k), gate.Measurement(1000, 0, 6.4), pinned(1.6)
+    )
+    assert "below the 2.0x floor" in verdict.problems[0]
+
+
+def test_a_pin_above_the_floor_is_refused():
+    with pytest.raises(ValueError):
+        gate.FloorShortfall(issue=693, predicted_x=2.1)
+
+
 def test_calibrations_name_a_gated_config_by_path_or_stem():
     configs = (
         "tools/bench/configs/a.cfg",

@@ -20,7 +20,11 @@ The gate fails when, for any config:
 - repo Ir grew more than THRESHOLD_PCT over its baseline (a regression);
 - repo Ir shrank more than THRESHOLD_PCT (an improvement: accept it so the
   baseline ratchets down and the gain stays locked in);
-- the predicted Pi 5 2-core worst 5 s window falls below PI_FLOOR_X.
+- the predicted Pi 5 2-core worst 5 s window falls below PI_FLOOR_X, bar a
+  config FLOOR_SHORTFALLS pins below it to the issue that owns the
+  shortfall: that config fails instead when its prediction leaves the pinned
+  one by more than THRESHOLD_PCT (grown: a regression; shrunk: re-pin) or
+  reaches the floor (unpin).
 
 The prediction is K x stream_secs / repo_Ir over the slice, the realtime
 factor scaled by the instruction rate the Pi sustains in the dense print's
@@ -107,6 +111,25 @@ class Verdict:
     @property
     def delta_pct(self) -> float:
         return 100.0 * (self.repo_ir - self.baseline_ir) / self.baseline_ir
+
+
+@dataclass(frozen=True)
+class FloorShortfall:
+    issue: int
+    predicted_x: float
+
+    def __post_init__(self) -> None:
+        if not self.predicted_x < PI_FLOOR_X:
+            raise ValueError(
+                f"a floor shortfall pins a prediction below {PI_FLOOR_X}x, "
+                f"not {self.predicted_x}x"
+            )
+
+
+FLOOR_SHORTFALLS: dict[str, FloorShortfall] = {}
+assert set(FLOOR_SHORTFALLS) <= set(CONFIGS), (
+    "a floor pin names an ungated config"
+)
 
 
 def run(command: list[str], cwd: Path | None = None) -> str:
@@ -336,7 +359,42 @@ def predicted_worst_x(entry: dict, measurement: Measurement) -> float | None:
     return pi["k"] * measurement.stream_secs / measurement.repo_ir
 
 
-def judge(config: str, entry: dict, measurement: Measurement) -> Verdict:
+def floor_problem(predicted: float, pin: FloorShortfall | None) -> str | None:
+    if pin is None:
+        if predicted >= PI_FLOOR_X:
+            return None
+        return (
+            f"predicted Pi 2-core worst window {predicted:.2f}x is below "
+            f"the {PI_FLOOR_X:.1f}x floor"
+        )
+    if predicted >= PI_FLOOR_X:
+        return (
+            f"predicted Pi 2-core worst window {predicted:.2f}x reaches the "
+            f"{PI_FLOOR_X:.1f}x floor: unpin the shortfall FLOOR_SHORTFALLS "
+            f"holds for #{pin.issue}"
+        )
+    drift_pct = 100.0 * (predicted - pin.predicted_x) / pin.predicted_x
+    if drift_pct < -THRESHOLD_PCT:
+        return (
+            f"predicted Pi 2-core worst window {predicted:.2f}x grew the "
+            f"floor shortfall pinned at {pin.predicted_x:.2f}x for "
+            f"#{pin.issue} ({drift_pct:+.2f} %)"
+        )
+    if drift_pct > THRESHOLD_PCT:
+        return (
+            f"predicted Pi 2-core worst window {predicted:.2f}x shrank the "
+            f"floor shortfall pinned at {pin.predicted_x:.2f}x for "
+            f"#{pin.issue} ({drift_pct:+.2f} %): re-pin it"
+        )
+    return None
+
+
+def judge(
+    config: str,
+    entry: dict,
+    measurement: Measurement,
+    shortfalls: dict[str, FloorShortfall] = FLOOR_SHORTFALLS,
+) -> Verdict:
     baseline_ir = entry["ir"]
     delta_pct = 100.0 * (measurement.repo_ir - baseline_ir) / baseline_ir
     predicted = predicted_worst_x(entry, measurement)
@@ -354,11 +412,8 @@ def judge(config: str, entry: dict, measurement: Measurement) -> Verdict:
         )
     if predicted is None:
         problems.append("no Pi calibration: run --calibrate-pi-worst")
-    elif predicted < PI_FLOOR_X:
-        problems.append(
-            f"predicted Pi 2-core worst window {predicted:.2f}x is below "
-            f"the {PI_FLOOR_X:.1f}x floor"
-        )
+    elif problem := floor_problem(predicted, shortfalls.get(config)):
+        problems.append(problem)
     return Verdict(
         config,
         measurement.repo_ir,
