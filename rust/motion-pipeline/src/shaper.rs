@@ -27,7 +27,7 @@ mod hidden_breaks;
 pub(crate) mod exact;
 
 #[path = "shaper_hull.rs"]
-mod hull;
+pub(crate) mod hull;
 
 #[path = "shaper_taylor.rs"]
 pub(crate) mod taylor;

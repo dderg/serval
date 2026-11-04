@@ -36,8 +36,8 @@ pub struct FollowerWord {
 }
 pub use space::{GcodePos, MachinePos};
 pub use surface::{
-    Fade, MeshGrid, MeshGridSpec, SurfaceBounds, SurfaceContinuity, SurfaceError, SurfaceSample,
-    SurfaceTransform, SurfaceTransition, SurfaceTransitionError,
+    Fade, MeshGrid, MeshGridSpec, MeshPatch, PatchAxis, SurfaceBounds, SurfaceContinuity,
+    SurfaceError, SurfaceSample, SurfaceTransform, SurfaceTransition, SurfaceTransitionError,
 };
 pub use velocity::{
     ExtrusionBudget, ExtrusionReach, FanOut, LawSegment, MoveVelocity, RailPair, RailPairShape,

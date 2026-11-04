@@ -223,6 +223,48 @@ impl NudgeProfile {
         &self.breakpoints
     }
 
+    /// The position `eval` reads on each phase, as monomial coefficients in
+    /// the time since the phase's start: `(start, end, [c₀, c₁, c₂])`, the
+    /// same formulas in exact arithmetic. The domain ends' parked zero
+    /// samples are not in it.
+    #[must_use]
+    pub fn phase_polynomials(&self) -> Vec<(f64, f64, [f64; 3])> {
+        let sign = self.delta_mm.signum();
+        if self.accel_mm_s2 == 0.0 {
+            return vec![(
+                self.t_start,
+                self.t_end(),
+                [0.0, sign * self.speed_mm_s, 0.0],
+            )];
+        }
+        let accel_end = self.t_start + self.t_accel;
+        let cruise_end = accel_end + self.t_cruise;
+        let accel_distance = 0.5 * self.accel_mm_s2 * self.t_accel * self.t_accel;
+        let mut phases = vec![(
+            self.t_start,
+            accel_end,
+            [0.0, 0.0, sign * 0.5 * self.accel_mm_s2],
+        )];
+        if self.t_cruise > 0.0 {
+            phases.push((
+                accel_end,
+                cruise_end,
+                [sign * accel_distance, sign * self.peak_speed_mm_s, 0.0],
+            ));
+        }
+        let remaining = self.t_end() - cruise_end;
+        phases.push((
+            cruise_end,
+            self.t_end(),
+            [
+                self.delta_mm - sign * 0.5 * self.accel_mm_s2 * remaining * remaining,
+                sign * self.accel_mm_s2 * remaining,
+                -sign * 0.5 * self.accel_mm_s2,
+            ],
+        ));
+        phases
+    }
+
     /// A nudge without acceleration cruises at `sign*speed` from the first
     /// instant, while `eval` parks a zero sample at both domain ends: velocity
     /// jumps at each end. A ramped nudge leaves and lands at rest, so its
@@ -419,6 +461,18 @@ impl BuzzProfile {
     #[must_use]
     pub fn amplitude_mm(&self) -> f64 {
         self.amplitude_mm
+    }
+
+    /// The carrier's angular frequency at the start, rad/s.
+    #[must_use]
+    pub fn omega_start(&self) -> f64 {
+        self.omega_start
+    }
+
+    /// The carrier's angular frequency's rate, rad/s².
+    #[must_use]
+    pub fn sweep_rate(&self) -> f64 {
+        self.sweep_rate
     }
 
     #[must_use]
@@ -792,6 +846,30 @@ impl BuzzProfile {
         let cos_coeff = 3.0 * b_accel * omega - b * omega.powi(3) + 3.0 * b_rate * self.sweep_rate;
         let phase = self.phase(t);
         sin_coeff * libm::sin(phase) + cos_coeff * libm::cos(phase)
+    }
+
+    /// The trapezoid envelope on each of its stretches, as `(start, end,
+    /// [e₀, e₁])` with the envelope `e₀ + e₁·τ` in the time `τ` since the
+    /// profile's start and the stretch ends absolute: the formulas `eval`
+    /// reads in exact arithmetic. Stretches of no time are left out.
+    #[must_use]
+    pub fn envelope_pieces(&self) -> Vec<(f64, f64, [f64; 2])> {
+        self.envelope_intervals()
+            .into_iter()
+            .filter(|&(left, right, _)| right > left)
+            .map(|(left, right, interval)| {
+                let envelope = if self.ramp == 0.0 {
+                    [1.0, 0.0]
+                } else {
+                    match interval {
+                        EnvelopeInterval::Rising => [0.0, 1.0 / self.ramp],
+                        EnvelopeInterval::Flat => [1.0, 0.0],
+                        EnvelopeInterval::Falling => [self.duration / self.ramp, -1.0 / self.ramp],
+                    }
+                };
+                (self.t_start + left, self.t_start + right, envelope)
+            })
+            .collect()
     }
 
     fn envelope_intervals(&self) -> [(f64, f64, EnvelopeInterval); 3] {

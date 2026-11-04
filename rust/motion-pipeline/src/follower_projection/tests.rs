@@ -765,7 +765,12 @@ fn an_advanced_follower_source_fit_opens_and_closes_on_the_signal_velocity() {
         odometer_from_start(&shaped),
         0.0,
     );
-    let advanced = super::AdvancedFollowerSignal::new(&sig, kernel_advance(&stage), &[]);
+    let advanced = super::AdvancedFollowerSignal::new(
+        &sig,
+        kernel_advance(&stage),
+        &[],
+        crate::lowering::FitTol::absolute(1e-4, 50.0),
+    );
     let pieces = nurbs::bezier::extract_bezier_pieces(&fitted.track);
     assert!(pieces.len() > 1, "fixture must fit with an interior seam");
     for piece in &pieces {
@@ -1341,6 +1346,7 @@ fn an_advanced_follower_source_holds_the_tolerance_past_a_leader_seam_velocity_r
         &sig,
         kernel_advance(&stage),
         &fitted.window_advance_steps,
+        fit_tol,
     );
     for piece in nurbs::bezier::extract_bezier_pieces(&fitted.track) {
         let duration = piece.u_end - piece.u_start;
@@ -1869,7 +1875,12 @@ fn an_advanced_follower_enclosure_holds_every_sample_of_its_signal() {
             linearization_velocity: 1.0,
         }),
     ] {
-        let advanced = super::AdvancedFollowerSignal::new(&sig, kernel_advance(&stage), &[]);
+        let advanced = super::AdvancedFollowerSignal::new(
+            &sig,
+            kernel_advance(&stage),
+            &[],
+            crate::lowering::FitTol::absolute(1e-4, 50.0),
+        );
         assert_enclosure_holds_every_sample(&advanced, (sig.grid[0], sig.grid[sig.grid.len() - 1]));
     }
 }
@@ -2004,6 +2015,184 @@ fn an_advanced_follower_enclosure_holds_every_sample_through_a_reversal() {
     let sig = resting_follower(&shaped, &state);
     assert_eq!(sig.rests.len(), 1, "the reversal is a rest");
     let stage = trajectory::ChainStage::DerivativeGains { k1: 0.04, k2: 0.0 };
-    let advanced = super::AdvancedFollowerSignal::new(&sig, kernel_advance(&stage), &[]);
+    let advanced = super::AdvancedFollowerSignal::new(
+        &sig,
+        kernel_advance(&stage),
+        &[],
+        crate::lowering::FitTol::absolute(1e-4, 50.0),
+    );
     assert_enclosure_holds_every_sample(&advanced, (sig.grid[0], sig.grid[sig.grid.len() - 1]));
+}
+
+/// Planar moves through `points` lowered to the analytic segments the
+/// shaper reads, with no chain shaping them.
+fn unshaped_segments(points: &[[f64; 2]], feedrate: f64) -> Vec<ContinuousSegment> {
+    let limits = geometry::VelocityLimits::try_new(300.0, 25_000.0, 0.05, f64::INFINITY).unwrap();
+    let config = crate::types::StreamConfig {
+        corner: geometry::CornerFitConfig::default(),
+        integration_tol: 1e-7,
+        max_extrude_only_velocity_mm_s: f64::INFINITY,
+        max_extrude_only_accel_mm_s2: f64::INFINITY,
+        fit_tol_mm: 0.005,
+        fit_tol_accel_mm_s2: 50.0,
+        max_buffer_moves: 256,
+        limits,
+        step_capacity: None,
+    };
+    let mut pipeline = crate::Pipeline::new(
+        config,
+        trajectory::AxisChainSet::default(),
+        vec![points[0][0], points[0][1], 0.2, 0.0],
+        0.0,
+    );
+    let crate::Pipeline { front, .. } = &mut pipeline;
+    let mut segments = Vec::new();
+    let mut keep = |item: crate::types::BaseItem| {
+        if let crate::types::BaseItem::Seg(segment) = item {
+            segments.push(segment);
+        }
+        true
+    };
+    for (line, pair) in points.windows(2).enumerate() {
+        let movement = geometry::line_move(
+            [pair[0][0], pair[0][1], 0.2],
+            [pair[1][0], pair[1][1], 0.2],
+            0.03 * libm::hypot(pair[1][0] - pair[0][0], pair[1][1] - pair[0][1]),
+            geometry::MoveContext {
+                extruder_axis: 3,
+                feedrate_mm_s: feedrate,
+                limits,
+                source: geometry::segment::SourceRange {
+                    start_line: line as u32,
+                    end_line: line as u32,
+                },
+            },
+        )
+        .unwrap();
+        assert!(front.feed(movement.into(), &mut keep));
+    }
+    assert!(front.finish(&mut keep));
+    segments
+}
+
+/// An advance riding unshaped leaders that leave their curvature cap as a
+/// square root of the time: its acceleration is exempt on the sliver where
+/// the onset's jerk alone passes the fit's tolerance, under the unshaped
+/// leader step's allowance, and its enclosure holds every sample of its
+/// position and velocity there and of all three elsewhere.
+#[test]
+fn an_advance_on_an_unshaped_cap_departure_is_enclosed_under_its_onset_exemption() {
+    let square = [
+        [0.0, 0.0],
+        [10.0, 0.0],
+        [10.0, 10.0],
+        [0.0, 10.0],
+        [0.0, 0.0],
+    ];
+    let stage = trajectory::ChainStage::DerivativeGains { k1: 0.01, k2: 0.0 };
+    let mut exempt = 0usize;
+    for segment in unshaped_segments(&square, 200.0) {
+        let state = extruding_on(&segment);
+        let sig = resting_follower(&segment, &state);
+        let advanced = super::AdvancedFollowerSignal::new(
+            &sig,
+            kernel_advance(&stage),
+            &[],
+            crate::lowering::FitTol::absolute(0.005, 50.0),
+        );
+        let support = (sig.grid[0], sig.grid[sig.grid.len() - 1]);
+        let slivers = advanced
+            .onset_slivers(support.0, support.1)
+            .expect("analytic leaders have formulas");
+        if slivers.is_empty() {
+            continue;
+        }
+        let pieces = advanced
+            .enclosure(support.0, support.1, [1e-7, f64::INFINITY, 1e-2])
+            .expect("the onsets' exemption leaves the advance an enclosure");
+        for piece in &pieces {
+            let in_sliver = slivers
+                .iter()
+                .any(|sliver| sliver.from <= piece.lo && piece.hi <= sliver.to);
+            assert_eq!(
+                piece.unshaped_step.is_some(),
+                in_sliver,
+                "[{}, {}] is exempt exactly inside an onset sliver",
+                piece.lo,
+                piece.hi
+            );
+            exempt += usize::from(in_sliver);
+            for k in 1..32 {
+                let t = piece.lo + (piece.hi - piece.lo) * f64::from(k) / 32.0;
+                let read = advanced.eval_pva(t);
+                let enclosed = piece.eval_pva(t);
+                for (order, (read, model)) in [
+                    (read.0, enclosed.0),
+                    (read.1, enclosed.1),
+                    (read.2, enclosed.2),
+                ]
+                .into_iter()
+                .enumerate()
+                .filter(|&(order, _)| piece.bounds(order))
+                {
+                    let bound = piece.pva[order].rounding + 1e-9 * (1.0 + read.abs());
+                    assert!(
+                        (read - model).abs() <= bound,
+                        "order {order} at t={t}: the signal reads {read}, its enclosure \
+                         {model} ± {}",
+                        piece.pva[order].rounding
+                    );
+                }
+            }
+        }
+    }
+    assert!(exempt > 0, "the square's corners leave no curvature cap");
+}
+
+/// An advance steep enough that its velocity changes across a square-root
+/// onset by more than the unshaped leader step's allowance is refused
+/// loudly, before any fit.
+#[test]
+fn an_onset_step_past_the_unshaped_leader_allowance_is_refused() {
+    let square = [
+        [0.0, 0.0],
+        [10.0, 0.0],
+        [10.0, 10.0],
+        [0.0, 10.0],
+        [0.0, 0.0],
+    ];
+    let tolerance = crate::lowering::FitTol::absolute(0.005, 50.0);
+    let mut refused = 0usize;
+    for segment in unshaped_segments(&square, 200.0) {
+        let state = extruding_on(&segment);
+        let sig = resting_follower(&segment, &state);
+        let support = (sig.grid[0], sig.grid[sig.grid.len() - 1]);
+        for (k1, refuses) in [(0.01, false), (0.04, true)] {
+            let stage = trajectory::ChainStage::DerivativeGains { k1, k2: 0.0 };
+            let advanced =
+                super::AdvancedFollowerSignal::new(&sig, kernel_advance(&stage), &[], tolerance);
+            let slivers = advanced
+                .onset_slivers(support.0, support.1)
+                .expect("analytic leaders have formulas");
+            match advanced.refuse_onset_steps(3, support) {
+                Err(crate::types::PostProcessError::UnshapedLeaderOnsetVelocityStep {
+                    change,
+                    allowance,
+                    ..
+                }) => {
+                    assert!(
+                        refuses && change > allowance,
+                        "k1={k1} refused a {change} step"
+                    );
+                    refused += 1;
+                }
+                Ok(()) => assert!(
+                    !refuses || slivers.is_empty(),
+                    "k1={k1} admits its onsets {slivers:?}"
+                ),
+                Err(other) => panic!("unexpected refusal: {other}"),
+            }
+        }
+    }
+    assert!(refused > 0, "no onset was refused");
 }

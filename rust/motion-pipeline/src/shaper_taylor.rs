@@ -29,6 +29,7 @@ fn piece(window: Window, models: &[TaylorModel; 3]) -> ExactPiece {
         center: window.center,
         radius: window.radius,
         pva: models.each_ref().map(local_polynomial),
+        unshaped_step: None,
     }
 }
 
@@ -43,7 +44,8 @@ const EVALUATOR_TIME_ULPS: f64 = 8.0;
 /// Debug builds hold every piece of an enclosure to the signal's own
 /// evaluator `truth` at the piece's centre: an enclosure modelling another
 /// formula than the signal evaluates would prove fits against the wrong
-/// signal, and fails loudly here instead.
+/// signal, and fails loudly here instead. A piece one ulp wide has no
+/// centre inside it to read its interior's formula at, and is skipped.
 pub(crate) fn debug_assert_holds(
     pieces: &[ExactPiece],
     truth: impl Fn(f64) -> (f64, f64, f64),
@@ -52,7 +54,10 @@ pub(crate) fn debug_assert_holds(
     if !cfg!(debug_assertions) {
         return;
     }
-    for piece in pieces {
+    for piece in pieces
+        .iter()
+        .filter(|piece| piece.lo < piece.center && piece.center < piece.hi)
+    {
         let (p, v, a) = truth(piece.center);
         let later = piece.center + piece.center.abs() * f64::EPSILON;
         let (p_later, v_later, a_later) = truth(later);
