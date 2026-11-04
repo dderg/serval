@@ -27,8 +27,11 @@ instructions grew 1.8 % over the full print, its Pi 2-core worst window fell
 pipeline (planning, shaper and pool threads sharing two cores) has. So the
 whole dense print also replays live (no --synchronous) under `taskset -c
 0,1`, built from this checkout and from the reference commit (extracted with
-`git archive`, built in its own target dir), LIVE_REPS times each, the two
-alternating. A config's live ratio is this checkout's wall seconds per
+`git archive`), LIVE_REPS times each, the two alternating. Both sides build
+from one directory, one after the other, so their binaries differ only where
+their code does: built from different paths, identical code gets different
+symbol hashes and code layout. The instruction count replays the same
+checkout build. A config's live ratio is this checkout's wall seconds per
 stream second over the reference's, each the mean of its LIVE_FASTEST
 fastest runs: a busy machine only ever slows a run down, and averaging two
 blunts one lucky run. The same machine runs both sides, so the
@@ -121,6 +124,7 @@ PI_FLOOR_X = 2.0
 PI_FLOOR_FAILS = False
 MEASURED_TREES = ("rust", "tools/bench/configs", "tools/sim/gcode")
 REFERENCE_DIR = "throughput-reference"
+AB_LAB_DIR = "throughput-ab"
 EXTRACTED_MARKER = ".extracted"
 CI_ROOT = Path("/home/runner/work/serval/serval")
 CI_CARGO_HOME = "/home/runner/.cargo"
@@ -152,9 +156,18 @@ class Verdict:
     warnings: tuple[str, ...]
 
 
-def run(command: list[str], cwd: Path | None = None) -> str:
+def run(
+    command: list[str],
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> str:
     result = subprocess.run(
-        command, cwd=cwd, capture_output=True, text=True, check=False
+        command,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=None if env is None else {**os.environ, **env},
     )
     if result.returncode != 0:
         raise GateError(
@@ -272,7 +285,35 @@ def prepare_reference(commit: str, target_dir: Path) -> None:
     (tree / EXTRACTED_MARKER).write_text(commit + "\n")
 
 
-def build_bench(rust_dir: Path) -> Path:
+def sync_tree(source: Path, dest: Path) -> None:
+    wanted = set()
+    for directory, subdirs, files in os.walk(source):
+        subdirs[:] = [name for name in subdirs if name != "target"]
+        for name in files:
+            path = Path(directory) / name
+            if path.is_symlink():
+                raise GateError(
+                    f"{path} is a symlink, which the A/B lab cannot copy"
+                )
+            relative = path.relative_to(source)
+            wanted.add(relative)
+            target = dest / relative
+            content = path.read_bytes()
+            if target.is_file() and target.read_bytes() == content:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+            shutil.copymode(path, target)
+    for directory, _, files in os.walk(dest):
+        for name in files:
+            path = Path(directory) / name
+            if path.relative_to(dest) not in wanted:
+                path.unlink()
+
+
+def build_in_lab(source_rust: Path, side: str) -> Path:
+    lab = RUST / "target" / AB_LAB_DIR
+    sync_tree(source_rust, lab / "rust")
     run(
         [
             "cargo",
@@ -284,9 +325,14 @@ def build_bench(rust_dir: Path) -> Path:
             "--example",
             "gcode_replay_bench",
         ],
-        cwd=rust_dir,
+        cwd=lab / "rust",
+        env={"CARGO_TARGET_DIR": str(lab / "target")},
     )
-    return rust_dir / "target" / "release" / "examples" / "gcode_replay_bench"
+    bench = lab / f"{side}-gcode_replay_bench"
+    shutil.copy2(
+        lab / "target" / "release" / "examples" / "gcode_replay_bench", bench
+    )
+    return bench
 
 
 def gate_cores() -> list[int]:
@@ -439,8 +485,8 @@ def measure_here(
             f"the reference {reference_commit} is not extracted at {reference}"
         )
     cores = gate_cores()
-    head_bench = build_bench(RUST)
-    reference_bench = build_bench(reference / "rust")
+    reference_bench = build_in_lab(reference / "rust", "reference")
+    head_bench = build_in_lab(RUST, "head")
     counted = measure_instructions(head_bench, configs, cores)
     live = measure_live(head_bench, reference_bench, reference, configs)
     return {

@@ -181,3 +181,23 @@ def test_calibrations_name_a_gated_config_by_path_or_stem():
     for bad in (["c=2"], ["a"], ["a="]):
         with pytest.raises(gate.GateError):
             gate.parse_calibrations(bad, configs)
+
+
+def test_the_lab_sync_rewrites_only_changed_files_and_drops_the_rest(tmp_path):
+    source, dest = tmp_path / "source", tmp_path / "dest"
+    (source / "crate" / "src").mkdir(parents=True)
+    (source / "target" / "release").mkdir(parents=True)
+    (source / "crate" / "src" / "lib.rs").write_text("fn a() {}")
+    (source / "Cargo.toml").write_text("[workspace]")
+    (source / "target" / "release" / "big").write_text("artifact")
+    gate.sync_tree(source, dest)
+    assert (dest / "crate" / "src" / "lib.rs").read_text() == "fn a() {}"
+    assert not (dest / "target").exists()
+    kept = dest / "Cargo.toml"
+    kept_mtime = kept.stat().st_mtime_ns
+    (dest / "stale.rs").write_text("old")
+    (source / "crate" / "src" / "lib.rs").write_text("fn b() {}")
+    gate.sync_tree(source, dest)
+    assert (dest / "crate" / "src" / "lib.rs").read_text() == "fn b() {}"
+    assert kept.stat().st_mtime_ns == kept_mtime
+    assert not (dest / "stale.rs").exists()
