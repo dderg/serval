@@ -30,6 +30,12 @@ const ODOMETER_RATE_TOL_MM_S: f64 = 1e-6;
 const INTEGRAL_MAX_DEPTH: u32 = 24;
 const GRID_DEDUP_EPS_S: f64 = 1e-12;
 const SPAN_MIN_LEN_MM: f64 = 1e-12;
+/// A raw leader chord this long proves their arc, which the odometer
+/// integrates far finer, longer than [`SPAN_MIN_LEN_MM`].
+const MOVING_CHORD_MM: f64 = 1e-6;
+/// The relative rounding a leader speed read off its pieces is trusted to,
+/// of the magnitude of the terms it sums.
+const SPEED_ROUNDING: f64 = 1e-9;
 const SPAN_LOOKUP_SLACK_MM: f64 = 1e-6;
 const PVA_MEMO_SLOTS: usize = 64;
 const BASIS_CONVERSION_ROUNDOFF_ENVELOPE: f64 = (1_u64 << 20) as f64;
@@ -567,7 +573,7 @@ pub(crate) fn project_followers(
                     shaped_leaders: &shaped_leaders,
                     support: projection_support(&base[i], &frontier[i], axis, leaders),
                     start_s: table_start,
-                    rests: arc.1 <= SPAN_MIN_LEN_MM,
+                    rests: !arc.1,
                 };
                 state.smoothing.lay(&state.spans, &leg, &rule);
                 state.smoothing.queue(
@@ -1585,7 +1591,7 @@ impl FollowerState {
         axis: usize,
         leaders: &[usize],
         upcoming: &[ContinuousSegment],
-        (shaped_ds, raw_ds): (f64, f64),
+        (shaped_ds, raw_moves): (f64, bool),
     ) -> f64 {
         if let Some(through) = self.ingested_through_t {
             assert!(
@@ -1607,7 +1613,7 @@ impl FollowerState {
         if shaped_ds <= SPAN_MIN_LEN_MM {
             return shaped_ds;
         }
-        if raw_ds > SPAN_MIN_LEN_MM {
+        if raw_moves {
             let (r0, r1) = raw
                 .followers
                 .iter()
@@ -1881,6 +1887,22 @@ fn leader_arc_length(seg: &ContinuousSegment, leaders: &[usize]) -> f64 {
     shaped_leader_arc_length(seg, leaders, &ShapedLeaders::of(seg, leaders))
 }
 
+/// Whether the raw leaders of `raw` cover more than [`SPAN_MIN_LEN_MM`]: at
+/// once where the chord across their support does by far, as no arc is
+/// shorter than its chord, else by their arc length.
+fn raw_leaders_move(raw: &ContinuousSegment, leaders: &[usize]) -> bool {
+    let (start, end) = leader_support(raw, leaders);
+    let chord = leaders
+        .iter()
+        .map(|&leader| {
+            let travel = axis_pva(&raw.axes[leader], end).0 - axis_pva(&raw.axes[leader], start).0;
+            travel * travel
+        })
+        .sum::<f64>()
+        .sqrt();
+    chord > MOVING_CHORD_MM || leader_arc_length(raw, leaders) > SPAN_MIN_LEN_MM
+}
+
 fn shaped_leader_arc_length(
     seg: &ContinuousSegment,
     leaders: &[usize],
@@ -1903,16 +1925,17 @@ fn shaped_leader_arc_length(
         .sum()
 }
 
-/// Shaped and raw leader arc lengths for each newly ingested segment, with
-/// the shaped leaders read for them, which the ratio ramp reads again. The
-/// integrals are pure per-segment work, so they fan out across cores;
-/// results are ordered by segment and bit-identical to serial evaluation.
+/// Each newly ingested segment's shaped leader arc length and whether its
+/// raw leaders move, with the shaped leaders read for them, which the ratio
+/// ramp reads again. The reads are pure per-segment work, so they fan out
+/// across cores; results are ordered by segment and bit-identical to serial
+/// evaluation.
 fn leader_arc_lengths<'a>(
     raw: &[ContinuousSegment],
     shaped: &'a [ContinuousSegment],
     leaders: &'a [usize],
     pool: &WorkerPool,
-) -> Vec<((f64, f64), ShapedLeaders<'a>)> {
+) -> Vec<((f64, bool), ShapedLeaders<'a>)> {
     assert_eq!(raw.len(), shaped.len());
     let workers = if cfg!(target_arch = "wasm32") {
         1
@@ -1930,7 +1953,7 @@ fn leader_arc_lengths<'a>(
             (
                 (
                     shaped_leader_arc_length(&shaped[i], leaders, &shaped_leaders),
-                    leader_arc_length(&raw[i], leaders),
+                    raw_leaders_move(&raw[i], leaders),
                 ),
                 shaped_leaders,
             )
@@ -1975,7 +1998,8 @@ fn leader_distance(
         .sqrt()
 }
 
-fn axis_grid(seg: &ContinuousSegment, axes: &[usize]) -> Vec<f64> {
+/// Where every one of `axes` of `seg` is continuously defined.
+fn leader_support(seg: &ContinuousSegment, axes: &[usize]) -> (f64, f64) {
     let (mut support_start, mut support_end) = (seg.t_start, seg.t_end);
     for &axis in axes {
         let (start, end) = seg.axes[axis].domain();
@@ -1986,6 +2010,11 @@ fn axis_grid(seg: &ContinuousSegment, axes: &[usize]) -> Vec<f64> {
         support_start < support_end,
         "axes have no shared continuous support"
     );
+    (support_start, support_end)
+}
+
+fn axis_grid(seg: &ContinuousSegment, axes: &[usize]) -> Vec<f64> {
+    let (support_start, support_end) = leader_support(seg, axes);
     let mut grid = vec![support_start, support_end];
     for &axis in axes {
         grid.extend(
@@ -2165,6 +2194,75 @@ impl<'a> ShapedLeaders<'a> {
             })
             .sum::<f64>()
             .sqrt()
+    }
+
+    /// A lower bound on the leaders' speed over `[lo, hi]`, when every
+    /// leader reads one cached piece across it: their velocity's tangent
+    /// line at `at`, at its nearest to rest over the interval, less the most
+    /// the pieces' higher terms add to it and their evaluation's rounding.
+    fn speed_floor(&self, lo: f64, at: f64, hi: f64) -> Option<f64> {
+        let leaders = self.axes.len();
+        assert!(
+            leaders <= MAX_LEADERS,
+            "a follower rides at most {MAX_LEADERS} leaders, got {leaders}"
+        );
+        let (back, ahead) = (at - lo, hi - at);
+        let reach = back.max(ahead);
+        let mut velocity = [0.0; MAX_LEADERS];
+        let mut acceleration = [0.0; MAX_LEADERS];
+        let mut remainder_squared = 0.0;
+        let mut magnitude = 0.0;
+        for (index, pieces) in self.pieces.iter().enumerate() {
+            let pieces = pieces.as_ref()?;
+            let piece = pieces.piece_at(lo)?;
+            if !std::ptr::eq(piece, pieces.piece_at(hi)?) {
+                return None;
+            }
+            let shifted = taylor_shifted(&piece.coeffs, at - piece.u_start);
+            velocity[index] = shifted.get(1).copied().unwrap_or(0.0);
+            acceleration[index] = 2.0 * shifted.get(2).copied().unwrap_or(0.0);
+            let remainder = shifted
+                .iter()
+                .enumerate()
+                .skip(3)
+                .rev()
+                .fold(0.0, |acc, (power, coeff)| {
+                    acc * reach + power as f64 * coeff.abs()
+                })
+                * reach
+                * reach;
+            remainder_squared += remainder * remainder;
+            let farthest = (lo - piece.u_start).abs().max((hi - piece.u_start).abs());
+            magnitude += piece
+                .coeffs
+                .iter()
+                .enumerate()
+                .skip(1)
+                .rev()
+                .fold(0.0, |acc, (power, coeff)| {
+                    acc * farthest + power as f64 * coeff.abs()
+                });
+        }
+        let (velocity, acceleration) = (&velocity[..leaders], &acceleration[..leaders]);
+        let dot = |left: &[f64], right: &[f64]| -> f64 {
+            left.iter().zip(right).map(|(l, r)| l * r).sum()
+        };
+        let rate_squared = dot(acceleration, acceleration);
+        let nearest = if rate_squared > 0.0 {
+            (-dot(velocity, acceleration) / rate_squared).clamp(-back, ahead)
+        } else {
+            0.0
+        };
+        let tangent_speed = velocity
+            .iter()
+            .zip(acceleration)
+            .map(|(v, a)| {
+                let along = v + a * nearest;
+                along * along
+            })
+            .sum::<f64>()
+            .sqrt();
+        Some(tangent_speed - remainder_squared.sqrt() - SPEED_ROUNDING * magnitude)
     }
 
     fn speed_deriv(&self, t: f64, speed: f64) -> f64 {
@@ -3749,6 +3847,18 @@ fn integrate_velocity(start_position: f64, velocity: &BezierPiece) -> BezierPiec
 fn polynomial_pv(coeffs: &[f64], tau: f64) -> (f64, f64) {
     let (position, velocity, _) = polynomial_pva(coeffs, tau);
     (position, velocity)
+}
+
+/// `coeffs`, a polynomial in `τ`, as one in `τ − at`.
+fn taylor_shifted(coeffs: &[f64], at: f64) -> Vec<f64> {
+    let mut shifted = coeffs.to_vec();
+    let degree = shifted.len().saturating_sub(1);
+    for done in 0..degree {
+        for index in (done..degree).rev() {
+            shifted[index] += at * shifted[index + 1];
+        }
+    }
+    shifted
 }
 
 fn polynomial_pva(coeffs: &[f64], tau: f64) -> (f64, f64, f64) {

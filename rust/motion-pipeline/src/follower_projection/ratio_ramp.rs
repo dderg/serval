@@ -1526,12 +1526,17 @@ impl<'l, 'a> LegSpeed<'l, 'a> {
         self.path.speed(t)
     }
 
-    /// The slowest time between the probes either side of probe `index`.
-    fn slowest_near(&self, index: usize) -> f64 {
-        let (mut lo, mut hi) = (
+    /// The probes either side of probe `index`.
+    fn around(&self, index: usize) -> (f64, f64) {
+        (
             self.probes[index.saturating_sub(1)],
             self.probes[(index + 1).min(self.probes.len() - 1)],
-        );
+        )
+    }
+
+    /// The slowest time between the probes either side of probe `index`.
+    fn slowest_near(&self, index: usize) -> f64 {
+        let (mut lo, mut hi) = self.around(index);
         for _ in 0..REST_REFINEMENTS {
             let (left, right) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
             if self.at(left) <= self.at(right) {
@@ -1541,6 +1546,16 @@ impl<'l, 'a> LegSpeed<'l, 'a> {
             }
         }
         0.5 * (lo + hi)
+    }
+
+    /// Whether the leaders provably stay faster than `rest_speed` between
+    /// the probes either side of probe `index`.
+    fn outruns_rest_near(&self, index: usize, rest_speed: f64) -> bool {
+        let (lo, hi) = self.around(index);
+        self.path
+            .leaders
+            .speed_floor(lo, self.probes[index], hi)
+            .is_some_and(|floor| floor > rest_speed)
     }
 
     fn path_at(&self, t: f64) -> f64 {
@@ -1561,8 +1576,12 @@ fn resting_stretch(
     let speed = LegSpeed::of(leaders, leg, table_end);
     let resting = |t: f64| speed.at(t) <= rest_speed;
     let rest_time = |index: usize| {
-        if resting(speed.probes[index]) {
-            return Some(speed.probes[index]);
+        let probe = speed.probes[index];
+        if resting(probe) {
+            return Some(probe);
+        }
+        if speed.outruns_rest_near(index, rest_speed) {
+            return None;
         }
         let slowest = speed.slowest_near(index);
         resting(slowest).then_some(slowest)
