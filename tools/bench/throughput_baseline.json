@@ -2,45 +2,45 @@
   "slice_lines": 1000,
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 10409182047,
+      "ir": 9634457828,
       "stream_secs": 6.594,
-      "reason": "Kernel follower fits seed only the shaped breaks that can carry a velocity break: 10x fewer extruder pieces on the kernel configs",
-      "commit": "a5a1fd42cdedaaccdfc4c4dd3331819e6ad30ac3",
+      "reason": "rail integrations memoized by their inputs: re-planning windows settle the same members from the same speeds again; output bit-identical (trajectory digests unchanged)",
+      "commit": "b386caf434ee6664e28255d7acc5f2fea42afff0",
       "pi_2core": {
-        "k": 4372677323.353047,
+        "k": 4587316424.936247,
         "worst_x": [
-          2.79,
-          2.77
+          2.28,
+          2.29
         ],
-        "commit": "a5a1fd42cdedaaccdfc4c4dd3331819e6ad30ac3"
+        "commit": "d2ce24fed9e01838bd790176d0d3499568e85fdf"
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 12222999697,
+      "ir": 12489615156,
       "stream_secs": 6.202,
-      "reason": "Kernel follower fits seed only the shaped breaks that can carry a velocity break: 10x fewer extruder pieces on the kernel configs",
-      "commit": "a5a1fd42cdedaaccdfc4c4dd3331819e6ad30ac3",
+      "reason": "rail integrations memoized by their inputs: re-planning windows settle the same members from the same speeds again; output bit-identical (trajectory digests unchanged)",
+      "commit": "b386caf434ee6664e28255d7acc5f2fea42afff0",
       "pi_2core": {
-        "k": 4375211113.72783,
+        "k": 4582331787.594325,
         "worst_x": [
-          2.22,
-          2.22
+          2.18,
+          2.19
         ],
-        "commit": "a5a1fd42cdedaaccdfc4c4dd3331819e6ad30ac3"
+        "commit": "d2ce24fed9e01838bd790176d0d3499568e85fdf"
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 12409925295,
+      "ir": 12856925656,
       "stream_secs": 7.543,
-      "reason": "Kernel follower fits seed only the shaped breaks that can carry a velocity break: 10x fewer extruder pieces on the kernel configs",
-      "commit": "a5a1fd42cdedaaccdfc4c4dd3331819e6ad30ac3",
+      "reason": "rail integrations memoized by their inputs: re-planning windows settle the same members from the same speeds again; output bit-identical (trajectory digests unchanged)",
+      "commit": "b386caf434ee6664e28255d7acc5f2fea42afff0",
       "pi_2core": {
-        "k": 3915633329.192629,
+        "k": 4388809054.193679,
         "worst_x": [
-          2.39,
-          2.38
+          2.25,
+          2.25
         ],
-        "commit": "a5a1fd42cdedaaccdfc4c4dd3331819e6ad30ac3"
+        "commit": "d2ce24fed9e01838bd790176d0d3499568e85fdf"
       }
     }
   }
