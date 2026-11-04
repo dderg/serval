@@ -90,19 +90,30 @@ def test_a_live_ratio_away_from_one_past_its_tolerance_fails():
     assert "accept the improvement" in shrunk.problems[0]
 
 
-def test_the_ir_prediction_scales_with_stream_time_per_instruction():
+def test_the_ir_prediction_scales_with_stream_time_per_instruction(monkeypatch):
+    monkeypatch.setattr(gate, "PI_FLOOR_FAILS", True)
     verdict = gate.judge("c", entry(2.5), measurement(stream=7.6))
     assert verdict.predicted_x == pytest.approx((1.9, 2.5))
     assert "Ir predicts, 1.90x, is below the 2.0x floor" in verdict.problems[0]
 
 
-def test_the_live_prediction_divides_the_reference_window_by_the_ratio():
+def test_the_live_prediction_divides_the_reference_window_by_the_ratio(monkeypatch):
+    monkeypatch.setattr(gate, "PI_FLOOR_FAILS", True)
     verdict = gate.judge("c", entry(2.01), measurement(live=1.01))
     assert verdict.predicted_x[1] == pytest.approx(2.01 / 1.01)
     assert verdict.problems == (
         "the Pi 2-core worst window the live ratio predicts, 1.99x, "
         "is below the 2.0x floor",
     )
+    assert verdict.warnings == ()
+
+
+def test_a_floor_miss_only_warns_while_the_floor_checks_are_off(monkeypatch):
+    monkeypatch.setattr(gate, "PI_FLOOR_FAILS", False)
+    verdict = gate.judge("c", entry(1.9), measurement())
+    assert verdict.problems == ()
+    assert len(verdict.warnings) == 2
+    assert all("below the 2.0x floor" in warning for warning in verdict.warnings)
 
 
 def test_a_calibration_off_the_reference_is_moved_onto_it_by_the_live_ratio():
