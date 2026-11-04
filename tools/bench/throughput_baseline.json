@@ -1,46 +1,45 @@
 {
   "slice_lines": 1000,
+  "commit": "82471136fdc15e4918c287125562611c81df084c",
+  "reason": "New gate format: total Ir (every user-space instruction, not repo files only) over the 1000-line slice plus a live 2-core A/B of the full print against this reference commit. Pi 2-core worst windows measured at a5c9bfca0 (main 2797f4c50 merged): p3_voron_direct_drive_kernel 1.89/1.90, trident_kernel 1.88/1.90, p3_voron_direct_drive_ramp 2.79/2.76; carried by the live ratio through the merges of main up to d0bbc8c5c (#681, rail-integration reuse, #682 ramp-end-accel).",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 8537411184,
+      "ir": 18417100746,
       "stream_secs": 8.541,
-      "reason": "Kernel follower fits seed only the shaped breaks that can carry a velocity break: 10x fewer extruder pieces on the kernel configs",
-      "commit": "72b1c971edc794da957c580a55ba1b00fb405ad2",
       "pi_2core": {
-        "k": 4587316424.936247,
+        "k_ir": 9114169275.97816,
+        "worst_x_reference": 4.165119366314405,
         "worst_x": [
-          2.28,
-          2.29
+          2.79,
+          2.76
         ],
-        "commit": "d2ce24fed9e01838bd790176d0d3499568e85fdf"
+        "commit": "a5c9bfca0a49fff520d699bef3b966c6a7f55fd6"
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 11679890044,
+      "ir": 28567827181,
       "stream_secs": 6.202,
-      "reason": "Kernel follower fits seed only the shaped breaks that can carry a velocity break: 10x fewer extruder pieces on the kernel configs",
-      "commit": "72b1c971edc794da957c580a55ba1b00fb405ad2",
       "pi_2core": {
-        "k": 4387962560.870687,
+        "k_ir": 9206017029.650112,
+        "worst_x_reference": 1.9357535808915818,
         "worst_x": [
-          2.33,
-          2.36
+          1.89,
+          1.9
         ],
-        "commit": "72b1c971edc794da957c580a55ba1b00fb405ad2"
+        "commit": "a5c9bfca0a49fff520d699bef3b966c6a7f55fd6"
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 12087431010,
+      "ir": 30195937189,
       "stream_secs": 7.543,
-      "reason": "Kernel follower fits seed only the shaped breaks that can carry a velocity break: 10x fewer extruder pieces on the kernel configs",
-      "commit": "72b1c971edc794da957c580a55ba1b00fb405ad2",
       "pi_2core": {
-        "k": 3990150233.9785233,
+        "k_ir": 8088130496.582261,
+        "worst_x_reference": 1.9681387183408123,
         "worst_x": [
-          2.5,
-          2.49
+          1.88,
+          1.9
         ],
-        "commit": "72b1c971edc794da957c580a55ba1b00fb405ad2"
+        "commit": "a5c9bfca0a49fff520d699bef3b966c6a7f55fd6"
       }
     }
   }
