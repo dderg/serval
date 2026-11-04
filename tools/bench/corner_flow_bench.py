@@ -1,8 +1,8 @@
 """Nozzle flow through the corners of a bench print, from captured steps.
 
-`analyze.py --corner-flow` calls `report`. Every extruding corner and short
-segment curve of the print is measured three ways with tools/flow_metric.py,
-the definition tools/corner_flow.py uses:
+`analyze.py --corner-flow` calls `report`. Every extruding corner, short
+segment curve and ratio step of the print is measured three ways with
+tools/flow_metric.py, the definition tools/corner_flow.py uses:
 
 - offline: the snapshot plan's continuous x, y and e tracks;
 - reference: the analyzer's reference steps for a, b and e, the plan
@@ -36,7 +36,8 @@ EXTRUDING_RATIO = 1e-6
 VELOCITY_WINDOW_S = 2e-3
 ACCEL_WINDOW_S = 5e-3
 EVENT_MARGIN_S = 1.0
-METRICS = ("apex", "peak", "dip", "width_mm", "blob_nl")
+CORNER_METRICS = ("apex", "peak", "dip", "width_mm", "blob_nl")
+STEP_METRICS = ("moved_nl", "net_nl", "switch_mm")
 XY_ROLES = ("a", "b")
 
 
@@ -48,6 +49,7 @@ class Feature:
     speed_mm_s: float
     window_mm: float
     ratio: float
+    ratio_after: float
 
 
 def _segments(block: list[dict]):
@@ -61,8 +63,9 @@ def _segments(block: list[dict]):
 
 def features(block: list[dict]) -> list[Feature]:
     """The block's extruding corners (a turn of at least CORNER_TURN_DEG
-    between two extruding moves) and curves (runs of short extruding
-    segments each turning a little)."""
+    between two extruding moves), curves (runs of short extruding segments
+    each turning a little) and ratio steps (two extruding moves laying
+    different beads, turning or not)."""
     segments = list(_segments(block))
     found: list[Feature] = []
     curve: list[int] = []
@@ -80,6 +83,7 @@ def features(block: list[dict]) -> list[Feature]:
                     speed,
                     run / 2.0,
                     de / length,
+                    de / length,
                 )
             )
         curve.clear()
@@ -94,20 +98,21 @@ def features(block: list[dict]) -> list[Feature]:
             and de_out / length_out > EXTRUDING_RATIO
         )
         turn = _turn(segments, index) if extruding else 0.0
-        if extruding and turn >= CORNER_TURN_DEG:
+        window = min(
+            flow_metric.CORNER_WINDOW_MM, 0.5 * min(length_in, length_out)
+        )
+        apex = tuple(block[index + 1]["position"][:2])
+        ratio_in = de_in / length_in if extruding else 0.0
+        ratio_out = de_out / length_out if extruding else 0.0
+        if extruding and flow_metric.is_ratio_step(ratio_in, ratio_out):
             close_curve()
             found.append(
-                Feature(
-                    "corner",
-                    tuple(block[index + 1]["position"][:2]),
-                    turn,
-                    speed,
-                    min(
-                        flow_metric.CORNER_WINDOW_MM,
-                        0.5 * min(length_in, length_out),
-                    ),
-                    de_in / length_in,
-                )
+                Feature("step", apex, turn, speed, window, ratio_in, ratio_out)
+            )
+        elif extruding and turn >= CORNER_TURN_DEG:
+            close_curve()
+            found.append(
+                Feature("corner", apex, turn, speed, window, ratio_in, ratio_in)
             )
         elif (
             extruding
@@ -204,6 +209,18 @@ def feature_spans(t, xy, speed, feats) -> list[np.ndarray]:
     ]
 
 
+def _feature_report(trace, apex, feat: Feature, nominal, bead_area) -> dict:
+    if feat.kind == "step":
+        return flow_metric.step_report(
+            trace,
+            apex,
+            (feat.ratio / nominal, feat.ratio_after / nominal),
+            feat.window_mm,
+            bead_area,
+        )
+    return flow_metric.corner_report(trace, apex, feat.window_mm, bead_area)
+
+
 def _source_report(
     t, xy, e, commanded, feats, spans, melt_k, nominal, bead_area
 ):
@@ -214,7 +231,7 @@ def _source_report(
     accel = _smoothed_gradient(velocity, dt, ACCEL_WINDOW_S)
     return [
         {
-            **flow_metric.corner_report(trace, apex, f.window_mm, bead_area),
+            **_feature_report(trace, apex, f, nominal, bead_area),
             **_extruder_peaks(velocity, accel, span),
         }
         for apex, f, span in zip(apexes, feats, spans)
@@ -237,9 +254,10 @@ def report(
     inputs, detail: dict, blocks: list[list[dict]], axis_weights: dict, engine
 ) -> dict:
     """Per extruding feature of the print: the flow deviation (fraction of
-    the nominal bead) and extruder peaks from the plan, the reference steps
-    and the captured steps. `blocks` are the analyzer's planned epochs, one
-    per reference block."""
+    the nominal bead) or, at a ratio step, the material it moves, and the
+    extruder peaks, from the plan, the reference steps and the captured
+    steps. `blocks` are the analyzer's planned epochs, one per reference
+    block."""
     config = PrinterConfig.parse(inputs.config.config_text)
     unshaped = config.unshaped().text()
     melt_k = config.advance_k()
@@ -260,7 +278,10 @@ def report(
             engine, block, unshaped, _duration(engine, block, unshaped)
         )
         xy_plan = np.column_stack([shaped[0][:, 0], shaped[1][:, 0]])
-        commanded = flow_metric.commanded_bead(t, xy_plan, t_raw, raw)
+        vertices = flow_metric.path_vertices(
+            tuple(waypoint["position"][:2]) for waypoint in block
+        )
+        commanded = flow_metric.commanded_bead(t, xy_plan, t_raw, raw, vertices)
         spans = feature_spans(
             t, xy_plan, np.hypot(shaped[0][:, 1], shaped[1][:, 1]), feats
         )
@@ -329,9 +350,10 @@ def _max_abs(rows: list[dict]) -> dict:
                 (
                     abs(row[pair[0]][metric] - row[pair[1]][metric])
                     for row in rows
+                    if metric in row[pair[0]]
                 ),
                 default=0.0,
             )
-            for metric in METRICS
+            for metric in CORNER_METRICS + STEP_METRICS
         }
     return out
