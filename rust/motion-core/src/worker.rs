@@ -221,7 +221,35 @@ pub struct ExecutionResources {
 
 pub(crate) struct PipelineOutput {
     pub(crate) trajectory: Sender<TrajectoryItem>,
-    pub(crate) detached: Option<DetachedTaps>,
+    pub(crate) input_tap: Option<Sender<motion_pipeline::InputTrace>>,
+}
+
+/// Where a detached pipeline's dispatcher hands its segments: recorded,
+/// never anchored to the host clock or projected onto an MCU, since nothing
+/// executes them.
+struct DetachedSink<'a> {
+    segments: &'a Sender<trajectory::ContinuousSegment>,
+}
+
+impl dispatch::SegmentSink for DetachedSink<'_> {
+    fn dispatch(&mut self, seg: &trajectory::ContinuousSegment) -> Result<(), DispatchError> {
+        self.segments
+            .send(seg.clone())
+            .expect("detached segment observer disconnected");
+        Ok(())
+    }
+
+    fn dispatch_nudge(
+        &mut self,
+        mcu_id: u32,
+        axis: u8,
+        _motor_mask: u8,
+        _profile: &trajectory::NudgeProfile,
+    ) -> Result<(), DispatchError> {
+        panic!("a detached pipeline drives no MCU: nudge for mcu {mcu_id} axis {axis}")
+    }
+
+    fn follow_stream_to(&mut self, _stream_t: f64) {}
 }
 
 pub struct DetachedTaps {
@@ -252,8 +280,11 @@ pub fn setup_pipeline(
     let (pump_control, control_rx) = pump_channel;
     let (output, trajectory_rx) = bounded::<TrajectoryItem>(TRAJECTORY_CHANNEL_CAP);
     let mut resources = resources;
-    let detached = resources.detached.take();
-    let frontier = Arc::new(if detached.is_some() {
+    let (input_tap, detached_segments) = resources
+        .detached
+        .take()
+        .map_or((None, None), |taps| (Some(taps.inputs), Some(taps.segments)));
+    let frontier = Arc::new(if detached_segments.is_some() {
         CommittedFrontier::unexecuted()
     } else {
         CommittedFrontier::default()
@@ -296,13 +327,16 @@ pub fn setup_pipeline(
                     if let Some(reason) = &pump.fatal_reason {
                         dispatcher.halt(reason);
                     }
-                    dispatcher.feed(
-                        item,
-                        &mut PumpSink {
-                            projection: &mut projection,
-                            pump,
-                        },
-                    );
+                    match &detached_segments {
+                        Some(segments) => dispatcher.feed(item, &mut DetachedSink { segments }),
+                        None => dispatcher.feed(
+                            item,
+                            &mut PumpSink {
+                                projection: &mut projection,
+                                pump,
+                            },
+                        ),
+                    }
                 },
                 |item, cohort_active| admission.bypasses_capacity(item, cohort_active),
             );
@@ -314,7 +348,7 @@ pub fn setup_pipeline(
         home_pos,
         PipelineOutput {
             trajectory: output,
-            detached,
+            input_tap,
         },
         links,
         timeline,
@@ -340,20 +374,14 @@ impl StreamWorkerHandle {
         let (tx, rx) = bounded(INPUT_CHANNEL_CAP);
         let PipelineOutput {
             trajectory,
-            detached,
+            input_tap,
         } = output;
         let pipeline = Pipeline::new(config.clone(), axis_chains, home_pos.clone(), 0.0);
-        let (pipeline, segment_tap) = match detached {
-            Some(taps) => (pipeline.with_input_tap(taps.inputs), Some(taps.segments)),
-            None => (pipeline, None),
-        };
-        let pipeline = pipeline.into_staged(move |item| {
-            if let (Some(tap), TrajectoryItem::Seg(seg)) = (&segment_tap, &item) {
-                tap.send(seg.clone())
-                    .expect("detached segment observer disconnected");
-            }
-            trajectory.send(item).is_ok()
-        });
+        let pipeline = match input_tap {
+            Some(tap) => pipeline.with_input_tap(tap),
+            None => pipeline,
+        }
+        .into_staged(move |item| trajectory.send(item).is_ok());
         let ingress = ingress::Ingress {
             config,
             odometer: home_pos,

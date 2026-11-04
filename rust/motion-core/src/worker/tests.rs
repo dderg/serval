@@ -143,7 +143,7 @@ fn spawn_on_timeline(
         home,
         PipelineOutput {
             trajectory: output,
-            detached: None,
+            input_tap: None,
         },
         links,
         timeline,
@@ -715,7 +715,7 @@ fn finite_homing_admission_and_cancellation_preserve_backpressure() {
         vec![0.0; 3],
         PipelineOutput {
             trajectory: output,
-            detached: None,
+            input_tap: None,
         },
         links,
         idle_timeline(frontier),
