@@ -2,8 +2,8 @@ use geometry::path::Segment;
 use std::sync::Arc;
 
 use geometry::{
-    ExtrusionReach, Move, VelocityPlanParams, VelocityProfile, plan_velocity_stops_select_prefix,
-    seam_requires_stop,
+    ExtrusionBudget, ExtrusionReach, Move, VelocityPlanParams, VelocityProfile,
+    plan_velocity_stops_select_prefix, seam_requires_stop,
 };
 
 use crate::types::{Control, PlannedItem, PlannedMove, StreamConfig, StreamInput};
@@ -31,7 +31,7 @@ const QUIET_PLAN_MIN_MOVES: usize = 32;
 pub struct Planner {
     reach: ExtrusionReach,
     moves: Vec<Move>,
-    ratios_in_reach: Vec<f64>,
+    budgets: Vec<ExtrusionBudget>,
     entry_v: f64,
     moves_since_plan: usize,
     config: StreamConfig,
@@ -46,7 +46,7 @@ impl Planner {
                 config.max_extrude_only_accel_mm_s2,
             ),
             moves: Vec::new(),
-            ratios_in_reach: Vec::new(),
+            budgets: Vec::new(),
             entry_v: 0.0,
             moves_since_plan: 0,
             config,
@@ -93,7 +93,7 @@ impl Planner {
             Control::Reset { .. } => {
                 self.reach.clear();
                 self.moves.clear();
-                self.ratios_in_reach.clear();
+                self.budgets.clear();
                 self.entry_v = 0.0;
                 self.moves_since_plan = 0;
             }
@@ -141,9 +141,9 @@ impl Planner {
     }
 
     fn admit_settled(&mut self) {
-        while let Some((m, ratio_in_reach)) = self.reach.pop() {
+        while let Some((m, budget)) = self.reach.pop() {
             self.moves.push(m);
-            self.ratios_in_reach.push(ratio_in_reach);
+            self.budgets.push(budget);
         }
     }
 
@@ -162,7 +162,7 @@ impl Planner {
         let profile = plan_velocity_stops_select_prefix(
             &self.moves,
             &stop_before,
-            &self.ratios_in_reach,
+            &self.budgets,
             VelocityPlanParams {
                 integration_tol: self.config.integration_tol,
                 max_extrude_only_velocity_mm_s: self.config.max_extrude_only_velocity_mm_s,
@@ -237,7 +237,7 @@ impl Planner {
             "the velocity profile plans a different number of moves than were committed"
         );
         self.entry_v = profile.boundary_speeds[count];
-        self.ratios_in_reach.drain(..count);
+        self.budgets.drain(..count);
         for (geometry, velocity) in self.moves.drain(..count).zip(profile.moves.iter().cloned()) {
             if !output(PlannedItem::Move(PlannedMove { geometry, velocity })) {
                 return false;

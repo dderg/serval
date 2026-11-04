@@ -274,10 +274,15 @@ post_processors: extruder_pa, extruder_smoothing
 #   reach: its own, and that of every move the followed axes' shaping
 #   post_processors and the ratio ramp carry onto it however short the moves
 #   between, so a short travel between two extrusions accelerates as they
-#   do. An extrude-only move that outlasts the shapers' reach separates the
-#   moves on either side. On the [extruder] axis each one left unset is
-#   inherited from max_extrude_only_velocity / max_extrude_only_accel (the
-#   same motor). An advance needs both, set or inherited.
+#   do. An extrude-only move does not quite separate the moves on either
+#   side: the shaped path keeps moving for the shapers' reach past a raw
+#   stop and before a raw start, and the extruder follows that motion at
+#   the ratio it reads there. The toolhead holds still for that reach
+#   wherever an extrude-only move meets motion, so a retract or prime never
+#   adds the path's demand to its own. On the [extruder] axis each one left
+#   unset is inherited from max_extrude_only_velocity /
+#   max_extrude_only_accel (the same motor). An advance needs both, set or
+#   inherited.
 #instantaneous_corner_velocity: 1.0
 #   Optional, on an axis that follows others. Default is 1.0, as upstream
 #   Klipper's [extruder] option. Must be above 0 (mm/s). The velocity

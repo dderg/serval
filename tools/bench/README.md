@@ -120,25 +120,31 @@ Any tool that touches the Pi or the boards (`run.py`, every `deploy.py` subcomma
 
 ## Replay throughput (Pi 5)
 
-`gcode_replay_bench` on the bench Pi 5 (2.4 GHz, `ondemand` pinned at max, `throttled=0x0`, 54–60 °C, klippy idle), full `voron_dense_top_layers.gcode`, worst 5 s stream window realtime factor (`ci.sh replay-budget`'s metric), cores limited with `taskset`. Lower of two runs; runs agreed within 2 %. Main `c53486ec9`, 2026-11-03.
+`gcode_replay_bench` on the bench Pi 5 (2.4 GHz, `ondemand` pinned at max, `throttled=0x0`, 54–60 °C, klippy idle), full `voron_dense_top_layers.gcode`, worst 5 s stream window realtime factor (`ci.sh replay-budget`'s metric), cores limited with `taskset`. The target is ≥ 2× at 2 cores, which leaves the other two to klippy and the OS. Main `80ad5b4d8`, 2026-11-04; repeat runs agree within 2 %.
 
-| config | segments | 4 cores | 2 cores | 1 core |
-|---|---:|---:|---:|---:|
-| `printer.cfg` | 807 | 19.2 | 17.3 | 11.7 |
-| `configs/fast.cfg` | 712 | 9.4 | 8.4 | 5.5 |
-| `configs/p1_bowden_bedslinger_kernel_cd0.04.cfg` | 1309 | 22.4 | 21.9 | 15.8 |
-| `configs/trident_kernel.cfg` | 19670 | 2.11 | 1.66 | 1.09 |
-| `configs/trident_ramp.cfg` | 19670 | 1.34 | 1.00 | 0.74 |
-| `configs/profiles/p1_bowden_bedslinger_kernel.cfg` | 18282 | 3.45 | 3.19 | 2.18 |
-| `configs/profiles/p1_bowden_bedslinger_ramp.cfg` | — | panics | panics | panics |
-| `configs/profiles/p2_i3_direct_drive_kernel.cfg` | 19566 | 3.34 | 3.10 | 2.07 |
-| `configs/profiles/p2_i3_direct_drive_ramp.cfg` | 19566 | 2.87 | 2.42 | 1.69 |
-| `configs/profiles/p3_voron_direct_drive_kernel.cfg` | 19669 | 2.27 | 1.92 | 1.24 |
-| `configs/profiles/p3_voron_direct_drive_ramp.cfg` | 19669 | 1.59 | 1.38 | 0.96 |
-| `configs/profiles/p4_high_accel_kernel.cfg` | 19670 | 2.22 | 1.74 | 1.14 |
-| `configs/profiles/p4_high_accel_ramp.cfg` | 19670 | 1.29 | 0.99 | 0.71 |
+| config | 4 cores | 2 cores |
+|---|---:|---:|
+| `printer.cfg` | 15.8 | 15.1 |
+| `configs/capacity.cfg` | 8.90 | 7.68 |
+| `configs/fast.cfg` | 8.43 | 7.27 |
+| `configs/p1_bowden_bedslinger_kernel_cd0.04.cfg` | 44.3 | 42.3 |
+| `configs/p2_i3_direct_drive_ramp_cd0.01.cfg` | 6.96 | 5.92 |
+| `configs/p3_voron_direct_drive_ramp_cd0.01.cfg` | 4.09 | 3.35 |
+| `configs/p4_high_accel_kernel_cd0.01.cfg` | 5.72 | 5.21 |
+| `configs/p4_high_accel_ramp_cd0.01.cfg` | 6.30 | 5.30 |
+| `configs/ramp.cfg` | 13.8 | 11.5 |
+| `configs/trident_kernel.cfg` | 2.89 | 2.29 |
+| `configs/trident_ramp.cfg` | 6.96 | 5.01 |
+| `configs/profiles/p1_bowden_bedslinger_kernel.cfg` | 11.8 | 10.4 |
+| `configs/profiles/p1_bowden_bedslinger_ramp.cfg` | 18.7 | 15.8 |
+| `configs/profiles/p2_i3_direct_drive_kernel.cfg` | 4.87 | 4.00 |
+| `configs/profiles/p2_i3_direct_drive_ramp.cfg` | 4.83 | 3.44 |
+| `configs/profiles/p3_voron_direct_drive_kernel.cfg` | 2.82 | 2.16 |
+| `configs/profiles/p3_voron_direct_drive_ramp.cfg` | 3.18 | 2.12 |
+| `configs/profiles/p4_high_accel_kernel.cfg` | 4.38 | 3.71 |
+| `configs/profiles/p4_high_accel_ramp.cfg` | 7.29 | 5.25 |
 
-The ~19 670-segment chains are bound by the single `kalico-shaper` thread (`shaper_busy` ≈ 100 % of wall, the planner blocked on it ≈ 97 %); with 4 cores the pool helpers sit ~50 % idle. `perf`: `ExactConvolution::pieces_over` 7–14 %, moment accumulation 9–12 %, trajectory/law/NURBS evaluation 12–22 %, and on ratio-ramp chains `ratio_ramp::{RatioSmoothing::correction, WidthField::jet}` 8–13 %.
+At 2 cores the `kalico-shaper` thread is busy ≈ 100 % of the wall time and the process uses ≈ 1.8 cores: the planning thread fits each lowered segment's sources while the shaper shapes the ones before it. The cost is in the shaper's leader fits and follower projection (about half of all CPU, `ExactConvolution::pieces_over` the largest single item) and in the planning thread's source fits (about 40 %, analytic span evaluation and the ladder proofs). `gcode_replay_bench --digest` hashes the emitted trajectory, so a throughput change can be held to an identical output.
 
 ## MCU step-rate capacity (F401, classic host-stepped path)
 

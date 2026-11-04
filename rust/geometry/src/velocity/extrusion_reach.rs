@@ -51,8 +51,9 @@ impl Reach {
 
 /// One move as the reach reads it: where it lies along the stream's path,
 /// the fastest the leaders can cross it and the least time they take, what
-/// it extrudes, and the reach of the extruder it is budgeted for. An
-/// extrude-only move is a rest of the leaders.
+/// it extrudes, the reach of the extruder it is budgeted for, and how long
+/// the leaders' shaped path moves on past a raw stop and before a raw
+/// start. An extrude-only move is a rest of the leaders.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Mark {
     start_mm: f64,
@@ -62,6 +63,7 @@ struct Mark {
     rest: bool,
     extruding: Option<(usize, f64)>,
     reach: Option<Reach>,
+    leader_kernel_reach_s: f64,
 }
 
 impl Mark {
@@ -198,6 +200,10 @@ impl Marks {
                 .extruder
                 .filter(|_| m.segment.spatial.is_some())
                 .map(|caps| Reach::of(&caps)),
+            leader_kernel_reach_s: m
+                .limits
+                .extruder
+                .map_or(0.0, |caps| caps.leader_kernel_reach_s),
         });
     }
 
@@ -319,18 +325,61 @@ impl Marks {
         Some(ratio)
     }
 
+    /// How long an extrude-only `marks[index]` holds the toolhead still
+    /// before and after its own motion: the leaders' kernel reach on each
+    /// side where the leaders move, so the shaped path has come to rest
+    /// before the extruder starts and stays at rest until it stops. `None`
+    /// while the move after it is still to come. Nothing holds at a stream's
+    /// edges, where the lowerer's rest holds already keep the leaders still.
+    fn rest_holds(&self, index: usize, closed: bool) -> Option<[f64; 2]> {
+        let mark = self.marks[index];
+        if !mark.rest {
+            return Some([0.0; 2]);
+        }
+        let after = self.marks.get(index + 1);
+        if after.is_none() && !closed {
+            return None;
+        }
+        let before = index.checked_sub(1).map(|previous| &self.marks[previous]);
+        let hold_beside = |other: Option<&Mark>| {
+            if other.is_some_and(|other| !other.rest) {
+                mark.leader_kernel_reach_s
+            } else {
+                0.0
+            }
+        };
+        Some([hold_beside(before), hold_beside(after)])
+    }
+
+    fn budget(&self, index: usize, closed: bool) -> Option<ExtrusionBudget> {
+        Some(ExtrusionBudget {
+            ratio_in_reach: self.ratio_in_reach(index, closed)?,
+            rest_holds_s: self.rest_holds(index, closed)?,
+        })
+    }
+
     fn drop_front(&mut self) {
         let mark = self.marks.pop_front().expect("a mark to drop");
         self.dropped.absorb(&mark);
     }
 }
 
-/// The largest extrusion ratio each move's extruder demand can meet: its own
-/// and that of every move within its [`Reach`], which the leaders' kernels
-/// and a ratio ramp carry across the joins however short the moves between.
-/// Moves on a stream pass through in order and leave once the moves after
-/// them cover their reach, so a move's ratio never depends on how far the
-/// stream had arrived when it was planned.
+/// What a move's plan takes from the moves around it: the largest
+/// extrusion ratio its extruder demand can meet, and for an extrude-only
+/// move how long it holds the toolhead still before and after its own
+/// motion, so the extruder never adds the leaders' spill to it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExtrusionBudget {
+    pub ratio_in_reach: f64,
+    pub rest_holds_s: [f64; 2],
+}
+
+/// Each move's [`ExtrusionBudget`]: the largest extrusion ratio within its
+/// [`Reach`], which the leaders' kernels and a ratio ramp carry across the
+/// joins however short the moves between, and an extrude-only move's rest
+/// holds. Moves on a stream pass through in order and leave once the moves
+/// after them cover their reach, so a move's budget never depends on how
+/// far the stream had arrived when it was planned.
 #[derive(Debug)]
 pub struct ExtrusionReach {
     marks: Marks,
@@ -372,16 +421,16 @@ impl ExtrusionReach {
     }
 
     /// The oldest move still waiting, once the moves after it cover its
-    /// reach, with the largest ratio within it.
-    pub fn pop(&mut self) -> Option<(Move, f64)> {
+    /// reach, with its budget.
+    pub fn pop(&mut self) -> Option<(Move, ExtrusionBudget)> {
         if self.pending.is_empty() {
             return None;
         }
         let index = self.marks.marks.len() - self.pending.len();
-        let ratio = self.marks.ratio_in_reach(index, self.closed)?;
+        let budget = self.marks.budget(index, self.closed)?;
         let m = self.pending.pop_front().expect("a waiting move");
         self.forget_beyond_history();
-        Some((m, ratio))
+        Some((m, budget))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -417,11 +466,11 @@ impl ExtrusionReach {
 
 /// [`ExtrusionReach`] over a whole stream at once, nothing before or after
 /// it.
-pub fn ratios_in_reach(
+pub fn extrusion_budgets(
     moves: &[Move],
     max_extrude_only_velocity_mm_s: f64,
     max_extrude_only_accel_mm_s2: f64,
-) -> Vec<f64> {
+) -> Vec<ExtrusionBudget> {
     let mut marks = Marks::new(ExtrudeOnly {
         velocity_mm_s: max_extrude_only_velocity_mm_s,
         accel_mm_s2: max_extrude_only_accel_mm_s2,
@@ -432,7 +481,7 @@ pub fn ratios_in_reach(
     (0..moves.len())
         .map(|index| {
             marks
-                .ratio_in_reach(index, true)
+                .budget(index, true)
                 .expect("a closed stream settles every move")
         })
         .collect()
