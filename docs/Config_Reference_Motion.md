@@ -352,13 +352,14 @@ their extrude-only caps; with a kernel, the advance is fitted into that
 extrusion before the kernel smooths it. Where the leaders turn around (a
 wipe that reverses along the line) or come to rest across an extrude-only
 move or dwell, the advance drops its lead to zero exactly where their speed
-does: it keeps the lead through the input shaper's spill around the rest,
-then releases it before the rest and rebuilds it after over that spill plus
-the reach of the longest ramp, rising from the rest point, so the extruder
-never asks much more than the advance's own `k·r·accel` there; a rest the
-leaders pass through without stopping keeps the full advance. Without a
-kernel, any extruder position step, or velocity step beyond the leaders'
-fit rounding, is refused before it is emitted; leaders without an
+does, rising from the rest point, so the extruder never asks much more than
+the advance's own `k·r·accel` there. At a rest it releases the lead before
+and rebuilds it after over the input shaper's spill around the rest alone
+wherever the shortest ramp the extruder's limits allow for that lead fits
+within the spill, and over the spill plus that ramp's reach elsewhere; a
+rest the leaders pass through without stopping keeps the full advance.
+Without a kernel, any extruder position step, or velocity step beyond the
+leaders' fit rounding, is refused before it is emitted; leaders without an
 acceleration-continuous kernel produce such steps. The trade-off against a
 kernel is measured in "Evaluating an extruder chain" in the README.
 
