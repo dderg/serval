@@ -32,6 +32,18 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST="$ROOT/rust"
+
+# Heavy jobs queue for one of SERVAL_SLOTS machine-wide slots (scripts/slots.py):
+# agents sharing the box stacked builds and tests to load 25-60, which timed out
+# nextest and distorted benchmarks. Cheap invocations and CI runners skip it.
+case "${1:-}" in
+    install-hooks|-h|--help|help) ;;
+    *)
+        if [ -z "${SERVAL_SLOT_HELD:-}" ] && [ -z "${GITHUB_ACTIONS:-}" ] && [ -z "${CI_NO_SLOT:-}" ]; then
+            exec python3 "$ROOT/scripts/slots.py" run -- "$0" "$@"
+        fi
+        ;;
+esac
 LOG_DIR="$ROOT/.ci-logs"
 VERBOSE=""
 

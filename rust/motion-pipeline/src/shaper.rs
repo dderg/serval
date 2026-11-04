@@ -410,7 +410,7 @@ impl<S: TrackSignal> TrackSignal for FacingRead<'_, S> {
 
 pub(crate) const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 
-/// Buffered lowered segments plus the shaped-leader cache: `shaped[i]` is
+/// Buffered lowered segments plus the shaped-leader cache: `shaped` holds
 /// `segments[i]` with every kerneled non-follower axis already fitted. A
 /// frontier segment's convolution window is fully covered when it is first
 /// fitted, so the fit is final — later emits reuse it bit-identically
@@ -419,8 +419,53 @@ pub(crate) const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 #[derive(Default)]
 struct PendingSegments {
     segments: VecDeque<ContinuousSegment>,
-    shaped: VecDeque<ContinuousSegment>,
+    shaped: ShapedCache,
     materialized: usize,
+}
+
+/// The pending segments' fitted leaders, as the motors run them and as
+/// the follower projection reads them (see [`ColumnTrack`]).
+#[derive(Default)]
+struct ShapedCache {
+    stored: VecDeque<ContinuousSegment>,
+    read: VecDeque<ContinuousSegment>,
+}
+
+impl ShapedCache {
+    fn len(&self) -> usize {
+        self.stored.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.stored.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.stored.clear();
+        self.read.clear();
+    }
+
+    fn pop_front(&mut self) {
+        self.stored.pop_front();
+        self.read.pop_front();
+    }
+
+    fn extend(&mut self, stored: Vec<ContinuousSegment>, read: Vec<ContinuousSegment>) {
+        assert_eq!(
+            stored.len(),
+            read.len(),
+            "every fitted leader segment has its read form"
+        );
+        self.stored.extend(stored);
+        self.read.extend(read);
+    }
+
+    fn window(&mut self, window: usize) -> (&[ContinuousSegment], &[ContinuousSegment]) {
+        (
+            &self.stored.make_contiguous()[..window],
+            &self.read.make_contiguous()[..window],
+        )
+    }
 }
 
 impl PendingSegments {
@@ -1146,7 +1191,7 @@ struct AxisFitRequest<'a> {
 /// the shaped-leader cache, and the toolhead mirror.
 struct ShaperOutputs<'a> {
     follower_states: &'a mut Vec<FollowerState>,
-    shaped_cache: &'a mut VecDeque<ContinuousSegment>,
+    shaped_cache: &'a mut ShapedCache,
     toolhead_tap: Option<&'a Sender<ContinuousSegment>>,
 }
 
@@ -1217,17 +1262,17 @@ fn apply_axis_chains(
     };
     if window > outputs.shaped_cache.len() {
         let mut fresh: Vec<ContinuousSegment> = base[outputs.shaped_cache.len()..window].to_vec();
-        fit_leader_axes(request, &mut fresh, n_axes, work)?;
-        outputs.shaped_cache.extend(fresh);
+        let read = fit_leader_axes(request, &mut fresh, n_axes, work)?;
+        outputs.shaped_cache.extend(fresh, read);
     }
-    let frontier = &outputs.shaped_cache.make_contiguous()[..window];
+    let (frontier, read_frontier) = outputs.shaped_cache.window(window);
     let mut out: Vec<ContinuousSegment> = frontier.iter().take(commit_count).cloned().collect();
     let projection_started = crate::timing::stopwatch();
     let mut projection_timing = crate::follower_projection::ProjectionTiming::default();
     project_followers(
         crate::follower_projection::ProjectionWindow {
             base,
-            frontier,
+            frontier: read_frontier,
             chains,
             fit_tol,
             lookahead,
@@ -1361,7 +1406,7 @@ fn fit_motor_commands(
     for (axis, column, _) in fit_columns(request, out, &columns) {
         let column = column?.expect("a motor-command chain convolves with its kernel");
         for (seg, track) in out.iter_mut().zip(column) {
-            Arc::make_mut(&mut seg.axes)[axis] = ContinuousAxis::Spline(Arc::new(track));
+            Arc::make_mut(&mut seg.axes)[axis] = ContinuousAxis::Spline(track.stored);
             rebuilt += 1;
         }
     }
@@ -1405,7 +1450,7 @@ fn constant_axis_column(
     segments: &[&ContinuousSegment],
     targets: &[ContinuousSegment],
     axis: usize,
-) -> Option<Vec<nurbs::ScalarNurbs>> {
+) -> Option<Vec<ColumnTrack>> {
     let splines = segments
         .iter()
         .map(|seg| match &seg.axes[axis] {
@@ -1423,7 +1468,10 @@ fn constant_axis_column(
     targets
         .iter()
         .map(|seg| match &seg.axes[axis] {
-            ContinuousAxis::Spline(curve) => Some((**curve).clone()),
+            ContinuousAxis::Spline(curve) => Some(ColumnTrack {
+                stored: Arc::clone(curve),
+                read: None,
+            }),
             _ => None,
         })
         .collect()
@@ -1463,7 +1511,7 @@ fn fit_axis_column(
     targets: &[ContinuousSegment],
     column: FitColumn,
     target_workers: usize,
-) -> Result<Option<Vec<nurbs::ScalarNurbs>>, PostProcessError> {
+) -> Result<Option<Vec<ColumnTrack>>, PostProcessError> {
     let AxisFitRequest {
         history,
         base,
@@ -1524,7 +1572,7 @@ fn fit_axis_column(
             targets[0].t_start,
         ),
         fit_tol,
-        signal.fit_context(),
+        signal,
         target_workers,
         pool,
     )
@@ -1760,13 +1808,14 @@ fn fit_axis_targets(
     targets: &[ContinuousSegment],
     source: ShapedSignalSource,
     fit_tol: FitTol,
-    fit_context: &'static str,
+    signal: ColumnSignal,
     target_workers: usize,
     pool: &WorkerPool,
-) -> Result<Vec<nurbs::ScalarNurbs>, PostProcessError> {
+) -> Result<Vec<ColumnTrack>, PostProcessError> {
     if targets.is_empty() {
         return Ok(Vec::new());
     }
+    let fit_context = signal.fit_context();
     let shaped_breaks = &source.shaped_breaks;
     let hidden_break_input = source.hidden_break_input();
     let shaped_times = shaped_breaks.times();
@@ -1782,7 +1831,7 @@ fn fit_axis_targets(
         .unwrap_or(0);
     if max_seed_spans < LEADER_SPAN_PARALLEL_THRESHOLD {
         let fit_target = |target: &ContinuousSegment, sig: &_| {
-            let track = fit_leader_target(
+            let pieces = fit_leader_target(
                 AxisFit {
                     axis,
                     t_start: target.t_start,
@@ -1796,13 +1845,7 @@ fn fit_axis_targets(
                 shaped_breaks,
                 hidden_break_input,
             )?;
-            if !track.control_points().iter().all(|value| value.is_finite()) {
-                return Err(PostProcessError::NonFiniteSample {
-                    axis,
-                    t: target.t_start,
-                });
-            }
-            Ok(track)
+            column_track(signal, axis, pieces)
         };
         let workers = target_workers.max(1).min(targets.len());
         return pool
@@ -1969,7 +2012,7 @@ fn fit_axis_targets(
                 Err(_) => needs_serial_fit = true,
             }
         }
-        let track = if needs_serial_fit || refinement_splits > MAX_FIT_REFINEMENT_SPLITS {
+        let pieces = if needs_serial_fit || refinement_splits > MAX_FIT_REFINEMENT_SPLITS {
             let sig = make_sig();
             fit_leader_target(
                 AxisFit {
@@ -1986,22 +2029,71 @@ fn fit_axis_targets(
                 hidden_break_input,
             )?
         } else {
-            fit_pieces_to_nurbs(axis, pieces)?
+            pieces
         };
-        if !track.control_points().iter().all(|value| value.is_finite()) {
-            return Err(PostProcessError::NonFiniteSample {
-                axis,
-                t: targets[target_index].t_start,
-            });
-        }
-        tracks.push(track);
+        tracks.push(column_track(signal, axis, pieces)?);
     }
     Ok(tracks)
 }
 
+/// A fitted column track as the motors run it and, for a leader, as the
+/// follower projection reads it. `stored` raises every piece to the
+/// track's highest degree on absolute control points, which rounds a
+/// piece's jerk to about `n(n−1)(n−2)·ε·|p|/h³`; `read` keeps each piece
+/// at its own degree on its own origin, so an advance with no kernel after
+/// it, which reads the leaders' jerk, reads it at the piece's precision
+/// rather than at the track's distance from the origin. `None` where the
+/// stored track is read as it is: a constant, or a motor command no
+/// projection reads.
+pub(crate) struct ColumnTrack {
+    pub stored: Arc<nurbs::ScalarNurbs>,
+    pub read: Option<ContinuousAxis>,
+}
+
+fn column_track(
+    signal: ColumnSignal,
+    axis: usize,
+    pieces: Vec<BezierPiece>,
+) -> Result<ColumnTrack, PostProcessError> {
+    match signal {
+        ColumnSignal::Shaped => leader_track(axis, pieces),
+        ColumnSignal::MotorCommand { .. } => Ok(ColumnTrack {
+            stored: Arc::new(finite_track(axis, pieces)?),
+            read: None,
+        }),
+    }
+}
+
+pub(crate) fn leader_track(
+    axis: usize,
+    pieces: Vec<BezierPiece>,
+) -> Result<ColumnTrack, PostProcessError> {
+    let relative = crate::follower_projection::localize_pieces(0.0, &pieces);
+    let stored = finite_track(axis, pieces)?;
+    let read = ContinuousAxis::try_piecewise_relative_spline(relative).unwrap_or_else(|error| {
+        panic!("shaper: axis {axis}: the leader's own pieces do not join: {error}")
+    });
+    Ok(ColumnTrack {
+        stored: Arc::new(stored),
+        read: Some(read),
+    })
+}
+
+fn finite_track(
+    axis: usize,
+    pieces: Vec<BezierPiece>,
+) -> Result<nurbs::ScalarNurbs, PostProcessError> {
+    let t_start = pieces.first().map_or(f64::NAN, |piece| piece.u_start);
+    let track = fit_pieces_to_nurbs(axis, pieces)?;
+    if !track.control_points().iter().all(|value| value.is_finite()) {
+        return Err(PostProcessError::NonFiniteSample { axis, t: t_start });
+    }
+    Ok(track)
+}
+
 type TimedColumn = (
     usize,
-    Result<Option<Vec<nurbs::ScalarNurbs>>, PostProcessError>,
+    Result<Option<Vec<ColumnTrack>>, PostProcessError>,
     u128,
 );
 
@@ -2040,12 +2132,15 @@ fn fit_columns(
         .expect("axis fit thread panicked")
 }
 
+/// Fits the kerneled leader axes of `fresh` in place, as the motors run
+/// them, and returns the same segments with the leaders as the follower
+/// projection reads them (see [`ColumnTrack`]).
 fn fit_leader_axes(
     request: AxisFitRequest,
     fresh: &mut [ContinuousSegment],
     n_axes: usize,
     work: crate::timing::PhaseWorkload,
-) -> Result<(), PostProcessError> {
+) -> Result<Vec<ContinuousSegment>, PostProcessError> {
     let chains = request.chains;
     let default_chain = CompiledChain::default();
     let leader_columns: Vec<FitColumn> = (0..n_axes)
@@ -2078,13 +2173,18 @@ fn fit_leader_axes(
             &per_axis.join(" "),
         );
     }
+    let mut read_segments = fresh.to_vec();
     for (axis, column, _) in columns {
         let Some(column) = column? else { continue };
-        for (seg, track) in fresh.iter_mut().zip(column) {
-            Arc::make_mut(&mut seg.axes)[axis] = ContinuousAxis::Spline(Arc::new(track));
+        for ((seg, read_seg), track) in fresh.iter_mut().zip(&mut read_segments).zip(column) {
+            let read = track
+                .read
+                .unwrap_or_else(|| ContinuousAxis::Spline(Arc::clone(&track.stored)));
+            Arc::make_mut(&mut read_seg.axes)[axis] = read;
+            Arc::make_mut(&mut seg.axes)[axis] = ContinuousAxis::Spline(track.stored);
         }
     }
-    Ok(())
+    Ok(read_segments)
 }
 
 /// Every time the window's signal changes polynomial on this axis: each
@@ -3511,14 +3611,14 @@ fn fit_leader_target<S: TrackSignal>(
     sig: &S,
     shaped_breaks: &ShapedBreaks,
     hidden_break_input: Option<&AxisSignalTable>,
-) -> Result<nurbs::ScalarNurbs, PostProcessError> {
+) -> Result<Vec<BezierPiece>, PostProcessError> {
     let seeds = shaped_breaks.select_seeds(
         fit_seed_times(fit.axis, fit.t_start, fit.t_end, fit.seed_breakpoints)?,
         hidden_break_input,
         fit.fit_tol,
     );
     let plan = plan_over_seeds(&fit, sig, seeds)?;
-    fit_axis_over_plan(&fit, sig, plan, true)
+    fit_pieces_over_plan(&fit, sig, plan, true)
 }
 
 fn fit_axis_over_plan<S: TrackSignal>(
@@ -3527,6 +3627,18 @@ fn fit_axis_over_plan<S: TrackSignal>(
     plan: FitPlan,
     requires_hull: bool,
 ) -> Result<nurbs::ScalarNurbs, PostProcessError> {
+    fit_pieces_to_nurbs(
+        fit.axis,
+        fit_pieces_over_plan(fit, sig, plan, requires_hull)?,
+    )
+}
+
+fn fit_pieces_over_plan<S: TrackSignal>(
+    fit: &AxisFit,
+    sig: &S,
+    plan: FitPlan,
+    requires_hull: bool,
+) -> Result<Vec<BezierPiece>, PostProcessError> {
     let policy = SpanFitPolicy {
         axis: fit.axis,
         fit_tol: fit.fit_tol,
@@ -3556,7 +3668,7 @@ fn fit_axis_over_plan<S: TrackSignal>(
             &mut pieces,
         )?;
     }
-    fit_pieces_to_nurbs(fit.axis, pieces)
+    Ok(pieces)
 }
 
 /// The convolution samples one span is fitted against, held by node rather

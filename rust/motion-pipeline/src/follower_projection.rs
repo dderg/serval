@@ -3512,7 +3512,7 @@ impl TrackSignal for AdvancedFollowerSignal<'_, '_> {
 /// the value a fitted curve would have to resolve against never exceeds one
 /// piece's own travel — and the seams stay bit-exact because each origin is
 /// the running sum of the preceding pieces' own increments.
-fn localize_pieces(base: f64, pieces: &[BezierPiece]) -> Arc<[RelativeSplinePiece]> {
+pub(crate) fn localize_pieces(base: f64, pieces: &[BezierPiece]) -> Arc<[RelativeSplinePiece]> {
     let first = pieces.first().expect("follower emit has no fitted pieces");
     let mut origin = base + first.coeffs[0];
     let mut out = Vec::with_capacity(pieces.len());
