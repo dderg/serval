@@ -148,6 +148,12 @@ enable_clock_stm32f446(void)
 #endif
 }
 
+#define FLASH_HZ_PER_WAIT_STATE 30000000
+#define FLASH_WAIT_STATES ((CONFIG_CLOCK_FREQ - 1) / FLASH_HZ_PER_WAIT_STATE)
+#if FLASH_WAIT_STATES > 7
+#error "CONFIG_CLOCK_FREQ needs more flash wait states than FLASH_ACR holds"
+#endif
+
 // Main clock setup called at chip startup
 static void
 clock_setup(void)
@@ -164,13 +170,8 @@ clock_setup(void)
     else
         enable_clock_stm32f446();
 
-    // Set flash latency
-#if CONFIG_MACH_STM32F411
-    FLASH->ACR = (FLASH_ACR_LATENCY_3WS | FLASH_ACR_ICEN | FLASH_ACR_DCEN | FLASH_ACR_PRFTEN);
-#else
-    FLASH->ACR = (FLASH_ACR_LATENCY_5WS | FLASH_ACR_ICEN | FLASH_ACR_DCEN
-                  | FLASH_ACR_PRFTEN);
-#endif
+    FLASH->ACR = ((FLASH_WAIT_STATES << FLASH_ACR_LATENCY_Pos)
+                  | FLASH_ACR_ICEN | FLASH_ACR_DCEN | FLASH_ACR_PRFTEN);
 
     // Wait for PLL lock
     while (!(RCC->CR & RCC_CR_PLLRDY))
