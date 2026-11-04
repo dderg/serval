@@ -1276,12 +1276,9 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<Vec<RailK
         u64::from(brake),
     ];
     RECENT_RAILS.with(|recent| {
-        if let Some(knots) = recent.borrow().read(&key) {
-            return knots;
-        }
-        let knots = integrate_rail_arc_afresh(law, v0, ds);
-        recent.borrow_mut().keep(key, knots.clone());
-        knots
+        recent
+            .borrow_mut()
+            .read_or_keep(key, || integrate_rail_arc_afresh(law, v0, ds))
     })
 }
 
@@ -1299,15 +1296,20 @@ struct RecentRails {
 const RECENT_RAILS_GENERATION: usize = 4096;
 
 impl RecentRails {
-    fn read(&self, key: &[u64; 6]) -> Option<Option<Arc<Vec<RailKnot>>>> {
-        self.newer.get(key).or_else(|| self.older.get(key)).cloned()
-    }
-
-    fn keep(&mut self, key: [u64; 6], knots: Option<Arc<Vec<RailKnot>>>) {
+    fn read_or_keep(
+        &mut self,
+        key: [u64; 6],
+        integrate: impl FnOnce() -> Option<Arc<Vec<RailKnot>>>,
+    ) -> Option<Arc<Vec<RailKnot>>> {
+        if let Some(knots) = self.newer.get(&key).or_else(|| self.older.get(&key)) {
+            return knots.clone();
+        }
+        let knots = integrate();
         if self.newer.len() == RECENT_RAILS_GENERATION {
             self.older = std::mem::take(&mut self.newer);
         }
-        self.newer.insert(key, knots);
+        self.newer.insert(key, knots.clone());
+        knots
     }
 }
 
