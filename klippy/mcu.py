@@ -12,6 +12,7 @@ from . import (
     chelper,
     clocksync,
     engine_mcu,
+    mcu_cpu_headroom,
     mcu_hardware_reset,
     msgproto,
     pins,
@@ -172,6 +173,7 @@ class MCU:
 
     def report_step_capacity(self, step_benchmark):
         self._get_status_info["step_capacity"] = step_benchmark
+        self._cpu_headroom.guard(step_benchmark)
 
     def _query_step_benchmark(self):
         parser = self._serial.get_msgparser()
@@ -181,12 +183,13 @@ class MCU:
                 self._name,
             )
             return None
-        if "get_step_benchmark" not in parser.messages_by_name:
-            raise error(
-                "MCU '%s' firmware does not report its step dispatch cost "
-                "(no get_step_benchmark command); flash firmware built from "
-                "this Serval version" % (self._name,)
-            )
+        for required in ("get_step_benchmark", "cpu_load"):
+            if required not in parser.messages_by_name:
+                raise error(
+                    "MCU '%s' firmware lacks %s, which the step capacity cap"
+                    " needs; flash firmware built from this Serval version"
+                    % (self._name, required)
+                )
         result = self.lookup_query_command(
             "get_step_benchmark",
             "step_benchmark pulsed_ticks_per_step=%u"
@@ -288,6 +291,9 @@ class MCU:
         self._reserved_move_slots = 0
         self._move_queue_slots = 0
         self._step_benchmark = None
+        self._cpu_headroom = mcu_cpu_headroom.CpuHeadroom(
+            self._name, self._printer.invoke_shutdown
+        )
         self._flush_callbacks = []
         self._get_status_info = {}
         self._stats_sumsq_base = 0.0
@@ -344,6 +350,11 @@ class MCU:
         diff = count * tick_sumsq - tick_sum**2
         self._mcu_tick_stddev = c * math.sqrt(max(0.0, diff))
         self._mcu_tick_awake = tick_sum / self._mcu_freq
+
+    def _handle_cpu_load(self, params):
+        self._cpu_headroom.observe(
+            params, self._reactor.monotonic(), self._mcu_freq
+        )
 
     def _handle_runtime_fault(self, params):
         fault = format_runtime_fault(
@@ -745,6 +756,7 @@ class MCU:
         self._serial.register_response(self._handle_shutdown, "shutdown")
         self._serial.register_response(self._handle_shutdown, "is_shutdown")
         self._serial.register_response(self._handle_mcu_stats, "stats")
+        self._serial.register_response(self._handle_cpu_load, "cpu_load")
         self._serial.register_response(
             self._handle_runtime_fault, "runtime_fault"
         )
@@ -1074,10 +1086,11 @@ class MCU:
         return "\n".join(out)
 
     def stats(self, eventtime):
-        load = "mcu_awake=%.03f mcu_task_avg=%.06f mcu_task_stddev=%.06f" % (
+        load = "mcu_awake=%.03f mcu_task_avg=%.06f mcu_task_stddev=%.06f %s" % (
             self._mcu_tick_awake,
             self._mcu_tick_avg,
             self._mcu_tick_stddev,
+            self._cpu_headroom.take_stats(),
         )
         stats = " ".join(
             [
