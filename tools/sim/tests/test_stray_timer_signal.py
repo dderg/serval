@@ -7,7 +7,6 @@ MCU down: "Step timer dispatched before its waketime" (#633). This test sends
 SIGALRM to the MCU every few real milliseconds through a slow move."""
 
 import ctypes
-import os
 import signal
 import threading
 import time
