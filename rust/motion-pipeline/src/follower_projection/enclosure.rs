@@ -591,10 +591,12 @@ impl<'a> FollowerSignal<'a> {
     /// on the other, however close its odometer bound reaches across. A
     /// window starting at a crossing may still read the boundary itself,
     /// where the odometer has not moved off it by the float, and the
-    /// boundary may read a formula of its own; at a crawl the odometer's
-    /// rounding even steps back below it by an ulp past the crossing, so
-    /// the hold leaves [`REACH_INSET_ULPS`] of it below. A bound wholly
-    /// across the crossing it starts or ends at stays whole.
+    /// boundary may read a formula of its own. At a crawl the odometer's
+    /// rounding even steps back below it by an ulp past the crossing: a
+    /// reach narrow enough to be read at its floats is held
+    /// [`REACH_INSET_ULPS`] below it, where a wider one's read points lie
+    /// that far inside anyway. A bound wholly across the crossing it starts
+    /// or ends at stays whole.
     fn reach_inside_crossings(&self, window: Window, reach: (f64, f64)) -> (f64, f64) {
         let (lo, hi) = reach;
         let crossings = self.ratio_crossings();
@@ -606,7 +608,12 @@ impl<'a> FollowerSignal<'a> {
                 .map(|&(_, boundary)| boundary)
         };
         let lo = boundary_at(window.lo).map_or(lo, |boundary| {
-            lo.max(boundary - REACH_INSET_ULPS * f64::EPSILON * boundary.abs().max(1.0))
+            let inset = REACH_INSET_ULPS * f64::EPSILON * boundary.abs().max(1.0);
+            if hi - boundary > 2.0 * inset {
+                lo.max(boundary)
+            } else {
+                lo.max(boundary - inset)
+            }
         });
         let hi = boundary_at(window.hi).map_or(hi, |boundary| {
             hi.min(trajectory::next_toward(boundary, f64::NEG_INFINITY))
