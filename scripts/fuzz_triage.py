@@ -36,6 +36,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import pending_baselines as pending
+import slots
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m|\^\[\[[0-9;]*m")
 HEADER = re.compile(
@@ -231,25 +232,26 @@ def fails_on_main(failure: Failure, rev: str = "origin/main") -> bool | None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a") as handle:
             handle.write(f"cc {value} # fuzz_triage replay\n")
-    result = subprocess.run(
-        [
-            "cargo",
-            "nextest",
-            "run",
-            "-p",
-            failure.package,
-            "--test",
-            failure.target,
-            "--profile",
-            "ci",
-            "-E",
-            f"test(={failure.test})",
-        ],
-        cwd=tree / "rust",
-        env=env,
-        capture_output=True,
-        text=True,
-    )
+    with slots.slot(label="fuzz replay"):
+        result = subprocess.run(
+            [
+                "cargo",
+                "nextest",
+                "run",
+                "-p",
+                failure.package,
+                "--test",
+                failure.target,
+                "--profile",
+                "ci",
+                "-E",
+                f"test(={failure.test})",
+            ],
+            cwd=tree / "rust",
+            env=env,
+            capture_output=True,
+            text=True,
+        )
     return result.returncode != 0
 
 

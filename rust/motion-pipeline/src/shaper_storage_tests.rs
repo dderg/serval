@@ -170,3 +170,67 @@ fn a_nanosecond_seed_cluster_far_from_the_origin_keeps_the_motor_command_in_budg
         );
     }
 }
+
+/// The follower projection reads the leaders' jerk wherever an advance has
+/// no kernel after it, and a sub-microsecond piece stored on absolute
+/// control points, raised to its track's degree 13, rounds that jerk to
+/// tens of millions of mm/s³: the dense trident_ramp print's y leader
+/// carried 1.15e6 mm/s³ over a 1.013 µs piece at 149.47 mm and read
+/// 4.8e7 off it, which the advance turned into 45 000 mm/s² of extruder
+/// acceleration. The projection reads each piece at its own degree and
+/// precision instead, the same motion as the motors run.
+#[test]
+fn the_projection_reads_a_sub_microsecond_leader_piece_at_its_own_precision() {
+    let sliver_s = 1.013_006_574_623_887e-6;
+    let (p0, v0, a0) = (
+        149.471_624_299,
+        27.677_913_381_254_74,
+        -1_276.978_973_016_173_3,
+    );
+    let jerk = 1.153_942_962_494_199_6e6;
+    let lead_s: f64 = 1.0e-3;
+    let lead_start = (
+        p0 - v0 * lead_s + a0 * lead_s * lead_s / 2.0 - jerk * lead_s.powi(3) / 6.0,
+        v0 - a0 * lead_s + jerk * lead_s * lead_s / 2.0,
+        a0 - jerk * lead_s,
+    );
+    let mut lead_coeffs = vec![lead_start.0, lead_start.1, lead_start.2 / 2.0, jerk / 6.0];
+    lead_coeffs.resize(14, 0.0);
+    let pieces = vec![
+        BezierPiece {
+            u_start: 0.0,
+            u_end: lead_s,
+            coeffs: lead_coeffs,
+        },
+        BezierPiece {
+            u_start: lead_s,
+            u_end: lead_s + sliver_s,
+            coeffs: vec![p0, v0, a0 / 2.0, jerk / 6.0],
+        },
+    ];
+    let track = crate::shaper::leader_track(1, pieces).expect("the leader pieces fit a track");
+    let midpoint = lead_s + 0.5 * sliver_s;
+    let read_axis = track
+        .read
+        .as_ref()
+        .expect("a leader track is read on its own pieces");
+    let read = read_axis
+        .eval_pvaj(midpoint)
+        .expect("the read track covers its pieces");
+    assert!(
+        (read.jerk - jerk).abs() <= 1.0e3,
+        "the projection reads {:e} mm/s³ of jerk off a {jerk:e} mm/s³ leader piece",
+        read.jerk
+    );
+    for t in [0.5 * lead_s, lead_s + 0.25 * sliver_s, midpoint] {
+        let stored = nurbs::eval::eval(&track.stored, t);
+        let read = read_axis
+            .eval_pva(t)
+            .expect("the read track covers its pieces");
+        assert!(
+            (read.position - stored).abs() <= 1.0e-12,
+            "the read track is {:e} mm off the stored one at t={t}",
+            read.position - stored
+        );
+    }
+}

@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 import lock
+import pi
 
 BENCH = Path(__file__).resolve().parent
 REPO = BENCH.parents[1]
@@ -31,6 +32,38 @@ SIM_GCODE = REPO / "tools" / "sim" / "gcode"
 RUN_TIMEOUT_S = 2400.0
 ANALYZE_TIMEOUT_S = 1200.0
 THROTTLE_ARGS = ["--host-cpus", "1", "--host-max-mhz", "1500"]
+LADDER_CEILING_STEPS_PER_S = 300_000
+BENCHMARK_BAND = (0.85, 1.10)
+
+
+class SuiteError(RuntimeError):
+    pass
+
+
+def step_benchmark_verdict(mcu_status: dict) -> dict:
+    benchmark = mcu_status.get("step_benchmark")
+    if benchmark is None:
+        raise SuiteError(f"mcu status has no step_benchmark: {mcu_status}")
+    if benchmark["simulated"]:
+        raise SuiteError(
+            f"the bench MCU reports a simulated benchmark: {benchmark}"
+        )
+    clock = float(mcu_status["mcu_constants"]["CLOCK_FREQ"])
+    capacity = clock / benchmark["pulsed_ticks_per_step"]
+    ratio = capacity / LADDER_CEILING_STEPS_PER_S
+    return {
+        **benchmark,
+        "pulsed_capacity_steps_per_s": capacity,
+        "ladder_ceiling_steps_per_s": LADDER_CEILING_STEPS_PER_S,
+        "ratio_to_ladder_ceiling": ratio,
+        "band": list(BENCHMARK_BAND),
+        "within_band": BENCHMARK_BAND[0] <= ratio <= BENCHMARK_BAND[1],
+    }
+
+
+def query_step_benchmark() -> dict:
+    status = pi.http("GET", "/printer/objects/query?mcu")["status"]["mcu"]
+    return step_benchmark_verdict(status)
 
 
 @dataclass(frozen=True)
@@ -204,6 +237,7 @@ def main() -> None:
         sync = python("deploy.py", "sync", timeout_s=1800)
         if sync.returncode != 0:
             sys.exit(f"sync failed: {last_lines(sync.stderr, 8)}")
+        benchmark = query_step_benchmark()
         rows = []
         for row in selected:
             print(f"running {row.name} ...", flush=True)
@@ -215,11 +249,18 @@ def main() -> None:
         "expect_fail": args.expect_fail,
         "suite_dir": str(suite_dir),
         "rows": rows,
+        "step_benchmark": benchmark,
     }
     (suite_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     print_table(rows)
+    print(
+        f"step benchmark: {benchmark['pulsed_capacity_steps_per_s']:.0f} "
+        f"steps/s pulsed = {benchmark['ratio_to_ladder_ceiling']:.2f} x the "
+        f"ladder ceiling, band {BENCHMARK_BAND}: "
+        + ("ok" if benchmark["within_band"] else "OUT OF BAND")
+    )
     print(f"summary: {suite_dir / 'summary.json'}")
-    sys.exit(exit_status(rows))
+    sys.exit(exit_status(rows) or int(not benchmark["within_band"]))
 
 
 if __name__ == "__main__":

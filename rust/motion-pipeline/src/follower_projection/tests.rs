@@ -1781,3 +1781,30 @@ fn a_source_fitted_to_the_plain_projection_keeps_the_absolute_budget() {
         assert_eq!(source_budget(&chain), AccelBudget::Absolute);
     }
 }
+
+fn near_rest_leader(velocity: [f64; 2], acceleration: [f64; 2], jerk: [f64; 2]) -> f64 {
+    let states = [
+        (0.0, velocity[0], acceleration[0], jerk[0]),
+        (0.0, velocity[1], acceleration[1], jerk[1]),
+    ];
+    let speed = (velocity[0] * velocity[0] + velocity[1] * velocity[1]).sqrt();
+    super::speed_second_of(&states, speed)
+}
+
+#[test]
+fn a_straight_onset_reads_its_speed_curvature_where_the_speed_cubed_underflows() {
+    let second = near_rest_leader([3e-121, 4e-121], [3e-102, 4e-102], [3e-90, 4e-90]);
+    assert!(
+        (second - 5e-90).abs() <= 1e-12 * 5e-90,
+        "d²|v|/dt² along a line is the jerk's projection, got {second}"
+    );
+}
+
+#[test]
+fn a_turning_onset_reads_its_normal_acceleration_where_the_speed_cubed_underflows() {
+    let second = near_rest_leader([1e-121, 0.0], [0.0, 1e-102], [0.0, 0.0]);
+    assert!(
+        (second - 1e-83).abs() <= 1e-12 * 1e-83,
+        "|a⊥|²/|v| is 1e-83, got {second}"
+    );
+}

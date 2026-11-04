@@ -173,6 +173,14 @@ Other families, scaled from the F401 by clock and by the instructions one more s
 | G0B1 | 64 MHz | 109–123 | ≈ 1.6 (M0+) | ≈ 160–180 k |
 | H723 | 520 MHz | 81 | ≈ 2.5 (GPIO and DWT behind slower buses) | ≈ 1.3 M |
 
+### Self-benchmark
+
+Every MCU now measures its own step cost. On the first `get_step_benchmark` (`src/stepper_bench.c`), it runs four benchmark steppers through the real classic dispatch path: `sched_timer_dispatch`, the batching, and the step and finish code. The pulses go to a RAM sink instead of a pin (`gpio_out_bench_sink`). The steppers run in two pairs 0.25 µs apart, like CoreXY a/b, 32 steps each at 10 µs intervals. The MCU sums the ticks spent inside dispatches and reports the worst of three runs as ticks per step, for the 2 µs pulsed mode and for the both-edge mode. Klippy queries it at connect and refuses firmware without the command. The result is in `printer.mcu.step_benchmark`. `CONFIG_MCU_SIM` builds report `simulated=1` and do not run it. On a real Linux MCU the sink is an invalid file descriptor, so the GPIO ioctl fails fast and the cost is a lower bound.
+
+F401: 301 ticks/step pulsed (279 k steps/s, 0.93 × the ladder ceiling) and 160 ticks/step both-edge (525 k steps/s). The values are identical across four resets. `suite.py` fails unless the pulsed capacity lies within `BENCHMARK_BAND` (0.85–1.10) of `LADDER_CEILING_STEPS_PER_S` (300 k).
+
+CI runs the benchmark of every test/configs firmware in unicorn (`step_benchmark_emu.py`, from `scripts/ci-build-mcu.sh`). In the emulator one instruction is one tick, the MCU is in its configured state, and the build fails on a shutdown or on a result outside 40–600 instructions/step. Instructions per step, pulsed / both-edge: F401 188 / 94, F103 172–174 / 95–96, G0B1 229–244 / 115–121, H723 300 / 154. The F401's 301 ticks over 188 instructions is 1.60 cycles per instruction.
+
 ## Limits
 
 - No endstops, heaters or TMC wired: no homing (`run.py` uses `SET_KINEMATIC_POSITION`).

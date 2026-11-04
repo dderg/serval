@@ -167,6 +167,49 @@ class MCU:
     def get_move_queue_slots(self):
         return self._move_queue_slots
 
+    def get_step_benchmark(self):
+        return self._step_benchmark
+
+    def _query_step_benchmark(self):
+        parser = self._serial.get_msgparser()
+        if "config_stepper" not in parser.messages_by_name:
+            logging.info(
+                "MCU '%s' firmware cannot drive steppers; no step benchmark",
+                self._name,
+            )
+            return None
+        if "get_step_benchmark" not in parser.messages_by_name:
+            raise error(
+                "MCU '%s' firmware does not report its step dispatch cost "
+                "(no get_step_benchmark command); flash firmware built from "
+                "this Serval version" % (self._name,)
+            )
+        result = self.lookup_query_command(
+            "get_step_benchmark",
+            "step_benchmark pulsed_ticks_per_step=%u"
+            " both_edge_ticks_per_step=%u simulated=%c",
+        ).send()
+        benchmark = {
+            "pulsed_ticks_per_step": result["pulsed_ticks_per_step"],
+            "both_edge_ticks_per_step": result["both_edge_ticks_per_step"],
+            "simulated": bool(result["simulated"]),
+        }
+        if not benchmark["simulated"] and not (
+            benchmark["pulsed_ticks_per_step"]
+            and benchmark["both_edge_ticks_per_step"]
+        ):
+            raise error(
+                "MCU '%s' reported an empty step benchmark: %s"
+                % (self._name, benchmark)
+            )
+        logging.info(
+            "MCU '%s' step benchmark: %s (clock %.0f Hz)",
+            self._name,
+            benchmark,
+            self._mcu_freq,
+        )
+        return benchmark
+
     def _init_identity(self, config, clocksync):
         self._config = config
         self._printer = printer = config.get_printer()
@@ -241,6 +284,7 @@ class MCU:
         self._mcu_freq = 0.0
         self._reserved_move_slots = 0
         self._move_queue_slots = 0
+        self._step_benchmark = None
         self._flush_callbacks = []
         self._get_status_info = {}
         self._stats_sumsq_base = 0.0
@@ -532,6 +576,8 @@ class MCU:
             )
             return
         config_params = self._send_get_config()
+        self._step_benchmark = self._query_step_benchmark()
+        self._get_status_info["step_benchmark"] = self._step_benchmark
         if not config_params["is_config"]:
             if self._restart_method == "rpi_usb":
                 # Only configure mcu after usb power reset
