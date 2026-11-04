@@ -97,7 +97,7 @@ fn clothoid_brake_stays_on_the_disk() {
             let kappa = (1838.0 * s).abs();
             let scalar = (a * a + (kappa * v * v).powi(2)).sqrt();
             assert!(
-                (scalar - 1000.0).abs() < 2e-5,
+                (scalar - 1000.0).abs() <= super::super::law::RAIL_ACCELERATION_DEFECT,
                 "scalar accel {scalar} left the disk at t={t}"
             );
         }

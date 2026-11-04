@@ -1,16 +1,17 @@
 //! Checks every piece a fit accepts against the exact signal it was fitted
-//! to — on a dense scan of its resolved stretch, edges included, and by an
-//! exact search around every scanned peak, never only at points the fit
-//! itself sampled — and keeps the ones that break the fit tolerance as
-//! resolved for the piece's duration (`FitTol::for_piece`). Where the fit's
-//! span has exact polynomials, the scan reads them, each sub-interval of
-//! them held to the signal's own evaluator at one point of its own. What the
-//! fit does not resolve is not held to it: pieces narrower than the cubic
-//! floor, and the slivers inside a piece's edges that the ladder reads its
-//! anchoring state past, which seed coalescing treats as carrying no
-//! integral. Compiled only for tests that hold the shaper to its
-//! `max_path_deviation` / `max_accel_deviation` promise; the live host never
-//! pays for it.
+//! to and keeps the ones that break the fit tolerance as resolved for the
+//! piece's duration (`FitTol::for_piece`). Where the signal has exact
+//! polynomials or an enclosure over the piece, the Bernstein hull's proven
+//! bound on the error is the measure; elsewhere a dense scan of its resolved
+//! stretch, edges included, and an exact search around every scanned peak,
+//! never only at points the fit itself sampled. Where the fit's span has
+//! exact polynomials, they are held to the signal's own evaluator at one
+//! point of each sub-interval. What the fit does not resolve is not held to
+//! it: pieces narrower than the cubic floor, and the slivers inside a
+//! piece's edges that the ladder reads its anchoring state past, which seed
+//! coalescing treats as carrying no integral. Compiled only for tests that
+//! hold the shaper to its `max_path_deviation` / `max_accel_deviation`
+//! promise; the live host never pays for it.
 
 use std::cell::RefCell;
 use std::convert::Infallible;
@@ -20,7 +21,9 @@ use crate::lowering::{FitTol, eval_mono, eval_mono_dd};
 use trajectory::next_toward;
 
 use crate::shaper::exact::ExactSpan;
-use crate::shaper::{SQUARE_ROOT_ONSET_EDGE_SLACK_S, TrackSignal, golden_section_peak};
+use crate::shaper::{
+    SQUARE_ROOT_ONSET_EDGE_SLACK_S, TrackSignal, golden_section_peak, proven_error_bounds,
+};
 
 /// Intervals each accepted piece's resolved stretch is scanned at, its
 /// edges included. Prime, so no scan point but the edges lands on the fit's
@@ -122,14 +125,31 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
     }
     let acceleration_scale = (2.0 / h) * (2.0 / h);
     let piece_tol = piece.fit_tol.for_piece(h);
+    if let Some(exact) = piece.exact {
+        hold_exact_to_evaluator(sig, exact, &piece, piece_tol);
+    }
+    let resolved = (
+        piece.t0 + piece.edge_insets.0,
+        piece.t1 - piece.edge_insets.1,
+    );
+    let proven = proven_error_bounds(
+        sig,
+        piece.exact.map(|exact| exact.over(resolved.0, resolved.1)),
+        piece.mono_u,
+        (piece.t0, piece.t1),
+        resolved,
+        piece_tol,
+    );
+    if proven.is_some_and(|[position, acceleration]| {
+        position <= piece_tol.pos_mm && acceleration <= piece_tol.accel_mm_s2
+    }) {
+        return;
+    }
     let midpoint = 0.5 * (piece.t0 + piece.t1);
     let truth_at = |t: f64| match piece.exact {
         Some(exact) => exact.pva(t, if t < midpoint { piece.t1 } else { piece.t0 }),
         None => sig.eval_pva(t),
     };
-    if let Some(exact) = piece.exact {
-        hold_exact_to_evaluator(sig, exact, &piece, piece_tol);
-    }
     let miss_at = |u: f64| {
         let x = 2.0 * u - 1.0;
         let t = piece.t0 + h * u;
@@ -189,10 +209,14 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
         }
     }
     let WorstMiss {
-        position,
-        acceleration,
+        mut position,
+        mut acceleration,
         worst_u,
     } = worst;
+    if let Some([position_bound, acceleration_bound]) = proven {
+        position = position_bound / piece_tol.pos_mm;
+        acceleration = acceleration_bound / piece_tol.accel_mm_s2;
+    }
     if position > 1.0 || acceleration > 1.0 {
         let exemption = (position <= 1.0)
             .then(|| cap_contact_onset(sig, &piece, acceleration))
