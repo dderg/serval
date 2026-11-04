@@ -1701,12 +1701,16 @@ impl Crossing {
     /// its direction is rounding too, and so is the tangential acceleration
     /// read along it. The speed leaves a zero at the whole acceleration.
     fn at(leaders: &ShapedLeaders, t: f64) -> Self {
-        let speed = leaders.speed(t);
-        let accel = leaders.accel_norm(t);
+        let motion = leaders.motion(t);
+        let speed = motion.speed();
+        let accel = motion.accel_norm();
         let (rate, jerk) = if speed > accel * TURNAROUND_SPEED_TIME_S {
             (
-                leaders.speed_deriv(t, speed).abs(),
-                leaders.speed_second(t, speed).abs(),
+                motion.speed_deriv(speed).abs(),
+                motion
+                    .speed_second(speed)
+                    .unwrap_or_else(|| leaders.speed_second(t, speed))
+                    .abs(),
             )
         } else {
             (accel, 0.0)

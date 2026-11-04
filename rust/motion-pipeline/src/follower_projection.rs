@@ -2328,14 +2328,37 @@ impl<'a> ShapedLeaders<'a> {
         axis_pva(self.axes[index], t)
     }
 
+    /// Every leader's state at `t`, to jerk where every leader reads a
+    /// cached piece: the piece's position, velocity and acceleration are
+    /// [`Self::pva`]'s and its jerk [`Self::pvaj`]'s.
+    fn motion(&self, t: f64) -> LeaderMotion {
+        let leaders = self.axes.len();
+        assert!(
+            leaders <= MAX_LEADERS,
+            "a follower rides at most {MAX_LEADERS} leaders, got {leaders}"
+        );
+        let mut states = [(0.0, 0.0, 0.0, 0.0); MAX_LEADERS];
+        let mut jerks_read = true;
+        for (index, state) in states.iter_mut().take(leaders).enumerate() {
+            let cached = match self.pieces.get(index) {
+                Some(Some(pieces)) => pieces.pvaj(t),
+                _ => None,
+            };
+            *state = cached.unwrap_or_else(|| {
+                jerks_read = false;
+                let (position, velocity, acceleration) = axis_pva(self.axes[index], t);
+                (position, velocity, acceleration, 0.0)
+            });
+        }
+        LeaderMotion {
+            states,
+            leaders,
+            jerks_read,
+        }
+    }
+
     fn speed(&self, t: f64) -> f64 {
-        (0..self.axes.len())
-            .map(|index| {
-                let velocity = self.pva(index, t).1;
-                velocity * velocity
-            })
-            .sum::<f64>()
-            .sqrt()
+        norm_of((0..self.axes.len()).map(|index| self.pva(index, t).1))
     }
 
     /// A lower bound on the leaders' speed over `[lo, hi]`, when every
@@ -2407,18 +2430,6 @@ impl<'a> ShapedLeaders<'a> {
         Some(tangent_speed - remainder_squared.sqrt() - SPEED_ROUNDING * magnitude)
     }
 
-    fn speed_deriv(&self, t: f64, speed: f64) -> f64 {
-        if speed == 0.0 {
-            return 0.0;
-        }
-        (0..self.axes.len())
-            .map(|index| {
-                let (_, velocity, acceleration) = self.pva(index, t);
-                velocity / speed * acceleration
-            })
-            .sum::<f64>()
-    }
-
     fn never_moves(&self, index: usize, t0: f64, t1: f64, rest: RestResolution) -> bool {
         let bounds = self.axes[index].pva_bounds(t0, t1).unwrap_or_else(|error| {
             panic!("leader {index} has no velocity bounds over [{t0}, {t1}]: {error}")
@@ -2462,17 +2473,55 @@ impl<'a> ShapedLeaders<'a> {
     }
 
     fn accel_norm(&self, t: f64) -> f64 {
-        (0..self.axes.len())
-            .map(|index| {
-                let acceleration = self.pva(index, t).2;
-                acceleration * acceleration
-            })
-            .sum::<f64>()
-            .sqrt()
+        norm_of((0..self.axes.len()).map(|index| self.pva(index, t).2))
     }
 }
 
 const MAX_LEADERS: usize = 3;
+
+/// The Euclidean norm of the leaders' `components`, in leader order.
+fn norm_of(components: impl Iterator<Item = f64>) -> f64 {
+    components
+        .map(|component| component * component)
+        .sum::<f64>()
+        .sqrt()
+}
+
+/// The leaders' states at one time, which their speed, its rate and their
+/// acceleration's norm read, and, when `jerks_read`, the speed's second
+/// rate too.
+#[derive(Clone, Copy)]
+struct LeaderMotion {
+    states: [(f64, f64, f64, f64); MAX_LEADERS],
+    leaders: usize,
+    jerks_read: bool,
+}
+
+impl LeaderMotion {
+    fn speed(&self) -> f64 {
+        norm_of(self.states[..self.leaders].iter().map(|state| state.1))
+    }
+
+    fn speed_deriv(&self, speed: f64) -> f64 {
+        if speed == 0.0 {
+            return 0.0;
+        }
+        self.states[..self.leaders]
+            .iter()
+            .map(|&(_, velocity, acceleration, _)| velocity / speed * acceleration)
+            .sum::<f64>()
+    }
+
+    fn accel_norm(&self) -> f64 {
+        norm_of(self.states[..self.leaders].iter().map(|state| state.2))
+    }
+
+    /// [`ShapedLeaders::speed_second`] at `speed`, where the jerks are read.
+    fn speed_second(&self, speed: f64) -> Option<f64> {
+        self.jerks_read
+            .then(|| speed_second_of(&self.states[..self.leaders], speed))
+    }
+}
 
 /// `d²|v|/dt² = |a⊥|²/|v| + v̂·j`, read through the unit direction
 /// `v̂ = v/|v|` before any product: near rest the leaders' velocity is
@@ -2615,6 +2664,7 @@ struct LaidRead {
 /// and what is laid there.
 #[derive(Clone, Copy)]
 struct PathRead {
+    motion: LeaderMotion,
     speed: f64,
     rate: f64,
     rate_deriv: f64,
@@ -2799,8 +2849,8 @@ impl<'a> FollowerSignal<'a> {
     /// How far the sliver's speed rate steps from the leaders' own where it
     /// takes over.
     fn sliver_rate_step(&self, sliver: &SpeedZeroSliver) -> f64 {
-        let speed = self.leaders.speed(sliver.inner);
-        (sliver.deriv_at(sliver.inner) - self.leaders.speed_deriv(sliver.inner, speed)).abs()
+        let motion = self.leaders.motion(sliver.inner);
+        (sliver.deriv_at(sliver.inner) - motion.speed_deriv(motion.speed())).abs()
     }
 
     /// The sliver's speed rate is the leaders' where it takes over, to
@@ -2814,24 +2864,25 @@ impl<'a> FollowerSignal<'a> {
     }
 
     fn odometer_rate(&self, t: f64) -> (f64, f64) {
-        let speed = self.leaders.speed(t);
+        let motion = self.leaders.motion(t);
+        let speed = motion.speed();
         (
             self.odometer_scale * speed,
-            self.odometer_scale * self.leader_speed_deriv(t, speed),
+            self.odometer_scale * self.leader_speed_deriv(t, &motion, speed),
         )
     }
 
-    fn leader_speed_deriv(&self, t: f64, speed: f64) -> f64 {
+    fn leader_speed_deriv(&self, t: f64, motion: &LeaderMotion, speed: f64) -> f64 {
         if let Some(sliver) = self.speed_zero_sliver(t) {
             return sliver.deriv_at(t);
         }
         match self.rest_at(t) {
             Some(rest) => self.rest_rates(rest, t).0,
-            None => self.leaders.speed_deriv(t, speed),
+            None => motion.speed_deriv(speed),
         }
     }
 
-    fn leader_speed_second_deriv(&self, t: f64, speed: f64) -> f64 {
+    fn leader_speed_second_deriv(&self, t: f64, motion: &LeaderMotion, speed: f64) -> f64 {
         if self.speed_zero_sliver(t).is_some() {
             return 0.0;
         }
@@ -2841,16 +2892,20 @@ impl<'a> FollowerSignal<'a> {
         if speed == 0.0 {
             return 0.0;
         }
-        self.leaders.speed_second(t, speed)
+        motion
+            .speed_second(speed)
+            .unwrap_or_else(|| self.leaders.speed_second(t, speed))
     }
 
     fn path_read(&self, t: f64) -> PathRead {
-        let speed = self.leaders.speed(t);
+        let motion = self.leaders.motion(t);
+        let speed = motion.speed();
         let s = self.s_owned(t);
         PathRead {
+            motion,
             speed,
             rate: self.odometer_scale * speed,
-            rate_deriv: self.odometer_scale * self.leader_speed_deriv(t, speed),
+            rate_deriv: self.odometer_scale * self.leader_speed_deriv(t, &motion, speed),
             s,
             laid: self.state.laid_at(s),
         }
@@ -2890,7 +2945,7 @@ impl<'a> FollowerSignal<'a> {
     }
 
     fn rate_second(&self, t: f64, read: &PathRead) -> f64 {
-        self.odometer_scale * self.leader_speed_second_deriv(t, read.speed)
+        self.odometer_scale * self.leader_speed_second_deriv(t, &read.motion, read.speed)
     }
 
     /// `d(R·W)/ds` at `s`: the path slope of the ratio a ratio-ramped
@@ -3466,11 +3521,12 @@ impl TrackSignal for FollowerSignal<'_> {
             return KnotJumpBound::UNBOUNDED;
         }
         let rates = |t: f64| {
-            let speed = self.leaders.speed(t);
+            let motion = self.leaders.motion(t);
+            let speed = motion.speed();
             (
                 self.odometer_scale * speed,
-                self.odometer_scale * self.leader_speed_deriv(t, speed),
-                self.odometer_scale * self.leader_speed_second_deriv(t, speed),
+                self.odometer_scale * self.leader_speed_deriv(t, &motion, speed),
+                self.odometer_scale * self.leader_speed_second_deriv(t, &motion, speed),
             )
         };
         let (rate_before, rate_deriv_before, rate_second_before) = rates(before);
