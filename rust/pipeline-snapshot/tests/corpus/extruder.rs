@@ -122,7 +122,9 @@ pub enum ExtruderExcess {
 impl ExtruderExcess {
     pub fn t(&self) -> f64 {
         match *self {
-            Self::Velocity { t, .. } | Self::Acceleration { t, .. } | Self::VelocityStep { t, .. } => t,
+            Self::Velocity { t, .. }
+            | Self::Acceleration { t, .. }
+            | Self::VelocityStep { t, .. } => t,
         }
     }
 }
