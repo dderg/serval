@@ -35,10 +35,10 @@ workload could not normalise away (its ratio to the replay differed 5-11 %
 between a Ryzen 7800X3D and a GitHub EPYC runner). CPU seconds are no
 substitute for wall: on four kinds of runner #663 moved trident_kernel's by
 -0.2 to +2.3 % where its wall moved +4.8 to +7.6 %. Replaying one binary as
-both sides on GitHub runners (EPYC 7763, Xeon 8370C) put the median ratio
-within 0.3 % of 1; #663 moved it by +2.6 % (Xeon) to +5.4 % (EPYC 9V74) on
-trident_kernel and by +4.4 to +7.8 % on p3_voron_direct_drive_kernel, so
-LIVE_TOLERANCE_PCT sits between the two.
+both sides on three GitHub runners (2x EPYC 7763, Xeon 8370C) put the
+median ratio within 0.45 % of 1; #663 moved it by +2.6 % (Xeon) to +5.4 %
+(EPYC 9V74) on trident_kernel and by +4.4 to +7.8 % on
+p3_voron_direct_drive_kernel, so LIVE_TOLERANCE_PCT sits between the two.
 
 The gate fails when, for any config:
 - Ir moved more than IR_TOLERANCE_PCT from its baseline;
