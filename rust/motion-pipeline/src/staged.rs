@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, bounded};
 
+use crate::leader_prefit::{LeaderGroupFits, LeaderPrefitter};
 use crate::shaper::{Shaper, SourceMaterializer};
 use crate::{BaseItem, Pipeline, PlanningFront, StreamInput, TrajectoryItem};
 
@@ -24,6 +25,7 @@ const SHAPER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 enum ShaperInput {
     Item(BaseItem),
+    LeaderPrefits(LeaderGroupFits),
     Finish,
 }
 
@@ -40,6 +42,7 @@ enum ShaperExit {
 pub struct StagedPipeline {
     front: PlanningFront,
     materializer: SourceMaterializer,
+    prefitter: LeaderPrefitter,
     shaper_inbox: Option<ShaperInbox>,
     shaper_thread: Option<JoinHandle<ShaperExit>>,
 }
@@ -51,6 +54,7 @@ impl Pipeline {
     ) -> StagedPipeline {
         let Self { front, shaper } = self;
         let materializer = SourceMaterializer::of(&shaper);
+        let prefitter = LeaderPrefitter::of(&shaper);
         let (sender, rx) = bounded(SHAPER_INBOX_CAP);
         let shaper_thread = std::thread::Builder::new()
             .name("kalico-shaper".into())
@@ -60,6 +64,7 @@ impl Pipeline {
         StagedPipeline {
             front,
             materializer,
+            prefitter,
             shaper_inbox: Some(ShaperInbox {
                 sender,
                 #[cfg(feature = "bench-metrics")]
@@ -84,6 +89,10 @@ fn run_shaper(
         let exit = match input {
             ShaperInput::Item(item) => {
                 (!shaper.feed(item, &mut sink)).then_some(ShaperExit::SinkClosed)
+            }
+            ShaperInput::LeaderPrefits(fits) => {
+                shaper.accept_leader_prefits(fits);
+                None
             }
             ShaperInput::Finish => Some(if shaper.finish(&mut sink) {
                 ShaperExit::Finished
@@ -139,18 +148,23 @@ impl StagedPipeline {
     }
 
     /// The planning front and what it hands each lowered item to: the
-    /// item's sources are fitted, then it is queued for the shaper. One item
-    /// at a time, so the shaper starts on a planned window's first segment
-    /// while the rest of the window is still being fitted.
+    /// item's sources are fitted and the leader groups it completes the
+    /// read of are fitted, then the fits and the item are queued for the
+    /// shaper, fits first. One item at a time, so the shaper starts on a
+    /// planned window's first segment while the rest of the window is still
+    /// being fitted.
     fn handoff(&mut self) -> (&mut PlanningFront, impl FnMut(BaseItem) -> bool + '_) {
         let inbox = self
             .shaper_inbox
             .as_mut()
             .expect("pipeline already finished");
         let materializer = &mut self.materializer;
+        let prefitter = &mut self.prefitter;
         (&mut self.front, move |mut item| {
             materializer.materialize(std::slice::from_mut(&mut item));
-            inbox.send(item)
+            let fits = prefitter.prefit(&item);
+            (fits.is_empty() || inbox.send_input(ShaperInput::LeaderPrefits(fits)))
+                && inbox.send(item)
         })
     }
 
