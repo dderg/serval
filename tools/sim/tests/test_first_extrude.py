@@ -8,7 +8,8 @@ TRIDENT_STEPS_PER_MM = 200 * 16 * 37 / 53.65
 def trident_topology_config(h7_pty: str, f4_pty: str, gcode_dir: str) -> str:
     """Bench-shaped topology: corexy, a/b/z motors on the bottom MCU, the
     geared extruder alone on the H7 (present=0x8), trident machine limits
-    and the bench's PA + smooth_triangle extruder chain."""
+    and the PA + smooth_triangle extruder chain the first-extrude dive was
+    found on."""
     return f"""\
 [mcu]
 serial: {h7_pty}

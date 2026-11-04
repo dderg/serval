@@ -14,13 +14,14 @@ G-code asks for at the same instant of the unshaped plan, so ratio changes
 
     make -f Makefile.rust motion-engine-fast
     python3 tools/corner_flow.py tools/bench/printer.cfg
-    python3 tools/corner_flow.py printer.cfg --sweep smooth_time=0,0.005,0.02
     python3 tools/corner_flow.py printer.cfg --set pa.k=0.04 --json
-    python3 tools/corner_flow.py printer.cfg --kernel-free
+    python3 tools/corner_flow.py kernel.cfg --kernel-free
+    python3 tools/corner_flow.py kernel.cfg --sweep smooth_time=0,0.005,0.02
 
-``--kernel-free`` evaluates the config's chain with its extruder smoothing
-kernels taken out: every follower ramps its extrusion-ratio steps by the
-ramp time its limits derive, kernel or not. An advance with no kernel
+``--kernel-free`` evaluates a config that carries an extruder kernel override
+with its extruder smoothing kernels taken out, leaving the recommended chain:
+every follower ramps its extrusion-ratio steps by the ramp time its limits
+derive, kernel or not. An advance with no kernel
 needs extrude-only caps, and the retract case is only comparable between
 chains under the same ones: ``--extrude-only V,A`` fills in whichever the
 config lacks, for every chain.

@@ -17,7 +17,9 @@ GCODE = (
 
 
 def _config(world):
-    base = configs.neptune_print_config(world.h7_pty, str(world.gcode_dir))
+    base = configs.with_extruder_smoothing(
+        configs.neptune_print_config(world.h7_pty, str(world.gcode_dir)), 0.013
+    )
     base = base.replace("max_velocity: 300", "max_velocity: 1000")
     base = base.replace("max_accel: 4000", "max_accel: 50000")
     base = base.replace("max_z_accel: 200", "max_z_accel: 1000")
@@ -27,7 +29,6 @@ def _config(world):
         "[motor z]\ndrive: stepper\nstep_pin: gpiochip0/gpio6\ndir_pin: gpiochip0/gpio7\nenable_pin: !gpiochip0/gpio8\nmicrosteps: 8",
     )
     base = base.replace("k: 0.03", "k: 0.02")
-    base = base.replace("smooth_time: 0.04", "smooth_time: 0.013")
     base = base.replace(
         "[axis x]\nposition_min: 0\nposition_endstop: 0\nposition_max: 250\nendstop_pin: ^gpiochip0/gpio10\nhoming_speed: 10",
         "[axis x]\nposition_min: 0\nposition_endstop: 0\nposition_max: 250\nendstop_pin: ^gpiochip0/gpio10\nhoming_speed: 10\npost_processors: shaper_x",

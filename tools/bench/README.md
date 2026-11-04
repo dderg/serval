@@ -125,16 +125,21 @@ Near an apex, where the nozzle nearly stops, flow per mm is ill-conditioned, so 
 
 `gcode/corner_flow.gcode` (`gen_corner_flow.py`) holds 90°/45°/135° interior corners at 50/100/200/300 mm/s, a 10 mm-radius arc of 0.5 mm segments at 100/200 mm/s and a 2 mm zigzag at 50/150 mm/s. Each case runs between rests, so each is an epoch of its own. The bead is 0.4 × 0.2 mm from 1.75 mm filament.
 
-Main @ b0e093d46, event mode:
-- `printer.cfg` (PA k 0.03 + smooth_triangle 0.04 on E), run `corner_flow/20261104-054727`. Peaks offline / captured:
-  - 45° interior: +60/+63 % at 50 mm/s, +116/+125 % at 100, +176/+184 % at 200, +181/+196 % at 300.
-  - 90°: +8/+9, +21/+22, +53/+57, +57/+58 %.
-  - 135°: +0.2/+1.4, +1/+2, +9/+12, +20/+23 %.
-  - Dips: −3 to −15 %.
-  - Quantization bound: 10.2 points on peak, 1.4 on dip. Capture minus reference: ≤ 8.2 / 2.6 points.
-- `configs/ramp.cfg` (smooth_triangle 2 ms + ratio_ramp_time 15 ms), run `corner_flow/20261104-054856`.
-  - Offline peaks ≤ 1.4 % at every corner.
-  - Captured peaks reach 27 % at a 45° interior corner at 300 mm/s, but the reference steps show 28 % there too. The quantization bound is 26.4 points on peak and 2.3 on dip, and the capture stays within 7.7 points of the reference.
+`printer.cfg` runs the recommended kernel-free extruder chain: PA k 0.03 alone on E, with `max_extrude_only_velocity: 50` / `max_extrude_only_accel: 5000` as the extruder's limits. A smoothing kernel on E is an explicit override and costs corner flow, as the captures below show.
+
+Main's derived ratio ramp (deployed head 29f8add16), event mode:
+- `printer.cfg` kernel-free, run `corner_flow/20261104-065545`.
+  - Offline peaks ≤ 0.7 % at every corner and speed, dips ≥ −0.5 %; peak extruder acceleration 2585 mm/s².
+  - Captured peaks reach 23 % at a 45° interior corner at 200 mm/s, but the reference steps show 23 % there too. The quantization bound is 23.2 points on peak and 2.4 on dip, and the capture stays within 8.0 / 4.4 points of the reference.
+- The same with `smooth_triangle` 0.04 after the advance (and the extrude-only caps then inherited from `[printer]`), run `corner_flow/20261104-065259`. Peaks offline / captured:
+  - 45° interior: +60/+62 % at 50 mm/s, +116/+127 % at 100, +176/+182 % at 200, +181/+195 % at 300.
+  - 90°: +8/+12, +22/+22, +53/+57, +57/+62 %.
+  - 135°: +0.2/+1.2, +1/+2, +9/+11, +20/+22 %.
+  - Dips: down to −13 % offline and −15 % captured.
+  - Quantization bound: 10.2 points on peak, 1.4 on dip. Capture minus reference: ≤ 10.3 / 3.1 points.
+- `configs/ramp.cfg` (the same limits with `smooth_triangle` 2 ms after the advance), run `corner_flow/20261104-065422`.
+  - Offline peaks ≤ 1.6 % at every corner.
+  - Captured peaks reach 27 % at a 45° interior corner at 300 mm/s, but the reference steps show 28 % there too. The quantization bound is 26.4 points on peak and 2.3 on dip, and the capture stays within 7.6 / 4.4 points of the reference.
 
 ## Recovery
 
@@ -154,9 +159,9 @@ Any tool that touches the Pi or the boards (`run.py`, every `deploy.py` subcomma
 
 | config | 4 cores | 2 cores |
 |---|---:|---:|
-| `printer.cfg` | 15.8 | 15.1 |
+| `printer.cfg` (then with `smooth_triangle` 0.04 on E) | 15.8 | 15.1 |
 | `configs/capacity.cfg` | 8.90 | 7.68 |
-| `configs/fast.cfg` | 8.43 | 7.27 |
+| `configs/fast.cfg` (then with `smooth_triangle` 0.04 on E) | 8.43 | 7.27 |
 | `configs/p1_bowden_bedslinger_kernel_cd0.04.cfg` | 44.3 | 42.3 |
 | `configs/p2_i3_direct_drive_ramp_cd0.01.cfg` | 6.96 | 5.92 |
 | `configs/p3_voron_direct_drive_ramp_cd0.01.cfg` | 4.09 | 3.35 |

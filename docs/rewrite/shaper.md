@@ -54,15 +54,13 @@ damping_ratio: 0.1
 
 [axis e]
 follows: x, y, z
-post_processors: pa, st
+post_processors: pa
+max_velocity: 50
+max_accel: 5000
 
 [post_processor pa]
 type: linear_pressure_advance
 k: 0.03
-
-[post_processor st]
-type: smooth_triangle
-smooth_time: 0.02
 ```
 
 Sources: `rust/trajectory/src/chain.rs` (stage model, compilation,
@@ -103,7 +101,9 @@ Roster (`rust/trajectory/src/algos/`):
 - `smooth_bell` (`smooth_time`) — the C¹ quartic bell `c·(h²−t²)²`, a
   general-purpose low-pass with no tuned notch.
 - `smooth_triangle` (`smooth_time`) — the classic triangle (double boxcar);
-  cheap general smoothing, used e.g. on the extruder.
+  cheap general smoothing. After an extruder's advance it is an explicit
+  override that trades a bead bulge at every corner for lower extruder
+  acceleration; the recommended extruder chain is the advance alone.
 - `linear_pressure_advance` (`k`) — `DerivativeGains { k1: k, k2: 0 }`.
 - `tanh_pressure_advance`, `recipr_pressure_advance` (`linear_advance`,
   `nonlinear_offset`, `linearization_velocity`) — `NonlinearAdvance`, the

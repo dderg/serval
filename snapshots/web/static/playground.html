@@ -150,8 +150,8 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
             <div class="row"><label for="cfg-max_path_deviation">max_path_deviation</label><input id="cfg-max_path_deviation" type="number" step="0.001" placeholder="0.005"></div>
             <div class="row"><label for="cfg-max_accel_deviation">max_accel_deviation</label><input id="cfg-max_accel_deviation" type="number" step="10" placeholder="50"></div>
             <div class="section">[extruder]</div>
-            <div class="row"><label for="cfg-max_extrude_only_velocity">max_extrude_only_velocity</label><input id="cfg-max_extrude_only_velocity" type="number" step="5" placeholder="∞"></div>
-            <div class="row"><label for="cfg-max_extrude_only_accel">max_extrude_only_accel</label><input id="cfg-max_extrude_only_accel" type="number" step="100" placeholder="∞"></div>
+            <div class="row"><label for="cfg-max_extrude_only_velocity">max_extrude_only_velocity</label><input id="cfg-max_extrude_only_velocity" type="number" step="5" placeholder="∞" value="50"></div>
+            <div class="row"><label for="cfg-max_extrude_only_accel">max_extrude_only_accel</label><input id="cfg-max_extrude_only_accel" type="number" step="100" placeholder="∞" value="5000"></div>
             <div class="section" title="Simulates the physical toolhead as a damped resonant mode driven by the motor command — view only, does not affect planning">toolhead sim (view only)</div>
             <div class="row"><label for="sim-x-freq">x frequency_hz</label><input id="sim-x-freq" type="number" step="5" min="0" placeholder="off" value="185"></div>
             <div class="row"><label for="sim-x-zeta">x damping_ratio</label><input id="sim-x-zeta" type="number" step="0.01" min="0" max="1" placeholder="0.1"></div>
@@ -176,15 +176,11 @@ frequency_hz: 120
 
 [axis e]
 follows: x, y, z
-post_processors: pa, st
+post_processors: pa
 
 [post_processor pa]
 type: linear_pressure_advance
-k: 0.03
-
-[post_processor st]
-type: smooth_triangle
-smooth_time: 0.02</textarea>
+k: 0.03</textarea>
           </div>
         </div>
         <div class="panel" id="panel-path">

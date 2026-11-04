@@ -244,10 +244,10 @@ K (by default the configured pressure advance):
 ```
 make -f Makefile.rust motion-engine-fast
 python3 tools/corner_flow.py printer.cfg
-python3 tools/corner_flow.py printer.cfg --kernel-free
-python3 tools/corner_flow.py printer.cfg --kernel-free --set pa.k=0.04 --melt-k 0.03 --json
-python3 tools/corner_flow.py printer.cfg --kernel-free --extrude-only 45,2000
-python3 tools/corner_flow.py printer.cfg --sweep smooth_time=0.002,0.005,0.01
+python3 tools/corner_flow.py printer.cfg --set pa.k=0.04 --melt-k 0.03 --json
+python3 tools/corner_flow.py printer.cfg --extrude-only 45,2000
+python3 tools/corner_flow.py kernel.cfg --kernel-free
+python3 tools/corner_flow.py kernel.cfg --sweep smooth_time=0.002,0.005,0.01
 ```
 
 - **`peak` / `dip`** are the worst bead over- and under-fill at a corner,
@@ -264,22 +264,31 @@ python3 tools/corner_flow.py printer.cfg --sweep smooth_time=0.002,0.005,0.01
   **`dE_adv`** compares against the same chain without its advance. The
   advance vanishes at rest, so anything above ~1e-6 mm is material the
   pipeline lost or invented.
-- **`--kernel-free` takes the extruder's smoothing kernels out of the
-  config's chain**, leaving the recommended setup below. Every chain, kernel
-  or not, ramps its extrusion-ratio steps by the ramp time its limits
-  derive, so a step spreads over about `v·τ` of path however finely the
-  path is cut into moves. An advance with no kernel needs extrude-only
-  caps: `--extrude-only V,A` (default `50,5000`) fills in whichever the
-  config lacks, for every chain, and `[axis e] max_velocity` / `max_accel`
-  inherit them where unset, so it also sets the extruder limits the
-  planner holds the advance to.
+- **`--kernel-free` takes the extruder's smoothing kernels out of a
+  config that carries one** (`kernel.cfg` above), leaving the recommended
+  setup below, so a kernel override can be compared with the chain
+  without it; `--sweep smooth_time=...` varies the kernel's width. Every
+  chain, kernel or not, ramps its extrusion-ratio steps by the ramp time
+  its limits derive, so a step spreads over about `v·τ` of path however
+  finely the path is cut into moves. An advance with no kernel needs
+  extrude-only caps: `--extrude-only V,A` (default `50,5000`) fills in
+  whichever the config lacks, for every chain, and `[axis e]
+  max_velocity` / `max_accel` inherit them where unset, so it also sets
+  the extruder limits the planner holds the advance to.
 - **An extruder kernel trades corner quality for extruder acceleration.**
   It blurs the flow in time while the nozzle slows into a corner, and no
-  pressure advance value can cancel a symmetric blur. On
-  `tools/bench/printer.cfg` at 150 mm/s, a 45° corner bulges +159% with
-  `smooth_time: 0.04`, +71% with 0.02, +24% with 0.01 and +7% with 0.005,
-  at matched K, while the extruder acceleration (`ae`) on the same corner
-  rises from 597 mm/s² at 0.04 to 3436 mm/s² at 0.005.
+  pressure advance value can cancel a symmetric blur. With a
+  `smooth_triangle` added after the advance of `tools/bench/printer.cfg`
+  (K 0.03, 10000 mm/s², extruder 50 mm/s and 5000 mm/s²), a 45° corner at
+  150 mm/s bulges +159% with `smooth_time: 0.04`, +71% with 0.02, +24%
+  with 0.01 and +8% with 0.005, at matched K, while the extruder
+  acceleration (`ae`) on the same corner rises from 601 mm/s² at 0.04 to
+  3150 mm/s² at 0.005. Without the kernel the same corner lays the
+  commanded bead (0%) at 3799 mm/s². The bench's captured steps agree
+  (`tools/bench/README.md`, "Corner flow"): with 0.04 the 45° corner
+  bulges +127% at 100 mm/s and +195% at 300 mm/s, and without a kernel
+  every corner stays within 0.7% offline and within step quantization
+  in the capture.
 
 **The recommended setup adapts to the machine: set the extruder's limits
 and the advance's `k`, and put no kernel on the extruder.**
@@ -303,9 +312,14 @@ advance then runs unblurred along the shaped path, so corners lay the
 commanded bead; the velocity planner slows extruding moves, corners
 included, wherever the exact advance would ask the extruder for more than
 those limits, and derives every ratio step's ramp from them. The cost is
-time, not bead error. A kernel after the advance stays available as the
-explicit override above, for an extruder too weak to follow the exact
-advance at a speed you need.
+time, not bead error.
+
+**A kernel after the advance is an explicit override**, not a default:
+use it only for an extruder too weak to follow the exact advance at a
+speed you need, where the planner's corner slowdown costs more print time
+than the bead bulge above costs quality. Size it with `--sweep
+smooth_time=...` against the bulge you accept; every corner pays for it
+with over-fill that grows with the kernel's width and the corner speed.
 
 **The chain comparison needs re-measurement.** The table this section
 carried compared kernel widths, fixed ratio-ramp times and
