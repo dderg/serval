@@ -22,6 +22,7 @@ use crate::worker_pool::WorkerPool;
 mod enclosure;
 mod extrude_only;
 mod ratio_ramp;
+mod rest;
 use ratio_ramp::{RampLeg, RatioSmoothing};
 
 const INTEGRAL_TOL_MM: f64 = 1e-10;
@@ -354,7 +355,8 @@ fn fit_source_projection(
             length: s_length,
         },
         0.0,
-    );
+    )
+    .with_rests(fit_tol);
     let tolerance = follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis) * 0.5);
     let breakpoints = sig.construction_breakpoints(raw_axis, tolerance.accel_mm_s2);
     let input_state = |t| {
@@ -2302,20 +2304,6 @@ impl<'a> ShapedLeaders<'a> {
         speed_second_of(&states[..leaders], speed)
     }
 
-    fn path_derivatives(&self, t: f64) -> (f64, f64, f64) {
-        let (states, leaders) = self.pvaj_states(t);
-        let states = &states[..leaders];
-        let speed = states.iter().map(|&(_, v, _, _)| v * v).sum::<f64>().sqrt();
-        if speed == 0.0 {
-            return (0.0, 0.0, 0.0);
-        }
-        let tangential = states
-            .iter()
-            .map(|&(_, v, a, _)| v / speed * a)
-            .sum::<f64>();
-        (speed, tangential, speed_second_of(states, speed))
-    }
-
     fn pvaj_states(&self, t: f64) -> ([(f64, f64, f64, f64); MAX_LEADERS], usize) {
         let leaders = self.axes.len();
         assert!(
@@ -2507,6 +2495,10 @@ pub(crate) struct FollowerSignal<'a> {
     state: &'a FollowerState,
     e_start: f64,
     s_start: f64,
+    /// The odometer's start plus the length it was scaled to, the sum the
+    /// projection loop carries to the next segment's start, so a segment
+    /// starts where its predecessor ends whether one emit held both or not.
+    s_end: f64,
     e_spans_start: f64,
     leaders: ShapedLeaders<'a>,
     raw_delta: Option<(&'a ContinuousAxis, f64)>,
@@ -2525,6 +2517,11 @@ pub(crate) struct FollowerSignal<'a> {
     axis_windows: std::cell::OnceCell<Option<enclosure::FollowerAxisWindows<'a>>>,
     /// See [`Self::ratio_crossings`].
     ratio_crossings: std::cell::OnceCell<Vec<(f64, f64)>>,
+    /// The leaders' rests inside the support, in order ([`rest`]).
+    rests: Vec<rest::Rest>,
+    /// The grid times and the rests' splits, in order: where the signal
+    /// may jump, each read on both sides by [`TrackSignal::knot_jump`].
+    jump_times: Vec<f64>,
 }
 
 impl<'a> FollowerSignal<'a> {
@@ -2555,7 +2552,7 @@ impl<'a> FollowerSignal<'a> {
             integrate_recording(&|t| shaped_leaders.speed(t), end, &mut knots);
         }
         let odometer_scale = knots.scale_to(odometer.length);
-        let s_end = odometer.start + knots.length() * odometer_scale;
+        let s_end = odometer.start + odometer.length;
         let s_owned_end = state.owned_span_end(odometer.start, s_end);
         let ratio_bounds = RatioBounds::ridden(state, odometer.start, s_owned_end);
 
@@ -2563,6 +2560,7 @@ impl<'a> FollowerSignal<'a> {
             state,
             e_start,
             s_start: odometer.start,
+            s_end,
             e_spans_start: state.spans_e(odometer.start),
             leaders: shaped_leaders,
             raw_delta,
@@ -2577,12 +2575,30 @@ impl<'a> FollowerSignal<'a> {
             whole_enclosure: enclosure::WholeEnclosure::default(),
             axis_windows: std::cell::OnceCell::new(),
             ratio_crossings: std::cell::OnceCell::new(),
+            rests: Vec::new(),
+            jump_times: Vec::new(),
         };
         let (start_sliver, end_sliver) = sig.speed_zero_slivers();
         sig.start_sliver = start_sliver;
         sig.end_sliver = end_sliver;
+        sig.jump_times = sig.grid.clone();
         sig.s_owned_end = s_owned_end;
         sig
+    }
+
+    /// The signal reading the leaders' rests, at speeds their fits to
+    /// `leader_tol` cannot resolve ([`rest`]).
+    fn with_rests(mut self, leader_tol: FitTol) -> Self {
+        self.rests = self.find_rests(self.rest_speed(leader_tol));
+        self.jump_times = self
+            .grid
+            .iter()
+            .copied()
+            .chain(self.rests.iter().map(|rest| rest.split))
+            .collect();
+        self.jump_times.sort_by(f64::total_cmp);
+        self.jump_times.dedup();
+        self
     }
 
     fn endpoint_sliver(
@@ -2635,14 +2651,23 @@ impl<'a> FollowerSignal<'a> {
     }
 
     fn leader_speed_deriv(&self, t: f64, speed: f64) -> f64 {
-        match self.speed_zero_sliver(t) {
-            Some(sliver) => sliver.deriv_at(t),
+        if let Some(sliver) = self.speed_zero_sliver(t) {
+            return sliver.deriv_at(t);
+        }
+        match self.rest_at(t) {
+            Some(rest) => self.rest_rates(rest, t).0,
             None => self.leaders.speed_deriv(t, speed),
         }
     }
 
     fn leader_speed_second_deriv(&self, t: f64, speed: f64) -> f64 {
-        if speed == 0.0 || self.speed_zero_sliver(t).is_some() {
+        if self.speed_zero_sliver(t).is_some() {
+            return 0.0;
+        }
+        if let Some(rest) = self.rest_at(t) {
+            return self.rest_rates(rest, t).1;
+        }
+        if speed == 0.0 {
             return 0.0;
         }
         self.leaders.speed_second(t, speed)
@@ -2852,7 +2877,7 @@ impl<'a> FollowerSignal<'a> {
         self.s_offset(t).min(self.s_owned_end - self.s_start)
     }
     fn s_end(&self) -> f64 {
-        self.s_start + self.knots.length() * self.odometer_scale
+        self.s_end
     }
     /// The exact value of an identically-constant window — a follower whose
     /// span table commands zero extrusion ratio across the whole owned range
@@ -2954,6 +2979,12 @@ impl<'a> FollowerSignal<'a> {
             }
         }
         breaks.extend(self.ratio_crossings().iter().map(|&(time, _)| time));
+        breaks.extend(
+            self.rests
+                .iter()
+                .map(|rest| rest.split)
+                .filter(|&t| t > support_start && t < support_end),
+        );
         breaks.sort_by(f64::total_cmp);
         breaks.dedup_by(|left, right| (*left - *right).abs() <= GRID_DEDUP_EPS_S);
         for b in breaks.iter_mut() {
@@ -3308,9 +3339,10 @@ impl TrackSignal for FollowerSignal<'_> {
             })
     }
     fn interior_knots(&self, start: f64, end: f64) -> &[f64] {
-        let first = self.grid.partition_point(|&t| t <= start);
-        let past_last = self.grid.partition_point(|&t| t < end);
-        &self.grid[first..past_last.max(first)]
+        let knots = &self.jump_times;
+        let first = knots.partition_point(|&t| t <= start);
+        let past_last = knots.partition_point(|&t| t < end);
+        &knots[first..past_last.max(first)]
     }
     fn knot_jump(&self, knot: f64) -> KnotJumpBound {
         let before = trajectory::next_toward(knot, f64::NEG_INFINITY);
@@ -3319,11 +3351,11 @@ impl TrackSignal for FollowerSignal<'_> {
             return KnotJumpBound::UNBOUNDED;
         }
         let rates = |t: f64| {
-            let (speed, speed_deriv, speed_second) = self.leaders.path_derivatives(t);
+            let speed = self.leaders.speed(t);
             (
                 self.odometer_scale * speed,
-                self.odometer_scale * speed_deriv,
-                self.odometer_scale * speed_second,
+                self.odometer_scale * self.leader_speed_deriv(t, speed),
+                self.odometer_scale * self.leader_speed_second_deriv(t, speed),
             )
         };
         let (rate_before, rate_deriv_before, rate_second_before) = rates(before);

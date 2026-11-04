@@ -31,7 +31,7 @@ fn print_head(print: &str, lines: usize) -> String {
 }
 
 fn emitted(config: &Path, gcode: &str, emit_batch: usize) -> Vec<ContinuousSegment> {
-    let replay = LiveReplay::new(gcode, &planner_config(config)).expect("the replay builds");
+    let replay = LiveReplay::new(gcode, &planner_config(config), None).expect("the replay builds");
     let mut pipeline = replay.pipeline().with_emit_batch(emit_batch);
     let mut segments = Vec::new();
     let mut collect = |item| {

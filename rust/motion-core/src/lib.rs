@@ -12,7 +12,6 @@ pub mod mcu_config;
 pub mod motion_history;
 pub mod nudge;
 pub mod pump;
-pub mod step_capacity;
 pub mod types;
 pub mod worker;
 

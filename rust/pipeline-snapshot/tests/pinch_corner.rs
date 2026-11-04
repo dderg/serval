@@ -44,7 +44,7 @@ fn stream_case(
     );
     let steps = plan_steps(&waypoints, base).expect("steps");
 
-    let config = live_config::stream_config(&planner_config).expect("stream config");
+    let config = live_config::stream_config(&planner_config, None).expect("stream config");
     let mut fit = FitStage::new(config.corner).into_driver();
     let mut planner = Planner::new(config, Arc::default());
     let mut planned = Vec::new();

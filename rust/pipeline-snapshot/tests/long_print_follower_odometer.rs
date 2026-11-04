@@ -64,7 +64,7 @@ fn plan_from(stream_start_s: f64) -> Vec<ContinuousSegment> {
         Some(pipeline_snapshot::EXTRUDER_AXIS),
     );
     let steps = plan_steps(&waypoints, base).expect("steps");
-    let config = live_config::stream_config(&planner).expect("stream config");
+    let config = live_config::stream_config(&planner, None).expect("stream config");
     let registry = planner_config::AxisRegistry::try_new(vec![
         axis("x", &[], &["shaper_x"]),
         axis("y", &[], &["shaper_y"]),

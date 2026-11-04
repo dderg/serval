@@ -139,15 +139,18 @@ fn run_waypoints(limits: FuzzLimits, waypoints: &[Waypoint]) -> (ExactTrajectory
     };
     let snapshot = pipeline_snapshot(waypoints, params).expect("valid fuzz input");
     let traj = snapshot.trajectory;
-    let config = live_config::stream_config(&PlannerConfig {
-        cartesian: CartesianLimits::without_z_caps(
-            limits.max_velocity,
-            limits.max_accel,
-            f64::INFINITY,
-            corner_deviation,
-        ),
-        ..PlannerConfig::default()
-    })
+    let config = live_config::stream_config(
+        &PlannerConfig {
+            cartesian: CartesianLimits::without_z_caps(
+                limits.max_velocity,
+                limits.max_accel,
+                f64::INFINITY,
+                corner_deviation,
+            ),
+            ..PlannerConfig::default()
+        },
+        None,
+    )
     .expect("strategy generates valid limits");
     let report = audit_trajectory(&traj, &config, &AuditBudgets::for_config(&config));
     (traj, report)

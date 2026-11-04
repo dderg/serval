@@ -8,7 +8,7 @@ import os
 import traceback
 
 from .extras.danger_options import get_danger_options
-from .motion_engine import native_class
+from .motion_engine import native
 
 RTT_AGE = 0.000010 / (60.0 * 60.0)
 SYNC_STABLE_SAMPLES = 3
@@ -26,7 +26,7 @@ class ClockSync:
         self.mcu_freq = 1.0
         self.clock_est = (0.0, 0.0, 0.0)
         stable_ppm = get_danger_options().clock_sync_stable_ppm * 1e-6
-        estimator = native_class("ClockSyncEstimator")
+        estimator = native("ClockSyncEstimator")
         self._est = estimator(
             estimator.DECAY, RTT_AGE, stable_ppm, SYNC_STABLE_SAMPLES
         )

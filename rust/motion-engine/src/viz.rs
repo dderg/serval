@@ -7,6 +7,8 @@ use snapshot_core::{SampleSide, Snapshot};
 use planner_config::RuntimeLimits;
 use planner_config::from_doc::{MotionSettings, read_motion_settings};
 
+use crate::step_benchmarks::{PyStepBenchmark, optional_step_capacity_input};
+
 /// The runtime limit overrides in force for a waypoint's move, as Python
 /// sees them: `None` is "no override, the config base applies".
 #[derive(IntoPyObject, FromPyObject)]
@@ -87,17 +89,37 @@ fn planner(config_text: &str) -> PyResult<snapshot_core::PlannerConfig> {
     planner_config::from_doc::planner_config_from_text(config_text).map_err(PyValueError::new_err)
 }
 
-fn snapshot_from_config(waypoints: &[Waypoint], config_text: &str) -> PyResult<Snapshot> {
-    snapshot_core::pipeline_snapshot_for_config(waypoints, &planner(config_text)?)
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+fn snapshot_from_config(
+    waypoints: &[Waypoint],
+    config_text: &str,
+    step_benchmarks: Option<&[PyStepBenchmark]>,
+) -> PyResult<Snapshot> {
+    let step_capacity = optional_step_capacity_input(config_text, step_benchmarks)?;
+    snapshot_core::pipeline_snapshot_for_config(
+        waypoints,
+        &planner(config_text)?,
+        step_capacity.as_ref(),
+    )
+    .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
 /// Snapshot the pipeline for `waypoints` under the motion config parsed
 /// from `config_text` — the same section reader (defaults, bounds) the live
 /// printer uses — and return the snapshot as a JSON string for `json.loads`.
+/// `step_benchmarks` caps every move as the live printer whose mcus
+/// reported them does; `None` plans uncapped.
 #[pyfunction]
-pub(crate) fn pipeline_snapshot(waypoints: Vec<PyWaypoint>, config_text: &str) -> PyResult<String> {
-    let snap = snapshot_from_config(&waypoints_from_py(waypoints), config_text)?;
+#[pyo3(signature = (waypoints, config_text, step_benchmarks = None))]
+pub(crate) fn pipeline_snapshot(
+    waypoints: Vec<PyWaypoint>,
+    config_text: &str,
+    step_benchmarks: Option<Vec<PyStepBenchmark>>,
+) -> PyResult<String> {
+    let snap = snapshot_from_config(
+        &waypoints_from_py(waypoints),
+        config_text,
+        step_benchmarks.as_deref(),
+    )?;
     serde_json::to_string(&snap).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
@@ -190,17 +212,24 @@ impl PlannerLimits {
 /// each axis in `axes` at `samples` times spread over the trajectory. Returns
 /// the snapshot JSON alongside per-axis `(position, velocity, acceleration)`
 /// rows so a plotting consumer never re-derives the carriers itself.
+/// `step_benchmarks` caps it as in [`pipeline_snapshot`].
 #[pyfunction]
+#[pyo3(signature = (waypoints, config_text, axes, samples, step_benchmarks = None))]
 pub(crate) fn pipeline_snapshot_axis_samples(
     waypoints: Vec<PyWaypoint>,
     config_text: &str,
     axes: Vec<usize>,
     samples: usize,
+    step_benchmarks: Option<Vec<PyStepBenchmark>>,
 ) -> PyResult<(String, Vec<Vec<(f64, f64, f64)>>)> {
     if samples < 2 {
         return Err(PyValueError::new_err("samples must be at least 2"));
     }
-    let snap = snapshot_from_config(&waypoints_from_py(waypoints), config_text)?;
+    let snap = snapshot_from_config(
+        &waypoints_from_py(waypoints),
+        config_text,
+        step_benchmarks.as_deref(),
+    )?;
     let t_end = snap.trajectory.t_end();
     let mut out = Vec::with_capacity(axes.len());
     for axis in axes {

@@ -147,8 +147,12 @@ pub struct LiveReplay {
 }
 
 impl LiveReplay {
-    pub fn new(source: &str, planner: &planner_config::PlannerConfig) -> Result<Self, String> {
-        let config = motion_pipeline::live_config::stream_config(planner)?;
+    pub fn new(
+        source: &str,
+        planner: &planner_config::PlannerConfig,
+        step_benchmarks: Option<&motion_pipeline::live_config::step_capacity::StepCapacityInput>,
+    ) -> Result<Self, String> {
+        let config = motion_pipeline::live_config::stream_config(planner, step_benchmarks)?;
         let chains = planner.compile_active_chains().map_err(|e| e.to_string())?;
         let moves = moves_under(
             source,

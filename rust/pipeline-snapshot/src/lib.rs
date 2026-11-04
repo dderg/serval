@@ -21,6 +21,7 @@ use trajectory::{AxisChainSet, ContinuousAxis, ContinuousSegment};
 pub mod audit;
 pub mod waypoints;
 
+use motion_pipeline::live_config::step_capacity::StepCapacityInput;
 use motion_pipeline::{Control, Pipeline, StreamConfig, StreamInput, TrajectoryItem, live_config};
 
 pub use geometry::corner_deviation_from_scv;
@@ -153,17 +154,26 @@ pub fn pipeline_snapshot_streaming(
         ));
     }
     let planner = planner_config(&params)?;
-    snapshot_planned(waypoints, &planner, partial_batch_segments, on_partial)
+    snapshot_planned(
+        waypoints,
+        &planner,
+        None,
+        partial_batch_segments,
+        on_partial,
+    )
 }
 
 /// The snapshot of `waypoints` under `planner` exactly as the live engine
 /// derives it from a config document: the snapshot every config-driven
-/// path (the Python harness, the corpus, the bench reference) takes.
+/// path (the Python harness, the corpus, the bench reference) takes. The
+/// live printer caps every move by its mcus' step benchmarks; `None` plans
+/// uncapped.
 pub fn pipeline_snapshot_for_config(
     waypoints: &[waypoints::Waypoint],
     planner: &PlannerConfig,
+    step_benchmarks: Option<&StepCapacityInput>,
 ) -> Result<Snapshot, SnapshotError> {
-    snapshot_planned(waypoints, planner, usize::MAX, |_| {})
+    snapshot_planned(waypoints, planner, step_benchmarks, usize::MAX, |_| {})
 }
 
 /// What the live engine is fed for `waypoints` under `planner` — the rest
@@ -177,8 +187,9 @@ pub struct StreamRecord {
 pub fn stream_record(
     waypoints: &[waypoints::Waypoint],
     planner: &PlannerConfig,
+    step_benchmarks: Option<&StepCapacityInput>,
 ) -> Result<StreamRecord, SnapshotError> {
-    let (config, axis_chains, steps) = stream_inputs(waypoints, planner)?;
+    let (config, axis_chains, steps) = stream_inputs(waypoints, planner, step_benchmarks)?;
     let mut inputs = vec![motion_pipeline::InputTrace::Reset {
         pos: rest_position_before(plan_moves(&steps)),
     }];
@@ -196,6 +207,7 @@ pub fn stream_record(
 fn stream_inputs(
     waypoints: &[waypoints::Waypoint],
     planner: &PlannerConfig,
+    step_benchmarks: Option<&StepCapacityInput>,
 ) -> Result<(StreamConfig, AxisChainSet, Vec<PlanStep>), SnapshotError> {
     if waypoints.len() < 2 {
         return Err(SnapshotError::TooFewWaypoints);
@@ -205,7 +217,8 @@ fn stream_inputs(
         &live_config::extruder_caps(planner).map_err(SnapshotError::InvalidChain)?,
     )
     .map_err(SnapshotError::InvalidLimits)?;
-    let config = live_config::stream_config(planner).map_err(SnapshotError::InvalidLimits)?;
+    let config = live_config::stream_config(planner, step_benchmarks)
+        .map_err(SnapshotError::InvalidLimits)?;
     let axis_chains = planner
         .compile_active_chains()
         .map_err(|e| SnapshotError::InvalidChain(e.to_string()))?;
@@ -215,10 +228,11 @@ fn stream_inputs(
 fn snapshot_planned(
     waypoints: &[waypoints::Waypoint],
     planner: &PlannerConfig,
+    step_benchmarks: Option<&StepCapacityInput>,
     partial_batch_segments: usize,
     mut on_partial: impl FnMut(&Snapshot),
 ) -> Result<Snapshot, SnapshotError> {
-    let (config, axis_chains, steps) = stream_inputs(waypoints, planner)?;
+    let (config, axis_chains, steps) = stream_inputs(waypoints, planner, step_benchmarks)?;
     let raw_points = extract_raw_path(&steps);
     let mut next_partial_at = partial_batch_segments;
     let (_fitted, shaped, toolhead) =

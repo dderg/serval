@@ -26,10 +26,13 @@ fn base(limits: geometry::VelocityLimits) -> live_config::GcodeMoveBase {
 }
 
 fn default_config(limits: geometry::VelocityLimits) -> StreamConfig {
-    live_config::stream_config(&PlannerConfig {
-        cartesian: base(limits).config_limits(),
-        ..PlannerConfig::default()
-    })
+    live_config::stream_config(
+        &PlannerConfig {
+            cartesian: base(limits).config_limits(),
+            ..PlannerConfig::default()
+        },
+        None,
+    )
     .unwrap()
 }
 

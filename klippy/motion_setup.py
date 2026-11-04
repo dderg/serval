@@ -28,9 +28,6 @@ McuTopology = namedtuple(
         "stepcompress_drain_budget_secs",
         "phase_sample_rate",
         "phase_ring_depth",
-        "mcu_name",
-        "step_capacity_ticks_per_s",
-        "ticks_per_step",
     ],
 )
 
@@ -252,6 +249,8 @@ def _reject_pulse_lane_conflicts(motion, name, mcu_obj, hp_motors):
 
 
 def derive_mcu_topology(motion, axis_to_handle):
+    """Each engine mcu's topology, and the step benchmarks of those whose
+    step capacity caps the planner."""
     by_handle = {}
     for axis_idx, handle in axis_to_handle.items():
         by_handle.setdefault(handle, []).append(axis_idx)
@@ -260,6 +259,7 @@ def derive_mcu_topology(motion, axis_to_handle):
     endpoint_handles = ethercat_handles(motion)
     slot_steppers = build_slot_steppers(motion)
     topo = []
+    step_benchmarks = []
     for handle in sorted(by_handle):
         axes = sorted(by_handle[handle])
         max_motor_velocity = [ceilings.get(a, float("inf")) for a in axes]
@@ -335,9 +335,6 @@ def derive_mcu_topology(motion, axis_to_handle):
                 motor_oids.append(slot_oids[axis])
                 motor_step_pulse_seconds.append(slot_step_pulse_seconds[axis])
                 motor_high_precision_step_compress.append(False)
-                capacity_motors.append(
-                    motion_step_capacity.CapacityMotor(axis, None, False)
-                )
                 continue
             motor_counts.append(len(bindings))
             steppers = dict(slot_steppers[axis])
@@ -374,14 +371,14 @@ def derive_mcu_topology(motion, axis_to_handle):
             _reject_pulse_lane_conflicts(
                 motion, name, mcu_obj, motor_high_precision_step_compress
             )
-        step_capacity_ticks_per_s, ticks_per_step = (
-            motion_step_capacity.mcu_step_capacity(
-                motion,
-                name,
-                None if handle in endpoint_handles else mcu_obj,
-                capacity_motors,
-            )
+        step_benchmark = motion_step_capacity.mcu_step_capacity(
+            motion,
+            name,
+            None if handle in endpoint_handles else mcu_obj,
+            capacity_motors,
         )
+        if step_benchmark is not None:
+            step_benchmarks.append(step_benchmark)
         topo.append(
             McuTopology(
                 handle,
@@ -400,12 +397,9 @@ def derive_mcu_topology(motion, axis_to_handle):
                 drain_budget_secs,
                 phase_sample_rate,
                 phase_ring_depth,
-                name,
-                step_capacity_ticks_per_s,
-                ticks_per_step,
             )
         )
-    return topo
+    return topo, step_benchmarks
 
 
 def init_planner(motion):
@@ -422,7 +416,7 @@ def init_planner(motion):
         return
 
     axis_to_handle = build_axis_to_handle(motion)
-    topology = derive_mcu_topology(motion, axis_to_handle)
+    topology, step_benchmarks = derive_mcu_topology(motion, axis_to_handle)
     if not topology:
         logging.warning(
             "Motion: no axis->MCU assignment resolved; skipping init_planner"
@@ -447,7 +441,9 @@ def init_planner(motion):
             motion._axis_mcus[axis_name] = mcu_by_handle[handle]
 
     try:
-        motion.engine.init_planner(motion._motion_config_text, topology)
+        motion.engine.init_planner(
+            motion._motion_config_text, topology, step_benchmarks
+        )
         configure_axes_per_mcu(motion, engine_mcus)
         motion._planner_ready = True
         motion._register_engine_wakeup()
