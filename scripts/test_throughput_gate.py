@@ -83,9 +83,14 @@ def test_ir_growth_or_shrinkage_past_its_tolerance_fails_and_noise_passes():
 
 def test_a_live_ratio_away_from_one_past_its_tolerance_fails():
     limit = gate.LIVE_TOLERANCE_PCT / 100.0
-    assert gate.judge("c", entry(), measurement(live=1 + limit * 0.9)).problems == ()
+    assert (
+        gate.judge("c", entry(), measurement(live=1 + limit * 0.9)).problems
+        == ()
+    )
     grown = gate.judge("c", entry(), measurement(live=1 + limit * 1.1))
-    assert grown.problems[0].startswith("live 2-core wall per stream second grew")
+    assert grown.problems[0].startswith(
+        "live 2-core wall per stream second grew"
+    )
     shrunk = gate.judge("c", entry(), measurement(live=1 - limit * 1.1))
     assert "accept the improvement" in shrunk.problems[0]
 
@@ -97,7 +102,9 @@ def test_the_ir_prediction_scales_with_stream_time_per_instruction(monkeypatch):
     assert "Ir predicts, 1.90x, is below the 2.0x floor" in verdict.problems[0]
 
 
-def test_the_live_prediction_divides_the_reference_window_by_the_ratio(monkeypatch):
+def test_the_live_prediction_divides_the_reference_window_by_the_ratio(
+    monkeypatch,
+):
     monkeypatch.setattr(gate, "PI_FLOOR_FAILS", True)
     verdict = gate.judge("c", entry(2.01), measurement(live=1.01))
     assert verdict.predicted_x[1] == pytest.approx(2.01 / 1.01)
@@ -113,14 +120,18 @@ def test_a_floor_miss_only_warns_while_the_floor_checks_are_off(monkeypatch):
     verdict = gate.judge("c", entry(1.9), measurement())
     assert verdict.problems == ()
     assert len(verdict.warnings) == 2
-    assert all("below the 2.0x floor" in warning for warning in verdict.warnings)
+    assert all(
+        "below the 2.0x floor" in warning for warning in verdict.warnings
+    )
 
 
 def test_a_calibration_off_the_reference_is_moved_onto_it_by_the_live_ratio():
     slower = measurement(live=1.1)
     pi = gate.pi_calibration(slower, [2.0, 2.2], "head", accepted=False)
     assert pi["worst_x_reference"] == pytest.approx(2.2)
-    assert gate.predicted_worst_x({"pi_2core": pi}, slower)[1] == pytest.approx(2.0)
+    assert gate.predicted_worst_x({"pi_2core": pi}, slower)[1] == pytest.approx(
+        2.0
+    )
     accepted = gate.pi_calibration(slower, [2.0, 2.2], "head", accepted=True)
     assert accepted["worst_x_reference"] == 2.0
 
@@ -141,10 +152,18 @@ def test_an_uncalibrated_config_fails():
 
 def test_a_baseline_without_its_slice_reference_or_configs_is_refused():
     configs = ("a.cfg",)
-    current = {"slice_lines": gate.SLICE_LINES, "commit": "abc", "configs": {"a.cfg": {}}}
+    current = {
+        "slice_lines": gate.SLICE_LINES,
+        "commit": "abc",
+        "configs": {"a.cfg": {}},
+    }
     assert gate.baseline_problem(current, configs) is None
-    assert "lines" in gate.baseline_problem({**current, "slice_lines": 1}, configs)
-    assert "reference" in gate.baseline_problem({**current, "commit": ""}, configs)
+    assert "lines" in gate.baseline_problem(
+        {**current, "slice_lines": 1}, configs
+    )
+    assert "reference" in gate.baseline_problem(
+        {**current, "commit": ""}, configs
+    )
     assert "no baseline" in gate.baseline_problem(current, ("b.cfg",))
 
 

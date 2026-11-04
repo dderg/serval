@@ -241,7 +241,9 @@ def prepare_reference(commit: str, target_dir: Path) -> None:
         ["git", "cat-file", "-e", f"{commit}^{{commit}}"], cwd=ROOT, check=False
     ).returncode
     if present != 0:
-        run(["git", "fetch", "--quiet", "--depth=1", "origin", commit], cwd=ROOT)
+        run(
+            ["git", "fetch", "--quiet", "--depth=1", "origin", commit], cwd=ROOT
+        )
     archive = subprocess.run(
         ["git", "archive", "--format=tar", commit, "--", *MEASURED_TREES],
         cwd=ROOT,
@@ -286,9 +288,13 @@ def gate_cores() -> list[int]:
         )
     for core in cores:
         if run(["taskset", "-c", str(core), "nproc"]).strip() != "1":
-            raise GateError(f"taskset -c {core} leaves more than one core visible")
+            raise GateError(
+                f"taskset -c {core} leaves more than one core visible"
+            )
     if run(["taskset", "-c", LIVE_CORES, "nproc"]).strip() != "2":
-        raise GateError(f"taskset -c {LIVE_CORES} does not leave two cores visible")
+        raise GateError(
+            f"taskset -c {LIVE_CORES} does not leave two cores visible"
+        )
     return cores
 
 
@@ -329,7 +335,9 @@ def measure_instructions(
         scratch = Path(scratch_dir)
         sliced = scratch / "slice.gcode"
         sliced.write_text("".join(lines[:SLICE_LINES]))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(cores)) as pool:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(cores)
+        ) as pool:
             futures = {
                 config: pool.submit(
                     count_instructions,
@@ -341,7 +349,9 @@ def measure_instructions(
                 )
                 for index, config in enumerate(configs)
             }
-            counted = {config: future.result() for config, future in futures.items()}
+            counted = {
+                config: future.result() for config, future in futures.items()
+            }
     print(
         f"counted instructions in {time.monotonic() - started:.0f} s",
         file=sys.stderr,
@@ -350,7 +360,9 @@ def measure_instructions(
     return counted
 
 
-def live_secs_per_stream_sec(bench: Path, tree: Path, config: str) -> tuple[float, float]:
+def live_secs_per_stream_sec(
+    bench: Path, tree: Path, config: str
+) -> tuple[float, float]:
     for needed in (tree / GCODE, tree / config):
         if not needed.exists():
             raise GateError(
@@ -379,7 +391,10 @@ def measure_live(
     reference: Path,
     configs: tuple[str, ...],
 ) -> dict[str, tuple[float, float, float]]:
-    sides = {"head": (head_bench, ROOT), "reference": (reference_bench, reference)}
+    sides = {
+        "head": (head_bench, ROOT),
+        "reference": (reference_bench, reference),
+    }
     costs = {(config, side): [] for config in configs for side in sides}
     walls = {(config, side): [] for config in configs for side in sides}
     for rep in range(LIVE_REPS):
@@ -406,17 +421,22 @@ def measure_live(
     }
 
 
-def measure_here(configs: tuple[str, ...], reference_commit: str) -> dict[str, Measurement]:
+def measure_here(
+    configs: tuple[str, ...], reference_commit: str
+) -> dict[str, Measurement]:
     reference = reference_tree(RUST / "target", reference_commit)
     if not (reference / EXTRACTED_MARKER).exists():
-        raise GateError(f"the reference {reference_commit} is not extracted at {reference}")
+        raise GateError(
+            f"the reference {reference_commit} is not extracted at {reference}"
+        )
     cores = gate_cores()
     head_bench = build_bench(RUST)
     reference_bench = build_bench(reference / "rust")
     counted = measure_instructions(head_bench, configs, cores)
     live = measure_live(head_bench, reference_bench, reference, configs)
     return {
-        config: Measurement(*counted[config], *live[config]) for config in configs
+        config: Measurement(*counted[config], *live[config])
+        for config in configs
     }
 
 
@@ -471,7 +491,9 @@ def measure_in_docker(
     return {config: Measurement(**raw[config]) for config in configs}
 
 
-def measure(configs: tuple[str, ...], reference_commit: str) -> dict[str, Measurement]:
+def measure(
+    configs: tuple[str, ...], reference_commit: str
+) -> dict[str, Measurement]:
     if shutil.which("valgrind"):
         prepare_reference(reference_commit, RUST / "target")
         return measure_here(configs, reference_commit)
@@ -498,17 +520,24 @@ def pi_calibration(
     lowest = min(worst)
     return {
         "k_ir": lowest * measurement.ir / measurement.stream_secs,
-        "worst_x_reference": lowest if accepted else lowest * measurement.live_ratio,
+        "worst_x_reference": lowest
+        if accepted
+        else lowest * measurement.live_ratio,
         "worst_x": worst,
         "commit": commit,
     }
 
 
 def carried_pi(pi: dict, measurement: Measurement) -> dict:
-    return {**pi, "worst_x_reference": pi["worst_x_reference"] / measurement.live_ratio}
+    return {
+        **pi,
+        "worst_x_reference": pi["worst_x_reference"] / measurement.live_ratio,
+    }
 
 
-def predicted_worst_x(entry: dict, measurement: Measurement) -> tuple[float, float] | None:
+def predicted_worst_x(
+    entry: dict, measurement: Measurement
+) -> tuple[float, float] | None:
     pi = entry.get("pi_2core")
     if pi is None:
         return None
@@ -518,7 +547,9 @@ def predicted_worst_x(entry: dict, measurement: Measurement) -> tuple[float, flo
     )
 
 
-def drift_problems(name: str, delta_pct: float, tolerance_pct: float) -> list[str]:
+def drift_problems(
+    name: str, delta_pct: float, tolerance_pct: float
+) -> list[str]:
     if delta_pct > tolerance_pct:
         return [
             f"{name} grew {delta_pct:+.2f} % (limit {tolerance_pct} %): a "
@@ -722,7 +753,9 @@ def main() -> int:
             {
                 "slice_lines": SLICE_LINES,
                 "commit": reference_commit,
-                "reason": args.reason.strip() if args.accept else baseline["reason"],
+                "reason": args.reason.strip()
+                if args.accept
+                else baseline["reason"],
                 "configs": entries,
             }
         )
