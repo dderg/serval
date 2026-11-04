@@ -35,7 +35,7 @@ ANALYZE_TIMEOUT_S = 1200.0
 ENGINE_BUILD_TIMEOUT_S = 3600
 ENGINE_BUILD = ["make", "-f", "Makefile.rust", "motion-engine-fast"]
 THROTTLE_ARGS = ["--host-cpus", "1", "--host-max-mhz", "1500"]
-LADDER_CEILING_STEPS_PER_S = 300_000
+SINGLE_MOTOR_CEILING_STEPS_PER_S = 172_000
 BENCHMARK_BAND = (0.85, 1.10)
 
 
@@ -53,12 +53,12 @@ def step_benchmark_verdict(mcu_status: dict) -> dict:
         )
     clock = float(mcu_status["mcu_constants"]["CLOCK_FREQ"])
     capacity = clock / benchmark["pulsed_ticks_per_step"]
-    ratio = capacity / LADDER_CEILING_STEPS_PER_S
+    ratio = capacity / SINGLE_MOTOR_CEILING_STEPS_PER_S
     return {
         **benchmark,
         "pulsed_capacity_steps_per_s": capacity,
-        "ladder_ceiling_steps_per_s": LADDER_CEILING_STEPS_PER_S,
-        "ratio_to_ladder_ceiling": ratio,
+        "single_motor_ceiling_steps_per_s": SINGLE_MOTOR_CEILING_STEPS_PER_S,
+        "ratio_to_single_motor_ceiling": ratio,
         "band": list(BENCHMARK_BAND),
         "within_band": BENCHMARK_BAND[0] <= ratio <= BENCHMARK_BAND[1],
     }
@@ -300,8 +300,8 @@ def main() -> None:
     print_table(rows)
     print(
         f"step benchmark: {benchmark['pulsed_capacity_steps_per_s']:.0f} "
-        f"steps/s pulsed = {benchmark['ratio_to_ladder_ceiling']:.2f} x the "
-        f"ladder ceiling, band {BENCHMARK_BAND}: "
+        f"steps/s pulsed = {benchmark['ratio_to_single_motor_ceiling']:.2f} x "
+        f"the single-motor ceiling, band {BENCHMARK_BAND}: "
         + ("ok" if benchmark["within_band"] else "OUT OF BAND")
     )
     print(f"summary: {suite_dir / 'summary.json'}")
