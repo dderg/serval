@@ -263,9 +263,13 @@ pub(crate) enum PostProcessError {
     NonFiniteSample { axis: usize, t: f64 },
 }
 
+/// A committed move: its geometry, its planned velocity, and the extrusion
+/// budget its plan took from the moves around it, which a re-plan of the
+/// move must take again.
 pub struct PlannedMove {
     pub geometry: Move,
     pub velocity: MoveVelocity,
+    pub budget: geometry::ExtrusionBudget,
 }
 
 /// What flows into the fit stage and planner: geometry, the command to stop
