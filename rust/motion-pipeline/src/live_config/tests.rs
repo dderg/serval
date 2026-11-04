@@ -49,7 +49,6 @@ const RAMPED_EXTRUDER: &str = "[motor me]\n\
     follows: x, y, z\n\
     motors: me\n\
     post_processors: pa\n\
-    ratio_ramp_time: 0.015\n\
     [post_processor pa]\n\
     type: linear_pressure_advance\n\
     k: 0.03\n\

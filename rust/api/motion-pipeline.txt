@@ -248,3 +248,4 @@ pub fn motion_pipeline::WorkerPool::lead_and_follow(&self, usize, impl core::ops
 pub const motion_pipeline::CONTIGUITY_EPS_MM: f64
 pub const motion_pipeline::SHAPER_INBOX_CAP: usize
 pub fn motion_pipeline::advance_odometer(&mut [f64], &geometry::frontend::Move)
+pub fn motion_pipeline::follower_velocity_step_allowance(&trajectory::chain::AxisChainSet, usize, f64, f64) -> f64

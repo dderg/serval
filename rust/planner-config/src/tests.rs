@@ -118,7 +118,6 @@ fn decl(name: &str, follows: &[&str]) -> AxisDecl {
         follows: follows.iter().map(|s| s.to_string()).collect(),
         motors: vec![],
         post_processors: vec![],
-        ratio_ramp_time: None,
         max_velocity: None,
         max_accel: None,
         instantaneous_corner_velocity: None,
@@ -181,7 +180,6 @@ fn decl_with_motors(name: &str, follows: &[&str], motors: &[&str]) -> AxisDecl {
         follows: follows.iter().map(|s| s.to_string()).collect(),
         motors: motors.iter().map(|s| s.to_string()).collect(),
         post_processors: vec![],
-        ratio_ramp_time: None,
         max_velocity: None,
         max_accel: None,
         instantaneous_corner_velocity: None,
@@ -599,7 +597,7 @@ fn post_processor_missing_required_param_rejected() {
 }
 
 #[test]
-fn a_follower_advance_needs_a_smoothing_kernel_on_its_axis() {
+fn a_follower_advance_needs_no_smoothing_kernel_on_its_axis() {
     let advances = [
         pp("pa", "linear_pressure_advance", &[("k", 0.04)]),
         pp(
@@ -613,16 +611,12 @@ fn a_follower_advance_needs_a_smoothing_kernel_on_its_axis() {
         ),
     ];
     for advance in advances {
-        let rejected = PostProcessorSet::try_new(&registry_with_e(&["pa"]), &[advance.clone()]);
-        assert!(
-            matches!(
-                rejected,
-                Err(PostProcessorConfigError::FollowerAdvanceWithoutKernel { ref axis, ref name })
-                    if axis == "e" && name == "pa"
-            ),
-            "{} with no kernel on a follower must be rejected, got {rejected:?}",
-            advance.ty
-        );
+        let registry = registry_with_e(&["pa"]);
+        let chains = PostProcessorSet::try_new(&registry, &[advance.clone()])
+            .unwrap_or_else(|error| panic!("{} with no kernel is refused: {error}", advance.ty))
+            .compile(&registry)
+            .unwrap();
+        assert!(chains.chains[3].kernel().is_none());
         for chain in [["pa", "st"], ["st", "pa"]] {
             assert!(
                 PostProcessorSet::try_new(
@@ -635,21 +629,6 @@ fn a_follower_advance_needs_a_smoothing_kernel_on_its_axis() {
             );
         }
     }
-}
-
-#[test]
-fn a_disabled_follower_advance_needs_no_kernel_until_it_is_raised() {
-    let registry = registry_with_e(&["pa"]);
-    let mut set = PostProcessorSet::try_new(
-        &registry,
-        &[pp("pa", "linear_pressure_advance", &[("k", 0.0)])],
-    )
-    .expect("a zero advance makes no steps");
-    set.set_param("pa", "k", 0.04).unwrap();
-    assert!(matches!(
-        set.compile(&registry),
-        Err(PostProcessorConfigError::FollowerAdvanceWithoutKernel { .. })
-    ));
 }
 
 #[test]
@@ -668,90 +647,54 @@ fn an_advance_on_an_axis_that_follows_nothing_is_not_a_follower_advance() {
     );
 }
 
-fn ramped_registry_with_e(e_post_processors: &[&str], ratio_ramp_time: f64) -> AxisRegistry {
-    let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
-    let mut e = limited_e();
-    e.post_processors = e_post_processors.iter().map(|s| (*s).to_string()).collect();
-    e.ratio_ramp_time = Some(ratio_ramp_time);
-    decls.push(e);
-    AxisRegistry::try_new(decls).unwrap()
-}
-
 #[test]
-fn a_ratio_ramp_compiles_onto_its_follower_chain_and_nowhere_else() {
-    let registry = ramped_registry_with_e(&[], 0.015);
-    let chains = PostProcessorSet::try_new(&registry, &[])
-        .unwrap()
-        .compile(&registry)
-        .unwrap();
-    assert_eq!(chains.chains[3].ratio_ramp_time(), Some(0.015));
-    assert!(
-        chains.chains[..3]
-            .iter()
-            .all(|chain| chain.ratio_ramp_time().is_none())
+fn a_follower_chain_derives_its_ratio_ramp_from_its_axis_limits_and_advance() {
+    let registry = registry_with_e(&["pa"]);
+    let chains = PostProcessorSet::try_new(
+        &registry,
+        &[pp("pa", "linear_pressure_advance", &[("k", 0.04)])],
+    )
+    .unwrap()
+    .compile(&registry)
+    .unwrap();
+    assert_eq!(
+        chains.chains[3].ratio_ramp_rule(),
+        geometry::RatioRampRule {
+            advance_slope_s: 0.04,
+            max_velocity_mm_s: 80.0,
+            max_accel_mm_s2: 10_000.0,
+        }
     );
-    assert!(chains.has_ratio_ramped_follower());
-    let plain = registry_with_e(&[]);
-    let chains = PostProcessorSet::try_new(&plain, &[])
-        .unwrap()
-        .compile(&plain)
-        .unwrap();
-    assert!(!chains.has_ratio_ramped_follower());
+    assert!(chains.chains[..3].iter().all(|chain| {
+        chain.ratio_ramp_rule().max_accel_mm_s2.is_infinite()
+            && chain.ratio_ramp_rule().max_velocity_mm_s.is_infinite()
+    }));
+    assert!(chains.has_projected_follower());
 }
 
 #[test]
-fn a_bypassed_chain_set_carries_no_ratio_ramp() {
-    let registry = ramped_registry_with_e(&[], 0.015);
+fn a_bypassed_chain_set_ramps_its_followers_without_limits() {
+    let registry = registry_with_e(&[]);
     let set = PostProcessorSet::try_new(&registry, &[]).unwrap();
     let bypassed = set.compile_active_chains(&registry, true).unwrap();
-    assert!(!bypassed.has_ratio_ramped_follower());
+    assert!(bypassed.has_projected_follower());
+    assert!(
+        bypassed.chains[3]
+            .ratio_ramp_rule()
+            .max_accel_mm_s2
+            .is_infinite()
+    );
 }
 
 #[test]
-fn a_ratio_ramp_compiles_next_to_a_smoothing_kernel() {
-    let registry = ramped_registry_with_e(&["st"], 0.015);
+fn a_ratio_ramp_derives_next_to_a_smoothing_kernel() {
+    let registry = registry_with_e(&["st"]);
     let chains = PostProcessorSet::try_new(&registry, &[e_smoothing()])
         .unwrap()
         .compile(&registry)
         .unwrap();
     assert!(chains.chains[3].kernel().is_some());
-    assert_eq!(chains.chains[3].ratio_ramp_time(), Some(0.015));
-    assert!(chains.has_ratio_ramped_follower());
-}
-
-#[test]
-fn a_ratio_ramp_needs_an_axis_that_follows_others() {
-    let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
-    decls[0].ratio_ramp_time = Some(0.01);
-    assert!(matches!(
-        AxisRegistry::try_new(decls),
-        Err(AxisConfigError::RatioRampWithoutLeaders { ref axis }) if axis == "x"
-    ));
-    let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
-    let mut e = decl("e", &[]);
-    e.ratio_ramp_time = Some(0.01);
-    decls.push(e);
-    assert!(matches!(
-        AxisRegistry::try_new(decls),
-        Err(AxisConfigError::RatioRampWithoutLeaders { ref axis }) if axis == "e"
-    ));
-}
-
-#[test]
-fn a_ratio_ramp_time_must_be_finite_and_positive() {
-    for value in [0.0, -0.01, f64::NAN, f64::INFINITY] {
-        let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
-        let mut e = decl("e", &["x", "y", "z"]);
-        e.ratio_ramp_time = Some(value);
-        decls.push(e);
-        assert!(
-            matches!(
-                AxisRegistry::try_new(decls),
-                Err(AxisConfigError::BadRatioRampTime { .. })
-            ),
-            "ratio_ramp_time {value} must be rejected"
-        );
-    }
+    assert_eq!(chains.chains[3].ratio_ramp_rule().max_accel_mm_s2, 10_000.0);
 }
 
 #[test]
@@ -810,9 +753,15 @@ fn the_instantaneous_corner_velocity_belongs_to_followers_and_must_be_positive()
 }
 
 #[test]
-fn a_ratio_ramp_requires_finite_extrude_only_caps() {
-    let ramped = PlannerConfig {
-        axis_registry: ramped_registry_with_e(&[], 0.015),
+fn a_kernel_free_advance_requires_finite_extrude_only_caps() {
+    let registry = registry_with_e(&["pa"]);
+    let advanced = PlannerConfig {
+        post_processors: PostProcessorSet::try_new(
+            &registry,
+            &[pp("pa", "linear_pressure_advance", &[("k", 0.04)])],
+        )
+        .unwrap(),
+        axis_registry: registry,
         ..PlannerConfig::default()
     };
     for (velocity, accel) in [
@@ -824,58 +773,26 @@ fn a_ratio_ramp_requires_finite_extrude_only_caps() {
         let config = PlannerConfig {
             max_extrude_only_velocity: velocity,
             max_extrude_only_accel: accel,
-            ..ramped.clone()
+            ..advanced.clone()
         };
-        let refused = config.check_ratio_ramp_extrude_only_caps();
+        let refused = config.check_kernel_free_advance_extrude_only_caps();
         assert!(
-            refused
-                .as_ref()
-                .is_err_and(|message| message.contains("axis 'e' has a ratio_ramp_time")),
+            refused.as_ref().is_err_and(|message| {
+                message.contains("axis 'e' has an advance and no smoothing kernel")
+            }),
             "caps {velocity:?}/{accel:?} must be refused, got {refused:?}"
         );
     }
     let capped = PlannerConfig {
         max_extrude_only_velocity: Some(40.0),
         max_extrude_only_accel: Some(2000.0),
-        ..ramped
+        ..advanced
     };
-    assert!(capped.check_ratio_ramp_extrude_only_caps().is_ok());
+    assert!(capped.check_kernel_free_advance_extrude_only_caps().is_ok());
     assert!(
         PlannerConfig::default()
-            .check_ratio_ramp_extrude_only_caps()
+            .check_kernel_free_advance_extrude_only_caps()
             .is_ok(),
-        "with no ratio ramp the caps stay optional"
+        "with no advance the caps stay optional"
     );
-}
-
-#[test]
-fn a_follower_advance_with_a_ratio_ramp_needs_no_kernel() {
-    let advances = [
-        pp("pa", "linear_pressure_advance", &[("k", 0.02)]),
-        pp(
-            "pa",
-            "tanh_pressure_advance",
-            &[
-                ("linear_advance", 0.02),
-                ("nonlinear_offset", 0.05),
-                ("linearization_velocity", 20.0),
-            ],
-        ),
-    ];
-    for advance in advances {
-        let registry = ramped_registry_with_e(&["pa"], 0.015);
-        let chains = PostProcessorSet::try_new(&registry, &[advance.clone()])
-            .unwrap_or_else(|error| panic!("{} on a ratio ramp is refused: {error}", advance.ty))
-            .compile(&registry)
-            .unwrap();
-        assert_eq!(chains.kernel_free_follower_transform(), None);
-        assert!(chains.chains[3].kernel().is_none());
-        let refused = PostProcessorSet::try_new(&registry_with_e(&["pa"]), &[advance.clone()]);
-        assert!(
-            refused
-                .as_ref()
-                .is_err_and(|error| error.to_string().contains("or set ratio_ramp_time")),
-            "with neither a kernel nor a ramp the refusal names ratio_ramp_time, got {refused:?}"
-        );
-    }
 }

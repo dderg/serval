@@ -9,11 +9,12 @@ use motion_core::seam_test_harness::{
     collect_shaped_segments_from_script, default_stream_config, parse_gcode_to_moves,
 };
 use motion_pipeline::{StreamConfig, StreamInput};
-use trajectory::{AxisChainSet, CompiledChain, ContinuousSegment, PostProcessorInstance, algos};
+use trajectory::{
+    AxisChainSet, CompiledChain, ContinuousSegment, FollowerLimits, PostProcessorInstance, algos,
+};
 
 const EXTRUDER_AXIS: usize = 3;
 const SAMPLE_DT_S: f64 = 1e-5;
-const RAMP_TIME_S: f64 = 0.015;
 const ADVANCE_S: f64 = 0.02;
 const EXTRUDE_ONLY_VELOCITY: f64 = 40.0;
 const EXTRUDE_ONLY_ACCEL: f64 = 2_000.0;
@@ -56,7 +57,10 @@ fn ramped(advance: Option<f64>) -> CompiledChain {
         .expect("linear pressure advance compiles"),
         None => CompiledChain::default(),
     };
-    chain.with_ratio_ramp_time(RAMP_TIME_S)
+    chain.with_follower_limits(FollowerLimits {
+        max_velocity_mm_s: EXTRUDE_ONLY_VELOCITY,
+        max_accel_mm_s2: EXTRUDE_ONLY_ACCEL,
+    })
 }
 
 fn config() -> StreamConfig {

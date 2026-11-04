@@ -1,6 +1,6 @@
 use super::*;
 use crate::fitter::{CornerFitConfig, fit_corners};
-use crate::frontend::{MoveContext, VelocityLimits, line_move};
+use crate::frontend::{LeaderSpill, MoveContext, VelocityLimits, line_move};
 use crate::path::{Arc, Line};
 use crate::segment::SourceRange;
 use crate::velocity::{plan_velocity_warm_start, warm_start_params};
@@ -18,7 +18,7 @@ fn caps(max_velocity: f64, max_accel: f64, slope: f64) -> ExtruderCaps {
         path_jerk_per_accel_hz: SMOOTHED,
         own_jerk_per_accel_hz: f64::INFINITY,
         instantaneous_corner_velocity_mm_s: 1.0,
-        ratio_ramp_time_s: 0.0,
+        leader_spill: LeaderSpill::UNSHAPED,
         leader_kernel_reach_s: 0.0,
     }
 }
@@ -256,7 +256,6 @@ fn the_planner_caps_the_climbing_travel_after_an_extrusion_on_an_unshaped_leader
 #[test]
 fn the_planner_budgets_a_travel_at_the_extrusion_a_ramp_carries_across_the_blends_beside_it() {
     let mut extruder = caps(1000.0, 2000.0, 0.5);
-    extruder.ratio_ramp_time_s = 0.015;
     extruder.leader_kernel_reach_s = 0.004;
     let limits = VelocityLimits::try_new(150.0, 3000.0, 0.0, f64::INFINITY)
         .unwrap()

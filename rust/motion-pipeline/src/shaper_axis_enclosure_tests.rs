@@ -261,6 +261,57 @@ fn analytic_axis_windows_enclose_the_axis_jerk() {
     assert!(read > 0, "no window read a jerk");
 }
 
+/// A window whose centre falls exactly on one of a rail's knots, its last
+/// one included, reads the rail pair it lies in.
+#[test]
+fn a_window_centred_on_a_rail_knot_reads_its_pair() {
+    let circle = polygon(48, 10.0);
+    let up = |t: f64| trajectory::next_toward(t, f64::INFINITY);
+    let down = |t: f64| trajectory::next_toward(t, f64::NEG_INFINITY);
+    let mut read = 0usize;
+    for segment in &lowered(moves_through(&circle, 150.0), circle[0]) {
+        for axis in segment.axes.iter() {
+            let ContinuousAxis::Analytic { span, .. } = axis else {
+                continue;
+            };
+            let Some(windows) = super::AxisWindows::of(axis) else {
+                continue;
+            };
+            for phase in span.phases.iter() {
+                let origin = span.t_start + phase.t0;
+                for knot in phase
+                    .rail_pairs(0.0, phase.end_time() - phase.t0)
+                    .flat_map(|pair| [pair.t_lo, pair.t_hi])
+                {
+                    let mut centre = down(down(origin + knot));
+                    while centre <= up(up(origin + knot)) {
+                        for window in [
+                            Window::new(centre, up(centre)),
+                            Window::new(down(centre), centre),
+                        ]
+                        .into_iter()
+                        .filter(|window| {
+                            window.center - origin == knot
+                                && window.lo >= span.t_start
+                                && window.hi <= span.t_end
+                        }) {
+                            assert!(
+                                windows.motion_models(window, false).is_some(),
+                                "the window [{}, {}] centred on a rail knot reads no pair",
+                                window.lo,
+                                window.hi
+                            );
+                            read += 1;
+                        }
+                        centre = up(centre);
+                    }
+                }
+            }
+        }
+    }
+    assert!(read > 0, "no window centres on a rail knot");
+}
+
 fn profile_axes() -> Vec<ContinuousAxis> {
     let nudge = |accel| {
         ContinuousAxis::Nudge(

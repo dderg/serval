@@ -148,14 +148,10 @@ smooth_time: 0.025
 type: linear_pressure_advance
 k: 0.040
 
-[post_processor extruder_smoothing]
-type: smooth_triangle
-smooth_time: 0.040
-
 [axis e]
 follows: x, y, z
 motors: e_motor
-post_processors: extruder_pa, extruder_smoothing
+post_processors: extruder_pa
 
 [extruder]
 # Heater and thermistor settings omitted here.
@@ -163,6 +159,8 @@ axis: e
 max_extrude_only_velocity: 50
 max_extrude_only_accel: 5000
 ```
+
+The mainline `pressure_advance_smooth_time` has no counterpart here: the advance runs without a smoothing kernel, and `[axis e]` inherits the extrude-only caps as the extruder's limits. See [Pressure advance](#pressure-advance).
 
 `corner_deviation` is the canonical corner budget in mm. It defaults to 0.04 when neither corner option is set ([why](Config_Reference_Motion.md#why-the-corner-budget-defaults-to-004-mm)). `square_corner_velocity` is still accepted as a legacy alias, converted internally as `scv² · (√2 − 1) / max_accel` — note this maps typical mainline values to a far tighter budget than intended (5 mm/s at 3000 mm/s² ≈ 0.0035 mm), so prefer setting `corner_deviation` directly or leaving both unset. Set at most one of the two. `max_z_velocity` and `max_z_accel` must be at most the corresponding global caps and default to them.
 
@@ -243,7 +241,7 @@ naming the axis they belong to.
 | `endstop_pin: tmc2209_stepper_x:virtual_endstop` | `endstop_pin: tmc2209_<motor>:virtual_endstop` on `[axis <name>]`. |
 | `[stepper_*] high_precision_step_compress` | Same opt-in, moved with the stepper fields to `[motor <name>] high_precision_step_compress: True`. Motors default to classic compression. |
 | `[extruder] pressure_advance` | `[post_processor <name>] type: linear_pressure_advance`, `k: ...`; put its name in the extruder axis chain. |
-| `[extruder] pressure_advance_smooth_time` | `[post_processor <name>] type: smooth_triangle`, `smooth_time: ...`; put its name in the extruder axis chain. |
+| `[extruder] pressure_advance_smooth_time` | **No counterpart needed; delete it** (see [Pressure advance](#pressure-advance)). As an explicit override, `[post_processor <name>] type: smooth_triangle`, `smooth_time: ...`, after the advance in the extruder axis chain. |
 | `[extruder] max_extrude_cross_section`, `max_extrude_only_distance` | **Rejected loudly** — "the planner has no such concept". Delete them. |
 | `[extruder] instantaneous_corner_velocity` | **Rejected with a pointer.** Move it to the extruder's `[axis e] instantaneous_corner_velocity`; same meaning, same 1 mm/s default. |
 | `[extruder] step_pin`, `dir_pin`, `rotation_distance`, `microsteps` | **Rejected.** Move them to a `[motor <name>]` and name it in `[axis e] motors:`. |
@@ -301,6 +299,7 @@ Pressure advance is an axis post-processing stage, not an `[extruder]` scalar. F
 ```ini
 [extruder]
 pressure_advance: 0.040
+pressure_advance_smooth_time: 0.040
 ```
 
 with:
@@ -310,16 +309,18 @@ with:
 type: linear_pressure_advance
 k: 0.040
 
-[post_processor extruder_smoothing]
-type: smooth_triangle
-smooth_time: 0.040
-
 [axis e]
 follows: x, y, z
-post_processors: extruder_pa, extruder_smoothing
+post_processors: extruder_pa
+max_velocity: 50
+max_accel: 5000
 ```
 
-`pressure_advance_smooth_time` maps to the smoothing kernel. On a following axis an advance needs that kernel, a `ratio_ramp_time` on the axis, or both: with neither it is rejected at config load, because it would turn every extrusion-ratio change taken at speed into an instant extruder step. The kernel blurs flow in time, corners included; `ratio_ramp_time` smooths only the extrusion ratio, along the path, and leaves the advance unblurred. What the extruder can follow decides the chain. On the 10000 mm/s² bench config, `ratio_ramp_time: 0.015` with a 0.002 s `smooth_triangle` keeps corners within ±2% (1.2%) and retracts at the extrude-only cap, since that advance reads the ratio-ramped path; a kernel chain alone advances its retracts to 196 mm/s. On a 70000 mm/s² printer only `ratio_ramp_time` alone keeps corners within ±2%, at about 65000 mm/s² of extruder acceleration, and it currently needs z shaped there ([#525](https://github.com/dderg/serval/issues/525)). The measured trade-off is in [Evaluating an extruder chain](../README.md#evaluating-an-extruder-chain).
+Set `max_velocity` and `max_accel` to what the extruder motor can do (mm/s and mm/s² of filament); on the `[extruder]` axis each one left unset inherits `max_extrude_only_velocity` / `max_extrude_only_accel`. An advance needs both, set or inherited, and without a kernel it also needs finite extrude-only caps, which bound the moves the extruder makes on its own (retracts, primes) and default from `nozzle_diameter` and `filament_diameter` when both are set. The advance then runs unblurred along the shaped path: the velocity planner slows extruding moves, corners included, so the advanced extruder stays within those limits, and every extrusion-ratio step (travel to extrusion, a flow change, a wipe) is ramped along the path over a time the limits and `k` derive (see the ratio ramp in the [Motion configuration reference](Config_Reference_Motion.md#axis-name)). Corners lay the commanded bead; the cost is time.
+
+`pressure_advance_smooth_time` has no counterpart in that chain; delete it. A smoothing kernel after the advance (`type: smooth_triangle`, `smooth_time: ...`, named after the advance in `post_processors`) stays legal as an explicit override: it lowers the extruder acceleration corners ask for and bulges the bead at every corner in exchange, by more the wider it is. The trade-off is measured in [Evaluating an extruder chain](../README.md#evaluating-an-extruder-chain).
+
+A config written for an earlier version of this fork that sets `ratio_ramp_time` on its follower axis is rejected at load. Delete the option and set the axis's `max_velocity` / `max_accel` (or the `[extruder]`'s extrude-only caps they inherit); the ramp time of each step follows from them. A chain that kept a short kernel next to the ramp can drop the kernel.
 
 The `linear_pressure_advance` parameter is named `k` and must be non-negative. For nonlinear pressure advance, the recommended models are `tanh_pressure_advance` and `recipr_pressure_advance`; each uses `linear_advance`, `nonlinear_offset`, and `linearization_velocity` parameters.
 

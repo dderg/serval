@@ -32,8 +32,7 @@ enum Section {
 
 /// Parses `[axis <name>]`/`[post_processor <name>]` sections in the same
 /// grammar `klippy/motion_setup.py` reads from `printer.cfg`:
-/// `post_processors: a, b` and `follows: x, y, z` comma lists and a
-/// `ratio_ramp_time: <s>` float on `[axis]`,
+/// `post_processors: a, b` and `follows: x, y, z` comma lists on `[axis]`,
 /// `type: <name>` plus one `key: value` float per parameter on
 /// `[post_processor]`. An explicit `[axis]` section replaces the default
 /// topology's declaration wholesale, so an `[axis e]` without `follows:`
@@ -53,7 +52,7 @@ pub fn parse(text: &str) -> Result<(Vec<AxisDecl>, Vec<PostProcessorDecl>), Conf
         if let Some(rest) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
             let rest = rest.trim();
             if let Some(name) = rest.strip_prefix("axis ") {
-                sections.push(Section::Axis(AxisDecl { name: name.trim().to_string(), follows: Vec::new(), motors: Vec::new(), post_processors: Vec::new(), ratio_ramp_time: None, max_velocity: None, max_accel: None, instantaneous_corner_velocity: None }));
+                sections.push(Section::Axis(AxisDecl { name: name.trim().to_string(), follows: Vec::new(), motors: Vec::new(), post_processors: Vec::new(), max_velocity: None, max_accel: None, instantaneous_corner_velocity: None }));
             } else if let Some(name) = rest.strip_prefix("post_processor ") {
                 sections.push(Section::PostProcessor {
                     name: name.trim().to_string(),
@@ -86,14 +85,6 @@ pub fn parse(text: &str) -> Result<(Vec<AxisDecl>, Vec<PostProcessorDecl>), Conf
                 }
                 "follows" => {
                     decl.follows = value.split(',').map(|s| s.trim().to_string()).collect();
-                }
-                "ratio_ramp_time" => {
-                    decl.ratio_ramp_time =
-                        Some(value.parse().map_err(|_| ConfigTextError::BadNumber {
-                            line: line_no,
-                            key: key.to_string(),
-                            value: value.to_string(),
-                        })?);
                 }
                 "motors" => {}
                 _ => {

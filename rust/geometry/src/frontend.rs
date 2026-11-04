@@ -69,14 +69,47 @@ pub struct ExtruderCaps {
     /// the advance: an unshaped followed axis steps the shaped path's
     /// acceleration, and the advance turns each step into one.
     pub instantaneous_corner_velocity_mm_s: f64,
-    /// The longest a ratio ramp spreads a ratio step over, 0 where the
-    /// follower lays its ratios unramped: a ramp's half-width is at most
-    /// half the path the leaders cover in it.
-    pub ratio_ramp_time_s: f64,
+    /// How far the shaped path's speed may exceed the planned speed at a
+    /// moment, through the kernels of the spatial axes the follower follows
+    /// (see [`LeaderSpill`]): the planner bounds the shaped speed at a ratio
+    /// step with it.
+    pub leader_spill: LeaderSpill,
     /// How far either side of an instant the kernels of the leaders the
     /// follower rides reach: the shaped path there averages the planned
     /// path within it.
     pub leader_kernel_reach_s: f64,
+}
+
+/// A kernel `w` turns a planned speed `v(t) ≤ v₀ + A·|t − t₀|` around `t₀`
+/// into a shaped speed at `t₀` of at most `v₀·∫|w| + A·∫|u|·|w(u)| du`:
+/// `mass` and `moment_s`, the largest among the followed axes' kernels
+/// (1 and 0 where no kernel shapes them).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LeaderSpill {
+    pub mass: f64,
+    pub moment_s: f64,
+}
+
+impl LeaderSpill {
+    pub const UNSHAPED: Self = Self {
+        mass: 1.0,
+        moment_s: 0.0,
+    };
+
+    /// The largest planned speed whose shaped speed stays within `shaped`
+    /// under an acceleration budget of `accel`; zero where the spill alone
+    /// exceeds it.
+    #[must_use]
+    pub fn planned_speed(&self, shaped: f64, accel: f64) -> f64 {
+        ((shaped - self.moment_s * accel) / self.mass).max(0.0)
+    }
+
+    fn wider(self, other: Self) -> Self {
+        Self {
+            mass: self.mass.max(other.mass),
+            moment_s: self.moment_s.max(other.moment_s),
+        }
+    }
 }
 
 impl ExtruderCaps {
@@ -111,9 +144,19 @@ impl ExtruderCaps {
             instantaneous_corner_velocity_mm_s: a
                 .instantaneous_corner_velocity_mm_s
                 .min(b.instantaneous_corner_velocity_mm_s),
-            ratio_ramp_time_s: a.ratio_ramp_time_s.max(b.ratio_ramp_time_s),
+            leader_spill: a.leader_spill.wider(b.leader_spill),
             leader_kernel_reach_s: a.leader_kernel_reach_s.max(b.leader_kernel_reach_s),
         })
+    }
+
+    /// The rule the follower's ratio ramp derives each step's ramp time by.
+    #[must_use]
+    pub fn ratio_ramp_rule(&self) -> crate::RatioRampRule {
+        crate::RatioRampRule {
+            advance_slope_s: self.advance_slope_s,
+            max_velocity_mm_s: self.max_velocity_mm_s,
+            max_accel_mm_s2: self.max_accel_mm_s2,
+        }
     }
 
     fn check(&self) -> Result<(), &'static str> {
@@ -140,14 +183,12 @@ impl ExtruderCaps {
         {
             return Err("jerk gains must be non-negative");
         }
-        if ![self.ratio_ramp_time_s, self.leader_kernel_reach_s]
-            .iter()
-            .all(|time| time.is_finite() && *time >= 0.0)
-        {
-            return Err(
-                "the ratio ramp time and the leaders' kernel reach must be finite and \
-                        non-negative",
-            );
+        let LeaderSpill { mass, moment_s } = self.leader_spill;
+        if !(mass.is_finite() && mass >= 1.0 && moment_s.is_finite() && moment_s >= 0.0) {
+            return Err("the leaders' spill must be finite, its mass at least 1");
+        }
+        if !(self.leader_kernel_reach_s.is_finite() && self.leader_kernel_reach_s >= 0.0) {
+            return Err("the leaders' kernel reach must be finite and non-negative");
         }
         Ok(())
     }

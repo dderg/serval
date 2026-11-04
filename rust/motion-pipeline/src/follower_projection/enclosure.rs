@@ -684,5 +684,3 @@ pub(super) struct OnsetSliver {
     pub(super) to: f64,
     pub(super) singular_change: f64,
 }
-
-impl AdvancedFollowerSignal<'_, '_> {}

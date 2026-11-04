@@ -7,7 +7,6 @@ fn decl(name: &str, follows: &[&str], post_processors: &[&str]) -> AxisDecl {
         follows: follows.iter().map(|s| (*s).to_string()).collect(),
         motors: vec![],
         post_processors: post_processors.iter().map(|s| (*s).to_string()).collect(),
-        ratio_ramp_time: None,
         max_velocity: None,
         max_accel: None,
         instantaneous_corner_velocity: None,
@@ -46,7 +45,6 @@ fn limited(post_processors: &[&str]) -> AxisDecl {
     AxisDecl {
         max_velocity: Some(100.0),
         max_accel: Some(10_000.0),
-        ratio_ramp_time: Some(0.015),
         ..decl("e", &["x", "y", "z"], post_processors)
     }
 }
@@ -81,27 +79,14 @@ fn a_ramped_linear_advance_takes_k_and_its_leaders_kernels() {
 }
 
 #[test]
-fn the_reach_takes_the_ramp_time_and_the_widest_leader_kernel() {
+fn the_reach_takes_the_widest_leader_kernel() {
     let caps = caps_of(
         limited(&["pa"]),
         &[pp("pa", "linear_pressure_advance", &[("k", 0.03)])],
     )
     .unwrap()[0];
-    assert_eq!(caps.ratio_ramp_time_s, 0.015);
     let (lo, hi) = trajectory::build_smooth_mzv_kernel(62.0).support();
     assert_eq!(caps.leader_kernel_reach_s, hi.max(-lo));
-    let unramped = caps_of(
-        AxisDecl {
-            ratio_ramp_time: None,
-            ..limited(&["pa", "st"])
-        },
-        &[
-            pp("pa", "linear_pressure_advance", &[("k", 0.03)]),
-            pp("st", "smooth_triangle", &[("smooth_time", 0.01)]),
-        ],
-    )
-    .unwrap()[0];
-    assert_eq!(unramped.ratio_ramp_time_s, 0.0);
 }
 
 #[test]

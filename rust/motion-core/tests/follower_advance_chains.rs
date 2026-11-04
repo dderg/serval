@@ -1,10 +1,8 @@
 //! A projected follower's advance (pressure advance or any other
-//! derivative-gain stage) needs a smoothing kernel or a ratio ramp in its
-//! chain: an advance turns every extrusion-ratio change taken at speed into
-//! an instant position step, which only a kernel can follow and only a ramp
-//! can take out. Configuration refuses a chain with neither; the pipeline
-//! refuses it too, at construction and at a chain swap, so a chain set built
-//! by hand cannot reach the shaper either.
+//! derivative-gain stage) needs no smoothing kernel in its chain: every
+//! follower ramps its extrusion-ratio steps, so an advance turns no ratio
+//! change taken at speed into a position step, and the pipeline takes such
+//! a chain at construction and at a chain swap.
 
 use motion_core::seam_test_harness::{
     collect_shaped_segments_from_script, default_stream_config, parse_gcode_to_moves,
@@ -60,51 +58,22 @@ fn corner_script() -> Vec<StreamInput> {
 }
 
 #[test]
-#[should_panic(expected = "follows other axes and its chain advances it with no smoothing kernel")]
-fn a_follower_advance_without_a_kernel_is_refused_when_the_pipeline_is_built() {
-    collect_shaped_segments_from_script(
-        corner_script(),
-        config(),
-        trident_leaders_with(vec![linear_advance(0.02)]),
-    );
-}
-
-#[test]
-#[should_panic(expected = "follows other axes and its chain advances it with no smoothing kernel")]
-fn a_follower_advance_without_a_kernel_is_refused_at_a_chain_swap() {
-    let mut script = corner_script();
-    script.push(StreamInput::Drain);
-    script.push(StreamInput::Control(Control::SetAxisChains(
-        trident_leaders_with(vec![linear_advance(0.02)]),
-    )));
-    collect_shaped_segments_from_script(script, config(), trident_leaders_with(Vec::new()));
-}
-
-fn ratio_ramped(e: Vec<PostProcessorInstance>) -> AxisChainSet {
-    let mut chains = trident_leaders_with(e);
-    chains.chains[EXTRUDER_AXIS] = chains.chains[EXTRUDER_AXIS]
-        .clone()
-        .with_ratio_ramp_time(0.015);
-    chains
-}
-
-#[test]
-fn a_follower_advance_on_a_ratio_ramp_is_accepted_when_the_pipeline_is_built() {
+fn a_kernel_free_follower_advance_is_accepted_when_the_pipeline_is_built() {
     let segments = collect_shaped_segments_from_script(
         corner_script(),
         config(),
-        ratio_ramped(vec![linear_advance(0.02)]),
+        trident_leaders_with(vec![linear_advance(0.02)]),
     );
     assert!(!segments.is_empty());
 }
 
 #[test]
-fn a_follower_advance_on_a_ratio_ramp_is_accepted_at_a_chain_swap() {
+fn a_kernel_free_follower_advance_is_accepted_at_a_chain_swap() {
     let mut script = corner_script();
     script.push(StreamInput::Drain);
-    script.push(StreamInput::Control(Control::SetAxisChains(ratio_ramped(
-        vec![linear_advance(0.02)],
-    ))));
+    script.push(StreamInput::Control(Control::SetAxisChains(
+        trident_leaders_with(vec![linear_advance(0.02)]),
+    )));
     let segments =
         collect_shaped_segments_from_script(script, config(), trident_leaders_with(Vec::new()));
     assert!(!segments.is_empty());

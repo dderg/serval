@@ -424,7 +424,6 @@ fn default_axis_decls() -> Vec<AxisDecl> {
         follows,
         motors: Vec::new(),
         post_processors: Vec::new(),
-        ratio_ramp_time: None,
         max_velocity: None,
         max_accel: None,
         instantaneous_corner_velocity: None,

@@ -1155,6 +1155,11 @@ impl PairInterpolant {
 /// that small is a held cap's rounding.
 const RAIL_JERK_ACCELERATION_FLOOR: f64 = 1e-15;
 
+/// How far past a formula's ends, relative to its length and at least
+/// absolutely, a window may reach and still read it: the rounding of the
+/// times the window's ends and the formula's own are computed from.
+const FORMULA_EDGE_SLACK: f64 = 1e-9;
+
 /// The jerk the rail's law reads at the interpolated state as the
 /// evaluator computes it: the time derivative of `√(A² − κ²v⁴)` along it,
 /// `−κv³·(σv² + 2κa)/a`, and zero below [`RAIL_JERK_ACCELERATION_FLOOR`].
@@ -1335,10 +1340,9 @@ impl<'a> AxisWindows<'a> {
         with_jerk: bool,
         lowest_order: usize,
     ) -> Option<[TaylorModel; 4]> {
-        let covers = |lo: f64, hi: f64| {
-            let slack = 1e-9 * (hi - lo).max(1.0);
-            window.lo >= lo - slack && window.hi <= hi + slack
-        };
+        let slack = |lo: f64, hi: f64| FORMULA_EDGE_SLACK * (hi - lo).max(1.0);
+        let covers =
+            |lo: f64, hi: f64| window.lo >= lo - slack(lo, hi) && window.hi <= hi + slack(lo, hi);
         match self {
             Self::Pieces(pieces) => {
                 let index = pieces
@@ -1403,10 +1407,17 @@ impl<'a> AxisWindows<'a> {
                     ),
                     ScalarLaw::DiskRail { kappa0, sigma, .. } => {
                         let centre = window.center - origin;
-                        let pair = phase.rail_pairs(centre, centre).next()?;
-                        if !covers(origin + pair.t_lo, origin + pair.t_hi) {
-                            return None;
-                        }
+                        let reads =
+                            |pair: &RailPair| covers(origin + pair.t_lo, origin + pair.t_hi);
+                        let pair = match phase.rail_pairs(centre, centre).next() {
+                            Some(pair) => Some(pair).filter(reads),
+                            None => phase
+                                .rail_pairs(
+                                    centre - FORMULA_EDGE_SLACK,
+                                    centre + FORMULA_EDGE_SLACK,
+                                )
+                                .find(reads),
+                        }?;
                         let state =
                             PairInterpolant::new(&pair, phase.s0 - span.source_distance_origin)
                                 .state(&tau);

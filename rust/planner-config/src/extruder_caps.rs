@@ -1,4 +1,4 @@
-use geometry::ExtruderCaps;
+use geometry::{ExtruderCaps, LeaderSpill};
 use trajectory::{AxisChainSet, ChainStage};
 
 use crate::AxisRegistry;
@@ -49,9 +49,17 @@ pub fn extruder_caps(
             }
         };
         let mut path_jerk_per_accel_hz = [0.0; SPATIAL_AXES];
+        let mut leader_spill = LeaderSpill::UNSHAPED;
         for &leader in leaders.iter().filter(|&&leader| leader < SPATIAL_AXES) {
-            path_jerk_per_accel_hz[leader] =
-                jerk_per_accel(chains.chains[leader].kernel().map(|k| k.peak_abs()));
+            let kernel = chains.chains[leader].kernel();
+            path_jerk_per_accel_hz[leader] = jerk_per_accel(kernel.map(|k| k.peak_abs()));
+            if let Some(kernel) = kernel {
+                let (mass, moment_s) = kernel.absolute_moments();
+                leader_spill = LeaderSpill {
+                    mass: leader_spill.mass.max(mass),
+                    moment_s: leader_spill.moment_s.max(moment_s),
+                };
+            }
         }
         let (leaders_back, leaders_forward) = chains.leaders_support(*axis);
         caps.push(ExtruderCaps {
@@ -63,7 +71,7 @@ pub fn extruder_caps(
             path_jerk_per_accel_hz,
             own_jerk_per_accel_hz: jerk_per_accel(chain.kernel().map(|k| k.peak_abs())),
             instantaneous_corner_velocity_mm_s: chain.instantaneous_corner_velocity(),
-            ratio_ramp_time_s: chain.ratio_ramp_time().unwrap_or(0.0),
+            leader_spill,
             leader_kernel_reach_s: leaders_forward.max(-leaders_back),
         });
     }

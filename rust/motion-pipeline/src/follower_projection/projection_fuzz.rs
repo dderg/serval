@@ -2,9 +2,10 @@
 //! leader tracks — strokes along one line with ratio steps, reversals through
 //! rest, holds and extrude-only retracts and primes — whose shaped frontier
 //! re-times each stroke over the same path. The extruder must lay `∫ r ds`
-//! over the path the shaped leaders travel, step its velocity at a seam only
-//! by the commanded ratio step times the leaders' speed, weld every seam, and
-//! commit the same track streamed a few segments at a time as all at once.
+//! over the path the shaped leaders travel wherever the ratio ramp reads a
+//! constant ratio and wherever the leaders dwell, keep its velocity continuous across
+//! every seam, weld every seam, and commit the same track streamed a few
+//! segments at a time as all at once.
 
 use std::sync::Arc;
 
@@ -74,22 +75,73 @@ fn step_strategy() -> impl Strategy<Value = Step> {
     ]
 }
 
-/// One segment as the oracle knows it: its raw and shaped leader distance
-/// along the line as cubics in local time, its ratio, or the extrude-only
-/// cubic it moves the extruder by.
+/// One segment as the oracle knows it: its shaped leader distance along
+/// the line as a cubic in local time from where along the travelled path
+/// it starts, its ratio, or the extrude-only cubic it moves the extruder
+/// by.
 #[derive(Debug, Clone)]
 enum Truth {
-    Stroke { shaped: [f64; 4], ratio: f64 },
+    Stroke {
+        shaped: [f64; 4],
+        ratio: f64,
+        path_start_mm: f64,
+    },
     Hold,
-    ExtrudeOnly { motion: [f64; 4] },
+    ExtrudeOnly {
+        motion: [f64; 4],
+    },
 }
 
+/// The track, and where along the travelled path its ratio steps — every
+/// boundary between two strokes of different ratios, rest or not — and
+/// the fastest the shaped leaders travel it.
 #[derive(Debug, Clone)]
 struct Track {
     base: Vec<ContinuousSegment>,
     frontier: Vec<ContinuousSegment>,
     truth: Vec<Truth>,
     e_at_start: Vec<f64>,
+    ratio_steps_mm: Vec<f64>,
+    fastest_shaped_mm_s: f64,
+}
+
+impl Track {
+    /// How far along the path the ratio ramp of a follower without limits
+    /// reaches either side of a point: half the path the fastest leaders
+    /// cover in the shortest ramp.
+    fn ramp_reach_mm(&self) -> f64 {
+        0.5 * self.fastest_shaped_mm_s * geometry::RATIO_RAMP_MIN_TIME_S
+    }
+
+    /// Whether the design holds at local time `dt` into segment `i`: the
+    /// leaders dwell there (a hold or an extrude-only move), or the ramp
+    /// reads one ratio across its reach. A stroke that stops for an instant
+    /// is no dwell: the ramp spreads a ratio step across the stop.
+    fn ramp_reads_one_ratio(&self, i: usize, dt: f64) -> bool {
+        let Truth::Stroke {
+            shaped,
+            path_start_mm,
+            ..
+        } = &self.truth[i]
+        else {
+            return true;
+        };
+        let s = path_start_mm + eval(shaped, dt);
+        let reach = self.ramp_reach_mm();
+        self.ratio_steps_mm
+            .iter()
+            .all(|step| (step - s).abs() > reach)
+    }
+}
+
+/// The fastest a cubic distance `coeffs` moves over `[0, duration]`.
+fn peak_speed(coeffs: &[f64; 4], duration: f64) -> f64 {
+    let vertex = -coeffs[2] / (3.0 * coeffs[3]);
+    [0.0, duration, vertex]
+        .into_iter()
+        .filter(|dt| (0.0..=duration).contains(dt))
+        .map(|dt| eval_d(coeffs, dt).abs())
+        .fold(0.0, f64::max)
 }
 
 fn hermite(length: f64, (v0, v1): (f64, f64), duration: f64) -> [f64; 4] {
@@ -238,11 +290,14 @@ fn build_track(heading: f64, steps: &[Step]) -> Track {
     let direction = [libm::cos(heading), libm::sin(heading)];
     let (mut t, mut along, mut e, mut sense) = (0.0, 0.0, 0.0, 1.0_f64);
     let (mut raw_speed, mut shaped_speed) = (0.0_f64, 0.0_f64);
+    let (mut travelled, mut last_ratio) = (0.0_f64, None);
     let mut track = Track {
         base: Vec::new(),
         frontier: Vec::new(),
         truth: Vec::new(),
         e_at_start: Vec::new(),
+        ratio_steps_mm: Vec::new(),
+        fastest_shaped_mm_s: 0.0,
     };
     let leaders_at = |along: f64, local: &[f64], sense: f64| -> [Vec<f64>; 3] {
         let line = |axis: usize| {
@@ -285,7 +340,18 @@ fn build_track(heading: f64, steps: &[Step]) -> Track {
                 track
                     .frontier
                     .push(segment([sx, sy, sz, e_line(&raw)], span, &followers, true));
-                track.truth.push(Truth::Stroke { shaped, ratio });
+                track.truth.push(Truth::Stroke {
+                    shaped,
+                    ratio,
+                    path_start_mm: travelled,
+                });
+                if last_ratio.is_some_and(|last| last != ratio) {
+                    track.ratio_steps_mm.push(travelled);
+                }
+                last_ratio = Some(ratio);
+                track.fastest_shaped_mm_s =
+                    track.fastest_shaped_mm_s.max(peak_speed(&shaped, duration));
+                travelled += length;
                 along += sense * length;
                 e += ratio * length;
                 t = span.1;
@@ -456,7 +522,7 @@ fn assert_lays_the_oracle(
 ) -> Result<(), TestCaseError> {
     for (i, seg) in committed.iter().enumerate() {
         let tol = segment_tol_mm(seg);
-        for dt in local_samples(seg) {
+        for dt in local_samples(seg).filter(|&dt| track.ramp_reads_one_ratio(i, dt)) {
             let (e, _) = follower_pv(seg, seg.t_start + dt);
             let (expected, _) = oracle(track, i, dt);
             prop_assert!(
@@ -469,11 +535,11 @@ fn assert_lays_the_oracle(
     Ok(())
 }
 
-/// Across a seam the extruder's velocity steps by exactly the commanded
-/// ratio step times the leaders' speed there, to within what the device
-/// resolves (the acceleration tolerance over one device interval) and the
-/// rounding of two evaluations of one continuous signal.
-fn assert_seams_weld(track: &Track, committed: &[ContinuousSegment]) -> Result<(), TestCaseError> {
+/// The ramp spreads every ratio step along the path, so across a seam the
+/// extruder's velocity is continuous to within what the device resolves
+/// (the acceleration tolerance over one device interval) and the rounding
+/// of two evaluations of one continuous signal.
+fn assert_seams_weld(committed: &[ContinuousSegment]) -> Result<(), TestCaseError> {
     for (i, pair) in committed.windows(2).enumerate() {
         let t = pair[0].t_end;
         let (e_before, v_before) = follower_pv(&pair[0], t);
@@ -483,13 +549,11 @@ fn assert_seams_weld(track: &Track, committed: &[ContinuousSegment]) -> Result<(
             "seam {i} at t={t}: the extruder jumps {} mm",
             e_after - e_before
         );
-        let commanded_step =
-            oracle(track, i + 1, 0.0).1 - oracle(track, i, pair[0].t_end - pair[0].t_start).1;
         let allowance = FIT_TOL.accel_mm_s2 * geometry::MIN_DEVICE_INTERVAL_S
             + super::ADVANCE_STEP_VELOCITY_ROUNDING * v_before.abs().max(1.0);
         prop_assert!(
-            ((v_after - v_before) - commanded_step).abs() <= allowance,
-            "seam {i} at t={t}: extruder velocity steps {} mm/s, the commanded ratio step is {commanded_step}",
+            (v_after - v_before).abs() <= allowance,
+            "seam {i} at t={t}: extruder velocity steps {} mm/s",
             v_after - v_before
         );
     }
@@ -595,7 +659,7 @@ proptest! {
         let chains = chains(CompiledChain::default());
         let one_shot = project_all_at_once(&track, &chains);
         assert_lays_the_oracle(&track, &one_shot)?;
-        assert_seams_weld(&track, &one_shot)?;
+        assert_seams_weld(&one_shot)?;
         let streamed = project_streamed(&track, &chains, &batch_sizes);
         assert_streams_like_one_shot(&streamed, &one_shot)?;
     }
