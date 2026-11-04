@@ -801,9 +801,7 @@ fn the_smoothing_models_hold_its_correction_and_valley_weight_between_bends() {
                         .smoothing
                         .valley_weight_model(&s, reach)
                         .expect("a stretch between bends lies on one side of every valley")
-                        .unwrap_or_else(|| {
-                            [1.0, 0.0, 0.0].map(|value| TaylorModel::constant(Ball::exact(value)))
-                        });
+                        .models();
                     read += 1;
                     for k in 1..8 {
                         let at = lo + (hi - lo) * f64::from(k) / 8.0;

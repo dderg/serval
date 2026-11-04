@@ -20,6 +20,7 @@ use crate::shaper::axis_enclosure::AxisWindows;
 use crate::shaper::taylor::{self, Ball, TaylorModel, Window};
 use crate::shaper::{Enclosure, ExactPiece};
 
+use super::ratio_ramp::ValleyWeight;
 use super::{AdvancedFollowerSignal, ChainStage, FollowerSignal, RatioSpan};
 
 /// How a stretch of the span table lays extrusion against path distance.
@@ -31,6 +32,8 @@ enum TableFormula {
     Before(RatioSpan),
     /// Past the table: the last span's end extended at its end ratio.
     Past(RatioSpan),
+    /// No table laid yet: no extrusion, and no smoothing of it.
+    Empty,
 }
 
 impl TableFormula {
@@ -63,6 +66,7 @@ impl TableFormula {
                     TaylorModel::constant(Ball::exact(0.0)),
                 ]
             }
+            TableFormula::Empty => [(); 3].map(|()| TaylorModel::constant(Ball::exact(0.0))),
         }
     }
 
@@ -72,6 +76,7 @@ impl TableFormula {
             TableFormula::Span(span) => (span.s0, span.s1),
             TableFormula::Before(first) => (f64::NEG_INFINITY, first.s0),
             TableFormula::Past(last) => (last.s1, f64::INFINITY),
+            TableFormula::Empty => (f64::NEG_INFINITY, f64::INFINITY),
         }
     }
 
@@ -271,10 +276,12 @@ pub(super) struct FollowerAxisWindows<'a> {
 
 impl<'a> FollowerSignal<'a> {
     /// The table's formulas over path distances `[lo, hi]`, the one laid at
-    /// `centre` first; `None` before an empty table.
-    fn table_formulas(&self, centre: f64, (lo, hi): (f64, f64)) -> Option<Vec<TableFormula>> {
+    /// `centre` first.
+    fn table_formulas(&self, centre: f64, (lo, hi): (f64, f64)) -> Vec<TableFormula> {
         let spans = &self.state.spans;
-        let (first, last) = (*spans.first()?, *spans.last()?);
+        let (Some(&first), Some(&last)) = (spans.first(), spans.last()) else {
+            return vec![TableFormula::Empty];
+        };
         let region_of = |s: f64| {
             if s < first.s0 {
                 TableFormula::Before(first)
@@ -301,7 +308,7 @@ impl<'a> FollowerSignal<'a> {
                 .take_while(|span| span.s0 <= hi)
                 .map(|&span| TableFormula::Span(span)),
         );
-        Some(formulas)
+        formulas
     }
 
     /// The follower's models on `window` and what `reading` asks beyond
@@ -379,8 +386,8 @@ impl<'a> FollowerSignal<'a> {
             self.reach_inside_crossings(window, inside_read((centre - spread, centre + spread)));
         let held = (centre + spread - self.s_owned_end).max(0.0);
         s.widen(held);
-        let reach = inside_read((reach.0 - held, reach.1 + held));
-        let formulas = self.table_formulas(centre, reach)?;
+        let reach = inside_read((reach.0, reach.1 + held));
+        let formulas = self.table_formulas(centre, reach);
         let correction = self.state.smoothing.correction_model(&s, reach)?;
         let raw = match (&windows.raw, self.raw_delta) {
             (Some(raw), Some((_, at_start))) => {
@@ -390,9 +397,11 @@ impl<'a> FollowerSignal<'a> {
             _ => [(); 3].map(|()| TaylorModel::constant(Ball::exact(0.0))),
         };
         let [base_e, base_ratio, base_slope] = formulas[0].laid(&s);
-        let e = base_e
-            .add(&correction.value)
-            .add_ball(Ball::exact(self.e_start - self.e_spans_start));
+        let laid_e = match formulas[0] {
+            TableFormula::Empty => base_e,
+            _ => base_e.add(&correction.value),
+        };
+        let e = laid_e.add_ball(Ball::exact(self.e_start - self.e_spans_start));
         let ratio = base_ratio.add(&correction.d1);
         let slope = base_slope.add(&correction.d2);
         let rate_squared = rate.mul(&rate);
@@ -421,7 +430,7 @@ impl<'a> FollowerSignal<'a> {
                     (true, None, Some(_)) => along_rest(2)?.scale(scale),
                     (true, None, None) => TaylorModel::constant(Ball::exact(0.0)),
                 };
-                let Some([weight, weight_slope, weight_curvature]) =
+                let ValleyWeight::Model([weight, weight_slope, weight_curvature]) =
                     self.state.smoothing.valley_weight_model(&s, reach)?
                 else {
                     let jerk = if with_jerk {

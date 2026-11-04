@@ -254,6 +254,16 @@ const NARROW_FLOATS: usize = 64;
 /// ([`read_points`]) and holds at most [`NARROW_FLOATS`] of them: a reach
 /// that narrow that reads more than one formula reads each at some of its
 /// floats, and the evaluator reads no other.
+/// `reach` split off from each of its end floats in turn: where the
+/// evaluator flips a formula on an end float itself, the float reads one
+/// and the rest of the reach the other.
+fn end_apart((lo, hi): (f64, f64)) -> [[(f64, f64); 2]; 2] {
+    [
+        [(lo, lo), (trajectory::next_toward(lo, hi), hi)],
+        [(lo, trajectory::next_toward(hi, lo)), (hi, hi)],
+    ]
+}
+
 fn narrow_floats((lo, hi): (f64, f64)) -> Option<Vec<f64>> {
     let inset = REACH_INSET_ULPS * f64::EPSILON * lo.abs().max(hi.abs()).max(1.0);
     if hi - lo > 2.0 * inset {
@@ -424,13 +434,10 @@ impl RatioSmoothing {
         if let Some(formula) = self.correction_formula(reach) {
             return self.correction_by(formula, s);
         }
-        let mut formulas: Vec<CorrectionFormula> = Vec::new();
-        for at in narrow_floats(reach)? {
-            let formula = self.correction_formula((at, at))?;
-            if !formulas.contains(&formula) {
-                formulas.push(formula);
-            }
-        }
+        let formulas = match self.formulas_across_rest(reach) {
+            Some(formulas) => formulas,
+            None => self.narrow_formulas(reach)?,
+        };
         let (first, others) = formulas.split_first()?;
         let mut base = self.correction_by(*first, s)?;
         for &other in others {
@@ -446,6 +453,19 @@ impl RatioSmoothing {
             }
         }
         Some(base)
+    }
+
+    /// Every formula a reach too narrow to place its bends in reads, one per
+    /// float.
+    fn narrow_formulas(&self, reach: (f64, f64)) -> Option<Vec<CorrectionFormula>> {
+        let mut formulas: Vec<CorrectionFormula> = Vec::new();
+        for at in narrow_floats(reach)? {
+            let formula = self.correction_formula((at, at))?;
+            if !formulas.contains(&formula) {
+                formulas.push(formula);
+            }
+        }
+        Some(formulas)
     }
 
     /// The correction's jet on the model `s` of the path by `formula`.
@@ -502,15 +522,59 @@ impl RatioSmoothing {
         if self.is_inert() {
             return Some(CorrectionFormula::Zero);
         }
-        let model_reach = reach;
-        let reach = read_points(reach);
-        let (h_lo, h_hi) = (self.width.jet(reach.0).value, self.width.jet(reach.1).value);
-        if h_lo <= 0.0 && h_hi <= 0.0 {
+        let read = read_points(reach);
+        let widths = (self.width.jet(read.0).value, self.width.jet(read.1).value);
+        if widths.0 <= 0.0 && widths.1 <= 0.0 {
             return Some(CorrectionFormula::Zero);
         }
-        if h_lo <= 0.0 || h_hi <= 0.0 {
+        if widths.0 <= 0.0 || widths.1 <= 0.0 {
             return None;
         }
+        self.smoothed_formula(read, widths, || self.width.width_interval(reach))
+    }
+
+    /// The formulas of a reach whose width rises from rest, or falls to
+    /// it, at one end: the rest reads none, the rest of the reach one
+    /// smoothed formula, and the window reads no seams there, or it would
+    /// divide by the vanishing width; `None` for any other reach.
+    fn formulas_across_rest(&self, reach: (f64, f64)) -> Option<Vec<CorrectionFormula>> {
+        if self.is_inert() {
+            return None;
+        }
+        let read = read_points(reach);
+        let widths = (self.width.jet(read.0).value, self.width.jet(read.1).value);
+        if (widths.0 <= 0.0) == (widths.1 <= 0.0) {
+            return None;
+        }
+        let moving_end = if widths.0 <= 0.0 { read.1 } else { read.0 };
+        let interval = self.width.formula_at(moving_end);
+        let Err((a, b)) = interval else {
+            return None;
+        };
+        if read.0 < self.width.nodes[a].s || read.1 > self.width.nodes[b].s {
+            return None;
+        }
+        let moving = self.smoothed_formula(read, (widths.0.max(0.0), widths.1.max(0.0)), || {
+            Some(interval)
+        })?;
+        match moving {
+            CorrectionFormula::Zero => Some(vec![moving]),
+            CorrectionFormula::Smoothed {
+                seams: (first, past),
+                ..
+            } => (first == past).then(|| vec![CorrectionFormula::Zero, moving]),
+        }
+    }
+
+    /// The smoothed formula every point of a reach reads, its ends read at
+    /// `reach` with widths `(h_lo, h_hi)` on the width's `interval`; `None`
+    /// where its ends' windows differ.
+    fn smoothed_formula(
+        &self,
+        reach: (f64, f64),
+        (h_lo, h_hi): (f64, f64),
+        interval: impl FnOnce() -> Option<WidthInterval>,
+    ) -> Option<CorrectionFormula> {
         let slope_left_of = |first: usize| {
             first
                 .checked_sub(1)
@@ -535,7 +599,7 @@ impl RatioSmoothing {
             return Some(CorrectionFormula::Zero);
         }
         Some(CorrectionFormula::Smoothed {
-            interval: self.width.width_interval(model_reach)?,
+            interval: interval()?,
             seams: (window.start, window.end),
             behind,
             slope_left,
@@ -612,24 +676,30 @@ impl RatioSmoothing {
     }
 
     /// `[W, W', W'']` of the advance's valley weight on the model `s` of
-    /// the path, `reach` its range — `Some(None)` where no valley weighs
-    /// it, `W = 1` —; `None` where the reach's ends lie on different sides
-    /// of a valley.
+    /// the path, `reach` its range; `None` where the reach's ends lie on
+    /// different sides of a valley.
     pub(in crate::follower_projection) fn valley_weight_model(
         &self,
         s: &TaylorModel,
         reach: (f64, f64),
-    ) -> Option<Option<[TaylorModel; 3]>> {
+    ) -> Option<ValleyWeight> {
         if let Some(weight) = self.valley_weight_on(s, reach) {
             return Some(weight);
         }
-        let constant = |value: f64| TaylorModel::constant(Ball::exact(value));
-        let unweighted = || [constant(1.0), constant(0.0), constant(0.0)];
+        let parts = match end_apart(reach).into_iter().find(|parts| {
+            parts
+                .iter()
+                .all(|&part| self.valley_weight_on(s, part).is_some())
+        }) {
+            Some(parts) => parts.to_vec(),
+            None => narrow_floats(reach)?
+                .into_iter()
+                .map(|at| (at, at))
+                .collect(),
+        };
         let mut base: Option<[TaylorModel; 3]> = None;
-        for at in narrow_floats(reach)? {
-            let weight = self
-                .valley_weight_on(s, (at, at))?
-                .unwrap_or_else(unweighted);
+        for part in parts {
+            let weight = self.valley_weight_on(s, part)?.models();
             match &mut base {
                 None => base = Some(weight),
                 Some(base) => {
@@ -640,16 +710,12 @@ impl RatioSmoothing {
                 }
             }
         }
-        Some(base)
+        Some(base.map_or(ValleyWeight::One, ValleyWeight::Model))
     }
 
     /// [`Self::valley_weight_model`] where every point of `reach` lies on
     /// one side of every valley; `None` where it does not.
-    fn valley_weight_on(
-        &self,
-        s: &TaylorModel,
-        reach: (f64, f64),
-    ) -> Option<Option<[TaylorModel; 3]>> {
+    fn valley_weight_on(&self, s: &TaylorModel, reach: (f64, f64)) -> Option<ValleyWeight> {
         let mut total: Option<[TaylorModel; 3]> = None;
         let reach = read_points(reach);
         for valley in self.valleys_over(reach.0, reach.1) {
@@ -672,6 +738,24 @@ impl RatioSmoothing {
                 ],
             });
         }
-        Some(total)
+        Some(total.map_or(ValleyWeight::One, ValleyWeight::Model))
+    }
+}
+
+/// The advance's valley weight over a reach: one where no valley weighs
+/// it, else `[W, W', W'']`.
+pub(in crate::follower_projection) enum ValleyWeight {
+    One,
+    Model([TaylorModel; 3]),
+}
+
+impl ValleyWeight {
+    pub(in crate::follower_projection) fn models(self) -> [TaylorModel; 3] {
+        match self {
+            ValleyWeight::One => {
+                [1.0, 0.0, 0.0].map(|value| TaylorModel::constant(Ball::exact(value)))
+            }
+            ValleyWeight::Model(models) => models,
+        }
     }
 }

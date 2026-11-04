@@ -247,10 +247,64 @@ fn try_enclose_to_depth(
         && right_models.is_none()
         && halving.singular >= ENCLOSURE_MAX_DEPTH;
     if modelless_stretch {
-        return None;
+        return peel_toward_singularity(window, accuracy, model, child, out);
     }
     try_enclose_to_depth(left, left_models.as_ref(), accuracy, model, child, out)?;
     try_enclose_to_depth(right, right_models.as_ref(), accuracy, model, child, out)
+}
+
+/// How much of a window without a model, halves and all, is peeled off
+/// each end at a time.
+const PEEL_SHARE: f64 = 0.125;
+
+/// How many peels a window without a model may take.
+const PEEL_MAX: u32 = 256;
+
+/// Encloses a window neither of whose halves has a model either: a speed
+/// vanishing at one end as a power of the time to it bounds no polynomial
+/// range on a window as wide as its distance from the zero, however far it
+/// is halved. Slivers [`PEEL_SHARE`] of the window wide are peeled off
+/// whichever end holds a model until the rest does; `None` where neither
+/// end does, or the peels run out.
+fn peel_toward_singularity(
+    window: Window,
+    accuracy: [f64; 3],
+    model: &dyn Fn(Window) -> Option<[TaylorModel; 3]>,
+    halving: Halving,
+    out: &mut Vec<ExactPiece>,
+) -> Option<()> {
+    let (mut lo, mut hi) = (window.lo, window.hi);
+    let mut from_the_end = Vec::new();
+    for _ in 0..PEEL_MAX {
+        let rest = Window::new(lo, hi);
+        if let Some(models) = model(rest) {
+            try_enclose_to_depth(rest, Some(&models), accuracy, model, halving, out)?;
+            for pieces in from_the_end.into_iter().rev() {
+                out.extend::<Vec<ExactPiece>>(pieces);
+            }
+            return Some(());
+        }
+        let peel = PEEL_SHARE * (hi - lo);
+        let (front, back) = (Window::new(lo, lo + peel), Window::new(hi - peel, hi));
+        let (front_models, back_models) = (model(front), model(back));
+        if front_models.is_none() && back_models.is_none() {
+            return None;
+        }
+        if let Some(models) = front_models {
+            try_enclose_to_depth(front, Some(&models), accuracy, model, halving, out)?;
+            lo = front.hi;
+        }
+        if let Some(models) = back_models {
+            let mut pieces = Vec::new();
+            try_enclose_to_depth(back, Some(&models), accuracy, model, halving, &mut pieces)?;
+            from_the_end.push(pieces);
+            hi = back.lo;
+        }
+        if lo >= hi {
+            return None;
+        }
+    }
+    None
 }
 
 /// Encloses several signals over `[lo, hi]` whose windows share work:
