@@ -56,12 +56,12 @@ fn audited(cases: Vec<(String, String, PathBuf)>) -> Audited {
         );
         let Some(audit) = snapshot
             .as_ref()
-            .and_then(|snapshot| corpus::extruder_audit(snapshot, &gcode, &config))
+            .and_then(|snapshot| corpus::extruder::extruder_audit(snapshot, &gcode, &config))
         else {
             continue;
         };
         println!("{name}: {}", audit.summary());
-        if let Some(excess) = corpus::extruder_excess(&config, &audit) {
+        if let Some(excess) = corpus::known_extruder_excesses::extruder_excess(&config, &audit) {
             audited.extruder.push(format!("{name}: {excess}"));
         }
     }

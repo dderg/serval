@@ -44,9 +44,13 @@ fn every_corpus_case_plans() {
                 if let Some(excess) = corpus::z_caps_excess(&snapshot, &case.config) {
                     failures.push(format!("{}: {excess}", case.name));
                 }
-                if let Some(audit) = corpus::extruder_audit(&snapshot, &case.gcode, &case.config) {
+                if let Some(audit) =
+                    corpus::extruder::extruder_audit(&snapshot, &case.gcode, &case.config)
+                {
                     println!("{:<70} {}", "", audit.summary());
-                    if let Some(excess) = corpus::extruder_excess(&case.config, &audit) {
+                    if let Some(excess) =
+                        corpus::known_extruder_excesses::extruder_excess(&case.config, &audit)
+                    {
                         failures.push(format!("{}: {excess}", case.name));
                     }
                 }
