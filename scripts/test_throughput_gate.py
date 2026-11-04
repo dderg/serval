@@ -44,8 +44,8 @@ def test_stream_secs_comes_from_the_bench_summary_line():
         gate.stream_secs("no summary")
 
 
-def test_the_live_ratio_compares_the_fastest_run_of_each_side():
-    assert gate.live_ratio([0.30, 0.25, 0.40], [0.21, 0.20, 0.50]) == 1.25
+def test_the_live_ratio_compares_the_median_run_of_each_side():
+    assert gate.live_ratio([0.30, 0.25, 0.90], [0.24, 0.10, 0.50]) == 1.25
     with pytest.raises(gate.GateError):
         gate.live_ratio([], [0.2])
     with pytest.raises(gate.GateError):
@@ -97,8 +97,8 @@ def test_the_ir_prediction_scales_with_stream_time_per_instruction():
 
 
 def test_the_live_prediction_divides_the_reference_window_by_the_ratio():
-    verdict = gate.judge("c", entry(2.05), measurement(live=1.03))
-    assert verdict.predicted_x[1] == pytest.approx(2.05 / 1.03)
+    verdict = gate.judge("c", entry(2.01), measurement(live=1.01))
+    assert verdict.predicted_x[1] == pytest.approx(2.01 / 1.01)
     assert verdict.problems == (
         "the Pi 2-core worst window the live ratio predicts, 1.99x, "
         "is below the 2.0x floor",
