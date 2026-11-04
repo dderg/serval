@@ -3,13 +3,6 @@
 //! pinned class and whenever a pinned class grows, worsens or shrinks, so
 //! the list tightens as fixes land; the failure prints the numbers to pin.
 //!
-//! TODO(ratio-ramp-end-accel, #676): a ratio ramp's ends ask the extruder
-//! for more than `[axis e] max_accel`. `Crossing::across` in
-//! motion-pipeline's `follower_projection/ratio_ramp.rs` reads the leaders
-//! only from the seam on, never over the half of the ramp before it, and
-//! where the leaders brake hard the width envelope lays the ramp narrower
-//! than the ramp time it derived.
-//!
 //! TODO(shaped-turning, #685): the planner holds a kernel-free advance's
 //! demand along the path, `r·(a_t + k·j_t)`, within `[axis e] max_accel`,
 //! but not the shaped path's turning term `k·r·a⊥²/v`, which slow sharp

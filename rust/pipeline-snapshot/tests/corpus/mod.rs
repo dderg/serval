@@ -34,7 +34,7 @@ pub fn repo() -> PathBuf {
     source_tree::repo_root()
 }
 
-fn motion_settings(config: &Path) -> planner_config::from_doc::MotionSettings {
+pub fn motion_settings(config: &Path) -> planner_config::from_doc::MotionSettings {
     let text = std::fs::read_to_string(config).expect("read config");
     let doc =
         config_doc::Document::parse(&text, &config.display().to_string()).expect("config parses");

@@ -782,3 +782,41 @@ fn tiny_scv_reversal_with_z_step_plans() {
     let (_, report) = run_case(limits, &moves);
     assert!(report.hard_ok(), "{report}");
 }
+
+/// #682, found by `target_budgets_hold`: a fast extrusion, a 1 mm travel
+/// turning off it, a reversed extrusion and three travels slowing to 1 mm/s;
+/// the follower's source fit ran out of refinement splits.
+#[test]
+fn an_extrusion_between_two_travels_keeps_its_source_fit() {
+    let limits = FuzzLimits {
+        max_velocity: 553.945_527_622_928_2,
+        max_accel: 43_373.570_522_562_106,
+        square_corner_velocity: 0.339_824_488_063_710_8,
+    };
+    let moves = [
+        planar(
+            Turn::Continue,
+            59.968_641_825_493_34,
+            582.359_961_523_245_7,
+            0.087_711_029_672_142_36,
+        ),
+        planar(
+            Turn::Absolute(0.927_233_164_578_025),
+            1.0,
+            235.130_400_227_618_9,
+            0.0,
+        ),
+        planar(
+            Turn::Absolute(4.058_019_275_991_085),
+            1.0,
+            527.270_397_943_680_9,
+            0.085_164_978_667_546_02,
+        ),
+        planar(Turn::Continue, 1.0, 556.546_817_523_540_5, 0.0),
+        planar(Turn::Continue, 1.0, 46.816_668_799_578_36, 0.0),
+        planar(Turn::Continue, 1.0, 1.0, 0.0),
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok(), "{report}");
+    assert!(report.target_ok(), "{report}");
+}
