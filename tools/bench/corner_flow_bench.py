@@ -19,7 +19,6 @@ printer executed differently from its own command.
 
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass
 
@@ -36,6 +35,7 @@ EXTRUDING_RATIO = 1e-6
 VELOCITY_WINDOW_S = 2e-3
 ACCEL_WINDOW_S = 5e-3
 EVENT_MARGIN_S = 1.0
+PLAN_AXES = [0, 1, 3]
 CORNER_METRICS = ("apex", "peak", "dip", "width_mm", "blob_nl")
 STEP_METRICS = ("moved_nl", "net_nl", "switch_mm")
 XY_ROLES = ("a", "b")
@@ -135,19 +135,10 @@ def _turn(segments, index: int) -> float:
     return math.degrees(math.acos(max(-1.0, min(1.0, cos))))
 
 
-def _plan(engine, block: list[dict], config_text: str, duration_s: float):
-    count = int(duration_s / flow_metric.SAMPLE_DT_S) + 2
-    _, rows = engine.pipeline_snapshot_axis_samples(
-        block, config_text, [0, 1, 3], count
-    )
-    return np.linspace(0.0, duration_s, count), np.asarray(rows)
-
-
-def _duration(engine, block: list[dict], config_text: str) -> float:
-    snapshot, _ = engine.pipeline_snapshot_axis_samples(
-        block, config_text, [0], 2
-    )
-    return json.loads(snapshot)["traversal_time_s"]
+def _local(epoch) -> tuple[np.ndarray, np.ndarray]:
+    """An epoch's sample times from its own start, and its axis rows."""
+    t_start, t_end, axes_pva = epoch
+    return np.linspace(0.0, t_end - t_start, axes_pva.shape[1]), axes_pva
 
 
 def _same_time(times: np.ndarray) -> np.ndarray:
@@ -251,15 +242,19 @@ def _epoch_for(epochs, start_s: float, end_s: float):
 
 
 def report(
-    inputs, detail: dict, blocks: list[list[dict]], axis_weights: dict, engine
+    inputs,
+    detail: dict,
+    blocks: list[list[dict]],
+    axis_weights: dict,
+    stream_epochs,
 ) -> dict:
     """Per extruding feature of the print: the flow deviation (fraction of
     the nominal bead) or, at a ratio step, the material it moves, and the
     extruder peaks, from the plan, the reference steps and the captured
     steps. `blocks` are the analyzer's planned epochs, one per reference
-    block."""
+    block; `stream_epochs(config_text, axes, sample_period_s)` samples the
+    print planned as one stream across each of them."""
     config = PrinterConfig.parse(inputs.config.config_text)
-    unshaped = config.unshaped().text()
     melt_k = config.advance_k()
     filament = config.getfloat("extruder", "filament_diameter", 1.75)
     filament_area = math.pi * (filament / 2.0) ** 2
@@ -267,16 +262,20 @@ def report(
     epochs = detail["epochs"]
     capture_events = detail["capture_events"]
     motors = {m.role: m for m in inputs.motors}
+    shaped_epochs, unshaped_epochs = (
+        stream_epochs(text, PLAN_AXES, flow_metric.SAMPLE_DT_S)
+        for text in (inputs.config.config_text, config.unshaped().text())
+    )
     rows = []
-    for block, reference_block in zip(blocks, reference.blocks):
+    for block, reference_block, shaped_epoch, unshaped_epoch in zip(
+        blocks, reference.blocks, shaped_epochs, unshaped_epochs, strict=True
+    ):
         feats = features(block)
         if not feats:
             continue
         duration = reference_block.duration_s
-        t, shaped = _plan(engine, block, inputs.config.config_text, duration)
-        t_raw, raw = _plan(
-            engine, block, unshaped, _duration(engine, block, unshaped)
-        )
+        t, shaped = _local(shaped_epoch)
+        t_raw, raw = _local(unshaped_epoch)
         xy_plan = np.column_stack([shaped[0][:, 0], shaped[1][:, 0]])
         vertices = flow_metric.path_vertices(
             tuple(waypoint["position"][:2]) for waypoint in block

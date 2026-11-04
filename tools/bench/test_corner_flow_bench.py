@@ -143,12 +143,15 @@ def _bench_run(tmp_path_factory, geometry):
         **vars(job), capture=_exact_capture(job, analyze.build_reference(job))
     )
     _, detail = analyze.analyze(inputs)
+    planned = analyze.plan_waypoints(inputs)
     report = corner_flow_bench.report(
         inputs,
         detail,
-        analyze.plan_waypoints(inputs)[2],
+        planned.blocks,
         analyze.ROLE_AXIS_WEIGHTS,
-        analyze.harness._import_engine(),
+        lambda config_text, axes, period: analyze.stream_epochs(
+            inputs, planned, config_text, axes, period
+        ),
     )
     return job, geometry, report
 
