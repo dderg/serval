@@ -31,7 +31,10 @@ fn split_at_rests(waypoints: &[Waypoint]) -> (Vec<Vec<Waypoint>>, Vec<f64>) {
         let mut waypoint = *waypoint;
         if let Some(dwell) = waypoint.dwell_before_s.take() {
             dwells.push(dwell);
-            let rest = *epochs.last().and_then(|epoch| epoch.last()).expect("an epoch");
+            let rest = *epochs
+                .last()
+                .and_then(|epoch| epoch.last())
+                .expect("an epoch");
             epochs.push(vec![rest]);
         }
         epochs.last_mut().expect("an epoch").push(waypoint);
@@ -50,7 +53,10 @@ fn position(snapshot: &pipeline_snapshot::Snapshot, axis: usize, t: f64) -> f64 
 fn assert_rest_decoupled(name: &str, gcode: &str, config: &Path) {
     let waypoints = corpus::waypoints(gcode, config);
     let (epochs, dwells) = split_at_rests(&waypoints);
-    assert!(epochs.len() > 2, "{name}: the print must rest between epochs");
+    assert!(
+        epochs.len() > 2,
+        "{name}: the print must rest between epochs"
+    );
     let stream = corpus::plan_waypoints(name, &waypoints, config);
     let planned = epochs
         .iter()
