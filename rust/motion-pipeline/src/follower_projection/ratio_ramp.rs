@@ -1,6 +1,9 @@
 use std::collections::VecDeque;
 
-use geometry::{RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep};
+use geometry::{
+    ADVANCE_VALLEY_SPEED_MM_S, RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule,
+    RatioStep,
+};
 use trajectory::ContinuousSegment;
 
 use super::{
@@ -1061,7 +1064,7 @@ impl RatioSmoothing {
 
     /// Takes in `leg`'s spans: the width nodes it covers, the seams the
     /// table gained with the ramp time `rule` derives for each, and the
-    /// advance valleys its opening seam and a turnaround inside it need.
+    /// advance valleys its opening seam and its slowest point inside need.
     pub(super) fn lay(&mut self, spans: &[RatioSpan], leg: &RampLeg, rule: &RatioRampRule) {
         assert!(
             self.width.rule.is_none_or(|laid| laid == *rule) || self.width.is_settled(),
@@ -1081,7 +1084,7 @@ impl RatioSmoothing {
             self.base_slope = Some(spans[0].ratio_slope());
         }
         let (t_start, t_end) = leg.support;
-        let opening = Crossing::at(leaders, t_start);
+        let opening = Crossing::valley_at(leaders, t_start);
         let crossing = self
             .reach_into_next
             .map_or(opening, |closing| closing.common(opening));
@@ -1092,18 +1095,18 @@ impl RatioSmoothing {
         }
         self.width.extend(leaders, leg, table_end);
         let closes_a_rest = self.lay_rest_valley(spans, leg, leaders, crossing, table_end);
-        if reach > SPAN_MIN_LEN_MM && !self.resting && !closes_a_rest && crossing.turns_around() {
-            self.lay_turnaround_valley(seam, reach);
+        if reach > SPAN_MIN_LEN_MM && !self.resting && !closes_a_rest && crossing.crawls() {
+            self.lay_valley(seam, reach, crossing.crawl_floor());
         }
-        let turn_inside = (!leg.rests && !self.resting)
-            .then(|| turnaround_inside(leaders, leg, table_end))
+        let slowest = (!leg.rests && !self.resting)
+            .then(|| slowest_crawl(leaders, leg, table_end))
             .flatten();
-        if let Some((turn, turn_crossing)) = turn_inside {
+        if let Some((turn, turn_crossing)) = slowest {
             let reach = turn_crossing
                 .reach(VALLEY_RAMP_TIME_S)
                 .min(turn - self.floor);
             if reach > SPAN_MIN_LEN_MM {
-                self.lay_turnaround_valley(turn, reach);
+                self.lay_valley(turn, reach, turn_crossing.crawl_floor());
             }
         }
         let new_seams = self.record_seams(spans);
@@ -1111,15 +1114,26 @@ impl RatioSmoothing {
         self.time_seams(&spans[new_seams.start.saturating_sub(1)..], leaders, leg);
         self.keep_tail(leaders, leg);
         self.width.assign(t_end - TARGET_DELAY_S);
-        self.reach_into_next = Some(Crossing::at(leaders, t_end));
+        self.reach_into_next = Some(Crossing::valley_at(leaders, t_end));
     }
 
-    fn lay_turnaround_valley(&mut self, turn: f64, reach: f64) {
+    /// A valley at `turn`, unless the last one laid sits there already: a
+    /// crawl at a seam is the slowest point of the leg before or after it
+    /// too.
+    fn lay_valley(&mut self, turn: f64, reach: f64, floor: f64) {
+        let laid_there = self
+            .valleys
+            .last()
+            .is_some_and(|valley| (valley.end - turn).abs() <= SPAN_LOOKUP_SLACK_MM);
+        if laid_there {
+            return;
+        }
         self.valleys.push(AdvanceValley {
             start: turn,
             end: turn,
             before: reach.min(self.back_reach_limit(turn)),
             after: reach,
+            floor,
         });
     }
 
@@ -1563,6 +1577,7 @@ impl RatioSmoothing {
                 end: f64::INFINITY,
                 before: rest_start - seam + reach.min(self.back_reach_limit(seam)),
                 after: 0.0,
+                floor: 0.0,
             });
             self.resting = true;
         }
@@ -1603,10 +1618,15 @@ impl RatioSmoothing {
 
 /// A stretch of path where a ratio-ramped advance reads the laid ratio
 /// weighted down to zero: `W = 0` on `[start, end]`, where the leaders'
-/// path speed is zero, and `W = ψ(x) = 1 − (1 − x)³` within
-/// `before`/`after` of it, `x` the distance out over that width, so the
-/// weight rises off the rest with a slope the leaders' zero speed makes
-/// harmless and meets 1 flat to second order. The laid ratio, and so the
+/// path speed is zero or a crawl, and `W = ψ(x) = 1 − (1 − x)³` within
+/// `before`/`after` of it, meeting 1 flat to second order. `x` is the
+/// distance `d` out over that width, both flattened over the valley's
+/// `floor` `f` as `√(d² + f²) − f`: with no floor, where the leaders rest
+/// or turn around, the weight rises off zero with a slope their zero speed
+/// makes harmless; across a crawl at speed `v` and acceleration `a`, the
+/// floor is `v²/a`, about where the acceleration takes over from the
+/// crawl, and the weight leaves zero flat, since `W'·ṡ²` of opposite signs
+/// either side would step the advanced velocity. The laid ratio, and so the
 /// material, is untouched; only the lead the advance builds is released
 /// over the path before and rebuilt after.
 ///
@@ -1614,13 +1634,19 @@ impl RatioSmoothing {
 /// `k·r·W·ṡ` catches up with the advance's `k·r·ṡ` at a rate of at most
 /// `1.653·k·r·a` (the peak of `d/du (u·ψ(u²))`): the advance's natural
 /// rate, overshot by what catching up from zero takes, and over a shaped
-/// start whose acceleration builds from zero, much less.
+/// start whose acceleration builds from zero, much less. A crawl's floor
+/// keeps that, since the leaders cover it within about `v/a`.
 ///
 /// - A turnaround: the leaders' path speed passes through zero at a seam
 ///   while its rate does not, so the rate steps from `−a` to `+a`, and an
 ///   advance reading `r·ṡ` would step the follower's velocity by `2·k·r·a`
 ///   whatever the ratio's own shape. The valley is that seam, each side
 ///   reaching as far as the leaders turn around in half the ramp time.
+/// - A crawl: the leaders' slowest point, under
+///   [`ADVANCE_VALLEY_SPEED_MM_S`], at a seam or inside a leg
+///   ([`slowest_crawl`]). The path speed's second derivative carries the
+///   tangent's turning there, `a⊥²/v`, which an advance would turn into
+///   follower acceleration however the planner bounds the path's own.
 /// - A rest: an extrude-only move or a dwell, where the shaped leaders come
 ///   to rest between the kernel spill of the move before and of the move
 ///   after, and the fit's back-and-forth near the rest point has its own
@@ -1632,6 +1658,7 @@ struct AdvanceValley {
     end: f64,
     before: f64,
     after: f64,
+    floor: f64,
 }
 
 impl AdvanceValley {
@@ -1654,11 +1681,17 @@ impl AdvanceValley {
         if distance >= width {
             return (1.0, 0.0, 0.0);
         }
-        let inside = 1.0 - distance / width;
+        let floor = self.floor.min(width);
+        let flattened = |d: f64| d * d / (d.hypot(floor) + floor);
+        let spread = distance.hypot(floor);
+        let slope = distance / spread;
+        let bend = floor / spread * (floor / spread) / spread;
+        let span = flattened(width);
+        let inside = 1.0 - flattened(distance) / span;
         (
             1.0 - inside * inside * inside,
-            outward * 3.0 * inside * inside / width,
-            -6.0 * inside / (width * width),
+            outward * 3.0 * inside * inside * slope / span,
+            -6.0 * inside * slope * slope / (span * span) + 3.0 * inside * inside * bend / span,
         )
     }
 }
@@ -1868,42 +1901,43 @@ fn ratio_steps_within(spans: &[RatioSpan], from: f64, to: f64) -> Option<(f64, f
     Some((first, steps.last().unwrap_or(first)))
 }
 
-/// Where inside `leg`, off its seams, the shaped leaders turn around: the
-/// path there and how they cross it. Shaping spreads a raw reversal over
-/// the kernels' support, so where the move into it brakes unlike the move
-/// out of it launches, the shaped velocity passes through zero off the raw
-/// seam, inside either move, where the seam's crossing does not see it.
-/// Such a leg's velocity reverses from one end to the other, and the
-/// turnaround is its slowest point.
-fn turnaround_inside(
+/// Where inside `leg`, off its seams, the shaped leaders are slowest, if
+/// they crawl there ([`Crossing::crawls`]): the path there and how a valley
+/// there reads them. Shaping spreads a raw reversal over the kernels'
+/// support, so where the move into it brakes unlike the move out of it
+/// launches, the shaped velocity passes through zero off the raw seam,
+/// inside either move, where the seam's crossing does not see it; where the
+/// axes are shaped unlike each other it passes a hair beside zero instead.
+/// A leg whose slowest probe provably stays faster around it has none, and
+/// one slowest at an end leaves it to that seam's crossing.
+fn slowest_crawl(
     leaders: &ShapedLeaders,
     leg: &RampLeg,
     table_end: f64,
 ) -> Option<(f64, Crossing)> {
-    let (t_start, t_end) = leg.support;
-    let reverses = (0..leaders.axes.len())
-        .map(|index| leaders.pva(index, t_start).1 * leaders.pva(index, t_end).1)
-        .sum::<f64>()
-        < 0.0;
-    if !reverses
-        || Crossing::at(leaders, t_start).turns_around()
-        || Crossing::at(leaders, t_end).turns_around()
-    {
-        return None;
-    }
     let speed = LegSpeed::of(leaders, leg, table_end);
-    let (slowest_probe, _) = speed
+    let (slowest_probe, slowest) = speed
         .probes
         .iter()
         .map(|&t| speed.at(t))
         .enumerate()
         .min_by(|left, right| left.1.total_cmp(&right.1))
         .expect("a leg has probes");
+    if slowest >= ADVANCE_VALLEY_SPEED_MM_S
+        && speed.outruns_rest_near(slowest_probe, ADVANCE_VALLEY_SPEED_MM_S)
+    {
+        return None;
+    }
     let turn = speed.slowest_near(slowest_probe);
-    let crossing = Crossing::at(leaders, turn);
-    crossing
-        .turns_around()
-        .then(|| (speed.path_at(turn), crossing))
+    let last_probe = speed.probes.len() - 1;
+    let at_an_end = [0, last_probe]
+        .into_iter()
+        .any(|end| slowest_probe == end && speed.at(turn) >= slowest);
+    if at_an_end {
+        return None;
+    }
+    let crossing = Crossing::valley_at(leaders, turn);
+    crossing.crawls().then(|| (speed.path_at(turn), crossing))
 }
 
 /// The time a turnaround's rate takes to build the speed the leaders cross
@@ -1944,6 +1978,22 @@ impl Crossing {
             (accel, 0.0)
         };
         Self { speed, rate, jerk }
+    }
+
+    /// How a valley at `t` reads the leaders crossing it: as [`Self::at`],
+    /// but a crawl, under [`ADVANCE_VALLEY_SPEED_MM_S`], they leave under
+    /// the whole of their acceleration, mostly across the path where they
+    /// nearly reverse, not the path speed's rate at its minimum.
+    fn valley_at(leaders: &ShapedLeaders, t: f64) -> Self {
+        let crossing = Self::at(leaders, t);
+        if crossing.speed < ADVANCE_VALLEY_SPEED_MM_S {
+            Self {
+                rate: leaders.motion(t).accel_norm(),
+                ..crossing
+            }
+        } else {
+            crossing
+        }
     }
 
     /// The fastest and the most accelerating the leaders are over `window`.
@@ -1987,6 +2037,23 @@ impl Crossing {
     /// exact zero, while that rate itself is no rounding.
     fn turns_around(self) -> bool {
         self.rate > 0.0 && self.speed <= self.rate * TURNAROUND_SPEED_TIME_S
+    }
+
+    /// The leaders turn around, or crawl under
+    /// [`ADVANCE_VALLEY_SPEED_MM_S`]: an advance releases its lead around.
+    fn crawls(self) -> bool {
+        self.turns_around() || self.speed < ADVANCE_VALLEY_SPEED_MM_S
+    }
+
+    /// The floor a valley here keeps flat (see [`AdvanceValley`]): `v²/a`,
+    /// about where the acceleration takes over from the crawl, and none
+    /// where the leaders turn around.
+    fn crawl_floor(self) -> f64 {
+        if self.turns_around() || self.speed == 0.0 {
+            0.0
+        } else {
+            self.speed * self.speed / self.rate
+        }
     }
 }
 

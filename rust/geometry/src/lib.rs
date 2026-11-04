@@ -27,7 +27,10 @@ pub use frontend::{
     CORNER_DEVIATION_SCV_FACTOR, ExtruderCaps, FrontendError, LeaderSpill, Move, MoveContext,
     VelocityLimits, corner_deviation_from_scv, line_move, scv_from_corner_deviation,
 };
-pub use ratio_ramp::{RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep};
+pub use ratio_ramp::{
+    ADVANCE_VALLEY_SPEED_MM_S, RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule,
+    RatioStep,
+};
 pub use segment::{CubicSegment, FollowerDemand, SourceRange};
 pub use step_capacity::{FollowerStepLoad, McuStepLoad, StepCapacity, StepCapacityOverload};
 
