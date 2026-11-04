@@ -174,7 +174,7 @@ fn main() {
     let held_field =
         deepest_held.map_or(String::new(), |held| format!(" deepest_held_moves={held}"));
     println!(
-        "moves={submitted} segments={} stream_secs={stream_s:.1} wall_secs={wall_s:.1} overall_x={:.2}{held_field}",
+        "moves={submitted} segments={} stream_secs={stream_s:.3} wall_secs={wall_s:.1} overall_x={:.2}{held_field}",
         arrivals.len(),
         stream_s / wall_s
     );

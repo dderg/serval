@@ -382,7 +382,7 @@ def report(verdicts: list[Verdict]) -> None:
         )
         print(
             f"{verdict.config:<62} {verdict.repo_ir:>15} "
-            f"{verdict.delta_pct:>+7.2f}% {verdict.stream_secs:>9.1f} "
+            f"{verdict.delta_pct:>+7.2f}% {verdict.stream_secs:>9.3f} "
             f"{predicted:>14}"
         )
         for problem in verdict.problems:
@@ -474,7 +474,6 @@ def main() -> int:
         raise GateError(f"no baseline for {missing}: accept one")
 
     measurements = measure(configs)
-    print(measurement_json(measurements), file=sys.stderr)
     if args.accept:
         entries = {
             config: {
