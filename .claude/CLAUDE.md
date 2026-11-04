@@ -133,6 +133,11 @@ exact range you edit with the same call that gave you the tag, send all changes 
 in one `edit`, and take the tag from the previous edit's response. Do not fall back to
 `python3 - <<EOF` replace scripts (261 in those sessions): they skip the anchors that make
 edits reviewable and silently match more than you meant.
+# Hardware lock
+
+The Pi bench is shared: every use goes through `tools/bench/lock.py hold -- <cmd>`, which
+queues behind the current holder and prints who holds it and for how long (waits of
+20 minutes were seen). Hold it for the whole session script, not per command.
 
 # Never work in ~/Developer/serval
 
