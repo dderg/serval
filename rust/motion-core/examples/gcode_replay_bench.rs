@@ -51,16 +51,14 @@ fn replay_staged(
     sink: impl FnMut(TrajectoryItem) -> bool + Send + 'static,
 ) -> u64 {
     let mut pipeline = pipeline.into_staged(sink);
-    let mut submitted = 0u64;
     let mut held = 0u64;
     let mut deepest_held = 0u64;
-    for m in moves {
+    for (submitted, m) in moves.into_iter().enumerate() {
         let planned_before = pipeline.segments_planned();
         if !pipeline.feed(m.into()) {
             eprintln!("pipeline input closed at move {submitted}");
             process::exit(1);
         }
-        submitted += 1;
         held = if pipeline.segments_planned() > planned_before {
             0
         } else {
