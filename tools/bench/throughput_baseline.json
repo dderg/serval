@@ -2,10 +2,10 @@
   "slice_lines": 1000,
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 10637984278,
+      "ir": 9634457828,
       "stream_secs": 6.594,
-      "reason": "the ratio ramp reads the leaders over both halves of every ramp (laid tails, seams widened by later legs), the width field derives each seam's width plateau, and the smoothing sums the table's slope span by span",
-      "commit": "7a1e95a06b0d022fbef2379317d1bf98e2b60f9f",
+      "reason": "rail integrations memoized by their inputs: re-planning windows settle the same members from the same speeds again; output bit-identical (trajectory digests unchanged)",
+      "commit": "b386caf434ee6664e28255d7acc5f2fea42afff0",
       "pi_2core": {
         "k": 4587316424.936247,
         "worst_x": [
@@ -16,10 +16,10 @@
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 13552878036,
+      "ir": 12489615156,
       "stream_secs": 6.202,
-      "reason": "the ratio ramp reads the leaders over both halves of every ramp (laid tails, seams widened by later legs), the width field derives each seam's width plateau, and the smoothing sums the table's slope span by span",
-      "commit": "7a1e95a06b0d022fbef2379317d1bf98e2b60f9f",
+      "reason": "rail integrations memoized by their inputs: re-planning windows settle the same members from the same speeds again; output bit-identical (trajectory digests unchanged)",
+      "commit": "b386caf434ee6664e28255d7acc5f2fea42afff0",
       "pi_2core": {
         "k": 4582331787.594325,
         "worst_x": [
@@ -30,10 +30,10 @@
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 14207321117,
+      "ir": 12856925656,
       "stream_secs": 7.543,
-      "reason": "the ratio ramp reads the leaders over both halves of every ramp (laid tails, seams widened by later legs), the width field derives each seam's width plateau, and the smoothing sums the table's slope span by span",
-      "commit": "7a1e95a06b0d022fbef2379317d1bf98e2b60f9f",
+      "reason": "rail integrations memoized by their inputs: re-planning windows settle the same members from the same speeds again; output bit-identical (trajectory digests unchanged)",
+      "commit": "b386caf434ee6664e28255d7acc5f2fea42afff0",
       "pi_2core": {
         "k": 4388809054.193679,
         "worst_x": [
