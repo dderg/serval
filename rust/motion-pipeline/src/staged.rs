@@ -40,6 +40,7 @@ enum ShaperExit {
 pub struct StagedPipeline {
     front: PlanningFront,
     materializer: SourceMaterializer,
+    planned_through_s: f64,
     shaper_inbox: Option<ShaperInbox>,
     shaper_thread: Option<JoinHandle<ShaperExit>>,
 }
@@ -60,6 +61,7 @@ impl Pipeline {
         StagedPipeline {
             front,
             materializer,
+            planned_through_s: 0.0,
             shaper_inbox: Some(ShaperInbox {
                 sender,
                 #[cfg(feature = "bench-metrics")]
@@ -148,10 +150,21 @@ impl StagedPipeline {
             .as_mut()
             .expect("pipeline already finished");
         let materializer = &mut self.materializer;
+        let planned_through_s = &mut self.planned_through_s;
         (&mut self.front, move |mut item| {
+            if let BaseItem::Seg(seg) = &item {
+                *planned_through_s = planned_through_s.max(seg.t_end);
+            }
             materializer.materialize(std::slice::from_mut(&mut item));
             inbox.send(item)
         })
+    }
+
+    /// The stream time the planning side has committed to the shaper
+    /// through.
+    #[must_use]
+    pub fn planned_through_s(&self) -> f64 {
+        self.planned_through_s
     }
 
     /// Segments the planning side has committed to the shaper so far.
