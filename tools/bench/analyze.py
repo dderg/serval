@@ -25,9 +25,11 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import hashlib
 import json
 import math
 import re
+import shlex
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, fields
@@ -58,6 +60,7 @@ REFERENCE_FINE_FACTOR = 50
 REFERENCE_CHUNK_INTERVALS = 20_000
 REFERENCE_BLOCK_SEPARATION_S = 100.0
 BLOCK_EDGE_SLACK_S = 1e-9
+EMPTY_DIFF_SHA256 = hashlib.sha256(b"").hexdigest()
 LATTICE_SNAP_STEPS = 1e-6
 DEFAULT_EPOCH_GAP_S = 0.15
 OFFSET_SEARCH_S = 1.0
@@ -1816,21 +1819,36 @@ def _save(fig, path: Path, plt) -> str:
     return path.name
 
 
-def deployed_engine_mismatch(run: dict, engine_build_id: str) -> str | None:
+def deployed_engine_mismatch(
+    run: dict, engine_build_id: str, analyze_argv: list[str]
+) -> str | None:
     """Why the reference this engine plans is not what the run executed: the
     Pi planned the print with the rust/ sources `deploy.py sync` recorded,
     and a reference from any other planner holds the capture against motion
     the printer never commanded."""
-    deployed = run["deployed"].get("rust_build_id")
+    identity = run["deployed"]
+    deployed = identity.get("rust_build_id")
     if deployed == engine_build_id:
         return None
-    identity = run["deployed"]
-    return (
+    head = identity["head"]
+    reason = (
         f"the run executed rust/ {deployed} ({identity.get('branch')} @ "
-        f"{identity.get('head')}, {identity.get('worktree')}) but the local "
-        f"engine was built from {engine_build_id}: analyze it from a tree at "
-        "the deployed code"
+        f"{head}, {identity.get('worktree')}) but the local engine was built "
+        f"from {engine_build_id}. Reanalyze it from a worktree at the "
+        "deployed head:\n"
+        f'  cd "$(scripts/wt.sh new reanalyze-{head[:12]} --base {head})"\n'
+        "  make -f Makefile.rust motion-engine-fast\n"
+        f"  uv run python tools/bench/analyze.py {shlex.join(analyze_argv)}"
     )
+    dirty_paths = identity.get("dirty_paths")
+    diff_sha256 = identity.get("diff_sha256")
+    if dirty_paths or diff_sha256 != EMPTY_DIFF_SHA256:
+        reason += (
+            f"\nThe deployed tree was dirty (dirty paths {dirty_paths}, "
+            f"git diff HEAD sha256 {diff_sha256}), so {head} alone may not "
+            f"reproduce rust/ {deployed}."
+        )
+    return reason
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1856,9 +1874,15 @@ def main(argv: list[str] | None = None) -> int:
         "and its clock, every captured motor stepped pulsed",
     )
     args = parser.parse_args(argv)
+    options = [
+        token
+        for token in (sys.argv[1:] if argv is None else argv)
+        if Path(token) != args.run_dir
+    ]
     mismatch = deployed_engine_mismatch(
         json.loads((args.run_dir / "run.json").read_text()),
         harness._import_engine().build_id(),
+        [str(args.run_dir.resolve()), *options],
     )
     if mismatch is not None:
         raise AnalysisError(mismatch)

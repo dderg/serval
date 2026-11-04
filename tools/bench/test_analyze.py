@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import analyze
 import numpy as np
@@ -785,30 +787,87 @@ def test_same_key_matching_stays_exact_over_millions_of_levels_and_long_runs():
     assert counts.tolist() == [2, 1]
 
 
-def _deployed(rust_build_id):
+HEAD = "abc1234def5678"
+RECIPE_ARGV = ["/runs/20261104-064327", "--corner-flow"]
+
+
+def _deployed(rust_build_id, dirty_paths=(), diff=b""):
     return {
         "deployed": {
-            "head": "abc1234",
+            "head": HEAD,
             "branch": "main",
             "worktree": "/tmp/wt",
             "rust_build_id": rust_build_id,
+            "dirty_paths": list(dirty_paths),
+            "diff_sha256": hashlib.sha256(diff).hexdigest(),
         }
     }
 
 
 def test_a_run_analyzes_with_the_engine_its_code_built():
-    assert analyze.deployed_engine_mismatch(_deployed("f00d"), "f00d") is None
+    assert (
+        analyze.deployed_engine_mismatch(_deployed("f00d"), "f00d", RECIPE_ARGV)
+        is None
+    )
 
 
 def test_a_run_refuses_a_reference_from_other_rust_sources():
-    reason = analyze.deployed_engine_mismatch(_deployed("f00d"), "beef")
-    assert "f00d" in reason and "beef" in reason and "abc1234" in reason
+    reason = analyze.deployed_engine_mismatch(
+        _deployed("f00d"), "beef", RECIPE_ARGV
+    )
+    assert "f00d" in reason and "beef" in reason and HEAD in reason
+
+
+def test_a_refusal_prints_the_worktree_recipe_at_the_deployed_head():
+    reason = analyze.deployed_engine_mismatch(
+        _deployed("f00d"), "beef", RECIPE_ARGV
+    )
+    assert f"scripts/wt.sh new reanalyze-{HEAD[:12]} --base {HEAD}" in reason
+    assert "make -f Makefile.rust motion-engine-fast" in reason
+    assert (
+        "uv run python tools/bench/analyze.py /runs/20261104-064327 "
+        "--corner-flow" in reason
+    )
+    assert "dirty" not in reason
+
+
+@pytest.mark.parametrize(
+    "dirty_paths, diff",
+    [(["rust/a.rs"], b""), ([], b"diff --git a/rust/a.rs b/rust/a.rs\n")],
+)
+def test_a_refusal_of_a_dirty_deploy_warns_its_head_may_not_reproduce_it(
+    dirty_paths, diff
+):
+    reason = analyze.deployed_engine_mismatch(
+        _deployed("f00d", dirty_paths, diff), "beef", RECIPE_ARGV
+    )
+    assert "dirty" in reason
+    assert f"--base {HEAD}" in reason
 
 
 def test_a_run_predating_build_ids_refuses_any_reference():
     run = _deployed(None)
     del run["deployed"]["rust_build_id"]
-    assert analyze.deployed_engine_mismatch(run, "beef") is not None
+    assert (
+        analyze.deployed_engine_mismatch(run, "beef", RECIPE_ARGV) is not None
+    )
+
+
+def test_main_refuses_with_the_recipe_for_the_same_run_and_options(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "run.json").write_text(json.dumps(_deployed("f00d")))
+    monkeypatch.setattr(
+        analyze.harness,
+        "_import_engine",
+        lambda: SimpleNamespace(build_id=lambda: "beef"),
+    )
+    monkeypatch.chdir(tmp_path.parent)
+    with pytest.raises(analyze.AnalysisError) as refusal:
+        analyze.main([tmp_path.name, "--gap", "0.3", "--corner-flow"])
+    assert f"analyze.py {tmp_path} --gap 0.3 --corner-flow" in str(
+        refusal.value
+    )
 
 
 def test_a_short_epoch_runs_at_the_latest_fitted_rate_not_the_median():
