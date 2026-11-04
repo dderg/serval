@@ -294,7 +294,7 @@ fn ramped_position_step(axis: usize, step: &AdvanceStep) -> PostProcessError {
 }
 
 /// One raw segment's follower projection inputs: the shaped leader signal it
-/// rides, the leader pieces its ingest read off it, its own raw track, and
+/// rides, what its ingest read off those leaders, its own raw track, and
 /// where on the shaped path it starts.
 #[derive(Clone, Copy)]
 struct FollowerSource<'a> {
@@ -302,7 +302,7 @@ struct FollowerSource<'a> {
     raw: &'a ContinuousSegment,
     axis: usize,
     leaders: &'a [usize],
-    leader_pieces: &'a [Option<LeaderPieces>],
+    reads: &'a LeaderReads,
     state: &'a FollowerState,
     s_start: f64,
     s_length: f64,
@@ -324,7 +324,7 @@ fn fit_source_projection(
         raw,
         axis,
         leaders,
-        leader_pieces,
+        reads,
         state,
         s_start,
         s_length,
@@ -335,7 +335,7 @@ fn fit_source_projection(
         shaped,
         raw,
         axis,
-        ShapedLeaders::with_pieces(shaped, leaders, leader_pieces),
+        ShapedLeaders::with_reads(shaped, leaders, reads),
         state,
         Odometer {
             start: s_start,
@@ -553,34 +553,40 @@ pub(crate) fn project_followers(
                 base[..frontier.len()]
                     .partition_point(|raw| raw.t_end <= through + GRID_DEDUP_EPS_S)
             });
-            let lengths = leader_arc_lengths(
+            let reads = ingest_reads(
                 &base[first_new..frontier.len()],
                 &frontier[first_new..],
                 leaders,
                 pool,
             );
-            timing.ingests += lengths.len();
+            timing.ingests += reads.len();
             let mut next_s = state.smoothing.backlog_end().unwrap_or(state.s_shaped);
-            for (offset, (arc, shaped_leaders)) in lengths.into_iter().enumerate() {
+            for (offset, read) in reads.into_iter().enumerate() {
                 let i = first_new + offset;
                 let table_start = state.s_ingested_end;
-                let shaped_ds =
-                    state.ingest(&base[i], &frontier[i], axis, leaders, &base[i + 1..], arc);
+                let shaped_ds = state.ingest(
+                    &base[i],
+                    &frontier[i],
+                    axis,
+                    leaders,
+                    &base[i + 1..],
+                    (read.shaped_ds, read.raw_moves),
+                );
                 let s_start = state.aligned_span_start(next_s);
                 let leg = RampLeg {
                     shaped: &frontier[i],
                     leaders,
-                    shaped_leaders: &shaped_leaders,
+                    shaped_leaders: &read.shaped_leaders,
                     support: projection_support(&base[i], &frontier[i], axis, leaders),
                     start_s: table_start,
-                    rests: !arc.1,
+                    rests: !read.raw_moves,
                 };
                 state.smoothing.lay(&state.spans, &leg, &rule);
                 state.smoothing.queue(
                     base[i].t_end,
                     (s_start, shaped_ds),
                     state.s_ingested_end,
-                    shaped_leaders.into_pieces(),
+                    read.shaped_leaders.into_reads(read.odometer),
                 );
                 next_s = s_start + shaped_ds;
             }
@@ -626,7 +632,7 @@ pub(crate) fn project_followers(
                                 raw: &base[*index],
                                 axis,
                                 leaders,
-                                leader_pieces: &pending.leader_pieces,
+                                reads: &pending.reads,
                                 state: state_ref,
                                 s_start: pending.s_start,
                                 s_length: pending.s_length,
@@ -1884,7 +1890,7 @@ fn axis_breakpoints(axis: &ContinuousAxis) -> Vec<f64> {
 }
 
 fn leader_arc_length(seg: &ContinuousSegment, leaders: &[usize]) -> f64 {
-    shaped_leader_arc_length(seg, leaders, &ShapedLeaders::of(seg, leaders))
+    shaped_leader_arc_length(seg, leaders, &ShapedLeaders::of(seg, leaders)).0
 }
 
 /// Whether the raw leaders of `raw` cover more than [`SPAN_MIN_LEN_MM`]: at
@@ -1903,12 +1909,16 @@ fn raw_leaders_move(raw: &ContinuousSegment, leaders: &[usize]) -> bool {
     chord > MOVING_CHORD_MM || leader_arc_length(raw, leaders) > SPAN_MIN_LEN_MM
 }
 
+/// The arc length the leaders of `seg` cover, with the odometer leaves it
+/// sums.
 fn shaped_leader_arc_length(
     seg: &ContinuousSegment,
     leaders: &[usize],
     shaped_leaders: &ShapedLeaders,
-) -> f64 {
-    axis_grid(seg, leaders)
+) -> (f64, OdometerLeaves) {
+    let grid = axis_grid(seg, leaders);
+    let mut leaves = Vec::new();
+    let length = grid
         .windows(2)
         .map(|window| {
             let mut length = 0.0;
@@ -1918,24 +1928,34 @@ fn shaped_leader_arc_length(
                 window[1],
                 &mut |end, leaf| {
                     length += leaf.covered_until(end);
+                    leaves.push((end, leaf));
                 },
             );
             length
         })
-        .sum()
+        .sum();
+    (length, OdometerLeaves { grid, leaves })
 }
 
-/// Each newly ingested segment's shaped leader arc length and whether its
-/// raw leaders move, with the shaped leaders read for them, which the ratio
-/// ramp reads again. The reads are pure per-segment work, so they fan out
-/// across cores; results are ordered by segment and bit-identical to serial
-/// evaluation.
-fn leader_arc_lengths<'a>(
+/// One newly ingested segment as ingest reads it: its shaped leaders, the
+/// arc length they cover with the odometer leaves summing it, and whether
+/// its raw leaders move.
+struct IngestRead<'a> {
+    shaped_leaders: ShapedLeaders<'a>,
+    shaped_ds: f64,
+    odometer: OdometerLeaves,
+    raw_moves: bool,
+}
+
+/// [`IngestRead`] for each newly ingested segment. The reads are pure
+/// per-segment work, so they fan out across cores; results are ordered by
+/// segment and bit-identical to serial evaluation.
+fn ingest_reads<'a>(
     raw: &[ContinuousSegment],
     shaped: &'a [ContinuousSegment],
     leaders: &'a [usize],
     pool: &WorkerPool,
-) -> Vec<((f64, bool), ShapedLeaders<'a>)> {
+) -> Vec<IngestRead<'a>> {
     assert_eq!(raw.len(), shaped.len());
     let workers = if cfg!(target_arch = "wasm32") {
         1
@@ -1950,13 +1970,14 @@ fn leader_arc_lengths<'a>(
         || (),
         |(), i| {
             let shaped_leaders = ShapedLeaders::of(&shaped[i], leaders);
-            (
-                (
-                    shaped_leader_arc_length(&shaped[i], leaders, &shaped_leaders),
-                    raw_leaders_move(&raw[i], leaders),
-                ),
+            let (shaped_ds, odometer) =
+                shaped_leader_arc_length(&shaped[i], leaders, &shaped_leaders);
+            IngestRead {
                 shaped_leaders,
-            )
+                shaped_ds,
+                odometer,
+                raw_moves: raw_leaders_move(&raw[i], leaders),
+            }
         },
     )
     .expect("leader arc length thread panicked")
@@ -2136,10 +2157,27 @@ impl LeaderPieces {
     }
 }
 
+/// The odometer leaves over one segment's leader knot grid, in order, each
+/// with the end it covers to.
+#[derive(Debug)]
+struct OdometerLeaves {
+    grid: Vec<f64>,
+    leaves: Vec<(f64, OdometerLeaf)>,
+}
+
+/// What ingest read off one shaped segment's leaders that its source fit
+/// reads again.
+#[derive(Debug)]
+struct LeaderReads {
+    pieces: Vec<Option<LeaderPieces>>,
+    odometer: OdometerLeaves,
+}
+
 struct ShapedLeaders<'a> {
     leaders: &'a [usize],
     axes: Vec<&'a ContinuousAxis>,
     pieces: Cow<'a, [Option<LeaderPieces>]>,
+    odometer: Option<&'a OdometerLeaves>,
 }
 
 impl<'a> ShapedLeaders<'a> {
@@ -2151,30 +2189,35 @@ impl<'a> ShapedLeaders<'a> {
             leaders,
             axes,
             pieces: Cow::Owned(pieces),
+            odometer: None,
         }
     }
 
-    /// The leaders of `seg` read through `pieces`, which
-    /// [`Self::into_pieces`] took from [`Self::of`] over the same segment.
-    fn with_pieces(
+    /// The leaders of `seg` read through `reads`, which ingest took from
+    /// [`Self::of`] over the same segment.
+    fn with_reads(
         seg: &'a ContinuousSegment,
         leaders: &'a [usize],
-        pieces: &'a [Option<LeaderPieces>],
+        reads: &'a LeaderReads,
     ) -> Self {
         assert_eq!(
             leaders.len(),
-            pieces.len(),
+            reads.pieces.len(),
             "cached leader pieces belong to a different leader set"
         );
         Self {
             leaders,
             axes: leaders.iter().map(|&leader| &seg.axes[leader]).collect(),
-            pieces: Cow::Borrowed(pieces),
+            pieces: Cow::Borrowed(&reads.pieces),
+            odometer: Some(&reads.odometer),
         }
     }
 
-    fn into_pieces(self) -> Vec<Option<LeaderPieces>> {
-        self.pieces.into_owned()
+    fn into_reads(self, odometer: OdometerLeaves) -> LeaderReads {
+        LeaderReads {
+            pieces: self.pieces.into_owned(),
+            odometer,
+        }
     }
 
     fn pva(&self, index: usize, t: f64) -> (f64, f64, f64) {
@@ -2550,15 +2593,27 @@ impl<'a> FollowerSignal<'a> {
         grid.sort_by(f64::total_cmp);
         grid.dedup_by(|left, right| (*left - *right).abs() <= GRID_DEDUP_EPS_S);
         let mut knots = OdometerKnots::starting_at(grid[0], grid.len());
-        for w in grid.windows(2) {
-            odometer_leaves(
-                &|t| shaped_leaders.speed(t),
-                w[0],
-                w[1],
-                &mut |end, leaf| {
+        match shaped_leaders
+            .odometer
+            .filter(|ingested| ingested.grid == grid)
+        {
+            Some(ingested) => {
+                for &(end, leaf) in &ingested.leaves {
                     knots.push_leaf(end, leaf);
-                },
-            );
+                }
+            }
+            None => {
+                for w in grid.windows(2) {
+                    odometer_leaves(
+                        &|t| shaped_leaders.speed(t),
+                        w[0],
+                        w[1],
+                        &mut |end, leaf| {
+                            knots.push_leaf(end, leaf);
+                        },
+                    );
+                }
+            }
         }
         let odometer_scale = knots.scale_to(odometer.length);
         let ratio_bounds = RatioBounds::ridden(
@@ -4172,6 +4227,7 @@ fn chebyshev_sum(coefficients: &[f64], x: f64) -> f64 {
 /// the Kronrod estimate, and it grows at that polynomial's value, which the
 /// leaf only accepts where it stays on the leaders' speed: the follower's
 /// position must follow its velocity for its fit to close.
+#[derive(Debug, Clone, Copy)]
 struct OdometerLeaf {
     centre: f64,
     half: f64,

@@ -4,7 +4,7 @@ use geometry::{RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule, Rati
 use trajectory::ContinuousSegment;
 
 use super::{
-    LeaderPieces, RatioSpan, SPAN_LOOKUP_SLACK_MM, SPAN_MIN_LEN_MM, ShapedLeaders, axis_grid,
+    LeaderReads, RatioSpan, SPAN_LOOKUP_SLACK_MM, SPAN_MIN_LEN_MM, ShapedLeaders, axis_grid,
     integrate,
 };
 
@@ -80,13 +80,13 @@ pub(super) struct RampLeg<'a> {
 }
 
 /// A segment whose projection waits for every seam and width node that can
-/// reach into it, with the leader pieces its ingest built.
+/// reach into it, with what its ingest read off its leaders.
 #[derive(Debug)]
 pub(super) struct PendingSegment {
     pub(super) t_end: f64,
     pub(super) s_start: f64,
     pub(super) s_length: f64,
-    pub(super) leader_pieces: Vec<Option<LeaderPieces>>,
+    pub(super) reads: LeaderReads,
     table_end: f64,
 }
 
@@ -966,13 +966,13 @@ impl RatioSmoothing {
         t_end: f64,
         (s_start, s_length): (f64, f64),
         table_end: f64,
-        leader_pieces: Vec<Option<LeaderPieces>>,
+        reads: LeaderReads,
     ) {
         self.backlog.push_back(PendingSegment {
             t_end,
             s_start,
             s_length,
-            leader_pieces,
+            reads,
             table_end,
         });
     }
