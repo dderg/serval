@@ -3872,10 +3872,11 @@ fn span_probe_t(t0: f64, t1: f64, u: f64) -> f64 {
 ///
 /// A rung that passes the probes is then held between them: proven by the
 /// Bernstein hull of its error against the signal's exact polynomials
-/// where the signal has them, against its Taylor-model enclosure where it
-/// has one, estimated by the witnesses where it has neither. Where it has
-/// exact polynomials every truth sample is read off them too, each edge's
-/// from the side facing into the span.
+/// where the signal has them, else against its Taylor-model enclosure; a
+/// signal with neither fails loudly with
+/// [`PostProcessError::UnprovableSpan`]. Where it has exact polynomials
+/// every truth sample is read off them too, each edge's from the side
+/// facing into the span.
 #[allow(clippy::type_complexity)]
 fn shaped_ladder<S: TrackSignal>(
     sig: &S,
@@ -4015,7 +4016,7 @@ fn shaped_ladder<S: TrackSignal>(
                 tol: piece_tol,
                 velocity: policy.velocity_budget,
             };
-            let witness = match exact {
+            let unproven = match exact {
                 Some(exact) => hull::first_unproven(
                     exact.over(resolved.0, resolved.1),
                     piece,
@@ -4035,7 +4036,7 @@ fn shaped_ladder<S: TrackSignal>(
                     }
                 },
             };
-            let Some(u) = witness else {
+            let Some(u) = unproven else {
                 return Ok((coefficients, None));
             };
             let t = t_of(u);
@@ -5083,6 +5084,10 @@ pub(crate) fn apply_derivative_gains_to_track(
     }
     nurbs::bezier::bezier_pieces_to_discontinuous_nurbs(&out_pieces)
 }
+
+#[cfg(test)]
+#[path = "shaper_test_signals.rs"]
+pub(crate) mod test_signals;
 
 #[cfg(test)]
 #[path = "shaper_moment_tests.rs"]

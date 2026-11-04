@@ -141,17 +141,41 @@ fn enclose_to_depth(
 pub(crate) fn try_enclose(
     (lo, hi): (f64, f64),
     accuracy: [f64; 3],
-    model: &dyn Fn(Window) -> Option<[TaylorModel; 3]>,
+    signal: Signal<'_>,
     out: &mut Vec<ExactPiece>,
 ) -> Option<()> {
     let window = Window::new(lo, hi);
     try_enclose_to_depth(
         window,
-        model(window).as_ref(),
+        (signal.model)(window).as_ref(),
         accuracy,
-        model,
+        signal,
         Halving::START,
         out,
+    )
+}
+
+/// A signal [`try_enclose`] encloses: its models on a window, and its
+/// evaluator, which alone holds a window no float lies inside.
+#[derive(Clone, Copy)]
+pub(crate) struct Signal<'a> {
+    pub(crate) model: &'a dyn Fn(Window) -> Option<[TaylorModel; 3]>,
+    pub(crate) pva_at: &'a dyn Fn(f64) -> (f64, f64, f64),
+}
+
+/// The piece over a window no float lies inside: the signal is read at
+/// its two ends alone, so their readings bound it.
+fn between_floats(window: Window, pva_at: &dyn Fn(f64) -> (f64, f64, f64)) -> ExactPiece {
+    let ((p0, v0, a0), (p1, v1, a1)) = (pva_at(window.lo), pva_at(window.hi));
+    let spanning = |low: f64, high: f64| {
+        TaylorModel::constant(Ball {
+            mid: 0.5 * low + 0.5 * high,
+            rad: upper(upper(0.5 * (low - high).abs()) + f64::EPSILON * low.abs().max(high.abs())),
+        })
+    };
+    piece(
+        window,
+        &[spanning(p0, p1), spanning(v0, v1), spanning(a0, a1)],
     )
 }
 
@@ -216,7 +240,7 @@ fn try_enclose_to_depth(
     window: Window,
     models: Option<&[TaylorModel; 3]>,
     accuracy: [f64; 3],
-    model: &dyn Fn(Window) -> Option<[TaylorModel; 3]>,
+    signal: Signal<'_>,
     halving: Halving,
     out: &mut Vec<ExactPiece>,
 ) -> Option<()> {
@@ -237,20 +261,24 @@ fn try_enclose_to_depth(
             }
             child
         }
-        None if halving.singular == SINGULAR_MAX_DEPTH || unsplittable => return None,
+        None if unsplittable => {
+            out.push(between_floats(window, signal.pva_at));
+            return Some(());
+        }
+        None if halving.singular == SINGULAR_MAX_DEPTH => return None,
         None => halving.modelless_child(),
     };
     let (left, right) = (Window::new(lo, middle), Window::new(middle, hi));
-    let (left_models, right_models) = (model(left), model(right));
+    let (left_models, right_models) = ((signal.model)(left), (signal.model)(right));
     let modelless_stretch = models.is_none()
         && left_models.is_none()
         && right_models.is_none()
         && halving.singular >= ENCLOSURE_MAX_DEPTH;
     if modelless_stretch {
-        return peel_toward_singularity(window, accuracy, model, child, out);
+        return peel_toward_singularity(window, accuracy, signal, child, out);
     }
-    try_enclose_to_depth(left, left_models.as_ref(), accuracy, model, child, out)?;
-    try_enclose_to_depth(right, right_models.as_ref(), accuracy, model, child, out)
+    try_enclose_to_depth(left, left_models.as_ref(), accuracy, signal, child, out)?;
+    try_enclose_to_depth(right, right_models.as_ref(), accuracy, signal, child, out)
 }
 
 /// How much of a window without a model, halves and all, is peeled off
@@ -269,7 +297,7 @@ const PEEL_MAX: u32 = 256;
 fn peel_toward_singularity(
     window: Window,
     accuracy: [f64; 3],
-    model: &dyn Fn(Window) -> Option<[TaylorModel; 3]>,
+    signal: Signal<'_>,
     halving: Halving,
     out: &mut Vec<ExactPiece>,
 ) -> Option<()> {
@@ -277,8 +305,8 @@ fn peel_toward_singularity(
     let mut from_the_end = Vec::new();
     for _ in 0..PEEL_MAX {
         let rest = Window::new(lo, hi);
-        if let Some(models) = model(rest) {
-            try_enclose_to_depth(rest, Some(&models), accuracy, model, halving, out)?;
+        if let Some(models) = (signal.model)(rest) {
+            try_enclose_to_depth(rest, Some(&models), accuracy, signal, halving, out)?;
             for pieces in from_the_end.into_iter().rev() {
                 out.extend::<Vec<ExactPiece>>(pieces);
             }
@@ -286,17 +314,17 @@ fn peel_toward_singularity(
         }
         let peel = PEEL_SHARE * (hi - lo);
         let (front, back) = (Window::new(lo, lo + peel), Window::new(hi - peel, hi));
-        let (front_models, back_models) = (model(front), model(back));
+        let (front_models, back_models) = ((signal.model)(front), (signal.model)(back));
         if front_models.is_none() && back_models.is_none() {
             return None;
         }
         if let Some(models) = front_models {
-            try_enclose_to_depth(front, Some(&models), accuracy, model, halving, out)?;
+            try_enclose_to_depth(front, Some(&models), accuracy, signal, halving, out)?;
             lo = front.hi;
         }
         if let Some(models) = back_models {
             let mut pieces = Vec::new();
-            try_enclose_to_depth(back, Some(&models), accuracy, model, halving, &mut pieces)?;
+            try_enclose_to_depth(back, Some(&models), accuracy, signal, halving, &mut pieces)?;
             from_the_end.push(pieces);
             hi = back.lo;
         }

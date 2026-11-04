@@ -16,7 +16,7 @@
 //! its own tolerance, which, like the evaluator's rounding, lies outside
 //! the bound.
 
-use crate::shaper::axis_enclosure::AxisWindows;
+use crate::shaper::axis_enclosure::{AxisWindows, FORMULA_EDGE_SLACK};
 use crate::shaper::taylor::{self, Ball, TaylorModel, Window};
 use crate::shaper::{Enclosure, ExactPiece};
 
@@ -518,7 +518,10 @@ impl<'a> FollowerSignal<'a> {
     /// one after from it on, and a fit piece ending or starting there
     /// holds the limit from inside, so a window ends on the one and starts
     /// on the other, however close its odometer bound reaches across. A
-    /// bound wholly across the crossing it starts or ends at stays whole.
+    /// window starting at a crossing may still read the boundary itself,
+    /// where the odometer has not moved off it by the float, and the
+    /// boundary may read a formula of its own. A bound wholly across the
+    /// crossing it starts or ends at stays whole.
     fn reach_inside_crossings(&self, window: Window, reach: (f64, f64)) -> (f64, f64) {
         let (lo, hi) = reach;
         let crossings = self.ratio_crossings();
@@ -529,9 +532,7 @@ impl<'a> FollowerSignal<'a> {
                 .filter(|&&(time, _)| time == t)
                 .map(|&(_, boundary)| boundary)
         };
-        let lo = boundary_at(window.lo).map_or(lo, |boundary| {
-            lo.max(trajectory::next_toward(boundary, f64::INFINITY))
-        });
+        let lo = boundary_at(window.lo).map_or(lo, |boundary| lo.max(boundary));
         let hi = boundary_at(window.hi).map_or(hi, |boundary| {
             hi.min(trajectory::next_toward(boundary, f64::NEG_INFINITY))
         });
@@ -549,10 +550,17 @@ impl<'a> FollowerSignal<'a> {
         accuracy: [f64; 3],
     ) -> Option<Vec<ExactPiece>> {
         let breaks = self.breaks_between(lo, hi, &[])?;
-        let pieces = enclose_between(&breaks, accuracy, &|window| {
-            self.window_models(window, Reading::Follower)
-                .map(|models| std::array::from_fn(|order| models.total(order)))
-        })?;
+        let pieces = enclose_between(
+            &breaks,
+            accuracy,
+            taylor::Signal {
+                model: &|window| {
+                    self.window_models(window, Reading::Follower)
+                        .map(|models| std::array::from_fn(|order| models.total(order)))
+                },
+                pva_at: &|t| crate::shaper::TrackSignal::eval_pva(self, t),
+            },
+        )?;
         taylor::debug_assert_holds(
             &pieces,
             |t| crate::shaper::TrackSignal::eval_pva(self, t),
@@ -625,11 +633,11 @@ impl<'a> FollowerSignal<'a> {
 fn enclose_between(
     breaks: &[f64],
     accuracy: [f64; 3],
-    model: &dyn Fn(Window) -> Option<[TaylorModel; 3]>,
+    signal: taylor::Signal<'_>,
 ) -> Option<Vec<ExactPiece>> {
     let mut out = Vec::new();
     for stretch in breaks.windows(2).filter(|stretch| stretch[0] < stretch[1]) {
-        taylor::try_enclose((stretch[0], stretch[1]), accuracy, model, &mut out)?;
+        taylor::try_enclose((stretch[0], stretch[1]), accuracy, signal, &mut out)?;
     }
     Some(out)
 }
@@ -655,6 +663,7 @@ impl AdvancedFollowerSignal<'_, '_> {
             .collect();
         let breaks = self.source.breaks_between(lo, hi, &extra)?;
         let mut pieces = Vec::new();
+        let pva_at = |t| crate::shaper::TrackSignal::eval_pva(self, t);
         for stretch in breaks.windows(2).filter(|stretch| stretch[0] < stretch[1]) {
             let stretch = (stretch[0], stretch[1]);
             if !slivers
@@ -664,7 +673,10 @@ impl AdvancedFollowerSignal<'_, '_> {
                 taylor::try_enclose(
                     stretch,
                     accuracy,
-                    &|window| self.advanced_models(window, Reading::Advance),
+                    taylor::Signal {
+                        model: &|window| self.advanced_models(window, Reading::Advance),
+                        pva_at: &pva_at,
+                    },
                     &mut pieces,
                 )?;
                 continue;
@@ -673,10 +685,13 @@ impl AdvancedFollowerSignal<'_, '_> {
             taylor::try_enclose(
                 stretch,
                 self.unshaped_step.enclosure_accuracy(accuracy),
-                &|window| {
-                    let [position, velocity, _] =
-                        self.advanced_models(window, Reading::AdvanceWithoutJerk)?;
-                    Some([position, velocity, TaylorModel::constant(Ball::exact(0.0))])
+                taylor::Signal {
+                    model: &|window| {
+                        let [position, velocity, _] =
+                            self.advanced_models(window, Reading::AdvanceWithoutJerk)?;
+                        Some([position, velocity, TaylorModel::constant(Ball::exact(0.0))])
+                    },
+                    pva_at: &pva_at,
                 },
                 &mut pieces,
             )?;
@@ -728,7 +743,10 @@ impl AdvancedFollowerSignal<'_, '_> {
 
     /// The slivers of `[lo, hi]` the advance's acceleration is exempt on
     /// ([`UnshapedLeaderStep`]), in time order; `None` where a leader has no
-    /// formula.
+    /// formula. A sliver narrower than a float still takes the one past the
+    /// onset, where the jerk no model bounds stands, and slivers no float
+    /// lies between — a cap touched and left at once — are one, read from
+    /// onsets as far past `[lo, hi]` as the formulas' own edges round.
     pub(super) fn onset_slivers(&self, lo: f64, hi: f64) -> Option<Vec<OnsetSliver>> {
         let windows = self.source.axis_windows()?;
         let gain = super::steepest_advance_slope(self.advance.stage)
@@ -737,23 +755,28 @@ impl AdvancedFollowerSignal<'_, '_> {
         let mut slivers: Vec<OnsetSliver> = windows
             .leaders
             .iter()
-            .flat_map(|(_, axis)| axis.square_root_onsets(lo, hi))
-            .filter_map(|onset| {
+            .flat_map(|(_, axis)| {
+                let pad = FORMULA_EDGE_SLACK * (hi - lo).max(1.0);
+                axis.square_root_onsets(lo - pad, hi + pad)
+            })
+            .map(|onset| {
                 let singular_jerk = gain * onset.jerk_coefficient;
                 let singular_reach = (singular_jerk / self.accel_tol).powi(2);
                 let reach = (onset.far - onset.at).clamp(-singular_reach, singular_reach);
-                let end = onset.at + reach;
-                let (from, to) = (onset.at.min(end).max(lo), onset.at.max(end).min(hi));
-                (from < to).then(|| OnsetSliver {
-                    from,
-                    to,
+                let end = match onset.at + reach {
+                    end if end == onset.at => trajectory::next_toward(onset.at, onset.far),
+                    end => end,
+                };
+                OnsetSliver {
+                    from: onset.at.min(end),
+                    to: onset.at.max(end),
                     singular_change: 2.0 * singular_jerk * reach.abs().sqrt(),
-                })
+                }
             })
             .collect();
         slivers.sort_by(|a, b| a.from.total_cmp(&b.from));
         slivers.dedup_by(|later, earlier| {
-            if later.from <= earlier.to {
+            if later.from <= trajectory::next_toward(earlier.to, f64::INFINITY) {
                 earlier.to = earlier.to.max(later.to);
                 earlier.singular_change += later.singular_change;
                 true
@@ -761,7 +784,15 @@ impl AdvancedFollowerSignal<'_, '_> {
                 false
             }
         });
-        Some(slivers)
+        Some(
+            slivers
+                .into_iter()
+                .filter_map(|sliver| {
+                    let (from, to) = (sliver.from.max(lo), sliver.to.min(hi));
+                    (from < to).then_some(OnsetSliver { from, to, ..sliver })
+                })
+                .collect(),
+        )
     }
 }
 
