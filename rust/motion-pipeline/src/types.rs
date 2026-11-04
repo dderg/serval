@@ -146,8 +146,9 @@ pub(crate) enum PostProcessError {
         allowance: f64,
     },
     #[error(
-        "axis {axis}: {fit_context} span [{t_start}, {t_end}] leaves breaks to the hull, but the \
-         signal has no exact polynomial there to prove a piece against"
+        "axis {axis}: {fit_context} span [{t_start}, {t_end}] has neither exact polynomials nor \
+         an enclosure there to prove a piece against: every fitted piece is proven, so the \
+         signal's formula there lacks a model"
     )]
     UnprovableSpan {
         axis: usize,
