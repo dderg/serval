@@ -77,6 +77,24 @@ pub(crate) fn follower_tol_scale(followers: &[FollowerDemand], axis: usize) -> f
         })
 }
 
+/// The tolerance scale of a follower whose segment demands `followers` yet
+/// rides the shaped path at ratios up to `ridden_ratio`: the tighter of
+/// the two. A segment whose raw track lays no extrusion — a travel, the
+/// rest a stream opens or closes on — is held to the budget of any
+/// extrusion its shaped support spills into.
+pub(crate) fn riding_tol_scale(
+    followers: &[FollowerDemand],
+    axis: usize,
+    ridden_ratio: f64,
+) -> f64 {
+    let own = follower_tol_scale(followers, axis);
+    if ridden_ratio > 0.0 {
+        own.min(ridden_ratio.clamp(FOLLOWER_TOL_SCALE_MIN, 1.0))
+    } else {
+        own
+    }
+}
+
 #[cfg(test)]
 #[path = "lowering_tests.rs"]
 mod tests;
