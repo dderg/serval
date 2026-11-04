@@ -28,6 +28,7 @@ from .mcu_pins import (  # noqa: F401
 )
 
 STEPCOMPRESS_MAX_ERROR_DEFAULT = 0.000025
+STEPCOMPRESS_DRAIN_BUDGET_DEFAULT = 0.008
 
 # Mirrors src/sample_wire.h / rust/runtime-contract/src/sample_wire.rs. The wire
 # contract lives in one place per language and test_sample_wire.py asserts the
@@ -146,9 +147,22 @@ class MCU:
                 % (config.get_name(), max_error)
             )
         self._stepcompress_max_error = max_error
+        drain_budget = config.getfloat(
+            "stepcompress_drain_budget", STEPCOMPRESS_DRAIN_BUDGET_DEFAULT
+        )
+        if not math.isfinite(drain_budget) or drain_budget < 0.0:
+            raise config.error(
+                "mcu '%s': stepcompress_drain_budget must be a finite "
+                "non-negative number of seconds, got %r"
+                % (config.get_name(), drain_budget)
+            )
+        self._stepcompress_drain_budget = drain_budget
 
     def get_stepcompress_max_error(self):
         return self._stepcompress_max_error
+
+    def get_stepcompress_drain_budget(self):
+        return self._stepcompress_drain_budget
 
     def get_move_queue_slots(self):
         return self._move_queue_slots

@@ -98,6 +98,12 @@ pub struct McuHardware {
     /// `build_endpoint` converts it to ticks with the measured clock
     /// frequency it alone holds.
     pub stepcompress_max_error_secs: f64,
+    /// Wall time one stepcompress drain pass may spend searching step roots
+    /// before it yields to the pacer; every pass still roots its first
+    /// window, so a spent budget slows a drain but never stalls it. The
+    /// sim and the hardware run the same value from the same `[mcu]`
+    /// section.
+    pub stepcompress_drain_budget_secs: f64,
     /// The mcu's own sample-executor rate (Hz), as klippy read it from the
     /// firmware's advertised `MOTION_SAMPLE_RATE_HZ`. Zero when the mcu has
     /// no phase lane to run at it.

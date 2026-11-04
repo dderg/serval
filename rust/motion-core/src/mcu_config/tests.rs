@@ -24,6 +24,7 @@ fn build_mcu_configs_two_mcu_corexy_with_e() {
                 move_queue_slots: 128,
                 step_pulse_seconds: vec![2e-6; 3],
                 stepcompress_max_error_secs: 0.0,
+                stepcompress_drain_budget_secs: 0.008,
                 phase_sample_rate: 10_000.0,
                 phase_ring_depth: 12,
             },
@@ -43,6 +44,7 @@ fn build_mcu_configs_two_mcu_corexy_with_e() {
                 move_queue_slots: 128,
                 step_pulse_seconds: vec![2e-6; 1],
                 stepcompress_max_error_secs: 0.0,
+                stepcompress_drain_budget_secs: 0.008,
                 phase_sample_rate: 0.0,
                 phase_ring_depth: 0,
             },
@@ -87,6 +89,7 @@ fn build_mcu_configs_stamps_ethercat_from_the_claimed_handles() {
             move_queue_slots: 0,
             step_pulse_seconds: vec![2e-6],
             stepcompress_max_error_secs: 0.0,
+            stepcompress_drain_budget_secs: 0.008,
             phase_sample_rate: 0.0,
             phase_ring_depth: 0,
         },
@@ -176,6 +179,7 @@ fn pulse_topology(lane_kinds: Vec<u8>, move_queue_slots: u32) -> Vec<McuTopology
             stepper_oids: (1..=n as u32).collect(),
             step_pulse_seconds: vec![2e-6; n],
             stepcompress_max_error_secs: 0.0,
+            stepcompress_drain_budget_secs: 0.008,
             phase_sample_rate: 10_000.0,
             phase_ring_depth: 12,
             move_queue_slots,
@@ -629,6 +633,7 @@ fn stepcompress_toolhead_cfg() -> McuAxisConfig {
             phase_sample_rate: 0.0,
             phase_ring_depth: 0,
             stepcompress_max_error_secs: 0.0,
+            stepcompress_drain_budget_secs: 0.008,
         },
     }
 }
@@ -652,6 +657,7 @@ fn stepcompress_corexy_cfg() -> McuAxisConfig {
             phase_sample_rate: 0.0,
             phase_ring_depth: 0,
             stepcompress_max_error_secs: 0.0,
+            stepcompress_drain_budget_secs: 0.008,
         },
     }
 }
