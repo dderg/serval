@@ -133,7 +133,7 @@ pub fn step_capacity(
             loads.push(mcu_load(cfg, &extruder_caps, mcu, &budget)?);
         }
     }
-    Ok((!loads.is_empty()).then(|| StepCapacity {
+    Ok((!loads.is_empty()).then_some(StepCapacity {
         lane_weights: input.lane_weights,
         mcus: loads,
     }))
