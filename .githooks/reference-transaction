@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Refuse to create or move refs/stash. The stash is one list shared by every
+# worktree of the repository, so one agent's `git stash pop` took another's
+# work in progress. A plain alias cannot shadow the builtin command, but every
+# ref update, `git stash`, `git merge --autostash` and `git pull --autostash`
+# included, passes through this hook. Deleting an entry stays allowed so old
+# stashes can be dropped.
+[ "$1" = prepared ] || exit 0
+zero=0000000000000000000000000000000000000000
+while read -r old new ref; do
+    if [ "$ref" = refs/stash ] && [ "$new" != "$zero" ]; then
+        echo "git stash is forbidden: the stash is shared by all worktrees. Commit your work on your branch, or save it: git diff > ~/.cache/<topic>.patch" >&2
+        exit 1
+    fi
+done
