@@ -2,10 +2,10 @@
   "slice_lines": 1000,
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 9634457828,
-      "stream_secs": 6.594,
-      "reason": "rail integrations memoized by their inputs: re-planning windows settle the same members from the same speeds again; output bit-identical (trajectory digests unchanged)",
-      "commit": "b386caf434ee6664e28255d7acc5f2fea42afff0",
+      "ir": 8396715192,
+      "stream_secs": 8.541,
+      "reason": "extruder-jerk-gain: the kernel-free advance cap now bounds the shaped path jerk by the leader kernels' directional total variation (2.26x the old peak gain for smooth_mzv). p3_voron_direct_drive_ramp (kernel-free advance, A_e inherits 10000) plans its 1000-line slice slower and its repo Ir drops; the kernel chains barely move.",
+      "commit": "58dff9d8ff8d4b3d1483aacf3a042a1ed2d35427",
       "pi_2core": {
         "k": 4587316424.936247,
         "worst_x": [
@@ -16,10 +16,10 @@
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 12489615156,
+      "ir": 12496701422,
       "stream_secs": 6.202,
-      "reason": "rail integrations memoized by their inputs: re-planning windows settle the same members from the same speeds again; output bit-identical (trajectory digests unchanged)",
-      "commit": "b386caf434ee6664e28255d7acc5f2fea42afff0",
+      "reason": "extruder-jerk-gain: the kernel-free advance cap now bounds the shaped path jerk by the leader kernels' directional total variation (2.26x the old peak gain for smooth_mzv). p3_voron_direct_drive_ramp (kernel-free advance, A_e inherits 10000) plans its 1000-line slice slower and its repo Ir drops; the kernel chains barely move.",
+      "commit": "58dff9d8ff8d4b3d1483aacf3a042a1ed2d35427",
       "pi_2core": {
         "k": 4582331787.594325,
         "worst_x": [
@@ -30,10 +30,10 @@
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 12856925656,
+      "ir": 12861738205,
       "stream_secs": 7.543,
-      "reason": "rail integrations memoized by their inputs: re-planning windows settle the same members from the same speeds again; output bit-identical (trajectory digests unchanged)",
-      "commit": "b386caf434ee6664e28255d7acc5f2fea42afff0",
+      "reason": "extruder-jerk-gain: the kernel-free advance cap now bounds the shaped path jerk by the leader kernels' directional total variation (2.26x the old peak gain for smooth_mzv). p3_voron_direct_drive_ramp (kernel-free advance, A_e inherits 10000) plans its 1000-line slice slower and its repo Ir drops; the kernel chains barely move.",
+      "commit": "58dff9d8ff8d4b3d1483aacf3a042a1ed2d35427",
       "pi_2core": {
         "k": 4388809054.193679,
         "worst_x": [

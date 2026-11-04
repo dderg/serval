@@ -1,16 +1,23 @@
-use geometry::{ExtruderCaps, LeaderSpill};
+use geometry::{ExtruderCaps, LeaderSpill, SPATIAL_AXIS_SETS};
+use nurbs::algebra::PiecewisePolynomialKernel;
 use trajectory::{AxisChainSet, ChainStage};
 
 use crate::AxisRegistry;
 
 const SPATIAL_AXES: usize = 3;
 
-/// One fitted-path jerk gain per unit of planned acceleration through a
-/// kernel `w`: a single step in the acceleration under the disk, at most
-/// `2A`, leaves `w` as a jerk of at most `2A·max|w|`. Without a kernel the
-/// step passes unsmoothed.
-fn jerk_per_accel(kernel_peak: Option<f64>) -> f64 {
-    kernel_peak.map_or(f64::INFINITY, |peak| 2.0 * peak)
+/// The shaped path's jerk gain over the set of spatial axes `set` through
+/// the kernels of the shaped leaders on them, 0 where none is.
+fn path_jerk_per_accel(shaped: &[(usize, &PiecewisePolynomialKernel)], set: usize) -> f64 {
+    let kernels: Vec<&PiecewisePolynomialKernel> = shaped
+        .iter()
+        .filter(|(axis, _)| set & (1 << axis) != 0)
+        .map(|(_, kernel)| *kernel)
+        .collect();
+    if kernels.is_empty() {
+        return 0.0;
+    }
+    PiecewisePolynomialKernel::directional_variation(&kernels)
 }
 
 /// The [`ExtruderCaps`] of every follower axis with leaders and a limit
@@ -48,18 +55,20 @@ pub fn extruder_caps(
                 unreachable!("a chain's transform is never its kernel")
             }
         };
-        let mut path_jerk_per_accel_hz = [0.0; SPATIAL_AXES];
+        let mut shaped = Vec::new();
+        let mut unshaped_leaders = [false; SPATIAL_AXES];
         let mut leader_spill = LeaderSpill::UNSHAPED;
         for &leader in leaders.iter().filter(|&&leader| leader < SPATIAL_AXES) {
-            let kernel = chains.chains[leader].kernel();
-            path_jerk_per_accel_hz[leader] = jerk_per_accel(kernel.map(|k| k.peak_abs()));
-            if let Some(kernel) = kernel {
-                let (mass, moment_s) = kernel.absolute_moments();
-                leader_spill = LeaderSpill {
-                    mass: leader_spill.mass.max(mass),
-                    moment_s: leader_spill.moment_s.max(moment_s),
-                };
-            }
+            let Some(kernel) = chains.chains[leader].kernel() else {
+                unshaped_leaders[leader] = true;
+                continue;
+            };
+            shaped.push((leader, kernel));
+            let (mass, moment_s) = kernel.absolute_moments();
+            leader_spill = LeaderSpill {
+                mass: leader_spill.mass.max(mass),
+                moment_s: leader_spill.moment_s.max(moment_s),
+            };
         }
         let (leaders_back, leaders_forward) = chains.leaders_support(*axis);
         caps.push(ExtruderCaps {
@@ -68,8 +77,13 @@ pub fn extruder_caps(
             max_accel_mm_s2: decl.max_accel.unwrap_or(f64::INFINITY),
             advance_slope_s,
             advance_curvature_s2_per_mm,
-            path_jerk_per_accel_hz,
-            own_jerk_per_accel_hz: jerk_per_accel(chain.kernel().map(|k| k.peak_abs())),
+            path_jerk_per_accel_hz: std::array::from_fn::<_, SPATIAL_AXIS_SETS, _>(|set| {
+                path_jerk_per_accel(&shaped, set)
+            }),
+            unshaped_leaders,
+            own_jerk_per_accel_hz: chain.kernel().map_or(f64::INFINITY, |kernel| {
+                PiecewisePolynomialKernel::directional_variation(&[kernel])
+            }),
             instantaneous_corner_velocity_mm_s: chain.instantaneous_corner_velocity(),
             leader_spill,
             leader_kernel_reach_s: leaders_forward.max(-leaders_back),

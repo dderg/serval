@@ -16,7 +16,8 @@ fn caps() -> ExtruderCaps {
         max_accel_mm_s2: 5000.0,
         advance_slope_s: 0.02,
         advance_curvature_s2_per_mm: 0.0,
-        path_jerk_per_accel_hz: [1000.0, 1000.0, f64::INFINITY],
+        path_jerk_per_accel_hz: [0.0, 1000.0, 1000.0, 1000.0, 0.0, 1000.0, 1000.0, 1000.0],
+        unshaped_leaders: [false, false, true],
         own_jerk_per_accel_hz: f64::INFINITY,
         instantaneous_corner_velocity_mm_s: 1.0,
         leader_spill: LeaderSpill::UNSHAPED,
@@ -232,4 +233,65 @@ fn an_extrude_only_move_holds_still_for_the_kernel_reach_beside_motion_only() {
             [KERNEL_REACH_S, 0.0],
         ]
     );
+}
+
+#[test]
+fn the_axes_in_reach_are_those_the_path_moves_on_within_the_spill() {
+    let limits = VelocityLimits::try_new(1000.0, 20_000.0, 0.0, f64::INFINITY)
+        .unwrap()
+        .with_extruder_caps(Some(caps()))
+        .unwrap();
+    let corners = [
+        [0.0, 0.0, 0.0],
+        [10.0, 0.0, 0.0],
+        [20.0, 0.0, 0.0],
+        [20.0, 10.0, 0.0],
+        [20.0, 10.0, 0.2],
+    ];
+    let moves: Vec<Move> = corners
+        .windows(2)
+        .enumerate()
+        .map(|(index, ends)| {
+            let ctx = MoveContext {
+                extruder_axis: 3,
+                feedrate_mm_s: 150.0,
+                limits,
+                source: SourceRange {
+                    start_line: index as u32,
+                    end_line: index as u32,
+                },
+            };
+            line_move(ends[0], ends[1], RATIO, ctx).unwrap()
+        })
+        .collect();
+    let axes: Vec<[bool; 3]> = extrusion_budgets(&moves, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
+        .iter()
+        .map(|budget| budget.axes_in_reach)
+        .collect();
+    assert_eq!(
+        axes,
+        [
+            [true, false, false],
+            [true, true, false],
+            [true, true, true],
+            [false, true, true],
+        ]
+    );
+}
+
+#[test]
+fn a_stream_after_a_drained_rest_budgets_as_a_fresh_one() {
+    let before = stream(&[(10.0, 3.0 * RATIO, 150.0), (0.2, 3.0 * RATIO, 150.0)]);
+    let after = stream(&[(0.2, RATIO, 150.0), (10.0, RATIO, 150.0)]);
+    let mut reach = reach();
+    for m in before {
+        reach.push(m);
+    }
+    reach.close();
+    settled(&mut reach);
+    for m in after.iter().cloned() {
+        reach.push(m);
+    }
+    reach.close();
+    assert_eq!(settled(&mut reach), streamed(&after));
 }
