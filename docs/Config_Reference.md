@@ -83,6 +83,12 @@ serial:
 #   Maximum time error in seconds the classic step encoder may
 #   introduce on a sub-sample step time. High-precision motors do not
 #   use this budget.
+#stepcompress_drain_budget: 0.008
+#   Wall time in seconds one host step-compression pass may spend
+#   searching step times before it yields; the rest of the refill
+#   continues on later passes. Every pass still completes at least one
+#   window, so 0 compresses one window per pass. The simulator uses
+#   the same value.
 ```
 
 ### [mcu my_extra_mcu]

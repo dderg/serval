@@ -27,8 +27,8 @@ use shaper::Shaper;
 pub use lower_stage::Lowerer;
 pub use staged::{SHAPER_INBOX_CAP, StagedPipeline};
 pub use types::{
-    BarrierAck, BaseItem, CONTIGUITY_EPS_MM, Control, DispatchCommand, PlannedItem, StreamConfig,
-    StreamError, StreamInput, TrajectoryItem, advance_odometer,
+    BarrierAck, BaseItem, CONTIGUITY_EPS_MM, Control, DispatchCommand, InputTrace, PlannedItem,
+    StreamConfig, StreamError, StreamInput, TrajectoryItem, advance_odometer,
 };
 pub use worker_pool::WorkerPool;
 
@@ -52,6 +52,7 @@ impl Pipeline {
                 planner: Planner::new(config, Arc::clone(&workers)),
                 lowerer: Lowerer::new(chains.rest_support(), home_pos, t_start),
                 fitted_tap: None,
+                input_tap: None,
             },
             shaper: Shaper::new(chains, fit_tol, workers),
         }
@@ -60,6 +61,12 @@ impl Pipeline {
     #[must_use]
     pub fn with_fitted_tap(mut self, tap: Sender<geometry::Move>) -> Self {
         self.front.fitted_tap = Some(tap);
+        self
+    }
+
+    #[must_use]
+    pub fn with_input_tap(mut self, tap: Sender<InputTrace>) -> Self {
+        self.front.input_tap = Some(tap);
         self
     }
 
@@ -95,6 +102,7 @@ struct PlanningFront {
     planner: Planner,
     lowerer: Lowerer,
     fitted_tap: Option<Sender<geometry::Move>>,
+    input_tap: Option<Sender<InputTrace>>,
 }
 
 impl PlanningFront {
@@ -104,7 +112,12 @@ impl PlanningFront {
             planner,
             lowerer,
             fitted_tap,
+            input_tap,
         } = self;
+        if let Some(tap) = input_tap {
+            tap.send(InputTrace::of(&item))
+                .expect("pipeline input observer disconnected");
+        }
         fit.feed(item, &mut |item| {
             Self::tap_fitted(fitted_tap.as_ref(), &item);
             planner.feed(item, &mut |item| lowerer.feed(item, shape))
@@ -124,6 +137,7 @@ impl PlanningFront {
             planner,
             lowerer,
             fitted_tap,
+            ..
         } = self;
         fit.finish(&mut |item| {
             Self::tap_fitted(fitted_tap.as_ref(), &item);

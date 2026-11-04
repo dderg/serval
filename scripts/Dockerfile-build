@@ -9,12 +9,13 @@ RUN mkdir /ci_build
 # Install dependencies. No MCU cross-toolchains here: the only supported
 # firmware is the kalico motion-runtime firmware (H723/F446/G0B1 + Linux
 # MCU), which needs the Rust toolchain and is built+linked by the dedicated
-# ci-mcu-firmware.yaml workflow. This image only runs the klippy host-side
-# python suite (build-essential covers chelper / test shim C builds).
+# ci-mcu-firmware.yaml workflow. This image runs the klippy host-side
+# python suite (build-essential covers chelper / test shim C builds) and,
+# where the host has no valgrind, scripts/throughput_gate.py.
 RUN apt update \
     && apt install -y sudo git curl \
       python3 python3-dev python3-venv libffi-dev build-essential \
-      pkg-config libudev-dev \
+      pkg-config libudev-dev valgrind \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -24,12 +25,16 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 # Rust toolchain for the _config_doc parser module klippy needs at startup.
 # The version comes from rust-toolchain.toml (single source of truth);
 # RUSTUP_TOOLCHAIN overrides the toml at cargo time so this image never
-# downloads the cross-compilation targets the firmware builds want.
+# downloads the cross-compilation targets the firmware builds want. The
+# toolchain lives outside /root so a container run as the invoking user
+# (ci.sh's DOCKER_RUN_AS_USER) can build with it.
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
 COPY rust/rust-toolchain.toml /tmp/rust-toolchain.toml
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --profile minimal --default-toolchain \
-      "$(sed -n 's/^channel = "\(.*\)"/\1/p' /tmp/rust-toolchain.toml)"
-ENV PATH="/root/.cargo/bin:${PATH}"
+    | sh -s -- -y --profile minimal --no-modify-path --default-toolchain \
+      "$(sed -n 's/^channel = "\(.*\)"/\1/p' /tmp/rust-toolchain.toml)" \
+    && chmod -R a+rX "$RUSTUP_HOME" "$CARGO_HOME"
+ENV PATH="/usr/local/cargo/bin:${PATH}"
 
 # Built from rust/ alone so Python-only edits keep this layer cached.
 # Installed OUTSIDE /klipper: the test container bind-mounts the host

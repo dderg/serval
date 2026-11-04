@@ -37,6 +37,25 @@ snapshots/snapshot-tests.sh --view       # read-only baseline gallery
 - `--view` starts the browser UI in read-only mode and renders the
   committed baselines without running the planner or offering accept actions.
 
+## Configs and the live parity gate
+
+A case config is a printer config: `[printer]`, `[kinematics]`, `[motor]` and
+`[axis]` sections as a live printer declares them. Every config-driven plan —
+the cases, `tools/bench/analyze.py`, the replays, the corpus and `init_planner`
+on the printer — derives its planner through
+`planner_config::from_doc::planner_config_from_text`, and every G-code move
+through `motion_pipeline::live_config::GcodeMoveBase`, so the live host and
+the snapshot path cannot plan the same G-code under different settings.
+
+`scripts/ci.sh live-parity` (`snapshots/test_live_bridge_parity.py`) holds
+them to it: klippy's own G-code handlers drive the real `MotionEngine` bridge
+with a detached planner (`init_planner_detached`: the production ingress and
+pipeline, no MCU), and every pipeline input and shaped segment must equal the
+snapshot path's bit for bit over the corpus — every case, the sim prints on
+both bench configs, and the dense print on every bench config and profile. A
+failure names the first diverging input (move number and field) or segment.
+One file: `uv run python snapshots/live_bridge_parity.py GCODE CONFIG`.
+
 ## G-code
 
 Cases, the playground and `tools/bench/analyze.py` read G-code through one
