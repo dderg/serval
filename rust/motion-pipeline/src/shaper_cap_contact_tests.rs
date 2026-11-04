@@ -29,6 +29,7 @@ fn config() -> StreamConfig {
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 64,
         limits: limits(),
+        step_capacity: None,
     }
 }
 

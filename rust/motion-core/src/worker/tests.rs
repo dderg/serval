@@ -823,6 +823,7 @@ fn cfg_cap(max_buffer_moves: usize) -> StreamConfig {
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves,
         limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, f64::INFINITY).unwrap(),
+        step_capacity: None,
     }
 }
 
@@ -1823,6 +1824,7 @@ fn beacon_scan_path_live_worker_velocity_stays_bounded() {
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 128,
         limits,
+        step_capacity: None,
     };
     let pts: Vec<(f64, f64)> = include_str!("../../beacon_scan_pts.txt")
         .lines()

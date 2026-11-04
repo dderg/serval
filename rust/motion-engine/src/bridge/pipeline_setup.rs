@@ -491,8 +491,12 @@ impl PyMotionEngine {
             self.build_execution_resources(mcu_configs, host_ios, ec_conns, &pump_tx)?;
         resources.detached = detached;
 
-        let stream_cfg =
+        let mut stream_cfg =
             motion_pipeline::live_config::stream_config(cfg).map_err(PyValueError::new_err)?;
+        stream_cfg.step_capacity =
+            live_step_capacity(cfg, mcu_configs, &self.extruder_caps.lock_ok())
+                .map_err(PyValueError::new_err)?
+                .map(Arc::new);
         let axis_chains = cfg
             .compile_active_chains()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -865,4 +869,34 @@ fn spawn_endpoint_liveness_poll(
             }
         })
         .expect("spawn ec-heartbeat-poll thread");
+}
+
+/// The step capacity the live planner holds every move to. A follower a
+/// capped mcu steps needs extruder caps: its advance's velocity gain is
+/// only known to the planner through them.
+fn live_step_capacity(
+    cfg: &planner_config::PlannerConfig,
+    mcu_configs: &[McuAxisConfig],
+    extruder_caps: &[geometry::ExtruderCaps],
+) -> Result<Option<geometry::StepCapacity>, String> {
+    let Some(capacity) = motion_core::step_capacity::step_capacity(mcu_configs) else {
+        return Ok(None);
+    };
+    for mcu in &capacity.mcus {
+        for follower in &mcu.followers {
+            if !extruder_caps
+                .iter()
+                .any(|caps| caps.axis_index == follower.axis_index)
+            {
+                return Err(format!(
+                    "mcu '{}' steps axis '{}', which has no limits the planner can bound its \
+                     step rate by: give [axis {}] a max_velocity or bind an [extruder] to it",
+                    mcu.mcu,
+                    cfg.axis_registry.axis_name(follower.axis_index),
+                    cfg.axis_registry.axis_name(follower.axis_index),
+                ));
+            }
+        }
+    }
+    Ok(Some(capacity))
 }

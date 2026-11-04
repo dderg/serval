@@ -10,12 +10,15 @@ use crate::path::CurvatureProfile;
 #[cfg(test)]
 use crate::path::Segment;
 use crate::segment::SourceRange;
+use crate::step_capacity::{StepCapacity, StepCapacityOverload};
 
 mod disk;
 mod extruder_caps;
 mod extrusion_reach;
 pub mod law;
+mod rate_cap;
 mod reconstruct;
+mod step_capacity;
 mod z_caps;
 
 pub use extrusion_reach::{ExtrusionBudget, ExtrusionReach, extrusion_budgets};
@@ -66,6 +69,7 @@ pub struct MoveVelocity {
     pub accel: f64,
     pub length: f64,
     pub source: SourceRange,
+    pub step_capacity_overload: Option<StepCapacityOverload>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -158,23 +162,26 @@ fn pin_rest_anchor(sample: Option<&mut VelSample>) {
 struct MoveCaps {
     kin: Kinematics,
     kappa_peak: f64,
+    step_capacity_overload: Option<StepCapacityOverload>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct VelocityPlanParams {
+pub struct VelocityPlanParams<'a> {
     pub integration_tol: f64,
     pub max_extrude_only_velocity_mm_s: f64,
     pub max_extrude_only_accel_mm_s2: f64,
     pub entry_v: f64,
+    pub step_capacity: Option<&'a StepCapacity>,
 }
 
 #[cfg(test)]
-pub(crate) fn warm_start_params(integration_tol: f64) -> VelocityPlanParams {
+pub(crate) fn warm_start_params(integration_tol: f64) -> VelocityPlanParams<'static> {
     VelocityPlanParams {
         integration_tol,
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
         entry_v: 0.0,
+        step_capacity: None,
     }
 }
 
@@ -324,6 +331,7 @@ fn validate_config(params: VelocityPlanParams) -> Result<(), VelocityError> {
         max_extrude_only_velocity_mm_s,
         max_extrude_only_accel_mm_s2,
         entry_v,
+        step_capacity: _,
     } = params;
     if !(integration_tol.is_finite() && integration_tol >= MIN_INTEGRATION_TOL) {
         return Err(VelocityError::InvalidConfig);
@@ -348,7 +356,7 @@ fn build_move_caps(
         let ratio_in_reach = budget.ratio_in_reach;
         let line_no = m.source.start_line;
         let path_ceiling = m.feedrate_mm_s.min(m.limits.max_velocity_mm_s);
-        let (length, kappa0, sigma, kappa_peak, flat_ceiling, accel) = match &m.segment.spatial {
+        let (length, kappa0, sigma, kappa_peak, limits) = match &m.segment.spatial {
             Some(seg) => {
                 let length = seg.s_len();
                 validate_segment(seg, length, line_no, CONSISTENCY_TOL)?;
@@ -356,7 +364,7 @@ fn build_move_caps(
                 let sigma = seg.dkappa_ds(0.0);
                 let (_, kappa_peak) = seg.kappa_peak();
                 let z_capped = z_caps::z_capped(seg, &m.limits, kappa_peak, path_ceiling);
-                let (flat_ceiling, accel) = match &m.limits.extruder {
+                let limits = match &m.limits.extruder {
                     Some(extruder) => extruder_caps::extruder_capped(
                         seg,
                         extruder,
@@ -366,7 +374,7 @@ fn build_move_caps(
                     ),
                     None => z_capped,
                 };
-                (length, kappa_start, sigma, kappa_peak, flat_ceiling, accel)
+                (length, kappa_start, sigma, kappa_peak, limits)
             }
             None => {
                 let length = m
@@ -381,12 +389,29 @@ fn build_move_caps(
                     0.0,
                     0.0,
                     0.0,
-                    path_ceiling.min(params.max_extrude_only_velocity_mm_s),
-                    m.limits
-                        .accel_mm_s2
-                        .min(params.max_extrude_only_accel_mm_s2),
+                    (
+                        path_ceiling.min(params.max_extrude_only_velocity_mm_s),
+                        m.limits
+                            .accel_mm_s2
+                            .min(params.max_extrude_only_accel_mm_s2),
+                    ),
                 )
             }
+        };
+        let ((flat_ceiling, accel), step_capacity_overload) = match params.step_capacity {
+            Some(capacity) => step_capacity::step_capacity_capped(
+                capacity,
+                step_capacity::MotorDemand::of(
+                    m,
+                    m.segment.spatial.as_ref(),
+                    ratio_in_reach,
+                    capacity,
+                ),
+                length,
+                kappa_peak,
+                limits,
+            ),
+            None => (limits, None),
         };
 
         if disk::limit_speed(kappa_peak, accel) < flat_ceiling {
@@ -403,6 +428,7 @@ fn build_move_caps(
                 flat_ceiling,
             },
             kappa_peak,
+            step_capacity_overload,
         });
     }
     Ok(caps)
@@ -681,6 +707,7 @@ fn reconstruct_runs(
                 accel: kin.accel,
                 length: kin.length,
                 source: m.source,
+                step_capacity_overload: caps[j].step_capacity_overload,
             });
         }
         run_start = run_end;

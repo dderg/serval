@@ -15,6 +15,7 @@ mod lowering;
 pub mod planner;
 mod shaper;
 mod staged;
+mod step_capacity_log;
 pub mod timing;
 pub mod types;
 mod worker_pool;
@@ -44,6 +45,7 @@ impl Pipeline {
         t_start: f64,
     ) -> Self {
         let workers = Arc::new(WorkerPool::new());
+        let fit_tol = config.fit_tol();
         Self {
             front: PlanningFront {
                 fit: FitStage::new(config.corner).into_driver(),
@@ -52,7 +54,7 @@ impl Pipeline {
                 fitted_tap: None,
                 input_tap: None,
             },
-            shaper: Shaper::new(chains, config.fit_tol(), workers),
+            shaper: Shaper::new(chains, fit_tol, workers),
         }
     }
 

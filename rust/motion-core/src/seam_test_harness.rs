@@ -35,6 +35,7 @@ pub fn default_stream_config() -> StreamConfig {
             f64::INFINITY,
         )
         .expect("bench limits (max_v=100 accel=1000 scv=5 jerk=inf) are valid"),
+        step_capacity: None,
     }
 }
 
@@ -166,7 +167,12 @@ impl LiveReplay {
 
     #[must_use]
     pub fn pipeline(&self) -> Pipeline {
-        Pipeline::new(self.config, self.chains.clone(), self.home.clone(), 0.0)
+        Pipeline::new(
+            self.config.clone(),
+            self.chains.clone(),
+            self.home.clone(),
+            0.0,
+        )
     }
 }
 

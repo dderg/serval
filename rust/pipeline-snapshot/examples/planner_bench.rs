@@ -143,6 +143,7 @@ fn stream_config() -> StreamConfig {
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: PRODUCTION_MAX_BUFFER_MOVES,
         limits,
+        step_capacity: None,
     }
 }
 

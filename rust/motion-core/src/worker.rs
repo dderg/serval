@@ -342,7 +342,7 @@ impl StreamWorkerHandle {
             trajectory,
             detached,
         } = output;
-        let pipeline = Pipeline::new(config, axis_chains, home_pos.clone(), 0.0);
+        let pipeline = Pipeline::new(config.clone(), axis_chains, home_pos.clone(), 0.0);
         let (pipeline, segment_tap) = match detached {
             Some(taps) => (pipeline.with_input_tap(taps.inputs), Some(taps.segments)),
             None => (pipeline, None),

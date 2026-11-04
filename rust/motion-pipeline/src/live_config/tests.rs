@@ -131,3 +131,11 @@ fn a_line_too_short_to_move_is_no_move() {
         .unwrap();
     assert!(moved.is_none());
 }
+
+#[test]
+fn the_offline_plans_carry_no_step_capacity() {
+    let mut cfg = PlannerConfig::default();
+    cfg.cartesian.max_jerk = f64::INFINITY;
+
+    assert_eq!(stream_config(&cfg).unwrap().step_capacity, None);
+}

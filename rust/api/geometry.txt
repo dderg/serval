@@ -261,9 +261,10 @@ pub geometry::path::Segment::Arc(geometry::path::arc::Arc)
 pub geometry::path::Segment::Clothoid(geometry::path::clothoid::Clothoid)
 pub geometry::path::Segment::Line(geometry::path::line::Line)
 impl geometry::path::Segment
-pub fn geometry::path::Segment::held_coordinate(&self, usize) -> core::option::Option<f64>
-impl geometry::path::Segment
+pub fn geometry::path::Segment::heading_lean_along(&self, [f64; 3]) -> f64
 pub fn geometry::path::Segment::lean_on(&self, usize) -> geometry::path::AxisLean
+impl geometry::path::Segment
+pub fn geometry::path::Segment::held_coordinate(&self, usize) -> core::option::Option<f64>
 impl geometry::path::lowering::PositionProfile for geometry::path::Segment
 pub fn geometry::path::Segment::d2heading_ds2(&self, f64) -> [f64; 3]
 pub fn geometry::path::Segment::dheading_ds(&self, f64) -> [f64; 3]
@@ -414,6 +415,23 @@ pub fn geometry::space::MachinePos::to_gcode(self, core::option::Option<&geometr
 pub fn geometry::space::MachinePos::x(&self) -> f64
 pub fn geometry::space::MachinePos::y(&self) -> f64
 pub fn geometry::space::MachinePos::z(&self) -> f64
+pub mod geometry::step_capacity
+pub struct geometry::step_capacity::FollowerStepLoad
+pub geometry::step_capacity::FollowerStepLoad::axis_index: usize
+pub geometry::step_capacity::FollowerStepLoad::s_per_mm: f64
+pub struct geometry::step_capacity::McuStepLoad
+pub geometry::step_capacity::McuStepLoad::followers: alloc::vec::Vec<geometry::step_capacity::FollowerStepLoad>
+pub geometry::step_capacity::McuStepLoad::lane_s_per_mm: [f64; 3]
+pub geometry::step_capacity::McuStepLoad::mcu: alloc::string::String
+impl geometry::step_capacity::McuStepLoad
+pub fn geometry::step_capacity::McuStepLoad::follower_s_per_mm(&self, usize) -> f64
+pub struct geometry::step_capacity::StepCapacity
+pub geometry::step_capacity::StepCapacity::lane_weights: [[f64; 3]; 3]
+pub geometry::step_capacity::StepCapacity::mcus: alloc::vec::Vec<geometry::step_capacity::McuStepLoad>
+pub struct geometry::step_capacity::StepCapacityOverload
+pub geometry::step_capacity::StepCapacityOverload::demand_over_capacity: f64
+pub geometry::step_capacity::StepCapacityOverload::mcu_index: usize
+pub const geometry::step_capacity::SPATIAL_LANES: usize
 pub mod geometry::surface
 pub enum geometry::surface::SurfaceContinuity
 pub geometry::surface::SurfaceContinuity::C0
@@ -620,6 +638,7 @@ pub geometry::velocity::MoveVelocity::peak_v: f64
 pub geometry::velocity::MoveVelocity::phases: alloc::vec::Vec<geometry::velocity::law::LawSegment>
 pub geometry::velocity::MoveVelocity::samples: alloc::vec::Vec<geometry::velocity::VelSample>
 pub geometry::velocity::MoveVelocity::source: geometry::segment::SourceRange
+pub geometry::velocity::MoveVelocity::step_capacity_overload: core::option::Option<geometry::step_capacity::StepCapacityOverload>
 pub struct geometry::velocity::Serial
 impl geometry::velocity::FanOut for geometry::velocity::Serial
 pub fn geometry::velocity::Serial::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
@@ -627,11 +646,12 @@ pub struct geometry::velocity::VelSample
 pub geometry::velocity::VelSample::a: f64
 pub geometry::velocity::VelSample::s: f64
 pub geometry::velocity::VelSample::v: f64
-pub struct geometry::velocity::VelocityPlanParams
+pub struct geometry::velocity::VelocityPlanParams<'a>
 pub geometry::velocity::VelocityPlanParams::entry_v: f64
 pub geometry::velocity::VelocityPlanParams::integration_tol: f64
 pub geometry::velocity::VelocityPlanParams::max_extrude_only_accel_mm_s2: f64
 pub geometry::velocity::VelocityPlanParams::max_extrude_only_velocity_mm_s: f64
+pub geometry::velocity::VelocityPlanParams::step_capacity: core::option::Option<&'a geometry::step_capacity::StepCapacity>
 pub struct geometry::velocity::VelocityProfile
 pub geometry::velocity::VelocityProfile::barrier: usize
 pub geometry::velocity::VelocityProfile::boundary_speeds: alloc::vec::Vec<f64>
@@ -649,9 +669,9 @@ pub fn geometry::velocity::FanOut::lead_and_follow(&self, usize, impl core::ops:
 impl geometry::velocity::FanOut for geometry::velocity::Serial
 pub fn geometry::velocity::Serial::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
 pub fn geometry::velocity::extrusion_budgets(&[geometry::frontend::Move], f64, f64) -> alloc::vec::Vec<geometry::ExtrusionBudget>
-pub fn geometry::velocity::plan_velocity_stops(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
-pub fn geometry::velocity::plan_velocity_stops_reconstruct_prefix(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams, usize) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
-pub fn geometry::velocity::plan_velocity_stops_select_prefix<F, W>(&[geometry::frontend::Move], &[bool], &[geometry::ExtrusionBudget], geometry::velocity::VelocityPlanParams, &W, F) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError> where F: core::ops::function::FnOnce(usize) -> usize, W: geometry::velocity::FanOut
+pub fn geometry::velocity::plan_velocity_stops(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams<'_>) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
+pub fn geometry::velocity::plan_velocity_stops_reconstruct_prefix(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams<'_>, usize) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
+pub fn geometry::velocity::plan_velocity_stops_select_prefix<F, W>(&[geometry::frontend::Move], &[bool], &[geometry::ExtrusionBudget], geometry::velocity::VelocityPlanParams<'_>, &W, F) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError> where F: core::ops::function::FnOnce(usize) -> usize, W: geometry::velocity::FanOut
 pub enum geometry::FitError
 pub geometry::FitError::Internal
 pub geometry::FitError::Internal::line_no: u32
@@ -828,6 +848,9 @@ pub fn geometry::segment::FollowerDemand::ramp(usize, f64, f64) -> Self
 pub fn geometry::segment::FollowerDemand::ratio_at(&self, f64, f64) -> f64
 pub fn geometry::segment::FollowerDemand::ratio_slope(&self, f64) -> f64
 pub fn geometry::segment::FollowerDemand::span(&self, f64, f64, f64) -> Self
+pub struct geometry::FollowerStepLoad
+pub geometry::FollowerStepLoad::axis_index: usize
+pub geometry::FollowerStepLoad::s_per_mm: f64
 pub struct geometry::FollowerWord
 pub geometry::FollowerWord::axis_index: usize
 pub geometry::FollowerWord::letter: u8
@@ -866,6 +889,12 @@ pub fn geometry::space::MachinePos::to_gcode(self, core::option::Option<&geometr
 pub fn geometry::space::MachinePos::x(&self) -> f64
 pub fn geometry::space::MachinePos::y(&self) -> f64
 pub fn geometry::space::MachinePos::z(&self) -> f64
+pub struct geometry::McuStepLoad
+pub geometry::McuStepLoad::followers: alloc::vec::Vec<geometry::step_capacity::FollowerStepLoad>
+pub geometry::McuStepLoad::lane_s_per_mm: [f64; 3]
+pub geometry::McuStepLoad::mcu: alloc::string::String
+impl geometry::step_capacity::McuStepLoad
+pub fn geometry::step_capacity::McuStepLoad::follower_s_per_mm(&self, usize) -> f64
 pub struct geometry::MeshGrid
 impl geometry::surface::MeshGrid
 pub fn geometry::surface::MeshGrid::bounds(&self) -> geometry::surface::SurfaceBounds
@@ -903,12 +932,19 @@ pub geometry::MoveVelocity::peak_v: f64
 pub geometry::MoveVelocity::phases: alloc::vec::Vec<geometry::velocity::law::LawSegment>
 pub geometry::MoveVelocity::samples: alloc::vec::Vec<geometry::velocity::VelSample>
 pub geometry::MoveVelocity::source: geometry::segment::SourceRange
+pub geometry::MoveVelocity::step_capacity_overload: core::option::Option<geometry::step_capacity::StepCapacityOverload>
 pub struct geometry::Serial
 impl geometry::velocity::FanOut for geometry::velocity::Serial
 pub fn geometry::velocity::Serial::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
 pub struct geometry::SourceRange
 pub geometry::SourceRange::end_line: u32
 pub geometry::SourceRange::start_line: u32
+pub struct geometry::StepCapacity
+pub geometry::StepCapacity::lane_weights: [[f64; 3]; 3]
+pub geometry::StepCapacity::mcus: alloc::vec::Vec<geometry::step_capacity::McuStepLoad>
+pub struct geometry::StepCapacityOverload
+pub geometry::StepCapacityOverload::demand_over_capacity: f64
+pub geometry::StepCapacityOverload::mcu_index: usize
 pub struct geometry::SurfaceBounds
 pub geometry::SurfaceBounds::max_curvature: f64
 pub geometry::SurfaceBounds::max_gradient: f64
@@ -952,11 +988,12 @@ impl geometry::frontend::VelocityLimits
 pub fn geometry::frontend::VelocityLimits::try_new(f64, f64, f64, f64) -> core::result::Result<Self, &'static str>
 pub fn geometry::frontend::VelocityLimits::with_extruder_caps(self, core::option::Option<geometry::frontend::ExtruderCaps>) -> core::result::Result<Self, &'static str>
 pub fn geometry::frontend::VelocityLimits::with_z_caps(self, f64, f64) -> core::result::Result<Self, &'static str>
-pub struct geometry::VelocityPlanParams
+pub struct geometry::VelocityPlanParams<'a>
 pub geometry::VelocityPlanParams::entry_v: f64
 pub geometry::VelocityPlanParams::integration_tol: f64
 pub geometry::VelocityPlanParams::max_extrude_only_accel_mm_s2: f64
 pub geometry::VelocityPlanParams::max_extrude_only_velocity_mm_s: f64
+pub geometry::VelocityPlanParams::step_capacity: core::option::Option<&'a geometry::step_capacity::StepCapacity>
 pub struct geometry::VelocityProfile
 pub geometry::VelocityProfile::barrier: usize
 pub geometry::VelocityProfile::boundary_speeds: alloc::vec::Vec<f64>
@@ -979,7 +1016,7 @@ pub fn geometry::velocity::Serial::lead_and_follow(&self, usize, impl core::ops:
 pub fn geometry::corner_deviation_from_scv(f64, f64) -> f64
 pub fn geometry::extrusion_budgets(&[geometry::frontend::Move], f64, f64) -> alloc::vec::Vec<geometry::ExtrusionBudget>
 pub fn geometry::line_move([f64; 3], [f64; 3], f64, geometry::frontend::MoveContext) -> core::result::Result<geometry::frontend::Move, geometry::frontend::FrontendError>
-pub fn geometry::plan_velocity_stops_reconstruct_prefix(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams, usize) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
-pub fn geometry::plan_velocity_stops_select_prefix<F, W>(&[geometry::frontend::Move], &[bool], &[geometry::ExtrusionBudget], geometry::velocity::VelocityPlanParams, &W, F) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError> where F: core::ops::function::FnOnce(usize) -> usize, W: geometry::velocity::FanOut
+pub fn geometry::plan_velocity_stops_reconstruct_prefix(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams<'_>, usize) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
+pub fn geometry::plan_velocity_stops_select_prefix<F, W>(&[geometry::frontend::Move], &[bool], &[geometry::ExtrusionBudget], geometry::velocity::VelocityPlanParams<'_>, &W, F) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError> where F: core::ops::function::FnOnce(usize) -> usize, W: geometry::velocity::FanOut
 pub fn geometry::scv_from_corner_deviation(f64, f64) -> f64
 pub fn geometry::seam_requires_stop(&geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig) -> bool

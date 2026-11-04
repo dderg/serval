@@ -282,6 +282,7 @@ fn stream_config_from(cfg: &PlannerConfig) -> (motion_pipeline::StreamConfig, Ve
         fit_tol_accel_mm_s2: cfg.fit_tolerance_accel_mm_s2,
         max_buffer_moves: 64,
         limits: test_limits(),
+        step_capacity: None,
     };
     (sc, vec![0.0; cfg.axis_registry.n_axes().max(3)])
 }

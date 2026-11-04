@@ -1,6 +1,7 @@
 use std::f64::consts::{FRAC_PI_2, PI};
 
 use super::{Arc, Clothoid, Line, Segment};
+use crate::vec3;
 
 /// How much of a segment's motion one axis carries: the largest component
 /// on that axis of the unit heading and of the unit normal anywhere along
@@ -24,6 +25,35 @@ impl Segment {
             Segment::Clothoid(clothoid) => clothoid.lean_on(axis),
         }
     }
+
+    /// The largest `|d·t̂|` anywhere along the segment: how fast a motor
+    /// whose position is `d·p` moves per unit of path speed, at worst.
+    #[must_use]
+    pub fn heading_lean_along(&self, direction: [f64; 3]) -> f64 {
+        match self {
+            Segment::Line(line) => {
+                vec3::dot(direction, vec3::sub(line.end, line.start)).abs() / line.length()
+            }
+            Segment::Arc(arc) => {
+                let (lo, hi) = arc.heading_range();
+                planar_heading_lean(
+                    vec3::dot(direction, arc.u),
+                    vec3::dot(direction, arc.v),
+                    lo,
+                    hi,
+                )
+            }
+            Segment::Clothoid(clothoid) => {
+                let (lo, hi) = clothoid.heading_range();
+                planar_heading_lean(
+                    vec3::dot(direction, clothoid.u),
+                    vec3::dot(direction, clothoid.v),
+                    lo,
+                    hi,
+                )
+            }
+        }
+    }
 }
 
 impl Line {
@@ -39,15 +69,25 @@ impl Line {
 
 impl Arc {
     fn lean_on(&self, axis: usize) -> AxisLean {
+        let (lo, hi) = self.heading_range();
+        planar_lean(self.u[axis], self.v[axis], lo, hi)
+    }
+
+    fn heading_range(&self) -> (f64, f64) {
         let quarter_turn = self.sweep.signum() * FRAC_PI_2;
         let first = self.start_angle + quarter_turn;
         let last = self.start_angle + self.sweep + quarter_turn;
-        planar_lean(self.u[axis], self.v[axis], first.min(last), first.max(last))
+        (first.min(last), first.max(last))
     }
 }
 
 impl Clothoid {
     fn lean_on(&self, axis: usize) -> AxisLean {
+        let (lo, hi) = self.heading_range();
+        planar_lean(self.u[axis], self.v[axis], lo, hi)
+    }
+
+    fn heading_range(&self) -> (f64, f64) {
         let heading_angle = |s: f64| self.kappa_0 * s + 0.5 * self.sigma * s * s;
         let mut lo = heading_angle(0.0).min(heading_angle(self.length));
         let mut hi = heading_angle(0.0).max(heading_angle(self.length));
@@ -56,7 +96,7 @@ impl Clothoid {
             lo = lo.min(heading_angle(turning_point));
             hi = hi.max(heading_angle(turning_point));
         }
-        planar_lean(self.u[axis], self.v[axis], lo, hi)
+        (lo, hi)
     }
 }
 
@@ -68,10 +108,16 @@ fn planar_lean(u_k: f64, v_k: f64, lo: f64, hi: f64) -> AxisLean {
     let plane = libm::hypot(u_k, v_k);
     let alpha = libm::atan2(v_k, u_k);
     AxisLean {
-        heading: plane * max_abs_cos(lo - alpha, hi - alpha),
+        heading: planar_heading_lean(u_k, v_k, lo, hi),
         normal: plane * max_abs_cos(lo - alpha - FRAC_PI_2, hi - alpha - FRAC_PI_2),
         plane,
     }
+}
+
+fn planar_heading_lean(u_k: f64, v_k: f64, lo: f64, hi: f64) -> f64 {
+    let plane = libm::hypot(u_k, v_k);
+    let alpha = libm::atan2(v_k, u_k);
+    plane * max_abs_cos(lo - alpha, hi - alpha)
 }
 
 fn max_abs_cos(lo: f64, hi: f64) -> f64 {

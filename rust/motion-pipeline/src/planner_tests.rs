@@ -30,6 +30,7 @@ fn config(max_buffer_moves: usize) -> StreamConfig {
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves,
         limits: limits(),
+        step_capacity: None,
     }
 }
 

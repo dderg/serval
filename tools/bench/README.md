@@ -181,6 +181,10 @@ F401: 301 ticks/step pulsed (279 k steps/s, 0.93 × the ladder ceiling) and 160 
 
 CI runs the benchmark of every test/configs firmware in unicorn (`step_benchmark_emu.py`, from `scripts/ci-build-mcu.sh`). In the emulator one instruction is one tick, the MCU is in its configured state, and the build fails on a shutdown or on a result outside 40–600 instructions/step. Instructions per step, pulsed / both-edge: F401 188 / 94, F103 172–174 / 95–96, G0B1 229–244 / 115–121, H723 300 / 154. The F401's 301 ticks over 188 instructions is 1.60 cycles per instruction.
 
+### How the capacity caps moves
+
+Klippy turns the benchmark into a per-move speed cap (`klippy/motion_step_capacity.py`, `docs/Config_Reference_Motion.md`, "MCU step capacity"). Each MCU gets 0.75 × CLOCK_FREQ ticks per second (`STEP_CAPACITY_FRACTION`). 0.75 is the ladder's knee above: p99 lateness holds at 4.1–5.1 µs up to 225 k steps/s, 75 % of the ~300 k ceiling. A motor costs its benchmarked ticks per step, pulsed or both-edge by its own mode, times the steps per second the move asks of it. The planner keeps the sum over each MCU's motors within the capacity, with pressure advance counted on the extruder. On this bench (F401, 301 ticks/step pulsed) that is 209 k steps/s. Pure X/Y travel reaches 1308 mm/s and is never capped at `max_velocity: 1000`. Only extrusions above a ratio of about 0.088 along X or Y at full speed are slowed, e.g. a 0.8 × 0.3 mm line to 964 mm/s. `capacity.cfg` raises the limits past the cap. Its ladder rungs above ~209 k aggregate are now planned slower than the G-code asks, and `step_capacity_capped` events report it.
+
 ## Limits
 
 - No endstops, heaters or TMC wired: no homing (`run.py` uses `SET_KINEMATIC_POSITION`).

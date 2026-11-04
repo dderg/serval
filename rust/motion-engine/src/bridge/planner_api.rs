@@ -89,6 +89,9 @@ struct McuTopology {
     stepcompress_max_error_secs: f64,
     phase_sample_rate: f64,
     phase_ring_depth: u32,
+    mcu_name: String,
+    step_capacity_ticks_per_s: Option<f64>,
+    ticks_per_step: Vec<u32>,
 }
 
 impl McuTopology {
@@ -110,6 +113,13 @@ impl McuTopology {
                 stepcompress_max_error_secs: self.stepcompress_max_error_secs,
                 phase_sample_rate: self.phase_sample_rate,
                 phase_ring_depth: self.phase_ring_depth,
+                step_capacity: self.step_capacity_ticks_per_s.map(|ticks_per_s| {
+                    motion_core::mcu_config::McuStepCapacity {
+                        mcu_name: self.mcu_name,
+                        ticks_per_s,
+                        ticks_per_step: self.ticks_per_step,
+                    }
+                }),
             },
         }
     }
