@@ -6,8 +6,9 @@ use trajectory::{ContinuousAxis, ContinuousSegment};
 
 use super::super::{FollowerState, SpanSide};
 use super::{
-    CLUSTER_REACH_S, CROSSING_PROBES, Crossing, ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_S,
-    RampLeg, ShapedLeaders, WIDTH_SLOPE_BOUND, WidthField,
+    CLUSTER_REACH_S, CROSSING_PROBES, Crossing, ENVELOPE_SLOPE, KERNEL_PEAK,
+    NODE_SPACING_PER_WIDTH, NODE_SPACING_S, RampLeg, ShapedLeaders, TimedSeam, WIDTH_SLOPE_BOUND,
+    WidthField,
 };
 
 /// `(length, ratio at start, ratio at end)` per span.
@@ -214,6 +215,7 @@ fn the_smoothed_ratio_is_c1_and_its_derivatives_are_exact() {
             for &s in &points {
                 let (left_ratio, left_slope) = state.ratio_and_slope(s - eps, SpanSide::After);
                 let (right_ratio, right_slope) = state.ratio_and_slope(s + eps, SpanSide::After);
+                let (_, slope_on) = state.ratio_and_slope(s, SpanSide::After);
                 assert!(
                     (left_ratio - right_ratio).abs() < 1e-9,
                     "the ratio jumps at {s} mm: {left_ratio} -> {right_ratio}"
@@ -221,6 +223,10 @@ fn the_smoothed_ratio_is_c1_and_its_derivatives_are_exact() {
                 assert!(
                     (left_slope - right_slope).abs() < 1e-5,
                     "the ratio's slope jumps at {s} mm: {left_slope} -> {right_slope}"
+                );
+                assert!(
+                    (slope_on - right_slope).abs() < 1e-5,
+                    "the ratio's slope on {s} mm is {slope_on}, beside it {right_slope}"
                 );
             }
             let h = 1e-6;
@@ -841,7 +847,11 @@ fn a_sliver_piece_of_the_leader_fit_leaves_the_crossing_jerk_alone() {
     let seam = BRAKING_TIME_S - CLUSTER_REACH_S;
     let jerk = |sliver: bool| {
         let leaders = braking_leaders(sliver);
-        Crossing::across(&ShapedLeaders::of(&leaders, &[0, 1]), seam, BRAKING_TIME_S).1
+        Crossing::over(
+            &ShapedLeaders::of(&leaders, &[0, 1]),
+            (seam, BRAKING_TIME_S),
+        )
+        .jerk
     };
     let probe_interval = CLUSTER_REACH_S / CROSSING_PROBES as f64;
     let bound = 2.0 * SLIVER_JERK_MM_S3 * SLIVER_S / probe_interval;
@@ -855,4 +865,168 @@ fn a_sliver_piece_of_the_leader_fit_leaves_the_crossing_jerk_alone() {
         "a sliver piece moves the crossing's jerk from {clean} to {with_sliver} mm/s³, past \
          {bound}"
     );
+}
+const CORNER_SPEED_MM_S: f64 = 40.0;
+const CORNER_CRAWL_MM_S: f64 = 4.0;
+const CORNER_BRAKE_MM_S2: f64 = 6400.0;
+
+/// The leaders' path and speed at `t`: a cruise at `CORNER_SPEED_MM_S`
+/// braking at `brake` into a corner they cross at `CORNER_CRAWL_MM_S`, then
+/// speeding up the same way, as a slicer's short travel between two
+/// extrusions plans.
+fn slow_corner(brake: f64, t: f64) -> f64 {
+    let ramp = (CORNER_SPEED_MM_S - CORNER_CRAWL_MM_S) / CORNER_BRAKE_MM_S2;
+    let covered = |speed_at: &dyn Fn(f64) -> f64, from: f64, to: f64| {
+        let steps = 64;
+        (0..steps)
+            .map(|k| {
+                let at = from + (to - from) * (k as f64 + 0.5) / steps as f64;
+                speed_at(at) * (to - from) / steps as f64
+            })
+            .sum::<f64>()
+    };
+    let speed = |t: f64| {
+        let off = (t - brake - ramp).abs();
+        if off >= ramp {
+            CORNER_SPEED_MM_S
+        } else {
+            CORNER_CRAWL_MM_S + CORNER_BRAKE_MM_S2 * off
+        }
+    };
+    covered(&speed, 0.0, t)
+}
+
+/// A ratio step crossed at speed just ahead of a slow corner asks for a
+/// window `V·τ/2` wide, `V` the speed the leaders cross it at. The corner's
+/// own target is a fraction of that, and its cone would narrow the window
+/// right where the leaders still cruise into it: the seam's width holds the
+/// window open wherever the seam is inside it.
+#[test]
+fn a_slow_corner_beside_a_ratio_step_does_not_narrow_its_window() {
+    let rule = RatioRampRule {
+        advance_slope_s: 0.02,
+        max_velocity_mm_s: 50.0,
+        max_accel_mm_s2: 5000.0,
+    };
+    let (seam_t, brake, end) = (0.052, 0.05, 0.12);
+    let mut field = WidthField {
+        rule: Some(rule),
+        ..WidthField::default()
+    };
+    field.place_rest(0.0);
+    let seam_s = slow_corner(brake, seam_t);
+    field.add_seam(TimedSeam {
+        t: seam_t,
+        s: seam_s,
+        crossing: Crossing {
+            speed: CORNER_SPEED_MM_S,
+            rate: CORNER_BRAKE_MM_S2,
+            jerk: 0.0,
+        },
+        step: 0.034,
+        peak_ratio: 0.034,
+        ramp_time: None,
+    });
+    let seam_width = 0.5 * CORNER_SPEED_MM_S * field.seam_ramp_time(0);
+    let mut t = NODE_SPACING_S;
+    while t < end {
+        field.place_sample(slow_corner(brake, t), t);
+        t += NODE_SPACING_S;
+    }
+    field.close(slow_corner(brake, end));
+    let corner = slow_corner(
+        brake,
+        brake + (CORNER_SPEED_MM_S - CORNER_CRAWL_MM_S) / CORNER_BRAKE_MM_S2,
+    );
+    assert!(
+        corner - seam_s < seam_width,
+        "the corner at {corner} mm lies beyond the {seam_width} mm window of the seam at \
+         {seam_s} mm"
+    );
+    let narrowest = probes(2.0 * seam_width, 400)
+        .map(|offset| seam_s - seam_width + offset)
+        .map(|s| (field.width(s), s))
+        .fold((f64::INFINITY, 0.0), |narrowest, probe| {
+            if probe.0 < narrowest.0 {
+                probe
+            } else {
+                narrowest
+            }
+        });
+    assert!(
+        narrowest.0 >= seam_width * (1.0 - 1e-12),
+        "the window at {} mm is {} mm wide, under the {seam_width} mm the seam at {seam_s} mm \
+         asks for",
+        narrowest.1,
+        narrowest.0
+    );
+}
+
+/// Moving width nodes lie most of the narrower of their targets apart on
+/// the path, so the smootherstep between two of them bends the width no
+/// sharper than a window's own width allows.
+#[test]
+fn moving_width_nodes_lie_a_window_apart() {
+    let mut field = WidthField {
+        rule: Some(RatioRampRule {
+            advance_slope_s: 0.02,
+            max_velocity_mm_s: 50.0,
+            max_accel_mm_s2: 5000.0,
+        }),
+        ..WidthField::default()
+    };
+    field.place_rest(0.0);
+    let brake = 0.05;
+    let mut t = NODE_SPACING_S;
+    while t < 0.12 {
+        field.place_sample(slow_corner(brake, t), t);
+        t += NODE_SPACING_S;
+    }
+    field.close(slow_corner(brake, 0.12));
+    for pair in field.nodes.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        if a.target > 0.0 && b.target > 0.0 {
+            assert!(
+                b.s - a.s >= NODE_SPACING_PER_WIDTH * a.target.min(b.target),
+                "width nodes at {} and {} mm lie closer than their targets {} and {}",
+                a.s,
+                b.s,
+                a.target,
+                b.target
+            );
+        }
+    }
+}
+
+/// A corner blend tens of nanometres long ramps the table's ratio at
+/// millions per millimetre. Summed seam by seam, its two slope steps cancel
+/// only to an ulp of `m·h²`, and where the leaders crawl through a wide
+/// window the laid track jittered by 1e-10 mm, more than a source fit
+/// split down to nanoseconds can follow.
+#[test]
+fn a_nanometre_blend_lays_a_smooth_track_through_a_wide_window() {
+    let blend_start = 10.0;
+    let table = vec![
+        (blend_start, 0.0, 0.0),
+        (2.7e-8, 0.0, 0.085),
+        (10.0, 0.085, 0.085),
+    ];
+    let total = length(&table);
+    let state = smoothed(&table, cruise(total));
+    let h = state.smoothing.width.width(blend_start);
+    let step = 1e-9;
+    for centre in [-h, -0.5 * h, 0.5 * h, h].map(|offset| blend_start + offset) {
+        for k in 0..2_000 {
+            let s = centre - 1e-6 + step * f64::from(k);
+            let (a, b) = (
+                state.smoothing.correction(s),
+                state.smoothing.correction(s + step),
+            );
+            let drift = b.value - a.value - 0.5 * step * (a.d1 + b.d1);
+            assert!(
+                drift.abs() < 1e-14,
+                "the laid track drifts {drift} mm off its own ratio over {step} mm at {s} mm"
+            );
+        }
+    }
 }

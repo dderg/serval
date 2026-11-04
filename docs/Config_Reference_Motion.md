@@ -50,7 +50,7 @@ max_accel: 3000
 
 ### MCU step capacity
 
-Each MCU measures at connect what one step costs its dispatch, in clock ticks: once for pulsed motors and once for both-edge (TMC `dedge`) motors (`printer.mcu.step_benchmark`; see `tools/bench/README.md`, "Self-benchmark"). Klippy hands the planner each MCU's benchmark, clock, stepped motors and the capacity fraction it applies (reported as `printer.mcu.step_capacity`). The planner gives every MCU a capacity of `STEP_CAPACITY_FRACTION` (0.625) of its clock in ticks per second; `rust/motion-pipeline/src/live_config/step_capacity.rs` is the one derivation the live planner and every snapshot share. 0.625 is the largest fraction at which the F401, held at the cap, keeps p99.9 step lateness × each motor's step rate within 0.5 microstep (`tools/bench/README.md`, "Capacity fraction from a timing budget").
+Each MCU measures at connect what one step costs it, in clock ticks: once for pulsed motors and once for both-edge (TMC `dedge`) motors. The figure is the timer interrupt time of one isolated motor's step with a cold instruction cache, the worst case a lone motor at speed meets (`printer.mcu.step_benchmark`; see `tools/bench/README.md`, "Self-benchmark"). Klippy hands the planner each MCU's benchmark, clock, stepped motors and the capacity fraction it applies (reported as `printer.mcu.step_capacity`). The planner gives every MCU a capacity of `STEP_CAPACITY_FRACTION` (0.80) of its clock in ticks per second; `rust/motion-pipeline/src/live_config/step_capacity.rs` is the one derivation the live planner and every snapshot share. On the F401 held at the cap, p99.9 step lateness × each motor's step rate stays within 0.5 microstep up to 0.85 for one motor alone, and the error jumps at 0.9. 0.80 keeps a margin from that cliff for printers running more MCU tasks than the bench (`tools/bench/README.md`, "Capacity fraction from a timing budget").
 
 The planner holds every move within the capacity of every MCU it steps. A motor stepping `d` mm per step at `c` ticks per step costs its MCU `c / d` ticks per mm it travels. A motor of a kinematic lane with weights `w` (CoreXY: `a = x + y`, `b = x - y`) travels at `|w·t̂|·v` at path speed `v` along heading `t̂`. On an arc or a blend, the planner takes the largest `|w·t̂|` over every heading the segment sweeps, which bounds the motor speed at every point. The extruder motor travels at `r·(v + k·A)`, the extrusion ratio and the pressure advance's velocity gain `k` over the acceleration budget `A`, as for its own `max_velocity`. Per MCU, the sum of `motor speed × c / d` over the motors it steps must stay within the capacity. This constraint is linear in the speed ceiling and the acceleration budget. Where it binds, the planner lowers whichever of the two lets the move finish sooner, as the extruder's velocity cap does. Only moves that ask too much are slowed, and only the MCUs they drive count.
 
@@ -60,14 +60,14 @@ Klippy refuses a config only when an MCU cannot step a pure move along an axis a
 
 Each motor is also limited to what its driver can physically be stepped at. That limit is one step per two pulse widths in pulsed mode (`stepper_full_finish` holds the next step until a pulse width after the unstep) and one per microsecond on both edges. The host checks every shaped track against it before sending.
 
-Worked example: the bench printer (`tools/bench/printer.cfg`: CoreXY, 80 steps/mm on a and b, 400 on z, 414 on e, PA `k = 0.03`, `max_velocity: 1000`, `max_accel: 10000`, F401 at 301 / 160 ticks per step, all pulsed). The capacity is 0.625 × 84 MHz / 301 = 174 k steps/s.
+Worked example: the bench printer (`tools/bench/printer.cfg`: CoreXY, 80 steps/mm on a and b, 400 on z, 414 on e, PA `k = 0.03`, `max_velocity: 1000`, `max_accel: 10000`, F401 at 497 / 240 ticks per step, all pulsed). The capacity is 0.80 × 84 MHz / 497 = 135 k steps/s.
 
-- A pure X or Y travel asks 160 steps/mm. It can reach 1090 mm/s, so it is never capped at 1000.
-- A 45° diagonal drives only one motor, at 113 steps/mm, and can reach 1542 mm/s.
-- Z can reach 436 mm/s, against `max_z_velocity: 25`.
-- Extrusion along X or Y at 1000 mm/s and 10000 mm/s² is capped above a budgeted extrusion ratio of about 0.027. A 0.4 × 0.2 mm line (ratio 0.033, budgeted 0.037) asks 180 k steps/s and is capped to 969 mm/s at full acceleration. A 0.8 × 0.3 mm line (ratio 0.100, budgeted 0.105) asks 217 k and is capped to 793 mm/s. For both lines, the pressure-advance share alone takes so much of the capacity that lowering the acceleration cannot keep 1000 mm/s.
+- A pure X or Y travel asks 160 steps/mm, so it is capped at 845 mm/s.
+- A 45° diagonal drives only one motor, at 113 steps/mm, and can reach 1195 mm/s.
+- Z can reach 338 mm/s, against `max_z_velocity: 25`.
+- Extrusion along X or Y at 10000 mm/s² is capped below the travel cap. A 0.4 × 0.2 mm line (ratio 0.033, budgeted 0.037) is capped to 745 mm/s at full acceleration. A 0.8 × 0.3 mm line (ratio 0.100, budgeted 0.105) is capped to 600 mm/s.
 
-The startup line reports about 199 % summed worst-case demand, so the cap can bind.
+The startup line reports about 190 % summed worst-case demand, so the cap can bind.
 
 ### Why the corner budget defaults to 0.04 mm
 

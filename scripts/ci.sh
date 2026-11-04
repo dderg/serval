@@ -6,7 +6,7 @@
 #   ./scripts/ci.sh <job>           # run one gate, exit with its status (CI)
 #   ./scripts/ci.sh -v <job>        # stream the gate's output live
 #   ./scripts/ci.sh throughput-gate [--accept --reason R]
-#                                   # replay instruction counts vs tools/bench/throughput_baseline.json
+#                                   # replay Ir and a live A/B vs tools/bench/throughput_baseline.json
 #
 # Output policy: a terminal, GitHub Actions and `-v` get the live stream.
 # Everywhere else (agents, scripts capturing stdout) a gate prints one PASS
@@ -374,9 +374,10 @@ job_replay_budget() {
     done
 }
 
-# Instruction counts of the repo's own code replaying a slice of the same
-# dense print single-threaded under cachegrind, against committed baselines,
-# plus the Pi 2-core worst window they predict; see scripts/throughput_gate.py.
+# Every user-space instruction of a slice of the same dense print replayed
+# single-threaded under cachegrind, plus the whole print replayed live on two
+# pinned cores against a build of the baseline's reference commit, and the
+# Pi 2-core worst window both predict; see scripts/throughput_gate.py.
 # A host without valgrind measures inside the scripts/Dockerfile-build image.
 # On a pull request the base is the merge commit's first parent, and a moved
 # baseline file needs a ```throughput-accept block in $PR_BODY.

@@ -2419,7 +2419,7 @@ fn the_ladder_fits_a_resolution_scale_span_without_high_degree_amplification() {
             velocity_sign: crate::lowering::VelocitySign::Certified,
             acceleration_monotonicity: None,
             high_degree_span_floor: 0.0,
-            velocity_continuous: false,
+            seam_continuity: crate::lowering::SeamContinuity::Position,
         },
     );
     let fit = match attempt {
@@ -2522,7 +2522,7 @@ fn a_smooth_cusp_fits_below_the_high_degree_floor_without_bump_corrections() {
                 velocity_sign: crate::lowering::VelocitySign::Certified,
                 acceleration_monotonicity: None,
                 high_degree_span_floor,
-                velocity_continuous: false,
+                seam_continuity: crate::lowering::SeamContinuity::Position,
             },
         );
         match attempt {
@@ -2638,7 +2638,7 @@ fn a_constant_acceleration_resolution_span_fits_the_anchored_quadratic() {
             velocity_sign: crate::lowering::VelocitySign::Certified,
             acceleration_monotonicity: None,
             high_degree_span_floor: 3.6e-7,
-            velocity_continuous: false,
+            seam_continuity: crate::lowering::SeamContinuity::Position,
         },
     )
     .unwrap_or_else(|crate::lowering::LadderMiss { failure, .. }| {
@@ -2777,7 +2777,7 @@ fn an_endpoint_anchored_fit_never_steps_the_right_seam() {
             velocity_sign: crate::lowering::VelocitySign::Certified,
             acceleration_monotonicity: None,
             high_degree_span_floor: 0.0,
-            velocity_continuous: false,
+            seam_continuity: crate::lowering::SeamContinuity::Position,
         },
     )
     .unwrap_or_else(|crate::lowering::LadderMiss { failure, .. }| {
@@ -2904,7 +2904,7 @@ fn the_closest_rung_at_a_square_root_onset_is_the_closest_between_the_probes() {
             velocity_sign: crate::lowering::VelocitySign::Unconstrained,
             acceleration_monotonicity: None,
             high_degree_span_floor: 0.0,
-            velocity_continuous: false,
+            seam_continuity: crate::lowering::SeamContinuity::Position,
         },
     ) {
         Ok(fit) => fit,
@@ -2966,7 +2966,7 @@ fn accepted_seed_intervals_do_not_spend_the_split_budget() {
                 seed_breakpoints: seeds,
                 fit_tol: tolerance,
                 fit_context: "test fit",
-                velocity_continuous: false,
+                seam_continuity: crate::lowering::SeamContinuity::Position,
             },
             &sig,
         )
@@ -3101,7 +3101,8 @@ fn shaped_seeds_carry_every_cut_transition_exactly_once() {
         3.0128303182171217,
         18.4517596196437,
     ];
-    let seeds = crate::shaper::shaped_signal_breakpoints(&kernel, &input_breaks);
+    let shaped = crate::shaper::ShapedBreaks::new(&kernel, &input_breaks);
+    let seeds = shaped.times();
     assert!(seeds.windows(2).all(|pair| pair[0] < pair[1]));
     let mut transitions = Vec::new();
     for &input_break in &input_breaks {

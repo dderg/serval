@@ -12,12 +12,12 @@ use trajectory::{
     RelativeSplinePiece, ShapedSignal,
 };
 
-use crate::lowering::{AccelBudget, FitTol, follower_tol_scale, riding_tol_scale};
+use crate::lowering::{AccelBudget, FitTol, SeamContinuity, follower_tol_scale, riding_tol_scale};
 use crate::shaper::{
     AxisFit, AxisSignalTable, BetweenProbes, ConvolutionSignal, Enclosure, ExactConvolution,
-    ExactKernel, FitBoundary, KnotJumpBound, Lookahead, SEGMENT_TIME_EPS_S, ShiftedTrackSignal,
-    SignalBounds, TrackSignal, apply_derivative_gains_to_track, fit_axis_from_signal,
-    fit_resolution, shaped_signal_breakpoints, unit_kernel_mass,
+    ExactKernel, FitBoundary, KnotJumpBound, Lookahead, SEGMENT_TIME_EPS_S, ShapedBreaks,
+    ShiftedTrackSignal, SignalBounds, TrackSignal, apply_derivative_gains_to_track,
+    fit_axis_from_signal, fit_resolution, fit_seed_times, unit_kernel_mass,
 };
 use crate::types::PostProcessError;
 use crate::worker_pool::WorkerPool;
@@ -423,7 +423,7 @@ fn fit_source_projection(
             } else {
                 "follower_source"
             },
-            velocity_continuous: true,
+            seam_continuity: SeamContinuity::Velocity,
         };
         match leading {
             Some(advance) => {
@@ -989,7 +989,7 @@ pub(crate) fn project_followers(
                     &semantic_cuts
                 };
                 let breaks_started = crate::timing::stopwatch();
-                let shaped_breaks = shaped_signal_breakpoints(kernel, shaped_break_seeds);
+                let shaped_breaks = ShapedBreaks::new(kernel, shaped_break_seeds);
                 timing.breakpoints_us += breaks_started.elapsed_us();
                 let input_jumps = table.input_jumps().to_vec();
                 let exact_kernel = ExactKernel::new(kernel);
@@ -1037,11 +1037,16 @@ pub(crate) fn project_followers(
                 let fitted = pool
                     .map_indexed(workers, supports.len(), &make_sig, |sig, index| {
                         let (start, end) = supports[index];
+                        let seeds = shaped_breaks.select_seeds(
+                            fit_seed_times(axis, start, end, shaped_breaks.times())?,
+                            Some(table.as_ref()),
+                            target_tol,
+                        );
                         fit_kernel_window(
                             axis,
                             start,
                             end,
-                            &shaped_breaks,
+                            &seeds,
                             sig,
                             target_tol,
                             output_monotonicity,
@@ -1232,7 +1237,7 @@ fn fit_kernel_window<S: TrackSignal>(
             seed_breakpoints: shaped_breaks,
             fit_tol: target_tol,
             fit_context: "follower_kernel",
-            velocity_continuous: true,
+            seam_continuity: SeamContinuity::Velocity,
         },
         &local,
     )?;
@@ -1499,6 +1504,25 @@ pub fn follower_velocity_step_allowance(
         .map_or(0.0, |advance| {
             UnshapedLeaderStep::of(advance, ratio_bound, leader_accel_tol).allowance()
         })
+}
+
+/// What every seam of leader `leader`'s fit must carry of its shaped signal
+/// for the followers of `chains` that read it. An advance with no kernel
+/// after it ([`LeadingAdvance::is_ramped`]) reads the leader's acceleration
+/// as velocity, so an acceleration step at a seam would reach the
+/// follower's motor as a velocity step.
+pub(crate) fn leader_seam_continuity(chains: &AxisChainSet, leader: usize) -> SeamContinuity {
+    let read_by_kernel_free_advance = chains
+        .projected_followers()
+        .filter(|(_, leaders)| leaders.contains(&leader))
+        .any(|(follower, _)| {
+            LeadingAdvance::of(&chains.chains[follower]).is_some_and(|advance| advance.is_ramped())
+        });
+    if read_by_kernel_free_advance {
+        SeamContinuity::Acceleration
+    } else {
+        SeamContinuity::Velocity
+    }
 }
 
 fn advance_offset(stage: &ChainStage, velocity: f64) -> f64 {

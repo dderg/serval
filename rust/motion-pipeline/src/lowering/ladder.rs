@@ -278,6 +278,23 @@ pub(crate) enum VelocitySign {
     Unconstrained,
 }
 
+/// Which of the signal's own state every span seam carries, whichever rung
+/// wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum SeamContinuity {
+    /// Position only: the two anchored quadratics may solve an endpoint
+    /// velocity from the travel instead of reading it from the signal.
+    Position,
+    /// Position and velocity: the anchored quadratics are withheld.
+    Velocity,
+    /// Position, velocity and acceleration: the cubic, which never reads
+    /// the endpoint acceleration, is withheld too, so every piece starts
+    /// from the quintic Hermite and its endpoint-preserving bumps. An
+    /// advance with no kernel after it turns a fit's acceleration step at a
+    /// seam into a velocity step of its motor.
+    Acceleration,
+}
+
 /// Every rung is endpoint-anchored: it reproduces the span's own endpoint
 /// positions, so the span seams stay C0 whichever rung wins.
 ///
@@ -286,16 +303,12 @@ pub(crate) enum VelocitySign {
 /// mean anything. Below it the quintic base and its bump corrections read
 /// sampling noise amplified by `(2/h)²`, so only the cubic — which never
 /// touches endpoint acceleration — is attempted.
-///
-/// `velocity_continuous` withholds the two anchored quadratics, which solve
-/// an endpoint velocity from the travel instead of reading it from the
-/// signal, so every seam carries the signal's own velocity.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LadderPolicy {
     pub velocity_sign: VelocitySign,
     pub acceleration_monotonicity: Option<AccelerationTrend>,
     pub high_degree_span_floor: f64,
-    pub velocity_continuous: bool,
+    pub seam_continuity: SeamContinuity,
 }
 
 #[cfg(test)]
@@ -454,8 +467,10 @@ pub(crate) fn ladder_fit(
     let truth_p = truth.position;
     let truth_v = truth.velocity;
     let truth_a = truth.acceleration;
-    if policy.acceleration_monotonicity.is_none() || truth_a(-1.0) == truth_a(1.0) {
-        if !policy.velocity_continuous {
+    if policy.seam_continuity < SeamContinuity::Acceleration
+        && (policy.acceleration_monotonicity.is_none() || truth_a(-1.0) == truth_a(1.0))
+    {
+        if policy.seam_continuity == SeamContinuity::Position {
             let anchored_acceleration_quadratic = anchored_acceleration_quadratic_in_u(
                 truth_p(-1.0),
                 truth_a(0.0),
