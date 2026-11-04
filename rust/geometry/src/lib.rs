@@ -24,9 +24,9 @@ pub use fitter::{
     CornerFitConfig, FitError, SEAM_VELOCITY_STEP_MM_S, UnblendReason, seam_requires_stop,
 };
 pub use frontend::{
-    CORNER_DEVIATION_SCV_FACTOR, ExtruderCaps, FrontendError, LeaderSpill, Move, MoveContext,
-    SPATIAL_AXIS_SETS, VelocityLimits, axis_set, corner_deviation_from_scv, line_move,
-    scv_from_corner_deviation,
+    ADVANCE_VALLEY_SPEED_MM_S, CORNER_DEVIATION_SCV_FACTOR, ExtruderCaps, FrontendError,
+    LeaderSpill, Move, MoveContext, SPATIAL_AXIS_SETS, VelocityLimits, axis_set,
+    corner_deviation_from_scv, line_move, scv_from_corner_deviation,
 };
 pub use ratio_ramp::{RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep};
 pub use segment::{CubicSegment, FollowerDemand, SourceRange};
@@ -43,8 +43,8 @@ pub use surface::{
     SurfaceError, SurfaceSample, SurfaceTransform, SurfaceTransition, SurfaceTransitionError,
 };
 pub use velocity::{
-    ExtrusionBudget, ExtrusionReach, FanOut, LawSegment, MoveVelocity, RailPair, RailPairShape,
-    ScalarLaw, Serial, VelSample, VelocityError, VelocityPlanParams, VelocityProfile,
-    VelocityReport, extrusion_budgets, plan_velocity_stops_reconstruct_prefix,
+    ExtrusionBudget, ExtrusionReach, FanOut, LawSegment, MoveVelocity, PathInReach, RailPair,
+    RailPairShape, ScalarLaw, Serial, VelSample, VelocityError, VelocityPlanParams,
+    VelocityProfile, VelocityReport, extrusion_budgets, plan_velocity_stops_reconstruct_prefix,
     plan_velocity_stops_select_prefix,
 };

@@ -1,6 +1,6 @@
 use std::f64::consts::PI;
 
-const COLLINEAR_EPS_RAD: f64 = 1e-3;
+pub(crate) const COLLINEAR_EPS_RAD: f64 = 1e-3;
 
 /// The largest per-axis velocity step a junction left unblended may take:
 /// passing a turn `θ` at speed `v` steps the velocity by `v·θ`.

@@ -17,6 +17,7 @@ use crate::path::{CurvatureProfile, Line};
 use crate::segment::FollowerDemand;
 use vec3::{cross, dot, turn_normal};
 
+pub(crate) use config::COLLINEAR_EPS_RAD;
 pub use config::{CornerFitConfig, SEAM_VELOCITY_STEP_MM_S};
 pub use move_ops::{
     blend_moves, consumption_moves, is_travel, merge_collinear_lines, spatial_end, spatial_start,
