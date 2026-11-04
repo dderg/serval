@@ -6,7 +6,8 @@
 Same arguments as gh, same stdout and exit code. Many agents poll GitHub at
 once and trip its secondary rate limit; `gh` then fails with "API rate limit
 exceeded", which a caller cannot tell apart from a genuinely red check. This
-wrapper retries only on a rate-limit failure, waiting Retry-After when GitHub
+wrapper retries only on a rate-limit or transient network failure (dropped
+connection, 502-504), waiting Retry-After when GitHub
 sent it and otherwise exponential backoff with jitter, and gives up loudly
 after MAX_ATTEMPTS. Any other failure is returned untouched on the first try.
 Long waits belong in one `--watch` call, not in a loop of short polls.
@@ -25,7 +26,19 @@ BASE_BACKOFF_SECONDS = 30.0
 MAX_BACKOFF_SECONDS = 300.0
 JITTER_FRACTION = 0.25
 POLL_INTERVAL_SECONDS = 60
-RATE_LIMIT_MARKERS = ("rate limit", "abuse detection", "HTTP 429")
+RATE_LIMIT_MARKERS = (
+    "rate limit",
+    "abuse detection",
+    "HTTP 429",
+    "check your internet connection",
+    "githubstatus.com",
+    "connection reset",
+    "i/o timeout",
+    "TLS handshake timeout",
+    "HTTP 502",
+    "HTTP 503",
+    "HTTP 504",
+)
 RETRY_AFTER = re.compile(r"retry[- ]after:?\s*(\d+)", re.IGNORECASE)
 
 
@@ -68,13 +81,13 @@ def run_gh(args: list[str], runner=run_streaming, sleep=time.sleep) -> int:
             return code
         wait = backoff_seconds(attempt, retry_after_seconds(stderr))
         print(
-            f"gh_util: rate limited (attempt {attempt + 1}/{MAX_ATTEMPTS}); "
+            f"gh_util: transient failure (attempt {attempt + 1}/{MAX_ATTEMPTS}); "
             f"waiting {wait:.0f}s before `gh {' '.join(args[:3])}`",
             file=sys.stderr,
         )
         sleep(wait)
     raise GhRateLimitError(
-        f"still rate limited after {MAX_ATTEMPTS} attempts: gh {' '.join(args)}"
+        f"still failing transiently after {MAX_ATTEMPTS} attempts: gh {' '.join(args)}"
     )
 
 
