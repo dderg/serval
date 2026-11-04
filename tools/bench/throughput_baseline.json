@@ -1,14 +1,14 @@
 {
   "slice_lines": 1000,
-  "commit": "6aa1cb2757343385a67c2bae4cef824a0b21e368",
-  "reason": "Kernel follower fits seed only the shaped breaks that can carry a velocity break: 10x fewer extruder pieces on the kernel configs",
+  "commit": "f5a2863b23ec4ef02f90e521718ea4d3a59f44c6",
+  "reason": "Pacer resume-lead fix (pacer-resume-lead) at the merge of main 07ccf720b: live 2-core ratio -2.7 % on p3_voron_direct_drive_kernel in CI; the change adds a planned-through stream-time compare per segment and a step timer per ingress step",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 18416942932,
+      "ir": 18446478289,
       "stream_secs": 8.541,
       "pi_2core": {
         "k_ir": 9114169275.97816,
-        "worst_x_reference": 4.187364218623241,
+        "worst_x_reference": 4.206673066496796,
         "worst_x": [
           2.79,
           2.76
@@ -17,11 +17,11 @@
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 25712366065,
+      "ir": 25740384216,
       "stream_secs": 6.202,
       "pi_2core": {
         "k_ir": 9659757002.81361,
-        "worst_x_reference": 2.33,
+        "worst_x_reference": 2.3166083529638914,
         "worst_x": [
           2.33,
           2.36
@@ -30,11 +30,11 @@
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 26365381177,
+      "ir": 26439689472,
       "stream_secs": 7.543,
       "pi_2core": {
         "k_ir": 8703407017.198727,
-        "worst_x_reference": 2.49,
+        "worst_x_reference": 2.4599239741247745,
         "worst_x": [
           2.5,
           2.49
