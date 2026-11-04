@@ -1674,6 +1674,50 @@ fn a_piece_leaving_rest_is_made_monotone_whatever_its_offset() {
     }
 }
 
+/// The bowden corner of `follower_advance_chains` opens on a rest whose
+/// advanced input builds its lead in one degree-11 piece; a retreat of
+/// about 1.5e-6 mm where it leaves rest set off the projection, whose
+/// Bernstein velocity clamped and carried forward lifted the piece
+/// 1.35e-3 mm, eight times the tolerance, above the source it corrects.
+#[test]
+fn a_monotone_correction_stays_within_the_tolerance_of_its_source() {
+    let tol = crate::lowering::FitTol::absolute(1.0 / 6000.0, 50.0);
+    let source = BezierPiece {
+        u_start: 2.805183445567574e-3,
+        u_end: 1.2687228749551069e-2,
+        coeffs: vec![
+            5.438224830090298e-10,
+            1.3572182146183744e-5,
+            0.12360558825861026,
+            -38607.17514969189,
+            82453802.0107496,
+            -67564349171.56878,
+            32524234426637.008,
+            -7139135022599966.0,
+            8.164979534420874e17,
+            -5.06708942693456e19,
+            1.5818995095411124e21,
+            -1.8103712258762171e22,
+        ],
+    };
+    let mut pieces = [source.clone()];
+    super::project_monotone(3, "test input", &mut pieces, tol);
+    let h = source.u_end - source.u_start;
+    let worst = (0..=512)
+        .map(|step| {
+            let tau = h * f64::from(step) / 512.0;
+            (super::polynomial_pva(&pieces[0].coeffs, tau).0
+                - super::polynomial_pva(&source.coeffs, tau).0)
+                .abs()
+        })
+        .fold(0.0, f64::max);
+    assert!(
+        worst <= tol.pos_mm,
+        "the monotone correction moves the piece {worst} mm from its source, past {} mm",
+        tol.pos_mm
+    );
+}
+
 fn ramped_advance(stage: &trajectory::ChainStage) -> super::LeadingAdvance<'_> {
     super::LeadingAdvance {
         stage,
