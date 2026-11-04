@@ -1,14 +1,14 @@
 {
   "slice_lines": 1000,
-  "commit": "a42dacfc3330ce248233a0f3e14f122717fa4adf",
-  "reason": "New gate format: total Ir (every user-space instruction, not repo files only) over the 1000-line slice plus a live 2-core A/B of the full print against this reference commit. Pi 2-core worst windows measured at a5c9bfca0 (main 2797f4c50 merged): p3_voron_direct_drive_kernel 1.89/1.90, trident_kernel 1.88/1.90, p3_voron_direct_drive_ramp 2.79/2.76; carried by the live ratio through the merges of main 6a9bd0254 and 6258172a4.",
+  "commit": "82471136fdc15e4918c287125562611c81df084c",
+  "reason": "New gate format: total Ir (every user-space instruction, not repo files only) over the 1000-line slice plus a live 2-core A/B of the full print against this reference commit. Pi 2-core worst windows measured at a5c9bfca0 (main 2797f4c50 merged): p3_voron_direct_drive_kernel 1.89/1.90, trident_kernel 1.88/1.90, p3_voron_direct_drive_ramp 2.79/2.76; carried by the live ratio through the merges of main up to d0bbc8c5c (#681, rail-integration reuse, #682 ramp-end-accel).",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 17955073988,
+      "ir": 18417100746,
       "stream_secs": 8.541,
       "pi_2core": {
         "k_ir": 9114169275.97816,
-        "worst_x_reference": 4.241753812069129,
+        "worst_x_reference": 4.165119366314405,
         "worst_x": [
           2.79,
           2.76
@@ -17,11 +17,11 @@
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 27817429819,
+      "ir": 28567827181,
       "stream_secs": 6.202,
       "pi_2core": {
         "k_ir": 9206017029.650112,
-        "worst_x_reference": 2.0273096208703905,
+        "worst_x_reference": 1.9357535808915818,
         "worst_x": [
           1.89,
           1.9
@@ -30,11 +30,11 @@
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 28910790918,
+      "ir": 30195937189,
       "stream_secs": 7.543,
       "pi_2core": {
         "k_ir": 8088130496.582261,
-        "worst_x_reference": 2.0683401967335207,
+        "worst_x_reference": 1.9681387183408123,
         "worst_x": [
           1.88,
           1.9
