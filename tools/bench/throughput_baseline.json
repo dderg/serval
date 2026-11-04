@@ -1,45 +1,45 @@
 {
   "slice_lines": 1000,
-  "commit": "4a3b0e9fec8b7e958ef79efa277cc1cd0ef2bee2",
+  "commit": "a5c9bfca0a49fff520d699bef3b966c6a7f55fd6",
   "reason": "New gate format: every user-space instruction (not repo files only) over the 1000-line slice, plus a live 2-core A/B of the full print against this reference commit. Pi 2-core worst windows measured at this commit: p3_voron_direct_drive_kernel 1.89/1.90, trident_kernel 1.88/1.90, p3_voron_direct_drive_ramp 2.79/2.76.",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 21775253020,
+      "ir": 21774939205,
       "stream_secs": 6.594,
       "pi_2core": {
-        "k_ir": 9114300627.115559,
+        "k_ir": 9114169275.97816,
         "worst_x_reference": 2.76,
         "worst_x": [
           2.79,
           2.76
         ],
-        "commit": "4a3b0e9fec8b7e958ef79efa277cc1cd0ef2bee2"
+        "commit": "a5c9bfca0a49fff520d699bef3b966c6a7f55fd6"
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 30209399020,
+      "ir": 30209374401,
       "stream_secs": 6.202,
       "pi_2core": {
-        "k_ir": 9206024532.054176,
+        "k_ir": 9206017029.650112,
         "worst_x_reference": 1.89,
         "worst_x": [
           1.89,
           1.9
         ],
-        "commit": "4a3b0e9fec8b7e958ef79efa277cc1cd0ef2bee2"
+        "commit": "a5c9bfca0a49fff520d699bef3b966c6a7f55fd6"
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 32451543099,
+      "ir": 32451472519,
       "stream_secs": 7.543,
       "pi_2core": {
-        "k_ir": 8088148087.779397,
+        "k_ir": 8088130496.582261,
         "worst_x_reference": 1.88,
         "worst_x": [
           1.88,
           1.9
         ],
-        "commit": "4a3b0e9fec8b7e958ef79efa277cc1cd0ef2bee2"
+        "commit": "a5c9bfca0a49fff520d699bef3b966c6a7f55fd6"
       }
     }
   }
