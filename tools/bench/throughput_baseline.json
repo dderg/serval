@@ -2,10 +2,10 @@
   "slice_lines": 1000,
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 9121547059,
-      "stream_secs": 8.541,
-      "reason": "extruder-jerk-gain: the planner's kernel-free advance cap now bounds the shaped path jerk by the leader kernels' directional total variation (2.26x the old peak gain for smooth_mzv). On p3_voron_direct_drive_ramp (kernel-free advance, A_e inherits 10000) the 1000-line slice plans slower, stream 6.594 -> 8.541 s, and repo Ir drops 12.4 %; the Pi 2-core prediction rises to 4.30x. The kernel chains (p3 kernel, trident kernel) move < 0.1 %.",
-      "commit": "59faef15d9334a8fad2c3a3cafdd99e9a2da4a29",
+      "ir": 9634457828,
+      "stream_secs": 6.594,
+      "reason": "rail integrations memoized by their inputs: re-planning windows settle the same members from the same speeds again; output bit-identical (trajectory digests unchanged)",
+      "commit": "b386caf434ee6664e28255d7acc5f2fea42afff0",
       "pi_2core": {
         "k": 4587316424.936247,
         "worst_x": [
@@ -16,10 +16,10 @@
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 13324197457,
+      "ir": 12489615156,
       "stream_secs": 6.202,
-      "reason": "extruder-jerk-gain: the planner's kernel-free advance cap now bounds the shaped path jerk by the leader kernels' directional total variation (2.26x the old peak gain for smooth_mzv). On p3_voron_direct_drive_ramp (kernel-free advance, A_e inherits 10000) the 1000-line slice plans slower, stream 6.594 -> 8.541 s, and repo Ir drops 12.4 %; the Pi 2-core prediction rises to 4.30x. The kernel chains (p3 kernel, trident kernel) move < 0.1 %.",
-      "commit": "59faef15d9334a8fad2c3a3cafdd99e9a2da4a29",
+      "reason": "rail integrations memoized by their inputs: re-planning windows settle the same members from the same speeds again; output bit-identical (trajectory digests unchanged)",
+      "commit": "b386caf434ee6664e28255d7acc5f2fea42afff0",
       "pi_2core": {
         "k": 4582331787.594325,
         "worst_x": [
@@ -30,10 +30,10 @@
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 13706610724,
+      "ir": 12856925656,
       "stream_secs": 7.543,
-      "reason": "extruder-jerk-gain: the planner's kernel-free advance cap now bounds the shaped path jerk by the leader kernels' directional total variation (2.26x the old peak gain for smooth_mzv). On p3_voron_direct_drive_ramp (kernel-free advance, A_e inherits 10000) the 1000-line slice plans slower, stream 6.594 -> 8.541 s, and repo Ir drops 12.4 %; the Pi 2-core prediction rises to 4.30x. The kernel chains (p3 kernel, trident kernel) move < 0.1 %.",
-      "commit": "59faef15d9334a8fad2c3a3cafdd99e9a2da4a29",
+      "reason": "rail integrations memoized by their inputs: re-planning windows settle the same members from the same speeds again; output bit-identical (trajectory digests unchanged)",
+      "commit": "b386caf434ee6664e28255d7acc5f2fea42afff0",
       "pi_2core": {
         "k": 4388809054.193679,
         "worst_x": [
