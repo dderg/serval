@@ -325,12 +325,16 @@ impl WidthField {
     /// leaders last stood still: a leg they open from a standstill — the
     /// stream's start, a drain or a dwell — lays a fresh one from its own
     /// start, so the motion after a rest is sampled as it would be planned
-    /// from rest. Ticks in a time gap before `leg`, legal only at rest,
-    /// sample its start.
+    /// from rest. A standstill is the leaders covering less than
+    /// [`REST_TARGET_MM`] over a node spacing, whether at speed or by
+    /// accelerating: the shaped leaders' fit leaves a dwell's end a rounding
+    /// off an exact zero (1e-14 mm/s, 1e-9 mm/s²). Ticks in a time gap
+    /// before `leg`, legal only at rest, sample its start.
     fn extend(&mut self, leaders: &ShapedLeaders, leg: &RampLeg, table_end: f64) {
         let grid = axis_grid(leg.shaped, leg.leaders);
         let (t0, t1) = (grid[0], grid[grid.len() - 1]);
-        let opens_from_standstill = leaders.speed(t0) == 0.0 && leaders.accel_norm(t0) == 0.0;
+        let opens_from_standstill = leaders.speed(t0) <= REST_SPEED_MM_S
+            && leaders.accel_norm(t0) <= REST_SPEED_MM_S / NODE_SPACING_S;
         let mut ticks = match self.grid {
             Some(ticks) if !opens_from_standstill => ticks,
             _ => SampleGrid {

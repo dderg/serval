@@ -48,6 +48,23 @@ impl Waypoint {
     }
 }
 
+/// The steepest extrusion any move between `waypoints` lays per millimetre
+/// of travel; extrude-only moves lay none along a path.
+#[must_use]
+pub fn extrusion_ratio_bound(waypoints: &[Waypoint]) -> f64 {
+    waypoints
+        .windows(2)
+        .filter_map(|pair| {
+            let [from, to] = [pair[0].position, pair[1].position];
+            let travel = (0..3)
+                .map(|axis| (to[axis] - from[axis]).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            (travel > 0.0).then(|| (to[3] - from[3]).abs() / travel)
+        })
+        .fold(0.0, f64::max)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum WaypointError {
     #[error(transparent)]
