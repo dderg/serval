@@ -20,7 +20,6 @@ on:
       - 'Cargo.lock'
       - 'test/configs/*.config'
       - 'tools/bench/step_benchmark_emu.py'
-      - 'tools/bench/f401.config'
       - 'scripts/ci-build-mcu.sh'
       - '.github/workflows/ci-mcu-firmware.yaml'
 
