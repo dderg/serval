@@ -33,9 +33,15 @@ def test_stepper_firmware_without_the_benchmark_is_refused():
         fake._query_step_benchmark()
 
 
+def test_stepper_firmware_without_the_cpu_load_monitor_is_refused():
+    fake = FakeMcu(["config_stepper", "get_step_benchmark"])
+    with pytest.raises(mcu.error, match="lacks cpu_load"):
+        fake._query_step_benchmark()
+
+
 def test_stepper_firmware_reports_its_measured_cost():
     fake = FakeMcu(
-        ["config_stepper", "get_step_benchmark"],
+        ["config_stepper", "get_step_benchmark", "cpu_load"],
         {
             "pulsed_ticks_per_step": 301,
             "both_edge_ticks_per_step": 160,
@@ -51,7 +57,7 @@ def test_stepper_firmware_reports_its_measured_cost():
 
 def test_an_empty_measurement_on_real_hardware_is_refused():
     fake = FakeMcu(
-        ["config_stepper", "get_step_benchmark"],
+        ["config_stepper", "get_step_benchmark", "cpu_load"],
         {
             "pulsed_ticks_per_step": 0,
             "both_edge_ticks_per_step": 160,
@@ -64,7 +70,7 @@ def test_an_empty_measurement_on_real_hardware_is_refused():
 
 def test_a_simulated_mcu_reports_without_a_measurement():
     fake = FakeMcu(
-        ["config_stepper", "get_step_benchmark"],
+        ["config_stepper", "get_step_benchmark", "cpu_load"],
         {
             "pulsed_ticks_per_step": 0,
             "both_edge_ticks_per_step": 0,

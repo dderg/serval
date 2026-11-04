@@ -319,6 +319,14 @@ step_joins_batch(struct timer *t, uint32_t waketime, uint32_t horizon)
     return !timer_is_before(horizon, waketime) && timer_is_step(t);
 }
 
+static uint32_t step_events;
+
+uint32_t
+sched_step_events(void)
+{
+    return step_events;
+}
+
 static __always_inline struct timer *
 fire_follower_step_edges(struct timer *t, uint32_t scheduled, uint32_t horizon)
 {
@@ -331,6 +339,7 @@ fire_follower_step_edges(struct timer *t, uint32_t scheduled, uint32_t horizon)
         while (timer_is_before(timer_read_time(), due))
             ;
         stepper_step_edge(t, stepper_timer_on_edge_path(t));
+        step_events++;
         last = t;
         t = t->next;
     } while (step_joins_batch(t, t->waketime, horizon));
@@ -392,11 +401,34 @@ dispatch_step_timer(struct timer *t, uint_fast8_t on_edge_path)
 }
 #endif
 
+static uint32_t dispatch_mark;
+static uint8_t last_dispatch_was_step;
+static volatile uint32_t nonstep_timer_ticks;
+
 static noinline unsigned int
 dispatch_callback_timer(struct timer *t)
 {
     uint_fast8_t res = t->func(t);
     return reschedule_head(t, res, t->next, t->next->waketime);
+}
+
+void
+sched_timer_irq_enter(uint32_t fired)
+{
+    dispatch_mark = fired;
+}
+
+void
+sched_timer_irq_exit(uint32_t now)
+{
+    if (!last_dispatch_was_step)
+        nonstep_timer_ticks += now - dispatch_mark;
+}
+
+uint32_t
+sched_nonstep_timer_ticks(void)
+{
+    return nonstep_timer_ticks;
 }
 
 // Invoke the next timer - called from board hardware irq code.
@@ -420,7 +452,8 @@ sched_timer_dispatch(void)
     uint32_t diag_start = timer_read_time();
     unsigned int next_waketime;
 #if CONFIG_INLINE_STEPPER_HACK
-    if (likely(timer_is_step(t))) {
+    uint_fast8_t step = timer_is_step(t);
+    if (likely(step)) {
         if (stepper_timer_on_edge_path(t))
             next_waketime = dispatch_step_timer(t, 1);
         else
@@ -429,9 +462,17 @@ sched_timer_dispatch(void)
         next_waketime = dispatch_callback_timer(t);
     }
 #else
+    uint_fast8_t step = 0;
     next_waketime = dispatch_callback_timer(t);
 #endif
-    diag_note_timer_duration(timer_read_time() - diag_start, diag_func);
+    uint32_t end = timer_read_time();
+    diag_note_timer_duration(end - diag_start, diag_func);
+    if (step)
+        step_events++;
+    else
+        nonstep_timer_ticks += end - dispatch_mark;
+    dispatch_mark = end;
+    last_dispatch_was_step = step;
     return next_waketime;
 }
 
