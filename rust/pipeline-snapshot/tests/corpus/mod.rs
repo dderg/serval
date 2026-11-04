@@ -13,6 +13,9 @@ use pipeline_snapshot::waypoints::parse_gcode;
 use pipeline_snapshot::{SampleSide, pipeline_snapshot_for_config};
 use planner_config::from_doc::{planner_config_from_text, read_motion_settings};
 
+pub mod extruder;
+pub mod known_extruder_excesses;
+
 pub const SIM_GCODES: [&str; 4] = [
     "voron_first_layers",
     "voron_dense_top_layers",

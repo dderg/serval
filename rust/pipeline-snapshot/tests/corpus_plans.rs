@@ -1,7 +1,7 @@
 //! Every corpus case plans through the production pipeline and holds the
-//! config's z caps. Heavy (the full sim prints), so ignored by default;
-//! `scripts/corpus.sh` runs it. Every case runs even when an earlier one
-//! panics, and all failures are listed.
+//! config's z caps and extruder limits. Heavy (the full sim prints), so
+//! ignored by default; `scripts/corpus.sh` runs it. Every case runs even
+//! when an earlier one panics, and all failures are listed.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Instant;
@@ -43,6 +43,16 @@ fn every_corpus_case_plans() {
                 );
                 if let Some(excess) = corpus::z_caps_excess(&snapshot, &case.config) {
                     failures.push(format!("{}: {excess}", case.name));
+                }
+                if let Some(audit) =
+                    corpus::extruder::extruder_audit(&snapshot, &case.gcode, &case.config)
+                {
+                    println!("{:<70} {}", "", audit.summary());
+                    if let Some(excess) =
+                        corpus::known_extruder_excesses::extruder_excess(&case.config, &audit)
+                    {
+                        failures.push(format!("{}: {excess}", case.name));
+                    }
                 }
             }
             Ok(snapshot) => failures.push(format!(
