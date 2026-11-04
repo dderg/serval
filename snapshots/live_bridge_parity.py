@@ -34,9 +34,9 @@ class DetachedEngine:
     """The bridge as klippy drives it, with the MCU clock caught up: the
     host never waits on an MCU, so every clock query answers "now"."""
 
-    def __init__(self, config_text: str):
+    def __init__(self, config_text: str, step_benchmarks=None):
         self._engine = harness._import_engine().MotionEngine()
-        self._engine.init_planner_detached(config_text)
+        self._engine.init_planner_detached(config_text, step_benchmarks)
         self.config_text = config_text
         self.frontier = 0.0
 
@@ -142,23 +142,35 @@ def first_divergence(live, snapshot) -> Divergence | None:
     )
 
 
-def live_record(gcode_text: str, cfg_path: Path):
+def live_record(gcode_text: str, cfg_path: Path, step_benchmarks=None):
     """What the live host feeds its pipeline for ``gcode_text`` and what the
-    pipeline shapes, with the config document klippy serialized for it."""
-    detached = live_replay.drive(gcode_text, cfg_path, DetachedEngine)
+    pipeline shapes, with the config document klippy serialized for it.
+    ``step_benchmarks`` is what the MCUs report at connect
+    (``mcu.get_status()["step_capacity"]``); ``None`` plans uncapped."""
+    detached = live_replay.drive(
+        gcode_text,
+        cfg_path,
+        lambda config_text: DetachedEngine(config_text, step_benchmarks),
+    )
     return detached.drained_record(), detached.config_text
 
 
-def snapshot_record(gcode_text: str, config_text: str):
+def snapshot_record(gcode_text: str, config_text: str, step_benchmarks=None):
     engine = harness._import_engine()
     return engine.snapshot_parity_record(
-        engine.parse_gcode(gcode_text, config_text), config_text
+        engine.parse_gcode(gcode_text, config_text),
+        config_text,
+        step_benchmarks,
     )
 
 
-def compare(gcode_text: str, cfg_path: Path) -> Divergence | None:
-    live, config_text = live_record(gcode_text, cfg_path)
-    return first_divergence(live, snapshot_record(gcode_text, config_text))
+def compare(
+    gcode_text: str, cfg_path: Path, step_benchmarks=None
+) -> Divergence | None:
+    live, config_text = live_record(gcode_text, cfg_path, step_benchmarks)
+    return first_divergence(
+        live, snapshot_record(gcode_text, config_text, step_benchmarks)
+    )
 
 
 def main(argv: list[str]) -> int:
