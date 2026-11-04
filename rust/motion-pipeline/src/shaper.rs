@@ -12,10 +12,9 @@ use trajectory::{
 
 use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
-    AccelBudget, AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE, LADDER_PROBES_U,
-    LadderBudget, LadderFailure, LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth,
-    SeamContinuity, VelocitySign, eval_mono, eval_mono_d, eval_mono_dd, exact_piece, held_miss,
-    ladder_fit, quintic_in_u,
+    AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget,
+    LadderFailure, LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth, SeamContinuity,
+    VelocitySign, exact_piece, held_miss, ladder_fit, quintic_in_u,
 };
 use crate::types::{BaseItem, Control, PostProcessError, TrajectoryItem};
 use crate::worker_pool::WorkerPool;
@@ -41,48 +40,6 @@ use taylor::{Ball, TaylorModel};
 
 pub(crate) use exact::{ExactConvolution, ExactKernel, ExactPiece};
 pub(crate) use hidden_breaks::ShapedBreaks;
-
-#[derive(Clone, Copy)]
-pub(crate) struct KnotJumpBound {
-    pub acceleration: f64,
-    pub jerk: f64,
-}
-
-impl KnotJumpBound {
-    pub(crate) const UNBOUNDED: Self = Self {
-        acceleration: f64::INFINITY,
-        jerk: f64::INFINITY,
-    };
-
-    fn hermite_miss(self, half_span: f64, width: f64) -> HermiteMiss {
-        let step = self.acceleration * half_span * half_span;
-        let kink = self.jerk * half_span * half_span * half_span * width;
-        HermiteMiss {
-            curvature_per_u2: step * UNIT_ACCELERATION_STEP_HERMITE_MISS.curvature_per_u2
-                + kink * UNIT_JERK_KINK_HERMITE_MISS.curvature_per_u2,
-            position: (step * UNIT_ACCELERATION_STEP_HERMITE_MISS.position
-                + kink * UNIT_JERK_KINK_HERMITE_MISS.position)
-                * width
-                * width,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct HermiteMiss {
-    curvature_per_u2: f64,
-    position: f64,
-}
-
-const UNIT_ACCELERATION_STEP_HERMITE_MISS: HermiteMiss = HermiteMiss {
-    curvature_per_u2: 1.0,
-    position: 1.0 / 16.0,
-};
-
-const UNIT_JERK_KINK_HERMITE_MISS: HermiteMiss = HermiteMiss {
-    curvature_per_u2: 1.0 / 12.0,
-    position: 1.0 / 192.0,
-};
 
 /// A signal's enclosure over a stretch: a slice of one the signal keeps,
 /// borrowed for the asking, or one built for it.
@@ -152,15 +109,6 @@ pub(crate) trait TrackSignal {
     ) -> Option<AccelerationTrend> {
         None
     }
-    fn interior_knots(&self, _start: f64, _end: f64) -> &[f64] {
-        &[]
-    }
-    fn knot_jump(&self, _knot: f64) -> KnotJumpBound {
-        KnotJumpBound::UNBOUNDED
-    }
-    fn eval_pva_across(&self, knot: f64) -> [(f64, f64, f64); 2] {
-        [f64::NEG_INFINITY, f64::INFINITY].map(|side| self.eval_pva(next_toward(knot, side)))
-    }
     fn diagnostic(&self, _t: f64) -> Option<String> {
         None
     }
@@ -185,24 +133,6 @@ pub(crate) trait TrackSignal {
         let _ = accuracy;
         self.exact_polynomial_on(lo, hi).map(Enclosure::Built)
     }
-    /// What a rung that passes the probes is held against between them,
-    /// where the signal has no enclosure.
-    fn between_probes(&self) -> BetweenProbes {
-        BetweenProbes::ErrorInterpolant
-    }
-}
-
-/// How a rung is held between two samples of a signal with no enclosure.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BetweenProbes {
-    /// Against the error's cubic Hermite interpolant: the rung and the truth
-    /// interpolated together.
-    ErrorInterpolant,
-    /// Against the truth's quintic Hermite interpolant, the rung read
-    /// exactly. A signal composed from other tracks' pieces bends between
-    /// samples where the high-degree rungs fitted to it swing, and an
-    /// interpolant of their difference follows neither.
-    TruthInterpolant,
 }
 
 impl TrackSignal for ContinuousAxis {
@@ -243,15 +173,6 @@ impl<S: TrackSignal> TrackSignal for &S {
     ) -> Option<AccelerationTrend> {
         S::acceleration_monotonicity(self, span, resolved)
     }
-    fn interior_knots(&self, start: f64, end: f64) -> &[f64] {
-        S::interior_knots(self, start, end)
-    }
-    fn knot_jump(&self, knot: f64) -> KnotJumpBound {
-        S::knot_jump(self, knot)
-    }
-    fn eval_pva_across(&self, knot: f64) -> [(f64, f64, f64); 2] {
-        S::eval_pva_across(self, knot)
-    }
     fn diagnostic(&self, t: f64) -> Option<String> {
         S::diagnostic(self, t)
     }
@@ -263,9 +184,6 @@ impl<S: TrackSignal> TrackSignal for &S {
     }
     fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
         S::enclosure_on(self, lo, hi, accuracy)
-    }
-    fn between_probes(&self) -> BetweenProbes {
-        S::between_probes(self)
     }
 }
 
@@ -4085,121 +4003,6 @@ impl SpanTruth {
     }
 }
 
-fn acceleration_error_witness<S: TrackSignal>(
-    sig: &S,
-    coefficients: &[f64],
-    t0: f64,
-    t1: f64,
-    budget: f64,
-) -> Option<f64> {
-    let span = (next_toward(t0, t1), next_toward(t1, t0));
-    sig.acceleration_monotonicity(span, span)?;
-    let h = t1 - t0;
-    let acceleration = exact_piece(coefficients, 0.0, h, h)
-        .differentiate()
-        .differentiate()
-        .to_bernstein();
-    let start_acceleration = sig.second_deriv(next_toward(t0, t1));
-    let end_acceleration = sig.second_deriv(next_toward(t1, t0));
-    acceleration_interval_witness(
-        sig,
-        (t0, h, budget),
-        (0.0, 1.0),
-        (start_acceleration, end_acceleration),
-        &acceleration,
-        0,
-    )
-}
-
-fn acceleration_interval_witness<S: TrackSignal>(
-    sig: &S,
-    (t0, h, budget): (f64, f64, f64),
-    (left, right): (f64, f64),
-    (a_left, a_right): (f64, f64),
-    controls: &[f64],
-    depth: u32,
-) -> Option<f64> {
-    let candidate_min = controls.iter().copied().fold(f64::INFINITY, f64::min);
-    let candidate_max = controls.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    if candidate_max - a_left.min(a_right) <= budget
-        && a_left.max(a_right) - candidate_min <= budget
-    {
-        return None;
-    }
-    let mid = 0.5 * (left + right);
-    let truth = sig.second_deriv(nurbs::fmadd(mid, h, t0));
-    let n = controls.len();
-    let mut work = [0.0; 14];
-    let mut lower = [0.0; 14];
-    let mut upper = [0.0; 14];
-    work[..n].copy_from_slice(controls);
-    lower[0] = work[0];
-    upper[n - 1] = work[n - 1];
-    for remaining in (1..n).rev() {
-        for index in 0..remaining {
-            work[index] = 0.5 * work[index] + 0.5 * work[index + 1];
-        }
-        lower[n - remaining] = work[0];
-        upper[remaining - 1] = work[remaining - 1];
-    }
-    if !truth.is_finite() || (work[0] - truth).abs() > budget || depth == 12 {
-        return Some(2.0 * mid - 1.0);
-    }
-    acceleration_interval_witness(
-        sig,
-        (t0, h, budget),
-        (left, mid),
-        (a_left, truth),
-        &lower[..n],
-        depth + 1,
-    )
-    .or_else(|| {
-        acceleration_interval_witness(
-            sig,
-            (t0, h, budget),
-            (mid, right),
-            (truth, a_right),
-            &upper[..n],
-            depth + 1,
-        )
-    })
-}
-
-const PROBE_BARYCENTRIC_WEIGHTS: [f64; LADDER_PROBES_U.len()] = probe_barycentric_weights();
-
-const fn probe_barycentric_weights() -> [f64; LADDER_PROBES_U.len()] {
-    let mut weights = [1.0; LADDER_PROBES_U.len()];
-    let mut node = 0;
-    while node < LADDER_PROBES_U.len() {
-        let mut other = 0;
-        while other < LADDER_PROBES_U.len() {
-            if other != node {
-                weights[node] /= LADDER_PROBES_U[node] - LADDER_PROBES_U[other];
-            }
-            other += 1;
-        }
-        node += 1;
-    }
-    weights
-}
-
-fn interpolated_through_probes(at_probes: &[f64; LADDER_PROBES_U.len()], u: f64) -> f64 {
-    let (mut numerator, mut denominator) = (0.0, 0.0);
-    for ((&node, &weight), &value) in LADDER_PROBES_U
-        .iter()
-        .zip(&PROBE_BARYCENTRIC_WEIGHTS)
-        .zip(at_probes)
-    {
-        let term = weight / (u - node);
-        numerator += term * value;
-        denominator += term;
-    }
-    numerator / denominator
-}
-
-const INTERPOLANT_POINTS_PER_PROBE_GAP: u32 = 8;
-const INTERPOLANT_SUSPICION_SHARE: f64 = 0.9;
-const INTERPOLANT_REFINE_SHARE: f64 = 0.5;
 const GOLDEN_SECTION_STEPS: u32 = 16;
 
 pub(crate) fn golden_section_peak<E>(
@@ -4229,579 +4032,6 @@ pub(crate) fn golden_section_peak<E>(
     } else {
         (right, right_value)
     })
-}
-
-/// Exact samples a suspicious stretch is scanned at before its peak is
-/// searched: the error between the probes is not unimodal near a knot.
-const EXACT_PEAK_SCAN_POINTS: u32 = 8;
-
-const WITNESS_MAX_DEPTH: u32 = 6;
-const HERMITE_TRUTH_SCAN_POINTS: u32 = 16;
-
-/// A quintic Hermite interpolant over `[from, from + width]` in `u`, its
-/// end slopes and curvatures scaled to the stretch: `width·f'` and
-/// `width²·f''`.
-#[derive(Clone, Copy)]
-struct HermiteTruth {
-    from: f64,
-    width: f64,
-    travel: f64,
-    slopes: (f64, f64),
-    curvatures: (f64, f64),
-}
-
-impl HermiteTruth {
-    fn curvature_per_u2(&self, u: f64) -> f64 {
-        let s = (u - self.from) / self.width;
-        let ((d0, d1), (c0, c1)) = (self.slopes, self.curvatures);
-        let scaled = -self.travel * s * (-60.0 + s * (180.0 - 120.0 * s))
-            + d0 * s * (-36.0 + s * (96.0 - 60.0 * s))
-            + c0 * (1.0 + s * (-9.0 + s * (18.0 - 10.0 * s)))
-            + c1 * s * (3.0 + s * (-12.0 + 10.0 * s))
-            + d1 * s * (-24.0 + s * (84.0 - 60.0 * s));
-        scaled / (self.width * self.width)
-    }
-}
-
-#[derive(Clone, Copy)]
-struct PositionErrorSample {
-    u: f64,
-    error: f64,
-    slope_per_u: f64,
-}
-
-impl PositionErrorSample {
-    fn hermite_peak_to(self, right: Self) -> f64 {
-        let width = right.u - self.u;
-        let (e0, e1) = (self.error, right.error);
-        let (d0, d1) = (self.slope_per_u * width, right.slope_per_u * width);
-        let c2 = 3.0 * (e1 - e0) - 2.0 * d0 - d1;
-        let c3 = 2.0 * (e0 - e1) + d0 + d1;
-        let at = |s: f64| ((c3 * s + c2) * s + d0) * s + e0;
-        let (a, b, c) = (3.0 * c3, 2.0 * c2, d0);
-        let critical = if a == 0.0 {
-            [(b != 0.0).then(|| -c / b), None]
-        } else {
-            let discriminant = b * b - 4.0 * a * c;
-            if discriminant < 0.0 {
-                [None, None]
-            } else {
-                let root = discriminant.sqrt();
-                [Some((-b - root) / (2.0 * a)), Some((-b + root) / (2.0 * a))]
-            }
-        };
-        critical
-            .into_iter()
-            .flatten()
-            .filter(|s| (0.0..=1.0).contains(s))
-            .map(|s| at(s).abs())
-            .fold(e0.abs().max(e1.abs()), f64::max)
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ErrorSample {
-    position: PositionErrorSample,
-    curvature_per_u2: f64,
-}
-
-impl ErrorSample {
-    fn hermite_curvature_peak_to(self, right: Self) -> f64 {
-        let ends = self
-            .curvature_per_u2
-            .abs()
-            .max(right.curvature_per_u2.abs());
-        self.hermite_curvature_vertex_to(right)
-            .map_or(ends, |(_, vertex)| ends.max(vertex))
-    }
-
-    fn hermite_curvature_vertex_to(self, right: Self) -> Option<(f64, f64)> {
-        let width = right.position.u - self.position.u;
-        let (f0, f1) = (
-            self.position.slope_per_u * width,
-            right.position.slope_per_u * width,
-        );
-        let (g0, g1) = (
-            self.curvature_per_u2 * width * width,
-            right.curvature_per_u2 * width * width,
-        );
-        let c2 = 3.0 * (f1 - f0) - 2.0 * g0 - g1;
-        let c3 = 2.0 * (f0 - f1) + g0 + g1;
-        let vertex = -c2 / (3.0 * c3);
-        (c3 != 0.0 && (0.0..=1.0).contains(&vertex)).then(|| {
-            (
-                nurbs::fmadd(vertex, width, self.position.u),
-                (g0 + vertex * (2.0 * c2 + 3.0 * c3 * vertex)).abs() / (width * width),
-            )
-        })
-    }
-}
-
-/// The samples the witnesses walk a span through, in order.
-struct ProbeWalk {
-    samples: [ErrorSample; LADDER_PROBES_U.len()],
-    len: usize,
-}
-
-impl ProbeWalk {
-    fn samples(&self) -> &[ErrorSample] {
-        &self.samples[..self.len]
-    }
-}
-
-struct RungWitness<'a, S> {
-    axis: usize,
-    sig: &'a S,
-    coefficients: &'a [f64],
-    t0: f64,
-    h: f64,
-    fit_tol: FitTol,
-    between_probes: BetweenProbes,
-}
-
-/// The stretch of a span its fit resolves, and which of its edges anchor
-/// past their slivers.
-#[derive(Clone, Copy)]
-struct ResolvedStretch {
-    from: f64,
-    to: f64,
-    anchored_past_slivers: (bool, bool),
-}
-
-/// Where the witnesses estimate a rung leaves the tolerance between the
-/// probes, for a signal with neither exact polynomials nor an enclosure to
-/// prove it against.
-fn estimated_witness<S: TrackSignal>(
-    witness: RungWitness<'_, S>,
-    t1: f64,
-    truth: &SpanTruth,
-    stretch: ResolvedStretch,
-) -> Result<Option<f64>, PostProcessError> {
-    if let Some(u) = acceleration_error_witness(
-        witness.sig,
-        witness.coefficients,
-        witness.t0,
-        t1,
-        witness.fit_tol.accel_mm_s2,
-    ) {
-        return Ok(Some(u));
-    }
-    let u_of = |t: f64| nurbs::fmadd(2.0 / witness.h, t - witness.t0, -1.0);
-    let walked_from = (
-        stretch.anchored_past_slivers.0.then(|| u_of(stretch.from)),
-        stretch.anchored_past_slivers.1.then(|| u_of(stretch.to)),
-    );
-    match witness.sig.interior_knots(stretch.from, stretch.to) {
-        [] => witness.over_probes(truth, walked_from),
-        knots => witness.over_pieces(truth, knots, walked_from),
-    }
-}
-
-impl<S: TrackSignal> RungWitness<'_, S> {
-    fn position_sample(&self, u: f64, (position, velocity): (f64, f64)) -> PositionErrorSample {
-        PositionErrorSample {
-            u,
-            error: eval_mono(self.coefficients, u) - position,
-            slope_per_u: eval_mono_d(self.coefficients, u) - velocity * (0.5 * self.h),
-        }
-    }
-
-    fn sample(&self, u: f64, (position, velocity, acceleration): (f64, f64, f64)) -> ErrorSample {
-        let half_span = 0.5 * self.h;
-        ErrorSample {
-            position: self.position_sample(u, (position, velocity)),
-            curvature_per_u2: eval_mono_dd(self.coefficients, u)
-                - acceleration * half_span * half_span,
-        }
-    }
-
-    fn exact_sample(
-        &self,
-        u: f64,
-        t: f64,
-        (position, velocity, acceleration): (f64, f64, f64),
-    ) -> Result<ErrorSample, PostProcessError> {
-        Ok(self.sample(
-            u,
-            (
-                exact_value(self.axis, position, t)?,
-                exact_value(self.axis, velocity, t)?,
-                exact_value(self.axis, acceleration, t)?,
-            ),
-        ))
-    }
-
-    fn exact_sample_at(&self, u: f64) -> Result<ErrorSample, PostProcessError> {
-        let t = nurbs::fmadd(0.5 * (u + 1.0), self.h, self.t0);
-        self.exact_sample(u, t, self.sig.eval_pva(t))
-    }
-
-    fn curvature_budget(&self) -> f64 {
-        let half_span = 0.5 * self.h;
-        self.fit_tol.accel_mm_s2 * half_span * half_span
-    }
-
-    fn within(&self, sample: ErrorSample) -> bool {
-        sample.position.error.abs() <= self.fit_tol.pos_mm
-            && sample.curvature_per_u2.abs() <= self.curvature_budget()
-    }
-
-    /// The truth's quintic Hermite interpolant between two samples: the
-    /// rung's travel, slope and curvature there less its errors.
-    fn hermite_truth(&self, left: ErrorSample, right: ErrorSample) -> HermiteTruth {
-        let width = right.position.u - left.position.u;
-        let travel = |u: f64| u * eval_mono(&self.coefficients[1..], u);
-        let slope = |sample: ErrorSample| {
-            (eval_mono_d(self.coefficients, sample.position.u) - sample.position.slope_per_u)
-                * width
-        };
-        let curvature = |sample: ErrorSample| {
-            (eval_mono_dd(self.coefficients, sample.position.u) - sample.curvature_per_u2)
-                * width
-                * width
-        };
-        HermiteTruth {
-            from: left.position.u,
-            width,
-            travel: travel(right.position.u) - travel(left.position.u) - right.position.error
-                + left.position.error,
-            slopes: (slope(left), slope(right)),
-            curvatures: (curvature(left), curvature(right)),
-        }
-    }
-
-    fn curvature_error_against(&self, truth: &HermiteTruth, u: f64) -> f64 {
-        eval_mono_dd(self.coefficients, u) - truth.curvature_per_u2(u)
-    }
-
-    /// The largest curvature error against `truth` over a scan of its
-    /// stretch.
-    fn curvature_error_peak_against(&self, truth: &HermiteTruth) -> f64 {
-        (1..HERMITE_TRUTH_SCAN_POINTS)
-            .map(|k| {
-                let u = nurbs::fmadd(
-                    f64::from(k) / f64::from(HERMITE_TRUTH_SCAN_POINTS),
-                    truth.width,
-                    truth.from,
-                );
-                self.curvature_error_against(truth, u).abs()
-            })
-            .fold(0.0, f64::max)
-    }
-
-    fn probe_samples(&self, truth: &SpanTruth) -> [ErrorSample; LADDER_PROBES_U.len()] {
-        std::array::from_fn(|index| {
-            self.sample(
-                LADDER_PROBES_U[index],
-                (truth.pos[index], truth.vel[index], truth.acc[index]),
-            )
-        })
-    }
-
-    /// The samples the witnesses walk a span through: the probes, but at an
-    /// edge anchored past its sliver an exact sample at its resolved edge in
-    /// place of the edge probe and the probes inside the sliver. That edge
-    /// probe carries the anchored state — the sliver's extrapolation, not the
-    /// signal — so a gap walked from it estimates the miss next to the edge
-    /// from a zero.
-    fn walk(
-        &self,
-        probes: &[ErrorSample; LADDER_PROBES_U.len()],
-        (from, to): (Option<f64>, Option<f64>),
-    ) -> Result<ProbeWalk, PostProcessError> {
-        let last = LADDER_PROBES_U.len() - 1;
-        let first = from.map_or(Ok(probes[0]), |u| self.exact_sample_at(u))?;
-        let final_sample = to.map_or(Ok(probes[last]), |u| self.exact_sample_at(u))?;
-        let mut walk = ProbeWalk {
-            samples: [first; LADDER_PROBES_U.len()],
-            len: 1,
-        };
-        for &probe in probes.iter().filter(|probe| {
-            first.position.u < probe.position.u && probe.position.u < final_sample.position.u
-        }) {
-            walk.samples[walk.len] = probe;
-            walk.len += 1;
-        }
-        walk.samples[walk.len] = final_sample;
-        walk.len += 1;
-        Ok(walk)
-    }
-
-    fn over_probes(
-        &self,
-        truth: &SpanTruth,
-        walked_from: (Option<f64>, Option<f64>),
-    ) -> Result<Option<f64>, PostProcessError> {
-        let probes = self.probe_samples(truth);
-        if let Some(u) = self.over_probe_interpolant(&probes)? {
-            return Ok(Some(u));
-        }
-        let walk = self.walk(&probes, walked_from)?;
-        if let Some(u) = self.outside_at_an_edge(&walk) {
-            return Ok(Some(u));
-        }
-        for gap in walk.samples().windows(2) {
-            if let Some(u) = self.over_piece(gap[0], gap[1])? {
-                return Ok(Some(u));
-            }
-        }
-        Ok(None)
-    }
-
-    fn outside_at_an_edge(&self, walk: &ProbeWalk) -> Option<f64> {
-        let samples = walk.samples();
-        [samples[0], samples[samples.len() - 1]]
-            .into_iter()
-            .find(|&edge| !self.within(edge))
-            .map(|edge| edge.position.u)
-    }
-
-    fn over_probe_interpolant(
-        &self,
-        samples: &[ErrorSample; LADDER_PROBES_U.len()],
-    ) -> Result<Option<f64>, PostProcessError> {
-        let curvatures = samples.map(|sample| sample.curvature_per_u2);
-        let interpolated = |u: f64| interpolated_through_probes(&curvatures, u).abs();
-        let (coarse_u, coarse_peak, spacing) = LADDER_PROBES_U
-            .windows(2)
-            .flat_map(|gap| {
-                let spacing = (gap[1] - gap[0]) / f64::from(INTERPOLANT_POINTS_PER_PROBE_GAP);
-                (1..INTERPOLANT_POINTS_PER_PROBE_GAP)
-                    .map(move |step| (nurbs::fmadd(f64::from(step), spacing, gap[0]), spacing))
-            })
-            .map(|(u, spacing)| (u, interpolated(u), spacing))
-            .fold((f64::NAN, 0.0, 0.0), |widest, sample| {
-                if sample.1 > widest.1 { sample } else { widest }
-            });
-        if coarse_peak <= INTERPOLANT_REFINE_SHARE * self.curvature_budget() {
-            return Ok(None);
-        }
-        let Ok((peak_u, peak)) = golden_section_peak(
-            |u| Ok::<_, std::convert::Infallible>(interpolated(u)),
-            (coarse_u - spacing).max(-1.0),
-            (coarse_u + spacing).min(1.0),
-        );
-        if peak <= INTERPOLANT_SUSPICION_SHARE * self.curvature_budget() {
-            return Ok(None);
-        }
-        let gap = LADDER_PROBES_U
-            .windows(2)
-            .find(|gap| peak_u <= gap[1])
-            .expect("the interpolant peak lies between the probes");
-        self.exact_witness_in(gap[0], gap[1], curvature_miss)
-    }
-
-    /// Where the error between `low` and `high` leaves the tolerance, read
-    /// from exact samples: a scan, then a golden-section search around the
-    /// largest miss by `measure`. Spent only on stretches an estimate already
-    /// puts near the budget, where the estimate itself decides nothing.
-    fn exact_witness_in(
-        &self,
-        low: f64,
-        high: f64,
-        measure: fn(&ErrorSample) -> f64,
-    ) -> Result<Option<f64>, PostProcessError> {
-        let step = (high - low) / f64::from(EXACT_PEAK_SCAN_POINTS);
-        let mut scan_peak = (f64::NAN, 0.0);
-        for k in 0..EXACT_PEAK_SCAN_POINTS {
-            let u = nurbs::fmadd(f64::from(k) + 0.5, step, low);
-            let sample = self.exact_sample_at(u)?;
-            if !self.within(sample) {
-                return Ok(Some(u));
-            }
-            if measure(&sample) >= scan_peak.1 {
-                scan_peak = (u, measure(&sample));
-            }
-        }
-        let (peak_u, _) = golden_section_peak(
-            |u| Ok(measure(&self.exact_sample_at(u)?)),
-            (scan_peak.0 - step).max(low),
-            (scan_peak.0 + step).min(high),
-        )?;
-        Ok((!self.within(self.exact_sample_at(peak_u)?)).then_some(peak_u))
-    }
-
-    fn over_pieces(
-        &self,
-        truth: &SpanTruth,
-        knots: &[f64],
-        walked_from: (Option<f64>, Option<f64>),
-    ) -> Result<Option<f64>, PostProcessError> {
-        let probes = self.probe_samples(truth);
-        if let Some(u) = self.over_probe_interpolant(&probes)? {
-            return Ok(Some(u));
-        }
-        let walk = self.walk(&probes, walked_from)?;
-        if let Some(u) = self.outside_at_an_edge(&walk) {
-            return Ok(Some(u));
-        }
-        let half_span = 0.5 * self.h;
-        let mut knots = knots
-            .iter()
-            .map(|&t| (nurbs::fmadd(2.0 / self.h, t - self.t0, -1.0), t))
-            .peekable();
-        for gap in walk.samples().windows(2) {
-            let (start, end) = (gap[0], gap[1]);
-            let width = end.position.u - start.position.u;
-            let mut curvature_margin =
-                self.curvature_budget() - start.hermite_curvature_peak_to(end);
-            let mut position_margin =
-                self.fit_tol.pos_mm - start.position.hermite_peak_to(end.position);
-            let mut previous = start;
-            while let Some((u, t)) = knots.next_if(|&(u, _)| u < end.position.u) {
-                let miss = self.sig.knot_jump(t).hermite_miss(half_span, width);
-                if miss.curvature_per_u2 <= curvature_margin && miss.position <= position_margin {
-                    curvature_margin -= miss.curvature_per_u2;
-                    position_margin -= miss.position;
-                    continue;
-                }
-                let [before, after] = self.sig.eval_pva_across(t);
-                let before = self.exact_sample(u, t, before)?;
-                let after = self.exact_sample(u, t, after)?;
-                if !self.within(before) || !self.within(after) {
-                    return Ok(Some(u));
-                }
-                if let Some(u) = self.over_piece(previous, before)? {
-                    return Ok(Some(u));
-                }
-                previous = after;
-            }
-            if let Some(u) = self.over_piece(previous, end)? {
-                return Ok(Some(u));
-            }
-        }
-        Ok(None)
-    }
-
-    fn over_piece(
-        &self,
-        left: ErrorSample,
-        right: ErrorSample,
-    ) -> Result<Option<f64>, PostProcessError> {
-        if right.position.u <= left.position.u {
-            return Ok(None);
-        }
-        let acceleration = match self.between_probes {
-            BetweenProbes::ErrorInterpolant => self.acceleration_between(left, right, 0)?,
-            BetweenProbes::TruthInterpolant => {
-                self.acceleration_against_hermite_truth(left, right, 0)?
-            }
-        };
-        match acceleration {
-            Some(u) => Ok(Some(u)),
-            None => self.over_gap(left.position, right.position, 0),
-        }
-    }
-
-    fn acceleration_between(
-        &self,
-        left: ErrorSample,
-        right: ErrorSample,
-        depth: u32,
-    ) -> Result<Option<f64>, PostProcessError> {
-        let estimated_peak = left.hermite_curvature_peak_to(right);
-        if estimated_peak <= INTERPOLANT_SUSPICION_SHARE * self.curvature_budget() {
-            return Ok(None);
-        }
-        if estimated_peak <= self.curvature_budget() {
-            return self.exact_witness_in(left.position.u, right.position.u, curvature_miss);
-        }
-        let u = 0.5 * (left.position.u + right.position.u);
-        let mid = self.exact_sample_at(u)?;
-        if !self.within(mid) || depth == WITNESS_MAX_DEPTH {
-            return Ok(Some(u));
-        }
-        match self.acceleration_between(left, mid, depth + 1)? {
-            Some(u) => Ok(Some(u)),
-            None => self.acceleration_between(mid, right, depth + 1),
-        }
-    }
-
-    /// Where the rung's curvature leaves the budget between two samples,
-    /// held against the truth's quintic Hermite interpolant rather than
-    /// the error's: the rung is known exactly, and a high-degree rung swings
-    /// between samples where no interpolant of the error follows it. The
-    /// stretch's exact midpoint measures how far the truth leaves its
-    /// interpolant; a stretch whose estimate and that miss together stay
-    /// under the suspicion share of the budget holds, one past the budget is
-    /// split there, and one in between is read exactly. So is a stretch
-    /// still past the budget at the deepest split: there the truth's
-    /// interpolant is rebuilt from samples a hair apart, whose positions'
-    /// rounding — an extruder's odometer integrates adaptively — swamps the
-    /// curvature it reconstructs, and only an exact sample may reject.
-    fn acceleration_against_hermite_truth(
-        &self,
-        left: ErrorSample,
-        right: ErrorSample,
-        depth: u32,
-    ) -> Result<Option<f64>, PostProcessError> {
-        let truth = self.hermite_truth(left, right);
-        let estimated_peak = self.curvature_error_peak_against(&truth);
-        if estimated_peak <= INTERPOLANT_REFINE_SHARE * self.curvature_budget() {
-            return Ok(None);
-        }
-        let u = 0.5 * (left.position.u + right.position.u);
-        let mid = self.exact_sample_at(u)?;
-        if !self.within(mid) {
-            return Ok(Some(u));
-        }
-        let truth_miss = (mid.curvature_per_u2 - self.curvature_error_against(&truth, u)).abs();
-        let bound = estimated_peak + truth_miss;
-        if bound <= INTERPOLANT_SUSPICION_SHARE * self.curvature_budget() {
-            return Ok(None);
-        }
-        if bound <= self.curvature_budget() || depth == WITNESS_MAX_DEPTH {
-            return self.exact_witness_in(left.position.u, right.position.u, curvature_miss);
-        }
-        match self.acceleration_against_hermite_truth(left, mid, depth + 1)? {
-            Some(u) => Ok(Some(u)),
-            None => self.acceleration_against_hermite_truth(mid, right, depth + 1),
-        }
-    }
-
-    /// Where the rung's position leaves the budget between two samples. The
-    /// error's cubic Hermite interpolant misses its truth by the error's
-    /// fourth derivative, so an estimate within reach of the budget is read
-    /// exactly rather than trusted.
-    fn over_gap(
-        &self,
-        left: PositionErrorSample,
-        right: PositionErrorSample,
-        depth: u32,
-    ) -> Result<Option<f64>, PostProcessError> {
-        let estimated_peak = left.hermite_peak_to(right);
-        if estimated_peak <= INTERPOLANT_SUSPICION_SHARE * self.fit_tol.pos_mm {
-            return Ok(None);
-        }
-        if estimated_peak <= self.fit_tol.pos_mm {
-            return self.exact_witness_in(left.u, right.u, position_miss);
-        }
-        let u = 0.5 * (left.u + right.u);
-        let t = nurbs::fmadd(0.5 * (u + 1.0), self.h, self.t0);
-        let (position, velocity, _) = self.sig.eval_pva(t);
-        let mid = self.position_sample(
-            u,
-            (
-                exact_value(self.axis, position, t)?,
-                exact_value(self.axis, velocity, t)?,
-            ),
-        );
-        if mid.error.abs() > self.fit_tol.pos_mm || depth == WITNESS_MAX_DEPTH {
-            return Ok(Some(u));
-        }
-        match self.over_gap(left, mid, depth + 1)? {
-            Some(u) => Ok(Some(u)),
-            None => self.over_gap(mid, right, depth + 1),
-        }
-    }
-}
-
-fn curvature_miss(sample: &ErrorSample) -> f64 {
-    sample.curvature_per_u2.abs()
-}
-
-fn position_miss(sample: &ErrorSample) -> f64 {
-    sample.position.error.abs()
 }
 
 const LADDER_FIT_NODES_U: [f64; 3] = [0.0, 0.5, -0.5];
@@ -4873,7 +4103,6 @@ fn edge_velocity_and_acceleration<S: TrackSignal>(
     let at_seam = EdgeAnchor {
         velocity,
         acceleration: seam_acceleration,
-        past_sliver: false,
     };
     if onset_on_edge {
         return Ok(at_seam);
@@ -4894,7 +4123,6 @@ fn edge_velocity_and_acceleration<S: TrackSignal>(
     {
         return Ok(EdgeAnchor {
             acceleration: extrapolated_to_seam,
-            past_sliver: true,
             ..at_seam
         });
     }
@@ -4934,14 +4162,11 @@ fn sliver_hides_break<S: TrackSignal>(
     }
 }
 
-/// The state a span edge anchors its rungs to, and whether any of it is
-/// read past the edge's sliver rather than at the seam: then it is not the
-/// signal's state at the edge.
+/// The state a span edge anchors its rungs to.
 #[derive(Debug, Clone, Copy)]
 struct EdgeAnchor {
     velocity: f64,
     acceleration: f64,
-    past_sliver: bool,
 }
 
 /// The velocity a span anchors to at a seam where coalescing moved a velocity
@@ -4986,10 +4211,11 @@ fn span_probe_t(t0: f64, t1: f64, u: f64) -> f64 {
 ///
 /// A rung that passes the probes is then held between them: proven by the
 /// Bernstein hull of its error against the signal's exact polynomials
-/// where the signal has them, against its Taylor-model enclosure where it
-/// has one, estimated by the witnesses where it has neither. Where it has
-/// exact polynomials every truth sample is read off them too, each edge's
-/// from the side facing into the span.
+/// where the signal has them, else against its Taylor-model enclosure; a
+/// signal with neither fails loudly with
+/// [`PostProcessError::UnprovableSpan`]. Where it has exact polynomials
+/// every truth sample is read off them too, each edge's from the side
+/// facing into the span.
 #[allow(clippy::type_complexity)]
 fn shaped_ladder<S: TrackSignal>(
     sig: &S,
@@ -5047,10 +4273,6 @@ fn shaped_ladder<S: TrackSignal>(
         Some(break_at) => velocity_past_moved_break(&from_end, axis, break_at, t0, t1)?,
         None => end.velocity,
     };
-    let anchored_past_slivers = (
-        start.past_sliver || slivers.start_break.is_some(),
-        end.past_sliver || slivers.end_break.is_some(),
-    );
     let base = quintic_in_u((p0, v0, a0), (p1, v1, a1), h);
     let endpoint_delta = exact_value(axis, sig.position_delta((t0, p0), (t1, p1)), t1)?;
 
@@ -5133,7 +4355,7 @@ fn shaped_ladder<S: TrackSignal>(
                 tol: piece_tol,
                 velocity: policy.velocity_budget,
             };
-            let witness = match exact {
+            let unproven = match exact {
                 Some(exact) => hull::first_unproven(
                     exact.over(resolved.0, resolved.1),
                     piece,
@@ -5143,30 +4365,17 @@ fn shaped_ladder<S: TrackSignal>(
                 None => match sig.enclosure_on(resolved.0, resolved.1, budget.enclosure_accuracy())
                 {
                     Some(enclosure) => hull::first_unproven(&enclosure, piece, resolved, budget),
-                    None => estimated_witness(
-                        RungWitness {
+                    None => {
+                        return Err(PostProcessError::UnprovableSpan {
                             axis,
-                            sig,
-                            coefficients: &coefficients,
-                            t0,
-                            h,
-                            fit_tol: piece_tol,
-                            between_probes: match fit_tol.accel_budget {
-                                AccelBudget::Absolute => sig.between_probes(),
-                                AccelBudget::PositionEquivalent => BetweenProbes::TruthInterpolant,
-                            },
-                        },
-                        t1,
-                        &truth,
-                        ResolvedStretch {
-                            from: start_past_sliver,
-                            to: end_past_sliver,
-                            anchored_past_slivers,
-                        },
-                    )?,
+                            fit_context: policy.fit_context,
+                            t_start: t0,
+                            t_end: t1,
+                        });
+                    }
                 },
             };
-            let Some(u) = witness else {
+            let Some(u) = unproven else {
                 return Ok((coefficients, None));
             };
             let t = t_of(u);
@@ -6214,6 +5423,10 @@ pub(crate) fn apply_derivative_gains_to_track(
     }
     nurbs::bezier::bezier_pieces_to_discontinuous_nurbs(&out_pieces)
 }
+
+#[cfg(test)]
+#[path = "shaper_test_signals.rs"]
+pub(crate) mod test_signals;
 
 #[cfg(test)]
 #[path = "shaper_moment_tests.rs"]

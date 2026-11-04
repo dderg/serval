@@ -43,6 +43,7 @@ pub struct StagedPipeline {
     front: PlanningFront,
     materializer: SourceMaterializer,
     prefitter: LeaderPrefitter,
+    planned_through_s: f64,
     shaper_inbox: Option<ShaperInbox>,
     shaper_thread: Option<JoinHandle<ShaperExit>>,
 }
@@ -65,6 +66,7 @@ impl Pipeline {
             front,
             materializer,
             prefitter,
+            planned_through_s: 0.0,
             shaper_inbox: Some(ShaperInbox {
                 sender,
                 #[cfg(feature = "bench-metrics")]
@@ -160,12 +162,23 @@ impl StagedPipeline {
             .expect("pipeline already finished");
         let materializer = &mut self.materializer;
         let prefitter = &mut self.prefitter;
+        let planned_through_s = &mut self.planned_through_s;
         (&mut self.front, move |mut item| {
+            if let BaseItem::Seg(seg) = &item {
+                *planned_through_s = planned_through_s.max(seg.t_end);
+            }
             materializer.materialize(std::slice::from_mut(&mut item));
             let fits = prefitter.prefit(&item);
             (fits.is_empty() || inbox.send_input(ShaperInput::LeaderPrefits(fits)))
                 && inbox.send(item)
         })
+    }
+
+    /// The stream time the planning side has committed to the shaper
+    /// through.
+    #[must_use]
+    pub fn planned_through_s(&self) -> f64 {
+        self.planned_through_s
     }
 
     /// Segments the planning side has committed to the shaper so far.

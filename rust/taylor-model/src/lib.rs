@@ -318,11 +318,12 @@ impl TaylorModel {
             *coefficient *= factor.mid;
             rounding += coefficient.abs();
         }
-        out.rad = upper(
-            factor.mid.abs() * self.rad
-                + factor.rad * (self.magnitude() + self.rad)
-                + UNIT_ROUNDING * rounding,
-        );
+        let factor_spread = if factor.rad == 0.0 {
+            0.0
+        } else {
+            factor.rad * (self.magnitude() + self.rad)
+        };
+        out.rad = upper(factor.mid.abs() * self.rad + factor_spread + UNIT_ROUNDING * rounding);
         out
     }
 

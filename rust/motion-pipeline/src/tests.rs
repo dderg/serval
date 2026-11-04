@@ -2939,6 +2939,17 @@ impl crate::shaper::TrackSignal for SineTrackSignal {
             -self.amplitude * self.omega * self.omega * sin,
         )
     }
+
+    fn enclosure_on(
+        &self,
+        lo: f64,
+        hi: f64,
+        accuracy: [f64; 3],
+    ) -> Option<crate::shaper::Enclosure<'_>> {
+        crate::shaper::test_signals::modelled((lo, hi), accuracy, &[], |window| {
+            crate::shaper::test_signals::sine(window, 0.0, self.amplitude, self.omega)
+        })
+    }
 }
 
 /// The fit budget bounds runaway bisection, so seed intervals the ladder
