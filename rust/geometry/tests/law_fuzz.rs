@@ -6,7 +6,7 @@
 //! finite differences that never touch the crate's interpolation.
 
 use geometry::path::{Arc, Clothoid, Line, PathSegment, Segment};
-use geometry::velocity::law::{LawSegment, ScalarLaw};
+use geometry::velocity::law::{LawSegment, RAIL_ACCELERATION_DEFECT, ScalarLaw};
 use geometry::velocity::plan_velocity_stops;
 use geometry::{Move, SourceRange, VelocityLimits};
 use proptest::prelude::*;
@@ -250,6 +250,7 @@ impl PlanCase {
                 max_extrude_only_velocity_mm_s: EXTRUDE_ONLY_V,
                 max_extrude_only_accel_mm_s2: EXTRUDE_ONLY_A,
                 entry_v: self.entry,
+                step_capacity: None,
             },
         )
     }
@@ -377,11 +378,10 @@ proptest! {
     /// branch the `brake` flag selected; the speed is therefore monotone and
     /// its extremes are the span's ends.
     ///
-    /// The branch, budget and monotonicity are exact consequences of the law
-    /// and are checked as such. The disk residual is not: `a` between knots is
-    /// the derivative of the quintic in time, not a re-evaluation of the law,
-    /// and on the fastest-turning rails (`|σ| ~ 1e4`) it drifts by up to
-    /// ~2e-5 of the budget.
+    /// The branch and monotonicity are exact consequences of the law and are
+    /// checked as such. The disk residual and the budget are not: `a` between
+    /// knots is the derivative of the quintic in time, which the integrator
+    /// proves within [`RAIL_ACCELERATION_DEFECT`] of the law.
     #[test]
     fn disk_rail_states_stay_on_the_acceleration_disk(rail in arb_rail()) {
         const SAMPLES: usize = 512;
@@ -393,14 +393,14 @@ proptest! {
             let (s, v, a) = segment.state_at(t);
             let normal = rail.kappa_at(s).abs() * v * v;
             at_most("speed below zero", -v, 0.0)?;
-            at_most("tangential accel over budget", a.abs(), budget * (1.0 + 1e-6))?;
+            at_most("tangential accel over budget", a.abs(), budget + RAIL_ACCELERATION_DEFECT)?;
             let signed = if rail.brake { a } else { -a };
             at_most("tangential accel on the wrong branch", signed, 1e-9 * budget)?;
             fail(
                 "state off the disk",
                 libm::hypot(a, normal),
                 budget,
-                1e-4 * budget,
+                RAIL_ACCELERATION_DEFECT,
             )?;
             at_most("speed above the span's ends", v - v_max, 1e-9 * (1.0 + v_max))?;
             at_most("speed below the span's ends", v_min - v, 1e-9 * (1.0 + v_max))?;
@@ -480,7 +480,7 @@ proptest! {
                 for t in sample_times(phase, 16) {
                     let (s, v, a) = phase.state_at(t);
                     at_most("phase speed below zero", -v, 1e-9 * speed_scale)?;
-                    at_most("phase accel over the move limit", a.abs(), mv.accel * (1.0 + 1e-6))?;
+                    at_most("phase accel over the move limit", a.abs(), mv.accel + RAIL_ACCELERATION_DEFECT)?;
                     at_most("phase arc before its start", arc_lo - s, 1e-9 * mv.length)?;
                     at_most("phase arc past its end", s - arc_hi, 1e-9 * mv.length)?;
                 }

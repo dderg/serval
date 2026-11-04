@@ -783,3 +783,17 @@ def test_same_key_matching_stays_exact_over_millions_of_levels_and_long_runs():
     assert delta == pytest.approx([-1e-8, 2e-8], abs=1e-9)
     counts = analyze.same_key_count(query_key, query_t, ref_key, ref_t)
     assert counts.tolist() == [2, 1]
+
+
+def test_a_short_epoch_runs_at_the_latest_fitted_rate_not_the_median():
+    fitted = [-47.0, -46.6, -45.5, -4.3, None, None]
+    assert analyze.nearest_fitted_ppm(fitted, 4) == -4.3
+    assert analyze.nearest_fitted_ppm(fitted, 5) == -4.3
+
+
+def test_a_short_first_epoch_runs_at_the_next_fitted_rate():
+    assert analyze.nearest_fitted_ppm([None, 12.0, -3.0], 0) == 12.0
+
+
+def test_a_run_with_no_fitted_epoch_runs_at_the_nominal_rate():
+    assert analyze.nearest_fitted_ppm([None, None], 1) == 0.0
