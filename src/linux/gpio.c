@@ -123,6 +123,13 @@ gpio_out_toggle_noirq(struct gpio_out g)
     gpio_out_write(g, !g.line->state);
 }
 
+struct gpio_out
+gpio_out_bench_sink(void)
+{
+    static struct gpio_line sink = { .fd = -1 };
+    return (struct gpio_out){ .line = &sink };
+}
+
 void
 gpio_out_toggle(struct gpio_out g)
 {

@@ -717,6 +717,85 @@ fn exact_reads_take_the_sub_interval_they_face() {
     }
 }
 
+/// A table whose interior seams sit at `seams`, each piece a cubic.
+fn table_with_seams(rng: &mut Rng, seams: &[f64]) -> AxisSignalTable {
+    let mut table = random_table(rng, SIGNAL_START_S, next_toward(SIGNAL_START_S, 1.0), None);
+    table.starts.clear();
+    table.ends.clear();
+    table.origins.clear();
+    table.coeffs.clear();
+    table.boundaries.clear();
+    table.last_t = SIGNAL_END_S;
+    let edges = std::iter::once(SIGNAL_START_S)
+        .chain(seams.iter().copied())
+        .chain(std::iter::once(SIGNAL_END_S))
+        .collect::<Vec<_>>();
+    for pair in edges.windows(2) {
+        let piece = vec![
+            rng.between(-5.0, 5.0),
+            rng.between(-300.0, 300.0),
+            rng.between(-3e4, 3e4),
+            rng.between(-3e6, 3e6),
+        ];
+        let mut centered = vec![0.0; piece.len()];
+        taylor_shift(
+            &piece,
+            piece_midpoint(pair[0], pair[1]) - pair[0],
+            &mut centered,
+        );
+        table.push_piece(pair[0], pair[1], centered);
+    }
+    table
+}
+
+/// Seams a kernel half-width apart, each nudged by an ulp or two, image
+/// under the triangle's three cuts onto floats that crowd within ulps of
+/// each other, the sub-intervals between them holding no float. A dyadic
+/// half-width and seam keep every image exact. A span ending on any of
+/// those floats reads every float near its end from both sides.
+#[test]
+fn a_span_ending_among_crowded_breaks_reads_every_float_from_both_sides() {
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    let half = 1.0 / 256.0;
+    let kernel = triangle_kernel(2.0 * half);
+    let middle = 3.03125;
+    let ulp = next_toward(middle, f64::INFINITY) - middle;
+    for nudges in [
+        (-1.0, 1.0),
+        (0.0, 1.0),
+        (-1.0, 0.0),
+        (1.0, 2.0),
+        (-2.0, -1.0),
+    ] {
+        let seams = [
+            middle - half + nudges.0 * ulp,
+            middle,
+            middle + half + nudges.1 * ulp,
+        ];
+        let table = table_with_seams(&mut rng, &seams);
+        let breaks = table.starts.clone();
+        let source = ShapedSignalSource::new(&kernel, table, breaks, SIGNAL_START_S + 0.01);
+        let signal = source.signal();
+        let mut edge = next_toward(middle, f64::NEG_INFINITY);
+        for _ in 0..8 {
+            edge = next_toward(edge, f64::NEG_INFINITY);
+        }
+        for _ in 0..16 {
+            let lo = edge - 0.002;
+            let span = ExactSpan::new(signal.exact_polynomial_on(lo, edge).expect("clamped"));
+            let mut t = edge;
+            for _ in 0..8 {
+                assert!(span.pva(t, lo).0.is_finite());
+                if t < edge {
+                    assert!(span.pva(t, edge).0.is_finite());
+                }
+                t = next_toward(t, f64::NEG_INFINITY);
+            }
+            edge = next_toward(edge, f64::INFINITY);
+        }
+    }
+}
+
 /// A random polynomial of `len` coefficients whose terms are of order one
 /// on `|w| ≤ radius`, all positive when `positive`.
 fn scaled_polynomial(rng: &mut Rng, len: usize, radius: f64, positive: bool) -> Vec<f64> {

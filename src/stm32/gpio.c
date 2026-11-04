@@ -107,6 +107,13 @@ gpio_out_toggle_noirq(struct gpio_out g)
     regs->ODR ^= g.bit;
 }
 
+struct gpio_out
+gpio_out_bench_sink(void)
+{
+    static GPIO_TypeDef sink;
+    return (struct gpio_out){ .regs = &sink, .bit = 1 };
+}
+
 void
 gpio_out_toggle(struct gpio_out g)
 {
