@@ -390,6 +390,15 @@ job_throughput_gate() {
     python3 "$ROOT/scripts/throughput_gate.py" ${accept_base[@]+"${accept_base[@]}"} "$@"
 }
 
+# The live host and the snapshot path must plan the whole corpus bit for bit
+# alike: klippy's G-code handlers drive the real MotionEngine bridge with a
+# detached planner (no MCU), and every pipeline input and shaped segment is
+# compared with the snapshot path's (snapshots/live_bridge_parity.py).
+job_live_parity() {
+    cd "$ROOT" && make -f Makefile.rust motion-engine-fast \
+        && uv run python -m pytest -q -n auto -p no:cacheprovider snapshots/test_live_bridge_parity.py
+}
+
 job_docs() { cd "$ROOT/docs/_kalico" && uv run mkdocs build --strict; }
 
 job_snapshot() {
@@ -502,6 +511,7 @@ run_all() {
         run_check "bench-fw"        job_bench_fw
         run_check "sim"             job_sim
         run_check "snapshot"        job_snapshot
+        run_check "live-parity"     job_live_parity
         run_check "replay-budget"   job_replay_budget
         run_check "throughput-gate" job_throughput_gate
         run_check "rust-fuzz"       job_rust_fuzz
@@ -574,6 +584,7 @@ case "$name" in
     replay-budget)    job=(job_replay_budget) ;;
     throughput-gate)  job=(job_throughput_gate ${@+"$@"}) ;;
     snapshot)         job=(job_snapshot) ;;
+    live-parity)      job=(job_live_parity) ;;
     *) echo "unknown job: $name" >&2; usage >&2; exit 2 ;;
 esac
 

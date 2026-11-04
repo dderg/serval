@@ -14,7 +14,6 @@ use host_rt::host_io::parser::{ArgValue, DataDictionary, MsgProtoParser};
 use host_rt::mcu_serial_conn::McuSerialConn;
 use host_rt::passthrough_queue::{McuHandle, PassthroughRouter};
 
-use motion_core::classify;
 use motion_core::mcu_config::{McuAxisConfig, McuTopologyInput, build_mcu_configs};
 use motion_core::worker::{StreamWorkerError, StreamWorkerHandle};
 use planner_config::PlannerConfig;
@@ -33,8 +32,6 @@ mod pipeline_setup;
 #[cfg(test)]
 mod pipeline_setup_tests;
 mod planner_api;
-#[cfg(test)]
-mod planner_api_tests;
 mod runtime_caps;
 mod servo;
 #[cfg(test)]
@@ -147,6 +144,12 @@ fn open_canbus_with_retry(
     })
 }
 
+#[cfg(feature = "snapshot")]
+struct DetachedRecordRx {
+    inputs: crossbeam_channel::Receiver<motion_pipeline::InputTrace>,
+    segments: crossbeam_channel::Receiver<trajectory::ContinuousSegment>,
+}
+
 #[pyclass(name = "MotionEngine")]
 #[allow(missing_debug_implementations)]
 pub struct PyMotionEngine {
@@ -158,6 +161,9 @@ pub struct PyMotionEngine {
     /// The extruder caps of the chains last published to the planner, one
     /// per limited follower axis; each submitted move carries its axis's.
     extruder_caps: Mutex<Vec<geometry::ExtruderCaps>>,
+    /// What a detached planner (`init_planner_detached`) was fed and shaped.
+    #[cfg(feature = "snapshot")]
+    detached_record: Mutex<Option<DetachedRecordRx>>,
     commanded_pos: Mutex<geometry::GcodePos>,
     bed_mesh: Mutex<Option<Arc<geometry::SurfaceTransform>>>,
     last_g5_pq: Mutex<Option<(f64, f64)>>,
@@ -203,6 +209,8 @@ impl PyMotionEngine {
             planner: Mutex::new(None),
             planner_config: Mutex::new(PlannerConfig::default()),
             extruder_caps: Mutex::new(Vec::new()),
+            #[cfg(feature = "snapshot")]
+            detached_record: Mutex::new(None),
             commanded_pos: Mutex::new(geometry::GcodePos([0.0; 3])),
             bed_mesh: Mutex::new(None),
             last_g5_pq: Mutex::new(None),

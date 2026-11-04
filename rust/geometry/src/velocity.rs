@@ -693,11 +693,7 @@ fn reconstruct_runs(
             boundaries.push(if is_anchor[j + 1] && v[j + 1] <= VELOCITY_EPS_MM_S {
                 0.0
             } else {
-                let (_, boundary_v, _) = phases
-                    .last()
-                    .expect("a member profile always carries at least one segment")
-                    .end_state();
-                boundary_v.min(v[j + 1])
+                v[j + 1]
             });
             out.push(MoveVelocity {
                 entry_v,
