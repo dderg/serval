@@ -41,6 +41,7 @@ for _path in (REPO_ROOT / "snapshots", REPO_ROOT / "klippy", REPO_ROOT):
         sys.path.insert(0, str(_path))
 
 import capture_events  # noqa: E402
+import corner_flow_bench  # noqa: E402
 import harness  # noqa: E402
 import mcu_execution  # noqa: E402
 
@@ -1842,6 +1843,11 @@ def main(argv: list[str] | None = None) -> int:
         help="idle seconds that split motion epochs",
     )
     parser.add_argument(
+        "--corner-flow",
+        action="store_true",
+        help="also measure nozzle flow through every extruding corner",
+    )
+    parser.add_argument(
         "--step-benchmark",
         type=SuppliedBenchmark.parse,
         metavar="PULSED,BOTH_EDGE,CLOCK_HZ",
@@ -1858,6 +1864,14 @@ def main(argv: list[str] | None = None) -> int:
         raise AnalysisError(mismatch)
     inputs = load_run(args.run_dir, args.step_benchmark)
     verdict, detail = analyze(inputs, args.gap)
+    if args.corner_flow:
+        verdict["corner_flow"] = corner_flow_bench.report(
+            inputs,
+            detail,
+            plan_waypoints(inputs)[2],
+            ROLE_AXIS_WEIGHTS,
+            harness._import_engine(),
+        )
     verdict["plots"] = save_plots(inputs, detail)
     text = json.dumps(verdict, indent=2)
     (args.run_dir / "analysis.json").write_text(text + "\n")

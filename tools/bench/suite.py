@@ -73,6 +73,8 @@ class Row:
     config: Path = PRINTER_CFG
     throttle: list[str] = field(default_factory=list)
     quick: bool = False
+    run_args: list[str] = field(default_factory=list)
+    analyze_args: list[str] = field(default_factory=list)
 
 
 MATRIX = [
@@ -88,6 +90,12 @@ MATRIX = [
         SIM_GCODE / "voron_dense_top_layers.gcode",
         FAST_CFG,
         THROTTLE_ARGS,
+    ),
+    Row(
+        "corner_flow",
+        BENCH / "gcode" / "corner_flow.gcode",
+        run_args=["--events"],
+        analyze_args=["--corner-flow"],
     ),
 ]
 
@@ -132,6 +140,7 @@ def run_row(row: Row, suite_dir: Path, lock_timeout_s: float) -> dict:
         "--lock-timeout",
         str(lock_timeout_s),
         *row.throttle,
+        *row.run_args,
         timeout_s=RUN_TIMEOUT_S,
     )
     run_dirs = sorted(runs_dir.glob("*")) if runs_dir.exists() else []
@@ -151,9 +160,14 @@ def run_row(row: Row, suite_dir: Path, lock_timeout_s: float) -> dict:
         result["duration_s"] = info.get("duration_s")
         result["deployed"] = info.get("deployed")
         result["host_throttle"] = info.get("host_throttle")
-        if (run_dir / "capture.bin").exists():
+        if (run_dir / "capture.bin").exists() or (
+            run_dir / "events.bin"
+        ).exists():
             analysis = python(
-                "analyze.py", str(run_dir), timeout_s=ANALYZE_TIMEOUT_S
+                "analyze.py",
+                str(run_dir),
+                *row.analyze_args,
+                timeout_s=ANALYZE_TIMEOUT_S,
             )
             if analysis.returncode != 0:
                 joined = f"analyze.py: {last_lines(analysis.stderr)}"
@@ -173,6 +187,10 @@ def run_row(row: Row, suite_dir: Path, lock_timeout_s: float) -> dict:
                 ).get("abs_max")
                 for role, motor in verdict["motors"].items()
             }
+            if "corner_flow" in verdict:
+                result["corner_flow_max_abs"] = verdict["corner_flow"][
+                    "max_abs"
+                ]
     result["wall_s"] = time.monotonic() - started
     result["passed"] = bool(
         result["error"] is None
