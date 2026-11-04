@@ -13,7 +13,7 @@ mod models;
 
 pub(super) use jet::Jet;
 use jet::{horner, horner_with_slope};
-pub(super) use models::ValleyWeight;
+pub(super) use models::{ValleyWeight, narrow_floats};
 
 /// The steepest the width envelope climbs per unit of path away from a
 /// node (see [`WidthField`]).

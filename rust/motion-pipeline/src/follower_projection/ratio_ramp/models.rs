@@ -264,7 +264,7 @@ fn end_apart((lo, hi): (f64, f64)) -> [[(f64, f64); 2]; 2] {
     ]
 }
 
-fn narrow_floats((lo, hi): (f64, f64)) -> Option<Vec<f64>> {
+pub(in crate::follower_projection) fn narrow_floats((lo, hi): (f64, f64)) -> Option<Vec<f64>> {
     let inset = REACH_INSET_ULPS * f64::EPSILON * lo.abs().max(hi.abs()).max(1.0);
     if hi - lo > 2.0 * inset {
         return None;
