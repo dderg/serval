@@ -147,3 +147,14 @@ fn the_bench_epochs_print_with_a_kernel_free_advance_plans_each_epoch_from_rest_
     std::fs::write(&path, config).expect("kernel-free config writes");
     assert_rest_decoupled("epochs_kernel_free", &gcode, &path);
 }
+
+#[test]
+fn the_corner_flow_print_with_ramped_ratio_steps_plans_each_epoch_from_rest_as_in_the_stream() {
+    let gcode = std::fs::read_to_string(corpus::repo().join("tools/bench/gcode/corner_flow.gcode"))
+        .expect("corner flow gcode");
+    assert_rest_decoupled(
+        "corner_flow",
+        &format!("SET_KINEMATIC_POSITION X=0 Y=0 Z=0\nG92 E0\n{gcode}"),
+        &corpus::repo().join("tools/bench/configs/ramp.cfg"),
+    );
+}
