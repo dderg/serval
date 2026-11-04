@@ -1168,7 +1168,9 @@ impl RatioSmoothing {
 
     /// Where over `[lo, hi]` the smoothed ratio's curvature, or the
     /// advance's read weight, bends: where each seam enters and leaves a
-    /// window, the width nodes, and the valley ends.
+    /// window, the width nodes, and the valley ends. A window edge lies on
+    /// its side of the seam clamped to the nodes, so one that side puts
+    /// outside `[lo, hi]` is not searched for.
     pub(super) fn bends(&self, lo: f64, hi: f64) -> Vec<f64> {
         let mut bends: Vec<f64> = self.valley_ends(lo, hi).collect();
         if self.is_inert() {
@@ -1176,9 +1178,18 @@ impl RatioSmoothing {
         }
         let (widest, _) = self.width.bounds(lo, hi);
         bends.extend(self.width.covering(lo, hi).iter().map(|node| node.s));
+        let (first, last) = (
+            self.width.nodes[0].s,
+            self.width.nodes[self.width.nodes.len() - 1].s,
+        );
         for seam in self.seams_near(lo - widest, hi + widest) {
-            bends.push(self.window_edge(seam.s, -1.0, widest));
-            bends.push(self.window_edge(seam.s, 1.0, widest));
+            let anchor = seam.s.clamp(first, last);
+            if anchor >= lo {
+                bends.push(self.window_edge(seam.s, -1.0, widest));
+            }
+            if anchor <= hi {
+                bends.push(self.window_edge(seam.s, 1.0, widest));
+            }
         }
         bends
     }
