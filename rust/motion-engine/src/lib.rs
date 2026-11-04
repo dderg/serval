@@ -32,6 +32,8 @@ fn _motion_engine(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "snapshot")]
     m.add_function(wrap_pyfunction!(viz::pipeline_snapshot_axis_samples, m)?)?;
     #[cfg(feature = "snapshot")]
+    m.add_function(wrap_pyfunction!(viz::pipeline_snapshot_epoch_samples, m)?)?;
+    #[cfg(feature = "snapshot")]
     m.add_function(wrap_pyfunction!(viz::snapshot_moves, m)?)?;
     #[cfg(feature = "snapshot")]
     m.add_class::<viz::PlannerLimits>()?;

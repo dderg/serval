@@ -469,10 +469,9 @@ def _start_position(text: str) -> tuple[float, float, float]:
 
 
 def split_at_rests(waypoints: list[dict]) -> list[list[dict]]:
-    """The print as motion epochs: the runs of moves between two stops at
-    rest, each planned from rest on the waypoint the previous run ended on.
-    Live, the gap at a stop is the dwell plus host latency; the capture
-    alignment measures it per epoch, so an epoch's plan leaves it out."""
+    """The print's moves as motion epochs: the runs of moves between two
+    dwells at rest, each starting on the waypoint the previous run ended
+    on."""
     blocks = [[waypoints[0]]]
     for waypoint in waypoints[1:]:
         if waypoint["dwell_before_s"] is not None:
@@ -482,9 +481,15 @@ def split_at_rests(waypoints: list[dict]) -> list[list[dict]]:
     return [block for block in blocks if len(block) > 1]
 
 
-def plan_waypoints(
-    job: Job,
-) -> tuple[tuple[float, float, float], tuple, list[list[dict]]]:
+@dataclass
+class PlannedPrint:
+    start_xyz: tuple[float, float, float]
+    final_xyze: tuple
+    waypoints: list[dict]
+    blocks: list[list[dict]]
+
+
+def plan_waypoints(job: Job) -> PlannedPrint:
     start = _start_position(job.gcode_text)
     engine = harness._import_engine()
     try:
@@ -499,7 +504,40 @@ def plan_waypoints(
     blocks = split_at_rests(waypoints)
     if not blocks:
         raise AnalysisError("print.gcode contains no motion")
-    return start, tuple(waypoints[-1]["position"]), blocks
+    return PlannedPrint(
+        start, tuple(waypoints[-1]["position"]), waypoints, blocks
+    )
+
+
+def stream_epochs(
+    job: Job,
+    planned: PlannedPrint,
+    config_text: str,
+    axes: list[int],
+    sample_period_s: float,
+) -> list[tuple[float, float, np.ndarray]]:
+    """The print planned as one stream, as the live host plans it, and
+    sampled across each epoch it moves between two dwells: `(t_start,
+    t_end, axes x samples x (p, v, a))`. Planning an epoch on its own from
+    rest is not the same plan: the planner's fits may cut a stream deep in
+    history differently, within their tolerance."""
+    engine = harness._import_engine()
+    epochs = engine.pipeline_snapshot_epoch_samples(
+        planned.waypoints,
+        config_text,
+        axes,
+        sample_period_s,
+        job.step_benchmarks,
+    )
+    if len(epochs) != len(planned.blocks):
+        raise AnalysisError(
+            f"the stream plan moves in {len(epochs)} epochs between rests, "
+            f"the print's dwells split it into {len(planned.blocks)}"
+        )
+    return [
+        (t_start, t_end, np.asarray(rows, dtype=np.float64))
+        for t_start, t_end, rows in epochs
+    ]
 
 
 def _motor_pva_steps(motor: Motor, axes_pva: np.ndarray) -> np.ndarray:
@@ -507,24 +545,15 @@ def _motor_pva_steps(motor: Motor, axes_pva: np.ndarray) -> np.ndarray:
     return np.einsum("a,asc->sc", weights, axes_pva) / motor.step_mm
 
 
-def sample_block(
-    job: Job, waypoints: list[tuple], stream_offset_s: float
+def reference_block(
+    job: Job, epoch: tuple[float, float, np.ndarray], stream_offset_s: float
 ) -> ReferenceBlock:
-    engine = harness._import_engine()
-    config_text = job.config.config_text
-    snapshot_json, _ = engine.pipeline_snapshot_axis_samples(
-        waypoints, config_text, [0], 2, job.step_benchmarks
-    )
-    duration = json.loads(snapshot_json)["traversal_time_s"]
-    samples = max(2, math.ceil(duration / REFERENCE_SAMPLE_PERIOD_S) + 1)
-    _, rows = engine.pipeline_snapshot_axis_samples(
-        waypoints, config_text, [0, 1, 2, 3], samples, job.step_benchmarks
-    )
-    axes_pva = np.asarray(rows, dtype=np.float64)
+    t_start, t_end, axes_pva = epoch
+    duration = t_end - t_start
     return ReferenceBlock(
         stream_offset_s=stream_offset_s,
         duration_s=duration,
-        sample_times=np.linspace(0.0, duration, samples),
+        sample_times=np.linspace(0.0, duration, axes_pva.shape[1]),
         motor_pva_steps={
             m.role: _motor_pva_steps(m, axes_pva) for m in job.motors
         },
@@ -674,11 +703,17 @@ def _motor_steps(
 
 
 def build_reference(job: Job) -> Reference:
-    start_xyz, final_xyze, waypoint_blocks = plan_waypoints(job)
+    planned = plan_waypoints(job)
     blocks = []
     offset = 0.0
-    for waypoints in waypoint_blocks:
-        block = sample_block(job, waypoints, offset)
+    for epoch in stream_epochs(
+        job,
+        planned,
+        job.config.config_text,
+        [0, 1, 2, 3],
+        REFERENCE_SAMPLE_PERIOD_S,
+    ):
+        block = reference_block(job, epoch, offset)
         blocks.append(block)
         offset += block.duration_s + REFERENCE_BLOCK_SEPARATION_S
     events: dict[str, StepEvents] = {}
@@ -694,8 +729,8 @@ def build_reference(job: Job) -> Reference:
             level_offsets[motor.role],
         ) = _motor_steps(motor, blocks)
     return Reference(
-        start_xyz=start_xyz,
-        final_xyze=final_xyze,
+        start_xyz=planned.start_xyz,
+        final_xyze=planned.final_xyze,
         blocks=blocks,
         events=events,
         start_counts=start_counts,
@@ -1889,12 +1924,15 @@ def main(argv: list[str] | None = None) -> int:
     inputs = load_run(args.run_dir, args.step_benchmark)
     verdict, detail = analyze(inputs, args.gap)
     if args.corner_flow:
+        planned = plan_waypoints(inputs)
         verdict["corner_flow"] = corner_flow_bench.report(
             inputs,
             detail,
-            plan_waypoints(inputs)[2],
+            planned.blocks,
             ROLE_AXIS_WEIGHTS,
-            harness._import_engine(),
+            lambda config_text, axes, period: stream_epochs(
+                inputs, planned, config_text, axes, period
+            ),
         )
     verdict["plots"] = save_plots(inputs, detail)
     text = json.dumps(verdict, indent=2)

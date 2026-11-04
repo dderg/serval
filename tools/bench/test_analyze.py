@@ -745,7 +745,7 @@ def _live_epochs(gcode: str, cfg: Path) -> list[list[tuple]]:
 
 def _reference_epochs(job: analyze.Job) -> list[list[tuple]]:
     engine = analyze.harness._import_engine()
-    _, _, blocks = analyze.plan_waypoints(job)
+    blocks = analyze.plan_waypoints(job).blocks
     epochs = []
     for block in blocks:
         moves = engine.snapshot_moves(block, job.config.config_text)
@@ -773,8 +773,49 @@ def test_reference_epochs_plan_exactly_the_moves_live_submits(tmp_path):
         LIVE_SEMANTICS_GCODE, tmp_path / "printer.cfg"
     )
     assert [len(epoch) for epoch in reference] == [3, 3, 2]
-    _, final_xyze, _ = analyze.plan_waypoints(job)
+    final_xyze = analyze.plan_waypoints(job).final_xyze
     assert final_xyze == pytest.approx((40.0, 30.0, 0.4, 4.5))
+
+
+EPOCH_SPLIT_GCODE = """\
+SET_KINEMATIC_POSITION X=0 Y=0 Z=0
+G92 E0
+G1 X10 Y5 E1 F3000
+G4 P100
+G1 X20 E1.5
+M400
+G1 X30 Y10 E2
+M400
+M400
+G1 X40
+G4 P0
+G1 X50 Y0 E3
+"""
+
+
+def test_the_stream_plan_splits_at_every_dwell_and_wait_the_print_rests_at(
+    tmp_path,
+):
+    _require_snapshot_engine()
+    shutil.copy(BENCH_DIR / "printer.cfg", tmp_path / "printer.cfg")
+    (tmp_path / "print.gcode").write_text(EPOCH_SPLIT_GCODE)
+    job = analyze.load_job(tmp_path)
+    planned = analyze.plan_waypoints(job)
+    epochs = analyze.stream_epochs(
+        job, planned, job.config.config_text, [0, 1, 2, 3], 1e-3
+    )
+    engine = analyze.harness._import_engine()
+    assert len(epochs) == len(planned.blocks) == 5
+    for (t_start, t_end, axes_pva), block in zip(epochs, planned.blocks):
+        snapshot, _ = engine.pipeline_snapshot_axis_samples(
+            block, job.config.config_text, [0], 2
+        )
+        assert t_end - t_start == pytest.approx(
+            json.loads(snapshot)["traversal_time_s"], abs=1e-9
+        )
+        assert axes_pva[:3, 0, 0] == pytest.approx(block[0]["position"][:3])
+        assert axes_pva[:3, -1, 0] == pytest.approx(block[-1]["position"][:3])
+        assert np.abs(axes_pva[:, [0, -1], 1]).max() < 1e-6
 
 
 def test_a_command_live_cannot_plan_offline_fails_the_analysis(tmp_path):
