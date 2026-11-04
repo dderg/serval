@@ -737,6 +737,9 @@ fn a_rest_valley_covers_the_ratio_step_its_leg_lays_short_of_the_rest() {
     assert_eq!(
         weight, 0.0,
         "the advance reads the ratio step at {ratio_step} mm with weight {weight}"
+    );
+}
+
 /// The leaders brake into a rest a rounding past the last time node: the
 /// node stacks with the rest where the leaders stop, so the window closes
 /// there however they move on after it.

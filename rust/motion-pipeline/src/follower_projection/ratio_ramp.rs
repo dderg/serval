@@ -865,14 +865,6 @@ impl RatioSmoothing {
         self.seams.is_empty() && self.base_slope.unwrap_or(0.0) == 0.0
     }
 
-    /// Where on the path the last segment still waiting on the smoothing
-    /// ends.
-    pub(super) fn backlog_end(&self) -> Option<f64> {
-        self.backlog
-            .back()
-            .map(|segment| segment.s_start + segment.s_length)
-    }
-
     /// No window may reach back past `s`: the leaders rest there, or the
     /// stream drained there and what precedes it is already committed. A
     /// rest valley still open closes there, with nothing after it.

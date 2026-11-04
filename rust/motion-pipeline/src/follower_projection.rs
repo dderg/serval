@@ -524,6 +524,29 @@ pub(crate) struct ProjectionWindow<'a> {
     pub pool: &'a WorkerPool,
 }
 
+/// Queues a source fit for every segment the ratio smoothing now holds
+/// final. Taken after each leg the smoothing lays, what is taken — and so
+/// how far back a valley laid later may reach — follows the legs alone,
+/// never how many of them one emit window brings.
+fn take_final_sources(
+    state: &mut FollowerState,
+    (base, frontier): (&[ContinuousSegment], &[ContinuousSegment]),
+    axis: usize,
+    source_jobs: &mut Vec<(usize, ratio_ramp::PendingSegment)>,
+) {
+    for pending in state.smoothing.take_final(&state.spans) {
+        let index = base[..frontier.len()]
+            .partition_point(|raw| raw.t_end < pending.t_end - GRID_DEDUP_EPS_S);
+        assert!(
+            index < frontier.len() && (base[index].t_end - pending.t_end).abs() <= GRID_DEDUP_EPS_S,
+            "follower axis {axis}: the segment ending at {} waited on its ratio smoothing past \
+             the shaped frontier",
+            pending.t_end
+        );
+        source_jobs.push((index, pending));
+    }
+}
+
 /// Projects every follower over the frontier, then commits the segments of
 /// `out` every follower holds final: a ratio-ramped follower holds back a
 /// segment until no width node or seam still to come reaches into it, and
@@ -576,7 +599,6 @@ pub(crate) fn project_followers(
                 pool,
             );
             timing.ingests += reads.len();
-            let mut next_s = state.smoothing.backlog_end().unwrap_or(state.s_shaped);
             for (offset, read) in reads.into_iter().enumerate() {
                 let i = first_new + offset;
                 let table_start = state.s_ingested_end;
@@ -588,7 +610,7 @@ pub(crate) fn project_followers(
                     &base[i + 1..],
                     (read.shaped_ds, read.raw_moves),
                 );
-                let s_start = state.aligned_span_start(next_s);
+                let s_start = state.aligned_span_start(state.s_queued_end);
                 let leg = RampLeg {
                     shaped: &frontier[i],
                     leaders,
@@ -604,22 +626,12 @@ pub(crate) fn project_followers(
                     state.s_ingested_end,
                     read.shaped_leaders.into_reads(read.odometer),
                 );
-                next_s = s_start + shaped_ds;
+                state.s_queued_end = s_start + shaped_ds;
+                take_final_sources(state, (base, frontier), axis, &mut source_jobs);
             }
             if lookahead.clamps_past_signal() {
                 state.smoothing.close_at(state.s_ingested_end);
-            }
-            for pending in state.smoothing.take_final(&state.spans) {
-                let index = base[..frontier.len()]
-                    .partition_point(|raw| raw.t_end < pending.t_end - GRID_DEDUP_EPS_S);
-                assert!(
-                    index < frontier.len()
-                        && (base[index].t_end - pending.t_end).abs() <= GRID_DEDUP_EPS_S,
-                    "follower axis {axis}: the segment ending at {} waited on its ratio \
-                     smoothing past the shaped frontier",
-                    pending.t_end
-                );
-                source_jobs.push((index, pending));
+                take_final_sources(state, (base, frontier), axis, &mut source_jobs);
             }
             timing.ingest_us += ingest_started.elapsed_us();
         }
@@ -1583,6 +1595,9 @@ pub(crate) struct FollowerState {
     ingested_through_t: Option<f64>,
     s_ingested_end: f64,
     s_shaped: f64,
+    /// Where on the shaped path the last leg queued for projection ends:
+    /// the next one starts there.
+    s_queued_end: f64,
     e_end: Option<f64>,
     projected_output_end: Option<f64>,
     /// Time and follower input state where `projected_output_end` was
@@ -1607,6 +1622,7 @@ impl FollowerState {
         self.ingested_through_t = None;
         self.s_ingested_end = 0.0;
         self.s_shaped = 0.0;
+        self.s_queued_end = 0.0;
         self.e_end = None;
         self.projected_output_end = None;
         self.projected_input_end = None;

@@ -33,6 +33,7 @@ fn config() -> StreamConfig {
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 64,
         limits: limits(),
+        step_capacity: None,
     }
 }
 
@@ -72,7 +73,12 @@ fn plain_chains() -> AxisChainSet {
 /// extrusion after it.
 fn print_with_a_stop(length: f64) -> Vec<Move> {
     vec![
-        line(1, [0.0, 0.0, 0.0], [length, 0.0, 0.0], EXTRUSION_RATIO * length),
+        line(
+            1,
+            [0.0, 0.0, 0.0],
+            [length, 0.0, 0.0],
+            EXTRUSION_RATIO * length,
+        ),
         line(2, [length, 0.0, 0.0], [length, 0.0, 0.0], -0.5),
         line(3, [length, 0.0, 0.0], [length + 10.0, 0.0, 0.0], 0.0),
         line(4, [length + 10.0, 0.0, 0.0], [length + 20.0, 0.0, 0.0], 0.5),
@@ -101,7 +107,12 @@ fn width_node_short_of_the_stop(items: &[BaseItem]) -> Option<f64> {
         _ => None,
     })?;
     let node_t = (extrusion.t_end / WIDTH_NODE_SPACING_S).floor() * WIDTH_NODE_SPACING_S;
-    let x = |t: f64| extrusion.eval_axis(0, t).expect("the extrusion evaluates").position;
+    let x = |t: f64| {
+        extrusion
+            .eval_axis(0, t)
+            .expect("the extrusion evaluates")
+            .position
+    };
     (node_t > extrusion.t_start).then(|| x(extrusion.t_end) - x(node_t))
 }
 
@@ -188,9 +199,8 @@ fn extruder_at_segment_ends(segments: &[ContinuousSegment]) -> Vec<(f64, f64)> {
 #[test]
 fn the_extruder_lays_the_same_material_whatever_the_emit_batching() {
     let length = length_stacking_a_node_on_the_stop();
-    let per_segment = extruder_at_segment_ends(&emitted_per_segment(lowered(
-        &print_with_a_stop(length),
-    )));
+    let per_segment =
+        extruder_at_segment_ends(&emitted_per_segment(lowered(&print_with_a_stop(length))));
     let batched = extruder_at_segment_ends(&emitted_in_batches(
         lowered(&print_with_a_stop(length)),
         EMIT_BATCH_SEGMENTS,
