@@ -1859,6 +1859,21 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Followers: the extruder rides the toolhead">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#rests" class="md-nav__link">
+    <span class="md-ellipsis">
+      Rests
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -2186,6 +2201,52 @@ is why <code>apply_motor_side_stages</code> runs only after <code>project_follow
 stage order: leading gains (pressure advance) act on the projected track,
 the follower's kernel (e.g. <code>smooth_triangle</code>) convolves that, trailing
 gains act on the convolution.</p>
+<h3 id="rests">Rests<a class="headerlink" href="#rests" title="Permanent link">&para;</a></h3>
+<p>The projection reads the leaders' path speed <code>|v|</code> and, for an advance, its
+rate <code>d|v|/dt = v̂·a</code> and its derivative <code>v̂·j + |a⊥|²/|v|</code> off the leaders'
+<em>fitted</em> polynomials. Near a stop those fits move at their own fit noise. X
+and Y stop at slightly different times, and the direction <code>v̂</code> turns through
+nanometre loops that no toolhead makes. <code>|a⊥|²/|v|</code> then spikes without
+bound over a microsecond, and the advance would turn the spike into
+extruder acceleration.</p>
+<p>A <strong>rest</strong> (<code>follower_projection/rest.rs</code>) is a maximal stretch inside the
+support where the leaders' speed is at most the speed their fits cannot
+resolve. That speed is the leader fit's velocity resolution: the
+acceleration tolerance times the shortest span such a fit holds at the
+leaders' position, speed and time scales (<code>velocity_resolution_at_scales</code>).
+No constant of its own enters.</p>
+<p>Inside a rest:</p>
+<ul>
+<li><code>|v|</code> and so the odometer are unchanged. Path distance, and with it
+  material, is exactly what it is outside rests.</li>
+<li>The rate and its derivative are read along a fixed direction: the unit
+  velocity the leaders enter the rest with, up to the rest's <em>split</em> (where
+  they are slowest), and the one they leave with from the split on.
+  <code>d|v|/dt = d̂·a</code> and <code>d²|v|/dt² = d̂·j</code>. The fit-noise curvature term is
+  dropped.</li>
+</ul>
+<p>The consequences:</p>
+<ul>
+<li>A stop-and-go along a line enters and leaves along the same direction. It
+  reads smooth through the split.</li>
+<li>A reversal, or a turn made at rest, enters and leaves along different
+  directions. Its rate steps at the split by what the two directions read
+  of the acceleration. That step is the jump the motion makes, kept and not
+  smoothed:<ul>
+<li>the split is a semantic break of the fit;</li>
+<li>it is a knot the signal reports through <code>TrackSignal::knot_jump</code> and
+  <code>eval_pva_across</code>;</li>
+<li>it is a break of the follower's enclosure windows, each side enclosed
+  with its own direction.</li>
+</ul>
+</li>
+<li>The rest's ends are breaks of the enclosure windows, not of the fit.
+  There the rate is continuous, and the dropped curvature term at the
+  floor speed is the only change.</li>
+</ul>
+<p>Rests never reach into the end slivers, which keep their own semantics. A
+rest that runs into one reads the single direction the leaders have at its
+other end.</p>
 <h2 id="streaming-mechanics-windows-frontier-drain">Streaming mechanics: windows, frontier, drain<a class="headerlink" href="#streaming-mechanics-windows-frontier-drain" title="Permanent link">&para;</a></h2>
 <p>The shaper is a streaming stage over channels; it never sees the whole
 trajectory. Correctness reduces to window bookkeeping:</p>
