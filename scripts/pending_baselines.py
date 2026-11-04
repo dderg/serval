@@ -28,8 +28,11 @@ import os
 import shutil
 import subprocess
 import sys
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import slots
 
 ROOT = Path(
     os.environ.get("SERVAL_REPO_ROOT") or Path(__file__).resolve().parent.parent
@@ -52,6 +55,7 @@ def target_dir_for(tree: Path, purpose: str = "build") -> Path:
 SAMPLE_DT_S = 1e-3
 AXES = ("x", "y", "z", "e")
 DETAIL_CASES = 6
+HEAVY = ("make", "cargo")
 PR_FIELDS = (
     "number,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,"
     "statusCheckRollup"
@@ -69,13 +73,19 @@ def run(args: list[str], cwd: Path = ROOT, env: dict | None = None) -> str:
             str(Path(__file__).with_name("gh_util.py")),
             *args[1:],
         ]
-    result = subprocess.run(
-        args,
-        cwd=cwd,
-        env={**os.environ, **(env or {})},
-        capture_output=True,
-        text=True,
+    heavy = (
+        slots.slot(label=" ".join(args)[:80])
+        if args[0] in HEAVY
+        else nullcontext()
     )
+    with heavy:
+        result = subprocess.run(
+            args,
+            cwd=cwd,
+            env={**os.environ, **(env or {})},
+            capture_output=True,
+            text=True,
+        )
     if result.returncode != 0:
         raise PendingBaselinesError(
             f"{' '.join(args)} failed ({result.returncode}):\n"
