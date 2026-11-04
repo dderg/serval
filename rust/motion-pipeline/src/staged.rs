@@ -19,12 +19,15 @@ use crate::shaper::{Shaper, SourceMaterializer};
 use crate::{BaseItem, Pipeline, PlanningFront, StreamInput, TrajectoryItem};
 
 /// Items each stage's inbox holds. Bounded so a slow shaper backpressures
-/// planning instead of buffering without limit, and deep enough to carry
-/// the shaper through the planning side's bursts: the planner lowers a
-/// whole velocity window at once, and at 16 items the shaper and the
-/// planner each idled waiting on the other. On the Pi 5 at two cores, 128
-/// raised trident_kernel's worst 5 s window by 9 % and
-/// p3_voron_direct_drive_kernel's by 10 %; 1024 added nothing over 128.
+/// planning instead of buffering without limit: the pacer reads how far
+/// planning has run ahead, so items held in the inboxes are items it
+/// counts as ready. Deep enough to carry the shaper through the planning
+/// side's bursts, though: the planner lowers a whole velocity window, some
+/// sixty segments, at once. On the Pi 5, trident_kernel at A_e 20000 rose
+/// from 1.49× to 1.70× (two cores) and 2.04× to 2.26× (three) against a
+/// single 16-item inbox; 128 per stage reached 1.87× and 2.34× but let
+/// planning run seconds of stream ahead of the shaper, so a starved
+/// producer went unbraked for longer than the pacer allows.
 const STAGE_INBOX_CAP: usize = 32;
 
 /// The most lowered items planning runs ahead of a shaper that holds one:
