@@ -18,7 +18,10 @@ fn build_id() -> &'static str {
 fn _motion_engine(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_id, m)?)?;
     m.add_function(wrap_pyfunction!(step_benchmarks::step_capacity_budget, m)?)?;
-    m.add_function(wrap_pyfunction!(step_benchmarks::step_capacity_fraction, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        step_benchmarks::step_capacity_fraction,
+        m
+    )?)?;
     m.add_class::<PyMotionEngine>()?;
     m.add_class::<PyClockSyncEstimator>()?;
     m.add_class::<PyDecayRegression>()?;
