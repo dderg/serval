@@ -1,42 +1,42 @@
 {
   "slice_lines": 1000,
-  "commit": "ab95d6849b3c2654903f9a7aecef545c0d6a6d95",
-  "reason": "Turning guard: kernel-free advance chains pay 141-162 us per move for the shaped-path turning bound (p3 ramp +12 % Ir, Pi 2-core worst 3.97x -> 3.13x measured); kernel chains pass straight through",
+  "commit": "f159a181622b0bfa285c72bff23ce3f4f55a52e3",
+  "reason": "Fit groups, group-level kernel fits and leader prefits on their own stage (#658): window-invariant fits, fewer emits, leader fits off the shaper thread",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 22311764291,
-      "stream_secs": 8.541,
+      "ir": 21602810939,
+      "stream_secs": 8.55,
       "pi_2core": {
-        "worst_x_reference": 3.5210944929972614,
+        "worst_x_reference": 3.03,
         "worst_x": [
-          4.23,
-          4.26
+          3.03,
+          3.06
         ],
-        "commit": "6aa1cb2757343385a67c2bae4cef824a0b21e368"
+        "commit": "f159a181622b0bfa285c72bff23ce3f4f55a52e3"
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 27355142381,
-      "stream_secs": 6.202,
+      "ir": 24739459848,
+      "stream_secs": 6.221,
       "pi_2core": {
-        "worst_x_reference": 2.067548951924704,
+        "worst_x_reference": 2.61,
         "worst_x": [
-          2.28,
-          2.28
+          2.62,
+          2.61
         ],
-        "commit": "6aa1cb2757343385a67c2bae4cef824a0b21e368"
+        "commit": "f159a181622b0bfa285c72bff23ce3f4f55a52e3"
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 28259155143,
-      "stream_secs": 7.543,
+      "ir": 27364814931,
+      "stream_secs": 7.548,
       "pi_2core": {
-        "worst_x_reference": 2.114194022869556,
+        "worst_x_reference": 2.87,
         "worst_x": [
-          2.41,
-          2.39
+          2.87,
+          2.88
         ],
-        "commit": "6aa1cb2757343385a67c2bae4cef824a0b21e368"
+        "commit": "f159a181622b0bfa285c72bff23ce3f4f55a52e3"
       }
     }
   },
