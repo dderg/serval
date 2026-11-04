@@ -963,3 +963,39 @@ fn a_crawl_valley_leaves_zero_flat_and_its_derivatives_are_exact() {
         "a valley without a floor leaves zero with slope {slope}"
     );
 }
+
+/// A crawl is worth a valley only where an advance reading the path speed
+/// through it would leave the follower's acceleration limit. The Bowden
+/// crawl of `voron_dense_top_layers` at t≈148.07 s on the P1 kernel config
+/// asks `r·(a + k·s⃛)` ≈ 370 mm/s² of its 2000; releasing its lead there
+/// asked 2610. A turnaround releases it whatever the advance asks.
+#[test]
+fn a_crawl_lays_a_valley_only_where_the_advance_would_leave_the_limit() {
+    let rule = RatioRampRule {
+        advance_slope_s: 0.5,
+        max_velocity_mm_s: 50.0,
+        max_accel_mm_s2: 2000.0,
+    };
+    let crawl = Crossing {
+        speed: 0.647,
+        rate: 119.0,
+        jerk: 119.0 * 119.0 / 0.647,
+    };
+    assert!(!crawl.needs_valley(&rule, 0.0337));
+    assert!(crawl.needs_valley(&rule, 0.2));
+    let cruise = Crossing {
+        speed: 2.5,
+        ..crawl
+    };
+    assert!(!cruise.needs_valley(&rule, 0.2));
+    let turnaround = Crossing {
+        speed: 0.0,
+        rate: 119.0,
+        jerk: 0.0,
+    };
+    let no_advance = RatioRampRule {
+        advance_slope_s: 0.0,
+        ..rule
+    };
+    assert!(turnaround.needs_valley(&no_advance, 0.0337));
+}

@@ -1095,7 +1095,11 @@ impl RatioSmoothing {
         }
         self.width.extend(leaders, leg, table_end);
         let closes_a_rest = self.lay_rest_valley(spans, leg, leaders, crossing, table_end);
-        if reach > SPAN_MIN_LEN_MM && !self.resting && !closes_a_rest && crossing.crawls() {
+        if reach > SPAN_MIN_LEN_MM
+            && !self.resting
+            && !closes_a_rest
+            && crossing.needs_valley(rule, peak_ratio_within(spans, seam, reach))
+        {
             self.lay_valley(seam, reach, crossing.crawl_floor());
         }
         let slowest = (!leg.rests && !self.resting)
@@ -1105,7 +1109,9 @@ impl RatioSmoothing {
             let reach = turn_crossing
                 .reach(VALLEY_RAMP_TIME_S)
                 .min(turn - self.floor);
-            if reach > SPAN_MIN_LEN_MM {
+            if reach > SPAN_MIN_LEN_MM
+                && turn_crossing.needs_valley(rule, peak_ratio_within(spans, turn, reach))
+            {
                 self.lay_valley(turn, reach, turn_crossing.crawl_floor());
             }
         }
@@ -1646,7 +1652,9 @@ impl RatioSmoothing {
 ///   [`ADVANCE_VALLEY_SPEED_MM_S`], at a seam or inside a leg
 ///   ([`slowest_crawl`]). The path speed's second derivative carries the
 ///   tangent's turning there, `a⊥²/v`, which an advance would turn into
-///   follower acceleration however the planner bounds the path's own.
+///   follower acceleration however the planner bounds the path's own. Only
+///   where that leaves the follower's limit ([`Crossing::needs_valley`]):
+///   releasing the lead asks for some too.
 /// - A rest: an extrude-only move or a dwell, where the shaped leaders come
 ///   to rest between the kernel spill of the move before and of the move
 ///   after, and the fit's back-and-forth near the rest point has its own
@@ -1940,6 +1948,15 @@ fn slowest_crawl(
     crossing.crawls().then(|| (speed.path_at(turn), crossing))
 }
 
+/// The largest extrusion ratio `spans` lay within `reach` of `s`.
+fn peak_ratio_within(spans: &[RatioSpan], s: f64, reach: f64) -> f64 {
+    spans
+        .iter()
+        .filter(|span| span.s1 >= s - reach && span.s0 <= s + reach)
+        .map(|span| span.r0.abs().max(span.r1.abs()))
+        .fold(0.0, f64::max)
+}
+
 /// The time a turnaround's rate takes to build the speed the leaders cross
 /// its seam with: the shaped leaders' velocities there are zero to their
 /// fit's rounding, far under the rate times this.
@@ -2040,9 +2057,21 @@ impl Crossing {
     }
 
     /// The leaders turn around, or crawl under
-    /// [`ADVANCE_VALLEY_SPEED_MM_S`]: an advance releases its lead around.
+    /// [`ADVANCE_VALLEY_SPEED_MM_S`].
     fn crawls(self) -> bool {
         self.turns_around() || self.speed < ADVANCE_VALLEY_SPEED_MM_S
+    }
+
+    /// An advance of `rule`'s slope releases its lead around where the
+    /// leaders turn around, or crawl where reading the path speed through
+    /// at `ratio` would ask the follower for more than its acceleration
+    /// limit: `r·(a + k·s⃛)`, the path speed's second rate carrying the
+    /// tangent's turning `a⊥²/v`. Elsewhere releasing the lead over the
+    /// crawl's short reach would ask more of the follower than the crawl.
+    fn needs_valley(self, rule: &RatioRampRule, ratio: f64) -> bool {
+        self.turns_around()
+            || (self.crawls()
+                && ratio * (self.rate + rule.advance_slope_s * self.jerk) > rule.max_accel_mm_s2)
     }
 
     /// The floor a valley here keeps flat (see [`AdvanceValley`]): `v²/a`,
