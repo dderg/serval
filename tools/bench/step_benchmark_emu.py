@@ -4,8 +4,12 @@ uv run --with unicorn --with pyelftools python tools/bench/step_benchmark_emu.py
     <out_dir>...
 
 Each <out_dir> holds a built klipper.elf and its autoconf.h. The emulator's
-timer counts executed instructions, so the benchmark reports instructions per
-step: one cycle per instruction, no wait states. Fails when a result is
+timer counts executed instructions and it delivers the timer interrupt
+(SysTick, or TIM2 on G0) the firmware programs, by calling its handler as
+the core would once the interrupt is due and PRIMASK is clear. The benchmark
+times one isolated motor's steps through that interrupt, so it reports
+instructions per step from the handler's entry to its exit: one cycle per
+instruction, no wait states, no hardware stacking. Fails when a result is
 outside [MIN_INSTRUCTIONS_PER_STEP, MAX_INSTRUCTIONS_PER_STEP].
 """
 
@@ -21,6 +25,8 @@ from elftools.elf.elffile import ELFFile
 from unicorn import UC_ARCH_ARM, UC_HOOK_CODE, UC_MODE_MCLASS, UC_MODE_THUMB, Uc
 from unicorn.arm_const import (
     UC_ARM_REG_LR,
+    UC_ARM_REG_PC,
+    UC_ARM_REG_PRIMASK,
     UC_ARM_REG_R0,
     UC_ARM_REG_R1,
     UC_ARM_REG_SP,
@@ -38,8 +44,14 @@ PAGE = 0x1000
 STACK_BASE = 0x70000000
 STACK_SIZE = 0x100000
 STOP = 0x70200000
+IRQ_RETURN = 0x70201000
 DWT_CYCCNT = 0xE0001004
+SYSTICK_LOAD = 0xE000E014
+SYSTICK_VAL = 0xE000E018
+SCB_ICSR = 0xE000ED04
+ICSR_PENDSTSET = 1 << 26
 G0_TIM2_CNT = 0x40000024
+G0_TIM2_CCR1 = 0x40000034
 
 
 class EmulationError(RuntimeError):
@@ -92,38 +104,73 @@ def map_image(uc: Uc, elf: ELFFile) -> None:
             uc.mem_write(seg["p_vaddr"], data)
 
 
+class TimerInterrupt:
+    """The one interrupt the benchmark needs: when it is due, in executed
+    instructions, from what the firmware wrote to the timer registers. It
+    starts due, as timer_init leaves it kicked."""
+
+    def __init__(self, g0: bool):
+        self.g0 = g0
+        self.load = 0
+        self.due: int | None = 0
+
+    def write(self, address: int, value: int, now: int) -> None:
+        if self.g0:
+            if address == G0_TIM2_CCR1:
+                self.due = value
+        elif address == SYSTICK_LOAD:
+            self.load = value
+        elif address == SYSTICK_VAL:
+            self.due = now + self.load if self.load else None
+        elif address == SCB_ICSR and value & ICSR_PENDSTSET:
+            self.due = now
+
+
 def measure(out_dir: Path) -> tuple[int, int]:
     conf = autoconf(out_dir)
+    g0 = conf.get("MACH_STM32G0") == "1"
     with open(out_dir / "klipper.elf", "rb") as handle:
         elf = ELFFile(handle)
         entry = symbol(elf, "stepper_bench_measure")
         result = symbol(elf, "bench_result")
         move_count = symbol(elf, "move_count")
         shutdown = symbol(elf, "sched_shutdown") & ~1
+        handler = symbol(
+            elf, "TIMx_IRQHandler" if g0 else "SysTick_Handler"
+        ) & ~1
         uc = Uc(UC_ARCH_ARM, UC_MODE_THUMB | UC_MODE_MCLASS)
         uc.ctl_set_cpu_model(cpu_model(conf))
         map_image(uc, elf)
     uc.mem_write(move_count, struct.pack("<I", CONFIGURED_MOVE_COUNT))
     shut_down = False
     executed = 0
-    timer_register = (
-        G0_TIM2_CNT if conf.get("MACH_STM32G0") == "1" else DWT_CYCCNT
-    )
+    in_handler = False
+    interrupt_pending = False
+    interrupt = TimerInterrupt(g0)
+    timer_register = G0_TIM2_CNT if g0 else DWT_CYCCNT
 
     def count(emu, address, _size, _user):
-        nonlocal executed, shut_down
+        nonlocal executed, shut_down, interrupt_pending
         executed += 1
         if address == shutdown:
             shut_down = True
             emu.emu_stop()
         if executed > INSTRUCTION_LIMIT:
             emu.emu_stop()
+        if (
+            not in_handler
+            and interrupt.due is not None
+            and executed - interrupt.due >= 0
+            and not emu.reg_read(UC_ARM_REG_PRIMASK)
+        ):
+            interrupt_pending = True
+            emu.emu_stop()
 
     def read(_emu, offset, _size, base):
         return executed if base + offset == timer_register else 0
 
-    def ignore(*_args):
-        pass
+    def write(_emu, offset, _size, value, base):
+        interrupt.write(base + offset, value, executed)
 
     for base, size in ((0x40000000, 0x20000000), (0xE0000000, 0x100000)):
         uc.mmio_map(
@@ -131,18 +178,32 @@ def measure(out_dir: Path) -> tuple[int, int]:
             size,
             lambda e, o, s, u, b=base: read(e, o, s, b),
             None,
-            ignore,
+            lambda e, o, s, v, u, b=base: write(e, o, s, v, b),
             None,
         )
     uc.mem_map(STACK_BASE, STACK_SIZE + PAGE)
-    uc.mem_map(STOP, PAGE)
+    uc.mem_map(STOP, 2 * PAGE)
     uc.mem_write(STOP, b"\x00\xbf" * 4)
+    uc.mem_write(IRQ_RETURN, b"\x00\xbf" * 4)
     uc.hook_add(UC_HOOK_CODE, count)
     uc.reg_write(UC_ARM_REG_SP, STACK_BASE + STACK_SIZE)
     uc.reg_write(UC_ARM_REG_LR, STOP | 1)
     uc.reg_write(UC_ARM_REG_R0, result)
     uc.reg_write(UC_ARM_REG_R1, result + 4)
-    uc.emu_start(entry | 1, STOP)
+    resume = entry | 1
+    while True:
+        uc.emu_start(resume, STOP)
+        if shut_down or executed > INSTRUCTION_LIMIT or not interrupt_pending:
+            break
+        interrupt_pending = False
+        interrupt.due = None
+        interrupted = uc.context_save()
+        resume = uc.reg_read(UC_ARM_REG_PC) | 1
+        in_handler = True
+        uc.reg_write(UC_ARM_REG_LR, IRQ_RETURN | 1)
+        uc.emu_start(handler | 1, IRQ_RETURN)
+        in_handler = False
+        uc.context_restore(interrupted)
     if shut_down:
         raise EmulationError(
             f"{out_dir}: benchmark shut the MCU down (configured MCU, "
