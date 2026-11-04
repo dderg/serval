@@ -3,7 +3,7 @@ import math
 import struct
 from collections import defaultdict, namedtuple
 
-from . import stepper
+from . import motion_step_capacity, stepper
 from .extras import servo_axis
 from .mcu import SAMPLE_COMMANDS
 from .motion_endstop import register_stepcompress_steppers
@@ -27,6 +27,9 @@ McuTopology = namedtuple(
         "stepcompress_max_error_secs",
         "phase_sample_rate",
         "phase_ring_depth",
+        "mcu_name",
+        "step_capacity_ticks_per_s",
+        "ticks_per_step",
     ],
 )
 
@@ -88,22 +91,21 @@ def build_follower_steppers(motion, config):
 
 
 STEP_EDGE_FLOOR_SECONDS = 0.000001
-STEP_ISR_BUDGET_FRACTION = 0.5
+STEP_REARM_PULSES = 2
 
 
 def motor_velocity_ceiling(mcu_stepper):
-    """The fastest motor-frame velocity (mm/s) the MCU can physically step:
-    the ISR budget fraction of real time divided by the cost of one step —
-    the 1us edge floor, plus the pulse-width busy-wait when the driver only
-    steps on rising edges. Mirrors the MCU's per-sample step budget in
-    src/stepper.c command_kalico_configure_axis."""
-    pulse_duration, both_edge = mcu_stepper.get_pulse_duration()
-    if pulse_duration is None:
-        pulse_duration = DEFAULT_STEP_PULSE_DURATION
-    per_step_s = STEP_EDGE_FLOOR_SECONDS + (
-        0.0 if both_edge else pulse_duration
+    """The fastest motor-frame velocity (mm/s) the driver can be stepped at
+    at all: src/stepper.h stepper_full_finish holds the next step until one
+    pulse width after the unstep, so a pulsed motor steps at most once per
+    two pulse widths, and nothing steps faster than the 1us edge floor. How
+    many steps the mcu can dispatch in total is its measured step capacity
+    (motion_step_capacity), which the planner caps every move to."""
+    min_step_period = max(
+        STEP_EDGE_FLOOR_SECONDS,
+        STEP_REARM_PULSES * step_pulse_width(mcu_stepper),
     )
-    return STEP_ISR_BUDGET_FRACTION / per_step_s * mcu_stepper.get_step_dist()
+    return mcu_stepper.get_step_dist() / min_step_period
 
 
 def step_pulse_width(mcu_stepper):
@@ -313,6 +315,7 @@ def derive_mcu_topology(motion, axis_to_handle):
         motor_oids = []
         motor_step_pulse_seconds = []
         motor_high_precision_step_compress = []
+        capacity_motors = []
         for axis, kind in zip(axes, lane_kinds):
             bindings = (
                 [binding for binding in bind_list if binding[0] == axis]
@@ -326,6 +329,9 @@ def derive_mcu_topology(motion, axis_to_handle):
                 motor_oids.append(slot_oids[axis])
                 motor_step_pulse_seconds.append(slot_step_pulse_seconds[axis])
                 motor_high_precision_step_compress.append(False)
+                capacity_motors.append(
+                    motion_step_capacity.CapacityMotor(axis, None, False)
+                )
                 continue
             motor_counts.append(len(bindings))
             steppers = dict(slot_steppers[axis])
@@ -347,6 +353,13 @@ def derive_mcu_topology(motion, axis_to_handle):
                         )
                     )
                 )
+                capacity_motors.append(
+                    motion_step_capacity.CapacityMotor(
+                        axis,
+                        steppers[stepper_name],
+                        kind == LANE_KIND_PULSE,
+                    )
+                )
         if (
             mcu_obj is not None
             and pulse_axes
@@ -355,6 +368,14 @@ def derive_mcu_topology(motion, axis_to_handle):
             _reject_pulse_lane_conflicts(
                 motion, name, mcu_obj, motor_high_precision_step_compress
             )
+        step_capacity_ticks_per_s, ticks_per_step = (
+            motion_step_capacity.mcu_step_capacity(
+                motion,
+                name,
+                None if handle in endpoint_handles else mcu_obj,
+                capacity_motors,
+            )
+        )
         topo.append(
             McuTopology(
                 handle,
@@ -372,6 +393,9 @@ def derive_mcu_topology(motion, axis_to_handle):
                 max_error_secs,
                 phase_sample_rate,
                 phase_ring_depth,
+                name,
+                step_capacity_ticks_per_s,
+                ticks_per_step,
             )
         )
     return topo

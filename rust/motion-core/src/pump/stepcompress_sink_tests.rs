@@ -1807,6 +1807,7 @@ fn stepcompress_cfg(move_queue_slots: u32) -> McuAxisConfig {
             phase_ring_depth: 0,
             stepcompress_max_error_secs: 25e-6,
             move_queue_slots,
+            step_capacity: None,
         },
     }
 }

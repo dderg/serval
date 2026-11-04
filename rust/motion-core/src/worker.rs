@@ -301,7 +301,7 @@ impl StreamWorkerHandle {
         pump: Sender<crate::pump::PumpMsg>,
     ) -> Self {
         let (tx, rx) = bounded(INPUT_CHANNEL_CAP);
-        let pipeline = Pipeline::new(config, axis_chains, home_pos.clone(), 0.0)
+        let pipeline = Pipeline::new(config.clone(), axis_chains, home_pos.clone(), 0.0)
             .into_staged(move |item| output.send(item).is_ok());
         let ingress = ingress::Ingress {
             config,
