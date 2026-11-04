@@ -810,6 +810,7 @@ G1 X0
 
 
 def _capacity_run(run_dir: Path) -> Path:
+    _require_snapshot_engine()
     shutil.copy(BENCH_DIR / "configs" / "capacity.cfg", run_dir / "printer.cfg")
     (run_dir / "print.gcode").write_text(FAST_SQUARE_GCODE)
     return run_dir
