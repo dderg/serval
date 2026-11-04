@@ -466,13 +466,11 @@ impl TurningGuard {
         );
         for index in first..last {
             self.entries.scales[index] *= step;
-            self.entries.backoffs[index] += 1;
-            let line = self.entries.moves[index].source.start_line;
-            assert!(
-                self.entries.backoffs[index] <= BACKOFFS_MAX,
-                "turning guard: line {line} at t={:.6}s still asks {demand:.0} mm/s² of the \
-                 extruder after {BACKOFFS_MAX} back-offs (limit {max_accel:.0} mm/s²)",
-                self.entries.timing[index].t0
+            count_backoff(
+                &mut self.entries.backoffs[index],
+                self.entries.moves[index].source.start_line,
+                self.entries.timing[index].t0,
+                (demand, max_accel),
             );
         }
         match self.resettle(first, last) {
@@ -797,6 +795,18 @@ impl TurningGuard {
         }
         true
     }
+}
+
+/// Counts one more back-off of the move at `line`, starting at `t0`, that
+/// still asks `demand` against `max_accel`; past [`BACKOFFS_MAX`] the guard
+/// fails loudly rather than slow the move without end.
+fn count_backoff(backoffs: &mut u32, line: u32, t0: f64, (demand, max_accel): (f64, f64)) {
+    *backoffs += 1;
+    assert!(
+        *backoffs <= BACKOFFS_MAX,
+        "turning guard: line {line} at t={t0:.6}s still asks {demand:.0} mm/s² of the extruder \
+         after {BACKOFFS_MAX} back-offs (limit {max_accel:.0} mm/s²)"
+    );
 }
 
 /// The kernel-free followers with an advance, each with the kernels of the

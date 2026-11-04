@@ -1,7 +1,8 @@
 use nurbs::algebra::PiecewisePolynomialKernel;
+use trajectory::{build_smooth_mzv_kernel, build_smooth_zv_kernel};
 
 use super::screen::MoveSummary;
-use super::shadow::{GridSample, PlannedGrid};
+use super::shadow::{FollowerKernels, GridSample, PlannedGrid};
 
 /// Gauss–Legendre nodes and weights on `[-1, 1]`, exact for polynomials
 /// up to degree 15.
@@ -34,6 +35,66 @@ impl Rng {
     pub fn between(&mut self, lo: f64, hi: f64) -> f64 {
         lo + (hi - lo) * self.unit()
     }
+}
+
+/// The leaders' kernels the tests shape with: a smooth MZV on x and a
+/// smooth ZV on y, z left unfollowed.
+pub(super) struct Leaders {
+    x: PiecewisePolynomialKernel,
+    y: PiecewisePolynomialKernel,
+}
+
+impl Leaders {
+    pub fn new() -> Self {
+        Self {
+            x: build_smooth_mzv_kernel(50.0),
+            y: build_smooth_zv_kernel(44.0),
+        }
+    }
+
+    pub fn axes(&self) -> [Option<&PiecewisePolynomialKernel>; 3] {
+        [Some(&self.x), Some(&self.y), None]
+    }
+
+    pub fn grid_kernels(&self, h: f64) -> FollowerKernels {
+        FollowerKernels::new([Some(Some(&self.x)), Some(Some(&self.y)), None], h)
+    }
+
+    pub fn jerk_gain(&self, axes: [bool; 3]) -> f64 {
+        let moving: Vec<&PiecewisePolynomialKernel> = [(axes[0], &self.x), (axes[1], &self.y)]
+            .into_iter()
+            .filter_map(|(moves, kernel)| moves.then_some(kernel))
+            .collect();
+        if moving.is_empty() {
+            return 0.0;
+        }
+        PiecewisePolynomialKernel::directional_variation(&moving)
+    }
+
+    /// The instants a shaped `t` reads the planned motion over: `t − u`
+    /// for `u` in either kernel's support.
+    pub fn read(&self, (t0, t1): (f64, f64)) -> (f64, f64) {
+        let (x, y) = (self.x.support(), self.y.support());
+        (t0 - x.1.max(y.1), t1 - x.0.min(y.0))
+    }
+}
+
+/// A planned motion in the plane: a cruise, then pieces of constant
+/// acceleration that turn, brake towards a crawl and reverse.
+pub(super) fn random_motion(rng: &mut Rng) -> Motion {
+    let heading = rng.between(0.0, std::f64::consts::TAU);
+    let speed = rng.between(0.0, 500.0);
+    let v0 = [speed * heading.cos(), speed * heading.sin(), 0.0];
+    let count = 2 + (rng.unit() * 6.0) as usize;
+    let pieces = (0..count)
+        .map(|_| {
+            let dt = rng.between(5e-4, 0.02);
+            let direction = rng.between(0.0, std::f64::consts::TAU);
+            let accel = rng.between(0.0, 40_000.0);
+            (dt, [accel * direction.cos(), accel * direction.sin(), 0.0])
+        })
+        .collect();
+    Motion::new(v0, pieces)
 }
 
 /// A planned motion of constant acceleration vectors: from `t = 0` the
@@ -95,7 +156,7 @@ impl Motion {
         )
     }
 
-    fn breaks(&self) -> Vec<f64> {
+    pub fn breaks(&self) -> Vec<f64> {
         self.starts.iter().map(|start| start.0).collect()
     }
 

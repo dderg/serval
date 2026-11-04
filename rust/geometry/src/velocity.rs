@@ -1177,3 +1177,5 @@ fn validate_segment<P: CurvatureProfile>(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod replan_tests;
