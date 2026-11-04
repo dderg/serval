@@ -1046,10 +1046,10 @@ impl KernelFit<'_> {
         let (read_lo, read_hi) = (target_start - k_hi, target_end - k_lo);
         let projected = &state.projected;
         let lo = projected
-            .partition_point(|segment| segment.t_start <= read_lo)
+            .partition_point(|segment| segment.t_start < read_lo)
             .saturating_sub(1);
-        let hi =
-            (projected.partition_point(|segment| segment.t_end < read_hi) + 1).min(projected.len());
+        let hi = (projected.partition_point(|segment| segment.t_end <= read_hi) + 1)
+            .min(projected.len());
         let window = &projected[lo..hi];
         let first = window.first().expect("cache covers commits");
         let last = window.last().expect("cache covers commits");

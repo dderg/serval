@@ -710,10 +710,12 @@ impl Shaper {
     /// projection itself commits only what it holds final (see
     /// `follower_projection::project_followers`).
     ///
-    /// Every gate compares `t_end + support` against the covered end with no
-    /// slack — the same association and strictness as the fit-time
-    /// `MissingLookahead` checks, so a gated segment can never demand
-    /// lookahead the buffer does not hold. The lowerer's rest-holds are sized
+    /// Every gate requires the buffer to reach strictly past `t_end +
+    /// support`, with no slack: a fit reads its signal from both sides of its
+    /// window's edges, so the segment past the last time a target reads must
+    /// already be held, and then the slice every fit reads is the same
+    /// whenever the shaper gets to it. The fit-time `MissingLookahead` checks
+    /// can never fire on a gated segment. The lowerer's rest-holds are sized
     /// exactly to a chain's support, so a slack here admits sums that land a
     /// few ulps past the frontier and panics the fit (issue #405).
     fn supported_count(&self) -> usize {
@@ -724,7 +726,7 @@ impl Shaper {
         let plain = self
             .pending
             .iter()
-            .take_while(|seg| seg.t_end + self.forward_support <= last_t)
+            .take_while(|seg| seg.t_end + self.forward_support < last_t)
             .count();
         let own_hi = self.chains.max_follower_own_forward_support();
         if own_hi <= 0.0 {
@@ -736,7 +738,7 @@ impl Shaper {
         let gated = self
             .pending
             .iter()
-            .take_while(|seg| seg.t_end + own_hi <= frontier_t)
+            .take_while(|seg| seg.t_end + own_hi < frontier_t)
             .count();
         plain.min(gated)
     }
@@ -747,7 +749,7 @@ impl Shaper {
         let direct_hi = self.chains.direct_forward_support();
         self.pending
             .iter()
-            .take_while(|seg| seg.t_end + direct_hi <= last_t)
+            .take_while(|seg| seg.t_end + direct_hi < last_t)
             .last()
             .map(|seg| seg.t_end)
     }
@@ -774,7 +776,7 @@ impl Shaper {
             let direct_hi = self.chains.direct_forward_support();
             self.pending
                 .iter()
-                .take_while(|seg| seg.t_end + direct_hi <= last_t)
+                .take_while(|seg| seg.t_end + direct_hi < last_t)
                 .count()
                 .max(count)
         };
@@ -829,10 +831,10 @@ impl Shaper {
         // leaves a gap-hold between segments, and that hold is anchored by
         // the segment before the gap. Drop the front only while the next
         // segment (plus its gap-hold back to the front's end) still covers
-        // the back-support window, or the window's start falls into a gap
-        // whose anchoring segment was just discarded.
+        // the back-support window strictly, so a fit whose window starts on
+        // a segment's start still holds the segment before it.
         let keep_after = emitted_through - self.back_support;
-        while self.history.len() >= 2 && self.history[1].t_start <= keep_after {
+        while self.history.len() >= 2 && self.history[1].t_start < keep_after {
             self.history.pop_front();
             self.history_trimmed = true;
         }
@@ -1467,10 +1469,14 @@ fn apply_trailing_stages_to_pieces(
     Ok(Arc::from(out))
 }
 
+/// A target whose whole read window holds one constant shapes to that
+/// constant times the kernel's mass, the offset a convolved neighbour's own
+/// fit carries, so the two meet without a rounding step where a rest ends.
 fn constant_axis_column(
     segments: &[&ContinuousSegment],
     targets: &[ContinuousSegment],
     axis: usize,
+    kernel_mass: f64,
 ) -> Option<Vec<ColumnTrack>> {
     let splines = segments
         .iter()
@@ -1486,11 +1492,19 @@ fn constant_axis_column(
     if !constant.is_finite() || control_points.any(|&point| point != constant) {
         return None;
     }
+    let shaped = constant * kernel_mass;
     targets
         .iter()
         .map(|seg| match &seg.axes[axis] {
             ContinuousAxis::Spline(curve) => Some(ColumnTrack {
-                stored: Arc::clone(curve),
+                stored: Arc::new(
+                    nurbs::ScalarNurbs::try_new(
+                        curve.degree(),
+                        curve.knots().to_vec(),
+                        vec![shaped; curve.control_points().len()],
+                    )
+                    .expect("a constant keeps its curve's knots and degree"),
+                ),
                 read: None,
             }),
             _ => None,
@@ -1611,7 +1625,9 @@ fn fit_target_alone(
     signal: ColumnSignal,
     pool: &WorkerPool,
 ) -> Result<Vec<ColumnTrack>, PostProcessError> {
-    if let Some(column) = constant_axis_column(signal_segments, target, axis) {
+    if let Some(column) =
+        constant_axis_column(signal_segments, target, axis, unit_kernel_mass(kernel))
+    {
         return Ok(column);
     }
     fit_axis_targets(
@@ -1631,11 +1647,13 @@ fn fit_target_alone(
 }
 
 /// The segments a convolution of `kernel` over `target` reads: from the one
-/// holding the earliest time read to the first one reaching the latest, so
-/// a gap a read lands in carries its hold. The slice depends on the target
-/// and the segments alone, never on how far the window around them reaches;
-/// an edge clamps only where the read passes it, as the window's own edge
-/// would.
+/// starting strictly before the earliest time read to the first one reaching
+/// strictly past the latest, so a gap a read lands in carries its hold and a
+/// one-sided read at either edge of the window finds signal. The slice
+/// depends on the target and the segments alone, never on how far the
+/// window around them reaches (the lookahead gates and the history
+/// retention hold both neighbours); an edge clamps only where the read
+/// passes it, as the window's own edge would.
 fn read_window<'s, 'a>(
     segments: &'s [&'a ContinuousSegment],
     target: &ContinuousSegment,
@@ -1645,9 +1663,9 @@ fn read_window<'s, 'a>(
     let (k_lo, k_hi) = kernel.support();
     let (read_lo, read_hi) = (target.t_start - k_hi, target.t_end - k_lo);
     let lo = segments
-        .partition_point(|seg| seg.t_start <= read_lo)
+        .partition_point(|seg| seg.t_start < read_lo)
         .saturating_sub(1);
-    let hi = (segments.partition_point(|seg| seg.t_end < read_hi) + 1).min(segments.len());
+    let hi = (segments.partition_point(|seg| seg.t_end <= read_hi) + 1).min(segments.len());
     let slice = &segments[lo..hi];
     let (first_t, last_t) = (slice[0].t_start, slice[slice.len() - 1].t_end);
     (
