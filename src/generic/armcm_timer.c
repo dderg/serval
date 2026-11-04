@@ -272,7 +272,7 @@ timer_dispatch_many(void)
         }
 
         irq_enable();
-        while (unlikely(diff > 0))
+        while (unlikely(diff > (int32_t)TIMER_SYSTICK_LEAD_TICKS))
             diff = next - timer_read_time();
         irq_disable();
     }
