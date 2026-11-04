@@ -81,6 +81,17 @@ pub(in crate::follower_projection) fn horner(x: f64, coeffs: &[f64]) -> f64 {
         .fold(leading, |acc, &coeff| acc * x + coeff)
 }
 
+/// [`horner`]'s value, by the same arithmetic, with the polynomial's slope.
+pub(in crate::follower_projection) fn horner_with_slope(x: f64, coeffs: &[f64]) -> (f64, f64) {
+    let (&leading, lower) = coeffs.split_last().expect("a polynomial has coefficients");
+    lower
+        .iter()
+        .rev()
+        .fold((leading, 0.0), |(value, slope), &coeff| {
+            (value * x + coeff, slope * x + value)
+        })
+}
+
 impl Add for Jet {
     type Output = Self;
 
