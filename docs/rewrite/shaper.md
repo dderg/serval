@@ -370,8 +370,6 @@ The consequences:
   of the acceleration. That step is the jump the motion makes, kept and not
   smoothed:
   - the split is a semantic break of the fit;
-  - it is a knot the signal reports through `TrackSignal::knot_jump` and
-    `eval_pva_across`;
   - it is a break of the follower's enclosure windows, each side enclosed
     with its own direction.
 - The rest's ends are breaks of the enclosure windows, not of the fit.
@@ -408,6 +406,32 @@ rounding makes.
 - The velocity change the singular term makes across the sliver,
   `2·G·J·√τ`, must stay within the allowance. A larger one is refused
   before the fit with `PostProcessError::UnshapedLeaderOnsetVelocityStep`.
+
+### The ratio ramp in enclosures
+
+Every follower ramps its ratio steps (`RatioSmoothing`), and every advance
+reads the laid velocity weighted by its valleys, `R = W·r̃`. A follower's
+enclosure window models both (`follower_projection/ratio_ramp/models.rs`):
+
+- **Correction.** The smoothing adds `X(s)` to the table: moments of the
+  seams inside the window, weighted by powers of the width `h(s)`
+  (`SeamMoments`). Over a window its formula is fixed: the width's node
+  interval, the seams inside the window and those behind its point. The
+  bends (`RatioSmoothing::bends`) are where these change, and windows
+  break there. Each derivative `X⁽ⁿ⁾`, `n ≤ 3`, is its Taylor polynomial
+  about the window's centre arc plus the Lagrange remainder past it. The
+  remainder is bounded by the same series computed over the window's
+  whole odometer reach, in ball arithmetic: an interval Taylor series.
+- **Valley weight.** `W`, `W'`, `W''` on the side of each valley the
+  window's reach lies on.
+- **Read.** The advance reads `R·ṡ`, `R'·ṡ² + R·s̈`, and
+  `R·s⃛ + 3R'·ṡ·s̈ + R''·ṡ³`.
+
+A reach a few ulps wide can straddle a bend located an ulp off from where
+the evaluator flips. Such a reach is enclosed by every formula its floats
+read, each widened by its departure from the others. A width node reads
+its jet from the interval it opens, so the evaluator keeps the width's
+third derivative there.
 
 ## Streaming mechanics: windows, frontier, drain
 
@@ -503,21 +527,12 @@ bead by up to 0.15 points at 50 mm/s. Leaders, and the follower's weld,
 edge-break and floor checks, keep the absolute budget; the fit audit holds
 every piece to the budget its fit resolved for it.
 
-The advanced signal has no exact polynomials to prove a rung against, so a
-rung that passes the probes is held between them by estimates. Under the
-position-equivalent budget those estimate the truth, not the error: the
-ladder accepts high-degree rungs whose curvature error runs to `8ε/h²`, and
-such a rung swings between two samples where the error's own interpolant
-sees nothing. Between each pair of samples the rung is read exactly against
-the truth's quintic Hermite interpolant, the exact midpoint measures how far
-the truth leaves that interpolant, and a stretch whose estimate and miss
-together reach the budget is split there. The error's interpolant left 72
-pieces of the kernel-free Trident chain's dense print up to 1.83× over; the
-truth's leaves none. Position between two samples is estimated by the
-error's cubic Hermite interpolant, which misses the error by its fourth
-derivative; an estimate past 90 % of the budget is read exactly. Trusted
-to the budget itself, it let a cubic on the 3 000 mm/s² bowden's dense
-print 0.14 % past it.
+Every rung that passes the probes is proven between them. The proof is the
+Bernstein hull of the rung's error against the signal's exact polynomials,
+or against its Taylor-model enclosure where it has none (the followers, the
+advanced followers and the cap-contact sources). A signal with neither
+fails loudly with `PostProcessError::UnprovableSpan`: a formula without a
+model is a gap to close, not a span to estimate.
 
 Leader refits use ordered parallel work without changing the fitted signal.
 Axes run concurrently. Ordinary windows distribute whole target segments;

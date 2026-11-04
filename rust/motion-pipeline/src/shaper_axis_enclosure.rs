@@ -1158,7 +1158,7 @@ const RAIL_JERK_ACCELERATION_FLOOR: f64 = 1e-15;
 /// How far past a formula's ends, relative to its length and at least
 /// absolutely, a window may reach and still read it: the rounding of the
 /// times the window's ends and the formula's own are computed from.
-const FORMULA_EDGE_SLACK: f64 = 1e-9;
+pub(crate) const FORMULA_EDGE_SLACK: f64 = 1e-9;
 
 /// The jerk the rail's law reads at the interpolated state as the
 /// evaluator computes it: the time derivative of `√(A² − κ²v⁴)` along it,

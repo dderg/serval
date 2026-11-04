@@ -14,10 +14,10 @@ use trajectory::{
 
 use crate::lowering::{AccelBudget, FitTol, SeamContinuity, follower_tol_scale};
 use crate::shaper::{
-    AxisFit, AxisSignalTable, BetweenProbes, ConvolutionSignal, Enclosure, ExactConvolution,
-    ExactKernel, FitBoundary, KnotJumpBound, Lookahead, SEGMENT_TIME_EPS_S, ShapedBreaks,
-    ShiftedTrackSignal, SignalBounds, TrackSignal, apply_derivative_gains_to_track,
-    fit_axis_from_signal, fit_resolution, fit_seed_times, unit_kernel_mass,
+    AxisFit, AxisSignalTable, ConvolutionSignal, Enclosure, ExactConvolution, ExactKernel,
+    FitBoundary, Lookahead, SEGMENT_TIME_EPS_S, ShapedBreaks, ShiftedTrackSignal, SignalBounds,
+    TrackSignal, apply_derivative_gains_to_track, fit_axis_from_signal, fit_resolution,
+    fit_seed_times, unit_kernel_mass,
 };
 use crate::types::PostProcessError;
 use crate::worker_pool::WorkerPool;
@@ -283,16 +283,6 @@ impl<'a> LeadingAdvance<'a> {
     /// No kernel follows the advance: a step it makes reaches the motor.
     fn is_ramped(&self) -> bool {
         self.smoothing == AdvanceSmoothing::RatioRamp
-    }
-
-    /// Whether the advance reads only the velocity laid along the leaders'
-    /// path, whose ratio the smoothing weighs: every advance a ratio ramp
-    /// precedes.
-    fn reads_path_only(&self) -> bool {
-        matches!(
-            self.smoothing,
-            AdvanceSmoothing::RatioRamp | AdvanceSmoothing::RatioRampAndKernel
-        )
     }
 }
 
@@ -2731,9 +2721,6 @@ pub(crate) struct FollowerSignal<'a> {
     ratio_crossings: std::cell::OnceCell<Vec<(f64, f64)>>,
     /// The leaders' rests inside the support, in order ([`rest`]).
     rests: Vec<rest::Rest>,
-    /// The grid times and the rests' splits, in order: where the signal
-    /// may jump, each read on both sides by [`TrackSignal::knot_jump`].
-    jump_times: Vec<f64>,
 }
 
 impl<'a> FollowerSignal<'a> {
@@ -2816,12 +2803,10 @@ impl<'a> FollowerSignal<'a> {
             axis_windows: std::cell::OnceCell::new(),
             ratio_crossings: std::cell::OnceCell::new(),
             rests: Vec::new(),
-            jump_times: Vec::new(),
         };
         let (start_sliver, end_sliver) = sig.speed_zero_slivers();
         sig.start_sliver = start_sliver;
         sig.end_sliver = end_sliver;
-        sig.jump_times = sig.grid.clone();
         sig.s_owned_end = state.owned_span_end(sig.s_start, sig.s_end());
         sig
     }
@@ -2830,14 +2815,6 @@ impl<'a> FollowerSignal<'a> {
     /// `leader_tol` cannot resolve ([`rest`]).
     fn with_rests(mut self, leader_tol: FitTol) -> Self {
         self.rests = self.find_rests(self.rest_speed(leader_tol));
-        self.jump_times = self
-            .grid
-            .iter()
-            .copied()
-            .chain(self.rests.iter().map(|rest| rest.split))
-            .collect();
-        self.jump_times.sort_by(f64::total_cmp);
-        self.jump_times.dedup();
         self
     }
 
@@ -3488,10 +3465,6 @@ fn refine_rest_boundary(
 }
 
 impl TrackSignal for FollowerSignal<'_> {
-    fn between_probes(&self) -> BetweenProbes {
-        BetweenProbes::TruthInterpolant
-    }
-
     fn eval(&self, t: f64) -> f64 {
         let spans = self.state.spans_e(self.s_owned(t)) - self.e_spans_start;
         let raw = self
@@ -3531,50 +3504,12 @@ impl TrackSignal for FollowerSignal<'_> {
         self.pva_memo
             .get_or(t, |t| self.pva_at_distance(t, self.s_owned(t)))
     }
-    fn eval_pva_across(&self, knot: f64) -> [(f64, f64, f64); 2] {
-        let s = self.s_owned(knot);
-        [f64::NEG_INFINITY, f64::INFINITY]
-            .map(|side| self.pva_at_distance(trajectory::next_toward(knot, side), s))
-    }
     fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
         let support = (self.grid[0], self.grid[self.grid.len() - 1]);
         self.whole_enclosure
             .over((lo, hi), accuracy, support, |(lo, hi), accuracy| {
                 self.enclosure(lo, hi, accuracy)
             })
-    }
-    fn interior_knots(&self, start: f64, end: f64) -> &[f64] {
-        let knots = &self.jump_times;
-        let first = knots.partition_point(|&t| t <= start);
-        let past_last = knots.partition_point(|&t| t < end);
-        &knots[first..past_last.max(first)]
-    }
-    fn knot_jump(&self, knot: f64) -> KnotJumpBound {
-        let before = trajectory::next_toward(knot, f64::NEG_INFINITY);
-        let after = trajectory::next_toward(knot, f64::INFINITY);
-        if self.speed_zero_sliver(before).is_some() || self.speed_zero_sliver(after).is_some() {
-            return KnotJumpBound::UNBOUNDED;
-        }
-        let rates = |t: f64| {
-            let motion = self.leaders.motion(t);
-            let speed = motion.speed();
-            (
-                self.odometer_scale * speed,
-                self.odometer_scale * self.leader_speed_deriv(t, &motion, speed),
-                self.odometer_scale * self.leader_speed_second_deriv(t, &motion, speed),
-            )
-        };
-        let (rate_before, rate_deriv_before, rate_second_before) = rates(before);
-        let (rate_after, rate_deriv_after, rate_second_after) = rates(after);
-        let RatioBounds { ratio, slope } = self.ratio_bounds;
-        KnotJumpBound {
-            acceleration: ratio * (rate_deriv_after - rate_deriv_before).abs()
-                + slope * (rate_after * rate_after - rate_before * rate_before).abs(),
-            jerk: ratio * (rate_second_after - rate_second_before).abs()
-                + 3.0
-                    * slope
-                    * (rate_after * rate_deriv_after - rate_before * rate_deriv_before).abs(),
-        }
     }
     fn diagnostic(&self, t: f64) -> Option<String> {
         let s = self.s_owned(t);
@@ -3767,16 +3702,8 @@ impl AdvancedFollowerSignal<'_, '_> {
 }
 
 impl TrackSignal for AdvancedFollowerSignal<'_, '_> {
-    fn between_probes(&self) -> BetweenProbes {
-        BetweenProbes::TruthInterpolant
-    }
-
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         self.pva_memo.get_or(t, |t| self.pva(t))
-    }
-
-    fn interior_knots(&self, start: f64, end: f64) -> &[f64] {
-        self.source.interior_knots(start, end)
     }
 
     fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
