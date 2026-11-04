@@ -260,3 +260,82 @@ fn analytic_axis_windows_enclose_the_axis_jerk() {
     }
     assert!(read > 0, "no window read a jerk");
 }
+
+fn profile_axes() -> Vec<ContinuousAxis> {
+    let nudge = |accel| {
+        ContinuousAxis::Nudge(
+            trajectory::NudgeProfile::try_new(-3.0, 40.0, accel, 2.0).expect("a nudge"),
+        )
+    };
+    let buzz = |sweep_end_hz, ramp| ContinuousAxis::Buzz {
+        base_position: 120.0,
+        sign: -1.0,
+        profile: std::sync::Arc::new(
+            trajectory::BuzzProfile::try_new(0.4, 20.0, sweep_end_hz, 0.3, ramp, 5.0)
+                .expect("a buzz"),
+        ),
+    };
+    vec![
+        nudge(2_000.0),
+        nudge(0.0),
+        nudge(40_000.0),
+        buzz(20.0, 0.05),
+        buzz(80.0, 0.05),
+        buzz(80.0, 0.0),
+    ]
+}
+
+fn profile_domain(axis: &ContinuousAxis) -> (f64, f64) {
+    match axis {
+        ContinuousAxis::Nudge(profile) => (profile.t_start(), profile.t_end()),
+        ContinuousAxis::Buzz { profile, .. } => (profile.t_start(), profile.t_end()),
+        _ => unreachable!("a profile axis"),
+    }
+}
+
+#[test]
+fn nudges_and_buzzes_are_enclosed_by_their_formulas() {
+    for axis in profile_axes() {
+        let (start, end) = profile_domain(&axis);
+        let inset = 1e-9 * (end - start);
+        assert_enclosed(&axis, (start + inset, end - inset));
+    }
+}
+
+#[test]
+fn nudge_and_buzz_windows_enclose_their_jerk() {
+    for axis in profile_axes() {
+        let (start, end) = profile_domain(&axis);
+        let windows = super::AxisWindows::of(&axis).expect("a profile axis has windows");
+        let mut breaks = vec![start, end];
+        breaks.extend(windows.breaks(start, end));
+        breaks.sort_by(f64::total_cmp);
+        for stretch in breaks.windows(2).filter(|stretch| stretch[1] > stretch[0]) {
+            for k in 0..16 {
+                let width = (stretch[1] - stretch[0]) / 16.0;
+                let window = Window::new(
+                    stretch[0] + width * f64::from(k),
+                    stretch[0] + width * f64::from(k + 1),
+                );
+                let [_, _, _, jerk] = windows
+                    .models(window, true)
+                    .expect("one formula covers the window");
+                for j in 1..8 {
+                    let t = window.lo + (window.hi - window.lo) * f64::from(j) / 8.0;
+                    let truth = axis.eval_pvaj(t).expect("the axis evaluates").jerk;
+                    let x = (t - window.center) / window.radius;
+                    let value: f64 = jerk
+                        .coefficients()
+                        .iter()
+                        .rev()
+                        .fold(0.0, |acc, c| acc * x + c);
+                    assert!(
+                        (truth - value).abs() <= jerk.rad() + 1e-6 * (1.0 + truth.abs()),
+                        "at t={t} the jerk {truth} leaves its model {value} ± {}",
+                        jerk.rad()
+                    );
+                }
+            }
+        }
+    }
+}

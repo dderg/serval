@@ -1,6 +1,6 @@
 //! Enclosures of the continuous axes the shaper fits directly: an analytic
-//! move's velocity law carried through its path, the polynomial tracks and
-//! holds.
+//! move's velocity law carried through its path, the polynomial tracks,
+//! holds, nudges and buzzes.
 //!
 //! Every order is enclosed from the formula `ContinuousAxis::eval_pva`
 //! evaluates: the law's `(s, v, a)` between its phase seams and rail knots
@@ -18,8 +18,11 @@ use std::ops::{Add, Mul, Neg};
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{Arc as PathArc, Clothoid, Segment};
 use geometry::{FollowerDemand, RailPair, RailPairShape, ScalarLaw};
+use nurbs::bezier::BezierPiece;
 use nurbs::bezier::extract_bezier_pieces;
-use trajectory::{AnalyticMoveSpan, ContinuousAxis, RelativeSplinePiece, SurfaceMode};
+use trajectory::{
+    AnalyticMoveSpan, BuzzProfile, ContinuousAxis, NudgeProfile, RelativeSplinePiece, SurfaceMode,
+};
 
 use super::ExactPiece;
 use super::taylor::{self, Ball, TaylorModel, Window, derivative_of, polynomial_of_balls};
@@ -57,19 +60,164 @@ pub(crate) fn continuous_axis_enclosure(
             ];
             taylor::enclose((lo, hi), accuracy, &|_| held, &mut out);
         }
-        ContinuousAxis::Nudge(_) | ContinuousAxis::Buzz { .. } => return None,
+        ContinuousAxis::Nudge(profile) => {
+            pieces_enclosure(nudge_pieces(profile), 0.0, (lo, hi), accuracy, &mut out);
+        }
+        ContinuousAxis::Buzz {
+            base_position,
+            sign,
+            profile,
+        } => {
+            for (start, end, envelope) in profile.envelope_pieces() {
+                let (from, to) = (lo.max(start), hi.min(end));
+                if from >= to {
+                    continue;
+                }
+                taylor::enclose(
+                    (from, to),
+                    accuracy,
+                    &|window: Window| {
+                        let [p, v, a, _] = buzz_models(profile, envelope, window, false);
+                        [
+                            p.scale(Ball::exact(*sign))
+                                .add_ball(Ball::exact(*base_position)),
+                            v.scale(Ball::exact(*sign)),
+                            a.scale(Ball::exact(*sign)),
+                        ]
+                    },
+                    &mut out,
+                );
+            }
+        }
     }
     Some(out)
+}
+
+/// A nudge's phases as polynomial pieces in the time since each starts.
+fn nudge_pieces(profile: &NudgeProfile) -> Vec<BezierPiece> {
+    profile
+        .phase_polynomials()
+        .into_iter()
+        .map(|(u_start, u_end, coeffs)| BezierPiece {
+            u_start,
+            u_end,
+            coeffs: coeffs.to_vec(),
+        })
+        .collect()
+}
+
+/// A buzz carrier's `[p, v, a, j]` on `window` inside the envelope stretch
+/// reading `envelope` (`e₀ + e₁·τ`, `τ` since the profile's start), before
+/// its sign and base — the formulas `BuzzProfile::eval` and `jerk` read:
+/// with `b = envelope·amplitude`, `amplitude = A·ω₀/ω` (or `A` without a
+/// sweep) and the phase `(ω₀ + ½ṡ·τ)·τ`, `p = b·sin`, `v = ḃ·sin + bω·cos`,
+/// `a = (b̈ − bω²)·sin + (2ḃω + bṡ)·cos`, and `j` likewise; `j` only
+/// `with_jerk`, else unbounded.
+fn buzz_models(
+    profile: &BuzzProfile,
+    [e0, e1]: [f64; 2],
+    window: Window,
+    with_jerk: bool,
+) -> [TaylorModel; 4] {
+    let tau = window.time_since(profile.t_start());
+    let sweep = profile.sweep_rate();
+    let omega = tau
+        .scale(Ball::exact(sweep))
+        .add_ball(Ball::exact(profile.omega_start()));
+    let zero = TaylorModel::constant(Ball::exact(0.0));
+    let [amplitude, amplitude_rate, amplitude_accel, amplitude_jerk] = if sweep == 0.0 {
+        [
+            TaylorModel::constant(Ball::exact(profile.amplitude_mm())),
+            zero,
+            zero,
+            zero,
+        ]
+    } else {
+        let inverse = omega
+            .reciprocal()
+            .expect("a sweeping buzz's angular frequency stays off zero");
+        let base = Ball::rounded(profile.amplitude_mm() * profile.omega_start(), 1);
+        let sweep = Ball::exact(sweep);
+        let inverse_squared = inverse.mul(&inverse);
+        let inverse_cubed = inverse_squared.mul(&inverse);
+        [
+            inverse.scale(base),
+            inverse_squared.scale(-(base * sweep)),
+            inverse_cubed.scale(Ball::exact(2.0) * base * sweep * sweep),
+            inverse_cubed
+                .mul(&inverse)
+                .scale(-(Ball::exact(6.0) * base * sweep * sweep * sweep)),
+        ]
+    };
+    let envelope = tau.scale(Ball::exact(e1)).add_ball(Ball::exact(e0));
+    let envelope_rate = Ball::exact(e1);
+    let b = envelope.mul(&amplitude);
+    let b_rate = amplitude
+        .scale(envelope_rate)
+        .add(&envelope.mul(&amplitude_rate));
+    let b_accel = amplitude_rate
+        .scale(Ball::exact(2.0) * envelope_rate)
+        .add(&envelope.mul(&amplitude_accel));
+    let phase = polynomial_of_balls(
+        [
+            Ball::exact(0.0),
+            Ball::exact(profile.omega_start()),
+            Ball::exact(0.5 * sweep),
+        ]
+        .into_iter(),
+        &tau,
+    );
+    let (sine, cosine) = phase.sin_cos();
+    let sweep = Ball::exact(sweep);
+    let omega_squared = omega.mul(&omega);
+    let position = b.mul(&sine);
+    let velocity = b_rate.mul(&sine).add(&b.mul(&omega).mul(&cosine));
+    let acceleration = b_accel.sub(&b.mul(&omega_squared)).mul(&sine).add(
+        &b_rate
+            .mul(&omega)
+            .scale(Ball::exact(2.0))
+            .add(&b.scale(sweep))
+            .mul(&cosine),
+    );
+    let jerk = if with_jerk {
+        let b_jerk = amplitude_accel
+            .scale(Ball::exact(3.0) * envelope_rate)
+            .add(&envelope.mul(&amplitude_jerk));
+        let sine_coefficient = b_jerk
+            .sub(&b_rate.mul(&omega_squared).scale(Ball::exact(3.0)))
+            .sub(&b.mul(&omega).scale(Ball::exact(3.0) * sweep));
+        let cosine_coefficient = b_accel
+            .mul(&omega)
+            .scale(Ball::exact(3.0))
+            .sub(&b.mul(&omega_squared).mul(&omega))
+            .add(&b_rate.scale(Ball::exact(3.0) * sweep));
+        sine_coefficient
+            .mul(&sine)
+            .add(&cosine_coefficient.mul(&cosine))
+    } else {
+        TaylorModel::UNBOUNDED
+    };
+    [position, velocity, acceleration, jerk]
 }
 
 fn spline_enclosure(
     curve: &nurbs::ScalarNurbs,
     base: f64,
+    span: (f64, f64),
+    accuracy: [f64; 3],
+    out: &mut Vec<ExactPiece>,
+) {
+    pieces_enclosure(extract_bezier_pieces(curve), base, span, accuracy, out);
+}
+
+fn pieces_enclosure(
+    pieces: Vec<BezierPiece>,
+    base: f64,
     (lo, hi): (f64, f64),
     accuracy: [f64; 3],
     out: &mut Vec<ExactPiece>,
 ) {
-    for piece in extract_bezier_pieces(curve) {
+    for piece in pieces {
         let (from, to) = (lo.max(piece.u_start), hi.min(piece.u_end));
         if from >= to {
             continue;
@@ -844,11 +992,18 @@ pub(crate) enum AxisWindows<'a> {
         reading: AxisReading<'a>,
     },
     Hold(f64),
+    /// A buzz's carrier, with its envelope's stretches.
+    Buzz {
+        base: f64,
+        sign: f64,
+        profile: &'a BuzzProfile,
+        envelopes: Vec<(f64, f64, [f64; 2])>,
+    },
 }
 
 impl<'a> AxisWindows<'a> {
-    /// `None` for an axis with no formula the windows can read: a nudge, a
-    /// buzz, or an analytic axis without a law.
+    /// `None` for an axis with no formula the windows can read: an analytic
+    /// axis without a law.
     pub(crate) fn of(axis: &'a ContinuousAxis) -> Option<Self> {
         Some(match axis {
             ContinuousAxis::Spline(curve) => Self::Pieces(
@@ -884,7 +1039,22 @@ impl<'a> AxisWindows<'a> {
                 },
             },
             ContinuousAxis::Hold { position, .. } => Self::Hold(*position),
-            ContinuousAxis::Nudge(_) | ContinuousAxis::Buzz { .. } => return None,
+            ContinuousAxis::Nudge(profile) => Self::Pieces(
+                nudge_pieces(profile)
+                    .into_iter()
+                    .map(|piece| (0.0, piece))
+                    .collect(),
+            ),
+            ContinuousAxis::Buzz {
+                base_position,
+                sign,
+                profile,
+            } => Self::Buzz {
+                base: *base_position,
+                sign: *sign,
+                profile,
+                envelopes: profile.envelope_pieces(),
+            },
         })
     }
 
@@ -1009,6 +1179,24 @@ impl<'a> AxisWindows<'a> {
                 TaylorModel::constant(Ball::exact(0.0)),
                 TaylorModel::constant(Ball::exact(0.0)),
             ]),
+            Self::Buzz {
+                base,
+                sign,
+                profile,
+                envelopes,
+            } => {
+                let &(_, _, envelope) = envelopes
+                    .iter()
+                    .find(|&&(start, end, _)| covers(start, end))?;
+                let [p, v, a, j] = buzz_models(profile, envelope, window, with_jerk);
+                let sign = Ball::exact(*sign);
+                Some([
+                    p.scale(sign).add_ball(Ball::exact(*base)),
+                    v.scale(sign),
+                    a.scale(sign),
+                    j.scale(sign),
+                ])
+            }
         }
     }
 
@@ -1035,6 +1223,11 @@ impl<'a> AxisWindows<'a> {
                 .filter(inside)
                 .collect(),
             Self::Hold(_) => Vec::new(),
+            Self::Buzz { envelopes, .. } => envelopes
+                .iter()
+                .flat_map(|&(start, end, _)| [start, end])
+                .filter(inside)
+                .collect(),
         }
     }
 }
