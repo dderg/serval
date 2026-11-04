@@ -3,13 +3,6 @@
 //! pinned class and whenever a pinned class grows, worsens or shrinks, so
 //! the list tightens as fixes land; the failure prints the numbers to pin.
 //!
-//! TODO(ratio-ramp-end-accel): a ratio ramp's ends ask the extruder for
-//! more than `[axis e] max_accel`. `Crossing::across` in
-//! motion-pipeline's `follower_projection/ratio_ramp.rs` reads the leaders
-//! only from the seam on, never over the half of the ramp before it, and
-//! where the leaders brake hard the width envelope lays the ramp narrower
-//! than the ramp time it derived.
-//!
 //! TODO(leader-knot-velocity-step): a kernel-free advance turns the
 //! acceleration steps a shaped leader's fit takes at its knots (up to twice
 //! `max_accel_deviation`) into extruder velocity steps of `k·r` times
@@ -53,12 +46,7 @@ pub struct KnownExcesses {
     pub worst: f64,
 }
 
-pub const KNOWN: &[KnownExcesses] = &[KnownExcesses {
-    config: "tools/bench/configs/trident_ramp.cfg",
-    class: ExcessClass::RampEndAccel,
-    count: 6,
-    worst: 5889.2,
-}];
+pub const KNOWN: &[KnownExcesses] = &[];
 
 fn printed(class: ExcessClass, worst: f64) -> f64 {
     let scale = match class {

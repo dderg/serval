@@ -6,7 +6,7 @@ use trajectory::{ContinuousAxis, ContinuousSegment};
 
 use super::super::FollowerState;
 use super::{
-    Crossing, ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_S, RampLeg, ShapedLeaders,
+    Crossing, ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_S, RampLeg, ShapedLeaders, TimedSeam,
     WIDTH_SLOPE_BOUND, WidthField,
 };
 
@@ -738,4 +738,132 @@ fn a_rest_valley_covers_the_ratio_step_its_leg_lays_short_of_the_rest() {
         weight, 0.0,
         "the advance reads the ratio step at {ratio_step} mm with weight {weight}"
     );
+}
+
+const CORNER_SPEED_MM_S: f64 = 40.0;
+const CORNER_CRAWL_MM_S: f64 = 4.0;
+const CORNER_BRAKE_MM_S2: f64 = 6400.0;
+
+/// The leaders' path and speed at `t`: a cruise at `CORNER_SPEED_MM_S`
+/// braking at `brake` into a corner they cross at `CORNER_CRAWL_MM_S`, then
+/// speeding up the same way, as a slicer's short travel between two
+/// extrusions plans.
+fn slow_corner(brake: f64, t: f64) -> f64 {
+    let ramp = (CORNER_SPEED_MM_S - CORNER_CRAWL_MM_S) / CORNER_BRAKE_MM_S2;
+    let covered = |speed_at: &dyn Fn(f64) -> f64, from: f64, to: f64| {
+        let steps = 64;
+        (0..steps)
+            .map(|k| {
+                let at = from + (to - from) * (k as f64 + 0.5) / steps as f64;
+                speed_at(at) * (to - from) / steps as f64
+            })
+            .sum::<f64>()
+    };
+    let speed = |t: f64| {
+        let off = (t - brake - ramp).abs();
+        if off >= ramp {
+            CORNER_SPEED_MM_S
+        } else {
+            CORNER_CRAWL_MM_S + CORNER_BRAKE_MM_S2 * off
+        }
+    };
+    covered(&speed, 0.0, t)
+}
+
+/// A ratio step crossed at speed just ahead of a slow corner asks for a
+/// window `V·τ/2` wide, `V` the speed the leaders cross it at. The corner's
+/// own target is a fraction of that, and its cone would narrow the window
+/// right where the leaders still cruise into it: the seam's width holds the
+/// window open wherever the seam is inside it.
+#[test]
+fn a_slow_corner_beside_a_ratio_step_does_not_narrow_its_window() {
+    let rule = RatioRampRule {
+        advance_slope_s: 0.02,
+        max_velocity_mm_s: 50.0,
+        max_accel_mm_s2: 5000.0,
+    };
+    let (seam_t, brake, end) = (0.052, 0.05, 0.12);
+    let mut field = WidthField {
+        rule: Some(rule),
+        ..WidthField::default()
+    };
+    field.place_rest(0.0);
+    let seam_s = slow_corner(brake, seam_t);
+    field.add_seam(TimedSeam {
+        t: seam_t,
+        s: seam_s,
+        crossing: Crossing {
+            speed: CORNER_SPEED_MM_S,
+            rate: CORNER_BRAKE_MM_S2,
+            jerk: 0.0,
+        },
+        step: 0.034,
+        peak_ratio: 0.034,
+        ramp_time: None,
+    });
+    let seam_width = 0.5 * CORNER_SPEED_MM_S * field.seam_ramp_time(0);
+    let mut t = NODE_SPACING_S;
+    while t < end {
+        field.place_sample(slow_corner(brake, t), t);
+        t += NODE_SPACING_S;
+    }
+    field.close(slow_corner(brake, end));
+    let corner = slow_corner(
+        brake,
+        brake + (CORNER_SPEED_MM_S - CORNER_CRAWL_MM_S) / CORNER_BRAKE_MM_S2,
+    );
+    assert!(
+        corner - seam_s < seam_width,
+        "the corner at {corner} mm lies beyond the {seam_width} mm window of the seam at \
+         {seam_s} mm"
+    );
+    let narrowest = probes(2.0 * seam_width, 400)
+        .map(|offset| seam_s - seam_width + offset)
+        .map(|s| (field.width(s), s))
+        .fold((f64::INFINITY, 0.0), |narrowest, probe| {
+            if probe.0 < narrowest.0 { probe } else { narrowest }
+        });
+    assert!(
+        narrowest.0 >= seam_width * (1.0 - 1e-12),
+        "the window at {} mm is {} mm wide, under the {seam_width} mm the seam at {seam_s} mm \
+         asks for",
+        narrowest.1,
+        narrowest.0
+    );
+}
+
+/// Moving width nodes lie no nearer on the path than the narrower of their
+/// targets, so the smootherstep between two of them bends the width no
+/// sharper than a window's own width.
+#[test]
+fn moving_width_nodes_lie_a_window_apart() {
+    let mut field = WidthField {
+        rule: Some(RatioRampRule {
+            advance_slope_s: 0.02,
+            max_velocity_mm_s: 50.0,
+            max_accel_mm_s2: 5000.0,
+        }),
+        ..WidthField::default()
+    };
+    field.place_rest(0.0);
+    let brake = 0.05;
+    let mut t = NODE_SPACING_S;
+    while t < 0.12 {
+        field.place_sample(slow_corner(brake, t), t);
+        t += NODE_SPACING_S;
+    }
+    field.close(slow_corner(brake, 0.12));
+    for pair in field.nodes.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        if a.target > 0.0 && b.target > 0.0 {
+            assert!(
+                b.s - a.s >= a.target.min(b.target),
+                "width nodes at {} and {} mm lie closer than their targets {} and {}",
+                a.s,
+                b.s,
+                a.target,
+                b.target
+            );
+        }
+    }
 }
