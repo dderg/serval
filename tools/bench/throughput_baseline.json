@@ -1,46 +1,45 @@
 {
   "slice_lines": 1000,
+  "commit": "82471136fdc15e4918c287125562611c81df084c",
+  "reason": "New gate format: total Ir (every user-space instruction, not repo files only) over the 1000-line slice plus a live 2-core A/B of the full print against this reference commit. Pi 2-core worst windows measured at a5c9bfca0 (main 2797f4c50 merged): p3_voron_direct_drive_kernel 1.89/1.90, trident_kernel 1.88/1.90, p3_voron_direct_drive_ramp 2.79/2.76; carried by the live ratio through the merges of main up to d0bbc8c5c (#681, rail-integration reuse, #682 ramp-end-accel).",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 8531762709,
+      "ir": 18417100746,
       "stream_secs": 8.541,
-      "reason": "the ratio ramp reads the leaders over both halves of every ramp (laid tails, seams widened by later legs), the width field derives each seam's width plateau, and the smoothing sums the table's slope span by span",
-      "commit": "fdc3ad24850ff092c2b565a9a368ba2d2d158238",
       "pi_2core": {
-        "k": 4587316424.936247,
+        "k_ir": 9114169275.97816,
+        "worst_x_reference": 4.165119366314405,
         "worst_x": [
-          2.28,
-          2.29
+          2.79,
+          2.76
         ],
-        "commit": "d2ce24fed9e01838bd790176d0d3499568e85fdf"
+        "commit": "a5c9bfca0a49fff520d699bef3b966c6a7f55fd6"
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 12733050046,
+      "ir": 28567827181,
       "stream_secs": 6.202,
-      "reason": "the ratio ramp reads the leaders over both halves of every ramp (laid tails, seams widened by later legs), the width field derives each seam's width plateau, and the smoothing sums the table's slope span by span",
-      "commit": "fdc3ad24850ff092c2b565a9a368ba2d2d158238",
       "pi_2core": {
-        "k": 4582331787.594325,
+        "k_ir": 9206017029.650112,
+        "worst_x_reference": 1.9357535808915818,
         "worst_x": [
-          2.18,
-          2.19
+          1.89,
+          1.9
         ],
-        "commit": "d2ce24fed9e01838bd790176d0d3499568e85fdf"
+        "commit": "a5c9bfca0a49fff520d699bef3b966c6a7f55fd6"
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 13364376280,
+      "ir": 30195937189,
       "stream_secs": 7.543,
-      "reason": "the ratio ramp reads the leaders over both halves of every ramp (laid tails, seams widened by later legs), the width field derives each seam's width plateau, and the smoothing sums the table's slope span by span",
-      "commit": "fdc3ad24850ff092c2b565a9a368ba2d2d158238",
       "pi_2core": {
-        "k": 4388809054.193679,
+        "k_ir": 8088130496.582261,
+        "worst_x_reference": 1.9681387183408123,
         "worst_x": [
-          2.25,
-          2.25
+          1.88,
+          1.9
         ],
-        "commit": "d2ce24fed9e01838bd790176d0d3499568e85fdf"
+        "commit": "a5c9bfca0a49fff520d699bef3b966c6a7f55fd6"
       }
     }
   }
