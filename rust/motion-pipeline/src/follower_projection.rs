@@ -2380,7 +2380,10 @@ fn speed_second_of(states: &[(f64, f64, f64, f64)], speed: f64) -> f64 {
             normal_squared += normal * normal;
         }
     }
-    let direction_dot_jerk = states.iter().map(|&(_, v, _, j)| v / speed * j).sum::<f64>();
+    let direction_dot_jerk = states
+        .iter()
+        .map(|&(_, v, _, j)| v / speed * j)
+        .sum::<f64>();
     normal_squared / speed + direction_dot_jerk
 }
 

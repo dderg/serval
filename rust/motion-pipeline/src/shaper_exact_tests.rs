@@ -760,7 +760,13 @@ fn a_span_ending_among_crowded_breaks_reads_every_float_from_both_sides() {
     let kernel = triangle_kernel(2.0 * half);
     let middle = 3.03125;
     let ulp = next_toward(middle, f64::INFINITY) - middle;
-    for nudges in [(-1.0, 1.0), (0.0, 1.0), (-1.0, 0.0), (1.0, 2.0), (-2.0, -1.0)] {
+    for nudges in [
+        (-1.0, 1.0),
+        (0.0, 1.0),
+        (-1.0, 0.0),
+        (1.0, 2.0),
+        (-2.0, -1.0),
+    ] {
         let seams = [
             middle - half + nudges.0 * ulp,
             middle,
