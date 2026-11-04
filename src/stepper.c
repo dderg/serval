@@ -46,6 +46,29 @@ emit_mcu_ready_once(void)
 }
 
 void
+stepper_setup_dispatch(struct stepper *s, uint_fast8_t both_edge,
+                       uint32_t pulse_ticks)
+{
+    s->step_both_edge = both_edge;
+    s->step_pulse_ticks = pulse_ticks;
+    if (s->step_both_edge)
+        s->flags |= SF_SINGLE_SCHED;
+    if (HAVE_EDGE_OPTIMIZATION) {
+        if (s->step_both_edge && s->step_pulse_ticks <= EDGE_STEP_TICKS)
+            s->flags |= SF_OPTIMIZED_PATH;
+        else
+            s->time.func = stepper_event_full;
+    } else if (HAVE_AVR_OPTIMIZATION) {
+        if (!s->step_both_edge && s->step_pulse_ticks <= AVR_STEP_TICKS)
+            s->flags |= SF_SINGLE_SCHED | SF_OPTIMIZED_PATH;
+        else
+            s->time.func = stepper_event_full;
+    } else if (!CONFIG_INLINE_STEPPER_HACK) {
+        s->time.func = stepper_event_full;
+    }
+}
+
+void
 command_config_stepper(uint32_t *args)
 {
     {
@@ -61,29 +84,13 @@ command_config_stepper(uint32_t *args)
     }
     struct stepper *s = oid_alloc(args[0], command_config_stepper, sizeof(*s));
     int_fast8_t invert_step = (int_fast8_t)args[3];
-    s->step_both_edge = invert_step < 0;
     s->step_idle_level = invert_step > 0;
-    s->step_pulse_ticks = args[4];
     s->step_pin = gpio_out_setup(args[1], s->step_idle_level);
     s->dir_pin = gpio_out_setup(args[2], 0);
     s->position = -POSITION_BIAS;
-    if (s->step_both_edge)
-        s->flags |= SF_SINGLE_SCHED;
     move_queue_setup(&s->mq, sizeof(struct stepper_move));
     move_queue_setup(&s->completed_barriers, sizeof(struct stepper_move));
-    if (HAVE_EDGE_OPTIMIZATION) {
-        if (s->step_both_edge && s->step_pulse_ticks <= EDGE_STEP_TICKS)
-            s->flags |= SF_OPTIMIZED_PATH;
-        else
-            s->time.func = stepper_event_full;
-    } else if (HAVE_AVR_OPTIMIZATION) {
-        if (!s->step_both_edge && s->step_pulse_ticks <= AVR_STEP_TICKS)
-            s->flags |= SF_SINGLE_SCHED | SF_OPTIMIZED_PATH;
-        else
-            s->time.func = stepper_event_full;
-    } else if (!CONFIG_INLINE_STEPPER_HACK) {
-        s->time.func = stepper_event_full;
-    }
+    stepper_setup_dispatch(s, invert_step < 0, args[4]);
     emit_mcu_ready_once();
 }
 DECL_COMMAND(command_config_stepper, "config_stepper oid=%c step_pin=%c"

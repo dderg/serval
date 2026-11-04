@@ -117,6 +117,14 @@ gpio_out_toggle_noirq(struct gpio_out g)
     regs->BSRR = bsrr;
 }
 
+struct gpio_out
+gpio_out_bench_sink(void)
+{
+    static GPIO_TypeDef sink;
+    static struct odr_cache sink_cache = { .bsrr = 1 };
+    return (struct gpio_out){ .regs = &sink, .oc = &sink_cache };
+}
+
 void
 gpio_out_toggle(struct gpio_out g)
 {
