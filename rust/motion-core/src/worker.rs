@@ -280,10 +280,9 @@ pub fn setup_pipeline(
     let (pump_control, control_rx) = pump_channel;
     let (output, trajectory_rx) = bounded::<TrajectoryItem>(TRAJECTORY_CHANNEL_CAP);
     let mut resources = resources;
-    let (input_tap, detached_segments) = resources
-        .detached
-        .take()
-        .map_or((None, None), |taps| (Some(taps.inputs), Some(taps.segments)));
+    let (input_tap, detached_segments) = resources.detached.take().map_or((None, None), |taps| {
+        (Some(taps.inputs), Some(taps.segments))
+    });
     let frontier = Arc::new(if detached_segments.is_some() {
         CommittedFrontier::unexecuted()
     } else {
