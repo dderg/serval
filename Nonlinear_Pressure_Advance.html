@@ -1908,17 +1908,15 @@
 <span class="na">nonlinear_offset</span><span class="o">:</span><span class="w"> </span><span class="s">0.0</span>
 <span class="na">linearization_velocity</span><span class="o">:</span><span class="w"> </span><span class="s">10.0</span>
 
-<span class="k">[post_processor extruder_smoothing]</span>
-<span class="na">type</span><span class="o">:</span><span class="w"> </span><span class="s">smooth_triangle</span>
-<span class="na">smooth_time</span><span class="o">:</span><span class="w"> </span><span class="s">0.005</span>
-
 <span class="k">[axis e]</span>
 <span class="na">follows</span><span class="o">:</span><span class="w"> </span><span class="s">x, y, z</span>
 <span class="na">motors</span><span class="o">:</span><span class="w"> </span><span class="s">extruder_motor</span>
-<span class="na">post_processors</span><span class="o">:</span><span class="w"> </span><span class="s">extruder_pa, extruder_smoothing</span>
+<span class="na">post_processors</span><span class="o">:</span><span class="w"> </span><span class="s">extruder_pa</span>
+<span class="na">max_velocity</span><span class="o">:</span><span class="w"> </span><span class="s">50</span>
+<span class="na">max_accel</span><span class="o">:</span><span class="w"> </span><span class="s">5000</span>
 </code></pre></div>
 
-<p>On an axis that follows others, an advance needs a smoothing kernel in its chain, a <code>ratio_ramp_time</code> on the axis, or both; with neither it is rejected at config load, because it would turn every extrusion-ratio change taken at speed into an instant extruder step. The kernel blurs every change of the extruder's motion over its width, corners included; the ratio ramp smooths only the extrusion ratio, along the path, however finely the path is cut into moves, and leaves the advance unblurred (see <code>ratio_ramp_time</code> in the <a href="Config_Reference_Motion.html">Motion configuration reference</a>). The advance then asks the extruder for more acceleration at every corner, so the extruder decides the chain; the measured trade-off, kernel widths against the ramp and the two combined, is in <a href="https://github.com/KalicoCrew/kalico//blob/main/README.md#evaluating-an-extruder-chain">Evaluating an extruder chain</a>.</p>
+<p>On an axis that follows others, an advance needs the axis's <code>max_velocity</code> and <code>max_accel</code>, set or inherited from the <code>[extruder]</code>'s <code>max_extrude_only_velocity</code> / <code>max_extrude_only_accel</code>; without them it is rejected at config load. The velocity planner slows extruding moves, corners included, so the advanced extruder stays within them, and every extrusion-ratio step (travel to extrusion, a flow change, a wipe) is ramped along the path over a time between 5 and 30 ms that the limits derive, reading the model through its small-signal slope <code>linear_advance + nonlinear_offset / linearization_velocity</code> (see the ratio ramp in the <a href="Config_Reference_Motion.html#axis-name">Motion configuration reference</a>). A smoothing kernel after the advance is optional, an explicit override: it blurs every change of the extruder's motion over its width, which lowers the extruder acceleration corners ask for and bulges the bead at every corner in exchange. The measured trade-off is in <a href="https://github.com/KalicoCrew/kalico//blob/main/README.md#evaluating-an-extruder-chain">Evaluating an extruder chain</a>.</p>
 <p><code>recipr_pressure_advance</code> accepts the same three parameters and may be used instead of <code>tanh_pressure_advance</code>. Do not attach both nonlinear models, or a nonlinear and linear pressure-advance processor, to the same axis.</p>
 <h2 id="model-and-parameters">Model and parameters<a class="headerlink" href="#model-and-parameters" title="Permanent link">&para;</a></h2>
 <p>The commanded advance is:</p>

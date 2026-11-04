@@ -2202,6 +2202,31 @@ total, and blends that run longer than their polyline (a loop of moves
 shorter than the corner budget) lay more. <code>planner_conservation_fuzz</code> holds
 the planner to it. Extrude-only moves ride no spatial path and add in
 directly.</p>
+<p>The ratio is not projected raw. Every follower smooths <code>r(s)</code> along the path
+(<code>follower_projection/ratio_ramp.rs</code>) with the kernel <code>¾(1 − x²)</code> of
+half-width <code>h(s)</code>: half the path the shaped leaders cover in the ramp time
+<code>τ</code> around <code>s</code> — <code>v·τ/2</code> at cruise, <code>a·τ²/8</code> at a turnaround — closing to
+zero at every rest. A ratio step then reaches the follower as a smoothstep
+<code>S</code> over about <code>τ</code> (<code>S′ ≤ 3/2</code>, <code>|S″| ≤ 6</code>), however finely the path is cut
+into moves, and <code>|h′| ≤ 0.75</code> keeps the laid ratio a convex combination of
+the commanded ones. Each seam derives its own <code>τ</code>
+(<code>geometry::RatioRampRule::ramp_time</code>) from the leaders' shaped speed,
+acceleration and jerk there, the steps within half the longest ramp of it,
+the advance's slope <code>k</code> (<code>CompiledChain::advance_slope</code>: a linear
+advance's <code>k</code>, a nonlinear one's small-signal slope) and the axis's
+<code>max_velocity</code> / <code>max_accel</code> (<code>V_e</code>, <code>A_e</code>): the shortest in
+[<code>RATIO_RAMP_MIN_TIME_S</code>, <code>RATIO_RAMP_MAX_TIME_S</code>] = [5, 30] ms whose peak
+advanced follower velocity and acceleration stay within both. At a steady
+speed, with <code>Δ = |Δr|·v</code>, the acceleration bound is <code>τ ≥ √(6kΔ/A_e)</code> for
+<code>τ ≤ 2k</code> and <code>τ ≥ 1.5Δ/A_e</code> without an advance; the velocity bound is about
+<code>τ ≥ 1.45kΔ/(V_e − r·v)</code> for the larger flow <code>r·v</code> (the overshoot
+coefficient rises to 1.5 as <code>τ/k</code> shrinks). An unlimited follower takes
+5 ms everywhere. Around its seam a step's <code>τ</code> holds within <code>τ</code> of it and
+falls off by half the time beyond; the leaders are sampled every 2.5 ms.
+Where even 30 ms exceeds the limits, the velocity planner caps the speed at
+the join (<code>velocity::extruder_caps::ratio_step_ceiling</code>, through
+<code>RatioRampRule::step_speed_cap</code>) rather than smearing the step over more
+path.</p>
 <p>Critically, the projection reads the leaders' <strong>toolhead signal</strong>, not their
 motor command — the follower must track where the nozzle physically is, and
 the mode-inverse counter-drive is motion the toolhead never performs. This
@@ -2339,7 +2364,7 @@ and every seam carries the signal's own velocity.</p>
 <p>A follower's fits are held to <code>max_path_deviation</code> times its largest demand
 ratio (<code>follower_tol_scale</code>; the projected source fit takes half of it).
 Where an advance applies before projection — any advance placed before a
-follower kernel or with none, with or without <code>ratio_ramp_time</code> —
+follower kernel or with none —
 the source fit fits the advanced signal itself, and each of its pieces of
 duration <code>h</code> is held to the acceleration budget
 <code>max(max_accel_deviation, 8ε/h²)</code> (<code>AccelBudget::PositionEquivalent</code>), <code>ε</code>
@@ -2379,7 +2404,7 @@ sees nothing. Between each pair of samples the rung is read exactly against
 the truth's quintic Hermite interpolant, the exact midpoint measures how far
 the truth leaves that interpolant, and a stretch whose estimate and miss
 together reach the budget is split there. The error's interpolant left 72
-pieces of the Trident ramp chain's dense print up to 1.83× over; the
+pieces of the kernel-free Trident chain's dense print up to 1.83× over; the
 truth's leaves none. Position between two samples is estimated by the
 error's cubic Hermite interpolant, which misses the error by its fourth
 derivative; an estimate past 90 % of the budget is read exactly. Trusted
@@ -2391,8 +2416,9 @@ a target with at least 512 exact cut spans distributes those spans instead.
 If the parallel spans exceed the global refinement budget, that target is
 rerun serially so failure behavior stays deterministic.</p>
 <p>Follower projection may evaluate a leader through cached local Bezier power
-polynomials. Every cache candidate is checked against the original NURBS at
-interior points before use. An ill-conditioned conversion falls back to direct
+polynomials. Every cache candidate piece is checked against the original NURBS
+at its far Gauss node, where the power basis's conversion error has grown the
+most, before use. An ill-conditioned conversion falls back to direct
 NURBS evaluation; it must never inject false velocity or acceleration into the
 follower source.</p>
 <h2 id="corner-deviation-and-kernel-smoothing-are-separate-knobs">Corner deviation and kernel smoothing are separate knobs<a class="headerlink" href="#corner-deviation-and-kernel-smoothing-are-separate-knobs" title="Permanent link">&para;</a></h2>
