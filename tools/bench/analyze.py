@@ -1,19 +1,20 @@
 """Judge a bench capture against the offline planner's reference trajectory.
 
 Usage: uv run python tools/bench/analyze.py <run_dir>
-    [--step-benchmark PULSED,BOTH_EDGE,CLOCK_HZ]
+    [--step-benchmark PULSED,BOTH_EDGE,CLOCK_HZ,FRACTION]
 
 run_dir holds capture.bin, capture.json, print.gcode and printer.cfg. The
 verdict goes to stdout and run_dir/analysis.json; plots to run_dir/*.png
 when matplotlib is importable.
 
 The reference is capped by the MCU step capacity exactly as the live run
-was: run.py records every MCU's step benchmark in run.json and the reference
-plans under it. A run.json from before that recording plans uncapped unless
---step-benchmark supplies the bench MCU's benchmark (e.g. the F401's
-301,160,84000000), charged to every captured motor stepped pulsed; the
-verdict's reference_step_capacity says which ("recorded", "supplied",
-"absent").
+was: run.py records every MCU's step benchmark, with the capacity fraction
+the live planner applied, in run.json and the reference plans under it. A
+run.json from before that recording plans uncapped unless --step-benchmark
+supplies the bench MCU's benchmark and the fraction its run was capped at
+(e.g. the F401's 301,160,84000000,0.75 for runs before the fraction became
+0.625), charged to every captured motor stepped pulsed; the verdict's
+reference_step_capacity says which ("recorded", "supplied", "absent").
 
 Alignment model per motion epoch:
     t_capture = offset_s + (1 + ppm * 1e-6) * t_stream
@@ -106,15 +107,18 @@ class SuppliedBenchmark:
     pulsed_ticks_per_step: int
     both_edge_ticks_per_step: int
     clock_hz: float
+    capacity_fraction: float
 
     @classmethod
     def parse(cls, text: str) -> SuppliedBenchmark:
         parts = text.split(",")
-        if len(parts) != 3:
+        if len(parts) != 4:
             raise argparse.ArgumentTypeError(
-                f"{text!r} is not PULSED,BOTH_EDGE,CLOCK_HZ"
+                f"{text!r} is not PULSED,BOTH_EDGE,CLOCK_HZ,FRACTION"
             )
-        return cls(int(parts[0]), int(parts[1]), float(parts[2]))
+        return cls(
+            int(parts[0]), int(parts[1]), float(parts[2]), float(parts[3])
+        )
 
 
 @dataclass(frozen=True)
@@ -391,6 +395,7 @@ def supplied_step_benchmarks(
         {
             "mcu": BENCH_MCU,
             "clock_freq": benchmark.clock_hz,
+            "capacity_fraction": benchmark.capacity_fraction,
             "pulsed_ticks_per_step": benchmark.pulsed_ticks_per_step,
             "both_edge_ticks_per_step": benchmark.both_edge_ticks_per_step,
             "simulated": False,

@@ -18,6 +18,7 @@ pub motion_pipeline::live_config::step_capacity::StepMode::BothEdge
 pub motion_pipeline::live_config::step_capacity::StepMode::Pulsed
 pub struct motion_pipeline::live_config::step_capacity::McuStepBenchmark
 pub motion_pipeline::live_config::step_capacity::McuStepBenchmark::benchmark: core::option::Option<motion_pipeline::live_config::step_capacity::StepBenchmark>
+pub motion_pipeline::live_config::step_capacity::McuStepBenchmark::capacity_fraction: f64
 pub motion_pipeline::live_config::step_capacity::McuStepBenchmark::clock_freq_hz: f64
 pub motion_pipeline::live_config::step_capacity::McuStepBenchmark::mcu: alloc::string::String
 impl motion_pipeline::live_config::step_capacity::McuStepBenchmark

@@ -67,6 +67,7 @@ fn board(name: &str, benchmark: Option<StepBenchmark>, motors: Vec<SteppedMotor>
         benchmark: McuStepBenchmark {
             mcu: name.into(),
             clock_freq_hz: F401_CLOCK_HZ,
+            capacity_fraction: STEP_CAPACITY_FRACTION,
             benchmark,
         },
         motors,
@@ -100,20 +101,31 @@ fn capacity_of(input: &StepCapacityInput) -> StepCapacity {
 }
 
 #[test]
-fn the_budget_is_three_quarters_of_the_clock_and_each_motor_pays_its_mode() {
-    let budget = board("mcu", Some(F401), Vec::new())
-        .benchmark
+fn the_budget_is_the_recorded_fraction_of_the_clock_and_each_motor_pays_its_mode() {
+    let mut mcu = board("mcu", Some(F401), Vec::new()).benchmark;
+    mcu.capacity_fraction = 0.5;
+    let budget = mcu
         .budget(&[StepMode::Pulsed, StepMode::BothEdge])
         .unwrap()
         .unwrap();
-    assert_eq!(budget.ticks_per_s, 63.0e6);
+    assert_eq!(budget.ticks_per_s, 42.0e6);
     assert_eq!(budget.ticks_per_step, vec![301, 160]);
+}
+
+#[test]
+fn a_fraction_outside_zero_to_one_is_refused() {
+    for fraction in [0.0, -0.1, 1.5, f64::NAN] {
+        let mut mcu = board("mcu", Some(F401), Vec::new()).benchmark;
+        mcu.capacity_fraction = fraction;
+        let error = mcu.budget(&[StepMode::Pulsed]).unwrap_err();
+        assert!(error.contains("fraction"), "{error}");
+    }
 }
 
 #[test]
 fn the_bench_printer_charges_each_motor_its_steps_per_mm_times_its_tick_cost() {
     let capacity = capacity_of(&bench(StepMode::Pulsed));
-    let per_mm = |step: f64| 301.0 / (step * (0.75 * F401_CLOCK_HZ));
+    let per_mm = |step: f64| 301.0 / (step * (STEP_CAPACITY_FRACTION * F401_CLOCK_HZ));
     assert_eq!(
         capacity,
         StepCapacity {
@@ -130,7 +142,7 @@ fn the_bench_printer_charges_each_motor_its_steps_per_mm_times_its_tick_cost() {
     );
     let pure_x_mm_s = 1.0 / (2.0 * capacity.mcus[0].lane_s_per_mm[0]);
     assert!(
-        (pure_x_mm_s - 1308.1).abs() < 0.1,
+        (pure_x_mm_s - 1090.1).abs() < 0.1,
         "a pure X move at 80 steps/mm on a and b: {pure_x_mm_s}"
     );
 }

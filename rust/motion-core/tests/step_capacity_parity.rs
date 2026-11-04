@@ -6,8 +6,8 @@
 use motion_core::seam_test_harness::LiveReplay;
 use motion_pipeline::TrajectoryItem;
 use motion_pipeline::live_config::step_capacity::{
-    DrivenAxis, McuStepBenchmark, McuStepInput, StepBenchmark, StepCapacityInput, StepMode,
-    SteppedMotor, step_capacity,
+    DrivenAxis, McuStepBenchmark, McuStepInput, STEP_CAPACITY_FRACTION, StepBenchmark,
+    StepCapacityInput, StepMode, SteppedMotor, step_capacity,
 };
 use planner_config::PlannerConfig;
 use trajectory::ContinuousSegment;
@@ -47,6 +47,7 @@ fn f401_benchmark() -> StepCapacityInput {
             benchmark: McuStepBenchmark {
                 mcu: "mcu".into(),
                 clock_freq_hz: 84.0e6,
+                capacity_fraction: STEP_CAPACITY_FRACTION,
                 benchmark: Some(StepBenchmark {
                     pulsed_ticks_per_step: 301,
                     both_edge_ticks_per_step: 160,

@@ -4,8 +4,8 @@
 
 use motion_core::kinematics::{KinematicsKind, KinematicsModule};
 use motion_pipeline::live_config::step_capacity::{
-    DrivenAxis, McuStepBenchmark, McuStepInput, StepBenchmark, StepCapacityInput, StepMode,
-    SteppedMotor,
+    DrivenAxis, McuStepBenchmark, McuStepInput, STEP_CAPACITY_FRACTION, StepBenchmark,
+    StepCapacityInput, StepMode, SteppedMotor,
 };
 use planner_config::from_doc::{KinematicsDecl, read_motion_settings};
 use pyo3::exceptions::PyValueError;
@@ -16,12 +16,14 @@ pub(crate) const MODE_BOTH_EDGE: &str = "both-edge";
 
 /// One mcu's step benchmark as klippy records it (`mcu.get_status()`'s
 /// `step_capacity`, a bench run's `run.json`): what one step costs it, its
-/// clock, and the motors it steps by name, step distance and mode.
+/// clock, the share of that clock the planner gave its steps, and the motors
+/// it steps by name, step distance and mode.
 #[derive(Debug, Clone, PartialEq, FromPyObject)]
 #[pyo3(from_item_all)]
 pub(crate) struct PyStepBenchmark {
     pub(crate) mcu: String,
     pub(crate) clock_freq: f64,
+    pub(crate) capacity_fraction: f64,
     pub(crate) pulsed_ticks_per_step: u32,
     pub(crate) both_edge_ticks_per_step: u32,
     pub(crate) simulated: bool,
@@ -71,6 +73,7 @@ impl PyStepBenchmark {
         McuStepBenchmark {
             mcu: self.mcu.clone(),
             clock_freq_hz: self.clock_freq,
+            capacity_fraction: self.capacity_fraction,
             benchmark: (!self.simulated).then_some(StepBenchmark {
                 pulsed_ticks_per_step: self.pulsed_ticks_per_step,
                 both_edge_ticks_per_step: self.both_edge_ticks_per_step,
@@ -162,6 +165,12 @@ pub(crate) fn step_capacity_budget(
         .budget(&modes)
         .map_err(PyValueError::new_err)?
         .map(|budget| (budget.ticks_per_s, budget.ticks_per_step)))
+}
+
+/// The share of each mcu's clock the live planner gives step dispatch.
+#[pyfunction]
+pub(crate) fn step_capacity_fraction() -> f64 {
+    STEP_CAPACITY_FRACTION
 }
 
 #[cfg(test)]

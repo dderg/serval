@@ -134,7 +134,8 @@ fn a_line_too_short_to_move_is_no_move() {
 
 fn spatial_benchmarks() -> step_capacity::StepCapacityInput {
     use step_capacity::{
-        DrivenAxis, McuStepBenchmark, McuStepInput, StepBenchmark, StepMode, SteppedMotor,
+        DrivenAxis, McuStepBenchmark, McuStepInput, STEP_CAPACITY_FRACTION, StepBenchmark,
+        StepMode, SteppedMotor,
     };
     step_capacity::StepCapacityInput {
         lane_weights: [[1.0, 1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 0.0, 1.0]],
@@ -142,6 +143,7 @@ fn spatial_benchmarks() -> step_capacity::StepCapacityInput {
             benchmark: McuStepBenchmark {
                 mcu: "mcu".into(),
                 clock_freq_hz: 84.0e6,
+                capacity_fraction: STEP_CAPACITY_FRACTION,
                 benchmark: Some(StepBenchmark {
                     pulsed_ticks_per_step: 301,
                     both_edge_ticks_per_step: 160,
