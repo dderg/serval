@@ -190,6 +190,14 @@ impl PathInReach {
             speed_share: self.speed_share,
         }
     }
+
+    /// The path ending in a rest of the leaders.
+    fn resting(self) -> Self {
+        Self {
+            slowest_ceiling_mm_s: 0.0,
+            ..self
+        }
+    }
 }
 
 /// Whether the toolhead stops where headings `from` and `to` join: any
@@ -367,12 +375,13 @@ impl Marks {
         )
     }
 
-    /// What the path does within the leaders' spill of `marks[index]`: the
-    /// shaped path there averages it, and only its planned acceleration
-    /// reaches the shaped path's jerk. Without a spill the shaped path is the
-    /// planned one, the move's own. `None` while moves still to come could
-    /// add to it. The history behind always covers the spill, so the
-    /// dropped marks never reach it.
+    /// What the path does within the leaders' spill of `marks[index]`, up to
+    /// the first rest either side, which the rest holds keep the shaped path
+    /// still across: the shaped path there averages it, and only its planned
+    /// acceleration reaches the shaped path's jerk. Without a spill the
+    /// shaped path is the planned one, the move's own. `None` while moves
+    /// still to come could add to it. The history behind always covers the
+    /// spill, so the dropped marks never reach it.
     fn path_in_reach(&self, index: usize, closed: bool) -> Option<PathInReach> {
         let mark = self.marks[index];
         let mut path = PathInReach::of(&mark);
@@ -385,14 +394,15 @@ impl Marks {
                 (index, ahead),
                 reach.spill_s,
                 closed,
-                (path, heading_sum, mark.edge_heading(ahead, false)),
-                |(path, sum, edge), other| {
-                    let stops = corner_stops(edge, other.edge_heading(ahead, true));
-                    (
-                        path.with(other, stops),
+                (path, heading_sum, Some(mark.edge_heading(ahead, false))),
+                |(path, sum, edge), other| match edge {
+                    None => (path, sum, None),
+                    Some(_) if other.rest => (path.resting(), sum, None),
+                    Some(edge) => (
+                        path.with(other, corner_stops(edge, other.edge_heading(ahead, true))),
                         weighted_heading(sum, other),
-                        other.edge_heading(ahead, false),
-                    )
+                        Some(other.edge_heading(ahead, false)),
+                    ),
                 },
                 |folded, _| folded,
             )?;
@@ -407,13 +417,19 @@ impl Marks {
         let mean = crate::vec3::scale(heading_sum, 1.0 / length);
         let mut share = least_share(1.0, &mark, mean);
         for ahead in [false, true] {
-            share = self.fold_beside(
+            (share, _) = self.fold_beside(
                 (index, ahead),
                 reach.spill_s,
                 closed,
-                share,
-                |share, other| least_share(share, other, mean),
-                |share, _| share,
+                (share, false),
+                |(share, rested), other| {
+                    if rested || other.rest {
+                        (share, true)
+                    } else {
+                        (least_share(share, other, mean), false)
+                    }
+                },
+                |folded, _| folded,
             )?;
         }
         Some(PathInReach {

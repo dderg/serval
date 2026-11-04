@@ -353,6 +353,20 @@ fn a_corner_beyond_the_spill_leaves_the_path_straight() {
 }
 
 #[test]
+fn a_rest_within_the_spill_ends_the_path_there() {
+    let short = 150.0 * SPILL_S / 4.0;
+    let mut moves = polyline(&[[-short, 0.0, 0.0], [0.0; 3]], 150.0);
+    let rest = stream(&[(0.0, 0.5, 150.0)]).remove(0);
+    moves.push(rest);
+    moves.extend(polyline(&[[0.0; 3], [0.0, short, 0.0]], 150.0));
+    let first = paths(&moves)[0];
+    assert_eq!(
+        (first.axes, first.speed_share, first.slowest_ceiling_mm_s),
+        ([true, false, false], 1.0, 0.0)
+    );
+}
+
+#[test]
 fn a_stream_after_a_drained_rest_budgets_as_a_fresh_one() {
     let before = stream(&[(10.0, 3.0 * RATIO, 150.0), (0.2, 3.0 * RATIO, 150.0)]);
     let after = stream(&[(0.2, RATIO, 150.0), (10.0, RATIO, 150.0)]);
