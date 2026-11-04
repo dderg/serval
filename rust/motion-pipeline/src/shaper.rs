@@ -785,8 +785,6 @@ fn materialize_source_axis(
             })?);
         }
     }
-    #[cfg(feature = "fit-audit")]
-    let _cap_contacts_audited = crate::fit_audit::CapContactScope::enter(&cap_contacts);
     let mut curve = fit_axis_from_signal(
         AxisFit {
             axis,
@@ -907,9 +905,10 @@ fn materialize_changed_sources<S: BorrowMut<ContinuousSegment> + Sync>(
 #[cfg(feature = "fit-audit")]
 const AUDIT_ENCLOSURE_SHARE: f64 = 1.0 / 1024.0;
 
-/// Proven upper bounds on a fitted piece's position and acceleration error
-/// over `resolved`: against the exact polynomials the fit proved it by
-/// where it had them, else against the signal's enclosure there.
+/// Proven upper bounds on a fitted piece's position, velocity and
+/// acceleration error over `resolved`, each settled against its `budgets`:
+/// against the exact polynomials the fit proved it by where it had them,
+/// else against the signal's enclosure there.
 #[cfg(feature = "fit-audit")]
 pub(crate) fn proven_error_bounds<S: TrackSignal>(
     sig: &S,
@@ -917,16 +916,16 @@ pub(crate) fn proven_error_bounds<S: TrackSignal>(
     mono_u: &[f64],
     (t0, t1): (f64, f64),
     resolved: (f64, f64),
-    tol: FitTol,
-) -> Option<[f64; 2]> {
+    budgets: [f64; 3],
+) -> Option<[f64; 3]> {
     let piece = FittedPiece { mono_u, t0, t1 };
     if let Some(exact) = exact {
-        return Some(hull::error_bounds(exact, piece, resolved, tol));
+        return Some(hull::error_bounds(exact, piece, resolved, budgets));
     }
     let accuracy =
-        [tol.pos_mm, f64::INFINITY, tol.accel_mm_s2].map(|budget| budget * AUDIT_ENCLOSURE_SHARE);
+        [budgets[0], f64::INFINITY, budgets[2]].map(|budget| budget * AUDIT_ENCLOSURE_SHARE);
     let enclosure = sig.enclosure_on(resolved.0, resolved.1, accuracy)?;
-    Some(hull::error_bounds(&enclosure, piece, resolved, tol))
+    Some(hull::error_bounds(&enclosure, piece, resolved, budgets))
 }
 
 /// Fits the shaper's changed sources ahead of it, on the thread that lowers
@@ -4246,7 +4245,7 @@ fn square_root_onset_within<S: TrackSignal>(sig: &S, from: f64, to: f64) -> bool
         .is_some_and(|&onset| onset <= to)
 }
 
-fn square_root_onset_on_edge<S: TrackSignal>(sig: &S, edge: f64) -> bool {
+pub(crate) fn square_root_onset_on_edge<S: TrackSignal>(sig: &S, edge: f64) -> bool {
     square_root_onset_within(
         sig,
         edge - SQUARE_ROOT_ONSET_EDGE_SLACK_S,
