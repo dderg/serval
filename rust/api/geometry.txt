@@ -401,6 +401,7 @@ pub geometry::ratio_ramp::RatioStep::jerk_mm_s3: f64
 pub geometry::ratio_ramp::RatioStep::peak_ratio: f64
 pub geometry::ratio_ramp::RatioStep::ratio_step: f64
 pub geometry::ratio_ramp::RatioStep::speed_mm_s: f64
+pub const geometry::ratio_ramp::ADVANCE_VALLEY_SPEED_MM_S: f64
 pub const geometry::ratio_ramp::RATIO_RAMP_MAX_TIME_S: f64
 pub const geometry::ratio_ramp::RATIO_RAMP_MIN_TIME_S: f64
 pub mod geometry::segment
@@ -1167,6 +1168,7 @@ pub geometry::VelocityReport::limit_ride: u32
 pub geometry::VelocityReport::ratio_step_bound: u32
 pub geometry::VelocityReport::stops: u32
 pub geometry::VelocityReport::traversal_time_s: f64
+pub const geometry::ADVANCE_VALLEY_SPEED_MM_S: f64
 pub const geometry::CORNER_DEVIATION_SCV_FACTOR: f64
 pub const geometry::MIN_DEVICE_INTERVAL_S: f64
 pub const geometry::RATIO_RAMP_MAX_TIME_S: f64
