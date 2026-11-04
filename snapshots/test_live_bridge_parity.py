@@ -96,6 +96,56 @@ def test_the_live_bridge_plans_what_the_snapshot_plans(engine, gcode_path, cfg):
     assert divergence is None, f"{gcode_path.name} on {cfg}: {divergence}"
 
 
+CAPACITY_CFG = BENCH_CONFIGS / "capacity.cfg"
+CAPPED_PRINTS = (
+    REPO / "tools" / "bench" / "gcode" / "capacity_ladder.gcode",
+    REPO / "tools" / "bench" / "gcode" / "capacity_ladder_high.gcode",
+    DENSE_PRINT,
+)
+F401_STEP_BENCHMARKS = [
+    {
+        "mcu": "mcu",
+        "clock_freq": 84_000_000.0,
+        "pulsed_ticks_per_step": 301,
+        "both_edge_ticks_per_step": 160,
+        "simulated": False,
+        "motors": [
+            {"name": "a", "step_distance": 40 / 3200, "mode": "pulsed"},
+            {"name": "b", "step_distance": 40 / 3200, "mode": "pulsed"},
+            {"name": "z", "step_distance": 8 / 3200, "mode": "pulsed"},
+            {
+                "name": "extruder",
+                "step_distance": 7.73 / 3200,
+                "mode": "pulsed",
+            },
+        ],
+    }
+]
+
+
+@pytest.mark.parametrize(
+    "gcode_path", [pytest.param(g, id=g.stem) for g in CAPPED_PRINTS]
+)
+def test_the_step_capacity_the_mcu_reports_caps_both_sides_alike(
+    engine, gcode_path
+):
+    gcode = with_start_position(gcode_path.read_text())
+    divergence = live_bridge_parity.compare(
+        gcode, CAPACITY_CFG, F401_STEP_BENCHMARKS
+    )
+    assert divergence is None, f"{gcode_path.name} capped: {divergence}"
+
+
+def test_the_capped_corpus_case_is_bound_by_the_cap(engine):
+    gcode = with_start_position(CAPPED_PRINTS[1].read_text())
+    config_text = harness.read_printer_config(CAPACITY_CFG).config_text
+    capped = live_bridge_parity.snapshot_record(
+        gcode, config_text, F401_STEP_BENCHMARKS
+    )
+    uncapped = live_bridge_parity.snapshot_record(gcode, config_text)
+    assert capped.segment_digests() != uncapped.segment_digests()
+
+
 def test_a_limit_the_two_sides_disagree_on_names_the_move_and_field(
     engine, tmp_path
 ):

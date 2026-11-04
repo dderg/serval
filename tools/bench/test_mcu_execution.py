@@ -303,3 +303,7 @@ def test_lateness_is_binned_by_the_aggregate_commanded_step_rate(tmp_path):
     assert burst["steps"] > burst_steps // 2
     assert burst["p50"] == pytest.approx(burst_late_ticks / FREQ * 1e9, abs=30)
     assert burst["rate_hz_to"] - burst["rate_hz_from"] == 25_000
+    burst_rate_hz = FREQ / burst_interval
+    late_steps = burst_late_ticks / FREQ * burst_rate_hz
+    assert burst["position_p99_9_steps"] == pytest.approx(late_steps, rel=0.05)
+    assert by_floor[0]["position_p99_9_steps"] < late_steps / 10

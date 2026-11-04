@@ -823,3 +823,73 @@ def test_a_short_first_epoch_runs_at_the_next_fitted_rate():
 
 def test_a_run_with_no_fitted_epoch_runs_at_the_nominal_rate():
     assert analyze.nearest_fitted_ppm([None, None], 1) == 0.0
+
+
+F401 = analyze.SuppliedBenchmark(301, 160, 84_000_000.0)
+FAST_SQUARE_GCODE = """\
+SET_KINEMATIC_POSITION X=0 Y=0 Z=0
+G92 E0
+G1 X200 F150000
+G1 Y200
+G1 X0
+"""
+
+
+def _capacity_run(run_dir: Path) -> Path:
+    _require_snapshot_engine()
+    shutil.copy(BENCH_DIR / "configs" / "capacity.cfg", run_dir / "printer.cfg")
+    (run_dir / "print.gcode").write_text(FAST_SQUARE_GCODE)
+    return run_dir
+
+
+def test_a_run_json_without_step_benchmarks_plans_an_uncapped_reference(
+    tmp_path,
+):
+    run_dir = _capacity_run(tmp_path)
+    (run_dir / "run.json").write_text(json.dumps({"print_state": "complete"}))
+    job = analyze.load_job(run_dir)
+    assert job.step_benchmarks is None
+    assert job.step_benchmarks_source == "absent"
+
+
+def test_recorded_step_benchmarks_reach_the_reference_verbatim(tmp_path):
+    run_dir = _capacity_run(tmp_path)
+    recorded = analyze.supplied_step_benchmarks(
+        analyze.load_job(run_dir).motors, F401
+    )
+    (run_dir / "run.json").write_text(json.dumps({"step_benchmarks": recorded}))
+    job = analyze.load_job(run_dir)
+    assert job.step_benchmarks == recorded
+    assert job.step_benchmarks_source == "recorded"
+    with pytest.raises(analyze.AnalysisError, match="records the step"):
+        analyze.load_job(run_dir, F401)
+
+
+def test_a_supplied_benchmark_charges_every_captured_motor_pulsed(tmp_path):
+    job = analyze.load_job(_capacity_run(tmp_path), F401)
+    assert job.step_benchmarks_source == "supplied"
+    (mcu,) = job.step_benchmarks
+    assert (mcu["mcu"], mcu["clock_freq"]) == ("mcu", 84_000_000.0)
+    assert (mcu["pulsed_ticks_per_step"], mcu["both_edge_ticks_per_step"]) == (
+        301,
+        160,
+    )
+    assert mcu["motors"] == [
+        {"name": m.name, "step_distance": m.step_mm, "mode": "pulsed"}
+        for m in job.motors
+    ]
+
+
+def test_the_step_benchmark_caps_the_reference_where_it_binds(tmp_path):
+    _require_snapshot_engine()
+    run_dir = _capacity_run(tmp_path)
+    uncapped = analyze.build_reference(analyze.load_job(run_dir))
+    capped = analyze.build_reference(analyze.load_job(run_dir, F401))
+    assert capped.blocks[0].duration_s > uncapped.blocks[0].duration_s
+    assert capped.final_counts == uncapped.final_counts
+
+
+def test_the_step_benchmark_option_parses_ticks_and_clock():
+    assert analyze.SuppliedBenchmark.parse("301,160,84000000") == F401
+    with pytest.raises(Exception, match="PULSED,BOTH_EDGE,CLOCK_HZ"):
+        analyze.SuppliedBenchmark.parse("301,160")

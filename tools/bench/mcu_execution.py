@@ -154,8 +154,27 @@ def aggregate_step_rate_hz(clocks: np.ndarray, clock_freq: float) -> np.ndarray:
     return inside / RATE_WINDOW_SECONDS
 
 
+def own_step_rate_hz(commanded: np.ndarray, clock_freq: float) -> np.ndarray:
+    if commanded.size < 2:
+        return np.zeros(commanded.size)
+    gaps = np.diff(commanded).astype(np.float64)
+    before = np.concatenate([[gaps[0]], gaps])
+    after = np.concatenate([gaps, [gaps[-1]]])
+    return clock_freq / np.minimum(before, after)
+
+
+def _position_steps_stats(position_steps: np.ndarray) -> dict:
+    if position_steps.size == 0:
+        return {}
+    return {
+        "position_p99_steps": float(np.percentile(position_steps, 99)),
+        "position_p99_9_steps": float(np.percentile(position_steps, 99.9)),
+        "position_max_steps": float(position_steps.max()),
+    }
+
+
 def _lateness_by_step_rate(
-    rate_hz: np.ndarray, relative_ns: np.ndarray
+    rate_hz: np.ndarray, relative_ns: np.ndarray, position_steps: np.ndarray
 ) -> list:
     bins = (rate_hz // RATE_BIN_HZ).astype(np.int64)
     rows = []
@@ -172,6 +191,7 @@ def _lateness_by_step_rate(
                     for t in LATE_THRESHOLDS_NS
                 },
                 **_stats_ns(late),
+                **_position_steps_stats(position_steps[mask]),
             }
         )
     return rows
@@ -349,7 +369,13 @@ def report(
             np.concatenate(lead_ns), relative_ns
         ),
         "lateness_by_step_rate_hz": _lateness_by_step_rate(
-            aggregate_step_rate_hz(x, tap.clock_freq), relative_ns
+            aggregate_step_rate_hz(x, tap.clock_freq),
+            relative_ns,
+            relative_ns
+            / NS
+            * np.concatenate(
+                [own_step_rate_hz(c, tap.clock_freq) for _, c, _, _ in paired]
+            ),
         ),
         "step_load_late_events": len(load_late),
         "step_load_late_matched": sum(1 for e in load_late if e["matched"]),

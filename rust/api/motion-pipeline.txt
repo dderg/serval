@@ -9,6 +9,39 @@ impl motion_pipeline::fit_stage::FitStage
 pub fn motion_pipeline::fit_stage::FitStage::into_driver(self) -> motion_pipeline::fit_stage::FitDriver
 pub fn motion_pipeline::fit_stage::FitStage::new(geometry::fitter::config::CornerFitConfig) -> Self
 pub mod motion_pipeline::live_config
+pub mod motion_pipeline::live_config::step_capacity
+pub enum motion_pipeline::live_config::step_capacity::DrivenAxis
+pub motion_pipeline::live_config::step_capacity::DrivenAxis::Follower(alloc::string::String)
+pub motion_pipeline::live_config::step_capacity::DrivenAxis::Lane(usize)
+pub enum motion_pipeline::live_config::step_capacity::StepMode
+pub motion_pipeline::live_config::step_capacity::StepMode::BothEdge
+pub motion_pipeline::live_config::step_capacity::StepMode::Pulsed
+pub struct motion_pipeline::live_config::step_capacity::McuStepBenchmark
+pub motion_pipeline::live_config::step_capacity::McuStepBenchmark::benchmark: core::option::Option<motion_pipeline::live_config::step_capacity::StepBenchmark>
+pub motion_pipeline::live_config::step_capacity::McuStepBenchmark::clock_freq_hz: f64
+pub motion_pipeline::live_config::step_capacity::McuStepBenchmark::mcu: alloc::string::String
+impl motion_pipeline::live_config::step_capacity::McuStepBenchmark
+pub fn motion_pipeline::live_config::step_capacity::McuStepBenchmark::budget(&self, &[motion_pipeline::live_config::step_capacity::StepMode]) -> core::result::Result<core::option::Option<motion_pipeline::live_config::step_capacity::McuStepBudget>, alloc::string::String>
+pub struct motion_pipeline::live_config::step_capacity::McuStepBudget
+pub motion_pipeline::live_config::step_capacity::McuStepBudget::ticks_per_s: f64
+pub motion_pipeline::live_config::step_capacity::McuStepBudget::ticks_per_step: alloc::vec::Vec<u32>
+pub struct motion_pipeline::live_config::step_capacity::McuStepInput
+pub motion_pipeline::live_config::step_capacity::McuStepInput::benchmark: motion_pipeline::live_config::step_capacity::McuStepBenchmark
+pub motion_pipeline::live_config::step_capacity::McuStepInput::motors: alloc::vec::Vec<motion_pipeline::live_config::step_capacity::SteppedMotor>
+pub struct motion_pipeline::live_config::step_capacity::StepBenchmark
+pub motion_pipeline::live_config::step_capacity::StepBenchmark::both_edge_ticks_per_step: u32
+pub motion_pipeline::live_config::step_capacity::StepBenchmark::pulsed_ticks_per_step: u32
+impl motion_pipeline::live_config::step_capacity::StepBenchmark
+pub fn motion_pipeline::live_config::step_capacity::StepBenchmark::ticks_per_step(self, motion_pipeline::live_config::step_capacity::StepMode) -> u32
+pub struct motion_pipeline::live_config::step_capacity::StepCapacityInput
+pub motion_pipeline::live_config::step_capacity::StepCapacityInput::lane_weights: [[f64; 3]; 3]
+pub motion_pipeline::live_config::step_capacity::StepCapacityInput::mcus: alloc::vec::Vec<motion_pipeline::live_config::step_capacity::McuStepInput>
+pub struct motion_pipeline::live_config::step_capacity::SteppedMotor
+pub motion_pipeline::live_config::step_capacity::SteppedMotor::drives: motion_pipeline::live_config::step_capacity::DrivenAxis
+pub motion_pipeline::live_config::step_capacity::SteppedMotor::mode: motion_pipeline::live_config::step_capacity::StepMode
+pub motion_pipeline::live_config::step_capacity::SteppedMotor::step_distance_mm: f64
+pub const motion_pipeline::live_config::step_capacity::STEP_CAPACITY_FRACTION: f64
+pub fn motion_pipeline::live_config::step_capacity::step_capacity(&planner_config::PlannerConfig, &motion_pipeline::live_config::step_capacity::StepCapacityInput) -> core::result::Result<core::option::Option<geometry::step_capacity::StepCapacity>, alloc::string::String>
 pub struct motion_pipeline::live_config::GcodeLine
 pub motion_pipeline::live_config::GcodeLine::de: f64
 pub motion_pipeline::live_config::GcodeLine::delta: [f64; 3]
@@ -30,7 +63,7 @@ pub const motion_pipeline::live_config::STREAM_INTEGRATION_TOL: f64
 pub const motion_pipeline::live_config::STREAM_MAX_BUFFER_MOVES: usize
 pub fn motion_pipeline::live_config::extruder_caps(&planner_config::PlannerConfig) -> core::result::Result<alloc::vec::Vec<geometry::frontend::ExtruderCaps>, alloc::string::String>
 pub fn motion_pipeline::live_config::require_unlimited_config_jerk(f64) -> core::result::Result<(), &'static str>
-pub fn motion_pipeline::live_config::stream_config(&planner_config::PlannerConfig) -> core::result::Result<motion_pipeline::types::StreamConfig, alloc::string::String>
+pub fn motion_pipeline::live_config::stream_config(&planner_config::PlannerConfig, core::option::Option<&motion_pipeline::live_config::step_capacity::StepCapacityInput>) -> core::result::Result<motion_pipeline::types::StreamConfig, alloc::string::String>
 pub mod motion_pipeline::planner
 pub struct motion_pipeline::planner::Planner
 impl motion_pipeline::planner::Planner

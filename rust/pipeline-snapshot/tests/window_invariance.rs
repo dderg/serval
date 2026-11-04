@@ -18,7 +18,7 @@ fn shaped(steps: &[PlanStep], config: &Path, idle_every: Option<usize>) -> Vec<S
     let (settings, _) = read_motion_settings(&doc).expect("motion settings");
     let planner = planner_config_from_settings(&settings).expect("planner config");
     let mut pipeline = Pipeline::new(
-        live_config::stream_config(&planner).expect("stream config"),
+        live_config::stream_config(&planner, None).expect("stream config"),
         planner.compile_active_chains().expect("chains"),
         rest_position_before(plan_moves(steps)),
         0.0,

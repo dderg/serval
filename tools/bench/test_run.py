@@ -48,3 +48,40 @@ def test_a_failing_cancel_does_not_hide_why_the_print_failed(
     assert (
         json.loads((tmp_path / "run.json").read_text())["print_state"] is None
     )
+
+
+F401_STEP_BENCHMARK = {
+    "mcu": "mcu",
+    "clock_freq": 84000000.0,
+    "pulsed_ticks_per_step": 301,
+    "both_edge_ticks_per_step": 160,
+    "simulated": False,
+    "motors": [{"name": "a", "step_distance": 0.0125, "mode": "pulsed"}],
+}
+
+
+def test_every_mcus_step_benchmark_is_recorded_as_klippy_reports_it(
+    monkeypatch,
+):
+    requests = []
+
+    def http(method, path):
+        requests.append(path)
+        if path == "/printer/objects/list":
+            return {"objects": ["mcu", "mcu toolboard", "print_stats"]}
+        return {
+            "status": {
+                "mcu": {"step_capacity": F401_STEP_BENCHMARK},
+                "mcu toolboard": {"mcu_version": "v1"},
+            }
+        }
+
+    monkeypatch.setattr(run, "http", http)
+    assert run.mcu_step_benchmarks() == [F401_STEP_BENCHMARK]
+    assert requests[-1] == "/printer/objects/query?mcu&mcu%20toolboard"
+
+
+def test_a_klippy_without_mcus_is_refused(monkeypatch):
+    monkeypatch.setattr(run, "http", lambda *_a: {"objects": ["print_stats"]})
+    with pytest.raises(run.BenchError, match="no mcu objects"):
+        run.mcu_step_benchmarks()
