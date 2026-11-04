@@ -840,6 +840,41 @@ pub(crate) fn analytic_axes_enclosure(
     Some(outs)
 }
 
+/// A rail leaving its curvature cap: from `at` toward `far`, the pair's
+/// other end, its tangential acceleration `a = (c₂ + 1.5c₃·z + …)/h` rises
+/// in `z = √(τ/h)`, `τ` the time from `at`, so its jerk is
+/// `jerk_coefficient/√τ` past terms bounded on the pair:
+/// `0.75·|c₃|/h^{3/2}`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SquareRootOnset {
+    pub at: f64,
+    pub far: f64,
+    pub jerk_coefficient: f64,
+}
+
+impl SquareRootOnset {
+    fn of(pair: &RailPair, origin: f64) -> Option<Self> {
+        let RailPairShape::Departure {
+            from_lo,
+            coefficients: [_, c3, _, _],
+        } = pair.shape
+        else {
+            return None;
+        };
+        let h = pair.t_hi - pair.t_lo;
+        let (at, far) = if from_lo {
+            (pair.t_lo, pair.t_hi)
+        } else {
+            (pair.t_hi, pair.t_lo)
+        };
+        (c3 != 0.0).then(|| Self {
+            at: origin + at,
+            far: origin + far,
+            jerk_coefficient: 0.75 * c3.abs() / (h * h.sqrt()),
+        })
+    }
+}
+
 /// The variable a rail pair's formula is a polynomial in.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum PairVariable {
@@ -1426,6 +1461,25 @@ impl<'a> AxisWindows<'a> {
                 ])
             }
         }
+    }
+
+    /// The curvature-cap departures of an analytic axis's rails reaching
+    /// into `(lo, hi)`, where its tangential acceleration rises as a square
+    /// root of the time.
+    pub(crate) fn square_root_onsets(&self, lo: f64, hi: f64) -> Vec<SquareRootOnset> {
+        let Self::Analytic { span, .. } = self else {
+            return Vec::new();
+        };
+        span.phases
+            .iter()
+            .filter(|phase| matches!(phase.law, ScalarLaw::DiskRail { .. }))
+            .flat_map(|phase| {
+                let origin = span.t_start + phase.t0;
+                phase
+                    .rail_pairs(lo - origin, hi - origin)
+                    .filter_map(move |pair| SquareRootOnset::of(&pair, origin))
+            })
+            .collect()
     }
 
     /// The times inside `(lo, hi)` at which the axis's formula changes.

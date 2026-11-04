@@ -29,6 +29,7 @@ fn piece(window: Window, models: &[TaylorModel; 3]) -> ExactPiece {
         center: window.center,
         radius: window.radius,
         pva: models.each_ref().map(local_polynomial),
+        unshaped_step: None,
     }
 }
 

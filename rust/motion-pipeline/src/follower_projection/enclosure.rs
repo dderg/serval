@@ -15,6 +15,7 @@
 //! the bound.
 
 use crate::shaper::axis_enclosure::AxisWindows;
+use crate::shaper::hull::ENCLOSURE_BUDGET_SHARE;
 use crate::shaper::taylor::{self, Ball, TaylorModel, Window};
 use crate::shaper::{Enclosure, ExactPiece};
 
@@ -146,13 +147,14 @@ impl Built {
     }
 }
 
-/// Whether every order of `piece` is within `accuracy`.
+/// Whether every order `piece` bounds is within `accuracy`.
 fn resolves(piece: &ExactPiece, accuracy: [f64; 3]) -> bool {
     piece
         .pva
         .iter()
         .zip(accuracy)
-        .all(|(order, accuracy)| order.rounding <= accuracy)
+        .enumerate()
+        .all(|(order, (model, accuracy))| !piece.bounds(order) || model.rounding <= accuracy)
 }
 
 impl WholeEnclosure {
@@ -549,38 +551,48 @@ impl AdvancedFollowerSignal<'_, '_> {
         if self.advance.reads_path_only() {
             return None;
         }
-        let step_times: Vec<f64> = self.steps.iter().map(|step| step.t).collect();
-        let breaks = self.source.breaks_between(lo, hi, &step_times)?;
-        let pieces = enclose_between(&breaks, accuracy, &|window: Window| {
-            let models = self.source.window_models(window, true)?;
-            let taken: f64 = self
-                .steps
+        let slivers = self.onset_slivers(lo, hi)?;
+        let extra: Vec<f64> = self
+            .steps
+            .iter()
+            .map(|step| step.t)
+            .chain(slivers.iter().flat_map(|sliver| [sliver.from, sliver.to]))
+            .collect();
+        let breaks = self.source.breaks_between(lo, hi, &extra)?;
+        let mut pieces = Vec::new();
+        for stretch in breaks.windows(2).filter(|stretch| stretch[0] < stretch[1]) {
+            let stretch = (stretch[0], stretch[1]);
+            if !slivers
                 .iter()
-                .take_while(|step| step.t < window.center)
-                .map(|step| step.step_mm)
-                .sum();
-            let [position, velocity, acceleration] =
-                std::array::from_fn(|order| models.total(order));
-            let position = position.add_ball(Ball::exact(-taken));
-            let [_, read_velocity, read_acceleration, read_jerk] = models.path;
-            Some(match self.advance.stage {
-                ChainStage::DerivativeGains { k1, k2 } => {
-                    assert_eq!(*k2, 0.0, "leading acceleration gain is not supported");
-                    let gain = Ball::exact(*k1);
-                    [
-                        position.add(&read_velocity.scale(gain)),
-                        velocity.add(&read_acceleration.scale(gain)),
-                        acceleration.add(&read_jerk.scale(gain)),
-                    ]
-                }
-                ChainStage::NonlinearAdvance(advance) => crate::shaper::nonlinear_advance_models(
-                    advance,
-                    &[position, velocity, acceleration],
-                    &[read_velocity, read_acceleration, read_jerk],
-                ),
-                ChainStage::SmoothKernel(_) => unreachable!("a leading advance is not a kernel"),
-            })
-        })?;
+                .any(|sliver| sliver.from <= stretch.0 && stretch.1 <= sliver.to)
+            {
+                taylor::try_enclose(
+                    stretch,
+                    accuracy,
+                    &|window| self.advanced_models(window, true),
+                    &mut pieces,
+                )?;
+                continue;
+            };
+            let first = pieces.len();
+            taylor::try_enclose(
+                stretch,
+                [
+                    accuracy[0],
+                    accuracy[1].min(self.unshaped_step.allowance() * ENCLOSURE_BUDGET_SHARE),
+                    accuracy[2],
+                ],
+                &|window| {
+                    let [position, velocity, _] = self.advanced_models(window, false)?;
+                    Some([position, velocity, TaylorModel::constant(Ball::exact(0.0))])
+                },
+                &mut pieces,
+            )?;
+            for piece in &mut pieces[first..] {
+                piece.pva[2].rounding = f64::INFINITY;
+                piece.unshaped_step = Some(self.unshaped_step);
+            }
+        }
         taylor::debug_assert_holds(
             &pieces,
             |t| crate::shaper::TrackSignal::eval_pva(self, t),
@@ -588,4 +600,91 @@ impl AdvancedFollowerSignal<'_, '_> {
         );
         Some(pieces)
     }
+
+    /// The advanced follower's `[p, v, a]` on `window`: the follower's
+    /// models less the advance steps behind it, plus the advance of the
+    /// motion laid along the path — `a` only `with_jerk`, else unbounded.
+    fn advanced_models(&self, window: Window, with_jerk: bool) -> Option<[TaylorModel; 3]> {
+        let models = self.source.window_models(window, with_jerk)?;
+        let taken: f64 = self
+            .steps
+            .iter()
+            .take_while(|step| step.t < window.center)
+            .map(|step| step.step_mm)
+            .sum();
+        let [position, velocity, acceleration] = std::array::from_fn(|order| models.total(order));
+        let position = position.add_ball(Ball::exact(-taken));
+        let [_, read_velocity, read_acceleration, read_jerk] = models.path;
+        Some(match self.advance.stage {
+            ChainStage::DerivativeGains { k1, k2 } => {
+                assert_eq!(*k2, 0.0, "leading acceleration gain is not supported");
+                let gain = Ball::exact(*k1);
+                [
+                    position.add(&read_velocity.scale(gain)),
+                    velocity.add(&read_acceleration.scale(gain)),
+                    acceleration.add(&read_jerk.scale(gain)),
+                ]
+            }
+            ChainStage::NonlinearAdvance(advance) => crate::shaper::nonlinear_advance_models(
+                advance,
+                &[position, velocity, acceleration],
+                &[read_velocity, read_acceleration, read_jerk],
+            ),
+            ChainStage::SmoothKernel(_) => unreachable!("a leading advance is not a kernel"),
+        })
+    }
+
+    /// The slivers of `[lo, hi]` the advance's acceleration is exempt on
+    /// ([`UnshapedLeaderStep`]), in time order; `None` where a leader has no
+    /// formula.
+    pub(super) fn onset_slivers(&self, lo: f64, hi: f64) -> Option<Vec<OnsetSliver>> {
+        let windows = self.source.axis_windows()?;
+        let gain = super::steepest_advance_slope(self.advance.stage)
+            * self.source.ratio_bounds.ratio
+            * self.source.odometer_scale;
+        let mut slivers: Vec<OnsetSliver> = windows
+            .leaders
+            .iter()
+            .flat_map(|(_, axis)| axis.square_root_onsets(lo, hi))
+            .filter_map(|onset| {
+                let singular_jerk = gain * onset.jerk_coefficient;
+                let singular_reach = (singular_jerk / self.accel_tol).powi(2);
+                let reach = (onset.far - onset.at).clamp(-singular_reach, singular_reach);
+                let end = onset.at + reach;
+                let (from, to) = (onset.at.min(end).max(lo), onset.at.max(end).min(hi));
+                (from < to).then(|| OnsetSliver {
+                    from,
+                    to,
+                    singular_change: 2.0 * singular_jerk * reach.abs().sqrt(),
+                })
+            })
+            .collect();
+        slivers.sort_by(|a, b| a.from.total_cmp(&b.from));
+        slivers.dedup_by(|later, earlier| {
+            if later.from <= earlier.to {
+                earlier.to = earlier.to.max(later.to);
+                earlier.singular_change += later.singular_change;
+                true
+            } else {
+                false
+            }
+        });
+        Some(slivers)
+    }
 }
+
+/// Where an unshaped leader leaves its curvature cap as a square root of
+/// the time, the advance's acceleration takes the leader's jerk
+/// `J/√τ` through its gain `G` (steepest slope × ratio × odometer scale).
+/// No fit holds that: the sliver `τ < (G·J/accel_tol)²` from the onset —
+/// where the singular term alone passes the acceleration tolerance — is
+/// exempt from the acceleration bound, the velocity changing across it by
+/// `singular_change = 2·G·J·√τ` there ([`UnshapedLeaderStep`]).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct OnsetSliver {
+    pub(super) from: f64,
+    pub(super) to: f64,
+    pub(super) singular_change: f64,
+}
+
+impl AdvancedFollowerSignal<'_, '_> {}

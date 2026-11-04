@@ -132,6 +132,20 @@ pub(crate) enum PostProcessError {
         resolution: f64,
     },
     #[error(
+        "axis {axis}: an unshaped leader leaves its curvature cap as a square root of the \
+         time on [{from}, {to}], where the advance on this follower changes its velocity by \
+         {change} mm/s faster than any fit resolves — beyond the {allowance} mm/s allowance \
+         (its instantaneous_corner_velocity plus the leaders' fit resolution) such a change \
+         may take"
+    )]
+    UnshapedLeaderOnsetVelocityStep {
+        axis: usize,
+        from: f64,
+        to: f64,
+        change: f64,
+        allowance: f64,
+    },
+    #[error(
         "axis {axis}: {fit_context} span [{t_start}, {t_end}] leaves breaks to the hull, but the \
          signal has no exact polynomial there to prove a piece against"
     )]
