@@ -31,6 +31,8 @@ REST_LADDER_CFG = BENCH / "configs" / "rest_ladder.cfg"
 SIM_GCODE = REPO / "tools" / "sim" / "gcode"
 RUN_TIMEOUT_S = 2400.0
 ANALYZE_TIMEOUT_S = 1200.0
+ENGINE_BUILD_TIMEOUT_S = 3600
+ENGINE_BUILD = ["make", "-f", "Makefile.rust", "motion-engine-fast"]
 THROTTLE_ARGS = ["--host-cpus", "1", "--host-max-mhz", "1500"]
 LADDER_CEILING_STEPS_PER_S = 300_000
 BENCHMARK_BAND = (0.85, 1.10)
@@ -109,6 +111,22 @@ def python(
         text=True,
         timeout=timeout_s,
     )
+
+
+def build_local_engine() -> None:
+    build = subprocess.run(
+        ENGINE_BUILD,
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        timeout=ENGINE_BUILD_TIMEOUT_S,
+    )
+    if build.returncode != 0:
+        raise SuiteError(
+            f"`{' '.join(ENGINE_BUILD)}` in {REPO} exited "
+            f"{build.returncode}; analyzing with the stale engine would hold "
+            f"every row against another planner:\n{build.stdout}{build.stderr}"
+        )
 
 
 def last_lines(text: str, count: int = 3) -> str:
@@ -249,6 +267,7 @@ def main() -> None:
     if unselected:
         parser.error(f"--expect-fail rows not in this suite: {unselected}")
     suite_dir = SUITES_DIR / datetime.now().strftime("%Y%m%d-%H%M%S")
+    build_local_engine()
     suite_dir.mkdir(parents=True)
     with lock.bench_lock(args.lock_timeout, command=" ".join(sys.argv)):
         lock.export_holder_token()
