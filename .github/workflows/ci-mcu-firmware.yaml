@@ -29,7 +29,7 @@ concurrency:
 
 jobs:
   mcu-firmware:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -74,7 +74,7 @@ jobs:
   # resolve the C step/SPI FFI (phase_stepping_write_xdirect) against
   # linux/phase_stepping_spi.c via the `mcu-linux` Rust feature.
   linux-mcu:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
