@@ -691,7 +691,9 @@ impl RatioSmoothing {
             .then(|| turnaround_inside(&leaders, leg, table_end))
             .flatten();
         if let Some((turn, turn_crossing)) = turn_inside {
-            let reach = turn_crossing.reach(VALLEY_RAMP_TIME_S).min(turn - self.floor);
+            let reach = turn_crossing
+                .reach(VALLEY_RAMP_TIME_S)
+                .min(turn - self.floor);
             if reach > SPAN_MIN_LEN_MM {
                 self.lay_turnaround_valley(turn, reach);
             }
