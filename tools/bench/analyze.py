@@ -1,10 +1,19 @@
 """Judge a bench capture against the offline planner's reference trajectory.
 
 Usage: uv run python tools/bench/analyze.py <run_dir>
+    [--step-benchmark PULSED,BOTH_EDGE,CLOCK_HZ]
 
 run_dir holds capture.bin, capture.json, print.gcode and printer.cfg. The
 verdict goes to stdout and run_dir/analysis.json; plots to run_dir/*.png
 when matplotlib is importable.
+
+The reference is capped by the MCU step capacity exactly as the live run
+was: run.py records every MCU's step benchmark in run.json and the reference
+plans under it. A run.json from before that recording plans uncapped unless
+--step-benchmark supplies the bench MCU's benchmark (e.g. the F401's
+301,160,84000000), charged to every captured motor stepped pulsed; the
+verdict's reference_step_capacity says which ("recorded", "supplied",
+"absent").
 
 Alignment model per motion epoch:
     t_capture = offset_s + (1 + ppm * 1e-6) * t_stream
@@ -81,10 +90,31 @@ REPORTED_STALLS_LIMIT = 50
 EDGE_TIE_STEPS = 0.5
 EPOCH_SPLIT_COUNT_SLACK = 200
 EPOCH_SPLIT_MIN_GAP_S = 1e-3
+STEP_BENCHMARKS_KEY = "step_benchmarks"
+BENCH_MCU = "mcu"
+STEP_CAPACITY_RECORDED = "recorded"
+STEP_CAPACITY_SUPPLIED = "supplied"
+STEP_CAPACITY_ABSENT = "absent"
 
 
 class AnalysisError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class SuppliedBenchmark:
+    pulsed_ticks_per_step: int
+    both_edge_ticks_per_step: int
+    clock_hz: float
+
+    @classmethod
+    def parse(cls, text: str) -> SuppliedBenchmark:
+        parts = text.split(",")
+        if len(parts) != 3:
+            raise argparse.ArgumentTypeError(
+                f"{text!r} is not PULSED,BOTH_EDGE,CLOCK_HZ"
+            )
+        return cls(int(parts[0]), int(parts[1]), float(parts[2]))
 
 
 @dataclass(frozen=True)
@@ -214,6 +244,8 @@ class Job:
     motors: list[Motor]
     config: harness.PrinterConfigData
     gcode_text: str
+    step_benchmarks: list[dict] | None
+    step_benchmarks_source: str
 
 
 @dataclass
@@ -343,19 +375,65 @@ def read_motors(sections: configparser.RawConfigParser) -> list[Motor]:
     return motors
 
 
-def load_job(run_dir: Path) -> Job:
+def recorded_step_benchmarks(run_dir: Path) -> list[dict] | None:
+    run_json = run_dir / "run.json"
+    if not run_json.exists():
+        return None
+    return json.loads(run_json.read_text()).get(STEP_BENCHMARKS_KEY)
+
+
+def supplied_step_benchmarks(
+    motors: list[Motor], benchmark: SuppliedBenchmark
+) -> list[dict]:
+    """The bench MCU stepping every captured motor pulsed, at a benchmark
+    supplied for a run whose run.json predates recording it."""
+    return [
+        {
+            "mcu": BENCH_MCU,
+            "clock_freq": benchmark.clock_hz,
+            "pulsed_ticks_per_step": benchmark.pulsed_ticks_per_step,
+            "both_edge_ticks_per_step": benchmark.both_edge_ticks_per_step,
+            "simulated": False,
+            "motors": [
+                {"name": m.name, "step_distance": m.step_mm, "mode": "pulsed"}
+                for m in motors
+            ],
+        }
+    ]
+
+
+def load_job(run_dir: Path, supplied: SuppliedBenchmark | None = None) -> Job:
     config = harness.read_printer_config(run_dir / "printer.cfg")
-    sections = _config_sections(config.config_text)
+    motors = read_motors(_config_sections(config.config_text))
+    recorded = recorded_step_benchmarks(run_dir)
+    if recorded is not None and supplied is not None:
+        raise AnalysisError(
+            f"{run_dir / 'run.json'} records the step benchmarks the run was "
+            "capped by; a supplied benchmark would replace them"
+        )
+    if recorded is not None:
+        step_benchmarks, source = recorded, STEP_CAPACITY_RECORDED
+    elif supplied is not None:
+        step_benchmarks = supplied_step_benchmarks(motors, supplied)
+        source = STEP_CAPACITY_SUPPLIED
+    else:
+        step_benchmarks, source = None, STEP_CAPACITY_ABSENT
     return Job(
         run_dir=run_dir,
-        motors=read_motors(sections),
+        motors=motors,
         config=config,
         gcode_text=(run_dir / "print.gcode").read_text(),
+        step_benchmarks=step_benchmarks,
+        step_benchmarks_source=source,
     )
 
 
-def load_run(run_dir: Path) -> RunInputs:
-    return RunInputs(**vars(load_job(run_dir)), capture=load_capture(run_dir))
+def load_run(
+    run_dir: Path, supplied: SuppliedBenchmark | None = None
+) -> RunInputs:
+    return RunInputs(
+        **vars(load_job(run_dir, supplied)), capture=load_capture(run_dir)
+    )
 
 
 def _command_word(line: str) -> str:
@@ -426,12 +504,12 @@ def sample_block(
     engine = harness._import_engine()
     config_text = job.config.config_text
     snapshot_json, _ = engine.pipeline_snapshot_axis_samples(
-        waypoints, config_text, [0], 2
+        waypoints, config_text, [0], 2, job.step_benchmarks
     )
     duration = json.loads(snapshot_json)["traversal_time_s"]
     samples = max(2, math.ceil(duration / REFERENCE_SAMPLE_PERIOD_S) + 1)
     _, rows = engine.pipeline_snapshot_axis_samples(
-        waypoints, config_text, [0, 1, 2, 3], samples
+        waypoints, config_text, [0, 1, 2, 3], samples, job.step_benchmarks
     )
     axes_pva = np.asarray(rows, dtype=np.float64)
     return ReferenceBlock(
@@ -1607,6 +1685,7 @@ def analyze(
     verdict = {
         "ok": all(checks.values()),
         "checks": checks,
+        "reference_step_capacity": inputs.step_benchmarks_source,
         "alignment_model": "t_capture = offset_s + (1 + ppm*1e-6) * t_stream",
         "capture": {
             "ticks": len(inputs.capture.deltas),
@@ -1757,6 +1836,14 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_EPOCH_GAP_S,
         help="idle seconds that split motion epochs",
     )
+    parser.add_argument(
+        "--step-benchmark",
+        type=SuppliedBenchmark.parse,
+        metavar="PULSED,BOTH_EDGE,CLOCK_HZ",
+        help="cap the reference of a run whose run.json predates recording "
+        "step benchmarks: the bench MCU's ticks per step pulsed and both-edge "
+        "and its clock, every captured motor stepped pulsed",
+    )
     args = parser.parse_args(argv)
     mismatch = deployed_engine_mismatch(
         json.loads((args.run_dir / "run.json").read_text()),
@@ -1764,7 +1851,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     if mismatch is not None:
         raise AnalysisError(mismatch)
-    inputs = load_run(args.run_dir)
+    inputs = load_run(args.run_dir, args.step_benchmark)
     verdict, detail = analyze(inputs, args.gap)
     verdict["plots"] = save_plots(inputs, detail)
     text = json.dumps(verdict, indent=2)

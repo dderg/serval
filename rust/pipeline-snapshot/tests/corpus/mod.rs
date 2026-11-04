@@ -103,7 +103,7 @@ pub fn plan_waypoints(
     waypoints: &[pipeline_snapshot::waypoints::Waypoint],
     config: &Path,
 ) -> pipeline_snapshot::Snapshot {
-    pipeline_snapshot_for_config(waypoints, &planner(name, config))
+    pipeline_snapshot_for_config(waypoints, &planner(name, config), None)
         .unwrap_or_else(|e| panic!("{name}: {e}"))
 }
 

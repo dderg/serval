@@ -159,7 +159,7 @@ class FakeMcu:
 
 @pytest.fixture
 def connected(monkeypatch):
-    monkeypatch.setattr(clocksync, "native_class", lambda name: StubEstimator)
+    monkeypatch.setattr(clocksync, "native", lambda name: StubEstimator)
     monkeypatch.setattr(
         clocksync,
         "get_danger_options",

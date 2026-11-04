@@ -170,6 +170,9 @@ class MCU:
     def get_step_benchmark(self):
         return self._step_benchmark
 
+    def report_step_capacity(self, step_benchmark):
+        self._get_status_info["step_capacity"] = step_benchmark
+
     def _query_step_benchmark(self):
         parser = self._serial.get_msgparser()
         if "config_stepper" not in parser.messages_by_name:

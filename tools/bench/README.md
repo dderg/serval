@@ -47,7 +47,7 @@ uv run python tools/bench/deploy.py flash-target   # build F401 fw (f401.config)
 uv run python tools/bench/deploy.py flash-capture  # build capture-fw, flash F407 via ST-Link
 uv run python tools/bench/deploy.py config         # validate + push printer.cfg, FIRMWARE_RESTART
 uv run python tools/bench/run.py <gcode> [--runs-dir ~/bench/runs] [--timeout 1800] [--events [--step-tap]]
-uv run python tools/bench/analyze.py <run_dir> [--gap S]
+uv run python tools/bench/analyze.py <run_dir> [--gap S] [--step-benchmark PULSED,BOTH_EDGE,CLOCK_HZ]
 uv run python tools/bench/capture.py --help        # standalone capture (--events for event mode)
 uv run python tools/bench/buzz.py --motor a --steps 2000 --period-us 100  # event-mode calibration against busy-waited DIAG_STEPPER_BUZZ steps
 uv run python tools/bench/cdc_throughput.py --seconds 60  # capture-board USB throughput probe (firmware mode "T"; Gate 0 of capture-fw/EVENT_MODE.md)
@@ -185,7 +185,9 @@ CI runs the benchmark of every test/configs firmware in unicorn (`step_benchmark
 
 ### How the capacity caps moves
 
-Klippy turns the benchmark into a per-move speed cap (`docs/Config_Reference_Motion.md`, "MCU step capacity"). Each MCU gets `STEP_CAPACITY_FRACTION` × CLOCK_FREQ ticks per second; the fraction comes from the timing budget below. A motor costs its benchmarked ticks per step (pulsed or both-edge, by its own mode) times the steps per second the move asks of it. The planner keeps the sum over each MCU's motors within the capacity, counting pressure advance on the extruder. On this bench (F401, 301 ticks/step pulsed) the fraction of 0.625 gives 174 k steps/s. `capacity.cfg` raises the speed limits past the cap, so its ladder rungs above the cap are planned slower than the G-code asks and `step_capacity_capped` events report it.
+The planner turns the benchmark into a per-move speed cap (`rust/motion-pipeline/src/live_config/step_capacity.rs`, `docs/Config_Reference_Motion.md`, "MCU step capacity"); klippy (`klippy/motion_step_capacity.py`) only hands it each MCU's benchmark, clock and stepped motors. Each MCU gets `STEP_CAPACITY_FRACTION` × CLOCK_FREQ ticks per second; the fraction comes from the timing budget below. A motor costs its benchmarked ticks per step (pulsed or both-edge, by its own mode) times the steps per second the move asks of it. The planner keeps the sum over each MCU's motors within the capacity, counting pressure advance on the extruder. On this bench (F401, 301 ticks/step pulsed) the fraction of 0.625 gives 174 k steps/s. `capacity.cfg` raises the speed limits past the cap, so its ladder rungs above the cap are planned slower than the G-code asks and `step_capacity_capped` events report it.
+
+`run.py` records every MCU's step benchmark (the MCU status `step_capacity`) in `run.json` under `step_benchmarks`, and `analyze.py` plans its reference under the same cap, so a run where the cap binds analyzes against the plan the printer executed. A `run.json` from before that recording plans an uncapped reference; `--step-benchmark 301,160,84000000` supplies the F401's benchmark for such a run, charged to every captured motor stepped pulsed (the bench has one MCU and no `dedge` driver). `analysis.json` says which reference it judged in `reference_step_capacity`: `recorded`, `supplied` or `absent`.
 
 ### Capacity fraction from a timing budget
 
