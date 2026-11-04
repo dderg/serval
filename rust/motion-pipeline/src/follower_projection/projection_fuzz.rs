@@ -82,7 +82,7 @@ fn step_strategy() -> impl Strategy<Value = Step> {
 #[derive(Debug, Clone)]
 enum Truth {
     Stroke {
-        shaped: [f64; 4],
+        shaped: Vec<f64>,
         ratio: f64,
         path_start_mm: f64,
     },
@@ -134,14 +134,50 @@ impl Track {
     }
 }
 
-/// The fastest a cubic distance `coeffs` moves over `[0, duration]`.
-fn peak_speed(coeffs: &[f64; 4], duration: f64) -> f64 {
-    let vertex = -coeffs[2] / (3.0 * coeffs[3]);
-    [0.0, duration, vertex]
-        .into_iter()
-        .filter(|dt| (0.0..=duration).contains(dt))
-        .map(|dt| eval_d(coeffs, dt).abs())
+const PEAK_SPEED_PROBES: usize = 64;
+
+/// The fastest a distance `coeffs` moves over `[0, duration]`, probed.
+fn peak_speed(coeffs: &[f64], duration: f64) -> f64 {
+    (0..=PEAK_SPEED_PROBES)
+        .map(|k| eval_d(coeffs, duration * k as f64 / PEAK_SPEED_PROBES as f64).abs())
         .fold(0.0, f64::max)
+}
+
+/// How the shaped leaders cover a stroke: a cubic whose acceleration steps
+/// wherever two strokes meet, as an unshaped leader's does, or a quintic
+/// with no acceleration at either end, as a smoothing kernel leaves it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Profile {
+    Cubic,
+    Quintic,
+}
+
+impl Profile {
+    /// The fastest the shaped leaders may cross either end of a stroke and
+    /// still never run backwards along it.
+    fn monotone_speed_cap(self, length: f64, duration: f64) -> f64 {
+        match self {
+            Profile::Cubic => 3.0 * length / duration,
+            Profile::Quintic => length / duration,
+        }
+    }
+
+    fn distance(self, length: f64, speeds: (f64, f64), duration: f64) -> Vec<f64> {
+        match self {
+            Profile::Cubic => hermite(length, speeds, duration).to_vec(),
+            Profile::Quintic => quintic_hermite(length, speeds, duration).to_vec(),
+        }
+    }
+}
+
+/// `length` covered in `duration` from speed `v0` to `v1`, with no
+/// acceleration at either end.
+fn quintic_hermite(length: f64, (v0, v1): (f64, f64), duration: f64) -> [f64; 6] {
+    let t = duration;
+    let a3 = (10.0 * length - (6.0 * v0 + 4.0 * v1) * t) / t.powi(3);
+    let a4 = (-15.0 * length + (8.0 * v0 + 7.0 * v1) * t) / t.powi(4);
+    let a5 = (6.0 * length - 3.0 * (v0 + v1) * t) / t.powi(5);
+    [0.0, v0, 0.0, a3, a4, a5]
 }
 
 fn hermite(length: f64, (v0, v1): (f64, f64), duration: f64) -> [f64; 4] {
@@ -240,7 +276,7 @@ fn rest_where_required(steps: &[Step]) -> Vec<Step> {
 /// Each stroke's duration, from its raw entry and exit speeds, and the
 /// shaped speed at its exit: the raw speed rescaled, capped where either
 /// stroke meeting there would overshoot its own length.
-fn timing(steps: &[Step]) -> Vec<(f64, f64)> {
+fn timing(steps: &[Step], profile: Profile) -> Vec<(f64, f64)> {
     let mut entry = 0.0_f64;
     let durations: Vec<f64> = steps
         .iter()
@@ -262,7 +298,7 @@ fn timing(steps: &[Step]) -> Vec<(f64, f64)> {
         })
         .collect();
     let monotone_cap = |i: usize| match steps.get(i) {
-        Some(Step::Stroke { length, .. }) => 3.0 * length / durations[i],
+        Some(Step::Stroke { length, .. }) => profile.monotone_speed_cap(*length, durations[i]),
         _ => 0.0,
     };
     steps
@@ -285,8 +321,12 @@ fn timing(steps: &[Step]) -> Vec<(f64, f64)> {
 }
 
 fn build_track(heading: f64, steps: &[Step]) -> Track {
+    build_profiled_track(heading, steps, Profile::Cubic)
+}
+
+fn build_profiled_track(heading: f64, steps: &[Step], profile: Profile) -> Track {
     let steps = rest_where_required(steps);
-    let timing = timing(&steps);
+    let timing = timing(&steps, profile);
     let direction = [libm::cos(heading), libm::sin(heading)];
     let (mut t, mut along, mut e, mut sense) = (0.0, 0.0, 0.0, 1.0_f64);
     let (mut raw_speed, mut shaped_speed) = (0.0_f64, 0.0_f64);
@@ -321,7 +361,7 @@ fn build_track(heading: f64, steps: &[Step]) -> Track {
                     sense = -sense;
                 }
                 let raw = hermite(length, (raw_speed, end_speed), duration);
-                let shaped = hermite(length, (shaped_speed, shaped_end), duration);
+                let shaped = profile.distance(length, (shaped_speed, shaped_end), duration);
                 let span = (t, t + duration);
                 let followers: Vec<FollowerDemand> = (ratio > 0.0)
                     .then(|| FollowerDemand::constant(E_AXIS, ratio))
@@ -340,6 +380,8 @@ fn build_track(heading: f64, steps: &[Step]) -> Track {
                 track
                     .frontier
                     .push(segment([sx, sy, sz, e_line(&raw)], span, &followers, true));
+                track.fastest_shaped_mm_s =
+                    track.fastest_shaped_mm_s.max(peak_speed(&shaped, duration));
                 track.truth.push(Truth::Stroke {
                     shaped,
                     ratio,
@@ -349,8 +391,6 @@ fn build_track(heading: f64, steps: &[Step]) -> Track {
                     track.ratio_steps_mm.push(travelled);
                 }
                 last_ratio = Some(ratio);
-                track.fastest_shaped_mm_s =
-                    track.fastest_shaped_mm_s.max(peak_speed(&shaped, duration));
                 travelled += length;
                 along += sense * length;
                 e += ratio * length;
@@ -610,12 +650,117 @@ fn assert_kernel_settles_in_holds(
 }
 
 fn smoothing(smooth_time: f64) -> CompiledChain {
-    CompiledChain::compile(&[trajectory::PostProcessorInstance::new(
-        "st",
-        &trajectory::algos::SmoothTriangle,
-        vec![smooth_time],
-    )])
-    .expect("a single smoothing kernel always compiles")
+    follower_chain(None, Some(smooth_time))
+}
+
+fn follower_chain(advance_k: Option<f64>, smooth_time: Option<f64>) -> CompiledChain {
+    let stages: Vec<trajectory::PostProcessorInstance> = advance_k
+        .map(|k| {
+            trajectory::PostProcessorInstance::new(
+                "pa",
+                &trajectory::algos::LinearPressureAdvance,
+                vec![k],
+            )
+        })
+        .into_iter()
+        .chain(smooth_time.map(|smooth_time| {
+            trajectory::PostProcessorInstance::new(
+                "st",
+                &trajectory::algos::SmoothTriangle,
+                vec![smooth_time],
+            )
+        }))
+        .collect();
+    CompiledChain::compile(&stages).expect("an advance and a smoothing kernel compile")
+}
+
+fn limited(chain: CompiledChain, limits: Option<(f64, f64)>) -> CompiledChain {
+    match limits {
+        Some((max_velocity_mm_s, max_accel_mm_s2)) => {
+            chain.with_follower_limits(trajectory::FollowerLimits {
+                max_velocity_mm_s,
+                max_accel_mm_s2,
+            })
+        }
+        None => chain,
+    }
+}
+
+/// Instants the shaped leaders stand still at: the stream's two ends, and
+/// every sample inside a hold or an extrude-only move. Strokes meeting at
+/// zero speed still accelerate through the stop, which the ratio ramp
+/// treats as a crossing.
+fn rest_instants(track: &Track) -> Vec<(usize, f64)> {
+    let last = track.frontier.len() - 1;
+    let mut rests = vec![
+        (0, 0.0),
+        (
+            last,
+            track.frontier[last].t_end - track.frontier[last].t_start,
+        ),
+    ];
+    for (i, seg) in track.frontier.iter().enumerate() {
+        if matches!(track.truth[i], Truth::Hold | Truth::ExtrudeOnly { .. }) {
+            rests.extend(local_samples(seg).map(|dt| (i, dt)));
+        }
+    }
+    rests
+}
+
+/// An advance acts on the extruder's velocity, which is zero wherever the
+/// leaders rest, so wherever the follower's kernel reads nothing but rest
+/// the advanced extruder sits exactly on the unadvanced one — and that one
+/// on the material the shaped path laid, `∫ r ds`.
+fn assert_advance_vanishes_at_rests(
+    track: &Track,
+    (advanced, plain): (&[ContinuousSegment], &[ContinuousSegment]),
+    kernel_reach: (f64, f64),
+) -> Result<(), TestCaseError> {
+    let resting_through = |t: f64| {
+        track.frontier.iter().zip(&track.truth).all(|(seg, truth)| {
+            let overlaps = seg.t_start < t + kernel_reach.1 && seg.t_end > t - kernel_reach.0;
+            !overlaps || matches!(truth, Truth::Hold)
+        })
+    };
+    for (i, dt) in rest_instants(track) {
+        let seg = &advanced[i];
+        let t = seg.t_start + dt;
+        let kernel_free = kernel_reach == (0.0, 0.0);
+        if !kernel_free && !resting_through(t) {
+            continue;
+        }
+        let tol = segment_tol_mm(seg);
+        let (e_advanced, _) = follower_pv(seg, t);
+        let (e_plain, _) = follower_pv(&plain[i], t);
+        prop_assert!(
+            (e_advanced - e_plain).abs() <= 2.0 * tol,
+            "rest in segment {i} at t={t}: the advanced extruder is at {e_advanced}, \
+             {} mm off the unadvanced {e_plain}",
+            e_advanced - e_plain
+        );
+        let (laid, _) = oracle(track, i, dt);
+        prop_assert!(
+            (e_plain - laid).abs() <= tol,
+            "rest in segment {i} at t={t}: the extruder is at {e_plain}, the shaped path laid {laid}"
+        );
+    }
+    Ok(())
+}
+
+/// Extruder motor limits. The planner caps the leaders' speed at every
+/// ratio step to what the follower's limits let a ramp take
+/// (`RatioRampRule::step_speed_cap`); these tracks are not planned, so the
+/// limits stay above what their fastest strokes ask of the extruder, and
+/// only the ramp time they derive varies.
+fn follower_limits_strategy() -> impl Strategy<Value = Option<(f64, f64)>> {
+    prop_oneof![
+        1 => Just(None),
+        3 => (2_000.0..10_000.0_f64, 2e6..2e7_f64).prop_map(Some),
+    ]
+}
+
+fn smooth_time_strategy() -> impl Strategy<Value = Option<f64>> {
+    prop_oneof![2 => Just(None), 1 => (0.002..0.04_f64).prop_map(Some)]
 }
 
 proptest! {
@@ -650,6 +795,46 @@ proptest! {
     }
 
     #[test]
+    fn an_advance_integrates_to_zero_across_every_rest(
+        heading in 0.0..std::f64::consts::TAU,
+        steps in prop::collection::vec(step_strategy(), 1..12),
+        advance_k in 0.005..0.08_f64,
+        smooth_time in smooth_time_strategy(),
+        limits in follower_limits_strategy(),
+    ) {
+        let track = build_profiled_track(heading, &steps, Profile::Quintic);
+        let advanced_chain = limited(follower_chain(Some(advance_k), smooth_time), limits);
+        let kernel_reach = advanced_chain
+            .kernel()
+            .map_or((0.0, 0.0), |kernel| {
+                let (lo, hi) = kernel.support();
+                (hi, -lo)
+            });
+        let advanced = project_all_at_once(&track, &chains(advanced_chain));
+        let plain = project_all_at_once(
+            &track,
+            &chains(limited(follower_chain(None, smooth_time), limits)),
+        );
+        assert_advance_vanishes_at_rests(&track, (&advanced, &plain), kernel_reach)?;
+    }
+
+    #[test]
+    fn an_advanced_follower_streams_like_it_projects_all_at_once(
+        heading in 0.0..std::f64::consts::TAU,
+        steps in prop::collection::vec(step_strategy(), 1..12),
+        batch_sizes in prop::collection::vec(1..4_usize, 1..4),
+        advance_k in 0.005..0.08_f64,
+        smooth_time in smooth_time_strategy(),
+        limits in follower_limits_strategy(),
+    ) {
+        let track = build_profiled_track(heading, &steps, Profile::Quintic);
+        let chains = chains(limited(follower_chain(Some(advance_k), smooth_time), limits));
+        let one_shot = project_all_at_once(&track, &chains);
+        let streamed = project_streamed(&track, &chains, &batch_sizes);
+        assert_streams_like_one_shot(&streamed, &one_shot)?;
+    }
+
+    #[test]
     fn projection_lays_the_ratio_along_the_shaped_path(
         heading in 0.0..std::f64::consts::TAU,
         steps in prop::collection::vec(step_strategy(), 1..12),
@@ -664,4 +849,38 @@ proptest! {
         assert_streams_like_one_shot(&streamed, &one_shot)?;
     }
 
+}
+
+/// #674: two strokes meeting at an instantaneous stop — speed zero, the
+/// leaders decelerating into it and accelerating out — rest there, so the
+/// ramp lays nothing of the stroke after the stop before it.
+#[test]
+#[ignore = "#674: the ratio ramp's window straddles a stop with acceleration on both sides"]
+fn a_stop_between_a_travel_and_an_extrusion_lays_nothing_ahead_of_it() {
+    let steps = [
+        Step::Stroke {
+            reverse: false,
+            length: 0.05,
+            pace: 33.86729975803374,
+            end_speed: 0.0,
+            shaped_speed_scale: 0.5,
+            ratio: 0.0,
+        },
+        Step::Stroke {
+            reverse: false,
+            length: 0.05,
+            pace: 1.0,
+            end_speed: 0.0,
+            shaped_speed_scale: 0.5,
+            ratio: 0.01,
+        },
+    ];
+    let track = build_track(0.0, &steps);
+    let committed = project_all_at_once(&track, &chains(CompiledChain::default()));
+    let stop = committed[1].t_start;
+    let (e, _) = follower_pv(&committed[1], stop);
+    assert!(
+        e.abs() <= segment_tol_mm(&committed[1]),
+        "at the stop t={stop} the extruder has laid {e} mm of the stroke after it"
+    );
 }
