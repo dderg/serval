@@ -8,7 +8,7 @@
 //! no jerk parameter: a constant-jerk cubic is not a law any axis executes,
 //! it was only ever a grid-cell approximation of the rail.
 //!
-//! `ConstAccel` is closed-form. `DiskRail` is evaluated through a dense
+//! `ConstAccel` is closed-form. `DiskRail` is evaluated through a
 //! Runge–Kutta solution built deterministically from the law parameters and
 //! cached inside the segment; between knots a C2 quintic interpolates
 //! velocity, arc is its anchored integral, and acceleration is its
@@ -16,12 +16,28 @@
 //! produced it, not as the difference of two rounded knot speeds. A pair
 //! that leaves the curvature cap from one end interpolates in the square
 //! root of the time from that end instead: see [`CapDeparture`].
+//!
+//! # Accuracy contract
+//!
+//! The rail is the motion its interpolant describes, and that motion is
+//! what every later stage plans, shapes and fits against. The integrator
+//! places its knots so each pair provably holds two things — bounded by
+//! Taylor models of its interpolant: its acceleration stays within
+//! [`RAIL_ACCELERATION_DEFECT`] of the law `a(s, v)` read at its own
+//! interpolated state — so its acceleration budget and its disk hold to
+//! that — and its arc stays within [`RAIL_ARC_DEFECT`] of the integral of
+//! its own speed, so arc, speed and time describe one consistent motion.
+//! Both are a tenth of the default fit tolerances. Nothing ties the rail
+//! to the exact solution of the ODE: that solution is no physical
+//! reference, only one more motion along the same path, and the rail's
+//! timing may drift from it by the defect integrated over the rail's
+//! duration while the path, the limits and the fit tolerances all hold.
 
 use std::sync::{Arc, OnceLock};
 
-/// Knot-count clamp for the dense rail solution.
-const RAIL_KNOTS_MIN: usize = 16;
-const RAIL_KNOTS_MAX: usize = 32768;
+mod defect;
+
+pub use defect::{PairDefect, RAIL_ACCELERATION_DEFECT, RAIL_ARC_DEFECT, RAIL_SPEED_SLACK};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ScalarLaw {
@@ -87,6 +103,7 @@ enum CapDeparture {
     None,
     FromLo,
     FromHi,
+    Clipped(ClippedDeparture),
 }
 
 impl CapDeparture {
@@ -95,8 +112,93 @@ impl CapDeparture {
             Self::None => Self::None,
             Self::FromLo => Self::FromHi,
             Self::FromHi => Self::FromLo,
+            Self::Clipped(clipped) => Self::Clipped(ClippedDeparture {
+                theta_lo: clipped.theta_hi,
+                theta_hi: clipped.theta_lo,
+                ..clipped
+            }),
         }
     }
+}
+
+/// The part of a departure pair a cut kept clear of its departure end: the
+/// parent pair's square-root interpolant `v_end + Σ cₖ·zᵏ`,
+/// `z = √(θ/h)`, over the departure-frame times `theta_lo..theta_hi` the
+/// kept pair's ends sit at. Both stay off the departure end, so the kept
+/// pair is analytic in its own time.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ClippedDeparture {
+    coefficients: [f64; 4],
+    h: f64,
+    v_end: f64,
+    theta_lo: f64,
+    theta_hi: f64,
+}
+
+impl ClippedDeparture {
+    fn interpolant(&self) -> DepartureInterpolant {
+        DepartureInterpolant {
+            c: self.coefficients,
+        }
+    }
+
+    /// `+1` where the departure-frame time runs with the pair's own.
+    fn direction(&self) -> f64 {
+        (self.theta_hi - self.theta_lo).signum()
+    }
+
+    fn theta_at(&self, u: f64) -> f64 {
+        self.theta_lo + (self.theta_hi - self.theta_lo) * u
+    }
+
+    fn z_at(&self, theta: f64) -> f64 {
+        (theta / self.h).sqrt()
+    }
+
+    /// `∫ v dθ` from the departure end out to `theta`.
+    fn mass_from_end(&self, theta: f64) -> f64 {
+        self.v_end * theta + self.h * self.interpolant().rise_mass(self.z_at(theta))
+    }
+
+    /// Speed, acceleration and `∫₀ᵘ v du` at the pair's time share `u`.
+    fn state(&self, u: f64) -> (f64, f64, f64) {
+        let theta = self.theta_at(u);
+        let z = self.z_at(theta);
+        let interpolant = self.interpolant();
+        (
+            self.v_end + interpolant.rise(z),
+            self.direction() * interpolant.scaled_accel(z) / self.h,
+            (self.mass_from_end(theta) - self.mass_from_end(self.theta_lo))
+                / (self.theta_hi - self.theta_lo),
+        )
+    }
+
+    /// This clipped pair cut at its time share `u`.
+    fn cut(&self, u: f64) -> Self {
+        Self {
+            theta_hi: self.theta_at(u),
+            ..*self
+        }
+    }
+}
+
+/// The cut knot ending `clipped` after `lo`, at speed `v`: its rise, the
+/// pair's formula and the interpolant's slopes there.
+fn clipped_cut(
+    clipped: &ClippedDeparture,
+    lo: &RailKnot,
+    v: f64,
+) -> (f64, CapDeparture, KnotSlopes) {
+    let z = clipped.z_at(clipped.theta_hi);
+    let interpolant = clipped.interpolant();
+    (
+        v - lo.v,
+        CapDeparture::Clipped(*clipped),
+        KnotSlopes::Interpolant {
+            accel: clipped.direction() * interpolant.scaled_accel(z) / clipped.h,
+            rate: interpolant.scaled_rate(z) / (clipped.h * clipped.h),
+        },
+    )
 }
 
 /// One knot pair's velocity in its departure frame — time running away
@@ -151,6 +253,52 @@ impl DepartureInterpolant {
     }
 }
 
+/// One knot pair of a disk rail: segment-local times, arc travelled since
+/// the segment start and speed at both knots, and how velocity
+/// interpolates between them. With `h = t_hi − t_lo` and
+/// `u = (τ − t_lo)/h`, [`LawSegment::state_at`] reads speed, `h·a` and
+/// `∫₀ᵘ v du` off the shape and the arc as
+/// `s_lo + h·∫₀ᵘ v + (s_hi − s_lo − h·∫₀¹ v)·u`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RailPair {
+    pub t_lo: f64,
+    pub t_hi: f64,
+    pub s_lo: f64,
+    pub s_hi: f64,
+    pub v_lo: f64,
+    pub v_hi: f64,
+    pub shape: RailPairShape,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RailPairShape {
+    /// The C2 quintic Hermite through both knots' speeds with end slopes
+    /// and curvatures `slopes = [h·a_lo, h²·ȧ_lo, h·a_hi, h²·ȧ_hi]`; `h·a`
+    /// is its derivative across the integrator's own speed `rise`.
+    Quintic { rise: f64, slopes: [f64; 4] },
+    /// Leaving the curvature cap from one end: with `z` the square root of
+    /// the time from that end over `h`, speed is that end's plus
+    /// `z²·(c₂ + z·(c₃ + z·(c₄ + z·c₅)))`, `coefficients = [c₂, c₃, c₄, c₅]`,
+    /// and `h·a` is `±(c₂ + z·(1.5c₃ + z·(2c₄ + z·2.5c₅)))`, negative
+    /// leaving from the high end.
+    Departure {
+        from_lo: bool,
+        coefficients: [f64; 4],
+    },
+    /// The part of a departure pair a cut kept clear of its departure end:
+    /// at departure-frame time `θ`, running linearly from `theta_lo` at
+    /// `t_lo` to `theta_hi` at `t_hi`, speed is `v_end` plus the
+    /// departure's `z²·(c₂ + …)` at `z = √(θ/h)`, and `h·a` its
+    /// `c₂ + z·(1.5c₃ + …)` signed by the direction `θ` runs in.
+    Clipped {
+        coefficients: [f64; 4],
+        h: f64,
+        v_end: f64,
+        theta_lo: f64,
+        theta_hi: f64,
+    },
+}
+
 /// One law over one time interval, in chain-local time and run-frame arc.
 #[derive(Clone, Debug)]
 pub struct LawSegment {
@@ -199,6 +347,15 @@ impl ScalarLaw {
         }
     }
 
+    /// Whether tangential acceleration `a` is a held cap's: the rail rides
+    /// its curvature cap.
+    fn holds_cap(&self, a: f64) -> bool {
+        match *self {
+            ScalarLaw::ConstAccel { .. } => false,
+            ScalarLaw::DiskRail { accel, .. } => a.abs() <= CAP_HOLD_RESOLUTION * accel,
+        }
+    }
+
     /// Equal to the bit, so integrating either from the same state yields the
     /// same knots; `==` would also identify `-0.0` with `0.0`.
     fn is_bitwise(&self, other: &ScalarLaw) -> bool {
@@ -229,19 +386,6 @@ impl ScalarLaw {
         }
     }
 
-    /// Whether the law reads the arc nowhere along a rail: constant
-    /// acceleration, or a disk rail of constant curvature. With `σ = ±0`,
-    /// `σ·ds` is a zero of `σ`'s sign for every finite `ds ≥ 0`, so
-    /// `κ0 + σ·ds` is one float and [`Self::accel_at`],
-    /// [`Self::accel_rate_at`] and [`Self::settle_crossed_cap`] give the same
-    /// bits at every arc.
-    fn is_autonomous(&self) -> bool {
-        match *self {
-            ScalarLaw::ConstAccel { .. } => true,
-            ScalarLaw::DiskRail { sigma, .. } => sigma == 0.0,
-        }
-    }
-
     /// Tangential acceleration commanded by the law at state `(ds, v)`,
     /// where `ds` is arc travelled since the segment start.
     fn accel_at(&self, ds: f64, v: f64) -> f64 {
@@ -255,6 +399,23 @@ impl ScalarLaw {
             } => {
                 let magnitude = rail_accel(accel, (kappa0 + sigma * ds).abs(), v);
                 if brake { -magnitude } else { magnitude }
+            }
+        }
+    }
+
+    /// The `v²` at which the curvature at arc `ds` takes the whole budget,
+    /// `A/|κ|`; `None` for constant acceleration or a straight.
+    fn cap_speed_squared(&self, ds: f64) -> Option<f64> {
+        match *self {
+            ScalarLaw::ConstAccel { .. } => None,
+            ScalarLaw::DiskRail {
+                accel,
+                kappa0,
+                sigma,
+                ..
+            } => {
+                let kappa = (kappa0 + sigma * ds).abs();
+                (kappa > 0.0).then(|| accel / kappa)
             }
         }
     }
@@ -314,6 +475,55 @@ impl ScalarLaw {
         }
         Some(cap * (1.0 - follow * follow).sqrt())
     }
+
+    /// The `v²` of the curve [`Self::settle_crossed_cap`] settles a rail on
+    /// at arc `ds`, where its cap rises; `None` elsewhere.
+    fn settled_speed_squared(&self, ds: f64) -> Option<f64> {
+        let (settled, _) = self.settled_slopes(ds, 0.0)?;
+        let ScalarLaw::DiskRail {
+            accel,
+            kappa0,
+            sigma,
+            ..
+        } = *self
+        else {
+            return None;
+        };
+        let kappa = (kappa0 + sigma * ds).abs();
+        let follow = 0.5 * sigma / (kappa * kappa);
+        (settled > 0.0).then(|| accel / kappa * (1.0 - follow * follow).sqrt())
+    }
+
+    /// The acceleration and its rate along the curve
+    /// [`Self::settle_crossed_cap`] settles a rail on at arc `ds`, speed `v`:
+    /// `w(s) = A·√(k⁻² − c·k⁻⁶)`, `k = |κ(s)|`, `c = σ²/4`, read as
+    /// `a = ½·w'` and `ȧ = v·½·w''`; `None` where no such curve exists — a
+    /// falling cap, a straight, or one rising faster than a rail can climb.
+    fn settled_slopes(&self, ds: f64, v: f64) -> Option<(f64, f64)> {
+        let ScalarLaw::DiskRail {
+            accel,
+            kappa0,
+            sigma,
+            ..
+        } = *self
+        else {
+            return None;
+        };
+        let signed = kappa0 + sigma * ds;
+        let k = signed.abs();
+        let dk = sigma * signed.signum();
+        let c = 0.25 * sigma * sigma;
+        if k == 0.0 || dk > 0.0 || c >= k.powi(4) {
+            return None;
+        }
+        let u = k.powi(-2) - c * k.powi(-6);
+        let du = -2.0 * k.powi(-3) + 6.0 * c * k.powi(-7);
+        let ddu = 6.0 * k.powi(-4) - 42.0 * c * k.powi(-8);
+        let root = u.sqrt();
+        let dw = accel * du / (2.0 * root) * dk;
+        let ddw = accel * (ddu / (2.0 * root) - du * du / (4.0 * u * root)) * dk * dk;
+        Some((0.5 * dw, v * 0.5 * ddw))
+    }
 }
 
 impl LawSegment {
@@ -360,7 +570,7 @@ impl LawSegment {
                 let u = ((tau - lo.t) / h).clamp(0.0, 1.0);
                 let (v, a, mass, full_mass) = match hi.departure {
                     CapDeparture::None => {
-                        let [m0, c0, m1, c1] = self.pair_slopes(lo, hi, h);
+                        let [m0, c0, m1, c1] = self.law.pair_slopes(lo, hi, h);
                         (
                             quintic(lo.v, m0, c0, hi.v, m1, c1, u),
                             quintic_deriv(0.0, m0, c0, hi.rise, m1, c1, u) / h,
@@ -369,7 +579,7 @@ impl LawSegment {
                         )
                     }
                     CapDeparture::FromLo => {
-                        let departing = self.departure_interpolant(lo, hi, h);
+                        let departing = self.law.departure_interpolant(lo, hi, h);
                         let z = u.sqrt();
                         (
                             lo.v + departing.rise(z),
@@ -379,7 +589,7 @@ impl LawSegment {
                         )
                     }
                     CapDeparture::FromHi => {
-                        let departing = self.departure_interpolant(lo, hi, h);
+                        let departing = self.law.departure_interpolant(lo, hi, h);
                         let z = (1.0 - u).sqrt();
                         let full_mass = hi.v + departing.rise_mass(1.0);
                         (
@@ -388,6 +598,10 @@ impl LawSegment {
                             full_mass - hi.v * (1.0 - u) - departing.rise_mass(z),
                             full_mass,
                         )
+                    }
+                    CapDeparture::Clipped(clipped) => {
+                        let (v, a, mass) = clipped.state(u);
+                        (v, a, mass, clipped.state(1.0).2)
                     }
                 };
                 let ds = lo.s + h * mass + (hi.s - lo.s - h * full_mass) * u;
@@ -463,11 +677,17 @@ impl LawSegment {
                 // The cubic above seeds Newton on the arc `state_at` itself
                 // reports, so the time found is the one whose interpolated
                 // state sits at `s`.
+                const ARC_INVERSION_STEPS: usize = 16;
                 let mut tau = lo.t + u * h;
-                for _ in 0..3 {
+                for _ in 0..ARC_INVERSION_STEPS {
                     let (s_at, v_at, _) = self.state_at(self.t0 + tau);
                     let slope = v_at.max(1e-12);
-                    tau = (tau - (s_at - self.s0 - ds) / slope).clamp(lo.t, hi.t);
+                    let next = (tau - (s_at - self.s0 - ds) / slope).clamp(lo.t, hi.t);
+                    let settled = (next - tau).abs() <= 4.0 * f64::EPSILON * tau.abs();
+                    tau = next;
+                    if settled {
+                        break;
+                    }
                 }
                 Some(self.t0 + tau.min(self.dt))
             }
@@ -652,7 +872,7 @@ impl LawSegment {
                 let u = (tau - lo.t) / h;
                 match hi.departure {
                     CapDeparture::None => {
-                        let [m0, c0, m1, c1] = self.pair_slopes(lo, hi, h);
+                        let [m0, c0, m1, c1] = self.law.pair_slopes(lo, hi, h);
                         (
                             quintic(0.0, m0, c0, hi.rise, m1, c1, u),
                             CapDeparture::None,
@@ -664,7 +884,7 @@ impl LawSegment {
                         )
                     }
                     CapDeparture::FromLo => {
-                        let departing = self.departure_interpolant(lo, hi, h);
+                        let departing = self.law.departure_interpolant(lo, hi, h);
                         let z = u.sqrt();
                         (
                             departing.rise(z),
@@ -676,17 +896,17 @@ impl LawSegment {
                         )
                     }
                     CapDeparture::FromHi => {
-                        let departing = self.departure_interpolant(lo, hi, h);
-                        let z = (1.0 - u).sqrt();
-                        (
-                            hi.rise + departing.rise(z),
-                            CapDeparture::None,
-                            KnotSlopes::Interpolant {
-                                accel: -departing.scaled_accel(z) / h,
-                                rate: departing.scaled_rate(z) / (h * h),
-                            },
-                        )
+                        let departing = self.law.departure_interpolant(lo, hi, h);
+                        let clipped = ClippedDeparture {
+                            coefficients: departing.c,
+                            h,
+                            v_end: hi.v,
+                            theta_lo: h,
+                            theta_hi: h * (1.0 - u),
+                        };
+                        clipped_cut(&clipped, lo, v)
                     }
+                    CapDeparture::Clipped(parent) => clipped_cut(&parent.cut(u), lo, v),
                 }
             }
             None => (0.0, CapDeparture::None, KnotSlopes::Law),
@@ -811,31 +1031,51 @@ impl LawSegment {
             .expect("a DiskRail segment always carries its dense solution")
     }
 
-    /// Hands a rail built by [`Self::until_arc`] back to this thread's spare
-    /// knot buffers when nothing else shares its knots, so the next
-    /// full-length rail integrated here writes into memory already mapped
-    /// rather than faulting in a fresh mebibyte.
-    pub(crate) fn recycle(self) {
-        let Some(Ok(mut knots)) = self.dense.into_inner().map(Arc::try_unwrap) else {
-            return;
+    /// The knot pairs of a disk rail that reach into segment-local time
+    /// `(tau_lo, tau_hi)`, each with the formula [`Self::state_at`]
+    /// evaluates between its knots; empty for a constant-acceleration
+    /// segment. Pairs of zero duration hold no time and are skipped.
+    pub fn rail_pairs(&self, tau_lo: f64, tau_hi: f64) -> impl Iterator<Item = RailPair> + '_ {
+        let knots: &[RailKnot] = match self.law {
+            ScalarLaw::ConstAccel { .. } => &[],
+            ScalarLaw::DiskRail { .. } => self.rail_knots(),
         };
-        if knots.capacity() < FULL_RAIL_KNOTS {
-            return;
-        }
-        knots.clear();
-        SPARE_FULL_RAILS.with_borrow_mut(|spare| {
-            if spare.buffers.len() < SPARE_FULL_RAILS_MAX {
-                spare.buffers.push(knots);
-            }
-        });
+        let first = knots
+            .partition_point(|knot| knot.t <= tau_lo)
+            .saturating_sub(1);
+        knots
+            .windows(2)
+            .skip(first)
+            .take_while(move |pair| pair[0].t < tau_hi)
+            .filter(|pair| pair[1].t > pair[0].t)
+            .map(|pair| self.law.rail_pair(&pair[0], &pair[1]))
     }
 
+    /// An upper bound on `|a|` of the rail's interpolated motion across
+    /// every knot pair reaching into segment-local time `(tau_lo, tau_hi)`:
+    /// the motion every later stage reads, which strays from the law's
+    /// own acceleration by up to its proven defect; zero for a
+    /// constant-acceleration segment.
+    pub fn interpolated_acceleration_bound(&self, tau_lo: f64, tau_hi: f64) -> f64 {
+        self.rail_pairs(tau_lo, tau_hi)
+            .map(|pair| defect::acceleration_bound(&pair))
+            .fold(0.0, f64::max)
+    }
+
+    /// The proven defect of every knot pair of this rail against its law.
+    pub fn rail_defects(&self) -> impl Iterator<Item = PairDefect> + '_ {
+        self.rail_pairs(0.0, self.dt)
+            .map(|pair| defect::pair_defect(&self.law, &pair))
+    }
+}
+
+impl ScalarLaw {
     /// The knot's acceleration and its rate.
     fn knot_slopes(&self, knot: &RailKnot) -> (f64, f64) {
         match knot.slopes {
             KnotSlopes::Law => {
-                let accel = self.law.accel_at(knot.s, knot.v);
-                (accel, self.law.accel_rate_at(knot.s, knot.v, accel))
+                let accel = self.accel_at(knot.s, knot.v);
+                (accel, self.accel_rate_at(knot.s, knot.v, accel))
             }
             KnotSlopes::Interpolant { accel, rate } => (accel, rate),
         }
@@ -856,6 +1096,40 @@ impl LawSegment {
             CapDeparture::FromLo => DepartureInterpolant::new(h, a_lo, hi.rise, a_hi, rate_hi),
             CapDeparture::FromHi => DepartureInterpolant::new(h, -a_hi, -hi.rise, -a_lo, rate_lo),
             CapDeparture::None => panic!("a pair that leaves no cap has no departure interpolant"),
+            CapDeparture::Clipped(_) => {
+                panic!("a clipped pair carries its parent's departure interpolant")
+            }
+        }
+    }
+
+    /// The formula [`LawSegment::state_at`] evaluates between `lo` and `hi`.
+    fn rail_pair(&self, lo: &RailKnot, hi: &RailKnot) -> RailPair {
+        let h = hi.t - lo.t;
+        let shape = match hi.departure {
+            CapDeparture::None => RailPairShape::Quintic {
+                rise: hi.rise,
+                slopes: self.pair_slopes(lo, hi, h),
+            },
+            CapDeparture::Clipped(clipped) => RailPairShape::Clipped {
+                coefficients: clipped.coefficients,
+                h: clipped.h,
+                v_end: clipped.v_end,
+                theta_lo: clipped.theta_lo,
+                theta_hi: clipped.theta_hi,
+            },
+            departure => RailPairShape::Departure {
+                from_lo: departure == CapDeparture::FromLo,
+                coefficients: self.departure_interpolant(lo, hi, h).c,
+            },
+        };
+        RailPair {
+            t_lo: lo.t,
+            t_hi: hi.t,
+            s_lo: lo.s,
+            s_hi: hi.s,
+            v_lo: lo.v,
+            v_hi: hi.v,
+            shape,
         }
     }
 }
@@ -943,158 +1217,373 @@ fn hermite(p0: f64, m0: f64, p1: f64, m1: f64, u: f64) -> f64 {
         + (u3 - u2) * m1
 }
 
-/// Target dense-knot spacing along the arc, in millimetres.
-const RAIL_KNOT_DS: f64 = 2.5e-4;
+/// The share of a rail's arc its first step tries.
+const RAIL_FIRST_STEP_SHARE: f64 = 1.0 / 16.0;
 
-/// Knots of a rail the knot-count clamp caps: one mebibyte each.
-const FULL_RAIL_KNOTS: usize = RAIL_KNOTS_MAX + 1;
+/// How far one step's size may grow toward the next, and shrink on a retry.
+const RAIL_STEP_GROWTH_MAX: f64 = 4.0;
+const RAIL_STEP_SHRINK_MAX: f64 = 0.125;
 
-/// Full-length knot buffers a thread keeps for reuse, at most. The reverse
-/// pass recycles each member's rails as soon as its profile is built, so the
-/// spares only have to bridge the members in flight, not a whole window.
-const SPARE_FULL_RAILS_MAX: usize = 4;
+/// The share of its allowance a step's size aims the worse defect at.
+const RAIL_STEP_DEFECT_TARGET: f64 = 0.5;
 
-/// A thread's recycled full-length knot buffers, and how many full-length
-/// buffers it has asked for since the last [`trim_spare_full_rails`].
-struct SpareFullRails {
-    buffers: Vec<Vec<RailKnot>>,
-    requested: usize,
+/// The order in the step size of a knot pair's acceleration defect.
+const RAIL_DEFECT_ORDER: f64 = 5.0;
+
+/// The shortest step, as a share of the rail's arc, a step is shrunk to.
+const RAIL_STEP_SHARE_MIN: f64 = 1e-12;
+
+/// Knots a rail may need before it fails loudly.
+const RAIL_KNOTS_MAX: usize = 1 << 16;
+
+/// How far above its curvature cap a rail may start, in `v²`: rounding of
+/// a speed read off the cap.
+const CAP_START_SLACK: f64 = 1e-9;
+
+/// The size the next step tries after one of `size` whose worse defect was
+/// `excess` times its allowance.
+fn next_step_size(size: f64, excess: f64) -> f64 {
+    let factor = libm::pow(RAIL_STEP_DEFECT_TARGET / excess, 1.0 / RAIL_DEFECT_ORDER);
+    size * factor.clamp(RAIL_STEP_SHRINK_MAX, RAIL_STEP_GROWTH_MAX)
 }
 
-thread_local! {
-    static SPARE_FULL_RAILS: std::cell::RefCell<SpareFullRails> =
-        const {
-            std::cell::RefCell::new(SpareFullRails {
-                buffers: Vec::new(),
-                requested: 0,
-            })
-        };
-}
-
-/// An empty knot vector with room for `len` knots, reusing a recycled
-/// full-length buffer when one is spare.
-fn knot_buffer(len: usize) -> Vec<RailKnot> {
-    let spare = if len == FULL_RAIL_KNOTS {
-        SPARE_FULL_RAILS.with_borrow_mut(|spare| {
-            spare.requested += 1;
-            spare.buffers.pop()
-        })
-    } else {
-        None
-    };
-    spare.unwrap_or_else(|| Vec::with_capacity(len))
-}
-
-/// Keeps no more of this thread's spare full-length buffers than the plan it
-/// just finished asked for, so a plan without full-length rails leaves none
-/// pinned for the next.
-pub(crate) fn trim_spare_full_rails() {
-    SPARE_FULL_RAILS.with_borrow_mut(|spare| {
-        spare.buffers.truncate(spare.requested);
-        spare.requested = 0;
-    });
-}
-
-/// Dense arc-uniform solution of the rail ODE `d(v²)/ds = 2·a(s, v)` from
-/// `(0, v0)` over `ds`. Each knot pair's duration is the one under which the
-/// state interpolant [`LawSegment::state_at`] reads between them covers
-/// exactly the pair's arc, so the knot times, the interpolated velocity and
-/// the interpolated arc describe one motion. A start on the curvature cap
-/// departs it across the first two steps of the graded grid: the pair after
-/// it then spans at most 9/4 of its start's time from the apex, which keeps
-/// the square root within a quintic's reach. `None` when the speed folds to
-/// rest strictly inside the span.
+/// Solution of the rail ODE `d(v²)/ds = 2·a(s, v)` from `(0, v0)` over
+/// `ds`, its steps as long as their knot pairs' proven defects against the
+/// law ([`defect`]) stay within [`RAIL_ACCELERATION_DEFECT`] and
+/// [`RAIL_ARC_DEFECT`]: each step retried shorter while its pairs miss,
+/// the next sized from the last's defect. Each knot pair's duration is the
+/// one under which the state interpolant [`LawSegment::state_at`] reads
+/// between them covers exactly the pair's arc, so the knot times, the
+/// interpolated velocity and the interpolated arc describe one motion. A
+/// start on the curvature cap departs it in the first step. `None` when
+/// the speed folds to rest strictly inside the span.
 fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<Vec<RailKnot>>> {
-    if ds <= 0.0 {
-        let knot = RailKnot {
-            t: 0.0,
-            s: 0.0,
-            v: v0,
-            rise: 0.0,
-            departure: CapDeparture::None,
-            slopes: KnotSlopes::Law,
-        };
-        return Some(Arc::new(vec![knot, knot]));
-    }
-    let n = ((ds / RAIL_KNOT_DS).ceil() as usize).clamp(RAIL_KNOTS_MIN, RAIL_KNOTS_MAX);
-    // Near an apex the rail acceleration vanishes and w(s) leaves the cap as
-    // s^(3/2); quadratic grading toward that end restores the integrator's
-    // order there.
-    let apex_start = {
-        let a0 = law.accel_at(0.0, v0).abs();
-        let budget = match law {
-            ScalarLaw::DiskRail { accel, .. } => *accel,
-            ScalarLaw::ConstAccel { a0 } => a0.abs().max(1.0),
-        };
-        a0 < 0.1 * budget
-    };
-    let arc_at = |k: usize| -> f64 {
-        let u = k as f64 / n as f64;
-        if apex_start { ds * u * u } else { ds * u }
-    };
-    let mut layout = RailLayout {
-        knots: knot_buffer(n + 1),
-        t: 0.0,
-        w: v0 * v0,
-        carried: None,
-    };
-    layout.knots.push(RailKnot {
+    let start = RailKnot {
         t: 0.0,
         s: 0.0,
         v: v0,
         rise: 0.0,
         departure: CapDeparture::None,
         slopes: KnotSlopes::Law,
-    });
-    let mut first_regular = 0;
-    if law.in_cap_contact(law.accel_at(0.0, v0)) {
-        let h = arc_at(2);
-        let w = layout.w;
-        let lo = rail_state(law, 0.0, w);
-        let increment = departure_increment(law, 0.0, h, w);
-        let step = settle_rail_step(law, &lo, h, w, increment, n == 2, departure_knot_duration)?;
-        layout.lay(h, h, step, CapDeparture::FromLo);
-        first_regular = 2;
+    };
+    if ds <= 0.0 {
+        return Some(Arc::new(vec![start, start]));
     }
-    let f = |s: f64, w: f64| 2.0 * law.accel_at(s, w.max(0.0).sqrt());
-    let mut memo = law.is_autonomous().then(StepMemo::new);
-    for i in first_regular..n {
-        let s = arc_at(i);
-        let s_next = arc_at(i + 1);
-        let h = s_next - s;
+    if let Some(cap) = law.cap_speed_squared(0.0) {
+        assert!(
+            v0 * v0 <= cap * (1.0 + CAP_START_SLACK),
+            "rail {law:?} starts at v={v0}, above its curvature cap v={}",
+            cap.sqrt()
+        );
+    }
+    let mut layout = RailLayout {
+        knots: vec![start],
+        t: 0.0,
+        w: v0 * v0,
+        carried: None,
+    };
+    let mut s = 0.0;
+    let mut size = ds * RAIL_FIRST_STEP_SHARE;
+    while s < ds {
+        let remaining = ds - s;
+        let last = size >= remaining;
+        let h = if last {
+            remaining
+        } else if 2.0 * size > remaining {
+            0.5 * remaining
+        } else {
+            size
+        };
+        let s_next = if last { ds } else { s + h };
         let w = layout.w;
         let lo = layout
             .carried
-            .take()
             .filter(|end| end.s == s)
             .unwrap_or_else(|| rail_state(law, s, w));
-        let last = i == n - 1;
-        let step = match memo.as_ref().and_then(|memo| memo.get(w, h)) {
-            Some(step) => {
-                if step.w_next <= 0.0 && !last {
-                    return None;
-                }
-                if lo.v + step.hi.v <= 0.0 {
-                    return None;
-                }
-                step
+        let shortest = h <= ds * RAIL_STEP_SHARE_MIN;
+        let Some((first, second)) = rail_step(law, &lo, (s, s_next, h, w), last) else {
+            if shortest {
+                return None;
             }
-            None => {
-                let k1 = 2.0 * lo.a;
-                let k2 = f(s + 0.5 * h, w + 0.5 * h * k1);
-                let k3 = f(s + 0.5 * h, w + 0.5 * h * k2);
-                let k4 = f(s + h, w + h * k3);
-                let increment = h * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0;
-                let step = settle_rail_step(law, &lo, h, w, increment, last, knot_duration)?;
-                if let Some(memo) = memo.as_mut() {
-                    memo.put(w, h, step);
-                }
-                step
-            }
+            size = h * RAIL_STEP_SHRINK_MAX;
+            continue;
         };
-        layout.lay(s_next, s + h, step, CapDeparture::None);
+        let laid: &[Laid] = match &second {
+            Some(second) => &[first, *second],
+            None => &[first],
+        };
+        let excess = layout.excess(law, laid);
+        size = next_step_size(h, excess);
+        if excess > 1.0 {
+            assert!(
+                !shortest,
+                "rail {law:?} from v={v0} over {ds} mm: a step of {h} mm at {s} mm still misses its law by {excess}× its allowance"
+            );
+            continue;
+        }
+        for laid in laid {
+            layout.lay(laid);
+        }
+        assert!(
+            layout.knots.len() <= RAIL_KNOTS_MAX,
+            "rail {law:?} from v={v0} over {ds} mm needs more than {RAIL_KNOTS_MAX} knots"
+        );
+        s = s_next;
     }
     Some(Arc::new(layout.knots))
+}
+
+/// The knots one step of `h` from `lo` at arc `s`, where `v² = w`, lays up
+/// to grid arc `s_next`: a start on the cap departs it, a step running onto
+/// the cap approaches it ([`approach`]), one leaving it departs, any other
+/// is one regular Runge–Kutta step. `None` when the speed folds to rest
+/// before the rail's `last` step.
+fn rail_step(
+    law: &ScalarLaw,
+    lo: &RailState,
+    (s, s_next, h, w): (f64, f64, f64, f64),
+    last: bool,
+) -> Option<(Laid, Option<Laid>)> {
+    let laid = |step, departure| Laid {
+        s_next,
+        s_end: s + h,
+        step,
+        departure,
+    };
+    let departure = || {
+        let increment = departure_increment(law, s, h, w);
+        settle_rail_step(law, lo, h, w, increment, last, departure_knot_duration)
+    };
+    if s == 0.0 && law.in_cap_contact(lo.a) {
+        return Some((laid(departure()?, CapDeparture::FromLo), None));
+    }
+    if let Some(step) = settled_step(law, lo, h) {
+        return Some((laid(step, CapDeparture::None), None));
+    }
+    let f = |s: f64, w: f64| 2.0 * law.accel_at(s, w.max(0.0).sqrt());
+    let k1 = 2.0 * lo.a;
+    let k2 = f(s + 0.5 * h, w + 0.5 * h * k1);
+    let k3 = f(s + 0.5 * h, w + 0.5 * h * k2);
+    let k4 = f(s + h, w + h * k3);
+    let increment = h * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0;
+    let step = settle_rail_step(law, lo, h, w, increment, last, knot_duration)?;
+    let approaching =
+        law.in_cap_contact(step.hi.a) && !law.holds_cap(lo.a) && step.hi.a.abs() < lo.a.abs();
+    if approaching {
+        approach(law, lo, (s, s_next, h, w), step, last)
+    } else if law.holds_cap(lo.a) && !law.holds_cap(step.hi.a) {
+        Some((laid(departure()?, CapDeparture::FromLo), None))
+    } else {
+        Some((laid(step, CapDeparture::None), None))
+    }
+}
+
+/// The share of [`RAIL_ACCELERATION_DEFECT`] within which the curve a
+/// rising cap draws must follow the law for a rail to ride it: the curve
+/// is the law's own to `O(f²)`, `f = σ/2κ²`, which only a stiff cap makes
+/// this close, and a gentle one the integrator steps across stably anyway.
+const SETTLED_CURVE_SHARE: f64 = 1.0 / 64.0;
+
+/// The step from `lo` along the curve a rising cap draws the rail on, where
+/// `lo` rides it and the curve follows the law: at both ends the law's
+/// acceleration within [`SETTLED_CURVE_SHARE`] of the curve's, and `lo`'s
+/// speed close enough that closing the gap over the step adds at most half
+/// [`RAIL_ACCELERATION_DEFECT`]. The solution is pulled onto the curve within
+/// `1/λ` of arc, `λ = ∂(2a)/∂(v²)` its stiffness there, far below any step
+/// an explicit integrator is stable at across it, so the rail rides the
+/// curve itself and the defect check holds its knots to the law. `None`
+/// off such a curve.
+fn settled_step(law: &ScalarLaw, lo: &RailState, h: f64) -> Option<RailStep> {
+    let follows = |s: f64, v: f64, settled: f64| {
+        settled > 0.0
+            && (law.accel_at(s, v) - settled).abs()
+                <= SETTLED_CURVE_SHARE * RAIL_ACCELERATION_DEFECT
+    };
+    let (settled, _) = law.settled_slopes(lo.s, lo.v)?;
+    let on_curve = law.settled_speed_squared(lo.s)?.sqrt();
+    let gap = (lo.v - on_curve).abs();
+    if !(follows(lo.s, on_curve, settled)
+        && gap * (lo.v + on_curve) <= RAIL_ACCELERATION_DEFECT * h)
+    {
+        return None;
+    }
+    let w_next = law.settled_speed_squared(lo.s + h)?;
+    let v = w_next.sqrt();
+    let (settled, rate) = law.settled_slopes(lo.s + h, v)?;
+    if !follows(lo.s + h, v, settled) {
+        return None;
+    }
+    let a = law.accel_at(lo.s + h, v);
+    let hi = RailState {
+        s: lo.s + h,
+        v,
+        a,
+        rate,
+        slopes: KnotSlopes::Interpolant { accel: a, rate },
+    };
+    Some(RailStep {
+        w_next,
+        hi,
+        rise: v - lo.v,
+        duration: knot_duration(h, (lo.v, lo.a, lo.rate), (hi.v, hi.a, hi.rate)),
+    })
+}
+
+/// The knots of a step from `lo`, short of the cap, whose end `step`
+/// reached reads in contact with it. Where the solution reaches the cap
+/// inside the step the step splits there: the approach onto the cap, whose
+/// acceleration falls to zero as the square root of the time left — the
+/// mirror of a departure — then the departure from the contact over the
+/// rest of the step. A step ending short of the cap is a regular one: the
+/// steps shorten toward the contact until one reaches it.
+fn approach(
+    law: &ScalarLaw,
+    lo: &RailState,
+    (s, s_next, h, w): (f64, f64, f64, f64),
+    step: RailStep,
+    last: bool,
+) -> Option<(Laid, Option<Laid>)> {
+    let approach_duration = |hi: &RailState, ds: f64| {
+        departure_knot_duration(ds, (hi.v, -hi.a, hi.rate), (lo.v, -lo.a, lo.rate))
+    };
+    let Some((reach, w_contact)) = cap_contact_in_step(law, s, w, h) else {
+        let laid = Laid {
+            s_next,
+            s_end: s + h,
+            step,
+            departure: CapDeparture::None,
+        };
+        return Some((laid, None));
+    };
+    let s_contact = s + reach;
+    let rest = h - reach;
+    let contact = rail_state(law, s_contact, w_contact);
+    let approach = RailStep {
+        w_next: w_contact,
+        hi: contact,
+        rise: contact.v - lo.v,
+        duration: approach_duration(&contact, reach),
+    };
+    if approach.duration <= speed_noise_duration(lo.v) {
+        let increment = departure_increment(law, s, h, w);
+        let departure = settle_rail_step(law, lo, h, w, increment, last, departure_knot_duration)?;
+        let laid = Laid {
+            s_next,
+            s_end: s + h,
+            step: departure,
+            departure: CapDeparture::FromLo,
+        };
+        return Some((laid, None));
+    }
+    if rest <= 0.0 {
+        let laid = Laid {
+            s_next,
+            s_end: s + h,
+            step: approach,
+            departure: CapDeparture::FromHi,
+        };
+        return Some((laid, None));
+    }
+    let onto = Laid {
+        s_next: s_contact,
+        s_end: s_contact,
+        step: approach,
+        departure: CapDeparture::FromHi,
+    };
+    let increment = departure_increment(law, s_contact, rest, w_contact);
+    let departure = settle_rail_step(
+        law,
+        &contact,
+        rest,
+        w_contact,
+        increment,
+        last,
+        departure_knot_duration,
+    )?;
+    let off = Laid {
+        s_next,
+        s_end: s_contact + rest,
+        step: departure,
+        departure: CapDeparture::FromLo,
+    };
+    Some((onto, Some(off)))
+}
+
+/// The shortest pair from speed `v` whose acceleration its speeds' rounding
+/// leaves within [`RAIL_ACCELERATION_DEFECT`]: a contact closer than this
+/// is the step's own start.
+fn speed_noise_duration(v: f64) -> f64 {
+    defect::SPEED_NOISE_ULPS * f64::EPSILON * v.abs() / RAIL_ACCELERATION_DEFECT
+}
+
+/// Bisection steps locating a contact inside one grid step.
+const CONTACT_BISECTIONS: usize = 64;
+
+/// Where inside `(s, s + h]` the solution from `v² = w` at `s` reaches the
+/// cap `v² = A/|κ|`, as the arc past `s` and the cap's `v²` there: the
+/// contact whose approach, integrated back from the cap, lands on `w` at
+/// `s`. `None` when the step does not reach the cap.
+fn cap_contact_in_step(law: &ScalarLaw, s: f64, w: f64, h: f64) -> Option<(f64, f64)> {
+    let landing = |reach: f64| -> Option<f64> {
+        let cap = law.cap_speed_squared(s + reach)?;
+        Some(cap + approach_increment(law, s + reach, reach, cap) - w)
+    };
+    let (mut short, mut short_landing) = (0.0, landing(0.0)?);
+    let (mut reaches, mut reaches_landing) = (h, landing(h)?);
+    if reaches_landing > 0.0 || short_landing <= 0.0 {
+        return None;
+    }
+    let mut kept_side = 0_i8;
+    for _ in 0..CONTACT_BISECTIONS {
+        let secant =
+            reaches - reaches_landing * (reaches - short) / (reaches_landing - short_landing);
+        let middle = if secant > short && secant < reaches {
+            secant
+        } else {
+            0.5 * (short + reaches)
+        };
+        if middle <= short || middle >= reaches {
+            break;
+        }
+        let middle_landing = landing(middle)?;
+        if middle_landing > 0.0 {
+            (short, short_landing) = (middle, middle_landing);
+            if kept_side == 1 {
+                reaches_landing *= 0.5;
+            }
+            kept_side = 1;
+        } else {
+            (reaches, reaches_landing) = (middle, middle_landing);
+            if kept_side == -1 {
+                short_landing *= 0.5;
+            }
+            kept_side = -1;
+            if middle_landing == 0.0 {
+                break;
+            }
+        }
+        if reaches - short <= CONTACT_ARC_RESOLUTION * (s.abs() + h) {
+            break;
+        }
+    }
+    Some((reaches, law.cap_speed_squared(s + reaches)?))
+}
+
+/// How finely a contact's arc is located, relative to the arc it sits at:
+/// far below any step the rail is integrated in, and above the ulp noise
+/// the landing reads with.
+const CONTACT_ARC_RESOLUTION: f64 = 1e-13;
+
+/// The change in `v²` from the cap at `s` back over `h` of arc, the mirror
+/// of [`departure_increment`]: the approach reaches the cap as
+/// `(s − s')^(3/2)`, smooth in `x = √((s − s')/h)`.
+fn approach_increment(law: &ScalarLaw, s: f64, h: f64, w: f64) -> f64 {
+    let slope = |x: f64, w: f64| -4.0 * h * x * law.accel_at(s - h * x * x, w.max(0.0).sqrt());
+    let k1 = slope(0.0, w);
+    let k2 = slope(0.5, w + 0.5 * k1);
+    let k3 = slope(0.5, w + 0.5 * k2);
+    let k4 = slope(1.0, w + k3);
+    (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0
 }
 
 /// The rail's knots as [`integrate_rail_arc`] lays them, with the state the
@@ -1106,35 +1595,99 @@ struct RailLayout {
     carried: Option<RailState>,
 }
 
-impl RailLayout {
-    /// Lays the knot at grid arc `s_next` that `step` reached at `s_end`,
-    /// the arc its own sum lands on.
-    fn lay(&mut self, s_next: f64, s_end: f64, step: RailStep, departure: CapDeparture) {
-        self.t += step.duration;
-        self.w = step.w_next.max(0.0);
-        self.knots.push(RailKnot {
-            t: self.t,
-            s: s_next,
-            v: step.hi.v,
-            rise: step.rise,
-            departure,
-            slopes: KnotSlopes::Law,
-        });
-        self.carried = Some(RailState {
-            s: s_end,
-            ..step.hi
-        });
+/// A knot a step reached: at arc `s_next`, by `step` landing on `s_end`,
+/// the arc its own sum lands on.
+#[derive(Clone, Copy)]
+struct Laid {
+    s_next: f64,
+    s_end: f64,
+    step: RailStep,
+    departure: CapDeparture,
+}
+
+impl Laid {
+    fn knot(&self, t_lo: f64) -> RailKnot {
+        RailKnot {
+            t: t_lo + self.step.duration,
+            s: self.s_next,
+            v: self.step.hi.v,
+            rise: self.step.rise,
+            departure: self.departure,
+            slopes: self.step.hi.slopes,
+        }
     }
 }
 
+impl RailLayout {
+    fn lay(&mut self, laid: &Laid) {
+        let knot = laid.knot(self.t);
+        self.t = knot.t;
+        self.w = laid.step.w_next.max(0.0);
+        self.knots.push(knot);
+        self.carried = Some(RailState {
+            s: laid.s_end,
+            ..laid.step.hi
+        });
+    }
+
+    /// How many times over its allowance the worse defect of the pairs
+    /// `laid` would add is.
+    fn excess(&self, law: &ScalarLaw, laid: &[Laid]) -> f64 {
+        let mut lo = *self
+            .knots
+            .last()
+            .expect("a rail layout starts with its first knot");
+        let mut worst = 0.0_f64;
+        for laid in laid {
+            let hi = laid.knot(lo.t);
+            if hi.t > lo.t {
+                worst = worst.max(defect::pair_defect(law, &law.rail_pair(&lo, &hi)).excess());
+            }
+            lo = hi;
+        }
+        worst
+    }
+}
+
+/// The rail's state at arc `s` where `v² = w`: the law's acceleration, and
+/// its rate — the settled curve's where the state rides a rising cap's
+/// curve within [`RAIL_ACCELERATION_DEFECT`]: the curve draws the rail
+/// along it, and the law's own rate there is its stiffness pulling an
+/// ulp's departure back, not the motion's. A state holding a held cap
+/// rides it flat: the law's acceleration there is the rounding of its
+/// speed against the cap, which a rail holding the cap does not follow.
 fn rail_state(law: &ScalarLaw, s: f64, w: f64) -> RailState {
     let v = w.max(0.0).sqrt();
     let a = law.accel_at(s, v);
-    RailState {
-        s,
-        v,
-        a,
-        rate: law.accel_rate_at(s, v, a),
+    match law.settled_slopes(s, v) {
+        Some((settled, rate)) if settled == 0.0 && rate == 0.0 && law.holds_cap(a) => RailState {
+            s,
+            v,
+            a: 0.0,
+            rate: 0.0,
+            slopes: KnotSlopes::Interpolant {
+                accel: 0.0,
+                rate: 0.0,
+            },
+        },
+        Some((settled, rate))
+            if settled > 0.0 && (a - settled).abs() <= RAIL_ACCELERATION_DEFECT =>
+        {
+            RailState {
+                s,
+                v,
+                a,
+                rate,
+                slopes: KnotSlopes::Interpolant { accel: a, rate },
+            }
+        }
+        _ => RailState {
+            s,
+            v,
+            a,
+            rate: law.accel_rate_at(s, v, a),
+            slopes: KnotSlopes::Law,
+        },
     }
 }
 
@@ -1183,46 +1736,6 @@ struct RailStep {
     duration: f64,
 }
 
-const STEP_MEMO_SLOTS: usize = 64;
-
-/// Completed regular steps of an autonomous rail by the `(v², h)` they
-/// started from. Such a law reads the arc nowhere, so a regular step is a
-/// function of its start speed and size alone, and a rail riding its cap
-/// repeats a handful of `(v², h)` pairs — the grid's step sizes differ only
-/// in rounding — for thousands of steps. Direct-mapped on the step size; a
-/// collision only costs a recomputation. A rail's departure from the cap is
-/// a different step from the same `(v², h)`, so it neither reads nor fills
-/// the memo.
-struct StepMemo {
-    slots: [Option<(u64, u64, RailStep)>; STEP_MEMO_SLOTS],
-}
-
-impl StepMemo {
-    fn new() -> Self {
-        StepMemo {
-            slots: [None; STEP_MEMO_SLOTS],
-        }
-    }
-
-    fn slot(h: f64) -> usize {
-        (h.to_bits().wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (64 - STEP_MEMO_SLOTS.trailing_zeros()))
-            as usize
-    }
-
-    fn get(&self, w: f64, h: f64) -> Option<RailStep> {
-        match self.slots[Self::slot(h)] {
-            Some((w_bits, h_bits, step)) if w_bits == w.to_bits() && h_bits == h.to_bits() => {
-                Some(step)
-            }
-            _ => None,
-        }
-    }
-
-    fn put(&mut self, w: f64, h: f64, step: RailStep) {
-        self.slots[Self::slot(h)] = Some((w.to_bits(), h.to_bits(), step));
-    }
-}
-
 /// The rise in `v²` over `[s, s + h]` departing the cap at `s`. There `v²`
 /// leaves as `(s'−s)^(3/2)`, whose unbounded curvature a step in arc
 /// misses by a fixed fraction however short; one Runge–Kutta step in
@@ -1245,6 +1758,7 @@ struct RailState {
     v: f64,
     a: f64,
     rate: f64,
+    slopes: KnotSlopes,
 }
 
 /// The duration `τ` under which the quintic Hermite through `(v, a, ȧ)` at

@@ -427,6 +427,7 @@ dependencies = [
  "libm",
  "nurbs",
  "proptest",
+ "taylor-model",
 ]
 
 [[package]]
@@ -733,6 +734,7 @@ dependencies = [
  "nurbs",
  "planner-config",
  "proptest",
+ "taylor-model",
  "thiserror",
  "tracing",
  "trajectory",
@@ -1349,6 +1351,13 @@ name = "target-lexicon"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
+
+[[package]]
+name = "taylor-model"
+version = "0.1.0"
+dependencies = [
+ "libm",
+]
 
 [[package]]
 name = "tempfile"

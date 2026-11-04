@@ -530,6 +530,19 @@ pub mod geometry::vec3
 pub fn geometry::vec3::dist([f64; 3], [f64; 3]) -> f64
 pub mod geometry::velocity
 pub mod geometry::velocity::law
+pub enum geometry::velocity::law::RailPairShape
+pub geometry::velocity::law::RailPairShape::Clipped
+pub geometry::velocity::law::RailPairShape::Clipped::coefficients: [f64; 4]
+pub geometry::velocity::law::RailPairShape::Clipped::h: f64
+pub geometry::velocity::law::RailPairShape::Clipped::theta_hi: f64
+pub geometry::velocity::law::RailPairShape::Clipped::theta_lo: f64
+pub geometry::velocity::law::RailPairShape::Clipped::v_end: f64
+pub geometry::velocity::law::RailPairShape::Departure
+pub geometry::velocity::law::RailPairShape::Departure::coefficients: [f64; 4]
+pub geometry::velocity::law::RailPairShape::Departure::from_lo: bool
+pub geometry::velocity::law::RailPairShape::Quintic
+pub geometry::velocity::law::RailPairShape::Quintic::rise: f64
+pub geometry::velocity::law::RailPairShape::Quintic::slopes: [f64; 4]
 pub enum geometry::velocity::law::ScalarLaw
 pub geometry::velocity::law::ScalarLaw::ConstAccel
 pub geometry::velocity::law::ScalarLaw::ConstAccel::a0: f64
@@ -553,14 +566,48 @@ pub fn geometry::velocity::law::LawSegment::end_distance(&self) -> f64
 pub fn geometry::velocity::law::LawSegment::end_state(&self) -> (f64, f64, f64)
 pub fn geometry::velocity::law::LawSegment::end_time(&self) -> f64
 pub fn geometry::velocity::law::LawSegment::flipped_cut(&self, f64, f64, geometry::velocity::law::ScalarLaw, f64) -> core::option::Option<(geometry::velocity::law::LawSegment, f64)>
+pub fn geometry::velocity::law::LawSegment::interpolated_acceleration_bound(&self, f64, f64) -> f64
 pub fn geometry::velocity::law::LawSegment::min_velocity(&self) -> f64
 pub fn geometry::velocity::law::LawSegment::new(f64, f64, f64, f64, geometry::velocity::law::ScalarLaw) -> Self
+pub fn geometry::velocity::law::LawSegment::rail_defects(&self) -> impl core::iter::traits::iterator::Iterator<Item = geometry::velocity::law::PairDefect> + '_
+pub fn geometry::velocity::law::LawSegment::rail_pairs(&self, f64, f64) -> impl core::iter::traits::iterator::Iterator<Item = geometry::velocity::law::RailPair> + '_
 pub fn geometry::velocity::law::LawSegment::reach_over(geometry::velocity::law::ScalarLaw, f64, f64) -> core::option::Option<f64>
 pub fn geometry::velocity::law::LawSegment::state_at(&self, f64) -> (f64, f64, f64)
 pub fn geometry::velocity::law::LawSegment::time_at_distance(&self, f64) -> core::option::Option<f64>
 pub fn geometry::velocity::law::LawSegment::until_arc(f64, f64, f64, geometry::velocity::law::ScalarLaw, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
 impl core::cmp::PartialEq for geometry::velocity::law::LawSegment
 pub fn geometry::velocity::law::LawSegment::eq(&self, &Self) -> bool
+pub struct geometry::velocity::law::PairDefect
+pub geometry::velocity::law::PairDefect::acceleration: f64
+pub geometry::velocity::law::PairDefect::arc: f64
+pub geometry::velocity::law::PairDefect::speed_noise: f64
+impl geometry::velocity::law::PairDefect
+pub fn geometry::velocity::law::PairDefect::allowance(&self) -> f64
+pub fn geometry::velocity::law::PairDefect::excess(&self) -> f64
+pub struct geometry::velocity::law::RailPair
+pub geometry::velocity::law::RailPair::s_hi: f64
+pub geometry::velocity::law::RailPair::s_lo: f64
+pub geometry::velocity::law::RailPair::shape: geometry::velocity::law::RailPairShape
+pub geometry::velocity::law::RailPair::t_hi: f64
+pub geometry::velocity::law::RailPair::t_lo: f64
+pub geometry::velocity::law::RailPair::v_hi: f64
+pub geometry::velocity::law::RailPair::v_lo: f64
+pub const geometry::velocity::law::RAIL_ACCELERATION_DEFECT: f64
+pub const geometry::velocity::law::RAIL_ARC_DEFECT: f64
+pub const geometry::velocity::law::RAIL_SPEED_SLACK: f64
+pub enum geometry::velocity::RailPairShape
+pub geometry::velocity::RailPairShape::Clipped
+pub geometry::velocity::RailPairShape::Clipped::coefficients: [f64; 4]
+pub geometry::velocity::RailPairShape::Clipped::h: f64
+pub geometry::velocity::RailPairShape::Clipped::theta_hi: f64
+pub geometry::velocity::RailPairShape::Clipped::theta_lo: f64
+pub geometry::velocity::RailPairShape::Clipped::v_end: f64
+pub geometry::velocity::RailPairShape::Departure
+pub geometry::velocity::RailPairShape::Departure::coefficients: [f64; 4]
+pub geometry::velocity::RailPairShape::Departure::from_lo: bool
+pub geometry::velocity::RailPairShape::Quintic
+pub geometry::velocity::RailPairShape::Quintic::rise: f64
+pub geometry::velocity::RailPairShape::Quintic::slopes: [f64; 4]
 pub enum geometry::velocity::ScalarLaw
 pub geometry::velocity::ScalarLaw::ConstAccel
 pub geometry::velocity::ScalarLaw::ConstAccel::a0: f64
@@ -621,8 +668,11 @@ pub fn geometry::velocity::law::LawSegment::end_distance(&self) -> f64
 pub fn geometry::velocity::law::LawSegment::end_state(&self) -> (f64, f64, f64)
 pub fn geometry::velocity::law::LawSegment::end_time(&self) -> f64
 pub fn geometry::velocity::law::LawSegment::flipped_cut(&self, f64, f64, geometry::velocity::law::ScalarLaw, f64) -> core::option::Option<(geometry::velocity::law::LawSegment, f64)>
+pub fn geometry::velocity::law::LawSegment::interpolated_acceleration_bound(&self, f64, f64) -> f64
 pub fn geometry::velocity::law::LawSegment::min_velocity(&self) -> f64
 pub fn geometry::velocity::law::LawSegment::new(f64, f64, f64, f64, geometry::velocity::law::ScalarLaw) -> Self
+pub fn geometry::velocity::law::LawSegment::rail_defects(&self) -> impl core::iter::traits::iterator::Iterator<Item = geometry::velocity::law::PairDefect> + '_
+pub fn geometry::velocity::law::LawSegment::rail_pairs(&self, f64, f64) -> impl core::iter::traits::iterator::Iterator<Item = geometry::velocity::law::RailPair> + '_
 pub fn geometry::velocity::law::LawSegment::reach_over(geometry::velocity::law::ScalarLaw, f64, f64) -> core::option::Option<f64>
 pub fn geometry::velocity::law::LawSegment::state_at(&self, f64) -> (f64, f64, f64)
 pub fn geometry::velocity::law::LawSegment::time_at_distance(&self, f64) -> core::option::Option<f64>
@@ -639,6 +689,14 @@ pub geometry::velocity::MoveVelocity::phases: alloc::vec::Vec<geometry::velocity
 pub geometry::velocity::MoveVelocity::samples: alloc::vec::Vec<geometry::velocity::VelSample>
 pub geometry::velocity::MoveVelocity::source: geometry::segment::SourceRange
 pub geometry::velocity::MoveVelocity::step_capacity_overload: core::option::Option<geometry::step_capacity::StepCapacityOverload>
+pub struct geometry::velocity::RailPair
+pub geometry::velocity::RailPair::s_hi: f64
+pub geometry::velocity::RailPair::s_lo: f64
+pub geometry::velocity::RailPair::shape: geometry::velocity::law::RailPairShape
+pub geometry::velocity::RailPair::t_hi: f64
+pub geometry::velocity::RailPair::t_lo: f64
+pub geometry::velocity::RailPair::v_hi: f64
+pub geometry::velocity::RailPair::v_lo: f64
 pub struct geometry::velocity::Serial
 impl geometry::velocity::FanOut for geometry::velocity::Serial
 pub fn geometry::velocity::Serial::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
@@ -710,6 +768,19 @@ pub geometry::GeometryError::NonPlanarBasis::reason: &'static str
 pub geometry::GeometryError::NotSinglePieceCubic
 pub geometry::GeometryError::NotSinglePieceCubic::reason: &'static str
 pub geometry::GeometryError::ZeroMotion
+pub enum geometry::RailPairShape
+pub geometry::RailPairShape::Clipped
+pub geometry::RailPairShape::Clipped::coefficients: [f64; 4]
+pub geometry::RailPairShape::Clipped::h: f64
+pub geometry::RailPairShape::Clipped::theta_hi: f64
+pub geometry::RailPairShape::Clipped::theta_lo: f64
+pub geometry::RailPairShape::Clipped::v_end: f64
+pub geometry::RailPairShape::Departure
+pub geometry::RailPairShape::Departure::coefficients: [f64; 4]
+pub geometry::RailPairShape::Departure::from_lo: bool
+pub geometry::RailPairShape::Quintic
+pub geometry::RailPairShape::Quintic::rise: f64
+pub geometry::RailPairShape::Quintic::slopes: [f64; 4]
 pub enum geometry::ScalarLaw
 pub geometry::ScalarLaw::ConstAccel
 pub geometry::ScalarLaw::ConstAccel::a0: f64
@@ -875,8 +946,11 @@ pub fn geometry::velocity::law::LawSegment::end_distance(&self) -> f64
 pub fn geometry::velocity::law::LawSegment::end_state(&self) -> (f64, f64, f64)
 pub fn geometry::velocity::law::LawSegment::end_time(&self) -> f64
 pub fn geometry::velocity::law::LawSegment::flipped_cut(&self, f64, f64, geometry::velocity::law::ScalarLaw, f64) -> core::option::Option<(geometry::velocity::law::LawSegment, f64)>
+pub fn geometry::velocity::law::LawSegment::interpolated_acceleration_bound(&self, f64, f64) -> f64
 pub fn geometry::velocity::law::LawSegment::min_velocity(&self) -> f64
 pub fn geometry::velocity::law::LawSegment::new(f64, f64, f64, f64, geometry::velocity::law::ScalarLaw) -> Self
+pub fn geometry::velocity::law::LawSegment::rail_defects(&self) -> impl core::iter::traits::iterator::Iterator<Item = geometry::velocity::law::PairDefect> + '_
+pub fn geometry::velocity::law::LawSegment::rail_pairs(&self, f64, f64) -> impl core::iter::traits::iterator::Iterator<Item = geometry::velocity::law::RailPair> + '_
 pub fn geometry::velocity::law::LawSegment::reach_over(geometry::velocity::law::ScalarLaw, f64, f64) -> core::option::Option<f64>
 pub fn geometry::velocity::law::LawSegment::state_at(&self, f64) -> (f64, f64, f64)
 pub fn geometry::velocity::law::LawSegment::time_at_distance(&self, f64) -> core::option::Option<f64>
@@ -933,6 +1007,14 @@ pub geometry::MoveVelocity::phases: alloc::vec::Vec<geometry::velocity::law::Law
 pub geometry::MoveVelocity::samples: alloc::vec::Vec<geometry::velocity::VelSample>
 pub geometry::MoveVelocity::source: geometry::segment::SourceRange
 pub geometry::MoveVelocity::step_capacity_overload: core::option::Option<geometry::step_capacity::StepCapacityOverload>
+pub struct geometry::RailPair
+pub geometry::RailPair::s_hi: f64
+pub geometry::RailPair::s_lo: f64
+pub geometry::RailPair::shape: geometry::velocity::law::RailPairShape
+pub geometry::RailPair::t_hi: f64
+pub geometry::RailPair::t_lo: f64
+pub geometry::RailPair::v_hi: f64
+pub geometry::RailPair::v_lo: f64
 pub struct geometry::Serial
 impl geometry::velocity::FanOut for geometry::velocity::Serial
 pub fn geometry::velocity::Serial::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
