@@ -683,7 +683,7 @@ impl RatioSmoothing {
             self.width.place_rest(seam);
         }
         self.width.extend(&leaders, leg, table_end);
-        let closes_a_rest = self.lay_rest_valley(leg, &leaders, crossing, table_end);
+        let closes_a_rest = self.lay_rest_valley(spans, leg, &leaders, crossing, table_end);
         if reach > SPAN_MIN_LEN_MM && !self.resting && !closes_a_rest && crossing.turns_around() {
             self.lay_turnaround_valley(seam, reach);
         }
@@ -1018,16 +1018,23 @@ impl RatioSmoothing {
     }
 
     /// Within a leg whose raw leaders rest, the shaped leaders rest where
-    /// their speed is down to [`REST_SPEED_MM_S`]: a rest valley opens where they
-    /// first come to rest, unless one is open already, and the first leg
-    /// that moves again closes it where they last rested. Each side spans
-    /// the shaped spill between that rest and the raw seam plus as far as
-    /// the leaders cover in half the valley ramp time at the seam, so the
-    /// advance keeps its lead through the spill and builds or releases it
-    /// from the rest out. A rest leg the leaders cross without coming to
-    /// rest opens none. Returns whether `leg` closes a rest valley.
+    /// their speed is down to [`REST_SPEED_MM_S`], and the table steps the
+    /// ratio from the leg's tail to its lead where their distance from the
+    /// rest point puts the rest ([`super::FollowerState::ingest`]), which
+    /// the odometer can reach while they still creep toward it. The width
+    /// rests there all the same, so the ratio step stays a step that any
+    /// weight above zero hands the advance as a position step. A rest
+    /// valley takes in both: it opens at the first, unless one is open
+    /// already, and the first leg that moves again closes it at the last.
+    /// Each side spans the shaped spill between that rest and the raw seam
+    /// plus as far as the leaders cover in half the valley ramp time at the
+    /// seam, so the advance keeps its lead through the spill and builds or
+    /// releases it from the rest out. A rest leg the leaders cross without
+    /// coming to rest opens none. Returns whether `leg` closes a rest
+    /// valley.
     fn lay_rest_valley(
         &mut self,
+        spans: &[RatioSpan],
         leg: &RampLeg,
         leaders: &ShapedLeaders,
         crossing: Crossing,
@@ -1043,11 +1050,13 @@ impl RatioSmoothing {
             self.close_rest(rest_end, seam - rest_end + reach);
             return true;
         }
-        let Some((rest_start, rest_end)) =
-            resting_stretch(leaders, leg, REST_SPEED_MM_S, table_end)
-        else {
+        let Some(resting) = resting_stretch(leaders, leg, REST_SPEED_MM_S, table_end) else {
             return false;
         };
+        let (rest_start, rest_end) = ratio_steps_within(spans, seam, table_end)
+            .map_or(resting, |(first_step, last_step)| {
+                (resting.0.min(first_step), resting.1.max(last_step))
+            });
         if !self.resting {
             self.valleys.push(AdvanceValley {
                 start: rest_start,
@@ -1286,6 +1295,20 @@ fn resting_stretch(
     let first = edge(speed.grid[0], first);
     let last = edge(speed.grid[speed.grid.len() - 1], last);
     Some((speed.path_at(first), speed.path_at(last)))
+}
+
+/// The first and the last seam in `[from, to)` where the table's ratio
+/// itself steps.
+fn ratio_steps_within(spans: &[RatioSpan], from: f64, to: f64) -> Option<(f64, f64)> {
+    let first_after = spans.partition_point(|span| span.s0 < from).max(1);
+    let mut steps = spans[first_after - 1..]
+        .windows(2)
+        .take_while(|pair| pair[1].s0 < to)
+        .filter_map(|pair| Seam::between(&pair[0], &pair[1]))
+        .filter(|seam| seam.step != 0.0)
+        .map(|seam| seam.s);
+    let first = steps.next()?;
+    Some((first, steps.last().unwrap_or(first)))
 }
 
 /// Where inside `leg`, off its seams, the shaped leaders turn around: the

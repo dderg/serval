@@ -1,5 +1,11 @@
+use std::sync::Arc;
+
+use geometry::RatioRampRule;
+use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
+use trajectory::{ContinuousAxis, ContinuousSegment};
+
 use super::super::FollowerState;
-use super::{ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_S, WIDTH_SLOPE_BOUND, WidthField};
+use super::{ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_S, RampLeg, WIDTH_SLOPE_BOUND, WidthField};
 
 /// `(length, ratio at start, ratio at end)` per span.
 type Table = Vec<(f64, f64, f64)>;
@@ -486,4 +492,86 @@ fn a_time_node_a_rounding_off_a_rest_narrows_the_width_into_it_linearly() {
             );
         }
     }
+}
+
+const REST_LEG_HALF_TIME_S: f64 = 0.01;
+const REST_LEG_SPILL_MM: f64 = 0.01;
+
+/// A resting leg as shaping leaves it: the leaders brake along x into a
+/// rest halfway through, speed falling as the square of the time left,
+/// and leave it the same way.
+fn braking_into_a_rest_and_leaving() -> ContinuousSegment {
+    let half = REST_LEG_HALF_TIME_S;
+    let (t0, t_rest, t1) = (0.0, half, 2.0 * half);
+    let d = REST_LEG_SPILL_MM;
+    let c = d / half.powi(3);
+    let x = bezier_pieces_to_nurbs(&[
+        BezierPiece {
+            u_start: t0,
+            u_end: t_rest,
+            coeffs: vec![0.0, 3.0 * c * half * half, -3.0 * c * half, c],
+        },
+        BezierPiece {
+            u_start: t_rest,
+            u_end: t1,
+            coeffs: vec![d, 0.0, 0.0, c],
+        },
+    ]);
+    let held = Arc::new(bezier_pieces_to_nurbs(&[BezierPiece {
+        u_start: t0,
+        u_end: t1,
+        coeffs: vec![0.0],
+    }]));
+    ContinuousSegment {
+        axes: Arc::from([
+            ContinuousAxis::Spline(Arc::new(x)),
+            ContinuousAxis::Spline(Arc::clone(&held)),
+            ContinuousAxis::Spline(Arc::clone(&held)),
+            ContinuousAxis::Spline(held),
+        ]),
+        followers: Arc::from([]),
+        spatial_path: false,
+        t_start: t0,
+        t_end: t1,
+        motor_mask: 0,
+        source_line: 1,
+        rest_at_end: false,
+    }
+}
+
+/// A resting leg steps the ratio from its tail to its lead where the
+/// leaders' distance from the rest point puts the rest, which the odometer
+/// can reach while they still creep toward it, short of where the valley
+/// finds them resting. The width rests there all the same, so the ratio
+/// step stays a step, and the valley's zero weight is all that keeps it
+/// from the advance.
+#[test]
+fn a_rest_valley_covers_the_ratio_step_its_leg_lays_short_of_the_rest() {
+    let travel = 10.0;
+    let short_of_rest = 4e-7;
+    let tail = REST_LEG_SPILL_MM - short_of_rest;
+    let mut state = FollowerState::default();
+    state.push_span(travel, 0.0, 0.0);
+    state.push_span(tail, 0.0, 0.0);
+    state.push_span(REST_LEG_SPILL_MM + short_of_rest, 0.03, 0.03);
+    let shaped = braking_into_a_rest_and_leaving();
+    let leg = RampLeg {
+        shaped: &shaped,
+        leaders: &[0, 1],
+        support: (shaped.t_start, shaped.t_end),
+        start_s: travel,
+        rests: true,
+    };
+    let rule = RatioRampRule {
+        advance_slope_s: 0.5,
+        max_velocity_mm_s: 45.0,
+        max_accel_mm_s2: 2000.0,
+    };
+    state.smoothing.lay(&state.spans, &leg, &rule);
+    let ratio_step = travel + tail;
+    let (weight, _, _) = state.smoothing.valley_weight(ratio_step);
+    assert_eq!(
+        weight, 0.0,
+        "the advance reads the ratio step at {ratio_step} mm with weight {weight}"
+    );
 }
