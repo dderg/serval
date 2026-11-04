@@ -570,14 +570,8 @@ pub(crate) fn project_followers(
             for (offset, read) in reads.into_iter().enumerate() {
                 let i = first_new + offset;
                 let table_start = state.s_ingested_end;
-                let shaped_ds = state.ingest(
-                    &base[i],
-                    &frontier[i],
-                    axis,
-                    leaders,
-                    &base[i + 1..],
-                    &read,
-                );
+                let shaped_ds =
+                    state.ingest(&base[i], &frontier[i], axis, leaders, &base[i + 1..], &read);
                 let s_start = state.aligned_span_start(next_s);
                 let leg = RampLeg {
                     shaped: &frontier[i],
@@ -2349,7 +2343,8 @@ fn arrival_at_rest(raw: &ContinuousSegment, shaped: &ContinuousSegment, leaders:
         leaders
             .iter()
             .map(|&axis| {
-                let delta = axis_pva(&shaped.axes[axis], t).0 - axis_pva(&raw.axes[axis], rest_at).0;
+                let delta =
+                    axis_pva(&shaped.axes[axis], t).0 - axis_pva(&raw.axes[axis], rest_at).0;
                 delta * delta
             })
             .sum::<f64>()

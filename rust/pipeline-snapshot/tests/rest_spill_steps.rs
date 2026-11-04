@@ -30,14 +30,13 @@ fn kernel_free_fast() -> PathBuf {
 fn a_kernel_free_advance_holds_the_extruder_to_its_limits_into_a_curved_stop() {
     let config = kernel_free_fast();
     for (print, lines) in EXCERPTS {
-        let gcode: String = std::fs::read_to_string(
-            corpus::repo().join(format!("tools/sim/gcode/{print}.gcode")),
-        )
-        .expect("read the sim print")
-        .lines()
-        .take(lines)
-        .flat_map(|line| [line, "\n"])
-        .collect();
+        let gcode: String =
+            std::fs::read_to_string(corpus::repo().join(format!("tools/sim/gcode/{print}.gcode")))
+                .expect("read the sim print")
+                .lines()
+                .take(lines)
+                .flat_map(|line| [line, "\n"])
+                .collect();
         let snapshot = corpus::plan(print, &gcode, &config).expect("the excerpt plans");
         let audit = corpus::extruder::extruder_audit(&snapshot, &gcode, &config)
             .expect("the config limits the extruder");

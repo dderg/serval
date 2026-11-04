@@ -365,8 +365,9 @@ and rebuilds it after over the input shaper's spill around the rest alone
 wherever the shortest ramp the extruder's limits allow for that lead fits
 within the spill, over the spill plus that ramp's reach elsewhere, and over
 the spill plus the reach of the longest ramp where a ratio step lies so near
-the rest that its own ramp would leave those limits; a rest the leaders pass
-through without stopping keeps the full advance. Around a rest, the flow
+the rest that its own ramp, at the speed the leaders cross it there, would
+leave those limits; a rest the leaders pass through without stopping keeps
+the full advance. Around a rest, the flow
 switches from the move before's ratio to the move after's where the shaped
 leaders reach the rest point, even where the shaped axes curve into it
 unlike each other and cover more path than their straight distance from it;
