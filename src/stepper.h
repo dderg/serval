@@ -101,6 +101,8 @@ enum {
 
 uint_fast8_t stepper_event_full(struct timer *t);
 uint_fast8_t stepper_load_next(struct stepper *s);
+void stepper_setup_dispatch(struct stepper *s, uint_fast8_t both_edge,
+                            uint32_t pulse_ticks);
 uint32_t stepper_get_position(struct stepper *s);
 int32_t stepper_classic_wire_position(struct stepper *s);
 void stepper_classic_halt(struct stepper *s);
