@@ -12,6 +12,7 @@ name = "motion_pipeline"
 
 [dependencies]
 libm = { version = "0.2", default-features = false }
+taylor-model = { path = "../taylor-model" }
 geometry = { path = "../geometry" }
 trajectory = { path = "../trajectory" }
 nurbs = { path = "../nurbs" }
@@ -26,6 +27,7 @@ fit-audit = []
 
 [dev-dependencies]
 proptest = "1"
+planner-config = { path = "../planner-config", features = ["doc"] }
 
 [lints]
 workspace = true

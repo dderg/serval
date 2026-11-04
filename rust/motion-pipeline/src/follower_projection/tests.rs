@@ -765,11 +765,7 @@ fn an_advanced_follower_source_fit_opens_and_closes_on_the_signal_velocity() {
         odometer_from_start(&shaped),
         0.0,
     );
-    let advanced = super::AdvancedFollowerSignal {
-        source: &sig,
-        advance: kernel_advance(&stage),
-        steps: &[],
-    };
+    let advanced = super::AdvancedFollowerSignal::new(&sig, kernel_advance(&stage), &[]);
     let pieces = nurbs::bezier::extract_bezier_pieces(&fitted.track);
     assert!(pieces.len() > 1, "fixture must fit with an interior seam");
     for piece in &pieces {
@@ -1341,11 +1337,11 @@ fn an_advanced_follower_source_holds_the_tolerance_past_a_leader_seam_velocity_r
         odometer_from_start(&shaped),
         0.0,
     );
-    let advanced = super::AdvancedFollowerSignal {
-        source: &sig,
-        advance: kernel_advance(&stage),
-        steps: &fitted.window_advance_steps,
-    };
+    let advanced = super::AdvancedFollowerSignal::new(
+        &sig,
+        kernel_advance(&stage),
+        &fitted.window_advance_steps,
+    );
     for piece in nurbs::bezier::extract_bezier_pieces(&fitted.track) {
         let duration = piece.u_end - piece.u_start;
         for sample in 0..64 {
@@ -1779,6 +1775,102 @@ fn a_source_fitted_to_the_plain_projection_keeps_the_absolute_budget() {
         ]),
     ] {
         assert_eq!(source_budget(&chain), AccelBudget::Absolute);
+    }
+}
+
+/// Leaders that speed up and turn without stopping, and a follower state
+/// whose odometer crosses a seam between two ratio ramps.
+fn turning_leaders_on_two_ramps() -> (ContinuousSegment, FollowerState) {
+    let shaped = cusp_segment(
+        vec![0.0, 80.0, 300.0],
+        vec![0.0, 5.0, 100.0, -900.0],
+        0.0,
+        0.1,
+    );
+    let mut state = FollowerState::default();
+    let length = super::leader_arc_length(&shaped, &[0, 1]);
+    state.push_span(0.4 * length, 0.05, 0.08);
+    state.push_span(0.7 * length, 0.08, 0.03);
+    (shaped, state)
+}
+
+/// The enclosure of `signal` over `[lo, hi]` exists and no sample of the
+/// signal leaves any of its pieces' bounds, each piece's ends read from
+/// inside it, as the fit piece ending or starting there holds them.
+fn assert_enclosure_holds_every_sample(signal: &impl TrackSignal, (lo, hi): (f64, f64)) {
+    let pieces = signal
+        .enclosure_on(lo, hi, [1e-7, f64::INFINITY, 1e-2])
+        .expect("a moving follower on its span table has an enclosure");
+    assert!(
+        pieces.len() > 1,
+        "the fixture's odometer crosses a span seam"
+    );
+    for piece in pieces.iter() {
+        for k in 0..=32 {
+            let t = match k {
+                0 => trajectory::next_toward(piece.lo, f64::INFINITY),
+                32 => trajectory::next_toward(piece.hi, f64::NEG_INFINITY),
+                _ => piece.lo + (piece.hi - piece.lo) * f64::from(k) / 32.0,
+            };
+            let read = signal.eval_pva(t);
+            let enclosed = piece.eval_pva(t);
+            for (order, (read, model)) in [
+                (read.0, enclosed.0),
+                (read.1, enclosed.1),
+                (read.2, enclosed.2),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let bound = piece.pva[order].rounding + 1e-9 * (1.0 + read.abs());
+                assert!(
+                    (read - model).abs() <= bound,
+                    "order {order} at t={t}: the signal reads {read}, its enclosure {model} ± {}",
+                    piece.pva[order].rounding
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_follower_enclosure_holds_every_sample_of_its_signal() {
+    let (shaped, state) = turning_leaders_on_two_ramps();
+    let sig = FollowerSignal::new(
+        &shaped,
+        &shaped,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    assert_enclosure_holds_every_sample(&sig, (sig.grid[0], sig.grid[sig.grid.len() - 1]));
+}
+
+#[test]
+fn an_advanced_follower_enclosure_holds_every_sample_of_its_signal() {
+    let (shaped, state) = turning_leaders_on_two_ramps();
+    let sig = FollowerSignal::new(
+        &shaped,
+        &shaped,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    for stage in [
+        trajectory::ChainStage::DerivativeGains { k1: 0.04, k2: 0.0 },
+        trajectory::ChainStage::NonlinearAdvance(trajectory::NonlinearAdvance {
+            model: trajectory::AdvanceModel::Tanh,
+            linear_advance: 0.02,
+            nonlinear_offset: 0.03,
+            linearization_velocity: 1.0,
+        }),
+    ] {
+        let advanced = super::AdvancedFollowerSignal::new(&sig, kernel_advance(&stage), &[]);
+        assert_enclosure_holds_every_sample(&advanced, (sig.grid[0], sig.grid[sig.grid.len() - 1]));
     }
 }
 

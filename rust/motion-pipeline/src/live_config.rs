@@ -61,33 +61,148 @@ pub fn stream_config(cfg: &PlannerConfig) -> Result<crate::StreamConfig, String>
     })
 }
 
-/// A G-code move's limits: the path caps, the z caps for the planner to
-/// apply to whatever share of each fitted segment's motion lands on z, and
-/// the caps of the extruder the move extrudes on.
-pub fn move_limits(
-    cfg: &PlannerConfig,
-    extruder: Option<geometry::ExtruderCaps>,
-) -> Result<geometry::VelocityLimits, String> {
-    let (max_velocity, accel, corner_deviation) = cfg.effective_limits();
-    Ok(
-        z_capped_limits(cfg, max_velocity, accel, corner_deviation)?
+/// The name of the axis a G-code E word drives.
+pub const EXTRUSION_AXIS: &str = "e";
+
+/// One G-code line move as the host hands it over: where the toolhead is,
+/// how far it goes, the E it extrudes, its feedrate and its sequence number.
+/// `start + delta` is the end, computed in exactly one place.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GcodeLine {
+    pub start: [f64; 3],
+    pub delta: [f64; 3],
+    pub de: f64,
+    pub feedrate_mm_s: f64,
+    pub seq: u32,
+}
+
+impl GcodeLine {
+    #[must_use]
+    pub fn end(&self) -> [f64; 3] {
+        [
+            self.start[0] + self.delta[0],
+            self.start[1] + self.delta[1],
+            self.start[2] + self.delta[2],
+        ]
+    }
+}
+
+/// The only constructor of the planner's G-code moves. The live bridge, the
+/// snapshot path, the replays and the bench reference all build every move
+/// through it, so no two of them can plan the same G-code under different
+/// limits: the config's path and z caps, the caps of the [`EXTRUSION_AXIS`]
+/// on every move (a travel beside an extrusion is budgeted by them too), and
+/// the runtime overrides in force when the move is submitted.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GcodeMoveBase {
+    limits: geometry::VelocityLimits,
+    extruder_axis: Option<usize>,
+}
+
+impl GcodeMoveBase {
+    pub fn of(
+        cfg: &PlannerConfig,
+        extruder_caps: &[geometry::ExtruderCaps],
+    ) -> Result<Self, String> {
+        let extruder_axis = cfg.axis_registry.axis_index(EXTRUSION_AXIS).ok();
+        let extruder = extruder_axis.and_then(|axis| {
+            extruder_caps
+                .iter()
+                .copied()
+                .find(|caps| caps.axis_index == axis)
+        });
+        let cart = cfg.cartesian;
+        Ok(Self {
+            limits: z_capped_limits(
+                cfg,
+                cart.max_velocity,
+                cart.max_accel,
+                cart.corner_deviation,
+            )?
             .with_extruder_caps(extruder)?,
-    )
+            extruder_axis,
+        })
+    }
+
+    /// A base not read from a config, for planner tests that pick limits
+    /// directly.
+    #[must_use]
+    pub fn from_parts(limits: geometry::VelocityLimits, extruder_axis: Option<usize>) -> Self {
+        Self {
+            limits,
+            extruder_axis,
+        }
+    }
+
+    #[must_use]
+    pub fn limits(&self) -> geometry::VelocityLimits {
+        self.limits
+    }
+
+    /// The config limits runtime overrides are clamped against.
+    #[must_use]
+    pub fn config_limits(&self) -> planner_config::CartesianLimits {
+        planner_config::CartesianLimits {
+            max_velocity: self.limits.max_velocity_mm_s,
+            max_accel: self.limits.accel_mm_s2,
+            max_jerk: self.limits.max_jerk_mm_s3,
+            max_z_velocity: self.limits.max_z_velocity_mm_s,
+            max_z_accel: self.limits.max_z_accel_mm_s2,
+            corner_deviation: self.limits.corner_deviation_mm,
+        }
+    }
+
+    pub fn limits_under(
+        &self,
+        runtime: &planner_config::RuntimeLimits,
+    ) -> Result<geometry::VelocityLimits, &'static str> {
+        let (velocity, accel, corner_deviation) = runtime.effective(&self.config_limits());
+        geometry::VelocityLimits::try_new(
+            velocity,
+            accel,
+            corner_deviation,
+            self.limits.max_jerk_mm_s3,
+        )?
+        .with_z_caps(
+            self.limits.max_z_velocity_mm_s,
+            self.limits.max_z_accel_mm_s2,
+        )?
+        .with_extruder_caps(self.limits.extruder)
+    }
+
+    /// `None` for a line too short to move anything.
+    pub fn line_move(
+        &self,
+        runtime: &planner_config::RuntimeLimits,
+        line: GcodeLine,
+    ) -> Result<Option<geometry::Move>, String> {
+        if line.de != 0.0 && self.extruder_axis.is_none() {
+            return Err(format!(
+                "E word on a move but no [axis {EXTRUSION_AXIS}] is declared — declare the \
+                 follower axis or stop sending E"
+            ));
+        }
+        let ctx = geometry::MoveContext {
+            extruder_axis: self.extruder_axis.unwrap_or_default(),
+            feedrate_mm_s: line.feedrate_mm_s,
+            limits: self.limits_under(runtime)?,
+            source: geometry::SourceRange {
+                start_line: line.seq,
+                end_line: line.seq,
+            },
+        };
+        match geometry::line_move(line.start, line.end(), line.de, ctx) {
+            Ok(m) => Ok(Some(m)),
+            Err(geometry::FrontendError::ZeroMotion { .. }) => Ok(None),
+            Err(e) => Err(format!("{e:?}")),
+        }
+    }
 }
 
 /// Every limited follower's extruder caps under the chains `cfg` runs.
 pub fn extruder_caps(cfg: &PlannerConfig) -> Result<Vec<geometry::ExtruderCaps>, String> {
     let chains = cfg.compile_active_chains().map_err(|e| e.to_string())?;
     planner_config::extruder_caps(&cfg.axis_registry, &chains)
-}
-
-/// The caps of the follower axis `axis` among `caps`, if it has limits.
-#[must_use]
-pub fn extruder_caps_on(
-    caps: &[geometry::ExtruderCaps],
-    axis: usize,
-) -> Option<geometry::ExtruderCaps> {
-    caps.iter().copied().find(|caps| caps.axis_index == axis)
 }
 
 fn z_capped_limits(

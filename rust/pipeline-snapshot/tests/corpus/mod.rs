@@ -10,8 +10,8 @@
 use std::path::{Path, PathBuf};
 
 use pipeline_snapshot::waypoints::parse_gcode;
-use pipeline_snapshot::{SampleSide, SnapshotParams, pipeline_snapshot};
-use planner_config::from_doc::read_motion_settings;
+use pipeline_snapshot::{SampleSide, pipeline_snapshot_for_config};
+use planner_config::from_doc::{planner_config_from_text, read_motion_settings};
 
 pub const SIM_GCODES: [&str; 4] = [
     "voron_first_layers",
@@ -89,8 +89,13 @@ pub fn plan(name: &str, gcode: &str, config: &Path) -> Option<pipeline_snapshot:
     Some(plan_waypoints(name, &waypoints, config))
 }
 
+fn planner(name: &str, config: &Path) -> planner_config::PlannerConfig {
+    let text = std::fs::read_to_string(config).expect("read config");
+    planner_config_from_text(&text).unwrap_or_else(|e| panic!("{name}: {e}"))
+}
+
 pub fn waypoints(gcode: &str, config: &Path) -> Vec<pipeline_snapshot::waypoints::Waypoint> {
-    parse_gcode(gcode, &motion_settings(config).cartesian).expect("gcode parses")
+    parse_gcode(gcode, &planner("waypoints", config).cartesian).expect("gcode parses")
 }
 
 pub fn plan_waypoints(
@@ -98,31 +103,8 @@ pub fn plan_waypoints(
     waypoints: &[pipeline_snapshot::waypoints::Waypoint],
     config: &Path,
 ) -> pipeline_snapshot::Snapshot {
-    let settings = motion_settings(config);
-    pipeline_snapshot(
-        waypoints,
-        SnapshotParams {
-            max_velocity: settings.cartesian.max_velocity,
-            max_accel: settings.cartesian.max_accel,
-            corner_deviation: settings.cartesian.corner_deviation,
-            max_jerk: settings.cartesian.max_jerk,
-            max_z_velocity: SnapshotParams::binding_z_cap(
-                settings.cartesian.max_z_velocity,
-                settings.cartesian.max_velocity,
-            ),
-            max_z_accel: SnapshotParams::binding_z_cap(
-                settings.cartesian.max_z_accel,
-                settings.cartesian.max_accel,
-            ),
-            max_extrude_only_velocity: settings.max_extrude_only_velocity,
-            max_extrude_only_accel: settings.max_extrude_only_accel,
-            max_path_deviation: Some(settings.fit_tolerance_mm),
-            max_accel_deviation: Some(settings.fit_tolerance_accel_mm_s2),
-            axis_decls: settings.axes,
-            post_processor_decls: settings.post_processors,
-        },
-    )
-    .unwrap_or_else(|e| panic!("{name}: {e}"))
+    pipeline_snapshot_for_config(waypoints, &planner(name, config))
+        .unwrap_or_else(|e| panic!("{name}: {e}"))
 }
 
 pub fn snapshot_cases() -> Vec<(String, String, PathBuf)> {

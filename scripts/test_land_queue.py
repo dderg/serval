@@ -92,3 +92,25 @@ def test_reexec_is_skipped_when_already_running_the_current_copy(monkeypatch):
         lq.pending, "run", lambda *a, **k: pytest.fail("fetched")
     )
     lq.reexec_current_copy()
+
+
+CHECK = """\
+  EXACT    a/p/c
+  CHANGED  b/p/c
+  PENDING  n/p/c
+"""
+
+
+def test_a_case_already_exact_on_the_branch_is_not_accepted_again():
+    assert lq.not_yet_accepted(["a/p/c", "b/p/c", "n/p/c"], CHECK) == [
+        "b/p/c",
+        "n/p/c",
+    ]
+
+
+def test_everything_already_exact_leaves_nothing_to_accept():
+    assert lq.not_yet_accepted(["a/p/c"], CHECK) == []
+
+
+def test_a_case_missing_from_the_check_output_is_still_accepted():
+    assert lq.not_yet_accepted(["z/p/c"], CHECK) == ["z/p/c"]

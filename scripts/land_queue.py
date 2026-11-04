@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -184,7 +185,26 @@ def review_snapshots(tree: Path, entry: Entry) -> dict:
         return json.loads(out.read_text())
 
 
+STATUS_LINE = re.compile(r"^\s*(EXACT|CHANGED|PENDING)\s+(\S+)\s*$")
+
+
+def not_yet_accepted(cases: list[str], check_output: str) -> list[str]:
+    exact = {
+        match.group(2)
+        for line in check_output.splitlines()
+        if (match := STATUS_LINE.match(line)) and match.group(1) == "EXACT"
+    }
+    return [case for case in cases if case not in exact]
+
+
 def accept(tree: Path, cases: list[str], message: Path) -> None:
+    check = subprocess.run(
+        ["uv", "run", "python", "snapshots/run.py"],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+    )
+    cases = not_yet_accepted(cases, check.stdout)
     if not cases:
         return
     pending.run(

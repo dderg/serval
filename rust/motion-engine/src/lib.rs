@@ -1,5 +1,7 @@
 mod bridge;
 #[cfg(feature = "snapshot")]
+mod parity;
+#[cfg(feature = "snapshot")]
 pub mod viz;
 
 use pyo3::prelude::*;
@@ -27,5 +29,9 @@ fn _motion_engine(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(viz::snapshot_moves, m)?)?;
     #[cfg(feature = "snapshot")]
     m.add_class::<viz::PlannerLimits>()?;
+    #[cfg(feature = "snapshot")]
+    m.add_class::<parity::ParityRecord>()?;
+    #[cfg(feature = "snapshot")]
+    m.add_function(wrap_pyfunction!(parity::snapshot_parity_record, m)?)?;
     Ok(())
 }

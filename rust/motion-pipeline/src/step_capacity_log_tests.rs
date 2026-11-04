@@ -54,3 +54,30 @@ fn the_first_cap_reports_at_once_and_later_ones_are_counted_until_the_interval()
         ]
     );
 }
+
+#[test]
+fn flushing_reports_every_cap_counted_inside_the_interval() {
+    let capacity = capacity();
+    let mut log = StepCapacityLog::default();
+    let start = Instant::now();
+    log.record(&capacity, overload(0, 1.2), start);
+    let soon = start + Duration::from_secs(1);
+    log.record(&capacity, overload(0, 1.5), soon);
+    log.record(&capacity, overload(1, 1.1), soon);
+    assert_eq!(
+        log.flush(&capacity),
+        vec![
+            StepCapacityReport {
+                mcu: "mcu".into(),
+                moves_capped: 1,
+                worst_demand_over_capacity: 1.5,
+            },
+            StepCapacityReport {
+                mcu: "toolboard".into(),
+                moves_capped: 1,
+                worst_demand_over_capacity: 1.1,
+            },
+        ]
+    );
+    assert!(log.flush(&capacity).is_empty());
+}

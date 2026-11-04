@@ -1142,23 +1142,57 @@ class SimWorld:
 
     @_runs_free
     def _wait_ready(self, timeout: float) -> bool:
+        return self._settled_state(timeout) == "ready"
+
+    def _settled_state(self, timeout: float) -> Optional[str]:
         deadline = self.vclock.deadline(timeout)
         while not deadline.expired():
             if self.klippy_proc.poll() is not None:
-                return False
-            try:
-                info = _api_request(
-                    self.api_socket, "info", {}, self.vclock.deadline(3.0)
-                )
-            except OSError:
-                info = {}
-            state = (info.get("result") or {}).get("state")
-            if state == "ready":
-                return True
-            if state in ("error", "shutdown"):
-                return False
+                return None
+            state = self._printer_state()
+            if state in ("ready", "error", "shutdown"):
+                return state
             time.sleep(READY_POLL_S)
-        return False
+        return None
+
+    def _printer_state(self) -> Optional[str]:
+        try:
+            info = _api_request(
+                self.api_socket, "info", {}, self.vclock.deadline(3.0)
+            )
+        except OSError:
+            return None
+        return (info.get("result") or {}).get("state")
+
+    @_runs_free
+    def restart_klippy(self, timeout: float = 120.0) -> Optional[str]:
+        self.klippy_proc.terminate()
+        self.klippy_proc.wait(timeout=10)
+        self._spawn_klippy(self.workdir / "printer.cfg")
+        return self._settled_state(timeout)
+
+    @_runs_free
+    def firmware_restart(self, timeout: float = 120.0) -> None:
+        _api_request(
+            self.api_socket,
+            "gcode/firmware_restart",
+            {},
+            self.vclock.deadline(5.0),
+        )
+        deadline = self.vclock.deadline(timeout)
+        state = None
+        while not deadline.expired():
+            if self.klippy_proc.poll() is not None:
+                raise SimError("klippy exited during FIRMWARE_RESTART")
+            state = self._printer_state()
+            if state == "ready":
+                self._wait_clock_sync(CLOCK_SYNC_BOOT_TIMEOUT)
+                return
+            time.sleep(READY_POLL_S)
+        raise SimError(
+            f"FIRMWARE_RESTART left klippy in {state!r}:\n"
+            f"{self.klippy_log_text()[-3000:]}"
+        )
 
     @_runs_free
     def _wait_clock_sync(self, timeout: float) -> None:
