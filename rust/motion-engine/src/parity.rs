@@ -100,16 +100,27 @@ impl PyMotionEngine {
 }
 
 /// What the snapshot path feeds its pipeline for `waypoints` under
-/// `config_text` and what it shapes.
+/// `config_text` and what it shapes, capped by `step_benchmarks` as
+/// `init_planner_detached` caps the live side.
 #[pyfunction]
+#[pyo3(signature = (waypoints, config_text, step_benchmarks = None))]
 pub(crate) fn snapshot_parity_record(
     waypoints: Vec<PyWaypoint>,
     config_text: &str,
+    step_benchmarks: Option<Vec<crate::step_benchmarks::PyStepBenchmark>>,
 ) -> PyResult<ParityRecord> {
+    let step_capacity = crate::step_benchmarks::optional_step_capacity_input(
+        config_text,
+        step_benchmarks.as_deref(),
+    )?;
     let planner = planner_config::from_doc::planner_config_from_text(config_text)
         .map_err(PyValueError::new_err)?;
-    let record = snapshot_core::stream_record(&waypoints_from_py(waypoints), &planner)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let record = snapshot_core::stream_record(
+        &waypoints_from_py(waypoints),
+        &planner,
+        step_capacity.as_ref(),
+    )
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(ParityRecord {
         inputs: shaping(record.inputs),
         segments: record.segments,

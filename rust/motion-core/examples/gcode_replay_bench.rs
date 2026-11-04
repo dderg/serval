@@ -130,7 +130,7 @@ fn main() {
     });
 
     let planner = planner_config(&config_path);
-    let replay = LiveReplay::new(&source, &planner).unwrap_or_else(|e| {
+    let replay = LiveReplay::new(&source, &planner, None).unwrap_or_else(|e| {
         eprintln!("{config_path}: {e}");
         process::exit(1);
     });

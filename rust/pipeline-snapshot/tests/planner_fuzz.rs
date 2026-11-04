@@ -144,8 +144,9 @@ fn run_waypoints(limits: FuzzLimits, waypoints: &[Waypoint]) -> (ExactTrajectory
         ),
         ..PlannerConfig::default()
     };
-    let config = live_config::stream_config(&planner).expect("strategy generates valid limits");
-    let report = audit_trajectory(&traj, &config, &budgets(&config));
+    let config =
+        live_config::stream_config(&planner, None).expect("strategy generates valid limits");
+    let report = audit_trajectory(&traj, &config, &budgets(&config, waypoints));
     (traj, report)
 }
 
@@ -155,9 +156,9 @@ const E_AXIS: usize = 3;
 /// is declared (x, y, z, and e following them, with no post-processors),
 /// the extruder's seam velocity under the derived ratio ramp: every ratio
 /// step is ramped, so only rounding steps it, bar the velocity steps a
-/// kernel-free advance makes of an unshaped leader's acceleration steps,
-/// which the axis's instantaneous corner velocity bounds.
-fn budgets(config: &motion_pipeline::StreamConfig) -> AuditBudgets {
+/// kernel-free advance makes of an unshaped leader's acceleration steps
+/// ([`motion_pipeline::follower_velocity_step_allowance`]).
+fn budgets(config: &motion_pipeline::StreamConfig, waypoints: &[Waypoint]) -> AuditBudgets {
     let axis = |name: &str, follows: &[&str]| planner_config::AxisDecl {
         name: name.to_string(),
         follows: follows.iter().map(ToString::to_string).collect(),
@@ -179,8 +180,30 @@ fn budgets(config: &motion_pipeline::StreamConfig) -> AuditBudgets {
         .compile_active_chains(&registry, false)
         .expect("the fuzz's chains compile");
     let mut budgets = AuditBudgets::for_config(config);
-    budgets.seam_vel_mm_s[E_AXIS] += chains.follower_velocity_step_allowance(E_AXIS);
+    budgets.seam_vel_mm_s[E_AXIS] += motion_pipeline::follower_velocity_step_allowance(
+        &chains,
+        E_AXIS,
+        extrusion_ratio_bound(waypoints),
+        config.fit_tol_accel_mm_s2,
+    );
     budgets
+}
+
+/// The steepest extrusion any move between `waypoints` lays per millimetre
+/// of travel.
+fn extrusion_ratio_bound(waypoints: &[Waypoint]) -> f64 {
+    waypoints
+        .windows(2)
+        .filter_map(|pair| {
+            let [from, to] = [pair[0].position, pair[1].position];
+            let travel = libm::sqrt(
+                (0..E_AXIS)
+                    .map(|axis| (to[axis] - from[axis]).powi(2))
+                    .sum::<f64>(),
+            );
+            (travel > 0.0).then(|| (to[E_AXIS] - from[E_AXIS]).abs() / travel)
+        })
+        .fold(0.0, f64::max)
 }
 
 /// The smoothness budgets that still bind under infinite jerk: a seam

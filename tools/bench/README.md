@@ -42,12 +42,12 @@ Run from the repo root.
 uv run python tools/bench/deploy.py sync [--tree DIR]  # rsync a worktree (default: this one) to Pi ~/klipper, delete stale, build-native.sh if rust/ changed, restart klipper, write ~/klipper/.bench-deploy.json
 uv run python tools/bench/deploy.py reset-target   # SWD-reset the F401 (for an MCU that no longer answers; a latched shutdown is already cleared by the FIRMWARE_RESTART that restart_klipper/prepare_printer send when klippy settles in shutdown), restart klipper
 uv run python tools/bench/lock.py hold -- <cmd...> # run a multi-step session under the bench lock
-uv run python tools/bench/suite.py [--quick] [--expect-fail NAME]  # regression matrix: sync + 8 runs (3 with --quick) + analyze, table, ~/bench/suites/<ts>/summary.json
+uv run python tools/bench/suite.py [--quick] [--expect-fail NAME]  # regression matrix: sync + 9 runs (3 with --quick) + analyze, table, ~/bench/suites/<ts>/summary.json
 uv run python tools/bench/deploy.py flash-target   # build F401 fw (f401.config), flash via Pi SWD, restart klippy
 uv run python tools/bench/deploy.py flash-capture  # build capture-fw, flash F407 via ST-Link
 uv run python tools/bench/deploy.py config         # validate + push printer.cfg, FIRMWARE_RESTART
 uv run python tools/bench/run.py <gcode> [--runs-dir ~/bench/runs] [--timeout 1800] [--events [--step-tap]]
-uv run python tools/bench/analyze.py <run_dir> [--gap S]
+uv run python tools/bench/analyze.py <run_dir> [--gap S] [--corner-flow] [--step-benchmark PULSED,BOTH_EDGE,CLOCK_HZ]
 uv run python tools/bench/capture.py --help        # standalone capture (--events for event mode)
 uv run python tools/bench/buzz.py --motor a --steps 2000 --period-us 100  # event-mode calibration against busy-waited DIAG_STEPPER_BUZZ steps
 uv run python tools/bench/cdc_throughput.py --seconds 60  # capture-board USB throughput probe (firmware mode "T"; Gate 0 of capture-fw/EVENT_MODE.md)
@@ -106,6 +106,36 @@ Run `20261103-231302` (capacity ladder, event mode) failed the old time-only che
 
 The bound 0.05 step / 50 µs puts the crossover at 1 kHz. From 1 kHz up, any step more than 50 µs off is also more than 0.05 step off, so high-rate steps are judged by the 50 µs bound exactly as before. Below 1 kHz the time allowance grows to 0.05 step / rate, which is 250 µs at the 200 Hz floor. The turnaround step above sits 4× inside that. A step misplaced by more than a twentieth of a step still fails at every rate. Lost or extra steps fail `all_steps_matched` and `net_steps_match`.
 
+### Corner flow (`--corner-flow`)
+
+`analyze.py --corner-flow` adds `corner_flow` to `analysis.json`: the nozzle flow through every extruding corner (a turn ≥ 20° between two extruding moves) and short-segment curve (≥ 3 vertices turning ≥ 1° between extruding segments ≤ 2 mm) of the print. It uses the definition `tools/corner_flow.py` uses, from the shared `tools/flow_metric.py`. A first-order melt model (`e_cmd = e_out + K·de_out/dt`) runs with K set to the config's pressure-advance k. Its output is measured per mm of the nozzle path in 0.02 mm bins. The commanded bead is subtracted and the difference is divided by the nominal bead, so 0 means the commanded bead exactly and +0.5 means 50 % over. Each feature reports `apex` (the deviation at the apex), `peak`/`dip`/`width_mm` (bins beyond ±5 %) and `blob_nl` within ±15 mm, or ±half the shorter leg, around the apex. It also reports the extruder's `ve_max`/`ve_min`/`ae_max` over that span while the nozzle moves, from 2 ms / 5 ms box-smoothed derivatives.
+
+Every feature is measured from three sources on the same block-local time grid (10 µs):
+- `offline`: the snapshot plan's continuous x, y and e.
+- `reference`: the analyzer's reference steps.
+- `capture`: the captured a/b/e steps, mapped to stream time by the epoch's alignment.
+
+A step event is an exact point of the motion, because the motor steps where its position crosses a lattice line. So the step tracks are rebuilt by joining the events linearly, and x, y come from a, b through the kinematics' motor weights.
+
+`max_abs` splits the gap between capture and offline into two parts:
+- `reference_minus_offline` is step quantization. It is deterministic from the plan and is the bound the bench can resolve.
+- `capture_minus_reference` is what the printer stepped differently from the plan, mostly the host's step compression (≤ 25 µs). At 0.02 mm bins that is visible near slow apexes and on fast curves.
+
+Near an apex, where the nozzle nearly stops, flow per mm is ill-conditioned, so the quantization grows with how sharp the corner is. An exact synthetic capture reproduces the reference metrics to < 1e-4 (`test_corner_flow_bench.py`), and the offline source equals `corner_flow.py`'s `measure` for the same program.
+
+`gcode/corner_flow.gcode` (`gen_corner_flow.py`) holds 90°/45°/135° interior corners at 50/100/200/300 mm/s, a 10 mm-radius arc of 0.5 mm segments at 100/200 mm/s and a 2 mm zigzag at 50/150 mm/s. Each case runs between rests, so each is an epoch of its own. The bead is 0.4 × 0.2 mm from 1.75 mm filament.
+
+Main @ b0e093d46, event mode:
+- `printer.cfg` (PA k 0.03 + smooth_triangle 0.04 on E), run `corner_flow/20261104-054727`. Peaks offline / captured:
+  - 45° interior: +60/+63 % at 50 mm/s, +116/+125 % at 100, +176/+184 % at 200, +181/+196 % at 300.
+  - 90°: +8/+9, +21/+22, +53/+57, +57/+58 %.
+  - 135°: +0.2/+1.4, +1/+2, +9/+12, +20/+23 %.
+  - Dips: −3 to −15 %.
+  - Quantization bound: 10.2 points on peak, 1.4 on dip. Capture minus reference: ≤ 8.2 / 2.6 points.
+- `configs/ramp.cfg` (smooth_triangle 2 ms + ratio_ramp_time 15 ms), run `corner_flow/20261104-054856`.
+  - Offline peaks ≤ 1.4 % at every corner.
+  - Captured peaks reach 27 % at a 45° interior corner at 300 mm/s, but the reference steps show 28 % there too. The quantization bound is 26.4 points on peak and 2.3 on dip, and the capture stays within 7.7 points of the reference.
+
 ## Recovery
 
 - F401: hard reset via NRST from the Pi always works. `uhubctl` does NOT power-cycle it (Pi 5 port power stays on).
@@ -116,7 +146,7 @@ The bound 0.05 step / 50 µs puts the crossover at 1 kHz. From 1 kHz up, any ste
 
 Any tool that touches the Pi or the boards (`run.py`, every `deploy.py` subcommand) takes an exclusive lock on `~/bench/.lock` and waits up to `--lock-timeout` seconds (default 1800), reporting the holder every 30 s, so several agents can share the bench safely. `lock.py hold -- <cmd>` keeps the lock across several steps (children inherit `BENCH_LOCK_TOKEN` and re-enter it).
 
-`run.json` records `deployed` (the Pi's `.bench-deploy.json`: HEAD, branch, `git diff HEAD` sha256, dirty paths, worktree, rust build id); `run.py` fails if it is missing, and `analyze.py` refuses a run whose deployed rust build id is not the one its local engine was built from — a reference planned by other code holds the capture against motion the printer never commanded. `suite.py` is the one-command regression check: it takes the lock once, syncs, runs each row (first_layers, speed_ladder, speed_ladder_fast, extrude_ladder, epochs, rest_ladder, dense_top, dense_top_fast_throttled; rest_ladder runs `configs/rest_ladder.cfg`, fast Z limits with pressure advance + smooth_triangle on E, whose slow root searches meet the reanchor cuts its G4 rests trigger mid-print — the case a budget-truncated cut drain once turned into LatticeDrift), records crashed rows and recovers with `reset-target`, and exits non-zero if any row fails; rows expected to fail must be named with `--expect-fail` (an expected-fail row that passes also fails the suite). Agent usage guide: `.claude/skills/bench/SKILL.md`.
+`run.json` records `deployed` (the Pi's `.bench-deploy.json`: HEAD, branch, `git diff HEAD` sha256, dirty paths, worktree, rust build id); `run.py` fails if it is missing, and `analyze.py` refuses a run whose deployed rust build id is not the one its local engine was built from — a reference planned by other code holds the capture against motion the printer never commanded. The refusal prints the recipe to reanalyze from a worktree at the deployed head (`scripts/wt.sh new reanalyze-<head> --base <head>`, `make -f Makefile.rust motion-engine-fast`, the same `analyze.py` command) and warns when the deployed tree was dirty, since the head alone then may not reproduce it. `suite.py` is the one-command regression check: it builds the local engine first (`make -f Makefile.rust motion-engine-fast` in its own tree; a failed build aborts the suite with make's output instead of analyzing with a stale engine), takes the lock once, syncs, runs each row (first_layers, speed_ladder, speed_ladder_fast, extrude_ladder, epochs, rest_ladder, dense_top, dense_top_fast_throttled, corner_flow; rest_ladder runs `configs/rest_ladder.cfg`, fast Z limits with pressure advance + smooth_triangle on E, whose slow root searches meet the reanchor cuts its G4 rests trigger mid-print — the case a budget-truncated cut drain once turned into LatticeDrift; corner_flow captures in event mode and analyzes with `--corner-flow`, its summary row carrying `corner_flow_max_abs`), records crashed rows and recovers with `reset-target`, and exits non-zero if any row fails; rows expected to fail must be named with `--expect-fail` (an expected-fail row that passes also fails the suite). Agent usage guide: `.claude/skills/bench/SKILL.md`.
 
 ## Replay throughput (Pi 5)
 
@@ -185,7 +215,28 @@ CI runs the benchmark of every test/configs firmware in unicorn (`step_benchmark
 
 ### How the capacity caps moves
 
-Klippy turns the benchmark into a per-move speed cap (`klippy/motion_step_capacity.py`, `docs/Config_Reference_Motion.md`, "MCU step capacity"). Each MCU gets 0.75 × CLOCK_FREQ ticks per second (`STEP_CAPACITY_FRACTION`). 0.75 is the ladder's knee above: p99 lateness holds at 4.1–5.1 µs up to 225 k steps/s, 75 % of the ~300 k ceiling. A motor costs its benchmarked ticks per step, pulsed or both-edge by its own mode, times the steps per second the move asks of it. The planner keeps the sum over each MCU's motors within the capacity, with pressure advance counted on the extruder. On this bench (F401, 301 ticks/step pulsed) that is 209 k steps/s. Pure X/Y travel reaches 1308 mm/s and is never capped at `max_velocity: 1000`. Only extrusions above a ratio of about 0.088 along X or Y at full speed are slowed, e.g. a 0.8 × 0.3 mm line to 964 mm/s. `capacity.cfg` raises the limits past the cap. Its ladder rungs above ~209 k aggregate are now planned slower than the G-code asks, and `step_capacity_capped` events report it.
+The planner turns the benchmark into a per-move speed cap (`rust/motion-pipeline/src/live_config/step_capacity.rs`, `docs/Config_Reference_Motion.md`, "MCU step capacity"); klippy (`klippy/motion_step_capacity.py`) only hands it each MCU's benchmark, clock and stepped motors. Each MCU gets `STEP_CAPACITY_FRACTION` × CLOCK_FREQ ticks per second; the fraction comes from the timing budget below. A motor costs its benchmarked ticks per step (pulsed or both-edge, by its own mode) times the steps per second the move asks of it. The planner keeps the sum over each MCU's motors within the capacity, counting pressure advance on the extruder. On this bench (F401, 301 ticks/step pulsed) the fraction of 0.625 gives 174 k steps/s. `capacity.cfg` raises the speed limits past the cap, so its ladder rungs above the cap are planned slower than the G-code asks and `step_capacity_capped` events report it.
+
+`run.py` records every MCU's step benchmark in `run.json` under `step_benchmarks`, taken from the MCU status `step_capacity`, together with the capacity fraction the live planner applied. `analyze.py` plans its reference under the same cap, so a run where the cap binds is analyzed against the plan the printer executed, even after the fraction changes. A `run.json` from before that recording plans an uncapped reference. For such a run, `--step-benchmark 301,160,84000000,0.75` supplies the F401's benchmark and the fraction live used then (0.75 until it became 0.625). It is charged to every captured motor, stepped pulsed, since the bench has one MCU and no `dedge` driver. `analysis.json` says which reference it judged in `reference_step_capacity`: `recorded`, `supplied` or `absent`.
+
+### Capacity fraction from a timing budget
+
+Budget: at the load the cap allows, p99.9 MCU step lateness × that motor's own step rate (lateness in microsteps of position) must stay ≤ 0.5 microstep. A step that is 0.5 microstep late is still nearer its own lattice point than the next one. The host's step compression already allows 25 µs by design, which is 1.3 microsteps at the 52 k steps/s per motor these runs reach. The analyzer's 0.05-step criterion is not usable here: the MCU's intrinsic ~5 µs p99.9 dispatch jitter alone exceeds it at any useful speed, even at a quarter of capacity. That criterion measures speed, not load.
+
+Sweep: `capacity_ladder_high` in event mode with the step tap and `configs/capacity.cfg`, so every rung asks more than the cap and the run sits at the cap. F401, 301 ticks/step pulsed, four motors stepping at equal rates. The fraction was set per run in a throwaway tree. `mcu_execution.lateness_by_step_rate_hz` → `position_p99_9_steps` in the dominant (capped) rate bin:
+
+| fraction | cap | p99.9 lateness | p99.9 position | max position | step_load_late |
+|---|---|---|---|---|---|
+| 0.75 | 209 k | 12.2 µs | 0.62 | 1.01 | 456 |
+| 0.65 | 181 k | 11.7–11.8 µs | 0.52 (×2) | 0.82 | 167–169 |
+| **0.625** | 174 k | 11.2 µs | **0.47** | 0.81 | 121 |
+| 0.60 | 167 k | 10.7–10.8 µs | 0.44 (×2) | 0.82 | 90–189 |
+| 0.55 | 153 k | 9.5 µs | 0.36 | 0.68 | 48 |
+| 0.45 | 126 k | 6.9 µs | 0.21 | 0.65 | 0 |
+| 0.35 | 98 k | 6.3 µs | 0.15 | 0.34 | 0 |
+| 0.25 | 70 k | 5.2 µs | 0.09 | 0.24 | 0 |
+
+The largest fraction measured within budget is 0.625; 0.65 misses it by 0.02 step, and it did so on both runs. Runs: `20261104-044956` … `-045817` and `-051422` … `-051928`. In time terms, lateness is flat at 5–7 µs up to 0.45 and the queueing knee appears from 0.55 upward.
 
 ## Limits
 

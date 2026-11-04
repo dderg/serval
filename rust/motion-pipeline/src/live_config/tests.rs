@@ -5,7 +5,7 @@ fn stream_config_accepts_unlimited_jerk() {
     let mut cfg = PlannerConfig::default();
     cfg.cartesian.max_jerk = f64::INFINITY;
 
-    assert!(stream_config(&cfg).is_ok());
+    assert!(stream_config(&cfg, None).is_ok());
 }
 
 #[test]
@@ -19,7 +19,7 @@ fn stream_config_rejects_finite_jerk() {
             "finite [printer] max_jerk is not supported by the continuous trajectory pipeline; set max_jerk: 0"
         )
     );
-    assert!(stream_config(&cfg).is_err());
+    assert!(stream_config(&cfg, None).is_err());
 }
 
 const CARTESIAN: &str = "[printer]\n\
@@ -131,10 +131,56 @@ fn a_line_too_short_to_move_is_no_move() {
     assert!(moved.is_none());
 }
 
+fn spatial_benchmarks() -> step_capacity::StepCapacityInput {
+    use step_capacity::{
+        DrivenAxis, McuStepBenchmark, McuStepInput, STEP_CAPACITY_FRACTION, StepBenchmark,
+        StepMode, SteppedMotor,
+    };
+    step_capacity::StepCapacityInput {
+        lane_weights: [[1.0, 1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 0.0, 1.0]],
+        mcus: vec![McuStepInput {
+            benchmark: McuStepBenchmark {
+                mcu: "mcu".into(),
+                clock_freq_hz: 84.0e6,
+                capacity_fraction: STEP_CAPACITY_FRACTION,
+                benchmark: Some(StepBenchmark {
+                    pulsed_ticks_per_step: 301,
+                    both_edge_ticks_per_step: 160,
+                }),
+            },
+            motors: (0..3)
+                .map(|lane| SteppedMotor {
+                    drives: DrivenAxis::Lane(lane),
+                    step_distance_mm: 0.0125,
+                    mode: StepMode::Pulsed,
+                })
+                .collect(),
+        }],
+    }
+}
+
 #[test]
-fn the_offline_plans_carry_no_step_capacity() {
+fn without_step_benchmarks_nothing_is_capped() {
     let mut cfg = PlannerConfig::default();
     cfg.cartesian.max_jerk = f64::INFINITY;
 
-    assert_eq!(stream_config(&cfg).unwrap().step_capacity, None);
+    assert_eq!(stream_config(&cfg, None).unwrap().step_capacity, None);
+}
+
+#[test]
+fn the_stream_carries_the_capacity_its_step_benchmarks_derive() {
+    let mut cfg = PlannerConfig::default();
+    cfg.cartesian.max_jerk = f64::INFINITY;
+    let benchmarks = spatial_benchmarks();
+    let derived = step_capacity::step_capacity(&cfg, &benchmarks)
+        .unwrap()
+        .expect("a benchmarked mcu stepping every lane is capped");
+
+    assert_eq!(
+        stream_config(&cfg, Some(&benchmarks))
+            .unwrap()
+            .step_capacity
+            .as_deref(),
+        Some(&derived)
+    );
 }

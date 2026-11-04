@@ -528,30 +528,6 @@ impl AxisChainSet {
         self.projected_followers().any(|(a, _)| a == axis)
     }
 
-    /// The velocity step projected follower `axis` may take at once: its
-    /// [`CompiledChain::instantaneous_corner_velocity`] where an advance
-    /// with no kernel rides an unshaped leader, whose acceleration steps the
-    /// advance turns into velocity steps; zero elsewhere, every ratio step
-    /// being ramped over the time [`CompiledChain::ratio_ramp_rule`]
-    /// derives.
-    #[must_use]
-    pub fn follower_velocity_step_allowance(&self, axis: usize) -> f64 {
-        let chain = &self.chains[axis];
-        let unshaped_leader = self
-            .projected_followers()
-            .find(|&(follower, _)| follower == axis)
-            .is_some_and(|(_, leaders)| {
-                leaders
-                    .iter()
-                    .any(|&leader| self.chains[leader].kernel().is_none())
-            });
-        if chain.transform().is_some() && chain.kernel().is_none() && unshaped_leader {
-            chain.instantaneous_corner_velocity()
-        } else {
-            0.0
-        }
-    }
-
     /// The half-support of everything this axis's emitted track depends on.
     /// A projected follower rides its leaders' shaped signal and then applies
     /// its own chain on top, so the supports cascade: they add.

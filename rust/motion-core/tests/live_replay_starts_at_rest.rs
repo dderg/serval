@@ -49,7 +49,7 @@ fn the_live_path_plans_the_dense_print_head_on_every_bench_config() {
     );
     let gcode = dense_print_head();
     for config in configs {
-        let replay = LiveReplay::new(&gcode, &planner_config(&config))
+        let replay = LiveReplay::new(&gcode, &planner_config(&config), None)
             .unwrap_or_else(|e| panic!("{}: {e}", config.display()));
         let (emitted_tx, emitted) = crossbeam_channel::unbounded();
         let mut pipeline = replay.pipeline().into_staged(move |item| {

@@ -29,6 +29,7 @@ fn piece(window: Window, models: &[TaylorModel; 3]) -> ExactPiece {
         center: window.center,
         radius: window.radius,
         pva: models.each_ref().map(local_polynomial),
+        unshaped_step: None,
     }
 }
 
@@ -43,7 +44,8 @@ const EVALUATOR_TIME_ULPS: f64 = 8.0;
 /// Debug builds hold every piece of an enclosure to the signal's own
 /// evaluator `truth` at the piece's centre: an enclosure modelling another
 /// formula than the signal evaluates would prove fits against the wrong
-/// signal, and fails loudly here instead.
+/// signal, and fails loudly here instead. A piece one ulp wide has no
+/// centre inside it to read its interior's formula at, and is skipped.
 pub(crate) fn debug_assert_holds(
     pieces: &[ExactPiece],
     truth: impl Fn(f64) -> (f64, f64, f64),
@@ -52,7 +54,10 @@ pub(crate) fn debug_assert_holds(
     if !cfg!(debug_assertions) {
         return;
     }
-    for piece in pieces {
+    for piece in pieces
+        .iter()
+        .filter(|piece| piece.lo < piece.center && piece.center < piece.hi)
+    {
         let (p, v, a) = truth(piece.center);
         let later = piece.center + piece.center.abs() * f64::EPSILON;
         let (p_later, v_later, a_later) = truth(later);
@@ -126,8 +131,10 @@ fn enclose_to_depth(
 }
 
 /// [`enclose`] for a signal whose windows may have no model: halving a
-/// window without one, and giving up — `None` — where the halving depth
-/// runs out on one, or on an unbounded model. A window whose bound
+/// window without one, past [`ENCLOSURE_MAX_DEPTH`] only toward the point
+/// its models fail at — one half at least modelled — down to
+/// [`SINGULAR_MAX_DEPTH`], and giving up — `None` — where the halving
+/// depth runs out on one, or on an unbounded model. A window whose bound
 /// halving twice running did not shrink by [`STALLED_SHARE`] — a jump or a
 /// rounding floor inside it no window resolves — is kept unresolved
 /// rather than halved down to the depth limit.
@@ -137,20 +144,35 @@ pub(crate) fn try_enclose(
     model: &dyn Fn(Window) -> Option<[TaylorModel; 3]>,
     out: &mut Vec<ExactPiece>,
 ) -> Option<()> {
-    try_enclose_to_depth((lo, hi), accuracy, model, Halving::START, out)
+    let window = Window::new(lo, hi);
+    try_enclose_to_depth(
+        window,
+        model(window).as_ref(),
+        accuracy,
+        model,
+        Halving::START,
+        out,
+    )
 }
+
+/// How many times a window without a model is halved toward the point
+/// its models fail at: a speed its models divide by vanishing there needs
+/// windows as narrow as the speed over its rate.
+const SINGULAR_MAX_DEPTH: u32 = 48;
 
 /// The share of its parent's excess over the accuracy a halved window
 /// must stay under to count as progress.
 const STALLED_SHARE: f64 = 0.75;
 
-/// Where a halving stands: its depth, the excess of the window it halved,
-/// and how many halvings running made no progress.
+/// Where a halving stands: its depth among modelled windows, the excess of
+/// the window it halved, how many halvings running made no progress, and
+/// how many windows without a model it went through.
 #[derive(Clone, Copy)]
 struct Halving {
     depth: u32,
     parent_excess: f64,
     stalls: u32,
+    singular: u32,
 }
 
 impl Halving {
@@ -158,6 +180,7 @@ impl Halving {
         depth: 0,
         parent_excess: f64::INFINITY,
         stalls: 0,
+        singular: 0,
     };
 
     fn child(self, excess: f64) -> Self {
@@ -166,6 +189,16 @@ impl Halving {
             depth: self.depth + 1,
             parent_excess: excess,
             stalls: if stalled { self.stalls + 1 } else { 0 },
+            singular: self.singular,
+        }
+    }
+
+    fn modelless_child(self) -> Self {
+        Self {
+            parent_excess: f64::INFINITY,
+            stalls: 0,
+            singular: self.singular + 1,
+            ..self
         }
     }
 }
@@ -180,20 +213,21 @@ fn excess(models: &[TaylorModel; 3], accuracy: [f64; 3]) -> f64 {
 }
 
 fn try_enclose_to_depth(
-    (lo, hi): (f64, f64),
+    window: Window,
+    models: Option<&[TaylorModel; 3]>,
     accuracy: [f64; 3],
     model: &dyn Fn(Window) -> Option<[TaylorModel; 3]>,
     halving: Halving,
     out: &mut Vec<ExactPiece>,
 ) -> Option<()> {
-    let window = Window::new(lo, hi);
-    let models = model(window);
+    let (lo, hi) = (window.lo, window.hi);
     let middle = window.center;
-    let last = halving.depth == ENCLOSURE_MAX_DEPTH || middle <= lo || middle >= hi;
-    let child = match &models {
+    let unsplittable = middle <= lo || middle >= hi;
+    let child = match models {
         Some(models) => {
             let excess = excess(models, accuracy);
             let child = halving.child(excess);
+            let last = halving.depth == ENCLOSURE_MAX_DEPTH || unsplittable;
             if excess <= 1.0 || last || child.stalls >= 2 {
                 if !models.iter().all(|model| model.rad().is_finite()) {
                     return None;
@@ -203,14 +237,20 @@ fn try_enclose_to_depth(
             }
             child
         }
-        None if last => return None,
-        None => Halving {
-            depth: halving.depth + 1,
-            ..Halving::START
-        },
+        None if halving.singular == SINGULAR_MAX_DEPTH || unsplittable => return None,
+        None => halving.modelless_child(),
     };
-    try_enclose_to_depth((lo, middle), accuracy, model, child, out)?;
-    try_enclose_to_depth((middle, hi), accuracy, model, child, out)
+    let (left, right) = (Window::new(lo, middle), Window::new(middle, hi));
+    let (left_models, right_models) = (model(left), model(right));
+    let modelless_stretch = models.is_none()
+        && left_models.is_none()
+        && right_models.is_none()
+        && halving.singular >= ENCLOSURE_MAX_DEPTH;
+    if modelless_stretch {
+        return None;
+    }
+    try_enclose_to_depth(left, left_models.as_ref(), accuracy, model, child, out)?;
+    try_enclose_to_depth(right, right_models.as_ref(), accuracy, model, child, out)
 }
 
 /// Encloses several signals over `[lo, hi]` whose windows share work:

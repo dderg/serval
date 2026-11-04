@@ -23,6 +23,7 @@ use crate::worker_pool::WorkerPool;
 mod enclosure;
 mod extrude_only;
 mod ratio_ramp;
+mod rest;
 use ratio_ramp::{RampLeg, RatioSmoothing};
 
 const INTEGRAL_TOL_MM: f64 = 1e-10;
@@ -281,6 +282,16 @@ impl<'a> LeadingAdvance<'a> {
     fn is_ramped(&self) -> bool {
         self.smoothing == AdvanceSmoothing::RatioRamp
     }
+
+    /// Whether the advance reads only the velocity laid along the leaders'
+    /// path, whose ratio the smoothing weighs: every advance a ratio ramp
+    /// precedes.
+    fn reads_path_only(&self) -> bool {
+        matches!(
+            self.smoothing,
+            AdvanceSmoothing::RatioRamp | AdvanceSmoothing::RatioRampAndKernel
+        )
+    }
 }
 
 fn ramped_position_step(axis: usize, step: &AdvanceStep) -> PostProcessError {
@@ -342,7 +353,8 @@ fn fit_source_projection(
             length: s_length,
         },
         0.0,
-    );
+    )
+    .with_rests(fit_tol);
     let tolerance = follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis) * 0.5);
     let breakpoints = sig.construction_breakpoints(raw_axis, tolerance.accel_mm_s2);
     let input_state = |t| {
@@ -357,7 +369,7 @@ fn fit_source_projection(
             ramped: leading.map(|advance| RampedSeam {
                 read_velocity: sig.ramped_advance_read(t).0,
                 read_slope: sig.ramped_read_slope(s),
-                advanced_velocity: AdvancedFollowerSignal::new(&sig, advance, &[])
+                advanced_velocity: AdvancedFollowerSignal::new(&sig, advance, &[], tolerance)
                     .eval_pva(t)
                     .1,
             }),
@@ -411,7 +423,7 @@ fn fit_source_projection(
             Some(advance) => {
                 let resolution = fit_resolution(
                     &fit,
-                    &AdvancedFollowerSignal::new(&sig, advance, &steps_beyond_rounding),
+                    &AdvancedFollowerSignal::new(&sig, advance, &steps_beyond_rounding, tolerance),
                 )?;
                 let mut seeds = breakpoints.fit_seeds.clone();
                 seeds.extend(sig.advance_velocity_steps_on_the_grid(advance, resolution.velocity));
@@ -426,8 +438,9 @@ fn fit_source_projection(
                             || (!advance.is_ramped() && step.step_mm.abs() > resolution.position)
                     })
                     .collect::<Vec<_>>();
-                let advanced = AdvancedFollowerSignal::new(&sig, advance, &steps);
+                let advanced = AdvancedFollowerSignal::new(&sig, advance, &steps, tolerance);
                 if advance.is_ramped() {
+                    advanced.refuse_onset_steps(axis, (t_start, t_end))?;
                     if let Some(refused) = unexplained(&steps) {
                         return Err(refused);
                     }
@@ -436,11 +449,12 @@ fn fit_source_projection(
                         &step_candidates,
                         (t_start, t_end),
                         resolution.velocity
-                            + advance_velocity_step_allowance(
+                            + UnshapedLeaderStep::of(
                                 advance,
                                 sig.ratio_bounds.ratio,
                                 fit_tol.accel_mm_s2,
-                            ),
+                            )
+                            .allowance(),
                     )?;
                 }
                 let track = fit_axis_from_signal(
@@ -1331,7 +1345,7 @@ fn join_advance_step(
 /// advanced velocity differs by on top, straight to the motor. A ratio ramp
 /// leaves the projection no step of its own, and the advance none beyond
 /// its allowance for the leaders' acceleration steps
-/// ([`advance_velocity_step_allowance`]), so a larger one on a
+/// ([`UnshapedLeaderStep`]), so a larger one on a
 /// ramped follower is refused.
 fn refuse_ramped_join_velocity_step(
     advance: LeadingAdvance,
@@ -1366,11 +1380,12 @@ fn refuse_ramped_join_velocity_step(
         before_ramped.advanced_velocity,
         after_ramped.advanced_velocity,
     );
-    let allowance = advance_velocity_step_allowance(
+    let allowance = UnshapedLeaderStep::of(
         advance,
         before.ratio.abs().max(after.ratio.abs()),
         leader_accel_tol,
-    );
+    )
+    .allowance();
     if (advanced_after - advanced_before).abs() > rounding + allowance {
         return Err(PostProcessError::RatioRampedVelocityStep {
             axis,
@@ -1383,20 +1398,86 @@ fn refuse_ramped_join_velocity_step(
     Ok(())
 }
 
-/// The velocity step an advance may make of the leaders' acceleration
-/// steps: the follower's instantaneous corner velocity, which the planner
-/// keeps an unshaped leader's steps within, plus what the leaders' own
-/// rounding makes. A shaped leader is fitted within `leader_accel_tol` on
-/// either side of its knots, so its acceleration may step by twice that
-/// there, which the projection scales by the ratio and the advance by its
-/// slope.
-fn advance_velocity_step_allowance(
-    advance: LeadingAdvance,
+/// The velocity change an advance may make of what an unshaped leader's
+/// acceleration does faster than a fit resolves — a step, or the square
+/// root it leaves a curvature cap by: the follower's instantaneous corner
+/// velocity, which the planner keeps an unshaped leader's steps within,
+/// plus what the leaders' own rounding makes. A shaped leader is fitted
+/// within `leader_accel_tol` on either side of its knots, so its
+/// acceleration may step by twice that there, which the projection scales
+/// by the ratio and the advance by its slope.
+///
+/// At a square-root onset the exemption covers the sliver where the
+/// leader's singular jerk `J/√τ`, through the advance's gain `G`, alone
+/// passes the follower's acceleration tolerance: `τ < (G·J/accel_tol)²`
+/// ([`enclosure::OnsetSliver`]). There the acceleration is not bounded, the
+/// fit's velocity holds the allowance, and the singular term's change
+/// across the sliver, `2·G·J·√τ`, must stay within it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct UnshapedLeaderStep {
+    allowance: f64,
+}
+
+impl UnshapedLeaderStep {
+    fn of(advance: LeadingAdvance, ratio_bound: f64, leader_accel_tol: f64) -> Self {
+        Self {
+            allowance: advance.instantaneous_corner_velocity
+                + 2.0 * leader_accel_tol * ratio_bound * steepest_advance_slope(advance.stage),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn with_allowance(allowance: f64) -> Self {
+        Self { allowance }
+    }
+
+    pub(crate) fn allowance(self) -> f64 {
+        self.allowance
+    }
+
+    /// `accuracy` for an enclosure piece under the exemption: the hull holds
+    /// its velocity to the allowance, so the piece's own bound takes the
+    /// share of it any enclosure takes of its budget.
+    pub(crate) fn enclosure_accuracy(self, accuracy: [f64; 3]) -> [f64; 3] {
+        [
+            accuracy[0],
+            accuracy[1].min(self.allowance * crate::shaper::hull::ENCLOSURE_BUDGET_SHARE),
+            accuracy[2],
+        ]
+    }
+
+    /// Whether a velocity change of `change` stays within the allowance.
+    pub(crate) fn admits(self, change: f64) -> bool {
+        change.abs() <= self.allowance
+    }
+}
+
+/// The velocity step projected follower `axis` of `chains` may take at
+/// once, its leaders fitted within `leader_accel_tol` and its ratio within
+/// `ratio_bound`: the [`UnshapedLeaderStep`] allowance where an advance
+/// with no kernel rides an unshaped leader, whose acceleration steps the
+/// advance turns into velocity steps; zero elsewhere, every ratio step
+/// being ramped over the time [`CompiledChain::ratio_ramp_rule`] derives.
+#[must_use]
+pub fn follower_velocity_step_allowance(
+    chains: &AxisChainSet,
+    axis: usize,
     ratio_bound: f64,
     leader_accel_tol: f64,
 ) -> f64 {
-    advance.instantaneous_corner_velocity
-        + 2.0 * leader_accel_tol * ratio_bound * steepest_advance_slope(advance.stage)
+    let rides_an_unshaped_leader = chains
+        .projected_followers()
+        .find(|&(follower, _)| follower == axis)
+        .is_some_and(|(_, leaders)| {
+            leaders
+                .iter()
+                .any(|&leader| chains.chains[leader].kernel().is_none())
+        });
+    LeadingAdvance::of(&chains.chains[axis])
+        .filter(|advance| advance.is_ramped() && rides_an_unshaped_leader)
+        .map_or(0.0, |advance| {
+            UnshapedLeaderStep::of(advance, ratio_bound, leader_accel_tol).allowance()
+        })
 }
 
 fn advance_offset(stage: &ChainStage, velocity: f64) -> f64 {
@@ -2059,6 +2140,16 @@ struct SpeedZeroSliver {
 }
 
 impl SpeedZeroSliver {
+    /// Whether the sliver holds the window `[lo, hi]` whose interior reads
+    /// it: the window lies on its side of its inner edge.
+    fn holds_window(&self, lo: f64, hi: f64) -> bool {
+        if self.interior_sign > 0.0 {
+            hi <= self.inner
+        } else {
+            lo >= self.inner
+        }
+    }
+
     fn deriv_at(&self, t: f64) -> f64 {
         let sign = if t > self.zero_time {
             1.0
@@ -2349,20 +2440,6 @@ impl<'a> ShapedLeaders<'a> {
         speed_second_of(&states[..leaders], speed)
     }
 
-    fn path_derivatives(&self, t: f64) -> (f64, f64, f64) {
-        let (states, leaders) = self.pvaj_states(t);
-        let states = &states[..leaders];
-        let speed = states.iter().map(|&(_, v, _, _)| v * v).sum::<f64>().sqrt();
-        if speed == 0.0 {
-            return (0.0, 0.0, 0.0);
-        }
-        let tangential = states
-            .iter()
-            .map(|&(_, v, a, _)| v / speed * a)
-            .sum::<f64>();
-        (speed, tangential, speed_second_of(states, speed))
-    }
-
     fn pvaj_states(&self, t: f64) -> ([(f64, f64, f64, f64); MAX_LEADERS], usize) {
         let leaders = self.axes.len();
         assert!(
@@ -2559,6 +2636,11 @@ pub(crate) struct FollowerSignal<'a> {
     axis_windows: std::cell::OnceCell<Option<enclosure::FollowerAxisWindows<'a>>>,
     /// See [`Self::ratio_crossings`].
     ratio_crossings: std::cell::OnceCell<Vec<(f64, f64)>>,
+    /// The leaders' rests inside the support, in order ([`rest`]).
+    rests: Vec<rest::Rest>,
+    /// The grid times and the rests' splits, in order: where the signal
+    /// may jump, each read on both sides by [`TrackSignal::knot_jump`].
+    jump_times: Vec<f64>,
 }
 
 impl<'a> FollowerSignal<'a> {
@@ -2640,12 +2722,30 @@ impl<'a> FollowerSignal<'a> {
             whole_enclosure: enclosure::WholeEnclosure::default(),
             axis_windows: std::cell::OnceCell::new(),
             ratio_crossings: std::cell::OnceCell::new(),
+            rests: Vec::new(),
+            jump_times: Vec::new(),
         };
         let (start_sliver, end_sliver) = sig.speed_zero_slivers();
         sig.start_sliver = start_sliver;
         sig.end_sliver = end_sliver;
+        sig.jump_times = sig.grid.clone();
         sig.s_owned_end = state.owned_span_end(sig.s_start, sig.s_end());
         sig
+    }
+
+    /// The signal reading the leaders' rests, at speeds their fits to
+    /// `leader_tol` cannot resolve ([`rest`]).
+    fn with_rests(mut self, leader_tol: FitTol) -> Self {
+        self.rests = self.find_rests(self.rest_speed(leader_tol));
+        self.jump_times = self
+            .grid
+            .iter()
+            .copied()
+            .chain(self.rests.iter().map(|rest| rest.split))
+            .collect();
+        self.jump_times.sort_by(f64::total_cmp);
+        self.jump_times.dedup();
+        self
     }
 
     fn endpoint_sliver(
@@ -2714,14 +2814,23 @@ impl<'a> FollowerSignal<'a> {
     }
 
     fn leader_speed_deriv(&self, t: f64, speed: f64) -> f64 {
-        match self.speed_zero_sliver(t) {
-            Some(sliver) => sliver.deriv_at(t),
+        if let Some(sliver) = self.speed_zero_sliver(t) {
+            return sliver.deriv_at(t);
+        }
+        match self.rest_at(t) {
+            Some(rest) => self.rest_rates(rest, t).0,
             None => self.leaders.speed_deriv(t, speed),
         }
     }
 
     fn leader_speed_second_deriv(&self, t: f64, speed: f64) -> f64 {
-        if speed == 0.0 || self.speed_zero_sliver(t).is_some() {
+        if self.speed_zero_sliver(t).is_some() {
+            return 0.0;
+        }
+        if let Some(rest) = self.rest_at(t) {
+            return self.rest_rates(rest, t).1;
+        }
+        if speed == 0.0 {
             return 0.0;
         }
         self.leaders.speed_second(t, speed)
@@ -2984,6 +3093,12 @@ impl<'a> FollowerSignal<'a> {
                 .iter()
                 .map(|&(time, _)| time)
                 .filter(|&time| self.speed_zero_sliver(time).is_none()),
+        );
+        breaks.extend(
+            self.rests
+                .iter()
+                .map(|rest| rest.split)
+                .filter(|&t| t > support_start && t < support_end),
         );
         breaks.sort_by(f64::total_cmp);
         breaks.dedup_by(|left, right| (*left - *right).abs() <= GRID_DEDUP_EPS_S);
@@ -3331,9 +3446,10 @@ impl TrackSignal for FollowerSignal<'_> {
             })
     }
     fn interior_knots(&self, start: f64, end: f64) -> &[f64] {
-        let first = self.grid.partition_point(|&t| t <= start);
-        let past_last = self.grid.partition_point(|&t| t < end);
-        &self.grid[first..past_last.max(first)]
+        let knots = &self.jump_times;
+        let first = knots.partition_point(|&t| t <= start);
+        let past_last = knots.partition_point(|&t| t < end);
+        &knots[first..past_last.max(first)]
     }
     fn knot_jump(&self, knot: f64) -> KnotJumpBound {
         let before = trajectory::next_toward(knot, f64::NEG_INFINITY);
@@ -3342,11 +3458,11 @@ impl TrackSignal for FollowerSignal<'_> {
             return KnotJumpBound::UNBOUNDED;
         }
         let rates = |t: f64| {
-            let (speed, speed_deriv, speed_second) = self.leaders.path_derivatives(t);
+            let speed = self.leaders.speed(t);
             (
                 self.odometer_scale * speed,
-                self.odometer_scale * speed_deriv,
-                self.odometer_scale * speed_second,
+                self.odometer_scale * self.leader_speed_deriv(t, speed),
+                self.odometer_scale * self.leader_speed_second_deriv(t, speed),
             )
         };
         let (rate_before, rate_deriv_before, rate_second_before) = rates(before);
@@ -3396,6 +3512,12 @@ struct AdvancedFollowerSignal<'a, 'b> {
     advance: LeadingAdvance<'a>,
     steps: &'a [AdvanceStep],
     pva_memo: PvaMemo,
+    /// The acceleration tolerance the advanced follower is fitted to.
+    accel_tol: f64,
+    unshaped_step: UnshapedLeaderStep,
+    /// The enclosure over the whole signal, which every rung of the fit
+    /// asks again.
+    whole_enclosure: enclosure::WholeEnclosure,
 }
 
 impl<'a, 'b> AdvancedFollowerSignal<'a, 'b> {
@@ -3403,12 +3525,20 @@ impl<'a, 'b> AdvancedFollowerSignal<'a, 'b> {
         source: &'a FollowerSignal<'b>,
         advance: LeadingAdvance<'a>,
         steps: &'a [AdvanceStep],
+        fit_tol: FitTol,
     ) -> Self {
         Self {
             source,
             advance,
             steps,
             pva_memo: PvaMemo::default(),
+            accel_tol: fit_tol.accel_mm_s2,
+            unshaped_step: UnshapedLeaderStep::of(
+                advance,
+                source.ratio_bounds.ratio,
+                fit_tol.accel_mm_s2,
+            ),
+            whole_enclosure: enclosure::WholeEnclosure::default(),
         }
     }
 
@@ -3465,6 +3595,29 @@ struct AdvanceInput {
 }
 
 impl AdvancedFollowerSignal<'_, '_> {
+    /// Refuses a velocity change across any of the window's square-root
+    /// onset slivers ([`UnshapedLeaderStep`]) its allowance does not admit:
+    /// with no kernel after the advance, the motor would be asked to make
+    /// it.
+    fn refuse_onset_steps(
+        &self,
+        axis: usize,
+        (t_start, t_end): (f64, f64),
+    ) -> Result<(), PostProcessError> {
+        for sliver in self.onset_slivers(t_start, t_end).unwrap_or_default() {
+            if !self.unshaped_step.admits(sliver.singular_change) {
+                return Err(PostProcessError::UnshapedLeaderOnsetVelocityStep {
+                    axis,
+                    from: sliver.from,
+                    to: sliver.to,
+                    change: sliver.singular_change,
+                    allowance: self.unshaped_step.allowance(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Refuses a velocity step wider than `resolution` at any of `times`
     /// inside the window: with no kernel after the advance, the motor
     /// would be asked to make it.
@@ -3525,6 +3678,15 @@ impl TrackSignal for AdvancedFollowerSignal<'_, '_> {
 
     fn interior_knots(&self, start: f64, end: f64) -> &[f64] {
         self.source.interior_knots(start, end)
+    }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
+        let grid = &self.source.grid;
+        let support = (grid[0], grid[grid.len() - 1]);
+        self.whole_enclosure
+            .over((lo, hi), accuracy, support, |(lo, hi), accuracy| {
+                self.enclosure(lo, hi, accuracy)
+            })
     }
 
     fn position_delta(&self, (t0, _): (f64, f64), (t1, _): (f64, f64)) -> f64 {
@@ -4267,9 +4429,13 @@ impl OdometerLeaf {
         (leaf, rate)
     }
 
+    /// The distance the leaders cover from the leaf's start to `t`: never
+    /// negative, though the Chebyshev sum rounds to a few ulps below zero
+    /// next to the start, where the signal would read the table before
+    /// its odometer's start.
     fn covered_until(&self, t: f64) -> f64 {
         let x = ((t - self.centre) / self.half).clamp(-1.0, 1.0);
-        self.half * chebyshev_sum(&self.covered, x)
+        (self.half * chebyshev_sum(&self.covered, x)).max(0.0)
     }
 }
 

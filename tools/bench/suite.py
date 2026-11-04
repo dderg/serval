@@ -31,6 +31,8 @@ REST_LADDER_CFG = BENCH / "configs" / "rest_ladder.cfg"
 SIM_GCODE = REPO / "tools" / "sim" / "gcode"
 RUN_TIMEOUT_S = 2400.0
 ANALYZE_TIMEOUT_S = 1200.0
+ENGINE_BUILD_TIMEOUT_S = 3600
+ENGINE_BUILD = ["make", "-f", "Makefile.rust", "motion-engine-fast"]
 THROTTLE_ARGS = ["--host-cpus", "1", "--host-max-mhz", "1500"]
 LADDER_CEILING_STEPS_PER_S = 300_000
 BENCHMARK_BAND = (0.85, 1.10)
@@ -73,6 +75,8 @@ class Row:
     config: Path = PRINTER_CFG
     throttle: list[str] = field(default_factory=list)
     quick: bool = False
+    run_args: list[str] = field(default_factory=list)
+    analyze_args: list[str] = field(default_factory=list)
 
 
 MATRIX = [
@@ -89,6 +93,12 @@ MATRIX = [
         FAST_CFG,
         THROTTLE_ARGS,
     ),
+    Row(
+        "corner_flow",
+        BENCH / "gcode" / "corner_flow.gcode",
+        run_args=["--events"],
+        analyze_args=["--corner-flow"],
+    ),
 ]
 
 
@@ -101,6 +111,22 @@ def python(
         text=True,
         timeout=timeout_s,
     )
+
+
+def build_local_engine() -> None:
+    build = subprocess.run(
+        ENGINE_BUILD,
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        timeout=ENGINE_BUILD_TIMEOUT_S,
+    )
+    if build.returncode != 0:
+        raise SuiteError(
+            f"`{' '.join(ENGINE_BUILD)}` in {REPO} exited "
+            f"{build.returncode}; analyzing with the stale engine would hold "
+            f"every row against another planner:\n{build.stdout}{build.stderr}"
+        )
 
 
 def last_lines(text: str, count: int = 3) -> str:
@@ -132,6 +158,7 @@ def run_row(row: Row, suite_dir: Path, lock_timeout_s: float) -> dict:
         "--lock-timeout",
         str(lock_timeout_s),
         *row.throttle,
+        *row.run_args,
         timeout_s=RUN_TIMEOUT_S,
     )
     run_dirs = sorted(runs_dir.glob("*")) if runs_dir.exists() else []
@@ -151,9 +178,14 @@ def run_row(row: Row, suite_dir: Path, lock_timeout_s: float) -> dict:
         result["duration_s"] = info.get("duration_s")
         result["deployed"] = info.get("deployed")
         result["host_throttle"] = info.get("host_throttle")
-        if (run_dir / "capture.bin").exists():
+        if (run_dir / "capture.bin").exists() or (
+            run_dir / "events.bin"
+        ).exists():
             analysis = python(
-                "analyze.py", str(run_dir), timeout_s=ANALYZE_TIMEOUT_S
+                "analyze.py",
+                str(run_dir),
+                *row.analyze_args,
+                timeout_s=ANALYZE_TIMEOUT_S,
             )
             if analysis.returncode != 0:
                 joined = f"analyze.py: {last_lines(analysis.stderr)}"
@@ -173,6 +205,10 @@ def run_row(row: Row, suite_dir: Path, lock_timeout_s: float) -> dict:
                 ).get("abs_max")
                 for role, motor in verdict["motors"].items()
             }
+            if "corner_flow" in verdict:
+                result["corner_flow_max_abs"] = verdict["corner_flow"][
+                    "max_abs"
+                ]
     result["wall_s"] = time.monotonic() - started
     result["passed"] = bool(
         result["error"] is None
@@ -231,6 +267,7 @@ def main() -> None:
     if unselected:
         parser.error(f"--expect-fail rows not in this suite: {unselected}")
     suite_dir = SUITES_DIR / datetime.now().strftime("%Y%m%d-%H%M%S")
+    build_local_engine()
     suite_dir.mkdir(parents=True)
     with lock.bench_lock(args.lock_timeout, command=" ".join(sys.argv)):
         lock.export_holder_token()

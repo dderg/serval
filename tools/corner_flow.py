@@ -67,15 +67,10 @@ for _path in (REPO / "klippy", REPO / "snapshots", REPO):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
-SAMPLE_DT_S = 10e-6
-PATH_STEP_MM = 0.02
-MOVING_SPEED_MM_S = 5.0
-RAW_REST_SPEED_MM_S = 1e-3
-WIDTH_THRESHOLD = 0.05
-CORNER_WINDOW_MM = 15.0
+from tools import flow_metric  # noqa: E402
+
 CASE_JOB_FLAG = "--case-job"
 ERROR_CHARS = 200
-APEX_SEARCH_MM = 2.0
 SPEEDS_MM_S = (50.0, 150.0, 300.0)
 ADVANCE_TYPES = {
     "linear_pressure_advance": "k",
@@ -96,7 +91,7 @@ class Geometry:
     name: str
     moves: list[Move]
     corners: list[tuple[float, float]]
-    window_mm: float = CORNER_WINDOW_MM
+    window_mm: float = flow_metric.CORNER_WINDOW_MM
 
 
 @dataclass
@@ -353,80 +348,11 @@ def sample(config_text: str, program: str):
         waypoints, config_text, [0], 2
     )
     t_end = json.loads(probe)["trajectory"]["t_end"]
-    count = int(t_end / SAMPLE_DT_S) + 2
+    count = int(t_end / flow_metric.SAMPLE_DT_S) + 2
     _, rows = engine.pipeline_snapshot_axis_samples(
         waypoints, config_text, [0, 1, 3], count
     )
     return np.linspace(0.0, t_end, count), np.array(rows)
-
-
-def melted(t: np.ndarray, e_cmd: np.ndarray, melt_k: float) -> np.ndarray:
-    if melt_k <= 0.0:
-        return e_cmd
-    dt = t[1] - t[0]
-    alpha = math.exp(-dt / melt_k)
-    slope = np.diff(e_cmd) / dt
-    lag = np.zeros_like(e_cmd)
-    for index, drive in enumerate(melt_k * slope * (alpha - 1.0), start=1):
-        lag[index] = alpha * lag[index - 1] + drive
-    return e_cmd + lag
-
-
-def commanded_ratio(t: np.ndarray, raw: np.ndarray, t_at: np.ndarray):
-    """The extrusion per mm the G-code commands at each time, read off the
-    unshaped plan: the follower lays each move's ratio over the shaped path
-    the nozzle covers during that move. Where the unshaped toolhead rests,
-    the nearest moving instant's ratio stands."""
-    speed = np.hypot(raw[0][:, 1], raw[1][:, 1])
-    moving = speed > 1e-6
-    ratio = np.zeros_like(speed)
-    ratio[moving] = raw[2][moving, 1] / speed[moving]
-    indices = np.flatnonzero(moving)
-    nearest = np.clip(np.searchsorted(indices, np.arange(len(t))), 1, None)
-    nearest = np.minimum(nearest, len(indices) - 1)
-    previous = indices[nearest - 1]
-    following = indices[nearest]
-    here = np.arange(len(t))
-    chosen = np.where(here - previous <= following - here, previous, following)
-    ratio = ratio[chosen]
-    return np.interp(t_at, t, ratio)
-
-
-def timeline_offset(t, xy, t_raw, raw) -> float:
-    """How much later the shaped plan runs than the unshaped one: shaping
-    holds the start for its kernels' reach. Found as the shift that best
-    lays the unshaped toolhead path onto the shaped one."""
-    stride = max(len(t) // 4000, 1)
-    t_probe, xy_probe = t[::stride], xy[::stride]
-
-    def mismatch(shift: float) -> float:
-        x = np.interp(t_probe - shift, t_raw, raw[0][:, 0])
-        y = np.interp(t_probe - shift, t_raw, raw[1][:, 0])
-        return float(np.mean(np.hypot(x - xy_probe[:, 0], y - xy_probe[:, 1])))
-
-    coarse = min(np.arange(-0.1, 0.1, 5e-4), key=mismatch)
-    return float(
-        min(np.arange(coarse - 5e-4, coarse + 5e-4, 1e-5), key=mismatch)
-    )
-
-
-def apex_indices(xy: np.ndarray, corners) -> list[int]:
-    found = []
-    start = 0
-    for cx, cy in corners:
-        distance = np.hypot(xy[start:, 0] - cx, xy[start:, 1] - cy)
-        near = np.flatnonzero(distance < APEX_SEARCH_MM)
-        if near.size == 0:
-            raise RuntimeError(f"the planned path never nears ({cx}, {cy})")
-        run_end = near[0]
-        while run_end + 1 < distance.size and distance[run_end + 1] < (
-            APEX_SEARCH_MM
-        ):
-            run_end += 1
-        apex = near[0] + int(np.argmin(distance[near[0] : run_end + 1]))
-        found.append(start + apex)
-        start += run_end + 1
-    return found
 
 
 def measure(
@@ -451,51 +377,25 @@ def measure(
     y, vy = axes[1][:, 0], axes[1][:, 1]
     e_cmd, ve, ae = axes[2][:, 0], axes[2][:, 1], axes[2][:, 2]
     speed_xy = np.hypot(vx, vy)
-    dt = t[1] - t[0]
-    s = np.concatenate(
-        [[0.0], np.cumsum(0.5 * (speed_xy[1:] + speed_xy[:-1]) * dt)]
-    )
-    advancing = np.concatenate([[True], np.diff(s) > 0])
     xy = np.column_stack([x, y])
-    offset = timeline_offset(t, xy, t_raw, raw)
-    r_cmd = commanded_ratio(t_raw + offset, raw, t)
-    e_out = melted(t, e_cmd, melt_k)
-    raw_speed = np.hypot(raw[0][:, 1], raw[1][:, 1])
-    raw_moving = np.interp(t, t_raw + offset, raw_speed) > RAW_REST_SPEED_MM_S
-    laying = advancing[1:] & raw_moving[1:]
-    laid = np.concatenate([[0.0], np.where(laying, np.diff(e_out), 0.0)])
-    e_out = e_out[0] + np.cumsum(laid)
-    grid = np.arange(0.0, s[-1], PATH_STEP_MM)
-    e_grid = np.interp(grid, s[advancing], e_out[advancing])
-    r_grid = np.interp(grid[:-1] + 0.5 * PATH_STEP_MM, s, r_cmd)
-    deviation = (np.diff(e_grid) / PATH_STEP_MM - r_grid) / ratio
-    middle = grid[:-1] + 0.5 * PATH_STEP_MM
+    trace = flow_metric.flow_trace(
+        t,
+        xy,
+        e_cmd,
+        flow_metric.commanded_bead(t, xy, t_raw, raw),
+        melt_k,
+        ratio,
+    )
     bead_area = width * height
-    for apex in apex_indices(xy, geometry.corners):
-        near = np.abs(middle - s[apex]) <= geometry.window_mm
-        local = deviation[near]
-        row.corners.append(
-            {
-                "s_mm": float(s[apex]),
-                "peak": float(local.max()),
-                "dip": float(local.min()),
-                "width_mm": float(
-                    np.count_nonzero(np.abs(local) > WIDTH_THRESHOLD)
-                    * PATH_STEP_MM
-                ),
-                "blob_nl": float(
-                    np.clip(local, 0.0, None).sum()
-                    * PATH_STEP_MM
-                    * bead_area
-                    * 1000.0
-                ),
-            }
-        )
+    row.corners = [
+        flow_metric.corner_report(trace, apex, geometry.window_mm, bead_area)
+        for apex in flow_metric.apex_indices(xy, geometry.corners)
+    ]
     row.peak = max(c["peak"] for c in row.corners) * 100.0
     row.dip = min(c["dip"] for c in row.corners) * 100.0
     row.width_mm = max(c["width_mm"] for c in row.corners)
     row.blob_nl = max(c["blob_nl"] for c in row.corners)
-    moving = speed_xy > MOVING_SPEED_MM_S
+    moving = speed_xy > flow_metric.MOVING_SPEED_MM_S
     row.ve_max = float(ve[moving].max())
     row.ve_min = float(ve[moving].min())
     row.ae_max = float(np.abs(ae[moving]).max())

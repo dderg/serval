@@ -918,7 +918,6 @@ mod stepcompress_reconcile_tests {
                 phase_ring_depth: 0,
                 stepcompress_max_error_secs: 0.0,
                 stepcompress_drain_budget_secs: 0.008,
-                step_capacity: None,
             },
         }
     }

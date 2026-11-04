@@ -457,6 +457,12 @@ pub geometry::step_capacity::StepCapacityOverload::demand_over_capacity: f64
 pub geometry::step_capacity::StepCapacityOverload::mcu_index: usize
 pub const geometry::step_capacity::SPATIAL_LANES: usize
 pub mod geometry::surface
+pub enum geometry::surface::PatchAxis
+pub geometry::surface::PatchAxis::Held(f64)
+pub geometry::surface::PatchAxis::Inside
+pub geometry::surface::PatchAxis::Inside::cell: f64
+pub geometry::surface::PatchAxis::Inside::min: f64
+pub geometry::surface::PatchAxis::Inside::spacing: f64
 pub enum geometry::surface::SurfaceContinuity
 pub geometry::surface::SurfaceContinuity::C0
 pub geometry::surface::SurfaceContinuity::C1
@@ -500,6 +506,7 @@ impl geometry::surface::MeshGrid
 pub fn geometry::surface::MeshGrid::bounds(&self) -> geometry::surface::SurfaceBounds
 pub fn geometry::surface::MeshGrid::contains(&self, f64, f64) -> bool
 pub fn geometry::surface::MeshGrid::new(geometry::surface::MeshGridSpec, alloc::vec::Vec<f64>) -> core::result::Result<Self, geometry::surface::SurfaceError>
+pub fn geometry::surface::MeshGrid::patch_at(&self, f64, f64) -> geometry::surface::MeshPatch
 pub fn geometry::surface::MeshGrid::sample(&self, f64, f64) -> geometry::surface::SurfaceSample
 pub fn geometry::surface::MeshGrid::x_range(&self) -> (f64, f64)
 pub fn geometry::surface::MeshGrid::y_range(&self) -> (f64, f64)
@@ -513,6 +520,11 @@ pub geometry::surface::MeshGridSpec::ny: usize
 pub geometry::surface::MeshGridSpec::tension: f64
 pub geometry::surface::MeshGridSpec::x_min: f64
 pub geometry::surface::MeshGridSpec::y_min: f64
+pub struct geometry::surface::MeshPatch
+pub geometry::surface::MeshPatch::points: [[f64; 4]; 4]
+pub geometry::surface::MeshPatch::tension: f64
+pub geometry::surface::MeshPatch::x: geometry::surface::PatchAxis
+pub geometry::surface::MeshPatch::y: geometry::surface::PatchAxis
 pub struct geometry::surface::SurfaceBounds
 pub geometry::surface::SurfaceBounds::max_curvature: f64
 pub geometry::surface::SurfaceBounds::max_gradient: f64
@@ -793,6 +805,12 @@ pub geometry::GeometryError::NonPlanarBasis::reason: &'static str
 pub geometry::GeometryError::NotSinglePieceCubic
 pub geometry::GeometryError::NotSinglePieceCubic::reason: &'static str
 pub geometry::GeometryError::ZeroMotion
+pub enum geometry::PatchAxis
+pub geometry::PatchAxis::Held(f64)
+pub geometry::PatchAxis::Inside
+pub geometry::PatchAxis::Inside::cell: f64
+pub geometry::PatchAxis::Inside::min: f64
+pub geometry::PatchAxis::Inside::spacing: f64
 pub enum geometry::RailPairShape
 pub geometry::RailPairShape::Clipped
 pub geometry::RailPairShape::Clipped::coefficients: [f64; 4]
@@ -1006,6 +1024,7 @@ impl geometry::surface::MeshGrid
 pub fn geometry::surface::MeshGrid::bounds(&self) -> geometry::surface::SurfaceBounds
 pub fn geometry::surface::MeshGrid::contains(&self, f64, f64) -> bool
 pub fn geometry::surface::MeshGrid::new(geometry::surface::MeshGridSpec, alloc::vec::Vec<f64>) -> core::result::Result<Self, geometry::surface::SurfaceError>
+pub fn geometry::surface::MeshGrid::patch_at(&self, f64, f64) -> geometry::surface::MeshPatch
 pub fn geometry::surface::MeshGrid::sample(&self, f64, f64) -> geometry::surface::SurfaceSample
 pub fn geometry::surface::MeshGrid::x_range(&self) -> (f64, f64)
 pub fn geometry::surface::MeshGrid::y_range(&self) -> (f64, f64)
@@ -1019,6 +1038,11 @@ pub geometry::MeshGridSpec::ny: usize
 pub geometry::MeshGridSpec::tension: f64
 pub geometry::MeshGridSpec::x_min: f64
 pub geometry::MeshGridSpec::y_min: f64
+pub struct geometry::MeshPatch
+pub geometry::MeshPatch::points: [[f64; 4]; 4]
+pub geometry::MeshPatch::tension: f64
+pub geometry::MeshPatch::x: geometry::surface::PatchAxis
+pub geometry::MeshPatch::y: geometry::surface::PatchAxis
 pub struct geometry::Move
 pub geometry::Move::feedrate_mm_s: f64
 pub geometry::Move::limits: geometry::frontend::VelocityLimits

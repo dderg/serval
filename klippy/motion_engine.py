@@ -41,10 +41,10 @@ _native = _load_native()
 NATIVE_BUILD_HINT = "make -f Makefile.rust motion-engine"
 
 
-def native_class(name):
-    """Return a class exported by the native _motion_engine module, failing
-    loudly when the native build is absent so construction (not import) is the
-    point of failure."""
+def native(name):
+    """Return a class or function exported by the native _motion_engine
+    module, failing loudly when the native build is absent so use (not
+    import) is the point of failure."""
     if _native is None:
         raise RuntimeError(
             "klippy requires the native _motion_engine module for %s; "

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import analyze
 import numpy as np
@@ -785,30 +787,87 @@ def test_same_key_matching_stays_exact_over_millions_of_levels_and_long_runs():
     assert counts.tolist() == [2, 1]
 
 
-def _deployed(rust_build_id):
+HEAD = "abc1234def5678"
+RECIPE_ARGV = ["/runs/20261104-064327", "--corner-flow"]
+
+
+def _deployed(rust_build_id, dirty_paths=(), diff=b""):
     return {
         "deployed": {
-            "head": "abc1234",
+            "head": HEAD,
             "branch": "main",
             "worktree": "/tmp/wt",
             "rust_build_id": rust_build_id,
+            "dirty_paths": list(dirty_paths),
+            "diff_sha256": hashlib.sha256(diff).hexdigest(),
         }
     }
 
 
 def test_a_run_analyzes_with_the_engine_its_code_built():
-    assert analyze.deployed_engine_mismatch(_deployed("f00d"), "f00d") is None
+    assert (
+        analyze.deployed_engine_mismatch(_deployed("f00d"), "f00d", RECIPE_ARGV)
+        is None
+    )
 
 
 def test_a_run_refuses_a_reference_from_other_rust_sources():
-    reason = analyze.deployed_engine_mismatch(_deployed("f00d"), "beef")
-    assert "f00d" in reason and "beef" in reason and "abc1234" in reason
+    reason = analyze.deployed_engine_mismatch(
+        _deployed("f00d"), "beef", RECIPE_ARGV
+    )
+    assert "f00d" in reason and "beef" in reason and HEAD in reason
+
+
+def test_a_refusal_prints_the_worktree_recipe_at_the_deployed_head():
+    reason = analyze.deployed_engine_mismatch(
+        _deployed("f00d"), "beef", RECIPE_ARGV
+    )
+    assert f"scripts/wt.sh new reanalyze-{HEAD[:12]} --base {HEAD}" in reason
+    assert "make -f Makefile.rust motion-engine-fast" in reason
+    assert (
+        "uv run python tools/bench/analyze.py /runs/20261104-064327 "
+        "--corner-flow" in reason
+    )
+    assert "dirty" not in reason
+
+
+@pytest.mark.parametrize(
+    "dirty_paths, diff",
+    [(["rust/a.rs"], b""), ([], b"diff --git a/rust/a.rs b/rust/a.rs\n")],
+)
+def test_a_refusal_of_a_dirty_deploy_warns_its_head_may_not_reproduce_it(
+    dirty_paths, diff
+):
+    reason = analyze.deployed_engine_mismatch(
+        _deployed("f00d", dirty_paths, diff), "beef", RECIPE_ARGV
+    )
+    assert "dirty" in reason
+    assert f"--base {HEAD}" in reason
 
 
 def test_a_run_predating_build_ids_refuses_any_reference():
     run = _deployed(None)
     del run["deployed"]["rust_build_id"]
-    assert analyze.deployed_engine_mismatch(run, "beef") is not None
+    assert (
+        analyze.deployed_engine_mismatch(run, "beef", RECIPE_ARGV) is not None
+    )
+
+
+def test_main_refuses_with_the_recipe_for_the_same_run_and_options(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "run.json").write_text(json.dumps(_deployed("f00d")))
+    monkeypatch.setattr(
+        analyze.harness,
+        "_import_engine",
+        lambda: SimpleNamespace(build_id=lambda: "beef"),
+    )
+    monkeypatch.chdir(tmp_path.parent)
+    with pytest.raises(analyze.AnalysisError) as refusal:
+        analyze.main([tmp_path.name, "--gap", "0.3", "--corner-flow"])
+    assert f"analyze.py {tmp_path} --gap 0.3 --corner-flow" in str(
+        refusal.value
+    )
 
 
 def test_a_short_epoch_runs_at_the_latest_fitted_rate_not_the_median():
@@ -823,3 +882,73 @@ def test_a_short_first_epoch_runs_at_the_next_fitted_rate():
 
 def test_a_run_with_no_fitted_epoch_runs_at_the_nominal_rate():
     assert analyze.nearest_fitted_ppm([None, None], 1) == 0.0
+
+
+F401 = analyze.SuppliedBenchmark(301, 160, 84_000_000.0, 0.75)
+FAST_SQUARE_GCODE = """\
+SET_KINEMATIC_POSITION X=0 Y=0 Z=0
+G92 E0
+G1 X200 F150000
+G1 Y200
+G1 X0
+"""
+
+
+def _capacity_run(run_dir: Path) -> Path:
+    _require_snapshot_engine()
+    shutil.copy(BENCH_DIR / "configs" / "capacity.cfg", run_dir / "printer.cfg")
+    (run_dir / "print.gcode").write_text(FAST_SQUARE_GCODE)
+    return run_dir
+
+
+def test_a_run_json_without_step_benchmarks_plans_an_uncapped_reference(
+    tmp_path,
+):
+    run_dir = _capacity_run(tmp_path)
+    (run_dir / "run.json").write_text(json.dumps({"print_state": "complete"}))
+    job = analyze.load_job(run_dir)
+    assert job.step_benchmarks is None
+    assert job.step_benchmarks_source == "absent"
+
+
+def test_recorded_step_benchmarks_reach_the_reference_verbatim(tmp_path):
+    run_dir = _capacity_run(tmp_path)
+    recorded = analyze.supplied_step_benchmarks(
+        analyze.load_job(run_dir).motors, F401
+    )
+    (run_dir / "run.json").write_text(json.dumps({"step_benchmarks": recorded}))
+    job = analyze.load_job(run_dir)
+    assert job.step_benchmarks == recorded
+    assert job.step_benchmarks_source == "recorded"
+    with pytest.raises(analyze.AnalysisError, match="records the step"):
+        analyze.load_job(run_dir, F401)
+
+
+def test_a_supplied_benchmark_charges_every_captured_motor_pulsed(tmp_path):
+    job = analyze.load_job(_capacity_run(tmp_path), F401)
+    assert job.step_benchmarks_source == "supplied"
+    (mcu,) = job.step_benchmarks
+    assert (mcu["mcu"], mcu["clock_freq"]) == ("mcu", 84_000_000.0)
+    assert (mcu["pulsed_ticks_per_step"], mcu["both_edge_ticks_per_step"]) == (
+        301,
+        160,
+    )
+    assert mcu["motors"] == [
+        {"name": m.name, "step_distance": m.step_mm, "mode": "pulsed"}
+        for m in job.motors
+    ]
+
+
+def test_the_step_benchmark_caps_the_reference_where_it_binds(tmp_path):
+    _require_snapshot_engine()
+    run_dir = _capacity_run(tmp_path)
+    uncapped = analyze.build_reference(analyze.load_job(run_dir))
+    capped = analyze.build_reference(analyze.load_job(run_dir, F401))
+    assert capped.blocks[0].duration_s > uncapped.blocks[0].duration_s
+    assert capped.final_counts == uncapped.final_counts
+
+
+def test_the_step_benchmark_option_parses_ticks_clock_and_fraction():
+    assert analyze.SuppliedBenchmark.parse("301,160,84000000,0.75") == F401
+    with pytest.raises(Exception, match="PULSED,BOTH_EDGE,CLOCK_HZ,FRACTION"):
+        analyze.SuppliedBenchmark.parse("301,160,84000000")

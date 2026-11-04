@@ -313,6 +313,7 @@ fn exact_pinned_parabola(sig: &PinnedParabola, breaks: &[f64]) -> ExactSpan {
                         local(&[half_bend * (sig.h - 2.0 * center), -sig.bend_mm_s2 * radius]),
                         local(&[-sig.bend_mm_s2]),
                     ],
+                    unshaped_step: None,
                 }
             })
             .collect(),

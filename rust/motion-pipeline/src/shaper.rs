@@ -27,7 +27,7 @@ mod hidden_breaks;
 pub(crate) mod exact;
 
 #[path = "shaper_hull.rs"]
-mod hull;
+pub(crate) mod hull;
 
 #[path = "shaper_taylor.rs"]
 pub(crate) mod taylor;
@@ -3501,6 +3501,21 @@ fn plan_over_seeds<S: TrackSignal>(
 /// tolerance carries across one floor.
 fn velocity_resolution(fit_tol: FitTol, floors: LadderFloors) -> f64 {
     fit_tol.accel_mm_s2 * floors.cubic
+}
+
+/// [`velocity_resolution`] of a fit to `fit_tol` of a signal reaching
+/// positions to `position_scale`, speeds to `velocity_scale` and times to
+/// `time_scale`: the speeds such a fit cannot resolve.
+pub(crate) fn velocity_resolution_at_scales(
+    position_scale: f64,
+    velocity_scale: f64,
+    time_scale: f64,
+    fit_tol: FitTol,
+) -> f64 {
+    velocity_resolution(
+        fit_tol,
+        ladder_resolution_floor_from_scales(position_scale, velocity_scale, time_scale, fit_tol),
+    )
 }
 
 const CUBIC_ANCHOR_OFFSET_CURVATURE: f64 = 6.0;

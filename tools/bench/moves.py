@@ -21,7 +21,7 @@ import numpy as np
 def move_spans(job: analyze.Job, waypoints: list[tuple]) -> list[dict]:
     engine = analyze.harness._import_engine()
     snapshot, _ = engine.pipeline_snapshot_axis_samples(
-        waypoints, job.config.config_text, [0], 2
+        waypoints, job.config.config_text, [0], 2, job.step_benchmarks
     )
     return json.loads(snapshot)["trajectory"]["spans"]
 

@@ -124,7 +124,6 @@ impl trajectory::chain::AxisChainSet
 pub fn trajectory::chain::AxisChainSet::axis_support(&self, usize) -> (f64, f64)
 pub fn trajectory::chain::AxisChainSet::back_support(&self) -> f64
 pub fn trajectory::chain::AxisChainSet::direct_forward_support(&self) -> f64
-pub fn trajectory::chain::AxisChainSet::follower_velocity_step_allowance(&self, usize) -> f64
 pub fn trajectory::chain::AxisChainSet::forward_support(&self) -> f64
 pub fn trajectory::chain::AxisChainSet::has_motor_side_stages(&self) -> bool
 pub fn trajectory::chain::AxisChainSet::has_own_kernel(&self, usize) -> bool
@@ -304,12 +303,15 @@ pub fn trajectory::BuzzProfile::amplitude_mm(&self) -> f64
 pub fn trajectory::BuzzProfile::breakpoints(&self) -> &[f64]
 pub fn trajectory::BuzzProfile::duration(&self) -> f64
 pub fn trajectory::BuzzProfile::end_time(&self) -> f64
+pub fn trajectory::BuzzProfile::envelope_pieces(&self) -> alloc::vec::Vec<(f64, f64, [f64; 2])>
 pub fn trajectory::BuzzProfile::eval(&self, f64) -> trajectory::continuous::ProfileSample
 pub fn trajectory::BuzzProfile::freq_end_hz(&self) -> f64
 pub fn trajectory::BuzzProfile::freq_start_hz(&self) -> f64
 pub fn trajectory::BuzzProfile::jerk(&self, f64) -> f64
+pub fn trajectory::BuzzProfile::omega_start(&self) -> f64
 pub fn trajectory::BuzzProfile::position(&self, f64) -> f64
 pub fn trajectory::BuzzProfile::ramp(&self) -> f64
+pub fn trajectory::BuzzProfile::sweep_rate(&self) -> f64
 pub fn trajectory::BuzzProfile::t_end(&self) -> f64
 pub fn trajectory::BuzzProfile::t_start(&self) -> f64
 pub fn trajectory::BuzzProfile::try_new(f64, f64, f64, f64, f64, f64) -> core::result::Result<Self, trajectory::continuous::ProfileError>
@@ -387,6 +389,7 @@ pub fn trajectory::NudgeProfile::duration(&self) -> f64
 pub fn trajectory::NudgeProfile::end_time(&self) -> f64
 pub fn trajectory::NudgeProfile::eval(&self, f64) -> trajectory::continuous::ProfileSample
 pub fn trajectory::NudgeProfile::jerk(&self, f64) -> f64
+pub fn trajectory::NudgeProfile::phase_polynomials(&self) -> alloc::vec::Vec<(f64, f64, [f64; 3])>
 pub fn trajectory::NudgeProfile::position(&self, f64) -> f64
 pub fn trajectory::NudgeProfile::speed_mm_s(&self) -> f64
 pub fn trajectory::NudgeProfile::t_end(&self) -> f64
@@ -557,7 +560,6 @@ impl trajectory::chain::AxisChainSet
 pub fn trajectory::chain::AxisChainSet::axis_support(&self, usize) -> (f64, f64)
 pub fn trajectory::chain::AxisChainSet::back_support(&self) -> f64
 pub fn trajectory::chain::AxisChainSet::direct_forward_support(&self) -> f64
-pub fn trajectory::chain::AxisChainSet::follower_velocity_step_allowance(&self, usize) -> f64
 pub fn trajectory::chain::AxisChainSet::forward_support(&self) -> f64
 pub fn trajectory::chain::AxisChainSet::has_motor_side_stages(&self) -> bool
 pub fn trajectory::chain::AxisChainSet::has_own_kernel(&self, usize) -> bool
@@ -578,12 +580,15 @@ pub fn trajectory::BuzzProfile::amplitude_mm(&self) -> f64
 pub fn trajectory::BuzzProfile::breakpoints(&self) -> &[f64]
 pub fn trajectory::BuzzProfile::duration(&self) -> f64
 pub fn trajectory::BuzzProfile::end_time(&self) -> f64
+pub fn trajectory::BuzzProfile::envelope_pieces(&self) -> alloc::vec::Vec<(f64, f64, [f64; 2])>
 pub fn trajectory::BuzzProfile::eval(&self, f64) -> trajectory::continuous::ProfileSample
 pub fn trajectory::BuzzProfile::freq_end_hz(&self) -> f64
 pub fn trajectory::BuzzProfile::freq_start_hz(&self) -> f64
 pub fn trajectory::BuzzProfile::jerk(&self, f64) -> f64
+pub fn trajectory::BuzzProfile::omega_start(&self) -> f64
 pub fn trajectory::BuzzProfile::position(&self, f64) -> f64
 pub fn trajectory::BuzzProfile::ramp(&self) -> f64
+pub fn trajectory::BuzzProfile::sweep_rate(&self) -> f64
 pub fn trajectory::BuzzProfile::t_end(&self) -> f64
 pub fn trajectory::BuzzProfile::t_start(&self) -> f64
 pub fn trajectory::BuzzProfile::try_new(f64, f64, f64, f64, f64, f64) -> core::result::Result<Self, trajectory::continuous::ProfileError>
@@ -696,6 +701,7 @@ pub fn trajectory::NudgeProfile::duration(&self) -> f64
 pub fn trajectory::NudgeProfile::end_time(&self) -> f64
 pub fn trajectory::NudgeProfile::eval(&self, f64) -> trajectory::continuous::ProfileSample
 pub fn trajectory::NudgeProfile::jerk(&self, f64) -> f64
+pub fn trajectory::NudgeProfile::phase_polynomials(&self) -> alloc::vec::Vec<(f64, f64, [f64; 3])>
 pub fn trajectory::NudgeProfile::position(&self, f64) -> f64
 pub fn trajectory::NudgeProfile::speed_mm_s(&self) -> f64
 pub fn trajectory::NudgeProfile::t_end(&self) -> f64

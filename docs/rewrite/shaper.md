@@ -311,6 +311,81 @@ stage order: leading gains (pressure advance) act on the projected track,
 the follower's kernel (e.g. `smooth_triangle`) convolves that, trailing
 gains act on the convolution.
 
+### Rests
+
+The projection reads the leaders' path speed `|v|` and, for an advance, its
+rate `d|v|/dt = v̂·a` and its derivative `v̂·j + |a⊥|²/|v|` off the leaders'
+*fitted* polynomials. Near a stop those fits move at their own fit noise. X
+and Y stop at slightly different times, and the direction `v̂` turns through
+nanometre loops that no toolhead makes. `|a⊥|²/|v|` then spikes without
+bound over a microsecond, and the advance would turn the spike into
+extruder acceleration.
+
+A **rest** (`follower_projection/rest.rs`) is a maximal stretch inside the
+support where the leaders' speed is at most the speed their fits cannot
+resolve. That speed is the leader fit's velocity resolution: the
+acceleration tolerance times the shortest span such a fit holds at the
+leaders' position, speed and time scales (`velocity_resolution_at_scales`).
+No constant of its own enters.
+
+Inside a rest:
+
+- `|v|` and so the odometer are unchanged. Path distance, and with it
+  material, is exactly what it is outside rests.
+- The rate and its derivative are read along a fixed direction: the unit
+  velocity the leaders enter the rest with, up to the rest's *split* (where
+  they are slowest), and the one they leave with from the split on.
+  `d|v|/dt = d̂·a` and `d²|v|/dt² = d̂·j`. The fit-noise curvature term is
+  dropped.
+
+The consequences:
+
+- A stop-and-go along a line enters and leaves along the same direction. It
+  reads smooth through the split.
+- A reversal, or a turn made at rest, enters and leaves along different
+  directions. Its rate steps at the split by what the two directions read
+  of the acceleration. That step is the jump the motion makes, kept and not
+  smoothed:
+  - the split is a semantic break of the fit;
+  - it is a knot the signal reports through `TrackSignal::knot_jump` and
+    `eval_pva_across`;
+  - it is a break of the follower's enclosure windows, each side enclosed
+    with its own direction.
+- The rest's ends are breaks of the enclosure windows, not of the fit.
+  There the rate is continuous, and the dropped curvature term at the
+  floor speed is the only change.
+
+Rests never reach into the end slivers, which keep their own semantics. A
+rest that runs into one reads the single direction the leaders have at its
+other end.
+
+### Square-root onsets
+
+An unshaped leader that leaves its curvature cap (a rail `Departure` pair)
+raises its tangential acceleration as `√τ`, `τ` the time from the cap. Its
+jerk there is `J/√τ` plus bounded terms, `J = 0.75·|c₃|/h^{3/2}` from the
+pair's coefficients (`SquareRootOnset`). An advance reads that jerk through
+its gain `G` (steepest advance slope × ratio bound × odometer scale), so the
+follower's acceleration is unbounded at the onset. No fit holds it.
+
+The **onset sliver** (`OnsetSliver`, `follower_projection/enclosure.rs`) is
+where the singular term alone passes the follower's acceleration tolerance:
+`τ < (G·J/accel_tol)²` on the departure side, clipped to the pair. The
+width comes from the tolerance; no constant of its own enters. Inside the
+sliver, one typed exemption (`UnshapedLeaderStep`) applies. It is the same
+allowance an advance's velocity step at an unshaped leader's acceleration
+step takes: `instantaneous_corner_velocity` plus what the leaders' fit
+rounding makes.
+
+- The acceleration bound is dropped. The enclosure's pieces carry the
+  exemption (`ExactPiece::unshaped_step`) and the hull skips their
+  acceleration.
+- Position is proven within tolerance, as everywhere.
+- The fit's velocity is proven within the allowance of the signal's.
+- The velocity change the singular term makes across the sliver,
+  `2·G·J·√τ`, must stay within the allowance. A larger one is refused
+  before the fit with `PostProcessError::UnshapedLeaderOnsetVelocityStep`.
+
 ## Streaming mechanics: windows, frontier, drain
 
 The shaper is a streaming stage over channels; it never sees the whole
