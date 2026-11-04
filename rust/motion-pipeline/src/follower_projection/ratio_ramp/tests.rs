@@ -5,7 +5,10 @@ use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 use trajectory::{ContinuousAxis, ContinuousSegment};
 
 use super::super::FollowerState;
-use super::{ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_S, RampLeg, WIDTH_SLOPE_BOUND, WidthField};
+use super::{
+    Crossing, ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_S, RampLeg, ShapedLeaders,
+    WIDTH_SLOPE_BOUND, WidthField,
+};
 
 /// `(length, ratio at start, ratio at end)` per span.
 type Table = Vec<(f64, f64, f64)>;
@@ -497,26 +500,9 @@ fn a_time_node_a_rounding_off_a_rest_narrows_the_width_into_it_linearly() {
 const REST_LEG_HALF_TIME_S: f64 = 0.01;
 const REST_LEG_SPILL_MM: f64 = 0.01;
 
-/// A resting leg as shaping leaves it: the leaders brake along x into a
-/// rest halfway through, speed falling as the square of the time left,
-/// and leave it the same way.
-fn braking_into_a_rest_and_leaving() -> ContinuousSegment {
-    let half = REST_LEG_HALF_TIME_S;
-    let (t0, t_rest, t1) = (0.0, half, 2.0 * half);
-    let d = REST_LEG_SPILL_MM;
-    let c = d / half.powi(3);
-    let x = bezier_pieces_to_nurbs(&[
-        BezierPiece {
-            u_start: t0,
-            u_end: t_rest,
-            coeffs: vec![0.0, 3.0 * c * half * half, -3.0 * c * half, c],
-        },
-        BezierPiece {
-            u_start: t_rest,
-            u_end: t1,
-            coeffs: vec![d, 0.0, 0.0, c],
-        },
-    ]);
+/// Leaders moving along x and y as `x` and `y` lay them over `[t0, t1]`,
+/// z and the follower held.
+fn leaders(x: &[BezierPiece], y: &[BezierPiece], (t0, t1): (f64, f64)) -> ContinuousSegment {
     let held = Arc::new(bezier_pieces_to_nurbs(&[BezierPiece {
         u_start: t0,
         u_end: t1,
@@ -524,8 +510,8 @@ fn braking_into_a_rest_and_leaving() -> ContinuousSegment {
     }]));
     ContinuousSegment {
         axes: Arc::from([
-            ContinuousAxis::Spline(Arc::new(x)),
-            ContinuousAxis::Spline(Arc::clone(&held)),
+            ContinuousAxis::Spline(Arc::new(bezier_pieces_to_nurbs(x))),
+            ContinuousAxis::Spline(Arc::new(bezier_pieces_to_nurbs(y))),
             ContinuousAxis::Spline(Arc::clone(&held)),
             ContinuousAxis::Spline(held),
         ]),
@@ -538,6 +524,174 @@ fn braking_into_a_rest_and_leaving() -> ContinuousSegment {
         rest_at_end: false,
     }
 }
+
+fn still(t0: f64, t1: f64) -> Vec<BezierPiece> {
+    vec![BezierPiece {
+        u_start: t0,
+        u_end: t1,
+        coeffs: vec![0.0],
+    }]
+}
+
+/// A resting leg as shaping leaves it: the leaders brake along x into a
+/// rest halfway through, speed falling as the square of the time left,
+/// and leave it the same way.
+fn braking_into_a_rest_and_leaving() -> ContinuousSegment {
+    let half = REST_LEG_HALF_TIME_S;
+    let (t0, t_rest, t1) = (0.0, half, 2.0 * half);
+    let d = REST_LEG_SPILL_MM;
+    let c = d / half.powi(3);
+    let x = [
+        BezierPiece {
+            u_start: t0,
+            u_end: t_rest,
+            coeffs: vec![0.0, 3.0 * c * half * half, -3.0 * c * half, c],
+        },
+        BezierPiece {
+            u_start: t_rest,
+            u_end: t1,
+            coeffs: vec![d, 0.0, 0.0, c],
+        },
+    ];
+    leaders(&x, &still(t0, t1), (t0, t1))
+}
+
+/// Leaders turning around along x at `turn` under `TURN_ACCEL_MM_S2`, the
+/// speed there no more than `drift` along y, the rounding a fit leaves of
+/// an exact zero.
+fn turning_around_with_drift(turn: f64, drift: f64) -> ContinuousSegment {
+    let (t0, t1) = (0.0, 2.0 * turn);
+    let x = [BezierPiece {
+        u_start: t0,
+        u_end: t1,
+        coeffs: vec![
+            0.5 * TURN_ACCEL_MM_S2 * turn * turn,
+            -TURN_ACCEL_MM_S2 * turn,
+            0.5 * TURN_ACCEL_MM_S2,
+        ],
+    }];
+    let y = [BezierPiece {
+        u_start: t0,
+        u_end: t1,
+        coeffs: vec![0.0, drift],
+    }];
+    leaders(&x, &y, (t0, t1))
+}
+
+const TURN_ACCEL_MM_S2: f64 = 20_000.0;
+
+/// At a turnaround the leaders' speed is a zero's rounding, and so is the
+/// direction it points: the speed leaves the zero at the whole
+/// acceleration whichever way that rounding points.
+#[test]
+fn a_turnaround_crossing_reads_the_whole_acceleration_whatever_its_rounding() {
+    let turn = 0.01;
+    for drift in [1e-11, 3e-12] {
+        let shaped = turning_around_with_drift(turn, drift);
+        let crossing = Crossing::at(&ShapedLeaders::of(&shaped, &[0, 1]), turn);
+        assert!(
+            crossing.turns_around(),
+            "a turnaround drifting {drift} mm/s along y crosses as {crossing:?}"
+        );
+        assert_eq!(
+            crossing.rate, TURN_ACCEL_MM_S2,
+            "a turnaround drifting {drift} mm/s along y crosses as {crossing:?}"
+        );
+    }
+}
+
+/// Leaders that start from a standstill at `t0` along x under a constant
+/// jerk, covering `REST_LEG_SPILL_MM` by `t0 + duration`.
+fn starting_from_standstill(t0: f64, duration: f64) -> ContinuousSegment {
+    let t1 = t0 + duration;
+    let x = [BezierPiece {
+        u_start: t0,
+        u_end: t1,
+        coeffs: vec![0.0, 0.0, 0.0, REST_LEG_SPILL_MM / duration.powi(3)],
+    }];
+    leaders(&x, &still(t0, t1), (t0, t1))
+}
+
+/// Leaders that brake along x under a constant jerk into a standstill at
+/// `t0 + duration`, covering `REST_LEG_SPILL_MM`.
+fn braking_to_standstill(t0: f64, duration: f64) -> ContinuousSegment {
+    let t1 = t0 + duration;
+    let c = REST_LEG_SPILL_MM / duration.powi(3);
+    let x = [BezierPiece {
+        u_start: t0,
+        u_end: t1,
+        coeffs: vec![0.0, 3.0 * c * duration * duration, -3.0 * c * duration, c],
+    }];
+    leaders(&x, &still(t0, t1), (t0, t1))
+}
+
+fn moving_leg(shaped: &ContinuousSegment, start_s: f64) -> RampLeg<'_> {
+    RampLeg {
+        shaped,
+        leaders: &[0, 1],
+        support: (shaped.t_start, shaped.t_end),
+        start_s,
+        rests: false,
+    }
+}
+
+/// The width field's time samples from `t0` on, as `(s − s0, t − t0)`.
+fn samples_from(field: &WidthField, t0: f64, s0: f64) -> Vec<(f64, f64)> {
+    field
+        .candidates
+        .iter()
+        .filter_map(|candidate| match candidate {
+            super::Candidate::Time(sample) if sample.t >= t0 => {
+                Some((sample.s - s0, sample.t - t0))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A full stop decouples planning: a leg the leaders open from a
+/// standstill samples the width at the times it would be planned from rest,
+/// wherever on the clock the stream before left them standing.
+#[test]
+fn a_leg_opening_from_standstill_samples_the_width_as_planned_from_rest() {
+    let duration = 0.02;
+    let from_rest = starting_from_standstill(0.0, duration);
+    let mut planned_from_rest = WidthField::default();
+    planned_from_rest.extend(
+        &ShapedLeaders::of(&from_rest, &[0, 1]),
+        &moving_leg(&from_rest, 0.0),
+        REST_LEG_SPILL_MM,
+    );
+    let stand_still_at = 0.0337;
+    let before = braking_to_standstill(stand_still_at - duration, duration);
+    let after = starting_from_standstill(stand_still_at, duration);
+    let mut stream = WidthField::default();
+    stream.extend(
+        &ShapedLeaders::of(&before, &[0, 1]),
+        &moving_leg(&before, 0.0),
+        REST_LEG_SPILL_MM,
+    );
+    stream.extend(
+        &ShapedLeaders::of(&after, &[0, 1]),
+        &moving_leg(&after, REST_LEG_SPILL_MM),
+        2.0 * REST_LEG_SPILL_MM,
+    );
+    let (streamed, from_rest) = (
+        samples_from(&stream, stand_still_at, REST_LEG_SPILL_MM),
+        samples_from(&planned_from_rest, 0.0, 0.0),
+    );
+    assert!(
+        streamed.len() == from_rest.len()
+            && streamed.iter().zip(&from_rest).all(|(a, b)| {
+                (a.0 - b.0).abs() <= SAMPLE_ROUNDING && (a.1 - b.1).abs() <= SAMPLE_ROUNDING
+            }),
+        "after a standstill the stream samples the width at {streamed:?}, from rest at \
+         {from_rest:?}"
+    );
+}
+
+/// What clock offsets leave of two samples of one motion.
+const SAMPLE_ROUNDING: f64 = 1e-12;
 
 /// A resting leg steps the ratio from its tail to its lead where the
 /// leaders' distance from the rest point puts the rest, which the odometer

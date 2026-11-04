@@ -126,6 +126,20 @@ struct TimeSample {
     base: Option<f64>,
 }
 
+/// The width field's time ticks since the leaders last stood still: every
+/// [`NODE_SPACING_S`] from `origin`, and the next one to sample.
+#[derive(Debug, Clone, Copy)]
+struct SampleGrid {
+    origin: f64,
+    next: i64,
+}
+
+impl SampleGrid {
+    fn time(&self, tick: i64) -> f64 {
+        self.origin + tick as f64 * NODE_SPACING_S
+    }
+}
+
 /// What may still become a node, in path order: a time sample, or a rest.
 #[derive(Debug, Clone, Copy)]
 enum Candidate {
@@ -190,7 +204,7 @@ struct WidthField {
     candidates: VecDeque<Candidate>,
     seams: Vec<TimedSeam>,
     rule: Option<RatioRampRule>,
-    next_time: Option<i64>,
+    grid: Option<SampleGrid>,
     pending: Option<usize>,
     before_pending: f64,
     last_kept: Option<(f64, f64)>,
@@ -198,21 +212,30 @@ struct WidthField {
 }
 
 impl WidthField {
-    /// Samples the times `leg` covers, the times in a gap before it (legal
-    /// only at rest) at its start.
+    /// Samples the times `leg` covers on the grid the stream laid since the
+    /// leaders last stood still: a leg they open from a standstill — the
+    /// stream's start, a drain or a dwell — lays a fresh one from its own
+    /// start, so the motion after a rest is sampled as it would be planned
+    /// from rest. Ticks in a time gap before `leg`, legal only at rest,
+    /// sample its start.
     fn extend(&mut self, leaders: &ShapedLeaders, leg: &RampLeg, table_end: f64) {
         let grid = axis_grid(leg.shaped, leg.leaders);
         let (t0, t1) = (grid[0], grid[grid.len() - 1]);
-        let mut index = self
-            .next_time
-            .unwrap_or_else(|| (t0 / NODE_SPACING_S).ceil() as i64);
+        let opens_from_standstill = leaders.speed(t0) == 0.0 && leaders.accel_norm(t0) == 0.0;
+        let mut ticks = match self.grid {
+            Some(ticks) if !opens_from_standstill => ticks,
+            _ => SampleGrid {
+                origin: t0,
+                next: 0,
+            },
+        };
         if self.nodes.is_empty() && self.candidates.is_empty() {
             self.place_rest(leg.start_s);
         }
         let speed = |t: f64| leaders.speed(t);
         let (mut knot, mut at, mut covered) = (1, t0, 0.0);
         loop {
-            let t = index as f64 * NODE_SPACING_S;
+            let t = ticks.time(ticks.next);
             if t >= t1 {
                 break;
             }
@@ -226,9 +249,9 @@ impl WidthField {
                 at = t;
             }
             self.place_sample((leg.start_s + covered).min(table_end), t.max(t0));
-            index += 1;
+            ticks.next += 1;
         }
-        self.next_time = Some(index);
+        self.grid = Some(ticks);
     }
 
     fn place_sample(&mut self, s: f64, t: f64) {
@@ -1367,15 +1390,20 @@ struct Crossing {
 }
 
 impl Crossing {
+    /// Where the speed is a zero's rounding — at rest, or at a turnaround,
+    /// under what [`TURNAROUND_SPEED_TIME_S`] of the acceleration builds —
+    /// its direction is rounding too, and so is the tangential acceleration
+    /// read along it. The speed leaves a zero at the whole acceleration.
     fn at(leaders: &ShapedLeaders, t: f64) -> Self {
         let speed = leaders.speed(t);
-        let (rate, jerk) = if speed > 0.0 {
+        let accel = leaders.accel_norm(t);
+        let (rate, jerk) = if speed > accel * TURNAROUND_SPEED_TIME_S {
             (
                 leaders.speed_deriv(t, speed).abs(),
                 leaders.speed_second(t, speed).abs(),
             )
         } else {
-            (leaders.accel_norm(t), 0.0)
+            (accel, 0.0)
         };
         Self { speed, rate, jerk }
     }
