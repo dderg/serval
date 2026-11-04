@@ -356,8 +356,10 @@ does, rising from the rest point, so the extruder never asks much more than
 the advance's own `k·r·accel` there. At a rest it releases the lead before
 and rebuilds it after over the input shaper's spill around the rest alone
 wherever the shortest ramp the extruder's limits allow for that lead fits
-within the spill, and over the spill plus that ramp's reach elsewhere; a
-rest the leaders pass through without stopping keeps the full advance.
+within the spill, over the spill plus that ramp's reach elsewhere, and over
+the spill plus the reach of the longest ramp where a ratio step lies so near
+the rest that its own ramp would leave those limits; a rest the leaders pass
+through without stopping keeps the full advance.
 Without a kernel, any extruder position step, or velocity step beyond the
 leaders' fit rounding, is refused before it is emitted; leaders without an
 acceleration-continuous kernel produce such steps. The trade-off against a
