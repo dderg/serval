@@ -156,6 +156,19 @@ The Pi bench is shared: every use goes through `tools/bench/lock.py hold -- <cmd
 queues behind the current holder and prints who holds it and for how long (waits of
 20 minutes were seen). Hold it for the whole session script, not per command.
 
+# Never use git stash
+
+The stash is one list shared by every worktree of the repository: one agent's `git stash
+pop` took another agent's work in progress. Commit WIP on your branch (a `WIP` commit you
+amend away before shipping is fine; history is never rewritten on main), or save it with
+`git diff > ~/.cache/<topic>.patch` and `git apply` it later. `git stash`, `merge --autostash`
+and `pull --autostash` are refused by `.githooks/reference-transaction`, installed into the
+shared hooks directory by `scripts/install-git-guards.sh` (run by `wt.sh new`; run it once by
+hand if you do not use wt.sh). A git alias cannot do this: git does not let an alias shadow
+a builtin command (checked: `alias.stash` is ignored), but every ref update passes through the
+hook, and it works in all worktrees at once. Deleting an existing stash entry is still
+allowed so old ones can be dropped.
+
 # Never work in ~/Developer/serval
 
 `~/Developer/serval` is the shared checkout: it stays on `main` tracking `origin/main`
