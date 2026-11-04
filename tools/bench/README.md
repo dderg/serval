@@ -207,15 +207,30 @@ Other families, scaled from the F401 by clock and by the instructions one more s
 
 ### Self-benchmark
 
-Every MCU now measures its own step cost. On the first `get_step_benchmark` (`src/stepper_bench.c`), it runs four benchmark steppers through the real classic dispatch path: `sched_timer_dispatch`, the batching, and the step and finish code. The pulses go to a RAM sink instead of a pin (`gpio_out_bench_sink`). The steppers run in two pairs 0.25 µs apart, like CoreXY a/b, 32 steps each at 10 µs intervals. The MCU sums the ticks spent inside dispatches and reports the worst of three runs as ticks per step, for the 2 µs pulsed mode and for the both-edge mode. Klippy queries it at connect and refuses firmware without the command. The result is in `printer.mcu.step_benchmark`. `CONFIG_MCU_SIM` builds report `simulated=1` and do not run it. On a real Linux MCU the sink is an invalid file descriptor, so the GPIO ioctl fails fast and the cost is a lower bound.
+Every MCU measures its own step cost. On the first `get_step_benchmark` (`src/stepper_bench.c`), it runs one benchmark stepper, 32 steps at 25 µs intervals. The steps go through the real timer interrupt (SysTick, or TIM2 on G0) and the real classic dispatch path, with pulses going to a RAM sink instead of a pin (`gpio_out_bench_sink`). Between steps the MCU executes a nop sled larger than its instruction cache: 2 KB, or 32 KB on H7 for its 16 KB L1. That evicts the cache the way the main loop's tasks do between a lone motor's steps.
 
-F401: 301 ticks/step pulsed (279 k steps/s, 0.93 × the ladder ceiling) and 160 ticks/step both-edge (525 k steps/s). The values are identical across four resets. `suite.py` fails unless the pulsed capacity lies within `BENCHMARK_BAND` (0.85–1.10) of `LADDER_CEILING_STEPS_PER_S` (300 k).
+The timer reports how many ticks its interrupt held the CPU (`timer_dispatch_busy_ticks`), counted from the moment it was due to fire to the handler's exit. That count includes entry latency, the dispatch prologue and the in-handler spin to the unstep. The benchmark reports the worst of three runs per step, once for the 2 µs pulsed mode and once for the both-edge mode.
 
-CI runs the benchmark of every test/configs firmware in unicorn (`step_benchmark_emu.py`, from `scripts/ci-build-mcu.sh`). In the emulator one instruction is one tick, the MCU is in its configured state, and the build fails on a shutdown or on a result outside 40–600 instructions/step. Instructions per step, pulsed / both-edge: F401 188 / 94, F103 172–174 / 95–96, G0B1 229–244 / 115–121, H723 300 / 154. The F401's 301 ticks over 188 instructions is 1.60 cycles per instruction.
+Klippy queries the benchmark at connect and refuses firmware without the command. The result is in `printer.mcu.step_benchmark`. `CONFIG_MCU_SIM` builds report `simulated=1` and do not run it.
+
+F401: 497 ticks/step pulsed (169 k steps/s) and 240 ticks/step both-edge. The values are identical across reflashes. The single-motor ceiling is about 172 k: a lone motor sustained at 169 k ran without a shutdown, and one at 174 k shut down. `suite.py` fails unless the pulsed capacity lies within `BENCHMARK_BAND` (0.85–1.10) of `SINGLE_MOTOR_CEILING_STEPS_PER_S` (172 k); the F401 sits at 0.98.
+
+The earlier benchmark timed `sched_timer_dispatch` in a cache-hot loop at 301 ticks/step. That counted none of the interrupt's cost, and the cap built on it shut the MCU down on a lone motor (see "Single motor at the cap").
+
+CI runs the benchmark of every test/configs firmware in unicorn (`step_benchmark_emu.py`, from `scripts/ci-build-mcu.sh`). The emulator counts one tick per instruction and delivers the timer interrupt the firmware programs, by calling its handler once the interrupt is due and PRIMASK is clear. It does not model hardware stacking or wait states. The build fails on a shutdown or on a result outside 40–600 instructions/step. Instructions per isolated step, pulsed / both-edge:
+
+| firmware | pulsed | both-edge |
+|---|---|---|
+| F401 | 392 | 167 |
+| F103 | 381 | 176 |
+| G0B1 | 277 | 99 |
+| H723 | 342 | 181 |
+
+The pulsed figure includes the spin to the 2 µs unstep inside the interrupt. On H7 the unstep is far enough away that it gets its own interrupt.
 
 ### How the capacity caps moves
 
-The planner turns the benchmark into a per-move speed cap (`rust/motion-pipeline/src/live_config/step_capacity.rs`, `docs/Config_Reference_Motion.md`, "MCU step capacity"); klippy (`klippy/motion_step_capacity.py`) only hands it each MCU's benchmark, clock and stepped motors. Each MCU gets `STEP_CAPACITY_FRACTION` × CLOCK_FREQ ticks per second; the fraction comes from the timing budget and the single-motor limit below. A motor costs its benchmarked ticks per step (pulsed or both-edge, by its own mode) times the steps per second the move asks of it. The planner keeps the sum over each MCU's motors within the capacity, counting pressure advance on the extruder. On this bench (F401, 301 ticks/step pulsed) the fraction of 0.50 gives 140 k steps/s. `capacity.cfg` raises the speed limits past the cap, so its ladder rungs above the cap are planned slower than the G-code asks and `step_capacity_capped` events report it.
+The planner turns the benchmark into a per-move speed cap (`rust/motion-pipeline/src/live_config/step_capacity.rs`, `docs/Config_Reference_Motion.md`, "MCU step capacity"); klippy (`klippy/motion_step_capacity.py`) only hands it each MCU's benchmark, clock and stepped motors. Each MCU gets `STEP_CAPACITY_FRACTION` × CLOCK_FREQ ticks per second; the fraction comes from the timing budget below. A motor costs its benchmarked ticks per step (pulsed or both-edge, by its own mode) times the steps per second the move asks of it. The planner keeps the sum over each MCU's motors within the capacity, counting pressure advance on the extruder. On this bench (F401, 497 ticks/step pulsed) the fraction of 0.80 gives 135 k steps/s. `capacity.cfg` raises the speed limits past the cap, so its ladder rungs above the cap are planned slower than the G-code asks and `step_capacity_capped` events report it.
 
 `run.py` records every MCU's step benchmark in `run.json` under `step_benchmarks`, taken from the MCU status `step_capacity`, together with the capacity fraction the live planner applied. `analyze.py` plans its reference under the same cap, so a run where the cap binds is analyzed against the plan the printer executed, even after the fraction changes. A `run.json` from before that recording plans an uncapped reference. For such a run, `--step-benchmark 301,160,84000000,0.75` supplies the F401's benchmark and the fraction live used then (0.75 until it became 0.625). It is charged to every captured motor, stepped pulsed, since the bench has one MCU and no `dedge` driver. `analysis.json` says which reference it judged in `reference_step_capacity`: `recorded`, `supplied` or `absent`.
 
@@ -223,34 +238,45 @@ The planner turns the benchmark into a per-move speed cap (`rust/motion-pipeline
 
 Budget: at the load the cap allows, p99.9 MCU step lateness × that motor's own step rate (lateness in microsteps of position) must stay ≤ 0.5 microstep. A step that is 0.5 microstep late is still nearer its own lattice point than the next one. The host's step compression already allows 25 µs by design, which is 1.3 microsteps at the 52 k steps/s per motor these runs reach. The analyzer's 0.05-step criterion is not usable here: the MCU's intrinsic ~5 µs p99.9 dispatch jitter alone exceeds it at any useful speed, even at a quarter of capacity. That criterion measures speed, not load.
 
-Sweep: `capacity_ladder_high` in event mode with the step tap and `configs/capacity.cfg`, so every rung asks more than the cap and the run sits at the cap. F401, 301 ticks/step pulsed, four motors stepping at equal rates. The fraction was set per run in a throwaway tree. `mcu_execution.lateness_by_step_rate_hz` → `position_p99_9_steps` in the dominant (capped) rate bin:
+The fraction must hold the budget for two workloads at the cap, each run in event mode with the step tap and `configs/capacity.cfg` so that every move asks more than the cap:
+- `single_motor_cap`: one motor alone, a CoreXY 45° diagonal stepping only `a`. Each step pays its own timer interrupt.
+- `capacity_ladder_high`: four motors at equal rates. Their steps batch inside the dispatch loop.
 
-| fraction | cap | p99.9 lateness | p99.9 position | max position | step_load_late |
-|---|---|---|---|---|---|
-| 0.75 | 209 k | 12.2 µs | 0.62 | 1.01 | 456 |
-| 0.65 | 181 k | 11.7–11.8 µs | 0.52 (×2) | 0.82 | 167–169 |
-| **0.625** | 174 k | 11.2 µs | **0.47** | 0.81 | 121 |
-| 0.60 | 167 k | 10.7–10.8 µs | 0.44 (×2) | 0.82 | 90–189 |
-| 0.55 | 153 k | 9.5 µs | 0.36 | 0.68 | 48 |
-| 0.45 | 126 k | 6.9 µs | 0.21 | 0.65 | 0 |
-| 0.35 | 98 k | 6.3 µs | 0.15 | 0.34 | 0 |
-| 0.25 | 70 k | 5.2 µs | 0.09 | 0.24 | 0 |
+The table gives `mcu_execution.lateness_by_step_rate_hz` → `position_p99_9_steps` in the dominant (capped) bin. Bench F401, isolated-step benchmark 497 ticks/step, firmware with #670, #671 and #683. The fraction was set per run in a throwaway tree.
 
-The largest fraction measured within budget is 0.625; 0.65 misses it by 0.02 step, and it did so on both runs. Runs: `20261104-044956` … `-045817` and `-051422` … `-051928`. In time terms, lateness is flat at 5–7 µs up to 0.45 and the queueing knee appears from 0.55 upward.
-
-### Single motor at the cap (interim fraction 0.50)
-
-The sweep above used the four-motor ladder only. On that ladder, steps of different motors fall close together and the dispatch loop takes them in turn without leaving the SysTick handler. A single motor held at the cap behaves differently: suite row `single_motor_cap` runs `gcode/single_motor_cap.gcode`, a CoreXY 45° diagonal at F150000 that steps only `a`, with `capacity.cfg`. Each of its steps pays a cold SysTick entry, the dispatch prologue and the exit. The self-benchmark never sees that cost, because it times `sched_timer_dispatch` in a cache-hot loop. A lone motor at the cap therefore needs more CPU than the benchmark charges, and the MCU falls more than 1 ms behind and shuts down with `Stepper too far in past`:
-
-| firmware | 0.50 | 0.625 | 0.775 |
+| fraction | cap | single motor | four motors |
 |---|---|---|---|
-| before #670/#671 (`481397432`) | shutdown (`-114535`) | shutdown (`-114149`) | shutdown (`-111157`) |
-| #670 + #671 (lead 190, 1 ms defer) | — | shutdown (`-110500`) | — |
-| lead 100, 1 ms defer | — | shutdown (`-110625`) | shutdown (`-111026`) |
-| lead 100, 100 µs defer | pass (`-114634`) | shutdown (`-115032`) | — |
-| main + #683 (lead 100, 1 ms defer), this fraction | pass (`-122013`, suite `20261104-122102`) | | |
+| 1.0 | 169 k | 0.89 (`20261104-125307`) | 0.24 (`-125357`) |
+| 0.9 | 152 k | 0.69 (`-125811`) | 0.21 (`-125859`) |
+| 0.85 | 144 k | 0.09, 0.09, 0.10 (`-131827`, `-131918`, suite `20261104-143747`) | 0.20 (`-143608`) |
+| **0.8** | 135 k | **0.05, 0.05, 0.05** (`-130322`, `-132317`, `-132439`) | **0.19** (`-130412`) |
 
-0.50 is interim. The self-benchmark is being reworked to measure an isolated step through the real SysTick path, and the fraction will then be re-derived against both this row and the timing budget.
+The single motor sets the fraction. 0.85 is the largest fraction measured within budget, and 0.9 misses it. The single-motor lateness rises steeply between the two, because at 0.9 a lone motor has the CPU nearly saturated. No fraction shut the MCU down. Four motors stay far inside the budget even at 1.0, because their steps are cheaper than the benchmark charges.
+
+The live fraction is **0.80**, one step back from that cliff. A shutdown is catastrophic, and real printers run more MCU tasks than this bench, which has no heaters, no ADC sampling and no TMC UART yet. Re-derive the fraction under that load once the phase-2 wiring (`WIRING_PHASE2.md`) exists.
+
+Earlier derivations used the four-motor ladder only, against the cache-hot benchmark (301 ticks/step):
+- First: 0.625, the largest fraction under 0.5 microstep. At 0.65 the result was 0.52 on both runs; at 0.75, 0.62. Runs `20261104-044956` … `-051928`.
+- With #670/#671/#683: 0.775 (0.44 and 0.46). At 0.80 the result was 0.55–0.59.
+
+That benchmark under-charged a lone motor. `single_motor_cap` shut the MCU down with `Stepper too far in past` at 0.625 on every firmware, and the old firmware (`481397432`) shut down even at 0.50 (`-114535`). Main ran at 0.50 as an interim fix (#684) until this benchmark.
+
+### Step timing jitter sources (F401)
+
+These were measured with an on-target probe: DWT-stamped histograms read over SWD from a throwaway firmware. Fixes were checked in event mode.
+
+| source | measured | fix |
+|---|---|---|
+| SysTick path vs dispatch-loop path | SysTick entry to step edge took 176–200 cycles (2.1–2.4 µs). A loop-dispatched step's edge came 72 cycles after due. Low-load lateness was a flat 1.2–3.0 µs band, p50 2.2 µs. | #671: wake SysTick early and spin to the deadline. Low-load p50 is now 0.1–0.3 µs. |
+| Flash wait states | 5 WS at 84 MHz. Entry-to-edge spread was 0.67 µs from cache misses. | #670: 2 WS. Capped-bin p99.9 position fell 18 %. |
+| Forced task defer | 14,570 forced 5 µs pauses per capped ladder, each delaying the next steps 4.4–12 µs. | #671: 1 ms interval instead of 100 µs. Capped p99.9 fell 27 %. |
+| Over-long SysTick lead | The clean prologue p99.9 is 100 cycles. A 190-cycle lead spun about 120 cycles per interrupt. | #683: lead 100. |
+| Running the hot path from SRAM | The self-benchmark rose from 301 to 391 ticks/step: S-bus instruction fetch contends with data. | Rejected. |
+| USB OTG interrupt (priority 1) | Overlapped 0.02 % of SysTick entries, delaying them 1.6–2.1 µs. | None; below p99.9. |
+| Masked critical sections in the main loop | Entries while awake were 7 % of the total; p99.9 entry delay grew by at most 0.3 µs. | None. |
+| SysTick entry from WFI | A constant 32 cycles. | None; the host's clock offset absorbs it. |
+
+What remains at the cap is queueing behind other events: about half the isolated steps wait, uniformly up to roughly 6 µs. That is load, and the capacity fraction trades it off.
 
 ## Limits
 

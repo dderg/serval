@@ -146,9 +146,8 @@ timer_kick(void)
 
 #define TIMER_MIN_TRY_TICKS timer_from_us(2)
 
-// Invoke timers
 static void
-timer_dispatch(void)
+timer_dispatch_due(void)
 {
     // A signal from an alarm that was superseded by a later one is
     // delivered after the re-arm; dispatching on it would run a timer
@@ -238,6 +237,22 @@ timer_dispatch(void)
     TimerInfo.next_wake_counter = next;
     TimerInfo.must_wake_timers = 0;
     timer_settime(TimerInfo.t_alarm, TIMER_ABSTIME, &it, NULL);
+}
+
+static uint32_t timer_busy_ticks;
+
+static void
+timer_dispatch(void)
+{
+    uint32_t entered = timer_read_time();
+    timer_dispatch_due();
+    timer_busy_ticks += timer_read_time() - entered;
+}
+
+uint32_t
+timer_dispatch_busy_ticks(void)
+{
+    return timer_busy_ticks;
 }
 
 // OS signal handler

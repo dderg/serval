@@ -2,10 +2,10 @@
   "slice_lines": 1000,
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 10409195933,
-      "stream_secs": 6.594,
-      "reason": "exact chunks shared by neighbouring spans are computed once; output bit-identical (trajectory digests unchanged)",
-      "commit": "aa9728b9ac981f863994615e28b4d60e09ccb7c8",
+      "ir": 8531762709,
+      "stream_secs": 8.541,
+      "reason": "the ratio ramp reads the leaders over both halves of every ramp (laid tails, seams widened by later legs), the width field derives each seam's width plateau, and the smoothing sums the table's slope span by span",
+      "commit": "fdc3ad24850ff092c2b565a9a368ba2d2d158238",
       "pi_2core": {
         "k": 4587316424.936247,
         "worst_x": [
@@ -16,10 +16,10 @@
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 13316627340,
+      "ir": 12733050046,
       "stream_secs": 6.202,
-      "reason": "exact chunks shared by neighbouring spans are computed once; output bit-identical (trajectory digests unchanged)",
-      "commit": "aa9728b9ac981f863994615e28b4d60e09ccb7c8",
+      "reason": "the ratio ramp reads the leaders over both halves of every ramp (laid tails, seams widened by later legs), the width field derives each seam's width plateau, and the smoothing sums the table's slope span by span",
+      "commit": "fdc3ad24850ff092c2b565a9a368ba2d2d158238",
       "pi_2core": {
         "k": 4582331787.594325,
         "worst_x": [
@@ -30,10 +30,10 @@
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 13701188811,
+      "ir": 13364376280,
       "stream_secs": 7.543,
-      "reason": "exact chunks shared by neighbouring spans are computed once; output bit-identical (trajectory digests unchanged)",
-      "commit": "aa9728b9ac981f863994615e28b4d60e09ccb7c8",
+      "reason": "the ratio ramp reads the leaders over both halves of every ramp (laid tails, seams widened by later legs), the width field derives each seam's width plateau, and the smoothing sums the table's slope span by span",
+      "commit": "fdc3ad24850ff092c2b565a9a368ba2d2d158238",
       "pi_2core": {
         "k": 4388809054.193679,
         "worst_x": [

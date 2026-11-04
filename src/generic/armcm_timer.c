@@ -45,6 +45,9 @@ timer_is_before(uint32_t time1, uint32_t time2)
 volatile uint32_t timer_last_diff;
 #endif
 
+static uint32_t timer_fire_time;
+static volatile uint32_t timer_busy_ticks;
+
 static void
 timer_set_diff(uint32_t value)
 {
@@ -65,6 +68,7 @@ timer_set_diff(uint32_t value)
     SysTick->LOAD = value;
     SysTick->VAL = 0;
     SysTick->LOAD = 0;
+    timer_fire_time = timer_read_time() + value;
 }
 
 // Under CONFIG_MCU_SIM (Renode), DWT->CYCCNT is unmodeled and reads as
@@ -96,6 +100,7 @@ timer_kick(void)
 {
     SysTick->LOAD = 0;
     SysTick->VAL = 0;
+    timer_fire_time = timer_read_time();
     SCB->ICSR = SCB_ICSR_PENDSTSET_Msk;
 }
 
@@ -276,6 +281,7 @@ timer_dispatch_many(void)
 void __visible __aligned(16) // aligning helps stabilize perf benchmarks
 SysTick_Handler(void)
 {
+    uint32_t fired = timer_fire_time;
     irq_disable();
     // SysTick and TIM5 share the same NVIC priority (MOTION_NVIC_PRIO).
     // Same-priority interrupts cannot nest, so a TIM5 tick that comes due
@@ -312,12 +318,19 @@ SysTick_Handler(void)
 #endif
     uint32_t diff = timer_dispatch_many();
     timer_set_diff(diff);
+    timer_busy_ticks += timer_read_time() - fired;
 #if CONFIG_MACH_STM32
     diag_systick_account(diag_systick_enter, DWT->CYCCNT);
 #endif
     irq_enable();
 }
 DECL_ARMCM_IRQ(SysTick_Handler, SysTick_IRQn);
+
+uint32_t
+timer_dispatch_busy_ticks(void)
+{
+    return timer_busy_ticks;
+}
 
 // Make sure timer_repeat_until doesn't wrap 32bit comparisons
 void

@@ -1,7 +1,10 @@
 //! An advance acts on the extruder's velocity, which is zero at every rest,
-//! so a run ends on exactly the material the same run lays without it.
-//! The cases are `tools/corner_flow.py`'s: a 45° corner and a 2 mm zigzag
-//! between 30 mm leads, extruding a 0.45 × 0.2 mm bead of 1.75 mm filament.
+//! so a run ends on exactly the material the chain lays without it: the
+//! ratio over the shaped arc wherever the commanded toolhead moves, and over
+//! the chord the shapers' spill covers where it rests (docs/rewrite/shaper.md,
+//! "Followers"). The cases are `tools/corner_flow.py`'s: a 45° corner and a
+//! 2 mm zigzag between 30 mm leads, extruding a 0.45 × 0.2 mm bead of
+//! 1.75 mm filament, each starting and ending at rest with none between.
 
 mod corpus;
 
@@ -10,7 +13,7 @@ use std::path::Path;
 const FILAMENT_MM: f64 = 1.75;
 const BEAD_WIDTH_MM: f64 = 0.45;
 const BEAD_HEIGHT_MM: f64 = 0.2;
-const CONSERVED_MM: f64 = 1e-6;
+const CONSERVED_MM: f64 = 1e-9;
 
 fn bead_ratio() -> f64 {
     BEAD_WIDTH_MM * BEAD_HEIGHT_MM / (std::f64::consts::PI * (FILAMENT_MM / 2.0).powi(2))
@@ -27,7 +30,10 @@ fn gcode(points: &[(f64, f64)], speed_mm_s: f64) -> String {
     let (mut x, mut y) = (0.0, 0.0);
     for &(to_x, to_y) in points {
         let length = libm::hypot(to_x - x, to_y - y);
-        lines.push(format!("G1 X{to_x:.5} Y{to_y:.5} E{:.6}", ratio * length));
+        lines.push(format!(
+            "G1 X{to_x:.12} Y{to_y:.12} E{:.12}",
+            ratio * length
+        ));
         (x, y) = (to_x, to_y);
     }
     lines.join("\n") + "\n"
@@ -93,10 +99,31 @@ fn variant(config: &Path, chain: &str, smooth_time: f64, name: &str) -> std::pat
     path
 }
 
-const PATH_PANELS_PER_ROW: usize = 2000;
+const PATH_PANELS_PER_ROW: usize = 20000;
 
-/// The final extruder position, and the length of the shaped toolhead path.
-fn final_e_and_path(name: &str, program: &str, config: &Path) -> (f64, f64) {
+fn toolhead_xy(trajectory: &pipeline_snapshot::ExactTrajectory, row: usize, t: f64) -> (f64, f64) {
+    let at = |axis: usize| {
+        trajectory
+            .eval_row(axis, row, t, pipeline_snapshot::SampleSide::Right)
+            .expect("leader carrier")
+            .position
+    };
+    (at(0), at(1))
+}
+
+/// The final extruder position, and the material the chord rule lays: the
+/// bead ratio over the shaped arc of every row but the first and the last,
+/// and over the chord from the start point to where the first row's spill
+/// ends and from where the last row's spill starts to the end point. A run
+/// from rest to rest with no rest between opens and closes on exactly one
+/// spill row each, the shapers' reach before the first move and after the
+/// last.
+fn final_e_and_chord_rule(
+    name: &str,
+    program: &str,
+    config: &Path,
+    (start, end): ((f64, f64), (f64, f64)),
+) -> (f64, f64) {
     let snapshot = corpus::plan(name, program, config).expect("the case plans");
     let trajectory = &snapshot.trajectory;
     let final_e = trajectory
@@ -107,8 +134,16 @@ fn final_e_and_path(name: &str, program: &str, config: &Path) -> (f64, f64) {
         )
         .expect("extruder carrier")
         .position;
-    let mut path = 0.0;
-    for (index, row) in trajectory.rows(0).iter().enumerate() {
+    let rows = trajectory.rows(0);
+    assert!(
+        rows.len() >= 3,
+        "{name}: a spill row on either side of the moves"
+    );
+    let distance = |a: (f64, f64), b: (f64, f64)| libm::hypot(a.0 - b.0, a.1 - b.1);
+    let last = rows.len() - 1;
+    let mut path = distance(start, toolhead_xy(trajectory, 0, rows[0].t1))
+        + distance(toolhead_xy(trajectory, last, rows[last].t0), end);
+    for (index, row) in rows.iter().enumerate().take(last).skip(1) {
         let speed = |t: f64| {
             (0..pipeline_snapshot::EXTRUDER_AXIS)
                 .map(|axis| {
@@ -127,7 +162,7 @@ fn final_e_and_path(name: &str, program: &str, config: &Path) -> (f64, f64) {
             path += h / 6.0 * (speed(a) + 4.0 * speed(a + 0.5 * h) + speed(a + h));
         }
     }
-    (final_e, path)
+    (final_e, bead_ratio() * path)
 }
 
 struct Case<'a> {
@@ -140,36 +175,32 @@ struct Case<'a> {
     speed_mm_s: f64,
 }
 
-/// The advanced chain ends on the material the unadvanced one lays over
-/// the same path. The two plans need not share that path: with no kernel,
-/// or a short one, the extruder caps budget the toolhead's acceleration for
-/// the advance, so the planner moves it differently and the shapers cut the
-/// corners by a different amount. Each run is therefore held to its own
-/// shaped path, and the two compared on what they lay beyond the bead ratio
-/// times that path.
+/// Both chains lay exactly what the chord rule asks of their own plan. The
+/// two plans need not share a path: with no kernel, or a short one, the
+/// extruder caps budget the toolhead's acceleration for the advance, so the
+/// planner moves it differently and the shapers cut the corners by a
+/// different amount.
 fn assert_advance_conserves(case: &Case) {
     let config = corpus::repo().join(case.config);
     let program = gcode(&case.points, case.speed_mm_s);
-    let beyond_the_path = |chain: &str| {
+    let ends = ((0.0, 0.0), *case.points.last().expect("a case moves"));
+    for chain in [case.chain, case.plain_chain] {
         let path = variant(
             &config,
             chain,
             case.smooth_time,
             &format!("{}_{}", case.name, chain.len()),
         );
-        let (final_e, travelled) = final_e_and_path(case.name, &program, &path);
-        final_e - bead_ratio() * travelled
-    };
-    let advanced = beyond_the_path(case.chain);
-    let plain = beyond_the_path(case.plain_chain);
-    assert!(
-        (advanced - plain).abs() <= CONSERVED_MM,
-        "{} at {} mm/s under `{}`: the advance adds {} mm beyond the material its path lays",
-        case.name,
-        case.speed_mm_s,
-        case.chain,
-        advanced - plain
-    );
+        let (final_e, laid) = final_e_and_chord_rule(case.name, &program, &path, ends);
+        assert!(
+            (final_e - laid).abs() <= CONSERVED_MM,
+            "{} at {} mm/s under `{chain}`: the extruder ends on {final_e}, {} mm off the {laid} \
+             the chord rule lays",
+            case.name,
+            case.speed_mm_s,
+            final_e - laid
+        );
+    }
 }
 
 #[test]
@@ -224,12 +255,7 @@ fn an_advance_before_a_long_kernel_conserves_material_through_a_corner() {
     });
 }
 
-/// The Trident's shapers spill the toolhead's motion past the G-code's
-/// first and last moves, and the extruder follows it there at the ratio it
-/// reads: the unadvanced chain lays 5.9e-5 mm less than the bead ratio
-/// times that shaped path, the advanced one 3.4e-6 mm less.
 #[test]
-#[ignore = "#675: the shapers' spill at the stream ends lays a ramp-dependent share of its path"]
 fn a_kernel_free_advance_on_the_trident_conserves_material_through_a_corner() {
     assert_advance_conserves(&Case {
         config: "tools/bench/configs/trident_ramp.cfg",
