@@ -1,7 +1,7 @@
 use crate::frontend::ExtruderCaps;
 use crate::path::{CurvatureProfile, Segment};
 
-use super::z_caps::crossing_time;
+use super::rate_cap::LinearRate;
 
 const SPATIAL_AXES: usize = 3;
 const BISECTION_STEPS: u32 = 64;
@@ -53,6 +53,13 @@ struct Demand {
 impl Demand {
     fn velocity(&self, v: f64, accel: f64) -> f64 {
         self.ratio * (v + self.slope * accel)
+    }
+
+    fn velocity_rate(&self) -> LinearRate {
+        LinearRate {
+            per_velocity: self.ratio,
+            per_accel: self.ratio * self.slope,
+        }
     }
 
     fn accel(&self, v: f64, accel: f64) -> f64 {
@@ -128,13 +135,22 @@ pub(super) fn extruder_capped(
     if demand.velocity(ceiling, accel) <= caps.max_velocity_mm_s {
         return (ceiling, accel);
     }
-    velocity_capped(
-        &demand,
+    demand.velocity_rate().capped(
         caps.max_velocity_mm_s,
         segment.s_len(),
         kappa_peak,
         (ceiling, accel),
     )
+}
+
+/// The extruder motor's velocity, `r·v + k·r·A`, at the ratio a segment
+/// with `ratio_in_reach` is budgeted at.
+pub(super) fn velocity_rate(caps: &ExtruderCaps, ratio_in_reach: f64) -> LinearRate {
+    let ratio = budgeted_ratio(ratio_in_reach);
+    LinearRate {
+        per_velocity: ratio,
+        per_accel: ratio * caps.advance_slope_s,
+    }
 }
 
 /// The largest budget up to `accel` whose acceleration demand at `ceiling`
@@ -153,43 +169,6 @@ fn largest_fitting_accel(demand: &Demand, ceiling: f64, accel: f64, max_accel: f
         }
     }
     fits
-}
-
-/// `r·v + k·r·A ≤ V_e`: keep the ceiling and cut the budget, or keep the
-/// budget and cut the ceiling, whichever crosses the segment sooner; when
-/// neither alone fits, each gets half of `V_e`.
-fn velocity_capped(
-    demand: &Demand,
-    max_velocity: f64,
-    length: f64,
-    kappa_peak: f64,
-    (ceiling, accel): (f64, f64),
-) -> (f64, f64) {
-    let (ratio, slope) = (demand.ratio, demand.slope);
-    let cut_ceiling = (max_velocity - ratio * slope * accel) / ratio;
-    if slope == 0.0 {
-        return (cut_ceiling, accel);
-    }
-    let cut_accel = (max_velocity - ratio * ceiling) / (ratio * slope);
-    match (cut_ceiling > 0.0, cut_accel > 0.0) {
-        (true, true) => {
-            let keep_ceiling = (ceiling, cut_accel);
-            let keep_accel = (cut_ceiling, accel);
-            if crossing_time(length, kappa_peak, keep_ceiling)
-                <= crossing_time(length, kappa_peak, keep_accel)
-            {
-                keep_ceiling
-            } else {
-                keep_accel
-            }
-        }
-        (true, false) => (cut_ceiling, accel),
-        (false, true) => (ceiling, cut_accel),
-        (false, false) => (
-            0.5 * max_velocity / ratio,
-            accel.min(0.5 * max_velocity / (ratio * slope)),
-        ),
-    }
 }
 
 #[cfg(test)]

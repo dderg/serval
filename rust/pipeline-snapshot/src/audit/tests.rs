@@ -13,6 +13,7 @@ fn config(max_jerk: f64) -> StreamConfig {
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 1024,
         limits: geometry::VelocityLimits::try_new(100.0, 1000.0, 8.0, max_jerk).unwrap(),
+        step_capacity: None,
     }
 }
 

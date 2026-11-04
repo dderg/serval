@@ -19,12 +19,13 @@ fn with_jerk(mut moves: Vec<Move>, jerk: f64) -> Vec<Move> {
     moves
 }
 
-fn unlimited(entry_v: f64) -> VelocityPlanParams {
+fn unlimited(entry_v: f64) -> VelocityPlanParams<'static> {
     VelocityPlanParams {
         integration_tol: DEFAULT_INTEGRATION_TOL,
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
         entry_v,
+        step_capacity: None,
     }
 }
 
@@ -994,12 +995,13 @@ fn wipe_into_retract() -> (Vec<Move>, Vec<bool>) {
     (moves, stop_before)
 }
 
-fn plan_params(entry_v: f64) -> VelocityPlanParams {
+fn plan_params(entry_v: f64) -> VelocityPlanParams<'static> {
     VelocityPlanParams {
         integration_tol: 1e-4,
         max_extrude_only_velocity_mm_s: 25.0,
         max_extrude_only_accel_mm_s2: 1000.0,
         entry_v,
+        step_capacity: None,
     }
 }
 

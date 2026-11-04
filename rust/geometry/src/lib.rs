@@ -13,6 +13,7 @@ pub mod frontend;
 pub mod path;
 pub mod segment;
 pub mod space;
+pub mod step_capacity;
 pub mod surface;
 pub mod vec3;
 pub mod velocity;
@@ -26,6 +27,7 @@ pub use frontend::{
     corner_deviation_from_scv, line_move, scv_from_corner_deviation,
 };
 pub use segment::{CubicSegment, FollowerDemand, SourceRange};
+pub use step_capacity::{FollowerStepLoad, McuStepLoad, StepCapacity, StepCapacityOverload};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FollowerWord {
