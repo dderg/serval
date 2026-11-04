@@ -153,6 +153,15 @@ pub fn read_motion_settings(
     ))
 }
 
+/// The planner a serialized config document runs: what `init_planner`
+/// builds and every offline path (snapshots, replays, the bench reference)
+/// plans under.
+pub fn planner_config_from_text(config_text: &str) -> Result<crate::PlannerConfig, String> {
+    let doc = Document::parse(config_text, "<config>").map_err(|e| e.to_string())?;
+    let (settings, _consumed) = read_motion_settings(&doc)?;
+    planner_config_from_settings(&settings)
+}
+
 /// Build the full `PlannerConfig` from parsed settings, running every
 /// validation the planner performs — axis registry, motor mapping,
 /// post-processor chain compilation, cartesian limits. Called both at

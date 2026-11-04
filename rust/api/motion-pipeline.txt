@@ -9,11 +9,26 @@ impl motion_pipeline::fit_stage::FitStage
 pub fn motion_pipeline::fit_stage::FitStage::into_driver(self) -> motion_pipeline::fit_stage::FitDriver
 pub fn motion_pipeline::fit_stage::FitStage::new(geometry::fitter::config::CornerFitConfig) -> Self
 pub mod motion_pipeline::live_config
+pub struct motion_pipeline::live_config::GcodeLine
+pub motion_pipeline::live_config::GcodeLine::de: f64
+pub motion_pipeline::live_config::GcodeLine::delta: [f64; 3]
+pub motion_pipeline::live_config::GcodeLine::feedrate_mm_s: f64
+pub motion_pipeline::live_config::GcodeLine::seq: u32
+pub motion_pipeline::live_config::GcodeLine::start: [f64; 3]
+impl motion_pipeline::live_config::GcodeLine
+pub fn motion_pipeline::live_config::GcodeLine::end(&self) -> [f64; 3]
+pub struct motion_pipeline::live_config::GcodeMoveBase
+impl motion_pipeline::live_config::GcodeMoveBase
+pub fn motion_pipeline::live_config::GcodeMoveBase::config_limits(&self) -> planner_config::CartesianLimits
+pub fn motion_pipeline::live_config::GcodeMoveBase::from_parts(geometry::frontend::VelocityLimits, core::option::Option<usize>) -> Self
+pub fn motion_pipeline::live_config::GcodeMoveBase::limits(&self) -> geometry::frontend::VelocityLimits
+pub fn motion_pipeline::live_config::GcodeMoveBase::limits_under(&self, &planner_config::RuntimeLimits) -> core::result::Result<geometry::frontend::VelocityLimits, &'static str>
+pub fn motion_pipeline::live_config::GcodeMoveBase::line_move(&self, &planner_config::RuntimeLimits, motion_pipeline::live_config::GcodeLine) -> core::result::Result<core::option::Option<geometry::frontend::Move>, alloc::string::String>
+pub fn motion_pipeline::live_config::GcodeMoveBase::of(&planner_config::PlannerConfig, &[geometry::frontend::ExtruderCaps]) -> core::result::Result<Self, alloc::string::String>
+pub const motion_pipeline::live_config::EXTRUSION_AXIS: &str
 pub const motion_pipeline::live_config::STREAM_INTEGRATION_TOL: f64
 pub const motion_pipeline::live_config::STREAM_MAX_BUFFER_MOVES: usize
 pub fn motion_pipeline::live_config::extruder_caps(&planner_config::PlannerConfig) -> core::result::Result<alloc::vec::Vec<geometry::frontend::ExtruderCaps>, alloc::string::String>
-pub fn motion_pipeline::live_config::extruder_caps_on(&[geometry::frontend::ExtruderCaps], usize) -> core::option::Option<geometry::frontend::ExtruderCaps>
-pub fn motion_pipeline::live_config::move_limits(&planner_config::PlannerConfig, core::option::Option<geometry::frontend::ExtruderCaps>) -> core::result::Result<geometry::frontend::VelocityLimits, alloc::string::String>
 pub fn motion_pipeline::live_config::require_unlimited_config_jerk(f64) -> core::result::Result<(), &'static str>
 pub fn motion_pipeline::live_config::stream_config(&planner_config::PlannerConfig) -> core::result::Result<motion_pipeline::types::StreamConfig, alloc::string::String>
 pub mod motion_pipeline::planner
@@ -47,6 +62,16 @@ pub motion_pipeline::types::DispatchCommand::Nudge::axis: u8
 pub motion_pipeline::types::DispatchCommand::Nudge::mcu_id: u32
 pub motion_pipeline::types::DispatchCommand::Nudge::motor_mask: u8
 pub motion_pipeline::types::DispatchCommand::Nudge::profile: trajectory::continuous::profiles::NudgeProfile
+pub enum motion_pipeline::types::InputTrace
+pub motion_pipeline::types::InputTrace::Control(&'static str)
+pub motion_pipeline::types::InputTrace::Drain
+pub motion_pipeline::types::InputTrace::Dwell
+pub motion_pipeline::types::InputTrace::Dwell::secs: f64
+pub motion_pipeline::types::InputTrace::Move(geometry::frontend::Move)
+pub motion_pipeline::types::InputTrace::Reset
+pub motion_pipeline::types::InputTrace::Reset::pos: alloc::vec::Vec<f64>
+impl motion_pipeline::types::InputTrace
+pub fn motion_pipeline::types::InputTrace::of(&motion_pipeline::types::StreamInput) -> Self
 pub enum motion_pipeline::types::PlannedItem
 pub motion_pipeline::types::PlannedItem::Control(motion_pipeline::types::Control)
 pub motion_pipeline::types::PlannedItem::Drain
@@ -109,6 +134,16 @@ pub motion_pipeline::DispatchCommand::Nudge::axis: u8
 pub motion_pipeline::DispatchCommand::Nudge::mcu_id: u32
 pub motion_pipeline::DispatchCommand::Nudge::motor_mask: u8
 pub motion_pipeline::DispatchCommand::Nudge::profile: trajectory::continuous::profiles::NudgeProfile
+pub enum motion_pipeline::InputTrace
+pub motion_pipeline::InputTrace::Control(&'static str)
+pub motion_pipeline::InputTrace::Drain
+pub motion_pipeline::InputTrace::Dwell
+pub motion_pipeline::InputTrace::Dwell::secs: f64
+pub motion_pipeline::InputTrace::Move(geometry::frontend::Move)
+pub motion_pipeline::InputTrace::Reset
+pub motion_pipeline::InputTrace::Reset::pos: alloc::vec::Vec<f64>
+impl motion_pipeline::types::InputTrace
+pub fn motion_pipeline::types::InputTrace::of(&motion_pipeline::types::StreamInput) -> Self
 pub enum motion_pipeline::PlannedItem
 pub motion_pipeline::PlannedItem::Control(motion_pipeline::types::Control)
 pub motion_pipeline::PlannedItem::Drain
@@ -146,6 +181,7 @@ pub fn motion_pipeline::Pipeline::finish(&mut self, &mut impl core::ops::functio
 pub fn motion_pipeline::Pipeline::idle(&mut self, &mut impl core::ops::function::FnMut(motion_pipeline::types::TrajectoryItem) -> bool) -> bool
 pub fn motion_pipeline::Pipeline::new(motion_pipeline::types::StreamConfig, trajectory::chain::AxisChainSet, alloc::vec::Vec<f64>, f64) -> Self
 pub fn motion_pipeline::Pipeline::with_fitted_tap(self, crossbeam_channel::channel::Sender<geometry::frontend::Move>) -> Self
+pub fn motion_pipeline::Pipeline::with_input_tap(self, crossbeam_channel::channel::Sender<motion_pipeline::types::InputTrace>) -> Self
 pub fn motion_pipeline::Pipeline::with_toolhead_tap(self, crossbeam_channel::channel::Sender<trajectory::continuous::ContinuousSegment>) -> Self
 impl motion_pipeline::Pipeline
 pub fn motion_pipeline::Pipeline::into_staged(self, impl core::ops::function::FnMut(motion_pipeline::types::TrajectoryItem) -> bool + core::marker::Send + 'static) -> motion_pipeline::StagedPipeline

@@ -10,8 +10,8 @@
 use std::path::{Path, PathBuf};
 
 use pipeline_snapshot::waypoints::parse_gcode;
-use pipeline_snapshot::{SampleSide, SnapshotParams, pipeline_snapshot};
-use planner_config::from_doc::read_motion_settings;
+use pipeline_snapshot::{SampleSide, pipeline_snapshot_for_config};
+use planner_config::from_doc::{planner_config_from_text, read_motion_settings};
 
 pub const SIM_GCODES: [&str; 4] = [
     "voron_first_layers",
@@ -82,35 +82,14 @@ pub fn z_caps_excess(snapshot: &pipeline_snapshot::Snapshot, config: &Path) -> O
 }
 
 pub fn plan(name: &str, gcode: &str, config: &Path) -> Option<pipeline_snapshot::Snapshot> {
-    let settings = motion_settings(config);
-    let waypoints = parse_gcode(gcode, &settings.cartesian).expect("gcode parses");
+    let text = std::fs::read_to_string(config).expect("read config");
+    let planner = planner_config_from_text(&text).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let waypoints = parse_gcode(gcode, &planner.cartesian).expect("gcode parses");
     if waypoints.len() < 2 {
         return None;
     }
-    let snapshot = pipeline_snapshot(
-        &waypoints,
-        SnapshotParams {
-            max_velocity: settings.cartesian.max_velocity,
-            max_accel: settings.cartesian.max_accel,
-            corner_deviation: settings.cartesian.corner_deviation,
-            max_jerk: settings.cartesian.max_jerk,
-            max_z_velocity: SnapshotParams::binding_z_cap(
-                settings.cartesian.max_z_velocity,
-                settings.cartesian.max_velocity,
-            ),
-            max_z_accel: SnapshotParams::binding_z_cap(
-                settings.cartesian.max_z_accel,
-                settings.cartesian.max_accel,
-            ),
-            max_extrude_only_velocity: settings.max_extrude_only_velocity,
-            max_extrude_only_accel: settings.max_extrude_only_accel,
-            max_path_deviation: Some(settings.fit_tolerance_mm),
-            max_accel_deviation: Some(settings.fit_tolerance_accel_mm_s2),
-            axis_decls: settings.axes,
-            post_processor_decls: settings.post_processors,
-        },
-    )
-    .unwrap_or_else(|e| panic!("{name}: {e}"));
+    let snapshot = pipeline_snapshot_for_config(&waypoints, &planner)
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
     Some(snapshot)
 }
 

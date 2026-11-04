@@ -653,7 +653,7 @@ impl RatioSmoothing {
 
     /// Takes in `leg`'s spans: the width nodes it covers, the seams the
     /// table gained with the ramp time `rule` derives for each, and the
-    /// advance valleys its opening seam needs.
+    /// advance valleys its opening seam and a turnaround inside it need.
     pub(super) fn lay(&mut self, spans: &[RatioSpan], leg: &RampLeg, rule: &RatioRampRule) {
         assert!(
             self.width.rule.is_none_or(|laid| laid == *rule) || self.width.is_settled(),
@@ -685,17 +685,30 @@ impl RatioSmoothing {
         self.width.extend(&leaders, leg, table_end);
         let closes_a_rest = self.lay_rest_valley(leg, &leaders, crossing, table_end);
         if reach > SPAN_MIN_LEN_MM && !self.resting && !closes_a_rest && crossing.turns_around() {
-            self.valleys.push(AdvanceValley {
-                start: seam,
-                end: seam,
-                before: reach.min(self.back_reach_limit(seam)),
-                after: reach,
-            });
+            self.lay_turnaround_valley(seam, reach);
+        }
+        let turn_inside = (!leg.rests && !self.resting)
+            .then(|| turnaround_inside(&leaders, leg, table_end))
+            .flatten();
+        if let Some((turn, turn_crossing)) = turn_inside {
+            let reach = turn_crossing.reach(VALLEY_RAMP_TIME_S).min(turn - self.floor);
+            if reach > SPAN_MIN_LEN_MM {
+                self.lay_turnaround_valley(turn, reach);
+            }
         }
         let new_seams = self.record_seams(spans);
         self.time_seams(&spans[new_seams.start.saturating_sub(1)..], &leaders, leg);
         self.width.assign(t_end - TARGET_DELAY_S);
         self.reach_into_next = Some(Crossing::at(&leaders, t_end));
+    }
+
+    fn lay_turnaround_valley(&mut self, turn: f64, reach: f64) {
+        self.valleys.push(AdvanceValley {
+            start: turn,
+            end: turn,
+            before: reach.min(self.back_reach_limit(turn)),
+            after: reach,
+        });
     }
 
     /// Records the seams of the spans not yet examined, and returns the
@@ -1169,6 +1182,69 @@ fn time_at_path(leaders: &ShapedLeaders, leg: &RampLeg, s: f64) -> f64 {
     hi
 }
 
+/// The shaped leaders' speed along a leg, probed
+/// [`REST_PROBES_PER_INTERVAL`] times per knot interval.
+struct LegSpeed<'l, 'a> {
+    leaders: &'l ShapedLeaders<'a>,
+    grid: Vec<f64>,
+    probes: Vec<f64>,
+    start_s: f64,
+    table_end: f64,
+}
+
+impl<'l, 'a> LegSpeed<'l, 'a> {
+    fn of(leaders: &'l ShapedLeaders<'a>, leg: &RampLeg, table_end: f64) -> Self {
+        let grid = axis_grid(leg.shaped, leg.leaders);
+        let probes = grid
+            .windows(2)
+            .flat_map(|pair| {
+                (0..REST_PROBES_PER_INTERVAL).map(move |index| {
+                    pair[0] + (pair[1] - pair[0]) * index as f64 / REST_PROBES_PER_INTERVAL as f64
+                })
+            })
+            .chain(std::iter::once(grid[grid.len() - 1]))
+            .collect();
+        Self {
+            leaders,
+            grid,
+            probes,
+            start_s: leg.start_s,
+            table_end,
+        }
+    }
+
+    fn at(&self, t: f64) -> f64 {
+        self.leaders.speed(t)
+    }
+
+    /// The slowest time between the probes either side of probe `index`.
+    fn slowest_near(&self, index: usize) -> f64 {
+        let (mut lo, mut hi) = (
+            self.probes[index.saturating_sub(1)],
+            self.probes[(index + 1).min(self.probes.len() - 1)],
+        );
+        for _ in 0..REST_REFINEMENTS {
+            let (left, right) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+            if self.at(left) <= self.at(right) {
+                hi = right;
+            } else {
+                lo = left;
+            }
+        }
+        0.5 * (lo + hi)
+    }
+
+    fn path_at(&self, t: f64) -> f64 {
+        let covered = self
+            .grid
+            .windows(2)
+            .take_while(|pair| pair[0] < t)
+            .map(|pair| integrate(&|time| self.at(time), pair[0], pair[1].min(t)))
+            .sum::<f64>();
+        (self.start_s + covered).min(self.table_end)
+    }
+}
+
 /// Where along `leg` the shaped leaders rest, first to last: the path at
 /// the first and the last time their speed is down to `rest_speed`, the
 /// minimum of each probe interval refined so that a turnaround, at rest
@@ -1179,42 +1255,17 @@ fn resting_stretch(
     rest_speed: f64,
     table_end: f64,
 ) -> Option<(f64, f64)> {
-    let grid = axis_grid(leg.shaped, leg.leaders);
-    let speed = |t: f64| leaders.speed(t);
-    let probes: Vec<f64> = grid
-        .windows(2)
-        .flat_map(|pair| {
-            (0..REST_PROBES_PER_INTERVAL).map(move |index| {
-                pair[0] + (pair[1] - pair[0]) * index as f64 / REST_PROBES_PER_INTERVAL as f64
-            })
-        })
-        .chain(std::iter::once(grid[grid.len() - 1]))
-        .collect();
-    let resting = |t: f64| speed(t) <= rest_speed;
-    let slowest_near = |index: usize| {
-        let (mut lo, mut hi) = (
-            probes[index.saturating_sub(1)],
-            probes[(index + 1).min(probes.len() - 1)],
-        );
-        for _ in 0..REST_REFINEMENTS {
-            let (left, right) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
-            if speed(left) <= speed(right) {
-                hi = right;
-            } else {
-                lo = left;
-            }
-        }
-        0.5 * (lo + hi)
-    };
+    let speed = LegSpeed::of(leaders, leg, table_end);
+    let resting = |t: f64| speed.at(t) <= rest_speed;
     let rest_time = |index: usize| {
-        if resting(probes[index]) {
-            return Some(probes[index]);
+        if resting(speed.probes[index]) {
+            return Some(speed.probes[index]);
         }
-        let slowest = slowest_near(index);
+        let slowest = speed.slowest_near(index);
         resting(slowest).then_some(slowest)
     };
-    let first = (0..probes.len()).find_map(rest_time)?;
-    let last = (0..probes.len())
+    let first = (0..speed.probes.len()).find_map(rest_time)?;
+    let last = (0..speed.probes.len())
         .rev()
         .find_map(rest_time)
         .expect("a first rest is also a last");
@@ -1230,17 +1281,47 @@ fn resting_stretch(
         }
         rest
     };
-    let first = edge(grid[0], first);
-    let last = edge(grid[grid.len() - 1], last);
-    let path_at = |t: f64| {
-        let covered = grid
-            .windows(2)
-            .take_while(|pair| pair[0] < t)
-            .map(|pair| integrate(&speed, pair[0], pair[1].min(t)))
-            .sum::<f64>();
-        (leg.start_s + covered).min(table_end)
-    };
-    Some((path_at(first), path_at(last)))
+    let first = edge(speed.grid[0], first);
+    let last = edge(speed.grid[speed.grid.len() - 1], last);
+    Some((speed.path_at(first), speed.path_at(last)))
+}
+
+/// Where inside `leg`, off its seams, the shaped leaders turn around: the
+/// path there and how they cross it. Shaping spreads a raw reversal over
+/// the kernels' support, so where the move into it brakes unlike the move
+/// out of it launches, the shaped velocity passes through zero off the raw
+/// seam, inside either move, where the seam's crossing does not see it.
+/// Such a leg's velocity reverses from one end to the other, and the
+/// turnaround is its slowest point.
+fn turnaround_inside(
+    leaders: &ShapedLeaders,
+    leg: &RampLeg,
+    table_end: f64,
+) -> Option<(f64, Crossing)> {
+    let (t_start, t_end) = leg.support;
+    let reverses = (0..leaders.axes.len())
+        .map(|index| leaders.pva(index, t_start).1 * leaders.pva(index, t_end).1)
+        .sum::<f64>()
+        < 0.0;
+    if !reverses
+        || Crossing::at(leaders, t_start).turns_around()
+        || Crossing::at(leaders, t_end).turns_around()
+    {
+        return None;
+    }
+    let speed = LegSpeed::of(leaders, leg, table_end);
+    let (slowest_probe, _) = speed
+        .probes
+        .iter()
+        .map(|&t| speed.at(t))
+        .enumerate()
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+        .expect("a leg has probes");
+    let turn = speed.slowest_near(slowest_probe);
+    let crossing = Crossing::at(leaders, turn);
+    crossing
+        .turns_around()
+        .then(|| (speed.path_at(turn), crossing))
 }
 
 /// The time a turnaround's rate takes to build the speed the leaders cross

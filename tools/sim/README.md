@@ -130,6 +130,13 @@ SIM_JITTER=3 tools/sim/run.sh test  # share a cpuset with 3 bursty CPU burners
   - A process klippy forks drops the host role in the child, so its
     waits and its exit cannot touch klippy's accounting (a forked child's
     exit used to clear `host_present` for the whole world).
+  - A process that replaces itself with `execve` (the linux firmware's
+    `config_reset`, which FIRMWARE_RESTART sends) releases its pacers, its
+    in-progress input and its device link first, as its exit would; an
+    exec runs no destructor, and the old image's registrations used to
+    hold virtual time forever, freezing klippy right after "Attempting
+    MCU config_reset command". `tests/test_firmware_restart.py` restarts
+    both firmware families from ready and from a latched shutdown.
   - Worlds keep klippy's default `clock_sync_stable_ppm` (5 ppm). With
     `get_clock` answered at the instant it is sent, the estimator converges
     as it does on hardware. The former 1000 ppm sim override let the engine

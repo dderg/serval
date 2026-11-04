@@ -38,3 +38,11 @@ def test_exactly_one_body_source_is_required(tmp_path: Path):
     assert ship.body_text("text", None) == "text"
     (tmp_path / "b.md").write_text("from file")
     assert ship.body_text(None, tmp_path / "b.md") == "from file"
+
+
+def test_a_moved_throughput_baseline_needs_an_accept_block():
+    changed = ["rust/a.rs", ship.THROUGHPUT_BASELINE]
+    assert ship.throughput_accept_problem(changed, "no block") is not None
+    body = "Faster.\n\n```throughput-accept\nfewer fits per window\n```\n"
+    assert ship.throughput_accept_problem(changed, body) is None
+    assert ship.throughput_accept_problem(["rust/a.rs"], "no block") is None

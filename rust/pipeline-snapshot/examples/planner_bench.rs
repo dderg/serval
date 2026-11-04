@@ -213,7 +213,14 @@ fn run_planner(items: Vec<StreamInput>, config: StreamConfig, trickle: bool) -> 
 
 fn bench(name: &str, waypoints: &[Waypoint], trickle: bool) {
     let config = stream_config();
-    let steps = pipeline_snapshot::plan_steps(waypoints, config.limits).expect("valid waypoints");
+    let steps = pipeline_snapshot::plan_steps(
+        waypoints,
+        motion_pipeline::live_config::GcodeMoveBase::from_parts(
+            config.limits,
+            Some(pipeline_snapshot::EXTRUDER_AXIS),
+        ),
+    )
+    .expect("valid waypoints");
     let fit_start = Instant::now();
     let fitted = run_fitter(&steps, &config);
     let fit_wall = fit_start.elapsed().as_secs_f64();
