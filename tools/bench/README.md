@@ -121,7 +121,7 @@ A step event is an exact point of the motion, because the motor steps where its 
 - `reference_minus_offline` is step quantization. It is deterministic from the plan and is the bound the bench can resolve.
 - `capture_minus_reference` is what the printer stepped differently from the plan, mostly the host's step compression (≤ 25 µs). At 0.02 mm bins that is visible near slow apexes and on fast curves.
 
-Near an apex, where the nozzle nearly stops, flow per mm is ill-conditioned, so the quantization grows with how sharp the corner is. An exact synthetic capture reproduces the reference metrics to < 1e-4 (`test_corner_flow_bench.py`), and the offline source equals `corner_flow.py`'s `measure` for the same program.
+Near an apex, where the nozzle nearly stops, flow per mm is ill-conditioned, so the quantization grows with how sharp the corner is, and with how sharply the extruder steps: the kernel-free chain's quantization bound is about twice the 0.04 kernel's (below). On the bench printer with the 0.04 kernel, an exact synthetic capture reproduces the reference metrics to < 1e-4 (`test_corner_flow_bench.py`), and the offline source equals `corner_flow.py`'s `measure` for the same program. Kernel-free, the reference's peak at a 90° corner at 150 mm/s sits just above the 5 % blob threshold, where `blob_nl` amplifies the capture's sub-ppm timing residuals to about 2e-3 relative.
 
 `gcode/corner_flow.gcode` (`gen_corner_flow.py`) holds 90°/45°/135° interior corners at 50/100/200/300 mm/s, a 10 mm-radius arc of 0.5 mm segments at 100/200 mm/s and a 2 mm zigzag at 50/150 mm/s. Each case runs between rests, so each is an epoch of its own. The bead is 0.4 × 0.2 mm from 1.75 mm filament.
 
