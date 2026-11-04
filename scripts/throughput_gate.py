@@ -49,24 +49,54 @@ The gate fails when, for any config:
 - Ir moved more than IR_TOLERANCE_PCT from its baseline;
 - the live ratio is more than LIVE_TOLERANCE_PCT away from 1;
 - the Pi 5 2-core worst 5 s window either measurement predicts is below
-  PI_FLOOR_X, once PI_FLOOR_FAILS is set; until then it is reported as a
-  warning, because main itself sits below the floor.
+  PI_FLOOR_X (PI_FLOOR_FAILS off turns this into a warning).
 Growth is a regression. Shrinkage must be accepted, so the baseline ratchets
 down and the gain stays locked in.
 
-The Ir prediction is K x stream_secs / Ir: the replay's realtime factor
-scaled by the instruction rate the Pi sustains in the dense print's worst
-window. The live prediction is the reference's Pi worst window divided by
-the live ratio. Both come from a calibration, the Pi 2-core worst window of
-the full print (`taskset -c 0,1 gcode_replay_bench <dense.gcode> --config
-CFG`, the lowest of two runs) measured at the checked-out commit:
+Both predictions come from fits over paired points that
+scripts/throughput_recheck.py measures: commits and patched variants of
+them, each with its Pi 2-core worst window (the full print under `taskset
+-c 0,1`, the lowest of two runs), its slice's Ir and its live cost on every
+CPU model the gate runs on. Neither measurement moves the Pi one for one.
+For #663, the Ir ratio predicted a worst window of 2.05x and the Pi
+measured 1.89x. Its live ratio moved trident_kernel by +2.6 % on a Xeon
+8370C and by +5.4 % on an EPYC 9V74. So each config gets its own exponents,
+and the live exponent is fitted per CPU model, through the reference the
+way the gate predicts:
+
+    Ir:   W = W_calibration x (Ir/stream_secs / at calibration)^-beta
+    live: W = W_reference x live_ratio^-alpha[CPU]
+
+The baseline's pi_calibration block keeps the points, the fits, and each
+fit's error and leave-one-out error, in % of the worst window, when it
+predicts every point from the reference. The gate prints them next to its
+predictions. A CPU model without a live fit fails the run loudly. The
+exponents come out at 0.8-1.1. The errors (max 2-12 %, leave-one-out
+4-20 %) come mostly from 728a1d720 and c73bd41d5 (#663). #663's thread
+handoffs cost the Pi more per unit of x86 cost than the other changes do,
+so the models under-predict how much it slowed the Pi. Treat a prediction
+within ~10 % of PI_FLOOR_X as uncertain, and measure the Pi.
+
+The calibration goes stale. The fits extrapolate from the code they were
+measured on, every accept carries W_reference over by a predicted step, and
+a toolchain bump moves the Pi without moving either A/B side. So the gate
+fails once the Pi measurement is more than PI_CALIBRATION_STALE_DAYS old,
+and names the re-check that re-measures every point and refits. Main took
+11 accepts in the 3 days before the first calibration. A carried step can
+miss by up to ~30 % of itself (#663 on p3_voron_direct_drive_kernel: -17 %
+measured, -12 % predicted), so 11 carried 2 % steps can drift W_reference
+by ~7 %. That is as much as the fits' own error, so 3 days is the limit.
+
+`--calibrate-pi-worst` re-anchors a config's W_reference to a fresh Pi
+measurement at the checked-out commit, moved onto the reference by its
+live ratio:
 
     python3 scripts/throughput_gate.py --calibrate-pi-worst \\
         p3_voron_direct_drive_ramp=2.12,2.13 trident_kernel=2.29,2.30 ...
 
 Accepting (`--accept --reason "..."`) makes HEAD the reference and rewrites
 every config's Ir with this run's; an accept without a calibration carries
-the reference's Pi worst window over by the live ratio it measured.
+W_reference over by live_ratio^-alpha of the CPU it ran on.
 Accepting and calibrating both refuse a dirty tree, so the recorded commit
 is the measured code. A PR whose tools/bench/throughput_baseline.json
 differs from its base (--accept-base, which CI sets to the merge commit's
@@ -90,8 +120,10 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import dataclasses
+import datetime
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -103,6 +135,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 
 ROOT = Path(__file__).resolve().parent.parent
 RUST = ROOT / "rust"
@@ -120,8 +153,9 @@ LIVE_FASTEST = 2
 LIVE_TOLERANCE_PCT = 2.0
 LIVE_CORES = "0,1"
 PI_FLOOR_X = 2.0
-# TODO(trident-panic): floor checks hard once main ≥2.0x
-PI_FLOOR_FAILS = False
+PI_FLOOR_FAILS = True
+PI_CALIBRATION_STALE_DAYS = 3
+RECHECK_COMMAND = "python3 scripts/throughput_recheck.py"
 MEASURED_TREES = ("rust", "tools/bench/configs", "tools/sim/gcode")
 REFERENCE_DIR = "throughput-reference"
 AB_LAB_DIR = "throughput-ab"
@@ -131,6 +165,7 @@ CI_CARGO_HOME = "/home/runner/.cargo"
 DOCKER_CACHE = RUST / "target" / "throughput-gate"
 ACCEPT_BLOCK = re.compile(r"```throughput-accept[ \t]*\n(.*?)```", re.S)
 STREAM_SECS = re.compile(r"\bstream_secs=([0-9.]+)")
+Replay = TypeVar("Replay")
 
 
 class GateError(RuntimeError):
@@ -144,6 +179,7 @@ class Measurement:
     live_ratio: float
     live_wall_secs: float
     reference_wall_secs: float
+    cpu: str
 
 
 @dataclass(frozen=True)
@@ -354,9 +390,8 @@ def gate_cores() -> list[int]:
 
 
 def count_instructions(
-    bench: Path, sliced: Path, config: str, core: int, scratch: Path
+    bench: Path, sliced: Path, config: Path, core: int, out_file: Path
 ) -> tuple[int, float]:
-    out_file = scratch / f"cachegrind-{Path(config).stem}.out"
     stdout = run(
         [
             "taskset",
@@ -369,7 +404,7 @@ def count_instructions(
             str(bench),
             str(sliced),
             "--config",
-            str(ROOT / config),
+            str(config),
             "--synchronous",
             "--digest",
         ]
@@ -377,36 +412,43 @@ def count_instructions(
     return instruction_count(out_file.read_text()), stream_secs(stdout)
 
 
-def measure_instructions(
-    bench: Path, configs: tuple[str, ...], cores: list[int]
-) -> dict[str, tuple[int, float]]:
-    lines = (ROOT / GCODE).read_text().splitlines(keepends=True)
+def write_slice(tree: Path, sliced: Path) -> None:
+    lines = (tree / GCODE).read_text().splitlines(keepends=True)
     if len(lines) < SLICE_LINES:
         raise GateError(
-            f"{GCODE} has {len(lines)} lines, the slice wants {SLICE_LINES}"
+            f"{tree / GCODE} has {len(lines)} lines, the slice wants {SLICE_LINES}"
         )
+    sliced.write_text("".join(lines[:SLICE_LINES]))
+
+
+def measure_instructions(
+    replays: dict[Replay, tuple[Path, Path, str]], cores: list[int]
+) -> dict[Replay, tuple[int, float]]:
+    """Ir and stream seconds of each (bench, tree, config) replay of the slice."""
     started = time.monotonic()
     with tempfile.TemporaryDirectory() as scratch_dir:
         scratch = Path(scratch_dir)
-        sliced = scratch / "slice.gcode"
-        sliced.write_text("".join(lines[:SLICE_LINES]))
+        slices = {}
+        for tree in {tree for _, tree, _ in replays.values()}:
+            slices[tree] = scratch / f"slice-{len(slices)}.gcode"
+            write_slice(tree, slices[tree])
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=len(cores)
         ) as pool:
             futures = {
-                config: pool.submit(
+                key: pool.submit(
                     count_instructions,
                     bench,
-                    sliced,
-                    config,
+                    slices[tree],
+                    tree / config,
                     cores[index % len(cores)],
-                    scratch,
+                    scratch / f"cachegrind-{index}.out",
                 )
-                for index, config in enumerate(configs)
+                for index, (key, (bench, tree, config)) in enumerate(
+                    replays.items()
+                )
             }
-            counted = {
-                config: future.result() for config, future in futures.items()
-            }
+            counted = {key: future.result() for key, future in futures.items()}
     print(
         f"counted instructions in {time.monotonic() - started:.0f} s",
         file=sys.stderr,
@@ -487,23 +529,33 @@ def measure_here(
     cores = gate_cores()
     reference_bench = build_in_lab(reference / "rust", "reference")
     head_bench = build_in_lab(RUST, "head")
-    counted = measure_instructions(head_bench, configs, cores)
+    counted = measure_instructions(
+        {config: (head_bench, ROOT, config) for config in configs}, cores
+    )
     live = measure_live(head_bench, reference_bench, reference, configs)
+    cpu = cpu_model()
     return {
-        config: Measurement(*counted[config], *live[config])
+        config: Measurement(*counted[config], *live[config], cpu)
         for config in configs
     }
 
 
-def measure_in_docker(
-    image: str, configs: tuple[str, ...], reference_commit: str
-) -> dict[str, Measurement]:
+def cpu_model() -> str:
+    for line in Path("/proc/cpuinfo").read_text().splitlines():
+        key, _, value = line.partition(":")
+        if key.strip() == "model name":
+            return " ".join(value.split())
+    raise GateError("/proc/cpuinfo names no CPU model")
+
+
+def run_in_image(image: str, script: str, arguments: list[str]) -> None:
+    """Run `python3 script arguments` in the image, the checkout and cargo
+    home mounted at the GitHub runner's paths and DOCKER_CACHE/target as its
+    rust/target."""
     target = DOCKER_CACHE / "target"
     cargo_home = DOCKER_CACHE / "cargo-home"
     target.mkdir(parents=True, exist_ok=True)
     cargo_home.mkdir(parents=True, exist_ok=True)
-    prepare_reference(reference_commit, target)
-    result_name = "throughput-measure.json"
     command = [
         "docker",
         "run",
@@ -531,17 +583,33 @@ def measure_in_docker(
         "--entrypoint",
         "python3",
         image,
-        "scripts/throughput_gate.py",
-        "--measure-json",
-        f"rust/target/{result_name}",
-        "--reference",
-        reference_commit,
-        "--configs",
-        *configs,
+        script,
+        *arguments,
     ]
-    print(f"measuring in {image}", file=sys.stderr, flush=True)
+    print(f"running {script} in {image}", file=sys.stderr, flush=True)
     if subprocess.run(command, check=False).returncode != 0:
-        raise GateError(f"the measurement in {image} failed")
+        raise GateError(f"{script} {' '.join(arguments)} failed in {image}")
+
+
+def measure_in_docker(
+    image: str, configs: tuple[str, ...], reference_commit: str
+) -> dict[str, Measurement]:
+    target = DOCKER_CACHE / "target"
+    target.mkdir(parents=True, exist_ok=True)
+    prepare_reference(reference_commit, target)
+    result_name = "throughput-measure.json"
+    run_in_image(
+        image,
+        "scripts/throughput_gate.py",
+        [
+            "--measure-json",
+            f"rust/target/{result_name}",
+            "--reference",
+            reference_commit,
+            "--configs",
+            *configs,
+        ],
+    )
     raw = json.loads((target / result_name).read_text())
     return {config: Measurement(**raw[config]) for config in configs}
 
@@ -570,36 +638,74 @@ def write_baseline(baseline: dict) -> None:
 
 
 def pi_calibration(
-    measurement: Measurement, worst: list[float], commit: str, accepted: bool
+    measurement: Measurement,
+    worst: list[float],
+    commit: str,
+    accepted: bool,
+    factor: float,
 ) -> dict:
     lowest = min(worst)
     return {
-        "k_ir": lowest * measurement.ir / measurement.stream_secs,
         "worst_x_reference": lowest
         if accepted
-        else lowest * measurement.live_ratio,
+        else lowest * measurement.live_ratio**factor,
         "worst_x": worst,
         "commit": commit,
     }
 
 
-def carried_pi(pi: dict, measurement: Measurement) -> dict:
+def carried_pi(pi: dict, measurement: Measurement, factor: float) -> dict:
     return {
         **pi,
-        "worst_x_reference": pi["worst_x_reference"] / measurement.live_ratio,
+        "worst_x_reference": pi["worst_x_reference"]
+        / measurement.live_ratio**factor,
     }
 
 
+def live_factor(model: dict, cpu: str) -> float:
+    fits = model["live"]
+    if cpu not in fits:
+        raise GateError(
+            f"the Pi calibration has no live model for this CPU, {cpu!r} "
+            f"(it has {sorted(fits)}): calibrate it with {RECHECK_COMMAND}, "
+            "run on this machine or with runner jobs that land on that CPU"
+        )
+    return fits[cpu]["factor"]
+
+
 def predicted_worst_x(
-    entry: dict, measurement: Measurement
+    entry: dict, model: dict | None, measurement: Measurement
 ) -> tuple[float, float] | None:
     pi = entry.get("pi_2core")
-    if pi is None:
+    if pi is None or model is None:
         return None
+    ir = model["ir"]
+    ir_per_stream_sec = measurement.ir / measurement.stream_secs
     return (
-        pi["k_ir"] * measurement.stream_secs / measurement.ir,
-        pi["worst_x_reference"] / measurement.live_ratio,
+        math.exp(ir["intercept"] - ir["factor"] * math.log(ir_per_stream_sec)),
+        pi["worst_x_reference"]
+        / measurement.live_ratio ** live_factor(model, measurement.cpu),
     )
+
+
+def calibration_problem(
+    baseline: dict, configs: tuple[str, ...], now: datetime.datetime
+) -> str | None:
+    calibration = baseline.get("pi_calibration", {})
+    measured_at = calibration.get("measured_at")
+    if not measured_at:
+        return f"the baseline records no Pi calibration: run {RECHECK_COMMAND}"
+    missing = [c for c in configs if c not in calibration.get("configs", {})]
+    if missing:
+        return f"the Pi calibration has no model for {missing}: run {RECHECK_COMMAND}"
+    age = now - datetime.datetime.fromisoformat(measured_at)
+    if age > datetime.timedelta(days=PI_CALIBRATION_STALE_DAYS):
+        return (
+            f"the Pi was last measured {age.days} days ago ({measured_at}, at "
+            f"{calibration['commit']}), past the {PI_CALIBRATION_STALE_DAYS}-day "
+            f"bound: re-measure it and refit with {RECHECK_COMMAND}"
+        )
+    return None
 
 
 def drift_problems(
@@ -619,9 +725,11 @@ def drift_problems(
     return []
 
 
-def judge(config: str, entry: dict, measurement: Measurement) -> Verdict:
+def judge(
+    config: str, entry: dict, measurement: Measurement, model: dict | None
+) -> Verdict:
     ir_delta_pct = 100.0 * (measurement.ir - entry["ir"]) / entry["ir"]
-    predicted = predicted_worst_x(entry, measurement)
+    predicted = predicted_worst_x(entry, model, measurement)
     problems = [
         *drift_problems("Ir", ir_delta_pct, IR_TOLERANCE_PCT),
         *drift_problems(
@@ -632,7 +740,9 @@ def judge(config: str, entry: dict, measurement: Measurement) -> Verdict:
     ]
     floor_misses = []
     if predicted is None:
-        problems.append("no Pi calibration: run --calibrate-pi-worst")
+        problems.append(
+            f"no Pi calibration: run {RECHECK_COMMAND} or --calibrate-pi-worst"
+        )
     else:
         for source, value in zip(("Ir", "the live ratio"), predicted):
             if value < PI_FLOOR_X:
@@ -653,8 +763,29 @@ def judge(config: str, entry: dict, measurement: Measurement) -> Verdict:
     )
 
 
-def report(verdicts: list[Verdict], reference_commit: str) -> None:
+def model_summary(model: dict, cpu: str) -> str:
+    ir, live = model["ir"], model["live"][cpu]
+    return (
+        f"  Pi models: Ir factor {ir['factor']:.2f} (calibration error max "
+        f"{ir['max_residual_pct']:.1f} %, leave-one-out "
+        f"{ir['max_loo_residual_pct']:.1f} %), live factor {live['factor']:.2f} "
+        f"on this CPU (max {live['max_residual_pct']:.1f} %, leave-one-out "
+        f"{live['max_loo_residual_pct']:.1f} %, {live['jobs']} jobs)"
+    )
+
+
+def report(
+    verdicts: list[Verdict], reference_commit: str, calibration: dict
+) -> None:
     print(f"reference {reference_commit}")
+    stale_at = datetime.datetime.fromisoformat(
+        calibration["measured_at"]
+    ) + datetime.timedelta(days=PI_CALIBRATION_STALE_DAYS)
+    print(
+        f"Pi calibration measured {calibration['measured_at']} at "
+        f"{calibration['commit']}, stale from {stale_at.isoformat()} "
+        f"(re-check: {RECHECK_COMMAND}); this CPU: {verdicts[0].measurement.cpu}"
+    )
     print(
         f"{'config':<62} {'Ir':>15} {'delta':>8} {'live':>8} "
         f"{'Pi pred Ir':>10} {'Pi pred live':>12}"
@@ -676,6 +807,8 @@ def report(verdicts: list[Verdict], reference_commit: str) -> None:
             f"{m.live_wall_secs:.2f} s, "
             f"reference {m.reference_wall_secs:.2f} s"
         )
+        if verdict.predicted_x is not None:
+            print(model_summary(calibration["configs"][verdict.config], m.cpu))
         for problem in verdict.problems:
             print(f"  FAIL: {problem}")
         for warning in verdict.warnings:
@@ -773,6 +906,13 @@ def main() -> int:
     problem = baseline_problem(baseline, configs)
     if problem and not args.accept:
         raise GateError(problem)
+    problem = calibration_problem(
+        baseline, configs, datetime.datetime.now(datetime.timezone.utc)
+    )
+    if problem:
+        raise GateError(problem)
+    calibration = baseline["pi_calibration"]
+    models = calibration["configs"]
     reference_commit = baseline.get("commit") or commit
     entries = baseline.get("configs", {})
 
@@ -785,7 +925,11 @@ def main() -> int:
                 **(
                     {
                         "pi_2core": carried_pi(
-                            entries[config]["pi_2core"], measurements[config]
+                            entries[config]["pi_2core"],
+                            measurements[config],
+                            live_factor(
+                                models[config], measurements[config].cpu
+                            ),
                         )
                     }
                     if "pi_2core" in entries.get(config, {})
@@ -796,7 +940,11 @@ def main() -> int:
         }
     for config, worst in calibrations.items():
         entries[config]["pi_2core"] = pi_calibration(
-            measurements[config], worst, commit, args.accept
+            measurements[config],
+            worst,
+            commit,
+            args.accept,
+            live_factor(models[config], measurements[config].cpu),
         )
     if args.accept:
         reference_commit = commit
@@ -813,12 +961,15 @@ def main() -> int:
                 if args.accept
                 else baseline["reason"],
                 "configs": entries,
+                "pi_calibration": calibration,
             }
         )
         print(f"wrote {BASELINE.relative_to(ROOT)}")
 
-    verdicts = [judge(c, entries[c], measurements[c]) for c in configs]
-    report(verdicts, reference_commit)
+    verdicts = [
+        judge(c, entries[c], measurements[c], models[c]) for c in configs
+    ]
+    report(verdicts, reference_commit, calibration)
     failed = [v.config for v in verdicts if v.problems]
     if failed:
         print(
