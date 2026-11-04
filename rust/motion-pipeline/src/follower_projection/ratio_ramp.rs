@@ -265,13 +265,15 @@ impl Candidate {
 }
 
 /// A ratio step as its ramp time is derived: when the leaders cross it, how
-/// fast and under what acceleration, how far the ratio moves there — its
-/// step and the change along the span it opens, which a window may gather
-/// as one step where that span is short — and the largest ratio about it.
+/// fast, under what acceleration and jerk, how far the ratio moves there —
+/// its step and the change along the span it opens, which a window may
+/// gather as one step where that span is short — and the largest ratio
+/// about it.
 #[derive(Debug, Clone, Copy)]
 struct TimedSeam {
     t: f64,
     crossing: Crossing,
+    jerk: f64,
     step: f64,
     peak_ratio: f64,
     ramp_time: Option<f64>,
@@ -413,7 +415,7 @@ impl WidthField {
             peak_ratio,
             speed_mm_s: seam.crossing.speed,
             accel_mm_s2: seam.crossing.rate,
-            jerk_mm_s3: seam.crossing.jerk,
+            jerk_mm_s3: seam.jerk,
         });
         self.seams[index].ramp_time = Some(ramp_time);
         ramp_time
@@ -977,9 +979,11 @@ impl RatioSmoothing {
                 continue;
             };
             let t = path.time_at(after.s0);
+            let (crossing, jerk) = Crossing::across(leaders, t, leg.support.1);
             self.width.add_seam(TimedSeam {
                 t,
-                crossing: Crossing::across(leaders, t, leg.support.1),
+                crossing,
+                jerk,
                 step: seam.step.abs() + (after.r1 - after.r0).abs(),
                 peak_ratio: before.r1.abs().max(after.r0.abs()).max(after.r1.abs()),
                 ramp_time: None,
@@ -1703,16 +1707,15 @@ fn turnaround_inside(
 /// fit's rounding, far under the rate times this.
 const TURNAROUND_SPEED_TIME_S: f64 = 1e-6;
 /// Probes a ramp's crossing is searched with for the leaders' fastest
-/// speed and acceleration.
+/// speed, acceleration and jerk.
 const CROSSING_PROBES: usize = 16;
 
-/// How the leaders cross a seam: their path speed and the magnitudes of its
-/// first two rates.
+/// How the leaders cross a seam: their path speed and the magnitude of its
+/// rate.
 #[derive(Debug, Clone, Copy)]
 struct Crossing {
     speed: f64,
     rate: f64,
-    jerk: f64,
 }
 
 impl Crossing {
@@ -1721,39 +1724,59 @@ impl Crossing {
     /// its direction is rounding too, and so is the tangential acceleration
     /// read along it. The speed leaves a zero at the whole acceleration.
     fn at(leaders: &ShapedLeaders, t: f64) -> Self {
+        Self::probe(leaders, t).0
+    }
+
+    /// The crossing at `t` with the leaders' path acceleration there,
+    /// signed, as they leave `t`: from a zero of the speed, their whole
+    /// acceleration.
+    fn probe(leaders: &ShapedLeaders, t: f64) -> (Self, f64) {
         let motion = leaders.motion(t);
         let speed = motion.speed();
         let accel = motion.accel_norm();
-        let (rate, jerk) = if speed > accel * TURNAROUND_SPEED_TIME_S {
-            (
-                motion.speed_deriv(speed).abs(),
-                motion
-                    .speed_second(speed)
-                    .unwrap_or_else(|| leaders.speed_second(t, speed))
-                    .abs(),
-            )
+        let path_accel = if speed > accel * TURNAROUND_SPEED_TIME_S {
+            motion.speed_deriv(speed)
         } else {
-            (accel, 0.0)
+            accel
         };
-        Self { speed, rate, jerk }
+        (
+            Self {
+                speed,
+                rate: path_accel.abs(),
+            },
+            path_accel,
+        )
     }
 
     /// The fastest and the most accelerating the leaders are from `t` on
-    /// over half the longest ramp, as far as `end`: what a ramp laid at `t`
-    /// meets.
-    fn across(leaders: &ShapedLeaders, t: f64, end: f64) -> Self {
+    /// over half the longest ramp, as far as `end`, and the steepest their
+    /// path acceleration changes there: what a ramp laid at `t` meets.
+    ///
+    /// The jerk is the largest mean over the intervals between probes, the
+    /// change in path acceleration across one over its length `Δt`. The
+    /// leaders are a fit, which holds their acceleration within its
+    /// tolerance `A` but leaves their jerk free: a sliver piece may carry
+    /// any, and where the fit lays one depends on how the shaper batched
+    /// it. The mean is within `2A/Δt` of the leaders' own whatever pieces
+    /// the fit lays. A seam the leg ends on spans no interval and meets no
+    /// jerk.
+    fn across(leaders: &ShapedLeaders, t: f64, end: f64) -> (Self, f64) {
         let until = (t + CLUSTER_REACH_S).min(end).max(t);
-        (0..=CROSSING_PROBES).fold(Self::at(leaders, t), |widest, index| {
-            let probe = Self::at(
-                leaders,
-                t + (until - t) * index as f64 / CROSSING_PROBES as f64,
-            );
-            Self {
-                speed: widest.speed.max(probe.speed),
-                rate: widest.rate.max(probe.rate),
-                jerk: widest.jerk.max(probe.jerk),
+        let (mut widest, first_accel) = Self::probe(leaders, t);
+        let (mut jerk, mut previous) = (0.0_f64, (t, first_accel));
+        for index in 1..=CROSSING_PROBES {
+            let at = t + (until - t) * index as f64 / CROSSING_PROBES as f64;
+            let (crossing, path_accel) = Self::probe(leaders, at);
+            widest = Self {
+                speed: widest.speed.max(crossing.speed),
+                rate: widest.rate.max(crossing.rate),
+            };
+            if at > previous.0 {
+                jerk = jerk.max((path_accel - previous.1).abs() / (at - previous.0));
             }
-        })
+            previous = (at, path_accel);
+        }
+        (widest, jerk)
     }
 
     /// What both sides of a seam share. A rate on one side only — a leader
@@ -1765,7 +1788,6 @@ impl Crossing {
         Self {
             speed: self.speed.min(other.speed),
             rate: self.rate.min(other.rate),
-            jerk: self.jerk.min(other.jerk),
         }
     }
 

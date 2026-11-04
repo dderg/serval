@@ -6,7 +6,8 @@ use trajectory::{ContinuousAxis, ContinuousSegment};
 
 use super::super::FollowerState;
 use super::{
-    Crossing, ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_S, RampLeg, ShapedLeaders,
+    CLUSTER_REACH_S, CROSSING_PROBES, Crossing, ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_S,
+    RampLeg, ShapedLeaders,
     WIDTH_SLOPE_BOUND, WidthField,
 };
 
@@ -763,5 +764,94 @@ fn a_time_node_a_rounding_short_of_a_rest_stacks_on_the_rest() {
         alone == 0.0 && moving_on == 0.0,
         "the window at the rest at {rest} mm is {alone} mm while the leaders rest there and \
          {moving_on} mm once they move on"
+    );
+}
+
+const BRAKING_SPEED_MM_S: f64 = 60.0;
+const BRAKING_ACCEL_MM_S2: f64 = -2000.0;
+const BRAKING_JERK_MM_S3: f64 = 1e5;
+const BRAKING_TIME_S: f64 = 0.02;
+const SLIVER_S: f64 = 1e-7;
+const SLIVER_JERK_MM_S3: f64 = 1e7;
+
+/// The leaders braking along x over `[0, BRAKING_TIME_S]` as a fit lays
+/// them, closing on a sliver piece whose jerk is [`SLIVER_JERK_MM_S3`]
+/// if `sliver`: the same motion to within the sliver's acceleration
+/// change, as two fits of one shaped signal lay it.
+fn braking_leaders(sliver: bool) -> ContinuousSegment {
+    let motion = [
+        0.0,
+        BRAKING_SPEED_MM_S,
+        0.5 * BRAKING_ACCEL_MM_S2,
+        BRAKING_JERK_MM_S3 / 6.0,
+    ];
+    let mut pieces = vec![BezierPiece {
+        u_start: 0.0,
+        u_end: BRAKING_TIME_S,
+        coeffs: motion.to_vec(),
+    }];
+    if sliver {
+        let start = BRAKING_TIME_S - SLIVER_S;
+        let at = |order: usize| -> f64 {
+            motion
+                .iter()
+                .enumerate()
+                .skip(order)
+                .map(|(power, coefficient)| {
+                    let falling = (power - order + 1..=power).product::<usize>() as f64;
+                    coefficient * falling * start.powi((power - order) as i32)
+                })
+                .sum()
+        };
+        pieces[0].u_end = start;
+        pieces.push(BezierPiece {
+            u_start: start,
+            u_end: BRAKING_TIME_S,
+            coeffs: vec![at(0), at(1), 0.5 * at(2), SLIVER_JERK_MM_S3 / 6.0],
+        });
+    }
+    let held = Arc::new(bezier_pieces_to_nurbs(&[BezierPiece {
+        u_start: 0.0,
+        u_end: BRAKING_TIME_S,
+        coeffs: vec![0.0],
+    }]));
+    ContinuousSegment {
+        axes: Arc::from([
+            ContinuousAxis::Spline(Arc::new(bezier_pieces_to_nurbs(&pieces))),
+            ContinuousAxis::Spline(Arc::clone(&held)),
+            ContinuousAxis::Spline(Arc::clone(&held)),
+            ContinuousAxis::Spline(held),
+        ]),
+        followers: Arc::from([]),
+        spatial_path: true,
+        t_start: 0.0,
+        t_end: BRAKING_TIME_S,
+        motor_mask: 0,
+        source_line: 1,
+        rest_at_end: false,
+    }
+}
+
+/// Two fits of one braking, one closing on a sliver piece of a jerk a
+/// hundred times the leaders' own, meet a seam with the same jerk: within
+/// twice the sliver's acceleration change over a probe interval.
+#[test]
+fn a_sliver_piece_of_the_leader_fit_leaves_the_crossing_jerk_alone() {
+    let seam = BRAKING_TIME_S - CLUSTER_REACH_S;
+    let jerk = |sliver: bool| {
+        let leaders = braking_leaders(sliver);
+        Crossing::across(&ShapedLeaders::of(&leaders, &[0, 1]), seam, BRAKING_TIME_S).1
+    };
+    let probe_interval = CLUSTER_REACH_S / CROSSING_PROBES as f64;
+    let bound = 2.0 * SLIVER_JERK_MM_S3 * SLIVER_S / probe_interval;
+    let (clean, with_sliver) = (jerk(false), jerk(true));
+    assert!(
+        (clean - BRAKING_JERK_MM_S3).abs() <= 1e-6 * BRAKING_JERK_MM_S3,
+        "the crossing reads a jerk of {clean} mm/s³ off a braking of {BRAKING_JERK_MM_S3}"
+    );
+    assert!(
+        (with_sliver - clean).abs() <= bound,
+        "a sliver piece moves the crossing's jerk from {clean} to {with_sliver} mm/s³, past \
+         {bound}"
     );
 }
