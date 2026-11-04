@@ -6,8 +6,8 @@ use trajectory::{ContinuousAxis, ContinuousSegment};
 
 use super::super::FollowerState;
 use super::{
-    Crossing, ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_PER_WIDTH, NODE_SPACING_S, RampLeg,
-    ShapedLeaders, TimedSeam, WIDTH_SLOPE_BOUND, WidthField,
+    AdvanceValley, Crossing, ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_PER_WIDTH, NODE_SPACING_S,
+    RampLeg, ShapedLeaders, TimedSeam, WIDTH_SLOPE_BOUND, WidthField,
 };
 
 /// `(length, ratio at start, ratio at end)` per span.
@@ -1001,4 +1001,94 @@ fn a_nanometre_blend_lays_a_smooth_track_through_a_wide_window() {
             );
         }
     }
+}
+
+/// The leaders cross a crawl moving, so its valley leaves zero flat over
+/// its floor: `W'·ṡ²` of opposite signs either side would step the advanced
+/// velocity there. With no floor the valley is `ψ`, kinked, as at a
+/// turnaround, where the leaders' zero speed makes the slope harmless.
+#[test]
+fn a_crawl_valley_leaves_zero_flat_and_its_derivatives_are_exact() {
+    let crawl = AdvanceValley {
+        start: 5.0,
+        end: 5.0,
+        before: 2.0,
+        after: 1.5,
+        floor: 0.01,
+    };
+    for side in [-1.0, 1.0] {
+        let (weight, slope, _) = crawl.weight(5.0 + side * 1e-9);
+        assert!(
+            weight < 1e-12 && slope.abs() < 1e-6,
+            "the crawl valley leaves zero at {weight} with slope {slope}"
+        );
+    }
+    let h = 1e-6;
+    for k in 1..4_000 {
+        let s = 2.9 + 3.7 * f64::from(k) / 4_000.0;
+        if (s - 5.0).abs() < 4.0 * h {
+            continue;
+        }
+        let (weight, slope, curvature) = crawl.weight(s);
+        let (before, after) = (crawl.weight(s - h), crawl.weight(s + h));
+        assert!(
+            (0.0..=1.0).contains(&weight),
+            "the crawl valley weighs {weight} at {s} mm"
+        );
+        for (order, value, numeric) in [
+            (1, slope, (after.0 - before.0) / (2.0 * h)),
+            (2, curvature, (after.1 - before.1) / (2.0 * h)),
+        ] {
+            assert!(
+                (value - numeric).abs() < 1e-5 * (1.0 + numeric.abs()),
+                "derivative {order} of the crawl valley at {s} mm is {value}, its \
+                 difference quotient {numeric}"
+            );
+        }
+    }
+    let kinked = AdvanceValley {
+        floor: 0.0,
+        ..crawl
+    };
+    let (_, slope, _) = kinked.weight(5.0 + 1e-9);
+    assert!(
+        (slope - 3.0 / 1.5).abs() < 1e-6,
+        "a valley without a floor leaves zero with slope {slope}"
+    );
+}
+
+/// A crawl is worth a valley only where an advance reading the path speed
+/// through it would leave the follower's acceleration limit. The Bowden
+/// crawl of `voron_dense_top_layers` at t≈148.07 s on the P1 kernel config
+/// asks `r·(a + k·s⃛)` ≈ 370 mm/s² of its 2000; releasing its lead there
+/// asked 2610. A turnaround releases it whatever the advance asks.
+#[test]
+fn a_crawl_lays_a_valley_only_where_the_advance_would_leave_the_limit() {
+    let rule = RatioRampRule {
+        advance_slope_s: 0.5,
+        max_velocity_mm_s: 50.0,
+        max_accel_mm_s2: 2000.0,
+    };
+    let crawl = Crossing {
+        speed: 0.647,
+        rate: 119.0,
+        jerk: 119.0 * 119.0 / 0.647,
+    };
+    assert!(!crawl.needs_valley(&rule, 0.0337));
+    assert!(crawl.needs_valley(&rule, 0.2));
+    let cruise = Crossing {
+        speed: 2.5,
+        ..crawl
+    };
+    assert!(!cruise.needs_valley(&rule, 0.2));
+    let turnaround = Crossing {
+        speed: 0.0,
+        rate: 119.0,
+        jerk: 0.0,
+    };
+    let no_advance = RatioRampRule {
+        advance_slope_s: 0.0,
+        ..rule
+    };
+    assert!(turnaround.needs_valley(&no_advance, 0.0337));
 }

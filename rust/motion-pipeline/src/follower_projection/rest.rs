@@ -8,7 +8,7 @@
 //! on: a stop-and-go reads smooth, and a reversal is a break where the
 //! rate jumps by what the two directions read of the acceleration.
 
-use super::{FollowerSignal, GRID_DEDUP_EPS_S, MAX_LEADERS};
+use super::{FloorLeaders, FollowerSignal, GRID_DEDUP_EPS_S, MAX_LEADERS};
 use geometry::MIN_DEVICE_INTERVAL_S;
 
 use crate::lowering::FitTol;
@@ -148,7 +148,7 @@ impl FollowerSignal<'_> {
         let window = Window::new(lo, hi);
         if self
             .leaders
-            .speed_floor(lo, window.center, hi)
+            .speed_floor(lo, window.center, hi, FloorLeaders::Every)
             .is_some_and(|speed| speed > floor)
         {
             return;
