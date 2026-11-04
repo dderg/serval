@@ -152,9 +152,7 @@ def with_extruder_smoothing(config: str, smooth_time: float) -> str:
             "with_extruder_smoothing needs exactly one kernel-free "
             f"'{chain.strip()}' chain and one [virtual_sdcard] section"
         )
-    kernel = (
-        f"[post_processor st]\ntype: smooth_triangle\nsmooth_time: {smooth_time}\n\n"
-    )
+    kernel = f"[post_processor st]\ntype: smooth_triangle\nsmooth_time: {smooth_time}\n\n"
     return config.replace(chain, "post_processors: pa, st\n").replace(
         "[virtual_sdcard]", kernel + "[virtual_sdcard]"
     )
