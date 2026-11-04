@@ -6,8 +6,8 @@ use trajectory::{ContinuousAxis, ContinuousSegment};
 
 use super::super::FollowerState;
 use super::{
-    Crossing, ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_S, RampLeg, ShapedLeaders, TimedSeam,
-    WIDTH_SLOPE_BOUND, WidthField,
+    Crossing, ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_PER_WIDTH, NODE_SPACING_S, RampLeg,
+    ShapedLeaders, TimedSeam, WIDTH_SLOPE_BOUND, WidthField,
 };
 
 /// `(length, ratio at start, ratio at end)` per span.
@@ -821,7 +821,11 @@ fn a_slow_corner_beside_a_ratio_step_does_not_narrow_its_window() {
         .map(|offset| seam_s - seam_width + offset)
         .map(|s| (field.width(s), s))
         .fold((f64::INFINITY, 0.0), |narrowest, probe| {
-            if probe.0 < narrowest.0 { probe } else { narrowest }
+            if probe.0 < narrowest.0 {
+                probe
+            } else {
+                narrowest
+            }
         });
     assert!(
         narrowest.0 >= seam_width * (1.0 - 1e-12),
@@ -832,9 +836,9 @@ fn a_slow_corner_beside_a_ratio_step_does_not_narrow_its_window() {
     );
 }
 
-/// Moving width nodes lie no nearer on the path than the narrower of their
-/// targets, so the smootherstep between two of them bends the width no
-/// sharper than a window's own width.
+/// Moving width nodes lie most of the narrower of their targets apart on
+/// the path, so the smootherstep between two of them bends the width no
+/// sharper than a window's own width allows.
 #[test]
 fn moving_width_nodes_lie_a_window_apart() {
     let mut field = WidthField {
@@ -857,7 +861,7 @@ fn moving_width_nodes_lie_a_window_apart() {
         let (a, b) = (pair[0], pair[1]);
         if a.target > 0.0 && b.target > 0.0 {
             assert!(
-                b.s - a.s >= a.target.min(b.target),
+                b.s - a.s >= NODE_SPACING_PER_WIDTH * a.target.min(b.target),
                 "width nodes at {} and {} mm lie closer than their targets {} and {}",
                 a.s,
                 b.s,

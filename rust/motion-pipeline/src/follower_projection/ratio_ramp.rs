@@ -25,9 +25,12 @@ const NODE_SPACING_S: f64 = RATIO_RAMP_MIN_TIME_S / WIDTH_NODES_PER_RAMP_TIME;
 /// units of the narrower of their targets: the smootherstep between nodes
 /// `L` apart that differ by at most `ENVELOPE_SLOPE·L` bends `h` by up to
 /// `h''' = 60·ENVELOPE_SLOPE/L²`, which the smoothed ratio's curvature
-/// carries, so an advance turns it into extruder acceleration. Nodes no
-/// nearer than a window's width keep that bend within the window's own.
-const NODE_SPACING_PER_WIDTH: f64 = 1.0;
+/// carries, so an advance turns it into extruder acceleration. Nodes most
+/// of a window's width apart keep that bend within the window's own; short
+/// of a whole width, since at cruise on the shortest ramp a width is one
+/// time tick of path exactly, and a tie there would hang the choice on how
+/// the path's rounding falls.
+const NODE_SPACING_PER_WIDTH: f64 = 0.75;
 /// How far along the path a seam holds the width its ramp asks for, in
 /// units of that width `V·τ/2`: a window that wide reaches the seam from
 /// up to one width away, and the nodes bracketing that reach lie within
@@ -572,8 +575,8 @@ impl WidthField {
     /// far enough past the last node kept in time and along the path.
     fn keep_if_due(&mut self, sample: TimeSample, base: f64) {
         let ramp_time = self.ramp_time_at(sample.t);
-        let target = (base * ramp_time / RATIO_RAMP_MIN_TIME_S)
-            .max(self.seam_width_at(sample.t, sample.s));
+        let target =
+            (base * ramp_time / RATIO_RAMP_MIN_TIME_S).max(self.seam_width_at(sample.t, sample.s));
         let due = self.last_kept.is_none_or(|last| {
             sample.t >= last.t + 0.5 * last.ramp_time - 0.5 * NODE_SPACING_S
                 && sample.s - last.s >= NODE_SPACING_PER_WIDTH * target.min(last.target)
@@ -1109,10 +1112,7 @@ impl RatioSmoothing {
             .retain(|tail| tail.until > t_end - CLUSTER_REACH_S);
         self.laid_tails.push_back(LegTail {
             until: t_end,
-            crossing: Crossing::over(
-                leaders,
-                ((t_end - CLUSTER_REACH_S).max(t_start), t_end),
-            ),
+            crossing: Crossing::over(leaders, ((t_end - CLUSTER_REACH_S).max(t_start), t_end)),
         });
     }
 

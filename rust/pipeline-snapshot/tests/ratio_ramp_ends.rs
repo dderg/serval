@@ -82,7 +82,10 @@ fn assert_ramp_ends_hold(config: &str, layers: &[usize]) {
 
 #[test]
 fn ratio_ramps_by_slow_corners_hold_the_trident_extruder_limits() {
-    assert_ramp_ends_hold("tools/bench/configs/trident_ramp.cfg", &[20, 21, 25, 28, 38]);
+    assert_ramp_ends_hold(
+        "tools/bench/configs/trident_ramp.cfg",
+        &[20, 21, 25, 28, 38],
+    );
 }
 
 #[test]
