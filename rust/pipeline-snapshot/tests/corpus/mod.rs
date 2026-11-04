@@ -82,13 +82,25 @@ pub fn z_caps_excess(snapshot: &pipeline_snapshot::Snapshot, config: &Path) -> O
 }
 
 pub fn plan(name: &str, gcode: &str, config: &Path) -> Option<pipeline_snapshot::Snapshot> {
-    let settings = motion_settings(config);
-    let waypoints = parse_gcode(gcode, &settings.cartesian).expect("gcode parses");
+    let waypoints = waypoints(gcode, config);
     if waypoints.len() < 2 {
         return None;
     }
-    let snapshot = pipeline_snapshot(
-        &waypoints,
+    Some(plan_waypoints(name, &waypoints, config))
+}
+
+pub fn waypoints(gcode: &str, config: &Path) -> Vec<pipeline_snapshot::waypoints::Waypoint> {
+    parse_gcode(gcode, &motion_settings(config).cartesian).expect("gcode parses")
+}
+
+pub fn plan_waypoints(
+    name: &str,
+    waypoints: &[pipeline_snapshot::waypoints::Waypoint],
+    config: &Path,
+) -> pipeline_snapshot::Snapshot {
+    let settings = motion_settings(config);
+    pipeline_snapshot(
+        waypoints,
         SnapshotParams {
             max_velocity: settings.cartesian.max_velocity,
             max_accel: settings.cartesian.max_accel,
@@ -110,8 +122,7 @@ pub fn plan(name: &str, gcode: &str, config: &Path) -> Option<pipeline_snapshot:
             post_processor_decls: settings.post_processors,
         },
     )
-    .unwrap_or_else(|e| panic!("{name}: {e}"));
-    Some(snapshot)
+    .unwrap_or_else(|e| panic!("{name}: {e}"))
 }
 
 pub fn snapshot_cases() -> Vec<(String, String, PathBuf)> {

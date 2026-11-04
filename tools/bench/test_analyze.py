@@ -783,3 +783,29 @@ def test_same_key_matching_stays_exact_over_millions_of_levels_and_long_runs():
     assert delta == pytest.approx([-1e-8, 2e-8], abs=1e-9)
     counts = analyze.same_key_count(query_key, query_t, ref_key, ref_t)
     assert counts.tolist() == [2, 1]
+
+
+def _deployed(rust_build_id):
+    return {
+        "deployed": {
+            "head": "abc1234",
+            "branch": "main",
+            "worktree": "/tmp/wt",
+            "rust_build_id": rust_build_id,
+        }
+    }
+
+
+def test_a_run_analyzes_with_the_engine_its_code_built():
+    assert analyze.deployed_engine_mismatch(_deployed("f00d"), "f00d") is None
+
+
+def test_a_run_refuses_a_reference_from_other_rust_sources():
+    reason = analyze.deployed_engine_mismatch(_deployed("f00d"), "beef")
+    assert "f00d" in reason and "beef" in reason and "abc1234" in reason
+
+
+def test_a_run_predating_build_ids_refuses_any_reference():
+    run = _deployed(None)
+    del run["deployed"]["rust_build_id"]
+    assert analyze.deployed_engine_mismatch(run, "beef") is not None

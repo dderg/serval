@@ -1717,6 +1717,23 @@ def _save(fig, path: Path, plt) -> str:
     return path.name
 
 
+def deployed_engine_mismatch(run: dict, engine_build_id: str) -> str | None:
+    """Why the reference this engine plans is not what the run executed: the
+    Pi planned the print with the rust/ sources `deploy.py sync` recorded,
+    and a reference from any other planner holds the capture against motion
+    the printer never commanded."""
+    deployed = run["deployed"].get("rust_build_id")
+    if deployed == engine_build_id:
+        return None
+    identity = run["deployed"]
+    return (
+        f"the run executed rust/ {deployed} ({identity.get('branch')} @ "
+        f"{identity.get('head')}, {identity.get('worktree')}) but the local "
+        f"engine was built from {engine_build_id}: analyze it from a tree at "
+        "the deployed code"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("run_dir", type=Path)
@@ -1727,6 +1744,12 @@ def main(argv: list[str] | None = None) -> int:
         help="idle seconds that split motion epochs",
     )
     args = parser.parse_args(argv)
+    mismatch = deployed_engine_mismatch(
+        json.loads((args.run_dir / "run.json").read_text()),
+        harness._import_engine().build_id(),
+    )
+    if mismatch is not None:
+        raise AnalysisError(mismatch)
     inputs = load_run(args.run_dir)
     verdict, detail = analyze(inputs, args.gap)
     verdict["plots"] = save_plots(inputs, detail)
