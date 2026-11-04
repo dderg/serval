@@ -375,6 +375,9 @@ class MCU:
         prefix = "MCU '%s' shutdown: " % (self._name,)
         is_latched_shutdown = params["#name"] == "is_shutdown"
         if is_latched_shutdown:
+            connecting = self._printer.get_state_message()[1] == "startup"
+            if connecting and not self._resettable():
+                return
             prefix = "Previous MCU '%s' shutdown: " % (self._name,)
 
         self._printer.invoke_async_shutdown(
@@ -476,23 +479,25 @@ class MCU:
                 )
             raise
 
-    def _recover_latched_peripheral_shutdown(self, get_config_cmd, exc):
-        is_motion_mcu = (
-            "runtime_reset" in self._serial.get_msgparser().messages_by_name
-        )
-        if is_motion_mcu:
-            has_reset = not (
-                self._reset_cmd is None and self._config_reset_cmd is None
-            )
-            remedy = "FIRMWARE_RESTART" if has_reset else "a power cycle"
+    def _resettable(self):
+        return not (self._reset_cmd is None and self._config_reset_cmd is None)
+
+    def _recover_latched_shutdown(self, get_config_cmd, exc):
+        if self._resettable():
             raise error(
-                "MCU '%s' is latched in shutdown and requires %s"
-                " (clear_shutdown cannot reset its timer and runtime"
-                " state): %s" % (self._name, remedy, exc)
+                "MCU '%s' is latched in shutdown from a previous host"
+                " session; FIRMWARE_RESTART resets it: %s" % (self._name, exc)
+            )
+        if "runtime_reset" in self._serial.get_msgparser().messages_by_name:
+            raise error(
+                "MCU '%s' is latched in shutdown and requires a power cycle"
+                " (it has no reset command, and clear_shutdown cannot reset"
+                " its timer and runtime state): %s" % (self._name, exc)
             )
         logging.info(
-            "MCU '%s' latched the shutdown broadcast from a previous host"
-            " session; sending clear_shutdown and retrying: %s",
+            "MCU '%s' has no reset command and latched the shutdown broadcast"
+            " from a previous host session; sending clear_shutdown and"
+            " retrying: %s",
             self._name,
             exc,
         )
@@ -513,9 +518,7 @@ class MCU:
         except Exception as e:
             if "shutdown state" not in str(e):
                 raise
-            config_params = self._recover_latched_peripheral_shutdown(
-                get_config_cmd, e
-            )
+            config_params = self._recover_latched_shutdown(get_config_cmd, e)
         if self._is_shutdown:
             raise error(
                 "MCU '%s' error during config: %s"

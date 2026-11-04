@@ -25,6 +25,13 @@ class _FakeClockSync:
         return True
 
 
+SIMULATED_STEP_BENCHMARK = {
+    "pulsed_ticks_per_step": 0,
+    "both_edge_ticks_per_step": 0,
+    "simulated": True,
+}
+
+
 class FakeMcu:
     class _PresentCommand:
         def send(self, args=()):
@@ -48,6 +55,7 @@ class FakeMcu:
         move_queue_slots=0,
         constants=None,
         missing_commands=(),
+        step_benchmark=SIMULATED_STEP_BENCHMARK,
     ):
         self._printer = printer
         self._name = name
@@ -66,6 +74,7 @@ class FakeMcu:
         self._move_queue_slots = move_queue_slots
         self._constants = {} if constants is None else dict(constants)
         self.missing_commands = tuple(missing_commands)
+        self._step_benchmark = step_benchmark
 
     def get_printer(self):
         return self._printer
@@ -78,6 +87,12 @@ class FakeMcu:
 
     def get_constants(self):
         return self._constants
+
+    def get_constant_float(self, name):
+        return float(self._constants[name])
+
+    def get_step_benchmark(self):
+        return self._step_benchmark
 
     def get_stepcompress_max_error(self):
         return self._stepcompress_max_error
@@ -134,8 +149,10 @@ class FakeStepper:
         step_both_edge=False,
         step_dist=0.0125,
         oid=0,
+        lane_weights=None,
     ):
         self._name = name
+        self._lane_weights = lane_weights
         self._active_callbacks = []
         self._mcu = mcu if mcu is not None else FakeMcu(handle=handle)
         self._pulse = (pulse_duration, step_both_edge)
@@ -160,6 +177,9 @@ class FakeStepper:
 
     def get_step_dist(self):
         return self._step_dist
+
+    def calc_position_from_coord(self, coord):
+        return sum(w * c for w, c in zip(self._lane_weights, coord))
 
     def add_active_callback(self, cb):
         self._active_callbacks.append(cb)

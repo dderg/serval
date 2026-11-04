@@ -13,7 +13,9 @@ fn kin(length: f64, accel: f64, kappa0: f64, sigma: f64, ceiling: f64) -> Kinema
 #[test]
 fn arc_reach_matches_the_closed_form() {
     // On a constant-curvature arc the rail has the closed form
-    // w(s) = w_lim * sin(2*kappa*s + asin(w0/w_lim)).
+    // w(s) = w_lim * sin(2*kappa*s + asin(w0/w_lim)); the rail strays from
+    // it by at most its defect over the 4 mm it takes at least its entry
+    // speed over.
     let k = kin(4.0, 1000.0, 0.12, 0.0, f64::INFINITY);
     let v = disk_reach_v(&k, 5.0, 4.0, 1e-9).unwrap().v;
     let w_lim = 1000.0 / 0.12;
@@ -23,10 +25,12 @@ fn arc_reach_matches_the_closed_form() {
     } else {
         w_lim * libm::sin(arg)
     };
+    let slowest_duration = 4.0 / 5.0;
+    let speed_drift = crate::velocity::law::RAIL_ACCELERATION_DEFECT * slowest_duration;
     assert!(
-        (v * v - closed).abs() < 1e-4 * (1.0 + closed),
-        "{} vs {closed}",
-        v * v
+        (v - closed.sqrt()).abs() <= speed_drift,
+        "{v} vs {}",
+        closed.sqrt()
     );
 }
 

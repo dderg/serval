@@ -79,6 +79,7 @@ static int (*real_pthread_join)(pthread_t, void **);
 static int (*real_pthread_create)(pthread_t *, const pthread_attr_t *,
                                   void *(*)(void *), void *);
 static void (*real_pthread_exit)(void *);
+static int (*real_execve)(const char *, char *const[], char *const[]);
 static ssize_t (*real_write)(int, const void *, size_t);
 static ssize_t (*real_writev)(int, const struct iovec *, int);
 static ssize_t (*real_send)(int, const void *, size_t, int);
@@ -1278,9 +1279,19 @@ unregister_host_thread(void)
     host_tid_slot = -1;
 }
 
-__attribute__((destructor))
+// The process that holds this image's registrations. A vfork child shares
+// this memory under its own pid and must not release them when it execs.
+static pid_t registrations_pid;
+
+// Everything this process holds the shared clock with: its pacers, the
+// input it is handling and its device link. An exiting process releases
+// them in its destructor; a process replacing itself with execve runs no
+// destructor, so the exec releases them first. Otherwise the old image's
+// pacer, in-progress command and unread link hold virtual time forever:
+// the linux firmware's config_reset re-executes itself from inside the
+// command it is handling, and FIRMWARE_RESTART froze the whole world.
 static void
-vtime_pacer_cleanup(void)
+release_process_registrations(void)
 {
     if (!vshm)
         return;
@@ -1294,6 +1305,32 @@ vtime_pacer_cleanup(void)
     if (device_link_slot >= 0)
         atomic_store_explicit(&vshm->links[device_link_slot].pts_plus_one, 0,
                               memory_order_release);
+}
+
+__attribute__((destructor))
+static void
+vtime_pacer_cleanup(void)
+{
+    release_process_registrations();
+}
+
+int
+execve(const char *path, char *const argv[], char *const envp[])
+{
+    if (getpid() != registrations_pid)
+        return REAL(execve)(path, argv, envp);
+    release_process_registrations();
+    REAL(execve)(path, argv, envp);
+    fprintf(stderr, "[vtime] execve %s failed after releasing the clock: %s\n",
+            path, strerror(errno));
+    abort();
+}
+
+int
+execv(const char *path, char *const argv[])
+{
+    extern char **environ;
+    return execve(path, argv, environ);
 }
 
 static void
@@ -1334,6 +1371,7 @@ vtime_init(void)
 {
     const char *v = getenv("VTIME_DEBUG");
     vtime_debug = (v && v[0] == '1');
+    registrations_pid = getpid();
 
     const char *speed_env = getenv("VTIME_SPEED");
     if (speed_env)

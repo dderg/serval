@@ -1808,6 +1808,7 @@ fn stepcompress_cfg(move_queue_slots: u32) -> McuAxisConfig {
             stepcompress_max_error_secs: 25e-6,
             stepcompress_drain_budget_secs: 0.008,
             move_queue_slots,
+            step_capacity: None,
         },
     }
 }

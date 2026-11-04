@@ -62,10 +62,19 @@ def test_a_pending_exit_code_passes_through():
 
 def test_persistent_rate_limiting_fails_loudly_after_the_attempt_cap():
     sleeps = []
-    with pytest.raises(gu.GhRateLimitError, match="still rate limited"):
+    with pytest.raises(gu.GhRateLimitError, match="still failing transiently"):
         gu.run_gh(
             ["pr", "view"],
             runner=lambda args: (1, LIMITED),
             sleep=sleeps.append,
         )
     assert len(sleeps) == gu.MAX_ATTEMPTS
+
+
+def test_network_blips_and_gateway_errors_are_retried_like_rate_limits():
+    assert gu.is_rate_limited(
+        "error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com"
+    )
+    assert gu.is_rate_limited("HTTP 502: Bad Gateway")
+    assert gu.is_rate_limited("dial tcp: i/o timeout")
+    assert not gu.is_rate_limited("HTTP 404: Not Found")
