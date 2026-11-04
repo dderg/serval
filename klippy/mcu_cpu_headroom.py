@@ -4,9 +4,12 @@ The planner lets steps take STEP_CAPACITY_FRACTION of each benchmarked MCU's
 clock, charging every step its benchmarked cost, and assumes everything else
 (tasks, other interrupts, non-step timer callbacks) fits in the rest. Every
 `cpu_load` window the MCU reports how long it slept, how long the timer
-interrupt ran, how much of that was non-step callbacks, and how many steps
-it dispatched per mode. The non-step share is what was neither asleep nor
-stepping; the charged step share is those steps at their benchmarked cost.
+interrupt ran, how much of that non-step timers took, and how many step
+timer events it dispatched. The non-step share is what was neither asleep
+nor stepping; the charged step share is those events at their benchmarked
+cost (a pulsed step is two events, a both-edge step one), taking the cheaper
+mode when the MCU steps both, so a shutdown is never charged more steps
+than ran.
 
 A window whose non-step share exceeds 1 - fraction violates the cap's
 assumption and is reported. When the charged step share and the non-step
@@ -21,50 +24,51 @@ from . import structured_log
 EVENT_INTERVAL_S = 30.0
 
 
+def ticks_per_step_event(step_capacity):
+    per_event = {
+        "pulsed": step_capacity["pulsed_ticks_per_step"] / 2.0,
+        "both-edge": step_capacity["both_edge_ticks_per_step"],
+    }
+    return min(per_event[m["mode"]] for m in step_capacity["motors"])
+
+
 class CpuLoadWindow:
-    def __init__(self, params, pulsed_ticks_per_step, both_edge_ticks_per_step):
+    def __init__(self, params, ticks_per_step_event):
         window = params["window_ticks"]
         if window <= 0:
             raise ValueError("cpu_load window of %d ticks" % (window,))
         step = params["timer_irq_ticks"] - params["nonstep_timer_ticks"]
-        charged = (
-            params["pulsed_step_edges"] / 2.0 * pulsed_ticks_per_step
-            + params["both_edge_steps"] * both_edge_ticks_per_step
-        )
         self.window_ticks = window
         self.idle_share = params["idle_ticks"] / window
         self.step_share = step / window
         self.nonstep_share = 1.0 - self.idle_share - self.step_share
-        self.charged_step_share = charged / window
+        self.charged_step_share = (
+            params["step_events"] * ticks_per_step_event / window
+        )
 
 
 class CpuHeadroom:
     def __init__(self, name, shutdown):
         self._name = name
         self._shutdown = shutdown
-        self._guarded = None
+        self._fraction = None
+        self._ticks_per_step_event = 0.0
         self._last_event_time = None
         self._exceeded_since_event = 0
         self.nonstep_max = 0.0
         self.idle_min = 1.0
 
     def guard(self, step_capacity):
-        self._guarded = step_capacity
+        self._fraction = step_capacity["capacity_fraction"]
+        self._ticks_per_step_event = ticks_per_step_event(step_capacity)
 
     def observe(self, params, eventtime, mcu_freq):
-        if self._guarded is None:
-            window = CpuLoadWindow(params, 0, 0)
-        else:
-            window = CpuLoadWindow(
-                params,
-                self._guarded["pulsed_ticks_per_step"],
-                self._guarded["both_edge_ticks_per_step"],
-            )
+        window = CpuLoadWindow(params, self._ticks_per_step_event)
         self.nonstep_max = max(self.nonstep_max, window.nonstep_share)
         self.idle_min = min(self.idle_min, window.idle_share)
-        if self._guarded is None:
+        if self._fraction is None:
             return
-        fraction = self._guarded["capacity_fraction"]
+        fraction = self._fraction
         allowance = 1.0 - fraction
         if window.nonstep_share <= allowance:
             return

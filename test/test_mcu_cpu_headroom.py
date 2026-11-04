@@ -2,35 +2,45 @@ import logging
 
 import pytest
 
-from klippy.mcu_cpu_headroom import CpuHeadroom, CpuLoadWindow
+from klippy.mcu_cpu_headroom import (
+    CpuHeadroom,
+    CpuLoadWindow,
+    ticks_per_step_event,
+)
 
 FREQ = 84_000_000.0
 WINDOW = 21_000_000
 PULSED = 476
 BOTH_EDGE = 240
-CAPACITY = {
-    "capacity_fraction": 0.8,
-    "pulsed_ticks_per_step": PULSED,
-    "both_edge_ticks_per_step": BOTH_EDGE,
-}
 
 
-def load(idle, step, callback, charged=0.0):
+def capacity(*modes):
     return {
-        "window_ticks": WINDOW,
-        "idle_ticks": round(idle * WINDOW),
-        "timer_irq_ticks": round((step + callback) * WINDOW),
-        "nonstep_timer_ticks": round(callback * WINDOW),
-        "pulsed_step_edges": round(2 * charged * WINDOW / PULSED),
-        "both_edge_steps": 0,
+        "capacity_fraction": 0.8,
+        "pulsed_ticks_per_step": PULSED,
+        "both_edge_ticks_per_step": BOTH_EDGE,
+        "motors": [{"name": "m%d" % i, "mode": m} for i, m in enumerate(modes)],
     }
 
 
-def headroom(capacity=CAPACITY):
+PULSED_MCU = capacity("pulsed", "pulsed")
+
+
+def load(idle, step, nonstep_timer, charged=0.0):
+    return {
+        "window_ticks": WINDOW,
+        "idle_ticks": round(idle * WINDOW),
+        "timer_irq_ticks": round((step + nonstep_timer) * WINDOW),
+        "nonstep_timer_ticks": round(nonstep_timer * WINDOW),
+        "step_events": round(charged * WINDOW / (PULSED / 2)),
+    }
+
+
+def headroom(guarded=PULSED_MCU):
     shutdowns = []
     monitor = CpuHeadroom("mcu", shutdowns.append)
-    if capacity is not None:
-        monitor.guard(capacity)
+    if guarded is not None:
+        monitor.guard(guarded)
     return monitor, shutdowns
 
 
@@ -43,22 +53,27 @@ def events(caplog):
 
 
 def test_the_shares_split_the_window():
-    window = CpuLoadWindow(load(0.5, 0.3, 0.05, charged=0.4), PULSED, BOTH_EDGE)
+    window = CpuLoadWindow(load(0.5, 0.3, 0.05, charged=0.4), PULSED / 2)
     assert window.idle_share == pytest.approx(0.5)
     assert window.step_share == pytest.approx(0.3)
     assert window.nonstep_share == pytest.approx(0.2)
     assert window.charged_step_share == pytest.approx(0.4, abs=1e-4)
 
 
-def test_both_edge_steps_are_charged_their_own_cost():
-    params = {**load(0.5, 0.3, 0.0), "pulsed_step_edges": 0, "both_edge_steps": 1000}
-    window = CpuLoadWindow(params, PULSED, BOTH_EDGE)
-    assert window.charged_step_share == pytest.approx(1000 * BOTH_EDGE / WINDOW)
+def test_a_step_event_costs_half_a_pulsed_step_or_a_both_edge_step():
+    assert ticks_per_step_event(capacity("pulsed")) == PULSED / 2
+    assert ticks_per_step_event(capacity("both-edge")) == BOTH_EDGE
+
+
+def test_mixed_modes_charge_the_cheaper_event():
+    assert ticks_per_step_event(capacity("pulsed", "both-edge")) == min(
+        PULSED / 2, BOTH_EDGE
+    )
 
 
 def test_an_empty_window_is_refused():
     with pytest.raises(ValueError, match="window"):
-        CpuLoadWindow({**load(0.5, 0.3, 0.0), "window_ticks": 0}, 1, 1)
+        CpuLoadWindow({**load(0.5, 0.3, 0.0), "window_ticks": 0}, 1.0)
 
 
 def test_load_within_the_headroom_raises_nothing(caplog):
@@ -91,7 +106,7 @@ def test_excess_non_step_load_with_steps_near_the_cap_shuts_down():
 
 
 def test_an_mcu_without_a_step_cap_is_only_measured():
-    monitor, shutdowns = headroom(capacity=None)
+    monitor, shutdowns = headroom(guarded=None)
     monitor.observe(load(0.0, 0.5, 0.4), 0.0, FREQ)
     assert shutdowns == []
     assert "mcu_nonstep_max=0.500" in monitor.take_stats()
