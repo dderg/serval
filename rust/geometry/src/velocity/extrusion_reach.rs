@@ -2,7 +2,8 @@ use std::collections::VecDeque;
 
 use crate::Move;
 use crate::frontend::ExtruderCaps;
-use crate::path::CurvatureProfile;
+use crate::path::lowering::PositionProfile;
+use crate::path::{CurvatureProfile, Headings};
 use crate::ratio_ramp::RATIO_RAMP_MAX_TIME_S;
 
 /// The largest extrusion ratio `m` lays along the path on `axis`: 0 for
@@ -50,7 +51,8 @@ impl Reach {
 
 /// One move as the reach reads it: where it lies along the stream's path,
 /// the fastest the leaders can cross it and the least time they take, the
-/// spatial axes it moves on, what it extrudes, the reach of the extruder it
+/// spatial axes it moves on, the headings it takes, enters and leaves on
+/// and its peak curvature, what it extrudes, the reach of the extruder it
 /// is budgeted for, and how long the leaders' shaped path moves on past a
 /// raw stop and before a raw start. An extrude-only move is a rest of the
 /// leaders.
@@ -62,12 +64,22 @@ struct Mark {
     least_time_s: f64,
     rest: bool,
     moves_on: [bool; 3],
+    headings: Option<Headings>,
+    entry_exit_headings: Option<[[f64; 3]; 2]>,
+    kappa_peak_per_mm: f64,
     extruding: Option<(usize, f64)>,
     reach: Option<Reach>,
     leader_kernel_reach_s: f64,
 }
 
 impl Mark {
+    /// The heading on its edge facing the move a scan starts at (`near`)
+    /// or away from it, `None` at rest.
+    fn edge_heading(&self, ahead: bool, near: bool) -> Option<[f64; 3]> {
+        self.entry_exit_headings
+            .map(|[entry, exit]| if ahead == near { entry } else { exit })
+    }
+
     fn ratio_on(&self, axis: usize) -> f64 {
         match self.extruding {
             Some((on, ratio)) if on == axis => ratio,
@@ -133,6 +145,72 @@ fn either(a: [bool; 3], b: [bool; 3]) -> [bool; 3] {
 /// The spatial axes `segment` moves on.
 fn moves_on(segment: &crate::path::Segment) -> [bool; 3] {
     std::array::from_fn(|axis| segment.lean_on(axis).plane != 0.0)
+}
+
+/// What the path does within the leaders' spill of a move, which the
+/// shaped path there averages.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PathInReach {
+    /// The spatial axes it moves on.
+    pub axes: [bool; 3],
+    /// Its largest curvature.
+    pub kappa_peak_per_mm: f64,
+    /// The lowest speed ceiling among its moves, 0 where it rests or stops
+    /// at a corner.
+    pub slowest_ceiling_mm_s: f64,
+    /// The least `t̂·b̂` over its headings `t̂` along their length-weighted
+    /// mean `b̂`: 1 on a straight path and where no kernel spills the
+    /// planned path into the shaped one, at most 0 where the headings span
+    /// half a turn. A unit-mass kernel keeps the shaped speed there at least
+    /// this share of the slowest planned speed.
+    pub speed_share: f64,
+}
+
+impl PathInReach {
+    fn of(mark: &Mark) -> Self {
+        Self {
+            axes: mark.moves_on,
+            kappa_peak_per_mm: mark.kappa_peak_per_mm,
+            slowest_ceiling_mm_s: mark.ceiling_mm_s,
+            speed_share: 1.0,
+        }
+    }
+
+    /// The path with `mark` added, which joins it at a corner stop where
+    /// `stops`.
+    fn with(self, mark: &Mark, stops: bool) -> Self {
+        Self {
+            axes: either(self.axes, mark.moves_on),
+            kappa_peak_per_mm: self.kappa_peak_per_mm.max(mark.kappa_peak_per_mm),
+            slowest_ceiling_mm_s: if stops {
+                0.0
+            } else {
+                self.slowest_ceiling_mm_s.min(mark.ceiling_mm_s)
+            },
+            speed_share: self.speed_share,
+        }
+    }
+}
+
+/// Whether the toolhead stops where headings `from` and `to` join: any
+/// turn sharper than the fitter passes as collinear stops it.
+fn corner_stops(from: Option<[f64; 3]>, to: Option<[f64; 3]>) -> bool {
+    from.zip(to).is_some_and(|(from, to)| {
+        libm::acos(crate::vec3::dot(from, to).clamp(-1.0, 1.0)) > crate::fitter::COLLINEAR_EPS_RAD
+    })
+}
+
+/// `mark`'s headings weighted by its length, `heading_sum` added.
+fn weighted_heading(heading_sum: [f64; 3], mark: &Mark) -> [f64; 3] {
+    mark.headings.map_or(heading_sum, |headings| {
+        crate::vec3::madd(heading_sum, mark.end_mm - mark.start_mm, headings.middle())
+    })
+}
+
+/// The least of `share` and `mark`'s headings along `mean`.
+fn least_share(share: f64, mark: &Mark, mean: [f64; 3]) -> f64 {
+    mark.headings
+        .map_or(share, |headings| share.min(headings.least_along(mean)))
 }
 
 /// Where the leaders' spill ends on one side of a move, and whether they
@@ -202,6 +280,17 @@ impl Marks {
             least_time_s,
             rest: m.segment.spatial.is_none(),
             moves_on: m.segment.spatial.as_ref().map_or([false; 3], moves_on),
+            headings: m.segment.spatial.as_ref().map(|segment| segment.headings()),
+            entry_exit_headings: m
+                .segment
+                .spatial
+                .as_ref()
+                .map(|segment| [segment.heading_at(0.0), segment.heading_at(segment.s_len())]),
+            kappa_peak_per_mm: m
+                .segment
+                .spatial
+                .as_ref()
+                .map_or(0.0, |segment| segment.kappa_peak().1.abs()),
             extruding: m
                 .limits
                 .extruder
@@ -278,36 +367,59 @@ impl Marks {
         )
     }
 
-    /// The spatial axes the path moves on within the leaders' spill of
-    /// `marks[index]`, up to the first rest either side, which the rest
-    /// holds keep the shaped path still across: the shaped path there moves
-    /// only on them, and only their planned acceleration reaches its jerk.
-    /// Without a spill the shaped path is the planned one, the move's own.
-    /// `None` while moves still to come could add to them. The history
-    /// behind always covers the spill, so the dropped marks never reach it.
-    fn axes_in_reach(&self, index: usize, closed: bool) -> Option<[bool; 3]> {
+    /// What the path does within the leaders' spill of `marks[index]`: the
+    /// shaped path there averages it, and only its planned acceleration
+    /// reaches the shaped path's jerk. Without a spill the shaped path is the
+    /// planned one, the move's own. `None` while moves still to come could
+    /// add to it. The history behind always covers the spill, so the
+    /// dropped marks never reach it.
+    fn path_in_reach(&self, index: usize, closed: bool) -> Option<PathInReach> {
         let mark = self.marks[index];
+        let mut path = PathInReach::of(&mark);
         let Some(reach) = mark.reach.filter(|reach| reach.spill_s > 0.0) else {
-            return Some(mark.moves_on);
+            return Some(path);
         };
-        let mut axes = mark.moves_on;
+        let mut heading_sum = weighted_heading([0.0; 3], &mark);
         for ahead in [false, true] {
-            (axes, _) = self.fold_beside(
+            (path, heading_sum, _) = self.fold_beside(
                 (index, ahead),
                 reach.spill_s,
                 closed,
-                (axes, false),
-                |(axes, rested), other| {
-                    if rested || other.rest {
-                        (axes, true)
-                    } else {
-                        (either(axes, other.moves_on), false)
-                    }
+                (path, heading_sum, mark.edge_heading(ahead, false)),
+                |(path, sum, edge), other| {
+                    let stops = corner_stops(edge, other.edge_heading(ahead, true));
+                    (
+                        path.with(other, stops),
+                        weighted_heading(sum, other),
+                        other.edge_heading(ahead, false),
+                    )
                 },
                 |folded, _| folded,
             )?;
         }
-        Some(axes)
+        let length = crate::vec3::norm(heading_sum);
+        if length == 0.0 {
+            return Some(PathInReach {
+                speed_share: 0.0,
+                ..path
+            });
+        }
+        let mean = crate::vec3::scale(heading_sum, 1.0 / length);
+        let mut share = least_share(1.0, &mark, mean);
+        for ahead in [false, true] {
+            share = self.fold_beside(
+                (index, ahead),
+                reach.spill_s,
+                closed,
+                share,
+                |share, other| least_share(share, other, mean),
+                |share, _| share,
+            )?;
+        }
+        Some(PathInReach {
+            speed_share: share.min(1.0),
+            ..path
+        })
     }
 
     /// The largest ratio on one side of `marks[index]` its demand meets:
@@ -419,7 +531,7 @@ impl Marks {
     fn budget(&self, index: usize, closed: bool) -> Option<ExtrusionBudget> {
         Some(ExtrusionBudget {
             ratio_in_reach: self.ratio_in_reach(index, closed)?,
-            axes_in_reach: self.axes_in_reach(index, closed)?,
+            path_in_reach: self.path_in_reach(index, closed)?,
             rest_holds_s: self.rest_holds(index, closed)?,
         })
     }
@@ -439,7 +551,7 @@ impl Marks {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExtrusionBudget {
     pub ratio_in_reach: f64,
-    pub axes_in_reach: [bool; 3],
+    pub path_in_reach: PathInReach,
     pub rest_holds_s: [f64; 2],
 }
 

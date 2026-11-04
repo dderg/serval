@@ -8,7 +8,7 @@ pub mod profile;
 
 pub use arc::Arc;
 pub use clothoid::Clothoid;
-pub use lean::AxisLean;
+pub use lean::{AxisLean, Headings};
 pub use line::Line;
 pub use profile::CurvatureProfile;
 

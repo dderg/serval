@@ -1,5 +1,5 @@
-use super::extrusion_reach::ExtrusionBudget;
-use crate::frontend::ExtruderCaps;
+use super::extrusion_reach::{ExtrusionBudget, PathInReach};
+use crate::frontend::{ADVANCE_VALLEY_SPEED_MM_S, ExtruderCaps};
 use crate::path::{CurvatureProfile, Segment};
 
 use super::rate_cap::LinearRate;
@@ -31,10 +31,9 @@ fn budgeted_ratio(ratio: f64) -> f64 {
 /// `σ⃛ = j·t̂ + a_⊥²/|v|` on the shaped path: the jerk's tangential part,
 /// at most `G·A` with `G` the jerk gain of the shaped axes the path moves on
 /// within the leaders' spill of the segment, plus the turning of the tangent
-/// under the normal acceleration, `v³κ²` at speed `v` on curvature `κ`,
-/// where the disk keeps `v ≤ √(A/κ)`. A follower kernel `w_e` bounds the
-/// same term by `G_e·A` on its own, differentiating `σ̈ ≤ A` rather than
-/// `σ⃛`.
+/// under the normal acceleration (see [`Demand::turning`]). A follower
+/// kernel `w_e` bounds the same term by `G_e·A` on its own, differentiating
+/// `σ̈ ≤ A` rather than `σ⃛`.
 ///
 /// An unshaped leader steps `σ̈` itself wherever its planned acceleration
 /// steps, by at most `2A·U` with `U` the share of the segment's plane on
@@ -47,7 +46,8 @@ struct Demand {
     curvature: f64,
     path_gain: f64,
     own_gain: f64,
-    kappa_peak: f64,
+    path: PathInReach,
+    accel_mass: f64,
     unshaped_share: f64,
     ratio_in_reach: f64,
 }
@@ -64,10 +64,34 @@ impl Demand {
         }
     }
 
+    /// The turning of the shaped tangent, `a_⊥²/|v|`, around the segment
+    /// under the budget `A` at speeds up to `v`. The shaped path averages the
+    /// planned path within the spill, whose headings lie within `acos c` of
+    /// their mean (`c` the path's speed share): its normal acceleration takes
+    /// the planned normal acceleration, at most `min(A, v²κ)`, and the
+    /// planned tangential acceleration turned by up to `2·acos c` off the
+    /// shaped tangent, never more than the kernels' mass `m` times `A`; its
+    /// speed keeps the share `c` of the slowest the path is driven there, at
+    /// most `√(A/κ)` on its peak curvature `κ` and its slowest ceiling. Below
+    /// [`ADVANCE_VALLEY_SPEED_MM_S`] the advance lays a valley instead.
+    fn turning(&self, v: f64, accel: f64) -> f64 {
+        let path = &self.path;
+        if path.speed_share >= 1.0 && path.kappa_peak_per_mm == 0.0 {
+            return 0.0;
+        }
+        let normal = accel.min(v * v * path.kappa_peak_per_mm);
+        let turn_off_tangent = 2.0 * libm::acos(path.speed_share.clamp(0.0, 1.0));
+        let swing = libm::sin(turn_off_tangent.min(std::f64::consts::FRAC_PI_2));
+        let shaped_normal = (self.accel_mass * accel).min(accel * swing + normal);
+        let slowest = v
+            .min(path.slowest_ceiling_mm_s)
+            .min((accel / path.kappa_peak_per_mm).sqrt());
+        let shaped_speed = (slowest * path.speed_share).max(ADVANCE_VALLEY_SPEED_MM_S);
+        shaped_normal * shaped_normal / shaped_speed
+    }
+
     fn accel(&self, v: f64, accel: f64) -> f64 {
-        let turning_speed = v.min((accel / self.kappa_peak).sqrt());
-        let turning = turning_speed.powi(3) * self.kappa_peak * self.kappa_peak;
-        let shaped_jerk = self.path_gain * accel + turning;
+        let shaped_jerk = self.path_gain * accel + self.turning(v, accel);
         let own_jerk = self.own_gain * accel;
         let path_jerk = if self.own_gain.is_infinite() {
             shaped_jerk
@@ -114,9 +138,10 @@ pub(super) fn extruder_capped(
         ratio: budgeted_ratio(ratio_in_reach),
         slope: caps.advance_slope_s,
         curvature: caps.advance_curvature_s2_per_mm,
-        path_gain: caps.path_jerk_gain(budget.axes_in_reach),
+        path_gain: caps.path_jerk_gain(budget.path_in_reach.axes),
         own_gain: caps.own_jerk_per_accel_hz,
-        kappa_peak,
+        path: budget.path_in_reach,
+        accel_mass: caps.leader_spill.mass,
         unshaped_share: unshaped_plane_sq.sqrt().min(1.0),
         ratio_in_reach: ratio_in_reach.max(0.0),
     };

@@ -32,12 +32,25 @@ fn caps(max_velocity: f64, max_accel: f64, slope: f64) -> ExtruderCaps {
     }
 }
 
-fn around(ratio_in_reach: f64, axes_in_reach: [bool; 3]) -> ExtrusionBudget {
+fn straight(axes: [bool; 3]) -> PathInReach {
+    PathInReach {
+        axes,
+        kappa_peak_per_mm: 0.0,
+        slowest_ceiling_mm_s: f64::INFINITY,
+        speed_share: 1.0,
+    }
+}
+
+fn along(ratio_in_reach: f64, path_in_reach: PathInReach) -> ExtrusionBudget {
     ExtrusionBudget {
         ratio_in_reach,
-        axes_in_reach,
+        path_in_reach,
         rest_holds_s: [0.0; 2],
     }
+}
+
+fn around(ratio_in_reach: f64, axes: [bool; 3]) -> ExtrusionBudget {
+    along(ratio_in_reach, straight(axes))
 }
 
 #[test]
@@ -58,14 +71,15 @@ fn line_x(length: f64) -> Segment {
     Segment::Line(Line::try_new([0.0, 0.0, 0.0], [length, 0.0, 0.0]).unwrap())
 }
 
-fn demand_of(caps: &ExtruderCaps, path_gain: f64, kappa_peak: f64) -> Demand {
+fn demand_of(caps: &ExtruderCaps, path_gain: f64, path: PathInReach) -> Demand {
     Demand {
         ratio: RATIO,
         slope: caps.advance_slope_s,
         curvature: caps.advance_curvature_s2_per_mm,
         path_gain,
         own_gain: caps.own_jerk_per_accel_hz,
-        kappa_peak,
+        path,
+        accel_mass: 1.0,
         unshaped_share: 0.0,
         ratio_in_reach: RATIO,
     }
@@ -139,6 +153,15 @@ fn only_the_axes_the_path_moves_around_a_segment_lend_their_jerk_gain() {
 
 const PLANE: [bool; 3] = [true, true, false];
 
+fn curving(kappa: f64, slowest: f64, share: f64) -> PathInReach {
+    PathInReach {
+        kappa_peak_per_mm: kappa,
+        slowest_ceiling_mm_s: slowest,
+        speed_share: share,
+        ..straight(PLANE)
+    }
+}
+
 #[test]
 fn a_curve_also_pays_for_the_tangent_turning_under_its_normal_acceleration() {
     let caps = caps(1000.0, 5000.0, 0.02);
@@ -146,9 +169,10 @@ fn a_curve_also_pays_for_the_tangent_turning_under_its_normal_acceleration() {
         Arc::try_new([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], 2.0, 0.0, 1.5).unwrap(),
     );
     let kappa = 0.5;
+    let path = curving(kappa, f64::INFINITY, libm::cos(0.75));
     let (ceiling, accel) =
-        extruder_capped(&arc, &caps, &around(RATIO, PLANE), kappa, (300.0, 70_000.0));
-    let demand = demand_of(&caps, PLANE_GAIN, kappa);
+        extruder_capped(&arc, &caps, &along(RATIO, path), kappa, (300.0, 70_000.0));
+    let demand = demand_of(&caps, PLANE_GAIN, path);
     assert!(demand.accel(ceiling, accel) <= 5000.0 * (1.0 + 1e-12));
     let straight = extruder_capped(
         &line_x(3.0),
@@ -161,6 +185,49 @@ fn a_curve_also_pays_for_the_tangent_turning_under_its_normal_acceleration() {
         accel < straight.1,
         "turning must cost budget: {accel} vs {}",
         straight.1
+    );
+}
+
+#[test]
+fn a_slow_corner_pays_for_the_braking_its_kernels_turn_across_the_shaped_tangent() {
+    let caps = caps(1000.0, 5000.0, 0.03);
+    let corner = curving(0.0, 20.0, libm::cos(1.2));
+    let (ceiling, accel) = extruder_capped(
+        &line_x(3.0),
+        &caps,
+        &along(RATIO, corner),
+        0.0,
+        (300.0, 70_000.0),
+    );
+    let shaped_speed = 20.0 * libm::cos(1.2);
+    let turning = accel * accel / shaped_speed;
+    let exact = RATIO * (accel + 0.03 * (PLANE_GAIN * accel + turning));
+    assert!((exact - 5000.0).abs() < 1e-6 * 5000.0, "{exact}");
+    assert!(demand_of(&caps, PLANE_GAIN, corner).accel(ceiling, accel) <= 5000.0 * (1.0 + 1e-12));
+}
+
+#[test]
+fn below_the_valley_speed_the_turning_is_held_at_it() {
+    let caps = caps(1000.0, 5000.0, 0.03);
+    let stop = curving(0.0, 0.0, 0.0);
+    let (_, accel) = extruder_capped(
+        &line_x(3.0),
+        &caps,
+        &along(RATIO, stop),
+        0.0,
+        (300.0, 70_000.0),
+    );
+    let turning = accel * accel / ADVANCE_VALLEY_SPEED_MM_S;
+    let exact = RATIO * (accel + 0.03 * (PLANE_GAIN * accel + turning));
+    assert!((exact - 5000.0).abs() < 1e-6 * 5000.0, "{exact}");
+}
+
+#[test]
+fn a_straight_path_does_not_turn() {
+    let caps = caps(1000.0, 5000.0, 0.03);
+    assert_eq!(
+        demand_of(&caps, 0.0, straight(PLANE)).turning(5.0, 3000.0),
+        0.0
     );
 }
 

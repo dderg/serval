@@ -54,6 +54,78 @@ impl Segment {
             }
         }
     }
+
+    /// The directions the segment heads in along its length.
+    #[must_use]
+    pub fn headings(&self) -> Headings {
+        match self {
+            Segment::Line(line) => Headings::Straight(vec3::scale(
+                vec3::sub(line.end, line.start),
+                1.0 / line.length(),
+            )),
+            Segment::Arc(arc) => {
+                let (lo, hi) = arc.heading_range();
+                Headings::Swept {
+                    u: arc.u,
+                    v: arc.v,
+                    lo,
+                    hi,
+                }
+            }
+            Segment::Clothoid(clothoid) => {
+                let (lo, hi) = clothoid.heading_range();
+                Headings::Swept {
+                    u: clothoid.u,
+                    v: clothoid.v,
+                    lo,
+                    hi,
+                }
+            }
+        }
+    }
+}
+
+/// The unit headings a segment takes along its length: one for a line, the
+/// headings `cos φ·u + sin φ·v` over `φ ∈ [lo, hi]` for a planar curve.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Headings {
+    Straight([f64; 3]),
+    Swept {
+        u: [f64; 3],
+        v: [f64; 3],
+        lo: f64,
+        hi: f64,
+    },
+}
+
+impl Headings {
+    /// The heading halfway through the sweep.
+    #[must_use]
+    pub fn middle(&self) -> [f64; 3] {
+        match *self {
+            Self::Straight(heading) => heading,
+            Self::Swept { u, v, lo, hi } => {
+                let phi = 0.5 * (lo + hi);
+                vec3::add(
+                    vec3::scale(u, libm::cos(phi)),
+                    vec3::scale(v, libm::sin(phi)),
+                )
+            }
+        }
+    }
+
+    /// The least `d·t̂` over the headings `t̂`.
+    #[must_use]
+    pub fn least_along(&self, direction: [f64; 3]) -> f64 {
+        match *self {
+            Self::Straight(heading) => vec3::dot(direction, heading),
+            Self::Swept { u, v, lo, hi } => {
+                let (along_u, along_v) = (vec3::dot(direction, u), vec3::dot(direction, v));
+                let alpha = libm::atan2(along_v, along_u);
+                libm::hypot(along_u, along_v) * min_cos(lo - alpha, hi - alpha)
+            }
+        }
+    }
 }
 
 impl Line {
@@ -126,6 +198,14 @@ fn max_abs_cos(lo: f64, hi: f64) -> f64 {
         return 1.0;
     }
     libm::cos(lo).abs().max(libm::cos(hi).abs())
+}
+
+fn min_cos(lo: f64, hi: f64) -> f64 {
+    let first_trough = (2.0 * ((lo / PI - 1.0) / 2.0).ceil() + 1.0) * PI;
+    if first_trough <= hi {
+        return -1.0;
+    }
+    libm::cos(lo).min(libm::cos(hi))
 }
 
 #[cfg(test)]

@@ -96,3 +96,56 @@ fn clothoids_in_tilted_planes_match_their_sampled_lean() {
         assert_lean_matches_samples(&clothoid);
     }
 }
+
+fn assert_least_heading_matches_samples(segment: &Segment, direction: [f64; 3]) {
+    let length = segment.s_len();
+    let sampled = (0..=SAMPLES)
+        .map(|k| {
+            crate::vec3::dot(
+                direction,
+                segment.heading_at(length * k as f64 / SAMPLES as f64),
+            )
+        })
+        .fold(f64::INFINITY, f64::min);
+    let least = segment.headings().least_along(direction);
+    assert!(
+        least <= sampled + 1e-12 && least >= sampled - 1e-6,
+        "{least} vs sampled {sampled}"
+    );
+}
+
+#[test]
+fn the_least_heading_along_a_direction_matches_the_sampled_one() {
+    let directions = [
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.6, -0.8, 0.0],
+        [0.0, 0.6, 0.8],
+    ];
+    let line = Segment::Line(Line::try_new([0.0; 3], [3.0, 4.0, 0.0]).unwrap());
+    for (tilt, start, sweep) in [
+        (0.4, 0.0, 0.3),
+        (0.4, 1.0, -0.2),
+        (1.2, -2.0, 3.5),
+        (0.0, 2.5, 4.0),
+    ] {
+        let (u, v) = tilted_basis(tilt);
+        let arc = Segment::Arc(Arc::try_new([1.0, 2.0, 3.0], v, u, 0.7, start, sweep).unwrap());
+        for direction in directions {
+            assert_least_heading_matches_samples(&arc, direction);
+            assert_least_heading_matches_samples(&line, direction);
+        }
+    }
+    for (tilt, kappa_0, sigma, length) in [
+        (0.3, 0.0, 2.0, 0.5),
+        (1.0, 3.0, -4.0, 1.2),
+        (0.7, -1.0, 1.5, 2.0),
+    ] {
+        let (u, v) = tilted_basis(tilt);
+        let clothoid =
+            Segment::Clothoid(Clothoid::try_new([0.0; 3], u, v, kappa_0, sigma, length).unwrap());
+        for direction in directions {
+            assert_least_heading_matches_samples(&clothoid, direction);
+        }
+    }
+}

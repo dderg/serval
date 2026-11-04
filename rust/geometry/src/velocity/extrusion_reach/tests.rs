@@ -266,7 +266,7 @@ fn the_axes_in_reach_are_those_the_path_moves_on_within_the_spill() {
         .collect();
     let axes: Vec<[bool; 3]> = extrusion_budgets(&moves, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
         .iter()
-        .map(|budget| budget.axes_in_reach)
+        .map(|budget| budget.path_in_reach.axes)
         .collect();
     assert_eq!(
         axes,
@@ -276,6 +276,79 @@ fn the_axes_in_reach_are_those_the_path_moves_on_within_the_spill() {
             [true, true, true],
             [false, true, true],
         ]
+    );
+}
+
+fn polyline(corners: &[[f64; 3]], feedrate_mm_s: f64) -> Vec<Move> {
+    let limits = VelocityLimits::try_new(1000.0, 20_000.0, 0.0, f64::INFINITY)
+        .unwrap()
+        .with_extruder_caps(Some(caps()))
+        .unwrap();
+    corners
+        .windows(2)
+        .enumerate()
+        .map(|(index, ends)| {
+            let ctx = MoveContext {
+                extruder_axis: 3,
+                feedrate_mm_s,
+                limits,
+                source: SourceRange {
+                    start_line: index as u32,
+                    end_line: index as u32,
+                },
+            };
+            line_move(ends[0], ends[1], RATIO, ctx).unwrap()
+        })
+        .collect()
+}
+
+fn paths(moves: &[Move]) -> Vec<PathInReach> {
+    extrusion_budgets(moves, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
+        .iter()
+        .map(|budget| budget.path_in_reach)
+        .collect()
+}
+
+#[test]
+fn a_straight_path_keeps_its_whole_speed_and_its_slowest_ceiling() {
+    let moves = polyline(&[[0.0; 3], [10.0, 0.0, 0.0], [20.0, 0.0, 0.0]], 150.0);
+    for path in paths(&moves) {
+        assert_eq!(path.speed_share, 1.0);
+        assert_eq!(path.kappa_peak_per_mm, 0.0);
+        assert_eq!(path.slowest_ceiling_mm_s, 150.0);
+    }
+}
+
+#[test]
+fn a_corner_within_the_spill_stops_the_path_and_shares_its_speed_by_the_half_turn() {
+    let short = 150.0 * SPILL_S / 4.0;
+    let moves = polyline(&[[-10.0, 0.0, 0.0], [0.0; 3], [0.0, short, 0.0]], 150.0);
+    let path = paths(&moves)[1];
+    assert_eq!(path.slowest_ceiling_mm_s, 0.0);
+    let mean = crate::vec3::normalize([10.0, short, 0.0]);
+    assert!(
+        (path.speed_share - mean[1].min(mean[0])).abs() < 1e-12,
+        "{path:?}"
+    );
+}
+
+#[test]
+fn a_corner_beyond_the_spill_leaves_the_path_straight() {
+    let moves = polyline(&[[-30.0, 0.0, 0.0], [0.0; 3], [0.0, 30.0, 0.0]], 150.0);
+    assert_eq!(paths(&moves)[0].slowest_ceiling_mm_s, 0.0);
+    let moves = polyline(
+        &[
+            [-60.0, 0.0, 0.0],
+            [-30.0, 0.0, 0.0],
+            [0.0; 3],
+            [0.0, 30.0, 0.0],
+        ],
+        150.0,
+    );
+    let first = paths(&moves)[0];
+    assert_eq!(
+        (first.speed_share, first.slowest_ceiling_mm_s),
+        (1.0, 150.0)
     );
 }
 
