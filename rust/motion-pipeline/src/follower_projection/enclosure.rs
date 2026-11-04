@@ -15,7 +15,6 @@
 //! the bound.
 
 use crate::shaper::axis_enclosure::AxisWindows;
-use crate::shaper::hull::ENCLOSURE_BUDGET_SHARE;
 use crate::shaper::taylor::{self, Ball, TaylorModel, Window};
 use crate::shaper::{Enclosure, ExactPiece};
 
@@ -149,6 +148,9 @@ impl Built {
 
 /// Whether every order `piece` bounds is within `accuracy`.
 fn resolves(piece: &ExactPiece, accuracy: [f64; 3]) -> bool {
+    let accuracy = piece
+        .unshaped_step
+        .map_or(accuracy, |step| step.enclosure_accuracy(accuracy));
     piece
         .pva
         .iter()
@@ -577,11 +579,7 @@ impl AdvancedFollowerSignal<'_, '_> {
             let first = pieces.len();
             taylor::try_enclose(
                 stretch,
-                [
-                    accuracy[0],
-                    accuracy[1].min(self.unshaped_step.allowance() * ENCLOSURE_BUDGET_SHARE),
-                    accuracy[2],
-                ],
+                self.unshaped_step.enclosure_accuracy(accuracy),
                 &|window| {
                     let [position, velocity, _] = self.advanced_models(window, false)?;
                     Some([position, velocity, TaylorModel::constant(Ball::exact(0.0))])

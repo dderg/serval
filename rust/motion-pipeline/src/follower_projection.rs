@@ -1530,6 +1530,17 @@ impl UnshapedLeaderStep {
         self.allowance
     }
 
+    /// `accuracy` for an enclosure piece under the exemption: the hull holds
+    /// its velocity to the allowance, so the piece's own bound takes the
+    /// share of it any enclosure takes of its budget.
+    pub(crate) fn enclosure_accuracy(self, accuracy: [f64; 3]) -> [f64; 3] {
+        [
+            accuracy[0],
+            accuracy[1].min(self.allowance * crate::shaper::hull::ENCLOSURE_BUDGET_SHARE),
+            accuracy[2],
+        ]
+    }
+
     /// Whether a velocity change of `change` stays within the allowance.
     pub(crate) fn admits(self, change: f64) -> bool {
         change.abs() <= self.allowance
