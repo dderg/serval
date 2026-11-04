@@ -242,9 +242,10 @@ impl FollowerModels {
     }
 }
 
-/// The axes a follower reads, window by window.
+/// The axes a follower reads, window by window: the moving leaders, each
+/// beside its index among the follower's leaders, and the raw track.
 pub(super) struct FollowerAxisWindows<'a> {
-    leaders: Vec<AxisWindows<'a>>,
+    pub(super) leaders: Vec<(usize, AxisWindows<'a>)>,
     raw: Option<AxisWindows<'a>>,
 }
 
@@ -295,7 +296,7 @@ impl<'a> FollowerSignal<'a> {
         let mut leaders = Vec::with_capacity(windows.leaders.len());
         let mut speed_squared = TaylorModel::constant(Ball::exact(0.0));
         let mut power = TaylorModel::constant(Ball::exact(0.0));
-        for axis in &windows.leaders {
+        for (_, axis) in &windows.leaders {
             let [velocity, acceleration, jerk] = axis
                 .motion_models(window, with_jerk)?
                 .map(|model| model.working_to(FOLLOWER_WORKING_SHARE));
@@ -303,12 +304,17 @@ impl<'a> FollowerSignal<'a> {
             power = power.add(&velocity.mul(&acceleration));
             leaders.push([velocity, acceleration, jerk]);
         }
+        let rest = match self.rest_at(window.center) {
+            Some(rest) if rest.from <= window.lo && window.hi <= rest.to => Some(*rest),
+            Some(_) => return None,
+            None => None,
+        };
         let slivers = (
             self.speed_zero_sliver(window.lo),
             self.speed_zero_sliver(window.hi),
         );
-        let (speed, inverse_speed) = match slivers {
-            (None, None) => {
+        let (speed, inverse_speed) = match (slivers, rest) {
+            ((None, None), None) => {
                 let speed = taylor::root_or_range(&speed_squared);
                 let inverse = speed.reciprocal()?;
                 (speed, Some(inverse))
@@ -318,8 +324,20 @@ impl<'a> FollowerSignal<'a> {
         let scale = Ball::exact(self.odometer_scale);
         let rate = speed.scale(scale);
         let along = inverse_speed.as_ref().map(|inverse| power.mul(inverse));
+        let along_rest = |order: usize| {
+            rest.map(|rest| {
+                let direction = rest.direction(window.center);
+                windows.leaders.iter().zip(&leaders).fold(
+                    TaylorModel::constant(Ball::exact(0.0)),
+                    |sum, ((index, _), models)| {
+                        sum.add(&models[order].scale(Ball::exact(direction[*index])))
+                    },
+                )
+            })
+        };
         let rate_deriv = match (slivers, &along) {
             (_, Some(along)) => along.scale(scale),
+            ((None, None), None) if rest.is_some() => along_rest(1)?.scale(scale),
             ((Some(lo), Some(hi)), None) if lo.zero_time == hi.zero_time => {
                 let side = |t: f64| lo.deriv_at(t);
                 let (low, high) = (side(window.lo), side(window.hi));
@@ -335,18 +353,23 @@ impl<'a> FollowerSignal<'a> {
             .scale(Ball::exact(window.radius) * scale)
             .add_ball(Ball::exact(self.s_owned(window.center)));
         let (centre, spread) = s.spread();
-        let reach = self.reach_inside_crossings(window, (centre - spread, centre + spread));
+        let read = self.read_distances();
+        let inside_read =
+            |(lo, hi): (f64, f64)| (lo.max(read.0).min(read.1), hi.min(read.1).max(read.0));
+        let reach =
+            self.reach_inside_crossings(window, inside_read((centre - spread, centre + spread)));
         if self.state.smoothing.touches(reach.0, reach.1) {
             return None;
         }
-        let held = (reach.1 - self.s_owned_end).max(0.0);
+        let held = (centre + spread - self.s_owned_end).max(0.0);
         s.widen(held);
-        let reach = (reach.0 - held, reach.1 + held);
+        let reach = inside_read((reach.0 - held, reach.1 + held));
         let formulas = self.table_formulas(centre, reach)?;
         let rate_second = if with_jerk {
-            match &inverse_speed {
-                Some(inverse) => leader_speed_second(&leaders, inverse).scale(scale),
-                None => TaylorModel::constant(Ball::exact(0.0)),
+            match (&inverse_speed, rest) {
+                (Some(inverse), _) => leader_speed_second(&leaders, inverse).scale(scale),
+                (None, Some(_)) => along_rest(2)?.scale(scale),
+                (None, None) => TaylorModel::constant(Ball::exact(0.0)),
             }
         } else {
             TaylorModel::UNBOUNDED
@@ -382,6 +405,14 @@ impl<'a> FollowerSignal<'a> {
             path[3].widen(ratio * rate_second + 3.0 * slope * rate * rate_deriv);
         }
         Some(FollowerModels { path, raw })
+    }
+
+    /// The path distances the signal reads anywhere on its support: its
+    /// odometer only advances from its start, and holds at the owned end.
+    /// A window's bound on its odometer reaching past them reads no table
+    /// formula there.
+    fn read_distances(&self) -> (f64, f64) {
+        (self.s_start, self.s_end().min(self.s_owned_end))
     }
 
     /// `reach` held to the side of a ratio crossing a window ends or starts
@@ -434,7 +465,7 @@ impl<'a> FollowerSignal<'a> {
 
     /// `lo`, the grid times, the axes' formula changes and `extra` inside
     /// `(lo, hi)` in order, and `hi`; `None` where an axis has no formula.
-    fn breaks_between(&self, lo: f64, hi: f64, extra: &[f64]) -> Option<Vec<f64>> {
+    pub(super) fn breaks_between(&self, lo: f64, hi: f64, extra: &[f64]) -> Option<Vec<f64>> {
         let windows = self.axis_windows()?;
         let mut breaks = vec![lo, hi];
         breaks.extend(
@@ -443,9 +474,15 @@ impl<'a> FollowerSignal<'a> {
                 .chain(extra)
                 .copied()
                 .chain(self.ratio_crossings().iter().map(|&(time, _)| time))
+                .chain(self.rests.iter().flat_map(super::rest::Rest::breaks))
                 .filter(|&t| t > lo && t < hi),
         );
-        for axis in windows.leaders.iter().chain(&windows.raw) {
+        for axis in windows
+            .leaders
+            .iter()
+            .map(|(_, axis)| axis)
+            .chain(&windows.raw)
+        {
             breaks.extend(axis.breaks(lo, hi));
         }
         breaks.sort_by(f64::total_cmp);
@@ -453,7 +490,7 @@ impl<'a> FollowerSignal<'a> {
         Some(breaks)
     }
 
-    fn axis_windows(&self) -> Option<&FollowerAxisWindows<'a>> {
+    pub(super) fn axis_windows(&self) -> Option<&FollowerAxisWindows<'a>> {
         self.axis_windows
             .get_or_init(|| {
                 Some(FollowerAxisWindows {
@@ -461,9 +498,10 @@ impl<'a> FollowerSignal<'a> {
                         .leaders
                         .axes
                         .iter()
-                        .filter_map(|axis| match AxisWindows::of(axis) {
+                        .enumerate()
+                        .filter_map(|(index, axis)| match AxisWindows::of(axis) {
                             Some(AxisWindows::Hold(_)) => None,
-                            windows => Some(windows),
+                            windows => Some(windows.map(|windows| (index, windows))),
                         })
                         .collect::<Option<_>>()?,
                     raw: match self.raw_delta {

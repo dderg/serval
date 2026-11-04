@@ -1900,3 +1900,110 @@ fn a_turning_onset_reads_its_normal_acceleration_where_the_speed_cubed_underflow
         "|a⊥|²/|v| is 1e-83, got {second}"
     );
 }
+
+/// Leaders on one line through the origin, `y = x/2` but for fit noise of
+/// `1e-9·t³` mm in `y`, whose velocity along the line is `x_velocity` —
+/// monomial coefficients of `ẋ` in `t` over `[0, 0.02]`.
+fn leaders_on_a_noisy_line(x_velocity: &[f64]) -> ContinuousSegment {
+    let mut x = vec![0.0];
+    x.extend(
+        x_velocity
+            .iter()
+            .enumerate()
+            .map(|(power, &c)| c / (power + 1) as f64),
+    );
+    let mut y: Vec<f64> = x.iter().map(|&c| 0.5 * c).collect();
+    y.resize(y.len().max(4), 0.0);
+    y[3] += 1e-9;
+    cusp_segment(x, y, 0.0, 0.02)
+}
+
+fn resting_follower<'a>(
+    shaped: &'a ContinuousSegment,
+    state: &'a FollowerState,
+) -> FollowerSignal<'a> {
+    FollowerSignal::new(
+        shaped,
+        shaped,
+        3,
+        &[0, 1],
+        state,
+        odometer_from_start(shaped),
+        0.0,
+    )
+    .with_rests(crate::lowering::FitTol::absolute(0.005, 50.0))
+}
+
+fn extruding_on(shaped: &ContinuousSegment) -> FollowerState {
+    let mut state = FollowerState::default();
+    state.push_span(super::leader_arc_length(shaped, &[0, 1]), 0.05, 0.05);
+    state
+}
+
+/// The path speed's rate just before and just after `t`.
+fn rates_across(sig: &FollowerSignal, t: f64) -> [f64; 2] {
+    [f64::NEG_INFINITY, f64::INFINITY]
+        .map(|side| sig.odometer_rate(trajectory::next_toward(t, side)).1)
+}
+
+#[test]
+fn a_reversal_is_a_rest_whose_split_steps_the_rate_by_the_acceleration_twice() {
+    let shaped = leaders_on_a_noisy_line(&[-0.5, 50.0]);
+    let state = extruding_on(&shaped);
+    let sig = resting_follower(&shaped, &state);
+    let [rest] = sig.rests[..] else {
+        panic!("one reversal, one rest: {:?}", sig.rests);
+    };
+    assert!(
+        (rest.split - 0.01).abs() < 1e-9,
+        "the leaders reverse at 0.01 s, the rest splits at {}",
+        rest.split
+    );
+    let acceleration = 50.0 * 1.25_f64.sqrt() * sig.odometer_scale;
+    let [before, after] = rates_across(&sig, rest.split);
+    assert!(
+        (before + acceleration).abs() < 1e-9 * acceleration
+            && (after - acceleration).abs() < 1e-9 * acceleration,
+        "the rate steps from {before} to {after}, not from −{acceleration} to {acceleration}"
+    );
+    assert!(
+        sig.interior_knots(0.0, 0.02).contains(&rest.split),
+        "the split is a knot the signal jumps at"
+    );
+    let jump = sig.knot_jump(rest.split);
+    assert!(
+        jump.acceleration >= 0.05 * 2.0 * acceleration * (1.0 - 1e-9),
+        "the split's jump bound {} misses the ratio times the rate's step",
+        jump.acceleration
+    );
+}
+
+#[test]
+fn a_stop_and_go_reads_its_rate_continuously_through_its_rest() {
+    let shaped = leaders_on_a_noisy_line(&[5e-2, -10.0, 500.0]);
+    let state = extruding_on(&shaped);
+    let sig = resting_follower(&shaped, &state);
+    let [rest] = sig.rests[..] else {
+        panic!("one stop, one rest: {:?}", sig.rests);
+    };
+    let [before, after] = rates_across(&sig, rest.split);
+    assert!(
+        (after - before).abs() < 1e-6,
+        "a stop-and-go steps its rate by {} at its split",
+        after - before
+    );
+}
+
+#[test]
+fn an_advanced_follower_enclosure_holds_every_sample_through_a_reversal() {
+    let shaped = leaders_on_a_noisy_line(&[-0.5, 50.0]);
+    let mut state = FollowerState::default();
+    let length = super::leader_arc_length(&shaped, &[0, 1]);
+    state.push_span(0.4 * length, 0.05, 0.08);
+    state.push_span(length, 0.08, 0.03);
+    let sig = resting_follower(&shaped, &state);
+    assert_eq!(sig.rests.len(), 1, "the reversal is a rest");
+    let stage = trajectory::ChainStage::DerivativeGains { k1: 0.04, k2: 0.0 };
+    let advanced = super::AdvancedFollowerSignal::new(&sig, kernel_advance(&stage), &[]);
+    assert_enclosure_holds_every_sample(&advanced, (sig.grid[0], sig.grid[sig.grid.len() - 1]));
+}
