@@ -87,6 +87,7 @@ struct McuTopology {
     step_pulse_seconds: Vec<f64>,
     high_precision_step_compress: Vec<bool>,
     stepcompress_max_error_secs: f64,
+    stepcompress_drain_budget_secs: f64,
     phase_sample_rate: f64,
     phase_ring_depth: u32,
 }
@@ -108,6 +109,7 @@ impl McuTopology {
                 move_queue_slots: self.move_queue_slots,
                 step_pulse_seconds: self.step_pulse_seconds,
                 stepcompress_max_error_secs: self.stepcompress_max_error_secs,
+                stepcompress_drain_budget_secs: self.stepcompress_drain_budget_secs,
                 phase_sample_rate: self.phase_sample_rate,
                 phase_ring_depth: self.phase_ring_depth,
             },

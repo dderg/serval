@@ -5,7 +5,7 @@ from collections import defaultdict, namedtuple
 
 from . import motion_step_capacity, stepper
 from .extras import servo_axis
-from .mcu import SAMPLE_COMMANDS
+from .mcu import SAMPLE_COMMANDS, STEPCOMPRESS_DRAIN_BUDGET_DEFAULT
 from .motion_endstop import register_stepcompress_steppers
 from .stepper import DEFAULT_STEP_PULSE_DURATION
 
@@ -25,6 +25,7 @@ McuTopology = namedtuple(
         "step_pulse_seconds",
         "high_precision_step_compress",
         "stepcompress_max_error_secs",
+        "stepcompress_drain_budget_secs",
         "phase_sample_rate",
         "phase_ring_depth",
     ],
@@ -266,6 +267,11 @@ def derive_mcu_topology(motion, axis_to_handle):
         max_error_secs = (
             0.0 if mcu_obj is None else mcu_obj.get_stepcompress_max_error()
         )
+        drain_budget_secs = (
+            STEPCOMPRESS_DRAIN_BUDGET_DEFAULT
+            if mcu_obj is None
+            else mcu_obj.get_stepcompress_drain_budget()
+        )
         masks = _build_slot_masks(
             motion.printer, mcu_obj, slot_steppers, len(mcu_by_handle)
         )
@@ -388,6 +394,7 @@ def derive_mcu_topology(motion, axis_to_handle):
                 motor_step_pulse_seconds,
                 motor_high_precision_step_compress,
                 max_error_secs,
+                drain_budget_secs,
                 phase_sample_rate,
                 phase_ring_depth,
             )
