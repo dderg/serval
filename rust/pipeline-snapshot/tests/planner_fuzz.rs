@@ -11,14 +11,10 @@
 //!
 //! `hard_invariants_hold` draws a fresh seed per run and prints it
 //! (`PROPTEST_RNG_SEED=<seed>` reproduces); `hard_invariants_hold_on_the_pinned_corpus`
-//! is the same property on a fixed 256-case corpus. Hunting for the smoothness
-//! budgets happens on the `#[ignore]`d `target_budgets_hold`, which fuzzes the
-//! full input space (including the known-broken families the CI tier steers around), and additionally
-//! asserts the intended smoothness budgets (seam C0/C1, velocity limits)
-//! that current lowering is known to violate. Run it with
-//! `cargo nextest run -p pipeline-snapshot --run-ignored all`, ideally with
-//! a large `PROPTEST_CASES`. Every bug it finds gets pinned below as an
-//! `#[ignore]`d regression test until fixed.
+//! is the same property on a fixed 256-case corpus. `target_budgets_hold`
+//! fuzzes the same planar space and additionally asserts the smoothness
+//! budgets (seam C0/C1, velocity limits). Every bug a fuzz finds gets pinned
+//! below as an `#[ignore]`d regression test until fixed.
 
 use motion_pipeline::live_config;
 use pipeline_snapshot::audit::{
@@ -139,21 +135,75 @@ fn run_waypoints(limits: FuzzLimits, waypoints: &[Waypoint]) -> (ExactTrajectory
     };
     let snapshot = pipeline_snapshot(waypoints, params).expect("valid fuzz input");
     let traj = snapshot.trajectory;
-    let config = live_config::stream_config(
-        &PlannerConfig {
-            cartesian: CartesianLimits::without_z_caps(
-                limits.max_velocity,
-                limits.max_accel,
-                f64::INFINITY,
-                corner_deviation,
-            ),
-            ..PlannerConfig::default()
-        },
-        None,
-    )
-    .expect("strategy generates valid limits");
-    let report = audit_trajectory(&traj, &config, &AuditBudgets::for_config(&config));
+    let planner = PlannerConfig {
+        cartesian: CartesianLimits::without_z_caps(
+            limits.max_velocity,
+            limits.max_accel,
+            f64::INFINITY,
+            corner_deviation,
+        ),
+        ..PlannerConfig::default()
+    };
+    let config =
+        live_config::stream_config(&planner, None).expect("strategy generates valid limits");
+    let report = audit_trajectory(&traj, &config, &budgets(&config, waypoints));
     (traj, report)
+}
+
+const E_AXIS: usize = 3;
+
+/// The audit's budgets for the chains the snapshot compiles when no axis
+/// is declared (x, y, z, and e following them, with no post-processors),
+/// the extruder's seam velocity under the derived ratio ramp: every ratio
+/// step is ramped, so only rounding steps it, bar the velocity steps a
+/// kernel-free advance makes of an unshaped leader's acceleration steps
+/// ([`motion_pipeline::follower_velocity_step_allowance`]).
+fn budgets(config: &motion_pipeline::StreamConfig, waypoints: &[Waypoint]) -> AuditBudgets {
+    let axis = |name: &str, follows: &[&str]| planner_config::AxisDecl {
+        name: name.to_string(),
+        follows: follows.iter().map(ToString::to_string).collect(),
+        motors: Vec::new(),
+        post_processors: Vec::new(),
+        max_velocity: None,
+        max_accel: None,
+        instantaneous_corner_velocity: None,
+    };
+    let registry = planner_config::AxisRegistry::try_new(vec![
+        axis("x", &[]),
+        axis("y", &[]),
+        axis("z", &[]),
+        axis("e", &["x", "y", "z"]),
+    ])
+    .expect("the fuzz's axes register");
+    let chains = planner_config::PostProcessorSet::try_new(&registry, &[])
+        .expect("no post-processors")
+        .compile_active_chains(&registry, false)
+        .expect("the fuzz's chains compile");
+    let mut budgets = AuditBudgets::for_config(config);
+    budgets.seam_vel_mm_s[E_AXIS] += motion_pipeline::follower_velocity_step_allowance(
+        &chains,
+        E_AXIS,
+        extrusion_ratio_bound(waypoints),
+        config.fit_tol_accel_mm_s2,
+    );
+    budgets
+}
+
+/// The steepest extrusion any move between `waypoints` lays per millimetre
+/// of travel.
+fn extrusion_ratio_bound(waypoints: &[Waypoint]) -> f64 {
+    waypoints
+        .windows(2)
+        .filter_map(|pair| {
+            let [from, to] = [pair[0].position, pair[1].position];
+            let travel = libm::sqrt(
+                (0..E_AXIS)
+                    .map(|axis| (to[axis] - from[axis]).powi(2))
+                    .sum::<f64>(),
+            );
+            (travel > 0.0).then(|| (to[E_AXIS] - from[E_AXIS]).abs() / travel)
+        })
+        .fold(0.0, f64::max)
 }
 
 /// The smoothness budgets that still bind under infinite jerk: a seam
@@ -226,8 +276,9 @@ proptest! {
 }
 
 proptest! {
+    #![proptest_config(fresh_seed_config())]
+
     #[test]
-    #[ignore = "#575: E seam velocity budget fails at every ratio step"]
     fn target_budgets_hold(
         limits in limits_strategy(),
         moves in prop::collection::vec(move_strategy(true), 2..40),
@@ -611,6 +662,58 @@ fn arc_run_tail_blend_leaves_no_sliver_row() {
             158.99678961430908,
             0.047124637386670276,
         ),
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok(), "{report}");
+}
+
+/// Found by `target_budgets_hold`: once every follower ramps its ratio, a
+/// slow z-carrying move, a fast 1 mm travel and a slow extrusion left the
+/// follower's source fit facing a velocity step narrower than the
+/// resolution floor at the travel → extrusion seam.
+#[test]
+fn slow_extrusion_after_a_short_fast_travel_ramps_its_ratio() {
+    let limits = FuzzLimits {
+        max_velocity: 369.8,
+        max_accel: 37419.9,
+        square_corner_velocity: 0.0,
+    };
+    let moves = [
+        MoveSpec {
+            z_step_mm: -0.185,
+            ..planar(Turn::Continue, 1.0, 1.0, 0.0)
+        },
+        planar(Turn::Continue, 1.0, 472.3, 0.0),
+        planar(Turn::Continue, 37.57, 1.0, 0.04166),
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok(), "{report}");
+}
+
+/// Found by `planner_conservation_fuzz`: a fast 1 mm extrusion, a
+/// micrometre extrusion turning off it, and a slow travel; the follower's
+/// plain source fit ran out of refinement splits on the ramp.
+#[test]
+fn a_micrometre_extrusion_between_a_fast_line_and_a_slow_travel_ramps_its_ratio() {
+    let limits = FuzzLimits {
+        max_velocity: 127.389385959449,
+        max_accel: 39584.86189423528,
+        square_corner_velocity: 7.296773245024728,
+    };
+    let moves = [
+        planar(
+            Turn::Absolute(2.9053886486487226),
+            1.0,
+            546.924938602993,
+            0.0765246174258583,
+        ),
+        planar(
+            Turn::Absolute(5.682024081779053),
+            0.0009566603280114744,
+            90.87832523810361,
+            0.09079521363142903,
+        ),
+        planar(Turn::Absolute(4.323424096437546), 1.0, 1.0, 0.0),
     ];
     let (_, report) = run_case(limits, &moves);
     assert!(report.hard_ok(), "{report}");

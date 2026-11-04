@@ -77,7 +77,7 @@ pub struct AxisExtrema {
 #[derive(Debug, Clone, Copy)]
 pub struct AuditBudgets {
     pub seam_pos_mm: f64,
-    pub seam_vel_mm_s: f64,
+    pub seam_vel_mm_s: [f64; 4],
     pub seam_accel_mm_s2: f64,
     pub velocity_slack_mm_s: f64,
     pub accel_slack_mm_s2: f64,
@@ -89,7 +89,7 @@ impl AuditBudgets {
     pub fn for_config(config: &StreamConfig) -> Self {
         Self {
             seam_pos_mm: 1e-4,
-            seam_vel_mm_s: geometry::SEAM_VELOCITY_STEP_MM_S,
+            seam_vel_mm_s: [geometry::SEAM_VELOCITY_STEP_MM_S; 4],
             seam_accel_mm_s2: 0.5,
             velocity_slack_mm_s: 1e-3 * config.limits.max_velocity_mm_s,
             accel_slack_mm_s2: config.fit_tol_accel_mm_s2,
@@ -449,13 +449,13 @@ fn report_state_jump(
         });
     }
     let dv = (after.velocity - before.velocity).abs();
-    if dv > budgets.seam_vel_mm_s {
+    if dv > budgets.seam_vel_mm_s[axis] {
         report.target.push(Violation {
             kind: ViolationKind::SeamVelocity,
             axis,
             t,
             value: dv,
-            bound: budgets.seam_vel_mm_s,
+            bound: budgets.seam_vel_mm_s[axis],
         });
     }
     let da = (after.acceleration - before.acceleration).abs();

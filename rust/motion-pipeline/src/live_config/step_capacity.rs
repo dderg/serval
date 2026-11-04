@@ -6,14 +6,12 @@ use geometry::step_capacity::SPATIAL_LANES;
 use geometry::{ExtruderCaps, FollowerStepLoad, McuStepLoad, StepCapacity};
 use planner_config::PlannerConfig;
 
-/// The share of each mcu's clock the planner lets step dispatch take. On the
-/// F401 (tools/bench/README.md, "MCU step-rate capacity") p99 step lateness
-/// holds at 4.1-5.1 us up to 225 k steps/s, rises to 7-8 us between 225 and
-/// 275 k and ~10 us beyond, and the MCU shuts down ("Stepper too far in
-/// past") at ~300 k: the knee sits at 75 % of the ceiling. The
-/// self-benchmark reads 0.93 of that ceiling, so 0.75 of the benchmarked
-/// capacity keeps every move below the knee with margin.
-pub const STEP_CAPACITY_FRACTION: f64 = 0.75;
+/// The share of each mcu's clock the live planner lets step dispatch take:
+/// the largest fraction whose sustained-cap F401 runs keep p99.9 MCU step
+/// lateness × the motor's own step rate ≤ 0.5 microstep (0.47 at 0.625;
+/// 0.52 at 0.65 on two runs): tools/bench/README.md, "Capacity fraction from
+/// a timing budget".
+pub const STEP_CAPACITY_FRACTION: f64 = 0.625;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepMode {
@@ -45,6 +43,7 @@ impl StepBenchmark {
 pub struct McuStepBenchmark {
     pub mcu: String,
     pub clock_freq_hz: f64,
+    pub capacity_fraction: f64,
     pub benchmark: Option<StepBenchmark>,
 }
 
@@ -78,8 +77,14 @@ impl McuStepBenchmark {
                 self.mcu
             ));
         }
+        if !(self.capacity_fraction > 0.0 && self.capacity_fraction <= 1.0) {
+            return Err(format!(
+                "mcu '{}': step capacity fraction must lie in (0, 1], got {}",
+                self.mcu, self.capacity_fraction
+            ));
+        }
         Ok(Some(McuStepBudget {
-            ticks_per_s: STEP_CAPACITY_FRACTION * self.clock_freq_hz,
+            ticks_per_s: self.capacity_fraction * self.clock_freq_hz,
             ticks_per_step: modes
                 .iter()
                 .map(|&mode| benchmark.ticks_per_step(mode))

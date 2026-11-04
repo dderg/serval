@@ -62,6 +62,8 @@ use std::cmp::Ordering;
 use nurbs::algebra::PiecewisePolynomialKernel;
 use trajectory::next_toward;
 
+use crate::follower_projection::UnshapedLeaderStep;
+
 use super::{
     AxisSignalTable, FALLING_FACTORIALS, GainImpulse, MOMENT_ORDERS, MOMENT_POWER_CAPACITY,
     MomentBounds, MomentTree, TRANSLATION_BINOMIALS, taylor_shift,
@@ -428,7 +430,9 @@ impl LocalPolynomial {
 
 /// The signal's exact polynomials on one real sub-interval between breaks.
 /// `[lo, hi]` holds the sub-interval and reaches at most an ulp past it,
-/// and lies within `radius` of `center`.
+/// and lies within `radius` of `center`. A piece inside an unshaped
+/// leader's square-root onset carries the [`UnshapedLeaderStep`] its
+/// acceleration is exempt under: it bounds no acceleration there.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ExactPiece {
     pub lo: f64,
@@ -436,9 +440,15 @@ pub(crate) struct ExactPiece {
     pub center: f64,
     pub radius: f64,
     pub pva: [LocalPolynomial; 3],
+    pub unshaped_step: Option<UnshapedLeaderStep>,
 }
 
 impl ExactPiece {
+    /// Whether the piece bounds the signal's derivative `order`.
+    pub(crate) fn bounds(&self, order: usize) -> bool {
+        order < 2 || self.unshaped_step.is_none()
+    }
+
     pub(crate) fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let x = (t - self.center) / self.radius;
         (
@@ -622,6 +632,7 @@ impl ExactConvolution<'_> {
                     center,
                     radius,
                     pva,
+                    unshaped_step: None,
                 });
             }
         }

@@ -47,7 +47,7 @@ pub fn stream_config(
 ) -> Result<crate::StreamConfig, String> {
     let cart = cfg.cartesian;
     require_unlimited_config_jerk(cart.max_jerk)?;
-    cfg.check_ratio_ramp_extrude_only_caps()?;
+    cfg.check_kernel_free_advance_extrude_only_caps()?;
     let max_extrude_only_accel_mm_s2 = cfg.max_extrude_only_accel.unwrap_or(f64::INFINITY);
     Ok(crate::StreamConfig {
         corner: geometry::CornerFitConfig {

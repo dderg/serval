@@ -332,14 +332,21 @@ def shaped_limits(pva, duration: float, caps: dict) -> dict:
     return out
 
 
+def motion_start(snapshot: dict) -> float | None:
+    starts = [
+        carrier["t0"]
+        for carriers in snapshot["trajectory"]["axes"]
+        for carrier in carriers
+        if carrier["carrier"]["kind"] != "hold"
+    ]
+    return min(starts, default=None)
+
+
 def start_shift(base: dict, head: dict) -> float:
-    base_spans, head_spans = (
-        base["trajectory"]["spans"],
-        head["trajectory"]["spans"],
-    )
-    if not base_spans or not head_spans:
+    base_start, head_start = motion_start(base), motion_start(head)
+    if base_start is None or head_start is None:
         return 0.0
-    return head_spans[0]["t_start"] - base_spans[0]["t_start"]
+    return head_start - base_start
 
 
 def motion_deltas(

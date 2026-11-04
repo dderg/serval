@@ -1,19 +1,20 @@
 """Judge a bench capture against the offline planner's reference trajectory.
 
 Usage: uv run python tools/bench/analyze.py <run_dir>
-    [--step-benchmark PULSED,BOTH_EDGE,CLOCK_HZ]
+    [--step-benchmark PULSED,BOTH_EDGE,CLOCK_HZ,FRACTION]
 
 run_dir holds capture.bin, capture.json, print.gcode and printer.cfg. The
 verdict goes to stdout and run_dir/analysis.json; plots to run_dir/*.png
 when matplotlib is importable.
 
 The reference is capped by the MCU step capacity exactly as the live run
-was: run.py records every MCU's step benchmark in run.json and the reference
-plans under it. A run.json from before that recording plans uncapped unless
---step-benchmark supplies the bench MCU's benchmark (e.g. the F401's
-301,160,84000000), charged to every captured motor stepped pulsed; the
-verdict's reference_step_capacity says which ("recorded", "supplied",
-"absent").
+was: run.py records every MCU's step benchmark, with the capacity fraction
+the live planner applied, in run.json and the reference plans under it. A
+run.json from before that recording plans uncapped unless --step-benchmark
+supplies the bench MCU's benchmark and the fraction its run was capped at
+(e.g. the F401's 301,160,84000000,0.75 for runs before the fraction became
+0.625), charged to every captured motor stepped pulsed; the verdict's
+reference_step_capacity says which ("recorded", "supplied", "absent").
 
 Alignment model per motion epoch:
     t_capture = offset_s + (1 + ppm * 1e-6) * t_stream
@@ -24,9 +25,11 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import hashlib
 import json
 import math
 import re
+import shlex
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, fields
@@ -40,6 +43,7 @@ for _path in (REPO_ROOT / "snapshots", REPO_ROOT / "klippy", REPO_ROOT):
         sys.path.insert(0, str(_path))
 
 import capture_events  # noqa: E402
+import corner_flow_bench  # noqa: E402
 import harness  # noqa: E402
 import mcu_execution  # noqa: E402
 
@@ -56,6 +60,7 @@ REFERENCE_FINE_FACTOR = 50
 REFERENCE_CHUNK_INTERVALS = 20_000
 REFERENCE_BLOCK_SEPARATION_S = 100.0
 BLOCK_EDGE_SLACK_S = 1e-9
+EMPTY_DIFF_SHA256 = hashlib.sha256(b"").hexdigest()
 LATTICE_SNAP_STEPS = 1e-6
 DEFAULT_EPOCH_GAP_S = 0.15
 OFFSET_SEARCH_S = 1.0
@@ -106,15 +111,18 @@ class SuppliedBenchmark:
     pulsed_ticks_per_step: int
     both_edge_ticks_per_step: int
     clock_hz: float
+    capacity_fraction: float
 
     @classmethod
     def parse(cls, text: str) -> SuppliedBenchmark:
         parts = text.split(",")
-        if len(parts) != 3:
+        if len(parts) != 4:
             raise argparse.ArgumentTypeError(
-                f"{text!r} is not PULSED,BOTH_EDGE,CLOCK_HZ"
+                f"{text!r} is not PULSED,BOTH_EDGE,CLOCK_HZ,FRACTION"
             )
-        return cls(int(parts[0]), int(parts[1]), float(parts[2]))
+        return cls(
+            int(parts[0]), int(parts[1]), float(parts[2]), float(parts[3])
+        )
 
 
 @dataclass(frozen=True)
@@ -391,6 +399,7 @@ def supplied_step_benchmarks(
         {
             "mcu": BENCH_MCU,
             "clock_freq": benchmark.clock_hz,
+            "capacity_fraction": benchmark.capacity_fraction,
             "pulsed_ticks_per_step": benchmark.pulsed_ticks_per_step,
             "both_edge_ticks_per_step": benchmark.both_edge_ticks_per_step,
             "simulated": False,
@@ -1810,21 +1819,36 @@ def _save(fig, path: Path, plt) -> str:
     return path.name
 
 
-def deployed_engine_mismatch(run: dict, engine_build_id: str) -> str | None:
+def deployed_engine_mismatch(
+    run: dict, engine_build_id: str, analyze_argv: list[str]
+) -> str | None:
     """Why the reference this engine plans is not what the run executed: the
     Pi planned the print with the rust/ sources `deploy.py sync` recorded,
     and a reference from any other planner holds the capture against motion
     the printer never commanded."""
-    deployed = run["deployed"].get("rust_build_id")
+    identity = run["deployed"]
+    deployed = identity.get("rust_build_id")
     if deployed == engine_build_id:
         return None
-    identity = run["deployed"]
-    return (
+    head = identity["head"]
+    reason = (
         f"the run executed rust/ {deployed} ({identity.get('branch')} @ "
-        f"{identity.get('head')}, {identity.get('worktree')}) but the local "
-        f"engine was built from {engine_build_id}: analyze it from a tree at "
-        "the deployed code"
+        f"{head}, {identity.get('worktree')}) but the local engine was built "
+        f"from {engine_build_id}. Reanalyze it from a worktree at the "
+        "deployed head:\n"
+        f'  cd "$(scripts/wt.sh new reanalyze-{head[:12]} --base {head})"\n'
+        "  make -f Makefile.rust motion-engine-fast\n"
+        f"  uv run python tools/bench/analyze.py {shlex.join(analyze_argv)}"
     )
+    dirty_paths = identity.get("dirty_paths")
+    diff_sha256 = identity.get("diff_sha256")
+    if dirty_paths or diff_sha256 != EMPTY_DIFF_SHA256:
+        reason += (
+            f"\nThe deployed tree was dirty (dirty paths {dirty_paths}, "
+            f"git diff HEAD sha256 {diff_sha256}), so {head} alone may not "
+            f"reproduce rust/ {deployed}."
+        )
+    return reason
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1837,6 +1861,11 @@ def main(argv: list[str] | None = None) -> int:
         help="idle seconds that split motion epochs",
     )
     parser.add_argument(
+        "--corner-flow",
+        action="store_true",
+        help="also measure nozzle flow through every extruding corner",
+    )
+    parser.add_argument(
         "--step-benchmark",
         type=SuppliedBenchmark.parse,
         metavar="PULSED,BOTH_EDGE,CLOCK_HZ",
@@ -1845,14 +1874,28 @@ def main(argv: list[str] | None = None) -> int:
         "and its clock, every captured motor stepped pulsed",
     )
     args = parser.parse_args(argv)
+    options = [
+        token
+        for token in (sys.argv[1:] if argv is None else argv)
+        if Path(token) != args.run_dir
+    ]
     mismatch = deployed_engine_mismatch(
         json.loads((args.run_dir / "run.json").read_text()),
         harness._import_engine().build_id(),
+        [str(args.run_dir.resolve()), *options],
     )
     if mismatch is not None:
         raise AnalysisError(mismatch)
     inputs = load_run(args.run_dir, args.step_benchmark)
     verdict, detail = analyze(inputs, args.gap)
+    if args.corner_flow:
+        verdict["corner_flow"] = corner_flow_bench.report(
+            inputs,
+            detail,
+            plan_waypoints(inputs)[2],
+            ROLE_AXIS_WEIGHTS,
+            harness._import_engine(),
+        )
     verdict["plots"] = save_plots(inputs, detail)
     text = json.dumps(verdict, indent=2)
     (args.run_dir / "analysis.json").write_text(text + "\n")

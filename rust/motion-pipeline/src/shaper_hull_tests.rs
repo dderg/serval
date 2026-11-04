@@ -33,6 +33,7 @@ fn resting_signal() -> [ExactPiece; 1] {
         center: 0.5 * (T0 + T1),
         radius: 0.5 * (T1 - T0),
         pva: [local(&[0.0]), local(&[0.0]), local(&[0.0])],
+        unshaped_step: None,
     }]
 }
 
@@ -148,4 +149,36 @@ fn a_rung_or_an_enclosure_with_a_nan_is_never_proven() {
         verdict.is_some(),
         "a NaN signal is proven within the budget"
     );
+}
+
+/// Inside an unshaped leader's square-root onset the hull holds a rung's
+/// velocity to the step's allowance and not its acceleration: a rung far
+/// past the acceleration budget is proven while its velocity stays within
+/// the allowance, and not once it leaves it.
+#[test]
+fn an_onset_exemption_holds_velocity_to_its_allowance_and_frees_acceleration() {
+    let budget = HullBudget {
+        tol: FitTol::absolute(f64::INFINITY, 1.0),
+        velocity: f64::INFINITY,
+    };
+    let mut signal = resting_signal();
+    signal[0].unshaped_step =
+        Some(crate::follower_projection::UnshapedLeaderStep::with_allowance(1.0));
+    let half = 0.5 * (T1 - T0);
+    let swing = |velocity_peak: f64| [0.0, 0.0, 0.5 * velocity_peak * half];
+    let verdict_on = |signal: &[ExactPiece], mono_u: &[f64]| {
+        first_unproven(
+            signal,
+            FittedPiece {
+                mono_u,
+                t0: T0,
+                t1: T1,
+            },
+            (T0, T1),
+            budget,
+        )
+    };
+    assert!(verdict_on(&resting_signal(), &swing(0.9)).is_some());
+    assert_eq!(verdict_on(&signal, &swing(0.9)), None);
+    assert!(verdict_on(&signal, &swing(1.1)).is_some());
 }

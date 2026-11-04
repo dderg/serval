@@ -193,7 +193,7 @@ pub fn planner_config_from_settings(
     cfg.max_extrude_only_accel = settings.max_extrude_only_accel;
     cfg.fit_tolerance_mm = settings.fit_tolerance_mm;
     cfg.fit_tolerance_accel_mm_s2 = settings.fit_tolerance_accel_mm_s2;
-    cfg.check_ratio_ramp_extrude_only_caps()?;
+    cfg.check_kernel_free_advance_extrude_only_caps()?;
     let chains = cfg.compile_active_chains().map_err(|e| e.to_string())?;
     crate::extruder_caps(&cfg.axis_registry, &chains)?;
     Ok(cfg)
@@ -601,7 +601,12 @@ impl Reader<'_> {
             let post_processors = self
                 .get_list(&section, "post_processors")?
                 .unwrap_or_default();
-            let ratio_ramp_time = self.getfloat(&section, "ratio_ramp_time", Bounds::above(0.0))?;
+            if self.get_str(&section, "ratio_ramp_time")?.is_some() {
+                return Err(format!(
+                    "[{section}] option 'ratio_ramp_time' was removed: {}",
+                    crate::RATIO_RAMP_RULE
+                ));
+            }
             let max_velocity = self.getfloat(&section, "max_velocity", Bounds::above(0.0))?;
             let max_accel = self.getfloat(&section, "max_accel", Bounds::above(0.0))?;
             let instantaneous_corner_velocity = self.getfloat(
@@ -614,7 +619,6 @@ impl Reader<'_> {
                 follows,
                 motors,
                 post_processors,
-                ratio_ramp_time,
                 max_velocity,
                 max_accel,
                 instantaneous_corner_velocity,

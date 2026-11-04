@@ -18,6 +18,7 @@ pub motion_pipeline::live_config::step_capacity::StepMode::BothEdge
 pub motion_pipeline::live_config::step_capacity::StepMode::Pulsed
 pub struct motion_pipeline::live_config::step_capacity::McuStepBenchmark
 pub motion_pipeline::live_config::step_capacity::McuStepBenchmark::benchmark: core::option::Option<motion_pipeline::live_config::step_capacity::StepBenchmark>
+pub motion_pipeline::live_config::step_capacity::McuStepBenchmark::capacity_fraction: f64
 pub motion_pipeline::live_config::step_capacity::McuStepBenchmark::clock_freq_hz: f64
 pub motion_pipeline::live_config::step_capacity::McuStepBenchmark::mcu: alloc::string::String
 impl motion_pipeline::live_config::step_capacity::McuStepBenchmark
@@ -247,3 +248,4 @@ pub fn motion_pipeline::WorkerPool::lead_and_follow(&self, usize, impl core::ops
 pub const motion_pipeline::CONTIGUITY_EPS_MM: f64
 pub const motion_pipeline::SHAPER_INBOX_CAP: usize
 pub fn motion_pipeline::advance_odometer(&mut [f64], &geometry::frontend::Move)
+pub fn motion_pipeline::follower_velocity_step_allowance(&trajectory::chain::AxisChainSet, usize, f64, f64) -> f64

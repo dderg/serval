@@ -127,9 +127,8 @@ pub fn trajectory::chain::AxisChainSet::direct_forward_support(&self) -> f64
 pub fn trajectory::chain::AxisChainSet::forward_support(&self) -> f64
 pub fn trajectory::chain::AxisChainSet::has_motor_side_stages(&self) -> bool
 pub fn trajectory::chain::AxisChainSet::has_own_kernel(&self, usize) -> bool
-pub fn trajectory::chain::AxisChainSet::has_ratio_ramped_follower(&self) -> bool
+pub fn trajectory::chain::AxisChainSet::has_projected_follower(&self) -> bool
 pub fn trajectory::chain::AxisChainSet::is_projected_follower(&self, usize) -> bool
-pub fn trajectory::chain::AxisChainSet::kernel_free_follower_transform(&self) -> core::option::Option<usize>
 pub fn trajectory::chain::AxisChainSet::leaders_support(&self, usize) -> (f64, f64)
 pub fn trajectory::chain::AxisChainSet::max_follower_own_forward_support(&self) -> f64
 pub fn trajectory::chain::AxisChainSet::n_axes(&self) -> usize
@@ -139,6 +138,7 @@ pub fn trajectory::chain::AxisChainSet::spatial(trajectory::chain::CompiledChain
 pub fn trajectory::chain::AxisChainSet::spatial_from_kernels(&[core::option::Option<nurbs::algebra::PiecewisePolynomialKernel>; 4]) -> Self
 pub struct trajectory::chain::CompiledChain
 impl trajectory::chain::CompiledChain
+pub fn trajectory::chain::CompiledChain::advance_slope(&self) -> f64
 pub fn trajectory::chain::CompiledChain::compile(&[trajectory::chain::PostProcessorInstance]) -> core::result::Result<Self, trajectory::chain::PostProcessorError>
 pub fn trajectory::chain::CompiledChain::follower_linear_transform(&self) -> bool
 pub fn trajectory::chain::CompiledChain::from_kernel_and_transform(core::option::Option<nurbs::algebra::PiecewisePolynomialKernel>, core::option::Option<(trajectory::chain::TransformPlacement, trajectory::chain::ChainStage)>) -> Self
@@ -150,11 +150,16 @@ pub fn trajectory::chain::CompiledChain::kernel(&self) -> core::option::Option<&
 pub fn trajectory::chain::CompiledChain::kernel_variance_s2(&self) -> f64
 pub fn trajectory::chain::CompiledChain::leading_transform(&self) -> core::option::Option<&trajectory::chain::ChainStage>
 pub fn trajectory::chain::CompiledChain::max_input_window(&self) -> (f64, f64)
-pub fn trajectory::chain::CompiledChain::ratio_ramp_time(&self) -> core::option::Option<f64>
+pub fn trajectory::chain::CompiledChain::ratio_ramp_rule(&self) -> geometry::ratio_ramp::RatioRampRule
 pub fn trajectory::chain::CompiledChain::trailing_transform(&self) -> core::option::Option<&trajectory::chain::ChainStage>
 pub fn trajectory::chain::CompiledChain::transform(&self) -> core::option::Option<&trajectory::chain::ChainStage>
+pub fn trajectory::chain::CompiledChain::with_follower_limits(self, trajectory::chain::FollowerLimits) -> Self
 pub fn trajectory::chain::CompiledChain::with_instantaneous_corner_velocity(self, f64) -> Self
-pub fn trajectory::chain::CompiledChain::with_ratio_ramp_time(self, f64) -> Self
+pub struct trajectory::chain::FollowerLimits
+pub trajectory::chain::FollowerLimits::max_accel_mm_s2: f64
+pub trajectory::chain::FollowerLimits::max_velocity_mm_s: f64
+impl trajectory::chain::FollowerLimits
+pub const trajectory::chain::FollowerLimits::UNLIMITED: Self
 pub struct trajectory::chain::NonlinearAdvance
 pub trajectory::chain::NonlinearAdvance::linear_advance: f64
 pub trajectory::chain::NonlinearAdvance::linearization_velocity: f64
@@ -179,7 +184,6 @@ pub struct trajectory::chain::RestSupport
 pub trajectory::chain::RestSupport::after_motion: f64
 pub trajectory::chain::RestSupport::before_motion: f64
 pub const trajectory::chain::DEFAULT_INSTANTANEOUS_CORNER_VELOCITY_MM_S: f64
-pub const trajectory::chain::FOLLOWER_TRANSFORM_WITHOUT_KERNEL: &str
 pub mod trajectory::continuous
 pub enum trajectory::continuous::ContinuousAxis
 pub trajectory::continuous::ContinuousAxis::Analytic
@@ -299,12 +303,15 @@ pub fn trajectory::BuzzProfile::amplitude_mm(&self) -> f64
 pub fn trajectory::BuzzProfile::breakpoints(&self) -> &[f64]
 pub fn trajectory::BuzzProfile::duration(&self) -> f64
 pub fn trajectory::BuzzProfile::end_time(&self) -> f64
+pub fn trajectory::BuzzProfile::envelope_pieces(&self) -> alloc::vec::Vec<(f64, f64, [f64; 2])>
 pub fn trajectory::BuzzProfile::eval(&self, f64) -> trajectory::continuous::ProfileSample
 pub fn trajectory::BuzzProfile::freq_end_hz(&self) -> f64
 pub fn trajectory::BuzzProfile::freq_start_hz(&self) -> f64
 pub fn trajectory::BuzzProfile::jerk(&self, f64) -> f64
+pub fn trajectory::BuzzProfile::omega_start(&self) -> f64
 pub fn trajectory::BuzzProfile::position(&self, f64) -> f64
 pub fn trajectory::BuzzProfile::ramp(&self) -> f64
+pub fn trajectory::BuzzProfile::sweep_rate(&self) -> f64
 pub fn trajectory::BuzzProfile::t_end(&self) -> f64
 pub fn trajectory::BuzzProfile::t_start(&self) -> f64
 pub fn trajectory::BuzzProfile::try_new(f64, f64, f64, f64, f64, f64) -> core::result::Result<Self, trajectory::continuous::ProfileError>
@@ -382,6 +389,7 @@ pub fn trajectory::NudgeProfile::duration(&self) -> f64
 pub fn trajectory::NudgeProfile::end_time(&self) -> f64
 pub fn trajectory::NudgeProfile::eval(&self, f64) -> trajectory::continuous::ProfileSample
 pub fn trajectory::NudgeProfile::jerk(&self, f64) -> f64
+pub fn trajectory::NudgeProfile::phase_polynomials(&self) -> alloc::vec::Vec<(f64, f64, [f64; 3])>
 pub fn trajectory::NudgeProfile::position(&self, f64) -> f64
 pub fn trajectory::NudgeProfile::speed_mm_s(&self) -> f64
 pub fn trajectory::NudgeProfile::t_end(&self) -> f64
@@ -555,9 +563,8 @@ pub fn trajectory::chain::AxisChainSet::direct_forward_support(&self) -> f64
 pub fn trajectory::chain::AxisChainSet::forward_support(&self) -> f64
 pub fn trajectory::chain::AxisChainSet::has_motor_side_stages(&self) -> bool
 pub fn trajectory::chain::AxisChainSet::has_own_kernel(&self, usize) -> bool
-pub fn trajectory::chain::AxisChainSet::has_ratio_ramped_follower(&self) -> bool
+pub fn trajectory::chain::AxisChainSet::has_projected_follower(&self) -> bool
 pub fn trajectory::chain::AxisChainSet::is_projected_follower(&self, usize) -> bool
-pub fn trajectory::chain::AxisChainSet::kernel_free_follower_transform(&self) -> core::option::Option<usize>
 pub fn trajectory::chain::AxisChainSet::leaders_support(&self, usize) -> (f64, f64)
 pub fn trajectory::chain::AxisChainSet::max_follower_own_forward_support(&self) -> f64
 pub fn trajectory::chain::AxisChainSet::n_axes(&self) -> usize
@@ -573,12 +580,15 @@ pub fn trajectory::BuzzProfile::amplitude_mm(&self) -> f64
 pub fn trajectory::BuzzProfile::breakpoints(&self) -> &[f64]
 pub fn trajectory::BuzzProfile::duration(&self) -> f64
 pub fn trajectory::BuzzProfile::end_time(&self) -> f64
+pub fn trajectory::BuzzProfile::envelope_pieces(&self) -> alloc::vec::Vec<(f64, f64, [f64; 2])>
 pub fn trajectory::BuzzProfile::eval(&self, f64) -> trajectory::continuous::ProfileSample
 pub fn trajectory::BuzzProfile::freq_end_hz(&self) -> f64
 pub fn trajectory::BuzzProfile::freq_start_hz(&self) -> f64
 pub fn trajectory::BuzzProfile::jerk(&self, f64) -> f64
+pub fn trajectory::BuzzProfile::omega_start(&self) -> f64
 pub fn trajectory::BuzzProfile::position(&self, f64) -> f64
 pub fn trajectory::BuzzProfile::ramp(&self) -> f64
+pub fn trajectory::BuzzProfile::sweep_rate(&self) -> f64
 pub fn trajectory::BuzzProfile::t_end(&self) -> f64
 pub fn trajectory::BuzzProfile::t_start(&self) -> f64
 pub fn trajectory::BuzzProfile::try_new(f64, f64, f64, f64, f64, f64) -> core::result::Result<Self, trajectory::continuous::ProfileError>
@@ -605,6 +615,7 @@ pub fn trajectory::continuous::ClockedMotorSpan::stream_time_at_clock(&self, u64
 pub fn trajectory::continuous::ClockedMotorSpan::try_new(alloc::rcs::arc::Arc<trajectory::continuous::MotorSpan>, f64, f64, f64, f64, f64, f64) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
 pub struct trajectory::CompiledChain
 impl trajectory::chain::CompiledChain
+pub fn trajectory::chain::CompiledChain::advance_slope(&self) -> f64
 pub fn trajectory::chain::CompiledChain::compile(&[trajectory::chain::PostProcessorInstance]) -> core::result::Result<Self, trajectory::chain::PostProcessorError>
 pub fn trajectory::chain::CompiledChain::follower_linear_transform(&self) -> bool
 pub fn trajectory::chain::CompiledChain::from_kernel_and_transform(core::option::Option<nurbs::algebra::PiecewisePolynomialKernel>, core::option::Option<(trajectory::chain::TransformPlacement, trajectory::chain::ChainStage)>) -> Self
@@ -616,11 +627,11 @@ pub fn trajectory::chain::CompiledChain::kernel(&self) -> core::option::Option<&
 pub fn trajectory::chain::CompiledChain::kernel_variance_s2(&self) -> f64
 pub fn trajectory::chain::CompiledChain::leading_transform(&self) -> core::option::Option<&trajectory::chain::ChainStage>
 pub fn trajectory::chain::CompiledChain::max_input_window(&self) -> (f64, f64)
-pub fn trajectory::chain::CompiledChain::ratio_ramp_time(&self) -> core::option::Option<f64>
+pub fn trajectory::chain::CompiledChain::ratio_ramp_rule(&self) -> geometry::ratio_ramp::RatioRampRule
 pub fn trajectory::chain::CompiledChain::trailing_transform(&self) -> core::option::Option<&trajectory::chain::ChainStage>
 pub fn trajectory::chain::CompiledChain::transform(&self) -> core::option::Option<&trajectory::chain::ChainStage>
+pub fn trajectory::chain::CompiledChain::with_follower_limits(self, trajectory::chain::FollowerLimits) -> Self
 pub fn trajectory::chain::CompiledChain::with_instantaneous_corner_velocity(self, f64) -> Self
-pub fn trajectory::chain::CompiledChain::with_ratio_ramp_time(self, f64) -> Self
 pub struct trajectory::ContinuousSegment
 pub trajectory::ContinuousSegment::axes: alloc::rcs::arc::Arc<[trajectory::continuous::ContinuousAxis]>
 pub trajectory::ContinuousSegment::followers: alloc::rcs::arc::Arc<[geometry::segment::FollowerDemand]>
@@ -634,6 +645,11 @@ impl trajectory::continuous::ContinuousSegment
 pub fn trajectory::continuous::ContinuousSegment::breakpoints(&self) -> alloc::vec::Vec<f64>
 pub fn trajectory::continuous::ContinuousSegment::eval_axis(&self, usize, f64) -> core::result::Result<trajectory::continuous::Pva, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::ContinuousSegment::eval_axis_pvaj(&self, usize, f64) -> core::result::Result<trajectory::continuous::Pvaj, trajectory::continuous::ContinuousError>
+pub struct trajectory::FollowerLimits
+pub trajectory::FollowerLimits::max_accel_mm_s2: f64
+pub trajectory::FollowerLimits::max_velocity_mm_s: f64
+impl trajectory::chain::FollowerLimits
+pub const trajectory::chain::FollowerLimits::UNLIMITED: Self
 pub struct trajectory::LocalPolynomial
 impl trajectory::continuous::LocalPolynomial
 pub fn trajectory::continuous::LocalPolynomial::noise_band(&self, f64) -> f64
@@ -685,6 +701,7 @@ pub fn trajectory::NudgeProfile::duration(&self) -> f64
 pub fn trajectory::NudgeProfile::end_time(&self) -> f64
 pub fn trajectory::NudgeProfile::eval(&self, f64) -> trajectory::continuous::ProfileSample
 pub fn trajectory::NudgeProfile::jerk(&self, f64) -> f64
+pub fn trajectory::NudgeProfile::phase_polynomials(&self) -> alloc::vec::Vec<(f64, f64, [f64; 3])>
 pub fn trajectory::NudgeProfile::position(&self, f64) -> f64
 pub fn trajectory::NudgeProfile::speed_mm_s(&self) -> f64
 pub fn trajectory::NudgeProfile::t_end(&self) -> f64
@@ -736,7 +753,6 @@ pub fn trajectory::ShapedSignal<'a, F>::new_from_evaluator(&'a nurbs::algebra::P
 pub fn trajectory::ShapedSignal<'a, F>::new_from_polynomial_evaluator<M>(&'a nurbs::algebra::PiecewisePolynomialKernel, F, alloc::vec::Vec<f64>, usize, M, alloc::vec::Vec<(f64, f64, f64)>) -> Self where M: core::ops::function::Fn(f64, f64, usize, f64, [&mut [f64]; 3]) -> bool + 'a
 pub fn trajectory::ShapedSignal<'a, F>::second_deriv(&self, f64) -> f64
 pub const trajectory::DEFAULT_INSTANTANEOUS_CORNER_VELOCITY_MM_S: f64
-pub const trajectory::FOLLOWER_TRANSFORM_WITHOUT_KERNEL: &str
 pub const trajectory::MAX_SPAN_SECS: f64
 pub const trajectory::SMOOTH_MZV_DURATION_PER_HZ: f64
 pub const trajectory::SMOOTH_ZV_DURATION_PER_HZ: f64

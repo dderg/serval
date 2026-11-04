@@ -50,7 +50,7 @@ max_accel: 3000
 
 ### MCU step capacity
 
-Each MCU measures at connect what one step costs its dispatch, in clock ticks: once for pulsed motors and once for both-edge (TMC `dedge`) motors (`printer.mcu.step_benchmark`, see `tools/bench/README.md`, "Self-benchmark"). Klippy hands the planner each MCU's benchmark, clock and stepped motors (also reported as `printer.mcu.step_capacity`), and the planner gives every MCU a capacity of `STEP_CAPACITY_FRACTION` (0.75) of its clock in ticks per second (`rust/motion-pipeline/src/live_config/step_capacity.rs`, the one derivation the live planner and every snapshot share). 0.75 is the knee the F401 capacity ladder measured: step lateness stays flat up to 75 % of the shutdown ceiling.
+Each MCU measures at connect what one step costs its dispatch, in clock ticks: once for pulsed motors and once for both-edge (TMC `dedge`) motors (`printer.mcu.step_benchmark`; see `tools/bench/README.md`, "Self-benchmark"). Klippy hands the planner each MCU's benchmark, clock, stepped motors and the capacity fraction it applies (reported as `printer.mcu.step_capacity`). The planner gives every MCU a capacity of `STEP_CAPACITY_FRACTION` (0.625) of its clock in ticks per second; `rust/motion-pipeline/src/live_config/step_capacity.rs` is the one derivation the live planner and every snapshot share. 0.625 is the largest fraction at which the F401, held at the cap, keeps p99.9 step lateness × each motor's step rate within 0.5 microstep (`tools/bench/README.md`, "Capacity fraction from a timing budget").
 
 The planner holds every move within the capacity of every MCU it steps. A motor stepping `d` mm per step at `c` ticks per step costs its MCU `c / d` ticks per mm it travels. A motor of a kinematic lane with weights `w` (CoreXY: `a = x + y`, `b = x - y`) travels at `|w·t̂|·v` at path speed `v` along heading `t̂`. On an arc or a blend, the planner takes the largest `|w·t̂|` over every heading the segment sweeps, which bounds the motor speed at every point. The extruder motor travels at `r·(v + k·A)`, the extrusion ratio and the pressure advance's velocity gain `k` over the acceleration budget `A`, as for its own `max_velocity`. Per MCU, the sum of `motor speed × c / d` over the motors it steps must stay within the capacity. This constraint is linear in the speed ceiling and the acceleration budget. Where it binds, the planner lowers whichever of the two lets the move finish sooner, as the extruder's velocity cap does. Only moves that ask too much are slowed, and only the MCUs they drive count.
 
@@ -60,7 +60,14 @@ Klippy refuses a config only when an MCU cannot step a pure move along an axis a
 
 Each motor is also limited to what its driver can physically be stepped at. That limit is one step per two pulse widths in pulsed mode (`stepper_full_finish` holds the next step until a pulse width after the unstep) and one per microsecond on both edges. The host checks every shaped track against it before sending.
 
-Worked example, the bench printer (`tools/bench/printer.cfg`: CoreXY, 80 steps/mm on a and b, 400 on z, 414 on e, PA `k = 0.03`, `max_velocity: 1000`, `max_accel: 10000`, F401 at 301 / 160 ticks per step, all pulsed). The capacity is 0.75 × 84 MHz / 301 = 209 k steps/s. A pure X or Y travel asks 160 steps/mm, so it reaches 1308 mm/s and is never capped at 1000. A 45° diagonal drives only one motor, at 113 steps/mm (1850 mm/s). Z reaches 523 mm/s against `max_z_velocity: 25`. An X extrusion of a 0.4 × 0.2 mm line (ratio 0.033, budgeted at 0.037) asks 180 k steps/s at 1000 mm/s and 10000 mm/s², 86 % of capacity, and is not capped. A 0.8 × 0.3 mm line (ratio 0.100, budgeted at 0.105) would ask 217 k. Its moves are capped to 964 mm/s at the full 10000 mm/s², or keep 1000 mm/s at 4435 mm/s² on a move longer than about 3.5 m, whichever finishes first. The startup line reports 165 % summed worst-case demand, so the cap can bind.
+Worked example: the bench printer (`tools/bench/printer.cfg`: CoreXY, 80 steps/mm on a and b, 400 on z, 414 on e, PA `k = 0.03`, `max_velocity: 1000`, `max_accel: 10000`, F401 at 301 / 160 ticks per step, all pulsed). The capacity is 0.625 × 84 MHz / 301 = 174 k steps/s.
+
+- A pure X or Y travel asks 160 steps/mm. It can reach 1090 mm/s, so it is never capped at 1000.
+- A 45° diagonal drives only one motor, at 113 steps/mm, and can reach 1542 mm/s.
+- Z can reach 436 mm/s, against `max_z_velocity: 25`.
+- Extrusion along X or Y at 1000 mm/s and 10000 mm/s² is capped above a budgeted extrusion ratio of about 0.027. A 0.4 × 0.2 mm line (ratio 0.033, budgeted 0.037) asks 180 k steps/s and is capped to 969 mm/s at full acceleration. A 0.8 × 0.3 mm line (ratio 0.100, budgeted 0.105) asks 217 k and is capped to 793 mm/s. For both lines, the pressure-advance share alone takes so much of the capacity that lowering the acceleration cannot keep 1000 mm/s.
+
+The startup line reports about 199 % summed worst-case demand, so the cap can bind.
 
 ### Why the corner budget defaults to 0.04 mm
 
@@ -275,22 +282,25 @@ motors: e_motor
 post_processors: extruder_pa, extruder_smoothing
 #   Optional comma-separated named post-processors. Default is an empty list.
 #   On an axis that follows others, a pressure advance (or any derivative-gain
-#   stage) needs a smoothing kernel in the same list or a ratio_ramp_time on
-#   the axis, and the axis's max_velocity and max_accel; the chain is
-#   rejected otherwise.
+#   stage) needs the axis's max_velocity and max_accel, set or inherited; the
+#   chain is rejected otherwise. A smoothing kernel in the same list is
+#   optional; without one the advance also needs finite [extruder]
+#   max_extrude_only_velocity and max_extrude_only_accel, which bound the
+#   moves the extruder makes on its own (retracts, primes).
 #max_velocity:
 #max_accel:
 #   Optional, on an axis that follows others. Must be above 0 (mm/s,
 #   mm/s^2). What the axis's motor can do for every move it makes, pressure
 #   advance included. The velocity planner slows each move so the commanded
 #   extruder velocity and acceleration stay within them, corners and curves
-#   included. A move is held to the largest extrusion ratio within its
-#   reach: its own, and that of every move the followed axes' shaping
-#   post_processors and the ratio ramp carry onto it however short the moves
-#   between, so a short travel between two extrusions accelerates as they
-#   do. An extrude-only move does not quite separate the moves on either
-#   side: the shaped path keeps moving for the shapers' reach past a raw
-#   stop and before a raw start, and the extruder follows that motion at
+#   included, and the axis's ratio ramp (below) derives each ramp time from
+#   them. A move is held to the largest extrusion ratio within its reach:
+#   its own, and that of every move the followed axes' shaping
+#   post_processors and the longest ratio ramp carry onto it however short
+#   the moves between, so a short travel between two extrusions accelerates
+#   as they do. An extrude-only move does not quite separate the moves on
+#   either side: the shaped path keeps moving for the shapers' reach past a
+#   raw stop and before a raw start, and the extruder follows that motion at
 #   the ratio it reads there. The toolhead holds still for that reach
 #   wherever an extrude-only move meets motion, so a retract or prime never
 #   adds the path's demand to its own. On the [extruder] axis each one left
@@ -301,49 +311,56 @@ post_processors: extruder_pa, extruder_smoothing
 #   Optional, on an axis that follows others. Default is 1.0, as upstream
 #   Klipper's [extruder] option. Must be above 0 (mm/s). The velocity
 #   change the axis's motor takes at once. Where no smoothing kernel follows
-#   the advance (a ratio_ramp_time chain) and a followed axis has no shaping
-#   post_processor (commonly z), every acceleration step of that axis makes
-#   the advance step the extruder velocity by k * ratio * the step's share
-#   along the path. The velocity planner caps the acceleration of extruding
-#   moves that move such an axis, and of the moves within their reach, so each
-#   step stays within this; a larger step is refused with the time it
-#   happens at.
-#ratio_ramp_time:
-#   Optional. Default is no ramp. If set, must be above 0 (seconds) and the
-#   axis must follow others. The extruded total of the projection is
-#   convolved along the leaders' path with a kernel whose half-width is
-#   half the path the leaders cover in about this time
-#   (v*ratio_ramp_time/2 at speed v) and closes to zero at every rest.
-#   Every extrusion-ratio step (travel to extrusion, a flow change, a wipe)
-#   and every step in the ratio's slope (a corner blend's flow ramp) is
-#   spread over about v*ratio_ramp_time of path, however finely the path is
-#   cut into moves: a cluster of short moves smooths exactly as one long
-#   move. The laid ratio stays within the commanded ratios, and the
-#   extruded material equals the unsmoothed projection's wherever the ratio
-#   is constant across the kernel and at every rest.
-#   A smoothing kernel may stay in post_processors next to the ramp.
-#   Without one, a pressure advance in the same post_processors needs no
-#   kernel. On every chain the advance applies only to the
-#   extrusion laid along the leaders' path, as Klipper advances only
-#   extruding moves that travel, so retracts, primes and other extrude-only
-#   moves keep their own motion and their extrude-only caps; with a kernel,
-#   the advance is fitted into that extrusion before the kernel smooths it.
-#   Either way
-#   ratio_ramp_time requires finite [extruder]
-#   max_extrude_only_velocity and max_extrude_only_accel. Where the leaders
-#   turn around (a wipe that reverses along the line) or come to rest across
-#   an extrude-only move or dwell, the advance drops its lead to zero exactly
-#   where their speed does: it keeps the lead through the input shaper's
-#   spill around the rest, then releases it before the rest and rebuilds it
-#   after over that spill plus the same reach, rising from the rest point,
-#   so the extruder never asks much more than the advance's own k*r*accel
-#   there; a rest the leaders pass through without stopping keeps the full
-#   advance. Any extruder position step, or
-#   velocity step beyond the leaders' fit rounding, is refused before it is
-#   emitted; leaders without an acceleration-continuous kernel produce such
-#   steps. The trade-off against a kernel is measured in "Evaluating an
-#   extruder chain" in the README.
+#   the advance and a followed axis has no shaping post_processor (commonly
+#   z), every acceleration step of that axis makes the advance step the
+#   extruder velocity by k * ratio * the step's share along the path. The
+#   velocity planner caps the acceleration of extruding moves that move
+#   such an axis, and of the moves within their reach, so each step stays
+#   within this; a larger step is refused with the time it happens at.
+#   Leaders a shaping post_processor smooths make no such step, and no
+#   allowance applies to them.
 ```
+
+Every axis that follows others ramps its extrusion ratio along the
+leaders' path; there is nothing to configure. The extruded total is
+convolved along the path with a kernel whose half-width is half the path the
+leaders cover in the ramp time τ (`v·τ/2` at speed `v`) and closes to zero at
+every rest, so every extrusion-ratio step (travel to extrusion, a flow
+change, a wipe) and every step in the ratio's slope (a corner blend's flow
+ramp) is spread over about `v·τ` of path, however finely the path is cut
+into moves. The laid ratio stays within the commanded ratios, and the
+extruded material equals the unsmoothed projection's wherever the ratio is
+constant across the kernel and at every rest.
+
+Each step takes its own τ: the shortest between 5 and 30 ms that keeps the
+advanced extruder within the axis's `max_velocity` and `max_accel` (V_e,
+A_e) at the leaders' speed, acceleration and jerk there, reading the
+advance through its slope `k` (a linear advance's `k`, a nonlinear one's
+`linear_advance + nonlinear_offset / linearization_velocity`). For a step
+`Δ = |Δr|·v` at a steady speed `v` onto a flow `r·v`, that is about
+`τ = max(5 ms, √(6·k·Δ/A_e), 1.45·k·Δ/(V_e − r·v))`; without an advance,
+`τ = max(5 ms, 1.5·Δ/A_e)`. An axis with neither limit set or inherited
+ramps every step over 5 ms. Where even 30 ms would exceed the limits at
+the speed the path allows, the velocity planner lowers the toolhead speed
+at the step instead, and that time is the cost. The former
+`ratio_ramp_time` option was removed; setting it is a config error.
+
+On every chain the advance applies only to the extrusion laid along the
+leaders' path, as Klipper advances only extruding moves that travel, so
+retracts, primes and other extrude-only moves keep their own motion and
+their extrude-only caps; with a kernel, the advance is fitted into that
+extrusion before the kernel smooths it. Where the leaders turn around (a
+wipe that reverses along the line) or come to rest across an extrude-only
+move or dwell, the advance drops its lead to zero exactly where their speed
+does: it keeps the lead through the input shaper's spill around the rest,
+then releases it before the rest and rebuilds it after over that spill plus
+the reach of the longest ramp, rising from the rest point, so the extruder
+never asks much more than the advance's own `k·r·accel` there; a rest the
+leaders pass through without stopping keeps the full advance. Without a
+kernel, any extruder position step, or velocity step beyond the leaders'
+fit rounding, is refused before it is emitted; leaders without an
+acceleration-continuous kernel produce such steps. The trade-off against a
+kernel is measured in "Evaluating an extruder chain" in the README.
 
 The kinematic lane constructor creates `AxisRail`/servo rails and applies the
 travel and homing parser; follower steppers are created directly from their

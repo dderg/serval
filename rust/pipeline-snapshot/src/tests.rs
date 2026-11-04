@@ -831,24 +831,29 @@ fn default_axis_snapshot_params() -> SnapshotParams {
     }
 }
 
-/// The smoothing kernel a follower advance needs after it.
+/// A smoothing kernel after a follower advance.
 fn follower_smoothing() -> planner_config::PostProcessorDecl {
     pp("st", "smooth_triangle", &[("smooth_time", 0.01)])
 }
 
 #[test]
-fn a_follower_advance_without_a_smoothing_kernel_is_refused_at_configuration() {
+fn a_kernel_free_follower_advance_needs_only_the_extrude_only_caps() {
     let mut params = default_axis_snapshot_params();
     let mut e = axis("e", &["x", "y", "z"]);
     e.post_processors = vec!["pa".to_string()];
     params.axis_decls = vec![e];
     params.post_processor_decls = vec![pp("pa", "linear_pressure_advance", &[("k", 0.04)])];
-    let refused = pipeline_snapshot(&square_waypoints(), params);
+    let refused = pipeline_snapshot(&square_waypoints(), params.clone());
     assert!(
-        matches!(&refused, Err(SnapshotError::InvalidChain(message)) if message.contains("no smoothing kernel")),
-        "a follower advance with no kernel must be refused before planning, got {:?}",
+        matches!(&refused, Err(SnapshotError::InvalidLimits(message)) if message.contains("max_extrude_only_velocity")),
+        "a kernel-free follower advance without extrude-only caps must be refused before \
+         planning, got {:?}",
         refused.map(|_| ())
     );
+    params.max_extrude_only_velocity = Some(40.0);
+    params.max_extrude_only_accel = Some(2000.0);
+    let planned = pipeline_snapshot(&square_waypoints(), params);
+    assert!(planned.is_ok(), "got {:?}", planned.map(|_| ()));
 }
 
 /// An extruder these tests never let bind: they exercise the chain, not the
@@ -862,7 +867,6 @@ fn axis(name: &str, follows: &[&str]) -> planner_config::AxisDecl {
         follows: follows.iter().map(|s| s.to_string()).collect(),
         motors: Vec::new(),
         post_processors: Vec::new(),
-        ratio_ramp_time: None,
         max_velocity: limit,
         max_accel: limit,
         instantaneous_corner_velocity: None,

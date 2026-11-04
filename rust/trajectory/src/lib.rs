@@ -6,9 +6,9 @@ mod convolution;
 mod kernel;
 
 pub use chain::{
-    AdvanceModel, AxisChainSet, ChainStage, CompiledChain, NonlinearAdvance, PostProcessorError,
-    PostProcessorInstance, RestSupport, DEFAULT_INSTANTANEOUS_CORNER_VELOCITY_MM_S,
-    FOLLOWER_TRANSFORM_WITHOUT_KERNEL,
+    AdvanceModel, AxisChainSet, ChainStage, CompiledChain, FollowerLimits, NonlinearAdvance,
+    PostProcessorError, PostProcessorInstance, RestSupport,
+    DEFAULT_INSTANTANEOUS_CORNER_VELOCITY_MM_S,
 };
 pub use continuous::{
     next_toward, AnalyticMoveSpan, BuzzProfile, ClockedMotorSpan, ContinuousAxis, ContinuousError,

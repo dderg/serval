@@ -27,7 +27,7 @@ mod hidden_breaks;
 pub(crate) mod exact;
 
 #[path = "shaper_hull.rs"]
-mod hull;
+pub(crate) mod hull;
 
 #[path = "shaper_taylor.rs"]
 pub(crate) mod taylor;
@@ -560,7 +560,6 @@ pub struct Shaper {
 
 impl Shaper {
     pub fn new(chains: AxisChainSet, fit_tol: FitTol, pool: Arc<WorkerPool>) -> Self {
-        assert_followable(&chains);
         Self {
             forward_support: chains.forward_support(),
             back_support: chains.back_support(),
@@ -589,7 +588,7 @@ impl Shaper {
     /// Takes in `segments` lowered segments before each emit instead of
     /// one, so a test can hold the output to the same trajectory however
     /// the emits are cut.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     #[must_use]
     pub fn with_emit_batch(mut self, segments: usize) -> Self {
         assert!(segments > 0, "an emit batch holds at least one segment");
@@ -681,7 +680,6 @@ impl Shaper {
                                     state.clear_projected_history();
                                 }
                             }
-                            assert_followable(chains);
                             (self.forward_support, self.back_support) = (new_forward, new_back);
                             self.chains = chains.clone();
                         }
@@ -766,7 +764,7 @@ impl Shaper {
         }
         self.materialize_pending();
         let beyond_commit = self.chains.max_follower_own_forward_support() > 0.0
-            || self.chains.has_ratio_ramped_follower();
+            || self.chains.has_projected_follower();
         let frontier_count = if !beyond_commit {
             count
         } else if force {
@@ -1244,7 +1242,7 @@ fn apply_axis_chains(
         ..
     } = request;
     if chains.chains.iter().all(CompiledChain::is_empty)
-        && !chains.has_ratio_ramped_follower()
+        && !chains.has_projected_follower()
         && outputs.follower_states.iter().all(|s| !s.is_active())
     {
         let out: Vec<ContinuousSegment> = base.iter().take(commit_count).cloned().collect();
@@ -5944,18 +5942,6 @@ pub(crate) fn apply_derivative_gains_to_track(
         });
     }
     nurbs::bezier::bezier_pieces_to_discontinuous_nurbs(&out_pieces)
-}
-
-/// The shaper refuses a chain set it cannot follow: configuration refuses
-/// the same set first, so this only trips on a chain set built by hand.
-fn assert_followable(chains: &AxisChainSet) {
-    if let Some(axis) = chains.kernel_free_follower_transform() {
-        panic!(
-            "shaper: axis {axis} follows other axes and its chain advances it with no \
-             smoothing kernel and no ratio ramp: {}",
-            trajectory::FOLLOWER_TRANSFORM_WITHOUT_KERNEL
-        );
-    }
 }
 
 #[cfg(test)]

@@ -105,13 +105,20 @@ pub geometry::frontend::ExtruderCaps::advance_slope_s: f64
 pub geometry::frontend::ExtruderCaps::axis_index: usize
 pub geometry::frontend::ExtruderCaps::instantaneous_corner_velocity_mm_s: f64
 pub geometry::frontend::ExtruderCaps::leader_kernel_reach_s: f64
+pub geometry::frontend::ExtruderCaps::leader_spill: geometry::frontend::LeaderSpill
 pub geometry::frontend::ExtruderCaps::max_accel_mm_s2: f64
 pub geometry::frontend::ExtruderCaps::max_velocity_mm_s: f64
 pub geometry::frontend::ExtruderCaps::own_jerk_per_accel_hz: f64
 pub geometry::frontend::ExtruderCaps::path_jerk_per_accel_hz: [f64; 3]
-pub geometry::frontend::ExtruderCaps::ratio_ramp_time_s: f64
 impl geometry::frontend::ExtruderCaps
+pub fn geometry::frontend::ExtruderCaps::ratio_ramp_rule(&self) -> geometry::ratio_ramp::RatioRampRule
 pub fn geometry::frontend::ExtruderCaps::stricter(core::option::Option<Self>, core::option::Option<Self>) -> core::option::Option<Self>
+pub struct geometry::frontend::LeaderSpill
+pub geometry::frontend::LeaderSpill::mass: f64
+pub geometry::frontend::LeaderSpill::moment_s: f64
+impl geometry::frontend::LeaderSpill
+pub const geometry::frontend::LeaderSpill::UNSHAPED: Self
+pub fn geometry::frontend::LeaderSpill::planned_speed(&self, f64, f64) -> f64
 pub struct geometry::frontend::Move
 pub geometry::frontend::Move::feedrate_mm_s: f64
 pub geometry::frontend::Move::limits: geometry::frontend::VelocityLimits
@@ -375,6 +382,23 @@ pub fn geometry::path::line::Line::kappa(&self, f64) -> f64
 pub fn geometry::path::line::Line::kappa_endpoints(&self) -> (f64, f64)
 pub fn geometry::path::line::Line::kappa_peak(&self) -> (f64, f64)
 pub fn geometry::path::line::Line::s_len(&self) -> f64
+pub mod geometry::ratio_ramp
+pub struct geometry::ratio_ramp::RatioRampRule
+pub geometry::ratio_ramp::RatioRampRule::advance_slope_s: f64
+pub geometry::ratio_ramp::RatioRampRule::max_accel_mm_s2: f64
+pub geometry::ratio_ramp::RatioRampRule::max_velocity_mm_s: f64
+impl geometry::ratio_ramp::RatioRampRule
+pub fn geometry::ratio_ramp::RatioRampRule::demand(&self, f64, &geometry::ratio_ramp::RatioStep) -> (f64, f64)
+pub fn geometry::ratio_ramp::RatioRampRule::ramp_time(&self, &geometry::ratio_ramp::RatioStep) -> f64
+pub fn geometry::ratio_ramp::RatioRampRule::step_speed_cap(&self, f64, f64, f64, f64) -> f64
+pub struct geometry::ratio_ramp::RatioStep
+pub geometry::ratio_ramp::RatioStep::accel_mm_s2: f64
+pub geometry::ratio_ramp::RatioStep::jerk_mm_s3: f64
+pub geometry::ratio_ramp::RatioStep::peak_ratio: f64
+pub geometry::ratio_ramp::RatioStep::ratio_step: f64
+pub geometry::ratio_ramp::RatioStep::speed_mm_s: f64
+pub const geometry::ratio_ramp::RATIO_RAMP_MAX_TIME_S: f64
+pub const geometry::ratio_ramp::RATIO_RAMP_MIN_TIME_S: f64
 pub mod geometry::segment
 pub struct geometry::segment::CubicSegment
 pub geometry::segment::CubicSegment::feedrate_mm_s: f64
@@ -433,6 +457,12 @@ pub geometry::step_capacity::StepCapacityOverload::demand_over_capacity: f64
 pub geometry::step_capacity::StepCapacityOverload::mcu_index: usize
 pub const geometry::step_capacity::SPATIAL_LANES: usize
 pub mod geometry::surface
+pub enum geometry::surface::PatchAxis
+pub geometry::surface::PatchAxis::Held(f64)
+pub geometry::surface::PatchAxis::Inside
+pub geometry::surface::PatchAxis::Inside::cell: f64
+pub geometry::surface::PatchAxis::Inside::min: f64
+pub geometry::surface::PatchAxis::Inside::spacing: f64
 pub enum geometry::surface::SurfaceContinuity
 pub geometry::surface::SurfaceContinuity::C0
 pub geometry::surface::SurfaceContinuity::C1
@@ -476,6 +506,7 @@ impl geometry::surface::MeshGrid
 pub fn geometry::surface::MeshGrid::bounds(&self) -> geometry::surface::SurfaceBounds
 pub fn geometry::surface::MeshGrid::contains(&self, f64, f64) -> bool
 pub fn geometry::surface::MeshGrid::new(geometry::surface::MeshGridSpec, alloc::vec::Vec<f64>) -> core::result::Result<Self, geometry::surface::SurfaceError>
+pub fn geometry::surface::MeshGrid::patch_at(&self, f64, f64) -> geometry::surface::MeshPatch
 pub fn geometry::surface::MeshGrid::sample(&self, f64, f64) -> geometry::surface::SurfaceSample
 pub fn geometry::surface::MeshGrid::x_range(&self) -> (f64, f64)
 pub fn geometry::surface::MeshGrid::y_range(&self) -> (f64, f64)
@@ -489,6 +520,11 @@ pub geometry::surface::MeshGridSpec::ny: usize
 pub geometry::surface::MeshGridSpec::tension: f64
 pub geometry::surface::MeshGridSpec::x_min: f64
 pub geometry::surface::MeshGridSpec::y_min: f64
+pub struct geometry::surface::MeshPatch
+pub geometry::surface::MeshPatch::points: [[f64; 4]; 4]
+pub geometry::surface::MeshPatch::tension: f64
+pub geometry::surface::MeshPatch::x: geometry::surface::PatchAxis
+pub geometry::surface::MeshPatch::y: geometry::surface::PatchAxis
 pub struct geometry::surface::SurfaceBounds
 pub geometry::surface::SurfaceBounds::max_curvature: f64
 pub geometry::surface::SurfaceBounds::max_gradient: f64
@@ -720,6 +756,7 @@ pub struct geometry::velocity::VelocityReport
 pub geometry::velocity::VelocityReport::curvature_bound: u32
 pub geometry::velocity::VelocityReport::feedrate_bound: u32
 pub geometry::velocity::VelocityReport::limit_ride: u32
+pub geometry::velocity::VelocityReport::ratio_step_bound: u32
 pub geometry::velocity::VelocityReport::stops: u32
 pub geometry::velocity::VelocityReport::traversal_time_s: f64
 pub trait geometry::velocity::FanOut
@@ -768,6 +805,12 @@ pub geometry::GeometryError::NonPlanarBasis::reason: &'static str
 pub geometry::GeometryError::NotSinglePieceCubic
 pub geometry::GeometryError::NotSinglePieceCubic::reason: &'static str
 pub geometry::GeometryError::ZeroMotion
+pub enum geometry::PatchAxis
+pub geometry::PatchAxis::Held(f64)
+pub geometry::PatchAxis::Inside
+pub geometry::PatchAxis::Inside::cell: f64
+pub geometry::PatchAxis::Inside::min: f64
+pub geometry::PatchAxis::Inside::spacing: f64
 pub enum geometry::RailPairShape
 pub geometry::RailPairShape::Clipped
 pub geometry::RailPairShape::Clipped::coefficients: [f64; 4]
@@ -878,12 +921,13 @@ pub geometry::ExtruderCaps::advance_slope_s: f64
 pub geometry::ExtruderCaps::axis_index: usize
 pub geometry::ExtruderCaps::instantaneous_corner_velocity_mm_s: f64
 pub geometry::ExtruderCaps::leader_kernel_reach_s: f64
+pub geometry::ExtruderCaps::leader_spill: geometry::frontend::LeaderSpill
 pub geometry::ExtruderCaps::max_accel_mm_s2: f64
 pub geometry::ExtruderCaps::max_velocity_mm_s: f64
 pub geometry::ExtruderCaps::own_jerk_per_accel_hz: f64
 pub geometry::ExtruderCaps::path_jerk_per_accel_hz: [f64; 3]
-pub geometry::ExtruderCaps::ratio_ramp_time_s: f64
 impl geometry::frontend::ExtruderCaps
+pub fn geometry::frontend::ExtruderCaps::ratio_ramp_rule(&self) -> geometry::ratio_ramp::RatioRampRule
 pub fn geometry::frontend::ExtruderCaps::stricter(core::option::Option<Self>, core::option::Option<Self>) -> core::option::Option<Self>
 pub struct geometry::ExtrusionBudget
 pub geometry::ExtrusionBudget::ratio_in_reach: f64
@@ -957,6 +1001,12 @@ pub fn geometry::velocity::law::LawSegment::time_at_distance(&self, f64) -> core
 pub fn geometry::velocity::law::LawSegment::until_arc(f64, f64, f64, geometry::velocity::law::ScalarLaw, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
 impl core::cmp::PartialEq for geometry::velocity::law::LawSegment
 pub fn geometry::velocity::law::LawSegment::eq(&self, &Self) -> bool
+pub struct geometry::LeaderSpill
+pub geometry::LeaderSpill::mass: f64
+pub geometry::LeaderSpill::moment_s: f64
+impl geometry::frontend::LeaderSpill
+pub const geometry::frontend::LeaderSpill::UNSHAPED: Self
+pub fn geometry::frontend::LeaderSpill::planned_speed(&self, f64, f64) -> f64
 pub struct geometry::MachinePos(pub [f64; 3])
 impl geometry::space::MachinePos
 pub fn geometry::space::MachinePos::to_gcode(self, core::option::Option<&geometry::surface::SurfaceTransform>) -> geometry::space::GcodePos
@@ -974,6 +1024,7 @@ impl geometry::surface::MeshGrid
 pub fn geometry::surface::MeshGrid::bounds(&self) -> geometry::surface::SurfaceBounds
 pub fn geometry::surface::MeshGrid::contains(&self, f64, f64) -> bool
 pub fn geometry::surface::MeshGrid::new(geometry::surface::MeshGridSpec, alloc::vec::Vec<f64>) -> core::result::Result<Self, geometry::surface::SurfaceError>
+pub fn geometry::surface::MeshGrid::patch_at(&self, f64, f64) -> geometry::surface::MeshPatch
 pub fn geometry::surface::MeshGrid::sample(&self, f64, f64) -> geometry::surface::SurfaceSample
 pub fn geometry::surface::MeshGrid::x_range(&self) -> (f64, f64)
 pub fn geometry::surface::MeshGrid::y_range(&self) -> (f64, f64)
@@ -987,6 +1038,11 @@ pub geometry::MeshGridSpec::ny: usize
 pub geometry::MeshGridSpec::tension: f64
 pub geometry::MeshGridSpec::x_min: f64
 pub geometry::MeshGridSpec::y_min: f64
+pub struct geometry::MeshPatch
+pub geometry::MeshPatch::points: [[f64; 4]; 4]
+pub geometry::MeshPatch::tension: f64
+pub geometry::MeshPatch::x: geometry::surface::PatchAxis
+pub geometry::MeshPatch::y: geometry::surface::PatchAxis
 pub struct geometry::Move
 pub geometry::Move::feedrate_mm_s: f64
 pub geometry::Move::limits: geometry::frontend::VelocityLimits
@@ -1015,6 +1071,20 @@ pub geometry::RailPair::t_hi: f64
 pub geometry::RailPair::t_lo: f64
 pub geometry::RailPair::v_hi: f64
 pub geometry::RailPair::v_lo: f64
+pub struct geometry::RatioRampRule
+pub geometry::RatioRampRule::advance_slope_s: f64
+pub geometry::RatioRampRule::max_accel_mm_s2: f64
+pub geometry::RatioRampRule::max_velocity_mm_s: f64
+impl geometry::ratio_ramp::RatioRampRule
+pub fn geometry::ratio_ramp::RatioRampRule::demand(&self, f64, &geometry::ratio_ramp::RatioStep) -> (f64, f64)
+pub fn geometry::ratio_ramp::RatioRampRule::ramp_time(&self, &geometry::ratio_ramp::RatioStep) -> f64
+pub fn geometry::ratio_ramp::RatioRampRule::step_speed_cap(&self, f64, f64, f64, f64) -> f64
+pub struct geometry::RatioStep
+pub geometry::RatioStep::accel_mm_s2: f64
+pub geometry::RatioStep::jerk_mm_s3: f64
+pub geometry::RatioStep::peak_ratio: f64
+pub geometry::RatioStep::ratio_step: f64
+pub geometry::RatioStep::speed_mm_s: f64
 pub struct geometry::Serial
 impl geometry::velocity::FanOut for geometry::velocity::Serial
 pub fn geometry::velocity::Serial::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
@@ -1086,10 +1156,13 @@ pub struct geometry::VelocityReport
 pub geometry::VelocityReport::curvature_bound: u32
 pub geometry::VelocityReport::feedrate_bound: u32
 pub geometry::VelocityReport::limit_ride: u32
+pub geometry::VelocityReport::ratio_step_bound: u32
 pub geometry::VelocityReport::stops: u32
 pub geometry::VelocityReport::traversal_time_s: f64
 pub const geometry::CORNER_DEVIATION_SCV_FACTOR: f64
 pub const geometry::MIN_DEVICE_INTERVAL_S: f64
+pub const geometry::RATIO_RAMP_MAX_TIME_S: f64
+pub const geometry::RATIO_RAMP_MIN_TIME_S: f64
 pub const geometry::SEAM_VELOCITY_STEP_MM_S: f64
 pub trait geometry::FanOut
 pub fn geometry::FanOut::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)

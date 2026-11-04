@@ -171,5 +171,47 @@ fn largest_fitting_accel(demand: &Demand, ceiling: f64, accel: f64, max_accel: f
     fits
 }
 
+/// The ratio a segment lays on `axis` at its start and end, 0 where it
+/// lays none.
+fn ratios_on(segment: &crate::path::PathSegment, axis: usize) -> (f64, f64) {
+    segment
+        .followers
+        .iter()
+        .find(|follower| follower.axis_index == axis)
+        .map_or((0.0, 0.0), |follower| (follower.ratio, follower.ratio_end))
+}
+
+/// The speed ceiling at the join of `up` into `dn` where the extrusion
+/// ratio moves: the follower's ratio ramp spreads the step there, with the
+/// change along either segment (a blend's ratio slides from one move's to
+/// the next's over a path a window gathers whole), over at most the longest
+/// ramp time, so the leaders' shaped speed there must stay where that ramp
+/// keeps the advanced follower within its limits under the budget `accel`
+/// around the join ([`crate::RatioRampRule::step_speed_cap`]; the path's
+/// jerk is the budget's own to hold, no slower crossing lowers it), and the
+/// planned speed lower still by what the leaders' kernels spill into it.
+/// Infinite where the ratio does not move, or no path carries it.
+pub(super) fn ratio_step_ceiling(up: &crate::Move, dn: &crate::Move, accel: f64) -> f64 {
+    let Some(caps) = ExtruderCaps::stricter(up.limits.extruder, dn.limits.extruder) else {
+        return f64::INFINITY;
+    };
+    if up.segment.spatial.is_none() || dn.segment.spatial.is_none() {
+        return f64::INFINITY;
+    }
+    let (up_start, up_end) = ratios_on(&up.segment, caps.axis_index);
+    let (dn_start, dn_end) = ratios_on(&dn.segment, caps.axis_index);
+    let moved = (up_end - up_start).abs() + (dn_start - up_end).abs() + (dn_end - dn_start).abs();
+    let peak = [up_start, up_end, dn_start, dn_end]
+        .iter()
+        .fold(0.0_f64, |peak, ratio| peak.max(ratio.abs()));
+    let shaped = caps
+        .ratio_ramp_rule()
+        .step_speed_cap(moved, peak, accel, 0.0);
+    if shaped.is_infinite() {
+        return shaped;
+    }
+    caps.leader_spill.planned_speed(shaped, accel)
+}
+
 #[cfg(test)]
 mod tests;

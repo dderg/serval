@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use crate::Move;
 use crate::frontend::ExtruderCaps;
 use crate::path::CurvatureProfile;
+use crate::ratio_ramp::RATIO_RAMP_MAX_TIME_S;
 
 /// The largest extrusion ratio `m` lays along the path on `axis`: 0 for
 /// travel, retraction (a negative ratio) and an extrude-only move, whose
@@ -24,15 +25,14 @@ pub(super) fn extruding_ratio(m: &Move, axis: usize) -> f64 {
 /// The shaped path at an instant averages the planned path within the
 /// leaders' kernel reach `T` of it, so a move's planned acceleration acts
 /// on the shaped path while it lies within `spill_s = 2T` of the move in
-/// time. A ratio ramp of time `ramp_s = τ` lays there the ratio within its
-/// half-width: at most half the path the leaders cover in `τ`, `v·τ/2` at
-/// path speeds up to `v`, and never across a rest of the leaders. Those
-/// speeds are the leaders' within `2T + τ` of the move.
+/// time. The ratio ramp lays there the ratio within its half-width: at most
+/// half the path the leaders cover in the longest ramp `τ_max`,
+/// `v·τ_max/2` at path speeds up to `v`, and never across a rest of the
+/// leaders. Those speeds are the leaders' within `2T + τ_max` of the move.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Reach {
     axis: usize,
     spill_s: f64,
-    ramp_s: f64,
 }
 
 impl Reach {
@@ -40,12 +40,11 @@ impl Reach {
         Self {
             axis: caps.axis_index,
             spill_s: 2.0 * caps.leader_kernel_reach_s,
-            ramp_s: caps.ratio_ramp_time_s,
         }
     }
 
     fn speed_window_s(&self) -> f64 {
-        self.spill_s + self.ramp_s
+        self.spill_s + RATIO_RAMP_MAX_TIME_S
     }
 }
 
@@ -317,7 +316,7 @@ impl Marks {
         for ahead in [false, true] {
             fastest = fastest.max(self.fastest_beside(index, ahead, window_s, closed)?);
         }
-        let ramp_mm = 0.5 * fastest * reach.ramp_s;
+        let ramp_mm = 0.5 * fastest * RATIO_RAMP_MAX_TIME_S;
         let mut ratio = mark.ratio_on(reach.axis);
         for ahead in [false, true] {
             ratio = ratio.max(self.ratio_beside(index, ahead, reach, ramp_mm, closed)?);

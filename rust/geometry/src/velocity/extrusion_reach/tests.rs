@@ -1,9 +1,10 @@
 use super::*;
-use crate::frontend::{MoveContext, VelocityLimits, line_move};
+use crate::frontend::{LeaderSpill, MoveContext, VelocityLimits, line_move};
+use crate::ratio_ramp::RATIO_RAMP_MAX_TIME_S;
 use crate::segment::SourceRange;
 
 const RATIO: f64 = 0.03;
-const RAMP_TIME_S: f64 = 0.015;
+const RAMP_TIME_S: f64 = RATIO_RAMP_MAX_TIME_S;
 const KERNEL_REACH_S: f64 = 0.004;
 const SPILL_S: f64 = 2.0 * KERNEL_REACH_S;
 const EXTRUDE_ONLY: (f64, f64) = (50.0, 5000.0);
@@ -18,7 +19,7 @@ fn caps() -> ExtruderCaps {
         path_jerk_per_accel_hz: [1000.0, 1000.0, f64::INFINITY],
         own_jerk_per_accel_hz: f64::INFINITY,
         instantaneous_corner_velocity_mm_s: 1.0,
-        ratio_ramp_time_s: RAMP_TIME_S,
+        leader_spill: LeaderSpill::UNSHAPED,
         leader_kernel_reach_s: KERNEL_REACH_S,
     }
 }
@@ -159,7 +160,7 @@ fn a_streamed_move_settles_once_the_moves_after_it_cover_its_reach() {
         (10.0, RATIO, 150.0),
         (travel, 0.0, 150.0),
         (travel, 0.0, 150.0),
-        (1.0, 0.0, 150.0),
+        (0.3 * speed_window_mm, 0.0, 150.0),
     ]);
     let mut reach = reach();
     for m in &moves[..3] {

@@ -1,9 +1,12 @@
+use std::borrow::Cow;
 use std::cell::RefCell;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use geometry::MIN_DEVICE_INTERVAL_S;
 use nurbs::ScalarNurbs;
-use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
+use nurbs::bezier::{
+    BezierPiece, bezier_piece_ends, bezier_pieces_to_nurbs, extract_bezier_pieces,
+};
 use trajectory::{
     AxisChainSet, ChainStage, CompiledChain, ContinuousAxis, ContinuousSegment,
     RelativeSplinePiece, ShapedSignal,
@@ -26,14 +29,29 @@ mod rest;
 use ratio_ramp::{RampLeg, RatioSmoothing};
 
 const INTEGRAL_TOL_MM: f64 = 1e-10;
+const ODOMETER_RATE_TOL_MM_S: f64 = 1e-6;
 const INTEGRAL_MAX_DEPTH: u32 = 24;
 const GRID_DEDUP_EPS_S: f64 = 1e-12;
 const SPAN_MIN_LEN_MM: f64 = 1e-12;
+/// A raw leader chord this long proves their arc, which the odometer
+/// integrates far finer, longer than [`SPAN_MIN_LEN_MM`].
+const MOVING_CHORD_MM: f64 = 1e-6;
+/// The relative rounding a leader speed read off its pieces is trusted to,
+/// of the magnitude of the terms it sums.
+const SPEED_ROUNDING: f64 = 1e-9;
 const SPAN_LOOKUP_SLACK_MM: f64 = 1e-6;
 const PVA_MEMO_SLOTS: usize = 64;
 const BASIS_CONVERSION_ROUNDOFF_ENVELOPE: f64 = (1_u64 << 20) as f64;
 const ODOMETER_ALIGNMENT_ULPS: f64 = (1_u64 << 12) as f64;
+/// The share of the leaders' first or last piece next to an endpoint at
+/// rest over which the follower reads their speed as leaving or reaching
+/// zero at the endpoint's acceleration ([`SpeedZeroSliver`]): within one
+/// piece, so a sliver never reads a brake into the cruise before it.
 const SPEED_ZERO_SLIVER_FRACTION: f64 = 1e-6;
+/// Relative mismatch between a sliver's speed rate and the leaders' own
+/// at its inner edge that rounding alone leaves where the leaders brake
+/// straight into the rest.
+const SLIVER_RATE_ROUNDING: f64 = 1e-9;
 const COMPONENT_ZERO_PROBES: usize = 16;
 /// The share of the acceleration tolerance under which a slow leader
 /// component counts as at rest ([`RestResolution`]).
@@ -186,13 +204,11 @@ impl AdvanceStep {
     }
 }
 
-/// What spares the motor the discontinuities a leading advance makes, and
-/// so what the advance reads.
+/// What spares the motor the discontinuities a leading advance makes. Every
+/// projected follower ramps its ratio, so the advance reads only the
+/// velocity laid along the leaders' path either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdvanceSmoothing {
-    /// A kernel after the projection: the advance reads the whole follower
-    /// velocity, and its steps are carried for the kernel to spread.
-    Kernel,
     /// A ratio ramp ahead of it: the laid ratio is C1, so the advance has no
     /// step to carry and nothing after it would spread one; a step that
     /// would reach the motor is refused. The advance reads only the
@@ -234,68 +250,49 @@ impl<'a> LeadingAdvance<'a> {
             .filter(|stage| chain.kernel().is_none() || !acceleration_gain(stage))?;
         Some(Self {
             stage,
-            smoothing: match (chain.ratio_ramp_time(), chain.kernel()) {
-                (Some(_), None) => AdvanceSmoothing::RatioRamp,
-                (Some(_), Some(_)) => AdvanceSmoothing::RatioRampAndKernel,
-                (None, _) => AdvanceSmoothing::Kernel,
+            smoothing: match chain.kernel() {
+                None => AdvanceSmoothing::RatioRamp,
+                Some(_) => AdvanceSmoothing::RatioRampAndKernel,
             },
             instantaneous_corner_velocity: chain.instantaneous_corner_velocity(),
         })
     }
 
     /// The follower velocity, acceleration and jerk the advance reads at
-    /// `t`, given the follower's path state and its own velocity and
-    /// acceleration there: the extrusion laid along the path, never the
-    /// extrude-only motion folded into the follower.
-    fn read(
-        &self,
-        sig: &FollowerSignal,
-        t: f64,
-        read: &PathRead,
-        (velocity, acceleration): (f64, f64),
-    ) -> (f64, f64, f64) {
-        if self.reads_path_only() {
-            return sig.ramped_read(t, read);
-        }
-        let (raw_velocity, raw_acceleration, raw_jerk) = sig.extrude_only_derivatives(t);
-        (
-            velocity - raw_velocity,
-            acceleration - raw_acceleration,
-            sig.jerk_read(t, read) - raw_jerk,
-        )
+    /// `t`: the extrusion laid along the path, never the extrude-only motion
+    /// folded into the follower.
+    fn read(&self, sig: &FollowerSignal, t: f64, read: &PathRead) -> (f64, f64, f64) {
+        sig.ramped_read(t, read)
     }
 
     fn read_velocity(&self, sig: &FollowerSignal, t: f64) -> f64 {
-        if self.reads_path_only() {
-            return sig.ramped_advance_read(t).0;
-        }
-        sig.deriv(t) - sig.extrude_only_derivatives(t).0
+        sig.ramped_advance_read(t).0
     }
 
     fn read_acceleration(&self, sig: &FollowerSignal, t: f64) -> f64 {
-        if self.reads_path_only() {
-            return sig.ramped_advance_read(t).1;
-        }
-        sig.second_deriv(t) - sig.extrude_only_derivatives(t).1
+        sig.ramped_advance_read(t).1
     }
 
     fn read_seam_velocity(&self, input: &SeamInput) -> f64 {
-        if self.reads_path_only() {
-            return input
-                .ramped
-                .expect("a ratio-ramped seam records what its advance reads")
-                .read_velocity;
-        }
-        input.path_velocity
-    }
-
-    fn reads_path_only(&self) -> bool {
-        self.smoothing != AdvanceSmoothing::Kernel
+        input
+            .ramped
+            .expect("a ratio-ramped seam records what its advance reads")
+            .read_velocity
     }
 
     /// No kernel follows the advance: a step it makes reaches the motor.
     fn is_ramped(&self) -> bool {
         self.smoothing == AdvanceSmoothing::RatioRamp
+    }
+
+    /// Whether the advance reads only the velocity laid along the leaders'
+    /// path, whose ratio the smoothing weighs: every advance a ratio ramp
+    /// precedes.
+    fn reads_path_only(&self) -> bool {
+        matches!(
+            self.smoothing,
+            AdvanceSmoothing::RatioRamp | AdvanceSmoothing::RatioRampAndKernel
+        )
     }
 }
 
@@ -310,13 +307,15 @@ fn ramped_position_step(axis: usize, step: &AdvanceStep) -> PostProcessError {
 }
 
 /// One raw segment's follower projection inputs: the shaped leader signal it
-/// rides, its own raw track, and where on the shaped path it starts.
+/// rides, what its ingest read off those leaders, its own raw track, and
+/// where on the shaped path it starts.
 #[derive(Clone, Copy)]
 struct FollowerSource<'a> {
     shaped: &'a ContinuousSegment,
     raw: &'a ContinuousSegment,
     axis: usize,
     leaders: &'a [usize],
+    reads: &'a LeaderReads,
     state: &'a FollowerState,
     s_start: f64,
     s_length: f64,
@@ -338,17 +337,18 @@ fn fit_source_projection(
         raw,
         axis,
         leaders,
+        reads,
         state,
         s_start,
         s_length,
     } = source;
     let raw_axis = &raw.axes[axis];
     let (t_start, t_end) = projection_support(raw, shaped, axis, leaders);
-    let sig = FollowerSignal::new(
+    let sig = FollowerSignal::riding(
         shaped,
         raw,
         axis,
-        leaders,
+        ShapedLeaders::with_reads(shaped, leaders, reads),
         state,
         Odometer {
             start: s_start,
@@ -364,20 +364,17 @@ fn fit_source_projection(
         let (ratio, ratio_slope) = sig.state.ratio_and_slope(s);
         SeamInput {
             velocity: sig.deriv(t),
-            path_velocity: sig.deriv(t) - sig.extrude_only_derivatives(t).0,
             ratio,
             leader_speed: sig.shaped_speed(t),
             s,
             ratio_slope,
-            ramped: leading
-                .filter(LeadingAdvance::reads_path_only)
-                .map(|advance| RampedSeam {
-                    read_velocity: sig.ramped_advance_read(t).0,
-                    read_slope: sig.ramped_read_slope(s),
-                    advanced_velocity: AdvancedFollowerSignal::new(&sig, advance, &[])
-                        .eval_pva(t)
-                        .1,
-                }),
+            ramped: leading.map(|advance| RampedSeam {
+                read_velocity: sig.ramped_advance_read(t).0,
+                read_slope: sig.ramped_read_slope(s),
+                advanced_velocity: AdvancedFollowerSignal::new(&sig, advance, &[], tolerance)
+                    .eval_pva(t)
+                    .1,
+            }),
         }
     };
     let input_start = input_state(t_start);
@@ -428,7 +425,7 @@ fn fit_source_projection(
             Some(advance) => {
                 let resolution = fit_resolution(
                     &fit,
-                    &AdvancedFollowerSignal::new(&sig, advance, &steps_beyond_rounding),
+                    &AdvancedFollowerSignal::new(&sig, advance, &steps_beyond_rounding, tolerance),
                 )?;
                 let mut seeds = breakpoints.fit_seeds.clone();
                 seeds.extend(sig.advance_velocity_steps_on_the_grid(advance, resolution.velocity));
@@ -443,8 +440,9 @@ fn fit_source_projection(
                             || (!advance.is_ramped() && step.step_mm.abs() > resolution.position)
                     })
                     .collect::<Vec<_>>();
-                let advanced = AdvancedFollowerSignal::new(&sig, advance, &steps);
+                let advanced = AdvancedFollowerSignal::new(&sig, advance, &steps, tolerance);
                 if advance.is_ramped() {
+                    advanced.refuse_onset_steps(axis, (t_start, t_end))?;
                     if let Some(refused) = unexplained(&steps) {
                         return Err(refused);
                     }
@@ -453,11 +451,12 @@ fn fit_source_projection(
                         &step_candidates,
                         (t_start, t_end),
                         resolution.velocity
-                            + advance_velocity_step_allowance(
+                            + UnshapedLeaderStep::of(
                                 advance,
                                 sig.ratio_bounds.ratio,
                                 fit_tol.accel_mm_s2,
-                            ),
+                            )
+                            .allowance(),
                     )?;
                 }
                 let track = fit_axis_from_signal(
@@ -560,86 +559,67 @@ pub(crate) fn project_followers(
             accel_budget: source_accel_budget(leading),
             ..fit_tol
         };
-        let leaders_transformed = leaders.iter().any(|&leader| {
-            chains
-                .chains
-                .get(leader)
-                .is_some_and(CompiledChain::is_zero_support_only)
-        });
-        let leaders_changed = leaders_transformed
-            || base.iter().zip(frontier).any(|(raw, shaped)| {
-                leaders
-                    .iter()
-                    .any(|&leader| raw.axes[leader] != shaped.axes[leader])
-            });
-        let ramp_time = chain.ratio_ramp_time();
+        let rule = chain.ratio_ramp_rule();
         let state = &mut states[axis];
-        assert!(
-            ramp_time.is_some() || !state.smoothing.has_backlog(),
-            "follower axis {axis} lost its ratio ramp with segments still waiting on it"
-        );
-        let projecting = leaders_changed || state.active || ramp_time.is_some();
-        if !projecting && chain.is_empty() {
-            continue;
-        }
         let mut source_jobs = Vec::new();
-        if projecting {
+        {
             state.start_projecting();
             let ingest_started = crate::timing::stopwatch();
             let first_new = state.ingested_through_t.map_or(0, |through| {
                 base[..frontier.len()]
                     .partition_point(|raw| raw.t_end <= through + GRID_DEDUP_EPS_S)
             });
-            let lengths = leader_arc_lengths(
+            let reads = ingest_reads(
                 &base[first_new..frontier.len()],
                 &frontier[first_new..],
                 leaders,
                 pool,
             );
-            timing.ingests += lengths.len();
+            timing.ingests += reads.len();
             let mut next_s = state.smoothing.backlog_end().unwrap_or(state.s_shaped);
-            for (offset, &arc) in lengths.iter().enumerate() {
+            for (offset, read) in reads.into_iter().enumerate() {
                 let i = first_new + offset;
                 let table_start = state.s_ingested_end;
-                let shaped_ds =
-                    state.ingest(&base[i], &frontier[i], axis, leaders, &base[i + 1..], arc);
+                let shaped_ds = state.ingest(
+                    &base[i],
+                    &frontier[i],
+                    axis,
+                    leaders,
+                    &base[i + 1..],
+                    (read.shaped_ds, read.raw_moves),
+                );
                 let s_start = state.aligned_span_start(next_s);
-                match ramp_time {
-                    Some(ramp_time) => {
-                        let leg = RampLeg {
-                            shaped: &frontier[i],
-                            leaders,
-                            support: projection_support(&base[i], &frontier[i], axis, leaders),
-                            start_s: table_start,
-                            rests: arc.1 <= SPAN_MIN_LEN_MM,
-                        };
-                        state.smoothing.lay(&state.spans, &leg, ramp_time);
-                        state.smoothing.queue(
-                            base[i].t_end,
-                            (s_start, shaped_ds),
-                            state.s_ingested_end,
-                        );
-                    }
-                    None => source_jobs.push((i, s_start, shaped_ds)),
-                }
+                let leg = RampLeg {
+                    shaped: &frontier[i],
+                    leaders,
+                    shaped_leaders: &read.shaped_leaders,
+                    support: projection_support(&base[i], &frontier[i], axis, leaders),
+                    start_s: table_start,
+                    rests: !read.raw_moves,
+                };
+                state.smoothing.lay(&state.spans, &leg, &rule);
+                state.smoothing.queue(
+                    base[i].t_end,
+                    (s_start, shaped_ds),
+                    state.s_ingested_end,
+                    read.shaped_leaders.into_reads(read.odometer),
+                );
                 next_s = s_start + shaped_ds;
             }
-            if ramp_time.is_some() {
-                if lookahead.clamps_past_signal() {
-                    state.smoothing.close_at(state.s_ingested_end);
-                }
-                for pending in state.smoothing.take_final(&state.spans) {
-                    let index = base[..frontier.len()]
-                        .partition_point(|raw| raw.t_end < pending.t_end - GRID_DEDUP_EPS_S);
-                    assert!(
-                        index < frontier.len()
-                            && (base[index].t_end - pending.t_end).abs() <= GRID_DEDUP_EPS_S,
-                        "follower axis {axis}: the segment ending at {} waited on its ratio \
-                         smoothing past the shaped frontier",
-                        pending.t_end
-                    );
-                    source_jobs.push((index, pending.s_start, pending.s_length));
-                }
+            if lookahead.clamps_past_signal() {
+                state.smoothing.close_at(state.s_ingested_end);
+            }
+            for pending in state.smoothing.take_final(&state.spans) {
+                let index = base[..frontier.len()]
+                    .partition_point(|raw| raw.t_end < pending.t_end - GRID_DEDUP_EPS_S);
+                assert!(
+                    index < frontier.len()
+                        && (base[index].t_end - pending.t_end).abs() <= GRID_DEDUP_EPS_S,
+                    "follower axis {axis}: the segment ending at {} waited on its ratio \
+                     smoothing past the shaped frontier",
+                    pending.t_end
+                );
+                source_jobs.push((index, pending));
             }
             timing.ingest_us += ingest_started.elapsed_us();
         }
@@ -659,18 +639,19 @@ pub(crate) fn project_followers(
                 source_jobs.len(),
                 || (),
                 |(), job| {
-                    let (index, s_start, s_length) = source_jobs[job];
+                    let (index, pending) = &source_jobs[job];
                     (
-                        index,
+                        *index,
                         fit_source_projection(
                             FollowerSource {
-                                shaped: &frontier[index],
-                                raw: &base[index],
+                                shaped: &frontier[*index],
+                                raw: &base[*index],
                                 axis,
                                 leaders,
+                                reads: &pending.reads,
                                 state: state_ref,
-                                s_start,
-                                s_length,
+                                s_start: pending.s_start,
+                                s_length: pending.s_length,
                             },
                             source_tol,
                             leading,
@@ -703,8 +684,7 @@ pub(crate) fn project_followers(
                     raw.t_start,
                 );
             }
-            let awaiting_ramps =
-                ramp_time.is_some() && source_fits.peek().is_none_or(|(index, _)| *index != i);
+            let awaiting_ramps = source_fits.peek().is_none_or(|(index, _)| *index != i);
             if awaiting_ramps {
                 break;
             }
@@ -715,62 +695,24 @@ pub(crate) fn project_followers(
                 "follower axis {axis} has no support in segment"
             );
             let base_position = state.e_end.unwrap_or_else(|| axis_pva(raw_axis, t_start).0);
-            let (projected, projected_cuts, input_states, window_advance_steps) = if projecting {
-                let (source_index, source_result) = source_fits
-                    .next()
-                    .expect("every unprojected follower segment has a source fit");
-                assert_eq!(
-                    source_index, i,
-                    "follower source fit index {source_index} does not match segment {i}"
-                );
-                let SourceProjection {
-                    track,
-                    s_end,
-                    e_end_relative,
-                    semantic_cuts,
-                    input_start,
-                    input_end,
-                    window_advance_steps,
-                } = source_result?;
-                state.s_shaped = s_end;
-                state.e_end = Some(base_position + e_end_relative);
-                (
-                    track,
-                    Some(semantic_cuts),
-                    Some((input_start, input_end)),
-                    window_advance_steps,
-                )
-            } else {
-                (
-                    fit_continuous_axis(
-                        axis,
-                        raw_axis,
-                        base_position,
-                        (t_start, t_end),
-                        fit_tol,
-                        leading.is_some(),
-                    )?,
-                    None,
-                    None,
-                    Vec::new(),
-                )
-            };
-            let (input_start, input_end) = input_states.unwrap_or_else(|| {
-                (
-                    SeamInput::of_track(&projected, t_start, raw.spatial_path),
-                    SeamInput::of_track(&projected, t_end, raw.spatial_path),
-                )
-            });
-            let track = if projecting || !raw.spatial_path {
-                projected
-            } else {
-                crate::shaper::apply_zero_support_transform(
-                    leading.map(|advance| advance.stage),
-                    axis,
-                    projected,
-                    follower_fit_tol(source_tol, follower_tol_scale(&raw.followers, axis)),
-                )?
-            };
+            let (source_index, source_result) = source_fits
+                .next()
+                .expect("every unprojected follower segment has a source fit");
+            assert_eq!(
+                source_index, i,
+                "follower source fit index {source_index} does not match segment {i}"
+            );
+            let SourceProjection {
+                track,
+                s_end,
+                e_end_relative,
+                semantic_cuts,
+                input_start,
+                input_end,
+                window_advance_steps,
+            } = source_result?;
+            state.s_shaped = s_end;
+            state.e_end = Some(base_position + e_end_relative);
             if !track.control_points().iter().all(|v| v.is_finite()) {
                 return Err(PostProcessError::NonFiniteSample {
                     axis,
@@ -806,7 +748,6 @@ pub(crate) fn project_followers(
                 }
                 None => 0.0,
             };
-            let semantic_cuts = projected_cuts.unwrap_or_else(|| piece_boundaries(&track));
             let track_start = nurbs::eval::eval(&track, t_start);
             let output_base = state.projected_output_end.unwrap_or(base_position)
                 + join_advance_step
@@ -840,20 +781,18 @@ pub(crate) fn project_followers(
             source_fits.next().is_none(),
             "follower source fit has no matching projection segment"
         );
-        if ramp_time.is_some() {
-            let kernel_lo = match kernel {
-                Some(kernel) if !lookahead.clamps_past_signal() => kernel.support().0,
-                _ => 0.0,
-            };
-            commit_count = commit_count.min(final_ramped_commits(
-                state,
-                (base, frontier),
-                commit_count,
-                kernel_lo,
-                (axis, leaders),
-            ));
-        }
-        committing.push((axis, leaders, projecting));
+        let kernel_lo = match kernel {
+            Some(kernel) if !lookahead.clamps_past_signal() => kernel.support().0,
+            _ => 0.0,
+        };
+        commit_count = commit_count.min(final_ramped_commits(
+            state,
+            (base, frontier),
+            commit_count,
+            kernel_lo,
+            (axis, leaders),
+        ));
+        committing.push((axis, leaders));
     }
     assert!(
         commit_count == requested || !lookahead.clamps_past_signal(),
@@ -861,7 +800,7 @@ pub(crate) fn project_followers(
         requested - commit_count
     );
     out.truncate(commit_count);
-    for (axis, leaders, projecting) in committing {
+    for (axis, leaders) in committing {
         let chain = &chains.chains[axis];
         let kernel = chain.kernel();
         let defer_linear_prefix =
@@ -880,7 +819,6 @@ pub(crate) fn project_followers(
                     chain,
                     kernel,
                     defer_linear_prefix,
-                    projecting,
                     fit_tol,
                     lookahead,
                 };
@@ -961,9 +899,7 @@ pub(crate) fn project_followers(
             let back = kernel.map_or(0.0, |k| k.support().1.max(0.0));
             state.trim_projected(emitted_through - back);
         }
-        if projecting {
-            state.prune_spans();
-        }
+        state.prune_spans();
     }
     Ok(())
 }
@@ -1018,7 +954,6 @@ struct KernelFit<'a> {
     chain: &'a CompiledChain,
     kernel: &'a nurbs::algebra::PiecewisePolynomialKernel,
     defer_linear_prefix: bool,
-    projecting: bool,
     fit_tol: FitTol,
     lookahead: Lookahead,
 }
@@ -1039,7 +974,6 @@ impl KernelFit<'_> {
             chain,
             kernel,
             defer_linear_prefix,
-            projecting,
             fit_tol,
             lookahead,
         } = *self;
@@ -1111,11 +1045,9 @@ impl KernelFit<'_> {
             .iter()
             .all(|span| span.r0 >= 0.0 && span.r1 >= 0.0);
         let target_tol = follower_fit_tol(fit_tol, target.tol_scale);
-        if projecting {
-            assert_piece_seams(axis, "projected input", &input_pieces, &input_steps);
-            if nonnegative_demand {
-                project_monotone(axis, "projected input", &mut input_pieces, target_tol);
-            }
+        assert_piece_seams(axis, "projected input", &input_pieces, &input_steps);
+        if nonnegative_demand {
+            project_monotone(axis, "projected input", &mut input_pieces, target_tol);
         }
         let unified_input_degree = input_pieces
             .iter()
@@ -1288,8 +1220,6 @@ fn fit_kernel_window<S: TrackSignal>(
 #[derive(Debug, Clone, Copy)]
 struct SeamInput {
     velocity: f64,
-    /// `velocity` less the extrude-only motion's, what an advance reads.
-    path_velocity: f64,
     ratio: f64,
     leader_speed: f64,
     s: f64,
@@ -1307,25 +1237,6 @@ struct RampedSeam {
 }
 
 impl SeamInput {
-    /// A track that is the follower's raw motion passed through, laid along
-    /// the path when it has one and extrude-only otherwise.
-    fn of_track(track: &ScalarNurbs, t: f64, spatial_path: bool) -> Self {
-        let velocity = if track.degree() == 0 {
-            0.0
-        } else {
-            nurbs::eval::eval(&nurbs::eval::derivative(track), t)
-        };
-        Self {
-            velocity,
-            path_velocity: if spatial_path { velocity } else { 0.0 },
-            ratio: 1.0,
-            leader_speed: velocity,
-            s: 0.0,
-            ratio_slope: 0.0,
-            ramped: None,
-        }
-    }
-
     fn signal_velocity_step(&self, right: &Self) -> f64 {
         right.velocity - self.velocity - right.ratio * (right.leader_speed - self.leader_speed)
     }
@@ -1422,7 +1333,7 @@ fn join_advance_step(
 /// advanced velocity differs by on top, straight to the motor. A ratio ramp
 /// leaves the projection no step of its own, and the advance none beyond
 /// its allowance for the leaders' acceleration steps
-/// ([`advance_velocity_step_allowance`]), so a larger one on a
+/// ([`UnshapedLeaderStep`]), so a larger one on a
 /// ramped follower is refused.
 fn refuse_ramped_join_velocity_step(
     advance: LeadingAdvance,
@@ -1457,11 +1368,12 @@ fn refuse_ramped_join_velocity_step(
         before_ramped.advanced_velocity,
         after_ramped.advanced_velocity,
     );
-    let allowance = advance_velocity_step_allowance(
+    let allowance = UnshapedLeaderStep::of(
         advance,
         before.ratio.abs().max(after.ratio.abs()),
         leader_accel_tol,
-    );
+    )
+    .allowance();
     if (advanced_after - advanced_before).abs() > rounding + allowance {
         return Err(PostProcessError::RatioRampedVelocityStep {
             axis,
@@ -1474,20 +1386,86 @@ fn refuse_ramped_join_velocity_step(
     Ok(())
 }
 
-/// The velocity step an advance may make of the leaders' acceleration
-/// steps: the follower's instantaneous corner velocity, which the planner
-/// keeps an unshaped leader's steps within, plus what the leaders' own
-/// rounding makes. A shaped leader is fitted within `leader_accel_tol` on
-/// either side of its knots, so its acceleration may step by twice that
-/// there, which the projection scales by the ratio and the advance by its
-/// slope.
-fn advance_velocity_step_allowance(
-    advance: LeadingAdvance,
+/// The velocity change an advance may make of what an unshaped leader's
+/// acceleration does faster than a fit resolves — a step, or the square
+/// root it leaves a curvature cap by: the follower's instantaneous corner
+/// velocity, which the planner keeps an unshaped leader's steps within,
+/// plus what the leaders' own rounding makes. A shaped leader is fitted
+/// within `leader_accel_tol` on either side of its knots, so its
+/// acceleration may step by twice that there, which the projection scales
+/// by the ratio and the advance by its slope.
+///
+/// At a square-root onset the exemption covers the sliver where the
+/// leader's singular jerk `J/√τ`, through the advance's gain `G`, alone
+/// passes the follower's acceleration tolerance: `τ < (G·J/accel_tol)²`
+/// ([`enclosure::OnsetSliver`]). There the acceleration is not bounded, the
+/// fit's velocity holds the allowance, and the singular term's change
+/// across the sliver, `2·G·J·√τ`, must stay within it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct UnshapedLeaderStep {
+    allowance: f64,
+}
+
+impl UnshapedLeaderStep {
+    fn of(advance: LeadingAdvance, ratio_bound: f64, leader_accel_tol: f64) -> Self {
+        Self {
+            allowance: advance.instantaneous_corner_velocity
+                + 2.0 * leader_accel_tol * ratio_bound * steepest_advance_slope(advance.stage),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn with_allowance(allowance: f64) -> Self {
+        Self { allowance }
+    }
+
+    pub(crate) fn allowance(self) -> f64 {
+        self.allowance
+    }
+
+    /// `accuracy` for an enclosure piece under the exemption: the hull holds
+    /// its velocity to the allowance, so the piece's own bound takes the
+    /// share of it any enclosure takes of its budget.
+    pub(crate) fn enclosure_accuracy(self, accuracy: [f64; 3]) -> [f64; 3] {
+        [
+            accuracy[0],
+            accuracy[1].min(self.allowance * crate::shaper::hull::ENCLOSURE_BUDGET_SHARE),
+            accuracy[2],
+        ]
+    }
+
+    /// Whether a velocity change of `change` stays within the allowance.
+    pub(crate) fn admits(self, change: f64) -> bool {
+        change.abs() <= self.allowance
+    }
+}
+
+/// The velocity step projected follower `axis` of `chains` may take at
+/// once, its leaders fitted within `leader_accel_tol` and its ratio within
+/// `ratio_bound`: the [`UnshapedLeaderStep`] allowance where an advance
+/// with no kernel rides an unshaped leader, whose acceleration steps the
+/// advance turns into velocity steps; zero elsewhere, every ratio step
+/// being ramped over the time [`CompiledChain::ratio_ramp_rule`] derives.
+#[must_use]
+pub fn follower_velocity_step_allowance(
+    chains: &AxisChainSet,
+    axis: usize,
     ratio_bound: f64,
     leader_accel_tol: f64,
 ) -> f64 {
-    advance.instantaneous_corner_velocity
-        + 2.0 * leader_accel_tol * ratio_bound * steepest_advance_slope(advance.stage)
+    let rides_an_unshaped_leader = chains
+        .projected_followers()
+        .find(|&(follower, _)| follower == axis)
+        .is_some_and(|(_, leaders)| {
+            leaders
+                .iter()
+                .any(|&leader| chains.chains[leader].kernel().is_none())
+        });
+    LeadingAdvance::of(&chains.chains[axis])
+        .filter(|advance| advance.is_ramped() && rides_an_unshaped_leader)
+        .map_or(0.0, |advance| {
+            UnshapedLeaderStep::of(advance, ratio_bound, leader_accel_tol).allowance()
+        })
 }
 
 fn advance_offset(stage: &ChainStage, velocity: f64) -> f64 {
@@ -1639,15 +1617,9 @@ impl FollowerState {
         self.active
     }
 
-    /// Moves the follower from its raw-axis fit onto its leaders' shaped
-    /// path. Whatever the raw fit already projected stays projected, so the
-    /// extrusion table starts where the raw fit stopped: a segment it covered
-    /// may still sit uncommitted in the window and must not be ingested.
+    /// Marks the follower as projected onto its leaders' shaped path.
     fn start_projecting(&mut self) {
-        if !self.active {
-            self.active = true;
-            self.ingested_through_t = self.projected_through_t;
-        }
+        self.active = true;
     }
 
     fn cached_projection(&self, t_start: f64, t_end: f64) -> &ProjSeg {
@@ -1694,7 +1666,7 @@ impl FollowerState {
         axis: usize,
         leaders: &[usize],
         upcoming: &[ContinuousSegment],
-        (shaped_ds, raw_ds): (f64, f64),
+        (shaped_ds, raw_moves): (f64, bool),
     ) -> f64 {
         if let Some(through) = self.ingested_through_t {
             assert!(
@@ -1716,7 +1688,7 @@ impl FollowerState {
         if shaped_ds <= SPAN_MIN_LEN_MM {
             return shaped_ds;
         }
-        if raw_ds > SPAN_MIN_LEN_MM {
+        if raw_moves {
             let (r0, r1) = raw
                 .followers
                 .iter()
@@ -1957,21 +1929,12 @@ fn axis_pva(axis: &ContinuousAxis, t: f64) -> (f64, f64, f64) {
 
 fn axis_breakpoints(axis: &ContinuousAxis) -> Vec<f64> {
     match axis {
-        ContinuousAxis::Spline(curve) => extract_bezier_pieces(curve)
-            .into_iter()
-            .map(|piece| piece.u_end)
-            .collect(),
-        ContinuousAxis::RelativeSpline { curve, .. } => extract_bezier_pieces(curve)
-            .into_iter()
-            .map(|piece| piece.u_end)
-            .collect(),
+        ContinuousAxis::Spline(curve) | ContinuousAxis::RelativeSpline { curve, .. } => {
+            bezier_piece_ends(curve).collect()
+        }
         ContinuousAxis::PiecewiseRelativeSpline(pieces) => pieces
             .iter()
-            .flat_map(|piece| {
-                extract_bezier_pieces(&piece.curve)
-                    .into_iter()
-                    .map(|bezier| bezier.u_end)
-            })
+            .flat_map(|piece| bezier_piece_ends(&piece.curve))
             .collect(),
         ContinuousAxis::Analytic { span, .. } => {
             let mut breaks = Vec::with_capacity(span.phases.len() + 2);
@@ -1986,62 +1949,73 @@ fn axis_breakpoints(axis: &ContinuousAxis) -> Vec<f64> {
     }
 }
 
-struct AxisSignal<'a> {
-    axis: &'a ContinuousAxis,
-    base: f64,
-}
-
-impl TrackSignal for AxisSignal<'_> {
-    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
-        let (position, velocity, acceleration) = axis_pva(self.axis, t);
-        (position - self.base, velocity, acceleration)
-    }
-
-    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
-        Some(TrackSignal::enclosure_on(self.axis, lo, hi, accuracy)?.offset_by(self.base))
-    }
-}
-
-fn fit_continuous_axis(
-    axis_index: usize,
-    axis: &ContinuousAxis,
-    base: f64,
-    (t_start, t_end): (f64, f64),
-    fit_tol: FitTol,
-    velocity_continuous: bool,
-) -> Result<ScalarNurbs, PostProcessError> {
-    let breakpoints = axis_breakpoints(axis);
-    fit_axis_from_signal(
-        AxisFit {
-            axis: axis_index,
-            t_start,
-            t_end,
-            seed_breakpoints: &breakpoints,
-            fit_tol,
-            fit_context: "follower_axis",
-            velocity_continuous,
-        },
-        &AxisSignal { axis, base },
-    )
-}
-
 fn leader_arc_length(seg: &ContinuousSegment, leaders: &[usize]) -> f64 {
-    let shaped_leaders = ShapedLeaders::of(seg, leaders);
-    axis_grid(seg, leaders)
-        .windows(2)
-        .map(|window| integrate(&|t| shaped_leaders.speed(t), window[0], window[1]))
-        .sum()
+    shaped_leader_arc_length(seg, leaders, &ShapedLeaders::of(seg, leaders)).0
 }
 
-/// Shaped and raw leader arc lengths for each newly ingested segment. The
-/// integrals are pure per-segment work, so they fan out across cores; results
-/// are ordered by segment and bit-identical to serial evaluation.
-fn leader_arc_lengths(
-    raw: &[ContinuousSegment],
-    shaped: &[ContinuousSegment],
+/// Whether the raw leaders of `raw` cover more than [`SPAN_MIN_LEN_MM`]: at
+/// once where the chord across their support does by far, as no arc is
+/// shorter than its chord, else by their arc length.
+fn raw_leaders_move(raw: &ContinuousSegment, leaders: &[usize]) -> bool {
+    let (start, end) = leader_support(raw, leaders);
+    let chord = leaders
+        .iter()
+        .map(|&leader| {
+            let travel = axis_pva(&raw.axes[leader], end).0 - axis_pva(&raw.axes[leader], start).0;
+            travel * travel
+        })
+        .sum::<f64>()
+        .sqrt();
+    chord > MOVING_CHORD_MM || leader_arc_length(raw, leaders) > SPAN_MIN_LEN_MM
+}
+
+/// The arc length the leaders of `seg` cover, with the odometer leaves it
+/// sums.
+fn shaped_leader_arc_length(
+    seg: &ContinuousSegment,
     leaders: &[usize],
+    shaped_leaders: &ShapedLeaders,
+) -> (f64, OdometerLeaves) {
+    let grid = axis_grid(seg, leaders);
+    let mut leaves = Vec::new();
+    let length = grid
+        .windows(2)
+        .map(|window| {
+            let mut length = 0.0;
+            odometer_leaves(
+                &|t| shaped_leaders.speed(t),
+                window[0],
+                window[1],
+                &mut |end, leaf| {
+                    length += leaf.covered_until(end);
+                    leaves.push((end, leaf));
+                },
+            );
+            length
+        })
+        .sum();
+    (length, OdometerLeaves { grid, leaves })
+}
+
+/// One newly ingested segment as ingest reads it: its shaped leaders, the
+/// arc length they cover with the odometer leaves summing it, and whether
+/// its raw leaders move.
+struct IngestRead<'a> {
+    shaped_leaders: ShapedLeaders<'a>,
+    shaped_ds: f64,
+    odometer: OdometerLeaves,
+    raw_moves: bool,
+}
+
+/// [`IngestRead`] for each newly ingested segment. The reads are pure
+/// per-segment work, so they fan out across cores; results are ordered by
+/// segment and bit-identical to serial evaluation.
+fn ingest_reads<'a>(
+    raw: &[ContinuousSegment],
+    shaped: &'a [ContinuousSegment],
+    leaders: &'a [usize],
     pool: &WorkerPool,
-) -> Vec<(f64, f64)> {
+) -> Vec<IngestRead<'a>> {
     assert_eq!(raw.len(), shaped.len());
     let workers = if cfg!(target_arch = "wasm32") {
         1
@@ -2055,10 +2029,15 @@ fn leader_arc_lengths(
         raw.len(),
         || (),
         |(), i| {
-            (
-                leader_arc_length(&shaped[i], leaders),
-                leader_arc_length(&raw[i], leaders),
-            )
+            let shaped_leaders = ShapedLeaders::of(&shaped[i], leaders);
+            let (shaped_ds, odometer) =
+                shaped_leader_arc_length(&shaped[i], leaders, &shaped_leaders);
+            IngestRead {
+                shaped_leaders,
+                shaped_ds,
+                odometer,
+                raw_moves: raw_leaders_move(&raw[i], leaders),
+            }
         },
     )
     .expect("leader arc length thread panicked")
@@ -2100,7 +2079,8 @@ fn leader_distance(
         .sqrt()
 }
 
-fn axis_grid(seg: &ContinuousSegment, axes: &[usize]) -> Vec<f64> {
+/// Where every one of `axes` of `seg` is continuously defined.
+fn leader_support(seg: &ContinuousSegment, axes: &[usize]) -> (f64, f64) {
     let (mut support_start, mut support_end) = (seg.t_start, seg.t_end);
     for &axis in axes {
         let (start, end) = seg.axes[axis].domain();
@@ -2111,6 +2091,11 @@ fn axis_grid(seg: &ContinuousSegment, axes: &[usize]) -> Vec<f64> {
         support_start < support_end,
         "axes have no shared continuous support"
     );
+    (support_start, support_end)
+}
+
+fn axis_grid(seg: &ContinuousSegment, axes: &[usize]) -> Vec<f64> {
+    let (support_start, support_end) = leader_support(seg, axes);
     let mut grid = vec![support_start, support_end];
     for &axis in axes {
         grid.extend(
@@ -2134,6 +2119,16 @@ struct SpeedZeroSliver {
 }
 
 impl SpeedZeroSliver {
+    /// Whether the sliver holds the window `[lo, hi]` whose interior reads
+    /// it: the window lies on its side of its inner edge.
+    fn holds_window(&self, lo: f64, hi: f64) -> bool {
+        if self.interior_sign > 0.0 {
+            hi <= self.inner
+        } else {
+            lo >= self.inner
+        }
+    }
+
     fn deriv_at(&self, t: f64) -> f64 {
         let sign = if t > self.zero_time {
             1.0
@@ -2146,6 +2141,7 @@ impl SpeedZeroSliver {
     }
 }
 
+#[derive(Debug, Clone)]
 struct LeaderPieces {
     base: f64,
     pieces: Vec<BezierPiece>,
@@ -2183,27 +2179,28 @@ impl LeaderPieces {
         candidate.matches(axis).then_some(candidate)
     }
 
+    /// Whether every piece reads what the axis does at its far Gauss
+    /// node: the power basis's conversion error grows along the piece, so
+    /// an ill-conditioned piece shows there.
     fn matches(&self, axis: &ContinuousAxis) -> bool {
-        const PROBES: [f64; 3] = [0.211_324_865_405_187_13, 0.5, 0.788_675_134_594_812_9];
+        const PROBE: f64 = 0.788_675_134_594_812_9;
         self.pieces.iter().all(|piece| {
             let duration = piece.u_end - piece.u_start;
-            duration.is_finite()
-                && duration > 0.0
-                && PROBES.into_iter().all(|fraction| {
-                    let t = piece.u_start + fraction * duration;
-                    let (position, velocity, acceleration) =
-                        polynomial_pva(&piece.coeffs, t - piece.u_start);
-                    let cached = [self.base + position, velocity, acceleration];
-                    let direct = axis_pva(axis, t);
-                    cached
-                        .into_iter()
-                        .zip([direct.0, direct.1, direct.2])
-                        .all(|(left, right)| {
-                            left.is_finite()
-                                && right.is_finite()
-                                && (left - right).abs()
-                                    <= 1e-8 * left.abs().max(right.abs()).max(1.0)
-                        })
+            if !(duration.is_finite() && duration > 0.0) {
+                return false;
+            }
+            let t = piece.u_start + PROBE * duration;
+            let (position, velocity, acceleration) =
+                polynomial_pva(&piece.coeffs, t - piece.u_start);
+            let cached = [self.base + position, velocity, acceleration];
+            let direct = axis_pva(axis, t);
+            cached
+                .into_iter()
+                .zip([direct.0, direct.1, direct.2])
+                .all(|(left, right)| {
+                    left.is_finite()
+                        && right.is_finite()
+                        && (left - right).abs() <= 1e-8 * left.abs().max(right.abs()).max(1.0)
                 })
         })
     }
@@ -2216,6 +2213,13 @@ impl LeaderPieces {
         let piece = self.pieces.get(index)?;
         let slack = 1e-9 * (piece.u_end - piece.u_start).max(1.0);
         (t >= piece.u_start - slack && t <= piece.u_end + slack).then_some(piece)
+    }
+
+    /// The piece `at` reads, when it also reads `[lo, hi]` around `at`.
+    fn piece_over(&self, lo: f64, at: f64, hi: f64) -> Option<&BezierPiece> {
+        let piece = self.piece_at(at)?;
+        let slack = 1e-9 * (piece.u_end - piece.u_start).max(1.0);
+        (lo >= piece.u_start - slack && hi <= piece.u_end + slack).then_some(piece)
     }
 
     fn pva(&self, t: f64) -> Option<(f64, f64, f64)> {
@@ -2231,17 +2235,67 @@ impl LeaderPieces {
     }
 }
 
-struct ShapedLeaders<'a> {
-    axes: Vec<&'a ContinuousAxis>,
+/// The odometer leaves over one segment's leader knot grid, in order, each
+/// with the end it covers to.
+#[derive(Debug)]
+struct OdometerLeaves {
+    grid: Vec<f64>,
+    leaves: Vec<(f64, OdometerLeaf)>,
+}
+
+/// What ingest read off one shaped segment's leaders that its source fit
+/// reads again.
+#[derive(Debug)]
+struct LeaderReads {
     pieces: Vec<Option<LeaderPieces>>,
+    odometer: OdometerLeaves,
+}
+
+struct ShapedLeaders<'a> {
+    leaders: &'a [usize],
+    axes: Vec<&'a ContinuousAxis>,
+    pieces: Cow<'a, [Option<LeaderPieces>]>,
+    odometer: Option<&'a OdometerLeaves>,
 }
 
 impl<'a> ShapedLeaders<'a> {
-    fn of(seg: &'a ContinuousSegment, leaders: &[usize]) -> Self {
+    fn of(seg: &'a ContinuousSegment, leaders: &'a [usize]) -> Self {
         let axes: Vec<&'a ContinuousAxis> =
             leaders.iter().map(|&leader| &seg.axes[leader]).collect();
         let pieces = axes.iter().map(|axis| LeaderPieces::of(axis)).collect();
-        Self { axes, pieces }
+        Self {
+            leaders,
+            axes,
+            pieces: Cow::Owned(pieces),
+            odometer: None,
+        }
+    }
+
+    /// The leaders of `seg` read through `reads`, which ingest took from
+    /// [`Self::of`] over the same segment.
+    fn with_reads(
+        seg: &'a ContinuousSegment,
+        leaders: &'a [usize],
+        reads: &'a LeaderReads,
+    ) -> Self {
+        assert_eq!(
+            leaders.len(),
+            reads.pieces.len(),
+            "cached leader pieces belong to a different leader set"
+        );
+        Self {
+            leaders,
+            axes: leaders.iter().map(|&leader| &seg.axes[leader]).collect(),
+            pieces: Cow::Borrowed(&reads.pieces),
+            odometer: Some(&reads.odometer),
+        }
+    }
+
+    fn into_reads(self, odometer: OdometerLeaves) -> LeaderReads {
+        LeaderReads {
+            pieces: self.pieces.into_owned(),
+            odometer,
+        }
     }
 
     fn pva(&self, index: usize, t: f64) -> (f64, f64, f64) {
@@ -2253,26 +2307,106 @@ impl<'a> ShapedLeaders<'a> {
         axis_pva(self.axes[index], t)
     }
 
-    fn speed(&self, t: f64) -> f64 {
-        (0..self.axes.len())
-            .map(|index| {
-                let velocity = self.pva(index, t).1;
-                velocity * velocity
-            })
-            .sum::<f64>()
-            .sqrt()
+    /// Every leader's state at `t`, to jerk where every leader reads a
+    /// cached piece: the piece's position, velocity and acceleration are
+    /// [`Self::pva`]'s and its jerk [`Self::pvaj`]'s.
+    fn motion(&self, t: f64) -> LeaderMotion {
+        let leaders = self.axes.len();
+        assert!(
+            leaders <= MAX_LEADERS,
+            "a follower rides at most {MAX_LEADERS} leaders, got {leaders}"
+        );
+        let mut states = [(0.0, 0.0, 0.0, 0.0); MAX_LEADERS];
+        let mut jerks_read = true;
+        for (index, state) in states.iter_mut().take(leaders).enumerate() {
+            let cached = match self.pieces.get(index) {
+                Some(Some(pieces)) => pieces.pvaj(t),
+                _ => None,
+            };
+            *state = cached.unwrap_or_else(|| {
+                jerks_read = false;
+                let (position, velocity, acceleration) = axis_pva(self.axes[index], t);
+                (position, velocity, acceleration, 0.0)
+            });
+        }
+        LeaderMotion {
+            states,
+            leaders,
+            jerks_read,
+        }
     }
 
-    fn speed_deriv(&self, t: f64, speed: f64) -> f64 {
-        if speed == 0.0 {
-            return 0.0;
+    fn speed(&self, t: f64) -> f64 {
+        norm_of((0..self.axes.len()).map(|index| self.pva(index, t).1))
+    }
+
+    /// A lower bound on the leaders' speed over `[lo, hi]`, when every
+    /// leader holds or reads one cached piece across it: their velocity's
+    /// tangent line at `at`, at its nearest to rest over the interval, less
+    /// the most the pieces' higher terms add to it and their evaluation's
+    /// rounding.
+    fn speed_floor(&self, lo: f64, at: f64, hi: f64) -> Option<f64> {
+        let leaders = self.axes.len();
+        assert!(
+            leaders <= MAX_LEADERS,
+            "a follower rides at most {MAX_LEADERS} leaders, got {leaders}"
+        );
+        let (back, ahead) = (at - lo, hi - at);
+        let reach = back.max(ahead);
+        let mut velocity = [0.0; MAX_LEADERS];
+        let mut acceleration = [0.0; MAX_LEADERS];
+        let mut remainder_squared = 0.0;
+        let mut magnitude = 0.0;
+        for (index, (axis, pieces)) in self.axes.iter().zip(self.pieces.iter()).enumerate() {
+            if matches!(axis, ContinuousAxis::Hold { .. }) {
+                continue;
+            }
+            let piece = pieces.as_ref()?.piece_over(lo, at, hi)?;
+            let shifted = taylor_shifted(&piece.coeffs, at - piece.u_start);
+            velocity[index] = shifted.get(1).copied().unwrap_or(0.0);
+            acceleration[index] = 2.0 * shifted.get(2).copied().unwrap_or(0.0);
+            let remainder = shifted
+                .iter()
+                .enumerate()
+                .skip(3)
+                .rev()
+                .fold(0.0, |acc, (power, coeff)| {
+                    acc * reach + power as f64 * coeff.abs()
+                })
+                * reach
+                * reach;
+            remainder_squared += remainder * remainder;
+            let farthest = (lo - piece.u_start).abs().max((hi - piece.u_start).abs());
+            magnitude += piece
+                .coeffs
+                .iter()
+                .enumerate()
+                .skip(1)
+                .rev()
+                .fold(0.0, |acc, (power, coeff)| {
+                    acc * farthest + power as f64 * coeff.abs()
+                });
         }
-        (0..self.axes.len())
-            .map(|index| {
-                let (_, velocity, acceleration) = self.pva(index, t);
-                velocity / speed * acceleration
+        let (velocity, acceleration) = (&velocity[..leaders], &acceleration[..leaders]);
+        let dot = |left: &[f64], right: &[f64]| -> f64 {
+            left.iter().zip(right).map(|(l, r)| l * r).sum()
+        };
+        let rate_squared = dot(acceleration, acceleration);
+        let nearest = if rate_squared > 0.0 {
+            (-dot(velocity, acceleration) / rate_squared).clamp(-back, ahead)
+        } else {
+            0.0
+        };
+        let tangent_speed = velocity
+            .iter()
+            .zip(acceleration)
+            .map(|(v, a)| {
+                let along = v + a * nearest;
+                along * along
             })
             .sum::<f64>()
+            .sqrt();
+        Some(tangent_speed - remainder_squared.sqrt() - SPEED_ROUNDING * magnitude)
     }
 
     fn never_moves(&self, index: usize, t0: f64, t1: f64, rest: RestResolution) -> bool {
@@ -2318,17 +2452,55 @@ impl<'a> ShapedLeaders<'a> {
     }
 
     fn accel_norm(&self, t: f64) -> f64 {
-        (0..self.axes.len())
-            .map(|index| {
-                let acceleration = self.pva(index, t).2;
-                acceleration * acceleration
-            })
-            .sum::<f64>()
-            .sqrt()
+        norm_of((0..self.axes.len()).map(|index| self.pva(index, t).2))
     }
 }
 
 const MAX_LEADERS: usize = 3;
+
+/// The Euclidean norm of the leaders' `components`, in leader order.
+fn norm_of(components: impl Iterator<Item = f64>) -> f64 {
+    components
+        .map(|component| component * component)
+        .sum::<f64>()
+        .sqrt()
+}
+
+/// The leaders' states at one time, which their speed, its rate and their
+/// acceleration's norm read, and, when `jerks_read`, the speed's second
+/// rate too.
+#[derive(Clone, Copy)]
+struct LeaderMotion {
+    states: [(f64, f64, f64, f64); MAX_LEADERS],
+    leaders: usize,
+    jerks_read: bool,
+}
+
+impl LeaderMotion {
+    fn speed(&self) -> f64 {
+        norm_of(self.states[..self.leaders].iter().map(|state| state.1))
+    }
+
+    fn speed_deriv(&self, speed: f64) -> f64 {
+        if speed == 0.0 {
+            return 0.0;
+        }
+        self.states[..self.leaders]
+            .iter()
+            .map(|&(_, velocity, acceleration, _)| velocity / speed * acceleration)
+            .sum::<f64>()
+    }
+
+    fn accel_norm(&self) -> f64 {
+        norm_of(self.states[..self.leaders].iter().map(|state| state.2))
+    }
+
+    /// [`ShapedLeaders::speed_second`] at `speed`, where the jerks are read.
+    fn speed_second(&self, speed: f64) -> Option<f64> {
+        self.jerks_read
+            .then(|| speed_second_of(&self.states[..self.leaders], speed))
+    }
+}
 
 /// `d²|v|/dt² = |a⊥|²/|v| + v̂·j`, read through the unit direction
 /// `v̂ = v/|v|` before any product: near rest the leaders' velocity is
@@ -2357,29 +2529,29 @@ fn speed_second_of(states: &[(f64, f64, f64, f64)], speed: f64) -> f64 {
 struct OdometerKnots {
     t: Vec<f64>,
     s: Vec<f64>,
-    speed: Vec<f64>,
+    leaves: Vec<OdometerLeaf>,
     leaf_magnitude: f64,
 }
 
 impl OdometerKnots {
-    fn starting_at(t: f64, speed: f64, capacity: usize) -> Self {
+    fn starting_at(t: f64, capacity: usize) -> Self {
         let mut knots = Self {
             t: Vec::with_capacity(capacity),
             s: Vec::with_capacity(capacity),
-            speed: Vec::with_capacity(capacity),
+            leaves: Vec::with_capacity(capacity),
             leaf_magnitude: 0.0,
         };
         knots.t.push(t);
         knots.s.push(0.0);
-        knots.speed.push(speed);
         knots
     }
 
-    fn push_leaf(&mut self, end: f64, value: f64, speed: f64) {
+    fn push_leaf(&mut self, end: f64, leaf: OdometerLeaf) {
+        let value = leaf.covered_until(end);
         let length = self.length() + value;
         self.t.push(end);
         self.s.push(length);
-        self.speed.push(speed);
+        self.leaves.push(leaf);
         self.leaf_magnitude += value.abs();
     }
 
@@ -2387,15 +2559,8 @@ impl OdometerKnots {
         *self.s.last().expect("odometer knots seeded")
     }
 
-    fn last(&self) -> (f64, f64) {
-        (
-            *self.t.last().expect("odometer knots seeded"),
-            *self.speed.last().expect("odometer knots seeded"),
-        )
-    }
-
     fn leaves(&self) -> usize {
-        self.s.len() - 1
+        self.leaves.len()
     }
 
     fn reassociation_bound(&self) -> f64 {
@@ -2484,6 +2649,7 @@ struct LaidRead {
 /// and what is laid there.
 #[derive(Clone, Copy)]
 struct PathRead {
+    motion: LeaderMotion,
     speed: f64,
     rate: f64,
     rate_deriv: f64,
@@ -2509,7 +2675,7 @@ pub(crate) struct FollowerSignal<'a> {
     ratio_bounds: RatioBounds,
     start_sliver: Option<SpeedZeroSliver>,
     end_sliver: Option<SpeedZeroSliver>,
-    pva_memo: RefCell<[Option<(u64, (f64, f64, f64))>; PVA_MEMO_SLOTS]>,
+    pva_memo: PvaMemo,
     /// The enclosure over the whole signal, which every rung of the fit
     /// asks again.
     whole_enclosure: enclosure::WholeEnclosure,
@@ -2525,15 +2691,25 @@ pub(crate) struct FollowerSignal<'a> {
 }
 
 impl<'a> FollowerSignal<'a> {
-    fn new(
+    /// The follower track of `raw` riding the shaped path of `shaped`, whose
+    /// leaders `shaped_leaders` reads.
+    fn riding(
         shaped: &'a ContinuousSegment,
         raw: &'a ContinuousSegment,
         axis: usize,
-        leaders: &[usize],
+        shaped_leaders: ShapedLeaders<'a>,
         state: &'a FollowerState,
         odometer: Odometer,
         e_start: f64,
     ) -> Self {
+        let leaders = shaped_leaders.leaders;
+        assert!(
+            leaders
+                .iter()
+                .zip(&shaped_leaders.axes)
+                .all(|(&leader, &read)| std::ptr::eq(read, &shaped.axes[leader])),
+            "the shaped leaders read another segment than the one the follower rides"
+        );
         let (t0, t1) = projection_support(raw, shaped, axis, leaders);
         let raw_delta =
             (!raw.spatial_path).then(|| (&raw.axes[axis], axis_pva(&raw.axes[axis], t0).0));
@@ -2545,11 +2721,28 @@ impl<'a> FollowerSignal<'a> {
         );
         grid.sort_by(f64::total_cmp);
         grid.dedup_by(|left, right| (*left - *right).abs() <= GRID_DEDUP_EPS_S);
-        let shaped_leaders = ShapedLeaders::of(shaped, leaders);
-        let mut knots =
-            OdometerKnots::starting_at(grid[0], shaped_leaders.speed(grid[0]), grid.len());
-        for &end in &grid[1..] {
-            integrate_recording(&|t| shaped_leaders.speed(t), end, &mut knots);
+        let mut knots = OdometerKnots::starting_at(grid[0], grid.len());
+        match shaped_leaders
+            .odometer
+            .filter(|ingested| ingested.grid == grid)
+        {
+            Some(ingested) => {
+                for &(end, leaf) in &ingested.leaves {
+                    knots.push_leaf(end, leaf);
+                }
+            }
+            None => {
+                for w in grid.windows(2) {
+                    odometer_leaves(
+                        &|t| shaped_leaders.speed(t),
+                        w[0],
+                        w[1],
+                        &mut |end, leaf| {
+                            knots.push_leaf(end, leaf);
+                        },
+                    );
+                }
+            }
         }
         let odometer_scale = knots.scale_to(odometer.length);
         let s_end = odometer.start + odometer.length;
@@ -2571,7 +2764,7 @@ impl<'a> FollowerSignal<'a> {
             ratio_bounds,
             start_sliver: None,
             end_sliver: None,
-            pva_memo: RefCell::new([None; PVA_MEMO_SLOTS]),
+            pva_memo: PvaMemo::default(),
             whole_enclosure: enclosure::WholeEnclosure::default(),
             axis_windows: std::cell::OnceCell::new(),
             ratio_crossings: std::cell::OnceCell::new(),
@@ -2623,12 +2816,15 @@ impl<'a> FollowerSignal<'a> {
     }
 
     fn speed_zero_slivers(&self) -> (Option<SpeedZeroSliver>, Option<SpeedZeroSliver>) {
-        let t0 = self.grid[0];
-        let t1 = self.grid[self.grid.len() - 1];
-        let slack = SPEED_ZERO_SLIVER_FRACTION * (t1 - t0);
+        let [t0, first_knot, ..] = self.grid[..] else {
+            unreachable!("a follower signal's grid holds both ends of its support")
+        };
+        let [.., last_knot, t1] = self.grid[..] else {
+            unreachable!("a follower signal's grid holds both ends of its support")
+        };
         (
-            self.endpoint_sliver(t0, slack, 1.0),
-            self.endpoint_sliver(t1, slack, -1.0),
+            self.endpoint_sliver(t0, SPEED_ZERO_SLIVER_FRACTION * (first_knot - t0), 1.0),
+            self.endpoint_sliver(t1, SPEED_ZERO_SLIVER_FRACTION * (t1 - last_knot), -1.0),
         )
     }
 
@@ -2638,29 +2834,43 @@ impl<'a> FollowerSignal<'a> {
             .or_else(|| self.end_sliver.filter(|sliver| t >= sliver.inner))
     }
 
+    /// How far the sliver's speed rate steps from the leaders' own where it
+    /// takes over.
+    fn sliver_rate_step(&self, sliver: &SpeedZeroSliver) -> f64 {
+        let motion = self.leaders.motion(sliver.inner);
+        (sliver.deriv_at(sliver.inner) - motion.speed_deriv(motion.speed())).abs()
+    }
+
+    /// The sliver's speed rate is the leaders' where it takes over, to
+    /// within rounding: its inner edge is no break of the signal.
+    fn sliver_joins_the_leaders(&self, sliver: &SpeedZeroSliver) -> bool {
+        self.sliver_rate_step(sliver) <= SLIVER_RATE_ROUNDING * sliver.accel_norm.max(1.0)
+    }
+
     fn shaped_speed(&self, t: f64) -> f64 {
         self.odometer_scale * self.leaders.speed(t)
     }
 
     fn odometer_rate(&self, t: f64) -> (f64, f64) {
-        let speed = self.leaders.speed(t);
+        let motion = self.leaders.motion(t);
+        let speed = motion.speed();
         (
             self.odometer_scale * speed,
-            self.odometer_scale * self.leader_speed_deriv(t, speed),
+            self.odometer_scale * self.leader_speed_deriv(t, &motion, speed),
         )
     }
 
-    fn leader_speed_deriv(&self, t: f64, speed: f64) -> f64 {
+    fn leader_speed_deriv(&self, t: f64, motion: &LeaderMotion, speed: f64) -> f64 {
         if let Some(sliver) = self.speed_zero_sliver(t) {
             return sliver.deriv_at(t);
         }
         match self.rest_at(t) {
             Some(rest) => self.rest_rates(rest, t).0,
-            None => self.leaders.speed_deriv(t, speed),
+            None => motion.speed_deriv(speed),
         }
     }
 
-    fn leader_speed_second_deriv(&self, t: f64, speed: f64) -> f64 {
+    fn leader_speed_second_deriv(&self, t: f64, motion: &LeaderMotion, speed: f64) -> f64 {
         if self.speed_zero_sliver(t).is_some() {
             return 0.0;
         }
@@ -2670,24 +2880,20 @@ impl<'a> FollowerSignal<'a> {
         if speed == 0.0 {
             return 0.0;
         }
-        self.leaders.speed_second(t, speed)
+        motion
+            .speed_second(speed)
+            .unwrap_or_else(|| self.leaders.speed_second(t, speed))
     }
 
     fn path_read(&self, t: f64) -> PathRead {
-        let speed = self.leaders.speed(t);
-        let s = (self.s_start
-            + self.s_offset_reading(t, |at| {
-                if at.to_bits() == t.to_bits() {
-                    speed
-                } else {
-                    self.leaders.speed(at)
-                }
-            }))
-        .min(self.s_owned_end);
+        let motion = self.leaders.motion(t);
+        let speed = motion.speed();
+        let s = self.s_owned(t);
         PathRead {
+            motion,
             speed,
             rate: self.odometer_scale * speed,
-            rate_deriv: self.odometer_scale * self.leader_speed_deriv(t, speed),
+            rate_deriv: self.odometer_scale * self.leader_speed_deriv(t, &motion, speed),
             s,
             laid: self.state.laid_at(s),
         }
@@ -2715,28 +2921,6 @@ impl<'a> FollowerSignal<'a> {
         )
     }
 
-    fn jerk_read(&self, t: f64, read: &PathRead) -> f64 {
-        let raw = self.raw_delta.map_or(0.0, |(axis, _)| {
-            axis.eval_pvaj(t)
-                .expect("follower raw axis has exact derivatives")
-                .jerk
-        });
-        self.path_jerk(t, read) + raw
-    }
-
-    /// The velocity, acceleration and jerk of the extrude-only motion folded
-    /// into the follower at `t`, zero along a spatial path.
-    fn extrude_only_derivatives(&self, t: f64) -> (f64, f64, f64) {
-        self.raw_delta.map_or((0.0, 0.0, 0.0), |(axis, _)| {
-            let (_, velocity, acceleration) = axis_pva(axis, t);
-            let jerk = axis
-                .eval_pvaj(t)
-                .expect("follower raw axis has exact derivatives")
-                .jerk;
-            (velocity, acceleration, jerk)
-        })
-    }
-
     fn path_deriv(&self, t: f64) -> f64 {
         let (ratio, _) = self.state.ratio_and_slope(self.s_owned(t));
         ratio * self.shaped_speed(t)
@@ -2749,22 +2933,7 @@ impl<'a> FollowerSignal<'a> {
     }
 
     fn rate_second(&self, t: f64, read: &PathRead) -> f64 {
-        self.odometer_scale * self.leader_speed_second_deriv(t, read.speed)
-    }
-
-    fn path_jerk(&self, t: f64, read: &PathRead) -> f64 {
-        let PathRead {
-            rate,
-            rate_deriv,
-            laid,
-            ..
-        } = *read;
-        let laid_jerk =
-            laid.ratio * self.rate_second(t, read) + 3.0 * laid.slope * rate * rate_deriv;
-        if self.state.smoothing.is_inert() {
-            return laid_jerk;
-        }
-        laid_jerk + laid.curvature * rate * rate * rate
+        self.odometer_scale * self.leader_speed_second_deriv(t, &read.motion, read.speed)
     }
 
     /// `d(R·W)/ds` at `s`: the path slope of the ratio a ratio-ramped
@@ -2826,12 +2995,6 @@ impl<'a> FollowerSignal<'a> {
     }
 
     fn s_offset(&self, t: f64) -> f64 {
-        self.s_offset_reading(t, |at| self.leaders.speed(at))
-    }
-
-    /// `s_offset`, the leaders' speed at the queried time read through
-    /// `speed`, which a caller that has read it already answers.
-    fn s_offset_reading(&self, t: f64, speed: impl Fn(f64) -> f64) -> f64 {
         let start = self.grid[0];
         let end = self.grid[self.grid.len() - 1];
         let scale = t.abs().max(start.abs()).max(end.abs());
@@ -2857,12 +3020,7 @@ impl<'a> FollowerSignal<'a> {
                     self.grid[self.grid.len() - 1]
                 );
                 let index = insertion - 1;
-                self.knots.s[index]
-                    + integrate_between(
-                        &|u| self.leaders.speed(u),
-                        (self.knots.t[index], self.knots.speed[index]),
-                        (t, speed(t)),
-                    )
+                self.knots.s[index] + self.knots.leaves[index].covered_until(t)
             }
         };
         integrated * self.odometer_scale
@@ -2974,11 +3132,17 @@ impl<'a> FollowerSignal<'a> {
         for sliver in [self.start_sliver, self.end_sliver].into_iter().flatten() {
             if sliver.inner > support_start + GRID_DEDUP_EPS_S
                 && sliver.inner < support_end - GRID_DEDUP_EPS_S
+                && !self.sliver_joins_the_leaders(&sliver)
             {
                 breaks.push(sliver.inner);
             }
         }
-        breaks.extend(self.ratio_crossings().iter().map(|&(time, _)| time));
+        breaks.extend(
+            self.ratio_crossings()
+                .iter()
+                .map(|&(time, _)| time)
+                .filter(|&time| self.speed_zero_sliver(time).is_none()),
+        );
         breaks.extend(
             self.rests
                 .iter()
@@ -3315,16 +3479,8 @@ impl TrackSignal for FollowerSignal<'_> {
     }
 
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
-        let key = t.to_bits();
-        let slot = ((key ^ key.rotate_right(32)) as usize) & (PVA_MEMO_SLOTS - 1);
-        if let Some((stored_key, value)) = self.pva_memo.borrow()[slot] {
-            if stored_key == key {
-                return value;
-            }
-        }
-        let value = self.pva_at_distance(t, self.s_owned(t));
-        self.pva_memo.borrow_mut()[slot] = Some((key, value));
-        value
+        self.pva_memo
+            .get_or(t, |t| self.pva_at_distance(t, self.s_owned(t)))
     }
     fn eval_pva_across(&self, knot: f64) -> [(f64, f64, f64); 2] {
         let s = self.s_owned(knot);
@@ -3351,11 +3507,12 @@ impl TrackSignal for FollowerSignal<'_> {
             return KnotJumpBound::UNBOUNDED;
         }
         let rates = |t: f64| {
-            let speed = self.leaders.speed(t);
+            let motion = self.leaders.motion(t);
+            let speed = motion.speed();
             (
                 self.odometer_scale * speed,
-                self.odometer_scale * self.leader_speed_deriv(t, speed),
-                self.odometer_scale * self.leader_speed_second_deriv(t, speed),
+                self.odometer_scale * self.leader_speed_deriv(t, &motion, speed),
+                self.odometer_scale * self.leader_speed_second_deriv(t, &motion, speed),
             )
         };
         let (rate_before, rate_deriv_before, rate_second_before) = rates(before);
@@ -3404,6 +3561,10 @@ struct AdvancedFollowerSignal<'a, 'b> {
     source: &'a FollowerSignal<'b>,
     advance: LeadingAdvance<'a>,
     steps: &'a [AdvanceStep],
+    pva_memo: PvaMemo,
+    /// The acceleration tolerance the advanced follower is fitted to.
+    accel_tol: f64,
+    unshaped_step: UnshapedLeaderStep,
     /// The enclosure over the whole signal, which every rung of the fit
     /// asks again.
     whole_enclosure: enclosure::WholeEnclosure,
@@ -3414,13 +3575,67 @@ impl<'a, 'b> AdvancedFollowerSignal<'a, 'b> {
         source: &'a FollowerSignal<'b>,
         advance: LeadingAdvance<'a>,
         steps: &'a [AdvanceStep],
+        fit_tol: FitTol,
     ) -> Self {
         Self {
             source,
             advance,
             steps,
+            pva_memo: PvaMemo::default(),
+            accel_tol: fit_tol.accel_mm_s2,
+            unshaped_step: UnshapedLeaderStep::of(
+                advance,
+                source.ratio_bounds.ratio,
+                fit_tol.accel_mm_s2,
+            ),
             whole_enclosure: enclosure::WholeEnclosure::default(),
         }
+    }
+
+    fn pva(&self, t: f64) -> (f64, f64, f64) {
+        let read = self.source.path_read(t);
+        let (p, v, a) = self.source.pva_read(t, &read);
+        let (read_v, read_a, read_j) = self.advance.read(self.source, t, &read);
+        let input = self.advance_input(t, read_v);
+        let p = p - input.steps_taken_out;
+        match self.advance.stage {
+            ChainStage::DerivativeGains { k1, k2 } => {
+                assert_eq!(*k2, 0.0, "leading acceleration gain is not supported");
+                (p + k1 * input.velocity, v + k1 * read_a, a + k1 * read_j)
+            }
+            ChainStage::NonlinearAdvance(advance) => (
+                p + advance.advance(input.velocity),
+                v + advance.slope(read_v) * read_a,
+                a + advance.slope(read_v) * read_j + advance.curvature(read_v) * read_a * read_a,
+            ),
+            ChainStage::SmoothKernel(_) => unreachable!("a leading advance is not a kernel"),
+        }
+    }
+}
+
+/// The last position, velocity and acceleration a signal evaluated, by
+/// the bits of their time: the fit asks a signal again at times it has
+/// probed.
+struct PvaMemo(RefCell<[Option<(u64, (f64, f64, f64))>; PVA_MEMO_SLOTS]>);
+
+impl Default for PvaMemo {
+    fn default() -> Self {
+        Self(RefCell::new([None; PVA_MEMO_SLOTS]))
+    }
+}
+
+impl PvaMemo {
+    fn get_or(&self, t: f64, eval: impl FnOnce(f64) -> (f64, f64, f64)) -> (f64, f64, f64) {
+        let key = t.to_bits();
+        let slot = ((key ^ key.rotate_right(32)) as usize) & (PVA_MEMO_SLOTS - 1);
+        if let Some((stored_key, value)) = self.0.borrow()[slot] {
+            if stored_key == key {
+                return value;
+            }
+        }
+        let value = eval(t);
+        self.0.borrow_mut()[slot] = Some((key, value));
+        value
     }
 }
 
@@ -3430,6 +3645,29 @@ struct AdvanceInput {
 }
 
 impl AdvancedFollowerSignal<'_, '_> {
+    /// Refuses a velocity change across any of the window's square-root
+    /// onset slivers ([`UnshapedLeaderStep`]) its allowance does not admit:
+    /// with no kernel after the advance, the motor would be asked to make
+    /// it.
+    fn refuse_onset_steps(
+        &self,
+        axis: usize,
+        (t_start, t_end): (f64, f64),
+    ) -> Result<(), PostProcessError> {
+        for sliver in self.onset_slivers(t_start, t_end).unwrap_or_default() {
+            if !self.unshaped_step.admits(sliver.singular_change) {
+                return Err(PostProcessError::UnshapedLeaderOnsetVelocityStep {
+                    axis,
+                    from: sliver.from,
+                    to: sliver.to,
+                    change: sliver.singular_change,
+                    allowance: self.unshaped_step.allowance(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Refuses a velocity step wider than `resolution` at any of `times`
     /// inside the window: with no kernel after the advance, the motor
     /// would be asked to make it.
@@ -3485,23 +3723,7 @@ impl TrackSignal for AdvancedFollowerSignal<'_, '_> {
     }
 
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
-        let read = self.source.path_read(t);
-        let (p, v, a) = self.source.pva_read(t, &read);
-        let (read_v, read_a, read_j) = self.advance.read(self.source, t, &read, (v, a));
-        let input = self.advance_input(t, read_v);
-        let p = p - input.steps_taken_out;
-        match self.advance.stage {
-            ChainStage::DerivativeGains { k1, k2 } => {
-                assert_eq!(*k2, 0.0, "leading acceleration gain is not supported");
-                (p + k1 * input.velocity, v + k1 * read_a, a + k1 * read_j)
-            }
-            ChainStage::NonlinearAdvance(advance) => (
-                p + advance.advance(input.velocity),
-                v + advance.slope(read_v) * read_a,
-                a + advance.slope(read_v) * read_j + advance.curvature(read_v) * read_a * read_a,
-            ),
-            ChainStage::SmoothKernel(_) => unreachable!("a leading advance is not a kernel"),
-        }
+        self.pva_memo.get_or(t, |t| self.pva(t))
     }
 
     fn interior_knots(&self, start: f64, end: f64) -> &[f64] {
@@ -3555,16 +3777,6 @@ pub(crate) fn localize_pieces(base: f64, pieces: &[BezierPiece]) -> Arc<[Relativ
         origin += travel;
     }
     Arc::from(out)
-}
-
-fn piece_boundaries(track: &ScalarNurbs) -> Vec<f64> {
-    let mut breaks = extract_bezier_pieces(track)
-        .iter()
-        .flat_map(|piece| [piece.u_start, piece.u_end])
-        .collect::<Vec<_>>();
-    breaks.sort_by(f64::total_cmp);
-    breaks.dedup();
-    breaks
 }
 
 fn piece_run_start_pv(pieces: &[BezierPiece]) -> (f64, f64) {
@@ -3897,6 +4109,18 @@ fn polynomial_pv(coeffs: &[f64], tau: f64) -> (f64, f64) {
     (position, velocity)
 }
 
+/// `coeffs`, a polynomial in `τ`, as one in `τ − at`.
+fn taylor_shifted(coeffs: &[f64], at: f64) -> Vec<f64> {
+    let mut shifted = coeffs.to_vec();
+    let degree = shifted.len().saturating_sub(1);
+    for done in 0..degree {
+        for index in (done..degree).rev() {
+            shifted[index] += at * shifted[index + 1];
+        }
+    }
+    shifted
+}
+
 fn polynomial_pva(coeffs: &[f64], tau: f64) -> (f64, f64, f64) {
     let (mut p, mut v, mut a) = (0.0_f64, 0.0_f64, 0.0_f64);
     for &coefficient in coeffs.iter().rev() {
@@ -4032,143 +4256,282 @@ fn assert_piece_seams(
         );
     }
 }
-fn integrate(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
-    if b - a <= 0.0 {
-        return 0.0;
+/// The 15-point Gauss–Kronrod rule on `[-1, 1]`: its nodes from the end
+/// in, the centre last, their Kronrod weights, and the weights of the
+/// 7-point Gauss rule on the odd-indexed ones it embeds.
+const KRONROD_NODES: [f64; 8] = [
+    0.991_455_371_120_812_6,
+    0.949_107_912_342_758_5,
+    0.864_864_423_359_769_1,
+    0.741_531_185_599_394_4,
+    0.586_087_235_467_691_1,
+    0.405_845_151_377_397_2,
+    0.207_784_955_007_898_5,
+    0.0,
+];
+const KRONROD_WEIGHTS: [f64; 8] = [
+    0.022_935_322_010_529_225,
+    0.063_092_092_629_978_55,
+    0.104_790_010_322_250_18,
+    0.140_653_259_715_525_92,
+    0.169_004_726_639_267_9,
+    0.190_350_578_064_785_4,
+    0.204_432_940_075_298_9,
+    0.209_482_141_084_727_83,
+];
+const GAUSS_WEIGHTS: [f64; 4] = [
+    0.129_484_966_168_869_7,
+    0.279_705_391_489_276_7,
+    0.381_830_050_505_118_9,
+    0.417_959_183_673_469_4,
+];
+
+const KRONROD_POINTS: usize = 15;
+
+/// The Kronrod nodes on `[-1, 1]` in ascending order.
+fn kronrod_abscissae() -> [f64; KRONROD_POINTS] {
+    let mut abscissae = [0.0; KRONROD_POINTS];
+    for (index, &node) in KRONROD_NODES[..7].iter().enumerate() {
+        abscissae[index] = -node;
+        abscissae[KRONROD_POINTS - 1 - index] = node;
     }
-    adaptive_simpson(f, SimpsonNode::root(f, (a, f(a)), (b, f(b))))
+    abscissae
 }
 
-/// `integrate` from `a` to `b`, `f` already read at both.
-fn integrate_between(f: &impl Fn(f64) -> f64, (a, fa): (f64, f64), (b, fb): (f64, f64)) -> f64 {
-    if b - a <= 0.0 {
-        return 0.0;
+/// `f` at the Kronrod nodes of `[a, b]`, in ascending order.
+fn kronrod_samples(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> [f64; KRONROD_POINTS] {
+    let centre = 0.5 * (a + b);
+    let half = 0.5 * (b - a);
+    let mut samples = [0.0; KRONROD_POINTS];
+    samples[7] = f(centre);
+    for (index, &node) in KRONROD_NODES[..7].iter().enumerate() {
+        let offset = half * node;
+        samples[index] = f(centre - offset);
+        samples[KRONROD_POINTS - 1 - index] = f(centre + offset);
     }
-    adaptive_simpson(f, SimpsonNode::root(f, (a, fa), (b, fb)))
+    samples
 }
 
-/// `integrate` from the last odometer knot to `b`, but the converged leaves
-/// of the adaptive recursion are kept as odometer knots, so later point
-/// queries integrate only the short residual past the nearest knot instead
-/// of re-descending the whole refinement tree from a grid boundary.
-fn integrate_recording(f: &impl Fn(f64) -> f64, b: f64, knots: &mut OdometerKnots) {
-    let last = knots.last();
-    if b - last.0 <= 0.0 {
-        return;
+/// The Kronrod and the embedded Gauss estimates of `∫f` over an interval
+/// `2·half` long, from `f` at its Kronrod nodes.
+fn kronrod_and_gauss(samples: &[f64; KRONROD_POINTS], half: f64) -> (f64, f64) {
+    let mut kronrod = KRONROD_WEIGHTS[7] * samples[7];
+    let mut gauss = GAUSS_WEIGHTS[3] * samples[7];
+    for (index, &weight) in KRONROD_WEIGHTS[..7].iter().enumerate() {
+        let pair = samples[index] + samples[KRONROD_POINTS - 1 - index];
+        kronrod += weight * pair;
+        if index % 2 == 1 {
+            gauss += GAUSS_WEIGHTS[index / 2] * pair;
+        }
     }
-    adaptive_simpson_recording(f, SimpsonNode::root(f, last, (b, f(b))), knots);
+    (kronrod * half, gauss * half)
 }
 
-/// One node of the adaptive Simpson tree: the interval, the three samples
-/// the parent already paid for, the parent's estimate over it, and the error
-/// budget and depth left to it.
-#[derive(Clone, Copy)]
-struct SimpsonNode {
-    a: f64,
-    b: f64,
-    fa: f64,
-    fm: f64,
-    fb: f64,
-    whole: f64,
+/// Adaptive Gauss–Kronrod: `rule` estimates `[a, b]` under its share of
+/// the tolerance and returns a leaf once it converges, or unconditionally
+/// when told it is the last chance; each leaf is handed to `leaf` with its
+/// end, in order. Simpson's halves can agree by chance on a speed that
+/// bends often, Kronrod and Gauss all but never do.
+fn adaptive_gauss_kronrod<L>(
+    rule: &impl Fn(f64, f64, f64, bool) -> Option<L>,
+    (a, b): (f64, f64),
     tol: f64,
     depth: u32,
-}
-
-/// One evaluation of a node: either it converged to a value, or it produced
-/// the two halves that must be refined.
-enum SimpsonStep {
-    Converged(f64),
-    Refine {
-        left: SimpsonNode,
-        right: SimpsonNode,
-    },
-}
-
-impl SimpsonNode {
-    fn root(f: &impl Fn(f64) -> f64, (a, fa): (f64, f64), (b, fb): (f64, f64)) -> Self {
-        let m = 0.5 * (a + b);
-        let fm = f(m);
-        let whole = (b - a) / 6.0 * (fa + 4.0 * fm + fb);
-        Self {
-            a,
-            b,
-            fa,
-            fm,
-            fb,
-            whole,
-            tol: INTEGRAL_TOL_MM,
-            depth: INTEGRAL_MAX_DEPTH,
-        }
-    }
-
-    fn step(self, f: &impl Fn(f64) -> f64) -> SimpsonStep {
-        let Self {
-            a,
-            b,
-            fa,
-            fm,
-            fb,
-            whole,
-            tol,
-            depth,
-        } = self;
-        let m = 0.5 * (a + b);
-        let (lm, rm) = (0.5 * (a + m), 0.5 * (m + b));
-        let (flm, frm) = (f(lm), f(rm));
-        let left = (m - a) / 6.0 * (fa + 4.0 * flm + fm);
-        let right = (b - m) / 6.0 * (fm + 4.0 * frm + fb);
-        let delta = left + right - whole;
-        if depth == 0 || delta.abs() <= 15.0 * tol {
-            return SimpsonStep::Converged(left + right + delta / 15.0);
-        }
-        SimpsonStep::Refine {
-            left: Self {
-                a,
-                b: m,
-                fa,
-                fm: flm,
-                fb: fm,
-                whole: left,
-                tol: 0.5 * tol,
-                depth: depth - 1,
-            },
-            right: Self {
-                a: m,
-                b,
-                fa: fm,
-                fm: frm,
-                fb,
-                whole: right,
-                tol: 0.5 * tol,
-                depth: depth - 1,
-            },
-        }
-    }
-}
-
-fn adaptive_simpson_recording(
-    f: &impl Fn(f64) -> f64,
-    node: SimpsonNode,
-    knots: &mut OdometerKnots,
+    leaf: &mut impl FnMut(f64, L),
 ) {
-    let (left, right) = match node.step(f) {
-        SimpsonStep::Converged(value) => {
-            knots.push_leaf(node.b, value, node.fb);
-            return;
-        }
-        SimpsonStep::Refine { left, right } => (left, right),
-    };
-    adaptive_simpson_recording(f, left, knots);
-    adaptive_simpson_recording(f, right, knots);
+    if let Some(converged) = rule(a, b, tol, depth == 0) {
+        leaf(b, converged);
+        return;
+    }
+    let middle = 0.5 * (a + b);
+    adaptive_gauss_kronrod(rule, (a, middle), 0.5 * tol, depth - 1, leaf);
+    adaptive_gauss_kronrod(rule, (middle, b), 0.5 * tol, depth - 1, leaf);
 }
 
-fn adaptive_simpson(f: &impl Fn(f64) -> f64, node: SimpsonNode) -> f64 {
-    match node.step(f) {
-        SimpsonStep::Converged(value) => value,
-        SimpsonStep::Refine { left, right } => {
-            adaptive_simpson(f, left) + adaptive_simpson(f, right)
+fn integrate(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
+    let mut total = 0.0;
+    if b - a > 0.0 {
+        adaptive_gauss_kronrod(
+            &|a, b, tol, last_chance| {
+                let (kronrod, gauss) = kronrod_and_gauss(&kronrod_samples(f, a, b), 0.5 * (b - a));
+                (last_chance || (kronrod - gauss).abs() <= tol).then_some(kronrod)
+            },
+            (a, b),
+            INTEGRAL_TOL_MM,
+            INTEGRAL_MAX_DEPTH,
+            &mut |_, value| total += value,
+        );
+    }
+    total
+}
+
+/// Maps `f` at the Kronrod nodes to the Chebyshev coefficients of the
+/// degree-14 polynomial through them.
+static KRONROD_INTERPOLATION: LazyLock<[[f64; KRONROD_POINTS]; KRONROD_POINTS]> =
+    LazyLock::new(|| {
+        let abscissae = kronrod_abscissae();
+        let mut vandermonde = [[0.0; KRONROD_POINTS]; KRONROD_POINTS];
+        for (row, &x) in vandermonde.iter_mut().zip(&abscissae) {
+            row[0] = 1.0;
+            row[1] = x;
+            for degree in 2..KRONROD_POINTS {
+                row[degree] = 2.0 * x * row[degree - 1] - row[degree - 2];
+            }
+        }
+        inverse(vandermonde)
+    });
+
+/// Gauss–Jordan inversion with partial pivoting; panics on a singular
+/// matrix.
+fn inverse<const N: usize>(mut matrix: [[f64; N]; N]) -> [[f64; N]; N] {
+    let mut inverse = [[0.0; N]; N];
+    for (index, row) in inverse.iter_mut().enumerate() {
+        row[index] = 1.0;
+    }
+    for column in 0..N {
+        let pivot = (column..N)
+            .max_by(|&left, &right| {
+                matrix[left][column]
+                    .abs()
+                    .total_cmp(&matrix[right][column].abs())
+            })
+            .expect("a column below the diagonal is never empty");
+        assert!(matrix[pivot][column] != 0.0, "inverting a singular matrix");
+        matrix.swap(column, pivot);
+        inverse.swap(column, pivot);
+        let scale = 1.0 / matrix[column][column];
+        for entry in 0..N {
+            matrix[column][entry] *= scale;
+            inverse[column][entry] *= scale;
+        }
+        for row in 0..N {
+            if row == column {
+                continue;
+            }
+            let factor = matrix[row][column];
+            for entry in 0..N {
+                matrix[row][entry] -= factor * matrix[column][entry];
+                inverse[row][entry] -= factor * inverse[column][entry];
+            }
         }
     }
+    inverse
+}
+
+/// `Σ coefficients[k]·T_k(x)` by Clenshaw's recurrence.
+fn chebyshev_sum(coefficients: &[f64], x: f64) -> f64 {
+    let (mut next, mut after) = (0.0, 0.0);
+    for &coefficient in coefficients[1..].iter().rev() {
+        (next, after) = (2.0 * x * next - after + coefficient, next);
+    }
+    x * next - after + coefficients[0]
+}
+
+/// One leaf of the odometer: the integral, from the leaf's start, of the
+/// polynomial through the leaders' speed at its Kronrod nodes. Its total is
+/// the Kronrod estimate, and it grows at that polynomial's value, which the
+/// leaf only accepts where it stays on the leaders' speed: the follower's
+/// position must follow its velocity for its fit to close.
+#[derive(Debug, Clone, Copy)]
+struct OdometerLeaf {
+    centre: f64,
+    half: f64,
+    covered: [f64; KRONROD_POINTS + 1],
+}
+
+impl OdometerLeaf {
+    fn through(samples: &[f64; KRONROD_POINTS], a: f64, b: f64) -> (Self, [f64; KRONROD_POINTS]) {
+        let mut rate = [0.0; KRONROD_POINTS];
+        for (coefficient, row) in rate.iter_mut().zip(KRONROD_INTERPOLATION.iter()) {
+            *coefficient = row
+                .iter()
+                .zip(samples)
+                .map(|(weight, sample)| weight * sample)
+                .sum();
+        }
+        let mut covered = [0.0; KRONROD_POINTS + 1];
+        let beyond = |degree: usize| rate.get(degree).copied().unwrap_or(0.0);
+        covered[1] = rate[0] - 0.5 * beyond(2);
+        for degree in 2..=KRONROD_POINTS {
+            covered[degree] = (rate[degree - 1] - beyond(degree + 1)) / (2.0 * degree as f64);
+        }
+        covered[0] = -(1..=KRONROD_POINTS)
+            .map(|degree| {
+                if degree % 2 == 0 {
+                    covered[degree]
+                } else {
+                    -covered[degree]
+                }
+            })
+            .sum::<f64>();
+        let leaf = Self {
+            centre: 0.5 * (a + b),
+            half: 0.5 * (b - a),
+            covered,
+        };
+        (leaf, rate)
+    }
+
+    /// The distance the leaders cover from the leaf's start to `t`: never
+    /// negative, though the Chebyshev sum rounds to a few ulps below zero
+    /// next to the start, where the signal would read the table before
+    /// its odometer's start.
+    fn covered_until(&self, t: f64) -> f64 {
+        let x = ((t - self.centre) / self.half).clamp(-1.0, 1.0);
+        (self.half * chebyshev_sum(&self.covered, x)).max(0.0)
+    }
+}
+
+/// Where a leaf's rate is checked against the leaders' speed: midway
+/// between each pair of neighbouring Kronrod nodes, and between the
+/// outermost ones and the leaf's ends. Not at the ends themselves, where
+/// the leaders may cross a seam whose velocity steps by its fit's
+/// rounding.
+static ODOMETER_RATE_CHECKS: LazyLock<[f64; KRONROD_POINTS + 1]> = LazyLock::new(|| {
+    let mut bounded = [0.0; KRONROD_POINTS + 2];
+    bounded[0] = -1.0;
+    bounded[KRONROD_POINTS + 1] = 1.0;
+    bounded[1..=KRONROD_POINTS].copy_from_slice(&kronrod_abscissae());
+    let mut checks = [0.0; KRONROD_POINTS + 1];
+    for (check, pair) in checks.iter_mut().zip(bounded.windows(2)) {
+        *check = 0.5 * (pair[0] + pair[1]);
+    }
+    checks
+});
+
+/// The path `speed` covers over `[a, b]`, leaf by leaf, each converged on
+/// its total and on its rate. Where the leaders' speed bends sharply the
+/// total alone converges on intervals over which a leaf's rate runs
+/// tenths of a micrometre per second off the speed.
+fn odometer_leaves(
+    speed: &impl Fn(f64) -> f64,
+    a: f64,
+    b: f64,
+    leaf: &mut impl FnMut(f64, OdometerLeaf),
+) {
+    if b - a <= 0.0 {
+        return;
+    }
+    adaptive_gauss_kronrod(
+        &|a, b, tol, last_chance| {
+            let samples = kronrod_samples(speed, a, b);
+            let half = 0.5 * (b - a);
+            let (kronrod, gauss) = kronrod_and_gauss(&samples, half);
+            if !last_chance && (kronrod - gauss).abs() > tol {
+                return None;
+            }
+            let (odometer_leaf, rate) = OdometerLeaf::through(&samples, a, b);
+            let centre = 0.5 * (a + b);
+            let follows_speed = ODOMETER_RATE_CHECKS.iter().all(|&x| {
+                (chebyshev_sum(&rate, x) - speed(centre + half * x)).abs() <= ODOMETER_RATE_TOL_MM_S
+            });
+            (last_chance || follows_speed).then_some(odometer_leaf)
+        },
+        (a, b),
+        INTEGRAL_TOL_MM,
+        INTEGRAL_MAX_DEPTH,
+        leaf,
+    );
 }
 
 #[cfg(test)]

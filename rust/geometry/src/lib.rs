@@ -11,6 +11,7 @@ pub mod error;
 pub mod fitter;
 pub mod frontend;
 pub mod path;
+pub mod ratio_ramp;
 pub mod segment;
 pub mod space;
 pub mod step_capacity;
@@ -23,9 +24,10 @@ pub use fitter::{
     CornerFitConfig, FitError, SEAM_VELOCITY_STEP_MM_S, UnblendReason, seam_requires_stop,
 };
 pub use frontend::{
-    CORNER_DEVIATION_SCV_FACTOR, ExtruderCaps, FrontendError, Move, MoveContext, VelocityLimits,
-    corner_deviation_from_scv, line_move, scv_from_corner_deviation,
+    CORNER_DEVIATION_SCV_FACTOR, ExtruderCaps, FrontendError, LeaderSpill, Move, MoveContext,
+    VelocityLimits, corner_deviation_from_scv, line_move, scv_from_corner_deviation,
 };
+pub use ratio_ramp::{RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep};
 pub use segment::{CubicSegment, FollowerDemand, SourceRange};
 pub use step_capacity::{FollowerStepLoad, McuStepLoad, StepCapacity, StepCapacityOverload};
 
@@ -36,8 +38,8 @@ pub struct FollowerWord {
 }
 pub use space::{GcodePos, MachinePos};
 pub use surface::{
-    Fade, MeshGrid, MeshGridSpec, SurfaceBounds, SurfaceContinuity, SurfaceError, SurfaceSample,
-    SurfaceTransform, SurfaceTransition, SurfaceTransitionError,
+    Fade, MeshGrid, MeshGridSpec, MeshPatch, PatchAxis, SurfaceBounds, SurfaceContinuity,
+    SurfaceError, SurfaceSample, SurfaceTransform, SurfaceTransition, SurfaceTransitionError,
 };
 pub use velocity::{
     ExtrusionBudget, ExtrusionReach, FanOut, LawSegment, MoveVelocity, RailPair, RailPairShape,

@@ -1,5 +1,12 @@
 use thiserror::Error;
-use trajectory::{AxisChainSet, CompiledChain, PostProcessorInstance, algos};
+use trajectory::{AxisChainSet, CompiledChain, FollowerLimits, PostProcessorInstance, algos};
+
+/// What replaced `ratio_ramp_time`, for the config error that refuses it.
+pub const RATIO_RAMP_RULE: &str = "every follower now ramps each extrusion-ratio step \
+    over the shortest time between 5 and 30 ms that keeps its advance within the axis's \
+    max_velocity and max_accel, and the planner slows the toolhead at a step where 30 ms is \
+    not enough. Delete the option; set [axis] max_velocity / max_accel (or the [extruder]'s \
+    max_extrude_only_velocity / max_extrude_only_accel they inherit) instead";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PostProcessorDecl {
@@ -34,12 +41,6 @@ pub enum PostProcessorConfigError {
          ignore. Move '{name}' after the kernel in the axis post_processors list"
     )]
     LeaderGainBeforeKernel { axis: String, name: String },
-    #[error(
-        "axis '{axis}' follows other axes, and post_processor '{name}' advances it with no \
-         smoothing kernel in the axis post_processors and no ratio_ramp_time: {}",
-        trajectory::FOLLOWER_TRANSFORM_WITHOUT_KERNEL
-    )]
-    FollowerAdvanceWithoutKernel { axis: String, name: String },
     #[error(
         "axis '{axis}' follows other axes, and post_processor '{name}' advances it: the \
          planner holds the advance within the motor's limits, so set [axis {axis}] \
@@ -125,7 +126,6 @@ impl PostProcessorSet {
         let followers = registry.follower_index_map();
         self.reject_pre_kernel_gains_on_leaders(registry, &followers)?;
         let chains = AxisChainSet { chains, followers };
-        self.reject_follower_advance_without_kernel(registry, &chains)?;
         self.reject_follower_advance_without_limits(registry, &chains)?;
         Ok(chains)
     }
@@ -175,9 +175,13 @@ impl PostProcessorSet {
             .into_iter()
             .zip(registry.decls())
             .map(|(chain, decl)| {
-                let chain = match decl.ratio_ramp_time {
-                    Some(ramp_time) => chain.with_ratio_ramp_time(ramp_time),
-                    None => chain,
+                let chain = if decl.follows.is_empty() {
+                    chain
+                } else {
+                    chain.with_follower_limits(FollowerLimits {
+                        max_velocity_mm_s: decl.max_velocity.unwrap_or(f64::INFINITY),
+                        max_accel_mm_s2: decl.max_accel.unwrap_or(f64::INFINITY),
+                    })
                 };
                 match decl.instantaneous_corner_velocity {
                     Some(mm_s) => chain.with_instantaneous_corner_velocity(mm_s),
@@ -185,20 +189,6 @@ impl PostProcessorSet {
                 }
             })
             .collect()
-    }
-
-    fn reject_follower_advance_without_kernel(
-        &self,
-        registry: &AxisRegistry,
-        chains: &AxisChainSet,
-    ) -> Result<(), PostProcessorConfigError> {
-        let Some(axis) = chains.kernel_free_follower_transform() else {
-            return Ok(());
-        };
-        Err(PostProcessorConfigError::FollowerAdvanceWithoutKernel {
-            axis: registry.axis_name(axis).to_string(),
-            name: self.transform_name(axis).clone(),
-        })
     }
 
     fn reject_pre_kernel_gains_on_leaders(
@@ -327,10 +317,6 @@ pub struct AxisDecl {
     pub follows: Vec<String>,
     pub motors: Vec<String>,
     pub post_processors: Vec<String>,
-    /// `ratio_ramp_time`: on an axis that follows others, the time over
-    /// which its extrusion-ratio steps are spread along the path, see
-    /// [`trajectory::CompiledChain::ratio_ramp_time`].
-    pub ratio_ramp_time: Option<f64>,
     /// `max_velocity`: what the motor of an axis that follows others can
     /// do for every move it makes, its advance included. For the
     /// `[extruder]` axis the reader inherits `max_extrude_only_velocity`
@@ -373,13 +359,6 @@ pub enum AxisConfigError {
     #[error("[kinematics] claims axis '{axis}' but no [axis {axis}] section is declared")]
     UnknownClaimedAxis { axis: String },
     #[error(
-        "axis '{axis}': ratio_ramp_time spreads the extrusion-ratio steps of an axis that \
-         follows others, and '{axis}' follows none"
-    )]
-    RatioRampWithoutLeaders { axis: String },
-    #[error("axis '{axis}': ratio_ramp_time must be finite and above 0, got {value}")]
-    BadRatioRampTime { axis: String, value: f64 },
-    #[error(
         "axis '{axis}': {option} is the capability of an axis that follows others, and \
          '{axis}' follows none (spatial limits live in [printer])"
     )]
@@ -410,19 +389,6 @@ impl AxisRegistry {
                 return Err(AxisConfigError::Duplicate {
                     name: d.name.clone(),
                 });
-            }
-            if let Some(value) = d.ratio_ramp_time {
-                if !(value.is_finite() && value > 0.0) {
-                    return Err(AxisConfigError::BadRatioRampTime {
-                        axis: d.name.clone(),
-                        value,
-                    });
-                }
-                if d.follows.is_empty() {
-                    return Err(AxisConfigError::RatioRampWithoutLeaders {
-                        axis: d.name.clone(),
-                    });
-                }
             }
             for (option, value) in [
                 ("max_velocity", d.max_velocity),
@@ -554,7 +520,6 @@ impl Default for AxisRegistry {
                     follows: vec![],
                     motors: vec![],
                     post_processors: vec![],
-                    ratio_ramp_time: None,
                     max_velocity: None,
                     max_accel: None,
                     instantaneous_corner_velocity: None,
@@ -723,16 +688,19 @@ impl PlannerConfig {
         self.runtime.effective(&self.cartesian)
     }
 
-    /// A ratio ramp takes the place of the follower's smoothing kernel, so
-    /// the moves it makes on its own — retracts, primes, which its advance
-    /// leaves untouched — are bounded by the extrude-only caps alone, and
-    /// those must be set.
-    pub fn check_ratio_ramp_extrude_only_caps(&self) -> Result<(), String> {
-        let Some(ramped) = self
-            .axis_registry
-            .decls()
-            .iter()
-            .find(|decl| decl.ratio_ramp_time.is_some())
+    /// An advance with no smoothing kernel leaves the moves its follower
+    /// makes on its own — retracts, primes, which the advance leaves
+    /// untouched — bounded by the extrude-only caps alone, and those must be
+    /// set.
+    pub fn check_kernel_free_advance_extrude_only_caps(&self) -> Result<(), String> {
+        let chains = self.compile_active_chains().map_err(|e| e.to_string())?;
+        let Some(axis) = chains
+            .projected_followers()
+            .map(|(axis, _)| axis)
+            .find(|&axis| {
+                let chain = &chains.chains[axis];
+                chain.transform().is_some() && chain.kernel().is_none()
+            })
         else {
             return Ok(());
         };
@@ -741,10 +709,10 @@ impl PlannerConfig {
             return Ok(());
         }
         Err(format!(
-            "axis '{}' has a ratio_ramp_time, so no smoothing kernel bounds the moves it makes \
-             on its own (retracts, primes): set finite [extruder] max_extrude_only_velocity \
-             and max_extrude_only_accel",
-            ramped.name
+            "axis '{}' has an advance and no smoothing kernel, so nothing bounds the moves it \
+             makes on its own (retracts, primes) but the extrude-only caps: set finite \
+             [extruder] max_extrude_only_velocity and max_extrude_only_accel",
+            self.axis_registry.axis_name(axis)
         ))
     }
 }

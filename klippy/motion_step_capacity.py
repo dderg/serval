@@ -68,6 +68,7 @@ def mcu_step_capacity(motion, name, mcu_obj, motors):
     step_benchmark = {
         "mcu": name,
         "clock_freq": mcu_obj.get_constant_float("CLOCK_FREQ"),
+        "capacity_fraction": native("step_capacity_fraction")(),
         **benchmark,
         "motors": [
             {
@@ -131,7 +132,7 @@ class _McuCapacity:
         ticks_by_mode = {m.mode: m.ticks_per_step for m in motors}
         return (
             "%d ticks/step pulsed and %d ticks/step both-edge measured, "
-            "capacity %s (%.0f %% of the %.0f Hz clock)"
+            "capacity %s (%.1f %% of the %.0f Hz clock)"
             % (
                 self.benchmark["pulsed_ticks_per_step"],
                 self.benchmark["both_edge_ticks_per_step"],

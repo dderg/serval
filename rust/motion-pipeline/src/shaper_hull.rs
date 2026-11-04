@@ -56,7 +56,7 @@ pub(crate) struct HullBudget {
 /// The share of each order's budget an enclosure's bound may take before
 /// its window is halved: the hull spends the bound as slack, so a rung
 /// within the rest of the budget is still proven.
-const ENCLOSURE_BUDGET_SHARE: f64 = 1.0 / 64.0;
+pub(crate) const ENCLOSURE_BUDGET_SHARE: f64 = 1.0 / 64.0;
 
 impl HullBudget {
     fn of_order(self, order: usize) -> f64 {
@@ -299,19 +299,34 @@ struct ErrorPatch {
     level_rounding: f64,
 }
 
-/// Every sub-interval's error patch for `order`, the fitted piece's
-/// derivatives already taken.
+/// What a fit's error from `sub` in derivative `order` may reach, `None`
+/// where it is not held: inside an unshaped leader's square-root onset the
+/// acceleration is exempt and the velocity holds the step's allowance.
+fn piece_budget(sub: &ExactPiece, order: usize, budget: HullBudget) -> Option<f64> {
+    match (order, sub.unshaped_step) {
+        (1, Some(step)) => Some(budget.velocity.min(step.allowance())),
+        (1, None) => budget.velocity.is_finite().then_some(budget.velocity),
+        (2, Some(_)) => None,
+        _ => Some(budget.of_order(order)),
+    }
+}
+
+/// Every sub-interval's error patch for `order` beside its budget, the
+/// fitted piece's derivatives already taken; `held` the budget of each
+/// sub-interval, `None` for one whose error is not held.
 fn error_patches<'a>(
     exact: &'a [ExactPiece],
     piece: FittedPiece<'a>,
     derivatives: &'a [Vec<f64>],
     domain: (f64, f64),
     order: usize,
-) -> impl Iterator<Item = ErrorPatch> + 'a {
+    held: impl Fn(&ExactPiece) -> Option<f64> + 'a,
+) -> impl Iterator<Item = (ErrorPatch, f64)> + 'a {
     let h = piece.t1 - piece.t0;
     let u_of = move |t: f64| 2.0 * (t - piece.t0) / h - 1.0;
     exact.iter().filter_map(move |sub| {
         let (from, to) = (sub.lo.max(domain.0), sub.hi.min(domain.1));
+        let budget = held(sub)?;
         if from > to {
             return None;
         }
@@ -334,13 +349,20 @@ fn error_patches<'a>(
         }
         let (controls, conversion) = bernstein(&error[..len]);
         let largest = controls.iter().fold(0.0_f64, |m, c| m.max(c.abs()));
-        Some(ErrorPatch {
-            level_rounding: ExactRounding::gamma(controls.len()) * largest,
-            controls,
-            from,
-            to,
-            rounding: signal.rounding + fitted.rounding + truth.rounding + subtraction + conversion,
-        })
+        Some((
+            ErrorPatch {
+                level_rounding: ExactRounding::gamma(controls.len()) * largest,
+                controls,
+                from,
+                to,
+                rounding: signal.rounding
+                    + fitted.rounding
+                    + truth.rounding
+                    + subtraction
+                    + conversion,
+            },
+            budget,
+        ))
     })
 }
 
@@ -361,18 +383,14 @@ pub(crate) fn first_unproven(
     budget: HullBudget,
 ) -> Option<f64> {
     let h = piece.t1 - piece.t0;
-    let orders: &[usize] = if budget.velocity.is_finite() {
-        &[0, 1, 2]
-    } else {
-        &[0, 2]
-    };
     let derivatives = derivatives_of(piece);
-    for &order in orders {
-        for patch in error_patches(exact, piece, &derivatives, domain, order) {
+    for order in [0, 1, 2] {
+        let held = |sub: &ExactPiece| piece_budget(sub, order, budget);
+        for (patch, limit) in error_patches(exact, piece, &derivatives, domain, order, held) {
             if let Some(t) = first_unproven_patch(
                 &patch.controls,
                 (patch.from, patch.to),
-                budget.of_order(order),
+                limit,
                 patch.rounding,
                 patch.level_rounding,
                 0,
@@ -420,8 +438,9 @@ pub(crate) fn error_bounds(
 ) -> [f64; 2] {
     let derivatives = derivatives_of(piece);
     [(0, budget.pos_mm), (2, budget.accel_mm_s2)].map(|(order, budget)| {
-        error_patches(exact, piece, &derivatives, domain, order)
-            .map(|patch| patch_bound(&patch.controls, &patch, budget, 0))
+        let held = |sub: &ExactPiece| sub.bounds(order).then_some(budget);
+        error_patches(exact, piece, &derivatives, domain, order, held)
+            .map(|(patch, budget)| patch_bound(&patch.controls, &patch, budget, 0))
             .fold(0.0_f64, f64::max)
     })
 }

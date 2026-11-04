@@ -17,6 +17,7 @@ fn f401(ab_mode: &str) -> PyStepBenchmark {
     PyStepBenchmark {
         mcu: "mcu".into(),
         clock_freq: F401_CLOCK_HZ,
+        capacity_fraction: 0.75,
         pulsed_ticks_per_step: 301,
         both_edge_ticks_per_step: 160,
         simulated: false,
@@ -97,10 +98,18 @@ fn a_config_without_kinematics_cannot_resolve_motors() {
 }
 
 #[test]
-fn the_budget_is_three_quarters_of_the_clock_and_each_motors_mode() {
+fn the_budget_is_the_recorded_fraction_of_the_clock_and_each_motors_mode() {
     assert_eq!(
         step_capacity_budget(f401(MODE_BOTH_EDGE)).unwrap(),
         Some((63.0e6, vec![160, 160, 301, 301]))
+    );
+    assert_eq!(
+        step_capacity_budget(PyStepBenchmark {
+            capacity_fraction: step_capacity_fraction(),
+            ..f401(MODE_BOTH_EDGE)
+        })
+        .unwrap(),
+        Some((52.5e6, vec![160, 160, 301, 301]))
     );
     assert_eq!(
         step_capacity_budget(PyStepBenchmark {

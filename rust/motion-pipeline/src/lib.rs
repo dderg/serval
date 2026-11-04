@@ -24,6 +24,7 @@ use fit_stage::{FitDriver, FitStage};
 use planner::Planner;
 use shaper::Shaper;
 
+pub use follower_projection::follower_velocity_step_allowance;
 pub use lower_stage::Lowerer;
 pub use staged::{SHAPER_INBOX_CAP, StagedPipeline};
 pub use types::{

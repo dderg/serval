@@ -137,7 +137,9 @@ z_motors: z
 [axis e]
 follows: x, y, z
 motors: extruder
-post_processors: pa, e_smooth
+post_processors: pa
+max_velocity: 50
+max_accel: 5000
 ```
 
 - **A follower axis pays out its commanded displacement** in proportion to
@@ -172,10 +174,6 @@ frequency_hz: 43
 type: linear_pressure_advance
 k: 0.045
 
-[post_processor e_smooth]
-type: smooth_triangle
-smooth_time: 0.005
-
 [axis x]
 post_processors: smooth
 
@@ -184,7 +182,9 @@ post_processors: is
 
 [axis e]
 follows: x, y, z
-post_processors: pa, e_smooth
+post_processors: pa
+max_velocity: 50
+max_accel: 5000
 ```
 
 Eight types exist today (registry: `rust/trajectory/src/algos/mod.rs`):
@@ -205,14 +205,16 @@ Eight types exist today (registry: `rust/trajectory/src/algos/mod.rs`):
   commanded advance stops growing once flow is past the linearization
   velocity. The nozzle pressure response flattens there and a purely
   linear model over-advances.
-- **A follower's advance needs a smoothing kernel or a ratio ramp.**
-  Pressure advance turns every extrusion-ratio change taken at speed —
-  travel to extrusion, a flow change, a wipe — into an instant position
-  step the extruder cannot make. A kernel in the same chain smooths it in
-  time, `ratio_ramp_time` smooths the ratio along the path; with neither
-  the config compiler rejects the chain. Keep a kernel short: the follower
-  already tracks the shaped toolhead exactly, and every millisecond of
-  extruder smoothing blurs flow against nozzle speed at corners.
+- **A follower's ratio steps are ramped along the path.** Pressure advance
+  turns every extrusion-ratio change taken at speed — travel to extrusion,
+  a flow change, a wipe — into an instant position step the extruder cannot
+  make, so every follower spreads each step along the path over a ramp time
+  derived per seam from its `max_velocity` / `max_accel` and the advance's
+  `k`: the shortest between 5 and 30 ms that keeps the extruder within its
+  limits, the planner slowing the toolhead at a step 30 ms cannot carry.
+  No smoothing kernel is needed. A kernel on the extruder is an explicit
+  override that blurs flow against nozzle speed at every corner in exchange
+  for less extruder acceleration.
 - **`mode_inverse` needs a preceding kernel.** It makes the toolhead
   follow the nominal path with the residual scaling with model error, and
   must be preceded by a short smoothing kernel; the config compiler
@@ -242,10 +244,10 @@ K (by default the configured pressure advance):
 ```
 make -f Makefile.rust motion-engine-fast
 python3 tools/corner_flow.py printer.cfg
-python3 tools/corner_flow.py printer.cfg --sweep smooth_time=0.005,0.01,0.02
-python3 tools/corner_flow.py printer.cfg --set pa.k=0.04 --melt-k 0.03 --json
-python3 tools/corner_flow.py printer.cfg --ramp 0.015 --sweep ratio_ramp_time=0.01,0.02
-python3 tools/corner_flow.py printer.cfg --set ratio_ramp_time=0.015 --sweep smooth_time=0.001,0.002
+python3 tools/corner_flow.py printer.cfg --kernel-free
+python3 tools/corner_flow.py printer.cfg --kernel-free --set pa.k=0.04 --melt-k 0.03 --json
+python3 tools/corner_flow.py printer.cfg --kernel-free --extrude-only 45,2000
+python3 tools/corner_flow.py printer.cfg --sweep smooth_time=0.002,0.005,0.01
 ```
 
 - **`peak` / `dip`** are the worst bead over- and under-fill at a corner,
@@ -262,79 +264,59 @@ python3 tools/corner_flow.py printer.cfg --set ratio_ramp_time=0.015 --sweep smo
   **`dE_adv`** compares against the same chain without its advance. The
   advance vanishes at rest, so anything above ~1e-6 mm is material the
   pipeline lost or invented.
-- **The extruder's smoothing kernel sets corner quality.** It blurs the
-  flow in time while the nozzle slows into a corner, and no pressure
-  advance value can cancel a symmetric blur. On `tools/bench/printer.cfg`
-  at 150 mm/s, a 45° corner bulges +159% with `smooth_time: 0.04`, +71%
-  with 0.02, +24% with 0.01 and +7% with 0.005, at matched K. A shorter
-  kernel costs extruder acceleration (the `ae` column, 597 → 3436 mm/s²
-  on the same corner), so keep it as short as the extruder tolerates.
-- **`--ramp TAU` replaces the kernel with `ratio_ramp_time`.** The
-  extruded total along the path is convolved with a kernel as wide as the
-  path the toolhead covers in about τ, so a ratio step spreads over `v·τ`
-  however finely the path is cut into moves, and the advance then runs
-  unblurred: corners lay the commanded bead, a 1.5× flow change spreads
-  over `v·τ` (`w>5%` 0.5 mm against 5.2 mm with the 0.04 s kernel at
-  150 mm/s) and retracts keep their extrude-only caps. The price is the
-  extruder acceleration an exact advance asks for at every corner.
-  `--set ratio_ramp_time=TAU` keeps the kernel as well: the hybrid chain.
+- **`--kernel-free` takes the extruder's smoothing kernels out of the
+  config's chain**, leaving the recommended setup below. Every chain, kernel
+  or not, ramps its extrusion-ratio steps by the ramp time its limits
+  derive, so a step spreads over about `v·τ` of path however finely the
+  path is cut into moves. An advance with no kernel needs extrude-only
+  caps: `--extrude-only V,A` (default `50,5000`) fills in whichever the
+  config lacks, for every chain, and `[axis e] max_velocity` / `max_accel`
+  inherit them where unset, so it also sets the extruder limits the
+  planner holds the advance to.
+- **An extruder kernel trades corner quality for extruder acceleration.**
+  It blurs the flow in time while the nozzle slows into a corner, and no
+  pressure advance value can cancel a symmetric blur. On
+  `tools/bench/printer.cfg` at 150 mm/s, a 45° corner bulges +159% with
+  `smooth_time: 0.04`, +71% with 0.02, +24% with 0.01 and +7% with 0.005,
+  at matched K, while the extruder acceleration (`ae`) on the same corner
+  rises from 597 mm/s² at 0.04 to 3436 mm/s² at 0.005.
 
-The three chains against each other at 50–300 mm/s. Corner deviation is
-the worst `peak`/`dip` over the 45°, 90°, 135° corners and the zigzag;
-extruder acceleration is `ae` at those corners and on the travel
-perimeter; the retract column is `|ve|*` of the retract case, extrude-only
-caps 50 mm/s and 5000 mm/s². The bench config is `tools/bench/printer.cfg`
-(10000 mm/s², `corner_deviation: 0.21`, K 0.03). Trident is that config
-at 70000 mm/s², `square_corner_velocity: 5`, K 0.02, with `smooth_mzv`
-x/y shapers at 191 and 129.4 Hz and z unshaped.
+**The recommended setup adapts to the machine: set the extruder's limits
+and the advance's `k`, and put no kernel on the extruder.**
 
-| config | chain | corner dev | e accel, corners (mm/s²) | e accel, travel (mm/s²) | retract case, peak e velocity (mm/s) |
-|---|---|---|---|---|---|
-| bench | kernel st 0.002 | 1.2% | 3,866 | 309,230 | 196 |
-| bench | kernel st 0.005 | 6.9% | 3,422 | 51,872 | 190 |
-| bench | kernel st 0.01 | 24.1% | 2,610 | 13,966 | 179 |
-| bench | kernel st 0.02 | 71.9% | 1,582 | 3,990 | 142 |
-| bench | kernel st 0.04 | 181% | 907 | 1,247 | 78 |
-| bench | ramp τ 0.01 | 0.1% | 4,081 | 17,957 | 50 |
-| bench | ramp τ 0.015 | 0.1% | 3,956 | 7,982 | 50 |
-| bench | ramp τ 0.03 | 0.1% | 3,956 | 2,433 | 50 |
-| bench | hybrid τ 0.015 + st 0.001 | 0.3% | 3,956 | 7,588 | 50 |
-| bench | hybrid τ 0.015 + st 0.002 | 1.2% | 3,878 | 7,207 | 50 |
-| bench | hybrid τ 0.015 + st 0.003 | 2.6% | 3,745 | 6,839 | 50 |
-| bench | hybrid τ 0.015 + st 0.005 | 6.9% | 3,457 | 6,188 | 50 |
-| Trident | kernel st 0.002 | 13.2% | 46,675 | 209,537 | 145 |
-| Trident | kernel st 0.005 | 59.4% | 25,800 | 35,921 | 138 |
-| Trident | kernel st 0.013 | 192% | 7,763 | 6,859 | 123 |
-| Trident | ramp τ 0.015 | 0.1% | 64,615 | 41,293 | 53 |
-| Trident | ramp τ 0.03 | 0.2% | 64,615 | 41,293 | 50 |
-| Trident | hybrid τ 0.015 + st 0.001 | 3.6% | 57,627 | 38,942 | 53 |
-| Trident | hybrid τ 0.015 + st 0.002 | 13.2% | 46,668 | 33,104 | 52 |
+```
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.04
 
-- **The extruder's capability decides the chain.** Less corner error costs
-  extruder acceleration along every family; pick the least error the
-  extruder can follow. The kernel rows are the kernel's own blur: on four
-  machines from 3,000 to 70,000 mm/s², an exact offline convolution of the
-  same shaped path agrees with them within 0.26 points down to
-  `smooth_time: 0.001`, near-stop corners included.
-- **On the bench config the ramp alone lays corners to 0.1%** at 3,960
-  mm/s² on corners and 8,000 mm/s² on travel at τ 0.015, and keeps
-  retracts at the 50 mm/s extrude-only cap. The hybrid τ 0.015 + st 0.001
-  lays 0.3% at the same 3,960 mm/s², its advance reading the ratio-ramped
-  path as the ramp's does, retracts included. A linear advance next to a
-  kernel no longer advances retracts, so the retract column of every kernel
-  row above is stale and their retracts now keep the extrude-only cap too.
-  The bare 0.002 s kernel spikes to 309,000 on travel.
-- **On a high-acceleration machine (Trident, 70000 mm/s²) only the ramp
-  alone reaches ±2%**, at about 65,000 mm/s² of extruder acceleration: the
-  exact advance asks that much at every corner for any τ from 0.015 s up.
-  Every kernel measured, alone or in the hybrid, blurs the corners past 2%
-  (3.6% at st 0.001, 13.2% at 0.002); the hybrid only lowers the kernel's
-  travel spikes (209,537 → 33,104 mm/s² at st 0.002).
-- **The ramp alone currently needs z shaped on such machines.** In the
-  XY→XYZ blend at a layer change the unshaped z exceeds `max_z_accel` many
-  times over ([#525](https://github.com/dderg/serval/issues/525)); the
-  unblurred advance passes that on to the extruder, and the dense top
-  layers are refused. With z shaped (`smooth_mzv` at 100 Hz) they complete.
+[axis e]
+follows: x, y, z
+post_processors: pa
+max_velocity: 50
+max_accel: 5000
+```
+
+`max_velocity` / `max_accel` are what the extruder motor can do, in mm/s
+and mm/s² of filament (on the `[extruder]` axis each one left unset
+inherits `max_extrude_only_velocity` / `max_extrude_only_accel`). The
+advance then runs unblurred along the shaped path, so corners lay the
+commanded bead; the velocity planner slows extruding moves, corners
+included, wherever the exact advance would ask the extruder for more than
+those limits, and derives every ratio step's ramp from them. The cost is
+time, not bead error. A kernel after the advance stays available as the
+explicit override above, for an extruder too weak to follow the exact
+advance at a speed you need.
+
+**The chain comparison needs re-measurement.** The table this section
+carried compared kernel widths, fixed ratio-ramp times and
+kernel + ramp hybrids on `tools/bench/printer.cfg` (10000 mm/s²,
+`corner_deviation: 0.21`, K 0.03) and on a Trident variant (70000 mm/s²,
+`square_corner_velocity: 5`, K 0.02, `smooth_mzv` x/y at 191 and 129.4 Hz,
+z unshaped), at 50–300 mm/s. Fixed ramp times no longer exist, and every
+kernel row was measured without the ratio ramp every chain now runs, so
+its numbers no longer describe the planner. The comparison is to be
+re-measured with the kernel-free chain against kernel widths on both
+configs, the time cost per corner included.
 
 ---
 

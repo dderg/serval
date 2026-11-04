@@ -1,4 +1,4 @@
-use std::ops::{Add, Mul, Sub};
+use std::ops::{Add, Mul};
 
 /// A value and its first three derivatives along one variable, carried
 /// through arithmetic by the product and chain rules.
@@ -60,13 +60,36 @@ impl Jet {
         }
     }
 
-    /// `Σ coeffs[i]·selfⁱ`.
+    /// `Σ coeffs[i]·selfⁱ`, by Horner's rule from the leading coefficient.
     pub(in crate::follower_projection) fn poly(self, coeffs: &[f64]) -> Self {
-        coeffs
+        let (&leading, lower) = coeffs.split_last().expect("a polynomial has coefficients");
+        lower
             .iter()
             .rev()
-            .fold(Self::ZERO, |acc, &coeff| (acc * self).offset(coeff))
+            .fold(Self::constant(leading), |acc, &coeff| {
+                (acc * self).offset(coeff)
+            })
     }
+}
+
+/// [`Jet::poly`]'s value alone, by the same arithmetic.
+pub(in crate::follower_projection) fn horner(x: f64, coeffs: &[f64]) -> f64 {
+    let (&leading, lower) = coeffs.split_last().expect("a polynomial has coefficients");
+    lower
+        .iter()
+        .rev()
+        .fold(leading, |acc, &coeff| acc * x + coeff)
+}
+
+/// [`horner`]'s value, by the same arithmetic, with the polynomial's slope.
+pub(in crate::follower_projection) fn horner_with_slope(x: f64, coeffs: &[f64]) -> (f64, f64) {
+    let (&leading, lower) = coeffs.split_last().expect("a polynomial has coefficients");
+    lower
+        .iter()
+        .rev()
+        .fold((leading, 0.0), |(value, slope), &coeff| {
+            (value * x + coeff, slope * x + value)
+        })
 }
 
 impl Add for Jet {
@@ -79,14 +102,6 @@ impl Add for Jet {
             d2: self.d2 + other.d2,
             d3: self.d3 + other.d3,
         }
-    }
-}
-
-impl Sub for Jet {
-    type Output = Self;
-
-    fn sub(self, other: Self) -> Self {
-        self + other.scale(-1.0)
     }
 }
 
