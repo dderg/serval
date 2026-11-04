@@ -1258,6 +1258,64 @@ fn next_step_size(size: f64, excess: f64) -> f64 {
 /// start on the curvature cap departs it in the first step. `None` when
 /// the speed folds to rest strictly inside the span.
 fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<Vec<RailKnot>>> {
+    let ScalarLaw::DiskRail {
+        accel,
+        kappa0,
+        sigma,
+        brake,
+    } = *law
+    else {
+        unreachable!("only a disk rail is integrated knot by knot")
+    };
+    let key = [
+        v0.to_bits(),
+        ds.to_bits(),
+        accel.to_bits(),
+        kappa0.to_bits(),
+        sigma.to_bits(),
+        u64::from(brake),
+    ];
+    RECENT_RAILS.with(|recent| {
+        if let Some(knots) = recent.borrow().read(&key) {
+            return knots;
+        }
+        let knots = integrate_rail_arc_afresh(law, v0, ds);
+        recent.borrow_mut().keep(key, knots.clone());
+        knots
+    })
+}
+
+/// The rails this thread integrated lately, by their inputs to the bit: a
+/// velocity plan settles the same members from the same speeds again as
+/// moves join the window it plans, and the integration is a pure function
+/// of them. Two generations of [`RECENT_RAILS_GENERATION`] entries each:
+/// the older is dropped when the newer fills.
+#[derive(Default)]
+struct RecentRails {
+    newer: std::collections::HashMap<[u64; 6], Option<Arc<Vec<RailKnot>>>>,
+    older: std::collections::HashMap<[u64; 6], Option<Arc<Vec<RailKnot>>>>,
+}
+
+const RECENT_RAILS_GENERATION: usize = 4096;
+
+impl RecentRails {
+    fn read(&self, key: &[u64; 6]) -> Option<Option<Arc<Vec<RailKnot>>>> {
+        self.newer.get(key).or_else(|| self.older.get(key)).cloned()
+    }
+
+    fn keep(&mut self, key: [u64; 6], knots: Option<Arc<Vec<RailKnot>>>) {
+        if self.newer.len() == RECENT_RAILS_GENERATION {
+            self.older = std::mem::take(&mut self.newer);
+        }
+        self.newer.insert(key, knots);
+    }
+}
+
+thread_local! {
+    static RECENT_RAILS: std::cell::RefCell<RecentRails> = std::cell::RefCell::default();
+}
+
+fn integrate_rail_arc_afresh(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<Vec<RailKnot>>> {
     let start = RailKnot {
         t: 0.0,
         s: 0.0,
