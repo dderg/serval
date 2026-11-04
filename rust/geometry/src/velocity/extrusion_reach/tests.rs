@@ -189,6 +189,50 @@ fn a_stream_settles_every_move_as_the_whole_print_would() {
         .collect();
     let moves = stream(&pieces);
     assert_eq!(streamed(&moves), batch(&moves));
+    let mut reach = reach();
+    let mut budgets = Vec::new();
+    for m in &moves {
+        reach.push(m.clone());
+        budgets.extend(std::iter::from_fn(|| reach.pop().map(|(_, budget)| budget)));
+    }
+    reach.close();
+    budgets.extend(std::iter::from_fn(|| reach.pop().map(|(_, budget)| budget)));
+    assert_eq!(
+        budgets,
+        extrusion_budgets(&moves, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
+    );
+}
+
+#[test]
+fn a_move_reads_the_path_to_the_nearest_rest_where_it_narrows_a_ramp() {
+    let narrows_within = rest_room_reach_mm(150.0);
+    let moves = stream(&[
+        (10.0, RATIO, 150.0),
+        (5.0, 2.0 * RATIO, 150.0),
+        (0.0, 1.0, 40.0),
+        (narrows_within + 1.0, RATIO, 150.0),
+        (narrows_within + 2.0, 2.0 * RATIO, 150.0),
+        (narrows_within - 1.0, RATIO, 150.0),
+    ]);
+    let rooms: Vec<f64> = extrusion_budgets(&moves, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
+        .iter()
+        .map(|budget| budget.rest_room_mm)
+        .collect();
+    let expected = [
+        0.0,
+        5.0,
+        f64::INFINITY,
+        0.0,
+        f64::INFINITY,
+        narrows_within - 1.0,
+    ];
+    assert!(
+        rooms
+            .iter()
+            .zip(expected)
+            .all(|(room, expected)| *room == expected || (room - expected).abs() <= 1e-9),
+        "{rooms:?} against {expected:?}"
+    );
 }
 
 #[test]
@@ -203,7 +247,7 @@ fn the_history_keeps_only_what_a_move_still_to_come_can_reach() {
     }
     let window_s = SPILL_S + RAMP_TIME_S;
     let history_mm = 1000.0 * window_s;
-    let waiting_mm = 150.0 * window_s;
+    let waiting_mm = (150.0 * window_s).max(rest_room_reach_mm(150.0));
     assert!(
         (longest as f64) < history_mm + waiting_mm + 3.0,
         "{longest} marks kept"

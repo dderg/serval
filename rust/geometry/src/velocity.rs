@@ -327,7 +327,7 @@ pub fn brake_horizon(
     let tol = params.integration_tol;
     let mut report = VelocityReport::default();
     let caps = build_move_caps(moves, budgets, Some(accel_scales), params, &mut report)?;
-    let seeded = seed_seam_velocities(moves, &caps, stop_before, 0.0, 0.0, &mut report);
+    let seeded = seed_seam_velocities(moves, &caps, budgets, stop_before, 0.0, 0.0, &mut report);
     let mut brake = 0.0_f64;
     for k in (0..n).rev() {
         let kin = &caps[k].kin;
@@ -401,8 +401,15 @@ where
     let mut report = VelocityReport::default();
     let caps = build_move_caps(moves, budgets, ends.accel_scales, params, &mut report)?;
     check_entry_ceiling(moves, &caps, entry_v, tol)?;
-    let mut plan =
-        seed_seam_velocities(moves, &caps, stop_before, entry_v, ends.exit_v, &mut report);
+    let mut plan = seed_seam_velocities(
+        moves,
+        &caps,
+        budgets,
+        stop_before,
+        entry_v,
+        ends.exit_v,
+        &mut report,
+    );
     forward_pass(moves, &caps, &mut plan, tol)?;
     let shop = ProfileShop::new(&caps, &plan.is_anchor);
     let mut settled = None;
@@ -591,6 +598,7 @@ impl SeamPlan {
 fn seed_seam_velocities(
     moves: &[crate::Move],
     caps: &[MoveCaps],
+    budgets: &[ExtrusionBudget],
     stop_before: &[bool],
     entry_v: f64,
     exit_v: f64,
@@ -616,8 +624,12 @@ fn seed_seam_velocities(
                 disk::limit_speed(kappa_up, up.accel).min(disk::limit_speed(kappa_dn, dn.accel));
             let ceiling = up.flat_ceiling.min(dn.flat_ceiling);
             v[k] = ceiling.min(disk::notch_free_min(ceiling, boundary_vlim));
-            let step_ceiling =
-                extruder_caps::ratio_step_ceiling(&moves[k - 1], &moves[k], up.accel.max(dn.accel));
+            let step_ceiling = extruder_caps::ratio_step_ceiling(
+                &moves[k - 1],
+                &moves[k],
+                up.accel.max(dn.accel),
+                budgets[k].rest_room_mm,
+            );
             if step_ceiling < v[k] {
                 report.ratio_step_bound += 1;
                 v[k] = step_ceiling;

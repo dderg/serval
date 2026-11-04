@@ -395,7 +395,7 @@ pub geometry::ratio_ramp::RatioRampRule::max_velocity_mm_s: f64
 impl geometry::ratio_ramp::RatioRampRule
 pub fn geometry::ratio_ramp::RatioRampRule::demand(&self, f64, &geometry::ratio_ramp::RatioStep) -> (f64, f64)
 pub fn geometry::ratio_ramp::RatioRampRule::ramp_time(&self, &geometry::ratio_ramp::RatioStep) -> f64
-pub fn geometry::ratio_ramp::RatioRampRule::step_speed_cap(&self, f64, f64, f64, f64) -> f64
+pub fn geometry::ratio_ramp::RatioRampRule::step_speed_cap(&self, f64, f64, f64, f64, f64) -> f64
 pub struct geometry::ratio_ramp::RatioStep
 pub geometry::ratio_ramp::RatioStep::accel_mm_s2: f64
 pub geometry::ratio_ramp::RatioStep::jerk_mm_s3: f64
@@ -403,8 +403,10 @@ pub geometry::ratio_ramp::RatioStep::peak_ratio: f64
 pub geometry::ratio_ramp::RatioStep::ratio_step: f64
 pub geometry::ratio_ramp::RatioStep::speed_mm_s: f64
 pub const geometry::ratio_ramp::ADVANCE_VALLEY_SPEED_MM_S: f64
+pub const geometry::ratio_ramp::RATIO_RAMP_ENVELOPE_SLOPE: f64
 pub const geometry::ratio_ramp::RATIO_RAMP_MAX_TIME_S: f64
 pub const geometry::ratio_ramp::RATIO_RAMP_MIN_TIME_S: f64
+pub fn geometry::ratio_ramp::rest_room_reach_mm(f64) -> f64
 pub mod geometry::segment
 pub struct geometry::segment::CubicSegment
 pub geometry::segment::CubicSegment::feedrate_mm_s: f64
@@ -688,6 +690,7 @@ pub struct geometry::velocity::ExtrusionBudget
 pub geometry::velocity::ExtrusionBudget::axes_in_reach: [bool; 3]
 pub geometry::velocity::ExtrusionBudget::ratio_in_reach: f64
 pub geometry::velocity::ExtrusionBudget::rest_holds_s: [f64; 2]
+pub geometry::velocity::ExtrusionBudget::rest_room_mm: f64
 pub struct geometry::velocity::ExtrusionReach
 impl geometry::ExtrusionReach
 pub fn geometry::ExtrusionReach::clear(&mut self)
@@ -944,6 +947,7 @@ pub struct geometry::ExtrusionBudget
 pub geometry::ExtrusionBudget::axes_in_reach: [bool; 3]
 pub geometry::ExtrusionBudget::ratio_in_reach: f64
 pub geometry::ExtrusionBudget::rest_holds_s: [f64; 2]
+pub geometry::ExtrusionBudget::rest_room_mm: f64
 pub struct geometry::ExtrusionReach
 impl geometry::ExtrusionReach
 pub fn geometry::ExtrusionReach::clear(&mut self)
@@ -1090,7 +1094,7 @@ pub geometry::RatioRampRule::max_velocity_mm_s: f64
 impl geometry::ratio_ramp::RatioRampRule
 pub fn geometry::ratio_ramp::RatioRampRule::demand(&self, f64, &geometry::ratio_ramp::RatioStep) -> (f64, f64)
 pub fn geometry::ratio_ramp::RatioRampRule::ramp_time(&self, &geometry::ratio_ramp::RatioStep) -> f64
-pub fn geometry::ratio_ramp::RatioRampRule::step_speed_cap(&self, f64, f64, f64, f64) -> f64
+pub fn geometry::ratio_ramp::RatioRampRule::step_speed_cap(&self, f64, f64, f64, f64, f64) -> f64
 pub struct geometry::RatioStep
 pub geometry::RatioStep::accel_mm_s2: f64
 pub geometry::RatioStep::jerk_mm_s3: f64
@@ -1174,6 +1178,7 @@ pub geometry::VelocityReport::traversal_time_s: f64
 pub const geometry::ADVANCE_VALLEY_SPEED_MM_S: f64
 pub const geometry::CORNER_DEVIATION_SCV_FACTOR: f64
 pub const geometry::MIN_DEVICE_INTERVAL_S: f64
+pub const geometry::RATIO_RAMP_ENVELOPE_SLOPE: f64
 pub const geometry::RATIO_RAMP_MAX_TIME_S: f64
 pub const geometry::RATIO_RAMP_MIN_TIME_S: f64
 pub const geometry::SEAM_VELOCITY_STEP_MM_S: f64
@@ -1190,5 +1195,6 @@ pub fn geometry::line_move([f64; 3], [f64; 3], f64, geometry::frontend::MoveCont
 pub fn geometry::plan_velocity_stops_reconstruct_prefix(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams<'_>, usize) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
 pub fn geometry::plan_velocity_stops_select_prefix<F, W>(&[geometry::frontend::Move], &[bool], &[geometry::ExtrusionBudget], geometry::velocity::VelocityPlanParams<'_>, &W, F) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError> where F: core::ops::function::FnOnce(usize) -> usize, W: geometry::velocity::FanOut
 pub fn geometry::replan_span(&[geometry::frontend::Move], &[bool], &[geometry::ExtrusionBudget], &[f64], geometry::velocity::VelocityPlanParams<'_>, f64) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
+pub fn geometry::rest_room_reach_mm(f64) -> f64
 pub fn geometry::scv_from_corner_deviation(f64, f64) -> f64
 pub fn geometry::seam_requires_stop(&geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig) -> bool
