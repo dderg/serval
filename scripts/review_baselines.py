@@ -395,6 +395,14 @@ def fit_audit(sha: str) -> dict | None:
     cached = AUDIT_DIR / f"{sha}.json"
     if cached.exists():
         return json.loads(cached.read_text())
+    with pending.commit_lock(f"audit-{pending.short(sha)}"):
+        return fit_audit_locked(sha)
+
+
+def fit_audit_locked(sha: str) -> dict | None:
+    cached = AUDIT_DIR / f"{sha}.json"
+    if cached.exists():
+        return json.loads(cached.read_text())
     probe = subprocess.run(
         [
             "git",
