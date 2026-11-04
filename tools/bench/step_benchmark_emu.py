@@ -135,9 +135,9 @@ def measure(out_dir: Path) -> tuple[int, int]:
         result = symbol(elf, "bench_result")
         move_count = symbol(elf, "move_count")
         shutdown = symbol(elf, "sched_shutdown") & ~1
-        handler = symbol(
-            elf, "TIMx_IRQHandler" if g0 else "SysTick_Handler"
-        ) & ~1
+        handler = (
+            symbol(elf, "TIMx_IRQHandler" if g0 else "SysTick_Handler") & ~1
+        )
         uc = Uc(UC_ARCH_ARM, UC_MODE_THUMB | UC_MODE_MCLASS)
         uc.ctl_set_cpu_model(cpu_model(conf))
         map_image(uc, elf)
