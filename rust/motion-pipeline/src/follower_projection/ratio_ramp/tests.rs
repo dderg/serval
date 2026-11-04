@@ -596,7 +596,7 @@ fn a_turnaround_crossing_reads_the_whole_acceleration_whatever_its_rounding() {
     let turn = 0.01;
     for drift in [1e-11, 3e-12] {
         let shaped = turning_around_with_drift(turn, drift);
-        let crossing = Crossing::at(&ShapedLeaders::of(&shaped, &[0, 1]), turn);
+        let crossing = Crossing::valley_at(&ShapedLeaders::of(&shaped, &[0, 1]), turn);
         assert!(
             crossing.turns_around(),
             "a turnaround drifting {drift} mm/s along y crosses as {crossing:?}"

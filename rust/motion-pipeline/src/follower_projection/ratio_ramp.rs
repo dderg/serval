@@ -2045,24 +2045,12 @@ struct Crossing {
 }
 
 impl Crossing {
-    /// The crossing at one instant, which spans no interval to read a jerk
-    /// over. Where the speed is a zero's rounding — at rest, or at a
-    /// turnaround, under what [`TURNAROUND_SPEED_TIME_S`] of the
-    /// acceleration builds — its direction is rounding too, and so is the
-    /// tangential acceleration read along it. The speed leaves a zero at
-    /// the whole acceleration.
-    fn at(leaders: &ShapedLeaders, t: f64) -> Self {
-        let (speed, path_accel) = Self::speed_and_path_accel(leaders, t);
-        Self {
-            speed,
-            rate: path_accel.abs(),
-            jerk: 0.0,
-        }
-    }
-
     /// The leaders' path speed at `t` and their path acceleration, signed,
-    /// as they leave `t`: from a zero of the speed, their whole
-    /// acceleration.
+    /// as they leave `t`. Where the speed is a zero's rounding — at rest,
+    /// or at a turnaround, under what [`TURNAROUND_SPEED_TIME_S`] of the
+    /// acceleration builds — its direction is rounding too, and so is the
+    /// tangential acceleration read along it: the speed leaves a zero at
+    /// the whole acceleration.
     fn speed_and_path_accel(leaders: &ShapedLeaders, t: f64) -> (f64, f64) {
         let motion = leaders.motion(t);
         let speed = motion.speed();
@@ -2074,20 +2062,33 @@ impl Crossing {
         }
     }
 
-    /// How a valley at `t` reads the leaders crossing it: as [`Self::at`],
-    /// but a crawl, under [`ADVANCE_VALLEY_SPEED_MM_S`], they leave under
-    /// the whole of their acceleration, mostly across the path where they
-    /// nearly reverse, not the path speed's rate at its minimum.
+    /// How a valley at `t` reads the leaders crossing it, with the jerk
+    /// [`Self::needs_valley`] weighs: the path speed's second rate at `t`,
+    /// which carries the tangent's turning `a⊥²/v` through a crawl. Under
+    /// [`ADVANCE_VALLEY_SPEED_MM_S`] they leave under the whole of their
+    /// acceleration, mostly across the path where they nearly reverse, not
+    /// the path speed's rate at its minimum.
     fn valley_at(leaders: &ShapedLeaders, t: f64) -> Self {
-        let crossing = Self::at(leaders, t);
-        if crossing.speed < ADVANCE_VALLEY_SPEED_MM_S {
-            Self {
-                rate: leaders.motion(t).accel_norm(),
-                ..crossing
-            }
-        } else {
-            crossing
+        let motion = leaders.motion(t);
+        let speed = motion.speed();
+        let accel = motion.accel_norm();
+        if speed <= accel * TURNAROUND_SPEED_TIME_S {
+            return Self {
+                speed,
+                rate: accel,
+                jerk: 0.0,
+            };
         }
+        let rate = if speed < ADVANCE_VALLEY_SPEED_MM_S {
+            accel
+        } else {
+            motion.speed_deriv(speed).abs()
+        };
+        let jerk = motion
+            .speed_second(speed)
+            .unwrap_or_else(|| leaders.speed_second(t, speed))
+            .abs();
+        Self { speed, rate, jerk }
     }
 
     /// The fastest and the most accelerating the leaders are over `window`,
