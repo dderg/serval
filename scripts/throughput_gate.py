@@ -199,18 +199,25 @@ class Verdict:
 
 @dataclass(frozen=True)
 class FloorShortfall:
+    """A config's Pi 2-core worst windows below PI_FLOOR_X, as the gate
+    predicts them from (Ir, the live ratio), owned by GitHub issue `issue`."""
+
     issue: int
-    predicted_x: float
+    predicted_x: tuple[float, float]
 
     def __post_init__(self) -> None:
-        if not self.predicted_x < PI_FLOOR_X:
+        if not all(value < PI_FLOOR_X for value in self.predicted_x):
             raise ValueError(
-                f"a floor shortfall pins a prediction below {PI_FLOOR_X}x, "
-                f"not {self.predicted_x}x"
+                f"a floor shortfall pins predictions below {PI_FLOOR_X}x, "
+                f"not {self.predicted_x}"
             )
 
 
-FLOOR_SHORTFALLS: dict[str, FloorShortfall] = {}
+FLOOR_SHORTFALLS: dict[str, FloorShortfall] = {
+    "tools/bench/configs/trident_kernel.cfg": FloorShortfall(
+        issue=693, predicted_x=(1.63, 1.37)
+    ),
+}
 assert set(FLOOR_SHORTFALLS) <= set(CONFIGS), (
     "a floor pin names an ungated config"
 )
@@ -749,30 +756,34 @@ def drift_problems(
     return []
 
 
-def floor_miss(
-    source: str, predicted: float, pin: FloorShortfall | None
+def floor_miss(source: str, predicted: float) -> str | None:
+    if predicted >= PI_FLOOR_X:
+        return None
+    return (
+        f"the Pi 2-core worst window {source} predicts, {predicted:.2f}x, "
+        f"is below the {PI_FLOOR_X:.1f}x floor"
+    )
+
+
+def shortfall_miss(
+    source: str, predicted: float, pinned_x: float, issue: int
 ) -> str | None:
     window = f"the Pi 2-core worst window {source} predicts, {predicted:.2f}x,"
-    if pin is None:
-        if predicted >= PI_FLOOR_X:
-            return None
-        return f"{window} is below the {PI_FLOOR_X:.1f}x floor"
     if predicted >= PI_FLOOR_X:
         return (
             f"{window} reaches the {PI_FLOOR_X:.1f}x floor: unpin the "
-            f"shortfall FLOOR_SHORTFALLS holds for #{pin.issue}"
+            f"shortfall FLOOR_SHORTFALLS holds for #{issue}"
         )
-    drift_pct = 100.0 * (predicted - pin.predicted_x) / pin.predicted_x
+    drift_pct = 100.0 * (predicted - pinned_x) / pinned_x
     if drift_pct < -SHORTFALL_TOLERANCE_PCT:
         return (
             f"{window} grew the floor shortfall pinned at "
-            f"{pin.predicted_x:.2f}x for #{pin.issue} ({drift_pct:+.2f} %)"
+            f"{pinned_x:.2f}x for #{issue} ({drift_pct:+.2f} %)"
         )
     if drift_pct > SHORTFALL_TOLERANCE_PCT:
         return (
             f"{window} shrank the floor shortfall pinned at "
-            f"{pin.predicted_x:.2f}x for #{pin.issue} ({drift_pct:+.2f} %): "
-            "re-pin it"
+            f"{pinned_x:.2f}x for #{issue} ({drift_pct:+.2f} %): re-pin it"
         )
     return None
 
@@ -800,8 +811,18 @@ def judge(
             f"no Pi calibration: run {RECHECK_COMMAND} or --calibrate-pi-worst"
         )
     else:
-        for source, value in zip(("Ir", "the live ratio"), predicted):
-            if miss := floor_miss(source, value, shortfalls.get(config)):
+        pin = shortfalls.get(config)
+        for index, (source, value) in enumerate(
+            zip(("Ir", "the live ratio"), predicted)
+        ):
+            miss = (
+                floor_miss(source, value)
+                if pin is None
+                else shortfall_miss(
+                    source, value, pin.predicted_x[index], pin.issue
+                )
+            )
+            if miss:
                 floor_misses.append(miss)
     if PI_FLOOR_FAILS:
         problems.extend(floor_misses)

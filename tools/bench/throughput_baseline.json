@@ -1,42 +1,42 @@
 {
   "slice_lines": 1000,
-  "commit": "0f479e89e4a17d26ff754d7aead4611c9369393e",
-  "reason": "provable fits: the ratio ramp modelled in follower enclosures and every fitted piece proven (witnesses removed); Pi 2-core worst window >= 2.06x on every config",
+  "commit": "18a9048ffe339fb78ff9997f2672e92abee4efb0",
+  "reason": "[axis e] max_accel 20000 on the gated direct-drive configs (extruder-accel-semantics): with the extruder no longer capping corners the dense print streams in less time for similar work, so the Pi realtime factor falls; trident_kernel's 2-core worst window (1.37x) falls below the 2.0x floor and is pinned to #693",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 19914918820,
-      "stream_secs": 8.541,
+      "ir": 23081592112,
+      "stream_secs": 6.528,
       "pi_2core": {
-        "worst_x_reference": 3.811364395954888,
+        "worst_x_reference": 2.6,
         "worst_x": [
-          4.23,
-          4.26
+          2.62,
+          2.6
         ],
-        "commit": "6aa1cb2757343385a67c2bae4cef824a0b21e368"
+        "commit": "18a9048ffe339fb78ff9997f2672e92abee4efb0"
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 27371139757,
+      "ir": 27871838708,
       "stream_secs": 6.202,
       "pi_2core": {
-        "worst_x_reference": 2.070231256080688,
+        "worst_x_reference": 2.02,
         "worst_x": [
-          2.28,
-          2.28
+          2.02,
+          2.02
         ],
-        "commit": "6aa1cb2757343385a67c2bae4cef824a0b21e368"
+        "commit": "18a9048ffe339fb78ff9997f2672e92abee4efb0"
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 28256044081,
-      "stream_secs": 7.543,
+      "ir": 31613645705,
+      "stream_secs": 5.533,
       "pi_2core": {
-        "worst_x_reference": 2.128770844865244,
+        "worst_x_reference": 1.37,
         "worst_x": [
-          2.41,
-          2.39
+          1.37,
+          1.37
         ],
-        "commit": "6aa1cb2757343385a67c2bae4cef824a0b21e368"
+        "commit": "18a9048ffe339fb78ff9997f2672e92abee4efb0"
       }
     }
   },
