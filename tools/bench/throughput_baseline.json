@@ -2,45 +2,45 @@
   "slice_lines": 1000,
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 13682843185,
+      "ir": 13113057580,
       "stream_secs": 6.588,
-      "reason": "Initial baselines: first 1000 lines of voron_dense_top_layers.gcode, synchronous single-thread replay",
-      "commit": "d7e05da434d131b6108584625e9c40af24d1b094",
+      "reason": "Initial baselines on main after #647 and #649: first 1000 lines of voron_dense_top_layers.gcode, synchronous single-thread replay",
+      "commit": "fb9ef9a3c6856e62985cadb5d12d6b48a952cd0b",
       "pi_2core": {
-        "k": 4506947436.46782,
+        "k": 4398885435.913782,
         "worst_x": [
-          2.19,
-          2.17
+          2.21,
+          2.21
         ],
-        "commit": "d7e05da434d131b6108584625e9c40af24d1b094"
+        "commit": "fb9ef9a3c6856e62985cadb5d12d6b48a952cd0b"
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 13395874232,
+      "ir": 12594144721,
       "stream_secs": 6.202,
-      "reason": "Initial baselines: first 1000 lines of voron_dense_top_layers.gcode, synchronous single-thread replay",
-      "commit": "d7e05da434d131b6108584625e9c40af24d1b094",
+      "reason": "Initial baselines on main after #647 and #649: first 1000 lines of voron_dense_top_layers.gcode, synchronous single-thread replay",
+      "commit": "fb9ef9a3c6856e62985cadb5d12d6b48a952cd0b",
       "pi_2core": {
-        "k": 4795040437.768462,
+        "k": 4568981880.401484,
         "worst_x": [
           2.25,
-          2.22
+          2.25
         ],
-        "commit": "d7e05da434d131b6108584625e9c40af24d1b094"
+        "commit": "fb9ef9a3c6856e62985cadb5d12d6b48a952cd0b"
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 13751512977,
+      "ir": 13402078459,
       "stream_secs": 7.404,
-      "reason": "Initial baselines: first 1000 lines of voron_dense_top_layers.gcode, synchronous single-thread replay",
-      "commit": "d7e05da434d131b6108584625e9c40af24d1b094",
+      "reason": "Initial baselines on main after #647 and #649: first 1000 lines of voron_dense_top_layers.gcode, synchronous single-thread replay",
+      "commit": "fb9ef9a3c6856e62985cadb5d12d6b48a952cd0b",
       "pi_2core": {
-        "k": 4327529070.287683,
+        "k": 4217563858.653431,
         "worst_x": [
-          2.34,
-          2.33
+          2.33,
+          2.34
         ],
-        "commit": "d7e05da434d131b6108584625e9c40af24d1b094"
+        "commit": "fb9ef9a3c6856e62985cadb5d12d6b48a952cd0b"
       }
     }
   }
