@@ -350,11 +350,16 @@ impl<S: TrackSignal> TrackSignal for ShiftedTrackSignal<S> {
 pub(crate) struct ConvolutionSignal<'a, S: TrackSignal> {
     evaluated: S,
     exact: ExactConvolution<'a>,
+    recent: exact::RecentChunks,
 }
 
 impl<'a, S: TrackSignal> ConvolutionSignal<'a, S> {
     pub(crate) fn new(evaluated: S, exact: ExactConvolution<'a>) -> Self {
-        Self { evaluated, exact }
+        Self {
+            evaluated,
+            exact,
+            recent: exact::RecentChunks::default(),
+        }
     }
 }
 
@@ -372,7 +377,7 @@ impl<S: TrackSignal> TrackSignal for ConvolutionSignal<'_, S> {
     }
 
     fn exact_polynomial_on(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
-        self.exact.pieces_over(lo, hi)
+        self.exact.pieces_over(lo, hi, &self.recent)
     }
 }
 
@@ -1797,21 +1802,21 @@ impl<'a> ShapedSignalSource<'a> {
             },
             self.table.input_jumps().to_vec(),
         );
-        ConvolutionSignal {
-            evaluated: ShiftedTrackSignal::new(
+        ConvolutionSignal::new(
+            ShiftedTrackSignal::new(
                 WithGainImpulses {
                     convolved: relative,
                     response: self.gain_impulse_response.as_ref(),
                 },
                 -self.shaped_offset,
             ),
-            exact: ExactConvolution {
+            ExactConvolution {
                 table: &self.table,
                 kernel: &self.exact_kernel,
                 impulses: self.table.gain_impulses(),
                 position_offset: self.shaped_offset,
             },
-        }
+        )
     }
 }
 

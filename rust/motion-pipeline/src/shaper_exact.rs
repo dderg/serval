@@ -529,6 +529,40 @@ pub(crate) struct ExactConvolution<'a> {
     pub position_offset: f64,
 }
 
+/// The chunks one signal's spans have read their exact polynomials off
+/// lately, by centre and radius: a span's pieces reach an ulp into the
+/// chunks of the sub-intervals beside it ([`ExactConvolution::pieces_over`]),
+/// whose own spans read those chunks whole after it.
+#[derive(Default)]
+pub(crate) struct RecentChunks(std::sync::Mutex<RecentChunkList>);
+
+type RecentChunkList = Vec<((u64, u64), Option<[LocalPolynomial; 3]>)>;
+
+/// How many chunks [`RecentChunks`] keeps: a span reaches into one on
+/// either side.
+const RECENT_CHUNKS: usize = 8;
+
+impl RecentChunks {
+    fn read(
+        &self,
+        center: f64,
+        radius: f64,
+        compute: impl FnOnce() -> Option<[LocalPolynomial; 3]>,
+    ) -> Option<[LocalPolynomial; 3]> {
+        let key = (center.to_bits(), radius.to_bits());
+        let mut recent = self.0.lock().expect("a chunk computation panicked");
+        if let Some(&(_, polynomials)) = recent.iter().find(|(held, _)| *held == key) {
+            return polynomials;
+        }
+        let polynomials = compute();
+        if recent.len() == RECENT_CHUNKS {
+            recent.remove(0);
+        }
+        recent.push((key, polynomials));
+        polynomials
+    }
+}
+
 /// One point mass of `x` and its derivatives: `weights[m]` multiplies
 /// `δ⁽ᵐ⁾(s − at)` in derivative order `order`.
 struct PointMass {
@@ -550,7 +584,12 @@ impl ExactConvolution<'_> {
     /// table holds, the float past it reads the table only by rounding: it
     /// is left to its neighbour, whose polynomial reaches an ulp past its
     /// break.
-    pub(crate) fn pieces_over(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
+    pub(crate) fn pieces_over(
+        &self,
+        lo: f64,
+        hi: f64,
+        recent: &RecentChunks,
+    ) -> Option<Vec<ExactPiece>> {
         assert!(
             lo <= hi,
             "exact polynomial over the empty interval [{lo}, {hi}]"
@@ -619,7 +658,8 @@ impl ExactConvolution<'_> {
                 let center =
                     (chunk_lo + 0.5 * (chunk_hi - chunk_lo)).clamp(first_inside, last_inside);
                 let radius = next_toward((center - chunk_lo).max(chunk_hi - center), f64::INFINITY);
-                let Some(pva) = self.polynomials_at(center, radius) else {
+                let Some(pva) = recent.read(center, radius, || self.polynomials_at(center, radius))
+                else {
                     let (first_held, last_held) = (first_inside.max(lo), last_inside.min(hi));
                     if first_held == last_held && (first_held == lo || first_held == hi) {
                         continue;

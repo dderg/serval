@@ -109,7 +109,10 @@ fn the_budget_is_the_recorded_fraction_of_the_clock_and_each_motors_mode() {
             ..f401(MODE_BOTH_EDGE)
         })
         .unwrap(),
-        Some((52.5e6, vec![160, 160, 301, 301]))
+        Some((
+            step_capacity_fraction() * F401_CLOCK_HZ,
+            vec![160, 160, 301, 301]
+        ))
     );
     assert_eq!(
         step_capacity_budget(PyStepBenchmark {
