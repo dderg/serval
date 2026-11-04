@@ -48,8 +48,10 @@ Columns, per case and speed (worst over the case's corners):
   for cases that extrude one ratio throughout (``n/a`` otherwise). The two
   runs need not travel the same path: the extruder caps budget the
   toolhead's acceleration for the advance, so its corners are planned and
-  shaped differently. An advance vanishes at rest, so anything above ~1e-6
-  is lost or invented material.
+  shaped differently. An advance vanishes at rest; the remainder is the
+  chord rule at the spills (docs/rewrite/shaper.md, "Followers"), up to
+  about 1e-4 mm where the two plans' spills curve differently, so anything
+  well above that is lost or invented material.
 """
 
 from __future__ import annotations
