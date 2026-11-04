@@ -30,7 +30,10 @@ fn gcode(points: &[(f64, f64)], speed_mm_s: f64) -> String {
     let (mut x, mut y) = (0.0, 0.0);
     for &(to_x, to_y) in points {
         let length = libm::hypot(to_x - x, to_y - y);
-        lines.push(format!("G1 X{to_x:.12} Y{to_y:.12} E{:.12}", ratio * length));
+        lines.push(format!(
+            "G1 X{to_x:.12} Y{to_y:.12} E{:.12}",
+            ratio * length
+        ));
         (x, y) = (to_x, to_y);
     }
     lines.join("\n") + "\n"
