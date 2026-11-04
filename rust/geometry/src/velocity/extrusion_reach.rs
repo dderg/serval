@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
 
 use crate::Move;
-use crate::frontend::ExtruderCaps;
+use crate::frontend::{ExtruderCaps, LeaderSpill};
 use crate::path::CurvatureProfile;
-use crate::ratio_ramp::RATIO_RAMP_MAX_TIME_S;
+use crate::ratio_ramp::{RATIO_RAMP_MAX_TIME_S, rest_room_reach_mm};
 
 /// The largest extrusion ratio `m` lays along the path on `axis`: 0 for
 /// travel, retraction (a negative ratio) and an extrude-only move, whose
@@ -28,32 +28,45 @@ pub(super) fn extruding_ratio(m: &Move, axis: usize) -> f64 {
 /// time. The ratio ramp lays there the ratio within its half-width: at most
 /// half the path the leaders cover in the longest ramp `τ_max`,
 /// `v·τ_max/2` at path speeds up to `v`, and never across a rest of the
-/// leaders. Those speeds are the leaders' within `2T + τ_max` of the move.
+/// leaders. Those speeds are the leaders' within `2T + τ_max` of the move;
+/// the kernels spill the move's acceleration budget `accel_mm_s2` into the
+/// shaped speed on top of them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Reach {
     axis: usize,
     spill_s: f64,
+    leader_spill: LeaderSpill,
+    accel_mm_s2: f64,
 }
 
 impl Reach {
-    fn of(caps: &ExtruderCaps) -> Self {
+    fn of(caps: &ExtruderCaps, accel_mm_s2: f64) -> Self {
         Self {
             axis: caps.axis_index,
             spill_s: 2.0 * caps.leader_kernel_reach_s,
+            leader_spill: caps.leader_spill,
+            accel_mm_s2,
         }
     }
 
     fn speed_window_s(&self) -> f64 {
         self.spill_s + RATIO_RAMP_MAX_TIME_S
     }
+
+    /// The fastest the shaped leaders move where the planned speed stays
+    /// within `planned`.
+    fn shaped_speed(&self, planned: f64) -> f64 {
+        self.leader_spill.mass * planned + self.leader_spill.moment_s * self.accel_mm_s2
+    }
 }
 
 /// One move as the reach reads it: where it lies along the stream's path,
 /// the fastest the leaders can cross it and the least time they take, the
 /// spatial axes it moves on, what it extrudes, the reach of the extruder it
-/// is budgeted for, and how long the leaders' shaped path moves on past a
-/// raw stop and before a raw start. An extrude-only move is a rest of the
-/// leaders.
+/// is budgeted for, how long the leaders' shaped path moves on past a raw
+/// stop and before a raw start, and where the leaders last rest before it.
+/// An extrude-only move is a rest of the leaders, and so is the stream's
+/// start.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Mark {
     start_mm: f64,
@@ -65,6 +78,7 @@ struct Mark {
     extruding: Option<(usize, f64)>,
     reach: Option<Reach>,
     leader_kernel_reach_s: f64,
+    rest_behind_mm: f64,
 }
 
 impl Mark {
@@ -164,6 +178,8 @@ struct Marks {
     path_end_mm: f64,
     dropped: Dropped,
     extrude_only: ExtrudeOnly,
+    last_rest_mm: f64,
+    rests_mm: VecDeque<f64>,
 }
 
 impl Marks {
@@ -173,6 +189,8 @@ impl Marks {
             path_end_mm: 0.0,
             dropped: Dropped::default(),
             extrude_only,
+            last_rest_mm: 0.0,
+            rests_mm: VecDeque::new(),
         }
     }
 
@@ -195,12 +213,13 @@ impl Marks {
             ),
         };
         self.path_end_mm += length;
+        let rest = m.segment.spatial.is_none();
         self.marks.push_back(Mark {
             start_mm,
             end_mm: self.path_end_mm,
             ceiling_mm_s,
             least_time_s,
-            rest: m.segment.spatial.is_none(),
+            rest,
             moves_on: m.segment.spatial.as_ref().map_or([false; 3], moves_on),
             extruding: m
                 .limits
@@ -210,12 +229,17 @@ impl Marks {
                 .limits
                 .extruder
                 .filter(|_| m.segment.spatial.is_some())
-                .map(|caps| Reach::of(&caps)),
+                .map(|caps| Reach::of(&caps, m.limits.accel_mm_s2)),
             leader_kernel_reach_s: m
                 .limits
                 .extruder
                 .map_or(0.0, |caps| caps.leader_kernel_reach_s),
+            rest_behind_mm: self.last_rest_mm,
         });
+        if rest {
+            self.last_rest_mm = self.path_end_mm;
+            self.rests_mm.push_back(self.path_end_mm);
+        }
     }
 
     /// The marks on one side of `marks[index]`, nearest first.
@@ -370,6 +394,18 @@ impl Marks {
         }
     }
 
+    /// The fastest planned ceiling the leaders reach within the speed
+    /// window of `marks[index]`, `None` while moves still to come could
+    /// raise it.
+    fn fastest_in_reach(&self, index: usize, reach: Reach, closed: bool) -> Option<f64> {
+        let window_s = reach.speed_window_s();
+        let mut fastest = self.marks[index].ceiling_mm_s;
+        for ahead in [false, true] {
+            fastest = fastest.max(self.fastest_beside(index, ahead, window_s, closed)?);
+        }
+        Some(fastest)
+    }
+
     /// The largest ratio the demand of `marks[index]` meets, `None` while
     /// moves still to come could add to it. `closed`: none will.
     fn ratio_in_reach(&self, index: usize, closed: bool) -> Option<f64> {
@@ -377,17 +413,41 @@ impl Marks {
         let Some(reach) = mark.reach else {
             return Some(0.0);
         };
-        let window_s = reach.speed_window_s();
-        let mut fastest = mark.ceiling_mm_s;
-        for ahead in [false, true] {
-            fastest = fastest.max(self.fastest_beside(index, ahead, window_s, closed)?);
-        }
-        let ramp_mm = 0.5 * fastest * RATIO_RAMP_MAX_TIME_S;
+        let ramp_mm = 0.5 * self.fastest_in_reach(index, reach, closed)? * RATIO_RAMP_MAX_TIME_S;
         let mut ratio = mark.ratio_on(reach.axis);
         for ahead in [false, true] {
             ratio = ratio.max(self.ratio_beside(index, ahead, reach, ramp_mm, closed)?);
         }
         Some(ratio)
+    }
+
+    /// The path from the start of `marks[index]` to the leaders' nearest
+    /// rest behind or ahead of it — an extrude-only move or an end of the
+    /// stream — where it is near enough to narrow the ratio ramp of a step
+    /// there ([`rest_room_reach_mm`] of the fastest the shaped leaders cross
+    /// it), infinite where none is. `None` while moves still to come could
+    /// bring one near.
+    fn rest_room(&self, index: usize, closed: bool) -> Option<f64> {
+        let mark = self.marks[index];
+        let Some(reach) = mark.reach else {
+            return Some(f64::INFINITY);
+        };
+        let narrows_within =
+            rest_room_reach_mm(reach.shaped_speed(self.fastest_in_reach(index, reach, closed)?));
+        let behind = mark.start_mm - mark.rest_behind_mm;
+        let first_ahead = self.rests_mm.partition_point(|&rest| rest < mark.start_mm);
+        let ahead = match self.rests_mm.get(first_ahead) {
+            Some(rest) => rest - mark.start_mm,
+            None if closed => self.path_end_mm - mark.start_mm,
+            None if self.path_end_mm - mark.start_mm > narrows_within => f64::INFINITY,
+            None => return None,
+        };
+        let room = behind.min(ahead);
+        Some(if room <= narrows_within {
+            room
+        } else {
+            f64::INFINITY
+        })
     }
 
     /// How long an extrude-only `marks[index]` holds the toolhead still
@@ -421,11 +481,15 @@ impl Marks {
             ratio_in_reach: self.ratio_in_reach(index, closed)?,
             axes_in_reach: self.axes_in_reach(index, closed)?,
             rest_holds_s: self.rest_holds(index, closed)?,
+            rest_room_mm: self.rest_room(index, closed)?,
         })
     }
 
     fn drop_front(&mut self) {
         let mark = self.marks.pop_front().expect("a mark to drop");
+        if mark.rest {
+            self.rests_mm.pop_front();
+        }
         self.dropped.absorb(&mark);
     }
 }
@@ -433,14 +497,17 @@ impl Marks {
 /// What a move's plan takes from the moves around it: the largest
 /// extrusion ratio its extruder demand can meet, the spatial axes the path
 /// moves on within the leaders' spill of it, whose kernels the shaped
-/// path's jerk there passes through, and for an extrude-only move how long
-/// it holds the toolhead still before and after its own motion, so the
-/// extruder never adds the leaders' spill to it.
+/// path's jerk there passes through, for an extrude-only move how long it
+/// holds the toolhead still before and after its own motion, so the
+/// extruder never adds the leaders' spill to it, and the path from its
+/// start to the leaders' nearest rest where that narrows the ratio ramp of
+/// a step there.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExtrusionBudget {
     pub ratio_in_reach: f64,
     pub axes_in_reach: [bool; 3],
     pub rest_holds_s: [f64; 2],
+    pub rest_room_mm: f64,
 }
 
 /// Each move's [`ExtrusionBudget`]: the largest extrusion ratio within its
@@ -480,9 +547,10 @@ impl ExtrusionReach {
             self.clear();
         }
         if let Some(caps) = m.limits.extruder {
-            self.history_mm = self
-                .history_mm
-                .max(m.limits.max_velocity_mm_s * Reach::of(&caps).speed_window_s());
+            self.history_mm = self.history_mm.max(
+                m.limits.max_velocity_mm_s
+                    * Reach::of(&caps, m.limits.accel_mm_s2).speed_window_s(),
+            );
         }
         self.marks.push(&m);
         self.pending.push_back(m);
