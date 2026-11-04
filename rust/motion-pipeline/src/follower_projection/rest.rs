@@ -132,7 +132,9 @@ impl FollowerSignal<'_> {
 
     /// Collects the windows of `(lo, hi)` no leader's speed bound rules a
     /// rest out of: halved down to [`REST_SEARCH_DEPTH`], or kept whole
-    /// where every leader's speed bound is under the floor throughout.
+    /// where every leader's speed bound is under the floor throughout. A
+    /// window the leaders' cached pieces prove faster than the floor is
+    /// ruled out before any model of it is built.
     fn rest_candidates(
         &self,
         (lo, hi): (f64, f64),
@@ -144,6 +146,13 @@ impl FollowerSignal<'_> {
             return;
         };
         let window = Window::new(lo, hi);
+        if self
+            .leaders
+            .speed_floor(lo, window.center, hi)
+            .is_some_and(|speed| speed > floor)
+        {
+            return;
+        }
         let speed_squared = windows.leaders.iter().fold(
             TaylorModel::constant(Ball::exact(0.0)),
             |sum, (_, axis)| {

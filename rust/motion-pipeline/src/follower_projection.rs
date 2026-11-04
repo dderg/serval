@@ -2235,6 +2235,13 @@ impl LeaderPieces {
         (t >= piece.u_start - slack && t <= piece.u_end + slack).then_some(piece)
     }
 
+    /// The piece `at` reads, when it also reads `[lo, hi]` around `at`.
+    fn piece_over(&self, lo: f64, at: f64, hi: f64) -> Option<&BezierPiece> {
+        let piece = self.piece_at(at)?;
+        let slack = 1e-9 * (piece.u_end - piece.u_start).max(1.0);
+        (lo >= piece.u_start - slack && hi <= piece.u_end + slack).then_some(piece)
+    }
+
     fn pva(&self, t: f64) -> Option<(f64, f64, f64)> {
         let piece = self.piece_at(t)?;
         let (p, v, a) = polynomial_pva(&piece.coeffs, t - piece.u_start);
@@ -2331,9 +2338,10 @@ impl<'a> ShapedLeaders<'a> {
     }
 
     /// A lower bound on the leaders' speed over `[lo, hi]`, when every
-    /// leader reads one cached piece across it: their velocity's tangent
-    /// line at `at`, at its nearest to rest over the interval, less the most
-    /// the pieces' higher terms add to it and their evaluation's rounding.
+    /// leader holds or reads one cached piece across it: their velocity's
+    /// tangent line at `at`, at its nearest to rest over the interval, less
+    /// the most the pieces' higher terms add to it and their evaluation's
+    /// rounding.
     fn speed_floor(&self, lo: f64, at: f64, hi: f64) -> Option<f64> {
         let leaders = self.axes.len();
         assert!(
@@ -2346,12 +2354,11 @@ impl<'a> ShapedLeaders<'a> {
         let mut acceleration = [0.0; MAX_LEADERS];
         let mut remainder_squared = 0.0;
         let mut magnitude = 0.0;
-        for (index, pieces) in self.pieces.iter().enumerate() {
-            let pieces = pieces.as_ref()?;
-            let piece = pieces.piece_at(lo)?;
-            if !std::ptr::eq(piece, pieces.piece_at(hi)?) {
-                return None;
+        for (index, (axis, pieces)) in self.axes.iter().zip(self.pieces.iter()).enumerate() {
+            if matches!(axis, ContinuousAxis::Hold { .. }) {
+                continue;
             }
+            let piece = pieces.as_ref()?.piece_over(lo, at, hi)?;
             let shifted = taylor_shifted(&piece.coeffs, at - piece.u_start);
             velocity[index] = shifted.get(1).copied().unwrap_or(0.0);
             acceleration[index] = 2.0 * shifted.get(2).copied().unwrap_or(0.0);
