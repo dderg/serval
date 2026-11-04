@@ -132,6 +132,7 @@ struct SeamMoments {
     step: [f64; SMOOTHED_RAMP.len()],
     slope_step: [f64; SMOOTHED_HALF_SQUARE.len()],
     behind: [f64; 3],
+    steps: bool,
 }
 
 impl SeamMoments {
@@ -141,6 +142,7 @@ impl SeamMoments {
             powers[k] = powers[k - 1] * u;
         }
         if seam.step != 0.0 {
+            self.steps = true;
             for (moment, power) in self.step.iter_mut().zip(powers) {
                 *moment += seam.step * power;
             }
@@ -176,17 +178,18 @@ impl SeamMoments {
 
     /// `X` with the width `h` and the table's slope `slope_left` at the
     /// window's back edge: the moments of power `k` of the slope steps
-    /// weigh with `h²⁻ᵏ`, of the ratio steps with `h¹⁻ᵏ`.
+    /// weigh with `h²⁻ᵏ`, of the ratio steps with `h¹⁻ᵏ`; `h⁰` is no
+    /// product.
     fn correction(&self, h: Jet, slope_left: f64) -> Jet {
         let inverse = h.recip();
         let inverse_squared = inverse * inverse;
         let powers_of_h = [
-            h * h,
-            h,
-            Jet::constant(1.0),
-            inverse,
-            inverse_squared,
-            inverse_squared * inverse,
+            Some(h * h),
+            Some(h),
+            None,
+            Some(inverse),
+            Some(inverse_squared),
+            Some(inverse_squared * inverse),
         ];
         let kink = Jet {
             value: -self.behind[0],
@@ -201,10 +204,13 @@ impl SeamMoments {
                 let slope_term =
                     Self::moment(&self.slope_step, index).scale(SMOOTHED_HALF_SQUARE[index]);
                 let weight = match index.checked_sub(1) {
-                    Some(k) => slope_term + Self::moment(&self.step, k).scale(SMOOTHED_RAMP[k]),
+                    Some(k) if self.steps => {
+                        slope_term + Self::moment(&self.step, k).scale(SMOOTHED_RAMP[k])
+                    }
+                    Some(_) => slope_term,
                     None => slope_term.offset(KERNEL_HALF_VARIANCE * slope_left),
                 };
-                total + power * weight
+                total + power.map_or(weight, |power| power * weight)
             })
     }
 }
