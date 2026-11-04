@@ -503,8 +503,9 @@ If the parallel spans exceed the global refinement budget, that target is
 rerun serially so failure behavior stays deterministic.
 
 Follower projection may evaluate a leader through cached local Bezier power
-polynomials. Every cache candidate is checked against the original NURBS at
-interior points before use. An ill-conditioned conversion falls back to direct
+polynomials. Every cache candidate piece is checked against the original NURBS
+at its far Gauss node, where the power basis's conversion error has grown the
+most, before use. An ill-conditioned conversion falls back to direct
 NURBS evaluation; it must never inject false velocity or acceleration into the
 follower source.
 

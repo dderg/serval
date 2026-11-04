@@ -2200,27 +2200,28 @@ impl LeaderPieces {
         candidate.matches(axis).then_some(candidate)
     }
 
+    /// Whether every piece reads what the axis does at its far Gauss
+    /// node: the power basis's conversion error grows along the piece, so
+    /// an ill-conditioned piece shows there.
     fn matches(&self, axis: &ContinuousAxis) -> bool {
-        const PROBES: [f64; 3] = [0.211_324_865_405_187_13, 0.5, 0.788_675_134_594_812_9];
+        const PROBE: f64 = 0.788_675_134_594_812_9;
         self.pieces.iter().all(|piece| {
             let duration = piece.u_end - piece.u_start;
-            duration.is_finite()
-                && duration > 0.0
-                && PROBES.into_iter().all(|fraction| {
-                    let t = piece.u_start + fraction * duration;
-                    let (position, velocity, acceleration) =
-                        polynomial_pva(&piece.coeffs, t - piece.u_start);
-                    let cached = [self.base + position, velocity, acceleration];
-                    let direct = axis_pva(axis, t);
-                    cached
-                        .into_iter()
-                        .zip([direct.0, direct.1, direct.2])
-                        .all(|(left, right)| {
-                            left.is_finite()
-                                && right.is_finite()
-                                && (left - right).abs()
-                                    <= 1e-8 * left.abs().max(right.abs()).max(1.0)
-                        })
+            if !(duration.is_finite() && duration > 0.0) {
+                return false;
+            }
+            let t = piece.u_start + PROBE * duration;
+            let (position, velocity, acceleration) =
+                polynomial_pva(&piece.coeffs, t - piece.u_start);
+            let cached = [self.base + position, velocity, acceleration];
+            let direct = axis_pva(axis, t);
+            cached
+                .into_iter()
+                .zip([direct.0, direct.1, direct.2])
+                .all(|(left, right)| {
+                    left.is_finite()
+                        && right.is_finite()
+                        && (left - right).abs() <= 1e-8 * left.abs().max(right.abs()).max(1.0)
                 })
         })
     }
