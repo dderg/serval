@@ -18,7 +18,7 @@ use crate::shaper::axis_enclosure::AxisWindows;
 use crate::shaper::taylor::{self, Ball, TaylorModel, Window};
 use crate::shaper::{Enclosure, ExactPiece};
 
-use super::{AdvancedFollowerSignal, ChainStage, FollowerSignal, RatioSpan};
+use super::{AdvancedFollowerSignal, ChainStage, FollowerSignal, RatioSpan, SpanSide};
 
 /// How a stretch of the span table lays extrusion against path distance.
 #[derive(Clone, Copy)]
@@ -254,8 +254,9 @@ pub(super) struct FollowerAxisWindows<'a> {
 }
 
 impl<'a> FollowerSignal<'a> {
-    /// The table's formulas over path distances `[lo, hi]`, the one laid at
-    /// `centre` first; `None` before an empty table.
+    /// The table's formulas over path distances `[lo, hi]`, the one the
+    /// signal reads at `centre` first — at a span boundary, on the side
+    /// [`Self::side_at`] reads it; `None` before an empty table.
     fn table_formulas(&self, centre: f64, (lo, hi): (f64, f64)) -> Option<Vec<TableFormula>> {
         let spans = &self.state.spans;
         let (first, last) = (*spans.first()?, *spans.last()?);
@@ -265,10 +266,11 @@ impl<'a> FollowerSignal<'a> {
             } else if s > last.s1 {
                 TableFormula::Past(last)
             } else {
-                let index = spans
-                    .partition_point(|span| span.s1 < s)
-                    .min(spans.len() - 1);
-                TableFormula::Span(spans[index])
+                let index = match self.side_at(s) {
+                    SpanSide::After => spans.partition_point(|span| span.s1 <= s),
+                    SpanSide::Before => spans.partition_point(|span| span.s1 < s),
+                };
+                TableFormula::Span(spans[index.min(spans.len() - 1)])
             }
         };
         let mut formulas = vec![region_of(centre)];
@@ -278,11 +280,18 @@ impl<'a> FollowerSignal<'a> {
         if hi > last.s1 {
             formulas.push(TableFormula::Past(last));
         }
-        let from = spans.partition_point(|span| span.s1 < lo);
+        let from = match self.side_at(lo) {
+            SpanSide::After => spans.partition_point(|span| span.s1 <= lo),
+            SpanSide::Before => spans.partition_point(|span| span.s1 < lo),
+        };
+        let read_at_hi = |span: &&RatioSpan| match self.side_at(hi) {
+            SpanSide::After => span.s0 <= hi,
+            SpanSide::Before => span.s0 < hi,
+        };
         formulas.extend(
             spans[from..]
                 .iter()
-                .take_while(|span| span.s0 <= hi)
+                .take_while(read_at_hi)
                 .map(|&span| TableFormula::Span(span)),
         );
         Some(formulas)
