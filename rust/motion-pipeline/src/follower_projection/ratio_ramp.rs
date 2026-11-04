@@ -1778,6 +1778,16 @@ impl<'l, 'a> LegPath<'l, 'a> {
         }
         hi
     }
+
+    /// Whether the leaders provably stay at `speed` or faster over the
+    /// whole leg, knot interval by knot interval.
+    fn outruns(&self, speed: f64) -> bool {
+        self.grid.windows(2).all(|pair| {
+            self.leaders
+                .speed_floor(pair[0], 0.5 * (pair[0] + pair[1]), pair[1])
+                .is_some_and(|floor| floor >= speed)
+        })
+    }
 }
 
 /// The shaped leaders' speed along a leg, probed
@@ -1789,8 +1799,7 @@ struct LegSpeed<'l, 'a> {
 }
 
 impl<'l, 'a> LegSpeed<'l, 'a> {
-    fn of(leaders: &'l ShapedLeaders<'a>, leg: &RampLeg, table_end: f64) -> Self {
-        let path = LegPath::of(leaders, leg);
+    fn over(path: LegPath<'l, 'a>, table_end: f64) -> Self {
         let grid = &path.grid;
         let probes = grid
             .windows(2)
@@ -1859,7 +1868,7 @@ fn resting_stretch(
     rest_speed: f64,
     table_end: f64,
 ) -> Option<(f64, f64)> {
-    let speed = LegSpeed::of(leaders, leg, table_end);
+    let speed = LegSpeed::over(LegPath::of(leaders, leg), table_end);
     let resting = |t: f64| speed.at(t) <= rest_speed;
     let rest_time = |index: usize| {
         let probe = speed.probes[index];
@@ -1916,14 +1925,19 @@ fn ratio_steps_within(spans: &[RatioSpan], from: f64, to: f64) -> Option<(f64, f
 /// launches, the shaped velocity passes through zero off the raw seam,
 /// inside either move, where the seam's crossing does not see it; where the
 /// axes are shaped unlike each other it passes a hair beside zero instead.
-/// A leg whose slowest probe provably stays faster around it has none, and
-/// one slowest at an end leaves it to that seam's crossing.
+/// A leg whose every knot interval, or whose slowest probe, provably stays
+/// faster has none, and one slowest at an end leaves it to that seam's
+/// crossing.
 fn slowest_crawl(
     leaders: &ShapedLeaders,
     leg: &RampLeg,
     table_end: f64,
 ) -> Option<(f64, Crossing)> {
-    let speed = LegSpeed::of(leaders, leg, table_end);
+    let path = LegPath::of(leaders, leg);
+    if path.outruns(ADVANCE_VALLEY_SPEED_MM_S) {
+        return None;
+    }
+    let speed = LegSpeed::over(path, table_end);
     let (slowest_probe, slowest) = speed
         .probes
         .iter()
