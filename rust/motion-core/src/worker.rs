@@ -16,6 +16,7 @@ mod pump_sink;
 
 pub use producer_throttle::PRODUCER_THROTTLE_ENV;
 
+use crate::dispatch_record::DispatchRecorder;
 pub use dispatch::DispatchError;
 use dispatch::{Dispatcher, WorkerLinks};
 use pump_sink::{Projection, PumpSink};
@@ -225,6 +226,7 @@ pub struct ExecutionResources {
 pub(crate) struct PipelineOutput {
     pub(crate) trajectory: Sender<TrajectoryItem>,
     pub(crate) input_tap: Option<Sender<motion_pipeline::InputTrace>>,
+    pub(crate) dispatch_record: Option<Arc<DispatchRecorder>>,
 }
 
 /// Where a detached pipeline's dispatcher hands its segments: recorded,
@@ -291,6 +293,11 @@ pub fn setup_pipeline(
     } else {
         CommittedFrontier::default()
     });
+    let dispatch_record = if detached_segments.is_some() {
+        None
+    } else {
+        DispatchRecorder::from_env()
+    };
     let links = Arc::new(WorkerLinks::default());
     let mut dispatcher = Dispatcher::new(Arc::clone(&links), Arc::clone(&frontier));
     let admission = Arc::clone(&links);
@@ -307,6 +314,7 @@ pub fn setup_pipeline(
         counter: resources.counter,
         frontier,
         frozen_projection: std::collections::HashMap::new(),
+        dispatch_record: dispatch_record.clone(),
     };
     let pump_thread = thread::Builder::new()
         .name("kalico-execution".into())
@@ -351,6 +359,7 @@ pub fn setup_pipeline(
         PipelineOutput {
             trajectory: output,
             input_tap,
+            dispatch_record,
         },
         links,
         timeline,
@@ -377,6 +386,7 @@ impl StreamWorkerHandle {
         let PipelineOutput {
             trajectory,
             input_tap,
+            dispatch_record,
         } = output;
         let pipeline = Pipeline::new(config.clone(), axis_chains, home_pos.clone(), 0.0);
         let pipeline = match input_tap {
@@ -394,6 +404,8 @@ impl StreamWorkerHandle {
             pacer: ingress::Pacer::default(),
             throttle: producer_throttle::ProducerThrottle::from_env(),
             last_line: 0,
+            moves_sent: 0,
+            dispatch_record,
             pump: pump.clone(),
         };
         let join = thread::Builder::new()

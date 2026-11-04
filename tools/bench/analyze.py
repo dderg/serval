@@ -16,8 +16,18 @@ supplies the bench MCU's benchmark and the fraction its run was capped at
 0.625), charged to every captured motor stepped pulsed; the verdict's
 reference_step_capacity says which ("recorded", "supplied", "absent").
 
+A run recorded with run.py's dispatch record also holds
+dispatch_record_*.bin: what the live host dispatched, segment by segment,
+with its anchoring and every drain to rest. When the pacer braked the
+stream to rest, the plan no longer describes the motion, so the record is
+the reference (reference_source "dispatch_record", reference time = host
+seconds since its first segment) and the brakes fail no_pacer_brakes. Any
+record is also compared with the plan segment for segment: outside the
+windows a pacer brake replanned, every dispatched segment must be the
+planned one (dispatch_matches_plan_outside_brakes).
+
 Alignment model per motion epoch:
-    t_capture = offset_s + (1 + ppm * 1e-6) * t_stream
+    t_capture = offset_s + (1 + ppm * 1e-6) * t_reference
 Timing errors are capture minus aligned reference: positive = step late.
 """
 
@@ -25,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import difflib
 import hashlib
 import json
 import math
@@ -44,8 +55,18 @@ for _path in (REPO_ROOT / "snapshots", REPO_ROOT / "klippy", REPO_ROOT):
 
 import capture_events  # noqa: E402
 import corner_flow_bench  # noqa: E402
+import dispatch_record  # noqa: E402
 import harness  # noqa: E402
 import mcu_execution  # noqa: E402
+
+REFERENCE_PLANNED = "plan"
+REFERENCE_DISPATCHED = "dispatch_record"
+DISPATCH_RECORD_GLOB = "dispatch_record_*.bin"
+DISPATCH_SEAM_SLACK_S = 1e-9
+DISPATCH_DURATION_TOLERANCE_S = 1e-9
+REPORTED_DIVERGENCES_LIMIT = 50
+BRAKE_SETTLE_S = 0.1
+EXTRUDER_AXIS = 3
 
 CAPTURE_ROLES = ("a", "b", "z", "e")
 ROLE_AXIS_WEIGHTS = {
@@ -203,6 +224,7 @@ class ReferenceBlock:
 
 @dataclass
 class Reference:
+    source: str
     start_xyz: tuple[float, float, float]
     final_xyze: tuple[float, float, float, float]
     blocks: list[ReferenceBlock]
@@ -254,6 +276,7 @@ class Job:
     gcode_text: str
     step_benchmarks: list[dict] | None
     step_benchmarks_source: str
+    dispatch_record: dispatch_record.DispatchRecord | None
 
 
 @dataclass
@@ -434,7 +457,41 @@ def load_job(run_dir: Path, supplied: SuppliedBenchmark | None = None) -> Job:
         gcode_text=(run_dir / "print.gcode").read_text(),
         step_benchmarks=step_benchmarks,
         step_benchmarks_source=source,
+        dispatch_record=load_dispatch_record(run_dir),
     )
+
+
+def load_dispatch_record(
+    run_dir: Path,
+) -> dispatch_record.DispatchRecord | None:
+    """The live host's record of what it dispatched for the print: the one
+    file of the run that holds segments. A pipeline set up and torn down
+    before the print leaves an empty one."""
+    paths = sorted(run_dir.glob(DISPATCH_RECORD_GLOB))
+    if not paths:
+        return None
+    try:
+        records = {p.name: dispatch_record.load(p) for p in paths}
+    except dispatch_record.RecordError as exc:
+        raise AnalysisError(str(exc)) from exc
+    moving = {name: r for name, r in records.items() if len(r)}
+    if len(moving) != 1:
+        raise AnalysisError(
+            f"{run_dir}: expected one dispatch record with segments, found "
+            f"{sorted(moving) or 'none'} among {sorted(records)}"
+        )
+    ((name, record),) = moving.items()
+    if record.nudges:
+        raise AnalysisError(
+            f"{name}: {record.nudges} nudges bypassed the planner; neither "
+            "the plan nor the record's segments describe that motion"
+        )
+    if record.axes != len(ROLE_AXIS_WEIGHTS["a"]):
+        raise AnalysisError(
+            f"{name}: records {record.axes} axes, the analyzer reads "
+            f"{len(ROLE_AXIS_WEIGHTS['a'])}"
+        )
+    return record
 
 
 def load_run(
@@ -702,8 +759,7 @@ def _motor_steps(
     return StepEvents.concat(parts), state.count, origins
 
 
-def build_reference(job: Job) -> Reference:
-    planned = plan_waypoints(job)
+def planned_blocks(job: Job, planned: PlannedPrint) -> list[ReferenceBlock]:
     blocks = []
     offset = 0.0
     for epoch in stream_epochs(
@@ -716,6 +772,69 @@ def build_reference(job: Job) -> Reference:
         block = reference_block(job, epoch, offset)
         blocks.append(block)
         offset += block.duration_s + REFERENCE_BLOCK_SEPARATION_S
+    return blocks
+
+
+def dispatched_runs(
+    record: dispatch_record.DispatchRecord,
+) -> list[tuple[int, int]]:
+    """The record's segments as runs of continuous motion: a run ends where
+    the stream drained to rest, re-anchored, or left a gap in host time."""
+    count = len(record)
+    starts = np.zeros(count, bool)
+    starts[0] = True
+    starts[1:] |= (record.flags[1:] & dispatch_record.FLAG_FRESH_EPOCH) != 0
+    starts[1:] |= (
+        np.abs(record.host_start()[1:] - record.host_end()[:-1])
+        > DISPATCH_SEAM_SLACK_S
+    )
+    drained = [
+        d.after_segments for d in record.drains if 0 < d.after_segments < count
+    ]
+    starts[drained] = True
+    bounds = [*np.flatnonzero(starts).tolist(), count]
+    return list(zip(bounds[:-1], bounds[1:]))
+
+
+def dispatched_blocks(
+    job: Job, record: dispatch_record.DispatchRecord
+) -> list[ReferenceBlock]:
+    origin = float(record.host_start()[0])
+    blocks = []
+    for lo, hi in dispatched_runs(record):
+        times, rows = [], []
+        for index in range(lo, hi):
+            samples = record.segment_samples(index)
+            n = len(samples)
+            local = record.t_start[index] + (
+                record.t_end[index] - record.t_start[index]
+            ) * np.arange(n) / (n - 1)
+            local[-1] = record.t_end[index]
+            keep = n if index == hi - 1 else n - 1
+            times.append(record.t0[index] + local[:keep])
+            rows.append(samples[:keep])
+        host = np.concatenate(times)
+        axes_pva = np.concatenate(rows).transpose(1, 0, 2)
+        blocks.append(
+            ReferenceBlock(
+                stream_offset_s=float(host[0]) - origin,
+                duration_s=float(host[-1] - host[0]),
+                sample_times=host - host[0],
+                motor_pva_steps={
+                    m.role: _motor_pva_steps(m, axes_pva) for m in job.motors
+                },
+            )
+        )
+    return blocks
+
+
+def build_reference(job: Job) -> Reference:
+    planned = plan_waypoints(job)
+    record = job.dispatch_record
+    if record is not None and record.pacer_brakes():
+        source, blocks = REFERENCE_DISPATCHED, dispatched_blocks(job, record)
+    else:
+        source, blocks = REFERENCE_PLANNED, planned_blocks(job, planned)
     events: dict[str, StepEvents] = {}
     start_counts: dict[str, int] = {}
     final_counts: dict[str, int] = {}
@@ -729,6 +848,7 @@ def build_reference(job: Job) -> Reference:
             level_offsets[motor.role],
         ) = _motor_steps(motor, blocks)
     return Reference(
+        source=source,
         start_xyz=planned.start_xyz,
         final_xyze=planned.final_xyze,
         blocks=blocks,
@@ -737,6 +857,162 @@ def build_reference(job: Job) -> Reference:
         final_counts=final_counts,
         level_offsets=level_offsets,
     )
+
+
+def planned_dispatch_record(job: Job) -> dispatch_record.DispatchRecord:
+    engine = harness._import_engine()
+    try:
+        data = engine.pipeline_snapshot_dispatch_record(
+            plan_waypoints(job).waypoints,
+            job.config.config_text,
+            job.step_benchmarks,
+        )
+    except ValueError as exc:
+        raise AnalysisError(f"print.gcode: {exc}") from exc
+    return dispatch_record.parse(bytes(data), "plan")
+
+
+def _motor_positions_steps(
+    job: Job, record: dispatch_record.DispatchRecord
+) -> np.ndarray:
+    per_step = np.array(
+        [np.asarray(m.axis_weights) / m.step_mm for m in job.motors]
+    ).T
+    return record.samples[:, :, 0] @ per_step
+
+
+@dataclass
+class DispatchComparison:
+    job: Job
+    live: dispatch_record.DispatchRecord
+    plan: dispatch_record.DispatchRecord
+    live_steps: np.ndarray
+    plan_steps: np.ndarray
+
+    def deviation_steps(self, i: int, j: int) -> float:
+        """How far live segment `i` strays from planned segment `j` in motor
+        steps, wherever both stand at the same instant of their own. A
+        follower is compared from where the segment starts it: a brake
+        re-bases the extruder by a sliver the plan never sees."""
+        live, plan = self.live, self.plan
+        live_span = live.t_end[i] - live.t_start[i]
+        plan_span = plan.t_end[j] - plan.t_start[j]
+        if abs(live_span - plan_span) > DISPATCH_DURATION_TOLERANCE_S:
+            return math.inf
+        a = self.live_steps[live.sample_start[i] : live.sample_start[i + 1]]
+        b = self.plan_steps[plan.sample_start[j] : plan.sample_start[j + 1]]
+        if a.shape != b.shape:
+            return math.inf
+        diff = a - b
+        for k, motor in enumerate(self.job.motors):
+            if motor.track_restarts_per_block:
+                diff[:, k] -= diff[0, k]
+        return float(np.abs(diff).max())
+
+    def extruder_offset_mm(self, i: int, j: int) -> float:
+        return float(
+            self.live.samples[self.live.sample_start[i], EXTRUDER_AXIS, 0]
+            - self.plan.samples[self.plan.sample_start[j], EXTRUDER_AXIS, 0]
+        )
+
+
+def _merge_runs(
+    runs: list[tuple[int, int]], spans_s: np.ndarray
+) -> list[tuple[int, int]]:
+    """Unpaired or straying runs of segments joined across less than
+    BRAKE_SETTLE_S of agreeing motion: the shaper and the extruder smooth a
+    brake's stop and restart into a few neighbours, some of which still
+    happen to land within tolerance of the plan."""
+    merged: list[list[int]] = []
+    for lo, hi in sorted(runs):
+        if merged and spans_s[merged[-1][1] : lo].sum() <= BRAKE_SETTLE_S:
+            merged[-1][1] = max(merged[-1][1], hi)
+        else:
+            merged.append([lo, hi])
+    return [(lo, hi) for lo, hi in merged]
+
+
+def compare_dispatch_with_plan(
+    job: Job, live: dispatch_record.DispatchRecord
+) -> dict:
+    """Pair the live record's segments with the plan's by source line and
+    hold each pair to the position-equivalent tolerance. A run of segments
+    that pairs with nothing, or strays, is a brake window when a pacer brake
+    drained the stream inside it and a divergence otherwise."""
+    plan = planned_dispatch_record(job)
+    comparison = DispatchComparison(
+        job,
+        live,
+        plan,
+        _motor_positions_steps(job, live),
+        _motor_positions_steps(job, plan),
+    )
+    matcher = difflib.SequenceMatcher(
+        None,
+        live.source_line.tolist(),
+        plan.source_line.tolist(),
+        autojunk=False,
+    )
+    runs: list[tuple[int, int]] = []
+    strays: dict[int, float] = {}
+    matched = 0
+    extruder_offset_mm = 0.0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag != "equal":
+            runs.append((i1, i2))
+            continue
+        for i, j in zip(range(i1, i2), range(j1, j2)):
+            deviation = comparison.deviation_steps(i, j)
+            if deviation > POSITION_EQUIVALENT_TOLERANCE_STEPS:
+                runs.append((i, i + 1))
+                strays[i] = deviation
+                continue
+            matched += 1
+            extruder_offset_mm = max(
+                extruder_offset_mm, abs(comparison.extruder_offset_mm(i, j))
+            )
+    brakes = [d.after_segments for d in live.pacer_brakes()]
+    origin = float(live.host_start()[0])
+    spans = live.t_end - live.t_start
+    windows, divergences = [], []
+    for lo, hi in _merge_runs(runs, spans):
+        braked = [b for b in brakes if lo <= b <= hi]
+        at = min(lo, len(live) - 1)
+        window = {
+            "segments": [lo, hi],
+            "source_lines": [
+                int(live.source_line[at]),
+                int(live.source_line[max(at, hi - 1)]),
+            ],
+            "host_s": float(live.host_start()[at]) - origin,
+            "motion_s": float(spans[lo:hi].sum()),
+        }
+        if braked:
+            windows.append({**window, "pacer_brakes": len(braked)})
+        else:
+            stray = [strays[i] for i in range(lo, hi) if i in strays]
+            divergences.append(
+                {
+                    **window,
+                    "max_deviation_steps": max(stray) if stray else None,
+                    "unpaired_segments": hi - lo - len(stray),
+                }
+            )
+    return {
+        "segments": len(live),
+        "planned_segments": len(plan),
+        "matched_segments": matched,
+        "pacer_brakes": len(brakes),
+        "requested_drains": len(live.drains) - len(brakes),
+        "brake_windows": windows,
+        "max_brake_window_motion_s": max(
+            (w["motion_s"] for w in windows), default=0.0
+        ),
+        "max_extruder_offset_mm": extruder_offset_mm,
+        "divergences": len(divergences),
+        "first_divergences": divergences[:REPORTED_DIVERGENCES_LIMIT],
+        "matches_plan_outside_brakes": not divergences,
+    }
 
 
 def capture_steps(
@@ -1726,11 +2002,22 @@ def analyze(
             p["pace_within_tolerance"] for p in paces
         ),
     }
+    record = inputs.dispatch_record
+    dispatched = (
+        None if record is None else compare_dispatch_with_plan(inputs, record)
+    )
+    if dispatched is not None:
+        checks["no_pacer_brakes"] = dispatched["pacer_brakes"] == 0
+        checks["dispatch_matches_plan_outside_brakes"] = dispatched[
+            "matches_plan_outside_brakes"
+        ]
     verdict = {
         "ok": all(checks.values()),
         "checks": checks,
+        "reference_source": reference.source,
         "reference_step_capacity": inputs.step_benchmarks_source,
-        "alignment_model": "t_capture = offset_s + (1 + ppm*1e-6) * t_stream",
+        "dispatch_record": dispatched,
+        "alignment_model": "t_capture = offset_s + (1 + ppm*1e-6) * t_reference",
         "capture": {
             "ticks": len(inputs.capture.deltas),
             "tick_hz": inputs.capture.tick_hz,
