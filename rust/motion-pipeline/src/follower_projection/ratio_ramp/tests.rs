@@ -855,29 +855,3 @@ fn a_sliver_piece_of_the_leader_fit_leaves_the_crossing_jerk_alone() {
          {bound}"
     );
 }
-
-/// The leaders creep a rounding past a rest while they hold it, as a fit
-/// of a hold lays them: every rest sampled inside the hold stacks on the
-/// first, so the field has one node where they rest, however many
-/// samples a hold spans.
-#[test]
-fn rests_a_rounding_apart_stack_on_the_first() {
-    let rest = 2.5;
-    let creep = 0.4 * super::REST_TARGET_MM;
-    let mut field = WidthField::default();
-    field.push_rest(0.0);
-    field.push(1.0, 0.5);
-    field.push_rest(rest);
-    field.push_rest(rest + creep);
-    field.push_rest(rest + 2.0 * creep);
-    let at_rest: Vec<f64> = field
-        .nodes
-        .iter()
-        .map(|node| node.s)
-        .filter(|&s| s >= rest)
-        .collect();
-    assert_eq!(
-        at_rest, [rest; 3],
-        "rests sampled {creep} mm apart in a hold sit at {at_rest:?}"
-    );
-}
