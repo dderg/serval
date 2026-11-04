@@ -427,3 +427,15 @@ fn gcode_state_errors_are_refused_like_klippy() {
         WaypointError::InvalidParam { line: 1, .. }
     ));
 }
+
+#[test]
+fn the_extrusion_ratio_bound_is_the_steepest_extrusion_per_millimetre_of_travel() {
+    let waypoints = [
+        Waypoint::at([0.0, 0.0, 0.0, 0.0], 100.0),
+        Waypoint::at([3.0, 4.0, 0.0, 0.25], 100.0),
+        Waypoint::at([3.0, 4.0, 0.0, -0.75], 100.0),
+        Waypoint::at([3.0, 6.0, 0.0, -0.7], 100.0),
+        Waypoint::at([3.0, 6.0, 1.0, -0.7], 100.0),
+    ];
+    assert_eq!(extrusion_ratio_bound(&waypoints), 0.05);
+}

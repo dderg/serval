@@ -5,8 +5,10 @@
 //! `max_accel_deviation` and the acceleration that spends its position
 //! tolerance over the piece. This replays every snapshot case and a whole
 //! dense real print through the pipeline with the fit audit on, and fails
-//! on any accepted piece that leaves the tolerance. Each set of cases is its
-//! own test, so the audited replays run side by side.
+//! on any accepted piece that leaves the tolerance, and on any planned
+//! extruder that leaves the limits it was planned under beyond what
+//! `corpus/known_extruder_excesses.rs` pins. Each set of cases is its own
+//! test, so the audited replays run side by side.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -33,17 +35,37 @@ fn dense_cases(configs: &[&str]) -> Vec<(String, String, PathBuf)> {
         .collect()
 }
 
-fn audited_violations(cases: Vec<(String, String, PathBuf)>) -> Vec<(String, FitViolation)> {
-    cases
-        .into_iter()
-        .flat_map(|(name, gcode, config)| {
-            take_violations();
-            corpus::plan(&name, &gcode, &config);
+/// What the audited replays of a set of cases leave behind: the fit
+/// pieces that left the tolerance, and per case the extruder's excesses
+/// over the limits it was planned under.
+#[derive(Default)]
+struct Audited {
+    fit: Vec<(String, FitViolation)>,
+    extruder: Vec<String>,
+}
+
+fn audited(cases: Vec<(String, String, PathBuf)>) -> Audited {
+    let mut audited = Audited::default();
+    for (name, gcode, config) in cases {
+        take_violations();
+        let snapshot = corpus::plan(&name, &gcode, &config);
+        audited.fit.extend(
             take_violations()
                 .into_iter()
-                .map(move |violation| (name.clone(), violation))
-        })
-        .collect()
+                .map(|violation| (name.clone(), violation)),
+        );
+        let Some(audit) = snapshot
+            .as_ref()
+            .and_then(|snapshot| corpus::extruder_audit(snapshot, &gcode, &config))
+        else {
+            continue;
+        };
+        println!("{name}: {}", audit.summary());
+        if let Some(excess) = corpus::extruder_excess(&config, &audit) {
+            audited.extruder.push(format!("{name}: {excess}"));
+        }
+    }
+    audited
 }
 
 fn table(violations: &[(String, FitViolation)]) -> String {
@@ -78,14 +100,17 @@ fn assembled_from_pieces(fit_context: &str) -> bool {
 }
 
 /// Every accepted piece of `cases` holds the fit tolerance, bar the
-/// exempt. Where a span's edge acceleration changes by more than the
-/// tolerance across its edge sliver, the ladder reads it past the sliver;
-/// read at the seam instead, a break that seed coalescing hid there pins the
-/// piece to the acceleration on the break's far side, which the count of
-/// pinned follower pieces names. The shaper's unit tests pin the read
-/// itself; this holds the whole pipeline to it.
+/// exempt, and the extruder holds the limits it was planned under. Where
+/// a span's edge acceleration changes by more than the tolerance across its
+/// edge sliver, the ladder reads it past the sliver; read at the seam
+/// instead, a break that seed coalescing hid there pins the piece to the
+/// acceleration on the break's far side, which the count of pinned follower
+/// pieces names. The shaper's unit tests pin the read itself; this holds the
+/// whole pipeline to it.
 fn assert_every_accepted_fit_piece_holds(cases: Vec<(String, String, PathBuf)>) {
-    let violations: Vec<(String, FitViolation)> = audited_violations(cases)
+    let audited = audited(cases);
+    let violations: Vec<(String, FitViolation)> = audited
+        .fit
         .into_iter()
         .filter(|(_, violation)| violation.exemption.is_none())
         .collect();
@@ -96,11 +121,13 @@ fn assert_every_accepted_fit_piece_holds(cases: Vec<(String, String, PathBuf)>) 
         })
         .count();
     assert!(
-        violations.is_empty(),
+        violations.is_empty() && audited.extruder.is_empty(),
         "{} accepted fit pieces leave the fit tolerance, {pinned} of them follower pieces \
-         across a break in their edge sliver:\n{}",
+         across a break in their edge sliver:\n{}\n{} cases leave their extruder limits:\n{}",
         violations.len(),
-        table(&violations)
+        table(&violations),
+        audited.extruder.len(),
+        audited.extruder.join("\n")
     );
 }
 

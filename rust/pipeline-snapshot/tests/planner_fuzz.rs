@@ -20,7 +20,7 @@ use motion_pipeline::live_config;
 use pipeline_snapshot::audit::{
     AuditBudgets, AuditReport, Violation, ViolationKind, audit_trajectory,
 };
-use pipeline_snapshot::waypoints::Waypoint;
+use pipeline_snapshot::waypoints::{Waypoint, extrusion_ratio_bound};
 use pipeline_snapshot::{
     CartesianLimits, ExactTrajectory, PlannerConfig, SnapshotParams, pipeline_snapshot,
 };
@@ -187,23 +187,6 @@ fn budgets(config: &motion_pipeline::StreamConfig, waypoints: &[Waypoint]) -> Au
         config.fit_tol_accel_mm_s2,
     );
     budgets
-}
-
-/// The steepest extrusion any move between `waypoints` lays per millimetre
-/// of travel.
-fn extrusion_ratio_bound(waypoints: &[Waypoint]) -> f64 {
-    waypoints
-        .windows(2)
-        .filter_map(|pair| {
-            let [from, to] = [pair[0].position, pair[1].position];
-            let travel = libm::sqrt(
-                (0..E_AXIS)
-                    .map(|axis| (to[axis] - from[axis]).powi(2))
-                    .sum::<f64>(),
-            );
-            (travel > 0.0).then(|| (to[E_AXIS] - from[E_AXIS]).abs() / travel)
-        })
-        .fold(0.0, f64::max)
 }
 
 /// The smoothness budgets that still bind under infinite jerk: a seam
