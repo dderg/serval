@@ -12,7 +12,7 @@ use trajectory::{
     RelativeSplinePiece, ShapedSignal,
 };
 
-use crate::lowering::{AccelBudget, FitTol, SeamContinuity, follower_tol_scale};
+use crate::lowering::{AccelBudget, FitTol, SeamContinuity, follower_tol_scale, riding_tol_scale};
 use crate::shaper::{
     AxisFit, AxisSignalTable, BetweenProbes, ConvolutionSignal, Enclosure, ExactConvolution,
     ExactKernel, FitBoundary, KnotJumpBound, Lookahead, SEGMENT_TIME_EPS_S, ShapedBreaks,
@@ -159,6 +159,9 @@ struct SourceProjection {
     /// Advance steps inside the segment, in time order, which `track`
     /// leaves out.
     window_advance_steps: Vec<AdvanceStep>,
+    /// The position tolerance scale the segment is fit and welded to
+    /// ([`riding_tol_scale`]).
+    tol_scale: f64,
 }
 
 /// The position step an advance before projection makes where the follower
@@ -357,7 +360,8 @@ fn fit_source_projection(
         0.0,
     )
     .with_rests(fit_tol);
-    let tolerance = follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis) * 0.5);
+    let tol_scale = riding_tol_scale(&raw.followers, axis, sig.ratio_bounds.ratio);
+    let tolerance = follower_fit_tol(fit_tol, tol_scale * 0.5);
     let breakpoints = sig.construction_breakpoints(raw_axis, tolerance.accel_mm_s2);
     let input_state = |t| {
         let s = sig.s_owned(t);
@@ -480,6 +484,7 @@ fn fit_source_projection(
         input_start,
         input_end,
         window_advance_steps,
+        tol_scale,
     })
 }
 
@@ -710,6 +715,7 @@ pub(crate) fn project_followers(
                 input_start,
                 input_end,
                 window_advance_steps,
+                tol_scale,
             } = source_result?;
             state.s_shaped = s_end;
             state.e_end = Some(base_position + e_end_relative);
@@ -770,6 +776,7 @@ pub(crate) fn project_followers(
                 semantic_cuts,
                 join_advance_step,
                 window_advance_steps,
+                tol_scale,
                 extrude_only: if raw.spatial_path {
                     Vec::new()
                 } else {
@@ -884,7 +891,7 @@ pub(crate) fn project_followers(
                         axis,
                         start: t_start,
                         end: t_end,
-                        tol: follower_fit_tol(fit_tol, follower_tol_scale(&raw.followers, axis)),
+                        tol: follower_fit_tol(fit_tol, cached.tol_scale),
                     },
                     previous,
                     law_step(committed_input_end),
@@ -1578,6 +1585,8 @@ struct ProjSeg {
     join_advance_step: f64,
     /// The advance steps inside the segment, also left out of `track`.
     window_advance_steps: Vec<AdvanceStep>,
+    /// The position tolerance scale the segment's source was fit to.
+    tol_scale: f64,
     /// The extrude-only motion folded into `track`, which a kernel's linear
     /// advance leaves unadvanced.
     extrude_only: Vec<extrude_only::ExtrudeOnlyPiece>,
