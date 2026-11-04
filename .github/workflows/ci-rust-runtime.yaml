@@ -19,6 +19,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       headers: ${{ steps.filter.outputs.headers }}
       klipper-c: ${{ steps.filter.outputs.klipper-c }}
+      throughput: ${{ steps.filter.outputs.throughput }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v2
@@ -37,6 +38,14 @@ jobs:
               - '.github/workflows/ci-rust-runtime.yaml'
             klipper-c:
               - 'src/**'
+              - 'scripts/ci.sh'
+              - '.github/workflows/ci-rust-runtime.yaml'
+            throughput:
+              - 'rust/**'
+              - 'tools/bench/configs/**'
+              - 'tools/bench/throughput_baseline.json'
+              - 'tools/sim/gcode/voron_dense_top_layers.gcode'
+              - 'scripts/throughput_gate.py'
               - 'scripts/ci.sh'
               - '.github/workflows/ci-rust-runtime.yaml'
 
@@ -374,6 +383,36 @@ jobs:
           key: replay-budget
       - name: Replay the bench-killer region against the 1.3x floor and on every bench config
         run: ./scripts/ci.sh replay-budget
+
+  # Deterministic throughput regression gate: instruction counts of the
+  # repo's own code (valgrind cachegrind) replaying a slice of the dense
+  # print single-threaded, against tools/bench/throughput_baseline.json, and
+  # the Pi 5 2-core worst window they predict against the 2x floor. A PR
+  # that moves the baselines states why in a ```throughput-accept block.
+  throughput-gate:
+    needs: changes
+    if: needs.changes.outputs.throughput == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Install system dependencies
+        run: |
+          printf 'https://archive.ubuntu.com/ubuntu/\tpriority:1\n' \
+            | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=15 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=15 install -y libudev-dev valgrind
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: throughput-gate
+      - name: Replay instruction counts against the committed baselines
+        run: ./scripts/ci.sh throughput-gate
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
 
   rust-ethercat-hw:
     needs: changes

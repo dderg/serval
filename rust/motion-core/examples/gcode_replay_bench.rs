@@ -7,13 +7,18 @@
 //
 //   cargo run --release -p motion-core --example gcode_replay_bench -- \
 //       <file.gcode> --config <printer.cfg> [t_lo t_hi] \
-//       [--min-worst-x <x>] [--max-held-moves <n>] [--digest]
+//       [--min-worst-x <x>] [--max-held-moves <n>] [--digest] [--synchronous]
 //
 // With t_lo/t_hi only moves whose stream window overlaps [t_lo, t_hi] stream
 // seconds are interesting; the whole file still replays (stream time only
 // exists downstream), but the report highlights that range. --digest hashes
 // every emitted segment, so a throughput change can be held to an identical
-// trajectory.
+// trajectory. --synchronous drives the plain synchronous Pipeline on the
+// calling thread with no shaper thread; under `taskset -c 0` the worker pool
+// has no helpers either, which makes the run single-threaded and its
+// instruction count deterministic (scripts/throughput_gate.py). The planner
+// commits only show up as shaped output there, so --max-held-moves needs the
+// staged pipeline.
 
 use std::env;
 use std::fs;
@@ -22,8 +27,8 @@ use std::process;
 use std::time::Instant;
 
 use motion_core::seam_test_harness::LiveReplay;
-use motion_pipeline::TrajectoryItem;
 use motion_pipeline::timing::stage_totals;
+use motion_pipeline::{Pipeline, StreamInput, TrajectoryItem};
 use trajectory::ContinuousSegment;
 
 fn take_flag(args: &mut Vec<String>, flag: &str) -> Option<String> {
@@ -38,6 +43,47 @@ fn take_switch(args: &mut Vec<String>, switch: &str) -> bool {
     };
     args.remove(i);
     true
+}
+
+fn replay_staged(
+    pipeline: Pipeline,
+    moves: impl IntoIterator<Item = impl Into<StreamInput>>,
+    sink: impl FnMut(TrajectoryItem) -> bool + Send + 'static,
+) -> u64 {
+    let mut pipeline = pipeline.into_staged(sink);
+    let mut submitted = 0u64;
+    let mut held = 0u64;
+    let mut deepest_held = 0u64;
+    for m in moves {
+        let planned_before = pipeline.segments_planned();
+        if !pipeline.feed(m.into()) {
+            eprintln!("pipeline input closed at move {submitted}");
+            process::exit(1);
+        }
+        submitted += 1;
+        held = if pipeline.segments_planned() > planned_before {
+            0
+        } else {
+            held + 1
+        };
+        deepest_held = deepest_held.max(held);
+    }
+    assert!(pipeline.finish());
+    deepest_held
+}
+
+fn replay_synchronous(
+    mut pipeline: Pipeline,
+    moves: impl IntoIterator<Item = impl Into<StreamInput>>,
+    mut sink: impl FnMut(TrajectoryItem) -> bool,
+) {
+    for (submitted, m) in moves.into_iter().enumerate() {
+        if !pipeline.feed(m.into(), &mut sink) {
+            eprintln!("pipeline input closed at move {submitted}");
+            process::exit(1);
+        }
+    }
+    assert!(pipeline.finish(&mut sink));
 }
 
 fn planner_config(path: &str) -> planner_config::PlannerConfig {
@@ -66,13 +112,18 @@ fn main() {
     let max_held_moves = take_flag(&mut args, "--max-held-moves")
         .map(|v| v.parse::<u64>().expect("--max-held-moves takes a count"));
     let digest = take_switch(&mut args, "--digest");
+    let synchronous = take_switch(&mut args, "--synchronous");
     let Some(config_path) = take_flag(&mut args, "--config") else {
         eprintln!(
             "usage: gcode_replay_bench <in.gcode> --config <printer.cfg> [t_lo t_hi] \
-             [--min-worst-x <x>] [--max-held-moves <n>] [--digest]"
+             [--min-worst-x <x>] [--max-held-moves <n>] [--digest] [--synchronous]"
         );
         process::exit(1);
     };
+    if synchronous && max_held_moves.is_some() {
+        eprintln!("--max-held-moves measures the staged pipeline; drop --synchronous");
+        process::exit(1);
+    }
     if args.len() < 2 {
         eprintln!("usage: gcode_replay_bench <in.gcode> --config <printer.cfg> [t_lo t_hi]");
         process::exit(1);
@@ -97,7 +148,7 @@ fn main() {
     let wall = Instant::now();
     let (arrival_tx, arrival_rx) = crossbeam_channel::unbounded::<(f64, f64)>();
     let (digest_tx, digest_rx) = crossbeam_channel::unbounded::<ContinuousSegment>();
-    let mut pipeline = replay.pipeline().into_staged(move |item| {
+    let sink = move |item| {
         if let TrajectoryItem::Seg(seg) = item {
             arrival_tx
                 .send((wall.elapsed().as_secs_f64(), seg.t_end))
@@ -107,31 +158,23 @@ fn main() {
             }
         }
         true
-    });
+    };
 
-    let mut submitted = 0u64;
-    let mut held = 0u64;
-    let mut deepest_held = 0u64;
-    for m in replay.moves {
-        let planned_before = pipeline.segments_planned();
-        if !pipeline.feed(m.into()) {
-            eprintln!("pipeline input closed at move {submitted}");
-            process::exit(1);
-        }
-        submitted += 1;
-        held = if pipeline.segments_planned() > planned_before {
-            0
-        } else {
-            held + 1
-        };
-        deepest_held = deepest_held.max(held);
-    }
-    assert!(pipeline.finish());
+    let submitted = replay.moves.len() as u64;
+    let pipeline = replay.pipeline();
+    let deepest_held = if synchronous {
+        replay_synchronous(pipeline, replay.moves, sink);
+        None
+    } else {
+        Some(replay_staged(pipeline, replay.moves, sink))
+    };
     let wall_s = wall.elapsed().as_secs_f64();
     let arrivals: Vec<(f64, f64)> = arrival_rx.try_iter().collect();
     let stream_s = arrivals.last().map_or(0.0, |&(_, t)| t);
+    let held_field =
+        deepest_held.map_or(String::new(), |held| format!(" deepest_held_moves={held}"));
     println!(
-        "moves={submitted} segments={} stream_secs={stream_s:.1} wall_secs={wall_s:.1} overall_x={:.2} deepest_held_moves={deepest_held}",
+        "moves={submitted} segments={} stream_secs={stream_s:.1} wall_secs={wall_s:.1} overall_x={:.2}{held_field}",
         arrivals.len(),
         stream_s / wall_s
     );
@@ -204,6 +247,7 @@ fn main() {
         println!("budget ok: worst window {worst:.2}x >= {floor:.2}x floor");
     }
     if let Some(ceiling) = max_held_moves {
+        let deepest_held = deepest_held.expect("--max-held-moves runs the staged pipeline");
         if deepest_held > ceiling {
             eprintln!(
                 "FAIL: the planner absorbed {deepest_held} moves in a row without committing \
