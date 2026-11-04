@@ -5,6 +5,8 @@
 #   ./scripts/ci.sh install-hooks   # enable the pre-push hook (runs `quick` per push)
 #   ./scripts/ci.sh <job>           # run one gate, exit with its status (CI)
 #   ./scripts/ci.sh -v <job>        # stream the gate's output live
+#   ./scripts/ci.sh throughput-gate [--accept --reason R]
+#                                   # replay instruction counts vs tools/bench/throughput_baseline.json
 #
 # Output policy: a terminal, GitHub Actions and `-v` get the live stream.
 # Everywhere else (agents, scripts capturing stdout) a gate prints one PASS
@@ -372,6 +374,31 @@ job_replay_budget() {
     done
 }
 
+# Instruction counts of the repo's own code replaying a slice of the same
+# dense print single-threaded under cachegrind, against committed baselines,
+# plus the Pi 2-core worst window they predict; see scripts/throughput_gate.py.
+# A host without valgrind measures inside the scripts/Dockerfile-build image.
+# On a pull request the base is the merge commit's first parent, and a moved
+# baseline file needs a ```throughput-accept block in $PR_BODY.
+job_throughput_gate() {
+    if ! command -v valgrind >/dev/null 2>&1; then
+        THROUGHPUT_GATE_IMAGE="$(docker_image)" || return
+        export THROUGHPUT_GATE_IMAGE
+    fi
+    local accept_base=()
+    [ "${GITHUB_EVENT_NAME:-}" != pull_request ] || accept_base=(--accept-base HEAD^1)
+    python3 "$ROOT/scripts/throughput_gate.py" ${accept_base[@]+"${accept_base[@]}"} "$@"
+}
+
+# The live host and the snapshot path must plan the whole corpus bit for bit
+# alike: klippy's G-code handlers drive the real MotionEngine bridge with a
+# detached planner (no MCU), and every pipeline input and shaped segment is
+# compared with the snapshot path's (snapshots/live_bridge_parity.py).
+job_live_parity() {
+    cd "$ROOT" && make -f Makefile.rust motion-engine-fast \
+        && uv run python -m pytest -q -n auto -p no:cacheprovider snapshots/test_live_bridge_parity.py
+}
+
 job_docs() { cd "$ROOT/docs/_kalico" && uv run mkdocs build --strict; }
 
 job_snapshot() {
@@ -484,7 +511,9 @@ run_all() {
         run_check "bench-fw"        job_bench_fw
         run_check "sim"             job_sim
         run_check "snapshot"        job_snapshot
+        run_check "live-parity"     job_live_parity
         run_check "replay-budget"   job_replay_budget
+        run_check "throughput-gate" job_throughput_gate
         run_check "rust-fuzz"       job_rust_fuzz
     fi
     echo "────────────────────────────────────────"
@@ -553,7 +582,9 @@ case "$name" in
     sim-e2e)          job=(job_sim_e2e ${@+"$@"}) ;;
     sim-image)        job=(job_sim_image) ;;
     replay-budget)    job=(job_replay_budget) ;;
+    throughput-gate)  job=(job_throughput_gate ${@+"$@"}) ;;
     snapshot)         job=(job_snapshot) ;;
+    live-parity)      job=(job_live_parity) ;;
     *) echo "unknown job: $name" >&2; usage >&2; exit 2 ;;
 esac
 

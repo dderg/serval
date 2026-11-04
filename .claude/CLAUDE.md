@@ -196,7 +196,8 @@ Every `gh` call in the tooling goes through `scripts/gh_util.py` (`pending_basel
 routes `gh` there; `land-pr.sh` defines `gh()` as the wrapper). Many agents polling
 GitHub trip its secondary rate limit, and a bare `gh pr checks --watch` then exits
 non-zero with "API rate limit exceeded", which looks like a red check. The wrapper
-retries only on that error (Retry-After if sent, else 30 s doubling to 300 s with 25 %
+retries only on that error and on transient network failures (a dropped connection
+made `--watch` exit like a red check on PR #652) (Retry-After if sent, else 30 s doubling to 300 s with 25 %
 jitter, 8 attempts, then a loud failure) and returns any other failure at once.
 Wait with one `gh pr checks --watch --interval 60`, never a loop of short polls; read PR
 metadata once per run and pass it along; use `gh_util.py <gh args>` in new scripts.

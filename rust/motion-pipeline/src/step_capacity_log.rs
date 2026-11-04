@@ -46,6 +46,10 @@ impl StepCapacityLog {
             return Vec::new();
         }
         self.last_report = Some(now);
+        self.flush(capacity)
+    }
+
+    pub fn flush(&mut self, capacity: &StepCapacity) -> Vec<StepCapacityReport> {
         self.pending
             .iter_mut()
             .zip(&capacity.mcus)

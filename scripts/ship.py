@@ -10,10 +10,13 @@ baseline review, accept, land-pr.sh), in order, stopping at the first problem:
 
 1. refuse a dirty tree (commit your work first);
 2. merge origin/main when the branch is behind, naming the conflicted files;
-3. cargo fmt --all and ruff format; formatting changes are committed;
-4. ./scripts/ci.sh quick, plus ./scripts/ci.sh py when klippy/, test/ or any
+3. refuse a branch that moves tools/bench/throughput_baseline.json without a
+   ```throughput-accept block in the body (the CI throughput gate's rule,
+   see scripts/throughput_gate.py);
+4. cargo fmt --all and ruff format; formatting changes are committed;
+5. ./scripts/ci.sh quick, plus ./scripts/ci.sh py when klippy/, test/ or any
    Python under tools/ or scripts/ changed (skip with --no-gates);
-5. land_queue.py --branch: build the snapshot engine, review the snapshots
+6. land_queue.py --branch: build the snapshot engine, review the snapshots
    against origin/main (no --expect: nothing may move; with it: every case must
    be EXPECTED, then accepted and committed from --accept-msg), land-pr.sh.
 """
@@ -26,12 +29,28 @@ import sys
 import tempfile
 from pathlib import Path
 
+import throughput_gate
+
 PY_GATE_PREFIXES = ("klippy/", "test/")
 PY_GATE_DIRS = ("tools/", "scripts/")
+THROUGHPUT_BASELINE = str(
+    throughput_gate.BASELINE.relative_to(throughput_gate.ROOT)
+)
 
 
 class ShipError(RuntimeError):
     pass
+
+
+def throughput_accept_problem(changed: list[str], body: str) -> str | None:
+    if THROUGHPUT_BASELINE not in changed or throughput_gate.accept_reason(
+        body
+    ):
+        return None
+    return (
+        f"the branch moves {THROUGHPUT_BASELINE}: say why in a "
+        "```throughput-accept block in the PR body"
+    )
 
 
 def needs_py_gate(changed: list[str]) -> bool:
@@ -136,6 +155,9 @@ def main() -> int:
         raise ShipError("the tree has uncommitted changes: commit them first")
     sync_main(branch)
     changed = git("diff", "--name-only", "origin/main...HEAD").splitlines()
+    problem = throughput_accept_problem(changed, body)
+    if problem:
+        raise ShipError(problem)
     commands = gate_commands(changed, args.no_gates)
     if args.dry_run:
         step(f"would format, run {commands or 'no gates'}, then land {branch}")

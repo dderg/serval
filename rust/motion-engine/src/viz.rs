@@ -2,7 +2,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use snapshot_core::waypoints::Waypoint;
-use snapshot_core::{SampleSide, Snapshot, SnapshotParams};
+use snapshot_core::{SampleSide, Snapshot};
 
 use planner_config::RuntimeLimits;
 use planner_config::from_doc::{MotionSettings, read_motion_settings};
@@ -79,35 +79,16 @@ fn motion_settings(config_text: &str) -> PyResult<MotionSettings> {
     Ok(settings)
 }
 
-fn snapshot_params(settings: MotionSettings) -> SnapshotParams {
-    SnapshotParams {
-        max_velocity: settings.cartesian.max_velocity,
-        max_accel: settings.cartesian.max_accel,
-        corner_deviation: settings.cartesian.corner_deviation,
-        max_jerk: settings.cartesian.max_jerk,
-        max_z_velocity: SnapshotParams::binding_z_cap(
-            settings.cartesian.max_z_velocity,
-            settings.cartesian.max_velocity,
-        ),
-        max_z_accel: SnapshotParams::binding_z_cap(
-            settings.cartesian.max_z_accel,
-            settings.cartesian.max_accel,
-        ),
-        max_extrude_only_velocity: settings.max_extrude_only_velocity,
-        max_extrude_only_accel: settings.max_extrude_only_accel,
-        max_path_deviation: Some(settings.fit_tolerance_mm),
-        max_accel_deviation: Some(settings.fit_tolerance_accel_mm_s2),
-        axis_decls: settings.axes,
-        post_processor_decls: settings.post_processors,
-    }
-}
-
-fn waypoints_from_py(waypoints: Vec<PyWaypoint>) -> Vec<Waypoint> {
+pub(crate) fn waypoints_from_py(waypoints: Vec<PyWaypoint>) -> Vec<Waypoint> {
     waypoints.into_iter().map(Waypoint::from).collect()
 }
 
+fn planner(config_text: &str) -> PyResult<snapshot_core::PlannerConfig> {
+    planner_config::from_doc::planner_config_from_text(config_text).map_err(PyValueError::new_err)
+}
+
 fn snapshot_from_config(waypoints: &[Waypoint], config_text: &str) -> PyResult<Snapshot> {
-    snapshot_core::pipeline_snapshot(waypoints, snapshot_params(motion_settings(config_text)?))
+    snapshot_core::pipeline_snapshot_for_config(waypoints, &planner(config_text)?)
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
@@ -136,21 +117,13 @@ pub(crate) fn snapshot_moves(
     waypoints: Vec<PyWaypoint>,
     config_text: &str,
 ) -> PyResult<Vec<PyMoveSpec>> {
-    let params = snapshot_params(motion_settings(config_text)?);
-    let limits = geometry::VelocityLimits::try_new(
-        params.max_velocity,
-        params.max_accel,
-        params.corner_deviation,
-        params.max_jerk,
+    let planner = planner(config_text)?;
+    let base = motion_pipeline::live_config::GcodeMoveBase::of(
+        &planner,
+        &motion_pipeline::live_config::extruder_caps(&planner).map_err(PyValueError::new_err)?,
     )
-    .and_then(|path| {
-        path.with_z_caps(
-            params.max_z_velocity.unwrap_or(f64::INFINITY),
-            params.max_z_accel.unwrap_or(f64::INFINITY),
-        )
-    })
-    .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    let specs = snapshot_core::move_specs(&waypoints_from_py(waypoints), limits)
+    .map_err(PyValueError::new_err)?;
+    let specs = snapshot_core::move_specs(&waypoints_from_py(waypoints), base)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(specs
         .into_iter()

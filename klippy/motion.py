@@ -56,7 +56,8 @@ class Move:
         velocity = min(speed, toolhead.max_velocity)
         self.is_kinematic_move = True
         self.axes_d = axes_d = [end_pos[i] - start_pos[i] for i in (0, 1, 2, 3)]
-        self.move_d = move_d = math.sqrt(sum([d * d for d in axes_d[:3]]))
+        dx, dy, dz = axes_d[:3]
+        self.move_d = move_d = math.sqrt(dx * dx + dy * dy + dz * dz)
         if move_d < 0.000000001:
             self.end_pos = (
                 start_pos[0],
