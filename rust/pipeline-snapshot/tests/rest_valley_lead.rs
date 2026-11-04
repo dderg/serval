@@ -5,6 +5,8 @@
 //! first few millimetres (half of `k·r·v` a millimetre before the stop), so
 //! the nozzle still held the advance's pressure when the toolhead stopped.
 
+mod corpus;
+
 use pipeline_snapshot::waypoints::parse_gcode;
 use pipeline_snapshot::{EXTRUDER_AXIS, SampleSide, Snapshot, pipeline_snapshot_for_config};
 use planner_config::from_doc::planner_config_from_text;
@@ -17,28 +19,6 @@ const SAMPLES: usize = 20000;
 const RATIO: f64 = 0.4 * 0.2 / (std::f64::consts::PI * 0.875 * 0.875);
 const MARKS_MM: [f64; 5] = [3.0, 2.0, 1.0, 0.5, 0.25];
 const KEPT_LEAD: f64 = 0.9;
-
-/// A bench config with its extruder kernel removed and the extruder's
-/// acceleration limit raised to [`EXTRUDER_MAX_ACCEL_MM_S2`]; a
-/// kernel-free advance needs finite extrude-only caps.
-fn kernel_free(bench_config: &str) -> String {
-    let text = std::fs::read_to_string(source_tree::repo_root().join(bench_config))
-        .unwrap_or_else(|e| panic!("read {bench_config}: {e}"));
-    let replace = |text: &str, from: &str, to: &str| {
-        assert!(text.contains(from), "{bench_config} has no `{from}`");
-        text.replacen(from, to, 1)
-    };
-    let text = replace(
-        &text,
-        "post_processors: pa, st\n",
-        &format!("post_processors: pa\nmax_accel: {EXTRUDER_MAX_ACCEL_MM_S2}\n"),
-    );
-    replace(
-        &text,
-        "pid_kd: 124.081\n",
-        "pid_kd: 124.081\nmax_extrude_only_velocity: 50\nmax_extrude_only_accel: 5000\n",
-    )
-}
 
 fn plan(config_text: &str) -> Snapshot {
     let planner = planner_config_from_text(config_text).expect("the config reads");
@@ -95,7 +75,10 @@ fn read_lead(snapshot: &Snapshot) -> LeadReading {
 #[test]
 fn a_kernel_free_advance_keeps_its_lead_into_and_out_of_a_rest_it_can_afford() {
     for bench_config in ["tools/bench/configs/fast.cfg", "tools/bench/printer.cfg"] {
-        let reading = read_lead(&plan(&kernel_free(bench_config)));
+        let reading = read_lead(&plan(&corpus::kernel_free(
+            bench_config,
+            EXTRUDER_MAX_ACCEL_MM_S2,
+        )));
         assert!(
             reading.full_advance_accel < EXTRUDER_MAX_ACCEL_MM_S2,
             "{bench_config}: precondition: the full advance asks {} mm/s² of the extruder",

@@ -586,7 +586,7 @@ pub(crate) fn project_followers(
                     axis,
                     leaders,
                     &base[i + 1..],
-                    (read.shaped_ds, read.raw_moves),
+                    &read,
                 );
                 let s_start = state.aligned_span_start(next_s);
                 let leg = RampLeg {
@@ -1693,10 +1693,9 @@ impl FollowerState {
     /// the next one). Both are measured as the shaped leaders' distance
     /// from the rest point at the segment's edges, so the move on each side
     /// extrudes exactly the material of the path it is shaped onto. Any
-    /// shaped arc beyond them — the fit's back-and-forth near the rest point
-    /// — joins the lead (see [`Self::push_lead`]): a separate idle span
-    /// would step the ratio, and so the follower's velocity, where the
-    /// leaders are already moving.
+    /// shaped arc beyond them joins one of them ([`Self::push_rest_arcs`]):
+    /// a separate idle span would step the ratio, and so the follower's
+    /// velocity, where the leaders are already moving.
     fn ingest(
         &mut self,
         raw: &ContinuousSegment,
@@ -1704,8 +1703,14 @@ impl FollowerState {
         axis: usize,
         leaders: &[usize],
         upcoming: &[ContinuousSegment],
-        (shaped_ds, raw_moves): (f64, bool),
+        read: &IngestRead,
     ) -> f64 {
+        let IngestRead {
+            shaped_ds,
+            ref odometer,
+            raw_moves,
+            ..
+        } = *read;
         if let Some(through) = self.ingested_through_t {
             assert!(
                 raw.t_end > through + GRID_DEDUP_EPS_S,
@@ -1744,47 +1749,69 @@ impl FollowerState {
             self.push_span(shaped_ds, tail_ratio, tail_ratio);
             return shaped_ds;
         }
-        if tail > SPAN_MIN_LEN_MM {
-            self.push_span(tail, tail_ratio, tail_ratio);
-        }
         let lead_ratio = upcoming
             .iter()
             .find(|seg| seg.spatial_path)
             .and_then(|seg| seg.followers.iter().find(|f| f.axis_index == axis))
             .map_or(0.0, |f| f.ratio);
-        self.push_lead(lead, idle, lead_ratio);
+        let rest_arc = odometer.covered_until(closest_to_rest(raw, shaped, leaders));
+        self.push_rest_arcs((tail, idle, lead), rest_arc, (tail_ratio, lead_ratio));
         shaped_ds
     }
 
-    /// Lays a lead's material, `lead_ratio × lead`, over the lead joined with
-    /// the idle arc, opening and closing on the lead ratio. The ratio ramps
-    /// linearly into a valley and back out over equal widths: with the idle
-    /// arc no longer than the lead, a V reaching just as deep as the idle's
-    /// share of material; with a longer idle arc, ramps one lead wide each
-    /// around a flat floor at zero, the deepest a valley goes without
-    /// changing sign. The two coincide where the lead and idle arcs are
-    /// equal. A lead with no ratio lays one flat span: its valley would only
-    /// cut the arc into extra breakpoints, down to slivers where the lead is
-    /// a few picometres.
-    fn push_lead(&mut self, lead: f64, idle: f64, lead_ratio: f64) {
-        let joined = lead + idle;
-        if idle <= SPAN_MIN_LEN_MM || lead_ratio == 0.0 {
+    /// Lays a rest segment's tail, idle and lead arcs, the ratio stepping
+    /// from the tail's to the lead's only `rest_arc` into the segment, where
+    /// the leaders come closest to the rest point. The idle arc is the
+    /// shaped path's excess over the tail's and the lead's straight
+    /// distances from the rest point: the shaped axes curve into and out of
+    /// it unlike each other, and the fit wanders around it. What of it the
+    /// leaders cover before they reach the rest joins the tail, the rest of
+    /// it the lead; a tail too short to lay its own span leaves the whole
+    /// idle arc to the lead.
+    fn push_rest_arcs(
+        &mut self,
+        (tail, idle, lead): (f64, f64, f64),
+        rest_arc: f64,
+        (tail_ratio, lead_ratio): (f64, f64),
+    ) {
+        let tail_idle = if tail > SPAN_MIN_LEN_MM {
+            (rest_arc - tail).clamp(0.0, idle)
+        } else {
+            0.0
+        };
+        self.push_over_idle(tail, tail_idle, tail_ratio);
+        self.push_over_idle(lead, idle - tail_idle, lead_ratio);
+    }
+
+    /// Lays an arc's material, `ratio × arc`, over the arc joined with the
+    /// idle arc, opening and closing on its ratio. The ratio ramps linearly
+    /// into a valley and back out over equal widths: with the idle arc no
+    /// longer than the arc, a V reaching just as deep as the idle's share of
+    /// material; with a longer idle arc, ramps one arc wide each around a
+    /// flat floor at zero, the deepest a valley goes without changing sign.
+    /// The two coincide where the arc and the idle arc are equal. An arc
+    /// with no ratio lays one flat span: its valley would only cut the
+    /// joined arc into extra breakpoints, down to slivers where the arc is a
+    /// few picometres.
+    fn push_over_idle(&mut self, arc: f64, idle: f64, ratio: f64) {
+        let joined = arc + idle;
+        if idle <= SPAN_MIN_LEN_MM || ratio == 0.0 {
             if joined > SPAN_MIN_LEN_MM {
-                self.push_span(joined, lead_ratio, lead_ratio);
+                self.push_span(joined, ratio, ratio);
             }
             return;
         }
-        let ramp = (0.5 * joined).min(lead);
+        let ramp = (0.5 * joined).min(arc);
         let floor = joined - 2.0 * ramp;
-        let valley_ratio = lead_ratio * (lead - ramp) / (joined - ramp);
+        let valley_ratio = ratio * (arc - ramp) / (joined - ramp);
         if ramp > SPAN_MIN_LEN_MM {
-            self.push_span(ramp, lead_ratio, valley_ratio);
+            self.push_span(ramp, ratio, valley_ratio);
         }
         if floor > SPAN_MIN_LEN_MM {
             self.push_span(floor, valley_ratio, valley_ratio);
         }
         if ramp > SPAN_MIN_LEN_MM {
-            self.push_span(ramp, valley_ratio, lead_ratio);
+            self.push_span(ramp, valley_ratio, ratio);
         }
     }
 
@@ -2279,6 +2306,73 @@ impl LeaderPieces {
 struct OdometerLeaves {
     grid: Vec<f64>,
     leaves: Vec<(f64, OdometerLeaf)>,
+}
+
+impl OdometerLeaves {
+    /// The arc the leaders cover from the segment's start until `t`.
+    fn covered_until(&self, t: f64) -> f64 {
+        let mut covered = 0.0;
+        for (end, leaf) in &self.leaves {
+            if t <= *end {
+                return covered + leaf.covered_until(t);
+            }
+            covered += leaf.covered_until(*end);
+        }
+        covered
+    }
+}
+
+/// Probes per leader knot interval the leaders of a rest segment are
+/// searched with for where they come closest to the rest point.
+const REST_POINT_PROBES_PER_INTERVAL: usize = 8;
+const REST_POINT_REFINEMENTS: usize = 64;
+
+/// When the shaped leaders of `shaped` come closest to where the raw ones
+/// of `raw` rest: the probe nearest it, refined by golden-section search
+/// over the probes either side.
+fn closest_to_rest(raw: &ContinuousSegment, shaped: &ContinuousSegment, leaders: &[usize]) -> f64 {
+    let rest_at = leader_support(raw, leaders).0;
+    let distance_sq = |t: f64| {
+        leaders
+            .iter()
+            .map(|&axis| {
+                let delta = axis_pva(&shaped.axes[axis], t).0 - axis_pva(&raw.axes[axis], rest_at).0;
+                delta * delta
+            })
+            .sum::<f64>()
+    };
+    let grid = axis_grid(shaped, leaders);
+    let mut probes: Vec<f64> = grid
+        .windows(2)
+        .flat_map(|window| {
+            (0..REST_POINT_PROBES_PER_INTERVAL).map(move |k| {
+                window[0]
+                    + (window[1] - window[0]) * k as f64 / REST_POINT_PROBES_PER_INTERVAL as f64
+            })
+        })
+        .collect();
+    probes.push(grid[grid.len() - 1]);
+    let nearest = probes
+        .iter()
+        .map(|&t| distance_sq(t))
+        .enumerate()
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .expect("a segment's leader grid has probes")
+        .0;
+    let (mut lo, mut hi) = (
+        probes[nearest.saturating_sub(1)],
+        probes[(nearest + 1).min(probes.len() - 1)],
+    );
+    let golden = 0.5 * (5.0_f64.sqrt() - 1.0);
+    for _ in 0..REST_POINT_REFINEMENTS {
+        let (left, right) = (hi - golden * (hi - lo), lo + golden * (hi - lo));
+        if distance_sq(left) <= distance_sq(right) {
+            hi = right;
+        } else {
+            lo = left;
+        }
+    }
+    0.5 * (lo + hi)
 }
 
 /// What ingest read off one shaped segment's leaders that its source fit

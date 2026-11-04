@@ -1225,7 +1225,7 @@ fn a_leader_acceleration_seam_is_seeded_as_a_construction_breakpoint() {
 
 fn laid_lead(lead: f64, idle: f64, lead_ratio: f64) -> FollowerState {
     let mut state = FollowerState::default();
-    state.push_lead(lead, idle, lead_ratio);
+    state.push_over_idle(lead, idle, lead_ratio);
     state
 }
 
@@ -1330,6 +1330,71 @@ fn a_lead_with_no_ratio_lays_one_flat_span() {
             "lead {lead} mm, idle {idle} mm: a lead that lays nothing needs no valley"
         );
     }
+}
+
+fn laid_rest(arcs: (f64, f64, f64), rest_arc: f64, ratios: (f64, f64)) -> FollowerState {
+    let mut state = FollowerState::default();
+    state.push_rest_arcs(arcs, rest_arc, ratios);
+    state
+}
+
+/// `voron_first_layers` on the kernel-free fast bench config at t≈4.749:
+/// the shaped axes curve into the stop after an extrusion and out of it
+/// into a travel, covering 4.5 µm more than the tail's and the lead's
+/// straight distances from the rest point, 1.8 µm of it before they rest.
+const CURVED_TAIL_MM: f64 = 0.111;
+const CURVED_IDLE_MM: f64 = 4.5e-3;
+const CURVED_LEAD_MM: f64 = 0.281;
+const CURVED_REST_ARC_MM: f64 = CURVED_TAIL_MM + 1.8e-3;
+const CURVED_TAIL_RATIO: f64 = 0.0369;
+
+#[test]
+fn the_ratio_steps_from_the_tail_to_the_lead_where_the_leaders_rest() {
+    let state = laid_rest(
+        (CURVED_TAIL_MM, CURVED_IDLE_MM, CURVED_LEAD_MM),
+        CURVED_REST_ARC_MM,
+        (CURVED_TAIL_RATIO, 0.0),
+    );
+    let steps: Vec<f64> = state
+        .spans
+        .windows(2)
+        .filter(|pair| pair[0].r1 != pair[1].r0)
+        .map(|pair| pair[0].s1)
+        .collect();
+    assert_eq!(
+        steps.len(),
+        1,
+        "the ratio steps at {steps:?}: {:?}",
+        state.spans
+    );
+    assert!(
+        (steps[0] - CURVED_REST_ARC_MM).abs() <= 1e-15,
+        "the ratio steps at s={} while the leaders still move toward the rest at s={}",
+        steps[0],
+        CURVED_REST_ARC_MM
+    );
+    let at_rest = state.spans_delta_e(0.0, 0.0, CURVED_REST_ARC_MM);
+    assert!(
+        (at_rest - CURVED_TAIL_RATIO * CURVED_TAIL_MM).abs() <= 1e-15,
+        "the tail lays {at_rest} mm, its command is {}",
+        CURVED_TAIL_RATIO * CURVED_TAIL_MM
+    );
+}
+
+#[test]
+fn a_tail_too_short_for_a_span_leaves_the_idle_arc_to_the_lead() {
+    let (idle, lead, lead_ratio) = (1e-5, 3e-5, 0.05);
+    let rest = laid_rest((1e-13, idle, lead), 5e-6, (0.04, lead_ratio));
+    let mut lead_alone = FollowerState::default();
+    lead_alone.push_over_idle(lead, idle, lead_ratio);
+    let ratios = |state: &FollowerState| {
+        state
+            .spans
+            .iter()
+            .map(|span| (span.s1 - span.s0, span.r0, span.r1))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ratios(&rest), ratios(&lead_alone));
 }
 
 const DENSE_SEGMENT: (f64, f64) = (11.042_946_570_120_918, 11.049_146_570_120_918);
