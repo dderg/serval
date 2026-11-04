@@ -4,11 +4,10 @@ use geometry::RatioRampRule;
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 use trajectory::{ContinuousAxis, ContinuousSegment};
 
-use super::super::FollowerState;
+use super::super::{FollowerState, SpanSide};
 use super::{
     CLUSTER_REACH_S, CROSSING_PROBES, Crossing, ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_S,
-    RampLeg, ShapedLeaders,
-    WIDTH_SLOPE_BOUND, WidthField,
+    RampLeg, ShapedLeaders, WIDTH_SLOPE_BOUND, WidthField,
 };
 
 /// `(length, ratio at start, ratio at end)` per span.
@@ -128,8 +127,8 @@ fn a_table_cut_into_short_spans_is_smoothed_exactly_as_the_whole_one() {
             let whole = smoothed(&table, field(total));
             let pieces = smoothed(&cut(&table, 0.01, 5), field(total));
             for s in probes(total, 20_000) {
-                let (whole_ratio, whole_slope) = whole.ratio_and_slope(s);
-                let (cut_ratio, cut_slope) = pieces.ratio_and_slope(s);
+                let (whole_ratio, whole_slope) = whole.ratio_and_slope(s, SpanSide::After);
+                let (cut_ratio, cut_slope) = pieces.ratio_and_slope(s, SpanSide::After);
                 assert!(
                     (whole_ratio - cut_ratio).abs() < 1e-12,
                     "the cut table lays {cut_ratio} at {s} mm, the whole one {whole_ratio}"
@@ -158,7 +157,7 @@ fn the_smoothed_ratio_stays_within_the_ratios_its_window_spans() {
             for s in probes(total, 20_000) {
                 let h = state.smoothing.width.width(s);
                 let (low, high) = table_range(&state, s - h, s + h);
-                let (ratio, _) = state.ratio_and_slope(s);
+                let (ratio, _) = state.ratio_and_slope(s, SpanSide::After);
                 assert!(
                     ratio >= low - 1e-12 && ratio <= high + 1e-12,
                     "the smoothed ratio {ratio} at {s} mm leaves [{low}, {high}]"
@@ -213,8 +212,8 @@ fn the_smoothed_ratio_is_c1_and_its_derivatives_are_exact() {
             points.retain(|&s| s > 1e-3 && s < total - 1e-3);
             let eps = 1e-9;
             for &s in &points {
-                let (left_ratio, left_slope) = state.ratio_and_slope(s - eps);
-                let (right_ratio, right_slope) = state.ratio_and_slope(s + eps);
+                let (left_ratio, left_slope) = state.ratio_and_slope(s - eps, SpanSide::After);
+                let (right_ratio, right_slope) = state.ratio_and_slope(s + eps, SpanSide::After);
                 assert!(
                     (left_ratio - right_ratio).abs() < 1e-9,
                     "the ratio jumps at {s} mm: {left_ratio} -> {right_ratio}"
@@ -260,7 +259,7 @@ fn a_cluster_of_short_spans_is_spread_over_the_whole_window() {
         .map(|seam| seam.step.abs())
         .sum();
     let steepest = probes(total, 50_000)
-        .map(|s| state.ratio_and_slope(s).1.abs())
+        .map(|s| state.ratio_and_slope(s, SpanSide::After).1.abs())
         .fold(0.0, f64::max);
     let width = 1.0;
     assert!(
@@ -286,7 +285,7 @@ fn the_slope_bound_covers_every_window() {
             let (ratio_bound, slope_bound) = state.smoothing.ratio_bounds(&state.spans, lo, hi);
             for k in 0..400 {
                 let s = lo + (hi - lo) * (k as f64 + 0.5) / 400.0;
-                let (ratio, slope) = state.ratio_and_slope(s);
+                let (ratio, slope) = state.ratio_and_slope(s, SpanSide::After);
                 assert!(
                     ratio.abs() <= ratio_bound * (1.0 + 1e-12),
                     "ratio {ratio} at {s} mm over the bound {ratio_bound}"
@@ -303,7 +302,8 @@ fn the_slope_bound_covers_every_window() {
 
 /// A move that leaves the leaders at rest — an extrude-only move, a dwell
 /// — stacks its width nodes on the rest node, and the zero-length stretch
-/// it rides there is bounded like any other.
+/// it rides there is bounded like any other. No window reaches a seam from
+/// a rest, so the stretch bends nowhere.
 #[test]
 fn a_zero_length_stretch_on_stacked_rest_nodes_is_bounded() {
     let table = line_table();
@@ -321,9 +321,10 @@ fn a_zero_length_stretch_on_stacked_rest_nodes_is_bounded() {
     field.push_rest(total);
     let state = smoothed(&table, field);
     let (ratio_bound, slope_bound) = state.smoothing.ratio_bounds(&state.spans, 0.0, 0.0);
-    let (ratio, slope) = state.ratio_and_slope(0.0);
+    let (ratio, slope) = state.ratio_and_slope(0.0, SpanSide::After);
     assert!(ratio.abs() <= ratio_bound && slope.abs() <= slope_bound);
-    assert!(state.smoothing.bends(0.0, 0.0).contains(&0.0));
+    assert!(!state.smoothing.touches(0.0, 0.0));
+    assert!(state.smoothing.bends(0.0, 0.0).is_empty());
 }
 
 #[test]

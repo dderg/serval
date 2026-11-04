@@ -365,7 +365,7 @@ fn fit_source_projection(
     let breakpoints = sig.construction_breakpoints(raw_axis, tolerance.accel_mm_s2);
     let input_state = |t| {
         let s = sig.s_owned(t);
-        let (ratio, ratio_slope) = sig.state.ratio_and_slope(s);
+        let (ratio, ratio_slope) = sig.ratio_and_slope(s);
         SeamInput {
             velocity: sig.deriv(t),
             ratio,
@@ -1887,14 +1887,17 @@ impl FollowerState {
         sign * delta
     }
 
-    fn ratio_and_slope(&self, s: f64) -> (f64, f64) {
-        let (ratio, slope) = self.table_ratio_and_slope(s);
+    fn ratio_and_slope(&self, s: f64, side: SpanSide) -> (f64, f64) {
+        let (ratio, slope) = self.table_ratio_and_slope(s, side);
         let correction = self.smoothing.correction(s);
         (ratio + correction.d1, slope + correction.d2)
     }
 
-    fn table_ratio_and_slope(&self, s: f64) -> (f64, f64) {
-        let idx = self.spans.partition_point(|span| span.s1 <= s);
+    fn table_ratio_and_slope(&self, s: f64, side: SpanSide) -> (f64, f64) {
+        let idx = match side {
+            SpanSide::After => self.spans.partition_point(|span| span.s1 <= s),
+            SpanSide::Before => self.spans.partition_point(|span| span.s1 < s),
+        };
         match self.spans.get(idx) {
             Some(span) if s >= span.s0 => (span.ratio_at(s), span.ratio_slope()),
             Some(span) => (span.r0, 0.0),
@@ -1906,8 +1909,8 @@ impl FollowerState {
     /// correction read once: [`Self::spans_e`], [`Self::ratio_and_slope`]
     /// and `d²r/ds²` (the table's spans are linear, so only the smoothing
     /// bends it).
-    fn laid_at(&self, s: f64) -> LaidRead {
-        let (ratio, slope) = self.table_ratio_and_slope(s);
+    fn laid_at(&self, s: f64, side: SpanSide) -> LaidRead {
+        let (ratio, slope) = self.table_ratio_and_slope(s, side);
         let correction = self.smoothing.correction(s);
         LaidRead {
             e: self
@@ -1936,6 +1939,27 @@ impl FollowerState {
             .filter(|&boundary| boundary <= s_end && s_end - boundary < envelope)
             .fold(s_end, |end, boundary| end.min(next_lower_float(boundary)))
             .max(s_start)
+    }
+}
+
+/// Which span a table read at a span boundary takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpanSide {
+    /// The span starting there.
+    After,
+    /// The span ending there.
+    Before,
+}
+
+impl SpanSide {
+    /// The side a segment owning `[s_start, s_end]` reads its start on:
+    /// its own span after it, or, owning no path, the span before.
+    fn opening(s_start: f64, s_end: f64) -> Self {
+        if s_end > s_start {
+            Self::After
+        } else {
+            Self::Before
+        }
     }
 }
 
@@ -2651,13 +2675,19 @@ impl RatioBounds {
             ratio: ridden
                 .clone()
                 .map(|span| span.r0.abs().max(span.r1.abs()))
-                .chain([s_start, s_end].map(|s| state.ratio_and_slope(s).0.abs()))
+                .chain(
+                    [
+                        (s_start, SpanSide::opening(s_start, s_end)),
+                        (s_end, SpanSide::Before),
+                    ]
+                    .map(|(s, side)| state.ratio_and_slope(s, side).0.abs()),
+                )
                 .fold(0.0_f64, f64::max),
             slope: ridden
                 .map(|span| span.ratio_slope().abs())
                 .fold(0.0_f64, f64::max),
         };
-        if state.smoothing.is_inert() {
+        if !state.smoothing.touches(s_start, s_end) {
             return table;
         }
         let (ratio, slope) = state.smoothing.ratio_bounds(&state.spans, s_start, s_end);
@@ -2925,13 +2955,13 @@ impl<'a> FollowerSignal<'a> {
             rate: self.odometer_scale * speed,
             rate_deriv: self.odometer_scale * self.leader_speed_deriv(t, &motion, speed),
             s,
-            laid: self.state.laid_at(s),
+            laid: self.laid_at(s),
         }
     }
 
     fn pva_at_distance(&self, t: f64, s: f64) -> (f64, f64, f64) {
         let (rate, rate_deriv) = self.odometer_rate(t);
-        self.pva_laid(t, (rate, rate_deriv), self.state.laid_at(s))
+        self.pva_laid(t, (rate, rate_deriv), self.laid_at(s))
     }
 
     fn pva_read(&self, t: f64, read: &PathRead) -> (f64, f64, f64) {
@@ -2952,13 +2982,13 @@ impl<'a> FollowerSignal<'a> {
     }
 
     fn path_deriv(&self, t: f64) -> f64 {
-        let (ratio, _) = self.state.ratio_and_slope(self.s_owned(t));
+        let (ratio, _) = self.ratio_and_slope(self.s_owned(t));
         ratio * self.shaped_speed(t)
     }
 
     fn path_second_deriv(&self, t: f64) -> f64 {
         let (rate, rate_deriv) = self.odometer_rate(t);
-        let (ratio, slope) = self.state.ratio_and_slope(self.s_owned(t));
+        let (ratio, slope) = self.ratio_and_slope(self.s_owned(t));
         slope * rate * rate + ratio * rate_deriv
     }
 
@@ -2969,7 +2999,7 @@ impl<'a> FollowerSignal<'a> {
     /// `d(R·W)/ds` at `s`: the path slope of the ratio a ratio-ramped
     /// advance reads.
     fn ramped_read_slope(&self, s: f64) -> f64 {
-        let (ratio, slope) = self.state.ratio_and_slope(s);
+        let (ratio, slope) = self.ratio_and_slope(s);
         let (weight, weight_slope, _) = self.state.smoothing.valley_weight(s);
         slope * weight + ratio * weight_slope
     }
@@ -3058,6 +3088,25 @@ impl<'a> FollowerSignal<'a> {
     fn s_at(&self, t: f64) -> f64 {
         self.s_start + self.s_offset(t)
     }
+    /// Which side of a span boundary the signal reads the table on at `s`:
+    /// at its owned end, the span it lays from, never the one after, which
+    /// the next segment owns and which may not be laid yet.
+    fn side_at(&self, s: f64) -> SpanSide {
+        if s >= self.s_owned_end {
+            SpanSide::Before
+        } else {
+            SpanSide::After
+        }
+    }
+
+    fn ratio_and_slope(&self, s: f64) -> (f64, f64) {
+        self.state.ratio_and_slope(s, self.side_at(s))
+    }
+
+    fn laid_at(&self, s: f64) -> LaidRead {
+        self.state.laid_at(s, self.side_at(s))
+    }
+
     fn s_owned(&self, t: f64) -> f64 {
         self.s_at(t).min(self.s_owned_end)
     }
@@ -3564,7 +3613,7 @@ impl TrackSignal for FollowerSignal<'_> {
         let span_index = self.state.spans.partition_point(|span| span.s1 <= s);
         let span = self.state.spans.get(span_index);
         let (speed, speed_deriv) = self.odometer_rate(t);
-        let (ratio, slope) = self.state.ratio_and_slope(s);
+        let (ratio, slope) = self.ratio_and_slope(s);
         let leaders = self
             .leaders
             .axes

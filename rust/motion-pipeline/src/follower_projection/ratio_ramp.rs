@@ -1118,14 +1118,43 @@ impl RatioSmoothing {
         &self.seams[first..last.max(first)]
     }
 
-    /// Whether the smoothing changes anything over `[lo, hi]`.
+    /// The table's slope just past `s`, as the seams laid so far leave it.
+    fn slope_left_of(&self, s: f64) -> f64 {
+        self.seams
+            .partition_point(|seam| seam.s <= s)
+            .checked_sub(1)
+            .map_or(self.base_slope.unwrap_or(0.0), |last| {
+                self.seams[last].slope_after
+            })
+    }
+
+    /// Whether the smoothing changes anything over `[lo, hi]`: the table
+    /// slopes where the windows there open, or a window there reaches a
+    /// seam. `s ± h(s)` grows along the path (`|h'| < 1`), so a seam
+    /// outside the stretch is reached from the stretch's end nearer it, if
+    /// at all, and one inside from itself, unless the leaders rest on it,
+    /// where no window reaches it. Only the width over the stretch decides,
+    /// never what is laid past it.
     pub(super) fn touches(&self, lo: f64, hi: f64) -> bool {
         if self.is_inert() {
             return false;
         }
+        let (back, ahead) = (lo - self.reach_back(lo), hi + self.reach_back(hi));
+        if self.slope_left_of(back) != 0.0 {
+            return true;
+        }
         let (widest, _) = self.width.bounds(lo, hi);
-        self.base_slope.unwrap_or(0.0) != 0.0
-            || !self.seams_near(lo - widest, hi + widest).is_empty()
+        self.seams_near(lo - widest, hi + widest)
+            .iter()
+            .any(|seam| {
+                if seam.s < lo {
+                    seam.s > back
+                } else if seam.s > hi {
+                    seam.s < ahead
+                } else {
+                    self.reach_back(seam.s) > 0.0
+                }
+            })
     }
 
     /// `(max |r̃|, max |r̃'|)` over `[lo, hi]`, see [`RatioSmoothing`].
@@ -1192,12 +1221,14 @@ impl RatioSmoothing {
 
     /// Where over `[lo, hi]` the smoothed ratio's curvature, or the
     /// advance's read weight, bends: where each seam enters and leaves a
-    /// window, the width nodes, and the valley ends. A window edge lies on
-    /// its side of the seam clamped to the nodes, so one that side puts
-    /// outside `[lo, hi]` is not searched for.
+    /// window, the width nodes, and the valley ends. A stretch the smoothing
+    /// does not touch bends only at valley ends, whatever the smoothing
+    /// holds elsewhere. A window edge lies on its side of the seam clamped
+    /// to the nodes, so one that side puts outside `[lo, hi]` is not
+    /// searched for.
     pub(super) fn bends(&self, lo: f64, hi: f64) -> Vec<f64> {
         let mut bends: Vec<f64> = self.valley_ends(lo, hi).collect();
-        if self.is_inert() {
+        if !self.touches(lo, hi) {
             return bends;
         }
         let (widest, _) = self.width.bounds(lo, hi);
