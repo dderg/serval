@@ -126,7 +126,34 @@ PY
     sudo apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=15 install -y libpython3-dev >&2
 }
 
+# pyo3-build-config records the interpreter it found (version, library name) in a
+# build script output that cargo reuses while its inputs look unchanged, and
+# rust-cache restores that output from runs on another runner image: after the
+# image moved from python 3.12 to another interpreter every pyo3 crate still asked
+# the linker for -lpython3.12. Stamp the interpreter in the target dir and rebuild
+# the pyo3 build configuration whenever it differs from the stamp.
+PYO3_STAMP_CHECKED=""
+refresh_pyo3_for_interpreter() {
+    [ -z "$PYO3_STAMP_CHECKED" ] || return 0
+    PYO3_STAMP_CHECKED=1
+    [ -n "${GITHUB_ACTIONS:-}" ] || [ -n "${CI_CHECK_PYO3_INTERPRETER:-}" ] || return 0
+    local stamp now target
+    target="${CARGO_TARGET_DIR:-$RUST/target}"
+    now="$(python3 -c 'import sys, sysconfig; print(sys.version, sys.executable, sysconfig.get_config_var("LDLIBRARY"))' 2>/dev/null || echo none)"
+    stamp="$target/.pyo3-interpreter"
+    if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$now" ]; then
+        return 0
+    fi
+    if [ -f "$stamp" ] || [ -d "$target/debug/build" ]; then
+        echo "ci.sh: interpreter changed or unrecorded ($now); rebuilding pyo3's build configuration" >&2
+        (cd "$RUST" && cargo clean -p pyo3-build-config -p pyo3-ffi >&2 2>&1 || true)
+    fi
+    mkdir -p "$target"
+    printf '%s\n' "$now" > "$stamp"
+}
+
 host_cargo() {
+    refresh_pyo3_for_interpreter
     ensure_libpython
     if [ "$(uname -s)" = Linux ] && command -v ld.lld >/dev/null 2>&1; then
         RUSTFLAGS="-Clink-arg=-fuse-ld=lld" cargo "$@"
