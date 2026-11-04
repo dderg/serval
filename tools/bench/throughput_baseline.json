@@ -1,0 +1,47 @@
+{
+  "slice_lines": 1000,
+  "configs": {
+    "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
+      "ir": 13703125158,
+      "stream_secs": 6.588,
+      "reason": "Initial baselines: first 1000 lines of voron_dense_top_layers.gcode, synchronous single-thread replay",
+      "commit": "75129927f0c72f86312539f1720f71785f4411a8",
+      "pi_2core": {
+        "k": 4555228638.205829,
+        "worst_x": [
+          2.19,
+          2.19
+        ],
+        "commit": "75129927f0c72f86312539f1720f71785f4411a8"
+      }
+    },
+    "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
+      "ir": 13451327776,
+      "stream_secs": 6.202,
+      "reason": "Initial baselines: first 1000 lines of voron_dense_top_layers.gcode, synchronous single-thread replay",
+      "commit": "75129927f0c72f86312539f1720f71785f4411a8",
+      "pi_2core": {
+        "k": 4793211808.321509,
+        "worst_x": [
+          2.21,
+          2.24
+        ],
+        "commit": "75129927f0c72f86312539f1720f71785f4411a8"
+      }
+    },
+    "tools/bench/configs/trident_kernel.cfg": {
+      "ir": 14118337955,
+      "stream_secs": 7.404,
+      "reason": "Initial baselines: first 1000 lines of voron_dense_top_layers.gcode, synchronous single-thread replay",
+      "commit": "75129927f0c72f86312539f1720f71785f4411a8",
+      "pi_2core": {
+        "k": 4423901608.698001,
+        "worst_x": [
+          2.33,
+          2.32
+        ],
+        "commit": "75129927f0c72f86312539f1720f71785f4411a8"
+      }
+    }
+  }
+}
