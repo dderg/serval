@@ -4,7 +4,9 @@ use std::sync::{Arc, LazyLock};
 
 use geometry::MIN_DEVICE_INTERVAL_S;
 use nurbs::ScalarNurbs;
-use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
+use nurbs::bezier::{
+    BezierPiece, bezier_piece_ends, bezier_pieces_to_nurbs, extract_bezier_pieces,
+};
 use trajectory::{
     AxisChainSet, ChainStage, CompiledChain, ContinuousAxis, ContinuousSegment,
     RelativeSplinePiece, ShapedSignal,
@@ -1941,21 +1943,12 @@ fn axis_pva(axis: &ContinuousAxis, t: f64) -> (f64, f64, f64) {
 
 fn axis_breakpoints(axis: &ContinuousAxis) -> Vec<f64> {
     match axis {
-        ContinuousAxis::Spline(curve) => extract_bezier_pieces(curve)
-            .into_iter()
-            .map(|piece| piece.u_end)
-            .collect(),
-        ContinuousAxis::RelativeSpline { curve, .. } => extract_bezier_pieces(curve)
-            .into_iter()
-            .map(|piece| piece.u_end)
-            .collect(),
+        ContinuousAxis::Spline(curve) | ContinuousAxis::RelativeSpline { curve, .. } => {
+            bezier_piece_ends(curve).collect()
+        }
         ContinuousAxis::PiecewiseRelativeSpline(pieces) => pieces
             .iter()
-            .flat_map(|piece| {
-                extract_bezier_pieces(&piece.curve)
-                    .into_iter()
-                    .map(|bezier| bezier.u_end)
-            })
+            .flat_map(|piece| bezier_piece_ends(&piece.curve))
             .collect(),
         ContinuousAxis::Analytic { span, .. } => {
             let mut breaks = Vec::with_capacity(span.phases.len() + 2);

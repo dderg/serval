@@ -125,6 +125,19 @@ pub fn extract_bezier_pieces(curve: &ScalarNurbs) -> Vec<BezierPiece> {
     pieces
 }
 
+/// The `u_end` of every piece [`extract_bezier_pieces`] returns, in order,
+/// read off the knots: refining to full multiplicity repeats knot values
+/// without adding any, so the pieces end where the knots between the
+/// domain's ends step.
+pub fn bezier_piece_ends(curve: &ScalarNurbs) -> impl Iterator<Item = f64> + '_ {
+    let p = curve.degree() as usize;
+    let knots = curve.knots();
+    knots[p..knots.len() - p]
+        .windows(2)
+        .filter(|pair| pair[0] != pair[1])
+        .map(|pair| pair[1])
+}
+
 /// Rounding two power-basis pieces' Bernstein conversions can leave between
 /// their shared seam values, in ulps of the larger piece's magnitude.
 const SEAM_ROUNDING_ENVELOPE: f64 = (1_u64 << 20) as f64;

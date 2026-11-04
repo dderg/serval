@@ -1,5 +1,7 @@
 use nurbs::ScalarNurbs;
-use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces, split_piece_at};
+use nurbs::bezier::{
+    BezierPiece, bezier_piece_ends, bezier_pieces_to_nurbs, extract_bezier_pieces, split_piece_at,
+};
 use nurbs::chebyshev::taylor_shift;
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
@@ -140,6 +142,15 @@ proptest! {
         for pair in pieces.windows(2) {
             prop_assert_eq!(pair[0].u_end, pair[1].u_start);
         }
+    }
+
+    #[test]
+    fn piece_ends_are_the_extracted_pieces_ends(curve in arb_curve()) {
+        let extracted: Vec<f64> = extract_bezier_pieces(&curve)
+            .iter()
+            .map(|piece| piece.u_end)
+            .collect();
+        prop_assert_eq!(bezier_piece_ends(&curve).collect::<Vec<_>>(), extracted);
     }
 
     #[test]
