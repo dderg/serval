@@ -861,43 +861,77 @@ pub(crate) fn project_followers(
         };
         let mut emitted_pv = state.emitted_output_pv;
         let mut committed_input_end = state.committed_input_end;
-        for i in 0..commit_count {
-            let raw = &base[i];
-            let (t_start, t_end) = projection_support(raw, &frontier[i], axis, leaders);
-            let cached = state.cached_projection(t_start, t_end);
-            let (input_start, input_end) = (cached.input_start, cached.input_end);
-            let (base_position, mut pieces) = kernel_tracks.as_ref().map_or_else(
-                || (cached.base, extract_bezier_pieces(&cached.track)),
-                |tracks| tracks[i].clone(),
-            );
-            let law_step = |previous_input: Option<SeamInput>| {
-                if kernel.is_some() {
-                    return 0.0;
+        let support = |i: usize| projection_support(&base[i], &frontier[i], axis, leaders);
+        let mut group_weld: Option<SeamWeld> = None;
+        for group in
+            crate::shaper::fit_groups(&base[..commit_count], lookahead.clamps_past_signal())
+        {
+            for i in group.clone() {
+                let (t_start, t_end) = support(i);
+                let cached = state.cached_projection(t_start, t_end);
+                let (input_start, input_end) = (cached.input_start, cached.input_end);
+                let (base_position, mut pieces) = kernel_tracks.as_ref().map_or_else(
+                    || (cached.base, extract_bezier_pieces(&cached.track)),
+                    |tracks| tracks[i].clone(),
+                );
+                let law_step = |previous_input: Option<SeamInput>| {
+                    if kernel.is_some() {
+                        return 0.0;
+                    }
+                    previous_input
+                        .expect("an emitted endpoint always records its pre-transform state")
+                        .emitted_velocity_step(&input_start)
+                };
+                if i == group.start {
+                    group_weld = None;
+                    if let Some(previous) = emitted_pv {
+                        let group_tol_scale = group
+                            .clone()
+                            .map(|j| {
+                                let (start, end) = support(j);
+                                state.cached_projection(start, end).tol_scale
+                            })
+                            .fold(f64::INFINITY, f64::min);
+                        group_weld = Some(SeamWeld::spanning(
+                            WeldWindow {
+                                axis,
+                                start: t_start,
+                                end: support(group.end - 1).1,
+                                tol: follower_fit_tol(fit_tol, group_tol_scale),
+                            },
+                            previous,
+                            law_step(committed_input_end),
+                            base_position,
+                            &pieces,
+                        )?);
+                    }
                 }
-                previous_input
-                    .expect("an emitted endpoint always records its pre-transform state")
-                    .emitted_velocity_step(&input_start)
-            };
-            if let Some(previous) = emitted_pv {
-                let weld = SeamWeld::spanning(
-                    WeldWindow {
-                        axis,
-                        start: t_start,
-                        end: t_end,
-                        tol: follower_fit_tol(fit_tol, cached.tol_scale),
-                    },
-                    previous,
-                    law_step(committed_input_end),
-                    base_position,
-                    &pieces,
-                )?;
-                pieces = weld.apply(pieces);
+                if let Some(weld) = group_weld {
+                    pieces = weld.apply(pieces);
+                }
+                if i > group.start {
+                    let previous = emitted_pv.expect("an earlier target of the group emitted");
+                    let weld = SeamWeld::spanning(
+                        WeldWindow {
+                            axis,
+                            start: t_start,
+                            end: t_end,
+                            tol: follower_fit_tol(fit_tol, cached.tol_scale),
+                        },
+                        previous,
+                        law_step(committed_input_end),
+                        base_position,
+                        &pieces,
+                    )?;
+                    pieces = weld.apply(pieces);
+                }
+                committed_input_end = Some(input_end);
+                let (run_end, velocity_end) = piece_run_end_pv(&pieces);
+                emitted_pv = Some((base_position + run_end, velocity_end));
+                Arc::make_mut(&mut out[i].axes)[axis] = ContinuousAxis::PiecewiseRelativeSpline(
+                    localize_pieces(base_position, &pieces),
+                );
             }
-            committed_input_end = Some(input_end);
-            let (run_end, velocity_end) = piece_run_end_pv(&pieces);
-            emitted_pv = Some((base_position + run_end, velocity_end));
-            Arc::make_mut(&mut out[i].axes)[axis] =
-                ContinuousAxis::PiecewiseRelativeSpline(localize_pieces(base_position, &pieces));
         }
         state.emitted_output_pv = emitted_pv;
         state.committed_input_end = committed_input_end;
@@ -1176,7 +1210,7 @@ impl KernelFit<'_> {
         } else {
             OutputMonotonicity::Free
         };
-        let mut fitted = Vec::with_capacity(group.len());
+        let mut fitted: Vec<(f64, Vec<BezierPiece>)> = Vec::with_capacity(group.len());
         let mut fit_us = 0;
         for target in group {
             let target_tol = follower_fit_tol(fit_tol, target.tol_scale);
@@ -1200,10 +1234,13 @@ impl KernelFit<'_> {
                 output_monotonicity,
             )?;
             fit_us += target_us;
-            fitted.push((
-                window_base + local_base - piece_run_start_pv(&pieces).0,
-                pieces,
-            ));
+            let base_position = match fitted.last() {
+                Some((previous_base, previous)) => {
+                    previous_base + piece_run_end_pv(previous).0 - piece_run_start_pv(&pieces).0
+                }
+                None => window_base + local_base - piece_run_start_pv(&pieces).0,
+            };
+            fitted.push((base_position, pieces));
         }
         Ok((
             fitted,
