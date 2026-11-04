@@ -224,6 +224,7 @@ impl motion_pipeline::StagedPipeline
 pub fn motion_pipeline::StagedPipeline::feed(&mut self, motion_pipeline::types::StreamInput) -> bool
 pub fn motion_pipeline::StagedPipeline::finish(&mut self) -> bool
 pub fn motion_pipeline::StagedPipeline::idle(&mut self) -> bool
+pub fn motion_pipeline::StagedPipeline::planned_through_s(&self) -> f64
 impl core::ops::drop::Drop for motion_pipeline::StagedPipeline
 pub fn motion_pipeline::StagedPipeline::drop(&mut self)
 pub struct motion_pipeline::StreamConfig
