@@ -10,7 +10,7 @@ use super::{
 
 mod jet;
 pub(super) use jet::Jet;
-use jet::horner;
+use jet::{horner, horner_with_slope};
 
 /// The steepest the width envelope climbs per unit of path away from a
 /// node (see [`WidthField`]).
@@ -59,6 +59,9 @@ const SMOOTHED_RAMP: [f64; 5] = [0.1875, 0.5, 0.375, 0.0, -0.0625];
 /// `∫₋₁ˣ` of [`SMOOTHED_RAMP`]: `x₊²/2` smoothed by the kernel.
 const SMOOTHED_HALF_SQUARE: [f64; 6] = [0.05, 0.1875, 0.25, 0.125, 0.0, -0.0125];
 const WIDTH_BISECTIONS: usize = 64;
+/// How close in ulps a Newton step on a window edge settles before the
+/// float the edge flips at is bracketed and bisected for.
+const NEWTON_SETTLED_ULPS: f64 = 4.0;
 /// Speed probes per leader knot interval a rest leg is searched with for
 /// where the shaped leaders come to rest.
 const REST_PROBES_PER_INTERVAL: usize = 8;
@@ -637,6 +640,24 @@ impl WidthField {
         }
     }
 
+    /// [`Self::width_after`], by the same arithmetic, with the width's
+    /// slope along the path.
+    fn width_and_slope_after(&self, a: usize, s: f64) -> (f64, f64) {
+        let (a, b) = (self.nodes[a], self.nodes[a + 1]);
+        let per_s = 1.0 / (b.s - a.s);
+        let x = (s - a.s) * per_s;
+        let scaled = |coeffs: &[f64], scale: f64, offset: f64| {
+            let (value, slope) = horner_with_slope(x, coeffs);
+            (value * scale + offset, slope * scale * per_s)
+        };
+        match (a.envelope == 0.0, b.envelope == 0.0) {
+            (true, true) => (0.0, 0.0),
+            (true, false) => scaled(&RISE_FROM_REST, b.envelope, 0.0),
+            (false, true) => scaled(&FALL_TO_REST, a.envelope, 0.0),
+            (false, false) => scaled(&SMOOTHERSTEP, b.envelope - a.envelope, a.envelope),
+        }
+    }
+
     /// A reader of [`Self::width`] for a search whose queries close in on
     /// one point: it tries the node interval of its last query first.
     fn searcher(&self) -> WidthSearch<'_> {
@@ -715,6 +736,24 @@ impl WidthSearch<'_> {
             Err((a, _)) => {
                 self.last.set(Some(a));
                 self.field.width_after(a, s)
+            }
+        }
+    }
+
+    /// [`Self::width`] with its slope along the path, read as flat on a
+    /// node.
+    fn width_and_slope(&self, s: f64) -> (f64, f64) {
+        let nodes = &self.field.nodes;
+        if let Some(a) = self.last.get() {
+            if nodes[a].s < s && s < nodes[a + 1].s {
+                return self.field.width_and_slope_after(a, s);
+            }
+        }
+        match self.field.interval(s) {
+            Ok(node) => (nodes[node].envelope, 0.0),
+            Err((a, _)) => {
+                self.last.set(Some(a));
+                self.field.width_and_slope_after(a, s)
             }
         }
     }
@@ -1139,7 +1178,8 @@ impl RatioSmoothing {
     }
 
     /// The `s` on `side` of `seam` where `s ∓ h(s) = seam`: `s ± h(s)` is
-    /// increasing since `|h'| < 1`.
+    /// increasing since `|h'| < 1`. A safeguarded Newton closes in on it,
+    /// and the float it flips at is bracketed from there and bisected for.
     fn window_edge(&self, seam: f64, side: f64, widest: f64) -> f64 {
         let width = self.width.searcher();
         let reach = |s: f64| (s - seam) * side - width.width(s);
@@ -1151,6 +1191,46 @@ impl RatioSmoothing {
         let mut far = (seam + side * (widest / (1.0 - WIDTH_SLOPE_BOUND))).clamp(first, last);
         if reach(far) < 0.0 || reach(near) >= 0.0 {
             return near;
+        }
+        let strictly_between =
+            |s: f64, near: f64, far: f64| (s - near) * side > 0.0 && (far - s) * side > 0.0;
+        let mut s = near;
+        for _ in 0..WIDTH_BISECTIONS {
+            let (h, slope) = width.width_and_slope(s);
+            let reached = (s - seam) * side - h;
+            if reached < 0.0 {
+                near = s;
+            } else {
+                far = s;
+            }
+            let newton = s - reached / (side - slope);
+            let ulp = (trajectory::next_toward(s, f64::INFINITY) - s).abs();
+            if (newton - s).abs() <= NEWTON_SETTLED_ULPS * ulp {
+                break;
+            }
+            s = if strictly_between(newton, near, far) {
+                newton
+            } else {
+                0.5 * (near + far)
+            };
+        }
+        let s_reached = s == far;
+        let mut step = trajectory::next_toward(s, if s_reached { near } else { far }) - s;
+        loop {
+            let probe = s + step;
+            if !strictly_between(probe, near, far) {
+                break;
+            }
+            let probe_reached = reach(probe) >= 0.0;
+            if probe_reached {
+                far = probe;
+            } else {
+                near = probe;
+            }
+            if probe_reached != s_reached {
+                break;
+            }
+            step *= 2.0;
         }
         for _ in 0..WIDTH_BISECTIONS {
             let mid = 0.5 * (near + far);
