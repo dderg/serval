@@ -245,8 +245,12 @@ impl Planner {
             "the velocity profile plans a different number of moves than were committed"
         );
         self.entry_v = profile.boundary_speeds[count];
-        self.budgets.drain(..count);
-        for (geometry, velocity) in self.moves.drain(..count).zip(profile.moves.iter().cloned()) {
+        for ((geometry, velocity), budget) in self
+            .moves
+            .drain(..count)
+            .zip(profile.moves.iter().cloned())
+            .zip(self.budgets.drain(..count))
+        {
             if let (Some(capacity), Some(overload)) = (
                 self.config.step_capacity.as_deref(),
                 velocity.step_capacity_overload,
@@ -257,7 +261,11 @@ impl Planner {
                     std::time::Instant::now(),
                 ));
             }
-            if !output(PlannedItem::Move(PlannedMove { geometry, velocity })) {
+            if !output(PlannedItem::Move(PlannedMove {
+                geometry,
+                velocity,
+                budget,
+            })) {
                 return false;
             }
         }
