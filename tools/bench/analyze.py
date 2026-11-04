@@ -1203,6 +1203,21 @@ def residual_wander_us(matches: dict[str, MatchedSteps]) -> float:
     return float((max(medians) - min(medians)) * 1e6) if medians else 0.0
 
 
+def nearest_fitted_ppm(fitted_ppm: list[float | None], index: int) -> float:
+    """The rate an epoch too short to fit its own runs at. The live host
+    re-syncs its host→mcu map at every rest, so the stream's rate against
+    the mcu clock moves from epoch to epoch as the clock estimate
+    converges; the latest fitted epoch holds the estimate nearest the one
+    in force, and a median over the whole run can sit tens of ppm off it."""
+    for ppm in reversed(fitted_ppm[:index]):
+        if ppm is not None:
+            return ppm
+    for ppm in fitted_ppm[index + 1 :]:
+        if ppm is not None:
+            return ppm
+    return 0.0
+
+
 def align_all(
     capture_events: dict[str, StepEvents],
     reference: Reference,
@@ -1226,12 +1241,11 @@ def align_all(
     for index, (cap, ref) in enumerate(pairs):
         if cap.duration_s >= MIN_SCALE_FIT_DURATION_S:
             alignments[index] = align_epoch(steps[index], cap, ref, None)
-    fitted = [a.ppm for a in alignments if a is not None]
-    fallback_ppm = float(np.median(fitted)) if fitted else 0.0
+    fitted_ppm = [None if a is None else a.ppm for a in alignments]
     results = []
     for index, (cap, ref) in enumerate(pairs):
         alignment = alignments[index] or align_epoch(
-            steps[index], cap, ref, fallback_ppm
+            steps[index], cap, ref, nearest_fitted_ppm(fitted_ppm, index)
         )
         results.append(
             EpochResult(

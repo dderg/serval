@@ -117,7 +117,11 @@ except in CI takes one for its whole run (`CI_NO_SLOT=1` opts out), the `make`/`
 builds in a normal slot but measures in an exclusive one (all slots, nothing else heavy
 runs). Wrap your own loops: `python3 scripts/slots.py run [--exclusive] -- <cmd>`;
 `slots.py status` shows who holds the slots. Waiting is queued, prints the holders every
-60 s and fails after 2 h. Nested calls under a held slot do not take a second one.
+60 s and fails after 2 h. Waiters are served first come, first served (a pid queue), so a
+chain of exclusive jobs cannot starve the others (it did, with the first version: a series
+of exclusive bench runs held every slot for 25+ minutes). An exclusive job still blocks all
+other heavy work while it runs: keep each one short and do not hold it across a session.
+Nested calls under a held slot do not take a second one.
 
 # Starting and shipping a change
 
