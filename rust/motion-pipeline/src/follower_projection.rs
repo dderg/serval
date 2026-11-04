@@ -284,16 +284,6 @@ impl<'a> LeadingAdvance<'a> {
     fn is_ramped(&self) -> bool {
         self.smoothing == AdvanceSmoothing::RatioRamp
     }
-
-    /// Whether the advance reads only the velocity laid along the leaders'
-    /// path, whose ratio the smoothing weighs: every advance a ratio ramp
-    /// precedes.
-    fn reads_path_only(&self) -> bool {
-        matches!(
-            self.smoothing,
-            AdvanceSmoothing::RatioRamp | AdvanceSmoothing::RatioRampAndKernel
-        )
-    }
 }
 
 fn ramped_position_step(axis: usize, step: &AdvanceStep) -> PostProcessError {

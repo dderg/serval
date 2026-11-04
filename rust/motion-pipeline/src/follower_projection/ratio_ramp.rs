@@ -9,6 +9,7 @@ use super::{
 };
 
 mod jet;
+mod models;
 pub(super) use jet::Jet;
 use jet::{horner, horner_with_slope};
 

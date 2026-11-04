@@ -2002,7 +2002,6 @@ fn a_follower_enclosure_holds_every_sample_of_its_signal() {
 }
 
 #[test]
-#[ignore = "advanced enclosure waits on the ramp model"]
 fn an_advanced_follower_enclosure_holds_every_sample_of_its_signal() {
     let (shaped, state) = turning_leaders_on_two_ramps();
     let sig = FollowerSignal::new(
@@ -2153,7 +2152,6 @@ fn a_stop_and_go_reads_its_rate_continuously_through_its_rest() {
 }
 
 #[test]
-#[ignore = "advanced enclosure waits on the ramp model"]
 fn an_advanced_follower_enclosure_holds_every_sample_through_a_reversal() {
     let shaped = leaders_on_a_noisy_line(&[-0.5, 50.0]);
     let mut state = FollowerState::default();
@@ -2229,7 +2227,6 @@ fn unshaped_segments(points: &[[f64; 2]], feedrate: f64) -> Vec<ContinuousSegmen
 /// leader step's allowance, and its enclosure holds every sample of its
 /// position and velocity there and of all three elsewhere.
 #[test]
-#[ignore = "advanced enclosure waits on the ramp model"]
 fn an_advance_on_an_unshaped_cap_departure_is_enclosed_under_its_onset_exemption() {
     let square = [
         [0.0, 0.0],

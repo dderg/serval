@@ -1,8 +1,10 @@
 //! Taylor-model enclosures of a follower's projected track: the shaped
 //! leaders' polynomial pieces give the path speed `|ẋ|` and its rate, the
 //! odometer `s` is its integral anchored at the window centre's own
-//! reading, and the span table lays `e(s)`, `r(s)` and `r'(s)` there. The
-//! follower reads `p = e(s)`, `v = r·ṡ`, `a = r'·ṡ² + r·s̈`.
+//! reading, and the span table and its smoothing lay `e(s)`, `r(s)` and
+//! `r'(s)` there. The follower reads `p = e(s)`, `v = r·ṡ`,
+//! `a = r'·ṡ² + r·s̈`; an advance reads `R = r·W`, `W` the valley weight,
+//! and its time derivatives.
 //!
 //! A window whose odometer range reaches into a neighbouring span — or
 //! before the table or past its last span — is modelled by the formula
@@ -232,11 +234,14 @@ impl WholeEnclosure {
 const FOLLOWER_WORKING_SHARE: f64 = 1.0 / (1_u64 << 24) as f64;
 
 /// A follower's models on one window: what the span table lays along the
-/// leaders' path, which an advance reads, and the raw track's extrude-only
-/// motion, which it does not; each `[p, v, a, j]`.
+/// leaders' path and the raw track's extrude-only motion, each `[p, v, a]`,
+/// and what an advance reads of the path's: the velocity laid along it
+/// weighted by its valleys and that velocity's first two time derivatives
+/// ([`FollowerSignal::ramped_advance_read`]), `[v, a, j]`.
 pub(super) struct FollowerModels {
-    path: [TaylorModel; 4],
-    raw: [TaylorModel; 4],
+    path: [TaylorModel; 3],
+    raw: [TaylorModel; 3],
+    read: [TaylorModel; 3],
 }
 
 impl FollowerModels {
@@ -244,6 +249,17 @@ impl FollowerModels {
     fn total(&self, order: usize) -> TaylorModel {
         self.path[order].add(&self.raw[order])
     }
+}
+
+/// What a window's models read beyond the follower's own `[p, v, a]`.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Reading {
+    /// The follower alone.
+    Follower,
+    /// The advance's read velocity and acceleration, its jerk unbounded.
+    AdvanceWithoutJerk,
+    /// The advance's read velocity, acceleration and jerk.
+    Advance,
 }
 
 /// The axes a follower reads, window by window: the moving leaders, each
@@ -288,14 +304,16 @@ impl<'a> FollowerSignal<'a> {
         Some(formulas)
     }
 
-    /// The follower's `[p, v, a, j]` on `window` — `j` only `with_jerk` —
-    /// split into what the span table lays along the leaders' path and the
-    /// extrude-only motion of the raw track; `None` where a model is out of
-    /// reach: an axis past one of its formulas or without a jerk, the
-    /// smoothing, or a speed zero the rate divides by. An odometer reaching
-    /// past the owned span, where the signal holds its distance, is widened
-    /// by how far it reaches.
-    fn window_models(&self, window: Window, with_jerk: bool) -> Option<FollowerModels> {
+    /// The follower's models on `window` and what `reading` asks beyond
+    /// them, split into what the span table and its smoothing lay along the
+    /// leaders' path and the extrude-only motion of the raw track; `None`
+    /// where a model is out of reach: an axis past one of its formulas or
+    /// without a jerk, an odometer reach across a bend of the smoothing, or
+    /// a speed zero the rate divides by. An odometer reaching past the owned
+    /// span, where the signal holds its distance, is widened by how far it
+    /// reaches.
+    fn window_models(&self, window: Window, reading: Reading) -> Option<FollowerModels> {
+        let with_jerk = reading == Reading::Advance;
         let windows = self.axis_windows()?;
         let mut leaders = Vec::with_capacity(windows.leaders.len());
         let mut speed_squared = TaylorModel::constant(Ball::exact(0.0));
@@ -359,53 +377,123 @@ impl<'a> FollowerSignal<'a> {
             |(lo, hi): (f64, f64)| (lo.max(read.0).min(read.1), hi.min(read.1).max(read.0));
         let reach =
             self.reach_inside_crossings(window, inside_read((centre - spread, centre + spread)));
-        if self.state.smoothing.touches(reach.0, reach.1) {
-            return None;
-        }
         let held = (centre + spread - self.s_owned_end).max(0.0);
         s.widen(held);
         let reach = inside_read((reach.0 - held, reach.1 + held));
         let formulas = self.table_formulas(centre, reach)?;
-        let rate_second = if with_jerk {
-            match (&inverse_speed, rest) {
-                (Some(inverse), _) => leader_speed_second(&leaders, inverse).scale(scale),
-                (None, Some(_)) => along_rest(2)?.scale(scale),
-                (None, None) => TaylorModel::constant(Ball::exact(0.0)),
-            }
-        } else {
-            TaylorModel::UNBOUNDED
-        };
+        let correction = self.state.smoothing.correction_model(&s, reach)?;
         let raw = match (&windows.raw, self.raw_delta) {
             (Some(raw), Some((_, at_start))) => {
-                let [p, v, a, j] = raw.models(window, with_jerk)?;
-                [p.add_ball(Ball::exact(-at_start)), v, a, j]
+                let [p, v, a, _] = raw.models(window, false)?;
+                [p.add_ball(Ball::exact(-at_start)), v, a]
             }
-            _ => [(); 4].map(|()| TaylorModel::constant(Ball::exact(0.0))),
+            _ => [(); 3].map(|()| TaylorModel::constant(Ball::exact(0.0))),
         };
-        let laid = |formula: &TableFormula| {
-            let [e, ratio, slope] = formula.laid(&s);
-            [
-                e.add_ball(Ball::exact(self.e_start - self.e_spans_start)),
-                ratio.mul(&rate),
-                slope.mul(&rate).mul(&rate).add(&ratio.mul(&rate_deriv)),
-                ratio
-                    .mul(&rate_second)
-                    .add(&slope.mul(&rate).mul(&rate_deriv).scale(Ball::exact(3.0))),
-            ]
-        };
-        let mut path = laid(&formulas[0]);
-        let [rate, rate_deriv, rate_second] =
-            [&rate, &rate_deriv, &rate_second].map(TaylorModel::bound);
-        for formula in &formulas[1..] {
-            let Some([e, ratio, slope]) = formula.departure_from(&formulas[0], reach) else {
-                continue;
-            };
+        let [base_e, base_ratio, base_slope] = formulas[0].laid(&s);
+        let e = base_e
+            .add(&correction.value)
+            .add_ball(Ball::exact(self.e_start - self.e_spans_start));
+        let ratio = base_ratio.add(&correction.d1);
+        let slope = base_slope.add(&correction.d2);
+        let rate_squared = rate.mul(&rate);
+        let mut path = [
+            e,
+            ratio.mul(&rate),
+            slope.mul(&rate_squared).add(&ratio.mul(&rate_deriv)),
+        ];
+        let departures: Vec<[f64; 3]> = formulas[1..]
+            .iter()
+            .filter_map(|formula| formula.departure_from(&formulas[0], reach))
+            .collect();
+        let rate_bound = rate.bound();
+        let rate_deriv_bound = rate_deriv.bound();
+        for &[e, ratio, slope] in &departures {
             path[0].widen(e);
-            path[1].widen(ratio * rate);
-            path[2].widen(slope * rate * rate + ratio * rate_deriv);
-            path[3].widen(ratio * rate_second + 3.0 * slope * rate * rate_deriv);
+            path[1].widen(ratio * rate_bound);
+            path[2].widen(slope * rate_bound * rate_bound + ratio * rate_deriv_bound);
         }
-        Some(FollowerModels { path, raw })
+        let read = match reading {
+            Reading::Follower => [(); 3].map(|()| TaylorModel::UNBOUNDED),
+            Reading::AdvanceWithoutJerk | Reading::Advance => {
+                let rate_second = match (with_jerk, &inverse_speed, rest) {
+                    (false, _, _) => TaylorModel::UNBOUNDED,
+                    (true, Some(inverse), _) => leader_speed_second(&leaders, inverse).scale(scale),
+                    (true, None, Some(_)) => along_rest(2)?.scale(scale),
+                    (true, None, None) => TaylorModel::constant(Ball::exact(0.0)),
+                };
+                let Some([weight, weight_slope, weight_curvature]) =
+                    self.state.smoothing.valley_weight_model(&s, reach)?
+                else {
+                    let jerk = if with_jerk {
+                        let mut jerk = ratio
+                            .mul(&rate_second)
+                            .add(&slope.mul(&rate).mul(&rate_deriv).scale(Ball::exact(3.0)))
+                            .add(&correction.d3.mul(&rate_squared).mul(&rate));
+                        let rate_second_bound = rate_second.bound();
+                        for &[_, ratio, slope] in &departures {
+                            jerk.widen(
+                                ratio * rate_second_bound
+                                    + 3.0 * slope * rate_bound * rate_deriv_bound,
+                            );
+                        }
+                        jerk
+                    } else {
+                        TaylorModel::UNBOUNDED
+                    };
+                    return Some(FollowerModels {
+                        read: [path[1], path[2], jerk],
+                        path,
+                        raw,
+                    });
+                };
+                let weighted = ratio.mul(&weight);
+                let weighted_slope = slope.mul(&weight).add(&ratio.mul(&weight_slope));
+                let mut read = [
+                    weighted.mul(&rate),
+                    weighted_slope
+                        .mul(&rate_squared)
+                        .add(&weighted.mul(&rate_deriv)),
+                    if with_jerk {
+                        let weighted_curvature = correction
+                            .d3
+                            .mul(&weight)
+                            .add(&slope.mul(&weight_slope).scale(Ball::exact(2.0)))
+                            .add(&ratio.mul(&weight_curvature));
+                        weighted
+                            .mul(&rate_second)
+                            .add(
+                                &weighted_slope
+                                    .mul(&rate)
+                                    .mul(&rate_deriv)
+                                    .scale(Ball::exact(3.0)),
+                            )
+                            .add(&weighted_curvature.mul(&rate_squared).mul(&rate))
+                    } else {
+                        TaylorModel::UNBOUNDED
+                    },
+                ];
+                let [w, w1, w2] =
+                    [&weight, &weight_slope, &weight_curvature].map(TaylorModel::bound);
+                let rate_second_bound = rate_second.bound();
+                for &[_, ratio, slope] in &departures {
+                    let weighted_slope = slope * w + ratio * w1;
+                    read[0].widen(ratio * w * rate_bound);
+                    read[1].widen(
+                        weighted_slope * rate_bound * rate_bound + ratio * w * rate_deriv_bound,
+                    );
+                    read[2].widen(
+                        ratio * w * rate_second_bound
+                            + 3.0 * weighted_slope * rate_bound * rate_deriv_bound
+                            + (2.0 * slope * w1 + ratio * w2)
+                                * rate_bound
+                                * rate_bound
+                                * rate_bound,
+                    );
+                }
+                read
+            }
+        };
+        Some(FollowerModels { path, raw, read })
     }
 
     /// The path distances the signal reads anywhere on its support: its
@@ -453,7 +541,7 @@ impl<'a> FollowerSignal<'a> {
     ) -> Option<Vec<ExactPiece>> {
         let breaks = self.breaks_between(lo, hi, &[])?;
         let pieces = enclose_between(&breaks, accuracy, &|window| {
-            self.window_models(window, false)
+            self.window_models(window, Reading::Follower)
                 .map(|models| std::array::from_fn(|order| models.total(order)))
         })?;
         taylor::debug_assert_holds(
@@ -540,19 +628,15 @@ fn enclose_between(
 impl AdvancedFollowerSignal<'_, '_> {
     /// The advanced follower's enclosure over `[lo, hi]`: the follower's
     /// models less the advance steps behind each window, plus the advance
-    /// of the motion laid along the path — never the extrude-only motion of
-    /// the raw track, which keeps its own. `None` for an advance reading the
-    /// ramped path velocity — its valley weights are the smoothing's — or
-    /// where the follower has no bounded model.
+    /// of the velocity laid along the path weighted by its valleys — never
+    /// the extrude-only motion of the raw track, which keeps its own.
+    /// `None` where the follower has no bounded model.
     pub(super) fn enclosure(
         &self,
         lo: f64,
         hi: f64,
         accuracy: [f64; 3],
     ) -> Option<Vec<ExactPiece>> {
-        if self.advance.reads_path_only() {
-            return None;
-        }
         let slivers = self.onset_slivers(lo, hi)?;
         let extra: Vec<f64> = self
             .steps
@@ -571,7 +655,7 @@ impl AdvancedFollowerSignal<'_, '_> {
                 taylor::try_enclose(
                     stretch,
                     accuracy,
-                    &|window| self.advanced_models(window, true),
+                    &|window| self.advanced_models(window, Reading::Advance),
                     &mut pieces,
                 )?;
                 continue;
@@ -581,7 +665,8 @@ impl AdvancedFollowerSignal<'_, '_> {
                 stretch,
                 self.unshaped_step.enclosure_accuracy(accuracy),
                 &|window| {
-                    let [position, velocity, _] = self.advanced_models(window, false)?;
+                    let [position, velocity, _] =
+                        self.advanced_models(window, Reading::AdvanceWithoutJerk)?;
                     Some([position, velocity, TaylorModel::constant(Ball::exact(0.0))])
                 },
                 &mut pieces,
@@ -600,10 +685,10 @@ impl AdvancedFollowerSignal<'_, '_> {
     }
 
     /// The advanced follower's `[p, v, a]` on `window`: the follower's
-    /// models less the advance steps behind it, plus the advance of the
-    /// motion laid along the path — `a` only `with_jerk`, else unbounded.
-    fn advanced_models(&self, window: Window, with_jerk: bool) -> Option<[TaylorModel; 3]> {
-        let models = self.source.window_models(window, with_jerk)?;
+    /// models less the advance steps behind it, plus the advance of what it
+    /// reads of the path — `a` unbounded without the read's jerk.
+    fn advanced_models(&self, window: Window, reading: Reading) -> Option<[TaylorModel; 3]> {
+        let models = self.source.window_models(window, reading)?;
         let taken: f64 = self
             .steps
             .iter()
@@ -612,7 +697,7 @@ impl AdvancedFollowerSignal<'_, '_> {
             .sum();
         let [position, velocity, acceleration] = std::array::from_fn(|order| models.total(order));
         let position = position.add_ball(Ball::exact(-taken));
-        let [_, read_velocity, read_acceleration, read_jerk] = models.path;
+        let [read_velocity, read_acceleration, read_jerk] = models.read;
         Some(match self.advance.stage {
             ChainStage::DerivativeGains { k1, k2 } => {
                 assert_eq!(*k2, 0.0, "leading acceleration gain is not supported");

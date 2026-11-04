@@ -739,3 +739,98 @@ fn a_rest_valley_covers_the_ratio_step_its_leg_lays_short_of_the_rest() {
         "the advance reads the ratio step at {ratio_step} mm with weight {weight}"
     );
 }
+
+fn model_at(model: &crate::shaper::taylor::TaylorModel, x: f64) -> f64 {
+    model
+        .coefficients()
+        .iter()
+        .rev()
+        .fold(0.0, |acc, c| acc * x + c)
+}
+
+/// Over every stretch of path between the smoothing's bends and the
+/// table's seams, its correction and the advance's valley weight read on a
+/// model of the path hold every reading the evaluator makes there, with
+/// its derivatives.
+#[test]
+fn the_smoothing_models_hold_its_correction_and_valley_weight_between_bends() {
+    use crate::shaper::taylor::{Ball, TaylorModel};
+    let mut read = 0usize;
+    for table in [line_table(), clustered_table()] {
+        for field in [cruise, cornering] {
+            let total = length(&table);
+            let mut state = smoothed(&table, field(total));
+            state.smoothing.valleys = vec![
+                super::AdvanceValley {
+                    start: 0.3 * total,
+                    end: 0.3 * total,
+                    before: 1.5,
+                    after: 2.0,
+                },
+                super::AdvanceValley {
+                    start: 0.6 * total,
+                    end: 0.6 * total + 1.0,
+                    before: 0.8,
+                    after: 0.5,
+                },
+            ];
+            let mut points: Vec<f64> = state.spans.iter().map(|span| span.s0).collect();
+            points.extend(state.smoothing.bends(0.0, total));
+            points.extend([0.0, total]);
+            points.retain(|&s| (0.0..=total).contains(&s));
+            points.sort_by(f64::total_cmp);
+            points.dedup();
+            for stretch in points.windows(2).filter(|pair| pair[1] - pair[0] > 1e-9) {
+                for part in 0..4 {
+                    let width = (stretch[1] - stretch[0]) / 4.0;
+                    let (lo, hi) = (
+                        stretch[0] + width * f64::from(part),
+                        stretch[0] + width * f64::from(part + 1),
+                    );
+                    let (centre, radius) = (0.5 * (lo + hi), 0.5 * (hi - lo));
+                    let s = TaylorModel::affine(Ball::exact(centre), radius);
+                    let reach = (
+                        trajectory::next_toward(lo, f64::INFINITY),
+                        trajectory::next_toward(hi, f64::NEG_INFINITY),
+                    );
+                    let correction = state
+                        .smoothing
+                        .correction_model(&s, reach)
+                        .expect("a stretch between bends reads one formula");
+                    let weight = state
+                        .smoothing
+                        .valley_weight_model(&s, reach)
+                        .expect("a stretch between bends lies on one side of every valley")
+                        .unwrap_or_else(|| {
+                            [1.0, 0.0, 0.0].map(|value| TaylorModel::constant(Ball::exact(value)))
+                        });
+                    read += 1;
+                    for k in 1..8 {
+                        let at = lo + (hi - lo) * f64::from(k) / 8.0;
+                        let x = (at - centre) / radius;
+                        let jet = state.smoothing.correction(at);
+                        let (w, w1, w2) = state.smoothing.valley_weight(at);
+                        for (name, truth, model) in [
+                            ("value", jet.value, &correction.value),
+                            ("d1", jet.d1, &correction.d1),
+                            ("d2", jet.d2, &correction.d2),
+                            ("d3", jet.d3, &correction.d3),
+                            ("W", w, &weight[0]),
+                            ("W'", w1, &weight[1]),
+                            ("W''", w2, &weight[2]),
+                        ] {
+                            let miss = (truth - model_at(model, x)).abs();
+                            assert!(
+                                miss <= model.rad() + 1e-9 * (1.0 + truth.abs()),
+                                "{name} at {at} mm on [{lo}, {hi}]: the evaluator reads {truth}, \
+                                 the model misses it by {miss:e} past its bound {:e}",
+                                model.rad()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(read > 100, "too few stretches read: {read}");
+}
