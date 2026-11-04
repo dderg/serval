@@ -68,15 +68,19 @@ const SERIES_DEGREE: usize = 3;
 /// derivative to [`SERIES_DEGREE`], and one past, which bounds the rest.
 const SERIES_LEN: usize = 3 + SERIES_DEGREE + 2;
 
-/// A real number as a float and a bound on its distance from it, the
-/// bound's own rounding left to [`Lean::sealed`]: the series arithmetic
-/// runs a few hundred of these in a chain, each bound a sum of products
-/// of non-negative floats, so the chain's bound errs by far less than the
-/// share `taylor::upper` inflates it by once at the end.
+/// A real number as a float and two bounds on its distance from it: `at`
+/// where the series is read at the window's centre, `over` where it is read
+/// anywhere on the window's reach — the same floats either way, as the
+/// reach only widens. The bounds' own rounding is left to
+/// [`Lean::sealed`]: the series arithmetic runs a few hundred of these in a
+/// chain, each bound a sum of products of non-negative floats, so the
+/// chain's bound errs by far less than the share `taylor::upper` inflates
+/// it by once at the end.
 #[derive(Clone, Copy)]
 struct Lean {
     mid: f64,
-    rad: f64,
+    at: f64,
+    over: f64,
 }
 
 /// What underflow can take from the bounds of a chain of up to `2¹²`
@@ -84,32 +88,40 @@ struct Lean {
 const LEAN_UNDERFLOW: f64 = 4096.0 * f64::MIN_POSITIVE;
 
 impl Lean {
-    const ZERO: Self = Self { mid: 0.0, rad: 0.0 };
+    const ZERO: Self = Self {
+        mid: 0.0,
+        at: 0.0,
+        over: 0.0,
+    };
 
     fn of(ball: Ball) -> Self {
         Self {
             mid: ball.mid,
-            rad: ball.rad,
+            at: ball.rad,
+            over: ball.rad,
         }
     }
 
-    fn sealed(self) -> Ball {
-        Ball {
+    /// The number read at the window's centre, and over its reach.
+    fn sealed(self) -> [Ball; 2] {
+        [self.at, self.over].map(|rad| Ball {
             mid: self.mid,
-            rad: taylor::upper(self.rad) + LEAN_UNDERFLOW,
-        }
+            rad: taylor::upper(rad) + LEAN_UNDERFLOW,
+        })
     }
 
     fn reciprocal(self) -> Option<Self> {
         let magnitude = self.mid.abs();
-        if !(magnitude > self.rad) {
+        if !(magnitude > self.over) {
             return None;
         }
         let mid = 1.0 / self.mid;
-        let nearest = (magnitude - self.rad) * (1.0 - f64::EPSILON);
+        let rounding = f64::EPSILON * mid.abs();
+        let spread = |rad: f64| rad / (magnitude * ((magnitude - rad) * (1.0 - f64::EPSILON)));
         Some(Self {
             mid,
-            rad: self.rad / (magnitude * nearest) + f64::EPSILON * mid.abs(),
+            at: spread(self.at) + rounding,
+            over: spread(self.over) + rounding,
         })
     }
 }
@@ -119,9 +131,11 @@ impl std::ops::Add for Lean {
 
     fn add(self, other: Self) -> Self {
         let mid = self.mid + other.mid;
+        let rounding = 0.5 * f64::EPSILON * mid.abs();
         Self {
             mid,
-            rad: self.rad + other.rad + 0.5 * f64::EPSILON * mid.abs(),
+            at: self.at + other.at + rounding,
+            over: self.over + other.over + rounding,
         }
     }
 }
@@ -131,11 +145,12 @@ impl std::ops::Mul for Lean {
 
     fn mul(self, other: Self) -> Self {
         let mid = self.mid * other.mid;
+        let (a, b) = (self.mid.abs(), other.mid.abs());
+        let rounding = 0.5 * f64::EPSILON * mid.abs();
         Self {
             mid,
-            rad: self.mid.abs() * other.rad
-                + self.rad * (other.mid.abs() + other.rad)
-                + 0.5 * f64::EPSILON * mid.abs(),
+            at: a * other.at + self.at * (b + other.at) + rounding,
+            over: a * other.over + self.over * (b + other.over) + rounding,
         }
     }
 }
@@ -146,7 +161,7 @@ impl std::ops::Neg for Lean {
     fn neg(self) -> Self {
         Self {
             mid: -self.mid,
-            rad: self.rad,
+            ..self
         }
     }
 }
@@ -161,7 +176,7 @@ fn series_about(polynomial: &[Ball], at: Lean) -> Series {
     for (slot, &c) in work.iter_mut().zip(polynomial) {
         *slot = Lean::of(c);
     }
-    if at.mid == 0.0 && at.rad == 0.0 {
+    if at.mid == 0.0 && at.over == 0.0 {
         return work;
     }
     let n = polynomial.len();
@@ -294,7 +309,7 @@ impl WidthField {
         for (slot, &c) in exact.iter_mut().zip(coefficients) {
             *slot = Ball::exact(c);
         }
-        let about = series_about(&exact[..coefficients.len()], Lean::of(at)).map(Lean::sealed);
+        let about = series_about(&exact[..coefficients.len()], Lean::of(at)).map(|c| c.sealed()[0]);
         let mut power = Ball::exact(scale);
         for (slot, &c) in out.iter_mut().zip(&about).take(coefficients.len()) {
             *slot = c * power;
@@ -388,13 +403,15 @@ impl RatioSmoothing {
         let Some(polynomials) = self.correction_polynomials(formula, centre) else {
             return Some(ModelJet::zero());
         };
-        let at_centre = polynomials.series(Lean::ZERO)?.map(Lean::sealed);
-        let over_reach = polynomials
+        let series = polynomials
             .series(Lean {
                 mid: 0.0,
-                rad: radius,
+                at: 0.0,
+                over: radius,
             })?
             .map(Lean::sealed);
+        let at_centre = series.map(|[at, _]| at);
+        let over_reach = series.map(|[_, over]| over);
         let delta = s.add_ball(Ball::exact(-centre));
         let mut powers = [TaylorModel::constant(Ball::exact(1.0)); SERIES_DEGREE + 1];
         let mut reach_powers = [1.0; SERIES_DEGREE + 2];
