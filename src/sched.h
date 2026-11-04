@@ -76,6 +76,8 @@ void sched_add_timer(struct timer*);
 void sched_del_timer(struct timer *del);
 unsigned int sched_timer_dispatch(void);
 uint32_t sched_callback_busy_ticks(void);
+uint32_t sched_pulsed_step_edges(void);
+uint32_t sched_both_edge_steps(void);
 struct timer *sched_peek_timer(void);
 void sched_timer_reset(void);
 void sched_wake_tasks(void);

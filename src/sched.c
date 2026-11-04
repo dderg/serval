@@ -319,6 +319,29 @@ step_joins_batch(struct timer *t, uint32_t waketime, uint32_t horizon)
     return !timer_is_before(horizon, waketime) && timer_is_step(t);
 }
 
+static volatile uint32_t pulsed_step_edges, both_edge_steps;
+
+static __always_inline void
+count_step_edge(struct timer *t)
+{
+    if (container_of(t, struct stepper, time)->step_both_edge)
+        both_edge_steps++;
+    else
+        pulsed_step_edges++;
+}
+
+uint32_t
+sched_pulsed_step_edges(void)
+{
+    return pulsed_step_edges;
+}
+
+uint32_t
+sched_both_edge_steps(void)
+{
+    return both_edge_steps;
+}
+
 static __always_inline struct timer *
 fire_follower_step_edges(struct timer *t, uint32_t scheduled, uint32_t horizon)
 {
@@ -331,6 +354,7 @@ fire_follower_step_edges(struct timer *t, uint32_t scheduled, uint32_t horizon)
         while (timer_is_before(timer_read_time(), due))
             ;
         stepper_step_edge(t, stepper_timer_on_edge_path(t));
+        count_step_edge(t);
         last = t;
         t = t->next;
     } while (step_joins_batch(t, t->waketime, horizon));
@@ -380,6 +404,7 @@ dispatch_step_timer(struct timer *t, uint_fast8_t on_edge_path)
 {
     uint32_t scheduled = t->waketime;
     stepper_step_edge(t, on_edge_path);
+    count_step_edge(t);
     struct timer *next = t->next;
     uint32_t next_waketime = next->waketime;
     uint32_t horizon = scheduled + STEP_COINCIDENCE_TICKS;

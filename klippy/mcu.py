@@ -173,7 +173,7 @@ class MCU:
 
     def report_step_capacity(self, step_benchmark):
         self._get_status_info["step_capacity"] = step_benchmark
-        self._cpu_headroom.guard(step_benchmark["capacity_fraction"])
+        self._cpu_headroom.guard(step_benchmark)
 
     def _query_step_benchmark(self):
         parser = self._serial.get_msgparser()
