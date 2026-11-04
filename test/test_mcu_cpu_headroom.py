@@ -20,7 +20,7 @@ def load(idle, step, callback, charged=0.0):
         "window_ticks": WINDOW,
         "idle_ticks": round(idle * WINDOW),
         "timer_irq_ticks": round((step + callback) * WINDOW),
-        "callback_ticks": round(callback * WINDOW),
+        "nonstep_timer_ticks": round(callback * WINDOW),
         "pulsed_step_edges": round(2 * charged * WINDOW / PULSED),
         "both_edge_steps": 0,
     }

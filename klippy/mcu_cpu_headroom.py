@@ -26,7 +26,7 @@ class CpuLoadWindow:
         window = params["window_ticks"]
         if window <= 0:
             raise ValueError("cpu_load window of %d ticks" % (window,))
-        step = params["timer_irq_ticks"] - params["callback_ticks"]
+        step = params["timer_irq_ticks"] - params["nonstep_timer_ticks"]
         charged = (
             params["pulsed_step_edges"] / 2.0 * pulsed_ticks_per_step
             + params["both_edge_steps"] * both_edge_ticks_per_step

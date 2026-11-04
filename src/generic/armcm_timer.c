@@ -283,6 +283,7 @@ SysTick_Handler(void)
 {
     uint32_t fired = timer_fire_time;
     irq_disable();
+    sched_timer_irq_enter(fired);
     // SysTick and TIM5 share the same NVIC priority (MOTION_NVIC_PRIO).
     // Same-priority interrupts cannot nest, so a TIM5 tick that comes due
     // during this handler stays pending until SysTick returns — even across
@@ -318,7 +319,9 @@ SysTick_Handler(void)
 #endif
     uint32_t diff = timer_dispatch_many();
     timer_set_diff(diff);
-    timer_busy_ticks += timer_read_time() - fired;
+    uint32_t done = timer_read_time();
+    sched_timer_irq_exit(done);
+    timer_busy_ticks += done - fired;
 #if CONFIG_MACH_STM32
     diag_systick_account(diag_systick_enter, DWT->CYCCNT);
 #endif
