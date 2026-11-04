@@ -1123,36 +1123,30 @@ impl KernelFit<'_> {
         for piece in &mut input_pieces {
             piece.coeffs.resize(unified_input_degree + 1, 0.0);
         }
-        let assemble = if input_steps.is_empty() {
-            bezier_pieces_to_nurbs
-        } else {
-            nurbs::bezier::bezier_pieces_to_discontinuous_nurbs
-        };
-        let mut kernel_input = assemble(&input_pieces);
-        let input_offset = nurbs::eval::eval(&kernel_input, target_start);
+        let at_target = &input_pieces[input_pieces
+            .partition_point(|piece| piece.u_end <= target_start)
+            .min(input_pieces.len() - 1)];
+        let input_offset = polynomial_pva(&at_target.coeffs, target_start - at_target.u_start).0;
         for piece in &mut input_pieces {
             piece.coeffs[0] -= input_offset;
         }
-        kernel_input = assemble(&input_pieces);
         let window_base = first.base + input_offset * unit_kernel_mass(kernel);
         let mut gained_input = chain.leading_transform().is_some();
         if defer_linear_prefix {
             if let Some(ChainStage::DerivativeGains { k1, k2 }) = chain.transform() {
-                kernel_input = nurbs::bezier::bezier_pieces_to_discontinuous_nurbs(
-                    &extrude_only::without_extrude_only_gain(
-                        extract_bezier_pieces(&apply_derivative_gains_to_track(
-                            &kernel_input,
-                            *k1,
-                            *k2,
-                        )),
-                        window.iter().flat_map(|segment| &segment.extrude_only),
-                        (*k1, *k2),
-                    ),
+                input_pieces = extrude_only::without_extrude_only_gain(
+                    extract_bezier_pieces(&apply_derivative_gains_to_track(
+                        &nurbs::bezier::bezier_pieces_to_discontinuous_nurbs(&input_pieces),
+                        *k1,
+                        *k2,
+                    )),
+                    window.iter().flat_map(|segment| &segment.extrude_only),
+                    (*k1, *k2),
                 );
                 gained_input = true;
             }
         }
-        let gained_pieces = extract_bezier_pieces(&kernel_input);
+        let gained_pieces = input_pieces;
         assert!(
             gained_pieces.iter().all(|piece| {
                 [0.0, piece.u_end - piece.u_start]
@@ -1171,8 +1165,8 @@ impl KernelFit<'_> {
             .map(|piece| piece.degree())
             .max()
             .expect("shaper kernel has no pieces");
-        let table = AxisSignalTable::from_tracks(
-            std::iter::once(&kernel_input),
+        let table = AxisSignalTable::from_pieces(
+            &gained_pieces,
             SignalBounds {
                 first_t,
                 last_t,
@@ -2457,15 +2451,19 @@ struct RatioBounds {
 }
 
 impl RatioBounds {
-    fn ridden(state: &FollowerState, s_start: f64, s_end: f64) -> Self {
-        let ridden = state.spans.iter().filter(|span| {
-            span.s1 >= s_start - SPAN_LOOKUP_SLACK_MM && span.s0 <= s_end + SPAN_LOOKUP_SLACK_MM
-        });
+    /// The ratio bounds over the spans a signal owning `[s_start,
+    /// s_owned_end]` reads, never one starting past its end: whether the
+    /// next segment's spans are laid yet must not reach the fit.
+    fn ridden(state: &FollowerState, s_start: f64, s_owned_end: f64) -> Self {
+        let ridden = state
+            .spans
+            .iter()
+            .filter(|span| span.s1 >= s_start - SPAN_LOOKUP_SLACK_MM && span.s0 < s_owned_end);
         let table = Self {
             ratio: ridden
                 .clone()
                 .map(|span| span.r0.abs().max(span.r1.abs()))
-                .chain([s_start, s_end].map(|s| state.ratio_and_slope(s).0.abs()))
+                .chain([s_start, s_owned_end].map(|s| state.ratio_and_slope(s).0.abs()))
                 .fold(0.0_f64, f64::max),
             slope: ridden
                 .map(|span| span.ratio_slope().abs())
@@ -2474,7 +2472,9 @@ impl RatioBounds {
         if state.smoothing.is_inert() {
             return table;
         }
-        let (ratio, slope) = state.smoothing.ratio_bounds(&state.spans, s_start, s_end);
+        let (ratio, slope) = state
+            .smoothing
+            .ratio_bounds(&state.spans, s_start, s_owned_end);
         Self {
             ratio: table.ratio.max(ratio),
             slope: table.slope.max(slope),
@@ -2555,11 +2555,9 @@ impl<'a> FollowerSignal<'a> {
             integrate_recording(&|t| shaped_leaders.speed(t), end, &mut knots);
         }
         let odometer_scale = knots.scale_to(odometer.length);
-        let ratio_bounds = RatioBounds::ridden(
-            state,
-            odometer.start,
-            odometer.start + knots.length() * odometer_scale,
-        );
+        let s_end = odometer.start + knots.length() * odometer_scale;
+        let s_owned_end = state.owned_span_end(odometer.start, s_end);
+        let ratio_bounds = RatioBounds::ridden(state, odometer.start, s_owned_end);
 
         let mut sig = Self {
             state,
@@ -2583,7 +2581,7 @@ impl<'a> FollowerSignal<'a> {
         let (start_sliver, end_sliver) = sig.speed_zero_slivers();
         sig.start_sliver = start_sliver;
         sig.end_sliver = end_sliver;
-        sig.s_owned_end = state.owned_span_end(sig.s_start, sig.s_end());
+        sig.s_owned_end = s_owned_end;
         sig
     }
 
@@ -2874,12 +2872,10 @@ impl<'a> FollowerSignal<'a> {
             .state
             .spans
             .iter()
-            .filter(|span| {
-                span.s1 >= s_lo - SPAN_LOOKUP_SLACK_MM && span.s0 <= s_hi + SPAN_LOOKUP_SLACK_MM
-            })
+            .filter(|span| span.s1 >= s_lo - SPAN_LOOKUP_SLACK_MM && span.s0 < self.s_owned_end)
             .all(|span| span.r0 == 0.0 && span.r1 == 0.0);
         let tail_zero = match self.state.spans.last() {
-            Some(last) if s_hi + SPAN_LOOKUP_SLACK_MM > last.s1 => last.r1 == 0.0,
+            Some(last) if self.s_owned_end > last.s1 => last.r1 == 0.0,
             _ => true,
         };
         let smoothed = self

@@ -289,7 +289,8 @@ impl<'a> FollowerSignal<'a> {
     /// reach: an axis past one of its formulas or without a jerk, the
     /// smoothing, or a speed zero the rate divides by. An odometer reaching
     /// past the owned span, where the signal holds its distance, is widened
-    /// by how far it reaches.
+    /// by how far it reaches and reads only the formulas up to the owned
+    /// end, as the held signal does, whatever the table lays beyond it.
     fn window_models(&self, window: Window, with_jerk: bool) -> Option<FollowerModels> {
         let windows = self.axis_windows()?;
         let mut leaders = Vec::with_capacity(windows.leaders.len());
@@ -342,7 +343,10 @@ impl<'a> FollowerSignal<'a> {
         let held = (reach.1 - self.s_owned_end).max(0.0);
         s.widen(held);
         let reach = (reach.0 - held, reach.1 + held);
-        let formulas = self.table_formulas(centre, reach)?;
+        let formulas = self.table_formulas(
+            centre.min(self.s_owned_end),
+            (reach.0, reach.1.min(self.s_owned_end)),
+        )?;
         let rate_second = if with_jerk {
             match &inverse_speed {
                 Some(inverse) => leader_speed_second(&leaders, inverse).scale(scale),

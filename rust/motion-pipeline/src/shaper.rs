@@ -1469,14 +1469,10 @@ fn apply_trailing_stages_to_pieces(
     Ok(Arc::from(out))
 }
 
-/// A target whose whole read window holds one constant shapes to that
-/// constant times the kernel's mass, the offset a convolved neighbour's own
-/// fit carries, so the two meet without a rounding step where a rest ends.
 fn constant_axis_column(
     segments: &[&ContinuousSegment],
     targets: &[ContinuousSegment],
     axis: usize,
-    kernel_mass: f64,
 ) -> Option<Vec<ColumnTrack>> {
     let splines = segments
         .iter()
@@ -1492,19 +1488,11 @@ fn constant_axis_column(
     if !constant.is_finite() || control_points.any(|&point| point != constant) {
         return None;
     }
-    let shaped = constant * kernel_mass;
     targets
         .iter()
         .map(|seg| match &seg.axes[axis] {
             ContinuousAxis::Spline(curve) => Some(ColumnTrack {
-                stored: Arc::new(
-                    nurbs::ScalarNurbs::try_new(
-                        curve.degree(),
-                        curve.knots().to_vec(),
-                        vec![shaped; curve.control_points().len()],
-                    )
-                    .expect("a constant keeps its curve's knots and degree"),
-                ),
+                stored: Arc::clone(curve),
                 read: None,
             }),
             _ => None,
@@ -1587,6 +1575,23 @@ fn fit_axis_column(
         boundary,
         lookahead,
     };
+    let reads: Vec<(std::ops::Range<usize>, SignalBounds)> = targets
+        .iter()
+        .map(|target| read_window(&window_segments, target, kernel, window))
+        .collect();
+    let read_from = reads
+        .iter()
+        .map(|(range, _)| range.start)
+        .min()
+        .unwrap_or(0);
+    let read_to = reads.iter().map(|(range, _)| range.end).max().unwrap_or(0);
+    let pieces: Vec<Vec<BezierPiece>> = window_segments[read_from..read_to]
+        .iter()
+        .map(|seg| match &seg.axes[axis] {
+            ContinuousAxis::Spline(track) => extract_bezier_pieces(track),
+            _ => panic!("shaper: changed axis was not materialized"),
+        })
+        .collect();
     let workers = target_workers.max(1).min(targets.len());
     let fitted = pool
         .map_indexed(
@@ -1594,11 +1599,16 @@ fn fit_axis_column(
             targets.len(),
             || (),
             |(), index| {
+                let (range, bounds) = reads[index].clone();
                 fit_target_alone(
                     axis,
                     std::slice::from_ref(&targets[index]),
                     kernel,
-                    read_window(&window_segments, &targets[index], kernel, window),
+                    TargetRead {
+                        segments: &window_segments[range.clone()],
+                        pieces: &pieces[range.start - read_from..range.end - read_from],
+                        bounds,
+                    },
                     fit_tol,
                     signal,
                     pool,
@@ -1613,6 +1623,14 @@ fn fit_axis_column(
     Ok(Some(tracks))
 }
 
+/// The segments one target's convolution reads, their axis pieces and the
+/// bounds of that slice.
+struct TargetRead<'r, 'a> {
+    segments: &'r [&'a ContinuousSegment],
+    pieces: &'r [Vec<BezierPiece>],
+    bounds: SignalBounds,
+}
+
 /// One target's fit from the signal it reads alone, about its own start:
 /// what else shares its emit never reaches the fit, so the leader comes out
 /// the same however the shaper batches its emits.
@@ -1620,14 +1638,12 @@ fn fit_target_alone(
     axis: usize,
     target: &[ContinuousSegment],
     kernel: &nurbs::algebra::PiecewisePolynomialKernel,
-    (signal_segments, bounds): (&[&ContinuousSegment], SignalBounds),
+    read: TargetRead,
     fit_tol: FitTol,
     signal: ColumnSignal,
     pool: &WorkerPool,
 ) -> Result<Vec<ColumnTrack>, PostProcessError> {
-    if let Some(column) =
-        constant_axis_column(signal_segments, target, axis, unit_kernel_mass(kernel))
-    {
+    if let Some(column) = constant_axis_column(read.segments, target, axis) {
         return Ok(column);
     }
     fit_axis_targets(
@@ -1635,8 +1651,11 @@ fn fit_target_alone(
         target,
         ShapedSignalSource::new(
             kernel,
-            signal.convolution_input(AxisSignalTable::build(signal_segments, axis, bounds)),
-            signal_breakpoints(signal_segments, axis),
+            signal.convolution_input(AxisSignalTable::from_pieces(
+                read.pieces.iter().flatten(),
+                read.bounds,
+            )),
+            signal_breakpoints(read.segments, axis),
             target[0].t_start,
         ),
         fit_tol,
@@ -1654,22 +1673,21 @@ fn fit_target_alone(
 /// window around them reaches (the lookahead gates and the history
 /// retention hold both neighbours); an edge clamps only where the read
 /// passes it, as the window's own edge would.
-fn read_window<'s, 'a>(
-    segments: &'s [&'a ContinuousSegment],
+fn read_window(
+    segments: &[&ContinuousSegment],
     target: &ContinuousSegment,
     kernel: &nurbs::algebra::PiecewisePolynomialKernel,
     window: SignalBounds,
-) -> (&'s [&'a ContinuousSegment], SignalBounds) {
+) -> (std::ops::Range<usize>, SignalBounds) {
     let (k_lo, k_hi) = kernel.support();
     let (read_lo, read_hi) = (target.t_start - k_hi, target.t_end - k_lo);
     let lo = segments
         .partition_point(|seg| seg.t_start < read_lo)
         .saturating_sub(1);
     let hi = (segments.partition_point(|seg| seg.t_end <= read_hi) + 1).min(segments.len());
-    let slice = &segments[lo..hi];
-    let (first_t, last_t) = (slice[0].t_start, slice[slice.len() - 1].t_end);
+    let (first_t, last_t) = (segments[lo].t_start, segments[hi - 1].t_end);
     (
-        slice,
+        lo..hi,
         SignalBounds {
             first_t,
             last_t,
@@ -1791,6 +1809,13 @@ pub(crate) fn unit_kernel_mass(kernel: &nurbs::algebra::PiecewisePolynomialKerne
     mass
 }
 
+/// A shaped signal carries its input's offset at full weight: the kernel
+/// has unit mass up to the rounding of its own integral, and a constant
+/// window shapes to its constant exactly whether it is convolved or kept.
+fn assert_unit_mass(kernel: &nurbs::algebra::PiecewisePolynomialKernel) {
+    unit_kernel_mass(kernel);
+}
+
 impl<'a> ShapedSignalSource<'a> {
     pub(crate) fn new(
         kernel: &'a nurbs::algebra::PiecewisePolynomialKernel,
@@ -1804,6 +1829,7 @@ impl<'a> ShapedSignalSource<'a> {
             .map(|piece| piece.degree())
             .max()
             .expect("shaper kernel has no pieces");
+        assert_unit_mass(kernel);
         let input_offset = input.eval_hinted(offset_at, &std::cell::Cell::new(0));
         assert!(
             input_offset.is_finite(),
@@ -1822,7 +1848,7 @@ impl<'a> ShapedSignalSource<'a> {
                 .then(|| GainImpulseResponse::new(kernel, table.gain_impulses())),
             table,
             input_breaks,
-            shaped_offset: input_offset * unit_kernel_mass(kernel),
+            shaped_offset: input_offset,
             exact_kernel: ExactKernel::new(kernel),
         }
     }
@@ -2749,18 +2775,19 @@ const MOMENT_ORDERS: usize = 3;
 type MomentBounds = [[f64; MOMENT_POWER_CAPACITY]; MOMENT_ORDERS];
 
 impl AxisSignalTable {
-    fn build(segments: &[&ContinuousSegment], axis: usize, bounds: SignalBounds) -> Self {
-        Self::from_tracks(
-            segments.iter().map(|seg| match &seg.axes[axis] {
-                ContinuousAxis::Spline(track) => track.as_ref(),
-                _ => panic!("shaper: changed axis was not materialized"),
-            }),
-            bounds,
-        )
-    }
-
+    #[cfg(test)]
     pub(crate) fn from_tracks<'a>(
         tracks: impl IntoIterator<Item = &'a nurbs::ScalarNurbs>,
+        bounds: SignalBounds,
+    ) -> Self {
+        let pieces: Vec<BezierPiece> = tracks.into_iter().flat_map(extract_bezier_pieces).collect();
+        Self::from_pieces(&pieces, bounds)
+    }
+
+    /// The table over monomial pieces in time order, each in its own
+    /// variable from its start.
+    pub(crate) fn from_pieces<'p>(
+        pieces: impl IntoIterator<Item = &'p BezierPiece>,
         bounds: SignalBounds,
     ) -> Self {
         let mut table = Self {
@@ -2779,25 +2806,23 @@ impl AxisSignalTable {
             gain_impulses: Vec::new(),
             boundaries: Vec::new(),
         };
-        for track in tracks {
-            for piece in extract_bezier_pieces(track) {
-                if let Some(previous_end) = table.ends.last().copied() {
-                    assert!(
-                        piece.u_start >= previous_end,
-                        "signal pieces overlap: next starts at {} before previous end {previous_end}",
-                        piece.u_start
-                    );
-                    if piece.u_start > previous_end {
-                        let previous = table.coeffs.len() - 1;
-                        let held = table.piece_at(previous, previous_end);
-                        table.push_piece(previous_end, piece.u_start, vec![held]);
-                    }
+        for piece in pieces {
+            if let Some(previous_end) = table.ends.last().copied() {
+                assert!(
+                    piece.u_start >= previous_end,
+                    "signal pieces overlap: next starts at {} before previous end {previous_end}",
+                    piece.u_start
+                );
+                if piece.u_start > previous_end {
+                    let previous = table.coeffs.len() - 1;
+                    let held = table.piece_at(previous, previous_end);
+                    table.push_piece(previous_end, piece.u_start, vec![held]);
                 }
-                let origin = piece_midpoint(piece.u_start, piece.u_end);
-                let mut centered = vec![0.0; piece.coeffs.len()];
-                taylor_shift(&piece.coeffs, origin - piece.u_start, &mut centered);
-                table.push_piece(piece.u_start, piece.u_end, centered);
             }
+            let origin = piece_midpoint(piece.u_start, piece.u_end);
+            let mut centered = vec![0.0; piece.coeffs.len()];
+            taylor_shift(&piece.coeffs, origin - piece.u_start, &mut centered);
+            table.push_piece(piece.u_start, piece.u_end, centered);
         }
         assert!(!table.coeffs.is_empty(), "empty signal window");
         table
