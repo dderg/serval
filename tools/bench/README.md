@@ -98,7 +98,10 @@ Count mode: 40 kHz snapshots, i8 step delta per channel. Event mode: every STEP 
 
 ## Analyzer
 
-Reference is offline `_motion_engine.pipeline_snapshot_axis_samples`; needs local `make -f Makefile.rust motion-engine-fast`. Extruder total is shorter than gcode E by design (`docs/rewrite/shaper.md`, "Followers").
+The reference is offline `_motion_engine.pipeline_snapshot_epoch_samples` and needs a local `make -f Makefile.rust motion-engine-fast`.
+- It plans the print as one stream, as the live host does, cuts it at every rest the stream drains to (a dwell or an `M400`), and aligns each epoch to its capture on its own.
+- It must not plan each epoch from rest. A kernel follower's fit seeds depend on the stream before them (#689), so an epoch planned alone sits up to 1.4e-4 mm of E (0.06 microstep) off the live stream. That is enough to fail the 0.05-step check at sub-kHz E rates, as the `epochs` row did 3/3 on e0229f32f.
+- The extruder total is shorter than the gcode E by design (`docs/rewrite/shaper.md`, "Followers").
 
 Timing check `timing_within_50us_or_0.05_step` (constants `TIMING_TOLERANCE_US`, `POSITION_EQUIVALENT_TOLERANCE_STEPS`). A step with reference rate ≥ 200 Hz fails only when it is both more than 50 µs off the aligned reference and more than 0.05 step off in position. Position error is |time error| × reference step rate. Near zero velocity, a tiny position difference becomes a large time difference.
 

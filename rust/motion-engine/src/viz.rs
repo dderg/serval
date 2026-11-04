@@ -2,7 +2,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use snapshot_core::waypoints::Waypoint;
-use snapshot_core::{SampleSide, Snapshot};
+use snapshot_core::{ExactTrajectory, SampleSide, Snapshot};
+use trajectory::ContinuousSegment;
 
 use planner_config::RuntimeLimits;
 use planner_config::from_doc::{MotionSettings, read_motion_settings};
@@ -246,4 +247,86 @@ pub(crate) fn pipeline_snapshot_axis_samples(
     }
     let json = serde_json::to_string(&snap).map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((json, out))
+}
+
+/// Plan `waypoints` under `config_text` as one stream, as the live host
+/// plans them, and evaluate each axis in `axes` across every motion epoch:
+/// the runs of shaped segments between two rests the stream drains to, at
+/// a dwell or a wait for the moves to finish. Each epoch is `(t_start,
+/// t_end, rows)`, with per-axis `(position, velocity, acceleration)` rows
+/// at `sample_period_s` or closer, both ends included. `step_benchmarks`
+/// caps it as in [`pipeline_snapshot`].
+#[pyfunction]
+#[pyo3(signature = (waypoints, config_text, axes, sample_period_s, step_benchmarks = None))]
+pub(crate) fn pipeline_snapshot_epoch_samples(
+    waypoints: Vec<PyWaypoint>,
+    config_text: &str,
+    axes: Vec<usize>,
+    sample_period_s: f64,
+    step_benchmarks: Option<Vec<PyStepBenchmark>>,
+) -> PyResult<Vec<EpochSamples>> {
+    if !(sample_period_s > 0.0 && sample_period_s.is_finite()) {
+        return Err(PyValueError::new_err(format!(
+            "sample_period_s must be positive and finite, got {sample_period_s}"
+        )));
+    }
+    let step_capacity = optional_step_capacity_input(config_text, step_benchmarks.as_deref())?;
+    let record = snapshot_core::stream_record(
+        &waypoints_from_py(waypoints),
+        &planner(config_text)?,
+        step_capacity.as_ref(),
+    )
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let trajectory = ExactTrajectory::from_segments(&record.segments)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    motion_epochs(&record.segments, &record.drained_at_rests)
+        .into_iter()
+        .map(|(t_start, t_end)| {
+            let samples = ((t_end - t_start) / sample_period_s).ceil().max(1.0) as usize + 1;
+            let rows = axes
+                .iter()
+                .map(|&axis| {
+                    (0..samples)
+                        .map(|i| {
+                            let last = i == samples - 1;
+                            let t = if last {
+                                t_end
+                            } else {
+                                t_start + (t_end - t_start) * i as f64 / (samples - 1) as f64
+                            };
+                            let side = if last {
+                                SampleSide::Left
+                            } else {
+                                SampleSide::Right
+                            };
+                            trajectory
+                                .eval_axis(axis, t, side)
+                                .map(|pvaj| (pvaj.position, pvaj.velocity, pvaj.acceleration))
+                                .map_err(|e| PyValueError::new_err(e.to_string()))
+                        })
+                        .collect::<PyResult<Vec<_>>>()
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            Ok((t_start, t_end, rows))
+        })
+        .collect()
+}
+
+type EpochSamples = (f64, f64, Vec<Vec<(f64, f64, f64)>>);
+
+/// The runs of `segments` between two rests the stream drained to, each
+/// rest given as the number of segments emitted when it drained.
+fn motion_epochs(segments: &[ContinuousSegment], drained_at_rests: &[usize]) -> Vec<(f64, f64)> {
+    let mut bounds: Vec<usize> = drained_at_rests
+        .iter()
+        .copied()
+        .filter(|&count| count > 0 && count < segments.len())
+        .collect();
+    bounds.dedup();
+    bounds.insert(0, 0);
+    bounds.push(segments.len());
+    bounds
+        .windows(2)
+        .map(|run| (segments[run[0]].t_start, segments[run[1] - 1].t_end))
+        .collect()
 }
