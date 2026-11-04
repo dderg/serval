@@ -2249,7 +2249,15 @@ falls off by half the time beyond; the leaders are sampled every 2.5 ms.
 Where even 30 ms exceeds the limits, the velocity planner caps the speed at
 the join (<code>velocity::extruder_caps::ratio_step_ceiling</code>, through
 <code>RatioRampRule::step_speed_cap</code>) rather than smearing the step over more
-path.</p>
+path. A rest of the leaders <code>d</code> along the path from the step narrows its
+window too: the width envelope rises off a rest by at most
+<code>RATIO_RAMP_ENVELOPE_SLOPE = c = 0.25</code> per millimetre, so a window past the
+step reaches back to it only out to <code>c·d/(1 + c)</code>, and the step's ramp gets
+no more than that path on the rest's side. Each move's
+<code>ExtrusionBudget::rest_room_mm</code> carries the path from its start to the
+nearest rest (an extrude-only move or a stream end) within
+<code>rest_room_reach_mm</code> of the fastest the leaders cross it, and the cap holds
+the ramp that room leaves within the limits as well.</p>
 <p>Critically, the projection reads the leaders' <strong>toolhead signal</strong>, not their
 motor command — the follower must track where the nozzle physically is, and
 the mode-inverse counter-drive is motion the toolhead never performs. This
