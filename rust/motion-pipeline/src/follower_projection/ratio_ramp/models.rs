@@ -247,6 +247,28 @@ impl CorrectionPolynomials {
     }
 }
 
+/// The most floats a narrow reach is read at one by one.
+const NARROW_FLOATS: usize = 64;
+
+/// Every float of `reach` where it is no wider than its read points inset
+/// ([`read_points`]) and holds at most [`NARROW_FLOATS`] of them: a reach
+/// that narrow that reads more than one formula reads each at some of its
+/// floats, and the evaluator reads no other.
+fn narrow_floats((lo, hi): (f64, f64)) -> Option<Vec<f64>> {
+    let inset = REACH_INSET_ULPS * f64::EPSILON * lo.abs().max(hi.abs()).max(1.0);
+    if hi - lo > 2.0 * inset {
+        return None;
+    }
+    let mut floats = vec![lo];
+    while let Some(&last) = floats.last().filter(|&&last| last < hi) {
+        if floats.len() == NARROW_FLOATS {
+            return None;
+        }
+        floats.push(trajectory::next_toward(last, f64::INFINITY));
+    }
+    Some(floats)
+}
+
 /// A model of a path function and of its first three path derivatives.
 #[derive(Clone, Copy)]
 pub(in crate::follower_projection) struct ModelJet {
@@ -399,7 +421,35 @@ impl RatioSmoothing {
         s: &TaylorModel,
         reach: (f64, f64),
     ) -> Option<ModelJet> {
-        let formula = self.correction_formula(reach)?;
+        if let Some(formula) = self.correction_formula(reach) {
+            return self.correction_by(formula, s);
+        }
+        let mut formulas: Vec<CorrectionFormula> = Vec::new();
+        for at in narrow_floats(reach)? {
+            let formula = self.correction_formula((at, at))?;
+            if !formulas.contains(&formula) {
+                formulas.push(formula);
+            }
+        }
+        let (first, others) = formulas.split_first()?;
+        let mut base = self.correction_by(*first, s)?;
+        for &other in others {
+            let other = self.correction_by(other, s)?;
+            for (model, other) in [
+                (&mut base.value, &other.value),
+                (&mut base.d1, &other.d1),
+                (&mut base.d2, &other.d2),
+                (&mut base.d3, &other.d3),
+            ] {
+                let departure = other.sub(model).bound();
+                model.widen(departure);
+            }
+        }
+        Some(base)
+    }
+
+    /// The correction's jet on the model `s` of the path by `formula`.
+    fn correction_by(&self, formula: CorrectionFormula, s: &TaylorModel) -> Option<ModelJet> {
         let (centre, radius) = s.spread();
         let Some(polynomials) = self.correction_polynomials(formula, centre) else {
             return Some(ModelJet::zero());
@@ -566,6 +616,36 @@ impl RatioSmoothing {
     /// it, `W = 1` —; `None` where the reach's ends lie on different sides
     /// of a valley.
     pub(in crate::follower_projection) fn valley_weight_model(
+        &self,
+        s: &TaylorModel,
+        reach: (f64, f64),
+    ) -> Option<Option<[TaylorModel; 3]>> {
+        if let Some(weight) = self.valley_weight_on(s, reach) {
+            return Some(weight);
+        }
+        let constant = |value: f64| TaylorModel::constant(Ball::exact(value));
+        let unweighted = || [constant(1.0), constant(0.0), constant(0.0)];
+        let mut base: Option<[TaylorModel; 3]> = None;
+        for at in narrow_floats(reach)? {
+            let weight = self
+                .valley_weight_on(s, (at, at))?
+                .unwrap_or_else(unweighted);
+            match &mut base {
+                None => base = Some(weight),
+                Some(base) => {
+                    for (model, other) in base.iter_mut().zip(&weight) {
+                        let departure = other.sub(model).bound();
+                        model.widen(departure);
+                    }
+                }
+            }
+        }
+        Some(base)
+    }
+
+    /// [`Self::valley_weight_model`] where every point of `reach` lies on
+    /// one side of every valley; `None` where it does not.
+    fn valley_weight_on(
         &self,
         s: &TaylorModel,
         reach: (f64, f64),
