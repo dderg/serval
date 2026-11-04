@@ -2291,10 +2291,9 @@ impl<'a> ShapedLeaders<'a> {
         (0..self.axes.len())
             .map(|index| {
                 let (_, velocity, acceleration) = self.pva(index, t);
-                velocity * acceleration
+                velocity / speed * acceleration
             })
             .sum::<f64>()
-            / speed
     }
 
     fn never_moves(&self, index: usize, t0: f64, t1: f64, rest: RestResolution) -> bool {
@@ -2333,8 +2332,11 @@ impl<'a> ShapedLeaders<'a> {
         if speed == 0.0 {
             return (0.0, 0.0, 0.0);
         }
-        let power = states.iter().map(|&(_, v, a, _)| v * a).sum::<f64>();
-        (speed, power / speed, speed_second_of(states, speed))
+        let tangential = states
+            .iter()
+            .map(|&(_, v, a, _)| v / speed * a)
+            .sum::<f64>();
+        (speed, tangential, speed_second_of(states, speed))
     }
 
     fn pvaj_states(&self, t: f64) -> ([(f64, f64, f64, f64); MAX_LEADERS], usize) {
@@ -2363,20 +2365,26 @@ impl<'a> ShapedLeaders<'a> {
 
 const MAX_LEADERS: usize = 3;
 
-/// `d²|v|/dt² = (|v|²|a|² − (v·a)²)/|v|³ + v·j/|v|`, with the first
-/// numerator summed through Lagrange's identity as the squared pairwise
-/// cross terms: the difference form cancels to rounding times `|a|²`,
-/// which the division by a near-rest speed would amplify.
+/// `d²|v|/dt² = |a⊥|²/|v| + v̂·j`, read through the unit direction
+/// `v̂ = v/|v|` before any product: near rest the leaders' velocity is
+/// small enough that `|v|³` and `|v|²|a|²` underflow to zero long before
+/// the curvature they describe does. `|a⊥|²` is summed through Lagrange's
+/// identity as the squared pairwise cross terms of `v̂` and `a`: the
+/// difference form cancels to rounding times `|a|²`, which the division by
+/// a near-rest speed would amplify.
 fn speed_second_of(states: &[(f64, f64, f64, f64)], speed: f64) -> f64 {
-    let mut cross_squared = 0.0;
+    let mut normal_squared = 0.0;
     for (index, &(_, v_i, a_i, _)) in states.iter().enumerate() {
         for &(_, v_j, a_j, _) in &states[index + 1..] {
-            let cross = v_i * a_j - v_j * a_i;
-            cross_squared += cross * cross;
+            let normal = v_i / speed * a_j - v_j / speed * a_i;
+            normal_squared += normal * normal;
         }
     }
-    let velocity_dot_jerk = states.iter().map(|&(_, v, _, j)| v * j).sum::<f64>();
-    cross_squared / (speed * speed * speed) + velocity_dot_jerk / speed
+    let direction_dot_jerk = states
+        .iter()
+        .map(|&(_, v, _, j)| v / speed * j)
+        .sum::<f64>();
+    normal_squared / speed + direction_dot_jerk
 }
 
 /// The odometer's leaves: each knot's time, the distance to it, and the
