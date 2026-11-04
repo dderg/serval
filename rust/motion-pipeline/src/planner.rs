@@ -207,7 +207,11 @@ impl Planner {
         }
         let profile = self.plan(self.moves.len());
         let n = self.moves.len();
-        self.emit(n, &profile, output)
+        let emitted = self.emit(n, &profile, output);
+        if let Some(capacity) = self.config.step_capacity.as_deref() {
+            log_step_capacity(self.step_capacity_log.flush(capacity));
+        }
+        emitted
     }
 
     /// Emit the prefix up to the furthest-forward clean seam inside the

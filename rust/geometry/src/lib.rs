@@ -40,7 +40,8 @@ pub use surface::{
     SurfaceTransform, SurfaceTransition, SurfaceTransitionError,
 };
 pub use velocity::{
-    ExtrusionBudget, ExtrusionReach, FanOut, LawSegment, MoveVelocity, ScalarLaw, Serial,
-    VelSample, VelocityError, VelocityPlanParams, VelocityProfile, VelocityReport,
-    extrusion_budgets, plan_velocity_stops_reconstruct_prefix, plan_velocity_stops_select_prefix,
+    ExtrusionBudget, ExtrusionReach, FanOut, LawSegment, MoveVelocity, RailPair, RailPairShape,
+    ScalarLaw, Serial, VelSample, VelocityError, VelocityPlanParams, VelocityProfile,
+    VelocityReport, extrusion_budgets, plan_velocity_stops_reconstruct_prefix,
+    plan_velocity_stops_select_prefix,
 };
