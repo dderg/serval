@@ -35,7 +35,10 @@ fn gcode(points: &[(f64, f64)], speed_mm_s: f64) -> String {
 
 fn corner_45() -> Vec<(f64, f64)> {
     let turn = (180.0_f64 - 45.0).to_radians();
-    vec![(60.0, 0.0), (60.0 + 60.0 * turn.cos(), 60.0 * turn.sin())]
+    vec![
+        (60.0, 0.0),
+        (60.0 + 60.0 * libm::cos(turn), 60.0 * libm::sin(turn)),
+    ]
 }
 
 fn zigzag() -> Vec<(f64, f64)> {
