@@ -52,7 +52,9 @@ them to it: klippy's own G-code handlers drive the real `MotionEngine` bridge
 with a detached planner (`init_planner_detached`: the production ingress and
 pipeline, no MCU), and every pipeline input and shaped segment must equal the
 snapshot path's bit for bit over the corpus — every case, the sim prints on
-both bench configs, and the dense print on every bench config and profile. A
+both bench configs, the dense print on every bench config and profile, and
+the capacity ladders and dense print on `capacity.cfg` under the F401's
+reported step capacity, passed to both sides (`step_benchmarks`). A
 failure names the first diverging input (move number and field) or segment.
 One file: `uv run python snapshots/live_bridge_parity.py GCODE CONFIG`.
 
