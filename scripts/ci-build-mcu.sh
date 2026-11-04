@@ -11,6 +11,7 @@ if [ ${#CONFIGS[@]} -eq 0 ]; then
     echo "ERROR: no test/configs/*.config found" >&2
     exit 1
 fi
+CONFIGS+=(tools/bench/f401.config)
 
 for TARGET in "${CONFIGS[@]}"; do
     NAME="$(basename "${TARGET}" .config)"

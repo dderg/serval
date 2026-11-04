@@ -221,16 +221,27 @@ F401: 497 ticks/step pulsed (169 k steps/s) and 240 ticks/step both-edge. The va
 
 The earlier benchmark timed `sched_timer_dispatch` in a cache-hot loop at 301 ticks/step. That counted none of the interrupt's cost, and the cap built on it shut the MCU down on a lone motor (see "Single motor at the cap").
 
-CI runs the benchmark of every test/configs firmware in unicorn (`step_benchmark_emu.py`, from `scripts/ci-build-mcu.sh`). The emulator counts one tick per instruction and delivers the timer interrupt the firmware programs, by calling its handler once the interrupt is due and PRIMASK is clear. It does not model hardware stacking or wait states. The build fails on a shutdown or on a result outside 40–600 instructions/step. Instructions per isolated step, pulsed / both-edge:
+CI runs the benchmark of every test/configs firmware and of `f401.config` in unicorn (`step_benchmark_emu.py`, from `scripts/ci-build-mcu.sh`). The emulator counts one tick per instruction and delivers the timer interrupt the firmware programs, by calling its handler once the interrupt is due and PRIMASK is clear, after the core's exception entry (12 cycles, 15 on the G0's M0+). It does not model wait states. The build fails on a shutdown or on a result outside 40–600 instructions/step. Instructions per isolated step, pulsed / both-edge:
 
 | firmware | pulsed | both-edge |
 |---|---|---|
-| F401 | 392 | 167 |
-| F103 | 381 | 176 |
-| G0B1 | 277 | 99 |
-| H723 | 342 | 181 |
+| F401 | 380 | 168 |
+| F103 | 371 | 176 |
+| G0B1 | 309 | 139 |
+| H723 | 343 | 182 |
 
 The pulsed figure includes the spin to the 2 µs unstep inside the interrupt. On H7 the unstep is far enough away that it gets its own interrupt.
+
+The same run checks that a step edge comes as late after its waketime whether the timer interrupt dispatched it or the dispatch loop did. A second benchmark run sets a bare timer 40–400 instructions before each step, so steps also follow another dispatch inside the interrupt. The check takes an irq-path edge when the interrupt was taken on time and dispatched that timer first, and a loop-path edge when the loop was spinning on the timer up to the waketime. It fails on any early edge, or when one dispatch function's edges spread over more than 8 instructions across the two paths. Edge lateness in instructions, irq / loop path, for pulsed and both-edge:
+
+| firmware | pulsed | both-edge |
+|---|---|---|
+| F401 | 25 / 25–27 | 23 / 23–25 |
+| F103 | 34 / 36 | 32 / 34 |
+| G0B1 | 36 / 35–36 | 33 / 32–33 |
+| H723 | 27 / 27–29 | 27 / 27–29 |
+
+H723 has no both-edge optimization, so both modes dispatch through the same function and are judged together. Both timer backends wake early and spin to the head timer's waketime: SysTick 100 ticks ahead, the G0's TIM2 64 ticks ahead (`TIMER_IRQ_LEAD_TICKS`). The dispatch loop ends its interrupts-enabled wait at the same lead, so both paths leave the same spin. Before that the G0 irq path was 61 instructions late against 43–48 in the loop, and SysTick's loop path came 12 instructions after its irq path. The G0 lead is the emulated 27 cycles from interrupt to the loop's first timer read, scaled by the F401's hardware-to-emulator ratio (44 emulated cycles against a measured p99.9 of 68–100). It is not measured on G0 hardware.
 
 ### How the capacity caps moves
 
