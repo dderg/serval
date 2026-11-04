@@ -1,6 +1,7 @@
 use super::extrusion_reach::{ExtrusionBudget, PathInReach};
-use crate::frontend::{ADVANCE_VALLEY_SPEED_MM_S, ExtruderCaps};
+use crate::frontend::ExtruderCaps;
 use crate::path::{CurvatureProfile, Segment};
+use crate::ratio_ramp::ADVANCE_VALLEY_SPEED_MM_S;
 
 use super::rate_cap::LinearRate;
 

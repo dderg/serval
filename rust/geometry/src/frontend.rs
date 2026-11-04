@@ -212,13 +212,6 @@ impl ExtruderCaps {
     }
 }
 
-/// The shaped path speed below which a kernel-free advance lays a valley
-/// (its weight falling to 0) at a speed minimum, as at a turnaround: there
-/// the turning of the shaped tangent, `a_⊥²/|v|`, grows without bound as
-/// the speed falls, and the planner bounds the advance's demand on it only
-/// at shaped speeds above this.
-pub const ADVANCE_VALLEY_SPEED_MM_S: f64 = 2.0;
-
 /// How many sets of spatial axes [`ExtruderCaps::path_jerk_per_accel_hz`]
 /// holds a gain for: bit `i` of a set's index stands for axis `i`.
 pub const SPATIAL_AXIS_SETS: usize = 8;

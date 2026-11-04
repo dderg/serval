@@ -24,9 +24,9 @@ pub use fitter::{
     CornerFitConfig, FitError, SEAM_VELOCITY_STEP_MM_S, UnblendReason, seam_requires_stop,
 };
 pub use frontend::{
-    ADVANCE_VALLEY_SPEED_MM_S, CORNER_DEVIATION_SCV_FACTOR, ExtruderCaps, FrontendError,
-    LeaderSpill, Move, MoveContext, SPATIAL_AXIS_SETS, VelocityLimits, axis_set,
-    corner_deviation_from_scv, line_move, scv_from_corner_deviation,
+    CORNER_DEVIATION_SCV_FACTOR, ExtruderCaps, FrontendError, LeaderSpill, Move, MoveContext,
+    SPATIAL_AXIS_SETS, VelocityLimits, axis_set, corner_deviation_from_scv, line_move,
+    scv_from_corner_deviation,
 };
 pub use ratio_ramp::{
     ADVANCE_VALLEY_SPEED_MM_S, RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule,
