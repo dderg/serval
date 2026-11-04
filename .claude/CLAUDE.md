@@ -212,6 +212,11 @@ non-zero with "API rate limit exceeded", which looks like a red check. The wrapp
 retries only on that error and on transient network failures (a dropped connection
 made `--watch` exit like a red check on PR #652) (Retry-After if sent, else 30 s doubling to 300 s with 25 %
 jitter, 8 attempts, then a loud failure) and returns any other failure at once.
+`git fetch`/`push`/`pull`/`ls-remote` in land-pr.sh, ship.py, land_queue and everything routed through
+`pending_baselines.run` go through `gh_util.py --git`: retried (5 attempts, 5 s doubling to 60 s,
+jitter) only on server and network errors (Internal Server Error, HTTP 5xx, connection reset,
+could not resolve host, RPC failed, early EOF); `Permission denied`, `Authentication failed` and
+`non-fast-forward`/`rejected` fail at once, loudly, and local subcommands are never retried.
 Wait with one `gh pr checks --watch --interval 60`, never a loop of short polls; read PR
 metadata once per run and pass it along; use `gh_util.py <gh args>` in new scripts.
 
