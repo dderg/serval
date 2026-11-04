@@ -2202,6 +2202,20 @@ total, and blends that run longer than their polyline (a loop of moves
 shorter than the corner budget) lay more. <code>planner_conservation_fuzz</code> holds
 the planner to it. Extrude-only moves ride no spatial path and add in
 directly.</p>
+<p>Where the raw toolhead rests but the shaped leaders still move — the
+kernels' spill past a stop and their reach ahead of a start — the follower
+lays the ratio over the <strong>chord</strong>, not the arc: the move before extrudes over
+the shaped leaders' straight-line distance from the rest point where the
+spill starts, the move after over their distance to it where the spill
+ends (<code>FollowerState::ingest</code>). The chords telescope to the raw rest
+positions, so a stroke from rest to rest lays exactly its commanded E —
+the slicer's volume, which the user sets and can check
+(<code>a_shaped_stroke_from_rest_to_rest_extrudes_its_command</code>) — however the
+shapers curve the spill or the fit wiggles near the rest point. It differs
+from <code>r·∫ds</code> by <code>r</code> times the spill's arc minus its chord: sub-micron on the
+bench and Trident configs, where axes with different shapers bend the
+spill off the line to the rest point. <code>advance_conservation</code> holds the
+projection to this rule with and without an advance.</p>
 <p>The ratio is not projected raw. Every follower smooths <code>r(s)</code> along the path
 (<code>follower_projection/ratio_ramp.rs</code>) with the kernel <code>¾(1 − x²)</code> of
 half-width <code>h(s)</code>: half the path the shaped leaders cover in the ramp time
