@@ -1,14 +1,15 @@
-//! Leader group fits made on the planning side, ahead of the shaper.
+//! Leader group fits made ahead of the shaper.
 //!
 //! A fit group's leader columns depend only on the group and the segments
 //! its convolution reads ([`crate::shaper::fit_leader_group`]), so they
 //! can be fitted wherever those segments are at hand. The staged pipeline
-//! fits each group as soon as the planning side has lowered the segment
-//! that completes its read, and queues the fits for the shaper just before
-//! that segment: the shaper, whose thread bounds the live pipeline, takes
-//! them instead of fitting the group itself. A group the planning side did
-//! not fit, or fitted from a different read, matches no key and the shaper
-//! fits it as before, so the trajectory is the same either way.
+//! fits each group on a thread between the planning side and the shaper,
+//! as soon as the segment that completes its read arrives, and queues the
+//! fits for the shaper just before that segment: the shaper, whose thread
+//! bounds the live pipeline, takes them instead of fitting the group
+//! itself. A group not fitted ahead, or fitted from a different read,
+//! matches no key and the shaper fits it as before, so the trajectory is
+//! the same either way.
 //!
 //! The groups chain the way the shaper's do: from the start of an era, and
 //! afresh after every item that makes the shaper flush what it holds.
