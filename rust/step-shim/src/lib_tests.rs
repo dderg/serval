@@ -1202,7 +1202,9 @@ fn a_spent_budget_still_roots_through_the_clock_it_owes() {
     let mut shim = seeded(cfg(), 16);
     shim.push_spans(0, &views).unwrap();
     shim.drain_budgeted(u64::MAX, spent_budget(8_500)).unwrap();
-    let unrooted = shim.unrooted_from(0).expect("a spent budget halts short of the end");
+    let unrooted = shim
+        .unrooted_from(0)
+        .expect("a spent budget halts short of the end");
     assert!(
         unrooted > 8_500,
         "a spent budget yielded at {unrooted}, short of the 8500 it owes"

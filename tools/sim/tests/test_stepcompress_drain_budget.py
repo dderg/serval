@@ -39,9 +39,7 @@ def _spent_budget_config(world) -> str:
     sc_section = f"[mcu sc]\nserial: {world.f4_pty}\n"
     assert sc_section in text
     return (
-        text.replace(
-            sc_section, sc_section + "stepcompress_drain_budget: 0\n"
-        )
+        text.replace(sc_section, sc_section + "stepcompress_drain_budget: 0\n")
         .replace("max_velocity: 100\n", "max_velocity: 500\n")
         .replace("max_accel: 1000\n", "max_accel: 20000\n")
     )
@@ -70,6 +68,6 @@ def test_rests_at_speed_cut_lanes_on_a_spent_drain_budget(sim_world, tmp_path):
         "no rest cut a lane: the test no longer reaches the reanchor drain"
     )
     for axis in ("x", "y"):
-        assert _steps(world, axis) - before[axis] == pytest.approx(
-            0, abs=1
-        ), f"{axis} did not return to its start"
+        assert _steps(world, axis) - before[axis] == pytest.approx(0, abs=1), (
+            f"{axis} did not return to its start"
+        )
