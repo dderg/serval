@@ -410,8 +410,8 @@ impl<S: TrackSignal> TrackSignal for FacingRead<'_, S> {
 
 pub(crate) const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 
-const FIT_GROUP_SEGMENTS: usize = 4;
-const FIT_GROUP_SPAN_S: f64 = 0.02;
+const FIT_GROUP_SEGMENTS: usize = 8;
+const FIT_GROUP_SPAN_S: f64 = 0.04;
 
 /// The ends of the complete fit groups among `segments`, whose first opens
 /// one. A group closes on its fourth segment, on the segment that carries
