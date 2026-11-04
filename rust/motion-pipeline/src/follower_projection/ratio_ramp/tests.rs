@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use geometry::RatioRampRule;
+use geometry::{RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule};
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 use trajectory::{ContinuousAxis, ContinuousSegment};
 
 use super::super::FollowerState;
 use super::{
     AdvanceValley, Crossing, ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_PER_WIDTH, NODE_SPACING_S,
-    RampLeg, ShapedLeaders, TimedSeam, WIDTH_SLOPE_BOUND, WidthField,
+    RampLeg, RestSide, ShapedLeaders, Spill, TimedSeam, WIDTH_SLOPE_BOUND, WidthField,
 };
 
 /// `(length, ratio at start, ratio at end)` per span.
@@ -745,6 +745,101 @@ fn a_rest_valley_covers_the_ratio_step_its_leg_lays_short_of_the_rest() {
     );
 }
 
+fn model_at(model: &crate::shaper::taylor::TaylorModel, x: f64) -> f64 {
+    model
+        .coefficients()
+        .iter()
+        .rev()
+        .fold(0.0, |acc, c| acc * x + c)
+}
+
+/// Over every stretch of path between the smoothing's bends and the
+/// table's seams, its correction and the advance's valley weight read on a
+/// model of the path hold every reading the evaluator makes there, with
+/// its derivatives.
+#[test]
+fn the_smoothing_models_hold_its_correction_and_valley_weight_between_bends() {
+    use crate::shaper::taylor::{Ball, TaylorModel};
+    let mut read = 0usize;
+    for table in [line_table(), clustered_table()] {
+        for field in [cruise, cornering] {
+            let total = length(&table);
+            let mut state = smoothed(&table, field(total));
+            state.smoothing.valleys = vec![
+                super::AdvanceValley {
+                    start: 0.3 * total,
+                    end: 0.3 * total,
+                    before: 1.5,
+                    after: 2.0,
+                    floor: 0.3,
+                },
+                super::AdvanceValley {
+                    start: 0.6 * total,
+                    end: 0.6 * total + 1.0,
+                    before: 0.8,
+                    after: 0.5,
+                    floor: 0.0,
+                },
+            ];
+            let mut points: Vec<f64> = state.spans.iter().map(|span| span.s0).collect();
+            points.extend(state.smoothing.bends(0.0, total));
+            points.extend([0.0, total]);
+            points.retain(|&s| (0.0..=total).contains(&s));
+            points.sort_by(f64::total_cmp);
+            points.dedup();
+            for stretch in points.windows(2).filter(|pair| pair[1] - pair[0] > 1e-9) {
+                for part in 0..4 {
+                    let width = (stretch[1] - stretch[0]) / 4.0;
+                    let (lo, hi) = (
+                        stretch[0] + width * f64::from(part),
+                        stretch[0] + width * f64::from(part + 1),
+                    );
+                    let (centre, radius) = (0.5 * (lo + hi), 0.5 * (hi - lo));
+                    let s = TaylorModel::affine(Ball::exact(centre), radius);
+                    let reach = (
+                        trajectory::next_toward(lo, f64::INFINITY),
+                        trajectory::next_toward(hi, f64::NEG_INFINITY),
+                    );
+                    let correction = state
+                        .smoothing
+                        .correction_model(&s, reach)
+                        .expect("a stretch between bends reads one formula");
+                    let weight = state
+                        .smoothing
+                        .valley_weight_model(&s, reach)
+                        .expect("a stretch between bends lies on one side of every valley")
+                        .models();
+                    read += 1;
+                    for k in 1..8 {
+                        let at = lo + (hi - lo) * f64::from(k) / 8.0;
+                        let x = (at - centre) / radius;
+                        let jet = state.smoothing.correction(at);
+                        let (w, w1, w2) = state.smoothing.valley_weight(at);
+                        for (name, truth, model) in [
+                            ("value", jet.value, &correction.value),
+                            ("d1", jet.d1, &correction.d1),
+                            ("d2", jet.d2, &correction.d2),
+                            ("d3", jet.d3, &correction.d3),
+                            ("W", w, &weight[0]),
+                            ("W'", w1, &weight[1]),
+                            ("W''", w2, &weight[2]),
+                        ] {
+                            let miss = (truth - model_at(model, x)).abs();
+                            assert!(
+                                miss <= model.rad() + 1e-9 * (1.0 + truth.abs()),
+                                "{name} at {at} mm on [{lo}, {hi}]: the evaluator reads {truth}, \
+                                 the model misses it by {miss:e} past its bound {:e}",
+                                model.rad()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(read > 100, "too few stretches read: {read}");
+}
+
 const CORNER_SPEED_MM_S: f64 = 40.0;
 const CORNER_CRAWL_MM_S: f64 = 4.0;
 const CORNER_BRAKE_MM_S2: f64 = 6400.0;
@@ -998,4 +1093,100 @@ fn a_crawl_lays_a_valley_only_where_the_advance_would_leave_the_limit() {
         ..rule
     };
     assert!(turnaround.needs_valley(&no_advance, 0.0337));
+}
+
+const LINE_RATIO: f64 = 0.4 * 0.2 / (std::f64::consts::PI * 0.875 * 0.875);
+const STOP: Crossing = Crossing {
+    speed: 70.25,
+    rate: 15068.0,
+    jerk: 1.18e6,
+};
+const STOP_SPILL_MM: f64 = 0.25;
+const LINE_END_MM: f64 = 30.0;
+
+/// The table of a line ending in a rest at [`LINE_END_MM`], its ratio
+/// stepping to `last_ratio` `last_mm` before the end.
+fn line_into_rest(last_mm: f64, last_ratio: f64) -> Vec<super::super::RatioSpan> {
+    let mut state = FollowerState::default();
+    state.push_span(LINE_END_MM - last_mm, LINE_RATIO, LINE_RATIO);
+    state.push_span(last_mm, last_ratio, last_ratio);
+    state.spans
+}
+
+/// The side a line ending in a rest opens as the kernel-free fast bench
+/// config stops it from 300 mm/s, over a spill of `spill_s`.
+fn stopping_side(spill_s: f64) -> RestSide {
+    RestSide {
+        rest: LINE_END_MM,
+        seam: LINE_END_MM - STOP_SPILL_MM,
+        outward: -1.0,
+        crossing: STOP,
+        spill: Spill {
+            duration: spill_s,
+            crossing: STOP,
+        },
+        beyond: STOP,
+    }
+}
+
+const DIRECT_DRIVE: RatioRampRule = RatioRampRule {
+    advance_slope_s: 0.03,
+    max_velocity_mm_s: 50.0,
+    max_accel_mm_s2: 20000.0,
+};
+
+/// A rest valley's side spans the spill alone where the extruder releases
+/// the lead within the shortest ramp its limits allow and that fits within
+/// the spill: the kernel-free fast bench config's 20000 mm/s² extruder
+/// stopping a 300 mm/s line. A spill that takes no time ramps out over
+/// that shortest ramp.
+#[test]
+fn a_rest_side_spans_the_spill_alone_where_the_lead_releases_within_it() {
+    let table = line_into_rest(1.0, LINE_RATIO);
+    assert_eq!(
+        stopping_side(0.0074).width(&table, &DIRECT_DRIVE, LINE_END_MM),
+        STOP_SPILL_MM
+    );
+    assert_eq!(
+        stopping_side(0.0).width(&table, &DIRECT_DRIVE, LINE_END_MM),
+        STOP_SPILL_MM + STOP.reach(RATIO_RAMP_MIN_TIME_S)
+    );
+}
+
+/// A rest valley's side reaches as far as the longest ramp where a ratio
+/// step lies so near the rest that the width field narrows its ramp past
+/// the extruder's limits, where a Bowden advance's path alone leaves its
+/// limit, and where the table does not reach that far yet.
+#[test]
+fn a_rest_side_reaches_the_longest_ramp_where_the_lead_or_a_near_step_needs_it() {
+    let longest = STOP_SPILL_MM + STOP.reach(RATIO_RAMP_MAX_TIME_S);
+    assert_eq!(
+        stopping_side(0.0074).width(
+            &line_into_rest(0.4, 3.0 * LINE_RATIO),
+            &DIRECT_DRIVE,
+            LINE_END_MM
+        ),
+        longest
+    );
+    let bowden = RatioRampRule {
+        advance_slope_s: 0.5,
+        max_velocity_mm_s: 45.0,
+        max_accel_mm_s2: 2000.0,
+    };
+    let table = line_into_rest(1.0, LINE_RATIO);
+    assert_eq!(
+        stopping_side(0.0074).width(&table, &bowden, LINE_END_MM),
+        longest
+    );
+    let leaving = RestSide {
+        rest: 0.0,
+        seam: STOP_SPILL_MM,
+        outward: 1.0,
+        ..stopping_side(0.0074)
+    };
+    assert_eq!(leaving.width(&table, &DIRECT_DRIVE, 1.0), longest);
+    assert_eq!(
+        leaving.width(&table, &DIRECT_DRIVE, LINE_END_MM),
+        STOP_SPILL_MM
+    );
 }

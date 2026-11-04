@@ -182,6 +182,7 @@ struct AnchoredSink {
     router: Arc<Mutex<host_rt::passthrough_queue::PassthroughRouter>>,
     frontier: Arc<CommittedFrontier>,
     starts_host: Arc<Mutex<Vec<f64>>>,
+    starts_stream: Arc<Mutex<Vec<f64>>>,
     parks: Arc<std::sync::atomic::AtomicUsize>,
 }
 
@@ -192,6 +193,7 @@ impl AnchoredSink {
             router: Arc::clone(&timeline.router),
             frontier: Arc::clone(&timeline.frontier),
             starts_host: Arc::default(),
+            starts_stream: Arc::default(),
             parks: Arc::default(),
         }
     }
@@ -201,6 +203,7 @@ impl AnchoredSink {
         let host_now = self.router.lock_ok().host_now_secs();
         let (t0, _) = anchor.anchor_segment(t_start, t_end, host_now);
         self.starts_host.lock_ok().push(t0 + t_start);
+        self.starts_stream.lock_ok().push(t_start);
         let runway_s = t0 + t_end - host_now;
         if runway_s > 0.0 {
             self.frontier
@@ -1892,5 +1895,92 @@ fn beacon_scan_path_live_worker_velocity_stays_bounded() {
     assert_eq!(
         overspeed, 0,
         "{overspeed} segments tripped the motor step ceiling"
+    );
+}
+
+const ANALYZER_PACE_TOLERANCE_S: f64 = 20e-3;
+const ANALYZER_PACE_TOLERANCE_PPM: f64 = 500.0;
+const STARVED_STREAMING: Duration = Duration::from_secs(6);
+const MIN_STARVED_BRAKES: u64 = 3;
+
+/// How far behind the stream's own timeline the dispatched starts fell: the
+/// lag the bench analyzer's pace check measures between a capture and the
+/// plan, here between the host starts and the stream times they were
+/// anchored for.
+fn worst_pace_lag_s(stream: &[f64], host: &[f64]) -> (f64, f64) {
+    let lags = stream
+        .iter()
+        .zip(host)
+        .map(|(&s, &h)| (h - host[0]) - (s - stream[0]));
+    let allowed =
+        |s: f64| ANALYZER_PACE_TOLERANCE_S + ANALYZER_PACE_TOLERANCE_PPM * 1e-6 * (s - stream[0]);
+    stream
+        .iter()
+        .zip(lags)
+        .map(|(&s, lag)| (lag, allowed(s)))
+        .fold((0.0, 0.0), |worst, (lag, allowed)| {
+            if lag - allowed > worst.0 - worst.1 {
+                (lag, allowed)
+            } else {
+                worst
+            }
+        })
+}
+
+#[test]
+fn a_producer_slower_than_realtime_brakes_and_resumes_without_overrunning_the_playhead() {
+    let timeline = ExecutionTimeline {
+        frontier: Arc::default(),
+        anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
+        router: Arc::new(Mutex::new(real_router())),
+    };
+    let sink = PacedSink {
+        inner: AnchoredSink::on(&timeline),
+        realtime_factor_bits: Arc::new(std::sync::atomic::AtomicU64::new(2.0_f64.to_bits())),
+    };
+    let mut h = spawn_on_timeline(
+        cfg_cap(1024),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0],
+        sink.clone(),
+        timeline,
+    );
+    let mut at = [0.0_f64, 0.0, 0.0];
+    let mut line_no = 1;
+    for phase in [
+        StrokePhase::healthy(2.0, 1.0, Duration::from_millis(1500)),
+        StrokePhase::unplannable(STARVED_STREAMING),
+    ] {
+        sink.set_realtime_factor(phase.realtime_factor);
+        let started = Instant::now();
+        while started.elapsed() < phase.streaming {
+            let (m, end) = phase.next_move(line_no, at);
+            loop {
+                match h.submit_move(m.clone()) {
+                    Ok(()) => break,
+                    Err(StreamWorkerError::ChannelFull) => std::thread::yield_now(),
+                    Err(e) => panic!("{e}"),
+                }
+            }
+            at = end;
+            line_no += 1;
+        }
+    }
+    h.flush().unwrap();
+    let brakes = h.links.pacer_drains.busy.load(Ordering::SeqCst)
+        + h.links.pacer_drains.idle.load(Ordering::SeqCst);
+    h.shutdown();
+    assert!(
+        brakes >= MIN_STARVED_BRAKES,
+        "a producer planning slower than realtime braked {brakes} times in \
+         {STARVED_STREAMING:?}; the pacer must brake it to rest and resume again and again"
+    );
+    let stream = sink.inner.starts_stream.lock_ok().clone();
+    let host = sink.inner.starts_host.lock_ok().clone();
+    let (lag, allowed) = worst_pace_lag_s(&stream, &host);
+    assert!(
+        lag > allowed,
+        "the brakes paused the machine, yet the dispatched starts lag the stream by only \
+         {lag}s ({allowed}s allowed): the bench pace check could not flag the stops"
     );
 }
