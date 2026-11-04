@@ -148,10 +148,22 @@ timer_init(void)
 DECL_INIT(timer_init);
 
 static uint32_t timer_repeat_until;
-#define TIMER_REPEAT_TICKS timer_from_us(100)
+#define TIMER_REPEAT_TICKS timer_from_us(1000)
 
-#define TIMER_MIN_TRY_TICKS 90
+#if CONFIG_MCU_SIM
+#define TIMER_SYSTICK_LEAD_TICKS 0
+#else
+#define TIMER_SYSTICK_LEAD_TICKS 190
+#endif
+#define TIMER_MIN_TRY_TICKS (TIMER_SYSTICK_LEAD_TICKS + 90)
 #define TIMER_DEFER_REPEAT_TICKS timer_from_us(5)
+
+static inline void
+timer_spin_until(uint32_t due)
+{
+    while (timer_is_before(timer_read_time(), due))
+        ;
+}
 
 // The dispatch loop opens the .sched_protected MPU window once at entry
 // and closes it before each return. sched_timer_dispatch (called inside
@@ -164,13 +176,20 @@ timer_dispatch_many(void)
     uint32_t tru = timer_repeat_until;
     sched_writable_begin();
     for (;;) {
+        uint32_t due = sched_peek_timer()->waketime;
+        int32_t ahead = due - timer_read_time();
+        if (ahead > (int32_t)TIMER_SYSTICK_LEAD_TICKS) {
+            sched_writable_end();
+            return ahead - TIMER_SYSTICK_LEAD_TICKS;
+        }
+        timer_spin_until(due);
         uint32_t next = sched_timer_dispatch();
 
         uint32_t now = timer_read_time();
         int32_t diff = next - now;
         if (diff > (int32_t)TIMER_MIN_TRY_TICKS) {
             sched_writable_end();
-            return diff;
+            return diff - TIMER_SYSTICK_LEAD_TICKS;
         }
 
         if (unlikely(timer_is_before(tru, now))) {
