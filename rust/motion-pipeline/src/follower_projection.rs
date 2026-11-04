@@ -1682,10 +1682,10 @@ impl FollowerState {
     /// previous ratio) and starts the next move in it (its lead, extruded at
     /// the next one). Both are measured as the shaped leaders' distance
     /// from the rest point at the segment's edges, so the move on each side
-    /// extrudes exactly the material of the path it is shaped onto. Any
-    /// shaped arc beyond them joins one of them ([`Self::push_rest_arcs`]):
-    /// a separate idle span would step the ratio, and so the follower's
-    /// velocity, where the leaders are already moving.
+    /// extrudes the material of the path it is shaped onto. Any shaped arc
+    /// beyond them joins one of them ([`Self::push_rest_arcs`]): a separate
+    /// idle span would step the ratio, and so the follower's velocity, where
+    /// the leaders are already moving.
     fn ingest(
         &mut self,
         raw: &ContinuousSegment,
@@ -1749,59 +1749,80 @@ impl FollowerState {
         shaped_ds
     }
 
-    /// Lays a rest segment's tail, idle and lead arcs, the ratio stepping
-    /// from the tail's to the lead's only `rest_arc` into the segment, where
-    /// the leaders come closest to the rest point. The idle arc is the
-    /// shaped path's excess over the tail's and the lead's straight
-    /// distances from the rest point: the shaped axes curve into and out of
-    /// it unlike each other, and the fit wanders around it. What of it the
-    /// leaders cover before they reach the rest joins the tail, the rest of
-    /// it the lead; a tail too short to lay its own span leaves the whole
-    /// idle arc to the lead.
+    /// Lays a rest segment's arcs, the ratio stepping from the tail's to
+    /// the lead's only `rest_arc` into the segment, where the leaders come
+    /// closest to the rest point. The tail's straight distance from the rest
+    /// point falls short of that arc where the shaped axes curve into the
+    /// rest unlike each other or the fit wanders toward it: the tail joins
+    /// what of the idle arc the leaders cover before they rest
+    /// ([`Self::push_tail`]), the lead the rest of it ([`Self::push_lead`]).
+    /// A tail too short to lay its own span leaves the whole idle arc to the
+    /// lead.
     fn push_rest_arcs(
         &mut self,
         (tail, idle, lead): (f64, f64, f64),
         rest_arc: f64,
         (tail_ratio, lead_ratio): (f64, f64),
     ) {
-        let tail_idle = if tail > SPAN_MIN_LEN_MM {
-            (rest_arc - tail).clamp(0.0, idle)
-        } else {
-            0.0
-        };
-        self.push_over_idle(tail, tail_idle, tail_ratio);
-        self.push_over_idle(lead, idle - tail_idle, lead_ratio);
+        if tail <= SPAN_MIN_LEN_MM {
+            self.push_lead(lead, idle, lead_ratio);
+            return;
+        }
+        let tail_idle = (rest_arc - tail).clamp(0.0, idle);
+        self.push_tail(tail, tail_idle, tail_ratio);
+        self.push_lead(lead, idle - tail_idle, lead_ratio);
     }
 
-    /// Lays an arc's material, `ratio × arc`, over the arc joined with the
-    /// idle arc, opening and closing on its ratio. The ratio ramps linearly
-    /// into a valley and back out over equal widths: with the idle arc no
-    /// longer than the arc, a V reaching just as deep as the idle's share of
-    /// material; with a longer idle arc, ramps one arc wide each around a
-    /// flat floor at zero, the deepest a valley goes without changing sign.
-    /// The two coincide where the arc and the idle arc are equal. An arc
-    /// with no ratio lays one flat span: its valley would only cut the
-    /// joined arc into extra breakpoints, down to slivers where the arc is a
-    /// few picometres.
-    fn push_over_idle(&mut self, arc: f64, idle: f64, ratio: f64) {
-        let joined = arc + idle;
-        if idle <= SPAN_MIN_LEN_MM || ratio == 0.0 {
+    /// Lays a tail's material, `tail_ratio × tail`, over the tail joined with
+    /// the idle arc, opening on the tail ratio and falling linearly from
+    /// there: to `tail_ratio·(2·tail/joined − 1)` at the rest where the idle
+    /// arc is no longer than the tail, else to zero over twice the tail and
+    /// flat at zero after, the deepest it goes without changing sign. Its
+    /// slope steps where the spill starts, the furthest from the rest the
+    /// width field ramps it, and the ratio only at the rest. A tail with no
+    /// idle arc or no ratio lays one flat span.
+    fn push_tail(&mut self, tail: f64, idle: f64, tail_ratio: f64) {
+        let joined = tail + idle;
+        if idle <= SPAN_MIN_LEN_MM || tail_ratio == 0.0 {
+            self.push_span(joined, tail_ratio, tail_ratio);
+            return;
+        }
+        let ramp = joined.min(2.0 * tail);
+        self.push_span(ramp, tail_ratio, tail_ratio * (2.0 * tail / ramp - 1.0));
+        if joined - ramp > SPAN_MIN_LEN_MM {
+            self.push_span(joined - ramp, 0.0, 0.0);
+        }
+    }
+
+    /// Lays a lead's material, `lead_ratio × lead`, over the lead joined with
+    /// the idle arc, opening and closing on the lead ratio. The ratio ramps
+    /// linearly into a valley and back out over equal widths: with the idle
+    /// arc no longer than the lead, a V reaching just as deep as the idle's
+    /// share of material; with a longer idle arc, ramps one lead wide each
+    /// around a flat floor at zero, the deepest a valley goes without
+    /// changing sign. The two coincide where the lead and idle arcs are
+    /// equal. A lead with no ratio lays one flat span: its valley would only
+    /// cut the arc into extra breakpoints, down to slivers where the lead is
+    /// a few picometres.
+    fn push_lead(&mut self, lead: f64, idle: f64, lead_ratio: f64) {
+        let joined = lead + idle;
+        if idle <= SPAN_MIN_LEN_MM || lead_ratio == 0.0 {
             if joined > SPAN_MIN_LEN_MM {
-                self.push_span(joined, ratio, ratio);
+                self.push_span(joined, lead_ratio, lead_ratio);
             }
             return;
         }
-        let ramp = (0.5 * joined).min(arc);
+        let ramp = (0.5 * joined).min(lead);
         let floor = joined - 2.0 * ramp;
-        let valley_ratio = ratio * (arc - ramp) / (joined - ramp);
+        let valley_ratio = lead_ratio * (lead - ramp) / (joined - ramp);
         if ramp > SPAN_MIN_LEN_MM {
-            self.push_span(ramp, ratio, valley_ratio);
+            self.push_span(ramp, lead_ratio, valley_ratio);
         }
         if floor > SPAN_MIN_LEN_MM {
             self.push_span(floor, valley_ratio, valley_ratio);
         }
         if ramp > SPAN_MIN_LEN_MM {
-            self.push_span(ramp, valley_ratio, ratio);
+            self.push_span(ramp, valley_ratio, lead_ratio);
         }
     }
 
