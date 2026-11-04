@@ -36,8 +36,13 @@ fn stream_case(
         max_extrude_only_accel: Some(1000.0),
         ..PlannerConfig::default()
     };
-    let limits = live_config::move_limits(&planner_config, None).expect("limits");
-    let steps = plan_steps(&waypoints, limits).expect("steps");
+    let base = live_config::GcodeMoveBase::from_parts(
+        live_config::GcodeMoveBase::of(&planner_config, &[])
+            .expect("move base")
+            .limits(),
+        Some(pipeline_snapshot::EXTRUDER_AXIS),
+    );
+    let steps = plan_steps(&waypoints, base).expect("steps");
 
     let config = live_config::stream_config(&planner_config).expect("stream config");
     let mut fit = FitStage::new(config.corner).into_driver();

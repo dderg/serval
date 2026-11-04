@@ -6,7 +6,7 @@ use trajectory::{
 };
 
 use super::compress::StepMove;
-use super::{MotorConfig, ShimError, StepEncoder, StepFrame, StepShim};
+use super::{DrainBudget, MotorConfig, ShimError, StepEncoder, StepFrame, StepShim};
 
 const CYCLES_PER_SECOND: f64 = 1_000_000.0;
 const MICROSTEP: f64 = 0.01;
@@ -40,6 +40,13 @@ fn seeded(cfg: MotorConfig, queue_depth: u32) -> StepShim {
     let mut shim = StepShim::new(vec![cfg], queue_depth);
     shim.reset_position(0, 0);
     shim
+}
+
+fn spent_budget(roots_through: u64) -> Option<DrainBudget> {
+    Some(DrainBudget {
+        deadline: std::time::Instant::now(),
+        roots_through,
+    })
 }
 
 fn base_group(position: f64, t_start: f64, t_end: f64) -> MotorGroup {
@@ -151,7 +158,10 @@ fn budgeted_multi_motor_drain_matches_serial_output() {
     let budgeted_frames = budgeted
         .drain_budgeted(
             u64::MAX,
-            Some(std::time::Instant::now() + std::time::Duration::from_secs(1)),
+            Some(DrainBudget {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(1),
+                roots_through: 0,
+            }),
         )
         .unwrap();
     let for_oid = |frames: &[StepFrame], oid: u32| {
@@ -198,10 +208,7 @@ fn a_budget_expiring_on_a_zero_width_window_keeps_its_root() {
     shim.push_spans(0, &[view]).unwrap();
     let mut frames = shim.drain_budgeted(first_root - 1, None).unwrap();
     assert!(frames.is_empty(), "the first root is one clock ahead");
-    frames.extend(
-        shim.drain_budgeted(first_root, Some(std::time::Instant::now()))
-            .unwrap(),
-    );
+    frames.extend(shim.drain_budgeted(first_root, spent_budget(0)).unwrap());
     frames.extend(shim.drain_budgeted(u64::MAX, None).unwrap());
 
     assert_eq!(replayed_step_clocks(&frames), whole);
@@ -1155,19 +1162,53 @@ fn unrooted_from_tracks_where_the_root_search_stopped() {
     .unwrap();
     assert_eq!(shim.unrooted_from(0), Some(1_000));
 
-    shim.drain_budgeted(u64::MAX, Some(std::time::Instant::now()))
-        .unwrap();
-    assert_eq!(
-        shim.unrooted_from(0),
-        Some(1_000),
-        "a spent budget roots nothing"
-    );
-
     shim.drain(1_500).unwrap();
     assert_eq!(shim.unrooted_from(0), Some(1_501));
 
     shim.drain(u64::MAX).unwrap();
     assert_eq!(shim.unrooted_from(0), None);
+}
+
+#[test]
+fn every_pass_of_a_spent_budget_roots_its_first_window_until_the_stream_ends() {
+    let views = (0..12)
+        .map(|i| span(1_000 * (i + 1), 0.1 * i as f64 + LATTICE_OFFSET, 0.1, 1_000))
+        .collect::<Vec<_>>();
+    let mut reference = seeded(cfg(), 16);
+    reference.push_spans(0, &views).unwrap();
+    let whole = replayed_step_clocks(&reference.drain(u64::MAX).unwrap());
+
+    let mut shim = seeded(cfg(), 16);
+    shim.push_spans(0, &views).unwrap();
+    let mut frames = Vec::new();
+    let mut passes = 0;
+    while let Some(unrooted) = shim.unrooted_from(0) {
+        frames.extend(shim.drain_budgeted(u64::MAX, spent_budget(0)).unwrap());
+        passes += 1;
+        assert!(
+            shim.unrooted_from(0).is_none_or(|next| next > unrooted),
+            "pass {passes} with a spent budget rooted nothing past {unrooted}"
+        );
+    }
+    assert!(passes > 1, "a spent budget must still halt between windows");
+    assert_eq!(replayed_step_clocks(&frames), whole);
+}
+
+#[test]
+fn a_spent_budget_still_roots_through_the_clock_it_owes() {
+    let views = (0..12)
+        .map(|i| span(1_000 * (i + 1), 0.1 * i as f64 + LATTICE_OFFSET, 0.1, 1_000))
+        .collect::<Vec<_>>();
+    let mut shim = seeded(cfg(), 16);
+    shim.push_spans(0, &views).unwrap();
+    shim.drain_budgeted(u64::MAX, spent_budget(8_500)).unwrap();
+    let unrooted = shim
+        .unrooted_from(0)
+        .expect("a spent budget halts short of the end");
+    assert!(
+        unrooted > 8_500,
+        "a spent budget yielded at {unrooted}, short of the 8500 it owes"
+    );
 }
 
 #[test]

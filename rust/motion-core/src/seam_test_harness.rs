@@ -112,10 +112,19 @@ impl SeamReport {
 /// cannot carry.
 #[must_use]
 pub fn parse_gcode_to_moves(source: &str, limits: VelocityLimits) -> Vec<Move> {
-    let waypoints =
-        pipeline_snapshot::waypoints::parse_gcode(source, &pipeline_snapshot::config_base(limits))
-            .unwrap_or_else(|e| panic!("seam harness: {e}"));
-    let steps = pipeline_snapshot::plan_steps(&waypoints, limits)
+    moves_under(
+        source,
+        motion_pipeline::live_config::GcodeMoveBase::from_parts(
+            limits,
+            Some(pipeline_snapshot::EXTRUDER_AXIS),
+        ),
+    )
+}
+
+fn moves_under(source: &str, base: motion_pipeline::live_config::GcodeMoveBase) -> Vec<Move> {
+    let waypoints = pipeline_snapshot::waypoints::parse_gcode(source, &base.config_limits())
+        .unwrap_or_else(|e| panic!("seam harness: {e}"));
+    let steps = pipeline_snapshot::plan_steps(&waypoints, base)
         .unwrap_or_else(|e| panic!("seam harness: {e}"));
     let mut moves = Vec::with_capacity(steps.len());
     for step in steps {
@@ -141,13 +150,12 @@ impl LiveReplay {
     pub fn new(source: &str, planner: &planner_config::PlannerConfig) -> Result<Self, String> {
         let config = motion_pipeline::live_config::stream_config(planner)?;
         let chains = planner.compile_active_chains().map_err(|e| e.to_string())?;
-        let extruder = motion_pipeline::live_config::extruder_caps_on(
-            &motion_pipeline::live_config::extruder_caps(planner)?,
-            pipeline_snapshot::EXTRUDER_AXIS,
-        );
-        let moves = parse_gcode_to_moves(
+        let moves = moves_under(
             source,
-            motion_pipeline::live_config::move_limits(planner, extruder)?,
+            motion_pipeline::live_config::GcodeMoveBase::of(
+                planner,
+                &motion_pipeline::live_config::extruder_caps(planner)?,
+            )?,
         );
         Ok(Self {
             config,

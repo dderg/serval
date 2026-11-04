@@ -45,15 +45,7 @@ fn planner_config(path: &str) -> planner_config::PlannerConfig {
         eprintln!("cannot read {path}: {e}");
         process::exit(1);
     });
-    let doc = config_doc::Document::parse(&text, path).unwrap_or_else(|e| {
-        eprintln!("cannot parse {path}: {e}");
-        process::exit(1);
-    });
-    let (settings, _) = planner_config::from_doc::read_motion_settings(&doc).unwrap_or_else(|e| {
-        eprintln!("{path}: {e}");
-        process::exit(1);
-    });
-    planner_config::from_doc::planner_config_from_settings(&settings).unwrap_or_else(|e| {
+    planner_config::from_doc::planner_config_from_text(&text).unwrap_or_else(|e| {
         eprintln!("{path}: {e}");
         process::exit(1);
     })
