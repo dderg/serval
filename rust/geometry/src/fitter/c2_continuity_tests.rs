@@ -120,7 +120,7 @@ fn c2_tangential_within_acceleration_disk() {
             let a_n = kappa * smp.v * smp.v;
             let disk = (a_t * a_t + a_n * a_n).sqrt();
             assert!(
-                disk <= ACCEL + 1e-3,
+                disk <= ACCEL + crate::velocity::law::RAIL_ACCELERATION_DEFECT,
                 "disk magnitude {disk:.3} exceeds a_max={ACCEL} at move line {} sample {sample_index}, local s={:.4} (kappa={kappa:.6}, a_t={a_t:.2}, a_n={a_n:.2})",
                 gm.source.start_line,
                 smp.s,

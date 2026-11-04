@@ -124,3 +124,28 @@ fn the_signal_rounding_term_is_charged_against_the_budget() {
         None
     );
 }
+
+/// A rung whose coefficients are not numbers, or a signal whose enclosure
+/// is not, is never proven: every comparison with a NaN is false, which a
+/// peak taken by `>` would read as zero error.
+#[test]
+fn a_rung_or_an_enclosure_with_a_nan_is_never_proven() {
+    assert!(verdict(&[0.0, f64::NAN, 0.0], POSITION_ONLY).is_some());
+    assert!(verdict(&[0.0, f64::NAN, 0.0], ACCELERATION_ONLY).is_some());
+    let mut signal = resting_signal();
+    signal[0].pva[0] = local(&[f64::NAN]);
+    let verdict = first_unproven(
+        &signal,
+        FittedPiece {
+            mono_u: &[0.0],
+            t0: T0,
+            t1: T1,
+        },
+        (T0, T1),
+        POSITION_ONLY,
+    );
+    assert!(
+        verdict.is_some(),
+        "a NaN signal is proven within the budget"
+    );
+}
