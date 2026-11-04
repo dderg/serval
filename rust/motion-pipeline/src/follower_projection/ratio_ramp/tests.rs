@@ -737,5 +737,28 @@ fn a_rest_valley_covers_the_ratio_step_its_leg_lays_short_of_the_rest() {
     assert_eq!(
         weight, 0.0,
         "the advance reads the ratio step at {ratio_step} mm with weight {weight}"
+/// The leaders brake into a rest a rounding past the last time node: the
+/// node stacks with the rest where the leaders stop, so the window closes
+/// there however they move on after it.
+#[test]
+fn a_time_node_a_rounding_short_of_a_rest_stacks_on_the_rest() {
+    let rest = 2.5;
+    let short = 0.9 * super::REST_TARGET_MM;
+    let mut field = WidthField::default();
+    field.push_rest(0.0);
+    field.push(1.0, 0.5);
+    field.push(2.0, 0.5);
+    field.push(rest - short, 0.5);
+    field.push_rest(rest);
+    let alone = field.width(rest);
+    for s in [3.0, 3.5, 4.5] {
+        field.push(s, 0.5);
+    }
+    field.push_rest(5.0);
+    let moving_on = field.width(rest);
+    assert!(
+        alone == 0.0 && moving_on == 0.0,
+        "the window at the rest at {rest} mm is {alone} mm while the leaders rest there and \
+         {moving_on} mm once they move on"
     );
 }

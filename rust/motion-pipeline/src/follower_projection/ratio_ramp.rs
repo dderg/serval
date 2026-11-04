@@ -522,30 +522,58 @@ impl WidthField {
         }
     }
 
-    /// A node within [`REST_TARGET_MM`] past the last one stacks on it: the
-    /// leaders cover no more between them than the fit's back-and-forth
+    /// A node within [`REST_TARGET_MM`] past the last one stacks with it:
+    /// the leaders cover no more between them than the fit's back-and-forth
     /// around a rest, and a node a rounding short of a rest would take the
     /// rest's cone as a sliver of an envelope that the smootherstep
     /// flattens onto, narrowing every window short of the rest to as much.
+    /// The stack sits where the leaders rest: a rest pulls the moving nodes
+    /// stacked short of it onto itself, as the window must close exactly
+    /// there whatever the leaders do after.
     fn push(&mut self, s: f64, target: f64) {
-        let s = self.nodes.last().map_or(s, |last| {
-            assert!(
-                s >= last.s - SPAN_LOOKUP_SLACK_MM,
-                "a ratio ramp width node at {s} mm falls behind the last one at {} mm",
-                last.s
-            );
-            if s <= last.s + REST_TARGET_MM {
-                last.s
-            } else {
-                s
+        let s = match self.nodes.last() {
+            None => s,
+            Some(last) => {
+                assert!(
+                    s >= last.s - SPAN_LOOKUP_SLACK_MM,
+                    "a ratio ramp width node at {s} mm falls behind the last one at {} mm",
+                    last.s
+                );
+                if s > last.s + REST_TARGET_MM {
+                    s
+                } else if target == 0.0 && s > last.s {
+                    self.pull_moving_stack_onto_rest(s);
+                    s
+                } else {
+                    last.s
+                }
             }
-        });
+        };
         self.nodes.push(WidthNode {
             s,
             target,
             envelope: target,
         });
         self.settle(self.nodes.len() - 1);
+    }
+
+    fn pull_moving_stack_onto_rest(&mut self, rest: f64) {
+        let stacked_at = self.nodes.last().expect("a stack to pull").s;
+        let moving = self
+            .nodes
+            .iter()
+            .rev()
+            .take_while(|node| node.s == stacked_at && node.envelope > 0.0)
+            .count();
+        let first_pulled = self.nodes.len() - moving;
+        assert!(
+            moving == 0 || first_pulled >= self.final_prefix,
+            "a rest at {rest} mm would pull the final ratio ramp width node at {stacked_at} mm \
+             onto itself"
+        );
+        for node in &mut self.nodes[first_pulled..] {
+            node.s = rest;
+        }
     }
 
     fn cone(&self, from: usize, to: usize) -> f64 {
