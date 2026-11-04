@@ -96,7 +96,7 @@ fn bisecting_toward_an_unseeded_acceleration_step_keeps_pieces_device_wide() {
             seed_breakpoints: &[0.994_616_767_877, 0.994_655_895_934_5],
             fit_tol: FitTol::absolute(0.0025, 25.0),
             fit_context: "unseeded acceleration step",
-            velocity_continuous: false,
+            seam_continuity: crate::lowering::SeamContinuity::Position,
         },
         &step,
     )
@@ -127,7 +127,7 @@ fn a_picometre_ramp_to_rest_at_the_resolution_floor_fails_loudly() {
             seed_breakpoints: &[ramp.at - 0.7e-5, ramp.at + 1.3e-5],
             fit_tol: FitTol::absolute(0.0025, 50.0),
             fit_context: "picometre ramp to rest",
-            velocity_continuous: false,
+            seam_continuity: crate::lowering::SeamContinuity::Position,
         },
         &ramp,
     );
@@ -298,7 +298,7 @@ fn an_accepted_piece_holds_the_position_tolerance_between_the_ladder_probes() {
             seed_breakpoints: &[],
             fit_tol,
             fit_context: "probe-blind bump",
-            velocity_continuous: true,
+            seam_continuity: crate::lowering::SeamContinuity::Velocity,
         },
         &sig,
     )
@@ -346,7 +346,7 @@ impl JerkKink {
                 seed_breakpoints: &[],
                 fit_tol,
                 fit_context: "unseeded jerk kink",
-                velocity_continuous: true,
+                seam_continuity: crate::lowering::SeamContinuity::Velocity,
             },
             self,
         )
@@ -458,7 +458,7 @@ fn an_accepted_piece_holds_the_acceleration_tolerance_between_the_ladder_probes(
             seed_breakpoints: &[],
             fit_tol,
             fit_context: "probe-blind acceleration bump",
-            velocity_continuous: true,
+            seam_continuity: crate::lowering::SeamContinuity::Velocity,
         },
         &sig,
     )
@@ -521,7 +521,7 @@ fn a_square_root_onset_at_the_floor_is_fitted_by_the_closest_anchored_rung() {
             seed_breakpoints: &[],
             fit_tol,
             fit_context: "square-root onset",
-            velocity_continuous: false,
+            seam_continuity: crate::lowering::SeamContinuity::Position,
         },
         &sig,
     )
@@ -594,7 +594,7 @@ impl WaveWithQuietKnot {
                 seed_breakpoints: &[],
                 fit_tol: FOLLOWER_LIKE_TOLERANCE,
                 fit_context: "smooth wave past a quiet knot",
-                velocity_continuous: true,
+                seam_continuity: crate::lowering::SeamContinuity::Velocity,
             },
             self,
         )
@@ -712,7 +712,7 @@ fn a_piece_starting_on_a_declared_square_root_onset_anchors_to_its_acceleration(
             seed_breakpoints: &[],
             fit_tol,
             fit_context: "square-root onset",
-            velocity_continuous: false,
+            seam_continuity: crate::lowering::SeamContinuity::Position,
         },
         &declared,
     )
@@ -775,7 +775,7 @@ fn a_square_root_onset_is_refined_until_its_shoulder_holds_the_tolerance() {
         seed_breakpoints: &[],
         fit_tol,
         fit_context: "square-root onset",
-        velocity_continuous: false,
+        seam_continuity: crate::lowering::SeamContinuity::Position,
     };
     let cubic_floor = seed_floors(&axis_fit, &onset(), &[axis_fit.t_start, axis_fit.t_end]).cubic;
     for declared in [false, true] {
@@ -815,7 +815,7 @@ fn every_piece_on_a_declared_square_root_onset_holds_the_tolerance_up_to_its_res
                 seed_breakpoints: &[],
                 fit_tol,
                 fit_context: "square-root onset",
-                velocity_continuous: false,
+                seam_continuity: crate::lowering::SeamContinuity::Position,
             };
             let cubic_floor = seed_floors(&fit, &declared, &[fit.t_start, fit.t_end]).cubic;
             let track = fit_axis_from_signal(fit, &declared).expect("a square-root onset fits");
@@ -877,7 +877,7 @@ fn fit_pressure_wave(fit_tol: FitTol) -> nurbs::ScalarNurbs {
             seed_breakpoints: &[],
             fit_tol,
             fit_context: "pressure wave",
-            velocity_continuous: true,
+            seam_continuity: crate::lowering::SeamContinuity::Velocity,
         },
         &PRESSURE_WAVE,
     )
@@ -1017,7 +1017,7 @@ fn a_piece_anchored_past_its_edge_sliver_holds_the_tolerance_from_its_resolved_e
         seed_breakpoints: &[],
         fit_tol,
         fit_context: "steep edge",
-        velocity_continuous: false,
+        seam_continuity: crate::lowering::SeamContinuity::Position,
     };
     let cubic_floor = seed_floors(&fit, &sig, &[fit.t_start, fit.t_end]).cubic;
     let anchor = edge_velocity_and_acceleration(
@@ -1163,7 +1163,7 @@ fn a_rail_braking_off_its_curvature_cap_holds_the_tolerance_past_its_phase_seam(
         seed_breakpoints: &seeds,
         fit_tol,
         fit_context: "materialize_source",
-        velocity_continuous: false,
+        seam_continuity: crate::lowering::SeamContinuity::Position,
     };
     let fit_seeds = fit_seed_times(0, fit.t_start, fit.t_end, &seeds).expect("seeds");
     let cubic_floor = seed_floors(&fit, &sig, &fit_seeds).cubic;

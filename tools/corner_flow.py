@@ -43,9 +43,13 @@ Columns, per case and speed (worst over the case's corners):
   and its prime) lays no bead and is left out of the bead columns.
 - ``dE_gc``: final e minus the G-code's total E (mm). Negative by design
   where the shaped path cuts a corner: the bead follows the shorter path.
-- ``dE_adv``: final e minus the same run without the advance stage(s), mm.
-  An advance vanishes at rest, so anything above ~1e-6 is lost or invented
-  material.
+- ``dE_adv``: what the run lays beyond the bead ratio times its own shaped
+  path, minus the same for the run without the advance stage(s), mm; only
+  for cases that extrude one ratio throughout (``n/a`` otherwise). The two
+  runs need not travel the same path: the extruder caps budget the
+  toolhead's acceleration for the advance, so its corners are planned and
+  shaped differently. An advance vanishes at rest, so anything above ~1e-6
+  is lost or invented material.
 """
 
 from __future__ import annotations
@@ -369,6 +373,7 @@ def measure(
     try:
         t, axes = sample(config.text(), program)
         _, plain = sample(config.without_advance().text(), program)
+        plain_xy = np.column_stack([plain[0][:, 0], plain[1][:, 0]])
         t_raw, raw = sample(config.unshaped().text(), program)
     except Exception as error:  # noqa: BLE001
         row.error = str(error).splitlines()[0][:ERROR_CHARS]
@@ -402,8 +407,22 @@ def measure(
     row.ve_all = float(np.abs(ve).max())
     row.ae_all = float(np.abs(ae).max())
     row.de_gcode = float(e_cmd[-1] - gcode_total_e(geometry, ratio))
-    row.de_advance = float(e_cmd[-1] - plain[2][-1, 0])
+    if all(move.e == 1.0 for move in geometry.moves):
+        row.de_advance = beyond_the_path(xy, e_cmd, ratio) - beyond_the_path(
+            plain_xy, plain[2][:, 0], ratio
+        )
     return row
+
+
+def _signed(value: float) -> str:
+    return "n/a" if math.isnan(value) else f"{value:+.1e}"
+
+
+def beyond_the_path(xy, e, ratio: float) -> float:
+    """Material laid beyond `ratio` times the length of the shaped path
+    `xy`, sampled densely enough that its chords sum to the path."""
+    path = np.hypot(np.diff(xy[:, 0]), np.diff(xy[:, 1])).sum()
+    return float(e[-1] - e[0] - ratio * path)
 
 
 def run_case(job) -> Row:
@@ -475,7 +494,7 @@ def table(rows: list[Row], sweep_name: str) -> str:
             f"{row.dip:>+4.0f}% {row.width_mm:>5.1f} {row.blob_nl:>6.1f} | "
             f"{row.ve_max:>6.1f} {row.ve_min:>6.1f} {row.ae_max:>7.0f} | "
             f"{row.ve_all:>6.1f} {row.ae_all:>7.0f} | "
-            f"{row.de_gcode:>+8.4f} {row.de_advance:>+8.1e}"
+            f"{row.de_gcode:>+8.4f} {_signed(row.de_advance):>8}"
         )
     return "\n".join(lines)
 

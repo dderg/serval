@@ -39,6 +39,7 @@ next_pool_path() {
 
 new_topic() {
     local topic="${1:?usage: wt.sh new <topic> [--base REF]}"; shift
+    "$(dirname "$0")/install-git-guards.sh" >&2
     local base="origin/main"
     if [ "${1:-}" = "--base" ]; then base="${2:?--base needs a ref}"; fi
     git fetch -q origin

@@ -199,7 +199,7 @@ proptest! {
                 seed_breakpoints: &[signal.boundary],
                 fit_tol: FitTol::absolute(0.005, 50.0),
                 fit_context: "phase_ripple_fuzz",
-                velocity_continuous: false,
+                seam_continuity: crate::lowering::SeamContinuity::Position,
             },
             &signal,
         ).map_err(|error| TestCaseError::fail(format!("{signal:?}: {error:?}")))?;
