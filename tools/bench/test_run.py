@@ -53,6 +53,7 @@ def test_a_failing_cancel_does_not_hide_why_the_print_failed(
 F401_STEP_BENCHMARK = {
     "mcu": "mcu",
     "clock_freq": 84000000.0,
+    "capacity_fraction": 0.625,
     "pulsed_ticks_per_step": 301,
     "both_edge_ticks_per_step": 160,
     "simulated": False,

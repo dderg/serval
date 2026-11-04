@@ -825,7 +825,7 @@ def test_a_run_with_no_fitted_epoch_runs_at_the_nominal_rate():
     assert analyze.nearest_fitted_ppm([None, None], 1) == 0.0
 
 
-F401 = analyze.SuppliedBenchmark(301, 160, 84_000_000.0)
+F401 = analyze.SuppliedBenchmark(301, 160, 84_000_000.0, 0.75)
 FAST_SQUARE_GCODE = """\
 SET_KINEMATIC_POSITION X=0 Y=0 Z=0
 G92 E0
@@ -889,7 +889,7 @@ def test_the_step_benchmark_caps_the_reference_where_it_binds(tmp_path):
     assert capped.final_counts == uncapped.final_counts
 
 
-def test_the_step_benchmark_option_parses_ticks_and_clock():
-    assert analyze.SuppliedBenchmark.parse("301,160,84000000") == F401
-    with pytest.raises(Exception, match="PULSED,BOTH_EDGE,CLOCK_HZ"):
-        analyze.SuppliedBenchmark.parse("301,160")
+def test_the_step_benchmark_option_parses_ticks_clock_and_fraction():
+    assert analyze.SuppliedBenchmark.parse("301,160,84000000,0.75") == F401
+    with pytest.raises(Exception, match="PULSED,BOTH_EDGE,CLOCK_HZ,FRACTION"):
+        analyze.SuppliedBenchmark.parse("301,160,84000000")
