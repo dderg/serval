@@ -2,10 +2,10 @@
   "slice_lines": 1000,
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 8396697224,
+      "ir": 8531762709,
       "stream_secs": 8.541,
-      "reason": "Kernel follower fits seed only the shaped breaks that can carry a velocity break: 10x fewer extruder pieces on the kernel configs",
-      "commit": "59def11ada6b19e598dc852089fa42db5fe0f5bd",
+      "reason": "the ratio ramp reads the leaders over both halves of every ramp (laid tails, seams widened by later legs), the width field derives each seam's width plateau, and the smoothing sums the table's slope span by span",
+      "commit": "fdc3ad24850ff092c2b565a9a368ba2d2d158238",
       "pi_2core": {
         "k": 4587316424.936247,
         "worst_x": [
@@ -16,31 +16,31 @@
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 11403077362,
+      "ir": 12733050046,
       "stream_secs": 6.202,
-      "reason": "Kernel follower fits seed only the shaped breaks that can carry a velocity break: 10x fewer extruder pieces on the kernel configs",
-      "commit": "59def11ada6b19e598dc852089fa42db5fe0f5bd",
+      "reason": "the ratio ramp reads the leaders over both halves of every ramp (laid tails, seams widened by later legs), the width field derives each seam's width plateau, and the smoothing sums the table's slope span by span",
+      "commit": "fdc3ad24850ff092c2b565a9a368ba2d2d158238",
       "pi_2core": {
-        "k": 4283968115.682038,
+        "k": 4582331787.594325,
         "worst_x": [
-          2.33,
-          2.36
+          2.18,
+          2.19
         ],
-        "commit": "59def11ada6b19e598dc852089fa42db5fe0f5bd"
+        "commit": "d2ce24fed9e01838bd790176d0d3499568e85fdf"
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 11569698749,
+      "ir": 13364376280,
       "stream_secs": 7.543,
-      "reason": "Kernel follower fits seed only the shaped breaks that can carry a velocity break: 10x fewer extruder pieces on the kernel configs",
-      "commit": "59def11ada6b19e598dc852089fa42db5fe0f5bd",
+      "reason": "the ratio ramp reads the leaders over both halves of every ramp (laid tails, seams widened by later legs), the width field derives each seam's width plateau, and the smoothing sums the table's slope span by span",
+      "commit": "fdc3ad24850ff092c2b565a9a368ba2d2d158238",
       "pi_2core": {
-        "k": 3819242991.5166383,
+        "k": 4388809054.193679,
         "worst_x": [
-          2.5,
-          2.49
+          2.25,
+          2.25
         ],
-        "commit": "59def11ada6b19e598dc852089fa42db5fe0f5bd"
+        "commit": "d2ce24fed9e01838bd790176d0d3499568e85fdf"
       }
     }
   }
