@@ -80,6 +80,8 @@ def git(*args: str, check: bool = True) -> str:
     result = subprocess.run(
         ["git", *args], capture_output=True, text=True, check=False
     )
+    if result.returncode != 0 and args[:1] in (("fetch",), ("push",)):
+        result = run_git_with_retry(args)
     if check and result.returncode != 0:
         raise ShipError(f"git {' '.join(args)}: {result.stderr.strip()}")
     return result.stdout.strip()
@@ -87,6 +89,16 @@ def git(*args: str, check: bool = True) -> str:
 
 def step(message: str) -> None:
     print(f"ship: {message}", flush=True)
+
+
+def run_git_with_retry(args: tuple[str, ...]) -> subprocess.CompletedProcess:
+    helper = Path(__file__).with_name("gh_util.py")
+    return subprocess.run(
+        [sys.executable, str(helper), "--git", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def run(command: list[str], cwd: Path | None = None) -> None:

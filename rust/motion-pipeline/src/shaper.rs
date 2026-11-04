@@ -14,8 +14,8 @@ use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
     AccelBudget, AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE, LADDER_PROBES_U,
     LadderBudget, LadderFailure, LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth,
-    VelocitySign, eval_mono, eval_mono_d, eval_mono_dd, exact_piece, held_miss, ladder_fit,
-    quintic_in_u,
+    SeamContinuity, VelocitySign, eval_mono, eval_mono_d, eval_mono_dd, exact_piece, held_miss,
+    ladder_fit, quintic_in_u,
 };
 use crate::types::{BaseItem, Control, PostProcessError, TrajectoryItem};
 use crate::worker_pool::WorkerPool;
@@ -350,11 +350,16 @@ impl<S: TrackSignal> TrackSignal for ShiftedTrackSignal<S> {
 pub(crate) struct ConvolutionSignal<'a, S: TrackSignal> {
     evaluated: S,
     exact: ExactConvolution<'a>,
+    recent: exact::RecentChunks,
 }
 
 impl<'a, S: TrackSignal> ConvolutionSignal<'a, S> {
     pub(crate) fn new(evaluated: S, exact: ExactConvolution<'a>) -> Self {
-        Self { evaluated, exact }
+        Self {
+            evaluated,
+            exact,
+            recent: exact::RecentChunks::default(),
+        }
     }
 }
 
@@ -372,7 +377,7 @@ impl<S: TrackSignal> TrackSignal for ConvolutionSignal<'_, S> {
     }
 
     fn exact_polynomial_on(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
-        self.exact.pieces_over(lo, hi)
+        self.exact.pieces_over(lo, hi, &self.recent)
     }
 }
 
@@ -872,7 +877,7 @@ fn materialize_source_axis(
             seed_breakpoints: &breakpoints,
             fit_tol,
             fit_context: "materialize_source",
-            velocity_continuous: false,
+            seam_continuity: SeamContinuity::Position,
         },
         &CapContactSource {
             source,
@@ -1477,22 +1482,36 @@ fn constant_axis_column(
 
 #[derive(Clone, Copy)]
 enum ColumnSignal {
-    Shaped,
-    MotorCommand { k1: f64, k2: f64 },
+    /// A leader's shaped signal, whose seams carry what the followers
+    /// reading it need ([`crate::follower_projection::leader_seam_continuity`]).
+    Shaped {
+        seam_continuity: SeamContinuity,
+    },
+    MotorCommand {
+        k1: f64,
+        k2: f64,
+    },
 }
 
 impl ColumnSignal {
     fn fit_context(self) -> &'static str {
         match self {
-            Self::Shaped => "smooth_kernel_target",
+            Self::Shaped { .. } => "smooth_kernel_target",
             Self::MotorCommand { .. } => "motor_command",
         }
     }
 
     fn convolution_input(self, shaped_input: AxisSignalTable) -> AxisSignalTable {
         match self {
-            Self::Shaped => shaped_input,
+            Self::Shaped { .. } => shaped_input,
             Self::MotorCommand { k1, k2 } => shaped_input.with_derivative_gains(k1, k2),
+        }
+    }
+
+    fn seam_continuity(self) -> SeamContinuity {
+        match self {
+            Self::Shaped { seam_continuity } => seam_continuity,
+            Self::MotorCommand { .. } => SeamContinuity::Velocity,
         }
     }
 }
@@ -1783,21 +1802,21 @@ impl<'a> ShapedSignalSource<'a> {
             },
             self.table.input_jumps().to_vec(),
         );
-        ConvolutionSignal {
-            evaluated: ShiftedTrackSignal::new(
+        ConvolutionSignal::new(
+            ShiftedTrackSignal::new(
                 WithGainImpulses {
                     convolved: relative,
                     response: self.gain_impulse_response.as_ref(),
                 },
                 -self.shaped_offset,
             ),
-            exact: ExactConvolution {
+            ExactConvolution {
                 table: &self.table,
                 kernel: &self.exact_kernel,
                 impulses: self.table.gain_impulses(),
                 position_offset: self.shaped_offset,
             },
-        }
+        )
     }
 }
 
@@ -1814,6 +1833,7 @@ fn fit_axis_targets(
         return Ok(Vec::new());
     }
     let fit_context = signal.fit_context();
+    let seam_continuity = signal.seam_continuity();
     let shaped_breaks = &source.shaped_breaks;
     let hidden_break_input = source.hidden_break_input();
     let shaped_times = shaped_breaks.times();
@@ -1837,7 +1857,7 @@ fn fit_axis_targets(
                     seed_breakpoints: shaped_times,
                     fit_tol,
                     fit_context,
-                    velocity_continuous: true,
+                    seam_continuity,
                 },
                 sig,
                 shaped_breaks,
@@ -1953,7 +1973,7 @@ fn fit_axis_targets(
                 velocity_budget: f64::INFINITY,
                 floors: plan.floors,
                 velocity_sign: VelocitySign::Unconstrained,
-                velocity_continuous: true,
+                seam_continuity,
                 requires_hull: true,
             },
             SpanSeeds {
@@ -2020,7 +2040,7 @@ fn fit_axis_targets(
                     seed_breakpoints: shaped_times,
                     fit_tol,
                     fit_context,
-                    velocity_continuous: true,
+                    seam_continuity,
                 },
                 &sig,
                 shaped_breaks,
@@ -2054,7 +2074,7 @@ fn column_track(
     pieces: Vec<BezierPiece>,
 ) -> Result<ColumnTrack, PostProcessError> {
     match signal {
-        ColumnSignal::Shaped => leader_track(axis, pieces),
+        ColumnSignal::Shaped { .. } => leader_track(axis, pieces),
         ColumnSignal::MotorCommand { .. } => Ok(ColumnTrack {
             stored: Arc::new(finite_track(axis, pieces)?),
             read: None,
@@ -2146,7 +2166,9 @@ fn fit_leader_axes(
         .map(|axis| FitColumn {
             axis,
             chain: chains.chains.get(axis).unwrap_or(&default_chain),
-            signal: ColumnSignal::Shaped,
+            signal: ColumnSignal::Shaped {
+                seam_continuity: crate::follower_projection::leader_seam_continuity(chains, axis),
+            },
         })
         .filter(|column| !column.chain.is_empty())
         .collect();
@@ -3606,7 +3628,7 @@ pub(crate) struct AxisFit<'a> {
     pub seed_breakpoints: &'a [f64],
     pub fit_tol: FitTol,
     pub fit_context: &'static str,
-    pub velocity_continuous: bool,
+    pub seam_continuity: SeamContinuity,
 }
 
 pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
@@ -3659,7 +3681,7 @@ fn fit_pieces_over_plan<S: TrackSignal>(
         velocity_budget: f64::INFINITY,
         floors: plan.floors,
         velocity_sign: VelocitySign::Unconstrained,
-        velocity_continuous: fit.velocity_continuous,
+        seam_continuity: fit.seam_continuity,
         requires_hull,
     };
     let mut refinement_splits = 0;
@@ -4457,7 +4479,7 @@ struct SpanFitPolicy {
     velocity_budget: f64,
     floors: LadderFloors,
     velocity_sign: VelocitySign,
-    velocity_continuous: bool,
+    seam_continuity: SeamContinuity,
     requires_hull: bool,
 }
 
@@ -4758,7 +4780,7 @@ fn shaped_ladder<S: TrackSignal>(
                 (start_past_sliver, end_past_sliver),
             ),
             high_degree_span_floor: policy.floors.high_degree,
-            velocity_continuous: policy.velocity_continuous,
+            seam_continuity: policy.seam_continuity,
         },
     ) {
         Ok(coefficients) => {
@@ -5465,7 +5487,7 @@ fn with_nonlinear_advance_fit<R>(
             seed_breakpoints: &breakpoints,
             fit_tol,
             fit_context: "nonlinear_advance",
-            velocity_continuous: true,
+            seam_continuity: SeamContinuity::Velocity,
         },
         &sig,
     )
