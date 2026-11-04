@@ -4,7 +4,7 @@ use geometry::RatioRampRule;
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 use trajectory::{ContinuousAxis, ContinuousSegment};
 
-use super::super::FollowerState;
+use super::super::{FollowerState, ShapedLeaders};
 use super::{ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_S, RampLeg, WIDTH_SLOPE_BOUND, WidthField};
 
 /// `(length, ratio at start, ratio at end)` per span.
@@ -555,9 +555,11 @@ fn a_rest_valley_covers_the_ratio_step_its_leg_lays_short_of_the_rest() {
     state.push_span(tail, 0.0, 0.0);
     state.push_span(REST_LEG_SPILL_MM + short_of_rest, 0.03, 0.03);
     let shaped = braking_into_a_rest_and_leaving();
+    let shaped_leaders = ShapedLeaders::of(&shaped, &[0, 1]);
     let leg = RampLeg {
         shaped: &shaped,
         leaders: &[0, 1],
+        shaped_leaders: &shaped_leaders,
         support: (shaped.t_start, shaped.t_end),
         start_s: travel,
         rests: true,
