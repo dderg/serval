@@ -245,8 +245,11 @@ static void
 timer_dispatch(void)
 {
     uint32_t entered = timer_read_time();
+    sched_timer_irq_enter(entered);
     timer_dispatch_due();
-    timer_busy_ticks += timer_read_time() - entered;
+    uint32_t done = timer_read_time();
+    sched_timer_irq_exit(done);
+    timer_busy_ticks += done - entered;
 }
 
 uint32_t
@@ -359,17 +362,27 @@ irq_restore(irqstatus_t flag)
 {
 }
 
+static uint32_t idle_ticks;
+
 void
 irq_wait(void)
 {
-    // Must atomically sleep until signaled
     if (!readl(&TimerInfo.must_wake_timers)) {
         timer_disable_signals();
-        if (!TimerInfo.must_wake_timers)
+        if (!TimerInfo.must_wake_timers) {
+            uint32_t slept = timer_read_time();
             console_sleep(&TimerInfo.ss_sleep);
+            idle_ticks += timer_read_time() - slept;
+        }
         timer_enable_signals();
     }
     irq_poll();
+}
+
+uint32_t
+irq_wait_idle_ticks(void)
+{
+    return idle_ticks;
 }
 
 void
