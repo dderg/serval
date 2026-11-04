@@ -2,10 +2,10 @@
   "slice_lines": 1000,
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 10464720694,
+      "ir": 10409195933,
       "stream_secs": 6.594,
-      "reason": "derived-ratio-ramp: kernel chains now ramp every ratio step, so the extruder gets ratio-smoothed source pieces and the kernel fit convolves them. On the 1000-line slice the output e pieces go from 22,147 to 37,576 (1.70x) on p3 kernel, from 42,682 to 54,880 (1.29x) on trident, and from 11,647 to 11,719 on ramp. Net repo Ir: p3 kernel +6.6%, trident +0.7%, ramp -21.1%. The Pi 2-core worst-window prediction stays above the 2.0x floor: 2.89x / 2.05x / 2.28x.",
-      "commit": "056a8e788af4f126ecd23875b07fd6c3c0caf3ea",
+      "reason": "exact chunks shared by neighbouring spans are computed once; output bit-identical (trajectory digests unchanged)",
+      "commit": "aa9728b9ac981f863994615e28b4d60e09ccb7c8",
       "pi_2core": {
         "k": 4587316424.936247,
         "worst_x": [
@@ -16,10 +16,10 @@
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 13892219183,
+      "ir": 13316627340,
       "stream_secs": 6.202,
-      "reason": "derived-ratio-ramp: kernel chains now ramp every ratio step, so the extruder gets ratio-smoothed source pieces and the kernel fit convolves them. On the 1000-line slice the output e pieces go from 22,147 to 37,576 (1.70x) on p3 kernel, from 42,682 to 54,880 (1.29x) on trident, and from 11,647 to 11,719 on ramp. Net repo Ir: p3 kernel +6.6%, trident +0.7%, ramp -21.1%. The Pi 2-core worst-window prediction stays above the 2.0x floor: 2.89x / 2.05x / 2.28x.",
-      "commit": "056a8e788af4f126ecd23875b07fd6c3c0caf3ea",
+      "reason": "exact chunks shared by neighbouring spans are computed once; output bit-identical (trajectory digests unchanged)",
+      "commit": "aa9728b9ac981f863994615e28b4d60e09ccb7c8",
       "pi_2core": {
         "k": 4582331787.594325,
         "worst_x": [
@@ -30,10 +30,10 @@
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 14547941605,
+      "ir": 13701188811,
       "stream_secs": 7.543,
-      "reason": "derived-ratio-ramp: kernel chains now ramp every ratio step, so the extruder gets ratio-smoothed source pieces and the kernel fit convolves them. On the 1000-line slice the output e pieces go from 22,147 to 37,576 (1.70x) on p3 kernel, from 42,682 to 54,880 (1.29x) on trident, and from 11,647 to 11,719 on ramp. Net repo Ir: p3 kernel +6.6%, trident +0.7%, ramp -21.1%. The Pi 2-core worst-window prediction stays above the 2.0x floor: 2.89x / 2.05x / 2.28x.",
-      "commit": "056a8e788af4f126ecd23875b07fd6c3c0caf3ea",
+      "reason": "exact chunks shared by neighbouring spans are computed once; output bit-identical (trajectory digests unchanged)",
+      "commit": "aa9728b9ac981f863994615e28b4d60e09ccb7c8",
       "pi_2core": {
         "k": 4388809054.193679,
         "worst_x": [
