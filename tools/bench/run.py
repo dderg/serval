@@ -97,7 +97,9 @@ def mcu_step_benchmarks() -> list[dict]:
     reports it in the MCU's status: the analyzer plans its reference under
     the same cap."""
     objects = http("GET", "/printer/objects/list")["objects"]
-    mcus = [name for name in objects if name == "mcu" or name.startswith("mcu ")]
+    mcus = [
+        name for name in objects if name == "mcu" or name.startswith("mcu ")
+    ]
     if not mcus:
         raise BenchError(f"klippy reports no mcu objects: {objects}")
     query = "&".join(urllib.parse.quote(name) for name in mcus)

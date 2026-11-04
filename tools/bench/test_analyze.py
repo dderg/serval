@@ -830,9 +830,7 @@ def test_recorded_step_benchmarks_reach_the_reference_verbatim(tmp_path):
     recorded = analyze.supplied_step_benchmarks(
         analyze.load_job(run_dir).motors, F401
     )
-    (run_dir / "run.json").write_text(
-        json.dumps({"step_benchmarks": recorded})
-    )
+    (run_dir / "run.json").write_text(json.dumps({"step_benchmarks": recorded}))
     job = analyze.load_job(run_dir)
     assert job.step_benchmarks == recorded
     assert job.step_benchmarks_source == "recorded"

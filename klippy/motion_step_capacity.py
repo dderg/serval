@@ -78,9 +78,7 @@ def mcu_step_capacity(motion, name, mcu_obj, motors):
             for m in stepped
         ],
     }
-    ticks_per_s, ticks_per_step = native("step_capacity_budget")(
-        step_benchmark
-    )
+    ticks_per_s, ticks_per_step = native("step_capacity_budget")(step_benchmark)
     stepped_motors = [
         SteppedMotor(
             m.stepper.get_name(),
