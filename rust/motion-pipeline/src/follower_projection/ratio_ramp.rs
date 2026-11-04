@@ -56,7 +56,7 @@ const CLUSTER_REACH_S: f64 = 0.5 * RATIO_RAMP_MAX_TIME_S;
 const TARGET_DELAY_S: f64 = RAMP_TIME_REACH_S + CLUSTER_REACH_S;
 /// The ramp time over which a turnaround or crawl valley releases and
 /// rebuilds the advance's lead, the longest, whatever the step there; and
-/// the furthest a rest valley reaches past its spill ([`Spill`]).
+/// the furthest a rest valley reaches past its spill ([`RestSide::width`]).
 const VALLEY_RAMP_TIME_S: f64 = RATIO_RAMP_MAX_TIME_S;
 /// A node's target below which the leaders count as resting there: the
 /// fit's back-and-forth around a rest point, far under any ramp.
@@ -1548,10 +1548,10 @@ impl RatioSmoothing {
     /// already, and the first leg that moves again closes it at the last.
     /// Each side spans the shaped spill between that rest and the raw seam,
     /// over which the advance builds or releases its lead from the rest out,
-    /// and reaches past the seam only where `rule` finds the spill too short
-    /// a ramp for that lead ([`Spill::reach_beyond`]). A rest leg the leaders
-    /// cross without coming to rest opens none. Returns whether `leg` closes
-    /// a rest valley.
+    /// and reaches past the seam only where the lead or a ratio step near
+    /// the rest needs it ([`RestSide::width`]). A rest leg the leaders cross
+    /// without coming to rest opens none. Returns whether `leg` closes a
+    /// rest valley.
     fn lay_rest_valley(
         &mut self,
         spans: &[RatioSpan],
@@ -1561,19 +1561,23 @@ impl RatioSmoothing {
         table_end: f64,
     ) -> bool {
         let seam = leg.start_s;
-        let side = |spill: Spill, spill_mm: f64| {
-            let ratio =
-                peak_ratio_within(spans, seam, spill_mm + crossing.reach(VALLEY_RAMP_TIME_S));
-            spill_mm + spill.reach_beyond(crossing, rule, ratio)
-        };
+        let leaders = leg.shaped_leaders;
+        let (t_start, t_end) = leg.support;
         if !leg.rests {
             let Some(open) = self.open_rest else {
                 return false;
             };
-            self.close_rest(open.end, side(open.departure, seam - open.end));
+            let side = RestSide {
+                rest: open.end,
+                seam,
+                outward: 1.0,
+                crossing,
+                spill: open.departure,
+                beyond: Crossing::over(leaders, (t_start, (t_start + CLUSTER_REACH_S).min(t_end))),
+            };
+            self.close_rest(open.end, side.width(spans, rule, table_end));
             return true;
         }
-        let leaders = leg.shaped_leaders;
         let Some(resting) = resting_stretch(leaders, leg, REST_SPEED_MM_S, table_end) else {
             return false;
         };
@@ -1586,11 +1590,21 @@ impl RatioSmoothing {
                 )
             },
         );
-        let (t_start, t_end) = leg.support;
         if self.open_rest.is_none() {
-            let spill_mm = rest_start - seam;
-            let before = side(Spill::over(leaders, (t_start, resting.first_t)), spill_mm)
-                .min(spill_mm + self.back_reach_limit(seam));
+            let side = RestSide {
+                rest: rest_start,
+                seam,
+                outward: -1.0,
+                crossing,
+                spill: Spill::over(leaders, (t_start, resting.first_t)),
+                beyond: self
+                    .laid_tails
+                    .iter()
+                    .fold(crossing, |widest, tail| widest.widest(tail.crossing)),
+            };
+            let before = side
+                .width(spans, rule, table_end)
+                .min(rest_start - seam + self.back_reach_limit(seam));
             self.valleys.push(AdvanceValley {
                 start: rest_start,
                 end: f64::INFINITY,
@@ -1675,7 +1689,8 @@ impl RatioSmoothing {
 ///   after, and the fit's back-and-forth near the rest point has its own
 ///   turnarounds and short idle spans an advance would turn into steps. The
 ///   valley is the stretch where the leaders rest, each side spanning the
-///   spill, past the raw seam only where that is too short ([`Spill`]).
+///   spill, and past the raw seam only where the lead or a ratio step near
+///   the rest needs it ([`RestSide::width`]).
 #[derive(Debug, Clone, Copy)]
 struct AdvanceValley {
     start: f64,
@@ -1743,30 +1758,105 @@ impl Spill {
             crossing: Crossing::over(leaders, (from, until)),
         }
     }
+}
 
-    /// How far past its raw seam, crossed as `seam`, a rest valley's side
-    /// reaches beyond the spill. Releasing or building the lead of an
-    /// advance on `ratio` is a ratio step of the whole `ratio` to the
-    /// advance: where the shortest ramp `rule` allows for it fits within
-    /// the spill, the side is the spill alone and reading the advance up to
-    /// the rest keeps its whole lead; else it reaches as far as the leaders
-    /// cover in half that ramp at the seam. A spill that takes no time — a
-    /// leader stopping without a kernel, its acceleration stepping at the
-    /// rest — always reaches out.
-    fn reach_beyond(self, seam: Crossing, rule: &RatioRampRule, ratio: f64) -> f64 {
-        let leaders = seam.widest(self.crossing);
-        let ramp_time = rule.ramp_time(&RatioStep {
-            ratio_step: ratio,
-            peak_ratio: ratio,
-            speed_mm_s: leaders.speed,
-            accel_mm_s2: leaders.rate,
-            jerk_mm_s3: leaders.jerk,
-        });
-        if ramp_time <= self.duration {
-            0.0
-        } else {
-            seam.reach(ramp_time)
+/// One side of a rest valley: where the leaders rest and the raw seam
+/// beside it, `outward` from the rest along the path (−1 before it, 1
+/// after), how they cross that seam, the spill between, and how they
+/// cross the path past the seam the side may reach.
+#[derive(Debug, Clone, Copy)]
+struct RestSide {
+    rest: f64,
+    seam: f64,
+    outward: f64,
+    crossing: Crossing,
+    spill: Spill,
+    beyond: Crossing,
+}
+
+impl RestSide {
+    /// How far from the rest the side spans: the spill, and past the seam
+    /// - as far as the longest ramp reaches where a ratio step within that
+    ///   reach lies so near the rest that the window the width field narrows
+    ///   to there ramps it beyond `rule`'s limits
+    ///   ([`Self::narrows_a_step`]), or where the table does not reach that
+    ///   far yet: the valley keeps the advance from reading it;
+    /// - else nowhere where the shortest ramp `rule` allows for releasing or
+    ///   building the lead of an advance on the ratio there, a step of that
+    ///   whole ratio to the advance, fits within the spill, which then
+    ///   carries the whole lead up to the rest;
+    /// - else as far as the leaders cover at the seam in half that ramp,
+    ///   read as they cross the whole reach. A spill that takes no time — a
+    ///   leader stopping without a kernel, its acceleration stepping at the
+    ///   rest — always reaches out.
+    fn width(self, spans: &[RatioSpan], rule: &RatioRampRule, table_end: f64) -> f64 {
+        let spill_mm = (self.seam - self.rest).abs();
+        let longest = self.crossing.reach(VALLEY_RAMP_TIME_S);
+        let far = self.seam + self.outward * longest;
+        let reach = (self.rest.min(far), self.rest.max(far));
+        if far > table_end || self.narrows_a_step(spans, rule, reach) {
+            return spill_mm + longest;
         }
+        let ratio = peak_ratio_within(spans, self.seam, spill_mm + longest);
+        let lead_ramp_time = |leaders: Crossing| {
+            rule.ramp_time(&RatioStep {
+                ratio_step: ratio,
+                peak_ratio: ratio,
+                speed_mm_s: leaders.speed,
+                accel_mm_s2: leaders.rate,
+                jerk_mm_s3: leaders.jerk,
+            })
+        };
+        let over_spill = self.crossing.widest(self.spill.crossing);
+        if lead_ramp_time(over_spill) <= self.spill.duration {
+            return spill_mm;
+        }
+        spill_mm
+            + self
+                .crossing
+                .reach(lead_ramp_time(over_spill.widest(self.beyond)))
+    }
+
+    /// Whether the table steps its ratio or its slope inside `(from, to)`
+    /// so near the rest that the width field, whose envelope falls off
+    /// toward the rest by [`ENVELOPE_SLOPE`], ramps the step over less time
+    /// than `rule`'s limits allow at the fastest and most accelerating the
+    /// leaders cross the side.
+    fn narrows_a_step(
+        self,
+        spans: &[RatioSpan],
+        rule: &RatioRampRule,
+        (from, to): (f64, f64),
+    ) -> bool {
+        let leaders = self
+            .crossing
+            .widest(self.spill.crossing)
+            .widest(self.beyond);
+        if leaders.speed == 0.0 {
+            return false;
+        }
+        let first = spans.partition_point(|span| span.s0 <= from).max(1);
+        spans[first - 1..]
+            .windows(2)
+            .take_while(|pair| pair[1].s0 < to)
+            .any(|pair| {
+                let (before, after) = (&pair[0], &pair[1]);
+                let Some(seam) = Seam::between(before, after) else {
+                    return false;
+                };
+                let window = ENVELOPE_SLOPE * (seam.s - self.rest).abs();
+                let (velocity, accel) = rule.demand(
+                    2.0 * window / leaders.speed,
+                    &RatioStep {
+                        ratio_step: seam.step.abs() + (after.r1 - after.r0).abs(),
+                        peak_ratio: before.r1.abs().max(after.r0.abs()).max(after.r1.abs()),
+                        speed_mm_s: leaders.speed,
+                        accel_mm_s2: leaders.rate,
+                        jerk_mm_s3: leaders.jerk,
+                    },
+                );
+                velocity > rule.max_velocity_mm_s || accel > rule.max_accel_mm_s2
+            })
     }
 }
 
