@@ -325,10 +325,13 @@ The consequences:
     `eval_pva_across`;
   - it is a break of the follower's enclosure windows, each side enclosed
     with its own direction.
-- The rest's ends are breaks too. There the dropped curvature term at the
+- The rest's ends are breaks of the enclosure windows, not of the fit.
+  There the rate is continuous, and the dropped curvature term at the
   floor speed is the only change.
 
-Rests never reach into the end slivers, which keep their own semantics.
+Rests never reach into the end slivers, which keep their own semantics. A
+rest that runs into one reads the single direction the leaders have at its
+other end.
 
 ## Streaming mechanics: windows, frontier, drain
 

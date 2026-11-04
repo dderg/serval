@@ -2991,7 +2991,7 @@ impl<'a> FollowerSignal<'a> {
         breaks.extend(
             self.rests
                 .iter()
-                .flat_map(rest::Rest::breaks)
+                .map(|rest| rest.split)
                 .filter(|&t| t > support_start && t < support_end),
         );
         breaks.sort_by(f64::total_cmp);

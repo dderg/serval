@@ -24,7 +24,9 @@ const REST_REFINE_STEPS: u32 = 96;
 
 /// One rest: `[from, to]`, the leaders' speed at most the floor inside, the
 /// floor at its ends; an end or the split within [`GRID_DEDUP_EPS_S`] of a
-/// break of the leaders or the raw track lies on it. The leaders' unit velocity `entry` at `from` reads
+/// break of the leaders or the raw track lies on it. A rest running into an
+/// end sliver reads the one direction the leaders have at its other end,
+/// split where it meets the sliver. The leaders' unit velocity `entry` at `from` reads
 /// the path before `split`, `exit` at `to` from it on.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Rest {
@@ -111,12 +113,18 @@ impl FollowerSignal<'_> {
             };
             let from = on_break(self.rest_edge(centre, interior.0, floor));
             let to = on_break(self.rest_edge(centre, interior.1, floor));
+            let (entry, exit) = (self.unit_velocity(from), self.unit_velocity(to));
+            let (split, entry, exit) = match (from == interior.0, to == interior.1) {
+                (true, false) => (from, exit, exit),
+                (false, true) => (to, entry, entry),
+                _ => (on_break(self.slowest_between(from, to)), entry, exit),
+            };
             rests.push(Rest {
                 from,
-                split: on_break(self.slowest_between(from, to)),
+                split,
                 to,
-                entry: self.unit_velocity(from),
-                exit: self.unit_velocity(to),
+                entry,
+                exit,
             });
         }
         rests
