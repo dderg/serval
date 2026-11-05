@@ -72,6 +72,21 @@ pub struct MoveVelocity {
     pub length: f64,
     pub source: SourceRange,
     pub step_capacity_overload: Option<StepCapacityOverload>,
+    /// The speed the corner budget capped the move at (a blend's apex
+    /// speed on both its halves, a curve's on the curve), infinite where it
+    /// capped none. A re-plan without the corner context holds the move to
+    /// it ([`MoveVelocity::corner_held`]).
+    pub corner_speed_mm_s: f64,
+}
+
+impl MoveVelocity {
+    /// `m` with the corner budget's speed cap on it baked into its
+    /// feedrate, for a re-plan that holds it without the corner context.
+    #[must_use]
+    pub fn corner_held(&self, mut m: crate::Move) -> crate::Move {
+        m.feedrate_mm_s = m.feedrate_mm_s.min(self.corner_speed_mm_s);
+        m
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -168,6 +183,7 @@ struct MoveCaps {
     kin: Kinematics,
     kappa_peak: f64,
     step_capacity_overload: Option<StepCapacityOverload>,
+    corner_speed: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -333,7 +349,7 @@ pub fn brake_horizon(
     let tol = params.integration_tol;
     let mut report = VelocityReport::default();
     let mut caps = build_move_caps(moves, budgets, Some(accel_scales), params, &mut report)?;
-    let seam_ceilings = corner_ceilings(moves, &mut caps, stop_before, params);
+    let seam_ceilings = hold_corners(moves, &mut caps, stop_before, params);
     let seeded = seed_seam_velocities(
         moves,
         &caps,
@@ -415,7 +431,7 @@ where
 
     let mut report = VelocityReport::default();
     let mut caps = build_move_caps(moves, budgets, ends.accel_scales, params, &mut report)?;
-    let seam_ceilings = corner_ceilings(moves, &mut caps, stop_before, params);
+    let seam_ceilings = hold_corners(moves, &mut caps, stop_before, params);
     check_entry_ceiling(moves, &caps, entry_v, tol)?;
     let mut plan = seed_seam_velocities(
         moves,
@@ -578,6 +594,7 @@ fn build_move_caps(
             },
             kappa_peak,
             step_capacity_overload,
+            corner_speed: f64::INFINITY,
         });
     }
     Ok(caps)
@@ -620,9 +637,10 @@ impl SeamPlan {
     }
 }
 
-/// Each seam's corner-budget speed ceiling, see [`corner_caps::constrain`],
-/// which also lowers `caps` for it; none where X and Y are unshaped.
-fn corner_ceilings(
+/// Holds `caps` to the corner budget on the shaped path and returns each
+/// seam's speed ceiling, see [`corner_caps::hold`]; none where X and Y are
+/// unshaped.
+fn hold_corners(
     moves: &[crate::Move],
     caps: &mut [MoveCaps],
     stop_before: &[bool],
@@ -630,7 +648,7 @@ fn corner_ceilings(
 ) -> Vec<f64> {
     params.shaped_corners.map_or_else(
         || vec![f64::INFINITY; moves.len() + 1],
-        |corners| corner_caps::constrain(moves, caps, stop_before, corners),
+        |corners| corner_caps::hold(moves, caps, stop_before, corners),
     )
 }
 
@@ -885,6 +903,7 @@ fn reconstruct_runs(
                 length: kin.length,
                 source: m.source,
                 step_capacity_overload: caps[j].step_capacity_overload,
+                corner_speed_mm_s: caps[j].corner_speed,
             });
         }
         run_start = run_end;

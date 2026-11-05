@@ -16,9 +16,10 @@ use std::sync::{Mutex, OnceLock};
 
 use nurbs::algebra::PiecewisePolynomialKernel;
 
-use crate::frontend::CornerBudget;
-use crate::path::Clothoid;
+use crate::frontend::{CornerBudget, Move};
 use crate::path::lowering::PositionProfile;
+use crate::path::{Clothoid, CurvatureProfile, Segment};
+use crate::vec3::{dot, norm, sub};
 
 const THETA_STEP_DEG: f64 = 5.0;
 const THETA_NODES: usize = 37;
@@ -44,6 +45,12 @@ const SQUARE_CORNER_RAD: f64 = std::f64::consts::FRAC_PI_2;
 const ACCEL_BISECTIONS: u32 = 48;
 const RATIO_BISECTIONS: u32 = 40;
 const CUT_CANDIDATES: i32 = 16;
+const ROOM_ACCEL_OCTAVES: i32 = 10;
+const TURN_EPS_RAD: f64 = 1e-6;
+/// How far before and after a slowed corner its slower acceleration reaches,
+/// in `σ²·A`: the distance a stop at `A` covers in four of the wider
+/// kernel's standard deviations, past the reach of its weight.
+const APPROACH_SIGMAS_SQUARED: f64 = 16.0;
 /// What the prediction adds to the shaper's share of a miss for the
 /// approximations between the table and the planned motion: a corner whose
 /// approach or exit is slower than the disk's, an asymmetric blend, the
@@ -590,13 +597,14 @@ impl ShapedCorners {
     #[must_use]
     pub fn blend_cut_mm(&self, budget: CornerBudget, theta: f64, accel: f64) -> f64 {
         let budget_mm = self.budget_mm(budget, theta, accel);
+        let room = self.cut_room_mm(budget, accel);
         let accel = if self.floor_mm(theta, accel) <= budget_mm {
             accel
         } else {
             self.corner_accel(theta, 0.0, accel, STOP_SHARE * budget_mm)
         };
         (1..=CUT_CANDIDATES)
-            .map(|j| budget_mm * 2.0_f64.powf(-0.5 * f64::from(j)))
+            .map(|j| room * 2.0_f64.powf(-0.5 * f64::from(j)))
             .filter_map(|cut| {
                 let ratio = self.apex_speed_ratio(theta, cut, accel, budget_mm)?;
                 Some((
@@ -609,6 +617,19 @@ impl ShapedCorners {
                 |best, next| if next.0 > best.0 { next } else { best },
             )
             .1
+    }
+
+    /// The most a blend may cut under `budget` whatever acceleration at or
+    /// under `accel` its corner is planned at: an implicit budget's
+    /// allowance over the floor shrinks with the acceleration the planner
+    /// leaves the corner, and the cut must stay within it there.
+    fn cut_room_mm(&self, budget: CornerBudget, accel: f64) -> f64 {
+        match budget {
+            CornerBudget::Shaped(mm) | CornerBudget::OverFloor(mm) => mm,
+            CornerBudget::ScvEquivalent(scv) => (0..=ROOM_ACCEL_OCTAVES)
+                .map(|k| self.scv_allowance_mm(scv, accel * 2.0_f64.powi(-k)))
+                .fold(f64::INFINITY, f64::min),
+        }
     }
 
     /// How far the shaper pulls a circle of `radius_mm` crossed at
@@ -649,6 +670,21 @@ impl ShapedCorners {
         lo
     }
 
+    /// Whether a stop at a corner turning `theta`, blended with apex
+    /// `cut_mm` from the vertex, misses past the corner's budget at `accel`:
+    /// the corner then slows the moves leading into and out of it.
+    #[must_use]
+    pub fn slows(&self, budget: CornerBudget, theta: f64, cut_mm: f64, accel: f64) -> bool {
+        self.miss_mm(theta, cut_mm, 0.0, accel) > self.budget_mm(budget, theta, accel)
+    }
+
+    /// The length of path either side of a corner a slower acceleration
+    /// needs to cover for the shaper to read no faster motion through it.
+    #[must_use]
+    pub fn approach_mm(&self, accel: f64) -> f64 {
+        APPROACH_SIGMAS_SQUARED * self.length_unit(accel)
+    }
+
     /// The tolerance an arc or a merged run of facets is fitted to under
     /// `budget` at `accel`.
     #[must_use]
@@ -659,6 +695,66 @@ impl ShapedCorners {
                 CornerBudget::ScvEquivalent(scv) => self.scv_allowance_mm(scv, accel),
             }
     }
+}
+
+/// The turn and the apex's distance from the vertex of a clothoid pair
+/// whose curvature peaks at the seam between `up` and `down`: the vertex is
+/// where the pair's entry and exit tangents meet.
+pub fn blend_apex(up: &Move, down: &Move) -> Option<(f64, f64)> {
+    let (Some(Segment::Clothoid(first)), Some(Segment::Clothoid(second))) =
+        (&up.segment.spatial, &down.segment.spatial)
+    else {
+        return None;
+    };
+    let (up_start, up_end) = first.kappa_endpoints();
+    let (down_start, down_end) = second.kappa_endpoints();
+    let peaks =
+        up_end.abs() >= up_start.abs() && down_start.abs() >= down_end.abs() && up_end.abs() > 0.0;
+    if !peaks {
+        return None;
+    }
+    let entry = first.point_at(0.0);
+    let entry_heading = first.heading_at(0.0);
+    let exit = second.point_at(second.s_len());
+    let exit_heading = second.heading_at(second.s_len());
+    let theta = dot(entry_heading, exit_heading).clamp(-1.0, 1.0).acos();
+    if theta < TURN_EPS_RAD {
+        return None;
+    }
+    let vertex = tangent_meet(entry, entry_heading, exit, exit_heading);
+    Some((theta, norm(sub(first.point_at(first.s_len()), vertex))))
+}
+
+/// The point midway between the closest points of the lines through
+/// `a` along `u` and through `b` along `w`.
+fn tangent_meet(a: [f64; 3], u: [f64; 3], b: [f64; 3], w: [f64; 3]) -> [f64; 3] {
+    let r = sub(a, b);
+    let (uu, uw, ww) = (dot(u, u), dot(u, w), dot(w, w));
+    let (ur, wr) = (dot(u, r), dot(w, r));
+    let det = uu * ww - uw * uw;
+    let s = (uw * wr - ww * ur) / det;
+    let t = (uu * wr - uw * ur) / det;
+    let p = [a[0] + s * u[0], a[1] + s * u[1], a[2] + s * u[2]];
+    let q = [b[0] + t * w[0], b[1] + t * w[1], b[2] + t * w[2]];
+    [
+        0.5 * (p[0] + q[0]),
+        0.5 * (p[1] + q[1]),
+        0.5 * (p[2] + q[2]),
+    ]
+}
+
+/// The turn a stop between two spatial moves makes.
+pub fn stop_turn(before: &Move, after: &Move) -> Option<f64> {
+    let (Some(incoming), Some(outgoing)) = (&before.segment.spatial, &after.segment.spatial) else {
+        return None;
+    };
+    let theta = dot(
+        incoming.heading_at(incoming.s_len()),
+        outgoing.heading_at(0.0),
+    )
+    .clamp(-1.0, 1.0)
+    .acos();
+    (theta >= TURN_EPS_RAD).then_some(theta)
 }
 
 type KernelKey = [Option<Vec<u64>>; 2];

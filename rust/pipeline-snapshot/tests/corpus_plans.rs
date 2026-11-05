@@ -65,6 +65,14 @@ fn every_corpus_case_plans() {
                             accuracy.lost.len()
                         ));
                     }
+                    if let Some((at, miss, budget)) = accuracy.over_budget.first() {
+                        failures.push(format!(
+                            "{}: the shaped path misses {} extruding vertices past their corner \
+                             budget, first {at:?} by {miss:.4} mm against {budget:.4} mm",
+                            case.name,
+                            accuracy.over_budget.len()
+                        ));
+                    }
                 }
             }
             Ok(snapshot) => failures.push(format!(

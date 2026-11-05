@@ -50,6 +50,13 @@ fn measure(config: &str) {
                         report.lost[0]
                     ));
                 }
+                if let Some((at, miss, budget)) = report.over_budget.first() {
+                    failures.push(format!(
+                        "{name}: the shaped path misses {} extruding vertices past their corner \
+                         budget, first {at:?} by {miss:.4} mm against {budget:.4} mm",
+                        report.over_budget.len()
+                    ));
+                }
             }
             Err(payload) => failures.push(format!(
                 "{name}: {}",

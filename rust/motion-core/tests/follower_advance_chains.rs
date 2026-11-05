@@ -117,7 +117,7 @@ fn bowden_corner(fit_tol_mm: f64, e: Vec<PostProcessorInstance>) -> Vec<Continuo
     config.limits = geometry::VelocityLimits::try_new(
         150.0,
         3000.0,
-        geometry::CornerBudget::Shaped(geometry::corner_deviation_from_scv(5.0, 3000.0)),
+        geometry::CornerBudget::ScvEquivalent(5.0),
         f64::INFINITY,
     )
     .expect("bowden limits are valid");

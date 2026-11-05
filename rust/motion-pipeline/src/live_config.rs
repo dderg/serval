@@ -60,12 +60,7 @@ pub fn stream_config(
         fit_tol_mm: cfg.fit_tolerance_mm,
         fit_tol_accel_mm_s2: cfg.fit_tolerance_accel_mm_s2,
         max_buffer_moves: STREAM_MAX_BUFFER_MOVES,
-        limits: z_capped_limits(
-            cfg,
-            cart.max_velocity,
-            cart.max_accel,
-            cart.corner,
-        )?,
+        limits: z_capped_limits(cfg, cart.max_velocity, cart.max_accel, cart.corner)?,
         step_capacity: step_benchmarks
             .map(|input| step_capacity::step_capacity(cfg, input))
             .transpose()?
@@ -126,13 +121,8 @@ impl GcodeMoveBase {
         });
         let cart = cfg.cartesian;
         Ok(Self {
-            limits: z_capped_limits(
-                cfg,
-                cart.max_velocity,
-                cart.max_accel,
-                cart.corner,
-            )?
-            .with_extruder_caps(extruder)?,
+            limits: z_capped_limits(cfg, cart.max_velocity, cart.max_accel, cart.corner)?
+                .with_extruder_caps(extruder)?,
             extruder_axis,
         })
     }
@@ -170,17 +160,12 @@ impl GcodeMoveBase {
         runtime: &planner_config::RuntimeLimits,
     ) -> Result<geometry::VelocityLimits, &'static str> {
         let (velocity, accel, corner) = runtime.effective(&self.config_limits());
-        geometry::VelocityLimits::try_new(
-            velocity,
-            accel,
-            corner,
-            self.limits.max_jerk_mm_s3,
-        )?
-        .with_z_caps(
-            self.limits.max_z_velocity_mm_s,
-            self.limits.max_z_accel_mm_s2,
-        )?
-        .with_extruder_caps(self.limits.extruder)
+        geometry::VelocityLimits::try_new(velocity, accel, corner, self.limits.max_jerk_mm_s3)?
+            .with_z_caps(
+                self.limits.max_z_velocity_mm_s,
+                self.limits.max_z_accel_mm_s2,
+            )?
+            .with_extruder_caps(self.limits.extruder)
     }
 
     /// `None` for a line too short to move anything.

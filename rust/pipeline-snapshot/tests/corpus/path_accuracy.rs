@@ -2,16 +2,20 @@
 //! every vertex the closest the path comes to it (its miss), and between
 //! them the farthest a sample lies from the polyline (its excursion), both
 //! grouped by how sharply the polyline turns there and whether the path
-//! extrudes into and out of it. `corner_deviation` budgets the miss of an
-//! extruding corner the toolhead passes without stopping.
+//! extrudes into and out of it. The corner budget bounds the miss of every
+//! extruding vertex: an explicit `corner_deviation` outright, an implicit
+//! budget as the shaper's floor at the vertex's turn plus its allowance,
+//! the floor taken at `max_accel` (the planner takes it at each corner's
+//! own, lower or equal, acceleration, so the audit's bound is the looser).
 
 use std::fmt::Write;
 use std::path::Path;
 
+use geometry::{CornerBudget, ShapedCorners};
 use pipeline_snapshot::waypoints::Waypoint;
 use pipeline_snapshot::{ExactTrajectory, SampleSide, Snapshot};
 
-use super::{motion_settings, waypoints};
+use super::{motion_settings, planner, waypoints};
 
 const SPATIAL_AXES: usize = 3;
 const SAMPLE_STEP_MM: f64 = 0.01;
@@ -82,13 +86,48 @@ impl Band {
     }
 }
 
+/// The shaped miss a config's corner budget grants a vertex by its turn.
+#[derive(Debug, Clone, Copy)]
+pub struct VertexBudget {
+    pub budget: CornerBudget,
+    max_accel: f64,
+    corners: Option<&'static ShapedCorners>,
+}
+
+impl VertexBudget {
+    pub fn of(config: &Path) -> Self {
+        let cartesian = motion_settings(config).cartesian;
+        let chains = planner("path accuracy", config)
+            .compile_active_chains()
+            .unwrap_or_else(|e| panic!("{}: {e}", config.display()));
+        let kernel = |axis: usize| chains.chains.get(axis).and_then(|chain| chain.kernel());
+        Self {
+            budget: cartesian.corner,
+            max_accel: cartesian.max_accel,
+            corners: ShapedCorners::interned([kernel(0), kernel(1)]),
+        }
+    }
+
+    pub fn mm(&self, turn_rad: f64) -> f64 {
+        self.corners.map_or_else(
+            || self.budget.unshaped_cut_mm(self.max_accel),
+            |corners| corners.budget_mm(self.budget, turn_rad, self.max_accel),
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PathAccuracy {
-    pub corner_deviation: f64,
+    pub budget: CornerBudget,
+    /// The extruding vertex whose miss takes the largest share of its
+    /// budget: the share and where.
+    pub worst_share: (f64, Point),
     /// Indexed `[motion][turn band]`.
     pub bands: [[Band; TURN_BANDS_DEG.len()]; 3],
     pub lost: Vec<Point>,
-    pub over_budget: Vec<(Point, f64)>,
+    /// Extruding vertices missed by more than their budget: where, the
+    /// miss and the budget.
+    pub over_budget: Vec<(Point, f64, f64)>,
 }
 
 impl PathAccuracy {
@@ -104,12 +143,16 @@ impl PathAccuracy {
     }
 
     pub fn summary(&self) -> String {
+        let (share, at) = self.worst_share;
         let mut out = format!(
-            "corner_deviation {:.4} mm, worst extruding miss {:.4} mm ({:.2}x), {} over budget, \
-             {} lost",
-            self.corner_deviation,
+            "corner budget {:?}, worst extruding miss {:.4} mm, worst share of budget {:.2} at \
+             ({:.3}, {:.3}, {:.3}), {} over budget, {} lost",
+            self.budget,
             self.worst_budgeted_miss(),
-            self.worst_budgeted_miss() / self.corner_deviation,
+            share,
+            at[0],
+            at[1],
+            at[2],
             self.over_budget.len(),
             self.lost.len()
         );
@@ -272,8 +315,7 @@ pub fn audit(snapshot: &Snapshot, gcode: &str, config: &Path) -> Option<PathAccu
     if line.segments() < 1 {
         return None;
     }
-    let cartesian = motion_settings(config).cartesian;
-    let corner_deviation = cartesian.corner.unshaped_cut_mm(cartesian.max_accel);
+    let budget = VertexBudget::of(config);
     let trajectory = snapshot.toolhead.as_ref().unwrap_or(&snapshot.trajectory);
     let mut nearest = vec![f64::INFINITY; line.vertices.len()];
     let mut excursion = vec![(0.0_f64, [0.0; SPATIAL_AXES]); line.segments()];
@@ -305,7 +347,8 @@ pub fn audit(snapshot: &Snapshot, gcode: &str, config: &Path) -> Option<PathAccu
         previous = Some(q);
     });
     let mut report = PathAccuracy {
-        corner_deviation,
+        budget: budget.budget,
+        worst_share: (0.0, [0.0; SPATIAL_AXES]),
         bands: [[Band::EMPTY; TURN_BANDS_DEG.len()]; 3],
         lost: Vec::new(),
         over_budget: Vec::new(),
@@ -317,13 +360,20 @@ pub fn audit(snapshot: &Snapshot, gcode: &str, config: &Path) -> Option<PathAccu
             continue;
         }
         let motion = line.motion_at(vertex);
-        let band = turn_band(line.turn_deg(vertex));
+        let turn_deg = line.turn_deg(vertex);
+        let band = turn_band(turn_deg);
         report.bands[motion as usize][band].add_miss(nearest[vertex], at);
         let (off, off_at) = excursion[vertex];
         report.bands[motion as usize][band].add_excursion(off, off_at);
-        if motion == Motion::Extruding && nearest[vertex] > corner_deviation * (1.0 + BUDGET_SLACK)
-        {
-            report.over_budget.push((at, nearest[vertex]));
+        if motion == Motion::Extruding {
+            let granted = budget.mm(turn_deg.to_radians());
+            let share = nearest[vertex] / granted;
+            if share > report.worst_share.0 {
+                report.worst_share = (share, at);
+            }
+            if share > 1.0 + BUDGET_SLACK {
+                report.over_budget.push((at, nearest[vertex], granted));
+            }
         }
     }
     Some(report)
