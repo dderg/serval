@@ -50,16 +50,19 @@ pub(super) struct Ingress {
 }
 
 impl Ingress {
-    /// A brake the pacer orders because the producer fell behind. The
-    /// motion that resumes after it must start the whole reserve ahead of the
-    /// playhead: the producer is still behind, and a resume nearer than one
-    /// brake to rest could not be braked again before the playhead overran
-    /// its committed end. That holds when the brake found the stream already
-    /// parked too: a resume at the default lead there brakes again within a
-    /// few planning steps, a stop per move.
+    /// A brake the pacer orders because the producer fell behind. While
+    /// committed motion still runs ahead of the playhead, the motion that
+    /// resumes after the brake must start the whole reserve ahead of it: the
+    /// producer is still behind, and a resume nearer than one brake to rest
+    /// could not be braked again before the playhead overran its committed
+    /// end. That includes a brake that found the stream parked on a stop it
+    /// has not reached yet: resumed at the default lead, it braked again
+    /// within a few planning steps, a stop per move. A machine already at
+    /// rest (a jog the prime timed out on) resumes at the default lead.
     fn pacer_brake(&mut self) {
+        let motion_ahead = self.timeline.frontier.runway_secs() > 0.0;
         self.drain_and_fence_as(DrainCause::PacerBrake);
-        if self.links.shutting_down.load(Ordering::Acquire) {
+        if !motion_ahead || self.links.shutting_down.load(Ordering::Acquire) {
             return;
         }
         let reserve_s = self.pacer.reserve_secs();
