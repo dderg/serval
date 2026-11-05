@@ -212,10 +212,17 @@ and `get_position_endstop()` exposed for `homing.py` now and bed_mesh later.
 ## Known divergences from mainline (accepted)
 
 - **No trigger debounce.** Legacy firmware requires 4 consecutive active
-  samples 15 µs apart; `src/endstop.c` trips on a single read of a 1 ms poll.
-  XY homing already runs this way on the bench without false trips. Revisit
-  in firmware only if noise shows up. Position quantization from the 1 ms
-  poll is ~5 µm at 5 mm/s probing speed.
+  samples 15 µs apart; `src/endstop.c` trips on the first edge whose pin
+  still reads active in the EXTI handler, or on a single read of the 1 ms
+  poll where no edge interrupt is available. XY homing already runs this
+  way on the bench without false trips. Revisit in firmware only if noise
+  shows up.
+- **Edge-timed trips.** On STM32 every endstop and probe pin with a free EXTI
+  line timestamps its trip at the edge interrupt and stops the steppers from
+  it; the 1 ms poll is the fallback (pin already active at arm time, EXTI
+  line taken by another endstop, linux/simulator MCUs), and there the trip is
+  stamped at the poll window midpoint (±0.5 ms). klippy logs
+  `endstop.trip_timing` at ready with which one each endstop uses.
 - **Single-pass homing** (no retract + slow second pass) — see Deliverable 1;
   trigger position is reconstructed analytically.
 - **Host-visible stop latency does not affect accuracy.** The trip halts step

@@ -77,7 +77,7 @@ timer-src-$(CONFIG_MACH_STM32G0) := generic/timer_irq.c stm32/stm32f0_timer.c
 gpio-src-y := stm32/gpio.c stm32/gpioperiph.c
 gpio-src-$(CONFIG_MACH_STM32F1) := stm32/gpio.c
 gpio-src-$(CONFIG_MACH_STM32H7) := stm32/stm32h7_gpio.c stm32/gpioperiph.c
-src-y += $(timer-src-y) $(gpio-src-y)
+src-y += $(timer-src-y) $(gpio-src-y) stm32/gpio_edge.c
 
 adc-src-y := stm32/adc.c
 adc-src-$(CONFIG_MACH_STM32G0) := stm32/stm32f0_adc.c

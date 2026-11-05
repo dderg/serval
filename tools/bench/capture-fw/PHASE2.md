@@ -225,7 +225,21 @@ uv run python tools/bench/lock.py hold -- bash -c "$B/deploy.py sync && <command
   - every `gcode` entry has no `!!` error (no `No trigger on x after full movement`);
   - `klippy_homed_axes == "xyz"`;
   - `klippy_position == [20, 20, 5]`;
-  - `simulator.walls.final_toolhead_mm` within 0.02 mm of `[20, 20, 5]` on every axis. The homing trigger error is dominated by the F401's endstop poll, not the F407's latency. Homing arms the endstop with `HOMING_POLL_PERIOD` = 1 ms, and `endstop.c` stamps the trip at the midpoint of the poll window that saw it, so the trip time is uncertain by ±0.5 ms: ±10 µm at 20 mm/s and ±2.5 µm at 5 mm/s. On top of that comes up to one CoreXY motor step (6.25 µm) of offset between the trajectory and the step lattice. The stop also lands within one poll period, so the axis stops 0 or 1 motor-step pair past the wall. Measured 2026-11-05 over 9 homings, with error = klippy's homed position minus the simulated position at the stop: x −6.9…+9.5 µm, y −5.0…+11.2 µm, z −1.7…+2.2 µm.
+  - `simulator.walls.final_toolhead_mm` within 0.02 mm of `[20, 20, 5]` on every axis. The F401 timestamps each trip at the endstop pin's EXTI edge interrupt and stops the steppers from it (klippy logs `endstop.trip_timing` at ready with `edge_timed=True` for every endstop), so the remaining homing error is the F407's own latency: the pin asserts up to 28 µs (count mode) or ~100 µs (event mode) after the step that crosses the wall, and the axis overshoots by v × that latency before klippy sees the trip. On top of that comes up to one CoreXY motor step (6.25 µm) of offset between the trajectory and the step lattice. Error = klippy's homed position ("homing: X … set X=") minus the simulated position while the axis stands at the halt; probe error = PROBE's `z=` minus that cycle's z frame offset. Measured 2026-11-06, 8 cycles of `G28` / `G1 X20 Y20 Z5` / `PROBE` per speed, x/y homing at 20/50/100 mm/s with z homing and probing at 5/10/20 mm/s:
+
+    | x/y, z mm/s | mode | x µm | y µm | z µm | probe µm |
+    |---|---|---|---|---|---|
+    | 20, 5 | 1 ms poll (before), events | −9.0…+10.9 | −8.0…+4.4 | −0.3…+3.0 | −3.7…+2.1 |
+    | 50, 10 | 1 ms poll (before), events | −20.2…+7.6 | −18.9…+27.0 | −3.6…+6.0 | −2.6…+3.3 |
+    | 100, 20 | 1 ms poll (before), events | −20.2…+30.8 | +6.3…+52.7 | −7.8…+11.8 | −11.7…+6.3 |
+    | 20, 5 | EXTI edge, events | +1.0…+2.6 | +1.1…+2.6 | +0.1…+0.6 | −1.1…−0.4 |
+    | 50, 10 | EXTI edge, events | +1.8…+6.3 | +2.1…+6.1 | +0.4…+1.2 | −1.9…−0.9 |
+    | 100, 20 | EXTI edge, events | +3.7…+10.6 | +4.6…+13.4 | +1.2…+2.3 | −4.6…−2.4 |
+    | 20, 5 | EXTI edge, counts | +0.3…+0.8 | +0.3…+0.7 | +0.1…+0.1 | −0.3…−0.2 |
+    | 50, 10 | EXTI edge, counts | +1.4…+7.8 | +0.8…+7.8 | +0.1…+0.3 | −0.5…−0.3 |
+    | 100, 20 | EXTI edge, counts | +1.7…+3.6 | +1.6…+3.4 | +0.2…+0.7 | −1.3…−0.6 |
+
+    The 50 mm/s count-mode x/y spread is one CoreXY step: the halts land on two lattice offsets, +1 and +7.5 µm.
   - `endstop_transition_examples`: each asserting edge of a homed pin is at that axis ≈ 0 (within 0.02 mm);
   - `walls.mismatched_records` ≤ the number of transitions.
 - Probe: `$B/sim_probe.py capture --seconds 60 --start 50,50,10 --gcode G28 --gcode "G1 Z5" --gcode PROBE`. Pass: the PROBE response reports `z=` within 0.01 of 0.000.
