@@ -113,7 +113,7 @@ ENDSTOPS = """\
 [axis x]
 endstop_pin: ^PA9
 [axis y]
-endstop_pin: ^!PA10
+endstop_pin: ^PA10
 [axis z]
 endstop_pin: mcu:PA15
 [probe]
@@ -161,3 +161,13 @@ def test_every_bench_config_passes_the_pin_guard():
     assert configs
     for config in configs:
         pi.validate_config(config.read_text())
+
+
+@pytest.mark.parametrize("pin", ["!PA9", "^!PA9", "!^PA9", "!mcu:PA9"])
+def test_an_inverted_f407_driven_endstop_is_refused(pin):
+    with pytest.raises(pi.BenchError, match="pin PA9 is inverted"):
+        pi.validate_config(f"[axis x]\nendstop_pin: {pin}\n")
+
+
+def test_an_inverted_endstop_on_another_pin_is_left_alone():
+    pi.validate_config("[axis x]\nendstop_pin: !PB3\n")
