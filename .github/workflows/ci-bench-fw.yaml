@@ -50,7 +50,7 @@ jobs:
           workspaces: |
             tools/bench/capture-fw
             rust
-          key: bench-fw
+          key: bench-fw-${{ hashFiles('rust/Cargo.toml') }}
       - name: capture-fw fmt, clippy, build; snapshot engine; tools/bench tests
         # The crate's rust-toolchain.toml pins the toolchain, target and
         # components; job_bench_fw in scripts/ci.sh installs it. It builds
