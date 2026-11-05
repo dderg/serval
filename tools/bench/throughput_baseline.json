@@ -1,42 +1,42 @@
 {
   "slice_lines": 1000,
-  "commit": "d3e5a67ecdb6629655c09f8684e154ae9552b1a9",
+  "commit": "d4db5407537b49dde64714c79cb76beacee2ab26",
   "reason": "Fit groups, group-level kernel fits and leader prefits on their own stage (#658)",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 24011599504,
+      "ir": 23986431436,
       "stream_secs": 6.537,
       "pi_2core": {
         "worst_x_reference": 2.4,
         "worst_x": [
-          2.41,
+          2.43,
           2.4
         ],
-        "commit": "d3e5a67ecdb6629655c09f8684e154ae9552b1a9"
+        "commit": "d4db5407537b49dde64714c79cb76beacee2ab26"
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 24796455040,
+      "ir": 24729066696,
       "stream_secs": 6.213,
       "pi_2core": {
         "worst_x_reference": 2.63,
         "worst_x": [
           2.63,
-          2.63
+          2.64
         ],
-        "commit": "d3e5a67ecdb6629655c09f8684e154ae9552b1a9"
+        "commit": "d4db5407537b49dde64714c79cb76beacee2ab26"
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 30434329070,
+      "ir": 30534287824,
       "stream_secs": 5.538,
       "pi_2core": {
-        "worst_x_reference": 1.78,
+        "worst_x_reference": 1.76,
         "worst_x": [
-          1.78,
-          1.8
+          1.76,
+          1.77
         ],
-        "commit": "d3e5a67ecdb6629655c09f8684e154ae9552b1a9"
+        "commit": "d4db5407537b49dde64714c79cb76beacee2ab26"
       }
     }
   },
