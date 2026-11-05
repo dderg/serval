@@ -51,6 +51,10 @@ class FakeToolhead(_FakeToolhead):
         self.endstop.calls.append("wait_moves")
         self.endstop.queued_motion_pending = False
 
+    def await_clock_sync(self):
+        super().await_clock_sync()
+        self.endstop.calls.append("await_clock_sync")
+
 
 def run_trip_move(endstop):
     homing = Homing.__new__(Homing)
@@ -86,6 +90,13 @@ def test_trip_move_waits_for_queued_motion_before_arming():
     with pytest.raises(ArmReached):
         run_trip_move(endstop)
     assert endstop.calls.index("wait_moves") < endstop.calls.index("arm")
+
+
+def test_trip_move_awaits_clock_sync_before_waiting_or_arming():
+    endstop = FakeEndstop(triggered_after_wait=False)
+    with pytest.raises(ArmReached):
+        run_trip_move(endstop)
+    assert endstop.calls[0] == "await_clock_sync"
 
 
 class DisarmTrackingEndstop:

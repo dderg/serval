@@ -1,5 +1,5 @@
 import pytest
-from fakes import FakeCommandError, FakeKin, FakeNode, FakePrinter
+from fakes import FakeCommandError, FakeKin, FakeMcu, FakeNode, FakePrinter
 
 from klippy.extras import servo_axis
 from klippy.extras.resonance_buzz import MOTOR_A, MOTOR_B
@@ -57,6 +57,8 @@ def make_motion(rails, node_handles, slot_by_motor):
         lanes=[(idx, rail.axis, None) for idx, rail in enumerate(rails)],
     )
     motion.engine = FakeBuzzEngine()
+    motion.mcu = FakeMcu()
+    motion.all_mcus = [motion.mcu]
     return motion
 
 
