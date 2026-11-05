@@ -10,7 +10,7 @@ concurrency:
 
 jobs:
   changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       snapshot: ${{ steps.filter.outputs.snapshot }}
       parity: ${{ steps.filter.outputs.parity }}
@@ -44,7 +44,7 @@ jobs:
   snapshot:
     needs: changes
     if: needs.changes.outputs.snapshot == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -75,7 +75,7 @@ jobs:
   live-parity:
     needs: changes
     if: needs.changes.outputs.parity == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
