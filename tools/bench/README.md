@@ -128,7 +128,7 @@ Near an apex, where the nozzle nearly stops, flow per mm is ill-conditioned, so 
 
 `gcode/corner_flow.gcode` (`gen_corner_flow.py`) holds 90°/45°/135° interior corners at 50/100/200/300 mm/s, a 10 mm-radius arc of 0.5 mm segments at 100/200 mm/s and a 2 mm zigzag at 50/150 mm/s. Each case runs between rests, so each is an epoch of its own. The bead is 0.4 × 0.2 mm from 1.75 mm filament.
 
-`printer.cfg` runs the recommended kernel-free extruder chain: PA k 0.03 alone on E, with `max_extrude_only_velocity: 50` / `max_extrude_only_accel: 5000` as the extruder's limits. A smoothing kernel on E is an explicit override and costs corner flow, as the captures below show.
+`printer.cfg` runs the recommended kernel-free extruder chain: PA k 0.03 alone on E, with `[axis e] max_accel: 20000` (the direct drive's pressure-advance-capable acceleration) and the extrude-only caps `max_extrude_only_velocity: 50` / `max_extrude_only_accel: 5000` for retracts and primes, which `[axis e] max_velocity` inherits. A smoothing kernel on E is an explicit override and costs corner flow, as the captures below show. The captures below predate `[axis e] max_accel: 20000` (the extruder then planned to 5000 mm/s² everywhere).
 
 Main's derived ratio ramp (deployed head 29f8add16), event mode:
 - `printer.cfg` kernel-free, run `corner_flow/20261104-065545`.

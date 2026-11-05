@@ -8,27 +8,13 @@
 
 mod corpus;
 
-use std::path::PathBuf;
-
-const EXTRUDER_MAX_ACCEL_MM_S2: f64 = 20000.0;
-
 /// The opening lines of each sim print, through its first stops after an
 /// extrusion on the kernel-free fast bench config.
 const EXCERPTS: [(&str, usize); 2] = [("voron_first_layers", 100), ("voron_dense_top_layers", 200)];
 
-fn kernel_free_fast() -> PathBuf {
-    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("rest_spill_steps_kf_fast.cfg");
-    std::fs::write(
-        &path,
-        corpus::kernel_free("tools/bench/configs/fast.cfg", EXTRUDER_MAX_ACCEL_MM_S2),
-    )
-    .expect("write the kernel-free config");
-    path
-}
-
 #[test]
 fn a_kernel_free_advance_holds_the_extruder_to_its_limits_into_a_curved_stop() {
-    let config = kernel_free_fast();
+    let config = corpus::repo().join("tools/bench/configs/fast.cfg");
     for (print, lines) in EXCERPTS {
         let gcode: String =
             std::fs::read_to_string(corpus::repo().join(format!("tools/sim/gcode/{print}.gcode")))

@@ -101,7 +101,8 @@ fn read_lead(snapshot: &Snapshot, heading: (f64, f64)) -> LeadReading {
 #[test]
 fn a_kernel_free_advance_keeps_its_lead_into_and_out_of_a_rest_it_can_afford() {
     for bench_config in ["tools/bench/configs/fast.cfg", "tools/bench/printer.cfg"] {
-        let config = corpus::kernel_free(bench_config, EXTRUDER_MAX_ACCEL_MM_S2);
+        let config = std::fs::read_to_string(corpus::repo().join(bench_config))
+            .unwrap_or_else(|e| panic!("read {bench_config}: {e}"));
         for heading_deg in HEADINGS_DEG {
             let heading = (
                 libm::cos(heading_deg.to_radians()),
