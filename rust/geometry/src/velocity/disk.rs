@@ -1,19 +1,5 @@
 use super::law::{LawSegment, ScalarLaw};
 
-/// A curvature (or boundary) speed limit this close to the flat ceiling is
-/// the fitter's own blend sizing — it solves the corner radius so the apex
-/// speed lands *at* the feedrate, to float tolerance. Taking the raw `min`
-/// would notch the cap by ~1e-6 mm/s at every blend. Snap such limits up to
-/// the ceiling instead.
-pub(super) const CAP_NOTCH_REL: f64 = 1e-6;
-
-pub(super) fn notch_free_min(flat_ceiling: f64, limit: f64) -> f64 {
-    if limit >= flat_ceiling * (1.0 - CAP_NOTCH_REL) {
-        flat_ceiling
-    } else {
-        limit
-    }
-}
 pub(super) const VELOCITY_FLOOR: f64 = 1e-9;
 const KAPPA_EPS: f64 = 1e-9;
 
