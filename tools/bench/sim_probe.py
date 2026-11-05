@@ -97,8 +97,9 @@ def line_spec(pin: str | None) -> dict:
 
 def _probe_state() -> str:
     for message in gcode("QUERY_PROBE"):
-        if message.startswith("probe: "):
-            return message.removeprefix("probe: ").strip()
+        text = message.removeprefix("// ")
+        if text.startswith("probe: "):
+            return text.removeprefix("probe: ").strip()
     raise ProbeError("QUERY_PROBE gave no 'probe:' response")
 
 
