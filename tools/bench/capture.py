@@ -11,6 +11,9 @@ CHANNEL_COUNT signed step deltas (i8, + when DIR pin is high).
 Event mode ("SVE1", command E): payload is a slice of one continuous byte
 stream (position = its offset, length = its size), decoded by
 capture_events.py.
+
+Identity ("SVI1", command I): stops any capture and answers one frame whose
+payload is the build id the firmware was built with (length bytes, ASCII).
 """
 
 from __future__ import annotations
@@ -34,12 +37,15 @@ TICK_HZ = 40_000
 EVENT_TICK_HZ = 84_000_000
 COUNT_MAGIC = b"SVC1"
 EVENT_MAGIC = b"SVE1"
+IDENTITY_MAGIC = b"SVI1"
+IDENTITY_TIMEOUT_S = 2.0
 HEADER = struct.Struct("<4sIIHBB")
 STALL_TIMEOUT_S = 1.0
 POSITION_MODULUS = 1 << 32
 CMD_START = b"S"
 CMD_EVENTS = b"E"
 CMD_STOP = b"X"
+CMD_IDENTITY = b"I"
 
 
 class Fault(enum.IntEnum):
@@ -192,6 +198,44 @@ class Capture:
                 expected_seq += 1
                 self._units += length
                 last_data = time.monotonic()
+
+
+def parse_identity(frame: bytes) -> str | None:
+    """The build id an identity frame carries, or None while it is short."""
+    if len(frame) < HEADER.size:
+        return None
+    magic, _, _, length, _, _ = HEADER.unpack_from(frame)
+    if magic != IDENTITY_MAGIC:
+        raise CaptureError(f"expected an identity frame, got magic {magic!r}")
+    if len(frame) < HEADER.size + length:
+        return None
+    return frame[HEADER.size : HEADER.size + length].decode()
+
+
+def identity(device: str = DEVICE) -> str:
+    """The build id the capture firmware was flashed with."""
+    fd = os.open(device, os.O_RDWR | os.O_NOCTTY)
+    try:
+        tty.setraw(fd)
+        termios.tcflush(fd, termios.TCIOFLUSH)
+        os.write(fd, CMD_STOP + b"\0")
+        while select.select([fd], [], [], 0.2)[0]:
+            os.read(fd, 65536)
+        os.write(fd, CMD_IDENTITY + b"\0")
+        frame = b""
+        deadline = time.monotonic() + IDENTITY_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if select.select([fd], [], [], 0.1)[0]:
+                frame += os.read(fd, 65536)
+                build_id = parse_identity(frame)
+                if build_id is not None:
+                    return build_id
+        raise CaptureError(
+            f"{device} sent no identity within {IDENTITY_TIMEOUT_S}s "
+            f"({len(frame)} bytes): firmware predates the identity command?"
+        )
+    finally:
+        os.close(fd)
 
 
 def main() -> None:
