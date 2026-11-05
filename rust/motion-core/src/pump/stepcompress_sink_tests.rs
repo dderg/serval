@@ -34,6 +34,7 @@ struct Harness {
     bursts: Arc<Mutex<Vec<usize>>>,
     attempts: Arc<Mutex<Vec<Vec<String>>>>,
     fail_sends: Arc<AtomicBool>,
+    refuse_probes: Arc<AtomicBool>,
     query_count: Arc<AtomicI64>,
     auto_query: Arc<AtomicBool>,
     query_calls: Arc<AtomicU64>,
@@ -106,6 +107,8 @@ fn harness_axes(budget: u32, axes: Vec<usize>, oids: Vec<u32>) -> Harness {
     let seeds = Arc::new(Mutex::new(Vec::new()));
     let seeds_for_egress = Arc::clone(&seeds);
     let fail_for_egress = Arc::clone(&fail_sends);
+    let refuse_probes = Arc::new(AtomicBool::new(false));
+    let refuse_probes_for_egress = Arc::clone(&refuse_probes);
     let bursts = Arc::new(Mutex::new(Vec::new()));
     let bursts_for_egress = Arc::clone(&bursts);
     let attempts = Arc::new(Mutex::new(Vec::new()));
@@ -120,6 +123,11 @@ fn harness_axes(budget: u32, axes: Vec<usize>, oids: Vec<u32>) -> Harness {
             );
             if fail_for_egress.load(Ordering::Relaxed) {
                 return Err(SendError::Transient("egress down".into()));
+            }
+            if refuse_probes_for_egress.load(Ordering::Relaxed)
+                && frames.iter().all(|(name, _)| *name == "kalico_wire_probe")
+            {
+                return Err(SendError::Transient("Backpressure".into()));
             }
             bursts_for_egress.lock_ok().push(frames.len());
             for (name, args) in frames {
@@ -202,6 +210,7 @@ fn harness_axes(budget: u32, axes: Vec<usize>, oids: Vec<u32>) -> Harness {
         bursts,
         attempts,
         fail_sends,
+        refuse_probes,
         query_calls,
         query_count,
         auto_query,
@@ -3314,6 +3323,8 @@ fn h7_harness(oids: Vec<u32>) -> Harness {
     let seeds = Arc::new(Mutex::new(Vec::new()));
     let seeds_for_egress = Arc::clone(&seeds);
     let fail_for_egress = Arc::clone(&fail_sends);
+    let refuse_probes = Arc::new(AtomicBool::new(false));
+    let refuse_probes_for_egress = Arc::clone(&refuse_probes);
     let bursts = Arc::new(Mutex::new(Vec::new()));
     let bursts_for_egress = Arc::clone(&bursts);
     let attempts = Arc::new(Mutex::new(Vec::new()));
@@ -3328,6 +3339,11 @@ fn h7_harness(oids: Vec<u32>) -> Harness {
             );
             if fail_for_egress.load(Ordering::Relaxed) {
                 return Err(SendError::Transient("egress down".into()));
+            }
+            if refuse_probes_for_egress.load(Ordering::Relaxed)
+                && frames.iter().all(|(name, _)| *name == "kalico_wire_probe")
+            {
+                return Err(SendError::Transient("Backpressure".into()));
             }
             bursts_for_egress.lock_ok().push(frames.len());
             for (name, args) in frames {
@@ -3422,6 +3438,7 @@ fn h7_harness(oids: Vec<u32>) -> Harness {
         bursts,
         attempts,
         fail_sends,
+        refuse_probes,
         query_calls,
         query_count,
         auto_query,
@@ -3444,12 +3461,14 @@ fn verify_mcu_agreement(
 }
 
 /// Feed the frames one send burst carried to the modelled mcu steppers, in
-/// wire order, as the mcu would receive them at clock `mcu_now`.
+/// wire order, as the mcu would receive them at clock `mcu_now`. Answers the
+/// least time any queued move's first step had left to run when it arrived.
 fn play_frames_on_mcu(
     frames: &[StepFrame],
     mcu: &mut HashMap<u32, McuStepper>,
     mcu_now: u64,
-) -> Result<(), String> {
+) -> Result<Option<i64>, String> {
+    let mut worst_margin: Option<i64> = None;
     for (idx, frame) in frames.iter().enumerate() {
         match *frame {
             StepFrame::ResetStepClock { oid, clock } => {
@@ -3482,12 +3501,15 @@ fn play_frames_on_mcu(
                          sorted behind this frame due to a stale start_clock"
                     ));
                 }
-                stepper.queue_step(interval, count, add);
+                if let Some(first) = stepper.queue_step(interval, count, add) {
+                    let margin = first as i64 - mcu_now as i64;
+                    worst_margin = Some(worst_margin.map_or(margin, |w| w.min(margin)));
+                }
             }
             StepFrame::QueueStepHp { .. } => {}
         }
     }
-    Ok(())
+    Ok(worst_margin)
 }
 
 /// Every lane the mcu has stepped sits where the host's cursor says it does;
@@ -3628,15 +3650,13 @@ fn repeated_probe_trips_with_h7_half_wrap_idle_gaps() {
     }
 }
 
-/// The reporter's mid-print shutdown: the planner drained to rest and the
-/// next segment arrived under the parked re-anchor floor, so the anchor
-/// re-anchored forward while the mcu still had the last 50 ms of the old
-/// stream queued. The fresh epoch's volley heads with `reset_step_clock`,
-/// which the mcu refuses while its stepper is active; the reset must wait
-/// for the lane's last sent step to execute, with the rest of the lane's
-/// volley behind it.
+/// The bench's short-rest resume: the pacer braked the stream to rest and the
+/// next segment re-anchored 40 ms past the end of the old stream, which the
+/// mcu still had queued. The resume steps on from the old stream's last
+/// queued step: a `reset_step_clock` would have to wait for that step to
+/// run, leaving the whole resume volley only the 40 ms rest as send margin.
 #[test]
-fn an_idle_resume_reset_waits_for_the_mcu_stepper_to_finish_the_old_stream() {
+fn a_short_rest_resume_steps_on_from_the_queued_stream_with_full_send_margin() {
     let mut h = h7_harness(vec![6]);
     let axis: u8 = 2;
     let mut mcu: HashMap<u32, McuStepper> = HashMap::new();
@@ -3674,7 +3694,7 @@ fn an_idle_resume_reset_waits_for_the_mcu_stepper_to_finish_the_old_stream() {
         "the old stream must still be executing on the mcu"
     );
 
-    let resume_at = now + lead;
+    let resume_at = last_step + (H7_FREQ * 0.040) as u64;
     h.endpoint.mark_reanchor(axis, resume_at, Some(H7_FREQ));
     let position = h.endpoint.shim.commanded_position(0);
     h.endpoint
@@ -3684,32 +3704,35 @@ fn an_idle_resume_reset_waits_for_the_mcu_stepper_to_finish_the_old_stream() {
         )
         .and_then(|()| h.endpoint.tick())
         .unwrap();
-    let mut reset_sent_at = None;
-    while now < resume_at {
+    let mut resumed = Vec::new();
+    let mut worst_margin = i64::MAX;
+    while now < resume_at + lead {
         now += tick_step;
         h.now.store(now, Ordering::Relaxed);
         h.endpoint.tick().unwrap();
         h.ack_sent_barriers();
         let frames: Vec<StepFrame> = std::mem::take(&mut h.sent.lock_ok());
-        if reset_sent_at.is_none()
-            && frames
-                .iter()
-                .any(|frame| matches!(frame, StepFrame::ResetStepClock { .. }))
+        if let Some(margin) = play_frames_on_mcu(&frames, &mut mcu, now)
+            .unwrap_or_else(|e| panic!("at mcu clock {now}: {e}"))
         {
-            reset_sent_at = Some(now);
+            worst_margin = worst_margin.min(margin);
         }
-        play_frames_on_mcu(&frames, &mut mcu, now)
-            .unwrap_or_else(|e| panic!("at mcu clock {now}: {e}"));
+        resumed.extend(frames);
     }
-    let reset_sent_at = reset_sent_at.expect("the resume volley re-anchors the lane");
     assert!(
-        reset_sent_at >= last_step,
-        "reset went out at {reset_sent_at}, before the old stream's last step at {last_step}"
+        !resumed
+            .iter()
+            .any(|frame| matches!(frame, StepFrame::ResetStepClock { .. })),
+        "the resume re-anchored a stepper that still held the old stream: {resumed:?}"
     );
+    let floor = (H7_FREQ * SEND_MARGIN_WARN_FLOOR_SECS) as i64;
     assert!(
-        h.endpoint.backlog.is_empty(),
-        "the resume volley drained behind its reset"
+        worst_margin >= floor,
+        "a resume move reached the mcu {:.1} ms before its first step, under the \
+         {SEND_MARGIN_WARN_FLOOR_SECS} s warning floor",
+        worst_margin as f64 / H7_FREQ * 1e3
     );
+    assert!(h.endpoint.backlog.is_empty(), "the resume volley drained");
     verify_mcu_bases(&h.endpoint.lanes, &mcu).unwrap();
 }
 
@@ -3718,3 +3741,29 @@ mod stepcompress_sink_fuzz;
 
 #[path = "stepcompress_sink_tap_tests.rs"]
 mod stepcompress_sink_tap_tests;
+
+/// The bench's 1-core resume: the transport, full behind the burst it had
+/// just admitted, refused the wire probe that followed. The probe is a
+/// diagnostic; refusing it must neither fail the send pass nor skip the
+/// retirement and heartbeat the pass publishes after it.
+#[test]
+fn a_refused_wire_probe_neither_fails_the_pass_nor_skips_its_heartbeat() {
+    let mut h = harness(1024);
+    h.refuse_probes.store(true, Ordering::Relaxed);
+    let now = (CYCLES_PER_SECOND * WIRE_PROBE_INTERVAL_SECS) as u64 + 1;
+    h.now.store(now, Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(now + 2_000, 40))])
+        .and_then(|()| h.endpoint.tick())
+        .expect("a probe the transport refused is dropped, not raised");
+    assert!(
+        h.attempts.lock_ok().iter().any(|burst| burst
+            .iter()
+            .any(|frame| frame.starts_with("kalico_wire_probe"))),
+        "the pass offered the probe"
+    );
+    assert!(
+        h.latest_heartbeat().is_some(),
+        "the pass still published its heartbeat"
+    );
+}
