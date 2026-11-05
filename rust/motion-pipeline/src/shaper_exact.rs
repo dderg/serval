@@ -564,6 +564,16 @@ impl RecentChunks {
     }
 }
 
+/// What one span's exact polynomials evaluate in and reuse from chunk to
+/// chunk and kernel piece to kernel piece: the input's series past two
+/// window edges, and one kernel piece's moments and their bounds, each read
+/// only as far as the evaluation writes it.
+struct ConvolutionScratch {
+    edge_series: [EdgeSeries; 2],
+    moments: [[f64; EXACT_CAPACITY]; MOMENT_ORDERS],
+    magnitudes: MomentBounds,
+}
+
 /// One point mass of `x` and its derivatives: `weights[m]` multiplies
 /// `δ⁽ᵐ⁾(s − at)` in derivative order `order`.
 struct PointMass {
@@ -631,6 +641,11 @@ impl ExactConvolution<'_> {
             .chain(std::iter::once(above.unwrap_or(RealSum::float(hi))))
             .collect();
         let mut pieces = Vec::with_capacity(points.len() - 1);
+        let mut scratch = ConvolutionScratch {
+            edge_series: [[Tracked::ZERO; MOMENT_ORDERS]; 2],
+            moments: [[0.0; EXACT_CAPACITY]; MOMENT_ORDERS],
+            magnitudes: [[0.0; EXACT_CAPACITY]; MOMENT_ORDERS],
+        };
         for pair in points.windows(2) {
             let first_inside = pair[0].first_float_above();
             let last_inside = pair[1].last_float_below();
@@ -659,8 +674,9 @@ impl ExactConvolution<'_> {
                 let center =
                     (chunk_lo + 0.5 * (chunk_hi - chunk_lo)).clamp(first_inside, last_inside);
                 let radius = next_toward((center - chunk_lo).max(chunk_hi - center), f64::INFINITY);
-                let Some(pva) = recent.read(center, radius, || self.polynomials_at(center, radius))
-                else {
+                let Some(pva) = recent.read(center, radius, || {
+                    self.polynomials_at(center, radius, &mut scratch)
+                }) else {
                     let (first_held, last_held) = (first_inside.max(lo), last_inside.min(hi));
                     if first_held == last_held && (first_held == lo || first_held == hi) {
                         continue;
@@ -729,19 +745,29 @@ impl ExactConvolution<'_> {
         jumps.chain(impulses)
     }
 
-    fn polynomials_at(&self, center: f64, radius: f64) -> Option<[LocalPolynomial; 3]> {
+    fn polynomials_at(
+        &self,
+        center: f64,
+        radius: f64,
+        scratch: &mut ConvolutionScratch,
+    ) -> Option<[LocalPolynomial; 3]> {
         let mut total = [CentredSum::ZERO; MOMENT_ORDERS];
         let mut point_masses = 0;
-        let mut edge_series = [[Tracked::ZERO; MOMENT_ORDERS]; 2];
+        let ConvolutionScratch {
+            edge_series,
+            moments,
+            magnitudes,
+        } = scratch;
         let mut previous_lower: Option<(RealSum, usize)> = None;
         for piece in &self.kernel.pieces {
             let lower = RealSum::of(center, -piece.end);
             let upper = RealSum::of(center, -piece.start);
             let degree = piece.at_start.len - 1;
-            let mut moments = [[0.0; EXACT_CAPACITY]; MOMENT_ORDERS];
-            let mut magnitudes: MomentBounds = [[0.0; EXACT_CAPACITY]; MOMENT_ORDERS];
+            for bounds in magnitudes.iter_mut() {
+                bounds[..=degree].fill(0.0);
+            }
             {
-                let [position, velocity, acceleration] = &mut moments;
+                let [position, velocity, acceleration] = &mut *moments;
                 if !self.table.integrate_bounded_moments(
                     lower.head,
                     upper.head,
@@ -752,20 +778,14 @@ impl ExactConvolution<'_> {
                         &mut velocity[..=degree],
                         &mut acceleration[..=degree],
                     ],
-                    Some(&mut magnitudes),
+                    Some(&mut *magnitudes),
                 ) {
                     return None;
                 }
             }
             for mass in self.point_masses_within(lower, upper) {
                 point_masses += 1;
-                add_point_mass(
-                    &mut moments,
-                    &mut magnitudes,
-                    &mass,
-                    mass.at - upper.head,
-                    degree,
-                );
+                add_point_mass(moments, magnitudes, &mass, mass.at - upper.head, degree);
             }
             let upper_slot = match previous_lower {
                 Some((edge, slot)) if edge.head == upper.head && edge.tail == upper.tail => slot,
