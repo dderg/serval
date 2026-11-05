@@ -1,42 +1,42 @@
 {
   "slice_lines": 1000,
-  "commit": "d607eec8be637e6a19e4a6c8c2034ba0b2e550b8",
-  "reason": "[axis e] max_accel 20000 on the gated direct-drive configs, merged with #710's turning guard (p3 ramp pays the kernel-free turning bound); trident_kernel's floor shortfall stays pinned to #693",
+  "commit": "d3e5a67ecdb6629655c09f8684e154ae9552b1a9",
+  "reason": "Fit groups, group-level kernel fits and leader prefits on their own stage (#658)",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 25831505500,
+      "ir": 24011599504,
       "stream_secs": 6.537,
       "pi_2core": {
-        "worst_x_reference": 2.4814567755259063,
+        "worst_x_reference": 2.4,
         "worst_x": [
-          2.62,
-          2.6
+          2.41,
+          2.4
         ],
-        "commit": "18a9048ffe339fb78ff9997f2672e92abee4efb0"
+        "commit": "d3e5a67ecdb6629655c09f8684e154ae9552b1a9"
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 27846335587,
+      "ir": 24796455040,
       "stream_secs": 6.213,
       "pi_2core": {
-        "worst_x_reference": 2.033062541774491,
+        "worst_x_reference": 2.63,
         "worst_x": [
-          2.02,
-          2.02
+          2.63,
+          2.63
         ],
-        "commit": "18a9048ffe339fb78ff9997f2672e92abee4efb0"
+        "commit": "d3e5a67ecdb6629655c09f8684e154ae9552b1a9"
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 31513184784,
+      "ir": 30434329070,
       "stream_secs": 5.538,
       "pi_2core": {
-        "worst_x_reference": 1.3843509101624139,
+        "worst_x_reference": 1.78,
         "worst_x": [
-          1.37,
-          1.37
+          1.78,
+          1.8
         ],
-        "commit": "18a9048ffe339fb78ff9997f2672e92abee4efb0"
+        "commit": "d3e5a67ecdb6629655c09f8684e154ae9552b1a9"
       }
     }
   },
