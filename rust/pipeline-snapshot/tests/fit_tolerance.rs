@@ -147,18 +147,10 @@ fn every_fit_piece_of_the_dense_print_holds_the_fit_tolerance_on_the_bench_confi
 }
 
 /// The first layers' slow perimeters, primes and retracts on the bench
-/// printer's kernel-free extruder chain.
-///
-/// TODO(first-layers-floor-sliver): on `fast.cfg` the x/y source fit accepts
-/// two sub-microsecond floor pieces (82.389 s on y, 128.561 s on x) whose
-/// acceleration misses the tolerance 338× and 263×; add `fast.cfg` here once
-/// they hold.
+/// configs' kernel-free extruder chain.
 #[test]
-fn every_fit_piece_of_the_first_layers_holds_the_fit_tolerance_on_the_bench_printer() {
-    assert_every_accepted_fit_piece_holds(print_cases(
-        "voron_first_layers",
-        &["tools/bench/printer.cfg"],
-    ));
+fn every_fit_piece_of_the_first_layers_holds_the_fit_tolerance_on_the_bench_configs() {
+    assert_every_accepted_fit_piece_holds(print_cases("voron_first_layers", &corpus::SIM_CONFIGS));
 }
 
 /// The Trident print that first broke the follower cache, on the bench
