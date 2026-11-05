@@ -284,31 +284,21 @@ def test_a_side_is_summarised_from_its_fastest_runs_and_its_reps():
     assert m.calibration_wall_secs == pytest.approx(8.2)
 
 
-def pinned(ir_x: float, live_x: float) -> dict[str, gate.FloorShortfall]:
-    return {"c": gate.FloorShortfall(issue=693, predicted_x=(ir_x, live_x))}
+def pinned(ir_x: float) -> dict[str, gate.FloorShortfall]:
+    return {"c": gate.FloorShortfall(issue=693, predicted_ir_x=ir_x)}
 
 
-def test_a_pinned_floor_shortfall_passes_at_its_pinned_predictions():
+def test_a_pinned_floor_shortfall_passes_at_its_pinned_prediction():
     verdict = gate.judge(
-        "c", entry(), measurement(), model(1.6, 1.0, 1.4), pinned(1.6, 1.4)
+        "c", entry(), measurement(), model(1.6, 1.0, 1.4), pinned(1.6)
     )
     assert verdict.predicted_x == pytest.approx((1.6, 1.4))
     assert verdict.problems == ()
 
 
-def test_each_prediction_answers_to_its_own_pin():
-    verdict = gate.judge(
-        "c", entry(), measurement(), model(1.6, 1.0, 1.4), pinned(1.4, 1.6)
-    )
-    assert verdict.problems == (
-        "the Pi 2-core worst window the live cost predicts, 1.40x, grew the "
-        "floor shortfall pinned at 1.60x for #693 (-12.50 %, limit 2.0 %)",
-    )
-
-
 def test_a_pinned_floor_shortfall_that_grows_fails_naming_its_issue():
     verdict = gate.judge(
-        "c", entry(), measurement(stream=9.0), model(1.6), pinned(1.6, 1.6)
+        "c", entry(), measurement(stream=9.0), model(1.6), pinned(1.6)
     )
     assert verdict.problems == (
         "the Pi 2-core worst window Ir predicts, 1.44x, grew the floor "
@@ -316,35 +306,27 @@ def test_a_pinned_floor_shortfall_that_grows_fails_naming_its_issue():
     )
 
 
-def test_a_pinned_live_shortfall_grows_only_beyond_its_band():
-    noisy = gate.judge(
+def test_a_pinned_config_holds_its_live_prediction_to_no_pin():
+    verdict = gate.judge(
         "c",
         entry(),
-        measurement(band_pct=5.0),
-        model(1.6, 1.0, 1.53),
-        pinned(1.6, 1.6),
+        measurement(band_pct=0.4),
+        model(1.6, 1.0, 1.2),
+        pinned(1.6),
     )
-    assert noisy.problems == ()
-    quiet = gate.judge(
-        "c",
-        entry(),
-        measurement(band_pct=1.0),
-        model(1.6, 1.0, 1.53),
-        pinned(1.6, 1.6),
-    )
-    assert "live cost predicts, 1.53x +-1.0 %, grew" in quiet.problems[0]
+    assert verdict.problems == ()
 
 
 def test_a_pinned_floor_shortfall_that_shrinks_passes():
     verdict = gate.judge(
-        "c", entry(), measurement(stream=10.5), model(1.6), pinned(1.6, 1.6)
+        "c", entry(), measurement(stream=10.5), model(1.6), pinned(1.6)
     )
     assert verdict.problems == ()
 
 
 def test_a_pinned_floor_shortfall_that_vanishes_passes_and_says_to_unpin():
     verdict = gate.judge(
-        "c", entry(), measurement(stream=13.0), model(1.6), pinned(1.6, 1.6)
+        "c", entry(), measurement(stream=13.0), model(1.6), pinned(1.6)
     )
     assert verdict.problems == ()
     assert len(verdict.notes) == 1
@@ -355,7 +337,7 @@ def test_a_pinned_floor_shortfall_that_vanishes_passes_and_says_to_unpin():
 
 def test_a_pin_on_another_config_leaves_the_floor_in_force():
     verdict = gate.judge(
-        "other", entry(), measurement(), model(1.6), pinned(1.6, 1.6)
+        "other", entry(), measurement(), model(1.6), pinned(1.6)
     )
     assert len(verdict.problems) == 2
     assert all("below the 2.0x floor" in p for p in verdict.problems)
@@ -366,7 +348,7 @@ def test_a_pinned_shortfall_only_warns_while_the_floor_checks_are_off(
 ):
     monkeypatch.setattr(gate, "PI_FLOOR_FAILS", False)
     verdict = gate.judge(
-        "c", entry(), measurement(stream=9.0), model(1.6), pinned(1.6, 1.6)
+        "c", entry(), measurement(stream=9.0), model(1.6), pinned(1.6)
     )
     assert verdict.problems == ()
     assert "grew the floor shortfall" in verdict.warnings[0]
@@ -374,9 +356,9 @@ def test_a_pinned_shortfall_only_warns_while_the_floor_checks_are_off(
 
 def test_a_pin_at_or_above_the_floor_is_refused():
     with pytest.raises(ValueError):
-        gate.FloorShortfall(issue=693, predicted_x=(1.6, 2.1))
+        gate.FloorShortfall(issue=693, predicted_ir_x=2.0)
     with pytest.raises(ValueError):
-        gate.FloorShortfall(issue=693, predicted_x=(2.0, 1.6))
+        gate.FloorShortfall(issue=693, predicted_ir_x=2.1)
 
 
 def test_a_missing_or_stale_pi_calibration_fails_with_the_recheck_command():
