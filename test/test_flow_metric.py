@@ -155,5 +155,7 @@ def test_a_retract_and_prime_at_rest_reach_no_bead():
     commanded = fm.CommandedBead(ratio=np.full_like(t, ratio), raw_moving=~stop)
     retract = np.where((t >= 0.12) & (t < 0.15), -0.8, 0.0)
     plain = fm.flow_trace(t, xy, ratio * u, commanded, melt_k, ratio)
-    retracted = fm.flow_trace(t, xy, ratio * u + retract, commanded, melt_k, ratio)
+    retracted = fm.flow_trace(
+        t, xy, ratio * u + retract, commanded, melt_k, ratio
+    )
     assert np.abs(retracted.deviation - plain.deviation).max() < 1e-9

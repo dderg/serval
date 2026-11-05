@@ -282,3 +282,18 @@ def step_report(
         "net_nl": (early_mm + late_mm) * nl_per_mm,
         "switch_mm": max(switch_mm, 0.0),
     }
+
+
+def rest_report(
+    e_cmd: np.ndarray, stay: tuple[int, int] | None, commanded_mm: float
+) -> dict:
+    """An extruder move of `commanded_mm` the G-code makes at rest (a
+    retract, a prime) against the toolhead's stop there, `stay` its first
+    and last sample (None where the toolhead never comes there): `inside`
+    is the share of the move the plan makes inside the stop, `outside_mm`
+    the filament it moves while the toolhead moves."""
+    inside = 0.0 if stay is None else float(e_cmd[stay[1]] - e_cmd[stay[0]])
+    return {
+        "inside": inside / commanded_mm,
+        "outside_mm": abs(commanded_mm - inside),
+    }
