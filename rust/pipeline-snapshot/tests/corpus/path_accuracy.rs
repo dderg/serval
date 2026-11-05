@@ -8,7 +8,8 @@
 //! the floor taken at `max_accel` (the planner takes it at each corner's
 //! own, lower or equal, acceleration, so the audit's bound is the looser).
 //! A vertex within the shaper's reach of a sharper corner takes that
-//! corner's budget: the shaper rounds them as one. Misses read across the
+//! corner's budget, and corners closer together than that reach turn as
+//! one: the shaper rounds them as one. Misses read across the
 //! bed (XY), and the shaped carriers may stray from the exact shaped path
 //! by `max_path_deviation` on top of any budget.
 
@@ -28,6 +29,10 @@ const SAMPLE_DT_MIN_S: f64 = 1e-6;
 const SAMPLE_DT_MAX_S: f64 = 1e-3;
 const CURSOR_REACH_MM: f64 = 3.0;
 const CURSOR_SKIP_COST: f64 = 0.25;
+/// The least share of the shaped path's progress the cursor's arc takes:
+/// where a later stretch retraces an earlier one (a travel back over the
+/// line it left), the cursor still moves on with the path.
+const CURSOR_PACE: f64 = 0.5;
 /// A vertex reads every sample the cursor places within this much polyline
 /// of it.
 const VERTEX_WINDOW_MM: f64 = 3.0;
@@ -300,6 +305,46 @@ impl Polyline {
         cosine.clamp(-1.0, 1.0).acos().to_degrees()
     }
 
+    /// The turn the path makes over `reach_mm` either side of `vertex`: the
+    /// chords from where it stands that far before to the vertex and on to
+    /// where it stands that far after. Corners closer together than the
+    /// shaper's reach turn as one.
+    fn turn_over_deg(&self, vertex: usize, reach_mm: f64) -> f64 {
+        let here = self.vertices[vertex];
+        let incoming = sub(here, self.point_at_arc(self.vertex_arc(vertex) - reach_mm));
+        let outgoing = sub(self.point_at_arc(self.vertex_arc(vertex) + reach_mm), here);
+        let lengths = norm(incoming) * norm(outgoing);
+        if lengths <= 0.0 {
+            return 0.0;
+        }
+        (dot(incoming, outgoing) / lengths)
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees()
+    }
+
+    fn point_at_arc(&self, arc: f64) -> Point {
+        let total = self.arc.last().copied().unwrap_or(0.0);
+        let arc = arc.clamp(0.0, total);
+        let segment = self
+            .arc
+            .partition_point(|&end| end < arc)
+            .min(self.segments() - 1);
+        let start = self.arc_start(segment);
+        let length = self.arc[segment] - start;
+        let along = if length > 0.0 {
+            (arc - start) / length
+        } else {
+            0.0
+        };
+        let (a, b) = (self.vertices[segment], self.vertices[segment + 1]);
+        [
+            a[0] + along * (b[0] - a[0]),
+            a[1] + along * (b[1] - a[1]),
+            a[2] + along * (b[2] - a[2]),
+        ]
+    }
+
     fn motion_at(&self, vertex: usize) -> Motion {
         if self.rests[vertex] {
             Motion::Rest
@@ -313,7 +358,8 @@ impl Polyline {
 
 /// Follows the samples along the polyline: the segment a sample lies
 /// nearest to, searched forward to [`CURSOR_REACH_MM`] of arc past the farthest
-/// the samples have come along it and never backward, each mm of polyline it
+/// the samples have come along it (at least [`CURSOR_PACE`] of the shaped
+/// path's own progress) and never backward, each mm of polyline it
 /// would skip costing [`CURSOR_SKIP_COST`] mm of distance. A later pass over
 /// the same place, or a neighbouring patch that a cut corner comes closer
 /// to, never claims a sample from the stretch the path is on.
@@ -323,8 +369,8 @@ struct Cursor {
 }
 
 impl Cursor {
-    fn advance(&mut self, line: &Polyline, q: Point) -> f64 {
-        let here = self.arc.max(line.arc_along(self.segment, q));
+    fn advance(&mut self, line: &Polyline, q: Point, step_mm: f64) -> f64 {
+        let here = (self.arc + CURSOR_PACE * step_mm).max(line.arc_along(self.segment, q));
         let own = line.distance_to_segment(self.segment, q);
         let mut best = (own, own, self.segment);
         let mut candidate = self.segment + 1;
@@ -359,7 +405,8 @@ pub fn audit(snapshot: &Snapshot, gcode: &str, config: &Path) -> Option<PathAccu
     let mut previous: Option<Point> = None;
     let mut window = 0..0;
     for_each_sample(trajectory, |q| {
-        let off = cursor.advance(&line, q);
+        let step = previous.map_or(0.0, |p| distance(p, q));
+        let off = cursor.advance(&line, q, step);
         let segment = cursor.segment;
         if off > excursion[segment].0 {
             excursion[segment] = (off, q);
@@ -385,16 +432,17 @@ pub fn audit(snapshot: &Snapshot, gcode: &str, config: &Path) -> Option<PathAccu
         lost: Vec::new(),
         over_budget: Vec::new(),
     };
+    let reach = budget.reach_mm();
     let own: Vec<f64> = (0..line.vertices.len())
         .map(|vertex| {
             if vertex == 0 || vertex + 1 == line.vertices.len() {
                 0.0
             } else {
-                budget.mm(line.turn_deg(vertex).to_radians())
+                let turn = line.turn_deg(vertex).max(line.turn_over_deg(vertex, reach));
+                budget.mm(turn.to_radians())
             }
         })
         .collect();
-    let reach = budget.reach_mm();
     let granted_at = |vertex: usize| {
         let here = line.vertex_arc(vertex);
         let lo = (0..=vertex)
