@@ -19,6 +19,11 @@ fn cartesian_validate_rejects_negative_or_nan_corner_deviation() {
 }
 
 #[test]
+fn default_limits_use_the_reader_default_corner_deviation() {
+    assert_eq!(CartesianLimits::default().corner_deviation, 0.04);
+}
+
+#[test]
 fn effective_limits_without_overrides_are_the_config_base() {
     let cfg = PlannerConfig::default();
     let (v, a, corner_deviation) = cfg.effective_limits();
@@ -30,10 +35,8 @@ fn effective_limits_without_overrides_are_the_config_base() {
 #[test]
 fn effective_limits_runtime_caps_clamp_but_never_raise() {
     let mut cfg = PlannerConfig::default();
-    cfg.runtime_caps = RuntimeCaps {
-        velocity: Some(50.0),
-        accel: Some(10_000_000.0),
-    };
+    cfg.runtime.set_velocity_cap(Some(50.0)).unwrap();
+    cfg.runtime.set_accel_cap(Some(10_000_000.0)).unwrap();
     let (v, a, _) = cfg.effective_limits();
     assert_eq!(v, 50.0);
     assert_eq!(a, cfg.cartesian.max_accel);
@@ -42,10 +45,32 @@ fn effective_limits_runtime_caps_clamp_but_never_raise() {
 #[test]
 fn effective_limits_runtime_corner_deviation_replaces_the_base() {
     let mut cfg = PlannerConfig::default();
-    cfg.runtime_corner_deviation = Some(0.01);
+    cfg.runtime.set_corner_deviation(Some(0.01)).unwrap();
     assert_eq!(cfg.effective_limits().2, 0.01);
-    cfg.runtime_corner_deviation = None;
+    cfg.runtime.set_corner_deviation(None).unwrap();
     assert_eq!(cfg.effective_limits().2, cfg.cartesian.corner_deviation);
+}
+
+#[test]
+fn runtime_caps_refuse_non_positive_or_non_finite_values_and_keep_the_old_cap() {
+    let mut runtime = RuntimeLimits::default();
+    runtime.set_accel_cap(Some(500.0)).unwrap();
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            runtime.set_accel_cap(Some(bad)),
+            Err(RuntimeLimitError::NotPositive { name: "accel" })
+        );
+        assert_eq!(
+            runtime.set_velocity_cap(Some(bad)),
+            Err(RuntimeLimitError::NotPositive { name: "velocity" })
+        );
+    }
+    assert_eq!(runtime.accel, Some(500.0));
+    assert_eq!(
+        runtime.set_corner_deviation(Some(-0.1)),
+        Err(RuntimeLimitError::InvalidCornerDeviation)
+    );
+    runtime.set_corner_deviation(Some(0.0)).unwrap();
 }
 
 #[test]
@@ -93,6 +118,9 @@ fn decl(name: &str, follows: &[&str]) -> AxisDecl {
         follows: follows.iter().map(|s| s.to_string()).collect(),
         motors: vec![],
         post_processors: vec![],
+        max_velocity: None,
+        max_accel: None,
+        instantaneous_corner_velocity: None,
     }
 }
 
@@ -152,6 +180,9 @@ fn decl_with_motors(name: &str, follows: &[&str], motors: &[&str]) -> AxisDecl {
         follows: follows.iter().map(|s| s.to_string()).collect(),
         motors: motors.iter().map(|s| s.to_string()).collect(),
         post_processors: vec![],
+        max_velocity: None,
+        max_accel: None,
+        instantaneous_corner_velocity: None,
     }
 }
 
@@ -223,12 +254,51 @@ fn pp(name: &str, ty: &str, params: &[(&str, f64)]) -> PostProcessorDecl {
     }
 }
 
+fn limited_e() -> AxisDecl {
+    AxisDecl {
+        max_velocity: Some(80.0),
+        max_accel: Some(10_000.0),
+        ..decl("e", &["x", "y", "z"])
+    }
+}
+
 fn registry_with_e(e_post_processors: &[&str]) -> AxisRegistry {
     let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
-    let mut e = decl("e", &["x", "y", "z"]);
+    let mut e = limited_e();
     e.post_processors = e_post_processors.iter().map(|s| (*s).to_string()).collect();
     decls.push(e);
     AxisRegistry::try_new(decls).unwrap()
+}
+
+#[test]
+fn a_follower_advance_needs_both_follower_limits() {
+    let advance = [
+        pp("pa", "linear_pressure_advance", &[("k", 0.04)]),
+        e_smoothing(),
+    ];
+    for (max_velocity, max_accel) in [(None, None), (Some(80.0), None), (None, Some(10_000.0))] {
+        let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
+        decls.push(AxisDecl {
+            post_processors: vec!["pa".into(), "st".into()],
+            max_velocity,
+            max_accel,
+            ..decl("e", &["x", "y", "z"])
+        });
+        let refused = PostProcessorSet::try_new(&AxisRegistry::try_new(decls).unwrap(), &advance);
+        assert!(
+            matches!(
+                refused,
+                Err(PostProcessorConfigError::FollowerAdvanceWithoutLimits { ref axis, ref name })
+                    if axis == "e" && name == "pa"
+            ),
+            "limits {max_velocity:?}/{max_accel:?} must be refused, got {refused:?}"
+        );
+    }
+    assert!(PostProcessorSet::try_new(&registry_with_e(&["pa", "st"]), &advance).is_ok());
+    assert!(
+        PostProcessorSet::try_new(&registry_with_e(&["st"]), &advance).is_ok(),
+        "a follower without an advance needs no limits"
+    );
 }
 
 #[test]
@@ -404,12 +474,19 @@ fn gain_without_kernel_on_axis_leading_nobody_compiles() {
     );
 }
 
+fn e_smoothing() -> PostProcessorDecl {
+    pp("st", "smooth_triangle", &[("smooth_time", 0.01)])
+}
+
 #[test]
 fn happy_path_compiles_pa_on_follower_e() {
-    let registry = registry_with_e(&["pa"]);
+    let registry = registry_with_e(&["pa", "st"]);
     let set = PostProcessorSet::try_new(
         &registry,
-        &[pp("pa", "linear_pressure_advance", &[("k", 0.04)])],
+        &[
+            pp("pa", "linear_pressure_advance", &[("k", 0.04)]),
+            e_smoothing(),
+        ],
     )
     .unwrap();
     let chains = set.compile(&registry).unwrap();
@@ -422,10 +499,13 @@ fn happy_path_compiles_pa_on_follower_e() {
 
 #[test]
 fn set_param_updates_named_instance_and_recompile_reflects_it() {
-    let registry = registry_with_e(&["pa"]);
+    let registry = registry_with_e(&["pa", "st"]);
     let mut set = PostProcessorSet::try_new(
         &registry,
-        &[pp("pa", "linear_pressure_advance", &[("k", 0.04)])],
+        &[
+            pp("pa", "linear_pressure_advance", &[("k", 0.04)]),
+            e_smoothing(),
+        ],
     )
     .unwrap();
     set.set_param("pa", "k", 0.07).unwrap();
@@ -514,4 +594,205 @@ fn post_processor_missing_required_param_rejected() {
     let registry = registry_with_e(&[]);
     let err = PostProcessorSet::try_new(&registry, &[pp("is", "smooth_bell", &[])]).unwrap_err();
     assert!(err.to_string().contains("smooth_time"), "got: {err}");
+}
+
+#[test]
+fn a_follower_advance_needs_no_smoothing_kernel_on_its_axis() {
+    let advances = [
+        pp("pa", "linear_pressure_advance", &[("k", 0.04)]),
+        pp(
+            "pa",
+            "tanh_pressure_advance",
+            &[
+                ("linear_advance", 0.02),
+                ("nonlinear_offset", 0.05),
+                ("linearization_velocity", 20.0),
+            ],
+        ),
+    ];
+    for advance in advances {
+        let registry = registry_with_e(&["pa"]);
+        let chains = PostProcessorSet::try_new(&registry, &[advance.clone()])
+            .unwrap_or_else(|error| panic!("{} with no kernel is refused: {error}", advance.ty))
+            .compile(&registry)
+            .unwrap();
+        assert!(chains.chains[3].kernel().is_none());
+        for chain in [["pa", "st"], ["st", "pa"]] {
+            assert!(
+                PostProcessorSet::try_new(
+                    &registry_with_e(&chain),
+                    &[advance.clone(), e_smoothing()]
+                )
+                .is_ok(),
+                "{} with a kernel ({chain:?}) is representable",
+                advance.ty
+            );
+        }
+    }
+}
+
+#[test]
+fn an_advance_on_an_axis_that_follows_nothing_is_not_a_follower_advance() {
+    let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
+    let mut e = decl("e", &[]);
+    e.post_processors = vec!["pa".to_string()];
+    decls.push(e);
+    let registry = AxisRegistry::try_new(decls).unwrap();
+    assert!(
+        PostProcessorSet::try_new(
+            &registry,
+            &[pp("pa", "linear_pressure_advance", &[("k", 0.04)])]
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn a_follower_chain_derives_its_ratio_ramp_from_its_axis_limits_and_advance() {
+    let registry = registry_with_e(&["pa"]);
+    let chains = PostProcessorSet::try_new(
+        &registry,
+        &[pp("pa", "linear_pressure_advance", &[("k", 0.04)])],
+    )
+    .unwrap()
+    .compile(&registry)
+    .unwrap();
+    assert_eq!(
+        chains.chains[3].ratio_ramp_rule(),
+        geometry::RatioRampRule {
+            advance_slope_s: 0.04,
+            max_velocity_mm_s: 80.0,
+            max_accel_mm_s2: 10_000.0,
+        }
+    );
+    assert!(chains.chains[..3].iter().all(|chain| {
+        chain.ratio_ramp_rule().max_accel_mm_s2.is_infinite()
+            && chain.ratio_ramp_rule().max_velocity_mm_s.is_infinite()
+    }));
+    assert!(chains.has_projected_follower());
+}
+
+#[test]
+fn a_bypassed_chain_set_ramps_its_followers_without_limits() {
+    let registry = registry_with_e(&[]);
+    let set = PostProcessorSet::try_new(&registry, &[]).unwrap();
+    let bypassed = set.compile_active_chains(&registry, true).unwrap();
+    assert!(bypassed.has_projected_follower());
+    assert!(
+        bypassed.chains[3]
+            .ratio_ramp_rule()
+            .max_accel_mm_s2
+            .is_infinite()
+    );
+}
+
+#[test]
+fn a_ratio_ramp_derives_next_to_a_smoothing_kernel() {
+    let registry = registry_with_e(&["st"]);
+    let chains = PostProcessorSet::try_new(&registry, &[e_smoothing()])
+        .unwrap()
+        .compile(&registry)
+        .unwrap();
+    assert!(chains.chains[3].kernel().is_some());
+    assert_eq!(chains.chains[3].ratio_ramp_rule().max_accel_mm_s2, 10_000.0);
+}
+
+#[test]
+fn follower_limits_belong_to_followers_and_must_be_positive() {
+    let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
+    decls[0].max_velocity = Some(60.0);
+    assert!(matches!(
+        AxisRegistry::try_new(decls),
+        Err(AxisConfigError::LimitWithoutLeaders { ref axis, option: "max_velocity" }) if axis == "x"
+    ));
+    for value in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
+        let mut e = decl("e", &["x", "y", "z"]);
+        e.max_accel = Some(value);
+        decls.push(e);
+        assert!(
+            matches!(
+                AxisRegistry::try_new(decls),
+                Err(AxisConfigError::BadLimit {
+                    option: "max_accel",
+                    ..
+                })
+            ),
+            "max_accel {value} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn the_instantaneous_corner_velocity_belongs_to_followers_and_must_be_positive() {
+    let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
+    decls[2].instantaneous_corner_velocity = Some(1.0);
+    assert!(matches!(
+        AxisRegistry::try_new(decls),
+        Err(AxisConfigError::LimitWithoutLeaders {
+            ref axis,
+            option: "instantaneous_corner_velocity"
+        }) if axis == "z"
+    ));
+    for value in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
+        let mut e = decl("e", &["x", "y", "z"]);
+        e.instantaneous_corner_velocity = Some(value);
+        decls.push(e);
+        assert!(
+            matches!(
+                AxisRegistry::try_new(decls),
+                Err(AxisConfigError::BadLimit {
+                    option: "instantaneous_corner_velocity",
+                    ..
+                })
+            ),
+            "instantaneous_corner_velocity {value} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn a_kernel_free_advance_requires_finite_extrude_only_caps() {
+    let registry = registry_with_e(&["pa"]);
+    let advanced = PlannerConfig {
+        post_processors: PostProcessorSet::try_new(
+            &registry,
+            &[pp("pa", "linear_pressure_advance", &[("k", 0.04)])],
+        )
+        .unwrap(),
+        axis_registry: registry,
+        ..PlannerConfig::default()
+    };
+    for (velocity, accel) in [
+        (None, Some(2000.0)),
+        (Some(40.0), None),
+        (Some(f64::INFINITY), Some(2000.0)),
+        (Some(40.0), Some(f64::INFINITY)),
+    ] {
+        let config = PlannerConfig {
+            max_extrude_only_velocity: velocity,
+            max_extrude_only_accel: accel,
+            ..advanced.clone()
+        };
+        let refused = config.check_kernel_free_advance_extrude_only_caps();
+        assert!(
+            refused.as_ref().is_err_and(|message| {
+                message.contains("axis 'e' has an advance and no smoothing kernel")
+            }),
+            "caps {velocity:?}/{accel:?} must be refused, got {refused:?}"
+        );
+    }
+    let capped = PlannerConfig {
+        max_extrude_only_velocity: Some(40.0),
+        max_extrude_only_accel: Some(2000.0),
+        ..advanced
+    };
+    assert!(capped.check_kernel_free_advance_extrude_only_caps().is_ok());
+    assert!(
+        PlannerConfig::default()
+            .check_kernel_free_advance_extrude_only_caps()
+            .is_ok(),
+        "with no advance the caps stay optional"
+    );
 }

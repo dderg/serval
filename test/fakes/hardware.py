@@ -1,5 +1,8 @@
 from klippy.extras import stepper_enable as _stepper_enable_mod
-from klippy.mcu import STEPCOMPRESS_MAX_ERROR_DEFAULT
+from klippy.mcu import (
+    STEPCOMPRESS_DRAIN_BUDGET_DEFAULT,
+    STEPCOMPRESS_MAX_ERROR_DEFAULT,
+)
 
 
 class _FakeClockSync:
@@ -22,6 +25,13 @@ class _FakeClockSync:
         return True
 
 
+SIMULATED_STEP_BENCHMARK = {
+    "pulsed_ticks_per_step": 0,
+    "both_edge_ticks_per_step": 0,
+    "simulated": True,
+}
+
+
 class FakeMcu:
     class _PresentCommand:
         def send(self, args=()):
@@ -41,9 +51,11 @@ class FakeMcu:
         non_critical_disconnected=False,
         clocksync_debug="fake clocksync",
         stepcompress_max_error=STEPCOMPRESS_MAX_ERROR_DEFAULT,
+        stepcompress_drain_budget=STEPCOMPRESS_DRAIN_BUDGET_DEFAULT,
         move_queue_slots=0,
         constants=None,
         missing_commands=(),
+        step_benchmark=SIMULATED_STEP_BENCHMARK,
     ):
         self._printer = printer
         self._name = name
@@ -58,9 +70,12 @@ class FakeMcu:
         self.non_critical_disconnected = non_critical_disconnected
         self._clocksync = _FakeClockSync(clocksync_debug)
         self._stepcompress_max_error = stepcompress_max_error
+        self._stepcompress_drain_budget = stepcompress_drain_budget
         self._move_queue_slots = move_queue_slots
         self._constants = {} if constants is None else dict(constants)
         self.missing_commands = tuple(missing_commands)
+        self._step_benchmark = step_benchmark
+        self.step_capacity = None
 
     def get_printer(self):
         return self._printer
@@ -74,8 +89,20 @@ class FakeMcu:
     def get_constants(self):
         return self._constants
 
+    def get_constant_float(self, name):
+        return float(self._constants[name])
+
+    def get_step_benchmark(self):
+        return self._step_benchmark
+
+    def report_step_capacity(self, step_benchmark):
+        self.step_capacity = step_benchmark
+
     def get_stepcompress_max_error(self):
         return self._stepcompress_max_error
+
+    def get_stepcompress_drain_budget(self):
+        return self._stepcompress_drain_budget
 
     def get_move_queue_slots(self):
         return self._move_queue_slots
@@ -126,8 +153,10 @@ class FakeStepper:
         step_both_edge=False,
         step_dist=0.0125,
         oid=0,
+        lane_weights=None,
     ):
         self._name = name
+        self._lane_weights = lane_weights
         self._active_callbacks = []
         self._mcu = mcu if mcu is not None else FakeMcu(handle=handle)
         self._pulse = (pulse_duration, step_both_edge)
@@ -152,6 +181,9 @@ class FakeStepper:
 
     def get_step_dist(self):
         return self._step_dist
+
+    def calc_position_from_coord(self, coord):
+        return sum(w * c for w, c in zip(self._lane_weights, coord))
 
     def add_active_callback(self, cb):
         self._active_callbacks.append(cb)

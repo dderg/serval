@@ -115,7 +115,6 @@ post_processors: z_shaping
 [axis e]
 follows: x, y, z
 motors: e_motor
-post_processors: e_smoothing
 
 [post_processor x_shaping]
 type: smooth_mzv
@@ -128,10 +127,6 @@ frequency_hz: 90.2
 [post_processor z_shaping]
 type: smooth_bell
 smooth_time: 0.025
-
-[post_processor e_smoothing]
-type: smooth_triangle
-smooth_time: 0.01
 
 [extruder]
 axis: e

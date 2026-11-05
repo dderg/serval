@@ -260,7 +260,13 @@ impl StepcompressLane {
 
     #[must_use]
     pub fn mm_to_steps(&self, mm: f64) -> i64 {
-        (mm / self.microstep_distance).round() as i64
+        let steps = (mm / self.microstep_distance).round();
+        checked_cast::f64_to_i64(steps).unwrap_or_else(|e| {
+            panic!(
+                "mm_to_steps({mm} mm at {} mm/step): {e}",
+                self.microstep_distance
+            )
+        })
     }
 
     #[must_use]

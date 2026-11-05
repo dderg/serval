@@ -41,10 +41,10 @@ _native = _load_native()
 NATIVE_BUILD_HINT = "make -f Makefile.rust motion-engine"
 
 
-def native_class(name):
-    """Return a class exported by the native _motion_engine module, failing
-    loudly when the native build is absent so construction (not import) is the
-    point of failure."""
+def native(name):
+    """Return a class or function exported by the native _motion_engine
+    module, failing loudly when the native build is absent so use (not
+    import) is the point of failure."""
     if _native is None:
         raise RuntimeError(
             "klippy requires the native _motion_engine module for %s; "
@@ -73,6 +73,10 @@ def attach_structured_logging(native, printer, events_dir):
     native.set_session_context(
         structured_log.get_session(), structured_log.get_print()
     )
+    if _native is not None:
+        structured_log.event(
+            "motion", "engine_build", build_id=_native.build_id()
+        )
 
     def _push_ctx(*_args):
         native.set_session_context(

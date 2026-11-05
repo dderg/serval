@@ -138,6 +138,8 @@ z_motors: z
 follows: x, y, z
 motors: extruder
 post_processors: pa
+max_velocity: 50
+max_accel: 5000
 ```
 
 - **A follower axis pays out its commanded displacement** in proportion to
@@ -181,6 +183,8 @@ post_processors: is
 [axis e]
 follows: x, y, z
 post_processors: pa
+max_velocity: 50
+max_accel: 5000
 ```
 
 Eight types exist today (registry: `rust/trajectory/src/algos/mod.rs`):
@@ -201,6 +205,16 @@ Eight types exist today (registry: `rust/trajectory/src/algos/mod.rs`):
   commanded advance stops growing once flow is past the linearization
   velocity. The nozzle pressure response flattens there and a purely
   linear model over-advances.
+- **A follower's ratio steps are ramped along the path.** Pressure advance
+  turns every extrusion-ratio change taken at speed — travel to extrusion,
+  a flow change, a wipe — into an instant position step the extruder cannot
+  make, so every follower spreads each step along the path over a ramp time
+  derived per seam from its `max_velocity` / `max_accel` and the advance's
+  `k`: the shortest between 5 and 30 ms that keeps the extruder within its
+  limits, the planner slowing the toolhead at a step 30 ms cannot carry.
+  No smoothing kernel is needed. A kernel on the extruder is an explicit
+  override that blurs flow against nozzle speed at every corner in exchange
+  for less extruder acceleration.
 - **`mode_inverse` needs a preceding kernel.** It makes the toolhead
   follow the nominal path with the residual scaling with model error, and
   must be preceded by a short smoothing kernel; the config compiler
@@ -219,6 +233,138 @@ The per-axis tracks the executors receive, nominal vs the chain's output
 ![per-axis velocity and acceleration tracks](docs/img/pipeline-axes.svg)
 
 Design detail: [docs/rewrite/shaper.md](docs/rewrite/shaper.md).
+
+### Evaluating an extruder chain
+
+`tools/corner_flow.py` plans standard corners, a zigzag, two perimeters
+and a retract under a printer config and measures the bead the nozzle lays
+along the shaped path, through a first-order melt model with time constant
+K (by default the configured pressure advance):
+
+```
+make -f Makefile.rust motion-engine-fast
+python3 tools/corner_flow.py printer.cfg
+python3 tools/corner_flow.py printer.cfg --set pa.k=0.04 --melt-k 0.03 --json
+python3 tools/corner_flow.py printer.cfg --extrude-only 45,2000
+python3 tools/corner_flow.py kernel.cfg --kernel-free
+python3 tools/corner_flow.py kernel.cfg --sweep smooth_time=0.002,0.005,0.01
+```
+
+- **`peak` / `dip`** are the worst bead over- and under-fill at a corner,
+  in % of the nominal bead. **`w>5%`** is how far along the path it stays
+  off by more than 5%, and **`blob`** the over-filled volume per corner,
+  in nL. The commanded bead is read off the unshaped plan where it passes
+  the same place, the two plans paired at every vertex of the program.
+- **`moved` / `net` / `sw`** replace those where the bead ratio steps (a
+  flow change, travel to extrusion and back, a retract's rest): any ramp
+  reads about ±50% at the switch itself, so the step is read as the
+  material laid across the vertex against a sharp switch (`moved`, nL),
+  what it gains or loses (`net`, nL; ~0 for a ramp centred on the
+  vertex), and the path the bead takes from 5% to 95% of the step (`sw`,
+  mm). Material moved while the toolhead rests (a retract and its prime)
+  is left out.
+- **`ve±` / `ae`** are the extruder's peak velocity and acceleration while
+  the nozzle moves; **`|ve|*` / `|ae|*`** the same over the whole run,
+  retracts and primes included.
+- **`dE_gc`** is the extruded total minus the G-code's. It is negative by
+  design where corners are cut: the bead follows the shorter path.
+  **`dE_adv`** compares against the same chain without its advance. The
+  advance vanishes at rest, so anything above ~1e-6 mm is material the
+  pipeline lost or invented.
+- **`t`** is the case's planned print time, s: what the extruder limits
+  and any kernel cost in time.
+- **`--kernel-free` takes the extruder's smoothing kernels out of a
+  config that carries one** (`kernel.cfg` above), leaving the recommended
+  setup below, so a kernel override can be compared with the chain
+  without it; `--sweep smooth_time=...` varies the kernel's width. Every
+  chain, kernel or not, ramps its extrusion-ratio steps by the ramp time
+  its limits derive, so a step spreads over about `v·τ` of path however
+  finely the path is cut into moves. An advance with no kernel needs
+  extrude-only caps: `--extrude-only V,A` (default `50,5000`) fills in
+  whichever the config lacks, for every chain, and `[axis e]
+  max_velocity` / `max_accel` inherit them where unset, so it also sets
+  the extruder limits the planner holds the advance to.
+- **An extruder kernel trades corner quality for extruder acceleration.**
+  It blurs the flow in time while the nozzle slows into a corner, and no
+  pressure advance value can cancel a symmetric blur. With a
+  `smooth_triangle` added after the advance of `tools/bench/printer.cfg`
+  (K 0.03, 10000 mm/s², `[axis e] max_accel: 20000`, extrude-only caps
+  50 mm/s and 5000 mm/s²), a 45° corner at 150 mm/s bulges +159% with
+  `smooth_time: 0.04`, +71% with 0.02, +24% with 0.01 and +7% with
+  0.005, at matched K, while the extruder acceleration (`ae`) on the same
+  corner rises from 624 mm/s² at 0.04 to 3428 mm/s² at 0.005. Without
+  the kernel the same corner lays the commanded bead (+0.5%) at
+  4066 mm/s². The bench's captured steps agree
+  (`tools/bench/README.md`, "Corner flow"): with 0.04 the 45° corner
+  bulges +127% at 100 mm/s and +195% at 300 mm/s, and without a kernel
+  every corner stays within 0.7% offline and within step quantization
+  in the capture.
+
+**The recommended setup adapts to the machine: set the extruder's limits
+and the advance's `k`, and put no kernel on the extruder.**
+
+```
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.04
+
+[axis e]
+follows: x, y, z
+post_processors: pa
+max_velocity: 50
+max_accel: 20000
+```
+
+`max_velocity` / `max_accel` are what the extruder motor can do, in mm/s
+and mm/s² of filament (on the `[extruder]` axis each one left unset
+inherits `max_extrude_only_velocity` / `max_extrude_only_accel`):
+`max_accel` is the drive's pressure-advance-capable acceleration, 20000
+mm/s² or more for a direct drive and about 5000 for an Ender-3-class
+bowden. The advance then runs unblurred along the shaped path, so corners
+lay the commanded bead; the velocity planner slows extruding moves,
+corners included, wherever the exact advance would ask the extruder for
+more than those limits, and derives every ratio step's ramp from them.
+The cost is time, not bead error.
+
+**A kernel after the advance is an explicit override**, not a default:
+use it only for an extruder too weak to follow the exact advance at a
+speed you need, where the planner's corner slowdown costs more print time
+than the bead bulge above costs quality. Size it with `--sweep
+smooth_time=...` against the bulge you accept; every corner pays for it
+with over-fill that grows with the kernel's width and the corner speed.
+
+**The chain comparison.** `corner_flow.py` on `tools/bench/printer.cfg`
+(10000 mm/s², `corner_deviation: 0.21`, K 0.03) and on the Trident
+variant `tools/bench/configs/trident_ramp.cfg` / `trident_kernel.cfg`
+(70000 mm/s², `square_corner_velocity: 5`, K 0.02, `smooth_mzv` x/y at
+191 and 129.4 Hz, z unshaped), both with `[axis e] max_accel: 20000` and
+extrude-only caps 50 / 5000, the kernel-free chain against kernel
+widths. Peaks are the 45° corner at 150 / 300 mm/s and the 90° corner at
+300 mm/s; `blob` the worst over every corner case and speed; the flow
+step (1.5× flow) and travel → extrusion step at 300 mm/s as `moved` nL /
+`sw` mm; `ae` on the 45° corner at 150 mm/s; `t` the summed print time of
+all 21 cases (50 / 150 / 300 mm/s).
+
+| chain | 45° peak | 90° peak | blob nL | flow step | travel step | retract sw | ae | t s |
+|---|---|---|---|---|---|---|---|---|
+| `printer.cfg`, no kernel | +1% / +1% | +1% | 0.2 | 3.1 / 0.56 | 39.1 / 3.92 | 0.04 | 4066 | 26.38 |
+| `printer.cfg` + `smooth_time: 0.005` | +7% / +7% | +2% | 0.9 | 3.1 / 0.58 | 39.4 / 3.96 | 0.04 | 3428 | 26.49 |
+| `printer.cfg` + `smooth_time: 0.01` | +24% / +24% | +6% | 3.4 | 3.4 / 0.62 | 40.4 / 4.10 | 0.02 | 2597 | 26.59 |
+| `printer.cfg` + `smooth_time: 0.02` | +71% / +72% | +20% | 13.2 | 4.5 / 7.18 | 45.4 / 4.78 | 0.00 | 1426 | 26.80 |
+| `printer.cfg` + `smooth_time: 0.04` | +159% / +181% | +57% | 50.4 | 9.2 / 9.34 | 83.0 / 8.44 | 5.72 | 624 | 27.22 |
+| Trident, no kernel | +0% / +0% | +0% | 0.0 | 2.1 / 0.40 | 17.4 / 1.66 | 0.04 | 9114 | 26.80 |
+| Trident + `smooth_time: 0.005` | +54% / +54% | +25% | 2.6 | 12.0 / 2.44 | 39.2 / 3.94 | 0.38 | 12206 | 25.70 |
+| Trident + `smooth_time: 0.01` | +101% / +152% | +75% | 14.3 | 12.5 / 3.40 | 56.6 / 5.74 | 2.22 | 5761 | 25.53 |
+| Trident + `smooth_time: 0.02` | +169% / +315% | +170% | 39.1 | 12.6 / 3.98 | 60.7 / 6.78 | 2.98 | 1476 | 25.74 |
+| Trident + `smooth_time: 0.04` | +216% / +470% | +263% | 72.9 | 20.6 / 6.28 | 83.0 / 9.42 | 4.82 | 477 | 26.16 |
+
+On the bench printer the kernel-free chain is both the cleanest and the
+fastest: a kernel's blur also delays every stop. On the 70000 mm/s²
+Trident the kernel-free chain lays every corner within 0.5% but costs
+2–5% of print time against a kernel (26.80 s against 25.53–26.16 s),
+the time the planner spends holding the exact advance within 20000 mm/s²
+of extruder acceleration; the kernel buys it back with a corner bulge
+of +54% at 0.005 and up.
 
 ---
 

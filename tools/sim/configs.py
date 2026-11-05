@@ -32,8 +32,9 @@ def _tail(gcode_dir: str) -> str:
 
 def neptune_print_config(h7_pty: str, gcode_dir: str) -> str:
     """Neptune 3 Pro bench profile on sim pins: real print limits and an
-    extruder follower with the bench's pressure-advance + smoothing
-    chain — the setup that reproduces motion-content bugs slicer prints hit."""
+    extruder follower with the bench's kernel-free pressure-advance chain
+    and extruder limits — the setup that reproduces motion-content bugs
+    slicer prints hit."""
     return f"""\
 [mcu]
 serial: {h7_pty}
@@ -79,15 +80,12 @@ homing_speed: 5
 [axis e]
 follows: x, y, z
 motors: extruder
-post_processors: pa, st
+post_processors: pa
+max_accel: 20000
 
 [post_processor pa]
 type: linear_pressure_advance
 k: 0.03
-
-[post_processor st]
-type: smooth_triangle
-smooth_time: 0.04
 
 [motor x]
 drive: stepper
@@ -135,6 +133,8 @@ control: pid
 pid_kp: 30.356
 pid_ki: 1.857
 pid_kd: 124.081
+max_extrude_only_velocity: 50
+max_extrude_only_accel: 5000
 
 [virtual_sdcard]
 path: {gcode_dir}
@@ -142,6 +142,21 @@ path: {gcode_dir}
 [force_move]
 enable_force_move: True
 """
+
+
+def with_extruder_smoothing(config: str, smooth_time: float) -> str:
+    """`config` with the explicit `smooth_triangle` override `st` after the
+    advance of its kernel-free `post_processors: pa` extruder chain."""
+    chain = "post_processors: pa\n"
+    if config.count(chain) != 1 or config.count("[virtual_sdcard]") != 1:
+        raise ValueError(
+            "with_extruder_smoothing needs exactly one kernel-free "
+            f"'{chain.strip()}' chain and one [virtual_sdcard] section"
+        )
+    kernel = f"[post_processor st]\ntype: smooth_triangle\nsmooth_time: {smooth_time}\n\n"
+    return config.replace(chain, "post_processors: pa, st\n").replace(
+        "[virtual_sdcard]", kernel + "[virtual_sdcard]"
+    )
 
 
 def minimal_config(h7_pty: str, gcode_dir: str) -> str:

@@ -132,6 +132,7 @@ dependencies = [
  "portable-atomic",
  "runtime",
  "runtime-contract",
+ "source-tree",
 ]
 
 [[package]]
@@ -168,6 +169,10 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+
+[[package]]
+name = "checked-cast"
+version = "0.1.0"
 
 [[package]]
 name = "clap"
@@ -422,6 +427,7 @@ dependencies = [
  "libm",
  "nurbs",
  "proptest",
+ "taylor-model",
 ]
 
 [[package]]
@@ -489,6 +495,7 @@ name = "host-rt"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "checked-cast",
  "flate2",
  "indexmap",
  "libc",
@@ -663,12 +670,12 @@ dependencies = [
 name = "motion-core"
 version = "0.1.0"
 dependencies = [
+ "checked-cast",
  "config-doc",
  "crossbeam-channel",
  "ethercat-rt",
  "ethercat-setpoint",
  "ethercat-setpoint-fill",
- "gcode",
  "geometry",
  "host-rt",
  "libm",
@@ -676,9 +683,11 @@ dependencies = [
  "motion-core",
  "motion-pipeline",
  "nurbs",
+ "pipeline-snapshot",
  "planner-config",
  "proptest",
  "runtime-contract",
+ "source-tree",
  "step-shim",
  "thiserror",
  "tracing",
@@ -689,6 +698,7 @@ dependencies = [
 name = "motion-engine"
 version = "0.1.0"
 dependencies = [
+ "checked-cast",
  "config-doc",
  "crossbeam-channel",
  "ethercat-rt",
@@ -708,6 +718,7 @@ dependencies = [
  "runtime-contract",
  "serde_json",
  "serialport",
+ "sha2",
  "thiserror",
  "tracing",
  "trajectory",
@@ -721,7 +732,9 @@ dependencies = [
  "geometry",
  "libm",
  "nurbs",
+ "planner-config",
  "proptest",
+ "taylor-model",
  "thiserror",
  "tracing",
  "trajectory",
@@ -732,6 +745,7 @@ name = "motion-services"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "checked-cast",
  "host-rt",
  "log",
  "mcu-protocol",
@@ -806,6 +820,7 @@ dependencies = [
  "libm",
  "proptest",
  "serde_json",
+ "source-tree",
 ]
 
 [[package]]
@@ -830,6 +845,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 name = "pipeline-snapshot"
 version = "0.1.0"
 dependencies = [
+ "config-doc",
  "crossbeam-channel",
  "gcode",
  "geometry",
@@ -840,6 +856,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "source-tree",
  "thiserror",
  "tracing",
  "trajectory",
@@ -857,6 +874,7 @@ version = "0.1.0"
 dependencies = [
  "config-doc",
  "geometry",
+ "nurbs",
  "thiserror",
  "trajectory",
 ]
@@ -1089,6 +1107,9 @@ dependencies = [
 [[package]]
 name = "runtime-contract"
 version = "0.1.0"
+dependencies = [
+ "source-tree",
+]
 
 [[package]]
 name = "rustfft"
@@ -1277,6 +1298,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
+name = "source-tree"
+version = "0.1.0"
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1327,6 +1352,13 @@ name = "target-lexicon"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
+
+[[package]]
+name = "taylor-model"
+version = "0.1.0"
+dependencies = [
+ "libm",
+]
 
 [[package]]
 name = "tempfile"
@@ -1559,6 +1591,7 @@ dependencies = [
 name = "trajectory"
 version = "0.1.0"
 dependencies = [
+ "checked-cast",
  "geometry",
  "libm",
  "nurbs",

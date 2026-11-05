@@ -4,7 +4,8 @@ uv run python tools/bench/moves.py <run_dir> [--epochs 1-3]
 
 Writes run_dir/moves.tsv: one row per (epoch, gcode move, motor) with the
 number of matched steps and the median/abs-max capture-minus-reference
-timing error in microseconds.
+timing error in microseconds. A move is named by the toolhead position and
+feedrate it ends at, as the live host submits it.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ import numpy as np
 def move_spans(job: analyze.Job, waypoints: list[tuple]) -> list[dict]:
     engine = analyze.harness._import_engine()
     snapshot, _ = engine.pipeline_snapshot_axis_samples(
-        waypoints, job.config.config_text, [0], 2
+        waypoints, job.config.config_text, [0], 2, job.step_benchmarks
     )
     return json.loads(snapshot)["trajectory"]["spans"]
 
@@ -30,15 +31,23 @@ def span_index(spans: list[dict], t_block_s: np.ndarray) -> np.ndarray:
     return np.clip(np.searchsorted(starts, t_block_s, "right") - 1, 0, None)
 
 
+def move_name(waypoint: dict) -> str:
+    x, y, z, e = waypoint["position"]
+    return (
+        f"X{x:.3f} Y{y:.3f} Z{z:.3f} E{e:.4f} F{waypoint['feedrate'] * 60:.0f}"
+    )
+
+
 def move_rows(run_dir: Path, epochs: range) -> list[tuple]:
     inputs = analyze.load_run(run_dir)
     reference = analyze.build_reference(inputs)
-    start, waypoint_blocks = analyze.split_gcode(inputs.gcode_text)
-    _, _, waypoints = analyze.plan_waypoints(inputs)
-    block_moves = [
-        [ln for ln in text.splitlines() if ln.startswith("G1")]
-        for text in waypoint_blocks
-    ]
+    if reference.source != analyze.REFERENCE_PLANNED:
+        raise analyze.AnalysisError(
+            f"{run_dir}: the pacer braked, so the reference is the dispatch "
+            "record and its blocks are not the plan's moves"
+        )
+    blocks = analyze.plan_waypoints(inputs).blocks
+    block_moves = [[move_name(w) for w in block[1:]] for block in blocks]
     capture_events = {
         m.role: analyze.capture_steps(
             inputs.capture, m, reference.start_counts[m.role]
@@ -50,7 +59,7 @@ def move_rows(run_dir: Path, epochs: range) -> list[tuple]:
     for index in epochs:
         result = results[index]
         block = reference.blocks[index]
-        spans = move_spans(inputs, waypoints[index])
+        spans = move_spans(inputs, blocks[index])
         for role, match in result.matches.items():
             if not match.late_s.size:
                 continue
@@ -82,10 +91,10 @@ def main() -> None:
     parser.add_argument("--last-epoch", type=int, default=2)
     args = parser.parse_args()
     rows = move_rows(args.run_dir, range(args.first_epoch, args.last_epoch + 1))
-    header = "epoch\tmove\tline\tmotor\tn\tmedian_us\tabs_max_us"
+    header = "epoch\tmove\ttarget\tmotor\tn\tmedian_us\tabs_max_us"
     body = [
-        f"{e}\t{s}\t{line}\t{role}\t{n}\t{med:.1f}\t{mx:.1f}"
-        for e, s, line, role, n, med, mx in rows
+        f"{e}\t{s}\t{target}\t{role}\t{n}\t{med:.1f}\t{mx:.1f}"
+        for e, s, target, role, n, med, mx in rows
     ]
     (args.run_dir / "moves.tsv").write_text("\n".join([header, *body]) + "\n")
     print("\n".join([header, *body]))

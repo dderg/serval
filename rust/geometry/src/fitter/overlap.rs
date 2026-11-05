@@ -5,7 +5,9 @@ use crate::path::{Arc, Line};
 use super::CornerFitConfig;
 use super::biclothoid::{self, Anchor, GeneralBlend, GeneralBlendRequest};
 use super::kernels::arc_len;
-use super::vec3::{add, cross, dot, normalize, scale};
+use super::vec3::{add, cross, dot, norm, normalize, scale};
+
+const OUT_OF_PLANE_EPS: f64 = 1e-9;
 
 pub(super) enum ArcSide {
     Inbound,
@@ -33,6 +35,7 @@ pub(super) fn resolve_arc_arc(
     arc_out: &Arc,
     config: CornerFitConfig,
     delta: f64,
+    shortest_halves: [f64; 2],
 ) -> Option<GeneralBlend> {
     let plane_n = plane_of(arc_in);
     // Anchor curvature is signed relative to the shared blend plane. Each
@@ -60,6 +63,7 @@ pub(super) fn resolve_arc_arc(
             delta,
             budget_in: 0.5 * arc_len(arc_in),
             budget_out: 0.5 * arc_len(arc_out),
+            shortest_halves,
         },
         config,
     )
@@ -71,10 +75,16 @@ pub(super) fn resolve_arc_line(
     side: ArcSide,
     config: CornerFitConfig,
     delta: f64,
+    shortest_halves: [f64; 2],
+    line_claim: f64,
 ) -> Option<GeneralBlend> {
     let plane_n = plane_of(arc);
+    let along_the_normal = |tangent: [f64; 3]| norm(cross(plane_n, tangent)) < OUT_OF_PLANE_EPS;
+    if along_the_normal(line.heading_at(0.0)) || along_the_normal(line.heading_at(line.s_len())) {
+        return None;
+    }
     let arc_budget = 0.5 * arc_len(arc);
-    let line_budget = 0.5 * line.s_len();
+    let line_budget = line_claim;
     let (anchor_in, anchor_out, budget_in, budget_out) = match side {
         ArcSide::Inbound => (
             Anchor {
@@ -114,6 +124,7 @@ pub(super) fn resolve_arc_line(
             delta,
             budget_in,
             budget_out,
+            shortest_halves,
         },
         config,
     )

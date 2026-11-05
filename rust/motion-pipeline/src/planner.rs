@@ -1,10 +1,14 @@
 use geometry::path::Segment;
+use std::sync::Arc;
+
 use geometry::{
-    Move, VelocityPlanParams, VelocityProfile, plan_velocity_stops_select_prefix,
-    seam_requires_stop,
+    ExtrusionBudget, ExtrusionReach, Move, VelocityPlanParams, VelocityProfile,
+    plan_velocity_stops_select_prefix, seam_requires_stop,
 };
 
+use crate::step_capacity_log::{StepCapacityLog, StepCapacityReport};
 use crate::types::{Control, PlannedItem, PlannedMove, StreamConfig, StreamInput};
+use crate::worker_pool::WorkerPool;
 
 /// Cost governor, not a lookahead bound: velocity planning is ~linear in the
 /// window, so re-planning on every arriving move would be quadratic. The window
@@ -22,20 +26,34 @@ const REPLAN_BATCH_MOVES: usize = 64;
 /// decides whether planning keeps up with the print.
 const QUIET_PLAN_MIN_MOVES: usize = 32;
 
+/// Moves enter the window once their ratio in reach has settled (see
+/// [`ExtrusionReach`]): a move's budget never changes after it is planned,
+/// so the forward ceilings the finality barrier rests on stay final.
 pub struct Planner {
+    reach: ExtrusionReach,
     moves: Vec<Move>,
+    budgets: Vec<ExtrusionBudget>,
     entry_v: f64,
     moves_since_plan: usize,
     config: StreamConfig,
+    workers: Arc<WorkerPool>,
+    step_capacity_log: StepCapacityLog,
 }
 
 impl Planner {
-    pub fn new(config: StreamConfig) -> Self {
+    pub fn new(config: StreamConfig, workers: Arc<WorkerPool>) -> Self {
         Self {
+            reach: ExtrusionReach::new(
+                config.max_extrude_only_velocity_mm_s,
+                config.max_extrude_only_accel_mm_s2,
+            ),
             moves: Vec::new(),
+            budgets: Vec::new(),
             entry_v: 0.0,
             moves_since_plan: 0,
             config,
+            workers,
+            step_capacity_log: StepCapacityLog::default(),
         }
     }
 
@@ -76,7 +94,9 @@ impl Planner {
     ) -> bool {
         match &ctrl {
             Control::Reset { .. } => {
+                self.reach.clear();
                 self.moves.clear();
+                self.budgets.clear();
                 self.entry_v = 0.0;
                 self.moves_since_plan = 0;
             }
@@ -85,7 +105,7 @@ impl Planner {
             | Control::SetMesh { .. }
             | Control::Dispatch(_) => {
                 assert!(
-                    self.moves.is_empty(),
+                    self.moves.is_empty() && self.reach.is_empty(),
                     "planner: control token arrived with {} undrained moves — a Drain must \
                      precede it",
                     self.moves.len()
@@ -96,7 +116,8 @@ impl Planner {
     }
 
     fn absorb(&mut self, m: Move, output: &mut impl FnMut(PlannedItem) -> bool) -> bool {
-        self.moves.push(m);
+        self.reach.push(m);
+        self.admit_settled();
         self.moves_since_plan += 1;
         if self.moves_since_plan < REPLAN_BATCH_MOVES
             && self.moves.len() < self.config.max_buffer_moves
@@ -122,6 +143,13 @@ impl Planner {
         true
     }
 
+    fn admit_settled(&mut self) {
+        while let Some((m, budget)) = self.reach.pop() {
+            self.moves.push(m);
+            self.budgets.push(budget);
+        }
+    }
+
     fn plan(&self, reconstruct_count: usize) -> VelocityProfile {
         self.plan_selected(|_| reconstruct_count)
     }
@@ -137,15 +165,20 @@ impl Planner {
         let profile = plan_velocity_stops_select_prefix(
             &self.moves,
             &stop_before,
+            &self.budgets,
             VelocityPlanParams {
                 integration_tol: self.config.integration_tol,
                 max_extrude_only_velocity_mm_s: self.config.max_extrude_only_velocity_mm_s,
                 max_extrude_only_accel_mm_s2: self.config.max_extrude_only_accel_mm_s2,
                 entry_v: self.entry_v,
+                step_capacity: self.config.step_capacity.as_deref(),
             },
+            &*self.workers,
             select_prefix,
         )
         .unwrap_or_else(|e| panic!("planner: velocity plan failed: {e:?}"));
+        let plan_us = clock.elapsed_us();
+        crate::timing::record_stage(crate::timing::Stage::VelocityPlan, plan_us);
         tracing::debug!(
             subsystem = "motion",
             event = "pipe_plan",
@@ -156,7 +189,7 @@ impl Planner {
             barrier = profile.barrier,
             v_barrier = profile.v_barrier,
             entry_v = self.entry_v,
-            plan_us = clock.elapsed_us(),
+            plan_us,
             t_us = crate::timing::mono_us(),
             "[pipe] plan"
         );
@@ -167,12 +200,18 @@ impl Planner {
     /// and emit everything.
     fn drain_to_rest(&mut self, output: &mut impl FnMut(PlannedItem) -> bool) -> bool {
         self.moves_since_plan = 0;
+        self.reach.close();
+        self.admit_settled();
         if self.moves.is_empty() {
             return true;
         }
         let profile = self.plan(self.moves.len());
         let n = self.moves.len();
-        self.emit(n, &profile, output)
+        let emitted = self.emit(n, &profile, output);
+        if let Some(capacity) = self.config.step_capacity.as_deref() {
+            log_step_capacity(self.step_capacity_log.flush(capacity));
+        }
+        emitted
     }
 
     /// Emit the prefix up to the furthest-forward clean seam inside the
@@ -200,10 +239,33 @@ impl Planner {
         profile: &VelocityProfile,
         output: &mut impl FnMut(PlannedItem) -> bool,
     ) -> bool {
-        debug_assert_eq!(profile.moves.len(), count);
+        assert_eq!(
+            profile.moves.len(),
+            count,
+            "the velocity profile plans a different number of moves than were committed"
+        );
         self.entry_v = profile.boundary_speeds[count];
-        for (geometry, velocity) in self.moves.drain(..count).zip(profile.moves.iter().cloned()) {
-            if !output(PlannedItem::Move(PlannedMove { geometry, velocity })) {
+        for ((geometry, velocity), budget) in self
+            .moves
+            .drain(..count)
+            .zip(profile.moves.iter().cloned())
+            .zip(self.budgets.drain(..count))
+        {
+            if let (Some(capacity), Some(overload)) = (
+                self.config.step_capacity.as_deref(),
+                velocity.step_capacity_overload,
+            ) {
+                log_step_capacity(self.step_capacity_log.record(
+                    capacity,
+                    overload,
+                    std::time::Instant::now(),
+                ));
+            }
+            if !output(PlannedItem::Move(PlannedMove {
+                geometry,
+                velocity,
+                budget,
+            })) {
                 return false;
             }
         }
@@ -216,6 +278,23 @@ impl Planner {
 
     fn stop_at_seam(&self, i: usize) -> bool {
         seam_requires_stop(&self.moves[i - 1], &self.moves[i], self.config.corner)
+    }
+}
+
+fn log_step_capacity(reports: Vec<StepCapacityReport>) {
+    for report in reports {
+        tracing::warn!(
+            subsystem = "motion",
+            event = "step_capacity_capped",
+            mcu = %report.mcu,
+            moves_capped = report.moves_capped,
+            worst_demand_over_capacity = report.worst_demand_over_capacity,
+            "step capacity of mcu '{}' capped {} move(s) since the last report; the \
+             worst asked {:.2}x what the mcu can step",
+            report.mcu,
+            report.moves_capped,
+            report.worst_demand_over_capacity,
+        );
     }
 }
 

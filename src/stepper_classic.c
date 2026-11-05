@@ -41,23 +41,6 @@ step_clock_check_horizon(int32_t distance, uint32_t clock, uint8_t oid)
     shutdown("Step clock beyond sync horizon");
 }
 
-#if CONFIG_HIGH_PREC_STEP
-static inline void
-add_interval(uint32_t *time, struct stepper *s)
-{
-    uint32_t interval = s->interval + s->int_low_acc;
-    *time += interval >> s->shift;
-    s->int_low_acc = interval - ((interval >> s->shift) << s->shift);
-}
-
-static inline void
-inc_interval(struct stepper *s)
-{
-    s->interval += s->add;
-    s->add += s->add2;
-}
-#endif
-
 static uint_fast8_t
 stepper_next_is_barrier(struct stepper *s)
 {
@@ -68,7 +51,7 @@ stepper_next_is_barrier(struct stepper *s)
     return m->flags & MF_BARRIER;
 }
 
-static uint_fast8_t
+uint_fast8_t
 stepper_load_next(struct stepper *s)
 {
     while (stepper_next_is_barrier(s)) {
@@ -190,83 +173,12 @@ stepper_load_next(struct stepper *s)
     return SF_RESCHEDULE;
 }
 
-// Optimized step function to step on each step pin edge
-static uint_fast8_t
-stepper_event_edge(struct timer *t)
-{
-    struct stepper *s = container_of(t, struct stepper, time);
-    gpio_out_toggle_noirq(s->step_pin);
-    uint32_t count = s->count - 1;
-    if (likely(count)) {
-        s->count = count;
-#if CONFIG_HIGH_PREC_STEP
-        if (s->flags & SF_HIGH_PREC_STEP) {
-            add_interval(&s->time.waketime, s);
-            inc_interval(s);
-        } else {
-            s->time.waketime += s->interval;
-            s->interval += s->add;
-        }
-#else
-        s->time.waketime += s->interval;
-        s->interval += s->add;
-#endif
-        return SF_RESCHEDULE;
-    }
-    return stepper_load_next(s);
-}
-
-// Regular "fully scheduled" step function
 uint_fast8_t
 stepper_event_full(struct timer *t)
 {
     struct stepper *s = container_of(t, struct stepper, time);
-    gpio_out_toggle_noirq(s->step_pin);
-#if CONFIG_MCU_SIM
-    uint32_t min_next_time = s->time.waketime + s->step_pulse_ticks;
-#else
-    uint32_t curtime = timer_read_time();
-    uint32_t min_next_time = curtime + s->step_pulse_ticks;
-#endif
-    uint32_t count = s->count - 1;
-    if (likely(count & 1 && !(s->flags & SF_SINGLE_SCHED)))
-        // Schedule unstep event
-        goto reschedule_min;
-    if (likely(count)) {
-#if CONFIG_HIGH_PREC_STEP
-        if (s->flags & SF_HIGH_PREC_STEP) {
-            add_interval(&s->next_step_time, s);
-            inc_interval(s);
-        } else {
-            s->next_step_time += s->interval;
-            s->interval += s->add;
-        }
-#else
-        s->next_step_time += s->interval;
-        s->interval += s->add;
-#endif
-        if (unlikely(timer_is_before(s->next_step_time, min_next_time)))
-            // The next step event is too close - push it back
-            goto reschedule_min;
-        s->count = count;
-        s->time.waketime = s->next_step_time;
-        return SF_RESCHEDULE;
-    }
-    s->time.waketime = min_next_time;
-    return stepper_load_next(s);
-reschedule_min:
-    s->count = count;
-    s->time.waketime = min_next_time;
-    return SF_RESCHEDULE;
-}
-
-// Optimized entry point for step function (may be inlined into sched.c code)
-uint_fast8_t
-stepper_event(struct timer *t)
-{
-    if (HAVE_EDGE_OPTIMIZATION)
-        return stepper_event_edge(t);
-    return stepper_event_full(t);
+    stepper_full_edge(s);
+    return stepper_full_finish(s);
 }
 
 // Record late idle re-arms before the scheduler applies its canonical
@@ -474,10 +386,14 @@ command_reset_step_clock(uint32_t *args)
 }
 DECL_COMMAND(command_reset_step_clock, "reset_step_clock oid=%c clock=%u");
 
-// The host stamps its projected mcu clock into this probe; the receipt
-// delta is the one-way host->mcu wire+demux latency plus projection error,
-// the direction the barrier-ack clock echo cannot see. The reset-surviving
-// worst latch feeds the crash replay; big deltas also emit live.
+// The host stamps its projected mcu clock into this probe as it hands it to
+// the transport, ahead of the motion it sends; the receipt delta is the
+// one-way host->mcu wire, the mcu's dispatch and the projection error, the
+// direction the barrier-ack clock echo cannot see. The reset-surviving worst
+// latch feeds the crash replay; a delta past what healthy runs reach also
+// emits live.
+#define WIRE_PROBE_LATE_US 10000
+
 void
 command_kalico_wire_probe(uint32_t *args)
 {
@@ -485,7 +401,7 @@ command_kalico_wire_probe(uint32_t *args)
     int32_t delta = (int32_t)(timer_read_time() - claimed);
     extern void diag_note_wire_probe(int32_t delta);
     diag_note_wire_probe(delta);
-    if (delta > (int32_t)timer_from_us(5000))
+    if (delta > (int32_t)timer_from_us(WIRE_PROBE_LATE_US))
         event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_MOTION,
                        EVENT_LOG_EVENT_MOTION_WIRE_PROBE_LATE, 0,
                        (uint32_t)delta, claimed);

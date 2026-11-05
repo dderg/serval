@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Usage:
 #   ./scripts/ci.sh                 # run all gates with a summary (local)
-#   ./scripts/ci.sh quick           # fast subset: ruff + rust test/clippy/fmt
+#   ./scripts/ci.sh quick           # fast subset: ruff + rust test/clippy/fmt (gates run concurrently)
 #   ./scripts/ci.sh install-hooks   # enable the pre-push hook (runs `quick` per push)
 #   ./scripts/ci.sh <job>           # run one gate, exit with its status (CI)
 #   ./scripts/ci.sh -v <job>        # stream the gate's output live
+#   ./scripts/ci.sh throughput-gate [--accept --reason R]
+#                                   # replay Ir and a live 2-core replay vs tools/bench/throughput_baseline.json
 #
 # Output policy: a terminal, GitHub Actions and `-v` get the live stream.
 # Everywhere else (agents, scripts capturing stdout) a gate prints one PASS
@@ -20,8 +22,41 @@
 #   cargo install cargo-deny                     # optional
 set -uo pipefail
 
+# A CARGO_TARGET_DIR leaked from another task's shell would send every build
+# and cached engine into someone else's directory. Gates use the worktree's
+# own rust/target unless the caller opts in (integrate_stack.py does). Never
+# share one target dir between worktrees: cargo's unit hash omits the workspace
+# path and its freshness test compares source mtimes with the artifact's, so a
+# worktree with older sources links the crates another worktree built from
+# different ones (reproduced: an example using a constant only the other
+# worktree's geometry defined compiled and ran).
+[ -n "${CI_KEEP_CARGO_TARGET_DIR:-}" ] || unset CARGO_TARGET_DIR
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST="$ROOT/rust"
+
+# Heavy jobs queue for one of SERVAL_SLOTS machine-wide slots (scripts/slots.py):
+# agents sharing the box stacked builds and tests to load 25-60, which timed out
+# nextest and distorted benchmarks. Cheap invocations and CI runners skip it.
+case "${1:-}" in
+    install-hooks|-h|--help|help) ;;
+    *)
+        if [ -z "${SERVAL_SLOT_HELD:-}" ] && [ -z "${GITHUB_ACTIONS:-}" ] && [ -z "${CI_NO_SLOT:-}" ]; then
+            exec python3 "$ROOT/scripts/slots.py" run -- "$0" "$@"
+        fi
+        ;;
+esac
+# Fail fast, with the reason, when the disk is nearly full: rustc then ICEs
+# with errors that read as bugs (it did, for every agent, at 22 MB free).
+MIN_FREE_GB="${CI_MIN_FREE_GB:-10}"
+if [ -z "${GITHUB_ACTIONS:-}" ] && [ "${1:-}" != "install-hooks" ]; then
+    free_gb="$(df -Pk "$ROOT" | awk 'NR == 2 { printf "%d", $4 / 1048576 }')"
+    if [ "$free_gb" -lt "$MIN_FREE_GB" ]; then
+        echo "ci.sh: only ${free_gb} GB free on $(df -P "$ROOT" | awk 'NR == 2 { print $6 }') (need ${MIN_FREE_GB}): free space first, e.g." >&2
+        echo "  python3 scripts/gc_caches.py --worktree-targets --apply" >&2
+        exit 1
+    fi
+fi
 LOG_DIR="$ROOT/.ci-logs"
 VERBOSE=""
 
@@ -45,17 +80,14 @@ run_quiet() {
 }
 
 # Built locally from the worktree's own scripts/Dockerfile-build, tagged per
-# branch so concurrent worktrees never test against a stale or mismatched
-# image (mirrors tools/sim/run.sh's kalico-sim-<branch> tagging). Docker's
-# content-addressed layer cache makes repeat calls near-instant when nothing
-# relevant changed.
+# worktree directory (a slot: the pool has ~20) so concurrent worktrees never
+# test against a stale or mismatched image and the number of 3.6 GB images is
+# bounded by the worktrees, not by every branch ever built (117 images, 400 GB
+# once). Docker's content-addressed layer cache makes repeat calls near-instant
+# when nothing relevant changed.
 docker_image() {
-    local branch tag
-    branch="$(cd "$ROOT" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo head)"
-    # Detached HEAD (e.g. GitHub Actions' PR checkout) yields the literal
-    # string "HEAD" rather than a branch name — fall back to the commit.
-    [ "$branch" = "HEAD" ] && branch="$(cd "$ROOT" && git rev-parse --short HEAD 2>/dev/null || echo head)"
-    tag="klipper-build-${branch//\//-}"
+    local tag
+    tag="klipper-build-$(basename "$ROOT")"
     tag="$(echo "$tag" | tr '[:upper:]' '[:lower:]')"
     run_quiet docker build -f "$ROOT/scripts/Dockerfile-build" -t "$tag" "$ROOT" || return 1
     echo "$tag"
@@ -78,7 +110,59 @@ DOCKER_RUN_AS_USER=(
 # rustflags in rust/.cargo/config.toml, so widening this past the host target
 # would drop the macOS cdylib `-undefined dynamic_lookup` and the cross-build
 # target-cpu/--nmagic flags.
+# pyo3 links the interpreter it finds (python3 on PATH): config-py and shaper-ident
+# fail with `ld.lld: unable to find library -lpython3.12` when the runner image has
+# the interpreter but not its development package (ubuntu-26.04 has no
+# libpython3.12-dev; 24.04 shipped it). Install the matching one when it is missing.
+# Only on GitHub runners; elsewhere a missing library is the developer's to fix.
+LIBPYTHON_CHECKED=""
+ensure_libpython() {
+    [ -z "$LIBPYTHON_CHECKED" ] || return 0
+    LIBPYTHON_CHECKED=1
+    [ -n "${GITHUB_ACTIONS:-}" ] && [ "$(uname -s)" = Linux ] || return 0
+    local have
+    have="$(python3 - <<'PY'
+import os, sysconfig
+libdir = sysconfig.get_config_var("LIBDIR") or ""
+names = [sysconfig.get_config_var(k) for k in ("LDLIBRARY", "LIBRARY")]
+print(any(n and os.path.exists(os.path.join(libdir, n)) for n in names))
+PY
+)"
+    [ "$have" = True ] && return 0
+    echo "ci.sh: no libpython for $(python3 --version 2>&1); installing libpython3-dev" >&2
+    sudo apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=15 update >&2
+    sudo apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=15 install -y libpython3-dev >&2
+}
+
+# pyo3-build-config records the interpreter it found (version, library name) in a
+# build script output that cargo reuses while its inputs look unchanged, and
+# rust-cache restores that output from runs on another runner image: after the
+# image moved from python 3.12 to another interpreter every pyo3 crate still asked
+# the linker for -lpython3.12. Stamp the interpreter in the target dir and rebuild
+# the pyo3 build configuration whenever it differs from the stamp.
+PYO3_STAMP_CHECKED=""
+refresh_pyo3_for_interpreter() {
+    [ -z "$PYO3_STAMP_CHECKED" ] || return 0
+    PYO3_STAMP_CHECKED=1
+    [ -n "${GITHUB_ACTIONS:-}" ] || [ -n "${CI_CHECK_PYO3_INTERPRETER:-}" ] || return 0
+    local stamp now target
+    target="${CARGO_TARGET_DIR:-$RUST/target}"
+    now="$(python3 -c 'import sys, sysconfig; print(sys.version, sys.executable, sysconfig.get_config_var("LDLIBRARY"))' 2>/dev/null || echo none)"
+    stamp="$target/.pyo3-interpreter"
+    if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$now" ]; then
+        return 0
+    fi
+    if [ -f "$stamp" ] || [ -d "$target/debug/build" ]; then
+        echo "ci.sh: interpreter changed or unrecorded ($now); rebuilding pyo3's build configuration" >&2
+        (cd "$RUST" && cargo clean -p pyo3-build-config -p pyo3-ffi >&2 2>&1 || true)
+    fi
+    mkdir -p "$target"
+    printf '%s\n' "$now" > "$stamp"
+}
+
 host_cargo() {
+    refresh_pyo3_for_interpreter
+    ensure_libpython
     if [ "$(uname -s)" = Linux ] && command -v ld.lld >/dev/null 2>&1; then
         RUSTFLAGS="-Clink-arg=-fuse-ld=lld" cargo "$@"
     else
@@ -95,16 +179,45 @@ job_rust_test() {
 # Every proptest suite (tests/*fuzz*.rs, *proptest*.rs, property_*.rs) at a
 # case count far above the per-file default, with a fresh random seed per
 # run. rust-test already runs the same suites at their defaults; this gate is
-# the one that keeps exploring. Suites that run the whole streaming pipeline
+# the one that keeps exploring. FUZZ_PARTITION=N/M runs shard N of M (the PR
+# workflow uses 3) and FUZZ_NEXTEST_PROFILE picks the nextest profile (the
+# nightly run uses the one without the 180 s limit). Suites that run the whole streaming pipeline
 # per case cost ~20 ms each, so they take a 64th of the count.
 job_rust_fuzz() {
     cd "$RUST"
     local cases="${PROPTEST_CASES:-20000}"
-    local pipeline='binary(seam_schedule_fuzz) | binary(planner_fuzz)'
-    PROPTEST_CASES="$cases" host_cargo nextest run --workspace --profile ci \
-        -E "(binary(/fuzz|proptest|^property_/) | test(/ripple_fuzz::/)) - ($pipeline)" || return 1
-    PROPTEST_CASES="$((cases / 64))" host_cargo nextest run --workspace --profile ci \
-        -E "$pipeline"
+    local pipeline='binary(seam_schedule_fuzz) | binary(planner_fuzz) | binary(planner_conservation_fuzz) | test(/projection_fuzz::/)'
+    local profile="${FUZZ_NEXTEST_PROFILE:-ci}"
+    local partition=()
+    [ -z "${FUZZ_PARTITION:-}" ] || partition=(--partition "hash:$FUZZ_PARTITION")
+    local log rc=0
+    log="$(mktemp)"
+    PROPTEST_CASES="$cases" host_cargo nextest run --workspace --profile "$profile" \
+        ${partition[@]+"${partition[@]}"} \
+        -E "(binary(/fuzz|proptest|^property_/) | test(/ripple_fuzz::/)) - ($pipeline)" \
+        >"$log" 2>&1 || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        PROPTEST_CASES="$((cases / 64))" host_cargo nextest run --workspace --profile "$profile" \
+            ${partition[@]+"${partition[@]}"} \
+            -E "$pipeline" >>"$log" 2>&1 || rc=$?
+    fi
+    cat "$log"
+    [ "$rc" -eq 0 ] || python3 "$ROOT/scripts/fuzz_triage.py" parse <"$log"
+    rm -f "$log"
+    return "$rc"
+}
+
+# The fit audit checks every accepted fit piece densely and slows the
+# pipeline ~2x, so it is compiled only here: as a feature of the default
+# test build it would unify into every workspace test binary.
+job_rust_fit_audit() {
+    cd "$RUST"
+    host_cargo nextest run --profile ci -p motion-pipeline --features fit-audit \
+        -E 'test(/^fit_audit::/)'
+    host_cargo nextest run --profile ci -p pipeline-snapshot --features fit-audit \
+        --test fit_tolerance
+    cargo clippy -p motion-pipeline --features fit-audit --all-targets -- -D warnings
+    cargo clippy -p pipeline-snapshot --features fit-audit --all-targets -- -D warnings
 }
 
 job_rust_clippy() { cd "$RUST" && cargo clippy --workspace --all-targets -- -D warnings; }
@@ -265,10 +378,17 @@ job_py() {
     fi
 }
 
-job_bench() {
-    cd "$ROOT" && uv run python -m pytest -q tools/bench
-    cd "$ROOT/tools/bench/sim-logic" && cargo test -q && cargo clippy --all-targets -- -D warnings && cargo fmt -- --check
-    cd "$ROOT/tools/bench/capture-fw" && cargo clippy --release -- -D warnings && cargo fmt -- --check
+job_bench_fw() {
+    cd "$ROOT/tools/bench/sim-logic"
+    cargo fmt --check
+    cargo clippy --all-targets -- -D warnings
+    cargo test -q
+    cd "$ROOT/tools/bench/capture-fw"
+    rustup show active-toolchain >/dev/null 2>&1 || rustup toolchain install
+    cargo fmt --check
+    cargo clippy --release -- -D warnings
+    cargo build --release
+    cd "$ROOT" && uv run pytest tools/bench
 }
 
 job_sim() {
@@ -288,6 +408,7 @@ job_sim() {
 }
 
 job_sim_e2e() { "$ROOT/tools/sim/run.sh" test "$@"; }
+job_sim_image() { "$ROOT/tools/sim/run.sh" save-image; }
 
 # The producer must outrun the printer everywhere; the committed asset is the
 # dense top-layer region that exhausted the bench's 0.25 s anchor lead,
@@ -299,11 +420,48 @@ job_sim_e2e() { "$ROOT/tools/sim/run.sh" test "$@"; }
 # fitter merges ~10 slicer moves into each planned move here and the planner
 # re-plans every 64 planned moves, so a healthy stream goes ~650 slicer moves
 # without output; a planner that cannot commit past a layer change holds
-# thousands (3480 before the finality barrier alone gated commits).
+# thousands (3480 before the finality barrier alone gated commits). Every
+# config under tools/bench/configs and its machine profiles then replays the
+# same print through the same live construction, held only to finishing.
+# CI runners say nothing about the printer host: the Pi 5 realtime factors
+# per config and core count are in tools/bench/README.md ("Replay
+# throughput (Pi 5)").
 job_replay_budget() {
     cd "$RUST" && cargo run --release -p motion-core --example gcode_replay_bench -- \
         "$ROOT/tools/sim/gcode/voron_dense_top_layers.gcode" \
-        --config "$ROOT/tools/bench/printer.cfg" --min-worst-x 1.3 --max-held-moves 1000
+        --config "$ROOT/tools/bench/printer.cfg" --min-worst-x 1.3 --max-held-moves 1000 || return
+    local config
+    for config in "$ROOT"/tools/bench/configs/*.cfg "$ROOT"/tools/bench/configs/profiles/*.cfg; do
+        echo "replay-budget: ${config#"$ROOT"/}"
+        cargo run --release -p motion-core --example gcode_replay_bench -- \
+            "$ROOT/tools/sim/gcode/voron_dense_top_layers.gcode" --config "$config" || return
+    done
+}
+
+# Every user-space instruction of a slice of the same dense print replayed
+# single-threaded under cachegrind, plus the whole print replayed live on two
+# pinned cores against a build of the pinned Pi calibration commit, and the
+# Pi 2-core worst window both predict; see scripts/throughput_gate.py.
+# A host without valgrind measures inside the scripts/Dockerfile-build image.
+# On a pull request the base is the merge commit's first parent, and a moved
+# baseline file needs a ```throughput-accept block in $PR_BODY.
+job_throughput_gate() {
+    if ! command -v valgrind >/dev/null 2>&1; then
+        THROUGHPUT_GATE_IMAGE="$(docker_image)" || return
+        export THROUGHPUT_GATE_IMAGE
+    fi
+    local accept_base=()
+    [ "${GITHUB_EVENT_NAME:-}" != pull_request ] || accept_base=(--accept-base HEAD^1)
+    python3 "$ROOT/scripts/throughput_gate.py" ${accept_base[@]+"${accept_base[@]}"} "$@"
+}
+
+# The live host and the snapshot path must plan the whole corpus bit for bit
+# alike: klippy's G-code handlers drive the real MotionEngine bridge with a
+# detached planner (no MCU), and every pipeline input and shaped segment is
+# compared with the snapshot path's (snapshots/live_bridge_parity.py).
+job_live_parity() {
+    cd "$ROOT" && make -f Makefile.rust motion-engine-fast \
+        && uv run python -m pytest -q -n auto -p no:cacheprovider snapshots/test_live_bridge_parity.py
 }
 
 job_docs() { cd "$ROOT/docs/_kalico" && uv run mkdocs build --strict; }
@@ -326,9 +484,8 @@ tally() { sed -e '/^[[:space:]]*$/d' -e 's/^[[:space:]]*//' "$1" | tail -1 | cut
 
 job_log() { mkdir -p "$LOG_DIR"; echo "$LOG_DIR/$1.log"; }
 
-run_check() {
+execute_check() {
     local name="$1"; shift
-    printf '%-20s ' "$name"
     local log rc=0
     log="$(job_log "$name")"
     # Standalone statement, NOT `... && rc=0 || rc=$?`: in a `&&`/`||`
@@ -337,6 +494,16 @@ run_check() {
     # nextest run could hide behind passing doc-tests.
     ( set -e; "$@" ) >"$log" 2>&1
     rc=$?
+    echo "$rc" >"$log.rc"
+}
+
+report_check() {
+    local name="$1"
+    printf '%-20s ' "$name"
+    local log rc
+    log="$(job_log "$name")"
+    rc="$(cat "$log.rc")"
+    rm -f "$log.rc"
     if [ "$rc" -eq 0 ]; then
         printf '\033[1;32mPASS\033[0m  %s  \033[2m[%s]\033[0m\n' \
             "$(tally "$log")" ".ci-logs/$name.log"; PASS=$((PASS + 1))
@@ -348,14 +515,48 @@ run_check() {
     return "$rc"
 }
 
+run_check() {
+    execute_check "$@"
+    report_check "$1"
+}
+
+# The quick gates are independent (cargo serialises only the compile step on
+# the target dir lock, not a test run), so they run concurrently and report in
+# a fixed order: wall time is the slowest gate, not the sum.
+run_quick_gates() {
+    local gates=(
+        "ruff job_ruff"
+        "rust-test job_rust_test"
+        "rust-fit-audit job_rust_fit_audit"
+        "rust-clippy job_rust_clippy"
+        "rust-fmt job_rust_fmt"
+        "public-api job_public_api"
+        "watchdog-canary job_watchdog_canary"
+    )
+    local gate
+    for gate in "${gates[@]}"; do
+        # shellcheck disable=SC2086
+        execute_check $gate &
+    done
+    wait
+    for gate in "${gates[@]}"; do
+        report_check "${gate%% *}" || true
+    done
+}
+
 run_all() {
     local quick="${1:-false}"
-    run_check "ruff"            job_ruff
-    run_check "rust-test"       job_rust_test
-    run_check "rust-clippy"     job_rust_clippy
-    run_check "rust-fmt"        job_rust_fmt
-    run_check "public-api"      job_public_api
-    run_check "watchdog-canary" job_watchdog_canary
+    if [ "$quick" = "true" ]; then
+        run_quick_gates
+    else
+        run_check "ruff"            job_ruff
+        run_check "rust-test"       job_rust_test
+        run_check "rust-fit-audit"  job_rust_fit_audit
+        run_check "rust-clippy"     job_rust_clippy
+        run_check "rust-fmt"        job_rust_fmt
+        run_check "public-api"      job_public_api
+        run_check "watchdog-canary" job_watchdog_canary
+    fi
     if [ "$quick" != "true" ]; then
         run_check "cbindgen-drift"  job_cbindgen_drift
         run_check "c-smoke"         job_c_smoke
@@ -372,10 +573,12 @@ run_all() {
         run_check "docs"            job_docs
         run_check "py"              job_py
         run_check "py-typecheck"    job_py_typecheck
+        run_check "bench-fw"        job_bench_fw
         run_check "sim"             job_sim
-        run_check "bench"           job_bench
         run_check "snapshot"        job_snapshot
+        run_check "live-parity"     job_live_parity
         run_check "replay-budget"   job_replay_budget
+        run_check "throughput-gate" job_throughput_gate
         run_check "rust-fuzz"       job_rust_fuzz
     fi
     echo "────────────────────────────────────────"
@@ -418,6 +621,7 @@ name="$1"; shift
 case "$name" in
     rust-test)        job=(job_rust_test) ;;
     rust-fuzz)        job=(job_rust_fuzz) ;;
+    rust-fit-audit)   job=(job_rust_fit_audit) ;;
     rust-clippy)      job=(job_rust_clippy) ;;
     rust-fmt)         job=(job_rust_fmt) ;;
     public-api)       job=(job_public_api) ;;
@@ -438,11 +642,14 @@ case "$name" in
     py)               job=(job_py "${1:-3.13}") ;;
     py-typecheck)     job=(job_py_typecheck) ;;
     docs)             job=(job_docs) ;;
+    bench-fw)         job=(job_bench_fw) ;;
     sim)              job=(job_sim) ;;
-    bench)            job=(job_bench) ;;
     sim-e2e)          job=(job_sim_e2e ${@+"$@"}) ;;
+    sim-image)        job=(job_sim_image) ;;
     replay-budget)    job=(job_replay_budget) ;;
+    throughput-gate)  job=(job_throughput_gate ${@+"$@"}) ;;
     snapshot)         job=(job_snapshot) ;;
+    live-parity)      job=(job_live_parity) ;;
     *) echo "unknown job: $name" >&2; usage >&2; exit 2 ;;
 esac
 

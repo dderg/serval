@@ -6,8 +6,9 @@ use crate::path::lowering::PositionProfile;
 use crate::path::{Arc, Clothoid, CurvatureProfile, Line};
 use crate::segment::FollowerDemand;
 
+use super::super::biclothoid::{DEV_SAMPLES_PER_PIECE, piece_dev_from_chain};
 use super::super::vec3::{add, cross, dot, madd, norm, normalize, scale, signed_angle, sub};
-use super::super::{BUDGET_EPS_MM, FitError, internal, line_of};
+use super::super::{BUDGET_EPS_MM, FitError, internal, line_claim_cap, line_of};
 use super::Reconstruction;
 use super::follower::construct_followers;
 
@@ -20,6 +21,7 @@ pub(in crate::fitter) struct Neighbor {
     dir: [f64; 3],
     vertex: [f64; 3],
     length: f64,
+    claim_cap: f64,
     epmm: f64,
     followers: Vec<FollowerDemand>,
 }
@@ -39,6 +41,7 @@ pub(in crate::fitter) fn neighbor(m: &Move, end: RunEnd) -> Option<Neighbor> {
         dir,
         vertex,
         length: l.s_len(),
+        claim_cap: line_claim_cap(m, l.s_len()),
         epmm: epmm(m),
         followers: m.segment.followers.clone(),
     })
@@ -91,8 +94,8 @@ pub(in crate::fitter) fn ease_run(
         return Ok(());
     }
 
-    let head_len = head.map_or(0.0, |n| n.length);
-    let tail_len = tail.map_or(0.0, |n| n.length);
+    let head_cap = head.map_or(0.0, |n| n.claim_cap);
+    let tail_cap = tail.map_or(0.0, |n| n.claim_cap);
     let mut fit = None;
     'search: for &(use_head, use_tail) in &[(true, true), (true, false), (false, true)] {
         let hp0 = if use_head { head_max } else { None };
@@ -120,11 +123,11 @@ pub(in crate::fitter) fn ease_run(
             let ends = EaseEnds {
                 head: hp.map(|plan| EaseEnd {
                     plan,
-                    line_len: head_len,
+                    claim_cap: head_cap,
                 }),
                 tail: tp.map(|plan| EaseEnd {
                     plan,
-                    line_len: tail_len,
+                    claim_cap: tail_cap,
                 }),
             };
             let attempt = try_ease(ends, &arc, &verts, tol).map_err(internal(line_no))?;
@@ -194,7 +197,7 @@ struct EndPlan {
 #[derive(Clone, Copy)]
 struct EaseEnd {
     plan: EndPlan,
-    line_len: f64,
+    claim_cap: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -229,11 +232,13 @@ struct EaseFit {
 /// Solve one easing configuration end to end: refit the circle for the given
 /// end plans, then build every planned spiral and validate its line trim, and
 /// rebuild the residual mid-arc between the spiral contacts. A planned end
-/// whose spiral is degenerate or over-claims its neighbor — or a pair of
+/// whose spiral is degenerate or over-claims its neighbor — a pair of
 /// spirals that would consume more angle than the arc has, leaving a residual
-/// sweep that runs backward — rejects the whole attempt: the caller retries
-/// with a smaller lead angle or fewer eased ends, because the refit circle is
-/// only valid together with the spirals it was solved for.
+/// sweep that runs backward — or an eased curve straying farther than `tol`
+/// from the polyline it replaces (the run's facets and the neighbor lines
+/// the spirals trim) rejects the whole attempt: the caller retries with a
+/// smaller lead angle or fewer eased ends, because the refit circle is only
+/// valid together with the spirals it was solved for.
 fn try_ease(
     ends: EaseEnds,
     arc: &ArcFrame,
@@ -252,7 +257,7 @@ fn try_ease(
     };
     let head = match ends.head {
         Some(e) => match build_spiral(origin, radius, &e.plan, pn)? {
-            Some((clo, b, trim)) if within_line(trim, e.line_len) => {
+            Some((clo, b, trim)) if within_line(trim, e.claim_cap) => {
                 Some(SpiralFit { clo, b, trim })
             }
             _ => return Ok(None),
@@ -261,7 +266,7 @@ fn try_ease(
     };
     let tail = match ends.tail {
         Some(e) => match build_spiral(origin, radius, &e.plan, pn)? {
-            Some((clo, b, trim)) if within_line(trim, e.line_len) => {
+            Some((clo, b, trim)) if within_line(trim, e.claim_cap) => {
                 Some(SpiralFit { clo, b, trim })
             }
             _ => return Ok(None),
@@ -279,7 +284,28 @@ fn try_ease(
     let Some(arc) = build_arc(origin, radius, b_head, b_tail, pn, expected_sweep)? else {
         return Ok(None);
     };
-    Ok(Some(EaseFit { head, tail, arc }))
+    let fit = EaseFit { head, tail, arc };
+    Ok((fit.deviation_from_polyline(verts) <= tol).then_some(fit))
+}
+
+impl EaseFit {
+    fn deviation_from_polyline(&self, verts: &[[f64; 3]]) -> f64 {
+        let line_contact =
+            |spiral: &Option<SpiralFit>| spiral.as_ref().map(|s| s.clo.point_at(0.0));
+        let chain: Vec<[f64; 3]> = line_contact(&self.head)
+            .into_iter()
+            .chain(verts.iter().copied())
+            .chain(line_contact(&self.tail))
+            .collect();
+        [&self.head, &self.tail]
+            .into_iter()
+            .flatten()
+            .map(|s| piece_dev_from_chain(&s.clo, &chain, DEV_SAMPLES_PER_PIECE))
+            .fold(
+                piece_dev_from_chain(&self.arc, &chain, DEV_SAMPLES_PER_PIECE * chain.len()),
+                f64::max,
+            )
+    }
 }
 
 fn max_ease_angle(radius: f64, neighbor_len: f64) -> f64 {
@@ -294,7 +320,11 @@ fn ease_plan(n: &Neighbor, spiral: Spiral, run_epmm: f64, arc: &ArcFrame) -> Opt
     if phi < ANGLE_EPS_RAD {
         return None;
     }
-    let normal = scale(normalize(cross(arc.plane_n, spiral.dir)), spiral.curve_sgn);
+    let tangent = cross(arc.plane_n, spiral.dir);
+    if norm(tangent) < ANGLE_EPS_RAD {
+        return None;
+    }
+    let normal = scale(normalize(tangent), spiral.curve_sgn);
     if dot(normal, sub(arc.origin, n.vertex)) <= 0.0 {
         return None;
     }
@@ -480,13 +510,13 @@ fn build_spiral(
     Ok(Some((clo, b, line_trim)))
 }
 
-/// A spiral may consume at most half of the neighbor line: the far half
-/// belongs to whatever claims the line's other end — another run's easing or a
-/// corner blend — which under streaming causality is unknown when this run
-/// seals. Claims beyond half can overlap on a short shared line, and the
-/// emitted geometry then jumps backward by the overlap.
-fn within_line(trim: f64, length: f64) -> bool {
-    trim > -BUDGET_EPS_MM && trim < 0.5 * length
+/// A spiral may consume at most [`line_claim_cap`] of the neighbor line: the
+/// far half belongs to whatever claims the line's other end — another run's
+/// easing or a corner blend — which under streaming causality is unknown when
+/// this run seals. Claims beyond half can overlap on a short shared line, and
+/// the emitted geometry then jumps backward by the overlap.
+fn within_line(trim: f64, claim_cap: f64) -> bool {
+    trim > -BUDGET_EPS_MM && trim < claim_cap
 }
 
 fn project_to_circle(origin: [f64; 3], radius: f64, p: [f64; 3]) -> [f64; 3] {

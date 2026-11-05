@@ -41,6 +41,14 @@ uv run python tools/bench/analyze.py ~/bench/runs/<dir> [--gap S]       # writes
 
 Run dirs: `~/bench/runs/<YYYYmmdd-HHMMSS>/` — `print.gcode`, `printer.cfg` (the one used), `capture.bin/json`, `klippy.log`, `events/*.jsonl` (structured logs; query with the query-logs/mcu-diagnostics skills, files hold the Pi's whole history so filter by the run's time window), `run.json`, `analysis.json`.
 
+## Helpers
+
+Offline, on run dirs under `~/bench/runs`: `uv run python tools/bench/summarize.py '<run_dir|glob>'... [--json]` (one diffable line per run: verdict, failed checks, stalls, abs_max/p99 per motor, epochs, mcu lateness, deployed head) and `uv run python tools/bench/events.py <run_dir> [--around T] [--names a,b]` (event counts in the run's time window, errors verbatim, klippy Stats trend for crashes). Use these instead of ad-hoc /tmp scripts.
+
+On hardware (lock-taking, re-entrant under `lock.py hold`): `gcode.py "G1 X10" ...` sends lines and fails on error; `state.py` reports printer state, deployed identity, klipper pid, MCU serial and capture board (read-only); `ab.py --ref A --ref B --gcode G [--runs 3] [--config C] [--host-cpus N --host-max-mhz M] [--dry-run]` runs the same gcode on clean worktrees of each ref in one lock hold and prints a side-by-side table. Landing a PR: `scripts/land-pr.sh <branch>`.
+
+Planner-side tools for changes the analyzer's reference depends on (it plans with the same engine): `scripts/review_baselines.py --pr N` (physical review of moved snapshot cases), `scripts/accept_reviewed.py N` (accept + commit baselines after review), `scripts/bench_compare.py A B` (interleaved replay A/B; trust its CPU row on a busy box), `scripts/corpus.sh` (59-case planner corpus), `scripts/integrate_stack.py 443 444 --run CMD` (try a PR stack on a throwaway worktree before `deploy.py sync --tree`). `scripts/land-pr.sh` runs from the branch's own worktree and re-updates the PR branch when main moves.
+
 ## Reading analysis.json
 
 `ok` = all four `checks`:
@@ -48,7 +56,7 @@ Run dirs: `~/bench/runs/<YYYYmmdd-HHMMSS>/` — `print.gcode`, `printer.cfg` (th
 - `net_steps_match` — per motor, captured net steps (DIR-signed) equal the reference's. False = lost or extra steps.
 - `all_steps_matched` — every captured step pairs with a reference step and vice versa (`unmatched_capture_steps`/`unmatched_reference_steps` = 0). Keys are absolute (level,dir): capture and reference counts run continuously across epochs. A step pairs within 100 ms when its key is unique in that window, but only within 2 ms (`PAIR_WINDOW_S`) when the key repeats (ripple bursts), so a step can't pair with the neighbouring burst. Unpaired steps whose count disagreement stays within ±1 on a lattice line are `edge_tie_steps`, not failures. When a burst ends exactly on a lattice line the firmware may withhold the final step, then take it when the next burst starts or skip it if that burst reverses; the lone unpaired step at the epoch's end or start is a `rest_tie_steps` tie (and is allowed in `net_steps_match`).
 - `no_stalls` — no 5 ms bin where the reference has ≥3 steps and the capture none (or reverse); `stalls.items[]` give times.
-- `timing_abs_max_within_50us` — max |capture − aligned reference| over motors. **Sign: positive = step late.** Healthy count-mode runs show p99 ≈ 13–25 µs, abs_max ≈ 33–37 µs (25 µs tick quantization); event-mode runs show p99 ≈ 3–6 µs, abs_max ≈ 23–29 µs (host step compression against the ideal reference, `stepcompress_max_error` = 25 µs).
+- `timing_within_50us_or_0.05_step` — fails if any step (reference rate ≥ 200 Hz) is both more than 50 µs off the aligned reference **and** more than 0.05 step off in position (|time error| × reference rate). From 1 kHz up, every step more than 50 µs off is also more than 0.05 step off, so the plain 50 µs bound applies there. Below 1 kHz the bound widens to 0.05 step / rate (250 µs at 200 Hz). This lets a turnaround step through when its large time error is a tiny position difference. Per motor: `timing_violation_steps`; `timing_beyond_time_bound_steps` and `timing_beyond_time_bound_worst_position` (time error, rate, position-equivalent steps, capture time); `position_equivalent_error_abs_max`. That last one is set by high-rate steps (≈ 2 steps at 70 kHz for a 29 µs error), so the time stats judge those steps. `timing_error_capture_minus_reference_us`: **Sign: positive = step late.** Healthy count-mode runs show p99 ≈ 13–25 µs, abs_max ≈ 33–37 µs (25 µs tick quantization); event-mode runs show p99 ≈ 3–6 µs, abs_max ≈ 23–29 µs (host step compression against the ideal reference, `stepcompress_max_error` = 25 µs). abs_max above 50 µs on an `ok` run is a low-rate step that the position bound let through.
 
 Also useful: `epochs[]` (one per motion burst; `ppm` = clock drift fit, `residual_wander_us`, capture-vs-stream span delta), `motors.*.peak_step_rate_captured_hz` vs `_reference_hz`, `max_abs_count_error_steps`. More than one capture epoch vs one reference epoch (`AnalysisError: N capture epochs vs 1`) means the printer stopped and restarted mid-run (starved host); rerun analyze with a larger `--gap`.
 
@@ -59,7 +67,7 @@ Crash triage: `journalctl -u klipper` on the Pi (`ssh bench-pi`) and `events/hos
 ## Recovery
 
 - klippy aborted: systemd restarts it after ~10 s; `prepare_printer` waits for ready.
-- MCU latched in shutdown (survives klippy restarts; `prepare_printer` times out "printer did not become ready"): `deploy.py reset-target`. Full reflash: `deploy.py flash-target` (F401 fw from `f401.config` via Pi SWD). Capture board: `deploy.py flash-capture`.
+- MCU latched in shutdown (survives klippy restarts; `prepare_printer` times out "printer did not become ready"): `deploy.py reset-target`. Full reflash: `deploy.py flash-target` (F401 fw from `f401.config` via Pi SWD). Capture board: `deploy.py flash-capture`. Both build inside the tree they run from (`out/bench-f401`, `capture-fw/target`; `--tree` picks another), require the board to report the tree's firmware build id (`firmware_build_id.py`) after flashing, and record it under `firmware` in the deploy record that every `run.json` carries.
 - F407 whose firmware disabled SWD: set BOOT0=1 and press reset (manual). Ask the user for wiring changes (endstops, TMC UART, clock wire are planned, see README).
 
 ## Limits

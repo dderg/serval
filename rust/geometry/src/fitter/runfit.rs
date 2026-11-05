@@ -1,12 +1,16 @@
 use crate::frontend::Move;
 use crate::path::CurvatureProfile;
+use crate::path::lowering::PositionProfile;
 use crate::segment::FollowerDemand;
 
 use super::emit::{SeamSide, blend_followers};
 use super::kernels::RunEnd;
 use super::move_ops::{is_travel, line_of};
 use super::overlap::ArcSide;
-use super::{CornerFitConfig, FitError, causal, kernels, overlap, ramps_admitted, span_tolerance};
+use super::{
+    CornerFitConfig, FitError, causal, kernels, line_claim_cap, overlap, ramps_admitted,
+    shortest_executable_halves, span_tolerance,
+};
 
 /// A sealed arc run's reconstruction: the arc, its easing clothoids into the
 /// neighbor lines, and any boundary blends resolved against them. Built only
@@ -26,6 +30,8 @@ impl RunFit {
     /// moves when they are plain (not part of another run); `None` when the
     /// run abuts another run, a stream edge, or nothing. Returns `Ok(None)`
     /// when no valid reconstruction exists — the facets stay plain lines.
+    /// `head_arc_tangent` is the [`RunFit::end_tangent`] of a sealed run
+    /// sharing the head vertex.
     /// A bare reconstruction whose extrusion ramp fails the kinematic gate
     /// dissolves the same way; an easing that fails it is dropped while the
     /// bare reconstruction stands.
@@ -33,6 +39,7 @@ impl RunFit {
         facets: &[Move],
         head: Option<&Move>,
         tail: Option<&Move>,
+        head_arc_tangent: Option<[f64; 3]>,
         corner: CornerFitConfig,
     ) -> Result<Option<RunFit>, FitError> {
         let tol = span_tolerance(facets);
@@ -49,6 +56,7 @@ impl RunFit {
             tol,
             head.and_then(travel_len),
             tail.and_then(travel_len),
+            head_arc_tangent,
         )?
         else {
             return Ok(None);
@@ -71,6 +79,17 @@ impl RunFit {
             head_line_extra: 0.0,
             tail_line_extra: 0.0,
         }))
+    }
+
+    /// The heading the run's arc ends on, when nothing eases it into a line
+    /// after it — what a run sharing its tail vertex anchors tangent to.
+    #[must_use]
+    pub fn end_tangent(&self) -> Option<[f64; 3]> {
+        let arc = &self.recon.arc;
+        self.recon
+            .down
+            .is_empty()
+            .then(|| arc.heading_at(arc.s_len()))
     }
 
     /// Length consumed from the head neighbor's tail (easing plus boundary
@@ -124,9 +143,15 @@ impl RunFit {
         let Some(line) = line_of(neighbor) else {
             return Ok(Vec::new());
         };
-        let Some(blend) =
-            overlap::resolve_arc_line(&self.recon.arc, line, ArcSide::Outbound, corner, self.tol)
-        else {
+        let Some(blend) = overlap::resolve_arc_line(
+            &self.recon.arc,
+            line,
+            ArcSide::Outbound,
+            corner,
+            self.tol,
+            shortest_executable_halves(neighbor, run_first),
+            line_claim_cap(neighbor, line.s_len()),
+        ) else {
             return Ok(Vec::new());
         };
         let Some(out) = general_blend(
@@ -166,9 +191,15 @@ impl RunFit {
         let Some(line) = line_of(neighbor) else {
             return Ok(Vec::new());
         };
-        let Some(blend) =
-            overlap::resolve_arc_line(&self.recon.arc, line, ArcSide::Inbound, corner, self.tol)
-        else {
+        let Some(blend) = overlap::resolve_arc_line(
+            &self.recon.arc,
+            line,
+            ArcSide::Inbound,
+            corner,
+            self.tol,
+            shortest_executable_halves(run_last, neighbor),
+            line_claim_cap(neighbor, line.s_len()),
+        ) else {
             return Ok(Vec::new());
         };
         let Some(out) = general_blend(
@@ -206,9 +237,13 @@ impl RunFit {
         if !(self.recon.down.is_empty() && next.recon.up.is_empty()) {
             return Ok(Vec::new());
         }
-        let Some(blend) =
-            overlap::resolve_arc_arc(&self.recon.arc, &next.recon.arc, corner, self.tol)
-        else {
+        let Some(blend) = overlap::resolve_arc_arc(
+            &self.recon.arc,
+            &next.recon.arc,
+            corner,
+            self.tol,
+            shortest_executable_halves(run_last, next_first),
+        ) else {
             return Ok(Vec::new());
         };
         let Some(out) = general_blend(

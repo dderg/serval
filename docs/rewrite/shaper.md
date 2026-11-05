@@ -2,17 +2,27 @@
 
 The shaper is the last stage of the streaming motion pipeline
 (`setup_pipeline` in `rust/motion-core/src/worker.rs`: fitter → planner →
-lowerer → **shaper**). It takes the lowered trajectory — per-axis piecewise
+turning guard → lowerer → **shaper**). It takes the lowered trajectory — per-axis piecewise
 polynomial tracks that already satisfy the velocity/accel/jerk limits and the
 clothoid corner blending — and turns it into what each motor should actually
 be commanded to do. Everything the classic Klipper stack does after the
 trapezoid generator (input shaping, smoothers, pressure advance) lives here,
 unified under one model, plus things that stack cannot express.
 
-In the live host, `motion_pipeline::Pipeline` runs these four stages
-synchronously on `kalico-planning`. Snapshot generation uses the same
-coordinator. There are no interstage queues or dedicated stage threads;
-numerical parallel work within a stage remains.
+In the live host, fitting, planning, the turning guard and lowering run on `kalico-planning`,
+and the shaper runs on its own `kalico-shaper` thread
+(`motion_pipeline::StagedPipeline`). Lowered items reach it in order through
+a bounded inbox (`SHAPER_INBOX_CAP`), so a slow shaper backpressures planning
+and a barrier still acknowledges only after everything ahead of it has been
+shaped. Snapshot generation runs the same four stages synchronously through
+`motion_pipeline::Pipeline`; numerical parallel work within a stage remains.
+That parallel work — the planner's member profiles, the shaper's leader
+target and span fits, follower source and kernel fits, arc lengths — fans
+out on one persistent worker pool the pipeline shares between the two
+stages (`kalico-pool-N` threads, one per spare core up to three, spawned on
+the first fan-out): the calling thread takes jobs alongside whichever
+helpers are idle, results merge in job order, and a job's panic resurfaces
+on the calling thread.
 
 The core idea: **resonance suppression and mechanical compensation are
 per-axis linear operators on the planned trajectory**, and there are exactly
@@ -44,15 +54,13 @@ damping_ratio: 0.1
 
 [axis e]
 follows: x, y, z
-post_processors: pa, st
+post_processors: pa
+max_velocity: 50
+max_accel: 5000
 
 [post_processor pa]
 type: linear_pressure_advance
 k: 0.03
-
-[post_processor st]
-type: smooth_triangle
-smooth_time: 0.02
 ```
 
 Sources: `rust/trajectory/src/chain.rs` (stage model, compilation,
@@ -93,7 +101,9 @@ Roster (`rust/trajectory/src/algos/`):
 - `smooth_bell` (`smooth_time`) — the C¹ quartic bell `c·(h²−t²)²`, a
   general-purpose low-pass with no tuned notch.
 - `smooth_triangle` (`smooth_time`) — the classic triangle (double boxcar);
-  cheap general smoothing, used e.g. on the extruder.
+  cheap general smoothing. After an extruder's advance it is an explicit
+  override that trades a bead bulge at every corner for lower extruder
+  acceleration; the recommended extruder chain is the advance alone.
 - `linear_pressure_advance` (`k`) — `DerivativeGains { k1: k, k2: 0 }`.
 - `tanh_pressure_advance`, `recipr_pressure_advance` (`linear_advance`,
   `nonlinear_offset`, `linearization_velocity`) — `NonlinearAdvance`, the
@@ -169,10 +179,16 @@ loudly at config time rather than producing silently wrong motion:
 - a gain stage with `k2 ≠ 0` must come **after** a kernel
   (`AccelGainNeedsPrecedingKernel`): applied before the kernel it would run
   in the lowerer, whose curved-path sampler carries no jerk and cannot form
-  the transformed velocity. After a kernel the track is polynomial and the
-  operator is exact algebra on coefficients
-  (`apply_derivative_gains_to_track`: differentiate the monomial pieces
-  twice, add `k1·ẋ + k2·ẍ` termwise).
+  the transformed velocity. After a kernel the operator commutes with the
+  convolution — `x + k1·ẋ + k2·ẍ` of `k ∗ f` is `k ∗ (f + k1·ḟ + k2·f̈)` —
+  so the motor command is the exact convolution of the gained input
+  polynomials (`AxisSignalTable::with_derivative_gains`), with the input's
+  acceleration and velocity steps carried as kernel-weighted jump terms.
+  The input is only position-continuous at its knots, so `ḟ` and `f̈` also
+  carry impulses there: a velocity step `Δḟ` puts `k2·Δḟ·δ` into the gained
+  input, a position step `Δf` puts `k1·Δf·δ + k2·Δf·δ′`. Gaining the pieces
+  drops them, so `GainImpulseResponse` adds their convolution back —
+  `δ ∗ k = k`, `δ′ ∗ k = k′` evaluated at each step.
 
 Order within a chain is meaningful: stages before the kernel act on the
 input signal, the kernel convolves the result, stages after the kernel act
@@ -223,12 +239,16 @@ supposed to cancel them.
 The shaper materializes the distinction (`apply_motor_side_stages` in
 shaper.rs): trailing gains are applied as the *last* transformation, after
 follower projection, and `Shaper::with_toolhead_tap` can mirror every
-emitted segment as it stands *before* that stage. The snapshot pipeline uses
-the tap to emit optional `toolhead_*_pieces`, which is what the snapshot
-viewer and playground plot as the toolhead signal alongside the motor
-command. `CompiledChain::has_motor_side_gains` /
-`AxisChainSet::has_motor_side_stages` define "motor-side": a gain stage
-that follows a kernel.
+emitted segment as it stands *before* that stage. A leader axis's motor
+command is its own velocity-continuous fit of that exact gained convolution
+(`fit_motor_commands`, fit context `motor_command`), never a derivative of
+the fitted toolhead track: a fit is only C1–C2 at its knots, so
+differentiating it twice would step the command's velocity by `k2·Δjerk` at
+every seam. The snapshot pipeline uses the tap to emit optional
+`toolhead_*_pieces`, which is what the snapshot viewer and playground plot
+as the toolhead signal alongside the motor command.
+`CompiledChain::has_motor_side_gains` / `AxisChainSet::has_motor_side_stages`
+define "motor-side": a gain stage that follows a kernel.
 
 ## Followers: the extruder rides the toolhead
 
@@ -248,9 +268,61 @@ leaders' kernels and not planned against the leaders' timing; it is
 This makes extrusion physically consistent with what the nozzle actually
 does: the follower keeps moving through rest holds (kernel creep is real
 traversal of the raw path's tail), it is continuous across every seam, and
-the total extruded amount tracks the shaped path's true length — permanently
-short of the commanded total by exactly the corner-cut length. Extrude-only
-moves ride no spatial path and add in directly.
+the total extruded amount tracks the shaped path's true length, not the
+G-code's: a blend that cuts a corner lays that much less than the commanded
+total, and blends that run longer than their polyline (a loop of moves
+shorter than the corner budget) lay more. `planner_conservation_fuzz` holds
+the planner to it. Extrude-only moves ride no spatial path and add in
+directly.
+
+Where the raw toolhead rests but the shaped leaders still move — the
+kernels' spill past a stop and their reach ahead of a start — the follower
+lays the ratio over the **chord**, not the arc: the move before extrudes over
+the shaped leaders' straight-line distance from the rest point where the
+spill starts, the move after over their distance to it where the spill
+ends (`FollowerState::ingest`). The chords telescope to the raw rest
+positions, so a stroke from rest to rest lays exactly its commanded E —
+the slicer's volume, which the user sets and can check
+(`a_shaped_stroke_from_rest_to_rest_extrudes_its_command`) — however the
+shapers curve the spill or the fit wiggles near the rest point. It differs
+from `r·∫ds` by `r` times the spill's arc minus its chord: sub-micron on the
+bench and Trident configs, where axes with different shapers bend the
+spill off the line to the rest point. `advance_conservation` holds the
+projection to this rule with and without an advance.
+
+The ratio is not projected raw. Every follower smooths `r(s)` along the path
+(`follower_projection/ratio_ramp.rs`) with the kernel `¾(1 − x²)` of
+half-width `h(s)`: half the path the shaped leaders cover in the ramp time
+`τ` around `s` — `v·τ/2` at cruise, `a·τ²/8` at a turnaround — closing to
+zero at every rest. A ratio step then reaches the follower as a smoothstep
+`S` over about `τ` (`S′ ≤ 3/2`, `|S″| ≤ 6`), however finely the path is cut
+into moves, and `|h′| ≤ 0.75` keeps the laid ratio a convex combination of
+the commanded ones. Each seam derives its own `τ`
+(`geometry::RatioRampRule::ramp_time`) from the leaders' shaped speed,
+acceleration and jerk there, the steps within half the longest ramp of it,
+the advance's slope `k` (`CompiledChain::advance_slope`: a linear
+advance's `k`, a nonlinear one's small-signal slope) and the axis's
+`max_velocity` / `max_accel` (`V_e`, `A_e`): the shortest in
+[`RATIO_RAMP_MIN_TIME_S`, `RATIO_RAMP_MAX_TIME_S`] = [5, 30] ms whose peak
+advanced follower velocity and acceleration stay within both. At a steady
+speed, with `Δ = |Δr|·v`, the acceleration bound is `τ ≥ √(6kΔ/A_e)` for
+`τ ≤ 2k` and `τ ≥ 1.5Δ/A_e` without an advance; the velocity bound is about
+`τ ≥ 1.45kΔ/(V_e − r·v)` for the larger flow `r·v` (the overshoot
+coefficient rises to 1.5 as `τ/k` shrinks). An unlimited follower takes
+5 ms everywhere. Around its seam a step's `τ` holds within `τ` of it and
+falls off by half the time beyond; the leaders are sampled every 2.5 ms.
+Where even 30 ms exceeds the limits, the velocity planner caps the speed at
+the join (`velocity::extruder_caps::ratio_step_ceiling`, through
+`RatioRampRule::step_speed_cap`) rather than smearing the step over more
+path. A rest of the leaders `d` along the path from the step narrows its
+window too: the width envelope rises off a rest by at most
+`RATIO_RAMP_ENVELOPE_SLOPE = c = 0.25` per millimetre, so a window past the
+step reaches back to it only out to `c·d/(1 + c)`, and the step's ramp gets
+no more than that path on the rest's side. Each move's
+`ExtrusionBudget::rest_room_mm` carries the path from its start to the
+nearest rest (an extrude-only move or a stream end) within
+`rest_room_reach_mm` of the fastest the leaders cross it, and the cap holds
+the ramp that room leaves within the limits as well.
 
 Critically, the projection reads the leaders' **toolhead signal**, not their
 motor command — the follower must track where the nozzle physically is, and
@@ -261,6 +333,159 @@ The follower's own chain then applies on top of the projection in the same
 stage order: leading gains (pressure advance) act on the projected track,
 the follower's kernel (e.g. `smooth_triangle`) convolves that, trailing
 gains act on the convolution.
+
+### The turning guard
+
+An advance reads the shaped path's arc length `σ`: it asks the extruder for
+`r·(σ̈ + k·σ⃛) + c·(r·σ̈)²`, with `σ̈ = a·v̂` and `σ⃛ = j·v̂ + a⊥²/|v|`. The
+planner bounds that per move from the *planned* path, where `a⊥²/|v|` is at
+most `v³κ²` under the disk. On the shaped path the turning term reads the
+*shaped* speed, which the leaders' kernels fold far under the planned one
+wherever turns lie closer together than their reach — a reversal the
+kernels round into a crawl of a few mm/s asked a kernel-free advance for
+33 kmm/s² against a 20 kmm/s² limit. A follower kernel bounds the same term
+on its own (`own_jerk_per_accel_hz`), so only kernel-free followers with an
+advance need more.
+
+For them `motion_pipeline::turning_guard::TurningGuard` sits between the
+planner and the lowerer, in the one pipeline the live host and the
+snapshots share. It holds committed moves until every instant whose kernels
+read them is proven to fit the extruder's `max_accel`:
+
+- **Screen** (`screen::passes`): from the planned moves within the kernels'
+  reach alone, per-axis boxes of planned velocity and acceleration, split by
+  each kernel's positive and negative mass, bound the shaped speed below and
+  the shaped acceleration, `|a × v|` and the tangential jerk (`G·A`) above.
+  A move whose bound fits passes; nearly all do.
+- **Shadow** (`shadow::shaped_at`, `CellMotion::between`): otherwise the
+  planned motion, sampled every ≤ 0.25 ms (48 cells across the narrowest
+  leader kernel), is convolved with each leader kernel linearised cell by
+  cell, every term carrying an explicit error radius, and every grid cell
+  across the move gets rigorous bounds on the shaped speed, acceleration,
+  `|a × v|`, jerk and their parts along the velocity, including between the
+  grid instants. A cell that binds is checked again on a grid 8× finer.
+  Below `ADVANCE_VALLEY_SPEED_MM_S` the advance lays a valley instead and the
+  cell asks nothing of the turning term.
+- **Back-off**: a cell that still binds scales the acceleration budgets of
+  the moves it reads by `(limit/demand)^(2/3)`, clamped to [0.5, 0.95], and
+  re-plans the span around them between two seams whose speeds it keeps
+  (`geometry::replan_span`): the same caps, stops, seam ceilings and
+  extrusion budgets the planner applies, on the lowered budgets. The
+  re-planned moves are checked again; a move backed off 64 times fails
+  loudly.
+- **Release**: a move leaves once no pending check can back off a move it
+  depends on: the earliest planned time a pending check reads, less the
+  kernels' backward reach, has a brake horizon
+  (`geometry::brake_horizon`) — the last seam a rest there cannot lower on
+  the current budgets — and moves whose kernels read only before that seam
+  are emitted. The guard's output thus reads its input sequence alone,
+  however the planner batches its commits.
+
+The guard holds up to the last committed move plus the brake horizon and
+the kernels' reach: on the dense print about 0.2 s of planned motion at the
+median and 0.3–0.4 s at worst (a single long slow move on the first layers
+holds its whole length). The pacer reads the dispatched runway, past the
+guard, so the hold makes it drain earlier, never late; a drain flushes the
+guard in under a millisecond. Kernel followers pass straight through.
+
+### Rests
+
+The projection reads the leaders' path speed `|v|` and, for an advance, its
+rate `d|v|/dt = v̂·a` and its derivative `v̂·j + |a⊥|²/|v|` off the leaders'
+*fitted* polynomials. Near a stop those fits move at their own fit noise. X
+and Y stop at slightly different times, and the direction `v̂` turns through
+nanometre loops that no toolhead makes. `|a⊥|²/|v|` then spikes without
+bound over a microsecond, and the advance would turn the spike into
+extruder acceleration.
+
+A **rest** (`follower_projection/rest.rs`) is a maximal stretch inside the
+support where the leaders' speed is at most the speed their fits cannot
+resolve. That speed is the leader fit's velocity resolution: the
+acceleration tolerance times the shortest span such a fit holds at the
+leaders' position, speed and time scales (`velocity_resolution_at_scales`).
+No constant of its own enters.
+
+Inside a rest:
+
+- `|v|` and so the odometer are unchanged. Path distance, and with it
+  material, is exactly what it is outside rests.
+- The rate and its derivative are read along a fixed direction: the unit
+  velocity the leaders enter the rest with, up to the rest's *split* (where
+  they are slowest), and the one they leave with from the split on.
+  `d|v|/dt = d̂·a` and `d²|v|/dt² = d̂·j`. The fit-noise curvature term is
+  dropped.
+
+The consequences:
+
+- A stop-and-go along a line enters and leaves along the same direction. It
+  reads smooth through the split.
+- A reversal, or a turn made at rest, enters and leaves along different
+  directions. Its rate steps at the split by what the two directions read
+  of the acceleration. That step is the jump the motion makes, kept and not
+  smoothed:
+  - the split is a semantic break of the fit;
+  - it is a break of the follower's enclosure windows, each side enclosed
+    with its own direction.
+- The rest's ends are breaks of the enclosure windows, not of the fit.
+  There the rate is continuous, and the dropped curvature term at the
+  floor speed is the only change.
+
+Rests never reach into the end slivers, which keep their own semantics. A
+rest that runs into one reads the single direction the leaders have at its
+other end.
+
+### Square-root onsets
+
+An unshaped leader that leaves its curvature cap (a rail `Departure` pair)
+raises its tangential acceleration as `√τ`, `τ` the time from the cap. Its
+jerk there is `J/√τ` plus bounded terms, `J = 0.75·|c₃|/h^{3/2}` from the
+pair's coefficients (`SquareRootOnset`). An advance reads that jerk through
+its gain `G` (steepest advance slope × ratio bound × odometer scale), so the
+follower's acceleration is unbounded at the onset. No fit holds it.
+
+The **onset sliver** (`OnsetSliver`, `follower_projection/enclosure.rs`) is
+where the singular term alone passes the follower's acceleration tolerance:
+`τ < (G·J/accel_tol)²` on the departure side, clipped to the pair. The
+width comes from the tolerance; no constant of its own enters. Inside the
+sliver, one typed exemption (`UnshapedLeaderStep`) applies. It is the same
+allowance an advance's velocity step at an unshaped leader's acceleration
+step takes: `instantaneous_corner_velocity` plus what the leaders' fit
+rounding makes.
+
+- The acceleration bound is dropped. The enclosure's pieces carry the
+  exemption (`ExactPiece::unshaped_step`) and the hull skips their
+  acceleration.
+- Position is proven within tolerance, as everywhere.
+- The fit's velocity is proven within the allowance of the signal's.
+- The velocity change the singular term makes across the sliver,
+  `2·G·J·√τ`, must stay within the allowance. A larger one is refused
+  before the fit with `PostProcessError::UnshapedLeaderOnsetVelocityStep`.
+
+### The ratio ramp in enclosures
+
+Every follower ramps its ratio steps (`RatioSmoothing`), and every advance
+reads the laid velocity weighted by its valleys, `R = W·r̃`. A follower's
+enclosure window models both (`follower_projection/ratio_ramp/models.rs`):
+
+- **Correction.** The smoothing adds `X(s)` to the table: moments of the
+  seams inside the window, weighted by powers of the width `h(s)`
+  (`SeamMoments`). Over a window its formula is fixed: the width's node
+  interval, the seams inside the window and those behind its point. The
+  bends (`RatioSmoothing::bends`) are where these change, and windows
+  break there. Each derivative `X⁽ⁿ⁾`, `n ≤ 3`, is its Taylor polynomial
+  about the window's centre arc plus the Lagrange remainder past it. The
+  remainder is bounded by the same series computed over the window's
+  whole odometer reach, in ball arithmetic: an interval Taylor series.
+- **Valley weight.** `W`, `W'`, `W''` on the side of each valley the
+  window's reach lies on.
+- **Read.** The advance reads `R·ṡ`, `R'·ṡ² + R·s̈`, and
+  `R·s⃛ + 3R'·ṡ·s̈ + R''·ṡ³`.
+
+A reach a few ulps wide can straddle a bend located an ulp off from where
+the evaluator flips. Such a reach is enclosed by every formula its floats
+read, each widened by its departure from the others. A width node reads
+its jet from the interval it opens, so the evaluator keeps the width's
+third derivative there.
 
 ## Streaming mechanics: windows, frontier, drain
 
@@ -304,8 +529,8 @@ carry, so each emitted segment is refit (`fit_axis_from_signal`) with the
 ladder the lowerer uses: two endpoint-anchored quadratics that carry the
 span's travel, a cubic through both endpoint velocities, a quintic Hermite
 base matching the signal's exact `(p, v, a)` at both span ends, then degree
-6/7 from interior residuals — bisecting spans until the fit meets
-`SHAPED_FIT_TOL_MM = 1e-3` and `SHAPED_FIT_TOL_ACCEL_MM_S2 = 50`. Sliver spans
+6/7 from interior residuals — bisecting spans until the fit meets the
+configured `max_path_deviation` and `max_accel_deviation`. Sliver spans
 below `SHAPED_FIT_MIN_SPAN_S` are carried as exact-endpoint linear pieces
 instead of dividing by a near-zero duration. Finally
 `pad_segment_axes_to_uniform_degree` zero-pads so kinematics lane mixing
@@ -313,13 +538,55 @@ sees one degree per segment. Every rung is endpoint-anchored, so seams are
 C⁰ by construction; the quadratics solve an endpoint velocity from the
 travel, so a seam they win can step in velocity.
 
-A pressure advance applied before projection (`p + k·ṗ` without a follower
-kernel, or any nonlinear advance) turns such a velocity step into a position
-step the extruder would have to take in zero time. The tracks that advance
-differentiates — the leaders a projected follower rides, and the follower's
-own raw fit when its leaders are unshaped — are therefore fitted with
-`velocity_continuous`: the quadratics are withheld and every seam carries
-the signal's own velocity.
+A pressure advance applied before projection (`p + k·ṗ` before or without
+a follower kernel, or any nonlinear advance) turns such a velocity step
+into a position step the extruder would have to take in zero time. The
+tracks that advance differentiates — the leaders a projected follower
+rides, and the follower's own raw fit when its leaders are unshaped — are
+therefore fitted with `velocity_continuous`: the quadratics are withheld
+and every seam carries the signal's own velocity.
+
+A follower's fits are held to `max_path_deviation` times its largest demand
+ratio (`follower_tol_scale`; the projected source fit takes half of it).
+Where an advance applies before projection — any advance placed before a
+follower kernel or with none —
+the source fit fits the advanced signal itself, and each of its pieces of
+duration `h` is held to the acceleration budget
+`max(max_accel_deviation, 8ε/h²)` (`AccelBudget::PositionEquivalent`), `ε`
+being that position tolerance. Every rung meets the signal's position at
+both piece ends, and an error pinned there whose acceleration stays within
+`8ε/h²` stays within `ε` in between (`|δ(t)| ≤ max|δ''|·t(h−t)/2`): the
+acceleration budget spends the position budget, no more. The melt lag `K`
+the bead model uses (`e_cmd = e_out + K·ė_out`, `tools/corner_flow.py`)
+turns a command error within `ε` into a nozzle-flow error of at most
+`2ε/K` — `ε = 0.5 · 0.005 · 0.033 ≈ 83 nm` of filament and `K = 0.02 s`
+bound it at 0.5 % of a 50 mm/s line and 0.08 % of a 300 mm/s one. An
+absolute 50 mm/s² on that signal, which carries `k·r·jerk` of the shaped
+path (~65 000 mm/s² on a 70 000 mm/s² Trident with `k = 0.02`), demanded
+pieces no deposition resolves. A linear advance commutes with the kernel,
+but applied after the source fit it would turn the fit's velocity error
+`δ'` into `k·δ'` of command position, and the melt lag that advance models
+undoes it: `δ'` reaches the nozzle flow whole, a bead error of `δ'/(r·v)`
+that grows as a corner slows. Under the absolute budget that left a 3–4
+point corner-error floor on every kernel chain at
+`square_corner_velocity: 5` (`smooth_time: 0.002` on a 3 000 mm/s² bowden
+with `k = 0.5` and a 5 000 mm/s² direct drive with `k = 0.05`: 4.2 % and
+5.1 % against the kernel's own 0.9 % and 1.6 %); fitted as an advanced
+source, kernel chains match an exact offline convolution of the same shaped
+path within 0.26 points. Only derivative gains placed after a kernel are
+still applied to the plain projection's fit, the kernel's input, where an
+acceleration gain must be. Every other follower fit keeps the absolute
+budget; spending the position budget on a kernel's output moved the corner
+bead by up to 0.15 points at 50 mm/s. Leaders, and the follower's weld,
+edge-break and floor checks, keep the absolute budget; the fit audit holds
+every piece to the budget its fit resolved for it.
+
+Every rung that passes the probes is proven between them. The proof is the
+Bernstein hull of the rung's error against the signal's exact polynomials,
+or against its Taylor-model enclosure where it has none (the followers, the
+advanced followers and the cap-contact sources). A signal with neither
+fails loudly with `PostProcessError::UnprovableSpan`: a formula without a
+model is a gap to close, not a span to estimate.
 
 Leader refits use ordered parallel work without changing the fitted signal.
 Axes run concurrently. Ordinary windows distribute whole target segments;
@@ -328,8 +595,9 @@ If the parallel spans exceed the global refinement budget, that target is
 rerun serially so failure behavior stays deterministic.
 
 Follower projection may evaluate a leader through cached local Bezier power
-polynomials. Every cache candidate is checked against the original NURBS at
-interior points before use. An ill-conditioned conversion falls back to direct
+polynomials. Every cache candidate piece is checked against the original NURBS
+at its far Gauss node, where the power basis's conversion error has grown the
+most, before use. An ill-conditioned conversion falls back to direct
 NURBS evaluation; it must never inject false velocity or acceleration into the
 follower source.
 

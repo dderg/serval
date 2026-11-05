@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import analyze
 import numpy as np
@@ -146,9 +148,68 @@ def test_recovers_injected_timing_errors(synthesized):
         stats = motor["timing_error_capture_minus_reference_us"]
         if role == "z":
             assert stats["max_late"] == pytest.approx(STALL_S * 1e6, rel=0.1)
+            assert motor["timing_violation_steps"] > 0
+            assert motor["timing_beyond_time_bound_worst_position"][
+                "timing_error_us"
+            ] == pytest.approx(STALL_S * 1e6, rel=0.1)
         else:
             assert stats["abs_max"] <= JITTER_US + quantization_us + 2.0
             assert abs(stats["p50"]) <= 2.0
+            assert motor["timing_violation_steps"] == 0
+    assert not verdict["checks"][analyze.TIMING_CHECK]
+
+
+TURNAROUND_NEIGHBOUR_RATE_HZ = 2900.0
+TURNAROUND_RATE_HZ = 227.0
+
+
+def _timing_report_with(late_s: float, rate_hz: float) -> dict:
+    neighbours = 20
+    late = np.full(2 * neighbours + 1, 1e-6)
+    rate = np.full(late.size, TURNAROUND_NEIGHBOUR_RATE_HZ)
+    late[neighbours] = late_s
+    rate[neighbours] = rate_hz
+    capture_time = np.arange(late.size) / TURNAROUND_NEIGHBOUR_RATE_HZ
+    return analyze.timing_report(late, capture_time, rate)
+
+
+def test_a_turnaround_step_far_off_in_time_but_close_in_position_passes():
+    report = _timing_report_with(-57.3e-6, TURNAROUND_RATE_HZ)
+    assert report["timing_error_capture_minus_reference_us"][
+        "abs_max"
+    ] == pytest.approx(57.3)
+    assert report["timing_beyond_time_bound_steps"] == 1
+    assert report["timing_violation_steps"] == 0
+    excused = report["timing_beyond_time_bound_worst_position"]
+    assert excused["position_equivalent_steps"] == pytest.approx(
+        0.013, abs=1e-3
+    )
+    assert excused["reference_rate_hz"] == TURNAROUND_RATE_HZ
+    assert report["position_equivalent_error_abs_max"] == excused
+
+
+def test_a_low_rate_step_misplaced_by_a_large_step_fraction_fails():
+    report = _timing_report_with(-1e-3, TURNAROUND_RATE_HZ)
+    assert report["timing_violation_steps"] == 1
+    worst = report["timing_beyond_time_bound_worst_position"]
+    assert worst["timing_error_us"] == pytest.approx(-1000.0)
+    assert worst["position_equivalent_steps"] == pytest.approx(0.227)
+
+
+@pytest.mark.parametrize(
+    "rate_hz",
+    [analyze.POSITION_BOUND_RELAXES_BELOW_HZ * 1.01, 20e3, 140e3],
+)
+def test_a_step_beyond_the_time_bound_fails_at_every_rate_the_time_bound_owns(
+    rate_hz,
+):
+    late_s = (analyze.TIMING_TOLERANCE_US + 1.0) * 1e-6
+    report = _timing_report_with(late_s, rate_hz)
+    assert report["timing_violation_steps"] == 1
+    worst = report["timing_beyond_time_bound_worst_position"]
+    assert worst["timing_error_us"] == pytest.approx(
+        analyze.TIMING_TOLERANCE_US + 1.0
+    )
 
 
 def test_reports_injected_stall(synthesized):
@@ -163,6 +224,82 @@ def test_reports_injected_stall(synthesized):
     assert stall_from - 0.01 <= z_idle[0]["capture_start_s"] <= stall_to
     assert z_idle[0]["duration_ms"] >= 0.5 * STALL_S * 1e3
     assert all(s["role"] == "z" for s in stalls)
+
+
+def test_a_capture_on_the_plans_pace_passes_the_pace_check(synthesized):
+    verdict, _, _ = synthesized
+    assert verdict["checks"]["pace_matches_reference"]
+    for epoch in verdict["epochs"]:
+        assert epoch["pace_within_tolerance"]
+        assert epoch["pace_max_abs_lag_ms"] <= STALL_S * 1e3 + 1.0
+
+
+def test_pace_pairs_steps_by_match_not_by_index():
+    alignment = analyze.Alignment(10.0, 0.0, False)
+    matches = {
+        role: analyze.MatchedSteps(
+            late_s=np.asarray(late),
+            capture_time_s=np.asarray(at),
+            reference_rate_hz=np.full(len(at), 500.0),
+            unmatched_capture=unmatched,
+            unmatched_reference=0,
+            edge_ties=0,
+        )
+        for role, at, late, unmatched in (
+            ("a", [10.0, 10.2, 10.4], [0.0, 1e-6, 0.0], 0),
+            ("z", [10.1, 10.3], [-1e-6, 0.0], 1),
+        )
+    }
+    epoch = SimpleNamespace(
+        matches=matches, alignment=alignment, capture=analyze.Epoch(9.95, 10.4)
+    )
+    capture, reference = analyze.paired_steps_s(epoch)
+    assert capture.tolist() == [10.0, 10.1, 10.2, 10.3, 10.4]
+    assert reference == pytest.approx([0.0, 0.100001, 0.199999, 0.3, 0.4])
+
+
+PACE_REFERENCE_S = np.arange(0.0, 20.0, 1e-3)
+
+
+def test_a_capture_one_percent_faster_than_the_plan_fails_the_pace_check():
+    pace = analyze.epoch_pace(16.6 + 0.99 * PACE_REFERENCE_S, PACE_REFERENCE_S)
+    assert not pace["pace_within_tolerance"]
+    assert pace["pace_capture_over_stream"] == pytest.approx(0.99, abs=1e-4)
+    assert pace["pace_worst_lag_ms"] == pytest.approx(-200.0, abs=1.0)
+    assert pace["pace_worst_at_stream_s"] == pytest.approx(20.0, abs=1e-2)
+
+
+def test_a_local_burst_that_runs_ahead_and_resyncs_fails_the_pace_check():
+    capture = PACE_REFERENCE_S.copy()
+    ahead = (PACE_REFERENCE_S > 5.0) & (PACE_REFERENCE_S < 10.0)
+    capture[ahead] -= 0.1 * (PACE_REFERENCE_S[ahead] - 5.0)
+    capture[PACE_REFERENCE_S >= 10.0] -= 0.5
+    capture[PACE_REFERENCE_S >= 12.0] += 0.5
+    pace = analyze.epoch_pace(capture, PACE_REFERENCE_S)
+    assert not pace["pace_within_tolerance"]
+    assert pace["pace_capture_over_stream"] == pytest.approx(1.0)
+
+
+def test_crystal_ppm_and_a_short_stall_stay_within_the_pace_tolerance():
+    capture = (1.0 + 150e-6) * PACE_REFERENCE_S
+    capture[(PACE_REFERENCE_S > 3.0) & (PACE_REFERENCE_S < 3.06)] += STALL_S
+    pace = analyze.epoch_pace(capture, PACE_REFERENCE_S)
+    assert pace["pace_within_tolerance"]
+    assert pace["pace_max_abs_lag_ms"] == pytest.approx(STALL_S * 1e3, abs=0.5)
+
+
+PACER_RESERVE_S = 1.056
+
+
+def test_a_capture_braked_to_rest_and_resumed_by_the_pacer_fails_the_pace_check():
+    capture = PACE_REFERENCE_S.copy()
+    for resume_at in (4.0, 9.0, 14.0):
+        capture[PACE_REFERENCE_S >= resume_at] += PACER_RESERVE_S
+    pace = analyze.epoch_pace(capture, PACE_REFERENCE_S)
+    assert not pace["pace_within_tolerance"]
+    assert pace["pace_worst_lag_ms"] == pytest.approx(
+        3 * PACER_RESERVE_S * 1e3, rel=1e-3
+    )
 
 
 TIE_GCODE = """\
@@ -240,8 +377,10 @@ def test_a_late_step_mid_move_is_still_unmatched(tie_run):
     verdict_with_z_step_at, z, landing = tie_run
     mid_move = landing // 2
     assert z.rate_hz[mid_move] > 100.0
-    delay_s = 0.5 * (z.time[landing + 1] - z.time[landing])
-    verdict = verdict_with_z_step_at(mid_move, z.time[mid_move] + delay_s)
+    window_s = analyze.REPORT_MATCH_WINDOW_S
+    late_s = z.time[landing] + 1.5 * window_s
+    assert late_s + 1.5 * window_s < z.time[landing + 1]
+    verdict = verdict_with_z_step_at(mid_move, late_s)
     motor = verdict["motors"]["z"]
     assert motor["unmatched_capture_steps"] > 0
     assert motor["unmatched_reference_steps"] > 0
@@ -566,3 +705,311 @@ def test_merged_epoch_is_cut_at_the_rest_nearest_the_reference_count():
         capture, capture_epochs, reference, reference_epochs
     )
     assert [e.start_s for e in split] == pytest.approx([0.0, 5.0, 5.12])
+
+
+LIVE_SEMANTICS_GCODE = """\
+SET_KINEMATIC_POSITION X=0 Y=0 Z=0
+G92 E0
+G1 X10 Y5 E1
+G92 E0
+G1 X20 E0.5 F3000
+G1 Z1
+G4 P200
+M83
+G1 X0 Y0 E1 F9000
+G92 E0
+G1 X5 E0.2
+G91
+M82
+G1 X5 E0.3
+M400
+G90
+G1 X30 Y30 Z0.4 E2 F1200
+SET_VELOCITY_LIMIT ACCEL=2000
+G1 X40 Y30 F120000
+M400
+"""
+
+
+def _live_epochs(gcode: str, cfg: Path) -> list[list[tuple]]:
+    import live_replay
+
+    steps = live_replay.replay(gcode, cfg)
+    anchor = next(
+        i
+        for i, s in enumerate(steps)
+        if isinstance(s, live_replay.LivePosition)
+    )
+    epochs: list[list[tuple]] = [[]]
+    for step in steps[anchor + 1 :]:
+        if isinstance(step, live_replay.LiveRest) and epochs[-1]:
+            epochs.append([])
+        elif isinstance(step, live_replay.LiveMove):
+            epochs[-1].append((step.delta, step.feedrate, step.limits))
+    return [epoch for epoch in epochs if epoch]
+
+
+def _reference_epochs(job: analyze.Job) -> list[list[tuple]]:
+    engine = analyze.harness._import_engine()
+    blocks = analyze.plan_waypoints(job).blocks
+    epochs = []
+    for block in blocks:
+        moves = engine.snapshot_moves(block, job.config.config_text)
+        assert all(m["dwell_before_s"] is None for m in moves)
+        epochs.append(
+            [
+                (
+                    tuple(e - s for s, e in zip(m["start"], m["end"])),
+                    m["feedrate"],
+                    (m["velocity"], m["accel"], m["corner_deviation"]),
+                )
+                for m in moves
+            ]
+        )
+    return epochs
+
+
+def test_reference_epochs_plan_exactly_the_moves_live_submits(tmp_path):
+    _require_snapshot_engine()
+    shutil.copy(BENCH_DIR / "printer.cfg", tmp_path / "printer.cfg")
+    (tmp_path / "print.gcode").write_text(LIVE_SEMANTICS_GCODE)
+    job = analyze.load_job(tmp_path)
+    reference = _reference_epochs(job)
+    assert reference == _live_epochs(
+        LIVE_SEMANTICS_GCODE, tmp_path / "printer.cfg"
+    )
+    assert [len(epoch) for epoch in reference] == [3, 3, 2]
+    final_xyze = analyze.plan_waypoints(job).final_xyze
+    assert final_xyze == pytest.approx((40.0, 30.0, 0.4, 4.5))
+
+
+EPOCH_SPLIT_GCODE = """\
+SET_KINEMATIC_POSITION X=0 Y=0 Z=0
+G92 E0
+G1 X10 Y5 E1 F3000
+G4 P100
+G1 X20 E1.5
+M400
+G1 X30 Y10 E2
+M400
+M400
+G1 X40
+G4 P0
+G1 X50 Y0 E3
+"""
+
+
+def test_the_stream_plan_splits_at_every_dwell_and_wait_the_print_rests_at(
+    tmp_path,
+):
+    _require_snapshot_engine()
+    shutil.copy(BENCH_DIR / "printer.cfg", tmp_path / "printer.cfg")
+    (tmp_path / "print.gcode").write_text(EPOCH_SPLIT_GCODE)
+    job = analyze.load_job(tmp_path)
+    planned = analyze.plan_waypoints(job)
+    epochs = analyze.stream_epochs(
+        job, planned, job.config.config_text, [0, 1, 2, 3], 1e-3
+    )
+    engine = analyze.harness._import_engine()
+    assert len(epochs) == len(planned.blocks) == 5
+    for (t_start, t_end, axes_pva), block in zip(epochs, planned.blocks):
+        snapshot, _ = engine.pipeline_snapshot_axis_samples(
+            block, job.config.config_text, [0], 2
+        )
+        assert t_end - t_start == pytest.approx(
+            json.loads(snapshot)["traversal_time_s"], abs=1e-9
+        )
+        assert axes_pva[:3, 0, 0] == pytest.approx(block[0]["position"][:3])
+        assert axes_pva[:3, -1, 0] == pytest.approx(block[-1]["position"][:3])
+        assert np.abs(axes_pva[:, [0, -1], 1]).max() < 1e-6
+
+
+def test_a_command_live_cannot_plan_offline_fails_the_analysis(tmp_path):
+    _require_snapshot_engine()
+    shutil.copy(BENCH_DIR / "printer.cfg", tmp_path / "printer.cfg")
+    (tmp_path / "print.gcode").write_text(
+        "SET_KINEMATIC_POSITION X=0 Y=0 Z=0\nG1 X10 F3000\nG2 X20 I5 J0\n"
+    )
+    with pytest.raises(analyze.AnalysisError, match="line 3: G2"):
+        analyze.plan_waypoints(analyze.load_job(tmp_path))
+
+
+def test_same_key_matching_stays_exact_over_millions_of_levels_and_long_runs():
+    ref_key = np.array([0, 5_000_000, 5_000_000], np.int64)
+    ref_t = np.array([0.0, 90.0, 90.000_000_05], np.float64)
+    query_key = np.array([5_000_000, 0], np.int64)
+    query_t = np.array([90.000_000_04, 0.000_000_02], np.float64)
+    nearest, delta = analyze.nearest_same_key(
+        query_key, query_t, ref_key, ref_t
+    )
+    assert nearest.tolist() == [2, 0]
+    assert delta == pytest.approx([-1e-8, 2e-8], abs=1e-9)
+    counts = analyze.same_key_count(query_key, query_t, ref_key, ref_t)
+    assert counts.tolist() == [2, 1]
+
+
+HEAD = "abc1234def5678"
+RECIPE_ARGV = ["/runs/20261104-064327", "--corner-flow"]
+
+
+def _deployed(rust_build_id, dirty_paths=(), diff=b""):
+    return {
+        "deployed": {
+            "head": HEAD,
+            "branch": "main",
+            "worktree": "/tmp/wt",
+            "rust_build_id": rust_build_id,
+            "dirty_paths": list(dirty_paths),
+            "diff_sha256": hashlib.sha256(diff).hexdigest(),
+        }
+    }
+
+
+def test_a_run_analyzes_with_the_engine_its_code_built():
+    assert (
+        analyze.deployed_engine_mismatch(_deployed("f00d"), "f00d", RECIPE_ARGV)
+        is None
+    )
+
+
+def test_a_run_refuses_a_reference_from_other_rust_sources():
+    reason = analyze.deployed_engine_mismatch(
+        _deployed("f00d"), "beef", RECIPE_ARGV
+    )
+    assert "f00d" in reason and "beef" in reason and HEAD in reason
+
+
+def test_a_refusal_prints_the_worktree_recipe_at_the_deployed_head():
+    reason = analyze.deployed_engine_mismatch(
+        _deployed("f00d"), "beef", RECIPE_ARGV
+    )
+    assert f"scripts/wt.sh new reanalyze-{HEAD[:12]} --base {HEAD}" in reason
+    assert "make -f Makefile.rust motion-engine-fast" in reason
+    assert (
+        "uv run python tools/bench/analyze.py /runs/20261104-064327 "
+        "--corner-flow" in reason
+    )
+    assert "dirty" not in reason
+
+
+@pytest.mark.parametrize(
+    "dirty_paths, diff",
+    [(["rust/a.rs"], b""), ([], b"diff --git a/rust/a.rs b/rust/a.rs\n")],
+)
+def test_a_refusal_of_a_dirty_deploy_warns_its_head_may_not_reproduce_it(
+    dirty_paths, diff
+):
+    reason = analyze.deployed_engine_mismatch(
+        _deployed("f00d", dirty_paths, diff), "beef", RECIPE_ARGV
+    )
+    assert "dirty" in reason
+    assert f"--base {HEAD}" in reason
+
+
+def test_a_run_predating_build_ids_refuses_any_reference():
+    run = _deployed(None)
+    del run["deployed"]["rust_build_id"]
+    assert (
+        analyze.deployed_engine_mismatch(run, "beef", RECIPE_ARGV) is not None
+    )
+
+
+def test_main_refuses_with_the_recipe_for_the_same_run_and_options(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "run.json").write_text(json.dumps(_deployed("f00d")))
+    monkeypatch.setattr(
+        analyze.harness,
+        "_import_engine",
+        lambda: SimpleNamespace(build_id=lambda: "beef"),
+    )
+    monkeypatch.chdir(tmp_path.parent)
+    with pytest.raises(analyze.AnalysisError) as refusal:
+        analyze.main([tmp_path.name, "--gap", "0.3", "--corner-flow"])
+    assert f"analyze.py {tmp_path} --gap 0.3 --corner-flow" in str(
+        refusal.value
+    )
+
+
+def test_a_short_epoch_runs_at_the_latest_fitted_rate_not_the_median():
+    fitted = [-47.0, -46.6, -45.5, -4.3, None, None]
+    assert analyze.nearest_fitted_ppm(fitted, 4) == -4.3
+    assert analyze.nearest_fitted_ppm(fitted, 5) == -4.3
+
+
+def test_a_short_first_epoch_runs_at_the_next_fitted_rate():
+    assert analyze.nearest_fitted_ppm([None, 12.0, -3.0], 0) == 12.0
+
+
+def test_a_run_with_no_fitted_epoch_runs_at_the_nominal_rate():
+    assert analyze.nearest_fitted_ppm([None, None], 1) == 0.0
+
+
+F401 = analyze.SuppliedBenchmark(301, 160, 84_000_000.0, 0.75)
+FAST_SQUARE_GCODE = """\
+SET_KINEMATIC_POSITION X=0 Y=0 Z=0
+G92 E0
+G1 X200 F150000
+G1 Y200
+G1 X0
+"""
+
+
+def _capacity_run(run_dir: Path) -> Path:
+    _require_snapshot_engine()
+    shutil.copy(BENCH_DIR / "configs" / "capacity.cfg", run_dir / "printer.cfg")
+    (run_dir / "print.gcode").write_text(FAST_SQUARE_GCODE)
+    return run_dir
+
+
+def test_a_run_json_without_step_benchmarks_plans_an_uncapped_reference(
+    tmp_path,
+):
+    run_dir = _capacity_run(tmp_path)
+    (run_dir / "run.json").write_text(json.dumps({"print_state": "complete"}))
+    job = analyze.load_job(run_dir)
+    assert job.step_benchmarks is None
+    assert job.step_benchmarks_source == "absent"
+
+
+def test_recorded_step_benchmarks_reach_the_reference_verbatim(tmp_path):
+    run_dir = _capacity_run(tmp_path)
+    recorded = analyze.supplied_step_benchmarks(
+        analyze.load_job(run_dir).motors, F401
+    )
+    (run_dir / "run.json").write_text(json.dumps({"step_benchmarks": recorded}))
+    job = analyze.load_job(run_dir)
+    assert job.step_benchmarks == recorded
+    assert job.step_benchmarks_source == "recorded"
+    with pytest.raises(analyze.AnalysisError, match="records the step"):
+        analyze.load_job(run_dir, F401)
+
+
+def test_a_supplied_benchmark_charges_every_captured_motor_pulsed(tmp_path):
+    job = analyze.load_job(_capacity_run(tmp_path), F401)
+    assert job.step_benchmarks_source == "supplied"
+    (mcu,) = job.step_benchmarks
+    assert (mcu["mcu"], mcu["clock_freq"]) == ("mcu", 84_000_000.0)
+    assert (mcu["pulsed_ticks_per_step"], mcu["both_edge_ticks_per_step"]) == (
+        301,
+        160,
+    )
+    assert mcu["motors"] == [
+        {"name": m.name, "step_distance": m.step_mm, "mode": "pulsed"}
+        for m in job.motors
+    ]
+
+
+def test_the_step_benchmark_caps_the_reference_where_it_binds(tmp_path):
+    _require_snapshot_engine()
+    run_dir = _capacity_run(tmp_path)
+    uncapped = analyze.build_reference(analyze.load_job(run_dir))
+    capped = analyze.build_reference(analyze.load_job(run_dir, F401))
+    assert capped.blocks[0].duration_s > uncapped.blocks[0].duration_s
+    assert capped.final_counts == uncapped.final_counts
+
+
+def test_the_step_benchmark_option_parses_ticks_clock_and_fraction():
+    assert analyze.SuppliedBenchmark.parse("301,160,84000000,0.75") == F401
+    with pytest.raises(Exception, match="PULSED,BOTH_EDGE,CLOCK_HZ,FRACTION"):
+        analyze.SuppliedBenchmark.parse("301,160,84000000")

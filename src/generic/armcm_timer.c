@@ -45,6 +45,9 @@ timer_is_before(uint32_t time1, uint32_t time2)
 volatile uint32_t timer_last_diff;
 #endif
 
+static uint32_t timer_fire_time;
+static volatile uint32_t timer_busy_ticks;
+
 static void
 timer_set_diff(uint32_t value)
 {
@@ -65,6 +68,7 @@ timer_set_diff(uint32_t value)
     SysTick->LOAD = value;
     SysTick->VAL = 0;
     SysTick->LOAD = 0;
+    timer_fire_time = timer_read_time() + value;
 }
 
 // Under CONFIG_MCU_SIM (Renode), DWT->CYCCNT is unmodeled and reads as
@@ -96,6 +100,7 @@ timer_kick(void)
 {
     SysTick->LOAD = 0;
     SysTick->VAL = 0;
+    timer_fire_time = timer_read_time();
     SCB->ICSR = SCB_ICSR_PENDSTSET_Msk;
 }
 
@@ -148,10 +153,22 @@ timer_init(void)
 DECL_INIT(timer_init);
 
 static uint32_t timer_repeat_until;
-#define TIMER_REPEAT_TICKS timer_from_us(100)
+#define TIMER_REPEAT_TICKS timer_from_us(1000)
 
-#define TIMER_MIN_TRY_TICKS 90
+#if CONFIG_MCU_SIM
+#define TIMER_SYSTICK_LEAD_TICKS 0
+#else
+#define TIMER_SYSTICK_LEAD_TICKS 100
+#endif
+#define TIMER_MIN_TRY_TICKS (TIMER_SYSTICK_LEAD_TICKS + 90)
 #define TIMER_DEFER_REPEAT_TICKS timer_from_us(5)
+
+static inline void
+timer_spin_until(uint32_t due)
+{
+    while (timer_is_before(timer_read_time(), due))
+        ;
+}
 
 // The dispatch loop opens the .sched_protected MPU window once at entry
 // and closes it before each return. sched_timer_dispatch (called inside
@@ -164,13 +181,20 @@ timer_dispatch_many(void)
     uint32_t tru = timer_repeat_until;
     sched_writable_begin();
     for (;;) {
+        uint32_t due = sched_peek_timer()->waketime;
+        int32_t ahead = due - timer_read_time();
+        if (ahead > (int32_t)TIMER_SYSTICK_LEAD_TICKS) {
+            sched_writable_end();
+            return ahead - TIMER_SYSTICK_LEAD_TICKS;
+        }
+        timer_spin_until(due);
         uint32_t next = sched_timer_dispatch();
 
         uint32_t now = timer_read_time();
         int32_t diff = next - now;
         if (diff > (int32_t)TIMER_MIN_TRY_TICKS) {
             sched_writable_end();
-            return diff;
+            return diff - TIMER_SYSTICK_LEAD_TICKS;
         }
 
         if (unlikely(timer_is_before(tru, now))) {
@@ -186,12 +210,14 @@ timer_dispatch_many(void)
                        haddrs[1], hfuncs[1],
                        haddrs[2], hfuncs[2],
                        (int32_t)(diff / (int32_t)timer_from_us(1)));
-                // Split: MESSAGE_MAX (64 B) can't fit all 6 (addr, func) pairs.
                 output("rsched_past_more a3 %u f3 %u a4 %u f4 %u"
                        " a5 %u f5 %u",
                        haddrs[3], hfuncs[3],
                        haddrs[4], hfuncs[4],
                        haddrs[5], hfuncs[5]);
+                output("rsched_past_tail a6 %u f6 %u a7 %u f7 %u",
+                       haddrs[6], hfuncs[6],
+                       haddrs[7], hfuncs[7]);
                 extern volatile uint32_t sched_bad_add_caller;
                 extern volatile uint32_t sched_bad_add_value;
                 extern volatile uint32_t sched_bad_add_stack0;
@@ -246,7 +272,7 @@ timer_dispatch_many(void)
         }
 
         irq_enable();
-        while (unlikely(diff > 0))
+        while (unlikely(diff > (int32_t)TIMER_SYSTICK_LEAD_TICKS))
             diff = next - timer_read_time();
         irq_disable();
     }
@@ -255,7 +281,9 @@ timer_dispatch_many(void)
 void __visible __aligned(16) // aligning helps stabilize perf benchmarks
 SysTick_Handler(void)
 {
+    uint32_t fired = timer_fire_time;
     irq_disable();
+    sched_timer_irq_enter(fired);
     // SysTick and TIM5 share the same NVIC priority (MOTION_NVIC_PRIO).
     // Same-priority interrupts cannot nest, so a TIM5 tick that comes due
     // during this handler stays pending until SysTick returns — even across
@@ -291,12 +319,21 @@ SysTick_Handler(void)
 #endif
     uint32_t diff = timer_dispatch_many();
     timer_set_diff(diff);
+    uint32_t done = timer_read_time();
+    sched_timer_irq_exit(done);
+    timer_busy_ticks += done - fired;
 #if CONFIG_MACH_STM32
     diag_systick_account(diag_systick_enter, DWT->CYCCNT);
 #endif
     irq_enable();
 }
 DECL_ARMCM_IRQ(SysTick_Handler, SysTick_IRQn);
+
+uint32_t
+timer_dispatch_busy_ticks(void)
+{
+    return timer_busy_ticks;
+}
 
 // Make sure timer_repeat_until doesn't wrap 32bit comparisons
 void

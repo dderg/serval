@@ -7,7 +7,7 @@ import logging
 import struct
 import threading
 
-from ..motion_engine import native_class
+from ..motion_engine import native
 
 # This "bulk sensor" module facilitates the processing of sensor chip
 # measurements that do not require the host to respond with low
@@ -187,7 +187,7 @@ class ClockSyncRegression:
     def __init__(self, mcu, chip_clock_smooth, decay=1.0 / 20.0):
         self.mcu = mcu
         self.chip_clock_smooth = chip_clock_smooth
-        self._reg = native_class("DecayRegression")(decay)
+        self._reg = native("DecayRegression")(decay)
         self.last_chip_clock = self.last_exp_mcu_clock = 0.0
 
     def reset(self, mcu_clock, chip_clock):

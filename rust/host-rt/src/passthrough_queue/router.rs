@@ -4,6 +4,7 @@ use std::time::Instant;
 use indexmap::IndexMap;
 
 use crate::clock::{Clock, HostSecs, PrintTime, instant_to_f64};
+use crate::clock_projection::project_clock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct McuHandle(u32);
@@ -29,6 +30,12 @@ pub enum RouterError {
         mcu: McuHandle,
         skew_secs: f64,
     },
+    /// A host time further before the record's reference than a record can
+    /// project backwards.
+    ProjectionBeyondBound {
+        mcu: McuHandle,
+        error: crate::clock_projection::ProjectionError,
+    },
 }
 
 impl std::fmt::Display for RouterError {
@@ -41,6 +48,9 @@ impl std::fmt::Display for RouterError {
                  invalidated by a (re)connect and no fresh estimate has arrived",
                 h.raw()
             ),
+            Self::ProjectionBeyondBound { mcu, error } => {
+                write!(f, "mcu handle {}: {error}", mcu.raw())
+            }
             Self::ClockEstStampAhead { mcu, skew_secs } => write!(
                 f,
                 "mcu handle {} published a clock estimate stamped {skew_secs:.6}s \
@@ -193,9 +203,11 @@ impl PassthroughRouter {
     pub fn clock_record(&self, mcu: McuHandle) -> Option<ClockRecordSnapshot> {
         let est = self.mcus.get(&mcu)?.est?;
         let host_now = instant_to_f64(self.clock.now());
-        let delta = (host_now - est.clock_offset) * est.clock_freq;
-        #[allow(clippy::cast_sign_loss)]
-        let projected_now = est.last_clock.wrapping_add(delta.max(0.0) as u64);
+        let projected_now =
+            project_clock(est.last_clock, est.clock_offset, est.clock_freq, host_now)
+                .unwrap_or_else(|e| {
+                    panic!("mcu {mcu:?}: now cannot project through its own record: {e}")
+                });
         Some(ClockRecordSnapshot {
             clock_freq: est.clock_freq,
             clock_offset: est.clock_offset,
@@ -386,9 +398,10 @@ impl PassthroughRouter {
     pub fn ack_clock_and_freq(&self, mcu: McuHandle) -> Option<(u64, f64)> {
         let rec = self.mcus.get(&mcu)?.est?;
         let host_now = instant_to_f64(self.clock.now());
-        let delta = (host_now - rec.clock_offset) * rec.clock_freq;
-        #[allow(clippy::cast_sign_loss)]
-        let projected = rec.last_clock.wrapping_add(delta.max(0.0) as u64);
+        let projected = project_clock(rec.last_clock, rec.clock_offset, rec.clock_freq, host_now)
+            .unwrap_or_else(|e| {
+                panic!("mcu {mcu:?}: now cannot project through its own record: {e}")
+            });
         Some((projected, rec.clock_freq))
     }
 
@@ -399,10 +412,8 @@ impl PassthroughRouter {
             .ok_or(RouterError::UnknownMcu(mcu))?
             .est(mcu)?;
         let host_now = instant_to_f64(self.clock.now());
-        let delta = (host_now - rec.clock_offset) * rec.clock_freq;
-        #[allow(clippy::cast_sign_loss)]
-        let projected = rec.last_clock.wrapping_add(delta.max(0.0) as u64);
-        Ok(projected)
+        project_clock(rec.last_clock, rec.clock_offset, rec.clock_freq, host_now)
+            .map_err(|error| RouterError::ProjectionBeyondBound { mcu, error })
     }
 
     pub fn host_now_secs(&self) -> f64 {
@@ -472,9 +483,13 @@ impl PassthroughRouter {
             .get(&mcu)
             .ok_or(RouterError::UnknownMcu(mcu))?
             .est(mcu)?;
-        let delta = (host_time_secs - rec.clock_offset) * rec.clock_freq;
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        let projected = rec.last_clock.wrapping_add(delta.max(0.0) as u64);
+        let projected = project_clock(
+            rec.last_clock,
+            rec.clock_offset,
+            rec.clock_freq,
+            host_time_secs,
+        )
+        .map_err(|error| RouterError::ProjectionBeyondBound { mcu, error })?;
         tracing::trace!(
             subsystem = "motion",
             event = "host_time_to_mcu_clock",
@@ -513,10 +528,37 @@ impl PassthroughRouter {
             );
             return;
         };
-        let delta = (seg0_host_secs - rec.clock_offset) * rec.clock_freq;
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        let start_time = rec.last_clock.wrapping_add(delta.max(0.0) as u64);
-        let ack_now = self.compute_ack_clock(mcu).unwrap_or(0);
+        let start_time = match project_clock(
+            rec.last_clock,
+            rec.clock_offset,
+            rec.clock_freq,
+            seg0_host_secs,
+        ) {
+            Ok(clock) => clock,
+            Err(e) => {
+                tracing::error!(
+                    subsystem = "motion",
+                    event = "seg0_lead_beyond_projection_bound",
+                    mcu = ?mcu,
+                    error = %e,
+                    "[seg0-lead] segment 0 cannot be projected through the clock record"
+                );
+                return;
+            }
+        };
+        let ack_now = match self.compute_ack_clock(mcu) {
+            Ok(clock) => clock,
+            Err(e) => {
+                tracing::error!(
+                    subsystem = "motion",
+                    event = "seg0_lead_no_ack_clock",
+                    mcu = ?mcu,
+                    error = ?e,
+                    "[seg0-lead] no ack clock to measure the start lead against"
+                );
+                return;
+            }
+        };
         let lead_ticks = start_time as i64 - ack_now as i64;
         let lead_us = (lead_ticks as f64 / rec.clock_freq) * 1e6;
         if lead_ticks < 0 {

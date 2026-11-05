@@ -1,11 +1,18 @@
 """Deploy and flash tooling for the bench.
 
-uv run python tools/bench/deploy.py sync
-uv run python tools/bench/deploy.py flash-target
-uv run python tools/bench/deploy.py flash-capture
-uv run python tools/bench/deploy.py config
+uv run python tools/bench/deploy.py sync [--tree DIR]
+uv run python tools/bench/deploy.py flash-target [--tree DIR]
+uv run python tools/bench/deploy.py flash-capture [--tree DIR]
+uv run python tools/bench/deploy.py config [--config CFG]
 uv run python tools/bench/deploy.py reset-target
 uv run python tools/bench/deploy.py mco
+
+Firmware builds inside the tree they come from (out/bench-f401 for the F401,
+tools/bench/capture-fw/target for the F407), never in a directory another
+tree shares. Each flash bakes the tree's firmware build id
+(firmware_build_id.py) into the image, requires the board to report it back,
+and records it under "firmware" in the deploy record, which run.py copies
+into every run.json; a sync keeps the boards' entries.
 """
 
 from __future__ import annotations
@@ -19,18 +26,25 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import capture
+import firmware_build_id
 import lock
 import pi
-from capture import DEVICE as CAPTURE_DEVICE
 
 REPO = Path(__file__).resolve().parents[2]
-BENCH = REPO / "tools" / "bench"
+sys.path.insert(0, str(REPO / "snapshots"))
+import engine_build_id  # noqa: E402
+
+BENCH = Path("tools/bench")
 TARGET_CONFIG = BENCH / "f401.config"
-TARGET_OUT = Path("~/bench/fw/f401").expanduser()
+TARGET_OUT = Path("out/bench-f401")
+TARGET_BOARD = "target"
 CAPTURE_FW = BENCH / "capture-fw"
-CAPTURE_ELF = (
-    CAPTURE_FW / "target/thumbv7em-none-eabihf/release/bench-capture-fw"
-)
+CAPTURE_TARGET_DIR = CAPTURE_FW / "target"
+CAPTURE_ELF = Path("thumbv7em-none-eabihf/release/bench-capture-fw")
+CAPTURE_BOARD = "capture"
+CAPTURE_BUILD_ID_ENV = "CAPTURE_FW_BUILD_ID"
+TARGET_VERSION_TAG = "-fw"
 CARGO_BIN = Path("~/.cargo/bin").expanduser()
 TARGET_SERIAL_GLOB = "/dev/serial/by-id/usb-Klipper_stm32f401xc_*"
 PI_ELF = "/tmp/bench-target.elf"
@@ -77,6 +91,7 @@ def deploy_identity(tree: Path) -> dict:
         "head": git_output(tree, "rev-parse", "HEAD").strip(),
         "branch": git_output(tree, "rev-parse", "--abbrev-ref", "HEAD").strip(),
         "diff_sha256": hashlib.sha256(diff).hexdigest(),
+        "rust_build_id": engine_build_id.tree_build_id(tree),
         "dirty_paths": dirty,
         "timestamp": datetime.now().astimezone().isoformat(),
         "worktree": str(tree),
@@ -120,12 +135,39 @@ def rsync_changes(tree: Path, files: list[str]) -> list[str]:
     return changed
 
 
+BUILD_OUTPUT_DIRS = ("rust/target/", ".git/")
+BUILD_OUTPUT_SUFFIXES = (".so", ".pyc")
+BUILD_OUTPUT_FILES = (".bench-deploy.json",)
+REMOTE_TREE_LISTING = (
+    "cd klipper && find . -path ./.git -prune -o -path ./rust/target -prune "
+    "-o \\( -type f -o -type l \\) -print"
+)
+
+
+def is_build_output(name: str) -> bool:
+    return (
+        name in BUILD_OUTPUT_FILES
+        or name.startswith(BUILD_OUTPUT_DIRS)
+        or name.endswith(BUILD_OUTPUT_SUFFIXES)
+        or "/__pycache__/" in name
+    )
+
+
+def stale_remote_files(remote: list[str], local: list[str]) -> list[str]:
+    return sorted(
+        name for name in set(remote) - set(local) if not is_build_output(name)
+    )
+
+
 def cmd_sync(tree: Path) -> None:
     files = local_files(tree)
     changed = rsync_changes(tree, files)
-    stale = sorted(
-        set(pi.ssh("cd klipper && git ls-files").splitlines()) - set(files)
-    )
+    remote = [
+        line.removeprefix("./")
+        for line in pi.ssh(REMOTE_TREE_LISTING).splitlines()
+        if line
+    ]
+    stale = stale_remote_files(remote, files)
     if stale:
         quoted = " ".join(f"'{name}'" for name in stale)
         pi.ssh(f"cd klipper && rm -f -- {quoted}")
@@ -143,7 +185,9 @@ def cmd_sync(tree: Path) -> None:
             raise pi.BenchError(
                 f"build-native.sh failed with exit code {build.returncode}"
             )
-    pi.write_deployed(deploy_identity(tree))
+    pi.write_deployed(
+        {**deploy_identity(tree), "firmware": pi.flashed_firmware()}
+    )
     if changed or stale:
         before = pi.klipper_pid()
         pi.restart_klipper()
@@ -159,12 +203,45 @@ def wait_pi_serial() -> None:
     raise pi.BenchError(f"{TARGET_SERIAL_GLOB} did not appear on the Pi")
 
 
-def cmd_flash_target() -> None:
-    TARGET_OUT.mkdir(parents=True, exist_ok=True)
-    make = ["make", f"KCONFIG_CONFIG={TARGET_CONFIG}", f"OUT={TARGET_OUT}/"]
-    run_checked([*make, "olddefconfig"], cwd=REPO)
-    run_checked([*make, f"-j{os.cpu_count()}"], cwd=REPO)
-    pi.scp_to_pi(TARGET_OUT / "klipper.elf", PI_ELF)
+def firmware_identity(tree: Path, build_id: str, elf: Path) -> dict:
+    return {
+        "build_id": build_id,
+        "worktree": str(tree),
+        "head": git_output(tree, "rev-parse", "HEAD").strip(),
+        "elf": str(elf),
+        "elf_sha256": hashlib.sha256(elf.read_bytes()).hexdigest(),
+        "timestamp": datetime.now().astimezone().isoformat(),
+    }
+
+
+def require_reported(board: str, reported: str, build_id: str) -> None:
+    if not reported.endswith(build_id):
+        raise pi.BenchError(
+            f"the {board} board reports firmware {reported!r} after flashing, "
+            f"not the build {build_id} this tree just made"
+        )
+
+
+def cmd_flash_target(tree: Path) -> None:
+    """Build the F401 firmware in this tree's own output directory (another
+    tree's objects and dependency files never mix in), flash it, and require
+    the mcu to report the build id baked into its version."""
+    out = tree / TARGET_OUT
+    out.mkdir(parents=True, exist_ok=True)
+    make = ["make", f"KCONFIG_CONFIG={tree / TARGET_CONFIG}", f"OUT={out}/"]
+    run_checked([*make, "olddefconfig"], cwd=tree)
+    build_id = firmware_build_id.target_build_id(tree, tree / TARGET_CONFIG)
+    (out / "compile_time_request.o").unlink(missing_ok=True)
+    run_checked(
+        [
+            *make,
+            f"VERSION_EXTRA={TARGET_VERSION_TAG}{build_id}",
+            f"-j{os.cpu_count()}",
+        ],
+        cwd=tree,
+    )
+    elf = out / "klipper.elf"
+    pi.scp_to_pi(elf, PI_ELF)
     output = pi.ssh(
         f"openocd -f ~/klipper/tools/bench/openocd-target.cfg"
         f' -c "program {PI_ELF} verify reset exit" 2>&1'
@@ -173,8 +250,10 @@ def cmd_flash_target() -> None:
     require_verified(output)
     wait_pi_serial()
     pi.firmware_restart()
+    require_reported(TARGET_BOARD, pi.mcu_version(), build_id)
+    pi.record_firmware(TARGET_BOARD, firmware_identity(tree, build_id, elf))
     pi.enable_mco()
-    print("target flashed, MCO1 on, printer ready")
+    print(f"target flashed with firmware {build_id}, MCO1 on, printer ready")
 
 
 def cmd_reset_target() -> None:
@@ -194,26 +273,39 @@ def cmd_mco() -> None:
     print("F401 MCO1 = HSE/4 on PA8")
 
 
-def cmd_flash_capture() -> None:
-    env = {**os.environ, "PATH": f"{CARGO_BIN}:{os.environ['PATH']}"}
-    run_checked(["cargo", "build", "--release"], cwd=CAPTURE_FW, env=env)
+def cmd_flash_capture(tree: Path) -> None:
+    """Build the F407 capture firmware in this tree's own cargo target dir,
+    whatever CARGO_TARGET_DIR the caller exports, flash it, and require the
+    board to report the build id it was built with."""
+    build_id = firmware_build_id.capture_build_id(tree)
+    target_dir = tree / CAPTURE_TARGET_DIR
+    env = {
+        **os.environ,
+        "PATH": f"{CARGO_BIN}:{os.environ['PATH']}",
+        "CARGO_TARGET_DIR": str(target_dir),
+        CAPTURE_BUILD_ID_ENV: build_id,
+    }
+    run_checked(["cargo", "build", "--release"], cwd=tree / CAPTURE_FW, env=env)
+    elf = target_dir / CAPTURE_ELF
     output = run_checked(
         [
             "openocd",
             "-f",
-            str(BENCH / "openocd-capture.cfg"),
+            str(tree / BENCH / "openocd-capture.cfg"),
             "-c",
-            f"program {CAPTURE_ELF} verify reset exit",
+            f"program {elf} verify reset exit",
         ],
         env=env,
     )
     require_verified(output)
     deadline = time.monotonic() + SERIAL_TIMEOUT_S
-    while not os.path.exists(CAPTURE_DEVICE):
+    while not os.path.exists(capture.DEVICE):
         if time.monotonic() > deadline:
-            raise pi.BenchError(f"{CAPTURE_DEVICE} did not appear")
+            raise pi.BenchError(f"{capture.DEVICE} did not appear")
         time.sleep(0.5)
-    print("capture board flashed, device present")
+    require_reported(CAPTURE_BOARD, capture.identity(), build_id)
+    pi.record_firmware(CAPTURE_BOARD, firmware_identity(tree, build_id, elf))
+    print(f"capture board flashed with firmware {build_id}, device present")
 
 
 def cmd_config(config: Path) -> None:
@@ -226,9 +318,11 @@ def cmd_config(config: Path) -> None:
     print("printer ready")
 
 
-COMMANDS = {
+TREE_COMMANDS = {
     "flash-target": cmd_flash_target,
     "flash-capture": cmd_flash_capture,
+}
+COMMANDS = {
     "reset-target": cmd_reset_target,
     "mco": cmd_mco,
 }
@@ -236,7 +330,9 @@ COMMANDS = {
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["sync", "config", *COMMANDS])
+    parser.add_argument(
+        "command", choices=["sync", "config", *TREE_COMMANDS, *COMMANDS]
+    )
     parser.add_argument("--tree", type=Path, default=REPO)
     parser.add_argument(
         "--config",
@@ -251,6 +347,8 @@ def main() -> None:
             cmd_sync(args.tree.resolve())
         elif args.command == "config":
             cmd_config(args.config)
+        elif args.command in TREE_COMMANDS:
+            TREE_COMMANDS[args.command](args.tree.resolve())
         else:
             COMMANDS[args.command]()
 

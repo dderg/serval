@@ -33,6 +33,7 @@ fn stepcompress_cfg() -> McuAxisConfig {
             phase_sample_rate: 0.0,
             phase_ring_depth: 0,
             stepcompress_max_error_secs: 0.0,
+            stepcompress_drain_budget_secs: 0.008,
         },
     }
 }
@@ -56,6 +57,7 @@ fn sink() -> (
         counter: Arc::new(AtomicU64::new(0)),
         frontier: Arc::new(super::super::CommittedFrontier::default()),
         frozen_projection: std::collections::HashMap::new(),
+        dispatch_record: None,
     };
     (sink, router, handle, clock)
 }

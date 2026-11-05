@@ -4,7 +4,7 @@ use host_rt::passthrough_queue::{McuHandle, PassthroughRouter};
 use nurbs::ScalarNurbs;
 use trajectory::{ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm};
 
-use crate::motion_history::{HISTORY_CAPACITY, HistoryError, HistoryStore};
+use crate::motion_history::{HISTORY_HORIZON_S, HistoryError, HistoryStore};
 use crate::types::AxisKey;
 
 fn stub_router_two_mcus() -> PassthroughRouter {
@@ -383,23 +383,47 @@ fn unchanged_rebase_invalidates_overlapping_and_future_motion() {
     assert_eq!(stale_future.acceleration, 0.0);
 }
 
+/// Whole seconds of 1 s spans, enough that the first `overrun` of them end
+/// before the horizon behind the last one.
+fn seconds_past_the_horizon(overrun: u64) -> u64 {
+    HISTORY_HORIZON_S as u64 + 1 + overrun
+}
+
 #[test]
-fn eviction_keeps_capacity_and_reports_true_window() {
+fn motion_older_than_the_horizon_is_evicted_and_the_window_reported() {
     let mut store = HistoryStore::default();
-    let dur = 0.001;
-    let dur_ticks = (dur * FREQ_HZ) as u64;
-    for i in 0..(HISTORY_CAPACITY as u64 + 10) {
-        rec(&mut store, key(), linear(i * dur_ticks, dur, 0.0, 1.0));
+    let second = FREQ as u64;
+    let spans = seconds_past_the_horizon(8);
+    for i in 0..spans {
+        rec(&mut store, key(), linear(i * second, 1.0, 0.0, 1.0));
     }
     let err = store
-        .state_at_host(key(), 0.0, Some(f64::INFINITY))
+        .state_at_host(key(), h(7 * second + second / 2), Some(f64::INFINITY))
         .unwrap_err();
     match err {
         HistoryError::BeforeRetainedWindow { window_start, .. } => {
-            assert!((window_start - h(10 * dur_ticks)).abs() < 1e-12);
+            assert!((window_start - h(8 * second)).abs() < 1e-9);
         }
         other => panic!("expected BeforeRetainedWindow, got {other:?}"),
     }
+    let oldest_kept = store
+        .state_at_host(key(), h(8 * second + second / 2), Some(f64::INFINITY))
+        .unwrap();
+    assert!((oldest_kept.position - 0.5).abs() < 1e-6);
+}
+
+#[test]
+fn motion_within_the_horizon_stays_answerable_however_many_spans_it_takes() {
+    let mut store = HistoryStore::default();
+    let dur = 0.001;
+    let dur_ticks = (dur * FREQ_HZ) as u64;
+    for i in 0..10_000 {
+        rec(&mut store, key(), linear(i * dur_ticks, dur, 0.0, 1.0));
+    }
+    let first = store
+        .state_at_host(key(), h(dur_ticks / 2), Some(f64::INFINITY))
+        .unwrap();
+    assert!((first.position - 0.5).abs() < 1e-6);
 }
 
 #[test]
@@ -448,14 +472,13 @@ fn eviction_does_not_stretch_the_pre_ring_hold() {
     let mut store = HistoryStore::default();
     rec(&mut store, key(), linear(0, 1.0, 0.0, 10.0));
     store.drop_pieces_on_reanchor();
-    let dur = 0.001;
-    let dur_ticks = (dur * FREQ_HZ) as u64;
+    let dur_ticks = FREQ as u64;
     let ring_start = 2_000_000_000_u64;
-    for i in 0..(HISTORY_CAPACITY as u64 + 10) {
+    for i in 0..seconds_past_the_horizon(10) {
         rec(
             &mut store,
             key(),
-            linear(ring_start + i * dur_ticks, dur, 0.0, 1.0),
+            linear(ring_start + i * dur_ticks, 1.0, 0.0, 1.0),
         );
     }
 

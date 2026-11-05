@@ -1,7 +1,7 @@
 use super::*;
 use crate::frontend::{MoveContext, line_move};
 use crate::path::lowering::PositionProfile;
-use crate::path::{Arc, Clothoid, CurvatureProfile, PathSegment, Segment};
+use crate::path::{Arc, Clothoid, CurvatureProfile, Line, PathSegment, Segment};
 use crate::segment::SourceRange;
 use crate::vec3::dist;
 use std::f64::consts::{PI, SQRT_2};
@@ -437,11 +437,12 @@ fn extrusion_rate_survives_a_short_leg_consumed_by_two_blends() {
 #[test]
 fn run_whose_tail_spiral_overclaims_its_neighbor_still_touches_the_run_endpoints() {
     // Slicer polyline from neptune_cube/discontinuity.gcode around Y=105: at
-    // accel 10000 / scv 20 the tail easing spiral wants 0.246mm of a 0.313mm
+    // accel 10000 / scv 22 the tail easing spiral wants 0.246mm of a 0.313mm
     // neighbor — over the half-line claim limit — which used to strand the
-    // arc's tail end ~15µm off the neighbor line.
+    // arc's tail end ~15µm off the neighbor line. At scv 20 the facets stray
+    // past the corner budget from the run's circle and the run does not form.
     let accel = 10_000.0;
-    let scv = 20.0;
+    let scv = 22.0;
     let ratio = 0.0337;
     let mk =
         |line_no: u32, a: [f64; 3], b: [f64; 3]| seg(line_no, accel, scv, a, b, ratio * dist(a, b));
@@ -458,6 +459,7 @@ fn run_whose_tail_spiral_overclaims_its_neighbor_still_touches_the_run_endpoints
         &facets,
         Some(&head),
         Some(&tail),
+        None,
         CornerFitConfig::default(),
     )
     .unwrap()
@@ -523,6 +525,7 @@ fn displaced_spiral_keeps_extrusion_rate_continuous_and_within_commanded_band() 
         &facets,
         Some(&head),
         Some(&tail),
+        None,
         CornerFitConfig::default(),
     )
     .unwrap()
@@ -605,7 +608,7 @@ fn corner_ramp_beyond_extruder_budget_leaves_the_junction_unblended() {
 
     let open = CornerFitConfig::default();
     assert!(matches!(
-        plan_junction_reduced(&a, &b, open, 0.0, 0.0).unwrap(),
+        plan_junction_reduced(&a, &b, open, (0.0, 0.0), (0.0, 0.0)).unwrap(),
         JunctionPlan::Blend(_)
     ));
 
@@ -614,7 +617,7 @@ fn corner_ramp_beyond_extruder_budget_leaves_the_junction_unblended() {
         ..CornerFitConfig::default()
     };
     assert!(matches!(
-        plan_junction_reduced(&a, &b, tight, 0.0, 0.0).unwrap(),
+        plan_junction_reduced(&a, &b, tight, (0.0, 0.0), (0.0, 0.0)).unwrap(),
         JunctionPlan::Unblended(UnblendReason::ExtrusionRampInfeasible)
     ));
 }
@@ -646,7 +649,7 @@ fn disabled_jerk_limiting_never_rejects_ramps_on_its_own() {
         ..CornerFitConfig::default()
     };
     assert!(matches!(
-        plan_junction_reduced(&a, &b, config, 0.0, 0.0).unwrap(),
+        plan_junction_reduced(&a, &b, config, (0.0, 0.0), (0.0, 0.0)).unwrap(),
         JunctionPlan::Blend(_)
     ));
 }
@@ -669,7 +672,7 @@ fn arc_ramp_beyond_extruder_budget_dissolves_the_run() {
         ramp_accel_budget_mm_s2: 0.01,
         ..CornerFitConfig::default()
     };
-    let fit = RunFit::fit(&facets, Some(&head), Some(&tail), tight).unwrap();
+    let fit = RunFit::fit(&facets, Some(&head), Some(&tail), None, tight).unwrap();
     assert!(
         fit.is_none(),
         "an arc ramp the extruder cannot follow must dissolve the run"
@@ -893,27 +896,119 @@ fn merge_deviation_budget_covers_absorbed_vertices() {
 }
 
 /// Anchoring the circle on a near-half-turn run (endpoint chord ≈ diameter)
-/// must not amplify least-squares noise: a µm-scale perturbation of the LS
-/// center moves the anchored center by the same order, not by
-/// sqrt(2·r·noise) ≈ 100µm as the old fixed-radius intersection did.
+/// must not amplify least-squares noise: µm-scale perturbations of the LS
+/// center leave the minimax circle where the exact seed puts it. Bulging
+/// past the vertices toward the chord midpoints, it keeps the chords closer
+/// than the circle through every vertex does.
 #[test]
-fn endpoint_anchored_center_is_well_conditioned_near_a_half_turn() {
+fn endpoint_anchored_minimax_circle_is_well_conditioned_near_a_half_turn() {
     let r = 20.0;
-    let (p0, p1) = ([r, 0.0, 0.0], [-r, 0.0, 0.0]);
+    let facets = 8;
+    let vertex = |k: usize| {
+        let angle = PI * k as f64 / facets as f64;
+        [r * libm::cos(angle), r * libm::sin(angle), 0.0]
+    };
+    let moves: Vec<Move> = (0..facets)
+        .map(|k| seg(k as u32, 10_000.0, 5.0, vertex(k), vertex(k + 1), 0.0))
+        .collect();
+    let lines: Vec<&Line> = moves.iter().map(|m| line_of(m).unwrap()).collect();
+    let (p0, p1) = (vertex(0), vertex(facets));
     let plane_normal = [0.0, 0.0, 1.0];
+    let (exact_center, exact_radius) = kernels::minimax_through_endpoints(
+        &lines,
+        (p0, p1),
+        [0.0; 3],
+        plane_normal,
+        (0.0, f64::INFINITY),
+    )
+    .unwrap();
+    let sagitta = r * (1.0 - libm::cos(0.5 * PI / facets as f64));
+    let deviation = kernels::max_chord_dev(&lines, exact_center, exact_radius);
+    assert!(
+        deviation < sagitta,
+        "minimax chord deviation {deviation} against a {sagitta} sagitta"
+    );
     for noise in [[1e-3, 0.0, 0.0], [0.0, 1e-3, 0.0], [-7e-4, 5e-4, 0.0]] {
-        let ls_origin = [noise[0], noise[1], noise[2]];
-        let (center, radius) =
-            kernels::center_through_endpoints(p0, p1, ls_origin, plane_normal).unwrap();
-        let center_err = dist(center, [0.0, 0.0, 0.0]);
+        let (center, radius) = kernels::minimax_through_endpoints(
+            &lines,
+            (p0, p1),
+            noise,
+            plane_normal,
+            (0.0, f64::INFINITY),
+        )
+        .unwrap();
+        let center_err = dist(center, exact_center);
         assert!(
-            center_err <= 1.1e-3,
-            "center error {center_err} amplifies the {noise:?} LS perturbation"
+            center_err <= 1e-6,
+            "center moved {center_err} under the {noise:?} LS perturbation"
         );
-        assert!((radius - r).abs() < 1e-6, "radius drifted to {radius}");
+        assert!(
+            (radius - exact_radius).abs() < 1e-6,
+            "radius drifted to {radius}"
+        );
         assert!(
             (dist(center, p0) - dist(center, p1)).abs() < 1e-9,
             "anchored center must be equidistant from both endpoints"
+        );
+    }
+}
+
+#[test]
+fn a_run_beside_a_move_along_its_plane_normal_gets_neither_ease_nor_blend_from_it() {
+    // trident_mesh_clock_regression.gcode: a Z lift, then three XY facets
+    // forming a shallow arc in the plane the lift is perpendicular to. No
+    // spiral joins a line along the arc plane's normal to the arc.
+    let mk = |line_no: u32, a: [f64; 3], b: [f64; 3]| seg(line_no, 10_000.0, 71.2, a, b, 0.0);
+    let head = mk(1, [169.513, 158.329, 0.0], [169.513, 158.329, 0.2]);
+    let facets = vec![
+        mk(2, [169.513, 158.329, 0.2], [170.254, 158.769, 0.2]),
+        mk(3, [170.254, 158.769, 0.2], [171.048, 159.137, 0.2]),
+        mk(4, [171.048, 159.137, 0.2], [171.481, 159.297, 0.2]),
+    ];
+    let corner = CornerFitConfig::default();
+    let fit = RunFit::fit(&facets, Some(&head), None, None, corner).unwrap();
+    if let Some(mut fit) = fit {
+        let blend = fit.blend_head_with_line(&head, &facets[0], corner).unwrap();
+        assert!(
+            blend.is_empty(),
+            "a lift along the arc plane's normal is not blended"
+        );
+    }
+}
+
+#[test]
+fn facets_of_jittered_lengths_leave_no_line_body_briefer_than_the_floor() {
+    let (accel, scv) = (3000.0, 20.0);
+    let facets = 40;
+    let radius = 2.7;
+    let vertex = |k: usize| {
+        let jitter = if k % 3 == 1 { 2e-3 } else { 0.0 };
+        let angle = 2.0 * PI * (k as f64 + jitter) / facets as f64;
+        [radius * libm::cos(angle), radius * libm::sin(angle), 0.0]
+    };
+    let moves: Vec<Move> = (0..facets)
+        .map(|k| seg(k as u32 + 1, accel, scv, vertex(k), vertex(k + 1), 0.0))
+        .collect();
+    let out = fit_corners(&moves, CornerFitConfig::default()).unwrap();
+    let floor = shortest_line_body_mm(&moves[0]);
+    for m in &out.moves {
+        if let Some(Segment::Line(line)) = &m.segment.spatial {
+            assert!(
+                line.s_len() >= floor,
+                "line {} keeps a {:e} mm body, under the {floor:e} mm floor",
+                m.source.start_line,
+                line.s_len()
+            );
+        }
+    }
+    for pair in out.moves.windows(2) {
+        assert!(
+            dist(
+                spatial_end(&pair[0]).unwrap(),
+                spatial_start(&pair[1]).unwrap()
+            ) <= 1e-7,
+            "the fit opened a gap at line {}",
+            pair[1].source.start_line
         );
     }
 }

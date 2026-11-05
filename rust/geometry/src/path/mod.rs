@@ -1,12 +1,14 @@
 pub mod arc;
 mod basis;
 pub mod clothoid;
+mod lean;
 pub mod line;
 pub mod lowering;
 pub mod profile;
 
 pub use arc::Arc;
 pub use clothoid::Clothoid;
+pub use lean::AxisLean;
 pub use line::Line;
 pub use profile::CurvatureProfile;
 

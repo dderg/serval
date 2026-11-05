@@ -79,6 +79,7 @@ typedef enum {
 
 #define EC_READ_U16(DATA) (*(const uint16_t *) (DATA))
 #define EC_READ_S16(DATA) (*(const int16_t *) (DATA))
+#define EC_READ_U32(DATA) (*(const uint32_t *) (DATA))
 #define EC_READ_S32(DATA) (*(const int32_t *) (DATA))
 #define EC_WRITE_U16(DATA, VAL) do { *(uint16_t *) (DATA) = (uint16_t) (VAL); } while (0)
 #define EC_WRITE_U32(DATA, VAL) do { *(uint32_t *) (DATA) = (uint32_t) (VAL); } while (0)
@@ -96,6 +97,7 @@ void ecrt_master_deactivate(ec_master_t *master);
 void ecrt_master_application_time(ec_master_t *master, uint64_t app_time);
 void ecrt_master_receive(ec_master_t *master);
 void ecrt_master_send(ec_master_t *master);
+int ecrt_master_select_reference_clock(ec_master_t *master, ec_slave_config_t *sc);
 void ecrt_master_sync_reference_clock(ec_master_t *master);
 void ecrt_master_sync_slave_clocks(ec_master_t *master);
 int ecrt_master_sdo_upload(ec_master_t *master, uint16_t position, uint16_t index,

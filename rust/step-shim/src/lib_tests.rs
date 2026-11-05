@@ -6,7 +6,7 @@ use trajectory::{
 };
 
 use super::compress::StepMove;
-use super::{MotorConfig, ShimError, StepEncoder, StepFrame, StepShim};
+use super::{DrainBudget, MotorConfig, ShimError, StepEncoder, StepFrame, StepShim};
 
 const CYCLES_PER_SECOND: f64 = 1_000_000.0;
 const MICROSTEP: f64 = 0.01;
@@ -40,6 +40,13 @@ fn seeded(cfg: MotorConfig, queue_depth: u32) -> StepShim {
     let mut shim = StepShim::new(vec![cfg], queue_depth);
     shim.reset_position(0, 0);
     shim
+}
+
+fn spent_budget(roots_through: u64) -> Option<DrainBudget> {
+    Some(DrainBudget {
+        deadline: std::time::Instant::now(),
+        roots_through,
+    })
 }
 
 fn base_group(position: f64, t_start: f64, t_end: f64) -> MotorGroup {
@@ -151,7 +158,10 @@ fn budgeted_multi_motor_drain_matches_serial_output() {
     let budgeted_frames = budgeted
         .drain_budgeted(
             u64::MAX,
-            Some(std::time::Instant::now() + std::time::Duration::from_secs(1)),
+            Some(DrainBudget {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(1),
+                roots_through: 0,
+            }),
         )
         .unwrap();
     let for_oid = |frames: &[StepFrame], oid: u32| {
@@ -198,10 +208,7 @@ fn a_budget_expiring_on_a_zero_width_window_keeps_its_root() {
     shim.push_spans(0, &[view]).unwrap();
     let mut frames = shim.drain_budgeted(first_root - 1, None).unwrap();
     assert!(frames.is_empty(), "the first root is one clock ahead");
-    frames.extend(
-        shim.drain_budgeted(first_root, Some(std::time::Instant::now()))
-            .unwrap(),
-    );
+    frames.extend(shim.drain_budgeted(first_root, spent_budget(0)).unwrap());
     frames.extend(shim.drain_budgeted(u64::MAX, None).unwrap());
 
     assert_eq!(replayed_step_clocks(&frames), whole);
@@ -1143,6 +1150,68 @@ fn halt_discards_queued_work_and_re_anchors_the_resumed_lane() {
 }
 
 #[test]
+fn unrooted_from_tracks_where_the_root_search_stopped() {
+    let mut shim = seeded(cfg(), 8);
+    shim.push_spans(
+        0,
+        &[
+            span(1_000, LATTICE_OFFSET, 0.1, 1_000),
+            span(2_000, 0.1 + LATTICE_OFFSET, 0.1, 1_000),
+        ],
+    )
+    .unwrap();
+    assert_eq!(shim.unrooted_from(0), Some(1_000));
+
+    shim.drain(1_500).unwrap();
+    assert_eq!(shim.unrooted_from(0), Some(1_501));
+
+    shim.drain(u64::MAX).unwrap();
+    assert_eq!(shim.unrooted_from(0), None);
+}
+
+#[test]
+fn every_pass_of_a_spent_budget_roots_its_first_window_until_the_stream_ends() {
+    let views = (0..12)
+        .map(|i| span(1_000 * (i + 1), 0.1 * i as f64 + LATTICE_OFFSET, 0.1, 1_000))
+        .collect::<Vec<_>>();
+    let mut reference = seeded(cfg(), 16);
+    reference.push_spans(0, &views).unwrap();
+    let whole = replayed_step_clocks(&reference.drain(u64::MAX).unwrap());
+
+    let mut shim = seeded(cfg(), 16);
+    shim.push_spans(0, &views).unwrap();
+    let mut frames = Vec::new();
+    let mut passes = 0;
+    while let Some(unrooted) = shim.unrooted_from(0) {
+        frames.extend(shim.drain_budgeted(u64::MAX, spent_budget(0)).unwrap());
+        passes += 1;
+        assert!(
+            shim.unrooted_from(0).is_none_or(|next| next > unrooted),
+            "pass {passes} with a spent budget rooted nothing past {unrooted}"
+        );
+    }
+    assert!(passes > 1, "a spent budget must still halt between windows");
+    assert_eq!(replayed_step_clocks(&frames), whole);
+}
+
+#[test]
+fn a_spent_budget_still_roots_through_the_clock_it_owes() {
+    let views = (0..12)
+        .map(|i| span(1_000 * (i + 1), 0.1 * i as f64 + LATTICE_OFFSET, 0.1, 1_000))
+        .collect::<Vec<_>>();
+    let mut shim = seeded(cfg(), 16);
+    shim.push_spans(0, &views).unwrap();
+    shim.drain_budgeted(u64::MAX, spent_budget(8_500)).unwrap();
+    let unrooted = shim
+        .unrooted_from(0)
+        .expect("a spent budget halts short of the end");
+    assert!(
+        unrooted > 8_500,
+        "a spent budget yielded at {unrooted}, short of the 8500 it owes"
+    );
+}
+
+#[test]
 fn a_cut_never_replays_steps_before_the_cut_clock() {
     let cut_at = 1_500;
     let mut shim = seeded(cfg(), 8);
@@ -1467,4 +1536,44 @@ fn an_extend_and_retract_opened_on_their_epoch_cut_clocks_step_the_same_count() 
         mismatches.len(),
         EPOCH_FREQS * EPOCH_FREQS
     );
+}
+
+#[test]
+fn a_cut_the_mcu_never_received_keeps_stepping_on_the_lattice_it_queued() {
+    let mut shim = seeded(cfg(), 8);
+    let before = span(1_000, LATTICE_OFFSET, 0.1, 1_000);
+    shim.push_spans(0, &[before]).unwrap();
+    let mut frames = shim.drain(u64::MAX).unwrap();
+    let cut_at = 2_040;
+    frames.extend(shim.cut_keeping_step_clock(0, cut_at).unwrap());
+    let after = span(cut_at, 0.1 + LATTICE_OFFSET, 0.1, 1_000);
+    shim.push_spans(0, &[after]).unwrap();
+    let resumed = shim.drain(u64::MAX).unwrap();
+
+    assert!(
+        reset_clocks(&resumed).is_empty(),
+        "the mcu still holds the queued steps, so a reset_step_clock would wait \
+         for them to play out: {resumed:?}"
+    );
+    frames.extend(resumed);
+    let expected: Vec<u64> = (1..=10)
+        .map(|k| 1_000 + 100 * k - 25)
+        .chain((1..=10).map(|k| cut_at + 100 * k - 25))
+        .collect();
+    assert_eq!(replayed_step_clocks(&frames), expected);
+    assert_eq!(shim.commanded_steps(0), 20);
+}
+
+#[test]
+fn a_cut_keeps_a_high_precision_carry_the_mcu_still_holds() {
+    let mut shim = seeded(hp_cfg(), 8);
+    shim.push_spans(0, &[span(1_000, LATTICE_OFFSET, 0.1, 1_000)])
+        .unwrap();
+    shim.drain(u64::MAX).unwrap();
+    shim.cut_keeping_step_clock(0, 2_040).unwrap();
+    shim.push_spans(0, &[span(2_040, 0.1 + LATTICE_OFFSET, 0.1, 1_000)])
+        .unwrap();
+    let resumed = shim.drain(u64::MAX).unwrap();
+    assert!(reset_clocks(&resumed).is_empty(), "{resumed:?}");
+    assert_eq!(shim.commanded_steps(0), 20);
 }

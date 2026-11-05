@@ -6,6 +6,7 @@
 //!
 //! Run: cargo run --release --example planner_bench
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -78,17 +79,18 @@ fn faceted_circles(loops: usize, radius_mm: f64, chord_mm: f64) -> Vec<Waypoint>
     let facets = ((2.0 * std::f64::consts::PI * radius_mm) / chord_mm).ceil() as usize;
     let mut wp = Vec::with_capacity(loops * facets + 1);
     let mut e = 0.0;
-    wp.push((radius_mm, 0.0, 0.2, e, MAX_VELOCITY, MAX_ACCEL));
+    wp.push(Waypoint::at([radius_mm, 0.0, 0.2, e], MAX_VELOCITY));
     for k in 1..=loops * facets {
         let theta = 2.0 * std::f64::consts::PI * (k as f64) / (facets as f64);
         e += chord_mm * 0.04;
-        wp.push((
-            radius_mm * libm::cos(theta),
-            radius_mm * libm::sin(theta),
-            0.2,
-            e,
+        wp.push(Waypoint::at(
+            [
+                radius_mm * libm::cos(theta),
+                radius_mm * libm::sin(theta),
+                0.2,
+                e,
+            ],
             MAX_VELOCITY,
-            MAX_ACCEL,
         ));
     }
     wp
@@ -97,7 +99,7 @@ fn faceted_circles(loops: usize, radius_mm: f64, chord_mm: f64) -> Vec<Waypoint>
 fn zigzag_infill(lines: usize, line_mm: f64, pitch_mm: f64) -> Vec<Waypoint> {
     let mut wp = Vec::with_capacity(2 * lines + 1);
     let mut e = 0.0;
-    wp.push((0.0, 0.0, 0.2, e, MAX_VELOCITY, MAX_ACCEL));
+    wp.push(Waypoint::at([0.0, 0.0, 0.2, e], MAX_VELOCITY));
     for i in 0..lines {
         let y = (i as f64) * pitch_mm;
         let (x0, x1) = if i % 2 == 0 {
@@ -106,10 +108,10 @@ fn zigzag_infill(lines: usize, line_mm: f64, pitch_mm: f64) -> Vec<Waypoint> {
             (line_mm, 0.0)
         };
         e += line_mm * 0.04;
-        wp.push((x1, y, 0.2, e, MAX_VELOCITY, MAX_ACCEL));
+        wp.push(Waypoint::at([x1, y, 0.2, e], MAX_VELOCITY));
         let _ = x0;
         e += pitch_mm * 0.04;
-        wp.push((x1, y + pitch_mm, 0.2, e, MAX_VELOCITY, MAX_ACCEL));
+        wp.push(Waypoint::at([x1, y + pitch_mm, 0.2, e], MAX_VELOCITY));
     }
     wp
 }
@@ -141,18 +143,19 @@ fn stream_config() -> StreamConfig {
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: PRODUCTION_MAX_BUFFER_MOVES,
         limits,
+        step_capacity: None,
     }
 }
 
-fn run_fitter(moves: &[geometry::Move], config: &StreamConfig) -> Vec<StreamInput> {
+fn run_fitter(steps: &[pipeline_snapshot::PlanStep], config: &StreamConfig) -> Vec<StreamInput> {
     let mut fitted = Vec::new();
     let mut collect = |item| {
         fitted.push(item);
         true
     };
     let mut fit = FitStage::new(config.corner).into_driver();
-    for m in moves.iter().cloned() {
-        assert!(fit.feed(m.into(), &mut collect));
+    for step in steps.iter().cloned() {
+        assert!(step.feed(|input| fit.feed(input, &mut collect)));
     }
     assert!(fit.finish(&mut collect));
     fitted
@@ -178,7 +181,7 @@ fn run_planner(items: Vec<StreamInput>, config: StreamConfig, trickle: bool) -> 
     PLAN_US_MAX.store(0, Ordering::Relaxed);
 
     let start = Instant::now();
-    let mut planner = Planner::new(config);
+    let mut planner = Planner::new(config, Arc::default());
     for item in items {
         assert!(planner.feed(item, &mut collect));
         if trickle {
@@ -210,9 +213,16 @@ fn run_planner(items: Vec<StreamInput>, config: StreamConfig, trickle: bool) -> 
 
 fn bench(name: &str, waypoints: &[Waypoint], trickle: bool) {
     let config = stream_config();
-    let moves = pipeline_snapshot::build_moves(waypoints, config.limits).expect("valid waypoints");
+    let steps = pipeline_snapshot::plan_steps(
+        waypoints,
+        motion_pipeline::live_config::GcodeMoveBase::from_parts(
+            config.limits,
+            Some(pipeline_snapshot::EXTRUDER_AXIS),
+        ),
+    )
+    .expect("valid waypoints");
     let fit_start = Instant::now();
-    let fitted = run_fitter(&moves, &config);
+    let fitted = run_fitter(&steps, &config);
     let fit_wall = fit_start.elapsed().as_secs_f64();
     let r = run_planner(fitted, stream_config(), trickle);
     let ratio = r.motion_s / r.wall_s;
@@ -226,7 +236,7 @@ fn bench(name: &str, waypoints: &[Waypoint], trickle: bool) {
          fit={:>6.1}ms plan_wall={:>9.1}ms plan_mean={:>8.1}ms plan_max={:>8.1}ms \
          motion={:>7.1}ms realtime_x={ratio:>7.2} {}",
         if trickle { "trickle" } else { "saturated" },
-        moves.len(),
+        pipeline_snapshot::plan_moves(&steps).count(),
         r.planned_moves,
         r.plans,
         fit_wall * 1e3,

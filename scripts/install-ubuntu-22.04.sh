@@ -11,6 +11,8 @@ install_packages()
 {
     # Packages for python cffi
     PKGLIST="virtualenv python3-dev libffi-dev build-essential"
+    # Rust native modules (scripts/build-native.sh)
+    PKGLIST="${PKGLIST} pkg-config libudev-dev"
     # kconfig requirements
     PKGLIST="${PKGLIST} libncurses-dev"
     # hub-ctrl

@@ -8,13 +8,14 @@ description = "PyO3-free core of the motion engine: pump, worker, enqueue, homin
 license.workspace = true
 
 [dependencies]
+checked-cast = { path = "../checked-cast" }
 host-rt = { path = "../host-rt" }
 mcu-protocol = { path = "../mcu-protocol" }
 trajectory = { path = "../trajectory" }
 geometry = { path = "../geometry" }
 motion-pipeline = { path = "../motion-pipeline" }
 planner-config = { path = "../planner-config" }
-gcode = { path = "../gcode", optional = true }
+pipeline-snapshot = { path = "../pipeline-snapshot", optional = true }
 nurbs = { path = "../nurbs" }
 runtime-contract = { path = "../runtime-contract" }
 step-shim = { path = "../step-shim" }
@@ -25,9 +26,11 @@ tracing = "0.1"
 thiserror = { workspace = true }
 
 [features]
-test-support = ["gcode"]
+test-support = ["pipeline-snapshot"]
 
 [dev-dependencies]
+source-tree = { path = "../source-tree" }
+motion-pipeline = { path = "../motion-pipeline", features = ["bench-metrics", "test-support"] }
 config-doc = { path = "../config-doc" }
 planner-config = { path = "../planner-config", features = ["doc"] }
 ethercat-rt = { path = "../ethercat-rt" }

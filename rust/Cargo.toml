@@ -23,6 +23,9 @@ members = [
     "ethercat-setpoint-fill",
     "shaper-ident",
     "step-shim",
+    "checked-cast",
+    "source-tree",
+    "taylor-model",
 ]
 exclude = ["gcode/fuzz", "snapshot-viewer", "motion-playground"]
 resolver = "2"
@@ -194,6 +197,51 @@ debug = false
 [profile.release.package.cbindgen]
 opt-level = 0
 debug = false
+
+# Host-only crates keep arithmetic overflow checks in release: a wrapped step
+# clock, count or index there is silently wrong motion. The MCU firmware crates
+# (runtime, runtime-contract, c-api) are untouched, so the firmware build is
+# identical. The snapshot profile inherits this. nurbs, geometry and trajectory
+# are left out: their evaluation and fitting loops cost +2..6% CPU on the dense
+# replay with checks on, the rest +0.2..0.3% (scripts/bench_compare.py).
+[profile.release.package.checked-cast]
+overflow-checks = true
+
+[profile.release.package.config-doc]
+overflow-checks = true
+
+[profile.release.package.gcode]
+overflow-checks = true
+
+[profile.release.package.host-rt]
+overflow-checks = true
+
+[profile.release.package.mcu-protocol]
+overflow-checks = true
+
+[profile.release.package.mcu-transport]
+overflow-checks = true
+
+[profile.release.package.motion-core]
+overflow-checks = true
+
+[profile.release.package.motion-engine]
+overflow-checks = true
+
+[profile.release.package.motion-pipeline]
+overflow-checks = true
+
+[profile.release.package.motion-services]
+overflow-checks = true
+
+[profile.release.package.pipeline-snapshot]
+overflow-checks = true
+
+[profile.release.package.planner-config]
+overflow-checks = true
+
+[profile.release.package.step-shim]
+overflow-checks = true
 
 [profile.dev]
 opt-level = 1            # eval correctness tests run faster than -O0; still debuggable

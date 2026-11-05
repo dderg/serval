@@ -2,16 +2,15 @@
 //! exactly on the curvature ceiling (disk rail = 0) and tiny debris features
 //! whose curvature spikes collapse the feasible speed at printing feeds.
 
+use std::sync::Arc;
+
 use geometry::path::lowering::PositionProfile;
 use motion_pipeline::fit_stage::FitStage;
 use motion_pipeline::planner::Planner;
 use motion_pipeline::types::PlannedMove;
-use motion_pipeline::{BaseItem, Lowerer, PlannedItem, StreamConfig};
+use motion_pipeline::{BaseItem, Lowerer, PlannedItem, live_config};
 use pipeline_snapshot::waypoints::parse_gcode;
-use pipeline_snapshot::{
-    ExactTrajectory, SNAPSHOT_MAX_BUFFER_MOVES, SampleSide, TRAJECTORY_FIT_TOL_ACCEL_MM_S2,
-    TRAJECTORY_FIT_TOL_MM, VELOCITY_INTEGRATION_TOL, build_moves,
-};
+use pipeline_snapshot::{CartesianLimits, ExactTrajectory, PlannerConfig, SampleSide, plan_steps};
 
 fn stream_case(
     case_rel_path: &str,
@@ -19,30 +18,35 @@ fn stream_case(
     max_accel: f64,
     scv: f64,
 ) -> Vec<PlannedMove> {
-    let path = format!(
-        "{}/../../snapshots/cases/{case_rel_path}",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = source_tree::repo_file(&format!("snapshots/cases/{case_rel_path}"));
     let text = std::fs::read_to_string(&path).expect("read case gcode");
-    let waypoints = parse_gcode(&text, max_velocity, max_accel).expect("parse");
-    let corner_deviation = geometry::corner_deviation_from_scv(scv, max_accel);
-    let limits =
-        geometry::VelocityLimits::try_new(max_velocity, max_accel, corner_deviation, f64::INFINITY)
-            .expect("limits");
-    let moves = build_moves(&waypoints, limits).expect("moves");
-
-    let config = StreamConfig {
-        corner: geometry::CornerFitConfig::default(),
-        integration_tol: VELOCITY_INTEGRATION_TOL,
-        max_extrude_only_velocity_mm_s: 100.0,
-        max_extrude_only_accel_mm_s2: 1000.0,
-        fit_tol_mm: TRAJECTORY_FIT_TOL_MM,
-        fit_tol_accel_mm_s2: TRAJECTORY_FIT_TOL_ACCEL_MM_S2,
-        max_buffer_moves: SNAPSHOT_MAX_BUFFER_MOVES,
-        limits,
+    let waypoints = parse_gcode(
+        &text,
+        &CartesianLimits::without_z_caps(max_velocity, max_accel, f64::INFINITY, 0.0),
+    )
+    .expect("parse");
+    let planner_config = PlannerConfig {
+        cartesian: CartesianLimits::without_z_caps(
+            max_velocity,
+            max_accel,
+            f64::INFINITY,
+            geometry::corner_deviation_from_scv(scv, max_accel),
+        ),
+        max_extrude_only_velocity: Some(100.0),
+        max_extrude_only_accel: Some(1000.0),
+        ..PlannerConfig::default()
     };
+    let base = live_config::GcodeMoveBase::from_parts(
+        live_config::GcodeMoveBase::of(&planner_config, &[])
+            .expect("move base")
+            .limits(),
+        Some(pipeline_snapshot::EXTRUDER_AXIS),
+    );
+    let steps = plan_steps(&waypoints, base).expect("steps");
+
+    let config = live_config::stream_config(&planner_config, None).expect("stream config");
     let mut fit = FitStage::new(config.corner).into_driver();
-    let mut planner = Planner::new(config);
+    let mut planner = Planner::new(config, Arc::default());
     let mut planned = Vec::new();
     let mut collect = |item| {
         if let PlannedItem::Move(m) = item {
@@ -50,8 +54,8 @@ fn stream_case(
         }
         true
     };
-    for m in moves {
-        assert!(fit.feed(m.into(), &mut |item| planner.feed(item, &mut collect)));
+    for step in steps {
+        assert!(step.feed(|input| fit.feed(input, &mut |item| planner.feed(item, &mut collect))));
     }
     assert!(fit.finish(&mut |item| planner.feed(item, &mut collect)));
     assert!(planner.finish(&mut collect));
@@ -143,6 +147,7 @@ fn lower_run(planned: &[PlannedMove]) -> Vec<trajectory::ContinuousSegment> {
         let item = PlannedItem::Move(PlannedMove {
             geometry: pm.geometry.clone(),
             velocity: pm.velocity.clone(),
+            budget: pm.budget,
         });
         assert!(lowerer.feed(item, &mut collect), "lowerer rejected input");
     }
@@ -200,13 +205,14 @@ fn cap_starved_clothoid_holds_per_axis_accel_budget() {
 /// caps what one substep may build, so the fly-over arrives near the notch
 /// bottom while the debris field is still crossed at the disk-planned speed
 /// instead of the old frozen crawl (~16.6 mm/s vs ~13.1), the executed
-/// carrier holds the configured per-axis acceleration budget, and every
-/// snapshot row is a finite, continuously joined window.
+/// carrier holds the configured per-axis acceleration budget to within the
+/// rail's proven defect, and every snapshot row is a finite, continuously
+/// joined window.
 #[test]
 fn debris_notch_fly_over_holds_per_axis_accel_budget() {
     let planned = stream_case("facet_debris/debris_corners.gcode", 300.0, 3000.0, 9.0);
     let max_a = carrier_max_accel(&planned);
-    let budget = 3000.0 * (1.0 + 1e-9);
+    let budget = 3000.0 + geometry::velocity::law::RAIL_ACCELERATION_DEFECT;
     assert!(max_a <= budget, "carrier accel {max_a:.6} exceeds {budget}");
     assert_carriers_are_finite_and_continuous(&planned);
 }

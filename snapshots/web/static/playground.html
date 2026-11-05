@@ -116,7 +116,7 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
       <h1>Motion Playground</h1>
       <button id="gcode-collapse" title="Collapse the gcode pane">⟨</button>
     </div>
-    <div class="hint">Paste G-code below — it re-plans as you type. G0/G1, G90/G91, G92, M82/M83.</div>
+    <div class="hint" title="Refused by name: G2/G3, G5, G10/G11, G28, G20, probing/levelling/calibration, FORCE_MOVE, stepper buzz and resonance tests, SET_PRESSURE_ADVANCE, SET_POST_PROCESSOR, SET_INPUT_SHAPER, BED_MESH_PROFILE/CLEAR/OFFSET, PAUSE/RESUME/CANCEL_PRINT/EXCLUDE_OBJECT, M109/M190/TEMPERATURE_WAIT after the first move. Any other command is ignored, as on a printer.">Paste G-code below — it re-plans as you type, read as the printer reads it: G0/G1, G90/G91, G92, M82/M83, M204, M220/M221, SET_VELOCITY_LIMIT, RESET_VELOCITY_LIMIT, SET_GCODE_OFFSET, SAVE/RESTORE_GCODE_STATE, and G4, M400, M18/M84, SET_KINEMATIC_POSITION as stops at rest. Arcs, firmware retraction, homing and probing are refused (hover for the full list).</div>
     <textarea id="gcode" spellcheck="false"></textarea>
     <div class="error" id="error"></div>
   </div>
@@ -150,8 +150,8 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
             <div class="row"><label for="cfg-max_path_deviation">max_path_deviation</label><input id="cfg-max_path_deviation" type="number" step="0.001" placeholder="0.005"></div>
             <div class="row"><label for="cfg-max_accel_deviation">max_accel_deviation</label><input id="cfg-max_accel_deviation" type="number" step="10" placeholder="50"></div>
             <div class="section">[extruder]</div>
-            <div class="row"><label for="cfg-max_extrude_only_velocity">max_extrude_only_velocity</label><input id="cfg-max_extrude_only_velocity" type="number" step="5" placeholder="∞"></div>
-            <div class="row"><label for="cfg-max_extrude_only_accel">max_extrude_only_accel</label><input id="cfg-max_extrude_only_accel" type="number" step="100" placeholder="∞"></div>
+            <div class="row"><label for="cfg-max_extrude_only_velocity">max_extrude_only_velocity</label><input id="cfg-max_extrude_only_velocity" type="number" step="5" placeholder="∞" value="50"></div>
+            <div class="row"><label for="cfg-max_extrude_only_accel">max_extrude_only_accel</label><input id="cfg-max_extrude_only_accel" type="number" step="100" placeholder="∞" value="5000"></div>
             <div class="section" title="Simulates the physical toolhead as a damped resonant mode driven by the motor command — view only, does not affect planning">toolhead sim (view only)</div>
             <div class="row"><label for="sim-x-freq">x frequency_hz</label><input id="sim-x-freq" type="number" step="5" min="0" placeholder="off" value="185"></div>
             <div class="row"><label for="sim-x-zeta">x damping_ratio</label><input id="sim-x-zeta" type="number" step="0.01" min="0" max="1" placeholder="0.1"></div>
@@ -176,15 +176,12 @@ frequency_hz: 120
 
 [axis e]
 follows: x, y, z
-post_processors: pa, st
+post_processors: pa
+max_accel: 20000
 
 [post_processor pa]
 type: linear_pressure_advance
-k: 0.03
-
-[post_processor st]
-type: smooth_triangle
-smooth_time: 0.02</textarea>
+k: 0.03</textarea>
           </div>
         </div>
         <div class="panel" id="panel-path">

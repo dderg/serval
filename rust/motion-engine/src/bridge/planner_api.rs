@@ -1,9 +1,8 @@
 use super::{
     Arc, ArgValue, DRAIN_TIMEOUT, HashSet, McuTopologyInput, Ordering, PyMotionEngine, PyResult,
-    PyRuntimeError, PyValueError, Python, classify, planner_err, pymethods, require_positive,
+    PyRuntimeError, PyValueError, Python, planner_err, pymethods,
 };
 use motion_core::lock_ext::LockExt;
-use planner_config::from_doc::{planner_config_from_settings, read_motion_settings};
 use pyo3::FromPyObject;
 
 fn unsupported_curve(py: Python<'_>, message: &'static str) -> PyResult<()> {
@@ -19,6 +18,56 @@ pub(super) fn require_single_motor_mask(motor_mask: u8) -> Result<(), String> {
     Ok(())
 }
 
+impl PyMotionEngine {
+    fn adopt_planner_config(&self, config_text: &str) -> PyResult<planner_config::PlannerConfig> {
+        if self.planner.lock_ok().is_some() {
+            return Err(PyRuntimeError::new_err("planner already initialized"));
+        }
+        let cfg = planner_config::from_doc::planner_config_from_text(config_text)
+            .map_err(PyValueError::new_err)?;
+        *self.extruder_caps.lock_ok() =
+            motion_pipeline::live_config::extruder_caps(&cfg).map_err(PyValueError::new_err)?;
+        *self.planner_config.lock_ok() = cfg.clone();
+        Ok(cfg)
+    }
+
+    #[cfg(feature = "snapshot")]
+    /// A fence of the detached planner, resolved to the stream time its
+    /// fenced trajectory ends at (0 for an idle stream): with no MCU clock to
+    /// project it through, the detached planner's print time is its stream
+    /// time.
+    pub(crate) fn detached_fence_end(&self, id: u64) -> PyResult<Option<f64>> {
+        if self.detached_record.lock_ok().is_none() {
+            return Err(PyRuntimeError::new_err(
+                "no detached planner: call init_planner_detached",
+            ));
+        }
+        let guard = self.planner.lock_ok();
+        let planner = guard.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("planner not initialized — call init_planner_detached first")
+        })?;
+        Ok(planner.fence_take(id).map(|end| end.unwrap_or(0.0)))
+    }
+
+    #[cfg(feature = "snapshot")]
+    /// What the detached planner was fed and shaped since it started; call
+    /// after a drain so the shaper has emitted everything.
+    pub(crate) fn take_detached_record(
+        &self,
+    ) -> PyResult<(
+        Vec<motion_pipeline::InputTrace>,
+        Vec<trajectory::ContinuousSegment>,
+    )> {
+        let guard = self.detached_record.lock_ok();
+        let record = guard.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("no detached planner: call init_planner_detached")
+        })?;
+        Ok((
+            record.inputs.try_iter().collect(),
+            record.segments.try_iter().collect(),
+        ))
+    }
+}
 pub(super) fn motion_history_host_now() -> f64 {
     host_rt::clock::instant_to_f64(std::time::Instant::now())
 }
@@ -38,6 +87,7 @@ struct McuTopology {
     step_pulse_seconds: Vec<f64>,
     high_precision_step_compress: Vec<bool>,
     stepcompress_max_error_secs: f64,
+    stepcompress_drain_budget_secs: f64,
     phase_sample_rate: f64,
     phase_ring_depth: u32,
 }
@@ -59,6 +109,7 @@ impl McuTopology {
                 move_queue_slots: self.move_queue_slots,
                 step_pulse_seconds: self.step_pulse_seconds,
                 stepcompress_max_error_secs: self.stepcompress_max_error_secs,
+                stepcompress_drain_budget_secs: self.stepcompress_drain_budget_secs,
                 phase_sample_rate: self.phase_sample_rate,
                 phase_ring_depth: self.phase_ring_depth,
             },
@@ -164,16 +215,17 @@ impl PyMotionEngine {
     /// sections are re-read here with the same reader
     /// (`_config_doc.read_motion_settings`) klippy used at config time, so
     /// the planner cannot drift from what the host validated and reported.
-    fn init_planner(&self, config_text: &str, mcus: Vec<McuTopology>) -> PyResult<()> {
-        if self.planner.lock_ok().is_some() {
-            return Err(PyRuntimeError::new_err("planner already initialized"));
-        }
-
-        let doc = config_doc::Document::parse(config_text, "<config>")
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let (settings, _consumed) = read_motion_settings(&doc).map_err(PyValueError::new_err)?;
-        let cfg = planner_config_from_settings(&settings).map_err(PyValueError::new_err)?;
-        *self.planner_config.lock_ok() = cfg.clone();
+    /// Every move is capped by the step capacity `step_benchmarks` derive.
+    fn init_planner(
+        &self,
+        config_text: &str,
+        mcus: Vec<McuTopology>,
+        step_benchmarks: Vec<crate::step_benchmarks::PyStepBenchmark>,
+    ) -> PyResult<()> {
+        let step_capacity =
+            crate::step_benchmarks::step_capacity_input(config_text, &step_benchmarks)
+                .map_err(PyValueError::new_err)?;
+        let cfg = self.adopt_planner_config(config_text)?;
 
         let mcus: Vec<McuTopologyInput> = mcus.into_iter().map(McuTopology::into_core).collect();
         let (ec_conns, mcu_configs) = self.resolve_mcu_topology(&mcus)?;
@@ -181,11 +233,18 @@ impl PyMotionEngine {
         self.rebase_motion_history_after_position_set(machine);
 
         let (ethercat_mcu_ids, host_ios) = self.build_transport_maps(&mcu_configs)?;
-        self.seed_ethercat_clock_estimates(&ethercat_mcu_ids);
+        self.seed_ethercat_clock_estimates(&ethercat_mcu_ids)?;
 
         host_rt::memory_lock::HOST_MEMORY_LOCK
             .start_pipeline_threads(|| {
-                let pump_control = self.spawn_pipeline(&cfg, &mcu_configs, &host_ios, &ec_conns)?;
+                let pump_control = self.spawn_pipeline(
+                    &cfg,
+                    &mcu_configs,
+                    &host_ios,
+                    &ec_conns,
+                    None,
+                    Some(&step_capacity),
+                )?;
 
                 self.spawn_live_position_poll_thread();
 
@@ -194,6 +253,41 @@ impl PyMotionEngine {
                 Ok(())
             })
             .map_err(|denied| PyRuntimeError::new_err(denied.to_string()))?
+    }
+    #[cfg(feature = "snapshot")]
+    /// The live planner with no MCU behind it: the same config reading, move
+    /// construction, ingress and pipeline as `init_planner`, but nothing
+    /// executes the trajectory, so the pacer never brakes for a playhead and
+    /// no memory needs locking. It records every pipeline input and shaped
+    /// segment for `take_detached_record`: the live half of the snapshot
+    /// parity gate. `step_benchmarks` cap it as they cap `init_planner`;
+    /// `None` plans uncapped.
+    #[pyo3(signature = (config_text, step_benchmarks = None))]
+    fn init_planner_detached(
+        &self,
+        config_text: &str,
+        step_benchmarks: Option<Vec<crate::step_benchmarks::PyStepBenchmark>>,
+    ) -> PyResult<()> {
+        let step_capacity = crate::step_benchmarks::optional_step_capacity_input(
+            config_text,
+            step_benchmarks.as_deref(),
+        )?;
+        let cfg = self.adopt_planner_config(config_text)?;
+        let (inputs_tx, inputs) = crossbeam_channel::unbounded();
+        let (segments_tx, segments) = crossbeam_channel::unbounded();
+        *self.detached_record.lock_ok() = Some(super::DetachedRecordRx { inputs, segments });
+        self.spawn_pipeline(
+            &cfg,
+            &[],
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+            Some(motion_core::worker::DetachedTaps {
+                inputs: inputs_tx,
+                segments: segments_tx,
+            }),
+            step_capacity.as_ref(),
+        )?;
+        Ok(())
     }
     /// Push one move into the pipe. Returns `false` when the pipe is full —
     /// queued motion has reached the configured depth, or the entry channel
@@ -221,33 +315,21 @@ impl PyMotionEngine {
                 feedrate,
                 "engine.submit_move enter"
             );
-            let followers = self.e_followers(de)?;
-            let (extruder_axis, e_delta) = match followers.as_slice() {
-                [] => (0usize, 0.0),
-                [(axis, delta)] => (*axis, *delta),
-                _ => {
-                    return Err(PyRuntimeError::new_err(
-                        "submit_move: multiple follower axes not yet supported by the new pipeline",
-                    ));
-                }
+            let line = motion_pipeline::live_config::GcodeLine {
+                start: self.commanded_pos.lock_ok().0,
+                delta: [dx, dy, dz],
+                de,
+                feedrate_mm_s: feedrate,
+                seq: self.move_seq.load(Ordering::Relaxed) as u32,
             };
-            let pos = self.commanded_pos.lock_ok().0;
-            let limits =
-                motion_core::live_config::move_limits(&self.planner_config.lock_ok(), [dx, dy, dz])
-                    .map_err(PyRuntimeError::new_err)?;
-            let line_no = self.move_seq.fetch_add(1, Ordering::Relaxed) as u32;
-            let m = classify::build_move(
-                pos,
-                [dx, dy, dz],
-                extruder_axis,
-                e_delta,
-                limits,
-                feedrate,
-                line_no,
-            )
-            .map_err(|e| PyRuntimeError::new_err(format!("{e:?}")))?;
+            let built = {
+                let cfg = self.planner_config.lock_ok();
+                motion_pipeline::live_config::GcodeMoveBase::of(&cfg, &self.extruder_caps.lock_ok())
+                    .and_then(|base| base.line_move(&cfg.runtime, line))
+            }
+            .map_err(PyRuntimeError::new_err)?;
 
-            {
+            if let Some(m) = built {
                 let guard = self.planner.lock_ok();
                 let planner = guard.as_ref().ok_or_else(|| {
                     PyRuntimeError::new_err("planner not initialized — call init_planner first")
@@ -260,16 +342,14 @@ impl PyMotionEngine {
                 tracing::trace!(
                     subsystem = "motion",
                     event = "intake_submit",
-                    line_no,
+                    line_no = line.seq,
                     channel_pending = planner.pending_channel_moves(),
                     "[intake] move accepted into the pipe"
                 );
             }
 
-            let mut pos = self.commanded_pos.lock_ok();
-            pos.0[0] += dx;
-            pos.0[1] += dy;
-            pos.0[2] += dz;
+            self.move_seq.fetch_add(1, Ordering::Relaxed);
+            self.commanded_pos.lock_ok().0 = line.end();
             *self.last_g5_pq.lock_ok() = None;
             Ok(true)
         })
@@ -387,15 +467,19 @@ impl PyMotionEngine {
     }
     #[pyo3(signature = (velocity))]
     fn set_velocity_cap(&self, velocity: Option<f64>) -> PyResult<()> {
-        require_positive(velocity, "velocity")?;
-        self.planner_config.lock_ok().runtime_caps.velocity = velocity;
-        Ok(())
+        self.planner_config
+            .lock_ok()
+            .runtime
+            .set_velocity_cap(velocity)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     }
     #[pyo3(signature = (accel))]
     fn set_accel_cap(&self, accel: Option<f64>) -> PyResult<()> {
-        require_positive(accel, "accel")?;
-        self.planner_config.lock_ok().runtime_caps.accel = accel;
-        Ok(())
+        self.planner_config
+            .lock_ok()
+            .runtime
+            .set_accel_cap(accel)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     }
     pub(super) fn set_post_processor_bypass(&self, enabled: bool) -> PyResult<()> {
         self.publish_post_processors(|_, bypass| {
@@ -405,15 +489,11 @@ impl PyMotionEngine {
     }
     #[pyo3(signature = (corner_deviation))]
     fn set_corner_deviation(&self, corner_deviation: Option<f64>) -> PyResult<()> {
-        if let Some(deviation) = corner_deviation {
-            if !(deviation.is_finite() && deviation >= 0.0) {
-                return Err(PyValueError::new_err(
-                    "corner_deviation must be finite and non-negative",
-                ));
-            }
-        }
-        self.planner_config.lock_ok().runtime_corner_deviation = corner_deviation;
-        Ok(())
+        self.planner_config
+            .lock_ok()
+            .runtime
+            .set_corner_deviation(corner_deviation)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     }
     pub(super) fn update_post_processor(&self, name: &str, key: &str, value: f64) -> PyResult<()> {
         self.publish_post_processors(|processors, _| processors.set_param(name, key, value))
@@ -558,6 +638,8 @@ impl PyMotionEngine {
         let axis_chains = processors
             .compile_active_chains(&cfg.axis_registry, bypass)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let extruder_caps = planner_config::extruder_caps(&cfg.axis_registry, &axis_chains)
+            .map_err(PyValueError::new_err)?;
         if let Some(handle) = self.planner.lock_ok().as_ref() {
             handle
                 .update_axis_chains(axis_chains)
@@ -565,6 +647,7 @@ impl PyMotionEngine {
         }
         cfg.post_processors = processors;
         cfg.post_processor_bypass = bypass;
+        *self.extruder_caps.lock_ok() = extruder_caps;
         Ok(())
     }
 
@@ -705,20 +788,5 @@ impl PyMotionEngine {
     /// history are seeded with.
     pub(crate) fn machine_from_gcode(&self, pos: geometry::GcodePos) -> geometry::MachinePos {
         pos.to_machine(self.bed_mesh.lock_ok().as_deref())
-    }
-
-    fn e_followers(&self, de: f64) -> PyResult<Vec<(usize, f64)>> {
-        if de.abs() > 0.0 {
-            let cfg = self.planner_config.lock_ok();
-            let axis_index = cfg.axis_registry.axis_index("e").map_err(|_| {
-                PyRuntimeError::new_err(
-                    "E word on a move but no [axis e] is declared — declare the \
-                     follower axis or stop sending E",
-                )
-            })?;
-            Ok(vec![(axis_index, de)])
-        } else {
-            Ok(vec![])
-        }
     }
 }

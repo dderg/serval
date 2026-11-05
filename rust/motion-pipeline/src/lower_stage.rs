@@ -4,7 +4,9 @@ use geometry::path::lowering::PositionProfile;
 use geometry::{Move, SurfaceTransform};
 use trajectory::{AnalyticMoveSpan, ContinuousAxis, ContinuousSegment, RestSupport, SurfaceMode};
 
-use crate::types::{BaseItem, Control, PlannedItem, PlannedMove, advance_odometer};
+use crate::types::{
+    BaseItem, CONTIGUITY_EPS_MM, Control, PlannedItem, PlannedMove, StreamError, advance_odometer,
+};
 
 const REST_EPS_MM_S: f64 = 1e-9;
 const WARP_BBOX_SAMPLES: usize = 8;
@@ -84,6 +86,7 @@ impl Lowerer {
         planned: PlannedMove,
         output: &mut impl FnMut(BaseItem) -> bool,
     ) -> bool {
+        self.assert_starts_where_the_toolhead_is(&planned.geometry);
         let hold_pad = if self.rest_hold_pending {
             self.rest.before_motion
         } else {
@@ -176,6 +179,31 @@ impl Lowerer {
         output(BaseItem::Seg(segment))
     }
 
+    fn assert_starts_where_the_toolhead_is(&self, movement: &Move) {
+        let Some(spatial) = &movement.segment.spatial else {
+            return;
+        };
+        let [x, y, z, ..] = self.odometer[..] else {
+            panic!(
+                "lowerer: the odometer {:?} carries no spatial position",
+                self.odometer
+            );
+        };
+        let expected = [x, y, z];
+        let got = spatial.point_at(0.0);
+        let gap_mm = geometry::vec3::dist(expected, got);
+        assert!(
+            gap_mm <= CONTIGUITY_EPS_MM,
+            "lowerer: {}",
+            StreamError::Discontinuity {
+                line_no: movement.source.start_line,
+                expected,
+                got,
+                gap_mm,
+            }
+        );
+    }
+
     fn emit_settle_hold(&mut self, output: &mut impl FnMut(BaseItem) -> bool) -> bool {
         let settle = self.rest.after_motion;
         if self.rest_hold_pending || !self.has_motion_history || settle <= 0.0 {
@@ -265,10 +293,15 @@ fn classify_surface(
 
 fn rest_z_warp(mesh: Option<&SurfaceTransform>, odometer: &[f64]) -> f64 {
     mesh.map_or(0.0, |surface| {
-        surface.correction_at(
-            odometer.first().copied().unwrap_or(0.0),
-            odometer.get(1).copied().unwrap_or(0.0),
-            odometer.get(2).copied().unwrap_or(0.0),
-        )
+        let &[x, y, z, ..] = odometer else {
+            panic!(
+                "lowerer: a mesh needs the x, y and z odometer to warp a rest hold, got {} axes",
+                odometer.len()
+            );
+        };
+        surface.correction_at(x, y, z)
     })
 }
+
+#[cfg(test)]
+mod tests;

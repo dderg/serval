@@ -5,6 +5,7 @@
 #include "autoconf.h" // CONFIG_MOTION_RUNTIME
 #include "basecmd.h" // struct move_queue_head
 #include "board/gpio.h" // struct gpio_out
+#include "board/misc.h" // timer_read_time
 #include "compiler.h" // DIV_ROUND_UP
 #include "sched.h" // struct timer
 #include "trsync.h" // struct trsync_signal
@@ -98,11 +99,122 @@ enum {
 #define EDGE_STEP_TICKS DIV_ROUND_UP(CONFIG_CLOCK_FREQ, 8000000)
 #define AVR_STEP_TICKS 40 // minimum instructions between step gpio pulses
 
-uint_fast8_t stepper_event(struct timer *t);
 uint_fast8_t stepper_event_full(struct timer *t);
+uint_fast8_t stepper_load_next(struct stepper *s);
+void stepper_setup_dispatch(struct stepper *s, uint_fast8_t both_edge,
+                            uint32_t pulse_ticks);
 uint32_t stepper_get_position(struct stepper *s);
 int32_t stepper_classic_wire_position(struct stepper *s);
 void stepper_classic_halt(struct stepper *s);
 uint8_t stepper_classic_halt_all(uint32_t *stream_end_clock);
+
+#if CONFIG_HIGH_PREC_STEP
+static __always_inline void
+stepper_add_interval(uint32_t *time, struct stepper *s)
+{
+    uint32_t interval = s->interval + s->int_low_acc;
+    *time += interval >> s->shift;
+    s->int_low_acc = interval - ((interval >> s->shift) << s->shift);
+}
+
+static __always_inline void
+stepper_inc_interval(struct stepper *s)
+{
+    s->interval += s->add;
+    s->add += s->add2;
+}
+#endif
+
+static __always_inline void
+stepper_full_edge(struct stepper *s)
+{
+    gpio_out_toggle_noirq(s->step_pin);
+#if CONFIG_MCU_SIM
+    s->time.waketime += s->step_pulse_ticks;
+#else
+    s->time.waketime = timer_read_time() + s->step_pulse_ticks;
+#endif
+}
+
+static __always_inline uint_fast8_t
+stepper_edge_finish(struct stepper *s)
+{
+    uint32_t count = s->count - 1;
+    if (likely(count)) {
+        s->count = count;
+#if CONFIG_HIGH_PREC_STEP
+        if (s->flags & SF_HIGH_PREC_STEP) {
+            stepper_add_interval(&s->time.waketime, s);
+            stepper_inc_interval(s);
+        } else {
+            s->time.waketime += s->interval;
+            s->interval += s->add;
+        }
+#else
+        s->time.waketime += s->interval;
+        s->interval += s->add;
+#endif
+        return SF_RESCHEDULE;
+    }
+    return stepper_load_next(s);
+}
+
+static __always_inline uint_fast8_t
+stepper_full_finish(struct stepper *s)
+{
+    uint32_t min_next_time = s->time.waketime;
+    uint32_t count = s->count - 1;
+    if (likely(count & 1 && !(s->flags & SF_SINGLE_SCHED)))
+        goto reschedule_min;
+    if (likely(count)) {
+#if CONFIG_HIGH_PREC_STEP
+        if (s->flags & SF_HIGH_PREC_STEP) {
+            stepper_add_interval(&s->next_step_time, s);
+            stepper_inc_interval(s);
+        } else {
+            s->next_step_time += s->interval;
+            s->interval += s->add;
+        }
+#else
+        s->next_step_time += s->interval;
+        s->interval += s->add;
+#endif
+        if (unlikely(timer_is_before(s->next_step_time, min_next_time)))
+            goto reschedule_min;
+        s->count = count;
+        s->time.waketime = s->next_step_time;
+        return SF_RESCHEDULE;
+    }
+    return stepper_load_next(s);
+reschedule_min:
+    s->count = count;
+    return SF_RESCHEDULE;
+}
+
+static __always_inline uint_fast8_t
+stepper_timer_on_edge_path(struct timer *t)
+{
+    return HAVE_EDGE_OPTIMIZATION && !t->func;
+}
+
+static __always_inline void
+stepper_step_edge(struct timer *t, uint_fast8_t on_edge_path)
+{
+    struct stepper *s = container_of(t, struct stepper, time);
+    if (on_edge_path)
+        gpio_out_toggle_noirq(s->step_pin);
+    else
+        stepper_full_edge(s);
+    barrier();
+}
+
+static __always_inline uint_fast8_t
+stepper_step_finish(struct timer *t, uint_fast8_t on_edge_path)
+{
+    struct stepper *s = container_of(t, struct stepper, time);
+    if (on_edge_path)
+        return stepper_edge_finish(s);
+    return stepper_full_finish(s);
+}
 
 #endif // stepper.h

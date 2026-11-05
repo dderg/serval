@@ -8,6 +8,8 @@
 #   ./run.sh test -k probe            # subset of the e2e suite
 #   ./run.sh test --keep-logs         # keep every world's logs in .sim-logs/
 #   ./run.sh test --verbose           # stream the image build instead of hiding it
+#   SIM_IMAGE_ARCHIVE=f.tar.zst ./run.sh save-image   # build once, save the image
+#   SIM_IMAGE_ARCHIVE=f.tar.zst ./run.sh test         # load it instead of building
 #   ./run.sh serve                    # long-lived printer for Moonraker
 #   ./run.sh shell                    # bash inside the image
 #   ./run.sh --branch main            # build+run a specific branch
@@ -73,7 +75,7 @@ KEEP_LOGS=""
 VERBOSE=""
 
 case "${1:-}" in
-    test|serve|shell)
+    test|serve|shell|save-image)
         MODE="$1"
         shift
         ;;
@@ -116,10 +118,10 @@ done
 # worktrees never race on one tag: with a single shared "kalico-sim" tag, a
 # concurrent session could silently retag the image between this session's
 # build and its test run.
-BUILD_BRANCH="${BRANCH:-$(cd "$REPO_ROOT" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo head)}"
-# Detached HEAD (e.g. GitHub Actions' PR checkout) yields the literal string
-# "HEAD", which is not a valid docker image name — fall back to the commit.
-[[ "$BUILD_BRANCH" == "HEAD" ]] && BUILD_BRANCH="$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo head)"
+# Tagged per worktree directory (a slot), not per branch: the pool reuses its
+# worktrees, so the number of images is bounded by the worktrees instead of
+# growing with every branch built. --branch builds name their own tag.
+BUILD_BRANCH="${BRANCH:-$(basename "$REPO_ROOT")}"
 IMAGE_TAG="kalico-sim-$(echo "${BUILD_BRANCH//\//-}" | tr '[:upper:]' '[:lower:]')"
 
 echo "=== Kalico Simulator ==="
@@ -173,6 +175,15 @@ build_image() {
     fi
 }
 
+provide_image() {
+    if [[ "$MODE" != save-image && -n "${SIM_IMAGE_ARCHIVE:-}" ]]; then
+        echo "Loading $IMAGE_TAG from $SIM_IMAGE_ARCHIVE"
+        zstd -dc "$SIM_IMAGE_ARCHIVE" | docker load
+        return
+    fi
+    build_image "$@"
+}
+
 if [[ -n "$BRANCH" ]]; then
     # Extract the branch into a unique, self-cleaning staging dir. A unique
     # path per invocation means concurrent builds never race on a shared
@@ -185,9 +196,9 @@ if [[ -n "$BRANCH" ]]; then
     # run.sh / Dockerfile / configs are tested without committing.
     mkdir -p "$BUILD_CTX/tools/sim"
     cp -a "$SCRIPT_DIR"/. "$BUILD_CTX/tools/sim/"
-    build_image "$BUILD_CTX" "$BUILD_CTX/tools/sim/Dockerfile"
+    provide_image "$BUILD_CTX" "$BUILD_CTX/tools/sim/Dockerfile"
 else
-    build_image "$REPO_ROOT" "$SCRIPT_DIR/Dockerfile"
+    provide_image "$REPO_ROOT" "$SCRIPT_DIR/Dockerfile"
 fi
 
 if [[ -n "${SIM_JITTER:-}" ]]; then
@@ -195,6 +206,11 @@ if [[ -n "${SIM_JITTER:-}" ]]; then
 fi
 
 case "$MODE" in
+    save-image)
+        : "${SIM_IMAGE_ARCHIVE:?save-image needs SIM_IMAGE_ARCHIVE}"
+        docker save "$IMAGE_TAG" | zstd -T0 -3 -f -o "$SIM_IMAGE_ARCHIVE"
+        ls -l "$SIM_IMAGE_ARCHIVE"
+        ;;
     test)
         # Each SimWorld has its own virtual-clock shm segment, so worlds
         # parallelize cleanly; local runs default to 4 pytest-xdist

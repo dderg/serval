@@ -20,9 +20,7 @@ fn printer_defaults_match_motion_setup() {
     let c = s.cartesian;
     assert_eq!(c.max_velocity, 300.0);
     assert_eq!(c.max_accel, 3000.0);
-    // Default scv = 5 -> deviation = scv^2 * (sqrt(2)-1) / accel.
-    let expected = 25.0 * (std::f64::consts::SQRT_2 - 1.0) / 3000.0;
-    assert!((c.corner_deviation - expected).abs() < 1e-15);
+    assert_eq!(c.corner_deviation, 0.04);
     assert_eq!(c.max_jerk, f64::INFINITY);
     assert_eq!(c.max_z_velocity, 300.0);
     assert_eq!(c.max_z_accel, 3000.0);
@@ -44,6 +42,27 @@ fn scv_and_corner_deviation_are_exclusive() {
 fn explicit_corner_deviation_wins() {
     let s = settings("[printer]\nmax_velocity: 300\nmax_accel: 3000\ncorner_deviation: 0.02\n");
     assert_eq!(s.cartesian.corner_deviation, 0.02);
+}
+
+#[test]
+fn neither_corner_option_defaults_to_the_same_deviation_at_any_accel() {
+    for accel in ["1000", "3000", "70000"] {
+        let s = settings(&format!(
+            "[printer]\nmax_velocity: 300\nmax_accel: {accel}\n"
+        ));
+        assert_eq!(
+            s.cartesian.corner_deviation,
+            crate::DEFAULT_CORNER_DEVIATION_MM,
+            "{accel}"
+        );
+    }
+}
+
+#[test]
+fn explicit_legacy_scv_keeps_its_converted_budget() {
+    let s = settings("[printer]\nmax_velocity: 300\nmax_accel: 3000\nsquare_corner_velocity: 5\n");
+    let expected = 25.0 * (std::f64::consts::SQRT_2 - 1.0) / 3000.0;
+    assert!((s.cartesian.corner_deviation - expected).abs() < 1e-15);
 }
 
 #[test]
@@ -102,6 +121,20 @@ fn axis_sections_parse_lists() {
 }
 
 #[test]
+fn a_ratio_ramp_time_is_refused_with_a_pointer_to_the_automatic_rule() {
+    let err = read_err(&format!(
+        "{MINIMAL}[axis x]\n[axis e]\nfollows: x\nratio_ramp_time: 0.015\n"
+    ));
+    assert_eq!(
+        err,
+        format!(
+            "[axis e] option 'ratio_ramp_time' was removed: {}",
+            crate::RATIO_RAMP_RULE
+        )
+    );
+}
+
+#[test]
 fn post_processor_sections_and_reference_validation() {
     let s = settings(&format!(
         "{MINIMAL}[axis x]\npost_processors: sm\n[post_processor sm]\ntype: smooth\nfreq: 42.5\n"
@@ -137,6 +170,106 @@ fn extruder_caps_read_when_present() {
     ));
     assert_eq!(s.max_extrude_only_velocity, Some(80.0));
     assert_eq!(s.max_extrude_only_accel, None);
+}
+
+const EXTRUDER_AXIS: &str = "[axis x]\n[axis y]\n[axis z]\n[axis e]\nfollows: x, y, z\n";
+
+#[test]
+fn a_follower_axis_reads_its_own_limits() {
+    let s = settings(&format!(
+        "{MINIMAL}{EXTRUDER_AXIS}max_velocity: 60\nmax_accel: 8000\n"
+    ));
+    let e = s.axes.iter().find(|a| a.name == "e").unwrap();
+    assert_eq!((e.max_velocity, e.max_accel), (Some(60.0), Some(8000.0)));
+    let err = read_err(&format!("{MINIMAL}{EXTRUDER_AXIS}max_accel: 0\n"));
+    assert_eq!(
+        err,
+        "Option 'max_accel' in section 'axis e' must be above 0"
+    );
+}
+
+#[test]
+fn the_extruder_axis_inherits_each_unset_limit_from_the_extrude_only_caps() {
+    let s = settings(&format!(
+        "{MINIMAL}{EXTRUDER_AXIS}max_accel: 8000\n[extruder]\naxis: e\n\
+         max_extrude_only_velocity: 45\nmax_extrude_only_accel: 2000\n"
+    ));
+    let e = s.axes.iter().find(|a| a.name == "e").unwrap();
+    assert_eq!((e.max_velocity, e.max_accel), (Some(45.0), Some(8000.0)));
+    assert_eq!(s.max_extrude_only_accel, Some(2000.0));
+}
+
+#[test]
+fn unset_extrude_only_caps_default_like_upstream_klippy() {
+    let s = settings(&format!(
+        "{MINIMAL}{EXTRUDER_AXIS}[extruder]\naxis: e\nnozzle_diameter: 0.4\n\
+         filament_diameter: 1.75\n"
+    ));
+    let ratio = 4.0 * 0.4 * 0.4 / (std::f64::consts::PI * 0.875 * 0.875);
+    assert_eq!(s.max_extrude_only_velocity, Some(300.0 * ratio));
+    assert_eq!(s.max_extrude_only_accel, Some(3000.0 * ratio));
+    let e = s.axes.iter().find(|a| a.name == "e").unwrap();
+    assert_eq!(
+        (e.max_velocity, e.max_accel),
+        (Some(300.0 * ratio), Some(3000.0 * ratio))
+    );
+}
+
+#[test]
+fn every_extruder_lends_its_caps_to_its_own_axis() {
+    let s = settings(&format!(
+        "{MINIMAL}{EXTRUDER_AXIS}[axis f]\nfollows: x, y, z\n[extruder]\naxis: e\n\
+         max_extrude_only_velocity: 45\nmax_extrude_only_accel: 2000\n\
+         [extruder1]\naxis: f\nmax_extrude_only_velocity: 80\nmax_extrude_only_accel: 9000\n"
+    ));
+    let limits = |name: &str| {
+        let decl = s.axes.iter().find(|a| a.name == name).unwrap();
+        (decl.max_velocity, decl.max_accel)
+    };
+    assert_eq!(limits("e"), (Some(45.0), Some(2000.0)));
+    assert_eq!(limits("f"), (Some(80.0), Some(9000.0)));
+    assert_eq!(s.max_extrude_only_velocity, Some(45.0));
+}
+
+#[test]
+fn without_nozzle_and_filament_diameters_nothing_is_derived() {
+    let s = settings(&format!("{MINIMAL}{EXTRUDER_AXIS}[extruder]\naxis: e\n"));
+    assert_eq!(s.max_extrude_only_velocity, None);
+    let e = s.axes.iter().find(|a| a.name == "e").unwrap();
+    assert_eq!((e.max_velocity, e.max_accel), (None, None));
+}
+
+const PA_TOPOLOGY: &str = "[kinematics]\ntype: cartesian\naxis_x: x\naxis_y: y\naxis_z: z\n\
+    x_motors: mx\ny_motors: my\nz_motors: mz\n[motor mx]\ndrive: stepper\n\
+    [motor my]\ndrive: stepper\n[motor mz]\ndrive: stepper\n[motor me]\ndrive: stepper\n\
+    [post_processor pa]\ntype: linear_pressure_advance\nk: 0.04\n\
+    [post_processor st]\ntype: smooth_triangle\nsmooth_time: 0.01\n";
+
+fn pa_config(extra: &str) -> Result<crate::PlannerConfig, String> {
+    let cfg = format!(
+        "{MINIMAL}{PA_TOPOLOGY}[axis x]\n[axis y]\n[axis z]\n[axis e]\nfollows: x, y, z\n\
+         motors: me\npost_processors: pa, st\n{extra}"
+    );
+    let doc = Document::parse(&cfg, "test.cfg").unwrap();
+    let (s, _) = read_motion_settings(&doc)?;
+    crate::from_doc::planner_config_from_settings(&s)
+}
+
+#[test]
+fn an_advance_without_extruder_limits_is_refused_naming_the_options() {
+    let err = pa_config("").unwrap_err();
+    for option in [
+        "[axis e] max_velocity and max_accel",
+        "max_extrude_only_velocity and max_extrude_only_accel",
+        "nozzle_diameter and filament_diameter",
+    ] {
+        assert!(err.contains(option), "{err}");
+    }
+    assert!(pa_config("max_velocity: 60\n").is_err());
+    assert!(pa_config("max_velocity: 60\nmax_accel: 8000\n").is_ok());
+    assert!(
+        pa_config("[extruder]\naxis: e\nnozzle_diameter: 0.4\nfilament_diameter: 1.75\n").is_ok()
+    );
 }
 
 #[test]
@@ -423,4 +556,20 @@ fn inverse_without_kernel_rejected_at_read_time() {
         "[post_processor belt]\ntype: mode_inverse\nfrequency_hz: 131\ndamping_ratio: 0.05\n",
     ));
     assert!(err.contains("belt"), "{err}");
+}
+
+#[test]
+fn a_follower_axis_reads_its_instantaneous_corner_velocity() {
+    let s = settings(&format!(
+        "{MINIMAL}{EXTRUDER_AXIS}instantaneous_corner_velocity: 2.5\n"
+    ));
+    let e = s.axes.iter().find(|a| a.name == "e").unwrap();
+    assert_eq!(e.instantaneous_corner_velocity, Some(2.5));
+    let err = read_err(&format!(
+        "{MINIMAL}{EXTRUDER_AXIS}instantaneous_corner_velocity: 0\n"
+    ));
+    assert_eq!(
+        err,
+        "Option 'instantaneous_corner_velocity' in section 'axis e' must be above 0"
+    );
 }

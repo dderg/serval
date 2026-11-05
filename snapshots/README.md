@@ -33,13 +33,58 @@ snapshots/snapshot-tests.sh --view       # read-only baseline gallery
   the baselines and, with nothing left to review, the server stops itself; the
   script re-checks and exits with the final status. Nothing is left listening.
 - `--ci` skips the server and just fails, so CI gets a plain red.
+- `python3 snapshots/run.py --accept CASE...` / `--accept-all` writes the baselines of the named (or all) changed or pending cases without the server, for agents that have already reviewed the diff.
 - `--view` starts the browser UI in read-only mode and renders the
   committed baselines without running the planner or offering accept actions.
+
+## Configs and the live parity gate
+
+A case config is a printer config: `[printer]`, `[kinematics]`, `[motor]` and
+`[axis]` sections as a live printer declares them. Every config-driven plan —
+the cases, `tools/bench/analyze.py`, the replays, the corpus and `init_planner`
+on the printer — derives its planner through
+`planner_config::from_doc::planner_config_from_text`, and every G-code move
+through `motion_pipeline::live_config::GcodeMoveBase`, so the live host and
+the snapshot path cannot plan the same G-code under different settings.
+
+`scripts/ci.sh live-parity` (`snapshots/test_live_bridge_parity.py`) holds
+them to it: klippy's own G-code handlers drive the real `MotionEngine` bridge
+with a detached planner (`init_planner_detached`: the production ingress and
+pipeline, no MCU), and every pipeline input and shaped segment must equal the
+snapshot path's bit for bit over the corpus — every case, the sim prints on
+both bench configs, the dense print on every bench config and profile, and
+the capacity ladders and dense print on `capacity.cfg` under the F401's
+reported step capacity, passed to both sides (`step_benchmarks`). A
+failure names the first diverging input (move number and field) or segment.
+One file: `uv run python snapshots/live_bridge_parity.py GCODE CONFIG`.
+
+## G-code
+
+Cases, the playground and `tools/bench/analyze.py` read G-code through one
+interpreter (`rust/pipeline-snapshot/src/waypoints.rs`) that plans each file
+move for move as the live host would submit it
+(`snapshots/test_live_parity.py` replays the same files through klippy's own
+handlers and compares).
+
+- **Mirrored:**
+  - Moves and coordinates: `G0`/`G1`, `G90`/`G91`, `G92`, `M82`/`M83`.
+  - Limits: `M204`, `SET_VELOCITY_LIMIT`, `RESET_VELOCITY_LIMIT`.
+  - Overrides and state: `M220`, `M221`, `SET_GCODE_OFFSET`, `SAVE_GCODE_STATE`/`RESTORE_GCODE_STATE`.
+  - Stops at rest: `G4`, `M400`, `M18`/`M84`, `SET_KINEMATIC_POSITION`.
+  - Defaults match klippy: E is absolute until `M83`, and the speed is 25 mm/s until the first `F`.
+- **Refused by name, with the reason:**
+  - `G2`/`G3`, `G5`, `G10`/`G11`, `G28`, `G20`.
+  - Probing, levelling and calibration moves; `FORCE_MOVE` and stepper buzz or resonance tests.
+  - `SET_PRESSURE_ADVANCE`, `SET_POST_PROCESSOR`, `SET_INPUT_SHAPER`, `BED_MESH_PROFILE`/`CLEAR`/`OFFSET` and other planner-setup commands.
+  - `PAUSE`/`RESUME`/`CANCEL_PRINT`/`EXCLUDE_OBJECT`.
+  - `M109`/`M190`/`TEMPERATURE_WAIT` after the first move.
+  - A `SET_KINEMATIC_POSITION` that moves the position after the first move.
+- **Ignored, as live ignores them:** every other command, such as temperatures, fans, `M117` and `M73`.
 
 ## Playground
 
 `web/static/playground.html` is an interactive spin-off of the review viewer:
-paste any G-code (G0/G1, G90/G91, G92, M82/M83), tweak the planner config
+paste any G-code (read as described under [G-code](#g-code)), tweak the planner config
 (velocity/accel/scv/jerk limits, deviation tolerances) and watch
 the toolpath, velocity, acceleration and jerk panels re-plan live. It runs the
 **real pipeline** — the same `Fitter → Planner → run_lowerer → Shaper` stages —

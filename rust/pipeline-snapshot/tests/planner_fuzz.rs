@@ -9,23 +9,20 @@
 //! resolution, no acceleration explosion, C0 position seams, and valid
 //! velocity bounds.
 //!
-//! `hard_invariants_hold` runs in CI on a fixed RNG seed — a deterministic
-//! 256-case corpus verified green — so CI never flakes on a fresh fuzz
-//! discovery. Hunting happens on the `#[ignore]`d `target_budgets_hold`,
-//! which uses random seeds, fuzzes the full input space (including the
-//! known-broken families the CI tier steers around), and additionally
-//! asserts the intended smoothness budgets (seam C0/C1, velocity limits)
-//! that current lowering is known to violate. Run it with
-//! `cargo nextest run -p pipeline-snapshot --run-ignored all`, ideally with
-//! a large `PROPTEST_CASES`. Every bug it finds gets pinned below as an
-//! `#[ignore]`d regression test until fixed.
+//! `hard_invariants_hold` draws a fresh seed per run and prints it
+//! (`PROPTEST_RNG_SEED=<seed>` reproduces); `hard_invariants_hold_on_the_pinned_corpus`
+//! is the same property on a fixed 256-case corpus. `target_budgets_hold`
+//! fuzzes the same planar space and additionally asserts the smoothness
+//! budgets (seam C0/C1, velocity limits). Every bug a fuzz finds gets pinned
+//! below as an `#[ignore]`d regression test until fixed.
 
+use motion_pipeline::live_config;
 use pipeline_snapshot::audit::{
     AuditBudgets, AuditReport, Violation, ViolationKind, audit_trajectory,
 };
+use pipeline_snapshot::waypoints::{Waypoint, extrusion_ratio_bound};
 use pipeline_snapshot::{
-    ExactTrajectory, SnapshotParams, TRAJECTORY_FIT_TOL_ACCEL_MM_S2, TRAJECTORY_FIT_TOL_MM,
-    VELOCITY_INTEGRATION_TOL, pipeline_snapshot,
+    CartesianLimits, ExactTrajectory, PlannerConfig, SnapshotParams, pipeline_snapshot,
 };
 use proptest::prelude::*;
 use proptest::test_runner::RngSeed;
@@ -53,16 +50,8 @@ struct MoveSpec {
     z_step_mm: f64,
 }
 
-/// `full` fuzzes the entire config space. The CI tier excludes the one
-/// known-broken family, pinned as `#[ignore]`d regression tests below: tiny
-/// positive square-corner velocities (scv in roughly (0, 0.1) makes sharp
-/// corners NaN the velocity plan; exactly 0 and >= 0.5 are safe).
-fn limits_strategy(full: bool) -> impl Strategy<Value = FuzzLimits> {
-    let scv = if full {
-        (0.0..20.0_f64).boxed()
-    } else {
-        prop_oneof![1 => Just(0.0), 9 => 0.5..20.0_f64].boxed()
-    };
+fn limits_strategy() -> impl Strategy<Value = FuzzLimits> {
+    let scv = prop_oneof![1 => Just(0.0), 3 => 1e-4..0.5_f64, 6 => 0.5..20.0_f64];
     (20.0..600.0_f64, 500.0..50_000.0_f64, scv).prop_map(|(v, a, scv)| FuzzLimits {
         max_velocity: v,
         max_accel: a,
@@ -104,10 +93,10 @@ fn move_strategy(full: bool) -> impl Strategy<Value = MoveSpec> {
         })
 }
 
-fn waypoints(moves: &[MoveSpec], max_accel: f64) -> Vec<pipeline_snapshot::waypoints::Waypoint> {
+fn waypoints(moves: &[MoveSpec]) -> Vec<Waypoint> {
     let (mut x, mut y, mut z, mut e) = (150.0, 150.0, 0.2, 0.0);
     let mut heading = 0.0_f64;
-    let mut points = vec![(x, y, z, e, 0.0, max_accel)];
+    let mut points = vec![Waypoint::at([x, y, z, e], 0.0)];
     for m in moves {
         heading = match m.turn {
             Turn::Continue => heading,
@@ -118,27 +107,25 @@ fn waypoints(moves: &[MoveSpec], max_accel: f64) -> Vec<pipeline_snapshot::waypo
         y += m.length_mm * libm::sin(heading);
         z = (z + m.z_step_mm).max(0.0);
         e += m.extrude_ratio * m.length_mm;
-        points.push((x, y, z, e, m.feed_mm_s, max_accel));
+        points.push(Waypoint::at([x, y, z, e], m.feed_mm_s));
     }
     points
 }
 
 fn run_case(limits: FuzzLimits, moves: &[MoveSpec]) -> (ExactTrajectory, AuditReport) {
-    run_waypoints(limits, &waypoints(moves, limits.max_accel))
+    run_waypoints(limits, &waypoints(moves))
 }
 
-fn run_waypoints(
-    limits: FuzzLimits,
-    waypoints: &[pipeline_snapshot::waypoints::Waypoint],
-) -> (ExactTrajectory, AuditReport) {
+fn run_waypoints(limits: FuzzLimits, waypoints: &[Waypoint]) -> (ExactTrajectory, AuditReport) {
+    let corner_deviation =
+        geometry::corner_deviation_from_scv(limits.square_corner_velocity, limits.max_accel);
     let params = SnapshotParams {
         max_velocity: limits.max_velocity,
         max_accel: limits.max_accel,
-        corner_deviation: geometry::corner_deviation_from_scv(
-            limits.square_corner_velocity,
-            limits.max_accel,
-        ),
+        corner_deviation,
         max_jerk: f64::INFINITY,
+        max_z_velocity: None,
+        max_z_accel: None,
         max_extrude_only_velocity: None,
         max_extrude_only_accel: None,
         max_path_deviation: None,
@@ -148,24 +135,58 @@ fn run_waypoints(
     };
     let snapshot = pipeline_snapshot(waypoints, params).expect("valid fuzz input");
     let traj = snapshot.trajectory;
-    let config = motion_pipeline::StreamConfig {
-        corner: geometry::CornerFitConfig::default(),
-        integration_tol: VELOCITY_INTEGRATION_TOL,
-        max_extrude_only_velocity_mm_s: f64::INFINITY,
-        max_extrude_only_accel_mm_s2: f64::INFINITY,
-        fit_tol_mm: TRAJECTORY_FIT_TOL_MM,
-        fit_tol_accel_mm_s2: TRAJECTORY_FIT_TOL_ACCEL_MM_S2,
-        max_buffer_moves: 65_536,
-        limits: geometry::VelocityLimits::try_new(
+    let planner = PlannerConfig {
+        cartesian: CartesianLimits::without_z_caps(
             limits.max_velocity,
             limits.max_accel,
-            limits.square_corner_velocity,
             f64::INFINITY,
-        )
-        .expect("strategy generates valid limits"),
+            corner_deviation,
+        ),
+        ..PlannerConfig::default()
     };
-    let report = audit_trajectory(&traj, &config, &AuditBudgets::for_config(&config));
+    let config =
+        live_config::stream_config(&planner, None).expect("strategy generates valid limits");
+    let report = audit_trajectory(&traj, &config, &budgets(&config, waypoints));
     (traj, report)
+}
+
+const E_AXIS: usize = 3;
+
+/// The audit's budgets for the chains the snapshot compiles when no axis
+/// is declared (x, y, z, and e following them, with no post-processors),
+/// the extruder's seam velocity under the derived ratio ramp: every ratio
+/// step is ramped, so only rounding steps it, bar the velocity steps a
+/// kernel-free advance makes of an unshaped leader's acceleration steps
+/// ([`motion_pipeline::follower_velocity_step_allowance`]).
+fn budgets(config: &motion_pipeline::StreamConfig, waypoints: &[Waypoint]) -> AuditBudgets {
+    let axis = |name: &str, follows: &[&str]| planner_config::AxisDecl {
+        name: name.to_string(),
+        follows: follows.iter().map(ToString::to_string).collect(),
+        motors: Vec::new(),
+        post_processors: Vec::new(),
+        max_velocity: None,
+        max_accel: None,
+        instantaneous_corner_velocity: None,
+    };
+    let registry = planner_config::AxisRegistry::try_new(vec![
+        axis("x", &[]),
+        axis("y", &[]),
+        axis("z", &[]),
+        axis("e", &["x", "y", "z"]),
+    ])
+    .expect("the fuzz's axes register");
+    let chains = planner_config::PostProcessorSet::try_new(&registry, &[])
+        .expect("no post-processors")
+        .compile_active_chains(&registry, false)
+        .expect("the fuzz's chains compile");
+    let mut budgets = AuditBudgets::for_config(config);
+    budgets.seam_vel_mm_s[E_AXIS] += motion_pipeline::follower_velocity_step_allowance(
+        &chains,
+        E_AXIS,
+        extrusion_ratio_bound(waypoints),
+        config.fit_tol_accel_mm_s2,
+    );
+    budgets
 }
 
 /// The smoothness budgets that still bind under infinite jerk: a seam
@@ -185,16 +206,32 @@ fn xy_smoothness_spikes(report: &AuditReport) -> Vec<&Violation> {
         .collect()
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig {
-        cases: 256,
-        rng_seed: RngSeed::Fixed(20260708),
+const PINNED_SEED: u64 = 20260708;
+
+fn fresh_seed_config() -> ProptestConfig {
+    let seed = std::env::var("PROPTEST_RNG_SEED")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after the epoch")
+                .as_nanos();
+            (nanos as u64) ^ u64::from(std::process::id()).rotate_left(40)
+        });
+    eprintln!("planner_fuzz seed: reproduce with PROPTEST_RNG_SEED={seed}");
+    ProptestConfig {
+        rng_seed: RngSeed::Fixed(seed),
         ..ProptestConfig::default()
-    })]
+    }
+}
+
+proptest! {
+    #![proptest_config(fresh_seed_config())]
 
     #[test]
     fn hard_invariants_hold(
-        limits in limits_strategy(false),
+        limits in limits_strategy(),
         moves in prop::collection::vec(move_strategy(false), 2..40),
     ) {
         let (traj, report) = run_case(limits, &moves);
@@ -204,10 +241,29 @@ proptest! {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 256,
+        rng_seed: RngSeed::Fixed(PINNED_SEED),
+        ..ProptestConfig::default()
+    })]
+
     #[test]
-    #[ignore = "intended smoothness budgets; current lowering is known to violate them"]
+    fn hard_invariants_hold_on_the_pinned_corpus(
+        limits in limits_strategy(),
+        moves in prop::collection::vec(move_strategy(false), 2..40),
+    ) {
+        let (traj, report) = run_case(limits, &moves);
+        prop_assert!(!traj.rows(0).is_empty(), "pipeline produced no X trajectory");
+        prop_assert!(report.hard_ok(), "{report}");
+    }
+}
+
+proptest! {
+    #![proptest_config(fresh_seed_config())]
+
+    #[test]
     fn target_budgets_hold(
-        limits in limits_strategy(true),
+        limits in limits_strategy(),
         moves in prop::collection::vec(move_strategy(true), 2..40),
     ) {
         let (_, report) = run_case(limits, &moves);
@@ -222,7 +278,6 @@ proptest! {
 /// tiny-positive-scv family as the two tests below — all three pass with
 /// scv = 0 or scv >= 0.1.
 #[test]
-#[ignore = "known planner bug: tiny scv makes the velocity plan NonFinite"]
 fn reversal_with_z_step_makes_velocity_plan_non_finite() {
     let limits = FuzzLimits {
         max_velocity: 20.0,
@@ -288,8 +343,11 @@ fn z_step_then_micro_reversal_escapes_profile_window() {
 /// Sweeping the space: scv = 0 exactly is safe at every corner angle, scv of
 /// 0.005 fails from 146° up, and no failures were found at scv >= 0.1. Same
 /// tiny-positive-scv family as its neighbors.
+///
+/// Root cause: `solve_line_line` admitted a blend on its trim (> 1 nm) while
+/// the clothoid halves came out 2.6e-10 mm long, below the length the velocity
+/// plan accepts. Such a corner now stays sharp.
 #[test]
-#[ignore = "known planner bug: tiny scv + sharp planar corner yields a NonFinite velocity plan"]
 fn near_reversal_planar_corner_makes_velocity_plan_non_finite() {
     let limits = FuzzLimits {
         max_velocity: 20.0,
@@ -473,9 +531,9 @@ fn slow_corner_rail_ramp_survives_nurbs_round_trip() {
     };
     let feed = 5932.264 / 60.0;
     let waypoints = [
-        (121.401, 114.125, 0.0, 0.0, feed, 1000.0),
-        (121.527, 113.034, 0.0, 0.03696, feed, 1000.0),
-        (126.102, 117.608, 0.0, 0.25458, feed, 1000.0),
+        Waypoint::at([121.401, 114.125, 0.0, 0.0], feed),
+        Waypoint::at([121.527, 113.034, 0.0, 0.03696], feed),
+        Waypoint::at([126.102, 117.608, 0.0, 0.25458], feed),
     ];
     let (_, report) = run_waypoints(limits, &waypoints);
     assert!(report.hard_ok(), "{report}");
@@ -484,4 +542,281 @@ fn slow_corner_rail_ramp_survives_nurbs_round_trip() {
         spikes.is_empty(),
         "X/Y seam-velocity or velocity past budget: {spikes:?}\n{report}"
     );
+}
+
+fn planar(turn: Turn, length_mm: f64, feed_mm_s: f64, extrude_ratio: f64) -> MoveSpec {
+    MoveSpec {
+        turn,
+        length_mm,
+        feed_mm_s,
+        extrude_ratio,
+        z_step_mm: 0.0,
+    }
+}
+
+/// Found by `hard_invariants_hold` (#562): a free clothoid-pair solve — the
+/// facet-consumption chain split at the facet's midpoint, or an arc run's
+/// boundary blend — sat at the edge of the pair's existence region, where one
+/// half carries the whole turn and the other shrinks to nanometres, emitting
+/// a row of a nanosecond or two. A pair half shorter than a device interval
+/// at its fastest speed is now infeasible for every free solve.
+#[test]
+fn facet_consumption_split_leaves_no_sliver_row() {
+    let limits = FuzzLimits {
+        max_velocity: 20.0,
+        max_accel: 42552.63125816086,
+        square_corner_velocity: 5.0,
+    };
+    let moves = [
+        planar(
+            Turn::Absolute(2.968191818487306),
+            0.002493439626094711,
+            165.95540533434988,
+            0.0,
+        ),
+        planar(
+            Turn::Absolute(1.387277182399567),
+            0.0006359771117086327,
+            588.2719245715481,
+            0.0,
+        ),
+        planar(Turn::Absolute(1.9715280945107174), 1.0, 1.0, 0.0),
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok(), "{report}");
+}
+
+#[test]
+fn same_sense_facet_consumption_leaves_no_sliver_row() {
+    let limits = FuzzLimits {
+        max_velocity: 100.85130229005617,
+        max_accel: 21853.28686118798,
+        square_corner_velocity: 10.295157997623004,
+    };
+    let moves = [
+        planar(Turn::Absolute(2.260652648254229), 1.0, 1.0, 0.0),
+        planar(
+            Turn::Absolute(0.8069452807702043),
+            0.004896715143695845,
+            1.0,
+            0.0,
+        ),
+        planar(Turn::Absolute(4.586520500087806), 1.0, 1.0, 0.0),
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok(), "{report}");
+}
+
+#[test]
+fn arc_run_tail_blend_leaves_no_sliver_row() {
+    let limits = FuzzLimits {
+        max_velocity: 579.9040202955272,
+        max_accel: 45069.717321302596,
+        square_corner_velocity: 17.587166725605982,
+    };
+    let moves = [
+        planar(
+            Turn::Absolute(3.942866479434897),
+            1.0,
+            1.0,
+            0.09312678484514826,
+        ),
+        planar(
+            Turn::Continue,
+            0.0008990155284484794,
+            1.0,
+            0.059730024030819666,
+        ),
+        planar(
+            Turn::Absolute(4.4081876990164295),
+            0.0005882210496939083,
+            1.0,
+            0.073725797059201,
+        ),
+        planar(
+            Turn::Absolute(5.384155481070599),
+            0.0007041462012606629,
+            543.1019473451835,
+            0.06929877228620371,
+        ),
+        planar(
+            Turn::Continue,
+            1.0,
+            158.99678961430908,
+            0.047124637386670276,
+        ),
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok(), "{report}");
+}
+
+/// Found by `target_budgets_hold`: once every follower ramps its ratio, a
+/// slow z-carrying move, a fast 1 mm travel and a slow extrusion left the
+/// follower's source fit facing a velocity step narrower than the
+/// resolution floor at the travel → extrusion seam.
+#[test]
+fn slow_extrusion_after_a_short_fast_travel_ramps_its_ratio() {
+    let limits = FuzzLimits {
+        max_velocity: 369.8,
+        max_accel: 37419.9,
+        square_corner_velocity: 0.0,
+    };
+    let moves = [
+        MoveSpec {
+            z_step_mm: -0.185,
+            ..planar(Turn::Continue, 1.0, 1.0, 0.0)
+        },
+        planar(Turn::Continue, 1.0, 472.3, 0.0),
+        planar(Turn::Continue, 37.57, 1.0, 0.04166),
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok(), "{report}");
+}
+
+/// Found by `planner_conservation_fuzz`: a fast 1 mm extrusion, a
+/// micrometre extrusion turning off it, and a slow travel; the follower's
+/// plain source fit ran out of refinement splits on the ramp.
+#[test]
+fn a_micrometre_extrusion_between_a_fast_line_and_a_slow_travel_ramps_its_ratio() {
+    let limits = FuzzLimits {
+        max_velocity: 127.389385959449,
+        max_accel: 39584.86189423528,
+        square_corner_velocity: 7.296773245024728,
+    };
+    let moves = [
+        planar(
+            Turn::Absolute(2.9053886486487226),
+            1.0,
+            546.924938602993,
+            0.0765246174258583,
+        ),
+        planar(
+            Turn::Absolute(5.682024081779053),
+            0.0009566603280114744,
+            90.87832523810361,
+            0.09079521363142903,
+        ),
+        planar(Turn::Absolute(4.323424096437546), 1.0, 1.0, 0.0),
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok(), "{report}");
+}
+
+/// #619, found by `target_budgets_hold`: a junction turning 0.89 mrad, under
+/// the fitter's collinear threshold, passed unblended at 207 mm/s under a
+/// zero corner budget, and z stepped by 0.18 mm/s there. Travel only. A
+/// junction now passes as collinear only when `v·θ` at the fastest its
+/// pieces may cross it stays within the seam budget.
+#[test]
+fn a_nearly_collinear_z_junction_keeps_the_seam_velocity_budget() {
+    let limits = FuzzLimits {
+        max_velocity: 314.47805824987176,
+        max_accel: 500.0,
+        square_corner_velocity: 0.0,
+    };
+    let moves = [
+        MoveSpec {
+            turn: Turn::Continue,
+            length_mm: 46.522523281975396,
+            feed_mm_s: 604.447037922063,
+            extrude_ratio: 0.0,
+            z_step_mm: 0.04119073092929801,
+        },
+        MoveSpec {
+            turn: Turn::Continue,
+            length_mm: 39.702781729279174,
+            feed_mm_s: 505.4380942226453,
+            extrude_ratio: 0.0,
+            z_step_mm: 0.0,
+        },
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok() && report.target_ok(), "{report}");
+}
+
+/// #619 in the plane: a 0.6 mrad heading change between two fast extrusions
+/// under a corner budget blends instead of stepping 0.18 mm/s.
+#[test]
+fn a_nearly_collinear_planar_junction_at_speed_keeps_the_seam_velocity_budget() {
+    let limits = FuzzLimits {
+        max_velocity: 300.0,
+        max_accel: 5000.0,
+        square_corner_velocity: 5.0,
+    };
+    let moves = [
+        planar(Turn::Absolute(0.0), 40.0, 300.0, 0.05),
+        planar(Turn::Absolute(6e-4), 40.0, 300.0, 0.05),
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok(), "{report}");
+    let spikes = xy_smoothness_spikes(&report);
+    assert!(spikes.is_empty(), "{spikes:?}\n{report}");
+}
+
+/// #618: under a 0.016 mm/s square-corner velocity, a travel reversal that
+/// steps z planned a member its own rails could not join, and the planner
+/// panicked with `Infeasible`.
+#[test]
+fn tiny_scv_reversal_with_z_step_plans() {
+    let limits = FuzzLimits {
+        max_velocity: 20.0,
+        max_accel: 38_054.585_539_152_91,
+        square_corner_velocity: 0.016_357_394_343_349_78,
+    };
+    let moves = [
+        MoveSpec {
+            turn: Turn::Absolute(0.0),
+            length_mm: 1.0,
+            feed_mm_s: 1.0,
+            extrude_ratio: 0.0,
+            z_step_mm: 0.0,
+        },
+        MoveSpec {
+            turn: Turn::Absolute(3.791_313_142_220_391),
+            length_mm: 1.0,
+            feed_mm_s: 1.0,
+            extrude_ratio: 0.0,
+            z_step_mm: -0.189_761_367_961_591_32,
+        },
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok(), "{report}");
+}
+
+/// #682, found by `target_budgets_hold`: a fast extrusion, a 1 mm travel
+/// turning off it, a reversed extrusion and three travels slowing to 1 mm/s;
+/// the follower's source fit ran out of refinement splits.
+#[test]
+fn an_extrusion_between_two_travels_keeps_its_source_fit() {
+    let limits = FuzzLimits {
+        max_velocity: 553.945_527_622_928_2,
+        max_accel: 43_373.570_522_562_106,
+        square_corner_velocity: 0.339_824_488_063_710_8,
+    };
+    let moves = [
+        planar(
+            Turn::Continue,
+            59.968_641_825_493_34,
+            582.359_961_523_245_7,
+            0.087_711_029_672_142_36,
+        ),
+        planar(
+            Turn::Absolute(0.927_233_164_578_025),
+            1.0,
+            235.130_400_227_618_9,
+            0.0,
+        ),
+        planar(
+            Turn::Absolute(4.058_019_275_991_085),
+            1.0,
+            527.270_397_943_680_9,
+            0.085_164_978_667_546_02,
+        ),
+        planar(Turn::Continue, 1.0, 556.546_817_523_540_5, 0.0),
+        planar(Turn::Continue, 1.0, 46.816_668_799_578_36, 0.0),
+        planar(Turn::Continue, 1.0, 1.0, 0.0),
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok(), "{report}");
+    assert!(report.target_ok(), "{report}");
 }

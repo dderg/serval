@@ -19,12 +19,211 @@ pub fn scv_from_corner_deviation(corner_deviation_mm: f64, accel_mm_s2: f64) -> 
     (corner_deviation_mm * accel_mm_s2 / CORNER_DEVIATION_SCV_FACTOR).sqrt()
 }
 
+/// A move's motion caps. The first four bound the toolhead path; the z caps
+/// bound the z axis alone, so the planner applies them to whatever share of
+/// the path's motion each fitted segment puts on z. `try_new` leaves z
+/// uncapped beyond the path caps; `with_z_caps` sets them. The extruder caps
+/// bound the motor of the follower axis the move extrudes on, see
+/// [`ExtruderCaps`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VelocityLimits {
     pub max_velocity_mm_s: f64,
     pub accel_mm_s2: f64,
     pub corner_deviation_mm: f64,
     pub max_jerk_mm_s3: f64,
+    pub max_z_velocity_mm_s: f64,
+    pub max_z_accel_mm_s2: f64,
+    pub extruder: Option<ExtruderCaps>,
+}
+
+/// What the extruder's motor can do and how its command follows the path.
+///
+/// A follower extrudes `r` per millimetre of the shaped path, so it runs at
+/// `r·σ̇` and its advance `a(ė)` adds `a′·r·σ̈` to that velocity and
+/// `a′·r·σ⃛ + a″·(r·σ̈)²` to its acceleration, where `σ` is the shaped
+/// path's arc length. `σ̈` never exceeds the planned acceleration `A` (a
+/// unit-mass kernel averages it); `σ⃛` is bounded per unit of `A` by the
+/// smoothing kernels the jerk passes through (see
+/// [`ExtruderCaps::path_jerk_per_accel_hz`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExtruderCaps {
+    pub axis_index: usize,
+    pub max_velocity_mm_s: f64,
+    pub max_accel_mm_s2: f64,
+    /// The advance's largest slope `sup da/dv`: `k` of a linear advance, the
+    /// small-signal slope of a nonlinear one, 0 without an advance.
+    pub advance_slope_s: f64,
+    /// The advance's largest `|d²a/dv²|`, 0 for a linear advance.
+    pub advance_curvature_s2_per_mm: f64,
+    /// By the set of spatial axes the path moves on around a segment (see
+    /// [`ExtruderCaps::path_jerk_gain`]), the shaped path's tangential jerk
+    /// per unit of planned acceleration through the kernels of the shaped
+    /// axes the follower follows among them: a planned acceleration within
+    /// the disk anywhere in the kernels' reach leaves at most
+    /// `A·max_d ∫ |(dᵢ·wᵢ′(u))ᵢ| du` along the shaped tangent `d`
+    /// ([`nurbs::algebra::PiecewisePolynomialKernel::directional_variation`]),
+    /// every lobe of a multimodal kernel taking a fresh swing of it. 0 for a
+    /// set without a shaped followed axis.
+    pub path_jerk_per_accel_hz: [f64; SPATIAL_AXIS_SETS],
+    /// The followed spatial axes no kernel shapes: their planned
+    /// acceleration steps reach the advance unsmoothed.
+    pub unshaped_leaders: [bool; 3],
+    /// The same bound through the follower's own kernel, which differentiates
+    /// the advance's input `σ̈ ≤ A` itself: the kernel's total variation,
+    /// infinite without one.
+    pub own_jerk_per_accel_hz: f64,
+    /// The velocity step the motor takes at once where no kernel smooths
+    /// the advance: an unshaped followed axis steps the shaped path's
+    /// acceleration, and the advance turns each step into one.
+    pub instantaneous_corner_velocity_mm_s: f64,
+    /// How far the shaped path's speed may exceed the planned speed at a
+    /// moment, through the kernels of the spatial axes the follower follows
+    /// (see [`LeaderSpill`]): the planner bounds the shaped speed at a ratio
+    /// step with it.
+    pub leader_spill: LeaderSpill,
+    /// How far either side of an instant the kernels of the leaders the
+    /// follower rides reach: the shaped path there averages the planned
+    /// path within it.
+    pub leader_kernel_reach_s: f64,
+}
+
+/// A kernel `w` turns a planned speed `v(t) ≤ v₀ + A·|t − t₀|` around `t₀`
+/// into a shaped speed at `t₀` of at most `v₀·∫|w| + A·∫|u|·|w(u)| du`:
+/// `mass` and `moment_s`, the largest among the followed axes' kernels
+/// (1 and 0 where no kernel shapes them).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LeaderSpill {
+    pub mass: f64,
+    pub moment_s: f64,
+}
+
+impl LeaderSpill {
+    pub const UNSHAPED: Self = Self {
+        mass: 1.0,
+        moment_s: 0.0,
+    };
+
+    /// The largest planned speed whose shaped speed stays within `shaped`
+    /// under an acceleration budget of `accel`; zero where the spill alone
+    /// exceeds it.
+    #[must_use]
+    pub fn planned_speed(&self, shaped: f64, accel: f64) -> f64 {
+        ((shaped - self.moment_s * accel) / self.mass).max(0.0)
+    }
+
+    fn wider(self, other: Self) -> Self {
+        Self {
+            mass: self.mass.max(other.mass),
+            moment_s: self.moment_s.max(other.moment_s),
+        }
+    }
+}
+
+impl ExtruderCaps {
+    /// The caps holding both `a` and `b`, for a segment that inherits from
+    /// two moves: the lower limits, the steeper advance, the larger gains.
+    #[must_use]
+    pub fn stricter(a: Option<Self>, b: Option<Self>) -> Option<Self> {
+        let (Some(a), Some(b)) = (a, b) else {
+            return a.or(b);
+        };
+        assert_eq!(
+            a.axis_index, b.axis_index,
+            "one fitted segment cannot extrude on two follower axes"
+        );
+        let mut path_jerk_per_accel_hz = a.path_jerk_per_accel_hz;
+        for (gain, other) in path_jerk_per_accel_hz
+            .iter_mut()
+            .zip(b.path_jerk_per_accel_hz)
+        {
+            *gain = gain.max(other);
+        }
+        let unshaped_leaders =
+            std::array::from_fn(|axis| a.unshaped_leaders[axis] || b.unshaped_leaders[axis]);
+        Some(Self {
+            axis_index: a.axis_index,
+            max_velocity_mm_s: a.max_velocity_mm_s.min(b.max_velocity_mm_s),
+            max_accel_mm_s2: a.max_accel_mm_s2.min(b.max_accel_mm_s2),
+            advance_slope_s: a.advance_slope_s.max(b.advance_slope_s),
+            advance_curvature_s2_per_mm: a
+                .advance_curvature_s2_per_mm
+                .max(b.advance_curvature_s2_per_mm),
+            path_jerk_per_accel_hz,
+            unshaped_leaders,
+            own_jerk_per_accel_hz: a.own_jerk_per_accel_hz.max(b.own_jerk_per_accel_hz),
+            instantaneous_corner_velocity_mm_s: a
+                .instantaneous_corner_velocity_mm_s
+                .min(b.instantaneous_corner_velocity_mm_s),
+            leader_spill: a.leader_spill.wider(b.leader_spill),
+            leader_kernel_reach_s: a.leader_kernel_reach_s.max(b.leader_kernel_reach_s),
+        })
+    }
+
+    /// The jerk gain of the path around a segment that moves on `axes`.
+    #[must_use]
+    pub fn path_jerk_gain(&self, axes: [bool; 3]) -> f64 {
+        self.path_jerk_per_accel_hz[axis_set(axes)]
+    }
+
+    /// The rule the follower's ratio ramp derives each step's ramp time by.
+    #[must_use]
+    pub fn ratio_ramp_rule(&self) -> crate::RatioRampRule {
+        crate::RatioRampRule {
+            advance_slope_s: self.advance_slope_s,
+            max_velocity_mm_s: self.max_velocity_mm_s,
+            max_accel_mm_s2: self.max_accel_mm_s2,
+        }
+    }
+
+    fn check(&self) -> Result<(), &'static str> {
+        if !(self.max_velocity_mm_s > 0.0 && self.max_accel_mm_s2 > 0.0) {
+            return Err("extruder caps must be positive");
+        }
+        if !(self.instantaneous_corner_velocity_mm_s.is_finite()
+            && self.instantaneous_corner_velocity_mm_s > 0.0)
+        {
+            return Err("the extruder's instantaneous corner velocity must be finite and positive");
+        }
+        if !(self.advance_slope_s.is_finite()
+            && self.advance_slope_s >= 0.0
+            && self.advance_curvature_s2_per_mm.is_finite()
+            && self.advance_curvature_s2_per_mm >= 0.0)
+        {
+            return Err("the advance's slope and curvature must be finite and non-negative");
+        }
+        if !self
+            .path_jerk_per_accel_hz
+            .iter()
+            .all(|gain| gain.is_finite() && *gain >= 0.0)
+        {
+            return Err("path jerk gains must be finite and non-negative");
+        }
+        if !(self.own_jerk_per_accel_hz >= 0.0) {
+            return Err("the follower kernel's jerk gain must be non-negative");
+        }
+        let LeaderSpill { mass, moment_s } = self.leader_spill;
+        if !(mass.is_finite() && mass >= 1.0 && moment_s.is_finite() && moment_s >= 0.0) {
+            return Err("the leaders' spill must be finite, its mass at least 1");
+        }
+        if !(self.leader_kernel_reach_s.is_finite() && self.leader_kernel_reach_s >= 0.0) {
+            return Err("the leaders' kernel reach must be finite and non-negative");
+        }
+        Ok(())
+    }
+}
+
+/// How many sets of spatial axes [`ExtruderCaps::path_jerk_per_accel_hz`]
+/// holds a gain for: bit `i` of a set's index stands for axis `i`.
+pub const SPATIAL_AXIS_SETS: usize = 8;
+
+/// The index of the set of the spatial axes `axes` marks.
+#[must_use]
+pub fn axis_set(axes: [bool; 3]) -> usize {
+    axes.iter()
+        .enumerate()
+        .filter(|(_, moves)| **moves)
+        .map(|(axis, _)| 1 << axis)
+        .sum()
 }
 
 impl VelocityLimits {
@@ -39,7 +238,30 @@ impl VelocityLimits {
             accel_mm_s2,
             corner_deviation_mm,
             max_jerk_mm_s3,
+            max_z_velocity_mm_s: f64::INFINITY,
+            max_z_accel_mm_s2: f64::INFINITY,
+            extruder: None,
         };
+        limits.check()?;
+        Ok(limits)
+    }
+
+    pub fn with_z_caps(
+        self,
+        max_z_velocity_mm_s: f64,
+        max_z_accel_mm_s2: f64,
+    ) -> Result<Self, &'static str> {
+        let limits = Self {
+            max_z_velocity_mm_s,
+            max_z_accel_mm_s2,
+            ..self
+        };
+        limits.check()?;
+        Ok(limits)
+    }
+
+    pub fn with_extruder_caps(self, extruder: Option<ExtruderCaps>) -> Result<Self, &'static str> {
+        let limits = Self { extruder, ..self };
         limits.check()?;
         Ok(limits)
     }
@@ -57,7 +279,10 @@ impl VelocityLimits {
         if !(self.max_jerk_mm_s3 > 0.0) {
             return Err("max_jerk must be positive (infinity disables jerk limiting)");
         }
-        Ok(())
+        if !(self.max_z_velocity_mm_s > 0.0 && self.max_z_accel_mm_s2 > 0.0) {
+            return Err("z caps must be positive (infinity leaves z to the path caps)");
+        }
+        self.extruder.as_ref().map_or(Ok(()), ExtruderCaps::check)
     }
 }
 

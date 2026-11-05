@@ -18,6 +18,19 @@ fn from_tag_unknown_is_loud() {
 }
 
 #[test]
+fn a_config_type_names_its_kinematics() {
+    assert_eq!(
+        KinematicsKind::from_config_type("corexy"),
+        Some(KinematicsKind::CoreXy)
+    );
+    assert_eq!(
+        KinematicsKind::from_config_type("cartesian"),
+        Some(KinematicsKind::Cartesian)
+    );
+    assert_eq!(KinematicsKind::from_config_type("delta"), None);
+}
+
+#[test]
 fn corexy_forward_matches_legacy_values() {
     let m = KinematicsModule::from_tag(0).unwrap();
     assert_eq!(m.forward([150.0, 150.0, 50.0]), [300.0, 0.0, 50.0]);

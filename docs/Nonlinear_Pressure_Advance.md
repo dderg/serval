@@ -15,7 +15,11 @@ linearization_velocity: 10.0
 follows: x, y, z
 motors: extruder_motor
 post_processors: extruder_pa
+max_velocity: 50
+max_accel: 5000
 ```
+
+On an axis that follows others, an advance needs the axis's `max_velocity` and `max_accel`, set or inherited from the `[extruder]`'s `max_extrude_only_velocity` / `max_extrude_only_accel`; without them it is rejected at config load. The velocity planner slows extruding moves, corners included, so the advanced extruder stays within them, and every extrusion-ratio step (travel to extrusion, a flow change, a wipe) is ramped along the path over a time between 5 and 30 ms that the limits derive, reading the model through its small-signal slope `linear_advance + nonlinear_offset / linearization_velocity` (see the ratio ramp in the [Motion configuration reference](Config_Reference_Motion.md#axis-name)). A smoothing kernel after the advance is optional, an explicit override: it blurs every change of the extruder's motion over its width, which lowers the extruder acceleration corners ask for and bulges the bead at every corner in exchange. The measured trade-off is in [Evaluating an extruder chain](../README.md#evaluating-an-extruder-chain).
 
 `recipr_pressure_advance` accepts the same three parameters and may be used instead of `tanh_pressure_advance`. Do not attach both nonlinear models, or a nonlinear and linear pressure-advance processor, to the same axis.
 

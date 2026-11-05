@@ -12,6 +12,7 @@
 //! maxima are probed at every breakpoint plus a dense interior grid, so a
 //! reported violation is a certified lower bound on the true excess.
 
+use geometry::MIN_DEVICE_INTERVAL_S;
 use motion_pipeline::StreamConfig;
 use trajectory::continuous::Pvaj;
 
@@ -22,10 +23,6 @@ pub const AXIS_NAMES: [&str; 4] = ["x", "y", "z", "e"];
 const INTERIOR_PROBES: usize = 16;
 const TIME_CONTIGUITY_TOL_S: f64 = 1e-9;
 const REST_VELOCITY_TOL_MM_S: f64 = 1e-9;
-
-/// The device's step-time resolution: the narrowest window a row can mean
-/// anything over.
-const MIN_ROW_SPAN_S: f64 = 2e-9;
 
 /// An infinite-jerk plan bounds the scalar path's acceleration, not each
 /// axis' reconstruction of it, so a per-axis rail crossing is expected — but
@@ -80,7 +77,7 @@ pub struct AxisExtrema {
 #[derive(Debug, Clone, Copy)]
 pub struct AuditBudgets {
     pub seam_pos_mm: f64,
-    pub seam_vel_mm_s: f64,
+    pub seam_vel_mm_s: [f64; 4],
     pub seam_accel_mm_s2: f64,
     pub velocity_slack_mm_s: f64,
     pub accel_slack_mm_s2: f64,
@@ -92,7 +89,7 @@ impl AuditBudgets {
     pub fn for_config(config: &StreamConfig) -> Self {
         Self {
             seam_pos_mm: 1e-4,
-            seam_vel_mm_s: 0.1,
+            seam_vel_mm_s: [geometry::SEAM_VELOCITY_STEP_MM_S; 4],
             seam_accel_mm_s2: 0.5,
             velocity_slack_mm_s: 1e-3 * config.limits.max_velocity_mm_s,
             accel_slack_mm_s2: config.fit_tol_accel_mm_s2,
@@ -176,13 +173,13 @@ fn audit_axis(
         }
         let dt = row.t1 - row.t0;
         extrema.min_piece_duration_s = extrema.min_piece_duration_s.min(dt);
-        if dt < MIN_ROW_SPAN_S && !lane_is_one_row {
+        if dt < MIN_DEVICE_INTERVAL_S && !lane_is_one_row {
             report.hard.push(Violation {
                 kind: ViolationKind::SliverSpan,
                 axis,
                 t: row.t0,
                 value: dt,
-                bound: MIN_ROW_SPAN_S,
+                bound: MIN_DEVICE_INTERVAL_S,
             });
         }
         let Some((max_v, max_a, max_j)) = probed_maxima(traj, axis, index, report) else {
@@ -452,13 +449,13 @@ fn report_state_jump(
         });
     }
     let dv = (after.velocity - before.velocity).abs();
-    if dv > budgets.seam_vel_mm_s {
+    if dv > budgets.seam_vel_mm_s[axis] {
         report.target.push(Violation {
             kind: ViolationKind::SeamVelocity,
             axis,
             t,
             value: dv,
-            bound: budgets.seam_vel_mm_s,
+            bound: budgets.seam_vel_mm_s[axis],
         });
     }
     let da = (after.acceleration - before.acceleration).abs();

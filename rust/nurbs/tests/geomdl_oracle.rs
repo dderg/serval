@@ -6,14 +6,7 @@ const TOLERANCE: f64 = 1e-9;
 
 #[test]
 fn oracle_matches_for_corpus_curves() {
-    let path: PathBuf = [
-        env!("CARGO_MANIFEST_DIR"),
-        "tests",
-        "data",
-        "geomdl_corpus.json",
-    ]
-    .iter()
-    .collect();
+    let path: PathBuf = source_tree::manifest_dir().join("tests/data/geomdl_corpus.json");
     let raw = fs::read_to_string(&path).expect("corpus must exist");
     let v: Value = serde_json::from_str(&raw).expect("valid JSON");
 

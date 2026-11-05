@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use super::dispatch::SegmentSink;
 use super::*;
+use crate::dispatch_record::DrainCause;
 use geometry::segment::SourceRange;
 use geometry::{CornerFitConfig, MoveContext, VelocityLimits, line_move};
 use motion_pipeline::{Control, DispatchCommand, StreamConfig};
@@ -97,8 +98,19 @@ fn spawn_on_timeline(
     config: StreamConfig,
     chains: AxisChainSet,
     home: Vec<f64>,
+    sink: impl SegmentSink + Send + 'static,
+    timeline: ExecutionTimeline,
+) -> TestWorker {
+    spawn_recorded(config, chains, home, sink, timeline, None)
+}
+
+fn spawn_recorded(
+    config: StreamConfig,
+    chains: AxisChainSet,
+    home: Vec<f64>,
     mut sink: impl SegmentSink + Send + 'static,
     timeline: ExecutionTimeline,
+    dispatch_record: Option<Arc<DispatchRecorder>>,
 ) -> TestWorker {
     struct NoEndpoint;
     impl crate::pump::SpanSink for NoEndpoint {
@@ -141,7 +153,11 @@ fn spawn_on_timeline(
         config,
         chains,
         home,
-        output,
+        PipelineOutput {
+            trajectory: output,
+            input_tap: None,
+            dispatch_record,
+        },
         links,
         timeline,
         control.clone(),
@@ -179,7 +195,9 @@ struct AnchoredSink {
     router: Arc<Mutex<host_rt::passthrough_queue::PassthroughRouter>>,
     frontier: Arc<CommittedFrontier>,
     starts_host: Arc<Mutex<Vec<f64>>>,
+    starts_stream: Arc<Mutex<Vec<f64>>>,
     parks: Arc<std::sync::atomic::AtomicUsize>,
+    record: Option<Arc<DispatchRecorder>>,
 }
 
 impl AnchoredSink {
@@ -189,26 +207,41 @@ impl AnchoredSink {
             router: Arc::clone(&timeline.router),
             frontier: Arc::clone(&timeline.frontier),
             starts_host: Arc::default(),
+            starts_stream: Arc::default(),
             parks: Arc::default(),
+            record: None,
         }
     }
 
-    fn anchor_span(&self, t_start: f64, t_end: f64) {
+    fn recording(self, record: &Arc<DispatchRecorder>) -> Self {
+        Self {
+            record: Some(Arc::clone(record)),
+            ..self
+        }
+    }
+
+    fn anchor_span(&self, t_start: f64, t_end: f64) -> (f64, crate::anchor::StreamEpoch) {
         let mut anchor = self.anchor.lock_ok();
         let host_now = self.router.lock_ok().host_now_secs();
-        let (t0, _) = anchor.anchor_segment(t_start, t_end, host_now);
+        let (t0, epoch) = anchor.anchor_segment(t_start, t_end, host_now);
         self.starts_host.lock_ok().push(t0 + t_start);
+        self.starts_stream.lock_ok().push(t_start);
         let runway_s = t0 + t_end - host_now;
         if runway_s > 0.0 {
             self.frontier
                 .advance_to(Instant::now() + Duration::from_secs_f64(runway_s));
         }
+        (t0, epoch)
     }
 }
 
 impl SegmentSink for AnchoredSink {
     fn dispatch(&mut self, seg: &ContinuousSegment) -> Result<(), DispatchError> {
-        self.anchor_span(seg.t_start, seg.t_end);
+        let (t0, epoch) = self.anchor_span(seg.t_start, seg.t_end);
+        if let Some(record) = &self.record {
+            record.record_segment(seg, t0, epoch.is_fresh());
+            record.check().map_err(DispatchError::DispatchRecord)?;
+        }
         Ok(())
     }
     fn dispatch_nudge(
@@ -394,10 +427,27 @@ impl StrokePhase {
     }
 }
 
-/// Streams each phase through a saturated inbox, one after another, and
-/// reports how many times the stream had braked to rest by the end of each
-/// phase. A phase stops streaming the moment the stream brakes.
-fn parks_after_each_phase(phases: &[StrokePhase]) -> Vec<usize> {
+/// Brakes to rest a stream had made by the end of one phase: every park of
+/// the sink, and of those the pacer's, split by the path that ordered them,
+/// plus how long the phase's closing flush took.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PhaseDrains {
+    parks: usize,
+    busy: u64,
+    idle: u64,
+    flush_s: Option<f64>,
+}
+
+/// Streams each phase through the inbox as fast as the submitter can, one
+/// after another, and reports the brakes to rest made by the end of each
+/// phase. A phase stops streaming the moment either path brakes: a stream
+/// that kept arriving after a brake would be judged on a runway that no
+/// longer exists. The submitter cannot keep the inbox full while the
+/// pipeline still has room downstream, so the idle path may brake too: it
+/// only ever does so on an inbox it found empty, which
+/// [`super::ingress::InboxFoundEmpty`] makes it prove, so its brakes are
+/// counted but are no failure of the busy path.
+fn drains_after_each_phase(phases: &[StrokePhase]) -> Vec<PhaseDrains> {
     let timeline = ExecutionTimeline {
         frontier: Arc::default(),
         anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
@@ -416,16 +466,19 @@ fn parks_after_each_phase(phases: &[StrokePhase]) -> Vec<usize> {
     );
     let mut at = [0.0_f64, 0.0, 0.0];
     let mut line_no = 1;
-    let mut parks = Vec::with_capacity(phases.len());
-    let parked = || sink.inner.parks.load(Ordering::SeqCst);
+    let mut drains = Vec::with_capacity(phases.len());
+    let busy_drained = || h.links.pacer_drains.busy.load(Ordering::SeqCst);
+    let idle_drained = || h.links.pacer_drains.idle.load(Ordering::SeqCst);
     for phase in phases {
         sink.set_realtime_factor(phase.realtime_factor);
-        let parks_before = parked();
+        let busy_before = busy_drained();
+        let idle_before = idle_drained();
         let started = Instant::now();
         let mut strokes = 0;
         while strokes < phase.max_strokes
             && started.elapsed() < phase.streaming
-            && parked() == parks_before
+            && busy_drained() == busy_before
+            && idle_drained() == idle_before
         {
             let (m, end) = phase.next_move(line_no, at);
             loop {
@@ -439,46 +492,59 @@ fn parks_after_each_phase(phases: &[StrokePhase]) -> Vec<usize> {
             line_no += 1;
             strokes += 1;
         }
-        if phase.then_flush {
+        let flush_s = phase.then_flush.then(|| {
+            let flush_started = Instant::now();
             h.flush().unwrap();
-        }
-        parks.push(parked());
+            flush_started.elapsed().as_secs_f64()
+        });
+        drains.push(PhaseDrains {
+            parks: sink.inner.parks.load(Ordering::SeqCst),
+            busy: busy_drained(),
+            idle: idle_drained(),
+            flush_s,
+        });
     }
     sink.set_realtime_factor(f64::INFINITY);
     h.flush().unwrap();
     h.shutdown();
-    parks
+    drains
 }
 
 #[test]
 fn a_saturated_stream_produced_faster_than_realtime_never_brakes_to_rest() {
-    let parks = parks_after_each_phase(&[
+    let drains = drains_after_each_phase(&[
         StrokePhase::slow_drain(),
         StrokePhase::healthy(2.0, 40.0, Duration::from_secs(3)),
     ]);
-    assert_eq!(parks[0], 1, "the slow drain braked to rest once");
+    let setup = drains[0];
+    assert!(
+        (setup.parks, setup.busy, setup.idle) == (1, 0, 0)
+            && setup.flush_s.is_some_and(|flush_s| flush_s > 1.0),
+        "the slow drain must be the flush's own brake to rest and take over a \
+         second, widening the reserve past two: {setup:?}"
+    );
     assert_eq!(
-        parks[1], parks[0],
-        "a stream produced 2x faster than realtime braked to rest while its inbox \
-         stayed full and its runway grew, because a slow earlier drain widened the \
-         reserve past it"
+        drains[1].busy, 0,
+        "a stream produced 2x faster than realtime braked to rest while moves kept \
+         arriving and its runway grew, because a slow earlier drain widened the \
+         reserve past it: {drains:?}"
     );
 }
 
 #[test]
 fn a_busy_stream_falling_behind_its_playhead_brakes_before_running_dry() {
-    let parks = parks_after_each_phase(&[
+    let drains = drains_after_each_phase(&[
         StrokePhase::healthy(2.0, 1.0, Duration::from_millis(1500)),
         StrokePhase::unplannable(Duration::from_secs(10)),
     ]);
     assert_eq!(
-        parks[0], 0,
-        "the stream braked while it was still gaining runway"
+        drains[0].parks, 0,
+        "the stream braked while it was still gaining runway: {drains:?}"
     );
     assert!(
-        parks[1] > 0,
-        "the committed runway fell away while the inbox stayed full, yet the \
-         pacer never braked to rest"
+        drains[1].busy + drains[1].idle > 0,
+        "the committed runway fell away while moves kept arriving, yet the \
+         pacer never braked to rest: {drains:?}"
     );
 }
 
@@ -677,7 +743,11 @@ fn finite_homing_admission_and_cancellation_preserve_backpressure() {
         cfg_cap(1),
         AxisChainSet::default(),
         vec![0.0; 3],
-        output,
+        PipelineOutput {
+            trajectory: output,
+            input_tap: None,
+            dispatch_record: None,
+        },
         links,
         idle_timeline(frontier),
         control.clone(),
@@ -784,6 +854,7 @@ fn cfg_cap(max_buffer_moves: usize) -> StreamConfig {
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves,
         limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, f64::INFINITY).unwrap(),
+        step_capacity: None,
     }
 }
 
@@ -1784,6 +1855,7 @@ fn beacon_scan_path_live_worker_velocity_stays_bounded() {
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 128,
         limits,
+        step_capacity: None,
     };
     let pts: Vec<(f64, f64)> = include_str!("../../beacon_scan_pts.txt")
         .lines()
@@ -1852,4 +1924,170 @@ fn beacon_scan_path_live_worker_velocity_stays_bounded() {
         overspeed, 0,
         "{overspeed} segments tripped the motor step ceiling"
     );
+}
+
+const ANALYZER_PACE_TOLERANCE_S: f64 = 20e-3;
+const ANALYZER_PACE_TOLERANCE_PPM: f64 = 500.0;
+const STARVED_DEADLINE: Duration = Duration::from_secs(30);
+const MIN_STARVED_BRAKES: u64 = 3;
+
+/// How far behind the stream's own timeline the dispatched starts fell: the
+/// lag the bench analyzer's pace check measures between a capture and the
+/// plan, here between the host starts and the stream times they were
+/// anchored for.
+fn worst_pace_lag_s(stream: &[f64], host: &[f64]) -> (f64, f64) {
+    let lags = stream
+        .iter()
+        .zip(host)
+        .map(|(&s, &h)| (h - host[0]) - (s - stream[0]));
+    let allowed =
+        |s: f64| ANALYZER_PACE_TOLERANCE_S + ANALYZER_PACE_TOLERANCE_PPM * 1e-6 * (s - stream[0]);
+    stream
+        .iter()
+        .zip(lags)
+        .map(|(&s, lag)| (lag, allowed(s)))
+        .fold((0.0, 0.0), |worst, (lag, allowed)| {
+            if lag - allowed > worst.0 - worst.1 {
+                (lag, allowed)
+            } else {
+                worst
+            }
+        })
+}
+
+#[test]
+fn a_producer_slower_than_realtime_brakes_and_resumes_without_overrunning_the_playhead() {
+    let timeline = ExecutionTimeline {
+        frontier: Arc::default(),
+        anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
+        router: Arc::new(Mutex::new(real_router())),
+    };
+    let dir = crate::dispatch_record::tests::scratch_dir("pacer-brakes");
+    let record = DispatchRecorder::open(&dir).unwrap();
+    let sink = PacedSink {
+        inner: AnchoredSink::on(&timeline).recording(&record),
+        realtime_factor_bits: Arc::new(std::sync::atomic::AtomicU64::new(2.0_f64.to_bits())),
+    };
+    let mut h = spawn_recorded(
+        cfg_cap(1024),
+        AxisChainSet::default(),
+        vec![0.0; 4],
+        sink.clone(),
+        timeline,
+        Some(Arc::clone(&record)),
+    );
+    let mut at = [0.0_f64, 0.0, 0.0];
+    let mut line_no = 1;
+    let brakes = |h: &StreamWorkerHandle| {
+        h.links.pacer_drains.busy.load(Ordering::SeqCst)
+            + h.links.pacer_drains.idle.load(Ordering::SeqCst)
+    };
+    for phase in [
+        StrokePhase::healthy(2.0, 1.0, Duration::from_millis(1500)),
+        StrokePhase::unplannable(STARVED_DEADLINE),
+    ] {
+        sink.set_realtime_factor(phase.realtime_factor);
+        let started = Instant::now();
+        let starved = phase.realtime_factor.is_infinite();
+        while started.elapsed() < phase.streaming && !(starved && brakes(&h) >= MIN_STARVED_BRAKES)
+        {
+            let (m, end) = phase.next_move(line_no, at);
+            loop {
+                match h.submit_move(m.clone()) {
+                    Ok(()) => break,
+                    Err(StreamWorkerError::ChannelFull) => std::thread::yield_now(),
+                    Err(e) => panic!("{e}"),
+                }
+            }
+            at = end;
+            line_no += 1;
+        }
+    }
+    h.flush().unwrap();
+    let brakes = brakes(&h);
+    h.shutdown();
+    drop(h);
+    assert!(
+        brakes >= MIN_STARVED_BRAKES,
+        "a producer planning slower than realtime braked {brakes} times in \
+         {STARVED_DEADLINE:?}; however deep the stage inboxes, the runway the pacer \
+         reads is what reached the dispatcher, so starving planning must brake it to \
+         rest and resume again and again"
+    );
+    let stream = sink.inner.starts_stream.lock_ok().clone();
+    let host = sink.inner.starts_host.lock_ok().clone();
+    let (lag, allowed) = worst_pace_lag_s(&stream, &host);
+    assert!(
+        lag > allowed,
+        "the brakes paused the machine, yet the dispatched starts lag the stream by only \
+         {lag}s ({allowed}s allowed): the bench pace check could not flag the stops"
+    );
+    drop(sink);
+    drop(Arc::into_inner(record).expect("every holder of the record closed"));
+    let records =
+        crate::dispatch_record::tests::decode(&crate::dispatch_record::tests::only_record(&dir));
+    assert_record_follows_the_brakes(&records, brakes, u64::from(line_no - 1));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The dispatch record of a braked stream: every pacer brake and the
+/// closing flush as a drain counting the moves sent before it, and the
+/// segments between them continuous on the host clock wherever they did
+/// not re-anchor.
+fn assert_record_follows_the_brakes(
+    records: &[crate::dispatch_record::tests::Decoded],
+    brakes: u64,
+    moves: u64,
+) {
+    use crate::dispatch_record::tests::Decoded;
+    let drains = |wanted: DrainCause| -> Vec<u64> {
+        records
+            .iter()
+            .filter_map(|record| match record {
+                Decoded::Drain { cause, moves_sent } if *cause == wanted as u8 => Some(*moves_sent),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        drains(DrainCause::PacerBrake).len() as u64,
+        brakes,
+        "every pacer brake is recorded as one"
+    );
+    let requested = drains(DrainCause::Requested);
+    assert!(
+        !requested.is_empty() && requested.iter().all(|&sent| sent == moves),
+        "the flush drains after all {moves} moves: {requested:?}"
+    );
+    let mut host_end: Option<f64> = None;
+    let mut moves_sent = 0;
+    let mut segments = 0;
+    for record in records {
+        match record {
+            Decoded::Segment(seg) => {
+                segments += 1;
+                let fresh = seg.flags & crate::dispatch_record::SEGMENT_FRESH_EPOCH != 0;
+                let host_start = seg.t0 + seg.t_start;
+                match host_end {
+                    None => assert!(fresh, "the first segment anchors the stream"),
+                    Some(end) if !fresh => assert!(
+                        (host_start - end).abs() < 1e-9,
+                        "segment {segments} starts at host {host_start}, {}s off the \
+                         previous end {end} without re-anchoring",
+                        host_start - end
+                    ),
+                    Some(_) => {}
+                }
+                host_end = Some(seg.t0 + seg.t_end);
+            }
+            Decoded::Drain {
+                moves_sent: sent, ..
+            } => {
+                assert!(*sent >= moves_sent, "moves sent never decrease");
+                moves_sent = *sent;
+            }
+            Decoded::Nudge(nudge) => panic!("a stream of moves dispatched a nudge: {nudge:?}"),
+        }
+    }
+    assert!(segments > 0, "the record holds the dispatched segments");
 }

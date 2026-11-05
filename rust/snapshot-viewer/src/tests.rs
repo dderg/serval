@@ -302,7 +302,11 @@ fn real_snapshot(
     post_processor_decls: Vec<pipeline_snapshot::PostProcessorDecl>,
 ) -> Snapshot {
     let gcode = "G90\nM83\nG1 X60 Y0 F9000\nG1 X60 Y60\nG1 X0 Y60\n";
-    let waypoints = pipeline_snapshot::waypoints::parse_gcode(gcode, 300.0, 3000.0).unwrap();
+    let waypoints = pipeline_snapshot::waypoints::parse_gcode(
+        gcode,
+        &pipeline_snapshot::CartesianLimits::without_z_caps(300.0, 3000.0, f64::INFINITY, 0.0),
+    )
+    .unwrap();
     pipeline_snapshot::pipeline_snapshot(
         &waypoints,
         pipeline_snapshot::SnapshotParams {
@@ -310,6 +314,8 @@ fn real_snapshot(
             max_accel: 3000.0,
             corner_deviation: pipeline_snapshot::corner_deviation_from_scv(5.0, 3000.0),
             max_jerk: f64::INFINITY,
+            max_z_velocity: None,
+            max_z_accel: None,
             max_extrude_only_velocity: None,
             max_extrude_only_accel: None,
             max_path_deviation: None,
@@ -413,12 +419,7 @@ fn a_chained_snapshot_renders_the_toolhead_lane_on_the_shared_grid() {
             .map(|(k, v)| ((*k).to_string(), *v))
             .collect(),
     };
-    let axis = |name: &str| pipeline_snapshot::AxisDecl {
-        name: name.to_string(),
-        follows: Vec::new(),
-        motors: Vec::new(),
-        post_processors: vec!["slew".to_string(), "belt".to_string()],
-    };
+    let axis = |name: &str| pipeline_snapshot::AxisDecl { name: name.to_string(), follows: Vec::new(), motors: Vec::new(), post_processors: vec!["slew".to_string(), "belt".to_string()], max_velocity: None, max_accel: None, instantaneous_corner_velocity: None };
     let snap = real_snapshot(
         vec![axis("x"), axis("y")],
         vec![

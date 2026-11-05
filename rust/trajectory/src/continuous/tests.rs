@@ -1074,32 +1074,67 @@ fn split_views_are_at_most_25ms_and_share_one_signal() {
     assert_eq!(views.last().unwrap().stream_t_end, 0.061);
 }
 
-#[test]
-fn split_views_absorb_a_final_sub_clock_tail() {
-    let duration = 2.0 * MAX_SPAN_SECS + 1e-10;
+fn split_hold(
+    t_start: f64,
+    duration: f64,
+    start_clock_exact: f64,
+) -> (ClockedMotorSpan, Vec<ClockedMotorSpan>) {
+    let t_end = t_start + duration;
     let signal = motor_span(
         ContinuousAxis::Hold {
             position: 4.0,
-            t_start: 0.0,
-            t_end: duration,
+            t_start,
+            t_end,
         },
-        0.0,
-        duration,
+        t_start,
+        t_end,
     );
     let clocked = ClockedMotorSpan::try_new(
         signal,
-        0.0,
-        duration,
+        t_start,
+        t_end,
         3.0,
         3.0 + duration,
-        500.25,
+        start_clock_exact,
         1_000_000.0,
     )
     .unwrap();
     let views = clocked.split_max_duration().unwrap();
-    assert_eq!(views.len(), 2);
-    assert_eq!(views.last().unwrap().stream_t_end, duration);
+    (clocked, views)
+}
+
+fn assert_views_tile_within_the_bound(clocked: &ClockedMotorSpan, views: &[ClockedMotorSpan]) {
+    for view in views {
+        let duration = view.stream_t_end - view.stream_t_start;
+        let representable = MAX_SPAN_SECS + 4.0 * f64::EPSILON * view.stream_t_end.abs().max(1.0);
+        assert!(
+            duration <= representable,
+            "a {duration} s view outran the {MAX_SPAN_SECS} s bound"
+        );
+    }
+    for pair in views.windows(2) {
+        assert_eq!(pair[0].stream_t_end, pair[1].stream_t_start);
+    }
+    assert_eq!(
+        views.first().unwrap().stream_t_start,
+        clocked.stream_t_start
+    );
+    assert_eq!(views.last().unwrap().stream_t_end, clocked.stream_t_end);
     assert_eq!(views.last().unwrap().end_clock, clocked.end_clock);
+}
+
+#[test]
+fn split_views_share_a_final_sub_clock_tail_with_the_view_before() {
+    let (clocked, views) = split_hold(0.0, 2.0 * MAX_SPAN_SECS + 1e-10, 500.25);
+    assert_eq!(views.len(), 3);
+    assert_views_tile_within_the_bound(&clocked, &views);
+}
+
+#[test]
+fn split_views_keep_the_bound_on_the_enqueue_fuzz_counterexample() {
+    let (clocked, views) = split_hold(0.0, 0.675_000_197_837_529_6, 500_000.0);
+    assert_eq!(views.len(), 28);
+    assert_views_tile_within_the_bound(&clocked, &views);
 }
 
 #[test]
@@ -2116,6 +2151,82 @@ fn carrier_breakpoints_are_publicly_exposed_and_bracket_the_domain() {
     close(segment.eval_axis_pvaj(0, 10.5).unwrap().acceleration, 6.0);
 }
 
+const SLIVER_TEST_EPOCHS_S: [f64; 2] = [0.0, 2.0e4];
+const SLIVER_ROUNDING_NOISE_MM: f64 = 1e-9;
+const RAMP_SPEED_MM_S: f64 = 1.0;
+
+fn two_ulps_above(t: f64) -> f64 {
+    interior_time_above(interior_time_above(t))
+}
+
+/// A unit-speed ramp through `knots` whose pieces all agree except the
+/// slivers, which carry position rounding noise a de Boor read amplifies by
+/// the reciprocal of their width.
+fn ramp_with_noisy_slivers(knots: Vec<f64>) -> ContinuousAxis {
+    let interior = &knots[1..knots.len() - 1];
+    let mut control_points = vec![10.0];
+    for window in interior.windows(2) {
+        let previous = *control_points.last().unwrap();
+        let width = window[1] - window[0];
+        let sliver = degenerate_knot_span(&knots, control_points.len());
+        let noise = if sliver {
+            SLIVER_ROUNDING_NOISE_MM
+        } else {
+            0.0
+        };
+        control_points.push(previous + RAMP_SPEED_MM_S * width + noise);
+    }
+    ContinuousAxis::Spline(Arc::new(
+        ScalarNurbs::try_new(1, knots, control_points).unwrap(),
+    ))
+}
+
+#[test]
+fn an_interior_sliver_reads_as_its_neighbour_at_any_stream_time() {
+    for epoch in SLIVER_TEST_EPOCHS_S {
+        let sliver_start = epoch + 1.0;
+        let sliver_end = two_ulps_above(sliver_start);
+        let end = epoch + 2.0;
+        let ramp = ramp_with_noisy_slivers(vec![epoch, epoch, sliver_start, sliver_end, end, end]);
+        let velocity = ramp.eval_pva(sliver_start).unwrap().velocity;
+        assert!(
+            (velocity - RAMP_SPEED_MM_S).abs() <= 1e-6,
+            "sliver [{sliver_start}, {sliver_end}] read its own noise: velocity {velocity}"
+        );
+    }
+}
+
+#[test]
+fn a_leading_sliver_reads_as_its_neighbour_at_any_stream_time() {
+    for epoch in SLIVER_TEST_EPOCHS_S {
+        let start = epoch + 1.0;
+        let sliver_end = two_ulps_above(start);
+        let end = epoch + 2.0;
+        let ramp = ramp_with_noisy_slivers(vec![start, start, sliver_end, end, end]);
+        let velocity = ramp.eval_pva(start).unwrap().velocity;
+        assert!(
+            (velocity - RAMP_SPEED_MM_S).abs() <= 1e-6,
+            "sliver [{start}, {sliver_end}] read its own noise: velocity {velocity}"
+        );
+    }
+}
+
+#[test]
+fn a_trailing_sliver_reads_as_its_neighbour_at_any_stream_time() {
+    for epoch in SLIVER_TEST_EPOCHS_S {
+        let start = epoch + 1.0;
+        let sliver_start = epoch + 2.0;
+        let end = two_ulps_above(sliver_start);
+        let ramp = ramp_with_noisy_slivers(vec![start, start, sliver_start, end, end]);
+        let inside_sliver = interior_time_above(sliver_start);
+        let velocity = ramp.eval_pva(inside_sliver).unwrap().velocity;
+        assert!(
+            (velocity - RAMP_SPEED_MM_S).abs() <= 1e-6,
+            "sliver [{sliver_start}, {end}] read its own noise: velocity {velocity}"
+        );
+    }
+}
+
 /// A degree-9 curve with interior knots, the shape a shaped move lowers to.
 fn lumpy_degree_nine() -> Arc<ScalarNurbs> {
     let degree = 9;
@@ -2267,6 +2378,66 @@ fn local_polynomial_sums_carriers_and_stops_at_a_piece_seam() {
     );
 }
 
+fn issue_471_seam(right_base: f64) -> Arc<[RelativeSplinePiece]> {
+    Arc::from(vec![
+        RelativeSplinePiece {
+            base_position: -90.80534819390974,
+            curve: cubic_bezier(vec![317.14878596142586; 4]),
+            t_start: 0.0,
+            t_end: 1.0,
+        },
+        RelativeSplinePiece {
+            base_position: right_base,
+            curve: Arc::new(
+                ScalarNurbs::try_new(
+                    3,
+                    vec![1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0],
+                    vec![254.67333002005893, 254.8, 255.4, 255.2],
+                )
+                .unwrap(),
+            ),
+            t_start: 1.0,
+            t_end: 2.0,
+        },
+    ])
+}
+
+fn independent_span(axis: ContinuousAxis) -> Result<MotorSpan, ContinuousError> {
+    MotorSpan::try_new(
+        Arc::from(vec![MotorGroup::Independent(MotorTerm {
+            source_axis: 1,
+            axis,
+            scale: 1.0,
+        })]),
+        0.0,
+        2.0,
+        0,
+        7,
+        false,
+    )
+}
+
+#[test]
+fn piecewise_relative_spline_refuses_a_position_jump_at_a_piece_seam() {
+    let jumping = issue_471_seam(-66.2333562065993);
+    let jump = Some(ContinuousError::PieceJump {
+        at: 1.0,
+        previous_end: -90.80534819390974 + 317.14878596142586,
+        next_start: -66.2333562065993 + 254.67333002005893,
+    });
+    assert_eq!(
+        ContinuousAxis::try_piecewise_relative_spline(Arc::clone(&jumping)).err(),
+        jump
+    );
+    assert_eq!(
+        independent_span(ContinuousAxis::PiecewiseRelativeSpline(jumping)).err(),
+        jump
+    );
+
+    let rebased = issue_471_seam(-90.80534819390974 + 317.14878596142586 - 254.67333002005893);
+    independent_span(ContinuousAxis::try_piecewise_relative_spline(rebased).unwrap()).unwrap();
+}
+
 #[test]
 fn local_polynomial_ranges_contain_every_sample_and_tighten_with_the_interval() {
     let curve = lumpy_degree_nine();
@@ -2354,4 +2525,27 @@ fn buzz_bounds_capture_extrema_hidden_between_partition_ends() {
         ceiling - peak < 1e-6 * peak,
         "ceiling {ceiling} is loose against the peak {peak}"
     );
+}
+
+#[test]
+fn a_span_whose_duration_has_no_cut_count_is_refused_not_cut_into_nothing() {
+    let signal = motor_span(
+        ContinuousAxis::Hold {
+            position: 4.0,
+            t_start: 0.0,
+            t_end: 0.061,
+        },
+        0.0,
+        0.061,
+    );
+    let mut clocked =
+        ClockedMotorSpan::try_new(signal, 0.0, 0.061, 3.0, 3.061, 500.25, 100_000.0).unwrap();
+    for end in [f64::INFINITY, f64::NAN, 1.0e300] {
+        clocked.stream_t_end = end;
+        let error = clocked.split_max_duration().unwrap_err();
+        assert!(
+            matches!(error, ContinuousError::NotRepresentable { .. }),
+            "{end}: {error:?}"
+        );
+    }
 }

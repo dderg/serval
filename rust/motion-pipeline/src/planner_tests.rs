@@ -1,6 +1,8 @@
 //! How far into its window the streaming planner may cut, and whether
 //! cutting there still reproduces a single-window plan.
 
+use std::sync::Arc;
+
 use geometry::segment::SourceRange;
 use geometry::{CornerFitConfig, MoveContext, VelocityLimits, line_move};
 
@@ -28,6 +30,7 @@ fn config(max_buffer_moves: usize) -> StreamConfig {
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves,
         limits: limits(),
+        step_capacity: None,
     }
 }
 
@@ -70,7 +73,7 @@ fn stream(moves: &[geometry::Move], drain: bool) -> Vec<PlannedMove> {
         out.push(item);
         true
     };
-    let mut planner = Planner::new(config(4096));
+    let mut planner = Planner::new(config(4096), Arc::default());
     for m in moves {
         assert!(
             planner.feed(StreamInput::Move(m.clone()), &mut collect),
@@ -123,7 +126,7 @@ fn streamed_commits_reproduce_a_single_window_plan() {
             out.push(item);
             true
         };
-        let mut planner = Planner::new(config(4096));
+        let mut planner = Planner::new(config(4096), Arc::default());
         for m in &moves {
             assert!(
                 planner.feed(StreamInput::Move(m.clone()), &mut collect),
@@ -227,7 +230,7 @@ fn plan_one_window(moves: &[geometry::Move]) -> Vec<PlannedMove> {
         out.push(item);
         true
     };
-    let mut planner = Planner::new(ramp_config());
+    let mut planner = Planner::new(ramp_config(), Arc::default());
     for m in moves {
         assert!(
             planner.feed(StreamInput::Move(m.clone()), &mut collect),
@@ -250,7 +253,7 @@ fn stream_ramp(moves: &[geometry::Move]) -> Vec<PlannedMove> {
         out.push(item);
         true
     };
-    let mut planner = Planner::new(ramp_config());
+    let mut planner = Planner::new(ramp_config(), Arc::default());
     for m in moves {
         assert!(
             planner.feed(StreamInput::Move(m.clone()), &mut collect),
@@ -379,7 +382,7 @@ fn dense_layers(layers: usize) -> Vec<geometry::Move> {
 fn plan_layers(moves: &[geometry::Move], cut: bool) -> (Vec<PlannedMove>, usize) {
     let mut out = Vec::new();
     let mut deepest_window = 0usize;
-    let mut planner = Planner::new(layer_config());
+    let mut planner = Planner::new(layer_config(), Arc::default());
     for (fed, m) in moves.iter().enumerate() {
         let mut collect = |item| {
             out.push(item);

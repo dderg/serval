@@ -9,12 +9,15 @@ from fakes import (
 )
 
 from klippy import motion_setup
-from klippy.mcu import STEPCOMPRESS_MAX_ERROR_DEFAULT
+from klippy.mcu import (
+    STEPCOMPRESS_DRAIN_BUDGET_DEFAULT,
+    STEPCOMPRESS_MAX_ERROR_DEFAULT,
+)
 from klippy.motion import Motion
 from klippy.motion_kinematics import _LinearKinematics
 from klippy.motion_setup import LANE_KIND_PULSE
 
-FAKE_STEPPER_VELOCITY_CEILING = 0.5 / (0.000001 + 0.000002) * 0.0125
+FAKE_STEPPER_VELOCITY_CEILING = 0.0125 / (2 * 0.000002)
 FAKE_STEP_DIST = 0.0125
 
 
@@ -37,6 +40,7 @@ def pulse_topology(handle, axes, kin, move_queue_slots=0, max_error=0.0):
         [2e-06] * n,
         [False] * n,
         max_error,
+        STEPCOMPRESS_DRAIN_BUDGET_DEFAULT,
         0.0,
         0,
     )
@@ -95,15 +99,16 @@ def test_one_mcu_corexy_topology():
     motion = make_motion("corexy", SPATIAL_AXES, follower=("e", "extruder", 11))
     a2h = motion_setup.build_axis_to_handle(motion)
     assert a2h == {0: 11, 1: 11, 2: 11, 3: 11}
-    assert motion_setup.derive_mcu_topology(motion, a2h) == [
-        pulse_topology(11, [0, 1, 2, 3], 0)
-    ]
+    assert motion_setup.derive_mcu_topology(motion, a2h) == (
+        [pulse_topology(11, [0, 1, 2, 3], 0)],
+        [],
+    )
 
 
 def test_high_precision_step_compress_is_opted_in_per_motor():
     motion = make_motion("corexy", SPATIAL_AXES)
     motion.kin.rails[0].get_steppers()[0].high_precision_step_compress = True
-    topology = motion_setup.derive_mcu_topology(
+    topology, _ = motion_setup.derive_mcu_topology(
         motion, motion_setup.build_axis_to_handle(motion)
     )
     expected = list(pulse_topology(11, [0, 1, 2], 0))
@@ -116,10 +121,13 @@ def test_two_mcu_corexy_topology():
     motion = make_motion("corexy", lanes, follower=("e", "extruder", 200))
     a2h = motion_setup.build_axis_to_handle(motion)
     assert a2h == {0: 100, 1: 100, 2: 200, 3: 200}
-    assert motion_setup.derive_mcu_topology(motion, a2h) == [
-        pulse_topology(100, [0, 1], 0),
-        pulse_topology(200, [2, 3], 1),
-    ]
+    assert motion_setup.derive_mcu_topology(motion, a2h) == (
+        [
+            pulse_topology(100, [0, 1], 0),
+            pulse_topology(200, [2, 3], 1),
+        ],
+        [],
+    )
 
 
 def test_init_planner_records_axis_mcu_ownership(monkeypatch):
@@ -160,9 +168,10 @@ def test_cartesian_topology_tag_is_cartesian():
         "cartesian", SPATIAL_AXES, follower=("e", "extruder", 11)
     )
     a2h = motion_setup.build_axis_to_handle(motion)
-    assert motion_setup.derive_mcu_topology(motion, a2h) == [
-        pulse_topology(11, [0, 1, 2, 3], 1)
-    ]
+    assert motion_setup.derive_mcu_topology(motion, a2h) == (
+        [pulse_topology(11, [0, 1, 2, 3], 1)],
+        [],
+    )
 
 
 def test_follower_slot_sourced_from_force_move_extruder():
@@ -223,14 +232,17 @@ class CaptureEngine:
     def __init__(self):
         self.init_planner_args = None
 
-    def init_planner(self, config_text, topology):
+    def init_planner(self, config_text, topology, step_benchmarks):
         self.init_planner_args = {
             "config_text": config_text,
             "topology": topology,
+            "step_benchmarks": step_benchmarks,
         }
 
 
-def test_init_planner_passes_config_text_and_topology(monkeypatch):
+def test_init_planner_passes_config_text_topology_and_step_benchmarks(
+    monkeypatch,
+):
     motion = make_motion("corexy", SPATIAL_AXES, follower=("e", "extruder", 11))
     motion._motion_config_text = (
         "[printer]\nmax_velocity: 300\nmax_accel: 3000\n"
@@ -253,6 +265,18 @@ def test_init_planner_passes_config_text_and_topology(monkeypatch):
         "configure_axes_per_mcu",
         lambda motion, engine_mcus: None,
     )
+    step_benchmark = {"mcu": "mcu", "motors": []}
+    benchmarked = []
+
+    def mcu_step_capacity(motion, name, mcu_obj, motors):
+        benchmarked.append((name, mcu_obj, [m.stepper for m in motors]))
+        return step_benchmark
+
+    monkeypatch.setattr(
+        motion_setup.motion_step_capacity,
+        "mcu_step_capacity",
+        mcu_step_capacity,
+    )
 
     motion_setup.init_planner(motion)
     assert engine.init_planner_args["config_text"] == motion._motion_config_text
@@ -265,3 +289,6 @@ def test_init_planner_passes_config_text_and_topology(monkeypatch):
             max_error=STEPCOMPRESS_MAX_ERROR_DEFAULT,
         )
     ]
+    assert engine.init_planner_args["step_benchmarks"] == [step_benchmark]
+    assert [(name, obj) for name, obj, _ in benchmarked] == [("mcu", mcu)]
+    assert len(benchmarked[0][2]) == 4

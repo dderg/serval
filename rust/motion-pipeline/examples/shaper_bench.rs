@@ -14,6 +14,7 @@
 
 use std::time::Instant;
 
+use geometry::path::lowering::PositionProfile;
 use geometry::segment::SourceRange;
 use geometry::{CornerFitConfig, MoveContext, VelocityLimits, line_move};
 use motion_pipeline::{Pipeline, StreamConfig, StreamInput, TrajectoryItem};
@@ -23,14 +24,10 @@ fn limits() -> VelocityLimits {
     VelocityLimits::try_new(2800.0, 100_000.0, 0.04, 40_000_000.0).unwrap()
 }
 
-/// Klippy caps per-move limits for Z motion (`for_move`); mirror the bench's
-/// [printer] max_z_velocity/max_z_accel so layer changes fit realistically.
-fn limits_for(dz: f64) -> VelocityLimits {
-    if dz == 0.0 {
-        limits()
-    } else {
-        VelocityLimits::try_new(20.0, 1000.0, 0.04, 40_000_000.0).unwrap()
-    }
+/// The bench's [printer] max_z_velocity/max_z_accel, so layer changes fit
+/// realistically.
+fn z_capped_limits() -> VelocityLimits {
+    limits().with_z_caps(20.0, 1000.0).unwrap()
 }
 
 fn config() -> StreamConfig {
@@ -43,6 +40,7 @@ fn config() -> StreamConfig {
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 512,
         limits: limits(),
+        step_capacity: None,
     }
 }
 
@@ -165,7 +163,15 @@ fn move_duration_estimate(m: &geometry::Move) -> f64 {
 /// Returns per-emit (wall_secs, stream_t_end) samples.
 fn run_case(name: &str, chains: AxisChainSet, inputs: Vec<StreamInput>) -> Vec<(f64, f64)> {
     let n_moves = inputs.len();
-    let mut pipeline = Pipeline::new(config(), chains, vec![100.0, 100.0, 0.2, 0.0], 0.0);
+    let [x, y, z] = inputs
+        .iter()
+        .find_map(|item| match item {
+            StreamInput::Move(m) => m.segment.spatial.as_ref(),
+            _ => None,
+        })
+        .expect("a shaper benchmark case moves the toolhead")
+        .point_at(0.0);
+    let mut pipeline = Pipeline::new(config(), chains, vec![x, y, z, 0.0], 0.0);
     let started = Instant::now();
     let mut emits: Vec<(f64, f64)> = Vec::new();
     let mut collect = |item| {
@@ -261,7 +267,7 @@ fn gcode_moves(path: &str) -> Vec<StreamInput> {
         let ctx = MoveContext {
             extruder_axis: 3,
             feedrate_mm_s: feed,
-            limits: limits_for(next[2] - pos[2]),
+            limits: z_capped_limits(),
             source: SourceRange {
                 start_line: line_no,
                 end_line: line_no,

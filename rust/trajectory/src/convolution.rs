@@ -182,14 +182,83 @@ const MOMENT_ORDERS: usize = 3;
 
 type MomentEvaluator<'a> = dyn Fn(f64, f64, usize, f64, [&mut [f64]; MOMENT_ORDERS]) -> bool + 'a;
 
+/// Hashes an exact time's bit pattern for the `eval_pva` memo: one multiply
+/// spreads the mantissa's varying low bits across the whole word, where both
+/// the bucket index and the control byte read them.
+#[derive(Default)]
+struct TimeBitsHasher(u64);
+
+impl std::hash::Hasher for TimeBitsHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, _bytes: &[u8]) {
+        panic!("TimeBitsHasher hashes f64 bit patterns through write_u64 only");
+    }
+
+    fn write_u64(&mut self, bits: u64) {
+        let mixed = bits.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        self.0 = mixed ^ (mixed >> 32);
+    }
+}
+
+type PvaMemo =
+    std::collections::HashMap<u64, (f64, f64, f64), std::hash::BuildHasherDefault<TimeBitsHasher>>;
+
+struct CenteredKernelPiece {
+    u_mid: f64,
+    half_width: f64,
+    coeffs: Vec<f64>,
+}
+
+impl CenteredKernelPiece {
+    fn new(piece: &nurbs::bezier::BezierPiece) -> Self {
+        let half_width = 0.5 * (piece.u_end - piece.u_start);
+        Self {
+            u_mid: piece.u_start + half_width,
+            half_width,
+            coeffs: nurbs::chebyshev::taylor_shift(&piece.coeffs, half_width),
+        }
+    }
+
+    fn mass(&self) -> f64 {
+        let half_width = self.half_width;
+        let mut reach = half_width;
+        let mut mass = 0.0;
+        for (power, coefficient) in self.coeffs.iter().enumerate() {
+            if power % 2 == 0 {
+                mass += coefficient * 2.0 * reach / (power + 1) as f64;
+            }
+            reach *= half_width;
+        }
+        mass
+    }
+
+    fn integrate(&self, moments: &[f64]) -> f64 {
+        let mut value = 0.0;
+        for (power, (coefficient, moment)) in self.coeffs.iter().zip(moments).enumerate() {
+            let term = coefficient * moment;
+            value += if power % 2 == 0 { term } else { -term };
+        }
+        value
+    }
+}
+
+pub fn kernel_mass(kernel: &PiecewisePolynomialKernel) -> f64 {
+    kernel
+        .pieces
+        .iter()
+        .map(|piece| CenteredKernelPiece::new(piece).mass())
+        .sum()
+}
+
 /// The convolution `(input ∗ kernel)(t)`, evaluated exactly: both factors are
 /// piecewise polynomials, so integrating between their breakpoints with a
 /// Gauss rule of sufficient order carries no quadrature error at all. The
 /// previous sampled rectangle-rule evaluator corrugated the result at the
 /// sample wavelength — noise invisible in position but fatal to the refit's
 /// second-difference acceleration probes, which chased it into subdividing
-const PVA_MEMO_SLOTS: usize = 256;
-
 /// every span to the floor.
 pub struct ShapedSignal<'a, F = Box<dyn Fn(f64) -> f64 + 'a>> {
     eval_input: F,
@@ -203,13 +272,15 @@ pub struct ShapedSignal<'a, F = Box<dyn Fn(f64) -> f64 + 'a>> {
     /// Reusable cut buffer for `convolve` — the merge of kernel-piece
     /// boundaries and in-window input breaks, rebuilt on every call.
     cuts: std::cell::RefCell<Vec<f64>>,
-    /// Recent `(t, (p, v, a))` results: adjacent fit spans share boundary
-    /// times (a segment's end is the next segment's start, and bisection
-    /// re-evaluates its parent's endpoints), so a tiny exact-`t` memo removes
-    /// whole convolution passes without changing any computed value.
-    pva_memo: std::cell::RefCell<[Option<(u64, (f64, f64, f64))>; PVA_MEMO_SLOTS]>,
-    pva_memo_next: std::cell::Cell<usize>,
+    /// Every `(t, (p, v, a))` this signal has computed, keyed by `t`'s bits:
+    /// adjacent fit spans share boundary times (a segment's end is the next
+    /// segment's start, and bisection re-evaluates its parent's endpoints),
+    /// and the fit's seam and edge checks revisit them from far apart, so an
+    /// exact-`t` memo removes whole convolution passes without changing any
+    /// computed value. A signal lives for one batch of fits, which bounds it.
+    pva_memo: std::cell::RefCell<PvaMemo>,
     kernel: &'a PiecewisePolynomialKernel,
+    centered_kernel: Vec<CenteredKernelPiece>,
     /// `k′` and `k″` as piecewise polynomials over the same support, plus the
     /// jump of `k′` at each internal piece boundary (a delta in `k″` — the
     /// triangle kernel has them, the bell kernel does not). With these,
@@ -458,9 +529,9 @@ where
             gauss_weights,
             input_breaks,
             cuts: std::cell::RefCell::new(Vec::new()),
-            pva_memo: std::cell::RefCell::new([None; PVA_MEMO_SLOTS]),
-            pva_memo_next: std::cell::Cell::new(0),
+            pva_memo: std::cell::RefCell::new(PvaMemo::default()),
             kernel,
+            centered_kernel: kernel.pieces.iter().map(CenteredKernelPiece::new).collect(),
             d_kernel,
             dd_kernel,
             d_kernel_jumps,
@@ -493,38 +564,29 @@ where
     /// bit-identical to the separate `eval`/`deriv`/`second_deriv` calls.
     pub fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let key = t.to_bits();
-        if let Some(hit) = self
-            .pva_memo
-            .borrow()
-            .iter()
-            .flatten()
-            .find(|(bits, _)| *bits == key)
-        {
-            return hit.1;
+        if let Some(&hit) = self.pva_memo.borrow().get(&key) {
+            return hit;
         }
         let value = self
             .convolve_pva_from_moments(t)
             .unwrap_or_else(|| self.convolve_pva_quadrature(t));
-        let slot = self.pva_memo_next.get();
-        self.pva_memo.borrow_mut()[slot] = Some((key, value));
-        self.pva_memo_next.set((slot + 1) % PVA_MEMO_SLOTS);
+        self.pva_memo.borrow_mut().insert(key, value);
         value
     }
 
     fn convolve_pva_from_moments(&self, t: f64) -> Option<(f64, f64, f64)> {
         let moment_input = self.moment_input.as_ref()?;
         let (mut p, mut v, mut a) = (0.0, 0.0, 0.0);
-        for kernel in &self.kernel.pieces {
+        for (kernel, centered) in self.kernel.pieces.iter().zip(&self.centered_kernel) {
             let degree = kernel.degree();
             let mut position = [0.0; MAX_EXACT_PRODUCT_DEGREE + 1];
             let mut velocity = [0.0; MAX_EXACT_PRODUCT_DEGREE + 1];
             let mut acceleration = [0.0; MAX_EXACT_PRODUCT_DEGREE + 1];
-            let piece_origin = t - kernel.u_start;
             if !moment_input(
                 t - kernel.u_end,
-                piece_origin,
+                t - kernel.u_start,
                 degree,
-                piece_origin,
+                t - centered.u_mid,
                 [
                     &mut position[..=degree],
                     &mut velocity[..=degree],
@@ -533,9 +595,9 @@ where
             ) {
                 return None;
             }
-            p += Self::integrate_kernel_piece(kernel, &position);
-            v += Self::integrate_kernel_piece(kernel, &velocity);
-            a += Self::integrate_kernel_piece(kernel, &acceleration);
+            p += centered.integrate(&position);
+            v += centered.integrate(&velocity);
+            a += centered.integrate(&acceleration);
         }
         for &(break_t, position_jump, slope_jump) in self.input_jumps_in_support(t) {
             let offset = t - break_t;
@@ -554,19 +616,6 @@ where
             .input_jumps
             .partition_point(|&(break_t, _, _)| break_t <= t - self.k_lo);
         &self.input_jumps[lo..hi]
-    }
-
-    /// A kernel piece's coefficients are a power basis in `tau - u_start` and
-    /// the moments arrive about that same origin, so substituting
-    /// `x = t - tau` turns the piece's contribution into one alternating dot
-    /// product.
-    fn integrate_kernel_piece(kernel: &nurbs::bezier::BezierPiece, moments: &[f64]) -> f64 {
-        let mut value = 0.0;
-        for (power, (coefficient, moment)) in kernel.coeffs.iter().zip(moments).enumerate() {
-            let term = coefficient * moment;
-            value += if power % 2 == 0 { term } else { -term };
-        }
-        value
     }
 
     /// Merge the kernel-piece boundaries (ascending by construction) with the

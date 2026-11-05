@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3c3a45f2af0bf67019c3591fd1369a2d76c9559949bfd2452d5dd45813463187 # shrinks to limits = Limits { max_velocity: 194.7821459348176, max_accel: 29509.875733820503, square_corner_velocity: 0.5 }, steps = [Step { heading: 0.0, length_mm: 1.0, feed_mm_s: 569.4102952022536, extrude_ratio: 0.0, dwell_before_s: None }, Step { heading: 4.126546043852568, length_mm: 1.0, feed_mm_s: 1.0, extrude_ratio: 0.0, dwell_before_s: None }]
+cc 6baa7fe7a4e7f559b8eebb7a32d1cf167e417ae41d4c2d831f343c12df759326 # shrinks to limits = Limits { max_velocity: 587.5141285924783, max_accel: 40405.80397363037, square_corner_velocity: 0.5 }, steps = [Step { heading: 0.0, length_mm: 1.0, feed_mm_s: 566.1419102258889, extrude_ratio: 0.0, dwell_before_s: None }, Step { heading: 1.342965881201005, length_mm: 1.0, feed_mm_s: 1.0, extrude_ratio: 0.0, dwell_before_s: None }]
+cc d53ca2776a04aca00a6a6bc12d45e6ba41a9a4b2698be18f571e4c46ab0f5c47 # shrinks to limits = Limits { max_velocity: 507.5606100077562, max_accel: 37475.256721830134, square_corner_velocity: 0.5 }, steps = [Step { heading: 5.992957147145822, length_mm: 1.0, feed_mm_s: 398.08259301795573, extrude_ratio: 0.0, dwell_before_s: None }, Step { heading: 0.0, length_mm: 1.0, feed_mm_s: 1.0, extrude_ratio: 0.0, dwell_before_s: None }]
+cc a9df2ff57d7b7781e9d71944e277c3c49eceeb3d5f09aad9dba50e7efbcf7a0a # shrinks to limits = Limits { max_velocity: 419.92915914107476, max_accel: 36599.590510520124, square_corner_velocity: 0.0 }, steps = [Step { heading: 0.0, length_mm: 0.0007210761746765738, feed_mm_s: 199.17412477503305, extrude_ratio: 0.0, dwell_before_s: None }, Step { heading: 0.0, length_mm: 0.03930365702311367, feed_mm_s: 125.98481005181462, extrude_ratio: 0.0491169352612145, dwell_before_s: None }, Step { heading: 0.0, length_mm: 1.0, feed_mm_s: 1.0, extrude_ratio: 0.0, dwell_before_s: Some(0.001) }]

@@ -1,4 +1,5 @@
 use crate::algos::PostProcessorAlgo;
+use geometry::RatioRampRule;
 use nurbs::algebra::PiecewisePolynomialKernel;
 
 #[derive(Debug, Clone)]
@@ -46,6 +47,14 @@ impl AdvanceModel {
             }
         }
     }
+
+    /// `sup |s''|`: tanh's at `tanh u = 1/√3`, the reciprocal's at rest.
+    fn max_shape_curvature(self) -> f64 {
+        match self {
+            Self::Tanh => 4.0 / (3.0 * 3.0_f64.sqrt()),
+            Self::Reciprocal => 2.0,
+        }
+    }
 }
 
 /// The operator `y = x + a(ẋ)` with the saturating advance law
@@ -83,6 +92,19 @@ impl NonlinearAdvance {
         let (_, _, dds) = self.model.shape(v / vl);
         self.nonlinear_offset / (vl * vl) * dds
     }
+
+    /// `sup |da/dv|`: both shapes peak in slope at rest, where `s' = 1`.
+    #[must_use]
+    pub fn max_slope(&self) -> f64 {
+        self.linear_advance.abs() + self.nonlinear_offset.abs() / self.linearization_velocity
+    }
+
+    /// `sup |d²a/dv²|`
+    #[must_use]
+    pub fn max_curvature(&self) -> f64 {
+        let vl = self.linearization_velocity;
+        self.nonlinear_offset.abs() / (vl * vl) * self.model.max_shape_curvature()
+    }
 }
 
 impl ChainStage {
@@ -117,10 +139,21 @@ impl ChainStage {
     }
 }
 
+/// Upstream Klipper's default extruder `instantaneous_corner_velocity`.
+pub const DEFAULT_INSTANTANEOUS_CORNER_VELOCITY_MM_S: f64 = 1.0;
+
 #[derive(Debug, Clone, Default)]
 pub struct CompiledChain {
     kernel: Option<PiecewisePolynomialKernel>,
     transform: Option<(TransformPlacement, ChainStage)>,
+    /// A projected follower motor's velocity and acceleration limits, which
+    /// set how long its ratio ramp spreads each extrusion-ratio step (see
+    /// [`Self::ratio_ramp_rule`]). It shapes the projection, not the signal,
+    /// so it is no stage of the chain.
+    follower_limits: Option<FollowerLimits>,
+    /// A projected follower's allowance for instantaneous velocity changes,
+    /// see [`Self::instantaneous_corner_velocity`].
+    instantaneous_corner_velocity: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,7 +344,12 @@ impl CompiledChain {
             kernel.is_some() || !matches!(transform, Some((TransformPlacement::AfterKernel, _))),
             "a trailing transform requires a kernel"
         );
-        Self { kernel, transform }
+        Self {
+            kernel,
+            transform,
+            follower_limits: None,
+            instantaneous_corner_velocity: None,
+        }
     }
 
     pub fn kernel(&self) -> Option<&PiecewisePolynomialKernel> {
@@ -338,6 +376,87 @@ impl CompiledChain {
     pub fn transform(&self) -> Option<&ChainStage> {
         self.transform.as_ref().map(|(_, transform)| transform)
     }
+
+    /// This chain with a projected follower's motor limits, see
+    /// [`Self::ratio_ramp_rule`].
+    #[must_use]
+    pub fn with_follower_limits(self, limits: FollowerLimits) -> Self {
+        assert!(
+            limits.max_velocity_mm_s > 0.0 && limits.max_accel_mm_s2 > 0.0,
+            "a follower's limits must be positive (infinity leaves it unlimited), got {limits:?}"
+        );
+        Self {
+            follower_limits: Some(limits),
+            ..self
+        }
+    }
+
+    /// The advance's largest slope `sup da/dv`: `k` of a linear advance,
+    /// the small-signal slope of a nonlinear one, 0 without an advance.
+    #[must_use]
+    pub fn advance_slope(&self) -> f64 {
+        match self.transform() {
+            None => 0.0,
+            Some(ChainStage::DerivativeGains { k1, .. }) => k1.abs(),
+            Some(ChainStage::NonlinearAdvance(advance)) => advance.max_slope(),
+            Some(ChainStage::SmoothKernel(_)) => {
+                unreachable!("a chain's transform is never its kernel")
+            }
+        }
+    }
+
+    /// What a projected follower's ratio ramp is held to: every
+    /// extrusion-ratio step is spread along the path over the shortest ramp
+    /// time that keeps the advanced follower within its motor's limits (see
+    /// [`geometry::ratio_ramp`]); an unlimited follower takes the shortest.
+    #[must_use]
+    pub fn ratio_ramp_rule(&self) -> RatioRampRule {
+        let limits = self.follower_limits.unwrap_or(FollowerLimits::UNLIMITED);
+        RatioRampRule {
+            advance_slope_s: self.advance_slope(),
+            max_velocity_mm_s: limits.max_velocity_mm_s,
+            max_accel_mm_s2: limits.max_accel_mm_s2,
+        }
+    }
+
+    /// This chain with an allowance of `mm_s` for instantaneous follower
+    /// velocity changes, see [`Self::instantaneous_corner_velocity`].
+    #[must_use]
+    pub fn with_instantaneous_corner_velocity(self, mm_s: f64) -> Self {
+        assert!(
+            mm_s.is_finite() && mm_s > 0.0,
+            "an instantaneous corner velocity must be finite and positive, got {mm_s}"
+        );
+        Self {
+            instantaneous_corner_velocity: Some(mm_s),
+            ..self
+        }
+    }
+
+    /// The velocity change a projected follower may make at once (mm/s,
+    /// upstream Klipper's extruder `instantaneous_corner_velocity`): where
+    /// no kernel smooths its advance, an unshaped leader's acceleration
+    /// steps become advance velocity steps, and the planner keeps them
+    /// within it. [`DEFAULT_INSTANTANEOUS_CORNER_VELOCITY_MM_S`] unless set.
+    #[must_use]
+    pub fn instantaneous_corner_velocity(&self) -> f64 {
+        self.instantaneous_corner_velocity
+            .unwrap_or(DEFAULT_INSTANTANEOUS_CORNER_VELOCITY_MM_S)
+    }
+}
+
+/// A projected follower motor's limits, infinite where unset.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FollowerLimits {
+    pub max_velocity_mm_s: f64,
+    pub max_accel_mm_s2: f64,
+}
+
+impl FollowerLimits {
+    pub const UNLIMITED: Self = Self {
+        max_velocity_mm_s: f64::INFINITY,
+        max_accel_mm_s2: f64::INFINITY,
+    };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -374,6 +493,8 @@ impl AxisChainSet {
                 .map(|k| CompiledChain {
                     kernel: k.clone(),
                     transform: None,
+                    follower_limits: None,
+                    instantaneous_corner_velocity: None,
                 })
                 .collect(),
             followers: Vec::new(),
@@ -383,6 +504,13 @@ impl AxisChainSet {
     #[must_use]
     pub fn n_axes(&self) -> usize {
         self.chains.len()
+    }
+
+    /// Whether any follower rides leaders: each smooths its extrusion ratio
+    /// along the path, see [`CompiledChain::ratio_ramp_rule`].
+    #[must_use]
+    pub fn has_projected_follower(&self) -> bool {
+        self.projected_followers().next().is_some()
     }
 
     /// Follower axes that ride on at least one leader: their tracks are not

@@ -143,6 +143,29 @@ fn hermite(p: [f64; 4], t: f64, tension: f64) -> (f64, f64, f64) {
     (v, d, dd)
 }
 
+/// One cell of the grid as [`MeshGrid::sample`] interpolates it: with `u`,
+/// `v` its parameters along x and y, the height is
+/// `Σₖ Hₖ(v)·Σᵢ Hᵢ(u)·points[k][i]`, `H` the cardinal spline's weights at
+/// `tension` — `H₀ = −τ·h₁₀`, `H₁ = h₀₀ − τ·h₁₁`, `H₂ = h₀₁ + τ·h₁₀`,
+/// `H₃ = τ·h₁₁` of the cubic Hermite basis.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MeshPatch {
+    pub x: PatchAxis,
+    pub y: PatchAxis,
+    pub points: [[f64; 4]; 4],
+    pub tension: f64,
+}
+
+/// How a patch's parameter follows one coordinate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PatchAxis {
+    /// Inside the grid: `(coordinate − min)/spacing − cell`.
+    Inside { min: f64, spacing: f64, cell: f64 },
+    /// Past the grid's edge the parameter holds at the edge, the height
+    /// flat along the coordinate.
+    Held(f64),
+}
+
 /// Cell index and local parameter for a clamped query along one axis.
 /// `inside` is false when the raw coordinate fell outside the grid.
 fn locate(coord: f64, min: f64, spacing: f64, count: usize) -> (usize, f64, bool) {
@@ -222,6 +245,33 @@ impl MeshGrid {
         let i = i.clamp(0, self.nx as isize - 1) as usize;
         let j = j.clamp(0, self.ny as isize - 1) as usize;
         self.z[j * self.nx + i]
+    }
+
+    /// The patch [`Self::sample`] reads at `(x, y)`.
+    pub fn patch_at(&self, x: f64, y: f64) -> MeshPatch {
+        let (ci, u, x_inside) = locate(x, self.x_min, self.dx, self.nx);
+        let (cj, v, y_inside) = locate(y, self.y_min, self.dy, self.ny);
+        let parameter = |cell: usize, held: f64, inside: bool, min: f64, spacing: f64| {
+            if inside {
+                PatchAxis::Inside {
+                    min,
+                    spacing,
+                    cell: cell as f64,
+                }
+            } else {
+                PatchAxis::Held(held)
+            }
+        };
+        MeshPatch {
+            x: parameter(ci, u, x_inside, self.x_min, self.dx),
+            y: parameter(cj, v, y_inside, self.y_min, self.dy),
+            points: std::array::from_fn(|k| {
+                std::array::from_fn(|i| {
+                    self.point(ci as isize + i as isize - 1, cj as isize + k as isize - 1)
+                })
+            }),
+            tension: self.tension,
+        }
     }
 
     pub fn sample(&self, x: f64, y: f64) -> SurfaceSample {

@@ -1,19 +1,79 @@
+use std::borrow::BorrowMut;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use crossbeam_channel::Sender;
+use geometry::MIN_DEVICE_INTERVAL_S;
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
 use trajectory::{
-    AxisChainSet, ChainStage, CompiledChain, ContinuousAxis, ContinuousSegment,
+    AnalyticMoveSpan, AxisChainSet, ChainStage, CompiledChain, ContinuousAxis, ContinuousSegment,
     RelativeSplinePiece, ShapedSignal, next_toward,
 };
 
-use crate::follower_projection::{FollowerState, advance_before_projection, project_followers};
+use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
-    AccelerationTrend, FitTol, LADDER_PROBES_U, LadderBudget, LadderFailure, LadderPolicy,
-    LadderPva, LadderSpan, LadderTruth, VelocitySign, exact_piece, ladder_fit, quintic_in_u,
+    AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget,
+    LadderFailure, LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth, SeamContinuity,
+    VelocitySign, exact_piece, held_miss, ladder_fit, quintic_in_u,
 };
 use crate::types::{BaseItem, Control, PostProcessError, TrajectoryItem};
+use crate::worker_pool::WorkerPool;
+
+#[path = "shaper_hidden_breaks.rs"]
+mod hidden_breaks;
+
+#[path = "shaper_exact.rs"]
+pub(crate) mod exact;
+
+#[path = "shaper_hull.rs"]
+pub(crate) mod hull;
+
+#[path = "shaper_taylor.rs"]
+pub(crate) mod taylor;
+
+#[path = "shaper_axis_enclosure.rs"]
+pub(crate) mod axis_enclosure;
+
+use exact::ExactSpan;
+use hull::{FittedPiece, HullBudget};
+use taylor::{Ball, TaylorModel};
+
+pub(crate) use exact::{ExactConvolution, ExactKernel, ExactPiece};
+pub(crate) use hidden_breaks::ShapedBreaks;
+
+/// A signal's enclosure over a stretch: a slice of one the signal keeps,
+/// borrowed for the asking, or one built for it.
+pub(crate) enum Enclosure<'a> {
+    Kept(&'a [ExactPiece]),
+    Held(std::cell::Ref<'a, [ExactPiece]>),
+    Built(Vec<ExactPiece>),
+}
+
+impl Enclosure<'_> {
+    /// The enclosure with every piece's position moved by `base`.
+    pub(crate) fn offset_by(self, base: f64) -> Enclosure<'static> {
+        Enclosure::Built(self.iter().map(|piece| piece.offset_by(base)).collect())
+    }
+
+    pub(crate) fn into_owned(self) -> Vec<ExactPiece> {
+        match self {
+            Enclosure::Built(pieces) => pieces,
+            kept => kept.to_vec(),
+        }
+    }
+}
+
+impl std::ops::Deref for Enclosure<'_> {
+    type Target = [ExactPiece];
+
+    fn deref(&self) -> &[ExactPiece] {
+        match self {
+            Enclosure::Kept(pieces) => pieces,
+            Enclosure::Held(pieces) => pieces,
+            Enclosure::Built(pieces) => pieces,
+        }
+    }
+}
 
 pub(crate) trait TrackSignal {
     fn eval_pva(&self, t: f64) -> (f64, f64, f64);
@@ -33,11 +93,45 @@ pub(crate) trait TrackSignal {
         let _ = (t0, t1);
         p1 - p0
     }
-    fn acceleration_monotonicity(&self, _start: f64, _end: f64) -> Option<AccelerationTrend> {
+    /// The magnitude a sample reading `position` was rounded at: the
+    /// position itself, or for a view read through an offset the larger of
+    /// it and the position the offset was taken from.
+    fn position_rounding_scale(&self, position: f64) -> f64 {
+        position.abs()
+    }
+    /// The acceleration's trend over `span` as a fit resolving only
+    /// `resolved` sees it: none across a break anywhere in the span, but a
+    /// smooth extremum in an edge sliver outside `resolved` is not one.
+    fn acceleration_monotonicity(
+        &self,
+        _span: (f64, f64),
+        _resolved: (f64, f64),
+    ) -> Option<AccelerationTrend> {
         None
     }
     fn diagnostic(&self, _t: f64) -> Option<String> {
         None
+    }
+    /// Times at which the acceleration rises from a point as a square root,
+    /// whose shoulder can bend between the ladder's probes.
+    fn square_root_onsets(&self) -> &[f64] {
+        &[]
+    }
+    /// The signal's exact polynomial on every sub-interval of `[lo, hi]`
+    /// between its breaks, each with an a-priori bound on its rounding;
+    /// `None` for a signal that is not exactly piecewise polynomial there.
+    fn exact_polynomial_on(&self, _lo: f64, _hi: f64) -> Option<Vec<ExactPiece>> {
+        None
+    }
+    /// Rigorous polynomial enclosures of the signal over `[lo, hi]`: on each
+    /// sub-interval between its breaks every order lies within its
+    /// polynomial's `rounding` of it, sub-intervals refined until each
+    /// order's bound is within its `accuracy` where the signal resolves
+    /// that. Exact polynomials are their own enclosure; `None` for a
+    /// signal with neither.
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
+        let _ = accuracy;
+        self.exact_polynomial_on(lo, hi).map(Enclosure::Built)
     }
 }
 
@@ -46,6 +140,50 @@ impl TrackSignal for ContinuousAxis {
         ContinuousAxis::eval_pva(self, t).map_or((f64::NAN, f64::NAN, f64::NAN), |pva| {
             (pva.position, pva.velocity, pva.acceleration)
         })
+    }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
+        axis_enclosure::continuous_axis_enclosure(self, (lo, hi), accuracy).map(Enclosure::Built)
+    }
+}
+
+impl<S: TrackSignal> TrackSignal for &S {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        S::eval_pva(self, t)
+    }
+    fn eval(&self, t: f64) -> f64 {
+        S::eval(self, t)
+    }
+    fn deriv(&self, t: f64) -> f64 {
+        S::deriv(self, t)
+    }
+    fn second_deriv(&self, t: f64) -> f64 {
+        S::second_deriv(self, t)
+    }
+    fn position_delta(&self, from: (f64, f64), to: (f64, f64)) -> f64 {
+        S::position_delta(self, from, to)
+    }
+    fn position_rounding_scale(&self, position: f64) -> f64 {
+        S::position_rounding_scale(self, position)
+    }
+    fn acceleration_monotonicity(
+        &self,
+        span: (f64, f64),
+        resolved: (f64, f64),
+    ) -> Option<AccelerationTrend> {
+        S::acceleration_monotonicity(self, span, resolved)
+    }
+    fn diagnostic(&self, t: f64) -> Option<String> {
+        S::diagnostic(self, t)
+    }
+    fn square_root_onsets(&self) -> &[f64] {
+        S::square_root_onsets(self)
+    }
+    fn exact_polynomial_on(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
+        S::exact_polynomial_on(self, lo, hi)
+    }
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
+        S::enclosure_on(self, lo, hi, accuracy)
     }
 }
 
@@ -63,18 +201,18 @@ where
 /// `base`. Fitting a shifted view keeps every fit source near zero without
 /// changing what the convolution means, so the emitted track carries its own
 /// relative base instead of an unbounded cumulative one.
-pub(crate) struct ShiftedTrackSignal<'a, S: TrackSignal> {
-    inner: &'a S,
+pub(crate) struct ShiftedTrackSignal<S: TrackSignal> {
+    inner: S,
     base: f64,
 }
 
-impl<'a, S: TrackSignal> ShiftedTrackSignal<'a, S> {
-    pub(crate) fn new(inner: &'a S, base: f64) -> Self {
+impl<S: TrackSignal> ShiftedTrackSignal<S> {
+    pub(crate) fn new(inner: S, base: f64) -> Self {
         Self { inner, base }
     }
 }
 
-impl<S: TrackSignal> TrackSignal for ShiftedTrackSignal<'_, S> {
+impl<S: TrackSignal> TrackSignal for ShiftedTrackSignal<S> {
     fn eval(&self, t: f64) -> f64 {
         self.inner.eval(t) - self.base
     }
@@ -91,6 +229,12 @@ impl<S: TrackSignal> TrackSignal for ShiftedTrackSignal<'_, S> {
         self.inner.position_delta(from, to)
     }
 
+    fn position_rounding_scale(&self, position: f64) -> f64 {
+        position
+            .abs()
+            .max(self.inner.position_rounding_scale(position + self.base))
+    }
+
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let (position, velocity, acceleration) = self.inner.eval_pva(t);
         (position - self.base, velocity, acceleration)
@@ -99,11 +243,156 @@ impl<S: TrackSignal> TrackSignal for ShiftedTrackSignal<'_, S> {
     fn diagnostic(&self, t: f64) -> Option<String> {
         self.inner.diagnostic(t)
     }
+
+    fn exact_polynomial_on(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
+        let pieces = self.inner.exact_polynomial_on(lo, hi)?;
+        Some(
+            pieces
+                .into_iter()
+                .map(|piece| piece.offset_by(self.base))
+                .collect(),
+        )
+    }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
+        Some(
+            self.inner
+                .enclosure_on(lo, hi, accuracy)?
+                .offset_by(self.base),
+        )
+    }
+}
+
+/// A convolution read through its evaluator, which also holds the exact
+/// construction behind it.
+pub(crate) struct ConvolutionSignal<'a, S: TrackSignal> {
+    evaluated: S,
+    exact: ExactConvolution<'a>,
+    recent: exact::RecentChunks,
+}
+
+impl<'a, S: TrackSignal> ConvolutionSignal<'a, S> {
+    pub(crate) fn new(evaluated: S, exact: ExactConvolution<'a>) -> Self {
+        Self {
+            evaluated,
+            exact,
+            recent: exact::RecentChunks::default(),
+        }
+    }
+}
+
+impl<S: TrackSignal> TrackSignal for ConvolutionSignal<'_, S> {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        self.evaluated.eval_pva(t)
+    }
+
+    fn position_rounding_scale(&self, position: f64) -> f64 {
+        self.evaluated.position_rounding_scale(position)
+    }
+
+    fn diagnostic(&self, t: f64) -> Option<String> {
+        self.evaluated.diagnostic(t)
+    }
+
+    fn exact_polynomial_on(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
+        self.exact.pieces_over(lo, hi, &self.recent)
+    }
+}
+
+/// A signal read from one side of its breaks: off a span's exact
+/// polynomials, from the sub-interval facing `toward`, where it has them;
+/// through its own evaluator where it does not.
+struct FacingRead<'a, S> {
+    sig: &'a S,
+    exact: Option<&'a ExactSpan>,
+    toward: f64,
+}
+
+impl<S: TrackSignal> TrackSignal for FacingRead<'_, S> {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        match self.exact {
+            Some(exact) => exact.pva(t, self.toward),
+            None => self.sig.eval_pva(t),
+        }
+    }
+
+    fn eval(&self, t: f64) -> f64 {
+        match self.exact {
+            Some(exact) => exact.pva(t, self.toward).0,
+            None => self.sig.eval(t),
+        }
+    }
+
+    fn second_deriv(&self, t: f64) -> f64 {
+        match self.exact {
+            Some(exact) => exact.pva(t, self.toward).2,
+            None => self.sig.second_deriv(t),
+        }
+    }
 }
 
 pub(crate) const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 
-/// Buffered lowered segments plus the shaped-leader cache: `shaped[i]` is
+const FIT_GROUP_SEGMENTS: usize = 8;
+const FIT_GROUP_SPAN_S: f64 = 0.04;
+
+/// The ends of the complete fit groups among `segments`, whose first opens
+/// one. A group closes on its fourth segment, on the segment that carries
+/// it `FIT_GROUP_SPAN_S` past its start, or on a segment ending at rest.
+/// Every target in a group reads one signal table laid about the group's
+/// start, so the shaper shapes and commits whole groups, and each group —
+/// and with it every fit — depends on its own segments alone, never on how
+/// the emits are cut.
+pub(crate) fn fit_group_ends(segments: &[ContinuousSegment]) -> Vec<usize> {
+    let mut ends = Vec::new();
+    let mut start = 0;
+    for (index, segment) in segments.iter().enumerate() {
+        if index + 1 - start == FIT_GROUP_SEGMENTS
+            || segment.t_end - segments[start].t_start >= FIT_GROUP_SPAN_S
+            || segment.rest_at_end
+        {
+            ends.push(index + 1);
+            start = index + 1;
+        }
+    }
+    ends
+}
+
+/// The most of the first `count` segments that fill whole fit groups.
+pub(crate) fn whole_groups(segments: &[ContinuousSegment], count: usize) -> usize {
+    fit_group_ends(&segments[..count])
+        .last()
+        .copied()
+        .unwrap_or(0)
+}
+
+/// The fit groups `segments` falls into, every one of them whole unless
+/// `clamps_past_signal` lets the last close where the signal ends.
+pub(crate) fn fit_groups(
+    segments: &[ContinuousSegment],
+    clamps_past_signal: bool,
+) -> Vec<std::ops::Range<usize>> {
+    let mut ends = fit_group_ends(segments);
+    if ends.last().copied().unwrap_or(0) < segments.len() {
+        assert!(
+            clamps_past_signal,
+            "shaper: {} segments past the last whole fit group are being shaped before \
+             their group closed",
+            segments.len() - ends.last().copied().unwrap_or(0)
+        );
+        ends.push(segments.len());
+    }
+    let mut start = 0;
+    ends.into_iter()
+        .map(|end| {
+            let group = start..end;
+            start = end;
+            group
+        })
+        .collect()
+}
+
+/// Buffered lowered segments plus the shaped-leader cache: `shaped` holds
 /// `segments[i]` with every kerneled non-follower axis already fitted. A
 /// frontier segment's convolution window is fully covered when it is first
 /// fitted, so the fit is final — later emits reuse it bit-identically
@@ -112,7 +401,53 @@ pub(crate) const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 #[derive(Default)]
 struct PendingSegments {
     segments: VecDeque<ContinuousSegment>,
-    shaped: VecDeque<ContinuousSegment>,
+    shaped: ShapedCache,
+    materialized: usize,
+}
+
+/// The pending segments' fitted leaders, as the motors run them and as
+/// the follower projection reads them (see [`ColumnTrack`]).
+#[derive(Default)]
+struct ShapedCache {
+    stored: VecDeque<ContinuousSegment>,
+    read: VecDeque<ContinuousSegment>,
+}
+
+impl ShapedCache {
+    fn len(&self) -> usize {
+        self.stored.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.stored.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.stored.clear();
+        self.read.clear();
+    }
+
+    fn pop_front(&mut self) {
+        self.stored.pop_front();
+        self.read.pop_front();
+    }
+
+    fn extend(&mut self, stored: Vec<ContinuousSegment>, read: Vec<ContinuousSegment>) {
+        assert_eq!(
+            stored.len(),
+            read.len(),
+            "every fitted leader segment has its read form"
+        );
+        self.stored.extend(stored);
+        self.read.extend(read);
+    }
+
+    fn window(&mut self, window: usize) -> (&[ContinuousSegment], &[ContinuousSegment]) {
+        (
+            &self.stored.make_contiguous()[..window],
+            &self.read.make_contiguous()[..window],
+        )
+    }
 }
 
 impl PendingSegments {
@@ -123,6 +458,7 @@ impl PendingSegments {
     fn clear(&mut self) {
         self.segments.clear();
         self.shaped.clear();
+        self.materialized = 0;
     }
 
     fn len(&self) -> usize {
@@ -147,10 +483,31 @@ impl PendingSegments {
         self.segments.iter()
     }
 
+    /// Fits the changed sources of the segments buffered since the last
+    /// call; returns how many segments and axes that was.
+    fn materialize(
+        &mut self,
+        chains: &AxisChainSet,
+        fit_tol: FitTol,
+        pool: &WorkerPool,
+    ) -> Result<(usize, usize), PostProcessError> {
+        let fresh = &mut self.segments.make_contiguous()[self.materialized..];
+        let rebuilt = materialize_changed_sources(fresh, chains, fit_tol, pool)?;
+        let segments = fresh.len();
+        self.materialized = self.segments.len();
+        Ok((segments, rebuilt))
+    }
+
     fn pop_front(&mut self) -> Option<ContinuousSegment> {
         let segment = self.segments.pop_front();
-        if segment.is_some() && !self.shaped.is_empty() {
-            self.shaped.pop_front();
+        if segment.is_some() {
+            self.materialized = self
+                .materialized
+                .checked_sub(1)
+                .expect("shaper committed a segment whose sources were never materialized");
+            if !self.shaped.is_empty() {
+                self.shaped.pop_front();
+            }
         }
         assert!(
             self.shaped.len() <= self.segments.len(),
@@ -178,10 +535,20 @@ pub struct Shaper {
     history_trimmed: bool,
     follower_states: Vec<FollowerState>,
     toolhead_tap: Option<Sender<ContinuousSegment>>,
+    pool: Arc<WorkerPool>,
+    emit_batch: usize,
+    segments_since_emit: usize,
+    /// The commit and frontier counts of the last emit, while it committed
+    /// nothing: until the pending groups reach past either, an emit would
+    /// read exactly what that one read and commit nothing again.
+    stalled: Option<(usize, usize)>,
+    /// Leader group fits the planning side made ahead of the shaper
+    /// ([`crate::leader_prefit`]).
+    leader_prefits: LeaderPrefits,
 }
 
 impl Shaper {
-    pub fn new(chains: AxisChainSet, fit_tol: FitTol) -> Self {
+    pub fn new(chains: AxisChainSet, fit_tol: FitTol, pool: Arc<WorkerPool>) -> Self {
         Self {
             forward_support: chains.forward_support(),
             back_support: chains.back_support(),
@@ -192,7 +559,35 @@ impl Shaper {
             history_trimmed: false,
             follower_states: Vec::new(),
             toolhead_tap: None,
+            pool,
+            emit_batch: 1,
+            segments_since_emit: 0,
+            stalled: None,
+            leader_prefits: LeaderPrefits::default(),
         }
+    }
+
+    /// Leader group fits made ahead on the planning side
+    /// ([`crate::leader_prefit`]); a shaper fits any group it finds no
+    /// match for itself.
+    pub(crate) fn accept_leader_prefits(&mut self, fits: Vec<(LeaderGroupKey, Vec<ColumnTrack>)>) {
+        self.leader_prefits.insert(fits);
+    }
+
+    pub(crate) fn chains(&self) -> &AxisChainSet {
+        &self.chains
+    }
+
+    pub(crate) fn fit_tol(&self) -> FitTol {
+        self.fit_tol
+    }
+
+    pub(crate) fn pool(&self) -> &Arc<WorkerPool> {
+        &self.pool
+    }
+
+    pub(crate) fn leader_prefit_era(&self) -> u64 {
+        self.leader_prefits.era()
     }
 
     /// Mirrors every emitted segment as it stands before the motor-side
@@ -204,24 +599,39 @@ impl Shaper {
         self
     }
 
-    fn buffer_segment(&mut self, mut segment: ContinuousSegment) {
+    /// Takes in `segments` lowered segments before each emit instead of
+    /// one, so a test can hold the output to the same trajectory however
+    /// the emits are cut.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn with_emit_batch(mut self, segments: usize) -> Self {
+        assert!(segments > 0, "an emit batch holds at least one segment");
+        self.emit_batch = segments;
+        self
+    }
+
+    /// Fits the changed sources of every segment buffered since the last
+    /// emit, which the window about to be shaped reads.
+    fn materialize_pending(&mut self) {
         let started = crate::timing::stopwatch();
-        let rebuilt = materialize_changed_sources(&mut segment, &self.chains, self.fit_tol)
+        let (segments, rebuilt) = self
+            .pending
+            .materialize(&self.chains, self.fit_tol, &self.pool)
             .unwrap_or_else(|error| panic!("shaper: {error}"));
         let elapsed_us = started.elapsed_us();
+        crate::timing::record_stage(crate::timing::Stage::MaterializeSource, elapsed_us);
         if crate::timing::is_slow_phase(elapsed_us) {
             crate::timing::log_slow_phase(
                 "materialize_source",
                 elapsed_us,
                 crate::timing::PhaseWorkload {
-                    segments: 1,
+                    segments,
                     axes: rebuilt,
                     ..Default::default()
                 },
                 "",
             );
         }
-        self.pending.push(segment);
     }
 
     pub fn feed(
@@ -231,7 +641,11 @@ impl Shaper {
     ) -> bool {
         match item {
             BaseItem::Seg(item) => {
-                self.buffer_segment(item);
+                self.pending.push(item);
+                self.segments_since_emit += 1;
+                if self.segments_since_emit < self.emit_batch {
+                    return true;
+                }
                 self.emit(self.supported_count(), false, output)
             }
             BaseItem::Drain => {
@@ -245,8 +659,11 @@ impl Shaper {
                 match &ctrl {
                     Control::Reset { .. } => {
                         self.pending.clear();
+                        self.segments_since_emit = 0;
+                        self.stalled = None;
                         self.history.clear();
                         self.history_trimmed = false;
+                        self.leader_prefits.start_era();
                         for state in &mut self.follower_states {
                             state.reset_timeline();
                         }
@@ -281,6 +698,7 @@ impl Shaper {
                             }
                             (self.forward_support, self.back_support) = (new_forward, new_back);
                             self.chains = chains.clone();
+                            self.leader_prefits.start_era();
                         }
                     }
                 }
@@ -302,11 +720,17 @@ impl Shaper {
     /// tracks have their own lookahead covered. The time-based bound already
     /// includes the cascaded width, but segment granularity can leave a long
     /// straddling segment unprojectable, so gate on the frontier explicitly.
+    /// A ratio-ramped follower needs no gate here: how far its smoothing
+    /// reads ahead depends on how the leaders come to rest, so the
+    /// projection itself commits only what it holds final (see
+    /// `follower_projection::project_followers`).
     ///
-    /// Every gate compares `t_end + support` against the covered end with no
-    /// slack — the same association and strictness as the fit-time
-    /// `MissingLookahead` checks, so a gated segment can never demand
-    /// lookahead the buffer does not hold. The lowerer's rest-holds are sized
+    /// Every gate requires the buffer to reach strictly past `t_end +
+    /// support`, with no slack: a fit reads its signal from both sides of its
+    /// window's edges, so the segment past the last time a target reads must
+    /// already be held, and then the slice every fit reads is the same
+    /// whenever the shaper gets to it. The fit-time `MissingLookahead` checks
+    /// can never fire on a gated segment. The lowerer's rest-holds are sized
     /// exactly to a chain's support, so a slack here admits sums that land a
     /// few ulps past the frontier and panics the fit (issue #405).
     fn supported_count(&self) -> usize {
@@ -317,7 +741,7 @@ impl Shaper {
         let plain = self
             .pending
             .iter()
-            .take_while(|seg| seg.t_end + self.forward_support <= last_t)
+            .take_while(|seg| seg.t_end + self.forward_support < last_t)
             .count();
         let own_hi = self.chains.max_follower_own_forward_support();
         if own_hi <= 0.0 {
@@ -329,7 +753,7 @@ impl Shaper {
         let gated = self
             .pending
             .iter()
-            .take_while(|seg| seg.t_end + own_hi <= frontier_t)
+            .take_while(|seg| seg.t_end + own_hi < frontier_t)
             .count();
         plain.min(gated)
     }
@@ -340,7 +764,7 @@ impl Shaper {
         let direct_hi = self.chains.direct_forward_support();
         self.pending
             .iter()
-            .take_while(|seg| seg.t_end + direct_hi <= last_t)
+            .take_while(|seg| seg.t_end + direct_hi < last_t)
             .last()
             .map(|seg| seg.t_end)
     }
@@ -351,22 +775,35 @@ impl Shaper {
         force: bool,
         output: &mut impl FnMut(TrajectoryItem) -> bool,
     ) -> bool {
+        self.segments_since_emit = 0;
+        let count = if force {
+            count
+        } else {
+            whole_groups(self.pending.segments.make_contiguous(), count)
+        };
         if count == 0 {
             return true;
         }
-        let frontier_count = if self.chains.max_follower_own_forward_support() <= 0.0 {
+        let beyond_commit = self.chains.max_follower_own_forward_support() > 0.0
+            || self.chains.has_projected_follower();
+        let frontier_count = if !beyond_commit {
             count
         } else if force {
             self.pending.len()
         } else {
             let last_t = self.pending.back().expect("count > 0").t_end;
             let direct_hi = self.chains.direct_forward_support();
-            self.pending
+            let reached = self
+                .pending
                 .iter()
-                .take_while(|seg| seg.t_end + direct_hi <= last_t)
-                .count()
-                .max(count)
+                .take_while(|seg| seg.t_end + direct_hi < last_t)
+                .count();
+            whole_groups(self.pending.segments.make_contiguous(), reached).max(count)
         };
+        if !force && self.stalled == Some((count, frontier_count)) {
+            return true;
+        }
+        self.materialize_pending();
         let pending = &mut self.pending;
         let segments = pending.segments.make_contiguous();
         let shaped = apply_axis_chains(
@@ -385,6 +822,8 @@ impl Shaper {
                 } else {
                     Lookahead::Required
                 },
+                pool: &self.pool,
+                prefits: &self.leader_prefits,
             },
             count,
             frontier_count,
@@ -395,13 +834,18 @@ impl Shaper {
             },
         )
         .unwrap_or_else(|e| panic!("shaper: {e}"));
+        let committed = shaped.len();
         for seg in shaped {
             if !output(TrajectoryItem::Seg(seg)) {
                 return false;
             }
         }
-        for _ in 0..count {
-            let raw = self.pending.pop_front().expect("count <= pending");
+        self.stalled = (committed == 0).then_some((count, frontier_count));
+        if committed == 0 {
+            return true;
+        }
+        for _ in 0..committed {
+            let raw = self.pending.pop_front().expect("committed <= pending");
             self.history.push_back(raw);
         }
         let emitted_through = self
@@ -413,69 +857,339 @@ impl Shaper {
         // leaves a gap-hold between segments, and that hold is anchored by
         // the segment before the gap. Drop the front only while the next
         // segment (plus its gap-hold back to the front's end) still covers
-        // the back-support window, or the window's start falls into a gap
-        // whose anchoring segment was just discarded.
+        // the back-support window strictly, so a fit whose window starts on
+        // a segment's start still holds the segment before it.
         let keep_after = emitted_through - self.back_support;
-        while self.history.len() >= 2 && self.history[1].t_start <= keep_after {
+        while self.history.len() >= 2 && self.history[1].t_start < keep_after {
             self.history.pop_front();
             self.history_trimmed = true;
         }
+        self.leader_prefits.forget_through(emitted_through);
         true
     }
 }
 
-fn materialize_changed_sources(
-    segment: &mut ContinuousSegment,
+/// The axes of `segment` whose source is fitted before shaping: every
+/// non-follower axis a chain changes, and a z read through a variable bed
+/// surface. A source already fitted is kept.
+fn axes_to_materialize<'a>(
+    segment: &'a ContinuousSegment,
+    chains: &'a AxisChainSet,
+) -> impl Iterator<Item = usize> + 'a {
+    segment
+        .axes
+        .iter()
+        .enumerate()
+        .filter(|(axis, source)| {
+            let variable_surface_z = *axis == 2
+                && matches!(source, ContinuousAxis::Analytic { span, .. } if span.has_variable_surface());
+            let changed = chains
+                .chains
+                .get(*axis)
+                .is_some_and(|chain| !chain.is_empty())
+                && !chains.is_projected_follower(*axis);
+            (variable_surface_z || changed) && !matches!(source, ContinuousAxis::Spline(_))
+        })
+        .map(|(axis, _)| axis)
+}
+
+fn materialize_source_axis(
+    segment: &ContinuousSegment,
+    axis: usize,
     chains: &AxisChainSet,
     fit_tol: FitTol,
-) -> Result<usize, PostProcessError> {
-    let mut replacements = Vec::new();
-    for (axis, source) in segment.axes.iter().enumerate() {
-        let variable_surface_z = axis == 2
-            && matches!(source, ContinuousAxis::Analytic { span, .. } if span.has_variable_surface());
-        let changed = chains
-            .chains
-            .get(axis)
-            .is_some_and(|chain| !chain.is_empty())
-            && !chains.is_projected_follower(axis);
-        if !(variable_surface_z || changed) || matches!(source, ContinuousAxis::Spline(_)) {
-            continue;
+    shared: Option<&SpanEnclosures>,
+) -> Result<ContinuousAxis, PostProcessError> {
+    let source = &segment.axes[axis];
+    let variable_surface_z = axis == 2
+        && matches!(source, ContinuousAxis::Analytic { span, .. } if span.has_variable_surface());
+    let (mut breakpoints, cap_contacts) = match source {
+        ContinuousAxis::Analytic { span, .. } => cap_contact_seeds(span),
+        _ => (vec![segment.t_start, segment.t_end], Vec::new()),
+    };
+    if let ContinuousAxis::Analytic { span, .. } = source {
+        if variable_surface_z {
+            breakpoints.extend(span.surface_seam_times().ok_or_else(|| {
+                fit_tolerance_without_probe(axis, segment.t_start, segment.t_end)
+            })?);
         }
-        let mut breakpoints = vec![segment.t_start, segment.t_end];
-        if let ContinuousAxis::Analytic { span, .. } = source {
-            breakpoints.extend(span.phase_seam_times());
-            if variable_surface_z {
-                breakpoints.extend(span.surface_seam_times().ok_or_else(|| {
-                    fit_tolerance_without_probe(axis, segment.t_start, segment.t_end)
-                })?);
-            }
-        }
-        let mut curve = fit_axis_from_signal(
-            AxisFit {
-                axis,
-                t_start: segment.t_start,
-                t_end: segment.t_end,
-                seed_breakpoints: &breakpoints,
-                fit_tol,
-                fit_context: "materialize_source",
-                velocity_continuous: false,
-            },
+    }
+    let mut curve = fit_axis_from_signal(
+        AxisFit {
+            axis,
+            t_start: segment.t_start,
+            t_end: segment.t_end,
+            seed_breakpoints: &breakpoints,
+            fit_tol,
+            fit_context: "materialize_source",
+            seam_continuity: SeamContinuity::Position,
+        },
+        &CapContactSource {
             source,
-        )?;
-        if !chains.is_projected_follower(axis) {
-            if let Some(chain) = chains.chains.get(axis) {
-                curve =
-                    apply_zero_support_transform(chain.leading_transform(), axis, curve, fit_tol)?;
+            axis,
+            cap_contacts: &cap_contacts,
+            shared,
+            enclosure: std::cell::OnceCell::new(),
+            whole: (segment.t_start, segment.t_end),
+            accuracy: HullBudget {
+                tol: fit_tol,
+                velocity: f64::INFINITY,
             }
+            .enclosure_accuracy(),
+        },
+    )?;
+    if !chains.is_projected_follower(axis) {
+        if let Some(chain) = chains.chains.get(axis) {
+            curve = apply_zero_support_transform(chain.leading_transform(), axis, curve, fit_tol)?;
         }
-        replacements.push((axis, ContinuousAxis::Spline(Arc::new(curve))));
     }
-    let rebuilt = replacements.len();
-    let axes = Arc::make_mut(&mut segment.axes);
-    for (axis, replacement) in replacements {
-        axes[axis] = replacement;
+    Ok(ContinuousAxis::Spline(Arc::new(curve)))
+}
+
+/// Fits the changed sources of every segment in `segments`, one pool job
+/// per axis: each fit reads only its own segment's source, so the batch an
+/// emit needs fans out whole. Returns how many axes it rebuilt.
+fn materialize_changed_sources<S: BorrowMut<ContinuousSegment> + Sync>(
+    segments: &mut [S],
+    chains: &AxisChainSet,
+    fit_tol: FitTol,
+    pool: &WorkerPool,
+) -> Result<usize, PostProcessError> {
+    let jobs: Vec<(usize, usize)> = segments
+        .iter()
+        .enumerate()
+        .flat_map(|(index, segment)| {
+            axes_to_materialize(segment.borrow(), chains).map(move |axis| (index, axis))
+        })
+        .collect();
+    let participants = if cfg!(target_arch = "wasm32") {
+        1
+    } else {
+        std::thread::available_parallelism()
+            .map_or(1, |cores| cores.get())
+            .min(jobs.len())
+    };
+    let accuracy = HullBudget {
+        tol: fit_tol,
+        velocity: f64::INFINITY,
     }
-    Ok(rebuilt)
+    .enclosure_accuracy();
+    let shared: Vec<Option<SpanEnclosures>> = segments
+        .iter()
+        .enumerate()
+        .map(|(index, segment)| {
+            let segment = segment.borrow();
+            let analytic = |axis: usize| match &segment.axes[axis] {
+                ContinuousAxis::Analytic { span, .. } if axis_enclosure::encloses(span, axis) => {
+                    Some(span)
+                }
+                _ => None,
+            };
+            let span = jobs
+                .iter()
+                .filter(|&&(job_index, _)| job_index == index)
+                .find_map(|&(_, axis)| analytic(axis))?;
+            let axes = jobs
+                .iter()
+                .filter(|&&(job_index, axis)| {
+                    job_index == index
+                        && analytic(axis).is_some_and(|other| Arc::ptr_eq(other, span))
+                })
+                .map(|&(_, axis)| axis)
+                .collect();
+            Some(SpanEnclosures {
+                span: Arc::clone(span),
+                axes,
+                whole: (segment.t_start, segment.t_end),
+                accuracy,
+                built: std::sync::OnceLock::new(),
+            })
+        })
+        .collect();
+    let fitted = pool
+        .map_indexed(
+            participants,
+            jobs.len(),
+            || (),
+            |(), job| {
+                let (index, axis) = jobs[job];
+                materialize_source_axis(
+                    segments[index].borrow(),
+                    axis,
+                    chains,
+                    fit_tol,
+                    shared[index].as_ref(),
+                )
+            },
+        )
+        .expect("source materialize thread panicked");
+    for (&(index, axis), source) in jobs.iter().zip(fitted) {
+        Arc::make_mut(&mut segments[index].borrow_mut().axes)[axis] = source?;
+    }
+    Ok(jobs.len())
+}
+
+/// The share of a piece's tolerance the audit lets an enclosure's bound
+/// spend before refining it.
+#[cfg(feature = "fit-audit")]
+const AUDIT_ENCLOSURE_SHARE: f64 = 1.0 / 1024.0;
+
+/// Proven upper bounds on a fitted piece's position, velocity and
+/// acceleration error over `resolved`, each settled against its `budgets`:
+/// against the exact polynomials the fit proved it by where it had them,
+/// else against the signal's enclosure there.
+#[cfg(feature = "fit-audit")]
+pub(crate) fn proven_error_bounds<S: TrackSignal>(
+    sig: &S,
+    exact: Option<&[ExactPiece]>,
+    mono_u: &[f64],
+    (t0, t1): (f64, f64),
+    resolved: (f64, f64),
+    budgets: [f64; 3],
+) -> Option<[f64; 3]> {
+    let piece = FittedPiece { mono_u, t0, t1 };
+    if let Some(exact) = exact {
+        return Some(hull::error_bounds(exact, piece, resolved, budgets));
+    }
+    let accuracy =
+        [budgets[0], f64::INFINITY, budgets[2]].map(|budget| budget * AUDIT_ENCLOSURE_SHARE);
+    let enclosure = sig.enclosure_on(resolved.0, resolved.1, accuracy)?;
+    Some(hull::error_bounds(&enclosure, piece, resolved, budgets))
+}
+
+/// Fits the shaper's changed sources ahead of it, on the thread that lowers
+/// the segments: a source fit reads only its own segment, so fitting it
+/// before the shaper sees it is the fit the shaper would make, and the
+/// planning side that waits on the shaper does it in parallel instead.
+/// Chain swaps travel in order with the segments, so every segment is
+/// fitted with the chains the shaper shapes it with.
+pub(crate) struct SourceMaterializer {
+    chains: AxisChainSet,
+    fit_tol: FitTol,
+    pool: Arc<WorkerPool>,
+}
+
+impl SourceMaterializer {
+    pub(crate) fn of(shaper: &Shaper) -> Self {
+        Self {
+            chains: shaper.chains.clone(),
+            fit_tol: shaper.fit_tol,
+            pool: Arc::clone(&shaper.pool),
+        }
+    }
+
+    pub(crate) fn materialize(&mut self, items: &mut [BaseItem]) {
+        let started = crate::timing::stopwatch();
+        let mut rest = items;
+        while !rest.is_empty() {
+            let swap = rest
+                .iter()
+                .position(|item| matches!(item, BaseItem::Control(Control::SetAxisChains(_))));
+            let (run, after) = rest.split_at_mut(swap.unwrap_or(rest.len()));
+            let mut segments: Vec<&mut ContinuousSegment> = run
+                .iter_mut()
+                .filter_map(|item| match item {
+                    BaseItem::Seg(segment) => Some(segment),
+                    BaseItem::Drain | BaseItem::Control(_) => None,
+                })
+                .collect();
+            materialize_changed_sources(&mut segments, &self.chains, self.fit_tol, &self.pool)
+                .unwrap_or_else(|error| panic!("shaper: {error}"));
+            let Some((swap, after)) = after.split_first_mut() else {
+                break;
+            };
+            if let BaseItem::Control(Control::SetAxisChains(chains)) = swap {
+                self.chains = chains.clone();
+            }
+            rest = after;
+        }
+        crate::timing::record_stage(
+            crate::timing::Stage::MaterializeSource,
+            started.elapsed_us(),
+        );
+    }
+}
+
+/// An analytic source's materialize seeds — its ends, phase seams and
+/// curvature-cap contacts — and those contacts.
+fn cap_contact_seeds(span: &AnalyticMoveSpan) -> (Vec<f64>, Vec<f64>) {
+    let cap_contacts: Vec<f64> = span.cap_contact_times().collect();
+    assert!(
+        cap_contacts.is_sorted(),
+        "cap contacts are out of time order: {cap_contacts:?}"
+    );
+    let mut seeds = vec![span.t_start, span.t_end];
+    seeds.extend(span.phase_seam_times());
+    seeds.extend_from_slice(&cap_contacts);
+    (seeds, cap_contacts)
+}
+
+/// The enclosures of a segment's analytic axes that read one span, built
+/// once for all of them by the first axis's fit that asks — the axes share
+/// each window's state and path trigonometry.
+struct SpanEnclosures {
+    span: Arc<AnalyticMoveSpan>,
+    axes: Vec<usize>,
+    whole: (f64, f64),
+    accuracy: [f64; 3],
+    built: std::sync::OnceLock<Option<Vec<Vec<ExactPiece>>>>,
+}
+
+impl SpanEnclosures {
+    fn of(&self, axis: usize) -> Option<&[ExactPiece]> {
+        let slot = self.axes.iter().position(|&shared| shared == axis)?;
+        let built = self.built.get_or_init(|| {
+            axis_enclosure::analytic_axes_enclosure(
+                &self.span,
+                &self.axes,
+                self.whole,
+                self.accuracy,
+            )
+        });
+        built.as_ref().map(|axes| axes[slot].as_slice())
+    }
+}
+
+/// A materialized source with the curvature-cap contacts its acceleration
+/// approaches as a square root, and its enclosure over the whole segment,
+/// built once at the fit's own accuracy — shared with the segment's other
+/// analytic axes where `shared` reads it: every rung of every span is
+/// proven against its stretch of it.
+struct CapContactSource<'a> {
+    source: &'a ContinuousAxis,
+    axis: usize,
+    cap_contacts: &'a [f64],
+    shared: Option<&'a SpanEnclosures>,
+    enclosure: std::cell::OnceCell<Option<Vec<ExactPiece>>>,
+    whole: (f64, f64),
+    accuracy: [f64; 3],
+}
+
+impl TrackSignal for CapContactSource<'_> {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        TrackSignal::eval_pva(self.source, t)
+    }
+
+    fn square_root_onsets(&self) -> &[f64] {
+        self.cap_contacts
+    }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, _accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
+        let whole = match self.shared {
+            Some(shared) => shared.of(self.axis)?,
+            None => self
+                .enclosure
+                .get_or_init(|| {
+                    self.source
+                        .enclosure_on(self.whole.0, self.whole.1, self.accuracy)
+                        .map(Enclosure::into_owned)
+                })
+                .as_deref()?,
+        };
+        let first = whole.partition_point(|piece| piece.hi < lo);
+        let past = whole.partition_point(|piece| piece.lo <= hi);
+        Some(Enclosure::Kept(&whole[first..past.max(first)]))
+    }
 }
 
 /// Whether the fit window's left edge is the start of the signal — where the
@@ -519,13 +1233,15 @@ struct AxisFitRequest<'a> {
     fit_tol: FitTol,
     boundary: FitBoundary,
     lookahead: Lookahead,
+    pool: &'a WorkerPool,
+    prefits: &'a LeaderPrefits,
 }
 
 /// The shaper state one emit writes through: the follower projection states,
 /// the shaped-leader cache, and the toolhead mirror.
 struct ShaperOutputs<'a> {
     follower_states: &'a mut Vec<FollowerState>,
-    shaped_cache: &'a mut VecDeque<ContinuousSegment>,
+    shaped_cache: &'a mut ShapedCache,
     toolhead_tap: Option<&'a Sender<ContinuousSegment>>,
 }
 
@@ -551,9 +1267,11 @@ fn apply_axis_chains(
         chains,
         fit_tol,
         lookahead,
+        pool,
         ..
     } = request;
     if chains.chains.iter().all(CompiledChain::is_empty)
+        && !chains.has_projected_follower()
         && outputs.follower_states.iter().all(|s| !s.is_active())
     {
         let out: Vec<ContinuousSegment> = base.iter().take(commit_count).cloned().collect();
@@ -580,9 +1298,10 @@ fn apply_axis_chains(
         }
         prev = Some(seg);
     }
-    debug_assert!(
+    assert!(
         outputs.shaped_cache.len() <= window,
-        "frontier retreated below the shaped-leader cache"
+        "frontier retreated below the shaped-leader cache: {} cached, window {window}",
+        outputs.shaped_cache.len()
     );
     let work = crate::timing::PhaseWorkload {
         window,
@@ -593,26 +1312,28 @@ fn apply_axis_chains(
     };
     if window > outputs.shaped_cache.len() {
         let mut fresh: Vec<ContinuousSegment> = base[outputs.shaped_cache.len()..window].to_vec();
-        fit_leader_axes(request, &mut fresh, n_axes, work)?;
-        outputs.shaped_cache.extend(fresh);
+        let read = fit_leader_axes(request, &mut fresh, n_axes, work)?;
+        outputs.shaped_cache.extend(fresh, read);
     }
-    let frontier = &outputs.shaped_cache.make_contiguous()[..window];
+    let (frontier, read_frontier) = outputs.shaped_cache.window(window);
     let mut out: Vec<ContinuousSegment> = frontier.iter().take(commit_count).cloned().collect();
     let projection_started = crate::timing::stopwatch();
     let mut projection_timing = crate::follower_projection::ProjectionTiming::default();
     project_followers(
         crate::follower_projection::ProjectionWindow {
             base,
-            frontier,
+            frontier: read_frontier,
             chains,
             fit_tol,
             lookahead,
+            pool,
         },
         &mut out,
         outputs.follower_states,
         &mut projection_timing,
     )?;
     let projection_us = projection_started.elapsed_us();
+    projection_timing.record_stages(projection_us);
     if crate::timing::is_slow_phase(projection_us) {
         crate::timing::log_slow_phase(
             "follower_projection",
@@ -631,8 +1352,9 @@ fn apply_axis_chains(
     }
     outputs.mirror_toolhead(&out);
     let motor_started = crate::timing::stopwatch();
-    let (motor_axes, motor_pieces) = apply_motor_side_stages(&mut out, chains, fit_tol)?;
+    let (motor_axes, motor_pieces) = apply_motor_side_stages(request, &mut out)?;
     let motor_us = motor_started.elapsed_us();
+    crate::timing::record_stage(crate::timing::Stage::MotorSide, motor_us);
     if crate::timing::is_slow_phase(motor_us) {
         crate::timing::log_slow_phase(
             "motor_side",
@@ -649,16 +1371,14 @@ fn apply_axis_chains(
     Ok(out)
 }
 
-/// Trailing derivative-gain stages produce the motor command (e.g. a
-/// mode-inverse counter-drive), which the physical toolhead does not follow —
-/// that is their entire purpose. They are therefore applied only after the
-/// followers have projected onto the toolhead signal.
 fn apply_motor_side_stages(
+    request: AxisFitRequest,
     out: &mut [ContinuousSegment],
-    chains: &AxisChainSet,
-    fit_tol: FitTol,
 ) -> Result<(usize, usize), PostProcessError> {
-    let mut rebuilt_axes = 0usize;
+    let AxisFitRequest {
+        chains, fit_tol, ..
+    } = request;
+    let mut rebuilt_axes = fit_motor_commands(request, out)?;
     let mut rebuilt_pieces = 0usize;
     for seg in out.iter_mut() {
         for axis in 0..seg.axes.len() {
@@ -667,10 +1387,10 @@ fn apply_motor_side_stages(
             };
             let follower_linear_chain =
                 chains.is_projected_follower(axis) && chain.follower_linear_transform();
-            if follower_linear_chain {
-                continue;
-            }
-            if !chain.has_motor_side_gains() {
+            if follower_linear_chain
+                || motor_command_column(chains, axis).is_some()
+                || !chain.has_motor_side_gains()
+            {
                 continue;
             }
             let replacement = match &seg.axes[axis] {
@@ -707,6 +1427,40 @@ fn apply_motor_side_stages(
         }
     }
     Ok((rebuilt_axes, rebuilt_pieces))
+}
+
+fn motor_command_column(chains: &AxisChainSet, axis: usize) -> Option<FitColumn<'_>> {
+    if chains.is_projected_follower(axis) {
+        return None;
+    }
+    let chain = chains.chains.get(axis)?;
+    match chain.trailing_transform()? {
+        ChainStage::DerivativeGains { k1, k2 } => Some(FitColumn {
+            axis,
+            chain,
+            signal: ColumnSignal::MotorCommand { k1: *k1, k2: *k2 },
+        }),
+        ChainStage::NonlinearAdvance(_) | ChainStage::SmoothKernel(_) => None,
+    }
+}
+
+fn fit_motor_commands(
+    request: AxisFitRequest,
+    out: &mut [ContinuousSegment],
+) -> Result<usize, PostProcessError> {
+    let n_axes = out.first().map_or(0, |seg| seg.axes.len());
+    let columns: Vec<FitColumn> = (0..n_axes)
+        .filter_map(|axis| motor_command_column(request.chains, axis))
+        .collect();
+    let mut rebuilt = 0;
+    for (axis, column, _) in fit_columns(request, out, &columns) {
+        let column = column?.expect("a motor-command chain convolves with its kernel");
+        for (seg, track) in out.iter_mut().zip(column) {
+            Arc::make_mut(&mut seg.axes)[axis] = ContinuousAxis::Spline(track.stored);
+            rebuilt += 1;
+        }
+    }
+    Ok(rebuilt)
 }
 
 /// The trailing stages are position-blind — they add velocity and
@@ -746,7 +1500,7 @@ fn constant_axis_column(
     segments: &[&ContinuousSegment],
     targets: &[ContinuousSegment],
     axis: usize,
-) -> Option<Vec<nurbs::ScalarNurbs>> {
+) -> Option<Vec<ColumnTrack>> {
     let splines = segments
         .iter()
         .map(|seg| match &seg.axes[axis] {
@@ -764,27 +1518,78 @@ fn constant_axis_column(
     targets
         .iter()
         .map(|seg| match &seg.axes[axis] {
-            ContinuousAxis::Spline(curve) => Some((**curve).clone()),
+            ContinuousAxis::Spline(curve) => Some(ColumnTrack {
+                stored: Arc::clone(curve),
+                read: None,
+            }),
             _ => None,
         })
         .collect()
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum ColumnSignal {
+    /// A leader's shaped signal, whose seams carry what the followers
+    /// reading it need ([`crate::follower_projection::leader_seam_continuity`]).
+    Shaped {
+        seam_continuity: SeamContinuity,
+    },
+    MotorCommand {
+        k1: f64,
+        k2: f64,
+    },
+}
+
+impl ColumnSignal {
+    fn fit_context(self) -> &'static str {
+        match self {
+            Self::Shaped { .. } => "smooth_kernel_target",
+            Self::MotorCommand { .. } => "motor_command",
+        }
+    }
+
+    fn convolution_input(self, shaped_input: AxisSignalTable) -> AxisSignalTable {
+        match self {
+            Self::Shaped { .. } => shaped_input,
+            Self::MotorCommand { k1, k2 } => shaped_input.with_derivative_gains(k1, k2),
+        }
+    }
+
+    fn seam_continuity(self) -> SeamContinuity {
+        match self {
+            Self::Shaped { seam_continuity } => seam_continuity,
+            Self::MotorCommand { .. } => SeamContinuity::Velocity,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct FitColumn<'a> {
+    axis: usize,
+    chain: &'a CompiledChain,
+    signal: ColumnSignal,
+}
+
 fn fit_axis_column(
     request: AxisFitRequest,
     targets: &[ContinuousSegment],
-    axis: usize,
+    column: FitColumn,
     target_workers: usize,
-    chain: &CompiledChain,
-) -> Result<Option<Vec<nurbs::ScalarNurbs>>, PostProcessError> {
+) -> Result<Option<Vec<ColumnTrack>>, PostProcessError> {
     let AxisFitRequest {
         history,
         base,
         fit_tol,
         boundary,
         lookahead,
+        pool,
         ..
     } = request;
+    let FitColumn {
+        axis,
+        chain,
+        signal,
+    } = column;
     let Some(kernel) = chain.kernel() else {
         return Ok(None);
     };
@@ -794,7 +1599,7 @@ fn fit_axis_column(
         .or_else(|| base.first())
         .map_or(0.0, |seg| seg.t_start);
     let last_t = base.last().map_or(first_t, |seg| seg.t_end);
-    let signal_segments: Vec<&ContinuousSegment> = history.iter().chain(base.iter()).collect();
+    let window_segments: Vec<&ContinuousSegment> = history.iter().chain(base.iter()).collect();
     for seg in targets {
         let need_lo = seg.t_start - k_hi;
         let need_hi = seg.t_end - k_lo;
@@ -805,64 +1610,498 @@ fn fit_axis_column(
             return Err(PostProcessError::MissingLookahead { axis, t: need_hi });
         }
     }
-    if let Some(column) = constant_axis_column(&signal_segments, targets, axis) {
-        return Ok(Some(column));
-    }
-    let input_breaks = signal_breakpoints(&signal_segments, axis);
-    let shaped_breaks = shaped_signal_breakpoints(kernel, &input_breaks);
-    let kernel_degree = kernel
-        .pieces
-        .iter()
-        .map(|piece| piece.degree())
-        .max()
-        .expect("shaper kernel has no pieces");
-    let bounds = SignalBounds {
+    let window = SignalBounds {
         first_t,
         last_t,
         boundary,
         lookahead,
     };
-    let table = Arc::new(
-        AxisSignalTable::build(&signal_segments, axis, bounds).with_piece_moments(kernel_degree),
-    );
-    let input_degree = table.max_degree();
-    fit_axis_targets(
-        axis,
-        targets,
-        ShapedSignalSource {
-            kernel,
-            table,
-            input_breaks,
-            shaped_breaks,
-            input_degree,
-        },
-        fit_tol,
-        target_workers,
-        rides_an_advanced_follower(request.chains, axis),
-    )
-    .map(Some)
+    let groups = fit_groups(targets, lookahead.clamps_past_signal());
+    let reads: Vec<(std::ops::Range<usize>, SignalBounds)> = groups
+        .iter()
+        .map(|group| {
+            let span = (targets[group.start].t_start, targets[group.end - 1].t_end);
+            read_window(&window_segments, span, kernel, window)
+        })
+        .collect();
+    let prefitted: Vec<Option<&Vec<ColumnTrack>>> = groups
+        .iter()
+        .zip(&reads)
+        .map(|(group, (range, bounds))| match signal {
+            ColumnSignal::Shaped { .. } => request.prefits.fits.get(&LeaderGroupKey::new(
+                axis,
+                request.prefits.era,
+                &targets[group.clone()],
+                &window_segments[range.clone()],
+                *bounds,
+            )),
+            ColumnSignal::MotorCommand { .. } => None,
+        })
+        .collect();
+    let unfitted = || {
+        reads
+            .iter()
+            .zip(&prefitted)
+            .filter(|(_, prefit)| prefit.is_none())
+            .map(|((range, _), _)| range)
+    };
+    let read_from = unfitted().map(|range| range.start).min().unwrap_or(0);
+    let read_to = unfitted().map(|range| range.end).max().unwrap_or(read_from);
+    let pieces: Vec<Vec<BezierPiece>> = window_segments[read_from..read_to]
+        .iter()
+        .map(|seg| match &seg.axes[axis] {
+            ContinuousAxis::Spline(track) => extract_bezier_pieces(track),
+            _ => panic!("shaper: changed axis was not materialized"),
+        })
+        .collect();
+    let workers = target_workers.max(1).min(groups.len());
+    let fitted = pool
+        .map_indexed(
+            workers,
+            groups.len(),
+            || (),
+            |(), index| {
+                if let Some(tracks) = prefitted[index] {
+                    return Ok(tracks.clone());
+                }
+                let (range, bounds) = reads[index].clone();
+                fit_group_alone(
+                    axis,
+                    &targets[groups[index].clone()],
+                    kernel,
+                    GroupRead {
+                        segments: &window_segments[range.clone()],
+                        pieces: &pieces[range.start - read_from..range.end - read_from],
+                        bounds,
+                    },
+                    fit_tol,
+                    signal,
+                    pool,
+                )
+            },
+        )
+        .expect("leader target fit thread panicked");
+    let mut tracks = Vec::with_capacity(targets.len());
+    for result in fitted {
+        tracks.extend(result?);
+    }
+    Ok(Some(tracks))
 }
 
-fn rides_an_advanced_follower(chains: &AxisChainSet, leader: usize) -> bool {
-    chains.projected_followers().any(|(follower, leaders)| {
-        leaders.contains(&leader)
-            && chains
-                .chains
-                .get(follower)
-                .and_then(advance_before_projection)
-                .is_some()
-    })
+/// The segments one fit group's convolution reads, their axis pieces and
+/// the bounds of that slice.
+struct GroupRead<'r, 'a> {
+    segments: &'r [&'a ContinuousSegment],
+    pieces: &'r [Vec<BezierPiece>],
+    bounds: SignalBounds,
+}
+
+/// One fit group's targets from the signal the group reads alone, about
+/// the group's start: what else shares its emit never reaches the fit, so
+/// the leader comes out the same however the shaper batches its emits.
+fn fit_group_alone(
+    axis: usize,
+    group: &[ContinuousSegment],
+    kernel: &nurbs::algebra::PiecewisePolynomialKernel,
+    read: GroupRead,
+    fit_tol: FitTol,
+    signal: ColumnSignal,
+    pool: &WorkerPool,
+) -> Result<Vec<ColumnTrack>, PostProcessError> {
+    if let Some(column) = constant_axis_column(read.segments, group, axis) {
+        return Ok(column);
+    }
+    fit_axis_targets(
+        axis,
+        group,
+        ShapedSignalSource::new(
+            kernel,
+            signal.convolution_input(AxisSignalTable::from_pieces(
+                read.pieces.iter().flatten(),
+                read.bounds,
+            )),
+            signal_breakpoints(read.segments, axis),
+            group[0].t_start,
+        ),
+        fit_tol,
+        signal,
+        1,
+        pool,
+    )
+}
+
+/// What one leader column's fit of one group reads: the group, the slice
+/// of segments its convolution reads and how that slice's edges behave,
+/// within one era of the shaper's chains. Two fits with the same key are
+/// the same fit wherever they run ([`fit_group_alone`]).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct LeaderGroupKey {
+    axis: usize,
+    era: u64,
+    group: [u64; 3],
+    slice: [u64; 3],
+    clamps_before_signal: bool,
+    clamps_past_signal: bool,
+}
+
+impl LeaderGroupKey {
+    fn new(
+        axis: usize,
+        era: u64,
+        group: &[ContinuousSegment],
+        slice: &[&ContinuousSegment],
+        bounds: SignalBounds,
+    ) -> Self {
+        let span =
+            |first: f64, last: f64, len: usize| [first.to_bits(), last.to_bits(), len as u64];
+        Self {
+            axis,
+            era,
+            group: span(group[0].t_start, group[group.len() - 1].t_end, group.len()),
+            slice: span(slice[0].t_start, slice[slice.len() - 1].t_end, slice.len()),
+            clamps_before_signal: bounds.boundary.clamps_before_signal(),
+            clamps_past_signal: bounds.lookahead.clamps_past_signal(),
+        }
+    }
+
+    fn group_end(&self) -> f64 {
+        f64::from_bits(self.group[1])
+    }
+}
+
+/// Leader group fits made ahead of the shaper, keyed by what they read.
+/// The era advances wherever the chains or the timeline change, so a fit
+/// made under the old ones never matches.
+#[derive(Default)]
+pub(crate) struct LeaderPrefits {
+    era: u64,
+    fits: HashMap<LeaderGroupKey, Vec<ColumnTrack>>,
+}
+
+impl LeaderPrefits {
+    pub(crate) fn start_era(&mut self) {
+        self.era += 1;
+        self.fits.clear();
+    }
+
+    pub(crate) fn era(&self) -> u64 {
+        self.era
+    }
+
+    pub(crate) fn insert(&mut self, fits: Vec<(LeaderGroupKey, Vec<ColumnTrack>)>) {
+        self.fits.extend(fits);
+    }
+
+    fn forget_through(&mut self, emitted_through: f64) {
+        self.fits.retain(|key, _| key.group_end() > emitted_through);
+    }
+}
+
+/// The kerneled columns the shaper fits as leaders under `chains`.
+pub(crate) fn leader_columns(chains: &AxisChainSet, n_axes: usize) -> Vec<FitColumn<'_>> {
+    (0..n_axes)
+        .filter(|&axis| !chains.is_projected_follower(axis))
+        .filter_map(|axis| {
+            let chain = chains.chains.get(axis)?;
+            (!chain.is_empty()).then(|| FitColumn {
+                axis,
+                chain,
+                signal: ColumnSignal::Shaped {
+                    seam_continuity: crate::follower_projection::leader_seam_continuity(
+                        chains, axis,
+                    ),
+                },
+            })
+        })
+        .collect()
+}
+
+/// Whether every read of a kerneled leader column over `group` lies within
+/// `window`, so its fit needs no segment the window does not hold.
+pub(crate) fn reads_within(
+    columns: &[FitColumn],
+    group: &[ContinuousSegment],
+    window: SignalBounds,
+) -> bool {
+    let span = (group[0].t_start, group[group.len() - 1].t_end);
+    columns
+        .iter()
+        .filter_map(|column| column.chain.kernel())
+        .all(|kernel| {
+            let (k_lo, k_hi) = kernel.support();
+            span.1 - k_lo < window.last_t
+                && (span.0 - k_hi >= window.first_t || window.boundary.clamps_before_signal())
+        })
+}
+
+/// One leader column's fit of `group`, whose reads lie within `window`
+/// ([`reads_within`]), keyed as the shaper keys it; `None` where the
+/// column has no kernel.
+pub(crate) fn fit_leader_group(
+    column: FitColumn,
+    group: &[ContinuousSegment],
+    segments: &[&ContinuousSegment],
+    window: SignalBounds,
+    (era, fit_tol): (u64, FitTol),
+    pool: &WorkerPool,
+) -> Option<Result<(LeaderGroupKey, Vec<ColumnTrack>), PostProcessError>> {
+    let kernel = column.chain.kernel()?;
+    let span = (group[0].t_start, group[group.len() - 1].t_end);
+    let (range, bounds) = read_window(segments, span, kernel, window);
+    let slice = &segments[range];
+    let pieces: Vec<Vec<BezierPiece>> = slice
+        .iter()
+        .map(|seg| match &seg.axes[column.axis] {
+            ContinuousAxis::Spline(track) => extract_bezier_pieces(track),
+            _ => panic!("leader prefit: changed axis was not materialized"),
+        })
+        .collect();
+    let key = LeaderGroupKey::new(column.axis, era, group, slice, bounds);
+    Some(
+        fit_group_alone(
+            column.axis,
+            group,
+            kernel,
+            GroupRead {
+                segments: slice,
+                pieces: &pieces,
+                bounds,
+            },
+            fit_tol,
+            column.signal,
+            pool,
+        )
+        .map(|tracks| (key, tracks)),
+    )
+}
+
+/// The segments a convolution of `kernel` over a fit group spanning `span`
+/// reads: from the one starting strictly before the earliest time read to
+/// the first one reaching strictly past the latest, so a gap a read lands
+/// in carries its hold and a one-sided read at either edge of the window
+/// finds signal. The slice depends on the group and the segments alone,
+/// never on how far the window around them reaches (the lookahead gates
+/// and the history retention hold both neighbours); an edge clamps only
+/// where the read passes it, as the window's own edge would.
+fn read_window(
+    segments: &[&ContinuousSegment],
+    (span_start, span_end): (f64, f64),
+    kernel: &nurbs::algebra::PiecewisePolynomialKernel,
+    window: SignalBounds,
+) -> (std::ops::Range<usize>, SignalBounds) {
+    let (k_lo, k_hi) = kernel.support();
+    let (read_lo, read_hi) = (span_start - k_hi, span_end - k_lo);
+    let lo = segments
+        .partition_point(|seg| seg.t_start < read_lo)
+        .saturating_sub(1);
+    let hi = (segments.partition_point(|seg| seg.t_end <= read_hi) + 1).min(segments.len());
+    let (first_t, last_t) = (segments[lo].t_start, segments[hi - 1].t_end);
+    (
+        lo..hi,
+        SignalBounds {
+            first_t,
+            last_t,
+            boundary: if read_lo < first_t {
+                window.boundary
+            } else {
+                FitBoundary::Interior
+            },
+            lookahead: if read_hi > last_t {
+                window.lookahead
+            } else {
+                Lookahead::Required
+            },
+        },
+    )
 }
 
 /// The convolution's input for one axis, packaged for the target fits: the
 /// kernel, the flattened signal it integrates, and the breakpoint sets that
 /// seed the input and shaped partitions.
-struct ShapedSignalSource<'a> {
+pub(crate) struct ShapedSignalSource<'a> {
     kernel: &'a nurbs::algebra::PiecewisePolynomialKernel,
     table: Arc<AxisSignalTable>,
     input_breaks: Vec<f64>,
-    shaped_breaks: Vec<f64>,
+    shaped_breaks: ShapedBreaks,
     input_degree: usize,
+    shaped_offset: f64,
+    gain_impulse_response: Option<GainImpulseResponse>,
+    exact_kernel: ExactKernel,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct GainImpulse {
+    at: f64,
+    delta: f64,
+    doublet: f64,
+}
+
+struct GainImpulseResponse {
+    impulses: Vec<GainImpulse>,
+    kernel_derivatives: [Vec<BezierPiece>; 4],
+    support: (f64, f64),
+}
+
+impl GainImpulseResponse {
+    fn new(kernel: &nurbs::algebra::PiecewisePolynomialKernel, impulses: &[GainImpulse]) -> Self {
+        assert!(
+            impulses.is_sorted_by(|left, right| left.at <= right.at),
+            "gain impulses are out of time order"
+        );
+        let mut order = kernel.pieces.clone();
+        let kernel_derivatives = std::array::from_fn(|_| {
+            let current = order.clone();
+            order = order.iter().map(BezierPiece::differentiate).collect();
+            current
+        });
+        Self {
+            impulses: impulses.to_vec(),
+            kernel_derivatives,
+            support: kernel.support(),
+        }
+    }
+
+    fn kernel_derivatives_at(&self, tau: f64) -> [f64; 4] {
+        let pieces = &self.kernel_derivatives[0];
+        let piece = pieces
+            .partition_point(|piece| piece.u_end <= tau)
+            .min(pieces.len() - 1);
+        self.kernel_derivatives
+            .each_ref()
+            .map(|order| order[piece].evaluate(tau))
+    }
+
+    fn response(&self, t: f64) -> (f64, f64, f64) {
+        let (k_lo, k_hi) = self.support;
+        let first = self
+            .impulses
+            .partition_point(|impulse| impulse.at <= t - k_hi);
+        let end = self
+            .impulses
+            .partition_point(|impulse| impulse.at < t - k_lo);
+        self.impulses[first..end]
+            .iter()
+            .fold((0.0, 0.0, 0.0), |(p, v, a), impulse| {
+                let [k, dk, ddk, dddk] = self.kernel_derivatives_at(t - impulse.at);
+                (
+                    p + impulse.delta * k + impulse.doublet * dk,
+                    v + impulse.delta * dk + impulse.doublet * ddk,
+                    a + impulse.delta * ddk + impulse.doublet * dddk,
+                )
+            })
+    }
+}
+
+struct WithGainImpulses<'r, S: TrackSignal> {
+    convolved: S,
+    response: Option<&'r GainImpulseResponse>,
+}
+
+impl<S: TrackSignal> TrackSignal for WithGainImpulses<'_, S> {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let (p, v, a) = self.convolved.eval_pva(t);
+        let Some(response) = self.response else {
+            return (p, v, a);
+        };
+        let (dp, dv, da) = response.response(t);
+        (p + dp, v + dv, a + da)
+    }
+}
+
+const KERNEL_MASS_TOLERANCE: f64 = 1e-9;
+
+pub(crate) fn unit_kernel_mass(kernel: &nurbs::algebra::PiecewisePolynomialKernel) -> f64 {
+    let mass = trajectory::kernel_mass(kernel);
+    assert!(
+        (mass - 1.0).abs() <= KERNEL_MASS_TOLERANCE,
+        "shaper kernel integrates to {mass}, not 1: it would scale every position it shapes"
+    );
+    mass
+}
+
+/// A shaped signal carries its input's offset at full weight: the kernel
+/// has unit mass up to the rounding of its own integral, and a constant
+/// window shapes to its constant exactly whether it is convolved or kept.
+fn assert_unit_mass(kernel: &nurbs::algebra::PiecewisePolynomialKernel) {
+    unit_kernel_mass(kernel);
+}
+
+impl<'a> ShapedSignalSource<'a> {
+    pub(crate) fn new(
+        kernel: &'a nurbs::algebra::PiecewisePolynomialKernel,
+        input: AxisSignalTable,
+        input_breaks: Vec<f64>,
+        offset_at: f64,
+    ) -> Self {
+        let kernel_degree = kernel
+            .pieces
+            .iter()
+            .map(|piece| piece.degree())
+            .max()
+            .expect("shaper kernel has no pieces");
+        assert_unit_mass(kernel);
+        let input_offset = input.eval_hinted(offset_at, &std::cell::Cell::new(0));
+        assert!(
+            input_offset.is_finite(),
+            "shaper: convolution input offset at t={offset_at} is not finite"
+        );
+        let table = Arc::new(
+            input
+                .offset_by(input_offset)
+                .with_piece_moments(kernel_degree),
+        );
+        Self {
+            kernel,
+            shaped_breaks: ShapedBreaks::new(kernel, &input_breaks),
+            input_degree: table.max_degree(),
+            gain_impulse_response: (!table.gain_impulses().is_empty())
+                .then(|| GainImpulseResponse::new(kernel, table.gain_impulses())),
+            table,
+            input_breaks,
+            shaped_offset: input_offset,
+            exact_kernel: ExactKernel::new(kernel),
+        }
+    }
+
+    /// The convolution's input where it is the table alone, so its jumps
+    /// are the table's: derivative gains add impulses the table does not
+    /// hold.
+    fn hidden_break_input(&self) -> Option<&AxisSignalTable> {
+        self.gain_impulse_response
+            .is_none()
+            .then_some(self.table.as_ref())
+    }
+
+    pub(crate) fn signal(&self) -> impl TrackSignal + use<'_, 'a> {
+        let eval_table = Arc::clone(&self.table);
+        let moment_table = Arc::clone(&self.table);
+        let piece_hint = std::cell::Cell::new(0);
+        let relative = ShapedSignal::new_from_polynomial_evaluator(
+            self.kernel,
+            move |t| eval_table.eval_hinted(t, &piece_hint),
+            self.input_breaks.clone(),
+            self.input_degree,
+            move |lo, hi, degree, origin, orders| {
+                moment_table.integrate_moments(lo, hi, degree, origin, orders)
+            },
+            self.table.input_jumps().to_vec(),
+        );
+        ConvolutionSignal::new(
+            ShiftedTrackSignal::new(
+                WithGainImpulses {
+                    convolved: relative,
+                    response: self.gain_impulse_response.as_ref(),
+                },
+                -self.shaped_offset,
+            ),
+            ExactConvolution {
+                table: &self.table,
+                kernel: &self.exact_kernel,
+                impulses: self.table.gain_impulses(),
+                position_offset: self.shaped_offset,
+            },
+        )
+    }
 }
 
 fn fit_axis_targets(
@@ -870,166 +2109,87 @@ fn fit_axis_targets(
     targets: &[ContinuousSegment],
     source: ShapedSignalSource,
     fit_tol: FitTol,
+    signal: ColumnSignal,
     target_workers: usize,
-    velocity_continuous: bool,
-) -> Result<Vec<nurbs::ScalarNurbs>, PostProcessError> {
-    let ShapedSignalSource {
-        kernel,
-        table,
-        input_breaks,
-        shaped_breaks,
-        input_degree,
-    } = source;
+    pool: &WorkerPool,
+) -> Result<Vec<ColumnTrack>, PostProcessError> {
     if targets.is_empty() {
         return Ok(Vec::new());
     }
-    let input_jumps = table.input_jumps().to_vec();
-    let make_sig = || {
-        let eval_table = Arc::clone(&table);
-        let moment_table = Arc::clone(&table);
-        let piece_hint = std::cell::Cell::new(0);
-        ShapedSignal::new_from_polynomial_evaluator(
-            kernel,
-            move |t| eval_table.eval_hinted(t, &piece_hint),
-            input_breaks.clone(),
-            input_degree,
-            move |lo, hi, degree, origin, orders| {
-                moment_table.integrate_moments(lo, hi, degree, origin, orders)
-            },
-            input_jumps.clone(),
-        )
-    };
+    let fit_context = signal.fit_context();
+    let seam_continuity = signal.seam_continuity();
+    let shaped_breaks = &source.shaped_breaks;
+    let hidden_break_input = source.hidden_break_input();
+    let shaped_times = shaped_breaks.times();
+    let make_sig = || source.signal();
     let max_seed_spans = targets
         .iter()
         .map(|target| {
-            let first = shaped_breaks.partition_point(|time| *time <= target.t_start);
-            let last = shaped_breaks.partition_point(|time| *time < target.t_end);
+            let first = shaped_times.partition_point(|time| *time <= target.t_start);
+            let last = shaped_times.partition_point(|time| *time < target.t_end);
             last.saturating_sub(first) + 1
         })
         .max()
         .unwrap_or(0);
     if max_seed_spans < LEADER_SPAN_PARALLEL_THRESHOLD {
         let fit_target = |target: &ContinuousSegment, sig: &_| {
-            let track = fit_axis_from_signal(
+            let pieces = fit_leader_target(
                 AxisFit {
                     axis,
                     t_start: target.t_start,
                     t_end: target.t_end,
-                    seed_breakpoints: &shaped_breaks,
+                    seed_breakpoints: shaped_times,
                     fit_tol,
-                    fit_context: "smooth_kernel_target",
-                    velocity_continuous,
+                    fit_context,
+                    seam_continuity,
                 },
                 sig,
+                shaped_breaks,
+                hidden_break_input,
             )?;
-            if !track.control_points().iter().all(|value| value.is_finite()) {
-                return Err(PostProcessError::NonFiniteSample {
-                    axis,
-                    t: target.t_start,
-                });
-            }
-            Ok(track)
+            column_track(signal, axis, pieces)
         };
         let workers = target_workers.max(1).min(targets.len());
-        let mut fitted = if workers > 1 {
-            let next_target = std::sync::atomic::AtomicUsize::new(0);
-            std::thread::scope(|scope| {
-                let next_target = &next_target;
-                let fit_target = &fit_target;
-                let handles: Vec<_> = (0..workers)
-                    .map(|_| {
-                        scope.spawn(move || {
-                            let sig = make_sig();
-                            let mut done = Vec::new();
-                            loop {
-                                let index =
-                                    next_target.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                let Some(target) = targets.get(index) else {
-                                    return done;
-                                };
-                                done.push((index, fit_target(target, &sig)));
-                            }
-                        })
-                    })
-                    .collect();
-                handles
-                    .into_iter()
-                    .flat_map(|handle| handle.join().expect("leader target fit thread panicked"))
-                    .collect::<Vec<_>>()
+        return pool
+            .map_indexed(workers, targets.len(), make_sig, |sig, index| {
+                fit_target(&targets[index], sig)
             })
-        } else {
-            let sig = make_sig();
-            targets
-                .iter()
-                .enumerate()
-                .map(|(index, target)| (index, fit_target(target, &sig)))
-                .collect()
-        };
-        fitted.sort_by_key(|(index, _)| *index);
-        return fitted.into_iter().map(|(_, result)| result).collect();
+            .expect("leader target fit thread panicked")
+            .into_iter()
+            .collect();
     }
     let plan_started = crate::timing::stopwatch();
     let seed_sets = targets
         .iter()
-        .map(|target| fit_seed_times(axis, target.t_start, target.t_end, &shaped_breaks))
+        .map(|target| {
+            fit_seed_times(axis, target.t_start, target.t_end, shaped_times)
+                .map(|seeds| shaped_breaks.select_seeds(seeds, hidden_break_input, fit_tol))
+        })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut scale_times = seed_sets
-        .iter()
-        .flat_map(|seeds| seeds.iter().copied())
-        .collect::<Vec<_>>();
+    let mut scale_times = seed_sets.iter().flatten().copied().collect::<Vec<_>>();
     scale_times.sort_by(f64::total_cmp);
     scale_times.dedup();
     let plan_workers = target_workers.max(1).min(scale_times.len());
-    let scale_samples = if plan_workers > 1 {
-        let next_time = std::sync::atomic::AtomicUsize::new(0);
-        std::thread::scope(|scope| {
-            let next_time = &next_time;
-            let scale_times = &scale_times;
-            let handles: Vec<_> = (0..plan_workers)
-                .map(|_| {
-                    scope.spawn(move || {
-                        let sig = make_sig();
-                        let mut done = Vec::new();
-                        loop {
-                            let index =
-                                next_time.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            let Some(&t) = scale_times.get(index) else {
-                                return done;
-                            };
-                            let (position, velocity, _) = sig.eval_pva(t);
-                            done.push((t.to_bits(), (position, velocity)));
-                        }
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .flat_map(|handle| handle.join().expect("leader scale probe thread panicked"))
-                .collect::<Vec<_>>()
+    let scale_cache = pool
+        .map_indexed(plan_workers, scale_times.len(), make_sig, |sig, index| {
+            let t = scale_times[index];
+            (t.to_bits(), scale_probe(sig, t))
         })
-    } else {
-        let sig = make_sig();
-        scale_times
-            .iter()
-            .map(|&t| {
-                let (position, velocity, _) = sig.eval_pva(t);
-                (t.to_bits(), (position, velocity))
-            })
-            .collect()
-    };
-    let scale_cache = scale_samples.into_iter().collect::<HashMap<_, _>>();
+        .expect("leader scale probe thread panicked")
+        .into_iter()
+        .collect::<HashMap<_, _>>();
     let mut plans = Vec::with_capacity(targets.len());
     for (target, seeds) in targets.iter().zip(seed_sets) {
         let (mut position_scale, mut velocity_scale) = (0.0_f64, 0.0_f64);
         for &t in &seeds {
-            let &(position, velocity) = scale_cache
+            let probe = scale_cache
                 .get(&t.to_bits())
                 .expect("leader scale probe is missing");
-            if position.is_finite() {
-                position_scale = position_scale.max(position.abs());
+            if probe.position_rounding_scale.is_finite() {
+                position_scale = position_scale.max(probe.position_rounding_scale);
             }
-            if velocity.is_finite() {
-                velocity_scale = velocity_scale.max(velocity.abs());
+            if probe.velocity.is_finite() {
+                velocity_scale = velocity_scale.max(probe.velocity.abs());
             }
         }
         let time_scale = target.t_start.abs().max(target.t_end.abs());
@@ -1039,12 +2199,22 @@ fn fit_axis_targets(
             time_scale,
             fit_tol,
         );
-        plans.push(fit_plan_from_seeds(
-            seeds,
-            floors,
-            target.t_start,
-            target.t_end,
-        ));
+        let resolution = velocity_resolution(fit_tol, floors);
+        let velocity_breaks = seeds[1..seeds.len() - 1]
+            .iter()
+            .map(|&t| VelocityBreak {
+                t,
+                step: scale_cache[&t.to_bits()].velocity_step,
+            })
+            .filter(|velocity_break| velocity_break.step.abs() > resolution)
+            .collect::<Vec<_>>();
+        plans.push(
+            fit_plan_from_seeds(seeds, &velocity_breaks, floors, fit_tol.pos_mm).map_err(
+                |crowded| {
+                    crowded_velocity_breaks_error(axis, fit_context, floors, fit_tol, crowded)
+                },
+            )?,
+        );
     }
     let jobs = plans
         .iter()
@@ -1078,17 +2248,17 @@ fn fit_axis_targets(
             RefineSpan {
                 t0: t_start,
                 t1: t_end,
-                depth: 0,
+                slivers: plan.slivers[span_index],
             },
             &SpanFitPolicy {
                 axis,
                 fit_tol,
-                fit_context: "smooth_kernel_target",
+                fit_context,
                 velocity_budget: f64::INFINITY,
                 floors: plan.floors,
-                max_depth: plan.max_depth,
                 velocity_sign: VelocitySign::Unconstrained,
-                velocity_continuous,
+                seam_continuity,
+                requires_hull: true,
             },
             SpanSeeds {
                 lower: t_start,
@@ -1102,49 +2272,16 @@ fn fit_axis_targets(
     type SpanFit = Result<(Vec<BezierPiece>, usize), PostProcessError>;
     let workers = target_workers.max(1).min(jobs.len());
     let spans_started = crate::timing::stopwatch();
-    let mut fitted: Vec<(usize, usize, SpanFit)> = if workers > 1 {
-        let next_job = std::sync::atomic::AtomicUsize::new(0);
-        std::thread::scope(|scope| {
-            let next_job = &next_job;
-            let fit_span = &fit_span;
-            let jobs = &jobs;
-            let handles: Vec<_> = (0..workers)
-                .map(|_| {
-                    scope.spawn(move || {
-                        let sig = make_sig();
-                        let mut done = Vec::new();
-                        loop {
-                            let index = next_job.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            let Some(&(target_index, span_index)) = jobs.get(index) else {
-                                return done;
-                            };
-                            done.push((
-                                target_index,
-                                span_index,
-                                fit_span(target_index, span_index, &sig),
-                            ));
-                        }
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .flat_map(|handle| handle.join().expect("leader span fit thread panicked"))
-                .collect()
+    let fitted: Vec<(usize, usize, SpanFit)> = pool
+        .map_indexed(workers, jobs.len(), make_sig, |sig, index| {
+            let (target_index, span_index) = jobs[index];
+            (
+                target_index,
+                span_index,
+                fit_span(target_index, span_index, sig),
+            )
         })
-    } else {
-        let sig = make_sig();
-        jobs.iter()
-            .map(|&(target_index, span_index)| {
-                (
-                    target_index,
-                    span_index,
-                    fit_span(target_index, span_index, &sig),
-                )
-            })
-            .collect()
-    };
-    fitted.sort_by_key(|(target_index, span_index, _)| (*target_index, *span_index));
+        .expect("leader span fit thread panicked");
     let spans_us = spans_started.elapsed_us();
     if crate::timing::is_slow_phase(spans_us) {
         crate::timing::log_slow_phase(
@@ -1177,93 +2314,141 @@ fn fit_axis_targets(
                 Err(_) => needs_serial_fit = true,
             }
         }
-        let track = if needs_serial_fit || refinement_splits > MAX_FIT_REFINEMENT_SPLITS {
+        let pieces = if needs_serial_fit || refinement_splits > MAX_FIT_REFINEMENT_SPLITS {
             let sig = make_sig();
-            fit_axis_from_signal(
+            fit_leader_target(
                 AxisFit {
                     axis,
                     t_start: targets[target_index].t_start,
                     t_end: targets[target_index].t_end,
-                    seed_breakpoints: &shaped_breaks,
+                    seed_breakpoints: shaped_times,
                     fit_tol,
-                    fit_context: "smooth_kernel_target",
-                    velocity_continuous,
+                    fit_context,
+                    seam_continuity,
                 },
                 &sig,
+                shaped_breaks,
+                hidden_break_input,
             )?
         } else {
-            fit_pieces_to_nurbs(axis, pieces)?
+            pieces
         };
-        if !track.control_points().iter().all(|value| value.is_finite()) {
-            return Err(PostProcessError::NonFiniteSample {
-                axis,
-                t: targets[target_index].t_start,
-            });
-        }
-        tracks.push(track);
+        tracks.push(column_track(signal, axis, pieces)?);
     }
     Ok(tracks)
 }
 
+/// A fitted column track as the motors run it and, for a leader, as the
+/// follower projection reads it. `stored` raises every piece to the
+/// track's highest degree on absolute control points, which rounds a
+/// piece's jerk to about `n(n−1)(n−2)·ε·|p|/h³`; `read` keeps each piece
+/// at its own degree on its own origin, so an advance with no kernel after
+/// it, which reads the leaders' jerk, reads it at the piece's precision
+/// rather than at the track's distance from the origin. `None` where the
+/// stored track is read as it is: a constant, or a motor command no
+/// projection reads.
+#[derive(Clone)]
+pub(crate) struct ColumnTrack {
+    pub stored: Arc<nurbs::ScalarNurbs>,
+    pub read: Option<ContinuousAxis>,
+}
+
+fn column_track(
+    signal: ColumnSignal,
+    axis: usize,
+    pieces: Vec<BezierPiece>,
+) -> Result<ColumnTrack, PostProcessError> {
+    match signal {
+        ColumnSignal::Shaped { .. } => leader_track(axis, pieces),
+        ColumnSignal::MotorCommand { .. } => Ok(ColumnTrack {
+            stored: Arc::new(finite_track(axis, pieces)?),
+            read: None,
+        }),
+    }
+}
+
+pub(crate) fn leader_track(
+    axis: usize,
+    pieces: Vec<BezierPiece>,
+) -> Result<ColumnTrack, PostProcessError> {
+    let relative = crate::follower_projection::localize_pieces(0.0, &pieces);
+    let stored = finite_track(axis, pieces)?;
+    let read = ContinuousAxis::try_piecewise_relative_spline(relative).unwrap_or_else(|error| {
+        panic!("shaper: axis {axis}: the leader's own pieces do not join: {error}")
+    });
+    Ok(ColumnTrack {
+        stored: Arc::new(stored),
+        read: Some(read),
+    })
+}
+
+fn finite_track(
+    axis: usize,
+    pieces: Vec<BezierPiece>,
+) -> Result<nurbs::ScalarNurbs, PostProcessError> {
+    let t_start = pieces.first().map_or(f64::NAN, |piece| piece.u_start);
+    let track = fit_pieces_to_nurbs(axis, pieces)?;
+    if !track.control_points().iter().all(|value| value.is_finite()) {
+        return Err(PostProcessError::NonFiniteSample { axis, t: t_start });
+    }
+    Ok(track)
+}
+
+type TimedColumn = (
+    usize,
+    Result<Option<Vec<ColumnTrack>>, PostProcessError>,
+    u128,
+);
+
+fn fit_columns(
+    request: AxisFitRequest,
+    targets: &[ContinuousSegment],
+    columns: &[FitColumn],
+) -> Vec<TimedColumn> {
+    if columns.is_empty() {
+        return Vec::new();
+    }
+    let parallel = cfg!(not(target_arch = "wasm32")) && columns.len() > 1 && !targets.is_empty();
+    let target_workers = if cfg!(target_arch = "wasm32") || targets.len() < 4 {
+        1
+    } else {
+        std::thread::available_parallelism()
+            .map_or(1, |cores| cores.get())
+            .div_ceil(columns.len().max(1))
+            .min(4)
+            .min(targets.len())
+    };
+    let column_workers = if parallel { columns.len() } else { 1 };
+    request
+        .pool
+        .map_indexed(
+            column_workers,
+            columns.len(),
+            || (),
+            |(), index| {
+                let column = columns[index];
+                let column_started = crate::timing::stopwatch();
+                let fitted = fit_axis_column(request, targets, column, target_workers);
+                (column.axis, fitted, column_started.elapsed_us())
+            },
+        )
+        .expect("axis fit thread panicked")
+}
+
+/// Fits the kerneled leader axes of `fresh` in place, as the motors run
+/// them, and returns the same segments with the leaders as the follower
+/// projection reads them (see [`ColumnTrack`]).
 fn fit_leader_axes(
     request: AxisFitRequest,
     fresh: &mut [ContinuousSegment],
     n_axes: usize,
     work: crate::timing::PhaseWorkload,
-) -> Result<(), PostProcessError> {
-    let chains = request.chains;
-    let default_chain = CompiledChain::default();
-    let axis_chains: Vec<(usize, &CompiledChain)> = (0..n_axes)
-        .filter(|&axis| !chains.is_projected_follower(axis))
-        .map(|axis| (axis, chains.chains.get(axis).unwrap_or(&default_chain)))
-        .filter(|(_, chain)| !chain.is_empty())
-        .collect();
+) -> Result<Vec<ContinuousSegment>, PostProcessError> {
+    let leader_columns = leader_columns(request.chains, n_axes);
     let fit_started = crate::timing::stopwatch();
-    type TimedColumn = (
-        usize,
-        Result<Option<Vec<nurbs::ScalarNurbs>>, PostProcessError>,
-        u128,
-    );
-    let parallel = cfg!(not(target_arch = "wasm32")) && axis_chains.len() > 1 && !fresh.is_empty();
-    let target_workers = if cfg!(target_arch = "wasm32") || fresh.len() < 4 {
-        1
-    } else {
-        std::thread::available_parallelism()
-            .map_or(1, |cores| cores.get())
-            .div_ceil(axis_chains.len().max(1))
-            .min(4)
-            .min(fresh.len())
-    };
-    let columns: Vec<TimedColumn> = if parallel {
-        let fresh_ref: &[ContinuousSegment] = fresh;
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = axis_chains
-                .iter()
-                .map(|&(axis, chain)| {
-                    scope.spawn(move || {
-                        let column_started = crate::timing::stopwatch();
-                        let column =
-                            fit_axis_column(request, fresh_ref, axis, target_workers, chain);
-                        (axis, column, column_started.elapsed_us())
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| h.join().expect("axis fit thread panicked"))
-                .collect()
-        })
-    } else {
-        axis_chains
-            .iter()
-            .map(|&(axis, chain)| {
-                let column_started = crate::timing::stopwatch();
-                let column = fit_axis_column(request, fresh, axis, target_workers, chain);
-                (axis, column, column_started.elapsed_us())
-            })
-            .collect()
-    };
+    let columns = fit_columns(request, fresh, &leader_columns);
     let fit_elapsed_us = fit_started.elapsed_us();
+    crate::timing::record_stage(crate::timing::Stage::LeaderFit, fit_elapsed_us);
     if crate::timing::is_slow_phase(fit_elapsed_us) {
         let per_axis: Vec<String> = columns
             .iter()
@@ -1274,20 +2459,25 @@ fn fit_leader_axes(
             fit_elapsed_us,
             crate::timing::PhaseWorkload {
                 segments: fresh.len(),
-                axes: axis_chains.len(),
+                axes: leader_columns.len(),
                 force: request.lookahead.clamps_past_signal(),
                 ..work
             },
             &per_axis.join(" "),
         );
     }
+    let mut read_segments = fresh.to_vec();
     for (axis, column, _) in columns {
         let Some(column) = column? else { continue };
-        for (seg, track) in fresh.iter_mut().zip(column) {
-            Arc::make_mut(&mut seg.axes)[axis] = ContinuousAxis::Spline(Arc::new(track));
+        for ((seg, read_seg), track) in fresh.iter_mut().zip(&mut read_segments).zip(column) {
+            let read = track
+                .read
+                .unwrap_or_else(|| ContinuousAxis::Spline(Arc::clone(&track.stored)));
+            Arc::make_mut(&mut read_seg.axes)[axis] = read;
+            Arc::make_mut(&mut seg.axes)[axis] = ContinuousAxis::Spline(track.stored);
         }
     }
-    Ok(())
+    Ok(read_segments)
 }
 
 /// Every time the window's signal changes polynomial on this axis: each
@@ -1324,22 +2514,6 @@ fn f64_from_ordered_key(key: u64) -> f64 {
     f64::from_bits(bits)
 }
 
-pub(crate) fn shaped_signal_breakpoints(
-    kernel: &nurbs::algebra::PiecewisePolynomialKernel,
-    input_breaks: &[f64],
-) -> Vec<f64> {
-    let kernel_breaks: Vec<f64> = ShapedSignal::kernel_cut_boundaries(kernel).collect();
-    let mut breaks = Vec::with_capacity(input_breaks.len() * (kernel_breaks.len() + 2));
-    for &input_break in input_breaks {
-        for &kernel_break in &kernel_breaks {
-            ShapedSignal::output_cut_transitions(kernel, input_break, kernel_break, &mut breaks);
-        }
-    }
-    breaks.sort_by(f64::total_cmp);
-    breaks.dedup();
-    breaks
-}
-
 /// Sized for the deepest fit-ladder rung (degree 13, 14 coefficients) times
 /// the widest kernel moment window the shaper builds.
 const MOMENT_POWER_CAPACITY: usize = 24;
@@ -1350,36 +2524,120 @@ fn differentiate_into(coefficients: &[f64], order: usize, out: &mut [f64]) -> us
     let mut length = coefficients.len();
     out[..length].copy_from_slice(coefficients);
     for _ in 0..order {
-        if length <= 1 {
-            return 0;
-        }
-        for power in 1..length {
-            out[power - 1] = out[power] * power as f64;
-        }
-        length -= 1;
+        length = differentiate_in_place(out, length);
     }
     length
 }
 
-fn accumulate_translated_moments(
-    source_origin: f64,
-    source: &[f64],
-    target_origin: f64,
-    target: &mut [f64],
-) {
-    assert_eq!(source.len(), target.len());
-    assert!(target.len() <= MOMENT_POWER_CAPACITY);
-    let delta = source_origin - target_origin;
-    let mut delta_powers = [1.0; MOMENT_POWER_CAPACITY];
-    for power in 1..target.len() {
-        delta_powers[power] = delta_powers[power - 1] * delta;
+/// One more derivative of the first `length` coefficients of `out`, in
+/// place; returns its coefficient count, zero once it vanishes.
+fn differentiate_in_place(out: &mut [f64], length: usize) -> usize {
+    if length <= 1 {
+        return 0;
     }
-    for (moment_power, moment) in target.iter_mut().enumerate() {
+    for power in 1..length {
+        out[power - 1] = out[power] * power as f64;
+    }
+    length - 1
+}
+
+/// `TRANSLATION_BINOMIALS[m][p]` is the weight of a source moment of power
+/// `p` in a translated moment of power `m`, built by the same running
+/// product a per-term update would compute, so a lookup reproduces it bit
+/// for bit without a division in the translation's inner loop.
+const TRANSLATION_BINOMIALS: [[f64; MOMENT_POWER_CAPACITY]; MOMENT_POWER_CAPACITY] =
+    translation_binomials();
+
+const fn translation_binomials() -> [[f64; MOMENT_POWER_CAPACITY]; MOMENT_POWER_CAPACITY] {
+    let mut table = [[0.0; MOMENT_POWER_CAPACITY]; MOMENT_POWER_CAPACITY];
+    let mut moment_power = 0;
+    while moment_power < MOMENT_POWER_CAPACITY {
         let mut choose = 1.0;
-        for source_power in 0..=moment_power {
-            *moment += choose * delta_powers[moment_power - source_power] * source[source_power];
-            if source_power < moment_power {
-                choose *= (moment_power - source_power) as f64 / (source_power + 1) as f64;
+        let mut source_power = 0;
+        while source_power <= moment_power {
+            table[moment_power][source_power] = choose;
+            choose *= (moment_power - source_power) as f64 / (source_power + 1) as f64;
+            source_power += 1;
+        }
+        moment_power += 1;
+    }
+    table
+}
+
+/// `FALLING_FACTORIALS[p][n] = p!/(p−n)!`, the factor the `n`-th derivative
+/// of `xᵖ` carries, as the ascending product `(p−n+1)···p` the per-term
+/// fold computed, so a lookup reproduces it bit for bit.
+pub(crate) const FALLING_FACTORIALS: [[f64; MOMENT_POWER_CAPACITY]; MOMENT_POWER_CAPACITY] =
+    falling_factorials();
+
+const fn falling_factorials() -> [[f64; MOMENT_POWER_CAPACITY]; MOMENT_POWER_CAPACITY] {
+    let mut table = [[0.0; MOMENT_POWER_CAPACITY]; MOMENT_POWER_CAPACITY];
+    let mut power = 0;
+    while power < MOMENT_POWER_CAPACITY {
+        let mut order = 0;
+        while order <= power {
+            let mut product = 1.0;
+            let mut factor = power - order + 1;
+            while factor <= power {
+                product *= factor as f64;
+                factor += 1;
+            }
+            table[power][order] = product;
+            order += 1;
+        }
+        power += 1;
+    }
+    table
+}
+
+/// The powers of one origin shift, built once and shared by every moment
+/// order translated between the same two origins.
+struct MomentTranslation {
+    delta_powers: [f64; MOMENT_POWER_CAPACITY],
+    len: usize,
+}
+
+impl MomentTranslation {
+    fn new(source_origin: f64, target_origin: f64, len: usize) -> Self {
+        assert!(len <= MOMENT_POWER_CAPACITY);
+        let delta = source_origin - target_origin;
+        let mut delta_powers = [1.0; MOMENT_POWER_CAPACITY];
+        for power in 1..len {
+            delta_powers[power] = delta_powers[power - 1] * delta;
+        }
+        Self { delta_powers, len }
+    }
+
+    fn accumulate(&self, source: &[f64], target: &mut [f64]) {
+        assert_eq!(source.len(), target.len());
+        assert!(target.len() <= self.len);
+        match target.len() {
+            1 => self.accumulate_fixed::<1>(source, target),
+            2 => self.accumulate_fixed::<2>(source, target),
+            3 => self.accumulate_fixed::<3>(source, target),
+            4 => self.accumulate_fixed::<4>(source, target),
+            5 => self.accumulate_fixed::<5>(source, target),
+            6 => self.accumulate_fixed::<6>(source, target),
+            7 => self.accumulate_fixed::<7>(source, target),
+            8 => self.accumulate_fixed::<8>(source, target),
+            _ => self.accumulate_terms(source, target),
+        }
+    }
+
+    fn accumulate_fixed<const LEN: usize>(&self, source: &[f64], target: &mut [f64]) {
+        let source: &[f64; LEN] = source.try_into().expect("source moment length");
+        let target: &mut [f64; LEN] = target.try_into().expect("target moment length");
+        self.accumulate_terms(source, target);
+    }
+
+    #[inline]
+    fn accumulate_terms(&self, source: &[f64], target: &mut [f64]) {
+        for (moment_power, moment) in target.iter_mut().enumerate() {
+            let binomials = &TRANSLATION_BINOMIALS[moment_power];
+            for source_power in 0..=moment_power {
+                *moment += binomials[source_power]
+                    * self.delta_powers[moment_power - source_power]
+                    * source[source_power];
             }
         }
     }
@@ -1390,52 +2648,177 @@ fn taylor_shift(coefficients: &[f64], shift: f64, shifted: &mut [f64]) {
     assert!(coefficients.len() <= MOMENT_POWER_CAPACITY);
     let mut work = [0.0; MOMENT_POWER_CAPACITY];
     work[..coefficients.len()].copy_from_slice(coefficients);
-    let mut remaining = coefficients.len();
-    for target in shifted.iter_mut() {
-        for power in (1..remaining).rev() {
+    for (lowest, target) in shifted.iter_mut().enumerate() {
+        for power in (lowest + 1..coefficients.len()).rev() {
             work[power - 1] = nurbs::fmadd(shift, work[power], work[power - 1]);
         }
-        *target = work[0];
-        work.copy_within(1..remaining, 0);
-        remaining -= 1;
+        *target = work[lowest];
     }
 }
 
+const POWER_DIVISORS: [f64; MOMENT_POWER_CAPACITY] = power_divisors();
+
+const fn power_divisors() -> [f64; MOMENT_POWER_CAPACITY] {
+    let mut divisors = [0.0; MOMENT_POWER_CAPACITY];
+    let mut power = 0;
+    while power < MOMENT_POWER_CAPACITY {
+        divisors[power] = power as f64;
+        power += 1;
+    }
+    divisors
+}
+
+/// Moments over `[lo, hi]` about `origin` of polynomials re-expanded about
+/// the window's midpoint, with everything that depends only on the window —
+/// the midpoint shift, the power differences of its edges, the translation
+/// back to `origin` — built once for all of a piece's derivative orders.
+struct MomentWindow {
+    shift: f64,
+    edge_power_spans: [f64; MOMENT_POWER_CAPACITY],
+    max_power: usize,
+    translation: MomentTranslation,
+}
+
+impl MomentWindow {
+    fn new(
+        expansion_point: f64,
+        lo: f64,
+        hi: f64,
+        origin: f64,
+        coefficient_len: usize,
+        moment_len: usize,
+    ) -> Option<Self> {
+        if hi <= lo {
+            return None;
+        }
+        let max_power = coefficient_len + moment_len - 1;
+        assert!(
+            max_power < MOMENT_POWER_CAPACITY,
+            "moment product degree {} exceeds capacity {}",
+            max_power - 1,
+            MOMENT_POWER_CAPACITY - 2
+        );
+        let base = lo + 0.5 * (hi - lo);
+        let x_lo = lo - base;
+        let x_hi = hi - base;
+        let (mut lo_power, mut hi_power) = (1.0_f64, 1.0_f64);
+        let mut edge_power_spans = [0.0; MOMENT_POWER_CAPACITY];
+        for span in &mut edge_power_spans[1..=max_power] {
+            lo_power *= x_lo;
+            hi_power *= x_hi;
+            *span = hi_power - lo_power;
+        }
+        Some(Self {
+            shift: base - expansion_point,
+            edge_power_spans,
+            max_power,
+            translation: MomentTranslation::new(base, origin, moment_len),
+        })
+    }
+
+    /// `coefficients`, given about `expansion_point`, re-expanded about the
+    /// window's midpoint into `centered`.
+    fn center(&self, coefficients: &[f64], centered: &mut [f64]) {
+        taylor_shift(coefficients, self.shift, centered);
+    }
+
+    /// Adds the moments of a polynomial whose coefficients are already
+    /// about the window's midpoint.
+    fn accumulate_centered(&self, centered: &[f64], moments: &mut [f64]) {
+        assert_eq!(moments.len(), self.translation.len);
+        assert!(centered.len() + moments.len() - 1 <= self.max_power);
+        match moments.len() {
+            1 => self.accumulate_centered_fixed::<1>(centered, moments),
+            2 => self.accumulate_centered_fixed::<2>(centered, moments),
+            3 => self.accumulate_centered_fixed::<3>(centered, moments),
+            4 => self.accumulate_centered_fixed::<4>(centered, moments),
+            5 => self.accumulate_centered_fixed::<5>(centered, moments),
+            6 => self.accumulate_centered_fixed::<6>(centered, moments),
+            7 => self.accumulate_centered_fixed::<7>(centered, moments),
+            8 => self.accumulate_centered_fixed::<8>(centered, moments),
+            _ => {
+                let mut local_moments = [0.0; MOMENT_POWER_CAPACITY];
+                let local_moments = &mut local_moments[..moments.len()];
+                self.integrate_centered(centered, local_moments);
+                self.translation.accumulate_terms(local_moments, moments);
+            }
+        }
+    }
+
+    fn accumulate_centered_fixed<const LEN: usize>(&self, centered: &[f64], moments: &mut [f64]) {
+        let mut local_moments = [0.0; LEN];
+        self.integrate_centered(centered, &mut local_moments);
+        self.translation
+            .accumulate_fixed::<LEN>(&local_moments, moments);
+    }
+
+    #[inline]
+    fn integrate_centered(&self, centered: &[f64], local_moments: &mut [f64]) {
+        let moment_len = local_moments.len();
+        for (polynomial_power, &coefficient) in centered.iter().enumerate() {
+            let powers = polynomial_power + 1..polynomial_power + 1 + moment_len;
+            for ((moment, &span), &divisor) in local_moments
+                .iter_mut()
+                .zip(&self.edge_power_spans[powers.clone()])
+                .zip(&POWER_DIVISORS[powers])
+            {
+                *moment += coefficient * span / divisor;
+            }
+        }
+    }
+}
+
+/// Segment-tree range sums of every piece's moments, for all
+/// `MOMENT_ORDERS` derivative orders at once: each node stores its orders
+/// contiguously, so one traversal translates every order with one set of
+/// origin-shift powers. Beside them each node bounds the magnitude of the
+/// terms its moments were summed from: `masses` bounds `∫|x⁽ⁿ⁾|` as it was
+/// evaluated, and `reaches` how far, through every translation below the
+/// node, a point of it lies from its origin, so the terms of its `q`-th
+/// moment sum to at most `mass·reach^q`.
 struct MomentTree {
     degree: usize,
     leaf_count: usize,
     origins: Vec<f64>,
     moments: Vec<f64>,
+    reaches: Vec<f64>,
+    masses: Vec<f64>,
 }
 
 impl MomentTree {
-    fn build(table: &AxisSignalTable, degree: usize, order: usize) -> Self {
+    fn build(table: &AxisSignalTable, degree: usize) -> Self {
         let stride = degree + 1;
         assert!(
             stride <= MOMENT_POWER_CAPACITY,
             "moment degree {degree} exceeds capacity {}",
             MOMENT_POWER_CAPACITY - 1
         );
+        let node_stride = MOMENT_ORDERS * stride;
         let leaf_count = table.coeffs.len().next_power_of_two();
         let node_count = 2 * leaf_count;
         let mut origins = vec![f64::NAN; node_count];
-        let mut moments = vec![0.0; node_count * stride];
+        let mut moments = vec![0.0; node_count * node_stride];
+        let mut reaches = vec![0.0; node_count];
+        let mut masses = vec![0.0; node_count * MOMENT_ORDERS];
         for i in 0..table.coeffs.len() {
             let node = leaf_count + i;
-            let origin = table.starts[i] + 0.5 * (table.ends[i] - table.starts[i]);
+            let origin = table.origins[i];
             origins[node] = origin;
-            let mut derivative = [0.0; MOMENT_POWER_CAPACITY];
-            let length = differentiate_into(&table.coeffs[i], order, &mut derivative);
-            if length == 0 {
-                continue;
+            reaches[node] = table.half_width(i);
+            for (order, mass) in masses[node * MOMENT_ORDERS..(node + 1) * MOMENT_ORDERS]
+                .iter_mut()
+                .enumerate()
+            {
+                *mass = (table.ends[i] - table.starts[i]) * table.piece_magnitude(i, order);
             }
-            AxisSignalTable::accumulate_polynomial_moments(
-                &derivative[..length],
-                table.starts[i],
+            let node_moments = &mut moments[node * node_stride..(node + 1) * node_stride];
+            table.accumulate_piece_moments(
+                i,
                 table.starts[i],
                 table.ends[i],
                 origin,
-                &mut moments[node * stride..(node + 1) * stride],
+                stride,
+                node_moments.chunks_exact_mut(stride),
             );
         }
         for node in (1..leaf_count).rev() {
@@ -1448,38 +2831,65 @@ impl MomentTree {
                 (false, false) => continue,
             };
             origins[node] = origin;
-            let mut combined = [0.0; MOMENT_POWER_CAPACITY];
+            let mut combined = [0.0; MOMENT_ORDERS * MOMENT_POWER_CAPACITY];
             for child in [left, right] {
                 if origins[child].is_finite() {
-                    accumulate_translated_moments(
-                        origins[child],
-                        &moments[child * stride..(child + 1) * stride],
-                        origin,
-                        &mut combined[..stride],
-                    );
+                    let translation = MomentTranslation::new(origins[child], origin, stride);
+                    let child_moments = &moments[child * node_stride..(child + 1) * node_stride];
+                    for (source, target) in child_moments
+                        .chunks_exact(stride)
+                        .zip(combined[..node_stride].chunks_exact_mut(stride))
+                    {
+                        translation.accumulate(source, target);
+                    }
+                    reaches[node] =
+                        reaches[node].max((origins[child] - origin).abs() + reaches[child]);
+                    for order in 0..MOMENT_ORDERS {
+                        masses[node * MOMENT_ORDERS + order] +=
+                            masses[child * MOMENT_ORDERS + order];
+                    }
                 }
             }
-            moments[node * stride..(node + 1) * stride].copy_from_slice(&combined[..stride]);
+            moments[node * node_stride..(node + 1) * node_stride]
+                .copy_from_slice(&combined[..node_stride]);
         }
         Self {
             degree,
             leaf_count,
             origins,
             moments,
+            reaches,
+            masses,
         }
     }
 
-    fn accumulate(&self, start: usize, end: usize, degree: usize, origin: f64, target: &mut [f64]) {
+    /// Adds every node's moments over `[start, end)` about `origin`, and
+    /// with `bounds` each node's bound on the terms of its moments.
+    fn accumulate(
+        &self,
+        start: usize,
+        end: usize,
+        origin: f64,
+        targets: &mut [&mut [f64]; MOMENT_ORDERS],
+        mut bounds: Option<&mut MomentBounds>,
+    ) {
         if start >= end {
             return;
         }
+        let moment_len = targets[0].len();
+        let mut visit = |node: usize, targets: &mut [&mut [f64]; MOMENT_ORDERS]| {
+            self.accumulate_node(node, origin, targets);
+            if let Some(bounds) = bounds.as_deref_mut() {
+                self.accumulate_node_magnitudes(node, origin, bounds, moment_len);
+            }
+        };
         let mut left = start + self.leaf_count;
         let mut right = end + self.leaf_count;
         let mut right_nodes = [0usize; usize::BITS as usize];
         let mut right_count = 0;
         while left < right {
             if left & 1 != 0 {
-                self.accumulate_node(left, degree, origin, target);
+                visit(left, targets);
                 left += 1;
             }
             if right & 1 != 0 {
@@ -1492,23 +2902,33 @@ impl MomentTree {
         }
         while right_count > 0 {
             right_count -= 1;
-            self.accumulate_node(right_nodes[right_count], degree, origin, target);
+            visit(right_nodes[right_count], targets);
         }
     }
 
-    fn accumulate_node(&self, node: usize, degree: usize, origin: f64, target: &mut [f64]) {
+    fn accumulate_node(&self, node: usize, origin: f64, targets: &mut [&mut [f64]; MOMENT_ORDERS]) {
         let stride = self.degree + 1;
-        accumulate_translated_moments(
-            self.origins[node],
-            &self.moments[node * stride..node * stride + degree + 1],
-            origin,
-            target,
-        );
+        let node_moments =
+            &self.moments[node * MOMENT_ORDERS * stride..(node + 1) * MOMENT_ORDERS * stride];
+        let moment_len = targets[0].len();
+        let translation = MomentTranslation::new(self.origins[node], origin, moment_len);
+        for (source, target) in node_moments.chunks_exact(stride).zip(targets.iter_mut()) {
+            translation.accumulate(&source[..moment_len], target);
+        }
     }
 }
+
+fn piece_midpoint(start: f64, end: f64) -> f64 {
+    start + 0.5 * (end - start)
+}
+
 /// One axis of the emit window, flattened to time-sorted monomial pieces so
 /// the convolution's Gauss sampling evaluates by binary search plus Horner
-/// instead of a de Boor pass per sample. Semantics match the NURBS window it
+/// instead of a de Boor pass per sample. Each piece is expanded about its
+/// midpoint, where a high-degree piece's monomial terms stay at the scale of
+/// its values: about an edge they swing by orders of magnitude more and
+/// cancel, and every moment and exact polynomial summed from them carries
+/// that swing in its rounding. Semantics match the NURBS window it
 /// is built from: before `first_t` the signal clamps at a stream boundary
 /// and is otherwise missing (NaN, surfaced as `MissingHistory`); past
 /// `last_t` it clamps under a drain flush and is otherwise missing; a time
@@ -1516,13 +2936,18 @@ impl MomentTree {
 pub(crate) struct AxisSignalTable {
     starts: Vec<f64>,
     ends: Vec<f64>,
+    origins: Vec<f64>,
     coeffs: Vec<Vec<f64>>,
     first_t: f64,
     last_t: f64,
     boundary: FitBoundary,
     lookahead: Lookahead,
-    moment_trees: Option<[MomentTree; MOMENT_ORDERS]>,
+    moment_tree: Option<MomentTree>,
     input_jumps: Vec<(f64, f64, f64)>,
+    entering_step: f64,
+    leaving_step: f64,
+    gain_impulses: Vec<GainImpulse>,
+    boundaries: Vec<f64>,
 }
 
 /// The time extent of a flattened signal window and how its two edges
@@ -1537,55 +2962,132 @@ pub(crate) struct SignalBounds {
 
 const MOMENT_ORDERS: usize = 3;
 
-impl AxisSignalTable {
-    fn build(segments: &[&ContinuousSegment], axis: usize, bounds: SignalBounds) -> Self {
-        Self::from_tracks(
-            segments.iter().map(|seg| match &seg.axes[axis] {
-                ContinuousAxis::Spline(track) => track.as_ref(),
-                _ => panic!("shaper: changed axis was not materialized"),
-            }),
-            bounds,
-        )
-    }
+/// For each derivative order and moment power, a bound on the magnitude of
+/// the terms that moment is summed from.
+type MomentBounds = [[f64; MOMENT_POWER_CAPACITY]; MOMENT_ORDERS];
 
+impl AxisSignalTable {
+    #[cfg(test)]
     pub(crate) fn from_tracks<'a>(
         tracks: impl IntoIterator<Item = &'a nurbs::ScalarNurbs>,
+        bounds: SignalBounds,
+    ) -> Self {
+        let pieces: Vec<BezierPiece> = tracks.into_iter().flat_map(extract_bezier_pieces).collect();
+        Self::from_pieces(&pieces, bounds)
+    }
+
+    /// The table over monomial pieces in time order, each in its own
+    /// variable from its start.
+    pub(crate) fn from_pieces<'p>(
+        pieces: impl IntoIterator<Item = &'p BezierPiece>,
         bounds: SignalBounds,
     ) -> Self {
         let mut table = Self {
             starts: Vec::new(),
             ends: Vec::new(),
+            origins: Vec::new(),
             coeffs: Vec::new(),
             first_t: bounds.first_t,
             last_t: bounds.last_t,
             boundary: bounds.boundary,
             lookahead: bounds.lookahead,
-            moment_trees: None,
+            moment_tree: None,
             input_jumps: Vec::new(),
+            entering_step: 0.0,
+            leaving_step: 0.0,
+            gain_impulses: Vec::new(),
+            boundaries: Vec::new(),
         };
-        for track in tracks {
-            for piece in extract_bezier_pieces(track) {
-                if let Some(previous_end) = table.ends.last().copied() {
-                    assert!(
-                        piece.u_start >= previous_end,
-                        "signal pieces overlap: next starts at {} before previous end {previous_end}",
-                        piece.u_start
-                    );
-                    if piece.u_start > previous_end {
-                        let previous = table.coeffs.len() - 1;
-                        let held = table.piece_at(previous, previous_end);
-                        table.starts.push(previous_end);
-                        table.ends.push(piece.u_start);
-                        table.coeffs.push(vec![held]);
-                    }
+        for piece in pieces {
+            if let Some(previous_end) = table.ends.last().copied() {
+                assert!(
+                    piece.u_start >= previous_end,
+                    "signal pieces overlap: next starts at {} before previous end {previous_end}",
+                    piece.u_start
+                );
+                if piece.u_start > previous_end {
+                    let previous = table.coeffs.len() - 1;
+                    let held = table.piece_at(previous, previous_end);
+                    table.push_piece(previous_end, piece.u_start, vec![held]);
                 }
-                table.starts.push(piece.u_start);
-                table.ends.push(piece.u_end);
-                table.coeffs.push(piece.coeffs);
             }
+            let origin = piece_midpoint(piece.u_start, piece.u_end);
+            let mut centered = vec![0.0; piece.coeffs.len()];
+            taylor_shift(&piece.coeffs, origin - piece.u_start, &mut centered);
+            table.push_piece(piece.u_start, piece.u_end, centered);
         }
         assert!(!table.coeffs.is_empty(), "empty signal window");
         table
+    }
+
+    pub(crate) fn offset_by(mut self, offset: f64) -> Self {
+        for coefficients in &mut self.coeffs {
+            coefficients[0] -= offset;
+        }
+        self
+    }
+
+    pub(crate) fn with_derivative_gains(mut self, k1: f64, k2: f64) -> Self {
+        assert!(
+            self.moment_tree.is_none(),
+            "derivative gains must reshape the signal before its moments are built"
+        );
+        let last = self.coeffs.len() - 1;
+        let held_before = self.piece_at(0, self.first_t);
+        let held_after = self.piece_at(last, self.last_t);
+        self.gain_impulses = self.input_step_impulses(k1, k2);
+        for coefficients in &mut self.coeffs {
+            for power in 0..coefficients.len() {
+                let slope = coefficients
+                    .get(power + 1)
+                    .map_or(0.0, |&c| c * (power + 1) as f64);
+                let curvature = coefficients
+                    .get(power + 2)
+                    .map_or(0.0, |&c| c * ((power + 1) * (power + 2)) as f64);
+                coefficients[power] += k1 * slope + k2 * curvature;
+            }
+        }
+        self.entering_step = self.piece_at(0, self.first_t) - held_before;
+        self.leaving_step = held_after - self.piece_at(last, self.last_t);
+        self
+    }
+
+    fn input_step_impulses(&self, k1: f64, k2: f64) -> Vec<GainImpulse> {
+        let last = self.coeffs.len() - 1;
+        let seams = (1..=last).map(|piece| {
+            let seam = self.starts[piece];
+            (
+                seam,
+                self.piece_at(piece, seam) - self.piece_at(piece - 1, seam),
+                self.slope_at(piece, seam) - self.slope_at(piece - 1, seam),
+            )
+        });
+        std::iter::once((self.first_t, 0.0, self.slope_at(0, self.first_t)))
+            .chain(seams)
+            .chain(std::iter::once((
+                self.last_t,
+                0.0,
+                -self.slope_at(last, self.last_t),
+            )))
+            .map(|(at, position_step, slope_step)| GainImpulse {
+                at,
+                delta: k1 * position_step + k2 * slope_step,
+                doublet: k2 * position_step,
+            })
+            .filter(|impulse| impulse.delta != 0.0 || impulse.doublet != 0.0)
+            .collect()
+    }
+
+    pub(crate) fn gain_impulses(&self) -> &[GainImpulse] {
+        &self.gain_impulses
+    }
+
+    fn held_before(&self) -> f64 {
+        self.piece_at(0, self.first_t) - self.entering_step
+    }
+
+    fn held_after(&self) -> f64 {
+        self.piece_at(self.coeffs.len() - 1, self.last_t) + self.leaving_step
     }
 
     pub(crate) fn max_degree(&self) -> usize {
@@ -1596,15 +3098,55 @@ impl AxisSignalTable {
             .expect("empty signal window")
     }
     pub(crate) fn with_piece_moments(mut self, degree: usize) -> Self {
-        let trees = std::array::from_fn(|order| MomentTree::build(&self, degree, order));
+        let tree = MomentTree::build(&self, degree);
         let input_jumps = self.collect_input_jumps();
-        self.moment_trees = Some(trees);
+        self.moment_tree = Some(tree);
         self.input_jumps = input_jumps;
+        let mut boundaries = self.starts.clone();
+        boundaries.extend([
+            *self.ends.last().expect("empty signal window"),
+            self.first_t,
+            self.last_t,
+        ]);
+        boundaries.sort_by(f64::total_cmp);
+        boundaries.dedup();
+        self.boundaries = boundaries;
         self
     }
 
     pub(crate) fn input_jumps(&self) -> &[(f64, f64, f64)] {
         &self.input_jumps
+    }
+
+    fn push_piece(&mut self, start: f64, end: f64, centered: Vec<f64>) {
+        self.starts.push(start);
+        self.ends.push(end);
+        self.origins.push(piece_midpoint(start, end));
+        self.coeffs.push(centered);
+    }
+
+    fn half_width(&self, piece: usize) -> f64 {
+        (self.origins[piece] - self.starts[piece]).max(self.ends[piece] - self.origins[piece])
+    }
+
+    /// Piece `piece`'s offset from its origin at `t`, clamped onto the piece.
+    fn offset_in(&self, piece: usize, t: f64) -> f64 {
+        t.clamp(self.starts[piece], self.ends[piece]) - self.origins[piece]
+    }
+
+    /// `Σₖ |cₖ| k!/(k−n)! (h/2)ᵏ⁻ⁿ` for piece `piece`'s `order`-th
+    /// derivative: a bound, at any point of the piece, on the terms its
+    /// re-expansion about any point of the piece sums.
+    fn piece_magnitude(&self, piece: usize, order: usize) -> f64 {
+        let half_width = self.half_width(piece);
+        let mut magnitude = 0.0;
+        let mut reach = 1.0;
+        for power in order..self.coeffs[piece].len() {
+            let falling = FALLING_FACTORIALS[power][order];
+            magnitude += self.coeffs[piece][power].abs() * falling * reach;
+            reach *= half_width;
+        }
+        magnitude
     }
 
     fn slope_at(&self, piece: usize, at: f64) -> f64 {
@@ -1613,7 +3155,7 @@ impl AxisSignalTable {
         if length == 0 {
             return 0.0;
         }
-        let tau = (at - self.starts[piece]).clamp(0.0, self.ends[piece] - self.starts[piece]);
+        let tau = self.offset_in(piece, at);
         derivative[..length]
             .iter()
             .rev()
@@ -1623,8 +3165,8 @@ impl AxisSignalTable {
     fn collect_input_jumps(&self) -> Vec<(f64, f64, f64)> {
         let mut jumps = Vec::new();
         let entering = self.slope_at(0, self.first_t);
-        if entering != 0.0 {
-            jumps.push((self.first_t, 0.0, entering));
+        if entering != 0.0 || self.entering_step != 0.0 {
+            jumps.push((self.first_t, self.entering_step, entering));
         }
         for piece in 1..self.coeffs.len() {
             let seam = self.starts[piece];
@@ -1635,8 +3177,8 @@ impl AxisSignalTable {
             }
         }
         let leaving = self.slope_at(self.coeffs.len() - 1, self.last_t);
-        if leaving != 0.0 {
-            jumps.push((self.last_t, 0.0, -leaving));
+        if leaving != 0.0 || self.leaving_step != 0.0 {
+            jumps.push((self.last_t, self.leaving_step, -leaving));
         }
         jumps
     }
@@ -1648,14 +3190,29 @@ impl AxisSignalTable {
         origin: f64,
         orders: [&mut [f64]; MOMENT_ORDERS],
     ) -> bool {
-        let trees = self
-            .moment_trees
+        self.integrate_bounded_moments(lo, hi, degree, origin, orders, None)
+    }
+
+    /// `integrate_moments`, and with `bounds` the magnitude of the terms
+    /// each moment sums, gathered in the same walk: every partial piece,
+    /// hold and tree node adds its mass times `(|δ| + reach)^q`.
+    fn integrate_bounded_moments(
+        &self,
+        lo: f64,
+        hi: f64,
+        degree: usize,
+        origin: f64,
+        mut orders: [&mut [f64]; MOMENT_ORDERS],
+        mut bounds: Option<&mut MomentBounds>,
+    ) -> bool {
+        let tree = self
+            .moment_tree
             .as_ref()
             .expect("moment integration requested before moments were built");
         assert!(
-            degree <= trees[0].degree,
+            degree <= tree.degree,
             "requested moment degree {degree} exceeds prepared degree {}",
-            trees[0].degree
+            tree.degree
         );
         if !lo.is_finite() || !hi.is_finite() || !origin.is_finite() || lo > hi {
             return false;
@@ -1665,133 +3222,143 @@ impl AxisSignalTable {
         {
             return false;
         }
+        let moment_len = degree + 1;
+        for moments in &mut orders {
+            assert_eq!(moments.len(), moment_len);
+            moments.fill(0.0);
+        }
+        if lo < self.first_t {
+            let to = hi.min(self.first_t);
+            Self::accumulate_held(self.held_before(), lo, to, origin, orders[0]);
+            if let Some(bounds) = bounds.as_deref_mut() {
+                Self::bound_held(
+                    self.held_before(),
+                    (lo, to),
+                    origin,
+                    &mut bounds[0][..moment_len],
+                );
+            }
+        }
         let interior_lo = lo.max(self.first_t);
         let interior_hi = hi.min(self.last_t);
-        let interior = (interior_hi > interior_lo).then(|| {
+        if interior_hi > interior_lo {
             let first_piece = self.ends.partition_point(|&end| end <= interior_lo);
             let end_piece = self.starts.partition_point(|&start| start < interior_hi);
             let mut full_start = first_piece;
             let mut full_end = end_piece;
-            let left_partial = (self.starts[first_piece] < interior_lo).then(|| {
+            if self.starts[first_piece] < interior_lo {
                 full_start += 1;
-                first_piece
-            });
-            let right_partial = (full_start < full_end && self.ends[full_end - 1] > interior_hi)
-                .then(|| {
-                    full_end -= 1;
-                    full_end
-                });
-            (left_partial, full_start, full_end, right_partial)
-        });
-        let mut derivative = [0.0; MOMENT_POWER_CAPACITY];
-        for (order, moments) in orders.into_iter().enumerate() {
-            assert_eq!(moments.len(), degree + 1);
-            moments.fill(0.0);
-            if lo < self.first_t && order == 0 {
-                let held = [self.piece_at(0, self.first_t)];
-                Self::accumulate_polynomial_moments(
-                    &held,
-                    lo,
-                    lo,
-                    hi.min(self.first_t),
+                let to = interior_hi.min(self.ends[first_piece]);
+                self.accumulate_piece_moments(
+                    first_piece,
+                    interior_lo,
+                    to,
                     origin,
-                    moments,
+                    moment_len,
+                    orders.iter_mut().map(|moments| &mut **moments),
                 );
-            }
-            if let Some((left_partial, full_start, full_end, right_partial)) = interior {
-                if let Some(piece) = left_partial {
-                    let length = differentiate_into(&self.coeffs[piece], order, &mut derivative);
-                    if length > 0 {
-                        Self::accumulate_polynomial_moments(
-                            &derivative[..length],
-                            self.starts[piece],
-                            interior_lo,
-                            interior_hi.min(self.ends[piece]),
-                            origin,
-                            moments,
-                        );
-                    }
-                }
-                trees[order].accumulate(full_start, full_end, degree, origin, moments);
-                if let Some(piece) = right_partial {
-                    let length = differentiate_into(&self.coeffs[piece], order, &mut derivative);
-                    if length > 0 {
-                        Self::accumulate_polynomial_moments(
-                            &derivative[..length],
-                            self.starts[piece],
-                            self.starts[piece],
-                            interior_hi,
-                            origin,
-                            moments,
-                        );
-                    }
+                if let Some(bounds) = bounds.as_deref_mut() {
+                    self.bound_partial_piece(
+                        first_piece,
+                        (interior_lo, to),
+                        origin,
+                        bounds,
+                        moment_len,
+                    );
                 }
             }
-            if hi > self.last_t && order == 0 {
-                let held = [self.piece_at(self.coeffs.len() - 1, self.last_t)];
-                Self::accumulate_polynomial_moments(
-                    &held,
-                    self.last_t,
-                    lo.max(self.last_t),
-                    hi,
+            let right_partial = full_start < full_end && self.ends[full_end - 1] > interior_hi;
+            if right_partial {
+                full_end -= 1;
+            }
+            tree.accumulate(
+                full_start,
+                full_end,
+                origin,
+                &mut orders,
+                bounds.as_deref_mut(),
+            );
+            if right_partial {
+                let from = self.starts[full_end];
+                self.accumulate_piece_moments(
+                    full_end,
+                    from,
+                    interior_hi,
                     origin,
-                    moments,
+                    moment_len,
+                    orders.iter_mut().map(|moments| &mut **moments),
+                );
+                if let Some(bounds) = bounds.as_deref_mut() {
+                    self.bound_partial_piece(
+                        full_end,
+                        (from, interior_hi),
+                        origin,
+                        bounds,
+                        moment_len,
+                    );
+                }
+            }
+        }
+        if hi > self.last_t {
+            let from = lo.max(self.last_t);
+            Self::accumulate_held(self.held_after(), from, hi, origin, orders[0]);
+            if let Some(bounds) = bounds {
+                Self::bound_held(
+                    self.held_after(),
+                    (from, hi),
+                    origin,
+                    &mut bounds[0][..moment_len],
                 );
             }
         }
         true
     }
 
-    fn accumulate_polynomial_moments(
-        coefficients: &[f64],
-        polynomial_start: f64,
+    fn accumulate_held(value: f64, lo: f64, hi: f64, origin: f64, moments: &mut [f64]) {
+        if let Some(window) = MomentWindow::new(lo, lo, hi, origin, 1, moments.len()) {
+            window.accumulate_centered(&[value], moments);
+        }
+    }
+
+    /// Adds piece `piece`'s moments over `[lo, hi]` about `origin` to each
+    /// target in turn, the `order`-th target receiving the piece's
+    /// `order`-th derivative. The piece is re-expanded about the window
+    /// once; each derivative is taken of that expansion.
+    fn accumulate_piece_moments<'m>(
+        &self,
+        piece: usize,
         lo: f64,
         hi: f64,
         origin: f64,
-        moments: &mut [f64],
+        moment_len: usize,
+        orders: impl Iterator<Item = &'m mut [f64]>,
     ) {
-        if hi <= lo {
+        let coefficients = &self.coeffs[piece];
+        let Some(window) = MomentWindow::new(
+            self.origins[piece],
+            lo,
+            hi,
+            origin,
+            coefficients.len(),
+            moment_len,
+        ) else {
             return;
-        }
-        let max_power = coefficients.len() + moments.len() - 1;
-        assert!(
-            max_power < MOMENT_POWER_CAPACITY,
-            "moment product degree {} exceeds capacity {}",
-            max_power - 1,
-            MOMENT_POWER_CAPACITY - 2
-        );
-        let base = lo + 0.5 * (hi - lo);
-        let mut local_coefficients = [0.0; MOMENT_POWER_CAPACITY];
-        taylor_shift(
-            coefficients,
-            base - polynomial_start,
-            &mut local_coefficients[..coefficients.len()],
-        );
-        let mut lo_powers = [1.0; MOMENT_POWER_CAPACITY];
-        let mut hi_powers = [1.0; MOMENT_POWER_CAPACITY];
-        let x_lo = lo - base;
-        let x_hi = hi - base;
-        for power in 1..=max_power {
-            lo_powers[power] = lo_powers[power - 1] * x_lo;
-            hi_powers[power] = hi_powers[power - 1] * x_hi;
-        }
-        let mut local_moments = [0.0; MOMENT_POWER_CAPACITY];
-        for (moment_power, moment) in local_moments[..moments.len()].iter_mut().enumerate() {
-            for (polynomial_power, coefficient) in local_coefficients
-                .iter()
-                .copied()
-                .take(coefficients.len())
-                .enumerate()
-            {
-                let power = polynomial_power + moment_power + 1;
-                *moment += coefficient * (hi_powers[power] - lo_powers[power]) / power as f64;
+        };
+        let mut centered = [0.0; MOMENT_POWER_CAPACITY];
+        window.center(coefficients, &mut centered[..coefficients.len()]);
+        let mut length = coefficients.len();
+        for (order, moments) in orders.enumerate() {
+            if order > 0 {
+                length = differentiate_in_place(&mut centered, length);
+            }
+            if length > 0 {
+                window.accumulate_centered(&centered[..length], moments);
             }
         }
-        accumulate_translated_moments(base, &local_moments[..moments.len()], origin, moments);
     }
 
     fn piece_at(&self, i: usize, t: f64) -> f64 {
-        let tau = (t - self.starts[i]).clamp(0.0, self.ends[i] - self.starts[i]);
+        let tau = self.offset_in(i, t);
         self.coeffs[i]
             .iter()
             .rev()
@@ -1809,13 +3376,13 @@ impl AxisSignalTable {
             if !self.boundary.clamps_before_signal() {
                 return f64::NAN;
             }
-            return self.piece_at(0, self.first_t);
+            return self.held_before();
         }
         if t > self.last_t {
             if !self.lookahead.clamps_past_signal() {
                 return f64::NAN;
             }
-            return self.piece_at(self.coeffs.len() - 1, self.last_t);
+            return self.held_after();
         }
         let i = self.piece_covering(t, hint);
         if t >= self.starts[i] - SEGMENT_TIME_EPS_S {
@@ -1870,7 +3437,6 @@ fn eval_segment_axis(seg: &ContinuousSegment, axis: usize, t: f64) -> f64 {
 
 const MAX_FIT_REFINEMENT_SPLITS: usize = 512;
 const LEADER_SPAN_PARALLEL_THRESHOLD: usize = 512;
-const MIN_DEVICE_INTERVAL_S: f64 = 2e-9;
 
 /// A span's acceleration is read off a quintic whose odd coefficients are
 /// solved from the endpoint positions, so one ulp of sampling noise reaches
@@ -1882,6 +3448,18 @@ const MIN_DEVICE_INTERVAL_S: f64 = 2e-9;
 /// high-degree rung — and the shortest knot span `bezier_pieces_to_nurbs` may
 /// be handed — is the one that still leaves the budget to the signal.
 const LADDER_HIGH_DEGREE_ACCEL_NOISE_GAIN: f64 = 32.0;
+
+fn stored_acceleration_noise(position_scale: f64, span_s: f64) -> f64 {
+    let control_point_rounding = 0.5 * f64::EPSILON * position_scale;
+    let second_difference_rounding = 4.0 * control_point_rounding;
+    let degree = LADDER_MAX_DEGREE as f64;
+    degree * (degree - 1.0) * second_difference_rounding / (span_s * span_s)
+}
+
+fn stored_acceleration_floor(position_scale: f64, fit_tol: FitTol) -> f64 {
+    let storage_share_of_accel_budget = 0.5 * fit_tol.accel_mm_s2;
+    (stored_acceleration_noise(position_scale, 1.0) / storage_share_of_accel_budget).sqrt()
+}
 
 #[derive(Debug, Clone, Copy)]
 struct LadderFloors {
@@ -1907,7 +3485,7 @@ fn ladder_resolution_floor<S: TrackSignal>(
     for &t in seeds {
         let (position, velocity, _) = sig.eval_pva(t);
         if position.is_finite() {
-            position_scale = position_scale.max(position.abs());
+            position_scale = position_scale.max(sig.position_rounding_scale(position));
         }
         if velocity.is_finite() {
             velocity_scale = velocity_scale.max(velocity.abs());
@@ -1923,7 +3501,9 @@ fn ladder_resolution_floor_from_scales(
     fit_tol: FitTol,
 ) -> LadderFloors {
     let sample_noise = f64::EPSILON * nurbs::fmadd(time_scale, velocity_scale, position_scale);
-    let representable = MIN_DEVICE_INTERVAL_S.max(8.0 * f64::EPSILON * time_scale);
+    let representable = MIN_DEVICE_INTERVAL_S
+        .max(8.0 * f64::EPSILON * time_scale)
+        .max(stored_acceleration_floor(position_scale, fit_tol));
     LadderFloors {
         high_degree: representable
             .max((LADDER_HIGH_DEGREE_ACCEL_NOISE_GAIN * sample_noise / fit_tol.accel_mm_s2).sqrt()),
@@ -1936,36 +3516,173 @@ fn ladder_resolution_floor_from_scales(
 /// knot span, and de Boor divides by knot spacing, so the *neighbouring*
 /// full-width span evaluates to garbage. Exact convolution cut transitions
 /// land an ulp away from segment edges by construction, so the collision is
-/// routine rather than exceptional. Each cluster collapses to its rightmost
-/// member — the transitions are right-owned, and the sub-ulp interval that
-/// gets absorbed into the span on the left carries no integral. `t_start` and
-/// `t_end` are pinned, so a cluster touching the start keeps the start.
-fn coalesce_degenerate_seeds(seeds: &mut Vec<f64>, minimum_span: f64) {
+/// routine rather than exceptional. A run of seeds each closer than the floor
+/// to the last kept one rolls forward onto its rightmost member, so what it
+/// absorbs can be many floors wide. It may roll onto a velocity break but
+/// never past one, and never past the pinned `t_start`: those anchor it.
+///
+/// A velocity break within the floor of an anchor is moved onto it, one knot
+/// carrying both, and the span beyond reads its edge velocity past the moved
+/// break. Moving a break by `d` shifts position by its velocity step times
+/// `d`; within `position_tolerance` that is the knot the signal would have
+/// had at representable resolution, beyond it the breaks are an error of
+/// whatever laid them.
+///
+/// The absorbed seeds may still be acceleration breaks of the signal, so the
+/// plan records, per kept span, how far in from each edge they reach: the
+/// ladder must read that edge's state past them.
+fn coalesce_degenerate_seeds(
+    seeds: &mut Vec<f64>,
+    velocity_breaks: &[VelocityBreak],
+    minimum_span: f64,
+    position_tolerance: f64,
+) -> Result<Vec<EdgeSlivers>, CrowdedVelocityBreaks> {
+    assert!(
+        velocity_breaks.is_sorted_by(|left, right| left.t <= right.t),
+        "velocity breaks are not sorted: {velocity_breaks:?}"
+    );
+    let step_at = |t: f64| {
+        velocity_breaks
+            .binary_search_by(|probe| probe.t.total_cmp(&t))
+            .ok()
+            .map(|index| velocity_breaks[index].step.abs())
+    };
+    let moved = |break_at: f64, moved_onto: f64, velocity_step: f64| {
+        let position_shift = velocity_step * (break_at - moved_onto).abs();
+        if position_shift > position_tolerance {
+            Err(CrowdedVelocityBreaks {
+                break_at,
+                moved_onto,
+                velocity_step,
+                position_shift,
+            })
+        } else {
+            Ok(())
+        }
+    };
     let t_end = *seeds.last().expect("fit seeds are empty");
     let mut kept = Vec::with_capacity(seeds.len());
-    kept.push(seeds[0]);
+    kept.push(KeptSeed::pinned(seeds[0]));
     for &seed in &seeds[1..seeds.len() - 1] {
-        if seed - *kept.last().expect("kept seeds are empty") >= minimum_span {
-            kept.push(seed);
-        } else if kept.len() > 1 {
-            kept.pop();
-            kept.push(seed);
+        let step = step_at(seed);
+        let last = kept.last_mut().expect("kept seeds are empty");
+        let gap = seed - last.t;
+        if gap >= minimum_span {
+            kept.push(KeptSeed::interior(seed, step));
+        } else if last.anchors() {
+            if let Some(step) = step {
+                moved(seed, last.t, step)?;
+                last.break_after = Some(seed);
+                last.carried_steps += step;
+            }
+            last.absorbed_after = last.absorbed_after.max(gap);
+        } else {
+            last.absorbed_before += gap;
+            last.t = seed;
+            last.velocity_break = step.is_some();
+            last.carried_steps = step.unwrap_or(0.0);
         }
     }
-    while kept.len() > 1 && t_end - *kept.last().expect("kept seeds are empty") < minimum_span {
+    let mut absorbed_end = 0.0_f64;
+    let mut end_break = None;
+    while kept.len() > 1 {
+        let last = kept.last().expect("kept seeds are empty");
+        let gap = t_end - last.t;
+        if gap >= minimum_span {
+            break;
+        }
+        if last.carried_steps > 0.0 {
+            moved(last.t, t_end, last.carried_steps)?;
+            end_break = Some(last.t);
+        }
+        absorbed_end = absorbed_end.max(gap + last.absorbed_before);
         kept.pop();
     }
-    kept.push(t_end);
-    *seeds = kept;
+    let mut end = KeptSeed::pinned(t_end);
+    end.absorbed_before = absorbed_end;
+    end.break_before = end_break;
+    kept.push(end);
+    *seeds = kept.iter().map(|seed| seed.t).collect();
+    Ok(kept
+        .windows(2)
+        .map(|span| EdgeSlivers {
+            start: span[0].absorbed_after,
+            end: span[1].absorbed_before,
+            start_break: span[0].break_after,
+            end_break: span[1].break_before,
+        })
+        .collect())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct VelocityBreak {
+    t: f64,
+    step: f64,
+}
+
+struct KeptSeed {
+    t: f64,
+    pinned: bool,
+    velocity_break: bool,
+    carried_steps: f64,
+    absorbed_before: f64,
+    absorbed_after: f64,
+    break_before: Option<f64>,
+    break_after: Option<f64>,
+}
+
+impl KeptSeed {
+    fn pinned(t: f64) -> Self {
+        Self {
+            pinned: true,
+            ..Self::interior(t, None)
+        }
+    }
+
+    fn interior(t: f64, step: Option<f64>) -> Self {
+        Self {
+            t,
+            pinned: false,
+            velocity_break: step.is_some(),
+            carried_steps: step.unwrap_or(0.0),
+            absorbed_before: 0.0,
+            absorbed_after: 0.0,
+            break_before: None,
+            break_after: None,
+        }
+    }
+
+    fn anchors(&self) -> bool {
+        self.pinned || self.velocity_break
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CrowdedVelocityBreaks {
+    break_at: f64,
+    moved_onto: f64,
+    velocity_step: f64,
+    position_shift: f64,
+}
+
+/// How far into a span, from each edge, seeds absorbed by coalescing reach,
+/// and the innermost velocity break among them, past which the edge's
+/// velocity is read.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+struct EdgeSlivers {
+    start: f64,
+    end: f64,
+    start_break: Option<f64>,
+    end_break: Option<f64>,
 }
 
 struct FitPlan {
     seeds: Vec<f64>,
+    slivers: Vec<EdgeSlivers>,
     floors: LadderFloors,
-    max_depth: u32,
 }
 
-fn fit_seed_times(
+pub(crate) fn fit_seed_times(
     axis: usize,
     t_start: f64,
     t_end: f64,
@@ -1996,31 +3713,154 @@ fn fit_seed_times(
 
 fn fit_plan_from_seeds(
     mut seeds: Vec<f64>,
+    velocity_breaks: &[VelocityBreak],
     floors: LadderFloors,
-    t_start: f64,
-    t_end: f64,
-) -> FitPlan {
-    coalesce_degenerate_seeds(&mut seeds, floors.cubic);
-    let max_depth = libm::log2((t_end - t_start) / floors.cubic).ceil().max(0.0) as u32;
-    FitPlan {
+    position_tolerance: f64,
+) -> Result<FitPlan, CrowdedVelocityBreaks> {
+    let slivers = coalesce_degenerate_seeds(
+        &mut seeds,
+        velocity_breaks,
+        floors.cubic,
+        position_tolerance,
+    )?;
+    Ok(FitPlan {
         seeds,
+        slivers,
         floors,
-        max_depth,
+    })
+}
+
+fn crowded_velocity_breaks_error(
+    axis: usize,
+    fit_context: &'static str,
+    floors: LadderFloors,
+    fit_tol: FitTol,
+    crowded: CrowdedVelocityBreaks,
+) -> PostProcessError {
+    PostProcessError::CrowdedVelocityBreaks {
+        axis,
+        fit_context,
+        break_at: crowded.break_at,
+        moved_onto: crowded.moved_onto,
+        velocity_step: crowded.velocity_step,
+        position_shift: crowded.position_shift,
+        position_budget: fit_tol.pos_mm,
+        floor: floors.cubic,
     }
 }
 
-fn prepare_fit_plan<S: TrackSignal>(
-    axis: usize,
-    t_start: f64,
-    t_end: f64,
-    seed_breakpoints: &[f64],
+fn plan_seeds_and_floors<S: TrackSignal>(
+    fit: &AxisFit,
     sig: &S,
-    fit_tol: FitTol,
+) -> Result<(Vec<f64>, LadderFloors), PostProcessError> {
+    let seeds = fit_seed_times(fit.axis, fit.t_start, fit.t_end, fit.seed_breakpoints)?;
+    let floors = seed_floors(fit, sig, &seeds);
+    Ok((seeds, floors))
+}
+
+fn seed_floors<S: TrackSignal>(fit: &AxisFit, sig: &S, seeds: &[f64]) -> LadderFloors {
+    let time_scale = fit.t_start.abs().max(fit.t_end.abs());
+    ladder_resolution_floor(sig, seeds, time_scale, fit.fit_tol)
+}
+
+fn prepare_fit_plan<S: TrackSignal>(fit: &AxisFit, sig: &S) -> Result<FitPlan, PostProcessError> {
+    let seeds = fit_seed_times(fit.axis, fit.t_start, fit.t_end, fit.seed_breakpoints)?;
+    plan_over_seeds(fit, sig, seeds)
+}
+
+fn plan_over_seeds<S: TrackSignal>(
+    fit: &AxisFit,
+    sig: &S,
+    seeds: Vec<f64>,
 ) -> Result<FitPlan, PostProcessError> {
-    let seeds = fit_seed_times(axis, t_start, t_end, seed_breakpoints)?;
-    let time_scale = t_start.abs().max(t_end.abs());
-    let floors = ladder_resolution_floor(sig, &seeds, time_scale, fit_tol);
-    Ok(fit_plan_from_seeds(seeds, floors, t_start, t_end))
+    let floors = seed_floors(fit, sig, &seeds);
+    let velocity_breaks =
+        velocity_breaks_among(sig, &seeds, velocity_resolution(fit.fit_tol, floors));
+    fit_plan_from_seeds(seeds, &velocity_breaks, floors, fit.fit_tol.pos_mm).map_err(|crowded| {
+        crowded_velocity_breaks_error(fit.axis, fit.fit_context, floors, fit.fit_tol, crowded)
+    })
+}
+
+/// The widest velocity step a span at the resolution floor can carry and
+/// still pass the floor's velocity gate: what an acceleration within
+/// tolerance carries across one floor.
+fn velocity_resolution(fit_tol: FitTol, floors: LadderFloors) -> f64 {
+    fit_tol.accel_mm_s2 * floors.cubic
+}
+
+/// [`velocity_resolution`] of a fit to `fit_tol` of a signal reaching
+/// positions to `position_scale`, speeds to `velocity_scale` and times to
+/// `time_scale`: the speeds such a fit cannot resolve.
+pub(crate) fn velocity_resolution_at_scales(
+    position_scale: f64,
+    velocity_scale: f64,
+    time_scale: f64,
+    fit_tol: FitTol,
+) -> f64 {
+    velocity_resolution(
+        fit_tol,
+        ladder_resolution_floor_from_scales(position_scale, velocity_scale, time_scale, fit_tol),
+    )
+}
+
+const CUBIC_ANCHOR_OFFSET_CURVATURE: f64 = 6.0;
+
+/// The widest position step a span at the resolution floor can absorb and
+/// still hold the acceleration tolerance: a cubic anchored `δ` off its
+/// signal at one end bends by `6δ/h²` there.
+fn position_resolution(fit_tol: FitTol, floors: LadderFloors) -> f64 {
+    fit_tol.accel_mm_s2 * floors.cubic * floors.cubic / CUBIC_ANCHOR_OFFSET_CURVATURE
+}
+
+fn velocity_breaks_among<S: TrackSignal>(
+    sig: &S,
+    seeds: &[f64],
+    velocity_resolution: f64,
+) -> Vec<VelocityBreak> {
+    seeds[1..seeds.len() - 1]
+        .iter()
+        .map(|&t| VelocityBreak {
+            t,
+            step: velocity_step_across(sig, t),
+        })
+        .filter(|velocity_break| velocity_break.step.abs() > velocity_resolution)
+        .collect()
+}
+
+fn velocity_step_across<S: TrackSignal>(sig: &S, t: f64) -> f64 {
+    sig.eval_pva(next_toward(t, f64::INFINITY)).1
+        - sig.eval_pva(next_toward(t, f64::NEG_INFINITY)).1
+}
+
+struct ScaleProbe {
+    position_rounding_scale: f64,
+    velocity: f64,
+    velocity_step: f64,
+}
+
+fn scale_probe<S: TrackSignal>(sig: &S, t: f64) -> ScaleProbe {
+    let (position, velocity, _) = sig.eval_pva(t);
+    ScaleProbe {
+        position_rounding_scale: sig.position_rounding_scale(position),
+        velocity,
+        velocity_step: velocity_step_across(sig, t),
+    }
+}
+
+pub(crate) struct FitResolution {
+    pub velocity: f64,
+    pub position: f64,
+}
+
+pub(crate) fn fit_resolution<S: TrackSignal>(
+    fit: &AxisFit,
+    sig: &S,
+) -> Result<FitResolution, PostProcessError> {
+    let (_, floors) = plan_seeds_and_floors(fit, sig)?;
+    Ok(FitResolution {
+        velocity: velocity_resolution(fit.fit_tol, floors),
+        position: position_resolution(fit.fit_tol, floors),
+    })
 }
 
 fn fit_pieces_to_nurbs(
@@ -2051,40 +3891,71 @@ pub(crate) struct AxisFit<'a> {
     pub seed_breakpoints: &'a [f64],
     pub fit_tol: FitTol,
     pub fit_context: &'static str,
-    pub velocity_continuous: bool,
+    pub seam_continuity: SeamContinuity,
 }
 
 pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
     fit: AxisFit,
     sig: &S,
 ) -> Result<nurbs::ScalarNurbs, PostProcessError> {
-    let plan = prepare_fit_plan(
-        fit.axis,
-        fit.t_start,
-        fit.t_end,
-        fit.seed_breakpoints,
-        sig,
+    let plan = prepare_fit_plan(&fit, sig)?;
+    fit_axis_over_plan(&fit, sig, plan, false)
+}
+
+/// One leader target's fit, seeded with the shaped breaks the hull cannot
+/// stand in for, and every span proven by it.
+fn fit_leader_target<S: TrackSignal>(
+    fit: AxisFit,
+    sig: &S,
+    shaped_breaks: &ShapedBreaks,
+    hidden_break_input: Option<&AxisSignalTable>,
+) -> Result<Vec<BezierPiece>, PostProcessError> {
+    let seeds = shaped_breaks.select_seeds(
+        fit_seed_times(fit.axis, fit.t_start, fit.t_end, fit.seed_breakpoints)?,
+        hidden_break_input,
         fit.fit_tol,
-    )?;
+    );
+    let plan = plan_over_seeds(&fit, sig, seeds)?;
+    fit_pieces_over_plan(&fit, sig, plan, true)
+}
+
+fn fit_axis_over_plan<S: TrackSignal>(
+    fit: &AxisFit,
+    sig: &S,
+    plan: FitPlan,
+    requires_hull: bool,
+) -> Result<nurbs::ScalarNurbs, PostProcessError> {
+    fit_pieces_to_nurbs(
+        fit.axis,
+        fit_pieces_over_plan(fit, sig, plan, requires_hull)?,
+    )
+}
+
+fn fit_pieces_over_plan<S: TrackSignal>(
+    fit: &AxisFit,
+    sig: &S,
+    plan: FitPlan,
+    requires_hull: bool,
+) -> Result<Vec<BezierPiece>, PostProcessError> {
     let policy = SpanFitPolicy {
         axis: fit.axis,
         fit_tol: fit.fit_tol,
         fit_context: fit.fit_context,
         velocity_budget: f64::INFINITY,
         floors: plan.floors,
-        max_depth: plan.max_depth,
         velocity_sign: VelocitySign::Unconstrained,
-        velocity_continuous: fit.velocity_continuous,
+        seam_continuity: fit.seam_continuity,
+        requires_hull,
     };
     let mut refinement_splits = 0;
     let mut pieces = Vec::with_capacity(plan.seeds.len());
-    for span in plan.seeds.windows(2) {
+    for (span, &slivers) in plan.seeds.windows(2).zip(&plan.slivers) {
         refine_shaped_span(
             sig,
             RefineSpan {
                 t0: span[0],
                 t1: span[1],
-                depth: 0,
+                slivers,
             },
             &policy,
             SpanSeeds {
@@ -2095,7 +3966,7 @@ pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
             &mut pieces,
         )?;
     }
-    fit_pieces_to_nurbs(fit.axis, pieces)
+    Ok(pieces)
 }
 
 /// The convolution samples one span is fitted against, held by node rather
@@ -2138,89 +4009,43 @@ impl SpanTruth {
     }
 }
 
-fn acceleration_error_witness<S: TrackSignal>(
-    sig: &S,
-    coefficients: &[f64],
-    t0: f64,
-    t1: f64,
-    budget: f64,
-) -> Option<f64> {
-    sig.acceleration_monotonicity(next_toward(t0, t1), next_toward(t1, t0))?;
-    let h = t1 - t0;
-    let acceleration = exact_piece(coefficients, 0.0, h, h)
-        .differentiate()
-        .differentiate()
-        .to_bernstein();
-    let start_acceleration = sig.second_deriv(next_toward(t0, t1));
-    let end_acceleration = sig.second_deriv(next_toward(t1, t0));
-    acceleration_interval_witness(
-        sig,
-        (t0, h, budget),
-        (0.0, 1.0),
-        (start_acceleration, end_acceleration),
-        &acceleration,
-        0,
-    )
-}
+const GOLDEN_SECTION_STEPS: u32 = 16;
 
-fn acceleration_interval_witness<S: TrackSignal>(
-    sig: &S,
-    (t0, h, budget): (f64, f64, f64),
-    (left, right): (f64, f64),
-    (a_left, a_right): (f64, f64),
-    controls: &[f64],
-    depth: u32,
-) -> Option<f64> {
-    let candidate_min = controls.iter().copied().fold(f64::INFINITY, f64::min);
-    let candidate_max = controls.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    if candidate_max - a_left.min(a_right) <= budget
-        && a_left.max(a_right) - candidate_min <= budget
-    {
-        return None;
-    }
-    let mid = 0.5 * (left + right);
-    let truth = sig.second_deriv(nurbs::fmadd(mid, h, t0));
-    let n = controls.len();
-    let mut work = [0.0; 14];
-    let mut lower = [0.0; 14];
-    let mut upper = [0.0; 14];
-    work[..n].copy_from_slice(controls);
-    lower[0] = work[0];
-    upper[n - 1] = work[n - 1];
-    for remaining in (1..n).rev() {
-        for index in 0..remaining {
-            work[index] = 0.5 * work[index] + 0.5 * work[index + 1];
+pub(crate) fn golden_section_peak<E>(
+    mut value: impl FnMut(f64) -> Result<f64, E>,
+    mut low: f64,
+    mut high: f64,
+) -> Result<(f64, f64), E> {
+    let shrink = 0.5 * (5.0_f64.sqrt() - 1.0);
+    let mut left = high - shrink * (high - low);
+    let mut right = low + shrink * (high - low);
+    let (mut left_value, mut right_value) = (value(left)?, value(right)?);
+    for _ in 0..GOLDEN_SECTION_STEPS {
+        if left_value >= right_value {
+            high = right;
+            (right, right_value) = (left, left_value);
+            left = high - shrink * (high - low);
+            left_value = value(left)?;
+        } else {
+            low = left;
+            (left, left_value) = (right, right_value);
+            right = low + shrink * (high - low);
+            right_value = value(right)?;
         }
-        lower[n - remaining] = work[0];
-        upper[remaining - 1] = work[remaining - 1];
     }
-    if !truth.is_finite() || (work[0] - truth).abs() > budget || depth == 12 {
-        return Some(2.0 * mid - 1.0);
-    }
-    acceleration_interval_witness(
-        sig,
-        (t0, h, budget),
-        (left, mid),
-        (a_left, truth),
-        &lower[..n],
-        depth + 1,
-    )
-    .or_else(|| {
-        acceleration_interval_witness(
-            sig,
-            (t0, h, budget),
-            (mid, right),
-            (truth, a_right),
-            &upper[..n],
-            depth + 1,
-        )
+    Ok(if left_value >= right_value {
+        (left, left_value)
+    } else {
+        (right, right_value)
     })
 }
 
 const LADDER_FIT_NODES_U: [f64; 3] = [0.0, 0.5, -0.5];
 
 /// Everything one fit's spans are refined against: the axis being fitted,
-/// its budgets, the resolution floors of the signal, and the rung rules.
+/// its budgets, the resolution floors of the signal, the rung rules, and
+/// whether the plan left breaks inside its spans that only the hull over
+/// the signal's exact polynomials can hold a piece across.
 #[derive(Clone, Copy)]
 struct SpanFitPolicy {
     axis: usize,
@@ -2228,18 +4053,17 @@ struct SpanFitPolicy {
     fit_context: &'static str,
     velocity_budget: f64,
     floors: LadderFloors,
-    max_depth: u32,
     velocity_sign: VelocitySign,
-    velocity_continuous: bool,
+    seam_continuity: SeamContinuity,
+    requires_hull: bool,
 }
 
-/// One span of a refinement tree: its bounds and how deep the bisection
-/// already is.
+/// One span of a refinement tree.
 #[derive(Clone, Copy)]
 struct RefineSpan {
     t0: f64,
     t1: f64,
-    depth: u32,
+    slivers: EdgeSlivers,
 }
 
 /// The partition seeds the refined span sits between, reported by a fit
@@ -2250,44 +4074,248 @@ struct SpanSeeds {
     upper: f64,
 }
 
+/// How far inside a span edge the state the ladder anchors to is read: past
+/// whatever coalescing absorbed there, and at least a cubic floor, but no
+/// more than a quarter of the span.
+fn edge_inset(h: f64, cubic_floor: f64, absorbed: f64) -> f64 {
+    cubic_floor.max(absorbed).min(0.25 * h)
+}
+
+/// The velocity and acceleration a span is anchored to at one edge. Both
+/// are read at the seam itself, so neighbouring pieces meet with matching
+/// state wherever the signal is smooth — unless a break hides in the edge's
+/// sliver: then the piece anchors to the acceleration past the sliver,
+/// extrapolated back to the seam, the break's far side as it would read
+/// there. Where the sliver holds seeds coalescing absorbed, the piece also
+/// anchors to the velocity past the sliver carried back to the seam by that
+/// acceleration: the velocity the absorbed break changes across the sliver
+/// moves onto the seam as a velocity break, as coalescing moves a sub-floor
+/// velocity break onto its anchor. Refining toward the seam could otherwise
+/// never absorb it, a piece of span `h` bending by `Δv/h` to reach it. The
+/// move shifts position by at most the moved step times the sliver, which
+/// must stay within the position tolerance. A sliver no seed was absorbed
+/// into keeps its seam velocity, so a break nothing declared still fails the
+/// fit. The extrapolation runs through a second read as far again past
+/// the sliver, so a smooth signal's jerk across a wide sliver cancels; the
+/// inset is at most a quarter span, so that read stays inside the span. Its
+/// miss of the seam reading only flags a candidate break: a smooth edge
+/// whose jerk changes within the sliver misses as well, so the candidate is
+/// confirmed by [`sliver_hides_break`]. At a square-root onset the signal
+/// declares on the edge the acceleration is steep past any extrapolation
+/// but hides no break: the edge anchors to the seam reading, where the span
+/// across the onset anchors too.
+fn edge_velocity_and_acceleration<S: TrackSignal>(
+    sig: &S,
+    axis: usize,
+    seam: f64,
+    past_sliver: f64,
+    absorbed_seeds: bool,
+    onset_on_edge: bool,
+    fit_tol: FitTol,
+) -> Result<EdgeAnchor, PostProcessError> {
+    let (_, velocity, seam_acceleration) = sig.eval_pva(seam);
+    let velocity = exact_value(axis, velocity, seam)?;
+    let seam_acceleration = exact_value(axis, seam_acceleration, seam)?;
+    let at_seam = EdgeAnchor {
+        velocity,
+        acceleration: seam_acceleration,
+    };
+    if onset_on_edge {
+        return Ok(at_seam);
+    }
+    let (_, past_velocity, past_acceleration) = sig.eval_pva(past_sliver);
+    let past_velocity = exact_value(axis, past_velocity, past_sliver)?;
+    let past_acceleration = exact_value(axis, past_acceleration, past_sliver)?;
+    let beyond = nurbs::fmadd(2.0, past_sliver - seam, seam);
+    let beyond_acceleration = exact_value(axis, sig.second_deriv(beyond), beyond)?;
+    let extrapolated_to_seam = 2.0 * past_acceleration - beyond_acceleration;
+    if (extrapolated_to_seam - seam_acceleration).abs() > fit_tol.accel_mm_s2
+        && sliver_hides_break(
+            sig,
+            axis,
+            (seam, seam_acceleration),
+            (past_sliver, past_acceleration),
+            (beyond, beyond_acceleration),
+            fit_tol,
+        )?
+    {
+        if !absorbed_seeds {
+            return Ok(EdgeAnchor {
+                acceleration: extrapolated_to_seam,
+                ..at_seam
+            });
+        }
+        let carried_velocity = nurbs::fmadd(
+            0.5 * (past_acceleration + extrapolated_to_seam),
+            seam - past_sliver,
+            past_velocity,
+        );
+        let velocity_step = carried_velocity - velocity;
+        let position_shift = (velocity_step * (seam - past_sliver)).abs();
+        if position_shift > fit_tol.pos_mm {
+            return Err(PostProcessError::SliverVelocityCarry {
+                axis,
+                seam,
+                past_sliver,
+                velocity_step,
+                position_shift,
+                position_budget: fit_tol.pos_mm,
+            });
+        }
+        return Ok(EdgeAnchor {
+            velocity: carried_velocity,
+            acceleration: extrapolated_to_seam,
+        });
+    }
+    Ok(at_seam)
+}
+
+/// Whether the acceleration between the `seam` and `past` reads jumps rather
+/// than bends. Less the line through the `past` and `beyond` reads, the
+/// signal misses at the seam by what the extrapolation missed and not at
+/// all past the sliver; bisecting toward where it crosses half that miss
+/// closes in on a break, whose step stays across the crossing however close
+/// the reads, while a smooth signal's change between them vanishes.
+fn sliver_hides_break<S: TrackSignal>(
+    sig: &S,
+    axis: usize,
+    seam: (f64, f64),
+    past: (f64, f64),
+    beyond: (f64, f64),
+    fit_tol: FitTol,
+) -> Result<bool, PostProcessError> {
+    let slope = (beyond.1 - past.1) / (beyond.0 - past.0);
+    let residual =
+        |(t, acceleration): (f64, f64)| acceleration - nurbs::fmadd(slope, t - past.0, past.1);
+    let half_miss = 0.5 * residual(seam);
+    let (mut near, mut far) = (seam, past);
+    loop {
+        let mid = 0.5 * near.0 + 0.5 * far.0;
+        if mid == near.0 || mid == far.0 {
+            return Ok((far.1 - near.1).abs() > fit_tol.accel_mm_s2);
+        }
+        let read = (mid, exact_value(axis, sig.second_deriv(mid), mid)?);
+        if (residual(read) - half_miss) * half_miss > 0.0 {
+            near = read;
+        } else {
+            far = read;
+        }
+    }
+}
+
+/// The state a span edge anchors its rungs to.
+#[derive(Debug, Clone, Copy)]
+struct EdgeAnchor {
+    velocity: f64,
+    acceleration: f64,
+}
+
+/// The velocity a span anchors to at a seam where coalescing moved a velocity
+/// break onto it: the far side of the break, carried back to the seam by its
+/// acceleration across the sub-floor gap.
+fn velocity_past_moved_break<S: TrackSignal>(
+    sig: &S,
+    axis: usize,
+    break_at: f64,
+    into_span: f64,
+    seam: f64,
+) -> Result<f64, PostProcessError> {
+    let past = next_toward(break_at, into_span);
+    let (_, velocity, acceleration) = sig.eval_pva(past);
+    let velocity = exact_value(axis, velocity, past)?;
+    let acceleration = exact_value(axis, acceleration, past)?;
+    Ok(nurbs::fmadd(acceleration, seam - past, velocity))
+}
+
+fn span_probe_t(t0: f64, t1: f64, u: f64) -> f64 {
+    match u {
+        -1.0 => next_toward(t0, t1),
+        1.0 => next_toward(t1, t0),
+        _ => nurbs::fmadd(0.5 * (u + 1.0), t1 - t0, t0),
+    }
+}
+
 /// Ladder fit of the shaped signal over one span: the endpoint-anchored
 /// quadratic carrying the span's own travel, the cubic through both endpoint
 /// velocities, then the quintic Hermite matching the convolution's exact
 /// (p, v, a) at both ends and degrees 6/7 from interior residuals — the
 /// lowering ladder against pre-sampled truth, with the shaper's own budgets.
 /// Every accepted piece is endpoint-anchored, so the span seams stay C0 no
-/// matter which rung wins. Returns the accepted monomial-in-u fit, or the
-/// quintic base with `fits = false` so the caller can bisect.
+/// matter which rung wins. On a span reaching a square-root onset the
+/// acceleration's shoulder bends between the probes, so the rungs are also
+/// held to the tolerance across the resolved stretch by `OnsetHold`: a miss
+/// there splits a splittable span — grading the partition toward the onset
+/// only as deep as its fit needs — and at the floor, where the closest rung
+/// is kept, it is the closest there too. The stretch is sampled only once a
+/// rung passes the probes or a kept closest rung is ranked. Returns the
+/// accepted monomial-in-u fit, or the closest rung with the ladder's miss.
+///
+/// A rung that passes the probes is then held between them: proven by the
+/// Bernstein hull of its error against the signal's exact polynomials
+/// where the signal has them, else against its Taylor-model enclosure; a
+/// signal with neither fails loudly with
+/// [`PostProcessError::UnprovableSpan`]. Where it has exact polynomials
+/// every truth sample is read off them too, each edge's from the side
+/// facing into the span.
 #[allow(clippy::type_complexity)]
 fn shaped_ladder<S: TrackSignal>(
     sig: &S,
+    exact: Option<&ExactSpan>,
     t0: f64,
     t1: f64,
+    slivers: EdgeSlivers,
     policy: &SpanFitPolicy,
+    keeps_closest_rung: bool,
 ) -> Result<(Vec<f64>, Option<LadderFailure>), PostProcessError> {
     let axis = policy.axis;
     let fit_tol = policy.fit_tol;
     let h = t1 - t0;
+    let piece_tol = fit_tol.for_piece(h);
     let t_of = |u: f64| nurbs::fmadd(0.5 * (u + 1.0), h, t0);
-    let interior_t_of = |u: f64| {
-        if u == -1.0 {
-            next_toward(t0, t1)
-        } else if u == 1.0 {
-            next_toward(t1, t0)
-        } else {
-            t_of(u)
-        }
+    let from_start = FacingRead {
+        sig,
+        exact,
+        toward: t1,
     };
-    let t0_inside = interior_t_of(-1.0);
-    let p0 = exact_value(axis, sig.eval(t0), t0)?;
-    let (_, v0, a0) = sig.eval_pva(t0_inside);
-    let v0 = exact_value(axis, v0, t0_inside)?;
-    let a0 = exact_value(axis, a0, t0_inside)?;
-    let t1_inside = interior_t_of(1.0);
-    let p1 = exact_value(axis, sig.eval(t1), t1)?;
-    let (_, v1, a1) = sig.eval_pva(t1_inside);
-    let v1 = exact_value(axis, v1, t1_inside)?;
-    let a1 = exact_value(axis, a1, t1_inside)?;
+    let from_end = FacingRead {
+        sig,
+        exact,
+        toward: t0,
+    };
+    let t0_inside = span_probe_t(t0, t1, -1.0);
+    let p0 = exact_value(axis, from_start.eval(t0), t0)?;
+    let start_past_sliver = t0 + edge_inset(h, policy.floors.cubic, slivers.start);
+    let end_past_sliver = t1 - edge_inset(h, policy.floors.cubic, slivers.end);
+    let start = edge_velocity_and_acceleration(
+        &from_start,
+        axis,
+        t0_inside,
+        start_past_sliver,
+        slivers.start > 0.0,
+        square_root_onset_on_edge(sig, t0),
+        fit_tol,
+    )?;
+    let a0 = start.acceleration;
+    let v0 = match slivers.start_break {
+        Some(break_at) => velocity_past_moved_break(&from_start, axis, break_at, t1, t0)?,
+        None => start.velocity,
+    };
+    let t1_inside = span_probe_t(t0, t1, 1.0);
+    let p1 = exact_value(axis, from_end.eval(t1), t1)?;
+    let end = edge_velocity_and_acceleration(
+        &from_end,
+        axis,
+        t1_inside,
+        end_past_sliver,
+        slivers.end > 0.0,
+        square_root_onset_on_edge(sig, t1),
+        fit_tol,
+    )?;
+    let a1 = end.acceleration;
+    let v1 = match slivers.end_break {
+        Some(break_at) => velocity_past_moved_break(&from_end, axis, break_at, t0, t1)?,
+        None => end.velocity,
+    };
     let base = quintic_in_u((p0, v0, a0), (p1, v1, a1), h);
     let endpoint_delta = exact_value(axis, sig.position_delta((t0, p0), (t1, p1)), t1)?;
 
@@ -2303,7 +4331,7 @@ fn shaped_ladder<S: TrackSignal>(
             1.0 => (p1, v1, a1),
             _ => {
                 let t = t_of(u);
-                let (pos, vel, acc) = sig.eval_pva(t);
+                let (pos, vel, acc) = from_start.eval_pva(t);
                 (
                     exact_value(axis, pos, t)?,
                     exact_value(axis, vel, t)?,
@@ -2318,10 +4346,24 @@ fn shaped_ladder<S: TrackSignal>(
     for (index, &u) in LADDER_FIT_NODES_U.iter().enumerate() {
         truth.fit_pos[index] = match SpanTruth::probe_index(u) {
             Some(probe) => truth.pos[probe],
-            None => finite_sample(axis, sig, t_of(u))?,
+            None => finite_sample(axis, &from_start, t_of(u))?,
         };
     }
 
+    let onset_hold = square_root_onset_within(sig, t0, t1).then(|| OnsetHold {
+        read: &from_start,
+        span: (t0, t1),
+        resolved: (start_past_sliver, end_past_sliver),
+        tol: piece_tol,
+        ranks_misses: keeps_closest_rung,
+        samples: std::array::from_fn(|_| std::cell::OnceCell::new()),
+        edge_scans: std::cell::OnceCell::new(),
+    });
+    let held_miss = |rung: &[f64]| {
+        onset_hold
+            .as_ref()
+            .map_or(0.0, |hold| hold.worst_miss(rung))
+    };
     match ladder_fit(
         &base,
         LadderSpan { h, endpoint_delta },
@@ -2329,26 +4371,60 @@ fn shaped_ladder<S: TrackSignal>(
             position: &|u| truth.pos_at(u),
             velocity: &|u| truth.vel_at(u),
             acceleration: &|u| truth.acc_at(u),
+            held_miss: &held_miss,
+            held_ranks_misses: keeps_closest_rung,
         },
         LadderBudget {
-            tol: fit_tol,
+            tol: piece_tol,
             velocity: policy.velocity_budget,
         },
         LadderPolicy {
             velocity_sign: policy.velocity_sign,
-            acceleration_monotonicity: sig.acceleration_monotonicity(t0_inside, t1_inside),
+            acceleration_monotonicity: sig.acceleration_monotonicity(
+                (t0_inside, t1_inside),
+                (start_past_sliver, end_past_sliver),
+            ),
             high_degree_span_floor: policy.floors.high_degree,
-            velocity_continuous: policy.velocity_continuous,
+            seam_continuity: policy.seam_continuity,
         },
     ) {
         Ok(coefficients) => {
-            let Some(u) =
-                acceleration_error_witness(sig, &coefficients, t0, t1, fit_tol.accel_mm_s2)
-            else {
+            let resolved = (start_past_sliver, end_past_sliver);
+            let piece = FittedPiece {
+                mono_u: &coefficients,
+                t0,
+                t1,
+            };
+            let budget = HullBudget {
+                tol: piece_tol,
+                velocity: policy.velocity_budget,
+            };
+            let unproven = match exact {
+                Some(exact) => hull::first_unproven(
+                    exact.over(resolved.0, resolved.1),
+                    piece,
+                    resolved,
+                    budget,
+                ),
+                None => match sig.enclosure_on(resolved.0, resolved.1, budget.enclosure_accuracy())
+                {
+                    Some(enclosure) => hull::first_unproven(&enclosure, piece, resolved, budget),
+                    None => {
+                        return Err(PostProcessError::UnprovableSpan {
+                            axis,
+                            fit_context: policy.fit_context,
+                            t_start: t0,
+                            t_end: t1,
+                        });
+                    }
+                },
+            };
+            let Some(u) = unproven else {
                 return Ok((coefficients, None));
             };
             let t = t_of(u);
-            let (source_position, source_velocity, source_acceleration) = sig.eval_pva(t);
+            let read = if t < t1 { &from_start } else { &from_end };
+            let (source_position, source_velocity, source_acceleration) = read.eval_pva(t);
             let piece = exact_piece(&coefficients, t0, t1, h);
             let velocity = piece.differentiate();
             let acceleration = velocity.differentiate();
@@ -2387,10 +4463,222 @@ fn shaped_ladder<S: TrackSignal>(
                 }),
             ))
         }
-        Err(failure) => Ok((base, Some(failure))),
+        Err(LadderMiss {
+            closest_rung,
+            failure,
+        }) => Ok((closest_rung, Some(failure))),
     }
 }
 
+/// Intervals between the check points a span reaching a square-root onset
+/// is held to the fit tolerance at between the ladder's probes.
+const SQUARE_ROOT_ONSET_CHECK_INTERVALS: usize = 64;
+
+/// Exact samples the stretch between a resolved edge and the check point
+/// next to it is scanned at before its peak is searched.
+const SQUARE_ROOT_ONSET_EDGE_SCAN_POINTS: u32 = 8;
+
+/// Share of the tolerance above which a rung's miss peaking at a check
+/// point is searched for exactly between that point's neighbours.
+const SQUARE_ROOT_ONSET_PEAK_SEARCH_SHARE: f64 = 0.25;
+
+/// Where a span reaching a square-root onset holds its rungs to the fit
+/// tolerance between the ladder's probes: at check points spread evenly
+/// across the resolved stretch, its edges included, then — for a rung they
+/// all hold — at the exact peaks between them. Next to an edge a rung's
+/// miss of an onset there rises as the root of the distance from it, a
+/// shoulder narrower than any grid of check points, so the stretch from
+/// each resolved edge to the check point next to it is searched in that
+/// root, where the shoulder is smooth. Each check point is sampled once,
+/// the first time a rung reads it, from the edges inward, where a rung
+/// misses an onset first: a rung that misses one is refused before the
+/// rest are read, unless its misses are ranked.
+struct OnsetHold<'a, S> {
+    read: &'a FacingRead<'a, S>,
+    span: (f64, f64),
+    resolved: (f64, f64),
+    tol: FitTol,
+    ranks_misses: bool,
+    samples: [std::cell::OnceCell<HeldSample>; SQUARE_ROOT_ONSET_CHECK_INTERVALS + 1],
+    edge_scans: std::cell::OnceCell<[EdgeScan; 2]>,
+}
+
+/// The stretch between a resolved edge and the check point next to it, in
+/// the root of the distance from the span edge.
+#[derive(Clone, Copy)]
+struct EdgeRoots {
+    span_edge: f64,
+    inward: f64,
+    from: f64,
+    to: f64,
+    step: f64,
+}
+
+impl EdgeRoots {
+    fn t_of_root(&self, root: f64) -> f64 {
+        nurbs::fmadd(self.inward * root, root, self.span_edge)
+    }
+
+    fn scan_root(&self, k: u32) -> f64 {
+        nurbs::fmadd(f64::from(k + 1), self.step, self.from)
+    }
+}
+
+/// The exact samples of an edge stretch, evenly spaced in its root: the
+/// same for every rung of the span.
+struct EdgeScan {
+    roots: EdgeRoots,
+    samples: [HeldSample; SQUARE_ROOT_ONSET_EDGE_SCAN_POINTS as usize],
+}
+
+impl<S: TrackSignal> OnsetHold<'_, S> {
+    fn check_t(&self, k: usize) -> f64 {
+        if k == SQUARE_ROOT_ONSET_CHECK_INTERVALS {
+            return self.resolved.1;
+        }
+        nurbs::fmadd(
+            k as f64 / SQUARE_ROOT_ONSET_CHECK_INTERVALS as f64,
+            self.resolved.1 - self.resolved.0,
+            self.resolved.0,
+        )
+    }
+
+    fn h(&self) -> f64 {
+        self.span.1 - self.span.0
+    }
+
+    fn sample_at(&self, t: f64) -> HeldSample {
+        let (position, _, acceleration) = self.read.eval_pva(t);
+        HeldSample {
+            x: 2.0 * (t - self.span.0) / self.h() - 1.0,
+            position,
+            acceleration,
+        }
+    }
+
+    fn miss_at(&self, rung: &[f64], t: f64) -> f64 {
+        held_miss(rung, self.h(), &[self.sample_at(t)], self.tol)
+    }
+
+    fn check_sample(&self, k: usize) -> HeldSample {
+        *self.samples[k].get_or_init(|| self.sample_at(self.check_t(k)))
+    }
+
+    fn check_miss(&self, rung: &[f64], k: usize) -> f64 {
+        held_miss(rung, self.h(), &[self.check_sample(k)], self.tol)
+    }
+
+    /// The rung's worst miss, or — unless its misses are ranked — the
+    /// first check point's it misses past the tolerance: a refused rung
+    /// only needs to be refused.
+    fn worst_miss(&self, rung: &[f64]) -> f64 {
+        let mut misses = [0.0; SQUARE_ROOT_ONSET_CHECK_INTERVALS + 1];
+        for k in (0..=SQUARE_ROOT_ONSET_CHECK_INTERVALS / 2)
+            .flat_map(|inward| [inward, SQUARE_ROOT_ONSET_CHECK_INTERVALS - inward])
+            .take(SQUARE_ROOT_ONSET_CHECK_INTERVALS + 1)
+        {
+            misses[k] = self.check_miss(rung, k);
+            if !self.ranks_misses && misses[k] > 1.0 {
+                return misses[k];
+            }
+        }
+        let at_checks = misses.iter().copied().fold(0.0, f64::max);
+        if at_checks > 1.0 {
+            return at_checks;
+        }
+        let last = SQUARE_ROOT_ONSET_CHECK_INTERVALS;
+        let edge_scans = self.edge_scans.get_or_init(|| {
+            [
+                self.edge_scan(self.span.0, self.check_t(0), self.check_t(1)),
+                self.edge_scan(self.span.1, self.check_t(last), self.check_t(last - 1)),
+            ]
+        });
+        let mut worst = edge_scans
+            .iter()
+            .map(|scan| self.edge_peak(rung, scan))
+            .fold(at_checks, f64::max);
+        for (before, around) in misses.windows(3).enumerate() {
+            if around[1] > SQUARE_ROOT_ONSET_PEAK_SEARCH_SHARE
+                && around[1] >= around[0]
+                && around[1] >= around[2]
+            {
+                let Ok((_, peak)) = golden_section_peak(
+                    |t| Ok::<_, std::convert::Infallible>(self.miss_at(rung, t)),
+                    self.check_t(before),
+                    self.check_t(before + 2),
+                );
+                worst = worst.max(peak);
+            }
+        }
+        worst
+    }
+
+    fn edge_scan(&self, span_edge: f64, resolved_edge: f64, next_check: f64) -> EdgeScan {
+        let (from, to) = (
+            (resolved_edge - span_edge).abs().sqrt(),
+            (next_check - span_edge).abs().sqrt(),
+        );
+        let roots = EdgeRoots {
+            span_edge,
+            inward: (next_check - span_edge).signum(),
+            from,
+            to,
+            step: (to - from) / f64::from(SQUARE_ROOT_ONSET_EDGE_SCAN_POINTS + 1),
+        };
+        EdgeScan {
+            roots,
+            samples: std::array::from_fn(|k| {
+                let k = u32::try_from(k).expect("the edge scan has a handful of points");
+                self.sample_at(roots.t_of_root(roots.scan_root(k)))
+            }),
+        }
+    }
+
+    /// The rung's largest miss between a resolved edge and the check point
+    /// next to it, read in the root of the distance from the span edge.
+    fn edge_peak(&self, rung: &[f64], scan: &EdgeScan) -> f64 {
+        let roots = scan.roots;
+        let mut scan_peak = (roots.from, 0.0);
+        for (k, sample) in (0..).zip(&scan.samples) {
+            let miss = held_miss(rung, self.h(), &[*sample], self.tol);
+            if miss >= scan_peak.1 {
+                scan_peak = (roots.scan_root(k), miss);
+            }
+        }
+        let Ok((_, peak)) = golden_section_peak(
+            |root| Ok::<_, std::convert::Infallible>(self.miss_at(rung, roots.t_of_root(root))),
+            (scan_peak.0 - roots.step).max(roots.from),
+            (scan_peak.0 + roots.step).min(roots.to),
+        );
+        peak.max(scan_peak.1)
+    }
+}
+
+/// How far from a span edge a declared square-root onset still lies on it:
+/// the onsets and the seeds the edges come from are computed apart, ulps of
+/// a print's time apart, and no fit resolves anything this short.
+pub(crate) const SQUARE_ROOT_ONSET_EDGE_SLACK_S: f64 = 1e-9;
+
+fn square_root_onset_within<S: TrackSignal>(sig: &S, from: f64, to: f64) -> bool {
+    let onsets = sig.square_root_onsets();
+    onsets
+        .get(onsets.partition_point(|&onset| onset < from))
+        .is_some_and(|&onset| onset <= to)
+}
+
+pub(crate) fn square_root_onset_on_edge<S: TrackSignal>(sig: &S, edge: f64) -> bool {
+    square_root_onset_within(
+        sig,
+        edge - SQUARE_ROOT_ONSET_EDGE_SLACK_S,
+        edge + SQUARE_ROOT_ONSET_EDGE_SLACK_S,
+    )
+}
+
+/// Refines one partition span. Where the signal has exact polynomials over
+/// it they are built once, up front, and every piece refined from the span
+/// reads its truth off them and is proven against them. A plan that left
+/// breaks for the hull alone to hold has no other proof: a span without
+/// exact polynomials is an error there.
 fn refine_shaped_span<S: TrackSignal>(
     sig: &S,
     span: RefineSpan,
@@ -2399,30 +4687,117 @@ fn refine_shaped_span<S: TrackSignal>(
     refinement_splits: &mut usize,
     out: &mut Vec<BezierPiece>,
 ) -> Result<(), PostProcessError> {
-    let RefineSpan { t0, t1, depth } = span;
+    let exact = sig
+        .exact_polynomial_on(span.t0, span.t1)
+        .map(ExactSpan::new);
+    if policy.requires_hull && exact.is_none() {
+        return Err(PostProcessError::UnprovableSpan {
+            axis: policy.axis,
+            fit_context: policy.fit_context,
+            t_start: span.t0,
+            t_end: span.t1,
+        });
+    }
+    refine_span_against(
+        sig,
+        exact.as_ref(),
+        span,
+        policy,
+        seeds,
+        refinement_splits,
+        out,
+    )
+}
+
+fn refine_span_against<S: TrackSignal>(
+    sig: &S,
+    exact: Option<&ExactSpan>,
+    span: RefineSpan,
+    policy: &SpanFitPolicy,
+    seeds: SpanSeeds,
+    refinement_splits: &mut usize,
+    out: &mut Vec<BezierPiece>,
+) -> Result<(), PostProcessError> {
+    let RefineSpan { t0, t1, slivers } = span;
     let fit_tol = policy.fit_tol;
     let velocity_budget = policy.velocity_budget;
     let floors = policy.floors;
-    let (mono_u, failure) = shaped_ladder(sig, t0, t1, policy)?;
+    let tm = 0.5 * t0 + 0.5 * t1;
+    let at_resolution_floor = tm - t0 < floors.cubic || t1 - tm < floors.cubic;
+    let splittable = !at_resolution_floor && *refinement_splits < MAX_FIT_REFINEMENT_SPLITS;
+    let (mono_u, failure) = shaped_ladder(sig, exact, t0, t1, slivers, policy, !splittable)?;
+    #[cfg(feature = "fit-audit")]
+    let edge_insets = (
+        edge_inset(t1 - t0, floors.cubic, slivers.start),
+        edge_inset(t1 - t0, floors.cubic, slivers.end),
+    );
     if failure.is_none() {
+        #[cfg(feature = "fit-audit")]
+        crate::fit_audit::check(
+            sig,
+            crate::fit_audit::AcceptedPiece {
+                fit_context: policy.fit_context,
+                axis: policy.axis,
+                fit_tol: policy.fit_tol,
+                t0,
+                t1,
+                mono_u: &mono_u,
+                accepted_at_floor: false,
+                cubic_floor: floors.cubic,
+                edge_insets,
+                exact,
+            },
+        );
         out.push(exact_piece(&mono_u, t0, t1, t1 - t0));
         return Ok(());
     }
-    let tm = 0.5 * t0 + 0.5 * t1;
-    if t1 - t0 <= floors.cubic
-        || depth >= policy.max_depth
-        || *refinement_splits >= MAX_FIT_REFINEMENT_SPLITS
-        || tm <= t0
-        || tm >= t1
-    {
+    if !splittable {
         let failure = failure.expect("failed fit has no ladder diagnostic");
         if failure.error.position <= fit_tol.pos_mm
             && failure.error.velocity <= velocity_budget
-            && t1 - t0 <= floors.high_degree
+            && (at_resolution_floor || t1 - t0 <= floors.high_degree)
             && sig
-                .acceleration_monotonicity(next_toward(t0, t1), next_toward(t1, t0))
+                .acceleration_monotonicity(
+                    (next_toward(t0, t1), next_toward(t1, t0)),
+                    (next_toward(t0, t1), next_toward(t1, t0)),
+                )
                 .is_none()
         {
+            let velocity_change = failure.right.velocity - failure.left.velocity;
+            let gate = FloorVelocityGate::over(sig, t0, t1, fit_tol);
+            if !gate.admits(velocity_change) {
+                return Err(PostProcessError::VelocityStepAtFitFloor {
+                    axis: policy.axis,
+                    fit_context: policy.fit_context,
+                    t_start: t0,
+                    t_end: t1,
+                    velocity_change,
+                    carried_low: gate.carried_low,
+                    carried_high: gate.carried_high,
+                    velocity_slack: gate.slack,
+                    position_error: failure.error.position,
+                    position_budget: fit_tol.pos_mm,
+                    velocity_error: failure.error.velocity,
+                    acceleration_error: failure.error.acceleration,
+                    acceleration_budget: fit_tol.for_piece(t1 - t0).accel_mm_s2,
+                });
+            }
+            #[cfg(feature = "fit-audit")]
+            crate::fit_audit::check(
+                sig,
+                crate::fit_audit::AcceptedPiece {
+                    fit_context: policy.fit_context,
+                    axis: policy.axis,
+                    fit_tol: policy.fit_tol,
+                    t0,
+                    t1,
+                    mono_u: &mono_u,
+                    accepted_at_floor: true,
+                    cubic_floor: floors.cubic,
+                    edge_insets,
+                    exact,
+                },
+            );
             out.push(exact_piece(&mono_u, t0, t1, t1 - t0));
             return Ok(());
         }
@@ -2451,7 +4826,7 @@ fn refine_shaped_span<S: TrackSignal>(
             velocity_error: failure.error.velocity,
             velocity_budget,
             acceleration_error: failure.error.acceleration,
-            acceleration_budget: fit_tol.accel_mm_s2,
+            acceleration_budget: fit_tol.for_piece(t1 - t0).accel_mm_s2,
             source_position: failure.source.position,
             source_velocity: failure.source.velocity,
             source_acceleration: failure.source.acceleration,
@@ -2461,30 +4836,74 @@ fn refine_shaped_span<S: TrackSignal>(
         });
     }
     *refinement_splits += 1;
-    refine_shaped_span(
+    refine_span_against(
         sig,
+        exact,
         RefineSpan {
             t0,
             t1: tm,
-            depth: depth + 1,
+            slivers: EdgeSlivers {
+                end: 0.0,
+                end_break: None,
+                ..slivers
+            },
         },
         policy,
         seeds,
         refinement_splits,
         out,
     )?;
-    refine_shaped_span(
+    refine_span_against(
         sig,
+        exact,
         RefineSpan {
             t0: tm,
             t1,
-            depth: depth + 1,
+            slivers: EdgeSlivers {
+                start: 0.0,
+                start_break: None,
+                ..slivers
+            },
         },
         policy,
         seeds,
         refinement_splits,
         out,
     )
+}
+
+/// What a floor-width span may carry in velocity across it: the velocity
+/// its own probed acceleration accounts for, widened by what an acceleration
+/// within tolerance carries over the span.
+struct FloorVelocityGate {
+    carried_low: f64,
+    carried_high: f64,
+    slack: f64,
+}
+
+impl FloorVelocityGate {
+    fn over<S: TrackSignal>(sig: &S, t0: f64, t1: f64, fit_tol: FitTol) -> Self {
+        let h = t1 - t0;
+        let (lowest, highest) = LADDER_PROBES_U
+            .iter()
+            .map(|&u| sig.second_deriv(span_probe_t(t0, t1, u)))
+            .fold(
+                (f64::INFINITY, f64::NEG_INFINITY),
+                |(lowest, highest), acceleration| {
+                    (lowest.min(acceleration), highest.max(acceleration))
+                },
+            );
+        Self {
+            carried_low: lowest * h,
+            carried_high: highest * h,
+            slack: fit_tol.accel_mm_s2 * h,
+        }
+    }
+
+    fn admits(&self, velocity_change: f64) -> bool {
+        velocity_change >= self.carried_low - self.slack
+            && velocity_change <= self.carried_high + self.slack
+    }
 }
 
 fn fit_tolerance_without_probe(axis: usize, t_start: f64, t_end: f64) -> PostProcessError {
@@ -2638,6 +5057,32 @@ pub(crate) fn apply_nonlinear_advance_to_track(
     adv: trajectory::NonlinearAdvance,
     fit_tol: FitTol,
 ) -> Result<nurbs::ScalarNurbs, PostProcessError> {
+    with_nonlinear_advance_fit(axis, track, adv, fit_tol, |fit, sig| {
+        fit_axis_from_signal(fit, sig)
+    })
+}
+
+/// The shortest span the nonlinear-advance refit of `track` resolves: seed
+/// times closer than this to a kept seed are coalesced onto it.
+#[cfg(test)]
+pub(crate) fn nonlinear_advance_resolution_floor(
+    axis: usize,
+    track: &nurbs::ScalarNurbs,
+    adv: trajectory::NonlinearAdvance,
+    fit_tol: FitTol,
+) -> Result<f64, PostProcessError> {
+    with_nonlinear_advance_fit(axis, track, adv, fit_tol, |fit, sig| {
+        Ok(plan_seeds_and_floors(&fit, sig)?.1.cubic)
+    })
+}
+
+fn with_nonlinear_advance_fit<R>(
+    axis: usize,
+    track: &nurbs::ScalarNurbs,
+    adv: trajectory::NonlinearAdvance,
+    fit_tol: FitTol,
+    fit: impl FnOnce(AxisFit, &NonlinearAdvanceSignal) -> R,
+) -> R {
     let sig = NonlinearAdvanceSignal::new(track, adv);
     let pieces = extract_bezier_pieces(track);
     let t_start = pieces
@@ -2647,7 +5092,7 @@ pub(crate) fn apply_nonlinear_advance_to_track(
     let t_end = pieces.last().expect("nonlinear advance: empty track").u_end;
     let mut breakpoints = track.knots().to_vec();
     breakpoints.extend(nonlinear_transition_breakpoints(&sig));
-    fit_axis_from_signal(
+    fit(
         AxisFit {
             axis,
             t_start,
@@ -2655,7 +5100,7 @@ pub(crate) fn apply_nonlinear_advance_to_track(
             seed_breakpoints: &breakpoints,
             fit_tol,
             fit_context: "nonlinear_advance",
-            velocity_continuous: false,
+            seam_continuity: SeamContinuity::Velocity,
         },
         &sig,
     )
@@ -2747,6 +5192,163 @@ impl NonlinearAdvanceSignal {
         }
         velocity
     }
+
+    /// Taylor models of the advanced track's position, velocity and
+    /// acceleration over `window` inside input piece `piece`: the formulas
+    /// `eval_pva` evaluates, enclosed term by term.
+    fn models_on(&self, piece: usize, window: taylor::Window) -> [TaylorModel; 3] {
+        let coefficients = &self.coeffs[piece];
+        let tau = window.time_since(self.starts[piece]);
+        let [position, velocity, acceleration, jerk] =
+            [0, 1, 2, 3].map(|order| taylor::derivative_of(coefficients, order, &tau));
+        let mut models = nonlinear_advance_models(
+            &self.adv,
+            &[position, velocity, acceleration],
+            &[velocity, acceleration, jerk],
+        );
+        let (velocity, acceleration) = (&velocity, &acceleration);
+        if models[2].rad().is_finite()
+            && self.curvature_velocity_may_flip(piece, window, velocity, acceleration)
+        {
+            let vl = self.adv.linearization_velocity;
+            let unit = velocity.scale(Ball::rounded(1.0 / vl, 1));
+            let shape = AdvanceShape::of(self.adv.model, &unit)
+                .expect("the advance's shape modelled its own velocity");
+            let curvature = shape
+                .curvature
+                .scale(Ball::rounded(self.adv.nonlinear_offset / (vl * vl), 2));
+            let curvature_miss = self.adv.nonlinear_offset.abs() / (vl * vl) * shape.branch_miss[2];
+            let squared = acceleration.mul(acceleration);
+            models[2].widen(2.0 * (curvature.bound() + curvature_miss) * squared.bound());
+        }
+        models
+    }
+
+    /// Whether `resolution_owned_curvature_velocity` may read the velocity
+    /// with its other sign somewhere on the window: next to a piece edge,
+    /// where the velocity is within a device interval's travel of zero.
+    fn curvature_velocity_may_flip(
+        &self,
+        piece: usize,
+        window: taylor::Window,
+        velocity: &TaylorModel,
+        acceleration: &TaylorModel,
+    ) -> bool {
+        let near_edge = window.reaches(self.starts[piece], MIN_DEVICE_INTERVAL_S)
+            || window.reaches(self.ends[piece], MIN_DEVICE_INTERVAL_S);
+        let (centre, spread) = velocity.spread();
+        near_edge && centre.abs() - spread < MIN_DEVICE_INTERVAL_S * acceleration.bound()
+    }
+}
+
+/// Taylor models of `[p, v, a]` advanced by `adv`: the track `[p, v, a]`
+/// plus the advance of the motion it reads, `[v, a, j]` — `p + advance(v)`,
+/// `v + slope(v)·a`, `a + slope(v)·j + curvature(v)·a²` — each widened by
+/// how far the shape may miss a branch its velocity's range reaches.
+pub(crate) fn nonlinear_advance_models(
+    adv: &trajectory::NonlinearAdvance,
+    [position, track_velocity, track_acceleration]: &[TaylorModel; 3],
+    [velocity, acceleration, jerk]: &[TaylorModel; 3],
+) -> [TaylorModel; 3] {
+    let vl = adv.linearization_velocity;
+    let unit = velocity.scale(Ball::rounded(1.0 / vl, 1));
+    let Some(shape) = AdvanceShape::of(adv.model, &unit) else {
+        return [TaylorModel::UNBOUNDED; 3];
+    };
+    let slope = shape
+        .slope
+        .scale(Ball::rounded(adv.nonlinear_offset / vl, 1))
+        .add_ball(Ball::exact(adv.linear_advance));
+    let curvature = shape
+        .curvature
+        .scale(Ball::rounded(adv.nonlinear_offset / (vl * vl), 2));
+    let squared = acceleration.mul(acceleration);
+    let mut models = [
+        position
+            .add(&velocity.scale(Ball::exact(adv.linear_advance)))
+            .add(&shape.value.scale(Ball::exact(adv.nonlinear_offset))),
+        track_velocity.add(&slope.mul(acceleration)),
+        track_acceleration
+            .add(&curvature.mul(&squared))
+            .add(&slope.mul(jerk)),
+    ];
+    let offset = adv.nonlinear_offset.abs();
+    let [shape_miss, slope_miss, curvature_miss] = shape.branch_miss;
+    let slope_miss = offset / vl * slope_miss;
+    let curvature_miss = offset / (vl * vl) * curvature_miss;
+    models[0].widen(offset * shape_miss);
+    models[1].widen(slope_miss * acceleration.bound());
+    models[2].widen(curvature_miss * squared.bound() + slope_miss * jerk.bound());
+    models
+}
+
+/// How far a reciprocal advance's unit velocity may reach past zero onto
+/// the branch opposite the one its window is modelled on. Within it the
+/// branches `u/(1 ± u)` differ from `u/(1 + |u|)` by at most `3S²`, their
+/// slopes by `5S` and their curvatures by `4.1`.
+const RECIPROCAL_BRANCH_SLACK: f64 = 1e-9;
+
+/// The unit-scaled advance shape `s(u)`, `s'(u)`, `s''(u)` of a velocity's
+/// model, and how far each may miss the shape where the model's range
+/// reaches a branch it does not follow.
+struct AdvanceShape {
+    value: TaylorModel,
+    slope: TaylorModel,
+    curvature: TaylorModel,
+    branch_miss: [f64; 3],
+}
+
+impl AdvanceShape {
+    fn of(model: trajectory::AdvanceModel, unit: &TaylorModel) -> Option<Self> {
+        let one = TaylorModel::constant(Ball::exact(1.0));
+        match model {
+            trajectory::AdvanceModel::Tanh => {
+                let value = unit.tanh();
+                let slope = one.sub(&value.mul(&value));
+                Some(Self {
+                    curvature: value.mul(&slope).scale(Ball::exact(-2.0)),
+                    value,
+                    slope,
+                    branch_miss: [0.0; 3],
+                })
+            }
+            trajectory::AdvanceModel::Reciprocal => {
+                let (centre, spread) = unit.spread();
+                let subtraction = f64::EPSILON * (centre.abs() + spread);
+                let sign = if centre - spread >= -RECIPROCAL_BRANCH_SLACK {
+                    1.0
+                } else if centre + spread <= RECIPROCAL_BRANCH_SLACK {
+                    -1.0
+                } else {
+                    return None;
+                };
+                let reaches_other_branch = sign * centre - spread - subtraction < 0.0;
+                let reciprocal = unit
+                    .scale(Ball::exact(sign))
+                    .add_ball(Ball::exact(1.0))
+                    .reciprocal()?;
+                let slope = reciprocal.mul(&reciprocal);
+                Some(Self {
+                    value: if sign > 0.0 {
+                        one.sub(&reciprocal)
+                    } else {
+                        reciprocal.sub(&one)
+                    },
+                    curvature: slope.mul(&reciprocal).scale(Ball::exact(-2.0 * sign)),
+                    slope,
+                    branch_miss: if reaches_other_branch {
+                        [
+                            3.0 * RECIPROCAL_BRANCH_SLACK * RECIPROCAL_BRANCH_SLACK,
+                            5.0 * RECIPROCAL_BRANCH_SLACK,
+                            4.1,
+                        ]
+                    } else {
+                        [0.0; 3]
+                    },
+                })
+            }
+        }
+    }
 }
 
 impl TrackSignal for NonlinearAdvanceSignal {
@@ -2781,7 +5383,11 @@ impl TrackSignal for NonlinearAdvanceSignal {
         )
     }
 
-    fn acceleration_monotonicity(&self, start: f64, end: f64) -> Option<AccelerationTrend> {
+    fn acceleration_monotonicity(
+        &self,
+        (start, end): (f64, f64),
+        (resolved_start, resolved_end): (f64, f64),
+    ) -> Option<AccelerationTrend> {
         let piece = self.piece_at(start);
         if self.piece_at(end) != piece
             || self.coeffs[piece]
@@ -2807,9 +5413,9 @@ impl TrackSignal for NonlinearAdvanceSignal {
                 let second = self.starts[piece] + (extremum - initial_velocity) / acceleration;
                 let lower = first.min(second);
                 let upper = first.max(second);
-                if end <= lower || start >= upper {
+                if resolved_end <= lower || resolved_start >= upper {
                     Some(AccelerationTrend::of_direction(direction))
-                } else if start >= lower && end <= upper {
+                } else if resolved_start >= lower && resolved_end <= upper {
                     Some(AccelerationTrend::of_direction(-direction))
                 } else {
                     None
@@ -2830,6 +5436,24 @@ impl TrackSignal for NonlinearAdvanceSignal {
             self.adv.slope(v),
             self.adv.curvature(curvature_velocity),
         ))
+    }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
+        let mut pieces = Vec::new();
+        let first = self.ends.partition_point(|&end| end <= lo);
+        for piece in first..self.coeffs.len() {
+            if self.starts[piece] >= hi {
+                break;
+            }
+            let span = (lo.max(self.starts[piece]), hi.min(self.ends[piece]));
+            taylor::enclose(
+                span,
+                accuracy,
+                &|window| self.models_on(piece, window),
+                &mut pieces,
+            );
+        }
+        Some(Enclosure::Built(pieces))
     }
 }
 
@@ -2864,3 +5488,47 @@ pub(crate) fn apply_derivative_gains_to_track(
     }
     nurbs::bezier::bezier_pieces_to_discontinuous_nurbs(&out_pieces)
 }
+
+#[cfg(test)]
+#[path = "shaper_test_signals.rs"]
+pub(crate) mod test_signals;
+
+#[cfg(test)]
+#[path = "shaper_moment_tests.rs"]
+mod shaper_moment_tests;
+
+#[cfg(test)]
+#[path = "shaper_refinement_tests.rs"]
+mod shaper_refinement_tests;
+
+#[cfg(test)]
+#[path = "shaper_offset_tests.rs"]
+mod shaper_offset_tests;
+
+#[cfg(test)]
+#[path = "shaper_storage_tests.rs"]
+mod shaper_storage_tests;
+
+#[cfg(test)]
+#[path = "shaper_edge_tests.rs"]
+mod shaper_edge_tests;
+
+#[cfg(test)]
+#[path = "shaper_motor_command_tests.rs"]
+mod shaper_motor_command_tests;
+
+#[cfg(test)]
+#[path = "shaper_cap_contact_tests.rs"]
+mod shaper_cap_contact_tests;
+
+#[cfg(test)]
+#[path = "shaper_shaped_wave_tests.rs"]
+mod shaper_shaped_wave_tests;
+
+#[cfg(test)]
+#[path = "shaper_enclosure_tests.rs"]
+mod shaper_enclosure_tests;
+
+#[cfg(test)]
+#[path = "shaper_emit_window_tests.rs"]
+mod shaper_emit_window_tests;

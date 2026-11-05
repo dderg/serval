@@ -10,6 +10,15 @@ use compress::compress_with_max_error;
 use ring::SpanQueue;
 use root_cursor::{StepRoot, StepRootCursor};
 
+/// How long one drain pass may spend in the root search, and the clock it
+/// roots through whatever the deadline: a pass that yields short of the
+/// stream the mcu needs before the next pass would starve it.
+#[derive(Debug, Clone, Copy)]
+pub struct DrainBudget {
+    pub deadline: std::time::Instant,
+    pub roots_through: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepEncoder {
     Classic { max_error_ticks: u32 },
@@ -445,7 +454,7 @@ fn drain_motor(
     motor: usize,
     state: &mut MotorState,
     up_to_clock: u64,
-    deadline: Option<std::time::Instant>,
+    budget: Option<DrainBudget>,
 ) -> Result<Vec<StepFrame>, ShimError> {
     let started = std::time::Instant::now();
     let queued_before = state.queue.len();
@@ -458,7 +467,7 @@ fn drain_motor(
             &mut state.queue,
             up_to_clock,
             &mut state.pending,
-            deadline,
+            budget,
         )
         .and_then(|()| state.emit(motor, &mut frames));
     let elapsed = started.elapsed();
@@ -547,6 +556,15 @@ impl StepShim {
         self.motors[motor].cursor.position()
     }
 
+    /// The earliest clock of queued motion the root search has not reached.
+    pub fn unrooted_from(&self, motor: usize) -> Option<u64> {
+        let state = &self.motors[motor];
+        state
+            .queue
+            .active()
+            .map(|view| view.start_clock.max(state.cursor.search_floor()))
+    }
+
     pub fn invert_dir(&self, motor: usize) -> bool {
         self.motors[motor].cfg.invert_dir
     }
@@ -577,17 +595,19 @@ impl StepShim {
         self.drain_budgeted(up_to_clock, None)
     }
 
-    /// Like [`Self::drain`], but the root search stops emitting new windows
-    /// once `deadline` passes; the per-motor frontier persists, so later
-    /// calls resume where this one stopped. A bulk refill (post-cut lead
-    /// rebuild) then amortizes across pacer ticks instead of consuming the
-    /// resume volley's delivery margin in one synchronous pass.
+    /// Like [`Self::drain`], but once each motor has rooted its first window
+    /// and `budget.roots_through`, the root search stops emitting new
+    /// windows when `budget.deadline` passes; the per-motor frontier
+    /// persists, so later calls resume where this one stopped. A bulk
+    /// refill (post-cut lead rebuild) then amortizes across pacer ticks
+    /// instead of consuming the resume volley's delivery margin in one
+    /// synchronous pass.
     pub fn drain_budgeted(
         &mut self,
         up_to_clock: u64,
-        deadline: Option<std::time::Instant>,
+        budget: Option<DrainBudget>,
     ) -> Result<Vec<StepFrame>, ShimError> {
-        let parallel = deadline.is_some()
+        let parallel = budget.is_some()
             && cfg!(not(target_arch = "wasm32"))
             && self.motors.len() > 1
             && std::thread::available_parallelism().is_ok_and(|cores| cores.get() > 1);
@@ -598,7 +618,7 @@ impl StepShim {
                     .iter_mut()
                     .enumerate()
                     .map(|(motor, state)| {
-                        scope.spawn(move || drain_motor(motor, state, up_to_clock, deadline))
+                        scope.spawn(move || drain_motor(motor, state, up_to_clock, budget))
                     })
                     .collect::<Vec<_>>();
                 let mut frames = Vec::new();
@@ -623,7 +643,7 @@ impl StepShim {
                 motor,
                 &mut self.motors[motor],
                 up_to_clock,
-                deadline,
+                budget,
             )?);
         }
         Ok(frames)
@@ -695,6 +715,27 @@ impl StepShim {
         state.stepped_clock = None;
         state.last_dir = None;
         state.encoder.rearm();
+        Ok(frames)
+    }
+
+    /// Cut the motor's motion at `clock` while the mcu keeps stepping what it
+    /// was sent: the roots up to the cut are emitted, the rest abandoned, and
+    /// the next run steps on from the last emitted step. The mcu still holds
+    /// those steps queued, so a `reset_step_clock` would have to wait for them
+    /// to play out, leaving the resumed run only the rest between the two as
+    /// send margin.
+    pub fn cut_keeping_step_clock(
+        &mut self,
+        motor: usize,
+        clock: u64,
+    ) -> Result<Vec<StepFrame>, ShimError> {
+        let executed = self.derived_halt_count(motor, clock);
+        let state = self.motor_mut(motor);
+        state.pending.retain(|root| root.clock <= clock);
+        let mut frames = Vec::new();
+        state.emit(motor, &mut frames)?;
+        state.queue.abandon_all();
+        state.cursor.reset_to(executed, clock.saturating_add(1));
         Ok(frames)
     }
 

@@ -54,8 +54,22 @@ fn parse_inputs(
     if cfg.square_corner_velocity.is_none() && cfg.corner_deviation.is_none() {
         return Err("one of square_corner_velocity or corner_deviation is required".to_string());
     }
-    let waypoints =
-        parse_gcode(gcode_text, cfg.max_velocity, cfg.max_accel).map_err(|e| e.to_string())?;
+    let corner_deviation = cfg.corner_deviation.unwrap_or_else(|| {
+        pipeline_snapshot::corner_deviation_from_scv(
+            cfg.square_corner_velocity.expect("validated above"),
+            cfg.max_accel,
+        )
+    });
+    let waypoints = parse_gcode(
+        gcode_text,
+        &pipeline_snapshot::CartesianLimits::without_z_caps(
+            cfg.max_velocity,
+            cfg.max_accel,
+            max_jerk,
+            corner_deviation,
+        ),
+    )
+    .map_err(|e| e.to_string())?;
     let (axis_decls, post_processor_decls) =
         config_text::parse(&cfg.post_processor_config).map_err(|e| e.to_string())?;
     Ok((
@@ -63,13 +77,10 @@ fn parse_inputs(
         SnapshotParams {
             max_velocity: cfg.max_velocity,
             max_accel: cfg.max_accel,
-            corner_deviation: cfg.corner_deviation.unwrap_or_else(|| {
-                pipeline_snapshot::corner_deviation_from_scv(
-                    cfg.square_corner_velocity.expect("validated above"),
-                    cfg.max_accel,
-                )
-            }),
+            corner_deviation,
             max_jerk,
+            max_z_velocity: None,
+            max_z_accel: None,
             max_extrude_only_velocity: cfg.max_extrude_only_velocity,
             max_extrude_only_accel: cfg.max_extrude_only_accel,
             max_path_deviation: cfg.max_path_deviation,

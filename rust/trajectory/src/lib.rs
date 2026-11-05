@@ -6,15 +6,16 @@ mod convolution;
 mod kernel;
 
 pub use chain::{
-    AdvanceModel, AxisChainSet, ChainStage, CompiledChain, NonlinearAdvance, PostProcessorError,
-    PostProcessorInstance, RestSupport,
+    AdvanceModel, AxisChainSet, ChainStage, CompiledChain, FollowerLimits, NonlinearAdvance,
+    PostProcessorError, PostProcessorInstance, RestSupport,
+    DEFAULT_INSTANTANEOUS_CORNER_VELOCITY_MM_S,
 };
 pub use continuous::{
     next_toward, AnalyticMoveSpan, BuzzProfile, ClockedMotorSpan, ContinuousAxis, ContinuousError,
     ContinuousSegment, LocalPolynomial, MotorGroup, MotorSpan, MotorTerm, NudgeProfile, Pva,
     PvaBounds, Pvaj, RelativeSplinePiece, SurfaceMode, MAX_SPAN_SECS,
 };
-pub use convolution::ShapedSignal;
+pub use convolution::{kernel_mass, ShapedSignal};
 pub use kernel::{
     build_smooth_mzv_kernel, build_smooth_zv_kernel, SMOOTH_MZV_DURATION_PER_HZ,
     SMOOTH_ZV_DURATION_PER_HZ,

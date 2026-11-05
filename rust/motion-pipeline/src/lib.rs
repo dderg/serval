@@ -1,33 +1,44 @@
 #![allow(clippy::result_large_err)]
 
+use std::sync::Arc;
+
 use crossbeam_channel::Sender;
 use trajectory::{AxisChainSet, ContinuousSegment};
 
+#[cfg(feature = "fit-audit")]
+pub mod fit_audit;
 pub mod fit_stage;
 mod follower_projection;
+mod leader_prefit;
+pub mod live_config;
 mod lower_stage;
 mod lowering;
 pub mod planner;
 mod shaper;
+mod staged;
+mod step_capacity_log;
 pub mod timing;
+mod turning_guard;
 pub mod types;
+mod worker_pool;
 
 use fit_stage::{FitDriver, FitStage};
 use planner::Planner;
 use shaper::Shaper;
+use turning_guard::TurningGuard;
 
+pub use follower_projection::follower_velocity_step_allowance;
 pub use lower_stage::Lowerer;
+pub use staged::{SHAPER_INBOX_CAP, StagedPipeline};
 pub use types::{
-    BarrierAck, BaseItem, CONTIGUITY_EPS_MM, Control, DispatchCommand, PlannedItem, StreamConfig,
-    StreamError, StreamInput, TrajectoryItem, advance_odometer,
+    BarrierAck, BaseItem, CONTIGUITY_EPS_MM, Control, DispatchCommand, InputTrace, PlannedItem,
+    StreamConfig, StreamError, StreamInput, TrajectoryItem, advance_odometer,
 };
+pub use worker_pool::WorkerPool;
 
 pub struct Pipeline {
-    fit: FitDriver,
-    planner: Planner,
-    lowerer: Lowerer,
+    front: PlanningFront,
     shaper: Shaper,
-    fitted_tap: Option<Sender<geometry::Move>>,
 }
 
 impl Pipeline {
@@ -37,18 +48,30 @@ impl Pipeline {
         home_pos: Vec<f64>,
         t_start: f64,
     ) -> Self {
+        let workers = Arc::new(WorkerPool::new());
+        let fit_tol = config.fit_tol();
         Self {
-            fit: FitStage::new(config.corner).into_driver(),
-            planner: Planner::new(config),
-            lowerer: Lowerer::new(chains.rest_support(), home_pos, t_start),
-            shaper: Shaper::new(chains, config.fit_tol()),
-            fitted_tap: None,
+            front: PlanningFront {
+                fit: FitStage::new(config.corner).into_driver(),
+                guard: TurningGuard::new(config.clone(), &chains),
+                planner: Planner::new(config, Arc::clone(&workers)),
+                lowerer: Lowerer::new(chains.rest_support(), home_pos, t_start),
+                fitted_tap: None,
+                input_tap: None,
+            },
+            shaper: Shaper::new(chains, fit_tol, workers),
         }
     }
 
     #[must_use]
     pub fn with_fitted_tap(mut self, tap: Sender<geometry::Move>) -> Self {
-        self.fitted_tap = Some(tap);
+        self.front.fitted_tap = Some(tap);
+        self
+    }
+
+    #[must_use]
+    pub fn with_input_tap(mut self, tap: Sender<InputTrace>) -> Self {
+        self.front.input_tap = Some(tap);
         self
     }
 
@@ -58,57 +81,98 @@ impl Pipeline {
         self
     }
 
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn with_emit_batch(mut self, segments: usize) -> Self {
+        self.shaper = self.shaper.with_emit_batch(segments);
+        self
+    }
+
     pub fn feed(
         &mut self,
         item: StreamInput,
         output: &mut impl FnMut(TrajectoryItem) -> bool,
     ) -> bool {
+        let Self { front, shaper } = self;
+        front.feed(item, &mut |item| shaper.feed(item, output))
+    }
+
+    pub fn idle(&mut self, output: &mut impl FnMut(TrajectoryItem) -> bool) -> bool {
+        let Self { front, shaper } = self;
+        front.idle(&mut |item| shaper.feed(item, output))
+    }
+
+    pub fn finish(&mut self, output: &mut impl FnMut(TrajectoryItem) -> bool) -> bool {
+        let Self { front, shaper } = self;
+        front.finish(&mut |item| shaper.feed(item, output)) && shaper.finish(output)
+    }
+}
+
+/// Every stage ahead of the shaper: fitting, velocity planning, the
+/// turning guard, lowering.
+struct PlanningFront {
+    fit: FitDriver,
+    planner: Planner,
+    guard: TurningGuard,
+    lowerer: Lowerer,
+    fitted_tap: Option<Sender<geometry::Move>>,
+    input_tap: Option<Sender<InputTrace>>,
+}
+
+impl PlanningFront {
+    fn feed(&mut self, item: StreamInput, shape: &mut impl FnMut(BaseItem) -> bool) -> bool {
         let Self {
             fit,
             planner,
+            guard,
             lowerer,
-            shaper,
             fitted_tap,
+            input_tap,
         } = self;
+        if let Some(tap) = input_tap {
+            tap.send(InputTrace::of(&item))
+                .expect("pipeline input observer disconnected");
+        }
         fit.feed(item, &mut |item| {
-            if let (Some(tap), StreamInput::Move(m)) = (fitted_tap.as_ref(), &item) {
-                tap.send(m.clone())
-                    .expect("pipeline fitted observer disconnected");
-            }
+            Self::tap_fitted(fitted_tap.as_ref(), &item);
             planner.feed(item, &mut |item| {
-                lowerer.feed(item, &mut |item| shaper.feed(item, output))
+                guard.feed(item, &mut |item| lowerer.feed(item, shape))
             })
         })
     }
 
-    pub fn idle(&mut self, output: &mut impl FnMut(TrajectoryItem) -> bool) -> bool {
+    fn idle(&mut self, shape: &mut impl FnMut(BaseItem) -> bool) -> bool {
         let Self {
             planner,
+            guard,
             lowerer,
-            shaper,
             ..
         } = self;
-        planner.idle(&mut |item| lowerer.feed(item, &mut |item| shaper.feed(item, output)))
+        planner.idle(&mut |item| guard.feed(item, &mut |item| lowerer.feed(item, shape)))
     }
 
-    pub fn finish(&mut self, output: &mut impl FnMut(TrajectoryItem) -> bool) -> bool {
+    fn finish(&mut self, shape: &mut impl FnMut(BaseItem) -> bool) -> bool {
         let Self {
             fit,
             planner,
+            guard,
             lowerer,
-            shaper,
             fitted_tap,
+            ..
         } = self;
         fit.finish(&mut |item| {
-            if let (Some(tap), StreamInput::Move(m)) = (fitted_tap.as_ref(), &item) {
-                tap.send(m.clone())
-                    .expect("pipeline fitted observer disconnected");
-            }
+            Self::tap_fitted(fitted_tap.as_ref(), &item);
             planner.feed(item, &mut |item| {
-                lowerer.feed(item, &mut |item| shaper.feed(item, output))
+                guard.feed(item, &mut |item| lowerer.feed(item, shape))
             })
-        }) && planner.finish(&mut |item| lowerer.feed(item, &mut |item| shaper.feed(item, output)))
-            && shaper.finish(output)
+        }) && planner.finish(&mut |item| guard.feed(item, &mut |item| lowerer.feed(item, shape)))
+    }
+
+    fn tap_fitted(tap: Option<&Sender<geometry::Move>>, item: &StreamInput) {
+        if let (Some(tap), StreamInput::Move(m)) = (tap, item) {
+            tap.send(m.clone())
+                .expect("pipeline fitted observer disconnected");
+        }
     }
 }
 

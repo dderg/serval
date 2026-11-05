@@ -3,11 +3,9 @@
 use std::collections::BTreeMap;
 
 pub use geometry::Move;
-use geometry::path::lowering::PositionProfile;
 use geometry::{CornerFitConfig, VelocityLimits};
 use trajectory::{AxisChainSet, ClockedMotorSpan, ContinuousSegment};
 
-use crate::classify::build_move;
 use crate::enqueue::enqueue_segment;
 use crate::mcu_config::{McuAxisConfig, McuHardware};
 use crate::pump::{
@@ -19,7 +17,6 @@ use motion_pipeline::{Pipeline, StreamConfig, TrajectoryItem};
 const HARNESS_MCU_ID: u32 = 0;
 const HARNESS_MCU_FREQ_HZ: f64 = 64.0e6;
 const HARNESS_T0_SECS: f64 = 1.0;
-const EXTRUDER_AXIS: usize = 3;
 
 #[must_use]
 pub fn default_stream_config() -> StreamConfig {
@@ -38,6 +35,7 @@ pub fn default_stream_config() -> StreamConfig {
             f64::INFINITY,
         )
         .expect("bench limits (max_v=100 accel=1000 scv=5 jerk=inf) are valid"),
+        step_capacity: None,
     }
 }
 
@@ -108,131 +106,78 @@ impl SeamReport {
     }
 }
 
-struct PosTracker {
-    pos: [f64; 3],
-    e_pos: f64,
-    feed: f64,
-    absolute: bool,
-    absolute_e: bool,
-    established: bool,
-}
-
-impl PosTracker {
-    fn new() -> Self {
-        Self {
-            pos: [0.0; 3],
-            e_pos: 0.0,
-            feed: 80.0,
-            absolute: true,
-            absolute_e: true,
-            established: false,
-        }
-    }
-
-    fn apply(
-        &mut self,
-        x: Option<f64>,
-        y: Option<f64>,
-        z: Option<f64>,
-        e: Option<f64>,
-        f: Option<f64>,
-    ) -> Option<([f64; 3], f64, f64, f64, f64)> {
-        if let Some(fv) = f {
-            self.feed = fv / 60.0;
-        }
-        let target = if self.absolute {
-            [
-                x.unwrap_or(self.pos[0]),
-                y.unwrap_or(self.pos[1]),
-                z.unwrap_or(self.pos[2]),
-            ]
-        } else {
-            [
-                self.pos[0] + x.unwrap_or(0.0),
-                self.pos[1] + y.unwrap_or(0.0),
-                self.pos[2] + z.unwrap_or(0.0),
-            ]
-        };
-        let e_target = if self.absolute_e {
-            e.unwrap_or(self.e_pos)
-        } else {
-            self.e_pos + e.unwrap_or(0.0)
-        };
-        let d = [
-            target[0] - self.pos[0],
-            target[1] - self.pos[1],
-            target[2] - self.pos[2],
-        ];
-        let de = e_target - self.e_pos;
-        let start = self.pos;
-        self.pos = target;
-        self.e_pos = e_target;
-        if !self.established {
-            self.established = true;
-            return None;
-        }
-        Some((start, d[0], d[1], d[2], de))
-    }
-}
-
+/// The moves the live host submits for `source`, through the shared snapshot
+/// G-code interpreter (`pipeline_snapshot::waypoints::parse_gcode`). Panics
+/// on G-code the snapshot refuses and on a stop at rest, which a move list
+/// cannot carry.
 #[must_use]
 pub fn parse_gcode_to_moves(source: &str, limits: VelocityLimits) -> Vec<Move> {
-    parse_gcode_to_moves_with(source, |_| limits)
+    moves_under(
+        source,
+        motion_pipeline::live_config::GcodeMoveBase::from_parts(
+            limits,
+            Some(pipeline_snapshot::EXTRUDER_AXIS),
+        ),
+    )
 }
 
-#[must_use]
-pub fn parse_gcode_to_moves_with(
-    source: &str,
-    limits_for: impl Fn([f64; 3]) -> VelocityLimits,
-) -> Vec<Move> {
-    let mut p = PosTracker::new();
-    let mut moves = Vec::new();
-    let mut submitted: u32 = 0;
-    for tok in gcode::lex(source) {
-        let Ok(t) = tok else { continue };
-        let gcode::Token::Command {
-            letter,
-            major,
-            params,
-            ..
-        } = t
-        else {
-            continue;
-        };
-        match (letter, major) {
-            (b'G', 0 | 1) => {
-                let Some((start, dx, dy, dz, de)) =
-                    p.apply(params.x(), params.y(), params.z(), params.e(), params.f())
-                else {
-                    continue;
-                };
-                if dx.abs() < 1e-9 && dy.abs() < 1e-9 && dz.abs() < 1e-9 && de.abs() < 1e-9 {
-                    continue;
-                }
-                match build_move(
-                    start,
-                    [dx, dy, dz],
-                    EXTRUDER_AXIS,
-                    de,
-                    limits_for([dx, dy, dz]),
-                    p.feed,
-                    submitted,
-                ) {
-                    Ok(m) => {
-                        moves.push(m);
-                        submitted += 1;
-                    }
-                    Err(_) => continue,
-                }
-            }
-            (b'G', 90) => p.absolute = true,
-            (b'G', 91) => p.absolute = false,
-            (b'M', 82) => p.absolute_e = true,
-            (b'M', 83) => p.absolute_e = false,
-            _ => {}
+fn moves_under(source: &str, base: motion_pipeline::live_config::GcodeMoveBase) -> Vec<Move> {
+    let waypoints = pipeline_snapshot::waypoints::parse_gcode(source, &base.config_limits())
+        .unwrap_or_else(|e| panic!("seam harness: {e}"));
+    let steps = pipeline_snapshot::plan_steps(&waypoints, base)
+        .unwrap_or_else(|e| panic!("seam harness: {e}"));
+    let mut moves = Vec::with_capacity(steps.len());
+    for step in steps {
+        match step {
+            pipeline_snapshot::PlanStep::Move(m) => moves.push(m),
+            pipeline_snapshot::PlanStep::Rest { dwell_s } => panic!(
+                "seam harness: the G-code stops at rest (dwell {dwell_s} s) after move {}; a move list cannot carry it",
+                moves.len()
+            ),
         }
     }
     moves
+}
+
+pub struct LiveReplay {
+    pub config: StreamConfig,
+    pub chains: AxisChainSet,
+    pub home: Vec<f64>,
+    pub moves: Vec<Move>,
+}
+
+impl LiveReplay {
+    pub fn new(
+        source: &str,
+        planner: &planner_config::PlannerConfig,
+        step_benchmarks: Option<&motion_pipeline::live_config::step_capacity::StepCapacityInput>,
+    ) -> Result<Self, String> {
+        let config = motion_pipeline::live_config::stream_config(planner, step_benchmarks)?;
+        let chains = planner.compile_active_chains().map_err(|e| e.to_string())?;
+        let moves = moves_under(
+            source,
+            motion_pipeline::live_config::GcodeMoveBase::of(
+                planner,
+                &motion_pipeline::live_config::extruder_caps(planner)?,
+            )?,
+        );
+        Ok(Self {
+            config,
+            chains,
+            home: pipeline_snapshot::rest_position_before(&moves),
+            moves,
+        })
+    }
+
+    #[must_use]
+    pub fn pipeline(&self) -> Pipeline {
+        Pipeline::new(
+            self.config.clone(),
+            self.chains.clone(),
+            self.home.clone(),
+            0.0,
+        )
+    }
 }
 
 fn span_velocity(span: &ClockedMotorSpan, t: f64) -> f64 {
@@ -386,15 +331,11 @@ pub fn collect_shaped_segments_from_script(
     config: StreamConfig,
     chains: AxisChainSet,
 ) -> Vec<ContinuousSegment> {
-    let spatial_home = script
-        .iter()
-        .find_map(|item| match item {
-            motion_pipeline::StreamInput::Move(m) => m.segment.spatial.as_ref(),
+    let home =
+        pipeline_snapshot::rest_position_before(script.iter().filter_map(|item| match item {
+            motion_pipeline::StreamInput::Move(m) => Some(m),
             _ => None,
-        })
-        .map_or([0.0, 0.0, 0.0], |seg| seg.point_at(0.0));
-    let mut home = spatial_home.to_vec();
-    home.push(0.0);
+        }));
     let mut pipeline = Pipeline::new(config, chains, home, 0.0);
     let mut segs = Vec::new();
     let mut output = |item| {

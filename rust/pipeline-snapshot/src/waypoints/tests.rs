@@ -1,161 +1,441 @@
 use super::*;
 
+fn limits() -> CartesianLimits {
+    CartesianLimits::without_z_caps(300.0, 3000.0, f64::INFINITY, 0.0)
+}
+
+fn parse(text: &str) -> Vec<Waypoint> {
+    parse_gcode(text, &limits()).unwrap()
+}
+
+fn parse_err(text: &str) -> WaypointError {
+    parse_gcode(text, &limits()).unwrap_err()
+}
+
 #[test]
 fn absolute_moves_produce_anchor_plus_targets() {
-    let wp = parse_gcode("G90\nG1 X10 Y0 F6000\nG1 X10 Y10\n", 300.0, 3000.0).unwrap();
     assert_eq!(
-        wp,
+        parse("G90\nG1 X10 Y0 F6000\nG1 X10 Y10\n"),
         vec![
-            (10.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
-            (10.0, 10.0, 0.0, 0.0, 100.0, 3000.0)
+            Waypoint::at([10.0, 0.0, 0.0, 0.0], 100.0),
+            Waypoint::at([10.0, 10.0, 0.0, 0.0], 100.0)
         ]
     );
 }
 
 #[test]
-fn g0_travels_at_max_velocity_regardless_of_feedrate() {
-    let wp = parse_gcode("G1 X5 F600\nG0 X10\n", 300.0, 3000.0).unwrap();
-    assert_eq!(wp[0].4, 10.0);
-    assert_eq!(wp[1].4, 300.0);
+fn g0_is_g1_and_takes_and_keeps_its_feedrate() {
+    let wp = parse("G1 X5 F600\nG0 X10\nG0 X20 F1200\nG1 X30\n");
+    assert_eq!(
+        wp.iter().map(|w| w.feedrate).collect::<Vec<_>>(),
+        [10.0, 10.0, 20.0, 20.0]
+    );
 }
 
 #[test]
-fn feedrate_persists_across_moves_and_survives_g0() {
-    let wp = parse_gcode("G1 X5 F600\nG0 X10\nG1 X20\n", 300.0, 3000.0).unwrap();
-    assert_eq!(wp[2].4, 10.0, "G1 reuses the last G1 feedrate");
+fn moves_before_any_feedrate_run_at_klippys_default_speed() {
+    let wp = parse("G1 X5\nG1 X10\n");
+    assert_eq!(wp[1].feedrate, LIVE_DEFAULT_SPEED_MM_S);
+}
+
+#[test]
+fn non_positive_feedrate_is_refused_like_klippy() {
+    assert!(matches!(
+        parse_err("G1 X5 F0\n"),
+        WaypointError::InvalidSpeed { line: 1, .. }
+    ));
+}
+
+#[test]
+fn kinematic_feedrate_is_capped_at_the_effective_velocity_but_extrude_only_is_not() {
+    let wp =
+        parse("M83\nG1 X5 F60000\nG1 X10\nSET_VELOCITY_LIMIT VELOCITY=40\nG1 X20\nG1 E-2 F60000\n");
+    assert_eq!(wp[1].feedrate, 300.0);
+    assert_eq!(wp[2].feedrate, 40.0);
+    assert_eq!(wp[3].feedrate, 1000.0);
+}
+
+#[test]
+fn z_share_of_a_move_is_capped_at_max_z_velocity_like_check_move() {
+    let config = CartesianLimits {
+        max_z_velocity: 15.0,
+        ..limits()
+    };
+    let wp = parse_gcode("G1 X0 Y0 Z0 F6000\nG1 X3 Z4\nG1 Z10\n", &config).unwrap();
+    assert!((wp[1].feedrate - 15.0 * 5.0 / 4.0).abs() < 1e-12);
+    assert_eq!(wp[2].feedrate, 15.0);
+}
+
+#[test]
+fn a_move_to_the_commanded_position_submits_nothing() {
+    let wp = parse("G1 X5 F600\nG1 X5\nG1 X10\n");
+    assert_eq!(wp.len(), 2);
+}
+
+#[test]
+fn a_sub_nanometre_xyz_move_with_extrusion_is_extrude_only_in_place() {
+    let wp = parse("M83\nG1 X5 F600\nG1 X5.0000000001 E1 F60000\n");
+    assert_eq!(wp[1].position, [5.0, 0.0, 0.0, 1.0]);
+    assert_eq!(wp[1].feedrate, 1000.0);
 }
 
 #[test]
 fn relative_mode_accumulates() {
-    let wp = parse_gcode("G91\nG1 X10 F6000\nG1 X10 Y5\n", 300.0, 3000.0).unwrap();
     assert_eq!(
-        wp,
+        parse("G91\nG1 X10 F6000\nG1 X10 Y5\n"),
         vec![
-            (10.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
-            (20.0, 5.0, 0.0, 0.0, 100.0, 3000.0)
+            Waypoint::at([10.0, 0.0, 0.0, 0.0], 100.0),
+            Waypoint::at([20.0, 5.0, 0.0, 0.0], 100.0)
         ]
     );
 }
 
 #[test]
-fn absolute_e_needs_declared_mode() {
-    let err = parse_gcode("G90\nG1 X10 E1 F6000\n", 300.0, 3000.0).unwrap_err();
-    assert!(matches!(
-        err,
-        WaypointError::AmbiguousExtruderMode { line: 2 }
-    ));
+fn e_is_absolute_by_default_like_klippy() {
+    let wp = parse("G1 X10 E1 F6000\nG1 X20 E3\n");
+    assert_eq!(wp[1].position[3], 3.0);
 }
 
 #[test]
 fn m83_makes_e_relative() {
-    let wp = parse_gcode("M83\nG1 X10 E1 F6000\nG1 X20 E1\n", 300.0, 3000.0).unwrap();
-    assert_eq!(wp[0].3, 1.0);
-    assert_eq!(wp[1].3, 2.0);
+    let wp = parse("M83\nG1 X10 E1 F6000\nG1 X20 E1\n");
+    assert_eq!(wp[0].position[3], 1.0);
+    assert_eq!(wp[1].position[3], 2.0);
 }
 
 #[test]
 fn m82_makes_e_absolute() {
-    let wp = parse_gcode("M82\nG1 X10 E1 F6000\nG1 X20 E3\n", 300.0, 3000.0).unwrap();
-    assert_eq!(wp[0].3, 1.0);
-    assert_eq!(wp[1].3, 3.0);
+    let wp = parse("M82\nG1 X10 E1 F6000\nG1 X20 E3\n");
+    assert_eq!(wp[0].position[3], 1.0);
+    assert_eq!(wp[1].position[3], 3.0);
 }
 
 #[test]
-fn g91_implies_relative_e_when_undeclared() {
-    let wp = parse_gcode("G91\nG1 X10 E1 F6000\nG1 X10 E1\n", 300.0, 3000.0).unwrap();
-    assert_eq!(wp[1].3, 2.0);
+fn g91_makes_e_relative_even_after_m82() {
+    let wp = parse("M82\nG91\nG1 X10 E1 F6000\nG1 X10 E1\n");
+    assert_eq!(wp[1].position[3], 2.0);
 }
 
 #[test]
-fn g92_resets_e_without_a_move() {
-    let wp = parse_gcode("M82\nG1 X10 E5 F6000\nG92 E0\nG1 X20 E1\n", 300.0, 3000.0).unwrap();
+fn g92_moves_the_gcode_origin_not_the_toolhead() {
+    let wp = parse("M82\nG1 X10 E5 F6000\nG92 E0\nG1 X20 E1\n");
     assert_eq!(wp.len(), 2);
-    assert_eq!(wp[1].3, 1.0);
+    assert_eq!(wp[1].position[3], 6.0);
+}
+
+#[test]
+fn g92_e0_under_relative_extrusion_leaves_later_extrusion_unchanged() {
+    let wp = parse("M83\nG1 X10 E1 F6000\nG1 X20 E1\nG92 E0\nG1 X30 E1\n");
+    assert_eq!(wp[2].position[3] - wp[1].position[3], 1.0);
+}
+
+#[test]
+fn g92_on_xyz_offsets_later_absolute_targets() {
+    let wp = parse("G1 X10 Y10 F6000\nG92 X0 Y0\nG1 X5 Y5\nG92\nG1 X1\n");
+    assert_eq!(wp[1].position[..2], [15.0, 15.0]);
+    assert_eq!(wp[2].position[..2], [16.0, 15.0]);
 }
 
 #[test]
 fn e_only_preamble_folds_into_first_positional_waypoint() {
-    let wp = parse_gcode("M83\nG1 E-2 F1800\nG1 X10 Y0 F6000\n", 300.0, 3000.0).unwrap();
-    assert_eq!(wp.len(), 1);
-    assert_eq!(wp[0], (10.0, 0.0, 0.0, -2.0, 100.0, 3000.0));
+    assert_eq!(
+        parse("M83\nG1 E-2 F1800\nG1 X10 Y0 F6000\n"),
+        vec![Waypoint::at([10.0, 0.0, 0.0, -2.0], 100.0)]
+    );
 }
 
 #[test]
 fn retract_after_position_is_a_waypoint() {
-    let wp = parse_gcode("M83\nG1 X10 F6000\nG1 E-2 F1800\n", 300.0, 3000.0).unwrap();
+    let wp = parse("M83\nG1 X10 F6000\nG1 E-2 F1800\n");
     assert_eq!(wp.len(), 2);
-    assert_eq!(wp[1], (10.0, 0.0, 0.0, -2.0, 30.0, 3000.0));
+    assert_eq!(wp[1], Waypoint::at([10.0, 0.0, 0.0, -2.0], 30.0));
+}
+
+fn refused_command(text: &str) -> (u32, String) {
+    match parse_err(text) {
+        WaypointError::Unplannable { line, command, .. } => (line, command.into()),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
 }
 
 #[test]
-fn arcs_are_rejected() {
-    let err = parse_gcode("G1 X10 F6000\nG2 X20 I5 J0\n", 300.0, 3000.0).unwrap_err();
-    assert!(matches!(
-        err,
-        WaypointError::UnsupportedArc { line: 2, major: 2 }
-    ));
+fn commands_the_snapshot_cannot_plan_are_refused_by_name() {
+    for (text, command) in [
+        ("G1 X10 F6000\nG2 X20 I5 J0\n", "G2"),
+        ("G1 X10 F6000\nG3 X20 I5 J0\n", "G3"),
+        ("G1 X10 F6000\nG5 X20 I1 J1 P1 Q1\n", "G5"),
+        ("G1 X10 F6000\nG5.1 X20 I1 J1\n", "G5.1"),
+        ("G1 X10 F6000\nG10\n", "G10"),
+        ("G1 X10 F6000\nG11\n", "G11"),
+        ("G1 X10 F6000\nG28 X\n", "G28"),
+        (
+            "G1 X10 F6000\nSET_PRESSURE_ADVANCE ADVANCE=0.02\n",
+            "SET_PRESSURE_ADVANCE",
+        ),
+        (
+            "G1 X10 F6000\nSET_POST_PROCESSOR NAME=pa K=1\n",
+            "SET_POST_PROCESSOR",
+        ),
+        (
+            "G1 X10 F6000\nBED_MESH_PROFILE LOAD=default\n",
+            "BED_MESH_PROFILE",
+        ),
+        ("G1 X10 F6000\nBED_MESH_CALIBRATE\n", "BED_MESH_CALIBRATE"),
+        (
+            "G1 X10 F6000\nFORCE_MOVE STEPPER=x DISTANCE=5 VELOCITY=5\n",
+            "FORCE_MOVE",
+        ),
+        ("G1 X10 F6000\nEXCLUDE_OBJECT NAME=a\n", "EXCLUDE_OBJECT"),
+        ("G1 X10 F6000\nM109 S210\n", "M109"),
+    ] {
+        assert_eq!(refused_command(text), (2, command.to_string()), "{text}");
+    }
 }
 
 #[test]
-fn comments_and_unknown_commands_are_ignored() {
-    let wp = parse_gcode(
-        "; header\nM104 S200\nG28\nG1 X10 F6000 ; move\n",
-        300.0,
-        3000.0,
-    )
-    .unwrap();
-    assert_eq!(wp.len(), 1);
+fn a_heater_wait_before_the_anchor_is_where_the_plan_starts() {
+    assert_eq!(parse("M190 S60\nM109 S210\nG1 X10 F6000\n").len(), 1);
+}
+
+#[test]
+fn comments_and_unknown_commands_are_ignored_whatever_their_arguments() {
+    assert_eq!(
+        parse(
+            "; header\nM104 S200\nM117 Layer 1 of 2.5.6\nRESPOND MSG=\"hello world\"\n\
+             M73 P10 R5\nEXCLUDE_OBJECT_START NAME=a b\nT0\nG1 X10 F6000 ; move\n"
+        )
+        .len(),
+        1
+    );
 }
 
 #[test]
 fn feedrate_only_g1_updates_state_without_a_waypoint() {
-    let wp = parse_gcode("G1 F600\nG1 X10\n", 300.0, 3000.0).unwrap();
-    assert_eq!(wp, vec![(10.0, 0.0, 0.0, 0.0, 10.0, 3000.0)]);
+    assert_eq!(
+        parse("G1 F600\nG1 X10\n"),
+        vec![Waypoint::at([10.0, 0.0, 0.0, 0.0], 10.0)]
+    );
 }
 
 #[test]
-fn set_velocity_limit_accel_applies_to_subsequent_moves() {
-    let wp = parse_gcode(
-        "G1 X10 F6000\nSET_VELOCITY_LIMIT ACCEL=500\nG1 X20\nSET_VELOCITY_LIMIT ACCEL=8000\nG1 X30\n",
-        300.0,
-        3000.0,
-    )
-    .unwrap();
-    assert_eq!(wp[0].5, 3000.0, "before any override: config max_accel");
-    assert_eq!(wp[1].5, 500.0);
-    assert_eq!(wp[2].5, 8000.0);
+fn set_velocity_limit_accel_rides_on_subsequent_waypoints_as_the_runtime_cap() {
+    let wp = parse(
+        "G1 X10 F6000\nSET_VELOCITY_LIMIT ACCEL=500\nG1 X20\nSET_VELOCITY_LIMIT ACCEL=50000\nG1 X30\n",
+    );
+    assert_eq!(wp[0].runtime, RuntimeLimits::default());
+    assert_eq!(wp[1].runtime.accel, Some(500.0));
+    assert_eq!(wp[2].runtime.accel, Some(50_000.0));
 }
 
 #[test]
-fn set_velocity_limit_rejects_unsupported_params() {
-    let err = parse_gcode(
-        "SET_VELOCITY_LIMIT VELOCITY=100\nG1 X10 F6000\n",
-        300.0,
-        3000.0,
-    )
-    .unwrap_err();
+fn set_velocity_limit_sets_every_runtime_limit_live_honours() {
+    let wp = parse(
+        "G1 X10 F6000\n\
+         SET_VELOCITY_LIMIT VELOCITY=100 ACCEL=500 SQUARE_CORNER_VELOCITY=8 MINIMUM_CRUISE_RATIO=0.5 ACCEL_TO_DECEL=200\n\
+         G1 X20\n\
+         SET_VELOCITY_LIMIT CORNER_DEVIATION=0.05\n\
+         G1 X30\n",
+    );
+    assert_eq!(
+        wp[1].runtime,
+        RuntimeLimits {
+            velocity: Some(100.0),
+            accel: Some(500.0),
+            corner_deviation: Some(geometry::corner_deviation_from_scv(8.0, 3000.0)),
+        }
+    );
+    assert_eq!(wp[2].runtime.corner_deviation, Some(0.05));
+    assert_eq!(wp[2].runtime.velocity, Some(100.0));
+}
+
+#[test]
+fn set_velocity_limit_square_corner_velocity_converts_at_the_config_accel() {
+    let wp = parse("G1 X10 F6000\nSET_VELOCITY_LIMIT ACCEL=500 SQUARE_CORNER_VELOCITY=8\nG1 X20\n");
+    assert_eq!(
+        wp[1].runtime.corner_deviation,
+        Some(geometry::corner_deviation_from_scv(8.0, 3000.0))
+    );
+}
+
+#[test]
+fn set_velocity_limit_ignores_unknown_parameters_like_klippy() {
+    let wp = parse("G1 X10 F6000\nSET_VELOCITY_LIMIT FOO=1\nG1 X20\n");
+    assert_eq!(wp[1].runtime, RuntimeLimits::default());
+}
+
+#[test]
+fn set_velocity_limit_refuses_both_corner_budget_aliases() {
     assert!(matches!(
-        err,
-        WaypointError::UnsupportedVelocityLimitParam { line: 1, ref param } if &**param == "VELOCITY"
+        parse_err("SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY=5 CORNER_DEVIATION=0.05\n"),
+        WaypointError::CornerBudgetAliases { line: 1 }
     ));
 }
 
 #[test]
-fn set_velocity_limit_rejects_non_positive_accel() {
-    let err = parse_gcode("SET_VELOCITY_LIMIT ACCEL=0\nG1 X10 F6000\n", 300.0, 3000.0).unwrap_err();
+fn set_velocity_limit_refuses_out_of_range_values_like_klippy() {
+    for bad in [
+        "SET_VELOCITY_LIMIT ACCEL=0\n",
+        "SET_VELOCITY_LIMIT VELOCITY=-1\n",
+        "SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY=-1\n",
+        "SET_VELOCITY_LIMIT CORNER_DEVIATION=-0.1\n",
+        "SET_VELOCITY_LIMIT ACCEL=fast\n",
+        "SET_VELOCITY_LIMIT MINIMUM_CRUISE_RATIO=half\n",
+    ] {
+        assert!(
+            matches!(parse_err(bad), WaypointError::InvalidParam { line: 1, .. }),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
+fn reset_velocity_limit_returns_to_the_config_base() {
+    let wp = parse(
+        "G1 X10 F6000\nSET_VELOCITY_LIMIT VELOCITY=100 ACCEL=500 CORNER_DEVIATION=0.05\nG1 X20\nRESET_VELOCITY_LIMIT\nG1 X30\n",
+    );
+    assert_eq!(wp[2].runtime, RuntimeLimits::default());
+}
+
+#[test]
+fn m204_sets_the_accel_cap_from_s_or_the_lower_of_p_and_t() {
+    let wp = parse("G1 X10 F6000\nM204 S700\nG1 X20\nM204 P900 T800\nG1 X30\nM204 P100\nG1 X40\n");
+    assert_eq!(wp[1].runtime.accel, Some(700.0));
+    assert_eq!(wp[2].runtime.accel, Some(800.0));
+    assert_eq!(
+        wp[3].runtime.accel,
+        Some(800.0),
+        "P without T is reported invalid and changes nothing"
+    );
     assert!(matches!(
-        err,
-        WaypointError::InvalidAccelLimit { line: 1, ref value } if value == "0"
+        parse_err("M204 S0\n"),
+        WaypointError::InvalidParam { line: 1, .. }
     ));
 }
 
 #[test]
 fn unknown_extended_commands_are_ignored() {
-    let wp = parse_gcode(
-        "EXCLUDE_OBJECT_DEFINE NAME=part1 CENTER=104,100\nG1 X10 F6000\n",
-        300.0,
-        3000.0,
-    )
-    .unwrap();
-    assert_eq!(wp.len(), 1);
+    assert_eq!(
+        parse("EXCLUDE_OBJECT_DEFINE NAME=part1 CENTER=104,100\nG1 X10 F6000\n").len(),
+        1
+    );
+}
+
+fn rests(waypoints: &[Waypoint]) -> Vec<Option<f64>> {
+    waypoints.iter().map(|w| w.dwell_before_s).collect()
+}
+
+#[test]
+fn stop_at_rest_commands_ride_on_the_next_move() {
+    let wp = parse(
+        "G1 X10 F6000\nG4 P250\nG1 X20\nM400\nG4 P100\nG1 X30\nG1 X40\nM84\n\
+         SET_KINEMATIC_POSITION\nG1 X50\nM400\n",
+    );
+    assert_eq!(rests(&wp), [None, Some(0.25), Some(0.1), None, Some(0.2)]);
+}
+
+#[test]
+fn a_rest_before_the_anchor_is_where_the_plan_starts() {
+    assert_eq!(
+        rests(&parse("G4 P500\nG1 X10 F6000\nG1 X20\n")),
+        [None, None]
+    );
+}
+
+#[test]
+fn negative_dwell_is_refused_like_klippy() {
+    assert!(matches!(
+        parse_err("G1 X10 F6000\nG4 P-1\n"),
+        WaypointError::InvalidParam { line: 2, .. }
+    ));
+}
+
+#[test]
+fn motors_off_unhomes_until_set_kinematic_position() {
+    assert!(matches!(
+        parse_err("G1 X10 F6000\nM18\nG1 Y5\n"),
+        WaypointError::Unhomed { line: 3, axis: 'Y' }
+    ));
+    assert_eq!(parse("G1 X10 F6000\nM84\nG1 E1\n").len(), 2);
+    assert!(matches!(
+        parse_err("G1 X10 F6000\nM84\nSET_KINEMATIC_POSITION CLEAR=Z\nG1 Y5\nG1 Z1\n"),
+        WaypointError::Unhomed { line: 5, axis: 'Z' }
+    ));
+}
+
+#[test]
+fn set_kinematic_position_before_any_move_anchors_the_plan_there() {
+    let wp = parse("G4 P100\nSET_KINEMATIC_POSITION X=5 Y=2\nG91\nG1 X10 F6000\nG1 X1\n");
+    assert_eq!(
+        wp.iter()
+            .map(|w| w.position[..2].to_vec())
+            .collect::<Vec<_>>(),
+        [[5.0, 2.0], [15.0, 2.0], [16.0, 2.0]]
+    );
+    assert_eq!(rests(&wp), [None, None, None]);
+}
+
+#[test]
+fn set_kinematic_position_away_from_the_toolhead_is_refused() {
+    assert!(matches!(
+        parse_err("G1 X10 F6000\nSET_KINEMATIC_POSITION X=0\n"),
+        WaypointError::PositionJump { line: 2, .. }
+    ));
+}
+
+#[test]
+fn m220_scales_the_speed_and_m221_the_extrusion_like_klippy() {
+    let wp = parse("M83\nG1 X10 F6000\nM220 S50\nM221 S90\nG1 X20 E1\nM220\nG1 X30\n");
+    assert_eq!(wp[1].feedrate, 50.0);
+    assert!((wp[1].position[3] - 0.9).abs() < 1e-12);
+    assert_eq!(wp[2].feedrate, 100.0);
+}
+
+#[test]
+fn set_gcode_offset_shifts_later_targets_and_moves_only_when_asked() {
+    let wp = parse(
+        "G1 X10 F6000\nSET_GCODE_OFFSET Z=0.2\nG1 X20 Z1\n\
+         SET_GCODE_OFFSET Z_ADJUST=-0.05 MOVE=1 MOVE_SPEED=5\n",
+    );
+    assert_eq!(wp[1].position[2], 1.2);
+    assert!((wp[2].position[2] - 1.15).abs() < 1e-12);
+    assert_eq!(wp[2].feedrate, 5.0);
+}
+
+#[test]
+fn restore_gcode_state_returns_modes_speed_and_position() {
+    let wp = parse(
+        "G1 X10 F6000\nSAVE_GCODE_STATE NAME=park\nG91\nG1 X5 F600\n\
+         RESTORE_GCODE_STATE NAME=park MOVE=1\nG1 X20\n",
+    );
+    assert_eq!(wp[2].position[0], 10.0);
+    assert_eq!(wp[2].feedrate, 100.0);
+    assert_eq!(wp[3].position[0], 20.0);
+}
+
+#[test]
+fn gcode_state_errors_are_refused_like_klippy() {
+    assert!(matches!(
+        parse_err("G20\n"),
+        WaypointError::InchUnits { line: 1 }
+    ));
+    assert!(matches!(
+        parse_err("RESTORE_GCODE_STATE\n"),
+        WaypointError::UnknownGcodeState { line: 1, .. }
+    ));
+    assert!(matches!(
+        parse_err("M220 S0\n"),
+        WaypointError::InvalidParam { line: 1, .. }
+    ));
+}
+
+#[test]
+fn the_extrusion_ratio_bound_is_the_steepest_extrusion_per_millimetre_of_travel() {
+    let waypoints = [
+        Waypoint::at([0.0, 0.0, 0.0, 0.0], 100.0),
+        Waypoint::at([3.0, 4.0, 0.0, 0.25], 100.0),
+        Waypoint::at([3.0, 4.0, 0.0, -0.75], 100.0),
+        Waypoint::at([3.0, 6.0, 0.0, -0.7], 100.0),
+        Waypoint::at([3.0, 6.0, 1.0, -0.7], 100.0),
+    ];
+    assert_eq!(extrusion_ratio_bound(&waypoints), 0.05);
 }

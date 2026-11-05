@@ -13,9 +13,11 @@ fn kin(length: f64, accel: f64, kappa0: f64, sigma: f64, ceiling: f64) -> Kinema
 #[test]
 fn arc_reach_matches_the_closed_form() {
     // On a constant-curvature arc the rail has the closed form
-    // w(s) = w_lim * sin(2*kappa*s + asin(w0/w_lim)).
+    // w(s) = w_lim * sin(2*kappa*s + asin(w0/w_lim)); the rail strays from
+    // it by at most its defect over the 4 mm it takes at least its entry
+    // speed over.
     let k = kin(4.0, 1000.0, 0.12, 0.0, f64::INFINITY);
-    let v = disk_reach_v(&k, 5.0, 4.0, 1e-9).unwrap();
+    let v = disk_reach_v(&k, 5.0, 4.0, 1e-9).unwrap().v;
     let w_lim = 1000.0 / 0.12;
     let arg = 2.0 * 0.12 * 4.0 + libm::asin(25.0 / w_lim);
     let closed = if arg >= std::f64::consts::FRAC_PI_2 {
@@ -23,24 +25,26 @@ fn arc_reach_matches_the_closed_form() {
     } else {
         w_lim * libm::sin(arg)
     };
+    let slowest_duration = 4.0 / 5.0;
+    let speed_drift = crate::velocity::law::RAIL_ACCELERATION_DEFECT * slowest_duration;
     assert!(
-        (v * v - closed).abs() < 1e-4 * (1.0 + closed),
-        "{} vs {closed}",
-        v * v
+        (v - closed.sqrt()).abs() <= speed_drift,
+        "{v} vs {}",
+        closed.sqrt()
     );
 }
 
 #[test]
 fn line_reach_is_constant_accel() {
     let k = kin(10.0, 500.0, 0.0, 0.0, f64::INFINITY);
-    let v = disk_reach_v(&k, 3.0, 10.0, 1e-9).unwrap();
+    let v = disk_reach_v(&k, 3.0, 10.0, 1e-9).unwrap().v;
     assert!((v - (9.0_f64 + 2.0 * 500.0 * 10.0).sqrt()).abs() < 1e-9);
 }
 
 #[test]
 fn clothoid_reach_respects_the_curvature_ceiling() {
     let k = kin(4.0, 1000.0, 0.0, 0.05, 300.0);
-    let v = disk_reach_v(&k, 5.0, 4.0, 1e-9).unwrap();
+    let v = disk_reach_v(&k, 5.0, 4.0, 1e-9).unwrap().v;
     let cap_end = limit_speed(k.kappa_abs(4.0), 1000.0);
     assert!(
         v <= cap_end * (1.0 + 1e-9),
@@ -51,8 +55,8 @@ fn clothoid_reach_respects_the_curvature_ceiling() {
 #[test]
 fn reverse_reach_mirrors_the_member() {
     let k = kin(4.0, 1000.0, 0.0, 0.05, 300.0);
-    let fwd = disk_reach_v(&k.reversed(), 5.0, 4.0, 1e-9).unwrap();
-    let rev = disk_reach_v_rev(&k, 5.0, 4.0, 1e-9).unwrap();
+    let fwd = disk_reach_v(&k.reversed(), 5.0, 4.0, 1e-9).unwrap().v;
+    let rev = disk_reach_v_rev(&k, 5.0, 4.0, 1e-9).unwrap().v;
     assert_eq!(fwd, rev);
 }
 

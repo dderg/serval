@@ -9,7 +9,7 @@
 
 use config_doc::Document;
 
-use crate::{AxisDecl, CartesianLimits, DEFAULT_SQUARE_CORNER_VELOCITY_MM_S, PostProcessorDecl};
+use crate::{AxisDecl, CartesianLimits, DEFAULT_CORNER_DEVIATION_MM, PostProcessorDecl};
 
 const UNSUPPORTED_PRINTER_KEYS: [&str; 2] = ["max_accel_to_decel", "minimum_cruise_ratio"];
 const LEGACY_STEPPER_AXES: [char; 5] = ['x', 'y', 'z', 'a', 'b'];
@@ -121,10 +121,22 @@ pub fn read_motion_settings(
     };
 
     let (cartesian, fit_tolerance_mm, fit_tolerance_accel_mm_s2) = reader.printer_section()?;
-    let axes = reader.axis_sections()?;
+    let mut axes = reader.axis_sections()?;
     let kinematics = reader.kinematics_section(&axes)?;
     let post_processors = reader.post_processor_sections(&axes)?;
-    let (max_extrude_only_velocity, max_extrude_only_accel) = reader.extruder_caps()?;
+    let extruders = reader.extruder_sections(&cartesian)?;
+    for extruder in &extruders {
+        extruder.lend_extrude_only_caps(&mut axes);
+    }
+    let (max_extrude_only_velocity, max_extrude_only_accel) = extruders
+        .iter()
+        .find(|extruder| extruder.section == "extruder")
+        .map_or((None, None), |extruder| {
+            (
+                extruder.max_extrude_only_velocity,
+                extruder.max_extrude_only_accel,
+            )
+        });
 
     Ok((
         MotionSettings {
@@ -139,6 +151,15 @@ pub fn read_motion_settings(
         },
         reader.consumed,
     ))
+}
+
+/// The planner a serialized config document runs: what `init_planner`
+/// builds and every offline path (snapshots, replays, the bench reference)
+/// plans under.
+pub fn planner_config_from_text(config_text: &str) -> Result<crate::PlannerConfig, String> {
+    let doc = Document::parse(config_text, "<config>").map_err(|e| e.to_string())?;
+    let (settings, _consumed) = read_motion_settings(&doc)?;
+    planner_config_from_settings(&settings)
 }
 
 /// Build the full `PlannerConfig` from parsed settings, running every
@@ -172,6 +193,9 @@ pub fn planner_config_from_settings(
     cfg.max_extrude_only_accel = settings.max_extrude_only_accel;
     cfg.fit_tolerance_mm = settings.fit_tolerance_mm;
     cfg.fit_tolerance_accel_mm_s2 = settings.fit_tolerance_accel_mm_s2;
+    cfg.check_kernel_free_advance_extrude_only_caps()?;
+    let chains = cfg.compile_active_chains().map_err(|e| e.to_string())?;
+    crate::extruder_caps(&cfg.axis_registry, &chains)?;
     Ok(cfg)
 }
 
@@ -350,10 +374,8 @@ impl Reader<'_> {
                 );
             }
             (_, Some(deviation)) => deviation,
-            (scv, None) => {
-                let scv = scv.unwrap_or(DEFAULT_SQUARE_CORNER_VELOCITY_MM_S);
-                geometry::corner_deviation_from_scv(scv, max_accel)
-            }
+            (Some(scv), None) => geometry::corner_deviation_from_scv(scv, max_accel),
+            (None, None) => DEFAULT_CORNER_DEVIATION_MM,
         };
 
         let max_jerk = self.getfloat_or("printer", "max_jerk", 0.0, Bounds::min(0.0))?;
@@ -579,11 +601,27 @@ impl Reader<'_> {
             let post_processors = self
                 .get_list(&section, "post_processors")?
                 .unwrap_or_default();
+            if self.get_str(&section, "ratio_ramp_time")?.is_some() {
+                return Err(format!(
+                    "[{section}] option 'ratio_ramp_time' was removed: {}",
+                    crate::RATIO_RAMP_RULE
+                ));
+            }
+            let max_velocity = self.getfloat(&section, "max_velocity", Bounds::above(0.0))?;
+            let max_accel = self.getfloat(&section, "max_accel", Bounds::above(0.0))?;
+            let instantaneous_corner_velocity = self.getfloat(
+                &section,
+                "instantaneous_corner_velocity",
+                Bounds::above(0.0),
+            )?;
             axes.push(AxisDecl {
                 name: name.to_owned(),
                 follows,
                 motors,
                 post_processors,
+                max_velocity,
+                max_accel,
+                instantaneous_corner_velocity,
             });
         }
         Ok(axes)
@@ -629,14 +667,81 @@ impl Reader<'_> {
         Ok(decls)
     }
 
-    fn extruder_caps(&mut self) -> Result<(Option<f64>, Option<f64>), String> {
-        if !self.doc.has_section("extruder") {
-            return Ok((None, None));
-        }
-        let velocity =
-            self.getfloat("extruder", "max_extrude_only_velocity", Bounds::above(0.0))?;
-        let accel = self.getfloat("extruder", "max_extrude_only_accel", Bounds::above(0.0))?;
-        Ok((velocity, accel))
+    fn extruder_sections(
+        &mut self,
+        cartesian: &CartesianLimits,
+    ) -> Result<Vec<ExtruderSection>, String> {
+        let sections: Vec<String> = self
+            .doc
+            .section_names()
+            .filter(|name| {
+                name.strip_prefix("extruder")
+                    .is_some_and(|index| index.chars().all(|c| c.is_ascii_digit()))
+            })
+            .map(str::to_owned)
+            .collect();
+        sections
+            .into_iter()
+            .map(|section| self.extruder_section(section, cartesian))
+            .collect()
+    }
+
+    fn extruder_section(
+        &mut self,
+        section: String,
+        cartesian: &CartesianLimits,
+    ) -> Result<ExtruderSection, String> {
+        let axis = self.get_str(&section, "axis")?;
+        let nozzle_diameter = self.getfloat(&section, "nozzle_diameter", Bounds::above(0.0))?;
+        let filament_diameter = self.getfloat(&section, "filament_diameter", Bounds::above(0.0))?;
+        let extrude_ratio = nozzle_diameter
+            .zip(filament_diameter)
+            .map(|(nozzle, filament)| default_extrude_ratio(nozzle, filament));
+        let mut cap = |option: &str, printer_limit: f64| match extrude_ratio {
+            Some(ratio) => self
+                .getfloat_or(&section, option, printer_limit * ratio, Bounds::above(0.0))
+                .map(Some),
+            None => self.getfloat(&section, option, Bounds::above(0.0)),
+        };
+        let max_extrude_only_velocity = cap("max_extrude_only_velocity", cartesian.max_velocity)?;
+        let max_extrude_only_accel = cap("max_extrude_only_accel", cartesian.max_accel)?;
+        Ok(ExtruderSection {
+            section,
+            axis,
+            max_extrude_only_velocity,
+            max_extrude_only_accel,
+        })
+    }
+}
+
+/// klippy's (upstream Klipper's) default for the extrude-only caps: the
+/// printer's limits scaled by the extrusion ratio of a bead whose cross
+/// section is four nozzle diameters squared.
+#[must_use]
+pub fn default_extrude_ratio(nozzle_diameter: f64, filament_diameter: f64) -> f64 {
+    let filament_area = std::f64::consts::PI * (0.5 * filament_diameter).powi(2);
+    4.0 * nozzle_diameter * nozzle_diameter / filament_area
+}
+
+struct ExtruderSection {
+    section: String,
+    axis: Option<String>,
+    max_extrude_only_velocity: Option<f64>,
+    max_extrude_only_accel: Option<f64>,
+}
+
+impl ExtruderSection {
+    /// The extruder's axis is the same motor its extrude-only moves drive,
+    /// so where `[axis <name>]` sets no limit of its own it takes these.
+    fn lend_extrude_only_caps(&self, axes: &mut [AxisDecl]) {
+        let Some(decl) = axes
+            .iter_mut()
+            .find(|decl| Some(&decl.name) == self.axis.as_ref())
+        else {
+            return;
+        };
+        decl.max_velocity = decl.max_velocity.or(self.max_extrude_only_velocity);
+        decl.max_accel = decl.max_accel.or(self.max_extrude_only_accel);
     }
 }
 

@@ -14,6 +14,9 @@ pub use profiles::{BuzzProfile, NudgeProfile, ProfileError, ProfileSample};
 mod tests;
 
 pub const MAX_SPAN_SECS: f64 = 0.025;
+/// A stretch of at least two clocks rounds to distinct start and end clocks
+/// whatever the phase of its start; one of under a clock may not.
+const TAIL_CLOCKS_THAT_ALWAYS_ROUND_APART: f64 = 2.0;
 
 const REST_VELOCITY_MM_S: f64 = 1e-3;
 
@@ -174,6 +177,8 @@ pub enum ContinuousError {
     },
     #[error("invalid continuous span: {reason}")]
     InvalidSpan { reason: &'static str },
+    #[error("{what} ({value}) is not representable")]
+    NotRepresentable { what: &'static str, value: f64 },
     #[error("analytic phase gap from {previous_end} to {next_start}")]
     PhaseGap { previous_end: f64, next_start: f64 },
     #[error("analytic phase overlap from {next_start} to {previous_end}")]
@@ -186,6 +191,12 @@ pub enum ContinuousError {
     PieceGap { previous_end: f64, next_start: f64 },
     #[error("relative spline piece overlap from {next_start} to {previous_end}")]
     PieceOverlap { previous_end: f64, next_start: f64 },
+    #[error("relative spline piece seam at {at} jumps from {previous_end} to {next_start}")]
+    PieceJump {
+        at: f64,
+        previous_end: f64,
+        next_start: f64,
+    },
 }
 
 impl AnalyticMoveSpan {
@@ -304,6 +315,18 @@ impl AnalyticMoveSpan {
             .map(|phase| analytic_phase_boundary(self.t_start, phase.end_time()))
     }
 
+    /// Absolute times at which a disk-rail phase enters or leaves contact
+    /// with its curvature cap, or starts or ends in contact — clamped into
+    /// the span, where a contact at its end would otherwise be nudged past
+    /// it.
+    pub fn cap_contact_times(&self) -> impl Iterator<Item = f64> + '_ {
+        self.phases.iter().flat_map(|phase| {
+            phase.cap_contact_times().into_iter().map(|local| {
+                analytic_phase_boundary(self.t_start, local).clamp(self.t_start, self.t_end)
+            })
+        })
+    }
+
     /// Absolute times at which a variable bed surface changes its piecewise
     /// definition along the path; empty without a variable surface or a
     /// spatial body, `None` when a transition cannot be located in the phases.
@@ -346,8 +369,6 @@ impl AnalyticMoveSpan {
         if axis == 2 && matches!(&self.surface, SurfaceMode::Variable(_)) {
             return Err(ContinuousError::VariableSurfaceBeforeDispatch);
         }
-        let (s, velocity, acceleration, jerk) = self.tangential_state(t);
-        let length = self.source.segment.s_len();
         let result = if axis < 3 {
             let segment = self
                 .source
@@ -355,16 +376,28 @@ impl AnalyticMoveSpan {
                 .spatial
                 .as_ref()
                 .ok_or(ContinuousError::AxisOutsideMove { axis })?;
-            let heading = segment.heading_at(s);
-            let dheading = segment.dheading_ds(s);
-            let d2heading = segment.d2heading_ds2(s);
-            let mut result = Pvaj {
-                position: segment.point_at(s)[axis],
-                velocity: velocity * heading[axis],
-                acceleration: acceleration * heading[axis] + velocity * velocity * dheading[axis],
-                jerk: jerk * heading[axis]
-                    + 3.0 * velocity * acceleration * dheading[axis]
-                    + velocity * velocity * velocity * d2heading[axis],
+            let mut result = match segment.held_coordinate(axis) {
+                Some(coordinate) => Pvaj {
+                    position: coordinate,
+                    velocity: 0.0,
+                    acceleration: 0.0,
+                    jerk: 0.0,
+                },
+                None => {
+                    let (s, velocity, acceleration, jerk) = self.tangential_state(t);
+                    let heading = segment.heading_at(s);
+                    let dheading = segment.dheading_ds(s);
+                    let d2heading = segment.d2heading_ds2(s);
+                    Pvaj {
+                        position: segment.point_at(s)[axis],
+                        velocity: velocity * heading[axis],
+                        acceleration: acceleration * heading[axis]
+                            + velocity * velocity * dheading[axis],
+                        jerk: jerk * heading[axis]
+                            + 3.0 * velocity * acceleration * dheading[axis]
+                            + velocity * velocity * velocity * d2heading[axis],
+                    }
+                }
             };
             if axis == 2 {
                 if let SurfaceMode::Constant(offset) = &self.surface {
@@ -375,6 +408,8 @@ impl AnalyticMoveSpan {
         } else {
             match analytic_follower(&self.source, axis) {
                 Some(follower) => {
+                    let (s, velocity, acceleration, jerk) = self.tangential_state(t);
+                    let length = self.source.segment.s_len();
                     let start = *self
                         .axis_start_positions
                         .get(follower.axis_index)
@@ -1248,58 +1283,55 @@ impl ClockedMotorSpan {
                 .is_ok_and(|pva| pva.velocity.abs() <= REST_VELOCITY_MM_S)
     }
 
+    /// Cuts the view into dispatchable pieces of at most `MAX_SPAN_SECS`, on
+    /// the `MAX_SPAN_SECS` grid from its start. A tail too short to round to a
+    /// clock is not folded into the piece before it, which would stretch that
+    /// piece past the bound; the two share what remains after the last full
+    /// piece instead.
     pub fn split_max_duration(&self) -> Result<Vec<Self>, ContinuousError> {
-        let mut views: Vec<Self> = Vec::new();
         let duration = self.stream_t_end - self.stream_t_start;
-        let count = (duration / MAX_SPAN_SECS).ceil() as usize;
-        let host_rate = (self.end_host - self.start_host) / duration;
-        for index in 0..count {
-            let offset_start = (index as f64 * MAX_SPAN_SECS).min(duration);
-            let offset_end = ((index + 1) as f64 * MAX_SPAN_SECS).min(duration);
-            let t_lo = self.stream_t_start + offset_start;
-            let (t_hi, host_hi) = if index + 1 == count {
-                (self.stream_t_end, self.end_host)
-            } else {
-                (
-                    self.stream_t_start + offset_end,
-                    self.start_host + offset_end * host_rate,
-                )
-            };
-            if t_hi <= t_lo {
-                debug_assert!(
-                    index + 1 == count,
-                    "only the fp-edge tail chunk may collapse below one ulp"
-                );
-                let last = views.last_mut().expect("original clocked span has a clock");
-                last.stream_t_end = self.stream_t_end;
-                last.end_host = self.end_host;
-                last.end_clock = self.end_clock;
-                continue;
-            }
-            let exact = self.start_clock_exact + offset_start * self.clock_freq_hz;
-            match Self::try_new(
-                Arc::clone(&self.signal),
-                t_lo,
-                t_hi,
-                self.start_host + offset_start * host_rate,
-                host_hi,
-                exact,
-                self.clock_freq_hz,
-            ) {
-                Ok(view) => views.push(view),
-                Err(ContinuousError::InvalidSpan {
-                    reason: "positive-duration clocked view must span at least one clock",
-                }) if index + 1 == count => {
-                    let last = views.last_mut().expect("original clocked span has a clock");
-
-                    last.stream_t_end = self.stream_t_end;
-                    last.end_host = self.end_host;
-                    last.end_clock = self.end_clock;
+        let grid_cuts =
+            checked_cast::f64_to_u32((duration / MAX_SPAN_SECS).ceil()).map_err(|e| {
+                ContinuousError::NotRepresentable {
+                    what: "the span's grid cut count",
+                    value: e.value,
                 }
-                Err(error) => return Err(error),
+            })?;
+        let mut cuts: Vec<f64> = (1..grid_cuts)
+            .map(|index| f64::from(index) * MAX_SPAN_SECS)
+            .take_while(|&offset| self.stream_t_start + offset < self.stream_t_end)
+            .collect();
+        if let Some(last) = cuts.last().copied() {
+            if (duration - last) * self.clock_freq_hz < TAIL_CLOCKS_THAT_ALWAYS_ROUND_APART {
+                let previous = cuts.len().checked_sub(2).map_or(0.0, |index| cuts[index]);
+                *cuts.last_mut().expect("a cut was just read") =
+                    previous + 0.5 * (duration - previous);
             }
         }
-        Ok(views)
+        let host_rate = (self.end_host - self.start_host) / duration;
+        let starts = std::iter::once(0.0).chain(cuts.iter().copied());
+        let ends = cuts.iter().copied().map(Some).chain([None]);
+        starts
+            .zip(ends)
+            .map(|(offset_start, offset_end)| {
+                let (t_hi, host_hi) = match offset_end {
+                    Some(offset_end) => (
+                        self.stream_t_start + offset_end,
+                        self.start_host + offset_end * host_rate,
+                    ),
+                    None => (self.stream_t_end, self.end_host),
+                };
+                Self::try_new(
+                    Arc::clone(&self.signal),
+                    self.stream_t_start + offset_start,
+                    t_hi,
+                    self.start_host + offset_start * host_rate,
+                    host_hi,
+                    self.start_clock_exact + offset_start * self.clock_freq_hz,
+                    self.clock_freq_hz,
+                )
+            })
+            .collect()
     }
 }
 /// The first time strictly after `span_start + local_boundary` in absolute
@@ -1728,7 +1760,8 @@ fn spline_evaluation_time(curve: &ScalarNurbs, t: f64) -> Result<f64, Continuous
 }
 
 const DEGENERATE_PIECE_WIDTH_ULPS: f64 = 4.0;
-const DEGENERATE_PIECE_SLACK_S: f64 = 1e-12;
+const DEGENERATE_RUN_WIDTH_ULPS: f64 = 2.0 * DEGENERATE_PIECE_WIDTH_ULPS;
+const DEGENERATE_RUN_SLACK_FLOOR_S: f64 = 1e-12;
 const PIECE_SEAM_ROUNDOFF_ULPS: f64 = (1_u64 << 20) as f64;
 
 fn degenerate_knot_span(knots: &[f64], span: usize) -> bool {
@@ -1736,20 +1769,25 @@ fn degenerate_knot_span(knots: &[f64], span: usize) -> bool {
     high - low <= DEGENERATE_PIECE_WIDTH_ULPS * f64::EPSILON * low.abs().max(high.abs())
 }
 
+fn degenerate_run_slack(t: f64) -> f64 {
+    DEGENERATE_RUN_SLACK_FLOOR_S.max(DEGENERATE_RUN_WIDTH_ULPS * f64::EPSILON * t.abs())
+}
+
 fn spline_pv(curve: &ScalarNurbs, t: f64) -> (f64, f64) {
     let [position, velocity] = spline_derivatives(curve, t);
     (position, velocity)
 }
 
+fn meet_within_seam_roundoff(left: f64, right: f64) -> bool {
+    (left - right).abs()
+        <= PIECE_SEAM_ROUNDOFF_ULPS * f64::EPSILON * left.abs().max(right.abs()).max(1.0)
+}
+
 fn spline_pv_continuous(curve: &ScalarNurbs, left: f64, right: f64) -> bool {
     let (left_position, left_velocity) = spline_pv(curve, left);
     let (right_position, right_velocity) = spline_pv(curve, right);
-    let position_scale = left_position.abs().max(right_position.abs()).max(1.0);
-    let velocity_scale = left_velocity.abs().max(right_velocity.abs()).max(1.0);
-    (left_position - right_position).abs()
-        <= PIECE_SEAM_ROUNDOFF_ULPS * f64::EPSILON * position_scale
-        && (left_velocity - right_velocity).abs()
-            <= PIECE_SEAM_ROUNDOFF_ULPS * f64::EPSILON * velocity_scale
+    meet_within_seam_roundoff(left_position, right_position)
+        && meet_within_seam_roundoff(left_velocity, right_velocity)
 }
 
 /// The largest representable time strictly below `value`, for evaluating
@@ -1793,9 +1831,10 @@ fn spline_owned_time(curve: &ScalarNurbs, t: f64) -> f64 {
     let right_time = (!degenerate_knot_span(knots, right)).then(|| knots[right]);
     let left_time =
         (!degenerate_knot_span(knots, left)).then(|| interior_time_below(knots[left + 1]));
+    let slack = degenerate_run_slack(t);
     match (left_time, right_time) {
         (Some(left_time), Some(right_time)) => {
-            if knots[right] - knots[left + 1] <= DEGENERATE_PIECE_SLACK_S
+            if knots[right] - knots[left + 1] <= slack
                 && spline_pv_continuous(curve, left_time, right_time)
             {
                 right_time
@@ -1803,8 +1842,8 @@ fn spline_owned_time(curve: &ScalarNurbs, t: f64) -> f64 {
                 t
             }
         }
-        (None, Some(right_time)) if knots[right] - t <= DEGENERATE_PIECE_SLACK_S => right_time,
-        (Some(left_time), None) if t - knots[left + 1] <= DEGENERATE_PIECE_SLACK_S => left_time,
+        (None, Some(right_time)) if knots[right] - t <= slack => right_time,
+        (Some(left_time), None) if t - knots[left + 1] <= slack => left_time,
         _ => t,
     }
 }
@@ -2183,6 +2222,7 @@ fn validate_relative_pieces(pieces: &[RelativeSplinePiece]) -> Result<(), Contin
         return Err(EMPTY_PIECES);
     };
     let mut previous_end = first.t_start;
+    let mut previous_end_position = None;
     for piece in pieces {
         if ![piece.base_position, piece.t_start, piece.t_end]
             .into_iter()
@@ -2216,9 +2256,23 @@ fn validate_relative_pieces(pieces: &[RelativeSplinePiece]) -> Result<(), Contin
                 next_start: piece.t_start,
             });
         }
-        let (curve_start, curve_end) = spline_domain(&piece.curve);
-        checked_clamped_time(piece.t_start, curve_start, curve_end)?;
-        checked_clamped_time(piece.t_end, curve_start, curve_end)?;
+        let piece_position = |t: f64| -> Result<f64, ContinuousError> {
+            let t = spline_evaluation_time(&piece.curve, t)?;
+            Ok(piece.base_position + nurbs::eval::eval(&piece.curve, t))
+        };
+        let start_position = piece_position(piece.t_start)?;
+        if let Some(previous_end_position) =
+            previous_end_position.filter(|&previous_end_position| {
+                !meet_within_seam_roundoff(previous_end_position, start_position)
+            })
+        {
+            return Err(ContinuousError::PieceJump {
+                at: piece.t_start,
+                previous_end: previous_end_position,
+                next_start: start_position,
+            });
+        }
+        previous_end_position = Some(piece_position(piece.t_end)?);
         previous_end = piece.t_end;
     }
     Ok(())
@@ -2405,8 +2459,9 @@ fn scalar_phase_bounds(phases: &[LawSegment], t0: f64, t1: f64) -> (f64, f64, f6
             arc[slot] = distance - segment.s0;
             speed[slot] = velocity;
         }
-        acceleration_abs_max =
-            acceleration_abs_max.max(rail_acceleration_ceiling(&segment.law, arc, speed));
+        acceleration_abs_max = acceleration_abs_max
+            .max(rail_acceleration_ceiling(&segment.law, arc, speed))
+            .max(segment.interpolated_acceleration_bound(lo - segment.t0, hi - segment.t0));
     }
     (velocity_min, velocity_max, acceleration_abs_max)
 }

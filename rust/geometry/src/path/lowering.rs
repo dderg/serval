@@ -196,5 +196,20 @@ impl PositionProfile for Segment {
     }
 }
 
+impl Segment {
+    /// The coordinate along `axis` of a segment lying in a plane normal to
+    /// it, which every point reads exactly and no heading leaves; `None`
+    /// when the segment moves along `axis`.
+    pub fn held_coordinate(&self, axis: usize) -> Option<f64> {
+        match self {
+            Segment::Line(l) => (l.start[axis] == l.end[axis]).then_some(l.start[axis]),
+            Segment::Arc(a) => (a.u[axis] == 0.0 && a.v[axis] == 0.0).then_some(a.origin[axis]),
+            Segment::Clothoid(c) => {
+                (c.u[axis] == 0.0 && c.v[axis] == 0.0).then_some(c.start_pose[axis])
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -12,15 +12,23 @@ name = "motion_pipeline"
 
 [dependencies]
 libm = { version = "0.2", default-features = false }
+taylor-model = { path = "../taylor-model" }
 geometry = { path = "../geometry" }
 trajectory = { path = "../trajectory" }
 nurbs = { path = "../nurbs" }
+planner-config = { path = "../planner-config" }
 crossbeam-channel = "0.5"
 thiserror = { workspace = true }
 tracing = "0.1"
 
+[features]
+bench-metrics = []
+fit-audit = []
+test-support = []
+
 [dev-dependencies]
 proptest = "1"
+planner-config = { path = "../planner-config", features = ["doc"] }
 
 [lints]
 workspace = true

@@ -39,6 +39,19 @@ impl BezierPiece {
         }
     }
 
+    /// The sum of the coefficients' magnitudes over the piece's span: the
+    /// scale its values are computed at, and so of their rounding.
+    fn magnitude(&self) -> f64 {
+        let h = self.u_end - self.u_start;
+        let mut h_pow = 1.0;
+        let mut total = 0.0_f64;
+        for c in &self.coeffs {
+            total += (c * h_pow).abs();
+            h_pow *= h;
+        }
+        total.max(1.0)
+    }
+
     pub fn to_bernstein(&self) -> Vec<f64> {
         let d = self.degree();
         let h = self.u_end - self.u_start;
@@ -70,17 +83,15 @@ impl BezierPiece {
         let d = bernstein.len() - 1;
         let h = u_end - u_start;
 
-        let mut h_pow = 1.0;
-        let mut coeffs = vec![0.0; d + 1];
-        for k in 0..=d {
-            let mut acc = 0.0;
-            for i in 0..=k {
-                let sign = if (k - i) % 2 == 0 { 1.0 } else { -1.0 };
-                let c_d_k = binomial(d, k) as f64;
-                let c_k_i = binomial(k, i) as f64;
-                acc += sign * c_d_k * c_k_i * bernstein[i];
+        let mut coeffs = bernstein.to_vec();
+        for k in 1..=d {
+            for i in (k..=d).rev() {
+                coeffs[i] -= coeffs[i - 1];
             }
-            coeffs[k] = acc / h_pow;
+        }
+        let mut h_pow = 1.0;
+        for (k, c) in coeffs.iter_mut().enumerate() {
+            *c = binomial(d, k) as f64 * *c / h_pow;
             h_pow *= h;
         }
         Self {
@@ -113,6 +124,23 @@ pub fn extract_bezier_pieces(curve: &ScalarNurbs) -> Vec<BezierPiece> {
 
     pieces
 }
+
+/// The `u_end` of every piece [`extract_bezier_pieces`] returns, in order,
+/// read off the knots: refining to full multiplicity repeats knot values
+/// without adding any, so the pieces end where the knots between the
+/// domain's ends step.
+pub fn bezier_piece_ends(curve: &ScalarNurbs) -> impl Iterator<Item = f64> + '_ {
+    let p = curve.degree() as usize;
+    let knots = curve.knots();
+    knots[p..knots.len() - p]
+        .windows(2)
+        .filter(|pair| pair[0] != pair[1])
+        .map(|pair| pair[1])
+}
+
+/// Rounding two power-basis pieces' Bernstein conversions can leave between
+/// their shared seam values, in ulps of the larger piece's magnitude.
+const SEAM_ROUNDING_ENVELOPE: f64 = (1_u64 << 20) as f64;
 
 pub fn bezier_pieces_to_nurbs(pieces: &[BezierPiece]) -> ScalarNurbs {
     assemble_bezier_pieces(pieces, false)
@@ -155,6 +183,20 @@ fn assemble_bezier_pieces(pieces: &[BezierPiece], discontinuous: bool) -> Scalar
         if i == 0 || discontinuous {
             cps.extend_from_slice(&bernstein);
         } else {
+            let seam = pieces[i - 1].u_end;
+            let left = *cps
+                .last()
+                .expect("a previous piece left its end control point");
+            assert!(
+                (bernstein[0] - left).abs()
+                    <= SEAM_ROUNDING_ENVELOPE
+                        * f64::EPSILON
+                        * pieces[i - 1].magnitude().max(piece.magnitude()),
+                "bezier_pieces_to_nurbs: pieces meet discontinuously at {seam} ({left} then {}); \
+                 a continuous NURBS would silently drop the step — use \
+                 bezier_pieces_to_discontinuous_nurbs",
+                bernstein[0]
+            );
             cps.extend_from_slice(&bernstein[1..]);
         }
     }
@@ -202,9 +244,9 @@ pub fn split_piece_at(piece: &BezierPiece, u_split: f64) -> (BezierPiece, Bezier
 }
 
 pub(crate) fn binomial(n: usize, k: usize) -> u64 {
-    debug_assert!(
+    assert!(
         n <= 50,
-        "binomial intermediate products overflow u64 above n = 50"
+        "binomial({n}, {k}): intermediate products overflow u64 above n = 50"
     );
     if k > n {
         return 0;

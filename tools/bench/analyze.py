@@ -1,13 +1,36 @@
 """Judge a bench capture against the offline planner's reference trajectory.
 
 Usage: uv run python tools/bench/analyze.py <run_dir>
+    [--step-benchmark PULSED,BOTH_EDGE,CLOCK_HZ,FRACTION]
 
 run_dir holds capture.bin, capture.json, print.gcode and printer.cfg. The
 verdict goes to stdout and run_dir/analysis.json; plots to run_dir/*.png
 when matplotlib is importable.
 
+The reference is capped by the MCU step capacity exactly as the live run
+was: run.py records every MCU's step benchmark, with the capacity fraction
+the live planner applied, in run.json and the reference plans under it. A
+run.json from before that recording plans uncapped unless --step-benchmark
+supplies the bench MCU's benchmark and the fraction its run was capped at
+(e.g. the F401's 301,160,84000000,0.75 for runs before the fraction became
+0.625), charged to every captured motor stepped pulsed; the verdict's
+reference_step_capacity says which ("recorded", "supplied", "absent").
+
+A run recorded with run.py's dispatch record also holds
+dispatch_record_*.bin: what the live host dispatched, segment by segment,
+with its anchoring and every drain to rest. When the pacer braked the
+stream to rest, the plan no longer describes the motion, so the record is
+the reference (reference_source "dispatch_record", reference time = host
+seconds since its first segment) and the brakes fail no_pacer_brakes. Any
+record is also compared with the plan segment for segment: outside the
+windows a pacer brake replanned, every dispatched segment must be the
+planned one (dispatch_matches_plan_outside_brakes). The extruder is held
+to the plan only until the first brake: a brake stops on a corner the plan
+cuts, so the extrusion the follower spreads over what follows differs, and
+dispatch_record.max_extruder_deviation_after_brakes_steps reports how far.
+
 Alignment model per motion epoch:
-    t_capture = offset_s + (1 + ppm * 1e-6) * t_stream
+    t_capture = offset_s + (1 + ppm * 1e-6) * t_reference
 Timing errors are capture minus aligned reference: positive = step late.
 """
 
@@ -15,9 +38,12 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import difflib
+import hashlib
 import json
 import math
 import re
+import shlex
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, fields
@@ -32,9 +58,20 @@ for _path in (REPO_ROOT / "snapshots", REPO_ROOT / "klippy", REPO_ROOT):
 
 import capture_aux  # noqa: E402
 import capture_events  # noqa: E402
+import corner_flow_bench  # noqa: E402
+import dispatch_record  # noqa: E402
 import harness  # noqa: E402
 import mcu_execution  # noqa: E402
 import sim_report  # noqa: E402
+
+REFERENCE_PLANNED = "plan"
+REFERENCE_DISPATCHED = "dispatch_record"
+DISPATCH_RECORD_GLOB = "dispatch_record_*.bin"
+DISPATCH_SEAM_SLACK_S = 1e-9
+DISPATCH_DURATION_TOLERANCE_S = 1e-9
+REPORTED_DIVERGENCES_LIMIT = 50
+BRAKE_SETTLE_S = 0.1
+EXTRUDER_AXIS = 3
 
 CAPTURE_ROLES = ("a", "b", "z", "e")
 ROLE_AXIS_WEIGHTS = {
@@ -44,29 +81,12 @@ ROLE_AXIS_WEIGHTS = {
     "e": (0.0, 0.0, 0.0, 1.0),
 }
 FOLLOWER_ROLES = frozenset({"e"})
-LIVE_DEFAULT_SPEED_MM_S = 25.0
-QUEUE_DRAIN_COMMANDS = frozenset(
-    {"M400", "G4", "M109", "M190", "TEMPERATURE_WAIT"}
-)
-UNMIRRORED_COMMANDS = frozenset(
-    {
-        "M220",
-        "M221",
-        "G28",
-        "SET_KINEMATIC_POSITION",
-        "SET_PRESSURE_ADVANCE",
-        "SET_INPUT_SHAPER",
-        "FORCE_MOVE",
-        "MANUAL_STEPPER",
-        "SAVE_GCODE_STATE",
-        "RESTORE_GCODE_STATE",
-    }
-)
 REFERENCE_SAMPLE_PERIOD_S = 0.5e-3
 REFERENCE_FINE_FACTOR = 50
 REFERENCE_CHUNK_INTERVALS = 20_000
 REFERENCE_BLOCK_SEPARATION_S = 100.0
 BLOCK_EDGE_SLACK_S = 1e-9
+EMPTY_DIFF_SHA256 = hashlib.sha256(b"").hexdigest()
 LATTICE_SNAP_STEPS = 1e-6
 DEFAULT_EPOCH_GAP_S = 0.15
 OFFSET_SEARCH_S = 1.0
@@ -74,9 +94,20 @@ OFFSET_SEARCH_BIN_S = 1e-3
 FIT_WINDOWS_S = (10e-3, 2e-3, 2e-3, 2e-3)
 REPORT_MATCH_WINDOW_S = 100e-3
 PAIR_WINDOW_S = 2e-3
+NS_PER_S = 1e9
 EPOCH_DURATION_TOLERANCE_S = 1.0
 EPOCH_DURATION_TOLERANCE_FRACTION = 0.5
 TIMING_TOLERANCE_US = 50.0
+PACE_TOLERANCE_S = 20e-3
+PACE_TOLERANCE_PPM = 500.0
+POSITION_EQUIVALENT_TOLERANCE_STEPS = 0.05
+POSITION_BOUND_RELAXES_BELOW_HZ = POSITION_EQUIVALENT_TOLERANCE_STEPS / (
+    TIMING_TOLERANCE_US * 1e-6
+)
+TIMING_CHECK = (
+    f"timing_within_{TIMING_TOLERANCE_US:g}us"
+    f"_or_{POSITION_EQUIVALENT_TOLERANCE_STEPS:g}_step"
+)
 CONDITIONED_RATE_HZ = 200.0
 COUNT_ERROR_MARGIN_S = 0.05
 INLIER_FLOOR_S = 200e-6
@@ -90,10 +121,34 @@ REPORTED_STALLS_LIMIT = 50
 EDGE_TIE_STEPS = 0.5
 EPOCH_SPLIT_COUNT_SLACK = 200
 EPOCH_SPLIT_MIN_GAP_S = 1e-3
+STEP_BENCHMARKS_KEY = "step_benchmarks"
+BENCH_MCU = "mcu"
+STEP_CAPACITY_RECORDED = "recorded"
+STEP_CAPACITY_SUPPLIED = "supplied"
+STEP_CAPACITY_ABSENT = "absent"
 
 
 class AnalysisError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class SuppliedBenchmark:
+    pulsed_ticks_per_step: int
+    both_edge_ticks_per_step: int
+    clock_hz: float
+    capacity_fraction: float
+
+    @classmethod
+    def parse(cls, text: str) -> SuppliedBenchmark:
+        parts = text.split(",")
+        if len(parts) != 4:
+            raise argparse.ArgumentTypeError(
+                f"{text!r} is not PULSED,BOTH_EDGE,CLOCK_HZ,FRACTION"
+            )
+        return cls(
+            int(parts[0]), int(parts[1]), float(parts[2]), float(parts[3])
+        )
 
 
 @dataclass(frozen=True)
@@ -176,6 +231,7 @@ class ReferenceBlock:
 
 @dataclass
 class Reference:
+    source: str
     start_xyz: tuple[float, float, float]
     final_xyze: tuple[float, float, float, float]
     blocks: list[ReferenceBlock]
@@ -224,9 +280,10 @@ class Job:
     run_dir: Path
     motors: list[Motor]
     config: harness.PrinterConfigData
-    max_z_velocity: float
-    max_z_accel: float
     gcode_text: str
+    step_benchmarks: list[dict] | None
+    step_benchmarks_source: str
+    dispatch_record: dispatch_record.DispatchRecord | None
 
 
 @dataclass
@@ -394,25 +451,100 @@ def read_motors(sections: configparser.RawConfigParser) -> list[Motor]:
     return motors
 
 
-def load_job(run_dir: Path) -> Job:
+def recorded_step_benchmarks(run_dir: Path) -> list[dict] | None:
+    run_json = run_dir / "run.json"
+    if not run_json.exists():
+        return None
+    return json.loads(run_json.read_text()).get(STEP_BENCHMARKS_KEY)
+
+
+def supplied_step_benchmarks(
+    motors: list[Motor], benchmark: SuppliedBenchmark
+) -> list[dict]:
+    """The bench MCU stepping every captured motor pulsed, at a benchmark
+    supplied for a run whose run.json predates recording it."""
+    return [
+        {
+            "mcu": BENCH_MCU,
+            "clock_freq": benchmark.clock_hz,
+            "capacity_fraction": benchmark.capacity_fraction,
+            "pulsed_ticks_per_step": benchmark.pulsed_ticks_per_step,
+            "both_edge_ticks_per_step": benchmark.both_edge_ticks_per_step,
+            "simulated": False,
+            "motors": [
+                {"name": m.name, "step_distance": m.step_mm, "mode": "pulsed"}
+                for m in motors
+            ],
+        }
+    ]
+
+
+def load_job(run_dir: Path, supplied: SuppliedBenchmark | None = None) -> Job:
     config = harness.read_printer_config(run_dir / "printer.cfg")
-    sections = _config_sections(config.config_text)
+    motors = read_motors(_config_sections(config.config_text))
+    recorded = recorded_step_benchmarks(run_dir)
+    if recorded is not None and supplied is not None:
+        raise AnalysisError(
+            f"{run_dir / 'run.json'} records the step benchmarks the run was "
+            "capped by; a supplied benchmark would replace them"
+        )
+    if recorded is not None:
+        step_benchmarks, source = recorded, STEP_CAPACITY_RECORDED
+    elif supplied is not None:
+        step_benchmarks = supplied_step_benchmarks(motors, supplied)
+        source = STEP_CAPACITY_SUPPLIED
+    else:
+        step_benchmarks, source = None, STEP_CAPACITY_ABSENT
     return Job(
         run_dir=run_dir,
-        motors=read_motors(sections),
+        motors=motors,
         config=config,
-        max_z_velocity=sections.getfloat(
-            "printer", "max_z_velocity", fallback=config.max_velocity
-        ),
-        max_z_accel=sections.getfloat(
-            "printer", "max_z_accel", fallback=config.max_accel
-        ),
         gcode_text=(run_dir / "print.gcode").read_text(),
+        step_benchmarks=step_benchmarks,
+        step_benchmarks_source=source,
+        dispatch_record=load_dispatch_record(run_dir),
     )
 
 
-def load_run(run_dir: Path) -> RunInputs:
-    return RunInputs(**vars(load_job(run_dir)), capture=load_capture(run_dir))
+def load_dispatch_record(
+    run_dir: Path,
+) -> dispatch_record.DispatchRecord | None:
+    """The live host's record of what it dispatched for the print: the one
+    file of the run that holds segments. A pipeline set up and torn down
+    before the print leaves an empty one."""
+    paths = sorted(run_dir.glob(DISPATCH_RECORD_GLOB))
+    if not paths:
+        return None
+    try:
+        records = {p.name: dispatch_record.load(p) for p in paths}
+    except dispatch_record.RecordError as exc:
+        raise AnalysisError(str(exc)) from exc
+    moving = {name: r for name, r in records.items() if len(r)}
+    if len(moving) != 1:
+        raise AnalysisError(
+            f"{run_dir}: expected one dispatch record with segments, found "
+            f"{sorted(moving) or 'none'} among {sorted(records)}"
+        )
+    ((name, record),) = moving.items()
+    if record.nudges:
+        raise AnalysisError(
+            f"{name}: {record.nudges} nudges bypassed the planner; neither "
+            "the plan nor the record's segments describe that motion"
+        )
+    if record.axes != len(ROLE_AXIS_WEIGHTS["a"]):
+        raise AnalysisError(
+            f"{name}: records {record.axes} axes, the analyzer reads "
+            f"{len(ROLE_AXIS_WEIGHTS['a'])}"
+        )
+    return record
+
+
+def load_run(
+    run_dir: Path, supplied: SuppliedBenchmark | None = None
+) -> RunInputs:
+    return RunInputs(
+        **vars(load_job(run_dir, supplied)), capture=load_capture(run_dir)
+    )
 
 
 def _command_word(line: str) -> str:
@@ -429,117 +561,85 @@ def _kinematic_start(line: str) -> tuple[float, float, float]:
     return float(params["X"]), float(params["Y"]), float(params["Z"])
 
 
-@dataclass
-class ExtrusionTracker:
-    absolute_coord: bool = True
-    absolute_extrude: bool = True
-    position: float = 0.0
-
-    def normalize(self, line: str) -> str | None:
-        code = line.split(";", 1)[0].strip().upper()
-        word = code.split(None, 1)[0]
-        words = re.findall(r"([A-Z])\s*([-+]?[0-9.]+)", code[len(word) :])
-        if word in ("G90", "G91"):
-            self.absolute_coord = word == "G90"
-            return code
-        if word in ("M82", "M83"):
-            self.absolute_extrude = word == "M82"
-            return None
-        if word == "G92":
-            letters = {letter for letter, _ in words} or {"X", "Y", "Z", "E"}
-            moved = letters - {"E"}
-            if moved:
-                raise AnalysisError(
-                    f"{line.strip()!r}: G92 on {sorted(moved)} shifts the "
-                    "coordinate frame mid-print; the reference cannot mirror it"
-                )
-            self.position = float(dict(words).get("E", self.position))
-            return None
-        if word not in ("G0", "G1"):
-            return code
-        rebuilt = []
-        for letter, value in words:
-            if letter == "E":
-                requested = float(value)
-                relative = not (self.absolute_coord and self.absolute_extrude)
-                delta = requested if relative else requested - self.position
-                self.position += delta
-                value = repr(delta)
-            rebuilt.append(f"{letter}{value}")
-        return " ".join(["G1", *rebuilt])
-
-
-def split_gcode(text: str) -> tuple[tuple[float, float, float], list[str]]:
+def _start_position(text: str) -> tuple[float, float, float]:
     lines = [ln for ln in text.splitlines() if _command_word(ln)]
     if not lines or _command_word(lines[0]) != "SET_KINEMATIC_POSITION":
         raise AnalysisError(
             "print.gcode must start with SET_KINEMATIC_POSITION X= Y= Z="
         )
-    start = _kinematic_start(lines[0])
-    extrusion = ExtrusionTracker()
-    blocks: list[list[str]] = [[]]
-    for line in lines[1:]:
-        word = _command_word(line)
-        if word in UNMIRRORED_COMMANDS:
-            raise AnalysisError(
-                f"{line.strip()!r}: the offline reference cannot mirror {word}"
-            )
-        if word in QUEUE_DRAIN_COMMANDS:
-            blocks.append([])
-            continue
-        normalized = extrusion.normalize(line)
-        if normalized is not None:
-            blocks[-1].append(normalized)
-    return start, ["\n".join(b) for b in blocks if b]
+    return _kinematic_start(lines[0])
 
 
-def _live_move_limits(job: Job, waypoints: list[tuple]) -> list[tuple]:
-    limited = [waypoints[0]]
-    for prev, cur in zip(waypoints, waypoints[1:]):
-        dx, dy, dz = (cur[i] - prev[i] for i in range(3))
-        distance = math.sqrt(dx * dx + dy * dy + dz * dz)
-        velocity, accel = cur[4], cur[5]
-        if distance > 1e-9 and abs(dz) > 1e-9:
-            z_unit = abs(dz) / distance
-            velocity = min(velocity, job.max_z_velocity / z_unit)
-            accel = min(accel, job.max_z_accel / z_unit)
-        limited.append((*cur[:4], velocity, accel))
-    return limited
+def split_at_rests(waypoints: list[dict]) -> list[list[dict]]:
+    """The print's moves as motion epochs: the runs of moves between two
+    dwells at rest, each starting on the waypoint the previous run ended
+    on."""
+    blocks = [[waypoints[0]]]
+    for waypoint in waypoints[1:]:
+        if waypoint["dwell_before_s"] is not None:
+            blocks.append([blocks[-1][-1]])
+            waypoint = {**waypoint, "dwell_before_s": None}
+        blocks[-1].append(waypoint)
+    return [block for block in blocks if len(block) > 1]
 
 
-def plan_waypoints(
-    job: Job,
-) -> tuple[tuple[float, float, float], tuple, list[list[tuple]]]:
+@dataclass
+class PlannedPrint:
+    start_xyz: tuple[float, float, float]
+    final_xyze: tuple
+    waypoints: list[dict]
+    blocks: list[list[dict]]
+
+
+def plan_waypoints(job: Job) -> PlannedPrint:
+    start = _start_position(job.gcode_text)
     engine = harness._import_engine()
-    start, block_texts = split_gcode(job.gcode_text)
-    sx, sy, sz = start
-    prefix = (
-        f"G90\nM83\nG92 X{sx!r} Y{sy!r} Z{sz!r} E0\n"
-        f"G1 X{sx!r} Y{sy!r} Z{sz!r} F{LIVE_DEFAULT_SPEED_MM_S * 60.0!r}\n"
-    )
-    cfg = job.config
-    blocks = []
-    consumed = 1
-    text = prefix
-    waypoints: list[tuple] = []
-    for block_text in block_texts:
-        text += block_text + "\n"
-        waypoints = engine.parse_gcode(text, cfg.max_velocity, cfg.max_accel)
-        if len(waypoints) > consumed:
-            blocks.append(waypoints[consumed - 1 :])
-        consumed = len(waypoints)
-    if not waypoints or tuple(waypoints[0][:4]) != (sx, sy, sz, 0.0):
+    try:
+        waypoints = engine.parse_gcode(job.gcode_text, job.config.config_text)
+    except ValueError as exc:
+        raise AnalysisError(f"print.gcode: {exc}") from exc
+    if tuple(waypoints[0]["position"][:3]) != start:
         raise AnalysisError(
-            f"parsed start {waypoints[0][:4] if waypoints else None} differs "
-            f"from SET_KINEMATIC_POSITION {start} with E=0"
+            f"parsed start {waypoints[0]['position']} differs from "
+            f"SET_KINEMATIC_POSITION {start}"
         )
+    blocks = split_at_rests(waypoints)
     if not blocks:
         raise AnalysisError("print.gcode contains no motion")
-    return (
-        start,
-        tuple(waypoints[-1][:4]),
-        [_live_move_limits(job, b) for b in blocks],
+    return PlannedPrint(
+        start, tuple(waypoints[-1]["position"]), waypoints, blocks
     )
+
+
+def stream_epochs(
+    job: Job,
+    planned: PlannedPrint,
+    config_text: str,
+    axes: list[int],
+    sample_period_s: float,
+) -> list[tuple[float, float, np.ndarray]]:
+    """The print planned as one stream, as the live host plans it, and
+    sampled across each epoch it moves between two dwells: `(t_start,
+    t_end, axes x samples x (p, v, a))`. Planning an epoch on its own from
+    rest is not the same plan: the planner's fits may cut a stream deep in
+    history differently, within their tolerance."""
+    engine = harness._import_engine()
+    epochs = engine.pipeline_snapshot_epoch_samples(
+        planned.waypoints,
+        config_text,
+        axes,
+        sample_period_s,
+        job.step_benchmarks,
+    )
+    if len(epochs) != len(planned.blocks):
+        raise AnalysisError(
+            f"the stream plan moves in {len(epochs)} epochs between rests, "
+            f"the print's dwells split it into {len(planned.blocks)}"
+        )
+    return [
+        (t_start, t_end, np.asarray(rows, dtype=np.float64))
+        for t_start, t_end, rows in epochs
+    ]
 
 
 def _motor_pva_steps(motor: Motor, axes_pva: np.ndarray) -> np.ndarray:
@@ -547,24 +647,15 @@ def _motor_pva_steps(motor: Motor, axes_pva: np.ndarray) -> np.ndarray:
     return np.einsum("a,asc->sc", weights, axes_pva) / motor.step_mm
 
 
-def sample_block(
-    job: Job, waypoints: list[tuple], stream_offset_s: float
+def reference_block(
+    job: Job, epoch: tuple[float, float, np.ndarray], stream_offset_s: float
 ) -> ReferenceBlock:
-    engine = harness._import_engine()
-    config_text = job.config.config_text
-    snapshot_json, _ = engine.pipeline_snapshot_axis_samples(
-        waypoints, config_text, [0], 2
-    )
-    duration = json.loads(snapshot_json)["traversal_time_s"]
-    samples = max(2, math.ceil(duration / REFERENCE_SAMPLE_PERIOD_S) + 1)
-    _, rows = engine.pipeline_snapshot_axis_samples(
-        waypoints, config_text, [0, 1, 2, 3], samples
-    )
-    axes_pva = np.asarray(rows, dtype=np.float64)
+    t_start, t_end, axes_pva = epoch
+    duration = t_end - t_start
     return ReferenceBlock(
         stream_offset_s=stream_offset_s,
         duration_s=duration,
-        sample_times=np.linspace(0.0, duration, samples),
+        sample_times=np.linspace(0.0, duration, axes_pva.shape[1]),
         motor_pva_steps={
             m.role: _motor_pva_steps(m, axes_pva) for m in job.motors
         },
@@ -713,14 +804,82 @@ def _motor_steps(
     return StepEvents.concat(parts), state.count, origins
 
 
-def build_reference(job: Job) -> Reference:
-    start_xyz, final_xyze, waypoint_blocks = plan_waypoints(job)
+def planned_blocks(job: Job, planned: PlannedPrint) -> list[ReferenceBlock]:
     blocks = []
     offset = 0.0
-    for waypoints in waypoint_blocks:
-        block = sample_block(job, waypoints, offset)
+    for epoch in stream_epochs(
+        job,
+        planned,
+        job.config.config_text,
+        [0, 1, 2, 3],
+        REFERENCE_SAMPLE_PERIOD_S,
+    ):
+        block = reference_block(job, epoch, offset)
         blocks.append(block)
         offset += block.duration_s + REFERENCE_BLOCK_SEPARATION_S
+    return blocks
+
+
+def dispatched_runs(
+    record: dispatch_record.DispatchRecord,
+) -> list[tuple[int, int]]:
+    """The record's segments as runs of continuous motion: a run ends where
+    the stream drained to rest, re-anchored, or left a gap in host time."""
+    count = len(record)
+    starts = np.zeros(count, bool)
+    starts[0] = True
+    starts[1:] |= (record.flags[1:] & dispatch_record.FLAG_FRESH_EPOCH) != 0
+    starts[1:] |= (
+        np.abs(record.host_start()[1:] - record.host_end()[:-1])
+        > DISPATCH_SEAM_SLACK_S
+    )
+    drained = [
+        d.after_segments for d in record.drains if 0 < d.after_segments < count
+    ]
+    starts[drained] = True
+    bounds = [*np.flatnonzero(starts).tolist(), count]
+    return list(zip(bounds[:-1], bounds[1:]))
+
+
+def dispatched_blocks(
+    job: Job, record: dispatch_record.DispatchRecord
+) -> list[ReferenceBlock]:
+    origin = float(record.host_start()[0])
+    blocks = []
+    for lo, hi in dispatched_runs(record):
+        times, rows = [], []
+        for index in range(lo, hi):
+            samples = record.segment_samples(index)
+            n = len(samples)
+            local = record.t_start[index] + (
+                record.t_end[index] - record.t_start[index]
+            ) * np.arange(n) / (n - 1)
+            local[-1] = record.t_end[index]
+            keep = n if index == hi - 1 else n - 1
+            times.append(record.t0[index] + local[:keep])
+            rows.append(samples[:keep])
+        host = np.concatenate(times)
+        axes_pva = np.concatenate(rows).transpose(1, 0, 2)
+        blocks.append(
+            ReferenceBlock(
+                stream_offset_s=float(host[0]) - origin,
+                duration_s=float(host[-1] - host[0]),
+                sample_times=host - host[0],
+                motor_pva_steps={
+                    m.role: _motor_pva_steps(m, axes_pva) for m in job.motors
+                },
+            )
+        )
+    return blocks
+
+
+def build_reference(job: Job) -> Reference:
+    planned = plan_waypoints(job)
+    record = job.dispatch_record
+    if record is not None and record.pacer_brakes():
+        source, blocks = REFERENCE_DISPATCHED, dispatched_blocks(job, record)
+    else:
+        source, blocks = REFERENCE_PLANNED, planned_blocks(job, planned)
     events: dict[str, StepEvents] = {}
     start_counts: dict[str, int] = {}
     final_counts: dict[str, int] = {}
@@ -734,14 +893,200 @@ def build_reference(job: Job) -> Reference:
             level_offsets[motor.role],
         ) = _motor_steps(motor, blocks)
     return Reference(
-        start_xyz=start_xyz,
-        final_xyze=final_xyze,
+        source=source,
+        start_xyz=planned.start_xyz,
+        final_xyze=planned.final_xyze,
         blocks=blocks,
         events=events,
         start_counts=start_counts,
         final_counts=final_counts,
         level_offsets=level_offsets,
     )
+
+
+def planned_dispatch_record(job: Job) -> dispatch_record.DispatchRecord:
+    engine = harness._import_engine()
+    try:
+        data = engine.pipeline_snapshot_dispatch_record(
+            plan_waypoints(job).waypoints,
+            job.config.config_text,
+            job.step_benchmarks,
+        )
+    except ValueError as exc:
+        raise AnalysisError(f"print.gcode: {exc}") from exc
+    return dispatch_record.parse(bytes(data), "plan")
+
+
+def _motor_positions_steps(
+    job: Job, record: dispatch_record.DispatchRecord
+) -> np.ndarray:
+    per_step = np.array(
+        [np.asarray(m.axis_weights) / m.step_mm for m in job.motors]
+    ).T
+    return record.samples[:, :, 0] @ per_step
+
+
+@dataclass(frozen=True)
+class SegmentDeviation:
+    leaders_steps: float
+    followers_steps: float
+
+
+@dataclass
+class DispatchComparison:
+    job: Job
+    live: dispatch_record.DispatchRecord
+    plan: dispatch_record.DispatchRecord
+    live_steps: np.ndarray
+    plan_steps: np.ndarray
+
+    def deviation(self, i: int, j: int) -> SegmentDeviation:
+        """How far live segment `i` strays from planned segment `j` in motor
+        steps, wherever both stand at the same instant of their own. A
+        follower is compared from where the segment starts it."""
+        live, plan = self.live, self.plan
+        live_span = live.t_end[i] - live.t_start[i]
+        plan_span = plan.t_end[j] - plan.t_start[j]
+        a = self.live_steps[live.sample_start[i] : live.sample_start[i + 1]]
+        b = self.plan_steps[plan.sample_start[j] : plan.sample_start[j + 1]]
+        if (
+            abs(live_span - plan_span) > DISPATCH_DURATION_TOLERANCE_S
+            or a.shape != b.shape
+        ):
+            return SegmentDeviation(math.inf, math.inf)
+        diff = np.abs(a - b)
+        followers = [m.track_restarts_per_block for m in self.job.motors]
+        leaders = [not f for f in followers]
+        rebased = np.abs((a - a[0]) - (b - b[0]))[:, followers]
+        return SegmentDeviation(
+            float(diff[:, leaders].max(initial=0.0)),
+            float(rebased.max(initial=0.0)),
+        )
+
+    def extruder_offset_mm(self, i: int, j: int) -> float:
+        return float(
+            self.live.samples[self.live.sample_start[i], EXTRUDER_AXIS, 0]
+            - self.plan.samples[self.plan.sample_start[j], EXTRUDER_AXIS, 0]
+        )
+
+
+def _merge_runs(
+    runs: list[tuple[int, int]], spans_s: np.ndarray
+) -> list[tuple[int, int]]:
+    """Unpaired or straying runs of segments joined across less than
+    BRAKE_SETTLE_S of agreeing motion: the shaper and the extruder smooth a
+    brake's stop and restart into a few neighbours, some of which still
+    happen to land within tolerance of the plan."""
+    merged: list[list[int]] = []
+    for lo, hi in sorted(runs):
+        if merged and spans_s[merged[-1][1] : lo].sum() <= BRAKE_SETTLE_S:
+            merged[-1][1] = max(merged[-1][1], hi)
+        else:
+            merged.append([lo, hi])
+    return [(lo, hi) for lo, hi in merged]
+
+
+def compare_dispatch_with_plan(
+    job: Job, live: dispatch_record.DispatchRecord
+) -> dict:
+    """Pair the live record's segments with the plan's by source line and
+    hold each pair to the position-equivalent tolerance. A run of segments
+    that pairs with nothing, or strays, is a brake window when a pacer brake
+    drained the stream inside it and a divergence otherwise.
+
+    The extruder is held to the plan only until the first brake. A brake
+    stops on a corner the plan cuts, so the path it lays, and with it the
+    extrusion budget the follower spreads over what follows, differs from
+    the plan's for the rest of the print; how far is reported, not judged."""
+    plan = planned_dispatch_record(job)
+    comparison = DispatchComparison(
+        job,
+        live,
+        plan,
+        _motor_positions_steps(job, live),
+        _motor_positions_steps(job, plan),
+    )
+    matcher = difflib.SequenceMatcher(
+        None,
+        live.source_line.tolist(),
+        plan.source_line.tolist(),
+        autojunk=False,
+    )
+    brakes = [d.after_segments for d in live.pacer_brakes()]
+    first_brake = min(brakes, default=len(live))
+    runs: list[tuple[int, int]] = []
+    unpaired: set[int] = set()
+    strays: dict[int, float] = {}
+    matched = 0
+    extruder_offset_mm = 0.0
+    replanned_extruder_steps = 0.0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag != "equal":
+            runs.append((i1, i2))
+            unpaired.update(range(i1, i2))
+            continue
+        for i, j in zip(range(i1, i2), range(j1, j2)):
+            deviation = comparison.deviation(i, j)
+            followers_held = i < first_brake
+            stray = max(
+                deviation.leaders_steps,
+                deviation.followers_steps if followers_held else 0.0,
+            )
+            if stray > POSITION_EQUIVALENT_TOLERANCE_STEPS:
+                runs.append((i, i + 1))
+                strays[i] = stray
+                continue
+            matched += 1
+            if not followers_held:
+                replanned_extruder_steps = max(
+                    replanned_extruder_steps, deviation.followers_steps
+                )
+            extruder_offset_mm = max(
+                extruder_offset_mm, abs(comparison.extruder_offset_mm(i, j))
+            )
+    origin = float(live.host_start()[0])
+    spans = live.t_end - live.t_start
+    windows, divergences = [], []
+    for lo, hi in _merge_runs(runs, spans):
+        braked = [b for b in brakes if lo <= b <= hi]
+        at = min(lo, len(live) - 1)
+        window = {
+            "segments": [lo, hi],
+            "source_lines": [
+                int(live.source_line[at]),
+                int(live.source_line[max(at, hi - 1)]),
+            ],
+            "host_s": float(live.host_start()[at]) - origin,
+            "motion_s": float(spans[lo:hi].sum()),
+        }
+        if braked:
+            windows.append({**window, "pacer_brakes": len(braked)})
+            continue
+        stray = [strays[i] for i in range(lo, hi) if i in strays]
+        divergences.append(
+            {
+                **window,
+                "max_deviation_steps": max(stray, default=None),
+                "straying_segments": len(stray),
+                "unpaired_segments": len(unpaired.intersection(range(lo, hi))),
+            }
+        )
+    return {
+        "segments": len(live),
+        "planned_segments": len(plan),
+        "matched_segments": matched,
+        "pacer_brakes": len(brakes),
+        "requested_drains": len(live.drains) - len(brakes),
+        "brake_windows": windows,
+        "max_brake_window_motion_s": max(
+            (w["motion_s"] for w in windows), default=0.0
+        ),
+        "max_extruder_offset_mm": extruder_offset_mm,
+        "max_extruder_deviation_after_brakes_steps": replanned_extruder_steps,
+        "divergences": len(divergences),
+        "first_divergences": divergences[:REPORTED_DIVERGENCES_LIMIT],
+        "matches_plan_outside_brakes": not divergences,
+    }
 
 
 def capture_steps(
@@ -865,6 +1210,39 @@ def _step_keys(events: StepEvents) -> np.ndarray:
     return events.level * 2 + (events.direction > 0)
 
 
+def _key_time_composite(
+    query_key: np.ndarray,
+    query_t: np.ndarray,
+    ref_key: np.ndarray,
+    ref_t: np.ndarray,
+    margin_s: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    keys, rank = np.unique(
+        np.concatenate([ref_key, query_key]), return_inverse=True
+    )
+    ref_rank, query_rank = rank[: ref_key.size], rank[ref_key.size :]
+    t_floor = min(ref_t.min(), query_t.min()) - margin_s
+    span_ns = (
+        int(
+            np.ceil(
+                (max(ref_t.max(), query_t.max()) - t_floor + margin_s)
+                * NS_PER_S
+            )
+        )
+        + 1
+    )
+    if keys.size * span_ns >= 1 << 62:
+        raise AnalysisError(
+            f"{keys.size} step keys over {span_ns} ns overflow the key/time index"
+        )
+    ref_ns = np.rint((ref_t - t_floor) * NS_PER_S).astype(np.int64)
+    query_ns = np.rint((query_t - t_floor) * NS_PER_S).astype(np.int64)
+    order = np.argsort(ref_rank * span_ns + ref_ns, kind="stable")
+    ref_composite = (ref_rank * span_ns + ref_ns)[order]
+    query_composite = query_rank * span_ns + query_ns
+    return order, ref_composite, query_composite, span_ns
+
+
 def nearest_same_key(
     query_key: np.ndarray,
     query_t: np.ndarray,
@@ -875,18 +1253,10 @@ def nearest_same_key(
     delta = np.full(query_t.size, np.inf)
     if query_t.size == 0 or ref_t.size == 0:
         return nearest, delta
-    order = np.lexsort((ref_t, ref_key))
+    order, ref_composite, query_composite, _ = _key_time_composite(
+        query_key, query_t, ref_key, ref_t, 0.0
+    )
     sorted_key, sorted_t = ref_key[order], ref_t[order]
-    key_floor = min(sorted_key.min(), query_key.min())
-    t_floor = min(sorted_t.min(), query_t.min())
-    span = max(sorted_t.max(), query_t.max()) - t_floor + 1.0
-    ref_composite = (sorted_key - key_floor) * span + (sorted_t - t_floor)
-    query_composite = (query_key - key_floor) * span + (query_t - t_floor)
-    resolution = np.spacing(max(ref_composite.max(), query_composite.max()))
-    if resolution > 1e-8:
-        raise AnalysisError(
-            f"step-key composite resolution {resolution:.2e}s too coarse"
-        )
     position = np.searchsorted(ref_composite, query_composite)
     for candidate in (position - 1, position):
         valid = (candidate >= 0) & (candidate < sorted_t.size)
@@ -1173,28 +1543,13 @@ def same_key_count(
 ) -> np.ndarray:
     if query_t.size == 0 or ref_t.size == 0:
         return np.zeros(query_t.size, np.int64)
-    order = np.lexsort((ref_t, ref_key))
-    sorted_key, sorted_t = ref_key[order], ref_t[order]
-    key_floor = min(sorted_key.min(), query_key.min())
-    t_floor = min(sorted_t.min(), query_t.min()) - REPORT_MATCH_WINDOW_S
-    span = (
-        max(sorted_t.max(), query_t.max())
-        - t_floor
-        + REPORT_MATCH_WINDOW_S
-        + 1.0
+    _, ref_composite, query_composite, _ = _key_time_composite(
+        query_key, query_t, ref_key, ref_t, REPORT_MATCH_WINDOW_S
     )
-    ref_composite = (sorted_key - key_floor) * span + (sorted_t - t_floor)
-    query_composite = (query_key - key_floor) * span + (query_t - t_floor)
-    resolution = np.spacing(max(ref_composite.max(), query_composite.max()))
-    if resolution > 1e-8:
-        raise AnalysisError(
-            f"step-key composite resolution {resolution:.2e}s too coarse"
-        )
+    window_ns = round(REPORT_MATCH_WINDOW_S * NS_PER_S)
     return np.searchsorted(
-        ref_composite, query_composite + REPORT_MATCH_WINDOW_S, "right"
-    ) - np.searchsorted(
-        ref_composite, query_composite - REPORT_MATCH_WINDOW_S, "left"
-    )
+        ref_composite, query_composite + window_ns, "right"
+    ) - np.searchsorted(ref_composite, query_composite - window_ns, "left")
 
 
 def _is_pair(
@@ -1280,6 +1635,46 @@ def conditioned_span(epoch: EpochResult) -> dict:
     }
 
 
+def paired_steps_s(epoch: EpochResult) -> tuple[np.ndarray, np.ndarray]:
+    """Every capture step matched to its reference step where the reference
+    moves at least CONDITIONED_RATE_HZ, as (capture, reference) times in
+    capture order. Pairing by match, not by index, keeps a tie step at an
+    edge (withheld at a rest on one side, taken on the other) from shifting
+    every later step against the wrong partner; a crawling step's time says
+    little about pace."""
+    matches = epoch.matches.values()
+    conditioned = np.concatenate([m.reference_rate_hz for m in matches]) >= (
+        CONDITIONED_RATE_HZ
+    )
+    capture = np.concatenate([m.capture_time_s for m in matches])[conditioned]
+    late = np.concatenate([m.late_s for m in matches])[conditioned]
+    if capture.size == 0:
+        raise AnalysisError(
+            f"epoch at capture {epoch.capture.start_s:.3f}s matched no step "
+            f"moving at {CONDITIONED_RATE_HZ:g} Hz or faster"
+        )
+    reference = epoch.alignment.to_stream(capture - late)
+    order = np.argsort(capture, kind="stable")
+    return capture[order], reference[order]
+
+
+def epoch_pace(capture_s: np.ndarray, reference_s: np.ndarray) -> dict:
+    capture = capture_s - capture_s[0]
+    stream = reference_s - reference_s[0]
+    lag = capture - stream
+    allowed = PACE_TOLERANCE_S + PACE_TOLERANCE_PPM * 1e-6 * stream
+    worst = int(np.argmax(np.abs(lag) - allowed))
+    return {
+        "pace_capture_over_stream": float(capture[-1] / stream[-1])
+        if stream[-1] > 0.0
+        else 1.0,
+        "pace_max_abs_lag_ms": float(np.abs(lag).max() * 1e3),
+        "pace_worst_lag_ms": float(lag[worst] * 1e3),
+        "pace_worst_at_stream_s": float(stream[worst]),
+        "pace_within_tolerance": bool(np.all(np.abs(lag) <= allowed)),
+    }
+
+
 def residual_wander_us(matches: dict[str, MatchedSteps]) -> float:
     late = np.concatenate([m.late_s for m in matches.values()])
     times = np.concatenate([m.capture_time_s for m in matches.values()])
@@ -1294,6 +1689,21 @@ def residual_wander_us(matches: dict[str, MatchedSteps]) -> float:
         if np.count_nonzero(bins == b) >= MIN_FIT_PAIRS
     ]
     return float((max(medians) - min(medians)) * 1e6) if medians else 0.0
+
+
+def nearest_fitted_ppm(fitted_ppm: list[float | None], index: int) -> float:
+    """The rate an epoch too short to fit its own runs at. The live host
+    re-syncs its host→mcu map at every rest, so the stream's rate against
+    the mcu clock moves from epoch to epoch as the clock estimate
+    converges; the latest fitted epoch holds the estimate nearest the one
+    in force, and a median over the whole run can sit tens of ppm off it."""
+    for ppm in reversed(fitted_ppm[:index]):
+        if ppm is not None:
+            return ppm
+    for ppm in fitted_ppm[index + 1 :]:
+        if ppm is not None:
+            return ppm
+    return 0.0
 
 
 def align_all(
@@ -1319,12 +1729,11 @@ def align_all(
     for index, (cap, ref) in enumerate(pairs):
         if cap.duration_s >= MIN_SCALE_FIT_DURATION_S:
             alignments[index] = align_epoch(steps[index], cap, ref, None)
-    fitted = [a.ppm for a in alignments if a is not None]
-    fallback_ppm = float(np.median(fitted)) if fitted else 0.0
+    fitted_ppm = [None if a is None else a.ppm for a in alignments]
     results = []
     for index, (cap, ref) in enumerate(pairs):
         alignment = alignments[index] or align_epoch(
-            steps[index], cap, ref, fallback_ppm
+            steps[index], cap, ref, nearest_fitted_ppm(fitted_ppm, index)
         )
         results.append(
             EpochResult(
@@ -1459,6 +1868,54 @@ def _timing_stats(late_s: np.ndarray, capture_time_s: np.ndarray) -> dict:
     }
 
 
+def _step_at(
+    late_s: np.ndarray,
+    capture_time_s: np.ndarray,
+    rate_hz: np.ndarray,
+    index: int,
+) -> dict:
+    return {
+        "capture_s": float(capture_time_s[index]),
+        "timing_error_us": float(late_s[index] * 1e6),
+        "reference_rate_hz": float(rate_hz[index]),
+        "position_equivalent_steps": float(abs(late_s[index]) * rate_hz[index]),
+    }
+
+
+def timing_report(
+    late_s: np.ndarray, capture_time_s: np.ndarray, rate_hz: np.ndarray
+) -> dict:
+    position_steps = np.abs(late_s) * rate_hz
+    beyond_time_bound = np.flatnonzero(
+        np.abs(late_s) * 1e6 > TIMING_TOLERANCE_US
+    )
+    beyond_position_bound = (
+        position_steps[beyond_time_bound] > POSITION_EQUIVALENT_TOLERANCE_STEPS
+    )
+    return {
+        "timing_error_capture_minus_reference_us": _timing_stats(
+            late_s, capture_time_s
+        ),
+        "position_equivalent_error_abs_max": _step_at(
+            late_s, capture_time_s, rate_hz, int(np.argmax(position_steps))
+        )
+        if late_s.size
+        else {},
+        "timing_beyond_time_bound_steps": int(beyond_time_bound.size),
+        "timing_beyond_time_bound_worst_position": _step_at(
+            late_s,
+            capture_time_s,
+            rate_hz,
+            int(
+                beyond_time_bound[np.argmax(position_steps[beyond_time_bound])]
+            ),
+        )
+        if beyond_time_bound.size
+        else {},
+        "timing_violation_steps": int(np.count_nonzero(beyond_position_bound)),
+    }
+
+
 def _gcode_net_steps(motor: Motor, reference: Reference) -> int:
     weights = np.asarray(motor.axis_weights)
     start = float(weights @ np.array([*reference.start_xyz, 0.0]))
@@ -1587,15 +2044,16 @@ def analyze(
             ),
             "edge_tie_steps": sum(e.matches[role].edge_ties for e in epochs),
             "rest_tie_steps": sum(e.matches[role].rest_ties for e in epochs),
-            "timing_error_capture_minus_reference_us": _timing_stats(
-                late[conditioned], late_at[conditioned]
+            **timing_report(
+                late[conditioned], late_at[conditioned], rate[conditioned]
             ),
             "timing_reference_rate_floor_hz": CONDITIONED_RATE_HZ,
+            "timing_position_bound_steps": POSITION_EQUIVALENT_TOLERANCE_STEPS,
+            "timing_position_bound_relaxes_below_hz": (
+                POSITION_BOUND_RELAXES_BELOW_HZ
+            ),
             "timing_steps_below_rate_floor": int(
                 np.count_nonzero(~conditioned)
-            ),
-            "max_abs_position_equivalent_error_steps": float(
-                np.max(np.abs(late) * rate, initial=0.0)
             ),
             "max_abs_count_error_steps": int(abs(error.error_steps[worst]))
             if worst is not None
@@ -1615,13 +2073,7 @@ def analyze(
                 np.abs(inputs.capture.deltas[:, motor.channel]).max()
             ),
         }
-    timing_abs_max_us = max(
-        (
-            r["timing_error_capture_minus_reference_us"].get("abs_max", 0.0)
-            for r in motors_report.values()
-        ),
-        default=0.0,
-    )
+    paces = [epoch_pace(*paired_steps_s(e)) for e in epochs]
     checks = {
         "net_steps_match": all(
             abs(r["net_steps_capture_minus_expected"]) <= r["rest_tie_steps"]
@@ -1633,13 +2085,29 @@ def analyze(
             and r["unmatched_reference_steps"] == 0
             for r in motors_report.values()
         ),
-        f"timing_abs_max_within_{TIMING_TOLERANCE_US:g}us": timing_abs_max_us
-        <= TIMING_TOLERANCE_US,
+        TIMING_CHECK: all(
+            r["timing_violation_steps"] == 0 for r in motors_report.values()
+        ),
+        "pace_matches_reference": all(
+            p["pace_within_tolerance"] for p in paces
+        ),
     }
+    record = inputs.dispatch_record
+    dispatched = (
+        None if record is None else compare_dispatch_with_plan(inputs, record)
+    )
+    if dispatched is not None:
+        checks["no_pacer_brakes"] = dispatched["pacer_brakes"] == 0
+        checks["dispatch_matches_plan_outside_brakes"] = dispatched[
+            "matches_plan_outside_brakes"
+        ]
     verdict = {
         "ok": all(checks.values()),
         "checks": checks,
-        "alignment_model": "t_capture = offset_s + (1 + ppm*1e-6) * t_stream",
+        "reference_source": reference.source,
+        "reference_step_capacity": inputs.step_benchmarks_source,
+        "dispatch_record": dispatched,
+        "alignment_model": "t_capture = offset_s + (1 + ppm*1e-6) * t_reference",
         "capture": {
             "ticks": len(inputs.capture.deltas),
             "tick_hz": inputs.capture.tick_hz,
@@ -1658,6 +2126,7 @@ def analyze(
                 "stream_start_s": e.reference.start_s,
                 "stream_duration_s": e.reference.duration_s,
                 **conditioned_span(e),
+                **pace,
                 "offset_s": e.alignment.offset_s,
                 "ppm": e.alignment.ppm,
                 "scale_fitted": e.alignment.scale_fitted,
@@ -1666,7 +2135,7 @@ def analyze(
                 ),
                 "residual_wander_us": residual_wander_us(e.matches),
             }
-            for e in epochs
+            for e, pace in zip(epochs, paces)
         ],
         "motors": motors_report,
         "corexy": corexy_report(inputs, reference, finals, errors),
@@ -1774,6 +2243,38 @@ def _save(fig, path: Path, plt) -> str:
     return path.name
 
 
+def deployed_engine_mismatch(
+    run: dict, engine_build_id: str, analyze_argv: list[str]
+) -> str | None:
+    """Why the reference this engine plans is not what the run executed: the
+    Pi planned the print with the rust/ sources `deploy.py sync` recorded,
+    and a reference from any other planner holds the capture against motion
+    the printer never commanded."""
+    identity = run["deployed"]
+    deployed = identity.get("rust_build_id")
+    if deployed == engine_build_id:
+        return None
+    head = identity["head"]
+    reason = (
+        f"the run executed rust/ {deployed} ({identity.get('branch')} @ "
+        f"{head}, {identity.get('worktree')}) but the local engine was built "
+        f"from {engine_build_id}. Reanalyze it from a worktree at the "
+        "deployed head:\n"
+        f'  cd "$(scripts/wt.sh new reanalyze-{head[:12]} --base {head})"\n'
+        "  make -f Makefile.rust motion-engine-fast\n"
+        f"  uv run python tools/bench/analyze.py {shlex.join(analyze_argv)}"
+    )
+    dirty_paths = identity.get("dirty_paths")
+    diff_sha256 = identity.get("diff_sha256")
+    if dirty_paths or diff_sha256 != EMPTY_DIFF_SHA256:
+        reason += (
+            f"\nThe deployed tree was dirty (dirty paths {dirty_paths}, "
+            f"git diff HEAD sha256 {diff_sha256}), so {head} alone may not "
+            f"reproduce rust/ {deployed}."
+        )
+    return reason
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("run_dir", type=Path)
@@ -1783,9 +2284,45 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_EPOCH_GAP_S,
         help="idle seconds that split motion epochs",
     )
+    parser.add_argument(
+        "--corner-flow",
+        action="store_true",
+        help="also measure nozzle flow through every extruding corner",
+    )
+    parser.add_argument(
+        "--step-benchmark",
+        type=SuppliedBenchmark.parse,
+        metavar="PULSED,BOTH_EDGE,CLOCK_HZ",
+        help="cap the reference of a run whose run.json predates recording "
+        "step benchmarks: the bench MCU's ticks per step pulsed and both-edge "
+        "and its clock, every captured motor stepped pulsed",
+    )
     args = parser.parse_args(argv)
-    inputs = load_run(args.run_dir)
+    options = [
+        token
+        for token in (sys.argv[1:] if argv is None else argv)
+        if Path(token) != args.run_dir
+    ]
+    mismatch = deployed_engine_mismatch(
+        json.loads((args.run_dir / "run.json").read_text()),
+        harness._import_engine().build_id(),
+        [str(args.run_dir.resolve()), *options],
+    )
+    if mismatch is not None:
+        raise AnalysisError(mismatch)
+    inputs = load_run(args.run_dir, args.step_benchmark)
     verdict, detail = analyze(inputs, args.gap)
+    if args.corner_flow:
+        planned = plan_waypoints(inputs)
+        verdict["corner_flow"] = corner_flow_bench.report(
+            inputs,
+            detail,
+            planned.blocks,
+            ROLE_AXIS_WEIGHTS,
+            lambda config_text, axes, period: stream_epochs(
+                inputs, planned, config_text, axes, period
+            ),
+        )
     verdict["plots"] = save_plots(inputs, detail)
     text = json.dumps(verdict, indent=2)
     (args.run_dir / "analysis.json").write_text(text + "\n")

@@ -1,5 +1,12 @@
 use thiserror::Error;
-use trajectory::{AxisChainSet, CompiledChain, PostProcessorInstance, algos};
+use trajectory::{AxisChainSet, CompiledChain, FollowerLimits, PostProcessorInstance, algos};
+
+/// What replaced `ratio_ramp_time`, for the config error that refuses it.
+pub const RATIO_RAMP_RULE: &str = "every follower now ramps each extrusion-ratio step \
+    over the shortest time between 5 and 30 ms that keeps its advance within the axis's \
+    max_velocity and max_accel, and the planner slows the toolhead at a step where 30 ms is \
+    not enough. Delete the option; set [axis] max_velocity / max_accel (or the [extruder]'s \
+    max_extrude_only_velocity / max_extrude_only_accel they inherit) instead";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PostProcessorDecl {
@@ -34,6 +41,14 @@ pub enum PostProcessorConfigError {
          ignore. Move '{name}' after the kernel in the axis post_processors list"
     )]
     LeaderGainBeforeKernel { axis: String, name: String },
+    #[error(
+        "axis '{axis}' follows other axes, and post_processor '{name}' advances it: the \
+         planner holds the advance within the motor's limits, so set [axis {axis}] \
+         max_velocity and max_accel (the [extruder] axis inherits them from \
+         max_extrude_only_velocity and max_extrude_only_accel, which default from \
+         nozzle_diameter and filament_diameter)"
+    )]
+    FollowerAdvanceWithoutLimits { axis: String, name: String },
 }
 
 #[derive(Debug, Clone)]
@@ -107,9 +122,73 @@ impl PostProcessorSet {
                 CompiledChain::compile(&chain).map_err(PostProcessorConfigError::Param)
             })
             .collect::<Result<_, _>>()?;
+        let chains = Self::with_follower_options(registry, chains);
         let followers = registry.follower_index_map();
         self.reject_pre_kernel_gains_on_leaders(registry, &followers)?;
-        Ok(AxisChainSet { chains, followers })
+        let chains = AxisChainSet { chains, followers };
+        self.reject_follower_advance_without_limits(registry, &chains)?;
+        Ok(chains)
+    }
+
+    fn reject_follower_advance_without_limits(
+        &self,
+        registry: &AxisRegistry,
+        chains: &AxisChainSet,
+    ) -> Result<(), PostProcessorConfigError> {
+        for (axis, leaders) in &chains.followers {
+            let decl = &registry.decls()[*axis];
+            if leaders.is_empty()
+                || chains.chains[*axis].transform().is_none()
+                || (decl.max_velocity.is_some() && decl.max_accel.is_some())
+            {
+                continue;
+            }
+            return Err(PostProcessorConfigError::FollowerAdvanceWithoutLimits {
+                axis: decl.name.clone(),
+                name: self.transform_name(*axis).clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn transform_name(&self, axis: usize) -> &String {
+        self.per_axis[axis]
+            .iter()
+            .find(|name| {
+                !matches!(
+                    self.instances
+                        .iter()
+                        .find(|i| i.name() == name.as_str())
+                        .expect("validated in try_new")
+                        .compile_stage(),
+                    None | Some(trajectory::ChainStage::SmoothKernel(_))
+                )
+            })
+            .expect("a transformed chain names the stage that transforms it")
+    }
+
+    fn with_follower_options(
+        registry: &AxisRegistry,
+        chains: Vec<CompiledChain>,
+    ) -> Vec<CompiledChain> {
+        chains
+            .into_iter()
+            .zip(registry.decls())
+            .map(|(chain, decl)| {
+                let chain = if decl.follows.is_empty() {
+                    chain
+                } else {
+                    chain.with_follower_limits(FollowerLimits {
+                        max_velocity_mm_s: decl.max_velocity.unwrap_or(f64::INFINITY),
+                        max_accel_mm_s2: decl.max_accel.unwrap_or(f64::INFINITY),
+                    })
+                };
+                match decl.instantaneous_corner_velocity {
+                    Some(mm_s) => chain.with_instantaneous_corner_velocity(mm_s),
+                    None => chain,
+                }
+            })
+            .collect()
     }
 
     fn reject_pre_kernel_gains_on_leaders(
@@ -238,6 +317,18 @@ pub struct AxisDecl {
     pub follows: Vec<String>,
     pub motors: Vec<String>,
     pub post_processors: Vec<String>,
+    /// `max_velocity`: what the motor of an axis that follows others can
+    /// do for every move it makes, its advance included. For the
+    /// `[extruder]` axis the reader inherits `max_extrude_only_velocity`
+    /// when it is unset.
+    pub max_velocity: Option<f64>,
+    /// `max_accel`, inherited like [`AxisDecl::max_velocity`] from
+    /// `max_extrude_only_accel`.
+    pub max_accel: Option<f64>,
+    /// `instantaneous_corner_velocity`: the velocity change the motor of an
+    /// axis that follows others takes at once, see
+    /// [`trajectory::CompiledChain::instantaneous_corner_velocity`].
+    pub instantaneous_corner_velocity: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -267,6 +358,17 @@ pub enum AxisConfigError {
     MotorMappingMissing { axis: String },
     #[error("[kinematics] claims axis '{axis}' but no [axis {axis}] section is declared")]
     UnknownClaimedAxis { axis: String },
+    #[error(
+        "axis '{axis}': {option} is the capability of an axis that follows others, and \
+         '{axis}' follows none (spatial limits live in [printer])"
+    )]
+    LimitWithoutLeaders { axis: String, option: &'static str },
+    #[error("axis '{axis}': {option} must be finite and above 0, got {value}")]
+    BadLimit {
+        axis: String,
+        option: &'static str,
+        value: f64,
+    },
 }
 
 impl AxisRegistry {
@@ -287,6 +389,29 @@ impl AxisRegistry {
                 return Err(AxisConfigError::Duplicate {
                     name: d.name.clone(),
                 });
+            }
+            for (option, value) in [
+                ("max_velocity", d.max_velocity),
+                ("max_accel", d.max_accel),
+                (
+                    "instantaneous_corner_velocity",
+                    d.instantaneous_corner_velocity,
+                ),
+            ] {
+                let Some(value) = value else { continue };
+                if !(value.is_finite() && value > 0.0) {
+                    return Err(AxisConfigError::BadLimit {
+                        axis: d.name.clone(),
+                        option,
+                        value,
+                    });
+                }
+                if d.follows.is_empty() {
+                    return Err(AxisConfigError::LimitWithoutLeaders {
+                        axis: d.name.clone(),
+                        option,
+                    });
+                }
             }
         }
         let mut ordered = Vec::with_capacity(decls.len());
@@ -395,6 +520,9 @@ impl Default for AxisRegistry {
                     follows: vec![],
                     motors: vec![],
                     post_processors: vec![],
+                    max_velocity: None,
+                    max_accel: None,
+                    instantaneous_corner_velocity: None,
                 })
                 .collect(),
         )
@@ -406,8 +534,7 @@ impl Default for AxisRegistry {
 pub struct PlannerConfig {
     pub axis_registry: AxisRegistry,
     pub cartesian: CartesianLimits,
-    pub runtime_caps: RuntimeCaps,
-    pub runtime_corner_deviation: Option<f64>,
+    pub runtime: RuntimeLimits,
     pub corner: geometry::CornerFitConfig,
     pub post_processors: PostProcessorSet,
     /// While set, `compile_active_chains` yields identity chains — the
@@ -420,10 +547,66 @@ pub struct PlannerConfig {
     pub fit_tolerance_accel_mm_s2: f64,
 }
 
+/// The `SET_VELOCITY_LIMIT` / `M204` / `RESET_VELOCITY_LIMIT` overrides in
+/// force. Velocity and accel caps clamp the config base but never raise it;
+/// a runtime corner deviation replaces the base outright.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct RuntimeCaps {
+pub struct RuntimeLimits {
     pub velocity: Option<f64>,
     pub accel: Option<f64>,
+    pub corner_deviation: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum RuntimeLimitError {
+    #[error("{name} must be finite and positive")]
+    NotPositive { name: &'static str },
+    #[error("corner_deviation must be finite and non-negative")]
+    InvalidCornerDeviation,
+}
+
+impl RuntimeLimits {
+    pub fn set_velocity_cap(&mut self, velocity: Option<f64>) -> Result<(), RuntimeLimitError> {
+        self.velocity = require_positive(velocity, "velocity")?;
+        Ok(())
+    }
+
+    pub fn set_accel_cap(&mut self, accel: Option<f64>) -> Result<(), RuntimeLimitError> {
+        self.accel = require_positive(accel, "accel")?;
+        Ok(())
+    }
+
+    pub fn set_corner_deviation(
+        &mut self,
+        corner_deviation: Option<f64>,
+    ) -> Result<(), RuntimeLimitError> {
+        if corner_deviation.is_some_and(|d| !(d.is_finite() && d >= 0.0)) {
+            return Err(RuntimeLimitError::InvalidCornerDeviation);
+        }
+        self.corner_deviation = corner_deviation;
+        Ok(())
+    }
+
+    /// `(velocity, accel, corner_deviation)` a move submitted now runs under.
+    #[must_use]
+    pub fn effective(&self, base: &CartesianLimits) -> (f64, f64, f64) {
+        let clamp = |cap: Option<f64>, base: f64| cap.map_or(base, |c| c.min(base));
+        (
+            clamp(self.velocity, base.max_velocity),
+            clamp(self.accel, base.max_accel),
+            self.corner_deviation.unwrap_or(base.corner_deviation),
+        )
+    }
+}
+
+fn require_positive(
+    value: Option<f64>,
+    name: &'static str,
+) -> Result<Option<f64>, RuntimeLimitError> {
+    if value.is_some_and(|v| !(v.is_finite() && v > 0.0)) {
+        return Err(RuntimeLimitError::NotPositive { name });
+    }
+    Ok(value)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -444,15 +627,32 @@ impl Default for CartesianLimits {
             max_jerk: 100_000.0,
             max_z_velocity: 15.0,
             max_z_accel: 100.0,
-            corner_deviation: geometry::corner_deviation_from_scv(
-                DEFAULT_SQUARE_CORNER_VELOCITY_MM_S,
-                3000.0,
-            ),
+            corner_deviation: DEFAULT_CORNER_DEVIATION_MM,
         }
     }
 }
 
 impl CartesianLimits {
+    /// Limits for a printer without z caps of its own: the z caps sit at the
+    /// path caps, where they can never bind (no move leans more than fully
+    /// on z).
+    #[must_use]
+    pub fn without_z_caps(
+        max_velocity: f64,
+        max_accel: f64,
+        max_jerk: f64,
+        corner_deviation: f64,
+    ) -> Self {
+        Self {
+            max_velocity,
+            max_accel,
+            max_jerk,
+            max_z_velocity: max_velocity,
+            max_z_accel: max_accel,
+            corner_deviation,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         let ok = |c: f64| c.is_finite() && c > 0.0;
         if !(ok(self.max_velocity)
@@ -470,30 +670,14 @@ impl CartesianLimits {
         }
         Ok(())
     }
-
-    #[must_use]
-    pub fn for_move(&self, dx: f64, dy: f64, dz: f64) -> (f64, f64) {
-        let d = (dx * dx + dy * dy + dz * dz).sqrt();
-        let mut v = self.max_velocity;
-        let mut a = self.max_accel;
-        if d > 1e-9 && dz.abs() > 1e-9 {
-            let z_unit = dz.abs() / d;
-            v = v.min(self.max_z_velocity / z_unit);
-            a = a.min(self.max_z_accel / z_unit);
-        }
-        (v, a)
-    }
 }
 
-pub const DEFAULT_SQUARE_CORNER_VELOCITY_MM_S: f64 = 5.0;
+/// The corner budget of a `[printer]` that sets neither `corner_deviation`
+/// nor `square_corner_velocity`, in mm. The same at every `max_accel`:
+/// see `docs/Config_Reference_Motion.md` for the profile study behind it.
+pub const DEFAULT_CORNER_DEVIATION_MM: f64 = 0.04;
 
 impl PlannerConfig {
-    #[must_use]
-    pub fn corner_deviation(&self) -> f64 {
-        self.runtime_corner_deviation
-            .unwrap_or(self.cartesian.corner_deviation)
-    }
-
     pub fn compile_active_chains(&self) -> Result<AxisChainSet, PostProcessorConfigError> {
         self.post_processors
             .compile_active_chains(&self.axis_registry, self.post_processor_bypass)
@@ -501,12 +685,35 @@ impl PlannerConfig {
 
     #[must_use]
     pub fn effective_limits(&self) -> (f64, f64, f64) {
-        let clamp = |cap: Option<f64>, base: f64| cap.map_or(base, |c| c.min(base));
-        (
-            clamp(self.runtime_caps.velocity, self.cartesian.max_velocity),
-            clamp(self.runtime_caps.accel, self.cartesian.max_accel),
-            self.corner_deviation(),
-        )
+        self.runtime.effective(&self.cartesian)
+    }
+
+    /// An advance with no smoothing kernel leaves the moves its follower
+    /// makes on its own — retracts, primes, which the advance leaves
+    /// untouched — bounded by the extrude-only caps alone, and those must be
+    /// set.
+    pub fn check_kernel_free_advance_extrude_only_caps(&self) -> Result<(), String> {
+        let chains = self.compile_active_chains().map_err(|e| e.to_string())?;
+        let Some(axis) = chains
+            .projected_followers()
+            .map(|(axis, _)| axis)
+            .find(|&axis| {
+                let chain = &chains.chains[axis];
+                chain.transform().is_some() && chain.kernel().is_none()
+            })
+        else {
+            return Ok(());
+        };
+        let finite = |cap: Option<f64>| cap.is_some_and(f64::is_finite);
+        if finite(self.max_extrude_only_velocity) && finite(self.max_extrude_only_accel) {
+            return Ok(());
+        }
+        Err(format!(
+            "axis '{}' has an advance and no smoothing kernel, so nothing bounds the moves it \
+             makes on its own (retracts, primes) but the extrude-only caps: set finite \
+             [extruder] max_extrude_only_velocity and max_extrude_only_accel",
+            self.axis_registry.axis_name(axis)
+        ))
     }
 }
 
@@ -518,8 +725,7 @@ impl Default for PlannerConfig {
         Self {
             axis_registry,
             cartesian: CartesianLimits::default(),
-            runtime_caps: RuntimeCaps::default(),
-            runtime_corner_deviation: None,
+            runtime: RuntimeLimits::default(),
             corner: geometry::CornerFitConfig::default(),
             post_processors,
             post_processor_bypass: false,
@@ -530,6 +736,9 @@ impl Default for PlannerConfig {
         }
     }
 }
+
+mod extruder_caps;
+pub use extruder_caps::extruder_caps;
 
 #[cfg(feature = "doc")]
 pub mod from_doc;

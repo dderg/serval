@@ -78,10 +78,11 @@ pub const AXIS_Z: usize = 2;
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct McuHardware {
     pub kinematics: u8,
-    /// Motor-frame velocity ceiling (mm/s) per lane: the fastest that lane's
-    /// MCU can physically emit steps. Tracks are validated against it at
-    /// enqueue so an overspeed track fails loud on the host instead of
-    /// latching -310 on the MCU.
+    /// Motor-frame velocity ceiling (mm/s) per lane: the fastest the
+    /// lane's driver can be stepped at all, from its pulse width. Tracks
+    /// are validated against it at enqueue so an overspeed track fails
+    /// loud on the host instead of on the MCU; the planner's step
+    /// capacity cap keeps them well inside it.
     pub max_motor_velocity: Vec<f64>,
     pub motor_counts: Vec<u8>,
     pub microstep_distance: Vec<f64>,
@@ -98,6 +99,12 @@ pub struct McuHardware {
     /// `build_endpoint` converts it to ticks with the measured clock
     /// frequency it alone holds.
     pub stepcompress_max_error_secs: f64,
+    /// Wall time one stepcompress drain pass may spend searching step roots
+    /// before it yields to the pacer; every pass still roots its first
+    /// window, so a spent budget slows a drain but never stalls it. The
+    /// sim and the hardware run the same value from the same `[mcu]`
+    /// section.
+    pub stepcompress_drain_budget_secs: f64,
     /// The mcu's own sample-executor rate (Hz), as klippy read it from the
     /// firmware's advertised `MOTION_SAMPLE_RATE_HZ`. Zero when the mcu has
     /// no phase lane to run at it.
@@ -512,11 +519,13 @@ pub fn sample_seed_counts(
     cfg: &McuAxisConfig,
     pos: geometry::MachinePos,
 ) -> Result<Vec<i64>, String> {
-    #[allow(clippy::cast_possible_truncation)]
-    Ok(seed_steps(cfg, pos, McuAxisConfig::phase_capable, "phase")?
+    seed_steps(cfg, pos, McuAxisConfig::phase_capable, "phase")?
         .into_iter()
-        .map(|steps| steps.round() as i64)
-        .collect())
+        .map(|steps| {
+            checked_cast::f64_to_i64(steps.round())
+                .map_err(|e| format!("position seed: phase lane step count: {e}"))
+        })
+        .collect()
 }
 
 fn seed_steps(

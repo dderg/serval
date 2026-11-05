@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use crossbeam_channel::Sender;
 use geometry::path::lowering::PositionProfile;
-use geometry::{CornerFitConfig, Move, MoveVelocity, SurfaceTransform, VelocityLimits};
+use geometry::{
+    CornerFitConfig, Move, MoveVelocity, StepCapacity, SurfaceTransform, VelocityLimits,
+};
 use trajectory::{AxisChainSet, ContinuousSegment, NudgeProfile};
 
 pub const CONTIGUITY_EPS_MM: f64 = 1e-6;
@@ -22,7 +24,7 @@ pub fn advance_odometer(pos: &mut [f64], movement: &Move) {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct StreamConfig {
     pub corner: CornerFitConfig,
     pub integration_tol: f64,
@@ -41,14 +43,15 @@ pub struct StreamConfig {
     /// through the bridge carry their own per-move limits; this is the fallback
     /// used when the engine constructs a move itself.
     pub limits: VelocityLimits,
+    /// The mcus' measured step-dispatch capacity every planned move is
+    /// held within; absent where no mcu steps the motors (snapshots,
+    /// replays, simulated mcus).
+    pub step_capacity: Option<Arc<StepCapacity>>,
 }
 
 impl StreamConfig {
     pub(crate) fn fit_tol(&self) -> crate::lowering::FitTol {
-        crate::lowering::FitTol {
-            pos_mm: self.fit_tol_mm,
-            accel_mm_s2: self.fit_tol_accel_mm_s2,
-        }
+        crate::lowering::FitTol::absolute(self.fit_tol_mm, self.fit_tol_accel_mm_s2)
     }
 }
 
@@ -57,8 +60,10 @@ pub enum StreamError {
     /// A move entered the pipeline whose spatial start does not meet the
     /// toolhead where the previous move left it. Real slicer output is always
     /// position-contiguous; a gap means the move stream was stitched wrong
-    /// upstream. Caught at ingress so the offending move is named there, not
-    /// as a downstream `ZeroMotion` deep in the fit stage.
+    /// upstream. The live ingress names the offending move before it enters;
+    /// the lowerer refuses it for every other driver (a pipeline built at a
+    /// home the first move does not start from), before the shaper smooths
+    /// the jump into an unfittable pulse.
     Discontinuity {
         line_no: u32,
         expected: [f64; 3],
@@ -97,6 +102,80 @@ pub(crate) enum PostProcessError {
     MissingHistory { axis: usize, t: f64 },
     #[error("axis {axis}: shaping window needs unavailable lookahead at t={t}")]
     MissingLookahead { axis: usize, t: f64 },
+    #[error(
+        "axis {axis}: the advance on this ratio-ramped follower would step its position by \
+         {step_mm} mm at t={t}, where the velocity it reads steps from {velocity_before} to \
+         {velocity_after} mm/s. A ratio ramp leaves the projected extrusion velocity-continuous \
+         and no kernel follows the advance, so the step would reach the motor as is"
+    )]
+    RatioRampedPositionStep {
+        axis: usize,
+        t: f64,
+        step_mm: f64,
+        velocity_before: f64,
+        velocity_after: f64,
+    },
+    #[error(
+        "axis {axis}: this ratio-ramped follower would step its velocity from \
+         {velocity_before} to {velocity_after} mm/s at t={t}, beyond the {resolution} mm/s \
+         allowance (its instantaneous_corner_velocity plus the fit resolution). No kernel \
+         follows a ratio ramp, so the step would reach the motor as is. The advance turns \
+         every acceleration step of the leaders it rides into one, and the planner holds \
+         those of unshaped leaders within instantaneous_corner_velocity: a larger one is a \
+         planner bug, or comes from a leader stepping where the planner cannot see it"
+    )]
+    RatioRampedVelocityStep {
+        axis: usize,
+        t: f64,
+        velocity_before: f64,
+        velocity_after: f64,
+        resolution: f64,
+    },
+    #[error(
+        "axis {axis}: an unshaped leader leaves its curvature cap as a square root of the \
+         time on [{from}, {to}], where the advance on this follower changes its velocity by \
+         {change} mm/s faster than any fit resolves — beyond the {allowance} mm/s allowance \
+         (its instantaneous_corner_velocity plus the leaders' fit resolution) such a change \
+         may take"
+    )]
+    UnshapedLeaderOnsetVelocityStep {
+        axis: usize,
+        from: f64,
+        to: f64,
+        change: f64,
+        allowance: f64,
+    },
+    #[error(
+        "axis {axis}: {fit_context} span [{t_start}, {t_end}] has neither exact polynomials nor \
+         an enclosure there to prove a piece against: every fitted piece is proven, so the \
+         signal's formula there lacks a model"
+    )]
+    UnprovableSpan {
+        axis: usize,
+        fit_context: &'static str,
+        t_start: f64,
+        t_end: f64,
+    },
+    #[error(
+        "axis {axis}: follower seam weld over [{t_start}, {t_end}] would move the emitted track \
+         by up to {displacement_mm} mm (budget {position_budget_mm}) and its acceleration by up \
+         to {acceleration_mm_s2} mm/s^2 (budget {acceleration_budget_mm_s2}): the emitted state \
+         (p, v) = ({emitted_position}, {emitted_velocity}) does not continue the fitted start \
+         (p, v) = ({fitted_position}, {fitted_velocity})"
+    )]
+    SeamWeld {
+        axis: usize,
+        t_start: f64,
+        t_end: f64,
+        displacement_mm: f64,
+        position_budget_mm: f64,
+        acceleration_mm_s2: f64,
+        acceleration_budget_mm_s2: f64,
+        emitted_position: f64,
+        emitted_velocity: f64,
+        fitted_position: f64,
+        fitted_velocity: f64,
+    },
     #[error(
         "axis {axis} ({fit_context}): fit tolerance failed after {refinement_splits} refinement \
          splits on [{t_start}, {t_end}], nearest seeds [{lower_seed} ({lower_seed_provenance}), \
@@ -142,13 +221,68 @@ pub(crate) enum PostProcessError {
         candidate_velocity: f64,
         candidate_acceleration: f64,
     },
+    #[error(
+        "axis {axis} ({fit_context}): the signal's velocity changes by {velocity_change} across \
+         [{t_start}, {t_end}], a span the fit cannot split further, while its acceleration \
+         there carries [{carried_low}, {carried_high}] (slack {velocity_slack}): a velocity \
+         step narrower than the resolution floor; position error \
+         {position_error}/{position_budget}, velocity error {velocity_error}, acceleration \
+         error {acceleration_error}/{acceleration_budget}"
+    )]
+    VelocityStepAtFitFloor {
+        axis: usize,
+        fit_context: &'static str,
+        t_start: f64,
+        t_end: f64,
+        velocity_change: f64,
+        carried_low: f64,
+        carried_high: f64,
+        velocity_slack: f64,
+        position_error: f64,
+        position_budget: f64,
+        velocity_error: f64,
+        acceleration_error: f64,
+        acceleration_budget: f64,
+    },
+    #[error(
+        "axis {axis} ({fit_context}): the velocity break at {break_at} lies within the {floor} s \
+         fit resolution floor of {moved_onto}; moving its velocity step {velocity_step} there \
+         shifts position by {position_shift}, beyond the {position_budget} tolerance"
+    )]
+    CrowdedVelocityBreaks {
+        axis: usize,
+        fit_context: &'static str,
+        break_at: f64,
+        moved_onto: f64,
+        velocity_step: f64,
+        position_shift: f64,
+        position_budget: f64,
+        floor: f64,
+    },
+    #[error(
+        "axis {axis}: the acceleration break hidden between {seam} and {past_sliver} changes \
+         velocity by {velocity_step} across the sliver; moving that step onto the seam shifts \
+         position by {position_shift}, beyond the {position_budget} tolerance"
+    )]
+    SliverVelocityCarry {
+        axis: usize,
+        seam: f64,
+        past_sliver: f64,
+        velocity_step: f64,
+        position_shift: f64,
+        position_budget: f64,
+    },
     #[error("axis {axis}: shaped sample is non-finite at t={t}")]
     NonFiniteSample { axis: usize, t: f64 },
 }
 
+/// A committed move: its geometry, its planned velocity, and the extrusion
+/// budget its plan took from the moves around it, which a re-plan of the
+/// move must take again.
 pub struct PlannedMove {
     pub geometry: Move,
     pub velocity: MoveVelocity,
+    pub budget: geometry::ExtrusionBudget,
 }
 
 /// What flows into the fit stage and planner: geometry, the command to stop
@@ -168,6 +302,38 @@ pub enum StreamInput {
 impl From<Move> for StreamInput {
     fn from(m: Move) -> Self {
         Self::Move(m)
+    }
+}
+
+/// What a pipeline was fed, as the parity gate compares it: every move in
+/// full, the stops at rest, dwells and resets, and any other control token
+/// by kind.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InputTrace {
+    Move(Move),
+    Drain,
+    Dwell { secs: f64 },
+    Reset { pos: Vec<f64> },
+    Control(&'static str),
+}
+
+impl InputTrace {
+    #[must_use]
+    pub fn of(input: &StreamInput) -> Self {
+        match input {
+            StreamInput::Move(m) => Self::Move(m.clone()),
+            StreamInput::Drain => Self::Drain,
+            StreamInput::Control(Control::Dwell { secs }) => Self::Dwell { secs: *secs },
+            StreamInput::Control(Control::Reset { pos }) => Self::Reset { pos: pos.clone() },
+            StreamInput::Control(Control::SetAxisChains(_)) => Self::Control("SetAxisChains"),
+            StreamInput::Control(Control::SetMesh { .. }) => Self::Control("SetMesh"),
+            StreamInput::Control(Control::Dispatch(DispatchCommand::Nudge { .. })) => {
+                Self::Control("Nudge")
+            }
+            StreamInput::Control(Control::Dispatch(DispatchCommand::Barrier(_))) => {
+                Self::Control("Barrier")
+            }
+        }
     }
 }
 

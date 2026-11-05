@@ -1,4 +1,6 @@
 use super::*;
+use crate::classify::build_move;
+use pipeline_snapshot::EXTRUDER_AXIS;
 
 const SQUARE: &str = "\
 G90
@@ -29,6 +31,45 @@ fn relative_mode_is_honored() {
         parse_gcode_to_moves(abs, limits).len(),
         parse_gcode_to_moves(rel, limits).len(),
         "relative and absolute encodings of the same path yield the same move count"
+    );
+}
+
+#[test]
+fn g92_moves_the_gcode_origin_like_live() {
+    let limits = default_stream_config().limits;
+    let reset = "M82\nG1 X0 Y0 E0 F3000\nG1 X10 E1\nG92 E0\nG1 X20 E1\n";
+    let continued = "M82\nG1 X0 Y0 E0 F3000\nG1 X10 E1\nG1 X20 E2\n";
+    assert_eq!(
+        parse_gcode_to_moves(reset, limits),
+        parse_gcode_to_moves(continued, limits),
+        "G92 E0 renames the extruder position; the next E1 still extrudes 1 mm"
+    );
+}
+
+#[test]
+#[should_panic(expected = "G28")]
+fn a_command_the_snapshot_cannot_plan_is_refused() {
+    let _ = parse_gcode_to_moves(
+        "G1 X0 Y0 F3000\nG28\nG1 X10\n",
+        default_stream_config().limits,
+    );
+}
+
+#[test]
+#[should_panic(expected = "malformed number")]
+fn an_unparseable_line_is_refused() {
+    let _ = parse_gcode_to_moves(
+        "G1 X0 Y0 F3000\nG1 X1.2.3\nG1 X10\n",
+        default_stream_config().limits,
+    );
+}
+
+#[test]
+#[should_panic(expected = "stops at rest")]
+fn a_stop_at_rest_is_refused_by_a_move_list() {
+    let _ = parse_gcode_to_moves(
+        "G1 X0 Y0 F3000\nG1 X10\nM400\nG1 X20\n",
+        default_stream_config().limits,
     );
 }
 
@@ -79,8 +120,12 @@ fn extruder_pa_smooth_chain_set() -> trajectory::AxisChainSet {
     extruder_chain_set_with_k(0.03)
 }
 
+/// A follower's advance needs a smoothing kernel after it; this is the
+/// shortest the configs in the repo use.
+const SHORT_EXTRUDER_SMOOTH_TIME_S: f64 = 0.005;
+
 fn extruder_chain_set_with_k(k: f64) -> trajectory::AxisChainSet {
-    extruder_chain_set(k, None)
+    extruder_chain_set(k, Some(SHORT_EXTRUDER_SMOOTH_TIME_S))
 }
 
 /// Smooth pressure advance: the follower's own kernel convolves its

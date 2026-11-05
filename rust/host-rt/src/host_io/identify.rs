@@ -67,10 +67,7 @@ pub fn identify_handshake(
                     if offset != identify_data.len() {
                         continue;
                     }
-                    let chunk = params
-                        .get_bytes("data")
-                        .map(<[u8]>::to_vec)
-                        .unwrap_or_default();
+                    let chunk = identify_chunk(&params)?.to_vec();
                     if chunk.is_empty() {
                         break 'outer;
                     }
@@ -187,6 +184,12 @@ fn build_parser_from_identify(identify_data: &[u8]) -> Result<MsgProtoParser, Tr
     })
 }
 
+fn identify_chunk(params: &MessageParams) -> Result<&[u8], TransportError> {
+    params
+        .get_bytes("data")
+        .ok_or_else(|| TransportError::Parse("identify response carried no data parameter".into()))
+}
+
 fn decode_identify_response(packet: &[u8]) -> Option<MessageParams> {
     if packet.len() < MESSAGE_MIN + 1 {
         return None;
@@ -205,10 +208,7 @@ fn decode_identify_response(packet: &[u8]) -> Option<MessageParams> {
     pos += n;
     let (data, _n) = decode_bytes(&body[pos..])?;
     let mut params = MessageParams::new();
-    #[allow(clippy::cast_sign_loss)]
-    {
-        params.insert("offset", MessageValue::U32(offset as u32));
-    }
+    params.insert("offset", MessageValue::U32(u32::try_from(offset).ok()?));
     params.insert("data", MessageValue::Bytes(data));
     Some(params)
 }

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 import time
@@ -21,16 +20,53 @@ from datetime import datetime
 from pathlib import Path
 
 import lock
+import pi
 
 BENCH = Path(__file__).resolve().parent
 REPO = BENCH.parents[1]
 SUITES_DIR = Path("~/bench/suites").expanduser()
 PRINTER_CFG = BENCH / "printer.cfg"
 FAST_CFG = BENCH / "configs" / "fast.cfg"
+REST_LADDER_CFG = BENCH / "configs" / "rest_ladder.cfg"
+CAPACITY_CFG = BENCH / "configs" / "capacity.cfg"
 SIM_GCODE = REPO / "tools" / "sim" / "gcode"
 RUN_TIMEOUT_S = 2400.0
 ANALYZE_TIMEOUT_S = 1200.0
+ENGINE_BUILD_TIMEOUT_S = 3600
+ENGINE_BUILD = ["make", "-f", "Makefile.rust", "motion-engine-fast"]
 THROTTLE_ARGS = ["--host-cpus", "1", "--host-max-mhz", "1500"]
+SINGLE_MOTOR_CEILING_STEPS_PER_S = 172_000
+BENCHMARK_BAND = (0.85, 1.10)
+
+
+class SuiteError(RuntimeError):
+    pass
+
+
+def step_benchmark_verdict(mcu_status: dict) -> dict:
+    benchmark = mcu_status.get("step_benchmark")
+    if benchmark is None:
+        raise SuiteError(f"mcu status has no step_benchmark: {mcu_status}")
+    if benchmark["simulated"]:
+        raise SuiteError(
+            f"the bench MCU reports a simulated benchmark: {benchmark}"
+        )
+    clock = float(mcu_status["mcu_constants"]["CLOCK_FREQ"])
+    capacity = clock / benchmark["pulsed_ticks_per_step"]
+    ratio = capacity / SINGLE_MOTOR_CEILING_STEPS_PER_S
+    return {
+        **benchmark,
+        "pulsed_capacity_steps_per_s": capacity,
+        "single_motor_ceiling_steps_per_s": SINGLE_MOTOR_CEILING_STEPS_PER_S,
+        "ratio_to_single_motor_ceiling": ratio,
+        "band": list(BENCHMARK_BAND),
+        "within_band": BENCHMARK_BAND[0] <= ratio <= BENCHMARK_BAND[1],
+    }
+
+
+def query_step_benchmark() -> dict:
+    status = pi.http("GET", "/printer/objects/query?mcu")["status"]["mcu"]
+    return step_benchmark_verdict(status)
 
 
 @dataclass(frozen=True)
@@ -40,6 +76,8 @@ class Row:
     config: Path = PRINTER_CFG
     throttle: list[str] = field(default_factory=list)
     quick: bool = False
+    run_args: list[str] = field(default_factory=list)
+    analyze_args: list[str] = field(default_factory=list)
 
 
 MATRIX = [
@@ -48,12 +86,26 @@ MATRIX = [
     Row("speed_ladder_fast", BENCH / "gcode" / "speed_ladder.gcode", FAST_CFG),
     Row("extrude_ladder", BENCH / "gcode" / "extrude_ladder.gcode"),
     Row("epochs", BENCH / "gcode" / "epochs.gcode", quick=True),
+    Row("rest_ladder", BENCH / "gcode" / "rest_ladder.gcode", REST_LADDER_CFG),
     Row("dense_top", SIM_GCODE / "voron_dense_top_layers.gcode"),
     Row(
         "dense_top_fast_throttled",
         SIM_GCODE / "voron_dense_top_layers.gcode",
         FAST_CFG,
         THROTTLE_ARGS,
+    ),
+    Row(
+        "corner_flow",
+        BENCH / "gcode" / "corner_flow.gcode",
+        run_args=["--events"],
+        analyze_args=["--corner-flow"],
+    ),
+    Row(
+        "single_motor_cap",
+        BENCH / "gcode" / "single_motor_cap.gcode",
+        CAPACITY_CFG,
+        quick=True,
+        run_args=["--events", "--step-tap"],
     ),
 ]
 
@@ -67,6 +119,22 @@ def python(
         text=True,
         timeout=timeout_s,
     )
+
+
+def build_local_engine() -> None:
+    build = subprocess.run(
+        ENGINE_BUILD,
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        timeout=ENGINE_BUILD_TIMEOUT_S,
+    )
+    if build.returncode != 0:
+        raise SuiteError(
+            f"`{' '.join(ENGINE_BUILD)}` in {REPO} exited "
+            f"{build.returncode}; analyzing with the stale engine would hold "
+            f"every row against another planner:\n{build.stdout}{build.stderr}"
+        )
 
 
 def last_lines(text: str, count: int = 3) -> str:
@@ -98,6 +166,7 @@ def run_row(row: Row, suite_dir: Path, lock_timeout_s: float) -> dict:
         "--lock-timeout",
         str(lock_timeout_s),
         *row.throttle,
+        *row.run_args,
         timeout_s=RUN_TIMEOUT_S,
     )
     run_dirs = sorted(runs_dir.glob("*")) if runs_dir.exists() else []
@@ -105,6 +174,7 @@ def run_row(row: Row, suite_dir: Path, lock_timeout_s: float) -> dict:
         result["run_dir"] = str(run_dirs[-1])
     if run.returncode != 0:
         result["error"] = f"run.py: {last_lines(run.stderr)}"
+        result["recovered_with_reset_target"] = True
         recovery = python("deploy.py", "reset-target", timeout_s=600)
         if recovery.returncode != 0:
             result["error"] += f"; reset-target: {last_lines(recovery.stderr)}"
@@ -116,9 +186,14 @@ def run_row(row: Row, suite_dir: Path, lock_timeout_s: float) -> dict:
         result["duration_s"] = info.get("duration_s")
         result["deployed"] = info.get("deployed")
         result["host_throttle"] = info.get("host_throttle")
-        if (run_dir / "capture.bin").exists():
+        if (run_dir / "capture.bin").exists() or (
+            run_dir / "events.bin"
+        ).exists():
             analysis = python(
-                "analyze.py", str(run_dir), timeout_s=ANALYZE_TIMEOUT_S
+                "analyze.py",
+                str(run_dir),
+                *row.analyze_args,
+                timeout_s=ANALYZE_TIMEOUT_S,
             )
             if analysis.returncode != 0:
                 joined = f"analyze.py: {last_lines(analysis.stderr)}"
@@ -138,6 +213,10 @@ def run_row(row: Row, suite_dir: Path, lock_timeout_s: float) -> dict:
                 ).get("abs_max")
                 for role, motor in verdict["motors"].items()
             }
+            if "corner_flow" in verdict:
+                result["corner_flow_max_abs"] = verdict["corner_flow"][
+                    "max_abs"
+                ]
     result["wall_s"] = time.monotonic() - started
     result["passed"] = bool(
         result["error"] is None
@@ -196,12 +275,14 @@ def main() -> None:
     if unselected:
         parser.error(f"--expect-fail rows not in this suite: {unselected}")
     suite_dir = SUITES_DIR / datetime.now().strftime("%Y%m%d-%H%M%S")
+    build_local_engine()
     suite_dir.mkdir(parents=True)
     with lock.bench_lock(args.lock_timeout, command=" ".join(sys.argv)):
-        os.environ[lock.TOKEN_ENV] = str(os.getpid())
+        lock.export_holder_token()
         sync = python("deploy.py", "sync", timeout_s=1800)
         if sync.returncode != 0:
             sys.exit(f"sync failed: {last_lines(sync.stderr, 8)}")
+        benchmark = query_step_benchmark()
         rows = []
         for row in selected:
             print(f"running {row.name} ...", flush=True)
@@ -213,11 +294,18 @@ def main() -> None:
         "expect_fail": args.expect_fail,
         "suite_dir": str(suite_dir),
         "rows": rows,
+        "step_benchmark": benchmark,
     }
     (suite_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     print_table(rows)
+    print(
+        f"step benchmark: {benchmark['pulsed_capacity_steps_per_s']:.0f} "
+        f"steps/s pulsed = {benchmark['ratio_to_single_motor_ceiling']:.2f} x "
+        f"the single-motor ceiling, band {BENCHMARK_BAND}: "
+        + ("ok" if benchmark["within_band"] else "OUT OF BAND")
+    )
     print(f"summary: {suite_dir / 'summary.json'}")
-    sys.exit(exit_status(rows))
+    sys.exit(exit_status(rows) or int(not benchmark["within_band"]))
 
 
 if __name__ == "__main__":

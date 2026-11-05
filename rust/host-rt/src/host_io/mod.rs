@@ -62,14 +62,12 @@ pub enum ReactorCommand {
     FireAndForget {
         payload: Vec<u8>,
     },
-    /// A burst of encoded commands to pack into as few Klipper message
-    /// blocks as the 64-byte block allows before it reaches the wire.
-    /// `reserved_blocks` is the admission capacity the sender claimed on
-    /// [`FireAndForgetDepth`]; the reactor releases it once the burst is
-    /// queued or abandoned.
+    /// A burst of encoded commands the sender already packed into as few
+    /// Klipper message blocks as the 64-byte block allows. The sender claimed
+    /// one unit of [`FireAndForgetDepth`] admission per block; the reactor
+    /// releases them once the burst is queued or abandoned.
     FireAndForgetBatch {
-        payloads: Vec<Vec<u8>>,
-        reserved_blocks: usize,
+        blocks: Vec<Vec<u8>>,
         enqueued_at: std::time::Instant,
     },
     McuIdentify {
@@ -298,7 +296,12 @@ impl McuHostIo {
         let mcu_can_data_rate = parser_owned
             .numeric_constant("CANBUS_DATA_FREQUENCY")
             .unwrap_or(0);
-        io.try_enable_fd(u32::try_from(mcu_can_data_rate).unwrap_or(0))
+        let can_data_rate = u32::try_from(mcu_can_data_rate).map_err(|_| {
+            TransportError::Parse(format!(
+                "CANBUS_DATA_FREQUENCY {mcu_can_data_rate} does not fit a u32 data rate"
+            ))
+        })?;
+        io.try_enable_fd(can_data_rate)
             .map_err(TransportError::Io)?;
 
         let parser = Arc::new(parser_owned);
@@ -648,29 +651,28 @@ impl McuHostIo {
     /// identical burst in the identical order. Any burst the reactor does
     /// accept reaches the wire; the reactor has no discard path.
     ///
-    /// Admission claims the burst's block capacity atomically, so concurrent
-    /// senders cannot each read the same sub-high-water depth and overshoot
-    /// it together. A closed reactor refuses with [`TransportError::Closed`].
+    /// Admission claims the blocks the burst packs into, atomically, so
+    /// concurrent senders cannot each read the same sub-high-water depth and
+    /// overshoot it together. A closed reactor refuses with
+    /// [`TransportError::Closed`].
     pub fn send_args_batch(
         &self,
         frames: &[(&str, Vec<(String, crate::host_io::parser::ArgValue)>)],
     ) -> Result<(), TransportError> {
-        let reserved_blocks = frames.len();
+        let payloads = frames
+            .iter()
+            .map(|(name, args)| {
+                self.parser
+                    .encode_args(name, args)
+                    .map_err(|e| TransportError::Parse(format!("{name}: {e:?}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let blocks = crate::host_io::wire::pack_blocks(&payloads).map_err(TransportError::Parse)?;
+        let reserved_blocks = blocks.len();
         self.fire_and_forget_depth.reserve(reserved_blocks)?;
-        let mut payloads = Vec::with_capacity(frames.len());
-        for (name, args) in frames {
-            match self.parser.encode_args(name, args) {
-                Ok(payload) => payloads.push(payload),
-                Err(e) => {
-                    self.fire_and_forget_depth.release(reserved_blocks);
-                    return Err(TransportError::Parse(format!("{name}: {e:?}")));
-                }
-            }
-        }
         self.submission_tx
             .send(ReactorCommand::FireAndForgetBatch {
-                payloads,
-                reserved_blocks,
+                blocks,
                 enqueued_at: std::time::Instant::now(),
             })
             .map_err(|_| {
@@ -747,6 +749,7 @@ impl McuHostIo {
     pub fn from_submission_tx_for_test(
         tx: Sender<ReactorCommand>,
         reactor_handle: Option<std::thread::JoinHandle<()>>,
+        parser: Arc<crate::host_io::parser::MsgProtoParser>,
     ) -> Arc<Self> {
         Arc::new(Self {
             submission_tx: tx,
@@ -755,7 +758,7 @@ impl McuHostIo {
             status_snapshot: Arc::new(ArcSwap::from_pointee(
                 crate::host_io::runtime_events::StatusEvent::default(),
             )),
-            parser: Arc::new(crate::host_io::parser::MsgProtoParser::new_empty()),
+            parser,
             link_health: Arc::new(LinkHealth::default()),
             clock: Arc::new(crate::clock::RealClock),
             raw_identify_bytes: Vec::new(),

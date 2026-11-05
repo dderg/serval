@@ -54,3 +54,31 @@ fn zero_clock_means_host_commanded_trigger_substitute_reference() {
         reference
     );
 }
+
+#[test]
+#[should_panic(expected = "reference is stale or wrong")]
+fn a_missing_reference_clock_is_refused_not_wrapped_into_a_wrong_trip_clock() {
+    let _ = relay_trip_clock(0x8000_0000, 0);
+}
+
+use super::trip_clock_from_report;
+
+#[test]
+fn a_report_with_its_clock_and_a_reference_expands_normally() {
+    assert_eq!(
+        trip_clock_from_report(3, Some(0x0000_2000), Ok::<u64, ()>(0x1_0000_1000)),
+        0x1_0000_2000
+    );
+}
+
+#[test]
+#[should_panic(expected = "mcu 3: trsync_state report carried no clock parameter")]
+fn a_report_without_a_clock_parameter_is_refused_not_read_as_a_host_commanded_trip() {
+    let _ = trip_clock_from_report(3, None, Ok::<u64, ()>(1_000));
+}
+
+#[test]
+#[should_panic(expected = "mcu 3: trip relay has no clock estimate")]
+fn a_missing_clock_estimate_is_refused_not_replaced_by_a_zero_reference() {
+    let _ = trip_clock_from_report(3, Some(0x1000), Err("NoClockEstimate"));
+}

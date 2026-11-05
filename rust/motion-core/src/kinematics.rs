@@ -7,6 +7,18 @@ pub enum KinematicsKind {
     Cartesian = 1,
 }
 
+impl KinematicsKind {
+    /// The kinematics a `[kinematics] type` names.
+    #[must_use]
+    pub fn from_config_type(kind: &str) -> Option<Self> {
+        match kind {
+            "corexy" => Some(Self::CoreXy),
+            "cartesian" => Some(Self::Cartesian),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct KinematicsModule {
     kind: KinematicsKind,

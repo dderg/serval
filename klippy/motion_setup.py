@@ -3,9 +3,9 @@ import math
 import struct
 from collections import defaultdict, namedtuple
 
-from . import stepper
+from . import motion_step_capacity, stepper
 from .extras import servo_axis
-from .mcu import SAMPLE_COMMANDS
+from .mcu import SAMPLE_COMMANDS, STEPCOMPRESS_DRAIN_BUDGET_DEFAULT
 from .motion_endstop import register_stepcompress_steppers
 from .stepper import DEFAULT_STEP_PULSE_DURATION
 
@@ -25,6 +25,7 @@ McuTopology = namedtuple(
         "step_pulse_seconds",
         "high_precision_step_compress",
         "stepcompress_max_error_secs",
+        "stepcompress_drain_budget_secs",
         "phase_sample_rate",
         "phase_ring_depth",
     ],
@@ -88,22 +89,21 @@ def build_follower_steppers(motion, config):
 
 
 STEP_EDGE_FLOOR_SECONDS = 0.000001
-STEP_ISR_BUDGET_FRACTION = 0.5
+STEP_REARM_PULSES = 2
 
 
 def motor_velocity_ceiling(mcu_stepper):
-    """The fastest motor-frame velocity (mm/s) the MCU can physically step:
-    the ISR budget fraction of real time divided by the cost of one step —
-    the 1us edge floor, plus the pulse-width busy-wait when the driver only
-    steps on rising edges. Mirrors the MCU's per-sample step budget in
-    src/stepper.c command_kalico_configure_axis."""
-    pulse_duration, both_edge = mcu_stepper.get_pulse_duration()
-    if pulse_duration is None:
-        pulse_duration = DEFAULT_STEP_PULSE_DURATION
-    per_step_s = STEP_EDGE_FLOOR_SECONDS + (
-        0.0 if both_edge else pulse_duration
+    """The fastest motor-frame velocity (mm/s) the driver can be stepped at
+    at all: src/stepper.h stepper_full_finish holds the next step until one
+    pulse width after the unstep, so a pulsed motor steps at most once per
+    two pulse widths, and nothing steps faster than the 1us edge floor. How
+    many steps the mcu can dispatch in total is its measured step capacity
+    (motion_step_capacity), which the planner caps every move to."""
+    min_step_period = max(
+        STEP_EDGE_FLOOR_SECONDS,
+        STEP_REARM_PULSES * step_pulse_width(mcu_stepper),
     )
-    return STEP_ISR_BUDGET_FRACTION / per_step_s * mcu_stepper.get_step_dist()
+    return mcu_stepper.get_step_dist() / min_step_period
 
 
 def step_pulse_width(mcu_stepper):
@@ -249,6 +249,8 @@ def _reject_pulse_lane_conflicts(motion, name, mcu_obj, hp_motors):
 
 
 def derive_mcu_topology(motion, axis_to_handle):
+    """Each engine mcu's topology, and the step benchmarks of those whose
+    step capacity caps the planner."""
     by_handle = {}
     for axis_idx, handle in axis_to_handle.items():
         by_handle.setdefault(handle, []).append(axis_idx)
@@ -257,12 +259,18 @@ def derive_mcu_topology(motion, axis_to_handle):
     endpoint_handles = ethercat_handles(motion)
     slot_steppers = build_slot_steppers(motion)
     topo = []
+    step_benchmarks = []
     for handle in sorted(by_handle):
         axes = sorted(by_handle[handle])
         max_motor_velocity = [ceilings.get(a, float("inf")) for a in axes]
         name, mcu_obj = mcu_by_handle.get(handle, (str(handle), None))
         max_error_secs = (
             0.0 if mcu_obj is None else mcu_obj.get_stepcompress_max_error()
+        )
+        drain_budget_secs = (
+            STEPCOMPRESS_DRAIN_BUDGET_DEFAULT
+            if mcu_obj is None
+            else mcu_obj.get_stepcompress_drain_budget()
         )
         masks = _build_slot_masks(
             motion.printer, mcu_obj, slot_steppers, len(mcu_by_handle)
@@ -313,6 +321,7 @@ def derive_mcu_topology(motion, axis_to_handle):
         motor_oids = []
         motor_step_pulse_seconds = []
         motor_high_precision_step_compress = []
+        capacity_motors = []
         for axis, kind in zip(axes, lane_kinds):
             bindings = (
                 [binding for binding in bind_list if binding[0] == axis]
@@ -347,6 +356,13 @@ def derive_mcu_topology(motion, axis_to_handle):
                         )
                     )
                 )
+                capacity_motors.append(
+                    motion_step_capacity.CapacityMotor(
+                        axis,
+                        steppers[stepper_name],
+                        kind == LANE_KIND_PULSE,
+                    )
+                )
         if (
             mcu_obj is not None
             and pulse_axes
@@ -355,6 +371,14 @@ def derive_mcu_topology(motion, axis_to_handle):
             _reject_pulse_lane_conflicts(
                 motion, name, mcu_obj, motor_high_precision_step_compress
             )
+        step_benchmark = motion_step_capacity.mcu_step_capacity(
+            motion,
+            name,
+            None if handle in endpoint_handles else mcu_obj,
+            capacity_motors,
+        )
+        if step_benchmark is not None:
+            step_benchmarks.append(step_benchmark)
         topo.append(
             McuTopology(
                 handle,
@@ -370,11 +394,12 @@ def derive_mcu_topology(motion, axis_to_handle):
                 motor_step_pulse_seconds,
                 motor_high_precision_step_compress,
                 max_error_secs,
+                drain_budget_secs,
                 phase_sample_rate,
                 phase_ring_depth,
             )
         )
-    return topo
+    return topo, step_benchmarks
 
 
 def init_planner(motion):
@@ -391,7 +416,7 @@ def init_planner(motion):
         return
 
     axis_to_handle = build_axis_to_handle(motion)
-    topology = derive_mcu_topology(motion, axis_to_handle)
+    topology, step_benchmarks = derive_mcu_topology(motion, axis_to_handle)
     if not topology:
         logging.warning(
             "Motion: no axis->MCU assignment resolved; skipping init_planner"
@@ -416,7 +441,9 @@ def init_planner(motion):
             motion._axis_mcus[axis_name] = mcu_by_handle[handle]
 
     try:
-        motion.engine.init_planner(motion._motion_config_text, topology)
+        motion.engine.init_planner(
+            motion._motion_config_text, topology, step_benchmarks
+        )
         configure_axes_per_mcu(motion, engine_mcus)
         motion._planner_ready = True
         motion._register_engine_wakeup()

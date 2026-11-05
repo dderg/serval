@@ -3,9 +3,6 @@ use motion_core::lock_ext::LockExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use pyo3::exceptions::PyValueError;
-use pyo3::prelude::*;
-
 use host_rt::host_io::McuHostIo;
 use host_rt::mcu_serial_conn::McuSerialConn;
 use runtime_contract::axes::MAX_AXES;
@@ -20,17 +17,6 @@ pub(crate) enum RuntimeCapsError {
     UnexpectedKind { got: mcu_protocol::MessageKind },
     #[error("decode RuntimeCapsResponse: {0}")]
     Decode(String),
-}
-
-pub(crate) fn require_positive(value: Option<f64>, name: &str) -> PyResult<()> {
-    if let Some(v) = value {
-        if !(v.is_finite() && v > 0.0) {
-            return Err(PyValueError::new_err(format!(
-                "{name} must be finite and positive"
-            )));
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn decode_runtime_caps_body(

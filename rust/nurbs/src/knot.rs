@@ -27,7 +27,11 @@ impl KnotVector {
 }
 
 pub fn find_knot_span(knots: &[f64], p: usize, n: usize, u: f64) -> usize {
-    debug_assert!(knots.len() == n + p + 1);
+    assert!(
+        knots.len() == n + p + 1,
+        "{} knots for {n} control points of degree {p}",
+        knots.len()
+    );
     if u >= knots[n] {
         return n - 1;
     }

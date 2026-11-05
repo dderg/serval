@@ -12,6 +12,7 @@ from . import (
     chelper,
     clocksync,
     engine_mcu,
+    mcu_cpu_headroom,
     mcu_hardware_reset,
     msgproto,
     pins,
@@ -28,6 +29,7 @@ from .mcu_pins import (  # noqa: F401
 )
 
 STEPCOMPRESS_MAX_ERROR_DEFAULT = 0.000025
+STEPCOMPRESS_DRAIN_BUDGET_DEFAULT = 0.008
 
 # Mirrors src/sample_wire.h / rust/runtime-contract/src/sample_wire.rs. The wire
 # contract lives in one place per language and test_sample_wire.py asserts the
@@ -146,12 +148,73 @@ class MCU:
                 % (config.get_name(), max_error)
             )
         self._stepcompress_max_error = max_error
+        drain_budget = config.getfloat(
+            "stepcompress_drain_budget", STEPCOMPRESS_DRAIN_BUDGET_DEFAULT
+        )
+        if not math.isfinite(drain_budget) or drain_budget < 0.0:
+            raise config.error(
+                "mcu '%s': stepcompress_drain_budget must be a finite "
+                "non-negative number of seconds, got %r"
+                % (config.get_name(), drain_budget)
+            )
+        self._stepcompress_drain_budget = drain_budget
 
     def get_stepcompress_max_error(self):
         return self._stepcompress_max_error
 
+    def get_stepcompress_drain_budget(self):
+        return self._stepcompress_drain_budget
+
     def get_move_queue_slots(self):
         return self._move_queue_slots
+
+    def get_step_benchmark(self):
+        return self._step_benchmark
+
+    def report_step_capacity(self, step_benchmark):
+        self._get_status_info["step_capacity"] = step_benchmark
+        self._cpu_headroom.guard(step_benchmark)
+
+    def _query_step_benchmark(self):
+        parser = self._serial.get_msgparser()
+        if "config_stepper" not in parser.messages_by_name:
+            logging.info(
+                "MCU '%s' firmware cannot drive steppers; no step benchmark",
+                self._name,
+            )
+            return None
+        for required in ("get_step_benchmark", "cpu_load"):
+            if required not in parser.messages_by_name:
+                raise error(
+                    "MCU '%s' firmware lacks %s, which the step capacity cap"
+                    " needs; flash firmware built from this Serval version"
+                    % (self._name, required)
+                )
+        result = self.lookup_query_command(
+            "get_step_benchmark",
+            "step_benchmark pulsed_ticks_per_step=%u"
+            " both_edge_ticks_per_step=%u simulated=%c",
+        ).send()
+        benchmark = {
+            "pulsed_ticks_per_step": result["pulsed_ticks_per_step"],
+            "both_edge_ticks_per_step": result["both_edge_ticks_per_step"],
+            "simulated": bool(result["simulated"]),
+        }
+        if not benchmark["simulated"] and not (
+            benchmark["pulsed_ticks_per_step"]
+            and benchmark["both_edge_ticks_per_step"]
+        ):
+            raise error(
+                "MCU '%s' reported an empty step benchmark: %s"
+                % (self._name, benchmark)
+            )
+        logging.info(
+            "MCU '%s' step benchmark: %s (clock %.0f Hz)",
+            self._name,
+            benchmark,
+            self._mcu_freq,
+        )
+        return benchmark
 
     def _init_identity(self, config, clocksync):
         self._config = config
@@ -227,6 +290,10 @@ class MCU:
         self._mcu_freq = 0.0
         self._reserved_move_slots = 0
         self._move_queue_slots = 0
+        self._step_benchmark = None
+        self._cpu_headroom = mcu_cpu_headroom.CpuHeadroom(
+            self._name, self._printer.invoke_shutdown
+        )
         self._flush_callbacks = []
         self._get_status_info = {}
         self._stats_sumsq_base = 0.0
@@ -284,11 +351,16 @@ class MCU:
         self._mcu_tick_stddev = c * math.sqrt(max(0.0, diff))
         self._mcu_tick_awake = tick_sum / self._mcu_freq
 
+    def _handle_cpu_load(self, params):
+        self._cpu_headroom.observe(
+            params, self._reactor.monotonic(), self._mcu_freq
+        )
+
     def _handle_runtime_fault(self, params):
         fault = format_runtime_fault(
-            params.get("fault_code", 0),
-            params.get("fault_detail", 0),
-            params.get("segment_id", 0),
+            params["fault_code"],
+            params["fault_detail"],
+            params["segment_id"],
         )
         self._last_runtime_fault = fault
         logging.error("MCU '%s' runtime fault: %s", self._name, fault)
@@ -317,6 +389,9 @@ class MCU:
         prefix = "MCU '%s' shutdown: " % (self._name,)
         is_latched_shutdown = params["#name"] == "is_shutdown"
         if is_latched_shutdown:
+            connecting = self._printer.get_state_message()[1] == "startup"
+            if connecting and not self._resettable():
+                return
             prefix = "Previous MCU '%s' shutdown: " % (self._name,)
 
         self._printer.invoke_async_shutdown(
@@ -418,19 +493,25 @@ class MCU:
                 )
             raise
 
-    def _recover_latched_peripheral_shutdown(self, get_config_cmd, exc):
-        is_motion_mcu = (
-            "runtime_reset" in self._serial.get_msgparser().messages_by_name
-        )
-        if is_motion_mcu:
+    def _resettable(self):
+        return not (self._reset_cmd is None and self._config_reset_cmd is None)
+
+    def _recover_latched_shutdown(self, get_config_cmd, exc):
+        if self._resettable():
             raise error(
-                "MCU '%s' is latched in shutdown and requires a power"
-                " cycle (clear_shutdown cannot reset its timer and runtime"
-                " state): %s" % (self._name, exc)
+                "MCU '%s' is latched in shutdown from a previous host"
+                " session; FIRMWARE_RESTART resets it: %s" % (self._name, exc)
+            )
+        if "runtime_reset" in self._serial.get_msgparser().messages_by_name:
+            raise error(
+                "MCU '%s' is latched in shutdown and requires a power cycle"
+                " (it has no reset command, and clear_shutdown cannot reset"
+                " its timer and runtime state): %s" % (self._name, exc)
             )
         logging.info(
-            "MCU '%s' latched the shutdown broadcast from a previous host"
-            " session; sending clear_shutdown and retrying: %s",
+            "MCU '%s' has no reset command and latched the shutdown broadcast"
+            " from a previous host session; sending clear_shutdown and"
+            " retrying: %s",
             self._name,
             exc,
         )
@@ -451,9 +532,7 @@ class MCU:
         except Exception as e:
             if "shutdown state" not in str(e):
                 raise
-            config_params = self._recover_latched_peripheral_shutdown(
-                get_config_cmd, e
-            )
+            config_params = self._recover_latched_shutdown(get_config_cmd, e)
         if self._is_shutdown:
             raise error(
                 "MCU '%s' error during config: %s"
@@ -514,6 +593,8 @@ class MCU:
             )
             return
         config_params = self._send_get_config()
+        self._step_benchmark = self._query_step_benchmark()
+        self._get_status_info["step_benchmark"] = self._step_benchmark
         if not config_params["is_config"]:
             if self._restart_method == "rpi_usb":
                 # Only configure mcu after usb power reset
@@ -675,6 +756,7 @@ class MCU:
         self._serial.register_response(self._handle_shutdown, "shutdown")
         self._serial.register_response(self._handle_shutdown, "is_shutdown")
         self._serial.register_response(self._handle_mcu_stats, "stats")
+        self._serial.register_response(self._handle_cpu_load, "cpu_load")
         self._serial.register_response(
             self._handle_runtime_fault, "runtime_fault"
         )
@@ -1004,10 +1086,11 @@ class MCU:
         return "\n".join(out)
 
     def stats(self, eventtime):
-        load = "mcu_awake=%.03f mcu_task_avg=%.06f mcu_task_stddev=%.06f" % (
+        load = "mcu_awake=%.03f mcu_task_avg=%.06f mcu_task_stddev=%.06f %s" % (
             self._mcu_tick_awake,
             self._mcu_tick_avg,
             self._mcu_tick_stddev,
+            self._cpu_headroom.take_stats(),
         )
         stats = " ".join(
             [

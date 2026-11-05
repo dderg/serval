@@ -10,13 +10,14 @@ mod runfit;
 use crate::vec3;
 
 use crate::GeometryError;
-use crate::frontend::{Move, VelocityLimits};
+use crate::MIN_DEVICE_INTERVAL_S;
+use crate::frontend::{ExtruderCaps, Move, VelocityLimits};
 use crate::path::lowering::PositionProfile;
 use crate::path::{CurvatureProfile, Line};
 use crate::segment::FollowerDemand;
-use vec3::{dot, turn_normal};
+use vec3::{cross, dot, turn_normal};
 
-pub use config::CornerFitConfig;
+pub use config::{CornerFitConfig, SEAM_VELOCITY_STEP_MM_S};
 pub use move_ops::{
     blend_moves, consumption_moves, is_travel, merge_collinear_lines, spatial_end, spatial_start,
     trim_line_move,
@@ -42,7 +43,12 @@ pub fn seam_requires_stop(prev: &Move, next: &Move, config: CornerFitConfig) -> 
     };
     let t_in = a.heading_at(a.s_len());
     let t_out = b.heading_at(0.0);
-    if libm::acos(dot(t_in, t_out).clamp(-1.0, 1.0)) > config.theta_min_rad {
+    if !passes_as_collinear(
+        libm::acos(dot(t_in, t_out).clamp(-1.0, 1.0)),
+        prev,
+        next,
+        config,
+    ) {
         return true;
     }
     emit::extrusion_step(
@@ -50,6 +56,20 @@ pub fn seam_requires_stop(prev: &Move, next: &Move, config: CornerFitConfig) -> 
         &next.segment.followers,
         config.extrusion_ramp_rel_tol,
     )
+}
+
+/// Whether a junction turning `theta` may pass unblended: under the
+/// collinear threshold, and stepping the velocity by no more than the seam
+/// budget at the fastest the two pieces may cross it.
+fn passes_as_collinear(theta: f64, prev: &Move, next: &Move, config: CornerFitConfig) -> bool {
+    let fastest = [prev, next]
+        .iter()
+        .map(|m| m.feedrate_mm_s.min(m.limits.max_velocity_mm_s))
+        .fold(f64::INFINITY, f64::min);
+    theta
+        <= config
+            .theta_min_rad
+            .min(config.seam_velocity_step_mm_s / fastest)
 }
 
 /// The fastest the planner can drive a piece: its feedrate, the machine cap,
@@ -111,6 +131,10 @@ pub enum UnblendReason {
     /// than [`CornerFitConfig::ramp_accel_budget_mm_s2`] allows in the worst
     /// case, so the corner stays sharp and the planner stops there instead.
     ExtrusionRampInfeasible,
+    /// Every blend of the corner would leave a body of the inbound line
+    /// shorter than [`shortest_line_body_mm`] behind the blend before it, so
+    /// the corner stays sharp and the line keeps its whole remaining length.
+    LineSliver,
 }
 
 #[cfg(test)]
@@ -149,6 +173,16 @@ pub enum FitError {
     OverTrimmedLine {
         line_no: u32,
         excess_mm: f64,
+    },
+    /// A corner blend would leave a body of its inbound line shorter than
+    /// [`shortest_line_body_mm`] behind the blend before it, and neither a
+    /// blend consuming that body nor one lengthening it to the floor fits the
+    /// corner's deviation and extrusion ramp, and even a sharp corner would
+    /// leave the line less than the floor.
+    LineSliver {
+        line_no: u32,
+        body_mm: f64,
+        shortest_mm: f64,
     },
 }
 
@@ -189,15 +223,62 @@ pub fn arc_candidate_fits(facets: &[Move], config: CornerFitConfig) -> bool {
 /// Classify a line-line junction whose adjoining lengths are partly consumed
 /// by neighboring arc-run easing: `in_reduction` is spent from `m_in`'s length
 /// (a run behind it eased into its head), `out_reduction` from `m_out`'s (a
-/// run ahead eases into its tail).
+/// run ahead eases into its tail). `head_trim` is what the element before
+/// `m_in` already took from its head and `tail_trim` what the run after
+/// `m_out` takes from its tail — easing plus boundary blend — so the blend
+/// leaves each body between them either gone or no shorter than
+/// [`shortest_line_body_mm`], unless the G-code line itself is shorter than
+/// that.
 pub fn plan_junction_reduced(
     m_in: &Move,
     m_out: &Move,
     config: CornerFitConfig,
-    in_reduction: f64,
-    out_reduction: f64,
+    (in_reduction, head_trim): (f64, f64),
+    (out_reduction, tail_trim): (f64, f64),
 ) -> Result<JunctionPlan, FitError> {
-    classify_junction(m_in, m_out, config, in_reduction, out_reduction)
+    classify_junction(
+        m_in,
+        m_out,
+        config,
+        (in_reduction, head_trim),
+        (out_reduction, tail_trim),
+    )
+}
+
+/// How long, crossed at the fastest it may be, the shortest line body two
+/// corner blends leave between them lasts. A body briefer than this is a
+/// sliver of their trim budgets, not geometry: shaped, its segment is far
+/// shorter than the span over which an absolute-position track can carry
+/// acceleration, so every follower riding it reads its leaders' acceleration
+/// unresolved.
+const SHORTEST_LINE_BODY_S: f64 = 1e-5;
+
+fn shortest_line_body_mm(m: &Move) -> f64 {
+    m.feedrate_mm_s.min(m.limits.max_velocity_mm_s) * SHORTEST_LINE_BODY_S
+}
+
+/// The most of a line a run's easing or boundary blend may claim from one
+/// end: half of what the line holds past the body floor, so the claims at
+/// both its ends — two runs, or a run and a corner — leave it at least the
+/// floor and the corner at its other end can always stay sharp. A line
+/// shorter than the floor is its own geometry and keeps the half rule alone.
+pub(super) fn line_claim_cap(m: &Move, length: f64) -> f64 {
+    let floor = shortest_line_body_mm(m);
+    if length < floor {
+        return 0.5 * length;
+    }
+    0.5 * (length - floor)
+}
+
+fn shortest_executable_mm(feedrate: f64, limits: VelocityLimits) -> f64 {
+    feedrate.min(limits.max_velocity_mm_s) * MIN_DEVICE_INTERVAL_S
+}
+
+fn shortest_executable_halves(m_in: &Move, m_out: &Move) -> [f64; 2] {
+    [
+        shortest_executable_mm(m_in.feedrate_mm_s, m_in.limits),
+        shortest_executable_mm(m_out.feedrate_mm_s, m_out.limits),
+    ]
 }
 
 /// The cocircularity tolerance the run detector derives from the moves' corner
@@ -219,9 +300,18 @@ pub fn fit_corners(moves: &[Move], config: CornerFitConfig) -> Result<FitOutcome
         });
     }
 
-    let mut plans = Vec::with_capacity(moves.len() - 1);
+    let mut plans: Vec<JunctionPlan> = Vec::with_capacity(moves.len() - 1);
     for pair in moves.windows(2) {
-        plans.push(classify_junction(&pair[0], &pair[1], config, 0.0, 0.0)?);
+        let head_trim = plans
+            .last()
+            .map_or(0.0, |plan| blend_trim(plan, JunctionBlend::trim_out));
+        plans.push(classify_junction(
+            &pair[0],
+            &pair[1],
+            config,
+            (0.0, head_trim),
+            (0.0, 0.0),
+        )?);
     }
 
     let mut out = Vec::new();
@@ -321,13 +411,15 @@ pub fn facet_consumption_candidate(
 /// per-junction blends it replaces (near the squeeze limit, two blends with
 /// their own footprints traverse faster than one blend squeezed through the
 /// whole turn); every facet's extrusion fits the ramp the anchors span; and
-/// the blend's extrusion ramps pass the kinematic gate.
+/// the blend's extrusion ramps pass the kinematic gate. `tail_trim` is what
+/// the run after `m_out` takes from its tail.
 pub fn plan_facet_consumption(
     m_in: &Move,
     mids: &[&Move],
     m_out: &Move,
     config: CornerFitConfig,
-    in_reduction: f64,
+    (in_reduction, head_trim): (f64, f64),
+    tail_trim: f64,
 ) -> Result<Option<FacetConsumption>, FitError> {
     let [first_mid, ..] = mids else {
         return Ok(None);
@@ -356,16 +448,14 @@ pub fn plan_facet_consumption(
     tangents.push(t_out);
 
     let mut thetas = Vec::with_capacity(tangents.len() - 1);
-    let mut first_normal = None;
+    let mut first_turn_axis = None;
     for w in tangents.windows(2) {
         let theta = libm::acos(dot(w[0], w[1]).clamp(-1.0, 1.0));
         if theta <= config.theta_min_rad || theta >= config.theta_max_rad {
             return Ok(None);
         }
-        let Some(n) = turn_normal(w[0], w[1]) else {
-            return Ok(None);
-        };
-        if dot(n, *first_normal.get_or_insert(n)) <= 0.0 {
+        let turn_axis = cross(w[0], w[1]);
+        if dot(turn_axis, *first_turn_axis.get_or_insert(turn_axis)) <= 0.0 {
             return Ok(None);
         }
         thetas.push(theta);
@@ -409,11 +499,27 @@ pub fn plan_facet_consumption(
     let t_ad_ab = biclothoid::trim_at_delta(theta_ab, delta).map_err(internal_err)?;
     let t_cap = (0.5 * (line_in.s_len() - in_reduction))
         .min(0.5 * line_out.s_len())
-        .min(t_ad_ab);
+        .min(t_ad_ab)
+        .min(
+            LineRoom::of(line_in.s_len(), head_trim, shortest_line_body_mm(m_in))
+                .trim_leaving_the_floor(),
+        )
+        .min(
+            LineRoom::of(line_out.s_len(), tail_trim, shortest_line_body_mm(m_out))
+                .trim_leaving_the_floor(),
+        );
     let mut vertices = Vec::with_capacity(mids.len() + 1);
     vertices.push(line_in.point_at(line_in.s_len()));
     vertices.extend(facet_lines.iter().map(|l| l.end));
-    let Some(blend) = biclothoid::solve_consume_chain(&vertices, t_in, t_out, delta, t_cap) else {
+    let fastest_consumed = consumed_feedrate(mids);
+    let shortest_half = std::iter::once(m_in)
+        .chain(mids.iter().copied())
+        .chain(std::iter::once(m_out))
+        .map(|m| shortest_executable_mm(fastest_consumed, m.limits))
+        .fold(0.0, f64::max);
+    let Some(blend) =
+        biclothoid::solve_consume_chain(&vertices, t_in, t_out, delta, t_cap, shortest_half)
+    else {
         return Ok(None);
     };
 
@@ -491,10 +597,7 @@ fn consumption_feedrates(
     mids: &[&Move],
     m_out: &Move,
 ) -> Vec<f64> {
-    let mid_min = mids
-        .iter()
-        .map(|m| m.feedrate_mm_s)
-        .fold(f64::INFINITY, f64::min);
+    let mid_min = consumed_feedrate(mids);
     let last = blend.segments.len() - 1;
     (0..blend.segments.len())
         .map(|i| match i {
@@ -503,6 +606,12 @@ fn consumption_feedrates(
             _ => mid_min,
         })
         .collect()
+}
+
+fn consumed_feedrate(mids: &[&Move]) -> f64 {
+    mids.iter()
+        .map(|m| m.feedrate_mm_s)
+        .fold(f64::INFINITY, f64::min)
 }
 
 /// Each blend segment's velocity limits: the componentwise minimum over the
@@ -522,6 +631,9 @@ fn consumption_limits(
             accel_mm_s2: a.accel_mm_s2.min(b.accel_mm_s2),
             corner_deviation_mm: a.corner_deviation_mm.min(b.corner_deviation_mm),
             max_jerk_mm_s3: a.max_jerk_mm_s3.min(b.max_jerk_mm_s3),
+            max_z_velocity_mm_s: a.max_z_velocity_mm_s.min(b.max_z_velocity_mm_s),
+            max_z_accel_mm_s2: a.max_z_accel_mm_s2.min(b.max_z_accel_mm_s2),
+            extruder: ExtruderCaps::stricter(a.extruder, b.extruder),
         })
         .expect("mids is non-empty");
     let last = blend.segments.len() - 1;
@@ -538,8 +650,8 @@ fn classify_junction(
     m_in: &Move,
     m_out: &Move,
     config: CornerFitConfig,
-    in_reduction: f64,
-    out_reduction: f64,
+    (in_reduction, head_trim): (f64, f64),
+    (out_reduction, tail_trim): (f64, f64),
 ) -> Result<JunctionPlan, FitError> {
     let (line_in, line_out) = match (move_ops::line_of(m_in), move_ops::line_of(m_out)) {
         (Some(a), Some(b)) => (a, b),
@@ -564,7 +676,7 @@ fn classify_junction(
     let t_in = line_in.heading_at(line_in.s_len());
     let t_out = line_out.heading_at(0.0);
     let theta = libm::acos(dot(t_in, t_out).clamp(-1.0, 1.0));
-    if theta <= config.theta_min_rad {
+    if passes_as_collinear(theta, m_in, m_out, config) {
         return Ok(JunctionPlan::Unblended(UnblendReason::Collinear));
     }
     if theta >= config.theta_max_rad {
@@ -593,26 +705,104 @@ fn classify_junction(
         return Ok(JunctionPlan::Unblended(UnblendReason::NoBudget));
     };
 
-    let (f_in, f_out) = biclothoid_followers(&bi, m_in, m_out, line_in, line_out);
-    let admitted = ramps_admitted(
-        config.ramp_accel_budget_mm_s2,
-        &f_in,
-        &bi.half1,
-        m_in.feedrate_mm_s,
-        m_in.limits,
-    ) && ramps_admitted(
-        config.ramp_accel_budget_mm_s2,
-        &f_out,
-        &bi.half2,
-        m_out.feedrate_mm_s,
-        m_out.limits,
-    );
-    if !admitted {
+    let admitted = |blend: &biclothoid::GeneralBlend| {
+        let (f_in, f_out) = biclothoid_followers(blend, m_in, m_out, line_in, line_out);
+        ramps_admitted(
+            config.ramp_accel_budget_mm_s2,
+            &f_in,
+            &blend.half1,
+            m_in.feedrate_mm_s,
+            m_in.limits,
+        ) && ramps_admitted(
+            config.ramp_accel_budget_mm_s2,
+            &f_out,
+            &blend.half2,
+            m_out.feedrate_mm_s,
+            m_out.limits,
+        )
+    };
+    if !admitted(&bi) {
         return Ok(JunctionPlan::Unblended(
             UnblendReason::ExtrusionRampInfeasible,
         ));
     }
-    Ok(JunctionPlan::Blend(JunctionBlend(bi)))
+    let inbound = LineRoom::of(line_in.s_len(), head_trim, shortest_line_body_mm(m_in));
+    let outbound = LineRoom::of(line_out.s_len(), tail_trim, shortest_line_body_mm(m_out));
+    let trims_in = inbound.trims_leaving_no_sliver(bi.trim_in);
+    let trims_out = outbound.trims_leaving_no_sliver(bi.trim_out);
+    if trims_in == [bi.trim_in; 2] && trims_out == [bi.trim_out; 2] {
+        return Ok(JunctionPlan::Blend(JunctionBlend(bi)));
+    }
+    let trim_out = trims_out[1];
+    let closing = trims_in
+        .iter()
+        .filter(|&&trim_in| trim_in > BUDGET_EPS_MM && trim_out > BUDGET_EPS_MM)
+        .find_map(|&trim_in| {
+            biclothoid::solve_line_line_trims(
+                vertex,
+                (t_in, t_out),
+                (trim_in, trim_out),
+                delta,
+                shortest_executable_halves(m_in, m_out),
+            )
+            .filter(&admitted)
+        });
+    if let Some(blend) = closing {
+        return Ok(JunctionPlan::Blend(JunctionBlend(blend)));
+    }
+    if inbound.keeps_no_sliver(0.0) {
+        return Ok(JunctionPlan::Unblended(UnblendReason::LineSliver));
+    }
+    Err(FitError::LineSliver {
+        line_no: m_in.source.start_line,
+        body_mm: inbound.room,
+        shortest_mm: inbound.floor,
+    })
+}
+
+/// What of a line a corner blend may trim: the length past what its other
+/// end already gave up, and the body floor [`shortest_line_body_mm`].
+#[derive(Clone, Copy)]
+struct LineRoom {
+    length: f64,
+    room: f64,
+    floor: f64,
+}
+
+impl LineRoom {
+    fn of(length: f64, claimed_at_other_end: f64, floor: f64) -> Self {
+        Self {
+            length,
+            room: length - claimed_at_other_end,
+            floor,
+        }
+    }
+
+    /// Whether trimming `trim` leaves the line no sliver: the body is gone,
+    /// at least the floor, or the G-code line itself is shorter than the
+    /// floor and is its own geometry.
+    fn keeps_no_sliver(self, trim: f64) -> bool {
+        let body = self.room - trim;
+        body <= BUDGET_EPS_MM || body >= self.floor - BUDGET_EPS_MM || self.length < self.floor
+    }
+
+    /// The longest trim leaving at least the floor, unbounded on a line
+    /// shorter than the floor.
+    fn trim_leaving_the_floor(self) -> f64 {
+        if self.length < self.floor {
+            return f64::INFINITY;
+        }
+        self.room - self.floor
+    }
+
+    /// `trim` twice where it leaves no sliver; otherwise the trim consuming
+    /// the body, then the one leaving exactly the floor.
+    fn trims_leaving_no_sliver(self, trim: f64) -> [f64; 2] {
+        if self.keeps_no_sliver(trim) {
+            return [trim; 2];
+        }
+        [self.room, self.room - self.floor]
+    }
 }
 
 fn biclothoid_followers(

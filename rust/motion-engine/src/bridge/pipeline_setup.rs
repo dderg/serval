@@ -6,6 +6,7 @@ use super::{
     dispatch_endstop_trip, query_ethercat_runtime_caps, report_endpoint_death,
 };
 use motion_core::lock_ext::LockExt;
+use motion_pipeline::live_config::step_capacity::StepCapacityInput;
 fn escalate_endpoint_death(latch: &Arc<Mutex<HashMap<u32, String>>>, mcu_id: u32, reason: &str) {
     if report_endpoint_death(latch, mcu_id, reason) {
         arm_endpoint_death_watchdog(Arc::clone(latch), mcu_id);
@@ -121,18 +122,28 @@ impl PyMotionEngine {
         Ok((ethercat_mcu_ids, host_ios))
     }
 
-    pub(super) fn seed_ethercat_clock_estimates(&self, ethercat_mcu_ids: &HashSet<u32>) {
+    pub(super) fn seed_ethercat_clock_estimates(
+        &self,
+        ethercat_mcu_ids: &HashSet<u32>,
+    ) -> PyResult<()> {
         let mut router = self.router.lock_ok();
         let now_ns = host_rt::clock::monotonic_raw_ns();
         for &mcu_id in ethercat_mcu_ids {
             let mcu_h = McuHandle::from_raw(mcu_id);
-            let _ = router.set_clock_est_from_sample(
-                mcu_h,
-                f64::from(ETHERCAT_CLOCK_FREQ_HZ),
-                Instant::now(),
-                now_ns,
-            );
+            router
+                .set_clock_est_from_sample(
+                    mcu_h,
+                    f64::from(ETHERCAT_CLOCK_FREQ_HZ),
+                    Instant::now(),
+                    now_ns,
+                )
+                .map_err(|e| {
+                    PyRuntimeError::new_err(format!(
+                        "mcu {mcu_id}: cannot seed the EtherCAT clock estimate: {e:?}"
+                    ))
+                })?;
         }
+        Ok(())
     }
 
     /// Build one endpoint per transport per mcu and index them by mcu for the
@@ -355,6 +366,7 @@ impl PyMotionEngine {
             mcu_configs: mcu_configs.to_vec(),
             counter: Arc::clone(&self.dispatched_segments),
             transports,
+            detached: None,
         })
     }
 
@@ -397,8 +409,11 @@ impl PyMotionEngine {
                 {
                     if let Some((projected, freq)) = clock_of(mcu_id) {
                         use motion_core::pump::skew_monitor::SkewVerdict;
-                        let skew_ticks = (projected as u32).wrapping_sub(mcu_clock) as i32;
-                        let skew_secs = f64::from(skew_ticks) / freq;
+                        let skew_ticks = -checked_cast::clock32_delta(mcu_clock, projected)
+                            .unwrap_or_else(|e| {
+                                panic!("mcu {mcu_id}: barrier ack clock echo: {e}")
+                            });
+                        let skew_secs = skew_ticks as f64 / freq;
                         match skew_monitor.lock_ok().observe(skew_secs) {
                             SkewVerdict::Fatal => {
                                 tracing::error!(
@@ -470,13 +485,16 @@ impl PyMotionEngine {
         mcu_configs: &[McuAxisConfig],
         host_ios: &HashMap<u32, Arc<McuHostIo>>,
         ec_conns: &HashMap<u32, Arc<McuSerialConn>>,
+        detached: Option<motion_core::worker::DetachedTaps>,
+        step_benchmarks: Option<&StepCapacityInput>,
     ) -> PyResult<crossbeam_channel::Sender<motion_core::pump::PumpMsg>> {
         let (pump_tx, pump_rx) = crossbeam_channel::unbounded::<motion_core::pump::PumpMsg>();
-        let resources =
+        let mut resources =
             self.build_execution_resources(mcu_configs, host_ios, ec_conns, &pump_tx)?;
+        resources.detached = detached;
 
-        let stream_cfg =
-            motion_core::live_config::stream_config(cfg).map_err(PyValueError::new_err)?;
+        let stream_cfg = motion_pipeline::live_config::stream_config(cfg, step_benchmarks)
+            .map_err(PyValueError::new_err)?;
         let axis_chains = cfg
             .compile_active_chains()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;

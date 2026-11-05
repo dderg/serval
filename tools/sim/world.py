@@ -30,6 +30,8 @@ VTIME_SHM_SIZE = 8192
 UNBOUNDED_VTIME_SPEED = 1000.0
 
 READY_POLL_S = 0.05
+LOG_FENCE_GCODE = "M115"
+LOG_FENCE_NEEDLE = b"FIRMWARE_NAME"
 PRINT_POLL_S = 0.2
 CLOCK_SYNC_BOOT_TIMEOUT = 120.0
 
@@ -174,6 +176,24 @@ def configured_step_tracks(
                 )
             )
     return tracks
+
+
+def log_through_fence(read_log, fence_offset, expired, poll):
+    """The klippy log once the fence record, written after `fence_offset`,
+    is in it. The log writer is a queue drained by a thread that a starved
+    runner can delay, so a record logged before an API response may land
+    after it; the queue is FIFO, so every record logged before the fence is
+    in the file by the time the fence is."""
+    while True:
+        data = read_log()
+        if LOG_FENCE_NEEDLE in data[fence_offset:]:
+            return data
+        if expired():
+            raise SimError(
+                f"log fence {LOG_FENCE_NEEDLE!r} did not appear in klippy.log"
+                f" after offset {fence_offset}"
+            )
+        poll()
 
 
 class SimError(Exception):
@@ -449,6 +469,10 @@ class HarnessPacer:
 
     def __exit__(self, *exc):
         self._clock.release_pacer(self._slot)
+
+    def hold_until(self, vtime_s: float) -> None:
+        """Virtual time may not pass `vtime_s` until the next hold."""
+        self._clock.hold_at(self._slot, int(vtime_s * 1e9))
 
     def sleep(
         self, seconds: float, stop: Optional[threading.Event] = None
@@ -1118,23 +1142,57 @@ class SimWorld:
 
     @_runs_free
     def _wait_ready(self, timeout: float) -> bool:
+        return self._settled_state(timeout) == "ready"
+
+    def _settled_state(self, timeout: float) -> Optional[str]:
         deadline = self.vclock.deadline(timeout)
         while not deadline.expired():
             if self.klippy_proc.poll() is not None:
-                return False
-            try:
-                info = _api_request(
-                    self.api_socket, "info", {}, self.vclock.deadline(3.0)
-                )
-            except OSError:
-                info = {}
-            state = (info.get("result") or {}).get("state")
-            if state == "ready":
-                return True
-            if state in ("error", "shutdown"):
-                return False
+                return None
+            state = self._printer_state()
+            if state in ("ready", "error", "shutdown"):
+                return state
             time.sleep(READY_POLL_S)
-        return False
+        return None
+
+    def _printer_state(self) -> Optional[str]:
+        try:
+            info = _api_request(
+                self.api_socket, "info", {}, self.vclock.deadline(3.0)
+            )
+        except OSError:
+            return None
+        return (info.get("result") or {}).get("state")
+
+    @_runs_free
+    def restart_klippy(self, timeout: float = 120.0) -> Optional[str]:
+        self.klippy_proc.terminate()
+        self.klippy_proc.wait(timeout=10)
+        self._spawn_klippy(self.workdir / "printer.cfg")
+        return self._settled_state(timeout)
+
+    @_runs_free
+    def firmware_restart(self, timeout: float = 120.0) -> None:
+        _api_request(
+            self.api_socket,
+            "gcode/firmware_restart",
+            {},
+            self.vclock.deadline(5.0),
+        )
+        deadline = self.vclock.deadline(timeout)
+        state = None
+        while not deadline.expired():
+            if self.klippy_proc.poll() is not None:
+                raise SimError("klippy exited during FIRMWARE_RESTART")
+            state = self._printer_state()
+            if state == "ready":
+                self._wait_clock_sync(CLOCK_SYNC_BOOT_TIMEOUT)
+                return
+            time.sleep(READY_POLL_S)
+        raise SimError(
+            f"FIRMWARE_RESTART left klippy in {state!r}:\n"
+            f"{self.klippy_log_text()[-3000:]}"
+        )
 
     @_runs_free
     def _wait_clock_sync(self, timeout: float) -> None:
@@ -1282,6 +1340,26 @@ class SimWorld:
 
     def mark_log(self) -> None:
         self.log_tail()
+
+    def _read_klippy_log(self) -> bytes:
+        return self.klippy_log.read_bytes() if self.klippy_log.exists() else b""
+
+    @_runs_free
+    def settled_log_tail(self, timeout: float = 10.0) -> str:
+        """log_tail() that includes every record klippy logged before this
+        call, however far its async log writer lags an API response."""
+        fence_offset = len(self._read_klippy_log())
+        self.gcode_ok(LOG_FENCE_GCODE, timeout=timeout)
+        deadline = self.vclock.deadline(timeout)
+        data = log_through_fence(
+            self._read_klippy_log,
+            fence_offset,
+            deadline.expired,
+            lambda: time.sleep(READY_POLL_S),
+        )
+        out = data[self._log_offset :].decode(errors="replace")
+        self._log_offset = len(data)
+        return out
 
     @_runs_free
     def expect_log(self, needle: str, timeout: float = 10.0) -> str:

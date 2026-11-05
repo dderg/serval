@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::Duration;
-use step_shim::{MotorConfig, ShimError, StepEncoder, StepFrame, StepShim};
+use step_shim::{DrainBudget, MotorConfig, ShimError, StepEncoder, StepFrame, StepShim};
 use trajectory::{BuzzProfile, ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm};
 
 pub const SHIM_RING_DEPTH: u32 = 64;
@@ -22,14 +22,12 @@ const RETIREMENT_IDLE_TICKS: u32 = 10;
 
 pub const MOVE_SLOT_RESERVE: u32 = 16;
 
-/// The most wall time one send pass may spend in the step root search. Bulk
-/// refills (rebuilding the 0.25s send lead after a reconcile cut) amortize
-/// across pacer ticks; a pass that compressed the whole lead synchronously
-/// consumed the resume volley's real delivery margin - the "Timer too
-/// close" trips.
-pub const DRAIN_PASS_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
-
 pub const SEND_LEAD_SECONDS: f64 = 2.0 * (host_rt::host_io::rtt::MIN_RTO_MS as f64) / 1000.0;
+
+/// How far past the mcu clock every drain pass roots whatever its budget:
+/// a pass that yields earlier leaves the mcu frames the next pacer passes
+/// cannot deliver in time.
+pub const URGENT_DRAIN_SECONDS: f64 = 0.050;
 
 pub const CONSUMED_MARGIN_SECONDS: f64 = 0.010;
 
@@ -230,6 +228,14 @@ pub fn build_endpoint(
             cfg.mcu_id
         ));
     }
+    let drain_budget_secs = cfg.hw.stepcompress_drain_budget_secs;
+    if !drain_budget_secs.is_finite() || drain_budget_secs < 0.0 {
+        return Err(format!(
+            "stepcompress mcu {}: drain budget {drain_budget_secs} s is not a finite \
+             non-negative wall time",
+            cfg.mcu_id
+        ));
+    }
     let simulated = std::env::var_os("MCU_SIM_SOCK_DIR").is_some();
     let query = host_io_step_count_query(cfg.mcu_id, host_io.clone());
     let link_health = host_io.upgrade().map(|io| io.link_health());
@@ -251,9 +257,7 @@ pub fn build_endpoint(
         },
         &pulse_lanes,
     )?;
-    if !simulated {
-        endpoint.set_drain_pass_budget(DRAIN_PASS_BUDGET);
-    }
+    endpoint.set_drain_pass_budget(std::time::Duration::from_secs_f64(drain_budget_secs));
     if let Some(dir) = std::env::var_os(STEP_TAP_DIR_ENV) {
         endpoint.attach_tap(StepTap::open(
             std::path::Path::new(&dir),
@@ -342,6 +346,10 @@ impl McuClock {
     /// How far ahead of the mcu the endpoint keeps its move queue stocked.
     fn lead_horizon(self) -> u64 {
         self.now.saturating_add(self.ticks(SEND_LEAD_SECONDS))
+    }
+
+    fn urgent_horizon(self) -> u64 {
+        self.now.saturating_add(self.ticks(URGENT_DRAIN_SECONDS))
     }
 }
 
@@ -743,9 +751,12 @@ impl StepcompressEndpoint {
             .map_or_else(|| "link: no vitals attached".to_string(), |l| l.describe())
     }
 
-    /// Cap the wall time one send pass may spend in the step root search.
-    /// Production sets [`DRAIN_PASS_BUDGET`]; tests leave the search
-    /// unbounded so mock-clock scenarios drain deterministically.
+    /// Cap the wall time one send pass may spend in the step root search:
+    /// bulk refills (rebuilding the send lead after a reconcile cut)
+    /// amortize across pacer ticks instead of consuming the resume volley's
+    /// delivery margin. [`build_endpoint`] sets the mcu's configured budget;
+    /// tests leave the search unbounded so mock-clock scenarios drain
+    /// deterministically.
     pub fn set_drain_pass_budget(&mut self, budget: std::time::Duration) {
         self.drain_pass_budget = Some(budget);
     }
@@ -1269,9 +1280,22 @@ impl StepcompressEndpoint {
             cut_at,
             "[reanchor] cutting unsent shim spans"
         );
-        let (_expected, tail) = self
+        if let Some(unrooted) = self
             .shim
-            .halt_at(motor, cut_at)
+            .unrooted_from(motor)
+            .filter(|&clock| clock <= cut_at)
+        {
+            return Err(self.motor_fatal(
+                motor,
+                &format!(
+                    "reanchor cut at clock {cut_at} would abandon the queued motion from clock \
+                     {unrooted} that the root search never reached"
+                ),
+            ));
+        }
+        let tail = self
+            .shim
+            .cut_keeping_step_clock(motor, cut_at)
             .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
         self.queue_step_volley(now, tail)?;
         self.shim.set_motor_cycles_per_second(motor, freq);
@@ -1395,8 +1419,14 @@ impl StepcompressEndpoint {
     }
 
     fn retirement_batch_ready(&self, snapshot: &[u32]) -> bool {
+        let baseline = self.retirement_baseline();
+        assert_eq!(
+            baseline.len(),
+            snapshot.len(),
+            "retirement snapshot and baseline cover different motor counts"
+        );
         snapshot.iter().enumerate().any(|(motor, &after)| {
-            let before = self.retirement_baseline().get(motor).copied().unwrap_or(0);
+            let before = baseline[motor];
             after.wrapping_sub(before) >= RETIREMENT_BATCH
         })
     }
@@ -1408,9 +1438,16 @@ impl StepcompressEndpoint {
         }
         self.deferred_retirement = false;
         let mut waits = Vec::new();
+        assert!(
+            self.published.len() == self.lanes.len() && snapshot.len() == self.lanes.len(),
+            "retirement snapshot ({}) and published counts ({}) must cover every lane ({})",
+            snapshot.len(),
+            self.published.len(),
+            self.lanes.len()
+        );
         for motor in 0..self.lanes.len() {
-            let before = self.published.get(motor).copied().unwrap_or(0);
-            let after = snapshot.get(motor).copied().unwrap_or(0);
+            let before = self.published[motor];
+            let after = snapshot[motor];
             if before == after {
                 continue;
             }
@@ -1670,13 +1707,36 @@ impl StepcompressEndpoint {
         drain_to: u64,
         retire: Retire,
     ) -> Result<(), SendError> {
+        let budget = self.drain_pass_budget.map(|budget| DrainBudget {
+            deadline: std::time::Instant::now() + budget,
+            roots_through: clock.urgent_horizon().min(drain_to),
+        });
+        self.drain_with_budget(clock, drain_to, retire, budget)
+    }
+
+    /// Drains every root up to `drain_to` regardless of the pass budget: a
+    /// cut abandons whatever the root search has not reached, so a run cut
+    /// short by the budget would reseed the lattice mid-run.
+    fn drain_through(
+        &mut self,
+        clock: McuClock,
+        drain_to: u64,
+        retire: Retire,
+    ) -> Result<(), SendError> {
+        self.drain_with_budget(clock, drain_to, retire, None)
+    }
+
+    fn drain_with_budget(
+        &mut self,
+        clock: McuClock,
+        drain_to: u64,
+        retire: Retire,
+        budget: Option<DrainBudget>,
+    ) -> Result<(), SendError> {
         let drain_started = std::time::Instant::now();
-        let deadline = self
-            .drain_pass_budget
-            .map(|budget| std::time::Instant::now() + budget);
         let frames = self
             .shim
-            .drain_budgeted(drain_to, deadline)
+            .drain_budgeted(drain_to, budget)
             .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
         let drain_elapsed = drain_started.elapsed();
         if drain_elapsed > std::time::Duration::from_millis(5) {
@@ -1825,6 +1885,11 @@ impl StepcompressEndpoint {
                 );
             }
         }
+        let probe_interval = clock.ticks(WIRE_PROBE_INTERVAL_SECS);
+        if clock.now >= self.last_wire_probe_clock.saturating_add(probe_interval) {
+            self.last_wire_probe_clock = clock.now;
+            self.send_wire_probe()?;
+        }
         if !burst.is_empty() {
             let egress_started = std::time::Instant::now();
             (self.egress)(&burst)?;
@@ -1856,20 +1921,38 @@ impl StepcompressEndpoint {
         if let Some(error) = stale {
             return Err(error);
         }
-        let probe_interval = clock.ticks(WIRE_PROBE_INTERVAL_SECS);
-        if clock.now >= self.last_wire_probe_clock.saturating_add(probe_interval) {
-            self.last_wire_probe_clock = clock.now;
-            #[allow(clippy::cast_possible_truncation)]
-            (self.egress)(&[(
-                "kalico_wire_probe",
-                vec![(
-                    "clock".to_string(),
-                    ArgValue::Int(i64::from(clock.now as u32)),
-                )],
-            )])?;
-        }
         self.release_retirements();
         self.post_heartbeat()
+    }
+
+    /// The probe is a diagnostic: a transport too full to take it right
+    /// now drops it, and the next probe interval offers another. It leaves
+    /// ahead of the pass's burst, stamped with the clock read as it is handed
+    /// over, so the mcu's receipt delta is the wire and the mcu's dispatch,
+    /// not the pass's compute or the burst queued in front of it.
+    fn send_wire_probe(&self) -> Result<(), SendError> {
+        let clock = self.clock_now()?;
+        #[allow(clippy::cast_possible_truncation)]
+        let probe = (
+            "kalico_wire_probe",
+            vec![(
+                "clock".to_string(),
+                ArgValue::Int(i64::from(clock.now as u32)),
+            )],
+        );
+        match (self.egress)(&[probe]) {
+            Err(SendError::Transient(reason)) => {
+                tracing::debug!(
+                    subsystem = "pump",
+                    event = "wire_probe_dropped",
+                    mcu = self.mcu_id,
+                    %reason,
+                    "the transport refused the wire probe; skipping this one"
+                );
+                Ok(())
+            }
+            sent => sent,
+        }
     }
 
     fn generate_buzz(&mut self, clock: McuClock) -> Result<(), SendError> {
@@ -2243,7 +2326,7 @@ impl StepcompressEndpoint {
                              producer's timeline",
                         ));
                     };
-                    self.drain_until(clock, at, Retire::Defer)?;
+                    self.drain_through(clock, at, Retire::Defer)?;
                     self.drain_until(clock, clock.lead_horizon(), Retire::Defer)?;
                     let sent = self.lanes[motor]
                         .last_sent_boundary

@@ -6,6 +6,7 @@ SET_POST_PROCESSOR error path."""
 import pytest
 
 from klippy import configfile
+from klippy.extras import axis
 from klippy.motion import Motion
 
 MINIMAL = "[printer]\nmax_velocity: 300\nmax_accel: 3000\n"
@@ -41,6 +42,54 @@ def test_happy_path_parses_sections_for_init_planner():
         "[post_processor pa]\ntype: linear_pressure_advance\nk: 0.04\n"
     )
     assert ("e", ["x", "y", "z"], [], ["is", "pa"]) in sections
+
+
+def test_ratio_ramp_time_is_refused_pointing_at_the_automatic_rule():
+    with pytest.raises(
+        configfile.error, match="'ratio_ramp_time' was removed: every follower"
+    ):
+        load("[axis e]\nfollows: x,y,z\nratio_ramp_time: 0.015\n")
+
+
+def test_the_axis_section_refuses_ratio_ramp_time():
+    section = "axis e"
+    fileconfig = configfile._config_doc.ConfigDocument.parse(
+        "[%s]\nfollows: x,y,z\nratio_ramp_time: 0.015\n" % section, "test.cfg"
+    )
+    wrapper = configfile.ConfigWrapper(None, fileconfig, {}, section)
+    with pytest.raises(
+        configfile.error,
+        match=r"\[axis e\] option 'ratio_ramp_time' was removed: every",
+    ):
+        axis.load_config_prefix(wrapper)
+
+
+def test_extruder_limits_are_read_from_the_follower_axis():
+    consumed = configfile._config_doc.read_motion_settings(
+        MINIMAL
+        + SPATIAL
+        + "[axis e]\nfollows: x,y,z\nmax_velocity: 60\nmax_accel: 8000\n"
+    )[3]
+    assert ("axis e", "max_velocity", 60.0) in consumed
+    assert ("axis e", "max_accel", 8000.0) in consumed
+
+
+def test_extruder_limits_must_be_above_zero():
+    with pytest.raises(configfile.error, match="max_accel.*above 0"):
+        load("[axis e]\nfollows: x,y,z\nmax_accel: 0\n")
+
+
+def test_the_instantaneous_corner_velocity_is_read_from_the_follower_axis():
+    consumed = configfile._config_doc.read_motion_settings(
+        MINIMAL
+        + SPATIAL
+        + "[axis e]\nfollows: x,y,z\ninstantaneous_corner_velocity: 2.5\n"
+    )[3]
+    assert ("axis e", "instantaneous_corner_velocity", 2.5) in consumed
+    with pytest.raises(
+        configfile.error, match="instantaneous_corner_velocity.*above 0"
+    ):
+        load("[axis e]\nfollows: x,y,z\ninstantaneous_corner_velocity: 0\n")
 
 
 def make_toolhead():

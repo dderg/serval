@@ -1,75 +1,239 @@
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 
-use snapshot_core::{SampleSide, Snapshot, SnapshotParams};
+use motion_core::dispatch_record::{DrainCause, encode_drain, encode_header, encode_segment};
+use motion_pipeline::InputTrace;
+use snapshot_core::waypoints::Waypoint;
+use snapshot_core::{ExactTrajectory, SampleSide, Snapshot, StreamRecord};
+use trajectory::ContinuousSegment;
 
-use planner_config::from_doc::read_motion_settings;
+use planner_config::RuntimeLimits;
+use planner_config::from_doc::{MotionSettings, read_motion_settings};
+
+use crate::step_benchmarks::{PyStepBenchmark, optional_step_capacity_input};
+
+/// The runtime limit overrides in force for a waypoint's move, as Python
+/// sees them: `None` is "no override, the config base applies".
+#[derive(IntoPyObject, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(crate) struct PyRuntimeLimits {
+    velocity: Option<f64>,
+    accel: Option<f64>,
+    corner_deviation: Option<f64>,
+}
+
+/// A waypoint as a Python dict: `position` is `[x, y, z, e]`;
+/// `dwell_before_s` is the stop at rest the move to it starts from, `None`
+/// when it blends from the previous move.
+#[derive(IntoPyObject, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(crate) struct PyWaypoint {
+    position: [f64; 4],
+    feedrate: f64,
+    runtime: PyRuntimeLimits,
+    dwell_before_s: Option<f64>,
+}
+
+impl From<Waypoint> for PyWaypoint {
+    fn from(w: Waypoint) -> Self {
+        Self {
+            position: w.position,
+            feedrate: w.feedrate,
+            runtime: PyRuntimeLimits {
+                velocity: w.runtime.velocity,
+                accel: w.runtime.accel,
+                corner_deviation: w.runtime.corner_deviation,
+            },
+            dwell_before_s: w.dwell_before_s,
+        }
+    }
+}
+
+impl From<PyWaypoint> for Waypoint {
+    fn from(w: PyWaypoint) -> Self {
+        Self {
+            position: w.position,
+            feedrate: w.feedrate,
+            runtime: RuntimeLimits {
+                velocity: w.runtime.velocity,
+                accel: w.runtime.accel,
+                corner_deviation: w.runtime.corner_deviation,
+            },
+            dwell_before_s: w.dwell_before_s,
+        }
+    }
+}
+
+/// One move exactly as the snapshot pipeline consumes it: the live
+/// `submit_move` endpoints and feedrate plus the limits it is planned under.
+#[derive(IntoPyObject)]
+pub(crate) struct PyMoveSpec {
+    start: [f64; 4],
+    end: [f64; 4],
+    feedrate: f64,
+    velocity: f64,
+    accel: f64,
+    corner_deviation: f64,
+    dwell_before_s: Option<f64>,
+}
+
+fn motion_settings(config_text: &str) -> PyResult<MotionSettings> {
+    let doc = config_doc::Document::parse(config_text, "<config>")
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let (settings, _consumed) = read_motion_settings(&doc).map_err(PyValueError::new_err)?;
+    Ok(settings)
+}
+
+pub(crate) fn waypoints_from_py(waypoints: Vec<PyWaypoint>) -> Vec<Waypoint> {
+    waypoints.into_iter().map(Waypoint::from).collect()
+}
+
+fn planner(config_text: &str) -> PyResult<snapshot_core::PlannerConfig> {
+    planner_config::from_doc::planner_config_from_text(config_text).map_err(PyValueError::new_err)
+}
 
 fn snapshot_from_config(
-    waypoints: &[snapshot_core::waypoints::Waypoint],
+    waypoints: &[Waypoint],
     config_text: &str,
+    step_benchmarks: Option<&[PyStepBenchmark]>,
 ) -> PyResult<Snapshot> {
-    let doc = config_doc::Document::parse(config_text, "<config>")
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    let (settings, _consumed) =
-        read_motion_settings(&doc).map_err(pyo3::exceptions::PyValueError::new_err)?;
-    snapshot_core::pipeline_snapshot(
+    let step_capacity = optional_step_capacity_input(config_text, step_benchmarks)?;
+    snapshot_core::pipeline_snapshot_for_config(
         waypoints,
-        SnapshotParams {
-            max_velocity: settings.cartesian.max_velocity,
-            max_accel: settings.cartesian.max_accel,
-            corner_deviation: settings.cartesian.corner_deviation,
-            max_jerk: settings.cartesian.max_jerk,
-            max_extrude_only_velocity: settings.max_extrude_only_velocity,
-            max_extrude_only_accel: settings.max_extrude_only_accel,
-            max_path_deviation: Some(settings.fit_tolerance_mm),
-            max_accel_deviation: Some(settings.fit_tolerance_accel_mm_s2),
-            axis_decls: settings.axes,
-            post_processor_decls: settings.post_processors,
-        },
+        &planner(config_text)?,
+        step_capacity.as_ref(),
     )
-    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
 /// Snapshot the pipeline for `waypoints` under the motion config parsed
 /// from `config_text` — the same section reader (defaults, bounds) the live
 /// printer uses — and return the snapshot as a JSON string for `json.loads`.
+/// `step_benchmarks` caps every move as the live printer whose mcus
+/// reported them does; `None` plans uncapped.
 #[pyfunction]
+#[pyo3(signature = (waypoints, config_text, step_benchmarks = None))]
 pub(crate) fn pipeline_snapshot(
-    waypoints: Vec<snapshot_core::waypoints::Waypoint>,
+    waypoints: Vec<PyWaypoint>,
     config_text: &str,
+    step_benchmarks: Option<Vec<PyStepBenchmark>>,
 ) -> PyResult<String> {
-    let snap = snapshot_from_config(&waypoints, config_text)?;
-    serde_json::to_string(&snap).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    let snap = snapshot_from_config(
+        &waypoints_from_py(waypoints),
+        config_text,
+        step_benchmarks.as_deref(),
+    )?;
+    serde_json::to_string(&snap).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
-/// G-code text → absolute `(x, y, z, e, feedrate, accel)` waypoints.
+/// G-code text → waypoints under the motion config parsed from `config_text`.
 #[pyfunction]
-pub(crate) fn parse_gcode(
-    text: &str,
-    max_velocity: f64,
-    max_accel: f64,
-) -> PyResult<Vec<snapshot_core::waypoints::Waypoint>> {
-    snapshot_core::waypoints::parse_gcode(text, max_velocity, max_accel)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+pub(crate) fn parse_gcode(text: &str, config_text: &str) -> PyResult<Vec<PyWaypoint>> {
+    let settings = motion_settings(config_text)?;
+    snapshot_core::waypoints::parse_gcode(text, &settings.cartesian)
+        .map(|waypoints| waypoints.into_iter().map(PyWaypoint::from).collect())
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// The moves `waypoints` feed the snapshot pipeline under `config_text`,
+/// with the effective limits each is planned under.
+#[pyfunction]
+pub(crate) fn snapshot_moves(
+    waypoints: Vec<PyWaypoint>,
+    config_text: &str,
+) -> PyResult<Vec<PyMoveSpec>> {
+    let planner = planner(config_text)?;
+    let base = motion_pipeline::live_config::GcodeMoveBase::of(
+        &planner,
+        &motion_pipeline::live_config::extruder_caps(&planner).map_err(PyValueError::new_err)?,
+    )
+    .map_err(PyValueError::new_err)?;
+    let specs = snapshot_core::move_specs(&waypoints_from_py(waypoints), base)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(specs
+        .into_iter()
+        .map(|spec| PyMoveSpec {
+            start: spec.start,
+            end: spec.end,
+            feedrate: spec.feedrate,
+            velocity: spec.limits.max_velocity_mm_s,
+            accel: spec.limits.accel_mm_s2,
+            corner_deviation: spec.limits.corner_deviation_mm,
+            dwell_before_s: spec.dwell_before_s,
+        })
+        .collect())
+}
+
+/// The live engine's runtime limit state over a config's base limits:
+/// the same [`RuntimeLimits`] setters and clamp `MotionEngine` exposes as
+/// `set_velocity_cap` / `set_accel_cap` / `set_corner_deviation` /
+/// `effective_limits`, without a planner behind it — the motion engine a
+/// G-code replay through klippy's own handlers talks to.
+#[pyclass]
+pub(crate) struct PlannerLimits {
+    base: planner_config::CartesianLimits,
+    runtime: RuntimeLimits,
+}
+
+#[pymethods]
+impl PlannerLimits {
+    #[new]
+    fn new(config_text: &str) -> PyResult<Self> {
+        Ok(Self {
+            base: motion_settings(config_text)?.cartesian,
+            runtime: RuntimeLimits::default(),
+        })
+    }
+
+    #[pyo3(signature = (velocity))]
+    fn set_velocity_cap(&mut self, velocity: Option<f64>) -> PyResult<()> {
+        self.runtime
+            .set_velocity_cap(velocity)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    #[pyo3(signature = (accel))]
+    fn set_accel_cap(&mut self, accel: Option<f64>) -> PyResult<()> {
+        self.runtime
+            .set_accel_cap(accel)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    #[pyo3(signature = (corner_deviation))]
+    fn set_corner_deviation(&mut self, corner_deviation: Option<f64>) -> PyResult<()> {
+        self.runtime
+            .set_corner_deviation(corner_deviation)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    fn effective_limits(&self) -> (f64, f64, f64) {
+        self.runtime.effective(&self.base)
+    }
 }
 
 /// Plan `waypoints` under `config_text` and evaluate the exact carriers of
 /// each axis in `axes` at `samples` times spread over the trajectory. Returns
 /// the snapshot JSON alongside per-axis `(position, velocity, acceleration)`
 /// rows so a plotting consumer never re-derives the carriers itself.
+/// `step_benchmarks` caps it as in [`pipeline_snapshot`].
 #[pyfunction]
+#[pyo3(signature = (waypoints, config_text, axes, samples, step_benchmarks = None))]
 pub(crate) fn pipeline_snapshot_axis_samples(
-    waypoints: Vec<snapshot_core::waypoints::Waypoint>,
+    waypoints: Vec<PyWaypoint>,
     config_text: &str,
     axes: Vec<usize>,
     samples: usize,
+    step_benchmarks: Option<Vec<PyStepBenchmark>>,
 ) -> PyResult<(String, Vec<Vec<(f64, f64, f64)>>)> {
     if samples < 2 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "samples must be at least 2",
-        ));
+        return Err(PyValueError::new_err("samples must be at least 2"));
     }
-    let snap = snapshot_from_config(&waypoints, config_text)?;
+    let snap = snapshot_from_config(
+        &waypoints_from_py(waypoints),
+        config_text,
+        step_benchmarks.as_deref(),
+    )?;
     let t_end = snap.trajectory.t_end();
     let mut out = Vec::with_capacity(axes.len());
     for axis in axes {
@@ -79,12 +243,172 @@ pub(crate) fn pipeline_snapshot_axis_samples(
             let pvaj = snap
                 .trajectory
                 .eval_axis(axis, t, SampleSide::Right)
-                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
             rows.push((pvaj.position, pvaj.velocity, pvaj.acceleration));
         }
         out.push(rows);
     }
-    let json = serde_json::to_string(&snap)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let json = serde_json::to_string(&snap).map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((json, out))
 }
+
+/// Plan `waypoints` under `config_text` as one stream, as the live host
+/// plans them, and evaluate each axis in `axes` across every motion epoch:
+/// the runs of shaped segments between two rests the stream drains to, at
+/// a dwell or a wait for the moves to finish. Each epoch is `(t_start,
+/// t_end, rows)`, with per-axis `(position, velocity, acceleration)` rows
+/// at `sample_period_s` or closer, both ends included. `step_benchmarks`
+/// caps it as in [`pipeline_snapshot`].
+#[pyfunction]
+#[pyo3(signature = (waypoints, config_text, axes, sample_period_s, step_benchmarks = None))]
+pub(crate) fn pipeline_snapshot_epoch_samples(
+    waypoints: Vec<PyWaypoint>,
+    config_text: &str,
+    axes: Vec<usize>,
+    sample_period_s: f64,
+    step_benchmarks: Option<Vec<PyStepBenchmark>>,
+) -> PyResult<Vec<EpochSamples>> {
+    if !(sample_period_s > 0.0 && sample_period_s.is_finite()) {
+        return Err(PyValueError::new_err(format!(
+            "sample_period_s must be positive and finite, got {sample_period_s}"
+        )));
+    }
+    let step_capacity = optional_step_capacity_input(config_text, step_benchmarks.as_deref())?;
+    let record = snapshot_core::stream_record(
+        &waypoints_from_py(waypoints),
+        &planner(config_text)?,
+        step_capacity.as_ref(),
+    )
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let trajectory = ExactTrajectory::from_segments(&record.segments)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    motion_epochs(&record.segments, &record.drained_at_rests)
+        .into_iter()
+        .map(|(t_start, t_end)| {
+            let samples = ((t_end - t_start) / sample_period_s).ceil().max(1.0) as usize + 1;
+            let rows = axes
+                .iter()
+                .map(|&axis| {
+                    (0..samples)
+                        .map(|i| {
+                            let last = i == samples - 1;
+                            let t = if last {
+                                t_end
+                            } else {
+                                t_start + (t_end - t_start) * i as f64 / (samples - 1) as f64
+                            };
+                            let side = if last {
+                                SampleSide::Left
+                            } else {
+                                SampleSide::Right
+                            };
+                            trajectory
+                                .eval_axis(axis, t, side)
+                                .map(|pvaj| (pvaj.position, pvaj.velocity, pvaj.acceleration))
+                                .map_err(|e| PyValueError::new_err(e.to_string()))
+                        })
+                        .collect::<PyResult<Vec<_>>>()
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            Ok((t_start, t_end, rows))
+        })
+        .collect()
+}
+
+type EpochSamples = (f64, f64, Vec<Vec<(f64, f64, f64)>>);
+
+/// Plan `waypoints` under `config_text` as one stream, as
+/// [`pipeline_snapshot_epoch_samples`] does, and encode the plan in the
+/// live host's dispatch-record format: every segment on host origin 0,
+/// re-anchored at the start and after every rest, and every rest as a
+/// requested drain. `step_benchmarks` caps it as in [`pipeline_snapshot`].
+#[pyfunction]
+#[pyo3(signature = (waypoints, config_text, step_benchmarks = None))]
+pub(crate) fn pipeline_snapshot_dispatch_record<'py>(
+    py: Python<'py>,
+    waypoints: Vec<PyWaypoint>,
+    config_text: &str,
+    step_benchmarks: Option<Vec<PyStepBenchmark>>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let step_capacity = optional_step_capacity_input(config_text, step_benchmarks.as_deref())?;
+    let record = snapshot_core::stream_record(
+        &waypoints_from_py(waypoints),
+        &planner(config_text)?,
+        step_capacity.as_ref(),
+    )
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let encoded = plan_dispatch_record(&record).map_err(PyValueError::new_err)?;
+    Ok(PyBytes::new(py, &encoded))
+}
+
+fn plan_dispatch_record(record: &StreamRecord) -> Result<Vec<u8>, String> {
+    let moves_before_drains: Vec<u64> = record
+        .inputs
+        .iter()
+        .scan(0_u64, |moves, input| {
+            Some(match input {
+                InputTrace::Move(_) => {
+                    *moves += 1;
+                    None
+                }
+                InputTrace::Drain => Some(*moves),
+                _ => None,
+            })
+        })
+        .flatten()
+        .collect();
+    if moves_before_drains.len() != record.drained_at_rests.len() {
+        return Err(format!(
+            "the plan fed {} drains but drained at {} rests",
+            moves_before_drains.len(),
+            record.drained_at_rests.len()
+        ));
+    }
+    let mut rests = record
+        .drained_at_rests
+        .iter()
+        .copied()
+        .zip(moves_before_drains)
+        .peekable();
+    let mut out = Vec::new();
+    encode_header(&mut out);
+    let mut fresh_epoch = true;
+    for (index, seg) in record.segments.iter().enumerate() {
+        while let Some((_, moves_sent)) = rests.next_if(|&(drained_at, _)| drained_at == index) {
+            encode_drain(&mut out, DrainCause::Requested, moves_sent);
+            fresh_epoch = true;
+        }
+        encode_segment(&mut out, seg, 0.0, fresh_epoch)?;
+        fresh_epoch = false;
+    }
+    for (drained_at, moves_sent) in rests {
+        if drained_at != record.segments.len() {
+            return Err(format!(
+                "a rest drained at {drained_at} of {} segments, out of order",
+                record.segments.len()
+            ));
+        }
+        encode_drain(&mut out, DrainCause::Requested, moves_sent);
+    }
+    Ok(out)
+}
+
+/// The runs of `segments` between two rests the stream drained to, each
+/// rest given as the number of segments emitted when it drained.
+fn motion_epochs(segments: &[ContinuousSegment], drained_at_rests: &[usize]) -> Vec<(f64, f64)> {
+    let mut bounds: Vec<usize> = drained_at_rests
+        .iter()
+        .copied()
+        .filter(|&count| count > 0 && count < segments.len())
+        .collect();
+    bounds.dedup();
+    bounds.insert(0, 0);
+    bounds.push(segments.len());
+    bounds
+        .windows(2)
+        .map(|run| (segments[run[0]].t_start, segments[run[1] - 1].t_end))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests;
