@@ -445,6 +445,33 @@ fn an_excursion_between_two_rests_within_a_node_spacing_opens_a_window() {
     assert_eq!(field.width(0.04), 0.0);
 }
 
+/// #773: off a rest a sample becomes a node only once that rest's cone no
+/// longer caps its target, so on a motion too short for its targets the
+/// only node kept can lie micrometres short of the rest it ends in, whose
+/// cone then crushes it to a sliver every window along the motion
+/// flattens onto. The motion opens the window halfway along it instead,
+/// the widest the two rests' cones allow its target.
+#[test]
+fn a_motion_whose_nodes_the_closing_rest_crushes_opens_its_window_halfway() {
+    let (end, target) = (3.5995653532023386, 0.856049567919998);
+    let mut field = WidthField::default();
+    field.push_rest(0.0);
+    field.push(3.5995408790997963, target);
+    field.push_rest(end);
+    let halfway = 0.5 * end;
+    assert_eq!(
+        field.width(halfway),
+        target.min(ENVELOPE_SLOPE * halfway),
+        "the motion's window halfway along it"
+    );
+    let seam = 0.1135885147517546;
+    assert!(
+        field.width(seam) >= 0.5 * ENVELOPE_SLOPE * seam,
+        "a {} mm window at the ratio step {seam} mm off the rest",
+        field.width(seam)
+    );
+}
+
 #[test]
 fn the_width_is_c2_lipschitz_and_closes_on_every_rest() {
     let mut field = WidthField::default();

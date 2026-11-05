@@ -51,10 +51,13 @@ fn a_ratio_ramped_advance_keeps_the_extruder_within_its_limits_through_a_crawl()
 }
 
 /// `tools/sim/gcode/voron_first_layers.gcode` lines 897-900: an extrusion,
-/// the travel back along it and the extrusion out again, whose crawl at
+/// the travel back along it and the extrusion out again. Its crawl at
 /// t≈63.92 s on the P1 bowden kernel profile drove the extruder to
 /// 49.4 mm/s against its 45 mm/s limit as the advance rebuilt the lead it
-/// released there.
+/// released there. On the P3 ratio-ramp profile the shaped toolhead
+/// crawls at the travel's end, a hair before the extrusion out starts,
+/// and the advance read the crawl's turning at the ratio ramping in
+/// there: up to 3.5·10⁶ mm/s² against 20000.
 const EXTRUSION_TRAVEL_BACK_AND_OUT: &str = "G90
 M83
 G1 X114.495 Y98.898 F3000
@@ -65,10 +68,8 @@ G1 X108.31 Y104.489 E.27739
 G1 X107.16 Y105.195 E.04579
 ";
 
-#[test]
-fn a_kernel_smoothed_advance_keeps_the_extruder_within_its_velocity_limit_out_of_a_crawl() {
-    let config =
-        corpus::repo().join("tools/bench/configs/profiles/p1_bowden_bedslinger_kernel.cfg");
+fn assert_plans_within_the_extruder_limits(profile: &str) {
+    let config = corpus::repo().join(profile);
     let snapshot = corpus::plan(
         "extrusion_travel_back_and_out",
         EXTRUSION_TRAVEL_BACK_AND_OUT,
@@ -79,4 +80,18 @@ fn a_kernel_smoothed_advance_keeps_the_extruder_within_its_velocity_limit_out_of
         .expect("the config limits the extruder");
     let excesses: Vec<String> = audit.excesses.iter().map(ToString::to_string).collect();
     assert!(excesses.is_empty(), "{}: {excesses:#?}", audit.summary());
+}
+
+#[test]
+fn a_kernel_smoothed_advance_keeps_the_extruder_within_its_velocity_limit_out_of_a_crawl() {
+    assert_plans_within_the_extruder_limits(
+        "tools/bench/configs/profiles/p1_bowden_bedslinger_kernel.cfg",
+    );
+}
+
+#[test]
+fn a_ratio_ramped_advance_releases_its_lead_round_a_crawl_at_the_end_of_a_travel() {
+    assert_plans_within_the_extruder_limits(
+        "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg",
+    );
 }

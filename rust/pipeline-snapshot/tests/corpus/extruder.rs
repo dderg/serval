@@ -455,12 +455,7 @@ fn extruder_limits(config: &Path, ratio_bound: f64) -> Option<ExtruderLimits> {
     let chains = compiled_chains(&settings);
     let chain = &chains.chains[E_AXIS];
     let (kernel_back, kernel_forward) = chain.max_input_window();
-    let advance = chain
-        .kernel()
-        .is_none()
-        .then(|| linear_advance_k(&settings, axis))
-        .flatten()
-        .map(|k| KernelFreeLinearAdvance { k, ratio_bound });
+    let advance = kernel_free_advance_k(config).map(|k| KernelFreeLinearAdvance { k, ratio_bound });
     Some(ExtruderLimits {
         moving,
         extrude_only,
@@ -474,6 +469,25 @@ fn extruder_limits(config: &Path, ratio_bound: f64) -> Option<ExtruderLimits> {
         ),
         advance,
     })
+}
+
+/// The `k` of the extruder's kernel-free linear advance; `None` where e has
+/// a kernel or no linear advance.
+pub fn kernel_free_advance_k(config: &Path) -> Option<f64> {
+    let settings = motion_settings(config);
+    let axis = settings.axes.iter().find(|decl| decl.name == "e")?;
+    compiled_chains(&settings).chains[E_AXIS]
+        .kernel()
+        .is_none()
+        .then(|| linear_advance_k(&settings, axis))
+        .flatten()
+}
+
+/// Whether the extruder's chain smooths e through a kernel of its own.
+pub fn e_has_kernel(config: &Path) -> bool {
+    compiled_chains(&motion_settings(config)).chains[E_AXIS]
+        .kernel()
+        .is_some()
 }
 
 fn toolhead_speed(trajectory: &pipeline_snapshot::ExactTrajectory, t: f64) -> f64 {

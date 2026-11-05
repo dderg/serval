@@ -3411,10 +3411,37 @@ impl<'a> FollowerSignal<'a> {
     }
 
     fn s_owned(&self, t: f64) -> f64 {
-        self.s_at(t).min(self.s_owned_end)
+        let (floor, ceiling) = self.crossing_hold(t);
+        self.s_at(t).clamp(floor, ceiling).min(self.s_owned_end)
     }
     fn s_owned_offset(&self, t: f64) -> f64 {
-        self.s_offset(t).min(self.s_owned_end - self.s_start)
+        let (floor, ceiling) = self.crossing_hold(t);
+        let offset = self.s_offset(t);
+        let s = self.s_start + offset;
+        let held = if s < floor {
+            floor - self.s_start
+        } else if s > ceiling {
+            ceiling - self.s_start
+        } else {
+            offset
+        };
+        held.min(self.s_owned_end - self.s_start)
+    }
+    /// The odometer readings `t` may take: at least the boundary of the
+    /// last ratio crossing at or before it, below that of the next. At a
+    /// crawl the odometer steps back, its leaf's rate running under a speed
+    /// smaller than the rate's tolerance, and would otherwise read a
+    /// boundary's formula again after its crossing or before it.
+    fn crossing_hold(&self, t: f64) -> (f64, f64) {
+        let crossings = self.ratio_crossings();
+        let next = crossings.partition_point(|&(time, _)| time <= t);
+        let floor = next
+            .checked_sub(1)
+            .map_or(f64::NEG_INFINITY, |last| crossings[last].1);
+        let ceiling = crossings.get(next).map_or(f64::INFINITY, |&(_, boundary)| {
+            trajectory::next_toward(boundary, f64::NEG_INFINITY)
+        });
+        (floor, ceiling)
     }
     fn s_end(&self) -> f64 {
         self.s_end
@@ -3454,8 +3481,10 @@ impl<'a> FollowerSignal<'a> {
     /// smoothing boundary, each beside that boundary, in order: the
     /// formula the table lays, or the one the advance reads, changes there,
     /// the signal reading the one before up to the time and the one after
-    /// from it on. Every boundary of the laid table bounds a span of the
-    /// advance's too.
+    /// from it on ([`Self::crossing_hold`]). Every boundary of the laid
+    /// table bounds a span of the advance's too. A crossing is held no
+    /// earlier than the one before, so the times rise with the boundaries
+    /// however the odometer steps back between.
     fn ratio_crossings(&self) -> &[(f64, f64)] {
         self.ratio_crossings.get_or_init(|| {
             let s_end = self.s_end();
@@ -3476,30 +3505,39 @@ impl<'a> FollowerSignal<'a> {
                 .collect::<Vec<_>>();
             boundaries.sort_by(f64::total_cmp);
             boundaries.dedup();
+            let start_reading = self.s_at(support_start);
             let mut crossings = Vec::new();
-            for boundary in boundaries {
-                if self.s_at(support_start) >= boundary {
-                    continue;
-                }
-                let mut lo = support_start;
-                let mut hi = support_end;
-                loop {
-                    let mid = 0.5 * lo + 0.5 * hi;
-                    if mid <= lo || mid >= hi {
-                        break;
-                    }
-                    if self.s_at(mid) < boundary {
-                        lo = mid;
-                    } else {
-                        hi = mid;
-                    }
-                }
-                if hi - support_start > GRID_DEDUP_EPS_S && support_end - hi > GRID_DEDUP_EPS_S {
-                    crossings.push((hi, boundary));
+            let mut earliest = support_start;
+            for boundary in boundaries.into_iter().filter(|&b| b > start_reading) {
+                let crossing = self
+                    .crossing_of(boundary, support_start, support_end)
+                    .max(earliest);
+                earliest = crossing;
+                if crossing - support_start > GRID_DEDUP_EPS_S
+                    && support_end - crossing > GRID_DEDUP_EPS_S
+                {
+                    crossings.push((crossing, boundary));
                 }
             }
             crossings
         })
+    }
+
+    /// A float of `(lo, hi]` the odometer reads `boundary` at, the float
+    /// before it below, by bisection from `lo` reading below it; `hi` where
+    /// the odometer stays below throughout.
+    fn crossing_of(&self, boundary: f64, mut lo: f64, mut hi: f64) -> f64 {
+        loop {
+            let mid = 0.5 * lo + 0.5 * hi;
+            if mid <= lo || mid >= hi {
+                return hi;
+            }
+            if self.s_at(mid) < boundary {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
     }
 
     fn construction_breakpoints(
