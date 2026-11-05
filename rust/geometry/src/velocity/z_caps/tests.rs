@@ -15,7 +15,7 @@ fn limits() -> VelocityLimits {
     VelocityLimits::try_new(
         1000.0,
         MAX_ACCEL,
-        corner_deviation_from_scv(SCV, MAX_ACCEL),
+        crate::CornerBudget::Shaped(corner_deviation_from_scv(SCV, MAX_ACCEL)),
         f64::INFINITY,
     )
     .unwrap()

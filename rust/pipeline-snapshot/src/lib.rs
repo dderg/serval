@@ -24,7 +24,7 @@ pub mod waypoints;
 use motion_pipeline::live_config::step_capacity::StepCapacityInput;
 use motion_pipeline::{Control, Pipeline, StreamConfig, StreamInput, TrajectoryItem, live_config};
 
-pub use geometry::corner_deviation_from_scv;
+pub use geometry::{CornerBudget, DEFAULT_CORNER_ALLOWANCE_MM, corner_deviation_from_scv};
 pub use planner_config::{
     AxisDecl, CartesianLimits, PlannerConfig, PostProcessorDecl, RuntimeLimits,
 };
@@ -40,8 +40,8 @@ pub enum SnapshotError {
     InvalidMaxPathDeviation(f64),
     #[error("max_accel_deviation must be positive, got {0}")]
     InvalidMaxAccelDeviation(f64),
-    #[error("corner_deviation must be finite and non-negative, got {0}")]
-    InvalidCornerDeviation(f64),
+    #[error("{1}, got {0:?}")]
+    InvalidCornerBudget(CornerBudget, &'static str),
     #[error("need at least 2 waypoints")]
     TooFewWaypoints,
     #[error("{0}")]
@@ -58,7 +58,7 @@ pub enum SnapshotError {
 pub struct SnapshotParams {
     pub max_velocity: f64,
     pub max_accel: f64,
-    pub corner_deviation: f64,
+    pub corner: CornerBudget,
     pub max_jerk: f64,
     /// `None` leaves z to the path caps — see [`SnapshotParams::binding_z_cap`].
     pub max_z_velocity: Option<f64>,
@@ -148,11 +148,10 @@ pub fn pipeline_snapshot_streaming(
             return Err(SnapshotError::InvalidMaxAccelDeviation(v));
         }
     }
-    if !(params.corner_deviation.is_finite() && params.corner_deviation >= 0.0) {
-        return Err(SnapshotError::InvalidCornerDeviation(
-            params.corner_deviation,
-        ));
-    }
+    params
+        .corner
+        .validate()
+        .map_err(|reason| SnapshotError::InvalidCornerBudget(params.corner, reason))?;
     let planner = planner_config(&params)?;
     snapshot_planned(
         waypoints,
@@ -503,7 +502,7 @@ fn planner_config(params: &SnapshotParams) -> Result<PlannerConfig, SnapshotErro
             max_jerk: params.max_jerk,
             max_z_velocity: params.max_z_velocity.unwrap_or(params.max_velocity),
             max_z_accel: params.max_z_accel.unwrap_or(params.max_accel),
-            corner_deviation: params.corner_deviation,
+            corner: params.corner,
         },
         post_processors,
         max_extrude_only_velocity: params.max_extrude_only_velocity,
@@ -701,7 +700,7 @@ pub struct Follower {
 pub struct Limits {
     pub max_velocity_mm_s: f64,
     pub accel_mm_s2: f64,
-    pub corner_deviation_mm: f64,
+    pub corner: Corner,
     /// `None` is jerk limiting off: an infinite bound is JSON `null` on the
     /// way out and unrecoverable on the way back.
     pub max_jerk_mm_s3: Option<f64>,
@@ -711,6 +710,36 @@ pub struct Limits {
     pub max_z_velocity_mm_s: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_z_accel_mm_s2: Option<f64>,
+}
+
+/// A span's corner budget as a snapshot records it: tagged by the option that set it,
+/// `default` where the config set neither.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum Corner {
+    CornerDeviation(f64),
+    Default(f64),
+    SquareCornerVelocity(f64),
+}
+
+impl From<CornerBudget> for Corner {
+    fn from(budget: CornerBudget) -> Self {
+        match budget {
+            CornerBudget::Shaped(mm) => Self::CornerDeviation(mm),
+            CornerBudget::OverFloor(mm) => Self::Default(mm),
+            CornerBudget::ScvEquivalent(scv) => Self::SquareCornerVelocity(scv),
+        }
+    }
+}
+
+impl From<Corner> for CornerBudget {
+    fn from(corner: Corner) -> Self {
+        match corner {
+            Corner::CornerDeviation(mm) => Self::Shaped(mm),
+            Corner::Default(mm) => Self::OverFloor(mm),
+            Corner::SquareCornerVelocity(scv) => Self::ScvEquivalent(scv),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1390,7 +1419,7 @@ impl Limits {
         Self {
             max_velocity_mm_s: limits.max_velocity_mm_s,
             accel_mm_s2: limits.accel_mm_s2,
-            corner_deviation_mm: limits.corner_deviation_mm,
+            corner: limits.corner.into(),
             max_jerk_mm_s3: finite(limits.max_jerk_mm_s3),
             max_z_velocity_mm_s: finite(limits.max_z_velocity_mm_s),
             max_z_accel_mm_s2: finite(limits.max_z_accel_mm_s2),
@@ -1401,7 +1430,7 @@ impl Limits {
         VelocityLimits::try_new(
             self.max_velocity_mm_s,
             self.accel_mm_s2,
-            self.corner_deviation_mm,
+            self.corner.into(),
             self.max_jerk_mm_s3.unwrap_or(f64::INFINITY),
         )?
         .with_z_caps(

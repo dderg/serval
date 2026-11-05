@@ -177,7 +177,13 @@ fn a_curve_is_bounded_by_its_steepest_heading() {
 #[test]
 fn the_planner_never_plans_a_move_past_its_mcu_capacity() {
     let capacity = one_board();
-    let limits = VelocityLimits::try_new(1000.0, 20_000.0, 0.0, f64::INFINITY).unwrap();
+    let limits = VelocityLimits::try_new(
+        1000.0,
+        20_000.0,
+        crate::CornerBudget::Shaped(0.0),
+        f64::INFINITY,
+    )
+    .unwrap();
     let m = line_move(
         [0.0; 3],
         [200.0, 0.0, 0.0],
@@ -220,7 +226,13 @@ fn the_planner_never_plans_a_move_past_its_mcu_capacity() {
 #[test]
 fn an_extrusion_without_extruder_caps_on_a_capped_mcu_fails_loudly() {
     let capacity = corexy(vec![mcu("mcu", [XY_SHARE, XY_SHARE, 0.0], 1.0 / 300.0)]);
-    let limits = VelocityLimits::try_new(100.0, 2000.0, 0.0, f64::INFINITY).unwrap();
+    let limits = VelocityLimits::try_new(
+        100.0,
+        2000.0,
+        crate::CornerBudget::Shaped(0.0),
+        f64::INFINITY,
+    )
+    .unwrap();
     let m = line_move(
         [0.0; 3],
         [10.0, 0.0, 0.0],
@@ -258,10 +270,15 @@ fn an_extruding_move_with_caps_carries_its_advance_into_the_demand() {
         leader_spill: crate::frontend::LeaderSpill::UNSHAPED,
         leader_kernel_reach_s: 0.0,
     };
-    let limits = VelocityLimits::try_new(100.0, 2000.0, 0.0, f64::INFINITY)
-        .unwrap()
-        .with_extruder_caps(Some(caps))
-        .unwrap();
+    let limits = VelocityLimits::try_new(
+        100.0,
+        2000.0,
+        crate::CornerBudget::Shaped(0.0),
+        f64::INFINITY,
+    )
+    .unwrap()
+    .with_extruder_caps(Some(caps))
+    .unwrap();
     let m = line_move(
         [0.0; 3],
         [10.0, 0.0, 0.0],

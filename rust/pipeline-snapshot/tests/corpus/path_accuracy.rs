@@ -272,7 +272,8 @@ pub fn audit(snapshot: &Snapshot, gcode: &str, config: &Path) -> Option<PathAccu
     if line.segments() < 1 {
         return None;
     }
-    let corner_deviation = motion_settings(config).cartesian.corner_deviation;
+    let cartesian = motion_settings(config).cartesian;
+    let corner_deviation = cartesian.corner.unshaped_cut_mm(cartesian.max_accel);
     let trajectory = snapshot.toolhead.as_ref().unwrap_or(&snapshot.trajectory);
     let mut nearest = vec![f64::INFINITY; line.vertices.len()];
     let mut excursion = vec![(0.0_f64, [0.0; SPATIAL_AXES]); line.segments()];

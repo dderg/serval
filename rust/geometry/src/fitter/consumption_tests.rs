@@ -18,7 +18,7 @@ fn ctx_with(line_no: u32, accel: f64, scv: f64) -> MoveContext {
         limits: VelocityLimits::try_new(
             200.0,
             accel,
-            crate::corner_deviation_from_scv(scv, accel),
+            crate::CornerBudget::Shaped(crate::corner_deviation_from_scv(scv, accel)),
             100_000.0,
         )
         .unwrap(),

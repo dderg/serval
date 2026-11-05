@@ -20,7 +20,13 @@ fn move_with(segment: Segment, followers: Vec<FollowerDemand>) -> Move {
     Move {
         segment: PathSegment::try_new(segment, followers).unwrap(),
         feedrate_mm_s: 100.0,
-        limits: VelocityLimits::try_new(100.0, 1_000.0, 0.1, f64::INFINITY).unwrap(),
+        limits: VelocityLimits::try_new(
+            100.0,
+            1_000.0,
+            geometry::CornerBudget::Shaped(0.1),
+            f64::INFINITY,
+        )
+        .unwrap(),
         source: SourceRange {
             start_line: 41,
             end_line: 41,

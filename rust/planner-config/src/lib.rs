@@ -1,3 +1,4 @@
+use geometry::{CornerBudget, DEFAULT_CORNER_ALLOWANCE_MM};
 use thiserror::Error;
 use trajectory::{AxisChainSet, CompiledChain, FollowerLimits, PostProcessorInstance, algos};
 
@@ -549,20 +550,20 @@ pub struct PlannerConfig {
 
 /// The `SET_VELOCITY_LIMIT` / `M204` / `RESET_VELOCITY_LIMIT` overrides in
 /// force. Velocity and accel caps clamp the config base but never raise it;
-/// a runtime corner deviation replaces the base outright.
+/// a runtime corner budget replaces the base outright.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct RuntimeLimits {
     pub velocity: Option<f64>,
     pub accel: Option<f64>,
-    pub corner_deviation: Option<f64>,
+    pub corner: Option<CornerBudget>,
 }
 
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum RuntimeLimitError {
     #[error("{name} must be finite and positive")]
     NotPositive { name: &'static str },
-    #[error("corner_deviation must be finite and non-negative")]
-    InvalidCornerDeviation,
+    #[error("{0}")]
+    InvalidCornerBudget(&'static str),
 }
 
 impl RuntimeLimits {
@@ -580,21 +581,34 @@ impl RuntimeLimits {
         &mut self,
         corner_deviation: Option<f64>,
     ) -> Result<(), RuntimeLimitError> {
-        if corner_deviation.is_some_and(|d| !(d.is_finite() && d >= 0.0)) {
-            return Err(RuntimeLimitError::InvalidCornerDeviation);
+        self.set_corner(corner_deviation.map(CornerBudget::Shaped))
+    }
+
+    pub fn set_square_corner_velocity(
+        &mut self,
+        square_corner_velocity: Option<f64>,
+    ) -> Result<(), RuntimeLimitError> {
+        self.set_corner(square_corner_velocity.map(CornerBudget::ScvEquivalent))
+    }
+
+    fn set_corner(&mut self, corner: Option<CornerBudget>) -> Result<(), RuntimeLimitError> {
+        if let Some(budget) = corner {
+            budget
+                .validate()
+                .map_err(RuntimeLimitError::InvalidCornerBudget)?;
         }
-        self.corner_deviation = corner_deviation;
+        self.corner = corner;
         Ok(())
     }
 
-    /// `(velocity, accel, corner_deviation)` a move submitted now runs under.
+    /// `(velocity, accel, corner)` a move submitted now runs under.
     #[must_use]
-    pub fn effective(&self, base: &CartesianLimits) -> (f64, f64, f64) {
+    pub fn effective(&self, base: &CartesianLimits) -> (f64, f64, CornerBudget) {
         let clamp = |cap: Option<f64>, base: f64| cap.map_or(base, |c| c.min(base));
         (
             clamp(self.velocity, base.max_velocity),
             clamp(self.accel, base.max_accel),
-            self.corner_deviation.unwrap_or(base.corner_deviation),
+            self.corner.unwrap_or(base.corner),
         )
     }
 }
@@ -616,7 +630,7 @@ pub struct CartesianLimits {
     pub max_jerk: f64,
     pub max_z_velocity: f64,
     pub max_z_accel: f64,
-    pub corner_deviation: f64,
+    pub corner: CornerBudget,
 }
 
 impl Default for CartesianLimits {
@@ -627,7 +641,7 @@ impl Default for CartesianLimits {
             max_jerk: 100_000.0,
             max_z_velocity: 15.0,
             max_z_accel: 100.0,
-            corner_deviation: DEFAULT_CORNER_DEVIATION_MM,
+            corner: CornerBudget::OverFloor(DEFAULT_CORNER_ALLOWANCE_MM),
         }
     }
 }
@@ -641,7 +655,7 @@ impl CartesianLimits {
         max_velocity: f64,
         max_accel: f64,
         max_jerk: f64,
-        corner_deviation: f64,
+        corner: CornerBudget,
     ) -> Self {
         Self {
             max_velocity,
@@ -649,7 +663,7 @@ impl CartesianLimits {
             max_jerk,
             max_z_velocity: max_velocity,
             max_z_accel: max_accel,
-            corner_deviation,
+            corner,
         }
     }
 
@@ -665,17 +679,44 @@ impl CartesianLimits {
         if !(self.max_jerk > 0.0) {
             return Err("[printer] max_jerk must be positive (infinity disables jerk limiting)");
         }
-        if !(self.corner_deviation.is_finite() && self.corner_deviation >= 0.0) {
-            return Err("[printer] corner_deviation must be finite and non-negative");
-        }
+        self.corner.validate()?;
         Ok(())
     }
 }
 
-/// The corner budget of a `[printer]` that sets neither `corner_deviation`
-/// nor `square_corner_velocity`, in mm. The same at every `max_accel`:
-/// see `docs/Config_Reference_Motion.md` for the profile study behind it.
-pub const DEFAULT_CORNER_DEVIATION_MM: f64 = 0.04;
+/// The kind name of a [`CornerBudget::Shaped`] outside Rust: the option that sets it.
+pub const CORNER_KIND_DEVIATION: &str = "corner_deviation";
+/// The kind name of a [`CornerBudget::OverFloor`] outside Rust.
+pub const CORNER_KIND_DEFAULT: &str = "default";
+/// The kind name of a [`CornerBudget::ScvEquivalent`] outside Rust: the option that sets it.
+pub const CORNER_KIND_SCV: &str = "square_corner_velocity";
+
+/// `corner` as the `(kind, value)` pair it crosses to Python and klippy as.
+#[must_use]
+pub fn corner_budget_parts(corner: CornerBudget) -> (&'static str, f64) {
+    match corner {
+        CornerBudget::Shaped(mm) => (CORNER_KIND_DEVIATION, mm),
+        CornerBudget::OverFloor(mm) => (CORNER_KIND_DEFAULT, mm),
+        CornerBudget::ScvEquivalent(scv) => (CORNER_KIND_SCV, scv),
+    }
+}
+
+/// The budget a `(kind, value)` pair from [`corner_budget_parts`] names, validated.
+pub fn corner_budget_from_parts(kind: &str, value: f64) -> Result<CornerBudget, String> {
+    let corner = match kind {
+        CORNER_KIND_DEVIATION => CornerBudget::Shaped(value),
+        CORNER_KIND_DEFAULT => CornerBudget::OverFloor(value),
+        CORNER_KIND_SCV => CornerBudget::ScvEquivalent(value),
+        other => {
+            return Err(format!(
+                "unknown corner budget kind '{other}': expected '{CORNER_KIND_DEVIATION}', \
+                 '{CORNER_KIND_DEFAULT}' or '{CORNER_KIND_SCV}'"
+            ));
+        }
+    };
+    corner.validate()?;
+    Ok(corner)
+}
 
 impl PlannerConfig {
     pub fn compile_active_chains(&self) -> Result<AxisChainSet, PostProcessorConfigError> {
@@ -684,7 +725,7 @@ impl PlannerConfig {
     }
 
     #[must_use]
-    pub fn effective_limits(&self) -> (f64, f64, f64) {
+    pub fn effective_limits(&self) -> (f64, f64, CornerBudget) {
         self.runtime.effective(&self.cartesian)
     }
 

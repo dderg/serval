@@ -28,10 +28,15 @@ fn caps() -> ExtruderCaps {
 /// A stream of moves along x, each `(length, ratio, feedrate)`; a zero
 /// length is an extrude-only move of `ratio` millimetres of filament.
 fn stream(pieces: &[(f64, f64, f64)]) -> Vec<Move> {
-    let limits = VelocityLimits::try_new(1000.0, 20_000.0, 0.0, f64::INFINITY)
-        .unwrap()
-        .with_extruder_caps(Some(caps()))
-        .unwrap();
+    let limits = VelocityLimits::try_new(
+        1000.0,
+        20_000.0,
+        crate::CornerBudget::Shaped(0.0),
+        f64::INFINITY,
+    )
+    .unwrap()
+    .with_extruder_caps(Some(caps()))
+    .unwrap();
     let mut x = 0.0;
     pieces
         .iter()
@@ -281,10 +286,15 @@ fn an_extrude_only_move_holds_still_for_the_kernel_reach_beside_motion_only() {
 
 #[test]
 fn the_axes_in_reach_are_those_the_path_moves_on_within_the_spill() {
-    let limits = VelocityLimits::try_new(1000.0, 20_000.0, 0.0, f64::INFINITY)
-        .unwrap()
-        .with_extruder_caps(Some(caps()))
-        .unwrap();
+    let limits = VelocityLimits::try_new(
+        1000.0,
+        20_000.0,
+        crate::CornerBudget::Shaped(0.0),
+        f64::INFINITY,
+    )
+    .unwrap()
+    .with_extruder_caps(Some(caps()))
+    .unwrap();
     let corners = [
         [0.0, 0.0, 0.0],
         [10.0, 0.0, 0.0],

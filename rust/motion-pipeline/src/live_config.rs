@@ -64,7 +64,7 @@ pub fn stream_config(
             cfg,
             cart.max_velocity,
             cart.max_accel,
-            cart.corner_deviation,
+            cart.corner,
         )?,
         step_capacity: step_benchmarks
             .map(|input| step_capacity::step_capacity(cfg, input))
@@ -130,7 +130,7 @@ impl GcodeMoveBase {
                 cfg,
                 cart.max_velocity,
                 cart.max_accel,
-                cart.corner_deviation,
+                cart.corner,
             )?
             .with_extruder_caps(extruder)?,
             extruder_axis,
@@ -161,7 +161,7 @@ impl GcodeMoveBase {
             max_jerk: self.limits.max_jerk_mm_s3,
             max_z_velocity: self.limits.max_z_velocity_mm_s,
             max_z_accel: self.limits.max_z_accel_mm_s2,
-            corner_deviation: self.limits.corner_deviation_mm,
+            corner: self.limits.corner,
         }
     }
 
@@ -169,11 +169,11 @@ impl GcodeMoveBase {
         &self,
         runtime: &planner_config::RuntimeLimits,
     ) -> Result<geometry::VelocityLimits, &'static str> {
-        let (velocity, accel, corner_deviation) = runtime.effective(&self.config_limits());
+        let (velocity, accel, corner) = runtime.effective(&self.config_limits());
         geometry::VelocityLimits::try_new(
             velocity,
             accel,
-            corner_deviation,
+            corner,
             self.limits.max_jerk_mm_s3,
         )?
         .with_z_caps(
@@ -222,10 +222,10 @@ fn z_capped_limits(
     cfg: &PlannerConfig,
     max_velocity: f64,
     accel: f64,
-    corner_deviation: f64,
+    corner: geometry::CornerBudget,
 ) -> Result<geometry::VelocityLimits, String> {
     Ok(
-        geometry::VelocityLimits::try_new(max_velocity, accel, corner_deviation, f64::INFINITY)?
+        geometry::VelocityLimits::try_new(max_velocity, accel, corner, f64::INFINITY)?
             .with_z_caps(cfg.cartesian.max_z_velocity, cfg.cartesian.max_z_accel)?,
     )
 }

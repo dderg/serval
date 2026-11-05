@@ -41,8 +41,13 @@ fn trident_chain_set() -> trajectory::AxisChainSet {
 
 fn trident_config() -> motion_pipeline::StreamConfig {
     let mut cfg = default_stream_config();
-    cfg.limits = geometry::VelocityLimits::try_new(2800.0, 50000.0, 100.0, f64::INFINITY)
-        .expect("trident bench limits are valid");
+    cfg.limits = geometry::VelocityLimits::try_new(
+        2800.0,
+        50000.0,
+        geometry::CornerBudget::Shaped(100.0),
+        f64::INFINITY,
+    )
+    .expect("trident bench limits are valid");
     cfg
 }
 

@@ -327,7 +327,13 @@ fn arc_on_the_curvature_cap() -> AnalyticMoveSpan {
         Move {
             segment: PathSegment::try_new(Segment::Arc(arc), Vec::new()).expect("path"),
             feedrate_mm_s: 200.0,
-            limits: VelocityLimits::try_new(200.0, accel, 0.1, f64::INFINITY).expect("limits"),
+            limits: VelocityLimits::try_new(
+                200.0,
+                accel,
+                geometry::CornerBudget::Shaped(0.1),
+                f64::INFINITY,
+            )
+            .expect("limits"),
             source: SourceRange {
                 start_line: 1,
                 end_line: 1,

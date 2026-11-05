@@ -30,7 +30,7 @@ class LiveMove:
     delta: tuple[float, float, float, float]
     end: tuple[float, float, float, float]
     feedrate: float
-    limits: tuple[float, float, float]
+    limits: tuple[float, float, tuple[str, float]]
 
 
 @dataclass(frozen=True)
@@ -137,6 +137,9 @@ class RecordingEngine:
 
     def set_corner_deviation(self, corner_deviation):
         self._limits.set_corner_deviation(corner_deviation)
+
+    def set_square_corner_velocity(self, square_corner_velocity):
+        self._limits.set_square_corner_velocity(square_corner_velocity)
 
     def effective_limits(self):
         return self._limits.effective_limits()

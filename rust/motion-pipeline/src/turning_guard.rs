@@ -572,6 +572,7 @@ impl TurningGuard {
             max_extrude_only_accel_mm_s2: self.config.max_extrude_only_accel_mm_s2,
             entry_v: 0.0,
             step_capacity: self.config.step_capacity.as_deref(),
+            shaped_corners: self.config.corner.shaped_corners,
         }
     }
 

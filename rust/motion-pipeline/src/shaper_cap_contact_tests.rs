@@ -16,7 +16,13 @@ const SMOOTH_TIME: f64 = 0.010;
 const LEADER: usize = 0;
 
 fn limits() -> VelocityLimits {
-    VelocityLimits::try_new(MAX_VELOCITY, MAX_ACCEL, CORNER_DEVIATION, f64::INFINITY).unwrap()
+    VelocityLimits::try_new(
+        MAX_VELOCITY,
+        MAX_ACCEL,
+        geometry::CornerBudget::Shaped(CORNER_DEVIATION),
+        f64::INFINITY,
+    )
+    .unwrap()
 }
 
 fn config() -> StreamConfig {

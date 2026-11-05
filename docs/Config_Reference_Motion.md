@@ -24,7 +24,8 @@ max_accel: 3000
 #square_corner_velocity:
 #   Optional legacy alias, no default. Must be >= 0. Set this XOR
 #   corner_deviation; it is converted to the corner-deviation budget
-#   scv^2 * (sqrt(2) - 1) / max_accel (5 mm/s at 3000 mm/s^2 is 0.0035 mm).
+#   scv^2 * (sqrt(2) - 1) / accel at each move's planned acceleration
+#   (5 mm/s at 3000 mm/s^2 is 0.0035 mm).
 #max_z_velocity: 300
 #   Optional. Default is max_velocity. Must be > 0 and <= max_velocity.
 #   Z speed limit in mm/s.

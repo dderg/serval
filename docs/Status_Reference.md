@@ -608,9 +608,16 @@ The following information is available in the `toolhead` object
 - For Delta printers the `cone_start_z` is the max z height at
   maximum radius (`printer.toolhead.cone_start_z`).
 - `max_velocity`, `max_accel`, `minimum_cruise_ratio`,
-  `square_corner_velocity`: The current printing limits that are in
-  effect. This may differ from the config file settings if a
-  `SET_VELOCITY_LIMIT` (or `M204`) command alters them at run-time.
+  `square_corner_velocity`, `corner_deviation`: The current printing
+  limits that are in effect. This may differ from the config file
+  settings if a `SET_VELOCITY_LIMIT` (or `M204`) command alters them at
+  run-time. Of the two corner values, the one the corner budget was set
+  with is reported as given; the other is its legacy conversion at the
+  current `max_accel`. With neither set, `corner_deviation` is the
+  0.04 mm default allowance.
+- `corner_budget`: How the corner budget in effect was set:
+  `corner_deviation`, `square_corner_velocity`, or `default` when
+  neither the config nor `SET_VELOCITY_LIMIT` set one.
 - `stalls`: The total number of times (since the last restart) that
   the printer had to be paused because the toolhead moved faster than
   moves could be read from the G-Code input.

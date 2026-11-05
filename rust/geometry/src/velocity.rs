@@ -10,8 +10,10 @@ use crate::path::CurvatureProfile;
 #[cfg(test)]
 use crate::path::Segment;
 use crate::segment::SourceRange;
+use crate::shaped_corner::ShapedCorners;
 use crate::step_capacity::{StepCapacity, StepCapacityOverload};
 
+mod corner_caps;
 mod disk;
 mod extruder_caps;
 mod extrusion_reach;
@@ -175,6 +177,9 @@ pub struct VelocityPlanParams<'a> {
     pub max_extrude_only_accel_mm_s2: f64,
     pub entry_v: f64,
     pub step_capacity: Option<&'a StepCapacity>,
+    /// The shaper's rounding the corner budget is held to on the shaped
+    /// path; `None` where no kernel shapes X or Y.
+    pub shaped_corners: Option<&'static ShapedCorners>,
 }
 
 #[cfg(test)]
@@ -185,6 +190,7 @@ pub(crate) fn warm_start_params(integration_tol: f64) -> VelocityPlanParams<'sta
         max_extrude_only_accel_mm_s2: f64::INFINITY,
         entry_v: 0.0,
         step_capacity: None,
+        shaped_corners: None,
     }
 }
 
@@ -326,8 +332,17 @@ pub fn brake_horizon(
     assert_eq!(accel_scales.len(), n, "one scale per move");
     let tol = params.integration_tol;
     let mut report = VelocityReport::default();
-    let caps = build_move_caps(moves, budgets, Some(accel_scales), params, &mut report)?;
-    let seeded = seed_seam_velocities(moves, &caps, budgets, stop_before, 0.0, 0.0, &mut report);
+    let mut caps = build_move_caps(moves, budgets, Some(accel_scales), params, &mut report)?;
+    let seam_ceilings = corner_ceilings(moves, &mut caps, stop_before, params);
+    let seeded = seed_seam_velocities(
+        moves,
+        &caps,
+        budgets,
+        stop_before,
+        (0.0, 0.0),
+        &seam_ceilings,
+        &mut report,
+    );
     let mut brake = 0.0_f64;
     for k in (0..n).rev() {
         let kin = &caps[k].kin;
@@ -399,15 +414,16 @@ where
     }
 
     let mut report = VelocityReport::default();
-    let caps = build_move_caps(moves, budgets, ends.accel_scales, params, &mut report)?;
+    let mut caps = build_move_caps(moves, budgets, ends.accel_scales, params, &mut report)?;
+    let seam_ceilings = corner_ceilings(moves, &mut caps, stop_before, params);
     check_entry_ceiling(moves, &caps, entry_v, tol)?;
     let mut plan = seed_seam_velocities(
         moves,
         &caps,
         budgets,
         stop_before,
-        entry_v,
-        ends.exit_v,
+        (entry_v, ends.exit_v),
+        &seam_ceilings,
         &mut report,
     );
     forward_pass(moves, &caps, &mut plan, tol)?;
@@ -458,6 +474,7 @@ fn validate_config(params: VelocityPlanParams) -> Result<(), VelocityError> {
         max_extrude_only_accel_mm_s2,
         entry_v,
         step_capacity: _,
+        shaped_corners: _,
     } = params;
     if !(integration_tol.is_finite() && integration_tol >= MIN_INTEGRATION_TOL) {
         return Err(VelocityError::InvalidConfig);
@@ -603,13 +620,27 @@ impl SeamPlan {
     }
 }
 
+/// Each seam's corner-budget speed ceiling, see [`corner_caps::constrain`],
+/// which also lowers `caps` for it; none where X and Y are unshaped.
+fn corner_ceilings(
+    moves: &[crate::Move],
+    caps: &mut [MoveCaps],
+    stop_before: &[bool],
+    params: VelocityPlanParams,
+) -> Vec<f64> {
+    params.shaped_corners.map_or_else(
+        || vec![f64::INFINITY; moves.len() + 1],
+        |corners| corner_caps::constrain(moves, caps, stop_before, corners),
+    )
+}
+
 fn seed_seam_velocities(
     moves: &[crate::Move],
     caps: &[MoveCaps],
     budgets: &[ExtrusionBudget],
     stop_before: &[bool],
-    entry_v: f64,
-    exit_v: f64,
+    (entry_v, exit_v): (f64, f64),
+    seam_ceilings: &[f64],
     report: &mut VelocityReport,
 ) -> SeamPlan {
     let n = caps.len();
@@ -631,7 +662,9 @@ fn seed_seam_velocities(
             let boundary_vlim =
                 disk::limit_speed(kappa_up, up.accel).min(disk::limit_speed(kappa_dn, dn.accel));
             let ceiling = up.flat_ceiling.min(dn.flat_ceiling);
-            v[k] = ceiling.min(disk::notch_free_min(ceiling, boundary_vlim));
+            v[k] = ceiling
+                .min(disk::notch_free_min(ceiling, boundary_vlim))
+                .min(seam_ceilings[k]);
             let step_ceiling = extruder_caps::ratio_step_ceiling(
                 &moves[k - 1],
                 &moves[k],

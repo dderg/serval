@@ -1,7 +1,12 @@
 use super::*;
 
 fn limits() -> CartesianLimits {
-    CartesianLimits::without_z_caps(300.0, 3000.0, f64::INFINITY, 0.0)
+    CartesianLimits::without_z_caps(
+        300.0,
+        3000.0,
+        f64::INFINITY,
+        geometry::CornerBudget::Shaped(0.0),
+    )
 }
 
 fn parse(text: &str) -> Vec<Waypoint> {
@@ -241,19 +246,22 @@ fn set_velocity_limit_sets_every_runtime_limit_live_honours() {
         RuntimeLimits {
             velocity: Some(100.0),
             accel: Some(500.0),
-            corner_deviation: Some(geometry::corner_deviation_from_scv(8.0, 3000.0)),
+            corner: Some(geometry::CornerBudget::ScvEquivalent(8.0)),
         }
     );
-    assert_eq!(wp[2].runtime.corner_deviation, Some(0.05));
+    assert_eq!(
+        wp[2].runtime.corner,
+        Some(geometry::CornerBudget::Shaped(0.05))
+    );
     assert_eq!(wp[2].runtime.velocity, Some(100.0));
 }
 
 #[test]
-fn set_velocity_limit_square_corner_velocity_converts_at_the_config_accel() {
+fn set_velocity_limit_square_corner_velocity_stays_a_speed() {
     let wp = parse("G1 X10 F6000\nSET_VELOCITY_LIMIT ACCEL=500 SQUARE_CORNER_VELOCITY=8\nG1 X20\n");
     assert_eq!(
-        wp[1].runtime.corner_deviation,
-        Some(geometry::corner_deviation_from_scv(8.0, 3000.0))
+        wp[1].runtime.corner,
+        Some(geometry::CornerBudget::ScvEquivalent(8.0))
     );
 }
 

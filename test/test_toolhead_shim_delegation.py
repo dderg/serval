@@ -25,7 +25,7 @@ def toolhead_fixture():
     motion.extruder = extruder_mod.DummyExtruder(printer)
     motion._max_velocity = 300.0
     motion._max_accel = 3000.0
-    motion._corner_deviation = 0.0034517796864424596
+    motion._corner = ("square_corner_velocity", 5.0)
     motion._planner_ready = False
 
     printer.add_object("motion", motion)

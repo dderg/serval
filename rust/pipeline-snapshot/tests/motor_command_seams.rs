@@ -24,7 +24,7 @@ fn mode_inverse_snapshot(gcode_name: &str) -> (Snapshot, f64) {
         SnapshotParams {
             max_velocity: settings.cartesian.max_velocity,
             max_accel: settings.cartesian.max_accel,
-            corner_deviation: settings.cartesian.corner_deviation,
+            corner: settings.cartesian.corner,
             max_jerk: settings.cartesian.max_jerk,
             max_z_velocity: SnapshotParams::binding_z_cap(
                 settings.cartesian.max_z_velocity,

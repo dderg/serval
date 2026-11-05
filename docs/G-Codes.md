@@ -1602,8 +1602,11 @@ The motion module is automatically loaded.
 [MINIMUM_CRUISE_RATIO=<value>] [ACCEL_TO_DECEL=<value>]`: This command
 can alter the velocity and acceleration limits specified in the printer
 config. `MINIMUM_CRUISE_RATIO` and `ACCEL_TO_DECEL` are accepted as
-legacy no-ops. `SQUARE_CORNER_VELOCITY` and `CORNER_DEVIATION` are
-aliases; specify at most one.
+legacy no-ops. `SQUARE_CORNER_VELOCITY` and `CORNER_DEVIATION` set the
+same corner budget; specify at most one. A `SQUARE_CORNER_VELOCITY` is
+kept as a speed and converted at each move's acceleration. With no
+parameters the command reports the limits in effect, including the
+corner budget's kind and value.
 
 #### RESET_VELOCITY_LIMIT
 `RESET_VELOCITY_LIMIT`: This command resets the velocity limits to the

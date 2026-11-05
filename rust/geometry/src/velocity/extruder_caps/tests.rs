@@ -231,10 +231,15 @@ fn a_follower_kernel_smooths_an_unshaped_leader_steps_itself() {
 #[test]
 fn the_planner_holds_an_extruding_move_to_its_cap_and_leaves_travel_alone() {
     let extruder = caps(1000.0, 2000.0, 0.5);
-    let limits = VelocityLimits::try_new(150.0, 3000.0, 0.0, f64::INFINITY)
-        .unwrap()
-        .with_extruder_caps(Some(extruder))
-        .unwrap();
+    let limits = VelocityLimits::try_new(
+        150.0,
+        3000.0,
+        crate::CornerBudget::Shaped(0.0),
+        f64::INFINITY,
+    )
+    .unwrap()
+    .with_extruder_caps(Some(extruder))
+    .unwrap();
     let moves: Vec<_> = [(0.0, 0.0), (RATIO * 50.0, 1.0)]
         .iter()
         .enumerate()
@@ -274,10 +279,15 @@ fn the_planner_holds_an_extruding_move_to_its_cap_and_leaves_travel_alone() {
 #[test]
 fn the_planner_caps_the_climbing_travel_after_an_extrusion_on_an_unshaped_leader() {
     let extruder = unshaped_z(1.0);
-    let limits = VelocityLimits::try_new(150.0, 3000.0, 0.0, f64::INFINITY)
-        .unwrap()
-        .with_extruder_caps(Some(extruder))
-        .unwrap();
+    let limits = VelocityLimits::try_new(
+        150.0,
+        3000.0,
+        crate::CornerBudget::Shaped(0.0),
+        f64::INFINITY,
+    )
+    .unwrap()
+    .with_extruder_caps(Some(extruder))
+    .unwrap();
     let context = |line: u32| MoveContext {
         extruder_axis: 3,
         feedrate_mm_s: 150.0,
@@ -318,10 +328,15 @@ fn the_planner_caps_the_climbing_travel_after_an_extrusion_on_an_unshaped_leader
 fn the_planner_budgets_a_travel_at_the_extrusion_a_ramp_carries_across_the_blends_beside_it() {
     let mut extruder = caps(1000.0, 2000.0, 0.5);
     extruder.leader_kernel_reach_s = 0.004;
-    let limits = VelocityLimits::try_new(150.0, 3000.0, 0.0, f64::INFINITY)
-        .unwrap()
-        .with_extruder_caps(Some(extruder))
-        .unwrap();
+    let limits = VelocityLimits::try_new(
+        150.0,
+        3000.0,
+        crate::CornerBudget::Shaped(0.0),
+        f64::INFINITY,
+    )
+    .unwrap()
+    .with_extruder_caps(Some(extruder))
+    .unwrap();
     let line = 2.0 * RATIO;
     let pieces = [
         (10.0, line),

@@ -19,12 +19,11 @@ fn voron_seam_repeat_sweep() {
     // already matches integration_tol=1e-4, buffer=512, unlimited jerk; the
     // only deltas are the printer.cfg scv and the host fit_tolerance default.
     let mut cfg = default_stream_config();
-    cfg.limits.corner_deviation_mm = geometry::corner_deviation_from_scv(
+    cfg.limits.corner = geometry::CornerBudget::ScvEquivalent(
         std::env::var("VORON_SCV")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(8.0),
-        cfg.limits.accel_mm_s2,
     );
     cfg.fit_tol_mm = 0.005;
     let moves = parse_gcode_to_moves(&src, cfg.limits);

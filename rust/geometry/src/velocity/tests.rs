@@ -9,7 +9,13 @@ const DEFAULT_JERK_MM_S3: f64 = f64::INFINITY;
 const DEFAULT_INTEGRATION_TOL: f64 = 1e-7;
 
 fn limits(max_v: f64, accel: f64) -> VelocityLimits {
-    VelocityLimits::try_new(max_v, accel, 5.0, DEFAULT_JERK_MM_S3).unwrap()
+    VelocityLimits::try_new(
+        max_v,
+        accel,
+        crate::CornerBudget::Shaped(5.0),
+        DEFAULT_JERK_MM_S3,
+    )
+    .unwrap()
 }
 
 fn with_jerk(mut moves: Vec<Move>, jerk: f64) -> Vec<Move> {
@@ -26,6 +32,7 @@ fn unlimited(entry_v: f64) -> VelocityPlanParams<'static> {
         max_extrude_only_accel_mm_s2: f64::INFINITY,
         entry_v,
         step_capacity: None,
+        shaped_corners: None,
     }
 }
 
@@ -1028,7 +1035,13 @@ fn decel_ramp_into_tight_arc() -> Vec<Move> {
 /// The 2026-07-02 Neptune bench crash geometry: a wipe ends in a 0.062 mm
 /// line followed by an extrude-only retract (a rest anchor).
 fn wipe_into_retract() -> (Vec<Move>, Vec<bool>) {
-    let lims = VelocityLimits::try_new(100.0, 1000.0, 30.0, f64::INFINITY).unwrap();
+    let lims = VelocityLimits::try_new(
+        100.0,
+        1000.0,
+        crate::CornerBudget::Shaped(30.0),
+        f64::INFINITY,
+    )
+    .unwrap();
     let line = |len: f64, line_no: u32| {
         let seg = Segment::Line(Line::try_new([0.0, 0.0, 0.0], [len, 0.0, 0.0]).unwrap());
         Move {
@@ -1056,6 +1069,7 @@ fn plan_params(entry_v: f64) -> VelocityPlanParams<'static> {
         max_extrude_only_accel_mm_s2: 1000.0,
         entry_v,
         step_capacity: None,
+        shaped_corners: None,
     }
 }
 
@@ -1160,7 +1174,13 @@ fn replanned_tail_continues_the_uncut_profile() {
 /// retract. The profile crosses the seam entering that last line already
 /// braking for the retract's rest anchor.
 fn graded_wipe_into_retract() -> (Vec<Move>, Vec<bool>) {
-    let lims = VelocityLimits::try_new(400.0, 2000.0, 20.0, f64::INFINITY).unwrap();
+    let lims = VelocityLimits::try_new(
+        400.0,
+        2000.0,
+        crate::CornerBudget::Shaped(20.0),
+        f64::INFINITY,
+    )
+    .unwrap();
     let line = |len: f64, feed: f64, line_no: u32| {
         let seg = Segment::Line(Line::try_new([0.0, 0.0, 0.0], [len, 0.0, 0.0]).unwrap());
         Move {

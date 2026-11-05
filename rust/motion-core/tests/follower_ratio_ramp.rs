@@ -53,8 +53,13 @@ fn config() -> StreamConfig {
     let mut config = default_stream_config();
     config.fit_tol_mm = 0.005;
     config.integration_tol = 1e-7;
-    config.limits = geometry::VelocityLimits::try_new(1000.0, 20_000.0, 0.04, f64::INFINITY)
-        .expect("test limits are valid");
+    config.limits = geometry::VelocityLimits::try_new(
+        1000.0,
+        20_000.0,
+        geometry::CornerBudget::Shaped(0.04),
+        f64::INFINITY,
+    )
+    .expect("test limits are valid");
     config
 }
 
