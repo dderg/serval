@@ -2,7 +2,6 @@ use nurbs::algebra::PiecewisePolynomialKernel;
 
 /// How many cells [`LeaderSpill`] tabulates the leaders' kernels over.
 pub const SPILL_CELLS: usize = 16;
-const BISECTION_STEPS: u32 = 64;
 
 /// What the leaders' kernels make of the planned speed about a moment.
 ///
@@ -70,7 +69,8 @@ impl LeaderSpill {
             spill.core_density_per_s = spill
                 .core_density_per_s
                 .min(kernel.least_absolute_within(cell_s));
-            for (cell, (mass, integral)) in kernel.absolute_mass_within(&ends).into_iter().enumerate()
+            for (cell, (mass, integral)) in
+                kernel.absolute_mass_within(&ends).into_iter().enumerate()
             {
                 spill.mass_within[cell] = spill.mass_within[cell].min(mass);
                 spill.spill_within_s[cell] = spill.spill_within_s[cell].min(integral);
@@ -84,40 +84,16 @@ impl LeaderSpill {
     /// changing by at most `accel` per second about it.
     #[must_use]
     pub fn shaped_speed(&self, planned: f64, ceiling: f64, accel: f64) -> f64 {
+        assert!(
+            ceiling.is_finite() && accel.is_finite() && accel >= 0.0,
+            "the shaped speed is bounded under a ceiling of {ceiling} mm/s and an acceleration \
+             of {accel} mm/s²"
+        );
         let room = (ceiling - planned).max(0.0);
         if accel == 0.0 {
             return self.mass * ceiling - self.mass_within[SPILL_CELLS - 1] * room;
         }
         self.mass * ceiling - accel * self.least_spill_within(room / accel)
-    }
-
-    /// The fastest planned speed at a moment whose shaped speed, under
-    /// `ceiling` and `accel` as [`Self::shaped_speed`] reads them, stays
-    /// within `shaped`: infinite where even the ceiling's does, zero where
-    /// even a planned rest's does not.
-    #[must_use]
-    pub fn planned_speed(&self, shaped: f64, ceiling: f64, accel: f64) -> f64 {
-        assert!(
-            ceiling.is_finite() && ceiling >= 0.0 && accel.is_finite() && accel >= 0.0,
-            "the shaped speed is bounded under a ceiling of {ceiling} mm/s and an acceleration \
-             of {accel} mm/s²"
-        );
-        if shaped >= self.mass * ceiling {
-            return f64::INFINITY;
-        }
-        if self.shaped_speed(0.0, ceiling, accel) > shaped {
-            return 0.0;
-        }
-        let (mut fits, mut exceeds) = (0.0, ceiling);
-        for _ in 0..BISECTION_STEPS {
-            let mid = 0.5 * (fits + exceeds);
-            if self.shaped_speed(mid, ceiling, accel) <= shaped {
-                fits = mid;
-            } else {
-                exceeds = mid;
-            }
-        }
-        fits
     }
 
     /// The spill bounding both `self` and `other`: the larger mass, and the

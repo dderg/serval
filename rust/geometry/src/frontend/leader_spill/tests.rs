@@ -93,7 +93,10 @@ fn the_shaped_speed_reaches_the_ceilings_spill_and_slopes_off_strictly_below_it(
     for (name, kernel) in kernels() {
         let spill = LeaderSpill::of_kernels(&[&kernel]);
         for accel in ACCELS {
-            assert_eq!(spill.shaped_speed(CEILING, CEILING, accel), spill.mass * CEILING);
+            assert_eq!(
+                spill.shaped_speed(CEILING, CEILING, accel),
+                spill.mass * CEILING
+            );
             let speeds: Vec<f64> = (0..=300)
                 .map(|step| spill.shaped_speed(CEILING * f64::from(step) / 300.0, CEILING, accel))
                 .collect();
@@ -106,27 +109,18 @@ fn the_shaped_speed_reaches_the_ceilings_spill_and_slopes_off_strictly_below_it(
 }
 
 #[test]
-fn the_planned_speed_inverts_the_shaped_one_and_closes_on_the_ceiling() {
+fn the_bound_overshoots_the_shaped_speed_by_at_most_a_cells_spill() {
     for (name, kernel) in kernels() {
         let spill = LeaderSpill::of_kernels(&[&kernel]);
         for accel in ACCELS {
-            let full = spill.mass * CEILING;
-            assert_eq!(spill.planned_speed(full, CEILING, accel), f64::INFINITY);
-            let mut previous = 0.0;
-            for shortfall in [1e-1, 1e-2, 1e-3, 1e-4, 1e-6, 1e-8] {
-                let shaped = full * (1.0 - shortfall);
-                let planned = spill.planned_speed(shaped, CEILING, accel);
+            for planned in (0..=30).map(|step| CEILING * f64::from(step) / 30.0) {
+                let bound = spill.shaped_speed(planned, CEILING, accel);
+                let sampled = sampled_shaped_speed(&kernel, planned, accel);
                 assert!(
-                    spill.shaped_speed(planned, CEILING, accel) <= shaped,
-                    "{name}: {planned} mm/s shapes past {shaped}"
+                    bound - sampled <= accel * spill.mass * spill.cell_s + 1e-6 * CEILING,
+                    "{name}: {bound} over the sampled {sampled} at {planned} mm/s, {accel} mm/s²"
                 );
-                assert!(planned >= previous && planned < CEILING, "{name}: {planned}");
-                previous = planned;
             }
-            assert!(
-                CEILING - previous < 0.01 * CEILING,
-                "{name}: a shaped shortfall of 1e-8 plans {previous} mm/s under {accel} mm/s²"
-            );
         }
     }
 }
@@ -136,7 +130,10 @@ fn an_unshaped_path_moves_at_its_planned_speed() {
     for accel in ACCELS {
         for planned in [0.0, 37.0, CEILING] {
             let shaped = LeaderSpill::UNSHAPED.shaped_speed(planned, CEILING, accel);
-            assert!((shaped - planned).abs() <= 1e-12 * CEILING, "{shaped} against {planned}");
+            assert!(
+                (shaped - planned).abs() <= 1e-12 * CEILING,
+                "{shaped} against {planned}"
+            );
         }
     }
 }
@@ -145,7 +142,11 @@ fn an_unshaped_path_moves_at_its_planned_speed() {
 fn a_wider_spill_bounds_both() {
     let narrow = LeaderSpill::of_kernels(&[&boxed(0.003)]);
     let wide = LeaderSpill::of_kernels(&[&lobed(0.008)]);
-    for (a, b) in [(narrow, wide), (wide, narrow), (narrow, LeaderSpill::UNSHAPED)] {
+    for (a, b) in [
+        (narrow, wide),
+        (wide, narrow),
+        (narrow, LeaderSpill::UNSHAPED),
+    ] {
         let wider = a.wider(b);
         assert!(wider.check().is_ok(), "{wider:?}");
         for accel in ACCELS {
