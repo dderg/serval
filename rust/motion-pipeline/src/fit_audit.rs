@@ -227,6 +227,20 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
         };
         let break_in_edge_sliver = edge_change(piece.t0, piece.t1, piece.t0 + piece.edge_insets.0)
             || edge_change(piece.t1, piece.t0, piece.t1 - piece.edge_insets.1);
+        if std::env::var_os("FLOORDBG").is_some() && exemption.is_none() {
+            eprintln!(
+                "AUDITOPEN ctx={} axis={} t0={:.12} h={h:.3e} floor={:.3e} insets={:?} proven={proven:?} pos={position:.3} acc={acceleration:.3} allowance={:.3e} on_onset=({},{}) at_floor={}",
+                piece.fit_context,
+                piece.axis,
+                piece.t0,
+                piece.cubic_floor,
+                piece.edge_insets,
+                piece_tol.accel_mm_s2 * h,
+                square_root_onset_on_edge(sig, piece.t0),
+                square_root_onset_on_edge(sig, piece.t1),
+                piece.accepted_at_floor
+            );
+        }
         VIOLATIONS
             .lock()
             .expect("fit audit poisoned")

@@ -612,7 +612,9 @@ fn climb(
     let truth_v = truth.velocity;
     let truth_a = truth.acceleration;
     if policy.seam_continuity < SeamContinuity::Acceleration
-        && (policy.acceleration_monotonicity.is_none() || truth_a(-1.0) == truth_a(1.0))
+        && (policy.acceleration_monotonicity.is_none()
+            || truth_a(-1.0) == truth_a(1.0)
+            || h < policy.high_degree_span_floor)
     {
         if policy.seam_continuity == SeamContinuity::Position {
             let anchored_acceleration_quadratic = anchored_acceleration_quadratic_in_u(

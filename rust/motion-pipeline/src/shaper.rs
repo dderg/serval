@@ -1119,6 +1119,13 @@ fn cap_contact_seeds(span: &AnalyticMoveSpan) -> (Vec<f64>, Vec<f64>) {
         cap_contacts.is_sorted(),
         "cap contacts are out of time order: {cap_contacts:?}"
     );
+    if let Some(at) = std::env::var("FLOORSPAN").ok().and_then(|s| s.parse::<f64>().ok()) {
+        if span.t_start <= at && at <= span.t_end {
+            let seams: Vec<String> = span.phase_seam_times().map(|t| format!("{:+.4e}", t - at)).collect();
+            let contacts: Vec<String> = cap_contacts.iter().map(|t| format!("{:+.4e}", t - at)).collect();
+            eprintln!("FLOORSPAN [{:.9},{:.9}] seams={seams:?} contacts={contacts:?} span={span:?}", span.t_start, span.t_end);
+        }
+    }
     let mut seeds = vec![span.t_start, span.t_end];
     seeds.extend(span.phase_seam_times());
     seeds.extend_from_slice(&cap_contacts);
@@ -4541,6 +4548,26 @@ fn shaped_ladder<S: TrackSignal>(
     match fitted {
         Ok(coefficients) => {
             let splittable = !keeps_closest_rung;
+            if std::env::var_os("FLOORDBG").is_some()
+                && keeps_closest_rung
+                && piece_tol.accel_mm_s2 > fit_tol.accel_mm_s2
+                && acceleration_bound(&coefficients, h) > fit_tol.accel_ceiling()
+            {
+                let accs: Vec<f64> = [-1.0, -0.5, 0.0, 0.5, 1.0]
+                    .iter()
+                    .map(|&u| sig.second_deriv(span_probe_t(t0, t1, u)))
+                    .collect();
+                eprintln!(
+                    "FLOORPE ctx={} axis={} t0={t0:.12} h={h:.3e} deg={} bound={:.3e} ceil={:.3e} floor={:.3e} slivers={:?} start=({p0:.6},{v0:.6e},{a0:.6e}) end=({p1:.6},{v1:.6e},{a1:.6e}) dp={endpoint_delta:.6e} sigacc={accs:?}",
+                    policy.fit_context,
+                    axis,
+                    coefficients.len() - 1,
+                    acceleration_bound(&coefficients, h),
+                    fit_tol.accel_ceiling(),
+                    policy.floors.cubic,
+                    slivers
+                );
+            }
             if splittable
                 && piece_tol.accel_mm_s2 > fit_tol.accel_mm_s2
                 && acceleration_bound(&coefficients, h) > fit_tol.accel_ceiling()
@@ -4968,6 +4995,34 @@ fn refine_span_against<S: TrackSignal>(
                     acceleration_error: failure.error.acceleration,
                     acceleration_budget: fit_tol.for_piece(t1 - t0).accel_mm_s2,
                 });
+            }
+            if std::env::var_os("FLOORDBG").is_some() && policy.fit_context == "materialize_source" {
+                let h = t1 - t0;
+                let accs: Vec<String> = [0.0, 1e-3, 0.01, 0.1, 0.25, 0.39, 0.5, 0.61, 0.75, 0.9, 0.99, 0.999, 1.0]
+                    .iter()
+                    .map(|&f| format!("{:.4e}", sig.second_deriv(span_probe_t(t0, t1, 2.0 * f - 1.0))))
+                    .collect();
+                let onsets: Vec<String> = sig
+                    .square_root_onsets()
+                    .iter()
+                    .filter(|&&o| (o - t0).abs() < 1e-5)
+                    .map(|o| format!("{:+.3e}", o - t0))
+                    .collect();
+                let gl = [(-0.906_179_845_938_664, 0.236_926_885_056_189), (-0.538_469_310_105_683, 0.478_628_670_499_366), (0.0, 0.568_888_888_888_889), (0.538_469_310_105_683, 0.478_628_670_499_366), (0.906_179_845_938_664, 0.236_926_885_056_189)];
+                let integral: f64 = gl.iter().map(|&(x, w)| w * 0.5 * h * sig.deriv(t0 + 0.5 * h * (x + 1.0))).sum();
+                let sampled = sig.eval_pva(t1).0 - sig.eval_pva(t0).0;
+                let delta_noise = sampled - integral;
+                let pos_scale = sig.position_rounding_scale(sig.eval_pva(t0).0);
+                eprintln!("FLOORNOISE t0={t0:.12} h={h:.3e} sampled-integral={delta_noise:.3e} pos_scale={pos_scale:.3e} hd_floor={:.3e}", floors.high_degree);
+                eprintln!(
+                    "FLOORMS axis={} t0={t0:.12} h={h:.3e} floor={:.3e} slivers={slivers:?} deg={} left={:?} right={:?} err={:?} onsets={onsets:?} acc={accs:?}",
+                    policy.axis,
+                    floors.cubic,
+                    mono_u.len() - 1,
+                    failure.left,
+                    failure.right,
+                    failure.error
+                );
             }
             #[cfg(feature = "fit-audit")]
             crate::fit_audit::check(
