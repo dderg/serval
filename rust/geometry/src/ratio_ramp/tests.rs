@@ -191,7 +191,8 @@ fn the_step_speed_cap_holds_the_longest_ramp_at_the_limits() {
 }
 
 /// What a step capped at `speed` asks of the follower over a ramp of `tau`:
-/// the leaders' own flow at the step, the ramp's addition at `crossing`.
+/// the leaders' own flow and the ramp's velocity at the step, the ramp's
+/// acceleration at `crossing`.
 fn capped_demand(
     rule: &RatioRampRule,
     tau: f64,
@@ -206,8 +207,10 @@ fn capped_demand(
         jerk_mm_s3: 0.0,
     };
     let (own_velocity, own_accel) = rule.own_demand(&at(speed));
-    let (ramp_velocity, ramp_accel) = rule.ramp_demand(tau, &at(crossing));
-    (own_velocity + ramp_velocity, own_accel + ramp_accel)
+    (
+        own_velocity + rule.ramp_velocity(tau, &at(speed)),
+        own_accel + rule.ramp_accel(tau, &at(crossing)),
+    )
 }
 
 #[test]
@@ -243,6 +246,37 @@ fn a_step_is_held_at_the_fastest_the_leaders_cross_it_within_the_longest_ramp() 
         kernel_chain.step_speed_cap(ratio, ratio, accel, 0.0, f64::INFINITY, f64::INFINITY),
         read_at_the_step,
         "a follower kernel spreads the ramp's edge, so the step is read where it is crossed"
+    );
+}
+
+#[test]
+fn the_velocity_a_ramp_adds_is_read_at_the_step_however_fast_its_edges() {
+    let rule = RatioRampRule {
+        advance_slope_s: 0.03,
+        max_velocity_mm_s: 50.0,
+        max_accel_mm_s2: 20000.0,
+        kernel_jerk_per_accel_hz: f64::INFINITY,
+    };
+    let (ratio, accel) = (0.03526, 28513.0);
+    let read_at_the_step = rule.step_speed_cap(ratio, ratio, accel, 0.0, f64::INFINITY, 0.0);
+    let (velocity, accel_demand) = capped_demand(
+        &rule,
+        RATIO_RAMP_MAX_TIME_S,
+        (ratio, accel),
+        (
+            read_at_the_step,
+            crossing_speed(read_at_the_step, accel, RATIO_RAMP_MAX_TIME_S),
+        ),
+    );
+    assert!(
+        (velocity - 50.0).abs() < 1e-6 && accel_demand < 20000.0,
+        "a travel switch at {read_at_the_step} mm/s asks {velocity} mm/s and {accel_demand} \
+         mm/s² at its edges"
+    );
+    assert_eq!(
+        rule.step_speed_cap(ratio, ratio, accel, 0.0, f64::INFINITY, f64::INFINITY),
+        read_at_the_step,
+        "where the velocity holds the step, faster edges leave its cap"
     );
 }
 

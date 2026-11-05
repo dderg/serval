@@ -160,16 +160,21 @@ impl RatioRampRule {
     /// and acceleration across `step`: proportional to the step, and
     /// shrinking as the ramp lengthens.
     fn ramp_demand(&self, tau: f64, step: &RatioStep) -> (f64, f64) {
+        (self.ramp_velocity(tau, step), self.ramp_accel(tau, step))
+    }
+
+    fn ramp_velocity(&self, tau: f64, step: &RatioStep) -> f64 {
         let k = self.advance_slope_s;
         let (v, a) = (step.speed_mm_s, step.accel_mm_s2.abs());
         let advanced = v + k * a;
+        step.ratio_step * (velocity_overshoot(ramp_ratio(k, v, advanced, tau)) - 1.0) * advanced
+    }
+
+    fn ramp_accel(&self, tau: f64, step: &RatioStep) -> f64 {
+        let k = self.advance_slope_s;
+        let (v, a) = (step.speed_mm_s, step.accel_mm_s2.abs());
         let rate = v + 2.0 * k * a;
-        (
-            step.ratio_step
-                * (velocity_overshoot(ramp_ratio(k, v, advanced, tau)) - 1.0)
-                * advanced,
-            step.ratio_step * rate / tau * acceleration_gain(ramp_ratio(k, v, rate, tau)),
-        )
+        step.ratio_step * rate / tau * acceleration_gain(ramp_ratio(k, v, rate, tau))
     }
 
     /// How much a ramp across `step` may add to the follower's velocity and
@@ -233,13 +238,15 @@ impl RatioRampRule {
     /// under an acceleration of up to `accel` and a jerk of up to `jerk`
     /// `rest_room_mm` along the path from the leaders' nearest rest, fits
     /// the limits within the longest ramp the room leaves it; zero where
-    /// even a crossing at rest does not. The leaders' own flow is read at
-    /// the step. Without a follower kernel the ramp's addition is read at
-    /// the ramp's edges, where the smoothed ratio's curvature steps and the
-    /// advance turns it into `k·r̃″·v³`: up to `accel` times half the ramp
-    /// faster than the step, and no faster than `fastest_mm_s`, the fastest
-    /// the leaders move anywhere near it. A follower kernel spreads that
-    /// step over its own width.
+    /// even a crossing at rest does not. The leaders' own flow, and the
+    /// velocity the ramp adds to it, are read at the step: the overshoot
+    /// `k·r̃′·v²` peaks inside the ramp, where the smoothed ratio climbs
+    /// fastest. Without a follower kernel the acceleration the ramp adds is
+    /// read at the ramp's edges, where the smoothed ratio's curvature steps
+    /// and the advance turns it into `k·r̃″·v³`: up to `accel` times half
+    /// the ramp faster than the step, and no faster than `fastest_mm_s`,
+    /// the fastest the leaders move anywhere near it. A follower kernel
+    /// spreads that step over its own width.
     #[must_use]
     pub fn step_speed_cap(
         &self,
@@ -276,9 +283,8 @@ impl RatioRampRule {
                 speed_mm_s
             };
             let (own_velocity, own_accel) = self.own_demand(&step_at(speed_mm_s));
-            let (ramp_velocity, ramp_accel) = self.ramp_demand(tau, &step_at(crossing));
-            own_velocity + ramp_velocity <= self.max_velocity_mm_s
-                && own_accel + ramp_accel <= self.max_accel_mm_s2
+            own_velocity + self.ramp_velocity(tau, &step_at(speed_mm_s)) <= self.max_velocity_mm_s
+                && own_accel + self.ramp_accel(tau, &step_at(crossing)) <= self.max_accel_mm_s2
         };
         if !fits_at(0.0) {
             return 0.0;
