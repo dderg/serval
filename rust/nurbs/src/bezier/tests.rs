@@ -193,3 +193,56 @@ fn bezier_pieces_to_nurbs_round_trips_extraction() {
         assert!((exp - got).abs() < 1e-10, "u={u}: exp={exp}, got={got}");
     }
 }
+
+/// The conversion before its binomial ratios came from a Pascal row: each
+/// ratio of two exact integers rounds once either way, so the controls
+/// must match it bit for bit.
+fn reference_to_bernstein(piece: &BezierPiece) -> Vec<f64> {
+    let d = piece.degree();
+    let h = piece.u_end - piece.u_start;
+    let mut h_pow = 1.0;
+    let normalized: Vec<f64> = piece
+        .coeffs
+        .iter()
+        .map(|c| {
+            let v = *c * h_pow;
+            h_pow *= h;
+            v
+        })
+        .collect();
+    (0..=d)
+        .map(|k| {
+            (0..=k).fold(0.0, |acc, i| {
+                acc + (binomial(k, i) as f64 / binomial(d, i) as f64) * normalized[i]
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn bernstein_controls_match_the_per_term_binomials_bit_for_bit() {
+    let mut state = 0x1234_5678_9abc_def1_u64;
+    let mut next = || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (state >> 11) as f64 / (1_u64 << 53) as f64 * 2.0 - 1.0
+    };
+    for degree in 0..=50 {
+        for _ in 0..20 {
+            let piece = BezierPiece {
+                u_start: next(),
+                u_end: 1.5 + next(),
+                coeffs: (0..=degree).map(|_| next() * 1e3).collect(),
+            };
+            let bits = |controls: Vec<f64>| -> Vec<u64> {
+                controls.into_iter().map(f64::to_bits).collect()
+            };
+            assert_eq!(
+                bits(piece.to_bernstein()),
+                bits(reference_to_bernstein(&piece)),
+                "degree {degree}"
+            );
+        }
+    }
+}

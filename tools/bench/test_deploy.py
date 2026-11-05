@@ -49,6 +49,7 @@ def _flash_target_bench(
     monkeypatch.setattr(deploy.pi, "ssh", lambda command: deploy.VERIFIED)
     monkeypatch.setattr(deploy, "wait_pi_serial", lambda: None)
     monkeypatch.setattr(deploy.pi, "firmware_restart", lambda: None)
+    monkeypatch.setattr(deploy.pi, "enable_mco", lambda: None)
     monkeypatch.setattr(
         deploy.pi,
         "mcu_version",

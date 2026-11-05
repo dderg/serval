@@ -379,6 +379,10 @@ job_py() {
 }
 
 job_bench_fw() {
+    cd "$ROOT/tools/bench/sim-logic"
+    cargo fmt --check
+    cargo clippy --all-targets -- -D warnings
+    cargo test -q
     cd "$ROOT/tools/bench/capture-fw"
     rustup show active-toolchain >/dev/null 2>&1 || rustup toolchain install
     cargo fmt --check

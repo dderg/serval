@@ -21,11 +21,19 @@ checksum = "f8fe8f5a8a398345e52358e18ff07cc17a568fbca5c6f73873d3a62056309603"
 name = "bench-capture-fw"
 version = "0.1.0"
 dependencies = [
+ "bench-sim-logic",
  "cortex-m",
  "cortex-m-rt",
  "stm32f4xx-hal",
  "usb-device",
  "usbd-serial",
+]
+
+[[package]]
+name = "bench-sim-logic"
+version = "0.1.0"
+dependencies = [
+ "libm",
 ]
 
 [[package]]
@@ -217,6 +225,12 @@ dependencies = [
  "hash32",
  "stable_deref_trait",
 ]
+
+[[package]]
+name = "libm"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "litrs"

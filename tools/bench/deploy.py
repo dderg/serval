@@ -3,8 +3,9 @@
 uv run python tools/bench/deploy.py sync [--tree DIR]
 uv run python tools/bench/deploy.py flash-target [--tree DIR]
 uv run python tools/bench/deploy.py flash-capture [--tree DIR]
-uv run python tools/bench/deploy.py config
+uv run python tools/bench/deploy.py config [--config CFG]
 uv run python tools/bench/deploy.py reset-target
+uv run python tools/bench/deploy.py mco
 
 Firmware builds inside the tree they come from (out/bench-f401 for the F401,
 tools/bench/capture-fw/target for the F407), never in a directory another
@@ -251,7 +252,8 @@ def cmd_flash_target(tree: Path) -> None:
     pi.firmware_restart()
     require_reported(TARGET_BOARD, pi.mcu_version(), build_id)
     pi.record_firmware(TARGET_BOARD, firmware_identity(tree, build_id, elf))
-    print(f"target flashed with firmware {build_id}, printer ready")
+    pi.enable_mco()
+    print(f"target flashed with firmware {build_id}, MCO1 on, printer ready")
 
 
 def cmd_reset_target() -> None:
@@ -262,7 +264,13 @@ def cmd_reset_target() -> None:
     print(output)
     wait_pi_serial()
     pi.restart_klipper()
-    print("target reset, printer ready")
+    pi.enable_mco()
+    print("target reset, MCO1 on, printer ready")
+
+
+def cmd_mco() -> None:
+    pi.enable_mco()
+    print("F401 MCO1 = HSE/4 on PA8")
 
 
 def cmd_flash_capture(tree: Path) -> None:
@@ -295,15 +303,19 @@ def cmd_flash_capture(tree: Path) -> None:
         if time.monotonic() > deadline:
             raise pi.BenchError(f"{capture.DEVICE} did not appear")
         time.sleep(0.5)
-    require_reported(CAPTURE_BOARD, capture.identity(), build_id)
+    flashed = capture.identity()
+    require_reported(CAPTURE_BOARD, flashed.build_id, build_id)
+    capture.require_endstop_lines_idle(flashed)
     pi.record_firmware(CAPTURE_BOARD, firmware_identity(tree, build_id, elf))
     print(f"capture board flashed with firmware {build_id}, device present")
 
 
-def cmd_config() -> None:
-    pi.validate_config(pi.REPO_CFG.read_text())
+def cmd_config(config: Path) -> None:
+    pi.validate_config(config.read_text())
     print("config valid")
-    print("config pushed" if pi.push_config() else "config unchanged on Pi")
+    print(
+        "config pushed" if pi.push_config(config) else "config unchanged on Pi"
+    )
     pi.firmware_restart()
     print("printer ready")
 
@@ -314,19 +326,29 @@ TREE_COMMANDS = {
 }
 COMMANDS = {
     "reset-target": cmd_reset_target,
-    "config": cmd_config,
+    "mco": cmd_mco,
 }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["sync", *TREE_COMMANDS, *COMMANDS])
+    parser.add_argument(
+        "command", choices=["sync", "config", *TREE_COMMANDS, *COMMANDS]
+    )
     parser.add_argument("--tree", type=Path, default=REPO)
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=pi.REPO_CFG,
+        help="printer config the config command pushes (e.g. configs/full.cfg)",
+    )
     lock.add_timeout_argument(parser)
     args = parser.parse_args()
     with lock.bench_lock(args.lock_timeout):
         if args.command == "sync":
             cmd_sync(args.tree.resolve())
+        elif args.command == "config":
+            cmd_config(args.config)
         elif args.command in TREE_COMMANDS:
             TREE_COMMANDS[args.command](args.tree.resolve())
         else:

@@ -4210,6 +4210,67 @@ struct EdgeAnchor {
     acceleration: f64,
 }
 
+/// What a span edge's state is read from: the edge, the side its span lies
+/// on, how far in past its sliver the state is read, whether the sliver
+/// absorbed seeds, and the break coalescing moved onto it. A refinement's
+/// child span shares one edge with its parent, and where the inset there is
+/// the same the edge reads the same state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct EdgeKey {
+    seam: f64,
+    into_later: bool,
+    past_sliver: f64,
+    absorbed: bool,
+    moved_break: Option<f64>,
+}
+
+/// A span edge's position and the velocity and acceleration its rungs
+/// anchor to, read once per [`EdgeKey`] along a refinement.
+#[derive(Debug, Clone, Copy)]
+struct EdgeState {
+    key: EdgeKey,
+    position: f64,
+    velocity: f64,
+    acceleration: f64,
+}
+
+impl EdgeState {
+    /// The edge's state through `read`, which faces into the span toward
+    /// `other_end`, or `known` itself where it was read at the same key.
+    fn read<S: TrackSignal>(
+        read: &FacingRead<S>,
+        key: EdgeKey,
+        other_end: f64,
+        policy: &SpanFitPolicy,
+        known: Option<Self>,
+    ) -> Result<Self, PostProcessError> {
+        if let Some(known) = known.filter(|known| known.key == key) {
+            return Ok(known);
+        }
+        let (axis, seam) = (policy.axis, key.seam);
+        let position = exact_value(axis, read.eval(seam), seam)?;
+        let anchor = edge_velocity_and_acceleration(
+            read,
+            axis,
+            next_toward(seam, other_end),
+            key.past_sliver,
+            key.absorbed,
+            square_root_onset_on_edge(read.sig, seam),
+            policy.fit_tol,
+        )?;
+        let velocity = match key.moved_break {
+            Some(break_at) => velocity_past_moved_break(read, axis, break_at, other_end, seam)?,
+            None => anchor.velocity,
+        };
+        Ok(Self {
+            key,
+            position,
+            velocity,
+            acceleration: anchor.acceleration,
+        })
+    }
+}
+
 /// The velocity a span anchors to at a seam where coalescing moved a velocity
 /// break onto it: the far side of the break, carried back to the seam by its
 /// acceleration across the sub-floor gap.
@@ -4266,12 +4327,12 @@ fn span_probe_t(t0: f64, t1: f64, u: f64) -> f64 {
 fn shaped_ladder<S: TrackSignal>(
     sig: &S,
     exact: Option<&ExactSpan>,
-    t0: f64,
-    t1: f64,
-    slivers: EdgeSlivers,
+    span: RefineSpan,
     policy: &SpanFitPolicy,
     keeps_closest_rung: bool,
-) -> Result<(Vec<f64>, Option<LadderFailure>), PostProcessError> {
+    known_edges: [Option<EdgeState>; 2],
+) -> Result<(Vec<f64>, Option<LadderFailure>, [EdgeState; 2]), PostProcessError> {
+    let RefineSpan { t0, t1, slivers } = span;
     let axis = policy.axis;
     let fit_tol = policy.fit_tol;
     let h = t1 - t0;
@@ -4288,39 +4349,37 @@ fn shaped_ladder<S: TrackSignal>(
         toward: t0,
     };
     let t0_inside = span_probe_t(t0, t1, -1.0);
-    let p0 = exact_value(axis, from_start.eval(t0), t0)?;
     let start_past_sliver = t0 + edge_inset(h, policy.floors.cubic, slivers.start);
     let end_past_sliver = t1 - edge_inset(h, policy.floors.cubic, slivers.end);
-    let start = edge_velocity_and_acceleration(
+    let start = EdgeState::read(
         &from_start,
-        axis,
-        t0_inside,
-        start_past_sliver,
-        slivers.start > 0.0,
-        square_root_onset_on_edge(sig, t0),
-        fit_tol,
+        EdgeKey {
+            seam: t0,
+            into_later: t1 > t0,
+            past_sliver: start_past_sliver,
+            absorbed: slivers.start > 0.0,
+            moved_break: slivers.start_break,
+        },
+        t1,
+        policy,
+        known_edges[0],
     )?;
-    let a0 = start.acceleration;
-    let v0 = match slivers.start_break {
-        Some(break_at) => velocity_past_moved_break(&from_start, axis, break_at, t1, t0)?,
-        None => start.velocity,
-    };
+    let (p0, v0, a0) = (start.position, start.velocity, start.acceleration);
     let t1_inside = span_probe_t(t0, t1, 1.0);
-    let p1 = exact_value(axis, from_end.eval(t1), t1)?;
-    let end = edge_velocity_and_acceleration(
+    let end = EdgeState::read(
         &from_end,
-        axis,
-        t1_inside,
-        end_past_sliver,
-        slivers.end > 0.0,
-        square_root_onset_on_edge(sig, t1),
-        fit_tol,
+        EdgeKey {
+            seam: t1,
+            into_later: t0 > t1,
+            past_sliver: end_past_sliver,
+            absorbed: slivers.end > 0.0,
+            moved_break: slivers.end_break,
+        },
+        t0,
+        policy,
+        known_edges[1],
     )?;
-    let a1 = end.acceleration;
-    let v1 = match slivers.end_break {
-        Some(break_at) => velocity_past_moved_break(&from_end, axis, break_at, t0, t1)?,
-        None => end.velocity,
-    };
+    let (p1, v1, a1) = (end.position, end.velocity, end.acceleration);
     let base = quintic_in_u((p0, v0, a0), (p1, v1, a1), h);
     let endpoint_delta = exact_value(axis, sig.position_delta((t0, p0), (t1, p1)), t1)?;
 
@@ -4436,7 +4495,7 @@ fn shaped_ladder<S: TrackSignal>(
                 },
             };
             let Some(u) = unproven else {
-                return Ok((coefficients, None));
+                return Ok((coefficients, None, [start, end]));
             };
             let t = t_of(u);
             let read = if t < t1 { &from_start } else { &from_end };
@@ -4477,12 +4536,13 @@ fn shaped_ladder<S: TrackSignal>(
                         acceleration: a1,
                     },
                 }),
+                [start, end],
             ))
         }
         Err(LadderMiss {
             closest_rung,
             failure,
-        }) => Ok((closest_rung, Some(failure))),
+        }) => Ok((closest_rung, Some(failure), [start, end])),
     }
 }
 
@@ -4722,9 +4782,11 @@ fn refine_shaped_span<S: TrackSignal>(
         seeds,
         refinement_splits,
         out,
+        [None, None],
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn refine_span_against<S: TrackSignal>(
     sig: &S,
     exact: Option<&ExactSpan>,
@@ -4733,6 +4795,7 @@ fn refine_span_against<S: TrackSignal>(
     seeds: SpanSeeds,
     refinement_splits: &mut usize,
     out: &mut Vec<BezierPiece>,
+    known_edges: [Option<EdgeState>; 2],
 ) -> Result<(), PostProcessError> {
     let RefineSpan { t0, t1, slivers } = span;
     let fit_tol = policy.fit_tol;
@@ -4741,7 +4804,8 @@ fn refine_span_against<S: TrackSignal>(
     let tm = 0.5 * t0 + 0.5 * t1;
     let at_resolution_floor = tm - t0 < floors.cubic || t1 - tm < floors.cubic;
     let splittable = !at_resolution_floor && *refinement_splits < MAX_FIT_REFINEMENT_SPLITS;
-    let (mono_u, failure) = shaped_ladder(sig, exact, t0, t1, slivers, policy, !splittable)?;
+    let (mono_u, failure, [start_edge, end_edge]) =
+        shaped_ladder(sig, exact, span, policy, !splittable, known_edges)?;
     #[cfg(feature = "fit-audit")]
     let edge_insets = (
         edge_inset(t1 - t0, floors.cubic, slivers.start),
@@ -4868,6 +4932,7 @@ fn refine_span_against<S: TrackSignal>(
         seeds,
         refinement_splits,
         out,
+        [Some(start_edge), None],
     )?;
     refine_span_against(
         sig,
@@ -4885,6 +4950,7 @@ fn refine_span_against<S: TrackSignal>(
         seeds,
         refinement_splits,
         out,
+        [None, Some(end_edge)],
     )
 }
 
