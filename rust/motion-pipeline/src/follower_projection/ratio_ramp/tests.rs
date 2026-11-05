@@ -1077,6 +1077,51 @@ fn moving_width_nodes_lie_a_window_apart() {
         t += NODE_SPACING_S;
     }
     field.close(slow_corner(brake, 0.12));
+    assert_moving_nodes_lie_a_window_apart(&field);
+}
+
+/// Leaders creep off a rest under a constant jerk, a ratio step just past
+/// it: the grid's tick on the rest point takes the seam's wide target, and
+/// the next tick, a few hundredths of a micron along, is no window apart
+/// from it. Kept, it would take the rest's cone as a sliver of an envelope
+/// that the smootherstep to the next node flattens onto.
+#[test]
+fn a_stream_creeping_off_a_rest_keeps_no_node_a_sliver_past_it() {
+    let mut field = WidthField {
+        rule: Some(RatioRampRule {
+            advance_slope_s: 0.02,
+            max_velocity_mm_s: 50.0,
+            max_accel_mm_s2: 5000.0,
+        }),
+        ..WidthField::default()
+    };
+    let creep = |t: f64| CREEP_JERK_MM_S3 * t.powi(3);
+    let (seam_t, end) = (2.0 * NODE_SPACING_S, 0.06);
+    field.place_rest(0.0);
+    field.add_seam(TimedSeam {
+        t: seam_t,
+        s: creep(seam_t),
+        crossing: Crossing {
+            speed: CORNER_SPEED_MM_S,
+            rate: CORNER_BRAKE_MM_S2,
+            jerk: 0.0,
+        },
+        step: 0.034,
+        peak_ratio: 0.034,
+        ramp_time: None,
+    });
+    let mut t = 0.0;
+    while t < end {
+        field.place_sample(creep(t), t);
+        t += NODE_SPACING_S;
+    }
+    field.close(creep(end));
+    assert_moving_nodes_lie_a_window_apart(&field);
+}
+
+const CREEP_JERK_MM_S3: f64 = 1500.0;
+
+fn assert_moving_nodes_lie_a_window_apart(field: &WidthField) {
     for pair in field.nodes.windows(2) {
         let (a, b) = (pair[0], pair[1]);
         if a.target > 0.0 && b.target > 0.0 {
