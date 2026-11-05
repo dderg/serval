@@ -20,6 +20,8 @@ fn a_slow_drain_reserves_runway_for_repeating_it_even_after_a_faster_drain() {
         pacer: Pacer::default(),
         throttle: None,
         last_line: 0,
+        moves_sent: 0,
+        dispatch_record: None,
         pump,
     };
     let slow = Duration::from_millis(300);

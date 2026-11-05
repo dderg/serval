@@ -1395,3 +1395,72 @@ fn a_rest_side_reaches_the_longest_ramp_where_the_lead_or_a_near_step_needs_it()
         STOP_SPILL_MM
     );
 }
+
+const CURVED_SPILL_MM: f64 = 0.1875;
+
+/// The stopping side of a stop in `voron_dense_top_layers` on the
+/// kernel-free fast bench config, whose shaped axes curve into it: the
+/// leaders cross the raw seam at 38.8 mm/s, and cruise at up to 98 mm/s
+/// past it.
+fn curved_stop() -> RestSide {
+    RestSide {
+        rest: LINE_END_MM,
+        seam: LINE_END_MM - CURVED_SPILL_MM,
+        outward: -1.0,
+        crossing: Crossing {
+            speed: 38.8,
+            rate: 4127.0,
+            jerk: 4.884e5,
+        },
+        spill: Spill {
+            duration: 0.0106,
+            crossing: Crossing {
+                speed: 38.8,
+                rate: 5348.0,
+                jerk: 1.758e6,
+            },
+        },
+        beyond: Crossing {
+            speed: 98.0,
+            rate: 9203.0,
+            jerk: 3.12e6,
+        },
+    }
+}
+
+/// The tail of a curved stop falls linearly across the spill, its slope
+/// stepping at the raw seam. Read at the speed the leaders cruise past the
+/// seam, that slope seam passed for a step the width field narrows past
+/// the extruder's limits, and the side released the lead from the longest
+/// ramp out.
+#[test]
+fn a_stopping_side_reads_its_spill_where_the_leaders_slow_into_the_rest() {
+    let mut stop = FollowerState::default();
+    stop.push_span(LINE_END_MM - CURVED_SPILL_MM, LINE_RATIO, LINE_RATIO);
+    stop.push_span(CURVED_SPILL_MM, LINE_RATIO, 0.95 * LINE_RATIO);
+    assert_eq!(
+        curved_stop().width(&stop.spans, &DIRECT_DRIVE, LINE_END_MM),
+        CURVED_SPILL_MM
+    );
+}
+
+/// A ratio ramp opening 1.5 mm before the rest moves the ratio by 30 %
+/// over 1.3 mm; the window its seam's distance from the rest leaves it
+/// ramps only the part of that within it, not the whole ramp's change as
+/// one step.
+#[test]
+fn a_rest_side_reads_a_long_ramp_by_its_change_within_the_window() {
+    let ramp_start = LINE_END_MM - 1.5;
+    let mut stop = FollowerState::default();
+    stop.push_span(ramp_start, LINE_RATIO, LINE_RATIO);
+    stop.push_span(
+        LINE_END_MM - CURVED_SPILL_MM - ramp_start,
+        LINE_RATIO,
+        0.7 * LINE_RATIO,
+    );
+    stop.push_span(CURVED_SPILL_MM, 0.7 * LINE_RATIO, 0.665 * LINE_RATIO);
+    assert_eq!(
+        curved_stop().width(&stop.spans, &DIRECT_DRIVE, LINE_END_MM),
+        CURVED_SPILL_MM
+    );
+}
