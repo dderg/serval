@@ -1145,8 +1145,9 @@ def main() -> int:
         return 1
     print(
         f"throughput gate: PASS ({len(verdicts)} configs: Ir grew at most "
-        f"{IR_TOLERANCE_PCT} %, the Pi windows predicted at or above "
-        f"{PI_FLOOR_X}x or their pinned shortfalls, within their bands)"
+        f"{IR_TOLERANCE_PCT} %, Ir predicts the Pi window at or above "
+        f"{PI_FLOOR_X}x or its pinned shortfall, and no live prediction misses "
+        "it even at its optimistic bound)"
     )
     return 0
 
