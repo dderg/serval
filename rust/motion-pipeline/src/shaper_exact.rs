@@ -858,15 +858,10 @@ fn add_point_mass(
             }
             let signed = if derivative % 2 == 0 { weight } else { -weight };
             let scale = weight.abs();
-            for (((moment, magnitude), falling), power) in moments[derivative..len]
-                .iter_mut()
-                .zip(&mut magnitudes[derivative..len])
-                .zip(&FALLING_FACTORIALS[derivative..len])
-                .zip(&powers[..len - derivative])
-            {
-                let term = falling[derivative] * power;
-                *moment += signed * term;
-                *magnitude += scale * term.abs();
+            for power in derivative..len {
+                let term = FALLING_FACTORIALS[power][derivative] * powers[power - derivative];
+                moments[power] += signed * term;
+                magnitudes[power] += scale * term.abs();
             }
         }
     }

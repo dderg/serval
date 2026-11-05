@@ -639,7 +639,7 @@ impl WidthField {
     /// time is not derived yet: the leaders are laid only up to `support`'s
     /// start, and [`Self::assign`] derives none within half the longest ramp
     /// of that.
-    fn widen_seams_into(&mut self, leaders: &ShapedLeaders, support: (f64, f64)) {
+    fn widen_seams_into(&mut self, crossings: &mut LegCrossings, support: (f64, f64)) {
         let first = self
             .seams
             .partition_point(|seam| seam.t + CLUSTER_REACH_S <= support.0)
@@ -654,7 +654,7 @@ impl WidthField {
             );
             seam.crossing = seam
                 .crossing
-                .widest(Crossing::over(leaders, ramp_reach_within(seam.t, support)));
+                .widest(crossings.over(ramp_reach_within(seam.t, support)));
         }
     }
 
@@ -1310,9 +1310,14 @@ impl RatioSmoothing {
             }
         }
         let new_seams = self.record_seams((spans, advance_spans));
-        self.width.widen_seams_into(leaders, leg.support);
-        self.time_seams(&spans[new_seams.start.saturating_sub(1)..], leaders, leg);
-        self.keep_tail(leaders, leg);
+        let mut crossings = LegCrossings::of(leaders);
+        self.width.widen_seams_into(&mut crossings, leg.support);
+        self.time_seams(
+            &spans[new_seams.start.saturating_sub(1)..],
+            &mut crossings,
+            leg,
+        );
+        self.keep_tail(&mut crossings, leg);
         self.width.assign(t_end - TARGET_DELAY_S);
         self.reach_into_next = Some(Crossing::valley_at(leaders, t_end));
     }
@@ -1351,8 +1356,8 @@ impl RatioSmoothing {
     /// where the leaders of `leg` cross them, with how they cross the ramp
     /// on either side: within `leg`, and over the tails of the legs before
     /// it the ramp reaches back into.
-    fn time_seams(&mut self, spans: &[RatioSpan], leaders: &ShapedLeaders, leg: &RampLeg) {
-        let path = LegPath::of(leaders, leg);
+    fn time_seams(&mut self, spans: &[RatioSpan], crossings: &mut LegCrossings, leg: &RampLeg) {
+        let path = LegPath::of(crossings.leaders, leg);
         for pair in spans.windows(2) {
             let (before, after) = (&pair[0], &pair[1]);
             let Some(seam) = Seam::between(before, after) else {
@@ -1364,7 +1369,7 @@ impl RatioSmoothing {
                 .iter()
                 .filter(|tail| tail.until > t - CLUSTER_REACH_S)
                 .fold(
-                    Crossing::over(leaders, ramp_reach_within(t, leg.support)),
+                    crossings.over(ramp_reach_within(t, leg.support)),
                     |widest, tail| widest.widest(tail.crossing),
                 );
             self.width.add_seam(TimedSeam {
@@ -1380,13 +1385,13 @@ impl RatioSmoothing {
 
     /// Remembers how the leaders of `leg` cross its last half of the longest
     /// ramp, which a ramp laid on a later leg may reach back into.
-    fn keep_tail(&mut self, leaders: &ShapedLeaders, leg: &RampLeg) {
+    fn keep_tail(&mut self, crossings: &mut LegCrossings, leg: &RampLeg) {
         let (t_start, t_end) = leg.support;
         self.laid_tails
             .retain(|tail| tail.until > t_end - CLUSTER_REACH_S);
         self.laid_tails.push_back(LegTail {
             until: t_end,
-            crossing: Crossing::over(leaders, ((t_end - CLUSTER_REACH_S).max(t_start), t_end)),
+            crossing: crossings.over(((t_end - CLUSTER_REACH_S).max(t_start), t_end)),
         });
     }
 
@@ -1508,7 +1513,8 @@ impl RatioSmoothing {
     /// seam. `s ± h(s)` grows along the path (`|h'| < 1`), so a seam
     /// outside the stretch is reached from the stretch's end nearer it, if
     /// at all, and one inside from itself, unless the leaders rest on it,
-    /// where no window reaches it. Only the width over the stretch decides,
+    /// where no window reaches it — though the windows past it still open
+    /// on the slope it leaves. Only the width over the stretch decides,
     /// never what is laid past it.
     pub(super) fn touches(&self, lo: f64, hi: f64) -> bool {
         if self.is_inert() {
@@ -1528,7 +1534,7 @@ impl RatioSmoothing {
                 } else if seam.s > hi {
                     seam.s < ahead
                 } else {
-                    self.reach_back(seam.s) > 0.0
+                    self.reach_back(seam.s) > 0.0 || seam.slope_after != 0.0
                 }
             })
     }
@@ -2384,6 +2390,33 @@ const TURNAROUND_SPEED_TIME_S: f64 = 1e-6;
 /// Probes a ramp's crossing is searched with for the leaders' fastest
 /// speed, acceleration and jerk.
 const CROSSING_PROBES: usize = 16;
+
+/// The crossings one leg's seams read of its leaders, each window probed
+/// once: the seams of a leg shorter than the ramps' reach all read the
+/// whole leg.
+struct LegCrossings<'l, 'a> {
+    leaders: &'l ShapedLeaders<'a>,
+    read: Vec<((f64, f64), Crossing)>,
+}
+
+impl<'l, 'a> LegCrossings<'l, 'a> {
+    fn of(leaders: &'l ShapedLeaders<'a>) -> Self {
+        Self {
+            leaders,
+            read: Vec::new(),
+        }
+    }
+
+    /// [`Crossing::over`] `window`.
+    fn over(&mut self, window: (f64, f64)) -> Crossing {
+        if let Some(&(_, crossing)) = self.read.iter().find(|(read, _)| *read == window) {
+            return crossing;
+        }
+        let crossing = Crossing::over(self.leaders, window);
+        self.read.push((window, crossing));
+        crossing
+    }
+}
 
 /// How the leaders cross a seam: their path speed, the magnitude of its
 /// rate, and how steeply that rate changes.

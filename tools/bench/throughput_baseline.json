@@ -1,18 +1,18 @@
 {
   "slice_lines": 1000,
-  "commit": "1d6a707475a0e9e3c02f7a3c40f9ab1ae41a50ee",
-  "reason": "CPU-agnostic gate: the reference moves to main after #698 (emit invariance), measured against the pinned calibration commit e6d8aa92b; trident_kernel's floor shortfall re-pinned to #693 at what the new model predicts",
+  "commit": "cbb61ef5c6b6273600678fb9b2afe22eac42b7c2",
+  "reason": "Digest-identical ladder and enclosure savings: onset checks refuse a rung at its first miss, read from the edges inward; probe errors shared between acceptance and rank; one squared speed per enclosure window",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 25750160891,
+      "ir": 21867416822,
       "stream_secs": 6.537
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 27734252201,
+      "ir": 22088567062,
       "stream_secs": 6.213
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 31213627919,
+      "ir": 27556667150,
       "stream_secs": 5.538
     }
   },

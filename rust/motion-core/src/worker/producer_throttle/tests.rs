@@ -7,6 +7,7 @@ fn a_throttle_reads_its_realtime_factor_and_onset() {
         Ok(ProducerThrottle {
             realtime_factor: 0.6,
             from_stream_s: 3.5,
+            owed_s: 0.0,
         })
     );
 }
@@ -23,9 +24,23 @@ fn a_malformed_throttle_is_refused() {
 
 #[test]
 fn planning_runs_free_before_the_onset_and_at_the_factor_after_it() {
-    let throttle = ProducerThrottle::parse("0.5@1.0").unwrap();
+    let mut throttle = ProducerThrottle::parse("0.5@1.0").unwrap();
     assert_eq!(throttle.hold(0.0, 0.8), Duration::ZERO);
-    assert_eq!(throttle.hold(0.8, 1.2), Duration::from_secs_f64(0.4));
-    assert_eq!(throttle.hold(1.2, 1.2), Duration::ZERO);
-    assert_eq!(throttle.hold(2.0, 2.5), Duration::from_secs_f64(1.0));
+    assert!((throttle.hold(0.8, 1.004).as_secs_f64() - 0.008).abs() < 1e-9);
+    assert_eq!(throttle.hold(1.004, 1.004), Duration::ZERO);
+}
+
+#[test]
+fn a_release_of_seconds_is_paid_a_step_at_a_time() {
+    let mut throttle = ProducerThrottle::parse("0.5@0.0").unwrap();
+    let mut held = vec![throttle.hold(0.0, 2.4)];
+    while held.last() != Some(&Duration::ZERO) {
+        held.push(throttle.hold(2.4, 2.4));
+    }
+    assert!(held.iter().all(|&step| step <= MAX_HOLD_PER_STEP));
+    let total: f64 = held.iter().map(Duration::as_secs_f64).sum();
+    assert!(
+        (total - 4.8).abs() < 1e-9,
+        "the release still costs {total}s"
+    );
 }

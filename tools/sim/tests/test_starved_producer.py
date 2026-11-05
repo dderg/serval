@@ -186,16 +186,14 @@ def test_a_producer_behind_its_playhead_brakes_and_resumes_instead_of_aborting(
 
     record = _record_holding(record_dir, brakes)
     assert len(record.pacer_brakes()) == brakes
-    resumes = {d.after_segments for d in record.pacer_brakes()}
     fresh = (record.flags & dispatch_record.FLAG_FRESH_EPOCH) != 0
-    assert all(fresh[at] for at in resumes if at < len(record)), (
-        "a resume after a pacer brake kept the anchor it braked on"
-    )
     seams = record.host_start()[1:] - record.host_end()[:-1]
-    drained = {d.after_segments for d in record.drains}
     continuous = [
         abs(seam) < 1e-9
         for index, seam in enumerate(seams, start=1)
-        if not fresh[index] and index not in drained
+        if not fresh[index]
     ]
-    assert all(continuous), "dispatched segments left a gap inside one anchor"
+    assert all(continuous), (
+        "a segment that kept its anchor left a gap: a resume either re-anchors "
+        "or continues a stream its playhead has not caught up with"
+    )
