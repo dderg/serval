@@ -720,7 +720,9 @@ impl WidthField {
     /// path order: a ratio step the table lays where the leaders rest, which
     /// the path they cover may reach only to a rounding.
     fn place_rest_among_laid(&mut self, s: f64) {
-        let at = self.candidates.partition_point(|candidate| candidate.s() <= s);
+        let at = self
+            .candidates
+            .partition_point(|candidate| candidate.s() <= s);
         self.candidates.insert(at, Candidate::Rest(s));
         self.pending = self
             .pending
