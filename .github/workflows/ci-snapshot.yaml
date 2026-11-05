@@ -3,10 +3,18 @@ name: Snapshot tests
 on:
   workflow_dispatch:
   pull_request:
+  push:
+    branches: [main]
+    paths:
+      - 'rust/Cargo.toml'
+      - 'rust/Cargo.lock'
+      - 'rust/rust-toolchain.toml'
+      - '.github/workflows/ci-rust-runtime.yaml'
+      - '.github/workflows/ci-snapshot.yaml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   changes:
