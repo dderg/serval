@@ -67,7 +67,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: snapshot
+          key: snapshot-${{ hashFiles('rust/Cargo.toml') }}
       - name: snapshot tests
         run: ./scripts/ci.sh snapshot
         env:
@@ -98,6 +98,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: snapshot
+          key: snapshot-${{ hashFiles('rust/Cargo.toml') }}
       - name: live/snapshot parity
         run: ./scripts/ci.sh live-parity

@@ -52,7 +52,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: mcu-firmware-full
+          key: mcu-firmware-full-${{ hashFiles('rust/Cargo.toml') }}
 
       # Full firmware build for every test/configs/*.config.
       # A missing Rust FFI symbol => arm-none-eabi-ld undefined reference =>
@@ -96,7 +96,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: linux-mcu-firmware
+          key: linux-mcu-firmware-${{ hashFiles('rust/Cargo.toml') }}
 
       - name: Build REAL Linux MCU (kalico-linux.config, MCU_SIM=n)
         run: |
