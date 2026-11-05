@@ -18,7 +18,10 @@ records. Aux frames ("SVA1") share the stream's seq; position is the first
 record index, length the record count, payload length * AUX_RECORD_LEN
 bytes, decoded by capture_aux.py and written to aux.bin.
 Identity ("SVI1", command I): stops any capture and answers one frame whose
-payload is the build id the firmware was built with (length bytes, ASCII).
+payload is the build id the firmware was built with (ASCII), then GPIOD's
+MODER, OTYPER and ODR (u32 each). Every capture checks them first: the
+endstop/probe lines PD8-PD11 must be push-pull outputs driving low, the
+not-triggered level of the active-high endstops they feed.
 """
 
 from __future__ import annotations
@@ -52,6 +55,14 @@ AUX_RECORD_LEN = 44
 AUX_CONFIG_ID_OFFSET = 36
 IDENTITY_MAGIC = b"SVI1"
 IDENTITY_TIMEOUT_S = 2.0
+IDENTITY_REGISTERS = struct.Struct("<III")
+ENDSTOP_LINES = {
+    8: "PD8 (x endstop)",
+    9: "PD9 (y endstop)",
+    10: "PD10 (z endstop)",
+    11: "PD11 (probe)",
+}
+GPIO_MODE_OUTPUT = 0b01
 HEADER = struct.Struct("<4sIIHBB")
 STALL_TIMEOUT_S = 1.0
 POSITION_MODULUS = 1 << 32
@@ -139,6 +150,11 @@ class Capture:
         termios.tcflush(fd, termios.TCIOFLUSH)
         os.write(fd, CMD_STOP + b"\0")
         self._drain(fd)
+        try:
+            require_endstop_lines_idle(_query_identity(fd, self._device))
+        except BaseException:
+            os.close(fd)
+            raise
         if self._sim is not None:
             os.write(fd, sim_command(self._sim))
         if self._events:
@@ -285,8 +301,30 @@ class Capture:
                 last_data = time.monotonic()
 
 
-def parse_identity(frame: bytes) -> str | None:
-    """The build id an identity frame carries, or None while it is short."""
+@dataclass(frozen=True)
+class Identity:
+    build_id: str
+    gpiod_moder: int
+    gpiod_otyper: int
+    gpiod_odr: int
+
+    def endstop_line_problems(self) -> list[str]:
+        problems = []
+        for pin, name in ENDSTOP_LINES.items():
+            mode = (self.gpiod_moder >> (2 * pin)) & 0b11
+            if mode != GPIO_MODE_OUTPUT:
+                problems.append(
+                    f"{name} is in mode {mode:02b}, not a driven output"
+                )
+            elif (self.gpiod_otyper >> pin) & 1:
+                problems.append(f"{name} is open-drain, not push-pull")
+            elif (self.gpiod_odr >> pin) & 1:
+                problems.append(f"{name} drives high, the triggered level")
+        return problems
+
+
+def parse_identity(frame: bytes) -> Identity | None:
+    """The identity a frame carries, or None while it is short."""
     if len(frame) < HEADER.size:
         return None
     magic, _, _, length, _, _ = HEADER.unpack_from(frame)
@@ -294,11 +332,48 @@ def parse_identity(frame: bytes) -> str | None:
         raise CaptureError(f"expected an identity frame, got magic {magic!r}")
     if len(frame) < HEADER.size + length:
         return None
-    return frame[HEADER.size : HEADER.size + length].decode()
+    payload = frame[HEADER.size : HEADER.size + length]
+    if length < IDENTITY_REGISTERS.size:
+        raise CaptureError(
+            f"identity of {length} bytes carries no pin registers: the firmware "
+            "predates the endstop-line report; reflash it"
+        )
+    registers = payload[-IDENTITY_REGISTERS.size :]
+    return Identity(
+        payload[: -IDENTITY_REGISTERS.size].decode(),
+        *IDENTITY_REGISTERS.unpack(registers),
+    )
 
 
-def identity(device: str = DEVICE) -> str:
-    """The build id the capture firmware was flashed with."""
+def require_endstop_lines_idle(identity: Identity) -> None:
+    problems = identity.endstop_line_problems()
+    if problems:
+        raise CaptureError(
+            "the F407 must drive every endstop/probe line push-pull at its "
+            "not-triggered level before the F401 reads it: "
+            + "; ".join(problems)
+        )
+
+
+def _query_identity(fd: int, device: str) -> Identity:
+    os.write(fd, CMD_IDENTITY + b"\0")
+    frame = b""
+    deadline = time.monotonic() + IDENTITY_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if select.select([fd], [], [], 0.1)[0]:
+            frame += os.read(fd, 65536)
+            found = parse_identity(frame)
+            if found is not None:
+                return found
+    raise CaptureError(
+        f"{device} sent no identity within {IDENTITY_TIMEOUT_S}s "
+        f"({len(frame)} bytes): firmware predates the identity command?"
+    )
+
+
+def identity(device: str = DEVICE) -> Identity:
+    """What the capture firmware was built from and how it drives the
+    endstop lines."""
     fd = os.open(device, os.O_RDWR | os.O_NOCTTY)
     try:
         tty.setraw(fd)
@@ -306,19 +381,7 @@ def identity(device: str = DEVICE) -> str:
         os.write(fd, CMD_STOP + b"\0")
         while select.select([fd], [], [], 0.2)[0]:
             os.read(fd, 65536)
-        os.write(fd, CMD_IDENTITY + b"\0")
-        frame = b""
-        deadline = time.monotonic() + IDENTITY_TIMEOUT_S
-        while time.monotonic() < deadline:
-            if select.select([fd], [], [], 0.1)[0]:
-                frame += os.read(fd, 65536)
-                build_id = parse_identity(frame)
-                if build_id is not None:
-                    return build_id
-        raise CaptureError(
-            f"{device} sent no identity within {IDENTITY_TIMEOUT_S}s "
-            f"({len(frame)} bytes): firmware predates the identity command?"
-        )
+        return _query_identity(fd, device)
     finally:
         os.close(fd)
 

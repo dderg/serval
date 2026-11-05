@@ -8,7 +8,7 @@ import run
 
 
 class _Capture:
-    def __init__(self, run_dir, both_edges_mask, events):
+    def __init__(self, run_dir, both_edges_mask, events, sim=None):
         pass
 
     def start(self):

@@ -303,7 +303,9 @@ def cmd_flash_capture(tree: Path) -> None:
         if time.monotonic() > deadline:
             raise pi.BenchError(f"{capture.DEVICE} did not appear")
         time.sleep(0.5)
-    require_reported(CAPTURE_BOARD, capture.identity(), build_id)
+    flashed = capture.identity()
+    require_reported(CAPTURE_BOARD, flashed.build_id, build_id)
+    capture.require_endstop_lines_idle(flashed)
     pi.record_firmware(CAPTURE_BOARD, firmware_identity(tree, build_id, elf))
     print(f"capture board flashed with firmware {build_id}, device present")
 

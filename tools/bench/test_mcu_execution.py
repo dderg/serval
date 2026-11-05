@@ -277,6 +277,8 @@ def test_without_a_valid_mco_the_step_fit_is_the_reference(tmp_path):
         tmp_path, _events(_channel(commanded)), MOTORS, aux
     )
     assert report["clock_reference"] == "fit"
+
+
 def test_lead_is_the_gap_back_to_the_latest_other_motor_step():
     a = np.array([1_000, 2_000, 3_000], np.int64)
     b = np.array([1_000, 2_100, 5_000], np.int64)

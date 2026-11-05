@@ -139,7 +139,13 @@ def _wall(
     except KeyError as exc:
         raise SimConfigError(f"wall {spec}: unknown {exc}") from exc
     axis = spec["axis"]
-    active_high = bool(spec.get("active_high", True))
+    active_high = spec.get("active_high", True)
+    if active_high is not True:
+        raise SimConfigError(
+            f"wall {spec}: the F407 drives every endstop/probe line low from "
+            "boot, the not-triggered level of an active-high endstop; an "
+            "active-low wall would idle at the triggered level"
+        )
     if axis in ("x", "y"):
         if "at_steps" in spec:
             raise SimConfigError(f"wall {spec}: toolhead walls take at_mm")

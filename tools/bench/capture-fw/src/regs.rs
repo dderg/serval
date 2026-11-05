@@ -217,6 +217,14 @@ pub const GPIOC: usize = 0x4002_0800;
 pub const GPIOD: usize = 0x4002_0C00;
 pub const GPIOE: usize = 0x4002_1000;
 
+pub const GPIO_MODER: usize = 0x00;
+pub const GPIO_OTYPER: usize = 0x04;
+pub const GPIO_ODR: usize = 0x14;
+
+pub fn read_gpio(port: usize, offset: usize) -> u32 {
+    unsafe { read_volatile((port + offset) as *const u32) }
+}
+
 pub fn write_bsrr(port: usize, value: u32) {
     unsafe { write_volatile((port + 0x18) as *mut u32, value) }
 }

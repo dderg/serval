@@ -279,3 +279,19 @@ def test_describe_records_what_the_firmware_evaluates():
             }
         ],
     }
+
+
+@pytest.mark.parametrize("level", [False, 0, "low"])
+def test_an_active_low_wall_is_refused(level):
+    with pytest.raises(sim_config.SimConfigError, match="active-low wall"):
+        sim_config._wall(
+            {
+                "pin": "x_endstop",
+                "axis": "a",
+                "at_steps": 0,
+                "trigger": "at_or_below",
+                "active_high": level,
+            },
+            {"a": 0.0125, "b": 0.0125, "z": 0.0025, "e": 0.0025},
+            {"a": 1, "b": 1, "z": 1, "e": 1},
+        )

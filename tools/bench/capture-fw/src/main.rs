@@ -32,7 +32,9 @@ const THROUGHPUT_MAGIC: [u8; 4] = *b"SVT1";
 const AUX_MAGIC: [u8; 4] = *b"SVA1";
 const IDENTITY_MAGIC: [u8; 4] = *b"SVI1";
 const BUILD_ID: &[u8] = env!("CAPTURE_FW_BUILD_ID").as_bytes();
-const _: () = assert!(BUILD_ID.len() <= FRAME_PAYLOAD_LEN);
+const ENDSTOP_REGISTERS: [usize; 3] = [regs::GPIO_MODER, regs::GPIO_OTYPER, regs::GPIO_ODR];
+const IDENTITY_LEN: usize = BUILD_ID.len() + 4 * ENDSTOP_REGISTERS.len();
+const _: () = assert!(IDENTITY_LEN <= FRAME_PAYLOAD_LEN);
 const FRAME_HEADER_LEN: usize = 16;
 const TICKS_PER_FRAME: usize = 128;
 const TICK_BYTES: usize = CHANNEL_COUNT;
@@ -255,15 +257,23 @@ impl Stream {
         self.frame_len = FRAME_MAX_LEN;
     }
 
+    /// The build id, then GPIOD's MODER, OTYPER and ODR as the pins stand:
+    /// the host checks the endstop lines are push-pull outputs at their
+    /// not-triggered level before it lets the F401 near them.
     fn stage_identity(&mut self) {
         self.frame[0..4].copy_from_slice(&IDENTITY_MAGIC);
         self.frame[4..14].fill(0);
-        self.frame[12..14].copy_from_slice(&(BUILD_ID.len() as u16).to_le_bytes());
+        self.frame[12..14].copy_from_slice(&(IDENTITY_LEN as u16).to_le_bytes());
         self.frame[14] = STATUS_DATA;
         self.frame[15] = 0;
-        let payload_end = FRAME_HEADER_LEN + BUILD_ID.len();
-        self.frame[FRAME_HEADER_LEN..payload_end].copy_from_slice(BUILD_ID);
-        self.frame_len = payload_end;
+        let ids_end = FRAME_HEADER_LEN + BUILD_ID.len();
+        self.frame[FRAME_HEADER_LEN..ids_end].copy_from_slice(BUILD_ID);
+        for (index, offset) in ENDSTOP_REGISTERS.into_iter().enumerate() {
+            let at = ids_end + 4 * index;
+            self.frame[at..at + 4]
+                .copy_from_slice(&regs::read_gpio(regs::GPIOD, offset).to_le_bytes());
+        }
+        self.frame_len = FRAME_HEADER_LEN + IDENTITY_LEN;
         self.sent = 0;
     }
 
