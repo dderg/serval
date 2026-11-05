@@ -1,0 +1,10 @@
+{
+  "expect_mco": false,
+  "both_edges": [],
+  "walls": [
+    {"pin": "x_endstop", "axis": "x", "at_mm": 0.0, "trigger": "at_or_below"},
+    {"pin": "y_endstop", "axis": "y", "at_mm": 0.0, "trigger": "at_or_below"},
+    {"pin": "z_endstop", "axis": "z", "at_mm": 0.0, "trigger": "at_or_below"},
+    {"pin": "probe", "axis": "z", "at_mm": 0.0, "trigger": "at_or_below"}
+  ]
+}

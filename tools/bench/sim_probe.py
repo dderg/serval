@@ -7,6 +7,8 @@ probe is given (push it with `deploy.py config --config configs/full.cfg`).
   query OBJECT...      klippy printer objects (temperatures, tmc2209 state)
   gcode SCRIPT         run a script, print the console responses it produced
   endstops             QUERY_ENDSTOPS as klippy sees the simulated pins
+  lines PIN...         drive each simulated line triggered on its own and read
+                       every endstop (and the probe) back through klippy
   capture              sim capture around a gcode sequence + simulator report
   heat                 heat one heater, compare klippy's reading with the model
 """
@@ -34,6 +36,7 @@ DEFAULT_CONFIG = BENCH / "configs" / "full.cfg"
 HEATER_OBJECTS = {"extruder": "extruder", "bed": "heater_bed"}
 HEATER_COMMANDS = {"extruder": "M104", "bed": "M140"}
 POLL_S = 0.5
+LINE_SETTLE_S = 0.2
 PLATEAU_S = 10.0
 GCODE_STORE_COUNT = 200
 
@@ -68,6 +71,92 @@ def gcode(script: str) -> list[str]:
 def endstops() -> dict:
     pi.gcode_script("QUERY_ENDSTOPS")
     return pi.http("GET", "/printer/query_endstops/status")
+
+
+ALWAYS_TRIGGERED_MM = 1000.0
+LINE_ENDSTOPS = {"x_endstop": "x", "y_endstop": "y", "z_endstop": "z"}
+
+
+def line_spec(pin: str | None) -> dict:
+    """A sim config whose only wall holds `pin` triggered wherever the
+    toolhead is, or no wall at all."""
+    walls = (
+        []
+        if pin is None
+        else [
+            {
+                "pin": pin,
+                "axis": "z",
+                "at_mm": ALWAYS_TRIGGERED_MM,
+                "trigger": "at_or_below",
+            }
+        ]
+    )
+    return {"walls": walls}
+
+
+def _probe_state() -> str:
+    for message in gcode("QUERY_PROBE"):
+        if message.startswith("probe: "):
+            return message.removeprefix("probe: ").strip()
+    raise ProbeError("QUERY_PROBE gave no 'probe:' response")
+
+
+def line_reading(endstop_states: dict, probe: str | None) -> dict[str, bool]:
+    """Which simulated lines klippy reads triggered."""
+    read = {
+        pin: endstop_states[axis] == "TRIGGERED"
+        for pin, axis in LINE_ENDSTOPS.items()
+        if axis in endstop_states
+    }
+    if probe is not None:
+        read["probe"] = probe == "TRIGGERED"
+    return read
+
+
+def _line_dir(args, name: str) -> Path:
+    root = args.out or Path("/tmp") / f"sim-probe-lines-{int(time.time())}"
+    out = root / name
+    out.mkdir(parents=True, exist_ok=False)
+    shutil.copyfile(args.config, out / "printer.cfg")
+    return out
+
+
+def run_lines(args) -> dict:
+    motors = analyze.read_motors(
+        analyze._config_sections(args.config.read_text())
+    )
+    rows = []
+    for pin in [None, *args.pins]:
+        sim = sim_config.build(
+            line_spec(pin),
+            config_id=secrets.randbelow(0xFFFF) + 1,
+            step_mm={m.role: m.step_mm for m in motors},
+            dir_sign={m.role: m.dir_sign for m in motors},
+            start_xyz=args.start,
+        )
+        out = _line_dir(args, pin or "none")
+        capture = Capture(out, 0, sim=sim)
+        capture.start()
+        try:
+            time.sleep(LINE_SETTLE_S)
+            capture.check()
+            states = endstops()
+            probe = _probe_state() if "probe" in args.pins else None
+        finally:
+            capture.stop()
+        read = line_reading(states, probe)
+        expected = {line: line == pin for line in read}
+        rows.append(
+            {
+                "driven": pin or "none",
+                "klippy_endstops": states,
+                "klippy_probe": probe,
+                "triggered_as_read": read,
+                "ok": read == expected,
+            }
+        )
+    return {"lines": rows, "ok": all(row["ok"] for row in rows)}
 
 
 def _parse_xyz(text: str) -> tuple[float, float, float]:
@@ -203,6 +292,11 @@ def main() -> None:
     commands.add_parser("query").add_argument("objects", nargs="+")
     commands.add_parser("gcode").add_argument("script")
     commands.add_parser("endstops")
+    lines = commands.add_parser("lines")
+    lines.add_argument("pins", nargs="+", choices=sorted(sim_config.PINS))
+    lines.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    lines.add_argument("--start", type=_parse_xyz, default=(50.0, 50.0, 10.0))
+    lines.add_argument("--out", type=Path)
     for name in ("capture", "heat"):
         sub = commands.add_parser(name)
         sub.add_argument("--sim", type=Path, default=DEFAULT_SIM)
@@ -224,6 +318,8 @@ def main() -> None:
             result = gcode(args.script)
         elif args.command == "endstops":
             result = endstops()
+        elif args.command == "lines":
+            result = run_lines(args)
         elif args.command == "capture":
             result = run_capture(args)
         else:
