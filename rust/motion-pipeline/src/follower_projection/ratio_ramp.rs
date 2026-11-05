@@ -922,9 +922,12 @@ impl WidthField {
     /// sample's base, opens the widest window the rests' cones allow. A
     /// sample kept on the rest point itself stacks on the rest and closes to
     /// zero width with it, so it is dropped first and leaves the path it
-    /// came after to the halfway node.
+    /// came after to the halfway node. So do samples this rest's cone caps
+    /// every one of, whose window it would crush to slivers along the whole
+    /// motion: the halfway node takes the largest of their targets.
     fn push_rest(&mut self, s: f64) {
         self.drop_samples_stacking_on(s);
+        let crushed_target = self.drop_samples_crushed_by(s);
         let Some(&last) = self.nodes.last() else {
             return self.push(s, 0.0);
         };
@@ -932,7 +935,10 @@ impl WidthField {
             return self.push(s, 0.0);
         }
         if s - last.s > REST_TARGET_MM {
-            self.push(0.5 * (last.s + s), 0.5 * (s - last.s));
+            self.push(
+                0.5 * (last.s + s),
+                crushed_target.unwrap_or(0.5 * (s - last.s)),
+            );
             self.push(s, 0.0);
         } else if s > last.s {
             self.nodes.push(WidthNode {
@@ -941,6 +947,31 @@ impl WidthField {
                 envelope: 0.0,
             });
         }
+    }
+
+    /// Drops every moving node since the last rest node where a rest at
+    /// `rest` caps each of their targets, and returns the largest. Each
+    /// dropped node's envelope is under both rests' cones at its place, at
+    /// most `ENVELOPE_SLOPE` times half the motion, which the halfway node
+    /// reaches with the largest target.
+    fn drop_samples_crushed_by(&mut self, rest: f64) -> Option<f64> {
+        let opening = self.nodes.iter().rposition(|node| node.target == 0.0)?;
+        let moving = &self.nodes[opening + 1..];
+        let crushed = !moving.is_empty()
+            && moving
+                .iter()
+                .all(|node| ENVELOPE_SLOPE * (rest - node.s) < node.target);
+        if !crushed {
+            return None;
+        }
+        assert!(
+            opening + 1 >= self.final_prefix,
+            "a rest at {rest} mm would drop the final ratio ramp width node at {} mm",
+            self.nodes[opening + 1].s
+        );
+        let target = moving.iter().map(|node| node.target).fold(0.0, f64::max);
+        self.nodes.truncate(opening + 1);
+        Some(target)
     }
 
     fn drop_samples_stacking_on(&mut self, rest: f64) {
