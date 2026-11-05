@@ -182,3 +182,56 @@ fn an_onset_exemption_holds_velocity_to_its_allowance_and_frees_acceleration() {
     assert_eq!(verdict_on(&signal, &swing(0.9)), None);
     assert!(verdict_on(&signal, &swing(1.1)).is_some());
 }
+
+/// Every error the magnitude test proves, the hull proves at its first
+/// look too: skipping the Bernstein conversion changes no verdict.
+#[test]
+fn an_error_the_magnitude_test_proves_the_hull_proves_at_once() {
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (state >> 11) as f64 / (1_u64 << 53) as f64
+    };
+    let mut proven = 0;
+    for _ in 0..20_000 {
+        let len = 1 + (next() * EXACT_CAPACITY as f64) as usize % EXACT_CAPACITY;
+        let decay = next();
+        let mut coefficients = [0.0; EXACT_CAPACITY];
+        let mut scale = 1.0;
+        for coefficient in &mut coefficients[..len] {
+            *coefficient = (2.0 * next() - 1.0) * scale;
+            scale *= decay;
+        }
+        let error = super::ErrorPolynomial {
+            coefficients,
+            len,
+            from: 0.0,
+            to: 1.0,
+            rounding: next() * 1e-3,
+        };
+        let budget = 0.5 + 2.0 * next();
+        if !error.proven_by_magnitude(budget) {
+            continue;
+        }
+        proven += 1;
+        let patch = error.patch();
+        assert_eq!(
+            super::first_unproven_patch(
+                &patch.controls,
+                (patch.from, patch.to),
+                budget,
+                patch.rounding,
+                patch.level_rounding,
+                0,
+            ),
+            None,
+            "{:?} within {budget}",
+            &coefficients[..len]
+        );
+        let peak = patch.controls.iter().fold(0.0_f64, |m, c| m.max(c.abs()));
+        assert!(peak + patch.rounding <= budget);
+    }
+    assert!(proven > 1_000, "the magnitude test proved only {proven} errors");
+}
