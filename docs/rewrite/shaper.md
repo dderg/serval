@@ -322,12 +322,8 @@ no more than that path on the rest's side. Each move's
 `ExtrusionBudget::rest_room_mm` carries the path from its start to the
 nearest rest (an extrude-only move or a stream end) within
 `rest_room_reach_mm` of the fastest the leaders cross it, and the cap holds
-the ramp that room leaves within the limits as well. The projection derives a
-step's `τ` from the fastest the leaders move within 15 ms (half the longest
-ramp) of it, so the cap reads the step there too: up to `A·15 ms` faster than
-the join under the join's budget `A`, and no faster than
-`ExtrusionBudget::fastest_in_reach_mm_s`, the fastest ceiling within the
-move's speed window. Only a rest may narrow a step's window below
+the ramp that room leaves within the limits as well. Only a rest may narrow a
+step's window below
 `H = V·τ/2`: every width node within its plateau (2.75 `H`) on the path
 targets `H`, falling off by `c` beyond, whenever the leaders took to get
 there — a 1.5 mm/s corner 1.8 mm before a step crossed at 46 mm/s lies
@@ -356,6 +352,19 @@ planned `v + k·a ≤ min(Q, v₀ + k·A + A·|u|)`, with `Q` the least of
 own flow never reaches `V_e` from the step's independent worst case of
 speed and budget, the way a noise step of `Δr ≤ 3e-5` once forced a stop
 at every such join of the Trident first layers.
+
+Without a follower kernel the acceleration the ramp adds is read at the
+ramp's edges, half the longest ramp either side of the join: the smoothed
+ratio's curvature steps there and the advance turns it into `k·r̃″·v³`, and
+the leaders may be up to `A·τ/2` faster in planned speed there, which the
+spill shapes as above (`StepCrossing::edge_speed_mm_s`). Read at the join, a
+P1 bowden travel braking into an extrusion reached 1.1× `max_accel` at the
+edge on the travel side. The own flow and the velocity overshoot `k·r̃′·v²`
+stay at the join: the overshoot peaks inside the ramp, and reading it at the
+edges cost the fast bench 2.5% of print time where its extruder velocity
+cap bound and none of its steps had exceeded a limit. A follower kernel
+spreads the curvature step over its own width, so with one the acceleration
+is read at the join too.
 
 Critically, the projection reads the leaders' **toolhead signal**, not their
 motor command — the follower must track where the nozzle physically is, and
