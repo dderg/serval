@@ -77,8 +77,7 @@ pub struct KnownExcesses {
     pub worst: f64,
 }
 
-pub const KNOWN: &[KnownExcesses] = &[
-];
+pub const KNOWN: &[KnownExcesses] = &[];
 
 /// Where the audit of the case named `case` departs from what [`KNOWN`]
 /// pins for it, as one failure line.
