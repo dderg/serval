@@ -1513,7 +1513,8 @@ impl RatioSmoothing {
     /// seam. `s ± h(s)` grows along the path (`|h'| < 1`), so a seam
     /// outside the stretch is reached from the stretch's end nearer it, if
     /// at all, and one inside from itself, unless the leaders rest on it,
-    /// where no window reaches it. Only the width over the stretch decides,
+    /// where no window reaches it — though the windows past it still open
+    /// on the slope it leaves. Only the width over the stretch decides,
     /// never what is laid past it.
     pub(super) fn touches(&self, lo: f64, hi: f64) -> bool {
         if self.is_inert() {
@@ -1533,7 +1534,7 @@ impl RatioSmoothing {
                 } else if seam.s > hi {
                     seam.s < ahead
                 } else {
-                    self.reach_back(seam.s) > 0.0
+                    self.reach_back(seam.s) > 0.0 || seam.slope_after != 0.0
                 }
             })
     }

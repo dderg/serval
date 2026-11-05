@@ -4355,7 +4355,8 @@ fn shaped_ladder<S: TrackSignal>(
         span: (t0, t1),
         resolved: (start_past_sliver, end_past_sliver),
         tol: piece_tol,
-        samples: std::cell::OnceCell::new(),
+        ranks_misses: keeps_closest_rung,
+        samples: std::array::from_fn(|_| std::cell::OnceCell::new()),
         edge_scans: std::cell::OnceCell::new(),
     });
     let held_miss = |rung: &[f64]| {
@@ -4488,13 +4489,17 @@ const SQUARE_ROOT_ONSET_PEAK_SEARCH_SHARE: f64 = 0.25;
 /// miss of an onset there rises as the root of the distance from it, a
 /// shoulder narrower than any grid of check points, so the stretch from
 /// each resolved edge to the check point next to it is searched in that
-/// root, where the shoulder is smooth.
+/// root, where the shoulder is smooth. Each check point is sampled once,
+/// the first time a rung reads it, from the edges inward, where a rung
+/// misses an onset first: a rung that misses one is refused before the
+/// rest are read, unless its misses are ranked.
 struct OnsetHold<'a, S> {
     read: &'a FacingRead<'a, S>,
     span: (f64, f64),
     resolved: (f64, f64),
     tol: FitTol,
-    samples: std::cell::OnceCell<[HeldSample; SQUARE_ROOT_ONSET_CHECK_INTERVALS + 1]>,
+    ranks_misses: bool,
+    samples: [std::cell::OnceCell<HeldSample>; SQUARE_ROOT_ONSET_CHECK_INTERVALS + 1],
     edge_scans: std::cell::OnceCell<[EdgeScan; 2]>,
 }
 
@@ -4555,11 +4560,28 @@ impl<S: TrackSignal> OnsetHold<'_, S> {
         held_miss(rung, self.h(), &[self.sample_at(t)], self.tol)
     }
 
+    fn check_sample(&self, k: usize) -> HeldSample {
+        *self.samples[k].get_or_init(|| self.sample_at(self.check_t(k)))
+    }
+
+    fn check_miss(&self, rung: &[f64], k: usize) -> f64 {
+        held_miss(rung, self.h(), &[self.check_sample(k)], self.tol)
+    }
+
+    /// The rung's worst miss, or — unless its misses are ranked — the
+    /// first check point's it misses past the tolerance: a refused rung
+    /// only needs to be refused.
     fn worst_miss(&self, rung: &[f64]) -> f64 {
-        let samples = self
-            .samples
-            .get_or_init(|| std::array::from_fn(|k| self.sample_at(self.check_t(k))));
-        let misses = samples.map(|sample| held_miss(rung, self.h(), &[sample], self.tol));
+        let mut misses = [0.0; SQUARE_ROOT_ONSET_CHECK_INTERVALS + 1];
+        for k in (0..=SQUARE_ROOT_ONSET_CHECK_INTERVALS / 2)
+            .flat_map(|inward| [inward, SQUARE_ROOT_ONSET_CHECK_INTERVALS - inward])
+            .take(SQUARE_ROOT_ONSET_CHECK_INTERVALS + 1)
+        {
+            misses[k] = self.check_miss(rung, k);
+            if !self.ranks_misses && misses[k] > 1.0 {
+                return misses[k];
+            }
+        }
         let at_checks = misses.iter().copied().fold(0.0, f64::max);
         if at_checks > 1.0 {
             return at_checks;
