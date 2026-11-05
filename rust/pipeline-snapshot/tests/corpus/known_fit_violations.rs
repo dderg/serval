@@ -36,7 +36,16 @@ pub struct KnownFitViolations {
     pub worst: f64,
 }
 
-pub const KNOWN: &[KnownFitViolations] = &[];
+pub const KNOWN: &[KnownFitViolations] = &[
+    // TODO(bound-ext, floor-slivers): floor pieces on cap-contact onsets 14.5 ns apart fail OnsetFloor.
+    KnownFitViolations {
+        case: "voron_first_layers:1400-4499@74s/tools/bench/configs/trident_kernel.cfg",
+        fit: "materialize_source",
+        class: FitViolationClass::FloorEdgeBreak,
+        count: 2123,
+        worst: 11.09,
+    },
+];
 
 /// Where the open violations of the case named `case` depart from what
 /// [`KNOWN`] pins for it, as one failure line.

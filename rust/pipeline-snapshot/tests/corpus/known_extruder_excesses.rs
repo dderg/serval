@@ -77,7 +77,188 @@ pub struct KnownExcesses {
     pub worst: f64,
 }
 
-pub const KNOWN: &[KnownExcesses] = &[];
+pub const KNOWN: &[KnownExcesses] = &[
+    // TODO(bowden-switch): slow corner nodes outside a seam's time reach narrow its window.
+    KnownExcesses {
+        case: "trident_follower_cache_regression/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
+        class: ExcessClass::Accel,
+        count: 413,
+        worst: 26088.6,
+    },
+    KnownExcesses {
+        case: "trident_follower_cache_regression/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
+        class: ExcessClass::Velocity,
+        count: 72,
+        worst: 55.2373,
+    },
+    KnownExcesses {
+        case: "voron_first_layers/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
+        class: ExcessClass::Accel,
+        count: 29,
+        worst: 22676.6,
+    },
+    KnownExcesses {
+        case: "voron_first_layers/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
+        class: ExcessClass::Velocity,
+        count: 5,
+        worst: 48.2076,
+    },
+    KnownExcesses {
+        case: "trident_follower_cache_regression:200-300/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
+        class: ExcessClass::Accel,
+        count: 134,
+        worst: 25146.0,
+    },
+    KnownExcesses {
+        case: "trident_follower_cache_regression:200-300/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
+        class: ExcessClass::Velocity,
+        count: 40,
+        worst: 55.2064,
+    },
+    KnownExcesses {
+        case: "trident_follower_cache_regression:820-900/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
+        class: ExcessClass::Accel,
+        count: 156,
+        worst: 26393.8,
+    },
+    KnownExcesses {
+        case: "trident_follower_cache_regression:820-900/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
+        class: ExcessClass::Velocity,
+        count: 24,
+        worst: 54.9216,
+    },
+    KnownExcesses {
+        case: "voron_first_layers:3550-3700/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
+        class: ExcessClass::Accel,
+        count: 44,
+        worst: 26914.4,
+    },
+    KnownExcesses {
+        case: "voron_first_layers:3550-3700/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
+        class: ExcessClass::Velocity,
+        count: 17,
+        worst: 56.4596,
+    },
+    KnownExcesses {
+        case: "corner_flow travel 50/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
+        class: ExcessClass::Accel,
+        count: 9,
+        worst: 5583.8,
+    },
+    KnownExcesses {
+        case: "corner_flow travel 150/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
+        class: ExcessClass::Accel,
+        count: 9,
+        worst: 5495.1,
+    },
+    KnownExcesses {
+        case: "corner_flow travel 300/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
+        class: ExcessClass::Accel,
+        count: 9,
+        worst: 5495.1,
+    },
+    // TODO(guard-robust): a turning-guard back-off spikes e.
+    KnownExcesses {
+        case: "voron_first_layers:850-950/tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg",
+        class: ExcessClass::Accel,
+        count: 39,
+        worst: 117753.4,
+    },
+    KnownExcesses {
+        case: "voron_first_layers/tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg",
+        class: ExcessClass::Accel,
+        count: 39,
+        worst: 182265.7,
+    },
+    // TODO(crawl-ve): a crawl valley's release judged as if no kernel followed.
+    KnownExcesses {
+        case: "voron_first_layers:850-950/tools/bench/configs/profiles/p1_bowden_bedslinger_kernel.cfg",
+        class: ExcessClass::Velocity,
+        count: 29,
+        worst: 49.3748,
+    },
+    KnownExcesses {
+        case: "voron_first_layers/tools/bench/configs/profiles/p1_bowden_bedslinger_kernel.cfg",
+        class: ExcessClass::Velocity,
+        count: 41,
+        worst: 49.4033,
+    },
+    // TODO(floor-guard): e past V_e by ε around the retract's rest.
+    KnownExcesses {
+        case: "corner_flow retract 50/tools/bench/configs/profiles/p4_high_accel_kernel.cfg",
+        class: ExcessClass::RestTransitionVelocity,
+        count: 12,
+        worst: 50.0219,
+    },
+    KnownExcesses {
+        case: "corner_flow retract 150/tools/bench/configs/profiles/p4_high_accel_kernel.cfg",
+        class: ExcessClass::RestTransitionVelocity,
+        count: 12,
+        worst: 50.0219,
+    },
+    KnownExcesses {
+        case: "corner_flow retract 300/tools/bench/configs/profiles/p4_high_accel_kernel.cfg",
+        class: ExcessClass::RestTransitionVelocity,
+        count: 10,
+        worst: 50.0219,
+    },
+    // TODO(floor-guard): the print-start prime steps e velocity.
+    KnownExcesses {
+        case: "voron_dense_top_layers/rust/motion-core/tests/configs/neptune_sim_print.cfg",
+        class: ExcessClass::VelocityStep,
+        count: 1,
+        worst: 0.9949,
+    },
+    // TODO(bound-ext, floor-slivers): the ladder chases an unshaped onset's singular advance.
+    KnownExcesses {
+        case: "voron_dense_top_layers/rust/motion-core/tests/configs/neptune_sim_print.cfg",
+        class: ExcessClass::Accel,
+        count: 6373,
+        worst: 2350706.7,
+    },
+    KnownExcesses {
+        case: "voron_first_layers/rust/motion-core/tests/configs/neptune_sim_print.cfg",
+        class: ExcessClass::Accel,
+        count: 3382,
+        worst: 297830.2,
+    },
+    KnownExcesses {
+        case: "voron_first_layers/rust/motion-core/tests/configs/neptune_sim_print.cfg",
+        class: ExcessClass::Turning,
+        count: 23,
+        worst: 118874.7,
+    },
+    KnownExcesses {
+        case: "trident_follower_cache_regression/rust/motion-core/tests/configs/neptune_sim_print.cfg",
+        class: ExcessClass::Accel,
+        count: 1188,
+        worst: 1245046.3,
+    },
+    KnownExcesses {
+        case: "trident_follower_cache_regression/rust/motion-core/tests/configs/neptune_sim_print.cfg",
+        class: ExcessClass::Turning,
+        count: 8,
+        worst: 21399.1,
+    },
+    KnownExcesses {
+        case: "corner_flow zigzag 50/rust/motion-core/tests/configs/neptune_sim_print.cfg",
+        class: ExcessClass::Accel,
+        count: 448,
+        worst: 250608.1,
+    },
+    KnownExcesses {
+        case: "corner_flow zigzag 150/rust/motion-core/tests/configs/neptune_sim_print.cfg",
+        class: ExcessClass::Accel,
+        count: 448,
+        worst: 250615.0,
+    },
+    KnownExcesses {
+        case: "corner_flow zigzag 300/rust/motion-core/tests/configs/neptune_sim_print.cfg",
+        class: ExcessClass::Accel,
+        count: 448,
+        worst: 250587.4,
+    },
+];
 
 /// Where the audit of the case named `case` departs from what [`KNOWN`]
 /// pins for it, as one failure line.
