@@ -705,9 +705,12 @@ fn polynomial_of_affine(coefficients: &[Ball], tau: &TaylorModel) -> TaylorModel
     };
     let mut scale = 1.0;
     let mut scaled_magnitude = 0.0;
+    let top = work[n - 1];
     for lowest in 0..n {
-        for power in (lowest + 1..n).rev() {
-            work[power - 1] += centre * work[power];
+        let mut higher = top;
+        for slot in work[lowest..n - 1].iter_mut().rev() {
+            higher = *slot + centre * higher;
+            *slot = higher;
         }
         let scaled = work[lowest] * scale;
         out.coefficients[lowest] = scaled;
