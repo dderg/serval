@@ -53,10 +53,13 @@ The gate fails when, for any config:
   PI_FLOOR_X by more than the prediction's band (none for Ir;
   PI_FLOOR_FAILS off turns this into a warning). A config FLOOR_SHORTFALLS
   pins below the floor, to the issue that owns the shortfall, misses it
-  instead when a prediction falls below the pinned one by more than
-  SHORTFALL_TOLERANCE_PCT or its band (a regression). A pinned shortfall
-  that shrinks passes; one whose prediction reaches the floor is judged
-  against the floor again, and the report says to unpin it;
+  instead when its Ir prediction falls below the pinned one by more than
+  SHORTFALL_TOLERANCE_PCT (a regression). Its live prediction is not held
+  to a pin: the live model misses the Pi by up to its residual on any one
+  runner CPU, far more than a pin could tolerate, and judging it against a
+  pin would make the live check a drift check. A pinned shortfall that
+  shrinks passes; once either prediction reaches the floor, that prediction
+  is judged against the floor again, and the report says to unpin it;
 - the calibration replay is inconsistent (below).
 
 Both Pi predictions come from fits over paired points that
@@ -226,23 +229,23 @@ class Verdict:
 
 @dataclass(frozen=True)
 class FloorShortfall:
-    """A config's Pi 2-core worst windows below PI_FLOOR_X, as the gate
-    predicts them from (Ir, the live cost), owned by GitHub issue `issue`."""
+    """A config's Pi 2-core worst window below PI_FLOOR_X, as the gate
+    predicts it from Ir, owned by GitHub issue `issue`."""
 
     issue: int
-    predicted_x: tuple[float, float]
+    predicted_ir_x: float
 
     def __post_init__(self) -> None:
-        if not all(value < PI_FLOOR_X for value in self.predicted_x):
+        if not self.predicted_ir_x < PI_FLOOR_X:
             raise ValueError(
-                f"a floor shortfall pins predictions below {PI_FLOOR_X}x, "
-                f"not {self.predicted_x}"
+                f"a floor shortfall pins an Ir prediction below {PI_FLOOR_X}x, "
+                f"not {self.predicted_ir_x}"
             )
 
 
 FLOOR_SHORTFALLS: dict[str, FloorShortfall] = {
     "tools/bench/configs/trident_kernel.cfg": FloorShortfall(
-        issue=693, predicted_x=(1.52, 1.84)
+        issue=693, predicted_ir_x=1.52
     ),
 }
 assert set(FLOOR_SHORTFALLS) <= set(CONFIGS), (
@@ -900,19 +903,18 @@ def judge(
     pin = shortfalls.get(config)
     floor_misses = []
     notes = []
-    for index, (source, value, band) in enumerate(
-        zip(("Ir", "the live cost"), predicted, bands)
-    ):
+    for source, value, band in zip(("Ir", "the live cost"), predicted, bands):
         vanished = pin and pin_vanished(source, value, band, pin.issue)
         if vanished:
             notes.append(vanished)
-        miss = (
-            floor_miss(source, value, band)
-            if pin is None or vanished
-            else shortfall_miss(
-                source, value, band, pin.predicted_x[index], pin.issue
+        if pin is None or vanished:
+            miss = floor_miss(source, value, band)
+        elif source == "Ir":
+            miss = shortfall_miss(
+                source, value, band, pin.predicted_ir_x, pin.issue
             )
-        )
+        else:
+            miss = None
         if miss:
             floor_misses.append(miss)
     if PI_FLOOR_FAILS:
