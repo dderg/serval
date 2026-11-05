@@ -763,7 +763,7 @@ impl WidthField {
         (0..laid).fold(0.0, |width, index| {
             let seam = self.seams[index];
             let within_time = (seam.t - t).abs() <= SEAM_REACH_S;
-            if !within_time && !(rest_behind < seam.s && seam.s < rest_ahead) {
+            if !(within_time || (rest_behind < seam.s && seam.s < rest_ahead)) {
                 return width;
             }
             let seam_width = self.seam_width(index);
