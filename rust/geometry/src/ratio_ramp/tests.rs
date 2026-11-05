@@ -239,6 +239,7 @@ fn the_own_flow_counts_no_more_than_its_bound() {
         advance_slope_s: 0.02,
         max_velocity_mm_s: 50.0,
         max_accel_mm_s2: 1.0e6,
+        kernel_jerk_per_accel_hz: f64::INFINITY,
     };
     let noise = Seam {
         ratio_step: 1e-5,
