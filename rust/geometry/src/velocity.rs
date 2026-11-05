@@ -497,6 +497,14 @@ fn build_move_caps(
                     }
                     None => z_capped,
                 };
+                let limits = extruder_caps::moving_retract_capped(
+                    &m.segment,
+                    (
+                        params.max_extrude_only_velocity_mm_s,
+                        params.max_extrude_only_accel_mm_s2,
+                    ),
+                    limits,
+                );
                 (length, kappa_start, sigma, kappa_peak, limits)
             }
             None => {
