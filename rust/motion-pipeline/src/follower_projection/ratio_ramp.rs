@@ -2252,7 +2252,7 @@ impl Crossing {
 
     /// The fastest and the most accelerating the leaders are over `window`.
     fn over(leaders: &ShapedLeaders, (from, until): (f64, f64)) -> Self {
-        (0..=CROSSING_PROBES).fold(Self::at(leaders, from), |widest, index| {
+        (1..=CROSSING_PROBES).fold(Self::at(leaders, from), |widest, index| {
             widest.widest(Self::at(
                 leaders,
                 from + (until - from) * index as f64 / CROSSING_PROBES as f64,
