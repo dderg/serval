@@ -169,25 +169,6 @@ pub const KNOWN: &[KnownExcesses] = &[
         count: 9,
         worst: 5495.1,
     },
-    // TODO(guard-robust): a turning-guard back-off spikes e.
-    KnownExcesses {
-        case: "voron_first_layers:850-950/tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg",
-        class: ExcessClass::Accel,
-        count: 39,
-        worst: 117753.4,
-    },
-    KnownExcesses {
-        case: "voron_first_layers/tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg",
-        class: ExcessClass::Accel,
-        count: 39,
-        worst: 182265.7,
-    },
-    KnownExcesses {
-        case: "voron_first_layers_zhop/tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg",
-        class: ExcessClass::Accel,
-        count: 38,
-        worst: 119635.3,
-    },
     // TODO(floor-guard): e past V_e by ε around the retract's rest.
     KnownExcesses {
         case: "corner_flow retract 50/tools/bench/configs/profiles/p4_high_accel_kernel.cfg",
