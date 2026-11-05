@@ -630,8 +630,7 @@ fn seed_seam_velocities(
             let kappa_dn = dn.kappa0.abs();
             let boundary_vlim =
                 disk::limit_speed(kappa_up, up.accel).min(disk::limit_speed(kappa_dn, dn.accel));
-            let ceiling = up.flat_ceiling.min(dn.flat_ceiling);
-            v[k] = ceiling.min(disk::notch_free_min(ceiling, boundary_vlim));
+            v[k] = up.flat_ceiling.min(dn.flat_ceiling).min(boundary_vlim);
             let step_ceiling = extruder_caps::ratio_step_ceiling(
                 &moves[k - 1],
                 &moves[k],
