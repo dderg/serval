@@ -193,18 +193,30 @@ impl Tracked {
         }
     }
 
-    /// `∫₀^z self(z − v) · other(v) dv` as a polynomial in `z`.
-    fn beta_convolution(&self, other: &Self) -> Self {
-        let mut product = Self::ZERO;
+    /// Clears to the zero polynomial of length `len`: every slot up to the
+    /// longer of the old and new lengths zeroed, so every slot past the
+    /// length stays zero as in [`Self::ZERO`].
+    fn clear_to(&mut self, len: usize) {
+        let reach = self.len.max(len);
+        self.values[..reach].fill(0.0);
+        self.magnitudes[..reach].fill(0.0);
+        self.len = len;
+    }
+
+    /// Writes `∫₀^z self(z − v) · other(v) dv`, a polynomial in `z`, into
+    /// `product`.
+    fn beta_convolution_into(&self, other: &Self, product: &mut Self) {
         if self.len == 0 || other.len == 0 {
-            return product;
+            product.clear_to(0);
+            return;
         }
-        product.len = self.len + other.len;
+        let len = self.len + other.len;
         assert!(
-            product.len <= EXACT_CAPACITY,
+            len <= EXACT_CAPACITY,
             "a sliver of degree {} exceeds the exact polynomial capacity",
-            product.len - 1
+            len - 1
         );
+        product.clear_to(len);
         for kernel_power in 0..self.len {
             for input_power in 0..other.len {
                 let beta = BETA[kernel_power][input_power];
@@ -215,7 +227,6 @@ impl Tracked {
                     beta * self.magnitudes[kernel_power] * other.magnitudes[input_power];
             }
         }
-        product
     }
 }
 
@@ -570,12 +581,15 @@ impl RecentChunks {
 
 /// What one span's exact polynomials evaluate in and reuse from chunk to
 /// chunk and kernel piece to kernel piece: the input's series past two
-/// window edges, and one kernel piece's moments and their bounds, each read
-/// only as far as the evaluation writes it.
+/// window edges, one kernel piece's moments and their bounds, and the
+/// frozen window and sliver terms each order adds, each read only as far
+/// as the evaluation writes it.
 struct ConvolutionScratch {
     edge_series: [EdgeSeries; 2],
     moments: [[f64; EXACT_CAPACITY]; MOMENT_ORDERS],
     magnitudes: MomentBounds,
+    at_upper: Tracked,
+    convolved: Tracked,
 }
 
 /// One point mass of `x` and its derivatives: `weights[m]` multiplies
@@ -649,6 +663,8 @@ impl ExactConvolution<'_> {
             edge_series: [[Tracked::ZERO; MOMENT_ORDERS]; 2],
             moments: [[0.0; EXACT_CAPACITY]; MOMENT_ORDERS],
             magnitudes: [[0.0; EXACT_CAPACITY]; MOMENT_ORDERS],
+            at_upper: Tracked::ZERO,
+            convolved: Tracked::ZERO,
         };
         for pair in points.windows(2) {
             let first_inside = pair[0].first_float_above();
@@ -761,6 +777,8 @@ impl ExactConvolution<'_> {
             edge_series,
             moments,
             magnitudes,
+            at_upper,
+            convolved,
         } = scratch;
         let mut previous_lower: Option<(RealSum, usize)> = None;
         for piece in &self.kernel.pieces {
@@ -811,12 +829,21 @@ impl ExactConvolution<'_> {
             previous_lower = Some((lower, lower_slot));
             let (upper_series, lower_series) = (&edge_series[upper_slot], &edge_series[lower_slot]);
             for order in 0..MOMENT_ORDERS {
-                let mut at_upper =
-                    frozen_window(&piece.at_start, &moments[order], &magnitudes[order]);
-                at_upper.add(&piece.at_start.beta_convolution(&upper_series[order]), 1.0);
-                total[order].add_shifted(&at_upper, upper.tail, 1.0, radius);
-                let at_lower = piece.at_end.beta_convolution(&lower_series[order]);
-                total[order].add_shifted(&at_lower, lower.tail, -1.0, radius);
+                frozen_window_into(
+                    &piece.at_start,
+                    &moments[order],
+                    &magnitudes[order],
+                    at_upper,
+                );
+                piece
+                    .at_start
+                    .beta_convolution_into(&upper_series[order], convolved);
+                at_upper.add(convolved, 1.0);
+                total[order].add_shifted(at_upper, upper.tail, 1.0, radius);
+                piece
+                    .at_end
+                    .beta_convolution_into(&lower_series[order], convolved);
+                total[order].add_shifted(convolved, lower.tail, -1.0, radius);
             }
         }
         let gamma = ExactRounding::gamma(ExactRounding::depth(
@@ -852,9 +879,8 @@ impl ExactConvolution<'_> {
 
 /// `Σ_r z^r Σ_l c_l C(l, r) (−1)^{l−r} M_{l−r}`: the kernel piece over the
 /// frozen window, as a polynomial in the window's motion `z`.
-fn frozen_window(kernel: &Tracked, moments: &[f64], magnitudes: &[f64]) -> Tracked {
-    let mut frozen = Tracked::ZERO;
-    frozen.len = kernel.len;
+fn frozen_window_into(kernel: &Tracked, moments: &[f64], magnitudes: &[f64], frozen: &mut Tracked) {
+    frozen.clear_to(kernel.len);
     for power in 0..kernel.len {
         for kernel_power in power..kernel.len {
             let moment_power = kernel_power - power;
@@ -866,7 +892,6 @@ fn frozen_window(kernel: &Tracked, moments: &[f64], magnitudes: &[f64]) -> Track
                 binomial * kernel.magnitudes[kernel_power] * magnitudes[moment_power];
         }
     }
-    frozen
 }
 
 /// Adds `∫ (s − origin)^q δ⁽ᵐ⁾(s − at) ds = (−1)^m q!/(q−m)! (at − origin)^{q−m}`
