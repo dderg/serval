@@ -4,11 +4,11 @@ use geometry::{RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule};
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 use trajectory::{ContinuousAxis, ContinuousSegment};
 
-use super::super::{FollowerState, Table as SpanTable};
+use super::super::{FollowerState, SpanSide, Table as SpanTable};
 use super::{
-    AdvanceValley, Crossing, ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_PER_WIDTH, NODE_SPACING_S,
-    RampLeg, RestSide, ShapedLeaders, Spill, TimedSeam, WIDTH_SLOPE_BOUND, WidthField,
-    slowest_crawl,
+    AdvanceValley, CLUSTER_REACH_S, CROSSING_PROBES, Crossing, ENVELOPE_SLOPE, KERNEL_PEAK,
+    NODE_SPACING_PER_WIDTH, NODE_SPACING_S, RampLeg, RestSide, ShapedLeaders, Spill, TimedSeam,
+    WIDTH_SLOPE_BOUND, WidthField, slowest_crawl,
 };
 
 /// `(length, ratio at start, ratio at end)` per span.
@@ -142,8 +142,8 @@ fn a_table_cut_into_short_spans_is_smoothed_exactly_as_the_whole_one() {
             let whole = smoothed(&table, field(total));
             let pieces = smoothed(&cut(&table, 0.01, 5), field(total));
             for s in probes(total, 20_000) {
-                let (whole_ratio, whole_slope) = whole.ratio_and_slope(s);
-                let (cut_ratio, cut_slope) = pieces.ratio_and_slope(s);
+                let (whole_ratio, whole_slope) = whole.ratio_and_slope(s, SpanSide::After);
+                let (cut_ratio, cut_slope) = pieces.ratio_and_slope(s, SpanSide::After);
                 assert!(
                     (whole_ratio - cut_ratio).abs() < 1e-12,
                     "the cut table lays {cut_ratio} at {s} mm, the whole one {whole_ratio}"
@@ -172,7 +172,7 @@ fn the_smoothed_ratio_stays_within_the_ratios_its_window_spans() {
             for s in probes(total, 20_000) {
                 let h = state.smoothing.width.width(s);
                 let (low, high) = table_range(&state, s - h, s + h);
-                let (ratio, _) = state.ratio_and_slope(s);
+                let (ratio, _) = state.ratio_and_slope(s, SpanSide::After);
                 assert!(
                     ratio >= low - 1e-12 && ratio <= high + 1e-12,
                     "the smoothed ratio {ratio} at {s} mm leaves [{low}, {high}]"
@@ -227,9 +227,9 @@ fn the_smoothed_ratio_is_c1_and_its_derivatives_are_exact() {
             points.retain(|&s| s > 1e-3 && s < total - 1e-3);
             let eps = 1e-9;
             for &s in &points {
-                let (left_ratio, left_slope) = state.ratio_and_slope(s - eps);
-                let (right_ratio, right_slope) = state.ratio_and_slope(s + eps);
-                let (_, slope_on) = state.ratio_and_slope(s);
+                let (left_ratio, left_slope) = state.ratio_and_slope(s - eps, SpanSide::After);
+                let (right_ratio, right_slope) = state.ratio_and_slope(s + eps, SpanSide::After);
+                let (_, slope_on) = state.ratio_and_slope(s, SpanSide::After);
                 assert!(
                     (left_ratio - right_ratio).abs() < 1e-9,
                     "the ratio jumps at {s} mm: {left_ratio} -> {right_ratio}"
@@ -277,7 +277,7 @@ fn the_advance_reads_the_laid_ratio_held_at_zero_where_it_retracts() {
         for s in probes(total, 20_000) {
             let h = state.smoothing.width.width(s);
             let (low, high) = table_range(&state, s - h, s + h);
-            let (read, _) = state.ratio_and_slope_on(SpanTable::Advance, s);
+            let (read, _) = state.ratio_and_slope_on(SpanTable::Advance, s, SpanSide::After);
             assert!(
                 read >= -1e-12 && read <= high.max(0.0) + 1e-12,
                 "the advance reads {read} at {s} mm, outside [0, {}]",
@@ -285,7 +285,7 @@ fn the_advance_reads_the_laid_ratio_held_at_zero_where_it_retracts() {
             );
             if low >= 0.0 {
                 extruding += 1;
-                let (laid, _) = state.ratio_and_slope(s);
+                let (laid, _) = state.ratio_and_slope(s, SpanSide::After);
                 assert_eq!(
                     read, laid,
                     "the advance reads {read} at {s} mm where the window extrudes {laid}"
@@ -319,7 +319,7 @@ fn the_ratio_the_advance_reads_is_c1_through_a_wipe() {
             "the ramp through zero must split the advance's table"
         );
         let eps = 1e-9;
-        let read = |s: f64| state.ratio_and_slope_on(SpanTable::Advance, s);
+        let read = |s: f64| state.ratio_and_slope_on(SpanTable::Advance, s, SpanSide::After);
         for &s in &points {
             let ((left_ratio, left_slope), (right_ratio, right_slope)) =
                 (read(s - eps), read(s + eps));
@@ -348,7 +348,7 @@ fn a_cluster_of_short_spans_is_spread_over_the_whole_window() {
         .map(|seam| seam.step.abs())
         .sum();
     let steepest = probes(total, 50_000)
-        .map(|s| state.ratio_and_slope(s).1.abs())
+        .map(|s| state.ratio_and_slope(s, SpanSide::After).1.abs())
         .fold(0.0, f64::max);
     let width = 1.0;
     assert!(
@@ -374,7 +374,7 @@ fn the_slope_bound_covers_every_window() {
             let (ratio_bound, slope_bound) = state.smoothing.ratio_bounds(&state.spans, lo, hi);
             for k in 0..400 {
                 let s = lo + (hi - lo) * (k as f64 + 0.5) / 400.0;
-                let (ratio, slope) = state.ratio_and_slope(s);
+                let (ratio, slope) = state.ratio_and_slope(s, SpanSide::After);
                 assert!(
                     ratio.abs() <= ratio_bound * (1.0 + 1e-12),
                     "ratio {ratio} at {s} mm over the bound {ratio_bound}"
@@ -391,7 +391,8 @@ fn the_slope_bound_covers_every_window() {
 
 /// A move that leaves the leaders at rest — an extrude-only move, a dwell
 /// — stacks its width nodes on the rest node, and the zero-length stretch
-/// it rides there is bounded like any other.
+/// it rides there is bounded like any other. No window reaches a seam from
+/// a rest, so the stretch bends nowhere.
 #[test]
 fn a_zero_length_stretch_on_stacked_rest_nodes_is_bounded() {
     let table = line_table();
@@ -409,9 +410,10 @@ fn a_zero_length_stretch_on_stacked_rest_nodes_is_bounded() {
     field.push_rest(total);
     let state = smoothed(&table, field);
     let (ratio_bound, slope_bound) = state.smoothing.ratio_bounds(&state.spans, 0.0, 0.0);
-    let (ratio, slope) = state.ratio_and_slope(0.0);
+    let (ratio, slope) = state.ratio_and_slope(0.0, SpanSide::After);
     assert!(ratio.abs() <= ratio_bound && slope.abs() <= slope_bound);
-    assert!(state.smoothing.bends(0.0, 0.0).contains(&0.0));
+    assert!(!state.smoothing.touches(0.0, 0.0));
+    assert!(state.smoothing.bends(0.0, 0.0).is_empty());
 }
 
 #[test]
@@ -677,7 +679,7 @@ fn a_turnaround_crossing_reads_the_whole_acceleration_whatever_its_rounding() {
     let turn = 0.01;
     for drift in [1e-11, 3e-12] {
         let shaped = turning_around_with_drift(turn, drift);
-        let crossing = Crossing::at(&ShapedLeaders::of(&shaped, &[0, 1]), turn);
+        let crossing = Crossing::valley_at(&ShapedLeaders::of(&shaped, &[0, 1]), turn);
         assert!(
             crossing.turns_around(),
             "a turnaround drifting {drift} mm/s along y crosses as {crossing:?}"
@@ -831,6 +833,124 @@ fn a_rest_valley_covers_the_ratio_step_its_leg_lays_short_of_the_rest() {
     );
 }
 
+/// The leaders brake into a rest a rounding past the last time node: the
+/// node stacks with the rest where the leaders stop, so the window closes
+/// there however they move on after it.
+#[test]
+fn a_time_node_a_rounding_short_of_a_rest_stacks_on_the_rest() {
+    let rest = 2.5;
+    let short = 0.9 * super::REST_TARGET_MM;
+    let mut field = WidthField::default();
+    field.push_rest(0.0);
+    field.push(1.0, 0.5);
+    field.push(2.0, 0.5);
+    field.push(rest - short, 0.5);
+    field.push_rest(rest);
+    let alone = field.width(rest);
+    for s in [3.0, 3.5, 4.5] {
+        field.push(s, 0.5);
+    }
+    field.push_rest(5.0);
+    let moving_on = field.width(rest);
+    assert!(
+        alone == 0.0 && moving_on == 0.0,
+        "the window at the rest at {rest} mm is {alone} mm while the leaders rest there and \
+         {moving_on} mm once they move on"
+    );
+}
+
+const BRAKING_SPEED_MM_S: f64 = 60.0;
+const BRAKING_ACCEL_MM_S2: f64 = -2000.0;
+const BRAKING_JERK_MM_S3: f64 = 1e5;
+const BRAKING_TIME_S: f64 = 0.02;
+const SLIVER_S: f64 = 1e-7;
+const SLIVER_JERK_MM_S3: f64 = 1e7;
+
+/// The leaders braking along x over `[0, BRAKING_TIME_S]` as a fit lays
+/// them, closing on a sliver piece whose jerk is [`SLIVER_JERK_MM_S3`]
+/// if `sliver`: the same motion to within the sliver's acceleration
+/// change, as two fits of one shaped signal lay it.
+fn braking_leaders(sliver: bool) -> ContinuousSegment {
+    let motion = [
+        0.0,
+        BRAKING_SPEED_MM_S,
+        0.5 * BRAKING_ACCEL_MM_S2,
+        BRAKING_JERK_MM_S3 / 6.0,
+    ];
+    let mut pieces = vec![BezierPiece {
+        u_start: 0.0,
+        u_end: BRAKING_TIME_S,
+        coeffs: motion.to_vec(),
+    }];
+    if sliver {
+        let start = BRAKING_TIME_S - SLIVER_S;
+        let at = |order: usize| -> f64 {
+            motion
+                .iter()
+                .enumerate()
+                .skip(order)
+                .map(|(power, coefficient)| {
+                    let falling = (power - order + 1..=power).product::<usize>() as f64;
+                    coefficient * falling * start.powi((power - order) as i32)
+                })
+                .sum()
+        };
+        pieces[0].u_end = start;
+        pieces.push(BezierPiece {
+            u_start: start,
+            u_end: BRAKING_TIME_S,
+            coeffs: vec![at(0), at(1), 0.5 * at(2), SLIVER_JERK_MM_S3 / 6.0],
+        });
+    }
+    let held = Arc::new(bezier_pieces_to_nurbs(&[BezierPiece {
+        u_start: 0.0,
+        u_end: BRAKING_TIME_S,
+        coeffs: vec![0.0],
+    }]));
+    ContinuousSegment {
+        axes: Arc::from([
+            ContinuousAxis::Spline(Arc::new(bezier_pieces_to_nurbs(&pieces))),
+            ContinuousAxis::Spline(Arc::clone(&held)),
+            ContinuousAxis::Spline(Arc::clone(&held)),
+            ContinuousAxis::Spline(held),
+        ]),
+        followers: Arc::from([]),
+        spatial_path: true,
+        t_start: 0.0,
+        t_end: BRAKING_TIME_S,
+        motor_mask: 0,
+        source_line: 1,
+        rest_at_end: false,
+    }
+}
+
+/// Two fits of one braking, one closing on a sliver piece of a jerk a
+/// hundred times the leaders' own, meet a seam with the same jerk: within
+/// twice the sliver's acceleration change over a probe interval.
+#[test]
+fn a_sliver_piece_of_the_leader_fit_leaves_the_crossing_jerk_alone() {
+    let seam = BRAKING_TIME_S - CLUSTER_REACH_S;
+    let jerk = |sliver: bool| {
+        let leaders = braking_leaders(sliver);
+        Crossing::over(
+            &ShapedLeaders::of(&leaders, &[0, 1]),
+            (seam, BRAKING_TIME_S),
+        )
+        .jerk
+    };
+    let probe_interval = CLUSTER_REACH_S / CROSSING_PROBES as f64;
+    let bound = 2.0 * SLIVER_JERK_MM_S3 * SLIVER_S / probe_interval;
+    let (clean, with_sliver) = (jerk(false), jerk(true));
+    assert!(
+        (clean - BRAKING_JERK_MM_S3).abs() <= 1e-6 * BRAKING_JERK_MM_S3,
+        "the crossing reads a jerk of {clean} mm/s³ off a braking of {BRAKING_JERK_MM_S3}"
+    );
+    assert!(
+        (with_sliver - clean).abs() <= bound,
+        "a sliver piece moves the crossing's jerk from {clean} to {with_sliver} mm/s³, past \
+         {bound}"
+    );
+}
 fn model_at(model: &crate::shaper::taylor::TaylorModel, x: f64) -> f64 {
     model
         .coefficients()
@@ -925,7 +1045,6 @@ fn the_smoothing_models_hold_its_correction_and_valley_weight_between_bends() {
     }
     assert!(read > 100, "too few stretches read: {read}");
 }
-
 const CORNER_SPEED_MM_S: f64 = 40.0;
 const CORNER_CRAWL_MM_S: f64 = 4.0;
 const CORNER_BRAKE_MM_S2: f64 = 6400.0;

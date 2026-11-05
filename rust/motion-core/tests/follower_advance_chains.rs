@@ -164,6 +164,41 @@ fn bowden_advanced_corner(fit_tol_mm: f64) -> Vec<ContinuousSegment> {
     )
 }
 
+/// The largest the extruder of `fitted` leaves that of `reference` over
+/// `[t0, t1]`, wherever both lay their bead on the same shaped path.
+fn extruder_departure(
+    fitted: &[ContinuousSegment],
+    reference: &[ContinuousSegment],
+    (t0, t1): (f64, f64),
+) -> f64 {
+    let samples: u32 = 20_000;
+    let shared_path: Vec<f64> = (0..=samples)
+        .map(|index| t0 + (t1 - t0) * f64::from(index) / f64::from(samples))
+        .filter(|&t| {
+            [0, 1]
+                .into_iter()
+                .all(|axis| axis_at(fitted, axis, t) == axis_at(reference, axis, t))
+        })
+        .collect();
+    assert!(
+        shared_path.len() * 10 >= samples as usize * 9,
+        "the tolerances must leave the shaped path alone: only {} of {samples} samples share it",
+        shared_path.len()
+    );
+    shared_path
+        .iter()
+        .map(|&t| (axis_at(fitted, EXTRUDER_AXIS, t) - axis_at(reference, EXTRUDER_AXIS, t)).abs())
+        .fold(0.0, f64::max)
+}
+
+fn plan_end(fitted: &[ContinuousSegment], reference: &[ContinuousSegment]) -> f64 {
+    fitted
+        .last()
+        .expect("the corner plans")
+        .t_end
+        .min(reference.last().expect("the corner plans").t_end)
+}
+
 /// An advance turns its source's velocity error `δ'` into `k·δ'` of
 /// command, and the melt lag that advance models hands `δ'` to the nozzle
 /// flow whole: a bead error of `δ'/(r·v)`, largest where a corner slows.
@@ -176,35 +211,37 @@ fn an_advance_before_a_kernel_holds_the_command_to_the_position_budget() {
     let fit_tol_mm = 0.005;
     let fitted = bowden_advanced_corner(fit_tol_mm);
     let reference = bowden_advanced_corner(fit_tol_mm / 25.0);
-    let t_end = fitted
-        .last()
-        .expect("the corner plans")
-        .t_end
-        .min(reference.last().expect("the corner plans").t_end);
-    let samples: u32 = 20_000;
-    let shared_path: Vec<f64> = (0..=samples)
-        .map(|index| t_end * f64::from(index) / f64::from(samples))
-        .filter(|&t| {
-            [0, 1]
-                .into_iter()
-                .all(|axis| axis_at(&fitted, axis, t) == axis_at(&reference, axis, t))
-        })
-        .collect();
-    assert!(
-        shared_path.len() * 10 >= samples as usize * 9,
-        "the tolerances must leave the shaped path alone: only {} of {samples} samples share it",
-        shared_path.len()
-    );
-    let worst = shared_path
-        .iter()
-        .map(|&t| {
-            (axis_at(&fitted, EXTRUDER_AXIS, t) - axis_at(&reference, EXTRUDER_AXIS, t)).abs()
-        })
-        .fold(0.0, f64::max);
+    let worst = extruder_departure(&fitted, &reference, (0.0, plan_end(&fitted, &reference)));
     let budget = 2.0 * fit_tol_mm * BOWDEN_RATIO;
     assert!(
         worst <= budget,
         "the advanced command leaves the reference by {worst} mm, past the follower's \
          position budget {budget} mm"
+    );
+}
+
+/// The rest a print opens on lays no extrusion of its own, yet the shaped
+/// leaders leave it early and ride the first extrusion's path: the
+/// extruder there is held to that extrusion's position budget, not a
+/// travel's.
+#[test]
+fn the_rest_a_print_opens_on_holds_the_extruder_to_the_extrusion_budget() {
+    let fit_tol_mm = 0.005;
+    let fitted = bowden_advanced_corner(fit_tol_mm);
+    let reference = bowden_advanced_corner(fit_tol_mm / 25.0);
+    let opening = &fitted[0];
+    assert!(
+        opening.followers.is_empty(),
+        "the plan opens on a segment that demands no extrusion, not on {:?}",
+        opening.followers
+    );
+    let worst = extruder_departure(&fitted, &reference, (opening.t_start, opening.t_end));
+    let budget = 2.0 * fit_tol_mm * BOWDEN_RATIO;
+    assert!(
+        worst <= budget,
+        "over the opening rest [{}, {}] the extruder leaves the reference by {worst} mm, past \
+         the extrusion's position budget {budget} mm",
+        opening.t_start,
+        opening.t_end
     );
 }

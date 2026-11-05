@@ -21,7 +21,9 @@ use crate::shaper::taylor::{self, Ball, TaylorModel, Window};
 use crate::shaper::{Enclosure, ExactPiece};
 
 use super::ratio_ramp::{REACH_INSET_ULPS, ValleyWeight};
-use super::{AdvancedFollowerSignal, ChainStage, FollowerSignal, LaidRead, RatioSpan, Table};
+use super::{
+    AdvancedFollowerSignal, ChainStage, FollowerSignal, LaidRead, RatioSpan, SpanSide, Table,
+};
 
 /// What the table and its smoothing lay over a window's reach: `(e, r,
 /// r', r'')` as models on the window, and how far other formulas the reach
@@ -311,8 +313,9 @@ pub(super) struct FollowerAxisWindows<'a> {
 }
 
 impl<'a> FollowerSignal<'a> {
-    /// `table`'s formulas over path distances `[lo, hi]`, the one laid at
-    /// `centre` first.
+    /// `table`'s formulas over path distances `[lo, hi]`, the one the
+    /// signal reads at `centre` first — at a span boundary, on the side
+    /// [`Self::side_at`] reads it.
     fn table_formulas(&self, table: Table, centre: f64, (lo, hi): (f64, f64)) -> Vec<TableFormula> {
         let spans = self.state.spans_of(table);
         let (Some(&first), Some(&last)) = (spans.first(), spans.last()) else {
@@ -324,10 +327,11 @@ impl<'a> FollowerSignal<'a> {
             } else if s > last.s1 {
                 TableFormula::Past(last)
             } else {
-                let index = spans
-                    .partition_point(|span| span.s1 < s)
-                    .min(spans.len() - 1);
-                TableFormula::Span(spans[index])
+                let index = match self.side_at(s) {
+                    SpanSide::After => spans.partition_point(|span| span.s1 <= s),
+                    SpanSide::Before => spans.partition_point(|span| span.s1 < s),
+                };
+                TableFormula::Span(spans[index.min(spans.len() - 1)])
             }
         };
         let mut formulas = vec![region_of(centre)];
@@ -337,11 +341,18 @@ impl<'a> FollowerSignal<'a> {
         if hi > last.s1 {
             formulas.push(TableFormula::Past(last));
         }
-        let from = spans.partition_point(|span| span.s1 < lo);
+        let from = match self.side_at(lo) {
+            SpanSide::After => spans.partition_point(|span| span.s1 <= lo),
+            SpanSide::Before => spans.partition_point(|span| span.s1 < lo),
+        };
+        let read_at_hi = |span: &&RatioSpan| match self.side_at(hi) {
+            SpanSide::After => span.s0 <= hi,
+            SpanSide::Before => span.s0 < hi,
+        };
         formulas.extend(
             spans[from..]
                 .iter()
-                .take_while(|span| span.s0 <= hi)
+                .take_while(read_at_hi)
                 .map(|&span| TableFormula::Span(span)),
         );
         formulas
@@ -610,7 +621,7 @@ impl<'a> FollowerSignal<'a> {
         }
         let reads: Vec<LaidRead> = super::ratio_ramp::narrow_floats(reach)?
             .into_iter()
-            .map(|s| self.state.laid_on(table, s))
+            .map(|s| self.laid_on(table, s))
             .collect();
         let spanning = |read: fn(&LaidRead) -> f64| {
             let (low, high) = reads
