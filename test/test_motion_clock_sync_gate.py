@@ -12,7 +12,9 @@ class _Clocksync:
         self.synced_at = synced_at
 
     def is_synced(self):
-        return self.synced_at is not None and self._reactor.now >= self.synced_at
+        return (
+            self.synced_at is not None and self._reactor.now >= self.synced_at
+        )
 
 
 class _Mcu:
