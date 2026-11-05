@@ -127,6 +127,7 @@ mod stage {
         ShaperBusy,
         MaterializeSource,
         LeaderFit,
+        LeaderPrefit,
         FollowerProjection,
         FollowerIngest,
         FollowerSourceFit,
@@ -156,12 +157,13 @@ mod totals {
     use super::Stage;
 
     impl Stage {
-        pub const ALL: [Self; 11] = [
+        pub const ALL: [Self; 12] = [
             Self::VelocityPlan,
             Self::PlanningBlockedOnShaper,
             Self::ShaperBusy,
             Self::MaterializeSource,
             Self::LeaderFit,
+            Self::LeaderPrefit,
             Self::FollowerProjection,
             Self::FollowerIngest,
             Self::FollowerSourceFit,
@@ -178,6 +180,7 @@ mod totals {
                 Self::ShaperBusy => "shaper_busy",
                 Self::MaterializeSource => "materialize_source",
                 Self::LeaderFit => "leader_fit",
+                Self::LeaderPrefit => "leader_prefit",
                 Self::FollowerProjection => "follower_projection",
                 Self::FollowerIngest => "follower_ingest",
                 Self::FollowerSourceFit => "follower_source_fit",

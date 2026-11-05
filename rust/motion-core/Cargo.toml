@@ -30,7 +30,7 @@ test-support = ["pipeline-snapshot"]
 
 [dev-dependencies]
 source-tree = { path = "../source-tree" }
-motion-pipeline = { path = "../motion-pipeline", features = ["bench-metrics"] }
+motion-pipeline = { path = "../motion-pipeline", features = ["bench-metrics", "test-support"] }
 config-doc = { path = "../config-doc" }
 planner-config = { path = "../planner-config", features = ["doc"] }
 ethercat-rt = { path = "../ethercat-rt" }

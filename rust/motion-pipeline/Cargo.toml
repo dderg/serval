@@ -24,6 +24,7 @@ tracing = "0.1"
 [features]
 bench-metrics = []
 fit-audit = []
+test-support = []
 
 [dev-dependencies]
 proptest = "1"

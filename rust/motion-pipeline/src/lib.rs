@@ -9,6 +9,7 @@ use trajectory::{AxisChainSet, ContinuousSegment};
 pub mod fit_audit;
 pub mod fit_stage;
 mod follower_projection;
+mod leader_prefit;
 pub mod live_config;
 mod lower_stage;
 mod lowering;
@@ -77,6 +78,13 @@ impl Pipeline {
     #[must_use]
     pub fn with_toolhead_tap(mut self, tap: Sender<ContinuousSegment>) -> Self {
         self.shaper = self.shaper.with_toolhead_tap(tap);
+        self
+    }
+
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn with_emit_batch(mut self, segments: usize) -> Self {
+        self.shaper = self.shaper.with_emit_batch(segments);
         self
     }
 

@@ -12,7 +12,7 @@ use trajectory::{
     RelativeSplinePiece, ShapedSignal,
 };
 
-use crate::lowering::{AccelBudget, FitTol, SeamContinuity, follower_tol_scale, riding_tol_scale};
+use crate::lowering::{AccelBudget, FitTol, SeamContinuity, riding_tol_scale};
 use crate::shaper::{
     AxisFit, AxisSignalTable, ConvolutionSignal, Enclosure, ExactConvolution, ExactKernel,
     FitBoundary, Lookahead, SEGMENT_TIME_EPS_S, ShapedBreaks, ShiftedTrackSignal, SignalBounds,
@@ -805,6 +805,9 @@ pub(crate) fn project_followers(
         "a forced follower projection left {} of {requested} segments short of final",
         requested - commit_count
     );
+    if !lookahead.clamps_past_signal() {
+        commit_count = crate::shaper::whole_groups(base, commit_count);
+    }
     out.truncate(commit_count);
     for (axis, leaders) in committing {
         let chain = &chains.chains[axis];
@@ -814,352 +817,130 @@ pub(crate) fn project_followers(
         let state = &mut states[axis];
         let kernel_tracks = match kernel {
             Some(kernel) if commit_count > 0 => {
-                let first = state.projected.first().expect("cache covers commits");
-                let last = state.projected.last().expect("cache covers commits");
-                let (first_t, last_t) = (first.t_start, last.t_end);
-                let mut batch_base = first.base;
-                let supports = (0..commit_count)
-                    .map(|i| projection_support(&base[i], &frontier[i], axis, leaders))
-                    .collect::<Vec<_>>();
-                let target_start = supports.first().expect("commit_count > 0").0;
-                let target_end = supports.last().expect("commit_count > 0").1;
-                let (k_lo, k_hi) = kernel.support();
-                let need_lo = target_start - k_hi;
-                let need_hi = target_end - k_lo;
-                if need_lo < first_t && state.projected_trimmed {
-                    return Err(PostProcessError::MissingHistory { axis, t: need_lo });
-                }
-                if need_hi > last_t && !lookahead.clamps_past_signal() {
-                    return Err(PostProcessError::MissingLookahead { axis, t: need_hi });
-                }
-                let mut input_pieces = Vec::new();
-                let mut semantic_cuts = Vec::new();
-                let mut input_steps = Vec::new();
-                let mut carried = 0.0;
-                let mut input_end = None;
-                for segment in &state.projected {
-                    if let Some(previous_end) = input_end {
-                        assert!(
-                            segment.t_start >= previous_end,
-                            "projected follower segments overlap"
-                        );
-                        if segment.t_start > previous_end {
-                            input_pieces.push(BezierPiece {
-                                u_start: previous_end,
-                                u_end: segment.t_start,
-                                coeffs: vec![carried],
-                            });
+                let targets = (0..commit_count)
+                    .map(|i| {
+                        let support = projection_support(&base[i], &frontier[i], axis, leaders);
+                        KernelTarget {
+                            support,
+                            tol_scale: state.cached_projection(support.0, support.1).tol_scale,
                         }
-                    }
-                    let pieces = extract_bezier_pieces(&segment.track);
-                    let head = pieces.first().expect("a projected track has pieces").coeffs[0];
-                    let segment_offset = input_end.map_or(0.0, |_| carried - head);
-                    let join_step = input_end.map_or(0.0, |_| segment.join_advance_step);
-                    if join_step != 0.0 {
-                        input_steps.push((segment.t_start, join_step));
-                    }
-                    let pieces = with_window_steps(
-                        pieces,
-                        &segment.window_advance_steps,
-                        segment_offset + join_step,
-                        &mut input_steps,
-                    );
-                    let tail = pieces.last().expect("a projected track has pieces");
-                    carried = polynomial_pva(&tail.coeffs, tail.u_end - tail.u_start).0;
-                    input_pieces.extend(pieces);
-                    semantic_cuts.extend_from_slice(&segment.semantic_cuts);
-                    semantic_cuts.extend([segment.t_start, segment.t_end]);
-                    input_end = Some(segment.t_end);
-                }
-                semantic_cuts.sort_by(f64::total_cmp);
-                semantic_cuts.dedup();
-                for piece in &mut input_pieces {
-                    piece.coeffs.resize(piece.coeffs.len().max(6), 0.0);
-                }
-                let nonnegative_demand = state
-                    .spans
-                    .iter()
-                    .all(|span| span.r0 >= 0.0 && span.r1 >= 0.0);
-                assert_piece_seams(axis, "projected input", &input_pieces, &input_steps);
-                if nonnegative_demand {
-                    let correction_tol = follower_fit_tol(
-                        fit_tol,
-                        base.iter()
-                            .map(|segment| follower_tol_scale(&segment.followers, axis))
-                            .fold(1.0, f64::min),
-                    );
-                    project_monotone(axis, "projected input", &mut input_pieces, correction_tol);
-                }
-                let unified_input_degree = input_pieces
-                    .iter()
-                    .map(|piece| piece.degree())
-                    .max()
-                    .expect("projected follower input is empty");
-                for piece in &mut input_pieces {
-                    piece.coeffs.resize(unified_input_degree + 1, 0.0);
-                }
-                let assemble = if input_steps.is_empty() {
-                    bezier_pieces_to_nurbs
-                } else {
-                    nurbs::bezier::bezier_pieces_to_discontinuous_nurbs
-                };
-                let mut kernel_input = assemble(&input_pieces);
-                let input_offset = nurbs::eval::eval(&kernel_input, target_start);
-                for piece in &mut input_pieces {
-                    piece.coeffs[0] -= input_offset;
-                }
-                kernel_input = assemble(&input_pieces);
-                batch_base += input_offset * unit_kernel_mass(kernel);
-                let mut gained_input = chain.leading_transform().is_some();
-                if defer_linear_prefix {
-                    if let Some(ChainStage::DerivativeGains { k1, k2 }) = chain.transform() {
-                        kernel_input = nurbs::bezier::bezier_pieces_to_discontinuous_nurbs(
-                            &extrude_only::without_extrude_only_gain(
-                                extract_bezier_pieces(&apply_derivative_gains_to_track(
-                                    &kernel_input,
-                                    *k1,
-                                    *k2,
-                                )),
-                                state
-                                    .projected
-                                    .iter()
-                                    .flat_map(|segment| &segment.extrude_only),
-                                (*k1, *k2),
-                            ),
-                        );
-                        gained_input = true;
-                    }
-                }
-                let gained_pieces = extract_bezier_pieces(&kernel_input);
-                assert!(
-                    gained_pieces.iter().all(|piece| {
-                        [0.0, piece.u_end - piece.u_start]
-                            .into_iter()
-                            .flat_map(|tau| {
-                                let pva = polynomial_pva(&piece.coeffs, tau);
-                                [pva.0, pva.1, pva.2]
-                            })
-                            .all(f64::is_finite)
-                    }),
-                    "follower axis {axis} gained input has non-finite one-sided P/V/A"
-                );
-                let kernel_degree = kernel
-                    .pieces
-                    .iter()
-                    .map(|piece| piece.degree())
-                    .max()
-                    .expect("shaper kernel has no pieces");
-                let table = Arc::new(
-                    AxisSignalTable::from_tracks(
-                        std::iter::once(&kernel_input),
-                        SignalBounds {
-                            first_t,
-                            last_t,
-                            boundary: if state.projected_trimmed {
-                                FitBoundary::Interior
-                            } else {
-                                FitBoundary::StreamBoundary
-                            },
-                            lookahead,
-                        },
-                    )
-                    .with_piece_moments(kernel_degree),
-                );
-                let input_degree = table.max_degree();
-                let exact_input_breaks = gained_pieces
-                    .iter()
-                    .flat_map(|piece| [piece.u_start, piece.u_end])
+                    })
                     .collect::<Vec<_>>();
-                let shaped_break_seeds = if gained_input {
-                    &exact_input_breaks
-                } else {
-                    &semantic_cuts
-                };
-                let breaks_started = crate::timing::stopwatch();
-                let shaped_breaks = ShapedBreaks::new(kernel, shaped_break_seeds);
-                timing.breakpoints_us += breaks_started.elapsed_us();
-                let input_jumps = table.input_jumps().to_vec();
-                let exact_kernel = ExactKernel::new(kernel);
-                let make_sig = || {
-                    let eval_table = Arc::clone(&table);
-                    let moment_table = Arc::clone(&table);
-                    let piece_hint = std::cell::Cell::new(0);
-                    ConvolutionSignal::new(
-                        ShapedSignal::new_from_polynomial_evaluator(
-                            kernel,
-                            move |t| eval_table.eval_hinted(t, &piece_hint),
-                            exact_input_breaks.clone(),
-                            input_degree,
-                            move |lo, hi, degree, origin, orders| {
-                                moment_table.integrate_moments(lo, hi, degree, origin, orders)
-                            },
-                            input_jumps.clone(),
-                        ),
-                        ExactConvolution {
-                            table: &table,
-                            kernel: &exact_kernel,
-                            impulses: &[],
-                            position_offset: 0.0,
-                        },
-                    )
-                };
-                let tol_scale = (0..commit_count)
-                    .map(|i| follower_tol_scale(&base[i].followers, axis))
-                    .fold(1.0, f64::min);
-                let target_tol = follower_fit_tol(fit_tol, tol_scale);
-                let output_monotonicity = if nonnegative_demand && !gained_input {
-                    OutputMonotonicity::Enforced
-                } else {
-                    OutputMonotonicity::Free
+                let fit = KernelFit {
+                    axis,
+                    chain,
+                    kernel,
+                    defer_linear_prefix,
+                    fit_tol,
+                    lookahead,
                 };
                 let kernel_started = crate::timing::stopwatch();
-                timing.kernel_fits += supports.len();
+                timing.kernel_fits += targets.len();
+                let groups = crate::shaper::fit_groups(
+                    &base[..commit_count],
+                    lookahead.clamps_past_signal(),
+                );
                 let workers = if cfg!(target_arch = "wasm32") {
                     1
                 } else {
                     std::thread::available_parallelism().map_or(1, |cores| {
-                        cores.get().saturating_sub(1).max(1).min(supports.len())
+                        cores.get().saturating_sub(1).max(1).min(groups.len())
                     })
                 };
+                let state_ref: &FollowerState = &*state;
                 let fitted = pool
-                    .map_indexed(workers, supports.len(), &make_sig, |sig, index| {
-                        let (start, end) = supports[index];
-                        let seeds = shaped_breaks.select_seeds(
-                            fit_seed_times(axis, start, end, shaped_breaks.times())?,
-                            Some(table.as_ref()),
-                            target_tol,
-                        );
-                        fit_kernel_window(
-                            axis,
-                            start,
-                            end,
-                            &seeds,
-                            sig,
-                            target_tol,
-                            output_monotonicity,
-                        )
-                    })
+                    .map_indexed(
+                        workers,
+                        groups.len(),
+                        || (),
+                        |(), index| fit.group_alone(state_ref, &targets[groups[index].clone()]),
+                    )
                     .expect("follower kernel fit thread panicked");
-                let mut bases = Vec::with_capacity(supports.len());
-                let mut tracks: Vec<Vec<BezierPiece>> = Vec::with_capacity(supports.len());
+                let mut tracks = Vec::with_capacity(targets.len());
                 for result in fitted {
-                    let (local_base, pieces, window_us) = result?;
-                    timing.kernel_fit_max_us = timing.kernel_fit_max_us.max(window_us);
-                    bases.push(local_base);
-                    tracks.push(pieces);
+                    let (group_tracks, window) = result?;
+                    timing.kernel_fit_max_us = timing.kernel_fit_max_us.max(window.fit_us);
+                    timing.breakpoints_us += window.breakpoints_us;
+                    tracks.extend(group_tracks);
                 }
                 timing.kernel_fit_us += kernel_started.elapsed_us();
-                bases[0] -= piece_run_start_pv(&tracks[0]).0;
-                for i in 1..tracks.len() {
-                    bases[i] = bases[i - 1] + piece_run_end(&tracks[i - 1])
-                        - piece_run_start_pv(&tracks[i]).0;
-                }
-                for (i, pair) in tracks.windows(2).enumerate() {
-                    let t = supports[i].1;
-                    let left_piece = pair[0].last().expect("a fitted target has pieces");
-                    let right_piece = pair[1].first().expect("a fitted target has pieces");
-                    let left = polynomial_pv(&left_piece.coeffs, t - left_piece.u_start);
-                    let right = polynomial_pv(&right_piece.coeffs, t - right_piece.u_start);
-                    assert!(
-                        [left.0, left.1, right.0, right.1]
-                            .into_iter()
-                            .all(f64::is_finite)
-                            && basis_conversion_same(
-                                bases[i] + left.0,
-                                bases[i + 1] + right.0,
-                                left_piece.degree().max(right_piece.degree()),
-                                supports[i].1 - supports[i].0,
-                                supports[i + 1].1 - supports[i + 1].0,
-                            ),
-                        "follower axis {axis} target seam {i} at {t}: left {left:?} over base \
-                         {}, right {right:?} over base {}",
-                        bases[i],
-                        bases[i + 1]
-                    );
-                }
-                Some((batch_base, bases, tracks))
+                Some(tracks)
             }
             _ => None,
         };
         let mut emitted_pv = state.emitted_output_pv;
         let mut committed_input_end = state.committed_input_end;
-        let emit_window = (commit_count > 0).then(|| {
-            (
-                projection_support(&base[0], &frontier[0], axis, leaders).0,
-                projection_support(
-                    &base[commit_count - 1],
-                    &frontier[commit_count - 1],
-                    axis,
-                    leaders,
-                )
-                .1,
-            )
-        });
-        let mut batch_weld: Option<SeamWeld> = None;
-        for i in 0..commit_count {
-            let raw = &base[i];
-            let (t_start, t_end) = projection_support(raw, &frontier[i], axis, leaders);
-            let cached = state.cached_projection(t_start, t_end);
-            let (input_start, input_end) = (cached.input_start, cached.input_end);
-            let (base_position, mut pieces) = kernel_tracks.as_ref().map_or_else(
-                || (cached.base, extract_bezier_pieces(&cached.track)),
-                |(batch_base, bases, tracks)| (*batch_base + bases[i], tracks[i].clone()),
-            );
-            let law_step = |previous_input: Option<SeamInput>| {
-                if kernel.is_some() {
-                    return 0.0;
+        let support = |i: usize| projection_support(&base[i], &frontier[i], axis, leaders);
+        let mut group_weld: Option<SeamWeld> = None;
+        for group in
+            crate::shaper::fit_groups(&base[..commit_count], lookahead.clamps_past_signal())
+        {
+            for i in group.clone() {
+                let (t_start, t_end) = support(i);
+                let cached = state.cached_projection(t_start, t_end);
+                let (input_start, input_end) = (cached.input_start, cached.input_end);
+                let (base_position, mut pieces) = kernel_tracks.as_ref().map_or_else(
+                    || (cached.base, extract_bezier_pieces(&cached.track)),
+                    |tracks| tracks[i].clone(),
+                );
+                let law_step = |previous_input: Option<SeamInput>| {
+                    if kernel.is_some() {
+                        return 0.0;
+                    }
+                    previous_input
+                        .expect("an emitted endpoint always records its pre-transform state")
+                        .emitted_velocity_step(&input_start)
+                };
+                if i == group.start {
+                    group_weld = None;
+                    if let Some(previous) = emitted_pv {
+                        let group_tol_scale = group
+                            .clone()
+                            .map(|j| {
+                                let (start, end) = support(j);
+                                state.cached_projection(start, end).tol_scale
+                            })
+                            .fold(f64::INFINITY, f64::min);
+                        group_weld = Some(SeamWeld::spanning(
+                            WeldWindow {
+                                axis,
+                                start: t_start,
+                                end: support(group.end - 1).1,
+                                tol: follower_fit_tol(fit_tol, group_tol_scale),
+                            },
+                            previous,
+                            law_step(committed_input_end),
+                            base_position,
+                            &pieces,
+                        )?);
+                    }
                 }
-                previous_input
-                    .expect("an emitted endpoint always records its pre-transform state")
-                    .emitted_velocity_step(&input_start)
-            };
-            if i == 0 {
-                if let (Some(previous), Some((emit_start, emit_end))) = (emitted_pv, emit_window) {
-                    let window_tol = follower_fit_tol(
-                        fit_tol,
-                        base[..commit_count]
-                            .iter()
-                            .map(|segment| follower_tol_scale(&segment.followers, axis))
-                            .fold(1.0, f64::min),
-                    );
-                    batch_weld = Some(SeamWeld::spanning(
+                if let Some(weld) = group_weld {
+                    pieces = weld.apply(pieces);
+                }
+                if i > group.start {
+                    let previous = emitted_pv.expect("an earlier target of the group emitted");
+                    let weld = SeamWeld::spanning(
                         WeldWindow {
                             axis,
-                            start: emit_start,
-                            end: emit_end,
-                            tol: window_tol,
+                            start: t_start,
+                            end: t_end,
+                            tol: follower_fit_tol(fit_tol, cached.tol_scale),
                         },
                         previous,
                         law_step(committed_input_end),
                         base_position,
                         &pieces,
-                    )?);
+                    )?;
+                    pieces = weld.apply(pieces);
                 }
+                committed_input_end = Some(input_end);
+                let (run_end, velocity_end) = piece_run_end_pv(&pieces);
+                emitted_pv = Some((base_position + run_end, velocity_end));
+                Arc::make_mut(&mut out[i].axes)[axis] = ContinuousAxis::PiecewiseRelativeSpline(
+                    localize_pieces(base_position, &pieces),
+                );
             }
-            if let Some(weld) = batch_weld {
-                pieces = weld.apply(pieces);
-            }
-            if i > 0 {
-                let previous = emitted_pv.expect("an earlier commit emitted its endpoint state");
-                let weld = SeamWeld::spanning(
-                    WeldWindow {
-                        axis,
-                        start: t_start,
-                        end: t_end,
-                        tol: follower_fit_tol(fit_tol, cached.tol_scale),
-                    },
-                    previous,
-                    law_step(committed_input_end),
-                    base_position,
-                    &pieces,
-                )?;
-                pieces = weld.apply(pieces);
-            }
-            committed_input_end = Some(input_end);
-            let (run_end, velocity_end) = piece_run_end_pv(&pieces);
-            emitted_pv = Some((base_position + run_end, velocity_end));
-            Arc::make_mut(&mut out[i].axes)[axis] =
-                ContinuousAxis::PiecewiseRelativeSpline(localize_pieces(base_position, &pieces));
         }
         state.emitted_output_pv = emitted_pv;
         state.committed_input_end = committed_input_end;
@@ -1202,6 +983,282 @@ fn final_ramped_commits(
 enum OutputMonotonicity {
     Enforced,
     Free,
+}
+
+/// One committed segment's follower-kernel fit target: the window the
+/// output covers and the tolerance scale of its own extrusion.
+#[derive(Clone, Copy)]
+struct KernelTarget {
+    support: (f64, f64),
+    tol_scale: f64,
+}
+
+struct KernelWindowTiming {
+    fit_us: u128,
+    breakpoints_us: u128,
+}
+
+/// What every target's follower-kernel fit shares within one emit.
+struct KernelFit<'a> {
+    axis: usize,
+    chain: &'a CompiledChain,
+    kernel: &'a nurbs::algebra::PiecewisePolynomialKernel,
+    defer_linear_prefix: bool,
+    fit_tol: FitTol,
+    lookahead: Lookahead,
+}
+
+impl KernelFit<'_> {
+    /// The kernel output over each target of one fit group from the
+    /// projected segments the group's window reads alone, assembled from the
+    /// first of them and offset at the group's start, so the fits are the
+    /// same whichever other segments share its emit or are still cached
+    /// around it. Returns each target's pieces with the absolute base they
+    /// sit on.
+    fn group_alone(
+        &self,
+        state: &FollowerState,
+        group: &[KernelTarget],
+    ) -> Result<(Vec<(f64, Vec<BezierPiece>)>, KernelWindowTiming), PostProcessError> {
+        let Self {
+            axis,
+            chain,
+            kernel,
+            defer_linear_prefix,
+            fit_tol,
+            lookahead,
+        } = *self;
+        let (target_start, target_end) = (
+            group.first().expect("a fit group holds targets").support.0,
+            group.last().expect("a fit group holds targets").support.1,
+        );
+        let (k_lo, k_hi) = kernel.support();
+        let (read_lo, read_hi) = (target_start - k_hi, target_end - k_lo);
+        let projected = &state.projected;
+        let lo = projected
+            .partition_point(|segment| segment.t_start < read_lo)
+            .saturating_sub(1);
+        let hi = (projected.partition_point(|segment| segment.t_end <= read_hi) + 1)
+            .min(projected.len());
+        let window = &projected[lo..hi];
+        let first = window.first().expect("cache covers commits");
+        let last = window.last().expect("cache covers commits");
+        let (first_t, last_t) = (first.t_start, last.t_end);
+        if read_lo < first_t && state.projected_trimmed {
+            return Err(PostProcessError::MissingHistory { axis, t: read_lo });
+        }
+        if read_hi > last_t && !lookahead.clamps_past_signal() {
+            return Err(PostProcessError::MissingLookahead { axis, t: read_hi });
+        }
+        let mut input_pieces = Vec::new();
+        let mut semantic_cuts = Vec::new();
+        let mut input_steps = Vec::new();
+        let mut carried = 0.0;
+        let mut input_end = None;
+        for segment in window {
+            if let Some(previous_end) = input_end {
+                assert!(
+                    segment.t_start >= previous_end,
+                    "projected follower segments overlap"
+                );
+                if segment.t_start > previous_end {
+                    input_pieces.push(BezierPiece {
+                        u_start: previous_end,
+                        u_end: segment.t_start,
+                        coeffs: vec![carried],
+                    });
+                }
+            }
+            let pieces = extract_bezier_pieces(&segment.track);
+            let head = pieces.first().expect("a projected track has pieces").coeffs[0];
+            let segment_offset = input_end.map_or(0.0, |_| carried - head);
+            let join_step = input_end.map_or(0.0, |_| segment.join_advance_step);
+            if join_step != 0.0 {
+                input_steps.push((segment.t_start, join_step));
+            }
+            let pieces = with_window_steps(
+                pieces,
+                &segment.window_advance_steps,
+                segment_offset + join_step,
+                &mut input_steps,
+            );
+            let tail = pieces.last().expect("a projected track has pieces");
+            carried = polynomial_pva(&tail.coeffs, tail.u_end - tail.u_start).0;
+            input_pieces.extend(pieces);
+            semantic_cuts.extend_from_slice(&segment.semantic_cuts);
+            semantic_cuts.extend([segment.t_start, segment.t_end]);
+            input_end = Some(segment.t_end);
+        }
+        semantic_cuts.sort_by(f64::total_cmp);
+        semantic_cuts.dedup();
+        for piece in &mut input_pieces {
+            piece.coeffs.resize(piece.coeffs.len().max(6), 0.0);
+        }
+        let nonnegative_demand = state
+            .spans
+            .iter()
+            .all(|span| span.r0 >= 0.0 && span.r1 >= 0.0);
+        let group_tol = follower_fit_tol(
+            fit_tol,
+            group
+                .iter()
+                .map(|target| target.tol_scale)
+                .fold(f64::INFINITY, f64::min),
+        );
+        assert_piece_seams(axis, "projected input", &input_pieces, &input_steps);
+        if nonnegative_demand {
+            project_monotone(axis, "projected input", &mut input_pieces, group_tol);
+        }
+        let unified_input_degree = input_pieces
+            .iter()
+            .map(|piece| piece.degree())
+            .max()
+            .expect("projected follower input is empty");
+        for piece in &mut input_pieces {
+            piece.coeffs.resize(unified_input_degree + 1, 0.0);
+        }
+        let at_target = &input_pieces[input_pieces
+            .partition_point(|piece| piece.u_end <= target_start)
+            .min(input_pieces.len() - 1)];
+        let input_offset = polynomial_pva(&at_target.coeffs, target_start - at_target.u_start).0;
+        for piece in &mut input_pieces {
+            piece.coeffs[0] -= input_offset;
+        }
+        let window_base = first.base + input_offset * unit_kernel_mass(kernel);
+        let mut gained_input = chain.leading_transform().is_some();
+        if defer_linear_prefix {
+            if let Some(ChainStage::DerivativeGains { k1, k2 }) = chain.transform() {
+                input_pieces = extrude_only::without_extrude_only_gain(
+                    extract_bezier_pieces(&apply_derivative_gains_to_track(
+                        &nurbs::bezier::bezier_pieces_to_discontinuous_nurbs(&input_pieces),
+                        *k1,
+                        *k2,
+                    )),
+                    window.iter().flat_map(|segment| &segment.extrude_only),
+                    (*k1, *k2),
+                );
+                gained_input = true;
+            }
+        }
+        let gained_pieces = input_pieces;
+        assert!(
+            gained_pieces.iter().all(|piece| {
+                [0.0, piece.u_end - piece.u_start]
+                    .into_iter()
+                    .flat_map(|tau| {
+                        let pva = polynomial_pva(&piece.coeffs, tau);
+                        [pva.0, pva.1, pva.2]
+                    })
+                    .all(f64::is_finite)
+            }),
+            "follower axis {axis} gained input has non-finite one-sided P/V/A"
+        );
+        let kernel_degree = kernel
+            .pieces
+            .iter()
+            .map(|piece| piece.degree())
+            .max()
+            .expect("shaper kernel has no pieces");
+        let table = AxisSignalTable::from_pieces(
+            &gained_pieces,
+            SignalBounds {
+                first_t,
+                last_t,
+                boundary: if read_lo < first_t {
+                    FitBoundary::StreamBoundary
+                } else {
+                    FitBoundary::Interior
+                },
+                lookahead: if read_hi > last_t {
+                    lookahead
+                } else {
+                    Lookahead::Required
+                },
+            },
+        )
+        .with_piece_moments(kernel_degree);
+        let input_degree = table.max_degree();
+        let exact_input_breaks = gained_pieces
+            .iter()
+            .flat_map(|piece| [piece.u_start, piece.u_end])
+            .collect::<Vec<_>>();
+        let shaped_break_seeds = if gained_input {
+            &exact_input_breaks
+        } else {
+            &semantic_cuts
+        };
+        let breaks_started = crate::timing::stopwatch();
+        let shaped_breaks = ShapedBreaks::new(kernel, shaped_break_seeds);
+        let breakpoints_us = breaks_started.elapsed_us();
+        let input_jumps = table.input_jumps().to_vec();
+        let exact_kernel = ExactKernel::new(kernel);
+        let table = Arc::new(table);
+        let eval_table = Arc::clone(&table);
+        let moment_table = Arc::clone(&table);
+        let piece_hint = std::cell::Cell::new(0);
+        let sig = ConvolutionSignal::new(
+            ShapedSignal::new_from_polynomial_evaluator(
+                kernel,
+                move |t| eval_table.eval_hinted(t, &piece_hint),
+                exact_input_breaks,
+                input_degree,
+                move |lo, hi, degree, origin, orders| {
+                    moment_table.integrate_moments(lo, hi, degree, origin, orders)
+                },
+                input_jumps,
+            ),
+            ExactConvolution {
+                table: &table,
+                kernel: &exact_kernel,
+                impulses: &[],
+                position_offset: 0.0,
+            },
+        );
+        let output_monotonicity = if nonnegative_demand && !gained_input {
+            OutputMonotonicity::Enforced
+        } else {
+            OutputMonotonicity::Free
+        };
+        let mut fitted: Vec<(f64, Vec<BezierPiece>)> = Vec::with_capacity(group.len());
+        let mut fit_us = 0;
+        for target in group {
+            let target_tol = follower_fit_tol(fit_tol, target.tol_scale);
+            let seeds = shaped_breaks.select_seeds(
+                fit_seed_times(
+                    axis,
+                    target.support.0,
+                    target.support.1,
+                    shaped_breaks.times(),
+                )?,
+                Some(&table),
+                target_tol,
+            );
+            let (local_base, pieces, target_us) = fit_kernel_window(
+                axis,
+                target.support.0,
+                target.support.1,
+                &seeds,
+                &sig,
+                target_tol,
+                output_monotonicity,
+            )?;
+            fit_us += target_us;
+            let base_position = match fitted.last() {
+                Some((previous_base, previous)) => {
+                    previous_base + piece_run_end_pv(previous).0 - piece_run_start_pv(&pieces).0
+                }
+                None => window_base + local_base - piece_run_start_pv(&pieces).0,
+            };
+            fitted.push((base_position, pieces));
+        }
+        Ok((
+            fitted,
+            KernelWindowTiming {
+                fit_us,
+                breakpoints_us,
+            },
+        ))
+    }
 }
 
 fn fit_kernel_window<S: TrackSignal>(
@@ -2896,18 +2953,22 @@ struct RatioBounds {
 }
 
 impl RatioBounds {
-    fn ridden(state: &FollowerState, s_start: f64, s_end: f64) -> Self {
-        let ridden = state.spans.iter().filter(|span| {
-            span.s1 >= s_start - SPAN_LOOKUP_SLACK_MM && span.s0 <= s_end + SPAN_LOOKUP_SLACK_MM
-        });
+    /// The ratio bounds over the spans a signal owning `[s_start,
+    /// s_owned_end]` reads, never one starting past its end: whether the
+    /// next segment's spans are laid yet must not reach the fit.
+    fn ridden(state: &FollowerState, s_start: f64, s_owned_end: f64) -> Self {
+        let ridden = state
+            .spans
+            .iter()
+            .filter(|span| span.s1 >= s_start - SPAN_LOOKUP_SLACK_MM && span.s0 < s_owned_end);
         let table = Self {
             ratio: ridden
                 .clone()
                 .map(|span| span.r0.abs().max(span.r1.abs()))
                 .chain(
                     [
-                        (s_start, SpanSide::opening(s_start, s_end)),
-                        (s_end, SpanSide::Before),
+                        (s_start, SpanSide::opening(s_start, s_owned_end)),
+                        (s_owned_end, SpanSide::Before),
                     ]
                     .map(|(s, side)| state.ratio_and_slope(s, side).0.abs()),
                 )
@@ -2916,10 +2977,12 @@ impl RatioBounds {
                 .map(|span| span.ratio_slope().abs())
                 .fold(0.0_f64, f64::max),
         };
-        if !state.smoothing.touches(s_start, s_end) {
+        if !state.smoothing.touches(s_start, s_owned_end) {
             return table;
         }
-        let (ratio, slope) = state.smoothing.ratio_bounds(&state.spans, s_start, s_end);
+        let (ratio, slope) = state
+            .smoothing
+            .ratio_bounds(&state.spans, s_start, s_owned_end);
         Self {
             ratio: table.ratio.max(ratio),
             slope: table.slope.max(slope),
@@ -2953,6 +3016,10 @@ pub(crate) struct FollowerSignal<'a> {
     state: &'a FollowerState,
     e_start: f64,
     s_start: f64,
+    /// The odometer's start plus the length it was scaled to, the sum the
+    /// projection loop carries to the next segment's start, so a segment
+    /// starts where its predecessor ends whether one emit held both or not.
+    s_end: f64,
     e_spans_start: f64,
     leaders: ShapedLeaders<'a>,
     raw_delta: Option<(&'a ContinuousAxis, f64)>,
@@ -3030,16 +3097,15 @@ impl<'a> FollowerSignal<'a> {
             }
         }
         let odometer_scale = knots.scale_to(odometer.length);
-        let ratio_bounds = RatioBounds::ridden(
-            state,
-            odometer.start,
-            odometer.start + knots.length() * odometer_scale,
-        );
+        let s_end = odometer.start + odometer.length;
+        let s_owned_end = state.owned_span_end(odometer.start, s_end);
+        let ratio_bounds = RatioBounds::ridden(state, odometer.start, s_owned_end);
 
         let mut sig = Self {
             state,
             e_start,
             s_start: odometer.start,
+            s_end,
             e_spans_start: state.spans_e(odometer.start),
             leaders: shaped_leaders,
             raw_delta,
@@ -3059,7 +3125,7 @@ impl<'a> FollowerSignal<'a> {
         let (start_sliver, end_sliver) = sig.speed_zero_slivers();
         sig.start_sliver = start_sliver;
         sig.end_sliver = end_sliver;
-        sig.s_owned_end = state.owned_span_end(sig.s_start, sig.s_end());
+        sig.s_owned_end = s_owned_end;
         sig
     }
 
@@ -3342,7 +3408,7 @@ impl<'a> FollowerSignal<'a> {
         self.s_offset(t).min(self.s_owned_end - self.s_start)
     }
     fn s_end(&self) -> f64 {
-        self.s_start + self.knots.length() * self.odometer_scale
+        self.s_end
     }
     /// The exact value of an identically-constant window — a follower whose
     /// span table commands zero extrusion ratio across the whole owned range
@@ -3362,12 +3428,10 @@ impl<'a> FollowerSignal<'a> {
             .state
             .spans
             .iter()
-            .filter(|span| {
-                span.s1 >= s_lo - SPAN_LOOKUP_SLACK_MM && span.s0 <= s_hi + SPAN_LOOKUP_SLACK_MM
-            })
+            .filter(|span| span.s1 >= s_lo - SPAN_LOOKUP_SLACK_MM && span.s0 < self.s_owned_end)
             .all(|span| span.r0 == 0.0 && span.r1 == 0.0);
         let tail_zero = match self.state.spans.last() {
-            Some(last) if s_hi + SPAN_LOOKUP_SLACK_MM > last.s1 => last.r1 == 0.0,
+            Some(last) if self.s_owned_end > last.s1 => last.r1 == 0.0,
             _ => true,
         };
         let smoothed = self
@@ -4049,13 +4113,6 @@ fn piece_run_end_pv(pieces: &[BezierPiece]) -> (f64, f64) {
     let last = pieces.last().expect("a fitted target has pieces");
     polynomial_pv(&last.coeffs, last.u_end - last.u_start)
 }
-
-fn piece_run_end(pieces: &[BezierPiece]) -> f64 {
-    pieces.last().map_or(0.0, |last| {
-        polynomial_pv(&last.coeffs, last.u_end - last.u_start).0
-    })
-}
-
 /// Every emitted follower track continues one the pipeline already handed
 /// downstream, and adjacent stretches are fitted independently, so each one
 /// opens a fit residual away from the state already emitted. Welding only
