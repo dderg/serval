@@ -133,6 +133,38 @@ impl Dropped {
     }
 }
 
+/// The motion on shaped leaders beside a rest: the largest acceleration
+/// and extrusion ratio of the moves on them, and the least time between
+/// the rest and the nearest of them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ShapedMotion {
+    accel_mm_s2: f64,
+    ratio: f64,
+    lead_s: f64,
+}
+
+impl ShapedMotion {
+    fn wider(a: Option<Self>, b: Option<Self>) -> Option<Self> {
+        match (a, b) {
+            (Some(a), Some(b)) => Some(Self {
+                accel_mm_s2: a.accel_mm_s2.max(b.accel_mm_s2),
+                ratio: a.ratio.max(b.ratio),
+                lead_s: a.lead_s.min(b.lead_s),
+            }),
+            (a, b) => a.or(b),
+        }
+    }
+}
+
+/// A scan for [`ShapedMotion`] outward from a rest: what it found, the
+/// least time of the moves it crossed, and whether it reached a rest.
+#[derive(Debug, Clone, Copy, Default)]
+struct ShapedScan {
+    motion: Option<ShapedMotion>,
+    elapsed_s: f64,
+    rested: bool,
+}
+
 fn either(a: [bool; 3], b: [bool; 3]) -> [bool; 3] {
     std::array::from_fn(|axis| a[axis] || b[axis])
 }
@@ -439,59 +471,76 @@ impl Marks {
         })
     }
 
-    /// The largest acceleration and extrusion ratio on `axis` of the
-    /// moves the leaders cross within `window_s` on one side of
-    /// `marks[index]`, up to the first rest. `None` while moves still to
-    /// come could add to them.
-    fn motion_beside(
+    /// The scan for motion on the leaders the kernels shape within
+    /// `window_s` on one side of `marks[index]`, up to the first rest: the
+    /// largest acceleration and extrusion ratio on `caps`' axis of the
+    /// moves on a shaped leader, and the least time the moves between take
+    /// before the first of them, which only unshaped leaders cross; no
+    /// motion where no shaped leader moves there. `None` while moves still
+    /// to come could change it. The history behind counts as shaped motion
+    /// where the scan reaches it.
+    fn shaped_scan_beside(
         &self,
         (index, ahead): (usize, bool),
         window_s: f64,
-        axis: usize,
+        caps: &ExtruderCaps,
         closed: bool,
-    ) -> Option<(f64, f64)> {
-        let (accel, ratio, _) = self.fold_beside(
+    ) -> Option<ShapedScan> {
+        let shaped =
+            |moves_on: [bool; 3]| (0..3).any(|axis| moves_on[axis] && !caps.unshaped_leaders[axis]);
+        self.fold_beside(
             (index, ahead),
             window_s,
             closed,
-            (0.0, 0.0, false),
-            |(accel, ratio, rested): (f64, f64, bool), other| {
-                if rested || other.rest {
-                    (accel, ratio, true)
-                } else {
-                    (
-                        accel.max(other.accel_mm_s2),
-                        ratio.max(other.ratio_on(axis)),
-                        false,
-                    )
+            ShapedScan::default(),
+            |scan, other| {
+                if scan.rested || other.rest {
+                    return ShapedScan {
+                        rested: true,
+                        ..scan
+                    };
+                }
+                let found = shaped(other.moves_on).then(|| ShapedMotion {
+                    accel_mm_s2: other.accel_mm_s2,
+                    ratio: other.ratio_on(caps.axis_index),
+                    lead_s: scan.elapsed_s,
+                });
+                ShapedScan {
+                    motion: ShapedMotion::wider(scan.motion, found),
+                    elapsed_s: scan.elapsed_s + other.least_time_s,
+                    rested: false,
                 }
             },
-            |(accel, ratio, rested), dropped| {
-                if rested {
-                    (accel, ratio, rested)
-                } else {
-                    (
-                        accel.max(dropped.accel_mm_s2),
-                        ratio.max(dropped.ratio_on(axis)),
-                        rested,
-                    )
+            |scan, dropped| {
+                if scan.rested {
+                    return scan;
+                }
+                let history = ShapedMotion {
+                    accel_mm_s2: dropped.accel_mm_s2,
+                    ratio: dropped.ratio_on(caps.axis_index),
+                    lead_s: scan.elapsed_s,
+                };
+                ShapedScan {
+                    motion: ShapedMotion::wider(scan.motion, Some(history)),
+                    ..scan
                 }
             },
-        )?;
-        Some((accel, ratio))
+        )
     }
 
     /// How long an extrude-only `marks[index]` holds the toolhead still
     /// before and after its own motion, where it starts or ends a run of
-    /// extrude-only moves beside motion of the leaders: until their shaped
-    /// path, settling under the largest acceleration the moves there take,
-    /// stands within the settle's radius of the rest point and asks the
-    /// extruder for no more than the extrude-only caps leave it
-    /// ([`crate::frontend::SettleSide::hold_s`]), and together with the run at least the
-    /// kernels' reach on both sides, so the shaped path past the stop
-    /// never meets the one ahead of the start across the run. `None` while
-    /// moves still to come could change it. Nothing holds at a stream's
-    /// edges, where the lowerer's rest holds already keep the leaders still.
+    /// extrude-only moves beside motion of the leaders the kernels shape:
+    /// until their shaped path, settling under the largest acceleration
+    /// the moves on them take, stands within the settle's radius of the
+    /// rest point and asks the extruder for no more than the extrude-only
+    /// caps leave it ([`crate::frontend::SettleSide::hold_s`]), less the
+    /// time moves on unshaped leaders alone already put between, and
+    /// together with that time and the run at least the kernels' reach on
+    /// both sides, so the shaped path past the stop never meets the one
+    /// ahead of the start across the run. `None` while moves still to come
+    /// could change it. Nothing holds at a stream's edges, where the
+    /// lowerer's rest holds already keep the leaders still.
     fn rest_holds(&self, index: usize, closed: bool) -> Option<[f64; 2]> {
         let mark = self.marks[index];
         let (true, Some(caps)) = (mark.rest, mark.extruder) else {
@@ -510,43 +559,50 @@ impl Marks {
         if last + 1 == self.marks.len() && !closed {
             return None;
         }
-        let moving_before = first > 0;
-        let moving_after = last + 1 < self.marks.len();
         let settle = caps.rest_settle.settle();
-        let hold_beside = |side: usize, from: usize, ahead: bool, moving: bool| {
-            if !moving {
-                return Some(0.0);
+        let motion_beside = |side: usize, from: usize, ahead: bool, at_edge: bool| {
+            if at_edge {
+                return Some(None);
             }
-            let settling = &settle.sides[side];
-            let (accel, ratio) =
-                self.motion_beside((from, ahead), settling.reach_s, caps.axis_index, closed)?;
-            let demand = SettleDemand {
-                ratio,
-                advance_slope_s: caps.advance_slope_s,
-                advance_curvature_s2_per_mm: caps.advance_curvature_s2_per_mm,
-                own_jerk_per_accel_hz: caps.own_jerk_per_accel_hz,
-                max_velocity_mm_s: caps.max_velocity_mm_s,
-                max_accel_mm_s2: caps.max_accel_mm_s2,
-                extrude_only_velocity_mm_s: self.extrude_only.velocity_mm_s,
-                extrude_only_accel_mm_s2: self.extrude_only.accel_mm_s2,
-            };
-            Some(settling.hold_s(settle.radius_mm, accel, &demand))
+            self.shaped_scan_beside((from, ahead), settle.sides[side].reach_s, &caps, closed)
+                .map(|scan| scan.motion)
         };
-        let mut before = hold_beside(0, first, false, moving_before)?;
-        let mut after = hold_beside(1, last, true, moving_after)?;
-        if moving_before && moving_after {
+        let motion = [
+            motion_beside(0, first, false, first == 0)?,
+            motion_beside(1, last, true, last + 1 == self.marks.len())?,
+        ];
+        let mut holds = [0, 1].map(|side| {
+            motion[side].map_or(0.0, |motion| {
+                let demand = SettleDemand {
+                    ratio: motion.ratio,
+                    advance_slope_s: caps.advance_slope_s,
+                    advance_curvature_s2_per_mm: caps.advance_curvature_s2_per_mm,
+                    own_jerk_per_accel_hz: caps.own_jerk_per_accel_hz,
+                    max_velocity_mm_s: caps.max_velocity_mm_s,
+                    max_accel_mm_s2: caps.max_accel_mm_s2,
+                    extrude_only_velocity_mm_s: self.extrude_only.velocity_mm_s,
+                    extrude_only_accel_mm_s2: self.extrude_only.accel_mm_s2,
+                };
+                let settled =
+                    settle.sides[side].hold_s(settle.radius_mm, motion.accel_mm_s2, &demand);
+                (settled - motion.lead_s).max(0.0)
+            })
+        });
+        if let [Some(before), Some(after)] = motion {
             let run_s: f64 = (first..=last).map(|at| self.marks[at].least_time_s).sum();
             let reaches = [settle.sides[0].reach_s, settle.sides[1].reach_s];
-            let short = reaches[0] + reaches[1] - (before + run_s + after);
+            let leads = [before.lead_s, after.lead_s];
+            let short =
+                reaches[0] + reaches[1] - (leads[0] + holds[0] + run_s + holds[1] + leads[1]);
             if short > 0.0 {
-                let left = [reaches[0] - before, reaches[1] - after];
-                before += short * left[0] / (left[0] + left[1]);
-                after += short * left[1] / (left[0] + left[1]);
+                let left = [0, 1].map(|side| reaches[side] - leads[side] - holds[side]);
+                let room = left[0] + left[1];
+                holds = [0, 1].map(|side| holds[side] + short * left[side] / room);
             }
         }
         Some([
-            if index == first { before } else { 0.0 },
-            if index == last { after } else { 0.0 },
+            if index == first { holds[0] } else { 0.0 },
+            if index == last { holds[1] } else { 0.0 },
         ])
     }
 
