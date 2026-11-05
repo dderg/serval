@@ -16,16 +16,20 @@ pub const SPILL_CELLS: usize = 16;
 /// little.
 ///
 /// The spill keeps `mass = ∫|w|`, the largest among the followed axes'
-/// kernels (1 where none shapes them), and at the ends
-/// `xᵢ = (i + 1)·cell_s` of [`SPILL_CELLS`] cells spanning the kernels'
-/// reach the least `W` and `Φ` among them. Within a cell `Φ` is at least
-/// its value at the cell's start plus `W` there times the way in, and
-/// within the first at least `core_density·x²`, `core_density` the least
-/// `|w|` there. An unshaped path keeps all of it at the moment: no cells,
-/// `W = 1`, `Φ(x) = x`.
+/// kernels (1 where none shapes them), the largest first moment
+/// `∫|u|·|w(u)| du` among them, and at the ends `xᵢ = (i + 1)·cell_s` of
+/// [`SPILL_CELLS`] cells spanning the kernels' reach the least `W` and `Φ`
+/// among them. Within a cell `Φ` is at least its value at the cell's start
+/// plus `W` there times the way in, within the first at least
+/// `core_density·x²`, `core_density` the least `|w|` there, and, read
+/// against `mass·C`, at least `mass·x − moment`, the line each kernel's
+/// `Φ` settles on past its reach, so the bound never exceeds the linear
+/// `mass·v₀ + moment·A`. An unshaped path keeps all of it at the moment: no
+/// cells, `W = 1`, `Φ(x) = x`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LeaderSpill {
     pub mass: f64,
+    pub moment_s: f64,
     pub cell_s: f64,
     pub core_density_per_s: f64,
     pub mass_within: [f64; SPILL_CELLS],
@@ -35,6 +39,7 @@ pub struct LeaderSpill {
 impl LeaderSpill {
     pub const UNSHAPED: Self = Self {
         mass: 1.0,
+        moment_s: 0.0,
         cell_s: 0.0,
         core_density_per_s: 0.0,
         mass_within: [1.0; SPILL_CELLS],
@@ -59,13 +64,16 @@ impl LeaderSpill {
         let ends: Vec<f64> = (1..=SPILL_CELLS).map(|end| end as f64 * cell_s).collect();
         let mut spill = Self {
             mass: Self::UNSHAPED.mass,
+            moment_s: Self::UNSHAPED.moment_s,
             cell_s,
             core_density_per_s: f64::INFINITY,
             mass_within: [f64::INFINITY; SPILL_CELLS],
             spill_within_s: [f64::INFINITY; SPILL_CELLS],
         };
         for kernel in kernels {
-            spill.mass = spill.mass.max(kernel.absolute_moments().0);
+            let (mass, moment_s) = kernel.absolute_moments();
+            spill.mass = spill.mass.max(mass);
+            spill.moment_s = spill.moment_s.max(moment_s);
             spill.core_density_per_s = spill
                 .core_density_per_s
                 .min(kernel.least_absolute_within(cell_s));
@@ -91,13 +99,14 @@ impl LeaderSpill {
         );
         let room = (ceiling - planned).max(0.0);
         if accel == 0.0 {
-            return self.mass * ceiling - self.mass_within[SPILL_CELLS - 1] * room;
+            return self.mass * (ceiling - room);
         }
         self.mass * ceiling - accel * self.least_spill_within(room / accel)
     }
 
-    /// The spill bounding both `self` and `other`: the larger mass, and the
-    /// least `W` and `Φ` either tells at the ends of the wider cells.
+    /// The spill bounding both `self` and `other`: the larger mass and
+    /// moment, and the least `W` and `Φ` either tells at the ends of the
+    /// wider cells.
     #[must_use]
     pub(super) fn wider(self, other: Self) -> Self {
         if self == other {
@@ -107,6 +116,7 @@ impl LeaderSpill {
         let end = |cell: usize| (cell + 1) as f64 * cell_s;
         Self {
             mass: self.mass.max(other.mass),
+            moment_s: self.moment_s.max(other.moment_s),
             cell_s,
             core_density_per_s: self
                 .least_density_within(cell_s)
@@ -132,7 +142,7 @@ impl LeaderSpill {
         if !(self.mass.is_finite() && self.mass >= 1.0) {
             return Err("the leaders' spill must be finite, its mass at least 1");
         }
-        if !(finite_non_negative(&[self.cell_s, self.core_density_per_s])
+        if !(finite_non_negative(&[self.moment_s, self.cell_s, self.core_density_per_s])
             && finite_non_negative(&self.mass_within)
             && finite_non_negative(&self.spill_within_s)
             && rising(&self.mass_within)
@@ -169,13 +179,14 @@ impl LeaderSpill {
 
     /// At most `Φ(x)`.
     fn least_spill_within(&self, x: f64) -> f64 {
-        match self.end_below(x) {
+        let within_cells = match self.end_below(x) {
             None => self.core_density_per_s * x * x,
             Some(cell) => {
                 let end = (cell + 1) as f64 * self.cell_s;
                 self.spill_within_s[cell] + self.mass_within[cell] * (x - end)
             }
-        }
+        };
+        within_cells.max(self.mass * x - self.moment_s)
     }
 
     /// The largest `m` with `W(x) ≥ 2m·x` on `(0, radius]` the spill tells.

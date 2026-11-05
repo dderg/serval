@@ -324,6 +324,24 @@ nearest rest (an extrude-only move or a stream end) within
 `rest_room_reach_mm` of the fastest the leaders cross it, and the cap holds
 the ramp that room leaves within the limits as well.
 
+The cap searches the planned speed `v₀` at the join, not the shaped one.
+The planned speeds within the leaders' kernel reach of the join stay under
+the fastest ceiling `C` within the move's reach
+(`ExtrusionBudget::fastest_ceiling_mm_s`) and within `A` per second of
+`v₀`, so a kernel `w` shapes them into a speed of at most
+`∫|w(u)|·min(C, v₀ + A·|u|) du = mass·C − A·Φ((C − v₀)/A)`
+(`geometry::LeaderSpill`, which tabulates `Φ(x) = ∫|w|·(x − |u|)⁺` and its
+slope over 16 cells of the kernels' reach). It reaches `mass·C` as `v₀`
+reaches `C` and falls continuously below it, so a step that fits at the
+ceiling caps nothing and a vanishing step needs a vanishing slowdown. The
+leaders' own advanced flow `r·(σ̇ + k·σ̈)` is shaped the same way from the
+planned `v + k·a ≤ min(Q, v₀ + k·A + A·|u|)`, with `Q` the least of
+`C + k·A` and `V_e/r_b`: every move about the step budgets its peak ratio
+`r` at a level `r_b ≥ r` and holds `r_b·(cⱼ + k·Aⱼ) ≤ V_e` itself, so the
+own flow never reaches `V_e` from the step's independent worst case of
+speed and budget, the way a noise step of `Δr ≤ 3e-5` once forced a stop
+at every such join of the Trident first layers.
+
 Critically, the projection reads the leaders' **toolhead signal**, not their
 motor command — the follower must track where the nozzle physically is, and
 the mode-inverse counter-drive is motion the toolhead never performs. This
