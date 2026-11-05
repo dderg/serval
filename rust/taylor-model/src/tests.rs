@@ -190,7 +190,11 @@ impl Lcg {
         let coefficients: Vec<f64> = (0..len)
             .map(|_| {
                 let c = self.coefficient();
-                if self.below(4) == 0 && c.is_finite() { c } else { c.clamp(-1e6, 1e6) }
+                if self.below(4) == 0 && c.is_finite() {
+                    c
+                } else {
+                    c.clamp(-1e6, 1e6)
+                }
             })
             .collect();
         let rad = match self.below(4) {

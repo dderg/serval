@@ -90,7 +90,10 @@ fn unfused_taylor_shift(coefficients: &[f64], shift: f64, shifted: &mut [f64]) {
 #[inline]
 fn horner_shift_in_place(shifted: &mut [f64], step: impl Fn(f64, f64) -> f64) {
     let len = shifted.len();
-    assert!(len <= EXACT_CAPACITY, "a {len}-coefficient polynomial exceeds the hull");
+    assert!(
+        len <= EXACT_CAPACITY,
+        "a {len}-coefficient polynomial exceeds the hull"
+    );
     let Some(&top) = shifted.last() else {
         return;
     };

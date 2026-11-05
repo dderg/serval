@@ -778,7 +778,10 @@ impl ExactConvolution<'_> {
                 }
             };
             let lower_slot = 1 - upper_slot;
-            if !self.table.series_past_into(lower, &mut edge_series[lower_slot]) {
+            if !self
+                .table
+                .series_past_into(lower, &mut edge_series[lower_slot])
+            {
                 return None;
             }
             previous_lower = Some((lower, lower_slot));

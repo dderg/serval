@@ -46,7 +46,9 @@
 use nurbs::algebra::PiecewisePolynomialKernel;
 use trajectory::ShapedSignal;
 
-use super::{AxisSignalTable, MIN_DEVICE_INTERVAL_S, MOMENT_POWER_CAPACITY, differentiate_in_place};
+use super::{
+    AxisSignalTable, MIN_DEVICE_INTERVAL_S, MOMENT_POWER_CAPACITY, differentiate_in_place,
+};
 use crate::lowering::FitTol;
 
 /// Holds the derivative series of an input piece and a kernel piece, and
