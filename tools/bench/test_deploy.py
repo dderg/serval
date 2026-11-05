@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import deploy
+import pytest
 
 
 def test_a_remote_file_missing_from_the_tree_is_stale():
@@ -26,3 +27,79 @@ def test_build_outputs_are_never_stale():
 def test_files_the_tree_carries_are_kept():
     names = ["a.py", "rust/b.rs"]
     assert deploy.stale_remote_files(names, names) == []
+
+
+def _flash_target_bench(
+    monkeypatch, tmp_path, reported_suffix: str | None = None
+):
+    calls = {"make": [], "recorded": []}
+    monkeypatch.setattr(
+        deploy.firmware_build_id, "target_build_id", lambda tree, config: "f00d"
+    )
+
+    def run_checked(command, cwd, env=None):
+        calls["make"].append((command, cwd))
+        if command[-1].startswith("-j"):
+            (tmp_path / "out/bench-f401/klipper.elf").write_bytes(b"elf")
+        return ""
+
+    monkeypatch.setattr(deploy, "run_checked", run_checked)
+    monkeypatch.setattr(deploy, "git_output", lambda tree, *args: "abc\n")
+    monkeypatch.setattr(deploy.pi, "scp_to_pi", lambda *a: None)
+    monkeypatch.setattr(deploy.pi, "ssh", lambda command: deploy.VERIFIED)
+    monkeypatch.setattr(deploy, "wait_pi_serial", lambda: None)
+    monkeypatch.setattr(deploy.pi, "firmware_restart", lambda: None)
+    monkeypatch.setattr(
+        deploy.pi,
+        "mcu_version",
+        lambda: f"v0.13-dirty-fw{reported_suffix or 'f00d'}",
+    )
+    monkeypatch.setattr(
+        deploy.pi,
+        "record_firmware",
+        lambda board, identity: calls["recorded"].append((board, identity)),
+    )
+    return calls
+
+
+def test_the_target_firmware_builds_in_its_own_tree_and_carries_its_id(
+    monkeypatch, tmp_path
+):
+    calls = _flash_target_bench(monkeypatch, tmp_path)
+    deploy.cmd_flash_target(tmp_path)
+
+    out = tmp_path / "out/bench-f401"
+    for command, cwd in calls["make"]:
+        assert cwd == tmp_path
+        assert f"OUT={out}/" in command
+        assert (
+            f"KCONFIG_CONFIG={tmp_path / 'tools/bench/f401.config'}" in command
+        )
+    assert "VERSION_EXTRA=-fwf00d" in calls["make"][-1][0]
+    ((board, identity),) = calls["recorded"]
+    assert board == "target"
+    assert identity["build_id"] == "f00d"
+    assert identity["worktree"] == str(tmp_path)
+    assert identity["elf"] == str(out / "klipper.elf")
+
+
+def test_a_target_reporting_another_build_is_refused_and_not_recorded(
+    monkeypatch, tmp_path
+):
+    calls = _flash_target_bench(monkeypatch, tmp_path, reported_suffix="beef")
+    with pytest.raises(deploy.pi.BenchError, match="not the build f00d"):
+        deploy.cmd_flash_target(tmp_path)
+    assert calls["recorded"] == []
+
+
+def test_a_sync_keeps_what_the_boards_were_flashed_with(monkeypatch, tmp_path):
+    written = []
+    flashed = {"target": {"build_id": "f00d"}, "capture": {"build_id": "beef"}}
+    monkeypatch.setattr(deploy, "local_files", lambda tree: [])
+    monkeypatch.setattr(deploy, "rsync_changes", lambda tree, files: [])
+    monkeypatch.setattr(deploy.pi, "ssh", lambda command: "")
+    monkeypatch.setattr(deploy, "deploy_identity", lambda tree: {"head": "abc"})
+    monkeypatch.setattr(deploy.pi, "flashed_firmware", lambda: flashed)
+    monkeypatch.setattr(deploy.pi, "write_deployed", written.append)
+    deploy.cmd_sync(tmp_path)
+    assert written == [{"head": "abc", "firmware": flashed}]

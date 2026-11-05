@@ -1885,6 +1885,11 @@ impl StepcompressEndpoint {
                 );
             }
         }
+        let probe_interval = clock.ticks(WIRE_PROBE_INTERVAL_SECS);
+        if clock.now >= self.last_wire_probe_clock.saturating_add(probe_interval) {
+            self.last_wire_probe_clock = clock.now;
+            self.send_wire_probe()?;
+        }
         if !burst.is_empty() {
             let egress_started = std::time::Instant::now();
             (self.egress)(&burst)?;
@@ -1916,18 +1921,17 @@ impl StepcompressEndpoint {
         if let Some(error) = stale {
             return Err(error);
         }
-        let probe_interval = clock.ticks(WIRE_PROBE_INTERVAL_SECS);
-        if clock.now >= self.last_wire_probe_clock.saturating_add(probe_interval) {
-            self.last_wire_probe_clock = clock.now;
-            self.send_wire_probe(clock)?;
-        }
         self.release_retirements();
         self.post_heartbeat()
     }
 
     /// The probe is a diagnostic: a transport too full to take it right
-    /// now drops it, and the next probe interval offers another.
-    fn send_wire_probe(&self, clock: McuClock) -> Result<(), SendError> {
+    /// now drops it, and the next probe interval offers another. It leaves
+    /// ahead of the pass's burst, stamped with the clock read as it is handed
+    /// over, so the mcu's receipt delta is the wire and the mcu's dispatch,
+    /// not the pass's compute or the burst queued in front of it.
+    fn send_wire_probe(&self) -> Result<(), SendError> {
+        let clock = self.clock_now()?;
         #[allow(clippy::cast_possible_truncation)]
         let probe = (
             "kalico_wire_probe",

@@ -7,6 +7,7 @@ import re
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -137,6 +138,25 @@ def write_deployed(identity: dict) -> None:
 
 def read_deployed() -> dict:
     return json.loads(ssh(f"cat {DEPLOY_RECORD}"))
+
+
+def flashed_firmware() -> dict:
+    """What each board was last flashed with, by board, as the deploy record
+    holds it: a sync replaces the host's identity, never the boards'."""
+    record = ssh(f"cat {DEPLOY_RECORD} 2>/dev/null || true").strip()
+    return json.loads(record).get("firmware", {}) if record else {}
+
+
+def record_firmware(board: str, identity: dict) -> None:
+    record = ssh(f"cat {DEPLOY_RECORD} 2>/dev/null || true").strip()
+    deployed = json.loads(record) if record else {}
+    deployed.setdefault("firmware", {})[board] = identity
+    write_deployed(deployed)
+
+
+def mcu_version(mcu: str = "mcu") -> str:
+    status = http("GET", f"/printer/objects/query?{urllib.parse.quote(mcu)}")
+    return status["status"][mcu]["mcu_version"]
 
 
 def klipper_pid() -> int:
