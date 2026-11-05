@@ -260,7 +260,11 @@ impl CentredSum {
             .iter()
             .rev()
             .fold(0.0, |acc, &magnitude| acc * reach + magnitude);
-        if shift.abs() <= radius * FIRST_ORDER_SHIFT_LIMIT {
+        if shift == 0.0 {
+            for (value, &term) in self.values.iter_mut().zip(&term.values[..len]) {
+                *value += sign * term;
+            }
+        } else if shift.abs() <= radius * FIRST_ORDER_SHIFT_LIMIT {
             for power in 0..len {
                 let slope = if power + 1 < len {
                     (power + 1) as f64 * shift * term.values[power + 1]
