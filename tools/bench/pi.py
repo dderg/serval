@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 import time
 import urllib.error
@@ -274,15 +275,65 @@ def prepare_printer(config: Path = REPO_CFG) -> None:
     firmware_restart()
 
 
-MCO_LIVE_ATTACH_BROKEN = (
-    "a live SWD attach (openocd-target-live.cfg) reads the running F401's "
-    "flash and peripherals as 0 and drops the MCU off USB ('Lost "
-    "communication with MCU'); mmw's read-modify-write on those zeros "
-    "clobbered RCC_CFGR (system clock to HSI), RCC_AHB1ENR and GPIOA_MODER "
-    "(USB pins) on the first hardware run. MCO1 stays off until the attach "
-    "is fixed: deploy.py reset-target recovers the F401"
+MCO_LIVE_CFG = Path(__file__).with_name("openocd-target-live.cfg")
+PI_MCO_LIVE_CFG = "/tmp/bench-openocd-target-live.cfg"
+MCO_WRITES = (
+    (0x40023830, 0x00000001, 0x00000000),
+    (0x40023808, 0x06400000, 0x07600000),
+    (0x40020008, 0x00030000, 0x00030000),
+    (0x40020024, 0x00000000, 0x0000000F),
+    (0x40020000, 0x00020000, 0x00030000),
 )
+MCO_RMW = re.compile(
+    r"^BENCH_RMW (0x[0-9a-f]{8}) (0x[0-9a-f]{8}) (0x[0-9a-f]{8})$",
+    flags=re.MULTILINE,
+)
+MCO_HALT_WINDOW = re.compile(
+    r"^BENCH_HALT_WINDOW_MS (\d+)$", flags=re.MULTILINE
+)
+MCO_HALT_WINDOW_LIMIT_MS = 50
 
 
-def enable_mco() -> None:
-    raise BenchError(MCO_LIVE_ATTACH_BROKEN)
+def mco_openocd_commands() -> str:
+    writes = "; ".join(
+        f"bench_rmw {a:#010x} {s:#010x} {c:#010x}" for a, s, c in MCO_WRITES
+    )
+    return f"init; bench_while_halted {{{writes}}}; shutdown"
+
+
+def checked_mco_halt_window_ms(output: str) -> int:
+    read_back = {
+        int(address, 16): (int(before, 16), int(after, 16))
+        for address, before, after in MCO_RMW.findall(output)
+    }
+    for address, set_bits, clear_bits in MCO_WRITES:
+        if address not in read_back:
+            raise BenchError(
+                f"F401 MCO1 setup reported no read-back of {address:#010x}:\n{output}"
+            )
+        before, after = read_back[address]
+        expected = (before & ~clear_bits) | set_bits
+        if after != expected:
+            raise BenchError(
+                f"F401 MCO1 register {address:#010x} read back {after:#010x}, "
+                f"expected {expected:#010x} from {before:#010x}:\n{output}"
+            )
+    windows = MCO_HALT_WINDOW.findall(output)
+    if len(windows) != 1:
+        raise BenchError(f"F401 MCO1 setup reported no halt window:\n{output}")
+    window_ms = int(windows[0])
+    if window_ms > MCO_HALT_WINDOW_LIMIT_MS:
+        raise BenchError(
+            f"F401 core was halted {window_ms} ms for the MCO1 setup, over "
+            f"the {MCO_HALT_WINDOW_LIMIT_MS} ms limit:\n{output}"
+        )
+    return window_ms
+
+
+def enable_mco() -> int:
+    scp_to_pi(MCO_LIVE_CFG, PI_MCO_LIVE_CFG)
+    output = ssh(
+        f"openocd -f {PI_MCO_LIVE_CFG}"
+        f" -c {shlex.quote(mco_openocd_commands())} 2>&1"
+    )
+    return checked_mco_halt_window_ms(output)
