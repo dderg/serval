@@ -34,7 +34,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: test
+          key: test-${{ hashFiles('rust/Cargo.toml') }}
       - name: property suites
         env:
           PROPTEST_CASES: ${{ github.event.inputs.cases || '200000' }}

@@ -211,6 +211,11 @@ Measured on five green PR runs (11-05): throughput-gate 704 s, rust-fuzz 407 s, 
   `rust/rust-toolchain.toml` or the workflows themselves, and cancel-in-progress applies to PRs only, so main's
   caches refresh when, and only when, they go stale. After changing those files by hand, dispatch both workflows
   on `main` once (`gh workflow run "Rust runtime (Step 5 + Step 6)" --ref main`).
+- rust-cache's own key hashes `Cargo.lock` and the toolchain but not the `[profile]` tables, and an existing
+  exact key is never overwritten, so after the `debug` change main kept serving the old-profile cache and every
+  PR still compiled 150 crates. Every rust-cache `key:` now ends in `hashFiles('rust/Cargo.toml')`: any profile
+  or manifest edit starts a new cache family that the next main run seeds. Changing `rust/Cargo.toml` therefore
+  costs one cold PR run unless main is seeded first (dispatch as above).
 - Concurrent baseline accepts: `tools/bench/throughput_baseline.json` is merged field by field by a git merge
   driver (`scripts/merge_throughput_baseline.py`, registered by `install-git-guards.sh`, selected by
   `.gitattributes`): configs accepted on both sides keep the lower Ir (the stricter, fail-safe baseline),

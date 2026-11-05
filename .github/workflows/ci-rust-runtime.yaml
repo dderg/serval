@@ -77,7 +77,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: test
+          key: test-${{ hashFiles('rust/Cargo.toml') }}
       - name: test (nextest + doctests)
         run: ./scripts/ci.sh rust-test
 
@@ -105,7 +105,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: fit-audit
+          key: fit-audit-${{ hashFiles('rust/Cargo.toml') }}
       - name: fit tolerance audit
         run: ./scripts/ci.sh rust-fit-audit
 
@@ -137,7 +137,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: test
+          key: test-${{ hashFiles('rust/Cargo.toml') }}
       - name: property suites at 20000 cases
         run: ./scripts/ci.sh rust-fuzz
         env:
@@ -162,7 +162,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: clippy
+          key: clippy-${{ hashFiles('rust/Cargo.toml') }}
       - name: clippy
         run: ./scripts/ci.sh rust-clippy
 
@@ -202,7 +202,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: public-api
+          key: public-api-${{ hashFiles('rust/Cargo.toml') }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-public-api@0.52.0
@@ -224,7 +224,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: loom
+          key: loom-${{ hashFiles('rust/Cargo.toml') }}
       - name: cargo test (loom — runtime, --release)
         run: ./scripts/ci.sh rust-loom
 
@@ -241,7 +241,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: mcu-h7
+          key: mcu-h7-${{ hashFiles('rust/Cargo.toml') }}
       - name: cargo build (mcu-h7)
         # Env (RUNTIME_STORAGE_SIZE / _PIECE_RING_SIZE) and the
         # motion-module-stepper feature live inside scripts/ci.sh so CI and
@@ -261,7 +261,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: mcu-f4
+          key: mcu-f4-${{ hashFiles('rust/Cargo.toml') }}
       - name: cargo build (mcu-f4)
         # Env + motion-module-stepper feature live inside scripts/ci.sh
         # (job_rust_mcu_f4) so CI and local stay one source of truth.
@@ -284,7 +284,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: mcu-g0
+          key: mcu-g0-${{ hashFiles('rust/Cargo.toml') }}
       - name: cargo build (mcu-g0)
         run: ./scripts/ci.sh rust-mcu-g0
 
@@ -303,7 +303,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: mcu-f1
+          key: mcu-f1-${{ hashFiles('rust/Cargo.toml') }}
       - name: cargo build (mcu-f1)
         run: ./scripts/ci.sh rust-mcu-f1
 
@@ -329,7 +329,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: no-stepper
+          key: no-stepper-${{ hashFiles('rust/Cargo.toml') }}
       - name: cargo build + test --no-run (runtime, no-stepper servo-node path)
         run: ./scripts/ci.sh rust-no-stepper
 
@@ -344,7 +344,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: cbindgen-drift
+          key: cbindgen-drift-${{ hashFiles('rust/Cargo.toml') }}
       - name: Regenerate headers and verify committed copies match
         run: ./scripts/ci.sh cbindgen-drift
 
@@ -359,7 +359,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: c-smoke
+          key: c-smoke-${{ hashFiles('rust/Cargo.toml') }}
       - name: Build release staticlib + run c_smoke_build test
         run: ./scripts/ci.sh c-smoke
 
@@ -388,7 +388,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: replay-budget
+          key: replay-budget-${{ hashFiles('rust/Cargo.toml') }}
       - name: Replay the bench-killer region against the 1.3x floor and on every bench config
         run: ./scripts/ci.sh replay-budget
 
@@ -428,7 +428,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: throughput-gate
+          key: throughput-gate-${{ hashFiles('rust/Cargo.toml') }}
       - name: Replay instruction counts against the committed baselines
         run: ./scripts/ci.sh throughput-gate --configs ${{ matrix.config }}
         env:
@@ -457,7 +457,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: ethercat-hw
+          key: ethercat-hw-${{ hashFiles('rust/Cargo.toml') }}
       - name: Compile-check the IgH hw endpoint against the CI ecrt.h stub
         run: ./scripts/ci.sh rust-ethercat-hw
 
@@ -485,7 +485,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: miri
+          key: miri-${{ hashFiles('rust/Cargo.toml') }}
       - name: cargo +nightly miri test (runtime, host)
         run: ./scripts/ci.sh miri
 
@@ -502,7 +502,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: panic-grep
+          key: panic-grep-${{ hashFiles('rust/Cargo.toml') }}
       - name: Assert release MCU build is panic-free
         run: ./scripts/ci.sh panic-grep
 
