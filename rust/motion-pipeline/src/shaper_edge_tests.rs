@@ -8,8 +8,9 @@ use geometry::{LawSegment, Move, ScalarLaw, SourceRange, VelocityLimits};
 use trajectory::{AnalyticMoveSpan, SurfaceMode};
 
 use super::{
-    CrowdedVelocityBreaks, EdgeSlivers, FitTol, PostProcessError, TrackSignal, VelocityBreak, cap_contact_seeds,
-    coalesce_degenerate_seeds, edge_inset, edge_velocity_and_acceleration, velocity_breaks_among,
+    CrowdedVelocityBreaks, EdgeSlivers, FitTol, PostProcessError, TrackSignal, VelocityBreak,
+    cap_contact_seeds, coalesce_degenerate_seeds, edge_inset, edge_velocity_and_acceleration,
+    velocity_breaks_among,
 };
 
 const FLOOR: f64 = 2e-9;
@@ -65,7 +66,11 @@ impl TrackSignal for AccelerateThenBrake {
             return (0.5 * a * t * t, a * t, a);
         }
         let d = t - r;
-        (0.5 * a * r * r + a * r * d - 0.5 * a * d * d, a * r - a * d, -a)
+        (
+            0.5 * a * r * r + a * r * d - 0.5 * a * d * d,
+            a * r - a * d,
+            -a,
+        )
     }
 }
 
@@ -485,7 +490,8 @@ fn a_break_in_a_wide_sliver_carries_its_near_side_velocity_to_the_seam() {
     };
     let seam = trajectory::next_toward(t1, 0.0);
     let past_sliver = t1 - edge_inset(SPAN_S, FLOOR, WIDE_SLIVER_S);
-    let anchor = edge_velocity_and_acceleration(&sig, 0, seam, past_sliver, true, false, TOL).unwrap();
+    let anchor =
+        edge_velocity_and_acceleration(&sig, 0, seam, past_sliver, true, false, TOL).unwrap();
     let near_side_at_seam = accel * seam;
     assert!(
         (anchor.velocity - near_side_at_seam).abs() <= 1e-9 * near_side_at_seam,
