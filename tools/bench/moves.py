@@ -41,8 +41,13 @@ def move_name(waypoint: dict) -> str:
 def move_rows(run_dir: Path, epochs: range) -> list[tuple]:
     inputs = analyze.load_run(run_dir)
     reference = analyze.build_reference(inputs)
-    _, _, waypoints = analyze.plan_waypoints(inputs)
-    block_moves = [[move_name(w) for w in block[1:]] for block in waypoints]
+    if reference.source != analyze.REFERENCE_PLANNED:
+        raise analyze.AnalysisError(
+            f"{run_dir}: the pacer braked, so the reference is the dispatch "
+            "record and its blocks are not the plan's moves"
+        )
+    blocks = analyze.plan_waypoints(inputs).blocks
+    block_moves = [[move_name(w) for w in block[1:]] for block in blocks]
     capture_events = {
         m.role: analyze.capture_steps(
             inputs.capture, m, reference.start_counts[m.role]
@@ -54,7 +59,7 @@ def move_rows(run_dir: Path, epochs: range) -> list[tuple]:
     for index in epochs:
         result = results[index]
         block = reference.blocks[index]
-        spans = move_spans(inputs, waypoints[index])
+        spans = move_spans(inputs, blocks[index])
         for role, match in result.matches.items():
             if not match.late_s.size:
                 continue

@@ -13,7 +13,6 @@
 
 DECL_CONSTANT("CLOCK_FREQ", CONFIG_CLOCK_FREQ);
 
-// Return the number of clock ticks for a given number of microseconds
 uint32_t
 timer_from_us(uint32_t us)
 {
@@ -38,26 +37,40 @@ timer_is_before(uint32_t time1, uint32_t time2)
 static uint32_t timer_repeat_until;
 #define TIMER_REPEAT_TICKS timer_from_us(100)
 
-#define TIMER_MIN_TRY_TICKS timer_from_us(2)
+#if CONFIG_MACH_STM32G0 && !CONFIG_MCU_SIM
+#define TIMER_IRQ_LEAD_TICKS 64
+#else
+#define TIMER_IRQ_LEAD_TICKS 0
+#endif
+#define TIMER_COMPARE_MARGIN_TICKS timer_from_us(2)
+#define TIMER_MIN_TRY_TICKS (TIMER_IRQ_LEAD_TICKS + TIMER_COMPARE_MARGIN_TICKS)
 #define TIMER_DEFER_REPEAT_TICKS timer_from_us(5)
 
-// Invoke timers - called from board irq code.
+static inline void
+timer_spin_until(uint32_t due)
+{
+    while (timer_is_before(timer_read_time(), due))
+        ;
+}
+
 uint32_t
 timer_dispatch_many(void)
 {
     uint32_t tru = timer_repeat_until;
     for (;;) {
-        // Run the next software timer
+        uint32_t due = sched_peek_timer()->waketime;
+        int32_t ahead = due - timer_read_time();
+        if (ahead > (int32_t)TIMER_MIN_TRY_TICKS)
+            return due - TIMER_IRQ_LEAD_TICKS;
+        timer_spin_until(due);
         uint32_t next = sched_timer_dispatch();
 
         uint32_t now = timer_read_time();
         int32_t diff = next - now;
         if (diff > (int32_t)TIMER_MIN_TRY_TICKS)
-            // Schedule next timer normally.
-            return next;
+            return next - TIMER_IRQ_LEAD_TICKS;
 
         if (unlikely(timer_is_before(tru, now))) {
-            // Check if there are too many repeat timers
             if (diff < (int32_t)(-timer_from_us(1000)))
                 try_shutdown("Rescheduled timer in the past");
             if (sched_check_set_tasks_busy()) {
@@ -67,9 +80,8 @@ timer_dispatch_many(void)
             timer_repeat_until = tru = now + TIMER_REPEAT_TICKS;
         }
 
-        // Next timer in the past or near future - wait for it to be ready
         irq_enable();
-        while (unlikely(diff > 0))
+        while (unlikely(diff > (int32_t)TIMER_IRQ_LEAD_TICKS))
             diff = next - timer_read_time();
         irq_disable();
     }

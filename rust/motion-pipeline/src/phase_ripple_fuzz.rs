@@ -31,6 +31,27 @@ impl TrackSignal for CruiseRamp {
             },
         )
     }
+
+    fn enclosure_on(
+        &self,
+        lo: f64,
+        hi: f64,
+        accuracy: [f64; 3],
+    ) -> Option<crate::shaper::Enclosure<'_>> {
+        crate::shaper::test_signals::modelled((lo, hi), accuracy, &[self.boundary], |window| {
+            let cruise = [
+                self.position + self.velocity * (self.boundary - self.start),
+                self.velocity,
+            ];
+            let ramp = [cruise[0], cruise[1], 0.5 * self.acceleration];
+            let coefficients: &[f64] = if window.center <= self.boundary {
+                &cruise
+            } else {
+                &ramp
+            };
+            crate::shaper::test_signals::polynomial(window, self.boundary, coefficients)
+        })
+    }
 }
 
 fn cruise_ramp() -> impl Strategy<Value = CruiseRamp> {
@@ -199,7 +220,7 @@ proptest! {
                 seed_breakpoints: &[signal.boundary],
                 fit_tol: FitTol::absolute(0.005, 50.0),
                 fit_context: "phase_ripple_fuzz",
-                velocity_continuous: false,
+                seam_continuity: crate::lowering::SeamContinuity::Position,
             },
             &signal,
         ).map_err(|error| TestCaseError::fail(format!("{signal:?}: {error:?}")))?;

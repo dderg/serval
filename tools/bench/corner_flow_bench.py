@@ -1,8 +1,8 @@
 """Nozzle flow through the corners of a bench print, from captured steps.
 
-`analyze.py --corner-flow` calls `report`. Every extruding corner and short
-segment curve of the print is measured three ways with tools/flow_metric.py,
-the definition tools/corner_flow.py uses:
+`analyze.py --corner-flow` calls `report`. Every extruding corner, short
+segment curve and ratio step of the print is measured three ways with
+tools/flow_metric.py, the definition tools/corner_flow.py uses:
 
 - offline: the snapshot plan's continuous x, y and e tracks;
 - reference: the analyzer's reference steps for a, b and e, the plan
@@ -19,7 +19,6 @@ printer executed differently from its own command.
 
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass
 
@@ -36,7 +35,9 @@ EXTRUDING_RATIO = 1e-6
 VELOCITY_WINDOW_S = 2e-3
 ACCEL_WINDOW_S = 5e-3
 EVENT_MARGIN_S = 1.0
-METRICS = ("apex", "peak", "dip", "width_mm", "blob_nl")
+PLAN_AXES = [0, 1, 3]
+CORNER_METRICS = ("apex", "peak", "dip", "width_mm", "blob_nl")
+STEP_METRICS = ("moved_nl", "net_nl", "switch_mm")
 XY_ROLES = ("a", "b")
 
 
@@ -48,6 +49,7 @@ class Feature:
     speed_mm_s: float
     window_mm: float
     ratio: float
+    ratio_after: float
 
 
 def _segments(block: list[dict]):
@@ -61,8 +63,9 @@ def _segments(block: list[dict]):
 
 def features(block: list[dict]) -> list[Feature]:
     """The block's extruding corners (a turn of at least CORNER_TURN_DEG
-    between two extruding moves) and curves (runs of short extruding
-    segments each turning a little)."""
+    between two extruding moves), curves (runs of short extruding segments
+    each turning a little) and ratio steps (two extruding moves laying
+    different beads, turning or not)."""
     segments = list(_segments(block))
     found: list[Feature] = []
     curve: list[int] = []
@@ -80,6 +83,7 @@ def features(block: list[dict]) -> list[Feature]:
                     speed,
                     run / 2.0,
                     de / length,
+                    de / length,
                 )
             )
         curve.clear()
@@ -94,20 +98,21 @@ def features(block: list[dict]) -> list[Feature]:
             and de_out / length_out > EXTRUDING_RATIO
         )
         turn = _turn(segments, index) if extruding else 0.0
-        if extruding and turn >= CORNER_TURN_DEG:
+        window = min(
+            flow_metric.CORNER_WINDOW_MM, 0.5 * min(length_in, length_out)
+        )
+        apex = tuple(block[index + 1]["position"][:2])
+        ratio_in = de_in / length_in if extruding else 0.0
+        ratio_out = de_out / length_out if extruding else 0.0
+        if extruding and flow_metric.is_ratio_step(ratio_in, ratio_out):
             close_curve()
             found.append(
-                Feature(
-                    "corner",
-                    tuple(block[index + 1]["position"][:2]),
-                    turn,
-                    speed,
-                    min(
-                        flow_metric.CORNER_WINDOW_MM,
-                        0.5 * min(length_in, length_out),
-                    ),
-                    de_in / length_in,
-                )
+                Feature("step", apex, turn, speed, window, ratio_in, ratio_out)
+            )
+        elif extruding and turn >= CORNER_TURN_DEG:
+            close_curve()
+            found.append(
+                Feature("corner", apex, turn, speed, window, ratio_in, ratio_in)
             )
         elif (
             extruding
@@ -130,19 +135,10 @@ def _turn(segments, index: int) -> float:
     return math.degrees(math.acos(max(-1.0, min(1.0, cos))))
 
 
-def _plan(engine, block: list[dict], config_text: str, duration_s: float):
-    count = int(duration_s / flow_metric.SAMPLE_DT_S) + 2
-    _, rows = engine.pipeline_snapshot_axis_samples(
-        block, config_text, [0, 1, 3], count
-    )
-    return np.linspace(0.0, duration_s, count), np.asarray(rows)
-
-
-def _duration(engine, block: list[dict], config_text: str) -> float:
-    snapshot, _ = engine.pipeline_snapshot_axis_samples(
-        block, config_text, [0], 2
-    )
-    return json.loads(snapshot)["traversal_time_s"]
+def _local(epoch) -> tuple[np.ndarray, np.ndarray]:
+    """An epoch's sample times from its own start, and its axis rows."""
+    t_start, t_end, axes_pva = epoch
+    return np.linspace(0.0, t_end - t_start, axes_pva.shape[1]), axes_pva
 
 
 def _same_time(times: np.ndarray) -> np.ndarray:
@@ -204,6 +200,18 @@ def feature_spans(t, xy, speed, feats) -> list[np.ndarray]:
     ]
 
 
+def _feature_report(trace, apex, feat: Feature, nominal, bead_area) -> dict:
+    if feat.kind == "step":
+        return flow_metric.step_report(
+            trace,
+            apex,
+            (feat.ratio / nominal, feat.ratio_after / nominal),
+            feat.window_mm,
+            bead_area,
+        )
+    return flow_metric.corner_report(trace, apex, feat.window_mm, bead_area)
+
+
 def _source_report(
     t, xy, e, commanded, feats, spans, melt_k, nominal, bead_area
 ):
@@ -214,7 +222,7 @@ def _source_report(
     accel = _smoothed_gradient(velocity, dt, ACCEL_WINDOW_S)
     return [
         {
-            **flow_metric.corner_report(trace, apex, f.window_mm, bead_area),
+            **_feature_report(trace, apex, f, nominal, bead_area),
             **_extruder_peaks(velocity, accel, span),
         }
         for apex, f, span in zip(apexes, feats, spans)
@@ -234,14 +242,19 @@ def _epoch_for(epochs, start_s: float, end_s: float):
 
 
 def report(
-    inputs, detail: dict, blocks: list[list[dict]], axis_weights: dict, engine
+    inputs,
+    detail: dict,
+    blocks: list[list[dict]],
+    axis_weights: dict,
+    stream_epochs,
 ) -> dict:
     """Per extruding feature of the print: the flow deviation (fraction of
-    the nominal bead) and extruder peaks from the plan, the reference steps
-    and the captured steps. `blocks` are the analyzer's planned epochs, one
-    per reference block."""
+    the nominal bead) or, at a ratio step, the material it moves, and the
+    extruder peaks, from the plan, the reference steps and the captured
+    steps. `blocks` are the analyzer's planned epochs, one per reference
+    block; `stream_epochs(config_text, axes, sample_period_s)` samples the
+    print planned as one stream across each of them."""
     config = PrinterConfig.parse(inputs.config.config_text)
-    unshaped = config.unshaped().text()
     melt_k = config.advance_k()
     filament = config.getfloat("extruder", "filament_diameter", 1.75)
     filament_area = math.pi * (filament / 2.0) ** 2
@@ -249,18 +262,25 @@ def report(
     epochs = detail["epochs"]
     capture_events = detail["capture_events"]
     motors = {m.role: m for m in inputs.motors}
+    shaped_epochs, unshaped_epochs = (
+        stream_epochs(text, PLAN_AXES, flow_metric.SAMPLE_DT_S)
+        for text in (inputs.config.config_text, config.unshaped().text())
+    )
     rows = []
-    for block, reference_block in zip(blocks, reference.blocks):
+    for block, reference_block, shaped_epoch, unshaped_epoch in zip(
+        blocks, reference.blocks, shaped_epochs, unshaped_epochs, strict=True
+    ):
         feats = features(block)
         if not feats:
             continue
         duration = reference_block.duration_s
-        t, shaped = _plan(engine, block, inputs.config.config_text, duration)
-        t_raw, raw = _plan(
-            engine, block, unshaped, _duration(engine, block, unshaped)
-        )
+        t, shaped = _local(shaped_epoch)
+        t_raw, raw = _local(unshaped_epoch)
         xy_plan = np.column_stack([shaped[0][:, 0], shaped[1][:, 0]])
-        commanded = flow_metric.commanded_bead(t, xy_plan, t_raw, raw)
+        vertices = flow_metric.path_vertices(
+            tuple(waypoint["position"][:2]) for waypoint in block
+        )
+        commanded = flow_metric.commanded_bead(t, xy_plan, t_raw, raw, vertices)
         spans = feature_spans(
             t, xy_plan, np.hypot(shaped[0][:, 1], shaped[1][:, 1]), feats
         )
@@ -329,9 +349,10 @@ def _max_abs(rows: list[dict]) -> dict:
                 (
                     abs(row[pair[0]][metric] - row[pair[1]][metric])
                     for row in rows
+                    if metric in row[pair[0]]
                 ),
                 default=0.0,
             )
-            for metric in METRICS
+            for metric in CORNER_METRICS + STEP_METRICS
         }
     return out

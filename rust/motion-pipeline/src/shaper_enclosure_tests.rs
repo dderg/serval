@@ -64,7 +64,7 @@ impl AdvancedQuartic {
                 seed_breakpoints: &seeds,
                 fit_tol: Self::TOLERANCE,
                 fit_context: "nonlinear_advance",
-                velocity_continuous: true,
+                seam_continuity: crate::lowering::SeamContinuity::Velocity,
             },
             &sig,
         )

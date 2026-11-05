@@ -1,31 +1,25 @@
-//! The extruder excesses known engine bugs leave on a profile, pinned per
+//! The extruder excesses known engine bugs leave on a case, pinned per
 //! class by count and worst value. A case fails on any excess outside a
 //! pinned class and whenever a pinned class grows, worsens or shrinks, so
 //! the list tightens as fixes land; the failure prints the numbers to pin.
 //!
-//! TODO(ratio-ramp-end-accel): a ratio ramp's ends ask the extruder for
-//! more than `[axis e] max_accel`. `Crossing::across` in
-//! motion-pipeline's `follower_projection/ratio_ramp.rs` reads the leaders
-//! only from the seam on, never over the half of the ramp before it, and
-//! where the leaders brake hard the width envelope lays the ramp narrower
-//! than the ramp time it derived.
-//!
-//! TODO(leader-knot-velocity-step): a kernel-free advance turns the
-//! acceleration steps a shaped leader's fit takes at its knots (up to twice
-//! `max_accel_deviation`) into extruder velocity steps of `k·r` times
-//! them, which `motion_pipeline::follower_velocity_step_allowance` grants
-//! no allowance.
+//! TODO(shaped-turning, #685): the planner holds a kernel-free advance's
+//! demand along the path, `r·(a_t + k·j_t)`, within `[axis e] max_accel`,
+//! but not the shaped path's turning term `k·r·a⊥²/v`, which slow sharp
+//! corners raise far past it. Every [`ExcessClass::Turning`] pin is one the
+//! shaped-speed predictor #685 designs removes.
 
-use std::path::Path;
-
-use super::extruder::{ExtruderAudit, ExtruderExcess, ToolheadPhase};
+use super::extruder::{AccelCause, ExtruderAudit, ExtruderExcess, ToolheadPhase};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ExcessClass {
-    /// An acceleration excess while the toolhead moves.
+    /// An acceleration excess while the toolhead moves that the path's
+    /// turning does not explain.
     RampEndAccel,
-    /// A velocity step beyond its allowance.
-    LeaderKnotVelocityStep,
+    /// An acceleration excess while the toolhead moves that the shaped
+    /// path's turning asks of a kernel-free advance, see
+    /// [`AccelCause::PathTurning`].
+    Turning,
 }
 
 impl ExcessClass {
@@ -34,43 +28,42 @@ impl ExcessClass {
             ExtruderExcess::Acceleration {
                 value,
                 phase: ToolheadPhase::Moving,
+                cause,
                 ..
-            } => Some((Self::RampEndAccel, value)),
-            ExtruderExcess::VelocityStep { step, .. } => Some((Self::LeaderKnotVelocityStep, step)),
-            ExtruderExcess::Acceleration { .. } | ExtruderExcess::Velocity { .. } => None,
+            } => Some((
+                match cause {
+                    AccelCause::PathTurning => Self::Turning,
+                    AccelCause::Unattributed => Self::RampEndAccel,
+                },
+                value,
+            )),
+            ExtruderExcess::Acceleration { .. }
+            | ExtruderExcess::Velocity { .. }
+            | ExtruderExcess::VelocityStep { .. } => None,
         }
     }
 }
 
-/// How many excesses of `class` the case on `config` leaves, and the worst
-/// of them: mm/s² for an acceleration, mm/s for a velocity step, as
-/// printed to one decimal and three decimals.
+/// How many excesses of `class` the case named `case` (`<gcode>/<config>`
+/// for the sim prints) leaves, and the worst of them in mm/s², as printed
+/// to one decimal.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KnownExcesses {
-    pub config: &'static str,
+    pub case: &'static str,
     pub class: ExcessClass,
     pub count: usize,
     pub worst: f64,
 }
 
-pub const KNOWN: &[KnownExcesses] = &[KnownExcesses {
-    config: "tools/bench/configs/trident_ramp.cfg",
-    class: ExcessClass::RampEndAccel,
-    count: 6,
-    worst: 5889.2,
-}];
+pub const KNOWN: &[KnownExcesses] = &[];
 
-fn printed(class: ExcessClass, worst: f64) -> f64 {
-    let scale = match class {
-        ExcessClass::RampEndAccel => 10.0,
-        ExcessClass::LeaderKnotVelocityStep => 1000.0,
-    };
-    (worst * scale).round() / scale
+fn printed(worst: f64) -> f64 {
+    (worst * 10.0).round() / 10.0
 }
 
-/// Where the audit of the case on `config` departs from what [`KNOWN`]
+/// Where the audit of the case named `case` departs from what [`KNOWN`]
 /// pins for it, as one failure line.
-pub fn extruder_excess(config: &Path, audit: &ExtruderAudit) -> Option<String> {
+pub fn extruder_excess(case: &str, audit: &ExtruderAudit) -> Option<String> {
     const SHOWN: usize = 3;
     let mut observed: Vec<(ExcessClass, usize, f64)> = Vec::new();
     let mut unpinned: Vec<String> = Vec::new();
@@ -87,19 +80,16 @@ pub fn extruder_excess(config: &Path, audit: &ExtruderAudit) -> Option<String> {
             None => observed.push((class, 1, value)),
         }
     }
-    let pinned: Vec<&KnownExcesses> = KNOWN
-        .iter()
-        .filter(|known| config.ends_with(known.config))
-        .collect();
+    let pinned: Vec<&KnownExcesses> = KNOWN.iter().filter(|known| known.case == case).collect();
     let mut departures: Vec<String> = Vec::new();
     for &(class, count, worst) in &observed {
         let matches = pinned.iter().any(|known| {
-            known.class == class && known.count == count && known.worst == printed(class, worst)
+            known.class == class && known.count == count && known.worst == printed(worst)
         });
         if !matches {
             departures.push(format!(
                 "pin {class:?}: count {count}, worst {}",
-                printed(class, worst)
+                printed(worst)
             ));
         }
     }

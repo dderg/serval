@@ -146,8 +146,9 @@ pub(crate) enum PostProcessError {
         allowance: f64,
     },
     #[error(
-        "axis {axis}: {fit_context} span [{t_start}, {t_end}] leaves breaks to the hull, but the \
-         signal has no exact polynomial there to prove a piece against"
+        "axis {axis}: {fit_context} span [{t_start}, {t_end}] has neither exact polynomials nor \
+         an enclosure there to prove a piece against: every fitted piece is proven, so the \
+         signal's formula there lacks a model"
     )]
     UnprovableSpan {
         axis: usize,
@@ -262,9 +263,13 @@ pub(crate) enum PostProcessError {
     NonFiniteSample { axis: usize, t: f64 },
 }
 
+/// A committed move: its geometry, its planned velocity, and the extrusion
+/// budget its plan took from the moves around it, which a re-plan of the
+/// move must take again.
 pub struct PlannedMove {
     pub geometry: Move,
     pub velocity: MoveVelocity,
+    pub budget: geometry::ExtrusionBudget,
 }
 
 /// What flows into the fit stage and planner: geometry, the command to stop

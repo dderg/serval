@@ -98,7 +98,10 @@ Count mode: 40 kHz snapshots, i8 step delta per channel. Event mode: every STEP 
 
 ## Analyzer
 
-Reference is offline `_motion_engine.pipeline_snapshot_axis_samples`; needs local `make -f Makefile.rust motion-engine-fast`. Extruder total is shorter than gcode E by design (`docs/rewrite/shaper.md`, "Followers").
+The reference is offline `_motion_engine.pipeline_snapshot_epoch_samples` and needs a local `make -f Makefile.rust motion-engine-fast`.
+- It plans the print as one stream, as the live host does, cuts it at every rest the stream drains to (a dwell or an `M400`), and aligns each epoch to its capture on its own.
+- It must not plan each epoch from rest. A kernel follower's fit seeds depend on the stream before them (#689), so an epoch planned alone sits up to 1.4e-4 mm of E (0.06 microstep) off the live stream. That is enough to fail the 0.05-step check at sub-kHz E rates, as the `epochs` row did 3/3 on e0229f32f.
+- The extruder total is shorter than the gcode E by design (`docs/rewrite/shaper.md`, "Followers").
 
 Timing check `timing_within_50us_or_0.05_step` (constants `TIMING_TOLERANCE_US`, `POSITION_EQUIVALENT_TOLERANCE_STEPS`). A step with reference rate ≥ 200 Hz fails only when it is both more than 50 µs off the aligned reference and more than 0.05 step off in position. Position error is |time error| × reference step rate. Near zero velocity, a tiny position difference becomes a large time difference.
 
@@ -108,7 +111,7 @@ The bound 0.05 step / 50 µs puts the crossover at 1 kHz. From 1 kHz up, any ste
 
 ### Corner flow (`--corner-flow`)
 
-`analyze.py --corner-flow` adds `corner_flow` to `analysis.json`: the nozzle flow through every extruding corner (a turn ≥ 20° between two extruding moves) and short-segment curve (≥ 3 vertices turning ≥ 1° between extruding segments ≤ 2 mm) of the print. It uses the definition `tools/corner_flow.py` uses, from the shared `tools/flow_metric.py`. A first-order melt model (`e_cmd = e_out + K·de_out/dt`) runs with K set to the config's pressure-advance k. Its output is measured per mm of the nozzle path in 0.02 mm bins. The commanded bead is subtracted and the difference is divided by the nominal bead, so 0 means the commanded bead exactly and +0.5 means 50 % over. Each feature reports `apex` (the deviation at the apex), `peak`/`dip`/`width_mm` (bins beyond ±5 %) and `blob_nl` within ±15 mm, or ±half the shorter leg, around the apex. It also reports the extruder's `ve_max`/`ve_min`/`ae_max` over that span while the nozzle moves, from 2 ms / 5 ms box-smoothed derivatives.
+`analyze.py --corner-flow` adds `corner_flow` to `analysis.json`: the nozzle flow through every extruding corner (a turn ≥ 20° between two extruding moves), short-segment curve (≥ 3 vertices turning ≥ 1° between extruding segments ≤ 2 mm) and ratio step (two extruding moves whose beads differ by ≥ 5 %, turning or not) of the print. It uses the definition `tools/corner_flow.py` uses, from the shared `tools/flow_metric.py`. A first-order melt model (`e_cmd = e_out + K·de_out/dt`) runs with K set to the config's pressure-advance k. Its output is measured per mm of the nozzle path in 0.02 mm bins. The commanded bead is read off the unshaped plan where it passes the same place (the two plans paired at every vertex of the block) and subtracted, and the difference is divided by the nominal bead, so 0 means the commanded bead exactly and +0.5 means 50 % over. Each corner and curve reports `apex` (the deviation at the apex), `peak`/`dip`/`width_mm` (bins beyond ±5 %) and `blob_nl` within ±15 mm, or ±half the shorter leg, around the apex. A ratio step reports instead, over the same window, `moved_nl` (the material laid across the vertex against a sharp switch there), `net_nl` (what the step gains or loses) and `switch_mm` (the path the bead takes from 5 % to 95 % of the step). Every feature also reports the extruder's `ve_max`/`ve_min`/`ae_max` over that span while the nozzle moves, from 2 ms / 5 ms box-smoothed derivatives.
 
 Every feature is measured from three sources on the same block-local time grid (10 µs):
 - `offline`: the snapshot plan's continuous x, y and e.
@@ -181,7 +184,21 @@ Any tool that touches the Pi or the boards (`run.py`, every `deploy.py` subcomma
 
 At 2 cores the `kalico-shaper` thread is busy ≈ 100 % of the wall time and the process uses ≈ 1.8 cores: the planning thread fits each lowered segment's sources while the shaper shapes the ones before it. The cost is in the shaper's leader fits and follower projection (about half of all CPU, `ExactConvolution::pieces_over` the largest single item) and in the planning thread's source fits (about 40 %, analytic span evaluation and the ladder proofs). `gcode_replay_bench --digest` hashes the emitted trajectory, so a throughput change can be held to an identical output.
 
-**CI throughput gate.** Wall-clock factors on a shared runner are noise, so `ci.sh throughput-gate` (`scripts/throughput_gate.py`) counts instructions instead: the first 1000 lines of the dense print replay through `gcode_replay_bench --synchronous` under `taskset -c 0` (no shaper thread, no pool helpers: one thread, a deterministic count) in valgrind cachegrind, and only instructions whose source file lies under `rust/` count — libc, ld.so, std and registry crates (crossbeam's spin loops, glibc's per-CPU memcpy) are excluded. The three slowest 2-core configs above are gated against `tools/bench/throughput_baseline.json`: the gate fails when a config's count moves more than 2 % either way (repeat runs differ by ~1 ppm; growth is a regression, shrinkage must be accepted so the baseline ratchets down), or when the predicted Pi 2-core worst window K × stream_secs / Ir falls below 2.0×. To accept a deliberate change, run `./scripts/ci.sh throughput-gate --accept --reason "…"` on a committed tree (valgrind, or else the `scripts/Dockerfile-build` image with the checkout at the CI runner's path), commit the baseline file, and put the reason in a ```` ```throughput-accept ```` block in the PR body; CI and `scripts/ship.py` refuse a moved baseline without it. K is calibrated per config from two 2-core runs of the full print on the Pi at the commit the counts come from (the lower of the two), and the baseline file records them: `./scripts/ci.sh throughput-gate --calibrate-pi-worst p3_voron_direct_drive_ramp=X1,X2 …` (`~/.cache/tp/pi_ab.sh "label=<worktree>" 0,1 <cfgs>` under `tools/bench/lock.py hold` measures them). Recalibrate whenever an accept changes what the Pi would measure by more than the gate's tolerance.
+**CI throughput gate.** `ci.sh throughput-gate` (`scripts/throughput_gate.py`) gates the three slowest 2-core configs above against `tools/bench/throughput_baseline.json`, which records an accepted reference commit, two ways. *Instructions* (deterministic): the first 1000 lines of the dense print replay through `gcode_replay_bench --synchronous` pinned to one core (no shaper thread, no pool helpers) in valgrind cachegrind, and every user-space instruction of the process counts — the repo's code, the std and registry code inlined into it, libc and libm. The gate fails when a config's count moves more than 2 % either way. *Live 2-core A/B* (measured): the full print replays live under `taskset -c 0,1`, five times each from this checkout and from a `git archive` build of the reference commit, alternating (both sides build in one directory, so identical code gives an identical binary), and the gate fails when the two sides' wall seconds per stream second (each the mean of its two fastest runs) differ by more than 2 % either way. Both directions fail: growth is a regression, and shrinkage must be accepted so the baseline ratchets down. It also fails when the Pi 2-core worst window either measurement predicts is below the 2.0× floor. Both predictions come from fits stored in the baseline's `pi_calibration` block: `W = W_cal × (Ir/stream_secs ÷ its calibration value)^-β` for the instructions, and `W = W_reference × live_ratio^-α[CPU]` for the A/B, with β per config and α per config and CPU model. A CPU model without an α fails the run.
+
+Why both: the gate used to count only instructions whose debug-info file lay under `rust/`, about half of all the work. It passed PR #663 while the Pi 2-core worst window fell 2.22× → 1.89× (p3_voron_direct_drive_kernel) and 2.28× → 1.89× (trident_kernel). Counting every instruction would not have caught it either: #663 handed the shaper thread 2.25× / 3.3× more items (5,974 → 19,667 per full print on trident), and the instruction counts barely moved. Over the slice / the full print, total Ir changed +5.5 % / +5.1 % on p3_voron_direct_drive_kernel, +0.4 % / +1.8 % on trident_kernel and −22 % on the ramp profile. libc and libm stayed at 9–12 % of the total on both commits. The slice showed the loss as well as the full print did (Pi 2-core slice −11 %, full −15 % to −17 %), so the first 1000 lines were not the blind spot. The Pi pays for the extra items in time per instruction and in thread handoffs: its own `instructions:u` rose +6.5 % / +2.7 %, its 1-core synchronous time +8 % / +7 %, its live 2-core wall +15 % / +18 %. CPU seconds of the live run do not track this either: +7–8 % on the Pi, and only −0.2 % to +2.3 % on trident on GitHub runners, where wall per stream second moved +2.6 % (Xeon 8370C) to +5.4 % (EPYC 9V74). Replaying one binary as both sides of the A/B on three runners kept the ratio within 0.45 % of 1. The A/B builds the reference instead of dividing by a fixed synthetic workload: such a workload's ratio to the replay differed 5–11 % between a Ryzen 7800X3D and a GitHub runner, so a baseline accepted on one machine could not be judged on another. The runners also understate the Pi: #663 cost them 2.6–7.8 % per stream second and the Pi 15–16 %. The 2 % tolerance is the tripwire, and the live floor prediction is optimistic.
+
+To accept a deliberate change, run `./scripts/ci.sh throughput-gate --accept --reason "…"` on a committed tree (valgrind, or else the `scripts/Dockerfile-build` image with the checkout at the CI runner's path), commit the baseline file, and put the reason in a ```` ```throughput-accept ```` block in the PR body; CI and `scripts/ship.py` refuse a moved baseline without it. The accept makes HEAD the reference and carries `W_reference` over by `live_ratio^-α` of the CPU it ran on. `--calibrate-pi-worst p3_voron_direct_drive_ramp=X1,X2 …` re-anchors a config's `W_reference` to two fresh 2-core Pi runs of the full print at the checked-out commit (the lower of the two).
+
+**Pi calibration and re-check.** `python3 scripts/throughput_recheck.py` re-measures every point and refits, in one command. A point is a commit or a patched commit listed in `pi_calibration.variants` (patches in `tools/bench/pi_calibration/`), plus the reference. The script measures each point's Pi worst window: built in one directory on the bench Pi and run twice per config under `tools/bench/lock.py`, taking the lower run. It counts each point's slice Ir in the gate's image. It measures each point's live cost on this machine and on the GitHub runners: every job of a throwaway branch dispatched to `ci-rust-runtime.yaml` replays the binaries the gate's image built, the branch is deleted afterwards, and runs of further `--stage dispatch` + `--stage collect` pairs add up to widen the CPU coverage. Each fit predicts every point from the reference, the way the gate does. Calibration of 2026-11-04 (reference 6aa1cb275, 7 points, Pi worst p3_voron_direct_drive_ramp 4.23×, p3_voron_direct_drive_kernel 2.28×, trident_kernel 2.39×), max error / leave-one-out max error in % of the worst window:
+
+| config | Ir: β, error | live α (range over 8 CPU models) | live error, EPYC 7763 / 9V45 / 9V74 | live error, Xeon 8370C / 8573C / 6973P-C / 6975P-C | live error, Ryzen 7800X3D (local) |
+|---|---|---|---|---|---|
+| p3_voron_direct_drive_ramp | 0.97, 2.0 / 4.2 | 0.85–0.97 | 5.4/11.8, 5.5/12.0, 5.7/13.0 | 2.7/5.8, 4.2/9.2, 4.7/11.2, 5.9/14.7 | 8.5/19.6 |
+| p3_voron_direct_drive_kernel | 1.06, 7.9 / 9.5 | 0.89–1.09 | 5.9/10.2, 5.8/11.0, 5.7/10.4 | 6.8/7.8, 6.8/7.7, 7.7/9.0, 5.2/5.7 | 7.0/14.9 |
+| trident_kernel | 0.78, 11.8 / 18.2 | 0.86–1.06 | 9.1/11.6, 7.3/8.6, 8.0/9.7 | 10.5/14.3, 10.3/13.7, 10.6/14.3, 9.4/11.9 | 5.7/7.2 |
+
+The exponents sit near 1. Most of the error comes from 728a1d720 → c73bd41d5 (#663), whose thread handoffs cost the Pi far more per x86 percent than any other change (its pair alone implies α ≈ 3 on p3_voron_direct_drive_kernel). So the gate under-predicts that kind of regression. Re-run of #663 against 728a1d720 with the calibrated gate: Ir predicts p3_voron_direct_drive_kernel at 1.92× (Pi measured 1.89×) and fails the floor, while the live prediction, 2.10×, passes it. The gate fails once the Pi measurement is more than 3 days old (`PI_CALIBRATION_STALE_DAYS`, justified in the script's docstring) and prints the re-check command.
 
 ## MCU step-rate capacity (F401, classic host-stepped path)
 
@@ -212,15 +229,41 @@ Other families, scaled from the F401 by clock and by the instructions one more s
 
 ### Self-benchmark
 
-Every MCU now measures its own step cost. On the first `get_step_benchmark` (`src/stepper_bench.c`), it runs four benchmark steppers through the real classic dispatch path: `sched_timer_dispatch`, the batching, and the step and finish code. The pulses go to a RAM sink instead of a pin (`gpio_out_bench_sink`). The steppers run in two pairs 0.25 µs apart, like CoreXY a/b, 32 steps each at 10 µs intervals. The MCU sums the ticks spent inside dispatches and reports the worst of three runs as ticks per step, for the 2 µs pulsed mode and for the both-edge mode. Klippy queries it at connect and refuses firmware without the command. The result is in `printer.mcu.step_benchmark`. `CONFIG_MCU_SIM` builds report `simulated=1` and do not run it. On a real Linux MCU the sink is an invalid file descriptor, so the GPIO ioctl fails fast and the cost is a lower bound.
+Every MCU measures its own step cost. On the first `get_step_benchmark` (`src/stepper_bench.c`), it runs one benchmark stepper, 32 steps at 25 µs intervals. The steps go through the real timer interrupt (SysTick, or TIM2 on G0) and the real classic dispatch path, with pulses going to a RAM sink instead of a pin (`gpio_out_bench_sink`). Between steps the MCU executes a nop sled larger than its instruction cache: 2 KB, or 32 KB on H7 for its 16 KB L1. That evicts the cache the way the main loop's tasks do between a lone motor's steps.
 
-F401: 301 ticks/step pulsed (279 k steps/s, 0.93 × the ladder ceiling) and 160 ticks/step both-edge (525 k steps/s). The values are identical across four resets. `suite.py` fails unless the pulsed capacity lies within `BENCHMARK_BAND` (0.85–1.10) of `LADDER_CEILING_STEPS_PER_S` (300 k).
+The timer reports how many ticks its interrupt held the CPU (`timer_dispatch_busy_ticks`), counted from the moment it was due to fire to the handler's exit. That count includes entry latency, the dispatch prologue and the in-handler spin to the unstep. The benchmark reports the worst of three runs per step, once for the 2 µs pulsed mode and once for the both-edge mode.
 
-CI runs the benchmark of every test/configs firmware in unicorn (`step_benchmark_emu.py`, from `scripts/ci-build-mcu.sh`). In the emulator one instruction is one tick, the MCU is in its configured state, and the build fails on a shutdown or on a result outside 40–600 instructions/step. Instructions per step, pulsed / both-edge: F401 188 / 94, F103 172–174 / 95–96, G0B1 229–244 / 115–121, H723 300 / 154. The F401's 301 ticks over 188 instructions is 1.60 cycles per instruction.
+Klippy queries the benchmark at connect and refuses firmware without the command. The result is in `printer.mcu.step_benchmark`. `CONFIG_MCU_SIM` builds report `simulated=1` and do not run it.
+
+F401: 497 ticks/step pulsed (169 k steps/s) and 240 ticks/step both-edge. The values are identical across reflashes. The single-motor ceiling is about 172 k: a lone motor sustained at 169 k ran without a shutdown, and one at 174 k shut down. `suite.py` fails unless the pulsed capacity lies within `BENCHMARK_BAND` (0.85–1.10) of `SINGLE_MOTOR_CEILING_STEPS_PER_S` (172 k); the F401 sits at 0.98.
+
+The earlier benchmark timed `sched_timer_dispatch` in a cache-hot loop at 301 ticks/step. That counted none of the interrupt's cost, and the cap built on it shut the MCU down on a lone motor (see "Single motor at the cap").
+
+CI runs the benchmark of every test/configs firmware and of `f401.config` in unicorn (`step_benchmark_emu.py`, from `scripts/ci-build-mcu.sh`). The emulator counts one tick per instruction and delivers the timer interrupt the firmware programs, by calling its handler once the interrupt is due and PRIMASK is clear, after the core's exception entry (12 cycles, 15 on the G0's M0+). It does not model wait states. The build fails on a shutdown or on a result outside 40–600 instructions/step. Instructions per isolated step, pulsed / both-edge:
+
+| firmware | pulsed | both-edge |
+|---|---|---|
+| F401 | 387 | 180 |
+| F103 | 387 | 191 |
+| G0B1 | 340 | 159 |
+| H723 | 357 | 189 |
+
+The pulsed figure includes the spin to the 2 µs unstep inside the interrupt. On H7 the unstep is far enough away that it gets its own interrupt.
+
+The same run checks that a step edge comes as late after its waketime whether the timer interrupt dispatched it or the dispatch loop did. A second benchmark run sets a bare timer 40–400 instructions before each step, so steps also follow another dispatch inside the interrupt. The check takes an irq-path edge when the interrupt was taken on time and dispatched that timer first, and a loop-path edge when the loop was spinning on the timer up to the waketime. It fails on any early edge, or when one dispatch function's edges spread over more than 8 instructions across the two paths. Edge lateness in instructions, irq / loop path, for pulsed and both-edge:
+
+| firmware | pulsed | both-edge |
+|---|---|---|
+| F401 | 26 / 25–27 | 25 / 24–26 |
+| F103 | 36 / 35–36 | 34 / 34 |
+| G0B1 | 37 / 36–40 | 34 / 33–37 |
+| H723 | 26 / 25–27 | 26 / 25–27 |
+
+H723 has no both-edge optimization, so both modes dispatch through the same function and are judged together. Both timer backends wake early and spin to the head timer's waketime: SysTick 100 ticks ahead, the G0's TIM2 64 ticks ahead (`TIMER_IRQ_LEAD_TICKS`). The dispatch loop ends its interrupts-enabled wait at the same lead, so both paths leave the same spin. Before that the G0 irq path was 61 instructions late against 43–48 in the loop, and SysTick's loop path came 12 instructions after its irq path. The G0 lead is the emulated 27 cycles from interrupt to the loop's first timer read, scaled by the F401's hardware-to-emulator ratio (44 emulated cycles against a measured p99.9 of 68–100). It is not measured on G0 hardware.
 
 ### How the capacity caps moves
 
-The planner turns the benchmark into a per-move speed cap (`rust/motion-pipeline/src/live_config/step_capacity.rs`, `docs/Config_Reference_Motion.md`, "MCU step capacity"); klippy (`klippy/motion_step_capacity.py`) only hands it each MCU's benchmark, clock and stepped motors. Each MCU gets `STEP_CAPACITY_FRACTION` × CLOCK_FREQ ticks per second; the fraction comes from the timing budget below. A motor costs its benchmarked ticks per step (pulsed or both-edge, by its own mode) times the steps per second the move asks of it. The planner keeps the sum over each MCU's motors within the capacity, counting pressure advance on the extruder. On this bench (F401, 301 ticks/step pulsed) the fraction of 0.625 gives 174 k steps/s. `capacity.cfg` raises the speed limits past the cap, so its ladder rungs above the cap are planned slower than the G-code asks and `step_capacity_capped` events report it.
+The planner turns the benchmark into a per-move speed cap (`rust/motion-pipeline/src/live_config/step_capacity.rs`, `docs/Config_Reference_Motion.md`, "MCU step capacity"); klippy (`klippy/motion_step_capacity.py`) only hands it each MCU's benchmark, clock and stepped motors. Each MCU gets `STEP_CAPACITY_FRACTION` × CLOCK_FREQ ticks per second; the fraction comes from the timing budget below. A motor costs its benchmarked ticks per step (pulsed or both-edge, by its own mode) times the steps per second the move asks of it. The planner keeps the sum over each MCU's motors within the capacity, counting pressure advance on the extruder. On this bench (F401, 497 ticks/step pulsed) the fraction of 0.80 gives 135 k steps/s. `capacity.cfg` raises the speed limits past the cap, so its ladder rungs above the cap are planned slower than the G-code asks and `step_capacity_capped` events report it.
 
 `run.py` records every MCU's step benchmark in `run.json` under `step_benchmarks`, taken from the MCU status `step_capacity`, together with the capacity fraction the live planner applied. `analyze.py` plans its reference under the same cap, so a run where the cap binds is analyzed against the plan the printer executed, even after the fraction changes. A `run.json` from before that recording plans an uncapped reference. For such a run, `--step-benchmark 301,160,84000000,0.75` supplies the F401's benchmark and the fraction live used then (0.75 until it became 0.625). It is charged to every captured motor, stepped pulsed, since the bench has one MCU and no `dedge` driver. `analysis.json` says which reference it judged in `reference_step_capacity`: `recorded`, `supplied` or `absent`.
 
@@ -228,20 +271,87 @@ The planner turns the benchmark into a per-move speed cap (`rust/motion-pipeline
 
 Budget: at the load the cap allows, p99.9 MCU step lateness × that motor's own step rate (lateness in microsteps of position) must stay ≤ 0.5 microstep. A step that is 0.5 microstep late is still nearer its own lattice point than the next one. The host's step compression already allows 25 µs by design, which is 1.3 microsteps at the 52 k steps/s per motor these runs reach. The analyzer's 0.05-step criterion is not usable here: the MCU's intrinsic ~5 µs p99.9 dispatch jitter alone exceeds it at any useful speed, even at a quarter of capacity. That criterion measures speed, not load.
 
-Sweep: `capacity_ladder_high` in event mode with the step tap and `configs/capacity.cfg`, so every rung asks more than the cap and the run sits at the cap. F401, 301 ticks/step pulsed, four motors stepping at equal rates. The fraction was set per run in a throwaway tree. `mcu_execution.lateness_by_step_rate_hz` → `position_p99_9_steps` in the dominant (capped) rate bin:
+The fraction must hold the budget for two workloads at the cap, each run in event mode with the step tap and `configs/capacity.cfg` so that every move asks more than the cap:
+- `single_motor_cap`: one motor alone, a CoreXY 45° diagonal stepping only `a`. Each step pays its own timer interrupt.
+- `capacity_ladder_high`: four motors at equal rates. Their steps batch inside the dispatch loop.
 
-| fraction | cap | p99.9 lateness | p99.9 position | max position | step_load_late |
-|---|---|---|---|---|---|
-| 0.75 | 209 k | 12.2 µs | 0.62 | 1.01 | 456 |
-| 0.65 | 181 k | 11.7–11.8 µs | 0.52 (×2) | 0.82 | 167–169 |
-| **0.625** | 174 k | 11.2 µs | **0.47** | 0.81 | 121 |
-| 0.60 | 167 k | 10.7–10.8 µs | 0.44 (×2) | 0.82 | 90–189 |
-| 0.55 | 153 k | 9.5 µs | 0.36 | 0.68 | 48 |
-| 0.45 | 126 k | 6.9 µs | 0.21 | 0.65 | 0 |
-| 0.35 | 98 k | 6.3 µs | 0.15 | 0.34 | 0 |
-| 0.25 | 70 k | 5.2 µs | 0.09 | 0.24 | 0 |
+The table gives `mcu_execution.lateness_by_step_rate_hz` → `position_p99_9_steps` in the dominant (capped) bin. Bench F401, isolated-step benchmark 497 ticks/step, firmware with #670, #671 and #683. The fraction was set per run in a throwaway tree.
 
-The largest fraction measured within budget is 0.625; 0.65 misses it by 0.02 step, and it did so on both runs. Runs: `20261104-044956` … `-045817` and `-051422` … `-051928`. In time terms, lateness is flat at 5–7 µs up to 0.45 and the queueing knee appears from 0.55 upward.
+| fraction | cap | single motor | four motors |
+|---|---|---|---|
+| 1.0 | 169 k | 0.89 (`20261104-125307`) | 0.24 (`-125357`) |
+| 0.9 | 152 k | 0.69 (`-125811`) | 0.21 (`-125859`) |
+| 0.85 | 144 k | 0.09, 0.09, 0.10 (`-131827`, `-131918`, suite `20261104-143747`) | 0.20 (`-143608`) |
+| **0.8** | 135 k | **0.05, 0.05, 0.05** (`-130322`, `-132317`, `-132439`) | **0.19** (`-130412`) |
+
+The single motor sets the fraction. 0.85 is the largest fraction measured within budget, and 0.9 misses it. The single-motor lateness rises steeply between the two, because at 0.9 a lone motor has the CPU nearly saturated. No fraction shut the MCU down. Four motors stay far inside the budget even at 1.0, because their steps are cheaper than the benchmark charges.
+
+The live fraction is **0.80**, one step back from that cliff. A shutdown is catastrophic, and real printers run more MCU tasks than this bench, which has no heaters, no ADC sampling and no TMC UART yet. Re-derive the fraction under that load once the phase-2 wiring (`WIRING_PHASE2.md`) exists.
+
+Earlier derivations used the four-motor ladder only, against the cache-hot benchmark (301 ticks/step):
+- First: 0.625, the largest fraction under 0.5 microstep. At 0.65 the result was 0.52 on both runs; at 0.75, 0.62. Runs `20261104-044956` … `-051928`.
+- With #670/#671/#683: 0.775 (0.44 and 0.46). At 0.80 the result was 0.55–0.59.
+
+That benchmark under-charged a lone motor. `single_motor_cap` shut the MCU down with `Stepper too far in past` at 0.625 on every firmware, and the old firmware (`481397432`) shut down even at 0.50 (`-114535`). Main ran at 0.50 as an interim fix (#684) until this benchmark.
+
+### Step timing jitter sources (F401)
+
+These were measured with an on-target probe: DWT-stamped histograms read over SWD from a throwaway firmware. Fixes were checked in event mode.
+
+| source | measured | fix |
+|---|---|---|
+| SysTick path vs dispatch-loop path | SysTick entry to step edge took 176–200 cycles (2.1–2.4 µs). A loop-dispatched step's edge came 72 cycles after due. Low-load lateness was a flat 1.2–3.0 µs band, p50 2.2 µs. | #671: wake SysTick early and spin to the deadline. Low-load p50 is now 0.1–0.3 µs. |
+| Flash wait states | 5 WS at 84 MHz. Entry-to-edge spread was 0.67 µs from cache misses. | #670: 2 WS. Capped-bin p99.9 position fell 18 %. |
+| Forced task defer | 14,570 forced 5 µs pauses per capped ladder, each delaying the next steps 4.4–12 µs. | #671: 1 ms interval instead of 100 µs. Capped p99.9 fell 27 %. |
+| Over-long SysTick lead | The clean prologue p99.9 is 100 cycles. A 190-cycle lead spun about 120 cycles per interrupt. | #683: lead 100. |
+| Running the hot path from SRAM | The self-benchmark rose from 301 to 391 ticks/step: S-bus instruction fetch contends with data. | Rejected. |
+| USB OTG interrupt (priority 1) | Overlapped 0.02 % of SysTick entries, delaying them 1.6–2.1 µs. | None; below p99.9. |
+| Masked critical sections in the main loop | Entries while awake were 7 % of the total; p99.9 entry delay grew by at most 0.3 µs. | None. |
+| SysTick entry from WFI | A constant 32 cycles. | None; the host's clock offset absorbs it. |
+
+What remains at the cap is queueing behind other events: about half the isolated steps wait, uniformly up to roughly 6 µs. That is load, and the capacity fraction trades it off.
+
+### Runtime headroom check
+
+The fraction leaves `1 − fraction` of each MCU's CPU for everything that is not a step. That covers tasks, USB and other interrupts, and non-step timers such as software PWM. The fraction was derived on this bench, where that load is small. On a real printer it is checked at run time.
+
+**What the MCU reports.** Every 250 ms the MCU sends `cpu_load` (`src/cpu_load.c`) with these fields:
+- the window length;
+- the time spent asleep (`irq_wait`, stamped before the wake is serviced);
+- the timer interrupt's busy time;
+- the part of that time that went to non-step timers;
+- the number of step timer events.
+
+Each timer dispatch is charged the interval since the previous dispatch ended, or since the interrupt fired. That covers its share of the entry, spin and exit, so a 50 kHz software PWM is charged its interrupt overhead, not just its callback.
+
+**What klippy does** (`klippy/mcu_cpu_headroom.py`):
+- The non-step share is what was neither asleep nor stepping.
+- The charged step share is the step events at their benchmarked cost: half a pulsed step, or one both-edge step. When an MCU uses both modes, the cheaper one is charged.
+- A window whose non-step share exceeds `1 − fraction` violates the cap's assumption. It is logged as `mcu.cpu_headroom_exceeded`, at most once every 30 s with the number of violating windows.
+- If, in the same window, the charged step share plus the non-step share exceeds 1, the steps are being squeezed and klippy shuts the printer down with the shares in the message.
+- The stats line carries `mcu_nonstep_max` and `mcu_idle_min` per stats period.
+
+There is no derating, so the plan stays deterministic.
+
+**Cost on the MCU** (emulator, instructions per isolated step, pulsed / both-edge, before → after):
+
+| firmware | pulsed | both-edge |
+|---|---|---|
+| F401 | 380 → 387 | 168 → 180 |
+| F103 | 371 → 387 | 176 → 191 |
+| G0B1 | 309 → 340 | 139 → 159 |
+| H723 | 343 → 357 | 182 → 189 |
+
+**Bench F401, `single_motor_cap`, fraction 0.80:**
+
+| extra load | non-step share | outcome |
+|---|---|---|
+| none | ≤ 8.8 % (idle ≥ 18 %) | nothing logged |
+| one software PWM pin at 50 kHz (`output_pin`, `cycle_time: 0.00002`), slow single-motor moves | 42 % | `cpu_headroom_exceeded` logged, no shutdown; steps were light |
+| the same PWM, single motor at the cap | 29 % | klippy shut down in the first loaded window with non-step 29 %, steps 64 % measured and 73 % charged, idle 6.6 %, before the MCU fell behind (`20261104-183119`) |
+| three PWM pins at 50 kHz, single motor at the cap | 86 % | the MCU shut itself down ("Stepper too far in past") within a second of reaching the cap, before a window could report. The violation had been logged for the preceding seconds. |
+
+A 250 ms window cannot pre-empt an overload that kills the MCU within milliseconds. In that case the MCU's own fail-loud check fires, and the logged violation names the cause.
 
 ## Limits
 

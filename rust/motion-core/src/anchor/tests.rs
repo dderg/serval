@@ -474,3 +474,77 @@ fn a_hold_on_a_stream_in_motion_is_refused() {
     let mut a = primed(false);
     assert!(a.hold_start_until(100.0 + DEFAULT_LEAD_SECS + 2.0).is_err());
 }
+
+const PACER_RESERVE_S: f64 = 1.056;
+
+fn braked_mid_motion() -> (Anchor, f64) {
+    let mut a = Anchor::new();
+    let (t0, _) = a.anchor_segment(0.0, 1.0, 100.0);
+    a.mark_parked();
+    a.require_resume_lead(PACER_RESERVE_S)
+        .expect("a stream braked to rest takes a resume lead");
+    (a, t0)
+}
+
+#[test]
+fn a_resume_after_a_pacer_brake_starts_the_reserve_ahead_of_the_playhead() {
+    let (mut a, t0) = braked_mid_motion();
+    let now = t0 + 1.0 - 0.112;
+    let (t0_new, epoch) = a.anchor_segment(1.0, 1.01, now);
+    assert_eq!(epoch, StreamEpoch::Reanchor);
+    assert!(
+        (t0_new + 1.0 - (now + PACER_RESERVE_S)).abs() < 1e-9,
+        "the resumed motion starts {}s ahead, the pacer needs {PACER_RESERVE_S}s to brake it",
+        t0_new + 1.0 - now
+    );
+}
+
+#[test]
+fn a_resume_after_a_pacer_brake_keeps_a_standing_anchor_that_already_clears_the_reserve() {
+    let (mut a, t0) = braked_mid_motion();
+    let (t0_new, epoch) = a.anchor_segment(1.0, 2.0, t0 + 1.0 - (PACER_RESERVE_S + 0.1));
+    assert_eq!(epoch, StreamEpoch::Continuation);
+    assert_eq!(t0_new, t0);
+}
+
+#[test]
+fn the_resume_lead_covers_one_resume_only() {
+    let (mut a, t0) = braked_mid_motion();
+    let now = t0 + 1.0 - 0.112;
+    let (t0_resumed, _) = a.anchor_segment(1.0, 2.0, now);
+    a.mark_parked();
+    let later = t0_resumed + 2.0 + 5.0;
+    let (t0_next, epoch) = a.anchor_segment(2.0, 3.0, later);
+    assert_eq!(epoch, StreamEpoch::Reanchor);
+    assert!((t0_next + 2.0 - (later + DEFAULT_LEAD_SECS)).abs() < 1e-9);
+}
+
+#[test]
+fn the_earliest_start_claimed_after_a_pacer_brake_is_the_resume_lead_ahead() {
+    let (mut a, t0) = braked_mid_motion();
+    let now = t0 + 1.0 + 0.5;
+    let claimed = a
+        .claim_earliest_start(now)
+        .expect("a parked stream answers");
+    assert!((claimed - (now + PACER_RESERVE_S)).abs() < 1e-9);
+    let (t0_new, _) = a.anchor_segment(1.0, 2.0, now);
+    assert!(t0_new + 1.0 >= claimed - 1e-9);
+}
+
+#[test]
+fn a_resume_lead_is_refused_while_the_stream_is_in_motion() {
+    let mut a = Anchor::new();
+    a.anchor_segment(0.0, 1.0, 100.0);
+    assert!(a.require_resume_lead(PACER_RESERVE_S).is_err());
+}
+
+#[test]
+fn without_a_pacer_brake_resumes_keep_the_default_lead_and_rest_floor() {
+    let mut a = Anchor::new();
+    let (t0, _) = a.anchor_segment(0.0, 1.0, 100.0);
+    a.mark_parked();
+    assert!(a.is_parked());
+    let (t0_new, epoch) = a.anchor_segment(1.0, 2.0, t0 + 1.0 - 0.2);
+    assert_eq!((epoch, t0_new), (StreamEpoch::Continuation, t0));
+    assert!(!a.is_parked());
+}

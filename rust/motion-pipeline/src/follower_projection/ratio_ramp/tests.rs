@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
-use geometry::RatioRampRule;
+use geometry::{RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule};
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 use trajectory::{ContinuousAxis, ContinuousSegment};
 
 use super::super::FollowerState;
 use super::{
-    Crossing, ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_S, RampLeg, ShapedLeaders,
-    WIDTH_SLOPE_BOUND, WidthField,
+    AdvanceValley, Crossing, ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_PER_WIDTH, NODE_SPACING_S,
+    RampLeg, RestSide, ShapedLeaders, Spill, TimedSeam, WIDTH_SLOPE_BOUND, WidthField,
+    slowest_crawl,
 };
 
 /// `(length, ratio at start, ratio at end)` per span.
@@ -214,6 +215,7 @@ fn the_smoothed_ratio_is_c1_and_its_derivatives_are_exact() {
             for &s in &points {
                 let (left_ratio, left_slope) = state.ratio_and_slope(s - eps);
                 let (right_ratio, right_slope) = state.ratio_and_slope(s + eps);
+                let (_, slope_on) = state.ratio_and_slope(s);
                 assert!(
                     (left_ratio - right_ratio).abs() < 1e-9,
                     "the ratio jumps at {s} mm: {left_ratio} -> {right_ratio}"
@@ -221,6 +223,10 @@ fn the_smoothed_ratio_is_c1_and_its_derivatives_are_exact() {
                 assert!(
                     (left_slope - right_slope).abs() < 1e-5,
                     "the ratio's slope jumps at {s} mm: {left_slope} -> {right_slope}"
+                );
+                assert!(
+                    (slope_on - right_slope).abs() < 1e-5,
+                    "the ratio's slope on {s} mm is {slope_on}, beside it {right_slope}"
                 );
             }
             let h = 1e-6;
@@ -737,5 +743,605 @@ fn a_rest_valley_covers_the_ratio_step_its_leg_lays_short_of_the_rest() {
     assert_eq!(
         weight, 0.0,
         "the advance reads the ratio step at {ratio_step} mm with weight {weight}"
+    );
+}
+
+fn model_at(model: &crate::shaper::taylor::TaylorModel, x: f64) -> f64 {
+    model
+        .coefficients()
+        .iter()
+        .rev()
+        .fold(0.0, |acc, c| acc * x + c)
+}
+
+/// Over every stretch of path between the smoothing's bends and the
+/// table's seams, its correction and the advance's valley weight read on a
+/// model of the path hold every reading the evaluator makes there, with
+/// its derivatives.
+#[test]
+fn the_smoothing_models_hold_its_correction_and_valley_weight_between_bends() {
+    use crate::shaper::taylor::{Ball, TaylorModel};
+    let mut read = 0usize;
+    for table in [line_table(), clustered_table()] {
+        for field in [cruise, cornering] {
+            let total = length(&table);
+            let mut state = smoothed(&table, field(total));
+            state.smoothing.valleys = vec![
+                super::AdvanceValley {
+                    start: 0.3 * total,
+                    end: 0.3 * total,
+                    before: 1.5,
+                    after: 2.0,
+                    floor: 0.3,
+                },
+                super::AdvanceValley {
+                    start: 0.6 * total,
+                    end: 0.6 * total + 1.0,
+                    before: 0.8,
+                    after: 0.5,
+                    floor: 0.0,
+                },
+            ];
+            let mut points: Vec<f64> = state.spans.iter().map(|span| span.s0).collect();
+            points.extend(state.smoothing.bends(0.0, total));
+            points.extend([0.0, total]);
+            points.retain(|&s| (0.0..=total).contains(&s));
+            points.sort_by(f64::total_cmp);
+            points.dedup();
+            for stretch in points.windows(2).filter(|pair| pair[1] - pair[0] > 1e-9) {
+                for part in 0..4 {
+                    let width = (stretch[1] - stretch[0]) / 4.0;
+                    let (lo, hi) = (
+                        stretch[0] + width * f64::from(part),
+                        stretch[0] + width * f64::from(part + 1),
+                    );
+                    let (centre, radius) = (0.5 * (lo + hi), 0.5 * (hi - lo));
+                    let s = TaylorModel::affine(Ball::exact(centre), radius);
+                    let reach = (
+                        trajectory::next_toward(lo, f64::INFINITY),
+                        trajectory::next_toward(hi, f64::NEG_INFINITY),
+                    );
+                    let correction = state
+                        .smoothing
+                        .correction_model(&s, reach)
+                        .expect("a stretch between bends reads one formula");
+                    let weight = state
+                        .smoothing
+                        .valley_weight_model(&s, reach)
+                        .expect("a stretch between bends lies on one side of every valley")
+                        .models();
+                    read += 1;
+                    for k in 1..8 {
+                        let at = lo + (hi - lo) * f64::from(k) / 8.0;
+                        let x = (at - centre) / radius;
+                        let jet = state.smoothing.correction(at);
+                        let (w, w1, w2) = state.smoothing.valley_weight(at);
+                        for (name, truth, model) in [
+                            ("value", jet.value, &correction.value),
+                            ("d1", jet.d1, &correction.d1),
+                            ("d2", jet.d2, &correction.d2),
+                            ("d3", jet.d3, &correction.d3),
+                            ("W", w, &weight[0]),
+                            ("W'", w1, &weight[1]),
+                            ("W''", w2, &weight[2]),
+                        ] {
+                            let miss = (truth - model_at(model, x)).abs();
+                            assert!(
+                                miss <= model.rad() + 1e-9 * (1.0 + truth.abs()),
+                                "{name} at {at} mm on [{lo}, {hi}]: the evaluator reads {truth}, \
+                                 the model misses it by {miss:e} past its bound {:e}",
+                                model.rad()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(read > 100, "too few stretches read: {read}");
+}
+
+const CORNER_SPEED_MM_S: f64 = 40.0;
+const CORNER_CRAWL_MM_S: f64 = 4.0;
+const CORNER_BRAKE_MM_S2: f64 = 6400.0;
+
+/// The leaders' path and speed at `t`: a cruise at `CORNER_SPEED_MM_S`
+/// braking at `brake` into a corner they cross at `CORNER_CRAWL_MM_S`, then
+/// speeding up the same way, as a slicer's short travel between two
+/// extrusions plans.
+fn slow_corner(brake: f64, t: f64) -> f64 {
+    let ramp = (CORNER_SPEED_MM_S - CORNER_CRAWL_MM_S) / CORNER_BRAKE_MM_S2;
+    let covered = |speed_at: &dyn Fn(f64) -> f64, from: f64, to: f64| {
+        let steps = 64;
+        (0..steps)
+            .map(|k| {
+                let at = from + (to - from) * (k as f64 + 0.5) / steps as f64;
+                speed_at(at) * (to - from) / steps as f64
+            })
+            .sum::<f64>()
+    };
+    let speed = |t: f64| {
+        let off = (t - brake - ramp).abs();
+        if off >= ramp {
+            CORNER_SPEED_MM_S
+        } else {
+            CORNER_CRAWL_MM_S + CORNER_BRAKE_MM_S2 * off
+        }
+    };
+    covered(&speed, 0.0, t)
+}
+
+/// A ratio step crossed at speed just ahead of a slow corner asks for a
+/// window `V·τ/2` wide, `V` the speed the leaders cross it at. The corner's
+/// own target is a fraction of that, and its cone would narrow the window
+/// right where the leaders still cruise into it: the seam's width holds the
+/// window open wherever the seam is inside it.
+#[test]
+fn a_slow_corner_beside_a_ratio_step_does_not_narrow_its_window() {
+    let rule = RatioRampRule {
+        advance_slope_s: 0.02,
+        max_velocity_mm_s: 50.0,
+        max_accel_mm_s2: 5000.0,
+    };
+    let (seam_t, brake, end) = (0.052, 0.05, 0.12);
+    let mut field = WidthField {
+        rule: Some(rule),
+        ..WidthField::default()
+    };
+    field.place_rest(0.0);
+    let seam_s = slow_corner(brake, seam_t);
+    field.add_seam(TimedSeam {
+        t: seam_t,
+        s: seam_s,
+        crossing: Crossing {
+            speed: CORNER_SPEED_MM_S,
+            rate: CORNER_BRAKE_MM_S2,
+            jerk: 0.0,
+        },
+        step: 0.034,
+        peak_ratio: 0.034,
+        ramp_time: None,
+    });
+    let seam_width = 0.5 * CORNER_SPEED_MM_S * field.seam_ramp_time(0);
+    let mut t = NODE_SPACING_S;
+    while t < end {
+        field.place_sample(slow_corner(brake, t), t);
+        t += NODE_SPACING_S;
+    }
+    field.close(slow_corner(brake, end));
+    let corner = slow_corner(
+        brake,
+        brake + (CORNER_SPEED_MM_S - CORNER_CRAWL_MM_S) / CORNER_BRAKE_MM_S2,
+    );
+    assert!(
+        corner - seam_s < seam_width,
+        "the corner at {corner} mm lies beyond the {seam_width} mm window of the seam at \
+         {seam_s} mm"
+    );
+    let narrowest = probes(2.0 * seam_width, 400)
+        .map(|offset| seam_s - seam_width + offset)
+        .map(|s| (field.width(s), s))
+        .fold((f64::INFINITY, 0.0), |narrowest, probe| {
+            if probe.0 < narrowest.0 {
+                probe
+            } else {
+                narrowest
+            }
+        });
+    assert!(
+        narrowest.0 >= seam_width * (1.0 - 1e-12),
+        "the window at {} mm is {} mm wide, under the {seam_width} mm the seam at {seam_s} mm \
+         asks for",
+        narrowest.1,
+        narrowest.0
+    );
+}
+
+/// Moving width nodes lie most of the narrower of their targets apart on
+/// the path, so the smootherstep between two of them bends the width no
+/// sharper than a window's own width allows.
+#[test]
+fn moving_width_nodes_lie_a_window_apart() {
+    let mut field = WidthField {
+        rule: Some(RatioRampRule {
+            advance_slope_s: 0.02,
+            max_velocity_mm_s: 50.0,
+            max_accel_mm_s2: 5000.0,
+        }),
+        ..WidthField::default()
+    };
+    field.place_rest(0.0);
+    let brake = 0.05;
+    let mut t = NODE_SPACING_S;
+    while t < 0.12 {
+        field.place_sample(slow_corner(brake, t), t);
+        t += NODE_SPACING_S;
+    }
+    field.close(slow_corner(brake, 0.12));
+    for pair in field.nodes.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        if a.target > 0.0 && b.target > 0.0 {
+            assert!(
+                b.s - a.s >= NODE_SPACING_PER_WIDTH * a.target.min(b.target),
+                "width nodes at {} and {} mm lie closer than their targets {} and {}",
+                a.s,
+                b.s,
+                a.target,
+                b.target
+            );
+        }
+    }
+}
+
+/// A corner blend tens of nanometres long ramps the table's ratio at
+/// millions per millimetre. Summed seam by seam, its two slope steps cancel
+/// only to an ulp of `m·h²`, and where the leaders crawl through a wide
+/// window the laid track jittered by 1e-10 mm, more than a source fit
+/// split down to nanoseconds can follow.
+#[test]
+fn a_nanometre_blend_lays_a_smooth_track_through_a_wide_window() {
+    let blend_start = 10.0;
+    let table = vec![
+        (blend_start, 0.0, 0.0),
+        (2.7e-8, 0.0, 0.085),
+        (10.0, 0.085, 0.085),
+    ];
+    let total = length(&table);
+    let state = smoothed(&table, cruise(total));
+    let h = state.smoothing.width.width(blend_start);
+    let step = 1e-9;
+    for centre in [-h, -0.5 * h, 0.5 * h, h].map(|offset| blend_start + offset) {
+        for k in 0..2_000 {
+            let s = centre - 1e-6 + step * f64::from(k);
+            let (a, b) = (
+                state.smoothing.correction(s),
+                state.smoothing.correction(s + step),
+            );
+            let drift = b.value - a.value - 0.5 * step * (a.d1 + b.d1);
+            assert!(
+                drift.abs() < 1e-14,
+                "the laid track drifts {drift} mm off its own ratio over {step} mm at {s} mm"
+            );
+        }
+    }
+}
+
+/// The leaders cross a crawl moving, so its valley leaves zero flat over
+/// its floor: `W'·ṡ²` of opposite signs either side would step the advanced
+/// velocity there. With no floor the valley is `ψ`, kinked, as at a
+/// turnaround, where the leaders' zero speed makes the slope harmless.
+#[test]
+fn a_crawl_valley_leaves_zero_flat_and_its_derivatives_are_exact() {
+    let crawl = AdvanceValley {
+        start: 5.0,
+        end: 5.0,
+        before: 2.0,
+        after: 1.5,
+        floor: 0.01,
+    };
+    for side in [-1.0, 1.0] {
+        let (weight, slope, _) = crawl.weight(5.0 + side * 1e-9);
+        assert!(
+            weight < 1e-12 && slope.abs() < 1e-6,
+            "the crawl valley leaves zero at {weight} with slope {slope}"
+        );
+    }
+    let h = 1e-6;
+    for k in 1..4_000 {
+        let s = 2.9 + 3.7 * f64::from(k) / 4_000.0;
+        if (s - 5.0).abs() < 4.0 * h {
+            continue;
+        }
+        let (weight, slope, curvature) = crawl.weight(s);
+        let (before, after) = (crawl.weight(s - h), crawl.weight(s + h));
+        assert!(
+            (0.0..=1.0).contains(&weight),
+            "the crawl valley weighs {weight} at {s} mm"
+        );
+        for (order, value, numeric) in [
+            (1, slope, (after.0 - before.0) / (2.0 * h)),
+            (2, curvature, (after.1 - before.1) / (2.0 * h)),
+        ] {
+            assert!(
+                (value - numeric).abs() < 1e-5 * (1.0 + numeric.abs()),
+                "derivative {order} of the crawl valley at {s} mm is {value}, its \
+                 difference quotient {numeric}"
+            );
+        }
+    }
+    let kinked = AdvanceValley {
+        floor: 0.0,
+        ..crawl
+    };
+    let (_, slope, _) = kinked.weight(5.0 + 1e-9);
+    assert!(
+        (slope - 3.0 / 1.5).abs() < 1e-6,
+        "a valley without a floor leaves zero with slope {slope}"
+    );
+}
+
+/// A crawl is worth a valley only where an advance reading the path speed
+/// through it would leave the follower's acceleration limit. The Bowden
+/// crawl of `voron_dense_top_layers` at t≈148.07 s on the P1 kernel config
+/// asks `r·(a + k·s⃛)` ≈ 370 mm/s² of its 2000; releasing its lead there
+/// asked 2610. A turnaround releases it whatever the advance asks.
+#[test]
+fn a_crawl_lays_a_valley_only_where_the_advance_would_leave_the_limit() {
+    let rule = RatioRampRule {
+        advance_slope_s: 0.5,
+        max_velocity_mm_s: 50.0,
+        max_accel_mm_s2: 2000.0,
+    };
+    let crawl = Crossing {
+        speed: 0.647,
+        rate: 119.0,
+        jerk: 119.0 * 119.0 / 0.647,
+    };
+    assert!(!crawl.needs_valley(&rule, 0.0337));
+    assert!(crawl.needs_valley(&rule, 0.2));
+    let cruise = Crossing {
+        speed: 2.5,
+        ..crawl
+    };
+    assert!(!cruise.needs_valley(&rule, 0.2));
+    let turnaround = Crossing {
+        speed: 0.0,
+        rate: 119.0,
+        jerk: 0.0,
+    };
+    let no_advance = RatioRampRule {
+        advance_slope_s: 0.0,
+        ..rule
+    };
+    assert!(turnaround.needs_valley(&no_advance, 0.0337));
+}
+
+const CRAWL_LEG_SEAM_SPEED_MM_S: f64 = 2.83;
+const CRAWL_LEG_PEAK_GAIN_MM_S: f64 = 3.0 * CRAWL_LEG_SEAM_SPEED_MM_S;
+const CRAWL_LEG_SIDEWAYS_MM_S: f64 = 0.3;
+const CRAWL_LEG_PIECE_S: f64 = 0.1;
+const CRAWL_LEG_REVERSAL_POWER: i32 = 8;
+
+/// Leaders on a leg from `t0` that cross its opening seam along x at
+/// [`CRAWL_LEG_SEAM_SPEED_MM_S`], speed up, and reverse x sharply right
+/// before the closing seam, which they cross `end_excess_mm_s` faster than
+/// the opening one, drifting sideways along y the whole time: the shaped
+/// reversals of the rest ladder, which pass a hair beside zero inside the
+/// last probe interval of the move into them. Returns the leaders and the
+/// time of the reversal.
+fn reversing_just_before_its_end(t0: f64, end_excess_mm_s: f64) -> (ContinuousSegment, f64) {
+    let (v0, gain, piece) = (
+        CRAWL_LEG_SEAM_SPEED_MM_S,
+        CRAWL_LEG_PEAK_GAIN_MM_S,
+        CRAWL_LEG_PIECE_S,
+    );
+    let power = CRAWL_LEG_REVERSAL_POWER;
+    let (t_mid, t1) = (t0 + piece, t0 + 2.0 * piece);
+    let x_mid = v0 * piece + 2.0 * gain * piece / 3.0;
+    let drop = 2.0 * v0 + gain + end_excess_mm_s;
+    let degree = power as usize + 1;
+    let mut speeding_up = vec![0.0; degree + 1];
+    speeding_up[..4].copy_from_slice(&[0.0, v0, gain / piece, -gain / (3.0 * piece * piece)]);
+    let mut reversal = vec![0.0; degree + 1];
+    reversal[0] = x_mid;
+    reversal[1] = v0 + gain;
+    reversal[degree] = -drop / (f64::from(power + 1) * piece.powi(power));
+    let x = [
+        BezierPiece {
+            u_start: t0,
+            u_end: t_mid,
+            coeffs: speeding_up,
+        },
+        BezierPiece {
+            u_start: t_mid,
+            u_end: t1,
+            coeffs: reversal,
+        },
+    ];
+    let sideways = CRAWL_LEG_SIDEWAYS_MM_S;
+    let y = [
+        BezierPiece {
+            u_start: t0,
+            u_end: t_mid,
+            coeffs: vec![0.0, sideways],
+        },
+        BezierPiece {
+            u_start: t_mid,
+            u_end: t1,
+            coeffs: vec![sideways * piece, sideways],
+        },
+    ];
+    let reversal_t = t_mid + piece * libm::pow((v0 + gain) / drop, 1.0 / f64::from(power));
+    (leaders(&x, &y, (t0, t1)), reversal_t)
+}
+
+/// A crawl in the last probe interval of a leg is found however the
+/// leg's two seam speeds compare: the seam a hair slower is not the
+/// slowest point, so the crawl is not left to a seam crossing that never
+/// sees it. Which seam reads slower is rounding where the leg's ends
+/// mirror each other, so missing it made a stream lay a valley where the
+/// same motion planned from rest laid none.
+#[test]
+fn a_crawl_right_before_a_legs_end_is_found_whichever_seam_is_slower() {
+    for end_excess_mm_s in [-1e-6, 0.0, 1e-6] {
+        let (shaped, reversal_t) = reversing_just_before_its_end(3.0, end_excess_mm_s);
+        let shaped_leaders = ShapedLeaders::of(&shaped, &[0, 1]);
+        let leg = moving_leg(&shaped, &shaped_leaders, 100.0);
+        let found = slowest_crawl(&shaped_leaders, &leg, f64::INFINITY);
+        let Some((_, crossing)) = found else {
+            panic!(
+                "a leg whose closing seam is {end_excess_mm_s} mm/s faster than its opening \
+                 one finds no crawl at its reversal at t={reversal_t}"
+            );
+        };
+        assert!(
+            (crossing.speed - CRAWL_LEG_SIDEWAYS_MM_S).abs() < 1e-6,
+            "the crawl at the reversal at t={reversal_t} crosses as {crossing:?}"
+        );
+    }
+}
+
+const LINE_RATIO: f64 = 0.4 * 0.2 / (std::f64::consts::PI * 0.875 * 0.875);
+const STOP: Crossing = Crossing {
+    speed: 70.25,
+    rate: 15068.0,
+    jerk: 1.18e6,
+};
+const STOP_SPILL_MM: f64 = 0.25;
+const LINE_END_MM: f64 = 30.0;
+
+/// The table of a line ending in a rest at [`LINE_END_MM`], its ratio
+/// stepping to `last_ratio` `last_mm` before the end.
+fn line_into_rest(last_mm: f64, last_ratio: f64) -> Vec<super::super::RatioSpan> {
+    let mut state = FollowerState::default();
+    state.push_span(LINE_END_MM - last_mm, LINE_RATIO, LINE_RATIO);
+    state.push_span(last_mm, last_ratio, last_ratio);
+    state.spans
+}
+
+/// The side a line ending in a rest opens as the kernel-free fast bench
+/// config stops it from 300 mm/s, over a spill of `spill_s`.
+fn stopping_side(spill_s: f64) -> RestSide {
+    RestSide {
+        rest: LINE_END_MM,
+        seam: LINE_END_MM - STOP_SPILL_MM,
+        outward: -1.0,
+        crossing: STOP,
+        spill: Spill {
+            duration: spill_s,
+            crossing: STOP,
+        },
+        beyond: STOP,
+    }
+}
+
+const DIRECT_DRIVE: RatioRampRule = RatioRampRule {
+    advance_slope_s: 0.03,
+    max_velocity_mm_s: 50.0,
+    max_accel_mm_s2: 20000.0,
+};
+
+/// A rest valley's side spans the spill alone where the extruder releases
+/// the lead within the shortest ramp its limits allow and that fits within
+/// the spill: the kernel-free fast bench config's 20000 mm/s² extruder
+/// stopping a 300 mm/s line. A spill that takes no time ramps out over
+/// that shortest ramp.
+#[test]
+fn a_rest_side_spans_the_spill_alone_where_the_lead_releases_within_it() {
+    let table = line_into_rest(1.0, LINE_RATIO);
+    assert_eq!(
+        stopping_side(0.0074).width(&table, &DIRECT_DRIVE, LINE_END_MM),
+        STOP_SPILL_MM
+    );
+    assert_eq!(
+        stopping_side(0.0).width(&table, &DIRECT_DRIVE, LINE_END_MM),
+        STOP_SPILL_MM + STOP.reach(RATIO_RAMP_MIN_TIME_S)
+    );
+}
+
+/// A rest valley's side reaches as far as the longest ramp where a ratio
+/// step lies so near the rest that the width field narrows its ramp past
+/// the extruder's limits, where a Bowden advance's path alone leaves its
+/// limit, and where the table does not reach that far yet.
+#[test]
+fn a_rest_side_reaches_the_longest_ramp_where_the_lead_or_a_near_step_needs_it() {
+    let longest = STOP_SPILL_MM + STOP.reach(RATIO_RAMP_MAX_TIME_S);
+    assert_eq!(
+        stopping_side(0.0074).width(
+            &line_into_rest(0.4, 3.0 * LINE_RATIO),
+            &DIRECT_DRIVE,
+            LINE_END_MM
+        ),
+        longest
+    );
+    let bowden = RatioRampRule {
+        advance_slope_s: 0.5,
+        max_velocity_mm_s: 45.0,
+        max_accel_mm_s2: 2000.0,
+    };
+    let table = line_into_rest(1.0, LINE_RATIO);
+    assert_eq!(
+        stopping_side(0.0074).width(&table, &bowden, LINE_END_MM),
+        longest
+    );
+    let leaving = RestSide {
+        rest: 0.0,
+        seam: STOP_SPILL_MM,
+        outward: 1.0,
+        ..stopping_side(0.0074)
+    };
+    assert_eq!(leaving.width(&table, &DIRECT_DRIVE, 1.0), longest);
+    assert_eq!(
+        leaving.width(&table, &DIRECT_DRIVE, LINE_END_MM),
+        STOP_SPILL_MM
+    );
+}
+
+const CURVED_SPILL_MM: f64 = 0.1875;
+
+/// The stopping side of a stop in `voron_dense_top_layers` on the
+/// kernel-free fast bench config, whose shaped axes curve into it: the
+/// leaders cross the raw seam at 38.8 mm/s, and cruise at up to 98 mm/s
+/// past it.
+fn curved_stop() -> RestSide {
+    RestSide {
+        rest: LINE_END_MM,
+        seam: LINE_END_MM - CURVED_SPILL_MM,
+        outward: -1.0,
+        crossing: Crossing {
+            speed: 38.8,
+            rate: 4127.0,
+            jerk: 4.884e5,
+        },
+        spill: Spill {
+            duration: 0.0106,
+            crossing: Crossing {
+                speed: 38.8,
+                rate: 5348.0,
+                jerk: 1.758e6,
+            },
+        },
+        beyond: Crossing {
+            speed: 98.0,
+            rate: 9203.0,
+            jerk: 3.12e6,
+        },
+    }
+}
+
+/// The tail of a curved stop falls linearly across the spill, its slope
+/// stepping at the raw seam. Read at the speed the leaders cruise past the
+/// seam, that slope seam passed for a step the width field narrows past
+/// the extruder's limits, and the side released the lead from the longest
+/// ramp out.
+#[test]
+fn a_stopping_side_reads_its_spill_where_the_leaders_slow_into_the_rest() {
+    let mut stop = FollowerState::default();
+    stop.push_span(LINE_END_MM - CURVED_SPILL_MM, LINE_RATIO, LINE_RATIO);
+    stop.push_span(CURVED_SPILL_MM, LINE_RATIO, 0.95 * LINE_RATIO);
+    assert_eq!(
+        curved_stop().width(&stop.spans, &DIRECT_DRIVE, LINE_END_MM),
+        CURVED_SPILL_MM
+    );
+}
+
+/// A ratio ramp opening 1.5 mm before the rest moves the ratio by 30 %
+/// over 1.3 mm; the window its seam's distance from the rest leaves it
+/// ramps only the part of that within it, not the whole ramp's change as
+/// one step.
+#[test]
+fn a_rest_side_reads_a_long_ramp_by_its_change_within_the_window() {
+    let ramp_start = LINE_END_MM - 1.5;
+    let mut stop = FollowerState::default();
+    stop.push_span(ramp_start, LINE_RATIO, LINE_RATIO);
+    stop.push_span(
+        LINE_END_MM - CURVED_SPILL_MM - ramp_start,
+        LINE_RATIO,
+        0.7 * LINE_RATIO,
+    );
+    stop.push_span(CURVED_SPILL_MM, 0.7 * LINE_RATIO, 0.665 * LINE_RATIO);
+    assert_eq!(
+        curved_stop().width(&stop.spans, &DIRECT_DRIVE, LINE_END_MM),
+        CURVED_SPILL_MM
     );
 }

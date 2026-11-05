@@ -12,12 +12,12 @@ use trajectory::{
     RelativeSplinePiece, ShapedSignal,
 };
 
-use crate::lowering::{AccelBudget, FitTol, follower_tol_scale};
+use crate::lowering::{AccelBudget, FitTol, SeamContinuity, follower_tol_scale};
 use crate::shaper::{
-    AxisFit, AxisSignalTable, BetweenProbes, ConvolutionSignal, Enclosure, ExactConvolution,
-    ExactKernel, FitBoundary, KnotJumpBound, Lookahead, SEGMENT_TIME_EPS_S, ShiftedTrackSignal,
-    SignalBounds, TrackSignal, apply_derivative_gains_to_track, fit_axis_from_signal,
-    fit_resolution, shaped_signal_breakpoints, unit_kernel_mass,
+    AxisFit, AxisSignalTable, ConvolutionSignal, Enclosure, ExactConvolution, ExactKernel,
+    FitBoundary, Lookahead, SEGMENT_TIME_EPS_S, ShapedBreaks, ShiftedTrackSignal, SignalBounds,
+    TrackSignal, apply_derivative_gains_to_track, fit_axis_from_signal, fit_resolution,
+    fit_seed_times, unit_kernel_mass,
 };
 use crate::types::PostProcessError;
 use crate::worker_pool::WorkerPool;
@@ -284,16 +284,6 @@ impl<'a> LeadingAdvance<'a> {
     fn is_ramped(&self) -> bool {
         self.smoothing == AdvanceSmoothing::RatioRamp
     }
-
-    /// Whether the advance reads only the velocity laid along the leaders'
-    /// path, whose ratio the smoothing weighs: every advance a ratio ramp
-    /// precedes.
-    fn reads_path_only(&self) -> bool {
-        matches!(
-            self.smoothing,
-            AdvanceSmoothing::RatioRamp | AdvanceSmoothing::RatioRampAndKernel
-        )
-    }
 }
 
 fn ramped_position_step(axis: usize, step: &AdvanceStep) -> PostProcessError {
@@ -419,7 +409,7 @@ fn fit_source_projection(
             } else {
                 "follower_source"
             },
-            velocity_continuous: true,
+            seam_continuity: SeamContinuity::Velocity,
         };
         match leading {
             Some(advance) => {
@@ -580,14 +570,8 @@ pub(crate) fn project_followers(
             for (offset, read) in reads.into_iter().enumerate() {
                 let i = first_new + offset;
                 let table_start = state.s_ingested_end;
-                let shaped_ds = state.ingest(
-                    &base[i],
-                    &frontier[i],
-                    axis,
-                    leaders,
-                    &base[i + 1..],
-                    (read.shaped_ds, read.raw_moves),
-                );
+                let shaped_ds =
+                    state.ingest(&base[i], &frontier[i], axis, leaders, &base[i + 1..], &read);
                 let s_start = state.aligned_span_start(next_s);
                 let leg = RampLeg {
                     shaped: &frontier[i],
@@ -970,7 +954,7 @@ pub(crate) fn project_followers(
                     &semantic_cuts
                 };
                 let breaks_started = crate::timing::stopwatch();
-                let shaped_breaks = shaped_signal_breakpoints(kernel, shaped_break_seeds);
+                let shaped_breaks = ShapedBreaks::new(kernel, shaped_break_seeds);
                 timing.breakpoints_us += breaks_started.elapsed_us();
                 let input_jumps = table.input_jumps().to_vec();
                 let exact_kernel = ExactKernel::new(kernel);
@@ -1018,11 +1002,16 @@ pub(crate) fn project_followers(
                 let fitted = pool
                     .map_indexed(workers, supports.len(), &make_sig, |sig, index| {
                         let (start, end) = supports[index];
+                        let seeds = shaped_breaks.select_seeds(
+                            fit_seed_times(axis, start, end, shaped_breaks.times())?,
+                            Some(table.as_ref()),
+                            target_tol,
+                        );
                         fit_kernel_window(
                             axis,
                             start,
                             end,
-                            &shaped_breaks,
+                            &seeds,
                             sig,
                             target_tol,
                             output_monotonicity,
@@ -1213,7 +1202,7 @@ fn fit_kernel_window<S: TrackSignal>(
             seed_breakpoints: shaped_breaks,
             fit_tol: target_tol,
             fit_context: "follower_kernel",
-            velocity_continuous: true,
+            seam_continuity: SeamContinuity::Velocity,
         },
         &local,
     )?;
@@ -1482,6 +1471,25 @@ pub fn follower_velocity_step_allowance(
         })
 }
 
+/// What every seam of leader `leader`'s fit must carry of its shaped signal
+/// for the followers of `chains` that read it. An advance with no kernel
+/// after it ([`LeadingAdvance::is_ramped`]) reads the leader's acceleration
+/// as velocity, so an acceleration step at a seam would reach the
+/// follower's motor as a velocity step.
+pub(crate) fn leader_seam_continuity(chains: &AxisChainSet, leader: usize) -> SeamContinuity {
+    let read_by_kernel_free_advance = chains
+        .projected_followers()
+        .filter(|(_, leaders)| leaders.contains(&leader))
+        .any(|(follower, _)| {
+            LeadingAdvance::of(&chains.chains[follower]).is_some_and(|advance| advance.is_ramped())
+        });
+    if read_by_kernel_free_advance {
+        SeamContinuity::Acceleration
+    } else {
+        SeamContinuity::Velocity
+    }
+}
+
 fn advance_offset(stage: &ChainStage, velocity: f64) -> f64 {
     match stage {
         ChainStage::DerivativeGains { k1, .. } => k1 * velocity,
@@ -1668,11 +1676,10 @@ impl FollowerState {
     /// previous ratio) and starts the next move in it (its lead, extruded at
     /// the next one). Both are measured as the shaped leaders' distance
     /// from the rest point at the segment's edges, so the move on each side
-    /// extrudes exactly the material of the path it is shaped onto. Any
-    /// shaped arc beyond them — the fit's back-and-forth near the rest point
-    /// — joins the lead (see [`Self::push_lead`]): a separate idle span
-    /// would step the ratio, and so the follower's velocity, where the
-    /// leaders are already moving.
+    /// extrudes the material of the path it is shaped onto. Any shaped arc
+    /// beyond them joins one of them ([`Self::push_rest_arcs`]): a separate
+    /// idle span would step the ratio, and so the follower's velocity, where
+    /// the leaders are already moving.
     fn ingest(
         &mut self,
         raw: &ContinuousSegment,
@@ -1680,8 +1687,14 @@ impl FollowerState {
         axis: usize,
         leaders: &[usize],
         upcoming: &[ContinuousSegment],
-        (shaped_ds, raw_moves): (f64, bool),
+        read: &IngestRead,
     ) -> f64 {
+        let IngestRead {
+            shaped_ds,
+            ref odometer,
+            raw_moves,
+            ..
+        } = *read;
         if let Some(through) = self.ingested_through_t {
             assert!(
                 raw.t_end > through + GRID_DEDUP_EPS_S,
@@ -1720,16 +1733,59 @@ impl FollowerState {
             self.push_span(shaped_ds, tail_ratio, tail_ratio);
             return shaped_ds;
         }
-        if tail > SPAN_MIN_LEN_MM {
-            self.push_span(tail, tail_ratio, tail_ratio);
-        }
         let lead_ratio = upcoming
             .iter()
             .find(|seg| seg.spatial_path)
             .and_then(|seg| seg.followers.iter().find(|f| f.axis_index == axis))
             .map_or(0.0, |f| f.ratio);
-        self.push_lead(lead, idle, lead_ratio);
+        let rest_arc = odometer.covered_until(arrival_at_rest(raw, shaped, leaders));
+        self.push_rest_arcs((tail, idle, lead), rest_arc, (tail_ratio, lead_ratio));
         shaped_ds
+    }
+
+    /// Lays a rest segment's arcs, the ratio stepping from the tail's to
+    /// the lead's only `rest_arc` into the segment, where the leaders reach
+    /// the rest point. The tail's straight distance from the rest
+    /// point falls short of that arc where the shaped axes curve into the
+    /// rest unlike each other or the fit wanders toward it: the tail joins
+    /// what of the idle arc the leaders cover before they rest
+    /// ([`Self::push_tail`]), the lead the rest of it ([`Self::push_lead`]).
+    /// A tail too short to lay its own span leaves the whole idle arc to the
+    /// lead.
+    fn push_rest_arcs(
+        &mut self,
+        (tail, idle, lead): (f64, f64, f64),
+        rest_arc: f64,
+        (tail_ratio, lead_ratio): (f64, f64),
+    ) {
+        if tail <= SPAN_MIN_LEN_MM {
+            self.push_lead(lead, idle, lead_ratio);
+            return;
+        }
+        let tail_idle = (rest_arc - tail).clamp(0.0, idle);
+        self.push_tail(tail, tail_idle, tail_ratio);
+        self.push_lead(lead, idle - tail_idle, lead_ratio);
+    }
+
+    /// Lays a tail's material, `tail_ratio × tail`, over the tail joined with
+    /// the idle arc, opening on the tail ratio and falling linearly from
+    /// there: to `tail_ratio·(2·tail/joined − 1)` at the rest where the idle
+    /// arc is no longer than the tail, else to zero over twice the tail and
+    /// flat at zero after, the deepest it goes without changing sign. Its
+    /// slope steps where the spill starts, the furthest from the rest the
+    /// width field ramps it, and the ratio only at the rest. A tail with no
+    /// idle arc or no ratio lays one flat span.
+    fn push_tail(&mut self, tail: f64, idle: f64, tail_ratio: f64) {
+        let joined = tail + idle;
+        if idle <= SPAN_MIN_LEN_MM || tail_ratio == 0.0 {
+            self.push_span(joined, tail_ratio, tail_ratio);
+            return;
+        }
+        let ramp = joined.min(2.0 * tail);
+        self.push_span(ramp, tail_ratio, tail_ratio * (2.0 * tail / ramp - 1.0));
+        if joined - ramp > SPAN_MIN_LEN_MM {
+            self.push_span(joined - ramp, 0.0, 0.0);
+        }
     }
 
     /// Lays a lead's material, `lead_ratio × lead`, over the lead joined with
@@ -2257,12 +2313,91 @@ struct OdometerLeaves {
     leaves: Vec<(f64, OdometerLeaf)>,
 }
 
+impl OdometerLeaves {
+    /// The arc the leaders cover from the segment's start until `t`.
+    fn covered_until(&self, t: f64) -> f64 {
+        let mut covered = 0.0;
+        for (end, leaf) in &self.leaves {
+            if t <= *end {
+                return covered + leaf.covered_until(t);
+            }
+            covered += leaf.covered_until(*end);
+        }
+        covered
+    }
+}
+
+/// Probes per leader knot interval the leaders of a rest segment are
+/// searched with for where they reach the rest point.
+const REST_POINT_PROBES_PER_INTERVAL: usize = 8;
+const REST_POINT_REFINEMENTS: usize = 64;
+
+/// When the shaped leaders of `shaped` first stop closing on where the raw
+/// ones of `raw` rest: the first probe their distance from it grows after,
+/// refined by golden-section search over the probes either side. The fit's
+/// back-and-forth around the rest point after that changes nothing of how
+/// they arrived.
+fn arrival_at_rest(raw: &ContinuousSegment, shaped: &ContinuousSegment, leaders: &[usize]) -> f64 {
+    let rest_at = leader_support(raw, leaders).0;
+    let distance_sq = |t: f64| {
+        leaders
+            .iter()
+            .map(|&axis| {
+                let delta =
+                    axis_pva(&shaped.axes[axis], t).0 - axis_pva(&raw.axes[axis], rest_at).0;
+                delta * delta
+            })
+            .sum::<f64>()
+    };
+    let grid = axis_grid(shaped, leaders);
+    let mut probes: Vec<f64> = grid
+        .windows(2)
+        .flat_map(|window| {
+            (0..REST_POINT_PROBES_PER_INTERVAL).map(move |k| {
+                window[0]
+                    + (window[1] - window[0]) * k as f64 / REST_POINT_PROBES_PER_INTERVAL as f64
+            })
+        })
+        .collect();
+    probes.push(grid[grid.len() - 1]);
+    let distances: Vec<f64> = probes.iter().map(|&t| distance_sq(t)).collect();
+    let nearest = distances
+        .windows(2)
+        .position(|pair| pair[1] > pair[0])
+        .unwrap_or(distances.len() - 1);
+    let (mut lo, mut hi) = (
+        probes[nearest.saturating_sub(1)],
+        probes[(nearest + 1).min(probes.len() - 1)],
+    );
+    let golden = 0.5 * (5.0_f64.sqrt() - 1.0);
+    for _ in 0..REST_POINT_REFINEMENTS {
+        let (left, right) = (hi - golden * (hi - lo), lo + golden * (hi - lo));
+        if distance_sq(left) <= distance_sq(right) {
+            hi = right;
+        } else {
+            lo = left;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
 /// What ingest read off one shaped segment's leaders that its source fit
 /// reads again.
 #[derive(Debug)]
 struct LeaderReads {
     pieces: Vec<Option<LeaderPieces>>,
     odometer: OdometerLeaves,
+}
+
+/// The leaders a [`ShapedLeaders::speed_floor`] bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FloorLeaders {
+    /// Every leader, so one no cached piece reads across the interval
+    /// leaves no floor.
+    Every,
+    /// Those a cached piece reads across the interval: the part of the
+    /// velocity they carry is never faster than the whole.
+    Cached,
 }
 
 struct ShapedLeaders<'a> {
@@ -2354,12 +2489,11 @@ impl<'a> ShapedLeaders<'a> {
         norm_of((0..self.axes.len()).map(|index| self.pva(index, t).1))
     }
 
-    /// A lower bound on the leaders' speed over `[lo, hi]`, when every
-    /// leader holds or reads one cached piece across it: their velocity's
-    /// tangent line at `at`, at its nearest to rest over the interval, less
-    /// the most the pieces' higher terms add to it and their evaluation's
-    /// rounding.
-    fn speed_floor(&self, lo: f64, at: f64, hi: f64) -> Option<f64> {
+    /// A lower bound on the speed of `bounded` leaders over `[lo, hi]`, and
+    /// so on the leaders' own: their velocity's tangent line at `at`, at its
+    /// nearest to rest over the interval, less the most the pieces' higher
+    /// terms add to it and their evaluation's rounding.
+    fn speed_floor(&self, lo: f64, at: f64, hi: f64, bounded: FloorLeaders) -> Option<f64> {
         let leaders = self.axes.len();
         assert!(
             leaders <= MAX_LEADERS,
@@ -2375,7 +2509,15 @@ impl<'a> ShapedLeaders<'a> {
             if matches!(axis, ContinuousAxis::Hold { .. }) {
                 continue;
             }
-            let piece = pieces.as_ref()?.piece_over(lo, at, hi)?;
+            let Some(piece) = pieces
+                .as_ref()
+                .and_then(|pieces| pieces.piece_over(lo, at, hi))
+            else {
+                match bounded {
+                    FloorLeaders::Every => return None,
+                    FloorLeaders::Cached => continue,
+                }
+            };
             let shifted = taylor_shifted(&piece.coeffs, at - piece.u_start);
             velocity[index] = shifted.get(1).copied().unwrap_or(0.0);
             acceleration[index] = 2.0 * shifted.get(2).copied().unwrap_or(0.0);
@@ -2689,9 +2831,6 @@ pub(crate) struct FollowerSignal<'a> {
     ratio_crossings: std::cell::OnceCell<Vec<(f64, f64)>>,
     /// The leaders' rests inside the support, in order ([`rest`]).
     rests: Vec<rest::Rest>,
-    /// The grid times and the rests' splits, in order: where the signal
-    /// may jump, each read on both sides by [`TrackSignal::knot_jump`].
-    jump_times: Vec<f64>,
 }
 
 impl<'a> FollowerSignal<'a> {
@@ -2774,12 +2913,10 @@ impl<'a> FollowerSignal<'a> {
             axis_windows: std::cell::OnceCell::new(),
             ratio_crossings: std::cell::OnceCell::new(),
             rests: Vec::new(),
-            jump_times: Vec::new(),
         };
         let (start_sliver, end_sliver) = sig.speed_zero_slivers();
         sig.start_sliver = start_sliver;
         sig.end_sliver = end_sliver;
-        sig.jump_times = sig.grid.clone();
         sig.s_owned_end = state.owned_span_end(sig.s_start, sig.s_end());
         sig
     }
@@ -2788,14 +2925,6 @@ impl<'a> FollowerSignal<'a> {
     /// `leader_tol` cannot resolve ([`rest`]).
     fn with_rests(mut self, leader_tol: FitTol) -> Self {
         self.rests = self.find_rests(self.rest_speed(leader_tol));
-        self.jump_times = self
-            .grid
-            .iter()
-            .copied()
-            .chain(self.rests.iter().map(|rest| rest.split))
-            .collect();
-        self.jump_times.sort_by(f64::total_cmp);
-        self.jump_times.dedup();
         self
     }
 
@@ -3446,10 +3575,6 @@ fn refine_rest_boundary(
 }
 
 impl TrackSignal for FollowerSignal<'_> {
-    fn between_probes(&self) -> BetweenProbes {
-        BetweenProbes::TruthInterpolant
-    }
-
     fn eval(&self, t: f64) -> f64 {
         let spans = self.state.spans_e(self.s_owned(t)) - self.e_spans_start;
         let raw = self
@@ -3489,50 +3614,12 @@ impl TrackSignal for FollowerSignal<'_> {
         self.pva_memo
             .get_or(t, |t| self.pva_at_distance(t, self.s_owned(t)))
     }
-    fn eval_pva_across(&self, knot: f64) -> [(f64, f64, f64); 2] {
-        let s = self.s_owned(knot);
-        [f64::NEG_INFINITY, f64::INFINITY]
-            .map(|side| self.pva_at_distance(trajectory::next_toward(knot, side), s))
-    }
     fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
         let support = (self.grid[0], self.grid[self.grid.len() - 1]);
         self.whole_enclosure
             .over((lo, hi), accuracy, support, |(lo, hi), accuracy| {
                 self.enclosure(lo, hi, accuracy)
             })
-    }
-    fn interior_knots(&self, start: f64, end: f64) -> &[f64] {
-        let knots = &self.jump_times;
-        let first = knots.partition_point(|&t| t <= start);
-        let past_last = knots.partition_point(|&t| t < end);
-        &knots[first..past_last.max(first)]
-    }
-    fn knot_jump(&self, knot: f64) -> KnotJumpBound {
-        let before = trajectory::next_toward(knot, f64::NEG_INFINITY);
-        let after = trajectory::next_toward(knot, f64::INFINITY);
-        if self.speed_zero_sliver(before).is_some() || self.speed_zero_sliver(after).is_some() {
-            return KnotJumpBound::UNBOUNDED;
-        }
-        let rates = |t: f64| {
-            let motion = self.leaders.motion(t);
-            let speed = motion.speed();
-            (
-                self.odometer_scale * speed,
-                self.odometer_scale * self.leader_speed_deriv(t, &motion, speed),
-                self.odometer_scale * self.leader_speed_second_deriv(t, &motion, speed),
-            )
-        };
-        let (rate_before, rate_deriv_before, rate_second_before) = rates(before);
-        let (rate_after, rate_deriv_after, rate_second_after) = rates(after);
-        let RatioBounds { ratio, slope } = self.ratio_bounds;
-        KnotJumpBound {
-            acceleration: ratio * (rate_deriv_after - rate_deriv_before).abs()
-                + slope * (rate_after * rate_after - rate_before * rate_before).abs(),
-            jerk: ratio * (rate_second_after - rate_second_before).abs()
-                + 3.0
-                    * slope
-                    * (rate_after * rate_deriv_after - rate_before * rate_deriv_before).abs(),
-        }
     }
     fn diagnostic(&self, t: f64) -> Option<String> {
         let s = self.s_owned(t);
@@ -3725,16 +3812,8 @@ impl AdvancedFollowerSignal<'_, '_> {
 }
 
 impl TrackSignal for AdvancedFollowerSignal<'_, '_> {
-    fn between_probes(&self) -> BetweenProbes {
-        BetweenProbes::TruthInterpolant
-    }
-
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         self.pva_memo.get_or(t, |t| self.pva(t))
-    }
-
-    fn interior_knots(&self, start: f64, end: f64) -> &[f64] {
-        self.source.interior_knots(start, end)
     }
 
     fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {

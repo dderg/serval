@@ -123,14 +123,26 @@ timer_wrap_event(struct timer *t)
  * Setup and irqs
  ****************************************************************/
 
-// Hardware timer IRQ handler - dispatch software timers
+static volatile uint32_t timer_busy_ticks;
+
 void __aligned(16)
 TIMx_IRQHandler(void)
 {
+    uint32_t entered = timer_read_time();
     irq_disable();
+    sched_timer_irq_enter(entered);
     uint32_t next = timer_dispatch_many();
     timer_set(next);
+    uint32_t done = timer_read_time();
+    sched_timer_irq_exit(done);
+    timer_busy_ticks += done - entered;
     irq_enable();
+}
+
+uint32_t
+timer_dispatch_busy_ticks(void)
+{
+    return timer_busy_ticks;
 }
 
 void

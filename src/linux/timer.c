@@ -146,9 +146,8 @@ timer_kick(void)
 
 #define TIMER_MIN_TRY_TICKS timer_from_us(2)
 
-// Invoke timers
 static void
-timer_dispatch(void)
+timer_dispatch_due(void)
 {
     // A signal from an alarm that was superseded by a later one is
     // delivered after the re-arm; dispatching on it would run a timer
@@ -238,6 +237,25 @@ timer_dispatch(void)
     TimerInfo.next_wake_counter = next;
     TimerInfo.must_wake_timers = 0;
     timer_settime(TimerInfo.t_alarm, TIMER_ABSTIME, &it, NULL);
+}
+
+static uint32_t timer_busy_ticks;
+
+static void
+timer_dispatch(void)
+{
+    uint32_t entered = timer_read_time();
+    sched_timer_irq_enter(entered);
+    timer_dispatch_due();
+    uint32_t done = timer_read_time();
+    sched_timer_irq_exit(done);
+    timer_busy_ticks += done - entered;
+}
+
+uint32_t
+timer_dispatch_busy_ticks(void)
+{
+    return timer_busy_ticks;
 }
 
 // OS signal handler
@@ -344,17 +362,27 @@ irq_restore(irqstatus_t flag)
 {
 }
 
+static uint32_t idle_ticks;
+
 void
 irq_wait(void)
 {
-    // Must atomically sleep until signaled
     if (!readl(&TimerInfo.must_wake_timers)) {
         timer_disable_signals();
-        if (!TimerInfo.must_wake_timers)
+        if (!TimerInfo.must_wake_timers) {
+            uint32_t slept = timer_read_time();
             console_sleep(&TimerInfo.ss_sleep);
+            idle_ticks += timer_read_time() - slept;
+        }
         timer_enable_signals();
     }
     irq_poll();
+}
+
+uint32_t
+irq_wait_idle_ticks(void)
+{
+    return idle_ticks;
 }
 
 void

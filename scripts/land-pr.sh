@@ -17,7 +17,12 @@ reexec_current_copy() {
     [ -z "${LAND_PR_REEXEC:-}" ] || return 0
     local top fresh
     top="$(git rev-parse --show-toplevel)" || { echo "land-pr: run it inside the repository" >&2; exit 1; }
-    git -C "$top" fetch -q origin || { echo "land-pr: git fetch origin failed" >&2; exit 1; }
+    local try
+    for try in 1 2 3; do
+        git -C "$top" fetch -q origin && break
+        [ "$try" -lt 3 ] || { echo "land-pr: git fetch origin failed 3 times" >&2; exit 1; }
+        sleep $((try * 10))
+    done
     fresh="$(mktemp -d)"
     git -C "$top" archive origin/main scripts | tar -x -C "$fresh" \
         || { echo "land-pr: could not extract scripts/ from origin/main" >&2; exit 1; }
@@ -44,6 +49,7 @@ gh_util="${GH_UTIL:-$(cd "$(dirname "$0")" && pwd)/gh_util.py}"
 fuzz_triage="$(dirname "$gh_util")/fuzz_triage.py"
 [ -f "$fuzz_triage" ] || { echo "land-pr: scripts/fuzz_triage.py not found beside gh_util.py" >&2; exit 1; }
 gh() { python3 "$gh_util" "$@"; }
+git_net() { python3 "$gh_util" --git "$@"; }
 
 usage() { echo "usage: $0 <branch> [--title T] [--body B] [--dry-run]" >&2; exit 2; }
 die() { echo "land-pr: $*" >&2; exit 1; }
@@ -132,7 +138,7 @@ advance_main() {
 }
 
 finish() {
-    run git fetch origin
+    run git_net fetch origin
     advance_main
     local tree
     tree="$(worktree_of_branch)"
@@ -174,7 +180,7 @@ main() {
     git rev-parse --verify --quiet "refs/heads/$branch" >/dev/null || die "no local branch $branch"
     [ "$branch" != "main" ] || die "refusing to land main"
 
-    run git push -u origin "$branch"
+    run git_net push -u origin "$branch"
     number="$(pr_number)"
     if [ -z "$number" ]; then
         open_pr

@@ -253,9 +253,16 @@ python3 tools/corner_flow.py kernel.cfg --sweep smooth_time=0.002,0.005,0.01
 - **`peak` / `dip`** are the worst bead over- and under-fill at a corner,
   in % of the nominal bead. **`w>5%`** is how far along the path it stays
   off by more than 5%, and **`blob`** the over-filled volume per corner,
-  in nL. Where flow changes or stops at speed, any smoothing sits at about
-  ±50% at the switch itself, so read `w>5%` and `blob` there. Material moved
-  while the toolhead rests (a retract and its prime) is left out.
+  in nL. The commanded bead is read off the unshaped plan where it passes
+  the same place, the two plans paired at every vertex of the program.
+- **`moved` / `net` / `sw`** replace those where the bead ratio steps (a
+  flow change, travel to extrusion and back, a retract's rest): any ramp
+  reads about ±50% at the switch itself, so the step is read as the
+  material laid across the vertex against a sharp switch (`moved`, nL),
+  what it gains or loses (`net`, nL; ~0 for a ramp centred on the
+  vertex), and the path the bead takes from 5% to 95% of the step (`sw`,
+  mm). Material moved while the toolhead rests (a retract and its prime)
+  is left out.
 - **`ve±` / `ae`** are the extruder's peak velocity and acceleration while
   the nozzle moves; **`|ve|*` / `|ae|*`** the same over the whole run,
   retracts and primes included.

@@ -92,6 +92,12 @@ impl TrackSignal for OffsetSine {
             -self.amplitude * self.omega * self.omega * sin,
         )
     }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<super::Enclosure<'_>> {
+        super::test_signals::modelled((lo, hi), accuracy, &[], |window| {
+            super::test_signals::sine(window, self.offset, self.amplitude, self.omega)
+        })
+    }
 }
 
 fn worst_case_stored_acceleration(degree: usize, position_mm: f64, span_s: f64) -> f64 {
@@ -125,7 +131,7 @@ fn a_nanosecond_seed_cluster_far_from_the_origin_keeps_the_motor_command_in_budg
             seed_breakpoints: &clusters,
             fit_tol: BENCH_TOL,
             fit_context: "test fit",
-            velocity_continuous: false,
+            seam_continuity: crate::lowering::SeamContinuity::Position,
         },
         &sig,
     )

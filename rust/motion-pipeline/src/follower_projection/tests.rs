@@ -1332,6 +1332,118 @@ fn a_lead_with_no_ratio_lays_one_flat_span() {
     }
 }
 
+fn laid_rest(arcs: (f64, f64, f64), rest_arc: f64, ratios: (f64, f64)) -> FollowerState {
+    let mut state = FollowerState::default();
+    state.push_rest_arcs(arcs, rest_arc, ratios);
+    state
+}
+
+/// `voron_first_layers` on the kernel-free fast bench config at t≈4.749:
+/// the shaped axes curve into the stop after an extrusion and out of it
+/// into a travel, covering 4.5 µm more than the tail's and the lead's
+/// straight distances from the rest point, 1.8 µm of it before they rest.
+const CURVED_TAIL_MM: f64 = 0.111;
+const CURVED_IDLE_MM: f64 = 4.5e-3;
+const CURVED_LEAD_MM: f64 = 0.281;
+const CURVED_REST_ARC_MM: f64 = CURVED_TAIL_MM + 1.8e-3;
+const CURVED_TAIL_RATIO: f64 = 0.0369;
+
+#[test]
+fn the_ratio_steps_from_the_tail_to_the_lead_where_the_leaders_rest() {
+    let state = laid_rest(
+        (CURVED_TAIL_MM, CURVED_IDLE_MM, CURVED_LEAD_MM),
+        CURVED_REST_ARC_MM,
+        (CURVED_TAIL_RATIO, 0.0),
+    );
+    let seams: Vec<f64> = state
+        .spans
+        .windows(2)
+        .filter(|pair| pair[0].r1 != pair[1].r0 || pair[0].ratio_slope() != pair[1].ratio_slope())
+        .map(|pair| pair[0].s1)
+        .collect();
+    assert_eq!(
+        seams.len(),
+        1,
+        "the ratio or its slope changes at {seams:?}: {:?}",
+        state.spans
+    );
+    assert!(
+        (seams[0] - CURVED_REST_ARC_MM).abs() <= 1e-15,
+        "the ratio steps at s={} while the leaders still move toward the rest at s={}",
+        seams[0],
+        CURVED_REST_ARC_MM
+    );
+    assert_eq!(
+        state.spans[0].r0, CURVED_TAIL_RATIO,
+        "the tail must open on its ratio"
+    );
+    let tail_material = state.spans_delta_e(0.0, 0.0, CURVED_REST_ARC_MM);
+    assert!(
+        (tail_material - CURVED_TAIL_RATIO * CURVED_TAIL_MM).abs() <= 1e-15,
+        "the tail lays {tail_material} mm, its command is {}",
+        CURVED_TAIL_RATIO * CURVED_TAIL_MM
+    );
+}
+
+#[test]
+fn a_tail_shorter_than_its_idle_arc_falls_to_zero_and_keeps_its_material() {
+    let (tail, tail_idle, ratio) = (2e-5, 5e-5, 0.05);
+    let state = laid_rest((tail, tail_idle, 0.0), tail + tail_idle, (ratio, 0.0));
+    assert_eq!(
+        state
+            .spans
+            .iter()
+            .map(|span| (span.r0, span.r1))
+            .collect::<Vec<_>>(),
+        vec![(ratio, 0.0), (0.0, 0.0)],
+        "a tail shorter than its idle arc falls to zero over twice its length"
+    );
+    let end = state.spans.last().expect("the tail lays spans").s1;
+    let material = state.spans_delta_e(0.0, 0.0, end);
+    assert!(
+        (material - ratio * tail).abs() <= 1e-18,
+        "the tail lays {material} mm, its command is {}",
+        ratio * tail
+    );
+}
+
+#[test]
+fn the_lead_keeps_what_the_tail_leaves_of_the_idle_arc() {
+    let lead_ratio = 0.05;
+    let state = laid_rest(
+        (CURVED_TAIL_MM, CURVED_IDLE_MM, CURVED_LEAD_MM),
+        CURVED_REST_ARC_MM,
+        (CURVED_TAIL_RATIO, lead_ratio),
+    );
+    let end = state.spans.last().expect("the rest lays spans").s1;
+    let lead_material = state.spans_delta_e(0.0, CURVED_REST_ARC_MM, end);
+    assert!(
+        (end - (CURVED_TAIL_MM + CURVED_IDLE_MM + CURVED_LEAD_MM)).abs() <= 1e-15,
+        "the spans cover {end} mm of the segment's arc"
+    );
+    assert!(
+        (lead_material - lead_ratio * CURVED_LEAD_MM).abs() <= 1e-15,
+        "the lead lays {lead_material} mm, its command is {}",
+        lead_ratio * CURVED_LEAD_MM
+    );
+}
+
+#[test]
+fn a_tail_too_short_for_a_span_leaves_the_idle_arc_to_the_lead() {
+    let (idle, lead, lead_ratio) = (1e-5, 3e-5, 0.05);
+    let rest = laid_rest((1e-13, idle, lead), 5e-6, (0.04, lead_ratio));
+    let mut lead_alone = FollowerState::default();
+    lead_alone.push_lead(lead, idle, lead_ratio);
+    let ratios = |state: &FollowerState| {
+        state
+            .spans
+            .iter()
+            .map(|span| (span.s1 - span.s0, span.r0, span.r1))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ratios(&rest), ratios(&lead_alone));
+}
+
 const DENSE_SEGMENT: (f64, f64) = (11.042_946_570_120_918, 11.049_146_570_120_918);
 const DENSE_ODOMETER_START: f64 = 1_825.258_274_639_182_7;
 const DENSE_LEADERS: [usize; 3] = [0, 1, 2];
@@ -1577,94 +1689,6 @@ fn an_advanced_follower_source_holds_the_tolerance_past_a_leader_seam_velocity_r
             );
         }
     }
-}
-
-fn leader_with_a_knot(knot: f64, end: f64) -> ContinuousSegment {
-    let before = [0.0, 80.0, 3_000.0, -400_000.0];
-    let at_knot = |order: usize| {
-        before
-            .iter()
-            .enumerate()
-            .skip(order)
-            .map(|(power, &coefficient)| {
-                let falling = ((power - order + 1)..=power).product::<usize>() as f64;
-                falling * coefficient * knot.powi((power - order) as i32)
-            })
-            .sum::<f64>()
-    };
-    let after = vec![
-        at_knot(0),
-        at_knot(1),
-        (at_knot(2) + 250.0) / 2.0,
-        (at_knot(3) + 900_000.0) / 6.0,
-    ];
-    let x = bezier_pieces_to_nurbs(&[
-        BezierPiece {
-            u_start: 0.0,
-            u_end: knot,
-            coeffs: before.to_vec(),
-        },
-        BezierPiece {
-            u_start: knot,
-            u_end: end,
-            coeffs: after,
-        },
-    ]);
-    let y = bezier_pieces_to_nurbs(&[BezierPiece {
-        u_start: 0.0,
-        u_end: end,
-        coeffs: vec![0.0, 30.0, -1_500.0, 60_000.0],
-    }]);
-    leader_segment(x, y, 0.0, end)
-}
-
-#[test]
-fn a_follower_reports_its_steps_across_a_leader_knot() {
-    let knot = 0.008;
-    let shaped = leader_with_a_knot(knot, 0.02);
-    let mut state = FollowerState::default();
-    state.push_span(10.0, 0.05, 0.09);
-    let sig = FollowerSignal::new(
-        &shaped,
-        &shaped,
-        3,
-        &[0, 1],
-        &state,
-        odometer_from_start(&shaped),
-        0.0,
-    );
-    assert_eq!(sig.interior_knots(0.001, 0.019), [knot]);
-    let [before, after] = sig.eval_pva_across(knot);
-    for (side, across) in [(f64::NEG_INFINITY, before), (f64::INFINITY, after)] {
-        let direct = sig.eval_pva(trajectory::next_toward(knot, side));
-        for (across, direct) in [
-            (across.0, direct.0),
-            (across.1, direct.1),
-            (across.2, direct.2),
-        ] {
-            assert!(
-                (across - direct).abs() <= 1e-9 * direct.abs().max(1.0),
-                "evaluating across the knot reads {across}, one ulp to its side reads {direct}"
-            );
-        }
-    }
-    let acceleration_step = (after.2 - before.2).abs();
-    let jerk_step = (jerk_at(&sig, trajectory::next_toward(knot, f64::INFINITY))
-        - jerk_at(&sig, trajectory::next_toward(knot, f64::NEG_INFINITY)))
-    .abs();
-    assert!(
-        acceleration_step > 1.0 && jerk_step > 1_000.0,
-        "test premise: the follower steps across the knot ({acceleration_step} mm/s², \
-         {jerk_step} mm/s³)"
-    );
-    let bound = sig.knot_jump(knot);
-    assert!(
-        acceleration_step <= bound.acceleration && jerk_step <= bound.jerk,
-        "the follower steps by {acceleration_step} mm/s² and {jerk_step} mm/s³ across the \
-         knot, past its reported bound of {} mm/s² and {} mm/s³",
-        bound.acceleration,
-        bound.jerk
-    );
 }
 
 /// A long slow move that ends in a brake shorter than a millionth of the
@@ -2002,7 +2026,6 @@ fn a_follower_enclosure_holds_every_sample_of_its_signal() {
 }
 
 #[test]
-#[ignore = "advanced enclosure waits on the ramp model"]
 fn an_advanced_follower_enclosure_holds_every_sample_of_its_signal() {
     let (shaped, state) = turning_leaders_on_two_ramps();
     let sig = FollowerSignal::new(
@@ -2124,16 +2147,6 @@ fn a_reversal_is_a_rest_whose_split_steps_the_rate_by_the_acceleration_twice() {
             && (after - acceleration).abs() < 1e-9 * acceleration,
         "the rate steps from {before} to {after}, not from −{acceleration} to {acceleration}"
     );
-    assert!(
-        sig.interior_knots(0.0, 0.02).contains(&rest.split),
-        "the split is a knot the signal jumps at"
-    );
-    let jump = sig.knot_jump(rest.split);
-    assert!(
-        jump.acceleration >= 0.05 * 2.0 * acceleration * (1.0 - 1e-9),
-        "the split's jump bound {} misses the ratio times the rate's step",
-        jump.acceleration
-    );
 }
 
 #[test]
@@ -2153,7 +2166,6 @@ fn a_stop_and_go_reads_its_rate_continuously_through_its_rest() {
 }
 
 #[test]
-#[ignore = "advanced enclosure waits on the ramp model"]
 fn an_advanced_follower_enclosure_holds_every_sample_through_a_reversal() {
     let shaped = leaders_on_a_noisy_line(&[-0.5, 50.0]);
     let mut state = FollowerState::default();
@@ -2229,7 +2241,6 @@ fn unshaped_segments(points: &[[f64; 2]], feedrate: f64) -> Vec<ContinuousSegmen
 /// leader step's allowance, and its enclosure holds every sample of its
 /// position and velocity there and of all three elsewhere.
 #[test]
-#[ignore = "advanced enclosure waits on the ramp model"]
 fn an_advance_on_an_unshaped_cap_departure_is_enclosed_under_its_onset_exemption() {
     let square = [
         [0.0, 0.0],
@@ -2395,4 +2406,39 @@ fn only_a_kernel_free_advance_over_an_unshaped_leader_may_step_the_follower() {
         allowance([&unshaped, &unshaped, &unshaped], CompiledChain::default()),
         0.0
     );
+}
+
+#[test]
+fn only_the_leaders_a_kernel_free_advance_reads_fit_acceleration_continuous_seams() {
+    use crate::lowering::SeamContinuity::{Acceleration, Velocity};
+    let compile = |instances: &[PostProcessorInstance]| CompiledChain::compile(instances).unwrap();
+    let pa = || PostProcessorInstance::new("pa", &algos::LinearPressureAdvance, vec![0.04]);
+    let shaped = || {
+        compile(&[PostProcessorInstance::new(
+            "is",
+            &algos::SmoothBell,
+            vec![0.01605],
+        )])
+    };
+    let continuity = |follower: CompiledChain| {
+        let chains = trajectory::AxisChainSet {
+            chains: vec![shaped(), shaped(), shaped(), follower],
+            followers: vec![(3, vec![0, 1])],
+        };
+        (0..3)
+            .map(|leader| super::leader_seam_continuity(&chains, leader))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        continuity(compile(&[pa()])),
+        [Acceleration, Acceleration, Velocity]
+    );
+    assert_eq!(
+        continuity(compile(&[
+            pa(),
+            PostProcessorInstance::new("st", &algos::SmoothTriangle, vec![0.002]),
+        ])),
+        [Velocity; 3]
+    );
+    assert_eq!(continuity(CompiledChain::default()), [Velocity; 3]);
 }

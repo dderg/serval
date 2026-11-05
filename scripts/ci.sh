@@ -6,7 +6,7 @@
 #   ./scripts/ci.sh <job>           # run one gate, exit with its status (CI)
 #   ./scripts/ci.sh -v <job>        # stream the gate's output live
 #   ./scripts/ci.sh throughput-gate [--accept --reason R]
-#                                   # replay instruction counts vs tools/bench/throughput_baseline.json
+#                                   # replay Ir and a live A/B vs tools/bench/throughput_baseline.json
 #
 # Output policy: a terminal, GitHub Actions and `-v` get the live stream.
 # Everywhere else (agents, scripts capturing stdout) a gate prints one PASS
@@ -102,7 +102,59 @@ DOCKER_RUN_AS_USER=(
 # rustflags in rust/.cargo/config.toml, so widening this past the host target
 # would drop the macOS cdylib `-undefined dynamic_lookup` and the cross-build
 # target-cpu/--nmagic flags.
+# pyo3 links the interpreter it finds (python3 on PATH): config-py and shaper-ident
+# fail with `ld.lld: unable to find library -lpython3.12` when the runner image has
+# the interpreter but not its development package (ubuntu-26.04 has no
+# libpython3.12-dev; 24.04 shipped it). Install the matching one when it is missing.
+# Only on GitHub runners; elsewhere a missing library is the developer's to fix.
+LIBPYTHON_CHECKED=""
+ensure_libpython() {
+    [ -z "$LIBPYTHON_CHECKED" ] || return 0
+    LIBPYTHON_CHECKED=1
+    [ -n "${GITHUB_ACTIONS:-}" ] && [ "$(uname -s)" = Linux ] || return 0
+    local have
+    have="$(python3 - <<'PY'
+import os, sysconfig
+libdir = sysconfig.get_config_var("LIBDIR") or ""
+names = [sysconfig.get_config_var(k) for k in ("LDLIBRARY", "LIBRARY")]
+print(any(n and os.path.exists(os.path.join(libdir, n)) for n in names))
+PY
+)"
+    [ "$have" = True ] && return 0
+    echo "ci.sh: no libpython for $(python3 --version 2>&1); installing libpython3-dev" >&2
+    sudo apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=15 update >&2
+    sudo apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=15 install -y libpython3-dev >&2
+}
+
+# pyo3-build-config records the interpreter it found (version, library name) in a
+# build script output that cargo reuses while its inputs look unchanged, and
+# rust-cache restores that output from runs on another runner image: after the
+# image moved from python 3.12 to another interpreter every pyo3 crate still asked
+# the linker for -lpython3.12. Stamp the interpreter in the target dir and rebuild
+# the pyo3 build configuration whenever it differs from the stamp.
+PYO3_STAMP_CHECKED=""
+refresh_pyo3_for_interpreter() {
+    [ -z "$PYO3_STAMP_CHECKED" ] || return 0
+    PYO3_STAMP_CHECKED=1
+    [ -n "${GITHUB_ACTIONS:-}" ] || [ -n "${CI_CHECK_PYO3_INTERPRETER:-}" ] || return 0
+    local stamp now target
+    target="${CARGO_TARGET_DIR:-$RUST/target}"
+    now="$(python3 -c 'import sys, sysconfig; print(sys.version, sys.executable, sysconfig.get_config_var("LDLIBRARY"))' 2>/dev/null || echo none)"
+    stamp="$target/.pyo3-interpreter"
+    if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$now" ]; then
+        return 0
+    fi
+    if [ -f "$stamp" ] || [ -d "$target/debug/build" ]; then
+        echo "ci.sh: interpreter changed or unrecorded ($now); rebuilding pyo3's build configuration" >&2
+        (cd "$RUST" && cargo clean -p pyo3-build-config -p pyo3-ffi >&2 2>&1 || true)
+    fi
+    mkdir -p "$target"
+    printf '%s\n' "$now" > "$stamp"
+}
+
 host_cargo() {
+    refresh_pyo3_for_interpreter
+    ensure_libpython
     if [ "$(uname -s)" = Linux ] && command -v ld.lld >/dev/null 2>&1; then
         RUSTFLAGS="-Clink-arg=-fuse-ld=lld" cargo "$@"
     else
@@ -374,9 +426,10 @@ job_replay_budget() {
     done
 }
 
-# Instruction counts of the repo's own code replaying a slice of the same
-# dense print single-threaded under cachegrind, against committed baselines,
-# plus the Pi 2-core worst window they predict; see scripts/throughput_gate.py.
+# Every user-space instruction of a slice of the same dense print replayed
+# single-threaded under cachegrind, plus the whole print replayed live on two
+# pinned cores against a build of the baseline's reference commit, and the
+# Pi 2-core worst window both predict; see scripts/throughput_gate.py.
 # A host without valgrind measures inside the scripts/Dockerfile-build image.
 # On a pull request the base is the merge commit's first parent, and a moved
 # baseline file needs a ```throughput-accept block in $PR_BODY.

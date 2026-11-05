@@ -50,24 +50,26 @@ max_accel: 3000
 
 ### MCU step capacity
 
-Each MCU measures at connect what one step costs its dispatch, in clock ticks: once for pulsed motors and once for both-edge (TMC `dedge`) motors (`printer.mcu.step_benchmark`; see `tools/bench/README.md`, "Self-benchmark"). Klippy hands the planner each MCU's benchmark, clock, stepped motors and the capacity fraction it applies (reported as `printer.mcu.step_capacity`). The planner gives every MCU a capacity of `STEP_CAPACITY_FRACTION` (0.625) of its clock in ticks per second; `rust/motion-pipeline/src/live_config/step_capacity.rs` is the one derivation the live planner and every snapshot share. 0.625 is the largest fraction at which the F401, held at the cap, keeps p99.9 step lateness × each motor's step rate within 0.5 microstep (`tools/bench/README.md`, "Capacity fraction from a timing budget").
+Each MCU measures at connect what one step costs it, in clock ticks: once for pulsed motors and once for both-edge (TMC `dedge`) motors. The figure is the timer interrupt time of one isolated motor's step with a cold instruction cache, the worst case a lone motor at speed meets (`printer.mcu.step_benchmark`; see `tools/bench/README.md`, "Self-benchmark"). Klippy hands the planner each MCU's benchmark, clock, stepped motors and the capacity fraction it applies (reported as `printer.mcu.step_capacity`). The planner gives every MCU a capacity of `STEP_CAPACITY_FRACTION` (0.80) of its clock in ticks per second; `rust/motion-pipeline/src/live_config/step_capacity.rs` is the one derivation the live planner and every snapshot share. On the F401 held at the cap, p99.9 step lateness × each motor's step rate stays within 0.5 microstep up to 0.85 for one motor alone, and the error jumps at 0.9. 0.80 keeps a margin from that cliff for printers running more MCU tasks than the bench (`tools/bench/README.md`, "Capacity fraction from a timing budget").
 
 The planner holds every move within the capacity of every MCU it steps. A motor stepping `d` mm per step at `c` ticks per step costs its MCU `c / d` ticks per mm it travels. A motor of a kinematic lane with weights `w` (CoreXY: `a = x + y`, `b = x - y`) travels at `|w·t̂|·v` at path speed `v` along heading `t̂`. On an arc or a blend, the planner takes the largest `|w·t̂|` over every heading the segment sweeps, which bounds the motor speed at every point. The extruder motor travels at `r·(v + k·A)`, the extrusion ratio and the pressure advance's velocity gain `k` over the acceleration budget `A`, as for its own `max_velocity`. Per MCU, the sum of `motor speed × c / d` over the motors it steps must stay within the capacity. This constraint is linear in the speed ceiling and the acceleration budget. Where it binds, the planner lowers whichever of the two lets the move finish sooner, as the extruder's velocity cap does. Only moves that ask too much are slowed, and only the MCUs they drive count.
 
 The first move the cap slows emits a `step_capacity_capped` host event at once, later ones at most every 30 s. Each event carries the MCU name, the moves capped since the last report and the worst demand as a multiple of the capacity. At startup klippy logs one line per MCU: the measured ticks per step, the capacity in steps/s for each mode in use, each motor's worst-case steps/s at the configured maximum speeds (`max_velocity` in its worst XY direction, `max_z_velocity`, the extruder's velocity limit) and whether the cap can bind. Simulated MCUs log that their capacity is not modeled, and they are not capped.
 
+The fraction assumes everything else an MCU does fits in the remaining `1 − fraction` of its CPU. That covers tasks, USB and other interrupts, and non-step timers such as software PWM. Klippy checks this assumption while printing. Every 250 ms each stepping MCU reports where its CPU went (`cpu_load`). A window whose non-step share exceeds `1 − fraction` is logged as `mcu.cpu_headroom_exceeded`, at most every 30 s. If, in the same window, the steps at their benchmarked cost plus that non-step load exceed the whole CPU, klippy shuts down: the cap no longer protects step timing on that MCU. The message names the MCU and the shares. The stats line carries the worst window per period as `mcu_nonstep_max` and `mcu_idle_min`. Firmware without `cpu_load` is refused when it drives steppers (`tools/bench/README.md`, "Runtime headroom check").
+
 Klippy refuses a config only when an MCU cannot step a pure move along an axis at `min(that axis's max velocity, 50 mm/s)` with the extruder idle (`STEP_CAPACITY_MIN_AXIS_VELOCITY`; first-layer and perimeter speeds start around there). The error names the MCU, its measured cost and capacity, each motor's demand, and the remedies: fewer microsteps or a larger `rotation_distance`, both-edge stepping, or moving motors to another MCU. A stepper bound to an MCU that reports no step benchmark (a probe MCU without steppers) is also an error. Every axis that an MCU with a measured capacity steps needs extruder limits: `[axis] max_velocity`, or an `[extruder]` bound to it.
 
 Each motor is also limited to what its driver can physically be stepped at. That limit is one step per two pulse widths in pulsed mode (`stepper_full_finish` holds the next step until a pulse width after the unstep) and one per microsecond on both edges. The host checks every shaped track against it before sending.
 
-Worked example: the bench printer (`tools/bench/printer.cfg`: CoreXY, 80 steps/mm on a and b, 400 on z, 414 on e, PA `k = 0.03`, `max_velocity: 1000`, `max_accel: 10000`, F401 at 301 / 160 ticks per step, all pulsed). The capacity is 0.625 × 84 MHz / 301 = 174 k steps/s.
+Worked example: the bench printer (`tools/bench/printer.cfg`: CoreXY, 80 steps/mm on a and b, 400 on z, 414 on e, PA `k = 0.03`, `max_velocity: 1000`, `max_accel: 10000`, F401 at 497 / 240 ticks per step, all pulsed). The capacity is 0.80 × 84 MHz / 497 = 135 k steps/s.
 
-- A pure X or Y travel asks 160 steps/mm. It can reach 1090 mm/s, so it is never capped at 1000.
-- A 45° diagonal drives only one motor, at 113 steps/mm, and can reach 1542 mm/s.
-- Z can reach 436 mm/s, against `max_z_velocity: 25`.
-- Extrusion along X or Y at 1000 mm/s and 10000 mm/s² is capped above a budgeted extrusion ratio of about 0.027. A 0.4 × 0.2 mm line (ratio 0.033, budgeted 0.037) asks 180 k steps/s and is capped to 969 mm/s at full acceleration. A 0.8 × 0.3 mm line (ratio 0.100, budgeted 0.105) asks 217 k and is capped to 793 mm/s. For both lines, the pressure-advance share alone takes so much of the capacity that lowering the acceleration cannot keep 1000 mm/s.
+- A pure X or Y travel asks 160 steps/mm, so it is capped at 845 mm/s.
+- A 45° diagonal drives only one motor, at 113 steps/mm, and can reach 1195 mm/s.
+- Z can reach 338 mm/s, against `max_z_velocity: 25`.
+- Extrusion along X or Y at 10000 mm/s² is capped below the travel cap. A 0.4 × 0.2 mm line (ratio 0.033, budgeted 0.037) is capped to 745 mm/s at full acceleration. A 0.8 × 0.3 mm line (ratio 0.100, budgeted 0.105) is capped to 600 mm/s.
 
-The startup line reports about 199 % summed worst-case demand, so the cap can bind.
+The startup line reports about 190 % summed worst-case demand, so the cap can bind.
 
 ### Why the corner budget defaults to 0.04 mm
 
@@ -308,6 +310,26 @@ post_processors: extruder_pa
 #   unset is inherited from max_extrude_only_velocity /
 #   max_extrude_only_accel (the same motor). An advance needs both, set or
 #   inherited.
+#   On the [extruder] axis max_accel is the extruder motor's
+#   pressure-advance-capable acceleration: the filament acceleration the
+#   drive follows without skipping while the advance adds k times the
+#   path's jerk to every corner and curve. It is a property of the drive,
+#   not of the print, so set it explicitly rather than inheriting the
+#   extrude-only cap, which only ever had to cover retracts and primes. A
+#   value below what the motor can do costs print time at every corner; a
+#   value above it skips steps. A direct drive typically follows 20000 or
+#   more. A bowden drive pushes the whole filament column against the
+#   tube's friction and the nozzle's back pressure, mostly through an
+#   ungeared drive gear, and is lower; 5000 is a safe start for an
+#   Ender-3-class bowden (with k around 0.5, upstream Klipper's default
+#   40 ms advance smoothing already asks about 4400 at its corners). To
+#   find the drive's value, print a pressure advance calibration pattern
+#   (or any part with sharp corners and fast perimeters) at the tuned k,
+#   raising max_accel between prints (it is read at restart). Stop at the
+#   first print that shows any of: clicks or knocks from the extruder,
+#   under-extrusion or gaps right after corners, or layer lines whose
+#   width shifts from layer to layer; set max_accel 20-30% below the last
+#   clean value.
 #instantaneous_corner_velocity: 1.0
 #   Optional, on an axis that follows others. Default is 1.0, as upstream
 #   Klipper's [extruder] option. Must be above 0 (mm/s). The velocity
@@ -343,8 +365,13 @@ advance through its slope `k` (a linear advance's `k`, a nonlinear one's
 `τ = max(5 ms, 1.5·Δ/A_e)`. An axis with neither limit set or inherited
 ramps every step over 5 ms. Where even 30 ms would exceed the limits at
 the speed the path allows, the velocity planner lowers the toolhead speed
-at the step instead, and that time is the cost. The former
-`ratio_ramp_time` option was removed; setting it is a config error.
+at the step instead, and that time is the cost. Near a rest the kernel's
+half-width is at most a quarter of the path left to it, so a step a few
+ramp lengths short of an extrude-only move or the end of a print gets only
+a fifth of the path to that rest on its side; where that is less than its
+τ takes, the velocity planner slows the step until the shorter ramp fits
+the limits. The former `ratio_ramp_time` option was
+removed; setting it is a config error.
 
 On every chain the advance applies only to the extrusion laid along the
 leaders' path, as Klipper advances only extruding moves that travel, so
@@ -353,13 +380,21 @@ their extrude-only caps; with a kernel, the advance is fitted into that
 extrusion before the kernel smooths it. Where the leaders turn around (a
 wipe that reverses along the line) or come to rest across an extrude-only
 move or dwell, the advance drops its lead to zero exactly where their speed
-does: it keeps the lead through the input shaper's spill around the rest,
-then releases it before the rest and rebuilds it after over that spill plus
-the reach of the longest ramp, rising from the rest point, so the extruder
-never asks much more than the advance's own `k·r·accel` there; a rest the
-leaders pass through without stopping keeps the full advance. Without a
-kernel, any extruder position step, or velocity step beyond the leaders'
-fit rounding, is refused before it is emitted; leaders without an
+does, rising from the rest point, so the extruder never asks much more than
+the advance's own `k·r·accel` there. At a rest it releases the lead before
+and rebuilds it after over the input shaper's spill around the rest alone
+wherever the shortest ramp the extruder's limits allow for that lead fits
+within the spill, over the spill plus that ramp's reach elsewhere, and over
+the spill plus the reach of the longest ramp where a ratio step lies so near
+the rest that its own ramp, at the speed the leaders cross it there, would
+leave those limits; a rest the leaders pass through without stopping keeps
+the full advance. Around a rest, the flow
+switches from the move before's ratio to the move after's where the shaped
+leaders reach the rest point, even where the shaped axes curve into it
+unlike each other and cover more path than their straight distance from it;
+the move before's material is spread over that whole path.
+Without a kernel, any extruder position step, or velocity step beyond the
+leaders' fit rounding, is refused before it is emitted; leaders without an
 acceleration-continuous kernel produce such steps. The trade-off against a
 kernel is measured in "Evaluating an extruder chain" in the README.
 

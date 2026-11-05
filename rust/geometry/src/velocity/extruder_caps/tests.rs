@@ -6,7 +6,15 @@ use crate::segment::SourceRange;
 use crate::velocity::{plan_velocity_warm_start, warm_start_params};
 
 const RATIO: f64 = 0.03125;
-const SMOOTHED: [f64; 3] = [1000.0, 700.0, 0.0];
+const X_GAIN: f64 = 1000.0;
+const Y_GAIN: f64 = 700.0;
+const PLANE_GAIN: f64 = 1200.0;
+const GAINS: [f64; 8] = [
+    0.0, X_GAIN, Y_GAIN, PLANE_GAIN, 0.0, X_GAIN, Y_GAIN, PLANE_GAIN,
+];
+const X: [bool; 3] = [true, false, false];
+const Y: [bool; 3] = [false, true, false];
+const XZ: [bool; 3] = [true, false, true];
 
 fn caps(max_velocity: f64, max_accel: f64, slope: f64) -> ExtruderCaps {
     ExtruderCaps {
@@ -15,11 +23,21 @@ fn caps(max_velocity: f64, max_accel: f64, slope: f64) -> ExtruderCaps {
         max_accel_mm_s2: max_accel,
         advance_slope_s: slope,
         advance_curvature_s2_per_mm: 0.0,
-        path_jerk_per_accel_hz: SMOOTHED,
+        path_jerk_per_accel_hz: GAINS,
+        unshaped_leaders: [false; 3],
         own_jerk_per_accel_hz: f64::INFINITY,
         instantaneous_corner_velocity_mm_s: 1.0,
         leader_spill: LeaderSpill::UNSHAPED,
         leader_kernel_reach_s: 0.0,
+    }
+}
+
+fn around(ratio_in_reach: f64, axes_in_reach: [bool; 3]) -> ExtrusionBudget {
+    ExtrusionBudget {
+        ratio_in_reach,
+        axes_in_reach,
+        rest_holds_s: [0.0; 2],
+        rest_room_mm: f64::INFINITY,
     }
 }
 
@@ -60,7 +78,7 @@ fn climbing() -> Segment {
 
 fn unshaped_z(icv: f64) -> ExtruderCaps {
     let mut caps = caps(1000.0, 2000.0, 0.5);
-    caps.path_jerk_per_accel_hz[2] = f64::INFINITY;
+    caps.unshaped_leaders[2] = true;
     caps.instantaneous_corner_velocity_mm_s = icv;
     caps
 }
@@ -73,7 +91,13 @@ fn velocity_step(caps: &ExtruderCaps, ratio: f64, accel: f64, unshaped_share: f6
 fn travel_keeps_its_caps() {
     let limits = (300.0, 20_000.0);
     assert_eq!(
-        extruder_capped(&line_x(10.0), &caps(10.0, 100.0, 0.5), 0.0, 0.0, limits),
+        extruder_capped(
+            &line_x(10.0),
+            &caps(10.0, 100.0, 0.5),
+            &around(0.0, X),
+            0.0,
+            limits
+        ),
         limits
     );
 }
@@ -81,9 +105,15 @@ fn travel_keeps_its_caps() {
 #[test]
 fn a_straight_extrusion_gets_the_largest_budget_its_advance_jerk_fits() {
     let caps = caps(1000.0, 2000.0, 0.5);
-    let (ceiling, accel) = extruder_capped(&line_x(50.0), &caps, RATIO, 0.0, (150.0, 3000.0));
+    let (ceiling, accel) = extruder_capped(
+        &line_x(50.0),
+        &caps,
+        &around(RATIO, X),
+        0.0,
+        (150.0, 3000.0),
+    );
     assert_eq!(ceiling, 150.0);
-    let exact = 2000.0 / (RATIO * (1.0 + 0.5 * SMOOTHED[0]));
+    let exact = 2000.0 / (RATIO * (1.0 + 0.5 * X_GAIN));
     assert!(
         (accel - exact).abs() < 1e-9 * exact,
         "{accel} against {exact}"
@@ -91,13 +121,24 @@ fn a_straight_extrusion_gets_the_largest_budget_its_advance_jerk_fits() {
 }
 
 #[test]
-fn only_the_axes_a_segment_moves_lend_their_jerk_gain() {
+fn only_the_axes_the_path_moves_around_a_segment_lend_their_jerk_gain() {
     let caps = caps(1000.0, 2000.0, 0.5);
     let along_y = Segment::Line(Line::try_new([0.0; 3], [0.0, 50.0, 0.0]).unwrap());
-    let (_, accel) = extruder_capped(&along_y, &caps, RATIO, 0.0, (150.0, 3000.0));
-    let exact = 2000.0 / (RATIO * (1.0 + 0.5 * SMOOTHED[1]));
-    assert!((accel - exact).abs() < 1e-9 * exact);
+    let (_, alone) = extruder_capped(&along_y, &caps, &around(RATIO, Y), 0.0, (150.0, 3000.0));
+    let exact = 2000.0 / (RATIO * (1.0 + 0.5 * Y_GAIN));
+    assert!((alone - exact).abs() < 1e-9 * exact);
+    let (_, cornering) = extruder_capped(
+        &along_y,
+        &caps,
+        &around(RATIO, [true, true, false]),
+        0.0,
+        (150.0, 3000.0),
+    );
+    let exact = 2000.0 / (RATIO * (1.0 + 0.5 * PLANE_GAIN));
+    assert!((cornering - exact).abs() < 1e-9 * exact);
 }
+
+const PLANE: [bool; 3] = [true, true, false];
 
 #[test]
 fn a_curve_also_pays_for_the_tangent_turning_under_its_normal_acceleration() {
@@ -106,10 +147,17 @@ fn a_curve_also_pays_for_the_tangent_turning_under_its_normal_acceleration() {
         Arc::try_new([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], 2.0, 0.0, 1.5).unwrap(),
     );
     let kappa = 0.5;
-    let (ceiling, accel) = extruder_capped(&arc, &caps, RATIO, kappa, (300.0, 70_000.0));
-    let demand = demand_of(&caps, SMOOTHED[0], kappa);
+    let (ceiling, accel) =
+        extruder_capped(&arc, &caps, &around(RATIO, PLANE), kappa, (300.0, 70_000.0));
+    let demand = demand_of(&caps, PLANE_GAIN, kappa);
     assert!(demand.accel(ceiling, accel) <= 5000.0 * (1.0 + 1e-12));
-    let straight = extruder_capped(&line_x(3.0), &caps, RATIO, 0.0, (300.0, 70_000.0));
+    let straight = extruder_capped(
+        &line_x(3.0),
+        &caps,
+        &around(RATIO, PLANE),
+        0.0,
+        (300.0, 70_000.0),
+    );
     assert!(
         accel < straight.1,
         "turning must cost budget: {accel} vs {}",
@@ -121,7 +169,13 @@ fn a_curve_also_pays_for_the_tangent_turning_under_its_normal_acceleration() {
 fn the_velocity_cap_gives_way_where_crossing_is_cheaper() {
     let caps = caps(45.0, 1e9, 0.5);
     for length in [0.5, 200.0] {
-        let (ceiling, accel) = extruder_capped(&line_x(length), &caps, RATIO, 0.0, (150.0, 3000.0));
+        let (ceiling, accel) = extruder_capped(
+            &line_x(length),
+            &caps,
+            &around(RATIO, X),
+            0.0,
+            (150.0, 3000.0),
+        );
         let velocity = RATIO * (ceiling + 0.5 * accel);
         assert!(velocity <= 45.0 * (1.0 + 1e-12), "{velocity}");
         assert!(ceiling < 150.0 || accel < 3000.0);
@@ -131,7 +185,13 @@ fn the_velocity_cap_gives_way_where_crossing_is_cheaper() {
 #[test]
 fn without_an_advance_only_the_base_flow_is_capped() {
     let caps = caps(3.0, 50.0, 0.0);
-    let (ceiling, accel) = extruder_capped(&line_x(10.0), &caps, RATIO, 0.0, (150.0, 3000.0));
+    let (ceiling, accel) = extruder_capped(
+        &line_x(10.0),
+        &caps,
+        &around(RATIO, X),
+        0.0,
+        (150.0, 3000.0),
+    );
     assert!((ceiling - 3.0 / RATIO).abs() < 1e-9);
     assert!((accel - 50.0 / RATIO).abs() < 1e-9);
 }
@@ -139,7 +199,8 @@ fn without_an_advance_only_the_base_flow_is_capped() {
 #[test]
 fn an_unshaped_leader_keeps_the_advance_velocity_steps_within_the_instantaneous_corner_velocity() {
     let caps = unshaped_z(0.1);
-    let (ceiling, accel) = extruder_capped(&climbing(), &caps, RATIO, 0.0, (150.0, 3000.0));
+    let (ceiling, accel) =
+        extruder_capped(&climbing(), &caps, &around(RATIO, XZ), 0.0, (150.0, 3000.0));
     assert_eq!(ceiling, 150.0);
     let z_share = 1.0 / 101.0_f64.sqrt();
     let exact = 0.1 / (2.0 * 0.5 * RATIO * z_share);
@@ -153,8 +214,8 @@ fn an_unshaped_leader_keeps_the_advance_velocity_steps_within_the_instantaneous_
 #[test]
 fn an_unshaped_leader_spends_the_budget_the_shaped_ones_leave() {
     let caps = unshaped_z(1.0);
-    let (_, accel) = extruder_capped(&climbing(), &caps, RATIO, 0.0, (150.0, 3000.0));
-    let exact = 2000.0 / (RATIO * (1.0 + 0.5 * SMOOTHED[0]));
+    let (_, accel) = extruder_capped(&climbing(), &caps, &around(RATIO, XZ), 0.0, (150.0, 3000.0));
+    let exact = 2000.0 / (RATIO * (1.0 + 0.5 * X_GAIN));
     assert!((accel - exact).abs() < 1e-9 * exact);
 }
 
@@ -162,7 +223,7 @@ fn an_unshaped_leader_spends_the_budget_the_shaped_ones_leave() {
 fn a_follower_kernel_smooths_an_unshaped_leader_steps_itself() {
     let mut caps = unshaped_z(0.1);
     caps.own_jerk_per_accel_hz = 400.0;
-    let (_, accel) = extruder_capped(&climbing(), &caps, RATIO, 0.0, (150.0, 3000.0));
+    let (_, accel) = extruder_capped(&climbing(), &caps, &around(RATIO, XZ), 0.0, (150.0, 3000.0));
     let exact = 2000.0 / (RATIO * (1.0 + 0.5 * 400.0));
     assert!((accel - exact).abs() < 1e-9 * exact);
 }
@@ -205,7 +266,7 @@ fn the_planner_holds_an_extruding_move_to_its_cap_and_leaves_travel_alone() {
             .map(|sample| sample.a.abs())
             .fold(0.0, f64::max)
     };
-    let cap = 2000.0 / (RATIO * (1.0 + 0.5 * SMOOTHED[0]));
+    let cap = 2000.0 / (RATIO * (1.0 + 0.5 * X_GAIN));
     assert!((peak(&moves[1]) - cap).abs() < 1e-6 * cap);
     assert!((peak(&moves[0]) - 3000.0).abs() < 1e-6);
 }
@@ -242,7 +303,7 @@ fn the_planner_caps_the_climbing_travel_after_an_extrusion_on_an_unshaped_leader
             .map(|sample| sample.a.abs())
             .fold(0.0, f64::max)
     };
-    let cap = 2000.0 / (RATIO * (1.0 + 0.5 * SMOOTHED[0]));
+    let cap = 2000.0 / (RATIO * (1.0 + 0.5 * X_GAIN));
     let z_share = 5.0 / 2525.0_f64.sqrt();
     assert!(velocity_step(&extruder, RATIO, cap, z_share) <= 1.0);
     assert!(
@@ -301,7 +362,7 @@ fn the_planner_budgets_a_travel_at_the_extrusion_a_ramp_carries_across_the_blend
         .iter()
         .map(|sample| sample.a.abs())
         .fold(0.0, f64::max);
-    let cap = 2000.0 / (line * (1.0 + 0.5 * SMOOTHED[0]));
+    let cap = 2000.0 / (line * (1.0 + 0.5 * X_GAIN));
     assert!(
         (travel_peak - cap).abs() < 1e-6 * cap,
         "{travel_peak} against {cap}"

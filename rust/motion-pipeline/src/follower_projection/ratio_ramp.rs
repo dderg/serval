@@ -1,30 +1,47 @@
 use std::collections::VecDeque;
 
-use geometry::{RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep};
+use geometry::{
+    ADVANCE_VALLEY_SPEED_MM_S, RATIO_RAMP_ENVELOPE_SLOPE as ENVELOPE_SLOPE, RATIO_RAMP_MAX_TIME_S,
+    RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep,
+};
 use trajectory::ContinuousSegment;
 
 use super::{
-    LeaderReads, RatioSpan, SPAN_LOOKUP_SLACK_MM, SPAN_MIN_LEN_MM, ShapedLeaders, axis_grid,
-    integrate,
+    FloorLeaders, LeaderReads, RatioSpan, SPAN_LOOKUP_SLACK_MM, SPAN_MIN_LEN_MM, ShapedLeaders,
+    axis_grid, integrate,
 };
 
 mod jet;
+mod models;
+
 pub(super) use jet::Jet;
 use jet::{horner, horner_with_slope};
+pub(super) use models::{REACH_INSET_ULPS, ValleyWeight, narrow_floats};
 
-/// The steepest the width envelope climbs per unit of path away from a
-/// node (see [`WidthField`]).
-const ENVELOPE_SLOPE: f64 = 0.25;
 /// `max |h'|` the width reaches: `3·ENVELOPE_SLOPE` rising off a rest,
 /// `1.875·ENVELOPE_SLOPE` between two moving nodes.
 pub(super) const WIDTH_SLOPE_BOUND: f64 = 3.0 * ENVELOPE_SLOPE;
 /// Width nodes per ramp time: one every half of the shortest ramp.
 const WIDTH_NODES_PER_RAMP_TIME: f64 = 2.0;
 const NODE_SPACING_S: f64 = RATIO_RAMP_MIN_TIME_S / WIDTH_NODES_PER_RAMP_TIME;
+/// How far apart on the path two moving width nodes lie at least, in
+/// units of the narrower of their targets: the smootherstep between nodes
+/// `L` apart that differ by at most `ENVELOPE_SLOPE·L` bends `h` by up to
+/// `h''' = 60·ENVELOPE_SLOPE/L²`, which the smoothed ratio's curvature
+/// carries, so an advance turns it into extruder acceleration. Nodes most
+/// of a window's width apart keep that bend within the window's own; short
+/// of a whole width, since at cruise on the shortest ramp a width is one
+/// time tick of path exactly, and a tie there would hang the choice on how
+/// the path's rounding falls.
+const NODE_SPACING_PER_WIDTH: f64 = 0.75;
+/// How far along the path a seam holds the width its ramp asks for, in
+/// units of that width `V·τ/2`: a window that wide reaches the seam from
+/// up to one width away, and the nodes bracketing that reach lie within
+/// one more.
+const SEAM_WIDTH_PLATEAU_WIDTHS: f64 = 2.0;
 /// How fast the ramp time a seam asks for falls off in time away from it:
 /// at a steady speed the width target `v·τ/2` then falls off along the
-/// path no faster than [`ENVELOPE_SLOPE`], so no node's cone narrows the
-/// window the seam needs.
+/// path no faster than [`ENVELOPE_SLOPE`].
 const RAMP_TIME_SLOPE: f64 = 2.0 * ENVELOPE_SLOPE;
 /// How far in time a seam raises the ramp time around it: it holds its own
 /// within one ramp time of the seam, then falls off.
@@ -34,11 +51,12 @@ const RAMP_TIME_REACH_S: f64 =
 /// from it: half the longest ramp.
 const CLUSTER_REACH_S: f64 = 0.5 * RATIO_RAMP_MAX_TIME_S;
 /// How long after a node the leaders must be laid before its target is
-/// known: every seam that raises its ramp time, and every seam those
-/// gather, lies within.
+/// known: every seam that raises its ramp time or its width, and every
+/// seam those gather, lies within.
 const TARGET_DELAY_S: f64 = RAMP_TIME_REACH_S + CLUSTER_REACH_S;
-/// The ramp time over which a valley releases and rebuilds the advance's
-/// lead: the longest, whatever the step there.
+/// The ramp time over which a turnaround or crawl valley releases and
+/// rebuilds the advance's lead, the longest, whatever the step there; and
+/// the furthest a rest valley reaches past its spill ([`RestSide::width`]).
 const VALLEY_RAMP_TIME_S: f64 = RATIO_RAMP_MAX_TIME_S;
 /// A node's target below which the leaders count as resting there: the
 /// fit's back-and-forth around a rest point, far under any ramp.
@@ -58,6 +76,9 @@ const KERNEL_HALF_VARIANCE: f64 = 0.1;
 const SMOOTHED_RAMP: [f64; 5] = [0.1875, 0.5, 0.375, 0.0, -0.0625];
 /// `∫₋₁ˣ` of [`SMOOTHED_RAMP`]: `x₊²/2` smoothed by the kernel.
 const SMOOTHED_HALF_SQUARE: [f64; 6] = [0.05, 0.1875, 0.25, 0.125, 0.0, -0.0125];
+/// [`SMOOTHED_HALF_SQUARE`] about the window's edge, `P₂(w − 1)` in powers
+/// of `w = 1 + x`: a fourfold root there.
+const SMOOTHED_HALF_SQUARE_OFF_EDGE: [f64; 6] = [0.0, 0.0, 0.0, 0.0, 0.0625, -0.0125];
 const WIDTH_BISECTIONS: usize = 64;
 /// How close in ulps a Newton step on a window edge settles before the
 /// float the edge flips at is bracketed and bisected for.
@@ -95,7 +116,6 @@ pub(super) struct PendingSegment {
 struct Seam {
     s: f64,
     step: f64,
-    slope_step: f64,
     slope_after: f64,
 }
 
@@ -104,58 +124,81 @@ impl Seam {
     /// steps there.
     fn between(before: &RatioSpan, after: &RatioSpan) -> Option<Self> {
         let step = after.r0 - before.r1;
-        let slope_step = after.ratio_slope() - before.ratio_slope();
-        (step != 0.0 || slope_step != 0.0).then(|| Self {
+        let slope_after = after.ratio_slope();
+        (step != 0.0 || slope_after != before.ratio_slope()).then_some(Self {
             s: after.s0,
             step,
-            slope_step,
-            slope_after: after.ratio_slope(),
+            slope_after,
         })
     }
 }
 
 /// The seams inside one window as [`RatioSmoothing::correction`] sums
-/// them, each at `u = s − σ`: the moments `Σ Δ·uᵏ` of their ratio steps
-/// and `Σ Δm·uᵏ` of their slope steps, and the table's own kink the seams
-/// at or behind `s` carry, `Σ Δ·u + Δm·u²/2`, with its two derivatives.
+/// them, each at `u = s − σ`: the moments `Σ Δ·uᵏ` of their ratio steps,
+/// the moments `Σ m·(u_aᵏ − u_bᵏ)` of the table's slope over each span
+/// between two of them, and the table's own kink behind `s` they carry,
+/// with its two derivatives.
 ///
 /// With `a`, `b` the coefficients of [`SMOOTHED_RAMP`] and
 /// [`SMOOTHED_HALF_SQUARE`], `h·G₁(u/h) = Σₖ aₖ·uᵏ·h¹⁻ᵏ − u₊` and
-/// `h²·G₂(u/h) = Σₖ bₖ·uᵏ·h²⁻ᵏ − u₊²/2`, so the correction is the moments
+/// `h²·G₂(u/h) = Σₖ bₖ·uᵏ·h²⁻ᵏ − u₊²/2`. A ratio step adds `Δ·h·G₁`; the
+/// slope `m` over a span adds `m·h²·(G₂(x_a) − G₂(x_b))`, its ends'
+/// `x = u/h`, which sums to the slope steps' `Δm·h²·G₂` and the slope
+/// behind the window's `0.1·h²·m`. So the correction is the moments
 /// weighted by powers of `h`, and a moment's path derivative is
 /// `(Σ c·uᵏ)' = k·Σ c·uᵏ⁻¹`: each seam costs a few products whatever the
-/// jets of `h`. `|u| < h` inside the window bounds every term by its
-/// coefficient times `|Δ|·h` or `|Δm|·h²`, as the polynomials in `u/h`
-/// are bounded.
+/// jets of `h`. A span inside the window enters as its rise `m·(u_a − u_b)`
+/// times `(u_aᵏ − u_bᵏ)/(u_a − u_b)`, never as two slope steps of opposite
+/// sign: a corner blend nanometres long steps the slope by millions, and
+/// those would cancel only to an ulp of `m·h²`. The two spans running past
+/// the window's edges are [`edge_spans`].
 #[derive(Default)]
 struct SeamMoments {
     step: [f64; SMOOTHED_RAMP.len()],
-    slope_step: [f64; SMOOTHED_HALF_SQUARE.len()],
+    slope: [f64; SMOOTHED_HALF_SQUARE.len()],
     behind: [f64; 3],
     steps: bool,
 }
 
 impl SeamMoments {
-    fn add(&mut self, u: f64, seam: &Seam) {
-        let mut powers = [1.0; SMOOTHED_HALF_SQUARE.len()];
-        for k in 1..powers.len() {
-            powers[k] = powers[k - 1] * u;
+    fn add_step(&mut self, u: f64, step: f64) {
+        if step == 0.0 {
+            return;
         }
-        if seam.step != 0.0 {
-            self.steps = true;
-            for (moment, power) in self.step.iter_mut().zip(powers) {
-                *moment += seam.step * power;
-            }
-        }
-        if seam.slope_step != 0.0 {
-            for (moment, power) in self.slope_step.iter_mut().zip(powers) {
-                *moment += seam.slope_step * power;
-            }
+        self.steps = true;
+        let mut power = 1.0;
+        for moment in &mut self.step {
+            *moment += step * power;
+            power *= u;
         }
         if u >= 0.0 {
-            self.behind[0] += seam.step * u + 0.5 * seam.slope_step * powers[2];
-            self.behind[1] += seam.step + seam.slope_step * u;
-            self.behind[2] += seam.slope_step;
+            self.behind[0] += step * u;
+            self.behind[1] += step;
+        }
+    }
+
+    /// The span of slope `slope` and `length` between the seams at
+    /// `u_a > u_b`. A seam at `s` lies behind it, as the table reads the
+    /// span it opens there.
+    fn add_span(&mut self, (u_a, u_b): (f64, f64), slope: f64, length: f64) {
+        if slope == 0.0 {
+            return;
+        }
+        let rise = slope * length;
+        let mut divided_difference = 0.0;
+        let mut power_b = 1.0;
+        for moment in &mut self.slope[1..] {
+            divided_difference = divided_difference * u_a + power_b;
+            power_b *= u_b;
+            *moment += rise * divided_difference;
+        }
+        if u_b >= 0.0 {
+            self.behind[0] += rise * 0.5 * (u_a + u_b);
+            self.behind[1] += rise;
+        } else if u_a >= 0.0 {
+            self.behind[0] += 0.5 * slope * u_a * u_a;
+            self.behind[1] += slope * u_a;
+            self.behind[2] += slope;
         }
     }
 
@@ -176,12 +219,10 @@ impl SeamMoments {
         }
     }
 
-    /// `X` with the width `h` and the table's slope `slope_left` at the
-    /// window's back edge: the moments of power `k` of the slope steps
-    /// weigh with `h²⁻ᵏ`, of the ratio steps with `h¹⁻ᵏ`; `h⁰` is no
-    /// product.
-    fn correction(&self, h: Jet, slope_left: f64) -> Jet {
-        let inverse = h.recip();
+    /// `X` but for [`edge_spans`] with the width `h` and its inverse: the
+    /// moments of power `k` of the slope weigh with `h²⁻ᵏ`, of the ratio
+    /// steps with `h¹⁻ᵏ`; `h⁰` is no product.
+    fn correction(&self, h: Jet, inverse: Jet) -> Jet {
         let inverse_squared = inverse * inverse;
         let powers_of_h = [
             Some(h * h),
@@ -202,16 +243,59 @@ impl SeamMoments {
             .enumerate()
             .fold(kink, |total, (index, &power)| {
                 let slope_term =
-                    Self::moment(&self.slope_step, index).scale(SMOOTHED_HALF_SQUARE[index]);
+                    Self::moment(&self.slope, index).scale(SMOOTHED_HALF_SQUARE[index]);
                 let weight = match index.checked_sub(1) {
                     Some(k) if self.steps => {
                         slope_term + Self::moment(&self.step, k).scale(SMOOTHED_RAMP[k])
                     }
-                    Some(_) => slope_term,
-                    None => slope_term.offset(KERNEL_HALF_VARIANCE * slope_left),
+                    _ => slope_term,
                 };
                 total + power.map_or(weight, |power| power * weight)
             })
+    }
+}
+
+/// What the two spans of the table running past the window's edges add to
+/// `X`: `slope_left` from behind the back edge up to the first seam inside,
+/// at `u_first`, `m·h²·(G₂(1) − G₂(x))`, and `slope_right` from the last,
+/// at `u_last`, on past the front edge, `m·h²·G₂(x)`. Each `G₂` is read
+/// about the edge it lies nearer, `P₂(x)` as `P₂(w − 1)` with `w = 1 + x`
+/// and `0.1 − G₂(x)` as `P₂(−x)` with `w = 1 − x`: a span that stops short
+/// of `s` is as steep as its rise over `w·h`, and `P₂`'s fourfold root
+/// there keeps the product of the two within an ulp of the rise. No seam
+/// inside: one span over the whole window, `0.1·h²·m`.
+fn edge_spans(h: Jet, inverse: Jet, slope_left: f64, ends: Option<(f64, f64, f64)>) -> Jet {
+    let Some((u_first, u_last, slope_right)) = ends else {
+        return (h * h).scale(KERNEL_HALF_VARIANCE * slope_left);
+    };
+    let back = if slope_left == 0.0 {
+        Jet::ZERO
+    } else {
+        half_square_about_edges(h, inverse, u_first)
+            .1
+            .scale(slope_left)
+    };
+    let front = if slope_right == 0.0 {
+        Jet::ZERO
+    } else {
+        half_square_about_edges(h, inverse, u_last)
+            .0
+            .scale(slope_right)
+    };
+    h * h * (back + front)
+}
+
+/// `(G₂(x), 0.1 − G₂(x))` at `x = u/h`, the one off the nearer edge read
+/// about it (see [`edge_spans`]).
+fn half_square_about_edges(h: Jet, inverse: Jet, u: f64) -> (Jet, Jet) {
+    let u = Jet::variable(u);
+    let complement = |part: Jet| part.scale(-1.0).offset(KERNEL_HALF_VARIANCE);
+    if u.value < 0.0 {
+        let ahead = ((h + u) * inverse).poly(&SMOOTHED_HALF_SQUARE_OFF_EDGE);
+        (ahead, complement(ahead))
+    } else {
+        let behind = ((h + u.scale(-1.0)) * inverse).poly(&SMOOTHED_HALF_SQUARE_OFF_EDGE);
+        (complement(behind), behind)
     }
 }
 
@@ -264,45 +348,84 @@ impl Candidate {
     }
 }
 
-/// A ratio step as its ramp time is derived: when the leaders cross it, how
-/// fast and under what acceleration, how far the ratio moves there — its
-/// step and the change along the span it opens, which a window may gather
-/// as one step where that span is short — and the largest ratio about it.
+/// A ratio step as its ramp time is derived: where and when the leaders
+/// cross it, how fast and under what acceleration, how far the ratio moves
+/// there — its step and the change along the span it opens, which a window
+/// may gather as one step where that span is short — and the largest ratio
+/// about it.
 #[derive(Debug, Clone, Copy)]
 struct TimedSeam {
     t: f64,
+    s: f64,
     crossing: Crossing,
     step: f64,
     peak_ratio: f64,
     ramp_time: Option<f64>,
 }
 
+/// The last moving node the width field kept: when and where, its ramp
+/// time and its target.
+#[derive(Debug, Clone, Copy)]
+struct KeptNode {
+    t: f64,
+    s: f64,
+    ramp_time: f64,
+    target: f64,
+}
+
+/// How the leaders cross the last half of the longest ramp of a laid leg
+/// ending at `until`.
+#[derive(Debug, Clone, Copy)]
+struct LegTail {
+    until: f64,
+    crossing: Crossing,
+}
+
+/// The part of `support` a ramp laid at `t` may reach: half the longest
+/// ramp on either side.
+fn ramp_reach_within(t: f64, (start, end): (f64, f64)) -> (f64, f64) {
+    (
+        (t - CLUSTER_REACH_S).clamp(start, end),
+        (t + CLUSTER_REACH_S).clamp(start, end),
+    )
+}
+
 /// The smoothing's half-width `h(s)` along the path.
 ///
 /// Each ratio step asks for its own ramp time `τ_σ`
-/// ([`RatioRampRule::ramp_time`]) from the leaders' shaped speed and
-/// acceleration there and the steps within half the longest ramp of it,
-/// which one window may gather. The ramp time at `t` is the largest of the
-/// seams around, each holding `τ_σ` within `τ_σ` of its seam and falling
-/// off by half the time beyond, never under the shortest ramp: within its
-/// window the targets follow the leaders' speed alone, and the ramp time
-/// falls off no faster than the envelope may, so no node's cone narrows
-/// the window a seam needs.
+/// ([`RatioRampRule::ramp_time`]) from the fastest and most accelerating
+/// the leaders are over its ramp and the steps within half the longest ramp
+/// of it, which one window may gather. The ramp time at `t` is the largest
+/// of the seams around, each holding `τ_σ` within `τ_σ` of its seam and
+/// falling off by half the time beyond, never under the shortest ramp.
+///
+/// The rule bounds a ramp whose window is `H_σ = V·τ_σ/2` wide wherever the
+/// seam is inside it, `V` the fastest the leaders cross it at. The leaders'
+/// own speed alone would not lay that: where they brake hard next to the
+/// step, or slow into a corner a few millimetres off it, the targets fall
+/// off faster than the envelope may, and the slow node's cone narrows the
+/// window below `H_σ` exactly where the leaders are fast. So each seam
+/// also asks for its width ([`Self::seam_width_at`]): every node within
+/// [`SEAM_WIDTH_PLATEAU_WIDTHS`] widths of it on the path targets at least
+/// `H_σ`, falling off by [`ENVELOPE_SLOPE`] beyond, so only a rest narrows
+/// a seam's window below its width, and the planner slows a step where the
+/// rest leaves its ramp too little path ([`geometry::rest_room_reach_mm`]).
 ///
 /// The leaders are sampled every half of the shortest ramp in time. A
-/// sample becomes a node once every seam that sets its ramp time `τ` is
-/// laid, and only half its own ramp time after the last one, so the nodes
-/// sit `τ/2` apart: the smootherstep between two of them bends `h` no
-/// sharper than a window's own width allows. A node's target is half the
-/// path the leaders cover in `τ` around it — `v·τ/2` at cruise, `a·τ²/8` at
-/// a turnaround, the accelerating path on both sides at a slow corner — and
-/// zero at a rest: where the leaders cross a leg seam at rest, at a floor,
-/// and at every sample inside a dwell, each of which is kept. The envelope
-/// is the largest `ENVELOPE_SLOPE`-Lipschitz field under every target, and
-/// `h` blends neighbouring envelope values by a smootherstep (flat to
-/// second order at each node, so `h` is C2), or rises off a rest node as
-/// `ψ`, linearly at first: a window shrinks to nothing at a rest at most as
-/// fast as the distance to it, so it never reaches across.
+/// sample becomes a node once every seam that sets its ramp time `τ` or its
+/// width is laid, and only half its own ramp time after the last one and no
+/// nearer on the path than [`NODE_SPACING_PER_WIDTH`] times the narrower of
+/// the two targets: the smootherstep between two of them bends `h` no
+/// sharper than a window's own width allows. A node's own target is half
+/// the path the leaders cover in `τ` around it — `v·τ/2` at cruise,
+/// `a·τ²/8` at a turnaround, the accelerating path on both sides at a slow
+/// corner — and zero at a rest: where the leaders cross a leg seam at rest,
+/// at a floor, and at every sample inside a dwell, each of which is kept.
+/// The envelope is the largest `ENVELOPE_SLOPE`-Lipschitz field under every
+/// target, and `h` blends neighbouring envelope values by a smootherstep
+/// (flat to second order at each node, so `h` is C2), or rises off a rest
+/// node as `ψ`, linearly at first: a window shrinks to nothing at a rest at
+/// most as fast as the distance to it, so it never reaches across.
 ///
 /// `|h'| ≤ WIDTH_SLOPE_BOUND < 1` everywhere, which keeps the smoothed
 /// ratio a convex combination of the table's (see [`RatioSmoothing`]).
@@ -311,11 +434,14 @@ struct WidthField {
     nodes: Vec<WidthNode>,
     candidates: VecDeque<Candidate>,
     seams: Vec<TimedSeam>,
+    /// How many of the first `seams` a floor closed: no leg after it is
+    /// reached by their ramps.
+    closed_seams: usize,
     rule: Option<RatioRampRule>,
     grid: Option<SampleGrid>,
     pending: Option<usize>,
     before_pending: f64,
-    last_kept: Option<(f64, f64)>,
+    last_kept: Option<KeptNode>,
     final_prefix: usize,
 }
 
@@ -398,6 +524,30 @@ impl WidthField {
         self.seams.push(seam);
     }
 
+    /// Widens every open seam whose ramp reaches into the leg over
+    /// `support` by how the leaders cross what it reaches there. Its ramp
+    /// time is not derived yet: the leaders are laid only up to `support`'s
+    /// start, and [`Self::assign`] derives none within half the longest ramp
+    /// of that.
+    fn widen_seams_into(&mut self, leaders: &ShapedLeaders, support: (f64, f64)) {
+        let first = self
+            .seams
+            .partition_point(|seam| seam.t + CLUSTER_REACH_S <= support.0)
+            .max(self.closed_seams);
+        for seam in &mut self.seams[first..] {
+            assert!(
+                seam.ramp_time.is_none(),
+                "the ratio step at t={} has its ramp time derived before the leg from t={} its \
+                 ramp reaches into is laid",
+                seam.t,
+                support.0
+            );
+            seam.crossing = seam
+                .crossing
+                .widest(Crossing::over(leaders, ramp_reach_within(seam.t, support)));
+        }
+    }
+
     /// The ramp time seam `index` asks for, with the steps it gathers.
     fn seam_ramp_time(&mut self, index: usize) -> f64 {
         if let Some(ramp_time) = self.seams[index].ramp_time {
@@ -423,18 +573,38 @@ impl WidthField {
         ramp_time
     }
 
-    /// The ramp time at `t`: the largest a seam around asks for there.
-    fn ramp_time_at(&mut self, t: f64) -> f64 {
+    /// The seams whose ramp time or width reaches the time `t`.
+    fn seams_reaching(&self, t: f64) -> std::ops::Range<usize> {
         let first = self
             .seams
             .partition_point(|seam| seam.t < t - RAMP_TIME_REACH_S);
         let last = self
             .seams
             .partition_point(|seam| seam.t <= t + RAMP_TIME_REACH_S);
-        (first..last).fold(RATIO_RAMP_MIN_TIME_S, |ramp_time, index| {
-            let seam_ramp_time = self.seam_ramp_time(index);
-            let beyond_plateau = ((self.seams[index].t - t).abs() - seam_ramp_time).max(0.0);
-            ramp_time.max(seam_ramp_time - RAMP_TIME_SLOPE * beyond_plateau)
+        first..last
+    }
+
+    /// The ramp time at `t`: the largest a seam around asks for there.
+    fn ramp_time_at(&mut self, t: f64) -> f64 {
+        self.seams_reaching(t)
+            .fold(RATIO_RAMP_MIN_TIME_S, |ramp_time, index| {
+                let seam_ramp_time = self.seam_ramp_time(index);
+                let beyond_plateau = ((self.seams[index].t - t).abs() - seam_ramp_time).max(0.0);
+                ramp_time.max(seam_ramp_time - RAMP_TIME_SLOPE * beyond_plateau)
+            })
+    }
+
+    /// The width the seams around ask for at the node at `t`, `s`: each its
+    /// ramp's `V·τ/2` within [`SEAM_WIDTH_PLATEAU_WIDTHS`] of it on the
+    /// path, falling off by [`ENVELOPE_SLOPE`] beyond (see [`WidthField`]).
+    fn seam_width_at(&mut self, t: f64, s: f64) -> f64 {
+        self.seams_reaching(t).fold(0.0, |width, index| {
+            let ramp_time = self.seam_ramp_time(index);
+            let seam = self.seams[index];
+            let seam_width = 0.5 * seam.crossing.speed * ramp_time;
+            let beyond_plateau =
+                ((s - seam.s).abs() - SEAM_WIDTH_PLATEAU_WIDTHS * seam_width).max(0.0);
+            width.max(seam_width - ENVELOPE_SLOPE * beyond_plateau)
         })
     }
 
@@ -451,16 +621,11 @@ impl WidthField {
                     let Some(base) = sample.base.filter(|_| sample.t <= through) else {
                         break;
                     };
-                    let ramp_time = self.ramp_time_at(sample.t);
-                    let due = self
-                        .last_kept
-                        .is_none_or(|(t, tau)| sample.t >= t + 0.5 * tau - 0.5 * NODE_SPACING_S);
                     if base == 0.0 {
                         self.push_rest(sample.s);
                         self.last_kept = None;
-                    } else if due {
-                        self.push(sample.s, base * ramp_time / RATIO_RAMP_MIN_TIME_S);
-                        self.last_kept = Some((sample.t, ramp_time));
+                    } else {
+                        self.keep_if_due(sample, base);
                     }
                 }
             }
@@ -473,6 +638,29 @@ impl WidthField {
         } - TARGET_DELAY_S;
         let drop = self.seams.partition_point(|seam| seam.t < needed_from);
         self.seams.drain(..drop);
+        self.closed_seams = self.closed_seams.saturating_sub(drop);
+    }
+
+    /// Makes `sample` a node of target `base` scaled to the ramp time
+    /// there, or the width the seams around ask for if wider, once it lies
+    /// far enough past the last node kept in time and along the path.
+    fn keep_if_due(&mut self, sample: TimeSample, base: f64) {
+        let ramp_time = self.ramp_time_at(sample.t);
+        let target =
+            (base * ramp_time / RATIO_RAMP_MIN_TIME_S).max(self.seam_width_at(sample.t, sample.s));
+        let due = self.last_kept.is_none_or(|last| {
+            sample.t >= last.t + 0.5 * last.ramp_time - 0.5 * NODE_SPACING_S
+                && sample.s - last.s >= NODE_SPACING_PER_WIDTH * target.min(last.target)
+        });
+        if due {
+            self.push(sample.s, target);
+            self.last_kept = Some(KeptNode {
+                t: sample.t,
+                s: sample.s,
+                ramp_time,
+                target,
+            });
+        }
     }
 
     /// A floor at `s`: the leaders rest there and nothing after reaches
@@ -484,6 +672,7 @@ impl WidthField {
         }
         self.place_rest(s);
         self.assign(f64::INFINITY);
+        self.closed_seams = self.seams.len();
     }
 
     /// Every ratio step laid has its node, as at a floor: a new rule
@@ -612,8 +801,23 @@ impl WidthField {
         Err((after - 1, after))
     }
 
+    /// The formula of the width at `s`: on a node that has a node past it,
+    /// the interval that node opens, whose derivatives it takes from its
+    /// start; else [`Self::interval`]'s.
+    fn formula_at(&self, s: f64) -> Result<usize, (usize, usize)> {
+        match self.interval(s) {
+            Ok(node)
+                if self.nodes[node].s == s
+                    && self.nodes.get(node + 1).is_some_and(|next| next.s > s) =>
+            {
+                Err((node, node + 1))
+            }
+            interval => interval,
+        }
+    }
+
     fn jet(&self, s: f64) -> Jet {
-        let (a, b) = match self.interval(s) {
+        let (a, b) = match self.formula_at(s) {
             Ok(node) => return Jet::constant(self.nodes[node].envelope),
             Err(interval) => interval,
         };
@@ -822,12 +1026,12 @@ pub(super) struct RatioSmoothing {
     seams: Vec<Seam>,
     base_slope: Option<f64>,
     valleys: Vec<AdvanceValley>,
-    resting: bool,
-    rest_end: f64,
+    open_rest: Option<OpenRest>,
     examined_through: f64,
     floor: f64,
     taken_through: f64,
     reach_into_next: Option<Crossing>,
+    laid_tails: VecDeque<LegTail>,
     backlog: VecDeque<PendingSegment>,
 }
 
@@ -855,6 +1059,7 @@ impl RatioSmoothing {
     pub(super) fn close_at(&mut self, s: f64) {
         self.floor = self.floor.max(s);
         self.reach_into_next = None;
+        self.laid_tails.clear();
         self.close_rest(s, 0.0);
         self.width.close(s);
     }
@@ -862,7 +1067,7 @@ impl RatioSmoothing {
     /// A rest valley opens with no end: the advance reads nothing from its
     /// start on until a leg that moves again closes it.
     fn close_rest(&mut self, end: f64, after: f64) {
-        if !std::mem::take(&mut self.resting) {
+        if self.open_rest.take().is_none() {
             return;
         }
         let valley = self
@@ -875,7 +1080,7 @@ impl RatioSmoothing {
 
     /// Takes in `leg`'s spans: the width nodes it covers, the seams the
     /// table gained with the ramp time `rule` derives for each, and the
-    /// advance valleys its opening seam and a turnaround inside it need.
+    /// advance valleys its opening seam and its slowest point inside need.
     pub(super) fn lay(&mut self, spans: &[RatioSpan], leg: &RampLeg, rule: &RatioRampRule) {
         assert!(
             self.width.rule.is_none_or(|laid| laid == *rule) || self.width.is_settled(),
@@ -895,7 +1100,7 @@ impl RatioSmoothing {
             self.base_slope = Some(spans[0].ratio_slope());
         }
         let (t_start, t_end) = leg.support;
-        let opening = Crossing::at(leaders, t_start);
+        let opening = Crossing::valley_at(leaders, t_start);
         let crossing = self
             .reach_into_next
             .map_or(opening, |closing| closing.common(opening));
@@ -905,33 +1110,52 @@ impl RatioSmoothing {
             self.width.place_rest(seam);
         }
         self.width.extend(leaders, leg, table_end);
-        let closes_a_rest = self.lay_rest_valley(spans, leg, leaders, crossing, table_end);
-        if reach > SPAN_MIN_LEN_MM && !self.resting && !closes_a_rest && crossing.turns_around() {
-            self.lay_turnaround_valley(seam, reach);
+        let closes_a_rest = self.lay_rest_valley(spans, leg, rule, crossing, table_end);
+        if reach > SPAN_MIN_LEN_MM
+            && self.open_rest.is_none()
+            && !closes_a_rest
+            && crossing.needs_valley(rule, peak_ratio_within(spans, seam, reach))
+        {
+            self.lay_valley(seam, reach, crossing.crawl_floor());
         }
-        let turn_inside = (!leg.rests && !self.resting)
-            .then(|| turnaround_inside(leaders, leg, table_end))
+        let slowest = (!leg.rests && self.open_rest.is_none())
+            .then(|| slowest_crawl(leaders, leg, table_end))
             .flatten();
-        if let Some((turn, turn_crossing)) = turn_inside {
+        if let Some((turn, turn_crossing)) = slowest {
             let reach = turn_crossing
                 .reach(VALLEY_RAMP_TIME_S)
                 .min(turn - self.floor);
-            if reach > SPAN_MIN_LEN_MM {
-                self.lay_turnaround_valley(turn, reach);
+            if reach > SPAN_MIN_LEN_MM
+                && turn_crossing.needs_valley(rule, peak_ratio_within(spans, turn, reach))
+            {
+                self.lay_valley(turn, reach, turn_crossing.crawl_floor());
             }
         }
         let new_seams = self.record_seams(spans);
+        self.width.widen_seams_into(leaders, leg.support);
         self.time_seams(&spans[new_seams.start.saturating_sub(1)..], leaders, leg);
+        self.keep_tail(leaders, leg);
         self.width.assign(t_end - TARGET_DELAY_S);
-        self.reach_into_next = Some(Crossing::at(leaders, t_end));
+        self.reach_into_next = Some(Crossing::valley_at(leaders, t_end));
     }
 
-    fn lay_turnaround_valley(&mut self, turn: f64, reach: f64) {
+    /// A valley at `turn`, unless the last one laid sits there already: a
+    /// crawl at a seam is the slowest point of the leg before or after it
+    /// too.
+    fn lay_valley(&mut self, turn: f64, reach: f64, floor: f64) {
+        let laid_there = self
+            .valleys
+            .last()
+            .is_some_and(|valley| (valley.end - turn).abs() <= SPAN_LOOKUP_SLACK_MM);
+        if laid_there {
+            return;
+        }
         self.valleys.push(AdvanceValley {
             start: turn,
             end: turn,
             before: reach.min(self.back_reach_limit(turn)),
             after: reach,
+            floor,
         });
     }
 
@@ -952,7 +1176,9 @@ impl RatioSmoothing {
     }
 
     /// Hands the width field the seams between consecutive `spans`, timed
-    /// where the leaders of `leg` cross them.
+    /// where the leaders of `leg` cross them, with how they cross the ramp
+    /// on either side: within `leg`, and over the tails of the legs before
+    /// it the ramp reaches back into.
     fn time_seams(&mut self, spans: &[RatioSpan], leaders: &ShapedLeaders, leg: &RampLeg) {
         let path = LegPath::of(leaders, leg);
         for pair in spans.windows(2) {
@@ -961,14 +1187,35 @@ impl RatioSmoothing {
                 continue;
             };
             let t = path.time_at(after.s0);
+            let crossing = self
+                .laid_tails
+                .iter()
+                .filter(|tail| tail.until > t - CLUSTER_REACH_S)
+                .fold(
+                    Crossing::over(leaders, ramp_reach_within(t, leg.support)),
+                    |widest, tail| widest.widest(tail.crossing),
+                );
             self.width.add_seam(TimedSeam {
+                s: after.s0,
                 t,
-                crossing: Crossing::across(leaders, t, leg.support.1),
+                crossing,
                 step: seam.step.abs() + (after.r1 - after.r0).abs(),
                 peak_ratio: before.r1.abs().max(after.r0.abs()).max(after.r1.abs()),
                 ramp_time: None,
             });
         }
+    }
+
+    /// Remembers how the leaders of `leg` cross its last half of the longest
+    /// ramp, which a ramp laid on a later leg may reach back into.
+    fn keep_tail(&mut self, leaders: &ShapedLeaders, leg: &RampLeg) {
+        let (t_start, t_end) = leg.support;
+        self.laid_tails
+            .retain(|tail| tail.until > t_end - CLUSTER_REACH_S);
+        self.laid_tails.push_back(LegTail {
+            until: t_end,
+            crossing: Crossing::over(leaders, ((t_end - CLUSTER_REACH_S).max(t_start), t_end)),
+        });
     }
 
     pub(super) fn queue(
@@ -1068,8 +1315,9 @@ impl RatioSmoothing {
 
     /// `X = Ẽ − E` at `s` with its first three path derivatives: the
     /// extrusion, ratio, slope and curvature the smoothing adds to the
-    /// table's, summed over the seams in the window by their moments
-    /// ([`SeamMoments`]).
+    /// table's, summed over the seams in the window and the spans between
+    /// them by their moments ([`SeamMoments`]), and over the spans running
+    /// past its edges ([`edge_spans`]).
     pub(super) fn correction(&self, s: f64) -> Jet {
         if self.is_inert() {
             return Jet::ZERO;
@@ -1085,11 +1333,23 @@ impl RatioSmoothing {
             .map_or(self.base_slope.unwrap_or(0.0), |last| {
                 self.seams[last].slope_after
             });
+        let window = self.seams_near(lo, hi);
         let mut moments = SeamMoments::default();
-        for seam in self.seams[first..].iter().take_while(|seam| seam.s < hi) {
-            moments.add(s - seam.s, seam);
+        for seam in window {
+            moments.add_step(s - seam.s, seam.step);
         }
-        moments.correction(h, slope_left)
+        for pair in window.windows(2) {
+            let (seam, next) = (pair[0], pair[1]);
+            moments.add_span((s - seam.s, s - next.s), seam.slope_after, next.s - seam.s);
+        }
+        let inverse = h.recip();
+        let ends = window
+            .first()
+            .zip(window.last())
+            .map(|(first_seam, last_seam)| {
+                (s - first_seam.s, s - last_seam.s, last_seam.slope_after)
+            });
+        moments.correction(h, inverse) + edge_spans(h, inverse, slope_left, ends)
     }
 
     fn seams_near(&self, lo: f64, hi: f64) -> &[Seam] {
@@ -1302,47 +1562,77 @@ impl RatioSmoothing {
     /// weight above zero hands the advance as a position step. A rest
     /// valley takes in both: it opens at the first, unless one is open
     /// already, and the first leg that moves again closes it at the last.
-    /// Each side spans the shaped spill between that rest and the raw seam
-    /// plus as far as the leaders cover in half the valley ramp time at the
-    /// seam, so the advance keeps its lead through the spill and builds or
-    /// releases it from the rest out. A rest leg the leaders cross without
-    /// coming to rest opens none. Returns whether `leg` closes a rest
-    /// valley.
+    /// Each side spans the shaped spill between that rest and the raw seam,
+    /// over which the advance builds or releases its lead from the rest out,
+    /// and reaches past the seam only where the lead or a ratio step near
+    /// the rest needs it ([`RestSide::width`]). A rest leg the leaders cross
+    /// without coming to rest opens none. Returns whether `leg` closes a
+    /// rest valley.
     fn lay_rest_valley(
         &mut self,
         spans: &[RatioSpan],
         leg: &RampLeg,
-        leaders: &ShapedLeaders,
+        rule: &RatioRampRule,
         crossing: Crossing,
         table_end: f64,
     ) -> bool {
         let seam = leg.start_s;
-        let reach = crossing.reach(VALLEY_RAMP_TIME_S);
+        let leaders = leg.shaped_leaders;
+        let (t_start, t_end) = leg.support;
         if !leg.rests {
-            if !self.resting {
+            let Some(open) = self.open_rest else {
                 return false;
-            }
-            let rest_end = self.rest_end;
-            self.close_rest(rest_end, seam - rest_end + reach);
+            };
+            let side = RestSide {
+                rest: open.end,
+                seam,
+                outward: 1.0,
+                crossing,
+                spill: open.departure,
+                beyond: Crossing::over(leaders, (t_start, (t_start + CLUSTER_REACH_S).min(t_end))),
+            };
+            self.close_rest(open.end, side.width(spans, rule, table_end));
             return true;
         }
         let Some(resting) = resting_stretch(leaders, leg, REST_SPEED_MM_S, table_end) else {
             return false;
         };
-        let (rest_start, rest_end) = ratio_steps_within(spans, seam, table_end)
-            .map_or(resting, |(first_step, last_step)| {
-                (resting.0.min(first_step), resting.1.max(last_step))
-            });
-        if !self.resting {
+        let (rest_start, rest_end) = ratio_steps_within(spans, seam, table_end).map_or(
+            (resting.first_s, resting.last_s),
+            |(first_step, last_step)| {
+                (
+                    resting.first_s.min(first_step),
+                    resting.last_s.max(last_step),
+                )
+            },
+        );
+        if self.open_rest.is_none() {
+            let side = RestSide {
+                rest: rest_start,
+                seam,
+                outward: -1.0,
+                crossing,
+                spill: Spill::over(leaders, (t_start, resting.first_t)),
+                beyond: self
+                    .laid_tails
+                    .iter()
+                    .fold(crossing, |widest, tail| widest.widest(tail.crossing)),
+            };
+            let before = side
+                .width(spans, rule, table_end)
+                .min(rest_start - seam + self.back_reach_limit(seam));
             self.valleys.push(AdvanceValley {
                 start: rest_start,
                 end: f64::INFINITY,
-                before: rest_start - seam + reach.min(self.back_reach_limit(seam)),
+                before,
                 after: 0.0,
+                floor: 0.0,
             });
-            self.resting = true;
         }
-        self.rest_end = rest_end;
+        self.open_rest = Some(OpenRest {
+            end: rest_end,
+            departure: Spill::over(leaders, (resting.last_t, t_end)),
+        });
         false
     }
 
@@ -1379,10 +1669,15 @@ impl RatioSmoothing {
 
 /// A stretch of path where a ratio-ramped advance reads the laid ratio
 /// weighted down to zero: `W = 0` on `[start, end]`, where the leaders'
-/// path speed is zero, and `W = ψ(x) = 1 − (1 − x)³` within
-/// `before`/`after` of it, `x` the distance out over that width, so the
-/// weight rises off the rest with a slope the leaders' zero speed makes
-/// harmless and meets 1 flat to second order. The laid ratio, and so the
+/// path speed is zero or a crawl, and `W = ψ(x) = 1 − (1 − x)³` within
+/// `before`/`after` of it, meeting 1 flat to second order. `x` is the
+/// distance `d` out over that width, both flattened over the valley's
+/// `floor` `f` as `√(d² + f²) − f`: with no floor, where the leaders rest
+/// or turn around, the weight rises off zero with a slope their zero speed
+/// makes harmless; across a crawl at speed `v` and acceleration `a`, the
+/// floor is `v²/a`, about where the acceleration takes over from the
+/// crawl, and the weight leaves zero flat, since `W'·ṡ²` of opposite signs
+/// either side would step the advanced velocity. The laid ratio, and so the
 /// material, is untouched; only the lead the advance builds is released
 /// over the path before and rebuilt after.
 ///
@@ -1390,24 +1685,35 @@ impl RatioSmoothing {
 /// `k·r·W·ṡ` catches up with the advance's `k·r·ṡ` at a rate of at most
 /// `1.653·k·r·a` (the peak of `d/du (u·ψ(u²))`): the advance's natural
 /// rate, overshot by what catching up from zero takes, and over a shaped
-/// start whose acceleration builds from zero, much less.
+/// start whose acceleration builds from zero, much less. A crawl's floor
+/// keeps that, since the leaders cover it within about `v/a`.
 ///
 /// - A turnaround: the leaders' path speed passes through zero at a seam
 ///   while its rate does not, so the rate steps from `−a` to `+a`, and an
 ///   advance reading `r·ṡ` would step the follower's velocity by `2·k·r·a`
 ///   whatever the ratio's own shape. The valley is that seam, each side
 ///   reaching as far as the leaders turn around in half the ramp time.
+/// - A crawl: the leaders' slowest point, under
+///   [`ADVANCE_VALLEY_SPEED_MM_S`], at a seam or inside a leg
+///   ([`slowest_crawl`]). The path speed's second derivative carries the
+///   tangent's turning there, `a⊥²/v`, which an advance would turn into
+///   follower acceleration however the planner bounds the path's own. Only
+///   where that leaves the follower's limit ([`Crossing::needs_valley`]):
+///   releasing the lead asks for some too.
 /// - A rest: an extrude-only move or a dwell, where the shaped leaders come
 ///   to rest between the kernel spill of the move before and of the move
 ///   after, and the fit's back-and-forth near the rest point has its own
 ///   turnarounds and short idle spans an advance would turn into steps. The
-///   valley is the stretch where the leaders rest.
+///   valley is the stretch where the leaders rest, each side spanning the
+///   spill, and past the raw seam only where the lead or a ratio step near
+///   the rest needs it ([`RestSide::width`]).
 #[derive(Debug, Clone, Copy)]
 struct AdvanceValley {
     start: f64,
     end: f64,
     before: f64,
     after: f64,
+    floor: f64,
 }
 
 impl AdvanceValley {
@@ -1430,12 +1736,178 @@ impl AdvanceValley {
         if distance >= width {
             return (1.0, 0.0, 0.0);
         }
-        let inside = 1.0 - distance / width;
+        let floor = self.floor.min(width);
+        let flattened = |d: f64| d * d / (libm::hypot(d, floor) + floor);
+        let spread = libm::hypot(distance, floor);
+        let slope = distance / spread;
+        let bend = floor / spread * (floor / spread) / spread;
+        let span = flattened(width);
+        let inside = 1.0 - flattened(distance) / span;
         (
             1.0 - inside * inside * inside,
-            outward * 3.0 * inside * inside / width,
-            -6.0 * inside / (width * width),
+            outward * 3.0 * inside * inside * slope / span,
+            -6.0 * inside * slope * slope / (span * span) + 3.0 * inside * inside * bend / span,
         )
+    }
+}
+
+/// A rest valley laid up to the last rest leg so far: where the leaders
+/// last rest, and the spill they leave it over.
+#[derive(Debug, Clone, Copy)]
+struct OpenRest {
+    end: f64,
+    departure: Spill,
+}
+
+/// The shaped spill between a raw seam and where the leaders rest beside
+/// it: how long they take over it, and how they cross it.
+#[derive(Debug, Clone, Copy)]
+struct Spill {
+    duration: f64,
+    crossing: Crossing,
+}
+
+impl Spill {
+    fn over(leaders: &ShapedLeaders, (from, until): (f64, f64)) -> Self {
+        Self {
+            duration: until - from,
+            crossing: Crossing::over(leaders, (from, until)),
+        }
+    }
+}
+
+/// One side of a rest valley: where the leaders rest and the raw seam
+/// beside it, `outward` from the rest along the path (−1 before it, 1
+/// after), how they cross that seam, the spill between, and how they
+/// cross the path past the seam the side may reach.
+#[derive(Debug, Clone, Copy)]
+struct RestSide {
+    rest: f64,
+    seam: f64,
+    outward: f64,
+    crossing: Crossing,
+    spill: Spill,
+    beyond: Crossing,
+}
+
+impl RestSide {
+    /// How far from the rest the side spans: the spill, and past the seam
+    /// - as far as the longest ramp reaches where a ratio step within that
+    ///   reach lies so near the rest that the window the width field narrows
+    ///   to there ramps it beyond `rule`'s limits
+    ///   ([`Self::narrows_a_step`]), or where the table does not reach that
+    ///   far yet: the valley keeps the advance from reading it;
+    /// - else nowhere where the shortest ramp `rule` allows for releasing or
+    ///   building the lead of an advance on the ratio there, a step of that
+    ///   whole ratio to the advance, fits within the spill, which then
+    ///   carries the whole lead up to the rest;
+    /// - else as far as the leaders cover at the seam in half that ramp,
+    ///   read as they cross the whole reach. A spill that takes no time — a
+    ///   leader stopping without a kernel, its acceleration stepping at the
+    ///   rest — always reaches out.
+    fn width(self, spans: &[RatioSpan], rule: &RatioRampRule, table_end: f64) -> f64 {
+        let spill_mm = (self.seam - self.rest).abs();
+        let longest = self.crossing.reach(VALLEY_RAMP_TIME_S);
+        let far = self.seam + self.outward * longest;
+        let reach = (self.rest.min(far), self.rest.max(far));
+        if far > table_end || self.narrows_a_step(spans, rule, reach) {
+            return spill_mm + longest;
+        }
+        let ratio = peak_ratio_within(spans, self.seam, spill_mm + longest);
+        let lead_ramp_time = |leaders: Crossing| {
+            rule.ramp_time(&RatioStep {
+                ratio_step: ratio,
+                peak_ratio: ratio,
+                speed_mm_s: leaders.speed,
+                accel_mm_s2: leaders.rate,
+                jerk_mm_s3: leaders.jerk,
+            })
+        };
+        let over_spill = self.crossing.widest(self.spill.crossing);
+        if lead_ramp_time(over_spill) <= self.spill.duration {
+            return spill_mm;
+        }
+        spill_mm
+            + self
+                .crossing
+                .reach(lead_ramp_time(over_spill.widest(self.beyond)))
+    }
+
+    /// Whether the table steps its ratio or its slope inside `(from, to)`
+    /// so near the rest that the width field, whose envelope falls off
+    /// toward the rest by [`ENVELOPE_SLOPE`], ramps the step over less time
+    /// than `rule`'s limits allow as the leaders cross the step's window
+    /// ([`Self::window_crossing`]). The window ramps the ratio the table
+    /// changes within it: the step, and the slopes either side over as much
+    /// of the window as their spans fill.
+    fn narrows_a_step(
+        self,
+        spans: &[RatioSpan],
+        rule: &RatioRampRule,
+        (from, to): (f64, f64),
+    ) -> bool {
+        let first = spans.partition_point(|span| span.s0 <= from).max(1);
+        spans[first - 1..]
+            .windows(2)
+            .take_while(|pair| pair[1].s0 < to)
+            .any(|pair| {
+                let (before, after) = (&pair[0], &pair[1]);
+                let Some(seam) = Seam::between(before, after) else {
+                    return false;
+                };
+                let distance = (seam.s - self.rest).abs();
+                let window = ENVELOPE_SLOPE * distance;
+                let leaders = self.window_crossing(distance + window);
+                if leaders.speed == 0.0 {
+                    return false;
+                }
+                let within_window =
+                    |span: &RatioSpan| span.ratio_slope().abs() * window.min(span.s1 - span.s0);
+                let (velocity, accel) = rule.demand(
+                    2.0 * window / leaders.speed,
+                    &RatioStep {
+                        ratio_step: seam.step.abs() + within_window(before) + within_window(after),
+                        peak_ratio: before.r1.abs().max(after.r0.abs()).max(after.r1.abs()),
+                        speed_mm_s: leaders.speed,
+                        accel_mm_s2: leaders.rate,
+                        jerk_mm_s3: leaders.jerk,
+                    },
+                );
+                velocity > rule.max_velocity_mm_s || accel > rule.max_accel_mm_s2
+            })
+    }
+
+    /// How the leaders cross a step's window reaching `reach` from the
+    /// rest. Into a rest, as they cross the spill, and where the window
+    /// runs past the raw seam, no faster than the most they accelerate past
+    /// it takes them over the overhang `d` from their speed at the seam,
+    /// `√(v² + 2·a·d)`: a step inside the spill is ramped where the leaders
+    /// slow into the rest, not at the speed they cruise far past the seam.
+    /// Out of a rest, at the fastest and most accelerating they cross the
+    /// whole side: the width field's sample grid restarts where the leaders
+    /// leave a standstill, so its first node can lie micrometres past the
+    /// rest, its envelope a sliver of the rest's cone that the smootherstep
+    /// to the next node flattens onto, and a window across the spill can be
+    /// a few thousandths of the envelope's.
+    // TODO: read a leaving spill where the leaders cross it too once the
+    // width field's windows across it follow the envelope.
+    fn window_crossing(self, reach: f64) -> Crossing {
+        let over_spill = self.crossing.widest(self.spill.crossing);
+        let past_seam = over_spill.widest(self.beyond);
+        if self.outward > 0.0 {
+            return past_seam;
+        }
+        let overhang = reach - (self.seam - self.rest).abs();
+        if overhang <= 0.0 {
+            return over_spill;
+        }
+        Crossing {
+            speed: libm::sqrt(
+                over_spill.speed * over_spill.speed + 2.0 * past_seam.rate * overhang,
+            )
+            .min(past_seam.speed),
+            ..past_seam
+        }
     }
 }
 
@@ -1513,6 +1985,21 @@ impl<'l, 'a> LegPath<'l, 'a> {
         }
         hi
     }
+
+    /// Whether the leaders provably stay at `speed` or faster over the
+    /// whole leg, knot interval by knot interval.
+    fn outruns(&self, speed: f64) -> bool {
+        self.grid.windows(2).all(|pair| {
+            self.leaders
+                .speed_floor(
+                    pair[0],
+                    0.5 * (pair[0] + pair[1]),
+                    pair[1],
+                    FloorLeaders::Cached,
+                )
+                .is_some_and(|floor| floor >= speed)
+        })
+    }
 }
 
 /// The shaped leaders' speed along a leg, probed
@@ -1524,8 +2011,7 @@ struct LegSpeed<'l, 'a> {
 }
 
 impl<'l, 'a> LegSpeed<'l, 'a> {
-    fn of(leaders: &'l ShapedLeaders<'a>, leg: &RampLeg, table_end: f64) -> Self {
-        let path = LegPath::of(leaders, leg);
+    fn over(path: LegPath<'l, 'a>, table_end: f64) -> Self {
         let grid = &path.grid;
         let probes = grid
             .windows(2)
@@ -1575,7 +2061,7 @@ impl<'l, 'a> LegSpeed<'l, 'a> {
         let (lo, hi) = self.around(index);
         self.path
             .leaders
-            .speed_floor(lo, self.probes[index], hi)
+            .speed_floor(lo, self.probes[index], hi, FloorLeaders::Every)
             .is_some_and(|floor| floor > rest_speed)
     }
 
@@ -1584,17 +2070,26 @@ impl<'l, 'a> LegSpeed<'l, 'a> {
     }
 }
 
-/// Where along `leg` the shaped leaders rest, first to last: the path at
-/// the first and the last time their speed is down to `rest_speed`, the
-/// minimum of each probe interval refined so that a turnaround, at rest
-/// for an instant only, is found.
+/// Where and when the shaped leaders of a rest leg first and last rest.
+#[derive(Debug, Clone, Copy)]
+struct Resting {
+    first_t: f64,
+    first_s: f64,
+    last_t: f64,
+    last_s: f64,
+}
+
+/// Where along `leg` the shaped leaders rest, first to last: the first and
+/// the last time their speed is down to `rest_speed`, the minimum of each
+/// probe interval refined so that a turnaround, at rest for an instant
+/// only, is found.
 fn resting_stretch(
     leaders: &ShapedLeaders,
     leg: &RampLeg,
     rest_speed: f64,
     table_end: f64,
-) -> Option<(f64, f64)> {
-    let speed = LegSpeed::of(leaders, leg, table_end);
+) -> Option<Resting> {
+    let speed = LegSpeed::over(LegPath::of(leaders, leg), table_end);
     let resting = |t: f64| speed.at(t) <= rest_speed;
     let rest_time = |index: usize| {
         let probe = speed.probes[index];
@@ -1625,9 +2120,14 @@ fn resting_stretch(
         rest
     };
     let grid = &speed.path.grid;
-    let first = edge(grid[0], first);
-    let last = edge(grid[grid.len() - 1], last);
-    Some((speed.path_at(first), speed.path_at(last)))
+    let first_t = edge(grid[0], first);
+    let last_t = edge(grid[grid.len() - 1], last);
+    Some(Resting {
+        first_t,
+        first_s: speed.path_at(first_t),
+        last_t,
+        last_s: speed.path_at(last_t),
+    })
 }
 
 /// The first and the last seam in `[from, to)` where the table's ratio
@@ -1644,30 +2144,30 @@ fn ratio_steps_within(spans: &[RatioSpan], from: f64, to: f64) -> Option<(f64, f
     Some((first, steps.last().unwrap_or(first)))
 }
 
-/// Where inside `leg`, off its seams, the shaped leaders turn around: the
-/// path there and how they cross it. Shaping spreads a raw reversal over
-/// the kernels' support, so where the move into it brakes unlike the move
-/// out of it launches, the shaped velocity passes through zero off the raw
-/// seam, inside either move, where the seam's crossing does not see it.
-/// Such a leg's velocity reverses from one end to the other, and the
-/// turnaround is its slowest point.
-fn turnaround_inside(
+/// Where inside `leg`, off its seams, the shaped leaders are slowest, if
+/// they crawl there ([`Crossing::crawls`]): the path there and how a valley
+/// there reads them. Shaping spreads a raw reversal over the kernels'
+/// support, so where the move into it brakes unlike the move out of it
+/// launches, the shaped velocity passes through zero off the raw seam,
+/// inside either move, where the seam's crossing does not see it; where the
+/// axes are shaped unlike each other it passes a hair beside zero instead.
+/// Such a crawl can hide in the probe interval next to a seam the leaders
+/// cross too fast to crawl there, so that interval is searched as well as
+/// the slowest probe's, however the leg's two seam speeds compare: mirrored
+/// seams tie to rounding, which the clock offset decides. A leg whose every
+/// knot interval, or every searched probe, provably stays faster has none,
+/// and one slowest at an end leaves it to that seam's crossing.
+fn slowest_crawl(
     leaders: &ShapedLeaders,
     leg: &RampLeg,
     table_end: f64,
 ) -> Option<(f64, Crossing)> {
-    let (t_start, t_end) = leg.support;
-    let reverses = (0..leaders.axes.len())
-        .map(|index| leaders.pva(index, t_start).1 * leaders.pva(index, t_end).1)
-        .sum::<f64>()
-        < 0.0;
-    if !reverses
-        || Crossing::at(leaders, t_start).turns_around()
-        || Crossing::at(leaders, t_end).turns_around()
-    {
+    let path = LegPath::of(leaders, leg);
+    if path.outruns(ADVANCE_VALLEY_SPEED_MM_S) {
         return None;
     }
-    let speed = LegSpeed::of(leaders, leg, table_end);
+    let speed = LegSpeed::over(path, table_end);
+    let probe_speed = |index: usize| speed.at(speed.probes[index]);
     let (slowest_probe, _) = speed
         .probes
         .iter()
@@ -1675,11 +2175,36 @@ fn turnaround_inside(
         .enumerate()
         .min_by(|left, right| left.1.total_cmp(&right.1))
         .expect("a leg has probes");
-    let turn = speed.slowest_near(slowest_probe);
-    let crossing = Crossing::at(leaders, turn);
-    crossing
-        .turns_around()
-        .then(|| (speed.path_at(turn), crossing))
+    let last_probe = speed.probes.len() - 1;
+    let next_to_a_fast_seam = [0, last_probe]
+        .into_iter()
+        .filter(|&end| end != slowest_probe && probe_speed(end) >= ADVANCE_VALLEY_SPEED_MM_S);
+    let (turn, _) = std::iter::once(slowest_probe)
+        .chain(next_to_a_fast_seam)
+        .filter_map(|index| {
+            let searched_speed = probe_speed(index);
+            if searched_speed >= ADVANCE_VALLEY_SPEED_MM_S
+                && speed.outruns_rest_near(index, ADVANCE_VALLEY_SPEED_MM_S)
+            {
+                return None;
+            }
+            let turn = speed.slowest_near(index);
+            let turn_speed = speed.at(turn);
+            let at_an_end = (index == 0 || index == last_probe) && turn_speed >= searched_speed;
+            (!at_an_end).then_some((turn, turn_speed))
+        })
+        .min_by(|left, right| left.1.total_cmp(&right.1))?;
+    let crossing = Crossing::valley_at(leaders, turn);
+    crossing.crawls().then(|| (speed.path_at(turn), crossing))
+}
+
+/// The largest extrusion ratio `spans` lay within `reach` of `s`.
+fn peak_ratio_within(spans: &[RatioSpan], s: f64, reach: f64) -> f64 {
+    spans
+        .iter()
+        .filter(|span| span.s1 >= s - reach && span.s0 <= s + reach)
+        .map(|span| span.r0.abs().max(span.r1.abs()))
+        .fold(0.0, f64::max)
 }
 
 /// The time a turnaround's rate takes to build the speed the leaders cross
@@ -1722,22 +2247,38 @@ impl Crossing {
         Self { speed, rate, jerk }
     }
 
-    /// The fastest and the most accelerating the leaders are from `t` on
-    /// over half the longest ramp, as far as `end`: what a ramp laid at `t`
-    /// meets.
-    fn across(leaders: &ShapedLeaders, t: f64, end: f64) -> Self {
-        let until = (t + CLUSTER_REACH_S).min(end).max(t);
-        (0..=CROSSING_PROBES).fold(Self::at(leaders, t), |widest, index| {
-            let probe = Self::at(
-                leaders,
-                t + (until - t) * index as f64 / CROSSING_PROBES as f64,
-            );
+    /// How a valley at `t` reads the leaders crossing it: as [`Self::at`],
+    /// but a crawl, under [`ADVANCE_VALLEY_SPEED_MM_S`], they leave under
+    /// the whole of their acceleration, mostly across the path where they
+    /// nearly reverse, not the path speed's rate at its minimum.
+    fn valley_at(leaders: &ShapedLeaders, t: f64) -> Self {
+        let crossing = Self::at(leaders, t);
+        if crossing.speed < ADVANCE_VALLEY_SPEED_MM_S {
             Self {
-                speed: widest.speed.max(probe.speed),
-                rate: widest.rate.max(probe.rate),
-                jerk: widest.jerk.max(probe.jerk),
+                rate: leaders.motion(t).accel_norm(),
+                ..crossing
             }
+        } else {
+            crossing
+        }
+    }
+
+    /// The fastest and the most accelerating the leaders are over `window`.
+    fn over(leaders: &ShapedLeaders, (from, until): (f64, f64)) -> Self {
+        (0..=CROSSING_PROBES).fold(Self::at(leaders, from), |widest, index| {
+            widest.widest(Self::at(
+                leaders,
+                from + (until - from) * index as f64 / CROSSING_PROBES as f64,
+            ))
         })
+    }
+
+    fn widest(self, other: Self) -> Self {
+        Self {
+            speed: self.speed.max(other.speed),
+            rate: self.rate.max(other.rate),
+            jerk: self.jerk.max(other.jerk),
+        }
     }
 
     /// What both sides of a seam share. A rate on one side only — a leader
@@ -1763,6 +2304,35 @@ impl Crossing {
     /// exact zero, while that rate itself is no rounding.
     fn turns_around(self) -> bool {
         self.rate > 0.0 && self.speed <= self.rate * TURNAROUND_SPEED_TIME_S
+    }
+
+    /// The leaders turn around, or crawl under
+    /// [`ADVANCE_VALLEY_SPEED_MM_S`].
+    fn crawls(self) -> bool {
+        self.turns_around() || self.speed < ADVANCE_VALLEY_SPEED_MM_S
+    }
+
+    /// An advance of `rule`'s slope releases its lead around where the
+    /// leaders turn around, or crawl where reading the path speed through
+    /// at `ratio` would ask the follower for more than its acceleration
+    /// limit: `r·(a + k·s⃛)`, the path speed's second rate carrying the
+    /// tangent's turning `a⊥²/v`. Elsewhere releasing the lead over the
+    /// crawl's short reach would ask more of the follower than the crawl.
+    fn needs_valley(self, rule: &RatioRampRule, ratio: f64) -> bool {
+        self.turns_around()
+            || (self.crawls()
+                && ratio * (self.rate + rule.advance_slope_s * self.jerk) > rule.max_accel_mm_s2)
+    }
+
+    /// The floor a valley here keeps flat (see [`AdvanceValley`]): `v²/a`,
+    /// about where the acceleration takes over from the crawl, and none
+    /// where the leaders turn around.
+    fn crawl_floor(self) -> f64 {
+        if self.turns_around() || self.speed == 0.0 {
+            0.0
+        } else {
+            self.speed * self.speed / self.rate
+        }
     }
 }
 
