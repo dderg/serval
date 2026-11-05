@@ -199,12 +199,16 @@ fn bernstein(coefficients: &[f64]) -> (Controls, f64) {
         len,
     };
     let mut worst_terms = 0.0_f64;
-    for (index, control) in controls.values[..len].iter_mut().enumerate() {
+    for (index, (control, row)) in controls.values[..len].iter_mut().zip(weights).enumerate() {
+        let terms_of = index + 1;
         let mut terms = 0.0;
-        for power in 0..=index {
-            let weight = weights[index][power];
-            *control += weight * on_unit[power];
-            terms += weight * magnitudes[power];
+        for ((&weight, &value), &magnitude) in row[..terms_of]
+            .iter()
+            .zip(&on_unit[..terms_of])
+            .zip(&magnitudes[..terms_of])
+        {
+            *control += weight * value;
+            terms += weight * magnitude;
         }
         worst_terms = worst_terms.max(terms);
     }
