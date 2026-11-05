@@ -2579,6 +2579,26 @@ post_processors: extruder_pa, extruder_smoothing
 #   unset is inherited from max_extrude_only_velocity /
 #   max_extrude_only_accel (the same motor). An advance needs both, set or
 #   inherited.
+#   On the [extruder] axis max_accel is the extruder motor&#39;s
+#   pressure-advance-capable acceleration: the filament acceleration the
+#   drive follows without skipping while the advance adds k times the
+#   path&#39;s jerk to every corner and curve. It is a property of the drive,
+#   not of the print, so set it explicitly rather than inheriting the
+#   extrude-only cap, which only ever had to cover retracts and primes. A
+#   value below what the motor can do costs print time at every corner; a
+#   value above it skips steps. A direct drive typically follows 20000 or
+#   more. A bowden drive pushes the whole filament column against the
+#   tube&#39;s friction and the nozzle&#39;s back pressure, mostly through an
+#   ungeared drive gear, and is lower; 5000 is a safe start for an
+#   Ender-3-class bowden (with k around 0.5, upstream Klipper&#39;s default
+#   40 ms advance smoothing already asks about 4400 at its corners). To
+#   find the drive&#39;s value, print a pressure advance calibration pattern
+#   (or any part with sharp corners and fast perimeters) at the tuned k,
+#   raising max_accel between prints (it is read at restart). Stop at the
+#   first print that shows any of: clicks or knocks from the extruder,
+#   under-extrusion or gaps right after corners, or layer lines whose
+#   width shifts from layer to layer; set max_accel 20-30% below the last
+#   clean value.
 #instantaneous_corner_velocity: 1.0
 #   Optional, on an axis that follows others. Default is 1.0, as upstream
 #   Klipper&#39;s [extruder] option. Must be above 0 (mm/s). The velocity
