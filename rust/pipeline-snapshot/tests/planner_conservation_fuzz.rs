@@ -782,3 +782,39 @@ fn an_extruding_sliver_between_a_travel_and_a_dwell_plans() {
         last[E_AXIS]
     );
 }
+
+/// Shrunk from `the_extruder_lays_its_ratio_along_the_path_the_toolhead_travels`
+/// (seed 9eaa5afb in `proptest-regressions`): a dwell parks the leaders on
+/// the ratio table's seam at 1 mm, and a sub-micron jog folded into the
+/// next line leaves the table a rounding-sized slope past it. No window
+/// reaches the seam where the leaders rest on it, so the smoothing claimed
+/// it touched nothing there and seeded no break at the width's nodes,
+/// while every window past the seam read a smoothed formula on that slope
+/// whose width interval changes at them: the follower source had no model
+/// across the node and the shaper refused the print.
+#[test]
+fn a_slope_left_by_a_seam_the_leaders_rest_on_breaks_the_source_at_the_width_nodes() {
+    let limits = Limits {
+        max_velocity: 20.0,
+        max_accel: 500.0,
+        square_corner_velocity: 5.0,
+    };
+    let step = |heading, length_mm, feed_mm_s, dwell_before_s| Step {
+        heading,
+        length_mm,
+        feed_mm_s,
+        extrude_ratio: 0.0,
+        dwell_before_s,
+    };
+    let steps = vec![
+        step(0.0, 1.0, 100.00430058044448, None),
+        step(std::f64::consts::PI, 1.0, 1.0, Some(0.001)),
+        step(3.2714594708031672, 0.0007617348134561052, 1.0, None),
+        step(0.0, 4.293214964430342, 1.0, None),
+        step(0.0, 1.0, 1.0, None),
+    ];
+    plan(
+        limits,
+        &waypoints(&uniform_ratio(steps, 0.06535562025042713)),
+    );
+}
