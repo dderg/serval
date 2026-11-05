@@ -638,13 +638,6 @@ fn seed_seam_velocities(
                 up.accel.max(dn.accel),
                 budgets[k].rest_room_mm,
             );
-            if std::env::var("BS_DBG").is_ok() && step_ceiling.is_finite() {
-                eprintln!(
-                    "BSPLAN line={} v={:.3} step_ceiling={:.3} up_accel={:.1} dn_accel={:.1} room={:.3}",
-                    moves[k].source.start_line, v[k], step_ceiling, up.accel, dn.accel,
-                    budgets[k].rest_room_mm
-                );
-            }
             if step_ceiling < v[k] {
                 report.ratio_step_bound += 1;
                 v[k] = step_ceiling;
