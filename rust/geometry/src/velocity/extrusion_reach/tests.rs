@@ -140,15 +140,17 @@ fn the_ramp_spreads_at_the_fastest_speed_the_leaders_reach_nearby() {
     );
 }
 
+/// Its holds keep an extrude-only move between motion longer than the
+/// spill, however brief its own motion, so the extrusion beyond it never
+/// reaches the move on the other side.
 #[test]
-fn a_rest_that_outlasts_the_spill_keeps_the_extrusion_beyond_it_out_of_reach() {
-    let moves = stream(&[(10.0, 0.0, 150.0), (0.0, 1.0, 40.0), (10.0, RATIO, 150.0)]);
-    assert!(least_rest_to_rest_time(1.0, 40.0, 5000.0) > SPILL_S);
-    assert_ratios(&batch(&moves), &[0.0, 0.0, RATIO]);
-    let brief = 0.001;
-    assert!(least_rest_to_rest_time(brief, 40.0, 5000.0) < SPILL_S);
-    let moves = stream(&[(10.0, 0.0, 150.0), (0.0, brief, 40.0), (10.0, RATIO, 150.0)]);
-    assert_ratios(&batch(&moves), &[RATIO, 0.0, RATIO]);
+fn a_rest_keeps_the_extrusion_beyond_it_out_of_reach() {
+    for filament in [1.0, 0.001] {
+        let moves = stream(&[(10.0, 0.0, 150.0), (0.0, filament, 40.0), (10.0, RATIO, 150.0)]);
+        assert_ratios(&batch(&moves), &[0.0, 0.0, RATIO]);
+    }
+    let brief = least_rest_to_rest_time(0.001, 40.0, 5000.0);
+    assert!(brief < SPILL_S && brief + 2.0 * KERNEL_REACH_S >= SPILL_S);
 }
 
 #[test]

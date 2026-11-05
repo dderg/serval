@@ -336,8 +336,9 @@ impl Marks {
 
     /// The largest ratio on one side of `marks[index]` its demand meets:
     /// over the marks the leaders reach within the spill, then over the
-    /// path a ramp `ramp_mm` wide lays beyond where the spill ends, up to
-    /// the first rest. `None` while moves still to come could add to it.
+    /// path a ramp `ramp_mm` wide lays beyond where the spill ends, both up
+    /// to the first rest, which the rest holds keep the shaped path still
+    /// across. `None` while moves still to come could add to it.
     fn ratio_beside(
         &self,
         index: usize,
@@ -356,6 +357,9 @@ impl Marks {
         let mut in_spill = true;
         for other in self.beside(index, ahead) {
             if in_spill {
+                if other.rest {
+                    return Some(ratio);
+                }
                 ratio = ratio.max(other.ratio_on(reach.axis));
                 let spill_left_s = reach.spill_s - elapsed;
                 elapsed += other.least_time_s;
