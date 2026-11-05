@@ -326,7 +326,8 @@ pub(crate) enum SeamContinuity {
 /// carries enough signal for a rung solved from endpoint *acceleration* to
 /// mean anything. Below it the quintic base and its bump corrections read
 /// sampling noise amplified by `(2/h)²`, so only the cubic — which never
-/// touches endpoint acceleration — is attempted.
+/// touches endpoint acceleration — is accepted from the ladder's probes; a
+/// ladder that ranks its rungs ([`ladder_fit`]) still ranks every degree.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LadderPolicy {
     pub velocity_sign: VelocitySign,
@@ -592,6 +593,12 @@ fn worst_miss(
     }
 }
 
+/// The first rung `candidate_ok` accepts, or the closest of them all. A
+/// span whose closest rung stands is never split again, so every degree is
+/// ranked whatever `high_degree_span_floor`: the acceleration a short
+/// high-degree rung reads off its noisy endpoints is the miss no shorter
+/// span would resolve either, while across the shoulder of a square-root
+/// onset its position and velocity hold where the quintic's cannot.
 pub(crate) fn ladder_fit(
     base: &[f64],
     span: LadderSpan,
@@ -599,8 +606,12 @@ pub(crate) fn ladder_fit(
     budget: LadderBudget,
     policy: LadderPolicy,
 ) -> Result<Vec<f64>, LadderMiss> {
+    let ranks_every_degree = LadderPolicy {
+        high_degree_span_floor: 0.0,
+        ..policy
+    };
     let mut closest: Option<(f64, f64, Vec<f64>)> = None;
-    let accepted = climb(base, span, truth, budget, policy, |errors| {
+    let accepted = climb(base, span, truth, budget, ranks_every_degree, |errors| {
         let (probe, score) = worst_miss(errors, span.h, truth, budget);
         if closest
             .as_ref()
