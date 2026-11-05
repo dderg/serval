@@ -17,9 +17,10 @@ def make_repo(tmp_path):
     for key, value in (("user.email", "t@t"), ("user.name", "t")):
         git(repo, "config", key, value)
     (repo / ".githooks").mkdir()
-    hook = INSTALL.parent.parent / ".githooks" / "reference-transaction"
-    (repo / ".githooks" / "reference-transaction").write_text(hook.read_text())
-    (repo / ".githooks" / "reference-transaction").chmod(0o755)
+    for name in ("reference-transaction", "post-checkout"):
+        hook = INSTALL.parent.parent / ".githooks" / name
+        (repo / ".githooks" / name).write_text(hook.read_text())
+        (repo / ".githooks" / name).chmod(0o755)
     (repo / "scripts").mkdir()
     (repo / "scripts" / "install-git-guards.sh").write_text(INSTALL.read_text())
     (repo / "f").write_text("a")
@@ -84,3 +85,27 @@ def test_the_installer_is_idempotent(tmp_path):
     assert (
         again.returncode == 0 and "installed" not in again.stderr + again.stdout
     )
+
+
+def test_a_plain_worktree_add_prints_the_wt_sh_nudge_but_succeeds(tmp_path):
+    repo = make_repo(tmp_path)
+    other = tmp_path / "serval-topic"
+    result = git(
+        repo, "worktree", "add", str(other), "-b", "topic", check=False
+    )
+    assert result.returncode == 0
+    assert "wt.sh new" in result.stderr
+
+
+def test_a_pool_or_scratch_worktree_is_not_nagged(tmp_path):
+    repo = make_repo(tmp_path)
+    for name in ("serval-pool-9", "scratch"):
+        result = git(
+            repo,
+            "worktree",
+            "add",
+            "--detach",
+            str(tmp_path / name),
+            check=False,
+        )
+        assert result.returncode == 0 and "wt.sh" not in result.stderr

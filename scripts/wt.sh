@@ -40,6 +40,7 @@ next_pool_path() {
 new_topic() {
     local topic="${1:?usage: wt.sh new <topic> [--base REF]}"; shift
     "$(dirname "$0")/install-git-guards.sh" >&2
+    "$(dirname "$0")/guard-main-checkout.sh" apply >&2 || true
     python3 "$(dirname "$0")/gc_caches.py" --if-free-below "${WT_GC_BELOW_GB:-100}" --apply >&2 || true
     local base="origin/main"
     if [ "${1:-}" = "--base" ]; then base="${2:?--base needs a ref}"; fi
