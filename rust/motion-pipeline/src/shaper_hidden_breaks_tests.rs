@@ -132,8 +132,8 @@ const BRAKE_MM_S2: f64 = 3_000.0;
 /// acceleration a few nanometres per second squared.
 const CRUISE_FIT_RESIDUE: f64 = 1e-5;
 
-/// A cruise until `BREAK_S`, then a brake.
-fn cruise_then_brake() -> nurbs::ScalarNurbs {
+/// A cruise until `BREAK_S`, then an acceleration of `accel` from it.
+fn cruise_then(accel: f64) -> nurbs::ScalarNurbs {
     bezier_pieces_to_nurbs(&[
         BezierPiece {
             u_start: 0.0,
@@ -146,7 +146,7 @@ fn cruise_then_brake() -> nurbs::ScalarNurbs {
             coeffs: vec![
                 CRUISE_MM_S * BREAK_S + CRUISE_FIT_RESIDUE * BREAK_S.powi(6),
                 CRUISE_MM_S + 6.0 * CRUISE_FIT_RESIDUE * BREAK_S.powi(5),
-                -0.5 * BRAKE_MM_S2,
+                0.5 * accel,
                 0.0,
                 0.0,
                 0.0,
@@ -156,35 +156,47 @@ fn cruise_then_brake() -> nurbs::ScalarNurbs {
     ])
 }
 
-/// The image where the shaped signal leaves a cruise stays a seed however
-/// close to the last one: a piece across it would let the velocity wander
-/// where the plan holds it, past the limit where the plan cruises at it.
-#[test]
-fn the_image_where_the_shaped_signal_leaves_a_cruise_stays_a_seed() {
+/// The seeds kept of the image of `BREAK_S` under the kernel's first cut
+/// and two seeds half the minimum span either side of it, beside those
+/// three.
+fn seeds_around_the_first_cut_image(track: &nurbs::ScalarNurbs) -> (Vec<f64>, Vec<f64>) {
     let kernel = build_smooth_zv_kernel(44.0);
-    let track = cruise_then_brake();
     let source = ShapedSignalSource::new(
         &kernel,
-        table_over(&track, 0.0, 2.0 * BREAK_S),
+        table_over(track, 0.0, 2.0 * BREAK_S),
         track.knots().to_vec(),
         0.0,
     );
     let breaks = &source.shaped_breaks;
     let (k_lo, _) = kernel.support();
-    let leaving_cruise = *breaks
+    let image = *breaks
         .times()
         .iter()
         .find(|&&t| (t - (BREAK_S + k_lo)).abs() < 1e-12)
         .expect("the break's images are shaped breaks");
     let close = 0.5 * breaks.minimum_span;
-    assert_eq!(
-        breaks.select_seeds(
-            vec![leaving_cruise - close, leaving_cruise, leaving_cruise + close],
-            source.hidden_break_input(),
-            FIT_TOL,
-        ),
-        vec![leaving_cruise - close, leaving_cruise, leaving_cruise + close]
-    );
+    let offered = vec![image - close, image, image + close];
+    (
+        breaks.select_seeds(offered.clone(), source.hidden_break_input(), FIT_TOL),
+        offered,
+    )
+}
+
+/// The image where the shaped signal leaves a cruise stays a seed however
+/// close to the last one: a piece across it would let the velocity wander
+/// where the plan holds it, past the limit where the plan cruises at it.
+#[test]
+fn the_image_where_the_shaped_signal_leaves_a_cruise_stays_a_seed() {
+    let (kept, offered) = seeds_around_the_first_cut_image(&cruise_then(-BRAKE_MM_S2));
+    assert_eq!(kept, offered);
+}
+
+/// A break the cruise runs through bounds no cruise, and its image is left
+/// to the fit within the minimum span.
+#[test]
+fn the_image_of_a_break_inside_a_cruise_is_left_to_the_fit() {
+    let (kept, offered) = seeds_around_the_first_cut_image(&cruise_then(0.0));
+    assert_eq!(kept, vec![offered[0], offered[2]]);
 }
 
 /// A box kernel turns an input position step into a velocity step of the

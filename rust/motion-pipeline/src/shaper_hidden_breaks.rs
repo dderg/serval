@@ -250,22 +250,28 @@ impl ShapedBreaks {
     /// Whether the shaped signal enters or leaves an exact cruise at
     /// `image`: the input holds its velocity past its break and the
     /// kernel's last cut closes the window behind it, or the input holds it
-    /// before the break and the first cut opens the window onto it.
+    /// before the break and the first cut opens the window onto it. A
+    /// break the cruise runs through, between two pieces holding one
+    /// velocity, bounds none.
     fn bounds_cruise(&self, input: &AxisSignalTable, image: KernelImage, fit_tol: FitTol) -> bool {
-        let cruises = |piece: usize| {
-            acceleration_bound(input, piece) <= CRUISE_ACCELERATION_SHARE * fit_tol.accel_mm_s2
-        };
+        let held_accel = CRUISE_ACCELERATION_SHARE * fit_tol.accel_mm_s2;
+        let cruises = |piece: usize| acceleration_bound(input, piece) <= held_accel;
         let after = input
             .starts
             .partition_point(|&start| start < image.input_break);
-        let enters = image.cut == self.kernel_jumps.len() - 1
-            && input.starts.get(after) == Some(&image.input_break)
-            && cruises(after);
-        let leaves = image.cut == 0
-            && after > 0
-            && input.ends[after - 1] == image.input_break
-            && cruises(after - 1);
-        enters || leaves
+        let starts_here = input.starts.get(after) == Some(&image.input_break);
+        let ends_here = after > 0 && input.ends[after - 1] == image.input_break;
+        let enters = image.cut == self.kernel_jumps.len() - 1 && starts_here && cruises(after);
+        let leaves = image.cut == 0 && ends_here && cruises(after - 1);
+        let cruise_runs_through = starts_here
+            && ends_here
+            && cruises(after - 1)
+            && cruises(after)
+            && input_jumps_at(input, image.input_break).is_some_and(|jumps| {
+                jumps.orders[1].abs()
+                    <= held_accel * (input.ends[after] - input.starts[after - 1])
+            });
+        (enters || leaves) && !cruise_runs_through
     }
 }
 
