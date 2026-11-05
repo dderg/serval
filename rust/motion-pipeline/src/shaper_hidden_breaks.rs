@@ -27,19 +27,21 @@
 //! (`shaper_hull`), which follow every break inside a span, so no image
 //! needs a seed for a piece to hold the tolerance, and every piece is held
 //! to the whole of it. The partition is left to the fit, which halves a span
-//! no rung fits. Three kinds of image stay seeds:
+//! no rung fits. Four kinds of image stay seeds:
 //!
 //! - one that may carry a velocity step wide enough for a resolution floor
 //!   to call it a velocity break, a knot the plan must anchor: a `J₁` past
 //!   the acceleration tolerance carried across the narrowest floor, or
 //!   jumps that are not known — an image of more than one pair, of a clamp
 //!   edge, or of an input the table alone does not describe;
-//! - one where the shaped signal enters or leaves an exact cruise, rest
-//!   included: the image of a break into an input holding its velocity
-//!   under the kernel's last cut, or out of one under its first. A piece
-//!   across it could only approximate the cruise, its velocity wandering
-//!   within tolerance where the plan holds it, and past the limit where
-//!   the plan cruises at it;
+//! - one where the shaped signal enters or leaves exact rest: the image of
+//!   a break into a resting input under the kernel's last cut, or out of
+//!   one under its first. A piece across it could only approximate the
+//!   rest, moving within tolerance where nothing moves;
+//! - one where it enters or leaves a cruise the same way, past a break
+//!   the input changes its velocity at. A piece across it could only
+//!   approximate the cruise, its velocity wandering within tolerance where
+//!   the plan holds it, and past the limit where the plan cruises at it;
 //! - the first image at least `minimum_span` past the last seed. Halving a
 //!   span across many images pays a ladder per level for rungs that cannot
 //!   reach across it, so the seeds cut a target into spans a rung usually
@@ -230,7 +232,8 @@ impl ShapedBreaks {
         for &t in interior {
             let last_kept = *kept.last().expect("kept seeds start with the first");
             let anchors = self.image_at(t).is_none_or(|image| {
-                self.bounds_cruise(input, image, fit_tol)
+                self.bounds_rest(input, image)
+                    || self.bounds_cruise(input, image, fit_tol)
                     || self
                         .image_jumps(input, image)
                         .is_none_or(|jumps| !jumps.below_any_velocity_break(fit_tol))
@@ -247,31 +250,55 @@ impl ShapedBreaks {
         Some(input_jumps_at(input, image.input_break)?.image_through(self.kernel_jumps[image.cut]))
     }
 
-    /// Whether the shaped signal enters or leaves an exact cruise at
-    /// `image`: the input holds its velocity past its break and the
-    /// kernel's last cut closes the window behind it, or the input holds it
-    /// before the break and the first cut opens the window onto it. A
-    /// break the cruise runs through, between two pieces holding one
-    /// velocity, bounds none.
+    /// Whether the shaped signal enters or leaves exact rest at `image`.
+    fn bounds_rest(&self, input: &AxisSignalTable, image: KernelImage) -> bool {
+        self.bounds_hold(input, image, |piece| {
+            input.coeffs[piece][1..].iter().all(|&c| c == 0.0)
+        })
+    }
+
+    /// Whether the shaped signal enters or leaves a cruise at `image`: the
+    /// input holds its velocity on one side of its break and changes it
+    /// there. A break the cruise runs through, between two pieces holding
+    /// one velocity, bounds none.
     fn bounds_cruise(&self, input: &AxisSignalTable, image: KernelImage, fit_tol: FitTol) -> bool {
         let held_accel = CRUISE_ACCELERATION_SHARE * fit_tol.accel_mm_s2;
         let cruises = |piece: usize| acceleration_bound(input, piece) <= held_accel;
+        let right = input
+            .starts
+            .partition_point(|&start| start < image.input_break);
+        let cruise_runs_through = right > 0
+            && right < input.starts.len()
+            && cruises(right - 1)
+            && cruises(right)
+            && input_jumps_at(input, image.input_break).is_some_and(|jumps| {
+                jumps.orders[1].abs()
+                    <= held_accel * (input.ends[right] - input.starts[right - 1])
+            });
+        !cruise_runs_through && self.bounds_hold(input, image, cruises)
+    }
+
+    /// Whether the shaped signal enters or leaves a stretch the input
+    /// `holds` at `image`: the input holds it past its break and the
+    /// kernel's last cut closes the window behind it, or it holds it before
+    /// the break and the first cut opens the window onto it.
+    fn bounds_hold(
+        &self,
+        input: &AxisSignalTable,
+        image: KernelImage,
+        holds: impl Fn(usize) -> bool,
+    ) -> bool {
         let after = input
             .starts
             .partition_point(|&start| start < image.input_break);
-        let starts_here = input.starts.get(after) == Some(&image.input_break);
-        let ends_here = after > 0 && input.ends[after - 1] == image.input_break;
-        let enters = image.cut == self.kernel_jumps.len() - 1 && starts_here && cruises(after);
-        let leaves = image.cut == 0 && ends_here && cruises(after - 1);
-        let cruise_runs_through = starts_here
-            && ends_here
-            && cruises(after - 1)
-            && cruises(after)
-            && input_jumps_at(input, image.input_break).is_some_and(|jumps| {
-                jumps.orders[1].abs()
-                    <= held_accel * (input.ends[after] - input.starts[after - 1])
-            });
-        (enters || leaves) && !cruise_runs_through
+        let enters = image.cut == self.kernel_jumps.len() - 1
+            && input.starts.get(after) == Some(&image.input_break)
+            && holds(after);
+        let leaves = image.cut == 0
+            && after > 0
+            && input.ends[after - 1] == image.input_break
+            && holds(after - 1);
+        enters || leaves
     }
 }
 
