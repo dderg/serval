@@ -40,13 +40,13 @@ Run from the repo root.
 
 ```
 uv run python tools/bench/deploy.py sync [--tree DIR]  # rsync a worktree (default: this one) to Pi ~/klipper, delete stale, build-native.sh if rust/ changed, restart klipper, write ~/klipper/.bench-deploy.json
-uv run python tools/bench/deploy.py reset-target   # SWD-reset the F401 (for an MCU that no longer answers; a latched shutdown is already cleared by the FIRMWARE_RESTART that restart_klipper/prepare_printer send when klippy settles in shutdown), restart klipper
+uv run python tools/bench/deploy.py reset-target   # SWD-reset the F401 (for an MCU that no longer answers; a latched shutdown is already cleared by the FIRMWARE_RESTART that restart_klipper/prepare_printer send when klippy settles in shutdown), restart klipper, then `mco` (MCO1 on, DBGMCU_CR back to 0)
 uv run python tools/bench/lock.py hold -- <cmd...> # run a multi-step session under the bench lock
 uv run python tools/bench/suite.py [--quick] [--expect-fail NAME]  # regression matrix: sync + 9 runs (3 with --quick) + analyze, table, ~/bench/suites/<ts>/summary.json
-uv run python tools/bench/deploy.py flash-target   # build F401 fw (f401.config) in out/bench-f401, flash via Pi SWD, restart klippy, check the reported build id
+uv run python tools/bench/deploy.py flash-target   # build F401 fw (f401.config) in out/bench-f401, flash via Pi SWD, restart klippy, check the reported build id, then `mco` (MCO1 on, DBGMCU_CR back to 0)
 uv run python tools/bench/deploy.py flash-capture  # build capture-fw in its own target/, flash F407 via ST-Link, check the reported build id
 uv run python tools/bench/deploy.py config         # validate + push printer.cfg, FIRMWARE_RESTART
-uv run python tools/bench/deploy.py mco            # MCO1 = HSE/4 on PA8; halts the F401 core for a few ms (capture-fw/PHASE2.md §3)
+uv run python tools/bench/deploy.py mco            # MCO1 = HSE/4 on PA8; halts the F401 core for a few ms and leaves DBGMCU_CR (sleep-debug bits) at 0 (capture-fw/PHASE2.md §3)
 uv run python tools/bench/run.py <gcode> [--runs-dir ~/bench/runs] [--timeout 1800] [--events [--step-tap]] [--sim configs/full.sim.json --config configs/full.cfg]
 uv run python tools/bench/analyze.py <run_dir> [--gap S] [--corner-flow] [--step-benchmark PULSED,BOTH_EDGE,CLOCK_HZ]
 uv run python tools/bench/capture.py --help        # standalone capture (--events for event mode)

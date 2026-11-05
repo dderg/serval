@@ -254,7 +254,7 @@ def cmd_flash_target(tree: Path) -> None:
     pi.record_firmware(TARGET_BOARD, firmware_identity(tree, build_id, elf))
     halt_ms = pi.enable_mco()
     print(
-        f"target flashed with firmware {build_id}, MCO1 on "
+        f"target flashed with firmware {build_id}, MCO1 on, DBGMCU_CR 0 "
         f"(core halted {halt_ms} ms), printer ready"
     )
 
@@ -268,12 +268,15 @@ def cmd_reset_target() -> None:
     wait_pi_serial()
     pi.restart_klipper()
     halt_ms = pi.enable_mco()
-    print(f"target reset, MCO1 on (core halted {halt_ms} ms), printer ready")
+    print(
+        f"target reset, MCO1 on, DBGMCU_CR 0 (core halted {halt_ms} ms), "
+        "printer ready"
+    )
 
 
 def cmd_mco() -> None:
     halt_ms = pi.enable_mco()
-    print(f"F401 MCO1 = HSE/4 on PA8 (core halted {halt_ms} ms)")
+    print(f"F401 MCO1 = HSE/4 on PA8, DBGMCU_CR 0 (core halted {halt_ms} ms)")
 
 
 def cmd_flash_capture(tree: Path) -> None:
