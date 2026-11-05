@@ -40,7 +40,7 @@ use hull::{FittedPiece, HullBudget};
 use taylor::{Ball, TaylorModel};
 
 pub(crate) use exact::{ExactConvolution, ExactKernel, ExactPiece};
-pub(crate) use hidden_breaks::ShapedBreaks;
+pub(crate) use hidden_breaks::{CruiseEnds, ShapedBreaks};
 
 /// A signal's enclosure over a stretch: a slice of one the signal keeps,
 /// borrowed for the asking, or one built for it.
@@ -2163,8 +2163,14 @@ fn fit_axis_targets(
     let seed_sets = targets
         .iter()
         .map(|target| {
-            fit_seed_times(axis, target.t_start, target.t_end, shaped_times)
-                .map(|seeds| shaped_breaks.select_seeds(seeds, hidden_break_input, fit_tol))
+            fit_seed_times(axis, target.t_start, target.t_end, shaped_times).map(|seeds| {
+                shaped_breaks.select_seeds(
+                    seeds,
+                    hidden_break_input,
+                    fit_tol,
+                    CruiseEnds::LeftToTheFit,
+                )
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut scale_times = seed_sets.iter().flatten().copied().collect::<Vec<_>>();
@@ -3985,6 +3991,7 @@ fn fit_leader_target<S: TrackSignal>(
         fit_seed_times(fit.axis, fit.t_start, fit.t_end, fit.seed_breakpoints)?,
         hidden_break_input,
         fit.fit_tol,
+        CruiseEnds::LeftToTheFit,
     );
     let plan = plan_over_seeds(&fit, sig, seeds)?;
     fit_pieces_over_plan(&fit, sig, plan, true)

@@ -14,10 +14,10 @@ use trajectory::{
 
 use crate::lowering::{AccelBudget, FitTol, SeamContinuity, riding_tol_scale};
 use crate::shaper::{
-    AxisFit, AxisSignalTable, ConvolutionSignal, Enclosure, ExactConvolution, ExactKernel,
-    FitBoundary, Lookahead, SEGMENT_TIME_EPS_S, ShapedBreaks, ShiftedTrackSignal, SignalBounds,
-    TrackSignal, apply_derivative_gains_to_track, fit_axis_from_signal, fit_resolution,
-    fit_seed_times, unit_kernel_mass,
+    AxisFit, AxisSignalTable, ConvolutionSignal, CruiseEnds, Enclosure, ExactConvolution,
+    ExactKernel, FitBoundary, Lookahead, SEGMENT_TIME_EPS_S, ShapedBreaks, ShiftedTrackSignal,
+    SignalBounds, TrackSignal, apply_derivative_gains_to_track, fit_axis_from_signal,
+    fit_resolution, fit_seed_times, unit_kernel_mass,
 };
 use crate::types::PostProcessError;
 use crate::worker_pool::WorkerPool;
@@ -1240,6 +1240,7 @@ impl KernelFit<'_> {
                 )?,
                 Some(&table),
                 target_tol,
+                CruiseEnds::Anchored,
             );
             let (local_base, pieces, target_us) = fit_kernel_window(
                 axis,

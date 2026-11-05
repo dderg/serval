@@ -76,6 +76,18 @@ class Failure:
     def target(self) -> str:
         return self.binary.split("::")[-1]
 
+    @property
+    def in_library(self) -> bool:
+        return "::" not in self.binary
+
+    @property
+    def target_args(self) -> list[str]:
+        return ["--lib"] if self.in_library else ["--test", self.target]
+
+    @property
+    def module_path(self) -> list[str]:
+        return self.test.split("::")[:-1]
+
 
 def clean(text: str) -> list[str]:
     return [ANSI.sub("", line) for line in text.splitlines()]
@@ -171,7 +183,7 @@ def repro_command(failure: Failure) -> str:
     env = f"PROPTEST_RNG_SEED={value} " if kind == "rng" else ""
     return (
         f"{env}PROPTEST_CASES={cases_for(failure)} cargo nextest run -p {failure.package} "
-        f"--test {failure.target} -E 'test(={failure.test})'"
+        f"{' '.join(failure.target_args)} -E 'test(={failure.test})'"
     )
 
 
@@ -211,12 +223,27 @@ def scratch_main(rev: str = "origin/main") -> Path:
     return tree
 
 
-def regression_file(tree: Path, failure: Failure) -> Path | None:
-    found = sorted(tree.glob(f"rust/*/tests/{failure.target}.rs"))
-    if len(found) != 1:
+def library_source(crate: Path, module_path: list[str]) -> Path | None:
+    if not module_path:
         return None
-    declared = PERSISTENCE_PATH.search(found[0].read_text())
-    return found[0].parents[1] / declared.group(1) if declared else None
+    stem = crate.joinpath("src", *module_path)
+    candidates = [stem.with_suffix(".rs"), stem / "mod.rs"]
+    return next((c for c in candidates if c.is_file()), None)
+
+
+def regression_file(tree: Path, failure: Failure) -> Path | None:
+    if failure.in_library:
+        crate = tree / "rust" / failure.package
+        source = library_source(crate, failure.module_path)
+        root = crate
+    else:
+        found = sorted(tree.glob(f"rust/*/tests/{failure.target}.rs"))
+        source = found[0] if len(found) == 1 else None
+        root = source.parents[1] if source else None
+    if source is None:
+        return None
+    declared = PERSISTENCE_PATH.search(source.read_text())
+    return root / declared.group(1) if declared else None
 
 
 def fails_on_main(failure: Failure, rev: str = "origin/main") -> bool | None:
@@ -240,8 +267,7 @@ def fails_on_main(failure: Failure, rev: str = "origin/main") -> bool | None:
                 "run",
                 "-p",
                 failure.package,
-                "--test",
-                failure.target,
+                *failure.target_args,
                 "--profile",
                 "ci",
                 "-E",
@@ -369,8 +395,8 @@ def triage(branch: str, run_id: str) -> int:
                     if behind
                     else f"; this PR broke {failure.binary} {failure.test}"
                 )
-                + f"\n  repro: add 'cc {failure.seed}' to the crate's proptest-regressions/"
-                f"{failure.target}.txt, then {repro_command(failure)}",
+                + f"\n  repro: add 'cc {failure.seed}' to the suite's proptest-regressions file, "
+                f"then {repro_command(failure)}",
                 file=sys.stderr,
             )
             return REGRESSION_EXIT
