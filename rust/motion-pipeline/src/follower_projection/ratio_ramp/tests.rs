@@ -1677,3 +1677,54 @@ fn a_rest_side_reads_a_long_ramp_by_its_change_within_the_window() {
         CURVED_SPILL_MM
     );
 }
+
+/// A ratio step an ulp past the rest node its leg comes to rest at: the
+/// width rises off the rest so slowly there that the step's window is a
+/// few ulps wide, all of it within the inset a wider reach is read at. A
+/// reach starting on the step still reads it at its first floats, as the
+/// bench prints planned from rest read it where the leaders stand on the
+/// step: its model holds every float of the reach, or there is none and
+/// the window splits.
+#[test]
+fn a_reach_starting_on_a_step_an_ulp_past_a_rest_holds_the_step_window() {
+    use crate::shaper::taylor::{Ball, TaylorModel};
+    let step_at = 1000.0_f64;
+    let rest = trajectory::next_toward(step_at, f64::NEG_INFINITY);
+    let mut field = WidthField::default();
+    field.push_rest(0.0);
+    field.push(996.0, 1.0);
+    field.push_rest(rest);
+    field.push(1004.0, 1.0);
+    field.push_rest(2000.0);
+    let state = smoothed(&vec![(step_at, 0.03, 0.03), (1000.0, 0.0, 0.0)], field);
+    let mut floats = vec![step_at];
+    while floats.len() < 32 {
+        let last = floats[floats.len() - 1];
+        floats.push(trajectory::next_toward(last, f64::INFINITY));
+    }
+    let reach = PathReach {
+        lo: step_at,
+        hi: floats[floats.len() - 1],
+        exact: (false, false),
+    };
+    assert!(
+        state.smoothing.correction(step_at).d1 != 0.0,
+        "the step's window must open at the step for the reach to read it"
+    );
+    let (centre, radius) = (0.5 * (reach.lo + reach.hi), 0.5 * (reach.hi - reach.lo));
+    let s = TaylorModel::affine(Ball::exact(centre), radius);
+    let Some(correction) = state.smoothing.correction_model(SpanTable::Laid, &s, reach) else {
+        return;
+    };
+    for at in floats {
+        let x = (at - centre) / radius;
+        let truth = state.smoothing.correction(at).d1;
+        let miss = (truth - model_at(&correction.d1, x)).abs();
+        assert!(
+            miss <= correction.d1.rad() + 1e-9 * (1.0 + truth.abs()),
+            "d1 at {at} mm: the evaluator reads {truth}, the model misses it by {miss:e} past \
+             its bound {:e}",
+            correction.d1.rad()
+        );
+    }
+}
