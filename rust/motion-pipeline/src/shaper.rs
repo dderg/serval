@@ -3725,7 +3725,16 @@ fn edge_inset(h: f64, cubic_floor: f64, absorbed: f64) -> f64 {
 /// state wherever the signal is smooth — unless a break hides in the edge's
 /// sliver: then the piece anchors to the acceleration past the sliver,
 /// extrapolated back to the seam, the break's far side as it would read
-/// there. The extrapolation runs through a second read as far again past
+/// there. Where the sliver holds seeds coalescing absorbed, the piece also
+/// anchors to the velocity past the sliver carried back to the seam by that
+/// acceleration: the velocity the absorbed break changes across the sliver
+/// moves onto the seam as a velocity break, as coalescing moves a sub-floor
+/// velocity break onto its anchor. Refining toward the seam could otherwise
+/// never absorb it, a piece of span `h` bending by `Δv/h` to reach it. The
+/// move shifts position by at most the moved step times the sliver, which
+/// must stay within the position tolerance. A sliver no seed was absorbed
+/// into keeps its seam velocity, so a break nothing declared still fails the
+/// fit. The extrapolation runs through a second read as far again past
 /// the sliver, so a smooth signal's jerk across a wide sliver cancels; the
 /// inset is at most a quarter span, so that read stays inside the span. Its
 /// miss of the seam reading only flags a candidate break: a smooth edge
@@ -3739,6 +3748,7 @@ fn edge_velocity_and_acceleration<S: TrackSignal>(
     axis: usize,
     seam: f64,
     past_sliver: f64,
+    absorbed_seeds: bool,
     onset_on_edge: bool,
     fit_tol: FitTol,
 ) -> Result<EdgeAnchor, PostProcessError> {
@@ -3752,7 +3762,9 @@ fn edge_velocity_and_acceleration<S: TrackSignal>(
     if onset_on_edge {
         return Ok(at_seam);
     }
-    let past_acceleration = exact_value(axis, sig.second_deriv(past_sliver), past_sliver)?;
+    let (_, past_velocity, past_acceleration) = sig.eval_pva(past_sliver);
+    let past_velocity = exact_value(axis, past_velocity, past_sliver)?;
+    let past_acceleration = exact_value(axis, past_acceleration, past_sliver)?;
     let beyond = nurbs::fmadd(2.0, past_sliver - seam, seam);
     let beyond_acceleration = exact_value(axis, sig.second_deriv(beyond), beyond)?;
     let extrapolated_to_seam = 2.0 * past_acceleration - beyond_acceleration;
@@ -3766,9 +3778,32 @@ fn edge_velocity_and_acceleration<S: TrackSignal>(
             fit_tol,
         )?
     {
+        if !absorbed_seeds {
+            return Ok(EdgeAnchor {
+                acceleration: extrapolated_to_seam,
+                ..at_seam
+            });
+        }
+        let carried_velocity = nurbs::fmadd(
+            0.5 * (past_acceleration + extrapolated_to_seam),
+            seam - past_sliver,
+            past_velocity,
+        );
+        let velocity_step = carried_velocity - velocity;
+        let position_shift = (velocity_step * (seam - past_sliver)).abs();
+        if position_shift > fit_tol.pos_mm {
+            return Err(PostProcessError::SliverVelocityCarry {
+                axis,
+                seam,
+                past_sliver,
+                velocity_step,
+                position_shift,
+                position_budget: fit_tol.pos_mm,
+            });
+        }
         return Ok(EdgeAnchor {
+            velocity: carried_velocity,
             acceleration: extrapolated_to_seam,
-            ..at_seam
         });
     }
     Ok(at_seam)
@@ -3895,6 +3930,7 @@ fn shaped_ladder<S: TrackSignal>(
         axis,
         t0_inside,
         start_past_sliver,
+        slivers.start > 0.0,
         square_root_onset_on_edge(sig, t0),
         fit_tol,
     )?;
@@ -3910,6 +3946,7 @@ fn shaped_ladder<S: TrackSignal>(
         axis,
         t1_inside,
         end_past_sliver,
+        slivers.end > 0.0,
         square_root_onset_on_edge(sig, t1),
         fit_tol,
     )?;

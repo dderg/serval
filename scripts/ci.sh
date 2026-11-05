@@ -46,6 +46,17 @@ case "${1:-}" in
         fi
         ;;
 esac
+# Fail fast, with the reason, when the disk is nearly full: rustc then ICEs
+# with errors that read as bugs (it did, for every agent, at 22 MB free).
+MIN_FREE_GB="${CI_MIN_FREE_GB:-10}"
+if [ -z "${GITHUB_ACTIONS:-}" ] && [ "${1:-}" != "install-hooks" ]; then
+    free_gb="$(df -Pk "$ROOT" | awk 'NR == 2 { printf "%d", $4 / 1048576 }')"
+    if [ "$free_gb" -lt "$MIN_FREE_GB" ]; then
+        echo "ci.sh: only ${free_gb} GB free on $(df -P "$ROOT" | awk 'NR == 2 { print $6 }') (need ${MIN_FREE_GB}): free space first, e.g." >&2
+        echo "  python3 scripts/gc_caches.py --worktree-targets --apply" >&2
+        exit 1
+    fi
+fi
 LOG_DIR="$ROOT/.ci-logs"
 VERBOSE=""
 
@@ -69,17 +80,14 @@ run_quiet() {
 }
 
 # Built locally from the worktree's own scripts/Dockerfile-build, tagged per
-# branch so concurrent worktrees never test against a stale or mismatched
-# image (mirrors tools/sim/run.sh's kalico-sim-<branch> tagging). Docker's
-# content-addressed layer cache makes repeat calls near-instant when nothing
-# relevant changed.
+# worktree directory (a slot: the pool has ~20) so concurrent worktrees never
+# test against a stale or mismatched image and the number of 3.6 GB images is
+# bounded by the worktrees, not by every branch ever built (117 images, 400 GB
+# once). Docker's content-addressed layer cache makes repeat calls near-instant
+# when nothing relevant changed.
 docker_image() {
-    local branch tag
-    branch="$(cd "$ROOT" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo head)"
-    # Detached HEAD (e.g. GitHub Actions' PR checkout) yields the literal
-    # string "HEAD" rather than a branch name — fall back to the commit.
-    [ "$branch" = "HEAD" ] && branch="$(cd "$ROOT" && git rev-parse --short HEAD 2>/dev/null || echo head)"
-    tag="klipper-build-${branch//\//-}"
+    local tag
+    tag="klipper-build-$(basename "$ROOT")"
     tag="$(echo "$tag" | tr '[:upper:]' '[:lower:]')"
     run_quiet docker build -f "$ROOT/scripts/Dockerfile-build" -t "$tag" "$ROOT" || return 1
     echo "$tag"
