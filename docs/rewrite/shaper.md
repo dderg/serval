@@ -322,7 +322,22 @@ no more than that path on the rest's side. Each move's
 `ExtrusionBudget::rest_room_mm` carries the path from its start to the
 nearest rest (an extrude-only move or a stream end) within
 `rest_room_reach_mm` of the fastest the leaders cross it, and the cap holds
-the ramp that room leaves within the limits as well.
+the ramp that room leaves within the limits as well. The projection derives a
+step's `τ` from the fastest the leaders move within 15 ms (half the longest
+ramp) of it, so the cap reads the step there too: up to `A·15 ms` faster than
+the join under the join's budget `A`, and no faster than
+`ExtrusionBudget::fastest_in_reach_mm_s`, the fastest ceiling within the
+move's speed window. Only a rest may narrow a step's window below
+`H = V·τ/2`: every width node within its plateau (2.75 `H`) on the path
+targets `H`, falling off by `c` beyond, whenever the leaders took to get
+there — a 1.5 mm/s corner 1.8 mm before a step crossed at 46 mm/s lies
+100 ms off it on the P1 bowden's 344 mm/s² budget and once kept its own
+0.03 mm, squeezing the window to 0.6 of `H` and the extruder to 5×
+`max_accel`. A seam's width reaches nodes behind it along the path up to the
+last rest, and nodes before it within `SEAM_PATH_REACH_S` = 217.5 ms, the
+longest a steady acceleration from rest takes to a step whose width reaches
+back to its start (`t² ≤ K·(t + τ_max/2)`, `K` = 6.75 longest ramps), so
+each node waits 232.5 ms of laid leaders for its target.
 
 Critically, the projection reads the leaders' **toolhead signal**, not their
 motor command — the follower must track where the nozzle physically is, and

@@ -190,6 +190,26 @@ fn the_step_speed_cap_holds_the_longest_ramp_at_the_limits() {
     );
 }
 
+/// What a step capped at `speed` asks of the follower over a ramp of `tau`:
+/// the leaders' own flow at the step, the ramp's addition at `crossing`.
+fn capped_demand(
+    rule: &RatioRampRule,
+    tau: f64,
+    (ratio, accel): (f64, f64),
+    (speed, crossing): (f64, f64),
+) -> (f64, f64) {
+    let at = |speed_mm_s: f64| RatioStep {
+        ratio_step: ratio,
+        peak_ratio: ratio,
+        speed_mm_s,
+        accel_mm_s2: accel,
+        jerk_mm_s3: 0.0,
+    };
+    let (own_velocity, own_accel) = rule.own_demand(&at(speed));
+    let (ramp_velocity, ramp_accel) = rule.ramp_demand(tau, &at(crossing));
+    (own_velocity + ramp_velocity, own_accel + ramp_accel)
+}
+
 #[test]
 fn a_step_is_held_at_the_fastest_the_leaders_cross_it_within_the_longest_ramp() {
     let (ratio, accel) = (0.0352, 493.0);
@@ -199,15 +219,11 @@ fn a_step_is_held_at_the_fastest_the_leaders_cross_it_within_the_longest_ramp() 
         (crossing - cap - 7.395).abs() < 1e-9,
         "braking at {accel} mm/s², the leaders cross at {crossing} mm/s a step capped at {cap}"
     );
-    let (velocity, accel_demand) = P1.demand(
+    let (velocity, accel_demand) = capped_demand(
+        &P1,
         RATIO_RAMP_MAX_TIME_S,
-        &RatioStep {
-            ratio_step: ratio,
-            peak_ratio: ratio,
-            speed_mm_s: crossing,
-            accel_mm_s2: accel,
-            jerk_mm_s3: 0.0,
-        },
+        (ratio, accel),
+        (cap, crossing),
     );
     assert!(velocity <= 45.0 + 1e-9 && accel_demand <= 2000.0 + 1e-9);
     assert!(
@@ -242,14 +258,8 @@ fn a_rest_beside_a_step_caps_its_speed_at_the_ramp_the_room_leaves() {
     let crossing = crossing_speed(beside_rest, accel);
     let ramp_time = rest_room_ramp_time(crossing, room_mm);
     assert!(ramp_time < RATIO_RAMP_MAX_TIME_S, "{ramp_time}");
-    let step = RatioStep {
-        ratio_step: ratio,
-        peak_ratio: ratio,
-        speed_mm_s: crossing,
-        accel_mm_s2: accel,
-        jerk_mm_s3: 0.0,
-    };
-    let (velocity, accel_demand) = rule.demand(ramp_time, &step);
+    let (velocity, accel_demand) =
+        capped_demand(&rule, ramp_time, (ratio, accel), (beside_rest, crossing));
     assert!(velocity <= 50.0 + 1e-9 && accel_demand <= 20000.0 + 1e-9);
     assert!(
         (velocity - 50.0).abs() < 1e-6 || (accel_demand - 20000.0).abs() < 1e-6,

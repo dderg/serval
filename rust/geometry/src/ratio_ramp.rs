@@ -173,11 +173,6 @@ impl RatioRampRule {
         )
     }
 
-    fn fits(&self, tau: f64, step: &RatioStep) -> bool {
-        let (velocity, accel) = self.demand(tau, step);
-        velocity <= self.max_velocity_mm_s && accel <= self.max_accel_mm_s2
-    }
-
     /// How much a ramp across `step` may add to the follower's velocity and
     /// acceleration: what the leaders' own flow leaves of each limit, and
     /// never under [`RAMP_HEADROOM_FLOOR`] of it.
@@ -239,11 +234,11 @@ impl RatioRampRule {
     /// under an acceleration of up to `accel` and a jerk of up to `jerk`
     /// `rest_room_mm` along the path from the leaders' nearest rest, fits
     /// the limits within the longest ramp the room leaves it; zero where
-    /// even a crossing at rest does not. The projection derives the ramp
-    /// from the fastest the leaders move within half the longest ramp of
-    /// the step, up to `accel` times that faster than at the step, so the
-    /// step is held there, at no more than `fastest_mm_s`, the fastest they
-    /// move anywhere near it.
+    /// even a crossing at rest does not. The leaders' own flow is read at
+    /// the step and the ramp's addition where the projection derives it: at
+    /// the fastest the leaders move within half the longest ramp of the
+    /// step, up to `accel` times that faster than at it and no faster than
+    /// `fastest_mm_s`, the fastest they move anywhere near it.
     #[must_use]
     pub fn step_speed_cap(
         &self,
@@ -265,18 +260,20 @@ impl RatioRampRule {
         if ratio_step <= 0.0 {
             return f64::INFINITY;
         }
+        let step_at = |speed_mm_s: f64| RatioStep {
+            ratio_step,
+            peak_ratio,
+            speed_mm_s,
+            accel_mm_s2: accel,
+            jerk_mm_s3: jerk,
+        };
         let fits_at = |speed_mm_s: f64| {
             let crossing = crossing_speed(speed_mm_s, accel).min(speed_mm_s.max(fastest_mm_s));
-            self.fits(
-                RATIO_RAMP_MAX_TIME_S.min(rest_room_ramp_time(crossing, rest_room_mm)),
-                &RatioStep {
-                    ratio_step,
-                    peak_ratio,
-                    speed_mm_s: crossing,
-                    accel_mm_s2: accel,
-                    jerk_mm_s3: jerk,
-                },
-            )
+            let tau = RATIO_RAMP_MAX_TIME_S.min(rest_room_ramp_time(crossing, rest_room_mm));
+            let (own_velocity, own_accel) = self.own_demand(&step_at(speed_mm_s));
+            let (ramp_velocity, ramp_accel) = self.ramp_demand(tau, &step_at(crossing));
+            own_velocity + ramp_velocity <= self.max_velocity_mm_s
+                && own_accel + ramp_accel <= self.max_accel_mm_s2
         };
         if !fits_at(0.0) {
             return 0.0;
