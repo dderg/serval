@@ -410,6 +410,33 @@ fn evaluation_budget(case: &Case, roots: usize) -> u64 {
     8 * roots as u64 + 24 * halvings * reversals + 64
 }
 
+/// The linear run turns at clock 4840 and owes a falling root there; the
+/// pass cut after 4839 starts on that clock in a window certified rising.
+#[test]
+fn a_drain_pass_starting_on_a_reversal_root_emits_it() {
+    let case = Case {
+        clock_freq_hz: 180_000_000.0,
+        clocks: 9680,
+        microstep_mm: 0.002_490_898_816_220_930_3,
+        base_mm: -318.146_605_969_789_96,
+        degree: 1,
+        segments: 2,
+        amplitude_mm: 1.510_764_601_304_872_3,
+        offsets: vec![0.520_606_650_752_102, -0.144_122_162_203_121_4, 0.270_594_159_421_402_36],
+        anchor: Anchor::Reseeded,
+        landing: None,
+        rest: None,
+        cuts: vec![1238, 1239, 4838, 4839, 4944, 4945],
+    };
+    let views = case.views();
+
+    let whole = drain_in_chunks(&case, &views, &[]);
+    let chunked = drain_in_chunks(&case, &views, &case.cuts);
+
+    assert_eq!(whole, reference_roots(&case, &views));
+    assert_eq!(chunked, whole);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 256,
