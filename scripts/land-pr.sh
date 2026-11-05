@@ -154,6 +154,7 @@ finish() {
             serval-pool-*)
                 git -C "$tree" switch -q --detach origin/main \
                     && git branch -D "$branch" >/dev/null \
+                    && rm -f "$(git -C "$tree" rev-parse --absolute-git-dir)/wt-lease" \
                     && echo "land-pr: $tree is idle again (warm target kept; scripts/wt.sh new reuses it)" \
                     || echo "land-pr: $tree has uncommitted changes and stays on $branch" >&2
                 ;;

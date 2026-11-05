@@ -13,6 +13,11 @@
 # instead of removing it. Cargo's freshness check compares mtimes in the same
 # path, so reusing one worktree is safe; sharing a target dir between paths is
 # not (see CLAUDE.md).
+#
+# Allocation is serialised by an flock on <dir>/.serval-pool.lock and recorded in a
+# lease file (<gitdir>/wt-lease: owner pid, topic) that land-pr.sh removes. A
+# worktree is idle only if detached, clean (untracked files count) and not leased
+# by a live pid.
 set -euo pipefail
 
 POOL_DIR="${WT_POOL_DIR:-$HOME/Developer}"
@@ -25,10 +30,25 @@ pool_paths() {
         '/^worktree / { path = substr($0, 10); if (index(path, p) == 1) print path }'
 }
 
+lease_file() { echo "$(git -C "$1" rev-parse --absolute-git-dir)/wt-lease"; }
+
+lease_owner_alive() {
+    local file pid
+    file="$(lease_file "$1")"
+    [ -f "$file" ] || return 1
+    pid="$(sed -n 's/^pid=//p' "$file")"
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
 is_idle() {
     local path="$1"
     [ -z "$(git -C "$path" symbolic-ref -q HEAD || true)" ] \
-        && [ -z "$(git -C "$path" status --porcelain --untracked-files=no)" ]
+        && [ -z "$(git -C "$path" status --porcelain)" ] \
+        && ! lease_owner_alive "$path"
+}
+
+claim() {
+    printf 'pid=%s\ntopic=%s\nsince=%s\n' "${WT_OWNER_PID:-$PPID}" "$2" "$(date +%s)" > "$(lease_file "$1")"
 }
 
 next_pool_path() {
@@ -45,6 +65,8 @@ new_topic() {
     local base="origin/main"
     if [ "${1:-}" = "--base" ]; then base="${2:?--base needs a ref}"; fi
     git fetch -q origin
+    exec 9>"$POOL_DIR/.serval-pool.lock"
+    flock 9
     git rev-parse --verify --quiet "refs/heads/$topic" >/dev/null && die "branch $topic exists"
     local path=""
     local candidate
@@ -55,6 +77,7 @@ new_topic() {
         path="$(next_pool_path)"
         git worktree add -q --detach "$path" "$base"
     fi
+    claim "$path" "$topic"
     git -C "$path" switch -q -c "$topic" "$base"
     echo "$path"
 }
@@ -63,7 +86,7 @@ list_pool() {
     local path
     while read -r path; do
         [ -n "$path" ] || continue
-        if is_idle "$path"; then echo "idle  $path"; else echo "busy  $path ($(git -C "$path" rev-parse --abbrev-ref HEAD))"; fi
+        if is_idle "$path"; then echo "idle  $path"; else echo "busy  $path ($(git -C "$path" rev-parse --abbrev-ref HEAD), lease: $(tr '\n' ' ' < "$(lease_file "$path")" 2>/dev/null || echo none))"; fi
     done < <(pool_paths)
 }
 
