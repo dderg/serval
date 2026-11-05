@@ -107,3 +107,57 @@ def test_a_printer_that_never_settles_fails_loudly(monkeypatch, clock):
     with pytest.raises(pi.BenchError, match="startup"):
         pi.restart_klipper()
     assert printer.restarts == 0
+
+
+ENDSTOPS = """\
+[axis x]
+endstop_pin: ^PA9
+[axis y]
+endstop_pin: ^!PA10
+[axis z]
+endstop_pin: mcu:PA15
+[probe]
+pin: ~PB0
+z_offset: 0
+"""
+
+
+def test_the_f407_driven_lines_may_be_endstops_and_the_probe():
+    pi.validate_config(ENDSTOPS)
+    pi.validate_config(pi.REPO_CFG.read_text())
+
+
+@pytest.mark.parametrize(
+    ("config", "line"),
+    [
+        ("[fan]\npin: PA9\n", 2),
+        ("[output_pin led]\npin: PB0\n", 2),
+        ("[extruder]\nheater_pin: PA10\n", 2),
+        ("[motor x]\nstep_pin: PB12\ndir_pin: PA15\n", 3),
+        ("[gcode_button b]\npin: PA9\n", 2),
+        ("[board_pins]\naliases:\n    EXP1=PB0\n", 3),
+        (
+            "[axis x]\nendstop_pin: ^PA9\n[static_digital_output s]\npins: PA9\n",
+            4,
+        ),
+    ],
+)
+def test_a_line_the_f407_drives_is_refused_as_anything_but_an_input(
+    config, line
+):
+    with pytest.raises(
+        pi.BenchError,
+        match=f"config line {line}: pin P.* is driven by the F407",
+    ):
+        pi.validate_config(config)
+
+
+def test_a_pin_named_in_a_comment_is_not_a_use():
+    pi.validate_config("[fan]\npin: PB4  # not PA9\n; PB0 spare\n")
+
+
+def test_every_bench_config_passes_the_pin_guard():
+    configs = sorted(Path(pi.__file__).with_name("configs").rglob("*.cfg"))
+    assert configs
+    for config in configs:
+        pi.validate_config(config.read_text())
