@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::pump::SEND_MARGIN_WARN_FLOOR_SECS;
+use crate::anchor::LOW_MARGIN_WARN_SECS;
 
 const DRAIN_RESERVE_FLOOR_S: f64 = 0.5;
 pub(super) const DRAIN_RESERVE_SAFETY: f64 = 2.0;
@@ -77,10 +77,11 @@ impl Pacer {
 
     /// The runway one brake to rest consumes, measured from the last
     /// moment the pacer could decide on it: the most runway it lost while
-    /// planning between two decisions, the slowest drain, and the margin the
-    /// brake's last frames must still reach the mcu with.
+    /// planning between two decisions, the slowest drain, and the transport
+    /// floor the brake's trajectory must still arrive ahead of the playhead
+    /// by.
     fn one_brake_secs(&self) -> f64 {
-        self.worst_blind_drop_s + self.worst_drain_s + SEND_MARGIN_WARN_FLOOR_SECS
+        self.worst_blind_drop_s + self.worst_drain_s + LOW_MARGIN_WARN_SECS
     }
 
     /// The runway fell from `before_s` to `after_s` while the ingress

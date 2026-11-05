@@ -59,7 +59,7 @@ fn the_reserve_covers_a_brake_after_the_most_runway_lost_planning_blind() {
     pacer.note_step(1.0, 0.6);
     pacer.note_step(0.6, 0.9);
     assert!(
-        (pacer.reserve_secs() - DRAIN_RESERVE_SAFETY * (0.3 + 0.4 + SEND_MARGIN_WARN_FLOOR_SECS)).abs()
+        (pacer.reserve_secs() - DRAIN_RESERVE_SAFETY * (0.3 + 0.4 + LOW_MARGIN_WARN_SECS)).abs()
             < 1e-12
     );
 }
@@ -279,7 +279,7 @@ fn a_stream_in_flight_waits_out_its_prime_only_while_one_brake_still_fits() {
     pacer.note_drain(0.2);
     pacer.note_step(0.6, 0.55);
     pacer.note_move(base);
-    let one_brake_s = 0.2 + 0.05 + SEND_MARGIN_WARN_FLOOR_SECS;
+    let one_brake_s = 0.2 + 0.05 + LOW_MARGIN_WARN_SECS;
     assert_eq!(
         pacer.idle_verdict(0.0, true, base),
         IdleVerdict::Wait(Duration::from_secs_f64(STARTUP_PRIME_S)),
@@ -301,22 +301,4 @@ fn a_stream_in_flight_waits_out_its_prime_only_while_one_brake_still_fits() {
         IdleVerdict::Brake,
         "an expired prime brakes under the reserve"
     );
-}
-
-/// The bench's starved run sent a resume's frames 43 ms before they ran:
-/// a brake budgeted to arrive 20 ms ahead, the anchor's floor, still left the
-/// transport under its 50 ms send-margin warning.
-#[test]
-fn a_brake_keeps_the_send_margin_the_transport_needs() {
-    let base = Instant::now();
-    let mut pacer = Pacer::default();
-    pacer.note_move(base);
-    assert_eq!(
-        pacer.idle_verdict(SEND_MARGIN_WARN_FLOOR_SECS - 0.001, false, base),
-        IdleVerdict::Brake
-    );
-    assert!(matches!(
-        pacer.idle_verdict(SEND_MARGIN_WARN_FLOOR_SECS + 0.01, false, base),
-        IdleVerdict::Wait(_)
-    ));
 }

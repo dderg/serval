@@ -45,8 +45,7 @@ pub use sched::{
 pub use stepcompress_sink::clock_probe;
 pub use stepcompress_sink::{
     BACKLOG_CEILING_FRAMES, ClockSource, EndpointSpec, FrameEgress, MOVE_SLOT_RESERVE,
-    SEND_MARGIN_WARN_FLOOR_SECS, StepLaneConfig, StepcompressEndpoint, StepcompressPacer,
-    build_endpoint,
+    StepLaneConfig, StepcompressEndpoint, StepcompressPacer, build_endpoint,
 };
 pub use transit_trace::emit_fault_snapshot;
 pub use wire_sink::{EtherCatRing, LANE_GROUP_PHASE, LANE_GROUP_PULSE, RingFiller, WireSink};
