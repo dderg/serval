@@ -87,7 +87,9 @@ struct Entries {
     stops: Vec<bool>,
     scales: Vec<f64>,
     backoffs: Vec<u32>,
-    checked: Vec<bool>,
+    /// The first grid cell of a move whose check is still to prove, `None`
+    /// once every cell is.
+    unproven: Vec<Option<i64>>,
     timing: Vec<Timing>,
     summaries: Vec<MoveSummary>,
     /// Whether the segment the moves belong to ends here, at rest.
@@ -231,7 +233,7 @@ impl TurningGuard {
                 self.entries.closed = true;
                 self.settle();
                 assert!(
-                    self.entries.checked.iter().all(|&checked| checked),
+                    self.entries.unproven.iter().all(Option::is_none),
                     "turning guard: a drained segment left a move unchecked"
                 );
                 let count = self.entries.moves.len();
@@ -310,7 +312,7 @@ impl TurningGuard {
         entries.stops.push(stop);
         entries.scales.push(1.0);
         entries.backoffs.push(0);
-        entries.checked.push(false);
+        entries.unproven.push(Some(i64::MIN));
         entries.timing.push(timing);
     }
 
@@ -318,11 +320,11 @@ impl TurningGuard {
     fn settle(&mut self) {
         loop {
             self.extend_grid();
-            let Some(index) = self.entries.checked.iter().position(|&checked| !checked) else {
+            let Some(index) = self.entries.unproven.iter().position(Option::is_some) else {
                 return;
             };
             match self.check(index) {
-                Check::Passed => self.entries.checked[index] = true,
+                Check::Passed => self.entries.unproven[index] = None,
                 Check::NotReady => return,
                 Check::Binds {
                     from,
@@ -377,8 +379,10 @@ impl TurningGuard {
             caps: &caps,
             nearby: &nearby,
         };
-        let first = (timing.t0 / h).floor() as i64;
         let last = (timing.t1() / h).ceil() as i64;
+        let first = ((timing.t0 / h).floor() as i64)
+            .max(self.entries.unproven[index].expect("turning guard: checking a proven move"))
+            .min(last);
         let mut from = expect_sample(&follower.coarse, &self.grid, first);
         for n in first..last {
             let to = expect_sample(&follower.coarse, &self.grid, n + 1);
@@ -576,13 +580,20 @@ impl TurningGuard {
     }
 
     /// Re-times the moves from `index` on after their velocities changed,
-    /// forgets the grid past the change and re-opens every move whose
-    /// stretch reads it.
+    /// forgets the grid past the change and re-opens every cell that reads
+    /// it: a cell reads the grid up to `ahead + 2` samples on, and the
+    /// sample the change straddles carries the acceleration over it.
     fn retime_from(&mut self, index: usize) {
         let h = self.h();
-        let (_, ahead) = self.span;
+        let (back, ahead) = self.span;
         let entries = &mut self.entries;
         let changed_at = entries.timing[index].t0;
+        let held_from = entries.timing[0].t0;
+        assert!(
+            held_from == 0.0 || changed_at - (back + ahead + 4) as f64 * h >= held_from,
+            "turning guard: a re-plan from t={changed_at} changes motion the moves emitted up to \
+             t={held_from} were proven against"
+        );
         for at in index..entries.moves.len() {
             let previous = (at > 0).then(|| entries.timing[at - 1]);
             let mut timing = timing_of(&entries.moves[at], &entries.velocities[at], previous, None);
@@ -600,12 +611,14 @@ impl TurningGuard {
                 &timing,
             );
         }
+        let straddled = (changed_at / h).floor() as i64;
+        let reopened_from = straddled - ahead - 2;
         for at in 0..entries.moves.len() {
-            if entries.timing[at].t1() + (ahead + 2) as f64 * h >= changed_at {
-                entries.checked[at] = false;
+            if (entries.timing[at].t1() / h).ceil() as i64 > reopened_from {
+                let unproven = &mut entries.unproven[at];
+                *unproven = Some(unproven.map_or(reopened_from, |from| from.min(reopened_from)));
             }
         }
-        let straddled = (changed_at / h).floor() as i64;
         self.grid.truncate_from(straddled + 1);
         let cell_accel = self.cell_accel(straddled as f64 * h, (straddled + 1) as f64 * h);
         self.grid.set_cell_accel(straddled, cell_accel);
@@ -745,9 +758,9 @@ impl TurningGuard {
         let timing = &self.entries.timing;
         let earliest = self
             .entries
-            .checked
+            .unproven
             .iter()
-            .position(|&checked| !checked)
+            .position(Option::is_some)
             .map_or(self.segment_end(), |index| timing[index].t0)
             - (back + 2) as f64 * h;
         let reach = timing.partition_point(|timing| timing.t1() <= earliest);
@@ -802,7 +815,7 @@ impl TurningGuard {
         entries.stops.drain(..count);
         entries.scales.drain(..count);
         entries.backoffs.drain(..count);
-        entries.checked.drain(..count);
+        entries.unproven.drain(..count);
         entries.timing.drain(..count);
         for ((geometry, velocity), budget) in entries
             .moves
