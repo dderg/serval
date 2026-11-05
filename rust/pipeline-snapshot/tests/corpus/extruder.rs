@@ -22,6 +22,16 @@ const TOOLHEAD_REST_MM_S: f64 = 1e-9;
 const VELOCITY_SLACK: f64 = 1e-6;
 const ROW_JOIN_S: f64 = 1e-9;
 const LEADER_ACCEL_STEP_ROUNDING_MM_S2: f64 = 1e-6;
+/// The shaped speed under which a speed minimum is a valley: excesses
+/// within its reach belong to the ratio ramp's ends and near-reversals,
+/// not to the path's turning.
+const VALLEY_SPEED_MM_S: f64 = 2.0;
+const VALLEY_PROBE_STEP_S: f64 = 2.5e-4;
+const VALLEY_PROBES_EACH_SIDE: i32 = 60;
+const VALLEY_REACH_FLOOR_S: f64 = 1e-3;
+/// The shaped speed under which the path's heading, and so its turning,
+/// is not read.
+const HEADING_MIN_SPEED_MM_S: f64 = 1.0;
 
 #[derive(Debug, Clone, Copy)]
 struct Caps {
@@ -62,6 +72,27 @@ struct ExtruderLimits {
     accel_slack: f64,
     transition_window_s: f64,
     step_allowance: StepAllowance,
+    advance: Option<KernelFreeLinearAdvance>,
+}
+
+/// A linear pressure advance no smoothing kernel follows: the extruder
+/// lays `r·(s + k·ṡ)` of the shaped path `s`, so the path alone asks it
+/// for `r·(s̈ + k·s⃛)`, with `s⃛ = j_t + a⊥²/v` along the path.
+#[derive(Debug, Clone, Copy)]
+struct KernelFreeLinearAdvance {
+    k: f64,
+    ratio_bound: f64,
+}
+
+/// What an acceleration excess while the toolhead moves is attributed to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccelCause {
+    /// The shaped path's turning under a kernel-free linear advance:
+    /// `r·(a_t + k·(j_t + a⊥²/v))` leaves the cap at the ratio `r` the
+    /// extruder's own velocity reads, `r·(a_t + k·j_t)` holds it, and no
+    /// valley is within reach.
+    PathTurning,
+    Unattributed,
 }
 
 /// A velocity step is an unbounded acceleration, so where the follower has
@@ -92,6 +123,7 @@ pub enum ExtruderExcess {
         value: f64,
         bound: f64,
         phase: ToolheadPhase,
+        cause: AccelCause,
     },
     VelocityStep {
         t: f64,
@@ -175,6 +207,7 @@ impl ExtruderAudit {
                 value: accel,
                 bound: accel_bound,
                 phase,
+                cause: AccelCause::Unattributed,
             });
         }
     }
@@ -306,10 +339,17 @@ impl std::fmt::Display for ExtruderExcess {
                 value,
                 bound,
                 phase,
-            } => write!(
-                f,
-                "e acceleration {value:.1} mm/s² at t={t:.4} ({phase}) exceeds {bound:.1}"
-            ),
+                cause,
+            } => {
+                write!(
+                    f,
+                    "e acceleration {value:.1} mm/s² at t={t:.4} ({phase}) exceeds {bound:.1}"
+                )?;
+                match cause {
+                    AccelCause::PathTurning => f.write_str(", asked by the path's turning"),
+                    AccelCause::Unattributed => Ok(()),
+                }
+            }
             Self::VelocityStep { t, step, allowance } => write!(
                 f,
                 "e velocity steps by {step:.4} mm/s at t={t:.4}, beyond its {allowance:.4} mm/s \
@@ -402,6 +442,7 @@ fn extruder_limits(config: &Path, ratio_bound: f64) -> Option<ExtruderLimits> {
             accel_slack: settings.fit_tolerance_accel_mm_s2,
             transition_window_s: 0.0,
             step_allowance: StepAllowance::Unlimited,
+            advance: None,
         });
     };
     let moving = Caps {
@@ -412,7 +453,14 @@ fn extruder_limits(config: &Path, ratio_bound: f64) -> Option<ExtruderLimits> {
         return None;
     }
     let chains = compiled_chains(&settings);
-    let (kernel_back, kernel_forward) = chains.chains[E_AXIS].max_input_window();
+    let chain = &chains.chains[E_AXIS];
+    let (kernel_back, kernel_forward) = chain.max_input_window();
+    let advance = chain
+        .kernel()
+        .is_none()
+        .then(|| linear_advance_k(&settings, axis))
+        .flatten()
+        .map(|k| KernelFreeLinearAdvance { k, ratio_bound });
     Some(ExtruderLimits {
         moving,
         extrude_only,
@@ -424,6 +472,7 @@ fn extruder_limits(config: &Path, ratio_bound: f64) -> Option<ExtruderLimits> {
             ratio_bound,
             settings.fit_tolerance_accel_mm_s2,
         ),
+        advance,
     })
 }
 
@@ -552,5 +601,124 @@ pub fn extruder_audit(
             audit.check_step(allowance, row.t1, step);
         }
     }
+    if let Some(advance) = limits.advance {
+        for excess in &mut audit.excesses {
+            if let ExtruderExcess::Acceleration {
+                t,
+                phase: ToolheadPhase::Moving,
+                cause,
+                ..
+            } = excess
+            {
+                *cause = advance.cause_at(trajectory, *t, limits.moving.accel);
+            }
+        }
+    }
     Some(audit)
+}
+
+fn linear_advance_k(
+    settings: &planner_config::from_doc::MotionSettings,
+    axis: &planner_config::AxisDecl,
+) -> Option<f64> {
+    axis.post_processors.iter().find_map(|name| {
+        settings
+            .post_processors
+            .iter()
+            .find(|decl| decl.name == *name && decl.ty == "linear_pressure_advance")
+            .map(|decl| {
+                decl.params
+                    .iter()
+                    .find(|(key, _)| key == "k")
+                    .map(|&(_, k)| k)
+                    .unwrap_or_else(|| panic!("[post_processor {name}] has no k"))
+            })
+    })
+}
+
+/// The shaped path's motion at an instant along its own heading: speed,
+/// tangential acceleration and jerk, and the turning term `a⊥²/v`.
+struct PathMotion {
+    speed: f64,
+    accel: f64,
+    jerk: f64,
+    turning: f64,
+}
+
+impl PathMotion {
+    fn at(trajectory: &pipeline_snapshot::ExactTrajectory, t: f64) -> Self {
+        let mut v = [0.0; E_AXIS];
+        let mut a = [0.0; E_AXIS];
+        let mut j = [0.0; E_AXIS];
+        for axis in 0..E_AXIS {
+            let state = trajectory
+                .eval_axis(axis, t, SampleSide::Right)
+                .unwrap_or_else(|e| panic!("axis {axis} at t={t} is not evaluable: {e}"));
+            (v[axis], a[axis], j[axis]) = (state.velocity, state.acceleration, state.jerk);
+        }
+        let dot = |p: &[f64; E_AXIS], q: &[f64; E_AXIS]| -> f64 {
+            p.iter().zip(q).map(|(p, q)| p * q).sum()
+        };
+        let speed = dot(&v, &v).sqrt();
+        let accel = dot(&v, &a) / speed;
+        Self {
+            speed,
+            accel,
+            jerk: dot(&v, &j) / speed,
+            turning: (dot(&a, &a) - accel * accel) / speed,
+        }
+    }
+}
+
+impl KernelFreeLinearAdvance {
+    fn cause_at(
+        self,
+        trajectory: &pipeline_snapshot::ExactTrajectory,
+        t: f64,
+        cap: f64,
+    ) -> AccelCause {
+        let path = PathMotion::at(trajectory, t);
+        if path.speed < HEADING_MIN_SPEED_MM_S {
+            return AccelCause::Unattributed;
+        }
+        let e_velocity = trajectory
+            .eval_axis(E_AXIS, t, SampleSide::Right)
+            .unwrap_or_else(|e| panic!("e at t={t} is not evaluable: {e}"))
+            .velocity;
+        let ratio = e_velocity / (path.speed + self.k * path.accel);
+        if !(ratio > 0.0 && ratio <= self.ratio_bound) {
+            return AccelCause::Unattributed;
+        }
+        let without_turning = (ratio * (path.accel + self.k * path.jerk)).abs();
+        let demand = (ratio * (path.accel + self.k * (path.jerk + path.turning))).abs();
+        if demand > cap && without_turning <= cap && !near_valley(trajectory, t) {
+            AccelCause::PathTurning
+        } else {
+            AccelCause::Unattributed
+        }
+    }
+}
+
+/// Whether a shaped speed minimum under [`VALLEY_SPEED_MM_S`] lies within
+/// the time the path's peak deceleration nearby takes to brake from four
+/// times that minimum's speed.
+fn near_valley(trajectory: &pipeline_snapshot::ExactTrajectory, t: f64) -> bool {
+    let speeds: Vec<(f64, f64)> = (-VALLEY_PROBES_EACH_SIDE..=VALLEY_PROBES_EACH_SIDE)
+        .map(|i| {
+            let at = (t + f64::from(i) * VALLEY_PROBE_STEP_S)
+                .clamp(trajectory.t_start(), trajectory.t_end());
+            (at, toolhead_speed(trajectory, at))
+        })
+        .collect();
+    let peak_accel = speeds
+        .windows(2)
+        .map(|pair| ((pair[1].1 - pair[0].1) / VALLEY_PROBE_STEP_S).abs())
+        .fold(f64::MIN_POSITIVE, f64::max);
+    speeds.windows(3).any(|w| {
+        let (at, v) = w[1];
+        v <= w[0].1
+            && v <= w[2].1
+            && v < VALLEY_SPEED_MM_S
+            && (at - t).abs() <= 4.0 * v / peak_accel + VALLEY_REACH_FLOOR_S
+    })
 }
