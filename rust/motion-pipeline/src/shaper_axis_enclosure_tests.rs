@@ -533,3 +533,93 @@ fn a_variable_surface_z_is_enclosed_by_its_chain_rule() {
         }
     }
 }
+
+const SEAM_SPAN_START_S: f64 = 0.05;
+const SEAM_PHASE_S: f64 = 0.125;
+const SEAM_PHASE_ACCEL_MM_S2: f64 = 6.0;
+
+fn seam_span() -> trajectory::AnalyticMoveSpan {
+    let ramp_end_velocity = 1.0 + SEAM_PHASE_ACCEL_MM_S2 * SEAM_PHASE_S;
+    let ramp_length = SEAM_PHASE_S + 0.5 * SEAM_PHASE_ACCEL_MM_S2 * SEAM_PHASE_S * SEAM_PHASE_S;
+    let brake_length = ramp_end_velocity * SEAM_PHASE_S
+        - 0.5 * SEAM_PHASE_ACCEL_MM_S2 * SEAM_PHASE_S * SEAM_PHASE_S;
+    let line =
+        geometry::path::Line::try_new([0.0, 0.0, 0.0], [ramp_length + brake_length, 0.0, 0.0])
+            .expect("line");
+    trajectory::AnalyticMoveSpan::try_new(
+        geometry::Move {
+            segment: geometry::path::PathSegment::try_new(Segment::Line(line), Vec::new())
+                .expect("path"),
+            feedrate_mm_s: 100.0,
+            limits: limits(),
+            source: SourceRange {
+                start_line: 1,
+                end_line: 1,
+            },
+        },
+        std::sync::Arc::from([
+            geometry::LawSegment::new(
+                0.0,
+                SEAM_PHASE_S,
+                0.0,
+                1.0,
+                ScalarLaw::ConstAccel {
+                    a0: SEAM_PHASE_ACCEL_MM_S2,
+                },
+            ),
+            geometry::LawSegment::new(
+                SEAM_PHASE_S,
+                SEAM_PHASE_S,
+                ramp_length,
+                ramp_end_velocity,
+                ScalarLaw::ConstAccel {
+                    a0: -SEAM_PHASE_ACCEL_MM_S2,
+                },
+            ),
+        ]),
+        0.0,
+        SEAM_SPAN_START_S,
+        SEAM_SPAN_START_S + 2.0 * SEAM_PHASE_S,
+        std::sync::Arc::from([0.0, 0.0, 0.0]),
+        trajectory::SurfaceMode::None,
+    )
+    .expect("span")
+}
+
+/// Where the raw sum of a span's start and its phase end rounds two ulps
+/// below the seam the evaluator switches phase at, the windows break at that
+/// seam and read, on every time up to it, the phase the evaluator reads.
+#[test]
+fn analytic_axis_windows_switch_phase_where_the_evaluator_does() {
+    let span = std::sync::Arc::new(seam_span());
+    let seams: Vec<f64> = span.phase_seam_times().collect();
+    let [seam] = seams[..] else {
+        panic!("two phases have one interior seam, got {seams:?}")
+    };
+    let raw_sum = SEAM_SPAN_START_S + SEAM_PHASE_S;
+    let up = |t: f64| trajectory::next_toward(t, f64::INFINITY);
+    assert!(
+        up(up(raw_sum)) <= seam,
+        "the fixture must round the raw seam sum {raw_sum:e} at least two ulps below the seam {seam:e}"
+    );
+    let axis = ContinuousAxis::Analytic {
+        span: std::sync::Arc::clone(&span),
+        axis: 0,
+    };
+    let windows = super::AxisWindows::of(&axis).expect("a line reads its law");
+    assert_eq!(windows.breaks(span.t_start, span.t_end), vec![seam]);
+    let mut t = raw_sum;
+    while t <= seam {
+        let truth = axis.eval_pva(t).expect("inside the span").acceleration;
+        let [_, _, acceleration, _] = windows
+            .models(Window::new(t, t), false)
+            .expect("one phase covers a point");
+        assert!(
+            (truth - acceleration.coefficients()[0]).abs() <= acceleration.rad(),
+            "at t={t:e} the axis accelerates at {truth}, its window reads {} ± {}",
+            acceleration.coefficients()[0],
+            acceleration.rad()
+        );
+        t = up(t);
+    }
+}

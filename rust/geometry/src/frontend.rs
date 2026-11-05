@@ -4,6 +4,11 @@ use crate::segment::{FollowerDemand, SourceRange};
 
 mod leader_spill;
 pub use leader_spill::{LeaderSpill, LeaderSpillId, SPILL_CELLS};
+mod rest_settle;
+pub use rest_settle::{
+    RestSettle, RestSettleId, SETTLE_CELLS, SETTLE_SHARE_OF_PATH_DEVIATION, SettleDemand,
+    SettleSide,
+};
 
 const DISPLACEMENT_EPSILON: f64 = 1e-9;
 
@@ -138,6 +143,9 @@ pub struct ExtruderCaps {
     /// follower rides reach: the shaped path there averages the planned
     /// path within it.
     pub leader_kernel_reach_s: f64,
+    /// How the shaped path settles onto a point the planned path rests at
+    /// (see [`RestSettle`]): an extrude-only move holds the toolhead for it.
+    pub rest_settle: RestSettleId,
 }
 
 impl ExtruderCaps {
@@ -177,6 +185,7 @@ impl ExtruderCaps {
                 .min(b.instantaneous_corner_velocity_mm_s),
             leader_spill: a.leader_spill.wider(b.leader_spill),
             leader_kernel_reach_s: a.leader_kernel_reach_s.max(b.leader_kernel_reach_s),
+            rest_settle: a.rest_settle.wider(b.rest_settle),
         })
     }
 
@@ -227,6 +236,7 @@ impl ExtruderCaps {
         if !(self.leader_kernel_reach_s.is_finite() && self.leader_kernel_reach_s >= 0.0) {
             return Err("the leaders' kernel reach must be finite and non-negative");
         }
+        self.rest_settle.settle().check()?;
         Ok(())
     }
 }

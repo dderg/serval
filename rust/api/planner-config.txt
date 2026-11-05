@@ -127,4 +127,4 @@ pub const planner_config::CORNER_KIND_SCV: &str
 pub const planner_config::RATIO_RAMP_RULE: &str
 pub fn planner_config::corner_budget_from_parts(&str, f64) -> core::result::Result<geometry::frontend::CornerBudget, alloc::string::String>
 pub fn planner_config::corner_budget_parts(geometry::frontend::CornerBudget) -> (&'static str, f64)
-pub fn planner_config::extruder_caps(&planner_config::AxisRegistry, &trajectory::chain::AxisChainSet) -> core::result::Result<alloc::vec::Vec<geometry::frontend::ExtruderCaps>, alloc::string::String>
+pub fn planner_config::extruder_caps(&planner_config::AxisRegistry, &trajectory::chain::AxisChainSet, f64) -> core::result::Result<alloc::vec::Vec<geometry::frontend::ExtruderCaps>, alloc::string::String>

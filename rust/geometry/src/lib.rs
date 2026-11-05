@@ -26,8 +26,9 @@ pub use fitter::{
 };
 pub use frontend::{
     CORNER_DEVIATION_SCV_FACTOR, CornerBudget, DEFAULT_CORNER_ALLOWANCE_MM, ExtruderCaps,
-    FrontendError, LeaderSpill, LeaderSpillId, Move, MoveContext, SPATIAL_AXIS_SETS,
-    VelocityLimits, axis_set, corner_deviation_from_scv, line_move, scv_from_corner_deviation,
+    FrontendError, LeaderSpill, LeaderSpillId, Move, MoveContext, RestSettle, RestSettleId,
+    SPATIAL_AXIS_SETS, SettleDemand, VelocityLimits, axis_set, corner_deviation_from_scv,
+    line_move, scv_from_corner_deviation,
 };
 pub use ratio_ramp::{
     ADVANCE_VALLEY_SPEED_MM_S, RATIO_RAMP_ENVELOPE_SLOPE, RATIO_RAMP_MAX_TIME_S,

@@ -647,8 +647,9 @@ impl PyMotionEngine {
         let axis_chains = processors
             .compile_active_chains(&cfg.axis_registry, bypass)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let extruder_caps = planner_config::extruder_caps(&cfg.axis_registry, &axis_chains)
-            .map_err(PyValueError::new_err)?;
+        let extruder_caps =
+            planner_config::extruder_caps(&cfg.axis_registry, &axis_chains, cfg.fit_tolerance_mm)
+                .map_err(PyValueError::new_err)?;
         if let Some(handle) = self.planner.lock_ok().as_ref() {
             handle
                 .update_axis_chains(axis_chains)

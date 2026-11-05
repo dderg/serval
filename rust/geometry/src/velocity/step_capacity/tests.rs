@@ -269,6 +269,7 @@ fn an_extruding_move_with_caps_carries_its_advance_into_the_demand() {
         instantaneous_corner_velocity_mm_s: 1.0,
         leader_spill: crate::frontend::LeaderSpillId::UNSHAPED,
         leader_kernel_reach_s: 0.0,
+        rest_settle: crate::frontend::RestSettleId::UNSHAPED,
     };
     let limits = VelocityLimits::try_new(
         100.0,

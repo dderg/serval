@@ -200,7 +200,7 @@ impl GcodeMoveBase {
 /// Every limited follower's extruder caps under the chains `cfg` runs.
 pub fn extruder_caps(cfg: &PlannerConfig) -> Result<Vec<geometry::ExtruderCaps>, String> {
     let chains = cfg.compile_active_chains().map_err(|e| e.to_string())?;
-    planner_config::extruder_caps(&cfg.axis_registry, &chains)
+    planner_config::extruder_caps(&cfg.axis_registry, &chains, cfg.fit_tolerance_mm)
 }
 
 fn z_capped_limits(
