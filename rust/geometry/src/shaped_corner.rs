@@ -47,15 +47,20 @@ const RATIO_BISECTIONS: u32 = 40;
 const CUT_CANDIDATES: i32 = 16;
 const ROOM_ACCEL_OCTAVES: i32 = 10;
 const TURN_EPS_RAD: f64 = 1e-6;
+/// The most curvature, against its apex's, a corner blend starts and ends
+/// at: a pair leaving an arc into a sharp corner starts at the arc's
+/// curvature, a small share of its peak, while a pair easing between two
+/// arcs keeps most of its peak throughout and is a curve, no corner.
+const LINE_CURVATURE_SHARE: f64 = 0.5;
 /// How far before and after a slowed corner its slower acceleration reaches,
-/// in `σ²·A`: the distance a stop at `A` covers in four of the wider
+/// in `σ²·A`: the distance a stop at `A` covers in `√32 ≈ 5.7` of the wider
 /// kernel's standard deviations, past the reach of its weight.
 const APPROACH_SIGMAS_SQUARED: f64 = 16.0;
 /// What the prediction adds to the shaper's share of a miss for the
 /// approximations between the table and the planned motion: a corner whose
 /// approach or exit is slower than the disk's, an asymmetric blend, the
 /// orientations between the sampled ones.
-pub const PREDICTION_MARGIN: f64 = 1.05;
+pub const PREDICTION_MARGIN: f64 = 1.20;
 /// A corner a stop at its planned acceleration rounds past its budget is
 /// slowed to the acceleration at which a stop takes this share of the
 /// budget's room beyond the cut, leaving the rest to the apex speed.
@@ -697,8 +702,9 @@ impl ShapedCorners {
     }
 }
 
-/// The turn and the apex's distance from the vertex of a clothoid pair
-/// whose curvature peaks at the seam between `up` and `down`: the vertex is
+/// The turn and the apex's distance from the vertex of a clothoid pair that
+/// blends a corner, its curvature rising from little to its peak at the
+/// seam between `up` and `down` and falling to little again: the vertex is
 /// where the pair's entry and exit tangents meet.
 pub fn blend_apex(up: &Move, down: &Move) -> Option<(f64, f64)> {
     let (Some(Segment::Clothoid(first)), Some(Segment::Clothoid(second))) =
@@ -708,9 +714,10 @@ pub fn blend_apex(up: &Move, down: &Move) -> Option<(f64, f64)> {
     };
     let (up_start, up_end) = first.kappa_endpoints();
     let (down_start, down_end) = second.kappa_endpoints();
-    let peaks =
-        up_end.abs() >= up_start.abs() && down_start.abs() >= down_end.abs() && up_end.abs() > 0.0;
-    if !peaks {
+    let blends_lines = up_end.abs() > 0.0
+        && up_start.abs() <= LINE_CURVATURE_SHARE * up_end.abs()
+        && down_end.abs() <= LINE_CURVATURE_SHARE * down_start.abs();
+    if !blends_lines {
         return None;
     }
     let entry = first.point_at(0.0);

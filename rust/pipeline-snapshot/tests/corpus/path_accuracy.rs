@@ -7,6 +7,8 @@
 //! budget as the shaper's floor at the vertex's turn plus its allowance,
 //! the floor taken at `max_accel` (the planner takes it at each corner's
 //! own, lower or equal, acceleration, so the audit's bound is the looser).
+//! A vertex within the shaper's reach of a sharper corner takes that
+//! corner's budget: the shaper rounds them as one.
 
 use std::fmt::Write;
 use std::path::Path;
@@ -106,6 +108,15 @@ impl VertexBudget {
             max_accel: cartesian.max_accel,
             corners: ShapedCorners::interned([kernel(0), kernel(1)]),
         }
+    }
+
+    /// How far along the path the shaper carries one corner's rounding
+    /// onto its neighbours: the distance a stop at `max_accel` covers in
+    /// two of the wider kernel's standard deviations. A vertex that close
+    /// to a sharper corner takes that corner's budget.
+    fn reach_mm(&self) -> f64 {
+        self.corners
+            .map_or(0.0, |corners| 0.25 * corners.approach_mm(self.max_accel))
     }
 
     pub fn mm(&self, turn_rad: f64) -> f64 {
@@ -353,6 +364,29 @@ pub fn audit(snapshot: &Snapshot, gcode: &str, config: &Path) -> Option<PathAccu
         lost: Vec::new(),
         over_budget: Vec::new(),
     };
+    let own: Vec<f64> = (0..line.vertices.len())
+        .map(|vertex| {
+            if vertex == 0 || vertex + 1 == line.vertices.len() {
+                0.0
+            } else {
+                budget.mm(line.turn_deg(vertex).to_radians())
+            }
+        })
+        .collect();
+    let reach = budget.reach_mm();
+    let granted_at = |vertex: usize| {
+        let here = line.vertex_arc(vertex);
+        let lo = (0..=vertex)
+            .rev()
+            .take_while(|&j| here - line.vertex_arc(j) <= reach)
+            .last()
+            .unwrap_or(vertex);
+        let hi = (vertex..line.vertices.len())
+            .take_while(|&j| line.vertex_arc(j) - here <= reach)
+            .last()
+            .unwrap_or(vertex);
+        own[lo..=hi].iter().copied().fold(0.0, f64::max)
+    };
     for vertex in 1..line.vertices.len() - 1 {
         let at = line.vertices[vertex];
         if nearest[vertex] > LOST_MM {
@@ -366,7 +400,7 @@ pub fn audit(snapshot: &Snapshot, gcode: &str, config: &Path) -> Option<PathAccu
         let (off, off_at) = excursion[vertex];
         report.bands[motion as usize][band].add_excursion(off, off_at);
         if motion == Motion::Extruding {
-            let granted = budget.mm(turn_deg.to_radians());
+            let granted = granted_at(vertex);
             let share = nearest[vertex] / granted;
             if share > report.worst_share.0 {
                 report.worst_share = (share, at);

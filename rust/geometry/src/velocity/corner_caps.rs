@@ -5,17 +5,18 @@
 //! into its moves' limits already (the planner's approach stage).
 
 use crate::frontend::Move;
-use crate::path::lowering::PositionProfile;
 use crate::path::{CurvatureProfile, Segment};
 use crate::shaped_corner::{ShapedCorners, blend_apex};
-use crate::vec3::dot;
 
 use super::MoveCaps;
 
 /// Caps each curve's speed in `caps` and returns each seam's speed
-/// ceiling, `seam_ceilings[k]` at the seam entering `moves[k]`. Each cap is
-/// also recorded as the speed limit of its moves ([`MoveCaps::corner_speed`]):
-/// a blend's apex speed caps both its halves there.
+/// ceiling, `seam_ceilings[k]` at the seam entering `moves[k]`. An apex is
+/// held as a corner alone here; as a vertex of the curve its neighbouring
+/// corners trace it arrives capped already (the planner's approach stage).
+/// Each cap is also recorded as
+/// the speed limit of its moves ([`MoveCaps::corner_speed`]): a blend's
+/// apex speed caps both its halves there.
 pub(super) fn hold(
     moves: &[Move],
     caps: &mut [MoveCaps],
@@ -25,33 +26,14 @@ pub(super) fn hold(
     let n = moves.len();
     let mut seam_ceilings = vec![f64::INFINITY; n + 1];
     let mut apex_halves = vec![false; n];
-    for k in 1..n {
-        if stop_before[k] {
-            continue;
-        }
-        let Some((theta, cut)) = blend_apex(&moves[k - 1], &moves[k]) else {
-            continue;
-        };
-        let accel = caps[k - 1].kin.accel.max(caps[k].kin.accel);
-        let budget = moves[k - 1].limits.corner.stricter(
-            moves[k].limits.corner,
-            caps[k - 1].kin.accel.min(caps[k].kin.accel),
-        );
-        let budget_mm = corners.budget_mm(budget, theta, accel);
-        if cut >= budget_mm {
-            continue;
-        }
-        let ratio = corners
-            .apex_speed_ratio(theta, cut, accel, budget_mm)
-            .unwrap_or_else(|| {
-                panic!(
-                    "line {}: a stop at the corner turning {theta} rad, cut {cut} mm, misses \
-                     past its {budget_mm} mm budget at the {accel} mm/s² it is planned at",
-                    moves[k].source.start_line
-                )
-            });
+    let apexes: Vec<Apex> = (1..n)
+        .filter(|&k| !stop_before[k])
+        .filter_map(|k| Apex::of(moves, caps, k, corners))
+        .collect();
+    for apex in &apexes {
+        let k = apex.seam;
         let kappa_peak = caps[k - 1].kappa_peak.max(caps[k].kappa_peak);
-        let apex_speed = ratio * (accel / kappa_peak).sqrt();
+        let apex_speed = apex.ratio * (apex.accel / kappa_peak).sqrt();
         seam_ceilings[k] = apex_speed;
         for j in [k - 1, k] {
             apex_halves[j] = true;
@@ -62,13 +44,41 @@ pub(super) fn hold(
         let Some(radius) = curve_radius(m).filter(|_| !apex_halves[k]) else {
             continue;
         };
-        let room = corners.budget_mm(m.limits.corner, facet_turn(m), caps[k].kin.accel)
+        let room = corners.budget_mm(m.limits.corner, 0.0, caps[k].kin.accel)
             - corners.arc_fit_tolerance_mm(m.limits.corner, m.limits.accel_mm_s2);
         let cap = corners.arc_speed_cap(radius, room);
         caps[k].kin.flat_ceiling = caps[k].kin.flat_ceiling.min(cap);
         caps[k].corner_speed = caps[k].corner_speed.min(cap);
     }
     seam_ceilings
+}
+
+/// A blended corner the corner budget holds at its apex: a clothoid pair
+/// whose stop there fits its budget at the acceleration it is planned at.
+/// A pair whose stop does not is no corner the fitter cut but a run of
+/// facets it replaced, held as a curve instead.
+struct Apex {
+    seam: usize,
+    accel: f64,
+    ratio: f64,
+}
+
+impl Apex {
+    fn of(moves: &[Move], caps: &[MoveCaps], k: usize, corners: &ShapedCorners) -> Option<Self> {
+        let (theta, cut) = blend_apex(&moves[k - 1], &moves[k])?;
+        let accel = caps[k - 1].kin.accel.max(caps[k].kin.accel);
+        let budget = moves[k - 1].limits.corner.stricter(
+            moves[k].limits.corner,
+            caps[k - 1].kin.accel.min(caps[k].kin.accel),
+        );
+        let budget_mm = corners.budget_mm(budget, theta, accel);
+        let ratio = corners.apex_speed_ratio(theta, cut, accel, budget_mm)?;
+        Some(Self {
+            seam: k,
+            accel,
+            ratio,
+        })
+    }
 }
 
 /// The tightest radius a curved move that is no corner blend rides.
@@ -79,17 +89,4 @@ fn curve_radius(m: &Move) -> Option<f64> {
     }
     let (_, kappa_peak) = segment.kappa_peak();
     (kappa_peak.abs() > 0.0).then(|| 1.0 / kappa_peak.abs())
-}
-
-/// The turn at each G-code vertex a curved move stands in for: its sweep
-/// shared over the lines it replaces.
-fn facet_turn(m: &Move) -> f64 {
-    let Some(segment) = &m.segment.spatial else {
-        return 0.0;
-    };
-    let lines = f64::from(m.source.end_line.saturating_sub(m.source.start_line) + 1);
-    let sweep = dot(segment.heading_at(0.0), segment.heading_at(segment.s_len()))
-        .clamp(-1.0, 1.0)
-        .acos();
-    sweep / lines
 }
