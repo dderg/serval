@@ -46,8 +46,7 @@ impl Reactor {
             } => self.handle_subscribe_runtime_events(priority, bulk, reply),
             ReactorCommand::FireAndForget { payload } => self.handle_fire_and_forget(payload),
             ReactorCommand::FireAndForgetBatch {
-                payloads,
-                reserved_blocks,
+                blocks,
                 enqueued_at,
             } => {
                 let waited = enqueued_at.elapsed();
@@ -60,11 +59,11 @@ impl Reactor {
                         event = "channel_wait_high",
                         mcu = %self.mcu_label,
                         waited_ms = waited.as_millis() as u64,
-                        blocks = payloads.len(),
+                        blocks = blocks.len(),
                         "batch sat this long in the submission channel before the reactor took it"
                     );
                 }
-                self.handle_fire_and_forget_batch(&payloads, reserved_blocks)
+                self.handle_fire_and_forget_batch(blocks)
             }
             ReactorCommand::McuIdentify {
                 completion,
@@ -163,20 +162,8 @@ impl Reactor {
         }
     }
 
-    fn handle_fire_and_forget_batch(&mut self, payloads: &[Vec<u8>], reserved_blocks: usize) {
-        let blocks = match crate::host_io::wire::pack_blocks(payloads) {
-            Ok(blocks) => blocks,
-            Err(detail) => {
-                self.outbound.fire_and_forget_depth.release(reserved_blocks);
-                tracing::error!(
-                    subsystem = "mcu-comms",
-                    event = "fire_and_forget_batch_pack_error",
-                    detail = %detail,
-                    "FireAndForgetBatch: refusing to frame an unpackable burst"
-                );
-                return;
-            }
-        };
+    fn handle_fire_and_forget_batch(&mut self, blocks: Vec<Vec<u8>>) {
+        let reserved_blocks = blocks.len();
         for block in blocks {
             if let Err(e) = self.dispatch_fire_and_forget(block, false) {
                 self.outbound.fire_and_forget_depth.release(reserved_blocks);

@@ -305,8 +305,11 @@ impl ReactorHarness {
         let port_handles = self.port_handles.clone();
         let mut reactor = self.reactor;
         let handle = std::thread::spawn(move || reactor.run());
-        let io =
-            crate::host_io::McuHostIo::from_submission_tx_for_test(submission_tx, Some(handle));
+        let io = crate::host_io::McuHostIo::from_submission_tx_for_test(
+            submission_tx,
+            Some(handle),
+            Arc::new(crate::host_io::parser::MsgProtoParser::new_empty()),
+        );
         (io, port_handles)
     }
 }
