@@ -43,6 +43,7 @@ CACHE = Path(
 ).expanduser()
 TARGETS = CACHE / "targets"
 LOCKS = CACHE / "locks"
+SCRATCH_TREE = "scratch"
 
 
 def target_dir_for(tree: Path, purpose: str = "build") -> Path:
@@ -214,28 +215,25 @@ def sample_commit(sha: str) -> Path:
     if (out / "meta.json").exists():
         return out
     ensure_commit(sha)
-    with commit_lock(f"wt-{short(sha)}"):
+    with commit_lock(SCRATCH_TREE):
         if (out / "meta.json").exists():
             return out
         return sample_commit_locked(sha, out)
 
 
 def sample_commit_locked(sha: str, out: Path) -> Path:
-    tree = CACHE / "wt" / short(sha)
+    tree = CACHE / "wt" / SCRATCH_TREE
     tree.parent.mkdir(parents=True, exist_ok=True)
     run(["git", "worktree", "prune"])
-    shutil.rmtree(tree, ignore_errors=True)
-    run(["git", "worktree", "add", "--detach", "--force", str(tree), sha])
-    try:
-        env = {"CARGO_TARGET_DIR": str(target_dir_for(tree))}
-        print(
-            f"building engine at {short(sha)} ...", file=sys.stderr, flush=True
-        )
-        run(["make", "-f", "Makefile.rust", "motion-engine-fast"], tree, env)
-        out.mkdir(parents=True, exist_ok=True)
-        run_sample_worker(tree, out)
-    finally:
-        run(["git", "worktree", "remove", "--force", str(tree)])
+    if not (tree / ".git").exists():
+        shutil.rmtree(tree, ignore_errors=True)
+        run(["git", "worktree", "add", "--detach", "--force", str(tree), sha])
+    run(["git", "checkout", "-q", "--detach", "--force", sha], tree)
+    env = {"CARGO_TARGET_DIR": str(target_dir_for(tree))}
+    print(f"building engine at {short(sha)} ...", file=sys.stderr, flush=True)
+    run(["make", "-f", "Makefile.rust", "motion-engine-fast"], tree, env)
+    out.mkdir(parents=True, exist_ok=True)
+    run_sample_worker(tree, out)
     return out
 
 

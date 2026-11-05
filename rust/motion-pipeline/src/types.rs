@@ -259,6 +259,19 @@ pub(crate) enum PostProcessError {
         position_budget: f64,
         floor: f64,
     },
+    #[error(
+        "axis {axis}: the acceleration break hidden between {seam} and {past_sliver} changes \
+         velocity by {velocity_step} across the sliver; moving that step onto the seam shifts \
+         position by {position_shift}, beyond the {position_budget} tolerance"
+    )]
+    SliverVelocityCarry {
+        axis: usize,
+        seam: f64,
+        past_sliver: f64,
+        velocity_step: f64,
+        position_shift: f64,
+        position_budget: f64,
+    },
     #[error("axis {axis}: shaped sample is non-finite at t={t}")]
     NonFiniteSample { axis: usize, t: f64 },
 }
