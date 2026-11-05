@@ -676,6 +676,40 @@ fn a_rescaled_odometer_carries_its_scale_into_every_derivative() {
     }
 }
 
+/// Deep into a print the span table stands thousands of millimetres down
+/// the path and a hundred into the extrusion; a segment's samples still
+/// differ by their own travel, to its rounding rather than the depth's, so
+/// a nanosecond fit span reads endpoints its endpoint delta agrees with.
+#[test]
+fn samples_deep_into_a_print_differ_by_their_own_travel() {
+    let shaped = cusp_segment(vec![0.0, 10.0], vec![0.0, 0.0, 500.0], 0.0, 0.02);
+    let mut state = FollowerState::default();
+    state.push_span(3000.0, 0.0333, 0.0333);
+    state.push_span(10.0, 0.0333, 0.05);
+    let odometer = super::Odometer {
+        start: 3000.0,
+        length: super::leader_arc_length(&shaped, &[0, 1]),
+    };
+    let sig = FollowerSignal::new(&shaped, &shaped, 3, &[0, 1], &state, odometer, 0.0);
+    let mut worst = (0.0_f64, 0.0);
+    for index in 1..2000 {
+        let t0 = f64::from(index) * 1e-5;
+        let t1 = t0 + 2e-9;
+        let sampled = sig.eval_pva(t1).0 - sig.eval_pva(t0).0;
+        let delta = sig.position_delta((t0, 0.0), (t1, 0.0));
+        let mismatch = (sampled - delta).abs();
+        if mismatch > worst.0 {
+            worst = (mismatch, t0);
+        }
+    }
+    assert!(
+        worst.0 <= 1e-17,
+        "samples 2 ns apart at t={} differ from their travel by {} mm",
+        worst.1,
+        worst.0
+    );
+}
+
 fn odometer_from_start(shaped: &ContinuousSegment) -> super::Odometer {
     super::Odometer {
         start: 0.0,
