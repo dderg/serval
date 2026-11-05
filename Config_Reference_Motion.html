@@ -2551,14 +2551,15 @@ follows: x, y, z
 #   Optional comma-separated axis names. Default is an empty list.
 motors: e_motor
 #   Optional comma-separated motor names. Default is an empty list.
-post_processors: extruder_pa, extruder_smoothing
+post_processors: extruder_pa
 #   Optional comma-separated named post-processors. Default is an empty list.
 #   On an axis that follows others, a pressure advance (or any derivative-gain
 #   stage) needs the axis&#39;s max_velocity and max_accel, set or inherited; the
-#   chain is rejected otherwise. A smoothing kernel in the same list is
-#   optional; without one the advance also needs finite [extruder]
-#   max_extrude_only_velocity and max_extrude_only_accel, which bound the
-#   moves the extruder makes on its own (retracts, primes).
+#   chain is rejected otherwise. The recommended extruder chain is the
+#   advance alone; a smoothing kernel after it is an explicit override (see
+#   the [post_processor &lt;name&gt;] section). Without one the advance also needs
+#   finite [extruder] max_extrude_only_velocity and max_extrude_only_accel,
+#   which bound the moves the extruder makes on its own (retracts, primes).
 #max_velocity:
 #max_accel:
 #   Optional, on an axis that follows others. Must be above 0 (mm/s,
@@ -2749,8 +2750,9 @@ damping_ratio: 0.7
 #   Required. Must be in [0, 1).
 </code></pre></div>
 
-<p>Attach a named post-processor to an axis with <code>post_processors: name1, name2</code>. On an axis that follows others, an advance (<code>linear_pressure_advance</code>, <code>tanh_pressure_advance</code>, <code>recipr_pressure_advance</code>, or another derivative-gain stage with a nonzero gain) must share its chain with a smoothing kernel: an advance turns every extrusion-ratio change taken at speed into an instant position step, which only a kernel makes followable, so the config compiler rejects the chain without one. A zero advance is accepted, and raising it at runtime on such a chain is rejected the same way. The fork has ZV, MZV, bell, and triangle smoothing kernels; it does not provide an EI-family input-shaper type.</p>
-<p>To judge an extruder chain (pressure advance plus its smoothing kernel) before printing, run <code>python3 tools/corner_flow.py printer.cfg</code>: it reports bead over- and under-fill at standard corners, flow changes and travel transitions, and accepts <code>--sweep smooth_time=...</code> and <code>--set name.param=value</code>. See <a href="https://github.com/KalicoCrew/kalico//blob/main/README.md#evaluating-an-extruder-chain">Evaluating an extruder chain</a> for how to read it.</p>
+<p>Attach a named post-processor to an axis with <code>post_processors: name1, name2</code>. On an axis that follows others, an advance (<code>linear_pressure_advance</code>, <code>tanh_pressure_advance</code>, <code>recipr_pressure_advance</code>, or another derivative-gain stage with a nonzero gain) needs the axis's <code>max_velocity</code> and <code>max_accel</code>, set or inherited from the <code>[extruder]</code>'s extrude-only caps; the config compiler rejects the chain without them. It needs no smoothing kernel: the recommended extruder chain is the advance alone, which the velocity planner holds to those limits and whose ratio steps it ramps (see <code>[axis &lt;name&gt;]</code> above). The fork has ZV, MZV, bell, and triangle smoothing kernels; it does not provide an EI-family input-shaper type.</p>
+<p>A smoothing kernel after the advance on the extruder (<code>type: smooth_triangle</code>, named after the advance in <code>post_processors</code>) is an explicit override, never a default. It lowers the extruder acceleration corners ask for, so the planner slows extruding corners less, and pays with a bead bulge at every corner that grows with the kernel's width and the corner speed: on the bench printer at 150 mm/s a 45° corner bulges +159% with <code>smooth_time: 0.04</code> and +7% with 0.005, where the kernel-free chain lays the commanded bead. Use it only for an extruder too weak to follow the exact advance at a speed you need.</p>
+<p>To judge an extruder chain before printing, run <code>python3 tools/corner_flow.py printer.cfg</code>: it reports bead over- and under-fill at standard corners, flow changes and travel transitions, and accepts <code>--set name.param=value</code>; on a config carrying a kernel override, <code>--kernel-free</code> compares it with the chain without the kernel and <code>--sweep smooth_time=...</code> varies its width. See <a href="https://github.com/KalicoCrew/kalico//blob/main/README.md#evaluating-an-extruder-chain">Evaluating an extruder chain</a> for how to read it.</p>
 <h2 id="extruder"><code>[extruder]</code><a class="headerlink" href="#extruder" title="Permanent link">&para;</a></h2>
 <p>The motion-owned portion of <code>[extruder]</code> is limited to the axis association and extrude-only caps. Heater, thermistor, and other extruder options remain mainline Klipper options and are outside this motion reference.</p>
 <div class="highlight"><pre><span></span><code>[extruder]

@@ -2022,15 +2022,13 @@ two kinds worth having:</p>
 
 <span class="k">[axis e]</span>
 <span class="na">follows</span><span class="o">:</span><span class="w"> </span><span class="s">x, y, z</span>
-<span class="na">post_processors</span><span class="o">:</span><span class="w"> </span><span class="s">pa, st</span>
+<span class="na">post_processors</span><span class="o">:</span><span class="w"> </span><span class="s">pa</span>
+<span class="na">max_velocity</span><span class="o">:</span><span class="w"> </span><span class="s">50</span>
+<span class="na">max_accel</span><span class="o">:</span><span class="w"> </span><span class="s">5000</span>
 
 <span class="k">[post_processor pa]</span>
 <span class="na">type</span><span class="o">:</span><span class="w"> </span><span class="s">linear_pressure_advance</span>
 <span class="na">k</span><span class="o">:</span><span class="w"> </span><span class="s">0.03</span>
-
-<span class="k">[post_processor st]</span>
-<span class="na">type</span><span class="o">:</span><span class="w"> </span><span class="s">smooth_triangle</span>
-<span class="na">smooth_time</span><span class="o">:</span><span class="w"> </span><span class="s">0.02</span>
 </code></pre></div>
 
 <p>Sources: <code>rust/trajectory/src/chain.rs</code> (stage model, compilation,
@@ -2067,7 +2065,9 @@ explicit tolerance.</p>
 <li><code>smooth_bell</code> (<code>smooth_time</code>) — the C¹ quartic bell <code>c·(h²−t²)²</code>, a
   general-purpose low-pass with no tuned notch.</li>
 <li><code>smooth_triangle</code> (<code>smooth_time</code>) — the classic triangle (double boxcar);
-  cheap general smoothing, used e.g. on the extruder.</li>
+  cheap general smoothing. After an extruder's advance it is an explicit
+  override that trades a bead bulge at every corner for lower extruder
+  acceleration; the recommended extruder chain is the advance alone.</li>
 <li><code>linear_pressure_advance</code> (<code>k</code>) — <code>DerivativeGains { k1: k, k2: 0 }</code>.</li>
 <li><code>tanh_pressure_advance</code>, <code>recipr_pressure_advance</code> (<code>linear_advance</code>,
   <code>nonlinear_offset</code>, <code>linearization_velocity</code>) — <code>NonlinearAdvance</code>, the
