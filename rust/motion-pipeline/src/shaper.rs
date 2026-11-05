@@ -4257,6 +4257,11 @@ fn span_probe_t(t0: f64, t1: f64, u: f64) -> f64 {
 /// [`PostProcessError::UnprovableSpan`]. Where it has exact polynomials
 /// every truth sample is read off them too, each edge's from the side
 /// facing into the span.
+///
+/// A rung a looser-than-absolute budget accepts on a splittable span is
+/// refit to the absolute budget where its acceleration may pass the
+/// budget's ceiling ([`FitTol::accel_ceiling`]); at the floor no finer
+/// partition could hold it, and the looser budget stands.
 #[allow(clippy::type_complexity)]
 fn shaped_ladder<S: TrackSignal>(
     sig: &S,
@@ -4389,7 +4394,9 @@ fn shaped_ladder<S: TrackSignal>(
         },
     ) {
         Ok(coefficients) => {
-            if piece_tol.accel_mm_s2 > fit_tol.accel_mm_s2
+            let splittable = !keeps_closest_rung;
+            if splittable
+                && piece_tol.accel_mm_s2 > fit_tol.accel_mm_s2
                 && acceleration_bound(&coefficients, h) > fit_tol.accel_ceiling()
             {
                 let absolute = SpanFitPolicy {
