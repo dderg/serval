@@ -863,7 +863,9 @@ fn the_width_rests_on_the_ratio_step_a_resting_leg_lays_beside_the_rest() {
             max_velocity_mm_s: 45.0,
             max_accel_mm_s2: 2000.0,
         };
-        state.smoothing.lay(&state.spans, &leg, &rule);
+        state
+            .smoothing
+            .lay((&state.spans, &state.advance_spans), &leg, &rule);
         state.smoothing.close_at(travel + 2.0 * REST_LEG_SPILL_MM);
         let ratio_step = travel + tail;
         let width = &state.smoothing.width;
