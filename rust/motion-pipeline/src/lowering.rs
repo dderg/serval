@@ -9,7 +9,7 @@ pub(crate) use ladder::ladder_candidate;
 pub(crate) use ladder::{
     AccelerationTrend, HeldSample, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget, LadderFailure,
     LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth, SeamContinuity, VelocitySign,
-    acceleration_bound, exact_piece, held_miss, ladder_fit, quintic_in_u,
+    acceleration_bound, exact_piece, held_miss, ladder_accept, ladder_fit, quintic_in_u,
 };
 
 use geometry::FollowerDemand;
