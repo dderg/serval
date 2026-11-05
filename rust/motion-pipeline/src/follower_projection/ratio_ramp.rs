@@ -16,7 +16,7 @@ mod models;
 
 pub(super) use jet::Jet;
 use jet::{horner, horner_with_slope};
-pub(super) use models::{ValleyWeight, narrow_floats};
+pub(super) use models::{REACH_INSET_ULPS, ValleyWeight, narrow_floats};
 
 /// `max |h'|` the width reaches: `3·ENVELOPE_SLOPE` rising off a rest,
 /// `1.875·ENVELOPE_SLOPE` between two moving nodes.
@@ -643,7 +643,12 @@ impl WidthField {
 
     /// Makes `sample` a node of target `base` scaled to the ramp time
     /// there, or the width the seams around ask for if wider, once it lies
-    /// far enough past the last node kept in time and along the path.
+    /// far enough past the last node kept in time and along the path. A
+    /// node the cone of a rest holds at zero width — the grid's first tick
+    /// on the rest point a stream or dwell opens on — opens no window, so
+    /// it spaces no node after it: thinning behind it would leave a motion
+    /// shorter than half a ramp time between two rests without a single
+    /// open node, and a ratio step in it unramped.
     fn keep_if_due(&mut self, sample: TimeSample, base: f64) {
         let ramp_time = self.ramp_time_at(sample.t);
         let target =
@@ -654,7 +659,8 @@ impl WidthField {
         });
         if due {
             self.push(sample.s, target);
-            self.last_kept = Some(KeptNode {
+            let opens_a_window = self.nodes.last().is_some_and(|node| node.envelope > 0.0);
+            self.last_kept = opens_a_window.then_some(KeptNode {
                 t: sample.t,
                 s: sample.s,
                 ramp_time,
@@ -1841,21 +1847,16 @@ impl RestSide {
     /// Whether the table steps its ratio or its slope inside `(from, to)`
     /// so near the rest that the width field, whose envelope falls off
     /// toward the rest by [`ENVELOPE_SLOPE`], ramps the step over less time
-    /// than `rule`'s limits allow at the fastest and most accelerating the
-    /// leaders cross the side.
+    /// than `rule`'s limits allow as the leaders cross the step's window
+    /// ([`Self::window_crossing`]). The window ramps the ratio the table
+    /// changes within it: the step, and the slopes either side over as much
+    /// of the window as their spans fill.
     fn narrows_a_step(
         self,
         spans: &[RatioSpan],
         rule: &RatioRampRule,
         (from, to): (f64, f64),
     ) -> bool {
-        let leaders = self
-            .crossing
-            .widest(self.spill.crossing)
-            .widest(self.beyond);
-        if leaders.speed == 0.0 {
-            return false;
-        }
         let first = spans.partition_point(|span| span.s0 <= from).max(1);
         spans[first - 1..]
             .windows(2)
@@ -1865,11 +1866,18 @@ impl RestSide {
                 let Some(seam) = Seam::between(before, after) else {
                     return false;
                 };
-                let window = ENVELOPE_SLOPE * (seam.s - self.rest).abs();
+                let distance = (seam.s - self.rest).abs();
+                let window = ENVELOPE_SLOPE * distance;
+                let leaders = self.window_crossing(distance + window);
+                if leaders.speed == 0.0 {
+                    return false;
+                }
+                let within_window =
+                    |span: &RatioSpan| span.ratio_slope().abs() * window.min(span.s1 - span.s0);
                 let (velocity, accel) = rule.demand(
                     2.0 * window / leaders.speed,
                     &RatioStep {
-                        ratio_step: seam.step.abs() + (after.r1 - after.r0).abs(),
+                        ratio_step: seam.step.abs() + within_window(before) + within_window(after),
                         peak_ratio: before.r1.abs().max(after.r0.abs()).max(after.r1.abs()),
                         speed_mm_s: leaders.speed,
                         accel_mm_s2: leaders.rate,
@@ -1878,6 +1886,39 @@ impl RestSide {
                 );
                 velocity > rule.max_velocity_mm_s || accel > rule.max_accel_mm_s2
             })
+    }
+
+    /// How the leaders cross a step's window reaching `reach` from the
+    /// rest. Into a rest, as they cross the spill, and where the window
+    /// runs past the raw seam, no faster than the most they accelerate past
+    /// it takes them over the overhang `d` from their speed at the seam,
+    /// `√(v² + 2·a·d)`: a step inside the spill is ramped where the leaders
+    /// slow into the rest, not at the speed they cruise far past the seam.
+    /// Out of a rest, at the fastest and most accelerating they cross the
+    /// whole side: the width field's sample grid restarts where the leaders
+    /// leave a standstill, so its first node can lie micrometres past the
+    /// rest, its envelope a sliver of the rest's cone that the smootherstep
+    /// to the next node flattens onto, and a window across the spill can be
+    /// a few thousandths of the envelope's.
+    // TODO: read a leaving spill where the leaders cross it too once the
+    // width field's windows across it follow the envelope.
+    fn window_crossing(self, reach: f64) -> Crossing {
+        let over_spill = self.crossing.widest(self.spill.crossing);
+        let past_seam = over_spill.widest(self.beyond);
+        if self.outward > 0.0 {
+            return past_seam;
+        }
+        let overhang = reach - (self.seam - self.rest).abs();
+        if overhang <= 0.0 {
+            return over_spill;
+        }
+        Crossing {
+            speed: libm::sqrt(
+                over_spill.speed * over_spill.speed + 2.0 * past_seam.rate * overhang,
+            )
+            .min(past_seam.speed),
+            ..past_seam
+        }
     }
 }
 

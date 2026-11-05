@@ -60,6 +60,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -402,7 +403,7 @@ def fit_audit(sha: str) -> dict | None:
     cached = AUDIT_DIR / f"{sha}.json"
     if cached.exists():
         return json.loads(cached.read_text())
-    with pending.commit_lock(f"audit-{pending.short(sha)}"):
+    with pending.commit_lock("audit-scratch"):
         return fit_audit_locked(sha)
 
 
@@ -421,48 +422,46 @@ def fit_audit_locked(sha: str) -> dict | None:
     )
     if probe.returncode != 0:
         return None
-    tree = pending.CACHE / "wt-audit" / pending.short(sha)
+    tree = pending.CACHE / "wt-audit" / pending.SCRATCH_TREE
     tree.parent.mkdir(parents=True, exist_ok=True)
     pending.run(["git", "worktree", "prune"])
-    pending.run(
-        ["git", "worktree", "add", "--detach", "--force", str(tree), sha]
-    )
-    try:
-        print(
-            f"fit audit at {pending.short(sha)} ...",
-            file=sys.stderr,
-            flush=True,
+    if not (tree / ".git").exists():
+        shutil.rmtree(tree, ignore_errors=True)
+        pending.run(
+            ["git", "worktree", "add", "--detach", "--force", str(tree), sha]
         )
-        with slots.slot(label="fit audit"):
-            result = subprocess.run(
-                [
-                    "cargo",
-                    "test",
-                    "--release",
-                    "-p",
-                    "pipeline-snapshot",
-                    "--features",
-                    "fit-audit",
-                    "--test",
-                    "fit_tolerance",
-                    "every_accepted_fit_piece",
-                    "--",
-                    "--include-ignored",
-                    "--exact",
-                    "every_accepted_fit_piece_holds_the_fit_tolerance_against_the_exact_signal",
-                ],
-                cwd=tree / "rust",
-                env={
-                    **os.environ,
-                    "CARGO_TARGET_DIR": str(
-                        pending.target_dir_for(tree, "audit")
-                    ),
-                },
-                capture_output=True,
-                text=True,
-            )
-    finally:
-        pending.run(["git", "worktree", "remove", "--force", str(tree)])
+    pending.run(["git", "checkout", "-q", "--detach", "--force", sha], tree)
+    print(
+        f"fit audit at {pending.short(sha)} ...",
+        file=sys.stderr,
+        flush=True,
+    )
+    with slots.slot(label="fit audit"):
+        result = subprocess.run(
+            [
+                "cargo",
+                "test",
+                "--release",
+                "-p",
+                "pipeline-snapshot",
+                "--features",
+                "fit-audit",
+                "--test",
+                "fit_tolerance",
+                "every_accepted_fit_piece",
+                "--",
+                "--include-ignored",
+                "--exact",
+                "every_accepted_fit_piece_holds_the_fit_tolerance_against_the_exact_signal",
+            ],
+            cwd=tree / "rust",
+            env={
+                **os.environ,
+                "CARGO_TARGET_DIR": str(pending.target_dir_for(tree, "audit")),
+            },
+            capture_output=True,
+            text=True,
+        )
     rows: dict = {}
     for line in (result.stdout + result.stderr).splitlines():
         match = AUDIT_LINE.match(line.strip())

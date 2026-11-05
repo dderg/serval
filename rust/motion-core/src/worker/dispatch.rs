@@ -38,6 +38,8 @@ pub enum DispatchError {
     NudgeTargetMissing { mcu_id: u32, axis: u8 },
     #[error("enqueue: {0}")]
     Enqueue(#[from] trajectory::ContinuousError),
+    #[error("{0}")]
+    DispatchRecord(String),
 }
 
 /// Where committed motion goes when it reaches the end of the pipeline.
