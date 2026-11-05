@@ -1626,7 +1626,7 @@ fn a_reach_starting_on_a_step_an_ulp_past_a_rest_holds_the_step_window() {
     );
     let (centre, radius) = (0.5 * (reach.0 + reach.1), 0.5 * (reach.1 - reach.0));
     let s = TaylorModel::affine(Ball::exact(centre), radius);
-    let Some(correction) = state.smoothing.correction_model(&s, reach) else {
+    let Some(correction) = state.smoothing.correction_model(SpanTable::Laid, &s, reach) else {
         return;
     };
     for at in floats {
