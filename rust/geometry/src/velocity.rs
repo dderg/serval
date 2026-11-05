@@ -635,8 +635,8 @@ fn seed_seam_velocities(
             let step_ceiling = extruder_caps::ratio_step_ceiling(
                 &moves[k - 1],
                 &moves[k],
+                (&budgets[k - 1], &budgets[k]),
                 up.accel.max(dn.accel),
-                budgets[k].rest_room_mm,
             );
             if step_ceiling < v[k] {
                 report.ratio_step_bound += 1;

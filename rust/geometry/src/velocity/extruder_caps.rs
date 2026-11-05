@@ -1,6 +1,7 @@
 use super::extrusion_reach::ExtrusionBudget;
 use crate::frontend::ExtruderCaps;
 use crate::path::{CurvatureProfile, Segment};
+use crate::ratio_ramp::StepCrossing;
 
 use super::rate_cap::LinearRate;
 
@@ -200,18 +201,22 @@ fn ratios_on(segment: &crate::path::PathSegment, axis: usize) -> (f64, f64) {
 /// ratio moves: the follower's ratio ramp spreads the step there, with the
 /// change along either segment (a blend's ratio slides from one move's to
 /// the next's over a path a window gathers whole), over at most the longest
-/// ramp time, and over less where the leaders rest `rest_room_mm` along the
-/// path from the join, so the leaders' shaped speed there must stay where
-/// that ramp keeps the advanced follower within its limits under the budget
+/// ramp time, and over less where the leaders rest within the room `dn`'s
+/// budget gives, so the leaders' shaped speed there must stay where that
+/// ramp keeps the advanced follower within its limits under the budget
 /// `accel` around the join ([`crate::RatioRampRule::step_speed_cap`]; the
-/// path's jerk is the budget's own to hold, no slower crossing lowers it),
-/// and the planned speed lower still by what the leaders' kernels spill
-/// into it. Infinite where the ratio does not move, or no path carries it.
+/// path's jerk is the budget's own to hold, no slower crossing lowers it).
+/// The leaders' own advanced flow there is held by the moves' own caps
+/// ([`own_flow_bound`]), and the shaped speed by the fastest planned
+/// ceiling within either budget's reach, whose [`crate::LeaderSpill`]
+/// gives the planned speed that keeps the shaped one within the cap.
+/// Infinite where the ratio does not move, no path carries it, or the
+/// leaders cross it within its limits at any speed they reach.
 pub(super) fn ratio_step_ceiling(
     up: &crate::Move,
     dn: &crate::Move,
+    (up_budget, dn_budget): (&ExtrusionBudget, &ExtrusionBudget),
     accel: f64,
-    rest_room_mm: f64,
 ) -> f64 {
     let Some(caps) = ExtruderCaps::stricter(up.limits.extruder, dn.limits.extruder) else {
         return f64::INFINITY;
@@ -221,17 +226,53 @@ pub(super) fn ratio_step_ceiling(
     }
     let (up_start, up_end) = ratios_on(&up.segment, caps.axis_index);
     let (dn_start, dn_end) = ratios_on(&dn.segment, caps.axis_index);
+    let ratios = [up_start, up_end, dn_start, dn_end];
     let moved = (up_end - up_start).abs() + (dn_start - up_end).abs() + (dn_end - dn_start).abs();
-    let peak = [up_start, up_end, dn_start, dn_end]
+    if moved == 0.0 {
+        return f64::INFINITY;
+    }
+    let peak = ratios
         .iter()
         .fold(0.0_f64, |peak, ratio| peak.max(ratio.abs()));
-    let shaped = caps
-        .ratio_ramp_rule()
-        .step_speed_cap(moved, peak, accel, 0.0, rest_room_mm);
+    let fastest = up_budget
+        .fastest_ceiling_mm_s
+        .min(dn_budget.fastest_ceiling_mm_s);
+    assert!(
+        fastest.is_finite(),
+        "the join into line {} extrudes with no extruder budget reaching it",
+        dn.source.start_line
+    );
+    let shaped = caps.ratio_ramp_rule().step_speed_cap(
+        &StepCrossing {
+            ratio_step: moved,
+            peak_ratio: peak,
+            accel_mm_s2: accel,
+            jerk_mm_s3: 0.0,
+            rest_room_mm: dn_budget.rest_room_mm,
+            own_flow_bound_mm_s: own_flow_bound(&caps, ratios),
+        },
+        caps.leader_spill.mass * fastest,
+    );
     if shaped.is_infinite() {
         return shaped;
     }
-    caps.leader_spill.planned_speed(shaped, accel)
+    caps.leader_spill.planned_speed(shaped, fastest, accel)
+}
+
+/// The most the leaders' own advanced flow `r·(σ̇ + k·σ̈)` reaches across
+/// a join extruding `ratios` either side of it. The kernels shape it
+/// linearly from the planned `v + k·a` of the moves within their reach of
+/// the join, so it is at most `r·mass·max (cⱼ + k·Aⱼ)` over those moves'
+/// ceilings and budgets; each of them budgets at least the join's peak
+/// ratio `r`, at its level `r_b` or above, and holds `r_b·(cⱼ + k·Aⱼ)`
+/// within the extruder's velocity cap ([`extruder_capped`]). A retraction
+/// is held by the extrude-only caps instead: unbounded here.
+fn own_flow_bound(caps: &ExtruderCaps, ratios: [f64; 4]) -> f64 {
+    if ratios.iter().any(|ratio| *ratio < 0.0) {
+        return f64::INFINITY;
+    }
+    let peak = ratios.iter().fold(0.0_f64, |peak, ratio| peak.max(*ratio));
+    caps.leader_spill.mass * caps.max_velocity_mm_s * peak / budgeted_ratio(peak)
 }
 
 #[cfg(test)]

@@ -2,6 +2,9 @@ use crate::GeometryError;
 use crate::path::{Line, PathSegment, Segment};
 use crate::segment::{FollowerDemand, SourceRange};
 
+mod leader_spill;
+pub use leader_spill::{LeaderSpill, SPILL_CELLS};
+
 const DISPLACEMENT_EPSILON: f64 = 1e-9;
 
 // TODO: a DerivativeGains chain stage with k2 != 0 demands extra motor
@@ -76,47 +79,14 @@ pub struct ExtruderCaps {
     /// the advance: an unshaped followed axis steps the shaped path's
     /// acceleration, and the advance turns each step into one.
     pub instantaneous_corner_velocity_mm_s: f64,
-    /// How far the shaped path's speed may exceed the planned speed at a
-    /// moment, through the kernels of the spatial axes the follower follows
-    /// (see [`LeaderSpill`]): the planner bounds the shaped speed at a ratio
-    /// step with it.
+    /// What the kernels of the spatial axes the follower follows make of
+    /// the planned speed (see [`LeaderSpill`]): the planner bounds the
+    /// shaped speed at a ratio step with it.
     pub leader_spill: LeaderSpill,
     /// How far either side of an instant the kernels of the leaders the
     /// follower rides reach: the shaped path there averages the planned
     /// path within it.
     pub leader_kernel_reach_s: f64,
-}
-
-/// A kernel `w` turns a planned speed `v(t) ≤ v₀ + A·|t − t₀|` around `t₀`
-/// into a shaped speed at `t₀` of at most `v₀·∫|w| + A·∫|u|·|w(u)| du`:
-/// `mass` and `moment_s`, the largest among the followed axes' kernels
-/// (1 and 0 where no kernel shapes them).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LeaderSpill {
-    pub mass: f64,
-    pub moment_s: f64,
-}
-
-impl LeaderSpill {
-    pub const UNSHAPED: Self = Self {
-        mass: 1.0,
-        moment_s: 0.0,
-    };
-
-    /// The largest planned speed whose shaped speed stays within `shaped`
-    /// under an acceleration budget of `accel`; zero where the spill alone
-    /// exceeds it.
-    #[must_use]
-    pub fn planned_speed(&self, shaped: f64, accel: f64) -> f64 {
-        ((shaped - self.moment_s * accel) / self.mass).max(0.0)
-    }
-
-    fn wider(self, other: Self) -> Self {
-        Self {
-            mass: self.mass.max(other.mass),
-            moment_s: self.moment_s.max(other.moment_s),
-        }
-    }
 }
 
 impl ExtruderCaps {
@@ -201,10 +171,7 @@ impl ExtruderCaps {
         if !(self.own_jerk_per_accel_hz >= 0.0) {
             return Err("the follower kernel's jerk gain must be non-negative");
         }
-        let LeaderSpill { mass, moment_s } = self.leader_spill;
-        if !(mass.is_finite() && mass >= 1.0 && moment_s.is_finite() && moment_s >= 0.0) {
-            return Err("the leaders' spill must be finite, its mass at least 1");
-        }
+        self.leader_spill.check()?;
         if !(self.leader_kernel_reach_s.is_finite() && self.leader_kernel_reach_s >= 0.0) {
             return Err("the leaders' kernel reach must be finite and non-negative");
         }

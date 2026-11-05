@@ -163,10 +163,23 @@ fn without_an_advance_the_base_flow_sets_the_ramp() {
     assert!((tau - 1.5 * 20.0 / 1000.0).abs() < 1e-12, "{tau}");
 }
 
+fn crossing(ratio: f64, accel_mm_s2: f64, rest_room_mm: f64) -> StepCrossing {
+    StepCrossing {
+        ratio_step: ratio,
+        peak_ratio: ratio,
+        accel_mm_s2,
+        jerk_mm_s3: 0.0,
+        rest_room_mm,
+        own_flow_bound_mm_s: f64::INFINITY,
+    }
+}
+
+const FASTEST_MM_S: f64 = 1000.0;
+
 #[test]
 fn the_step_speed_cap_holds_the_longest_ramp_at_the_limits() {
     let ratio = 0.4 * 0.2 / (std::f64::consts::PI * 0.875 * 0.875);
-    let cap = P1.step_speed_cap(ratio, ratio, 0.0, 0.0, f64::INFINITY);
+    let cap = P1.step_speed_cap(&crossing(ratio, 0.0, f64::INFINITY), FASTEST_MM_S);
     assert!(
         cap > 17.0 && cap < 19.0,
         "a bowden travel-to-extrusion switch caps at {cap}"
@@ -175,15 +188,43 @@ fn the_step_speed_cap_holds_the_longest_ramp_at_the_limits() {
     assert!(velocity <= 45.0 + 1e-9 && accel <= 2000.0 + 1e-9);
     assert!((accel - 2000.0).abs() < 1e-6 || (velocity - 45.0).abs() < 1e-6);
     assert_eq!(
-        P1.step_speed_cap(0.0, ratio, 0.0, 0.0, f64::INFINITY),
+        P1.step_speed_cap(&crossing(0.0, 0.0, f64::INFINITY), FASTEST_MM_S),
         f64::INFINITY
     );
-    let under_accel = P1.step_speed_cap(ratio, ratio, 1000.0, 0.0, f64::INFINITY);
+    assert_eq!(
+        P1.step_speed_cap(&crossing(ratio, 0.0, f64::INFINITY), 0.9 * cap),
+        f64::INFINITY
+    );
+    let under_accel = P1.step_speed_cap(&crossing(ratio, 1000.0, f64::INFINITY), FASTEST_MM_S);
     assert!(under_accel < cap, "{under_accel} against {cap}");
     assert_eq!(
-        P1.step_speed_cap(ratio, ratio, 5000.0, 0.0, f64::INFINITY),
+        P1.step_speed_cap(&crossing(ratio, 5000.0, f64::INFINITY), FASTEST_MM_S),
         0.0
     );
+}
+
+#[test]
+fn the_own_flow_counts_no_more_than_its_bound() {
+    let rule = RatioRampRule {
+        advance_slope_s: 0.02,
+        max_velocity_mm_s: 50.0,
+        max_accel_mm_s2: 1.0e6,
+    };
+    let noise = StepCrossing {
+        ratio_step: 1e-5,
+        peak_ratio: 0.03116,
+        ..crossing(0.0, 74_000.0, f64::INFINITY)
+    };
+    let own_limited = rule.step_speed_cap(&noise, FASTEST_MM_S);
+    assert!(
+        (own_limited - (50.0 / 0.03116 - 0.02 * 74_000.0)).abs() < 1.0,
+        "{own_limited}"
+    );
+    let bounded = StepCrossing {
+        own_flow_bound_mm_s: 50.0 * 0.03116 / 0.03125,
+        ..noise
+    };
+    assert_eq!(rule.step_speed_cap(&bounded, FASTEST_MM_S), f64::INFINITY);
 }
 
 #[test]
@@ -194,8 +235,8 @@ fn a_rest_beside_a_step_caps_its_speed_at_the_ramp_the_room_leaves() {
         max_accel_mm_s2: 20000.0,
     };
     let (ratio, accel, room_mm) = (0.02743, 25409.0, 10.4);
-    let free = rule.step_speed_cap(ratio, ratio, accel, 0.0, f64::INFINITY);
-    let beside_rest = rule.step_speed_cap(ratio, ratio, accel, 0.0, room_mm);
+    let free = rule.step_speed_cap(&crossing(ratio, accel, f64::INFINITY), FASTEST_MM_S);
+    let beside_rest = rule.step_speed_cap(&crossing(ratio, accel, room_mm), FASTEST_MM_S);
     assert!(
         beside_rest < 0.8 * free,
         "a rest {room_mm} mm away caps the step at {beside_rest} mm/s, free {free} mm/s"
@@ -217,7 +258,7 @@ fn a_rest_beside_a_step_caps_its_speed_at_the_ramp_the_room_leaves() {
     );
     let past_reach = rest_room_reach_mm(free) * (1.0 + 1e-9);
     assert_eq!(
-        rule.step_speed_cap(ratio, ratio, accel, 0.0, past_reach),
+        rule.step_speed_cap(&crossing(ratio, accel, past_reach), FASTEST_MM_S),
         free
     );
 }
