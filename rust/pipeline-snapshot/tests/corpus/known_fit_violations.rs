@@ -42,8 +42,8 @@ pub const KNOWN: &[KnownFitViolations] = &[
         case: "voron_first_layers:1400-4499@74s/tools/bench/configs/trident_kernel.cfg",
         fit: "materialize_source",
         class: FitViolationClass::FloorEdgeBreak,
-        count: 2123,
-        worst: 11.09,
+        count: 2235,
+        worst: 9.67,
     },
 ];
 

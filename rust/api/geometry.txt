@@ -105,7 +105,7 @@ pub geometry::frontend::ExtruderCaps::advance_slope_s: f64
 pub geometry::frontend::ExtruderCaps::axis_index: usize
 pub geometry::frontend::ExtruderCaps::instantaneous_corner_velocity_mm_s: f64
 pub geometry::frontend::ExtruderCaps::leader_kernel_reach_s: f64
-pub geometry::frontend::ExtruderCaps::leader_spill: geometry::frontend::LeaderSpill
+pub geometry::frontend::ExtruderCaps::leader_spill: geometry::LeaderSpillId
 pub geometry::frontend::ExtruderCaps::max_accel_mm_s2: f64
 pub geometry::frontend::ExtruderCaps::max_velocity_mm_s: f64
 pub geometry::frontend::ExtruderCaps::own_jerk_per_accel_hz: f64
@@ -116,11 +116,20 @@ pub fn geometry::frontend::ExtruderCaps::path_jerk_gain(&self, [bool; 3]) -> f64
 pub fn geometry::frontend::ExtruderCaps::ratio_ramp_rule(&self) -> geometry::ratio_ramp::RatioRampRule
 pub fn geometry::frontend::ExtruderCaps::stricter(core::option::Option<Self>, core::option::Option<Self>) -> core::option::Option<Self>
 pub struct geometry::frontend::LeaderSpill
+pub geometry::frontend::LeaderSpill::cell_s: f64
+pub geometry::frontend::LeaderSpill::core_density_per_s: f64
 pub geometry::frontend::LeaderSpill::mass: f64
+pub geometry::frontend::LeaderSpill::mass_within: [f64; 16]
 pub geometry::frontend::LeaderSpill::moment_s: f64
-impl geometry::frontend::LeaderSpill
-pub const geometry::frontend::LeaderSpill::UNSHAPED: Self
-pub fn geometry::frontend::LeaderSpill::planned_speed(&self, f64, f64) -> f64
+pub geometry::frontend::LeaderSpill::spill_within_s: [f64; 16]
+impl geometry::LeaderSpill
+pub const geometry::LeaderSpill::UNSHAPED: Self
+pub fn geometry::LeaderSpill::of_kernels(&[&nurbs::algebra::PiecewisePolynomialKernel]) -> geometry::LeaderSpillId
+pub fn geometry::LeaderSpill::shaped_speed(&self, f64, f64, f64) -> f64
+pub struct geometry::frontend::LeaderSpillId(_)
+impl geometry::LeaderSpillId
+pub const geometry::LeaderSpillId::UNSHAPED: Self
+pub fn geometry::LeaderSpillId::spill(self) -> alloc::rcs::arc::Arc<geometry::LeaderSpill>
 pub struct geometry::frontend::Move
 pub geometry::frontend::Move::feedrate_mm_s: f64
 pub geometry::frontend::Move::limits: geometry::frontend::VelocityLimits
@@ -145,6 +154,7 @@ pub fn geometry::frontend::VelocityLimits::with_extruder_caps(self, core::option
 pub fn geometry::frontend::VelocityLimits::with_z_caps(self, f64, f64) -> core::result::Result<Self, &'static str>
 pub const geometry::frontend::CORNER_DEVIATION_SCV_FACTOR: f64
 pub const geometry::frontend::SPATIAL_AXIS_SETS: usize
+pub const geometry::frontend::SPILL_CELLS: usize
 pub fn geometry::frontend::axis_set([bool; 3]) -> usize
 pub fn geometry::frontend::corner_deviation_from_scv(f64, f64) -> f64
 pub fn geometry::frontend::line_move([f64; 3], [f64; 3], f64, geometry::frontend::MoveContext) -> core::result::Result<geometry::frontend::Move, geometry::frontend::FrontendError>
@@ -394,15 +404,20 @@ pub geometry::ratio_ramp::RatioRampRule::kernel_jerk_per_accel_hz: f64
 pub geometry::ratio_ramp::RatioRampRule::max_accel_mm_s2: f64
 pub geometry::ratio_ramp::RatioRampRule::max_velocity_mm_s: f64
 impl geometry::ratio_ramp::RatioRampRule
+pub fn geometry::ratio_ramp::RatioRampRule::crossing_fits(&self, &geometry::ratio_ramp::StepCrossing) -> bool
 pub fn geometry::ratio_ramp::RatioRampRule::demand(&self, f64, &geometry::ratio_ramp::RatioStep) -> (f64, f64)
 pub fn geometry::ratio_ramp::RatioRampRule::ramp_time(&self, &geometry::ratio_ramp::RatioStep) -> f64
-pub fn geometry::ratio_ramp::RatioRampRule::step_speed_cap(&self, f64, f64, f64, f64, f64) -> f64
+pub fn geometry::ratio_ramp::RatioRampRule::step_speed_cap(&self, f64, impl core::ops::function::Fn(f64) -> geometry::ratio_ramp::StepCrossing) -> f64
 pub struct geometry::ratio_ramp::RatioStep
 pub geometry::ratio_ramp::RatioStep::accel_mm_s2: f64
 pub geometry::ratio_ramp::RatioStep::jerk_mm_s3: f64
 pub geometry::ratio_ramp::RatioStep::peak_ratio: f64
 pub geometry::ratio_ramp::RatioStep::ratio_step: f64
 pub geometry::ratio_ramp::RatioStep::speed_mm_s: f64
+pub struct geometry::ratio_ramp::StepCrossing
+pub geometry::ratio_ramp::StepCrossing::own_flow_mm_s: f64
+pub geometry::ratio_ramp::StepCrossing::rest_room_mm: f64
+pub geometry::ratio_ramp::StepCrossing::step: geometry::ratio_ramp::RatioStep
 pub const geometry::ratio_ramp::ADVANCE_VALLEY_SPEED_MM_S: f64
 pub const geometry::ratio_ramp::RATIO_RAMP_ENVELOPE_SLOPE: f64
 pub const geometry::ratio_ramp::RATIO_RAMP_MAX_TIME_S: f64
@@ -689,6 +704,7 @@ impl core::fmt::Display for geometry::velocity::VelocityError
 pub fn geometry::velocity::VelocityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct geometry::velocity::ExtrusionBudget
 pub geometry::velocity::ExtrusionBudget::axes_in_reach: [bool; 3]
+pub geometry::velocity::ExtrusionBudget::fastest_ceiling_mm_s: f64
 pub geometry::velocity::ExtrusionBudget::ratio_in_reach: f64
 pub geometry::velocity::ExtrusionBudget::rest_holds_s: [f64; 2]
 pub geometry::velocity::ExtrusionBudget::rest_room_mm: f64
@@ -934,7 +950,7 @@ pub geometry::ExtruderCaps::advance_slope_s: f64
 pub geometry::ExtruderCaps::axis_index: usize
 pub geometry::ExtruderCaps::instantaneous_corner_velocity_mm_s: f64
 pub geometry::ExtruderCaps::leader_kernel_reach_s: f64
-pub geometry::ExtruderCaps::leader_spill: geometry::frontend::LeaderSpill
+pub geometry::ExtruderCaps::leader_spill: geometry::LeaderSpillId
 pub geometry::ExtruderCaps::max_accel_mm_s2: f64
 pub geometry::ExtruderCaps::max_velocity_mm_s: f64
 pub geometry::ExtruderCaps::own_jerk_per_accel_hz: f64
@@ -946,6 +962,7 @@ pub fn geometry::frontend::ExtruderCaps::ratio_ramp_rule(&self) -> geometry::rat
 pub fn geometry::frontend::ExtruderCaps::stricter(core::option::Option<Self>, core::option::Option<Self>) -> core::option::Option<Self>
 pub struct geometry::ExtrusionBudget
 pub geometry::ExtrusionBudget::axes_in_reach: [bool; 3]
+pub geometry::ExtrusionBudget::fastest_ceiling_mm_s: f64
 pub geometry::ExtrusionBudget::ratio_in_reach: f64
 pub geometry::ExtrusionBudget::rest_holds_s: [f64; 2]
 pub geometry::ExtrusionBudget::rest_room_mm: f64
@@ -1019,11 +1036,20 @@ pub fn geometry::velocity::law::LawSegment::until_arc(f64, f64, f64, geometry::v
 impl core::cmp::PartialEq for geometry::velocity::law::LawSegment
 pub fn geometry::velocity::law::LawSegment::eq(&self, &Self) -> bool
 pub struct geometry::LeaderSpill
+pub geometry::LeaderSpill::cell_s: f64
+pub geometry::LeaderSpill::core_density_per_s: f64
 pub geometry::LeaderSpill::mass: f64
+pub geometry::LeaderSpill::mass_within: [f64; 16]
 pub geometry::LeaderSpill::moment_s: f64
-impl geometry::frontend::LeaderSpill
-pub const geometry::frontend::LeaderSpill::UNSHAPED: Self
-pub fn geometry::frontend::LeaderSpill::planned_speed(&self, f64, f64) -> f64
+pub geometry::LeaderSpill::spill_within_s: [f64; 16]
+impl geometry::LeaderSpill
+pub const geometry::LeaderSpill::UNSHAPED: Self
+pub fn geometry::LeaderSpill::of_kernels(&[&nurbs::algebra::PiecewisePolynomialKernel]) -> geometry::LeaderSpillId
+pub fn geometry::LeaderSpill::shaped_speed(&self, f64, f64, f64) -> f64
+pub struct geometry::LeaderSpillId(_)
+impl geometry::LeaderSpillId
+pub const geometry::LeaderSpillId::UNSHAPED: Self
+pub fn geometry::LeaderSpillId::spill(self) -> alloc::rcs::arc::Arc<geometry::LeaderSpill>
 pub struct geometry::MachinePos(pub [f64; 3])
 impl geometry::space::MachinePos
 pub fn geometry::space::MachinePos::to_gcode(self, core::option::Option<&geometry::surface::SurfaceTransform>) -> geometry::space::GcodePos
@@ -1094,9 +1120,10 @@ pub geometry::RatioRampRule::kernel_jerk_per_accel_hz: f64
 pub geometry::RatioRampRule::max_accel_mm_s2: f64
 pub geometry::RatioRampRule::max_velocity_mm_s: f64
 impl geometry::ratio_ramp::RatioRampRule
+pub fn geometry::ratio_ramp::RatioRampRule::crossing_fits(&self, &geometry::ratio_ramp::StepCrossing) -> bool
 pub fn geometry::ratio_ramp::RatioRampRule::demand(&self, f64, &geometry::ratio_ramp::RatioStep) -> (f64, f64)
 pub fn geometry::ratio_ramp::RatioRampRule::ramp_time(&self, &geometry::ratio_ramp::RatioStep) -> f64
-pub fn geometry::ratio_ramp::RatioRampRule::step_speed_cap(&self, f64, f64, f64, f64, f64) -> f64
+pub fn geometry::ratio_ramp::RatioRampRule::step_speed_cap(&self, f64, impl core::ops::function::Fn(f64) -> geometry::ratio_ramp::StepCrossing) -> f64
 pub struct geometry::RatioStep
 pub geometry::RatioStep::accel_mm_s2: f64
 pub geometry::RatioStep::jerk_mm_s3: f64
