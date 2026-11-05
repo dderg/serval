@@ -303,6 +303,26 @@ fn relative_failure(what: &str, got: f64, want: f64, tol: f64) -> Result<(), Tes
     )))
 }
 
+/// `s_len()` is the length of the curve `point_at` traces: the Richardson
+/// polygon of the position parametrisation converges to it inside the
+/// chord rule's own truncation-plus-rounding budget.
+fn check_length_equals_the_integrated_speed(segment: &Segment) -> Result<(), TestCaseError> {
+    const CHORDS: usize = 1024;
+    let length = segment.s_len();
+    let (_, kappa_peak) = segment.kappa_peak();
+    let (measured, anchor_scale) = richardson_polygon_length(segment, length, CHORDS);
+    let h = length / (2 * CHORDS) as f64;
+    let kappa_h = kappa_peak * h;
+    let truncation = length * kappa_h * kappa_h * kappa_h * kappa_h / 1920.0;
+    let rounding = (2 * CHORDS) as f64 * f64::EPSILON * anchor_scale;
+    relative_failure(
+        "polygon length",
+        measured,
+        length,
+        POLYGON_BUDGET_SLACK * (truncation + rounding),
+    )
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 384,
@@ -438,24 +458,26 @@ proptest! {
         relative_failure("line ends at its end", norm(sub(segment.point_at(length), line.end)), 0.0, 1e-14 * scale_mm)?;
     }
 
-    /// `s_len()` is the length of the curve `point_at` traces: the Richardson
-    /// polygon of the position parametrisation converges to it inside the
-    /// chord rule's own truncation-plus-rounding budget.
     #[test]
     fn length_equals_the_integrated_speed(segment in arb_segment()) {
-        const CHORDS: usize = 1024;
-        let length = segment.s_len();
-        let (_, kappa_peak) = segment.kappa_peak();
-        let (measured, anchor_scale) = richardson_polygon_length(&segment, length, CHORDS);
-        let h = length / (2 * CHORDS) as f64;
-        let kappa_h = kappa_peak * h;
-        let truncation = length * kappa_h * kappa_h * kappa_h * kappa_h / 1920.0;
-        let rounding = (2 * CHORDS) as f64 * f64::EPSILON * anchor_scale;
-        relative_failure(
-            "polygon length",
-            measured,
-            length,
-            POLYGON_BUDGET_SLACK * (truncation + rounding),
-        )?;
+        check_length_equals_the_integrated_speed(&segment)?;
     }
+}
+
+/// Issue #724: a 64 mm clothoid turning 1.2e-4 rad sits 1.4 Fresnel units
+/// from a spiral centre 3.4e6 mm away, so its Fresnel difference spans
+/// 2.7e-5 units and kept only `ε/2.7e-5` of relative accuracy: the endpoint
+/// fell 9.75e-10 mm short and the polygon length missed `s_len()` by that.
+#[test]
+fn near_straight_clothoid_polygon_length_equals_its_length() {
+    let clothoid = Clothoid::try_new(
+        [0.0; 3],
+        [0.8866889390633168, -0.4623664405455587, 0.0],
+        [0.20437598943117705, 0.3919357318081349, 0.8970043684821436],
+        -1.8941993545693383e-6,
+        -5.590939974115212e-13,
+        63.782676302900505,
+    )
+    .expect("orthonormal frame and finite parameters");
+    check_length_equals_the_integrated_speed(&Segment::Clothoid(clothoid)).unwrap();
 }

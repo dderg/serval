@@ -679,15 +679,16 @@ fn seed_seam_velocities(
             let kappa_dn = dn.kappa0.abs();
             let boundary_vlim =
                 disk::limit_speed(kappa_up, up.accel).min(disk::limit_speed(kappa_dn, dn.accel));
-            let ceiling = up.flat_ceiling.min(dn.flat_ceiling);
-            v[k] = ceiling
-                .min(disk::notch_free_min(ceiling, boundary_vlim))
+            v[k] = up
+                .flat_ceiling
+                .min(dn.flat_ceiling)
+                .min(boundary_vlim)
                 .min(seam_ceilings[k]);
             let step_ceiling = extruder_caps::ratio_step_ceiling(
                 &moves[k - 1],
                 &moves[k],
+                (&budgets[k - 1], &budgets[k]),
                 up.accel.max(dn.accel),
-                budgets[k].rest_room_mm,
             );
             if step_ceiling < v[k] {
                 report.ratio_step_bound += 1;
@@ -1240,6 +1241,8 @@ fn validate_segment<P: CurvatureProfile>(
     Ok(())
 }
 
+#[cfg(test)]
+mod plan_time_monotone_tests;
 #[cfg(test)]
 mod replan_tests;
 #[cfg(test)]

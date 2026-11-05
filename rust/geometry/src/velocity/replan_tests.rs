@@ -5,6 +5,7 @@ use super::*;
 use crate::fitter::{CornerFitConfig, fit_corners, seam_requires_stop};
 use crate::frontend::{ExtruderCaps, LeaderSpill, Move, MoveContext, VelocityLimits, line_move};
 use crate::path::lowering::PositionProfile;
+use nurbs::algebra::PiecewisePolynomialKernel;
 
 const EXTRUDER_AXIS: usize = 3;
 const EXTRUDE_ONLY_V: f64 = 40.0;
@@ -62,10 +63,10 @@ fn extruder(max_velocity: f64, max_accel: f64, slope: f64) -> ExtruderCaps {
         unshaped_leaders: [false, false, true],
         own_jerk_per_accel_hz: f64::INFINITY,
         instantaneous_corner_velocity_mm_s: 2.0,
-        leader_spill: LeaderSpill {
-            mass: 1.05,
-            moment_s: 0.002,
-        },
+        leader_spill: LeaderSpill::of_kernels(&[&PiecewisePolynomialKernel::single_poly(
+            vec![125.0],
+            (-0.004, 0.004),
+        )]),
         leader_kernel_reach_s: 0.004,
     }
 }
@@ -357,8 +358,8 @@ proptest! {
                 extruder_caps::ratio_step_ceiling(
                     &stream.moves[lo + k - 1],
                     &stream.moves[lo + k],
+                    (&stream.budgets[lo + k - 1], &stream.budgets[lo + k]),
                     up_accel.max(dn_accel),
-                    stream.budgets[lo + k].rest_room_mm,
                 ),
             )?;
         }

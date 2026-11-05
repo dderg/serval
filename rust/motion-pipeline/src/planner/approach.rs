@@ -7,8 +7,11 @@
 //! together trace a curve the shaper shrinks as a whole: each blend's
 //! halves get the speed at which a circle through the corner's turn over
 //! the shorter leg to a neighbouring corner keeps its shrink within the
-//! budget's room beyond the cut ([`ShapedCorners::arc_speed_cap`]). A move
-//! leaves here final: the window plans it as it will commit.
+//! budget's room beyond the cut ([`ShapedCorners::arc_speed_cap`]).
+//! Every other curve, an arc or a clothoid no corner blend claims, is
+//! capped at the speed that keeps the shaper's pull on it within its
+//! budget's room. A move leaves here final: the window plans it as it will
+//! commit.
 
 use std::collections::VecDeque;
 
@@ -32,6 +35,9 @@ pub(super) struct Approaches {
     slowing_ahead: Option<(f64, f64)>,
     since_corner_mm: f64,
     last_apex: Option<HeldApex>,
+    /// The last held move when it is a clothoid that may yet turn out to
+    /// open a corner blend; a curve otherwise.
+    unsettled_clothoid: Option<u64>,
 }
 
 /// A blend still held, as its curve cap needs it once the next corner
@@ -53,6 +59,7 @@ impl Approaches {
             slowing_ahead: None,
             since_corner_mm: f64::INFINITY,
             last_apex: None,
+            unsettled_clothoid: None,
         }
     }
 
@@ -79,6 +86,21 @@ impl Approaches {
                     .map_or(Verdict::None, |apex| Verdict::Blend(*id, apex))
             }
         });
+        let closes_blend = matches!(verdict, Verdict::Blend(..));
+        if let Some(id) = self.unsettled_clothoid.take() {
+            if !closes_blend {
+                self.cap_curves(id, corners);
+            }
+        }
+        match &pieces[0].segment.spatial {
+            Some(Segment::Arc(_)) => pieces
+                .iter_mut()
+                .for_each(|piece| cap_curve(piece, corners)),
+            Some(Segment::Clothoid(_)) if !closes_blend => {
+                self.unsettled_clothoid = Some(self.next_id);
+            }
+            _ => {}
+        }
         let corner = match verdict {
             Verdict::None => false,
             Verdict::Stop { turns, slowed } => {
@@ -188,6 +210,16 @@ impl Approaches {
         );
     }
 
+    fn cap_curves(&mut self, id: u64, corners: &ShapedCorners) {
+        for (held, pieces) in &mut self.held {
+            if *held == id {
+                pieces
+                    .iter_mut()
+                    .for_each(|piece| cap_curve(piece, corners));
+            }
+        }
+    }
+
     fn cap_halves(&mut self, halves: [u64; 2], cap: f64) {
         for (id, pieces) in &mut self.held {
             if halves.contains(id) {
@@ -198,6 +230,9 @@ impl Approaches {
 
     /// Releases every held move: the stream ends or drains here.
     pub(super) fn flush(&mut self, release: &mut impl FnMut(Move)) {
+        if let (Some(id), Some(corners)) = (self.unsettled_clothoid, self.corners) {
+            self.cap_curves(id, corners);
+        }
         self.reset();
         for piece in self.held.drain(..).flat_map(|(_, pieces)| pieces) {
             release(piece);
@@ -213,6 +248,7 @@ impl Approaches {
         self.slowing_ahead = None;
         self.since_corner_mm = f64::INFINITY;
         self.last_apex = None;
+        self.unsettled_clothoid = None;
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -297,6 +333,20 @@ impl BlendCorner {
             budget_mm,
             slowed: slowed_accel(half1, half2, theta, cut_mm, corners),
         })
+    }
+}
+
+/// Caps a curve that is no corner blend at the speed that keeps the
+/// shaper's pull on its tightest radius within its budget's room
+/// ([`ShapedCorners::curve_room_mm`]).
+fn cap_curve(m: &mut Move, corners: &ShapedCorners) {
+    let Some(segment) = &m.segment.spatial else {
+        return;
+    };
+    let (_, kappa_peak) = segment.kappa_peak();
+    if kappa_peak.abs() > 0.0 {
+        let room = corners.curve_room_mm(m.limits.corner, m.limits.accel_mm_s2);
+        cap_speed(m, corners.arc_speed_cap(1.0 / kappa_peak.abs(), room));
     }
 }
 

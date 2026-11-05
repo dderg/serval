@@ -22,6 +22,7 @@ use pipeline_snapshot::{ExactTrajectory, SampleSide, Snapshot};
 use super::{motion_settings, planner, waypoints};
 
 const SPATIAL_AXES: usize = 3;
+const PLANAR_AXES: [usize; 2] = [0, 1];
 const SAMPLE_STEP_MM: f64 = 0.01;
 const SAMPLE_DT_MIN_S: f64 = 1e-6;
 const SAMPLE_DT_MAX_S: f64 = 1e-3;
@@ -460,8 +461,9 @@ fn for_each_sample(trajectory: &ExactTrajectory, mut visit: impl FnMut(Point)) {
 }
 
 fn after_hold_gap(trajectory: &ExactTrajectory, t: f64) -> f64 {
-    (0..SPATIAL_AXES)
-        .filter_map(|axis| {
+    PLANAR_AXES
+        .iter()
+        .filter_map(|&axis| {
             let rows = trajectory.rows(axis);
             let next = rows.partition_point(|row| row.t0 <= t);
             rows.get(next).map(|row| row.t0)
@@ -470,16 +472,23 @@ fn after_hold_gap(trajectory: &ExactTrajectory, t: f64) -> f64 {
         .unwrap_or_else(|| panic!("the shaped path is not evaluable at t={t} nor after it"))
 }
 
+/// The toolhead's position and speed at `t`; `None` where X or Y carries no
+/// row (a hold gap). Z reads 0 where it carries none: misses read in XY.
 fn state_at(trajectory: &ExactTrajectory, t: f64) -> Option<(Point, f64)> {
     let mut q = [0.0; SPATIAL_AXES];
     let mut speed_squared = 0.0;
     for (axis, coordinate) in q.iter_mut().enumerate() {
         let state = trajectory
             .eval_axis(axis, t, SampleSide::Right)
-            .or_else(|_| trajectory.eval_axis(axis, t, SampleSide::Left))
-            .ok()?;
-        *coordinate = state.position;
-        speed_squared += state.velocity * state.velocity;
+            .or_else(|_| trajectory.eval_axis(axis, t, SampleSide::Left));
+        match state {
+            Ok(state) => {
+                *coordinate = state.position;
+                speed_squared += state.velocity * state.velocity;
+            }
+            Err(_) if PLANAR_AXES.contains(&axis) => return None,
+            Err(_) => {}
+        }
     }
     Some((q, speed_squared.sqrt()))
 }

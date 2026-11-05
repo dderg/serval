@@ -720,6 +720,7 @@ fn a_follower_chain_derives_its_ratio_ramp_from_its_axis_limits_and_advance() {
             advance_slope_s: 0.04,
             max_velocity_mm_s: 80.0,
             max_accel_mm_s2: 10_000.0,
+            kernel_jerk_per_accel_hz: f64::INFINITY,
         }
     );
     assert!(chains.chains[..3].iter().all(|chain| {

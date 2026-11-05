@@ -1,5 +1,5 @@
 use super::*;
-use crate::frontend::{LeaderSpill, MoveContext, VelocityLimits, line_move};
+use crate::frontend::{LeaderSpillId, MoveContext, VelocityLimits, line_move};
 use crate::ratio_ramp::RATIO_RAMP_MAX_TIME_S;
 use crate::segment::SourceRange;
 
@@ -20,7 +20,7 @@ fn caps() -> ExtruderCaps {
         unshaped_leaders: [false, false, true],
         own_jerk_per_accel_hz: f64::INFINITY,
         instantaneous_corner_velocity_mm_s: 1.0,
-        leader_spill: LeaderSpill::UNSHAPED,
+        leader_spill: LeaderSpillId::UNSHAPED,
         leader_kernel_reach_s: KERNEL_REACH_S,
     }
 }

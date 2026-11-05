@@ -1,6 +1,10 @@
 use super::extrusion_reach::ExtrusionBudget;
 use crate::frontend::ExtruderCaps;
+use std::sync::Arc;
+
+use crate::frontend::LeaderSpill;
 use crate::path::{CurvatureProfile, Segment};
+use crate::ratio_ramp::{RatioStep, StepCrossing};
 
 use super::rate_cap::LinearRate;
 
@@ -200,18 +204,22 @@ fn ratios_on(segment: &crate::path::PathSegment, axis: usize) -> (f64, f64) {
 /// ratio moves: the follower's ratio ramp spreads the step there, with the
 /// change along either segment (a blend's ratio slides from one move's to
 /// the next's over a path a window gathers whole), over at most the longest
-/// ramp time, and over less where the leaders rest `rest_room_mm` along the
-/// path from the join, so the leaders' shaped speed there must stay where
-/// that ramp keeps the advanced follower within its limits under the budget
-/// `accel` around the join ([`crate::RatioRampRule::step_speed_cap`]; the
-/// path's jerk is the budget's own to hold, no slower crossing lowers it),
-/// and the planned speed lower still by what the leaders' kernels spill
-/// into it. Infinite where the ratio does not move, or no path carries it.
+/// ramp time, and over less where the leaders rest within the room `dn`'s
+/// budget gives, so the planned speed at the join must stay where that ramp
+/// keeps the advanced follower within its limits under the budget `accel`
+/// around it ([`crate::RatioRampRule::step_speed_cap`]; the path's jerk is
+/// the budget's own to hold, no slower crossing lowers it). The planned
+/// speeds within the leaders' reach of the join stay under the fastest
+/// ceiling either budget gives and within `accel` of the join's, so the
+/// leaders' [`crate::LeaderSpill`] bounds both their shaped speed and their
+/// own advanced flow there ([`StepFlow`]), and both fall continuously as the
+/// join slows. Infinite where the ratio does not move, no path carries it,
+/// or the leaders cross it within the limits at the fastest ceiling.
 pub(super) fn ratio_step_ceiling(
     up: &crate::Move,
     dn: &crate::Move,
+    (up_budget, dn_budget): (&ExtrusionBudget, &ExtrusionBudget),
     accel: f64,
-    rest_room_mm: f64,
 ) -> f64 {
     let Some(caps) = ExtruderCaps::stricter(up.limits.extruder, dn.limits.extruder) else {
         return f64::INFINITY;
@@ -222,17 +230,89 @@ pub(super) fn ratio_step_ceiling(
     let (up_start, up_end) = ratios_on(&up.segment, caps.axis_index);
     let (dn_start, dn_end) = ratios_on(&dn.segment, caps.axis_index);
     let moved = (up_end - up_start).abs() + (dn_start - up_end).abs() + (dn_end - dn_start).abs();
-    let peak = [up_start, up_end, dn_start, dn_end]
-        .iter()
-        .fold(0.0_f64, |peak, ratio| peak.max(ratio.abs()));
-    let shaped = caps
-        .ratio_ramp_rule()
-        .step_speed_cap(moved, peak, accel, 0.0, rest_room_mm);
-    if shaped.is_infinite() {
-        return shaped;
+    if moved == 0.0 {
+        return f64::INFINITY;
     }
-    caps.leader_spill.planned_speed(shaped, accel)
+    let fastest = up_budget
+        .fastest_ceiling_mm_s
+        .min(dn_budget.fastest_ceiling_mm_s);
+    assert!(
+        fastest.is_finite(),
+        "the join into line {} extrudes with no extruder budget reaching it",
+        dn.source.start_line
+    );
+    let flow = StepFlow::new(&caps, [up_start, up_end, dn_start, dn_end], fastest, accel);
+    caps.ratio_ramp_rule()
+        .step_speed_cap(fastest, |planned| StepCrossing {
+            step: RatioStep {
+                ratio_step: moved,
+                peak_ratio: flow.peak_ratio,
+                speed_mm_s: flow.shaped_speed(planned),
+                accel_mm_s2: accel,
+                jerk_mm_s3: 0.0,
+            },
+            rest_room_mm: dn_budget.rest_room_mm,
+            own_flow_mm_s: flow.own_flow(planned),
+        })
 }
 
+/// What the leaders' kernels make of a planned speed `v₀` at a ratio step
+/// whose planned surroundings stay within `fastest` and within `accel` of
+/// it: a shaped speed of at most `spill(v₀; fastest)` ([`LeaderSpill`]), and
+/// an own advanced flow `r·(σ̇ + k·σ̈)` of at most
+/// `r·spill(v₀ + k·accel; ceiling)`, the kernels shaping `v + k·a ≤
+/// min(ceiling, v₀ + k·accel + accel·|u|)` as linearly as `v`. Its
+/// `ceiling` is the least of `fastest + k·accel` and, where the step
+/// extrudes either side, `V_e/r_b`: every move about the step budgets at
+/// least its peak ratio `r`, at that ratio's level `r_b` or above, and holds
+/// `r_b·(cⱼ + k·Aⱼ)` within the extruder's velocity cap
+/// ([`extruder_capped`]). A retraction answers to the extrude-only caps
+/// instead.
+struct StepFlow {
+    spill: Arc<LeaderSpill>,
+    peak_ratio: f64,
+    fastest: f64,
+    advance_mm_s: f64,
+    advanced_ceiling: f64,
+    accel: f64,
+}
+
+impl StepFlow {
+    fn new(caps: &ExtruderCaps, ratios: [f64; 4], fastest: f64, accel: f64) -> Self {
+        let peak_ratio = ratios
+            .iter()
+            .fold(0.0_f64, |peak, ratio| peak.max(ratio.abs()));
+        let advance_mm_s = caps.advance_slope_s * accel;
+        let per_move_cap = if ratios.iter().any(|ratio| *ratio < 0.0) {
+            f64::INFINITY
+        } else {
+            caps.max_velocity_mm_s / budgeted_ratio(peak_ratio)
+        };
+        Self {
+            spill: caps.leader_spill.spill(),
+            peak_ratio,
+            fastest,
+            advance_mm_s,
+            advanced_ceiling: (fastest + advance_mm_s).min(per_move_cap),
+            accel,
+        }
+    }
+
+    fn shaped_speed(&self, planned: f64) -> f64 {
+        self.spill.shaped_speed(planned, self.fastest, self.accel)
+    }
+
+    fn own_flow(&self, planned: f64) -> f64 {
+        self.peak_ratio
+            * self.spill.shaped_speed(
+                planned + self.advance_mm_s,
+                self.advanced_ceiling,
+                self.accel,
+            )
+    }
+}
+
+#[cfg(test)]
+mod noise_step_tests;
 #[cfg(test)]
 mod tests;

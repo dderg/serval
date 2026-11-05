@@ -90,6 +90,35 @@ const GD: [f64; 11] = [
 /// at this squared argument.
 const AUXILIARY_X2: f64 = 2.5625;
 
+/// Largest `|κ₀·s| + |σ·s²/2|` that `small_turn_offset` evaluates. With
+/// `Δx = s·√(σ/π)` the segment's Fresnel span and `x₀` its start argument,
+/// that sum is `π·Δx·(|x₀| + Δx/2)`. The Fresnel difference is a pair of
+/// `O(1)` values scaled by `√(π/σ)`, so it carries `ε/Δx` of relative error;
+/// the endpoint tails are `O(1/κ)` and carry `ε/(κ·s)`. Neither is bounded as
+/// the turn vanishes. Above this sum the difference is only taken for
+/// `|x₀| ≲ 1.6`, so `Δx > 0.048`; the tails need `|x| ≥ 1.6` at both ends, so
+/// `κ·s = π·|x|·Δx ≥ max(1.6·π·Δx, 0.25 − 1.5·π·Δx²) > 0.23`. Both stay
+/// within ~20ε of the segment length.
+const SMALL_TURN: f64 = 0.25;
+
+/// Highest total power `j + k` the small-turn series keeps. The terms of
+/// power `n` sum in magnitude to `(|a| + |b|)ⁿ/n!`, so the dropped remainder
+/// is below `SMALL_TURN¹³/13! ≈ 2.4e-18` of the segment length.
+const SMALL_TURN_ORDER: usize = 12;
+
+/// `∫₀¹ τⁿ dτ = 1/(n + 1)` for every power `j + 2k` the series reaches.
+const POWER_INTEGRALS: [f64; 2 * SMALL_TURN_ORDER + 1] = power_integrals();
+
+const fn power_integrals() -> [f64; 2 * SMALL_TURN_ORDER + 1] {
+    let mut integrals = [0.0; 2 * SMALL_TURN_ORDER + 1];
+    let mut n = 0;
+    while n < integrals.len() {
+        integrals[n] = 1.0 / (n + 1) as f64;
+        n += 1;
+    }
+    integrals
+}
+
 fn polevl(x: f64, coef: &[f64]) -> f64 {
     coef.iter().fold(0.0, |acc, &c| acc * x + c)
 }
@@ -138,11 +167,41 @@ pub(super) fn clothoid_offset(kappa_0: f64, sigma: f64, s: f64) -> (f64, f64) {
     if sigma == 0.0 {
         return constant_curvature_offset(kappa_0, s);
     }
+    let linear_turn = kappa_0 * s;
+    let quadratic_turn = 0.5 * sigma * s * s;
+    if linear_turn.abs() + quadratic_turn.abs() <= SMALL_TURN {
+        return small_turn_offset(linear_turn, quadratic_turn, s);
+    }
     if sigma < 0.0 {
         let (cx, cy) = rising_curvature_offset(-kappa_0, -sigma, s);
         return (cx, -cy);
     }
     rising_curvature_offset(kappa_0, sigma, s)
+}
+
+/// `∫₀ˢ e^{iφ(t)} dt` with `φ = a·τ + b·τ²`, `τ = t/s`, `a = κ₀·s`,
+/// `b = σ·s²/2`, expanded as
+/// `s·Σ_{j,k} (ia)ʲ/j! · (ib)ᵏ/k! · ∫₀¹ τ^{j+2k} dτ`. No term depends on
+/// where the spiral centre is, so the result keeps a few ulps of `s` however
+/// small `σ` gets. Summing from the highest power down keeps each partial
+/// sum small until its leading term lands.
+fn small_turn_offset(a: f64, b: f64, s: f64) -> (f64, f64) {
+    let mut a_terms = [1.0; SMALL_TURN_ORDER + 1];
+    let mut b_terms = [1.0; SMALL_TURN_ORDER + 1];
+    for n in 1..=SMALL_TURN_ORDER {
+        a_terms[n] = a_terms[n - 1] * a / n as f64;
+        b_terms[n] = b_terms[n - 1] * b / n as f64;
+    }
+    let mut by_power_of_i = [0.0; 4];
+    for (k, b_term) in b_terms.iter().enumerate().rev() {
+        for (j, a_term) in a_terms[..=SMALL_TURN_ORDER - k].iter().enumerate().rev() {
+            by_power_of_i[(j + k) % 4] += a_term * b_term * POWER_INTEGRALS[j + 2 * k];
+        }
+    }
+    (
+        s * (by_power_of_i[0] - by_power_of_i[2]),
+        s * (by_power_of_i[1] - by_power_of_i[3]),
+    )
 }
 
 /// `∫₀ˢ (cos, sin)(κ₀·t) dt`. The sagitta is taken through the half-angle

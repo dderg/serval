@@ -637,6 +637,14 @@ impl ShapedCorners {
         }
     }
 
+    /// The room a curve under `budget` leaves the shaper's pull on it at any
+    /// acceleration at or under `accel`: the budget a turn-free vertex gets,
+    /// less the tolerance the curve was fitted to.
+    #[must_use]
+    pub fn curve_room_mm(&self, budget: CornerBudget, accel: f64) -> f64 {
+        self.cut_room_mm(budget, accel) - self.arc_fit_tolerance_mm(budget, accel)
+    }
+
     /// How far the shaper pulls a circle of `radius_mm` crossed at
     /// `speed_mm_s` inward.
     #[must_use]

@@ -88,6 +88,7 @@ macro_rules! path_accuracy_of {
 path_accuracy_of! {
     fast: "tools/bench/configs/fast.cfg",
     printer: "tools/bench/printer.cfg",
+    neptune: "rust/motion-core/tests/configs/neptune_sim_print.cfg",
     p1_ramp: "tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
     p1_kernel: "tools/bench/configs/profiles/p1_bowden_bedslinger_kernel.cfg",
     p2_ramp: "tools/bench/configs/profiles/p2_i3_direct_drive_ramp.cfg",

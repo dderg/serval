@@ -1467,3 +1467,69 @@ fn accel_change_inside_a_corner_blend_still_plans() {
         );
     }
 }
+
+#[test]
+fn feed_a_hair_above_a_curvature_cap_seeds_the_seam_on_the_cap() {
+    let accel = 18_775.628_234_420_52;
+    let feed = 65.515_204_436_507_99;
+    let entry_kappa = 4.374_325_938_295_120_5;
+    let lims = VelocityLimits::try_new(
+        600.0,
+        accel,
+        crate::CornerBudget::Shaped(0.02),
+        f64::INFINITY,
+    )
+    .unwrap();
+    let clothoid = |kappa_0: f64, sigma: f64, length: f64| {
+        Segment::Clothoid(
+            Clothoid::try_new(
+                [0.0; 3],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                kappa_0,
+                sigma,
+                length,
+            )
+            .unwrap(),
+        )
+    };
+    let segments = [
+        Segment::Line(Line::try_new([0.0; 3], [0.119_951_125_829_401_84, 0.0, 0.0]).unwrap()),
+        clothoid(entry_kappa, -1.708_013_378_731_562_6, 2.559_226_989_806_964),
+        clothoid(
+            -0.655_612_556_352_451_1,
+            419.249_036_962_581_4,
+            0.001_563_778_323_982_090_5,
+        ),
+    ];
+    let moves: Vec<Move> = segments
+        .into_iter()
+        .zip(1..)
+        .map(|(seg, line_no)| Move {
+            segment: PathSegment::try_new(seg, Vec::new()).unwrap(),
+            feedrate_mm_s: feed,
+            limits: lims,
+            source: src(line_no),
+        })
+        .collect();
+    let cap = (accel / entry_kappa).sqrt();
+    assert!(
+        feed > cap && feed / cap - 1.0 < 1e-6,
+        "feed {feed} sits a hair above cap {cap}"
+    );
+    let params = VelocityPlanParams {
+        integration_tol: 1e-9,
+        max_extrude_only_velocity_mm_s: 25.0,
+        max_extrude_only_accel_mm_s2: 1500.0,
+        entry_v: 0.0,
+        step_capacity: None,
+        shaped_corners: None,
+    };
+    let plan = plan_velocity_stops(&moves, &[false; 3], params)
+        .expect("a feed a hair above the entry cap must plan");
+    assert!(
+        plan.moves[1].entry_v <= cap,
+        "clothoid entered at {} above its cap {cap}",
+        plan.moves[1].entry_v
+    );
+}

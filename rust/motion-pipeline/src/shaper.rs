@@ -40,7 +40,7 @@ use hull::{FittedPiece, HullBudget};
 use taylor::{Ball, TaylorModel};
 
 pub(crate) use exact::{ExactConvolution, ExactKernel, ExactPiece};
-pub(crate) use hidden_breaks::ShapedBreaks;
+pub(crate) use hidden_breaks::{CruiseEnds, ShapedBreaks};
 
 /// A signal's enclosure over a stretch: a slice of one the signal keeps,
 /// borrowed for the asking, or one built for it.
@@ -2163,8 +2163,14 @@ fn fit_axis_targets(
     let seed_sets = targets
         .iter()
         .map(|target| {
-            fit_seed_times(axis, target.t_start, target.t_end, shaped_times)
-                .map(|seeds| shaped_breaks.select_seeds(seeds, hidden_break_input, fit_tol))
+            fit_seed_times(axis, target.t_start, target.t_end, shaped_times).map(|seeds| {
+                shaped_breaks.select_seeds(
+                    seeds,
+                    hidden_break_input,
+                    fit_tol,
+                    CruiseEnds::LeftToTheFit,
+                )
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut scale_times = seed_sets.iter().flatten().copied().collect::<Vec<_>>();
@@ -3985,6 +3991,7 @@ fn fit_leader_target<S: TrackSignal>(
         fit_seed_times(fit.axis, fit.t_start, fit.t_end, fit.seed_breakpoints)?,
         hidden_break_input,
         fit.fit_tol,
+        CruiseEnds::LeftToTheFit,
     );
     let plan = plan_over_seeds(&fit, sig, seeds)?;
     fit_pieces_over_plan(&fit, sig, plan, true)
@@ -5310,8 +5317,7 @@ fn with_nonlinear_advance_fit<R>(
         .expect("nonlinear advance: empty track")
         .u_start;
     let t_end = pieces.last().expect("nonlinear advance: empty track").u_end;
-    let mut breakpoints = track.knots().to_vec();
-    breakpoints.extend(nonlinear_transition_breakpoints(&sig));
+    let breakpoints = nonlinear_advance_seeds(track, &sig, t_start.abs().max(t_end.abs()), fit_tol);
     fit(
         AxisFit {
             axis,
@@ -5324,6 +5330,35 @@ fn with_nonlinear_advance_fit<R>(
         },
         &sig,
     )
+}
+
+/// The track's knots plus the advance law's transition times. A transition
+/// is a smooth feature of the signal, a hint where to split, while a knot can
+/// carry an acceleration break. A hint closer than the cubic floor to a knot
+/// would coalesce with it, and a run rolls onto its rightmost seed, so a hint
+/// just past a knot moved the seam off the break: the span before it then
+/// ended inside the next piece and bent by `6·½·a·d²/h²` to meet that piece's
+/// position `d` past the break. A knot within the floor already splits where
+/// the hint would, so such hints are dropped and the seam stays on the break.
+fn nonlinear_advance_seeds(
+    track: &nurbs::ScalarNurbs,
+    sig: &NonlinearAdvanceSignal,
+    time_scale: f64,
+    fit_tol: FitTol,
+) -> Vec<f64> {
+    let knots = track.knots();
+    let hints = nonlinear_transition_breakpoints(sig);
+    let mut seeds = knots.to_vec();
+    seeds.extend_from_slice(&hints);
+    let floor = ladder_resolution_floor(sig, &seeds, time_scale, fit_tol).cubic;
+    seeds.truncate(knots.len());
+    seeds.extend(hints.into_iter().filter(|&hint| {
+        let after = knots.partition_point(|&knot| knot <= hint);
+        let clear_of = |knot: f64| (hint - knot).abs() >= floor;
+        knots[..after].last().is_none_or(|&knot| clear_of(knot))
+            && knots.get(after).is_none_or(|&knot| clear_of(knot))
+    }));
+    seeds
 }
 
 /// The advance law applied to a polynomial track, evaluated as a signal:
