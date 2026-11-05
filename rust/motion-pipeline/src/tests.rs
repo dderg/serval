@@ -62,13 +62,7 @@ fn assert_segment_axes_finite(segment: &ContinuousSegment) {
 }
 fn axis_breakpoints(axis: &ContinuousAxis) -> (Vec<f64>, usize) {
     match axis {
-        ContinuousAxis::Analytic { span, .. } => (
-            span.phases
-                .iter()
-                .flat_map(|phase| [span.t_start + phase.t0, span.t_start + phase.end_time()])
-                .collect(),
-            3,
-        ),
+        ContinuousAxis::Analytic { .. } => (axis.breakpoints(), 3),
         ContinuousAxis::Spline(curve) | ContinuousAxis::RelativeSpline { curve, .. } => {
             (curve.knots().to_vec(), curve.degree() as usize)
         }

@@ -293,6 +293,7 @@ pub fn trajectory::continuous::AnalyticMoveSpan::cap_contact_times(&self) -> imp
 pub fn trajectory::continuous::AnalyticMoveSpan::eval_axis(&self, usize, f64) -> core::result::Result<trajectory::continuous::Pva, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::AnalyticMoveSpan::eval_axis_pvaj(&self, usize, f64) -> core::result::Result<trajectory::continuous::Pvaj, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::AnalyticMoveSpan::has_variable_surface(&self) -> bool
+pub fn trajectory::continuous::AnalyticMoveSpan::phase_extents(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&geometry::velocity::law::LawSegment, f64, f64)> + '_
 pub fn trajectory::continuous::AnalyticMoveSpan::phase_seam_times(&self) -> impl core::iter::traits::iterator::Iterator<Item = f64> + '_
 pub fn trajectory::continuous::AnalyticMoveSpan::surface_seam_times(&self) -> core::option::Option<alloc::vec::Vec<f64>>
 pub fn trajectory::continuous::AnalyticMoveSpan::try_new(geometry::frontend::Move, alloc::rcs::arc::Arc<[geometry::velocity::law::LawSegment]>, f64, f64, f64, alloc::rcs::arc::Arc<[f64]>, trajectory::continuous::SurfaceMode) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
@@ -551,6 +552,7 @@ pub fn trajectory::continuous::AnalyticMoveSpan::cap_contact_times(&self) -> imp
 pub fn trajectory::continuous::AnalyticMoveSpan::eval_axis(&self, usize, f64) -> core::result::Result<trajectory::continuous::Pva, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::AnalyticMoveSpan::eval_axis_pvaj(&self, usize, f64) -> core::result::Result<trajectory::continuous::Pvaj, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::AnalyticMoveSpan::has_variable_surface(&self) -> bool
+pub fn trajectory::continuous::AnalyticMoveSpan::phase_extents(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&geometry::velocity::law::LawSegment, f64, f64)> + '_
 pub fn trajectory::continuous::AnalyticMoveSpan::phase_seam_times(&self) -> impl core::iter::traits::iterator::Iterator<Item = f64> + '_
 pub fn trajectory::continuous::AnalyticMoveSpan::surface_seam_times(&self) -> core::option::Option<alloc::vec::Vec<f64>>
 pub fn trajectory::continuous::AnalyticMoveSpan::try_new(geometry::frontend::Move, alloc::rcs::arc::Arc<[geometry::velocity::law::LawSegment]>, f64, f64, f64, alloc::rcs::arc::Arc<[f64]>, trajectory::continuous::SurfaceMode) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
