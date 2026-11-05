@@ -1275,47 +1275,49 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<Vec<RailK
         sigma.to_bits(),
         u64::from(brake),
     ];
-    RECENT_RAILS.with(|recent| {
-        recent
-            .borrow_mut()
-            .read_or_keep(key, || integrate_rail_arc_afresh(law, v0, ds))
-    })
+    let recent = || RECENT_RAILS.lock().expect("a rail integration panicked");
+    if let Some(Rail(knots)) = recent().read(&key) {
+        return knots;
+    }
+    let knots = integrate_rail_arc_afresh(law, v0, ds);
+    recent().keep(key, Rail(knots.clone()));
+    knots
 }
 
-/// The rails this thread integrated lately, by their inputs to the bit: a
-/// velocity plan settles the same members from the same speeds again as
-/// moves join the window it plans, and the integration is a pure function
-/// of them. Two generations of [`RECENT_RAILS_GENERATION`] entries each:
-/// the older is dropped when the newer fills.
+/// The rails integrated lately, by their inputs to the bit: a velocity plan
+/// settles the same members from the same speeds again as moves join the
+/// window it plans, and the shaper's workers read the same rails again, so
+/// every thread reads the one cache. The integration is a pure function of
+/// the key and runs outside the lock: two threads integrating one key at
+/// once keep the same rail. Two generations of [`RECENT_RAILS_GENERATION`]
+/// entries each: the older is dropped when the newer fills.
 #[derive(Default)]
 struct RecentRails {
-    newer: std::collections::HashMap<[u64; 6], Option<Arc<Vec<RailKnot>>>>,
-    older: std::collections::HashMap<[u64; 6], Option<Arc<Vec<RailKnot>>>>,
+    newer: std::collections::HashMap<[u64; 6], Rail>,
+    older: std::collections::HashMap<[u64; 6], Rail>,
 }
+
+/// One integrated rail: its knots, or `None` where its speed folds to rest.
+#[derive(Clone)]
+struct Rail(Option<Arc<Vec<RailKnot>>>);
 
 const RECENT_RAILS_GENERATION: usize = 4096;
 
 impl RecentRails {
-    fn read_or_keep(
-        &mut self,
-        key: [u64; 6],
-        integrate: impl FnOnce() -> Option<Arc<Vec<RailKnot>>>,
-    ) -> Option<Arc<Vec<RailKnot>>> {
-        if let Some(knots) = self.newer.get(&key).or_else(|| self.older.get(&key)) {
-            return knots.clone();
-        }
-        let knots = integrate();
+    fn read(&self, key: &[u64; 6]) -> Option<Rail> {
+        self.newer.get(key).or_else(|| self.older.get(key)).cloned()
+    }
+
+    fn keep(&mut self, key: [u64; 6], knots: Rail) {
         if self.newer.len() == RECENT_RAILS_GENERATION {
             self.older = std::mem::take(&mut self.newer);
         }
-        self.newer.insert(key, knots.clone());
-        knots
+        self.newer.insert(key, knots);
     }
 }
 
-thread_local! {
-    static RECENT_RAILS: std::cell::RefCell<RecentRails> = std::cell::RefCell::default();
-}
+static RECENT_RAILS: std::sync::LazyLock<std::sync::Mutex<RecentRails>> =
+    std::sync::LazyLock::new(std::sync::Mutex::default);
 
 fn integrate_rail_arc_afresh(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<Vec<RailKnot>>> {
     let start = RailKnot {
