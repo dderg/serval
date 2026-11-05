@@ -575,14 +575,8 @@ pub(crate) fn project_followers(
             for (offset, read) in reads.into_iter().enumerate() {
                 let i = first_new + offset;
                 let table_start = state.s_ingested_end;
-                let shaped_ds = state.ingest(
-                    &base[i],
-                    &frontier[i],
-                    axis,
-                    leaders,
-                    &base[i + 1..],
-                    (read.shaped_ds, read.raw_moves),
-                );
+                let shaped_ds =
+                    state.ingest(&base[i], &frontier[i], axis, leaders, &base[i + 1..], &read);
                 let s_start = state.aligned_span_start(next_s);
                 let leg = RampLeg {
                     shaped: &frontier[i],
@@ -1748,11 +1742,10 @@ impl FollowerState {
     /// previous ratio) and starts the next move in it (its lead, extruded at
     /// the next one). Both are measured as the shaped leaders' distance
     /// from the rest point at the segment's edges, so the move on each side
-    /// extrudes exactly the material of the path it is shaped onto. Any
-    /// shaped arc beyond them — the fit's back-and-forth near the rest point
-    /// — joins the lead (see [`Self::push_lead`]): a separate idle span
-    /// would step the ratio, and so the follower's velocity, where the
-    /// leaders are already moving.
+    /// extrudes the material of the path it is shaped onto. Any shaped arc
+    /// beyond them joins one of them ([`Self::push_rest_arcs`]): a separate
+    /// idle span would step the ratio, and so the follower's velocity, where
+    /// the leaders are already moving.
     fn ingest(
         &mut self,
         raw: &ContinuousSegment,
@@ -1760,8 +1753,14 @@ impl FollowerState {
         axis: usize,
         leaders: &[usize],
         upcoming: &[ContinuousSegment],
-        (shaped_ds, raw_moves): (f64, bool),
+        read: &IngestRead,
     ) -> f64 {
+        let IngestRead {
+            shaped_ds,
+            ref odometer,
+            raw_moves,
+            ..
+        } = *read;
         if let Some(through) = self.ingested_through_t {
             assert!(
                 raw.t_end > through + GRID_DEDUP_EPS_S,
@@ -1800,16 +1799,59 @@ impl FollowerState {
             self.push_span(shaped_ds, tail_ratio, tail_ratio);
             return shaped_ds;
         }
-        if tail > SPAN_MIN_LEN_MM {
-            self.push_span(tail, tail_ratio, tail_ratio);
-        }
         let lead_ratio = upcoming
             .iter()
             .find(|seg| seg.spatial_path)
             .and_then(|seg| seg.followers.iter().find(|f| f.axis_index == axis))
             .map_or(0.0, |f| f.ratio);
-        self.push_lead(lead, idle, lead_ratio);
+        let rest_arc = odometer.covered_until(arrival_at_rest(raw, shaped, leaders));
+        self.push_rest_arcs((tail, idle, lead), rest_arc, (tail_ratio, lead_ratio));
         shaped_ds
+    }
+
+    /// Lays a rest segment's arcs, the ratio stepping from the tail's to
+    /// the lead's only `rest_arc` into the segment, where the leaders reach
+    /// the rest point. The tail's straight distance from the rest
+    /// point falls short of that arc where the shaped axes curve into the
+    /// rest unlike each other or the fit wanders toward it: the tail joins
+    /// what of the idle arc the leaders cover before they rest
+    /// ([`Self::push_tail`]), the lead the rest of it ([`Self::push_lead`]).
+    /// A tail too short to lay its own span leaves the whole idle arc to the
+    /// lead.
+    fn push_rest_arcs(
+        &mut self,
+        (tail, idle, lead): (f64, f64, f64),
+        rest_arc: f64,
+        (tail_ratio, lead_ratio): (f64, f64),
+    ) {
+        if tail <= SPAN_MIN_LEN_MM {
+            self.push_lead(lead, idle, lead_ratio);
+            return;
+        }
+        let tail_idle = (rest_arc - tail).clamp(0.0, idle);
+        self.push_tail(tail, tail_idle, tail_ratio);
+        self.push_lead(lead, idle - tail_idle, lead_ratio);
+    }
+
+    /// Lays a tail's material, `tail_ratio × tail`, over the tail joined with
+    /// the idle arc, opening on the tail ratio and falling linearly from
+    /// there: to `tail_ratio·(2·tail/joined − 1)` at the rest where the idle
+    /// arc is no longer than the tail, else to zero over twice the tail and
+    /// flat at zero after, the deepest it goes without changing sign. Its
+    /// slope steps where the spill starts, the furthest from the rest the
+    /// width field ramps it, and the ratio only at the rest. A tail with no
+    /// idle arc or no ratio lays one flat span.
+    fn push_tail(&mut self, tail: f64, idle: f64, tail_ratio: f64) {
+        let joined = tail + idle;
+        if idle <= SPAN_MIN_LEN_MM || tail_ratio == 0.0 {
+            self.push_span(joined, tail_ratio, tail_ratio);
+            return;
+        }
+        let ramp = joined.min(2.0 * tail);
+        self.push_span(ramp, tail_ratio, tail_ratio * (2.0 * tail / ramp - 1.0));
+        if joined - ramp > SPAN_MIN_LEN_MM {
+            self.push_span(joined - ramp, 0.0, 0.0);
+        }
     }
 
     /// Lays a lead's material, `lead_ratio × lead`, over the lead joined with
@@ -2335,6 +2377,74 @@ impl LeaderPieces {
 struct OdometerLeaves {
     grid: Vec<f64>,
     leaves: Vec<(f64, OdometerLeaf)>,
+}
+
+impl OdometerLeaves {
+    /// The arc the leaders cover from the segment's start until `t`.
+    fn covered_until(&self, t: f64) -> f64 {
+        let mut covered = 0.0;
+        for (end, leaf) in &self.leaves {
+            if t <= *end {
+                return covered + leaf.covered_until(t);
+            }
+            covered += leaf.covered_until(*end);
+        }
+        covered
+    }
+}
+
+/// Probes per leader knot interval the leaders of a rest segment are
+/// searched with for where they reach the rest point.
+const REST_POINT_PROBES_PER_INTERVAL: usize = 8;
+const REST_POINT_REFINEMENTS: usize = 64;
+
+/// When the shaped leaders of `shaped` first stop closing on where the raw
+/// ones of `raw` rest: the first probe their distance from it grows after,
+/// refined by golden-section search over the probes either side. The fit's
+/// back-and-forth around the rest point after that changes nothing of how
+/// they arrived.
+fn arrival_at_rest(raw: &ContinuousSegment, shaped: &ContinuousSegment, leaders: &[usize]) -> f64 {
+    let rest_at = leader_support(raw, leaders).0;
+    let distance_sq = |t: f64| {
+        leaders
+            .iter()
+            .map(|&axis| {
+                let delta =
+                    axis_pva(&shaped.axes[axis], t).0 - axis_pva(&raw.axes[axis], rest_at).0;
+                delta * delta
+            })
+            .sum::<f64>()
+    };
+    let grid = axis_grid(shaped, leaders);
+    let mut probes: Vec<f64> = grid
+        .windows(2)
+        .flat_map(|window| {
+            (0..REST_POINT_PROBES_PER_INTERVAL).map(move |k| {
+                window[0]
+                    + (window[1] - window[0]) * k as f64 / REST_POINT_PROBES_PER_INTERVAL as f64
+            })
+        })
+        .collect();
+    probes.push(grid[grid.len() - 1]);
+    let distances: Vec<f64> = probes.iter().map(|&t| distance_sq(t)).collect();
+    let nearest = distances
+        .windows(2)
+        .position(|pair| pair[1] > pair[0])
+        .unwrap_or(distances.len() - 1);
+    let (mut lo, mut hi) = (
+        probes[nearest.saturating_sub(1)],
+        probes[(nearest + 1).min(probes.len() - 1)],
+    );
+    let golden = 0.5 * (5.0_f64.sqrt() - 1.0);
+    for _ in 0..REST_POINT_REFINEMENTS {
+        let (left, right) = (hi - golden * (hi - lo), lo + golden * (hi - lo));
+        if distance_sq(left) <= distance_sq(right) {
+            hi = right;
+        } else {
+            lo = left;
+        }
+    }
+    0.5 * (lo + hi)
 }
 
 /// What ingest read off one shaped segment's leaders that its source fit

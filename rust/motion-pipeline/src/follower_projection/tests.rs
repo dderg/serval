@@ -1332,6 +1332,118 @@ fn a_lead_with_no_ratio_lays_one_flat_span() {
     }
 }
 
+fn laid_rest(arcs: (f64, f64, f64), rest_arc: f64, ratios: (f64, f64)) -> FollowerState {
+    let mut state = FollowerState::default();
+    state.push_rest_arcs(arcs, rest_arc, ratios);
+    state
+}
+
+/// `voron_first_layers` on the kernel-free fast bench config at t≈4.749:
+/// the shaped axes curve into the stop after an extrusion and out of it
+/// into a travel, covering 4.5 µm more than the tail's and the lead's
+/// straight distances from the rest point, 1.8 µm of it before they rest.
+const CURVED_TAIL_MM: f64 = 0.111;
+const CURVED_IDLE_MM: f64 = 4.5e-3;
+const CURVED_LEAD_MM: f64 = 0.281;
+const CURVED_REST_ARC_MM: f64 = CURVED_TAIL_MM + 1.8e-3;
+const CURVED_TAIL_RATIO: f64 = 0.0369;
+
+#[test]
+fn the_ratio_steps_from_the_tail_to_the_lead_where_the_leaders_rest() {
+    let state = laid_rest(
+        (CURVED_TAIL_MM, CURVED_IDLE_MM, CURVED_LEAD_MM),
+        CURVED_REST_ARC_MM,
+        (CURVED_TAIL_RATIO, 0.0),
+    );
+    let seams: Vec<f64> = state
+        .spans
+        .windows(2)
+        .filter(|pair| pair[0].r1 != pair[1].r0 || pair[0].ratio_slope() != pair[1].ratio_slope())
+        .map(|pair| pair[0].s1)
+        .collect();
+    assert_eq!(
+        seams.len(),
+        1,
+        "the ratio or its slope changes at {seams:?}: {:?}",
+        state.spans
+    );
+    assert!(
+        (seams[0] - CURVED_REST_ARC_MM).abs() <= 1e-15,
+        "the ratio steps at s={} while the leaders still move toward the rest at s={}",
+        seams[0],
+        CURVED_REST_ARC_MM
+    );
+    assert_eq!(
+        state.spans[0].r0, CURVED_TAIL_RATIO,
+        "the tail must open on its ratio"
+    );
+    let tail_material = state.spans_delta_e(0.0, 0.0, CURVED_REST_ARC_MM);
+    assert!(
+        (tail_material - CURVED_TAIL_RATIO * CURVED_TAIL_MM).abs() <= 1e-15,
+        "the tail lays {tail_material} mm, its command is {}",
+        CURVED_TAIL_RATIO * CURVED_TAIL_MM
+    );
+}
+
+#[test]
+fn a_tail_shorter_than_its_idle_arc_falls_to_zero_and_keeps_its_material() {
+    let (tail, tail_idle, ratio) = (2e-5, 5e-5, 0.05);
+    let state = laid_rest((tail, tail_idle, 0.0), tail + tail_idle, (ratio, 0.0));
+    assert_eq!(
+        state
+            .spans
+            .iter()
+            .map(|span| (span.r0, span.r1))
+            .collect::<Vec<_>>(),
+        vec![(ratio, 0.0), (0.0, 0.0)],
+        "a tail shorter than its idle arc falls to zero over twice its length"
+    );
+    let end = state.spans.last().expect("the tail lays spans").s1;
+    let material = state.spans_delta_e(0.0, 0.0, end);
+    assert!(
+        (material - ratio * tail).abs() <= 1e-18,
+        "the tail lays {material} mm, its command is {}",
+        ratio * tail
+    );
+}
+
+#[test]
+fn the_lead_keeps_what_the_tail_leaves_of_the_idle_arc() {
+    let lead_ratio = 0.05;
+    let state = laid_rest(
+        (CURVED_TAIL_MM, CURVED_IDLE_MM, CURVED_LEAD_MM),
+        CURVED_REST_ARC_MM,
+        (CURVED_TAIL_RATIO, lead_ratio),
+    );
+    let end = state.spans.last().expect("the rest lays spans").s1;
+    let lead_material = state.spans_delta_e(0.0, CURVED_REST_ARC_MM, end);
+    assert!(
+        (end - (CURVED_TAIL_MM + CURVED_IDLE_MM + CURVED_LEAD_MM)).abs() <= 1e-15,
+        "the spans cover {end} mm of the segment's arc"
+    );
+    assert!(
+        (lead_material - lead_ratio * CURVED_LEAD_MM).abs() <= 1e-15,
+        "the lead lays {lead_material} mm, its command is {}",
+        lead_ratio * CURVED_LEAD_MM
+    );
+}
+
+#[test]
+fn a_tail_too_short_for_a_span_leaves_the_idle_arc_to_the_lead() {
+    let (idle, lead, lead_ratio) = (1e-5, 3e-5, 0.05);
+    let rest = laid_rest((1e-13, idle, lead), 5e-6, (0.04, lead_ratio));
+    let mut lead_alone = FollowerState::default();
+    lead_alone.push_lead(lead, idle, lead_ratio);
+    let ratios = |state: &FollowerState| {
+        state
+            .spans
+            .iter()
+            .map(|span| (span.s1 - span.s0, span.r0, span.r1))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ratios(&rest), ratios(&lead_alone));
+}
+
 const DENSE_SEGMENT: (f64, f64) = (11.042_946_570_120_918, 11.049_146_570_120_918);
 const DENSE_ODOMETER_START: f64 = 1_825.258_274_639_182_7;
 const DENSE_LEADERS: [usize; 3] = [0, 1, 2];
