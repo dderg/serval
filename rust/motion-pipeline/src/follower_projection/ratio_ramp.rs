@@ -643,7 +643,12 @@ impl WidthField {
 
     /// Makes `sample` a node of target `base` scaled to the ramp time
     /// there, or the width the seams around ask for if wider, once it lies
-    /// far enough past the last node kept in time and along the path.
+    /// far enough past the last node kept in time and along the path. A
+    /// node the cone of a rest holds at zero width — the grid's first tick
+    /// on the rest point a stream or dwell opens on — opens no window, so
+    /// it spaces no node after it: thinning behind it would leave a motion
+    /// shorter than half a ramp time between two rests without a single
+    /// open node, and a ratio step in it unramped.
     fn keep_if_due(&mut self, sample: TimeSample, base: f64) {
         let ramp_time = self.ramp_time_at(sample.t);
         let target =
@@ -654,7 +659,8 @@ impl WidthField {
         });
         if due {
             self.push(sample.s, target);
-            self.last_kept = Some(KeptNode {
+            let opens_a_window = self.nodes.last().is_some_and(|node| node.envelope > 0.0);
+            self.last_kept = opens_a_window.then_some(KeptNode {
                 t: sample.t,
                 s: sample.s,
                 ramp_time,
