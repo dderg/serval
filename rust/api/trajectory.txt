@@ -147,6 +147,7 @@ pub fn trajectory::chain::CompiledChain::instantaneous_corner_velocity(&self) ->
 pub fn trajectory::chain::CompiledChain::is_empty(&self) -> bool
 pub fn trajectory::chain::CompiledChain::is_zero_support_only(&self) -> bool
 pub fn trajectory::chain::CompiledChain::kernel(&self) -> core::option::Option<&nurbs::algebra::PiecewisePolynomialKernel>
+pub fn trajectory::chain::CompiledChain::kernel_jerk_per_accel_hz(&self) -> f64
 pub fn trajectory::chain::CompiledChain::kernel_variance_s2(&self) -> f64
 pub fn trajectory::chain::CompiledChain::leading_transform(&self) -> core::option::Option<&trajectory::chain::ChainStage>
 pub fn trajectory::chain::CompiledChain::max_input_window(&self) -> (f64, f64)
@@ -624,6 +625,7 @@ pub fn trajectory::chain::CompiledChain::instantaneous_corner_velocity(&self) ->
 pub fn trajectory::chain::CompiledChain::is_empty(&self) -> bool
 pub fn trajectory::chain::CompiledChain::is_zero_support_only(&self) -> bool
 pub fn trajectory::chain::CompiledChain::kernel(&self) -> core::option::Option<&nurbs::algebra::PiecewisePolynomialKernel>
+pub fn trajectory::chain::CompiledChain::kernel_jerk_per_accel_hz(&self) -> f64
 pub fn trajectory::chain::CompiledChain::kernel_variance_s2(&self) -> f64
 pub fn trajectory::chain::CompiledChain::leading_transform(&self) -> core::option::Option<&trajectory::chain::ChainStage>
 pub fn trajectory::chain::CompiledChain::max_input_window(&self) -> (f64, f64)

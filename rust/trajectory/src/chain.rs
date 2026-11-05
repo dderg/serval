@@ -142,9 +142,29 @@ impl ChainStage {
 /// Upstream Klipper's default extruder `instantaneous_corner_velocity`.
 pub const DEFAULT_INSTANTANEOUS_CORNER_VELOCITY_MM_S: f64 = 1.0;
 
+/// A chain's smoothing kernel with its jerk gain, the kernel's total
+/// variation ([`PiecewisePolynomialKernel::directional_variation`]): what
+/// it smooths a signal bounded by `A` into has a slope of at most that
+/// gain times `A`.
+#[derive(Debug, Clone)]
+struct ChainKernel {
+    shape: PiecewisePolynomialKernel,
+    jerk_per_accel_hz: f64,
+}
+
+impl ChainKernel {
+    fn new(shape: PiecewisePolynomialKernel) -> Self {
+        let jerk_per_accel_hz = PiecewisePolynomialKernel::directional_variation(&[&shape]);
+        Self {
+            shape,
+            jerk_per_accel_hz,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CompiledChain {
-    kernel: Option<PiecewisePolynomialKernel>,
+    kernel: Option<ChainKernel>,
     transform: Option<(TransformPlacement, ChainStage)>,
     /// A projected follower motor's velocity and acceleration limits, which
     /// set how long its ratio ramp spreads each extrusion-ratio step (see
@@ -280,7 +300,9 @@ impl CompiledChain {
             }
             slot_sources[slot] = Some(inst.name());
             match stage {
-                ChainStage::SmoothKernel(kernel) => compiled.kernel = Some(kernel),
+                ChainStage::SmoothKernel(kernel) => {
+                    compiled.kernel = Some(ChainKernel::new(kernel))
+                }
                 transform => {
                     let placement = if compiled.kernel.is_some() {
                         TransformPlacement::AfterKernel
@@ -319,14 +341,13 @@ impl CompiledChain {
 
     #[must_use]
     pub fn kernel_variance_s2(&self) -> f64 {
-        self.kernel
-            .as_ref()
+        self.kernel()
             .map_or(0.0, |kernel| kernel.second_moment().max(0.0))
     }
 
     #[must_use]
     pub fn max_input_window(&self) -> (f64, f64) {
-        self.kernel.as_ref().map_or((0.0, 0.0), |kernel| {
+        self.kernel().map_or((0.0, 0.0), |kernel| {
             let (lo, hi) = kernel.support();
             ((-hi).min(0.0), (-lo).max(0.0))
         })
@@ -345,7 +366,7 @@ impl CompiledChain {
             "a trailing transform requires a kernel"
         );
         Self {
-            kernel,
+            kernel: kernel.map(ChainKernel::new),
             transform,
             follower_limits: None,
             instantaneous_corner_velocity: None,
@@ -353,7 +374,17 @@ impl CompiledChain {
     }
 
     pub fn kernel(&self) -> Option<&PiecewisePolynomialKernel> {
-        self.kernel.as_ref()
+        self.kernel.as_ref().map(|kernel| &kernel.shape)
+    }
+
+    /// The slope a signal bounded by `A` keeps through this chain's
+    /// kernel, per unit of `A`: infinite without a kernel, where a step
+    /// passes through whole.
+    #[must_use]
+    pub fn kernel_jerk_per_accel_hz(&self) -> f64 {
+        self.kernel
+            .as_ref()
+            .map_or(f64::INFINITY, |kernel| kernel.jerk_per_accel_hz)
     }
 
     pub fn leading_transform(&self) -> Option<&ChainStage> {
@@ -416,6 +447,7 @@ impl CompiledChain {
             advance_slope_s: self.advance_slope(),
             max_velocity_mm_s: limits.max_velocity_mm_s,
             max_accel_mm_s2: limits.max_accel_mm_s2,
+            kernel_jerk_per_accel_hz: self.kernel_jerk_per_accel_hz(),
         }
     }
 
@@ -491,7 +523,7 @@ impl AxisChainSet {
             chains: kernels[..3]
                 .iter()
                 .map(|k| CompiledChain {
-                    kernel: k.clone(),
+                    kernel: k.clone().map(ChainKernel::new),
                     transform: None,
                     follower_limits: None,
                     instantaneous_corner_velocity: None,
