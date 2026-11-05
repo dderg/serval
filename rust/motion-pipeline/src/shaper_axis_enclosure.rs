@@ -383,7 +383,7 @@ impl<'a> AxisLaw<'a> {
                 [
                     position,
                     v.mul(&heading),
-                    a.mul(&heading).add(&v.mul(v).mul(&turn)),
+                    a.mul(&heading).add(&window.speed_squared().mul(&turn)),
                 ]
             }
             AxisLaw::Clothoid(clothoid, axis) => {
@@ -405,7 +405,7 @@ impl<'a> AxisLaw<'a> {
                 [
                     clothoid_position(clothoid, axis, s, &window.spread_trig),
                     v.mul(&heading),
-                    a.mul(&heading).add(&v.mul(v).mul(&turn)),
+                    a.mul(&heading).add(&window.speed_squared().mul(&turn)),
                 ]
             }
             AxisLaw::Follower {
@@ -431,7 +431,7 @@ impl<'a> AxisLaw<'a> {
                 [
                     offset.add_ball(Ball::exact(start)),
                     ratio.mul(v),
-                    ratio.mul(a).add(&v.mul(v).scale(slope)),
+                    ratio.mul(a).add(&window.speed_squared().scale(slope)),
                 ]
             }
         }
@@ -506,7 +506,7 @@ impl<'a> AxisLaw<'a> {
         Some(
             jerk.mul(&heading)
                 .add(&a.mul(v).mul(&turn).scale(Ball::exact(3.0)))
-                .add(&v.mul(v).mul(v).mul(&bend)),
+                .add(&window.speed_squared().mul(v).mul(&bend)),
         )
     }
 }
@@ -732,12 +732,21 @@ impl AxisReading<'_> {
     }
 }
 
-/// One window's tangential state, and the path trigonometry every axis of
-/// a curved segment reads off it, modelled once for all of them.
+/// One window's tangential state, and the path trigonometry and squared
+/// speed every axis of a curved segment reads off it, modelled once for
+/// all of them.
 struct WindowReading {
     state: Tangential,
     trig: std::cell::OnceCell<(TaylorModel, TaylorModel)>,
     spread_trig: std::cell::OnceCell<(TaylorModel, TaylorModel)>,
+    speed_squared: std::cell::OnceCell<TaylorModel>,
+}
+
+impl WindowReading {
+    fn speed_squared(&self) -> &TaylorModel {
+        self.speed_squared
+            .get_or_init(|| self.state.v.mul(&self.state.v))
+    }
 }
 
 /// The enclosures of the analytic `axes` of `span` over `(lo, hi)`, each
@@ -784,6 +793,7 @@ pub(crate) fn analytic_axes_enclosure(
                         state: state(window),
                         trig: std::cell::OnceCell::new(),
                         spread_trig: std::cell::OnceCell::new(),
+                        speed_squared: std::cell::OnceCell::new(),
                     });
                     readings[axis].models(reading)
                 },
@@ -1438,6 +1448,7 @@ impl<'a> AxisWindows<'a> {
                     state,
                     trig: std::cell::OnceCell::new(),
                     spread_trig: std::cell::OnceCell::new(),
+                    speed_squared: std::cell::OnceCell::new(),
                 };
                 let [p, v, a] = reading.models(&reading_window);
                 let j = if with_jerk {
