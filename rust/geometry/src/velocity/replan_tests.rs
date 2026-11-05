@@ -3,7 +3,9 @@ use proptest::test_runner::FileFailurePersistence;
 
 use super::*;
 use crate::fitter::{CornerFitConfig, fit_corners, seam_requires_stop};
-use crate::frontend::{ExtruderCaps, LeaderSpill, Move, MoveContext, VelocityLimits, line_move};
+use crate::frontend::{
+    ExtruderCaps, LeaderSpill, Move, MoveContext, RestSettle, VelocityLimits, line_move,
+};
 use crate::path::lowering::PositionProfile;
 use nurbs::algebra::PiecewisePolynomialKernel;
 
@@ -62,6 +64,13 @@ fn extruder(max_velocity: f64, max_accel: f64, slope: f64) -> ExtruderCaps {
             (-0.004, 0.004),
         )]),
         leader_kernel_reach_s: 0.004,
+        rest_settle: RestSettle::of_kernels(
+            &[&PiecewisePolynomialKernel::single_poly(
+                vec![125.0],
+                (-0.004, 0.004),
+            )],
+            0.005,
+        ),
     }
 }
 

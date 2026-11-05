@@ -1,6 +1,6 @@
 use super::*;
 use crate::fitter::{CornerFitConfig, fit_corners};
-use crate::frontend::{LeaderSpillId, MoveContext, VelocityLimits, line_move};
+use crate::frontend::{LeaderSpillId, MoveContext, RestSettleId, VelocityLimits, line_move};
 use crate::path::{Arc, Line};
 use crate::segment::SourceRange;
 use crate::velocity::{plan_velocity_warm_start, warm_start_params};
@@ -29,6 +29,7 @@ fn caps(max_velocity: f64, max_accel: f64, slope: f64) -> ExtruderCaps {
         instantaneous_corner_velocity_mm_s: 1.0,
         leader_spill: LeaderSpillId::UNSHAPED,
         leader_kernel_reach_s: 0.0,
+        rest_settle: RestSettleId::UNSHAPED,
     }
 }
 

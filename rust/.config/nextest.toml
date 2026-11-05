@@ -19,6 +19,12 @@ status-level = "slow"
 period = "60s"
 terminate-after = 3
 
+# `scripts/corpus.sh` plans 402 whole prints in one test (~140 s on an idle
+# workstation, ~200 s with the fit audit on, several times that under load).
+[[profile.default.overrides]]
+filter = "binary(corpus_plans)"
+slow-timeout = { period = "60s", terminate-after = 20 }
+
 # CI profile: identical honesty constraints with a tighter slow-timeout to
 # surface hanging tests quickly without masking real failures via retries.
 [profile.ci]

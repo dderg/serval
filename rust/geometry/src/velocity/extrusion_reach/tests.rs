@@ -1,5 +1,7 @@
+use nurbs::algebra::PiecewisePolynomialKernel;
+
 use super::*;
-use crate::frontend::{LeaderSpillId, MoveContext, VelocityLimits, line_move};
+use crate::frontend::{LeaderSpillId, MoveContext, RestSettle, VelocityLimits, line_move};
 use crate::ratio_ramp::RATIO_RAMP_MAX_TIME_S;
 use crate::segment::SourceRange;
 
@@ -22,15 +24,30 @@ fn caps() -> ExtruderCaps {
         instantaneous_corner_velocity_mm_s: 1.0,
         leader_spill: LeaderSpillId::UNSHAPED,
         leader_kernel_reach_s: KERNEL_REACH_S,
+        rest_settle: RestSettle::of_kernels(&[&box_kernel()], PATH_DEVIATION_MM),
     }
+}
+
+const PATH_DEVIATION_MM: f64 = 0.005;
+const STREAM_ACCEL: f64 = 20_000.0;
+
+fn box_kernel() -> PiecewisePolynomialKernel {
+    PiecewisePolynomialKernel::single_poly(
+        vec![0.5 / KERNEL_REACH_S],
+        (-KERNEL_REACH_S, KERNEL_REACH_S),
+    )
 }
 
 /// A stream of moves along x, each `(length, ratio, feedrate)`; a zero
 /// length is an extrude-only move of `ratio` millimetres of filament.
 fn stream(pieces: &[(f64, f64, f64)]) -> Vec<Move> {
-    let limits = VelocityLimits::try_new(1000.0, 20_000.0, 0.0, f64::INFINITY)
+    stream_under(caps(), pieces)
+}
+
+fn stream_under(caps: ExtruderCaps, pieces: &[(f64, f64, f64)]) -> Vec<Move> {
+    let limits = VelocityLimits::try_new(1000.0, STREAM_ACCEL, 0.0, f64::INFINITY)
         .unwrap()
-        .with_extruder_caps(Some(caps()))
+        .with_extruder_caps(Some(caps))
         .unwrap();
     let mut x = 0.0;
     pieces
@@ -255,7 +272,7 @@ fn the_history_keeps_only_what_a_move_still_to_come_can_reach() {
 }
 
 #[test]
-fn an_extrude_only_move_holds_still_for_the_kernel_reach_beside_motion_only() {
+fn an_extrude_only_move_holds_for_the_kernel_reach_beside_motion_where_the_extruder_has_no_room() {
     let moves = stream(&[
         (10.0, RATIO, 150.0),
         (0.0, -0.5, 40.0),
@@ -276,6 +293,80 @@ fn an_extrude_only_move_holds_still_for_the_kernel_reach_beside_motion_only() {
             [0.0, 0.0],
             [KERNEL_REACH_S, 0.0],
         ]
+    );
+}
+
+/// The caps with room on the extruder beyond the extrude-only caps.
+fn roomy_caps() -> ExtruderCaps {
+    ExtruderCaps {
+        max_velocity_mm_s: f64::INFINITY,
+        max_accel_mm_s2: 4.0 * EXTRUDE_ONLY.1,
+        ..caps()
+    }
+}
+
+/// The box kernel `1/2R` on `(−R, R)` leaves the shaped path settling
+/// under an acceleration `A` within `A·(R − h)³/12R` of the rest point
+/// `h` past the stop; the hold is the first cell start where that is
+/// within half the path deviation.
+#[test]
+fn an_extrude_only_move_holds_until_the_shaped_path_settles_within_the_radius() {
+    let radius = 0.5 * PATH_DEVIATION_MM;
+    let settled_after = KERNEL_REACH_S - libm::cbrt(radius * 12.0 * KERNEL_REACH_S / STREAM_ACCEL);
+    let cell = KERNEL_REACH_S / crate::frontend::SETTLE_CELLS as f64;
+    let hold = (settled_after / cell).ceil() * cell;
+    let moves = stream_under(
+        roomy_caps(),
+        &[
+            (10.0, RATIO, 150.0),
+            (0.0, -0.5, 40.0),
+            (0.0, 0.5, 40.0),
+            (10.0, RATIO, 150.0),
+            (0.0, -0.5, 40.0),
+        ],
+    );
+    let holds: Vec<[f64; 2]> = extrusion_budgets(&moves, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
+        .iter()
+        .map(|budget| budget.rest_holds_s)
+        .collect();
+    let expected = [
+        [0.0, 0.0],
+        [hold, 0.0],
+        [0.0, hold],
+        [0.0, 0.0],
+        [hold, 0.0],
+    ];
+    let close = holds
+        .iter()
+        .flatten()
+        .zip(expected.iter().flatten())
+        .all(|(got, want)| (got - want).abs() <= 1e-12);
+    assert!(
+        close && hold < KERNEL_REACH_S,
+        "{holds:?} against {expected:?}"
+    );
+}
+
+#[test]
+fn the_holds_of_a_brief_rest_cover_the_kernels_on_both_sides_together() {
+    let filament = 0.001;
+    let moves = stream_under(
+        roomy_caps(),
+        &[
+            (10.0, RATIO, 150.0),
+            (0.0, filament, 40.0),
+            (10.0, RATIO, 150.0),
+        ],
+    );
+    let [before, after] = extrusion_budgets(&moves, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)[1].rest_holds_s;
+    let run = least_rest_to_rest_time(filament, 40.0, EXTRUDE_ONLY.1);
+    assert!(
+        before < KERNEL_REACH_S && after < KERNEL_REACH_S,
+        "{before} {after}"
+    );
+    assert!(
+        (before + run + after - 2.0 * KERNEL_REACH_S).abs() <= 1e-12,
+        "{before} + {run} + {after}"
     );
 }
 

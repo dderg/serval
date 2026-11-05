@@ -1,4 +1,4 @@
-use geometry::{ExtruderCaps, LeaderSpill, SPATIAL_AXIS_SETS};
+use geometry::{ExtruderCaps, LeaderSpill, RestSettle, SPATIAL_AXIS_SETS};
 use nurbs::algebra::PiecewisePolynomialKernel;
 use trajectory::{AxisChainSet, ChainStage};
 
@@ -23,10 +23,13 @@ fn path_jerk_per_accel(shaped: &[(usize, &PiecewisePolynomialKernel)], set: usiz
 /// The [`ExtruderCaps`] of every follower axis with leaders and a limit
 /// (`[axis] max_velocity` / `max_accel`, set or inherited from the extruder's
 /// extrude-only caps), from its chain as compiled: the advance's slope and
-/// curvature bounds, the follower's own kernel, and its spatial leaders'.
+/// curvature bounds, the follower's own kernel, and its spatial leaders',
+/// whose settle onto a rest point an extrude-only move waits for to within
+/// its share of `max_path_deviation_mm`.
 pub fn extruder_caps(
     registry: &AxisRegistry,
     chains: &AxisChainSet,
+    max_path_deviation_mm: f64,
 ) -> Result<Vec<ExtruderCaps>, String> {
     let mut caps = Vec::new();
     for (axis, leaders) in &chains.followers {
@@ -81,6 +84,7 @@ pub fn extruder_caps(
             instantaneous_corner_velocity_mm_s: chain.instantaneous_corner_velocity(),
             leader_spill,
             leader_kernel_reach_s: leaders_forward.max(-leaders_back),
+            rest_settle: RestSettle::of_kernels(&leader_kernels, max_path_deviation_mm),
         });
     }
     Ok(caps)

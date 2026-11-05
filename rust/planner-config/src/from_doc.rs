@@ -195,7 +195,7 @@ pub fn planner_config_from_settings(
     cfg.fit_tolerance_accel_mm_s2 = settings.fit_tolerance_accel_mm_s2;
     cfg.check_kernel_free_advance_extrude_only_caps()?;
     let chains = cfg.compile_active_chains().map_err(|e| e.to_string())?;
-    crate::extruder_caps(&cfg.axis_registry, &chains)?;
+    crate::extruder_caps(&cfg.axis_registry, &chains, cfg.fit_tolerance_mm)?;
     Ok(cfg)
 }
 
