@@ -73,9 +73,7 @@ def _record_holding(
         time.sleep(0.05)
 
 
-def test_td_08(
-    sim_world, monkeypatch, tmp_path
-):
+def test_td_08(sim_world, monkeypatch, tmp_path):
     monkeypatch.setenv("RUST_LOG", "info,motion_core::worker::ingress=debug")
     record_dir = tmp_path / "dispatch_record"
     record_dir.mkdir()
