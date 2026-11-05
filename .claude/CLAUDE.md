@@ -203,6 +203,14 @@ Measured on five green PR runs (11-05): throughput-gate 704 s, rust-fuzz 407 s, 
   counterexamples (law_fuzz, planner_fuzz rng seed, root_cursor_fuzz), for which `fuzz_triage` fired: it opened
   #709, #723 and #724, replayed the seeds on main, reran and let the landings continue. Those three bugs are
   still open; the triage makes them non-blocking, it does not fix them.
+- Cache seeding: PR runs read rust-cache entries from `main` (an entry saved on a PR ref is invisible to other
+  PRs), and no workflow ran on `main`, so main's caches only changed when somebody dispatched a run by hand. The
+  first PR after any change to dependencies, `[profile]` or the toolchain therefore compiled all 150 crates cold
+  (the `debug` change above showed it: rust-test 504 s, rust-fuzz 461 s on its own run). The Rust runtime and
+  Snapshot workflows now also run on a push to `main` that touches `rust/Cargo.toml`, `rust/Cargo.lock`,
+  `rust/rust-toolchain.toml` or the workflows themselves, and cancel-in-progress applies to PRs only, so main's
+  caches refresh when, and only when, they go stale. After changing those files by hand, dispatch both workflows
+  on `main` once (`gh workflow run "Rust runtime (Step 5 + Step 6)" --ref main`).
 - Concurrent baseline accepts: `tools/bench/throughput_baseline.json` is merged field by field by a git merge
   driver (`scripts/merge_throughput_baseline.py`, registered by `install-git-guards.sh`, selected by
   `.gitattributes`): configs accepted on both sides keep the lower Ir (the stricter, fail-safe baseline),
