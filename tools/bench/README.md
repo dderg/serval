@@ -264,6 +264,15 @@ The same run checks that a step edge comes as late after its waketime whether th
 
 H723 has no both-edge optimization, so both modes dispatch through the same function and are judged together. Both timer backends wake early and spin to the head timer's waketime: SysTick 100 ticks ahead, the G0's TIM2 64 ticks ahead (`TIMER_IRQ_LEAD_TICKS`). The dispatch loop ends its interrupts-enabled wait at the same lead, so both paths leave the same spin. Before that the G0 irq path was 61 instructions late against 43–48 in the loop, and SysTick's loop path came 12 instructions after its irq path. The G0 lead is the emulated 27 cycles from interrupt to the loop's first timer read, scaled by the F401's hardware-to-emulator ratio (44 emulated cycles against a measured p99.9 of 68–100). It is not measured on G0 hardware.
 
+`endstop_edge_emu.py` (also from `scripts/ci-build-mcu.sh`) runs the firmware's own `config_endstop` / `config_trsync` / `trsync_start` / `endstop_arm_trsync` / `query_endstop` handlers in the same emulator, with the family's EXTI, SYSCFG/AFIO and GPIO registers modeled, and drives the endstop pin active. It fails unless the trip is stamped at most 60 instructions after the edge and the steppers are stop-gated at most 400 after it; an endstop armed with its pin already active, and a second endstop on a shared EXTI line (PA9 + PB9), must still trip from the 1 ms poll at its window midpoint. Instructions from edge to trip stamp / to stop gate:
+
+| firmware | trip stamp | stop gate |
+|---|---|---|
+| F401 | 15 | 177 |
+| F103 | 15 | 151 |
+| G0B1 | 19 | 231 |
+| H723 | 15 | 178 |
+
 ### How the capacity caps moves
 
 The planner turns the benchmark into a per-move speed cap (`rust/motion-pipeline/src/live_config/step_capacity.rs`, `docs/Config_Reference_Motion.md`, "MCU step capacity"); klippy (`klippy/motion_step_capacity.py`) only hands it each MCU's benchmark, clock and stepped motors. Each MCU gets `STEP_CAPACITY_FRACTION` × CLOCK_FREQ ticks per second; the fraction comes from the timing budget below. A motor costs its benchmarked ticks per step (pulsed or both-edge, by its own mode) times the steps per second the move asks of it. The planner keeps the sum over each MCU's motors within the capacity, counting pressure advance on the extruder. On this bench (F401, 497 ticks/step pulsed) the fraction of 0.80 gives 135 k steps/s. `capacity.cfg` raises the speed limits past the cap, so its ladder rungs above the cap are planned slower than the G-code asks and `step_capacity_capped` events report it.

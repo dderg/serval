@@ -1,4 +1,5 @@
 import pytest
+from fakes import FakePrinter
 
 from klippy import pins
 from klippy.extras import tmc, tmc2130, tmc2208, tmc2209
@@ -10,6 +11,10 @@ class _FakeMcu:
         self.oids = 0
         self.config_cmds = []
         self.config_callbacks = []
+        self.printer = FakePrinter()
+
+    def get_printer(self):
+        return self.printer
 
     def create_oid(self):
         oid = self.oids

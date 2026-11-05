@@ -1,3 +1,5 @@
+from . import structured_log
+
 AXIS_ENDSTOP_IDS = (0, 1, 2)
 PROVIDER_ID_FIRST = len(AXIS_ENDSTOP_IDS)
 ENDSTOP_ID_MAX = 255
@@ -59,6 +61,9 @@ class MotionEndstop:
         self._state_cmd = None
         self._trip_stop = None
         self.mcu.register_config_callback(self._build_config)
+        self.mcu.get_printer().register_event_handler(
+            "klippy:ready", self._report_trip_timing
+        )
 
     def _build_config(self):
         bound_locally = (
@@ -86,7 +91,7 @@ class MotionEndstop:
         self._state_cmd = self.mcu.lookup_query_command(
             "endstop_query_state oid=%c",
             "endstop_state oid=%c armed=%c pin_value=%c tripped=%c"
-            " trip_clock=%u",
+            " trip_clock=%u edge_timed=%c",
             oid=self.oid,
         )
         if self.mcu.try_lookup_command(STEPPER_STOP_ON_TRIGGER_CMD) is not None:
@@ -102,7 +107,26 @@ class MotionEndstop:
         return {
             "tripped": bool(params["tripped"]),
             "trip_clock": params["trip_clock"],
+            "edge_timed": bool(params["edge_timed"]),
         }
+
+    def _report_trip_timing(self):
+        edge_timed = self.query_trip_state()["edge_timed"]
+        structured_log.event(
+            "endstop",
+            "trip_timing",
+            msg="endstop %d (pin %s on mcu '%s'): trips timed by %s"
+            % (
+                self.endstop_id,
+                self.pin,
+                self.mcu.get_name(),
+                "the pin edge interrupt" if edge_timed else "the poll",
+            ),
+            endstop_id=self.endstop_id,
+            pin=self.pin,
+            mcu=self.mcu.get_name(),
+            edge_timed=edge_timed,
+        )
 
     def _trip_stop_oids(self):
         registered = stepcompress_stepper_oids(self.mcu.get_printer(), self.mcu)
