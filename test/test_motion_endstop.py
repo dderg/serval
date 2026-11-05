@@ -144,7 +144,6 @@ def test_ready_reports_how_each_endstop_times_its_trips(caplog):
     )
 
 
-
 def test_arm_sends_rest_ticks():
     mcu = _fake_mcu()
     endstop = _connected(mcu, MotionEndstop(_pin_params(mcu), 3))

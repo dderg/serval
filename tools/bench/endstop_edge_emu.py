@@ -252,7 +252,9 @@ class Machine:
 
     def _map(self, elf: ELFFile, ram_start: int, ram_size: int) -> None:
         uc = self.uc
-        ram = range(ram_start // PAGE, (ram_start + ram_size + PAGE - 1) // PAGE)
+        ram = range(
+            ram_start // PAGE, (ram_start + ram_size + PAGE - 1) // PAGE
+        )
         pages = set(ram)
         for seg in elf.iter_segments():
             if seg["p_type"] != "PT_LOAD" or not seg["p_memsz"]:
@@ -261,7 +263,9 @@ class Machine:
                 (seg["p_vaddr"], seg["p_memsz"]),
                 (seg["p_paddr"], seg["p_filesz"]),
             ):
-                pages.update(range(start // PAGE, (start + size + PAGE - 1) // PAGE))
+                pages.update(
+                    range(start // PAGE, (start + size + PAGE - 1) // PAGE)
+                )
         for page in sorted(pages):
             uc.mem_map(page * PAGE, PAGE)
         for seg in elf.iter_segments():
@@ -351,7 +355,9 @@ class Machine:
 
     def require_running(self) -> None:
         if self.shut_down:
-            raise EmulationError(f"{self.out_dir}: the endstop shut the MCU down")
+            raise EmulationError(
+                f"{self.out_dir}: the endstop shut the MCU down"
+            )
         if self.executed > INSTRUCTION_LIMIT:
             raise EmulationError(
                 f"{self.out_dir}: ran past {INSTRUCTION_LIMIT} instructions"
@@ -410,7 +416,9 @@ class Machine:
         self.call(self.config_trsync, self.trsync_oid)
 
     def arm(self, oid: int) -> int:
-        self.call(self.trsync_start, self.trsync_oid, 0, 0, TRSYNC_EXPIRE_REASON)
+        self.call(
+            self.trsync_start, self.trsync_oid, 0, 0, TRSYNC_EXPIRE_REASON
+        )
         self.call(self.arm_trsync, oid, self.trsync_oid, TRSYNC_TRIGGER_REASON)
         armed = self.executed
         self.call(self.query_endstop, oid, REST_TICKS)
