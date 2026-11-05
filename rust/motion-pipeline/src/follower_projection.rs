@@ -3481,9 +3481,9 @@ impl<'a> FollowerSignal<'a> {
     /// formula the table lays, or the one the advance reads, changes there,
     /// the signal reading the one before up to the time and the one after
     /// from it on ([`Self::crossing_hold`]). Every boundary of the laid
-    /// table bounds a span of the advance's too. Each boundary is searched
-    /// for from the crossing of the one before, so the times rise with the
-    /// boundaries however the odometer steps back between.
+    /// table bounds a span of the advance's too. A crossing is held no
+    /// earlier than the one before, so the times rise with the boundaries
+    /// however the odometer steps back between.
     fn ratio_crossings(&self) -> &[(f64, f64)] {
         self.ratio_crossings.get_or_init(|| {
             let s_end = self.s_end();
@@ -3506,14 +3506,12 @@ impl<'a> FollowerSignal<'a> {
             boundaries.dedup();
             let start_reading = self.s_at(support_start);
             let mut crossings = Vec::new();
-            let mut searched_from = support_start;
+            let mut earliest = support_start;
             for boundary in boundaries.into_iter().filter(|&b| b > start_reading) {
-                let crossing = if self.s_at(searched_from) >= boundary {
-                    searched_from
-                } else {
-                    self.crossing_of(boundary, searched_from, support_end)
-                };
-                searched_from = crossing;
+                let crossing = self
+                    .crossing_of(boundary, support_start, support_end)
+                    .max(earliest);
+                earliest = crossing;
                 if crossing - support_start > GRID_DEDUP_EPS_S
                     && support_end - crossing > GRID_DEDUP_EPS_S
                 {
