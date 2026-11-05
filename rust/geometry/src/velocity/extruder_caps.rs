@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::frontend::LeaderSpill;
 use crate::path::{CurvatureProfile, Segment};
-use crate::ratio_ramp::{RatioStep, StepCrossing};
+use crate::ratio_ramp::{RatioStep, StepCrossing, longest_ramp_time};
 
 use super::rate_cap::LinearRate;
 
@@ -211,10 +211,12 @@ fn ratios_on(segment: &crate::path::PathSegment, axis: usize) -> (f64, f64) {
 /// the budget's own to hold, no slower crossing lowers it). The planned
 /// speeds within the leaders' reach of the join stay under the fastest
 /// ceiling either budget gives and within `accel` of the join's, so the
-/// leaders' [`crate::LeaderSpill`] bounds both their shaped speed and their
-/// own advanced flow there ([`StepFlow`]), and both fall continuously as the
-/// join slows. Infinite where the ratio does not move, no path carries it,
-/// or the leaders cross it within the limits at the fastest ceiling.
+/// leaders' [`crate::LeaderSpill`] bounds their shaped speed at the join
+/// and half the ramp either side of it, where the planned speed is at most
+/// `accel` times that faster, and their own advanced flow there
+/// ([`StepFlow`]); the shaped speed and the own flow fall continuously as
+/// the join slows. Infinite where the ratio does not move, no path carries
+/// it, or the leaders cross it within the limits at the fastest ceiling.
 pub(super) fn ratio_step_ceiling(
     up: &crate::Move,
     dn: &crate::Move,
@@ -242,18 +244,22 @@ pub(super) fn ratio_step_ceiling(
         dn.source.start_line
     );
     let flow = StepFlow::new(&caps, [up_start, up_end, dn_start, dn_end], fastest, accel);
-    caps.ratio_ramp_rule()
-        .step_speed_cap(fastest, |planned| StepCrossing {
+    caps.ratio_ramp_rule().step_speed_cap(fastest, |planned| {
+        let speed_mm_s = flow.shaped_speed(planned);
+        let half_ramp_s = 0.5 * longest_ramp_time(speed_mm_s, dn_budget.rest_room_mm);
+        StepCrossing {
             step: RatioStep {
                 ratio_step: moved,
                 peak_ratio: flow.peak_ratio,
-                speed_mm_s: flow.shaped_speed(planned),
+                speed_mm_s,
                 accel_mm_s2: accel,
                 jerk_mm_s3: 0.0,
             },
             rest_room_mm: dn_budget.rest_room_mm,
+            edge_speed_mm_s: flow.shaped_speed(planned + accel * half_ramp_s),
             own_flow_mm_s: flow.own_flow(planned),
-        })
+        }
+    })
 }
 
 /// What the leaders' kernels make of a planned speed `v₀` at a ratio step
