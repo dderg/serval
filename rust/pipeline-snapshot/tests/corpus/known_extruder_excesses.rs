@@ -78,97 +78,6 @@ pub struct KnownExcesses {
 }
 
 pub const KNOWN: &[KnownExcesses] = &[
-    // TODO(bowden-switch): slow corner nodes outside a seam's time reach narrow its window.
-    KnownExcesses {
-        case: "trident_follower_cache_regression/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
-        class: ExcessClass::Accel,
-        count: 413,
-        worst: 26088.6,
-    },
-    KnownExcesses {
-        case: "trident_follower_cache_regression/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
-        class: ExcessClass::Velocity,
-        count: 72,
-        worst: 55.2373,
-    },
-    KnownExcesses {
-        case: "voron_first_layers/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
-        class: ExcessClass::Accel,
-        count: 29,
-        worst: 22676.6,
-    },
-    KnownExcesses {
-        case: "voron_first_layers/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
-        class: ExcessClass::Velocity,
-        count: 5,
-        worst: 48.2076,
-    },
-    KnownExcesses {
-        case: "voron_first_layers_zhop/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
-        class: ExcessClass::Accel,
-        count: 44,
-        worst: 26251.3,
-    },
-    KnownExcesses {
-        case: "voron_first_layers_zhop/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
-        class: ExcessClass::Velocity,
-        count: 16,
-        worst: 56.9817,
-    },
-    KnownExcesses {
-        case: "trident_follower_cache_regression:200-300/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
-        class: ExcessClass::Accel,
-        count: 134,
-        worst: 25146.0,
-    },
-    KnownExcesses {
-        case: "trident_follower_cache_regression:200-300/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
-        class: ExcessClass::Velocity,
-        count: 40,
-        worst: 55.2064,
-    },
-    KnownExcesses {
-        case: "trident_follower_cache_regression:820-900/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
-        class: ExcessClass::Accel,
-        count: 156,
-        worst: 26393.8,
-    },
-    KnownExcesses {
-        case: "trident_follower_cache_regression:820-900/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
-        class: ExcessClass::Velocity,
-        count: 24,
-        worst: 54.9216,
-    },
-    KnownExcesses {
-        case: "voron_first_layers:3550-3700/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
-        class: ExcessClass::Accel,
-        count: 44,
-        worst: 26914.4,
-    },
-    KnownExcesses {
-        case: "voron_first_layers:3550-3700/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
-        class: ExcessClass::Velocity,
-        count: 17,
-        worst: 56.4596,
-    },
-    KnownExcesses {
-        case: "corner_flow travel 50/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
-        class: ExcessClass::Accel,
-        count: 9,
-        worst: 5583.8,
-    },
-    KnownExcesses {
-        case: "corner_flow travel 150/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
-        class: ExcessClass::Accel,
-        count: 9,
-        worst: 5495.1,
-    },
-    KnownExcesses {
-        case: "corner_flow travel 300/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
-        class: ExcessClass::Accel,
-        count: 9,
-        worst: 5495.1,
-    },
     // TODO(guard-robust): a turning-guard back-off spikes e.
     KnownExcesses {
         case: "voron_first_layers:850-950/tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg",
@@ -179,14 +88,14 @@ pub const KNOWN: &[KnownExcesses] = &[
     KnownExcesses {
         case: "voron_first_layers/tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg",
         class: ExcessClass::Accel,
-        count: 39,
-        worst: 182265.7,
+        count: 37,
+        worst: 139517.2,
     },
     KnownExcesses {
         case: "voron_first_layers_zhop/tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg",
         class: ExcessClass::Accel,
-        count: 38,
-        worst: 119635.3,
+        count: 37,
+        worst: 138394.6,
     },
     // TODO(floor-guard): e past V_e by ε around the retract's rest.
     KnownExcesses {
