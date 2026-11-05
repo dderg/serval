@@ -9,8 +9,12 @@ window of the dense print from what it measures on its own machine. Both of
 its predictions come from fits over paired points this script measures: the
 variants of the code in pi_calibration.variants of
 tools/bench/throughput_baseline.json (commits, optionally patched for
-spread) plus the calibration commit, pi_calibration.commit unless
---calibration-commit re-pins it. Per variant and config:
+spread) plus the calibration commit the gate's live replay is pinned to:
+the baseline's reference commit unless --calibration-commit names another.
+Pinning it at the reference puts the gate's yardstick at the code it judges
+next, where its prediction is the Pi's own measurement on every runner CPU;
+the fit's CPU-dependent error grows with the head's distance from it.
+Between re-checks the pin holds still. Per variant and config:
 
 - Pi: the full dense print under `taskset -c 0,1` on the bench Pi (ssh
   PI_HOST, under tools/bench/lock.py), the lowest worst window of PI_RUNS
@@ -138,17 +142,18 @@ def stream(command: list[str], cwd: Path | None = None) -> None:
 
 
 def calibration_commit(baseline: dict, pinned: str | None) -> str:
-    if pinned:
-        return gate.run(
-            ["git", "rev-parse", "--verify", f"{pinned}^{{commit}}"],
-            cwd=gate.ROOT,
-        ).strip()
-    recorded = baseline.get("pi_calibration", {}).get("commit")
-    if not recorded:
+    """The commit to pin the gate's calibration replay to: --calibration-commit,
+    or else the baseline's reference, so the yardstick sits at the code the
+    gate judges next."""
+    chosen = pinned or baseline.get("commit")
+    if not chosen:
         raise GateError(
-            "the baseline pins no calibration commit: pass --calibration-commit"
+            "the baseline names no reference commit: pass --calibration-commit"
         )
-    return recorded
+    return gate.run(
+        ["git", "rev-parse", "--verify", f"{chosen}^{{commit}}"],
+        cwd=gate.ROOT,
+    ).strip()
 
 
 def variants(baseline: dict, calibration: str) -> list[dict]:
@@ -159,6 +164,16 @@ def variants(baseline: dict, calibration: str) -> list[dict]:
     if CALIBRATION_LABEL in labels or len(set(labels)) != len(labels):
         raise GateError(
             f"variant labels must be unique and not {CALIBRATION_LABEL!r}: {labels}"
+        )
+    duplicates = [
+        variant["label"]
+        for variant in listed
+        if variant["commit"] == calibration and not variant.get("patch")
+    ]
+    if duplicates:
+        raise GateError(
+            f"variants {duplicates} are the calibration commit {calibration} "
+            "itself: drop them from pi_calibration.variants"
         )
     return [*listed, {"label": CALIBRATION_LABEL, "commit": calibration}]
 

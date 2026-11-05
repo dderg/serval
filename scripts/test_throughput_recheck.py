@@ -195,11 +195,21 @@ def test_variants_add_the_calibration_commit_and_refuse_clashing_labels():
         recheck.variants(clash, "cal")
     with pytest.raises(gate.GateError):
         recheck.variants({}, "cal")
+    itself = {"pi_calibration": {"variants": [{"label": "a", "commit": "cal"}]}}
+    with pytest.raises(gate.GateError, match="calibration commit"):
+        recheck.variants(itself, "cal")
+    patched = {
+        "pi_calibration": {
+            "variants": [{"label": "a", "commit": "cal", "patch": "p.patch"}]
+        }
+    }
+    assert recheck.variants(patched, "cal")[0]["label"] == "a"
 
 
-def test_the_calibration_commit_is_the_pinned_one_unless_re_pinned():
-    pinned = {"pi_calibration": {"commit": "abc"}}
-    assert recheck.calibration_commit(pinned, None) == "abc"
+def test_the_calibration_commit_is_the_reference_unless_re_pinned():
+    head = gate.run(["git", "rev-parse", "HEAD"], cwd=gate.ROOT).strip()
+    assert recheck.calibration_commit({"commit": "HEAD"}, None) == head
+    assert recheck.calibration_commit({"commit": "nope"}, "HEAD") == head
     with pytest.raises(gate.GateError, match="--calibration-commit"):
         recheck.calibration_commit({}, None)
 

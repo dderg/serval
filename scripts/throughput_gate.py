@@ -88,23 +88,28 @@ measure the Pi.
 The normalisation is only as good as the calibration replay, so the gate
 fails when it is inconsistent:
 - its fastest LIVE_FASTEST runs differ by more than CALIBRATION_SPREAD_PCT.
-  Over the 113 runner jobs and 3 configs of the first fit they differed by
-  at most 4.3 % (99th percentile 3.2 %). A 5 % spread moves the prediction
-  by about 2.5 %, a quarter of the fit's own error;
+  Over the 689 runner and local job-configs of the first two re-checks
+  they differed by at most 6.4 % (99th percentile 4.0 %). An 8 % spread
+  moves the yardstick by at most 4 %, and the prediction by about as much,
+  well inside the fit's own error;
 - this runner's speed on it, as a multiple of the Pi's, lies more than
   CALIBRATION_SPEED_MARGIN_PCT outside the speeds of the jobs the fit
-  measured. Runners of one CPU model ran it up to 30 % apart (EPYC 9V74), so
+  measured. Runners of one CPU model ran it up to 31 % apart (EPYC 9V74), so
   a runner within that margin is one like those fitted; beyond it the fit
   extrapolates.
 An unknown CPU model is not a failure.
 
-The calibration goes stale. The head drifts away from the code the points
-were measured on, and a toolchain bump or a Pi OS update moves the Pi without
-moving the runner. So the gate fails once the Pi measurement is more than
-PI_CALIBRATION_STALE_DAYS old, and names the re-check that re-measures every
-point and refits. Main took 11 accepts in the 3 days before the first
-calibration; 11 changes of ~2 % each move the head by about as much as the
-fit's own error, so 3 days is the limit.
+The re-check pins the calibration commit to the reference it runs at, so
+the prediction at the reference is the Pi's own measurement on every runner
+CPU, and the CPU-dependent error only enters through the head's distance
+from it. The calibration goes stale: the head drifts away from it and from
+the code the points were measured on, and a toolchain bump or a Pi OS
+update moves the Pi without moving the runner. So the gate fails once the
+Pi measurement is more than PI_CALIBRATION_STALE_DAYS old, and names the
+re-check that re-measures every point, re-pins and refits. Main took 11
+accepts in the 3 days before the first calibration; 11 changes of ~2 %
+each move the head by about as much as the fit's own error, so 3 days is
+the limit.
 
 Accepting (`--accept --reason "..."`) makes HEAD the reference and rewrites
 every config's Ir with this run's. It refuses a dirty tree, so the recorded
@@ -166,8 +171,8 @@ PI_FLOOR_X = 2.0
 SHORTFALL_TOLERANCE_PCT = 2.0
 PI_FLOOR_FAILS = True
 PI_CALIBRATION_STALE_DAYS = 3
-CALIBRATION_SPREAD_PCT = 5.0
-CALIBRATION_SPEED_MARGIN_PCT = 30.0
+CALIBRATION_SPREAD_PCT = 8.0
+CALIBRATION_SPEED_MARGIN_PCT = 35.0
 RECHECK_COMMAND = "python3 scripts/throughput_recheck.py"
 MEASURED_TREES = ("rust", "tools/bench/configs", "tools/sim/gcode")
 TREES_DIR = "throughput-trees"
