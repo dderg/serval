@@ -3820,7 +3820,10 @@ fn the_wire_probe_leaves_ahead_of_the_burst_stamped_at_its_own_send() {
         .iter()
         .position(|(names, _, _)| names.contains(&"queue_step"))
         .expect("the pass sent motion");
-    assert!(probe < burst, "the probe queued behind the burst: {handed:?}");
+    assert!(
+        probe < burst,
+        "the probe queued behind the burst: {handed:?}"
+    );
     let (names, clock_at_send, stamped) = &handed[probe];
     assert_eq!(names, &vec!["kalico_wire_probe"]);
     assert_eq!(
