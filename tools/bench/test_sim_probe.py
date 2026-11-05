@@ -32,3 +32,8 @@ def test_each_endstop_is_read_against_its_own_line():
     }
     assert sim_probe.line_reading(states, "open")["probe"] is False
     assert sim_probe.line_reading({}, "TRIGGERED") == {"probe": True}
+
+
+def test_query_probe_reads_klippys_comment_prefixed_response(monkeypatch):
+    monkeypatch.setattr(sim_probe, "gcode", lambda script: ["// probe: open"])
+    assert sim_probe._probe_state() == "open"
