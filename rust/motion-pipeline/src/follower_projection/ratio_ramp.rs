@@ -41,8 +41,7 @@ const TICK_WIDTHS: f64 = 2.0 / WIDTH_NODES_PER_RAMP_TIME;
 /// in units of the width `V·τ/2` both target: a sample becomes a node on
 /// the first tick past both half a ramp time after the last node and
 /// [`NODE_SPACING_PER_WIDTH`] of a width along the path from it.
-const NODE_GAP_WIDTHS: f64 =
-    (1.0 + 0.5 * TICK_WIDTHS).max(NODE_SPACING_PER_WIDTH + TICK_WIDTHS);
+const NODE_GAP_WIDTHS: f64 = (1.0 + 0.5 * TICK_WIDTHS).max(NODE_SPACING_PER_WIDTH + TICK_WIDTHS);
 /// How far along the path a seam holds the width its ramp asks for, in
 /// units of that width `V·τ/2`: a window that wide reaches the seam from
 /// up to one width away, and the nodes bracketing that reach lie within
@@ -704,9 +703,7 @@ impl WidthField {
 
     /// The seams whose ramp time or width reaches the time `t`.
     fn seams_reaching(&self, t: f64) -> std::ops::Range<usize> {
-        let first = self
-            .seams
-            .partition_point(|seam| seam.t < t - SEAM_REACH_S);
+        let first = self.seams.partition_point(|seam| seam.t < t - SEAM_REACH_S);
         let last = self
             .seams
             .partition_point(|seam| seam.t <= t + SEAM_REACH_S);
