@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ef14835edafa8f4f79f92318f4463350743c5d73b728ef6e8b52abf87d6ab6e0 # shrinks to case = Case { clock_freq_hz: 180000000.0, clocks: 9680, microstep_mm: 0.0024908988162209303, base_mm: -318.14660596978996, degree: 1, segments: 2, amplitude_mm: 1.5107646013048723, offsets: [0.520606650752102, -0.1441221622031214, 0.27059415942140236], anchor: Reseeded, landing: None, rest: None, cuts: [1238, 1239, 4838, 4839, 4944, 4945] }
