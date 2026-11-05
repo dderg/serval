@@ -1,6 +1,8 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use bench_sim_logic::aux::AUX_RECORD_LEN;
+
 pub const RING_TICKS: usize = 8192;
 
 pub struct TickRing {
@@ -34,6 +36,10 @@ impl TickRing {
 
     pub fn available(&self) -> usize {
         self.produced.load(Ordering::Acquire) - self.consumed.load(Ordering::Relaxed)
+    }
+
+    pub fn produced(&self) -> usize {
+        self.produced.load(Ordering::Relaxed)
     }
 
     pub fn pop_into(&self, out: &mut [u8]) {
@@ -188,6 +194,60 @@ impl DirQueue {
 
     pub fn release_through(&self, index: usize) {
         self.consumed.store(index, Ordering::Release);
+    }
+
+    pub fn reset(&self) {
+        self.produced.store(0, Ordering::Release);
+        self.consumed.store(0, Ordering::Release);
+    }
+}
+
+pub const AUX_SLOTS: usize = 256;
+
+pub struct AuxRing {
+    slots: UnsafeCell<[[u8; AUX_RECORD_LEN]; AUX_SLOTS]>,
+    produced: AtomicUsize,
+    consumed: AtomicUsize,
+}
+
+unsafe impl Sync for AuxRing {}
+
+impl AuxRing {
+    pub const fn new() -> Self {
+        Self {
+            slots: UnsafeCell::new([[0; AUX_RECORD_LEN]; AUX_SLOTS]),
+            produced: AtomicUsize::new(0),
+            consumed: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn push(&self, record: [u8; AUX_RECORD_LEN]) -> Result<(), RingFull> {
+        let produced = self.produced.load(Ordering::Relaxed);
+        if produced - self.consumed.load(Ordering::Acquire) == AUX_SLOTS {
+            return Err(RingFull);
+        }
+        unsafe { (*self.slots.get())[produced % AUX_SLOTS] = record };
+        self.produced.store(produced + 1, Ordering::Release);
+        Ok(())
+    }
+
+    pub fn available(&self) -> usize {
+        self.produced.load(Ordering::Acquire) - self.consumed.load(Ordering::Relaxed)
+    }
+
+    pub fn pop_into(&self, out: &mut [u8]) {
+        let consumed = self.consumed.load(Ordering::Relaxed);
+        let (chunks, remainder) = out.as_chunks_mut::<AUX_RECORD_LEN>();
+        assert!(remainder.is_empty());
+        for (i, chunk) in chunks.iter_mut().enumerate() {
+            *chunk = unsafe { (*self.slots.get())[(consumed + i) % AUX_SLOTS] };
+        }
+        self.consumed
+            .store(consumed + chunks.len(), Ordering::Release);
+    }
+
+    pub fn consumed(&self) -> usize {
+        self.consumed.load(Ordering::Relaxed)
     }
 
     pub fn reset(&self) {

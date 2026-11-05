@@ -1,0 +1,10 @@
+[package]
+name = "bench-sim-logic"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+libm = { version = "0.2", default-features = false }
+
+[workspace]

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import secrets
 import time
 import urllib.parse
 import urllib.request
@@ -19,12 +20,14 @@ from datetime import datetime
 from pathlib import Path
 
 import lock
+import sim_config
 import throttle
 from capture import Capture
 from pi import (
     PI_LOGS,
     REPO_CFG,
     BenchError,
+    enable_mco,
     http,
     prepare_printer,
     printer_state,
@@ -34,6 +37,7 @@ from pi import (
     ssh,
     upload,
 )
+from sim_config import SimConfig
 
 STEP_TAP_ENV = "SERVAL_STEP_TAP_DIR"
 PI_STEP_TAP_DIR = "/tmp/serval-step-tap"
@@ -164,6 +168,27 @@ def recording_session(env: dict[str, str]) -> Iterator[None]:
         restart_klipper()
 
 
+def kinematic_start(line: str) -> tuple[float, float, float]:
+    import analyze
+
+    return analyze._kinematic_start(line)
+
+
+def build_sim(
+    path: Path, config: Path, start_xyz: tuple[float, float, float]
+) -> SimConfig:
+    import analyze
+
+    motors = analyze.read_motors(analyze._config_sections(config.read_text()))
+    return sim_config.load(
+        path,
+        config_id=secrets.randbelow(0xFFFF) + 1,
+        step_mm={m.role: m.step_mm for m in motors},
+        dir_sign={m.role: m.dir_sign for m in motors},
+        start_xyz=start_xyz,
+    )
+
+
 def run(
     gcode: Path,
     runs_dir: Path,
@@ -173,10 +198,16 @@ def run(
     events: bool = False,
     tap: bool = False,
     dispatch_record: bool = True,
+    sim_path: Path | None = None,
 ) -> Path:
     if tap and not events:
         raise BenchError("--step-tap is only analyzable with --events")
     lines, stats = sanitize(gcode.read_text())
+    sim = (
+        None
+        if sim_path is None
+        else build_sim(sim_path, config, kinematic_start(lines[0]))
+    )
     run_dir = runs_dir / datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir.mkdir(parents=True)
     sanitized = ("\n".join(lines) + "\n").encode()
@@ -192,6 +223,7 @@ def run(
         "config": str(config.resolve()),
         "deployed": deployed,
         "sanitized_lines": len(lines),
+        "sim": None if sim_path is None else str(sim_path.resolve()),
         **stats,
         "step_benchmarks": mcu_step_benchmarks(),
     }
@@ -202,6 +234,8 @@ def run(
         summary["host_throttle"] = applied_throttle
         summary["step_tap"] = tap
         summary["dispatch_record"] = dispatch_record
+        if sim is not None and sim.expect_mco:
+            enable_mco()
         execute(
             run_dir,
             remote_name,
@@ -210,6 +244,7 @@ def run(
             events,
             tap,
             dispatch_record,
+            sim,
         )
     return run_dir
 
@@ -222,8 +257,14 @@ def execute(
     events: bool,
     tap: bool,
     dispatch_record: bool,
+    sim: SimConfig | None,
 ) -> None:
-    capture = Capture(run_dir, both_edges_mask=0, events=events)
+    capture = Capture(
+        run_dir,
+        both_edges_mask=0 if sim is None else sim.both_edges_mask,
+        events=events,
+        sim=sim,
+    )
     final: dict = {}
     failure: BaseException | None = None
     started = time.time()
@@ -299,6 +340,12 @@ def main() -> None:
         help="record every segment the host dispatched, the reference "
         "analyze.py judges a run the pacer braked against",
     )
+    parser.add_argument(
+        "--sim",
+        type=Path,
+        help="simulated peripherals JSON (e.g. configs/full.sim.json; pair with "
+        "--config configs/full.cfg)",
+    )
     lock.add_timeout_argument(parser)
     args = parser.parse_args()
     with lock.bench_lock(args.lock_timeout):
@@ -312,6 +359,7 @@ def main() -> None:
                 args.events,
                 args.step_tap,
                 args.dispatch_record,
+                args.sim,
             )
         )
 

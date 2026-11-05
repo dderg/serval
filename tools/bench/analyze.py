@@ -56,11 +56,13 @@ for _path in (REPO_ROOT / "snapshots", REPO_ROOT / "klippy", REPO_ROOT):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
+import capture_aux  # noqa: E402
 import capture_events  # noqa: E402
 import corner_flow_bench  # noqa: E402
 import dispatch_record  # noqa: E402
 import harness  # noqa: E402
 import mcu_execution  # noqa: E402
+import sim_report  # noqa: E402
 
 REFERENCE_PLANNED = "plan"
 REFERENCE_DISPATCHED = "dispatch_record"
@@ -211,6 +213,8 @@ class Capture:
     deltas: np.ndarray
     exact_steps: list[tuple[np.ndarray, np.ndarray]] | None = None
     events: capture_events.EventCapture | None = None
+    meta: dict | None = None
+    aux: np.ndarray | None = None
 
     @property
     def duration_s(self) -> float:
@@ -338,6 +342,7 @@ def load_capture(run_dir: Path) -> Capture:
             f"capture.json channel_count={channels}, analyzer expects "
             f"{len(CAPTURE_ROLES)} ({', '.join(CAPTURE_ROLES)})"
         )
+    aux = capture_aux.load(run_dir) if meta.get("aux") else None
     if meta.get("mode", "counts") == "events":
         events = capture_events.load(run_dir)
         return Capture(
@@ -348,13 +353,50 @@ def load_capture(run_dir: Path) -> Capture:
                 for c in events.channels
             ],
             events,
+            meta,
+            aux,
         )
     raw = np.fromfile(run_dir / "capture.bin", dtype=np.int8)
     if raw.size % channels:
         raise AnalysisError(
             f"capture.bin size {raw.size} is not a multiple of {channels}"
         )
-    return Capture(float(meta["tick_hz"]), raw.reshape(-1, channels))
+    return Capture(
+        float(meta["tick_hz"]), raw.reshape(-1, channels), None, None, meta, aux
+    )
+
+
+def capture_positions(capture: Capture):
+    if capture.events is not None:
+        channels = capture.events.channels
+
+        def at_event_records(records: np.ndarray) -> np.ndarray:
+            times = records["time"].astype(np.int64)
+            columns = []
+            for channel in channels:
+                totals = np.concatenate(([0], np.cumsum(channel.step_signs())))
+                columns.append(
+                    totals[np.searchsorted(channel.step_ticks, times, "right")]
+                )
+            return np.stack(columns, axis=1)
+
+        return at_event_records
+    totals = np.concatenate(
+        (
+            np.zeros((1, len(CAPTURE_ROLES)), np.int64),
+            np.cumsum(capture.deltas, axis=0),
+        )
+    )
+
+    def at_count_records(records: np.ndarray) -> np.ndarray:
+        ticks = records["time"].astype(np.int64)
+        if ticks.size and ticks[-1] >= len(capture.deltas):
+            raise AnalysisError(
+                f"aux record at tick {ticks[-1]} beyond the {len(capture.deltas)} captured ticks"
+            )
+        return totals[ticks + 1]
+
+    return at_count_records
 
 
 def _config_sections(config_text: str) -> configparser.RawConfigParser:
@@ -2098,7 +2140,19 @@ def analyze(
         "motors": motors_report,
         "corexy": corexy_report(inputs, reference, finals, errors),
         "mcu_execution": mcu_execution.report(
-            inputs.run_dir, inputs.capture.events, inputs.motors
+            inputs.run_dir,
+            inputs.capture.events,
+            inputs.motors,
+            inputs.capture.aux,
+        ),
+        "simulator": None
+        if inputs.capture.aux is None
+        else sim_report.report(
+            inputs.capture.meta,
+            inputs.capture.aux,
+            inputs.config.config_text,
+            inputs.motors,
+            capture_positions(inputs.capture),
         ),
         "stalls": {
             "count": len(stalls),

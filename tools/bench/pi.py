@@ -27,7 +27,9 @@ FORBIDDEN_PINS = {
     "PA8": "reserved for clock output",
 }
 F407_DRIVEN_PINS = {"PA9": "PD8", "PA10": "PD9", "PA15": "PD10", "PB0": "PD11"}
-PIN_TOKEN = re.compile(r"\bP[A-K]\d{1,2}\b", flags=re.IGNORECASE)
+PIN_TOKEN = re.compile(
+    r"([\^~!]*)(?:[A-Za-z_]\w*:)?\b(P[A-K]\d{1,2})\b", flags=re.IGNORECASE
+)
 KEY_LINE = re.compile(r"^(\w+)\s*[:=]")
 
 
@@ -223,7 +225,9 @@ def validate_config(text: str) -> None:
     not. The SWD pins and the MCO pin are never klippy's. The phase-2
     endstop/probe lines are driven push-pull by the F407 from its boot, so
     on the F401 they may only be read: an output there would fight the
-    F407's driver."""
+    F407's driver. The F407 drives them low when not triggered, so they
+    must read active-high: an inverted (`!`) pin would see a trigger at
+    rest."""
     section, key = "", ""
     for number, line in enumerate(text.splitlines(), 1):
         code = re.split(r"[#;]", line, maxsplit=1)[0]
@@ -234,7 +238,7 @@ def validate_config(text: str) -> None:
         if code[:1] not in (" ", "\t"):
             match = KEY_LINE.match(stripped)
             key = match.group(1).lower() if match else ""
-        for token in PIN_TOKEN.findall(code):
+        for modifiers, token in PIN_TOKEN.findall(code):
             pin = token.upper()
             reason = FORBIDDEN_PINS.get(pin)
             if reason:
@@ -246,6 +250,12 @@ def validate_config(text: str) -> None:
                     f"config line {number}: pin {pin} is driven by the F407's "
                     f"{F407_DRIVEN_PINS[pin]}; it may only be an endstop_pin or "
                     f"the [probe] pin, not {key or 'a value'} in [{section}]"
+                )
+            if pin in F407_DRIVEN_PINS and "!" in modifiers:
+                raise BenchError(
+                    f"config line {number}: pin {pin} is inverted; the F407's "
+                    f"{F407_DRIVEN_PINS[pin]} drives it low when not triggered, "
+                    "so it must read active-high"
                 )
 
 
@@ -262,3 +272,31 @@ def prepare_printer(config: Path = REPO_CFG) -> None:
     wait_settled()
     push_config(config)
     firmware_restart()
+
+
+MCO_LIVE_CFG = "~/klipper/tools/bench/openocd-target-live.cfg"
+MCO_WRITES = (
+    (0x40023830, 0x00000001, 0x00000000),
+    (0x40023808, 0x06400000, 0x07600000),
+    (0x40020008, 0x00030000, 0x00030000),
+    (0x40020024, 0x00000000, 0x0000000F),
+    (0x40020000, 0x00020000, 0x00030000),
+)
+MCO_WORD = re.compile(r"(0x[0-9a-fA-F]{8}):\s+([0-9a-fA-F]{8})")
+
+
+def enable_mco() -> None:
+    writes = "; ".join(
+        f"mmw {a:#010x} {s:#010x} {c:#010x}" for a, s, c in MCO_WRITES
+    )
+    reads = "; ".join(f"mdw {a:#010x}" for a, _, _ in MCO_WRITES)
+    output = ssh(
+        f'openocd -f {MCO_LIVE_CFG} -c "init; {writes}; {reads}; exit" 2>&1'
+    )
+    words = {int(a, 16): int(v, 16) for a, v in MCO_WORD.findall(output)}
+    for address, set_bits, clear_bits in MCO_WRITES:
+        mask = set_bits | clear_bits
+        if address not in words or words[address] & mask != set_bits:
+            raise BenchError(
+                f"F401 MCO1 setup did not stick at {address:#010x}: {output}"
+            )
