@@ -41,6 +41,28 @@ pub fn motion_settings(config: &Path) -> planner_config::from_doc::MotionSetting
     read_motion_settings(&doc).expect("motion settings").0
 }
 
+/// `bench_config` with its extruder kernel removed and the extruder's
+/// acceleration limit set to `e_max_accel`; a kernel-free advance needs
+/// finite extrude-only caps.
+pub fn kernel_free(bench_config: &str, e_max_accel: f64) -> String {
+    let text = std::fs::read_to_string(repo().join(bench_config))
+        .unwrap_or_else(|e| panic!("read {bench_config}: {e}"));
+    let replace = |text: &str, from: &str, to: &str| {
+        assert!(text.contains(from), "{bench_config} has no `{from}`");
+        text.replacen(from, to, 1)
+    };
+    let text = replace(
+        &text,
+        "post_processors: pa, st\n",
+        &format!("post_processors: pa\nmax_accel: {e_max_accel}\n"),
+    );
+    replace(
+        &text,
+        "pid_kd: 124.081\n",
+        "pid_kd: 124.081\nmax_extrude_only_velocity: 50\nmax_extrude_only_accel: 5000\n",
+    )
+}
+
 const Z_AXIS: usize = 2;
 const Z_PROBES_PER_ROW: usize = 32;
 

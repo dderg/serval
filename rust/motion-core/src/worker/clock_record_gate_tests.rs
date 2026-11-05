@@ -57,6 +57,7 @@ fn sink() -> (
         counter: Arc::new(AtomicU64::new(0)),
         frontier: Arc::new(super::super::CommittedFrontier::default()),
         frozen_projection: std::collections::HashMap::new(),
+        dispatch_record: None,
     };
     (sink, router, handle, clock)
 }

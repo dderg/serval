@@ -1,42 +1,42 @@
 {
   "slice_lines": 1000,
-  "commit": "0f479e89e4a17d26ff754d7aead4611c9369393e",
-  "reason": "provable fits: the ratio ramp modelled in follower enclosures and every fitted piece proven (witnesses removed); Pi 2-core worst window >= 2.06x on every config",
+  "commit": "d607eec8be637e6a19e4a6c8c2034ba0b2e550b8",
+  "reason": "[axis e] max_accel 20000 on the gated direct-drive configs, merged with #710's turning guard (p3 ramp pays the kernel-free turning bound); trident_kernel's floor shortfall stays pinned to #693",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 19914918820,
-      "stream_secs": 8.541,
+      "ir": 25831505500,
+      "stream_secs": 6.537,
       "pi_2core": {
-        "worst_x_reference": 3.811364395954888,
+        "worst_x_reference": 2.4814567755259063,
         "worst_x": [
-          4.23,
-          4.26
+          2.62,
+          2.6
         ],
-        "commit": "6aa1cb2757343385a67c2bae4cef824a0b21e368"
+        "commit": "18a9048ffe339fb78ff9997f2672e92abee4efb0"
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 27371139757,
-      "stream_secs": 6.202,
+      "ir": 27846335587,
+      "stream_secs": 6.213,
       "pi_2core": {
-        "worst_x_reference": 2.070231256080688,
+        "worst_x_reference": 2.033062541774491,
         "worst_x": [
-          2.28,
-          2.28
+          2.02,
+          2.02
         ],
-        "commit": "6aa1cb2757343385a67c2bae4cef824a0b21e368"
+        "commit": "18a9048ffe339fb78ff9997f2672e92abee4efb0"
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 28256044081,
-      "stream_secs": 7.543,
+      "ir": 31513184784,
+      "stream_secs": 5.538,
       "pi_2core": {
-        "worst_x_reference": 2.128770844865244,
+        "worst_x_reference": 1.3843509101624139,
         "worst_x": [
-          2.41,
-          2.39
+          1.37,
+          1.37
         ],
-        "commit": "6aa1cb2757343385a67c2bae4cef824a0b21e368"
+        "commit": "18a9048ffe339fb78ff9997f2672e92abee4efb0"
       }
     }
   },

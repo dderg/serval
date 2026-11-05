@@ -8,6 +8,7 @@ use super::super::FollowerState;
 use super::{
     AdvanceValley, Crossing, ENVELOPE_SLOPE, KERNEL_PEAK, NODE_SPACING_PER_WIDTH, NODE_SPACING_S,
     RampLeg, RestSide, ShapedLeaders, Spill, TimedSeam, WIDTH_SLOPE_BOUND, WidthField,
+    slowest_crawl,
 };
 
 /// `(length, ratio at start, ratio at end)` per span.
@@ -1095,6 +1096,91 @@ fn a_crawl_lays_a_valley_only_where_the_advance_would_leave_the_limit() {
     assert!(turnaround.needs_valley(&no_advance, 0.0337));
 }
 
+const CRAWL_LEG_SEAM_SPEED_MM_S: f64 = 2.83;
+const CRAWL_LEG_PEAK_GAIN_MM_S: f64 = 3.0 * CRAWL_LEG_SEAM_SPEED_MM_S;
+const CRAWL_LEG_SIDEWAYS_MM_S: f64 = 0.3;
+const CRAWL_LEG_PIECE_S: f64 = 0.1;
+const CRAWL_LEG_REVERSAL_POWER: i32 = 8;
+
+/// Leaders on a leg from `t0` that cross its opening seam along x at
+/// [`CRAWL_LEG_SEAM_SPEED_MM_S`], speed up, and reverse x sharply right
+/// before the closing seam, which they cross `end_excess_mm_s` faster than
+/// the opening one, drifting sideways along y the whole time: the shaped
+/// reversals of the rest ladder, which pass a hair beside zero inside the
+/// last probe interval of the move into them. Returns the leaders and the
+/// time of the reversal.
+fn reversing_just_before_its_end(t0: f64, end_excess_mm_s: f64) -> (ContinuousSegment, f64) {
+    let (v0, gain, piece) = (
+        CRAWL_LEG_SEAM_SPEED_MM_S,
+        CRAWL_LEG_PEAK_GAIN_MM_S,
+        CRAWL_LEG_PIECE_S,
+    );
+    let power = CRAWL_LEG_REVERSAL_POWER;
+    let (t_mid, t1) = (t0 + piece, t0 + 2.0 * piece);
+    let x_mid = v0 * piece + 2.0 * gain * piece / 3.0;
+    let drop = 2.0 * v0 + gain + end_excess_mm_s;
+    let degree = power as usize + 1;
+    let mut speeding_up = vec![0.0; degree + 1];
+    speeding_up[..4].copy_from_slice(&[0.0, v0, gain / piece, -gain / (3.0 * piece * piece)]);
+    let mut reversal = vec![0.0; degree + 1];
+    reversal[0] = x_mid;
+    reversal[1] = v0 + gain;
+    reversal[degree] = -drop / (f64::from(power + 1) * piece.powi(power));
+    let x = [
+        BezierPiece {
+            u_start: t0,
+            u_end: t_mid,
+            coeffs: speeding_up,
+        },
+        BezierPiece {
+            u_start: t_mid,
+            u_end: t1,
+            coeffs: reversal,
+        },
+    ];
+    let sideways = CRAWL_LEG_SIDEWAYS_MM_S;
+    let y = [
+        BezierPiece {
+            u_start: t0,
+            u_end: t_mid,
+            coeffs: vec![0.0, sideways],
+        },
+        BezierPiece {
+            u_start: t_mid,
+            u_end: t1,
+            coeffs: vec![sideways * piece, sideways],
+        },
+    ];
+    let reversal_t = t_mid + piece * libm::pow((v0 + gain) / drop, 1.0 / f64::from(power));
+    (leaders(&x, &y, (t0, t1)), reversal_t)
+}
+
+/// A crawl in the last probe interval of a leg is found however the
+/// leg's two seam speeds compare: the seam a hair slower is not the
+/// slowest point, so the crawl is not left to a seam crossing that never
+/// sees it. Which seam reads slower is rounding where the leg's ends
+/// mirror each other, so missing it made a stream lay a valley where the
+/// same motion planned from rest laid none.
+#[test]
+fn a_crawl_right_before_a_legs_end_is_found_whichever_seam_is_slower() {
+    for end_excess_mm_s in [-1e-6, 0.0, 1e-6] {
+        let (shaped, reversal_t) = reversing_just_before_its_end(3.0, end_excess_mm_s);
+        let shaped_leaders = ShapedLeaders::of(&shaped, &[0, 1]);
+        let leg = moving_leg(&shaped, &shaped_leaders, 100.0);
+        let found = slowest_crawl(&shaped_leaders, &leg, f64::INFINITY);
+        let Some((_, crossing)) = found else {
+            panic!(
+                "a leg whose closing seam is {end_excess_mm_s} mm/s faster than its opening \
+                 one finds no crawl at its reversal at t={reversal_t}"
+            );
+        };
+        assert!(
+            (crossing.speed - CRAWL_LEG_SIDEWAYS_MM_S).abs() < 1e-6,
+            "the crawl at the reversal at t={reversal_t} crosses as {crossing:?}"
+        );
+    }
+}
+
 const LINE_RATIO: f64 = 0.4 * 0.2 / (std::f64::consts::PI * 0.875 * 0.875);
 const STOP: Crossing = Crossing {
     speed: 70.25,
@@ -1188,5 +1274,74 @@ fn a_rest_side_reaches_the_longest_ramp_where_the_lead_or_a_near_step_needs_it()
     assert_eq!(
         leaving.width(&table, &DIRECT_DRIVE, LINE_END_MM),
         STOP_SPILL_MM
+    );
+}
+
+const CURVED_SPILL_MM: f64 = 0.1875;
+
+/// The stopping side of a stop in `voron_dense_top_layers` on the
+/// kernel-free fast bench config, whose shaped axes curve into it: the
+/// leaders cross the raw seam at 38.8 mm/s, and cruise at up to 98 mm/s
+/// past it.
+fn curved_stop() -> RestSide {
+    RestSide {
+        rest: LINE_END_MM,
+        seam: LINE_END_MM - CURVED_SPILL_MM,
+        outward: -1.0,
+        crossing: Crossing {
+            speed: 38.8,
+            rate: 4127.0,
+            jerk: 4.884e5,
+        },
+        spill: Spill {
+            duration: 0.0106,
+            crossing: Crossing {
+                speed: 38.8,
+                rate: 5348.0,
+                jerk: 1.758e6,
+            },
+        },
+        beyond: Crossing {
+            speed: 98.0,
+            rate: 9203.0,
+            jerk: 3.12e6,
+        },
+    }
+}
+
+/// The tail of a curved stop falls linearly across the spill, its slope
+/// stepping at the raw seam. Read at the speed the leaders cruise past the
+/// seam, that slope seam passed for a step the width field narrows past
+/// the extruder's limits, and the side released the lead from the longest
+/// ramp out.
+#[test]
+fn a_stopping_side_reads_its_spill_where_the_leaders_slow_into_the_rest() {
+    let mut stop = FollowerState::default();
+    stop.push_span(LINE_END_MM - CURVED_SPILL_MM, LINE_RATIO, LINE_RATIO);
+    stop.push_span(CURVED_SPILL_MM, LINE_RATIO, 0.95 * LINE_RATIO);
+    assert_eq!(
+        curved_stop().width(&stop.spans, &DIRECT_DRIVE, LINE_END_MM),
+        CURVED_SPILL_MM
+    );
+}
+
+/// A ratio ramp opening 1.5 mm before the rest moves the ratio by 30 %
+/// over 1.3 mm; the window its seam's distance from the rest leaves it
+/// ramps only the part of that within it, not the whole ramp's change as
+/// one step.
+#[test]
+fn a_rest_side_reads_a_long_ramp_by_its_change_within_the_window() {
+    let ramp_start = LINE_END_MM - 1.5;
+    let mut stop = FollowerState::default();
+    stop.push_span(ramp_start, LINE_RATIO, LINE_RATIO);
+    stop.push_span(
+        LINE_END_MM - CURVED_SPILL_MM - ramp_start,
+        LINE_RATIO,
+        0.7 * LINE_RATIO,
+    );
+    stop.push_span(CURVED_SPILL_MM, 0.7 * LINE_RATIO, 0.665 * LINE_RATIO);
+    assert_eq!(
+        curved_stop().width(&stop.spans, &DIRECT_DRIVE, LINE_END_MM),
+        CURVED_SPILL_MM
     );
 }

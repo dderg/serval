@@ -309,6 +309,26 @@ post_processors: extruder_pa, extruder_smoothing
 #   unset is inherited from max_extrude_only_velocity /
 #   max_extrude_only_accel (the same motor). An advance needs both, set or
 #   inherited.
+#   On the [extruder] axis max_accel is the extruder motor's
+#   pressure-advance-capable acceleration: the filament acceleration the
+#   drive follows without skipping while the advance adds k times the
+#   path's jerk to every corner and curve. It is a property of the drive,
+#   not of the print, so set it explicitly rather than inheriting the
+#   extrude-only cap, which only ever had to cover retracts and primes. A
+#   value below what the motor can do costs print time at every corner; a
+#   value above it skips steps. A direct drive typically follows 20000 or
+#   more. A bowden drive pushes the whole filament column against the
+#   tube's friction and the nozzle's back pressure, mostly through an
+#   ungeared drive gear, and is lower; 5000 is a safe start for an
+#   Ender-3-class bowden (with k around 0.5, upstream Klipper's default
+#   40 ms advance smoothing already asks about 4400 at its corners). To
+#   find the drive's value, print a pressure advance calibration pattern
+#   (or any part with sharp corners and fast perimeters) at the tuned k,
+#   raising max_accel between prints (it is read at restart). Stop at the
+#   first print that shows any of: clicks or knocks from the extruder,
+#   under-extrusion or gaps right after corners, or layer lines whose
+#   width shifts from layer to layer; set max_accel 20-30% below the last
+#   clean value.
 #instantaneous_corner_velocity: 1.0
 #   Optional, on an axis that follows others. Default is 1.0, as upstream
 #   Klipper's [extruder] option. Must be above 0 (mm/s). The velocity
@@ -344,8 +364,13 @@ advance through its slope `k` (a linear advance's `k`, a nonlinear one's
 `τ = max(5 ms, 1.5·Δ/A_e)`. An axis with neither limit set or inherited
 ramps every step over 5 ms. Where even 30 ms would exceed the limits at
 the speed the path allows, the velocity planner lowers the toolhead speed
-at the step instead, and that time is the cost. The former
-`ratio_ramp_time` option was removed; setting it is a config error.
+at the step instead, and that time is the cost. Near a rest the kernel's
+half-width is at most a quarter of the path left to it, so a step a few
+ramp lengths short of an extrude-only move or the end of a print gets only
+a fifth of the path to that rest on its side; where that is less than its
+τ takes, the velocity planner slows the step until the shorter ramp fits
+the limits. The former `ratio_ramp_time` option was
+removed; setting it is a config error.
 
 On every chain the advance applies only to the extrusion laid along the
 leaders' path, as Klipper advances only extruding moves that travel, so
@@ -360,8 +385,13 @@ and rebuilds it after over the input shaper's spill around the rest alone
 wherever the shortest ramp the extruder's limits allow for that lead fits
 within the spill, over the spill plus that ramp's reach elsewhere, and over
 the spill plus the reach of the longest ramp where a ratio step lies so near
-the rest that its own ramp would leave those limits; a rest the leaders pass
-through without stopping keeps the full advance.
+the rest that its own ramp, at the speed the leaders cross it there, would
+leave those limits; a rest the leaders pass through without stopping keeps
+the full advance. Around a rest, the flow
+switches from the move before's ratio to the move after's where the shaped
+leaders reach the rest point, even where the shaped axes curve into it
+unlike each other and cover more path than their straight distance from it;
+the move before's material is spread over that whole path.
 Without a kernel, any extruder position step, or velocity step beyond the
 leaders' fit rounding, is refused before it is emitted; leaders without an
 acceleration-continuous kernel produce such steps. The trade-off against a

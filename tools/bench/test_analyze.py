@@ -234,29 +234,35 @@ def test_a_capture_on_the_plans_pace_passes_the_pace_check(synthesized):
         assert epoch["pace_max_abs_lag_ms"] <= STALL_S * 1e3 + 1.0
 
 
-def _uniform_steps(times: np.ndarray) -> analyze.StepEvents:
-    return analyze.StepEvents(
-        times,
-        np.arange(1, times.size + 1, dtype=np.int64),
-        np.ones(times.size, np.int8),
-        np.full(times.size, np.nan),
-    )
-
-
-def _paced(capture_times: np.ndarray, reference_times: np.ndarray) -> dict:
-    return analyze.epoch_pace(
-        analyze.EpochSteps(
-            capture={"a": _uniform_steps(capture_times)},
-            reference={"a": _uniform_steps(reference_times)},
+def test_pace_pairs_steps_by_match_not_by_index():
+    alignment = analyze.Alignment(10.0, 0.0, False)
+    matches = {
+        role: analyze.MatchedSteps(
+            late_s=np.asarray(late),
+            capture_time_s=np.asarray(at),
+            reference_rate_hz=np.full(len(at), 500.0),
+            unmatched_capture=unmatched,
+            unmatched_reference=0,
+            edge_ties=0,
         )
+        for role, at, late, unmatched in (
+            ("a", [10.0, 10.2, 10.4], [0.0, 1e-6, 0.0], 0),
+            ("z", [10.1, 10.3], [-1e-6, 0.0], 1),
+        )
+    }
+    epoch = SimpleNamespace(
+        matches=matches, alignment=alignment, capture=analyze.Epoch(9.95, 10.4)
     )
+    capture, reference = analyze.paired_steps_s(epoch)
+    assert capture.tolist() == [10.0, 10.1, 10.2, 10.3, 10.4]
+    assert reference == pytest.approx([0.0, 0.100001, 0.199999, 0.3, 0.4])
 
 
 PACE_REFERENCE_S = np.arange(0.0, 20.0, 1e-3)
 
 
 def test_a_capture_one_percent_faster_than_the_plan_fails_the_pace_check():
-    pace = _paced(16.6 + 0.99 * PACE_REFERENCE_S, PACE_REFERENCE_S)
+    pace = analyze.epoch_pace(16.6 + 0.99 * PACE_REFERENCE_S, PACE_REFERENCE_S)
     assert not pace["pace_within_tolerance"]
     assert pace["pace_capture_over_stream"] == pytest.approx(0.99, abs=1e-4)
     assert pace["pace_worst_lag_ms"] == pytest.approx(-200.0, abs=1.0)
@@ -269,7 +275,7 @@ def test_a_local_burst_that_runs_ahead_and_resyncs_fails_the_pace_check():
     capture[ahead] -= 0.1 * (PACE_REFERENCE_S[ahead] - 5.0)
     capture[PACE_REFERENCE_S >= 10.0] -= 0.5
     capture[PACE_REFERENCE_S >= 12.0] += 0.5
-    pace = _paced(capture, PACE_REFERENCE_S)
+    pace = analyze.epoch_pace(capture, PACE_REFERENCE_S)
     assert not pace["pace_within_tolerance"]
     assert pace["pace_capture_over_stream"] == pytest.approx(1.0)
 
@@ -277,9 +283,23 @@ def test_a_local_burst_that_runs_ahead_and_resyncs_fails_the_pace_check():
 def test_crystal_ppm_and_a_short_stall_stay_within_the_pace_tolerance():
     capture = (1.0 + 150e-6) * PACE_REFERENCE_S
     capture[(PACE_REFERENCE_S > 3.0) & (PACE_REFERENCE_S < 3.06)] += STALL_S
-    pace = _paced(capture, PACE_REFERENCE_S)
+    pace = analyze.epoch_pace(capture, PACE_REFERENCE_S)
     assert pace["pace_within_tolerance"]
     assert pace["pace_max_abs_lag_ms"] == pytest.approx(STALL_S * 1e3, abs=0.5)
+
+
+PACER_RESERVE_S = 1.056
+
+
+def test_a_capture_braked_to_rest_and_resumed_by_the_pacer_fails_the_pace_check():
+    capture = PACE_REFERENCE_S.copy()
+    for resume_at in (4.0, 9.0, 14.0):
+        capture[PACE_REFERENCE_S >= resume_at] += PACER_RESERVE_S
+    pace = analyze.epoch_pace(capture, PACE_REFERENCE_S)
+    assert not pace["pace_within_tolerance"]
+    assert pace["pace_worst_lag_ms"] == pytest.approx(
+        3 * PACER_RESERVE_S * 1e3, rel=1e-3
+    )
 
 
 TIE_GCODE = """\

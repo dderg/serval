@@ -103,6 +103,10 @@ pub struct Anchor {
     t0: Option<f64>,
     last_t_end: f64,
     parked: bool,
+    /// The lead the next resume from rest starts at, when the pacer braked
+    /// motion in flight to rest: the playhead must not reach the resumed
+    /// motion's committed end before the pacer can brake it again.
+    resume_lead_s: Option<f64>,
     stream_end: f64,
     claimed_start_host: f64,
     held_start_host: f64,
@@ -114,6 +118,7 @@ impl Anchor {
             t0: None,
             last_t_end: 0.0,
             parked: true,
+            resume_lead_s: None,
             stream_end: 0.0,
             claimed_start_host: f64::NEG_INFINITY,
             held_start_host: f64::NEG_INFINITY,
@@ -135,7 +140,7 @@ impl Anchor {
     pub fn planned_start(&self, seg_t_start: f64, host_now: f64) -> Option<(f64, StreamEpoch)> {
         let epoch = Self::epoch_of(self.classify(seg_t_start, host_now))?;
         let natural_t0 = if epoch.retimed() {
-            host_now + DEFAULT_LEAD_SECS - seg_t_start
+            host_now + self.start_lead_s() - seg_t_start
         } else {
             self.t0.expect("a continuing stream is anchored")
         };
@@ -174,7 +179,7 @@ impl Anchor {
         let margin_s = t0 + seg_t_start - host_now;
         let hole_s = seg_t_start - self.last_t_end;
         let floor_s = if self.parked {
-            PARKED_REANCHOR_FLOOR_SECS
+            PARKED_REANCHOR_FLOOR_SECS.max(self.resume_lead_s.unwrap_or(0.0))
         } else {
             LOW_MARGIN_WARN_SECS
         };
@@ -231,7 +236,7 @@ impl Anchor {
                     event = "anchor_idle_resume",
                     margin_s,
                     seg_t_start,
-                    lead_secs = DEFAULT_LEAD_SECS,
+                    lead_secs = self.start_lead_s(),
                     "[anchor] resuming from rest across an idle gap — re-anchoring forward"
                 );
             }
@@ -315,7 +320,7 @@ impl Anchor {
                 t0,
                 seg_t_start,
                 seg_t_end,
-                lead_secs = DEFAULT_LEAD_SECS,
+                lead_secs = self.start_lead_s(),
                 held_start_host = self.held_start_host,
                 last_t_end = self.last_t_end,
                 condition,
@@ -346,6 +351,7 @@ impl Anchor {
         self.last_t_end = seg_t_end;
         self.stream_end = seg_t_end;
         self.parked = false;
+        self.resume_lead_s = None;
         self.held_start_host = f64::NEG_INFINITY;
         (t0, epoch)
     }
@@ -353,7 +359,7 @@ impl Anchor {
     pub fn claim_earliest_start(&mut self, host_now: f64) -> Result<f64, String> {
         let natural = match self.classify(self.stream_end, host_now) {
             AnchorClass::Reposition | AnchorClass::IdleResume { .. } => {
-                host_now + DEFAULT_LEAD_SECS
+                host_now + self.start_lead_s()
             }
             AnchorClass::Continuation { .. } | AnchorClass::Rejoin { .. } => {
                 self.t0.expect("a continuing stream is anchored") + self.stream_end
@@ -396,6 +402,35 @@ impl Anchor {
     /// stop, once jerk is unlimited.
     pub fn mark_parked(&mut self) {
         self.parked = true;
+    }
+
+    #[must_use]
+    pub fn is_parked(&self) -> bool {
+        self.parked
+    }
+
+    /// The pacer braked motion in flight to rest because the producer fell
+    /// behind the playhead: the next resume must start at least `lead_s`
+    /// (the pacer's reserve) ahead, or the pacer could not brake it again in
+    /// time and the playhead would overrun the committed end mid-motion.
+    pub fn require_resume_lead(&mut self, lead_s: f64) -> Result<(), String> {
+        if !self.parked {
+            return Err(format!(
+                "a resume lead of {lead_s:.6}s needs a stream braked to rest, and this one is \
+                 in motion"
+            ));
+        }
+        if !(lead_s.is_finite() && lead_s > 0.0) {
+            return Err(format!(
+                "resume lead must be finite and positive, got {lead_s}"
+            ));
+        }
+        self.resume_lead_s = Some(lead_s);
+        Ok(())
+    }
+
+    fn start_lead_s(&self) -> f64 {
+        DEFAULT_LEAD_SECS.max(self.resume_lead_s.unwrap_or(0.0))
     }
 
     pub fn t0(&self) -> Option<f64> {

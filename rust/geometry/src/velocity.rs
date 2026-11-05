@@ -259,6 +259,122 @@ where
     F: FnOnce(usize) -> usize,
     W: FanOut,
 {
+    plan_span(
+        moves,
+        stop_before,
+        budgets,
+        SpanEnds::WINDOW,
+        params,
+        workers,
+        select_prefix,
+    )
+}
+
+/// Re-plans a span cut out of a settled plan between its two seam speeds:
+/// entering at `params.entry_v` and leaving at `exit_v`, each move's
+/// acceleration budget scaled by `accel_scales[k]`. The plan of the span
+/// is the one a window holding it plans there whenever the scaled budgets
+/// leave both seam speeds standing: a window's plan before a seam reads only
+/// that seam's speed, and after it only that speed again. The returned
+/// boundary speeds show whether they stand: an exit the span cannot reach
+/// comes back lower than `exit_v`, an entry it cannot brake from fails with
+/// [`VelocityError::OverCommitted`].
+pub fn replan_span(
+    moves: &[crate::Move],
+    stop_before: &[bool],
+    budgets: &[ExtrusionBudget],
+    accel_scales: &[f64],
+    params: VelocityPlanParams,
+    exit_v: f64,
+) -> Result<VelocityProfile, VelocityError> {
+    assert_eq!(accel_scales.len(), moves.len(), "one scale per move");
+    assert!(
+        exit_v.is_finite() && exit_v >= 0.0,
+        "a span's exit speed must be finite and non-negative, got {exit_v}"
+    );
+    plan_span(
+        moves,
+        stop_before,
+        budgets,
+        SpanEnds {
+            accel_scales: Some(accel_scales),
+            exit_v,
+        },
+        params,
+        &Serial,
+        |_| moves.len(),
+    )
+}
+
+/// The latest seam of `moves` (an index into `seam_speeds`, one per seam)
+/// whose speed a rest at their far end could not lower: there the brake
+/// envelope from that rest, through the moves' ceilings and acceleration
+/// budgets scaled by `accel_scales`, reaches at least the seam's speed. Any
+/// lowering of the plan at or past the far end then leaves every seam up to
+/// it standing, the plan before a seam reading only that seam's speed.
+/// `None` where no seam of `moves` stands clear.
+pub fn brake_horizon(
+    moves: &[crate::Move],
+    stop_before: &[bool],
+    budgets: &[ExtrusionBudget],
+    accel_scales: &[f64],
+    seam_speeds: &[f64],
+    params: VelocityPlanParams,
+) -> Result<Option<usize>, VelocityError> {
+    let n = moves.len();
+    assert_eq!(seam_speeds.len(), n + 1, "one speed per seam");
+    assert_eq!(accel_scales.len(), n, "one scale per move");
+    let tol = params.integration_tol;
+    let mut report = VelocityReport::default();
+    let caps = build_move_caps(moves, budgets, Some(accel_scales), params, &mut report)?;
+    let seeded = seed_seam_velocities(moves, &caps, budgets, stop_before, 0.0, 0.0, &mut report);
+    let mut brake = 0.0_f64;
+    for k in (0..n).rev() {
+        let kin = &caps[k].kin;
+        let reach =
+            disk::disk_reach_v_rev(kin, brake, kin.length, tol).ok_or(VelocityError::Diverged {
+                line_no: moves[k].source.start_line,
+            })?;
+        brake = if k == 0 {
+            reach.v
+        } else {
+            reach.v.min(seeded.v[k])
+        };
+        if seam_speeds[k] <= brake {
+            return Ok(Some(k));
+        }
+    }
+    Ok(None)
+}
+
+/// How a plan ends and scales its budgets: a window brakes to rest at its
+/// far end on its own budgets; a re-planned span leaves at a set speed.
+#[derive(Clone, Copy)]
+struct SpanEnds<'a> {
+    accel_scales: Option<&'a [f64]>,
+    exit_v: f64,
+}
+
+impl SpanEnds<'_> {
+    const WINDOW: Self = Self {
+        accel_scales: None,
+        exit_v: 0.0,
+    };
+}
+
+fn plan_span<F, W>(
+    moves: &[crate::Move],
+    stop_before: &[bool],
+    budgets: &[ExtrusionBudget],
+    ends: SpanEnds,
+    params: VelocityPlanParams,
+    workers: &W,
+    select_prefix: F,
+) -> Result<VelocityProfile, VelocityError>
+where
+    F: FnOnce(usize) -> usize,
+    W: FanOut,
+{
     let tol = params.integration_tol;
     let entry_v = params.entry_v;
     validate_config(params)?;
@@ -283,9 +399,17 @@ where
     }
 
     let mut report = VelocityReport::default();
-    let caps = build_move_caps(moves, budgets, params, &mut report)?;
+    let caps = build_move_caps(moves, budgets, ends.accel_scales, params, &mut report)?;
     check_entry_ceiling(moves, &caps, entry_v, tol)?;
-    let mut plan = seed_seam_velocities(moves, &caps, stop_before, entry_v, &mut report);
+    let mut plan = seed_seam_velocities(
+        moves,
+        &caps,
+        budgets,
+        stop_before,
+        entry_v,
+        ends.exit_v,
+        &mut report,
+    );
     forward_pass(moves, &caps, &mut plan, tol)?;
     let shop = ProfileShop::new(&caps, &plan.is_anchor);
     let mut settled = None;
@@ -350,11 +474,12 @@ fn validate_config(params: VelocityPlanParams) -> Result<(), VelocityError> {
 fn build_move_caps(
     moves: &[crate::Move],
     budgets: &[ExtrusionBudget],
+    accel_scales: Option<&[f64]>,
     params: VelocityPlanParams,
     report: &mut VelocityReport,
 ) -> Result<Vec<MoveCaps>, VelocityError> {
     let mut caps = Vec::with_capacity(moves.len());
-    for (m, budget) in moves.iter().zip(budgets) {
+    for (index, (m, budget)) in moves.iter().zip(budgets).enumerate() {
         let ratio_in_reach = budget.ratio_in_reach;
         let line_no = m.source.start_line;
         let path_ceiling = m.feedrate_mm_s.min(m.limits.max_velocity_mm_s);
@@ -411,6 +536,7 @@ fn build_move_caps(
             ),
             None => (limits, None),
         };
+        let accel = accel * accel_scales.map_or(1.0, |scales| scales[index]);
 
         if disk::limit_speed(kappa_peak, accel) < flat_ceiling {
             report.curvature_bound += 1;
@@ -472,13 +598,16 @@ impl SeamPlan {
 fn seed_seam_velocities(
     moves: &[crate::Move],
     caps: &[MoveCaps],
+    budgets: &[ExtrusionBudget],
     stop_before: &[bool],
     entry_v: f64,
+    exit_v: f64,
     report: &mut VelocityReport,
 ) -> SeamPlan {
     let n = caps.len();
     let mut v = vec![0.0_f64; n + 1];
     v[0] = entry_v;
+    v[n] = exit_v;
     let mut is_anchor = vec![false; n + 1];
     is_anchor[0] = true;
     is_anchor[n] = true;
@@ -495,8 +624,12 @@ fn seed_seam_velocities(
                 disk::limit_speed(kappa_up, up.accel).min(disk::limit_speed(kappa_dn, dn.accel));
             let ceiling = up.flat_ceiling.min(dn.flat_ceiling);
             v[k] = ceiling.min(disk::notch_free_min(ceiling, boundary_vlim));
-            let step_ceiling =
-                extruder_caps::ratio_step_ceiling(&moves[k - 1], &moves[k], up.accel.max(dn.accel));
+            let step_ceiling = extruder_caps::ratio_step_ceiling(
+                &moves[k - 1],
+                &moves[k],
+                up.accel.max(dn.accel),
+                budgets[k].rest_room_mm,
+            );
             if step_ceiling < v[k] {
                 report.ratio_step_bound += 1;
                 v[k] = step_ceiling;
@@ -1047,5 +1180,7 @@ fn validate_segment<P: CurvatureProfile>(
     Ok(())
 }
 
+#[cfg(test)]
+mod replan_tests;
 #[cfg(test)]
 mod tests;

@@ -292,8 +292,11 @@ const PEEL_MAX: u32 = 256;
 /// vanishing at one end as a power of the time to it bounds no polynomial
 /// range on a window as wide as its distance from the zero, however far it
 /// is halved. Slivers [`PEEL_SHARE`] of the window wide are peeled off
-/// whichever end holds a model until the rest does; `None` where neither
-/// end does, or the peels run out.
+/// whichever end holds a model until the rest does, a peel neither end of
+/// which holds one narrowed until one does. Where not even a peel no float
+/// lies inside does, a rest of at most [`FLOAT_PIECES_MAX`] floats around
+/// a speed zero is held float by float by the evaluator
+/// ([`between_floats`]); `None` past that, or where the peels run out.
 fn peel_toward_singularity(
     window: Window,
     accuracy: [f64; 3],
@@ -302,22 +305,37 @@ fn peel_toward_singularity(
     out: &mut Vec<ExactPiece>,
 ) -> Option<()> {
     let (mut lo, mut hi) = (window.lo, window.hi);
-    let mut from_the_end = Vec::new();
+    let mut from_the_end: Vec<Vec<ExactPiece>> = Vec::new();
+    let finish = |from_the_end: Vec<Vec<ExactPiece>>, out: &mut Vec<ExactPiece>| {
+        for pieces in from_the_end.into_iter().rev() {
+            out.extend(pieces);
+        }
+        Some(())
+    };
     for _ in 0..PEEL_MAX {
         let rest = Window::new(lo, hi);
         if let Some(models) = (signal.model)(rest) {
             try_enclose_to_depth(rest, Some(&models), accuracy, signal, halving, out)?;
-            for pieces in from_the_end.into_iter().rev() {
-                out.extend::<Vec<ExactPiece>>(pieces);
+            return finish(from_the_end, out);
+        }
+        let mut peel = PEEL_SHARE * (hi - lo);
+        let (front, back, front_models, back_models) = loop {
+            let (first_float, last_float) = (
+                trajectory::next_toward(lo, f64::INFINITY),
+                trajectory::next_toward(hi, f64::NEG_INFINITY),
+            );
+            let front = Window::new(lo, (lo + peel).max(first_float).min(hi));
+            let back = Window::new((hi - peel).min(last_float).max(lo), hi);
+            let (front_models, back_models) = ((signal.model)(front), (signal.model)(back));
+            if front_models.is_some() || back_models.is_some() {
+                break (front, back, front_models, back_models);
             }
-            return Some(());
-        }
-        let peel = PEEL_SHARE * (hi - lo);
-        let (front, back) = (Window::new(lo, lo + peel), Window::new(hi - peel, hi));
-        let (front_models, back_models) = ((signal.model)(front), (signal.model)(back));
-        if front_models.is_none() && back_models.is_none() {
-            return None;
-        }
+            if front.hi == first_float.min(hi) && back.lo == last_float.max(lo) {
+                between_each_float((lo, hi), signal.pva_at, out)?;
+                return finish(from_the_end, out);
+            }
+            peel *= PEEL_SHARE;
+        };
         if let Some(models) = front_models {
             try_enclose_to_depth(front, Some(&models), accuracy, signal, halving, out)?;
             lo = front.hi;
@@ -329,10 +347,32 @@ fn peel_toward_singularity(
             hi = back.lo;
         }
         if lo >= hi {
-            return None;
+            return finish(from_the_end, out);
         }
     }
     None
+}
+
+/// The most floats a window without a model is held by one by one.
+const FLOAT_PIECES_MAX: usize = 64;
+
+/// [`between_floats`] pieces over every pair of consecutive floats of
+/// `[lo, hi]`; `None` past [`FLOAT_PIECES_MAX`] of them.
+fn between_each_float(
+    (lo, hi): (f64, f64),
+    pva_at: &dyn Fn(f64) -> (f64, f64, f64),
+    out: &mut Vec<ExactPiece>,
+) -> Option<()> {
+    let mut from = lo;
+    for _ in 0..FLOAT_PIECES_MAX {
+        if from >= hi {
+            return Some(());
+        }
+        let to = trajectory::next_toward(from, f64::INFINITY).min(hi);
+        out.push(between_floats(Window::new(from, to), pva_at));
+        from = to;
+    }
+    (from >= hi).then_some(())
 }
 
 /// Encloses several signals over `[lo, hi]` whose windows share work:

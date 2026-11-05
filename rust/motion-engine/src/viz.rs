@@ -1,8 +1,11 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 
+use motion_core::dispatch_record::{DrainCause, encode_drain, encode_header, encode_segment};
+use motion_pipeline::InputTrace;
 use snapshot_core::waypoints::Waypoint;
-use snapshot_core::{ExactTrajectory, SampleSide, Snapshot};
+use snapshot_core::{ExactTrajectory, SampleSide, Snapshot, StreamRecord};
 use trajectory::ContinuousSegment;
 
 use planner_config::RuntimeLimits;
@@ -314,6 +317,82 @@ pub(crate) fn pipeline_snapshot_epoch_samples(
 
 type EpochSamples = (f64, f64, Vec<Vec<(f64, f64, f64)>>);
 
+/// Plan `waypoints` under `config_text` as one stream, as
+/// [`pipeline_snapshot_epoch_samples`] does, and encode the plan in the
+/// live host's dispatch-record format: every segment on host origin 0,
+/// re-anchored at the start and after every rest, and every rest as a
+/// requested drain. `step_benchmarks` caps it as in [`pipeline_snapshot`].
+#[pyfunction]
+#[pyo3(signature = (waypoints, config_text, step_benchmarks = None))]
+pub(crate) fn pipeline_snapshot_dispatch_record<'py>(
+    py: Python<'py>,
+    waypoints: Vec<PyWaypoint>,
+    config_text: &str,
+    step_benchmarks: Option<Vec<PyStepBenchmark>>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let step_capacity = optional_step_capacity_input(config_text, step_benchmarks.as_deref())?;
+    let record = snapshot_core::stream_record(
+        &waypoints_from_py(waypoints),
+        &planner(config_text)?,
+        step_capacity.as_ref(),
+    )
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let encoded = plan_dispatch_record(&record).map_err(PyValueError::new_err)?;
+    Ok(PyBytes::new(py, &encoded))
+}
+
+fn plan_dispatch_record(record: &StreamRecord) -> Result<Vec<u8>, String> {
+    let moves_before_drains: Vec<u64> = record
+        .inputs
+        .iter()
+        .scan(0_u64, |moves, input| {
+            Some(match input {
+                InputTrace::Move(_) => {
+                    *moves += 1;
+                    None
+                }
+                InputTrace::Drain => Some(*moves),
+                _ => None,
+            })
+        })
+        .flatten()
+        .collect();
+    if moves_before_drains.len() != record.drained_at_rests.len() {
+        return Err(format!(
+            "the plan fed {} drains but drained at {} rests",
+            moves_before_drains.len(),
+            record.drained_at_rests.len()
+        ));
+    }
+    let mut rests = record
+        .drained_at_rests
+        .iter()
+        .copied()
+        .zip(moves_before_drains)
+        .peekable();
+    let mut out = Vec::new();
+    encode_header(&mut out);
+    let mut fresh_epoch = true;
+    for (index, seg) in record.segments.iter().enumerate() {
+        while let Some((_, moves_sent)) = rests.next_if(|&(drained_at, _)| drained_at == index) {
+            encode_drain(&mut out, DrainCause::Requested, moves_sent);
+            fresh_epoch = true;
+        }
+        encode_segment(&mut out, seg, 0.0, fresh_epoch)?;
+        fresh_epoch = false;
+    }
+    for (drained_at, moves_sent) in rests {
+        if drained_at != record.segments.len() {
+            return Err(format!(
+                "a rest drained at {drained_at} of {} segments, out of order",
+                record.segments.len()
+            ));
+        }
+        encode_drain(&mut out, DrainCause::Requested, moves_sent);
+    }
+    Ok(out)
+}
+
 /// The runs of `segments` between two rests the stream drained to, each
 /// rest given as the number of segments emitted when it drained.
 fn motion_epochs(segments: &[ContinuousSegment], drained_at_rests: &[usize]) -> Vec<(f64, f64)> {
@@ -330,3 +409,6 @@ fn motion_epochs(segments: &[ContinuousSegment], drained_at_rests: &[usize]) -> 
         .map(|run| (segments[run[0]].t_start, segments[run[1] - 1].t_end))
         .collect()
 }
+
+#[cfg(test)]
+mod tests;
