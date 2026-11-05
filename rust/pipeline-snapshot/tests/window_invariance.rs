@@ -56,11 +56,7 @@ fn steps_for(gcode: &str, config: &Path) -> Vec<PlanStep> {
 
 #[test]
 fn commits_wherever_the_inbox_runs_dry_shape_the_same_trajectory() {
-    let gcode: String = corpus::sim_cases(None)
-        .into_iter()
-        .find(|(name, _, _)| name.starts_with("voron_first_layers/"))
-        .expect("first layers print")
-        .1;
+    let gcode = corpus::sim_print("voron_first_layers");
     for config in ["tools/bench/configs/ramp.cfg", "tools/bench/printer.cfg"] {
         let config = corpus::repo().join(config);
         let steps = steps_for(&gcode, &config);
