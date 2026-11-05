@@ -67,7 +67,8 @@ G1 X107.16 Y105.195 E.04579
 
 #[test]
 fn a_kernel_smoothed_advance_keeps_the_extruder_within_its_velocity_limit_out_of_a_crawl() {
-    let config = corpus::repo().join("tools/bench/configs/profiles/p1_bowden_bedslinger_kernel.cfg");
+    let config =
+        corpus::repo().join("tools/bench/configs/profiles/p1_bowden_bedslinger_kernel.cfg");
     let snapshot = corpus::plan(
         "extrusion_travel_back_and_out",
         EXTRUSION_TRAVEL_BACK_AND_OUT,

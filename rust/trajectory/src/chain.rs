@@ -300,7 +300,9 @@ impl CompiledChain {
             }
             slot_sources[slot] = Some(inst.name());
             match stage {
-                ChainStage::SmoothKernel(kernel) => compiled.kernel = Some(ChainKernel::new(kernel)),
+                ChainStage::SmoothKernel(kernel) => {
+                    compiled.kernel = Some(ChainKernel::new(kernel))
+                }
                 transform => {
                     let placement = if compiled.kernel.is_some() {
                         TransformPlacement::AfterKernel
