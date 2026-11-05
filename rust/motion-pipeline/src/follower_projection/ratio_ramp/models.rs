@@ -12,11 +12,13 @@
 //! ulp or so from where the evaluator's flips, so the ends are read a few
 //! ulps inside the reach: the formulas meet to second order at a bend.
 
+use crate::follower_projection::Table;
 use crate::shaper::taylor::{self, Ball, TaylorModel};
 
 use super::{
     AdvanceValley, FALL_TO_REST, KERNEL_HALF_VARIANCE, RISE_FROM_REST, RatioSmoothing,
-    SMOOTHED_HALF_SQUARE, SMOOTHED_RAMP, SMOOTHERSTEP, SPAN_LOOKUP_SLACK_MM, Seam, WidthField,
+    SMOOTHED_HALF_SQUARE, SMOOTHED_RAMP, SMOOTHERSTEP, SPAN_LOOKUP_SLACK_MM, Seam, SeamTable,
+    WidthField,
 };
 
 /// `C(n, k)` for the moments' expansions about a window's centre.
@@ -536,29 +538,31 @@ impl AdvanceValley {
 }
 
 impl RatioSmoothing {
-    /// The correction `X` and its first three path derivatives on the model
-    /// `s` of the path, `reach` its range; `None` where the reach's ends
-    /// read different formulas, or the width may reach zero. Each
-    /// derivative is its Taylor polynomial about the model's centre, to
-    /// [`SERIES_DEGREE`] in the distance `δ` from it, and the Lagrange
+    /// The correction `X` of `table` and its first three path derivatives
+    /// on the model `s` of the path, `reach` its range; `None` where the
+    /// reach's ends read different formulas, or the width may reach zero.
+    /// Each derivative is its Taylor polynomial about the model's centre,
+    /// to [`SERIES_DEGREE`] in the distance `δ` from it, and the Lagrange
     /// remainder past it, bounded by the series read with `δ` the whole
     /// reach of the model: an interval Taylor series.
     pub(in crate::follower_projection) fn correction_model(
         &self,
+        table: Table,
         s: &TaylorModel,
         reach: (f64, f64),
     ) -> Option<ModelJet> {
-        if let Some(formula) = self.correction_formula(reach) {
-            return self.correction_by(formula, s);
+        let seams = self.seam_table(table);
+        if let Some(formula) = self.correction_formula(seams, reach) {
+            return self.correction_by(seams, formula, s);
         }
-        let formulas = match self.formulas_across_rest(reach) {
+        let formulas = match self.formulas_across_rest(seams, reach) {
             Some(formulas) => formulas,
-            None => self.narrow_formulas(reach)?,
+            None => self.narrow_formulas(seams, reach)?,
         };
         let (first, others) = formulas.split_first()?;
-        let mut base = self.correction_by(*first, s)?;
+        let mut base = self.correction_by(seams, *first, s)?;
         for &other in others {
-            let other = self.correction_by(other, s)?;
+            let other = self.correction_by(seams, other, s)?;
             for (model, other) in [
                 (&mut base.value, &other.value),
                 (&mut base.d1, &other.d1),
@@ -574,10 +578,14 @@ impl RatioSmoothing {
 
     /// Every formula a reach too narrow to place its bends in reads, one per
     /// float.
-    fn narrow_formulas(&self, reach: (f64, f64)) -> Option<Vec<CorrectionFormula>> {
+    fn narrow_formulas(
+        &self,
+        seams: &SeamTable,
+        reach: (f64, f64),
+    ) -> Option<Vec<CorrectionFormula>> {
         let mut formulas: Vec<CorrectionFormula> = Vec::new();
         for at in narrow_floats(reach)? {
-            let formula = self.correction_formula((at, at))?;
+            let formula = self.correction_formula(seams, (at, at))?;
             if !formulas.contains(&formula) {
                 formulas.push(formula);
             }
@@ -586,9 +594,14 @@ impl RatioSmoothing {
     }
 
     /// The correction's jet on the model `s` of the path by `formula`.
-    fn correction_by(&self, formula: CorrectionFormula, s: &TaylorModel) -> Option<ModelJet> {
+    fn correction_by(
+        &self,
+        seams: &SeamTable,
+        formula: CorrectionFormula,
+        s: &TaylorModel,
+    ) -> Option<ModelJet> {
         let (centre, radius) = s.spread();
-        let Some(polynomials) = self.correction_polynomials(formula, centre) else {
+        let Some(polynomials) = self.correction_polynomials(seams, formula, centre) else {
             return Some(ModelJet::zero());
         };
         let series = polynomials
@@ -635,8 +648,12 @@ impl RatioSmoothing {
 
     /// The formula of the correction every point of `reach` reads; `None`
     /// where its ends read different ones.
-    fn correction_formula(&self, reach: (f64, f64)) -> Option<CorrectionFormula> {
-        if self.is_inert() {
+    fn correction_formula(
+        &self,
+        seams: &SeamTable,
+        reach: (f64, f64),
+    ) -> Option<CorrectionFormula> {
+        if seams.is_inert() {
             return Some(CorrectionFormula::Zero);
         }
         let read = self.correction_read_points(reach);
@@ -647,7 +664,7 @@ impl RatioSmoothing {
         if widths.0 <= 0.0 || widths.1 <= 0.0 {
             return None;
         }
-        self.smoothed_formula(read, widths, || self.width.width_interval(reach))
+        self.smoothed_formula(seams, read, widths, || self.width.width_interval(reach))
     }
 
     /// [`read_points`] for the correction's formula, each end moved inside
@@ -677,8 +694,12 @@ impl RatioSmoothing {
     /// it, at one end: the rest reads none, the rest of the reach one
     /// smoothed formula, and the window reads no seams there, or it would
     /// divide by the vanishing width; `None` for any other reach.
-    fn formulas_across_rest(&self, reach: (f64, f64)) -> Option<Vec<CorrectionFormula>> {
-        if self.is_inert() {
+    fn formulas_across_rest(
+        &self,
+        seams: &SeamTable,
+        reach: (f64, f64),
+    ) -> Option<Vec<CorrectionFormula>> {
+        if seams.is_inert() {
             return None;
         }
         let read = self.correction_read_points(reach);
@@ -694,9 +715,10 @@ impl RatioSmoothing {
         if read.0 < self.width.nodes[a].s || read.1 > self.width.nodes[b].s {
             return None;
         }
-        let moving = self.smoothed_formula(read, (widths.0.max(0.0), widths.1.max(0.0)), || {
-            Some(interval)
-        })?;
+        let moving =
+            self.smoothed_formula(seams, read, (widths.0.max(0.0), widths.1.max(0.0)), || {
+                Some(interval)
+            })?;
         match moving {
             CorrectionFormula::Zero => Some(vec![moving]),
             CorrectionFormula::Smoothed {
@@ -711,6 +733,7 @@ impl RatioSmoothing {
     /// where its ends' windows differ.
     fn smoothed_formula(
         &self,
+        table: &SeamTable,
         reach: (f64, f64),
         (h_lo, h_hi): (f64, f64),
         interval: impl FnOnce() -> Option<WidthInterval>,
@@ -718,13 +741,13 @@ impl RatioSmoothing {
         let slope_left_of = |first: usize| {
             first
                 .checked_sub(1)
-                .map_or(self.base_slope.unwrap_or(0.0), |last| {
-                    self.seams[last].slope_after
+                .map_or(table.base_slope.unwrap_or(0.0), |last| {
+                    table.seams[last].slope_after
                 })
         };
-        let first = |at: f64, h: f64| self.seams.partition_point(|seam| seam.s <= at - h);
-        let past = |at: f64, h: f64| self.seams.partition_point(|seam| seam.s < at + h);
-        let behind = |at: f64| self.seams.partition_point(|seam| seam.s <= at);
+        let first = |at: f64, h: f64| table.seams.partition_point(|seam| seam.s <= at - h);
+        let past = |at: f64, h: f64| table.seams.partition_point(|seam| seam.s < at + h);
+        let behind = |at: f64| table.seams.partition_point(|seam| seam.s <= at);
         let window = first(reach.0, h_lo)..past(reach.0, h_lo).max(first(reach.0, h_lo));
         if first(reach.1, h_hi) != window.start
             || past(reach.1, h_hi).max(first(reach.1, h_hi)) != window.end
@@ -750,6 +773,7 @@ impl RatioSmoothing {
     /// distance from `centre`; `None` for no correction.
     fn correction_polynomials(
         &self,
+        table: &SeamTable,
         formula: CorrectionFormula,
         centre: f64,
     ) -> Option<CorrectionPolynomials> {
@@ -762,7 +786,7 @@ impl RatioSmoothing {
         else {
             return None;
         };
-        let seams = &self.seams[first..past];
+        let seams = &table.seams[first..past];
         let is_behind = |index: usize| first + index < behind_end;
         let offset_of = |seam: &Seam| Ball::rounded(centre - seam.s, 1);
         let zero = Ball::exact(0.0);

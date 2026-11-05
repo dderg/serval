@@ -2,45 +2,58 @@
 """Re-measure the Pi and refit the throughput gate's Pi worst-window models.
 
     python3 scripts/throughput_recheck.py [--dispatches N] [--stage STAGE]
+        [--calibration-commit REV]
 
 The gate (scripts/throughput_gate.py) predicts the Pi 5 2-core worst 5 s
 window of the dense print from what it measures on its own machine. Both of
 its predictions come from fits over paired points this script measures: the
 variants of the code in pi_calibration.variants of
 tools/bench/throughput_baseline.json (commits, optionally patched for
-spread) plus the baseline's reference commit. Per variant and config:
+spread) plus the calibration commit the gate's live replay is pinned to:
+the baseline's reference commit unless --calibration-commit names another.
+Pinning it at the reference puts the gate's yardstick at the code it judges
+next, where its prediction is the Pi's own measurement on every runner CPU;
+the fit's CPU-dependent error grows with the head's distance from it.
+Between re-checks the pin holds still. Per variant and config:
 
 - Pi: the full dense print under `taskset -c 0,1` on the bench Pi (ssh
   PI_HOST, under tools/bench/lock.py), the lowest worst window of PI_RUNS
-  runs, every variant built in one directory there so only its code differs;
+  runs, every variant built in one directory there so only its code differs,
+  and for the calibration commit also its fastest wall per stream second;
 - Ir: the instructions and stream seconds of the gate's slice, counted the
   way the gate counts them, in the gate's image;
-- live: the live 2-core wall per stream second of the full print on every
-  CPU model the gate runs on. That is the GitHub runners: a throwaway branch,
-  whose every CI job replays all variants, is dispatched DISPATCHES times,
-  with the binaries built in the gate's image at the runner's paths, so they
-  are the binaries the gate builds. It is also this machine, which accepts
-  run on. A job takes each variant's cost as the mean of its LIVE_FASTEST
-  fastest runs, then as a log against the job's mean over variants. A CPU
-  model's value is the mean over its jobs.
+- live: the live 2-core wall per stream second of the full print on as many
+  runner CPU models as GitHub hands out. A throwaway branch, whose every CI
+  job replays all variants, is dispatched DISPATCHES times, with the
+  binaries built in the gate's image at the runner's paths, so they are the
+  binaries the gate builds. This machine, which accepts run on, replays them
+  too. A job takes each variant's cost as the mean of its LIVE_FASTEST
+  fastest runs, as a log against the calibration commit's in the same job. A
+  CPU model's value is the mean over its jobs. Runner rows are kept per
+  variant key (commit and patch digest), so rows collected before for an
+  unchanged variant and calibration commit still count after the variant
+  list grows.
 
-Per config it fits, through the reference the way the gate predicts a PR
-from it, ln(W / W_ref) = -beta ln(Ir per stream second / the reference's)
-and, per CPU model, ln(W / W_ref) = -alpha ln(live cost / the reference's).
-For each fit it records each point's error and leave-one-out error (the
-point predicted by the fit without it), in % of the measured window. The
-gate predicts the window from Ir as the reference's window times the Ir
-rate ratio^-beta, and from the live ratio as W_reference times
-live_ratio^-alpha. Fitting makes the reference's window the one measured
-here and stamps when and at which commit the Pi was measured, which
-restarts the gate's PI_CALIBRATION_STALE_DAYS clock.
+Per config it fits, through the calibration commit the way the gate
+predicts, ln(W / W_cal) = -beta ln(Ir per stream second / the
+calibration's) and ln(W / W_cal) = -alpha x, x the log live cost over the
+calibration's. alpha is one factor over every (CPU model, variant) point, so
+each CPU model counts once however many jobs landed on it. Each fit records
+each point's error and leave-one-out error (the point predicted by the fit
+without its variant), in % of the measured window; the live fit, per CPU
+model, also the error with that CPU model left out of the fit, which is how
+well it predicts a CPU model it never saw. It also records the Pi's speed
+on the calibration commit and the range of each job's speed on it as a
+multiple of the Pi's, which the gate holds its runner to. Fitting stamps
+when the Pi was measured, which restarts the gate's
+PI_CALIBRATION_STALE_DAYS clock.
 
 Stages: build (trees, binaries, Ir), dispatch (the runner branches), pi,
 local, collect (wait for the runners, read their logs, delete the
 branches), fit. `all` runs them in that order. Each stage saves its data
 under WORK/data, so a failed stage reruns alone with --stage. Collect adds
-its rows to the runner rows already collected for the same variants, so a
-further dispatch + collect widens the CPU coverage before the fit.
+its rows to the runner rows already collected, so a further dispatch +
+collect widens the CPU coverage before the fit.
 """
 
 from __future__ import annotations
@@ -66,7 +79,7 @@ from throughput_gate import GateError
 
 WORK = gate.DOCKER_CACHE / "target" / "throughput-recheck"
 IMAGE_WORK = Path("rust") / "target" / "throughput-recheck"
-REFERENCE_LABEL = "reference"
+CALIBRATION_LABEL = "calibration"
 REPO = "dderg/serval"
 WORKFLOW = Path(".github") / "workflows" / "ci-rust-runtime.yaml"
 PROBE_DIR = "recheck-probe"
@@ -85,6 +98,7 @@ IMAGE_TAG = "klipper-build-throughput-recheck"
 WORST_WINDOW = re.compile(
     r"worst stream windows[^\n]*\n\s*[0-9.]+\.\.\s*[0-9.]+\s+([0-9.]+)x"
 )
+PI_STAMP = re.compile(r"\bpi_(started|ended)_ns=(\d+)")
 PROBE_ROW = re.compile(r"RECHECK (\{.*\})\s*$")
 STAGES = ("build", "dispatch", "pi", "local", "collect", "fit")
 
@@ -127,16 +141,41 @@ def stream(command: list[str], cwd: Path | None = None) -> None:
         raise GateError(f"failed: {' '.join(command)}")
 
 
-def variants(baseline: dict) -> list[dict]:
+def calibration_commit(baseline: dict, pinned: str | None) -> str:
+    """The commit to pin the gate's calibration replay to: --calibration-commit,
+    or else the baseline's reference, so the yardstick sits at the code the
+    gate judges next."""
+    chosen = pinned or baseline.get("commit")
+    if not chosen:
+        raise GateError(
+            "the baseline names no reference commit: pass --calibration-commit"
+        )
+    return gate.run(
+        ["git", "rev-parse", "--verify", f"{chosen}^{{commit}}"],
+        cwd=gate.ROOT,
+    ).strip()
+
+
+def variants(baseline: dict, calibration: str) -> list[dict]:
     listed = baseline.get("pi_calibration", {}).get("variants")
     if not listed:
         raise GateError("the baseline lists no pi_calibration.variants")
     labels = [variant["label"] for variant in listed]
-    if REFERENCE_LABEL in labels or len(set(labels)) != len(labels):
+    if CALIBRATION_LABEL in labels or len(set(labels)) != len(labels):
         raise GateError(
-            f"variant labels must be unique and not {REFERENCE_LABEL!r}: {labels}"
+            f"variant labels must be unique and not {CALIBRATION_LABEL!r}: {labels}"
         )
-    return [*listed, {"label": REFERENCE_LABEL, "commit": baseline["commit"]}]
+    duplicates = [
+        variant["label"]
+        for variant in listed
+        if variant["commit"] == calibration and not variant.get("patch")
+    ]
+    if duplicates:
+        raise GateError(
+            f"variants {duplicates} are the calibration commit {calibration} "
+            "itself: drop them from pi_calibration.variants"
+        )
+    return [*listed, {"label": CALIBRATION_LABEL, "commit": calibration}]
 
 
 def variant_key(variant: dict) -> str:
@@ -152,8 +191,8 @@ def extract_tree(variant: dict, tree: Path) -> None:
     key = variant_key(variant)
     if marker.exists() and marker.read_text().strip() == key:
         return
-    staging = gate.reference_tree(WORK / "staging", variant["commit"])
-    gate.prepare_reference(variant["commit"], WORK / "staging")
+    staging = gate.commit_tree(WORK / "staging", variant["commit"])
+    gate.extract_commit(variant["commit"], WORK / "staging")
     if tree.exists():
         shutil.rmtree(tree)
     shutil.copytree(staging, tree)
@@ -465,22 +504,30 @@ def run_id(branch: str) -> int:
     raise GateError(f"no workflow run appeared for {branch}")
 
 
-def collected_rows(keys: dict[str, str]) -> list[dict]:
+def stored_rows() -> list[dict]:
     path = data_path("collect")
-    if not path.exists():
-        return []
-    payload = json.loads(path.read_text())
-    return payload["rows"] if payload["variants"] == keys else []
+    return json.loads(path.read_text())["rows"] if path.exists() else []
+
+
+def collected_rows(keys: dict[str, str]) -> list[dict]:
+    """Runner rows collected so far whose variant key is still listed,
+    under that variant's current label."""
+    labels = {key: label for label, key in keys.items()}
+    return [
+        {**row, "label": labels[row["key"]]}
+        for row in stored_rows()
+        if row["key"] in labels
+    ]
 
 
 def collect_stage(keys: dict[str, str]) -> None:
     """Wait for the dispatched runs, add their rows to those already collected
-    for these variants and delete their branches."""
+    and delete their branches."""
     dispatched = load("dispatch", keys)
     runs = {f"{run}/" for run in dispatched["runs"]}
     rows = [
         row
-        for row in collected_rows(keys)
+        for row in stored_rows()
         if not any(row["job"].startswith(run) for run in runs)
     ]
     for run in dispatched["runs"]:
@@ -503,7 +550,7 @@ def collect_stage(keys: dict[str, str]) -> None:
                 break
             time.sleep(POLL_SECS)
         log = retried(["gh", "-R", REPO, "run", "view", str(run), "--log"])
-        rows.extend(probe_rows(log, run))
+        rows.extend(probe_rows(log, run, dispatched["variants"]))
     for branch in dispatched["branches"]:
         retried(
             [
@@ -516,16 +563,17 @@ def collect_stage(keys: dict[str, str]) -> None:
                 branch,
             ]
         )
-    save("collect", {"variants": keys, "rows": rows})
+    save("collect", {"rows": rows})
 
 
-def probe_rows(log: str, run: int) -> list[dict]:
+def probe_rows(log: str, run: int, keys: dict[str, str]) -> list[dict]:
     rows = []
     for line in log.splitlines():
         match = PROBE_ROW.search(line)
         if match:
             row = json.loads(match.group(1))
             row["job"] = f"{run}/{line.split(chr(9), 1)[0]}"
+            row["key"] = keys[row["label"]]
             rows.append(row)
     return rows
 
@@ -542,6 +590,8 @@ def local_stage(keys: dict[str, str]) -> None:
             str(Path(__file__).resolve()),
             "--stage",
             "local-held",
+            "--calibration-commit",
+            keys[CALIBRATION_LABEL],
         ]
     )
     load("local", keys)
@@ -573,6 +623,8 @@ def pi_stage(keys: dict[str, str]) -> None:
             str(Path(__file__).resolve()),
             "--stage",
             "pi-held",
+            "--calibration-commit",
+            keys[CALIBRATION_LABEL],
         ],
         cwd=gate.ROOT,
     )
@@ -631,13 +683,16 @@ def pi_held(keys: dict[str, str]) -> None:
     )
     labels = list(keys)
     worst = {label: {config: [] for config in gate.CONFIGS} for label in labels}
+    cost = {label: {config: [] for config in gate.CONFIGS} for label in labels}
     for run in range(PI_RUNS):
         order = labels if run % 2 == 0 else labels[::-1]
         for config in gate.CONFIGS:
             for label in order:
                 out = ssh(
-                    f"cd {PI_DIR} && taskset -c {gate.LIVE_CORES} bins/{label} "
-                    f"trees/{label}/{gate.GCODE} --config trees/{label}/{config}"
+                    f"cd {PI_DIR} && date +pi_started_ns=%s%N && "
+                    f"taskset -c {gate.LIVE_CORES} bins/{label} "
+                    f"trees/{label}/{gate.GCODE} --config trees/{label}/{config} "
+                    "&& date +pi_ended_ns=%s%N"
                 )
                 match = WORST_WINDOW.search(out)
                 if not match:
@@ -645,6 +700,9 @@ def pi_held(keys: dict[str, str]) -> None:
                         f"no worst window in the Pi replay of {label} {config}"
                     )
                 worst[label][config].append(float(match.group(1)))
+                cost[label][config].append(
+                    pi_wall_secs(out) / gate.stream_secs(out)
+                )
                 print(
                     f"pi run {run + 1}/{PI_RUNS} {label} {Path(config).stem}: "
                     f"{match.group(1)}x",
@@ -655,7 +713,26 @@ def pi_held(keys: dict[str, str]) -> None:
         raise GateError(
             "the Pi throttled during the runs: their windows are void"
         )
-    save("pi", {"variants": keys, "measured_at": measured_at, "worst_x": worst})
+    save(
+        "pi",
+        {
+            "variants": keys,
+            "measured_at": measured_at,
+            "worst_x": worst,
+            "cost": cost,
+        },
+    )
+
+
+def pi_wall_secs(out: str) -> float:
+    """The Pi replay's wall seconds, process start to exit as the gate times
+    its own replays, from the `date` stamps around it."""
+    stamps = dict(PI_STAMP.findall(out))
+    if set(stamps) != {"started", "ended"}:
+        raise GateError(
+            f"the Pi replay printed no start and end stamps:\n{out}"
+        )
+    return (int(stamps["ended"]) - int(stamps["started"])) * 1e-9
 
 
 def factor_through_origin(points: list[tuple[float, float]]) -> float:
@@ -671,10 +748,10 @@ def error_pct(predicted_log: float, measured_log: float) -> float:
 
 
 def fit(
-    xs: dict[str, float], ys: dict[str, float], anchor: str = REFERENCE_LABEL
+    xs: dict[str, float], ys: dict[str, float], anchor: str = CALIBRATION_LABEL
 ) -> dict:
     """ln(W / W_anchor) = -factor * (x - x_anchor), the way the gate predicts
-    a PR from the reference, with each other point's residual and
+    a PR from the calibration commit, with each other point's residual and
     leave-one-out residual in % of its measured window."""
     others = sorted(k for k in xs if k != anchor)
     if len(others) < 2:
@@ -698,36 +775,126 @@ def fit(
     }
 
 
-def live_log_costs(
+def pooled_fit(
+    xs: dict[str, dict[str, float]], ys: dict[str, float], jobs: dict[str, int]
+) -> dict:
+    """ln(W / W_cal) = -factor * x over every (CPU model, variant) point, x
+    the variant's log live cost over the calibration commit's on that CPU
+    model. Per CPU model: each point's residual, its leave-one-out residual
+    (the fit without that variant on any CPU model) and its residual from the
+    fit without that CPU model, in % of the measured window."""
+    if len(xs) < 2:
+        raise GateError(
+            f"the live fit wants 2 CPU models to be told apart, got {sorted(xs)}"
+        )
+    others = sorted(label for label in ys if label != CALIBRATION_LABEL)
+    points = {
+        (cpu, label): (measured[label], ys[label] - ys[CALIBRATION_LABEL])
+        for cpu, measured in xs.items()
+        for label in others
+        if label in measured
+    }
+    fitted_labels = sorted({label for _, label in points})
+    if len(fitted_labels) < 2:
+        raise GateError(
+            f"the live fit wants 2 variants besides {CALIBRATION_LABEL}"
+        )
+
+    def factor_without(drop: int, value: str | None) -> float:
+        return factor_through_origin(
+            [point for key, point in points.items() if key[drop] != value]
+        )
+
+    factor = factor_without(0, None)
+    loo_factor = {label: factor_without(1, label) for label in fitted_labels}
+    by_cpu = {}
+    for cpu in sorted(xs):
+        mine = {
+            label: point
+            for (owner, label), point in points.items()
+            if owner == cpu
+        }
+        cpu_out = factor_without(0, cpu)
+        slopes = {
+            "residual_pct": {label: factor for label in mine},
+            "loo_residual_pct": loo_factor,
+            "cpu_out_residual_pct": {label: cpu_out for label in mine},
+        }
+        errors = {
+            name: {
+                label: round(error_pct(-slope[label] * x, y), 2)
+                for label, (x, y) in mine.items()
+            }
+            for name, slope in slopes.items()
+        }
+        by_cpu[cpu] = {
+            "jobs": jobs[cpu],
+            **{
+                f"max_{name}": max(abs(e) for e in values.values())
+                for name, values in errors.items()
+            },
+            **errors,
+        }
+    return {
+        "factor": factor,
+        "intercept": ys[CALIBRATION_LABEL],
+        **{
+            name: max(fitted[name] for fitted in by_cpu.values())
+            for name in (
+                "max_residual_pct",
+                "max_loo_residual_pct",
+                "max_cpu_out_residual_pct",
+            )
+        },
+        "by_cpu": by_cpu,
+    }
+
+
+def live_costs(
     rows: list[dict], labels: list[str], configs: list[str]
-) -> dict[str, dict[str, dict]]:
-    """Per config and CPU model: each variant's log live cost against the
-    job's mean over variants, averaged over the jobs that ran every variant
-    at least LIVE_FASTEST times, and how many jobs that was."""
+) -> dict[str, dict]:
+    """Per config: per CPU model, each variant's log live cost over the
+    calibration commit's in the same job, averaged over the jobs that ran
+    both at least LIVE_FASTEST times, and how many jobs ran the calibration
+    commit; per such job, the calibration commit's cost and how far apart
+    its fastest runs were."""
     costs = collections.defaultdict(list)
     cpus = {}
     for row in rows:
         costs[row["job"], row["config"], row["label"]].append(row["cost"])
         cpus[row["job"]] = row["cpu"]
-    centred = collections.defaultdict(list)
-    for job, cpu in cpus.items():
-        for config in configs:
-            samples = [costs[job, config, label] for label in labels]
-            if min(len(s) for s in samples) < gate.LIVE_FASTEST:
+    result = {
+        config: {"cpus": {}, "calibration_costs": [], "spreads_pct": []}
+        for config in configs
+    }
+    for config in configs:
+        logs = collections.defaultdict(lambda: collections.defaultdict(list))
+        jobs = collections.Counter()
+        for job, cpu in cpus.items():
+            calibration = costs[job, config, CALIBRATION_LABEL]
+            if len(calibration) < gate.LIVE_FASTEST:
                 continue
-            logs = [math.log(gate.fastest_mean(s)) for s in samples]
-            mean = statistics.fmean(logs)
-            centred[config, cpu].append(
-                {label: value - mean for label, value in zip(labels, logs)}
+            yardstick = gate.fastest_mean(calibration)
+            jobs[cpu] += 1
+            result[config]["calibration_costs"].append(yardstick)
+            result[config]["spreads_pct"].append(
+                gate.fastest_spread_pct(calibration)
             )
-    result = collections.defaultdict(dict)
-    for (config, cpu), jobs in centred.items():
-        result[config][cpu] = {
-            "jobs": len(jobs),
-            "x": {
-                label: statistics.fmean(j[label] for j in jobs)
-                for label in labels
-            },
+            for label in labels:
+                samples = costs[job, config, label]
+                if len(samples) >= gate.LIVE_FASTEST:
+                    logs[cpu][label].append(
+                        math.log(gate.fastest_mean(samples) / yardstick)
+                    )
+        result[config]["cpus"] = {
+            cpu: {
+                "jobs": jobs[cpu],
+                "x": {
+                    label: statistics.fmean(values)
+                    for label, values in by_label.items()
+                },
+            }
+            for cpu, by_label in sorted(logs.items())
         }
     return result
 
@@ -736,48 +903,52 @@ def fit_stage(baseline: dict, listed: list[dict], keys: dict[str, str]) -> dict:
     labels = list(keys)
     built = load("build", keys)["ir"]
     pi = load("pi", keys)
-    rows = load("collect", keys)["rows"] + load("local", keys)["rows"]
-    live = live_log_costs(rows, labels, list(gate.CONFIGS))
+    rows = collected_rows(keys) + load("local", keys)["rows"]
+    live = live_costs(rows, labels, list(gate.CONFIGS))
     models = {}
     for config in gate.CONFIGS:
-        worst = {label: min(pi["worst_x"][label][config]) for label in labels}
-        ys = {label: math.log(worst[label]) for label in labels}
+        ys = {
+            label: math.log(min(pi["worst_x"][label][config]))
+            for label in labels
+        }
         ir_x = {
             label: math.log(
                 built[label][config]["ir"] / built[label][config]["stream_secs"]
             )
             for label in labels
         }
-        live_fits = {}
-        for cpu, measured in sorted(live[config].items()):
-            live_fits[cpu] = {
-                "jobs": measured["jobs"],
-                **fit(measured["x"], ys),
-            }
+        measured = live[config]
+        pi_cost = min(pi["cost"][CALIBRATION_LABEL][config])
+        speeds = [pi_cost / cost for cost in measured["calibration_costs"]]
         models[config] = {
             "ir": fit(ir_x, ys),
-            "live": live_fits,
+            "live": {
+                **pooled_fit(
+                    {cpu: m["x"] for cpu, m in measured["cpus"].items()},
+                    ys,
+                    {cpu: m["jobs"] for cpu, m in measured["cpus"].items()},
+                ),
+                "pi_cost": pi_cost,
+                "speed_x": {"min": min(speeds), "max": max(speeds)},
+                "max_calibration_spread_pct": max(measured["spreads_pct"]),
+            },
             "points": {
                 label: {
                     "pi_worst_x": pi["worst_x"][label][config],
                     "ir": built[label][config]["ir"],
                     "stream_secs": built[label][config]["stream_secs"],
                     "live_log_cost": {
-                        cpu: round(measured["x"][label], 5)
-                        for cpu, measured in sorted(live[config].items())
+                        cpu: round(m["x"][label], 5)
+                        for cpu, m in measured["cpus"].items()
+                        if label in m["x"]
                     },
                 }
                 for label in labels
             },
         }
-        baseline["configs"][config]["pi_2core"] = {
-            "worst_x_reference": worst[REFERENCE_LABEL],
-            "worst_x": pi["worst_x"][REFERENCE_LABEL][config],
-            "commit": baseline["commit"],
-        }
     baseline["pi_calibration"] = {
         "measured_at": pi["measured_at"],
-        "commit": baseline["commit"],
+        "commit": listed[-1]["commit"],
         "variants": listed[:-1],
         "configs": models,
     }
@@ -803,43 +974,63 @@ def short_cpu(cpu: str) -> str:
 
 
 def report(calibration: dict) -> None:
-    """Each point against the reference (Pi worst window, Ir per stream
-    second and live cost per CPU), then each fit's factor and errors."""
+    """Each point against the calibration commit (Pi worst window, Ir per
+    stream second and live cost per CPU model), then each fit's factor and
+    errors, the live fit's per CPU model."""
     print(
-        f"Pi calibration measured {calibration['measured_at']} at "
-        f"{calibration['commit']}"
+        f"Pi calibration at {calibration['commit']}, measured "
+        f"{calibration['measured_at']}"
     )
     for config, model in calibration["configs"].items():
         print(f"\n{config}")
         points = model["points"]
-        cpus = list(model["live"])
+        live = model["live"]
+        cpus = list(live["by_cpu"])
         print(
             f"  {'variant':<34} {'Pi worst':>8} {'Ir/s':>7}"
             + "".join(f" {short_cpu(cpu)[:13]:>13}" for cpu in cpus)
         )
-        reference = points[REFERENCE_LABEL]
-        reference_rate = reference["ir"] / reference["stream_secs"]
+        anchor = points[CALIBRATION_LABEL]
+        anchor_rate = anchor["ir"] / anchor["stream_secs"]
         for label, point in points.items():
             rate = point["ir"] / point["stream_secs"]
-            live = "".join(
-                f" {100 * math.expm1(point['live_log_cost'][cpu] - reference['live_log_cost'][cpu]):>+12.1f}%"
+            costs = point["live_log_cost"]
+            cells = "".join(
+                f" {100 * math.expm1(costs[cpu]):>+12.1f}%"
+                if cpu in costs
+                else f" {'-':>13}"
                 for cpu in cpus
             )
             print(
                 f"  {label:<34} {min(point['pi_worst_x']):>7.2f}x "
-                f"{100 * (rate / reference_rate - 1):>+6.1f}%{live}"
+                f"{100 * (rate / anchor_rate - 1):>+6.1f}%{cells}"
             )
-        fits = [("Ir", model["ir"])] + [
-            (f"live on {short_cpu(cpu)} ({fitted['jobs']} jobs)", fitted)
-            for cpu, fitted in model["live"].items()
-        ]
-        for name, fitted in fits:
+        ir = model["ir"]
+        print(
+            f"  Ir: factor {ir['factor']:.2f}, error max "
+            f"{ir['max_residual_pct']:.1f} %, leave-one-out max "
+            f"{ir['max_loo_residual_pct']:.1f} %"
+        )
+        print(
+            f"  live: factor {live['factor']:.2f} over {len(cpus)} CPU models, "
+            f"error max {live['max_residual_pct']:.1f} %, leave-one-out max "
+            f"{live['max_loo_residual_pct']:.1f} %, CPU model left out max "
+            f"{live['max_cpu_out_residual_pct']:.1f} %"
+        )
+        for cpu, fitted in live["by_cpu"].items():
             print(
-                f"  {name}: factor {fitted['factor']:.2f}, error max "
-                f"{fitted['max_residual_pct']:.1f} %, leave-one-out max "
-                f"{fitted['max_loo_residual_pct']:.1f} % "
-                f"({len(fitted['residual_pct'])} pairs with the reference)"
+                f"    {short_cpu(cpu):<24} {fitted['jobs']:>3} jobs: error max "
+                f"{fitted['max_residual_pct']:>4.1f} %, leave-one-out "
+                f"{fitted['max_loo_residual_pct']:>4.1f} %, left out "
+                f"{fitted['max_cpu_out_residual_pct']:>4.1f} %"
             )
+        print(
+            f"  calibration replay: the Pi's {live['pi_cost']:.3f} s per stream "
+            f"second, jobs {live['speed_x']['min']:.2f}-"
+            f"{live['speed_x']['max']:.2f}x its speed, fastest "
+            f"{gate.LIVE_FASTEST} runs up to "
+            f"{live['max_calibration_spread_pct']:.2f} % apart"
+        )
 
 
 def main() -> int:
@@ -860,6 +1051,7 @@ def main() -> int:
         ),
     )
     parser.add_argument("--dispatches", type=int, default=DISPATCHES)
+    parser.add_argument("--calibration-commit")
     parser.add_argument("--image", help=argparse.SUPPRESS)
     parser.add_argument("--probe", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--job", default="", help=argparse.SUPPRESS)
@@ -879,7 +1071,9 @@ def main() -> int:
         return 0
 
     baseline = gate.load_baseline()
-    listed = variants(baseline)
+    listed = variants(
+        baseline, calibration_commit(baseline, args.calibration_commit)
+    )
     keys = {variant["label"]: variant_key(variant) for variant in listed}
     stages = STAGES if args.stage == "all" else (args.stage,)
     for stage in stages:
