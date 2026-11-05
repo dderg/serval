@@ -15,9 +15,9 @@ use trajectory::{
 use crate::lowering::{AccelBudget, FitTol, SeamContinuity, riding_tol_scale};
 use crate::shaper::{
     AxisFit, AxisSignalTable, ConvolutionSignal, Enclosure, ExactConvolution, ExactKernel,
-    FitBoundary, Lookahead, SEGMENT_TIME_EPS_S, ShapedBreaks, ShiftedTrackSignal, SignalBounds,
-    TrackSignal, apply_derivative_gains_to_track, fit_axis_from_signal, fit_resolution,
-    fit_seed_times, unit_kernel_mass,
+    ExemptAccelerations, FitBoundary, Lookahead, SEGMENT_TIME_EPS_S, ShapedBreaks,
+    ShiftedTrackSignal, SignalBounds, TrackSignal, apply_derivative_gains_to_track,
+    fit_axis_from_signal, fit_resolution, fit_seed_times, unit_kernel_mass,
 };
 use crate::types::PostProcessError;
 use crate::worker_pool::WorkerPool;
@@ -2031,6 +2031,11 @@ impl FollowerState {
     /// span is a seam mismatch the stored track turns into acceleration.
     /// Every term here is a difference of nearby quantities instead.
     fn spans_e_since(&self, origin: &SpanOrigin, distance: OdometerDistance) -> f64 {
+        self.table_e_since(origin, distance)
+            + (self.smoothing.correction(distance.s).value - origin.smoothing_e)
+    }
+
+    fn table_e_since(&self, origin: &SpanOrigin, distance: OdometerDistance) -> f64 {
         let Some(first) = self.spans.first() else {
             return 0.0;
         };
@@ -2043,14 +2048,13 @@ impl FollowerState {
         );
         let past = |boundary: f64| (origin.s - boundary) + offset;
         let idx = self.spans.partition_point(|span| span.s1 < s);
-        let table = match self.spans.get(idx) {
+        match self.spans.get(idx) {
             Some(span) => (span.e0 - origin.table_e) + span.e_past(past(span.s0).max(0.0)),
             None => {
                 let last = self.spans.last().expect("non-empty spans");
                 (last.e_at(last.s1) - origin.table_e) + last.r1 * past(last.s1)
             }
-        };
-        table + (self.smoothing.correction(s).value - origin.smoothing_e)
+        }
     }
 
     fn spans_of(&self, table: Table) -> &[RatioSpan] {
@@ -2154,6 +2158,24 @@ impl FollowerState {
             e: self
                 .table_e(table, s)
                 .map_or(0.0, |table| table + correction.value),
+            ratio: ratio + correction.d1,
+            slope: slope + correction.d2,
+            curvature: correction.d3,
+        }
+    }
+
+    /// [`Self::laid_on`] of the laid table at `distance` past `origin`, its
+    /// extrusion read as [`Self::spans_e_since`] reads it.
+    fn laid_since(
+        &self,
+        origin: &SpanOrigin,
+        distance: OdometerDistance,
+        side: SpanSide,
+    ) -> LaidRead {
+        let (ratio, slope) = self.table_ratio_and_slope(Table::Laid, distance.s, side);
+        let correction = self.smoothing.correction_of(Table::Laid, distance.s);
+        LaidRead {
+            e: self.table_e_since(origin, distance) + (correction.value - origin.smoothing_e),
             ratio: ratio + correction.d1,
             slope: slope + correction.d2,
             curvature: correction.d3,
@@ -3041,6 +3063,9 @@ impl RatioBounds {
 /// What the span table and its smoothing lay at one shaped path distance.
 #[derive(Clone, Copy)]
 struct LaidRead {
+    /// The extrusion laid up to the distance read, from the origin the read
+    /// is taken against: the table's own for [`FollowerState::laid_on`], the
+    /// segment's for [`FollowerState::laid_since`].
     e: f64,
     ratio: f64,
     slope: f64,
@@ -3073,7 +3098,7 @@ struct PathRead {
     speed: f64,
     rate: f64,
     rate_deriv: f64,
-    distance: OdometerDistance,
+    s: f64,
     laid: LaidRead,
 }
 
@@ -3303,35 +3328,31 @@ impl<'a> FollowerSignal<'a> {
             speed,
             rate: self.odometer_scale * speed,
             rate_deriv: self.odometer_scale * self.leader_speed_deriv(t, &motion, speed),
-            distance,
-            laid: self.laid_at(distance.s),
+            s: distance.s,
+            laid: self.laid_since(distance),
         }
     }
 
     fn pva_at(&self, t: f64) -> (f64, f64, f64) {
         let (rate, rate_deriv) = self.odometer_rate(t);
-        let distance = self.owned_distance(t);
-        self.pva_laid(t, (rate, rate_deriv), self.laid_at(distance.s), distance)
+        self.pva_laid(
+            t,
+            (rate, rate_deriv),
+            self.laid_since(self.owned_distance(t)),
+        )
     }
 
     fn pva_read(&self, t: f64, read: &PathRead) -> (f64, f64, f64) {
-        self.pva_laid(t, (read.rate, read.rate_deriv), read.laid, read.distance)
+        self.pva_laid(t, (read.rate, read.rate_deriv), read.laid)
     }
 
-    fn pva_laid(
-        &self,
-        t: f64,
-        (rate, rate_deriv): (f64, f64),
-        laid: LaidRead,
-        distance: OdometerDistance,
-    ) -> (f64, f64, f64) {
-        let spans = self.state.spans_e_since(&self.span_origin, distance);
+    fn pva_laid(&self, t: f64, (rate, rate_deriv): (f64, f64), laid: LaidRead) -> (f64, f64, f64) {
         let (raw_p, raw_v, raw_a) = self.raw_delta.map_or((0.0, 0.0, 0.0), |(axis, at_start)| {
             let (position, velocity, acceleration) = axis_pva(axis, t);
             (position - at_start, velocity, acceleration)
         });
         (
-            self.e_start + spans + raw_p,
+            self.e_start + laid.e + raw_p,
             laid.ratio * rate + raw_v,
             laid.slope * rate * rate + laid.ratio * rate_deriv + raw_a,
         )
@@ -3390,7 +3411,7 @@ impl<'a> FollowerSignal<'a> {
         let PathRead {
             rate,
             rate_deriv,
-            distance: OdometerDistance { s, .. },
+            s,
             laid,
             ..
         } = *read;
@@ -3467,8 +3488,9 @@ impl<'a> FollowerSignal<'a> {
         self.state.ratio_and_slope_on(table, s, self.side_at(s))
     }
 
-    fn laid_at(&self, s: f64) -> LaidRead {
-        self.laid_on(Table::Laid, s)
+    fn laid_since(&self, distance: OdometerDistance) -> LaidRead {
+        self.state
+            .laid_since(&self.span_origin, distance, self.side_at(distance.s))
     }
 
     fn laid_on(&self, table: Table, s: f64) -> LaidRead {
@@ -4135,6 +4157,17 @@ impl AdvancedFollowerSignal<'_, '_> {
 impl TrackSignal for AdvancedFollowerSignal<'_, '_> {
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         self.pva_memo.get_or(t, |t| self.pva(t))
+    }
+
+    fn exempt_accelerations(&self, lo: f64, hi: f64) -> Option<ExemptAccelerations> {
+        let slivers = self.onset_slivers(lo, hi)?;
+        (!slivers.is_empty()).then(|| ExemptAccelerations {
+            stretches: slivers
+                .iter()
+                .map(|sliver| (sliver.from, sliver.to))
+                .collect(),
+            velocity: self.unshaped_step.allowance(),
+        })
     }
 
     fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {

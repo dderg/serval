@@ -118,6 +118,14 @@ pub(crate) trait TrackSignal {
     fn square_root_onsets(&self) -> &[f64] {
         &[]
     }
+    /// The stretches of `[lo, hi]` whose acceleration the signal's
+    /// enclosure exempts from the bound — an unshaped leader's square-root
+    /// onset sliver ([`crate::follower_projection::UnshapedLeaderStep`]) —
+    /// and the velocity it holds a fit to there instead; `None` where none
+    /// of `[lo, hi]` is exempt.
+    fn exempt_accelerations(&self, _lo: f64, _hi: f64) -> Option<ExemptAccelerations> {
+        None
+    }
     /// The signal's exact polynomial on every sub-interval of `[lo, hi]`
     /// between its breaks, each with an a-priori bound on its rounding;
     /// `None` for a signal that is not exactly piecewise polynomial there.
@@ -134,6 +142,14 @@ pub(crate) trait TrackSignal {
         let _ = accuracy;
         self.exact_polynomial_on(lo, hi).map(Enclosure::Built)
     }
+}
+
+/// [`TrackSignal::exempt_accelerations`]: the exempt stretches in time
+/// order, and the velocity a fit is held to inside them.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ExemptAccelerations {
+    pub(crate) stretches: Vec<(f64, f64)>,
+    pub(crate) velocity: f64,
 }
 
 impl TrackSignal for ContinuousAxis {
@@ -179,6 +195,9 @@ impl<S: TrackSignal> TrackSignal for &S {
     }
     fn square_root_onsets(&self) -> &[f64] {
         S::square_root_onsets(self)
+    }
+    fn exempt_accelerations(&self, lo: f64, hi: f64) -> Option<ExemptAccelerations> {
+        S::exempt_accelerations(self, lo, hi)
     }
     fn exact_polynomial_on(&self, lo: f64, hi: f64) -> Option<Vec<ExactPiece>> {
         S::exact_polynomial_on(self, lo, hi)
@@ -4499,19 +4518,19 @@ fn shaped_ladder<S: TrackSignal>(
             .map_or(0.0, |hold| hold.worst_miss(rung))
     };
     let ladder_span = LadderSpan { h, endpoint_delta };
-    let exempt_stretches = exempt_accelerations(sig, exact, (t0, t1), piece_tol, policy);
+    let exempt_stretches = exempt_accelerations(sig, exact, (t0, t1), policy);
     let exempt_at = |u: f64| {
         let t = span_probe_t(t0, t1, u);
         exempt_stretches
             .as_ref()
-            .is_some_and(|(stretches, _)| stretches.iter().any(|&(lo, hi)| lo <= t && t <= hi))
+            .is_some_and(|exempt| exempt.stretches.iter().any(|&(lo, hi)| lo <= t && t <= hi))
     };
     let exemption = exempt_stretches
         .as_ref()
         .filter(|_| LADDER_PROBES_U.iter().any(|&u| exempt_at(u)))
-        .map(|&(_, velocity)| AccelerationExemption {
+        .map(|exempt| AccelerationExemption {
             exempt: &exempt_at,
-            velocity,
+            velocity: exempt.velocity,
             ceiling: fit_tol.accel_ceiling(),
         });
     let ladder_truth = LadderTruth {
@@ -4652,37 +4671,24 @@ fn shaped_ladder<S: TrackSignal>(
     }
 }
 
-/// The stretches of `span` whose acceleration the proof exempts — the
-/// enclosure's pieces inside an unshaped leader's square-root onset sliver
-/// ([`crate::follower_projection::UnshapedLeaderStep`]) — and the velocity
-/// the proof holds a fit to there; `None` where none of the span is exempt.
-/// Only a signal fitted under a ceiling on its own acceleration has them:
-/// a rung there is held to that ceiling instead of the signal.
+/// What [`TrackSignal::exempt_accelerations`] exempts of `span`, for a
+/// fit that holds its rungs there to a ceiling on their own acceleration
+/// instead of to the signal; `None` for a fit without that ceiling, or
+/// read off exact polynomials, which exempt nothing.
 fn exempt_accelerations<S: TrackSignal>(
     sig: &S,
     exact: Option<&ExactSpan>,
     (t0, t1): (f64, f64),
-    piece_tol: FitTol,
     policy: &SpanFitPolicy,
-) -> Option<(Vec<(f64, f64)>, f64)> {
+) -> Option<ExemptAccelerations> {
     if exact.is_some() || !policy.fit_tol.accel_ceiling().is_finite() {
         return None;
     }
-    let budget = HullBudget {
-        tol: piece_tol,
-        velocity: policy.velocity_budget,
-    };
-    let enclosure = sig.enclosure_on(t0, t1, budget.enclosure_accuracy())?;
-    let mut velocity = f64::INFINITY;
-    let stretches: Vec<(f64, f64)> = enclosure
-        .iter()
-        .filter_map(|piece| {
-            let step = piece.unshaped_step?;
-            velocity = velocity.min(step.allowance());
-            Some((piece.lo, piece.hi))
-        })
-        .collect();
-    (!stretches.is_empty()).then_some((stretches, velocity.min(policy.velocity_budget)))
+    let exempt = sig.exempt_accelerations(t0, t1)?;
+    Some(ExemptAccelerations {
+        velocity: exempt.velocity.min(policy.velocity_budget),
+        ..exempt
+    })
 }
 
 /// What a span's ladder and hull made of it.
