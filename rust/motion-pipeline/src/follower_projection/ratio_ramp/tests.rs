@@ -1224,6 +1224,55 @@ fn a_slow_corner_beside_a_ratio_step_does_not_narrow_its_window() {
     );
 }
 
+/// The rule bounds a ramp whose window is `V·τ/2` wide on every window
+/// that reaches its seam: a width that changes along them steepens the
+/// ramp's ends by its slope, which on a 300 mm/s cruise of a 20 000 mm/s²
+/// extruder left 561 mm/s² over the limit. Wherever the time grid falls
+/// against the seam, the width holds `V·τ/2` exactly from one width before
+/// the seam to one width past it.
+#[test]
+fn a_ratio_step_crossed_at_cruise_holds_its_width_over_every_window_reaching_it() {
+    let end = 0.3;
+    for speed in [150.0, 300.0] {
+        for phase in probes(NODE_SPACING_S, 16) {
+            let seam_t = 0.1 + phase;
+            let seam_s = speed * seam_t;
+            let mut field = WidthField {
+                rule: Some(DIRECT_DRIVE),
+                ..WidthField::default()
+            };
+            field.place_rest(0.0);
+            field.add_seam(TimedSeam {
+                t: seam_t,
+                s: seam_s,
+                crossing: Crossing {
+                    speed,
+                    rate: 0.0,
+                    jerk: 0.0,
+                },
+                step: LINE_RATIO,
+                peak_ratio: LINE_RATIO,
+                ramp_time: None,
+            });
+            let seam_width = 0.5 * speed * field.seam_ramp_time(0);
+            let mut t = NODE_SPACING_S;
+            while t < end {
+                field.place_sample(speed * t, t);
+                t += NODE_SPACING_S;
+            }
+            field.close(speed * end);
+            for s in probes(2.0 * seam_width, 400).map(|offset| seam_s - seam_width + offset) {
+                let width = field.width(s);
+                assert!(
+                    (width - seam_width).abs() <= 1e-12 * seam_width,
+                    "at {speed} mm/s the window at {s} mm is {width} mm wide, not the \
+                     {seam_width} mm the seam at {seam_s} mm asks for"
+                );
+            }
+        }
+    }
+}
+
 /// Moving width nodes lie most of the narrower of their targets apart on
 /// the path, so the smootherstep between two of them bends the width no
 /// sharper than a window's own width allows.
