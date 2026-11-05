@@ -255,7 +255,7 @@ fn an_extruding_move_with_caps_carries_its_advance_into_the_demand() {
         unshaped_leaders: [false; 3],
         own_jerk_per_accel_hz: f64::INFINITY,
         instantaneous_corner_velocity_mm_s: 1.0,
-        leader_spill: crate::frontend::LeaderSpill::UNSHAPED,
+        leader_spill: crate::frontend::LeaderSpillId::UNSHAPED,
         leader_kernel_reach_s: 0.0,
     };
     let limits = VelocityLimits::try_new(100.0, 2000.0, 0.0, f64::INFINITY)
