@@ -146,6 +146,28 @@ pub(super) fn velocity_rate(caps: &ExtruderCaps, ratio_in_reach: f64) -> LinearR
     }
 }
 
+/// A move that retracts while the toolhead travels, a wipe, is a retract:
+/// no advance leads it, and as in Klipper its filament motion `|r|·v` keeps
+/// the extrude-only caps, `|r|` its steepest retracting ratio.
+pub(super) fn moving_retract_capped(
+    segment: &crate::path::PathSegment,
+    (velocity_cap, accel_cap): (f64, f64),
+    (ceiling, accel): (f64, f64),
+) -> (f64, f64) {
+    let retract = segment
+        .followers
+        .iter()
+        .map(|follower| -follower.ratio.min(follower.ratio_end))
+        .fold(0.0, f64::max);
+    if retract <= 0.0 {
+        return (ceiling, accel);
+    }
+    (
+        ceiling.min(velocity_cap / retract),
+        accel.min(accel_cap / retract),
+    )
+}
+
 /// The largest budget up to `accel` whose acceleration demand at `ceiling`
 /// fits `max_accel`; the demand grows with the budget, so bisection finds it.
 fn largest_fitting_accel(demand: &Demand, ceiling: f64, accel: f64, max_accel: f64) -> f64 {
