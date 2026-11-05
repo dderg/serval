@@ -5145,3 +5145,7 @@ mod shaper_shaped_wave_tests;
 #[cfg(test)]
 #[path = "shaper_enclosure_tests.rs"]
 mod shaper_enclosure_tests;
+
+#[cfg(test)]
+#[path = "shaper_emit_window_tests.rs"]
+mod shaper_emit_window_tests;

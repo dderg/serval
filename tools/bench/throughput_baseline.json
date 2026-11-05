@@ -1,13 +1,13 @@
 {
   "slice_lines": 1000,
-  "commit": "d607eec8be637e6a19e4a6c8c2034ba0b2e550b8",
-  "reason": "[axis e] max_accel 20000 on the gated direct-drive configs, merged with #710's turning guard (p3 ramp pays the kernel-free turning bound); trident_kernel's floor shortfall stays pinned to #693",
+  "commit": "09bc8789c27d8316bc0a9d0f468489a33e54d443",
+  "reason": "emit invariance at the merge with main a72e98824: one leader read per crossing probe, about -1 % Ir and -2 % live on trident_kernel",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 25831505500,
+      "ir": 25752708746,
       "stream_secs": 6.537,
       "pi_2core": {
-        "worst_x_reference": 2.4814567755259063,
+        "worst_x_reference": 2.491203037161278,
         "worst_x": [
           2.62,
           2.6
@@ -16,10 +16,10 @@
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 27846335587,
+      "ir": 27731644137,
       "stream_secs": 6.213,
       "pi_2core": {
-        "worst_x_reference": 2.033062541774491,
+        "worst_x_reference": 2.0305262385476195,
         "worst_x": [
           2.02,
           2.02
@@ -28,10 +28,10 @@
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 31513184784,
+      "ir": 31213866569,
       "stream_secs": 5.538,
       "pi_2core": {
-        "worst_x_reference": 1.3843509101624139,
+        "worst_x_reference": 1.4112396984842257,
         "worst_x": [
           1.37,
           1.37
