@@ -204,6 +204,55 @@ fn assert_flat_cruise(
     Ok(())
 }
 
+fn assert_advanced_cruise_is_flat(
+    axis: usize,
+    signal: &CruiseRamp,
+    advance: NonlinearAdvance,
+) -> Result<(), TestCaseError> {
+    let track = bezier_pieces_to_nurbs(&[
+        BezierPiece {
+            u_start: signal.start,
+            u_end: signal.boundary,
+            coeffs: vec![signal.position, signal.velocity, 0.0],
+        },
+        BezierPiece {
+            u_start: signal.boundary,
+            u_end: signal.end,
+            coeffs: vec![
+                signal.eval(signal.boundary),
+                signal.velocity,
+                0.5 * signal.acceleration,
+            ],
+        },
+    ]);
+    let output = apply_nonlinear_advance_to_track(axis, &track, advance, FitTol::absolute(0.005, 50.0))
+        .map_err(|error| TestCaseError::fail(format!("{signal:?}, {advance:?}: {error:?}")))?;
+    let advance_position_scale =
+        advance.linear_advance * signal.velocity.abs() * 1.8 + advance.nonlinear_offset;
+    assert_flat_cruise(&output, signal, advance_position_scale)
+}
+
+/// The tanh transition fell 1.46e-7 s past the cruise end, inside the
+/// coalescing floor, and the seam rolled onto it.
+#[test]
+fn a_tanh_transition_just_past_the_ramp_start_keeps_the_cruise_flat() {
+    let signal = CruiseRamp {
+        start: 16.0,
+        boundary: 16.014_461_809_955_762,
+        end: 16.019_476_529_183_905,
+        position: 13.242_667_800_982_515,
+        velocity: 55.733_452_426_024_236,
+        acceleration: 7_476.625_516_848_559_5,
+    };
+    let advance = NonlinearAdvance {
+        model: AdvanceModel::Tanh,
+        linear_advance: 0.0,
+        nonlinear_offset: 0.0,
+        linearization_velocity: signal.velocity * 1.518_681_186_155_7,
+    };
+    assert_advanced_cruise_is_flat(0, &signal, advance).unwrap();
+}
+
 proptest! {
     #![proptest_config(config())]
 
@@ -243,23 +292,6 @@ proptest! {
             nonlinear_offset: if zero_gain { 0.0 } else { nonlinear_offset },
             linearization_velocity: signal.velocity.abs() * knee_ratio,
         };
-        let track = bezier_pieces_to_nurbs(&[
-            BezierPiece {
-                u_start: signal.start,
-                u_end: signal.boundary,
-                coeffs: vec![signal.position, signal.velocity, 0.0],
-            },
-            BezierPiece {
-                u_start: signal.boundary,
-                u_end: signal.end,
-                coeffs: vec![signal.eval(signal.boundary), signal.velocity, 0.5 * signal.acceleration],
-            },
-        ]);
-        let output = apply_nonlinear_advance_to_track(
-            axis, &track, advance, FitTol::absolute(0.005, 50.0),
-        ).map_err(|error| TestCaseError::fail(format!("{signal:?}, {advance:?}: {error:?}")))?;
-        let advance_position_scale = advance.linear_advance * signal.velocity.abs() * 1.8
-            + advance.nonlinear_offset;
-        assert_flat_cruise(&output, &signal, advance_position_scale)?;
+        assert_advanced_cruise_is_flat(axis, &signal, advance)?;
     }
 }
