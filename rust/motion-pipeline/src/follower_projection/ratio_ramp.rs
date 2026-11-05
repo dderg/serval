@@ -697,6 +697,12 @@ impl WidthField {
             accel_mm_s2: seam.crossing.rate,
             jerk_mm_s3: seam.crossing.jerk,
         });
+        if std::env::var("BS_DBG").is_ok() {
+            eprintln!(
+                "BSSEAM t={:.5} s={:.4} step={:.5} peak={:.5} cross={:?} tau={:.5}",
+                seam.t, seam.s, step, peak_ratio, seam.crossing, ramp_time
+            );
+        }
         self.seams[index].ramp_time = Some(ramp_time);
         ramp_time
     }
@@ -1124,6 +1130,11 @@ impl WidthField {
             .partition_point(|node| node.s <= s)
             .saturating_sub(1)
             .min(self.final_prefix.saturating_sub(1));
+        if std::env::var("BS_DBG").is_ok() {
+            for node in &self.nodes[..keep] {
+                eprintln!("BSNODE s={:.4} target={:.4} env={:.4}", node.s, node.target, node.envelope);
+            }
+        }
         self.nodes.drain(..keep);
         self.final_prefix -= keep;
     }
