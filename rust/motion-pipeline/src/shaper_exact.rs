@@ -173,15 +173,16 @@ impl Tracked {
         shifted
     }
 
-    fn derivative(&self, order: usize) -> Self {
-        let mut derivative = Self::ZERO;
+    /// Writes the `order`-th derivative into `derivative`, whose every
+    /// slot it sets.
+    fn derivative_into(&self, order: usize, derivative: &mut Self) {
+        *derivative = Self::ZERO;
         derivative.len = self.len.saturating_sub(order);
         for power in 0..derivative.len {
             let falling = FALLING_FACTORIALS[power + order][order];
             derivative.values[power] = self.values[power + order] * falling;
             derivative.magnitudes[power] = self.magnitudes[power + order] * falling;
         }
-        derivative
     }
 
     fn add(&mut self, other: &Self, sign: f64) {
@@ -731,7 +732,8 @@ impl ExactConvolution<'_> {
     fn polynomials_at(&self, center: f64, radius: f64) -> Option<[LocalPolynomial; 3]> {
         let mut total = [CentredSum::ZERO; MOMENT_ORDERS];
         let mut point_masses = 0;
-        let mut previous_lower: Option<(RealSum, EdgeSeries)> = None;
+        let mut edge_series = [[Tracked::ZERO; MOMENT_ORDERS]; 2];
+        let mut previous_lower: Option<(RealSum, usize)> = None;
         for piece in &self.kernel.pieces {
             let lower = RealSum::of(center, -piece.end);
             let upper = RealSum::of(center, -piece.start);
@@ -765,14 +767,25 @@ impl ExactConvolution<'_> {
                     degree,
                 );
             }
-            let upper_series = match previous_lower {
-                Some((edge, series)) if edge.head == upper.head && edge.tail == upper.tail => {
-                    series
+            let upper_slot = match previous_lower {
+                Some((edge, slot)) if edge.head == upper.head && edge.tail == upper.tail => slot,
+                _ => {
+                    let slot = previous_lower.map_or(0, |(_, slot)| 1 - slot);
+                    if !self.table.series_past_into(upper, &mut edge_series[slot]) {
+                        return None;
+                    }
+                    slot
                 }
-                _ => self.table.series_past(upper)?,
             };
-            let lower_series = self.table.series_past(lower)?;
-            previous_lower = Some((lower, lower_series));
+            let lower_slot = 1 - upper_slot;
+            if !self
+                .table
+                .series_past_into(lower, &mut edge_series[lower_slot])
+            {
+                return None;
+            }
+            previous_lower = Some((lower, lower_slot));
+            let (upper_series, lower_series) = (&edge_series[upper_slot], &edge_series[lower_slot]);
             for order in 0..MOMENT_ORDERS {
                 let mut at_upper =
                     frozen_window(&piece.at_start, &moments[order], &magnitudes[order]);
@@ -914,25 +927,28 @@ impl AxisSignalTable {
         }
     }
 
-    /// The Taylor series, about `edge.head`, of every derivative order of
-    /// the region of `x` the real `edge` lies inside: a piece, or a clamped
-    /// hold. `None` where that region is history or lookahead the table
-    /// does not clamp.
-    fn series_past(&self, edge: RealSum) -> Option<EdgeSeries> {
-        let mut series = [Tracked::ZERO; MOMENT_ORDERS];
-        if edge.order_of(self.first_t) == Ordering::Greater {
+    /// Writes into `series` the Taylor series, about `edge.head`, of every
+    /// derivative order of the region of `x` the real `edge` lies inside: a
+    /// piece, or a clamped hold. `false` where that region is history or
+    /// lookahead the table does not clamp.
+    fn series_past_into(&self, edge: RealSum, series: &mut EdgeSeries) -> bool {
+        let held = if edge.order_of(self.first_t) == Ordering::Greater {
             if !self.boundary.clamps_before_signal() {
-                return None;
+                return false;
             }
-            series[0] = Tracked::exact(&[self.held_before()]);
-            return Some(series);
-        }
-        if edge.order_of(self.last_t) == Ordering::Less {
+            Some(self.held_before())
+        } else if edge.order_of(self.last_t) == Ordering::Less {
             if !self.lookahead.clamps_past_signal() {
-                return None;
+                return false;
             }
-            series[0] = Tracked::exact(&[self.held_after()]);
-            return Some(series);
+            Some(self.held_after())
+        } else {
+            None
+        };
+        if let Some(value) = held {
+            series[0] = Tracked::exact(&[value]);
+            series[1..].fill(Tracked::ZERO);
+            return true;
         }
         let piece = self
             .starts
@@ -945,9 +961,9 @@ impl AxisSignalTable {
         );
         let shifted = Tracked::exact(&self.coeffs[piece]).shifted(edge.head - self.origins[piece]);
         for (order, slot) in series.iter_mut().enumerate() {
-            *slot = shifted.derivative(order);
+            shifted.derivative_into(order, slot);
         }
-        Some(series)
+        true
     }
 }
 
