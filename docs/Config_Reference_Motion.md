@@ -281,14 +281,15 @@ follows: x, y, z
 #   Optional comma-separated axis names. Default is an empty list.
 motors: e_motor
 #   Optional comma-separated motor names. Default is an empty list.
-post_processors: extruder_pa, extruder_smoothing
+post_processors: extruder_pa
 #   Optional comma-separated named post-processors. Default is an empty list.
 #   On an axis that follows others, a pressure advance (or any derivative-gain
 #   stage) needs the axis's max_velocity and max_accel, set or inherited; the
-#   chain is rejected otherwise. A smoothing kernel in the same list is
-#   optional; without one the advance also needs finite [extruder]
-#   max_extrude_only_velocity and max_extrude_only_accel, which bound the
-#   moves the extruder makes on its own (retracts, primes).
+#   chain is rejected otherwise. The recommended extruder chain is the
+#   advance alone; a smoothing kernel after it is an explicit override (see
+#   the [post_processor <name>] section). Without one the advance also needs
+#   finite [extruder] max_extrude_only_velocity and max_extrude_only_accel,
+#   which bound the moves the extruder makes on its own (retracts, primes).
 #max_velocity:
 #max_accel:
 #   Optional, on an axis that follows others. Must be above 0 (mm/s,
@@ -499,9 +500,11 @@ damping_ratio: 0.7
 #   Required. Must be in [0, 1).
 ```
 
-Attach a named post-processor to an axis with `post_processors: name1, name2`. On an axis that follows others, an advance (`linear_pressure_advance`, `tanh_pressure_advance`, `recipr_pressure_advance`, or another derivative-gain stage with a nonzero gain) must share its chain with a smoothing kernel: an advance turns every extrusion-ratio change taken at speed into an instant position step, which only a kernel makes followable, so the config compiler rejects the chain without one. A zero advance is accepted, and raising it at runtime on such a chain is rejected the same way. The fork has ZV, MZV, bell, and triangle smoothing kernels; it does not provide an EI-family input-shaper type.
+Attach a named post-processor to an axis with `post_processors: name1, name2`. On an axis that follows others, an advance (`linear_pressure_advance`, `tanh_pressure_advance`, `recipr_pressure_advance`, or another derivative-gain stage with a nonzero gain) needs the axis's `max_velocity` and `max_accel`, set or inherited from the `[extruder]`'s extrude-only caps; the config compiler rejects the chain without them. It needs no smoothing kernel: the recommended extruder chain is the advance alone, which the velocity planner holds to those limits and whose ratio steps it ramps (see `[axis <name>]` above). The fork has ZV, MZV, bell, and triangle smoothing kernels; it does not provide an EI-family input-shaper type.
 
-To judge an extruder chain (pressure advance plus its smoothing kernel) before printing, run `python3 tools/corner_flow.py printer.cfg`: it reports bead over- and under-fill at standard corners, flow changes and travel transitions, and accepts `--sweep smooth_time=...` and `--set name.param=value`. See [Evaluating an extruder chain](../README.md#evaluating-an-extruder-chain) for how to read it.
+A smoothing kernel after the advance on the extruder (`type: smooth_triangle`, named after the advance in `post_processors`) is an explicit override, never a default. It lowers the extruder acceleration corners ask for, so the planner slows extruding corners less, and pays with a bead bulge at every corner that grows with the kernel's width and the corner speed: on the bench printer at 150 mm/s a 45° corner bulges +159% with `smooth_time: 0.04` and +7% with 0.005, where the kernel-free chain lays the commanded bead. Use it only for an extruder too weak to follow the exact advance at a speed you need.
+
+To judge an extruder chain before printing, run `python3 tools/corner_flow.py printer.cfg`: it reports bead over- and under-fill at standard corners, flow changes and travel transitions, and accepts `--set name.param=value`; on a config carrying a kernel override, `--kernel-free` compares it with the chain without the kernel and `--sweep smooth_time=...` varies its width. See [Evaluating an extruder chain](../README.md#evaluating-an-extruder-chain) for how to read it.
 
 ## `[extruder]`
 

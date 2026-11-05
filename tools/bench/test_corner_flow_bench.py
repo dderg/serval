@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import shutil
 import sys
 from pathlib import Path
 
@@ -126,13 +125,30 @@ def _exact_capture(job, reference) -> analyze.Capture:
     )
 
 
+def _smoothed_extruder_config() -> str:
+    """The bench printer with the `smooth_triangle` 0.04 override after its
+    advance. The bounds below are calibrated on that smooth extruder signal:
+    the kernel-free chain `printer.cfg` ships lays its extruder steps sharply
+    enough that step quantization alone moves the apex by several points
+    (the README's "Corner flow" captures), and puts the reference's peak near
+    the 5 % blob threshold, where blob amplifies any timing residual."""
+    config = (BENCH_DIR / "printer.cfg").read_text()
+    chain = "post_processors: pa\n"
+    shaper = "[post_processor shaper_x]\n"
+    assert config.count(chain) == 1 and config.count(shaper) == 1
+    kernel = "[post_processor st]\ntype: smooth_triangle\nsmooth_time: 0.04\n\n"
+    return config.replace(chain, "post_processors: pa, st\n").replace(
+        shaper, kernel + shaper
+    )
+
+
 def _bench_run(tmp_path_factory, geometry):
     try:
         analyze.harness._import_engine()
     except ImportError as exc:
         pytest.skip(str(exc))
     run_dir = tmp_path_factory.mktemp(geometry.name.replace(" ", "_"))
-    shutil.copy(BENCH_DIR / "printer.cfg", run_dir / "printer.cfg")
+    (run_dir / "printer.cfg").write_text(_smoothed_extruder_config())
     ratio = BEAD[0] * BEAD[1] / (math.pi * (BEAD[2] / 2.0) ** 2)
     (run_dir / "print.gcode").write_text(
         "SET_KINEMATIC_POSITION X=0 Y=0 Z=0\nG92 E0\n"

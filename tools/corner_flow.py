@@ -17,13 +17,14 @@ switch moves across the vertex and the path it takes, not as over-fill.
 
     make -f Makefile.rust motion-engine-fast
     python3 tools/corner_flow.py tools/bench/printer.cfg
-    python3 tools/corner_flow.py printer.cfg --sweep smooth_time=0,0.005,0.02
     python3 tools/corner_flow.py printer.cfg --set pa.k=0.04 --json
-    python3 tools/corner_flow.py printer.cfg --kernel-free
+    python3 tools/corner_flow.py kernel.cfg --kernel-free
+    python3 tools/corner_flow.py kernel.cfg --sweep smooth_time=0,0.005,0.02
 
-``--kernel-free`` evaluates the config's chain with its extruder smoothing
-kernels taken out: every follower ramps its extrusion-ratio steps by the
-ramp time its limits derive, kernel or not. An advance with no kernel
+``--kernel-free`` evaluates a config that carries an extruder kernel override
+with its extruder smoothing kernels taken out, leaving the recommended chain:
+every follower ramps its extrusion-ratio steps by the ramp time its limits
+derive, kernel or not. An advance with no kernel
 needs extrude-only caps, and the retract case is only comparable between
 chains under the same ones: ``--extrude-only V,A`` fills in whichever the
 config lacks, for every chain.
@@ -62,6 +63,8 @@ has none of that kind):
   chord rule at the spills (docs/rewrite/shaper.md, "Followers"), up to
   about 1e-4 mm where the two plans' spills curve differently, so anything
   well above that is lost or invented material.
+- ``t``: the case's planned print time (s), what the extruder limits and
+  any kernel cost in time.
 """
 
 from __future__ import annotations
@@ -153,6 +156,7 @@ class Row:
     ae_all: float = math.nan
     de_gcode: float = math.nan
     de_advance: float = math.nan
+    time_s: float = math.nan
     error: str = ""
     corners: list[dict] = field(default_factory=list)
     steps: list[dict] = field(default_factory=list)
@@ -467,6 +471,7 @@ def measure(
     row.ae_max = float(np.abs(ae[moving]).max())
     row.ve_all = float(np.abs(ve).max())
     row.ae_all = float(np.abs(ae).max())
+    row.time_s = float(t[-1])
     row.de_gcode = float(e_cmd[-1] - gcode_total_e(geometry, ratio))
     if all(move.e == 1.0 for move in geometry.moves):
         row.de_advance = beyond_the_path(xy, e_cmd, ratio) - beyond_the_path(
@@ -543,7 +548,7 @@ def table(rows: list[Row], sweep_name: str) -> str:
         f"{'case':<10} {'mm/s':>4} | {'peak':>6} {'dip':>5} {'w>5%':>5} "
         f"{'blob':>6} | {'moved':>6} {'net':>6} {'sw':>5} | "
         f"{'ve+':>6} {'ve-':>6} {'ae':>7} | {'|ve|*':>6} "
-        f"{'|ae|*':>7} | {'dE_gc':>8} {'dE_adv':>8}"
+        f"{'|ae|*':>7} | {'dE_gc':>8} {'dE_adv':>8} | {'t':>6}"
     )
     if sweep_name:
         head = f"{sweep_name:>11} " + head
@@ -564,7 +569,8 @@ def table(rows: list[Row], sweep_name: str) -> str:
             f"{_cell(row.switch_mm, '.2f', 5)} | "
             f"{row.ve_max:>6.1f} {row.ve_min:>6.1f} {row.ae_max:>7.0f} | "
             f"{row.ve_all:>6.1f} {row.ae_all:>7.0f} | "
-            f"{row.de_gcode:>+8.4f} {_signed(row.de_advance):>8}"
+            f"{row.de_gcode:>+8.4f} {_signed(row.de_advance):>8} | "
+            f"{row.time_s:>6.3f}"
         )
     return "\n".join(lines)
 

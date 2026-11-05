@@ -265,7 +265,7 @@ were simply never carried across:
 | Section | Note |
 |---|---|
 | `[input_shaper]` | Replaced by `[post_processor]` chains (see above). |
-| `[extruder_smoother]` | Replaced by a `smooth_triangle` post-processor. |
+| `[extruder_smoother]` | **No counterpart needed; delete it.** The advance runs unblurred along the shaped path (see [Pressure advance](#pressure-advance)); a `smooth_triangle` post-processor after the advance is an explicit override. |
 | `[ringing_test]`, `[pa_test]` | Kalico's calibration-pattern generators. The `RINGING_TEST` / `PA_TEST` commands go with them, so macros that call them break too. |
 | `[manual_stepper]` | Drives a stepper outside the kinematic model, which the motor/axis split has no room for. Mods that depend on it (filament changers, nozzle wipers, `[trad_rack]`) do not load. |
 | `[endstop_phase]` | Incompatible with the new stepper model. |
@@ -321,7 +321,7 @@ Set `max_velocity` and `max_accel` to what the extruder motor can do (mm/s and m
 
 `[axis e] max_accel` is the extruder motor's pressure-advance-capable acceleration, not the retract cap: a direct drive typically follows 20000 mm/s² or more, an Ender-3-class bowden about 5000. Inheriting `max_extrude_only_accel` (by default about a quarter of `[printer] max_accel` for a 0.4 mm nozzle on 1.75 mm filament) slows every corner of an extruding move. The [Motion configuration reference](Config_Reference_Motion.md#axis-name) describes a calibration print that finds the drive's value.
 
-`pressure_advance_smooth_time` has no counterpart in that chain; delete it. A smoothing kernel after the advance (`type: smooth_triangle`, `smooth_time: ...`, named after the advance in `post_processors`) stays legal as an explicit override: it lowers the extruder acceleration corners ask for and bulges the bead at every corner in exchange, by more the wider it is. The trade-off is measured in [Evaluating an extruder chain](../README.md#evaluating-an-extruder-chain).
+`pressure_advance_smooth_time` has no counterpart in that chain; delete it. A smoothing kernel after the advance (`type: smooth_triangle`, `smooth_time: ...`, named after the advance in `post_processors`) stays legal as an explicit override for an extruder too weak to follow the exact advance at a speed you need: it lowers the extruder acceleration corners ask for, so the planner slows extruding corners less, and bulges the bead at every corner in exchange, by more the wider it is and the faster the corner. A mainline-style `smooth_time: 0.040` is far too wide for that: on the bench printer it bulges a 45° corner by +127% at 100 mm/s and +195% at 300 mm/s in the captured steps, where the kernel-free chain stays within step quantization. The trade-off is measured in [Evaluating an extruder chain](../README.md#evaluating-an-extruder-chain).
 
 A config written for an earlier version of this fork that sets `ratio_ramp_time` on its follower axis is rejected at load. Delete the option and set the axis's `max_velocity` / `max_accel` (or the `[extruder]`'s extrude-only caps they inherit); the ramp time of each step follows from them. A chain that kept a short kernel next to the ramp can drop the kernel.
 

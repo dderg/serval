@@ -3,8 +3,8 @@
 //! everywhere inside the piece — not just at the ladder's probe points. A
 //! follower's acceleration promise is per piece: the looser of
 //! `max_accel_deviation` and the acceleration that spends its position
-//! tolerance over the piece. This replays every snapshot case and a whole
-//! dense real print through the pipeline with the fit audit on, and fails
+//! tolerance over the piece. This replays every snapshot case and whole
+//! real prints through the pipeline with the fit audit on, and fails
 //! on any accepted piece that leaves the tolerance, and on any planned
 //! extruder that leaves the limits it was planned under beyond what
 //! `corpus/known_extruder_excesses.rs` pins. Each set of cases is its own
@@ -19,15 +19,18 @@ mod corpus;
 const DENSE_PRINT: &str = "voron_dense_top_layers";
 
 fn dense_cases(configs: &[&str]) -> Vec<(String, String, PathBuf)> {
-    let gcode = std::fs::read_to_string(
-        corpus::repo().join(format!("tools/sim/gcode/{DENSE_PRINT}.gcode")),
-    )
-    .expect("read the dense print");
+    print_cases(DENSE_PRINT, configs)
+}
+
+fn print_cases(print: &str, configs: &[&str]) -> Vec<(String, String, PathBuf)> {
+    let gcode =
+        std::fs::read_to_string(corpus::repo().join(format!("tools/sim/gcode/{print}.gcode")))
+            .unwrap_or_else(|e| panic!("read the sim print {print}: {e}"));
     configs
         .iter()
         .map(|config| {
             (
-                format!("{DENSE_PRINT}/{config}"),
+                format!("{print}/{config}"),
                 gcode.clone(),
                 corpus::repo().join(config),
             )
@@ -149,6 +152,23 @@ fn every_accepted_fit_piece_holds_the_fit_tolerance_against_the_exact_signal() {
 #[test]
 fn every_fit_piece_of_the_dense_print_holds_the_fit_tolerance_on_the_bench_configs() {
     assert_every_accepted_fit_piece_holds(dense_cases(&corpus::SIM_CONFIGS));
+}
+
+/// The first layers' slow perimeters, primes and retracts on the bench
+/// configs' kernel-free extruder chain.
+#[test]
+fn every_fit_piece_of_the_first_layers_holds_the_fit_tolerance_on_the_bench_configs() {
+    assert_every_accepted_fit_piece_holds(print_cases("voron_first_layers", &corpus::SIM_CONFIGS));
+}
+
+/// The Trident print that first broke the follower cache, on the bench
+/// configs' kernel-free extruder chain.
+#[test]
+fn every_fit_piece_of_the_follower_cache_print_holds_the_fit_tolerance_on_the_bench_configs() {
+    assert_every_accepted_fit_piece_holds(print_cases(
+        "trident_follower_cache_regression",
+        &corpus::SIM_CONFIGS,
+    ));
 }
 
 /// A 70 000 mm/s² Trident whose kernel-free pressure advance under a ratio

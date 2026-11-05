@@ -232,7 +232,7 @@ fn a_kernel_free_advance_conserves_material_through_a_zigzag() {
 #[test]
 fn an_advance_before_a_short_kernel_conserves_material_through_a_corner() {
     assert_advance_conserves(&Case {
-        config: "tools/bench/printer.cfg",
+        config: "tools/bench/configs/ramp.cfg",
         chain: "pa, st",
         plain_chain: "st",
         smooth_time: 0.005,
@@ -245,7 +245,7 @@ fn an_advance_before_a_short_kernel_conserves_material_through_a_corner() {
 #[test]
 fn an_advance_before_a_long_kernel_conserves_material_through_a_corner() {
     assert_advance_conserves(&Case {
-        config: "tools/bench/printer.cfg",
+        config: "tools/bench/configs/ramp.cfg",
         chain: "pa, st",
         plain_chain: "st",
         smooth_time: 0.04,
