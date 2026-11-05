@@ -24,6 +24,8 @@ baseline review, accept, land-pr.sh), in order, stopping at the first problem:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import os
 import subprocess
 import sys
 import tempfile
@@ -145,6 +147,28 @@ def format_tree(root: Path) -> None:
         step("committed formatting changes")
 
 
+GATE_CACHE = Path("~/.cache/ship-gates").expanduser()
+
+
+def gate_stamp(tree: str, command: list[str]) -> Path:
+    digest = hashlib.sha256(" ".join(command).encode()).hexdigest()[:12]
+    return GATE_CACHE / f"{tree}-{digest}.ok"
+
+
+def run_gate(command: list[str], root: Path) -> None:
+    """A gate is a function of the tree, so a gate that passed on this exact
+    tree is not run again: a retry after a red CI run or a conflict resolved
+    elsewhere used to repeat ci.sh quick (3-5 min) and ci.sh py every time."""
+    tree = git("rev-parse", "HEAD^{tree}")
+    stamp = gate_stamp(tree, command)
+    if stamp.exists() and not os.environ.get("SHIP_NO_GATE_CACHE"):
+        step(f"skipping {' '.join(command)}: passed on this exact tree")
+        return
+    run(command, root)
+    GATE_CACHE.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(f"{' '.join(command)}\n")
+
+
 def free_space_gc() -> None:
     subprocess.run(
         [
@@ -190,7 +214,7 @@ def main() -> int:
         return 0
     format_tree(root)
     for command in commands:
-        run(command, root)
+        run_gate(command, root)
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as handle:
         handle.write(body)
     land = [
