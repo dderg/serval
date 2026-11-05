@@ -4462,7 +4462,14 @@ fn shaped_ladder<S: TrackSignal>(
                     fit_tol: fit_tol.absolute_budget(),
                     ..*policy
                 };
-                return shaped_ladder(sig, exact, t0, t1, slivers, &absolute, keeps_closest_rung);
+                return shaped_ladder(
+                    sig,
+                    exact,
+                    span,
+                    &absolute,
+                    keeps_closest_rung,
+                    known_edges,
+                );
             }
             let resolved = (start_past_sliver, end_past_sliver);
             let piece = FittedPiece {
