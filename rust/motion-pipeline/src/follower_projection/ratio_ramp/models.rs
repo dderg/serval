@@ -33,7 +33,7 @@ const BINOMIALS: [[f64; 6]; 6] = [
 
 /// How many ulps of the path inside its reach the formula of a window is
 /// read.
-pub(in crate::follower_projection) const REACH_INSET_ULPS: f64 = 4.0;
+const REACH_INSET_ULPS: f64 = 4.0;
 
 /// How many insets ([`REACH_INSET_ULPS`]) the width at a reach's end spans
 /// at least for the correction's formula there to be read inset: a window

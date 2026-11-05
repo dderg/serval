@@ -2592,3 +2592,85 @@ fn only_the_leaders_a_kernel_free_advance_reads_fit_acceleration_continuous_seam
     );
     assert_eq!(continuity(CompiledChain::default()), [Velocity; 3]);
 }
+
+/// A leader of the voron_dense_top_layers print on the p3 kernel profile
+/// overshooting a stop by a third of a micrometre per second before it
+/// moves on: the odometer leaf over the stop runs under that speed, so its
+/// reading climbs past a span boundary, steps back below it and climbs
+/// again. The table's formula changes at the boundary's crossing alone,
+/// as the follower's enclosures model it.
+#[test]
+fn the_follower_reads_a_boundarys_formula_from_its_crossing_on() {
+    let stop_end = 0.001_092_048_345_084_251;
+    let stopping = [
+        150.519_941_572_294_21,
+        0.157_829_662_124_684_55,
+        -85.829_121_122_020_41,
+        -109_646.230_262_216_37,
+        137_372_192.481_226_65,
+        -41_303_178_465.302_92,
+    ];
+    let stopped_at = stopping.iter().rev().fold(0.0, |y, c| y * stop_end + c);
+    let moving_end = stop_end + 0.01;
+    let shaped = leader_segment(
+        bezier_pieces_to_nurbs(&[BezierPiece {
+            u_start: 0.0,
+            u_end: moving_end,
+            coeffs: vec![120.122],
+        }]),
+        bezier_pieces_to_nurbs(&[
+            BezierPiece {
+                u_start: 0.0,
+                u_end: stop_end,
+                coeffs: stopping.to_vec(),
+            },
+            BezierPiece {
+                u_start: stop_end,
+                u_end: moving_end,
+                coeffs: vec![stopped_at, 0.0, 50.0, 0.0, 0.0, 0.0],
+            },
+        ]),
+        0.0,
+        moving_end,
+    );
+    let boundary = 5.842_770_8e-5;
+    let (before, after) = (0.04, 0.0);
+    let mut state = FollowerState::default();
+    state.push_span(boundary, before, before);
+    state.push_span(1.0, after, after);
+    let sig = FollowerSignal::new(
+        &shaped,
+        &shaped,
+        3,
+        &[0, 1],
+        &state,
+        odometer_from_start(&shaped),
+        0.0,
+    );
+    let stepping_back = (0.001_074, 0.001_085);
+    assert!(
+        sig.s_at(stepping_back.0) > boundary && sig.s_at(stepping_back.1) < boundary,
+        "test premise: the odometer reads {} then {} across the boundary {boundary}",
+        sig.s_at(stepping_back.0),
+        sig.s_at(stepping_back.1)
+    );
+    let crossing = sig
+        .ratio_crossings()
+        .iter()
+        .find(|&&(_, at)| at == boundary)
+        .map(|&(time, _)| time)
+        .expect("the odometer crosses the boundary");
+    let probes = 20_000;
+    for index in 0..=probes {
+        let t = stop_end * f64::from(index) / f64::from(probes);
+        let ratio = sig.path_read(t).laid.ratio;
+        let expected = if t < crossing { before } else { after };
+        assert_eq!(
+            ratio,
+            expected,
+            "at t={t} the odometer reads {} and the table ratio {ratio}; the boundary {boundary} \
+             is crossed at {crossing}",
+            sig.s_at(t)
+        );
+    }
+}

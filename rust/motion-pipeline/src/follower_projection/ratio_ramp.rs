@@ -16,7 +16,7 @@ mod models;
 
 pub(super) use jet::Jet;
 use jet::{horner, horner_with_slope};
-pub(super) use models::{PathReach, REACH_INSET_ULPS, ValleyWeight, narrow_floats};
+pub(super) use models::{PathReach, ValleyWeight, narrow_floats};
 
 /// `max |h'|` the width reaches: `3·ENVELOPE_SLOPE` rising off a rest,
 /// `1.875·ENVELOPE_SLOPE` between two moving nodes.
@@ -1263,6 +1263,9 @@ pub(super) struct RatioSmoothing {
     reach_into_next: Option<Crossing>,
     laid_tails: VecDeque<LegTail>,
     backlog: VecDeque<PendingSegment>,
+    /// The slowest point of the last leg, where a valley reaching past the
+    /// laid table waits for the ratio the next leg lays there.
+    waiting_crawl: Option<(f64, Crossing)>,
 }
 
 impl RatioSmoothing {
@@ -1281,6 +1284,7 @@ impl RatioSmoothing {
     pub(super) fn close_at(&mut self, s: f64) {
         self.floor = self.floor.max(s);
         self.reach_into_next = None;
+        self.waiting_crawl = None;
         self.laid_tails.clear();
         self.close_rest(s, 0.0);
         self.width.close(s);
@@ -1303,7 +1307,8 @@ impl RatioSmoothing {
     /// Takes in `leg`'s spans: the width nodes it covers, the seams the
     /// table gained with the ramp time `rule` derives for each, the seams
     /// `advance_spans`, the table an advance reads, gained, and the advance
-    /// valleys its opening seam and its slowest point inside need.
+    /// valleys its opening seam and its slowest point inside need, and the
+    /// one the last leg's slowest point waited on these spans for.
     pub(super) fn lay(
         &mut self,
         (spans, advance_spans): (&[RatioSpan], &[RatioSpan]),
@@ -1319,6 +1324,9 @@ impl RatioSmoothing {
         self.width.rule = Some(*rule);
         let leaders = leg.shaped_leaders;
         let table_end = spans.last().map_or(leg.start_s, |last| last.s1);
+        if let Some(crawl) = self.waiting_crawl.take() {
+            self.lay_crawl_valley(spans, rule, crawl, f64::INFINITY);
+        }
         if table_end <= leg.start_s {
             self.width.extend(leaders, leg, table_end);
             self.close_at(leg.start_s);
@@ -1346,15 +1354,8 @@ impl RatioSmoothing {
         let slowest = (!leg.rests && self.open_rest.is_none())
             .then(|| slowest_crawl(leaders, leg, table_end))
             .flatten();
-        if let Some((turn, turn_crossing)) = slowest {
-            let reach = turn_crossing
-                .reach(VALLEY_RAMP_TIME_S)
-                .min(turn - self.floor);
-            if reach > SPAN_MIN_LEN_MM
-                && turn_crossing.needs_valley(rule, peak_ratio_within(spans, turn, reach))
-            {
-                self.lay_valley(turn, reach, turn_crossing.crawl_floor());
-            }
+        if let Some(crawl) = slowest {
+            self.lay_crawl_valley(spans, rule, crawl, table_end);
         }
         let new_seams = self.record_seams((spans, advance_spans));
         let mut crossings = LegCrossings::of(leaders);
@@ -1367,6 +1368,28 @@ impl RatioSmoothing {
         self.keep_tail(&mut crossings, leg);
         self.width.assign(t_end - TARGET_DELAY_S);
         self.reach_into_next = Some(Crossing::valley_at(leaders, t_end));
+    }
+
+    /// A valley at the crawl `turn` where reading the path speed through it
+    /// at the ratio within its reach would ask too much of the follower.
+    /// The advance there reads the ratio laid after the table's end too, so
+    /// a reach running past `table_end` waits for the next leg's spans.
+    fn lay_crawl_valley(
+        &mut self,
+        spans: &[RatioSpan],
+        rule: &RatioRampRule,
+        (turn, crossing): (f64, Crossing),
+        table_end: f64,
+    ) {
+        let reach = crossing.reach(VALLEY_RAMP_TIME_S).min(turn - self.floor);
+        if reach <= SPAN_MIN_LEN_MM {
+            return;
+        }
+        if crossing.needs_valley(rule, peak_ratio_within(spans, turn, reach)) {
+            self.lay_valley(turn, reach, crossing.crawl_floor());
+        } else if turn + reach > table_end {
+            self.waiting_crawl = Some((turn, crossing));
+        }
     }
 
     /// A valley at `turn`, unless the last one laid sits there already: a
@@ -1496,15 +1519,20 @@ impl RatioSmoothing {
     }
 
     /// How far back from the table's end a valley the next leg may open
-    /// there reaches: a rest or a turnaround releases the advance over the
-    /// leaders' reach at that seam, which is no further than the reach of
-    /// the crossing the last leg closed on.
+    /// there, or lay at a crawl waiting on its spans, reaches: a rest or a
+    /// turnaround releases the advance over the leaders' reach at that
+    /// seam, which is no further than the reach of the crossing the last
+    /// leg closed on.
     fn unlaid_valley_reach(&self, table_end: f64) -> f64 {
-        self.reach_into_next.map_or(0.0, |closing| {
+        let opening = self.reach_into_next.map_or(0.0, |closing| {
             closing
                 .reach(VALLEY_RAMP_TIME_S)
                 .min(table_end - self.floor)
-        })
+        });
+        let waiting = self.waiting_crawl.map_or(0.0, |(turn, crossing)| {
+            table_end - turn + crossing.reach(VALLEY_RAMP_TIME_S).min(turn - self.floor)
+        });
+        opening.max(waiting)
     }
 
     /// How far the smoothed ratio is final: its width there is, and every
