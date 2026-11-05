@@ -422,7 +422,11 @@ fn a_drain_pass_starting_on_a_reversal_root_emits_it() {
         degree: 1,
         segments: 2,
         amplitude_mm: 1.510_764_601_304_872_3,
-        offsets: vec![0.520_606_650_752_102, -0.144_122_162_203_121_4, 0.270_594_159_421_402_36],
+        offsets: vec![
+            0.520_606_650_752_102,
+            -0.144_122_162_203_121_4,
+            0.270_594_159_421_402_36,
+        ],
         anchor: Anchor::Reseeded,
         landing: None,
         rest: None,
