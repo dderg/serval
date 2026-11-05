@@ -388,7 +388,7 @@ job_bench_fw() {
     cargo fmt --check
     cargo clippy --release -- -D warnings
     cargo build --release
-    cd "$ROOT" && uv run pytest tools/bench
+    cd "$ROOT" && make -f Makefile.rust motion-engine-fast && uv run pytest tools/bench
 }
 
 job_sim() {
@@ -461,7 +461,8 @@ job_throughput_gate() {
 # compared with the snapshot path's (snapshots/live_bridge_parity.py).
 job_live_parity() {
     cd "$ROOT" && make -f Makefile.rust motion-engine-fast \
-        && uv run python -m pytest -q -n auto -p no:cacheprovider snapshots/test_live_bridge_parity.py
+        && uv run python -m pytest -q -n auto -p no:cacheprovider \
+            snapshots/test_live_bridge_parity.py snapshots/test_live_parity.py
 }
 
 job_docs() { cd "$ROOT/docs/_kalico" && uv run mkdocs build --strict; }

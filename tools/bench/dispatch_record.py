@@ -2,15 +2,17 @@
 
 The live host writes one when SERVAL_DISPATCH_RECORD_DIR is set: every shaped
 segment it dispatched, sampled per axis as (position, velocity, acceleration)
-at most `sample_interval_s` apart with both ends included, together with the
-host-time origin it was anchored on, and every drain to rest with its cause.
+with both ends included, every breakpoint read once from each side and no two
+samples of one breakpoint interval more than `sample_interval_s` apart,
+together with the host-time origin it was anchored on, and every drain to rest
+with its cause.
 The engine's `pipeline_snapshot_dispatch_record` writes the offline plan in
 the same format, so the two compare segment for segment.
 
 Layout (little-endian): magic, u32 axes, f64 sample interval; then records,
 each a u8 kind followed by
     SEGMENT  f64 t0, f64 t_start, f64 t_end, u32 source_line, u8 flags,
-             u32 n, n x axes x 3 f64
+             u32 n, n x (f64 t, axes x 3 f64)
     DRAIN    u8 cause, u64 moves_sent
     NUDGE    f64 t0, f64 t_start, f64 t_end, u32 mcu_id, u8 axis
 """
@@ -23,7 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
-MAGIC = b"SVDREC1\0"
+MAGIC = b"SVDREC2\0"
 HEADER = struct.Struct("<8sId")
 KIND_SEGMENT = 1
 KIND_DRAIN = 2
@@ -63,6 +65,7 @@ class DispatchRecord:
     source_line: np.ndarray
     flags: np.ndarray
     sample_start: np.ndarray
+    times: np.ndarray
     samples: np.ndarray
     drains: list[Drain]
     nudges: int
@@ -72,6 +75,11 @@ class DispatchRecord:
 
     def segment_samples(self, index: int) -> np.ndarray:
         return self.samples[
+            self.sample_start[index] : self.sample_start[index + 1]
+        ]
+
+    def segment_times(self, index: int) -> np.ndarray:
+        return self.times[
             self.sample_start[index] : self.sample_start[index + 1]
         ]
 
@@ -95,7 +103,9 @@ def parse(data: bytes, name: str = "dispatch record") -> DispatchRecord:
         )
     heads: list[tuple] = []
     sample_starts = [0]
+    time_blobs: list[np.ndarray] = []
     blobs: list[np.ndarray] = []
+    row = 1 + axes * 3
     drains: list[Drain] = []
     nudges = 0
     offset = HEADER.size
@@ -109,18 +119,29 @@ def parse(data: bytes, name: str = "dispatch record") -> DispatchRecord:
                 data, offset
             )
             offset += SEGMENT.size
-            width = n * axes * 3 * 8
+            width = n * row * 8
             _need(data, offset, width, name, "segment samples")
             if n < 2 or not t_end > t_start:
                 raise RecordError(
                     f"{name}: segment {len(heads)} at t={t_start} spans "
                     f"[{t_start}, {t_end}] with {n} samples"
                 )
-            blobs.append(
-                np.frombuffer(data, "<f8", n * axes * 3, offset).reshape(
-                    n, axes, 3
+            rows = np.frombuffer(data, "<f8", n * row, offset).reshape(n, row)
+            times = rows[:, 0]
+            gaps = np.diff(times)
+            if (
+                times[0] != t_start
+                or times[-1] != t_end
+                or gaps.min() < 0.0
+                or gaps.max() > interval * (1.0 + 1e-9)
+            ):
+                raise RecordError(
+                    f"{name}: segment {len(heads)} over [{t_start}, {t_end}] "
+                    f"is sampled from {times[0]} to {times[-1]} with gaps "
+                    f"{gaps.min()}..{gaps.max()} s (at most {interval})"
                 )
-            )
+            time_blobs.append(times)
+            blobs.append(rows[:, 1:].reshape(n, axes, 3))
             offset += width
             heads.append((t0, t_start, t_end, line, flags))
             sample_starts.append(sample_starts[-1] + n)
@@ -149,6 +170,7 @@ def parse(data: bytes, name: str = "dispatch record") -> DispatchRecord:
         source_line=table[:, 3].astype(np.int64),
         flags=table[:, 4].astype(np.int64),
         sample_start=np.asarray(sample_starts, np.int64),
+        times=(np.concatenate(time_blobs) if time_blobs else np.empty(0)),
         samples=(
             np.concatenate(blobs)
             if blobs
