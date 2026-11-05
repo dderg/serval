@@ -243,11 +243,7 @@ class FloorShortfall:
             )
 
 
-FLOOR_SHORTFALLS: dict[str, FloorShortfall] = {
-    "tools/bench/configs/trident_kernel.cfg": FloorShortfall(
-        issue=693, predicted_ir_x=1.93
-    ),
-}
+FLOOR_SHORTFALLS: dict[str, FloorShortfall] = {}
 assert set(FLOOR_SHORTFALLS) <= set(CONFIGS), (
     "a floor pin names an ungated config"
 )
