@@ -132,8 +132,12 @@ advance_main() {
     elif [ -n "$(git -C "$tree" status --porcelain --untracked-files=no)" ]; then
         echo "land-pr: $tree has main checked out with uncommitted changes; main was not advanced" >&2
     else
+        local guard
+        guard="$(dirname "$gh_util")/guard-main-checkout.sh"
+        [ ! -x "$guard" ] || "$guard" lift "$tree"
         git -C "$tree" merge --ff-only origin/main \
             || echo "land-pr: $tree has a main that is not a fast-forward of origin/main; main was not advanced" >&2
+        [ ! -x "$guard" ] || "$guard" apply "$tree"
     fi
 }
 
