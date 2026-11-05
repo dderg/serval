@@ -14,7 +14,8 @@ use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
     AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget,
     LadderFailure, LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth, SeamContinuity,
-    VelocitySign, acceleration_bound, exact_piece, held_miss, ladder_fit, quintic_in_u,
+    VelocitySign, acceleration_bound, exact_piece, held_miss, ladder_accept, ladder_fit,
+    quintic_in_u,
 };
 use crate::types::{BaseItem, Control, PostProcessError, TrajectoryItem};
 use crate::worker_pool::WorkerPool;
@@ -4393,7 +4394,6 @@ fn span_probe_t(t0: f64, t1: f64, u: f64) -> f64 {
 /// refit to the absolute budget where its acceleration may pass the
 /// budget's ceiling ([`FitTol::accel_ceiling`]); at the floor no finer
 /// partition could hold it, and the looser budget stands.
-#[allow(clippy::type_complexity)]
 fn shaped_ladder<S: TrackSignal>(
     sig: &S,
     exact: Option<&ExactSpan>,
@@ -4401,7 +4401,7 @@ fn shaped_ladder<S: TrackSignal>(
     policy: &SpanFitPolicy,
     keeps_closest_rung: bool,
     known_edges: [Option<EdgeState>; 2],
-) -> Result<(Vec<f64>, Option<LadderFailure>, [EdgeState; 2]), PostProcessError> {
+) -> Result<(SpanVerdict, [EdgeState; 2]), PostProcessError> {
     let RefineSpan { t0, t1, slivers } = span;
     let axis = policy.axis;
     let fit_tol = policy.fit_tol;
@@ -4498,30 +4498,47 @@ fn shaped_ladder<S: TrackSignal>(
             .as_ref()
             .map_or(0.0, |hold| hold.worst_miss(rung))
     };
-    match ladder_fit(
-        &base,
-        LadderSpan { h, endpoint_delta },
-        &LadderTruth {
-            position: &|u| truth.pos_at(u),
-            velocity: &|u| truth.vel_at(u),
-            acceleration: &|u| truth.acc_at(u),
-            held_miss: &held_miss,
-            held_ranks_misses: keeps_closest_rung,
-        },
-        LadderBudget {
-            tol: piece_tol,
-            velocity: policy.velocity_budget,
-        },
-        LadderPolicy {
-            velocity_sign: policy.velocity_sign,
-            acceleration_monotonicity: sig.acceleration_monotonicity(
-                (t0_inside, t1_inside),
-                (start_past_sliver, end_past_sliver),
-            ),
-            high_degree_span_floor: policy.floors.high_degree,
-            seam_continuity: policy.seam_continuity,
-        },
-    ) {
+    let ladder_span = LadderSpan { h, endpoint_delta };
+    let ladder_truth = LadderTruth {
+        position: &|u| truth.pos_at(u),
+        velocity: &|u| truth.vel_at(u),
+        acceleration: &|u| truth.acc_at(u),
+        held_miss: &held_miss,
+        held_ranks_misses: keeps_closest_rung,
+    };
+    let ladder_budget = LadderBudget {
+        tol: piece_tol,
+        velocity: policy.velocity_budget,
+    };
+    let ladder_policy = LadderPolicy {
+        velocity_sign: policy.velocity_sign,
+        acceleration_monotonicity: sig.acceleration_monotonicity(
+            (t0_inside, t1_inside),
+            (start_past_sliver, end_past_sliver),
+        ),
+        high_degree_span_floor: policy.floors.high_degree,
+        seam_continuity: policy.seam_continuity,
+    };
+    let fitted = if keeps_closest_rung {
+        ladder_fit(
+            &base,
+            ladder_span,
+            &ladder_truth,
+            ladder_budget,
+            ladder_policy,
+        )
+        .map_err(Some)
+    } else {
+        ladder_accept(
+            &base,
+            ladder_span,
+            &ladder_truth,
+            ladder_budget,
+            ladder_policy,
+        )
+        .ok_or(None)
+    };
+    match fitted {
         Ok(coefficients) => {
             let splittable = !keeps_closest_rung;
             if splittable
@@ -4565,7 +4582,7 @@ fn shaped_ladder<S: TrackSignal>(
                 },
             };
             let Some(u) = unproven else {
-                return Ok((coefficients, None, [start, end]));
+                return Ok((SpanVerdict::Proven(coefficients), [start, end]));
             };
             let t = t_of(u);
             let read = if t < t1 { &from_start } else { &from_end };
@@ -4577,43 +4594,58 @@ fn shaped_ladder<S: TrackSignal>(
             let candidate_velocity = velocity.evaluate(t);
             let candidate_acceleration = acceleration.evaluate(t);
             Ok((
-                coefficients,
-                Some(LadderFailure {
-                    u,
-                    error: LadderPva {
-                        position: (candidate_position - source_position).abs(),
-                        velocity: (candidate_velocity - source_velocity).abs(),
-                        acceleration: (candidate_acceleration - source_acceleration).abs(),
+                SpanVerdict::Missed(
+                    coefficients,
+                    LadderFailure {
+                        u,
+                        error: LadderPva {
+                            position: (candidate_position - source_position).abs(),
+                            velocity: (candidate_velocity - source_velocity).abs(),
+                            acceleration: (candidate_acceleration - source_acceleration).abs(),
+                        },
+                        source: LadderPva {
+                            position: source_position,
+                            velocity: source_velocity,
+                            acceleration: source_acceleration,
+                        },
+                        candidate: LadderPva {
+                            position: candidate_position,
+                            velocity: candidate_velocity,
+                            acceleration: candidate_acceleration,
+                        },
+                        left: LadderPva {
+                            position: p0,
+                            velocity: v0,
+                            acceleration: a0,
+                        },
+                        right: LadderPva {
+                            position: p1,
+                            velocity: v1,
+                            acceleration: a1,
+                        },
                     },
-                    source: LadderPva {
-                        position: source_position,
-                        velocity: source_velocity,
-                        acceleration: source_acceleration,
-                    },
-                    candidate: LadderPva {
-                        position: candidate_position,
-                        velocity: candidate_velocity,
-                        acceleration: candidate_acceleration,
-                    },
-                    left: LadderPva {
-                        position: p0,
-                        velocity: v0,
-                        acceleration: a0,
-                    },
-                    right: LadderPva {
-                        position: p1,
-                        velocity: v1,
-                        acceleration: a1,
-                    },
-                }),
+                ),
                 [start, end],
             ))
         }
-        Err(LadderMiss {
+        Err(Some(LadderMiss {
             closest_rung,
             failure,
-        }) => Ok((closest_rung, Some(failure), [start, end])),
+        })) => Ok((SpanVerdict::Missed(closest_rung, failure), [start, end])),
+        Err(None) => Ok((SpanVerdict::Refused, [start, end])),
     }
+}
+
+/// What a span's ladder and hull made of it.
+enum SpanVerdict {
+    /// A rung, proven within the budget.
+    Proven(Vec<f64>),
+    /// The closest rung of a ladder that refused them all, or a rung the
+    /// hull did not prove, and where it misses.
+    Missed(Vec<f64>, LadderFailure),
+    /// Every rung refused on a splittable span, which is split without
+    /// ranking them.
+    Refused,
 }
 
 /// Intervals between the check points a span reaching a square-root onset
@@ -4874,35 +4906,40 @@ fn refine_span_against<S: TrackSignal>(
     let tm = 0.5 * t0 + 0.5 * t1;
     let at_resolution_floor = tm - t0 < floors.cubic || t1 - tm < floors.cubic;
     let splittable = !at_resolution_floor && *refinement_splits < MAX_FIT_REFINEMENT_SPLITS;
-    let (mono_u, failure, [start_edge, end_edge]) =
+    let (verdict, [start_edge, end_edge]) =
         shaped_ladder(sig, exact, span, policy, !splittable, known_edges)?;
     #[cfg(feature = "fit-audit")]
     let edge_insets = (
         edge_inset(t1 - t0, floors.cubic, slivers.start),
         edge_inset(t1 - t0, floors.cubic, slivers.end),
     );
-    if failure.is_none() {
-        #[cfg(feature = "fit-audit")]
-        crate::fit_audit::check(
-            sig,
-            crate::fit_audit::AcceptedPiece {
-                fit_context: policy.fit_context,
-                axis: policy.axis,
-                fit_tol: policy.fit_tol,
-                t0,
-                t1,
-                mono_u: &mono_u,
-                accepted_at_floor: false,
-                cubic_floor: floors.cubic,
-                edge_insets,
-                exact,
-            },
-        );
-        out.push(exact_piece(&mono_u, t0, t1, t1 - t0));
-        return Ok(());
-    }
+    let missed = match verdict {
+        SpanVerdict::Proven(mono_u) => {
+            #[cfg(feature = "fit-audit")]
+            crate::fit_audit::check(
+                sig,
+                crate::fit_audit::AcceptedPiece {
+                    fit_context: policy.fit_context,
+                    axis: policy.axis,
+                    fit_tol: policy.fit_tol,
+                    t0,
+                    t1,
+                    mono_u: &mono_u,
+                    accepted_at_floor: false,
+                    cubic_floor: floors.cubic,
+                    edge_insets,
+                    exact,
+                },
+            );
+            out.push(exact_piece(&mono_u, t0, t1, t1 - t0));
+            return Ok(());
+        }
+        SpanVerdict::Missed(mono_u, failure) => Some((mono_u, failure)),
+        SpanVerdict::Refused => None,
+    };
     if !splittable {
-        let failure = failure.expect("failed fit has no ladder diagnostic");
+        let (mono_u, failure) =
+            missed.expect("a span at its floor ranks the rungs its ladder refuses");
         if failure.error.position <= fit_tol.pos_mm
             && failure.error.velocity <= velocity_budget
             && (at_resolution_floor || t1 - t0 <= floors.high_degree)
