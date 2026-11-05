@@ -315,6 +315,46 @@ fn ac_fres1_near_arc_clothoid_offset_survives_the_spiral_offset() {
     }
 }
 
+/// A near-straight clothoid lies on a spiral far larger than itself: its two
+/// Fresnel arguments, or its two endpoint tails, differ by a sliver of their
+/// own size, and their difference kept only `ε/Δx` (or `ε/turn`) of relative
+/// accuracy. Issue #724's 64 mm segment fell 9.75e-10 mm short; the 100 mm
+/// ones here lost micrometres of reach and every digit of their sagitta.
+/// References are 50-digit quadratures of `(∫cos φ, ∫sin φ)`.
+#[test]
+fn ac_fres1_near_straight_clothoid_offset_keeps_full_precision() {
+    let cases = [
+        (
+            -1.8941993545693383e-6,
+            -5.590939974115212e-13,
+            63.782676302900505,
+            (63.78267614772811, -0.003853043301758622),
+        ),
+        (1e-12, 1e-24, 100.0, (100.0, 5.000000000166666e-9)),
+        (1e-12, 1e-30, 100.0, (100.0, 5e-9)),
+        (
+            -3e-9,
+            2e-14,
+            50.0,
+            (49.999999999999815, -3.749583333333326e-6),
+        ),
+        (
+            2e-5,
+            1e-15,
+            50.0,
+            (49.999991666667064, 0.024999997937500067),
+        ),
+    ];
+    for (kappa_0, sigma, s, (rx, ry)) in cases {
+        let (cx, cy) = clothoid_offset(kappa_0, sigma, s);
+        assert!(
+            (cx - rx).abs() <= 4.0 * f64::EPSILON * rx
+                && (cy - ry).abs() <= 8.0 * f64::EPSILON * ry.abs(),
+            "offset mismatch k0={kappa_0} sigma={sigma} s={s}: ({cx:e},{cy:e}) vs ({rx:e},{ry:e})"
+        );
+    }
+}
+
 /// The offset is a smooth function of `σ`, so a curvature rate that is pure
 /// float residue must land on the circular arc it is a residue of.
 #[test]

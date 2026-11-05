@@ -1703,12 +1703,15 @@ fn reset_position_drops_the_stale_stream_and_re_emits_a_step_clock_reset() {
         .unwrap();
     assert!(!h.endpoint.backlog.is_empty());
 
-    h.endpoint.reset_position(&[5.0]).unwrap();
+    let reseeded_steps: i32 = 5;
+    h.endpoint
+        .reset_position(&[f64::from(reseeded_steps)])
+        .unwrap();
     assert!(h.endpoint.backlog.is_empty());
     assert!(h.endpoint.in_flight.is_empty());
     assert_eq!(
         h.seeds.lock_ok().as_slice(),
-        &[(OID, 5)],
+        &[(OID, i64::from(reseeded_steps))],
         "the mcu step counter must adopt the same origin as the shim"
     );
     assert_eq!(
@@ -1719,7 +1722,14 @@ fn reset_position_drops_the_stale_stream_and_re_emits_a_step_clock_reset() {
 
     h.sent.lock_ok().clear();
     h.endpoint
-        .send_frames(MCU_ID, &[axis_frame(ramp(82_000, 8))])
+        .send_frames(
+            MCU_ID,
+            &[axis_frame(ramp_from(
+                82_000,
+                8,
+                f64::from(reseeded_steps) * MICROSTEP,
+            ))],
+        )
         .and_then(|()| h.endpoint.tick())
         .unwrap();
     assert!(
