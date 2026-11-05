@@ -76,19 +76,23 @@ pub fn rest_room_reach_mm(speed: f64) -> f64 {
 
 /// The longest ramp a ratio step crossed at `speed`, `room_mm` along the
 /// path from a rest of the leaders, gets: the half of it on the rest's side
-/// laid over the step's share of the room.
+/// laid over the step's share of the room, and never over
+/// [`RATIO_RAMP_MAX_TIME_S`].
+#[must_use]
+pub fn longest_ramp_time(speed: f64, room_mm: f64) -> f64 {
+    assert!(
+        room_mm >= 0.0,
+        "a ratio step lies {room_mm} mm from the leaders' nearest rest"
+    );
+    RATIO_RAMP_MAX_TIME_S.min(rest_room_ramp_time(speed, room_mm))
+}
+
 fn rest_room_ramp_time(speed: f64, room_mm: f64) -> f64 {
     if speed > 0.0 {
         2.0 * REST_ROOM_RAMP_SHARE * room_mm / speed
     } else {
         f64::INFINITY
     }
-}
-
-/// The fastest leaders crossing a ratio step at `speed` under an
-/// acceleration of up to `accel` move at the edges of a ramp of `tau`.
-fn crossing_speed(speed: f64, accel: f64, tau: f64) -> f64 {
-    speed + 0.5 * accel * tau
 }
 
 /// What a follower's ratio ramp is held to: the advance's slope, the
@@ -112,6 +116,20 @@ pub struct RatioStep {
     pub speed_mm_s: f64,
     pub accel_mm_s2: f64,
     pub jerk_mm_s3: f64,
+}
+
+/// A ratio step as the planner lets the leaders cross it: `step` at their
+/// shaped speed there, `rest_room_mm` along the path from their nearest
+/// rest, their shaped speed at most `edge_speed_mm_s` half the
+/// [`longest_ramp_time`] either side of it, and their own advanced flow
+/// there at most `own_flow_mm_s`, which the planner can bound tighter than
+/// the step's speed and acceleration alone do.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StepCrossing {
+    pub step: RatioStep,
+    pub rest_room_mm: f64,
+    pub edge_speed_mm_s: f64,
+    pub own_flow_mm_s: f64,
 }
 
 /// `max_u (S(u) + 6p·u(1 − u))` with `S(u) = 3u² − 2u³`.
@@ -177,6 +195,39 @@ impl RatioRampRule {
         step.ratio_step * rate / tau * acceleration_gain(ramp_ratio(k, v, rate, tau))
     }
 
+    /// Whether the leaders crossing a ratio step as `crossing` lays out keep
+    /// the follower within its limits over the longest ramp the step's rest
+    /// room leaves it. The leaders' own flow, and the velocity the ramp adds
+    /// to it, are read at the step: the overshoot `k·r̃′·v²` peaks inside
+    /// the ramp, where the smoothed ratio climbs fastest. Without a follower
+    /// kernel the acceleration the ramp adds is read at the ramp's edges,
+    /// where the smoothed ratio's curvature steps and the advance turns it
+    /// into `k·r̃″·v³`; a follower kernel spreads that step over its own
+    /// width, so with one it is read at the step too.
+    #[must_use]
+    pub fn crossing_fits(&self, crossing: &StepCrossing) -> bool {
+        let step = &crossing.step;
+        assert!(
+            crossing.edge_speed_mm_s >= step.speed_mm_s,
+            "the leaders cross a ratio step at {} mm/s and its ramp's edges at {} mm/s",
+            step.speed_mm_s,
+            crossing.edge_speed_mm_s
+        );
+        let tau = longest_ramp_time(step.speed_mm_s, crossing.rest_room_mm);
+        let accel_read_at = if self.kernel_jerk_per_accel_hz.is_infinite() {
+            RatioStep {
+                speed_mm_s: crossing.edge_speed_mm_s,
+                ..*step
+            }
+        } else {
+            *step
+        };
+        let (own_velocity, own_accel) = self.own_demand(step);
+        own_velocity.min(crossing.own_flow_mm_s) + self.ramp_velocity(tau, step)
+            <= self.max_velocity_mm_s
+            && own_accel + self.ramp_accel(tau, &accel_read_at) <= self.max_accel_mm_s2
+    }
+
     /// How much a ramp across `step` may add to the follower's velocity and
     /// acceleration: what the leaders' own flow leaves of each limit, and
     /// never under [`RAMP_HEADROOM_FLOOR`] of it.
@@ -233,82 +284,32 @@ impl RatioRampRule {
         long
     }
 
-    /// The largest leader speed at which a ratio step of `ratio_step`
-    /// whose larger side extrudes `peak_ratio` per path millimetre, crossed
-    /// under an acceleration of up to `accel` and a jerk of up to `jerk`
-    /// `rest_room_mm` along the path from the leaders' nearest rest, fits
-    /// the limits within the longest ramp the room leaves it; zero where
-    /// even a crossing at rest does not. The leaders' own flow, and the
-    /// velocity the ramp adds to it, are read at the step: the overshoot
-    /// `k·r̃′·v²` peaks inside the ramp, where the smoothed ratio climbs
-    /// fastest. Without a follower kernel the acceleration the ramp adds is
-    /// read at the ramp's edges, where the smoothed ratio's curvature steps
-    /// and the advance turns it into `k·r̃″·v³`: up to `accel` times half
-    /// the ramp faster than the step, and no faster than `fastest_mm_s`,
-    /// the fastest the leaders move anywhere near it. A follower kernel
-    /// spreads that step over its own width.
+    /// The largest planned speed up to `fastest_mm_s` at which the leaders
+    /// cross a ratio step, as `crossing_at` lays the crossing out at it,
+    /// within the follower's limits ([`Self::crossing_fits`]): infinite
+    /// where even `fastest_mm_s` does, zero where even a crossing at rest
+    /// does not. Every demand grows with the speed, so bisection finds it.
     #[must_use]
     pub fn step_speed_cap(
         &self,
-        ratio_step: f64,
-        peak_ratio: f64,
-        accel: f64,
-        jerk: f64,
-        rest_room_mm: f64,
         fastest_mm_s: f64,
+        crossing_at: impl Fn(f64) -> StepCrossing,
     ) -> f64 {
         assert!(
-            rest_room_mm >= 0.0,
-            "a ratio step lies {rest_room_mm} mm from the leaders' nearest rest"
+            fastest_mm_s.is_finite() && fastest_mm_s >= 0.0,
+            "the leaders cross a ratio step at up to {fastest_mm_s} mm/s"
         );
-        assert!(
-            fastest_mm_s >= 0.0,
-            "the leaders move at up to {fastest_mm_s} mm/s near a ratio step"
-        );
-        if ratio_step <= 0.0 {
+        let fits = |speed: f64| self.crossing_fits(&crossing_at(speed));
+        if fits(fastest_mm_s) {
             return f64::INFINITY;
         }
-        let step_at = |speed_mm_s: f64| RatioStep {
-            ratio_step,
-            peak_ratio,
-            speed_mm_s,
-            accel_mm_s2: accel,
-            jerk_mm_s3: jerk,
-        };
-        let fits_at = |speed_mm_s: f64| {
-            let tau = RATIO_RAMP_MAX_TIME_S.min(rest_room_ramp_time(speed_mm_s, rest_room_mm));
-            let crossing = if self.kernel_jerk_per_accel_hz.is_infinite() {
-                crossing_speed(speed_mm_s, accel, tau).min(speed_mm_s.max(fastest_mm_s))
-            } else {
-                speed_mm_s
-            };
-            let (own_velocity, own_accel) = self.own_demand(&step_at(speed_mm_s));
-            own_velocity + self.ramp_velocity(tau, &step_at(speed_mm_s)) <= self.max_velocity_mm_s
-                && own_accel + self.ramp_accel(tau, &step_at(crossing)) <= self.max_accel_mm_s2
-        };
-        if !fits_at(0.0) {
+        if !fits(0.0) {
             return 0.0;
         }
-        let (velocity, accel_demand) = self.demand(
-            RATIO_RAMP_MAX_TIME_S,
-            &RatioStep {
-                ratio_step,
-                peak_ratio,
-                speed_mm_s: 1.0,
-                accel_mm_s2: 0.0,
-                jerk_mm_s3: 0.0,
-            },
-        );
-        let (mut slow, mut fast) = (
-            0.0,
-            (self.max_velocity_mm_s / velocity).min(self.max_accel_mm_s2 / accel_demand),
-        );
-        if fits_at(fast) {
-            return fast;
-        }
+        let (mut slow, mut fast) = (0.0, fastest_mm_s);
         for _ in 0..BISECTIONS {
             let mid = 0.5 * (slow + fast);
-            if fits_at(mid) {
+            if fits(mid) {
                 slow = mid;
             } else {
                 fast = mid;

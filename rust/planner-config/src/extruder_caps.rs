@@ -57,19 +57,15 @@ pub fn extruder_caps(
         };
         let mut shaped = Vec::new();
         let mut unshaped_leaders = [false; SPATIAL_AXES];
-        let mut leader_spill = LeaderSpill::UNSHAPED;
         for &leader in leaders.iter().filter(|&&leader| leader < SPATIAL_AXES) {
-            let Some(kernel) = chains.chains[leader].kernel() else {
-                unshaped_leaders[leader] = true;
-                continue;
-            };
-            shaped.push((leader, kernel));
-            let (mass, moment_s) = kernel.absolute_moments();
-            leader_spill = LeaderSpill {
-                mass: leader_spill.mass.max(mass),
-                moment_s: leader_spill.moment_s.max(moment_s),
-            };
+            match chains.chains[leader].kernel() {
+                Some(kernel) => shaped.push((leader, kernel)),
+                None => unshaped_leaders[leader] = true,
+            }
         }
+        let leader_kernels: Vec<&PiecewisePolynomialKernel> =
+            shaped.iter().map(|(_, kernel)| *kernel).collect();
+        let leader_spill = LeaderSpill::of_kernels(&leader_kernels);
         let (leaders_back, leaders_forward) = chains.leaders_support(*axis);
         caps.push(ExtruderCaps {
             axis_index: *axis,

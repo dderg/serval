@@ -634,8 +634,8 @@ fn seed_seam_velocities(
             let step_ceiling = extruder_caps::ratio_step_ceiling(
                 &moves[k - 1],
                 &moves[k],
+                (&budgets[k - 1], &budgets[k]),
                 up.accel.max(dn.accel),
-                &budgets[k],
             );
             if step_ceiling < v[k] {
                 report.ratio_step_bound += 1;
@@ -1187,6 +1187,8 @@ fn validate_segment<P: CurvatureProfile>(
     Ok(())
 }
 
+#[cfg(test)]
+mod plan_time_monotone_tests;
 #[cfg(test)]
 mod replan_tests;
 #[cfg(test)]

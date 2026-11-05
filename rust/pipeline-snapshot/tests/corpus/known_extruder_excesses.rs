@@ -97,25 +97,6 @@ pub const KNOWN: &[KnownExcesses] = &[
         count: 37,
         worst: 138394.6,
     },
-    // TODO(floor-guard): e past V_e by ε around the retract's rest.
-    KnownExcesses {
-        case: "corner_flow retract 50/tools/bench/configs/profiles/p4_high_accel_kernel.cfg",
-        class: ExcessClass::RestTransitionVelocity,
-        count: 12,
-        worst: 50.0219,
-    },
-    KnownExcesses {
-        case: "corner_flow retract 150/tools/bench/configs/profiles/p4_high_accel_kernel.cfg",
-        class: ExcessClass::RestTransitionVelocity,
-        count: 12,
-        worst: 50.0219,
-    },
-    KnownExcesses {
-        case: "corner_flow retract 300/tools/bench/configs/profiles/p4_high_accel_kernel.cfg",
-        class: ExcessClass::RestTransitionVelocity,
-        count: 10,
-        worst: 50.0219,
-    },
     // TODO(floor-guard): the print-start prime steps e velocity.
     KnownExcesses {
         case: "voron_dense_top_layers/rust/motion-core/tests/configs/neptune_sim_print.cfg",

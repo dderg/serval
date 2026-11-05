@@ -1,4 +1,6 @@
 import json
+import subprocess
+from pathlib import Path
 
 import fuzz_triage as ft
 
@@ -209,3 +211,148 @@ def test_a_file_seed_repro_names_the_regressions_file_step():
     [failure] = ft.parse_log(LOG)
     assert f"add `cc {SEED}`" in ft.seed_instructions(failure)
     assert "PROPTEST_RNG_SEED" not in ft.repro_command(failure)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+PHASE_SEED = "35d4fdc9218232c1f9e07ab568175aad8fe9fec6ac03776c9d623297cdd0cbdc"
+PROJECTION_SEED = (
+    "1e12a3900bfe7bd0dbcf5de533c5f9686bf1407da77bf08797d67f4eb9eb4324"
+)
+
+LIB_LOG = f"""\
+        FAIL [   0.9s] ( 2/2) motion-pipeline phase_ripple_fuzz::nonlinear_advance_does_not_import_next_phase_acceleration
+  stdout ───
+
+    running 1 test
+    test phase_ripple_fuzz::nonlinear_advance_does_not_import_next_phase_acceleration ... FAILED
+  stderr ───
+    thread 'phase_ripple_fuzz::nonlinear_advance_does_not_import_next_phase_acceleration' panicked at motion-pipeline/src/phase_ripple_fuzz.rs:207:1:
+    Test failed: cruise acceleration ripple: bound=2.741540974579668e-8, roundoff=2.468422141789857e-8, signal=CruiseRamp {{ start: 0.0 }}.
+    minimal failing input: signal = CruiseRamp {{ start: 0.0 }}
+    	successes: 3
+    cc {PHASE_SEED}
+        FAIL [   1.1s] ( 1/2) motion-pipeline follower_projection::projection_fuzz::an_advance_integrates_to_zero_across_every_rest
+  stderr ───
+    thread 'follower_projection::projection_fuzz::an_advance_integrates_to_zero_across_every_rest' panicked at motion-pipeline/src/follower_projection/projection_fuzz.rs:524:33:
+    one-shot projection failed: SliverVelocityCarry {{ axis: 3, seam: 0.00042632395149012675 }}
+    cc {PROJECTION_SEED}
+"""
+
+
+def lib_failures():
+    return {f.test.rsplit("::", 1)[-1]: f for f in ft.parse_log(LIB_LOG)}
+
+
+def test_library_test_ids_split_into_crate_and_module_path():
+    phase = lib_failures()[
+        "nonlinear_advance_does_not_import_next_phase_acceleration"
+    ]
+    assert phase.in_library and phase.package == "motion-pipeline"
+    assert phase.module_path == ["phase_ripple_fuzz"]
+    assert phase.seed == f"cc:{PHASE_SEED}"
+    assert phase.location == "motion-pipeline/src/phase_ripple_fuzz.rs:207:1"
+    projection = lib_failures()[
+        "an_advance_integrates_to_zero_across_every_rest"
+    ]
+    assert projection.module_path == ["follower_projection", "projection_fuzz"]
+    assert projection.location.endswith("projection_fuzz.rs:524:33")
+
+
+def test_a_library_repro_runs_lib_tests_not_a_test_target():
+    phase = lib_failures()[
+        "nonlinear_advance_does_not_import_next_phase_acceleration"
+    ]
+    command = ft.repro_command(phase)
+    assert "-p motion-pipeline --lib" in command
+    assert "--test" not in command
+    assert (
+        "test(=phase_ripple_fuzz::nonlinear_advance_does_not_import_next_phase_acceleration)"
+        in command
+    )
+
+
+def test_a_library_failure_is_placed_in_the_regressions_file_its_module_declares():
+    failures = lib_failures()
+    phase = failures[
+        "nonlinear_advance_does_not_import_next_phase_acceleration"
+    ]
+    projection = failures["an_advance_integrates_to_zero_across_every_rest"]
+    crate = ROOT / "rust" / "motion-pipeline"
+    assert (
+        ft.regression_file(ROOT, phase)
+        == crate / "proptest-regressions/phase_ripple_fuzz.txt"
+    )
+    assert (
+        ft.regression_file(ROOT, projection)
+        == crate / "proptest-regressions/projection_fuzz.txt"
+    )
+
+
+def test_a_module_that_does_not_exist_cannot_be_placed():
+    ghost = ft.Failure(
+        "motion-pipeline", "no_such_mod::t", f"cc:{PHASE_SEED}", "x:1:1", "m"
+    )
+    assert ft.regression_file(ROOT, ghost) is None
+
+
+class ReplayWorld:
+    def __init__(self, monkeypatch, tmp_path, returncode):
+        crate = tmp_path / "rust" / "motion-pipeline"
+        (crate / "src").mkdir(parents=True)
+        (crate / "src" / "phase_ripple_fuzz.rs").write_text(
+            'x("proptest-regressions/phase_ripple_fuzz.txt")'
+        )
+        self.crate = crate
+        self.runs = []
+        monkeypatch.setattr(
+            ft, "scratch_main", lambda rev="origin/main": tmp_path
+        )
+
+        def run(cmd, **kwargs):
+            self.runs.append((cmd, kwargs["env"], kwargs["cwd"]))
+            return subprocess.CompletedProcess(cmd, returncode)
+
+        monkeypatch.setattr(ft.subprocess, "run", run)
+
+
+def test_a_cc_seed_replay_appends_to_the_crate_regressions_file_and_runs_lib(
+    monkeypatch, tmp_path
+):
+    world = ReplayWorld(monkeypatch, tmp_path, returncode=101)
+    phase = lib_failures()[
+        "nonlinear_advance_does_not_import_next_phase_acceleration"
+    ]
+    assert ft.fails_on_main(phase) is True
+    saved = world.crate / "proptest-regressions/phase_ripple_fuzz.txt"
+    assert f"cc {PHASE_SEED}" in saved.read_text()
+    [(cmd, env, cwd)] = world.runs
+    assert cmd[cmd.index("-p") + 1] == "motion-pipeline" and "--lib" in cmd
+    assert "--test" not in cmd
+    assert env["PROPTEST_CASES"] == "1" and "PROPTEST_RNG_SEED" not in env
+    assert cwd == tmp_path / "rust"
+
+
+def test_an_rng_seed_replay_sets_the_env_seed_and_runs_lib(
+    monkeypatch, tmp_path
+):
+    world = ReplayWorld(monkeypatch, tmp_path, returncode=0)
+    failure = ft.Failure(
+        "motion-pipeline",
+        "phase_ripple_fuzz::t",
+        "rng:1234567890123",
+        "motion-pipeline/src/phase_ripple_fuzz.rs:9:1",
+        "m",
+    )
+    assert ft.fails_on_main(failure) is False
+    [(cmd, env, _)] = world.runs
+    assert "--lib" in cmd and env["PROPTEST_RNG_SEED"] == "1234567890123"
+    assert not (world.crate / "proptest-regressions").exists()
+
+
+def test_a_library_failure_is_triaged_instead_of_stopping_the_landing(
+    monkeypatch,
+):
+    world = FakeWorld(monkeypatch, ["rust-fuzz (1/3)"], LIB_LOG, on_main=True)
+    monkeypatch.setattr(ft, "report_pre_existing", lambda *a: None)
+    assert ft.triage("b", "77") == ft.RERUN_EXIT
+    assert world.ran("run", "rerun", "77", "--failed")
