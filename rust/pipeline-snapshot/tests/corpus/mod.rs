@@ -17,6 +17,9 @@ use planner_config::from_doc::{planner_config_from_text, read_motion_settings};
 
 pub mod extruder;
 pub mod known_extruder_excesses;
+#[cfg(feature = "fit-audit")]
+pub mod known_fit_violations;
+pub mod ratchet;
 
 pub const SIM_GCODES: [&str; 4] = [
     "voron_first_layers",
@@ -191,24 +194,9 @@ pub fn print_cases(print: &str, configs: &[&str]) -> Vec<(String, String, PathBu
     let gcode = sim_print(print);
     configs
         .iter()
-        .map(|config| (format!("{print}/{config}"), gcode.clone(), repo().join(config)))
-        .collect()
-}
-
-/// Source lines `lines` (1-based, as the planner counts them) of `print`
-/// on each of `configs`, each case named `<print>:<first>-<last>/<config>`
-/// and planned by [`print_slice`].
-pub fn print_slice_cases(
-    print: &str,
-    lines: RangeInclusive<usize>,
-    configs: &[&str],
-) -> Vec<(String, String, PathBuf)> {
-    let gcode = print_slice(&sim_print(print), lines.clone());
-    configs
-        .iter()
         .map(|config| {
             (
-                format!("{print}:{}-{}/{config}", lines.start(), lines.end()),
+                format!("{print}/{config}"),
                 gcode.clone(),
                 repo().join(config),
             )
@@ -216,22 +204,126 @@ pub fn print_slice_cases(
         .collect()
 }
 
-/// Source lines `lines` (1-based) of `print`, started from rest where the
-/// print stands before them: the G-code state the print set up and its
-/// velocity limits replayed, the toolhead placed at the print's position
-/// and its feedrate kept. Only the state the sim prints use is tracked;
-/// any other command before the slice is refused.
-pub fn print_slice(print: &str, lines: RangeInclusive<usize>) -> String {
+/// A stretch of a sim print planned on its own: its source lines (1-based,
+/// as the planner counts them), started from rest after the toolhead idles
+/// `idle_s`, so the stretch can run as late on the clock as in the print.
+pub struct PrintSlice {
+    pub print: &'static str,
+    pub lines: RangeInclusive<usize>,
+    pub idle_s: f64,
+}
+
+/// The first layer's opening perimeters, through the near-reversal at
+/// (120.5, 109.8) where the P1 bowden profile dips flow by 92%.
+pub const FIRST_LAYERS_OPENING: PrintSlice = PrintSlice {
+    print: "voron_first_layers",
+    lines: 150..=260,
+    idle_s: 0.0,
+};
+
+/// The second layer's near-reversal at (114.0, 98.8), where the P3 Voron's
+/// ratio ramp spikes e and the P1 bowden kernel chain's crawl valley drives
+/// e past `[axis e] max_velocity`.
+pub const FIRST_LAYERS_REVERSAL: PrintSlice = PrintSlice {
+    print: "voron_first_layers",
+    lines: 850..=950,
+    idle_s: 0.0,
+};
+
+/// An extrude-to-travel switch at (98.9, 108.7) on the ninth layer, where
+/// the P1 bowden ratio ramp leaves `[axis e]`'s limits.
+pub const FIRST_LAYERS_LATE_SWITCH: PrintSlice = PrintSlice {
+    print: "voron_first_layers",
+    lines: 3550..=3700,
+    idle_s: 0.0,
+};
+
+/// The extrude-to-travel switch at (183.1, 137.1) on the Trident print's
+/// first layer, where the P1 bowden ratio ramp leaves `[axis e]`'s limits.
+pub const FOLLOWER_CACHE_FIRST_SWITCH: PrintSlice = PrintSlice {
+    print: "trident_follower_cache_regression",
+    lines: 200..=300,
+    idle_s: 0.0,
+};
+
+/// The same switch run the other way on the Trident print's second layer.
+pub const FOLLOWER_CACHE_SECOND_SWITCH: PrintSlice = PrintSlice {
+    print: "trident_follower_cache_regression",
+    lines: 820..=900,
+    idle_s: 0.0,
+};
+
+/// Most of two top layers of the dense print.
+pub const DENSE_TOP_LAYERS: PrintSlice = PrintSlice {
+    print: "voron_dense_top_layers",
+    lines: 2200..=2400,
+    idle_s: 0.0,
+};
+
+/// The stretches of the sim prints every machine profile plans.
+pub const PROFILE_SLICES: [PrintSlice; 6] = [
+    FIRST_LAYERS_OPENING,
+    FIRST_LAYERS_REVERSAL,
+    FIRST_LAYERS_LATE_SWITCH,
+    FOLLOWER_CACHE_FIRST_SWITCH,
+    FOLLOWER_CACHE_SECOND_SWITCH,
+    DENSE_TOP_LAYERS,
+];
+
+/// The first layers from their third layer on, run as late as the Trident
+/// kernel chain reaches them (74 s): its source fit accepts floor pieces
+/// across breaks in their edge slivers there, and not on the same lines
+/// run from t = 0.
+pub const FIRST_LAYERS_FROM_74_S: PrintSlice = PrintSlice {
+    print: "voron_first_layers",
+    lines: 1400..=4499,
+    idle_s: 74.0,
+};
+
+/// `slice` on each of `configs`, each case named
+/// `<print>:<first>-<last>[@<idle>s]/<config>` and planned by
+/// [`print_slice`].
+pub fn print_slice_cases(slice: &PrintSlice, configs: &[&str]) -> Vec<(String, String, PathBuf)> {
+    let gcode = print_slice(&sim_print(slice.print), slice);
+    let idle = if slice.idle_s > 0.0 {
+        format!("@{}s", slice.idle_s)
+    } else {
+        String::new()
+    };
+    configs
+        .iter()
+        .map(|config| {
+            (
+                format!(
+                    "{}:{}-{}{idle}/{config}",
+                    slice.print,
+                    slice.lines.start(),
+                    slice.lines.end()
+                ),
+                gcode.clone(),
+                repo().join(config),
+            )
+        })
+        .collect()
+}
+
+/// The lines of `slice` from `print`, started from rest where the print
+/// stands before them: the G-code state the print set up and its velocity
+/// limits replayed, the toolhead placed at the print's position, idled for
+/// the slice's `idle_s` and its feedrate kept. Only the state the sim
+/// prints use is tracked; any other command before the slice is refused.
+pub fn print_slice(print: &str, slice: &PrintSlice) -> String {
     let all: Vec<&str> = print.lines().collect();
+    let (first, last) = (*slice.lines.start(), *slice.lines.end());
     assert!(
-        *lines.start() >= 1 && lines.start() <= lines.end() && *lines.end() <= all.len(),
-        "lines {lines:?} of a {}-line print",
+        first >= 1 && first <= last && last <= all.len(),
+        "lines {first}-{last} of a {}-line print",
         all.len()
     );
     let mut position: [Option<f64>; 3] = [None; 3];
     let mut feedrate: Option<f64> = None;
     let mut prelude = vec!["G21".to_string(), "G90".to_string(), "M83".to_string()];
-    for (index, raw) in all[..lines.start() - 1].iter().enumerate() {
+    for (index, raw) in all[..first - 1].iter().enumerate() {
         let line = raw.split(';').next().expect("split yields a head").trim();
         let mut words = line.split_whitespace();
         let Some(command) = words.next() else {
@@ -242,9 +334,9 @@ pub fn print_slice(print: &str, lines: RangeInclusive<usize>) -> String {
                 for word in words {
                     let (letter, value) = word.split_at(1);
                     let parse = || {
-                        value.parse::<f64>().unwrap_or_else(|e| {
-                            panic!("line {}: {word}: {e}", index + 1)
-                        })
+                        value
+                            .parse::<f64>()
+                            .unwrap_or_else(|e| panic!("line {}: {word}: {e}", index + 1))
                     };
                     match letter {
                         "X" => position[0] = Some(parse()),
@@ -267,16 +359,19 @@ pub fn print_slice(print: &str, lines: RangeInclusive<usize>) -> String {
         }
     }
     let [Some(x), Some(y), Some(z)] = position else {
-        panic!("the print states no position before line {}", lines.start());
+        panic!("the print states no position before line {first}");
     };
     prelude.push(format!("SET_KINEMATIC_POSITION X={x} Y={y} Z={z}"));
+    if slice.idle_s > 0.0 {
+        prelude.push(format!("G4 P{}", slice.idle_s * 1000.0));
+    }
     if let Some(feedrate) = feedrate {
         prelude.push(format!("G1 F{feedrate}"));
     }
     prelude
         .iter()
         .map(String::as_str)
-        .chain(all[lines.start() - 1..*lines.end()].iter().copied())
+        .chain(all[first - 1..last].iter().copied())
         .flat_map(|line| [line, "\n"])
         .collect()
 }
@@ -324,17 +419,23 @@ pub fn profile_cases() -> Vec<(String, String, PathBuf)> {
         .collect()
 }
 
+/// Every case of [`corpus`], unfiltered.
+pub fn all_cases() -> Vec<(String, String, PathBuf)> {
+    let mut cases = snapshot_cases();
+    cases.extend(sim_cases());
+    cases.extend(profile_cases());
+    cases.extend(corner_flow_cases(&SIM_CONFIGS));
+    cases.extend(corner_flow_cases(&PROFILE_CONFIGS));
+    cases
+}
+
 pub fn corpus() -> Vec<Case> {
     let filter = std::env::var("CORPUS_FILTER").ok();
     let configs: Option<Vec<String>> = std::env::var("CORPUS_CONFIGS")
         .ok()
         .map(|list| list.split(',').map(str::to_string).collect());
-    snapshot_cases()
+    all_cases()
         .into_iter()
-        .chain(sim_cases())
-        .chain(profile_cases())
-        .chain(corner_flow_cases(&SIM_CONFIGS))
-        .chain(corner_flow_cases(&PROFILE_CONFIGS))
         .filter(|(name, _, config)| {
             filter.as_deref().is_none_or(|f| name.contains(f))
                 && configs.as_ref().is_none_or(|wanted| {
