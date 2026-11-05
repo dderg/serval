@@ -445,6 +445,7 @@ pub geometry::ratio_ramp::RatioStep::peak_ratio: f64
 pub geometry::ratio_ramp::RatioStep::ratio_step: f64
 pub geometry::ratio_ramp::RatioStep::speed_mm_s: f64
 pub struct geometry::ratio_ramp::StepCrossing
+pub geometry::ratio_ramp::StepCrossing::edge_speed_mm_s: f64
 pub geometry::ratio_ramp::StepCrossing::own_flow_mm_s: f64
 pub geometry::ratio_ramp::StepCrossing::rest_room_mm: f64
 pub geometry::ratio_ramp::StepCrossing::step: geometry::ratio_ramp::RatioStep
@@ -452,6 +453,7 @@ pub const geometry::ratio_ramp::ADVANCE_VALLEY_SPEED_MM_S: f64
 pub const geometry::ratio_ramp::RATIO_RAMP_ENVELOPE_SLOPE: f64
 pub const geometry::ratio_ramp::RATIO_RAMP_MAX_TIME_S: f64
 pub const geometry::ratio_ramp::RATIO_RAMP_MIN_TIME_S: f64
+pub fn geometry::ratio_ramp::longest_ramp_time(f64, f64) -> f64
 pub fn geometry::ratio_ramp::rest_room_reach_mm(f64) -> f64
 pub mod geometry::segment
 pub struct geometry::segment::CubicSegment

@@ -168,7 +168,8 @@ fn without_an_advance_the_base_flow_sets_the_ramp() {
 }
 
 /// A ratio step the leaders cross at whatever speed the search tries, their
-/// own flow at most `own_flow_mm_s`.
+/// own flow at most `own_flow_mm_s`, unshaped: `accel` faster half the
+/// longest ramp either side of it.
 #[derive(Debug, Clone, Copy)]
 struct Seam {
     ratio_step: f64,
@@ -179,8 +180,8 @@ struct Seam {
 }
 
 impl Seam {
-    fn cap(self, rule: &RatioRampRule, fastest_mm_s: f64) -> f64 {
-        rule.step_speed_cap(fastest_mm_s, |speed_mm_s| StepCrossing {
+    fn crossing(self, speed_mm_s: f64) -> StepCrossing {
+        StepCrossing {
             step: RatioStep {
                 ratio_step: self.ratio_step,
                 peak_ratio: self.peak_ratio,
@@ -189,8 +190,42 @@ impl Seam {
                 jerk_mm_s3: 0.0,
             },
             rest_room_mm: self.rest_room_mm,
+            edge_speed_mm_s: self.edge_speed(speed_mm_s),
             own_flow_mm_s: self.own_flow_mm_s,
+        }
+    }
+
+    fn edge_speed(self, speed_mm_s: f64) -> f64 {
+        speed_mm_s + 0.5 * self.accel_mm_s2 * longest_ramp_time(speed_mm_s, self.rest_room_mm)
+    }
+
+    fn cap(self, rule: &RatioRampRule, fastest_mm_s: f64) -> f64 {
+        rule.step_speed_cap(fastest_mm_s, |speed_mm_s| self.crossing(speed_mm_s))
+    }
+
+    /// The cap were the leaders no faster at the ramp's edges than at the
+    /// step.
+    fn cap_read_at_the_step(self, rule: &RatioRampRule, fastest_mm_s: f64) -> f64 {
+        rule.step_speed_cap(fastest_mm_s, |speed_mm_s| StepCrossing {
+            edge_speed_mm_s: speed_mm_s,
+            ..self.crossing(speed_mm_s)
         })
+    }
+
+    /// What the step asks of the follower at `speed_mm_s` over a ramp of
+    /// `tau`: the own flow and the ramp's velocity at the step, the ramp's
+    /// acceleration at its edges.
+    fn demand(self, rule: &RatioRampRule, tau: f64, speed_mm_s: f64) -> (f64, f64) {
+        let crossing = self.crossing(speed_mm_s);
+        let at_edges = RatioStep {
+            speed_mm_s: crossing.edge_speed_mm_s,
+            ..crossing.step
+        };
+        let (own_velocity, own_accel) = rule.own_demand(&crossing.step);
+        (
+            own_velocity + rule.ramp_velocity(tau, &crossing.step),
+            own_accel + rule.ramp_accel(tau, &at_edges),
+        )
     }
 }
 
@@ -275,14 +310,8 @@ fn a_rest_beside_a_step_caps_its_speed_at_the_ramp_the_room_leaves() {
     );
     let ramp_time = rest_room_ramp_time(beside_rest, room_mm);
     assert!(ramp_time < RATIO_RAMP_MAX_TIME_S, "{ramp_time}");
-    let step = RatioStep {
-        ratio_step: ratio,
-        peak_ratio: ratio,
-        speed_mm_s: beside_rest,
-        accel_mm_s2: accel,
-        jerk_mm_s3: 0.0,
-    };
-    let (velocity, accel_demand) = rule.demand(ramp_time, &step);
+    let (velocity, accel_demand) =
+        seam(ratio, accel, room_mm).demand(&rule, ramp_time, beside_rest);
     assert!(velocity <= 50.0 + 1e-9 && accel_demand <= 20000.0 + 1e-9);
     assert!(
         (velocity - 50.0).abs() < 1e-6 || (accel_demand - 20000.0).abs() < 1e-6,
@@ -292,6 +321,56 @@ fn a_rest_beside_a_step_caps_its_speed_at_the_ramp_the_room_leaves() {
     assert_eq!(
         seam(ratio, accel, past_reach).cap(&rule, FASTEST_MM_S),
         free
+    );
+}
+
+#[test]
+fn a_step_is_held_where_its_ramp_edges_are_crossed_fastest() {
+    let braking = seam(0.0352, 493.0, f64::INFINITY);
+    let cap = braking.cap(&P1, FASTEST_MM_S);
+    let read_at_the_step = braking.cap_read_at_the_step(&P1, FASTEST_MM_S);
+    assert!(
+        cap < read_at_the_step,
+        "braking at 493 mm/s² into a bowden switch, its ramp's edges cap it at {cap} mm/s, \
+         the step alone at {read_at_the_step} mm/s"
+    );
+    let (velocity, accel_demand) = braking.demand(&P1, RATIO_RAMP_MAX_TIME_S, cap);
+    assert!(
+        velocity <= 45.0 + 1e-9 && (accel_demand - 2000.0).abs() < 1e-6,
+        "the step capped at {cap} mm/s asks {velocity} mm/s and {accel_demand} mm/s²"
+    );
+    let kernel_chain = RatioRampRule {
+        kernel_jerk_per_accel_hz: 200.0,
+        ..P1
+    };
+    assert_eq!(
+        braking.cap(&kernel_chain, FASTEST_MM_S),
+        read_at_the_step,
+        "a follower kernel spreads the ramp's edge, so the step is read where it is crossed"
+    );
+}
+
+#[test]
+fn the_velocity_a_ramp_adds_is_read_at_the_step_however_fast_its_edges() {
+    let rule = RatioRampRule {
+        advance_slope_s: 0.03,
+        max_velocity_mm_s: 50.0,
+        max_accel_mm_s2: 20000.0,
+        kernel_jerk_per_accel_hz: f64::INFINITY,
+    };
+    let travel_switch = seam(0.03526, 28513.0, f64::INFINITY);
+    let cap = travel_switch.cap(&rule, FASTEST_MM_S);
+    let (velocity, accel_demand) = travel_switch.demand(&rule, RATIO_RAMP_MAX_TIME_S, cap);
+    assert!(
+        (velocity - 50.0).abs() < 1e-6 && accel_demand < 0.5 * 20000.0,
+        "a travel switch capped at {cap} mm/s asks {velocity} mm/s and {accel_demand} mm/s² \
+         with its edges {} mm/s fast",
+        travel_switch.edge_speed(cap)
+    );
+    assert_eq!(
+        cap,
+        travel_switch.cap_read_at_the_step(&rule, FASTEST_MM_S),
+        "where the velocity holds the step, faster edges leave its cap"
     );
 }
 

@@ -78,6 +78,7 @@ pub struct KnownExcesses {
 }
 
 pub const KNOWN: &[KnownExcesses] = &[
+<<<<<<< HEAD
     // TODO(bowden-switch): slow corner nodes outside a seam's time reach narrow its window.
     KnownExcesses {
         case: "trident_follower_cache_regression/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
@@ -169,6 +170,8 @@ pub const KNOWN: &[KnownExcesses] = &[
         count: 9,
         worst: 5495.1,
     },
+=======
+>>>>>>> origin/main
     // TODO(bound-ext, floor-slivers): the ladder chases an unshaped onset's singular advance.
     KnownExcesses {
         case: "voron_dense_top_layers/rust/motion-core/tests/configs/neptune_sim_print.cfg",
