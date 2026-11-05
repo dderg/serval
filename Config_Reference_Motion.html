@@ -2576,9 +2576,11 @@ post_processors: extruder_pa
 #   as they do. An extrude-only move does not quite separate the moves on
 #   either side: the shaped path keeps moving for the shapers&#39; reach past a
 #   raw stop and before a raw start, and the extruder follows that motion at
-#   the ratio it reads there. The toolhead holds still for that reach
-#   wherever an extrude-only move meets motion, so a retract or prime never
-#   adds the path&#39;s demand to its own. On the [extruder] axis each one left
+#   the ratio it reads there. The toolhead holds still wherever an
+#   extrude-only move meets motion until the shaped path has settled within
+#   half of max_path_deviation of the rest point and the extruder has room
+#   for what is left of that motion on top of the retract or prime, never
+#   longer than the shapers&#39; reach. On the [extruder] axis each one left
 #   unset is inherited from max_extrude_only_velocity /
 #   max_extrude_only_accel (the same motor). An advance needs both, set or
 #   inherited.
