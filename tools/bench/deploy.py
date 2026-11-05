@@ -252,8 +252,7 @@ def cmd_flash_target(tree: Path) -> None:
     pi.firmware_restart()
     require_reported(TARGET_BOARD, pi.mcu_version(), build_id)
     pi.record_firmware(TARGET_BOARD, firmware_identity(tree, build_id, elf))
-    pi.enable_mco()
-    print(f"target flashed with firmware {build_id}, MCO1 on, printer ready")
+    print(f"target flashed with firmware {build_id}, printer ready")
 
 
 def cmd_reset_target() -> None:
@@ -264,8 +263,7 @@ def cmd_reset_target() -> None:
     print(output)
     wait_pi_serial()
     pi.restart_klipper()
-    pi.enable_mco()
-    print("target reset, MCO1 on, printer ready")
+    print("target reset, printer ready")
 
 
 def cmd_mco() -> None:
