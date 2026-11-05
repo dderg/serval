@@ -327,39 +327,56 @@ impl<'a> AxisLaw<'a> {
     }
 
     fn models(&self, window: &WindowReading) -> [TaylorModel; 3] {
+        self.models_unless(window, |_| false)
+            .expect("a reading refusing no acceleration reads every model")
+    }
+
+    /// [`Self::models`], or `None` once the acceleration's model is one
+    /// `refused` refuses: its position and velocity are then left unread.
+    fn models_unless(
+        &self,
+        window: &WindowReading,
+        refused: impl Fn(&TaylorModel) -> bool,
+    ) -> Option<[TaylorModel; 3]> {
         let Tangential { s, v, a } = &window.state;
         match self {
             AxisLaw::Warped { surface, path } => {
-                warped_models(surface, path.each_ref().map(|law| law.models(window)))
+                let models = warped_models(surface, path.each_ref().map(|law| law.models(window)));
+                (!refused(&models[2])).then_some(models)
             }
-            _ => self.flat_models(window, s, v, a),
+            _ => self.flat_models(window, (s, v, a), refused),
         }
     }
 
     fn flat_models(
         &self,
         window: &WindowReading,
-        s: &TaylorModel,
-        v: &TaylorModel,
-        a: &TaylorModel,
-    ) -> [TaylorModel; 3] {
-        match *self {
+        (s, v, a): (&TaylorModel, &TaylorModel, &TaylorModel),
+        refused: impl Fn(&TaylorModel) -> bool,
+    ) -> Option<[TaylorModel; 3]> {
+        let unless_refused =
+            |acceleration: TaylorModel| (!refused(&acceleration)).then_some(acceleration);
+        Some(match *self {
             AxisLaw::Warped { .. } => unreachable!("a warped law reads its path's flat laws"),
-            AxisLaw::Constant(position) => [
-                TaylorModel::constant(Ball::exact(position)),
-                TaylorModel::constant(Ball::exact(0.0)),
-                TaylorModel::constant(Ball::exact(0.0)),
-            ],
+            AxisLaw::Constant(position) => {
+                let acceleration = unless_refused(TaylorModel::constant(Ball::exact(0.0)))?;
+                [
+                    TaylorModel::constant(Ball::exact(position)),
+                    TaylorModel::constant(Ball::exact(0.0)),
+                    acceleration,
+                ]
+            }
             AxisLaw::Line {
                 start,
                 extent,
                 length,
             } => {
                 let heading = Ball::rounded(extent / length, 1);
+                let acceleration = unless_refused(a.scale(heading))?;
                 [
                     s.scale(heading).add_ball(Ball::exact(start)),
                     v.scale(heading),
-                    a.scale(heading),
+                    acceleration,
                 ]
             }
             AxisLaw::Arc(arc, axis) => {
@@ -370,21 +387,19 @@ impl<'a> AxisLaw<'a> {
                         .sin_cos()
                 });
                 let (u, w) = (arc.u[axis], arc.v[axis]);
-                let position = cosine
-                    .scale(Ball::rounded(arc.radius * u, 1))
-                    .add(&sine.scale(Ball::rounded(arc.radius * w, 1)))
-                    .add_ball(Ball::exact(arc.origin[axis]));
                 let heading = sine
                     .scale(Ball::exact(-sign * u))
                     .add(&cosine.scale(Ball::exact(sign * w)));
                 let turn = cosine
                     .scale(Ball::rounded(-u / arc.radius, 1))
                     .add(&sine.scale(Ball::rounded(-w / arc.radius, 1)));
-                [
-                    position,
-                    v.mul(&heading),
-                    a.mul(&heading).add(&window.speed_squared().mul(&turn)),
-                ]
+                let acceleration =
+                    unless_refused(a.mul(&heading).add(&window.speed_squared().mul(&turn)))?;
+                let position = cosine
+                    .scale(Ball::rounded(arc.radius * u, 1))
+                    .add(&sine.scale(Ball::rounded(arc.radius * w, 1)))
+                    .add_ball(Ball::exact(arc.origin[axis]));
+                [position, v.mul(&heading), acceleration]
             }
             AxisLaw::Clothoid(clothoid, axis) => {
                 let (sine, cosine) = window
@@ -402,10 +417,12 @@ impl<'a> AxisLaw<'a> {
                         .scale(Ball::exact(-u))
                         .add(&cosine.scale(Ball::exact(w))),
                 );
+                let acceleration =
+                    unless_refused(a.mul(&heading).add(&window.speed_squared().mul(&turn)))?;
                 [
                     clothoid_position(clothoid, axis, s, &window.spread_trig),
                     v.mul(&heading),
-                    a.mul(&heading).add(&window.speed_squared().mul(&turn)),
+                    acceleration,
                 ]
             }
             AxisLaw::Follower {
@@ -428,13 +445,15 @@ impl<'a> AxisLaw<'a> {
                     (ratio, demand.ratio_slope(length), offset)
                 };
                 let slope = Ball::rounded(slope, 2);
+                let acceleration =
+                    unless_refused(ratio.mul(a).add(&window.speed_squared().scale(slope)))?;
                 [
                     offset.add_ball(Ball::exact(start)),
                     ratio.mul(v),
-                    ratio.mul(a).add(&window.speed_squared().scale(slope)),
+                    acceleration,
                 ]
             }
-        }
+        })
     }
 
     /// The axis's jerk on the window, the tangential jerk `jerk` given:
@@ -723,12 +742,22 @@ pub(crate) struct AxisReading<'a> {
 
 impl AxisReading<'_> {
     fn models(&self, window: &WindowReading) -> [TaylorModel; 3] {
-        let [position, velocity, acceleration] = self.law.models(window);
-        [
+        self.models_unless(window, |_| false)
+            .expect("a reading refusing no acceleration reads every model")
+    }
+
+    /// [`AxisLaw::models_unless`] with the surface offset on the position.
+    fn models_unless(
+        &self,
+        window: &WindowReading,
+        refused: impl Fn(&TaylorModel) -> bool,
+    ) -> Option<[TaylorModel; 3]> {
+        let [position, velocity, acceleration] = self.law.models_unless(window, refused)?;
+        Some([
             position.add_ball(Ball::exact(self.offset)),
             velocity,
             acceleration,
-        ]
+        ])
     }
 }
 
@@ -788,14 +817,19 @@ pub(crate) fn analytic_axes_enclosure(
             taylor::enclose_axes(
                 (stretch[0], stretch[1]),
                 accuracy,
-                &|window: Window, axis: usize, shared: &mut Option<WindowReading>| {
+                &|window: Window,
+                  axis: usize,
+                  shared: &mut Option<WindowReading>,
+                  refused_acceleration: Option<f64>| {
                     let reading = shared.get_or_insert_with(|| WindowReading {
                         state: state(window),
                         trig: std::cell::OnceCell::new(),
                         spread_trig: std::cell::OnceCell::new(),
                         speed_squared: std::cell::OnceCell::new(),
                     });
-                    readings[axis].models(reading)
+                    readings[axis].models_unless(reading, |acceleration| {
+                        refused_acceleration.is_some_and(|accuracy| acceleration.rad() > accuracy)
+                    })
                 },
                 outs,
             );
