@@ -173,6 +173,53 @@ fn inverse_factorials() -> [Ball; TAYLOR_LEN + 1] {
 /// `γ` of a product's coefficient sums.
 const PRODUCT_ROUNDING: f64 = gamma(2 * TAYLOR_LEN);
 
+/// The kept coefficients of `left · right` and the magnitude of the terms
+/// past [`TAYLOR_LEN`], each coefficient summed in ascending power of
+/// `left`.
+fn ragged_product(left: &[f64], right: &[f64]) -> ([f64; TAYLOR_LEN], f64) {
+    let mut coefficients = [0.0; TAYLOR_LEN];
+    let mut truncated = 0.0;
+    for (i, &a) in left.iter().enumerate() {
+        let kept = right.len().min(TAYLOR_LEN - i);
+        for (slot, &b) in coefficients[i..i + kept].iter_mut().zip(&right[..kept]) {
+            *slot += a * b;
+        }
+        for &b in &right[kept..] {
+            truncated += (a * b).abs();
+        }
+    }
+    (coefficients, truncated)
+}
+
+/// [`ragged_product`] of the first `left_len` of `left` and all of `right`,
+/// whose coefficients past its length are zeros, over fixed bounds the
+/// compiler unrolls. Bit for bit the same when `left` is finite: each
+/// coefficient and the truncated sum add the same terms in the same order,
+/// with zero products between them, and a sum started at `+0.0` is never
+/// `-0.0`, so adding a zero leaves it as it is.
+#[inline]
+fn padded_product(
+    left: &[f64; TAYLOR_LEN],
+    left_len: usize,
+    right: &[f64; TAYLOR_LEN],
+) -> ([f64; TAYLOR_LEN], f64) {
+    let mut coefficients = [0.0; TAYLOR_LEN];
+    let mut truncated = 0.0;
+    for i in 0..TAYLOR_LEN {
+        if i == left_len {
+            break;
+        }
+        let a = left[i];
+        for j in 0..TAYLOR_LEN - i {
+            coefficients[i + j] += a * right[j];
+        }
+        for &b in &right[TAYLOR_LEN - i..] {
+            truncated += (a * b).abs();
+        }
+    }
+    (coefficients, truncated)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct TaylorModel {
     coefficients: [f64; TAYLOR_LEN],
@@ -341,20 +388,13 @@ impl TaylorModel {
             product.working_share = self.working_share.max(other.working_share);
             return product;
         }
-        let mut coefficients = [0.0; TAYLOR_LEN];
-        let mut truncated = 0.0;
-        let (left, right) = (self.coefficients(), other.coefficients());
-        for (i, &a) in left.iter().enumerate() {
-            let kept = right.len().min(TAYLOR_LEN - i);
-            for (slot, &b) in coefficients[i..i + kept].iter_mut().zip(&right[..kept]) {
-                *slot += a * b;
-            }
-            for &b in &right[kept..] {
-                truncated += (a * b).abs();
-            }
-        }
-        let len = (self.len + other.len).saturating_sub(1).min(TAYLOR_LEN);
         let (a_magnitude, b_magnitude) = (self.magnitude(), other.magnitude());
+        let (coefficients, truncated) = if a_magnitude.is_finite() {
+            padded_product(&self.coefficients, self.len, &other.coefficients)
+        } else {
+            ragged_product(self.coefficients(), other.coefficients())
+        };
+        let len = (self.len + other.len).saturating_sub(1).min(TAYLOR_LEN);
         Self {
             coefficients,
             len,
@@ -373,9 +413,16 @@ impl TaylorModel {
     /// The model with its trailing coefficients below [`TRIM_SHARE`] of its
     /// magnitude moved into the bound, where they cost every later product
     /// a term and move the bound by a share no fit tolerance resolves.
+    #[inline]
     fn trimmed(mut self) -> Self {
+        self.trim();
+        self
+    }
+
+    #[inline]
+    fn trim(&mut self) {
         if self.len <= 1 {
-            return self;
+            return;
         }
         let deviation: f64 = self.coefficients[1..self.len].iter().map(|c| c.abs()).sum();
         let negligible = TRIM_SHARE * (self.coefficients[0].abs() + deviation);
@@ -391,7 +438,6 @@ impl TaylorModel {
             self.coefficients[self.len] = 0.0;
         }
         self.rad = upper(self.rad + dropped);
-        self
     }
 
     /// `f(self)` for an `f` with `f(c₀ + d) = Σₖ seriesₖ·dᵏ + R` on the

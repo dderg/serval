@@ -104,3 +104,127 @@ fn a_polynomial_in_shifted_time_and_its_derivative_are_enclosed() {
         "slope",
     );
 }
+
+/// `TaylorModel::mul` before its product was unrolled over fixed bounds,
+/// kept as the bit-for-bit reference the unrolled product must match.
+fn reference_mul(a: &TaylorModel, b: &TaylorModel) -> TaylorModel {
+    if a.len == 1 || b.len == 1 {
+        return a.mul(b);
+    }
+    let mut coefficients = [0.0; super::TAYLOR_LEN];
+    let mut truncated = 0.0;
+    let (left, right) = (a.coefficients(), b.coefficients());
+    for (i, &x) in left.iter().enumerate() {
+        let kept = right.len().min(super::TAYLOR_LEN - i);
+        for (slot, &y) in coefficients[i..i + kept].iter_mut().zip(&right[..kept]) {
+            *slot += x * y;
+        }
+        for &y in &right[kept..] {
+            truncated += (x * y).abs();
+        }
+    }
+    let len = (a.len + b.len).saturating_sub(1).min(super::TAYLOR_LEN);
+    let (a_magnitude, b_magnitude) = (a.magnitude(), b.magnitude());
+    let mut out = TaylorModel {
+        coefficients,
+        len,
+        rad: super::upper(
+            a_magnitude * b.rad
+                + a.rad * b_magnitude
+                + a.rad * b.rad
+                + truncated
+                + super::PRODUCT_ROUNDING * a_magnitude * b_magnitude,
+        ),
+        working_share: a.working_share.max(b.working_share),
+    };
+    if out.len > 1 {
+        let deviation: f64 = out.coefficients[1..out.len].iter().map(|c| c.abs()).sum();
+        let negligible = super::TRIM_SHARE * (out.coefficients[0].abs() + deviation);
+        let working = out.working_share * deviation;
+        let mut dropped = 0.0;
+        while out.len > 1 {
+            let last = out.coefficients[out.len - 1].abs();
+            if last > negligible && dropped + last > working {
+                break;
+            }
+            out.len -= 1;
+            dropped += last;
+            out.coefficients[out.len] = 0.0;
+        }
+        out.rad = super::upper(out.rad + dropped);
+    }
+    out
+}
+
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        self.0 >> 11
+    }
+
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+
+    fn coefficient(&mut self) -> f64 {
+        match self.below(12) {
+            0 => 0.0,
+            1 => -0.0,
+            2 => f64::INFINITY,
+            3 => f64::NAN,
+            4 => 1e-300 * (self.below(1000) as f64 - 500.0),
+            _ => {
+                let mantissa = self.below(1 << 30) as f64 / (1u64 << 29) as f64 - 1.0;
+                mantissa * 10f64.powi(self.below(24) as i32 - 12)
+            }
+        }
+    }
+
+    fn model(&mut self) -> TaylorModel {
+        let len = 1 + self.below(super::TAYLOR_LEN as u64) as usize;
+        let coefficients: Vec<f64> = (0..len)
+            .map(|_| {
+                let c = self.coefficient();
+                if self.below(4) == 0 && c.is_finite() { c } else { c.clamp(-1e6, 1e6) }
+            })
+            .collect();
+        let rad = match self.below(4) {
+            0 => 0.0,
+            1 => f64::INFINITY,
+            _ => self.below(1 << 20) as f64 * 1e-12,
+        };
+        let model = TaylorModel::from_polynomial(&coefficients, rad);
+        match self.below(3) {
+            0 => model,
+            1 => model.working_to(1e-9),
+            _ => model.working_to(1e-3),
+        }
+    }
+}
+
+fn bits(model: &TaylorModel) -> ([u64; super::TAYLOR_LEN], usize, u64, u64) {
+    (
+        model.coefficients.map(f64::to_bits),
+        model.len,
+        model.rad.to_bits(),
+        model.working_share.to_bits(),
+    )
+}
+
+#[test]
+fn a_product_is_bit_for_bit_the_reference_product() {
+    let mut rng = Lcg(0x5eed_1234_abcd_0001);
+    for _ in 0..200_000 {
+        let (a, b) = (rng.model(), rng.model());
+        assert_eq!(
+            bits(&a.mul(&b)),
+            bits(&reference_mul(&a, &b)),
+            "{a:?} x {b:?}"
+        );
+    }
+}
