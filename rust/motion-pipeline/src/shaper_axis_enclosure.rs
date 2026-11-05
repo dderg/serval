@@ -743,15 +743,6 @@ struct WindowReading {
 }
 
 impl WindowReading {
-    fn of(state: Tangential) -> Self {
-        Self {
-            state,
-            trig: std::cell::OnceCell::new(),
-            spread_trig: std::cell::OnceCell::new(),
-            speed_squared: std::cell::OnceCell::new(),
-        }
-    }
-
     fn speed_squared(&self) -> &TaylorModel {
         self.speed_squared
             .get_or_init(|| self.state.v.mul(&self.state.v))
@@ -798,7 +789,12 @@ pub(crate) fn analytic_axes_enclosure(
                 (stretch[0], stretch[1]),
                 accuracy,
                 &|window: Window, axis: usize, shared: &mut Option<WindowReading>| {
-                    let reading = shared.get_or_insert_with(|| WindowReading::of(state(window)));
+                    let reading = shared.get_or_insert_with(|| WindowReading {
+                        state: state(window),
+                        trig: std::cell::OnceCell::new(),
+                        spread_trig: std::cell::OnceCell::new(),
+                        speed_squared: std::cell::OnceCell::new(),
+                    });
                     readings[axis].models(reading)
                 },
                 outs,
@@ -1448,7 +1444,12 @@ impl<'a> AxisWindows<'a> {
                         (state, jerk)
                     }
                 };
-                let reading_window = WindowReading::of(state);
+                let reading_window = WindowReading {
+                    state,
+                    trig: std::cell::OnceCell::new(),
+                    spread_trig: std::cell::OnceCell::new(),
+                    speed_squared: std::cell::OnceCell::new(),
+                };
                 let [p, v, a] = reading.models(&reading_window);
                 let j = if with_jerk {
                     reading.law.jerk(&reading_window, &tangential_jerk)?
