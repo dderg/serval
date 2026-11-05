@@ -1174,3 +1174,41 @@ fn whipped_extrusion_from_rest() -> Track {
     ];
     build_profiled_track(0.0, &steps, Profile::Quintic)
 }
+
+/// #773, found by `an_advance_integrates_to_zero_across_every_rest`: a
+/// 3.6 mm motion from rest to rest too short for the targets its samples
+/// ask kept one width node, 2.4e-5 mm short of the closing rest, whose
+/// cone crushed it. The ratio step 0.11 mm along the motion, crossed at
+/// 236 mm/s, read a window of 7e-7 mm and the advance an acceleration of
+/// 1e17 mm/s².
+#[test]
+fn a_ratio_step_on_a_motion_too_short_for_its_targets_projects_an_advance() {
+    let steps = [
+        Step::Stroke {
+            reverse: true,
+            length: 0.1135885147517546,
+            pace: 167.53205405064966,
+            end_speed: 296.7151199474701,
+            shaped_speed_scale: 1.0120240680335737,
+            ratio: 0.013363302426233356,
+        },
+        Step::Stroke {
+            reverse: false,
+            length: 3.4859768384505854,
+            pace: 137.7592739292454,
+            end_speed: 21.946552010094877,
+            shaped_speed_scale: 1.4747436785993033,
+            ratio: 0.09124851236736166,
+        },
+    ];
+    let (advance_k, smooth_time) = (0.053063197074292814, 0.005382709019971745);
+    let track = build_profiled_track(0.0, &steps, Profile::Quintic);
+    let advanced_chain = follower_chain(Some(advance_k), Some(smooth_time));
+    let (lo, hi) = advanced_chain
+        .kernel()
+        .expect("the smoothing has a kernel")
+        .support();
+    let advanced = project_all_at_once(&track, &chains(advanced_chain));
+    let plain = project_all_at_once(&track, &chains(follower_chain(None, Some(smooth_time))));
+    assert_advance_vanishes_at_rests(&track, (&advanced, &plain), (hi, -lo)).unwrap();
+}

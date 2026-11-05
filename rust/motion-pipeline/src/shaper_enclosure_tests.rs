@@ -1,7 +1,4 @@
-use super::{
-    AxisFit, NonlinearAdvanceSignal, TrackSignal, fit_axis_from_signal,
-    nonlinear_transition_breakpoints,
-};
+use super::{NonlinearAdvanceSignal, TrackSignal, apply_nonlinear_advance_to_track};
 use crate::lowering::FitTol;
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
 use trajectory::{AdvanceModel, NonlinearAdvance};
@@ -54,21 +51,8 @@ impl AdvancedQuartic {
             ],
         }]);
         let sig = NonlinearAdvanceSignal::new(&track, self.advance);
-        let mut seeds = track.knots().to_vec();
-        seeds.extend(nonlinear_transition_breakpoints(&sig));
-        let fit = fit_axis_from_signal(
-            AxisFit {
-                axis: 3,
-                t_start: Self::START,
-                t_end: Self::START + self.duration,
-                seed_breakpoints: &seeds,
-                fit_tol: Self::TOLERANCE,
-                fit_context: "nonlinear_advance",
-                seam_continuity: crate::lowering::SeamContinuity::Velocity,
-            },
-            &sig,
-        )
-        .expect("the advanced quartic fits");
+        let fit = apply_nonlinear_advance_to_track(3, &track, self.advance, Self::TOLERANCE)
+            .expect("the advanced quartic fits");
         worst_over_tolerance(&sig, &fit, Self::TOLERANCE)
     }
 }

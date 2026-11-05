@@ -7,10 +7,12 @@
 //! on the bench configs and stretches of them on every machine profile
 //! through the pipeline with the fit audit on, and fails on any accepted
 //! piece that leaves the tolerance beyond what
-//! `corpus/known_fit_violations.rs` pins, and on any planned extruder that
+//! `corpus/known_fit_violations.rs` pins, on any planned extruder that
 //! leaves the limits it was planned under beyond what
-//! `corpus/known_extruder_excesses.rs` pins. Each set of cases is its own
-//! test, so the audited replays run side by side.
+//! `corpus/known_extruder_excesses.rs` pins, and on any retract or prime
+//! planned outside the toolhead's stop (`corpus/retract_placement.rs`).
+//! Each set of cases is its own test, so the audited replays run side by
+//! side.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -30,7 +32,8 @@ fn dense_cases(configs: &[&str]) -> Vec<(String, String, PathBuf)> {
 static AUDITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Per case, where the open fit violations and the extruder's excesses
-/// over the limits it was planned under depart from the pinned ones.
+/// over the limits it was planned under depart from the pinned ones, and
+/// every retract and prime the plan moves outside the toolhead's stop.
 fn audited(cases: Vec<(String, String, PathBuf)>) -> Vec<String> {
     let _auditing = AUDITING
         .lock()
@@ -52,10 +55,18 @@ fn audited(cases: Vec<(String, String, PathBuf)>) -> Vec<String> {
                 table(&name, &open)
             ));
         }
-        let Some(audit) = snapshot
-            .as_ref()
-            .and_then(|snapshot| corpus::extruder::extruder_audit(snapshot, &gcode, &config))
-        else {
+        let Some(snapshot) = snapshot else {
+            continue;
+        };
+        if let Some(placement) =
+            corpus::retract_placement::retract_placement(&snapshot, &gcode, &config)
+        {
+            println!("{name}: {}", placement.summary());
+            if let Some(misplaced) = placement.misplaced() {
+                failures.push(format!("{name}: {misplaced}"));
+            }
+        }
+        let Some(audit) = corpus::extruder::extruder_audit(&snapshot, &gcode, &config) else {
             continue;
         };
         println!("{name}: {}", audit.summary());
