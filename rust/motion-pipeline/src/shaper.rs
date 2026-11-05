@@ -12,10 +12,10 @@ use trajectory::{
 
 use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
-    AccelerationExemption, AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget,
-    LadderFailure, LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth, SeamContinuity,
-    VelocitySign, acceleration_bound, exact_piece, held_miss, ladder_accept, ladder_fit,
-    quintic_in_u,
+    AccelerationExemption, AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE,
+    LADDER_PROBES_U, LadderBudget, LadderFailure, LadderMiss, LadderPolicy, LadderPva, LadderSpan,
+    LadderTruth, SeamContinuity, VelocitySign, acceleration_bound, exact_piece, held_miss,
+    ladder_accept, ladder_fit, quintic_in_u,
 };
 use crate::types::{BaseItem, Control, PostProcessError, TrajectoryItem};
 use crate::worker_pool::WorkerPool;

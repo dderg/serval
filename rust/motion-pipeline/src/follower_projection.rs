@@ -3933,8 +3933,7 @@ impl TrackSignal for FollowerSignal<'_> {
     }
 
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
-        self.pva_memo
-            .get_or(t, |t| self.pva_at(t))
+        self.pva_memo.get_or(t, |t| self.pva_at(t))
     }
     fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
         let support = (self.grid[0], self.grid[self.grid.len() - 1]);

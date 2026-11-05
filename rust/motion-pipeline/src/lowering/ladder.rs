@@ -570,9 +570,9 @@ fn worst_miss(
 ) -> (f64, f64) {
     let errors = errors.all(truth, budget.tol);
     let mono_u = errors.mono_u;
-    let ceiling_miss = truth
-        .exemption
-        .map_or(0.0, |exemption| acceleration_bound(mono_u, h) / exemption.ceiling);
+    let ceiling_miss = truth.exemption.map_or(0.0, |exemption| {
+        acceleration_bound(mono_u, h) / exemption.ceiling
+    });
     let (probe, score) = LADDER_PROBES_U
         .iter()
         .enumerate()
@@ -728,19 +728,39 @@ fn exempt_rungs(
     endpoint_delta: f64,
 ) -> Vec<Vec<f64>> {
     let start = (truth.position)(-1.0);
-    let mut rungs = Vec::with_capacity(2);
+    let mut rungs = Vec::with_capacity(3);
     if !(exemption.exempt)(-1.0) {
-        rungs.push(quadratic_in_u(start, (truth.velocity)(-1.0), h, endpoint_delta));
+        rungs.push(quadratic_in_u(
+            start,
+            (truth.velocity)(-1.0),
+            h,
+            endpoint_delta,
+        ));
     }
     if !(exemption.exempt)(1.0) {
-        rungs.push(end_quadratic_in_u(start, (truth.velocity)(1.0), h, endpoint_delta));
+        rungs.push(end_quadratic_in_u(
+            start,
+            (truth.velocity)(1.0),
+            h,
+            endpoint_delta,
+        ));
     }
-    rungs.push(anchored_acceleration_quadratic_in_u(start, 0.0, h, endpoint_delta));
+    rungs.push(anchored_acceleration_quadratic_in_u(
+        start,
+        0.0,
+        h,
+        endpoint_delta,
+    ));
     rungs
 }
 
 /// [`quadratic_in_u`] matching the right endpoint's velocity instead.
-pub(crate) fn end_quadratic_in_u(p_start: f64, v_end: f64, h: f64, endpoint_delta: f64) -> Vec<f64> {
+pub(crate) fn end_quadratic_in_u(
+    p_start: f64,
+    v_end: f64,
+    h: f64,
+    endpoint_delta: f64,
+) -> Vec<f64> {
     let end_travel = v_end * h;
     vec![
         p_start + 0.75 * endpoint_delta - 0.25 * end_travel,
