@@ -1001,6 +1001,8 @@ fn summary_of(
 }
 
 #[cfg(test)]
+mod backoff_stream_tests;
+#[cfg(test)]
 mod test_motion;
 #[cfg(test)]
 mod tests;
