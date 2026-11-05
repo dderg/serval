@@ -176,6 +176,7 @@ impl Stream {
             &self.stop_before[lo..hi],
             &self.budgets[lo..hi],
             scales,
+            &self.window.boundary_speeds[lo..=hi],
             params(self.window.boundary_speeds[lo]),
             self.window.boundary_speeds[hi],
         )
@@ -309,7 +310,8 @@ proptest! {
     /// A span re-planned on lowered budgets keeps every limit the planner
     /// holds: the speed ceilings, the z, extruder and extrude-only caps, the
     /// disk, the stops, the seam ceilings (curvature and the ratio steps'
-    /// at the lowered budgets) and both seam speeds it was cut at.
+    /// at the lowered budgets) and both seam speeds it was cut at; and it
+    /// raises no seam over the speed the window left there.
     #[test]
     fn a_replan_on_lowered_budgets_keeps_every_planner_limit(
         stream in arb_stream(),
@@ -337,6 +339,7 @@ proptest! {
         }
         for k in 1..hi - lo {
             let seam = replanned.boundary_speeds[k];
+            within("seam the window left", seam, stream.window.boundary_speeds[lo + k])?;
             if stream.stop_before[lo + k] {
                 close("stop", seam, 0.0)?;
                 continue;
@@ -390,6 +393,7 @@ proptest! {
             &stream.stop_before[standing..reach],
             &stream.budgets[standing..reach],
             &scales[standing..],
+            &seams[standing..],
             params(seams[standing]),
             0.0,
         );

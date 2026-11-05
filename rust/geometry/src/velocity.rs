@@ -272,22 +272,28 @@ where
 
 /// Re-plans a span cut out of a settled plan between its two seam speeds:
 /// entering at `params.entry_v` and leaving at `exit_v`, each move's
-/// acceleration budget scaled by `accel_scales[k]`. The plan of the span
-/// is the one a window holding it plans there whenever the scaled budgets
-/// leave both seam speeds standing: a window's plan before a seam reads only
-/// that seam's speed, and after it only that speed again. The returned
-/// boundary speeds show whether they stand: an exit the span cannot reach
-/// comes back lower than `exit_v`, an entry it cannot brake from fails with
+/// acceleration budget scaled by `accel_scales[k]` and each seam held at or
+/// under `seam_ceilings[k]` (one per seam). The plan of the span is the one
+/// a window holding it plans there whenever the scaled budgets leave both
+/// seam speeds standing: a window's plan before a seam reads only that
+/// seam's speed, and after it only that speed again. Ceilings at the seam
+/// speeds the span was cut from keep a re-plan from raising any of them,
+/// which lowered budgets would otherwise do where a seam's ceiling grows as
+/// its budget falls (the ratio steps'). The returned boundary speeds show
+/// whether both ends stand: an exit the span cannot reach comes back lower
+/// than `exit_v`, an entry it cannot brake from fails with
 /// [`VelocityError::OverCommitted`].
 pub fn replan_span(
     moves: &[crate::Move],
     stop_before: &[bool],
     budgets: &[ExtrusionBudget],
     accel_scales: &[f64],
+    seam_ceilings: &[f64],
     params: VelocityPlanParams,
     exit_v: f64,
 ) -> Result<VelocityProfile, VelocityError> {
     assert_eq!(accel_scales.len(), moves.len(), "one scale per move");
+    assert_eq!(seam_ceilings.len(), moves.len() + 1, "one ceiling per seam");
     assert!(
         exit_v.is_finite() && exit_v >= 0.0,
         "a span's exit speed must be finite and non-negative, got {exit_v}"
@@ -298,6 +304,7 @@ pub fn replan_span(
         budgets,
         SpanEnds {
             accel_scales: Some(accel_scales),
+            seam_ceilings: Some(seam_ceilings),
             exit_v,
         },
         params,
@@ -327,7 +334,15 @@ pub fn brake_horizon(
     let tol = params.integration_tol;
     let mut report = VelocityReport::default();
     let caps = build_move_caps(moves, budgets, Some(accel_scales), params, &mut report)?;
-    let seeded = seed_seam_velocities(moves, &caps, budgets, stop_before, 0.0, 0.0, &mut report);
+    let seeded = seed_seam_velocities(
+        moves,
+        &caps,
+        budgets,
+        stop_before,
+        (0.0, 0.0),
+        None,
+        &mut report,
+    );
     let mut brake = 0.0_f64;
     for k in (0..n).rev() {
         let kin = &caps[k].kin;
@@ -348,16 +363,19 @@ pub fn brake_horizon(
 }
 
 /// How a plan ends and scales its budgets: a window brakes to rest at its
-/// far end on its own budgets; a re-planned span leaves at a set speed.
+/// far end on its own budgets; a re-planned span leaves at a set speed and
+/// holds its seams under ceilings.
 #[derive(Clone, Copy)]
 struct SpanEnds<'a> {
     accel_scales: Option<&'a [f64]>,
+    seam_ceilings: Option<&'a [f64]>,
     exit_v: f64,
 }
 
 impl SpanEnds<'_> {
     const WINDOW: Self = Self {
         accel_scales: None,
+        seam_ceilings: None,
         exit_v: 0.0,
     };
 }
@@ -406,8 +424,8 @@ where
         &caps,
         budgets,
         stop_before,
-        entry_v,
-        ends.exit_v,
+        (entry_v, ends.exit_v),
+        ends.seam_ceilings,
         &mut report,
     );
     forward_pass(moves, &caps, &mut plan, tol)?;
@@ -608,8 +626,8 @@ fn seed_seam_velocities(
     caps: &[MoveCaps],
     budgets: &[ExtrusionBudget],
     stop_before: &[bool],
-    entry_v: f64,
-    exit_v: f64,
+    (entry_v, exit_v): (f64, f64),
+    seam_ceilings: Option<&[f64]>,
     report: &mut VelocityReport,
 ) -> SeamPlan {
     let n = caps.len();
@@ -640,6 +658,9 @@ fn seed_seam_velocities(
             if step_ceiling < v[k] {
                 report.ratio_step_bound += 1;
                 v[k] = step_ceiling;
+            }
+            if let Some(ceilings) = seam_ceilings {
+                v[k] = v[k].min(ceilings[k]);
             }
         }
     }
