@@ -4322,13 +4322,12 @@ fn span_probe_t(t0: f64, t1: f64, u: f64) -> f64 {
 fn shaped_ladder<S: TrackSignal>(
     sig: &S,
     exact: Option<&ExactSpan>,
-    t0: f64,
-    t1: f64,
-    slivers: EdgeSlivers,
+    span: RefineSpan,
     policy: &SpanFitPolicy,
     keeps_closest_rung: bool,
     known_edges: [Option<EdgeState>; 2],
 ) -> Result<(Vec<f64>, Option<LadderFailure>, [EdgeState; 2]), PostProcessError> {
+    let RefineSpan { t0, t1, slivers } = span;
     let axis = policy.axis;
     let fit_tol = policy.fit_tol;
     let h = t1 - t0;
@@ -4789,16 +4788,8 @@ fn refine_span_against<S: TrackSignal>(
     let tm = 0.5 * t0 + 0.5 * t1;
     let at_resolution_floor = tm - t0 < floors.cubic || t1 - tm < floors.cubic;
     let splittable = !at_resolution_floor && *refinement_splits < MAX_FIT_REFINEMENT_SPLITS;
-    let (mono_u, failure, [start_edge, end_edge]) = shaped_ladder(
-        sig,
-        exact,
-        t0,
-        t1,
-        slivers,
-        policy,
-        !splittable,
-        known_edges,
-    )?;
+    let (mono_u, failure, [start_edge, end_edge]) =
+        shaped_ladder(sig, exact, span, policy, !splittable, known_edges)?;
     #[cfg(feature = "fit-audit")]
     let edge_insets = (
         edge_inset(t1 - t0, floors.cubic, slivers.start),
