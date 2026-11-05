@@ -235,4 +235,6 @@ pub(super) fn ratio_step_ceiling(
 }
 
 #[cfg(test)]
+mod noise_step_tests;
+#[cfg(test)]
 mod tests;
