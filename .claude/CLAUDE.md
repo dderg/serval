@@ -156,6 +156,32 @@ The Pi bench is shared: every use goes through `tools/bench/lock.py hold -- <cmd
 queues behind the current holder and prints who holds it and for how long (waits of
 20 minutes were seen). Hold it for the whole session script, not per command.
 
+# Workflow audit, round 2 (7 agents, 80 merges after 04:00 on 11-04 vs 81 before)
+
+| measure | before ship.py/wt.sh/slots | after |
+|---|---|---|
+| landings through `ship.py` / hand-rolled `land-pr.sh` | 12 / 68 calls | 107 / 31 calls (77% on ship.py) |
+| ship attempts that landed | n/a | 45 of 107 (42%); 62 stopped: 22 snapshot gate, 18 red non-fuzz job, 12 cannot merge, 9 `ci.sh quick`, 5 merge conflict |
+| manual `ci.sh quick` calls | 39 (0.5/merge) | 6 (0.1/merge) |
+| edit tool rejections | 143 of 804 edit+write calls (18%) | 84 of 840 (10%) |
+| bash python/sed edit scripts | 285 (3.5/merge) | 707 (8.8/merge); 58% from one agent, 64% of them single-site replaces, 4% fail, only 7 follow an edit rejection |
+| worktree creation: `wt.sh new` / plain `git worktree add` | 2 / 39 | 43 / 51 |
+| shared-resource incidents (disk ICE, stash, transport, rate limit, image) | disk and stash incidents | 1 disk, 2 transport, 6 runner image, 0 stash, 0 rate limit |
+| PR created to merged, median / p90 | 15.2 / 31 min | 20.0 / 146 min |
+| Rust runtime workflow median | 9.2 min | 14.9 min (throughput-gate 556 s, rust-fuzz 390-420 s per shard) |
+| required-check reds: throughput-gate / rust-fuzz / ethercat-hw | n/a | 12 / 21 / 6 of 117 PR runs |
+
+What this says: ship.py cut the hand-typed steps around a landing, but landings still fail 58% of the
+time and the PR-to-merge tail got much worse. The tail is CI cost and red gates, not tooling: the new
+throughput-gate is both the slowest job and the most frequent red (12 failures, plus `throughput_baseline.json`
+was the most conflicted file, 6 of 12), and every red rerun costs a full 15-minute CI cycle. `ship.py` now keeps
+a gate cache (`~/.cache/ship-gates`, keyed by tree hash and command, successes only, `SHIP_NO_GATE_CACHE=1`
+overrides) so a retry on the same tree does not repeat `ci.sh quick`/`py`. The shared checkout is read-only for
+tracked files (`scripts/guard-main-checkout.sh`, applied by `wt.sh new`, lifted and re-applied by `land-pr.sh`
+around its fast-forward), so a relative path typed in the wrong directory fails with a permission error instead of
+editing main (5 edits used relative paths in the window). A `post-checkout` hook, installed with the other guards,
+prints the `wt.sh` hint on a plain `git worktree add`.
+
 # Disk space
 
 /home filled to 22 MB free and rustc ICE'd for every agent. The sources were: ~495 scratch
