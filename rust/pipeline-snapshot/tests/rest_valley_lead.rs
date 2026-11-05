@@ -4,11 +4,14 @@
 //! of the extruder's acceleration, used to fade the lead over the last and
 //! first few millimetres (half of `k·r·v` a millimetre before the stop), so
 //! the nozzle still held the advance's pressure when the toolhead stopped.
-//! A diagonal line, which the axes' unlike shapers curve into its stop,
-//! lays the tail's material as a linear fall across the spill; read at the
-//! speed the leaders cruise well past the spill, that slope seam passed for
-//! a step the width field narrows past the extruder's limits, and the lead
-//! was released from 30 ms out.
+//! A diagonal line, which the axes' unlike shapers curve into and out of
+//! its rests, lays the material as a linear ramp across each spill; read at
+//! the speed the leaders cruise well past the spill, that slope seam passed
+//! for a step the width field narrows past the extruder's limits, and the
+//! lead was released from 30 ms out. Out of the rest the width field's
+//! first node, micrometres past it, did narrow every window across the
+//! spill to a sliver, so the start released its lead there even once the
+//! stop kept it.
 
 mod corpus;
 
@@ -25,15 +28,6 @@ const RATIO: f64 = 0.4 * 0.2 / (std::f64::consts::PI * 0.875 * 0.875);
 const MARKS_MM: [f64; 5] = [3.0, 2.0, 1.0, 0.5, 0.25];
 const KEPT_LEAD: f64 = 0.9;
 const HEADINGS_DEG: [f64; 2] = [0.0, 45.0];
-
-/// Whether the shaped axes leave a rest along the line: a curved start
-/// lays the lead's material as a valley inside the spill, which a leaving
-/// side still reads at the fastest the leaders cross it.
-// TODO: hold curved starts to the kept lead too once the width field's
-// windows across a leaving spill follow its envelope.
-fn starts_straight(heading_deg: f64) -> bool {
-    heading_deg % 90.0 == 0.0
-}
 
 fn plan(config_text: &str, heading: (f64, f64)) -> Snapshot {
     let planner = planner_config_from_text(config_text).expect("the config reads");
@@ -116,13 +110,9 @@ fn a_kernel_free_advance_keeps_its_lead_into_and_out_of_a_rest_it_can_afford() {
             );
             assert_eq!(reading.after_start.len(), MARKS_MM.len(), "{line}");
             assert_eq!(reading.before_stop.len(), MARKS_MM.len(), "{line}");
-            let held_after_start: &[(f64, f64)] = if starts_straight(heading_deg) {
-                &reading.after_start
-            } else {
-                &[]
-            };
             assert!(
-                held_after_start
+                reading
+                    .after_start
                     .iter()
                     .chain(&reading.before_stop)
                     .all(|&(_, kept)| kept >= KEPT_LEAD),
