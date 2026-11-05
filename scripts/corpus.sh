@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run the planner corpus: every snapshot case plus the four sim prints on both
-# bench configs (59 cases), through the production pipeline.
+# Run the planner corpus: every snapshot case plus the six sim prints on both
+# bench configs (63 cases), through the production pipeline.
 #
 #   scripts/corpus.sh [--configs fast,printer] [-k SUBSTRING] [--audit]
 #   scripts/corpus.sh --probe FILE.rs [--configs ...] [-k ...]
