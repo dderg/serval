@@ -154,8 +154,11 @@ finish() {
                     || echo "land-pr: $tree has uncommitted changes and stays on $branch" >&2
                 ;;
             *)
+                slot="$(basename "$tree" | tr '[:upper:]' '[:lower:]')"
                 git worktree remove "$tree" \
-                    || echo "land-pr: $tree has uncommitted or untracked files and was kept; remove it with 'git worktree remove --force $tree' when done" >&2
+                    && docker rmi "klipper-build-$slot" "kalico-sim-$slot" >/dev/null 2>&1 \
+                    || true
+                [ ! -d "$tree" ] || echo "land-pr: $tree has uncommitted or untracked files and was kept; remove it with 'git worktree remove --force $tree' when done" >&2
                 ;;
         esac
     elif [ -n "$tree" ]; then
