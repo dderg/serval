@@ -50,3 +50,8 @@ status-level = "slow"
 [profile.nightly.slow-timeout]
 period = "300s"
 terminate-after = 6
+
+# The path-accuracy audit plans two whole prints per machine profile.
+[[profile.default.overrides]]
+filter = "binary(path_accuracy)"
+slow-timeout = { period = "60s", terminate-after = 15 }

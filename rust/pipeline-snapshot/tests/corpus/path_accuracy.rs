@@ -17,7 +17,11 @@ const SPATIAL_AXES: usize = 3;
 const SAMPLE_STEP_MM: f64 = 0.01;
 const SAMPLE_DT_MIN_S: f64 = 1e-6;
 const SAMPLE_DT_MAX_S: f64 = 1e-3;
-const CURSOR_REACH_MM: f64 = 5.0;
+const CURSOR_REACH_MM: f64 = 3.0;
+const CURSOR_SKIP_COST: f64 = 0.25;
+/// A vertex reads every sample the cursor places within this much polyline
+/// of it.
+const VERTEX_WINDOW_MM: f64 = 3.0;
 const COINCIDENT_MM: f64 = 1e-9;
 const EXTRUDING_E_MM: f64 = 1e-9;
 /// A vertex the path never comes within this of has been lost: the cursor
@@ -194,6 +198,17 @@ impl Polyline {
         distance_to_segment(q, self.vertices[segment], self.vertices[segment + 1])
     }
 
+    fn arc_along(&self, segment: usize, q: Point) -> f64 {
+        let (a, b) = (self.vertices[segment], self.vertices[segment + 1]);
+        let ab = sub(b, a);
+        let length = norm(ab);
+        self.arc_start(segment) + (dot(sub(q, a), ab) / length).clamp(0.0, length)
+    }
+
+    fn vertex_arc(&self, vertex: usize) -> f64 {
+        self.arc_start(vertex)
+    }
+
     fn arc_start(&self, segment: usize) -> f64 {
         if segment == 0 {
             0.0
@@ -221,27 +236,33 @@ impl Polyline {
 }
 
 /// Follows the samples along the polyline: the segment a sample lies
-/// nearest to, searched forward to [`CURSOR_REACH_MM`] of arc past the end of
-/// its own and never backward, so a later pass over the same place never
-/// claims it.
+/// nearest to, searched forward to [`CURSOR_REACH_MM`] of arc past the farthest
+/// the samples have come along it and never backward, each mm of polyline it
+/// would skip costing [`CURSOR_SKIP_COST`] mm of distance. A later pass over
+/// the same place, or a neighbouring patch that a cut corner comes closer
+/// to, never claims a sample from the stretch the path is on.
 struct Cursor {
     segment: usize,
+    arc: f64,
 }
 
 impl Cursor {
     fn advance(&mut self, line: &Polyline, q: Point) -> f64 {
-        let reach = line.arc_start(self.segment + 1) + CURSOR_REACH_MM;
-        let mut best = (line.distance_to_segment(self.segment, q), self.segment);
+        let here = self.arc.max(line.arc_along(self.segment, q));
+        let own = line.distance_to_segment(self.segment, q);
+        let mut best = (own, own, self.segment);
         let mut candidate = self.segment + 1;
-        while candidate < line.segments() && line.arc_start(candidate) <= reach {
+        while candidate < line.segments() && line.arc_start(candidate) <= here + CURSOR_REACH_MM {
             let d = line.distance_to_segment(candidate, q);
-            if d <= best.0 {
-                best = (d, candidate);
+            let cost = d + CURSOR_SKIP_COST * (line.arc_start(candidate) - here).max(0.0);
+            if cost < best.0 {
+                best = (cost, d, candidate);
             }
             candidate += 1;
         }
-        self.segment = best.1;
-        best.0
+        self.segment = best.2;
+        self.arc = here.max(line.arc_start(self.segment));
+        best.1
     }
 }
 
@@ -255,8 +276,12 @@ pub fn audit(snapshot: &Snapshot, gcode: &str, config: &Path) -> Option<PathAccu
     let trajectory = snapshot.toolhead.as_ref().unwrap_or(&snapshot.trajectory);
     let mut nearest = vec![f64::INFINITY; line.vertices.len()];
     let mut excursion = vec![(0.0_f64, [0.0; SPATIAL_AXES]); line.segments()];
-    let mut cursor = Cursor { segment: 0 };
+    let mut cursor = Cursor {
+        segment: 0,
+        arc: 0.0,
+    };
     let mut previous: Option<Point> = None;
+    let mut window = 0..0;
     for_each_sample(trajectory, |q| {
         let off = cursor.advance(&line, q);
         let segment = cursor.segment;
@@ -264,10 +289,17 @@ pub fn audit(snapshot: &Snapshot, gcode: &str, config: &Path) -> Option<PathAccu
             excursion[segment] = (off, q);
         }
         let chord_from = previous.unwrap_or(q);
-        let lo = segment.saturating_sub(1);
-        let hi = (segment + 2).min(line.vertices.len() - 1);
-        for (vertex, best) in nearest.iter_mut().enumerate().take(hi + 1).skip(lo) {
-            *best = best.min(distance_to_segment(line.vertices[vertex], chord_from, q));
+        while window.end < line.vertices.len()
+            && line.vertex_arc(window.end) <= cursor.arc + VERTEX_WINDOW_MM
+        {
+            window.end += 1;
+        }
+        while line.vertex_arc(window.start) < cursor.arc - VERTEX_WINDOW_MM {
+            window.start += 1;
+        }
+        for vertex in window.clone() {
+            nearest[vertex] =
+                nearest[vertex].min(distance_to_segment(line.vertices[vertex], chord_from, q));
         }
         previous = Some(q);
     });

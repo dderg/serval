@@ -9,56 +9,30 @@ use std::path::PathBuf;
 
 mod corpus;
 
-const PROFILE_CONFIGS: [&str; 10] = [
-    "tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
-    "tools/bench/configs/profiles/p1_bowden_bedslinger_kernel.cfg",
-    "tools/bench/configs/profiles/p2_i3_direct_drive_ramp.cfg",
-    "tools/bench/configs/profiles/p2_i3_direct_drive_kernel.cfg",
-    "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg",
-    "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg",
-    "tools/bench/configs/profiles/p4_high_accel_ramp.cfg",
-    "tools/bench/configs/profiles/p4_high_accel_kernel.cfg",
-    "tools/bench/configs/trident_ramp.cfg",
-    "tools/bench/configs/trident_kernel.cfg",
-];
 const PRINTS: [&str; 2] = ["voron_dense_top_layers", "voron_first_layers"];
 
-fn cases() -> Vec<(String, String, PathBuf)> {
-    let configs: Vec<&str> = corpus::SIM_CONFIGS
-        .iter()
-        .chain(PROFILE_CONFIGS.iter())
-        .copied()
-        .collect();
-    let prints = PRINTS.iter().flat_map(|print| {
+fn cases(config: &str) -> Vec<(String, String, PathBuf)> {
+    let prints = PRINTS.iter().map(|print| {
         let gcode =
             std::fs::read_to_string(corpus::repo().join(format!("tools/sim/gcode/{print}.gcode")))
                 .expect("read sim print");
-        configs
-            .iter()
-            .map(move |config| {
-                (
-                    format!("{print}/{config}"),
-                    gcode.clone(),
-                    corpus::repo().join(config),
-                )
-            })
-            .collect::<Vec<_>>()
+        (
+            format!("{print}/{config}"),
+            gcode,
+            corpus::repo().join(config),
+        )
     });
     let filter = std::env::var("CORPUS_FILTER").ok();
-    corpus::corner_flow_cases(&configs)
+    corpus::corner_flow_cases(&[config])
         .into_iter()
         .chain(prints)
         .filter(|(name, _, _)| filter.as_deref().is_none_or(|f| name.contains(f)))
         .collect()
 }
 
-#[test]
-#[ignore = "full sim prints on every profile; run with scripts/corpus.sh --path-accuracy"]
-fn the_shaped_path_of_every_profile_case_is_measured_against_its_polyline() {
-    let cases = cases();
-    assert!(!cases.is_empty(), "CORPUS_FILTER selects no case");
+fn measure(config: &str) {
     let mut failures = Vec::new();
-    for (name, gcode, config) in &cases {
+    for (name, gcode, config) in &cases(config) {
         let measured = catch_unwind(AssertUnwindSafe(|| {
             let snapshot = corpus::plan(name, gcode, config)
                 .unwrap_or_else(|| panic!("fewer than two waypoints"));
@@ -92,4 +66,29 @@ fn the_shaped_path_of_every_profile_case_is_measured_against_its_polyline() {
         "path accuracy failed:\n{}",
         failures.join("\n")
     );
+}
+
+macro_rules! path_accuracy_of {
+    ($($test:ident: $config:literal,)*) => {$(
+        #[test]
+        #[ignore = "full sim prints; run with scripts/corpus.sh --path-accuracy"]
+        fn $test() {
+            measure($config);
+        }
+    )*};
+}
+
+path_accuracy_of! {
+    fast: "tools/bench/configs/fast.cfg",
+    printer: "tools/bench/printer.cfg",
+    p1_ramp: "tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
+    p1_kernel: "tools/bench/configs/profiles/p1_bowden_bedslinger_kernel.cfg",
+    p2_ramp: "tools/bench/configs/profiles/p2_i3_direct_drive_ramp.cfg",
+    p2_kernel: "tools/bench/configs/profiles/p2_i3_direct_drive_kernel.cfg",
+    p3_ramp: "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg",
+    p3_kernel: "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg",
+    p4_ramp: "tools/bench/configs/profiles/p4_high_accel_ramp.cfg",
+    p4_kernel: "tools/bench/configs/profiles/p4_high_accel_kernel.cfg",
+    trident_ramp: "tools/bench/configs/trident_ramp.cfg",
+    trident_kernel: "tools/bench/configs/trident_kernel.cfg",
 }
