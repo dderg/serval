@@ -2631,6 +2631,75 @@ impl MomentTranslation {
         self.accumulate_terms(source, target);
     }
 
+    /// [`Self::accumulate`] for every derivative order at once, each
+    /// translation weight `C(m, s)·δ^{m−s}` formed once for all of them:
+    /// the same products in the same order as one order at a time.
+    fn accumulate_orders(
+        &self,
+        sources: &[f64],
+        stride: usize,
+        targets: &mut [&mut [f64]; MOMENT_ORDERS],
+    ) {
+        let len = targets[0].len();
+        assert!(len <= self.len && len <= stride);
+        match len {
+            1 => self.accumulate_orders_fixed::<1>(sources, stride, targets),
+            2 => self.accumulate_orders_fixed::<2>(sources, stride, targets),
+            3 => self.accumulate_orders_fixed::<3>(sources, stride, targets),
+            4 => self.accumulate_orders_fixed::<4>(sources, stride, targets),
+            5 => self.accumulate_orders_fixed::<5>(sources, stride, targets),
+            6 => self.accumulate_orders_fixed::<6>(sources, stride, targets),
+            7 => self.accumulate_orders_fixed::<7>(sources, stride, targets),
+            8 => self.accumulate_orders_fixed::<8>(sources, stride, targets),
+            _ => self.accumulate_orders_terms(sources, stride, len, targets),
+        }
+    }
+
+    fn accumulate_orders_fixed<const LEN: usize>(
+        &self,
+        sources: &[f64],
+        stride: usize,
+        targets: &mut [&mut [f64]; MOMENT_ORDERS],
+    ) {
+        let source = |order: usize| -> &[f64; LEN] {
+            sources[order * stride..order * stride + LEN]
+                .try_into()
+                .expect("source moment length")
+        };
+        let (sources_p, sources_v, sources_a) = (source(0), source(1), source(2));
+        let [position, velocity, acceleration] = targets;
+        let position: &mut [f64; LEN] = (&mut position[..LEN]).try_into().expect("target length");
+        let velocity: &mut [f64; LEN] = (&mut velocity[..LEN]).try_into().expect("target length");
+        let acceleration: &mut [f64; LEN] = (&mut acceleration[..LEN])
+            .try_into()
+            .expect("target length");
+        for moment_power in 0..LEN {
+            let binomials = &TRANSLATION_BINOMIALS[moment_power];
+            for source_power in 0..=moment_power {
+                let weight =
+                    binomials[source_power] * self.delta_powers[moment_power - source_power];
+                position[moment_power] += weight * sources_p[source_power];
+                velocity[moment_power] += weight * sources_v[source_power];
+                acceleration[moment_power] += weight * sources_a[source_power];
+            }
+        }
+    }
+
+    fn accumulate_orders_terms(
+        &self,
+        sources: &[f64],
+        stride: usize,
+        len: usize,
+        targets: &mut [&mut [f64]; MOMENT_ORDERS],
+    ) {
+        for (order, target) in targets.iter_mut().enumerate() {
+            self.accumulate_terms(
+                &sources[order * stride..order * stride + len],
+                &mut target[..len],
+            );
+        }
+    }
+
     #[inline]
     fn accumulate_terms(&self, source: &[f64], target: &mut [f64]) {
         for (moment_power, moment) in target.iter_mut().enumerate() {
@@ -2912,10 +2981,11 @@ impl MomentTree {
         let node_moments =
             &self.moments[node * MOMENT_ORDERS * stride..(node + 1) * MOMENT_ORDERS * stride];
         let moment_len = targets[0].len();
-        let translation = MomentTranslation::new(self.origins[node], origin, moment_len);
-        for (source, target) in node_moments.chunks_exact(stride).zip(targets.iter_mut()) {
-            translation.accumulate(&source[..moment_len], target);
-        }
+        MomentTranslation::new(self.origins[node], origin, moment_len).accumulate_orders(
+            node_moments,
+            stride,
+            targets,
+        );
     }
 }
 

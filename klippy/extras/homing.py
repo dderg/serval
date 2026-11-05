@@ -843,6 +843,7 @@ class Homing:
                     "trip_move: %s is not attached to the engine"
                     % (_endstop_label(axis, endstop),)
                 )
+        toolhead.await_clock_sync()
         toolhead.wait_moves()
         self._drain_motion_before_arming_device(gcmd, engine, axis)
         provider = entry["provider"]

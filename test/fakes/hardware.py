@@ -80,6 +80,9 @@ class FakeMcu:
     def get_printer(self):
         return self._printer
 
+    def is_fileoutput(self):
+        return False
+
     def get_name(self):
         return self._name
 
