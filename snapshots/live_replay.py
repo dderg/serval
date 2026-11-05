@@ -110,6 +110,9 @@ class _Mcu:
     def estimated_print_time(self, eventtime):
         return self._engine.frontier
 
+    def is_fileoutput(self):
+        return True
+
 
 class _Rail:
     def get_range(self):
@@ -203,7 +206,6 @@ def _motion(printer, config, engine):
     motion.motion_lead = 0.0
     motion.commanded_pos = [0.0, 0.0, 0.0, 0.0]
     motion._planner_ready = True
-    motion._clock_sync_confirmed = True
     motion._engine_wakeup = None
     motion._last_reactor_yield = 0.0
     motion._lookahead_fences = []

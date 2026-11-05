@@ -42,24 +42,30 @@ rep-to-rep ratios swing about +-2 % on a GitHub runner, as much as the
 changes a drift band would look for, so such a band flaked both ways. Each
 job measures its own noise instead: the live band is 3 standard deviations
 of the LIVE_REPS per-rep log ratios (head over calibration within one rep),
-carried through alpha onto the predicted window. The live floor checks fail
-only beyond that band.
+carried through alpha onto the predicted window.
 
 The gate fails when, for any config:
 - Ir grew more than IR_TOLERANCE_PCT over its baseline. Ir is deterministic,
   so it is the drift signal. Shrinkage passes: the next accept ratchets the
   baseline down;
-- the Pi 5 2-core worst 5 s window a measurement predicts is below
-  PI_FLOOR_X by more than the prediction's band (none for Ir;
-  PI_FLOOR_FAILS off turns this into a warning). A config FLOOR_SHORTFALLS
-  pins below the floor, to the issue that owns the shortfall, misses it
-  instead when its Ir prediction falls below the pinned one by more than
-  SHORTFALL_TOLERANCE_PCT (a regression). Its live prediction is not held
-  to a pin: the live model misses the Pi by up to its residual on any one
-  runner CPU, far more than a pin could tolerate, and judging it against a
-  pin would make the live check a drift check. A pinned shortfall that
-  shrinks passes; once either prediction reaches the floor, that prediction
-  is judged against the floor again, and the report says to unpin it;
+- the Pi 5 2-core worst 5 s window the Ir prediction gives is below
+  PI_FLOOR_X (PI_FLOOR_FAILS off turns this into a warning). Ir is
+  deterministic, so it decides the floor;
+- even the live prediction's optimistic bound misses PI_FLOOR_X: the
+  prediction raised by this job's live band and by the live model's
+  residual, its worst leave-one-out residual on this runner's CPU model (on
+  an unseen CPU model, its worst residual on a CPU model left out of the
+  fit). The live model misses the Pi by 10-15 % on any one runner CPU, so a
+  live prediction just under the floor is within its own error: it is
+  reported, and Ir decides. A live prediction below even its optimistic
+  bound is a regression no residual explains, such as #663's thread
+  handoffs, which Ir cannot see.
+  A config FLOOR_SHORTFALLS pins below the floor, to the issue that owns
+  the shortfall, misses it instead when its Ir prediction falls below the
+  pinned one by more than SHORTFALL_TOLERANCE_PCT (a regression); its live
+  prediction is not judged. A pinned shortfall that shrinks passes; once
+  its Ir prediction reaches the floor, both predictions are judged against
+  the floor again, and the report says to unpin it;
 - the calibration replay is inconsistent (below).
 
 Both Pi predictions come from fits over paired points that
@@ -847,22 +853,55 @@ def prediction(source: str, predicted: float, band_pct: float) -> str:
     )
 
 
-def floor_miss(source: str, predicted: float, band_pct: float) -> str | None:
-    if predicted * (1.0 + band_pct / 100.0) >= PI_FLOOR_X:
+def floor_miss(source: str, predicted: float) -> str | None:
+    if predicted >= PI_FLOOR_X:
         return None
     return (
-        f"{prediction(source, predicted, band_pct)} is below the "
+        f"{prediction(source, predicted, 0.0)} is below the "
         f"{PI_FLOOR_X:.1f}x floor"
     )
 
 
-def pin_vanished(
-    source: str, predicted: float, band_pct: float, issue: int
-) -> str | None:
-    if predicted / (1.0 + band_pct / 100.0) < PI_FLOOR_X:
+def live_residual_pct(live: dict, cpu: str) -> float:
+    """How far the live model misses the Pi on this runner: its worst
+    leave-one-out residual on this CPU model, or, on a CPU model the fit
+    did not see, its worst residual on a CPU model left out of the fit."""
+    fitted_on = live["by_cpu"].get(cpu)
+    if fitted_on is None:
+        return live["max_cpu_out_residual_pct"]
+    return fitted_on["max_loo_residual_pct"]
+
+
+def live_optimistic_x(
+    predicted: float, band_pct: float, residual_pct: float
+) -> float:
+    return predicted * (1.0 + band_pct / 100.0) * (1.0 + residual_pct / 100.0)
+
+
+def live_floor_verdict(
+    predicted: float, band_pct: float, residual_pct: float
+) -> tuple[str | None, str | None]:
+    """(a failure, a note) for the live prediction: it fails only when even
+    its optimistic bound, raised by this job's rep band and the model's
+    residual, misses the floor; below the floor within them it is noted."""
+    if predicted * (1.0 + band_pct / 100.0) >= PI_FLOOR_X:
+        return None, None
+    optimistic = live_optimistic_x(predicted, band_pct, residual_pct)
+    stated = (
+        f"{prediction('the live cost', predicted, band_pct)} below the "
+        f"{PI_FLOOR_X:.1f}x floor, optimistically {optimistic:.2f}x with the "
+        f"live model's {residual_pct:.1f} % residual"
+    )
+    if optimistic < PI_FLOOR_X:
+        return f"{stated}: even that misses the floor", None
+    return None, f"{stated}: Ir decides the floor; measure the Pi"
+
+
+def pin_vanished(source: str, predicted: float, issue: int) -> str | None:
+    if predicted < PI_FLOOR_X:
         return None
     return (
-        f"{prediction(source, predicted, band_pct)} reaches the "
+        f"{prediction(source, predicted, 0.0)} reaches the "
         f"{PI_FLOOR_X:.1f}x floor: unpin the shortfall FLOOR_SHORTFALLS holds "
         f"for #{issue}"
     )
@@ -899,20 +938,21 @@ def judge(
     pin = shortfalls.get(config)
     floor_misses = []
     notes = []
-    for source, value, band in zip(("Ir", "the live cost"), predicted, bands):
-        vanished = pin and pin_vanished(source, value, band, pin.issue)
-        if vanished:
-            notes.append(vanished)
-        if pin is None or vanished:
-            miss = floor_miss(source, value, band)
-        elif source == "Ir":
-            miss = shortfall_miss(
-                source, value, band, pin.predicted_ir_x, pin.issue
-            )
-        else:
-            miss = None
-        if miss:
-            floor_misses.append(miss)
+    ir_x, live_x = predicted
+    vanished = pin and pin_vanished("Ir", ir_x, pin.issue)
+    if vanished:
+        notes.append(vanished)
+    if pin is None or vanished:
+        ir_miss = floor_miss("Ir", ir_x)
+        live_miss, live_note = live_floor_verdict(
+            live_x, bands[1], live_residual_pct(model["live"], measurement.cpu)
+        )
+    else:
+        ir_miss = shortfall_miss("Ir", ir_x, 0.0, pin.predicted_ir_x, pin.issue)
+        live_miss, live_note = None, None
+    floor_misses.extend(miss for miss in (ir_miss, live_miss) if miss)
+    if live_note:
+        notes.append(live_note)
     if PI_FLOOR_FAILS:
         problems.extend(floor_misses)
         floor_misses = []
@@ -1105,8 +1145,9 @@ def main() -> int:
         return 1
     print(
         f"throughput gate: PASS ({len(verdicts)} configs: Ir grew at most "
-        f"{IR_TOLERANCE_PCT} %, the Pi windows predicted at or above "
-        f"{PI_FLOOR_X}x or their pinned shortfalls, within their bands)"
+        f"{IR_TOLERANCE_PCT} %, Ir predicts the Pi window at or above "
+        f"{PI_FLOOR_X}x or its pinned shortfall, and no live prediction misses "
+        "it even at its optimistic bound)"
     )
     return 0
 

@@ -353,6 +353,59 @@ struct ErrorPatch {
     level_rounding: f64,
 }
 
+/// One order's error `P − S` on one sub-interval of the domain as
+/// monomial coefficients in the sub-interval's `y ∈ [−1, 1]`, with the
+/// rounding of everything up to them.
+struct ErrorPolynomial {
+    coefficients: [f64; EXACT_CAPACITY],
+    len: usize,
+    from: f64,
+    to: f64,
+    rounding: f64,
+}
+
+/// What [`ErrorPolynomial::proven_by_magnitude`] inflates its bound by,
+/// against the roundings of the sums it and the hull compute: each is a
+/// few dozen operations, under `10⁻¹³` of itself.
+const MAGNITUDE_BOUND_INFLATION: f64 = 1e-9;
+
+impl ErrorPolynomial {
+    /// Whether the hull would prove the patch at its first look, settled
+    /// without the Bernstein conversion. Every Bernstein coefficient of
+    /// `yᵏ` on `[−1, 1]` is an average of products of `k` ends `±1`, so
+    /// each control of the error lies within `Σ|eₖ|` of zero. The
+    /// conversion computes them within its rounding bound
+    /// `γ·max ᵢ termsᵢ`, and the terms' Bernstein form of `Σ|eₖ|(2v+1)ᵏ`,
+    /// whose monomial coefficients are non-negative, peaks at its last
+    /// control `Σ|eₖ|3ᵏ`. So the hull's first test, its largest control
+    /// plus the rounding and that conversion bound within the budget,
+    /// passes whenever `Σ|eₖ| + 2γΣ|eₖ|3ᵏ` plus the rounding does: a patch
+    /// passing this would have been proven, and skipping it changes no
+    /// verdict.
+    fn proven_by_magnitude(&self, budget: f64) -> bool {
+        let (mut monomial, mut tripled, mut power) = (0.0, 0.0, 1.0);
+        for coefficient in &self.coefficients[..self.len] {
+            monomial += coefficient.abs();
+            tripled += coefficient.abs() * power;
+            power *= 3.0;
+        }
+        let conversion = ExactRounding::gamma(CONVERSION_DEPTH) * tripled;
+        (monomial + 2.0 * conversion + self.rounding) * (1.0 + MAGNITUDE_BOUND_INFLATION) <= budget
+    }
+
+    fn patch(&self) -> ErrorPatch {
+        let (controls, conversion) = bernstein(&self.coefficients[..self.len]);
+        let largest = controls.iter().fold(0.0_f64, |m, c| m.max(c.abs()));
+        ErrorPatch {
+            level_rounding: ExactRounding::gamma(controls.len()) * largest,
+            controls,
+            from: self.from,
+            to: self.to,
+            rounding: self.rounding + conversion,
+        }
+    }
+}
+
 /// What a fit's error from `sub` in derivative `order` may reach, `None`
 /// where it is not held: inside an unshaped leader's square-root onset the
 /// acceleration is exempt and the velocity holds the step's allowance.
@@ -365,17 +418,17 @@ fn piece_budget(sub: &ExactPiece, order: usize, budget: HullBudget) -> Option<f6
     }
 }
 
-/// Every sub-interval's error patch for `order` beside its budget, the
-/// fitted piece's derivatives already taken; `held` the budget of each
+/// Every sub-interval's error polynomial for `order` beside its budget,
+/// the fitted piece's derivatives already taken; `held` the budget of each
 /// sub-interval, `None` for one whose error is not held.
-fn error_patches<'a>(
+fn error_polynomials<'a>(
     exact: &'a [ExactPiece],
     piece: FittedPiece<'a>,
     derivative: &'a [f64],
     domain: (f64, f64),
     order: usize,
     held: impl Fn(&ExactPiece) -> Option<f64> + 'a,
-) -> impl Iterator<Item = (ErrorPatch, f64)> + 'a {
+) -> impl Iterator<Item = (ErrorPolynomial, f64)> + 'a {
     let h = piece.t1 - piece.t0;
     let u_of = move |t: f64| 2.0 * (t - piece.t0) / h - 1.0;
     exact.iter().filter_map(move |sub| {
@@ -394,26 +447,20 @@ fn error_patches<'a>(
             half / sub.radius,
         );
         let len = fitted.len.max(truth.len).max(1);
-        let mut error = [0.0; EXACT_CAPACITY];
+        let mut coefficients = [0.0; EXACT_CAPACITY];
         let mut subtraction = 0.0;
-        for (power, slot) in error[..len].iter_mut().enumerate() {
+        for (power, slot) in coefficients[..len].iter_mut().enumerate() {
             let (p, s) = (fitted.coefficients[power], truth.coefficients[power]);
             *slot = p - s;
             subtraction += f64::EPSILON * 0.5 * (p.abs() + s.abs());
         }
-        let (controls, conversion) = bernstein(&error[..len]);
-        let largest = controls.iter().fold(0.0_f64, |m, c| m.max(c.abs()));
         Some((
-            ErrorPatch {
-                level_rounding: ExactRounding::gamma(controls.len()) * largest,
-                controls,
+            ErrorPolynomial {
+                coefficients,
+                len,
                 from,
                 to,
-                rounding: signal.rounding
-                    + fitted.rounding
-                    + truth.rounding
-                    + subtraction
-                    + conversion,
+                rounding: signal.rounding + fitted.rounding + truth.rounding + subtraction,
             },
             budget,
         ))
@@ -439,7 +486,11 @@ pub(crate) fn first_unproven(
     for order in [0, 1, 2] {
         let derivative = piece_derivative(piece.mono_u, order, h);
         let held = |sub: &ExactPiece| piece_budget(sub, order, budget);
-        for (patch, limit) in error_patches(exact, piece, &derivative, domain, order, held) {
+        for (error, limit) in error_polynomials(exact, piece, &derivative, domain, order, held) {
+            if error.proven_by_magnitude(limit) {
+                continue;
+            }
+            let patch = error.patch();
             if let Some(t) = first_unproven_patch(
                 &patch.controls,
                 (patch.from, patch.to),
@@ -494,8 +545,11 @@ pub(crate) fn error_bounds(
     [0, 1, 2].map(|order| {
         let budget = budgets[order];
         let held = |sub: &ExactPiece| sub.bounds(order).then_some(budget);
-        error_patches(exact, piece, &derivatives[order], domain, order, held)
-            .map(|(patch, budget)| patch_bound(&patch.controls, &patch, budget, 0))
+        error_polynomials(exact, piece, &derivatives[order], domain, order, held)
+            .map(|(error, budget)| {
+                let patch = error.patch();
+                patch_bound(&patch.controls, &patch, budget, 0)
+            })
             .fold(0.0_f64, f64::max)
     })
 }

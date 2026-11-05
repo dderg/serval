@@ -78,6 +78,7 @@ def production_toolhead(engine, position):
     toolhead.printer = printer
     toolhead.reactor = printer.get_reactor()
     toolhead.mcu = FakeMcu(printer=printer, handle=1, est_print_time=1.0)
+    toolhead.all_mcus = [toolhead.mcu]
     toolhead.motion_lead = 0.25
     toolhead.engine = engine
     toolhead._engine_wakeup = None
