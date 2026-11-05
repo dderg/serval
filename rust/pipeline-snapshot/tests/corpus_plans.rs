@@ -71,7 +71,7 @@ fn plan_case(case: &corpus::Case) -> Outcome {
                         accuracy.lost.len()
                     ));
                 }
-                if let Some((at, miss, budget)) = accuracy.over_budget.first() {
+                if let Some((at, miss, budget, _)) = accuracy.over_budget.first() {
                     outcome.failures.push(format!(
                         "{}: the shaped path misses {} extruding vertices past their corner \
                          budget, first {at:?} by {miss:.4} mm against {budget:.4} mm",

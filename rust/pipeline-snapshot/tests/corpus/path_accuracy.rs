@@ -145,12 +145,15 @@ pub struct PathAccuracy {
     /// The extruding vertex whose miss takes the largest share of its
     /// budget: the share and where.
     pub worst_share: (f64, Point),
+    /// The largest share of its budget an extruding vertex's miss takes,
+    /// per turn band.
+    pub worst_share_by_band: [f64; TURN_BANDS_DEG.len()],
     /// Indexed `[motion][turn band]`.
     pub bands: [[Band; TURN_BANDS_DEG.len()]; 3],
     pub lost: Vec<Point>,
     /// Extruding vertices missed by more than their budget: where, the
-    /// miss and the budget.
-    pub over_budget: Vec<(Point, f64, f64)>,
+    /// miss, the budget and the vertex's own turn in degrees.
+    pub over_budget: Vec<(Point, f64, f64, f64)>,
 }
 
 impl PathAccuracy {
@@ -424,6 +427,7 @@ pub fn audit(snapshot: &Snapshot, gcode: &str, config: &Path) -> Option<PathAccu
     let mut report = PathAccuracy {
         budget: budget.budget,
         worst_share: (0.0, [0.0; SPATIAL_AXES]),
+        worst_share_by_band: [0.0; TURN_BANDS_DEG.len()],
         bands: [[Band::EMPTY; TURN_BANDS_DEG.len()]; 3],
         lost: Vec::new(),
         over_budget: Vec::new(),
@@ -467,11 +471,14 @@ pub fn audit(snapshot: &Snapshot, gcode: &str, config: &Path) -> Option<PathAccu
         if motion == Motion::Extruding {
             let granted = granted_at(vertex);
             let share = nearest[vertex] / granted;
+            report.worst_share_by_band[band] = report.worst_share_by_band[band].max(share);
             if share > report.worst_share.0 {
                 report.worst_share = (share, at);
             }
             if nearest[vertex] > granted * (1.0 + BUDGET_SLACK) + budget.fit_tolerance_mm {
-                report.over_budget.push((at, nearest[vertex], granted));
+                report
+                    .over_budget
+                    .push((at, nearest[vertex], granted, turn_deg));
             }
         }
     }
