@@ -47,7 +47,15 @@ struct Audited {
     extruder: Vec<String>,
 }
 
+/// Held across an audited replay: the fit audit gathers violations from
+/// every thread into one list, so two replays at once would take each
+/// other's — or drop them — when the tests share a process.
+static AUDITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn audited(cases: Vec<(String, String, PathBuf)>) -> Audited {
+    let _auditing = AUDITING
+        .lock()
+        .expect("an audited replay panicked while auditing");
     let mut audited = Audited::default();
     for (name, gcode, config) in cases {
         take_violations();

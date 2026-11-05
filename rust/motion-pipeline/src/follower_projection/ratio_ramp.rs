@@ -643,12 +643,7 @@ impl WidthField {
 
     /// Makes `sample` a node of target `base` scaled to the ramp time
     /// there, or the width the seams around ask for if wider, once it lies
-    /// far enough past the last node kept in time and along the path. A
-    /// node the cone of a rest holds at zero width — the grid's first tick
-    /// on the rest point a stream or dwell opens on — opens no window, so
-    /// it spaces no node after it: thinning behind it would leave a motion
-    /// shorter than half a ramp time between two rests without a single
-    /// open node, and a ratio step in it unramped.
+    /// far enough past the last node kept in time and along the path.
     fn keep_if_due(&mut self, sample: TimeSample, base: f64) {
         let ramp_time = self.ramp_time_at(sample.t);
         let target =
@@ -659,8 +654,7 @@ impl WidthField {
         });
         if due {
             self.push(sample.s, target);
-            let opens_a_window = self.nodes.last().is_some_and(|node| node.envelope > 0.0);
-            self.last_kept = opens_a_window.then_some(KeptNode {
+            self.last_kept = Some(KeptNode {
                 t: sample.t,
                 s: sample.s,
                 ramp_time,
@@ -701,8 +695,12 @@ impl WidthField {
     /// leave no time sample in between, and `h` would be zero all along the
     /// path they cover: a ratio step there would step the follower's
     /// velocity. A node halfway along it, its target half that path as a
-    /// sample's base, opens the widest window the rests' cones allow.
+    /// sample's base, opens the widest window the rests' cones allow. A
+    /// sample kept on the rest point itself stacks on the rest and closes to
+    /// zero width with it, so it is dropped first and leaves the path it
+    /// came after to the halfway node.
     fn push_rest(&mut self, s: f64) {
+        self.drop_samples_stacking_on(s);
         let Some(&last) = self.nodes.last() else {
             return self.push(s, 0.0);
         };
@@ -721,30 +719,69 @@ impl WidthField {
         }
     }
 
-    /// A node within [`REST_TARGET_MM`] past the last one stacks on it: the
-    /// leaders cover no more between them than the fit's back-and-forth
+    fn drop_samples_stacking_on(&mut self, rest: f64) {
+        while self.nodes.len() > self.final_prefix
+            && self
+                .nodes
+                .last()
+                .is_some_and(|last| last.target > 0.0 && rest <= last.s + REST_TARGET_MM)
+        {
+            self.nodes.pop();
+        }
+    }
+
+    /// A node within [`REST_TARGET_MM`] past the last one stacks with it:
+    /// the leaders cover no more between them than the fit's back-and-forth
     /// around a rest, and a node a rounding short of a rest would take the
     /// rest's cone as a sliver of an envelope that the smootherstep
     /// flattens onto, narrowing every window short of the rest to as much.
+    /// The stack sits where the leaders rest: a rest pulls the moving nodes
+    /// stacked short of it onto itself, as the window must close exactly
+    /// there whatever the leaders do after.
     fn push(&mut self, s: f64, target: f64) {
-        let s = self.nodes.last().map_or(s, |last| {
-            assert!(
-                s >= last.s - SPAN_LOOKUP_SLACK_MM,
-                "a ratio ramp width node at {s} mm falls behind the last one at {} mm",
-                last.s
-            );
-            if s <= last.s + REST_TARGET_MM {
-                last.s
-            } else {
-                s
+        let s = match self.nodes.last() {
+            None => s,
+            Some(last) => {
+                assert!(
+                    s >= last.s - SPAN_LOOKUP_SLACK_MM,
+                    "a ratio ramp width node at {s} mm falls behind the last one at {} mm",
+                    last.s
+                );
+                if s > last.s + REST_TARGET_MM {
+                    s
+                } else if target == 0.0 && s > last.s {
+                    self.pull_moving_stack_onto_rest(s);
+                    s
+                } else {
+                    last.s
+                }
             }
-        });
+        };
         self.nodes.push(WidthNode {
             s,
             target,
             envelope: target,
         });
         self.settle(self.nodes.len() - 1);
+    }
+
+    fn pull_moving_stack_onto_rest(&mut self, rest: f64) {
+        let stacked_at = self.nodes.last().expect("a stack to pull").s;
+        let moving = self
+            .nodes
+            .iter()
+            .rev()
+            .take_while(|node| node.s == stacked_at && node.envelope > 0.0)
+            .count();
+        let first_pulled = self.nodes.len() - moving;
+        assert!(
+            moving == 0 || first_pulled >= self.final_prefix,
+            "a rest at {rest} mm would pull the final ratio ramp width node at {stacked_at} mm \
+             onto itself"
+        );
+        for node in &mut self.nodes[first_pulled..] {
+            node.s = rest;
+        }
     }
 
     fn cone(&self, from: usize, to: usize) -> f64 {
@@ -1049,14 +1086,6 @@ impl RatioSmoothing {
     /// Nothing to smooth: the table has no seam and no slope.
     pub(super) fn is_inert(&self) -> bool {
         self.seams.is_empty() && self.base_slope.unwrap_or(0.0) == 0.0
-    }
-
-    /// Where on the path the last segment still waiting on the smoothing
-    /// ends.
-    pub(super) fn backlog_end(&self) -> Option<f64> {
-        self.backlog
-            .back()
-            .map(|segment| segment.s_start + segment.s_length)
     }
 
     /// No window may reach back past `s`: the leaders rest there, or the
@@ -1364,14 +1393,43 @@ impl RatioSmoothing {
         &self.seams[first..last.max(first)]
     }
 
-    /// Whether the smoothing changes anything over `[lo, hi]`.
+    /// The table's slope just past `s`, as the seams laid so far leave it.
+    fn slope_left_of(&self, s: f64) -> f64 {
+        self.seams
+            .partition_point(|seam| seam.s <= s)
+            .checked_sub(1)
+            .map_or(self.base_slope.unwrap_or(0.0), |last| {
+                self.seams[last].slope_after
+            })
+    }
+
+    /// Whether the smoothing changes anything over `[lo, hi]`: the table
+    /// slopes where the windows there open, or a window there reaches a
+    /// seam. `s ± h(s)` grows along the path (`|h'| < 1`), so a seam
+    /// outside the stretch is reached from the stretch's end nearer it, if
+    /// at all, and one inside from itself, unless the leaders rest on it,
+    /// where no window reaches it. Only the width over the stretch decides,
+    /// never what is laid past it.
     pub(super) fn touches(&self, lo: f64, hi: f64) -> bool {
         if self.is_inert() {
             return false;
         }
+        let (back, ahead) = (lo - self.reach_back(lo), hi + self.reach_back(hi));
+        if self.slope_left_of(back) != 0.0 {
+            return true;
+        }
         let (widest, _) = self.width.bounds(lo, hi);
-        self.base_slope.unwrap_or(0.0) != 0.0
-            || !self.seams_near(lo - widest, hi + widest).is_empty()
+        self.seams_near(lo - widest, hi + widest)
+            .iter()
+            .any(|seam| {
+                if seam.s < lo {
+                    seam.s > back
+                } else if seam.s > hi {
+                    seam.s < ahead
+                } else {
+                    self.reach_back(seam.s) > 0.0
+                }
+            })
     }
 
     /// `(max |r̃|, max |r̃'|)` over `[lo, hi]`, see [`RatioSmoothing`].
@@ -1438,12 +1496,14 @@ impl RatioSmoothing {
 
     /// Where over `[lo, hi]` the smoothed ratio's curvature, or the
     /// advance's read weight, bends: where each seam enters and leaves a
-    /// window, the width nodes, and the valley ends. A window edge lies on
-    /// its side of the seam clamped to the nodes, so one that side puts
-    /// outside `[lo, hi]` is not searched for.
+    /// window, the width nodes, and the valley ends. A stretch the smoothing
+    /// does not touch bends only at valley ends, whatever the smoothing
+    /// holds elsewhere. A window edge lies on its side of the seam clamped
+    /// to the nodes, so one that side puts outside `[lo, hi]` is not
+    /// searched for.
     pub(super) fn bends(&self, lo: f64, hi: f64) -> Vec<f64> {
         let mut bends: Vec<f64> = self.valley_ends(lo, hi).collect();
-        if self.is_inert() {
+        if !self.touches(lo, hi) {
             return bends;
         }
         let (widest, _) = self.width.bounds(lo, hi);
@@ -2218,11 +2278,11 @@ fn peak_ratio_within(spans: &[RatioSpan], s: f64, reach: f64) -> f64 {
 /// fit's rounding, far under the rate times this.
 const TURNAROUND_SPEED_TIME_S: f64 = 1e-6;
 /// Probes a ramp's crossing is searched with for the leaders' fastest
-/// speed and acceleration.
+/// speed, acceleration and jerk.
 const CROSSING_PROBES: usize = 16;
 
-/// How the leaders cross a seam: their path speed and the magnitudes of its
-/// first two rates.
+/// How the leaders cross a seam: their path speed, the magnitude of its
+/// rate, and how steeply that rate changes.
 #[derive(Debug, Clone, Copy)]
 struct Crossing {
     speed: f64,
@@ -2231,52 +2291,88 @@ struct Crossing {
 }
 
 impl Crossing {
-    /// Where the speed is a zero's rounding — at rest, or at a turnaround,
-    /// under what [`TURNAROUND_SPEED_TIME_S`] of the acceleration builds —
-    /// its direction is rounding too, and so is the tangential acceleration
-    /// read along it. The speed leaves a zero at the whole acceleration.
-    fn at(leaders: &ShapedLeaders, t: f64) -> Self {
+    /// The leaders' path speed at `t` and their path acceleration, signed,
+    /// as they leave `t`. Where the speed is a zero's rounding — at rest,
+    /// or at a turnaround, under what [`TURNAROUND_SPEED_TIME_S`] of the
+    /// acceleration builds — its direction is rounding too, and so is the
+    /// tangential acceleration read along it: the speed leaves a zero at
+    /// the whole acceleration.
+    fn speed_and_path_accel(leaders: &ShapedLeaders, t: f64) -> (f64, f64) {
         let motion = leaders.motion(t);
         let speed = motion.speed();
         let accel = motion.accel_norm();
-        let (rate, jerk) = if speed > accel * TURNAROUND_SPEED_TIME_S {
-            (
-                motion.speed_deriv(speed).abs(),
-                motion
-                    .speed_second(speed)
-                    .unwrap_or_else(|| leaders.speed_second(t, speed))
-                    .abs(),
-            )
+        if speed > accel * TURNAROUND_SPEED_TIME_S {
+            (speed, motion.speed_deriv(speed))
         } else {
-            (accel, 0.0)
-        };
-        Self { speed, rate, jerk }
-    }
-
-    /// How a valley at `t` reads the leaders crossing it: as [`Self::at`],
-    /// but a crawl, under [`ADVANCE_VALLEY_SPEED_MM_S`], they leave under
-    /// the whole of their acceleration, mostly across the path where they
-    /// nearly reverse, not the path speed's rate at its minimum.
-    fn valley_at(leaders: &ShapedLeaders, t: f64) -> Self {
-        let crossing = Self::at(leaders, t);
-        if crossing.speed < ADVANCE_VALLEY_SPEED_MM_S {
-            Self {
-                rate: leaders.motion(t).accel_norm(),
-                ..crossing
-            }
-        } else {
-            crossing
+            (speed, accel)
         }
     }
 
-    /// The fastest and the most accelerating the leaders are over `window`.
+    /// How a valley at `t` reads the leaders crossing it, with the jerk
+    /// [`Self::needs_valley`] weighs: the path speed's second rate at `t`,
+    /// which carries the tangent's turning `a⊥²/v` through a crawl. Under
+    /// [`ADVANCE_VALLEY_SPEED_MM_S`] they leave under the whole of their
+    /// acceleration, mostly across the path where they nearly reverse, not
+    /// the path speed's rate at its minimum.
+    fn valley_at(leaders: &ShapedLeaders, t: f64) -> Self {
+        let motion = leaders.motion(t);
+        let speed = motion.speed();
+        let accel = motion.accel_norm();
+        if speed <= accel * TURNAROUND_SPEED_TIME_S {
+            return Self {
+                speed,
+                rate: accel,
+                jerk: 0.0,
+            };
+        }
+        let rate = if speed < ADVANCE_VALLEY_SPEED_MM_S {
+            accel
+        } else {
+            motion.speed_deriv(speed).abs()
+        };
+        let jerk = motion
+            .speed_second(speed)
+            .unwrap_or_else(|| leaders.speed_second(t, speed))
+            .abs();
+        Self { speed, rate, jerk }
+    }
+
+    /// The fastest and the most accelerating the leaders are over `window`,
+    /// and the steepest their path acceleration changes there.
+    ///
+    /// The jerk is the largest mean over the intervals between probes, the
+    /// change in path acceleration across one over its length `Δt`. The
+    /// leaders are a fit, which holds their acceleration within its
+    /// tolerance `A` but leaves their jerk free: a sliver piece may carry
+    /// any, and where the fit lays one depends on how the shaper batched
+    /// it. The mean is within `2A/Δt` of the leaders' own whatever pieces
+    /// the fit lays. A window of no length spans no interval and meets no
+    /// jerk.
     fn over(leaders: &ShapedLeaders, (from, until): (f64, f64)) -> Self {
-        (0..=CROSSING_PROBES).fold(Self::at(leaders, from), |widest, index| {
-            widest.widest(Self::at(
-                leaders,
-                from + (until - from) * index as f64 / CROSSING_PROBES as f64,
-            ))
-        })
+        let probe_at = |index: usize| from + (until - from) * index as f64 / CROSSING_PROBES as f64;
+        let (speed, path_accel) = Self::speed_and_path_accel(leaders, from);
+        let mut widest = Self {
+            speed,
+            rate: path_accel.abs(),
+            jerk: 0.0,
+        };
+        let mut previous = (from, path_accel);
+        for index in 1..=CROSSING_PROBES {
+            let at = probe_at(index);
+            let (speed, path_accel) = Self::speed_and_path_accel(leaders, at);
+            let jerk = if at > previous.0 {
+                (path_accel - previous.1).abs() / (at - previous.0)
+            } else {
+                0.0
+            };
+            widest = widest.widest(Self {
+                speed,
+                rate: path_accel.abs(),
+                jerk,
+            });
+            previous = (at, path_accel);
+        }
+        widest
     }
 
     fn widest(self, other: Self) -> Self {
