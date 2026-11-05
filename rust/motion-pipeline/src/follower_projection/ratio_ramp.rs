@@ -16,7 +16,7 @@ mod models;
 
 pub(super) use jet::Jet;
 use jet::{horner, horner_with_slope};
-pub(super) use models::{REACH_INSET_ULPS, ValleyWeight, narrow_floats};
+pub(super) use models::{PathReach, REACH_INSET_ULPS, ValleyWeight, narrow_floats};
 
 /// `max |h'|` the width reaches: `3·ENVELOPE_SLOPE` rising off a rest,
 /// `1.875·ENVELOPE_SLOPE` between two moving nodes.
