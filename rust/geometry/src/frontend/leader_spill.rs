@@ -1,7 +1,43 @@
+use std::sync::{Arc, LazyLock, Mutex};
+
 use nurbs::algebra::PiecewisePolynomialKernel;
 
 /// How many cells [`LeaderSpill`] tabulates the leaders' kernels over.
 pub const SPILL_CELLS: usize = 16;
+
+/// The spills the configurations built so far hold, each once: every
+/// move's caps name theirs by [`LeaderSpillId`] instead of carrying the
+/// table.
+static SPILLS: LazyLock<Mutex<Vec<Arc<LeaderSpill>>>> =
+    LazyLock::new(|| Mutex::new(vec![Arc::new(LeaderSpill::UNSHAPED)]));
+
+fn spills() -> std::sync::MutexGuard<'static, Vec<Arc<LeaderSpill>>> {
+    SPILLS
+        .lock()
+        .expect("a thread registering a leader spill panicked")
+}
+
+/// A [`LeaderSpill`] the moves' caps share.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaderSpillId(u32);
+
+impl LeaderSpillId {
+    pub const UNSHAPED: Self = Self(0);
+
+    #[must_use]
+    pub fn spill(self) -> Arc<LeaderSpill> {
+        Arc::clone(&spills()[self.0 as usize])
+    }
+
+    /// The spill bounding both `self` and `other` ([`LeaderSpill::wider`]).
+    #[must_use]
+    pub(super) fn wider(self, other: Self) -> Self {
+        if self == other {
+            return self;
+        }
+        self.spill().wider(&other.spill()).registered()
+    }
+}
 
 /// What the leaders' kernels make of the planned speed about a moment.
 ///
@@ -47,11 +83,11 @@ impl LeaderSpill {
     };
 
     /// The spill of the shaped leaders' `kernels`, the unshaped one without
-    /// any.
+    /// any, shared by every move whose caps carry it.
     #[must_use]
-    pub fn of_kernels(kernels: &[&PiecewisePolynomialKernel]) -> Self {
+    pub fn of_kernels(kernels: &[&PiecewisePolynomialKernel]) -> LeaderSpillId {
         if kernels.is_empty() {
-            return Self::UNSHAPED;
+            return LeaderSpillId::UNSHAPED;
         }
         let reach = kernels
             .iter()
@@ -84,7 +120,7 @@ impl LeaderSpill {
                 spill.spill_within_s[cell] = spill.spill_within_s[cell].min(integral);
             }
         }
-        spill
+        spill.registered()
     }
 
     /// The fastest the shaped path moves at a moment the planned path
@@ -107,11 +143,7 @@ impl LeaderSpill {
     /// The spill bounding both `self` and `other`: the larger mass and
     /// moment, and the least `W` and `Φ` either tells at the ends of the
     /// wider cells.
-    #[must_use]
-    pub(super) fn wider(self, other: Self) -> Self {
-        if self == other {
-            return self;
-        }
+    fn wider(&self, other: &Self) -> Self {
         let cell_s = self.cell_s.max(other.cell_s);
         let end = |cell: usize| (cell + 1) as f64 * cell_s;
         Self {
@@ -130,6 +162,19 @@ impl LeaderSpill {
                     .min(other.least_spill_within(end(cell)))
             }),
         }
+    }
+
+    /// The id of the one registered copy of this spill.
+    fn registered(self) -> LeaderSpillId {
+        let mut spills = spills();
+        let index = match spills.iter().position(|spill| **spill == self) {
+            Some(index) => index,
+            None => {
+                spills.push(Arc::new(self));
+                spills.len() - 1
+            }
+        };
+        LeaderSpillId(u32::try_from(index).expect("fewer than 2³² distinct leader spills"))
     }
 
     pub(super) fn check(&self) -> Result<(), &'static str> {

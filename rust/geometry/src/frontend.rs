@@ -3,7 +3,7 @@ use crate::path::{Line, PathSegment, Segment};
 use crate::segment::{FollowerDemand, SourceRange};
 
 mod leader_spill;
-pub use leader_spill::{LeaderSpill, SPILL_CELLS};
+pub use leader_spill::{LeaderSpill, LeaderSpillId, SPILL_CELLS};
 
 const DISPLACEMENT_EPSILON: f64 = 1e-9;
 
@@ -82,7 +82,7 @@ pub struct ExtruderCaps {
     /// What the kernels of the spatial axes the follower follows make of
     /// the planned speed (see [`LeaderSpill`]): the planner bounds the
     /// shaped speed at a ratio step with it.
-    pub leader_spill: LeaderSpill,
+    pub leader_spill: LeaderSpillId,
     /// How far either side of an instant the kernels of the leaders the
     /// follower rides reach: the shaped path there averages the planned
     /// path within it.
@@ -171,7 +171,7 @@ impl ExtruderCaps {
         if !(self.own_jerk_per_accel_hz >= 0.0) {
             return Err("the follower kernel's jerk gain must be non-negative");
         }
-        self.leader_spill.check()?;
+        self.leader_spill.spill().check()?;
         if !(self.leader_kernel_reach_s.is_finite() && self.leader_kernel_reach_s >= 0.0) {
             return Err("the leaders' kernel reach must be finite and non-negative");
         }

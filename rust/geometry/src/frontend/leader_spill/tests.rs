@@ -68,7 +68,7 @@ fn kernels() -> Vec<(&'static str, PiecewisePolynomialKernel)> {
 #[test]
 fn the_spill_bounds_the_shaped_speed_and_never_exceeds_the_linear_bound() {
     for (name, kernel) in kernels() {
-        let spill = LeaderSpill::of_kernels(&[&kernel]);
+        let spill = LeaderSpill::of_kernels(&[&kernel]).spill();
         let (mass, moment) = kernel.absolute_moments();
         for accel in ACCELS {
             for planned in (0..=30).map(|step| CEILING * f64::from(step) / 30.0) {
@@ -91,7 +91,7 @@ fn the_spill_bounds_the_shaped_speed_and_never_exceeds_the_linear_bound() {
 #[test]
 fn the_shaped_speed_reaches_the_ceilings_spill_and_slopes_off_strictly_below_it() {
     for (name, kernel) in kernels() {
-        let spill = LeaderSpill::of_kernels(&[&kernel]);
+        let spill = LeaderSpill::of_kernels(&[&kernel]).spill();
         for accel in ACCELS {
             assert_eq!(
                 spill.shaped_speed(CEILING, CEILING, accel),
@@ -111,7 +111,7 @@ fn the_shaped_speed_reaches_the_ceilings_spill_and_slopes_off_strictly_below_it(
 #[test]
 fn the_bound_overshoots_the_shaped_speed_by_at_most_a_cells_spill() {
     for (name, kernel) in kernels() {
-        let spill = LeaderSpill::of_kernels(&[&kernel]);
+        let spill = LeaderSpill::of_kernels(&[&kernel]).spill();
         for accel in ACCELS {
             for planned in (0..=30).map(|step| CEILING * f64::from(step) / 30.0) {
                 let bound = spill.shaped_speed(planned, CEILING, accel);
@@ -129,7 +129,9 @@ fn the_bound_overshoots_the_shaped_speed_by_at_most_a_cells_spill() {
 fn an_unshaped_path_moves_at_its_planned_speed() {
     for accel in ACCELS {
         for planned in [0.0, 37.0, CEILING] {
-            let shaped = LeaderSpill::UNSHAPED.shaped_speed(planned, CEILING, accel);
+            let shaped = LeaderSpillId::UNSHAPED
+                .spill()
+                .shaped_speed(planned, CEILING, accel);
             assert!(
                 (shaped - planned).abs() <= 1e-12 * CEILING,
                 "{shaped} against {planned}"
@@ -142,17 +144,14 @@ fn an_unshaped_path_moves_at_its_planned_speed() {
 fn a_wider_spill_bounds_both() {
     let narrow = LeaderSpill::of_kernels(&[&boxed(0.003)]);
     let wide = LeaderSpill::of_kernels(&[&lobed(0.008)]);
-    for (a, b) in [
-        (narrow, wide),
-        (wide, narrow),
-        (narrow, LeaderSpill::UNSHAPED),
-    ] {
-        let wider = a.wider(b);
+    let unshaped = LeaderSpillId::UNSHAPED;
+    for (a, b) in [(narrow, wide), (wide, narrow), (narrow, unshaped)] {
+        let wider = a.wider(b).spill();
         assert!(wider.check().is_ok(), "{wider:?}");
         for accel in ACCELS {
             for planned in (0..=30).map(|step| CEILING * f64::from(step) / 30.0) {
                 let bound = wider.shaped_speed(planned, CEILING, accel);
-                for spill in [a, b] {
+                for spill in [a.spill(), b.spill()] {
                     assert!(bound >= spill.shaped_speed(planned, CEILING, accel) - 1e-9 * CEILING);
                 }
             }

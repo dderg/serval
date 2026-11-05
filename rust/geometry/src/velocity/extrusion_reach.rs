@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use crate::Move;
-use crate::frontend::{ExtruderCaps, LeaderSpill};
+use crate::frontend::{ExtruderCaps, LeaderSpillId};
 use crate::path::CurvatureProfile;
 use crate::ratio_ramp::{RATIO_RAMP_MAX_TIME_S, rest_room_reach_mm};
 
@@ -33,7 +33,7 @@ pub(super) fn extruding_ratio(m: &Move, axis: usize) -> f64 {
 struct Reach {
     axis: usize,
     spill_s: f64,
-    leader_spill: LeaderSpill,
+    leader_spill: LeaderSpillId,
 }
 
 impl Reach {
@@ -421,7 +421,7 @@ impl Marks {
     /// none is. `None` while moves still to come could bring one near.
     fn rest_room(&self, index: usize, reach: Reach, fastest: f64, closed: bool) -> Option<f64> {
         let mark = self.marks[index];
-        let narrows_within = rest_room_reach_mm(reach.leader_spill.mass * fastest);
+        let narrows_within = rest_room_reach_mm(reach.leader_spill.spill().mass * fastest);
         let behind = mark.start_mm - mark.rest_behind_mm;
         let first_ahead = self.rests_mm.partition_point(|&rest| rest < mark.start_mm);
         let ahead = match self.rests_mm.get(first_ahead) {

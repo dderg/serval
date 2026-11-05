@@ -1,5 +1,7 @@
 use super::extrusion_reach::ExtrusionBudget;
 use crate::frontend::ExtruderCaps;
+use std::sync::Arc;
+
 use crate::frontend::LeaderSpill;
 use crate::path::{CurvatureProfile, Segment};
 use crate::ratio_ramp::{RatioStep, StepCrossing};
@@ -267,7 +269,7 @@ pub(super) fn ratio_step_ceiling(
 /// ([`extruder_capped`]). A retraction answers to the extrude-only caps
 /// instead.
 struct StepFlow {
-    spill: LeaderSpill,
+    spill: Arc<LeaderSpill>,
     peak_ratio: f64,
     fastest: f64,
     advance_mm_s: f64,
@@ -287,7 +289,7 @@ impl StepFlow {
             caps.max_velocity_mm_s / budgeted_ratio(peak_ratio)
         };
         Self {
-            spill: caps.leader_spill,
+            spill: caps.leader_spill.spill(),
             peak_ratio,
             fastest,
             advance_mm_s,
