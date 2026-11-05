@@ -2644,7 +2644,17 @@ removed; setting it is a config error.</p>
 leaders' path, as Klipper advances only extruding moves that travel, so
 retracts, primes and other extrude-only moves keep their own motion and
 their extrude-only caps; with a kernel, the advance is fitted into that
-extrusion before the kernel smooths it. Where the leaders turn around (a
+extrusion before the kernel smooths it. A retract the toolhead makes while
+it moves (a wipe: a negative extrusion ratio along the path) is a retract
+too, and is not advanced: the advance reads the laid ratio held at zero
+wherever it is negative, ramped along the path exactly as the laid ratio
+is, so it releases the lead of the extrusion before a wipe over the ramp
+into it and rebuilds the lead of the extrusion after over the ramp out of
+it, the same ramps the ratio step itself takes, with no velocity step.
+The wipe's own filament motion <code>|r|·v</code> keeps the extrude-only caps, as in
+Klipper: the velocity planner holds the move to
+<code>max_extrude_only_velocity / |r|</code> and <code>max_extrude_only_accel / |r|</code>.
+Where the leaders turn around (a
 wipe that reverses along the line) or come to rest across an extrude-only
 move or dwell, the advance drops its lead to zero exactly where their speed
 does, rising from the rest point, so the extruder never asks much more than
@@ -2751,10 +2761,13 @@ damping_ratio: 0.7
 #   Optional. Must be above 0 (mm/s). Default, as in upstream Klipper, is
 #   [printer] max_velocity * 4 * nozzle_diameter^2 / filament_area, with
 #   filament_area = pi * (filament_diameter/2)^2; no default without both
-#   diameters.
+#   diameters. As in upstream Klipper it also caps a retract the toolhead
+#   makes while it moves (a wipe): the move runs at no more than this over
+#   its retract ratio.
 #max_extrude_only_accel:
 #   Optional. Must be above 0 (mm/s^2). Default is [printer] max_accel
-#   scaled the same way.
+#   scaled the same way, and it caps a moving retract&#39;s acceleration the
+#   same way.
 </code></pre></div>
 
 <p>When using the pressure-advance compatibility command, <code>axis</code> identifies the <code>[axis &lt;name&gt;]</code> chain from which <code>linear_pressure_advance</code> (<code>k</code>) and <code>smooth_triangle</code> (<code>smooth_time</code>) targets are resolved. The compatibility command is documented in the migration guide; the configuration itself uses named post-processors.</p>
