@@ -4,7 +4,9 @@ use proptest::test_runner::FileFailurePersistence;
 
 use super::*;
 use crate::fitter::{CornerFitConfig, fit_corners, seam_requires_stop};
-use crate::frontend::{ExtruderCaps, LeaderSpill, Move, MoveContext, VelocityLimits, line_move};
+use crate::frontend::{
+    ExtruderCaps, LeaderSpill, Move, MoveContext, RestSettle, VelocityLimits, line_move,
+};
 
 const EXTRUDER_AXIS: usize = 3;
 const EXTRUDE_ONLY_V: f64 = 40.0;
@@ -88,6 +90,13 @@ fn extruder(machine: &Machine) -> ExtruderCaps {
             (-reach, reach),
         )]),
         leader_kernel_reach_s: reach,
+        rest_settle: RestSettle::of_kernels(
+            &[&PiecewisePolynomialKernel::single_poly(
+                vec![0.5 / reach],
+                (-reach, reach),
+            )],
+            0.005,
+        ),
     }
 }
 

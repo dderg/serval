@@ -38,7 +38,7 @@ fn caps_of(e: AxisDecl, decls: &[PostProcessorDecl]) -> Result<Vec<ExtruderCaps>
         .unwrap()
         .compile(&registry)
         .unwrap();
-    extruder_caps(&registry, &chains)
+    extruder_caps(&registry, &chains, 0.005)
 }
 
 fn limited(post_processors: &[&str]) -> AxisDecl {

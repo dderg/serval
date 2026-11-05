@@ -103,6 +103,60 @@ impl PiecewisePolynomialKernel {
             .fold(f64::INFINITY, f64::min)
     }
 
+    /// What `w` keeps beyond `past ≥ 0` on one side of the origin,
+    /// `ahead` (`u > past`) or behind (`u < −past`), `d` the distance
+    /// beyond: `∫|w|`, `∫|w|·d` and `∫|w|·d²/2` by the midpoint rule of
+    /// [`Self::absolute_moments`], and `|w|` at the near edge plus the
+    /// total variation of `w` over the tail, every jump and the drop to 0
+    /// past the support included.
+    #[must_use]
+    pub fn tail(&self, past: f64, ahead: bool) -> KernelTail {
+        let beyond = |u: f64| if ahead { u - past } else { -past - u };
+        let (mass, first_moment_s, half_second_moment_s2) = self
+            .absolute_steps()
+            .filter(|step| beyond(step.u) > 0.0)
+            .fold((0.0, 0.0, 0.0), |(mass, first, second), step| {
+                let d = beyond(step.u);
+                (
+                    mass + step.weight(),
+                    first + d * step.weight(),
+                    second + 0.5 * d * d * step.weight(),
+                )
+            });
+        let slope: f64 = self
+            .pieces
+            .iter()
+            .map(|piece| {
+                let slope = piece.differentiate();
+                let width = (piece.u_end - piece.u_start) / MOMENT_GRID_STEPS as f64;
+                (0..MOMENT_GRID_STEPS)
+                    .map(|step| piece.u_start + (step as f64 + 0.5) * width)
+                    .filter(|&u| beyond(u) > 0.0)
+                    .map(|u| slope.evaluate(u).abs() * width)
+                    .sum::<f64>()
+            })
+            .sum();
+        let mut breaks: Vec<f64> = self
+            .pieces
+            .iter()
+            .flat_map(|piece| [piece.u_start, piece.u_end])
+            .filter(|&u| beyond(u) > 0.0)
+            .collect();
+        breaks.sort_by(f64::total_cmp);
+        breaks.dedup();
+        let jumps: f64 = breaks
+            .into_iter()
+            .map(|u| (self.value_beside(u, true) - self.value_beside(u, false)).abs())
+            .sum();
+        let edge = if ahead { past } else { -past };
+        KernelTail {
+            mass,
+            first_moment_s,
+            half_second_moment_s2,
+            variation_per_s: self.value_beside(edge, ahead).abs() + slope + jumps,
+        }
+    }
+
     fn absolute_steps(&self) -> impl Iterator<Item = AbsoluteStep> + '_ {
         self.pieces.iter().flat_map(|piece| {
             let width = (piece.u_end - piece.u_start) / MOMENT_GRID_STEPS as f64;
@@ -205,6 +259,16 @@ impl PiecewisePolynomialKernel {
             })
             .map_or(0.0, |p| p.evaluate(u))
     }
+}
+
+/// What a kernel keeps beyond a distance from the origin on one side
+/// ([`PiecewisePolynomialKernel::tail`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KernelTail {
+    pub mass: f64,
+    pub first_moment_s: f64,
+    pub half_second_moment_s2: f64,
+    pub variation_per_s: f64,
 }
 
 /// One step of the midpoint rule over a kernel: its midpoint, `|w|` there

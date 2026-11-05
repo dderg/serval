@@ -173,3 +173,36 @@ fn kernels_whose_swings_fall_apart_vary_along_the_diagonal_by_more_than_either()
         "{variation} vs {diagonal}"
     );
 }
+
+#[test]
+fn a_box_kernel_keeps_its_tail_moments_and_its_edges_as_variation() {
+    let reach = 0.02;
+    let height = 1.0 / (2.0 * reach);
+    let kernel = PiecewisePolynomialKernel::single_poly(vec![height], (-reach, reach));
+    for ahead in [true, false] {
+        let past = 0.005;
+        let left = reach - past;
+        let tail = kernel.tail(past, ahead);
+        let close = |got: f64, want: f64| (got - want).abs() <= 1e-5 * want;
+        assert!(close(tail.mass, height * left), "{tail:?}");
+        assert!(
+            close(tail.first_moment_s, height * left * left / 2.0),
+            "{tail:?}"
+        );
+        assert!(
+            close(tail.half_second_moment_s2, height * left.powi(3) / 6.0),
+            "{tail:?}"
+        );
+        assert!(close(tail.variation_per_s, 2.0 * height), "{tail:?}");
+        let empty = kernel.tail(reach, ahead);
+        assert_eq!(
+            empty,
+            KernelTail {
+                mass: 0.0,
+                first_moment_s: 0.0,
+                half_second_moment_s2: 0.0,
+                variation_per_s: 0.0,
+            }
+        );
+    }
+}

@@ -1,6 +1,8 @@
 use nurbs::algebra::PiecewisePolynomialKernel;
 
-use crate::frontend::{ExtruderCaps, LeaderSpill, MoveContext, VelocityLimits, line_move};
+use crate::frontend::{
+    ExtruderCaps, LeaderSpill, MoveContext, RestSettle, VelocityLimits, line_move,
+};
 use crate::segment::SourceRange;
 use crate::velocity::{VelocityProfile, plan_velocity_stops, warm_start_params};
 
@@ -26,6 +28,13 @@ fn trident_like_extruder() -> ExtruderCaps {
             (-KERNEL_REACH_S, KERNEL_REACH_S),
         )]),
         leader_kernel_reach_s: KERNEL_REACH_S,
+        rest_settle: RestSettle::of_kernels(
+            &[&PiecewisePolynomialKernel::single_poly(
+                vec![0.5 / KERNEL_REACH_S],
+                (-KERNEL_REACH_S, KERNEL_REACH_S),
+            )],
+            0.005,
+        ),
     }
 }
 

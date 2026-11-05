@@ -110,6 +110,7 @@ pub geometry::frontend::ExtruderCaps::max_accel_mm_s2: f64
 pub geometry::frontend::ExtruderCaps::max_velocity_mm_s: f64
 pub geometry::frontend::ExtruderCaps::own_jerk_per_accel_hz: f64
 pub geometry::frontend::ExtruderCaps::path_jerk_per_accel_hz: [f64; 8]
+pub geometry::frontend::ExtruderCaps::rest_settle: geometry::RestSettleId
 pub geometry::frontend::ExtruderCaps::unshaped_leaders: [bool; 3]
 impl geometry::frontend::ExtruderCaps
 pub fn geometry::frontend::ExtruderCaps::path_jerk_gain(&self, [bool; 3]) -> f64
@@ -140,6 +141,33 @@ pub geometry::frontend::MoveContext::extruder_axis: usize
 pub geometry::frontend::MoveContext::feedrate_mm_s: f64
 pub geometry::frontend::MoveContext::limits: geometry::frontend::VelocityLimits
 pub geometry::frontend::MoveContext::source: geometry::segment::SourceRange
+pub struct geometry::frontend::RestSettle
+pub geometry::frontend::RestSettle::radius_mm: f64
+pub geometry::frontend::RestSettle::sides: [geometry::frontend::SettleSide; 2]
+impl geometry::RestSettle
+pub const geometry::RestSettle::UNSHAPED: Self
+pub fn geometry::RestSettle::of_kernels(&[&nurbs::algebra::PiecewisePolynomialKernel], f64) -> geometry::RestSettleId
+pub struct geometry::frontend::RestSettleId(_)
+impl geometry::RestSettleId
+pub const geometry::RestSettleId::UNSHAPED: Self
+pub fn geometry::RestSettleId::settle(self) -> alloc::rcs::arc::Arc<geometry::RestSettle>
+pub struct geometry::frontend::SettleDemand
+pub geometry::frontend::SettleDemand::advance_curvature_s2_per_mm: f64
+pub geometry::frontend::SettleDemand::advance_slope_s: f64
+pub geometry::frontend::SettleDemand::extrude_only_accel_mm_s2: f64
+pub geometry::frontend::SettleDemand::extrude_only_velocity_mm_s: f64
+pub geometry::frontend::SettleDemand::max_accel_mm_s2: f64
+pub geometry::frontend::SettleDemand::max_velocity_mm_s: f64
+pub geometry::frontend::SettleDemand::own_jerk_per_accel_hz: f64
+pub geometry::frontend::SettleDemand::ratio: f64
+pub struct geometry::frontend::SettleSide
+pub geometry::frontend::SettleSide::accel: [f64; 16]
+pub geometry::frontend::SettleSide::distance_s2: [f64; 16]
+pub geometry::frontend::SettleSide::jerk_per_s: [f64; 16]
+pub geometry::frontend::SettleSide::reach_s: f64
+pub geometry::frontend::SettleSide::speed_s: [f64; 16]
+impl geometry::frontend::SettleSide
+pub fn geometry::frontend::SettleSide::hold_s(&self, f64, f64, &geometry::SettleDemand) -> f64
 pub struct geometry::frontend::VelocityLimits
 pub geometry::frontend::VelocityLimits::accel_mm_s2: f64
 pub geometry::frontend::VelocityLimits::corner_deviation_mm: f64
@@ -153,6 +181,8 @@ pub fn geometry::frontend::VelocityLimits::try_new(f64, f64, f64, f64) -> core::
 pub fn geometry::frontend::VelocityLimits::with_extruder_caps(self, core::option::Option<geometry::frontend::ExtruderCaps>) -> core::result::Result<Self, &'static str>
 pub fn geometry::frontend::VelocityLimits::with_z_caps(self, f64, f64) -> core::result::Result<Self, &'static str>
 pub const geometry::frontend::CORNER_DEVIATION_SCV_FACTOR: f64
+pub const geometry::frontend::SETTLE_CELLS: usize
+pub const geometry::frontend::SETTLE_SHARE_OF_PATH_DEVIATION: f64
 pub const geometry::frontend::SPATIAL_AXIS_SETS: usize
 pub const geometry::frontend::SPILL_CELLS: usize
 pub fn geometry::frontend::axis_set([bool; 3]) -> usize
@@ -957,6 +987,7 @@ pub geometry::ExtruderCaps::max_accel_mm_s2: f64
 pub geometry::ExtruderCaps::max_velocity_mm_s: f64
 pub geometry::ExtruderCaps::own_jerk_per_accel_hz: f64
 pub geometry::ExtruderCaps::path_jerk_per_accel_hz: [f64; 8]
+pub geometry::ExtruderCaps::rest_settle: geometry::RestSettleId
 pub geometry::ExtruderCaps::unshaped_leaders: [bool; 3]
 impl geometry::frontend::ExtruderCaps
 pub fn geometry::frontend::ExtruderCaps::path_jerk_gain(&self, [bool; 3]) -> f64
@@ -1132,9 +1163,28 @@ pub geometry::RatioStep::jerk_mm_s3: f64
 pub geometry::RatioStep::peak_ratio: f64
 pub geometry::RatioStep::ratio_step: f64
 pub geometry::RatioStep::speed_mm_s: f64
+pub struct geometry::RestSettle
+pub geometry::RestSettle::radius_mm: f64
+pub geometry::RestSettle::sides: [geometry::frontend::SettleSide; 2]
+impl geometry::RestSettle
+pub const geometry::RestSettle::UNSHAPED: Self
+pub fn geometry::RestSettle::of_kernels(&[&nurbs::algebra::PiecewisePolynomialKernel], f64) -> geometry::RestSettleId
+pub struct geometry::RestSettleId(_)
+impl geometry::RestSettleId
+pub const geometry::RestSettleId::UNSHAPED: Self
+pub fn geometry::RestSettleId::settle(self) -> alloc::rcs::arc::Arc<geometry::RestSettle>
 pub struct geometry::Serial
 impl geometry::velocity::FanOut for geometry::velocity::Serial
 pub fn geometry::velocity::Serial::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
+pub struct geometry::SettleDemand
+pub geometry::SettleDemand::advance_curvature_s2_per_mm: f64
+pub geometry::SettleDemand::advance_slope_s: f64
+pub geometry::SettleDemand::extrude_only_accel_mm_s2: f64
+pub geometry::SettleDemand::extrude_only_velocity_mm_s: f64
+pub geometry::SettleDemand::max_accel_mm_s2: f64
+pub geometry::SettleDemand::max_velocity_mm_s: f64
+pub geometry::SettleDemand::own_jerk_per_accel_hz: f64
+pub geometry::SettleDemand::ratio: f64
 pub struct geometry::SourceRange
 pub geometry::SourceRange::end_line: u32
 pub geometry::SourceRange::start_line: u32
