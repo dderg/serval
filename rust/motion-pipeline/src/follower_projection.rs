@@ -3499,21 +3499,10 @@ impl<'a> FollowerSignal<'a> {
     }
 
     fn s_owned(&self, t: f64) -> f64 {
-        let (floor, ceiling) = self.crossing_hold(t);
-        self.s_at(t).clamp(floor, ceiling).min(self.s_owned_end)
+        self.owned_distance(t).s
     }
     fn s_owned_offset(&self, t: f64) -> f64 {
-        let (floor, ceiling) = self.crossing_hold(t);
-        let offset = self.s_offset(t);
-        let s = self.s_start + offset;
-        let held = if s < floor {
-            floor - self.s_start
-        } else if s > ceiling {
-            ceiling - self.s_start
-        } else {
-            offset
-        };
-        held.min(self.s_owned_end - self.s_start)
+        self.owned_distance(t).offset
     }
     /// The odometer readings `t` may take: at least the boundary of the
     /// last ratio crossing at or before it, below that of the next. At a
@@ -3531,11 +3520,22 @@ impl<'a> FollowerSignal<'a> {
         });
         (floor, ceiling)
     }
+    /// The odometer's reading at `t`, held to its ratio crossings
+    /// ([`Self::crossing_hold`]) and to the owned end.
     fn owned_distance(&self, t: f64) -> OdometerDistance {
+        let (floor, ceiling) = self.crossing_hold(t);
         let offset = self.s_offset(t);
+        let s = self.s_start + offset;
+        let held = if s < floor {
+            floor - self.s_start
+        } else if s > ceiling {
+            ceiling - self.s_start
+        } else {
+            offset
+        };
         OdometerDistance {
-            s: (self.s_start + offset).min(self.s_owned_end),
-            offset: offset.min(self.s_owned_end - self.s_start),
+            s: s.clamp(floor, ceiling).min(self.s_owned_end),
+            offset: held.min(self.s_owned_end - self.s_start),
         }
     }
     fn s_end(&self) -> f64 {
