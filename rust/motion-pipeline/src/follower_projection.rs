@@ -209,16 +209,17 @@ impl AdvanceStep {
 
 /// What spares the motor the discontinuities a leading advance makes. Every
 /// projected follower ramps its ratio, so the advance reads only the
-/// velocity laid along the leaders' path either way.
+/// velocity [`Table::Advance`] lays along the leaders' path either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdvanceSmoothing {
     /// A ratio ramp ahead of it: the laid ratio is C1, so the advance has no
     /// step to carry and nothing after it would spread one; a step that
     /// would reach the motor is refused. The advance reads only the
-    /// velocity laid along the leaders' path, as Klipper advances only the
+    /// extrusion laid along the leaders' path, as Klipper advances only the
     /// extruding moves that travel: a retract or prime the raw track makes
-    /// on its own pushes no bead to lead, and advancing it would step its
-    /// velocity by `k·Δa` at every acceleration change of its trapezoid.
+    /// on its own, or a retract the toolhead makes while it moves, pushes no
+    /// bead to lead, and advancing either would step its velocity at every
+    /// acceleration change of its trapezoid.
     RatioRamp,
     /// A ratio ramp ahead of it and a kernel after: the advance reads the
     /// path's velocity alone, as on a ramp, and the kernel spreads what
@@ -608,7 +609,9 @@ pub(crate) fn project_followers(
                     start_s: table_start,
                     rests: !read.raw_moves,
                 };
-                state.smoothing.lay(&state.spans, &leg, &rule);
+                state
+                    .smoothing
+                    .lay((&state.spans, &state.advance_spans), &leg, &rule);
                 state.smoothing.queue(
                     base[i].t_end,
                     (s_start, shaped_ds),
@@ -1600,6 +1603,41 @@ impl RatioSpan {
         let ds = s - self.s0;
         self.e0 + self.r0 * ds + 0.5 * (self.r1 - self.r0) * ds * ds / (self.s1 - self.s0)
     }
+
+    /// The span as the advance reads it, `(s0, s1, r0, r1)`: its ratio held
+    /// at zero wherever it is negative, cut where a ramp crosses zero.
+    fn advance_parts(&self) -> [Option<(f64, f64, f64, f64)>; 2] {
+        let held = [
+            Some((self.s0, self.s1, self.r0.max(0.0), self.r1.max(0.0))),
+            None,
+        ];
+        if self.r0 * self.r1 >= 0.0 {
+            return held;
+        }
+        let zero_at = self.s0 + (self.s1 - self.s0) * self.r0 / (self.r0 - self.r1);
+        if !(zero_at > self.s0 && zero_at < self.s1) {
+            return held;
+        }
+        [
+            Some((self.s0, zero_at, self.r0.max(0.0), 0.0)),
+            Some((zero_at, self.s1, 0.0, self.r1.max(0.0))),
+        ]
+    }
+
+    fn retracts(&self) -> bool {
+        self.r0 < 0.0 || self.r1 < 0.0
+    }
+}
+
+/// Which of a follower's span tables a read takes: the one the projection
+/// lays, or the one a pressure advance reads, which holds the laid ratio at
+/// zero wherever it is negative. Klipper advances only the moves that
+/// extrude while the toolhead travels; a retract the toolhead makes while
+/// it moves, a wipe, pushes no bead to lead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Table {
+    Laid,
+    Advance,
 }
 
 /// Per-follower streaming state: the extrusion-per-shaped-distance table and
@@ -1609,6 +1647,11 @@ impl RatioSpan {
 pub(crate) struct FollowerState {
     active: bool,
     spans: Vec<RatioSpan>,
+    /// [`Table::Advance`]: `spans` with every negative ratio held at zero.
+    advance_spans: Vec<RatioSpan>,
+    /// How many of `spans` retract somewhere, and so differ from their
+    /// part of `advance_spans`.
+    retracting_spans: usize,
     ingested_through_t: Option<f64>,
     s_ingested_end: f64,
     s_shaped: f64,
@@ -1636,6 +1679,8 @@ impl FollowerState {
     /// odometer labels are void.
     pub(crate) fn reset_timeline(&mut self) {
         self.spans.clear();
+        self.advance_spans.clear();
+        self.retracting_spans = 0;
         self.ingested_through_t = None;
         self.s_ingested_end = 0.0;
         self.s_shaped = 0.0;
@@ -1856,13 +1901,24 @@ impl FollowerState {
             return;
         }
         let e0 = self.spans.last().map_or(0.0, |span| span.e_at(span.s1));
-        self.spans.push(RatioSpan {
+        let span = RatioSpan {
             s0: self.s_ingested_end,
             s1,
             r0,
             r1,
             e0,
-        });
+        };
+        self.spans.push(span);
+        if span.retracts() {
+            self.retracting_spans += 1;
+        }
+        for (s0, s1, r0, r1) in span.advance_parts().into_iter().flatten() {
+            let e0 = self
+                .advance_spans
+                .last()
+                .map_or(0.0, |span| span.e_at(span.s1));
+            self.advance_spans.push(RatioSpan { s0, s1, r0, r1, e0 });
+        }
         self.s_ingested_end = s1;
     }
 
@@ -1872,7 +1928,15 @@ impl FollowerState {
         let committed = self.s_shaped - SPAN_LOOKUP_SLACK_MM;
         let keep_after = committed - self.smoothing.reach_back(committed);
         let keep_from = self.spans.partition_point(|span| span.s1 < keep_after);
+        self.retracting_spans -= self.spans[..keep_from]
+            .iter()
+            .filter(|span| span.retracts())
+            .count();
         self.spans.drain(..keep_from);
+        let keep_advance_from = self
+            .advance_spans
+            .partition_point(|span| span.s1 < keep_after);
+        self.advance_spans.drain(..keep_advance_from);
         self.smoothing.prune_before(committed);
     }
 
@@ -1880,23 +1944,31 @@ impl FollowerState {
     /// A kernel with negative lobes can overshoot the ingested path by a
     /// whisker at a terminal flush; the terminal ratio extends it.
     fn spans_e(&self, s: f64) -> f64 {
-        self.table_e(s)
+        self.table_e(Table::Laid, s)
             .map_or(0.0, |table| table + self.smoothing.correction(s).value)
     }
 
-    fn table_e(&self, s: f64) -> Option<f64> {
-        let first = self.spans.first()?;
+    fn spans_of(&self, table: Table) -> &[RatioSpan] {
+        match table {
+            Table::Laid => &self.spans,
+            Table::Advance => &self.advance_spans,
+        }
+    }
+
+    fn table_e(&self, table: Table, s: f64) -> Option<f64> {
+        let spans = self.spans_of(table);
+        let first = spans.first()?;
         assert!(
             s >= first.s0 - SPAN_LOOKUP_SLACK_MM,
             "shaped path odometer {s} fell behind the pruned span table \
              starting at {}",
             first.s0
         );
-        let idx = self.spans.partition_point(|span| span.s1 < s);
-        Some(match self.spans.get(idx) {
+        let idx = spans.partition_point(|span| span.s1 < s);
+        Some(match spans.get(idx) {
             Some(span) => span.e_at(s.max(span.s0)),
             None => {
-                let last = self.spans.last().expect("non-empty spans");
+                let last = spans.last().expect("non-empty spans");
                 last.e_at(last.s1) + last.r1 * (s - last.s1)
             }
         })
@@ -1944,37 +2016,52 @@ impl FollowerState {
     }
 
     fn ratio_and_slope(&self, s: f64, side: SpanSide) -> (f64, f64) {
-        let (ratio, slope) = self.table_ratio_and_slope(s, side);
-        let correction = self.smoothing.correction(s);
+        self.ratio_and_slope_on(Table::Laid, s, side)
+    }
+
+    fn ratio_and_slope_on(&self, table: Table, s: f64, side: SpanSide) -> (f64, f64) {
+        let (ratio, slope) = self.table_ratio_and_slope(table, s, side);
+        let correction = self.smoothing.correction_of(table, s);
         (ratio + correction.d1, slope + correction.d2)
     }
 
-    fn table_ratio_and_slope(&self, s: f64, side: SpanSide) -> (f64, f64) {
+    fn table_ratio_and_slope(&self, table: Table, s: f64, side: SpanSide) -> (f64, f64) {
+        let spans = self.spans_of(table);
         let idx = match side {
-            SpanSide::After => self.spans.partition_point(|span| span.s1 <= s),
-            SpanSide::Before => self.spans.partition_point(|span| span.s1 < s),
+            SpanSide::After => spans.partition_point(|span| span.s1 <= s),
+            SpanSide::Before => spans.partition_point(|span| span.s1 < s),
         };
-        match self.spans.get(idx) {
+        match spans.get(idx) {
             Some(span) if s >= span.s0 => (span.ratio_at(s), span.ratio_slope()),
             Some(span) => (span.r0, 0.0),
-            None => (self.spans.last().map_or(0.0, |span| span.r1), 0.0),
+            None => (spans.last().map_or(0.0, |span| span.r1), 0.0),
         }
     }
 
-    /// What the table and its smoothing lay at `s`, the smoothing's
+    /// What `table` and its smoothing lay at `s`, the smoothing's
     /// correction read once: [`Self::spans_e`], [`Self::ratio_and_slope`]
     /// and `d²r/ds²` (the table's spans are linear, so only the smoothing
     /// bends it).
-    fn laid_at(&self, s: f64, side: SpanSide) -> LaidRead {
-        let (ratio, slope) = self.table_ratio_and_slope(s, side);
-        let correction = self.smoothing.correction(s);
+    fn laid_on(&self, table: Table, s: f64, side: SpanSide) -> LaidRead {
+        let (ratio, slope) = self.table_ratio_and_slope(table, s, side);
+        let correction = self.smoothing.correction_of(table, s);
         LaidRead {
             e: self
-                .table_e(s)
+                .table_e(table, s)
                 .map_or(0.0, |table| table + correction.value),
             ratio: ratio + correction.d1,
             slope: slope + correction.d2,
             curvature: correction.d3,
+        }
+    }
+
+    /// The table an advance reads: [`Table::Advance`], which is the laid
+    /// table itself wherever that retracts nowhere.
+    fn advance_table(&self) -> Table {
+        if self.retracting_spans > 0 {
+            Table::Advance
+        } else {
+            Table::Laid
         }
     }
 
@@ -3128,7 +3215,7 @@ impl<'a> FollowerSignal<'a> {
     /// `d(R·W)/ds` at `s`: the path slope of the ratio a ratio-ramped
     /// advance reads.
     fn ramped_read_slope(&self, s: f64) -> f64 {
-        let (ratio, slope) = self.ratio_and_slope(s);
+        let (ratio, slope) = self.ratio_and_slope_on(self.state.advance_table(), s);
         let (weight, weight_slope, _) = self.state.smoothing.valley_weight(s);
         slope * weight + ratio * weight_slope
     }
@@ -3153,8 +3240,8 @@ impl<'a> FollowerSignal<'a> {
     /// What a ratio-ramped advance reads at `t`: the velocity `R(s)·ṡ` the
     /// projection lays along the leaders' path and its first two time
     /// derivatives, leaving out what the raw track moves on its own. `R`
-    /// is the laid ratio weighted down to zero at every turnaround of the
-    /// leaders ([`RatioSmoothing::valley_weight`]).
+    /// is the ratio [`Table::Advance`] lays, weighted down to zero at every
+    /// turnaround of the leaders ([`RatioSmoothing::valley_weight`]).
     fn ramped_advance_read(&self, t: f64) -> (f64, f64, f64) {
         self.ramped_read(t, &self.path_read(t))
     }
@@ -3167,6 +3254,10 @@ impl<'a> FollowerSignal<'a> {
             laid,
             ..
         } = *read;
+        let laid = match self.state.advance_table() {
+            Table::Laid => laid,
+            Table::Advance => self.laid_on(Table::Advance, s),
+        };
         let rate_second = self.rate_second(t, read);
         let (weight, weight_slope, weight_curvature) = self.state.smoothing.valley_weight(s);
         let weighted = laid.ratio * weight;
@@ -3229,11 +3320,19 @@ impl<'a> FollowerSignal<'a> {
     }
 
     fn ratio_and_slope(&self, s: f64) -> (f64, f64) {
-        self.state.ratio_and_slope(s, self.side_at(s))
+        self.ratio_and_slope_on(Table::Laid, s)
+    }
+
+    fn ratio_and_slope_on(&self, table: Table, s: f64) -> (f64, f64) {
+        self.state.ratio_and_slope_on(table, s, self.side_at(s))
     }
 
     fn laid_at(&self, s: f64) -> LaidRead {
-        self.state.laid_at(s, self.side_at(s))
+        self.laid_on(Table::Laid, s)
+    }
+
+    fn laid_on(&self, table: Table, s: f64) -> LaidRead {
+        self.state.laid_on(table, s, self.side_at(s))
     }
 
     fn s_owned(&self, t: f64) -> f64 {
@@ -3280,8 +3379,10 @@ impl<'a> FollowerSignal<'a> {
 
     /// The times inside the support the odometer first reads a span or
     /// smoothing boundary, each beside that boundary, in order: the
-    /// formula the table lays changes there, the signal reading the one
-    /// before up to the time and the one after from it on.
+    /// formula the table lays, or the one the advance reads, changes there,
+    /// the signal reading the one before up to the time and the one after
+    /// from it on. Every boundary of the laid table bounds a span of the
+    /// advance's too.
     fn ratio_crossings(&self) -> &[(f64, f64)] {
         self.ratio_crossings.get_or_init(|| {
             let s_end = self.s_end();
@@ -3289,7 +3390,7 @@ impl<'a> FollowerSignal<'a> {
             let support_end = *self.grid.last().expect("follower grid is seeded");
             let mut boundaries = self
                 .state
-                .spans
+                .spans_of(self.state.advance_table())
                 .iter()
                 .flat_map(|span| [span.s0, span.s1])
                 .chain(self.state.smoothing.bends(
