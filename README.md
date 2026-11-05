@@ -349,18 +349,19 @@ all 21 cases (50 / 150 / 300 mm/s).
 |---|---|---|---|---|---|---|---|---|
 | `printer.cfg`, no kernel | +1% / +1% | +1% | 0.2 | 3.1 / 0.56 | 39.1 / 3.92 | 0.04 | 4066 | 26.38 |
 | `printer.cfg` + `smooth_time: 0.005` | +7% / +7% | +2% | 0.9 | 3.1 / 0.58 | 39.4 / 3.96 | 0.04 | 3428 | 26.49 |
-| `printer.cfg` + `smooth_time: 0.01` | +24% / +24% | +6% | 3.4 | 3.4 / 0.62 | 40.4 / 4.12 | 0.02 | 2597 | 26.59 |
-| `printer.cfg` + `smooth_time: 0.02` | +71% / +72% | +20% | 13.2 | 4.5 / 7.18 | 45.4 / 4.80 | 0.00 | 1426 | 26.80 |
-| `printer.cfg` + `smooth_time: 0.04` | +159% / +181% | +57% | 50.4 | 9.2 / 9.34 | 83.0 / 8.44 | 5.68 | 624 | 27.22 |
+| `printer.cfg` + `smooth_time: 0.01` | +24% / +24% | +6% | 3.4 | 3.4 / 0.62 | 40.4 / 4.10 | 0.02 | 2597 | 26.59 |
+| `printer.cfg` + `smooth_time: 0.02` | +71% / +72% | +20% | 13.2 | 4.5 / 7.18 | 45.4 / 4.78 | 0.00 | 1426 | 26.80 |
+| `printer.cfg` + `smooth_time: 0.04` | +159% / +181% | +57% | 50.4 | 9.2 / 9.34 | 83.0 / 8.44 | 5.72 | 624 | 27.22 |
 | Trident, no kernel | +0% / +0% | +0% | 0.0 | 2.1 / 0.40 | 17.4 / 1.66 | 0.04 | 9114 | 26.80 |
-| Trident + `smooth_time: 0.005` | +54% / +54% | +25% | 2.6 | 20.1 / 4.00 | 42.8 / 4.28 | 0.56 | 12206 | 25.70 |
-| Trident + `smooth_time: 0.013` | +128% / +207% | +107% | 21.8 | 33.0 / 7.10 | 69.0 / 7.04 | 4.32 | 3483 | 25.59 |
-| Trident + `smooth_time: 0.04` | +216% / +469% | +263% | 72.9 | 35.7 / 6.80 | 91.4 / 10.32 | 5.94 | 466 | 26.16 |
+| Trident + `smooth_time: 0.005` | +54% / +54% | +25% | 2.6 | 12.0 / 2.44 | 39.2 / 3.94 | 0.38 | 12206 | 25.70 |
+| Trident + `smooth_time: 0.01` | +101% / +152% | +75% | 14.3 | 12.5 / 3.40 | 56.6 / 5.74 | 2.22 | 5761 | 25.53 |
+| Trident + `smooth_time: 0.02` | +169% / +315% | +170% | 39.1 | 12.6 / 3.98 | 60.7 / 6.78 | 2.98 | 1476 | 25.74 |
+| Trident + `smooth_time: 0.04` | +216% / +470% | +263% | 72.9 | 20.6 / 6.28 | 83.0 / 9.42 | 4.82 | 477 | 26.16 |
 
 On the bench printer the kernel-free chain is both the cleanest and the
 fastest: a kernel's blur also delays every stop. On the 70000 mm/s²
 Trident the kernel-free chain lays every corner within 0.5% but costs
-2–5% of print time against a kernel (26.80 s against 25.59–26.16 s),
+2–5% of print time against a kernel (26.80 s against 25.53–26.16 s),
 the time the planner spends holding the exact advance within 20000 mm/s²
 of extruder acceleration; the kernel buys it back with a corner bulge
 of +54% at 0.005 and up.
