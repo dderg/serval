@@ -2115,10 +2115,11 @@ fn carrier_breakpoints_are_publicly_exposed_and_bracket_the_domain() {
         span: Arc::clone(&span),
         axis: 0,
     };
+    let seam = interior_time_above(11.0);
     let mut breakpoints = axis.breakpoints();
     breakpoints.sort_by(f64::total_cmp);
     breakpoints.dedup();
-    assert_eq!(breakpoints, vec![10.0, 11.0, 12.0]);
+    assert_eq!(breakpoints, vec![10.0, seam, 12.0]);
 
     let segment = ContinuousSegment {
         axes: Arc::from([
@@ -2146,7 +2147,7 @@ fn carrier_breakpoints_are_publicly_exposed_and_bracket_the_domain() {
     let merged = segment.breakpoints();
     assert_eq!(merged.first(), Some(&10.0));
     assert_eq!(merged.last(), Some(&12.0));
-    assert!(merged.contains(&11.0));
+    assert!(merged.contains(&seam));
     assert!(merged.windows(2).all(|pair| pair[0] < pair[1]));
     close(segment.eval_axis_pvaj(0, 10.5).unwrap().acceleration, 6.0);
 }
