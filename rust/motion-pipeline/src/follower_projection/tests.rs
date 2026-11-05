@@ -2069,6 +2069,53 @@ fn a_follower_enclosure_holds_every_sample_of_its_signal() {
     assert_enclosure_holds_every_sample(&sig, (sig.grid[0], sig.grid[sig.grid.len() - 1]));
 }
 
+/// The leaders set off from rest on a span boundary, the span behind them
+/// extruding and the one ahead not, as a travel opens after an extrusion
+/// that stopped: the signal reads the span ahead from the boundary on, and
+/// so does its enclosure, which resolves the follower standing still
+/// there rather than straddling the extrusion's acceleration.
+#[test]
+fn a_follower_enclosure_opening_on_a_span_boundary_reads_the_span_ahead() {
+    let accel = 20_000.0;
+    let shaped = cusp_segment(vec![0.0, 0.0, 0.5 * accel], vec![0.0], 0.0, 0.01);
+    let behind = 2.0;
+    let ahead = super::leader_arc_length(&shaped, &[0, 1]);
+    let mut state = FollowerState::default();
+    state.push_span(behind, 0.05, 0.05);
+    state.push_span(ahead, 0.0, 0.0);
+    let sig = FollowerSignal::new(
+        &shaped,
+        &shaped,
+        3,
+        &[0, 1],
+        &state,
+        super::Odometer {
+            start: behind,
+            length: ahead,
+        },
+        0.0,
+    );
+    let accuracy = [1e-7, f64::INFINITY, 1e-2];
+    let pieces = sig
+        .enclosure_on(0.0, 1e-4, accuracy)
+        .expect("leaders moving off a span boundary have an enclosure");
+    for piece in pieces.iter() {
+        assert!(
+            piece.pva[2].rounding <= accuracy[2],
+            "the enclosure over [{}, {}] holds the acceleration only to ±{} mm/s²",
+            piece.lo,
+            piece.hi,
+            piece.pva[2].rounding
+        );
+        let t = trajectory::next_toward(piece.lo, f64::INFINITY);
+        let (read, model) = (sig.eval_pva(t).2, piece.eval_pva(t).2);
+        assert!(
+            (read - model).abs() <= piece.pva[2].rounding + 1e-9,
+            "at t={t} the follower accelerates at {read} mm/s², its enclosure at {model}"
+        );
+    }
+}
+
 #[test]
 fn an_advanced_follower_enclosure_holds_every_sample_of_its_signal() {
     let (shaped, state) = turning_leaders_on_two_ramps();

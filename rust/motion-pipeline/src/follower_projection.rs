@@ -12,7 +12,7 @@ use trajectory::{
     RelativeSplinePiece, ShapedSignal,
 };
 
-use crate::lowering::{AccelBudget, FitTol, SeamContinuity, riding_tol_scale};
+use crate::lowering::{AccelBudget, FitTol, SeamContinuity, follower_tol_scale, riding_tol_scale};
 use crate::shaper::{
     AxisFit, AxisSignalTable, ConvolutionSignal, Enclosure, ExactConvolution, ExactKernel,
     FitBoundary, Lookahead, SEGMENT_TIME_EPS_S, ShapedBreaks, ShiftedTrackSignal, SignalBounds,
@@ -355,7 +355,7 @@ fn fit_source_projection(
     let breakpoints = sig.construction_breakpoints(raw_axis, tolerance.accel_mm_s2);
     let input_state = |t| {
         let s = sig.s_owned(t);
-        let (ratio, ratio_slope) = sig.state.ratio_and_slope(s);
+        let (ratio, ratio_slope) = sig.ratio_and_slope(s);
         SeamInput {
             velocity: sig.deriv(t),
             ratio,
@@ -519,6 +519,29 @@ pub(crate) struct ProjectionWindow<'a> {
     pub pool: &'a WorkerPool,
 }
 
+/// Queues a source fit for every segment the ratio smoothing now holds
+/// final. Taken after each leg the smoothing lays, what is taken — and so
+/// how far back a valley laid later may reach — follows the legs alone,
+/// never how many of them one emit window brings.
+fn take_final_sources(
+    state: &mut FollowerState,
+    (base, frontier): (&[ContinuousSegment], &[ContinuousSegment]),
+    axis: usize,
+    source_jobs: &mut Vec<(usize, ratio_ramp::PendingSegment)>,
+) {
+    for pending in state.smoothing.take_final(&state.spans) {
+        let index = base[..frontier.len()]
+            .partition_point(|raw| raw.t_end < pending.t_end - GRID_DEDUP_EPS_S);
+        assert!(
+            index < frontier.len() && (base[index].t_end - pending.t_end).abs() <= GRID_DEDUP_EPS_S,
+            "follower axis {axis}: the segment ending at {} waited on its ratio smoothing past \
+             the shaped frontier",
+            pending.t_end
+        );
+        source_jobs.push((index, pending));
+    }
+}
+
 /// Projects every follower over the frontier, then commits the segments of
 /// `out` every follower holds final: a ratio-ramped follower holds back a
 /// segment until no width node or seam still to come reaches into it, and
@@ -571,13 +594,12 @@ pub(crate) fn project_followers(
                 pool,
             );
             timing.ingests += reads.len();
-            let mut next_s = state.smoothing.backlog_end().unwrap_or(state.s_shaped);
             for (offset, read) in reads.into_iter().enumerate() {
                 let i = first_new + offset;
                 let table_start = state.s_ingested_end;
                 let shaped_ds =
                     state.ingest(&base[i], &frontier[i], axis, leaders, &base[i + 1..], &read);
-                let s_start = state.aligned_span_start(next_s);
+                let s_start = state.aligned_span_start(state.s_queued_end);
                 let leg = RampLeg {
                     shaped: &frontier[i],
                     leaders,
@@ -593,22 +615,12 @@ pub(crate) fn project_followers(
                     state.s_ingested_end,
                     read.shaped_leaders.into_reads(read.odometer),
                 );
-                next_s = s_start + shaped_ds;
+                state.s_queued_end = s_start + shaped_ds;
+                take_final_sources(state, (base, frontier), axis, &mut source_jobs);
             }
             if lookahead.clamps_past_signal() {
                 state.smoothing.close_at(state.s_ingested_end);
-            }
-            for pending in state.smoothing.take_final(&state.spans) {
-                let index = base[..frontier.len()]
-                    .partition_point(|raw| raw.t_end < pending.t_end - GRID_DEDUP_EPS_S);
-                assert!(
-                    index < frontier.len()
-                        && (base[index].t_end - pending.t_end).abs() <= GRID_DEDUP_EPS_S,
-                    "follower axis {axis}: the segment ending at {} waited on its ratio \
-                     smoothing past the shaped frontier",
-                    pending.t_end
-                );
-                source_jobs.push((index, pending));
+                take_final_sources(state, (base, frontier), axis, &mut source_jobs);
             }
             timing.ingest_us += ingest_started.elapsed_us();
         }
@@ -1657,6 +1669,9 @@ pub(crate) struct FollowerState {
     ingested_through_t: Option<f64>,
     s_ingested_end: f64,
     s_shaped: f64,
+    /// Where on the shaped path the last leg queued for projection ends:
+    /// the next one starts there.
+    s_queued_end: f64,
     e_end: Option<f64>,
     projected_output_end: Option<f64>,
     /// Time and follower input state where `projected_output_end` was
@@ -1681,6 +1696,7 @@ impl FollowerState {
         self.ingested_through_t = None;
         self.s_ingested_end = 0.0;
         self.s_shaped = 0.0;
+        self.s_queued_end = 0.0;
         self.e_end = None;
         self.projected_output_end = None;
         self.projected_input_end = None;
@@ -1984,14 +2000,17 @@ impl FollowerState {
         sign * delta
     }
 
-    fn ratio_and_slope(&self, s: f64) -> (f64, f64) {
-        let (ratio, slope) = self.table_ratio_and_slope(s);
+    fn ratio_and_slope(&self, s: f64, side: SpanSide) -> (f64, f64) {
+        let (ratio, slope) = self.table_ratio_and_slope(s, side);
         let correction = self.smoothing.correction(s);
         (ratio + correction.d1, slope + correction.d2)
     }
 
-    fn table_ratio_and_slope(&self, s: f64) -> (f64, f64) {
-        let idx = self.spans.partition_point(|span| span.s1 <= s);
+    fn table_ratio_and_slope(&self, s: f64, side: SpanSide) -> (f64, f64) {
+        let idx = match side {
+            SpanSide::After => self.spans.partition_point(|span| span.s1 <= s),
+            SpanSide::Before => self.spans.partition_point(|span| span.s1 < s),
+        };
         match self.spans.get(idx) {
             Some(span) if s >= span.s0 => (span.ratio_at(s), span.ratio_slope()),
             Some(span) => (span.r0, 0.0),
@@ -2003,8 +2022,8 @@ impl FollowerState {
     /// correction read once: [`Self::spans_e`], [`Self::ratio_and_slope`]
     /// and `d²r/ds²` (the table's spans are linear, so only the smoothing
     /// bends it).
-    fn laid_at(&self, s: f64) -> LaidRead {
-        let (ratio, slope) = self.table_ratio_and_slope(s);
+    fn laid_at(&self, s: f64, side: SpanSide) -> LaidRead {
+        let (ratio, slope) = self.table_ratio_and_slope(s, side);
         let correction = self.smoothing.correction(s);
         LaidRead {
             e: self
@@ -2033,6 +2052,27 @@ impl FollowerState {
             .filter(|&boundary| boundary <= s_end && s_end - boundary < envelope)
             .fold(s_end, |end, boundary| end.min(next_lower_float(boundary)))
             .max(s_start)
+    }
+}
+
+/// Which span a table read at a span boundary takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpanSide {
+    /// The span starting there.
+    After,
+    /// The span ending there.
+    Before,
+}
+
+impl SpanSide {
+    /// The side a segment owning `[s_start, s_end]` reads its start on:
+    /// its own span after it, or, owning no path, the span before.
+    fn opening(s_start: f64, s_end: f64) -> Self {
+        if s_end > s_start {
+            Self::After
+        } else {
+            Self::Before
+        }
     }
 }
 
@@ -2838,13 +2878,19 @@ impl RatioBounds {
             ratio: ridden
                 .clone()
                 .map(|span| span.r0.abs().max(span.r1.abs()))
-                .chain([s_start, s_owned_end].map(|s| state.ratio_and_slope(s).0.abs()))
+                .chain(
+                    [
+                        (s_start, SpanSide::opening(s_start, s_owned_end)),
+                        (s_owned_end, SpanSide::Before),
+                    ]
+                    .map(|(s, side)| state.ratio_and_slope(s, side).0.abs()),
+                )
                 .fold(0.0_f64, f64::max),
             slope: ridden
                 .map(|span| span.ratio_slope().abs())
                 .fold(0.0_f64, f64::max),
         };
-        if state.smoothing.is_inert() {
+        if !state.smoothing.touches(s_start, s_owned_end) {
             return table;
         }
         let (ratio, slope) = state
@@ -3104,13 +3150,13 @@ impl<'a> FollowerSignal<'a> {
             rate: self.odometer_scale * speed,
             rate_deriv: self.odometer_scale * self.leader_speed_deriv(t, &motion, speed),
             s,
-            laid: self.state.laid_at(s),
+            laid: self.laid_at(s),
         }
     }
 
     fn pva_at_distance(&self, t: f64, s: f64) -> (f64, f64, f64) {
         let (rate, rate_deriv) = self.odometer_rate(t);
-        self.pva_laid(t, (rate, rate_deriv), self.state.laid_at(s))
+        self.pva_laid(t, (rate, rate_deriv), self.laid_at(s))
     }
 
     fn pva_read(&self, t: f64, read: &PathRead) -> (f64, f64, f64) {
@@ -3131,13 +3177,13 @@ impl<'a> FollowerSignal<'a> {
     }
 
     fn path_deriv(&self, t: f64) -> f64 {
-        let (ratio, _) = self.state.ratio_and_slope(self.s_owned(t));
+        let (ratio, _) = self.ratio_and_slope(self.s_owned(t));
         ratio * self.shaped_speed(t)
     }
 
     fn path_second_deriv(&self, t: f64) -> f64 {
         let (rate, rate_deriv) = self.odometer_rate(t);
-        let (ratio, slope) = self.state.ratio_and_slope(self.s_owned(t));
+        let (ratio, slope) = self.ratio_and_slope(self.s_owned(t));
         slope * rate * rate + ratio * rate_deriv
     }
 
@@ -3148,7 +3194,7 @@ impl<'a> FollowerSignal<'a> {
     /// `d(R·W)/ds` at `s`: the path slope of the ratio a ratio-ramped
     /// advance reads.
     fn ramped_read_slope(&self, s: f64) -> f64 {
-        let (ratio, slope) = self.state.ratio_and_slope(s);
+        let (ratio, slope) = self.ratio_and_slope(s);
         let (weight, weight_slope, _) = self.state.smoothing.valley_weight(s);
         slope * weight + ratio * weight_slope
     }
@@ -3237,6 +3283,25 @@ impl<'a> FollowerSignal<'a> {
     fn s_at(&self, t: f64) -> f64 {
         self.s_start + self.s_offset(t)
     }
+    /// Which side of a span boundary the signal reads the table on at `s`:
+    /// at its owned end, the span it lays from, never the one after, which
+    /// the next segment owns and which may not be laid yet.
+    fn side_at(&self, s: f64) -> SpanSide {
+        if s >= self.s_owned_end {
+            SpanSide::Before
+        } else {
+            SpanSide::After
+        }
+    }
+
+    fn ratio_and_slope(&self, s: f64) -> (f64, f64) {
+        self.state.ratio_and_slope(s, self.side_at(s))
+    }
+
+    fn laid_at(&self, s: f64) -> LaidRead {
+        self.state.laid_at(s, self.side_at(s))
+    }
+
     fn s_owned(&self, t: f64) -> f64 {
         self.s_at(t).min(self.s_owned_end)
     }
@@ -3699,7 +3764,7 @@ impl TrackSignal for FollowerSignal<'_> {
         let span_index = self.state.spans.partition_point(|span| span.s1 <= s);
         let span = self.state.spans.get(span_index);
         let (speed, speed_deriv) = self.odometer_rate(t);
-        let (ratio, slope) = self.state.ratio_and_slope(s);
+        let (ratio, slope) = self.ratio_and_slope(s);
         let leaders = self
             .leaders
             .axes

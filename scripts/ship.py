@@ -145,6 +145,19 @@ def format_tree(root: Path) -> None:
         step("committed formatting changes")
 
 
+def free_space_gc() -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).with_name("gc_caches.py")),
+            "--if-free-below",
+            "100",
+            "--apply",
+        ],
+        check=False,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -165,6 +178,7 @@ def main() -> int:
     root = Path(git("rev-parse", "--show-toplevel"))
     if git("status", "--porcelain", "--untracked-files=no"):
         raise ShipError("the tree has uncommitted changes: commit them first")
+    free_space_gc()
     sync_main(branch)
     changed = git("diff", "--name-only", "origin/main...HEAD").splitlines()
     problem = throughput_accept_problem(changed, body)

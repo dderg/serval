@@ -118,10 +118,10 @@ done
 # worktrees never race on one tag: with a single shared "kalico-sim" tag, a
 # concurrent session could silently retag the image between this session's
 # build and its test run.
-BUILD_BRANCH="${BRANCH:-$(cd "$REPO_ROOT" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo head)}"
-# Detached HEAD (e.g. GitHub Actions' PR checkout) yields the literal string
-# "HEAD", which is not a valid docker image name — fall back to the commit.
-[[ "$BUILD_BRANCH" == "HEAD" ]] && BUILD_BRANCH="$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo head)"
+# Tagged per worktree directory (a slot), not per branch: the pool reuses its
+# worktrees, so the number of images is bounded by the worktrees instead of
+# growing with every branch built. --branch builds name their own tag.
+BUILD_BRANCH="${BRANCH:-$(basename "$REPO_ROOT")}"
 IMAGE_TAG="kalico-sim-$(echo "${BUILD_BRANCH//\//-}" | tr '[:upper:]' '[:lower:]')"
 
 echo "=== Kalico Simulator ==="
