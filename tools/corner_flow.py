@@ -56,8 +56,13 @@ has none of that kind):
   acceleration (mm/s^2) while the nozzle moves.
 - ``|ve|*`` / ``|ae|*``: the same peaks over the whole run, the travel,
   retract and prime transitions at rest included.
-- Material the extruder moves while the unshaped toolhead rests (a retract
-  and its prime) lays no bead and is left out of the bead columns.
+- Material the extruder moves while the shaped toolhead rests (a retract
+  and its prime) never reaches the melt model: the melt holds the pressure
+  it had when the toolhead stopped, so a retract at rest neither spills
+  nor starves the bead after it. Material moved while the unshaped
+  toolhead rests lays no bead and is left out of the bead columns.
+- ``miss``: the largest distance from a case corner to the shaped path
+  (mm), the corner's path accuracy against ``corner_deviation``.
 - ``dE_gc``: final e minus the G-code's total E (mm). Negative by design
   where the shaped path cuts a corner: the bead follows the shorter path.
 - ``dE_adv``: what the run lays beyond the bead ratio times its own shaped
@@ -164,6 +169,7 @@ class Row:
     de_gcode: float = math.nan
     de_advance: float = math.nan
     time_s: float = math.nan
+    miss_mm: float = math.nan
     error: str = ""
     corners: list[dict] = field(default_factory=list)
     steps: list[dict] = field(default_factory=list)
@@ -465,9 +471,15 @@ def measure(
         ratio,
     )
     bead_area = width * height
-    for apex, ratios in zip(
-        flow_metric.apex_indices(xy, geometry.corners), geometry.corner_ratios()
+    for (apex, ratios), corner in zip(
+        zip(
+            flow_metric.apex_indices(xy, geometry.corners),
+            geometry.corner_ratios(),
+        ),
+        geometry.corners,
     ):
+        miss = float(np.hypot(*(xy[apex] - np.asarray(corner))))
+        row.miss_mm = miss if math.isnan(row.miss_mm) else max(row.miss_mm, miss)
         if flow_metric.is_ratio_step(*ratios):
             row.steps.append(
                 flow_metric.step_report(
@@ -572,7 +584,7 @@ def table(rows: list[Row], sweep_name: str) -> str:
         f"{'case':<10} {'mm/s':>4} | {'peak':>6} {'dip':>5} {'w>5%':>5} "
         f"{'blob':>6} | {'moved':>6} {'net':>6} {'sw':>5} | "
         f"{'ve+':>6} {'ve-':>6} {'ae':>7} | {'|ve|*':>6} "
-        f"{'|ae|*':>7} | {'dE_gc':>8} {'dE_adv':>8} | {'t':>6}"
+        f"{'|ae|*':>7} | {'dE_gc':>8} {'dE_adv':>8} | {'miss':>6} | {'t':>6}"
     )
     if sweep_name:
         head = f"{sweep_name:>11} " + head
@@ -594,6 +606,7 @@ def table(rows: list[Row], sweep_name: str) -> str:
             f"{row.ve_max:>6.1f} {row.ve_min:>6.1f} {row.ae_max:>7.0f} | "
             f"{row.ve_all:>6.1f} {row.ae_all:>7.0f} | "
             f"{row.de_gcode:>+8.4f} {_signed(row.de_advance):>8} | "
+            f"{_cell(row.miss_mm, '.3f', 6)} | "
             f"{row.time_s:>6.3f}"
         )
     return "\n".join(lines)

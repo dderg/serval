@@ -143,3 +143,17 @@ def test_a_ratio_step_is_a_change_of_at_least_five_percent(
     before, after, steps
 ):
     assert fm.is_ratio_step(before, after) is steps
+
+
+def test_a_retract_and_prime_at_rest_reach_no_bead():
+    melt_k = 0.03
+    ratio = 0.03
+    t = np.arange(0.0, 0.3 + DT_S, DT_S)
+    stop = (t >= 0.1) & (t < 0.2)
+    u = SPEED_MM_S * np.where(t < 0.1, t, np.where(stop, 0.1, t - 0.1))
+    xy = np.column_stack([u, np.zeros_like(u)])
+    commanded = fm.CommandedBead(ratio=np.full_like(t, ratio), raw_moving=~stop)
+    retract = np.where((t >= 0.12) & (t < 0.15), -0.8, 0.0)
+    plain = fm.flow_trace(t, xy, ratio * u, commanded, melt_k, ratio)
+    retracted = fm.flow_trace(t, xy, ratio * u + retract, commanded, melt_k, ratio)
+    assert np.abs(retracted.deviation - plain.deviation).max() < 1e-9

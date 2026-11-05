@@ -4,11 +4,13 @@
 The commanded e track is passed through a first-order melt model
 (``e_cmd = e_out + K * d(e_out)/dt``, K the configured linear pressure
 advance), and the material leaving the nozzle is measured per millimetre of
-the shaped nozzle path. The deviation is that flow minus the bead the G-code
-commands at the same place of the unshaped plan, over the nominal bead:
-0 lays the commanded bead exactly. Where the ratio steps, the bead is read
-instead as the material laid across the switch and the path the switch
-takes.
+the shaped nozzle path. What the extruder moves while the shaped toolhead
+rests (a retract and its prime) never reaches the melt: the melt holds the
+pressure it had when the toolhead stopped. The deviation is that flow minus
+the bead the G-code commands at the same place of the unshaped plan, over
+the nominal bead: 0 lays the commanded bead exactly. Where the ratio steps,
+the bead is read instead as the material laid across the switch and the
+path the switch takes.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ SAMPLE_DT_S = 10e-6
 PATH_STEP_MM = 0.02
 MOVING_SPEED_MM_S = 5.0
 RAW_REST_SPEED_MM_S = 1e-3
+SHAPED_REST_SPEED_MM_S = 1e-3
 WIDTH_THRESHOLD = 0.05
 CORNER_WINDOW_MM = 15.0
 APEX_SEARCH_MM = 2.0
@@ -41,6 +44,13 @@ def melted(t: np.ndarray, e_cmd: np.ndarray, melt_k: float) -> np.ndarray:
     for index, drive in enumerate(melt_k * slope * (alpha - 1.0), start=1):
         lag[index] = alpha * lag[index - 1] + drive
     return e_cmd + lag
+
+
+def rest_frozen(t: np.ndarray, xy: np.ndarray, e_cmd: np.ndarray) -> np.ndarray:
+    """`e_cmd` without what it moves while the shaped toolhead `xy` rests."""
+    speed = np.hypot(np.diff(xy[:, 0]), np.diff(xy[:, 1])) / np.diff(t)
+    steps = np.where(speed < SHAPED_REST_SPEED_MM_S, 0.0, np.diff(e_cmd))
+    return e_cmd[0] + np.concatenate([[0.0], np.cumsum(steps)])
 
 
 def commanded_ratio(t: np.ndarray, raw: np.ndarray, t_at: np.ndarray):
@@ -192,7 +202,7 @@ def flow_trace(
     step = np.hypot(np.diff(xy[:, 0]), np.diff(xy[:, 1]))
     s = np.concatenate([[0.0], np.cumsum(step)])
     advancing = np.concatenate([[True], step > 0])
-    e_out = melted(t, e_cmd, melt_k)
+    e_out = melted(t, rest_frozen(t, xy, e_cmd), melt_k)
     laying = advancing[1:] & commanded.raw_moving[1:]
     laid = np.concatenate([[0.0], np.where(laying, np.diff(e_out), 0.0)])
     e_out = e_out[0] + np.cumsum(laid)
