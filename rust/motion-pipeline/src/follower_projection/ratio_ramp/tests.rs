@@ -4,7 +4,7 @@ use geometry::{RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule};
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 use trajectory::{ContinuousAxis, ContinuousSegment};
 
-use super::super::{FollowerState, SpanSide};
+use super::super::{FollowerState, SpanSide, Table as SpanTable};
 use super::{
     AdvanceValley, CLUSTER_REACH_S, CROSSING_PROBES, Crossing, ENVELOPE_SLOPE, KERNEL_PEAK,
     NODE_SPACING_PER_WIDTH, NODE_SPACING_S, RampLeg, RestSide, ShapedLeaders, Spill, TimedSeam,
@@ -39,6 +39,19 @@ fn clustered_table() -> Table {
     table.push((0.01, 0.01, 0.03));
     table.push((10.0, 0.03, 0.03));
     table
+}
+
+/// An extrusion into a wipe, the wipe's ratio ramping back through zero
+/// into an extrusion, and a travel.
+fn retracting_table() -> Table {
+    vec![
+        (10.0, 0.0, 0.0),
+        (10.0, 0.04, 0.04),
+        (10.0, -0.05, -0.05),
+        (10.0, -0.05, 0.03),
+        (10.0, 0.03, 0.03),
+        (10.0, 0.0, 0.0),
+    ]
 }
 
 /// `table` with `pieces` spans of `piece` mm cut off both ends of every
@@ -97,8 +110,9 @@ fn smoothed(table: &Table, field: WidthField) -> FollowerState {
         state.push_span(length, r0, r1);
     }
     state.smoothing.width = field;
-    state.smoothing.base_slope = Some(state.spans[0].ratio_slope());
-    state.smoothing.record_seams(&state.spans);
+    state
+        .smoothing
+        .record_seams((&state.spans, &state.advance_spans));
     state
 }
 
@@ -254,12 +268,81 @@ fn the_smoothed_ratio_is_c1_and_its_derivatives_are_exact() {
 }
 
 #[test]
+fn the_advance_reads_the_laid_ratio_held_at_zero_where_it_retracts() {
+    let table = retracting_table();
+    let total = length(&table);
+    for field in [cruise, cornering] {
+        let state = smoothed(&table, field(total));
+        let (mut extruding, mut retracting) = (0, 0);
+        for s in probes(total, 20_000) {
+            let h = state.smoothing.width.width(s);
+            let (low, high) = table_range(&state, s - h, s + h);
+            let (read, _) = state.ratio_and_slope_on(SpanTable::Advance, s, SpanSide::After);
+            assert!(
+                read >= -1e-12 && read <= high.max(0.0) + 1e-12,
+                "the advance reads {read} at {s} mm, outside [0, {}]",
+                high.max(0.0)
+            );
+            if low >= 0.0 {
+                extruding += 1;
+                let (laid, _) = state.ratio_and_slope(s, SpanSide::After);
+                assert_eq!(
+                    read, laid,
+                    "the advance reads {read} at {s} mm where the window extrudes {laid}"
+                );
+            } else if high <= 0.0 {
+                retracting += 1;
+                assert!(
+                    read.abs() <= 1e-12,
+                    "the advance reads {read} at {s} mm where the window only retracts"
+                );
+            }
+        }
+        assert!(
+            extruding > 1000 && retracting > 1000,
+            "the probes must cover both, yet {extruding} extrude and {retracting} retract"
+        );
+    }
+}
+
+#[test]
+fn the_ratio_the_advance_reads_is_c1_through_a_wipe() {
+    let table = retracting_table();
+    let total = length(&table);
+    for field in [cruise, cornering] {
+        let state = smoothed(&table, field(total));
+        let mut points: Vec<f64> = state.advance_spans.iter().map(|span| span.s0).collect();
+        points.extend(state.smoothing.bends(0.0, total));
+        points.retain(|&s| s > 1e-3 && s < total - 1e-3);
+        assert!(
+            state.advance_spans.len() > state.spans.len(),
+            "the ramp through zero must split the advance's table"
+        );
+        let eps = 1e-9;
+        let read = |s: f64| state.ratio_and_slope_on(SpanTable::Advance, s, SpanSide::After);
+        for &s in &points {
+            let ((left_ratio, left_slope), (right_ratio, right_slope)) =
+                (read(s - eps), read(s + eps));
+            assert!(
+                (left_ratio - right_ratio).abs() < 1e-9,
+                "the read ratio jumps at {s} mm: {left_ratio} -> {right_ratio}"
+            );
+            assert!(
+                (left_slope - right_slope).abs() < 1e-5,
+                "the read ratio's slope jumps at {s} mm: {left_slope} -> {right_slope}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_cluster_of_short_spans_is_spread_over_the_whole_window() {
     let table = clustered_table();
     let total = length(&table);
     let state = smoothed(&table, cruise(total));
     let variation: f64 = state
         .smoothing
+        .laid
         .seams
         .iter()
         .map(|seam| seam.step.abs())
@@ -739,7 +822,9 @@ fn a_rest_valley_covers_the_ratio_step_its_leg_lays_short_of_the_rest() {
         max_velocity_mm_s: 45.0,
         max_accel_mm_s2: 2000.0,
     };
-    state.smoothing.lay(&state.spans, &leg, &rule);
+    state
+        .smoothing
+        .lay((&state.spans, &state.advance_spans), &leg, &rule);
     let ratio_step = travel + tail;
     let (weight, _, _) = state.smoothing.valley_weight(ratio_step);
     assert_eq!(
@@ -923,7 +1008,7 @@ fn the_smoothing_models_hold_its_correction_and_valley_weight_between_bends() {
                     );
                     let correction = state
                         .smoothing
-                        .correction_model(&s, reach)
+                        .correction_model(SpanTable::Laid, &s, reach)
                         .expect("a stretch between bends reads one formula");
                     let weight = state
                         .smoothing
@@ -1077,6 +1162,51 @@ fn moving_width_nodes_lie_a_window_apart() {
         t += NODE_SPACING_S;
     }
     field.close(slow_corner(brake, 0.12));
+    assert_moving_nodes_lie_a_window_apart(&field);
+}
+
+/// Leaders creep off a rest under a constant jerk, a ratio step just past
+/// it: the grid's tick on the rest point takes the seam's wide target, and
+/// the next tick, a few hundredths of a micron along, is no window apart
+/// from it. Kept, it would take the rest's cone as a sliver of an envelope
+/// that the smootherstep to the next node flattens onto.
+#[test]
+fn a_stream_creeping_off_a_rest_keeps_no_node_a_sliver_past_it() {
+    let mut field = WidthField {
+        rule: Some(RatioRampRule {
+            advance_slope_s: 0.02,
+            max_velocity_mm_s: 50.0,
+            max_accel_mm_s2: 5000.0,
+        }),
+        ..WidthField::default()
+    };
+    let creep = |t: f64| CREEP_JERK_MM_S3 * t.powi(3);
+    let (seam_t, end) = (2.0 * NODE_SPACING_S, 0.06);
+    field.place_rest(0.0);
+    field.add_seam(TimedSeam {
+        t: seam_t,
+        s: creep(seam_t),
+        crossing: Crossing {
+            speed: CORNER_SPEED_MM_S,
+            rate: CORNER_BRAKE_MM_S2,
+            jerk: 0.0,
+        },
+        step: 0.034,
+        peak_ratio: 0.034,
+        ramp_time: None,
+    });
+    let mut t = 0.0;
+    while t < end {
+        field.place_sample(creep(t), t);
+        t += NODE_SPACING_S;
+    }
+    field.close(creep(end));
+    assert_moving_nodes_lie_a_window_apart(&field);
+}
+
+const CREEP_JERK_MM_S3: f64 = 1500.0;
+
+fn assert_moving_nodes_lie_a_window_apart(field: &WidthField) {
     for pair in field.nodes.windows(2) {
         let (a, b) = (pair[0], pair[1]);
         if a.target > 0.0 && b.target > 0.0 {
@@ -1496,7 +1626,7 @@ fn a_reach_starting_on_a_step_an_ulp_past_a_rest_holds_the_step_window() {
     );
     let (centre, radius) = (0.5 * (reach.0 + reach.1), 0.5 * (reach.1 - reach.0));
     let s = TaylorModel::affine(Ball::exact(centre), radius);
-    let Some(correction) = state.smoothing.correction_model(&s, reach) else {
+    let Some(correction) = state.smoothing.correction_model(SpanTable::Laid, &s, reach) else {
         return;
     };
     for at in floats {
