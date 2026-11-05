@@ -310,7 +310,8 @@ fn a_rest_beside_a_step_caps_its_speed_at_the_ramp_the_room_leaves() {
     );
     let ramp_time = rest_room_ramp_time(beside_rest, room_mm);
     assert!(ramp_time < RATIO_RAMP_MAX_TIME_S, "{ramp_time}");
-    let (velocity, accel_demand) = seam(ratio, accel, room_mm).demand(&rule, ramp_time, beside_rest);
+    let (velocity, accel_demand) =
+        seam(ratio, accel, room_mm).demand(&rule, ramp_time, beside_rest);
     assert!(velocity <= 50.0 + 1e-9 && accel_demand <= 20000.0 + 1e-9);
     assert!(
         (velocity - 50.0).abs() < 1e-6 || (accel_demand - 20000.0).abs() < 1e-6,
