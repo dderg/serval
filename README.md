@@ -357,7 +357,7 @@ all 21 cases (50 / 150 / 300 mm/s).
 | Trident + `smooth_time: 0.01` | +101% / +152% | +75% | 14.3 | 12.5 / 3.40 | 56.6 / 5.74 | 2.22 | 5761 | 25.53 |
 | Trident + `smooth_time: 0.013` | +128% / +207% | +107% | 21.8 | 12.3 / 3.46 | 57.4 / 6.02 | 2.42 | 3483 | 25.59 |
 | Trident + `smooth_time: 0.02` | +169% / +315% | +170% | 39.1 | 12.6 / 3.98 | 60.7 / 6.78 | 2.98 | 1476 | 25.74 |
-| Trident + `smooth_time: 0.04` | +216% / +470% | +263% | 72.9 | 20.6 / 6.28 | 83.0 / 9.42 | 4.82 | 477 | 26.16 |
+| Trident + `smooth_time: 0.04` | +216% / +470% | +263% | 72.9 | 20.5 / 6.28 | 83.0 / 9.42 | 4.82 | 477 | 26.16 |
 
 On the bench printer the kernel-free chain is both the cleanest and the
 fastest: a kernel's blur also delays every stop. On the 70000 mm/s²
