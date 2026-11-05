@@ -66,13 +66,24 @@ impl BezierPiece {
             })
             .collect();
 
+        assert!(
+            d < BINOMIAL_ROW_CAPACITY,
+            "a degree-{d} piece exceeds the Bernstein conversion's binomial rows"
+        );
+        let mut degree_row = [0.0_f64; BINOMIAL_ROW_CAPACITY];
+        for (i, slot) in degree_row.iter_mut().enumerate().take(d + 1) {
+            *slot = binomial(d, i) as f64;
+        }
+        let mut pascal_row = [0_u64; BINOMIAL_ROW_CAPACITY];
         let mut bernstein = vec![0.0; d + 1];
         for k in 0..=d {
+            pascal_row[k] = 1;
+            for i in (1..k).rev() {
+                pascal_row[i] += pascal_row[i - 1];
+            }
             let mut acc = 0.0;
             for i in 0..=k {
-                let num = binomial(k, i) as f64;
-                let den = binomial(d, i) as f64;
-                acc += (num / den) * normalized[i];
+                acc += (pascal_row[i] as f64 / degree_row[i]) * normalized[i];
             }
             bernstein[k] = acc;
         }
@@ -242,6 +253,9 @@ pub fn split_piece_at(piece: &BezierPiece, u_split: f64) -> (BezierPiece, Bezier
 
     (left, right)
 }
+
+/// Degrees [`binomial`] computes exactly, plus one: its rows fit this.
+const BINOMIAL_ROW_CAPACITY: usize = 51;
 
 pub(crate) fn binomial(n: usize, k: usize) -> u64 {
     assert!(
