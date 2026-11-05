@@ -156,6 +156,22 @@ The Pi bench is shared: every use goes through `tools/bench/lock.py hold -- <cmd
 queues behind the current holder and prints who holds it and for how long (waits of
 20 minutes were seen). Hold it for the whole session script, not per command.
 
+# Disk space
+
+/home filled to 22 MB free and rustc ICE'd for every agent. The sources were: ~495 scratch
+cargo targets in `pending-baselines/targets` (one per commit, 277 GB), ad-hoc `~/.cache/*-target`
+dirs (~280 GB), 117 docker images of 3.6 GB / 0.65 GB (one per branch, ~400 GB with build cache),
+and 20-60 GB `rust/target` in every worktree. Now: scratch worktrees for samples, audits and fuzz
+replays are single fixed trees (`wt/scratch`, `wt-audit/scratch`, `fuzz-triage/main`) checked out
+to the commit needed, so there is one warm target each; local docker images are tagged per
+worktree directory (`klipper-build-<dir>`, `kalico-sim-<dir>`), bounded by the pool, and `land-pr.sh`
+removes a non-pool worktree's images with it. `scripts/gc_caches.py` also drops repo docker images
+older than 12 h that no container uses, build cache older than a week, scratch targets beyond 24,
+and with `--worktree-targets` the `rust/target` of idle (detached, clean) or merged-branch
+worktrees not used by any process; it never touches worktree sources. `wt.sh new` and `ship.py`
+run it automatically (`--if-free-below 100`), and `ci.sh` refuses to start below 10 GB free
+(`CI_MIN_FREE_GB`). `~/.cache/huggingface` and `go-build` are the user's: leave them.
+
 # Never use git stash
 
 The stash is one list shared by every worktree of the repository: one agent's `git stash
