@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use crate::Move;
-use crate::frontend::{ExtruderCaps, LeaderSpillId};
+use crate::frontend::{ExtruderCaps, LeaderSpillId, SettleDemand};
 use crate::path::CurvatureProfile;
 use crate::ratio_ramp::{RATIO_RAMP_MAX_TIME_S, rest_room_reach_mm};
 
@@ -51,23 +51,23 @@ impl Reach {
 }
 
 /// One move as the reach reads it: where it lies along the stream's path,
-/// the fastest the leaders can cross it and the least time they take, the
-/// spatial axes it moves on, what it extrudes, the reach of the extruder it
-/// is budgeted for, how long the leaders' shaped path moves on past a raw
-/// stop and before a raw start, and where the leaders last rest before it.
-/// An extrude-only move is a rest of the leaders, and so is the stream's
-/// start.
+/// the fastest the leaders can cross it, the least time they take and the
+/// acceleration they may take it at, the spatial axes it moves on, what it
+/// extrudes, the reach of the extruder it is budgeted for, the extruder's
+/// caps, and where the leaders last rest before it. An extrude-only move
+/// is a rest of the leaders, and so is the stream's start.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Mark {
     start_mm: f64,
     end_mm: f64,
     ceiling_mm_s: f64,
     least_time_s: f64,
+    accel_mm_s2: f64,
     rest: bool,
     moves_on: [bool; 3],
     extruding: Option<(usize, f64)>,
     reach: Option<Reach>,
-    leader_kernel_reach_s: f64,
+    extruder: Option<ExtruderCaps>,
     rest_behind_mm: f64,
 }
 
@@ -101,11 +101,13 @@ fn least_rest_to_rest_time(length: f64, speed: f64, accel: f64) -> f64 {
 }
 
 /// What the marks dropped from the history leave behind: where the last
-/// of them ends, their fastest ceiling and their largest ratio per axis.
+/// of them ends, their fastest ceiling, their largest acceleration and
+/// their largest ratio per axis.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Dropped {
     end_mm: f64,
     ceiling_mm_s: f64,
+    accel_mm_s2: f64,
     ratios: Vec<(usize, f64)>,
 }
 
@@ -113,6 +115,7 @@ impl Dropped {
     fn absorb(&mut self, mark: &Mark) {
         self.end_mm = mark.end_mm;
         self.ceiling_mm_s = self.ceiling_mm_s.max(mark.ceiling_mm_s);
+        self.accel_mm_s2 = self.accel_mm_s2.max(mark.accel_mm_s2);
         let Some((axis, ratio)) = mark.extruding else {
             return;
         };
@@ -209,6 +212,7 @@ impl Marks {
             end_mm: self.path_end_mm,
             ceiling_mm_s,
             least_time_s,
+            accel_mm_s2: m.limits.accel_mm_s2,
             rest,
             moves_on: m.segment.spatial.as_ref().map_or([false; 3], moves_on),
             extruding: m
@@ -220,10 +224,7 @@ impl Marks {
                 .extruder
                 .filter(|_| m.segment.spatial.is_some())
                 .map(|caps| Reach::of(&caps)),
-            leader_kernel_reach_s: m
-                .limits
-                .extruder
-                .map_or(0.0, |caps| caps.leader_kernel_reach_s),
+            extruder: m.limits.extruder,
             rest_behind_mm: self.last_rest_mm,
         });
         if rest {
@@ -438,30 +439,115 @@ impl Marks {
         })
     }
 
+    /// The largest acceleration and extrusion ratio on `axis` of the
+    /// moves the leaders cross within `window_s` on one side of
+    /// `marks[index]`, up to the first rest. `None` while moves still to
+    /// come could add to them.
+    fn motion_beside(
+        &self,
+        (index, ahead): (usize, bool),
+        window_s: f64,
+        axis: usize,
+        closed: bool,
+    ) -> Option<(f64, f64)> {
+        let (accel, ratio, _) = self.fold_beside(
+            (index, ahead),
+            window_s,
+            closed,
+            (0.0, 0.0, false),
+            |(accel, ratio, rested): (f64, f64, bool), other| {
+                if rested || other.rest {
+                    (accel, ratio, true)
+                } else {
+                    (
+                        accel.max(other.accel_mm_s2),
+                        ratio.max(other.ratio_on(axis)),
+                        false,
+                    )
+                }
+            },
+            |(accel, ratio, rested), dropped| {
+                if rested {
+                    (accel, ratio, rested)
+                } else {
+                    (
+                        accel.max(dropped.accel_mm_s2),
+                        ratio.max(dropped.ratio_on(axis)),
+                        rested,
+                    )
+                }
+            },
+        )?;
+        Some((accel, ratio))
+    }
+
     /// How long an extrude-only `marks[index]` holds the toolhead still
-    /// before and after its own motion: the leaders' kernel reach on each
-    /// side where the leaders move, so the shaped path has come to rest
-    /// before the extruder starts and stays at rest until it stops. `None`
-    /// while the move after it is still to come. Nothing holds at a stream's
+    /// before and after its own motion, where it starts or ends a run of
+    /// extrude-only moves beside motion of the leaders: until their shaped
+    /// path, settling under the largest acceleration the moves there take,
+    /// stands within the settle's radius of the rest point and asks the
+    /// extruder for no more than the extrude-only caps leave it
+    /// ([`crate::frontend::SettleSide::hold_s`]), and together with the run at least the
+    /// kernels' reach on both sides, so the shaped path past the stop
+    /// never meets the one ahead of the start across the run. `None` while
+    /// moves still to come could change it. Nothing holds at a stream's
     /// edges, where the lowerer's rest holds already keep the leaders still.
     fn rest_holds(&self, index: usize, closed: bool) -> Option<[f64; 2]> {
         let mark = self.marks[index];
-        if !mark.rest {
+        let (true, Some(caps)) = (mark.rest, mark.extruder) else {
             return Some([0.0; 2]);
-        }
-        let after = self.marks.get(index + 1);
-        if after.is_none() && !closed {
+        };
+        let first = index
+            - self
+                .beside(index, false)
+                .take_while(|other| other.rest)
+                .count();
+        let last = index
+            + self
+                .beside(index, true)
+                .take_while(|other| other.rest)
+                .count();
+        if last + 1 == self.marks.len() && !closed {
             return None;
         }
-        let before = index.checked_sub(1).map(|previous| &self.marks[previous]);
-        let hold_beside = |other: Option<&Mark>| {
-            if other.is_some_and(|other| !other.rest) {
-                mark.leader_kernel_reach_s
-            } else {
-                0.0
+        let moving_before = first > 0;
+        let moving_after = last + 1 < self.marks.len();
+        let settle = caps.rest_settle.settle();
+        let hold_beside = |side: usize, from: usize, ahead: bool, moving: bool| {
+            if !moving {
+                return Some(0.0);
             }
+            let settling = &settle.sides[side];
+            let (accel, ratio) =
+                self.motion_beside((from, ahead), settling.reach_s, caps.axis_index, closed)?;
+            let demand = SettleDemand {
+                ratio,
+                advance_slope_s: caps.advance_slope_s,
+                advance_curvature_s2_per_mm: caps.advance_curvature_s2_per_mm,
+                own_jerk_per_accel_hz: caps.own_jerk_per_accel_hz,
+                max_velocity_mm_s: caps.max_velocity_mm_s,
+                max_accel_mm_s2: caps.max_accel_mm_s2,
+                extrude_only_velocity_mm_s: self.extrude_only.velocity_mm_s,
+                extrude_only_accel_mm_s2: self.extrude_only.accel_mm_s2,
+            };
+            Some(settling.hold_s(settle.radius_mm, accel, &demand))
         };
-        Some([hold_beside(before), hold_beside(after)])
+        let mut before = hold_beside(0, first, false, moving_before)?;
+        let mut after = hold_beside(1, last, true, moving_after)?;
+        if moving_before && moving_after {
+            let run_s: f64 = (first..=last).map(|at| self.marks[at].least_time_s).sum();
+            let reaches = [settle.sides[0].reach_s, settle.sides[1].reach_s];
+            let short = reaches[0] + reaches[1] - (before + run_s + after);
+            if short > 0.0 {
+                let left = [reaches[0] - before, reaches[1] - after];
+                before += short * left[0] / (left[0] + left[1]);
+                after += short * left[1] / (left[0] + left[1]);
+            }
+        }
+        Some([
+            if index == first { before } else { 0.0 },
+            if index == last { after } else { 0.0 },
+        ])
     }
 
     fn budget(&self, index: usize, closed: bool) -> Option<ExtrusionBudget> {

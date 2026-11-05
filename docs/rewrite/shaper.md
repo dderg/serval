@@ -290,6 +290,25 @@ bench and Trident configs, where axes with different shapers bend the
 spill off the line to the rest point. `advance_conservation` holds the
 projection to this rule with and without an advance.
 
+An extrude-only move (a retract, a prime) is a raw rest with filament
+motion of its own, which adds to whatever the follower lays on the
+leaders' spill. The planner holds the raw toolhead at the rest point
+beside motion (`ExtrusionReach::rest_holds`) until the shaped path has
+**settled** onto it, not for the kernels' whole reach: until it stands
+within half of `max_path_deviation` of the point, the other half left to
+the output fit, and the extruder carries the settling motion's demand on
+top of the extrude-only move's within its caps (`frontend::RestSettle`).
+That is within the position contract every other point of the path keeps.
+The settle is bounded from the leaders' kernel tails alone: a planned
+path that comes to rest under tangential acceleration `A` covers at most
+`A·s²/2` in its last `s` seconds, whatever its turns, so `h` after the
+stop the shaped path stands within `A·∫_{u>h}|w(u)|·(u − h)²/2 du`. The
+holds on either side of a run of extrude-only moves still sum, with the
+run, to at least the kernels' reach on both sides, so the spill past the
+stop never meets the reach ahead of the start and the ratio budgets
+around the rest stay what they read. `retract_placement` in the fit audit
+holds every retract and prime inside the toolhead's stop.
+
 The ratio is not projected raw. Every follower smooths `r(s)` along the path
 (`follower_projection/ratio_ramp.rs`) with the kernel `¾(1 − x²)` of
 half-width `h(s)`: half the path the shaped leaders cover in the ramp time
