@@ -2524,15 +2524,21 @@ fn differentiate_into(coefficients: &[f64], order: usize, out: &mut [f64]) -> us
     let mut length = coefficients.len();
     out[..length].copy_from_slice(coefficients);
     for _ in 0..order {
-        if length <= 1 {
-            return 0;
-        }
-        for power in 1..length {
-            out[power - 1] = out[power] * power as f64;
-        }
-        length -= 1;
+        length = differentiate_in_place(out, length);
     }
     length
+}
+
+/// One more derivative of the first `length` coefficients of `out`, in
+/// place; returns its coefficient count, zero once it vanishes.
+fn differentiate_in_place(out: &mut [f64], length: usize) -> usize {
+    if length <= 1 {
+        return 0;
+    }
+    for power in 1..length {
+        out[power - 1] = out[power] * power as f64;
+    }
+    length - 1
 }
 
 /// `TRANSLATION_BINOMIALS[m][p]` is the weight of a source moment of power

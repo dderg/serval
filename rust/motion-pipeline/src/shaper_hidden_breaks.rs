@@ -46,7 +46,7 @@
 use nurbs::algebra::PiecewisePolynomialKernel;
 use trajectory::ShapedSignal;
 
-use super::{AxisSignalTable, MIN_DEVICE_INTERVAL_S, MOMENT_POWER_CAPACITY, differentiate_into};
+use super::{AxisSignalTable, MIN_DEVICE_INTERVAL_S, MOMENT_POWER_CAPACITY, differentiate_in_place};
 use crate::lowering::FitTol;
 
 /// Holds the derivative series of an input piece and a kernel piece, and
@@ -81,8 +81,12 @@ impl JumpSeries {
         );
         let mut orders = [0.0; SERIES_CAPACITY];
         let mut derivative = [0.0; MOMENT_POWER_CAPACITY];
+        let mut length = coefficients.len();
+        derivative[..length].copy_from_slice(coefficients);
         for (order, value) in orders[..coefficients.len()].iter_mut().enumerate() {
-            let length = differentiate_into(coefficients, order, &mut derivative);
+            if order > 0 {
+                length = differentiate_in_place(&mut derivative, length);
+            }
             *value = derivative[..length]
                 .iter()
                 .rev()
