@@ -660,6 +660,10 @@ impl WidthField {
     /// there, or the width the seams around ask for if wider, once it lies
     /// far enough past the last node kept in time and along the path, or
     /// past the rest the leaders last left for its cone to hold that target.
+    /// Every node kept so opens a window: a node the cone of a rest held at
+    /// zero width would space the nodes after it, and a motion shorter than
+    /// half a ramp time between two rests would keep no open node, a ratio
+    /// step in it unramped.
     fn keep_if_due(&mut self, sample: TimeSample, base: f64) {
         let ramp_time = self.ramp_time_at(sample.t);
         let target =
@@ -676,6 +680,11 @@ impl WidthField {
         };
         if due {
             self.push(sample.s, target);
+            assert!(
+                self.nodes.last().is_some_and(|node| node.envelope > 0.0),
+                "the width node kept at {} mm opens no window",
+                sample.s
+            );
             self.last_kept = Some(LastKept::Moving(KeptNode {
                 t: sample.t,
                 s: sample.s,
