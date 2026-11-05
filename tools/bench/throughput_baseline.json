@@ -1,18 +1,18 @@
 {
   "slice_lines": 1000,
-  "commit": "f93ffbfd631f23dcc60b0fdd0a4846d3e51bde3a",
-  "reason": "Fit groups, group-level kernel fits and leader prefits on their own stage (#658)",
+  "commit": "4560c5c5963fe4996cf2d5f4052ac0a270310da8",
+  "reason": "Digest-identical follower projection savings: one crossing memo per lay, indexed point-mass moments",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 23798714525,
+      "ir": 24868263920,
       "stream_secs": 6.537
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 24519163813,
+      "ir": 26153307751,
       "stream_secs": 6.213
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 29437862918,
+      "ir": 29601274379,
       "stream_secs": 5.538
     }
   },
