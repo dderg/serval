@@ -92,13 +92,15 @@ fn crossing_speed(speed: f64, accel: f64) -> f64 {
     speed + 0.5 * accel * RATIO_RAMP_MAX_TIME_S
 }
 
-/// What a follower's ratio ramp is held to: the advance's slope and the
-/// follower motor's velocity and acceleration limits.
+/// What a follower's ratio ramp is held to: the advance's slope, the
+/// follower motor's velocity and acceleration limits, and the jerk gain of
+/// the kernel smoothing the advanced follower, infinite without one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RatioRampRule {
     pub advance_slope_s: f64,
     pub max_velocity_mm_s: f64,
     pub max_accel_mm_s2: f64,
+    pub kernel_jerk_per_accel_hz: f64,
 }
 
 /// A ratio step as the leaders cross it: the step, the larger ratio on

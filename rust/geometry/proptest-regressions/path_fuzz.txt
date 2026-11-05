@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 87ef04e08b5928c0702b04eeead91294b4a407b8eb7b0491da03875dccd4a631 # shrinks to segment = Clothoid(Clothoid { start_pose: [0.0, 0.0, 0.0], u: [0.8866889390633168, -0.4623664405455587, 0.0], v: [0.20437598943117705, 0.3919357318081349, 0.8970043684821436], kappa_0: -1.8941993545693383e-6, sigma: -5.590939974115212e-13, length: 63.782676302900505 })
