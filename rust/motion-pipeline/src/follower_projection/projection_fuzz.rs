@@ -18,6 +18,7 @@ use trajectory::{AxisChainSet, CompiledChain, ContinuousAxis, ContinuousSegment}
 use super::{FollowerState, ProjectionTiming, ProjectionWindow, project_followers};
 use crate::lowering::FitTol;
 use crate::shaper::Lookahead;
+use crate::types::PostProcessError;
 use crate::worker_pool::WorkerPool;
 
 const E_AXIS: usize = 3;
@@ -519,6 +520,14 @@ fn chains(follower: CompiledChain) -> AxisChainSet {
 }
 
 fn project_all_at_once(track: &Track, chains: &AxisChainSet) -> Vec<ContinuousSegment> {
+    try_project_all_at_once(track, chains)
+        .unwrap_or_else(|error| panic!("one-shot projection failed: {error:?}"))
+}
+
+fn try_project_all_at_once(
+    track: &Track,
+    chains: &AxisChainSet,
+) -> Result<Vec<ContinuousSegment>, PostProcessError> {
     let pool = WorkerPool::new();
     let mut committed = track.frontier.clone();
     project_followers(
@@ -533,9 +542,8 @@ fn project_all_at_once(track: &Track, chains: &AxisChainSet) -> Vec<ContinuousSe
         &mut committed,
         &mut Vec::new(),
         &mut ProjectionTiming::default(),
-    )
-    .unwrap_or_else(|error| panic!("one-shot projection failed: {error:?}"));
-    committed
+    )?;
+    Ok(committed)
 }
 
 /// Feed the track the way the shaper does: a few more segments each call,
@@ -1083,13 +1091,70 @@ fn a_narrow_reach_ending_at_the_held_distance_is_read_at_both_ends() {
 
 /// #757: a 0.05 mm extrusion whipped from rest to rest in 0.37 ms asks an
 /// advanced extruder for `r·k·j` ≈ 2e7 mm/s², ten times the 2e6 mm/s² drawn
-/// for it. Past its limit the advanced source fit falls back on the
-/// absolute acceleration budget, which the ramp's window narrowing into
-/// the rest never meets, and spends every refinement split there. The
-/// planner holds that demand within the limits, so the drawn limits rise
-/// over it.
+/// for it. The planner holds that demand within the limits, so the drawn
+/// limits rise over it.
 #[test]
 fn limits_drawn_under_a_strokes_advanced_demand_rise_over_it() {
+    let track = whipped_extrusion_from_rest();
+    let limits = track
+        .extruder_peaks
+        .limits_above(WHIPPED_ADVANCE_K, WHIPPED_DRAWN_LIMITS);
+    assert!(
+        limits.1 > 10.0 * WHIPPED_DRAWN_LIMITS.1,
+        "the track asks no more than {limits:?} of the extruder"
+    );
+    project_all_at_once(
+        &track,
+        &chains(limited(
+            follower_chain(Some(WHIPPED_ADVANCE_K), None),
+            Some(limits),
+        )),
+    );
+}
+
+/// Under the limits #757 drew, the advanced source asks its motor past
+/// them where the stroke leaves the rest, and the fit that cannot follow it
+/// there fails on that demand, not on its tolerance.
+#[test]
+fn a_fit_failing_on_an_advanced_demand_past_the_limit_names_the_demand() {
+    let track = whipped_extrusion_from_rest();
+    let error = try_project_all_at_once(
+        &track,
+        &chains(limited(
+            follower_chain(Some(WHIPPED_ADVANCE_K), None),
+            Some(WHIPPED_DRAWN_LIMITS),
+        )),
+    )
+    .expect_err("an advanced demand ten times the limit projects");
+    let PostProcessError::AdvancedDemandOverLimit {
+        axis,
+        t,
+        demand_mm_s2,
+        limit_mm_s2,
+        ..
+    } = error
+    else {
+        panic!("the projection fails as {error:?}");
+    };
+    let stroke = track.frontier.last().expect("a stroke");
+    assert_eq!(axis, E_AXIS);
+    assert!(
+        (stroke.t_start..=stroke.t_end).contains(&t),
+        "the demand is refused at t={t}, off the stroke [{}, {}]",
+        stroke.t_start,
+        stroke.t_end
+    );
+    assert_eq!(limit_mm_s2, WHIPPED_DRAWN_LIMITS.1);
+    assert!(
+        demand_mm_s2.abs() > 10.0 * limit_mm_s2,
+        "the refused demand {demand_mm_s2} mm/s^2 is not the stroke's"
+    );
+}
+
+const WHIPPED_ADVANCE_K: f64 = 0.03786656554428725;
+const WHIPPED_DRAWN_LIMITS: (f64, f64) = (2000.0, 2e6);
+
+fn whipped_extrusion_from_rest() -> Track {
     let stroke = |reverse, length, pace, end_speed, ratio| Step::Stroke {
         reverse,
         length,
@@ -1107,16 +1172,5 @@ fn limits_drawn_under_a_strokes_advanced_demand_rise_over_it() {
         Step::Hold { duration: 0.001 },
         stroke(false, 0.05, 135.9014773916357, 0.0, 0.01),
     ];
-    let advance_k = 0.03786656554428725;
-    let drawn = (2000.0, 2e6);
-    let track = build_profiled_track(0.0, &steps, Profile::Quintic);
-    let limits = track.extruder_peaks.limits_above(advance_k, drawn);
-    assert!(
-        limits.1 > 10.0 * drawn.1,
-        "the track asks no more than {limits:?} of the extruder"
-    );
-    project_all_at_once(
-        &track,
-        &chains(limited(follower_chain(Some(advance_k), None), Some(limits))),
-    );
+    build_profiled_track(0.0, &steps, Profile::Quintic)
 }
