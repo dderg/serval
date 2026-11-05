@@ -352,7 +352,7 @@ proptest! {
                     &stream.moves[lo + k - 1],
                     &stream.moves[lo + k],
                     up_accel.max(dn_accel),
-                    stream.budgets[lo + k].rest_room_mm,
+                    &stream.budgets[lo + k],
                 ),
             )?;
         }

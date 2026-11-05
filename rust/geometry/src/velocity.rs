@@ -636,7 +636,7 @@ fn seed_seam_velocities(
                 &moves[k - 1],
                 &moves[k],
                 up.accel.max(dn.accel),
-                budgets[k].rest_room_mm,
+                &budgets[k],
             );
             if step_ceiling < v[k] {
                 report.ratio_step_bound += 1;

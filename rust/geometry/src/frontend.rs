@@ -111,6 +111,13 @@ impl LeaderSpill {
         ((shaped - self.moment_s * accel) / self.mass).max(0.0)
     }
 
+    /// The fastest the shaped leaders move where the planned speed stays
+    /// within `planned` under an acceleration budget of `accel`.
+    #[must_use]
+    pub fn shaped_speed(&self, planned: f64, accel: f64) -> f64 {
+        self.mass * planned + self.moment_s * accel
+    }
+
     fn wider(self, other: Self) -> Self {
         Self {
             mass: self.mass.max(other.mass),

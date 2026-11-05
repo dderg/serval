@@ -85,6 +85,13 @@ fn rest_room_ramp_time(speed: f64, room_mm: f64) -> f64 {
     }
 }
 
+/// The fastest leaders crossing a ratio step at `speed` under an
+/// acceleration of up to `accel` move within half the longest ramp of it,
+/// the window the projection reads a step's crossing over.
+fn crossing_speed(speed: f64, accel: f64) -> f64 {
+    speed + 0.5 * accel * RATIO_RAMP_MAX_TIME_S
+}
+
 /// What a follower's ratio ramp is held to: the advance's slope and the
 /// follower motor's velocity and acceleration limits.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -230,7 +237,11 @@ impl RatioRampRule {
     /// under an acceleration of up to `accel` and a jerk of up to `jerk`
     /// `rest_room_mm` along the path from the leaders' nearest rest, fits
     /// the limits within the longest ramp the room leaves it; zero where
-    /// even a crossing at rest does not.
+    /// even a crossing at rest does not. The projection derives the ramp
+    /// from the fastest the leaders move within half the longest ramp of
+    /// the step, up to `accel` times that faster than at the step, so the
+    /// step is held there, at no more than `fastest_mm_s`, the fastest they
+    /// move anywhere near it.
     #[must_use]
     pub fn step_speed_cap(
         &self,
@@ -239,21 +250,27 @@ impl RatioRampRule {
         accel: f64,
         jerk: f64,
         rest_room_mm: f64,
+        fastest_mm_s: f64,
     ) -> f64 {
         assert!(
             rest_room_mm >= 0.0,
             "a ratio step lies {rest_room_mm} mm from the leaders' nearest rest"
         );
+        assert!(
+            fastest_mm_s >= 0.0,
+            "the leaders move at up to {fastest_mm_s} mm/s near a ratio step"
+        );
         if ratio_step <= 0.0 {
             return f64::INFINITY;
         }
         let fits_at = |speed_mm_s: f64| {
+            let crossing = crossing_speed(speed_mm_s, accel).min(speed_mm_s.max(fastest_mm_s));
             self.fits(
-                RATIO_RAMP_MAX_TIME_S.min(rest_room_ramp_time(speed_mm_s, rest_room_mm)),
+                RATIO_RAMP_MAX_TIME_S.min(rest_room_ramp_time(crossing, rest_room_mm)),
                 &RatioStep {
                     ratio_step,
                     peak_ratio,
-                    speed_mm_s,
+                    speed_mm_s: crossing,
                     accel_mm_s2: accel,
                     jerk_mm_s3: jerk,
                 },

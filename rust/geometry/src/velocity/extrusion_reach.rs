@@ -56,7 +56,7 @@ impl Reach {
     /// The fastest the shaped leaders move where the planned speed stays
     /// within `planned`.
     fn shaped_speed(&self, planned: f64) -> f64 {
-        self.leader_spill.mass * planned + self.leader_spill.moment_s * self.accel_mm_s2
+        self.leader_spill.shaped_speed(planned, self.accel_mm_s2)
     }
 }
 
@@ -482,6 +482,10 @@ impl Marks {
             axes_in_reach: self.axes_in_reach(index, closed)?,
             rest_holds_s: self.rest_holds(index, closed)?,
             rest_room_mm: self.rest_room(index, closed)?,
+            fastest_in_reach_mm_s: match self.marks[index].reach {
+                Some(reach) => self.fastest_in_reach(index, reach, closed)?,
+                None => f64::INFINITY,
+            },
         })
     }
 
@@ -499,15 +503,17 @@ impl Marks {
 /// moves on within the leaders' spill of it, whose kernels the shaped
 /// path's jerk there passes through, for an extrude-only move how long it
 /// holds the toolhead still before and after its own motion, so the
-/// extruder never adds the leaders' spill to it, and the path from its
-/// start to the leaders' nearest rest where that narrows the ratio ramp of
-/// a step there.
+/// extruder never adds the leaders' spill to it, the path from its start
+/// to the leaders' nearest rest where that narrows the ratio ramp of a step
+/// there, and the fastest planned ceiling the leaders reach within its
+/// speed window, infinite for a move no extruder reach covers.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExtrusionBudget {
     pub ratio_in_reach: f64,
     pub axes_in_reach: [bool; 3],
     pub rest_holds_s: [f64; 2],
     pub rest_room_mm: f64,
+    pub fastest_in_reach_mm_s: f64,
 }
 
 /// Each move's [`ExtrusionBudget`]: the largest extrusion ratio within its
