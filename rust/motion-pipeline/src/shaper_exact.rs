@@ -260,7 +260,11 @@ impl CentredSum {
             .iter()
             .rev()
             .fold(0.0, |acc, &magnitude| acc * reach + magnitude);
-        if shift.abs() <= radius * FIRST_ORDER_SHIFT_LIMIT {
+        if shift == 0.0 {
+            for (value, &term) in self.values.iter_mut().zip(&term.values[..len]) {
+                *value += sign * term;
+            }
+        } else if shift.abs() <= radius * FIRST_ORDER_SHIFT_LIMIT {
             for power in 0..len {
                 let slope = if power + 1 < len {
                     (power + 1) as f64 * shift * term.values[power + 1]
@@ -979,9 +983,10 @@ impl AxisSignalTable {
             edge.order_of(self.ends[piece]) == Ordering::Greater,
             "a window edge inside the signal lies past its last piece's end"
         );
-        let shifted = Tracked::exact(&self.coeffs[piece]).shifted(edge.head - self.origins[piece]);
-        for (order, slot) in series.iter_mut().enumerate() {
-            shifted.derivative_into(order, slot);
+        let [position, higher @ ..] = series;
+        *position = Tracked::exact(&self.coeffs[piece]).shifted(edge.head - self.origins[piece]);
+        for (order, slot) in (1..).zip(higher.iter_mut()) {
+            position.derivative_into(order, slot);
         }
         true
     }
