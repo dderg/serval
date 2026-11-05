@@ -3346,12 +3346,13 @@ impl AxisSignalTable {
         };
         let mut centered = [0.0; MOMENT_POWER_CAPACITY];
         window.center(coefficients, &mut centered[..coefficients.len()]);
-        let mut derivative = [0.0; MOMENT_POWER_CAPACITY];
+        let mut length = coefficients.len();
         for (order, moments) in orders.enumerate() {
-            let length =
-                differentiate_into(&centered[..coefficients.len()], order, &mut derivative);
+            if order > 0 {
+                length = differentiate_in_place(&mut centered, length);
+            }
             if length > 0 {
-                window.accumulate_centered(&derivative[..length], moments);
+                window.accumulate_centered(&centered[..length], moments);
             }
         }
     }
