@@ -77,9 +77,7 @@ pub fn extruder_caps(
                 path_jerk_per_accel(&shaped, set)
             }),
             unshaped_leaders,
-            own_jerk_per_accel_hz: chain.kernel().map_or(f64::INFINITY, |kernel| {
-                PiecewisePolynomialKernel::directional_variation(&[kernel])
-            }),
+            own_jerk_per_accel_hz: chain.kernel_jerk_per_accel_hz(),
             instantaneous_corner_velocity_mm_s: chain.instantaneous_corner_velocity(),
             leader_spill,
             leader_kernel_reach_s: leaders_forward.max(-leaders_back),

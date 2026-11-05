@@ -142,6 +142,7 @@ impl ExtruderCaps {
             advance_slope_s: self.advance_slope_s,
             max_velocity_mm_s: self.max_velocity_mm_s,
             max_accel_mm_s2: self.max_accel_mm_s2,
+            kernel_jerk_per_accel_hz: self.own_jerk_per_accel_hz,
         }
     }
 

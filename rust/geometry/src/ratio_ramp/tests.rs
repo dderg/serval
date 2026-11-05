@@ -50,6 +50,7 @@ fn unlimited(k: f64) -> RatioRampRule {
         advance_slope_s: k,
         max_velocity_mm_s: f64::INFINITY,
         max_accel_mm_s2: f64::INFINITY,
+        kernel_jerk_per_accel_hz: f64::INFINITY,
     }
 }
 
@@ -108,6 +109,7 @@ const P1: RatioRampRule = RatioRampRule {
     advance_slope_s: 0.5,
     max_velocity_mm_s: 45.0,
     max_accel_mm_s2: 2000.0,
+    kernel_jerk_per_accel_hz: f64::INFINITY,
 };
 
 fn cruise(ratio_step: f64, speed_mm_s: f64) -> RatioStep {
@@ -126,6 +128,7 @@ fn the_ramp_time_is_the_shortest_that_fits() {
         advance_slope_s: 0.03,
         max_velocity_mm_s: 30.0,
         max_accel_mm_s2: 5000.0,
+        kernel_jerk_per_accel_hz: f64::INFINITY,
     };
     let step = cruise(0.04, 200.0);
     let tau = rule.ramp_time(&step);
@@ -158,6 +161,7 @@ fn without_an_advance_the_base_flow_sets_the_ramp() {
         advance_slope_s: 0.0,
         max_velocity_mm_s: 50.0,
         max_accel_mm_s2: 1000.0,
+        kernel_jerk_per_accel_hz: f64::INFINITY,
     };
     let tau = rule.ramp_time(&cruise(0.1, 200.0));
     assert!((tau - 1.5 * 20.0 / 1000.0).abs() < 1e-12, "{tau}");
@@ -259,6 +263,7 @@ fn a_rest_beside_a_step_caps_its_speed_at_the_ramp_the_room_leaves() {
         advance_slope_s: 0.03,
         max_velocity_mm_s: 50.0,
         max_accel_mm_s2: 20000.0,
+        kernel_jerk_per_accel_hz: f64::INFINITY,
     };
     let (ratio, accel, room_mm) = (0.02743, 25409.0, 10.4);
     let free = seam(ratio, accel, f64::INFINITY).cap(&rule, FASTEST_MM_S);
@@ -293,6 +298,7 @@ const P4: RatioRampRule = RatioRampRule {
     advance_slope_s: 0.02,
     max_velocity_mm_s: 50.0,
     max_accel_mm_s2: 5000.0,
+    kernel_jerk_per_accel_hz: f64::INFINITY,
 };
 const P4_PEAK_RATIO: f64 = 0.0427;
 const P4_SPEED_MM_S: f64 = 65.0;

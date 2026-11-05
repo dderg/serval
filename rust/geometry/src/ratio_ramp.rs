@@ -85,13 +85,15 @@ fn rest_room_ramp_time(speed: f64, room_mm: f64) -> f64 {
     }
 }
 
-/// What a follower's ratio ramp is held to: the advance's slope and the
-/// follower motor's velocity and acceleration limits.
+/// What a follower's ratio ramp is held to: the advance's slope, the
+/// follower motor's velocity and acceleration limits, and the jerk gain of
+/// the kernel smoothing the advanced follower, infinite without one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RatioRampRule {
     pub advance_slope_s: f64,
     pub max_velocity_mm_s: f64,
     pub max_accel_mm_s2: f64,
+    pub kernel_jerk_per_accel_hz: f64,
 }
 
 /// A ratio step as the leaders cross it: the step, the larger ratio on
