@@ -197,14 +197,14 @@ def failed_jobs(run_id: str) -> list[str]:
 def scratch_main(rev: str = "origin/main") -> Path:
     pending.run(["git", "fetch", "-q", "origin"])
     sha = pending.run(["git", "rev-parse", rev]).strip()
-    tree = SCRATCH / f"main-{sha[:10]}"
+    tree = SCRATCH / "main"
     if not tree.exists():
         SCRATCH.mkdir(parents=True, exist_ok=True)
         pending.run(["git", "worktree", "prune"])
         pending.run(
             ["git", "worktree", "add", "-q", "--detach", str(tree), sha]
         )
-    pending.run(["git", "checkout", "-q", "--", "rust"], tree)
+    pending.run(["git", "checkout", "-q", "--detach", "--force", sha], tree)
     subprocess.run(
         ["git", "clean", "-fdq", "--", "rust/*/proptest-regressions"], cwd=tree
     )
