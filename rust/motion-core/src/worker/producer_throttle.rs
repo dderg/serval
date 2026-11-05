@@ -2,17 +2,26 @@
 //! weak to plan a print in realtime. Set [`PRODUCER_THROTTLE_ENV`] to
 //! `<realtime_factor>@<from_stream_s>` and, for everything it plans past
 //! stream time `from_stream_s`, the planning side spends
-//! `1 / realtime_factor` of the planned motion's duration before it takes
-//! the next input, brakes to rest included, as a starved host would.
+//! `1 / realtime_factor` of the planned motion's duration, brakes to rest
+//! included, as a starved host would.
+//!
+//! The time is owed when the motion leaves planning and paid at most
+//! [`MAX_HOLD_PER_STEP`] per planning step. A real host's cost goes with the
+//! moves it plans, one step at a time; planning stages that hold motion back
+//! (the turning guard) release seconds of it in one step, and charging that
+//! whole release to the step would blind the pacer for seconds no real
+//! planner spends in one step.
 
 use std::time::Duration;
 
 pub const PRODUCER_THROTTLE_ENV: &str = "SERVAL_PRODUCER_THROTTLE";
+pub(crate) const MAX_HOLD_PER_STEP: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ProducerThrottle {
     realtime_factor: f64,
     from_stream_s: f64,
+    owed_s: f64,
 }
 
 impl ProducerThrottle {
@@ -55,17 +64,20 @@ impl ProducerThrottle {
         Ok(Self {
             realtime_factor,
             from_stream_s,
+            owed_s: 0.0,
         })
     }
 
-    /// How long the producer spends having planned the stream from
-    /// `planned_from_s` through `planned_to_s`.
-    pub(crate) fn hold(&self, planned_from_s: f64, planned_to_s: f64) -> Duration {
+    /// How long this planning step holds the producer, having planned the
+    /// stream from `planned_from_s` through `planned_to_s`.
+    pub(crate) fn hold(&mut self, planned_from_s: f64, planned_to_s: f64) -> Duration {
         let throttled_s = planned_to_s - planned_from_s.max(self.from_stream_s);
-        if throttled_s <= 0.0 {
-            return Duration::ZERO;
+        if throttled_s > 0.0 {
+            self.owed_s += throttled_s / self.realtime_factor;
         }
-        Duration::from_secs_f64(throttled_s / self.realtime_factor)
+        let paid_s = self.owed_s.min(MAX_HOLD_PER_STEP.as_secs_f64());
+        self.owed_s -= paid_s;
+        Duration::from_secs_f64(paid_s)
     }
 }
 
