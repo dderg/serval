@@ -58,7 +58,12 @@ fn assert_within_extruder_limits(name: &str, gcode: &str) {
     let snapshot = corpus::plan(name, gcode, &config).expect("the G-code plans");
     let audit = corpus::extruder::extruder_audit(&snapshot, gcode, &config)
         .expect("the P1 bowden extruder has limits");
-    let shown: Vec<String> = audit.excesses.iter().take(5).map(|e| format!("{e:?}")).collect();
+    let shown: Vec<String> = audit
+        .excesses
+        .iter()
+        .take(5)
+        .map(|e| format!("{e:?}"))
+        .collect();
     assert!(
         audit.excesses.is_empty(),
         "{name}: {} extruder excesses, first: {}",

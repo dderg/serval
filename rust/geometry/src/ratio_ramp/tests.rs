@@ -219,12 +219,8 @@ fn a_step_is_held_at_the_fastest_the_leaders_cross_it_within_the_longest_ramp() 
         (crossing - cap - 7.395).abs() < 1e-9,
         "braking at {accel} mm/s², the leaders cross at {crossing} mm/s a step capped at {cap}"
     );
-    let (velocity, accel_demand) = capped_demand(
-        &P1,
-        RATIO_RAMP_MAX_TIME_S,
-        (ratio, accel),
-        (cap, crossing),
-    );
+    let (velocity, accel_demand) =
+        capped_demand(&P1, RATIO_RAMP_MAX_TIME_S, (ratio, accel), (cap, crossing));
     assert!(velocity <= 45.0 + 1e-9 && accel_demand <= 2000.0 + 1e-9);
     assert!(
         (velocity - 45.0).abs() < 1e-6 || (accel_demand - 2000.0).abs() < 1e-6,

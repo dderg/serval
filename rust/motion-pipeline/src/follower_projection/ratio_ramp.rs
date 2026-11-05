@@ -811,7 +811,10 @@ impl WidthField {
         let (needed_from, front_s) = match self.candidates.front() {
             Some(&Candidate::Time(sample)) => (sample.t, sample.s),
             Some(&Candidate::Rest(s)) => (through, s),
-            None => (through, self.nodes.last().map_or(f64::NEG_INFINITY, |node| node.s)),
+            None => (
+                through,
+                self.nodes.last().map_or(f64::NEG_INFINITY, |node| node.s),
+            ),
         };
         let needed_from = needed_from - TARGET_DELAY_S;
         let mut drop = 0;
