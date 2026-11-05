@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Nudge, never block: a worktree created by plain `git worktree add` starts with
+# a cold rust/target (250-310 s to the first green `ci.sh quick`, 20-40 GB on
+# disk once built; 51 of 94 worktree creations in one audit window did this).
+# scripts/wt.sh new <topic> reuses a warm pool worktree instead.
+zero=0000000000000000000000000000000000000000
+[ "$1" = "$zero" ] || exit 0
+top="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+case "$(basename "$top")" in
+    serval-pool-*|scratch|main) exit 0 ;;
+esac
+case "$top" in
+    "$HOME"/.cache/*) exit 0 ;;
+esac
+echo "git: $top starts with a cold cargo target; scripts/wt.sh new <topic> hands out a warm worktree (see CLAUDE.md)." >&2
+exit 0
