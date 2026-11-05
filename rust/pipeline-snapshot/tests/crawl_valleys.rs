@@ -49,3 +49,33 @@ fn a_ratio_ramped_advance_keeps_the_extruder_within_its_limits_through_a_crawl()
         .collect();
     assert!(moving.is_empty(), "{moving:#?}");
 }
+
+/// `tools/sim/gcode/voron_first_layers.gcode` lines 897-900: an extrusion,
+/// the travel back along it and the extrusion out again, whose crawl at
+/// t≈63.92 s on the P1 bowden kernel profile drove the extruder to
+/// 49.4 mm/s against its 45 mm/s limit as the advance rebuilt the lead it
+/// released there.
+const EXTRUSION_TRAVEL_BACK_AND_OUT: &str = "G90
+M83
+G1 X114.495 Y98.898 F3000
+G1 X109.03 Y104.363 E.26235
+G1 X114.088 Y98.711 F9000
+G1 F5878.936
+G1 X108.31 Y104.489 E.27739
+G1 X107.16 Y105.195 E.04579
+";
+
+#[test]
+fn a_kernel_smoothed_advance_keeps_the_extruder_within_its_velocity_limit_out_of_a_crawl() {
+    let config = corpus::repo().join("tools/bench/configs/profiles/p1_bowden_bedslinger_kernel.cfg");
+    let snapshot = corpus::plan(
+        "extrusion_travel_back_and_out",
+        EXTRUSION_TRAVEL_BACK_AND_OUT,
+        &config,
+    )
+    .expect("the repro plans");
+    let audit = corpus::extruder::extruder_audit(&snapshot, EXTRUSION_TRAVEL_BACK_AND_OUT, &config)
+        .expect("the config limits the extruder");
+    let excesses: Vec<String> = audit.excesses.iter().map(ToString::to_string).collect();
+    assert!(excesses.is_empty(), "{}: {excesses:#?}", audit.summary());
+}
