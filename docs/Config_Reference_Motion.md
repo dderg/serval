@@ -41,8 +41,9 @@ max_accel: 3000
 #   advance, or a nonlinear advance before one) holds each piece of its
 #   advanced fit, of duration h, to the looser of this and 8*e/h^2, e being
 #   its scaled path deviation: the acceleration error a piece pinned at
-#   both ends can carry while staying within e. A piece the looser budget
-#   would carry past the axis's max_accel plus this is held to this.
+#   both ends can carry while staying within e. Where no kernel follows the
+#   advance, a piece the looser budget would carry past the axis's
+#   max_accel plus this is held to this.
 ```
 
 `corner_deviation` is the canonical corner budget. Setting both corner options is an error. `max_accel_to_decel` and `minimum_cruise_ratio` are explicitly unsupported rather than ignored.

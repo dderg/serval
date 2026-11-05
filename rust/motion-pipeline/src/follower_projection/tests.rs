@@ -1959,8 +1959,11 @@ fn e_chain(stages: &[(&str, &'static dyn PostProcessorAlgo, Vec<f64>)]) -> Compi
     .expect("extruder chain compiles")
 }
 
-fn source_budget(chain: &CompiledChain) -> AccelBudget {
-    super::source_accel_budget(super::LeadingAdvance::of(chain), EXTRUDER_ACCEL_LIMIT)
+fn source_budget(chain: CompiledChain) -> AccelBudget {
+    super::source_accel_budget(&chain.with_follower_limits(trajectory::FollowerLimits {
+        max_velocity_mm_s: 50.0,
+        max_accel_mm_s2: EXTRUDER_ACCEL_LIMIT,
+    }))
 }
 
 const EXTRUDER_ACCEL_LIMIT: f64 = 20_000.0;
@@ -1969,9 +1972,22 @@ const SMOOTH_TIME: f64 = 0.01;
 const TANH: [f64; 3] = [0.02, 0.05, 2.0];
 
 #[test]
-fn a_source_fitted_to_the_advanced_signal_spends_its_position_budget() {
+fn a_source_the_motor_reads_spends_its_position_budget_within_the_extruder_limit() {
+    assert_eq!(
+        source_budget(e_chain(&[(
+            "pa",
+            &algos::LinearPressureAdvance,
+            vec![LINEAR_ADVANCE]
+        )])),
+        AccelBudget::PositionEquivalent {
+            accel_limit_mm_s2: EXTRUDER_ACCEL_LIMIT
+        }
+    );
+}
+
+#[test]
+fn a_source_a_kernel_smooths_spends_its_position_budget_past_the_extruder_limit() {
     for chain in [
-        e_chain(&[("pa", &algos::LinearPressureAdvance, vec![LINEAR_ADVANCE])]),
         e_chain(&[
             ("pa", &algos::TanhPressureAdvance, TANH.to_vec()),
             ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
@@ -1982,9 +1998,9 @@ fn a_source_fitted_to_the_advanced_signal_spends_its_position_budget() {
         ]),
     ] {
         assert_eq!(
-            source_budget(&chain),
+            source_budget(chain),
             AccelBudget::PositionEquivalent {
-                accel_limit_mm_s2: EXTRUDER_ACCEL_LIMIT
+                accel_limit_mm_s2: f64::INFINITY
             }
         );
     }
@@ -2004,7 +2020,7 @@ fn a_source_fitted_to_the_plain_projection_keeps_the_absolute_budget() {
             ("pa", &algos::TanhPressureAdvance, TANH.to_vec()),
         ]),
     ] {
-        assert_eq!(source_budget(&chain), AccelBudget::Absolute);
+        assert_eq!(source_budget(chain), AccelBudget::Absolute);
     }
 }
 

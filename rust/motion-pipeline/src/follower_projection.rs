@@ -68,18 +68,25 @@ fn follower_fit_tol(fit_tol: FitTol, position_scale: f64) -> FitTol {
 /// shaped path: its acceleration carries `k·r·jerk` of the path while the
 /// extruder moves a fraction of its position tolerance, and nothing after
 /// it differentiates the fit, so it spends its position budget
-/// ([`AccelBudget::PositionEquivalent`]) wherever that keeps it within the
-/// follower's acceleration limit `accel_limit_mm_s2`. Every other follower
-/// fit keeps the absolute budget. The plain projection trailing derivative
-/// gains differentiate would turn its velocity error `δ'` into `k·δ'` of
-/// command position, which the position-equivalent budget does not bound;
-/// a kernel's output carries only the path's own acceleration, which the
-/// absolute budget resolves in long pieces, and spending its position
-/// budget there moves the bead the melt lag lays.
-fn source_accel_budget(leading: Option<LeadingAdvance>, accel_limit_mm_s2: f64) -> AccelBudget {
-    match leading {
-        Some(_) => AccelBudget::PositionEquivalent { accel_limit_mm_s2 },
-        None => AccelBudget::Absolute,
+/// ([`AccelBudget::PositionEquivalent`]). Where no kernel follows, that fit
+/// is the motor's command, which spends it only within the follower's
+/// acceleration limit; a kernel after it smooths the advanced signal's
+/// acceleration, far past the limit, into the command. Every other
+/// follower fit keeps the absolute budget. The plain projection trailing
+/// derivative gains differentiate would turn its velocity error `δ'` into
+/// `k·δ'` of command position, which the position-equivalent budget does
+/// not bound; a kernel's output carries only the path's own acceleration,
+/// which the absolute budget resolves in long pieces, and spending its
+/// position budget there moves the bead the melt lag lays.
+fn source_accel_budget(chain: &CompiledChain) -> AccelBudget {
+    if LeadingAdvance::of(chain).is_none() {
+        return AccelBudget::Absolute;
+    }
+    AccelBudget::PositionEquivalent {
+        accel_limit_mm_s2: match chain.kernel() {
+            Some(_) => f64::INFINITY,
+            None => chain.ratio_ramp_rule().max_accel_mm_s2,
+        },
     }
 }
 
@@ -575,11 +582,11 @@ pub(crate) fn project_followers(
         let chain = &chains.chains[axis];
         let kernel = chain.kernel();
         let leading = LeadingAdvance::of(chain);
-        let rule = chain.ratio_ramp_rule();
         let source_tol = FitTol {
-            accel_budget: source_accel_budget(leading, rule.max_accel_mm_s2),
+            accel_budget: source_accel_budget(chain),
             ..fit_tol
         };
+        let rule = chain.ratio_ramp_rule();
         let state = &mut states[axis];
         let mut source_jobs = Vec::new();
         {
