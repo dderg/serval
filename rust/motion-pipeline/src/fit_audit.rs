@@ -13,7 +13,6 @@
 //! hold the shaper to its `max_path_deviation` / `max_accel_deviation`
 //! promise; the live host never pays for it.
 
-use std::cell::RefCell;
 use std::convert::Infallible;
 use std::sync::Mutex;
 
@@ -22,7 +21,7 @@ use trajectory::next_toward;
 
 use crate::shaper::exact::ExactSpan;
 use crate::shaper::{
-    SQUARE_ROOT_ONSET_EDGE_SLACK_S, TrackSignal, golden_section_peak, proven_error_bounds,
+    TrackSignal, golden_section_peak, proven_error_bounds, square_root_onset_on_edge,
 };
 
 /// Intervals each accepted piece's resolved stretch is scanned at, its
@@ -132,15 +131,16 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
         piece.t0 + piece.edge_insets.0,
         piece.t1 - piece.edge_insets.1,
     );
+    let floor_allowance = piece_tol.accel_mm_s2 * h;
     let proven = proven_error_bounds(
         sig,
         piece.exact.map(|exact| exact.over(resolved.0, resolved.1)),
         piece.mono_u,
         (piece.t0, piece.t1),
         resolved,
-        piece_tol,
+        [piece_tol.pos_mm, floor_allowance, piece_tol.accel_mm_s2],
     );
-    if proven.is_some_and(|[position, acceleration]| {
+    if proven.is_some_and(|[position, _, acceleration]| {
         position <= piece_tol.pos_mm && acceleration <= piece_tol.accel_mm_s2
     }) {
         return;
@@ -213,14 +213,14 @@ pub(crate) fn check<S: TrackSignal>(sig: &S, piece: AcceptedPiece) {
         mut acceleration,
         worst_u,
     } = worst;
-    if let Some([position_bound, acceleration_bound]) = proven {
+    if let Some([position_bound, _, acceleration_bound]) = proven {
         position = position_bound / piece_tol.pos_mm;
         acceleration = acceleration_bound / piece_tol.accel_mm_s2;
     }
     if position > 1.0 || acceleration > 1.0 {
-        let exemption = (position <= 1.0)
-            .then(|| cap_contact_onset(sig, &piece, acceleration))
-            .flatten();
+        let exemption = proven
+            .filter(|_| position <= 1.0)
+            .and_then(|[_, velocity_error, _]| onset_floor(sig, &piece, velocity_error));
         let edge_change = |edge: f64, inside: f64, past_sliver: f64| {
             (sig.eval_pva(next_toward(edge, inside)).2 - sig.eval_pva(past_sliver).2).abs()
                 > piece.fit_tol.accel_mm_s2
@@ -281,102 +281,37 @@ fn hold_exact_to_evaluator<S: TrackSignal>(
     }
 }
 
-/// Why a violating piece is not a fit failure: what no representable span
-/// could have held to the tolerance, with the measurements that bound it.
+/// Why a violating piece is not a fit failure.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Exemption {
-    /// A floor piece abutting a disk rail's curvature-cap contact, where the
-    /// exact acceleration rises as `onset_coefficient · √τ`: no polynomial
-    /// whose acceleration has degree n misses it by less than
-    /// `E_n · |B| · √h`. The rungs, anchored to the endpoint state, are not
-    /// minimax: they are held to an empirical multiple of that floor.
-    CapContactOnset {
-        onset_coefficient: f64,
-        error_mm_s2: f64,
-        bound_mm_s2: f64,
-    },
+    /// A piece at the fit floor on a declared square-root onset: no span
+    /// shorter resolves the onset's shoulder, so the piece answers to the
+    /// floor's contract — its position within the tolerance and its
+    /// velocity within what the acceleration tolerance carries across it,
+    /// `allowance = accel_tol·h`, both proven — not to its acceleration.
+    OnsetFloor { velocity_error: f64, allowance: f64 },
 }
 
-/// Minimax error of √x on [0, 1] by polynomials of degree n, by Remez.
-const SQRT_MINIMAX_ERROR: [f64; 12] = [
-    0.5, 0.125, 0.06762, 0.04593, 0.03469, 0.02785, 0.02325, 0.01995, 0.01747, 0.01554, 0.01399,
-    0.01272,
-];
-
-/// Empirical ceiling on how far an endpoint-anchored rung exceeds the
-/// minimax error at a square-root onset: measured 1.65–2.47× on every
-/// onset floor piece of the dense slices, with margin. Not a proven bound —
-/// the rungs are not interpolants at the probes, so no Lebesgue constant
-/// applies to them.
-pub const ANCHORED_RUNG_EXCESS_CEILING: f64 = 3.3;
-
-thread_local! {
-    static CAP_CONTACTS: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
-}
-
-/// The curvature-cap contact times of the source being fitted on this
-/// thread, for as long as the scope lives.
-pub(crate) struct CapContactScope;
-
-impl CapContactScope {
-    pub(crate) fn enter(contacts: &[f64]) -> Self {
-        CAP_CONTACTS.with(|held| {
-            let mut held = held.borrow_mut();
-            held.clear();
-            held.extend_from_slice(contacts);
-        });
-        Self
-    }
-}
-
-impl Drop for CapContactScope {
-    fn drop(&mut self) {
-        CAP_CONTACTS.with(|held| held.borrow_mut().clear());
-    }
-}
-
-fn cap_contact_onset<S: TrackSignal>(
+/// The [`Exemption::OnsetFloor`] of a violating piece with its position
+/// proven within the tolerance and its velocity error proven at most
+/// `velocity_error`, where it holds.
+fn onset_floor<S: TrackSignal>(
     sig: &S,
     piece: &AcceptedPiece,
-    acceleration_over_tolerance: f64,
+    velocity_error: f64,
 ) -> Option<Exemption> {
     let h = piece.t1 - piece.t0;
-    if piece.fit_context != "materialize_source"
-        || !piece.accepted_at_floor
-        || h > 2.0 * piece.cubic_floor
-    {
-        return None;
-    }
-    let touches = |edge: f64| {
-        CAP_CONTACTS.with(|held| {
-            held.borrow()
-                .iter()
-                .any(|&contact| (contact - edge).abs() <= SQUARE_ROOT_ONSET_EDGE_SLACK_S)
+    let allowance = piece.fit_tol.for_piece(h).accel_mm_s2 * h;
+    let on_onset =
+        square_root_onset_on_edge(sig, piece.t0) || square_root_onset_on_edge(sig, piece.t1);
+    (piece.accepted_at_floor
+        && h <= 2.0 * piece.cubic_floor
+        && on_onset
+        && velocity_error <= allowance)
+        .then_some(Exemption::OnsetFloor {
+            velocity_error,
+            allowance,
         })
-    };
-    let (onset, far) = if touches(piece.t0) {
-        (
-            next_toward(piece.t0, piece.t1),
-            next_toward(piece.t1, piece.t0),
-        )
-    } else if touches(piece.t1) {
-        (
-            next_toward(piece.t1, piece.t0),
-            next_toward(piece.t0, piece.t1),
-        )
-    } else {
-        return None;
-    };
-    let onset_coefficient = (sig.eval_pva(far).2 - sig.eval_pva(onset).2) / h.sqrt();
-    let acceleration_degree = (piece.mono_u.len() - 1).checked_sub(2)?;
-    let minimax = *SQRT_MINIMAX_ERROR.get(acceleration_degree)?;
-    let bound_mm_s2 = ANCHORED_RUNG_EXCESS_CEILING * minimax * onset_coefficient.abs() * h.sqrt();
-    let error_mm_s2 = acceleration_over_tolerance * piece.fit_tol.for_piece(h).accel_mm_s2;
-    (error_mm_s2 <= bound_mm_s2).then_some(Exemption::CapContactOnset {
-        onset_coefficient,
-        error_mm_s2,
-        bound_mm_s2,
-    })
 }
 
 #[cfg(test)]
