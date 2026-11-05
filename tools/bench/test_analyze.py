@@ -91,16 +91,8 @@ def _synthesize_capture(
     return deltas.astype(np.int8)
 
 
-def _require_snapshot_engine() -> None:
-    try:
-        analyze.harness._import_engine()
-    except ImportError as exc:
-        pytest.skip(str(exc))
-
-
 @pytest.fixture(scope="module")
 def synthesized(tmp_path_factory):
-    _require_snapshot_engine()
     run_dir = tmp_path_factory.mktemp("run")
     shutil.copy(BENCH_DIR / "printer.cfg", run_dir / "printer.cfg")
     (run_dir / "print.gcode").write_text(GCODE)
@@ -317,7 +309,6 @@ TIE_CAPTURE_START_S = 0.4
 
 @pytest.fixture(scope="module")
 def tie_run(tmp_path_factory):
-    _require_snapshot_engine()
     template = tmp_path_factory.mktemp("tie")
     shutil.copy(BENCH_DIR / "printer.cfg", template / "printer.cfg")
     (template / "print.gcode").write_text(TIE_GCODE)
@@ -412,9 +403,11 @@ def test_reversal_apex_step_the_capture_lacks(apex_steps, tie):
     capture = _events([0.8, 1.3], [9, 8], [1, -1])
     capture_tie, reference_tie, _ = analyze.edge_ties(
         capture,
+        capture.start_count(),
         capture.time,
         np.array([False, False]),
         reference,
+        reference.start_count(),
         np.array([False, True, False, False]),
         _apex_positions(apex_steps),
         None,
@@ -429,15 +422,28 @@ def test_reversal_apex_step_the_reference_lacks(apex_steps, tie):
     capture = _events([0.8, 1.0, 1.2, 1.3], [9, 10, 9, 8], [1, 1, -1, -1])
     capture_tie, reference_tie, _ = analyze.edge_ties(
         capture,
+        capture.start_count(),
         capture.time,
         np.array([False, True, False, False]),
         reference,
+        reference.start_count(),
         np.array([False, False]),
         _apex_positions(apex_steps),
         None,
     )
     assert capture_tie.tolist() == [False, tie, False, False]
     assert not reference_tie.any()
+
+
+def _epoch_steps(
+    capture: analyze.StepEvents, reference: analyze.StepEvents
+) -> analyze.EpochSteps:
+    return analyze.EpochSteps(
+        {"a": capture},
+        {"a": reference},
+        {"a": capture.start_count()},
+        {"a": reference.start_count()},
+    )
 
 
 class _RippleReference:
@@ -457,7 +463,7 @@ def test_ripple_bursts_beyond_the_pair_window_are_not_timing_errors():
         [1.025, 1.026, 1.075, 1.076], [10, 10, 10, 10], [1, -1, 1, -1]
     )
     match = analyze.measure_epoch(
-        analyze.EpochSteps({"a": capture}, {"a": reference}),
+        _epoch_steps(capture, reference),
         analyze.Alignment(0.0, 0.0, True),
         _RippleReference(),
     )["a"]
@@ -482,9 +488,11 @@ def test_final_step_the_capture_lacks_is_a_tie_only_on_the_lattice_line(
     capture = _events([0.8], [9], [1])
     capture_tie, reference_tie, rest_ties = analyze.edge_ties(
         capture,
+        capture.start_count(),
         capture.time,
         np.array([False]),
         reference,
+        reference.start_count(),
         np.array([False, True]),
         _resting_positions(final_steps),
         (0.0, 1.2),
@@ -512,7 +520,7 @@ def test_step_withheld_at_rest_and_taken_on_resume_is_a_tie(start_steps, tie):
     reference = _events([1.0, 1.1], [9, 8], [-1, -1])
     capture = _events([0.95, 1.0, 1.1], [10, 9, 8], [1, -1, -1])
     match = analyze.measure_epoch(
-        analyze.EpochSteps({"a": capture}, {"a": reference}),
+        _epoch_steps(capture, reference),
         analyze.Alignment(0.0, 0.0, True),
         _RestingReference(start_steps),
     )["a"]
@@ -532,9 +540,11 @@ def test_step_withheld_at_rest_and_cancelled_by_reversal_is_a_tie(
     capture = _events([1.1], [8], [-1])
     capture_tie, reference_tie, rest_ties = analyze.edge_ties(
         capture,
+        capture.start_count(),
         capture.time,
         np.array([False]),
         reference,
+        reference.start_count(),
         np.array([True, False]),
         _resting_positions(start_steps),
         (0.9, 1.2),
@@ -553,7 +563,6 @@ G1 X{x} F3000
 
 
 def _verdict_dropping_last_step(tmp_path_factory, x_mm: str) -> dict:
-    _require_snapshot_engine()
     run_dir = tmp_path_factory.mktemp("end")
     shutil.copy(BENCH_DIR / "printer.cfg", run_dir / "printer.cfg")
     (run_dir / "print.gcode").write_text(END_GCODE.format(x=x_mm))
@@ -608,7 +617,6 @@ def test_dropped_final_step_past_the_line_still_fails(tmp_path_factory):
 def test_blocks_split_by_drain_commands_stay_separate_epochs_across_short_rests(
     tmp_path,
 ):
-    _require_snapshot_engine()
     gcode = (BENCH_DIR / "gcode" / "epochs.gcode").read_text()
     shutil.copy(BENCH_DIR / "printer.cfg", tmp_path / "printer.cfg")
     (tmp_path / "print.gcode").write_text(
@@ -652,7 +660,6 @@ def _e_steps_at(reference: analyze.Reference, t_stream: float) -> float:
 
 
 def test_extruder_lattice_carries_its_fraction_across_a_drain(tmp_path):
-    _require_snapshot_engine()
     shutil.copy(BENCH_DIR / "printer.cfg", tmp_path / "printer.cfg")
     (tmp_path / "print.gcode").write_text(DRAIN_GCODE)
     reference = analyze.build_reference(analyze.load_job(tmp_path))
@@ -770,7 +777,6 @@ def _reference_epochs(job: analyze.Job) -> list[list[tuple]]:
 
 
 def test_reference_epochs_plan_exactly_the_moves_live_submits(tmp_path):
-    _require_snapshot_engine()
     shutil.copy(BENCH_DIR / "printer.cfg", tmp_path / "printer.cfg")
     (tmp_path / "print.gcode").write_text(LIVE_SEMANTICS_GCODE)
     job = analyze.load_job(tmp_path)
@@ -802,7 +808,6 @@ G1 X50 Y0 E3
 def test_the_stream_plan_splits_at_every_dwell_and_wait_the_print_rests_at(
     tmp_path,
 ):
-    _require_snapshot_engine()
     shutil.copy(BENCH_DIR / "printer.cfg", tmp_path / "printer.cfg")
     (tmp_path / "print.gcode").write_text(EPOCH_SPLIT_GCODE)
     job = analyze.load_job(tmp_path)
@@ -825,7 +830,6 @@ def test_the_stream_plan_splits_at_every_dwell_and_wait_the_print_rests_at(
 
 
 def test_a_command_live_cannot_plan_offline_fails_the_analysis(tmp_path):
-    _require_snapshot_engine()
     shutil.copy(BENCH_DIR / "printer.cfg", tmp_path / "printer.cfg")
     (tmp_path / "print.gcode").write_text(
         "SET_KINEMATIC_POSITION X=0 Y=0 Z=0\nG1 X10 F3000\nG2 X20 I5 J0\n"
@@ -956,7 +960,6 @@ G1 X0
 
 
 def _capacity_run(run_dir: Path) -> Path:
-    _require_snapshot_engine()
     shutil.copy(BENCH_DIR / "configs" / "capacity.cfg", run_dir / "printer.cfg")
     (run_dir / "print.gcode").write_text(FAST_SQUARE_GCODE)
     return run_dir
@@ -1001,7 +1004,6 @@ def test_a_supplied_benchmark_charges_every_captured_motor_pulsed(tmp_path):
 
 
 def test_the_step_benchmark_caps_the_reference_where_it_binds(tmp_path):
-    _require_snapshot_engine()
     run_dir = _capacity_run(tmp_path)
     uncapped = analyze.build_reference(analyze.load_job(run_dir))
     capped = analyze.build_reference(analyze.load_job(run_dir, F401))
@@ -1013,3 +1015,39 @@ def test_the_step_benchmark_option_parses_ticks_clock_and_fraction():
     assert analyze.SuppliedBenchmark.parse("301,160,84000000,0.75") == F401
     with pytest.raises(Exception, match="PULSED,BOTH_EDGE,CLOCK_HZ,FRACTION"):
         analyze.SuppliedBenchmark.parse("301,160,84000000")
+
+
+@pytest.mark.parametrize(
+    ("start_steps", "tie"), [(10.0, True), (10.001, False)]
+)
+def test_a_lone_step_where_the_reference_rests_on_a_lattice_line_is_a_tie(
+    start_steps, tie
+):
+    capture = _events([1.0], [9], [-1])
+    match = analyze.measure_epoch(
+        analyze.EpochSteps(
+            {"a": capture},
+            {"a": analyze.StepEvents.empty()},
+            {"a": 10},
+            {"a": 10},
+        ),
+        analyze.Alignment(0.0, 0.0, True),
+        _RestingReference(start_steps),
+    )["a"]
+    assert match.late_s.size == 0
+    assert match.unmatched_reference == 0
+    assert match.unmatched_capture == (0 if tie else 1)
+    assert match.rest_ties == (1 if tie else 0)
+
+
+def test_the_epoch_starts_at_the_count_the_previous_epoch_left():
+    events = _events([1.0, 2.0, 3.0], [1, 2, 1], [1, 1, -1])
+    steps = analyze.epoch_steps(
+        {"a": events},
+        {"a": analyze.StepEvents.empty()},
+        analyze.Epoch(2.5, 4.0),
+        analyze.Epoch(2.5, 4.0),
+        {"a": 0},
+    )
+    assert steps.capture_start == {"a": 2}
+    assert steps.reference_start == {"a": 0}

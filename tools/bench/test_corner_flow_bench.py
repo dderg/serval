@@ -143,10 +143,6 @@ def _smoothed_extruder_config() -> str:
 
 
 def _bench_run(tmp_path_factory, geometry):
-    try:
-        analyze.harness._import_engine()
-    except ImportError as exc:
-        pytest.skip(str(exc))
     run_dir = tmp_path_factory.mktemp(geometry.name.replace(" ", "_"))
     (run_dir / "printer.cfg").write_text(_smoothed_extruder_config())
     ratio = BEAD[0] * BEAD[1] / (math.pi * (BEAD[2] / 2.0) ** 2)
