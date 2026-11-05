@@ -390,8 +390,7 @@ impl ErrorPolynomial {
             power *= 3.0;
         }
         let conversion = ExactRounding::gamma(CONVERSION_DEPTH) * tripled;
-        (monomial + 2.0 * conversion + self.rounding) * (1.0 + MAGNITUDE_BOUND_INFLATION)
-            <= budget
+        (monomial + 2.0 * conversion + self.rounding) * (1.0 + MAGNITUDE_BOUND_INFLATION) <= budget
     }
 
     fn patch(&self) -> ErrorPatch {

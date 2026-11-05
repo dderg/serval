@@ -233,5 +233,8 @@ fn an_error_the_magnitude_test_proves_the_hull_proves_at_once() {
         let peak = patch.controls.iter().fold(0.0_f64, |m, c| m.max(c.abs()));
         assert!(peak + patch.rounding <= budget);
     }
-    assert!(proven > 1_000, "the magnitude test proved only {proven} errors");
+    assert!(
+        proven > 1_000,
+        "the magnitude test proved only {proven} errors"
+    );
 }
