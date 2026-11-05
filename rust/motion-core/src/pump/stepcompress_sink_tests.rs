@@ -3767,3 +3767,65 @@ fn a_refused_wire_probe_neither_fails_the_pass_nor_skips_its_heartbeat() {
         "the pass still published its heartbeat"
     );
 }
+
+/// The probe's receipt delta on the mcu is meant to be the host->mcu wire and
+/// the mcu's dispatch. Stamped with the pass's clock sample, it also carried
+/// the pass's own compute and the burst queued ahead of it: 62 lates on a
+/// healthy 2-core bench run. It goes out first, stamped as it is handed to
+/// the transport.
+#[test]
+fn the_wire_probe_leaves_ahead_of_the_burst_stamped_at_its_own_send() {
+    let mut h = harness(1024);
+    let clock = Arc::new(AtomicU64::new(
+        (CYCLES_PER_SECOND * WIRE_PROBE_INTERVAL_SECS) as u64 + 1,
+    ));
+    let clock_for_reads = Arc::clone(&clock);
+    let work_per_read = 700_u64;
+    h.endpoint.clock_of = Arc::new(move |_| {
+        Some((
+            clock_for_reads.fetch_add(work_per_read, Ordering::Relaxed) + work_per_read,
+            CYCLES_PER_SECOND,
+        ))
+    });
+    let handed: Arc<Mutex<Vec<(Vec<&'static str>, u64, Option<i64>)>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let handed_for_egress = Arc::clone(&handed);
+    let clock_for_egress = Arc::clone(&clock);
+    h.endpoint.egress = Arc::new(move |frames: &[(&'static str, Vec<(String, ArgValue)>)]| {
+        let stamped = frames.iter().find_map(|(name, args)| {
+            (*name == "kalico_wire_probe").then(|| match args[0].1 {
+                ArgValue::Int(clock) => clock,
+                ref other => panic!("probe clock {other:?}"),
+            })
+        });
+        handed_for_egress.lock_ok().push((
+            frames.iter().map(|(name, _)| *name).collect(),
+            clock_for_egress.load(Ordering::Relaxed),
+            stamped,
+        ));
+        Ok(())
+    });
+    let now = clock.load(Ordering::Relaxed);
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(ramp(now + 2_000, 40))])
+        .and_then(|()| h.endpoint.tick())
+        .unwrap();
+
+    let handed = handed.lock_ok().clone();
+    let probe = handed
+        .iter()
+        .position(|(names, _, _)| names.contains(&"kalico_wire_probe"))
+        .expect("the pass sent a probe");
+    let burst = handed
+        .iter()
+        .position(|(names, _, _)| names.contains(&"queue_step"))
+        .expect("the pass sent motion");
+    assert!(probe < burst, "the probe queued behind the burst: {handed:?}");
+    let (names, clock_at_send, stamped) = &handed[probe];
+    assert_eq!(names, &vec!["kalico_wire_probe"]);
+    assert_eq!(
+        stamped.map(|c| c as u32),
+        Some(*clock_at_send as u32),
+        "the probe carries the mcu clock read as it was sent"
+    );
+}
