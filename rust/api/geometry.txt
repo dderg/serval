@@ -390,6 +390,7 @@ pub fn geometry::path::line::Line::s_len(&self) -> f64
 pub mod geometry::ratio_ramp
 pub struct geometry::ratio_ramp::RatioRampRule
 pub geometry::ratio_ramp::RatioRampRule::advance_slope_s: f64
+pub geometry::ratio_ramp::RatioRampRule::kernel_jerk_per_accel_hz: f64
 pub geometry::ratio_ramp::RatioRampRule::max_accel_mm_s2: f64
 pub geometry::ratio_ramp::RatioRampRule::max_velocity_mm_s: f64
 impl geometry::ratio_ramp::RatioRampRule
@@ -1089,6 +1090,7 @@ pub geometry::RailPair::v_hi: f64
 pub geometry::RailPair::v_lo: f64
 pub struct geometry::RatioRampRule
 pub geometry::RatioRampRule::advance_slope_s: f64
+pub geometry::RatioRampRule::kernel_jerk_per_accel_hz: f64
 pub geometry::RatioRampRule::max_accel_mm_s2: f64
 pub geometry::RatioRampRule::max_velocity_mm_s: f64
 impl geometry::ratio_ramp::RatioRampRule

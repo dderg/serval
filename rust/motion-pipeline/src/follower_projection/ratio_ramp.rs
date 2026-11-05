@@ -2570,13 +2570,26 @@ impl Crossing {
     /// An advance of `rule`'s slope releases its lead around where the
     /// leaders turn around, or crawl where reading the path speed through
     /// at `ratio` would ask the follower for more than its acceleration
-    /// limit: `r·(a + k·s⃛)`, the path speed's second rate carrying the
-    /// tangent's turning `a⊥²/v`. Elsewhere releasing the lead over the
-    /// crawl's short reach would ask more of the follower than the crawl.
+    /// limit: `r·(a + k·J)`, `J` the slope of the path's acceleration the
+    /// follower meets ([`Self::advanced_jerk`]). Elsewhere releasing the
+    /// lead over the crawl's short reach would ask more of the follower
+    /// than the crawl.
     fn needs_valley(self, rule: &RatioRampRule, ratio: f64) -> bool {
         self.turns_around()
             || (self.crawls()
-                && ratio * (self.rate + rule.advance_slope_s * self.jerk) > rule.max_accel_mm_s2)
+                && ratio * (self.rate + rule.advance_slope_s * self.advanced_jerk(rule))
+                    > rule.max_accel_mm_s2)
+    }
+
+    /// The path speed's second rate `s⃛` carries the tangent's turning
+    /// `a⊥²/v`; a kernel after the advance differentiates `s̈` instead, so
+    /// the follower meets at most the kernel's jerk gain times the rate.
+    fn advanced_jerk(self, rule: &RatioRampRule) -> f64 {
+        if rule.kernel_jerk_per_accel_hz.is_finite() {
+            self.jerk.min(rule.kernel_jerk_per_accel_hz * self.rate)
+        } else {
+            self.jerk
+        }
     }
 
     /// The floor a valley here keeps flat (see [`AdvanceValley`]): `v²/a`,
