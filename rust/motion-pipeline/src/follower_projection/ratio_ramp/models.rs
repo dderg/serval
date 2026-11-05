@@ -684,7 +684,10 @@ impl RatioSmoothing {
                 0.0
             }
         };
-        (reach.0 + inset_where(reach.0), reach.1 - inset_where(reach.1))
+        (
+            reach.0 + inset_where(reach.0),
+            reach.1 - inset_where(reach.1),
+        )
     }
 
     /// The formulas of a reach whose width rises from rest, or falls to
