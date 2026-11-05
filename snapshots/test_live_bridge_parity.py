@@ -29,6 +29,8 @@ SIM_GCODE = REPO / "tools" / "sim" / "gcode"
 SIM_PRINTS = (
     "voron_first_layers",
     "voron_dense_top_layers",
+    "voron_first_layers_zhop",
+    "voron_dense_top_layers_zhop",
     "trident_follower_cache_regression",
     "trident_mesh_clock_regression",
 )
