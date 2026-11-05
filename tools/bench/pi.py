@@ -26,6 +26,9 @@ FORBIDDEN_PINS = {
     "PA14": "F401 SWD clock pin",
     "PA8": "reserved for clock output",
 }
+F407_DRIVEN_PINS = {"PA9": "PD8", "PA10": "PD9", "PA15": "PD10", "PB0": "PD11"}
+PIN_TOKEN = re.compile(r"\bP[A-K]\d{1,2}\b", flags=re.IGNORECASE)
+KEY_LINE = re.compile(r"^(\w+)\s*[:=]")
 
 
 class BenchError(RuntimeError):
@@ -207,14 +210,42 @@ def scp_from_pi(remote: str, local: Path, recursive: bool = False) -> None:
     )
 
 
+def is_input_pin_key(section: str, key: str) -> bool:
+    """The config keys a pin is only ever read through: an endstop, or the
+    probe's trigger."""
+    return key == "endstop_pin" or (
+        section.split()[:1] == ["probe"] and key == "pin"
+    )
+
+
 def validate_config(text: str) -> None:
+    """Refuse a printer config that would make the F401 drive a pin it must
+    not. The SWD pins and the MCO pin are never klippy's. The phase-2
+    endstop/probe lines are driven push-pull by the F407 from its boot, so
+    on the F401 they may only be read: an output there would fight the
+    F407's driver."""
+    section, key = "", ""
     for number, line in enumerate(text.splitlines(), 1):
-        code = line.split("#", 1)[0]
-        for pin in re.findall(r"\bP[A-K]\d{1,2}\b", code, flags=re.IGNORECASE):
-            reason = FORBIDDEN_PINS.get(pin.upper())
+        code = re.split(r"[#;]", line, maxsplit=1)[0]
+        stripped = code.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section, key = stripped[1:-1].strip().lower(), ""
+            continue
+        if code[:1] not in (" ", "\t"):
+            match = KEY_LINE.match(stripped)
+            key = match.group(1).lower() if match else ""
+        for token in PIN_TOKEN.findall(code):
+            pin = token.upper()
+            reason = FORBIDDEN_PINS.get(pin)
             if reason:
                 raise BenchError(
-                    f"config line {number}: pin {pin.upper()} is forbidden ({reason})"
+                    f"config line {number}: pin {pin} is forbidden ({reason})"
+                )
+            if pin in F407_DRIVEN_PINS and not is_input_pin_key(section, key):
+                raise BenchError(
+                    f"config line {number}: pin {pin} is driven by the F407's "
+                    f"{F407_DRIVEN_PINS[pin]}; it may only be an endstop_pin or "
+                    f"the [probe] pin, not {key or 'a value'} in [{section}]"
                 )
 
 
