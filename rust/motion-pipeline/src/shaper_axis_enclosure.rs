@@ -18,7 +18,8 @@ use std::ops::{Add, Mul, Neg};
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{Arc as PathArc, Clothoid, Segment};
 use geometry::{
-    FollowerDemand, MeshPatch, PatchAxis, RailPair, RailPairShape, ScalarLaw, SurfaceTransform,
+    FollowerDemand, LawSegment, MeshPatch, PatchAxis, RailPair, RailPairShape, ScalarLaw,
+    SurfaceTransform,
 };
 use nurbs::bezier::BezierPiece;
 use nurbs::bezier::extract_bezier_pieces;
@@ -839,9 +840,9 @@ pub(crate) fn analytic_axes_enclosure(
             );
         }
     };
-    for phase in span.phases.iter() {
+    for (phase, start, end) in span.phase_extents() {
         let origin = span.t_start + phase.t0;
-        let (from, to) = (lo.max(origin), hi.min(span.t_start + phase.end_time()));
+        let (from, to) = (lo.max(start), hi.min(end));
         if from >= to {
             continue;
         }
@@ -871,7 +872,8 @@ pub(crate) fn analytic_axes_enclosure(
             ScalarLaw::DiskRail { .. } => {
                 let arc_base = phase.s0 - span.source_distance_origin;
                 for pair in phase.rail_pairs(from - origin, to - origin) {
-                    let range = (from.max(origin + pair.t_lo), to.min(origin + pair.t_hi));
+                    let knot_time = |tau| rail_knot_time(phase, origin, (start, end), tau);
+                    let range = (from.max(knot_time(pair.t_lo)), to.min(knot_time(pair.t_hi)));
                     if range.0 >= range.1 {
                         continue;
                     }
@@ -886,6 +888,16 @@ pub(crate) fn analytic_axes_enclosure(
         }
     }
     Some(outs)
+}
+
+fn rail_knot_time(phase: &LawSegment, origin: f64, (start, end): (f64, f64), tau: f64) -> f64 {
+    if tau <= 0.0 {
+        start
+    } else if tau >= phase.dt {
+        end
+    } else {
+        origin + tau
+    }
 }
 
 /// A rail leaving its curvature cap: from `at` toward `far`, the pair's
@@ -1423,13 +1435,12 @@ impl<'a> AxisWindows<'a> {
                 if !covers(seam_before, seam_after) {
                     return None;
                 }
-                let phase = span
-                    .phases
-                    .iter()
-                    .find(|phase| window.center <= span.t_start + phase.end_time())
-                    .or_else(|| span.phases.last())?;
+                let (phase, start, end) = span
+                    .phase_extents()
+                    .find(|&(_, _, end)| window.center < end)
+                    .or_else(|| span.phase_extents().last())?;
                 let origin = span.t_start + phase.t0;
-                if !covers(origin, span.t_start + phase.end_time()) {
+                if !covers(start, end) {
                     return None;
                 }
                 let tau = window.time_since(origin);
@@ -1455,8 +1466,10 @@ impl<'a> AxisWindows<'a> {
                     ),
                     ScalarLaw::DiskRail { kappa0, sigma, .. } => {
                         let centre = window.center - origin;
-                        let reads =
-                            |pair: &RailPair| covers(origin + pair.t_lo, origin + pair.t_hi);
+                        let reads = |pair: &RailPair| {
+                            let knot_time = |tau| rail_knot_time(phase, origin, (start, end), tau);
+                            covers(knot_time(pair.t_lo), knot_time(pair.t_hi))
+                        };
                         let pair = match phase.rail_pairs(centre, centre).next() {
                             Some(pair) => Some(pair).filter(reads),
                             None => phase
@@ -1555,20 +1568,18 @@ impl<'a> AxisWindows<'a> {
                 span,
                 surface_seams,
                 ..
-            } => span
-                .phases
-                .iter()
-                .flat_map(|phase| {
-                    let origin = span.t_start + phase.t0;
-                    std::iter::once(span.t_start + phase.end_time()).chain(
-                        phase
-                            .rail_pairs(lo - origin, hi - origin)
-                            .map(move |pair| origin + pair.t_hi),
-                    )
-                })
-                .chain(surface_seams.iter().copied())
-                .filter(inside)
-                .collect(),
+            } => {
+                span.phase_extents()
+                    .flat_map(|(phase, start, end)| {
+                        let origin = span.t_start + phase.t0;
+                        std::iter::once(end).chain(phase.rail_pairs(lo - origin, hi - origin).map(
+                            move |pair| rail_knot_time(phase, origin, (start, end), pair.t_hi),
+                        ))
+                    })
+                    .chain(surface_seams.iter().copied())
+                    .filter(inside)
+                    .collect()
+            }
             Self::Hold(_) => Vec::new(),
             Self::Buzz { envelopes, .. } => envelopes
                 .iter()

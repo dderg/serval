@@ -315,6 +315,23 @@ impl AnalyticMoveSpan {
             .map(|phase| analytic_phase_boundary(self.t_start, phase.end_time()))
     }
 
+    /// Each velocity phase with the absolute times the evaluator reads it
+    /// from and to: the span's ends and the phase seams between.
+    pub fn phase_extents(&self) -> impl Iterator<Item = (&LawSegment, f64, f64)> + '_ {
+        let starts = std::iter::once(self.t_start).chain(self.phase_seam_times());
+        let ends = self.phase_seam_times().chain(std::iter::once(self.t_end));
+        self.phases
+            .iter()
+            .zip(starts.zip(ends))
+            .map(|(phase, (start, end))| (phase, start, end))
+    }
+
+    fn append_breakpoints(&self, output: &mut Vec<f64>) {
+        output.push(self.t_start);
+        output.extend(self.phase_seam_times());
+        output.push(self.t_end);
+    }
+
     /// Absolute times at which a disk-rail phase enters or leaves contact
     /// with its curvature cap, or starts or ends in contact — clamped into
     /// the span, where a contact at its end would otherwise be nudged past
@@ -727,14 +744,7 @@ impl ContinuousAxis {
 
     pub fn append_breakpoints(&self, output: &mut Vec<f64>) {
         match self {
-            Self::Analytic { span, .. } => {
-                output.extend(span.phases.iter().map(|phase| span.t_start + phase.t0));
-                output.extend(
-                    span.phases
-                        .iter()
-                        .map(|phase| span.t_start + phase.end_time()),
-                );
-            }
+            Self::Analytic { span, .. } => span.append_breakpoints(output),
             Self::Spline(curve) => output.extend_from_slice(curve.knots()),
             Self::RelativeSpline { curve, .. } => output.extend_from_slice(curve.knots()),
             Self::PiecewiseRelativeSpline(pieces) => {
@@ -1009,11 +1019,7 @@ impl MotorGroup {
     fn append_breakpoints(&self, output: &mut Vec<f64>) {
         match self {
             Self::Analytic { span, terms } => {
-                output.extend(
-                    span.phases.iter().flat_map(|phase| {
-                        [span.t_start + phase.t0, span.t_start + phase.end_time()]
-                    }),
-                );
+                span.append_breakpoints(output);
                 for term in terms.iter() {
                     term.axis.append_breakpoints(output);
                 }

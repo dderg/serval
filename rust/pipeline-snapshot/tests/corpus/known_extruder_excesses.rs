@@ -169,38 +169,7 @@ pub const KNOWN: &[KnownExcesses] = &[
         count: 9,
         worst: 5495.1,
     },
-    // TODO(guard-robust): a turning-guard back-off spikes e.
-    KnownExcesses {
-        case: "voron_first_layers:850-950/tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg",
-        class: ExcessClass::Accel,
-        count: 39,
-        worst: 117753.4,
-    },
-    KnownExcesses {
-        case: "voron_first_layers/tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg",
-        class: ExcessClass::Accel,
-        count: 38,
-        worst: 125582.7,
-    },
-    KnownExcesses {
-        case: "voron_first_layers_zhop/tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg",
-        class: ExcessClass::Accel,
-        count: 38,
-        worst: 157679.1,
-    },
-    // TODO(floor-guard): the print-start prime steps e velocity.
-    KnownExcesses {
-        case: "voron_dense_top_layers/rust/motion-core/tests/configs/neptune_sim_print.cfg",
-        class: ExcessClass::VelocityStep,
-        count: 1,
-        worst: 0.9949,
-    },
-    KnownExcesses {
-        case: "voron_dense_top_layers_zhop/rust/motion-core/tests/configs/neptune_sim_print.cfg",
-        class: ExcessClass::VelocityStep,
-        count: 1,
-        worst: 0.9949,
-    },
+
     // TODO(bound-ext, floor-slivers): the ladder chases an unshaped onset's singular advance.
     KnownExcesses {
         case: "voron_dense_top_layers/rust/motion-core/tests/configs/neptune_sim_print.cfg",
