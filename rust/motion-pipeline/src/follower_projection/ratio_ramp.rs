@@ -740,12 +740,7 @@ impl WidthField {
 
     /// Makes `sample` a node of target `base` scaled to the ramp time
     /// there, or the width the seams around ask for if wider, once it lies
-    /// far enough past the last node kept in time and along the path. A
-    /// node the cone of a rest holds at zero width — the grid's first tick
-    /// on the rest point a stream or dwell opens on — opens no window, so
-    /// it spaces no node after it: thinning behind it would leave a motion
-    /// shorter than half a ramp time between two rests without a single
-    /// open node, and a ratio step in it unramped.
+    /// far enough past the last node kept in time and along the path.
     fn keep_if_due(&mut self, sample: TimeSample, base: f64) {
         let ramp_time = self.ramp_time_at(sample.t);
         let target =
@@ -756,8 +751,7 @@ impl WidthField {
         });
         if due {
             self.push(sample.s, target);
-            let opens_a_window = self.nodes.last().is_some_and(|node| node.envelope > 0.0);
-            self.last_kept = opens_a_window.then_some(KeptNode {
+            self.last_kept = Some(KeptNode {
                 t: sample.t,
                 s: sample.s,
                 ramp_time,
@@ -798,8 +792,12 @@ impl WidthField {
     /// leave no time sample in between, and `h` would be zero all along the
     /// path they cover: a ratio step there would step the follower's
     /// velocity. A node halfway along it, its target half that path as a
-    /// sample's base, opens the widest window the rests' cones allow.
+    /// sample's base, opens the widest window the rests' cones allow. A
+    /// sample kept on the rest point itself stacks on the rest and closes to
+    /// zero width with it, so it is dropped first and leaves the path it
+    /// came after to the halfway node.
     fn push_rest(&mut self, s: f64) {
+        self.drop_samples_stacking_on(s);
         let Some(&last) = self.nodes.last() else {
             return self.push(s, 0.0);
         };
@@ -815,6 +813,17 @@ impl WidthField {
                 target: 0.0,
                 envelope: 0.0,
             });
+        }
+    }
+
+    fn drop_samples_stacking_on(&mut self, rest: f64) {
+        while self.nodes.len() > self.final_prefix
+            && self
+                .nodes
+                .last()
+                .is_some_and(|last| last.target > 0.0 && rest <= last.s + REST_TARGET_MM)
+        {
+            self.nodes.pop();
         }
     }
 
