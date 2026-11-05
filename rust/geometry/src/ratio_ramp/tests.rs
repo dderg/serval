@@ -221,3 +221,73 @@ fn a_rest_beside_a_step_caps_its_speed_at_the_ramp_the_room_leaves() {
         free
     );
 }
+
+const P4: RatioRampRule = RatioRampRule {
+    advance_slope_s: 0.02,
+    max_velocity_mm_s: 50.0,
+    max_accel_mm_s2: 5000.0,
+};
+const P4_PEAK_RATIO: f64 = 0.0427;
+const P4_SPEED_MM_S: f64 = 65.0;
+const P4_ACCEL_MM_S2: f64 = 3750.0;
+
+/// A step crossed where the leaders' own advanced flow asks for `share`
+/// of the follower's acceleration limit.
+fn crossing_at_path_share(ratio_step: f64, share: f64) -> RatioStep {
+    let own_accel = share * P4.max_accel_mm_s2 / P4_PEAK_RATIO;
+    RatioStep {
+        ratio_step,
+        peak_ratio: P4_PEAK_RATIO,
+        speed_mm_s: P4_SPEED_MM_S,
+        accel_mm_s2: P4_ACCEL_MM_S2,
+        jerk_mm_s3: (own_accel - P4_ACCEL_MM_S2).max(0.0) / P4.advance_slope_s,
+    }
+}
+
+const PATH_SHARES: [f64; 7] = [0.0, 0.5, 0.9, 0.99, 0.999_999, 1.0, 1.5];
+const SWEEP_SAMPLES: usize = 20_000;
+/// The largest change in ramp time between neighbouring samples of a sweep
+/// a continuous ramp time takes.
+const SWEEP_TAU_JUMP_S: f64 = 1e-3 * (RATIO_RAMP_MAX_TIME_S - RATIO_RAMP_MIN_TIME_S);
+
+fn largest_jump(taus: impl Iterator<Item = f64>) -> f64 {
+    taus.collect::<Vec<_>>()
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]).abs())
+        .fold(0.0, f64::max)
+}
+
+#[test]
+fn the_ramp_time_is_continuous_in_the_step_and_shortest_as_it_vanishes() {
+    for share in PATH_SHARES {
+        let tau = |ratio_step: f64| P4.ramp_time(&crossing_at_path_share(ratio_step, share));
+        assert_eq!(
+            tau(1e-9),
+            RATIO_RAMP_MIN_TIME_S,
+            "a vanishing step takes the shortest ramp with the path at {share} of the limit"
+        );
+        let jump = largest_jump(
+            (0..=SWEEP_SAMPLES).map(|index| tau(0.05 * index as f64 / SWEEP_SAMPLES as f64)),
+        );
+        assert!(
+            jump <= SWEEP_TAU_JUMP_S,
+            "the ramp time jumps by {jump} s across a step sweep with the path at {share} of \
+             the limit"
+        );
+    }
+}
+
+#[test]
+fn the_ramp_time_is_continuous_in_the_leaders_own_demand() {
+    for ratio_step in [3e-4, 3e-3, 0.03] {
+        let jump = largest_jump((0..=SWEEP_SAMPLES).map(|index| {
+            let share = 2.0 * index as f64 / SWEEP_SAMPLES as f64;
+            P4.ramp_time(&crossing_at_path_share(ratio_step, share))
+        }));
+        assert!(
+            jump <= SWEEP_TAU_JUMP_S,
+            "a {ratio_step} step's ramp time jumps by {jump} s as the path's own demand sweeps \
+             through the limit"
+        );
+    }
+}
