@@ -1,7 +1,9 @@
 //! The planner corpus: every snapshot case, the sim prints and
 //! `tools/corner_flow.py`'s cases on the bench configs and on every
-//! machine profile. Shared by the corpus test, the fit audit and ad-hoc
-//! probes (`scripts/corpus.sh --probe FILE.rs`).
+//! machine profile. The `_zhop` prints are their sources with a 0.4 mm
+//! z-hop around every retract (`tools/sim/gcode/gen_zhop.py`). Shared by
+//! the corpus test, the fit audit and ad-hoc probes
+//! (`scripts/corpus.sh --probe FILE.rs`).
 //!
 //! `CORPUS_FILTER=substr` keeps the cases whose name contains it;
 //! `CORPUS_CONFIGS=fast,printer` keeps the cases run on those config stems.
@@ -21,9 +23,11 @@ pub mod known_extruder_excesses;
 pub mod known_fit_violations;
 pub mod ratchet;
 
-pub const SIM_GCODES: [&str; 4] = [
+pub const SIM_GCODES: [&str; 6] = [
     "voron_first_layers",
     "voron_dense_top_layers",
+    "voron_first_layers_zhop",
+    "voron_dense_top_layers_zhop",
     "trident_follower_cache_regression",
     "trident_mesh_clock_regression",
 ];

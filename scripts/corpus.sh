@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Run the planner corpus: every snapshot case, the sim prints and the
-# corner_flow cases on the bench configs and on every machine profile,
-# through the production pipeline, side by side.
+# Run the planner corpus: every snapshot case, the sim prints (and their
+# z-hop variants) and the corner_flow cases on the bench configs and on every
+# machine profile, through the production pipeline, side by side.
 #
 #   scripts/corpus.sh [--configs fast,printer] [-k SUBSTRING] [--audit]
 #   scripts/corpus.sh --probe FILE.rs [--configs ...] [-k ...]
