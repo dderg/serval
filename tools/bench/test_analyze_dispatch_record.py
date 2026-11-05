@@ -277,7 +277,6 @@ def test_the_plans_own_record_steps_like_the_plan(tmp_path):
 
 
 def test_a_record_with_a_nudge_is_refused(tmp_path):
-    _write_run(tmp_path, None)
     (tmp_path / "dispatch_record_p1_s0.bin").write_bytes(
         dispatch_record.HEADER.pack(dispatch_record.MAGIC, 4, 0.5e-3)
         + bytes([dispatch_record.KIND_NUDGE])
@@ -287,11 +286,10 @@ def test_a_record_with_a_nudge_is_refused(tmp_path):
         + bytes(2 * 4 * 3 * 8)
     )
     with pytest.raises(analyze.AnalysisError, match="1 nudges bypassed"):
-        analyze.load_job(tmp_path)
+        analyze.load_dispatch_record(tmp_path)
 
 
 def test_only_one_record_may_hold_the_print(tmp_path):
-    _write_run(tmp_path, None)
     empty = dispatch_record.HEADER.pack(dispatch_record.MAGIC, 4, 0.5e-3)
     moving = (
         empty
@@ -301,9 +299,9 @@ def test_only_one_record_may_hold_the_print(tmp_path):
     )
     (tmp_path / "dispatch_record_p1_s0.bin").write_bytes(empty)
     (tmp_path / "dispatch_record_p1_s1.bin").write_bytes(moving)
-    assert len(analyze.load_job(tmp_path).dispatch_record) == 1
+    assert len(analyze.load_dispatch_record(tmp_path)) == 1
     (tmp_path / "dispatch_record_p1_s2.bin").write_bytes(moving)
     with pytest.raises(
         analyze.AnalysisError, match="expected one dispatch record"
     ):
-        analyze.load_job(tmp_path)
+        analyze.load_dispatch_record(tmp_path)
