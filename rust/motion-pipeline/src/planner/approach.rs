@@ -345,8 +345,9 @@ fn cap_curve(m: &mut Move, corners: &ShapedCorners) {
     };
     let (_, kappa_peak) = segment.kappa_peak();
     if kappa_peak.abs() > 0.0 {
-        let room = corners.curve_room_mm(m.limits.corner, m.limits.accel_mm_s2);
-        cap_speed(m, corners.arc_speed_cap(1.0 / kappa_peak.abs(), room));
+        let radius = 1.0 / kappa_peak.abs();
+        let room = corners.curve_room_mm(m.limits.corner, radius, m.limits.accel_mm_s2);
+        cap_speed(m, corners.arc_speed_cap(radius, room));
     }
 }
 

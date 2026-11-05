@@ -56,6 +56,8 @@ const LINE_CURVATURE_SHARE: f64 = 0.5;
 /// in `σ²·A`: the distance a stop at `A` covers in `√32 ≈ 5.7` of the wider
 /// kernel's standard deviations, past the reach of its weight.
 const APPROACH_SIGMAS_SQUARED: f64 = 16.0;
+/// The shaper's reach as a share of the approach: `4·σ²·A`.
+const REACH_SHARE_OF_APPROACH: f64 = 0.25;
 /// What the prediction adds to the shaper's share of a miss for the
 /// approximations between the table and the planned motion: a corner whose
 /// approach or exit is slower than the disk's, an asymmetric blend, the
@@ -130,7 +132,10 @@ impl Taps {
             .enumerate()
             .fold((0.0, 0.0), |(re, im), (index, weight)| {
                 let phase = -omega * (self.first + index as i64) as f64 / STEPS_PER_SIGMA;
-                (re + weight * phase.cos(), im + weight * phase.sin())
+                (
+                    re + weight * libm::cos(phase),
+                    im + weight * libm::sin(phase),
+                )
             })
     }
 }
@@ -202,7 +207,7 @@ impl Blend {
     /// Position at arc `s` from the apex of the blend of cut `cut`.
     fn point(&self, cut: f64, s: f64) -> [f64; 2] {
         let half = self.length * cut;
-        let exit = [self.theta.cos(), self.theta.sin()];
+        let exit = [libm::cos(self.theta), libm::sin(self.theta)];
         if s < -half {
             let start = Self::sample(&self.half1, 0.0);
             [cut * start[0] + (s + half), cut * start[1]]
@@ -269,7 +274,7 @@ fn worst_miss(taps: &[Taps; 2], xs: &[f64], ys: &[f64], offset: i64, search: i64
     (0..ORIENTATIONS)
         .map(|l| {
             let phi = std::f64::consts::PI * l as f64 / ORIENTATIONS as f64;
-            let (sin, cos) = phi.sin_cos();
+            let (sin, cos) = libm::sincos(phi);
             let at = |s: &[f64; 4]| [cos * s[0] - sin * s[1], sin * s[2] + cos * s[3]];
             let (closest, index) = sums
                 .windows(2)
@@ -295,7 +300,7 @@ fn distance_to_chord(a: [f64; 2], b: [f64; 2]) -> f64 {
     } else {
         0.0
     };
-    (a[0] + along * d[0]).hypot(a[1] + along * d[1])
+    libm::hypot(a[0] + along * d[0], a[1] + along * d[1])
 }
 
 fn theta_node(index: usize) -> f64 {
@@ -371,7 +376,7 @@ impl ShapedCorners {
             worst_miss(&taps, &xs, &ys, offset, search)
         };
         let sharp = |theta: f64, v0: f64| {
-            let exit = [theta.cos(), theta.sin()];
+            let exit = [libm::cos(theta), libm::sin(theta)];
             let arcs = arc_from_apex(|_| 0.0, v0, count);
             miss_of(
                 &|s: f64| {
@@ -463,7 +468,7 @@ impl ShapedCorners {
         } else if cut_hat > highest {
             at(CUT_NODES - 1) - highest + cut_hat
         } else {
-            let (c, f) = bracket(cut_hat.log2() - f64::from(CUT_OCTAVE_LOW), CUT_NODES);
+            let (c, f) = bracket(libm::log2(cut_hat) - f64::from(CUT_OCTAVE_LOW), CUT_NODES);
             at(c) * (1.0 - f) + at(c + 1) * f
         }
     }
@@ -509,7 +514,10 @@ impl ShapedCorners {
                 / (b - a);
             self.square_at_speed[SPEED_NODES - 1] + slope * (speed_hat - b)
         } else {
-            let (i, f) = bracket(speed_hat.log2() - f64::from(SPEED_OCTAVE_LOW), SPEED_NODES);
+            let (i, f) = bracket(
+                libm::log2(speed_hat) - f64::from(SPEED_OCTAVE_LOW),
+                SPEED_NODES,
+            );
             self.square_at_speed[i] * (1.0 - f) + self.square_at_speed[i + 1] * f
         };
         PREDICTION_MARGIN * self.length_unit(accel) * (at_speed - square_floor).max(0.0)
@@ -609,7 +617,7 @@ impl ShapedCorners {
             self.corner_accel(theta, 0.0, accel, STOP_SHARE * budget_mm)
         };
         (1..=CUT_CANDIDATES)
-            .map(|j| room * 2.0_f64.powf(-0.5 * f64::from(j)))
+            .map(|j| room * libm::pow(2.0, -0.5 * f64::from(j)))
             .filter_map(|cut| {
                 let ratio = self.apex_speed_ratio(theta, cut, accel, budget_mm)?;
                 Some((
@@ -637,12 +645,29 @@ impl ShapedCorners {
         }
     }
 
-    /// The room a curve under `budget` leaves the shaper's pull on it at any
-    /// acceleration at or under `accel`: the budget a turn-free vertex gets,
-    /// less the tolerance the curve was fitted to.
+    /// How far along the path the shaper carries one corner's rounding
+    /// onto its neighbours at `accel`: the distance a stop covers in
+    /// `√8 ≈ 2.8` of the wider kernel's standard deviations.
     #[must_use]
-    pub fn curve_room_mm(&self, budget: CornerBudget, accel: f64) -> f64 {
-        self.cut_room_mm(budget, accel) - self.arc_fit_tolerance_mm(budget, accel)
+    pub fn reach_mm(&self, accel: f64) -> f64 {
+        REACH_SHARE_OF_APPROACH * self.approach_mm(accel)
+    }
+
+    /// The room a curve of `radius_mm` under `budget` leaves the shaper's
+    /// pull on it at any acceleration at or under `accel`: the budget of a
+    /// vertex on it, whose stop the shaper rounds by the turn between the
+    /// curve's chords over its reach either side (`reach/R`), less the
+    /// tolerance the curve was fitted to.
+    #[must_use]
+    pub fn curve_room_mm(&self, budget: CornerBudget, radius_mm: f64, accel: f64) -> f64 {
+        let turn = (self.reach_mm(accel) / radius_mm).min(std::f64::consts::PI);
+        let floor = match budget {
+            CornerBudget::Shaped(_) => 0.0,
+            CornerBudget::OverFloor(_) | CornerBudget::ScvEquivalent(_) => {
+                self.floor_mm(turn, accel)
+            }
+        };
+        floor + self.cut_room_mm(budget, accel) - self.arc_fit_tolerance_mm(budget, accel)
     }
 
     /// How far the shaper pulls a circle of `radius_mm` crossed at
@@ -732,7 +757,7 @@ pub fn blend_apex(up: &Move, down: &Move) -> Option<(f64, f64)> {
     let entry_heading = first.heading_at(0.0);
     let exit = second.point_at(second.s_len());
     let exit_heading = second.heading_at(second.s_len());
-    let theta = dot(entry_heading, exit_heading).clamp(-1.0, 1.0).acos();
+    let theta = libm::acos(dot(entry_heading, exit_heading).clamp(-1.0, 1.0));
     if theta < TURN_EPS_RAD {
         return None;
     }
@@ -763,12 +788,13 @@ pub fn stop_turn(before: &Move, after: &Move) -> Option<f64> {
     let (Some(incoming), Some(outgoing)) = (&before.segment.spatial, &after.segment.spatial) else {
         return None;
     };
-    let theta = dot(
-        incoming.heading_at(incoming.s_len()),
-        outgoing.heading_at(0.0),
-    )
-    .clamp(-1.0, 1.0)
-    .acos();
+    let theta = libm::acos(
+        dot(
+            incoming.heading_at(incoming.s_len()),
+            outgoing.heading_at(0.0),
+        )
+        .clamp(-1.0, 1.0),
+    );
     (theta >= TURN_EPS_RAD).then_some(theta)
 }
 
@@ -793,10 +819,10 @@ fn circle_radius_ratio(taps: &[Taps; 2], omega_hat: f64) -> f64 {
     (0..CIRCLE_PHASES)
         .map(|k| {
             let u = std::f64::consts::TAU * k as f64 / CIRCLE_PHASES as f64;
-            let (sin, cos) = u.sin_cos();
+            let (sin, cos) = libm::sincos(u);
             let x = gx.0 * cos - gx.1 * sin;
             let y = gy.0 * sin + gy.1 * cos;
-            x.hypot(y)
+            libm::hypot(x, y)
         })
         .fold(f64::INFINITY, f64::min)
 }

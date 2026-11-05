@@ -124,12 +124,11 @@ impl VertexBudget {
     }
 
     /// How far along the path the shaper carries one corner's rounding
-    /// onto its neighbours: the distance a stop at `max_accel` covers in
-    /// two of the wider kernel's standard deviations. A vertex that close
-    /// to a sharper corner takes that corner's budget.
+    /// onto its neighbours at `max_accel` ([`ShapedCorners::reach_mm`]). A
+    /// vertex that close to a sharper corner takes that corner's budget.
     fn reach_mm(&self) -> f64 {
         self.corners
-            .map_or(0.0, |corners| 0.25 * corners.approach_mm(self.max_accel))
+            .map_or(0.0, |corners| corners.reach_mm(self.max_accel))
     }
 
     pub fn mm(&self, turn_rad: f64) -> f64 {
@@ -302,7 +301,7 @@ impl Polyline {
         let incoming = sub(self.vertices[vertex], self.vertices[vertex - 1]);
         let outgoing = sub(self.vertices[vertex + 1], self.vertices[vertex]);
         let cosine = dot(incoming, outgoing) / (norm(incoming) * norm(outgoing));
-        cosine.clamp(-1.0, 1.0).acos().to_degrees()
+        libm::acos(cosine.clamp(-1.0, 1.0)).to_degrees()
     }
 
     /// The turn the path makes over `reach_mm` either side of `vertex`: the
@@ -317,10 +316,7 @@ impl Polyline {
         if lengths <= 0.0 {
             return 0.0;
         }
-        (dot(incoming, outgoing) / lengths)
-            .clamp(-1.0, 1.0)
-            .acos()
-            .to_degrees()
+        libm::acos((dot(incoming, outgoing) / lengths).clamp(-1.0, 1.0)).to_degrees()
     }
 
     fn point_at_arc(&self, arc: f64) -> Point {
