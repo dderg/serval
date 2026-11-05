@@ -373,6 +373,14 @@ struct KeptNode {
     target: f64,
 }
 
+/// What the next moving node keeps its distance from: the rest node the
+/// leaders last left, or the last moving node kept since.
+#[derive(Debug, Clone, Copy)]
+enum LastKept {
+    Rest(f64),
+    Moving(KeptNode),
+}
+
 /// How the leaders cross the last half of the longest ramp of a laid leg
 /// ending at `until`.
 #[derive(Debug, Clone, Copy)]
@@ -416,11 +424,16 @@ fn ramp_reach_within(t: f64, (start, end): (f64, f64)) -> (f64, f64) {
 /// width is laid, and only half its own ramp time after the last one and no
 /// nearer on the path than [`NODE_SPACING_PER_WIDTH`] times the narrower of
 /// the two targets: the smootherstep between two of them bends `h` no
-/// sharper than a window's own width allows. A node's own target is half
-/// the path the leaders cover in `τ` around it — `v·τ/2` at cruise,
-/// `a·τ²/8` at a turnaround, the accelerating path on both sides at a slow
-/// corner — and zero at a rest: where the leaders cross a leg seam at rest,
-/// at a floor, and at every sample inside a dwell, each of which is kept.
+/// sharper than a window's own width allows. Off a rest, a sample becomes a
+/// node only once the rest's cone no longer caps its target: a node the
+/// cone caps is a sliver of its window, micrometres past the rest where the
+/// leaders creep out of it, which the smootherstep to the next node would
+/// flatten onto, while the rise off the rest opens the window with the
+/// distance. A node's own target is half the path the leaders cover in `τ`
+/// around it — `v·τ/2` at cruise, `a·τ²/8` at a turnaround, the
+/// accelerating path on both sides at a slow corner — and zero at a rest:
+/// where the leaders cross a leg seam at rest, at a floor, and at every
+/// sample inside a dwell, each of which is kept.
 /// The envelope is the largest `ENVELOPE_SLOPE`-Lipschitz field under every
 /// target, and `h` blends neighbouring envelope values by a smootherstep
 /// (flat to second order at each node, so `h` is C2), or rises off a rest
@@ -441,7 +454,7 @@ struct WidthField {
     grid: Option<SampleGrid>,
     pending: Option<usize>,
     before_pending: f64,
-    last_kept: Option<KeptNode>,
+    last_kept: Option<LastKept>,
     final_prefix: usize,
 }
 
@@ -613,17 +626,13 @@ impl WidthField {
     fn assign(&mut self, through: f64) {
         while let Some(&candidate) = self.candidates.front() {
             match candidate {
-                Candidate::Rest(s) => {
-                    self.push_rest(s);
-                    self.last_kept = None;
-                }
+                Candidate::Rest(s) => self.rest_at(s),
                 Candidate::Time(sample) => {
                     let Some(base) = sample.base.filter(|_| sample.t <= through) else {
                         break;
                     };
                     if base == 0.0 {
-                        self.push_rest(sample.s);
-                        self.last_kept = None;
+                        self.rest_at(sample.s);
                     } else {
                         self.keep_if_due(sample, base);
                     }
@@ -641,25 +650,38 @@ impl WidthField {
         self.closed_seams = self.closed_seams.saturating_sub(drop);
     }
 
+    fn rest_at(&mut self, s: f64) {
+        self.push_rest(s);
+        let rest = self.nodes.last().expect("a rest leaves a node").s;
+        self.last_kept = Some(LastKept::Rest(rest));
+    }
+
     /// Makes `sample` a node of target `base` scaled to the ramp time
     /// there, or the width the seams around ask for if wider, once it lies
-    /// far enough past the last node kept in time and along the path.
+    /// far enough past the last node kept in time and along the path, or
+    /// past the rest the leaders last left for its cone to hold that target.
     fn keep_if_due(&mut self, sample: TimeSample, base: f64) {
         let ramp_time = self.ramp_time_at(sample.t);
         let target =
             (base * ramp_time / RATIO_RAMP_MIN_TIME_S).max(self.seam_width_at(sample.t, sample.s));
-        let due = self.last_kept.is_none_or(|last| {
-            sample.t >= last.t + 0.5 * last.ramp_time - 0.5 * NODE_SPACING_S
-                && sample.s - last.s >= NODE_SPACING_PER_WIDTH * target.min(last.target)
-        });
+        let due = match self
+            .last_kept
+            .expect("the width field lays a rest before its first sample")
+        {
+            LastKept::Rest(rest) => target <= ENVELOPE_SLOPE * (sample.s - rest),
+            LastKept::Moving(last) => {
+                sample.t >= last.t + 0.5 * last.ramp_time - 0.5 * NODE_SPACING_S
+                    && sample.s - last.s >= NODE_SPACING_PER_WIDTH * target.min(last.target)
+            }
+        };
         if due {
             self.push(sample.s, target);
-            self.last_kept = Some(KeptNode {
+            self.last_kept = Some(LastKept::Moving(KeptNode {
                 t: sample.t,
                 s: sample.s,
                 ramp_time,
                 target,
-            });
+            }));
         }
     }
 
@@ -683,6 +705,17 @@ impl WidthField {
 
     fn place_rest(&mut self, s: f64) {
         self.candidates.push_back(Candidate::Rest(s));
+    }
+
+    /// A rest at `s` among the candidates the leg being laid placed, in
+    /// path order: a ratio step the table lays where the leaders rest, which
+    /// the path they cover may reach only to a rounding.
+    fn place_rest_among_laid(&mut self, s: f64) {
+        let at = self.candidates.partition_point(|candidate| candidate.s() <= s);
+        self.candidates.insert(at, Candidate::Rest(s));
+        self.pending = self
+            .pending
+            .map(|pending| if at <= pending { pending + 1 } else { pending });
     }
 
     /// A rest past a node already at zero width keeps its own place rather
@@ -1597,7 +1630,12 @@ impl RatioSmoothing {
         let Some(resting) = resting_stretch(leaders, leg, REST_SPEED_MM_S, table_end) else {
             return false;
         };
-        let (rest_start, rest_end) = ratio_steps_within(spans, seam, table_end).map_or(
+        let steps = ratio_steps_within(spans, seam, table_end);
+        if let Some((first_step, last_step)) = steps {
+            self.width.place_rest_among_laid(first_step);
+            self.width.place_rest_among_laid(last_step);
+        }
+        let (rest_start, rest_end) = steps.map_or(
             (resting.first_s, resting.last_s),
             |(first_step, last_step)| {
                 (
@@ -1878,25 +1916,14 @@ impl RestSide {
     }
 
     /// How the leaders cross a step's window reaching `reach` from the
-    /// rest. Into a rest, as they cross the spill, and where the window
-    /// runs past the raw seam, no faster than the most they accelerate past
-    /// it takes them over the overhang `d` from their speed at the seam,
-    /// `√(v² + 2·a·d)`: a step inside the spill is ramped where the leaders
-    /// slow into the rest, not at the speed they cruise far past the seam.
-    /// Out of a rest, at the fastest and most accelerating they cross the
-    /// whole side: the width field's sample grid restarts where the leaders
-    /// leave a standstill, so its first node can lie micrometres past the
-    /// rest, its envelope a sliver of the rest's cone that the smootherstep
-    /// to the next node flattens onto, and a window across the spill can be
-    /// a few thousandths of the envelope's.
-    // TODO: read a leaving spill where the leaders cross it too once the
-    // width field's windows across it follow the envelope.
+    /// rest: as they cross the spill, and where the window runs past the raw
+    /// seam, no faster than the most they accelerate past it takes them
+    /// over the overhang `d` from their speed at the seam, `√(v² + 2·a·d)`:
+    /// a step inside the spill is ramped where the leaders slow into the
+    /// rest or leave it, not at the speed they cruise far past the seam.
     fn window_crossing(self, reach: f64) -> Crossing {
         let over_spill = self.crossing.widest(self.spill.crossing);
         let past_seam = over_spill.widest(self.beyond);
-        if self.outward > 0.0 {
-            return past_seam;
-        }
         let overhang = reach - (self.seam - self.rest).abs();
         if overhang <= 0.0 {
             return over_spill;
