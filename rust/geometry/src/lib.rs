@@ -48,6 +48,6 @@ pub use surface::{
 pub use velocity::{
     ExtrusionBudget, ExtrusionReach, FanOut, LawSegment, MoveVelocity, RailPair, RailPairShape,
     ScalarLaw, Serial, VelSample, VelocityError, VelocityPlanParams, VelocityProfile,
-    VelocityReport, extrusion_budgets, plan_velocity_stops_reconstruct_prefix,
-    plan_velocity_stops_select_prefix,
+    VelocityReport, brake_horizon, extrusion_budgets, plan_velocity_stops_reconstruct_prefix,
+    plan_velocity_stops_select_prefix, replan_span,
 };
