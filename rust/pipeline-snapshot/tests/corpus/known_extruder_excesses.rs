@@ -78,7 +78,6 @@ pub struct KnownExcesses {
 }
 
 pub const KNOWN: &[KnownExcesses] = &[
-
     // TODO(bound-ext, floor-slivers): the ladder chases an unshaped onset's singular advance.
     KnownExcesses {
         case: "voron_dense_top_layers/rust/motion-core/tests/configs/neptune_sim_print.cfg",
