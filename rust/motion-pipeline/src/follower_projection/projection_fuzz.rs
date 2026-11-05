@@ -884,3 +884,32 @@ fn a_stop_between_a_travel_and_an_extrusion_lays_nothing_ahead_of_it() {
         "at the stop t={stop} the extruder has laid {e} mm of the stroke after it"
     );
 }
+
+/// Found by `an_advance_integrates_to_zero_across_every_rest`: a travel
+/// crossed into an extrusion at 77 mm/s, the extrusion braking to rest.
+#[test]
+fn a_travel_into_an_extrusion_at_speed_projects_an_advance_without_a_position_step() {
+    let steps = [
+        Step::Stroke {
+            reverse: false,
+            length: 0.4428979271674037,
+            pace: 174.03817691732735,
+            end_speed: 155.00628301603433,
+            shaped_speed_scale: 0.5,
+            ratio: 0.0,
+        },
+        Step::Stroke {
+            reverse: false,
+            length: 0.38147226712142007,
+            pace: 102.12785456679669,
+            end_speed: 0.0,
+            shaped_speed_scale: 0.5,
+            ratio: 0.01,
+        },
+        Step::Hold { duration: 0.001 },
+    ];
+    let track = build_profiled_track(0.0, &steps, Profile::Quintic);
+    let advanced = project_all_at_once(&track, &chains(follower_chain(Some(0.005), None)));
+    let plain = project_all_at_once(&track, &chains(follower_chain(None, None)));
+    assert_advance_vanishes_at_rests(&track, (&advanced, &plain), (0.0, 0.0)).unwrap();
+}
