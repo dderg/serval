@@ -1276,11 +1276,11 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<Vec<RailK
         u64::from(brake),
     ];
     let recent = || RECENT_RAILS.lock().expect("a rail integration panicked");
-    if let Some(knots) = recent().read(&key) {
+    if let Some(Rail(knots)) = recent().read(&key) {
         return knots;
     }
     let knots = integrate_rail_arc_afresh(law, v0, ds);
-    recent().keep(key, knots.clone());
+    recent().keep(key, Rail(knots.clone()));
     knots
 }
 
@@ -1293,18 +1293,22 @@ fn integrate_rail_arc(law: &ScalarLaw, v0: f64, ds: f64) -> Option<Arc<Vec<RailK
 /// entries each: the older is dropped when the newer fills.
 #[derive(Default)]
 struct RecentRails {
-    newer: std::collections::HashMap<[u64; 6], Option<Arc<Vec<RailKnot>>>>,
-    older: std::collections::HashMap<[u64; 6], Option<Arc<Vec<RailKnot>>>>,
+    newer: std::collections::HashMap<[u64; 6], Rail>,
+    older: std::collections::HashMap<[u64; 6], Rail>,
 }
+
+/// One integrated rail: its knots, or `None` where its speed folds to rest.
+#[derive(Clone)]
+struct Rail(Option<Arc<Vec<RailKnot>>>);
 
 const RECENT_RAILS_GENERATION: usize = 4096;
 
 impl RecentRails {
-    fn read(&self, key: &[u64; 6]) -> Option<Option<Arc<Vec<RailKnot>>>> {
+    fn read(&self, key: &[u64; 6]) -> Option<Rail> {
         self.newer.get(key).or_else(|| self.older.get(key)).cloned()
     }
 
-    fn keep(&mut self, key: [u64; 6], knots: Option<Arc<Vec<RailKnot>>>) {
+    fn keep(&mut self, key: [u64; 6], knots: Rail) {
         if self.newer.len() == RECENT_RAILS_GENERATION {
             self.older = std::mem::take(&mut self.newer);
         }
