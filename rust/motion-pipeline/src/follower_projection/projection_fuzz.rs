@@ -1120,4 +1120,3 @@ fn limits_drawn_under_a_strokes_advanced_demand_rise_over_it() {
         &chains(limited(follower_chain(Some(advance_k), None), Some(limits))),
     );
 }
-
