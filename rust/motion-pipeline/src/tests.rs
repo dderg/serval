@@ -2404,6 +2404,7 @@ fn the_ladder_fits_a_resolution_scale_span_without_high_degree_amplification() {
             acceleration: &truth_a,
             held_miss: &|_| 0.0,
             held_ranks_misses: false,
+            exemption: None,
         },
         crate::lowering::LadderBudget {
             tol: tolerance,
@@ -2507,6 +2508,7 @@ fn a_smooth_cusp_fits_below_the_high_degree_floor_without_bump_corrections() {
                 acceleration: &truth_a,
                 held_miss: &|_| 0.0,
                 held_ranks_misses: false,
+                exemption: None,
             },
             crate::lowering::LadderBudget {
                 tol: tolerance,
@@ -2623,6 +2625,7 @@ fn a_constant_acceleration_resolution_span_fits_the_anchored_quadratic() {
             acceleration: &truth_a,
             held_miss: &|_| 0.0,
             held_ranks_misses: false,
+            exemption: None,
         },
         crate::lowering::LadderBudget {
             tol: tolerance,
@@ -2762,6 +2765,7 @@ fn an_endpoint_anchored_fit_never_steps_the_right_seam() {
             acceleration: &truth_a,
             held_miss: &|_| 0.0,
             held_ranks_misses: false,
+            exemption: None,
         },
         crate::lowering::LadderBudget {
             tol: tolerance,
@@ -2889,6 +2893,7 @@ fn the_closest_rung_at_a_square_root_onset_is_the_closest_between_the_probes() {
             acceleration: &truth_a,
             held_miss: &|rung| crate::lowering::held_miss(rung, h, &held, tolerance),
             held_ranks_misses: true,
+            exemption: None,
         },
         crate::lowering::LadderBudget {
             tol: tolerance,

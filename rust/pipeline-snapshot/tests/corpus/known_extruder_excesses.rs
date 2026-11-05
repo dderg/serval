@@ -77,75 +77,7 @@ pub struct KnownExcesses {
     pub worst: f64,
 }
 
-pub const KNOWN: &[KnownExcesses] = &[
-    // TODO(bound-ext, floor-slivers): the ladder chases an unshaped onset's singular advance.
-    KnownExcesses {
-        case: "voron_dense_top_layers/rust/motion-core/tests/configs/neptune_sim_print.cfg",
-        class: ExcessClass::Accel,
-        count: 6474,
-        worst: 2350675.7,
-    },
-    KnownExcesses {
-        case: "voron_first_layers/rust/motion-core/tests/configs/neptune_sim_print.cfg",
-        class: ExcessClass::Accel,
-        count: 3593,
-        worst: 310242.5,
-    },
-    KnownExcesses {
-        case: "voron_first_layers/rust/motion-core/tests/configs/neptune_sim_print.cfg",
-        class: ExcessClass::Turning,
-        count: 23,
-        worst: 118874.7,
-    },
-    KnownExcesses {
-        case: "trident_follower_cache_regression/rust/motion-core/tests/configs/neptune_sim_print.cfg",
-        class: ExcessClass::Accel,
-        count: 1195,
-        worst: 1245046.3,
-    },
-    KnownExcesses {
-        case: "trident_follower_cache_regression/rust/motion-core/tests/configs/neptune_sim_print.cfg",
-        class: ExcessClass::Turning,
-        count: 8,
-        worst: 21399.0,
-    },
-    KnownExcesses {
-        case: "corner_flow zigzag 50/rust/motion-core/tests/configs/neptune_sim_print.cfg",
-        class: ExcessClass::Accel,
-        count: 448,
-        worst: 250608.1,
-    },
-    KnownExcesses {
-        case: "corner_flow zigzag 150/rust/motion-core/tests/configs/neptune_sim_print.cfg",
-        class: ExcessClass::Accel,
-        count: 448,
-        worst: 250615.0,
-    },
-    KnownExcesses {
-        case: "corner_flow zigzag 300/rust/motion-core/tests/configs/neptune_sim_print.cfg",
-        class: ExcessClass::Accel,
-        count: 448,
-        worst: 250587.4,
-    },
-    KnownExcesses {
-        case: "voron_dense_top_layers_zhop/rust/motion-core/tests/configs/neptune_sim_print.cfg",
-        class: ExcessClass::Accel,
-        count: 6373,
-        worst: 2350706.7,
-    },
-    KnownExcesses {
-        case: "voron_first_layers_zhop/rust/motion-core/tests/configs/neptune_sim_print.cfg",
-        class: ExcessClass::Accel,
-        count: 3578,
-        worst: 310242.5,
-    },
-    KnownExcesses {
-        case: "voron_first_layers_zhop/rust/motion-core/tests/configs/neptune_sim_print.cfg",
-        class: ExcessClass::Turning,
-        count: 23,
-        worst: 118874.7,
-    },
-];
+pub const KNOWN: &[KnownExcesses] = &[];
 
 /// Where the audit of the case named `case` departs from what [`KNOWN`]
 /// pins for it, as one failure line.
