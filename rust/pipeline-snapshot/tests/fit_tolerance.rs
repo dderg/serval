@@ -45,10 +45,10 @@ fn audited(cases: Vec<(String, String, PathBuf)>) -> Vec<String> {
             .collect();
         if let Some(departure) = corpus::known_fit_violations::fit_violations(&name, &open) {
             failures.push(format!(
-                "{name}: {departure}, {} of {} follower pieces across a break in their edge \
-                 sliver:\n{}",
-                assembled_across_edge_break(&open),
+                "{name}: {departure}; of its {} open pieces, {} are follower pieces across a \
+                 break in their edge sliver:\n{}",
                 open.len(),
+                assembled_across_edge_break(&open),
                 table(&name, &open)
             ));
         }
@@ -132,28 +132,61 @@ fn every_accepted_fit_piece_holds_the_fit_tolerance_against_the_exact_signal() {
 }
 
 #[test]
-fn every_fit_piece_of_the_dense_print_holds_the_fit_tolerance_on_the_bench_configs() {
-    assert_every_accepted_fit_piece_holds(dense_cases(&corpus::SIM_CONFIGS));
+fn every_fit_piece_of_the_dense_print_holds_the_fit_tolerance_on_the_fast_bench_config() {
+    assert_every_accepted_fit_piece_holds(dense_cases(&[corpus::FAST_CONFIG]));
 }
 
-/// The first layers' slow perimeters, primes and retracts on the bench
-/// configs' kernel-free extruder chain.
 #[test]
-fn every_fit_piece_of_the_first_layers_holds_the_fit_tolerance_on_the_bench_configs() {
-    assert_every_accepted_fit_piece_holds(corpus::print_cases(
-        "voron_first_layers",
-        &corpus::SIM_CONFIGS,
-    ));
+fn every_fit_piece_of_the_dense_print_holds_the_fit_tolerance_on_the_printer_bench_config() {
+    assert_every_accepted_fit_piece_holds(dense_cases(&[corpus::PRINTER_CONFIG]));
 }
 
-/// The Trident print that first broke the follower cache, on the bench
-/// configs' kernel-free extruder chain.
 #[test]
-fn every_fit_piece_of_the_follower_cache_print_holds_the_fit_tolerance_on_the_bench_configs() {
-    assert_every_accepted_fit_piece_holds(corpus::print_cases(
-        "trident_follower_cache_regression",
-        &corpus::SIM_CONFIGS,
-    ));
+fn every_fit_piece_of_the_dense_print_holds_the_fit_tolerance_on_the_neptune_config() {
+    assert_every_accepted_fit_piece_holds(dense_cases(&[corpus::NEPTUNE_CONFIG]));
+}
+
+/// The first layers' slow perimeters, primes and retracts on `config`'s
+/// kernel-free extruder chain.
+fn first_layers_cases(config: &str) -> Vec<(String, String, PathBuf)> {
+    corpus::print_cases("voron_first_layers", &[config])
+}
+
+#[test]
+fn every_fit_piece_of_the_first_layers_holds_the_fit_tolerance_on_the_fast_bench_config() {
+    assert_every_accepted_fit_piece_holds(first_layers_cases(corpus::FAST_CONFIG));
+}
+
+#[test]
+fn every_fit_piece_of_the_first_layers_holds_the_fit_tolerance_on_the_printer_bench_config() {
+    assert_every_accepted_fit_piece_holds(first_layers_cases(corpus::PRINTER_CONFIG));
+}
+
+#[test]
+fn every_fit_piece_of_the_first_layers_holds_the_fit_tolerance_on_the_neptune_config() {
+    assert_every_accepted_fit_piece_holds(first_layers_cases(corpus::NEPTUNE_CONFIG));
+}
+
+/// The Trident print that first broke the follower cache, on `config`'s
+/// kernel-free extruder chain.
+fn follower_cache_cases(config: &str) -> Vec<(String, String, PathBuf)> {
+    corpus::print_cases("trident_follower_cache_regression", &[config])
+}
+
+#[test]
+fn every_fit_piece_of_the_follower_cache_print_holds_the_fit_tolerance_on_the_fast_bench_config() {
+    assert_every_accepted_fit_piece_holds(follower_cache_cases(corpus::FAST_CONFIG));
+}
+
+#[test]
+fn every_fit_piece_of_the_follower_cache_print_holds_the_fit_tolerance_on_the_printer_bench_config()
+{
+    assert_every_accepted_fit_piece_holds(follower_cache_cases(corpus::PRINTER_CONFIG));
+}
+
+#[test]
+fn every_fit_piece_of_the_follower_cache_print_holds_the_fit_tolerance_on_the_neptune_config() {
+    assert_every_accepted_fit_piece_holds(follower_cache_cases(corpus::NEPTUNE_CONFIG));
 }
 
 /// A 70 000 mm/s² Trident whose kernel-free pressure advance under a ratio

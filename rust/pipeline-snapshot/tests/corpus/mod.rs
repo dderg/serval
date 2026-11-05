@@ -27,11 +27,10 @@ pub const SIM_GCODES: [&str; 4] = [
     "trident_follower_cache_regression",
     "trident_mesh_clock_regression",
 ];
-pub const SIM_CONFIGS: [&str; 3] = [
-    "tools/bench/configs/fast.cfg",
-    "tools/bench/printer.cfg",
-    "rust/motion-core/tests/configs/neptune_sim_print.cfg",
-];
+pub const FAST_CONFIG: &str = "tools/bench/configs/fast.cfg";
+pub const PRINTER_CONFIG: &str = "tools/bench/printer.cfg";
+pub const NEPTUNE_CONFIG: &str = "rust/motion-core/tests/configs/neptune_sim_print.cfg";
+pub const SIM_CONFIGS: [&str; 3] = [FAST_CONFIG, PRINTER_CONFIG, NEPTUNE_CONFIG];
 
 /// The machine profiles, each class of printer with a ratio-ramped and a
 /// kernel-smoothed extruder chain.
