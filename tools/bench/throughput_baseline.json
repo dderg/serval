@@ -1,18 +1,18 @@
 {
   "slice_lines": 1000,
-  "commit": "4560c5c5963fe4996cf2d5f4052ac0a270310da8",
-  "reason": "Digest-identical follower projection savings: one crossing memo per lay, indexed point-mass moments",
+  "commit": "614c7f8890231ea6a013ac8919bc725e06d67cc2",
+  "reason": "Digest-identical ladder and enclosure savings: onset checks refuse a rung at its first miss, read from the edges inward; probe errors shared between acceptance and rank; one squared speed per enclosure window",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 24868263920,
+      "ir": 23789857482,
       "stream_secs": 6.537
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 26153307751,
+      "ir": 25108243556,
       "stream_secs": 6.213
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 29601274379,
+      "ir": 29329945462,
       "stream_secs": 5.538
     }
   },
