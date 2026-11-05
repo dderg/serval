@@ -456,7 +456,7 @@ impl<'a> FollowerSignal<'a> {
             hi: reach.1,
             exact: (reach.0 == read.0, reach.1 == read.1),
         };
-        let laid = self.table_models(Table::Laid, &s, centre, reach)?;
+        let laid = self.table_models(Table::Laid, &s, centre.min(self.s_owned_end), reach)?;
         let raw = match (&windows.raw, self.raw_delta) {
             (Some(raw), Some((_, at_start))) => {
                 let [p, v, a, _] = raw.models(window, false)?;
