@@ -3,7 +3,7 @@ use std::iter::once;
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_discontinuous_nurbs, bezier_pieces_to_nurbs};
 use trajectory::build_smooth_zv_kernel;
 
-use super::{JumpSeries, input_jumps_at, kernel_jumps_at};
+use super::{CruiseEnds, JumpSeries, input_jumps_at, kernel_jumps_at};
 use crate::lowering::FitTol;
 use crate::shaper::{
     AxisFit, AxisSignalTable, FitBoundary, Lookahead, ShapedSignalSource, SignalBounds,
@@ -109,6 +109,7 @@ fn an_image_is_seeded_only_past_the_minimum_span_or_at_a_rest() {
             vec![around - by, around, around + by],
             source.hidden_break_input(),
             FIT_TOL,
+            CruiseEnds::LeftToTheFit,
         )
     };
     let moving = image(k_hi);
@@ -159,7 +160,10 @@ fn cruise_then(accel: f64) -> nurbs::ScalarNurbs {
 /// The seeds kept of the image of `BREAK_S` under the kernel's first cut
 /// and two seeds half the minimum span either side of it, beside those
 /// three.
-fn seeds_around_the_first_cut_image(track: &nurbs::ScalarNurbs) -> (Vec<f64>, Vec<f64>) {
+fn seeds_around_the_first_cut_image(
+    track: &nurbs::ScalarNurbs,
+    cruise_ends: CruiseEnds,
+) -> (Vec<f64>, Vec<f64>) {
     let kernel = build_smooth_zv_kernel(44.0);
     let source = ShapedSignalSource::new(
         &kernel,
@@ -177,25 +181,41 @@ fn seeds_around_the_first_cut_image(track: &nurbs::ScalarNurbs) -> (Vec<f64>, Ve
     let close = 0.5 * breaks.minimum_span;
     let offered = vec![image - close, image, image + close];
     (
-        breaks.select_seeds(offered.clone(), source.hidden_break_input(), FIT_TOL),
+        breaks.select_seeds(
+            offered.clone(),
+            source.hidden_break_input(),
+            FIT_TOL,
+            cruise_ends,
+        ),
         offered,
     )
 }
 
-/// The image where the shaped signal leaves a cruise stays a seed however
-/// close to the last one: a piece across it would let the velocity wander
-/// where the plan holds it, past the limit where the plan cruises at it.
+/// Where a fit anchors cruise ends, the image where the shaped signal
+/// leaves a cruise stays a seed however close to the last one: a piece
+/// across it would let the velocity wander where the plan holds it, past
+/// the limit where the plan cruises at it.
 #[test]
-fn the_image_where_the_shaped_signal_leaves_a_cruise_stays_a_seed() {
-    let (kept, offered) = seeds_around_the_first_cut_image(&cruise_then(-BRAKE_MM_S2));
+fn an_anchored_image_where_the_shaped_signal_leaves_a_cruise_stays_a_seed() {
+    let (kept, offered) =
+        seeds_around_the_first_cut_image(&cruise_then(-BRAKE_MM_S2), CruiseEnds::Anchored);
     assert_eq!(kept, offered);
+}
+
+/// A fit that leaves cruise ends to itself seeds that image only past the
+/// minimum span.
+#[test]
+fn a_cruise_end_left_to_the_fit_is_seeded_only_past_the_minimum_span() {
+    let (kept, offered) =
+        seeds_around_the_first_cut_image(&cruise_then(-BRAKE_MM_S2), CruiseEnds::LeftToTheFit);
+    assert_eq!(kept, vec![offered[0], offered[2]]);
 }
 
 /// A break the cruise runs through bounds no cruise, and its image is left
 /// to the fit within the minimum span.
 #[test]
 fn the_image_of_a_break_inside_a_cruise_is_left_to_the_fit() {
-    let (kept, offered) = seeds_around_the_first_cut_image(&cruise_then(0.0));
+    let (kept, offered) = seeds_around_the_first_cut_image(&cruise_then(0.0), CruiseEnds::Anchored);
     assert_eq!(kept, vec![offered[0], offered[2]]);
 }
 
@@ -235,9 +255,12 @@ fn an_image_carrying_a_resolvable_velocity_step_stays_a_seed() {
         .expect("the step's first image is a shaped break");
     let seeds = vec![image_t - 1e-5, image_t, image_t + 1e-5];
     assert_eq!(
-        source
-            .shaped_breaks
-            .select_seeds(seeds.clone(), source.hidden_break_input(), FIT_TOL),
+        source.shaped_breaks.select_seeds(
+            seeds.clone(),
+            source.hidden_break_input(),
+            FIT_TOL,
+            CruiseEnds::LeftToTheFit
+        ),
         seeds
     );
 }
