@@ -61,7 +61,7 @@ fn audited(cases: Vec<(String, String, PathBuf)>) -> Audited {
             continue;
         };
         println!("{name}: {}", audit.summary());
-        if let Some(excess) = corpus::known_extruder_excesses::extruder_excess(&config, &audit) {
+        if let Some(excess) = corpus::known_extruder_excesses::extruder_excess(&name, &audit) {
             audited.extruder.push(format!("{name}: {excess}"));
         }
     }
