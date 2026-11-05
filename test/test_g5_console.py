@@ -32,7 +32,6 @@ def make_motion():
     m.reactor = types.SimpleNamespace(monotonic=lambda: 0.0)
     m._last_reactor_yield = 0.0
     m._engine_wakeup = None
-    m._clock_sync_confirmed = False
     m._fire_active_callbacks = lambda axes_d: None
     m._sync_print_time = lambda: None
     m._axis_limit = lambda axis, kind: 100.0
