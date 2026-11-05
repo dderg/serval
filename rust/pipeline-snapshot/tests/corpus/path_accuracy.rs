@@ -8,7 +8,9 @@
 //! the floor taken at `max_accel` (the planner takes it at each corner's
 //! own, lower or equal, acceleration, so the audit's bound is the looser).
 //! A vertex within the shaper's reach of a sharper corner takes that
-//! corner's budget: the shaper rounds them as one.
+//! corner's budget: the shaper rounds them as one. Misses read across the
+//! bed (XY), and the shaped carriers may stray from the exact shaped path
+//! by `max_path_deviation` on top of any budget.
 
 use std::fmt::Write;
 use std::path::Path;
@@ -94,11 +96,15 @@ pub struct VertexBudget {
     pub budget: CornerBudget,
     max_accel: f64,
     corners: Option<&'static ShapedCorners>,
+    /// How far the shaped carriers may stray from the exact shaped path
+    /// (`max_path_deviation`), on top of any budget.
+    fit_tolerance_mm: f64,
 }
 
 impl VertexBudget {
     pub fn of(config: &Path) -> Self {
-        let cartesian = motion_settings(config).cartesian;
+        let settings = motion_settings(config);
+        let cartesian = settings.cartesian;
         let chains = planner("path accuracy", config)
             .compile_active_chains()
             .unwrap_or_else(|e| panic!("{}: {e}", config.display()));
@@ -107,6 +113,7 @@ impl VertexBudget {
             budget: cartesian.corner,
             max_accel: cartesian.max_accel,
             corners: ShapedCorners::interned([kernel(0), kernel(1)]),
+            fit_tolerance_mm: settings.fit_tolerance_mm,
         }
     }
 
@@ -249,7 +256,11 @@ impl Polyline {
     }
 
     fn distance_to_segment(&self, segment: usize, q: Point) -> f64 {
-        distance_to_segment(q, self.vertices[segment], self.vertices[segment + 1])
+        distance_to_segment(
+            planar(q),
+            planar(self.vertices[segment]),
+            planar(self.vertices[segment + 1]),
+        )
     }
 
     fn arc_along(&self, segment: usize, q: Point) -> f64 {
@@ -257,6 +268,16 @@ impl Polyline {
         let ab = sub(b, a);
         let length = norm(ab);
         self.arc_start(segment) + (dot(sub(q, a), ab) / length).clamp(0.0, length)
+    }
+
+    /// How far `q` lies from vertex `vertex` across the bed: misses read in
+    /// XY, where a bed mesh or a z-hop leaves the corner a G-code draws.
+    fn planar_distance(&self, vertex: usize, chord: (Point, Point)) -> f64 {
+        distance_to_segment(
+            planar(self.vertices[vertex]),
+            planar(chord.0),
+            planar(chord.1),
+        )
     }
 
     fn vertex_arc(&self, vertex: usize) -> f64 {
@@ -352,8 +373,7 @@ pub fn audit(snapshot: &Snapshot, gcode: &str, config: &Path) -> Option<PathAccu
             window.start += 1;
         }
         for vertex in window.clone() {
-            nearest[vertex] =
-                nearest[vertex].min(distance_to_segment(line.vertices[vertex], chord_from, q));
+            nearest[vertex] = nearest[vertex].min(line.planar_distance(vertex, (chord_from, q)));
         }
         previous = Some(q);
     });
@@ -405,7 +425,7 @@ pub fn audit(snapshot: &Snapshot, gcode: &str, config: &Path) -> Option<PathAccu
             if share > report.worst_share.0 {
                 report.worst_share = (share, at);
             }
-            if share > 1.0 + BUDGET_SLACK {
+            if nearest[vertex] > granted * (1.0 + BUDGET_SLACK) + budget.fit_tolerance_mm {
                 report.over_budget.push((at, nearest[vertex], granted));
             }
         }
@@ -466,6 +486,10 @@ fn state_at(trajectory: &ExactTrajectory, t: f64) -> Option<(Point, f64)> {
 
 fn spatial(position: [f64; 4]) -> Point {
     [position[0], position[1], position[2]]
+}
+
+fn planar(p: Point) -> Point {
+    [p[0], p[1], 0.0]
 }
 
 fn sub(a: Point, b: Point) -> Point {

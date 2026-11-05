@@ -67,7 +67,7 @@ pub const PREDICTION_MARGIN: f64 = 1.20;
 pub const STOP_SHARE: f64 = 0.5;
 /// The share of a corner budget an arc or a merged run of facets may spend
 /// on its fit, the rest left to the shaper's pull on the curve.
-pub const ARC_FIT_SHARE: f64 = 0.5;
+pub const ARC_FIT_SHARE: f64 = 0.25;
 
 /// A kernel sampled every `1/STEPS_PER_SIGMA` of the pair's `T`, as
 /// weights of unit sum from offset `first` on.
