@@ -43,8 +43,8 @@ uv run python tools/bench/deploy.py sync [--tree DIR]  # rsync a worktree (defau
 uv run python tools/bench/deploy.py reset-target   # SWD-reset the F401 (for an MCU that no longer answers; a latched shutdown is already cleared by the FIRMWARE_RESTART that restart_klipper/prepare_printer send when klippy settles in shutdown), restart klipper
 uv run python tools/bench/lock.py hold -- <cmd...> # run a multi-step session under the bench lock
 uv run python tools/bench/suite.py [--quick] [--expect-fail NAME]  # regression matrix: sync + 9 runs (3 with --quick) + analyze, table, ~/bench/suites/<ts>/summary.json
-uv run python tools/bench/deploy.py flash-target   # build F401 fw (f401.config), flash via Pi SWD, restart klippy
-uv run python tools/bench/deploy.py flash-capture  # build capture-fw, flash F407 via ST-Link
+uv run python tools/bench/deploy.py flash-target   # build F401 fw (f401.config) in out/bench-f401, flash via Pi SWD, restart klippy, check the reported build id
+uv run python tools/bench/deploy.py flash-capture  # build capture-fw in its own target/, flash F407 via ST-Link, check the reported build id
 uv run python tools/bench/deploy.py config         # validate + push printer.cfg, FIRMWARE_RESTART
 uv run python tools/bench/run.py <gcode> [--runs-dir ~/bench/runs] [--timeout 1800] [--events [--step-tap]]
 uv run python tools/bench/analyze.py <run_dir> [--gap S] [--corner-flow] [--step-benchmark PULSED,BOTH_EDGE,CLOCK_HZ]

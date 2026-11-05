@@ -20,7 +20,7 @@ use crate::shaper::axis_enclosure::{AxisWindows, FORMULA_EDGE_SLACK};
 use crate::shaper::taylor::{self, Ball, TaylorModel, Window};
 use crate::shaper::{Enclosure, ExactPiece};
 
-use super::ratio_ramp::{REACH_INSET_ULPS, ValleyWeight};
+use super::ratio_ramp::{PathReach, REACH_INSET_ULPS, ValleyWeight};
 use super::{
     AdvancedFollowerSignal, ChainStage, FollowerSignal, LaidRead, RatioSpan, SpanSide, Table,
 };
@@ -366,10 +366,10 @@ impl<'a> FollowerSignal<'a> {
         table: Table,
         s: &TaylorModel,
         centre: f64,
-        reach: (f64, f64),
+        reach: PathReach,
     ) -> Option<LaidModels> {
-        let formulas = self.table_formulas(table, centre, reach);
-        match self.laid_on_floats(table, &formulas, reach) {
+        let formulas = self.table_formulas(table, centre, reach.span());
+        match self.laid_on_floats(table, &formulas, reach.span()) {
             Some(laid) => Some(laid),
             None => self.laid_models(table, s, &formulas, reach),
         }
@@ -451,6 +451,11 @@ impl<'a> FollowerSignal<'a> {
         let held = (centre + spread - self.s_owned_end).max(0.0);
         s.widen(held);
         let reach = inside_read((reach.0, reach.1 + held));
+        let reach = PathReach {
+            lo: reach.0,
+            hi: reach.1,
+            exact: (reach.0 == read.0, reach.1 == read.1),
+        };
         let laid = self.table_models(Table::Laid, &s, centre.min(self.s_owned_end), reach)?;
         let raw = match (&windows.raw, self.raw_delta) {
             (Some(raw), Some((_, at_start))) => {
@@ -586,7 +591,7 @@ impl<'a> FollowerSignal<'a> {
         table: Table,
         s: &TaylorModel,
         formulas: &[TableFormula],
-        reach: (f64, f64),
+        reach: PathReach,
     ) -> Option<LaidModels> {
         let correction = self.state.smoothing.correction_model(table, s, reach)?;
         let [base_e, base_ratio, base_slope] = formulas[0].laid(s);
@@ -600,7 +605,7 @@ impl<'a> FollowerSignal<'a> {
             curvature: correction.d3,
             departures: formulas[1..]
                 .iter()
-                .filter_map(|formula| formula.departure_from(&formulas[0], reach))
+                .filter_map(|formula| formula.departure_from(&formulas[0], reach.span()))
                 .collect(),
         })
     }
