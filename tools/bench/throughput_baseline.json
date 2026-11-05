@@ -1,18 +1,18 @@
 {
   "slice_lines": 1000,
-  "commit": "9f21574acd283f95ff01d5f7906e750e2e878d6d",
-  "reason": "Fit groups, group-level kernel fits and leader prefits on their own stage (#658)",
+  "commit": "cbb61ef5c6b6273600678fb9b2afe22eac42b7c2",
+  "reason": "Digest-identical ladder and enclosure savings: onset checks refuse a rung at its first miss, read from the edges inward; probe errors shared between acceptance and rank; one squared speed per enclosure window",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 22906722558,
+      "ir": 21867416822,
       "stream_secs": 6.537
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 23107615732,
+      "ir": 22088567062,
       "stream_secs": 6.213
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 27838915659,
+      "ir": 27556667150,
       "stream_secs": 5.538
     }
   },
