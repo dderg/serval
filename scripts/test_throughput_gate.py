@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import math
+import statistics
 
 import pytest
 import throughput_gate as gate
@@ -58,6 +59,20 @@ def test_the_live_ratio_compares_the_fastest_runs_of_each_side():
         gate.live_ratio([0.2, 0.3], [])
 
 
+def test_the_live_band_is_three_sigma_of_the_per_rep_log_ratios():
+    head = [1.0, 1.02, 0.98, 1.0]
+    calibration = [1.0, 1.0, 1.0, 1.0]
+    logs = [math.log(h) for h in head]
+    assert gate.live_band_pct(head, calibration) == pytest.approx(
+        100.0 * math.expm1(3.0 * statistics.stdev(logs))
+    )
+    assert gate.live_band_pct([2.0, 4.0], [1.0, 2.0]) == pytest.approx(0.0)
+    with pytest.raises(gate.GateError):
+        gate.live_band_pct([1.0, 1.0], [1.0])
+    with pytest.raises(gate.GateError):
+        gate.live_band_pct([1.0], [1.0])
+
+
 def test_the_accept_reason_is_the_fenced_block_in_the_body():
     body = "Faster.\n\n```throughput-accept\n  fewer fits per window\n```\nmore"
     assert gate.accept_reason(body) == "fewer fits per window"
@@ -71,9 +86,9 @@ CPU = "Test CPU 9000"
 
 def measurement(
     ir: int = 1000,
-    live: float = 1.0,
     stream: float = 10.0,
     vs_calibration: float = 1.0,
+    band_pct: float = 0.0,
     calibration_cost: float = 0.5,
     spread_pct: float = 0.5,
     cpu: str = CPU,
@@ -81,12 +96,11 @@ def measurement(
     return gate.Measurement(
         ir=ir,
         stream_secs=stream,
-        live_ratio=live,
         calibration_ratio=vs_calibration,
+        calibration_band_pct=band_pct,
         calibration_cost=calibration_cost,
         calibration_spread_pct=spread_pct,
         live_wall_secs=20.0,
-        reference_wall_secs=20.0,
         calibration_wall_secs=20.0,
         cpu=cpu,
     )
@@ -127,32 +141,39 @@ def entry() -> dict:
     return {"ir": 1000, "stream_secs": 10.0}
 
 
-def test_ir_growth_or_shrinkage_past_its_tolerance_fails_and_noise_passes():
+def test_only_ir_growth_past_its_tolerance_fails():
     assert (
         gate.judge("c", entry(), measurement(ir=1015), model()).problems == ()
     )
     grown = gate.judge("c", entry(), measurement(ir=1030), model())
     assert grown.problems[0].startswith("Ir grew")
-    shrunk = gate.judge("c", entry(), measurement(ir=970), model())
-    assert "accept the improvement" in shrunk.problems[0]
+    shrunk = gate.judge("c", entry(), measurement(ir=950), model(beta=0.0))
+    assert shrunk.problems == ()
 
 
-def test_a_live_ratio_away_from_one_past_its_tolerance_fails():
-    limit = gate.LIVE_TOLERANCE_PCT / 100.0
-    assert (
-        gate.judge(
-            "c", entry(), measurement(live=1 + limit * 0.9), model()
-        ).problems
-        == ()
+def test_the_live_cost_never_fails_on_drift():
+    for ratio in (0.9, 1.1):
+        verdict = gate.judge(
+            "c", entry(), measurement(vs_calibration=ratio), model(3.0)
+        )
+        assert verdict.problems == ()
+
+
+def test_the_live_floor_fails_only_beyond_the_prediction_band():
+    below = model(2.5, 1.0, 1.96)
+    noisy = gate.judge("c", entry(), measurement(band_pct=3.0), below)
+    assert noisy.band_pct[1] == pytest.approx(3.0)
+    assert noisy.problems == ()
+    quiet = gate.judge("c", entry(), measurement(band_pct=1.0), below)
+    assert quiet.problems == (
+        "the Pi 2-core worst window the live cost predicts, 1.96x +-1.0 %, "
+        "is below the 2.0x floor",
     )
-    grown = gate.judge("c", entry(), measurement(live=1 + limit * 1.1), model())
-    assert grown.problems[0].startswith(
-        "live 2-core wall per stream second grew"
+    steeper = gate.judge(
+        "c", entry(), measurement(band_pct=1.0), model(2.5, 1.0, 1.96, 3.0)
     )
-    shrunk = gate.judge(
-        "c", entry(), measurement(live=1 - limit * 1.1), model()
-    )
-    assert "accept the improvement" in shrunk.problems[0]
+    assert steeper.band_pct[1] == pytest.approx(100.0 * (1.01**3 - 1.0))
+    assert steeper.problems == ()
 
 
 def test_the_floor_checks_fail_hard():
@@ -186,11 +207,11 @@ def test_the_live_prediction_divides_the_calibration_window_by_the_cost_over_it(
     assert steeper.predicted_x[1] == pytest.approx(2.2 / 1.01**3)
 
 
-def test_the_live_prediction_ignores_the_reference_and_the_cpu_model():
+def test_the_live_prediction_ignores_the_cpu_model():
     moved = gate.judge(
         "c",
         entry(),
-        measurement(live=1.01, vs_calibration=0.8, cpu="Unseen CPU"),
+        measurement(vs_calibration=0.8, cpu="Unseen CPU"),
         model(),
     )
     assert moved.predicted_x[1] == pytest.approx(2.5 / 0.8)
@@ -249,15 +270,17 @@ def test_the_summary_names_an_unseen_cpu_model_without_failing():
     assert "on this CPU model" in seen[0]
 
 
-def test_a_side_is_summarised_from_its_fastest_runs():
+def test_a_side_is_summarised_from_its_fastest_runs_and_its_reps():
     head = [(0.52, 10.4), (0.50, 10.0), (0.60, 12.0)]
-    reference = [(0.49, 9.8), (0.51, 10.2)]
     calibration = [(0.40, 8.0), (0.42, 8.4), (0.80, 16.0)]
-    m = gate.summarise(1000, 10.0, head, reference, calibration, CPU)
-    assert m.live_ratio == pytest.approx(0.51 / 0.50)
+    m = gate.summarise(1000, 10.0, head, calibration, CPU)
     assert m.calibration_ratio == pytest.approx(0.51 / 0.41)
+    assert m.calibration_band_pct == pytest.approx(
+        gate.live_band_pct([0.52, 0.50, 0.60], [0.40, 0.42, 0.80])
+    )
     assert m.calibration_cost == pytest.approx(0.41)
     assert m.calibration_spread_pct == pytest.approx(5.0)
+    assert m.live_wall_secs == pytest.approx(10.2)
     assert m.calibration_wall_secs == pytest.approx(8.2)
 
 
@@ -277,9 +300,10 @@ def test_each_prediction_answers_to_its_own_pin():
     verdict = gate.judge(
         "c", entry(), measurement(), model(1.6, 1.0, 1.4), pinned(1.4, 1.6)
     )
-    assert len(verdict.problems) == 2
-    assert "Ir predicts, 1.60x, shrank" in verdict.problems[0]
-    assert "live cost predicts, 1.40x, grew" in verdict.problems[1]
+    assert verdict.problems == (
+        "the Pi 2-core worst window the live cost predicts, 1.40x, grew the "
+        "floor shortfall pinned at 1.60x for #693 (-12.50 %, limit 2.0 %)",
+    )
 
 
 def test_a_pinned_floor_shortfall_that_grows_fails_naming_its_issue():
@@ -288,18 +312,34 @@ def test_a_pinned_floor_shortfall_that_grows_fails_naming_its_issue():
     )
     assert verdict.problems == (
         "the Pi 2-core worst window Ir predicts, 1.44x, grew the floor "
-        "shortfall pinned at 1.60x for #693 (-10.00 %)",
+        "shortfall pinned at 1.60x for #693 (-10.00 %, limit 2.0 %)",
     )
 
 
-def test_a_pinned_floor_shortfall_that_shrinks_fails_until_repinned():
+def test_a_pinned_live_shortfall_grows_only_beyond_its_band():
+    noisy = gate.judge(
+        "c",
+        entry(),
+        measurement(band_pct=5.0),
+        model(1.6, 1.0, 1.53),
+        pinned(1.6, 1.6),
+    )
+    assert noisy.problems == ()
+    quiet = gate.judge(
+        "c",
+        entry(),
+        measurement(band_pct=1.0),
+        model(1.6, 1.0, 1.53),
+        pinned(1.6, 1.6),
+    )
+    assert "live cost predicts, 1.53x +-1.0 %, grew" in quiet.problems[0]
+
+
+def test_a_pinned_floor_shortfall_that_shrinks_passes():
     verdict = gate.judge(
         "c", entry(), measurement(stream=10.5), model(1.6), pinned(1.6, 1.6)
     )
-    assert verdict.problems == (
-        "the Pi 2-core worst window Ir predicts, 1.68x, shrank the floor "
-        "shortfall pinned at 1.60x for #693 (+5.00 %): re-pin it",
-    )
+    assert verdict.problems == ()
 
 
 def test_a_pinned_floor_shortfall_that_vanishes_fails_until_unpinned():

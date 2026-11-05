@@ -176,8 +176,8 @@ def extract_tree(variant: dict, tree: Path) -> None:
     key = variant_key(variant)
     if marker.exists() and marker.read_text().strip() == key:
         return
-    staging = gate.reference_tree(WORK / "staging", variant["commit"])
-    gate.prepare_reference(variant["commit"], WORK / "staging")
+    staging = gate.commit_tree(WORK / "staging", variant["commit"])
+    gate.extract_commit(variant["commit"], WORK / "staging")
     if tree.exists():
         shutil.rmtree(tree)
     shutil.copytree(staging, tree)
