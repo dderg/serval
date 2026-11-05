@@ -41,6 +41,30 @@ pub(crate) fn eval_mono_dd(c: &[f64], x: f64) -> f64 {
     acc
 }
 
+/// An upper bound on the magnitude of the acceleration of the monomial-in-u
+/// piece `mono_u` over its span of `h` seconds: the largest Bernstein
+/// coefficient of its second derivative.
+pub(crate) fn acceleration_bound(mono_u: &[f64], h: f64) -> f64 {
+    let second: Vec<f64> = mono_u
+        .iter()
+        .enumerate()
+        .skip(2)
+        .map(|(power, &coefficient)| (power * (power - 1)) as f64 * coefficient)
+        .collect();
+    if second.is_empty() {
+        return 0.0;
+    }
+    let peak = BezierPiece {
+        u_start: -1.0,
+        u_end: 1.0,
+        coeffs: taylor_shift(&second, -1.0),
+    }
+    .to_bernstein()
+    .iter()
+    .fold(0.0_f64, |peak, control| peak.max(control.abs()));
+    peak * (2.0 / h) * (2.0 / h)
+}
+
 /// Monomial-in-u quadratic that reproduces the left endpoint position and
 /// `endpoint_delta` — the span's own relative travel — exactly, and carries
 /// the *sampled* midpoint acceleration instead of solving one from the

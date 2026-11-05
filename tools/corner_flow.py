@@ -32,6 +32,12 @@ config lacks, for every chain.
 Each case plans in a process of its own: a planner panic fails that case
 alone, as an ERROR row carrying the panic's message.
 
+``--write-gcode FILE`` writes the cases' G-code instead, one marked
+section per case and speed; the fit audit plans
+``tools/sim/gcode/corner_flow_cases.gcode``, written so, on the bench
+configs and holds the extruder to its limits there
+(``rust/pipeline-snapshot/tests/fit_tolerance.rs``).
+
 Columns, per case and speed (worst over the case's corners; ``-`` where it
 has none of that kind):
 
@@ -89,6 +95,7 @@ for _path in (REPO / "klippy", REPO / "snapshots", REPO):
 from tools import flow_metric  # noqa: E402
 
 CASE_JOB_FLAG = "--case-job"
+CASE_MARKER = "; corner_flow case: "
 ERROR_CHARS = 200
 SPEEDS_MM_S = (50.0, 150.0, 300.0)
 START = (0.0, 0.0)
@@ -257,6 +264,23 @@ def gcode_total_e(geometry: Geometry, ratio: float) -> float:
     return total
 
 
+def bead_ratio(bead: tuple[float, float, float]) -> float:
+    """Filament per path millimetre of a `width, height, filament` bead."""
+    width, height, filament = bead
+    return width * height / (math.pi * (filament / 2.0) ** 2)
+
+
+def cases_gcode(bead: tuple[float, float, float], speeds: list[float]) -> str:
+    """Every case at every speed, each opened by a marker line naming it."""
+    ratio = bead_ratio(bead)
+    return "".join(
+        f"{CASE_MARKER}{geometry.name} {speed:g}\n"
+        + gcode(geometry, speed, ratio)
+        for geometry in GEOMETRIES
+        for speed in speeds
+    )
+
+
 class PrinterConfig:
     """The printer config as klippy reads it, editable by section."""
 
@@ -415,8 +439,8 @@ def measure(
     melt_k: float,
     bead: tuple[float, float, float],
 ) -> Row:
-    width, height, filament = bead
-    ratio = width * height / (math.pi * (filament / 2.0) ** 2)
+    width, height, _ = bead
+    ratio = bead_ratio(bead)
     row = Row(geometry.name, speed)
     program = gcode(geometry, speed, ratio)
     try:
@@ -584,7 +608,9 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__.split("\n\n", 1)[1],
     )
-    parser.add_argument("config", type=Path, help="printer.cfg to evaluate")
+    parser.add_argument(
+        "config", type=Path, nargs="?", help="printer.cfg to evaluate"
+    )
     parser.add_argument(
         "--set",
         action="append",
@@ -628,12 +654,27 @@ def main() -> None:
     )
     parser.add_argument("--json", action="store_true", help="emit JSON rows")
     parser.add_argument(
+        "--write-gcode",
+        type=Path,
+        metavar="FILE",
+        help="write every case's G-code at --speeds and --bead to FILE, "
+        f"each opened by a '{CASE_MARKER}<case> <speed>' line, and exit; "
+        "no config is read",
+    )
+    parser.add_argument(
         "--jobs",
         type=int,
         default=os.cpu_count() or 1,
         help="parallel planner runs",
     )
     args = parser.parse_args()
+    bead = tuple(float(v) for v in args.bead.split(","))
+    speeds = [float(v) for v in args.speeds.split(",")]
+    if args.write_gcode:
+        args.write_gcode.write_text(cases_gcode(bead, speeds))
+        return
+    if args.config is None:
+        parser.error("a config is required unless --write-gcode is given")
 
     velocity, _, accel = args.extrude_only.partition(",")
     base = PrinterConfig.load(args.config).with_extrude_only_caps(
@@ -653,8 +694,6 @@ def main() -> None:
             variant = base.copy()
             variant.set_param(sweep_name, value)
             variants.append((value, variant))
-    bead = tuple(float(v) for v in args.bead.split(","))
-    speeds = [float(v) for v in args.speeds.split(",")]
 
     jobs = []
     for label, variant in variants:

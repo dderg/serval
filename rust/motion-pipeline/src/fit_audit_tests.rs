@@ -256,6 +256,9 @@ impl TrackSignal for PinnedParabola {
 
 const PINNED_SPAN_S: f64 = 1e-3;
 const FOLLOWER_POSITION_TOL_MM: f64 = 1e-4;
+const UNLIMITED_POSITION_EQUIVALENT: AccelBudget = AccelBudget::PositionEquivalent {
+    accel_limit_mm_s2: f64::INFINITY,
+};
 
 fn audit_flat_piece<S: TrackSignal>(
     sig: &S,
@@ -306,7 +309,7 @@ fn a_follower_piece_bending_within_its_position_budget_holds_a_position_equivale
         bend > 50.0,
         "the bend must break the absolute 50 mm/s² budget"
     );
-    let violations = audit_flat_piece_over_pinned_parabola(bend, AccelBudget::PositionEquivalent);
+    let violations = audit_flat_piece_over_pinned_parabola(bend, UNLIMITED_POSITION_EQUIVALENT);
     assert!(violations.is_empty(), "{violations:?}");
     let absolute = audit_flat_piece_over_pinned_parabola(bend, AccelBudget::Absolute);
     let [absolute] = absolute.as_slice() else {
@@ -318,7 +321,7 @@ fn a_follower_piece_bending_within_its_position_budget_holds_a_position_equivale
 #[test]
 fn a_follower_piece_bending_past_its_position_budget_breaks_a_position_equivalent_tolerance() {
     let bend = 2.0 * position_equivalent_acceleration();
-    let violations = audit_flat_piece_over_pinned_parabola(bend, AccelBudget::PositionEquivalent);
+    let violations = audit_flat_piece_over_pinned_parabola(bend, UNLIMITED_POSITION_EQUIVALENT);
     let [violation] = violations.as_slice() else {
         panic!("a bend of twice the position-equivalent acceleration must be a violation");
     };
@@ -400,7 +403,7 @@ fn counted_pinned_parabola(bend_mm_s2: f64) -> Counted<PinnedParabola> {
 fn a_piece_with_exact_polynomials_reads_the_evaluator_once_per_sub_interval() {
     let sig = counted_pinned_parabola(0.5 * position_equivalent_acceleration());
     let exact = exact_pinned_parabola(&sig.signal, &[0.3 * PINNED_SPAN_S, 0.7 * PINNED_SPAN_S]);
-    let violations = audit_flat_piece(&sig, AccelBudget::PositionEquivalent, Some(&exact));
+    let violations = audit_flat_piece(&sig, UNLIMITED_POSITION_EQUIVALENT, Some(&exact));
     assert!(violations.is_empty(), "{violations:?}");
     assert_eq!(sig.evaluations.get(), 3);
 }
@@ -409,7 +412,7 @@ fn a_piece_with_exact_polynomials_reads_the_evaluator_once_per_sub_interval() {
 fn a_violation_is_measured_off_the_exact_polynomials() {
     let sig = counted_pinned_parabola(2.0 * position_equivalent_acceleration());
     let exact = exact_pinned_parabola(&sig.signal, &[0.5 * PINNED_SPAN_S]);
-    let violations = audit_flat_piece(&sig, AccelBudget::PositionEquivalent, Some(&exact));
+    let violations = audit_flat_piece(&sig, UNLIMITED_POSITION_EQUIVALENT, Some(&exact));
     let [violation] = violations.as_slice() else {
         panic!("a bend of twice the position-equivalent acceleration must be a violation");
     };
@@ -428,5 +431,5 @@ fn exact_polynomials_the_evaluator_disagrees_with_fail_the_audit() {
         bend_mm_s2: sig.signal.bend_mm_s2 * (1.0 + 1e-4),
     };
     let exact = exact_pinned_parabola(&disagreeing, &[]);
-    audit_flat_piece(&sig, AccelBudget::PositionEquivalent, Some(&exact));
+    audit_flat_piece(&sig, UNLIMITED_POSITION_EQUIVALENT, Some(&exact));
 }

@@ -6,7 +6,9 @@ use super::{
 const POSITION_EQUIVALENT: FitTol = FitTol {
     pos_mm: 1e-4,
     accel_mm_s2: 50.0,
-    accel_budget: AccelBudget::PositionEquivalent,
+    accel_budget: AccelBudget::PositionEquivalent {
+        accel_limit_mm_s2: f64::INFINITY,
+    },
 };
 
 #[test]

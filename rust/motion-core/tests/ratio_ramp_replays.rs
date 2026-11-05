@@ -107,3 +107,14 @@ fn a_ratio_ramp_plans_the_first_layers_of_a_print() {
         &print_head("voron_first_layers.gcode", "", 2486),
     );
 }
+
+/// The sim's print test: a 20 000 mm/s² extruder holds its kernel-free
+/// advance's fit to its limit only where a span can still split; a sliver
+/// at the resolution floor keeps the budget its fit resolved for it.
+#[test]
+fn a_kernel_free_advance_plans_the_first_layers_of_the_sim_print() {
+    replays_to_the_end(
+        "neptune_sim_print.cfg",
+        &print_head("voron_first_layers.gcode", "", 4499),
+    );
+}

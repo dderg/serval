@@ -853,7 +853,9 @@ fn fit_pressure_wave(fit_tol: FitTol) -> nurbs::ScalarNurbs {
 fn a_position_equivalent_budget_fits_a_pressure_wave_in_fewer_pieces_within_each_piece_budget() {
     let absolute = FitTol::absolute(1e-4, 50.0);
     let position_equivalent = FitTol {
-        accel_budget: AccelBudget::PositionEquivalent,
+        accel_budget: AccelBudget::PositionEquivalent {
+            accel_limit_mm_s2: f64::INFINITY,
+        },
         ..absolute
     };
     let absolute_pieces = nurbs::bezier::extract_bezier_pieces(&fit_pressure_wave(absolute));
@@ -886,6 +888,137 @@ fn a_position_equivalent_budget_fits_a_pressure_wave_in_fewer_pieces_within_each
                 piece.u_end,
                 acceleration.evaluate(t) - truth_acceleration,
                 budget.accel_mm_s2
+            );
+        }
+    }
+}
+
+/// A linear advance releasing its lead over a ratio ramp from a flow of
+/// `flow` mm/s to none at a steady path speed, the ramp `ramp_s` long from
+/// `at`: `ė = flow·(1 − S(u)) − k·flow·S′(u)/τ` with the smoothstep
+/// `S(u) = 3u² − 2u³`. Its acceleration steps from zero to
+/// `−6·k·flow/τ²` as the ramp opens, its peak.
+struct AdvanceReleasedOverARamp {
+    at: f64,
+    ramp_s: f64,
+    flow: f64,
+    advance_s: f64,
+}
+
+impl AdvanceReleasedOverARamp {
+    /// The position's coefficients in the time since `at` over the ramp.
+    fn ramp_coefficients(&self) -> [f64; 5] {
+        let (flow, k, tau) = (self.flow, self.advance_s, self.ramp_s);
+        [
+            0.0,
+            flow,
+            -3.0 * k * flow / (tau * tau),
+            -flow / (tau * tau) + 2.0 * k * flow / (tau * tau * tau),
+            flow / (2.0 * tau * tau * tau),
+        ]
+    }
+
+    fn rest_position(&self) -> f64 {
+        0.5 * self.flow * self.ramp_s - self.advance_s * self.flow
+    }
+
+    fn peak_acceleration(&self) -> f64 {
+        6.0 * self.advance_s * self.flow / (self.ramp_s * self.ramp_s)
+    }
+}
+
+impl TrackSignal for AdvanceReleasedOverARamp {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let tau = t - self.at;
+        if tau < 0.0 {
+            return (self.flow * tau, self.flow, 0.0);
+        }
+        if tau >= self.ramp_s {
+            return (self.rest_position(), 0.0, 0.0);
+        }
+        let c = self.ramp_coefficients();
+        (
+            (((c[4] * tau + c[3]) * tau + c[2]) * tau + c[1]) * tau,
+            ((4.0 * c[4] * tau + 3.0 * c[3]) * tau + 2.0 * c[2]) * tau + c[1],
+            (12.0 * c[4] * tau + 6.0 * c[3]) * tau + 2.0 * c[2],
+        )
+    }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
+        let rest = self.at + self.ramp_s;
+        test_signals::modelled((lo, hi), accuracy, &[self.at, rest], |window| {
+            if window.center < self.at {
+                test_signals::polynomial(window, self.at, &[0.0, self.flow])
+            } else if window.center < rest {
+                test_signals::polynomial(window, self.at, &self.ramp_coefficients())
+            } else {
+                test_signals::polynomial(window, rest, &[self.rest_position()])
+            }
+        })
+    }
+}
+
+/// The extruder's own acceleration limit bounds the position-equivalent
+/// budget: where it would carry a piece past the limit plus
+/// `max_accel_deviation`, the piece is held to the absolute budget, so a
+/// ramp planned up to the limit stays within that. A 150 mm/s line of a
+/// 0.4 x 0.2 mm bead turning to travel on a 20 000 mm/s² extruder with
+/// `k = 0.02` left a cubic 72 mm/s² over its limit.
+#[test]
+fn a_position_equivalent_budget_keeps_a_fit_within_the_followers_limit() {
+    const POINTS: u32 = 256;
+    let (flow, advance_s, limit): (f64, f64, f64) = (4.989_022_5, 0.02, 20_000.0);
+    let ramp = AdvanceReleasedOverARamp {
+        at: 0.785_96,
+        ramp_s: (6.0 * advance_s * flow / limit).sqrt(),
+        flow,
+        advance_s,
+    };
+    assert!((ramp.peak_acceleration() - limit).abs() <= 1e-9 * limit);
+    let absolute = FitTol::absolute(8.3e-5, 50.0);
+    let limited = FitTol {
+        accel_budget: AccelBudget::PositionEquivalent {
+            accel_limit_mm_s2: limit,
+        },
+        ..absolute
+    };
+    let (t_start, t_end) = (0.7825, 0.795);
+    let rest = ramp.at + ramp.ramp_s;
+    let track = fit_axis_from_signal(
+        AxisFit {
+            axis: 3,
+            t_start,
+            t_end,
+            seed_breakpoints: &[
+                t_start,
+                0.785,
+                ramp.at,
+                0.7875,
+                ramp.at + 0.5 * ramp.ramp_s,
+                0.79,
+                rest,
+                0.7925,
+                t_end,
+            ],
+            fit_tol: limited,
+            fit_context: "advance released over a ramp",
+            seam_continuity: crate::lowering::SeamContinuity::Velocity,
+        },
+        &ramp,
+    )
+    .expect("the ramp fits");
+    let ceiling = limit + absolute.accel_mm_s2;
+    for piece in nurbs::bezier::extract_bezier_pieces(&track) {
+        let h = piece.u_end - piece.u_start;
+        let acceleration = piece.differentiate().differentiate();
+        for k in 0..=POINTS {
+            let t = piece.u_start + h * f64::from(k) / f64::from(POINTS);
+            assert!(
+                acceleration.evaluate(t).abs() <= ceiling,
+                "piece [{}, {}] reaches {} mm/s² at {t}, past the {ceiling} mm/s² ceiling",
+                piece.u_start,
+                piece.u_end,
+                acceleration.evaluate(t)
             );
         }
     }

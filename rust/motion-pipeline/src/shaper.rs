@@ -14,7 +14,7 @@ use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
     AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget,
     LadderFailure, LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth, SeamContinuity,
-    VelocitySign, exact_piece, held_miss, ladder_fit, quintic_in_u,
+    VelocitySign, acceleration_bound, exact_piece, held_miss, ladder_fit, quintic_in_u,
 };
 use crate::types::{BaseItem, Control, PostProcessError, TrajectoryItem};
 use crate::worker_pool::WorkerPool;
@@ -4318,6 +4318,11 @@ fn span_probe_t(t0: f64, t1: f64, u: f64) -> f64 {
 /// [`PostProcessError::UnprovableSpan`]. Where it has exact polynomials
 /// every truth sample is read off them too, each edge's from the side
 /// facing into the span.
+///
+/// A rung a looser-than-absolute budget accepts on a splittable span is
+/// refit to the absolute budget where its acceleration may pass the
+/// budget's ceiling ([`FitTol::accel_ceiling`]); at the floor no finer
+/// partition could hold it, and the looser budget stands.
 #[allow(clippy::type_complexity)]
 fn shaped_ladder<S: TrackSignal>(
     sig: &S,
@@ -4448,6 +4453,17 @@ fn shaped_ladder<S: TrackSignal>(
         },
     ) {
         Ok(coefficients) => {
+            let splittable = !keeps_closest_rung;
+            if splittable
+                && piece_tol.accel_mm_s2 > fit_tol.accel_mm_s2
+                && acceleration_bound(&coefficients, h) > fit_tol.accel_ceiling()
+            {
+                let absolute = SpanFitPolicy {
+                    fit_tol: fit_tol.absolute_budget(),
+                    ..*policy
+                };
+                return shaped_ladder(sig, exact, span, &absolute, keeps_closest_rung, known_edges);
+            }
             let resolved = (start_past_sliver, end_past_sliver);
             let piece = FittedPiece {
                 mono_u: &coefficients,
