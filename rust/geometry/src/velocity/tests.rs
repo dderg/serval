@@ -594,6 +594,60 @@ fn extrude_only_limits_do_not_affect_spatial_move() {
     );
 }
 
+fn line_move_with_ratio(len: f64, ratio: f64, feed: f64, accel: f64) -> Move {
+    let seg = Segment::Line(Line::try_new([0.0, 0.0, 0.0], [len, 0.0, 0.0]).unwrap());
+    Move {
+        segment: PathSegment::try_new(seg, vec![FollowerDemand::constant(3, ratio)]).unwrap(),
+        feedrate_mm_s: feed,
+        limits: limits(feed, accel),
+        source: src(1),
+    }
+}
+
+fn extrude_only_capped(m: Move, velocity: f64, accel: f64) -> VelocityProfile {
+    plan_velocity_warm_start(
+        &outcome(with_jerk(vec![m], f64::INFINITY), Vec::new()),
+        VelocityPlanParams {
+            max_extrude_only_velocity_mm_s: velocity,
+            max_extrude_only_accel_mm_s2: accel,
+            ..unlimited(0.0)
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn extrude_only_velocity_caps_a_moving_retract_by_its_ratio() {
+    let peak = extrude_only_capped(line_move_with_ratio(10.0, -0.5, 100.0, 1000.0), 5.0, 1e6).moves
+        [0]
+    .peak_v;
+    assert!(
+        (peak - 10.0).abs() < 1e-9,
+        "a retract at ratio 0.5 under a 5 mm/s extrude-only cap peaks at {peak} mm/s, not 10"
+    );
+}
+
+#[test]
+fn extrude_only_accel_caps_a_moving_retract_by_its_ratio() {
+    let peak = extrude_only_capped(line_move_with_ratio(0.5, -0.5, 100.0, 1000.0), 1e6, 10.0).moves
+        [0]
+    .peak_v;
+    let apex = (20.0_f64 * 0.5).sqrt();
+    assert!(
+        (peak - apex).abs() < 1e-6,
+        "a retract at ratio 0.5 under a 10 mm/s² extrude-only cap peaks at {peak} mm/s, not \
+         {apex}"
+    );
+}
+
+#[test]
+fn extrude_only_limits_do_not_cap_an_extruding_move() {
+    let extruding = || line_move_with_ratio(10.0, 0.5, 50.0, 1000.0);
+    let base = extrude_only_capped(extruding(), f64::INFINITY, f64::INFINITY).moves[0].peak_v;
+    let capped = extrude_only_capped(extruding(), 1.0, 1.0).moves[0].peak_v;
+    assert_eq!(base, capped);
+}
+
 #[test]
 fn empty_and_single_move() {
     let empty = plan(&outcome(Vec::new(), Vec::new())).unwrap();

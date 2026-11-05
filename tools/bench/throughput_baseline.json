@@ -1,48 +1,24 @@
 {
   "slice_lines": 1000,
-  "commit": "af804bedb0c1feb46248b5bc190ca7a573794361",
-  "reason": "Digest-identical follower projection savings: one crossing memo per lay, indexed point-mass moments",
+  "commit": "1d6a707475a0e9e3c02f7a3c40f9ab1ae41a50ee",
+  "reason": "CPU-agnostic gate: the reference moves to main after #698 (emit invariance), measured against the pinned calibration commit e6d8aa92b; trident_kernel's floor shortfall re-pinned to #693 at what the new model predicts",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 24850930761,
-      "stream_secs": 6.537,
-      "pi_2core": {
-        "worst_x_reference": 2.782294427119972,
-        "worst_x": [
-          2.62,
-          2.6
-        ],
-        "commit": "18a9048ffe339fb78ff9997f2672e92abee4efb0"
-      }
+      "ir": 25750160891,
+      "stream_secs": 6.537
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 26147640110,
-      "stream_secs": 6.213,
-      "pi_2core": {
-        "worst_x_reference": 2.1257860171643395,
-        "worst_x": [
-          2.02,
-          2.02
-        ],
-        "commit": "18a9048ffe339fb78ff9997f2672e92abee4efb0"
-      }
+      "ir": 27734252201,
+      "stream_secs": 6.213
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 29584533241,
-      "stream_secs": 5.538,
-      "pi_2core": {
-        "worst_x_reference": 1.3967389728830104,
-        "worst_x": [
-          1.37,
-          1.37
-        ],
-        "commit": "18a9048ffe339fb78ff9997f2672e92abee4efb0"
-      }
+      "ir": 31213627919,
+      "stream_secs": 5.538
     }
   },
   "pi_calibration": {
-    "measured_at": "2026-11-04T16:48:30+00:00",
-    "commit": "6aa1cb2757343385a67c2bae4cef824a0b21e368",
+    "measured_at": "2026-11-05T00:17:54+00:00",
+    "commit": "e6d8aa92b91f587b70ca16b1b5eb10cb3b812d2a",
     "variants": [
       {
         "label": "728a1d720",
@@ -70,573 +46,859 @@
         "label": "70ef61704+emit-batch-1",
         "commit": "70ef6170493ddf1376e101ec91b69916ab8c31ae",
         "patch": "tools/bench/pi_calibration/emit-batch-1.patch"
+      },
+      {
+        "label": "a577d8340",
+        "commit": "a577d83405ee131df803c9520e84f0a7c483b8a2"
+      },
+      {
+        "label": "6aa1cb275",
+        "commit": "6aa1cb2757343385a67c2bae4cef824a0b21e368"
       }
     ],
     "configs": {
       "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
         "ir": {
-          "factor": 0.9735239983472155,
-          "intercept": 22.364856397516782,
-          "max_residual_pct": 1.98,
-          "max_loo_residual_pct": 4.19,
+          "factor": 0.9565143975750231,
+          "intercept": 21.999936274275992,
+          "max_residual_pct": 2.0,
+          "max_loo_residual_pct": 2.04,
           "residual_pct": {
-            "70ef61704+emit-batch-1": 0.24,
-            "70ef61704+emit-batch-8": -1.98,
-            "70ef61704+seed-selection-reverted": -0.7,
-            "728a1d720": -1.88,
-            "8d567d184": 1.93,
-            "c73bd41d5": 0.97
+            "6aa1cb275": 0.07,
+            "70ef61704+emit-batch-1": 0.06,
+            "70ef61704+emit-batch-8": -0.85,
+            "70ef61704+seed-selection-reverted": -0.87,
+            "728a1d720": -0.24,
+            "8d567d184": 2.0,
+            "a577d8340": 0.56,
+            "c73bd41d5": 1.77
           },
           "loo_residual_pct": {
-            "70ef61704+emit-batch-1": 0.24,
-            "70ef61704+emit-batch-8": -1.98,
-            "70ef61704+seed-selection-reverted": -0.7,
-            "728a1d720": -4.19,
-            "8d567d184": 2.49,
-            "c73bd41d5": 1.24
+            "6aa1cb275": 0.09,
+            "70ef61704+emit-batch-1": 0.08,
+            "70ef61704+emit-batch-8": -1.08,
+            "70ef61704+seed-selection-reverted": -1.09,
+            "728a1d720": -0.24,
+            "8d567d184": 2.04,
+            "a577d8340": 0.65,
+            "c73bd41d5": 1.8
           }
         },
         "live": {
-          "AMD EPYC 7763 64-Core Processor": {
-            "jobs": 32,
-            "factor": 0.9382946234025337,
-            "intercept": 1.249939308411579,
-            "max_residual_pct": 5.4,
-            "max_loo_residual_pct": 11.83,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": 0.2,
-              "70ef61704+emit-batch-8": 4.85,
-              "70ef61704+seed-selection-reverted": -1.02,
-              "728a1d720": -4.73,
-              "8d567d184": 5.4,
-              "c73bd41d5": 4.87
+          "factor": 0.897072486099747,
+          "intercept": 0.8628899551470398,
+          "max_residual_pct": 14.28,
+          "max_loo_residual_pct": 14.36,
+          "max_cpu_out_residual_pct": 14.15,
+          "by_cpu": {
+            "AMD EPYC 7763 64-Core Processor": {
+              "jobs": 20,
+              "max_residual_pct": 8.53,
+              "max_loo_residual_pct": 9.43,
+              "max_cpu_out_residual_pct": 8.93,
+              "residual_pct": {
+                "6aa1cb275": -5.67,
+                "70ef61704+emit-batch-1": -5.66,
+                "70ef61704+emit-batch-8": -0.57,
+                "70ef61704+seed-selection-reverted": -6.84,
+                "728a1d720": -7.19,
+                "8d567d184": 0.52,
+                "a577d8340": -8.53,
+                "c73bd41d5": 0.69
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": -5.79,
+                "70ef61704+emit-batch-1": -5.71,
+                "70ef61704+emit-batch-8": 0.3,
+                "70ef61704+seed-selection-reverted": -7.15,
+                "728a1d720": -7.24,
+                "8d567d184": 0.63,
+                "a577d8340": -9.43,
+                "c73bd41d5": 0.82
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": -6.19,
+                "70ef61704+emit-batch-1": -6.18,
+                "70ef61704+emit-batch-8": -1.21,
+                "70ef61704+seed-selection-reverted": -7.34,
+                "728a1d720": -7.06,
+                "8d567d184": 0.35,
+                "a577d8340": -8.93,
+                "c73bd41d5": 0.52
+              }
             },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": 0.2,
-              "70ef61704+emit-batch-8": 4.91,
-              "70ef61704+seed-selection-reverted": -1.02,
-              "728a1d720": -11.83,
-              "8d567d184": 6.68,
-              "c73bd41d5": 6.01
+            "AMD EPYC 9V45 96-Core Processor": {
+              "jobs": 9,
+              "max_residual_pct": 9.72,
+              "max_loo_residual_pct": 10.58,
+              "max_cpu_out_residual_pct": 10.04,
+              "residual_pct": {
+                "6aa1cb275": -5.19,
+                "70ef61704+emit-batch-1": -4.6,
+                "70ef61704+emit-batch-8": 1.06,
+                "70ef61704+seed-selection-reverted": -5.98,
+                "728a1d720": -6.05,
+                "8d567d184": 1.47,
+                "a577d8340": -9.72,
+                "c73bd41d5": 1.57
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": -5.3,
+                "70ef61704+emit-batch-1": -4.64,
+                "70ef61704+emit-batch-8": 1.97,
+                "70ef61704+seed-selection-reverted": -6.3,
+                "728a1d720": -6.1,
+                "8d567d184": 1.6,
+                "a577d8340": -10.58,
+                "c73bd41d5": 1.7
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": -5.63,
+                "70ef61704+emit-batch-1": -5.05,
+                "70ef61704+emit-batch-8": 0.49,
+                "70ef61704+seed-selection-reverted": -6.42,
+                "728a1d720": -5.94,
+                "8d567d184": 1.32,
+                "a577d8340": -10.04,
+                "c73bd41d5": 1.41
+              }
+            },
+            "AMD EPYC 9V74 80-Core Processor": {
+              "jobs": 19,
+              "max_residual_pct": 8.55,
+              "max_loo_residual_pct": 9.45,
+              "max_cpu_out_residual_pct": 8.9,
+              "residual_pct": {
+                "6aa1cb275": -4.82,
+                "70ef61704+emit-batch-1": -4.65,
+                "70ef61704+emit-batch-8": -0.22,
+                "70ef61704+seed-selection-reverted": -6.19,
+                "728a1d720": -7.28,
+                "8d567d184": 1.17,
+                "a577d8340": -8.55,
+                "c73bd41d5": 1.55
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": -4.94,
+                "70ef61704+emit-batch-1": -4.7,
+                "70ef61704+emit-batch-8": 0.67,
+                "70ef61704+seed-selection-reverted": -6.5,
+                "728a1d720": -7.33,
+                "8d567d184": 1.29,
+                "a577d8340": -9.45,
+                "c73bd41d5": 1.68
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": -5.28,
+                "70ef61704+emit-batch-1": -5.11,
+                "70ef61704+emit-batch-8": -0.77,
+                "70ef61704+seed-selection-reverted": -6.63,
+                "728a1d720": -7.16,
+                "8d567d184": 1.01,
+                "a577d8340": -8.9,
+                "c73bd41d5": 1.39
+              }
+            },
+            "AMD Ryzen 7 7800X3D 8-Core Processor": {
+              "jobs": 1,
+              "max_residual_pct": 14.28,
+              "max_loo_residual_pct": 14.36,
+              "max_cpu_out_residual_pct": 14.15,
+              "residual_pct": {
+                "6aa1cb275": -4.51,
+                "70ef61704+emit-batch-1": -4.45,
+                "70ef61704+emit-batch-8": 0.36,
+                "70ef61704+seed-selection-reverted": -6.1,
+                "728a1d720": -14.28,
+                "8d567d184": 0.02,
+                "a577d8340": -9.35,
+                "c73bd41d5": 1.64
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": -4.63,
+                "70ef61704+emit-batch-1": -4.49,
+                "70ef61704+emit-batch-8": 1.26,
+                "70ef61704+seed-selection-reverted": -6.42,
+                "728a1d720": -14.36,
+                "8d567d184": 0.13,
+                "a577d8340": -10.22,
+                "c73bd41d5": 1.77
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": -4.86,
+                "70ef61704+emit-batch-1": -4.8,
+                "70ef61704+emit-batch-8": -0.07,
+                "70ef61704+seed-selection-reverted": -6.45,
+                "728a1d720": -14.15,
+                "8d567d184": -0.09,
+                "a577d8340": -9.6,
+                "c73bd41d5": 1.52
+              }
+            },
+            "INTEL(R) XEON(R) PLATINUM 8573C": {
+              "jobs": 3,
+              "max_residual_pct": 8.1,
+              "max_loo_residual_pct": 8.54,
+              "max_cpu_out_residual_pct": 8.29,
+              "residual_pct": {
+                "6aa1cb275": 3.02,
+                "70ef61704+emit-batch-1": 3.14,
+                "70ef61704+emit-batch-8": 5.31,
+                "70ef61704+seed-selection-reverted": 2.14,
+                "728a1d720": 1.94,
+                "8d567d184": 8.1,
+                "a577d8340": -7.61,
+                "c73bd41d5": 7.81
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": 2.87,
+                "70ef61704+emit-batch-1": 3.08,
+                "70ef61704+emit-batch-8": 6.32,
+                "70ef61704+seed-selection-reverted": 1.74,
+                "728a1d720": 1.92,
+                "8d567d184": 8.28,
+                "a577d8340": -8.54,
+                "c73bd41d5": 7.99
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": 3.49,
+                "70ef61704+emit-batch-1": 3.61,
+                "70ef61704+emit-batch-8": 5.83,
+                "70ef61704+seed-selection-reverted": 2.61,
+                "728a1d720": 1.91,
+                "8d567d184": 8.29,
+                "a577d8340": -7.32,
+                "c73bd41d5": 7.99
+              }
+            },
+            "Intel(R) Xeon(R) 6973P-C": {
+              "jobs": 1,
+              "max_residual_pct": 11.97,
+              "max_loo_residual_pct": 12.19,
+              "max_cpu_out_residual_pct": 12.42,
+              "residual_pct": {
+                "6aa1cb275": 4.72,
+                "70ef61704+emit-batch-1": 5.69,
+                "70ef61704+emit-batch-8": 7.24,
+                "70ef61704+seed-selection-reverted": 4.93,
+                "728a1d720": 3.58,
+                "8d567d184": 11.97,
+                "a577d8340": -6.98,
+                "c73bd41d5": 11.07
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": 4.57,
+                "70ef61704+emit-batch-1": 5.63,
+                "70ef61704+emit-batch-8": 8.3,
+                "70ef61704+seed-selection-reverted": 4.5,
+                "728a1d720": 3.57,
+                "8d567d184": 12.19,
+                "a577d8340": -7.93,
+                "c73bd41d5": 11.29
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": 5.7,
+                "70ef61704+emit-batch-1": 6.69,
+                "70ef61704+emit-batch-8": 8.34,
+                "70ef61704+seed-selection-reverted": 5.92,
+                "728a1d720": 3.54,
+                "8d567d184": 12.42,
+                "a577d8340": -6.39,
+                "c73bd41d5": 11.5
+              }
+            },
+            "Intel(R) Xeon(R) 6975P-C": {
+              "jobs": 4,
+              "max_residual_pct": 12.87,
+              "max_loo_residual_pct": 13.1,
+              "max_cpu_out_residual_pct": 13.41,
+              "residual_pct": {
+                "6aa1cb275": 6.67,
+                "70ef61704+emit-batch-1": 7.31,
+                "70ef61704+emit-batch-8": 7.53,
+                "70ef61704+seed-selection-reverted": 5.18,
+                "728a1d720": 2.08,
+                "8d567d184": 12.09,
+                "a577d8340": -9.04,
+                "c73bd41d5": 12.87
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": 6.51,
+                "70ef61704+emit-batch-1": 7.25,
+                "70ef61704+emit-batch-8": 8.6,
+                "70ef61704+seed-selection-reverted": 4.75,
+                "728a1d720": 2.06,
+                "8d567d184": 12.31,
+                "a577d8340": -9.92,
+                "c73bd41d5": 13.1
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": 7.86,
+                "70ef61704+emit-batch-1": 8.52,
+                "70ef61704+emit-batch-8": 8.81,
+                "70ef61704+seed-selection-reverted": 6.34,
+                "728a1d720": 2.01,
+                "8d567d184": 12.62,
+                "a577d8340": -8.41,
+                "c73bd41d5": 13.41
+              }
+            },
+            "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": {
+              "jobs": 4,
+              "max_residual_pct": 6.77,
+              "max_loo_residual_pct": 7.72,
+              "max_cpu_out_residual_pct": 6.86,
+              "residual_pct": {
+                "6aa1cb275": -0.78,
+                "70ef61704+emit-batch-1": -0.77,
+                "70ef61704+emit-batch-8": 1.2,
+                "70ef61704+seed-selection-reverted": -1.65,
+                "728a1d720": 2.28,
+                "8d567d184": 4.32,
+                "a577d8340": -6.77,
+                "c73bd41d5": 4.25
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": -0.92,
+                "70ef61704+emit-batch-1": -0.82,
+                "70ef61704+emit-batch-8": 2.12,
+                "70ef61704+seed-selection-reverted": -2.01,
+                "728a1d720": 2.27,
+                "8d567d184": 4.47,
+                "a577d8340": -7.72,
+                "c73bd41d5": 4.4
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": -0.91,
+                "70ef61704+emit-batch-1": -0.89,
+                "70ef61704+emit-batch-8": 1.06,
+                "70ef61704+seed-selection-reverted": -1.77,
+                "728a1d720": 2.29,
+                "8d567d184": 4.28,
+                "a577d8340": -6.86,
+                "c73bd41d5": 4.21
+              }
             }
           },
-          "AMD EPYC 9V45 96-Core Processor": {
-            "jobs": 18,
-            "factor": 0.943911812261039,
-            "intercept": 1.2503016189540508,
-            "max_residual_pct": 5.45,
-            "max_loo_residual_pct": 11.99,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": -0.27,
-              "70ef61704+emit-batch-8": 5.16,
-              "70ef61704+seed-selection-reverted": -0.8,
-              "728a1d720": -4.78,
-              "8d567d184": 5.45,
-              "c73bd41d5": 5.08
-            },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": -0.27,
-              "70ef61704+emit-batch-8": 5.23,
-              "70ef61704+seed-selection-reverted": -0.8,
-              "728a1d720": -11.99,
-              "8d567d184": 6.75,
-              "c73bd41d5": 6.26
-            }
+          "pi_cost": 0.3691790455899036,
+          "speed_x": {
+            "min": 0.8273266528387883,
+            "max": 1.9243877405150436
           },
-          "AMD EPYC 9V74 80-Core Processor": {
-            "jobs": 19,
-            "factor": 0.927357383270596,
-            "intercept": 1.2477938520965204,
-            "max_residual_pct": 5.68,
-            "max_loo_residual_pct": 13.01,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": -0.12,
-              "70ef61704+emit-batch-8": 3.68,
-              "70ef61704+seed-selection-reverted": -1.17,
-              "728a1d720": -5.13,
-              "8d567d184": 5.68,
-              "c73bd41d5": 5.1
-            },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": -0.12,
-              "70ef61704+emit-batch-8": 3.72,
-              "70ef61704+seed-selection-reverted": -1.17,
-              "728a1d720": -13.01,
-              "8d567d184": 7.02,
-              "c73bd41d5": 6.29
-            }
-          },
-          "AMD Ryzen 7 7800X3D 8-Core Processor": {
-            "jobs": 1,
-            "factor": 0.8489385176391773,
-            "intercept": 1.2511815694823318,
-            "max_residual_pct": 8.51,
-            "max_loo_residual_pct": 19.55,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": -0.2,
-              "70ef61704+emit-batch-8": 3.45,
-              "70ef61704+seed-selection-reverted": -1.56,
-              "728a1d720": -6.99,
-              "8d567d184": 7.68,
-              "c73bd41d5": 8.51
-            },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": -0.2,
-              "70ef61704+emit-batch-8": 3.49,
-              "70ef61704+seed-selection-reverted": -1.56,
-              "728a1d720": -19.55,
-              "8d567d184": 9.31,
-              "c73bd41d5": 10.15
-            }
-          },
-          "INTEL(R) XEON(R) PLATINUM 8573C": {
-            "jobs": 5,
-            "factor": 0.9284217813072969,
-            "intercept": 1.242453434816706,
-            "max_residual_pct": 4.15,
-            "max_loo_residual_pct": 9.21,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": 0.08,
-              "70ef61704+emit-batch-8": 1.37,
-              "70ef61704+seed-selection-reverted": -0.66,
-              "728a1d720": -3.85,
-              "8d567d184": 4.15,
-              "c73bd41d5": 2.95
-            },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": 0.08,
-              "70ef61704+emit-batch-8": 1.38,
-              "70ef61704+seed-selection-reverted": -0.66,
-              "728a1d720": -9.21,
-              "8d567d184": 5.21,
-              "c73bd41d5": 3.71
-            }
-          },
-          "Intel(R) Xeon(R) 6973P-C": {
-            "jobs": 2,
-            "factor": 0.8971442369799685,
-            "intercept": 1.237891723694241,
-            "max_residual_pct": 4.72,
-            "max_loo_residual_pct": 11.22,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": -0.81,
-              "70ef61704+emit-batch-8": -0.46,
-              "70ef61704+seed-selection-reverted": -1.67,
-              "728a1d720": -4.55,
-              "8d567d184": 4.72,
-              "c73bd41d5": 3.71
-            },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": -0.81,
-              "70ef61704+emit-batch-8": -0.46,
-              "70ef61704+seed-selection-reverted": -1.67,
-              "728a1d720": -11.22,
-              "8d567d184": 5.88,
-              "c73bd41d5": 4.64
-            }
-          },
-          "Intel(R) Xeon(R) 6975P-C": {
-            "jobs": 4,
-            "factor": 0.8829748330477171,
-            "intercept": 1.240902465681644,
-            "max_residual_pct": 5.88,
-            "max_loo_residual_pct": 14.65,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": 0.17,
-              "70ef61704+emit-batch-8": -1.58,
-              "70ef61704+seed-selection-reverted": -0.68,
-              "728a1d720": -5.66,
-              "8d567d184": 5.88,
-              "c73bd41d5": 5.1
-            },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": 0.17,
-              "70ef61704+emit-batch-8": -1.59,
-              "70ef61704+seed-selection-reverted": -0.68,
-              "728a1d720": -14.65,
-              "8d567d184": 7.24,
-              "c73bd41d5": 6.27
-            }
-          },
-          "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": {
-            "jobs": 7,
-            "factor": 0.9685098739489041,
-            "intercept": 1.2410600504270382,
-            "max_residual_pct": 2.7,
-            "max_loo_residual_pct": 5.78,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": 0.32,
-              "70ef61704+emit-batch-8": 1.4,
-              "70ef61704+seed-selection-reverted": -0.7,
-              "728a1d720": -2.53,
-              "8d567d184": 2.7,
-              "c73bd41d5": 1.76
-            },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": 0.32,
-              "70ef61704+emit-batch-8": 1.41,
-              "70ef61704+seed-selection-reverted": -0.7,
-              "728a1d720": -5.78,
-              "8d567d184": 3.44,
-              "c73bd41d5": 2.25
-            }
-          }
+          "max_calibration_spread_pct": 2.732499334181848
         },
         "points": {
           "728a1d720": {
             "pi_worst_x": [
-              2.24,
-              2.25
+              2.23,
+              2.24
             ],
-            "ir": 27831400529,
+            "ir": 27830681009,
             "stream_secs": 6.588,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": 0.52431,
-              "AMD EPYC 9V45 96-Core Processor": 0.52214,
-              "AMD EPYC 9V74 80-Core Processor": 0.53264,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.60924,
-              "INTEL(R) XEON(R) PLATINUM 8573C": 0.51184,
-              "Intel(R) Xeon(R) 6973P-C": 0.53282,
-              "Intel(R) Xeon(R) 6975P-C": 0.55798,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.47521
+              "AMD EPYC 7763 64-Core Processor": 0.15105,
+              "AMD EPYC 9V45 96-Core Processor": 0.13739,
+              "AMD EPYC 9V74 80-Core Processor": 0.15212,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.23967,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.04646,
+              "Intel(R) Xeon(R) 6973P-C": 0.02864,
+              "Intel(R) Xeon(R) 6975P-C": 0.04497,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.04272
             }
           },
           "c73bd41d5": {
             "pi_worst_x": [
               2.77,
-              2.77
+              2.78
             ],
-            "ir": 21748685254,
+            "ir": 21748226642,
             "stream_secs": 6.594,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": 0.19559,
-              "AMD EPYC 9V45 96-Core Processor": 0.19271,
-              "AMD EPYC 9V74 80-Core Processor": 0.1932,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.17744,
-              "INTEL(R) XEON(R) PLATINUM 8573C": 0.20957,
-              "Intel(R) Xeon(R) 6973P-C": 0.2035,
-              "Intel(R) Xeon(R) 6975P-C": 0.19519,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.2114
+              "AMD EPYC 7763 64-Core Processor": -0.18156,
+              "AMD EPYC 9V45 96-Core Processor": -0.1912,
+              "AMD EPYC 9V74 80-Core Processor": -0.19099,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.192,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.25766,
+              "Intel(R) Xeon(R) 6973P-C": -0.29092,
+              "Intel(R) Xeon(R) 6975P-C": -0.30882,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.22028
             }
           },
           "8d567d184": {
             "pi_worst_x": [
-              2.75,
-              2.76
+              2.78,
+              2.77
             ],
-            "ir": 21697597950,
+            "ir": 21696374428,
             "stream_secs": 6.594,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": 0.198,
-              "AMD EPYC 9V45 96-Core Processor": 0.19664,
-              "AMD EPYC 9V74 80-Core Processor": 0.19509,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.19508,
-              "INTEL(R) XEON(R) PLATINUM 8573C": 0.20481,
-              "Intel(R) Xeon(R) 6973P-C": 0.20083,
-              "Intel(R) Xeon(R) 6975P-C": 0.19499,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.20943
+              "AMD EPYC 7763 64-Core Processor": -0.1796,
+              "AMD EPYC 9V45 96-Core Processor": -0.19014,
+              "AMD EPYC 9V74 80-Core Processor": -0.18678,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.17407,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.2607,
+              "Intel(R) Xeon(R) 6973P-C": -0.2999,
+              "Intel(R) Xeon(R) 6975P-C": -0.30112,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.22102
             }
           },
           "70ef61704+seed-selection-reverted": {
             "pi_worst_x": [
-              4.26,
-              4.26
+              4.27,
+              4.27
             ],
-            "ir": 18416461914,
+            "ir": 18417106778,
             "stream_secs": 8.541,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.20153,
-              "AMD EPYC 9V45 96-Core Processor": -0.20233,
-              "AMD EPYC 9V74 80-Core Processor": -0.20456,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.21483,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.21561,
-              "Intel(R) Xeon(R) 6973P-C": -0.2168,
-              "Intel(R) Xeon(R) 6975P-C": -0.22822,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.20776
+              "AMD EPYC 7763 64-Core Processor": -0.57733,
+              "AMD EPYC 9V45 96-Core Processor": -0.58759,
+              "AMD EPYC 9V74 80-Core Processor": -0.58508,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.58607,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.67989,
+              "Intel(R) Xeon(R) 6973P-C": -0.7099,
+              "Intel(R) Xeon(R) 6975P-C": -0.71258,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.63778
             }
           },
           "70ef61704+emit-batch-8": {
             "pi_worst_x": [
               4.44,
-              4.45
+              4.39
             ],
-            "ir": 17886295632,
+            "ir": 17886181712,
             "stream_secs": 8.541,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.30699,
-              "AMD EPYC 9V45 96-Core Processor": -0.30794,
-              "AMD EPYC 9V74 80-Core Processor": -0.30089,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.32209,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.28204,
-              "Intel(R) Xeon(R) 6973P-C": -0.27659,
-              "Intel(R) Xeon(R) 6975P-C": -0.26477,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.27206
+              "AMD EPYC 7763 64-Core Processor": -0.6808,
+              "AMD EPYC 9V45 96-Core Processor": -0.69887,
+              "AMD EPYC 9V74 80-Core Processor": -0.68476,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.69123,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.74479,
+              "Intel(R) Xeon(R) 6973P-C": -0.76509,
+              "Intel(R) Xeon(R) 6975P-C": -0.76811,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.70048
             }
           },
           "70ef61704+emit-batch-1": {
             "pi_worst_x": [
-              4.25,
-              4.22
+              4.23,
+              4.24
             ],
-            "ir": 18417096421,
+            "ir": 18417050562,
             "stream_secs": 8.541,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.20447,
-              "AMD EPYC 9V45 96-Core Processor": -0.19792,
-              "AMD EPYC 9V74 80-Core Processor": -0.20583,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.21983,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.21343,
-              "Intel(R) Xeon(R) 6973P-C": -0.21602,
-              "Intel(R) Xeon(R) 6975P-C": -0.22719,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.20855
+              "AMD EPYC 7763 64-Core Processor": -0.58082,
+              "AMD EPYC 9V45 96-Core Processor": -0.59329,
+              "AMD EPYC 9V74 80-Core Processor": -0.59267,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.59508,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.68024,
+              "Intel(R) Xeon(R) 6973P-C": -0.70752,
+              "Intel(R) Xeon(R) 6975P-C": -0.72445,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.63717
             }
           },
-          "reference": {
+          "a577d8340": {
+            "pi_worst_x": [
+              3.95,
+              3.91
+            ],
+            "ir": 19914644207,
+            "stream_secs": 8.55,
+            "live_log_cost": {
+              "AMD EPYC 7763 64-Core Processor": -0.45868,
+              "AMD EPYC 9V45 96-Core Processor": -0.44407,
+              "AMD EPYC 9V74 80-Core Processor": -0.4584,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.44867,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.46982,
+              "Intel(R) Xeon(R) 6973P-C": -0.4774,
+              "Intel(R) Xeon(R) 6975P-C": -0.45241,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.47997
+            }
+          },
+          "6aa1cb275": {
             "pi_worst_x": [
               4.23,
-              4.26
+              4.27
             ],
-            "ir": 18417109518,
+            "ir": 18416043921,
             "stream_secs": 8.541,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.20491,
-              "AMD EPYC 9V45 96-Core Processor": -0.2033,
-              "AMD EPYC 9V74 80-Core Processor": -0.20964,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.22501,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.21515,
-              "Intel(R) Xeon(R) 6973P-C": -0.22773,
-              "Intel(R) Xeon(R) 6975P-C": -0.22798,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.20768
+              "AMD EPYC 7763 64-Core Processor": -0.58071,
+              "AMD EPYC 9V45 96-Core Processor": -0.58642,
+              "AMD EPYC 9V74 80-Core Processor": -0.59068,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.59437,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.67896,
+              "Intel(R) Xeon(R) 6973P-C": -0.69722,
+              "Intel(R) Xeon(R) 6975P-C": -0.71775,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.63702
+            }
+          },
+          "calibration": {
+            "pi_worst_x": [
+              2.37,
+              2.37
+            ],
+            "ir": 25847225576,
+            "stream_secs": 6.537,
+            "live_log_cost": {
+              "AMD EPYC 7763 64-Core Processor": 0.0,
+              "AMD EPYC 9V45 96-Core Processor": 0.0,
+              "AMD EPYC 9V74 80-Core Processor": 0.0,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.0,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.0,
+              "Intel(R) Xeon(R) 6973P-C": 0.0,
+              "Intel(R) Xeon(R) 6975P-C": 0.0,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.0
             }
           }
         }
       },
       "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
         "ir": {
-          "factor": 1.0555256567879907,
-          "intercept": 24.199097115790693,
-          "max_residual_pct": 7.94,
-          "max_loo_residual_pct": 9.49,
+          "factor": 1.3017346358288537,
+          "intercept": 29.626951569108122,
+          "max_residual_pct": 12.53,
+          "max_loo_residual_pct": 12.76,
           "residual_pct": {
-            "70ef61704+emit-batch-1": 0.43,
-            "70ef61704+emit-batch-8": -5.06,
-            "70ef61704+seed-selection-reverted": 0.49,
-            "728a1d720": -7.94,
-            "8d567d184": 1.32,
-            "c73bd41d5": 1.75
+            "6aa1cb275": -1.99,
+            "70ef61704+emit-batch-1": -1.57,
+            "70ef61704+emit-batch-8": -4.82,
+            "70ef61704+seed-selection-reverted": -4.46,
+            "728a1d720": -12.53,
+            "8d567d184": -3.93,
+            "a577d8340": -0.88,
+            "c73bd41d5": -4.58
           },
           "loo_residual_pct": {
-            "70ef61704+emit-batch-1": 0.43,
-            "70ef61704+emit-batch-8": -5.55,
-            "70ef61704+seed-selection-reverted": 0.58,
-            "728a1d720": -9.49,
-            "8d567d184": 1.65,
-            "c73bd41d5": 2.83
+            "6aa1cb275": -2.28,
+            "70ef61704+emit-batch-1": -1.8,
+            "70ef61704+emit-batch-8": -9.79,
+            "70ef61704+seed-selection-reverted": -4.53,
+            "728a1d720": -12.76,
+            "8d567d184": -4.05,
+            "a577d8340": -0.89,
+            "c73bd41d5": -5.35
           }
         },
         "live": {
-          "AMD EPYC 7763 64-Core Processor": {
-            "jobs": 32,
-            "factor": 1.0268627983532628,
-            "intercept": 0.7944494677094633,
-            "max_residual_pct": 5.92,
-            "max_loo_residual_pct": 10.18,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": 0.37,
-              "70ef61704+emit-batch-8": 5.32,
-              "70ef61704+seed-selection-reverted": 2.91,
-              "728a1d720": -4.99,
-              "8d567d184": 4.25,
-              "c73bd41d5": 5.92
+          "factor": 0.6337390091873989,
+          "intercept": 0.6981347220709843,
+          "max_residual_pct": 13.85,
+          "max_loo_residual_pct": 14.08,
+          "max_cpu_out_residual_pct": 14.57,
+          "by_cpu": {
+            "AMD EPYC 7763 64-Core Processor": {
+              "jobs": 12,
+              "max_residual_pct": 6.41,
+              "max_loo_residual_pct": 9.23,
+              "max_cpu_out_residual_pct": 6.49,
+              "residual_pct": {
+                "6aa1cb275": -4.18,
+                "70ef61704+emit-batch-1": -3.73,
+                "70ef61704+emit-batch-8": -5.85,
+                "70ef61704+seed-selection-reverted": 1.31,
+                "728a1d720": -6.41,
+                "8d567d184": 3.25,
+                "a577d8340": -0.55,
+                "c73bd41d5": 6.2
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": -4.18,
+                "70ef61704+emit-batch-1": -3.69,
+                "70ef61704+emit-batch-8": -9.23,
+                "70ef61704+seed-selection-reverted": 1.38,
+                "728a1d720": -6.45,
+                "8d567d184": 3.33,
+                "a577d8340": -0.55,
+                "c73bd41d5": 6.19
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": -4.4,
+                "70ef61704+emit-batch-1": -3.96,
+                "70ef61704+emit-batch-8": -6.39,
+                "70ef61704+seed-selection-reverted": 1.24,
+                "728a1d720": -6.49,
+                "8d567d184": 3.18,
+                "a577d8340": -0.64,
+                "c73bd41d5": 6.2
+              }
             },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": 0.37,
-              "70ef61704+emit-batch-8": 10.18,
-              "70ef61704+seed-selection-reverted": 3.24,
-              "728a1d720": -5.47,
-              "8d567d184": 4.83,
-              "c73bd41d5": 7.7
+            "AMD EPYC 9V45 96-Core Processor": {
+              "jobs": 9,
+              "max_residual_pct": 7.34,
+              "max_loo_residual_pct": 8.16,
+              "max_cpu_out_residual_pct": 7.31,
+              "residual_pct": {
+                "6aa1cb275": -3.18,
+                "70ef61704+emit-batch-1": -2.54,
+                "70ef61704+emit-batch-8": -4.49,
+                "70ef61704+seed-selection-reverted": 2.25,
+                "728a1d720": -3.68,
+                "8d567d184": 3.85,
+                "a577d8340": -0.46,
+                "c73bd41d5": 7.34
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": -3.18,
+                "70ef61704+emit-batch-1": -2.49,
+                "70ef61704+emit-batch-8": -8.16,
+                "70ef61704+seed-selection-reverted": 2.36,
+                "728a1d720": -3.76,
+                "8d567d184": 3.96,
+                "a577d8340": -0.46,
+                "c73bd41d5": 7.37
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": -3.38,
+                "70ef61704+emit-batch-1": -2.75,
+                "70ef61704+emit-batch-8": -4.94,
+                "70ef61704+seed-selection-reverted": 2.18,
+                "728a1d720": -3.81,
+                "8d567d184": 3.78,
+                "a577d8340": -0.53,
+                "c73bd41d5": 7.31
+              }
+            },
+            "AMD EPYC 9V74 80-Core Processor": {
+              "jobs": 18,
+              "max_residual_pct": 6.92,
+              "max_loo_residual_pct": 8.68,
+              "max_cpu_out_residual_pct": 6.9,
+              "residual_pct": {
+                "6aa1cb275": -3.59,
+                "70ef61704+emit-batch-1": -2.99,
+                "70ef61704+emit-batch-8": -5.15,
+                "70ef61704+seed-selection-reverted": 1.49,
+                "728a1d720": -4.97,
+                "8d567d184": 3.47,
+                "a577d8340": -0.45,
+                "c73bd41d5": 6.92
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": -3.6,
+                "70ef61704+emit-batch-1": -2.94,
+                "70ef61704+emit-batch-8": -8.68,
+                "70ef61704+seed-selection-reverted": 1.57,
+                "728a1d720": -5.03,
+                "8d567d184": 3.56,
+                "a577d8340": -0.45,
+                "c73bd41d5": 6.93
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": -3.81,
+                "70ef61704+emit-batch-1": -3.21,
+                "70ef61704+emit-batch-8": -5.66,
+                "70ef61704+seed-selection-reverted": 1.42,
+                "728a1d720": -5.08,
+                "8d567d184": 3.4,
+                "a577d8340": -0.53,
+                "c73bd41d5": 6.9
+              }
+            },
+            "AMD Ryzen 7 7800X3D 8-Core Processor": {
+              "jobs": 1,
+              "max_residual_pct": 7.29,
+              "max_loo_residual_pct": 7.32,
+              "max_cpu_out_residual_pct": 7.28,
+              "residual_pct": {
+                "6aa1cb275": -2.71,
+                "70ef61704+emit-batch-1": -2.27,
+                "70ef61704+emit-batch-8": -1.75,
+                "70ef61704+seed-selection-reverted": 1.17,
+                "728a1d720": -2.64,
+                "8d567d184": 3.75,
+                "a577d8340": -0.66,
+                "c73bd41d5": 7.29
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": -2.72,
+                "70ef61704+emit-batch-1": -2.22,
+                "70ef61704+emit-batch-8": -6.04,
+                "70ef61704+seed-selection-reverted": 1.24,
+                "728a1d720": -2.73,
+                "8d567d184": 3.85,
+                "a577d8340": -0.65,
+                "c73bd41d5": 7.32
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": -2.85,
+                "70ef61704+emit-batch-1": -2.41,
+                "70ef61704+emit-batch-8": -2.09,
+                "70ef61704+seed-selection-reverted": 1.14,
+                "728a1d720": -2.74,
+                "8d567d184": 3.71,
+                "a577d8340": -0.7,
+                "c73bd41d5": 7.28
+              }
+            },
+            "INTEL(R) XEON(R) PLATINUM 8573C": {
+              "jobs": 3,
+              "max_residual_pct": 10.03,
+              "max_loo_residual_pct": 10.14,
+              "max_cpu_out_residual_pct": 10.05,
+              "residual_pct": {
+                "6aa1cb275": 0.4,
+                "70ef61704+emit-batch-1": 1.03,
+                "70ef61704+emit-batch-8": -3.46,
+                "70ef61704+seed-selection-reverted": 5.94,
+                "728a1d720": -2.56,
+                "8d567d184": 6.99,
+                "a577d8340": 0.39,
+                "c73bd41d5": 10.03
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": 0.39,
+                "70ef61704+emit-batch-1": 1.1,
+                "70ef61704+emit-batch-8": -7.37,
+                "70ef61704+seed-selection-reverted": 6.17,
+                "728a1d720": -2.65,
+                "8d567d184": 7.21,
+                "a577d8340": 0.39,
+                "c73bd41d5": 10.14
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": 0.47,
+                "70ef61704+emit-batch-1": 1.1,
+                "70ef61704+emit-batch-8": -3.34,
+                "70ef61704+seed-selection-reverted": 5.98,
+                "728a1d720": -2.52,
+                "8d567d184": 7.02,
+                "a577d8340": 0.41,
+                "c73bd41d5": 10.05
+              }
+            },
+            "Intel(R) Xeon(R) 6973P-C": {
+              "jobs": 1,
+              "max_residual_pct": 12.02,
+              "max_loo_residual_pct": 12.19,
+              "max_cpu_out_residual_pct": 12.21,
+              "residual_pct": {
+                "6aa1cb275": 2.91,
+                "70ef61704+emit-batch-1": 2.46,
+                "70ef61704+emit-batch-8": -2.49,
+                "70ef61704+seed-selection-reverted": 7.0,
+                "728a1d720": -0.54,
+                "8d567d184": 8.93,
+                "a577d8340": 1.05,
+                "c73bd41d5": 12.02
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": 2.91,
+                "70ef61704+emit-batch-1": 2.55,
+                "70ef61704+emit-batch-8": -6.61,
+                "70ef61704+seed-selection-reverted": 7.26,
+                "728a1d720": -0.67,
+                "8d567d184": 9.23,
+                "a577d8340": 1.05,
+                "c73bd41d5": 12.19
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": 3.44,
+                "70ef61704+emit-batch-1": 2.95,
+                "70ef61704+emit-batch-8": -1.74,
+                "70ef61704+seed-selection-reverted": 7.28,
+                "728a1d720": -0.24,
+                "8d567d184": 9.2,
+                "a577d8340": 1.2,
+                "c73bd41d5": 12.21
+              }
+            },
+            "Intel(R) Xeon(R) 6975P-C": {
+              "jobs": 4,
+              "max_residual_pct": 13.85,
+              "max_loo_residual_pct": 14.08,
+              "max_cpu_out_residual_pct": 14.57,
+              "residual_pct": {
+                "6aa1cb275": 5.33,
+                "70ef61704+emit-batch-1": 5.87,
+                "70ef61704+emit-batch-8": 0.14,
+                "70ef61704+seed-selection-reverted": 9.06,
+                "728a1d720": 2.73,
+                "8d567d184": 10.79,
+                "a577d8340": 0.99,
+                "c73bd41d5": 13.85
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": 5.32,
+                "70ef61704+emit-batch-1": 5.98,
+                "70ef61704+emit-batch-8": -4.58,
+                "70ef61704+seed-selection-reverted": 9.39,
+                "728a1d720": 2.55,
+                "8d567d184": 11.17,
+                "a577d8340": 1.0,
+                "c73bd41d5": 14.08
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": 7.04,
+                "70ef61704+emit-batch-1": 7.6,
+                "70ef61704+emit-batch-8": 2.53,
+                "70ef61704+seed-selection-reverted": 10.04,
+                "728a1d720": 3.9,
+                "8d567d184": 11.74,
+                "a577d8340": 1.41,
+                "c73bd41d5": 14.57
+              }
+            },
+            "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": {
+              "jobs": 1,
+              "max_residual_pct": 7.94,
+              "max_loo_residual_pct": 9.59,
+              "max_cpu_out_residual_pct": 7.9,
+              "residual_pct": {
+                "6aa1cb275": -2.06,
+                "70ef61704+emit-batch-1": -1.08,
+                "70ef61704+emit-batch-8": -6.32,
+                "70ef61704+seed-selection-reverted": 4.21,
+                "728a1d720": -4.29,
+                "8d567d184": 4.96,
+                "a577d8340": -0.21,
+                "c73bd41d5": 7.94
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": -2.06,
+                "70ef61704+emit-batch-1": -1.02,
+                "70ef61704+emit-batch-8": -9.59,
+                "70ef61704+seed-selection-reverted": 4.38,
+                "728a1d720": -4.36,
+                "8d567d184": 5.11,
+                "a577d8340": -0.21,
+                "c73bd41d5": 7.98
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": -2.25,
+                "70ef61704+emit-batch-1": -1.3,
+                "70ef61704+emit-batch-8": -6.67,
+                "70ef61704+seed-selection-reverted": 4.1,
+                "728a1d720": -4.39,
+                "8d567d184": 4.88,
+                "a577d8340": -0.28,
+                "c73bd41d5": 7.9
+              }
             }
           },
-          "AMD EPYC 9V45 96-Core Processor": {
-            "jobs": 18,
-            "factor": 1.0449549171363772,
-            "intercept": 0.7953393991013459,
-            "max_residual_pct": 5.75,
-            "max_loo_residual_pct": 11.02,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": 0.51,
-              "70ef61704+emit-batch-8": 5.75,
-              "70ef61704+seed-selection-reverted": 2.07,
-              "728a1d720": -2.74,
-              "8d567d184": 3.66,
-              "c73bd41d5": 5.0
-            },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": 0.51,
-              "70ef61704+emit-batch-8": 11.02,
-              "70ef61704+seed-selection-reverted": 2.34,
-              "728a1d720": -2.86,
-              "8d567d184": 4.2,
-              "c73bd41d5": 6.68
-            }
+          "pi_cost": 0.46153806617501486,
+          "speed_x": {
+            "min": 0.8691103599388137,
+            "max": 1.8538946511407743
           },
-          "AMD EPYC 9V74 80-Core Processor": {
-            "jobs": 19,
-            "factor": 1.043926297811684,
-            "intercept": 0.7938277709690749,
-            "max_residual_pct": 5.69,
-            "max_loo_residual_pct": 10.39,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": 0.14,
-              "70ef61704+emit-batch-8": 5.47,
-              "70ef61704+seed-selection-reverted": 1.79,
-              "728a1d720": -3.98,
-              "8d567d184": 4.16,
-              "c73bd41d5": 5.69
-            },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": 0.14,
-              "70ef61704+emit-batch-8": 10.39,
-              "70ef61704+seed-selection-reverted": 2.05,
-              "728a1d720": -4.26,
-              "8d567d184": 4.73,
-              "c73bd41d5": 7.42
-            }
-          },
-          "AMD Ryzen 7 7800X3D 8-Core Processor": {
-            "jobs": 1,
-            "factor": 0.8935054697497263,
-            "intercept": 0.8016824998079874,
-            "max_residual_pct": 7.04,
-            "max_loo_residual_pct": 14.86,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": 0.19,
-              "70ef61704+emit-batch-8": 6.72,
-              "70ef61704+seed-selection-reverted": 1.05,
-              "728a1d720": -0.53,
-              "8d567d184": 4.35,
-              "c73bd41d5": 7.04
-            },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": 0.19,
-              "70ef61704+emit-batch-8": 14.86,
-              "70ef61704+seed-selection-reverted": 1.24,
-              "728a1d720": -0.54,
-              "8d567d184": 4.93,
-              "c73bd41d5": 8.75
-            }
-          },
-          "INTEL(R) XEON(R) PLATINUM 8573C": {
-            "jobs": 5,
-            "factor": 1.04516133798159,
-            "intercept": 0.7808537493724951,
-            "max_residual_pct": 6.77,
-            "max_loo_residual_pct": 7.74,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": 0.41,
-              "70ef61704+emit-batch-8": 2.06,
-              "70ef61704+seed-selection-reverted": 2.07,
-              "728a1d720": -6.77,
-              "8d567d184": 2.69,
-              "c73bd41d5": 3.62
-            },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": 0.41,
-              "70ef61704+emit-batch-8": 2.99,
-              "70ef61704+seed-selection-reverted": 2.34,
-              "728a1d720": -7.74,
-              "8d567d184": 3.18,
-              "c73bd41d5": 5.16
-            }
-          },
-          "Intel(R) Xeon(R) 6973P-C": {
-            "jobs": 2,
-            "factor": 1.0890522266199103,
-            "intercept": 0.7741694053954703,
-            "max_residual_pct": 7.66,
-            "max_loo_residual_pct": 9.02,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": 0.66,
-              "70ef61704+emit-batch-8": -0.18,
-              "70ef61704+seed-selection-reverted": 1.11,
-              "728a1d720": -7.66,
-              "8d567d184": 2.29,
-              "c73bd41d5": 3.18
-            },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": 0.66,
-              "70ef61704+emit-batch-8": -0.23,
-              "70ef61704+seed-selection-reverted": 1.29,
-              "728a1d720": -9.02,
-              "8d567d184": 2.75,
-              "c73bd41d5": 4.65
-            }
-          },
-          "Intel(R) Xeon(R) 6975P-C": {
-            "jobs": 4,
-            "factor": 1.0233135015215014,
-            "intercept": 0.7757821108722662,
-            "max_residual_pct": 5.21,
-            "max_loo_residual_pct": 5.7,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": 0.77,
-              "70ef61704+emit-batch-8": 0.77,
-              "70ef61704+seed-selection-reverted": -0.61,
-              "728a1d720": -5.21,
-              "8d567d184": 2.22,
-              "c73bd41d5": 2.41
-            },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": 0.77,
-              "70ef61704+emit-batch-8": 1.02,
-              "70ef61704+seed-selection-reverted": -0.75,
-              "728a1d720": -5.7,
-              "8d567d184": 2.64,
-              "c73bd41d5": 3.6
-            }
-          },
-          "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": {
-            "jobs": 7,
-            "factor": 1.093997100369269,
-            "intercept": 0.7772573999524848,
-            "max_residual_pct": 6.81,
-            "max_loo_residual_pct": 7.79,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": 0.43,
-              "70ef61704+emit-batch-8": 1.01,
-              "70ef61704+seed-selection-reverted": 2.36,
-              "728a1d720": -6.81,
-              "8d567d184": 1.64,
-              "c73bd41d5": 2.88
-            },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": 0.43,
-              "70ef61704+emit-batch-8": 1.38,
-              "70ef61704+seed-selection-reverted": 2.65,
-              "728a1d720": -7.79,
-              "8d567d184": 2.01,
-              "c73bd41d5": 4.25
-            }
-          }
+          "max_calibration_spread_pct": 5.452804830838076
         },
         "points": {
           "728a1d720": {
             "pi_worst_x": [
               2.21,
-              2.22
+              2.21
             ],
-            "ir": 28641344027,
+            "ir": 28641491118,
             "stream_secs": 6.202,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": 0.0513,
-              "AMD EPYC 9V45 96-Core Processor": 0.02881,
-              "AMD EPYC 9V74 80-Core Processor": 0.03973,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.01569,
-              "INTEL(R) XEON(R) PLATINUM 8573C": 0.05545,
-              "Intel(R) Xeon(R) 6973P-C": 0.05593,
-              "Intel(R) Xeon(R) 6975P-C": 0.03551,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.0501
+              "AMD EPYC 7763 64-Core Processor": -0.04516,
+              "AMD EPYC 9V45 96-Core Processor": -0.09053,
+              "AMD EPYC 9V74 80-Core Processor": -0.06927,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.10746,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.10884,
+              "Intel(R) Xeon(R) 6973P-C": -0.14111,
+              "Intel(R) Xeon(R) 6975P-C": -0.19218,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.08043
             }
           },
           "c73bd41d5": {
@@ -644,35 +906,35 @@
               1.89,
               1.89
             ],
-            "ir": 30211292448,
+            "ir": 30211670297,
             "stream_secs": 6.202,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": 0.09771,
-              "AMD EPYC 9V45 96-Core Processor": 0.10528,
-              "AMD EPYC 9V74 80-Core Processor": 0.09764,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.10863,
-              "INTEL(R) XEON(R) PLATINUM 8573C": 0.10401,
-              "Intel(R) Xeon(R) 6973P-C": 0.09759,
-              "Intel(R) Xeon(R) 6975P-C": 0.11273,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.10265
+              "AMD EPYC 7763 64-Core Processor": 0.00227,
+              "AMD EPYC 9V45 96-Core Processor": -0.0146,
+              "AMD EPYC 9V74 80-Core Processor": -0.0084,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.01396,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.05363,
+              "Intel(R) Xeon(R) 6973P-C": -0.08195,
+              "Intel(R) Xeon(R) 6975P-C": -0.10756,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.02336
             }
           },
           "8d567d184": {
             "pi_worst_x": [
               1.99,
-              1.99
+              2.0
             ],
-            "ir": 28885329431,
+            "ir": 28886081386,
             "stream_secs": 6.202,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": 0.06302,
-              "AMD EPYC 9V45 96-Core Processor": 0.06823,
-              "AMD EPYC 9V74 80-Core Processor": 0.06224,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.07946,
-              "INTEL(R) XEON(R) PLATINUM 8573C": 0.06333,
-              "Intel(R) Xeon(R) 6973P-C": 0.05817,
-              "Intel(R) Xeon(R) 6975P-C": 0.06423,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.06656
+              "AMD EPYC 7763 64-Core Processor": -0.0347,
+              "AMD EPYC 9V45 96-Core Processor": -0.04385,
+              "AMD EPYC 9V74 80-Core Processor": -0.03801,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.04233,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.09077,
+              "Intel(R) Xeon(R) 6973P-C": -0.11916,
+              "Intel(R) Xeon(R) 6975P-C": -0.1459,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.06064
             }
           },
           "70ef61704+seed-selection-reverted": {
@@ -680,409 +942,557 @@
               2.04,
               2.03
             ],
-            "ir": 28568353590,
+            "ir": 28568987424,
             "stream_secs": 6.202,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": 0.05624,
-              "AMD EPYC 9V45 96-Core Processor": 0.06399,
-              "AMD EPYC 9V74 80-Core Processor": 0.06518,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.09308,
-              "INTEL(R) XEON(R) PLATINUM 8573C": 0.05009,
-              "Intel(R) Xeon(R) 6973P-C": 0.05059,
-              "Intel(R) Xeon(R) 6975P-C": 0.07219,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.04195
+              "AMD EPYC 7763 64-Core Processor": -0.03616,
+              "AMD EPYC 9V45 96-Core Processor": -0.0508,
+              "AMD EPYC 9V74 80-Core Processor": -0.03892,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.03394,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.10667,
+              "Intel(R) Xeon(R) 6973P-C": -0.12238,
+              "Intel(R) Xeon(R) 6975P-C": -0.15244,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.08069
             }
           },
           "70ef61704+emit-batch-8": {
             "pi_worst_x": [
-              2.62,
-              2.61
+              2.59,
+              2.6
             ],
-            "ir": 23760975634,
+            "ir": 23760977153,
             "stream_secs": 6.202,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.2111,
-              "AMD EPYC 9V45 96-Core Processor": -0.21045,
-              "AMD EPYC 9V74 80-Core Processor": -0.20956,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.24929,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.1903,
-              "Intel(R) Xeon(R) 6973P-C": -0.16843,
-              "Intel(R) Xeon(R) 6975P-C": -0.18686,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.17563
+              "AMD EPYC 7763 64-Core Processor": -0.3049,
+              "AMD EPYC 9V45 96-Core Processor": -0.32761,
+              "AMD EPYC 9V74 80-Core Processor": -0.31663,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.37213,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.34447,
+              "Intel(R) Xeon(R) 6973P-C": -0.36021,
+              "Intel(R) Xeon(R) 6975P-C": -0.4022,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.29708
             }
           },
           "70ef61704+emit-batch-1": {
             "pi_worst_x": [
+              2.26,
+              2.26
+            ],
+            "ir": 25713439862,
+            "stream_secs": 6.202,
+            "live_log_cost": {
+              "AMD EPYC 7763 64-Core Processor": -0.125,
+              "AMD EPYC 9V45 96-Core Processor": -0.14438,
+              "AMD EPYC 9V74 80-Core Processor": -0.13709,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.14871,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.20108,
+              "Intel(R) Xeon(R) 6973P-C": -0.2234,
+              "Intel(R) Xeon(R) 6975P-C": -0.27504,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.16778
+            }
+          },
+          "a577d8340": {
+            "pi_worst_x": [
+              2.08,
+              2.09
+            ],
+            "ir": 27343480709,
+            "stream_secs": 6.221,
+            "live_log_cost": {
+              "AMD EPYC 7763 64-Core Processor": -0.04529,
+              "AMD EPYC 9V45 96-Core Processor": -0.04676,
+              "AMD EPYC 9V74 80-Core Processor": -0.04683,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.04363,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.06018,
+              "Intel(R) Xeon(R) 6973P-C": -0.07048,
+              "Intel(R) Xeon(R) 6975P-C": -0.06963,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.05068
+            }
+          },
+          "6aa1cb275": {
+            "pi_worst_x": [
               2.28,
               2.27
             ],
-            "ir": 25713169720,
+            "ir": 25709732881,
             "stream_secs": 6.202,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.02822,
-              "AMD EPYC 9V45 96-Core Processor": -0.02825,
-              "AMD EPYC 9V74 80-Core Processor": -0.02616,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.02239,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.04113,
-              "Intel(R) Xeon(R) 6973P-C": -0.04794,
-              "Intel(R) Xeon(R) 6975P-C": -0.05052,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.04275
+              "AMD EPYC 7763 64-Core Processor": -0.12457,
+              "AMD EPYC 9V45 96-Core Processor": -0.14094,
+              "AMD EPYC 9V74 80-Core Processor": -0.1342,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.14854,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.19824,
+              "Intel(R) Xeon(R) 6973P-C": -0.23726,
+              "Intel(R) Xeon(R) 6975P-C": -0.27391,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.15916
             }
           },
-          "reference": {
+          "calibration": {
             "pi_worst_x": [
-              2.28,
-              2.28
+              2.01,
+              2.02
             ],
-            "ir": 25710407982,
-            "stream_secs": 6.202,
+            "ir": 27845204486,
+            "stream_secs": 6.213,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.02895,
-              "AMD EPYC 9V45 96-Core Processor": -0.0276,
-              "AMD EPYC 9V74 80-Core Processor": -0.02907,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.02517,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.04145,
-              "Intel(R) Xeon(R) 6973P-C": -0.04592,
-              "Intel(R) Xeon(R) 6975P-C": -0.04729,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.04289
+              "AMD EPYC 7763 64-Core Processor": 0.0,
+              "AMD EPYC 9V45 96-Core Processor": 0.0,
+              "AMD EPYC 9V74 80-Core Processor": 0.0,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.0,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.0,
+              "Intel(R) Xeon(R) 6973P-C": 0.0,
+              "Intel(R) Xeon(R) 6975P-C": 0.0,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.0
             }
           }
         }
       },
       "tools/bench/configs/trident_kernel.cfg": {
         "ir": {
-          "factor": 0.7791735098924709,
-          "intercept": 17.99335113314663,
-          "max_residual_pct": 11.85,
-          "max_loo_residual_pct": 18.21,
+          "factor": 1.1467039170289872,
+          "intercept": 26.10079077742122,
+          "max_residual_pct": 16.57,
+          "max_loo_residual_pct": 17.43,
           "residual_pct": {
-            "70ef61704+emit-batch-1": 0.42,
-            "70ef61704+emit-batch-8": -5.01,
-            "70ef61704+seed-selection-reverted": 4.38,
-            "728a1d720": -11.85,
-            "8d567d184": 4.51,
-            "c73bd41d5": 7.56
+            "6aa1cb275": 3.15,
+            "70ef61704+emit-batch-1": 3.6,
+            "70ef61704+emit-batch-8": -2.73,
+            "70ef61704+seed-selection-reverted": 1.95,
+            "728a1d720": -16.57,
+            "8d567d184": 1.66,
+            "a577d8340": 2.26,
+            "c73bd41d5": 2.8
           },
           "loo_residual_pct": {
-            "70ef61704+emit-batch-1": 0.42,
-            "70ef61704+emit-batch-8": -5.02,
-            "70ef61704+seed-selection-reverted": 5.11,
-            "728a1d720": -18.21,
-            "8d567d184": 5.4,
-            "c73bd41d5": 11.4
+            "6aa1cb275": 3.88,
+            "70ef61704+emit-batch-1": 4.43,
+            "70ef61704+emit-batch-8": -3.37,
+            "70ef61704+seed-selection-reverted": 2.16,
+            "728a1d720": -17.43,
+            "8d567d184": 1.82,
+            "a577d8340": 2.62,
+            "c73bd41d5": 2.98
           }
         },
         "live": {
-          "AMD EPYC 7763 64-Core Processor": {
-            "jobs": 23,
-            "factor": 0.9984036465264636,
-            "intercept": 0.8066751975145637,
-            "max_residual_pct": 9.13,
-            "max_loo_residual_pct": 11.59,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": 0.44,
-              "70ef61704+emit-batch-8": 4.55,
-              "70ef61704+seed-selection-reverted": 3.02,
-              "728a1d720": -9.13,
-              "8d567d184": 4.12,
-              "c73bd41d5": 5.81
+          "factor": 0.9606020265965195,
+          "intercept": 0.34358970439007686,
+          "max_residual_pct": 12.58,
+          "max_loo_residual_pct": 13.28,
+          "max_cpu_out_residual_pct": 12.89,
+          "by_cpu": {
+            "AMD EPYC 7763 64-Core Processor": {
+              "jobs": 7,
+              "max_residual_pct": 12.58,
+              "max_loo_residual_pct": 13.28,
+              "max_cpu_out_residual_pct": 12.89,
+              "residual_pct": {
+                "6aa1cb275": -3.77,
+                "70ef61704+emit-batch-1": -3.44,
+                "70ef61704+emit-batch-8": -1.08,
+                "70ef61704+seed-selection-reverted": -1.38,
+                "728a1d720": -12.58,
+                "8d567d184": 0.08,
+                "a577d8340": -4.74,
+                "c73bd41d5": 2.16
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": -3.65,
+                "70ef61704+emit-batch-1": -3.21,
+                "70ef61704+emit-batch-8": -0.67,
+                "70ef61704+seed-selection-reverted": -1.2,
+                "728a1d720": -13.28,
+                "8d567d184": 0.35,
+                "a577d8340": -5.25,
+                "c73bd41d5": 2.53
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": -4.25,
+                "70ef61704+emit-batch-1": -3.92,
+                "70ef61704+emit-batch-8": -1.67,
+                "70ef61704+seed-selection-reverted": -1.75,
+                "728a1d720": -12.89,
+                "8d567d184": -0.31,
+                "a577d8340": -5.14,
+                "c73bd41d5": 1.83
+              }
             },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": 0.44,
-              "70ef61704+emit-batch-8": 5.2,
-              "70ef61704+seed-selection-reverted": 3.58,
-              "728a1d720": -11.59,
-              "8d567d184": 4.88,
-              "c73bd41d5": 9.05
+            "AMD EPYC 9V45 96-Core Processor": {
+              "jobs": 7,
+              "max_residual_pct": 9.61,
+              "max_loo_residual_pct": 10.41,
+              "max_cpu_out_residual_pct": 9.9,
+              "residual_pct": {
+                "6aa1cb275": -2.88,
+                "70ef61704+emit-batch-1": -2.6,
+                "70ef61704+emit-batch-8": -0.23,
+                "70ef61704+seed-selection-reverted": -0.84,
+                "728a1d720": -9.61,
+                "8d567d184": -0.54,
+                "a577d8340": -5.34,
+                "c73bd41d5": 2.59
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": -2.76,
+                "70ef61704+emit-batch-1": -2.36,
+                "70ef61704+emit-batch-8": 0.19,
+                "70ef61704+seed-selection-reverted": -0.66,
+                "728a1d720": -10.41,
+                "8d567d184": -0.28,
+                "a577d8340": -5.84,
+                "c73bd41d5": 2.96
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": -3.28,
+                "70ef61704+emit-batch-1": -3.0,
+                "70ef61704+emit-batch-8": -0.72,
+                "70ef61704+seed-selection-reverted": -1.15,
+                "728a1d720": -9.9,
+                "8d567d184": -0.85,
+                "a577d8340": -5.65,
+                "c73bd41d5": 2.32
+              }
+            },
+            "AMD EPYC 9V74 80-Core Processor": {
+              "jobs": 12,
+              "max_residual_pct": 10.07,
+              "max_loo_residual_pct": 10.85,
+              "max_cpu_out_residual_pct": 10.33,
+              "residual_pct": {
+                "6aa1cb275": -3.09,
+                "70ef61704+emit-batch-1": -2.39,
+                "70ef61704+emit-batch-8": -0.13,
+                "70ef61704+seed-selection-reverted": -1.4,
+                "728a1d720": -10.07,
+                "8d567d184": 0.12,
+                "a577d8340": -4.45,
+                "c73bd41d5": 3.21
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": -2.97,
+                "70ef61704+emit-batch-1": -2.15,
+                "70ef61704+emit-batch-8": 0.28,
+                "70ef61704+seed-selection-reverted": -1.22,
+                "728a1d720": -10.85,
+                "8d567d184": 0.4,
+                "a577d8340": -4.97,
+                "c73bd41d5": 3.59
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": -3.47,
+                "70ef61704+emit-batch-1": -2.77,
+                "70ef61704+emit-batch-8": -0.6,
+                "70ef61704+seed-selection-reverted": -1.68,
+                "728a1d720": -10.33,
+                "8d567d184": -0.17,
+                "a577d8340": -4.76,
+                "c73bd41d5": 2.95
+              }
+            },
+            "AMD Ryzen 7 7800X3D 8-Core Processor": {
+              "jobs": 1,
+              "max_residual_pct": 8.14,
+              "max_loo_residual_pct": 8.99,
+              "max_cpu_out_residual_pct": 8.39,
+              "residual_pct": {
+                "6aa1cb275": -2.39,
+                "70ef61704+emit-batch-1": -2.06,
+                "70ef61704+emit-batch-8": 1.84,
+                "70ef61704+seed-selection-reverted": -2.71,
+                "728a1d720": -8.14,
+                "8d567d184": -0.3,
+                "a577d8340": -4.79,
+                "c73bd41d5": 2.04
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": -2.27,
+                "70ef61704+emit-batch-1": -1.83,
+                "70ef61704+emit-batch-8": 2.28,
+                "70ef61704+seed-selection-reverted": -2.54,
+                "728a1d720": -8.99,
+                "8d567d184": -0.03,
+                "a577d8340": -5.3,
+                "c73bd41d5": 2.4
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": -2.72,
+                "70ef61704+emit-batch-1": -2.39,
+                "70ef61704+emit-batch-8": 1.42,
+                "70ef61704+seed-selection-reverted": -2.94,
+                "728a1d720": -8.39,
+                "8d567d184": -0.55,
+                "a577d8340": -5.05,
+                "c73bd41d5": 1.82
+              }
+            },
+            "INTEL(R) XEON(R) PLATINUM 8573C": {
+              "jobs": 2,
+              "max_residual_pct": 8.68,
+              "max_loo_residual_pct": 9.51,
+              "max_cpu_out_residual_pct": 8.52,
+              "residual_pct": {
+                "6aa1cb275": 2.89,
+                "70ef61704+emit-batch-1": 3.13,
+                "70ef61704+emit-batch-8": 1.16,
+                "70ef61704+seed-selection-reverted": 4.47,
+                "728a1d720": -8.68,
+                "8d567d184": 4.39,
+                "a577d8340": -4.69,
+                "c73bd41d5": 7.06
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": 3.04,
+                "70ef61704+emit-batch-1": 3.4,
+                "70ef61704+emit-batch-8": 1.59,
+                "70ef61704+seed-selection-reverted": 4.68,
+                "728a1d720": -9.51,
+                "8d567d184": 4.71,
+                "a577d8340": -5.2,
+                "c73bd41d5": 7.49
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": 3.15,
+                "70ef61704+emit-batch-1": 3.39,
+                "70ef61704+emit-batch-8": 1.44,
+                "70ef61704+seed-selection-reverted": 4.67,
+                "728a1d720": -8.52,
+                "8d567d184": 4.59,
+                "a577d8340": -4.51,
+                "c73bd41d5": 7.23
+              }
+            },
+            "Intel(R) Xeon(R) 6973P-C": {
+              "jobs": 1,
+              "max_residual_pct": 9.22,
+              "max_loo_residual_pct": 10.03,
+              "max_cpu_out_residual_pct": 9.48,
+              "residual_pct": {
+                "6aa1cb275": 5.26,
+                "70ef61704+emit-batch-1": 6.5,
+                "70ef61704+emit-batch-8": 2.98,
+                "70ef61704+seed-selection-reverted": 6.55,
+                "728a1d720": -9.22,
+                "8d567d184": 7.1,
+                "a577d8340": -4.23,
+                "c73bd41d5": 8.98
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": 5.41,
+                "70ef61704+emit-batch-1": 6.8,
+                "70ef61704+emit-batch-8": 3.43,
+                "70ef61704+seed-selection-reverted": 6.78,
+                "728a1d720": -10.03,
+                "8d567d184": 7.44,
+                "a577d8340": -4.76,
+                "c73bd41d5": 9.45
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": 6.0,
+                "70ef61704+emit-batch-1": 7.26,
+                "70ef61704+emit-batch-8": 3.76,
+                "70ef61704+seed-selection-reverted": 7.13,
+                "728a1d720": -8.8,
+                "8d567d184": 7.67,
+                "a577d8340": -3.75,
+                "c73bd41d5": 9.48
+              }
+            },
+            "Intel(R) Xeon(R) 6975P-C": {
+              "jobs": 4,
+              "max_residual_pct": 10.11,
+              "max_loo_residual_pct": 10.59,
+              "max_cpu_out_residual_pct": 10.89,
+              "residual_pct": {
+                "6aa1cb275": 7.09,
+                "70ef61704+emit-batch-1": 8.07,
+                "70ef61704+emit-batch-8": 5.67,
+                "70ef61704+seed-selection-reverted": 6.5,
+                "728a1d720": -3.9,
+                "8d567d184": 7.51,
+                "a577d8340": -5.92,
+                "c73bd41d5": 10.11
+              },
+              "loo_residual_pct": {
+                "6aa1cb275": 7.25,
+                "70ef61704+emit-batch-1": 8.38,
+                "70ef61704+emit-batch-8": 6.15,
+                "70ef61704+seed-selection-reverted": 6.73,
+                "728a1d720": -4.88,
+                "8d567d184": 7.86,
+                "a577d8340": -6.41,
+                "c73bd41d5": 10.59
+              },
+              "cpu_out_residual_pct": {
+                "6aa1cb275": 8.26,
+                "70ef61704+emit-batch-1": 9.25,
+                "70ef61704+emit-batch-8": 6.93,
+                "70ef61704+seed-selection-reverted": 7.37,
+                "728a1d720": -3.12,
+                "8d567d184": 8.38,
+                "a577d8340": -5.24,
+                "c73bd41d5": 10.89
+              }
             }
           },
-          "AMD EPYC 9V45 96-Core Processor": {
-            "jobs": 18,
-            "factor": 1.0570018797979661,
-            "intercept": 0.8054184900709279,
-            "max_residual_pct": 7.31,
-            "max_loo_residual_pct": 8.61,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": 0.25,
-              "70ef61704+emit-batch-8": 5.16,
-              "70ef61704+seed-selection-reverted": 1.77,
-              "728a1d720": -7.31,
-              "8d567d184": 2.98,
-              "c73bd41d5": 4.83
-            },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": 0.25,
-              "70ef61704+emit-batch-8": 5.94,
-              "70ef61704+seed-selection-reverted": 2.16,
-              "728a1d720": -8.61,
-              "8d567d184": 3.61,
-              "c73bd41d5": 7.7
-            }
+          "pi_cost": 0.6192090497634976,
+          "speed_x": {
+            "min": 0.8871607103067969,
+            "max": 1.8578303196607677
           },
-          "AMD EPYC 9V74 80-Core Processor": {
-            "jobs": 13,
-            "factor": 1.0114592607839363,
-            "intercept": 0.8027254314955223,
-            "max_residual_pct": 8.04,
-            "max_loo_residual_pct": 9.71,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": -0.06,
-              "70ef61704+emit-batch-8": 4.14,
-              "70ef61704+seed-selection-reverted": 1.39,
-              "728a1d720": -8.04,
-              "8d567d184": 3.4,
-              "c73bd41d5": 4.99
-            },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": -0.06,
-              "70ef61704+emit-batch-8": 4.65,
-              "70ef61704+seed-selection-reverted": 1.72,
-              "728a1d720": -9.71,
-              "8d567d184": 4.07,
-              "c73bd41d5": 7.92
-            }
-          },
-          "AMD Ryzen 7 7800X3D 8-Core Processor": {
-            "jobs": 1,
-            "factor": 0.9766171740627025,
-            "intercept": 0.8061586466739141,
-            "max_residual_pct": 5.72,
-            "max_loo_residual_pct": 7.19,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": 0.42,
-              "70ef61704+emit-batch-8": 5.72,
-              "70ef61704+seed-selection-reverted": 0.01,
-              "728a1d720": -5.12,
-              "8d567d184": 2.49,
-              "c73bd41d5": 4.52
-            },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": 0.42,
-              "70ef61704+emit-batch-8": 6.65,
-              "70ef61704+seed-selection-reverted": 0.01,
-              "728a1d720": -5.67,
-              "8d567d184": 3.04,
-              "c73bd41d5": 7.19
-            }
-          },
-          "INTEL(R) XEON(R) PLATINUM 8573C": {
-            "jobs": 4,
-            "factor": 0.9282652524366255,
-            "intercept": 0.7956526808792312,
-            "max_residual_pct": 10.29,
-            "max_loo_residual_pct": 13.71,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": 0.48,
-              "70ef61704+emit-batch-8": -0.35,
-              "70ef61704+seed-selection-reverted": 2.74,
-              "728a1d720": -10.29,
-              "8d567d184": 3.19,
-              "c73bd41d5": 5.29
-            },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": 0.48,
-              "70ef61704+emit-batch-8": -0.37,
-              "70ef61704+seed-selection-reverted": 3.27,
-              "728a1d720": -13.71,
-              "8d567d184": 3.89,
-              "c73bd41d5": 8.45
-            }
-          },
-          "Intel(R) Xeon(R) 6973P-C": {
-            "jobs": 2,
-            "factor": 0.8635876307100112,
-            "intercept": 0.792011445551461,
-            "max_residual_pct": 10.57,
-            "max_loo_residual_pct": 14.34,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": -0.06,
-              "70ef61704+emit-batch-8": -2.08,
-              "70ef61704+seed-selection-reverted": 2.03,
-              "728a1d720": -10.57,
-              "8d567d184": 3.32,
-              "c73bd41d5": 5.93
-            },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": -0.06,
-              "70ef61704+emit-batch-8": -2.12,
-              "70ef61704+seed-selection-reverted": 2.49,
-              "728a1d720": -14.34,
-              "8d567d184": 4.04,
-              "c73bd41d5": 9.22
-            }
-          },
-          "Intel(R) Xeon(R) 6975P-C": {
-            "jobs": 4,
-            "factor": 0.8873672520659522,
-            "intercept": 0.793922898394611,
-            "max_residual_pct": 9.36,
-            "max_loo_residual_pct": 11.86,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": 0.63,
-              "70ef61704+emit-batch-8": -0.49,
-              "70ef61704+seed-selection-reverted": 0.88,
-              "728a1d720": -9.36,
-              "8d567d184": 3.25,
-              "c73bd41d5": 4.77
-            },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": 0.63,
-              "70ef61704+emit-batch-8": -0.5,
-              "70ef61704+seed-selection-reverted": 1.1,
-              "728a1d720": -11.86,
-              "8d567d184": 3.92,
-              "c73bd41d5": 7.69
-            }
-          },
-          "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": {
-            "jobs": 4,
-            "factor": 0.9315419482341155,
-            "intercept": 0.7957675577569792,
-            "max_residual_pct": 10.54,
-            "max_loo_residual_pct": 14.28,
-            "residual_pct": {
-              "70ef61704+emit-batch-1": 0.44,
-              "70ef61704+emit-batch-8": -0.68,
-              "70ef61704+seed-selection-reverted": 3.76,
-              "728a1d720": -10.54,
-              "8d567d184": 2.93,
-              "c73bd41d5": 5.28
-            },
-            "loo_residual_pct": {
-              "70ef61704+emit-batch-1": 0.44,
-              "70ef61704+emit-batch-8": -0.71,
-              "70ef61704+seed-selection-reverted": 4.37,
-              "728a1d720": -14.28,
-              "8d567d184": 3.61,
-              "c73bd41d5": 8.51
-            }
-          }
+          "max_calibration_spread_pct": 3.068927899589813
         },
         "points": {
           "728a1d720": {
             "pi_worst_x": [
-              2.28,
-              2.28
+              2.29,
+              2.29
             ],
-            "ir": 32321251698,
+            "ir": 32321129675,
             "stream_secs": 7.404,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": 0.07833,
-              "AMD EPYC 9V45 96-Core Processor": 0.05406,
-              "AMD EPYC 9V74 80-Core Processor": 0.0617,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.03536,
-              "INTEL(R) XEON(R) PLATINUM 8573C": 0.08628,
-              "Intel(R) Xeon(R) 6973P-C": 0.09205,
-              "Intel(R) Xeon(R) 6975P-C": 0.07663,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.08912
+              "AMD EPYC 7763 64-Core Processor": -0.36492,
+              "AMD EPYC 9V45 96-Core Processor": -0.39967,
+              "AMD EPYC 9V74 80-Core Processor": -0.3944,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.41642,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.41028,
+              "Intel(R) Xeon(R) 6973P-C": -0.40412,
+              "Intel(R) Xeon(R) 6975P-C": -0.46346
             }
           },
           "c73bd41d5": {
             "pi_worst_x": [
               1.89,
-              1.9
+              1.89
             ],
-            "ir": 32451680521,
+            "ir": 32451793253,
             "stream_secs": 7.543,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": 0.11379,
-              "AMD EPYC 9V45 96-Core Processor": 0.11514,
-              "AMD EPYC 9V74 80-Core Processor": 0.11613,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.1284,
-              "INTEL(R) XEON(R) PLATINUM 8573C": 0.11586,
-              "Intel(R) Xeon(R) 6973P-C": 0.11326,
-              "Intel(R) Xeon(R) 6975P-C": 0.12485,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.11564
+              "AMD EPYC 7763 64-Core Processor": -0.32726,
+              "AMD EPYC 9V45 96-Core Processor": -0.33166,
+              "AMD EPYC 9V74 80-Core Processor": -0.33789,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.32602,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.37598,
+              "Intel(R) Xeon(R) 6973P-C": -0.39456,
+              "Intel(R) Xeon(R) 6975P-C": -0.40522
             }
           },
           "8d567d184": {
             "pi_worst_x": [
-              2.04,
+              2.05,
               2.05
             ],
-            "ir": 30527074702,
+            "ir": 30526300039,
             "stream_secs": 7.543,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": 0.05342,
-              "AMD EPYC 9V45 96-Core Processor": 0.05969,
-              "AMD EPYC 9V74 80-Core Processor": 0.05571,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.07026,
-              "INTEL(R) XEON(R) PLATINUM 8573C": 0.05522,
-              "Intel(R) Xeon(R) 6973P-C": 0.0537,
-              "Intel(R) Xeon(R) 6975P-C": 0.05519,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.05785
+              "AMD EPYC 7763 64-Core Processor": -0.39039,
+              "AMD EPYC 9V45 96-Core Processor": -0.38393,
+              "AMD EPYC 9V74 80-Core Processor": -0.39089,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.38647,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.43434,
+              "Intel(R) Xeon(R) 6973P-C": -0.46098,
+              "Intel(R) Xeon(R) 6975P-C": -0.46498
             }
           },
           "70ef61704+seed-selection-reverted": {
             "pi_worst_x": [
               2.07,
-              2.06
+              2.07
             ],
-            "ir": 30194266787,
+            "ir": 30194273757,
             "stream_secs": 7.543,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": 0.05435,
-              "AMD EPYC 9V45 96-Core Processor": 0.06165,
-              "AMD EPYC 9V74 80-Core Processor": 0.06543,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.08537,
-              "INTEL(R) XEON(R) PLATINUM 8573C": 0.04948,
-              "Intel(R) Xeon(R) 6973P-C": 0.05699,
-              "Intel(R) Xeon(R) 6975P-C": 0.07044,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.03882
+              "AMD EPYC 7763 64-Core Processor": -0.38525,
+              "AMD EPYC 9V45 96-Core Processor": -0.39096,
+              "AMD EPYC 9V74 80-Core Processor": -0.38508,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.3711,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.44521,
+              "Intel(R) Xeon(R) 6973P-C": -0.46578,
+              "Intel(R) Xeon(R) 6975P-C": -0.4653
             }
           },
           "70ef61704+emit-batch-8": {
             "pi_worst_x": [
-              2.54,
-              2.55
+              2.57,
+              2.57
             ],
-            "ir": 26046562730,
+            "ir": 26046563444,
             "stream_secs": 7.543,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.17029,
-              "AMD EPYC 9V45 96-Core Processor": -0.16752,
-              "AMD EPYC 9V74 80-Core Processor": -0.16807,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.18598,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.14325,
-              "Intel(R) Xeon(R) 6973P-C": -0.1379,
-              "Intel(R) Xeon(R) 6975P-C": -0.15031,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.13905
+              "AMD EPYC 7763 64-Core Processor": -0.61368,
+              "AMD EPYC 9V45 96-Core Processor": -0.62256,
+              "AMD EPYC 9V74 80-Core Processor": -0.62356,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.64394,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.63696,
+              "Intel(R) Xeon(R) 6973P-C": -0.65547,
+              "Intel(R) Xeon(R) 6975P-C": -0.68233
             }
           },
           "70ef61704+emit-batch-1": {
             "pi_worst_x": [
               2.38,
-              2.41
-            ],
-            "ir": 26363172396,
-            "stream_secs": 7.543,
-            "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.06489,
-              "AMD EPYC 9V45 96-Core Processor": -0.0607,
-              "AMD EPYC 9V74 80-Core Processor": -0.0631,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.06672,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.08211,
-              "Intel(R) Xeon(R) 6973P-C": -0.0863,
-              "Intel(R) Xeon(R) 6975P-C": -0.0896,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.08131
-            }
-          },
-          "reference": {
-            "pi_worst_x": [
-              2.41,
               2.39
             ],
-            "ir": 26363873479,
+            "ir": 26362819124,
             "stream_secs": 7.543,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.06472,
-              "AMD EPYC 9V45 96-Core Processor": -0.06232,
-              "AMD EPYC 9V74 80-Core Processor": -0.06779,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.06669,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.08149,
-              "Intel(R) Xeon(R) 6973P-C": -0.09181,
-              "Intel(R) Xeon(R) 6975P-C": -0.08719,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.08108
+              "AMD EPYC 7763 64-Core Processor": -0.50855,
+              "AMD EPYC 9V45 96-Core Processor": -0.51758,
+              "AMD EPYC 9V74 80-Core Processor": -0.51982,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.52329,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.57705,
+              "Intel(R) Xeon(R) 6973P-C": -0.61054,
+              "Intel(R) Xeon(R) 6975P-C": -0.62574
+            }
+          },
+          "a577d8340": {
+            "pi_worst_x": [
+              2.24,
+              2.23
+            ],
+            "ir": 28239872683,
+            "stream_secs": 7.548,
+            "live_log_cost": {
+              "AMD EPYC 7763 64-Core Processor": -0.42669,
+              "AMD EPYC 9V45 96-Core Processor": -0.42014,
+              "AMD EPYC 9V74 80-Core Processor": -0.42985,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.42615,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.42723,
+              "Intel(R) Xeon(R) 6973P-C": -0.43217,
+              "Intel(R) Xeon(R) 6975P-C": -0.41369
+            }
+          },
+          "6aa1cb275": {
+            "pi_worst_x": [
+              2.39,
+              2.4
+            ],
+            "ir": 26364792051,
+            "stream_secs": 7.543,
+            "live_log_cost": {
+              "AMD EPYC 7763 64-Core Processor": -0.50935,
+              "AMD EPYC 9V45 96-Core Processor": -0.51891,
+              "AMD EPYC 9V74 80-Core Processor": -0.51668,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.52412,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.57901,
+              "Intel(R) Xeon(R) 6973P-C": -0.60271,
+              "Intel(R) Xeon(R) 6975P-C": -0.62067
+            }
+          },
+          "calibration": {
+            "pi_worst_x": [
+              1.41,
+              1.41
+            ],
+            "ir": 31510261300,
+            "stream_secs": 5.538,
+            "live_log_cost": {
+              "AMD EPYC 7763 64-Core Processor": 0.0,
+              "AMD EPYC 9V45 96-Core Processor": 0.0,
+              "AMD EPYC 9V74 80-Core Processor": 0.0,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.0,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.0,
+              "Intel(R) Xeon(R) 6973P-C": 0.0,
+              "Intel(R) Xeon(R) 6975P-C": 0.0
             }
           }
         }
