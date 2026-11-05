@@ -18,7 +18,11 @@ def _rmw_line(address: int, before: int, after: int) -> str:
     return f"BENCH_RMW {address:#010x} {before:#010x} {after:#010x}"
 
 
-def _output(after: dict[int, int] | None = None, window: str = "4") -> str:
+def _output(
+    after: dict[int, int] | None = None,
+    window: str = "4",
+    dbgmcu_cr: str | None = "0x00000000",
+) -> str:
     lines = ["Info : SWD DPIDR 0x2ba01477 DPv1"]
     for address, set_bits, clear_bits in pi.MCO_WRITES:
         before = BEFORE[address]
@@ -26,6 +30,8 @@ def _output(after: dict[int, int] | None = None, window: str = "4") -> str:
         lines.append(
             _rmw_line(address, before, (after or {}).get(address, written))
         )
+    if dbgmcu_cr is not None:
+        lines.append(f"BENCH_DBGMCU_CR {dbgmcu_cr}")
     if window:
         lines.append(f"BENCH_HALT_WINDOW_MS {window}")
     lines.append("shutdown command invoked")
@@ -49,6 +55,9 @@ def test_the_live_config_defines_the_procs_the_commands_call():
         "bench_while_halted",
         "bench_rmw",
         "bench_require_trusted_bus_reads",
+        "bench_clear_dbgmcu_cr",
+        "bench_keep_hclk_in_sleep",
+        "bench_require_hclk_in_sleep",
     ):
         assert f"proc {proc} " in config
 
@@ -60,6 +69,29 @@ def test_registers_reading_back_as_written_report_the_halt_window():
 def test_a_register_reading_back_other_than_written_fails_loudly():
     with pytest.raises(pi.BenchError, match="0x40020000 read back 0x00000000"):
         pi.checked_mco_halt_window_ms(_output(after={0x40020000: 0}))
+
+
+def test_sleep_debug_bits_left_set_fail_loudly():
+    with pytest.raises(
+        pi.BenchError, match=r"DBGMCU_CR read back \['0x00000007'\]"
+    ):
+        pi.checked_mco_halt_window_ms(_output(dbgmcu_cr="0x00000007"))
+
+
+def test_a_missing_dbgmcu_read_back_fails_loudly():
+    with pytest.raises(pi.BenchError, match=r"DBGMCU_CR read back \[\]"):
+        pi.checked_mco_halt_window_ms(_output(dbgmcu_cr=None))
+
+
+def test_the_live_attach_sets_only_dbg_sleep_and_only_for_its_session():
+    text = pi.MCO_LIVE_CFG.read_text()
+    assert "$_TARGETNAME configure -event examine-end {}" in text
+    assert (
+        "$_TARGETNAME configure -event examine-start { bench_keep_hclk_in_sleep }"
+        in text
+    )
+    assert re.findall(r"apreg 0 0x0C (\S+)", text) == ["0x00000001"]
+    assert re.findall(r"\bmm?ww 0xE0042004 (\S+)", text) == ["0x00000000"]
 
 
 def test_a_register_without_a_read_back_fails_loudly():

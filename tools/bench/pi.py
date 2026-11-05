@@ -292,6 +292,9 @@ MCO_HALT_WINDOW = re.compile(
     r"^BENCH_HALT_WINDOW_MS (\d+)$", flags=re.MULTILINE
 )
 MCO_HALT_WINDOW_LIMIT_MS = 50
+DBGMCU_CR_READ_BACK = re.compile(
+    r"^BENCH_DBGMCU_CR (0x[0-9a-f]{8})$", flags=re.MULTILINE
+)
 
 
 def mco_openocd_commands() -> str:
@@ -318,6 +321,12 @@ def checked_mco_halt_window_ms(output: str) -> int:
                 f"F401 MCO1 register {address:#010x} read back {after:#010x}, "
                 f"expected {expected:#010x} from {before:#010x}:\n{output}"
             )
+    dbgmcu_cr = DBGMCU_CR_READ_BACK.findall(output)
+    if dbgmcu_cr != ["0x00000000"]:
+        raise BenchError(
+            f"F401 DBGMCU_CR read back {dbgmcu_cr} after clearing, expected "
+            f"['0x00000000'] (DBG_SLEEP/STOP/STANDBY must stay off):\n{output}"
+        )
     windows = MCO_HALT_WINDOW.findall(output)
     if len(windows) != 1:
         raise BenchError(f"F401 MCO1 setup reported no halt window:\n{output}")
