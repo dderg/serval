@@ -464,6 +464,7 @@ pub mod geometry::shaped_corner
 pub struct geometry::shaped_corner::ShapedCorners
 impl geometry::shaped_corner::ShapedCorners
 pub fn geometry::shaped_corner::ShapedCorners::apex_speed_ratio(&self, f64, f64, f64, f64) -> core::option::Option<f64>
+pub fn geometry::shaped_corner::ShapedCorners::approach_mm(&self, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::arc_fit_tolerance_mm(&self, geometry::frontend::CornerBudget, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::arc_shrink_mm(&self, f64, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::arc_speed_cap(&self, f64, f64) -> f64
@@ -471,14 +472,19 @@ pub fn geometry::shaped_corner::ShapedCorners::blend_cut_mm(&self, geometry::fro
 pub fn geometry::shaped_corner::ShapedCorners::blend_peak_curvature(&self, f64, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::budget_mm(&self, geometry::frontend::CornerBudget, f64, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::corner_accel(&self, f64, f64, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::curve_room_mm(&self, geometry::frontend::CornerBudget, f64, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::floor_mm(&self, f64, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::interned([core::option::Option<&nurbs::algebra::PiecewisePolynomialKernel>; 2]) -> core::option::Option<&'static Self>
 pub fn geometry::shaped_corner::ShapedCorners::miss_mm(&self, f64, f64, f64, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::new([core::option::Option<&nurbs::algebra::PiecewisePolynomialKernel>; 2]) -> core::option::Option<Self>
+pub fn geometry::shaped_corner::ShapedCorners::reach_mm(&self, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::scv_allowance_mm(&self, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::slows(&self, geometry::frontend::CornerBudget, f64, f64, f64) -> bool
 pub const geometry::shaped_corner::ARC_FIT_SHARE: f64
 pub const geometry::shaped_corner::PREDICTION_MARGIN: f64
 pub const geometry::shaped_corner::STOP_SHARE: f64
+pub fn geometry::shaped_corner::blend_apex(&geometry::frontend::Move, &geometry::frontend::Move) -> core::option::Option<(f64, f64)>
+pub fn geometry::shaped_corner::stop_turn(&geometry::frontend::Move, &geometry::frontend::Move) -> core::option::Option<f64>
 pub mod geometry::space
 pub struct geometry::space::GcodePos(pub [f64; 3])
 impl geometry::space::GcodePos
@@ -773,6 +779,7 @@ impl core::cmp::PartialEq for geometry::velocity::law::LawSegment
 pub fn geometry::velocity::law::LawSegment::eq(&self, &Self) -> bool
 pub struct geometry::velocity::MoveVelocity
 pub geometry::velocity::MoveVelocity::accel: f64
+pub geometry::velocity::MoveVelocity::corner_speed_mm_s: f64
 pub geometry::velocity::MoveVelocity::entry_v: f64
 pub geometry::velocity::MoveVelocity::exit_v: f64
 pub geometry::velocity::MoveVelocity::length: f64
@@ -781,6 +788,8 @@ pub geometry::velocity::MoveVelocity::phases: alloc::vec::Vec<geometry::velocity
 pub geometry::velocity::MoveVelocity::samples: alloc::vec::Vec<geometry::velocity::VelSample>
 pub geometry::velocity::MoveVelocity::source: geometry::segment::SourceRange
 pub geometry::velocity::MoveVelocity::step_capacity_overload: core::option::Option<geometry::step_capacity::StepCapacityOverload>
+impl geometry::velocity::MoveVelocity
+pub fn geometry::velocity::MoveVelocity::corner_held(&self, geometry::frontend::Move) -> geometry::frontend::Move
 pub struct geometry::velocity::RailPair
 pub geometry::velocity::RailPair::s_hi: f64
 pub geometry::velocity::RailPair::s_lo: f64
@@ -1137,6 +1146,7 @@ pub geometry::MoveContext::limits: geometry::frontend::VelocityLimits
 pub geometry::MoveContext::source: geometry::segment::SourceRange
 pub struct geometry::MoveVelocity
 pub geometry::MoveVelocity::accel: f64
+pub geometry::MoveVelocity::corner_speed_mm_s: f64
 pub geometry::MoveVelocity::entry_v: f64
 pub geometry::MoveVelocity::exit_v: f64
 pub geometry::MoveVelocity::length: f64
@@ -1145,6 +1155,8 @@ pub geometry::MoveVelocity::phases: alloc::vec::Vec<geometry::velocity::law::Law
 pub geometry::MoveVelocity::samples: alloc::vec::Vec<geometry::velocity::VelSample>
 pub geometry::MoveVelocity::source: geometry::segment::SourceRange
 pub geometry::MoveVelocity::step_capacity_overload: core::option::Option<geometry::step_capacity::StepCapacityOverload>
+impl geometry::velocity::MoveVelocity
+pub fn geometry::velocity::MoveVelocity::corner_held(&self, geometry::frontend::Move) -> geometry::frontend::Move
 pub struct geometry::RailPair
 pub geometry::RailPair::s_hi: f64
 pub geometry::RailPair::s_lo: f64
@@ -1175,6 +1187,7 @@ pub fn geometry::velocity::Serial::lead_and_follow(&self, usize, impl core::ops:
 pub struct geometry::ShapedCorners
 impl geometry::shaped_corner::ShapedCorners
 pub fn geometry::shaped_corner::ShapedCorners::apex_speed_ratio(&self, f64, f64, f64, f64) -> core::option::Option<f64>
+pub fn geometry::shaped_corner::ShapedCorners::approach_mm(&self, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::arc_fit_tolerance_mm(&self, geometry::frontend::CornerBudget, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::arc_shrink_mm(&self, f64, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::arc_speed_cap(&self, f64, f64) -> f64
@@ -1182,11 +1195,14 @@ pub fn geometry::shaped_corner::ShapedCorners::blend_cut_mm(&self, geometry::fro
 pub fn geometry::shaped_corner::ShapedCorners::blend_peak_curvature(&self, f64, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::budget_mm(&self, geometry::frontend::CornerBudget, f64, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::corner_accel(&self, f64, f64, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::curve_room_mm(&self, geometry::frontend::CornerBudget, f64, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::floor_mm(&self, f64, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::interned([core::option::Option<&nurbs::algebra::PiecewisePolynomialKernel>; 2]) -> core::option::Option<&'static Self>
 pub fn geometry::shaped_corner::ShapedCorners::miss_mm(&self, f64, f64, f64, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::new([core::option::Option<&nurbs::algebra::PiecewisePolynomialKernel>; 2]) -> core::option::Option<Self>
+pub fn geometry::shaped_corner::ShapedCorners::reach_mm(&self, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::scv_allowance_mm(&self, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::slows(&self, geometry::frontend::CornerBudget, f64, f64, f64) -> bool
 pub struct geometry::SourceRange
 pub geometry::SourceRange::end_line: u32
 pub geometry::SourceRange::start_line: u32
