@@ -1,42 +1,42 @@
 {
   "slice_lines": 1000,
-  "commit": "169bbda55a69896bce13ba53f74061569153564b",
-  "reason": "emit invariance at the merge with main 493d7b64d: riding tolerance (2c5d050a4) +0.9 % Ir on p3 kernel, one leader read per crossing probe -2.5 % Ir on trident_kernel",
+  "commit": "d607eec8be637e6a19e4a6c8c2034ba0b2e550b8",
+  "reason": "[axis e] max_accel 20000 on the gated direct-drive configs, merged with #710's turning guard (p3 ramp pays the kernel-free turning bound); trident_kernel's floor shortfall stays pinned to #693",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 22317002041,
-      "stream_secs": 8.55,
+      "ir": 25831505500,
+      "stream_secs": 6.537,
       "pi_2core": {
-        "worst_x_reference": 3.507943760014117,
+        "worst_x_reference": 2.4814567755259063,
         "worst_x": [
-          4.23,
-          4.26
+          2.62,
+          2.6
         ],
-        "commit": "6aa1cb2757343385a67c2bae4cef824a0b21e368"
+        "commit": "18a9048ffe339fb78ff9997f2672e92abee4efb0"
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 27603684795,
-      "stream_secs": 6.221,
+      "ir": 27846335587,
+      "stream_secs": 6.213,
       "pi_2core": {
-        "worst_x_reference": 2.0177641989118476,
+        "worst_x_reference": 2.033062541774491,
         "worst_x": [
-          2.28,
-          2.28
+          2.02,
+          2.02
         ],
-        "commit": "6aa1cb2757343385a67c2bae4cef824a0b21e368"
+        "commit": "18a9048ffe339fb78ff9997f2672e92abee4efb0"
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 27554495950,
-      "stream_secs": 7.548,
+      "ir": 31513184784,
+      "stream_secs": 5.538,
       "pi_2core": {
-        "worst_x_reference": 2.146606584055911,
+        "worst_x_reference": 1.3843509101624139,
         "worst_x": [
-          2.41,
-          2.39
+          1.37,
+          1.37
         ],
-        "commit": "6aa1cb2757343385a67c2bae4cef824a0b21e368"
+        "commit": "18a9048ffe339fb78ff9997f2672e92abee4efb0"
       }
     }
   },

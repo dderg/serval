@@ -8,7 +8,7 @@ use super::super::{FollowerState, SpanSide};
 use super::{
     AdvanceValley, CLUSTER_REACH_S, CROSSING_PROBES, Crossing, ENVELOPE_SLOPE, KERNEL_PEAK,
     NODE_SPACING_PER_WIDTH, NODE_SPACING_S, RampLeg, RestSide, ShapedLeaders, Spill, TimedSeam,
-    WIDTH_SLOPE_BOUND, WidthField,
+    WIDTH_SLOPE_BOUND, WidthField, slowest_crawl,
 };
 
 /// `(length, ratio at start, ratio at end)` per span.
@@ -1213,6 +1213,91 @@ fn a_crawl_lays_a_valley_only_where_the_advance_would_leave_the_limit() {
         ..rule
     };
     assert!(turnaround.needs_valley(&no_advance, 0.0337));
+}
+
+const CRAWL_LEG_SEAM_SPEED_MM_S: f64 = 2.83;
+const CRAWL_LEG_PEAK_GAIN_MM_S: f64 = 3.0 * CRAWL_LEG_SEAM_SPEED_MM_S;
+const CRAWL_LEG_SIDEWAYS_MM_S: f64 = 0.3;
+const CRAWL_LEG_PIECE_S: f64 = 0.1;
+const CRAWL_LEG_REVERSAL_POWER: i32 = 8;
+
+/// Leaders on a leg from `t0` that cross its opening seam along x at
+/// [`CRAWL_LEG_SEAM_SPEED_MM_S`], speed up, and reverse x sharply right
+/// before the closing seam, which they cross `end_excess_mm_s` faster than
+/// the opening one, drifting sideways along y the whole time: the shaped
+/// reversals of the rest ladder, which pass a hair beside zero inside the
+/// last probe interval of the move into them. Returns the leaders and the
+/// time of the reversal.
+fn reversing_just_before_its_end(t0: f64, end_excess_mm_s: f64) -> (ContinuousSegment, f64) {
+    let (v0, gain, piece) = (
+        CRAWL_LEG_SEAM_SPEED_MM_S,
+        CRAWL_LEG_PEAK_GAIN_MM_S,
+        CRAWL_LEG_PIECE_S,
+    );
+    let power = CRAWL_LEG_REVERSAL_POWER;
+    let (t_mid, t1) = (t0 + piece, t0 + 2.0 * piece);
+    let x_mid = v0 * piece + 2.0 * gain * piece / 3.0;
+    let drop = 2.0 * v0 + gain + end_excess_mm_s;
+    let degree = power as usize + 1;
+    let mut speeding_up = vec![0.0; degree + 1];
+    speeding_up[..4].copy_from_slice(&[0.0, v0, gain / piece, -gain / (3.0 * piece * piece)]);
+    let mut reversal = vec![0.0; degree + 1];
+    reversal[0] = x_mid;
+    reversal[1] = v0 + gain;
+    reversal[degree] = -drop / (f64::from(power + 1) * piece.powi(power));
+    let x = [
+        BezierPiece {
+            u_start: t0,
+            u_end: t_mid,
+            coeffs: speeding_up,
+        },
+        BezierPiece {
+            u_start: t_mid,
+            u_end: t1,
+            coeffs: reversal,
+        },
+    ];
+    let sideways = CRAWL_LEG_SIDEWAYS_MM_S;
+    let y = [
+        BezierPiece {
+            u_start: t0,
+            u_end: t_mid,
+            coeffs: vec![0.0, sideways],
+        },
+        BezierPiece {
+            u_start: t_mid,
+            u_end: t1,
+            coeffs: vec![sideways * piece, sideways],
+        },
+    ];
+    let reversal_t = t_mid + piece * libm::pow((v0 + gain) / drop, 1.0 / f64::from(power));
+    (leaders(&x, &y, (t0, t1)), reversal_t)
+}
+
+/// A crawl in the last probe interval of a leg is found however the
+/// leg's two seam speeds compare: the seam a hair slower is not the
+/// slowest point, so the crawl is not left to a seam crossing that never
+/// sees it. Which seam reads slower is rounding where the leg's ends
+/// mirror each other, so missing it made a stream lay a valley where the
+/// same motion planned from rest laid none.
+#[test]
+fn a_crawl_right_before_a_legs_end_is_found_whichever_seam_is_slower() {
+    for end_excess_mm_s in [-1e-6, 0.0, 1e-6] {
+        let (shaped, reversal_t) = reversing_just_before_its_end(3.0, end_excess_mm_s);
+        let shaped_leaders = ShapedLeaders::of(&shaped, &[0, 1]);
+        let leg = moving_leg(&shaped, &shaped_leaders, 100.0);
+        let found = slowest_crawl(&shaped_leaders, &leg, f64::INFINITY);
+        let Some((_, crossing)) = found else {
+            panic!(
+                "a leg whose closing seam is {end_excess_mm_s} mm/s faster than its opening \
+                 one finds no crawl at its reversal at t={reversal_t}"
+            );
+        };
+        assert!(
+            (crossing.speed - CRAWL_LEG_SIDEWAYS_MM_S).abs() < 1e-6,
+            "the crawl at the reversal at t={reversal_t} crosses as {crossing:?}"
+        );
+    }
 }
 
 const LINE_RATIO: f64 = 0.4 * 0.2 / (std::f64::consts::PI * 0.875 * 0.875);
