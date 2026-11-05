@@ -93,8 +93,9 @@ enum Truth {
 }
 
 /// The track, and where along the travelled path its ratio steps — every
-/// boundary between two strokes of different ratios, rest or not — and
-/// the fastest the shaped leaders travel it.
+/// boundary between two strokes of different ratios, rest or not — the
+/// fastest the shaped leaders travel it, and the most its strokes ask of
+/// the extruder.
 #[derive(Debug, Clone)]
 struct Track {
     base: Vec<ContinuousSegment>,
@@ -103,6 +104,7 @@ struct Track {
     e_at_start: Vec<f64>,
     ratio_steps_mm: Vec<f64>,
     fastest_shaped_mm_s: f64,
+    extruder_peaks: ExtruderPeaks,
 }
 
 impl Track {
@@ -134,13 +136,71 @@ impl Track {
     }
 }
 
+/// The extruder's peak speed, acceleration and jerk over a track: `r` times
+/// the shaped leaders' along a stroke, an extrude-only move's own.
+#[derive(Debug, Clone, Copy, Default)]
+struct ExtruderPeaks {
+    speed: f64,
+    accel: f64,
+    jerk: f64,
+}
+
+impl ExtruderPeaks {
+    fn of(distance: &[f64], duration: f64, ratio: f64) -> Self {
+        let velocity = derivative(distance);
+        let accel = derivative(&velocity);
+        let jerk = derivative(&accel);
+        Self {
+            speed: ratio * peak(&velocity, duration),
+            accel: ratio * peak(&accel, duration),
+            jerk: ratio * peak(&jerk, duration),
+        }
+    }
+
+    fn widest(self, other: Self) -> Self {
+        Self {
+            speed: self.speed.max(other.speed),
+            accel: self.accel.max(other.accel),
+            jerk: self.jerk.max(other.jerk),
+        }
+    }
+
+    /// `limits`, raised to `RAMP_HEADROOM` times what an advance of slope
+    /// `k` asks on these peaks, `r·(v + k·a)` and `r·(a + k·j)`. The planner
+    /// holds an advanced extruder's demand within its limits; these tracks
+    /// are not planned, so the limits are raised over them instead.
+    fn limits_above(self, k: f64, (max_velocity, max_accel): (f64, f64)) -> (f64, f64) {
+        (
+            max_velocity.max(RAMP_HEADROOM * (self.speed + k * self.accel)),
+            max_accel.max(RAMP_HEADROOM * (self.accel + k * self.jerk)),
+        )
+    }
+}
+
+/// The limits leave a ratio ramp as much again as the leaders' own demand.
+const RAMP_HEADROOM: f64 = 2.0;
+
 const PEAK_SPEED_PROBES: usize = 64;
 
 /// The fastest a distance `coeffs` moves over `[0, duration]`, probed.
 fn peak_speed(coeffs: &[f64], duration: f64) -> f64 {
+    peak(&derivative(coeffs), duration)
+}
+
+/// The largest `|coeffs|` reads over `[0, duration]`, probed.
+fn peak(coeffs: &[f64], duration: f64) -> f64 {
     (0..=PEAK_SPEED_PROBES)
-        .map(|k| eval_d(coeffs, duration * k as f64 / PEAK_SPEED_PROBES as f64).abs())
+        .map(|k| eval(coeffs, duration * k as f64 / PEAK_SPEED_PROBES as f64).abs())
         .fold(0.0, f64::max)
+}
+
+fn derivative(coeffs: &[f64]) -> Vec<f64> {
+    coeffs
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(k, c)| k as f64 * c)
+        .collect()
 }
 
 /// How the shaped leaders cover a stroke: a cubic whose acceleration steps
@@ -338,6 +398,7 @@ fn build_profiled_track(heading: f64, steps: &[Step], profile: Profile) -> Track
         e_at_start: Vec::new(),
         ratio_steps_mm: Vec::new(),
         fastest_shaped_mm_s: 0.0,
+        extruder_peaks: ExtruderPeaks::default(),
     };
     let leaders_at = |along: f64, local: &[f64], sense: f64| -> [Vec<f64>; 3] {
         let line = |axis: usize| {
@@ -382,6 +443,9 @@ fn build_profiled_track(heading: f64, steps: &[Step], profile: Profile) -> Track
                     .push(segment([sx, sy, sz, e_line(&raw)], span, &followers, true));
                 track.fastest_shaped_mm_s =
                     track.fastest_shaped_mm_s.max(peak_speed(&shaped, duration));
+                track.extruder_peaks = track
+                    .extruder_peaks
+                    .widest(ExtruderPeaks::of(&shaped, duration, ratio));
                 track.truth.push(Truth::Stroke {
                     shaped,
                     ratio,
@@ -416,6 +480,9 @@ fn build_profiled_track(heading: f64, steps: &[Step], profile: Profile) -> Track
                 let move_e = segment([x, y, z, e_coeffs], span, &[], false);
                 track.base.push(move_e.clone());
                 track.frontier.push(move_e);
+                track.extruder_peaks = track
+                    .extruder_peaks
+                    .widest(ExtruderPeaks::of(&motion, duration, 1.0));
                 track.truth.push(Truth::ExtrudeOnly { motion });
                 e += delta;
                 t = span.1;
@@ -747,11 +814,9 @@ fn assert_advance_vanishes_at_rests(
     Ok(())
 }
 
-/// Extruder motor limits. The planner caps the leaders' speed at every
-/// ratio step to what the follower's limits let a ramp take
-/// (`RatioRampRule::step_speed_cap`); these tracks are not planned, so the
-/// limits stay above what their fastest strokes ask of the extruder, and
-/// only the ramp time they derive varies.
+/// Extruder motor limits, each raised over the track it drives
+/// ([`ExtruderPeaks::limits_above`]), so only the ramp time they derive
+/// varies.
 fn follower_limits_strategy() -> impl Strategy<Value = Option<(f64, f64)>> {
     prop_oneof![
         1 => Just(None),
@@ -803,6 +868,7 @@ proptest! {
         limits in follower_limits_strategy(),
     ) {
         let track = build_profiled_track(heading, &steps, Profile::Quintic);
+        let limits = limits.map(|limits| track.extruder_peaks.limits_above(advance_k, limits));
         let advanced_chain = limited(follower_chain(Some(advance_k), smooth_time), limits);
         let kernel_reach = advanced_chain
             .kernel()
@@ -828,6 +894,7 @@ proptest! {
         limits in follower_limits_strategy(),
     ) {
         let track = build_profiled_track(heading, &steps, Profile::Quintic);
+        let limits = limits.map(|limits| track.extruder_peaks.limits_above(advance_k, limits));
         let chains = chains(limited(follower_chain(Some(advance_k), smooth_time), limits));
         let one_shot = project_all_at_once(&track, &chains);
         let streamed = project_streamed(&track, &chains, &batch_sizes);
@@ -1013,3 +1080,44 @@ fn a_narrow_reach_ending_at_the_held_distance_is_read_at_both_ends() {
         &chains(follower_chain(Some(0.0607965931472197), None)),
     );
 }
+
+/// #757: a 0.05 mm extrusion whipped from rest to rest in 0.37 ms asks an
+/// advanced extruder for `r·k·j` ≈ 2e7 mm/s², ten times the 2e6 mm/s² drawn
+/// for it. Past its limit the advanced source fit falls back on the
+/// absolute acceleration budget, which the ramp's window narrowing into
+/// the rest never meets, and spends every refinement split there. The
+/// planner holds that demand within the limits, so the drawn limits rise
+/// over it.
+#[test]
+fn limits_drawn_under_a_strokes_advanced_demand_rise_over_it() {
+    let stroke = |reverse, length, pace, end_speed, ratio| Step::Stroke {
+        reverse,
+        length,
+        pace,
+        end_speed,
+        shaped_speed_scale: 0.5,
+        ratio,
+    };
+    let steps = [
+        stroke(true, 6.680050825710807, 1.0, 0.0, 0.0),
+        stroke(true, 0.05, 1.0, 0.0, 0.0),
+        stroke(true, 0.05, 1.0, 0.0, 0.0),
+        stroke(false, 0.05, 80.22781195765434, 72.72794614146788, 0.0),
+        stroke(false, 16.195128136076594, 64.17110889153133, 0.0, 0.0),
+        Step::Hold { duration: 0.001 },
+        stroke(false, 0.05, 135.9014773916357, 0.0, 0.01),
+    ];
+    let advance_k = 0.03786656554428725;
+    let drawn = (2000.0, 2e6);
+    let track = build_profiled_track(0.0, &steps, Profile::Quintic);
+    let limits = track.extruder_peaks.limits_above(advance_k, drawn);
+    assert!(
+        limits.1 > 10.0 * drawn.1,
+        "the track asks no more than {limits:?} of the extruder"
+    );
+    project_all_at_once(
+        &track,
+        &chains(limited(follower_chain(Some(advance_k), None), Some(limits))),
+    );
+}
+
