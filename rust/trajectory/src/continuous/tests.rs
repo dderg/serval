@@ -2115,10 +2115,11 @@ fn carrier_breakpoints_are_publicly_exposed_and_bracket_the_domain() {
         span: Arc::clone(&span),
         axis: 0,
     };
+    let seam = interior_time_above(11.0);
     let mut breakpoints = axis.breakpoints();
     breakpoints.sort_by(f64::total_cmp);
     breakpoints.dedup();
-    assert_eq!(breakpoints, vec![10.0, 11.0, 12.0]);
+    assert_eq!(breakpoints, vec![10.0, seam, 12.0]);
 
     let segment = ContinuousSegment {
         axes: Arc::from([
@@ -2146,9 +2147,113 @@ fn carrier_breakpoints_are_publicly_exposed_and_bracket_the_domain() {
     let merged = segment.breakpoints();
     assert_eq!(merged.first(), Some(&10.0));
     assert_eq!(merged.last(), Some(&12.0));
-    assert!(merged.contains(&11.0));
+    assert!(merged.contains(&seam));
     assert!(merged.windows(2).all(|pair| pair[0] < pair[1]));
     close(segment.eval_axis_pvaj(0, 10.5).unwrap().acceleration, 6.0);
+}
+
+const SEAM_SPAN_START_S: f64 = 0.05;
+const SEAM_PHASE_S: f64 = 0.125;
+const SEAM_PHASE_ACCEL_MM_S2: f64 = 6.0;
+
+fn seam_span() -> Arc<AnalyticMoveSpan> {
+    let ramp_end_velocity = 1.0 + SEAM_PHASE_ACCEL_MM_S2 * SEAM_PHASE_S;
+    let ramp_length = SEAM_PHASE_S + 0.5 * SEAM_PHASE_ACCEL_MM_S2 * SEAM_PHASE_S * SEAM_PHASE_S;
+    let brake_length = ramp_end_velocity * SEAM_PHASE_S
+        - 0.5 * SEAM_PHASE_ACCEL_MM_S2 * SEAM_PHASE_S * SEAM_PHASE_S;
+    let length = ramp_length + brake_length;
+    Arc::new(
+        AnalyticMoveSpan::try_new(
+            move_with(
+                Segment::Line(Line::try_new([0.0, 0.0, 0.0], [length, 0.0, 0.0]).unwrap()),
+                vec![],
+            ),
+            Arc::from([
+                LawSegment::new(
+                    0.0,
+                    SEAM_PHASE_S,
+                    0.0,
+                    1.0,
+                    ScalarLaw::ConstAccel {
+                        a0: SEAM_PHASE_ACCEL_MM_S2,
+                    },
+                ),
+                LawSegment::new(
+                    SEAM_PHASE_S,
+                    SEAM_PHASE_S,
+                    ramp_length,
+                    ramp_end_velocity,
+                    ScalarLaw::ConstAccel {
+                        a0: -SEAM_PHASE_ACCEL_MM_S2,
+                    },
+                ),
+            ]),
+            0.0,
+            SEAM_SPAN_START_S,
+            SEAM_SPAN_START_S + 2.0 * SEAM_PHASE_S,
+            Arc::from([0.0, 0.0, 0.0, 7.0]),
+            SurfaceMode::None,
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn analytic_breakpoints_sit_where_the_evaluator_switches_phase() {
+    let span = seam_span();
+    let seam: Vec<f64> = span.phase_seam_times().collect();
+    let [seam] = seam[..] else {
+        panic!("two phases have one interior seam, got {seam:?}")
+    };
+    let raw_sum = SEAM_SPAN_START_S + SEAM_PHASE_S;
+    assert!(
+        interior_time_above(interior_time_above(raw_sum)) <= seam,
+        "the fixture must round the raw seam sum {raw_sum:e} at least two ulps below the seam {seam:e}"
+    );
+    let axis = ContinuousAxis::Analytic {
+        span: Arc::clone(&span),
+        axis: 0,
+    };
+    close(
+        axis.eval_pva(next_toward(seam, f64::NEG_INFINITY))
+            .unwrap()
+            .acceleration,
+        SEAM_PHASE_ACCEL_MM_S2,
+    );
+    close(
+        axis.eval_pva(seam).unwrap().acceleration,
+        -SEAM_PHASE_ACCEL_MM_S2,
+    );
+    let mut axis_breakpoints = axis.breakpoints();
+    axis_breakpoints.sort_by(f64::total_cmp);
+    axis_breakpoints.dedup();
+    assert_eq!(
+        axis_breakpoints,
+        vec![span.t_start, seam, span.t_end],
+        "the axis must report its seam where the evaluator switches phase"
+    );
+
+    let motor = MotorSpan::try_new(
+        Arc::from([MotorGroup::Analytic {
+            span: Arc::clone(&span),
+            terms: Arc::from([MotorTerm {
+                source_axis: 0,
+                axis,
+                scale: 1.0,
+            }]),
+        }]),
+        span.t_start,
+        span.t_end,
+        1,
+        41,
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        motor.breakpoints[..],
+        [span.t_start, seam, span.t_end],
+        "the motor group must report the same seam as its axes"
+    );
 }
 
 const SLIVER_TEST_EPOCHS_S: [f64; 2] = [0.0, 2.0e4];
