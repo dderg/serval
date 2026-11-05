@@ -376,13 +376,16 @@ fn between_each_float(
 }
 
 /// Encloses several signals over `[lo, hi]` whose windows share work:
-/// `model(window, axis, shared)` reads signal `axis` on `window`, `shared`
-/// holding what the window's first reading built for the rest. Each
-/// signal halves on its own, as [`enclose`] does, into `outs[axis]`.
+/// `model(window, axis, shared, refused)` reads signal `axis` on `window`,
+/// `shared` holding what the window's first reading built for the rest.
+/// Where a window will halve unless it resolves, `refused` is the
+/// acceleration accuracy: a reading whose acceleration's bound passes it
+/// may stop there and read `None`, the window halving without its models.
+/// Each signal halves on its own, as [`enclose`] does, into `outs[axis]`.
 pub(crate) fn enclose_axes<S>(
     (lo, hi): (f64, f64),
     accuracy: [f64; 3],
-    model: &impl Fn(Window, usize, &mut Option<S>) -> [TaylorModel; 3],
+    model: &impl Fn(Window, usize, &mut Option<S>, Option<f64>) -> Option<[TaylorModel; 3]>,
     outs: &mut [Vec<ExactPiece>],
 ) {
     let axes: Vec<usize> = (0..outs.len()).collect();
@@ -392,7 +395,7 @@ pub(crate) fn enclose_axes<S>(
 fn enclose_axes_to_depth<S>(
     (lo, hi): (f64, f64),
     accuracy: [f64; 3],
-    model: &impl Fn(Window, usize, &mut Option<S>) -> [TaylorModel; 3],
+    model: &impl Fn(Window, usize, &mut Option<S>, Option<f64>) -> Option<[TaylorModel; 3]>,
     axes: &[usize],
     depth: u32,
     outs: &mut [Vec<ExactPiece>],
@@ -403,7 +406,10 @@ fn enclose_axes_to_depth<S>(
     let mut shared = None;
     let mut unresolved = Vec::new();
     for &axis in axes {
-        let models = model(window, axis, &mut shared);
+        let Some(models) = model(window, axis, &mut shared, (!last).then_some(accuracy[2])) else {
+            unresolved.push(axis);
+            continue;
+        };
         let resolved = models
             .iter()
             .zip(accuracy)
