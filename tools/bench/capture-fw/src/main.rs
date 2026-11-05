@@ -69,6 +69,7 @@ static mut USB_BUS: Option<UsbBusAllocator<UsbBus<USB>>> = None;
 fn latch_fault(fault: Fault, channel: u8) {
     capture::stop_snapshot_timer();
     event::halt_interrupts();
+    sim::drive_idle();
     FAULT.store(
         u16::from_le_bytes([fault as u8, channel]),
         Ordering::Release,
@@ -343,8 +344,11 @@ impl Stream {
         self.fault_reported = false;
         let sampler = Sampler::arm(both_edges_mask);
         cortex_m::interrupt::free(|cs| SAMPLER.borrow(cs).replace(Some(sampler)));
-        sim::start_capture(aux, COUNT_TICKS_PER_AUX);
-        capture::start_snapshot_timer(capture::TICK_HZ);
+        capture::start_snapshot_timer(capture::TICK_HZ, || {
+            if aux {
+                sim::start_capture(COUNT_TICKS_PER_AUX);
+            }
+        });
     }
 
     fn start_events(&mut self, both_edges_mask: u8, aux: bool) {
@@ -352,9 +356,12 @@ impl Stream {
         self.mode = Mode::Events;
         self.aux = aux;
         self.fault_reported = false;
-        sim::start_capture(aux, EVENT_SNAPSHOTS_PER_AUX);
         event::start(both_edges_mask);
-        capture::start_snapshot_timer(event::SNAPSHOT_HZ);
+        capture::start_snapshot_timer(event::SNAPSHOT_HZ, || {
+            if aux {
+                sim::start_capture(EVENT_SNAPSHOTS_PER_AUX);
+            }
+        });
     }
 
     fn configure(&mut self, payload: &[u8]) {
@@ -525,6 +532,7 @@ fn main() -> ! {
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     cortex_m::interrupt::disable();
+    sim::drive_endstops_low();
     loop {
         cortex_m::asm::nop();
     }

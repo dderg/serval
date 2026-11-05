@@ -28,7 +28,7 @@ const ENDSTOP_MASK: u32 = 0xF;
 const BSRR_RESET_SHIFT: u32 = 16;
 const MCO_TIMER: regs::Timer = regs::TIM9;
 const CCMR1_CC1S_TI1: u32 = 0b01;
-const CCMR1_IC1F_CK_INT_N2: u32 = 0b0001 << 4;
+const CCMR1_IC1F_CK_INT_N8: u32 = 0b0011 << 4;
 const SMCR_SMS_EXTERNAL_CLOCK: u32 = 0b111;
 const SMCR_TS_TI1FP1: u32 = 0b101 << 4;
 const COUNTER_TOP: u32 = 0xFFFF;
@@ -77,7 +77,6 @@ struct Peripherals {
 
 struct Capture {
     tracker: Tracker,
-    aux: bool,
     config_id: u16,
 }
 
@@ -145,7 +144,7 @@ pub fn init() {
 fn arm_mco_counter() {
     let tim = MCO_TIMER;
     tim.set_cr1(0);
-    tim.set_ccmr1(CCMR1_CC1S_TI1 | CCMR1_IC1F_CK_INT_N2);
+    tim.set_ccmr1(CCMR1_CC1S_TI1 | CCMR1_IC1F_CK_INT_N8);
     tim.set_ccer(0);
     tim.set_smcr(SMCR_TS_TI1FP1 | SMCR_SMS_EXTERNAL_CLOCK);
     tim.set_psc(0);
@@ -194,16 +193,23 @@ pub fn apply_config(config: SimConfig) {
     drive_endstops(config.walls.idle_levels());
 }
 
-pub fn start_capture(aux: bool, ticks_per_aux: u32) {
+pub fn start_capture(ticks_per_aux: u32) {
     let config = config();
     let capture = Capture {
         tracker: Tracker::start(config, ticks_per_aux, mco_count()),
-        aux,
         config_id: config.id,
     };
     drive_endstops(capture.tracker.levels());
     AUX.reset();
     cortex_m::interrupt::free(|_| unsafe { *CAPTURE.0.get() = Some(capture) });
+}
+
+pub fn drive_idle() {
+    drive_endstops(config().walls.idle_levels());
+}
+
+pub fn drive_endstops_low() {
+    drive_endstops(0);
 }
 
 pub fn stop_capture() {
@@ -233,9 +239,6 @@ fn with_capture(
     };
     let output = tick(&mut capture.tracker).map_err(|_| Fault::McoLost)?;
     drive_endstops(output.levels);
-    if !capture.aux {
-        return Ok(());
-    }
     let TickOutput {
         levels,
         aux: Some(stamp),

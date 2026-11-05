@@ -114,7 +114,10 @@ fn arm_counter(timer: Timer, mode: EdgeMode) {
     timer.set_cr1(regs::CR1_CEN);
 }
 
-pub fn start_snapshot_timer(hz: u32) {
+/// Starts the snapshot tick with `at_start` run in the same critical
+/// section, just before the counter enables: whatever it samples (the MCO
+/// count) is taken at the tick timeline's origin.
+pub fn start_snapshot_timer(hz: u32, at_start: impl FnOnce()) {
     let tim = regs::TIM6;
     tim.set_cr1(0);
     tim.set_psc(0);
@@ -122,7 +125,10 @@ pub fn start_snapshot_timer(hz: u32) {
     tim.set_egr(regs::EGR_UG);
     tim.set_sr(0);
     tim.set_dier(regs::DIER_UIE);
-    tim.set_cr1(regs::CR1_CEN);
+    cortex_m::interrupt::free(|_| {
+        at_start();
+        tim.set_cr1(regs::CR1_CEN);
+    });
 }
 
 pub fn stop_snapshot_timer() {
