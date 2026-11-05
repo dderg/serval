@@ -50,15 +50,19 @@ pub(super) struct Ingress {
 }
 
 impl Ingress {
-    /// A brake the pacer orders because the producer fell behind. When it
-    /// stops motion in flight, the motion that resumes after it must start
-    /// the whole reserve ahead of the playhead: the producer is still
-    /// behind, and a resume nearer than one brake to rest could not be
-    /// braked again before the playhead overran its committed end.
+    /// A brake the pacer orders because the producer fell behind. While
+    /// committed motion still runs ahead of the playhead, the motion that
+    /// resumes after the brake must start the whole reserve ahead of it: the
+    /// producer is still behind, and a resume nearer than one brake to rest
+    /// could not be braked again before the playhead overran its committed
+    /// end. That includes a brake that found the stream parked on a stop it
+    /// has not reached yet: resumed at the default lead, it braked again
+    /// within a few planning steps, a stop per move. A machine already at
+    /// rest (a jog the prime timed out on) resumes at the default lead.
     fn pacer_brake(&mut self) {
-        let in_flight = !self.timeline.anchor.lock_ok().is_parked();
+        let motion_ahead = self.timeline.frontier.runway_secs() > 0.0;
         self.drain_and_fence_as(DrainCause::PacerBrake);
-        if !in_flight || self.links.shutting_down.load(Ordering::Acquire) {
+        if !motion_ahead || self.links.shutting_down.load(Ordering::Acquire) {
             return;
         }
         let reserve_s = self.pacer.reserve_secs();
@@ -146,9 +150,10 @@ impl Ingress {
         self.hold_for_throttle(planned_from_s);
     }
 
-    fn hold_for_throttle(&self, planned_from_s: f64) {
-        if let Some(throttle) = &self.throttle {
-            std::thread::sleep(throttle.hold(planned_from_s, self.pipeline.planned_through_s()));
+    fn hold_for_throttle(&mut self, planned_from_s: f64) {
+        let planned_to_s = self.pipeline.planned_through_s();
+        if let Some(throttle) = &mut self.throttle {
+            std::thread::sleep(throttle.hold(planned_from_s, planned_to_s));
         }
     }
 
