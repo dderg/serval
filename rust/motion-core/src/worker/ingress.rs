@@ -146,9 +146,10 @@ impl Ingress {
         self.hold_for_throttle(planned_from_s);
     }
 
-    fn hold_for_throttle(&self, planned_from_s: f64) {
-        if let Some(throttle) = &self.throttle {
-            std::thread::sleep(throttle.hold(planned_from_s, self.pipeline.planned_through_s()));
+    fn hold_for_throttle(&mut self, planned_from_s: f64) {
+        let planned_to_s = self.pipeline.planned_through_s();
+        if let Some(throttle) = &mut self.throttle {
+            std::thread::sleep(throttle.hold(planned_from_s, planned_to_s));
         }
     }
 
