@@ -225,8 +225,9 @@ fn assert_advanced_cruise_is_flat(
             ],
         },
     ]);
-    let output = apply_nonlinear_advance_to_track(axis, &track, advance, FitTol::absolute(0.005, 50.0))
-        .map_err(|error| TestCaseError::fail(format!("{signal:?}, {advance:?}: {error:?}")))?;
+    let output =
+        apply_nonlinear_advance_to_track(axis, &track, advance, FitTol::absolute(0.005, 50.0))
+            .map_err(|error| TestCaseError::fail(format!("{signal:?}, {advance:?}: {error:?}")))?;
     let advance_position_scale =
         advance.linear_advance * signal.velocity.abs() * 1.8 + advance.nonlinear_offset;
     assert_flat_cruise(&output, signal, advance_position_scale)
