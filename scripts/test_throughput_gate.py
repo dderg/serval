@@ -128,6 +128,7 @@ def model(
             "intercept": math.log(live_worst or ir_worst),
             "max_residual_pct": 6.0,
             "max_loo_residual_pct": 9.0,
+            "max_cpu_out_residual_pct": 12.0,
             "pi_cost": 1.0,
             "speed_x": {"min": 1.5, "max": 3.0},
             "by_cpu": {
@@ -159,21 +160,54 @@ def test_the_live_cost_never_fails_on_drift():
         assert verdict.problems == ()
 
 
-def test_the_live_floor_fails_only_beyond_the_prediction_band():
+def test_a_live_prediction_below_the_floor_within_its_residual_is_only_noted():
     below = model(2.5, 1.0, 1.96)
-    noisy = gate.judge("c", entry(), measurement(band_pct=3.0), below)
-    assert noisy.band_pct[1] == pytest.approx(3.0)
-    assert noisy.problems == ()
-    quiet = gate.judge("c", entry(), measurement(band_pct=1.0), below)
-    assert quiet.problems == (
-        "the Pi 2-core worst window the live cost predicts, 1.96x +-1.0 %, "
-        "is below the 2.0x floor",
+    verdict = gate.judge("c", entry(), measurement(band_pct=1.0), below)
+    assert verdict.problems == ()
+    assert len(verdict.notes) == 1
+    assert (
+        "the live cost predicts, 1.96x +-1.0 %, below the 2.0x floor"
+        in (verdict.notes[0])
     )
+    assert (
+        "optimistically 2.16x with the live model's 9.0 % residual"
+        in (verdict.notes[0])
+    )
+    assert "Ir decides the floor" in verdict.notes[0]
+
+
+def test_a_live_prediction_fails_only_below_its_optimistic_bound():
+    optimistic = 1.81 * 1.01 * 1.09
+    assert optimistic < 2.0
+    verdict = gate.judge(
+        "c", entry(), measurement(band_pct=1.0), model(2.5, 1.0, 1.81)
+    )
+    assert len(verdict.problems) == 1
+    assert f"optimistically {optimistic:.2f}x" in verdict.problems[0]
+    assert verdict.problems[0].endswith("even that misses the floor")
+    noisy = gate.judge(
+        "c", entry(), measurement(band_pct=5.0), model(2.5, 1.0, 1.81)
+    )
+    assert noisy.problems == ()
+
+
+def test_an_unseen_cpu_model_widens_the_live_bound_by_the_cpu_left_out_residual():
+    seen = gate.judge("c", entry(), measurement(), model(2.5, 1.0, 1.82))
+    assert len(seen.problems) == 1
+    unseen = gate.judge(
+        "c", entry(), measurement(cpu="Unseen CPU"), model(2.5, 1.0, 1.82)
+    )
+    assert unseen.problems == ()
+    assert "12.0 % residual" in unseen.notes[0]
+
+
+def test_the_live_band_carries_through_alpha():
     steeper = gate.judge(
         "c", entry(), measurement(band_pct=1.0), model(2.5, 1.0, 1.96, 3.0)
     )
     assert steeper.band_pct[1] == pytest.approx(100.0 * (1.01**3 - 1.0))
     assert steeper.problems == ()
+    assert steeper.notes == ()
 
 
 def test_the_floor_checks_fail_hard():
@@ -193,11 +227,8 @@ def test_the_live_prediction_divides_the_calibration_window_by_the_cost_over_it(
         "c", entry(), measurement(vs_calibration=1.01), model(2.5, 1.0, 2.01)
     )
     assert verdict.predicted_x[1] == pytest.approx(2.01 / 1.01)
-    assert verdict.problems == (
-        "the Pi 2-core worst window the live cost predicts, 1.99x, "
-        "is below the 2.0x floor",
-    )
-    assert verdict.warnings == ()
+    assert verdict.problems == ()
+    assert "Ir decides the floor" in verdict.notes[0]
     steeper = gate.judge(
         "c",
         entry(),
@@ -254,12 +285,11 @@ def test_a_calibration_speed_past_the_fitted_envelope_and_its_margin_fails():
 
 def test_a_floor_miss_only_warns_while_the_floor_checks_are_off(monkeypatch):
     monkeypatch.setattr(gate, "PI_FLOOR_FAILS", False)
-    verdict = gate.judge("c", entry(), measurement(), model(1.9))
+    verdict = gate.judge("c", entry(), measurement(), model(1.7))
     assert verdict.problems == ()
     assert len(verdict.warnings) == 2
-    assert all(
-        "below the 2.0x floor" in warning for warning in verdict.warnings
-    )
+    assert "below the 2.0x floor" in verdict.warnings[0]
+    assert verdict.warnings[1].endswith("even that misses the floor")
 
 
 def test_the_summary_names_an_unseen_cpu_model_without_failing():
@@ -326,7 +356,11 @@ def test_a_pinned_floor_shortfall_that_shrinks_passes():
 
 def test_a_pinned_floor_shortfall_that_vanishes_passes_and_says_to_unpin():
     verdict = gate.judge(
-        "c", entry(), measurement(stream=13.0), model(1.6), pinned(1.6)
+        "c",
+        entry(),
+        measurement(stream=13.0),
+        model(1.6, 1.0, 2.1),
+        pinned(1.6),
     )
     assert verdict.problems == ()
     assert len(verdict.notes) == 1
