@@ -70,6 +70,10 @@
         "label": "70ef61704+emit-batch-1",
         "commit": "70ef6170493ddf1376e101ec91b69916ab8c31ae",
         "patch": "tools/bench/pi_calibration/emit-batch-1.patch"
+      },
+      {
+        "label": "a577d8340",
+        "commit": "a577d83405ee131df803c9520e84f0a7c483b8a2"
       }
     ],
     "configs": {

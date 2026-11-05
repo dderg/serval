@@ -42,6 +42,9 @@ def test_a_fit_wants_two_points_besides_the_anchor():
         )
 
 
+CAL = recheck.CALIBRATION_LABEL
+
+
 def rows(job: str, cpu: str, costs: dict[str, list[float]]) -> list[dict]:
     return [
         {
@@ -56,27 +59,72 @@ def rows(job: str, cpu: str, costs: dict[str, list[float]]) -> list[dict]:
     ]
 
 
-def test_live_costs_centre_each_job_and_average_jobs_of_one_cpu():
+def test_live_costs_divide_by_the_jobs_calibration_and_average_one_cpu():
     measured = [
-        *rows("1/x", "Slow", {"a": [2.0, 2.0, 9.0], "b": [4.0, 4.0]}),
-        *rows("1/y", "Slow", {"a": [1.0, 1.0], "b": [2.0, 2.0]}),
-        *rows("2/x", "Fast", {"a": [1.0, 1.0], "b": [1.0, 1.0]}),
+        *rows("1/x", "Slow", {CAL: [2.0, 2.0, 9.0], "b": [4.0, 4.0]}),
+        *rows("1/y", "Slow", {CAL: [1.0, 1.1], "b": [2.0, 2.2]}),
+        *rows("2/x", "Fast", {CAL: [1.0, 1.0], "b": [1.0, 1.0]}),
     ]
-    live = recheck.live_log_costs(measured, ["a", "b"], ["c.cfg"])
-    assert live["c.cfg"]["Slow"]["jobs"] == 2
-    assert live["c.cfg"]["Slow"]["x"]["b"] - live["c.cfg"]["Slow"]["x"][
-        "a"
-    ] == (pytest.approx(math.log(2.0)))
-    assert live["c.cfg"]["Fast"]["x"] == {"a": 0.0, "b": 0.0}
+    live = recheck.live_costs(measured, [CAL, "b"], ["c.cfg"])["c.cfg"]
+    assert live["cpus"]["Slow"]["jobs"] == 2
+    assert live["cpus"]["Slow"]["x"]["b"] == pytest.approx(math.log(2.0))
+    assert live["cpus"]["Slow"]["x"][CAL] == 0.0
+    assert live["cpus"]["Fast"]["x"] == {CAL: 0.0, "b": 0.0}
+    assert sorted(live["calibration_costs"]) == pytest.approx([1.0, 1.05, 2.0])
+    assert max(live["spreads_pct"]) == pytest.approx(10.0)
 
 
-def test_a_job_missing_runs_of_a_variant_is_left_out():
+def test_a_job_counts_for_the_variants_it_ran_beside_the_calibration():
     measured = [
-        *rows("1/x", "Slow", {"a": [2.0, 2.0], "b": [4.0]}),
-        *rows("1/y", "Slow", {"a": [1.0, 1.0], "b": [3.0, 3.0]}),
+        *rows("1/x", "Slow", {CAL: [2.0, 2.0], "b": [4.0], "c": [3.0, 3.0]}),
+        *rows("1/y", "Slow", {CAL: [1.0, 1.0], "b": [3.0, 3.0]}),
+        *rows("1/z", "Slow", {CAL: [1.0], "b": [3.0, 3.0]}),
     ]
-    live = recheck.live_log_costs(measured, ["a", "b"], ["c.cfg"])
-    assert live["c.cfg"]["Slow"]["jobs"] == 1
+    live = recheck.live_costs(measured, [CAL, "b", "c"], ["c.cfg"])["c.cfg"]
+    assert live["cpus"]["Slow"]["jobs"] == 2
+    assert live["cpus"]["Slow"]["x"]["b"] == pytest.approx(math.log(3.0))
+    assert live["cpus"]["Slow"]["x"]["c"] == pytest.approx(math.log(1.5))
+
+
+def test_one_live_factor_fits_every_cpu_model():
+    ys = {
+        CAL: math.log(2.0),
+        "a": math.log(2.0) - 0.2,
+        "b": math.log(2.0) + 0.1,
+    }
+    xs = {
+        "Slow": {CAL: 0.0, "a": 0.1, "b": -0.05},
+        "Fast": {CAL: 0.0, "a": 0.2, "b": -0.2},
+    }
+    fitted = recheck.pooled_fit(xs, ys, {"Slow": 3, "Fast": 1})
+    factor = 0.085 / 0.0925
+    without_slow = 0.06 / 0.08
+    without_a = 0.025 / 0.0425
+    assert fitted["factor"] == pytest.approx(factor)
+    assert fitted["intercept"] == pytest.approx(math.log(2.0))
+    slow = fitted["by_cpu"]["Slow"]
+    assert slow["jobs"] == 3
+    for name, slope in (
+        ("residual_pct", factor),
+        ("cpu_out_residual_pct", without_slow),
+        ("loo_residual_pct", without_a),
+    ):
+        assert slow[name]["a"] == pytest.approx(
+            100.0 * (math.exp(-slope * 0.1 + 0.2) - 1.0), abs=0.01
+        )
+    assert fitted["max_cpu_out_residual_pct"] == max(
+        cpu["max_cpu_out_residual_pct"] for cpu in fitted["by_cpu"].values()
+    )
+
+
+def test_the_live_fit_wants_two_cpu_models_and_two_variants():
+    ys = {CAL: 0.0, "a": -0.1, "b": 0.1}
+    with pytest.raises(gate.GateError, match="CPU models"):
+        recheck.pooled_fit({"Only": {"a": 0.1, "b": -0.1}}, ys, {"Only": 1})
+    with pytest.raises(gate.GateError, match="variants"):
+        recheck.pooled_fit(
+            {"A": {"a": 0.1}, "B": {"a": 0.2}}, ys, {"A": 1, "B": 1}
+        )
 
 
 def test_the_probe_budget_is_each_ci_jobs_timeout():
@@ -97,7 +145,7 @@ def test_the_probe_budget_is_each_ci_jobs_timeout():
     assert recheck.job_timeouts(workflow) == {"rust-test": 20, "rust-fmt": 5}
 
 
-def test_probe_rows_come_from_the_run_log_keyed_by_run_and_job():
+def test_probe_rows_come_from_the_run_log_keyed_by_run_job_and_variant():
     row = {
         "cpu": "X",
         "label": "a",
@@ -109,28 +157,58 @@ def test_probe_rows_come_from_the_run_log_keyed_by_run_and_job():
         "rust-test\tProbe\t2026-11-04T10:00:00Z noise\n"
         f"rust-test\tProbe\t2026-11-04T10:00:01Z RECHECK {json.dumps(row)}\n"
     )
-    assert recheck.probe_rows(log, 7) == [{**row, "job": "7/rust-test"}]
+    assert recheck.probe_rows(log, 7, {"a": "sha-a"}) == [
+        {**row, "job": "7/rust-test", "key": "sha-a"}
+    ]
 
 
-def test_variants_add_the_reference_and_refuse_clashing_labels():
+def test_collected_rows_follow_their_variant_key_and_drop_unlisted_ones(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(recheck, "WORK", tmp_path)
+    recheck.save(
+        "collect",
+        {
+            "rows": [
+                {"job": "1/x", "label": "reference", "key": "sha-cal"},
+                {"job": "1/x", "label": "old", "key": "sha-old"},
+                {"job": "1/x", "label": "a", "key": "sha-a"},
+            ]
+        },
+    )
+    assert recheck.collected_rows({"a": "sha-a", CAL: "sha-cal"}) == [
+        {"job": "1/x", "label": CAL, "key": "sha-cal"},
+        {"job": "1/x", "label": "a", "key": "sha-a"},
+    ]
+
+
+def test_variants_add_the_calibration_commit_and_refuse_clashing_labels():
     baseline = {
-        "commit": "ref",
         "pi_calibration": {"variants": [{"label": "a", "commit": "x"}]},
     }
-    assert recheck.variants(baseline) == [
+    assert recheck.variants(baseline, "cal") == [
         {"label": "a", "commit": "x"},
-        {"label": recheck.REFERENCE_LABEL, "commit": "ref"},
+        {"label": CAL, "commit": "cal"},
     ]
-    clash = {
-        "commit": "ref",
-        "pi_calibration": {
-            "variants": [{"label": recheck.REFERENCE_LABEL, "commit": "x"}]
-        },
-    }
+    clash = {"pi_calibration": {"variants": [{"label": CAL, "commit": "x"}]}}
     with pytest.raises(gate.GateError):
-        recheck.variants(clash)
+        recheck.variants(clash, "cal")
     with pytest.raises(gate.GateError):
-        recheck.variants({"commit": "ref"})
+        recheck.variants({}, "cal")
+
+
+def test_the_calibration_commit_is_the_pinned_one_unless_re_pinned():
+    pinned = {"pi_calibration": {"commit": "abc"}}
+    assert recheck.calibration_commit(pinned, None) == "abc"
+    with pytest.raises(gate.GateError, match="--calibration-commit"):
+        recheck.calibration_commit({}, None)
+
+
+def test_the_pi_wall_comes_from_the_stamps_around_the_replay():
+    out = "pi_started_ns=1000000000\nmoves=1\npi_ended_ns=3500000000\n"
+    assert recheck.pi_wall_secs(out) == pytest.approx(2.5)
+    with pytest.raises(gate.GateError):
+        recheck.pi_wall_secs("pi_started_ns=1\n")
 
 
 def test_the_ci_probe_hook_replaces_the_rust_line_once():
