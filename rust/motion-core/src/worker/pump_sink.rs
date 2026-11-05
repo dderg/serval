@@ -11,6 +11,7 @@ use trajectory::{
 
 use super::CommittedFrontier;
 use super::dispatch::{DispatchError, SegmentSink};
+use crate::dispatch_record::{DispatchRecorder, RecordedNudge};
 
 pub(crate) struct Projection {
     pub(crate) transports: Arc<crate::axis_transport::AxisTransports>,
@@ -20,6 +21,7 @@ pub(crate) struct Projection {
     pub(crate) counter: Arc<AtomicU64>,
     pub(crate) frontier: Arc<CommittedFrontier>,
     pub(crate) frozen_projection: std::collections::HashMap<u32, FrozenProjection>,
+    pub(crate) dispatch_record: Option<Arc<DispatchRecorder>>,
 }
 
 #[derive(Clone, Copy)]
@@ -419,6 +421,10 @@ impl Projection {
         for m in msgs {
             pump.enqueue(m);
         }
+        if let Some(record) = &self.dispatch_record {
+            record.record_segment(seg, at.t0, at.epoch.is_fresh());
+            record.check().map_err(DispatchError::DispatchRecord)?;
+        }
 
         tracing::trace!(
             subsystem = "motion",
@@ -510,6 +516,16 @@ impl Projection {
                 lead_secs: at.lead_secs,
                 source_line: u32::MAX,
             });
+        }
+        if let Some(record) = &self.dispatch_record {
+            record.record_nudge(RecordedNudge {
+                t0: at.t0,
+                t_start: profile.t_start(),
+                t_end: profile.t_end(),
+                mcu_id,
+                axis,
+            });
+            record.check().map_err(DispatchError::DispatchRecord)?;
         }
 
         self.counter.fetch_add(1, Ordering::Relaxed);

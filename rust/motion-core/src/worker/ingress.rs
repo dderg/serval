@@ -14,6 +14,7 @@ use motion_pipeline::{
 
 use super::dispatch::WorkerLinks;
 use super::{ExecutionTimeline, HomeDripParams, NudgeParams, StreamMsg, fatal};
+use crate::dispatch_record::{DispatchRecorder, DrainCause};
 use crate::lock_ext::LockExt;
 
 mod pacer;
@@ -42,6 +43,9 @@ pub(super) struct Ingress {
     /// Source line of the last move forwarded into the pipeline; a fence
     /// arriving now sequences after it.
     pub(super) last_line: u32,
+    /// `StreamInput::Move`s fed into the pipeline since it started.
+    pub(super) moves_sent: u64,
+    pub(super) dispatch_record: Option<Arc<DispatchRecorder>>,
     pub(super) pump: crossbeam_channel::Sender<crate::pump::PumpMsg>,
 }
 
@@ -53,7 +57,7 @@ impl Ingress {
     /// braked again before the playhead overran its committed end.
     fn pacer_brake(&mut self) {
         let in_flight = !self.timeline.anchor.lock_ok().is_parked();
-        self.drain_and_fence();
+        self.drain_and_fence_as(DrainCause::PacerBrake);
         if !in_flight || self.links.shutting_down.load(Ordering::Acquire) {
             return;
         }
@@ -132,8 +136,12 @@ impl Ingress {
             return;
         }
         let planned_from_s = self.pipeline.planned_through_s();
+        let is_move = matches!(item, StreamInput::Move(_));
         if !self.pipeline.feed(item) && !self.links.shutting_down.load(Ordering::Acquire) {
             fatal("execution owner closed during planning");
+        }
+        if is_move {
+            self.moves_sent += 1;
         }
         self.hold_for_throttle(planned_from_s);
     }
@@ -179,10 +187,20 @@ impl Ingress {
     /// intake remains uncommitted. Every drain runs through here, so every
     /// drain measures the traversal the pacer's reserve has to cover.
     fn drain_and_fence(&mut self) -> BarrierAck {
+        self.drain_and_fence_as(DrainCause::Requested)
+    }
+
+    fn drain_and_fence_as(&mut self, cause: DrainCause) -> BarrierAck {
         let sent = Instant::now();
         self.send(StreamInput::Drain);
         self.pacer.note_reset();
         let ack = self.barrier();
+        if let Some(record) = &self.dispatch_record {
+            record.record_drain(cause, self.moves_sent);
+            if let Err(error) = record.check() {
+                fatal(&error);
+            }
+        }
         let latency_s = sent.elapsed().as_secs_f64();
         if self.pacer.note_drain(latency_s) {
             tracing::info!(

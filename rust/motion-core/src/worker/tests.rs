@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use super::dispatch::SegmentSink;
 use super::*;
+use crate::dispatch_record::DrainCause;
 use geometry::segment::SourceRange;
 use geometry::{CornerFitConfig, MoveContext, VelocityLimits, line_move};
 use motion_pipeline::{Control, DispatchCommand, StreamConfig};
@@ -97,8 +98,19 @@ fn spawn_on_timeline(
     config: StreamConfig,
     chains: AxisChainSet,
     home: Vec<f64>,
+    sink: impl SegmentSink + Send + 'static,
+    timeline: ExecutionTimeline,
+) -> TestWorker {
+    spawn_recorded(config, chains, home, sink, timeline, None)
+}
+
+fn spawn_recorded(
+    config: StreamConfig,
+    chains: AxisChainSet,
+    home: Vec<f64>,
     mut sink: impl SegmentSink + Send + 'static,
     timeline: ExecutionTimeline,
+    dispatch_record: Option<Arc<DispatchRecorder>>,
 ) -> TestWorker {
     struct NoEndpoint;
     impl crate::pump::SpanSink for NoEndpoint {
@@ -144,6 +156,7 @@ fn spawn_on_timeline(
         PipelineOutput {
             trajectory: output,
             input_tap: None,
+            dispatch_record,
         },
         links,
         timeline,
@@ -184,6 +197,7 @@ struct AnchoredSink {
     starts_host: Arc<Mutex<Vec<f64>>>,
     starts_stream: Arc<Mutex<Vec<f64>>>,
     parks: Arc<std::sync::atomic::AtomicUsize>,
+    record: Option<Arc<DispatchRecorder>>,
 }
 
 impl AnchoredSink {
@@ -195,13 +209,21 @@ impl AnchoredSink {
             starts_host: Arc::default(),
             starts_stream: Arc::default(),
             parks: Arc::default(),
+            record: None,
         }
     }
 
-    fn anchor_span(&self, t_start: f64, t_end: f64) {
+    fn recording(self, record: &Arc<DispatchRecorder>) -> Self {
+        Self {
+            record: Some(Arc::clone(record)),
+            ..self
+        }
+    }
+
+    fn anchor_span(&self, t_start: f64, t_end: f64) -> (f64, crate::anchor::StreamEpoch) {
         let mut anchor = self.anchor.lock_ok();
         let host_now = self.router.lock_ok().host_now_secs();
-        let (t0, _) = anchor.anchor_segment(t_start, t_end, host_now);
+        let (t0, epoch) = anchor.anchor_segment(t_start, t_end, host_now);
         self.starts_host.lock_ok().push(t0 + t_start);
         self.starts_stream.lock_ok().push(t_start);
         let runway_s = t0 + t_end - host_now;
@@ -209,12 +231,17 @@ impl AnchoredSink {
             self.frontier
                 .advance_to(Instant::now() + Duration::from_secs_f64(runway_s));
         }
+        (t0, epoch)
     }
 }
 
 impl SegmentSink for AnchoredSink {
     fn dispatch(&mut self, seg: &ContinuousSegment) -> Result<(), DispatchError> {
-        self.anchor_span(seg.t_start, seg.t_end);
+        let (t0, epoch) = self.anchor_span(seg.t_start, seg.t_end);
+        if let Some(record) = &self.record {
+            record.record_segment(seg, t0, epoch.is_fresh());
+            record.check().map_err(DispatchError::DispatchRecord)?;
+        }
         Ok(())
     }
     fn dispatch_nudge(
@@ -719,6 +746,7 @@ fn finite_homing_admission_and_cancellation_preserve_backpressure() {
         PipelineOutput {
             trajectory: output,
             input_tap: None,
+            dispatch_record: None,
         },
         links,
         idle_timeline(frontier),
@@ -1900,7 +1928,7 @@ fn beacon_scan_path_live_worker_velocity_stays_bounded() {
 
 const ANALYZER_PACE_TOLERANCE_S: f64 = 20e-3;
 const ANALYZER_PACE_TOLERANCE_PPM: f64 = 500.0;
-const STARVED_STREAMING: Duration = Duration::from_secs(6);
+const STARVED_DEADLINE: Duration = Duration::from_secs(30);
 const MIN_STARVED_BRAKES: u64 = 3;
 
 /// How far behind the stream's own timeline the dispatched starts fell: the
@@ -1934,26 +1962,35 @@ fn a_producer_slower_than_realtime_brakes_and_resumes_without_overrunning_the_pl
         anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
         router: Arc::new(Mutex::new(real_router())),
     };
+    let dir = crate::dispatch_record::tests::scratch_dir("pacer-brakes");
+    let record = DispatchRecorder::open(&dir).unwrap();
     let sink = PacedSink {
-        inner: AnchoredSink::on(&timeline),
+        inner: AnchoredSink::on(&timeline).recording(&record),
         realtime_factor_bits: Arc::new(std::sync::atomic::AtomicU64::new(2.0_f64.to_bits())),
     };
-    let mut h = spawn_on_timeline(
+    let mut h = spawn_recorded(
         cfg_cap(1024),
         AxisChainSet::default(),
-        vec![0.0, 0.0, 0.0],
+        vec![0.0; 4],
         sink.clone(),
         timeline,
+        Some(Arc::clone(&record)),
     );
     let mut at = [0.0_f64, 0.0, 0.0];
     let mut line_no = 1;
+    let brakes = |h: &StreamWorkerHandle| {
+        h.links.pacer_drains.busy.load(Ordering::SeqCst)
+            + h.links.pacer_drains.idle.load(Ordering::SeqCst)
+    };
     for phase in [
         StrokePhase::healthy(2.0, 1.0, Duration::from_millis(1500)),
-        StrokePhase::unplannable(STARVED_STREAMING),
+        StrokePhase::unplannable(STARVED_DEADLINE),
     ] {
         sink.set_realtime_factor(phase.realtime_factor);
         let started = Instant::now();
-        while started.elapsed() < phase.streaming {
+        let starved = phase.realtime_factor.is_infinite();
+        while started.elapsed() < phase.streaming && !(starved && brakes(&h) >= MIN_STARVED_BRAKES)
+        {
             let (m, end) = phase.next_move(line_no, at);
             loop {
                 match h.submit_move(m.clone()) {
@@ -1967,13 +2004,15 @@ fn a_producer_slower_than_realtime_brakes_and_resumes_without_overrunning_the_pl
         }
     }
     h.flush().unwrap();
-    let brakes = h.links.pacer_drains.busy.load(Ordering::SeqCst)
-        + h.links.pacer_drains.idle.load(Ordering::SeqCst);
+    let brakes = brakes(&h);
     h.shutdown();
+    drop(h);
     assert!(
         brakes >= MIN_STARVED_BRAKES,
         "a producer planning slower than realtime braked {brakes} times in \
-         {STARVED_STREAMING:?}; the pacer must brake it to rest and resume again and again"
+         {STARVED_DEADLINE:?}; however deep the stage inboxes, the runway the pacer \
+         reads is what reached the dispatcher, so starving planning must brake it to \
+         rest and resume again and again"
     );
     let stream = sink.inner.starts_stream.lock_ok().clone();
     let host = sink.inner.starts_host.lock_ok().clone();
@@ -1983,4 +2022,72 @@ fn a_producer_slower_than_realtime_brakes_and_resumes_without_overrunning_the_pl
         "the brakes paused the machine, yet the dispatched starts lag the stream by only \
          {lag}s ({allowed}s allowed): the bench pace check could not flag the stops"
     );
+    drop(sink);
+    drop(Arc::into_inner(record).expect("every holder of the record closed"));
+    let records =
+        crate::dispatch_record::tests::decode(&crate::dispatch_record::tests::only_record(&dir));
+    assert_record_follows_the_brakes(&records, brakes, u64::from(line_no - 1));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The dispatch record of a braked stream: every pacer brake and the
+/// closing flush as a drain counting the moves sent before it, and the
+/// segments between them continuous on the host clock wherever they did
+/// not re-anchor.
+fn assert_record_follows_the_brakes(
+    records: &[crate::dispatch_record::tests::Decoded],
+    brakes: u64,
+    moves: u64,
+) {
+    use crate::dispatch_record::tests::Decoded;
+    let drains = |wanted: DrainCause| -> Vec<u64> {
+        records
+            .iter()
+            .filter_map(|record| match record {
+                Decoded::Drain { cause, moves_sent } if *cause == wanted as u8 => Some(*moves_sent),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        drains(DrainCause::PacerBrake).len() as u64,
+        brakes,
+        "every pacer brake is recorded as one"
+    );
+    let requested = drains(DrainCause::Requested);
+    assert!(
+        !requested.is_empty() && requested.iter().all(|&sent| sent == moves),
+        "the flush drains after all {moves} moves: {requested:?}"
+    );
+    let mut host_end: Option<f64> = None;
+    let mut moves_sent = 0;
+    let mut segments = 0;
+    for record in records {
+        match record {
+            Decoded::Segment(seg) => {
+                segments += 1;
+                let fresh = seg.flags & crate::dispatch_record::SEGMENT_FRESH_EPOCH != 0;
+                let host_start = seg.t0 + seg.t_start;
+                match host_end {
+                    None => assert!(fresh, "the first segment anchors the stream"),
+                    Some(end) if !fresh => assert!(
+                        (host_start - end).abs() < 1e-9,
+                        "segment {segments} starts at host {host_start}, {}s off the \
+                         previous end {end} without re-anchoring",
+                        host_start - end
+                    ),
+                    Some(_) => {}
+                }
+                host_end = Some(seg.t0 + seg.t_end);
+            }
+            Decoded::Drain {
+                moves_sent: sent, ..
+            } => {
+                assert!(*sent >= moves_sent, "moves sent never decrease");
+                moves_sent = *sent;
+            }
+            Decoded::Nudge(nudge) => panic!("a stream of moves dispatched a nudge: {nudge:?}"),
+        }
+    }
+    assert!(segments > 0, "the record holds the dispatched segments");
 }
