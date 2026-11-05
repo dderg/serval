@@ -12,7 +12,7 @@ use trajectory::{
 
 use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
-    AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget,
+    AccelerationExemption, AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget,
     LadderFailure, LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth, SeamContinuity,
     VelocitySign, acceleration_bound, exact_piece, held_miss, ladder_accept, ladder_fit,
     quintic_in_u,
@@ -4499,12 +4499,28 @@ fn shaped_ladder<S: TrackSignal>(
             .map_or(0.0, |hold| hold.worst_miss(rung))
     };
     let ladder_span = LadderSpan { h, endpoint_delta };
+    let exempt_stretches = exempt_accelerations(sig, exact, (t0, t1), piece_tol, policy);
+    let exempt_at = |u: f64| {
+        let t = span_probe_t(t0, t1, u);
+        exempt_stretches
+            .as_ref()
+            .is_some_and(|(stretches, _)| stretches.iter().any(|&(lo, hi)| lo <= t && t <= hi))
+    };
+    let exemption = exempt_stretches
+        .as_ref()
+        .filter(|_| LADDER_PROBES_U.iter().any(|&u| exempt_at(u)))
+        .map(|&(_, velocity)| AccelerationExemption {
+            exempt: &exempt_at,
+            velocity,
+            ceiling: fit_tol.accel_ceiling(),
+        });
     let ladder_truth = LadderTruth {
         position: &|u| truth.pos_at(u),
         velocity: &|u| truth.vel_at(u),
         acceleration: &|u| truth.acc_at(u),
         held_miss: &held_miss,
         held_ranks_misses: keeps_closest_rung,
+        exemption,
     };
     let ladder_budget = LadderBudget {
         tol: piece_tol,
@@ -4634,6 +4650,39 @@ fn shaped_ladder<S: TrackSignal>(
         })) => Ok((SpanVerdict::Missed(closest_rung, failure), [start, end])),
         Err(None) => Ok((SpanVerdict::Refused, [start, end])),
     }
+}
+
+/// The stretches of `span` whose acceleration the proof exempts — the
+/// enclosure's pieces inside an unshaped leader's square-root onset sliver
+/// ([`crate::follower_projection::UnshapedLeaderStep`]) — and the velocity
+/// the proof holds a fit to there; `None` where none of the span is exempt.
+/// Only a signal fitted under a ceiling on its own acceleration has them:
+/// a rung there is held to that ceiling instead of the signal.
+fn exempt_accelerations<S: TrackSignal>(
+    sig: &S,
+    exact: Option<&ExactSpan>,
+    (t0, t1): (f64, f64),
+    piece_tol: FitTol,
+    policy: &SpanFitPolicy,
+) -> Option<(Vec<(f64, f64)>, f64)> {
+    if exact.is_some() || !policy.fit_tol.accel_ceiling().is_finite() {
+        return None;
+    }
+    let budget = HullBudget {
+        tol: piece_tol,
+        velocity: policy.velocity_budget,
+    };
+    let enclosure = sig.enclosure_on(t0, t1, budget.enclosure_accuracy())?;
+    let mut velocity = f64::INFINITY;
+    let stretches: Vec<(f64, f64)> = enclosure
+        .iter()
+        .filter_map(|piece| {
+            let step = piece.unshaped_step?;
+            velocity = velocity.min(step.allowance());
+            Some((piece.lo, piece.hi))
+        })
+        .collect();
+    (!stretches.is_empty()).then_some((stretches, velocity.min(policy.velocity_budget)))
 }
 
 /// What a span's ladder and hull made of it.

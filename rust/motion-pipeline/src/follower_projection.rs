@@ -1665,8 +1665,11 @@ impl RatioSpan {
     }
 
     fn e_at(&self, s: f64) -> f64 {
-        let ds = s - self.s0;
-        self.e0 + self.r0 * ds + 0.5 * (self.r1 - self.r0) * ds * ds / (self.s1 - self.s0)
+        self.e0 + self.e_past(s - self.s0)
+    }
+
+    fn e_past(&self, ds: f64) -> f64 {
+        self.r0 * ds + 0.5 * (self.r1 - self.r0) * ds * ds / (self.s1 - self.s0)
     }
 
     /// The span as the advance reads it, `(s0, s1, r0, r1)`: its ratio held
@@ -2011,6 +2014,43 @@ impl FollowerState {
     fn spans_e(&self, s: f64) -> f64 {
         self.table_e(Table::Laid, s)
             .map_or(0.0, |table| table + self.smoothing.correction(s).value)
+    }
+
+    fn span_origin(&self, s: f64) -> SpanOrigin {
+        SpanOrigin {
+            s,
+            table_e: self.table_e(Table::Laid, s).unwrap_or(0.0),
+            smoothing_e: self.smoothing.correction(s).value,
+        }
+    }
+
+    /// [`Self::spans_e`] at `distance` past `origin`, less its value at
+    /// `origin`. Path length and cumulative extrusion both run tens of
+    /// millimetres deep into a print, so the difference of two absolute
+    /// reads carries rounding at that depth, which over a nanosecond fit
+    /// span is a seam mismatch the stored track turns into acceleration.
+    /// Every term here is a difference of nearby quantities instead.
+    fn spans_e_since(&self, origin: &SpanOrigin, distance: OdometerDistance) -> f64 {
+        let Some(first) = self.spans.first() else {
+            return 0.0;
+        };
+        let OdometerDistance { s, offset } = distance;
+        assert!(
+            s >= first.s0 - SPAN_LOOKUP_SLACK_MM,
+            "shaped path odometer {s} fell behind the pruned span table \
+             starting at {}",
+            first.s0
+        );
+        let past = |boundary: f64| (origin.s - boundary) + offset;
+        let idx = self.spans.partition_point(|span| span.s1 < s);
+        let table = match self.spans.get(idx) {
+            Some(span) => (span.e0 - origin.table_e) + span.e_past(past(span.s0).max(0.0)),
+            None => {
+                let last = self.spans.last().expect("non-empty spans");
+                (last.e_at(last.s1) - origin.table_e) + last.r1 * past(last.s1)
+            }
+        };
+        table + (self.smoothing.correction(s).value - origin.smoothing_e)
     }
 
     fn spans_of(&self, table: Table) -> &[RatioSpan] {
@@ -3007,6 +3047,23 @@ struct LaidRead {
     curvature: f64,
 }
 
+/// The shaped path distance at one time, absolute for table lookups and as
+/// the offset from the segment's odometer start the integration produced.
+#[derive(Clone, Copy)]
+struct OdometerDistance {
+    s: f64,
+    offset: f64,
+}
+
+/// What [`FollowerState::spans_e`] reads at the segment's odometer start,
+/// split into the table's and the smoothing's share.
+#[derive(Clone, Copy)]
+struct SpanOrigin {
+    s: f64,
+    table_e: f64,
+    smoothing_e: f64,
+}
+
 /// The follower's path state at one time, read once for every quantity
 /// derived from it: where the odometer stands, how fast it runs and turns,
 /// and what is laid there.
@@ -3016,7 +3073,7 @@ struct PathRead {
     speed: f64,
     rate: f64,
     rate_deriv: f64,
-    s: f64,
+    distance: OdometerDistance,
     laid: LaidRead,
 }
 
@@ -3029,6 +3086,7 @@ pub(crate) struct FollowerSignal<'a> {
     /// starts where its predecessor ends whether one emit held both or not.
     s_end: f64,
     e_spans_start: f64,
+    span_origin: SpanOrigin,
     leaders: ShapedLeaders<'a>,
     raw_delta: Option<(&'a ContinuousAxis, f64)>,
     grid: Vec<f64>,
@@ -3115,6 +3173,7 @@ impl<'a> FollowerSignal<'a> {
             s_start: odometer.start,
             s_end,
             e_spans_start: state.spans_e(odometer.start),
+            span_origin: state.span_origin(odometer.start),
             leaders: shaped_leaders,
             raw_delta,
             grid,
@@ -3238,28 +3297,35 @@ impl<'a> FollowerSignal<'a> {
     fn path_read(&self, t: f64) -> PathRead {
         let motion = self.leaders.motion(t);
         let speed = motion.speed();
-        let s = self.s_owned(t);
+        let distance = self.owned_distance(t);
         PathRead {
             motion,
             speed,
             rate: self.odometer_scale * speed,
             rate_deriv: self.odometer_scale * self.leader_speed_deriv(t, &motion, speed),
-            s,
-            laid: self.laid_at(s),
+            distance,
+            laid: self.laid_at(distance.s),
         }
     }
 
-    fn pva_at_distance(&self, t: f64, s: f64) -> (f64, f64, f64) {
+    fn pva_at(&self, t: f64) -> (f64, f64, f64) {
         let (rate, rate_deriv) = self.odometer_rate(t);
-        self.pva_laid(t, (rate, rate_deriv), self.laid_at(s))
+        let distance = self.owned_distance(t);
+        self.pva_laid(t, (rate, rate_deriv), self.laid_at(distance.s), distance)
     }
 
     fn pva_read(&self, t: f64, read: &PathRead) -> (f64, f64, f64) {
-        self.pva_laid(t, (read.rate, read.rate_deriv), read.laid)
+        self.pva_laid(t, (read.rate, read.rate_deriv), read.laid, read.distance)
     }
 
-    fn pva_laid(&self, t: f64, (rate, rate_deriv): (f64, f64), laid: LaidRead) -> (f64, f64, f64) {
-        let spans = laid.e - self.e_spans_start;
+    fn pva_laid(
+        &self,
+        t: f64,
+        (rate, rate_deriv): (f64, f64),
+        laid: LaidRead,
+        distance: OdometerDistance,
+    ) -> (f64, f64, f64) {
+        let spans = self.state.spans_e_since(&self.span_origin, distance);
         let (raw_p, raw_v, raw_a) = self.raw_delta.map_or((0.0, 0.0, 0.0), |(axis, at_start)| {
             let (position, velocity, acceleration) = axis_pva(axis, t);
             (position - at_start, velocity, acceleration)
@@ -3324,7 +3390,7 @@ impl<'a> FollowerSignal<'a> {
         let PathRead {
             rate,
             rate_deriv,
-            s,
+            distance: OdometerDistance { s, .. },
             laid,
             ..
         } = *read;
@@ -3414,6 +3480,13 @@ impl<'a> FollowerSignal<'a> {
     }
     fn s_owned_offset(&self, t: f64) -> f64 {
         self.s_offset(t).min(self.s_owned_end - self.s_start)
+    }
+    fn owned_distance(&self, t: f64) -> OdometerDistance {
+        let offset = self.s_offset(t);
+        OdometerDistance {
+            s: (self.s_start + offset).min(self.s_owned_end),
+            offset: offset.min(self.s_owned_end - self.s_start),
+        }
     }
     fn s_end(&self) -> f64 {
         self.s_end
@@ -3823,7 +3896,9 @@ fn refine_rest_boundary(
 
 impl TrackSignal for FollowerSignal<'_> {
     fn eval(&self, t: f64) -> f64 {
-        let spans = self.state.spans_e(self.s_owned(t)) - self.e_spans_start;
+        let spans = self
+            .state
+            .spans_e_since(&self.span_origin, self.owned_distance(t));
         let raw = self
             .raw_delta
             .map_or(0.0, |(axis, at_start)| axis_pva(axis, t).0 - at_start);
@@ -3859,7 +3934,7 @@ impl TrackSignal for FollowerSignal<'_> {
 
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         self.pva_memo
-            .get_or(t, |t| self.pva_at_distance(t, self.s_owned(t)))
+            .get_or(t, |t| self.pva_at(t))
     }
     fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
         let support = (self.grid[0], self.grid[self.grid.len() - 1]);

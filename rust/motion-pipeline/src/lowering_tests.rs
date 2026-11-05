@@ -93,6 +93,7 @@ fn bowed_fit(seam_continuity: SeamContinuity) -> (Vec<f64>, f64) {
             acceleration: &acceleration,
             held_miss: &|_| 0.0,
             held_ranks_misses: false,
+            exemption: None,
         },
         LadderBudget {
             tol: FitTol::absolute(1e-4, 50.0),

@@ -379,6 +379,22 @@ pub(crate) struct LadderTruth<'a> {
     /// Whether a miss's closest rung is the closest at the held points as
     /// well: only where the closest rung is kept, at the floor.
     pub held_ranks_misses: bool,
+    /// Where the signal's acceleration is exempt from the fit, if anywhere
+    /// in the span.
+    pub exemption: Option<AccelerationExemption<'a>>,
+}
+
+/// Where a signal's acceleration is exempt from the fit — inside an
+/// unshaped leader's square-root onset sliver the advance reads a singular
+/// jerk the hull does not hold — and what holds a rung there instead: its
+/// velocity within `velocity` of the signal's, and its own acceleration
+/// within `ceiling` all along the span. Probes outside keep their
+/// acceleration test.
+#[derive(Clone, Copy)]
+pub(crate) struct AccelerationExemption<'a> {
+    pub exempt: &'a dyn Fn(f64) -> bool,
+    pub velocity: f64,
+    pub ceiling: f64,
 }
 
 /// The signal at one node `x ∈ [-1, 1]` between the ladder's probes.
@@ -455,9 +471,12 @@ fn preserves_acceleration_monotonicity(mono_u: &[f64], trend: AccelerationTrend)
 /// A rung's position and acceleration errors at the ladder's probes, each
 /// read once for both its acceptance and, where it is refused, its rank:
 /// acceptance reads them in order up to the first past the tolerance, and
-/// only a refused rung's rank reads the rest.
+/// only a refused rung's rank reads the rest. At a probe whose acceleration
+/// is exempt, the acceleration error is the rung's velocity error over the
+/// exemption's velocity, scaled to the acceleration tolerance.
 struct ProbeErrors<'r> {
     mono_u: &'r [f64],
+    h: f64,
     dd_scale: f64,
     position: [f64; LADDER_PROBES_U.len()],
     acceleration: [f64; LADDER_PROBES_U.len()],
@@ -468,6 +487,7 @@ impl<'r> ProbeErrors<'r> {
     fn of(mono_u: &'r [f64], h: f64) -> Self {
         Self {
             mono_u,
+            h,
             dd_scale: (2.0 / h) * (2.0 / h),
             position: [0.0; LADDER_PROBES_U.len()],
             acceleration: [0.0; LADDER_PROBES_U.len()],
@@ -475,17 +495,23 @@ impl<'r> ProbeErrors<'r> {
         }
     }
 
-    fn read_next(&mut self, truth: &LadderTruth) {
+    fn read_next(&mut self, truth: &LadderTruth, tol: FitTol) {
         let (index, u) = (self.read, LADDER_PROBES_U[self.read]);
         self.position[index] = (eval_mono(self.mono_u, u) - (truth.position)(u)).abs();
-        self.acceleration[index] =
-            (eval_mono_dd(self.mono_u, u) * self.dd_scale - (truth.acceleration)(u)).abs();
+        self.acceleration[index] = match truth.exemption.filter(|exemption| (exemption.exempt)(u)) {
+            Some(exemption) => {
+                let velocity_error =
+                    (eval_mono_d(self.mono_u, u) * (2.0 / self.h) - (truth.velocity)(u)).abs();
+                velocity_error / exemption.velocity * tol.accel_mm_s2
+            }
+            None => (eval_mono_dd(self.mono_u, u) * self.dd_scale - (truth.acceleration)(u)).abs(),
+        };
         self.read += 1;
     }
 
     fn within(&mut self, truth: &LadderTruth, tol: FitTol) -> bool {
         while self.read < LADDER_PROBES_U.len() {
-            self.read_next(truth);
+            self.read_next(truth, tol);
             let index = self.read - 1;
             if !(self.position[index] <= tol.pos_mm && self.acceleration[index] <= tol.accel_mm_s2)
             {
@@ -495,9 +521,9 @@ impl<'r> ProbeErrors<'r> {
         true
     }
 
-    fn all(&mut self, truth: &LadderTruth) -> &Self {
+    fn all(&mut self, truth: &LadderTruth, tol: FitTol) -> &Self {
         while self.read < LADDER_PROBES_U.len() {
-            self.read_next(truth);
+            self.read_next(truth, tol);
         }
         self
     }
@@ -527,6 +553,9 @@ fn candidate_ok(
         && policy
             .acceleration_monotonicity
             .is_none_or(|trend| preserves_acceleration_monotonicity(mono_u, trend))
+        && truth
+            .exemption
+            .is_none_or(|exemption| acceleration_bound(mono_u, h) <= exemption.ceiling)
         && (truth.held_miss)(mono_u) <= 1.0
 }
 
@@ -538,8 +567,11 @@ fn worst_miss(
     truth: &LadderTruth,
     budget: LadderBudget,
 ) -> (f64, f64) {
-    let errors = errors.all(truth);
+    let errors = errors.all(truth, budget.tol);
     let mono_u = errors.mono_u;
+    let ceiling_miss = truth
+        .exemption
+        .map_or(0.0, |exemption| acceleration_bound(mono_u, h) / exemption.ceiling);
     let (probe, score) = LADDER_PROBES_U
         .iter()
         .enumerate()
@@ -552,6 +584,7 @@ fn worst_miss(
         })
         .max_by(|left, right| left.1.total_cmp(&right.1))
         .expect("ladder probes are empty");
+    let score = score.max(ceiling_miss);
     if truth.held_ranks_misses {
         (probe, score.max((truth.held_miss)(mono_u)))
     } else {
@@ -643,6 +676,15 @@ fn climb(
             return Some(cubic);
         }
     }
+    if let Some(exemption) = truth.exemption {
+        for rung in exempt_rungs(exemption, truth, h, endpoint_delta) {
+            let mut errors = ProbeErrors::of(&rung, h);
+            if candidate_ok(&mut errors, h, truth, budget, policy) {
+                return Some(rung);
+            }
+            refused(&mut errors);
+        }
+    }
     let quintic = ladder_candidate(base, 5, truth_p);
     let mut errors = ProbeErrors::of(&quintic, h);
     if candidate_ok(&mut errors, h, truth, budget, policy) {
@@ -660,6 +702,40 @@ fn climb(
         }
     }
     None
+}
+
+/// The rungs for a span reaching an exempt acceleration, which leave the
+/// velocity free at an exempt end: a velocity the signal's own does not
+/// reach there without passing the ceiling may step by up to the
+/// exemption's velocity at that seam, as the advance steps it at an
+/// unshaped leader's acceleration step. The quadratic keeping the velocity
+/// of whichever end is not exempt, and the chord, which keeps neither.
+fn exempt_rungs(
+    exemption: AccelerationExemption,
+    truth: &LadderTruth,
+    h: f64,
+    endpoint_delta: f64,
+) -> Vec<Vec<f64>> {
+    let start = (truth.position)(-1.0);
+    let mut rungs = Vec::with_capacity(2);
+    if !(exemption.exempt)(-1.0) {
+        rungs.push(quadratic_in_u(start, (truth.velocity)(-1.0), h, endpoint_delta));
+    }
+    if !(exemption.exempt)(1.0) {
+        rungs.push(end_quadratic_in_u(start, (truth.velocity)(1.0), h, endpoint_delta));
+    }
+    rungs.push(anchored_acceleration_quadratic_in_u(start, 0.0, h, endpoint_delta));
+    rungs
+}
+
+/// [`quadratic_in_u`] matching the right endpoint's velocity instead.
+pub(crate) fn end_quadratic_in_u(p_start: f64, v_end: f64, h: f64, endpoint_delta: f64) -> Vec<f64> {
+    let end_travel = v_end * h;
+    vec![
+        p_start + 0.75 * endpoint_delta - 0.25 * end_travel,
+        0.5 * endpoint_delta,
+        0.25 * (end_travel - endpoint_delta),
+    ]
 }
 
 /// The miss a refused ladder reports: its closest rung and where, at the
