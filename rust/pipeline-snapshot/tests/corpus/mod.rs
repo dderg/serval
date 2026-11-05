@@ -22,6 +22,7 @@ pub mod known_extruder_excesses;
 #[cfg(feature = "fit-audit")]
 pub mod known_fit_violations;
 pub mod ratchet;
+pub mod retract_placement;
 
 pub const SIM_GCODES: [&str; 6] = [
     "voron_first_layers",
