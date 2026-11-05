@@ -244,8 +244,8 @@ overflow-checks = true
 overflow-checks = true
 
 [profile.dev]
-opt-level = 1            # eval correctness tests run faster than -O0; still debuggable
-debug = true
+opt-level = 1            # eval correctness tests run faster than -O0
+debug = "line-tables-only"
 
 # Snapshot-iteration profile: identical float semantics to `release` (Rust
 # never reassociates or contracts FP regardless of opt/LTO settings), but no
