@@ -67,7 +67,10 @@ impl PathReach {
             return (self.lo, self.hi);
         }
         let inset_of = |exact: bool| if exact { 0.0 } else { inset };
-        (self.lo + inset_of(self.exact.0), self.hi - inset_of(self.exact.1))
+        (
+            self.lo + inset_of(self.exact.0),
+            self.hi - inset_of(self.exact.1),
+        )
     }
 }
 
