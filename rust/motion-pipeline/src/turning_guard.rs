@@ -3,8 +3,8 @@ use std::collections::VecDeque;
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{CurvatureProfile, Segment};
 use geometry::{
-    ExtrusionBudget, Move, MoveVelocity, ScalarLaw, VelocityError, VelocityPlanParams,
-    brake_horizon, replan_span, seam_requires_stop,
+    BrakeMove, ExtrusionBudget, Move, MoveVelocity, ScalarLaw, VelocityError, VelocityPlanParams,
+    brake_horizon, brake_move, replan_span, seam_requires_stop,
 };
 use trajectory::AxisChainSet;
 
@@ -94,6 +94,8 @@ struct Entries {
     velocities: Vec<MoveVelocity>,
     budgets: Vec<ExtrusionBudget>,
     stops: Vec<bool>,
+    /// Each move as the emission horizon reads it, at [`SCALE_FLOOR`].
+    floor_brakes: Vec<BrakeMove>,
     scales: Vec<f64>,
     backoffs: Vec<u32>,
     /// The first grid cell of a move whose check is still to prove, `None`
@@ -306,11 +308,25 @@ impl TurningGuard {
             velocity,
             budget,
         } = planned;
-        let entries = &mut self.entries;
-        let stop = entries
+        let held = &self.entries;
+        let stop = held
             .moves
             .last()
             .is_some_and(|before| seam_requires_stop(before, &geometry, self.config.corner));
+        let floor_brake = brake_move(
+            &geometry,
+            &budget,
+            stop,
+            held.moves
+                .last()
+                .zip(held.budgets.last())
+                .zip(held.floor_brakes.last())
+                .map(|((m, budget), brake)| (m, budget, brake)),
+            SCALE_FLOOR,
+            self.plan_params(),
+        )
+        .unwrap_or_else(|error| panic!("turning guard: brake caps failed: {error:?}"));
+        let entries = &mut self.entries;
         let previous = entries.timing.last().copied();
         let timing = timing_of(&geometry, &velocity, previous, self.carried_position);
         if let Some(start) = timing.start {
@@ -330,6 +346,7 @@ impl TurningGuard {
         entries.velocities.push(velocity);
         entries.budgets.push(budget);
         entries.stops.push(stop);
+        entries.floor_brakes.push(floor_brake);
         entries.scales.push(1.0);
         entries.backoffs.push(0);
         entries.unproven.push(Some(i64::MIN));
@@ -847,18 +864,12 @@ impl TurningGuard {
             return None;
         }
         let entries = &self.entries;
-        let seams: Vec<f64> = entries.velocities[since..reach]
-            .iter()
-            .map(|velocity| velocity.entry_v)
-            .chain(std::iter::once(entries.velocities[reach - 1].exit_v))
-            .collect();
         brake_horizon(
-            &entries.moves[since..reach],
-            &entries.stops[since..reach],
-            &entries.budgets[since..reach],
-            &vec![SCALE_FLOOR; reach - since],
-            &seams,
-            self.plan_params(),
+            &entries.floor_brakes[since..reach],
+            entries.velocities[since..reach]
+                .iter()
+                .map(|velocity| velocity.entry_v),
+            self.config.integration_tol,
         )
         .unwrap_or_else(|error| panic!("turning guard: brake horizon failed: {error:?}"))
         .map(|seam| since + seam)
@@ -875,6 +886,7 @@ impl TurningGuard {
         let entries = &mut self.entries;
         self.history.extend(entries.summaries.drain(..count));
         entries.stops.drain(..count);
+        entries.floor_brakes.drain(..count);
         entries.scales.drain(..count);
         entries.backoffs.drain(..count);
         entries.unproven.drain(..count);

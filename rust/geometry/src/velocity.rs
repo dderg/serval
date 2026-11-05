@@ -313,49 +313,89 @@ pub fn replan_span(
     )
 }
 
-/// The latest seam of `moves` (an index into `seam_speeds`, one per seam)
-/// whose speed a rest at their far end could not lower: there the brake
-/// envelope from that rest, through the moves' ceilings and acceleration
-/// budgets scaled by `accel_scales`, reaches at least the seam's speed. Any
+/// What [`brake_horizon`] reads of a move: its kinematics on its
+/// acceleration budget scaled by a fixed factor, and the ceiling of the seam
+/// into it, `None` at the start of a span.
+pub struct BrakeMove {
+    kin: Kinematics,
+    entry_ceiling: Option<f64>,
+    line_no: u32,
+}
+
+/// Move `m`'s [`BrakeMove`] on its budget scaled by `accel_scale`, entered
+/// from `previous` (the move before it, its budget and its own brake move
+/// under the same scale) or at the start of a span, at rest where
+/// `stop_before`.
+pub fn brake_move(
+    m: &crate::Move,
+    budget: &ExtrusionBudget,
+    stop_before: bool,
+    previous: Option<(&crate::Move, &ExtrusionBudget, &BrakeMove)>,
+    accel_scale: f64,
+    params: VelocityPlanParams,
+) -> Result<BrakeMove, VelocityError> {
+    let mut report = VelocityReport::default();
+    let kin = build_move_caps(
+        std::slice::from_ref(m),
+        std::slice::from_ref(budget),
+        Some(&[accel_scale]),
+        params,
+        &mut report,
+    )?
+    .pop()
+    .expect("one move has one set of caps")
+    .kin;
+    let entry_ceiling = previous.map(|(up_move, up_budget, up)| {
+        if stop_before {
+            0.0
+        } else {
+            seam_ceiling(
+                (up_move, m),
+                (up_budget, budget),
+                (&up.kin, &kin),
+                &mut report,
+            )
+        }
+    });
+    Ok(BrakeMove {
+        kin,
+        entry_ceiling,
+        line_no: m.source.start_line,
+    })
+}
+
+/// The latest seam of `moves` (an index into `moves`, the seam entering
+/// that move) whose speed in `entry_speeds` a rest at their far end could
+/// not lower: there the brake envelope from that rest, through the moves'
+/// ceilings and scaled budgets, reaches at least the seam's speed. Any
 /// lowering of the plan at or past the far end then leaves every seam up to
 /// it standing, the plan before a seam reading only that seam's speed.
 /// `None` where no seam of `moves` stands clear.
 pub fn brake_horizon(
-    moves: &[crate::Move],
-    stop_before: &[bool],
-    budgets: &[ExtrusionBudget],
-    accel_scales: &[f64],
-    seam_speeds: &[f64],
-    params: VelocityPlanParams,
+    moves: &[BrakeMove],
+    entry_speeds: impl DoubleEndedIterator<Item = f64> + ExactSizeIterator,
+    integration_tol: f64,
 ) -> Result<Option<usize>, VelocityError> {
-    let n = moves.len();
-    assert_eq!(seam_speeds.len(), n + 1, "one speed per seam");
-    assert_eq!(accel_scales.len(), n, "one scale per move");
-    let tol = params.integration_tol;
-    let mut report = VelocityReport::default();
-    let caps = build_move_caps(moves, budgets, Some(accel_scales), params, &mut report)?;
-    let seeded = seed_seam_velocities(
-        moves,
-        &caps,
-        budgets,
-        stop_before,
-        (0.0, 0.0),
-        None,
-        &mut report,
-    );
+    assert_eq!(entry_speeds.len(), moves.len(), "one entry speed per move");
     let mut brake = 0.0_f64;
-    for k in (0..n).rev() {
-        let kin = &caps[k].kin;
-        let reach =
-            disk::disk_reach_v_rev(kin, brake, kin.length, tol).ok_or(VelocityError::Diverged {
-                line_no: moves[k].source.start_line,
-            })?;
+    for (k, (brake_move, seam_speed)) in moves.iter().zip(entry_speeds).enumerate().rev() {
+        let kin = &brake_move.kin;
+        let reach = disk::disk_reach_v_rev(kin, brake, kin.length, integration_tol).ok_or(
+            VelocityError::Diverged {
+                line_no: brake_move.line_no,
+            },
+        )?;
         brake = if k == 0 {
             reach.v
         } else {
-            reach.v.min(seeded.v[k])
+            reach.v.min(brake_move.entry_ceiling.unwrap_or_else(|| {
+                panic!(
+                    "brake horizon: line {} starts a span inside one",
+                    brake_move.line_no
+                )
+            }))
         };
-        if seam_speeds[k] <= brake {
+        if seam_speed <= brake {
             return Ok(Some(k));
         }
     }
@@ -642,23 +682,12 @@ fn seed_seam_velocities(
             report.stops += 1;
             is_anchor[k] = true;
         } else {
-            let up = &caps[k - 1].kin;
-            let dn = &caps[k].kin;
-            let kappa_up = (up.kappa0 + up.sigma * up.length).abs();
-            let kappa_dn = dn.kappa0.abs();
-            let boundary_vlim =
-                disk::limit_speed(kappa_up, up.accel).min(disk::limit_speed(kappa_dn, dn.accel));
-            v[k] = up.flat_ceiling.min(dn.flat_ceiling).min(boundary_vlim);
-            let step_ceiling = extruder_caps::ratio_step_ceiling(
-                &moves[k - 1],
-                &moves[k],
+            v[k] = seam_ceiling(
+                (&moves[k - 1], &moves[k]),
                 (&budgets[k - 1], &budgets[k]),
-                up.accel.max(dn.accel),
+                (&caps[k - 1].kin, &caps[k].kin),
+                report,
             );
-            if step_ceiling < v[k] {
-                report.ratio_step_bound += 1;
-                v[k] = step_ceiling;
-            }
             if let Some(ceilings) = seam_ceilings {
                 v[k] = v[k].min(ceilings[k]);
             }
@@ -669,6 +698,33 @@ fn seed_seam_velocities(
         is_anchor,
         forward_rails: vec![None; n],
         backward_rails: vec![None; n],
+    }
+}
+
+/// The fastest a seam between two moves may run on their kinematics: their
+/// feed ceilings, the curvature limits on either side, and the ratio step.
+fn seam_ceiling(
+    (up_move, dn_move): (&crate::Move, &crate::Move),
+    (up_budget, dn_budget): (&ExtrusionBudget, &ExtrusionBudget),
+    (up, dn): (&Kinematics, &Kinematics),
+    report: &mut VelocityReport,
+) -> f64 {
+    let kappa_up = (up.kappa0 + up.sigma * up.length).abs();
+    let kappa_dn = dn.kappa0.abs();
+    let boundary_vlim =
+        disk::limit_speed(kappa_up, up.accel).min(disk::limit_speed(kappa_dn, dn.accel));
+    let ceiling = up.flat_ceiling.min(dn.flat_ceiling).min(boundary_vlim);
+    let step_ceiling = extruder_caps::ratio_step_ceiling(
+        up_move,
+        dn_move,
+        (up_budget, dn_budget),
+        up.accel.max(dn.accel),
+    );
+    if step_ceiling < ceiling {
+        report.ratio_step_bound += 1;
+        step_ceiling
+    } else {
+        ceiling
     }
 }
 

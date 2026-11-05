@@ -375,13 +375,26 @@ proptest! {
         let reach = 1 + ((reach * n as f64) as usize).min(n - 1);
         let scales = &scales[..reach];
         let seams = &stream.window.boundary_speeds[..=reach];
+        let mut brakes: Vec<BrakeMove> = Vec::with_capacity(reach);
+        for k in 0..reach {
+            let previous = k
+                .checked_sub(1)
+                .map(|up| (&stream.moves[up], &stream.budgets[up], &brakes[up]));
+            let brake = brake_move(
+                &stream.moves[k],
+                &stream.budgets[k],
+                stream.stop_before[k],
+                previous,
+                scales[k],
+                params(0.0),
+            )
+            .expect("the window's moves have caps");
+            brakes.push(brake);
+        }
         let horizon = brake_horizon(
-            &stream.moves[..reach],
-            &stream.stop_before[..reach],
-            &stream.budgets[..reach],
-            scales,
-            seams,
-            params(0.0),
+            &brakes,
+            seams[..reach].iter().copied(),
+            params(0.0).integration_tol,
         )
         .expect("the window's moves have a brake envelope");
         let Some(standing) = horizon else {
