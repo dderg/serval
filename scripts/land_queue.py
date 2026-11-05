@@ -214,8 +214,60 @@ def accept(tree: Path, cases: list[str], message: Path) -> None:
     git(tree, "commit", "-q", "-F", str(message))
 
 
+MAX_REMERGES = 2
+
+
+def pr_is_dirty(tree: Path, branch: str) -> bool:
+    state = pending.run(
+        [
+            "gh",
+            "pr",
+            "view",
+            branch,
+            "--json",
+            "mergeStateStatus",
+            "--jq",
+            ".mergeStateStatus",
+        ],
+        tree,
+    ).strip()
+    return state == "DIRTY"
+
+
+def remerge_main(tree: Path, entry: Entry) -> bool:
+    """Main moved while the checks ran and the PR now conflicts with it
+    (6 landings in one audit window, each a hand-resolved merge and a full
+    CI cycle). Merge main again here: the throughput-baseline merge driver
+    resolves the usual hotspot, and a clean result is pushed by the next
+    land-pr.sh run. A real conflict is aborted and reported with its files."""
+    pending.run(["git", "fetch", "-q", "origin"], tree)
+    merged = subprocess.run(
+        [
+            "git",
+            "merge",
+            "--no-edit",
+            "-q",
+            "-m",
+            f"Merge main into {entry.branch}",
+            "origin/main",
+        ],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+    )
+    if merged.returncode == 0:
+        return True
+    files = git(tree, "diff", "--name-only", "--diff-filter=U")
+    subprocess.run(["git", "merge", "--abort"], cwd=tree)
+    raise QueueError(
+        f"{entry.branch}: main moved and merging it conflicts; resolve by hand, then rerun.\n"
+        f"Conflicted files:\n{files}"
+    )
+
+
 def land(tree: Path, entry: Entry, body: str) -> None:
     reruns = 0
+    remerges = 0
     while True:
         result = subprocess.run(
             [
@@ -247,6 +299,13 @@ def land(tree: Path, entry: Entry, body: str) -> None:
             )
         )
         head = git(tree, "rev-parse", "HEAD")
+        if remerges < MAX_REMERGES and pr_is_dirty(tree, entry.branch):
+            remerges += 1
+            print(
+                f"land_queue: PR conflicts with main; merging main again ({remerges}/{MAX_REMERGES})"
+            )
+            remerge_main(tree, entry)
+            continue
         run_id = failed_flaky_run([r for r in runs if r["headSha"] == head])
         if run_id is None or reruns >= MAX_FLAKE_RERUNS:
             raise QueueError(f"{entry.branch}: failed to land")

@@ -566,6 +566,47 @@ pub(crate) fn ladder_fit(
     budget: LadderBudget,
     policy: LadderPolicy,
 ) -> Result<Vec<f64>, LadderMiss> {
+    let mut closest: Option<(f64, f64, Vec<f64>)> = None;
+    let accepted = climb(base, span, truth, budget, policy, |errors| {
+        let (probe, score) = worst_miss(errors, span.h, truth, budget);
+        if closest
+            .as_ref()
+            .is_none_or(|(_, closest_score, _)| score < *closest_score)
+        {
+            closest = Some((probe, score, errors.mono_u.to_vec()));
+        }
+    });
+    if let Some(rung) = accepted {
+        return Ok(rung);
+    }
+    let (u, _, closest) = closest.expect("a refused ladder ranked its quintic");
+    Err(ladder_miss(closest, u, span.h, truth))
+}
+
+/// [`ladder_fit`]'s accepted rung, or `None` where it refuses them all,
+/// for a caller that discards a refusal: the refused rungs go unranked,
+/// which spares reading every probe of each and its held miss.
+pub(crate) fn ladder_accept(
+    base: &[f64],
+    span: LadderSpan,
+    truth: &LadderTruth,
+    budget: LadderBudget,
+    policy: LadderPolicy,
+) -> Option<Vec<f64>> {
+    climb(base, span, truth, budget, policy, |_| {})
+}
+
+/// The rungs in order, the first one `candidate_ok` accepts returned;
+/// `refused` is handed the probe errors, as far as they were read, of each
+/// rung from the quintic up that it refuses.
+fn climb(
+    base: &[f64],
+    span: LadderSpan,
+    truth: &LadderTruth,
+    budget: LadderBudget,
+    policy: LadderPolicy,
+    mut refused: impl FnMut(&mut ProbeErrors),
+) -> Option<Vec<f64>> {
     let LadderSpan { h, endpoint_delta } = span;
     let truth_p = truth.position;
     let truth_v = truth.velocity;
@@ -582,13 +623,13 @@ pub(crate) fn ladder_fit(
             );
             let mut errors = ProbeErrors::of(&anchored_acceleration_quadratic, h);
             if candidate_ok(&mut errors, h, truth, budget, policy) {
-                return Ok(anchored_acceleration_quadratic);
+                return Some(anchored_acceleration_quadratic);
             }
             let anchored_quadratic =
                 quadratic_in_u(truth_p(-1.0), truth_v(-1.0), h, endpoint_delta);
             let mut errors = ProbeErrors::of(&anchored_quadratic, h);
             if candidate_ok(&mut errors, h, truth, budget, policy) {
-                return Ok(anchored_quadratic);
+                return Some(anchored_quadratic);
             }
         }
         let cubic = cubic_in_u(
@@ -599,29 +640,32 @@ pub(crate) fn ladder_fit(
         );
         let mut errors = ProbeErrors::of(&cubic, h);
         if candidate_ok(&mut errors, h, truth, budget, policy) {
-            return Ok(cubic);
+            return Some(cubic);
         }
     }
     let quintic = ladder_candidate(base, 5, truth_p);
     let mut errors = ProbeErrors::of(&quintic, h);
     if candidate_ok(&mut errors, h, truth, budget, policy) {
-        return Ok(quintic);
+        return Some(quintic);
     }
-    let (mut u, mut closest_score) = worst_miss(&mut errors, h, truth, budget);
-    let mut closest = quintic;
+    refused(&mut errors);
     if h >= policy.high_degree_span_floor {
         for degree in [6, 7, 9, 11, LADDER_MAX_DEGREE] {
             let candidate = ladder_candidate(base, degree, truth_p);
             let mut errors = ProbeErrors::of(&candidate, h);
             if candidate_ok(&mut errors, h, truth, budget, policy) {
-                return Ok(candidate);
+                return Some(candidate);
             }
-            let (probe, score) = worst_miss(&mut errors, h, truth, budget);
-            if score < closest_score {
-                (u, closest_score, closest) = (probe, score, candidate);
-            }
+            refused(&mut errors);
         }
     }
+    None
+}
+
+/// The miss a refused ladder reports: its closest rung and where, at the
+/// probe `u` it misses worst, it strays from the truth.
+fn ladder_miss(closest: Vec<f64>, u: f64, h: f64, truth: &LadderTruth) -> LadderMiss {
+    let (truth_p, truth_v, truth_a) = (truth.position, truth.velocity, truth.acceleration);
     let source = LadderPva {
         position: truth_p(u),
         velocity: truth_v(u),
@@ -633,7 +677,7 @@ pub(crate) fn ladder_fit(
         velocity: eval_mono_d(&closest, u) * (2.0 / h),
         acceleration: eval_mono_dd(&closest, u) * dd_scale,
     };
-    Err(LadderMiss {
+    LadderMiss {
         closest_rung: closest,
         failure: LadderFailure {
             u,
@@ -655,7 +699,7 @@ pub(crate) fn ladder_fit(
                 acceleration: truth_a(1.0),
             },
         },
-    })
+    }
 }
 
 pub(crate) fn exact_piece(mono_u: &[f64], u_start: f64, u_end: f64, h: f64) -> BezierPiece {
