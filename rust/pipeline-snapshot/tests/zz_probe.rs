@@ -141,12 +141,18 @@ fn next_stop(
     None
 }
 
-
 #[test]
 #[ignore]
 fn probe() {
-    for corpus::Case { name, gcode, config } in corpus::corpus() {
-        let Some(snapshot) = corpus::plan(&name, &gcode, Path::new(&config)) else { continue };
+    for corpus::Case {
+        name,
+        gcode,
+        config,
+    } in corpus::corpus()
+    {
+        let Some(snapshot) = corpus::plan(&name, &gcode, Path::new(&config)) else {
+            continue;
+        };
         let waypoints = corpus::waypoints(&gcode, Path::new(&config));
         let radius = corpus::motion_settings(Path::new(&config)).fit_tolerance_mm;
         let trajectory = snapshot.toolhead.as_ref().unwrap_or(&snapshot.trajectory);
@@ -154,9 +160,17 @@ fn probe() {
         let mut cursor = 0;
         let (mut before, mut after, mut runs, mut missing) = (0.0, 0.0, 0, 0);
         for run in rest_runs(&waypoints) {
-            let Some(((s0, s1), past)) = next_stop(trajectory, &grid, cursor, run.at, radius) else { missing += 1; continue };
+            let Some(((s0, s1), past)) = next_stop(trajectory, &grid, cursor, run.at, radius)
+            else {
+                missing += 1;
+                continue;
+            };
             let lo = grid.partition_point(|&t| t < s0);
-            let resting: Vec<f64> = grid[lo..past].iter().copied().filter(|&t| t <= s1 && speed(trajectory, t) <= REST_MM_S).collect();
+            let resting: Vec<f64> = grid[lo..past]
+                .iter()
+                .copied()
+                .filter(|&t| t <= s1 && speed(trajectory, t) <= REST_MM_S)
+                .collect();
             cursor = past;
             runs += 1;
             if let (Some(r0), Some(r1)) = (resting.first(), resting.last()) {
@@ -165,6 +179,9 @@ fn probe() {
             }
         }
         let total = snapshot.traversal_time_s;
-        println!("SLACK {name} runs={runs} missing={missing} before={before:.4} after={after:.4} total={total:.3} pct={:.2}", 100.0 * (before + after) / total);
+        println!(
+            "SLACK {name} runs={runs} missing={missing} before={before:.4} after={after:.4} total={total:.3} pct={:.2}",
+            100.0 * (before + after) / total
+        );
     }
 }
