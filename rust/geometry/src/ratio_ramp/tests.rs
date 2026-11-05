@@ -214,7 +214,7 @@ fn capped_demand(
 fn a_step_is_held_at_the_fastest_the_leaders_cross_it_within_the_longest_ramp() {
     let (ratio, accel) = (0.0352, 493.0);
     let cap = P1.step_speed_cap(ratio, ratio, accel, 0.0, f64::INFINITY, f64::INFINITY);
-    let crossing = crossing_speed(cap, accel);
+    let crossing = crossing_speed(cap, accel, RATIO_RAMP_MAX_TIME_S);
     assert!(
         (crossing - cap - 7.395).abs() < 1e-9,
         "braking at {accel} mm/s², the leaders cross at {crossing} mm/s a step capped at {cap}"
@@ -234,6 +234,16 @@ fn a_step_is_held_at_the_fastest_the_leaders_cross_it_within_the_longest_ramp() 
         "leaders that move no faster than {ceiling_nearby} mm/s near the step cap it at \
          {held_by_ceiling} mm/s, not above {cap} mm/s"
     );
+    let kernel_chain = RatioRampRule {
+        kernel_jerk_per_accel_hz: 200.0,
+        ..P1
+    };
+    let read_at_the_step = P1.step_speed_cap(ratio, ratio, accel, 0.0, f64::INFINITY, 0.0);
+    assert_eq!(
+        kernel_chain.step_speed_cap(ratio, ratio, accel, 0.0, f64::INFINITY, f64::INFINITY),
+        read_at_the_step,
+        "a follower kernel spreads the ramp's edge, so the step is read where it is crossed"
+    );
 }
 
 #[test]
@@ -251,8 +261,8 @@ fn a_rest_beside_a_step_caps_its_speed_at_the_ramp_the_room_leaves() {
         beside_rest < 0.8 * free,
         "a rest {room_mm} mm away caps the step at {beside_rest} mm/s, free {free} mm/s"
     );
-    let crossing = crossing_speed(beside_rest, accel);
-    let ramp_time = rest_room_ramp_time(crossing, room_mm);
+    let ramp_time = rest_room_ramp_time(beside_rest, room_mm);
+    let crossing = crossing_speed(beside_rest, accel, ramp_time);
     assert!(ramp_time < RATIO_RAMP_MAX_TIME_S, "{ramp_time}");
     let (velocity, accel_demand) =
         capped_demand(&rule, ramp_time, (ratio, accel), (beside_rest, crossing));
@@ -261,7 +271,7 @@ fn a_rest_beside_a_step_caps_its_speed_at_the_ramp_the_room_leaves() {
         (velocity - 50.0).abs() < 1e-6 || (accel_demand - 20000.0).abs() < 1e-6,
         "the capped step asks {velocity} mm/s and {accel_demand} mm/s² of the extruder"
     );
-    let past_reach = rest_room_reach_mm(crossing_speed(free, accel)) * (1.0 + 1e-9);
+    let past_reach = rest_room_reach_mm(free) * (1.0 + 1e-9);
     assert_eq!(
         rule.step_speed_cap(ratio, ratio, accel, 0.0, past_reach, f64::INFINITY),
         free

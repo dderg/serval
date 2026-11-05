@@ -86,10 +86,9 @@ fn rest_room_ramp_time(speed: f64, room_mm: f64) -> f64 {
 }
 
 /// The fastest leaders crossing a ratio step at `speed` under an
-/// acceleration of up to `accel` move within half the longest ramp of it,
-/// the window the projection reads a step's crossing over.
-fn crossing_speed(speed: f64, accel: f64) -> f64 {
-    speed + 0.5 * accel * RATIO_RAMP_MAX_TIME_S
+/// acceleration of up to `accel` move at the edges of a ramp of `tau`.
+fn crossing_speed(speed: f64, accel: f64, tau: f64) -> f64 {
+    speed + 0.5 * accel * tau
 }
 
 /// What a follower's ratio ramp is held to: the advance's slope, the
@@ -235,10 +234,12 @@ impl RatioRampRule {
     /// `rest_room_mm` along the path from the leaders' nearest rest, fits
     /// the limits within the longest ramp the room leaves it; zero where
     /// even a crossing at rest does not. The leaders' own flow is read at
-    /// the step and the ramp's addition where the projection derives it: at
-    /// the fastest the leaders move within half the longest ramp of the
-    /// step, up to `accel` times that faster than at it and no faster than
-    /// `fastest_mm_s`, the fastest they move anywhere near it.
+    /// the step. Without a follower kernel the ramp's addition is read at
+    /// the ramp's edges, where the smoothed ratio's curvature steps and the
+    /// advance turns it into `k·r̃″·v³`: up to `accel` times half the ramp
+    /// faster than the step, and no faster than `fastest_mm_s`, the fastest
+    /// the leaders move anywhere near it. A follower kernel spreads that
+    /// step over its own width.
     #[must_use]
     pub fn step_speed_cap(
         &self,
@@ -268,8 +269,12 @@ impl RatioRampRule {
             jerk_mm_s3: jerk,
         };
         let fits_at = |speed_mm_s: f64| {
-            let crossing = crossing_speed(speed_mm_s, accel).min(speed_mm_s.max(fastest_mm_s));
-            let tau = RATIO_RAMP_MAX_TIME_S.min(rest_room_ramp_time(crossing, rest_room_mm));
+            let tau = RATIO_RAMP_MAX_TIME_S.min(rest_room_ramp_time(speed_mm_s, rest_room_mm));
+            let crossing = if self.kernel_jerk_per_accel_hz.is_infinite() {
+                crossing_speed(speed_mm_s, accel, tau).min(speed_mm_s.max(fastest_mm_s))
+            } else {
+                speed_mm_s
+            };
             let (own_velocity, own_accel) = self.own_demand(&step_at(speed_mm_s));
             let (ramp_velocity, ramp_accel) = self.ramp_demand(tau, &step_at(crossing));
             own_velocity + ramp_velocity <= self.max_velocity_mm_s
