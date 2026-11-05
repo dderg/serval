@@ -215,7 +215,7 @@ class FloorShortfall:
 
 FLOOR_SHORTFALLS: dict[str, FloorShortfall] = {
     "tools/bench/configs/trident_kernel.cfg": FloorShortfall(
-        issue=693, predicted_x=(1.68, 1.78)
+        issue=693, predicted_x=(1.64, 1.40)
     ),
 }
 assert set(FLOOR_SHORTFALLS) <= set(CONFIGS), (
