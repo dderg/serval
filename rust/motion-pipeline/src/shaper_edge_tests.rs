@@ -8,8 +8,9 @@ use geometry::{LawSegment, Move, ScalarLaw, SourceRange, VelocityLimits};
 use trajectory::{AnalyticMoveSpan, SurfaceMode};
 
 use super::{
-    CrowdedVelocityBreaks, EdgeSlivers, FitTol, TrackSignal, VelocityBreak, cap_contact_seeds,
-    coalesce_degenerate_seeds, edge_inset, edge_velocity_and_acceleration, velocity_breaks_among,
+    CrowdedVelocityBreaks, EdgeSlivers, FitTol, PostProcessError, TrackSignal, VelocityBreak,
+    cap_contact_seeds, coalesce_degenerate_seeds, edge_inset, edge_velocity_and_acceleration,
+    velocity_breaks_among,
 };
 
 const FLOOR: f64 = 2e-9;
@@ -50,6 +51,29 @@ impl TrackSignal for JerkWithStep {
     }
 }
 
+/// Accelerating at `accel` from rest at the origin until `reversal`, then
+/// braking at `accel`: the accelerate-then-brake profile a planner ends a
+/// move on when its two rails cross just short of the end.
+struct AccelerateThenBrake {
+    reversal: f64,
+    accel: f64,
+}
+
+impl TrackSignal for AccelerateThenBrake {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let (r, a) = (self.reversal, self.accel);
+        if t < r {
+            return (0.5 * a * t * t, a * t, a);
+        }
+        let d = t - r;
+        (
+            0.5 * a * r * r + a * r * d - 0.5 * a * d * d,
+            a * r - a * d,
+            -a,
+        )
+    }
+}
+
 /// Stored-acceleration slivers far from the origin reach this wide, where a
 /// smooth signal's jerk alone moves its acceleration past the tolerance.
 const WIDE_SLIVER_S: f64 = 7e-7;
@@ -82,6 +106,7 @@ fn a_break_hidden_in_the_edge_sliver_is_read_past() {
         trajectory::next_toward(t0, 2.0),
         t0 + edge_inset(1e-3, FLOOR, 0.0),
         false,
+        false,
         TOL,
     )
     .unwrap()
@@ -103,6 +128,7 @@ fn a_smooth_edge_keeps_its_seam_acceleration() {
         0,
         seam,
         t0 + edge_inset(1e-3, FLOOR, 0.0),
+        false,
         false,
         TOL,
     )
@@ -352,7 +378,7 @@ fn a_smooth_edge_keeps_its_seam_acceleration_across_a_wide_sliver() {
         "the sliver must be wide enough for jerk alone to move the acceleration past the \
          tolerance"
     );
-    let acceleration = edge_velocity_and_acceleration(&sig, 0, seam, past_sliver, false, TOL)
+    let acceleration = edge_velocity_and_acceleration(&sig, 0, seam, past_sliver, true, false, TOL)
         .unwrap()
         .acceleration;
     assert_eq!(
@@ -400,7 +426,7 @@ fn a_jerk_change_within_the_extrapolation_is_no_break() {
         (extrapolated - sig.eval_pva(seam).2).abs() > TOL.accel_mm_s2,
         "the jerk change must move the extrapolation past the tolerance"
     );
-    let acceleration = edge_velocity_and_acceleration(&sig, 0, seam, past_sliver, false, TOL)
+    let acceleration = edge_velocity_and_acceleration(&sig, 0, seam, past_sliver, true, false, TOL)
         .unwrap()
         .acceleration;
     assert_eq!(
@@ -421,7 +447,7 @@ fn a_break_in_a_wide_sliver_anchors_to_its_far_side_at_the_seam() {
     };
     let seam = trajectory::next_toward(t0, 2.0);
     let past_sliver = t0 + edge_inset(SPAN_S, FLOOR, WIDE_SLIVER_S);
-    let acceleration = edge_velocity_and_acceleration(&sig, 0, seam, past_sliver, false, TOL)
+    let acceleration = edge_velocity_and_acceleration(&sig, 0, seam, past_sliver, true, false, TOL)
         .unwrap()
         .acceleration;
     let far_side_at_seam = STEEP_JERK * seam + step_by;
@@ -443,7 +469,7 @@ fn a_break_in_a_wide_sliver_at_the_span_end_anchors_to_its_near_side_at_the_seam
     };
     let seam = trajectory::next_toward(t1, 0.0);
     let past_sliver = t1 - edge_inset(SPAN_S, FLOOR, WIDE_SLIVER_S);
-    let acceleration = edge_velocity_and_acceleration(&sig, 0, seam, past_sliver, false, TOL)
+    let acceleration = edge_velocity_and_acceleration(&sig, 0, seam, past_sliver, true, false, TOL)
         .unwrap()
         .acceleration;
     let inside_side_at_seam = STEEP_JERK * seam;
@@ -451,5 +477,45 @@ fn a_break_in_a_wide_sliver_at_the_span_end_anchors_to_its_near_side_at_the_seam
         (acceleration - inside_side_at_seam).abs() <= 1e-3 * TOL.accel_mm_s2,
         "the end edge anchored to {acceleration}, the span's side of the break reads \
          {inside_side_at_seam} at the seam"
+    );
+}
+
+#[test]
+fn a_break_in_a_wide_sliver_carries_its_near_side_velocity_to_the_seam() {
+    let t1 = 1.0;
+    let accel = 15_000.0;
+    let sig = AccelerateThenBrake {
+        reversal: t1 - 0.6 * WIDE_SLIVER_S,
+        accel,
+    };
+    let seam = trajectory::next_toward(t1, 0.0);
+    let past_sliver = t1 - edge_inset(SPAN_S, FLOOR, WIDE_SLIVER_S);
+    let anchor =
+        edge_velocity_and_acceleration(&sig, 0, seam, past_sliver, true, false, TOL).unwrap();
+    let near_side_at_seam = accel * seam;
+    assert!(
+        (anchor.velocity - near_side_at_seam).abs() <= 1e-9 * near_side_at_seam,
+        "the end edge anchored to velocity {}, the span's side of the break reads {near_side_at_seam} \
+         at the seam: the brake the sliver hides must move onto the seam, not bend the piece",
+        anchor.velocity
+    );
+    assert_eq!(anchor.acceleration, accel);
+}
+
+#[test]
+fn carrying_a_sliver_velocity_past_the_position_tolerance_fails_loudly() {
+    let t1 = 1.0;
+    let sig = AccelerateThenBrake {
+        reversal: t1 - 0.6 * WIDE_SLIVER_S,
+        accel: 15_000.0,
+    };
+    let seam = trajectory::next_toward(t1, 0.0);
+    let past_sliver = t1 - edge_inset(SPAN_S, FLOOR, WIDE_SLIVER_S);
+    let tight = FitTol::absolute(1e-12, TOL.accel_mm_s2);
+    let anchor = edge_velocity_and_acceleration(&sig, 0, seam, past_sliver, true, false, tight);
+    assert!(
+        matches!(anchor, Err(PostProcessError::SliverVelocityCarry { .. })),
+        "a hidden break whose velocity step shifts position past the tolerance must fail \
+         loudly, got {anchor:?}"
     );
 }

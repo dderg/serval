@@ -982,6 +982,7 @@ fn a_piece_anchored_past_its_edge_sliver_holds_the_tolerance_from_its_resolved_e
         trajectory::next_toward(fit.t_start, fit.t_end),
         fit.t_start + edge_inset(fit.t_end - fit.t_start, cubic_floor, 0.0),
         false,
+        false,
         fit_tol,
     )
     .expect("the edge reads");
