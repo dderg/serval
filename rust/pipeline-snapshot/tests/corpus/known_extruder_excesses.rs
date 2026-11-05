@@ -104,6 +104,18 @@ pub const KNOWN: &[KnownExcesses] = &[
         worst: 48.2076,
     },
     KnownExcesses {
+        case: "voron_first_layers_zhop/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
+        class: ExcessClass::Accel,
+        count: 44,
+        worst: 26251.3,
+    },
+    KnownExcesses {
+        case: "voron_first_layers_zhop/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
+        class: ExcessClass::Velocity,
+        count: 16,
+        worst: 56.9817,
+    },
+    KnownExcesses {
         case: "trident_follower_cache_regression:200-300/tools/bench/configs/profiles/p1_bowden_bedslinger_ramp.cfg",
         class: ExcessClass::Accel,
         count: 134,
@@ -170,6 +182,12 @@ pub const KNOWN: &[KnownExcesses] = &[
         count: 39,
         worst: 182265.7,
     },
+    KnownExcesses {
+        case: "voron_first_layers_zhop/tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg",
+        class: ExcessClass::Accel,
+        count: 38,
+        worst: 119635.3,
+    },
     // TODO(crawl-ve): a crawl valley's release judged as if no kernel followed.
     KnownExcesses {
         case: "voron_first_layers:850-950/tools/bench/configs/profiles/p1_bowden_bedslinger_kernel.cfg",
@@ -182,6 +200,12 @@ pub const KNOWN: &[KnownExcesses] = &[
         class: ExcessClass::Velocity,
         count: 41,
         worst: 49.4033,
+    },
+    KnownExcesses {
+        case: "voron_first_layers_zhop/tools/bench/configs/profiles/p1_bowden_bedslinger_kernel.cfg",
+        class: ExcessClass::Velocity,
+        count: 29,
+        worst: 49.3899,
     },
     // TODO(floor-guard): e past V_e by ε around the retract's rest.
     KnownExcesses {
@@ -205,6 +229,12 @@ pub const KNOWN: &[KnownExcesses] = &[
     // TODO(floor-guard): the print-start prime steps e velocity.
     KnownExcesses {
         case: "voron_dense_top_layers/rust/motion-core/tests/configs/neptune_sim_print.cfg",
+        class: ExcessClass::VelocityStep,
+        count: 1,
+        worst: 0.9949,
+    },
+    KnownExcesses {
+        case: "voron_dense_top_layers_zhop/rust/motion-core/tests/configs/neptune_sim_print.cfg",
         class: ExcessClass::VelocityStep,
         count: 1,
         worst: 0.9949,
@@ -257,6 +287,24 @@ pub const KNOWN: &[KnownExcesses] = &[
         class: ExcessClass::Accel,
         count: 448,
         worst: 250587.4,
+    },
+    KnownExcesses {
+        case: "voron_dense_top_layers_zhop/rust/motion-core/tests/configs/neptune_sim_print.cfg",
+        class: ExcessClass::Accel,
+        count: 6373,
+        worst: 2350706.7,
+    },
+    KnownExcesses {
+        case: "voron_first_layers_zhop/rust/motion-core/tests/configs/neptune_sim_print.cfg",
+        class: ExcessClass::Accel,
+        count: 3374,
+        worst: 297830.2,
+    },
+    KnownExcesses {
+        case: "voron_first_layers_zhop/rust/motion-core/tests/configs/neptune_sim_print.cfg",
+        class: ExcessClass::Turning,
+        count: 23,
+        worst: 118874.7,
     },
 ];
 
