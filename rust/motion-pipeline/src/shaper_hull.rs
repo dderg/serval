@@ -429,18 +429,20 @@ fn patch_bound(controls: &[f64], patch: &ErrorPatch, budget: f64, depth: u32) ->
         .min(bound)
 }
 
-/// Proven upper bounds on how far `piece`'s position and acceleration
-/// stray from the signal whose exact polynomials or enclosure over
-/// `domain` are `exact`, everywhere on it, settled against `budget`.
+/// Proven upper bounds on how far `piece`'s position, velocity and
+/// acceleration stray from the signal whose exact polynomials or
+/// enclosure over `domain` are `exact`, everywhere on it, each settled
+/// against its `budgets`.
 #[cfg(feature = "fit-audit")]
 pub(crate) fn error_bounds(
     exact: &[ExactPiece],
     piece: FittedPiece,
     domain: (f64, f64),
-    budget: FitTol,
-) -> [f64; 2] {
+    budgets: [f64; 3],
+) -> [f64; 3] {
     let derivatives = derivatives_of(piece);
-    [(0, budget.pos_mm), (2, budget.accel_mm_s2)].map(|(order, budget)| {
+    [0, 1, 2].map(|order| {
+        let budget = budgets[order];
         let held = |sub: &ExactPiece| sub.bounds(order).then_some(budget);
         error_patches(exact, piece, &derivatives, domain, order, held)
             .map(|(patch, budget)| patch_bound(&patch.controls, &patch, budget, 0))
