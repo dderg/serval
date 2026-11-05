@@ -1,13 +1,13 @@
 {
   "slice_lines": 1000,
-  "commit": "09bc8789c27d8316bc0a9d0f468489a33e54d443",
-  "reason": "emit invariance at the merge with main a72e98824: one leader read per crossing probe, about -1 % Ir and -2 % live on trident_kernel",
+  "commit": "af804bedb0c1feb46248b5bc190ca7a573794361",
+  "reason": "Digest-identical follower projection savings: one crossing memo per lay, indexed point-mass moments",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 25752708746,
+      "ir": 24850930761,
       "stream_secs": 6.537,
       "pi_2core": {
-        "worst_x_reference": 2.491203037161278,
+        "worst_x_reference": 2.782294427119972,
         "worst_x": [
           2.62,
           2.6
@@ -16,10 +16,10 @@
       }
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 27731644137,
+      "ir": 26147640110,
       "stream_secs": 6.213,
       "pi_2core": {
-        "worst_x_reference": 2.0305262385476195,
+        "worst_x_reference": 2.1257860171643395,
         "worst_x": [
           2.02,
           2.02
@@ -28,10 +28,10 @@
       }
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 31213866569,
+      "ir": 29584533241,
       "stream_secs": 5.538,
       "pi_2core": {
-        "worst_x_reference": 1.4112396984842257,
+        "worst_x_reference": 1.3967389728830104,
         "worst_x": [
           1.37,
           1.37
