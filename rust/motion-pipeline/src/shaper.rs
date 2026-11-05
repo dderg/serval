@@ -333,6 +333,65 @@ impl<S: TrackSignal> TrackSignal for FacingRead<'_, S> {
 
 pub(crate) const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 
+const FIT_GROUP_SEGMENTS: usize = 8;
+const FIT_GROUP_SPAN_S: f64 = 0.04;
+
+/// The ends of the complete fit groups among `segments`, whose first opens
+/// one. A group closes on its fourth segment, on the segment that carries
+/// it `FIT_GROUP_SPAN_S` past its start, or on a segment ending at rest.
+/// Every target in a group reads one signal table laid about the group's
+/// start, so the shaper shapes and commits whole groups, and each group —
+/// and with it every fit — depends on its own segments alone, never on how
+/// the emits are cut.
+pub(crate) fn fit_group_ends(segments: &[ContinuousSegment]) -> Vec<usize> {
+    let mut ends = Vec::new();
+    let mut start = 0;
+    for (index, segment) in segments.iter().enumerate() {
+        if index + 1 - start == FIT_GROUP_SEGMENTS
+            || segment.t_end - segments[start].t_start >= FIT_GROUP_SPAN_S
+            || segment.rest_at_end
+        {
+            ends.push(index + 1);
+            start = index + 1;
+        }
+    }
+    ends
+}
+
+/// The most of the first `count` segments that fill whole fit groups.
+pub(crate) fn whole_groups(segments: &[ContinuousSegment], count: usize) -> usize {
+    fit_group_ends(&segments[..count])
+        .last()
+        .copied()
+        .unwrap_or(0)
+}
+
+/// The fit groups `segments` falls into, every one of them whole unless
+/// `clamps_past_signal` lets the last close where the signal ends.
+pub(crate) fn fit_groups(
+    segments: &[ContinuousSegment],
+    clamps_past_signal: bool,
+) -> Vec<std::ops::Range<usize>> {
+    let mut ends = fit_group_ends(segments);
+    if ends.last().copied().unwrap_or(0) < segments.len() {
+        assert!(
+            clamps_past_signal,
+            "shaper: {} segments past the last whole fit group are being shaped before \
+             their group closed",
+            segments.len() - ends.last().copied().unwrap_or(0)
+        );
+        ends.push(segments.len());
+    }
+    let mut start = 0;
+    ends.into_iter()
+        .map(|end| {
+            let group = start..end;
+            start = end;
+            group
+        })
+        .collect()
+}
+
 /// Buffered lowered segments plus the shaped-leader cache: `shaped` holds
 /// `segments[i]` with every kerneled non-follower axis already fitted. A
 /// frontier segment's convolution window is fully covered when it is first
@@ -477,6 +536,15 @@ pub struct Shaper {
     follower_states: Vec<FollowerState>,
     toolhead_tap: Option<Sender<ContinuousSegment>>,
     pool: Arc<WorkerPool>,
+    emit_batch: usize,
+    segments_since_emit: usize,
+    /// The commit and frontier counts of the last emit, while it committed
+    /// nothing: until the pending groups reach past either, an emit would
+    /// read exactly what that one read and commit nothing again.
+    stalled: Option<(usize, usize)>,
+    /// Leader group fits the planning side made ahead of the shaper
+    /// ([`crate::leader_prefit`]).
+    leader_prefits: LeaderPrefits,
 }
 
 impl Shaper {
@@ -492,7 +560,34 @@ impl Shaper {
             follower_states: Vec::new(),
             toolhead_tap: None,
             pool,
+            emit_batch: 1,
+            segments_since_emit: 0,
+            stalled: None,
+            leader_prefits: LeaderPrefits::default(),
         }
+    }
+
+    /// Leader group fits made ahead on the planning side
+    /// ([`crate::leader_prefit`]); a shaper fits any group it finds no
+    /// match for itself.
+    pub(crate) fn accept_leader_prefits(&mut self, fits: Vec<(LeaderGroupKey, Vec<ColumnTrack>)>) {
+        self.leader_prefits.insert(fits);
+    }
+
+    pub(crate) fn chains(&self) -> &AxisChainSet {
+        &self.chains
+    }
+
+    pub(crate) fn fit_tol(&self) -> FitTol {
+        self.fit_tol
+    }
+
+    pub(crate) fn pool(&self) -> &Arc<WorkerPool> {
+        &self.pool
+    }
+
+    pub(crate) fn leader_prefit_era(&self) -> u64 {
+        self.leader_prefits.era()
     }
 
     /// Mirrors every emitted segment as it stands before the motor-side
@@ -501,6 +596,17 @@ impl Shaper {
     #[must_use]
     pub fn with_toolhead_tap(mut self, tap: Sender<ContinuousSegment>) -> Self {
         self.toolhead_tap = Some(tap);
+        self
+    }
+
+    /// Takes in `segments` lowered segments before each emit instead of
+    /// one, so a test can hold the output to the same trajectory however
+    /// the emits are cut.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn with_emit_batch(mut self, segments: usize) -> Self {
+        assert!(segments > 0, "an emit batch holds at least one segment");
+        self.emit_batch = segments;
         self
     }
 
@@ -536,6 +642,10 @@ impl Shaper {
         match item {
             BaseItem::Seg(item) => {
                 self.pending.push(item);
+                self.segments_since_emit += 1;
+                if self.segments_since_emit < self.emit_batch {
+                    return true;
+                }
                 self.emit(self.supported_count(), false, output)
             }
             BaseItem::Drain => {
@@ -549,8 +659,11 @@ impl Shaper {
                 match &ctrl {
                     Control::Reset { .. } => {
                         self.pending.clear();
+                        self.segments_since_emit = 0;
+                        self.stalled = None;
                         self.history.clear();
                         self.history_trimmed = false;
+                        self.leader_prefits.start_era();
                         for state in &mut self.follower_states {
                             state.reset_timeline();
                         }
@@ -585,6 +698,7 @@ impl Shaper {
                             }
                             (self.forward_support, self.back_support) = (new_forward, new_back);
                             self.chains = chains.clone();
+                            self.leader_prefits.start_era();
                         }
                     }
                 }
@@ -611,10 +725,12 @@ impl Shaper {
     /// projection itself commits only what it holds final (see
     /// `follower_projection::project_followers`).
     ///
-    /// Every gate compares `t_end + support` against the covered end with no
-    /// slack — the same association and strictness as the fit-time
-    /// `MissingLookahead` checks, so a gated segment can never demand
-    /// lookahead the buffer does not hold. The lowerer's rest-holds are sized
+    /// Every gate requires the buffer to reach strictly past `t_end +
+    /// support`, with no slack: a fit reads its signal from both sides of its
+    /// window's edges, so the segment past the last time a target reads must
+    /// already be held, and then the slice every fit reads is the same
+    /// whenever the shaper gets to it. The fit-time `MissingLookahead` checks
+    /// can never fire on a gated segment. The lowerer's rest-holds are sized
     /// exactly to a chain's support, so a slack here admits sums that land a
     /// few ulps past the frontier and panics the fit (issue #405).
     fn supported_count(&self) -> usize {
@@ -625,7 +741,7 @@ impl Shaper {
         let plain = self
             .pending
             .iter()
-            .take_while(|seg| seg.t_end + self.forward_support <= last_t)
+            .take_while(|seg| seg.t_end + self.forward_support < last_t)
             .count();
         let own_hi = self.chains.max_follower_own_forward_support();
         if own_hi <= 0.0 {
@@ -637,7 +753,7 @@ impl Shaper {
         let gated = self
             .pending
             .iter()
-            .take_while(|seg| seg.t_end + own_hi <= frontier_t)
+            .take_while(|seg| seg.t_end + own_hi < frontier_t)
             .count();
         plain.min(gated)
     }
@@ -648,7 +764,7 @@ impl Shaper {
         let direct_hi = self.chains.direct_forward_support();
         self.pending
             .iter()
-            .take_while(|seg| seg.t_end + direct_hi <= last_t)
+            .take_while(|seg| seg.t_end + direct_hi < last_t)
             .last()
             .map(|seg| seg.t_end)
     }
@@ -659,10 +775,15 @@ impl Shaper {
         force: bool,
         output: &mut impl FnMut(TrajectoryItem) -> bool,
     ) -> bool {
+        self.segments_since_emit = 0;
+        let count = if force {
+            count
+        } else {
+            whole_groups(self.pending.segments.make_contiguous(), count)
+        };
         if count == 0 {
             return true;
         }
-        self.materialize_pending();
         let beyond_commit = self.chains.max_follower_own_forward_support() > 0.0
             || self.chains.has_projected_follower();
         let frontier_count = if !beyond_commit {
@@ -672,12 +793,17 @@ impl Shaper {
         } else {
             let last_t = self.pending.back().expect("count > 0").t_end;
             let direct_hi = self.chains.direct_forward_support();
-            self.pending
+            let reached = self
+                .pending
                 .iter()
-                .take_while(|seg| seg.t_end + direct_hi <= last_t)
-                .count()
-                .max(count)
+                .take_while(|seg| seg.t_end + direct_hi < last_t)
+                .count();
+            whole_groups(self.pending.segments.make_contiguous(), reached).max(count)
         };
+        if !force && self.stalled == Some((count, frontier_count)) {
+            return true;
+        }
+        self.materialize_pending();
         let pending = &mut self.pending;
         let segments = pending.segments.make_contiguous();
         let shaped = apply_axis_chains(
@@ -697,6 +823,7 @@ impl Shaper {
                     Lookahead::Required
                 },
                 pool: &self.pool,
+                prefits: &self.leader_prefits,
             },
             count,
             frontier_count,
@@ -713,6 +840,7 @@ impl Shaper {
                 return false;
             }
         }
+        self.stalled = (committed == 0).then_some((count, frontier_count));
         if committed == 0 {
             return true;
         }
@@ -729,13 +857,14 @@ impl Shaper {
         // leaves a gap-hold between segments, and that hold is anchored by
         // the segment before the gap. Drop the front only while the next
         // segment (plus its gap-hold back to the front's end) still covers
-        // the back-support window, or the window's start falls into a gap
-        // whose anchoring segment was just discarded.
+        // the back-support window strictly, so a fit whose window starts on
+        // a segment's start still holds the segment before it.
         let keep_after = emitted_through - self.back_support;
-        while self.history.len() >= 2 && self.history[1].t_start <= keep_after {
+        while self.history.len() >= 2 && self.history[1].t_start < keep_after {
             self.history.pop_front();
             self.history_trimmed = true;
         }
+        self.leader_prefits.forget_through(emitted_through);
         true
     }
 }
@@ -1105,6 +1234,7 @@ struct AxisFitRequest<'a> {
     boundary: FitBoundary,
     lookahead: Lookahead,
     pool: &'a WorkerPool,
+    prefits: &'a LeaderPrefits,
 }
 
 /// The shaper state one emit writes through: the follower projection states,
@@ -1398,7 +1528,7 @@ fn constant_axis_column(
 }
 
 #[derive(Clone, Copy)]
-enum ColumnSignal {
+pub(crate) enum ColumnSignal {
     /// A leader's shaped signal, whose seams carry what the followers
     /// reading it need ([`crate::follower_projection::leader_seam_continuity`]).
     Shaped {
@@ -1434,7 +1564,7 @@ impl ColumnSignal {
 }
 
 #[derive(Clone, Copy)]
-struct FitColumn<'a> {
+pub(crate) struct FitColumn<'a> {
     axis: usize,
     chain: &'a CompiledChain,
     signal: ColumnSignal,
@@ -1480,74 +1610,303 @@ fn fit_axis_column(
             return Err(PostProcessError::MissingLookahead { axis, t: need_hi });
         }
     }
-    let (signal_segments, bounds) = read_window(
-        &window_segments,
-        (
-            targets[0].t_start - k_hi,
-            targets[targets.len() - 1].t_end - k_lo,
-        ),
-        SignalBounds {
-            first_t,
-            last_t,
-            boundary,
-            lookahead,
-        },
-    );
-    if let Some(column) = constant_axis_column(signal_segments, targets, axis) {
-        return Ok(Some(column));
+    let window = SignalBounds {
+        first_t,
+        last_t,
+        boundary,
+        lookahead,
+    };
+    let groups = fit_groups(targets, lookahead.clamps_past_signal());
+    let reads: Vec<(std::ops::Range<usize>, SignalBounds)> = groups
+        .iter()
+        .map(|group| {
+            let span = (targets[group.start].t_start, targets[group.end - 1].t_end);
+            read_window(&window_segments, span, kernel, window)
+        })
+        .collect();
+    let prefitted: Vec<Option<&Vec<ColumnTrack>>> = groups
+        .iter()
+        .zip(&reads)
+        .map(|(group, (range, bounds))| match signal {
+            ColumnSignal::Shaped { .. } => request.prefits.fits.get(&LeaderGroupKey::new(
+                axis,
+                request.prefits.era,
+                &targets[group.clone()],
+                &window_segments[range.clone()],
+                *bounds,
+            )),
+            ColumnSignal::MotorCommand { .. } => None,
+        })
+        .collect();
+    let unfitted = || {
+        reads
+            .iter()
+            .zip(&prefitted)
+            .filter(|(_, prefit)| prefit.is_none())
+            .map(|((range, _), _)| range)
+    };
+    let read_from = unfitted().map(|range| range.start).min().unwrap_or(0);
+    let read_to = unfitted().map(|range| range.end).max().unwrap_or(read_from);
+    let pieces: Vec<Vec<BezierPiece>> = window_segments[read_from..read_to]
+        .iter()
+        .map(|seg| match &seg.axes[axis] {
+            ContinuousAxis::Spline(track) => extract_bezier_pieces(track),
+            _ => panic!("shaper: changed axis was not materialized"),
+        })
+        .collect();
+    let workers = target_workers.max(1).min(groups.len());
+    let fitted = pool
+        .map_indexed(
+            workers,
+            groups.len(),
+            || (),
+            |(), index| {
+                if let Some(tracks) = prefitted[index] {
+                    return Ok(tracks.clone());
+                }
+                let (range, bounds) = reads[index].clone();
+                fit_group_alone(
+                    axis,
+                    &targets[groups[index].clone()],
+                    kernel,
+                    GroupRead {
+                        segments: &window_segments[range.clone()],
+                        pieces: &pieces[range.start - read_from..range.end - read_from],
+                        bounds,
+                    },
+                    fit_tol,
+                    signal,
+                    pool,
+                )
+            },
+        )
+        .expect("leader target fit thread panicked");
+    let mut tracks = Vec::with_capacity(targets.len());
+    for result in fitted {
+        tracks.extend(result?);
+    }
+    Ok(Some(tracks))
+}
+
+/// The segments one fit group's convolution reads, their axis pieces and
+/// the bounds of that slice.
+struct GroupRead<'r, 'a> {
+    segments: &'r [&'a ContinuousSegment],
+    pieces: &'r [Vec<BezierPiece>],
+    bounds: SignalBounds,
+}
+
+/// One fit group's targets from the signal the group reads alone, about
+/// the group's start: what else shares its emit never reaches the fit, so
+/// the leader comes out the same however the shaper batches its emits.
+fn fit_group_alone(
+    axis: usize,
+    group: &[ContinuousSegment],
+    kernel: &nurbs::algebra::PiecewisePolynomialKernel,
+    read: GroupRead,
+    fit_tol: FitTol,
+    signal: ColumnSignal,
+    pool: &WorkerPool,
+) -> Result<Vec<ColumnTrack>, PostProcessError> {
+    if let Some(column) = constant_axis_column(read.segments, group, axis) {
+        return Ok(column);
     }
     fit_axis_targets(
         axis,
-        targets,
+        group,
         ShapedSignalSource::new(
             kernel,
-            signal.convolution_input(AxisSignalTable::build(signal_segments, axis, bounds)),
-            signal_breakpoints(signal_segments, axis),
-            targets[0].t_start,
+            signal.convolution_input(AxisSignalTable::from_pieces(
+                read.pieces.iter().flatten(),
+                read.bounds,
+            )),
+            signal_breakpoints(read.segments, axis),
+            group[0].t_start,
         ),
         fit_tol,
         signal,
-        target_workers,
+        1,
         pool,
     )
-    .map(Some)
 }
 
-/// The segments a convolution over `[read_lo, read_hi]` reads, one segment
-/// of margin on each side so the edges of the slice (and a gain impulse a
-/// cut edge carries) stay outside every read, with the bounds of that
-/// slice: an edge that is not the window's own is an interior cut.
-fn read_window<'s, 'a>(
-    segments: &'s [&'a ContinuousSegment],
-    (read_lo, read_hi): (f64, f64),
+/// What one leader column's fit of one group reads: the group, the slice
+/// of segments its convolution reads and how that slice's edges behave,
+/// within one era of the shaper's chains. Two fits with the same key are
+/// the same fit wherever they run ([`fit_group_alone`]).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct LeaderGroupKey {
+    axis: usize,
+    era: u64,
+    group: [u64; 3],
+    slice: [u64; 3],
+    clamps_before_signal: bool,
+    clamps_past_signal: bool,
+}
+
+impl LeaderGroupKey {
+    fn new(
+        axis: usize,
+        era: u64,
+        group: &[ContinuousSegment],
+        slice: &[&ContinuousSegment],
+        bounds: SignalBounds,
+    ) -> Self {
+        let span =
+            |first: f64, last: f64, len: usize| [first.to_bits(), last.to_bits(), len as u64];
+        Self {
+            axis,
+            era,
+            group: span(group[0].t_start, group[group.len() - 1].t_end, group.len()),
+            slice: span(slice[0].t_start, slice[slice.len() - 1].t_end, slice.len()),
+            clamps_before_signal: bounds.boundary.clamps_before_signal(),
+            clamps_past_signal: bounds.lookahead.clamps_past_signal(),
+        }
+    }
+
+    fn group_end(&self) -> f64 {
+        f64::from_bits(self.group[1])
+    }
+}
+
+/// Leader group fits made ahead of the shaper, keyed by what they read.
+/// The era advances wherever the chains or the timeline change, so a fit
+/// made under the old ones never matches.
+#[derive(Default)]
+pub(crate) struct LeaderPrefits {
+    era: u64,
+    fits: HashMap<LeaderGroupKey, Vec<ColumnTrack>>,
+}
+
+impl LeaderPrefits {
+    pub(crate) fn start_era(&mut self) {
+        self.era += 1;
+        self.fits.clear();
+    }
+
+    pub(crate) fn era(&self) -> u64 {
+        self.era
+    }
+
+    pub(crate) fn insert(&mut self, fits: Vec<(LeaderGroupKey, Vec<ColumnTrack>)>) {
+        self.fits.extend(fits);
+    }
+
+    fn forget_through(&mut self, emitted_through: f64) {
+        self.fits.retain(|key, _| key.group_end() > emitted_through);
+    }
+}
+
+/// The kerneled columns the shaper fits as leaders under `chains`.
+pub(crate) fn leader_columns(chains: &AxisChainSet, n_axes: usize) -> Vec<FitColumn<'_>> {
+    (0..n_axes)
+        .filter(|&axis| !chains.is_projected_follower(axis))
+        .filter_map(|axis| {
+            let chain = chains.chains.get(axis)?;
+            (!chain.is_empty()).then(|| FitColumn {
+                axis,
+                chain,
+                signal: ColumnSignal::Shaped {
+                    seam_continuity: crate::follower_projection::leader_seam_continuity(
+                        chains, axis,
+                    ),
+                },
+            })
+        })
+        .collect()
+}
+
+/// Whether every read of a kerneled leader column over `group` lies within
+/// `window`, so its fit needs no segment the window does not hold.
+pub(crate) fn reads_within(
+    columns: &[FitColumn],
+    group: &[ContinuousSegment],
     window: SignalBounds,
-) -> (&'s [&'a ContinuousSegment], SignalBounds) {
+) -> bool {
+    let span = (group[0].t_start, group[group.len() - 1].t_end);
+    columns
+        .iter()
+        .filter_map(|column| column.chain.kernel())
+        .all(|kernel| {
+            let (k_lo, k_hi) = kernel.support();
+            span.1 - k_lo < window.last_t
+                && (span.0 - k_hi >= window.first_t || window.boundary.clamps_before_signal())
+        })
+}
+
+/// One leader column's fit of `group`, whose reads lie within `window`
+/// ([`reads_within`]), keyed as the shaper keys it; `None` where the
+/// column has no kernel.
+pub(crate) fn fit_leader_group(
+    column: FitColumn,
+    group: &[ContinuousSegment],
+    segments: &[&ContinuousSegment],
+    window: SignalBounds,
+    (era, fit_tol): (u64, FitTol),
+    pool: &WorkerPool,
+) -> Option<Result<(LeaderGroupKey, Vec<ColumnTrack>), PostProcessError>> {
+    let kernel = column.chain.kernel()?;
+    let span = (group[0].t_start, group[group.len() - 1].t_end);
+    let (range, bounds) = read_window(segments, span, kernel, window);
+    let slice = &segments[range];
+    let pieces: Vec<Vec<BezierPiece>> = slice
+        .iter()
+        .map(|seg| match &seg.axes[column.axis] {
+            ContinuousAxis::Spline(track) => extract_bezier_pieces(track),
+            _ => panic!("leader prefit: changed axis was not materialized"),
+        })
+        .collect();
+    let key = LeaderGroupKey::new(column.axis, era, group, slice, bounds);
+    Some(
+        fit_group_alone(
+            column.axis,
+            group,
+            kernel,
+            GroupRead {
+                segments: slice,
+                pieces: &pieces,
+                bounds,
+            },
+            fit_tol,
+            column.signal,
+            pool,
+        )
+        .map(|tracks| (key, tracks)),
+    )
+}
+
+/// The segments a convolution of `kernel` over a fit group spanning `span`
+/// reads: from the one starting strictly before the earliest time read to
+/// the first one reaching strictly past the latest, so a gap a read lands
+/// in carries its hold and a one-sided read at either edge of the window
+/// finds signal. The slice depends on the group and the segments alone,
+/// never on how far the window around them reaches (the lookahead gates
+/// and the history retention hold both neighbours); an edge clamps only
+/// where the read passes it, as the window's own edge would.
+fn read_window(
+    segments: &[&ContinuousSegment],
+    (span_start, span_end): (f64, f64),
+    kernel: &nurbs::algebra::PiecewisePolynomialKernel,
+    window: SignalBounds,
+) -> (std::ops::Range<usize>, SignalBounds) {
+    let (k_lo, k_hi) = kernel.support();
+    let (read_lo, read_hi) = (span_start - k_hi, span_end - k_lo);
     let lo = segments
-        .partition_point(|seg| seg.t_start <= read_lo)
-        .saturating_sub(2);
-    let hi = (segments.partition_point(|seg| seg.t_start <= read_hi) + 1).min(segments.len());
-    let slice = &segments[lo..hi];
-    let at_window_start = lo == 0;
-    let at_window_end = hi == segments.len();
+        .partition_point(|seg| seg.t_start < read_lo)
+        .saturating_sub(1);
+    let hi = (segments.partition_point(|seg| seg.t_end <= read_hi) + 1).min(segments.len());
+    let (first_t, last_t) = (segments[lo].t_start, segments[hi - 1].t_end);
     (
-        slice,
+        lo..hi,
         SignalBounds {
-            first_t: if at_window_start {
-                window.first_t
-            } else {
-                slice[0].t_start
-            },
-            last_t: if at_window_end {
-                window.last_t
-            } else {
-                slice[slice.len() - 1].t_end
-            },
-            boundary: if at_window_start {
+            first_t,
+            last_t,
+            boundary: if read_lo < first_t {
                 window.boundary
             } else {
                 FitBoundary::Interior
             },
-            lookahead: if at_window_end {
+            lookahead: if read_hi > last_t {
                 window.lookahead
             } else {
                 Lookahead::Required
@@ -1660,6 +2019,13 @@ pub(crate) fn unit_kernel_mass(kernel: &nurbs::algebra::PiecewisePolynomialKerne
     mass
 }
 
+/// A shaped signal carries its input's offset at full weight: the kernel
+/// has unit mass up to the rounding of its own integral, and a constant
+/// window shapes to its constant exactly whether it is convolved or kept.
+fn assert_unit_mass(kernel: &nurbs::algebra::PiecewisePolynomialKernel) {
+    unit_kernel_mass(kernel);
+}
+
 impl<'a> ShapedSignalSource<'a> {
     pub(crate) fn new(
         kernel: &'a nurbs::algebra::PiecewisePolynomialKernel,
@@ -1673,6 +2039,7 @@ impl<'a> ShapedSignalSource<'a> {
             .map(|piece| piece.degree())
             .max()
             .expect("shaper kernel has no pieces");
+        assert_unit_mass(kernel);
         let input_offset = input.eval_hinted(offset_at, &std::cell::Cell::new(0));
         assert!(
             input_offset.is_finite(),
@@ -1691,7 +2058,7 @@ impl<'a> ShapedSignalSource<'a> {
                 .then(|| GainImpulseResponse::new(kernel, table.gain_impulses())),
             table,
             input_breaks,
-            shaped_offset: input_offset * unit_kernel_mass(kernel),
+            shaped_offset: input_offset,
             exact_kernel: ExactKernel::new(kernel),
         }
     }
@@ -1980,6 +2347,7 @@ fn fit_axis_targets(
 /// rather than at the track's distance from the origin. `None` where the
 /// stored track is read as it is: a constant, or a motor command no
 /// projection reads.
+#[derive(Clone)]
 pub(crate) struct ColumnTrack {
     pub stored: Arc<nurbs::ScalarNurbs>,
     pub read: Option<ContinuousAxis>,
@@ -2076,19 +2444,7 @@ fn fit_leader_axes(
     n_axes: usize,
     work: crate::timing::PhaseWorkload,
 ) -> Result<Vec<ContinuousSegment>, PostProcessError> {
-    let chains = request.chains;
-    let default_chain = CompiledChain::default();
-    let leader_columns: Vec<FitColumn> = (0..n_axes)
-        .filter(|&axis| !chains.is_projected_follower(axis))
-        .map(|axis| FitColumn {
-            axis,
-            chain: chains.chains.get(axis).unwrap_or(&default_chain),
-            signal: ColumnSignal::Shaped {
-                seam_continuity: crate::follower_projection::leader_seam_continuity(chains, axis),
-            },
-        })
-        .filter(|column| !column.chain.is_empty())
-        .collect();
+    let leader_columns = leader_columns(request.chains, n_axes);
     let fit_started = crate::timing::stopwatch();
     let columns = fit_columns(request, fresh, &leader_columns);
     let fit_elapsed_us = fit_started.elapsed_us();
@@ -2605,18 +2961,19 @@ const MOMENT_ORDERS: usize = 3;
 type MomentBounds = [[f64; MOMENT_POWER_CAPACITY]; MOMENT_ORDERS];
 
 impl AxisSignalTable {
-    fn build(segments: &[&ContinuousSegment], axis: usize, bounds: SignalBounds) -> Self {
-        Self::from_tracks(
-            segments.iter().map(|seg| match &seg.axes[axis] {
-                ContinuousAxis::Spline(track) => track.as_ref(),
-                _ => panic!("shaper: changed axis was not materialized"),
-            }),
-            bounds,
-        )
-    }
-
+    #[cfg(test)]
     pub(crate) fn from_tracks<'a>(
         tracks: impl IntoIterator<Item = &'a nurbs::ScalarNurbs>,
+        bounds: SignalBounds,
+    ) -> Self {
+        let pieces: Vec<BezierPiece> = tracks.into_iter().flat_map(extract_bezier_pieces).collect();
+        Self::from_pieces(&pieces, bounds)
+    }
+
+    /// The table over monomial pieces in time order, each in its own
+    /// variable from its start.
+    pub(crate) fn from_pieces<'p>(
+        pieces: impl IntoIterator<Item = &'p BezierPiece>,
         bounds: SignalBounds,
     ) -> Self {
         let mut table = Self {
@@ -2635,25 +2992,23 @@ impl AxisSignalTable {
             gain_impulses: Vec::new(),
             boundaries: Vec::new(),
         };
-        for track in tracks {
-            for piece in extract_bezier_pieces(track) {
-                if let Some(previous_end) = table.ends.last().copied() {
-                    assert!(
-                        piece.u_start >= previous_end,
-                        "signal pieces overlap: next starts at {} before previous end {previous_end}",
-                        piece.u_start
-                    );
-                    if piece.u_start > previous_end {
-                        let previous = table.coeffs.len() - 1;
-                        let held = table.piece_at(previous, previous_end);
-                        table.push_piece(previous_end, piece.u_start, vec![held]);
-                    }
+        for piece in pieces {
+            if let Some(previous_end) = table.ends.last().copied() {
+                assert!(
+                    piece.u_start >= previous_end,
+                    "signal pieces overlap: next starts at {} before previous end {previous_end}",
+                    piece.u_start
+                );
+                if piece.u_start > previous_end {
+                    let previous = table.coeffs.len() - 1;
+                    let held = table.piece_at(previous, previous_end);
+                    table.push_piece(previous_end, piece.u_start, vec![held]);
                 }
-                let origin = piece_midpoint(piece.u_start, piece.u_end);
-                let mut centered = vec![0.0; piece.coeffs.len()];
-                taylor_shift(&piece.coeffs, origin - piece.u_start, &mut centered);
-                table.push_piece(piece.u_start, piece.u_end, centered);
             }
+            let origin = piece_midpoint(piece.u_start, piece.u_end);
+            let mut centered = vec![0.0; piece.coeffs.len()];
+            taylor_shift(&piece.coeffs, origin - piece.u_start, &mut centered);
+            table.push_piece(piece.u_start, piece.u_end, centered);
         }
         assert!(!table.coeffs.is_empty(), "empty signal window");
         table
