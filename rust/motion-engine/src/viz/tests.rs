@@ -27,7 +27,7 @@ fn summarize(bytes: &[u8]) -> Vec<Summary> {
             records.push(Summary::Segment {
                 fresh_epoch: flags & SEGMENT_FRESH_EPOCH != 0,
             });
-            at += SEGMENT_FIXED_LEN + n as usize * RECORDED_AXES as usize * 3 * 8;
+            at += SEGMENT_FIXED_LEN + n as usize * (1 + RECORDED_AXES as usize * 3) * 8;
         } else if kind == RecordKind::Drain as u8 {
             records.push(Summary::Drain {
                 cause: bytes[at + 1],

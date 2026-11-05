@@ -14,6 +14,7 @@ pub(crate) struct DecodedSegment {
     pub t_end: f64,
     pub source_line: u32,
     pub flags: u8,
+    pub times: Vec<f64>,
     pub samples: Vec<[[f64; 3]; AXES]>,
 }
 
@@ -66,15 +67,21 @@ pub(crate) fn decode(bytes: &[u8]) -> Vec<Decoded> {
                 let source_line = cursor.u32();
                 let flags = cursor.u8();
                 let n = cursor.u32();
-                let samples = (0..n)
-                    .map(|_| std::array::from_fn(|_| std::array::from_fn(|_| cursor.f64())))
-                    .collect();
+                let (times, samples) = (0..n)
+                    .map(|_| {
+                        let t = cursor.f64();
+                        let pva: [[f64; 3]; AXES] =
+                            std::array::from_fn(|_| std::array::from_fn(|_| cursor.f64()));
+                        (t, pva)
+                    })
+                    .unzip();
                 Decoded::Segment(DecodedSegment {
                     t0,
                     t_start,
                     t_end,
                     source_line,
                     flags,
+                    times,
                     samples,
                 })
             }
@@ -158,16 +165,105 @@ fn the_header_names_the_format_the_axes_and_the_sample_interval() {
     assert_eq!(decode(&out), Vec::new());
 }
 
+fn instants(seg: &ContinuousSegment) -> Vec<SampleInstant> {
+    sample_instants(seg).unwrap()
+}
+
 #[test]
-fn a_segment_takes_both_ends_and_no_wider_gap_than_the_interval() {
-    assert_eq!(sample_count(1.0, 1.0), Ok(2));
-    assert_eq!(sample_count(0.0, 0.25e-3), Ok(2));
-    assert_eq!(sample_count(0.0, 0.5e-3), Ok(2));
-    assert_eq!(sample_count(0.0, 1.0e-3), Ok(3));
-    assert_eq!(sample_count(0.0, 1.2e-3), Ok(4));
-    for (t_start, t_end) in [(1.0, 0.5), (f64::NAN, 1.0), (0.0, f64::INFINITY)] {
+fn a_segment_is_sampled_from_end_to_end_no_wider_apart_than_the_interval() {
+    let seg = segment(2.0);
+    let samples = instants(&seg);
+    assert_eq!(samples[0].t, seg.t_start);
+    assert_eq!(samples[samples.len() - 1].t, seg.t_end);
+    for pair in samples.windows(2) {
+        let gap = pair[1].t - pair[0].t;
         assert!(
-            sample_count(t_start, t_end).is_err(),
+            (0.0..=SAMPLE_INTERVAL_S * (1.0 + 1e-12)).contains(&gap),
+            "gap {gap} between {pair:?}"
+        );
+    }
+    for sample in &samples {
+        assert!(
+            (seg.t_start..=seg.t_end).contains(&sample.eval_t),
+            "{sample:?}"
+        );
+    }
+}
+
+#[test]
+fn every_breakpoint_is_read_once_from_each_side() {
+    let seg = segment(2.0);
+    let samples = instants(&seg);
+    let interior: Vec<f64> = seg
+        .breakpoints()
+        .into_iter()
+        .filter(|&b| b > seg.t_start && b < seg.t_end)
+        .collect();
+    assert!(!interior.is_empty(), "the nudge fixture has corners");
+    let mut corners_with_a_jump = 0;
+    for corner in interior {
+        let at: Vec<usize> = (0..samples.len())
+            .filter(|&k| samples[k].t == corner)
+            .collect();
+        let [left, right] = at[..] else {
+            panic!("corner {corner} is sampled at {at:?}");
+        };
+        assert_eq!(right, left + 1);
+        assert_eq!(
+            samples[left].eval_t,
+            trajectory::continuous::interior_time_below(corner)
+        );
+        assert_eq!(
+            samples[right].eval_t,
+            trajectory::continuous::interior_time_above(corner)
+        );
+        if (0..AXES).any(|axis| {
+            pva(&seg, axis, samples[left].eval_t)[2] != pva(&seg, axis, samples[right].eval_t)[2]
+        }) {
+            corners_with_a_jump += 1;
+        }
+    }
+    assert!(
+        corners_with_a_jump > 0,
+        "the fixture's acceleration jumps at a corner"
+    );
+}
+
+#[test]
+fn breakpoints_closer_than_the_device_resolution_are_one_corner() {
+    let mut seg = segment(2.0);
+    let sliver = seg.t_end - MIN_BREAKPOINT_GAP_S / 10.0;
+    seg.axes = [
+        seg.axes[0].clone(),
+        ContinuousAxis::Hold {
+            position: 1.0,
+            t_start: seg.t_start,
+            t_end: sliver,
+        },
+        seg.axes[2].clone(),
+        seg.axes[3].clone(),
+    ]
+    .to_vec()
+    .into();
+    let samples = instants(&seg);
+    assert!(samples.iter().all(|sample| sample.t != sliver));
+    assert_eq!(
+        samples
+            .iter()
+            .filter(|sample| sample.t == seg.t_end)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_span_that_is_not_a_finite_forward_interval_is_refused() {
+    for (t_start, t_end) in [(1.0, 0.5), (f64::NAN, 1.0), (0.0, f64::INFINITY)] {
+        let mut seg = segment(0.0);
+        seg.t_start = t_start;
+        seg.t_end = t_end;
+        assert!(
+            sample_instants(&seg).is_err(),
             "[{t_start}, {t_end}] must be refused"
         );
     }
@@ -178,9 +274,9 @@ fn a_segment_record_carries_its_anchoring_and_its_carrier_at_every_sample() {
     let seg = segment(2.0);
     let mut out = Vec::new();
     encode_segment(&mut out, &seg, 1234.5, true).unwrap();
-    let n = sample_count(seg.t_start, seg.t_end).unwrap() as usize;
-    assert!(n > 2, "the fixture spans several intervals");
-    assert_eq!(out.len(), SEGMENT_FIXED_LEN + n * AXES * 3 * 8);
+    let expected = instants(&seg);
+    let n = expected.len();
+    assert_eq!(out.len(), SEGMENT_FIXED_LEN + n * (1 + AXES * 3) * 8);
     let mut framed = Vec::new();
     encode_header(&mut framed);
     framed.extend_from_slice(&out);
@@ -192,22 +288,16 @@ fn a_segment_record_carries_its_anchoring_and_its_carrier_at_every_sample() {
     assert_eq!(record.source_line, 7);
     assert_eq!(record.flags, SEGMENT_FRESH_EPOCH | SEGMENT_REST_AT_END);
     assert_eq!(record.samples.len(), n);
-    let span = seg.t_end - seg.t_start;
-    for (k, sample) in record.samples.iter().enumerate() {
-        let t = if k == n - 1 {
-            seg.t_end
-        } else {
-            seg.t_start + span * k as f64 / (n - 1) as f64
-        };
+    for (k, (sample, instant)) in record.samples.iter().zip(&expected).enumerate() {
+        assert_eq!(record.times[k], instant.t);
         for axis in 0..AXES {
-            assert_eq!(sample[axis], pva(&seg, axis, t), "sample {k} axis {axis}");
+            assert_eq!(
+                sample[axis],
+                pva(&seg, axis, instant.eval_t),
+                "sample {k} axis {axis}"
+            );
         }
     }
-    for axis in 0..AXES {
-        assert_eq!(record.samples[n - 1][axis], pva(&seg, axis, seg.t_end));
-        assert_eq!(record.samples[0][axis], pva(&seg, axis, seg.t_start));
-    }
-    assert!(span / (n - 1) as f64 <= SAMPLE_INTERVAL_S);
 }
 
 #[test]
