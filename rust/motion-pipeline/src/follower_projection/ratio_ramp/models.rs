@@ -33,12 +33,23 @@ const BINOMIALS: [[f64; 6]; 6] = [
 /// read.
 pub(in crate::follower_projection) const REACH_INSET_ULPS: f64 = 4.0;
 
+/// How many insets ([`REACH_INSET_ULPS`]) the width at a reach's end spans
+/// at least for the correction's formula there to be read inset: a window
+/// edge the inset skips then lies where the formulas on its two sides
+/// agree to within `(1/16)²` of the step in the ratio, the kernel's
+/// smoothing of a step being flat to second order at a window's edges.
+const INSET_WIDTHS: f64 = 16.0;
+
+fn reach_inset((lo, hi): (f64, f64)) -> f64 {
+    REACH_INSET_ULPS * f64::EPSILON * lo.abs().max(hi.abs()).max(1.0)
+}
+
 /// The points `reach` is read at for its formula: its ends moved
 /// [`REACH_INSET_ULPS`] inside, or its ends themselves where it is no
 /// wider than that: a reach that narrow holds only floats a bend may
 /// separate.
 fn read_points((lo, hi): (f64, f64)) -> (f64, f64) {
-    let inset = REACH_INSET_ULPS * f64::EPSILON * lo.abs().max(hi.abs()).max(1.0);
+    let inset = reach_inset((lo, hi));
     if hi - lo > 2.0 * inset {
         (lo + inset, hi - inset)
     } else {
@@ -329,7 +340,7 @@ fn end_apart((lo, hi): (f64, f64)) -> [[(f64, f64); 2]; 2] {
 /// that narrow that reads more than one formula reads each at some of its
 /// floats, and the evaluator reads no other.
 pub(in crate::follower_projection) fn narrow_floats((lo, hi): (f64, f64)) -> Option<Vec<f64>> {
-    let inset = REACH_INSET_ULPS * f64::EPSILON * lo.abs().max(hi.abs()).max(1.0);
+    let inset = reach_inset((lo, hi));
     if hi - lo > 2.0 * inset {
         return None;
     }
@@ -628,7 +639,7 @@ impl RatioSmoothing {
         if self.is_inert() {
             return Some(CorrectionFormula::Zero);
         }
-        let read = read_points(reach);
+        let read = self.correction_read_points(reach);
         let widths = (self.width.jet(read.0).value, self.width.jet(read.1).value);
         if widths.0 <= 0.0 && widths.1 <= 0.0 {
             return Some(CorrectionFormula::Zero);
@@ -639,6 +650,26 @@ impl RatioSmoothing {
         self.smoothed_formula(read, widths, || self.width.width_interval(reach))
     }
 
+    /// [`read_points`] for the correction's formula, each end moved inside
+    /// only where the width there spans [`INSET_WIDTHS`] insets: a seam an
+    /// ulp past the rest node its leaders stand at opens a window only a
+    /// few ulps wide, all of it within the inset, which the signal reads
+    /// where the leaders stand on the seam.
+    fn correction_read_points(&self, reach: (f64, f64)) -> (f64, f64) {
+        let inset = reach_inset(reach);
+        if reach.1 - reach.0 <= 2.0 * inset {
+            return reach;
+        }
+        let inset_where = |s: f64| {
+            if self.width.jet(s).value >= INSET_WIDTHS * inset {
+                inset
+            } else {
+                0.0
+            }
+        };
+        (reach.0 + inset_where(reach.0), reach.1 - inset_where(reach.1))
+    }
+
     /// The formulas of a reach whose width rises from rest, or falls to
     /// it, at one end: the rest reads none, the rest of the reach one
     /// smoothed formula, and the window reads no seams there, or it would
@@ -647,7 +678,7 @@ impl RatioSmoothing {
         if self.is_inert() {
             return None;
         }
-        let read = read_points(reach);
+        let read = self.correction_read_points(reach);
         let widths = (self.width.jet(read.0).value, self.width.jet(read.1).value);
         if (widths.0 <= 0.0) == (widths.1 <= 0.0) {
             return None;

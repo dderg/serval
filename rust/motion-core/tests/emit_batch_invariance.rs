@@ -93,8 +93,6 @@ fn ratio_ramped_leaders_are_the_same_however_the_emits_are_batched() {
 }
 
 #[test]
-#[ignore = "TODO(floor-guard.EmitWindowInvariance): the ratio ramp lays the terminal rest hold \
-            differently when finish() takes it in with the segments before it"]
 fn a_ratio_ramped_extruder_is_the_same_however_the_emits_are_batched() {
     assert_axes_match(
         &source_tree::manifest_dir().join("tests/configs/bench_ramp.cfg"),
