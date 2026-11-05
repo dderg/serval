@@ -357,6 +357,9 @@ class FakeToolhead:
         self.calls.append(("dwell_until", print_time))
         self._last_move_time = max(self._last_move_time, print_time)
 
+    def await_clock_sync(self):
+        self.calls.append(("await_clock_sync",))
+
     def wait_moves(self):
         self.calls.append(("wait_moves",))
 
@@ -432,7 +435,7 @@ class FakeMotion:
     def get_position(self):
         return list(self.commanded_pos)
 
-    def _await_clock_sync(self):
+    def await_clock_sync(self):
         pass
 
     def set_position(self, newpos, homing_axes=()):

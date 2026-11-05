@@ -113,7 +113,6 @@ class Motion:
         self._engine_wakeup = None
         self._load_motion_config(config)
         self.print_stall = 0
-        self._clock_sync_confirmed = False
         self._last_reactor_yield = 0.0
         gcode = printer.lookup_object("gcode")
         self.Coord = gcode.Coord
@@ -202,6 +201,7 @@ class Motion:
         self.printer.send_event("toolhead:manual_move")
 
     def submit_nudge(self, mcu_id, axis_idx, motor_idx, delta_mm, speed, accel):
+        self.await_clock_sync()
         motor_mask = 1 << motor_idx
         return self.engine.submit_nudge(
             {
@@ -215,6 +215,7 @@ class Motion:
     def submit_resonance_buzz(self, axis_mask, sign_mask, wave):
         from .extras import resonance_buzz
 
+        self.await_clock_sync()
         return resonance_buzz.submit_buzz(self, axis_mask, sign_mask, wave)
 
     def resonance_buzz_done(self):
@@ -345,11 +346,8 @@ class Motion:
 
     CLOCK_SYNC_TIMEOUT = 60.0
 
-    def _await_clock_sync(self):
-        if self._clock_sync_confirmed:
-            return
+    def await_clock_sync(self):
         if self.mcu.is_fileoutput():
-            self._clock_sync_confirmed = True
             return
 
         def pending_mcus():
@@ -360,28 +358,30 @@ class Motion:
                 and not m.get_clocksync().is_synced()
             ]
 
+        def names(mcus):
+            return ", ".join(m.get_name() for m in mcus)
+
         pending = pending_mcus()
-        if pending:
-            self.printer.lookup_object("gcode").respond_info(
-                "Waiting for MCU clock synchronization..."
-            )
-            deadline = self.reactor.monotonic() + self.CLOCK_SYNC_TIMEOUT
-            while pending:
-                if self.reactor.monotonic() > deadline:
-                    raise self.printer.command_error(
-                        "MCU clock synchronization did not converge"
-                        " within %.0fs (mcu: %s)"
-                        % (
-                            self.CLOCK_SYNC_TIMEOUT,
-                            ", ".join(m.get_name() for m in pending),
-                        )
-                    )
-                self.reactor.pause(self.reactor.monotonic() + 0.100)
-                pending = pending_mcus()
-        self._clock_sync_confirmed = True
+        if not pending:
+            return
+        self.printer.lookup_object("gcode").respond_info(
+            "Waiting for MCU clock synchronization (mcu: %s), up to %.0f s..."
+            % (names(pending), self.CLOCK_SYNC_TIMEOUT)
+        )
+        deadline = self.reactor.monotonic() + self.CLOCK_SYNC_TIMEOUT
+        while pending:
+            if self.reactor.monotonic() > deadline:
+                raise self.printer.command_error(
+                    "MCU clock synchronization did not converge within"
+                    " %.0f s (mcu: %s); check the MCU connection, then retry"
+                    " or FIRMWARE_RESTART"
+                    % (self.CLOCK_SYNC_TIMEOUT, names(pending))
+                )
+            self.reactor.pause(self.reactor.monotonic() + 0.100)
+            pending = pending_mcus()
 
     def move(self, newpos, speed):
-        self._await_clock_sync()
+        self.await_clock_sync()
         self.resync_parked_servos()
         move = Move(self, self.commanded_pos, newpos, speed)
         if not move.move_d:
@@ -400,7 +400,7 @@ class Motion:
         self._sync_print_time()
 
     def move_curve(self, newpos, interior_control_points, submit, speed):
-        self._await_clock_sync()
+        self.await_clock_sync()
         self.resync_parked_servos()
         move = Move(self, self.commanded_pos, newpos, speed)
         if move.is_kinematic_move:
