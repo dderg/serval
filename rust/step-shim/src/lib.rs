@@ -718,6 +718,27 @@ impl StepShim {
         Ok(frames)
     }
 
+    /// Cut the motor's motion at `clock` while the mcu keeps stepping what it
+    /// was sent: the roots up to the cut are emitted, the rest abandoned, and
+    /// the next run steps on from the last emitted step. The mcu still holds
+    /// those steps queued, so a `reset_step_clock` would have to wait for them
+    /// to play out, leaving the resumed run only the rest between the two as
+    /// send margin.
+    pub fn cut_keeping_step_clock(
+        &mut self,
+        motor: usize,
+        clock: u64,
+    ) -> Result<Vec<StepFrame>, ShimError> {
+        let executed = self.derived_halt_count(motor, clock);
+        let state = self.motor_mut(motor);
+        state.pending.retain(|root| root.clock <= clock);
+        let mut frames = Vec::new();
+        state.emit(motor, &mut frames)?;
+        state.queue.abandon_all();
+        state.cursor.reset_to(executed, clock.saturating_add(1));
+        Ok(frames)
+    }
+
     pub fn set_motor_cycles_per_second(&mut self, motor: usize, freq: f64) {
         let state = self.motor_mut(motor);
         if state.cfg.cycles_per_second == freq {
