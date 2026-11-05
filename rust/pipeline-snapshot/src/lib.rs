@@ -182,6 +182,10 @@ pub fn pipeline_snapshot_for_config(
 pub struct StreamRecord {
     pub inputs: Vec<motion_pipeline::InputTrace>,
     pub segments: Vec<ContinuousSegment>,
+    /// How many of `segments` the pipeline had emitted once each rest step
+    /// (a dwell or a wait for the moves to finish) drained it, in order:
+    /// the motion before a rest ends with the segment the count names.
+    pub drained_at_rests: Vec<usize>,
 }
 
 pub fn stream_record(
@@ -199,9 +203,19 @@ pub fn stream_record(
             true
         });
     }
+    let mut fed = steps.iter();
+    let mut drained_at_rests = Vec::new();
     let (_fitted, segments, _toolhead) =
-        run_pipeline_streaming(&steps, config, axis_chains, |_, _| {});
-    Ok(StreamRecord { inputs, segments })
+        run_pipeline_streaming(&steps, config, axis_chains, |shaped, _| {
+            if matches!(fed.next(), Some(PlanStep::Rest { .. })) {
+                drained_at_rests.push(shaped.len());
+            }
+        });
+    Ok(StreamRecord {
+        inputs,
+        segments,
+        drained_at_rests,
+    })
 }
 
 fn stream_inputs(

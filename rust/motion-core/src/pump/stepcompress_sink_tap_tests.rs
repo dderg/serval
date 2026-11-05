@@ -122,7 +122,12 @@ fn the_tap_replays_the_wire_through_sent_and_unsent_cuts() {
         "the sent cut reconciled"
     );
     assert!(h.endpoint.lanes.iter().all(|l| l.pending_cut.is_none()));
-    assert!(tap.sent("reset_step_clock") >= 3, "one reset per epoch");
+    assert_eq!(
+        tap.sent("reset_step_clock"),
+        2,
+        "the first epoch and the sent cut reset the step clock; the unsent cut steps on \
+         from the stream the mcu still holds"
+    );
     assert!(tap.sent("queue_step") > 0);
     assert!(tap.sent("stepcompress_barrier") > 0);
     tap.assert_replays_the_wire();

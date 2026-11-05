@@ -1,6 +1,6 @@
 use std::cell::Cell;
 
-use super::{AcceptedPiece, CapContactScope, Exemption, check, take_violations};
+use super::{AcceptedPiece, Exemption, check, take_violations};
 use crate::lowering::{AccelBudget, FitTol, quintic_in_u};
 use crate::shaper::TrackSignal;
 use crate::shaper::exact::{EXACT_CAPACITY, ExactPiece, ExactSpan, LocalPolynomial};
@@ -22,17 +22,52 @@ impl TrackSignal for SquareRootOnset {
     }
 }
 
-fn audit_floor_quintic_at_onset(contacts: &[f64]) -> Vec<super::FitViolation> {
-    let sig = SquareRootOnset {
-        at: 0.211_721_933,
-        coefficient: 9.8e6,
-    };
-    let (t0, t1) = (sig.at, sig.at + 0.8e-6);
+/// [`SquareRootOnset`] declaring its onset, with its enclosure.
+struct DeclaredOnset(SquareRootOnset);
+
+impl TrackSignal for DeclaredOnset {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        self.0.eval_pva(t)
+    }
+
+    fn square_root_onsets(&self) -> &[f64] {
+        std::slice::from_ref(&self.0.at)
+    }
+
+    fn enclosure_on(
+        &self,
+        lo: f64,
+        hi: f64,
+        accuracy: [f64; 3],
+    ) -> Option<crate::shaper::Enclosure<'_>> {
+        use crate::shaper::taylor::{self, Ball};
+        let (at, c) = (self.0.at, self.0.coefficient);
+        crate::shaper::test_signals::modelled((lo, hi), accuracy, &[at], |window| {
+            let line = crate::shaper::test_signals::polynomial(window, at, &[150.0, 300.0]);
+            if window.center < at {
+                return line;
+            }
+            let tau = window.time_since(at);
+            let root = taylor::root_or_range(&tau);
+            [
+                line[0].add(
+                    &tau.mul(&tau)
+                        .mul(&root)
+                        .scale(Ball::rounded(c * 4.0 / 15.0, 2)),
+                ),
+                line[1].add(&tau.mul(&root).scale(Ball::rounded(c * 2.0 / 3.0, 2))),
+                root.scale(Ball::exact(c)),
+            ]
+        })
+    }
+}
+
+fn audit_floor_quintic_at_onset(sig: &impl TrackSignal, at: f64) -> Vec<super::FitViolation> {
+    let (t0, t1) = (at, at + 0.8e-6);
     let mono_u = quintic_in_u(sig.eval_pva(t0), sig.eval_pva(t1), t1 - t0);
-    let _scope = CapContactScope::enter(contacts);
     take_violations();
     check(
-        &sig,
+        sig,
         AcceptedPiece {
             fit_context: "materialize_source",
             axis: 1,
@@ -49,38 +84,69 @@ fn audit_floor_quintic_at_onset(contacts: &[f64]) -> Vec<super::FitViolation> {
     take_violations()
 }
 
+const ONSET: SquareRootOnset = SquareRootOnset {
+    at: 0.211_721_933,
+    coefficient: 9.8e6,
+};
+
+/// A quintic anchored across a declared onset at the fit floor strays in
+/// velocity past what the acceleration tolerance carries across it: the
+/// floor's contract does not hold, and the piece stays a violation.
 #[test]
-fn a_floor_piece_on_a_cap_contact_onset_is_exempt_within_the_minimax_bound() {
-    let violations = audit_floor_quintic_at_onset(&[0.211_721_933]);
+fn a_floor_piece_on_a_declared_onset_straying_in_velocity_is_a_violation() {
+    let violations = audit_floor_quintic_at_onset(&DeclaredOnset(ONSET), ONSET.at);
     let [violation] = violations.as_slice() else {
         panic!("the quintic across a square-root onset must break the tolerance: {violations:?}");
     };
-    match violation.exemption {
-        Some(Exemption::CapContactOnset {
-            onset_coefficient,
-            error_mm_s2,
-            bound_mm_s2,
-        }) => {
-            assert!(
-                (onset_coefficient - 9.8e6).abs() < 1e3,
-                "measured onset coefficient {onset_coefficient}"
-            );
-            assert!(error_mm_s2 > 50.0 && error_mm_s2 <= bound_mm_s2);
-        }
-        None => panic!("an onset floor piece within the bound is not exempt: {violation:?}"),
-    }
+    assert!(violation.exemption.is_none(), "{violation:?}");
 }
 
+/// The fit of a declared onset down to its floor: every piece holds the
+/// tolerance or, at the floor on the onset, the floor's contract, proven.
 #[test]
-fn a_floor_piece_away_from_any_cap_contact_stays_a_violation() {
-    let violations = audit_floor_quintic_at_onset(&[0.2117]);
+fn a_fit_down_to_a_declared_onset_holds_the_tolerance_or_the_floor_contract() {
+    let sig = DeclaredOnset(ONSET);
+    take_violations();
+    crate::shaper::fit_axis_from_signal(
+        crate::shaper::AxisFit {
+            axis: 1,
+            t_start: ONSET.at,
+            t_end: ONSET.at + 4e-6,
+            seed_breakpoints: &[],
+            fit_tol: FitTol::absolute(0.005, 50.0),
+            fit_context: "square-root onset",
+            seam_continuity: crate::lowering::SeamContinuity::Position,
+        },
+        &sig,
+    )
+    .expect("a square-root onset fits down to the floor");
+    let violations = take_violations();
     assert!(
         violations
             .iter()
-            .all(|violation| violation.exemption.is_none()),
-        "{violations:?}"
+            .any(|violation| violation.exemption.is_some()),
+        "the onset's floor piece must answer to the floor's contract: {violations:?}"
     );
-    assert_eq!(violations.len(), 1);
+    for violation in &violations {
+        match violation.exemption {
+            Some(Exemption::OnsetFloor {
+                velocity_error,
+                allowance,
+            }) => assert!(velocity_error <= allowance, "{violation:?}"),
+            None => panic!("a piece leaves the tolerance unexempt: {violation:?}"),
+        }
+    }
+}
+
+/// A floor piece across an onset the signal does not declare: no exemption
+/// covers its acceleration miss.
+#[test]
+fn a_floor_piece_across_an_undeclared_onset_is_a_violation() {
+    let violations = audit_floor_quintic_at_onset(&ONSET, ONSET.at);
+    let [violation] = violations.as_slice() else {
+        panic!("the quintic across a square-root onset must break the tolerance: {violations:?}");
+    };
+    assert!(violation.exemption.is_none(), "{violation:?}");
 }
 
 /// A straight line whose exact acceleration carries a Gaussian bump the
@@ -190,6 +256,9 @@ impl TrackSignal for PinnedParabola {
 
 const PINNED_SPAN_S: f64 = 1e-3;
 const FOLLOWER_POSITION_TOL_MM: f64 = 1e-4;
+const UNLIMITED_POSITION_EQUIVALENT: AccelBudget = AccelBudget::PositionEquivalent {
+    accel_limit_mm_s2: f64::INFINITY,
+};
 
 fn audit_flat_piece<S: TrackSignal>(
     sig: &S,
@@ -240,7 +309,7 @@ fn a_follower_piece_bending_within_its_position_budget_holds_a_position_equivale
         bend > 50.0,
         "the bend must break the absolute 50 mm/s² budget"
     );
-    let violations = audit_flat_piece_over_pinned_parabola(bend, AccelBudget::PositionEquivalent);
+    let violations = audit_flat_piece_over_pinned_parabola(bend, UNLIMITED_POSITION_EQUIVALENT);
     assert!(violations.is_empty(), "{violations:?}");
     let absolute = audit_flat_piece_over_pinned_parabola(bend, AccelBudget::Absolute);
     let [absolute] = absolute.as_slice() else {
@@ -252,7 +321,7 @@ fn a_follower_piece_bending_within_its_position_budget_holds_a_position_equivale
 #[test]
 fn a_follower_piece_bending_past_its_position_budget_breaks_a_position_equivalent_tolerance() {
     let bend = 2.0 * position_equivalent_acceleration();
-    let violations = audit_flat_piece_over_pinned_parabola(bend, AccelBudget::PositionEquivalent);
+    let violations = audit_flat_piece_over_pinned_parabola(bend, UNLIMITED_POSITION_EQUIVALENT);
     let [violation] = violations.as_slice() else {
         panic!("a bend of twice the position-equivalent acceleration must be a violation");
     };
@@ -334,7 +403,7 @@ fn counted_pinned_parabola(bend_mm_s2: f64) -> Counted<PinnedParabola> {
 fn a_piece_with_exact_polynomials_reads_the_evaluator_once_per_sub_interval() {
     let sig = counted_pinned_parabola(0.5 * position_equivalent_acceleration());
     let exact = exact_pinned_parabola(&sig.signal, &[0.3 * PINNED_SPAN_S, 0.7 * PINNED_SPAN_S]);
-    let violations = audit_flat_piece(&sig, AccelBudget::PositionEquivalent, Some(&exact));
+    let violations = audit_flat_piece(&sig, UNLIMITED_POSITION_EQUIVALENT, Some(&exact));
     assert!(violations.is_empty(), "{violations:?}");
     assert_eq!(sig.evaluations.get(), 3);
 }
@@ -343,7 +412,7 @@ fn a_piece_with_exact_polynomials_reads_the_evaluator_once_per_sub_interval() {
 fn a_violation_is_measured_off_the_exact_polynomials() {
     let sig = counted_pinned_parabola(2.0 * position_equivalent_acceleration());
     let exact = exact_pinned_parabola(&sig.signal, &[0.5 * PINNED_SPAN_S]);
-    let violations = audit_flat_piece(&sig, AccelBudget::PositionEquivalent, Some(&exact));
+    let violations = audit_flat_piece(&sig, UNLIMITED_POSITION_EQUIVALENT, Some(&exact));
     let [violation] = violations.as_slice() else {
         panic!("a bend of twice the position-equivalent acceleration must be a violation");
     };
@@ -362,5 +431,5 @@ fn exact_polynomials_the_evaluator_disagrees_with_fail_the_audit() {
         bend_mm_s2: sig.signal.bend_mm_s2 * (1.0 + 1e-4),
     };
     let exact = exact_pinned_parabola(&disagreeing, &[]);
-    audit_flat_piece(&sig, AccelBudget::PositionEquivalent, Some(&exact));
+    audit_flat_piece(&sig, UNLIMITED_POSITION_EQUIVALENT, Some(&exact));
 }

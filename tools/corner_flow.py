@@ -17,19 +17,26 @@ switch moves across the vertex and the path it takes, not as over-fill.
 
     make -f Makefile.rust motion-engine-fast
     python3 tools/corner_flow.py tools/bench/printer.cfg
-    python3 tools/corner_flow.py printer.cfg --sweep smooth_time=0,0.005,0.02
     python3 tools/corner_flow.py printer.cfg --set pa.k=0.04 --json
-    python3 tools/corner_flow.py printer.cfg --kernel-free
+    python3 tools/corner_flow.py kernel.cfg --kernel-free
+    python3 tools/corner_flow.py kernel.cfg --sweep smooth_time=0,0.005,0.02
 
-``--kernel-free`` evaluates the config's chain with its extruder smoothing
-kernels taken out: every follower ramps its extrusion-ratio steps by the
-ramp time its limits derive, kernel or not. An advance with no kernel
+``--kernel-free`` evaluates a config that carries an extruder kernel override
+with its extruder smoothing kernels taken out, leaving the recommended chain:
+every follower ramps its extrusion-ratio steps by the ramp time its limits
+derive, kernel or not. An advance with no kernel
 needs extrude-only caps, and the retract case is only comparable between
 chains under the same ones: ``--extrude-only V,A`` fills in whichever the
 config lacks, for every chain.
 
 Each case plans in a process of its own: a planner panic fails that case
 alone, as an ERROR row carrying the panic's message.
+
+``--write-gcode FILE`` writes the cases' G-code instead, one marked
+section per case and speed; the fit audit plans
+``tools/sim/gcode/corner_flow_cases.gcode``, written so, on the bench
+configs and holds the extruder to its limits there
+(``rust/pipeline-snapshot/tests/fit_tolerance.rs``).
 
 Columns, per case and speed (worst over the case's corners; ``-`` where it
 has none of that kind):
@@ -62,6 +69,8 @@ has none of that kind):
   chord rule at the spills (docs/rewrite/shaper.md, "Followers"), up to
   about 1e-4 mm where the two plans' spills curve differently, so anything
   well above that is lost or invented material.
+- ``t``: the case's planned print time (s), what the extruder limits and
+  any kernel cost in time.
 """
 
 from __future__ import annotations
@@ -86,6 +95,7 @@ for _path in (REPO / "klippy", REPO / "snapshots", REPO):
 from tools import flow_metric  # noqa: E402
 
 CASE_JOB_FLAG = "--case-job"
+CASE_MARKER = "; corner_flow case: "
 ERROR_CHARS = 200
 SPEEDS_MM_S = (50.0, 150.0, 300.0)
 START = (0.0, 0.0)
@@ -153,6 +163,7 @@ class Row:
     ae_all: float = math.nan
     de_gcode: float = math.nan
     de_advance: float = math.nan
+    time_s: float = math.nan
     error: str = ""
     corners: list[dict] = field(default_factory=list)
     steps: list[dict] = field(default_factory=list)
@@ -251,6 +262,23 @@ def gcode_total_e(geometry: Geometry, ratio: float) -> float:
         total += move.e * ratio * length if length > 0 else move.e
         x, y = move.x, move.y
     return total
+
+
+def bead_ratio(bead: tuple[float, float, float]) -> float:
+    """Filament per path millimetre of a `width, height, filament` bead."""
+    width, height, filament = bead
+    return width * height / (math.pi * (filament / 2.0) ** 2)
+
+
+def cases_gcode(bead: tuple[float, float, float], speeds: list[float]) -> str:
+    """Every case at every speed, each opened by a marker line naming it."""
+    ratio = bead_ratio(bead)
+    return "".join(
+        f"{CASE_MARKER}{geometry.name} {speed:g}\n"
+        + gcode(geometry, speed, ratio)
+        for geometry in GEOMETRIES
+        for speed in speeds
+    )
 
 
 class PrinterConfig:
@@ -411,8 +439,8 @@ def measure(
     melt_k: float,
     bead: tuple[float, float, float],
 ) -> Row:
-    width, height, filament = bead
-    ratio = width * height / (math.pi * (filament / 2.0) ** 2)
+    width, height, _ = bead
+    ratio = bead_ratio(bead)
     row = Row(geometry.name, speed)
     program = gcode(geometry, speed, ratio)
     try:
@@ -467,6 +495,7 @@ def measure(
     row.ae_max = float(np.abs(ae[moving]).max())
     row.ve_all = float(np.abs(ve).max())
     row.ae_all = float(np.abs(ae).max())
+    row.time_s = float(t[-1])
     row.de_gcode = float(e_cmd[-1] - gcode_total_e(geometry, ratio))
     if all(move.e == 1.0 for move in geometry.moves):
         row.de_advance = beyond_the_path(xy, e_cmd, ratio) - beyond_the_path(
@@ -543,7 +572,7 @@ def table(rows: list[Row], sweep_name: str) -> str:
         f"{'case':<10} {'mm/s':>4} | {'peak':>6} {'dip':>5} {'w>5%':>5} "
         f"{'blob':>6} | {'moved':>6} {'net':>6} {'sw':>5} | "
         f"{'ve+':>6} {'ve-':>6} {'ae':>7} | {'|ve|*':>6} "
-        f"{'|ae|*':>7} | {'dE_gc':>8} {'dE_adv':>8}"
+        f"{'|ae|*':>7} | {'dE_gc':>8} {'dE_adv':>8} | {'t':>6}"
     )
     if sweep_name:
         head = f"{sweep_name:>11} " + head
@@ -564,7 +593,8 @@ def table(rows: list[Row], sweep_name: str) -> str:
             f"{_cell(row.switch_mm, '.2f', 5)} | "
             f"{row.ve_max:>6.1f} {row.ve_min:>6.1f} {row.ae_max:>7.0f} | "
             f"{row.ve_all:>6.1f} {row.ae_all:>7.0f} | "
-            f"{row.de_gcode:>+8.4f} {_signed(row.de_advance):>8}"
+            f"{row.de_gcode:>+8.4f} {_signed(row.de_advance):>8} | "
+            f"{row.time_s:>6.3f}"
         )
     return "\n".join(lines)
 
@@ -578,7 +608,9 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__.split("\n\n", 1)[1],
     )
-    parser.add_argument("config", type=Path, help="printer.cfg to evaluate")
+    parser.add_argument(
+        "config", type=Path, nargs="?", help="printer.cfg to evaluate"
+    )
     parser.add_argument(
         "--set",
         action="append",
@@ -622,12 +654,27 @@ def main() -> None:
     )
     parser.add_argument("--json", action="store_true", help="emit JSON rows")
     parser.add_argument(
+        "--write-gcode",
+        type=Path,
+        metavar="FILE",
+        help="write every case's G-code at --speeds and --bead to FILE, "
+        f"each opened by a '{CASE_MARKER}<case> <speed>' line, and exit; "
+        "no config is read",
+    )
+    parser.add_argument(
         "--jobs",
         type=int,
         default=os.cpu_count() or 1,
         help="parallel planner runs",
     )
     args = parser.parse_args()
+    bead = tuple(float(v) for v in args.bead.split(","))
+    speeds = [float(v) for v in args.speeds.split(",")]
+    if args.write_gcode:
+        args.write_gcode.write_text(cases_gcode(bead, speeds))
+        return
+    if args.config is None:
+        parser.error("a config is required unless --write-gcode is given")
 
     velocity, _, accel = args.extrude_only.partition(",")
     base = PrinterConfig.load(args.config).with_extrude_only_caps(
@@ -647,8 +694,6 @@ def main() -> None:
             variant = base.copy()
             variant.set_param(sweep_name, value)
             variants.append((value, variant))
-    bead = tuple(float(v) for v in args.bead.split(","))
-    speeds = [float(v) for v in args.speeds.split(",")]
 
     jobs = []
     for label, variant in variants:

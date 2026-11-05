@@ -146,6 +146,28 @@ pub(super) fn velocity_rate(caps: &ExtruderCaps, ratio_in_reach: f64) -> LinearR
     }
 }
 
+/// A move that retracts while the toolhead travels, a wipe, is a retract:
+/// no advance leads it, and as in Klipper its filament motion `|r|·v` keeps
+/// the extrude-only caps, `|r|` its steepest retracting ratio.
+pub(super) fn moving_retract_capped(
+    segment: &crate::path::PathSegment,
+    (velocity_cap, accel_cap): (f64, f64),
+    (ceiling, accel): (f64, f64),
+) -> (f64, f64) {
+    let retract = segment
+        .followers
+        .iter()
+        .map(|follower| -follower.ratio.min(follower.ratio_end))
+        .fold(0.0, f64::max);
+    if retract <= 0.0 {
+        return (ceiling, accel);
+    }
+    (
+        ceiling.min(velocity_cap / retract),
+        accel.min(accel_cap / retract),
+    )
+}
+
 /// The largest budget up to `accel` whose acceleration demand at `ceiling`
 /// fits `max_accel`; the demand grows with the budget, so bisection finds it.
 fn largest_fitting_accel(demand: &Demand, ceiling: f64, accel: f64, max_accel: f64) -> f64 {
@@ -178,13 +200,19 @@ fn ratios_on(segment: &crate::path::PathSegment, axis: usize) -> (f64, f64) {
 /// ratio moves: the follower's ratio ramp spreads the step there, with the
 /// change along either segment (a blend's ratio slides from one move's to
 /// the next's over a path a window gathers whole), over at most the longest
-/// ramp time, so the leaders' shaped speed there must stay where that ramp
-/// keeps the advanced follower within its limits under the budget `accel`
-/// around the join ([`crate::RatioRampRule::step_speed_cap`]; the path's
-/// jerk is the budget's own to hold, no slower crossing lowers it), and the
-/// planned speed lower still by what the leaders' kernels spill into it.
-/// Infinite where the ratio does not move, or no path carries it.
-pub(super) fn ratio_step_ceiling(up: &crate::Move, dn: &crate::Move, accel: f64) -> f64 {
+/// ramp time, and over less where the leaders rest `rest_room_mm` along the
+/// path from the join, so the leaders' shaped speed there must stay where
+/// that ramp keeps the advanced follower within its limits under the budget
+/// `accel` around the join ([`crate::RatioRampRule::step_speed_cap`]; the
+/// path's jerk is the budget's own to hold, no slower crossing lowers it),
+/// and the planned speed lower still by what the leaders' kernels spill
+/// into it. Infinite where the ratio does not move, or no path carries it.
+pub(super) fn ratio_step_ceiling(
+    up: &crate::Move,
+    dn: &crate::Move,
+    accel: f64,
+    rest_room_mm: f64,
+) -> f64 {
     let Some(caps) = ExtruderCaps::stricter(up.limits.extruder, dn.limits.extruder) else {
         return f64::INFINITY;
     };
@@ -199,7 +227,7 @@ pub(super) fn ratio_step_ceiling(up: &crate::Move, dn: &crate::Move, accel: f64)
         .fold(0.0_f64, |peak, ratio| peak.max(ratio.abs()));
     let shaped = caps
         .ratio_ramp_rule()
-        .step_speed_cap(moved, peak, accel, 0.0);
+        .step_speed_cap(moved, peak, accel, 0.0, rest_room_mm);
     if shaped.is_infinite() {
         return shaped;
     }

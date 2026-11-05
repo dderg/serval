@@ -234,29 +234,35 @@ def test_a_capture_on_the_plans_pace_passes_the_pace_check(synthesized):
         assert epoch["pace_max_abs_lag_ms"] <= STALL_S * 1e3 + 1.0
 
 
-def _uniform_steps(times: np.ndarray) -> analyze.StepEvents:
-    return analyze.StepEvents(
-        times,
-        np.arange(1, times.size + 1, dtype=np.int64),
-        np.ones(times.size, np.int8),
-        np.full(times.size, np.nan),
-    )
-
-
-def _paced(capture_times: np.ndarray, reference_times: np.ndarray) -> dict:
-    return analyze.epoch_pace(
-        analyze.EpochSteps(
-            capture={"a": _uniform_steps(capture_times)},
-            reference={"a": _uniform_steps(reference_times)},
+def test_pace_pairs_steps_by_match_not_by_index():
+    alignment = analyze.Alignment(10.0, 0.0, False)
+    matches = {
+        role: analyze.MatchedSteps(
+            late_s=np.asarray(late),
+            capture_time_s=np.asarray(at),
+            reference_rate_hz=np.full(len(at), 500.0),
+            unmatched_capture=unmatched,
+            unmatched_reference=0,
+            edge_ties=0,
         )
+        for role, at, late, unmatched in (
+            ("a", [10.0, 10.2, 10.4], [0.0, 1e-6, 0.0], 0),
+            ("z", [10.1, 10.3], [-1e-6, 0.0], 1),
+        )
+    }
+    epoch = SimpleNamespace(
+        matches=matches, alignment=alignment, capture=analyze.Epoch(9.95, 10.4)
     )
+    capture, reference = analyze.paired_steps_s(epoch)
+    assert capture.tolist() == [10.0, 10.1, 10.2, 10.3, 10.4]
+    assert reference == pytest.approx([0.0, 0.100001, 0.199999, 0.3, 0.4])
 
 
 PACE_REFERENCE_S = np.arange(0.0, 20.0, 1e-3)
 
 
 def test_a_capture_one_percent_faster_than_the_plan_fails_the_pace_check():
-    pace = _paced(16.6 + 0.99 * PACE_REFERENCE_S, PACE_REFERENCE_S)
+    pace = analyze.epoch_pace(16.6 + 0.99 * PACE_REFERENCE_S, PACE_REFERENCE_S)
     assert not pace["pace_within_tolerance"]
     assert pace["pace_capture_over_stream"] == pytest.approx(0.99, abs=1e-4)
     assert pace["pace_worst_lag_ms"] == pytest.approx(-200.0, abs=1.0)
@@ -269,7 +275,7 @@ def test_a_local_burst_that_runs_ahead_and_resyncs_fails_the_pace_check():
     capture[ahead] -= 0.1 * (PACE_REFERENCE_S[ahead] - 5.0)
     capture[PACE_REFERENCE_S >= 10.0] -= 0.5
     capture[PACE_REFERENCE_S >= 12.0] += 0.5
-    pace = _paced(capture, PACE_REFERENCE_S)
+    pace = analyze.epoch_pace(capture, PACE_REFERENCE_S)
     assert not pace["pace_within_tolerance"]
     assert pace["pace_capture_over_stream"] == pytest.approx(1.0)
 
@@ -277,9 +283,23 @@ def test_a_local_burst_that_runs_ahead_and_resyncs_fails_the_pace_check():
 def test_crystal_ppm_and_a_short_stall_stay_within_the_pace_tolerance():
     capture = (1.0 + 150e-6) * PACE_REFERENCE_S
     capture[(PACE_REFERENCE_S > 3.0) & (PACE_REFERENCE_S < 3.06)] += STALL_S
-    pace = _paced(capture, PACE_REFERENCE_S)
+    pace = analyze.epoch_pace(capture, PACE_REFERENCE_S)
     assert pace["pace_within_tolerance"]
     assert pace["pace_max_abs_lag_ms"] == pytest.approx(STALL_S * 1e3, abs=0.5)
+
+
+PACER_RESERVE_S = 1.056
+
+
+def test_a_capture_braked_to_rest_and_resumed_by_the_pacer_fails_the_pace_check():
+    capture = PACE_REFERENCE_S.copy()
+    for resume_at in (4.0, 9.0, 14.0):
+        capture[PACE_REFERENCE_S >= resume_at] += PACER_RESERVE_S
+    pace = analyze.epoch_pace(capture, PACE_REFERENCE_S)
+    assert not pace["pace_within_tolerance"]
+    assert pace["pace_worst_lag_ms"] == pytest.approx(
+        3 * PACER_RESERVE_S * 1e3, rel=1e-3
+    )
 
 
 TIE_GCODE = """\
@@ -731,7 +751,7 @@ def _live_epochs(gcode: str, cfg: Path) -> list[list[tuple]]:
 
 def _reference_epochs(job: analyze.Job) -> list[list[tuple]]:
     engine = analyze.harness._import_engine()
-    _, _, blocks = analyze.plan_waypoints(job)
+    blocks = analyze.plan_waypoints(job).blocks
     epochs = []
     for block in blocks:
         moves = engine.snapshot_moves(block, job.config.config_text)
@@ -759,8 +779,49 @@ def test_reference_epochs_plan_exactly_the_moves_live_submits(tmp_path):
         LIVE_SEMANTICS_GCODE, tmp_path / "printer.cfg"
     )
     assert [len(epoch) for epoch in reference] == [3, 3, 2]
-    _, final_xyze, _ = analyze.plan_waypoints(job)
+    final_xyze = analyze.plan_waypoints(job).final_xyze
     assert final_xyze == pytest.approx((40.0, 30.0, 0.4, 4.5))
+
+
+EPOCH_SPLIT_GCODE = """\
+SET_KINEMATIC_POSITION X=0 Y=0 Z=0
+G92 E0
+G1 X10 Y5 E1 F3000
+G4 P100
+G1 X20 E1.5
+M400
+G1 X30 Y10 E2
+M400
+M400
+G1 X40
+G4 P0
+G1 X50 Y0 E3
+"""
+
+
+def test_the_stream_plan_splits_at_every_dwell_and_wait_the_print_rests_at(
+    tmp_path,
+):
+    _require_snapshot_engine()
+    shutil.copy(BENCH_DIR / "printer.cfg", tmp_path / "printer.cfg")
+    (tmp_path / "print.gcode").write_text(EPOCH_SPLIT_GCODE)
+    job = analyze.load_job(tmp_path)
+    planned = analyze.plan_waypoints(job)
+    epochs = analyze.stream_epochs(
+        job, planned, job.config.config_text, [0, 1, 2, 3], 1e-3
+    )
+    engine = analyze.harness._import_engine()
+    assert len(epochs) == len(planned.blocks) == 5
+    for (t_start, t_end, axes_pva), block in zip(epochs, planned.blocks):
+        snapshot, _ = engine.pipeline_snapshot_axis_samples(
+            block, job.config.config_text, [0], 2
+        )
+        assert t_end - t_start == pytest.approx(
+            json.loads(snapshot)["traversal_time_s"], abs=1e-9
+        )
+        assert axes_pva[:3, 0, 0] == pytest.approx(block[0]["position"][:3])
+        assert axes_pva[:3, -1, 0] == pytest.approx(block[-1]["position"][:3])
+        assert np.abs(axes_pva[:, [0, -1], 1]).max() < 1e-6
 
 
 def test_a_command_live_cannot_plan_offline_fails_the_analysis(tmp_path):

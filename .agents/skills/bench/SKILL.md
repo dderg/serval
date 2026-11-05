@@ -67,9 +67,9 @@ Crash triage: `journalctl -u klipper` on the Pi (`ssh bench-pi`) and `events/hos
 ## Recovery
 
 - klippy aborted: systemd restarts it after ~10 s; `prepare_printer` waits for ready.
-- MCU latched in shutdown (survives klippy restarts; `prepare_printer` times out "printer did not become ready"): `deploy.py reset-target`. Full reflash: `deploy.py flash-target` (F401 fw from `f401.config` via Pi SWD). Capture board: `deploy.py flash-capture`.
+- MCU latched in shutdown (survives klippy restarts; `prepare_printer` times out "printer did not become ready"): `deploy.py reset-target`. Full reflash: `deploy.py flash-target` (F401 fw from `f401.config` via Pi SWD). Capture board: `deploy.py flash-capture`. Both build inside the tree they run from (`out/bench-f401`, `capture-fw/target`; `--tree` picks another), require the board to report the tree's firmware build id (`firmware_build_id.py`) after flashing, and record it under `firmware` in the deploy record that every `run.json` carries.
 - F407 whose firmware disabled SWD: set BOOT0=1 and press reset (manual). Ask the user for wiring changes (endstops, TMC UART, clock wire are planned, see README).
 
 ## Limits
 
-No endstops/heaters/TMC wired (no homing; runs use `SET_KINEMATIC_POSITION`); klippy takes the non-TMC single-edge 2 µs step path, not the TMC both-edge path; 25 µs time resolution in count mode (11.9 ns with `--events`; add `--step-tap` to separate MCU execution error from host compression error); Pi 5 is faster than Pi 4 printers; config pins PA13/PA14/PA8 are forbidden. Prefer `--host-cpus/--host-max-mhz` to approximate weaker hosts.
+Endstops/probe, heaters/thermistors and TMC2209s are simulated by the capture board only with `--config configs/full.cfg --sim configs/full.sim.json` (phase-2 wiring, `tools/bench/capture-fw/PHASE2.md`; then klippy takes the TMC both-edge path and `analysis.json` gains `simulator`); otherwise klippy takes the non-TMC single-edge 2 µs step path; runs drop `G28` and start from `SET_KINEMATIC_POSITION`; 25 µs time resolution in count mode (11.9 ns with `--events`; add `--step-tap` to separate MCU execution error from host compression error); Pi 5 is faster than Pi 4 printers; config pins PA13/PA14/PA8 are forbidden. Prefer `--host-cpus/--host-max-mhz` to approximate weaker hosts.

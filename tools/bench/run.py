@@ -2,7 +2,8 @@
 
 uv run python tools/bench/run.py <gcode> [--runs-dir ~/bench/runs]
     [--config tools/bench/configs/fast.cfg]
-    [--host-cpus N] [--host-max-mhz M]
+    [--host-cpus N] [--host-max-mhz M] [--events [--step-tap]]
+    [--no-dispatch-record]
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import secrets
 import time
 import urllib.parse
 import urllib.request
@@ -18,12 +20,14 @@ from datetime import datetime
 from pathlib import Path
 
 import lock
+import sim_config
 import throttle
 from capture import Capture
 from pi import (
     PI_LOGS,
     REPO_CFG,
     BenchError,
+    enable_mco,
     http,
     prepare_printer,
     printer_state,
@@ -33,10 +37,13 @@ from pi import (
     ssh,
     upload,
 )
+from sim_config import SimConfig
 
 STEP_TAP_ENV = "SERVAL_STEP_TAP_DIR"
-STEP_TAP_DROPIN = f"{throttle.DROPIN_DIR}/bench-step-tap.conf"
 PI_STEP_TAP_DIR = "/tmp/serval-step-tap"
+DISPATCH_RECORD_ENV = "SERVAL_DISPATCH_RECORD_DIR"
+PI_DISPATCH_RECORD_DIR = "/tmp/serval-dispatch-record"
+RECORDING_DROPIN = f"{throttle.DROPIN_DIR}/bench-recording.conf"
 
 TERMINAL_STATES = {"complete", "error", "cancelled"}
 ACTIVE_STATES = {"printing", "paused"}
@@ -130,23 +137,56 @@ def cancel_active_print() -> None:
         http("POST", "/printer/print/cancel")
 
 
+def recordings(tap: bool, dispatch_record: bool) -> dict[str, str]:
+    """The host recordings a run asks for: each env var the live host reads
+    and the empty Pi directory it writes into."""
+    wanted = {
+        STEP_TAP_ENV: (tap, PI_STEP_TAP_DIR),
+        DISPATCH_RECORD_ENV: (dispatch_record, PI_DISPATCH_RECORD_DIR),
+    }
+    return {env: path for env, (on, path) in wanted.items() if on}
+
+
 @contextlib.contextmanager
-def step_tap_session(enabled: bool) -> Iterator[None]:
-    if not enabled:
+def recording_session(env: dict[str, str]) -> Iterator[None]:
+    if not env:
         yield
         return
+    dirs = " ".join(env.values())
+    lines = "".join(f"Environment={k}={v}\\n" for k, v in env.items())
     ssh(
-        f"rm -rf {PI_STEP_TAP_DIR} && mkdir -p {PI_STEP_TAP_DIR} && "
+        f"rm -rf {dirs} && mkdir -p {dirs} && "
         f"sudo mkdir -p {throttle.DROPIN_DIR} && printf "
-        f"'[Service]\\nEnvironment={STEP_TAP_ENV}={PI_STEP_TAP_DIR}\\n' "
-        f"| sudo tee {STEP_TAP_DROPIN} >/dev/null && sudo systemctl daemon-reload"
+        f"'[Service]\\n{lines}' "
+        f"| sudo tee {RECORDING_DROPIN} >/dev/null && sudo systemctl daemon-reload"
     )
     restart_klipper()
     try:
         yield
     finally:
-        ssh(f"sudo rm -f {STEP_TAP_DROPIN} && sudo systemctl daemon-reload")
+        ssh(f"sudo rm -f {RECORDING_DROPIN} && sudo systemctl daemon-reload")
         restart_klipper()
+
+
+def kinematic_start(line: str) -> tuple[float, float, float]:
+    import analyze
+
+    return analyze._kinematic_start(line)
+
+
+def build_sim(
+    path: Path, config: Path, start_xyz: tuple[float, float, float]
+) -> SimConfig:
+    import analyze
+
+    motors = analyze.read_motors(analyze._config_sections(config.read_text()))
+    return sim_config.load(
+        path,
+        config_id=secrets.randbelow(0xFFFF) + 1,
+        step_mm={m.role: m.step_mm for m in motors},
+        dir_sign={m.role: m.dir_sign for m in motors},
+        start_xyz=start_xyz,
+    )
 
 
 def run(
@@ -157,10 +197,17 @@ def run(
     host_throttle: throttle.Throttle | None = None,
     events: bool = False,
     tap: bool = False,
+    dispatch_record: bool = True,
+    sim_path: Path | None = None,
 ) -> Path:
     if tap and not events:
         raise BenchError("--step-tap is only analyzable with --events")
     lines, stats = sanitize(gcode.read_text())
+    sim = (
+        None
+        if sim_path is None
+        else build_sim(sim_path, config, kinematic_start(lines[0]))
+    )
     run_dir = runs_dir / datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir.mkdir(parents=True)
     sanitized = ("\n".join(lines) + "\n").encode()
@@ -176,16 +223,29 @@ def run(
         "config": str(config.resolve()),
         "deployed": deployed,
         "sanitized_lines": len(lines),
+        "sim": None if sim_path is None else str(sim_path.resolve()),
         **stats,
         "step_benchmarks": mcu_step_benchmarks(),
     }
     with (
         throttle.throttled(host_throttle) as applied_throttle,
-        step_tap_session(tap),
+        recording_session(recordings(tap, dispatch_record)),
     ):
         summary["host_throttle"] = applied_throttle
         summary["step_tap"] = tap
-        execute(run_dir, remote_name, summary, timeout_s, events, tap)
+        summary["dispatch_record"] = dispatch_record
+        if sim is not None and sim.expect_mco:
+            enable_mco()
+        execute(
+            run_dir,
+            remote_name,
+            summary,
+            timeout_s,
+            events,
+            tap,
+            dispatch_record,
+            sim,
+        )
     return run_dir
 
 
@@ -196,8 +256,15 @@ def execute(
     timeout_s: float,
     events: bool,
     tap: bool,
+    dispatch_record: bool,
+    sim: SimConfig | None,
 ) -> None:
-    capture = Capture(run_dir, both_edges_mask=0, events=events)
+    capture = Capture(
+        run_dir,
+        both_edges_mask=0 if sim is None else sim.both_edges_mask,
+        events=events,
+        sim=sim,
+    )
     final: dict = {}
     failure: BaseException | None = None
     started = time.time()
@@ -228,6 +295,8 @@ def execute(
     scp_from_pi(f"{PI_LOGS}/events", run_dir / "events", recursive=True)
     if tap:
         scp_from_pi(f"{PI_STEP_TAP_DIR}/step_tap_mcu*.bin", run_dir)
+    if dispatch_record:
+        scp_from_pi(f"{PI_DISPATCH_RECORD_DIR}/dispatch_record_*.bin", run_dir)
     summary.update(
         host_start=datetime.fromtimestamp(started).isoformat(),
         host_end=datetime.fromtimestamp(ended).isoformat(),
@@ -264,6 +333,19 @@ def main() -> None:
         action="store_true",
         help="record the host's commanded step frames (needs --events)",
     )
+    parser.add_argument(
+        "--dispatch-record",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="record every segment the host dispatched, the reference "
+        "analyze.py judges a run the pacer braked against",
+    )
+    parser.add_argument(
+        "--sim",
+        type=Path,
+        help="simulated peripherals JSON (e.g. configs/full.sim.json; pair with "
+        "--config configs/full.cfg)",
+    )
     lock.add_timeout_argument(parser)
     args = parser.parse_args()
     with lock.bench_lock(args.lock_timeout):
@@ -276,6 +358,8 @@ def main() -> None:
                 throttle.Throttle(args.host_cpus, args.host_max_mhz),
                 args.events,
                 args.step_tap,
+                args.dispatch_record,
+                args.sim,
             )
         )
 

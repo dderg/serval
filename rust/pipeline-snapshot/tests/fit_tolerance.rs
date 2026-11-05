@@ -3,8 +3,8 @@
 //! everywhere inside the piece — not just at the ladder's probe points. A
 //! follower's acceleration promise is per piece: the looser of
 //! `max_accel_deviation` and the acceleration that spends its position
-//! tolerance over the piece. This replays every snapshot case and a whole
-//! dense real print through the pipeline with the fit audit on, and fails
+//! tolerance over the piece. This replays every snapshot case and whole
+//! real prints through the pipeline with the fit audit on, and fails
 //! on any accepted piece that leaves the tolerance, and on any planned
 //! extruder that leaves the limits it was planned under beyond what
 //! `corpus/known_extruder_excesses.rs` pins. Each set of cases is its own
@@ -19,15 +19,18 @@ mod corpus;
 const DENSE_PRINT: &str = "voron_dense_top_layers";
 
 fn dense_cases(configs: &[&str]) -> Vec<(String, String, PathBuf)> {
-    let gcode = std::fs::read_to_string(
-        corpus::repo().join(format!("tools/sim/gcode/{DENSE_PRINT}.gcode")),
-    )
-    .expect("read the dense print");
+    print_cases(DENSE_PRINT, configs)
+}
+
+fn print_cases(print: &str, configs: &[&str]) -> Vec<(String, String, PathBuf)> {
+    let gcode =
+        std::fs::read_to_string(corpus::repo().join(format!("tools/sim/gcode/{print}.gcode")))
+            .unwrap_or_else(|e| panic!("read the sim print {print}: {e}"));
     configs
         .iter()
         .map(|config| {
             (
-                format!("{DENSE_PRINT}/{config}"),
+                format!("{print}/{config}"),
                 gcode.clone(),
                 corpus::repo().join(config),
             )
@@ -44,7 +47,15 @@ struct Audited {
     extruder: Vec<String>,
 }
 
+/// Held across an audited replay: the fit audit gathers violations from
+/// every thread into one list, so two replays at once would take each
+/// other's — or drop them — when the tests share a process.
+static AUDITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn audited(cases: Vec<(String, String, PathBuf)>) -> Audited {
+    let _auditing = AUDITING
+        .lock()
+        .expect("an audited replay panicked while auditing");
     let mut audited = Audited::default();
     for (name, gcode, config) in cases {
         take_violations();
@@ -61,7 +72,7 @@ fn audited(cases: Vec<(String, String, PathBuf)>) -> Audited {
             continue;
         };
         println!("{name}: {}", audit.summary());
-        if let Some(excess) = corpus::known_extruder_excesses::extruder_excess(&config, &audit) {
+        if let Some(excess) = corpus::known_extruder_excesses::extruder_excess(&name, &audit) {
             audited.extruder.push(format!("{name}: {excess}"));
         }
     }
@@ -143,6 +154,23 @@ fn every_fit_piece_of_the_dense_print_holds_the_fit_tolerance_on_the_bench_confi
     assert_every_accepted_fit_piece_holds(dense_cases(&corpus::SIM_CONFIGS));
 }
 
+/// The first layers' slow perimeters, primes and retracts on the bench
+/// configs' kernel-free extruder chain.
+#[test]
+fn every_fit_piece_of_the_first_layers_holds_the_fit_tolerance_on_the_bench_configs() {
+    assert_every_accepted_fit_piece_holds(print_cases("voron_first_layers", &corpus::SIM_CONFIGS));
+}
+
+/// The Trident print that first broke the follower cache, on the bench
+/// configs' kernel-free extruder chain.
+#[test]
+fn every_fit_piece_of_the_follower_cache_print_holds_the_fit_tolerance_on_the_bench_configs() {
+    assert_every_accepted_fit_piece_holds(print_cases(
+        "trident_follower_cache_regression",
+        &corpus::SIM_CONFIGS,
+    ));
+}
+
 /// A 70 000 mm/s² Trident whose kernel-free pressure advance under a ratio
 /// ramp fits the follower's advanced source to the position-equivalent
 /// budget.
@@ -167,4 +195,45 @@ fn every_fit_piece_of_the_dense_print_holds_the_fit_tolerance_on_the_bowden_corn
     assert_every_accepted_fit_piece_holds(dense_cases(&[
         "tools/bench/configs/p1_bowden_bedslinger_kernel_cd0.04.cfg",
     ]));
+}
+
+const CORNER_FLOW_CASES: &str = "tools/sim/gcode/corner_flow_cases.gcode";
+const CORNER_FLOW_CASE_MARKER: &str = "; corner_flow case: ";
+
+/// `tools/corner_flow.py`'s synthetic corners, zigzag, flow change, travel
+/// steps and retract at each of its speeds, each planned on its own from
+/// rest as it measures them.
+fn corner_flow_cases(configs: &[&str]) -> Vec<(String, String, PathBuf)> {
+    let all = std::fs::read_to_string(corpus::repo().join(CORNER_FLOW_CASES))
+        .unwrap_or_else(|e| panic!("read {CORNER_FLOW_CASES}: {e}"));
+    let cases: Vec<(&str, &str)> = all
+        .split(CORNER_FLOW_CASE_MARKER)
+        .filter(|case| !case.is_empty())
+        .map(|case| {
+            case.split_once('\n')
+                .unwrap_or_else(|| panic!("a corner_flow case without G-code: {case:?}"))
+        })
+        .collect();
+    configs
+        .iter()
+        .flat_map(|config| {
+            cases.iter().map(move |(name, gcode)| {
+                (
+                    format!("corner_flow {name}/{config}"),
+                    (*gcode).to_string(),
+                    corpus::repo().join(config),
+                )
+            })
+        })
+        .collect()
+}
+
+/// The corner_flow cases on the bench configs and the 70 000 mm/s² Trident
+/// ramp chain, whose extrude-to-travel steps at 150 and 300 mm/s ramp the
+/// extruder right up to its 20 000 mm/s² limit.
+#[test]
+fn every_fit_piece_of_the_corner_flow_cases_holds_the_fit_tolerance_on_the_bench_configs() {
+    let mut configs = corpus::SIM_CONFIGS.to_vec();
+    configs.push("tools/bench/configs/trident_ramp.cfg");
+    assert_every_accepted_fit_piece_holds(corner_flow_cases(&configs));
 }

@@ -6,6 +6,7 @@
 
 # Output directory
 OUT=out/
+VERSION_EXTRA ?=
 
 $(shell ./scripts/find-firmware-extras.sh)
 
@@ -91,7 +92,7 @@ $(OUT)%.o.ctr: $(OUT)%.o
 $(OUT)compile_time_request.o: $(patsubst %.c, $(OUT)src/%.o.ctr,$(src-y)) ./scripts/buildcommands.py
 	@echo "  Building $@"
 	$(Q)cat $(patsubst %.c, $(OUT)src/%.o.ctr,$(src-y)) | tr -s '\0' '\n' > $(OUT)compile_time_request.txt
-	$(Q)$(PYTHON) ./scripts/buildcommands.py -d $(OUT)klipper.dict -t "$(CC);$(AS);$(LD);$(OBJCOPY);$(OBJDUMP);$(STRIP)" $(OUT)compile_time_request.txt $(OUT)compile_time_request.c
+	$(Q)$(PYTHON) ./scripts/buildcommands.py -d $(OUT)klipper.dict -e "$(VERSION_EXTRA)" -t "$(CC);$(AS);$(LD);$(OBJCOPY);$(OBJDUMP);$(STRIP)" $(OUT)compile_time_request.txt $(OUT)compile_time_request.c
 	@python3 tools/check_async_event_registration.py $(OUT)klipper.dict
 	$(Q)$(CC) $(CFLAGS) -c $(OUT)compile_time_request.c -o $@
 

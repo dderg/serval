@@ -4,10 +4,11 @@ use geometry::path::{Clothoid, PathSegment, Segment};
 use geometry::{LawSegment, Move, ScalarLaw, SourceRange, VelocityLimits};
 use trajectory::{AnalyticMoveSpan, ContinuousAxis, SurfaceMode};
 
+use super::taylor::{self, Ball};
 use super::{
-    AxisFit, BetweenProbes, CapContactSource, FloorVelocityGate, KnotJumpBound,
-    MIN_DEVICE_INTERVAL_S, RungWitness, TrackSignal, cap_contact_seeds, edge_inset,
-    edge_velocity_and_acceleration, fit_axis_from_signal, fit_seed_times, seed_floors,
+    AxisFit, CapContactSource, Enclosure, FloorVelocityGate, MIN_DEVICE_INTERVAL_S, TrackSignal,
+    cap_contact_seeds, edge_inset, edge_velocity_and_acceleration, fit_axis_from_signal,
+    fit_seed_times, seed_floors, test_signals,
 };
 use crate::lowering::{AccelBudget, FitTol, LADDER_PROBES_U, eval_mono_dd, quintic_in_u};
 use crate::types::PostProcessError;
@@ -34,6 +35,17 @@ impl TrackSignal for AccelerationStep {
             self.velocity + acceleration * tau,
             acceleration,
         )
+    }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
+        test_signals::modelled((lo, hi), accuracy, &[self.at], |window| {
+            let acceleration = if window.center < self.at {
+                self.before
+            } else {
+                self.after
+            };
+            test_signals::polynomial(window, self.at, &[0.0, self.velocity, acceleration / 2.0])
+        })
     }
 }
 
@@ -68,6 +80,24 @@ impl TrackSignal for RampToRest {
         } else {
             (velocity * self.ramp_s / 2.0, 0.0, 0.0)
         }
+    }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
+        let Motion {
+            velocity,
+            acceleration,
+        } = self.approach;
+        let rest = self.at + self.ramp_s;
+        test_signals::modelled((lo, hi), accuracy, &[self.at, rest], |window| {
+            let deceleration = velocity / self.ramp_s;
+            if window.center < self.at {
+                test_signals::polynomial(window, self.at, &[0.0, velocity, acceleration / 2.0])
+            } else if window.center < rest {
+                test_signals::polynomial(window, self.at, &[0.0, velocity, -deceleration / 2.0])
+            } else {
+                test_signals::polynomial(window, rest, &[velocity * self.ramp_s / 2.0])
+            }
+        })
     }
 }
 
@@ -282,6 +312,24 @@ impl TrackSignal for CubicWithProbeBlindBump {
             a + tau * j + bump_dd * rate * rate,
         )
     }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
+        let [p, v, a, j] = self.cubic;
+        test_signals::modelled((lo, hi), accuracy, &[], |window| {
+            let cubic = test_signals::polynomial(window, self.t0, &[p, v, a / 2.0, j / 6.0]);
+            let rate = Ball::rounded(2.0 / self.h, 1);
+            let x = window
+                .time_since(self.t0)
+                .scale(rate)
+                .add_ball(Ball::exact(-1.0));
+            let bump = |order: usize| taylor::derivative_of(&self.bump, order, &x);
+            [
+                cubic[0].add(&bump(0)),
+                cubic[1].add(&bump(1).scale(rate)),
+                cubic[2].add(&bump(2).scale(rate * rate)),
+            ]
+        })
+    }
 }
 
 #[test]
@@ -388,19 +436,18 @@ impl TrackSignal for JerkKink {
         along((p, v, a, self.jerk_after), tau - knot)
     }
 
-    fn interior_knots(&self, start: f64, end: f64) -> &[f64] {
-        if self.knot[0] > start && self.knot[0] < end {
-            &self.knot
-        } else {
-            &[]
-        }
-    }
-
-    fn knot_jump(&self, _knot: f64) -> KnotJumpBound {
-        KnotJumpBound {
-            acceleration: 0.0,
-            jerk: (self.jerk_after - self.before[3]).abs(),
-        }
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
+        let knot = self.knot[0];
+        let at_knot = self.eval_pva(knot);
+        test_signals::modelled((lo, hi), accuracy, &[knot], |window| {
+            let [p, v, a, j] = self.before;
+            if window.center <= knot {
+                test_signals::polynomial(window, self.t0, &[p, v, a / 2.0, j / 6.0])
+            } else {
+                let (p, v, a) = at_knot;
+                test_signals::polynomial(window, knot, &[p, v, a / 2.0, self.jerk_after / 6.0])
+            }
+        })
     }
 }
 
@@ -502,6 +549,27 @@ impl TrackSignal for SquareRootOnset {
             self.coefficient * root,
         )
     }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
+        test_signals::modelled((lo, hi), accuracy, &[self.at], |window| {
+            let line = test_signals::polynomial(window, self.at, &[self.offset_mm, self.velocity]);
+            if window.center < self.at {
+                return line;
+            }
+            let tau = window.time_since(self.at);
+            let root = taylor::root_or_range(&tau);
+            let c = self.coefficient;
+            [
+                line[0].add(
+                    &tau.mul(&tau)
+                        .mul(&root)
+                        .scale(Ball::rounded(c * 4.0 / 15.0, 2)),
+                ),
+                line[1].add(&tau.mul(&root).scale(Ball::rounded(c * 2.0 / 3.0, 2))),
+                root.scale(Ball::exact(c)),
+            ]
+        })
+    }
 }
 
 #[test]
@@ -560,123 +628,6 @@ fn a_square_root_onset_at_the_floor_is_fitted_by_the_closest_anchored_rung() {
     );
 }
 
-struct WaveWithQuietKnot {
-    t0: f64,
-    amplitude: f64,
-    angular_rate: f64,
-    phase: f64,
-    knot: [f64; 1],
-}
-
-impl WaveWithQuietKnot {
-    const SPAN_S: f64 = 0.014;
-    const KNOT_FRACTION: f64 = 0.4;
-
-    fn new(cycles: f64, eighths_of_a_turn: f64, peak_over_tolerance: f64) -> Self {
-        let t0 = 1.0;
-        let angular_rate = std::f64::consts::TAU * cycles / Self::SPAN_S;
-        Self {
-            t0,
-            amplitude: peak_over_tolerance * FOLLOWER_LIKE_TOLERANCE.accel_mm_s2
-                / (angular_rate * angular_rate),
-            angular_rate,
-            phase: eighths_of_a_turn * std::f64::consts::TAU / 8.0,
-            knot: [t0 + Self::KNOT_FRACTION * Self::SPAN_S],
-        }
-    }
-
-    fn worst_acceleration_deviation_of_its_fit(&self) -> (f64, f64) {
-        let track = fit_axis_from_signal(
-            AxisFit {
-                axis: 3,
-                t_start: self.t0,
-                t_end: self.t0 + Self::SPAN_S,
-                seed_breakpoints: &[],
-                fit_tol: FOLLOWER_LIKE_TOLERANCE,
-                fit_context: "smooth wave past a quiet knot",
-                seam_continuity: crate::lowering::SeamContinuity::Velocity,
-            },
-            self,
-        )
-        .expect("a smooth signal fits");
-        let acceleration = nurbs::eval::derivative(&nurbs::eval::derivative(&track));
-        (0..2000)
-            .map(|k| {
-                let t = self.t0 + Self::SPAN_S * (f64::from(k) + 0.5) / 2000.0;
-                (
-                    (nurbs::eval::eval(&acceleration, t) - self.second_deriv(t)).abs(),
-                    t,
-                )
-            })
-            .fold((0.0, f64::NAN), |worst, sample| {
-                if sample.0 > worst.0 { sample } else { worst }
-            })
-    }
-}
-
-impl TrackSignal for WaveWithQuietKnot {
-    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
-        let tau = t - self.t0;
-        let rate = self.angular_rate;
-        let (sine, cosine) = libm::sincos(rate.mul_add(tau, self.phase));
-        (
-            0.3 + 10.0 * tau + 100.0 * tau * tau + self.amplitude * sine,
-            10.0 + 200.0 * tau + self.amplitude * rate * cosine,
-            200.0 - self.amplitude * rate * rate * sine,
-        )
-    }
-
-    fn interior_knots(&self, start: f64, end: f64) -> &[f64] {
-        if self.knot[0] > start && self.knot[0] < end {
-            &self.knot
-        } else {
-            &[]
-        }
-    }
-
-    fn knot_jump(&self, _knot: f64) -> KnotJumpBound {
-        KnotJumpBound {
-            acceleration: 0.0,
-            jerk: 0.0,
-        }
-    }
-}
-
-fn assert_holds_the_acceleration_tolerance((worst, at): (f64, f64)) {
-    assert!(
-        worst <= FOLLOWER_LIKE_TOLERANCE.accel_mm_s2,
-        "the fit's acceleration leaves the signal by {worst} mm/s² at {at}, past the {} mm/s² \
-         tolerance",
-        FOLLOWER_LIKE_TOLERANCE.accel_mm_s2
-    );
-}
-
-#[test]
-fn a_quiet_knot_keeps_the_probe_interpolant_watching_the_acceleration_between_probes() {
-    assert_holds_the_acceleration_tolerance(
-        WaveWithQuietKnot::new(3.2, 3.0, 2.0).worst_acceleration_deviation_of_its_fit(),
-    );
-}
-
-#[test]
-fn a_near_tolerance_acceleration_estimate_is_sampled_at_its_peak() {
-    assert_holds_the_acceleration_tolerance(
-        WaveWithQuietKnot::new(3.2, 3.0, 1.0).worst_acceleration_deviation_of_its_fit(),
-    );
-}
-
-/// Next to the quiet knot the estimates between the probes put this wave's
-/// miss just under the budget, and one exact read where they place its peak
-/// lands within it while the true peak does not: such a stretch is settled
-/// by exact samples. Measured before: 57.8 mm/s² against the 50 mm/s²
-/// tolerance.
-#[test]
-fn a_near_budget_estimate_between_probes_is_settled_by_exact_samples() {
-    assert_holds_the_acceleration_tolerance(
-        WaveWithQuietKnot::new(3.2, 1.0, 1.0).worst_acceleration_deviation_of_its_fit(),
-    );
-}
-
 struct DeclaredOnset(SquareRootOnset);
 
 impl TrackSignal for DeclaredOnset {
@@ -686,6 +637,10 @@ impl TrackSignal for DeclaredOnset {
 
     fn square_root_onsets(&self) -> &[f64] {
         std::slice::from_ref(&self.0.at)
+    }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
+        self.0.enclosure_on(lo, hi, accuracy)
     }
 }
 
@@ -853,6 +808,16 @@ impl TrackSignal for PressureWave {
             )
         })
     }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
+        test_signals::modelled((lo, hi), accuracy, &[], |window| {
+            let [first, second] = self
+                .tones
+                .each_ref()
+                .map(|tone| test_signals::sine(window, 0.0, tone.amplitude_mm, tone.angular_rate));
+            std::array::from_fn(|order| first[order].add(&second[order]))
+        })
+    }
 }
 
 const PRESSURE_WAVE: PressureWave = PressureWave {
@@ -888,7 +853,9 @@ fn fit_pressure_wave(fit_tol: FitTol) -> nurbs::ScalarNurbs {
 fn a_position_equivalent_budget_fits_a_pressure_wave_in_fewer_pieces_within_each_piece_budget() {
     let absolute = FitTol::absolute(1e-4, 50.0);
     let position_equivalent = FitTol {
-        accel_budget: AccelBudget::PositionEquivalent,
+        accel_budget: AccelBudget::PositionEquivalent {
+            accel_limit_mm_s2: f64::INFINITY,
+        },
         ..absolute
     };
     let absolute_pieces = nurbs::bezier::extract_bezier_pieces(&fit_pressure_wave(absolute));
@@ -926,6 +893,137 @@ fn a_position_equivalent_budget_fits_a_pressure_wave_in_fewer_pieces_within_each
     }
 }
 
+/// A linear advance releasing its lead over a ratio ramp from a flow of
+/// `flow` mm/s to none at a steady path speed, the ramp `ramp_s` long from
+/// `at`: `ė = flow·(1 − S(u)) − k·flow·S′(u)/τ` with the smoothstep
+/// `S(u) = 3u² − 2u³`. Its acceleration steps from zero to
+/// `−6·k·flow/τ²` as the ramp opens, its peak.
+struct AdvanceReleasedOverARamp {
+    at: f64,
+    ramp_s: f64,
+    flow: f64,
+    advance_s: f64,
+}
+
+impl AdvanceReleasedOverARamp {
+    /// The position's coefficients in the time since `at` over the ramp.
+    fn ramp_coefficients(&self) -> [f64; 5] {
+        let (flow, k, tau) = (self.flow, self.advance_s, self.ramp_s);
+        [
+            0.0,
+            flow,
+            -3.0 * k * flow / (tau * tau),
+            -flow / (tau * tau) + 2.0 * k * flow / (tau * tau * tau),
+            flow / (2.0 * tau * tau * tau),
+        ]
+    }
+
+    fn rest_position(&self) -> f64 {
+        0.5 * self.flow * self.ramp_s - self.advance_s * self.flow
+    }
+
+    fn peak_acceleration(&self) -> f64 {
+        6.0 * self.advance_s * self.flow / (self.ramp_s * self.ramp_s)
+    }
+}
+
+impl TrackSignal for AdvanceReleasedOverARamp {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let tau = t - self.at;
+        if tau < 0.0 {
+            return (self.flow * tau, self.flow, 0.0);
+        }
+        if tau >= self.ramp_s {
+            return (self.rest_position(), 0.0, 0.0);
+        }
+        let c = self.ramp_coefficients();
+        (
+            (((c[4] * tau + c[3]) * tau + c[2]) * tau + c[1]) * tau,
+            ((4.0 * c[4] * tau + 3.0 * c[3]) * tau + 2.0 * c[2]) * tau + c[1],
+            (12.0 * c[4] * tau + 6.0 * c[3]) * tau + 2.0 * c[2],
+        )
+    }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
+        let rest = self.at + self.ramp_s;
+        test_signals::modelled((lo, hi), accuracy, &[self.at, rest], |window| {
+            if window.center < self.at {
+                test_signals::polynomial(window, self.at, &[0.0, self.flow])
+            } else if window.center < rest {
+                test_signals::polynomial(window, self.at, &self.ramp_coefficients())
+            } else {
+                test_signals::polynomial(window, rest, &[self.rest_position()])
+            }
+        })
+    }
+}
+
+/// The extruder's own acceleration limit bounds the position-equivalent
+/// budget: where it would carry a piece past the limit plus
+/// `max_accel_deviation`, the piece is held to the absolute budget, so a
+/// ramp planned up to the limit stays within that. A 150 mm/s line of a
+/// 0.4 x 0.2 mm bead turning to travel on a 20 000 mm/s² extruder with
+/// `k = 0.02` left a cubic 72 mm/s² over its limit.
+#[test]
+fn a_position_equivalent_budget_keeps_a_fit_within_the_followers_limit() {
+    const POINTS: u32 = 256;
+    let (flow, advance_s, limit): (f64, f64, f64) = (4.989_022_5, 0.02, 20_000.0);
+    let ramp = AdvanceReleasedOverARamp {
+        at: 0.785_96,
+        ramp_s: (6.0 * advance_s * flow / limit).sqrt(),
+        flow,
+        advance_s,
+    };
+    assert!((ramp.peak_acceleration() - limit).abs() <= 1e-9 * limit);
+    let absolute = FitTol::absolute(8.3e-5, 50.0);
+    let limited = FitTol {
+        accel_budget: AccelBudget::PositionEquivalent {
+            accel_limit_mm_s2: limit,
+        },
+        ..absolute
+    };
+    let (t_start, t_end) = (0.7825, 0.795);
+    let rest = ramp.at + ramp.ramp_s;
+    let track = fit_axis_from_signal(
+        AxisFit {
+            axis: 3,
+            t_start,
+            t_end,
+            seed_breakpoints: &[
+                t_start,
+                0.785,
+                ramp.at,
+                0.7875,
+                ramp.at + 0.5 * ramp.ramp_s,
+                0.79,
+                rest,
+                0.7925,
+                t_end,
+            ],
+            fit_tol: limited,
+            fit_context: "advance released over a ramp",
+            seam_continuity: crate::lowering::SeamContinuity::Velocity,
+        },
+        &ramp,
+    )
+    .expect("the ramp fits");
+    let ceiling = limit + absolute.accel_mm_s2;
+    for piece in nurbs::bezier::extract_bezier_pieces(&track) {
+        let h = piece.u_end - piece.u_start;
+        let acceleration = piece.differentiate().differentiate();
+        for k in 0..=POINTS {
+            let t = piece.u_start + h * f64::from(k) / f64::from(POINTS);
+            assert!(
+                acceleration.evaluate(t).abs() <= ceiling,
+                "piece [{}, {}] reaches {} mm/s² at {t}, past the {ceiling} mm/s² ceiling",
+                piece.u_start,
+                piece.u_end,
+                acceleration.evaluate(t)
+            );
+        }
+    }
+}
+
 /// An acceleration stepping to `step` a sliver `delay` past a span edge and
 /// rising from there as `rise · (1 − e^(−τ/time))`: the break hides in the
 /// edge sliver, so the edge anchors to the reading past it extrapolated
@@ -956,50 +1054,41 @@ impl TrackSignal for SaturatingRise {
             },
         )
     }
-}
 
-/// A smooth extruder swell, `20·τ + 3·10⁴·τ² + 10⁷·τ³` mm.
-struct CubicSwell {
-    t0: f64,
-}
-
-impl CubicSwell {
-    const COEFFICIENTS: [f64; 4] = [0.0, 20.0, 3e4, 1e7];
-
-    /// The swell over `[t0, t0 + h]` as a polynomial in `u ∈ [−1, 1]`.
-    fn in_u(&self, h: f64) -> Vec<f64> {
-        let half = 0.5 * h;
-        Self::COEFFICIENTS
-            .iter()
-            .rev()
-            .fold(vec![0.0], |acc, &coefficient| {
-                let mut next = vec![0.0; acc.len() + 1];
-                for (power, &value) in acc.iter().enumerate() {
-                    next[power] += half * value;
-                    next[power + 1] += half * value;
-                }
-                next[0] += coefficient;
-                next
-            })
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
+        let onset = self.t0 + self.delay;
+        test_signals::modelled((lo, hi), accuracy, &[self.t0, onset], |window| {
+            let line = test_signals::polynomial(window, self.t0, &[100.0, -10.0]);
+            if window.center < onset {
+                return line;
+            }
+            let risen = window.time_since(onset);
+            let settled = test_signals::exp(&risen.scale(Ball::rounded(-1.0 / self.time, 1)))
+                .scale(Ball::exact(-1.0))
+                .add_ball(Ball::exact(1.0));
+            let (step, rise, time) = (self.step, self.rise, self.time);
+            let squared = risen.mul(&risen).scale(Ball::exact(0.5));
+            [
+                line[0].add(&squared.scale(Ball::exact(step))).add(
+                    &squared
+                        .sub(&risen.scale(Ball::exact(time)))
+                        .add(&settled.scale(Ball::rounded(time * time, 1)))
+                        .scale(Ball::exact(rise)),
+                ),
+                line[1].add(&risen.scale(Ball::exact(step))).add(
+                    &risen
+                        .sub(&settled.scale(Ball::exact(time)))
+                        .scale(Ball::exact(rise)),
+                ),
+                settled.scale(Ball::exact(rise)).add_ball(Ball::exact(step)),
+            ]
+        })
     }
 }
 
-impl TrackSignal for CubicSwell {
-    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
-        let tau = t - self.t0;
-        (
-            tau * (20.0 + tau * (3e4 + 1e7 * tau)),
-            20.0 + tau * (6e4 + 3e7 * tau),
-            6e4 + 6e7 * tau,
-        )
-    }
-}
-
-/// The witnesses walked the first probe gap from the span edge, whose
-/// sample is the anchored edge state: past a steep edge that is the
-/// extrapolation, not the signal, so the miss between the resolved edge and
-/// the first probe was estimated from a zero. Measured before: 1.15× the
-/// tolerance on a 100 µs piece.
+/// Past a steep edge the anchored edge state is the extrapolation, not the
+/// signal, and the piece must still hold the tolerance from its resolved
+/// edge. Measured before: 1.15× the tolerance on a 100 µs piece.
 #[test]
 fn a_piece_anchored_past_its_edge_sliver_holds_the_tolerance_from_its_resolved_edge() {
     let fit_tol = FitTol::absolute(0.005, 50.0);
@@ -1026,11 +1115,13 @@ fn a_piece_anchored_past_its_edge_sliver_holds_the_tolerance_from_its_resolved_e
         trajectory::next_toward(fit.t_start, fit.t_end),
         fit.t_start + edge_inset(fit.t_end - fit.t_start, cubic_floor, 0.0),
         false,
+        false,
         fit_tol,
     )
     .expect("the edge reads");
-    assert!(
-        anchor.past_sliver,
+    assert_ne!(
+        anchor.acceleration,
+        sig.second_deriv(fit.t_start),
         "the step must hide in the edge sliver for the edge to anchor past it"
     );
     let track = fit_axis_from_signal(fit, &sig).expect("a stepped rise fits");
@@ -1172,162 +1263,5 @@ fn a_rail_braking_off_its_curvature_cap_holds_the_tolerance_past_its_phase_seam(
     assert!(
         worst <= fit_tol.accel_mm_s2,
         "the braking rail leaves the tolerance by {worst} mm/s²"
-    );
-}
-
-/// The smooth swell with its positions read off by up to `noise_mm`, as an
-/// extruder's adaptively integrated odometer reads them; its speed and
-/// acceleration stay exact.
-struct NoisyPositions {
-    swell: CubicSwell,
-    noise_mm: f64,
-}
-
-impl TrackSignal for NoisyPositions {
-    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
-        let scrambled = t.to_bits().wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 11;
-        let unit = scrambled as f64 / (1_u64 << 53) as f64;
-        let (position, velocity, acceleration) = self.swell.eval_pva(t);
-        (
-            self.noise_mm.mul_add(2.0 * unit - 1.0, position),
-            velocity,
-            acceleration,
-        )
-    }
-}
-
-/// A swing `α·(u − a)^p·(u − b)^q` between the two middle probes, `p, q ≥ 3`
-/// so a rung carrying it meets the truth's position, slope and curvature at
-/// both, scaled for its curvature to peak at `peak` times `curvature_budget`.
-fn swing_between_middle_probes((p, q): (i32, i32), peak: f64, curvature_budget: f64) -> Vec<f64> {
-    let (a, b) = (LADDER_PROBES_U[4], LADDER_PROBES_U[5]);
-    let times_root = |polynomial: Vec<f64>, root: f64| {
-        let mut next = vec![0.0; polynomial.len() + 1];
-        for (power, &value) in polynomial.iter().enumerate() {
-            next[power] -= root * value;
-            next[power + 1] += value;
-        }
-        next
-    };
-    let unit = (0..q).fold(
-        (0..p).fold(vec![1.0], |acc, _| times_root(acc, a)),
-        |acc, _| times_root(acc, b),
-    );
-    let unit_peak = (0..=4096)
-        .map(|k| eval_mono_dd(&unit, a + (b - a) * f64::from(k) / 4096.0).abs())
-        .fold(0.0, f64::max);
-    unit.iter()
-        .map(|value| value * peak * curvature_budget / unit_peak)
-        .collect()
-}
-
-/// The witness's verdict between the two middle probes on the swell's rung
-/// plus `swing`, held against the truth's interpolant.
-fn witness_between_middle_probes(
-    sig: &impl TrackSignal,
-    fit_tol: FitTol,
-    swing: impl Fn(f64) -> Vec<f64>,
-) -> Option<f64> {
-    let h = 1e-3;
-    let piece_tol = fit_tol.for_piece(h);
-    let swing = swing(piece_tol.accel_mm_s2 * (0.5 * h) * (0.5 * h));
-    let mut coefficients = CubicSwell { t0: 1.0 }.in_u(h);
-    coefficients.resize(swing.len().max(coefficients.len()), 0.0);
-    for (coefficient, swing) in coefficients.iter_mut().zip(&swing) {
-        *coefficient += swing;
-    }
-    let witness = RungWitness {
-        axis: 3,
-        sig,
-        coefficients: &coefficients,
-        t0: 1.0,
-        h,
-        fit_tol: piece_tol,
-        between_probes: BetweenProbes::TruthInterpolant,
-    };
-    let left = witness
-        .exact_sample_at(LADDER_PROBES_U[4])
-        .expect("the swell is finite");
-    let right = witness
-        .exact_sample_at(LADDER_PROBES_U[5])
-        .expect("the swell is finite");
-    witness
-        .over_piece(left, right)
-        .expect("the swell is finite")
-}
-
-const POSITION_EQUIVALENT: FitTol = FitTol {
-    accel_budget: AccelBudget::PositionEquivalent,
-    ..FitTol::absolute(1e-4, 50.0)
-};
-
-fn witness_of_swing(fit_tol: FitTol, shape: (i32, i32), peak: f64) -> Option<f64> {
-    witness_between_middle_probes(&CubicSwell { t0: 1.0 }, fit_tol, |budget| {
-        swing_between_middle_probes(shape, peak, budget)
-    })
-}
-
-fn caught_between_middle_probes(witness: Option<f64>) -> bool {
-    witness.is_some_and(|u| u > LADDER_PROBES_U[4] && u < LADDER_PROBES_U[5])
-}
-
-#[test]
-fn a_rung_swinging_past_the_position_equivalent_budget_between_probes_is_caught() {
-    let witness = witness_of_swing(POSITION_EQUIVALENT, (3, 3), 1.5);
-    assert!(
-        caught_between_middle_probes(witness),
-        "a swing 1.5x the budget between the probes went unwitnessed: {witness:?}"
-    );
-}
-
-#[test]
-fn a_rung_swinging_within_the_position_equivalent_budget_between_probes_is_kept() {
-    let witness = witness_of_swing(POSITION_EQUIVALENT, (3, 3), 0.8);
-    assert!(
-        witness.is_none(),
-        "a swing 0.8x the budget between the probes was witnessed at {witness:?}"
-    );
-}
-
-/// A follower's plain source fits to the absolute budget, and the error's
-/// interpolant between probes reads a swing that meets the truth at both as
-/// no miss at all: measured before, 61 pieces up to 1.94x over on the
-/// Trident kernel chain's dense print.
-#[test]
-fn a_rung_swinging_past_the_absolute_budget_between_probes_is_caught_against_the_truth() {
-    let witness = witness_of_swing(FitTol::absolute(1e-4, 50.0), (3, 3), 1.5);
-    assert!(
-        caught_between_middle_probes(witness),
-        "a swing 1.5x the budget between the probes went unwitnessed: {witness:?}"
-    );
-}
-
-/// A lopsided swing peaks between the points the truth's interpolant is
-/// scanned at, where the scan reads it under the budget: measured before,
-/// an advanced extruder piece 1.000022x over on the Trident ramp chain.
-#[test]
-fn a_rung_swinging_just_past_the_budget_between_the_scan_points_is_caught() {
-    let witness = witness_of_swing(POSITION_EQUIVALENT, (3, 5), 1.01);
-    assert!(
-        caught_between_middle_probes(witness),
-        "a lopsided swing 1.01x the budget between the probes went unwitnessed: {witness:?}"
-    );
-}
-
-/// Split ever finer, the truth's interpolant is rebuilt from positions a
-/// hair apart, and their rounding reads as curvature that grows as the
-/// square of the split. Rejected at the deepest split, a rung that holds
-/// the truth exactly was split down to 2 ns pieces.
-#[test]
-fn a_rung_holding_the_truth_is_kept_however_noisy_its_positions_read() {
-    let noisy = NoisyPositions {
-        swell: CubicSwell { t0: 1.0 },
-        noise_mm: 1e-6,
-    };
-    let witness =
-        witness_between_middle_probes(&noisy, FitTol::absolute(1e-4, 50.0), |_| Vec::new());
-    assert!(
-        witness.is_none(),
-        "a rung on the truth was witnessed at {witness:?} through position noise"
     );
 }

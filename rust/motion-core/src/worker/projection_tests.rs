@@ -50,6 +50,7 @@ fn pump_sink(router: PassthroughRouter) -> Projection {
         counter: Arc::new(AtomicU64::new(0)),
         frontier: Arc::new(super::super::CommittedFrontier::default()),
         frozen_projection: std::collections::HashMap::new(),
+        dispatch_record: None,
     }
 }
 

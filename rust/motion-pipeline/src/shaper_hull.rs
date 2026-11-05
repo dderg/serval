@@ -55,8 +55,11 @@ pub(crate) struct HullBudget {
 
 /// The share of each order's budget an enclosure's bound may take before
 /// its window is halved: the hull spends the bound as slack, so a rung
-/// within the rest of the budget is still proven.
-pub(crate) const ENCLOSURE_BUDGET_SHARE: f64 = 1.0 / 64.0;
+/// within the rest of the budget is still proven, and one in the slack is
+/// split, never accepted. A sixteenth leaves rungs 94 % of the budget; a
+/// sixty-fourth halved the followers' windows twice more, for 1.7 % more
+/// instructions on the P3 kernel profile's dense print.
+pub(crate) const ENCLOSURE_BUDGET_SHARE: f64 = 1.0 / 16.0;
 
 impl HullBudget {
     fn of_order(self, order: usize) -> f64 {
@@ -77,14 +80,29 @@ impl HullBudget {
 /// above count, where a fused step would cost a library call on targets
 /// without a fused multiply-add.
 fn unfused_taylor_shift(coefficients: &[f64], shift: f64, shifted: &mut [f64]) {
-    assert_eq!(coefficients.len(), shifted.len());
-    let mut work = [0.0; EXACT_CAPACITY];
-    work[..coefficients.len()].copy_from_slice(coefficients);
-    for (lowest, target) in shifted.iter_mut().enumerate() {
-        for power in (lowest + 1..coefficients.len()).rev() {
-            work[power - 1] += shift * work[power];
+    shifted.copy_from_slice(coefficients);
+    horner_shift_in_place(shifted, |lower, higher| lower + shift * higher);
+}
+
+/// The repeated Horner passes of [`unfused_taylor_shift`] in place: pass
+/// `lowest` settles `shifted[lowest]` and only touches the slots above it
+/// after. Each pass carries the slot it just wrote into the next step.
+#[inline]
+fn horner_shift_in_place(shifted: &mut [f64], step: impl Fn(f64, f64) -> f64) {
+    let len = shifted.len();
+    assert!(
+        len <= EXACT_CAPACITY,
+        "a {len}-coefficient polynomial exceeds the hull"
+    );
+    let Some(&top) = shifted.last() else {
+        return;
+    };
+    for lowest in 0..len {
+        let mut higher = top;
+        for slot in shifted[lowest..len - 1].iter_mut().rev() {
+            higher = step(*slot, higher);
+            *slot = higher;
         }
-        *target = work[lowest];
     }
 }
 
@@ -123,30 +141,55 @@ fn composed(coefficients: &[f64], mid: f64, half: f64) -> Bounded {
 }
 
 /// `mono_u`'s `order`-th time derivative, as monomial coefficients in `u`.
-fn piece_derivative(mono_u: &[f64], order: usize, h: f64) -> Vec<f64> {
+fn piece_derivative(mono_u: &[f64], order: usize, h: f64) -> Monomials {
+    assert!(
+        mono_u.len() <= EXACT_CAPACITY,
+        "a {}-coefficient piece exceeds the hull",
+        mono_u.len()
+    );
     let rate = 2.0 / h;
     let scale = (0..order).fold(1.0, |acc, _| acc * rate);
-    (order..mono_u.len())
-        .map(|power| {
-            let falling = ((power - order + 1)..=power).fold(1.0, |acc, k| acc * k as f64);
-            mono_u[power] * falling * scale
-        })
-        .collect()
+    let mut derivative = Monomials {
+        values: [0.0; EXACT_CAPACITY],
+        len: mono_u.len().saturating_sub(order),
+    };
+    for (slot, power) in derivative.values.iter_mut().zip(order..mono_u.len()) {
+        let falling = ((power - order + 1)..=power).fold(1.0, |acc, k| acc * k as f64);
+        *slot = mono_u[power] * falling * scale;
+    }
+    derivative
+}
+
+/// Monomial coefficients of a polynomial in `u`.
+struct Monomials {
+    values: [f64; EXACT_CAPACITY],
+    len: usize,
+}
+
+impl std::ops::Deref for Monomials {
+    type Target = [f64];
+
+    fn deref(&self) -> &[f64] {
+        &self.values[..self.len]
+    }
 }
 
 /// The Bernstein coefficients on `y ∈ [−1, 1]` of a polynomial in `y`,
-/// and the rounding bound of the conversion.
+/// and the rounding bound of the conversion. Its Taylor shifts by `∓1`
+/// take their products as the exact `−x` and `x`, so they round as
+/// [`unfused_taylor_shift`] by `∓1` does.
 fn bernstein(coefficients: &[f64]) -> (Controls, f64) {
     let len = coefficients.len();
     let degree = len - 1;
     let mut on_unit = [0.0; EXACT_CAPACITY];
     let mut magnitudes = [0.0; EXACT_CAPACITY];
-    unfused_taylor_shift(coefficients, -1.0, &mut on_unit[..len]);
-    let mut absolute = [0.0; EXACT_CAPACITY];
-    for (magnitude, coefficient) in absolute.iter_mut().zip(coefficients) {
+    let (on_unit, magnitudes) = (&mut on_unit[..len], &mut magnitudes[..len]);
+    on_unit.copy_from_slice(coefficients);
+    horner_shift_in_place(on_unit, |lower, higher| lower - higher);
+    for (magnitude, coefficient) in magnitudes.iter_mut().zip(coefficients) {
         *magnitude = coefficient.abs();
     }
-    unfused_taylor_shift(&absolute[..len], 1.0, &mut magnitudes[..len]);
+    horner_shift_in_place(magnitudes, |lower, higher| lower + higher);
     let mut doubling = 1.0;
     for power in 0..len {
         on_unit[power] *= doubling;
@@ -159,12 +202,16 @@ fn bernstein(coefficients: &[f64]) -> (Controls, f64) {
         len,
     };
     let mut worst_terms = 0.0_f64;
-    for (index, control) in controls.values[..len].iter_mut().enumerate() {
+    for (index, (control, row)) in controls.values[..len].iter_mut().zip(weights).enumerate() {
+        let terms_of = index + 1;
         let mut terms = 0.0;
-        for power in 0..=index {
-            let weight = weights[index][power];
-            *control += weight * on_unit[power];
-            terms += weight * magnitudes[power];
+        for ((&weight, &value), &magnitude) in row[..terms_of]
+            .iter()
+            .zip(&on_unit[..terms_of])
+            .zip(&magnitudes[..terms_of])
+        {
+            *control += weight * value;
+            terms += weight * magnitude;
         }
         worst_terms = worst_terms.max(terms);
     }
@@ -210,19 +257,26 @@ fn bernstein_weights() -> &'static [[[f64; EXACT_CAPACITY]; EXACT_CAPACITY]] {
 }
 
 /// Halves Bernstein controls at their midpoint.
-fn de_casteljau_halves(controls: &[f64]) -> (Vec<f64>, Vec<f64>) {
+fn de_casteljau_halves(controls: &[f64]) -> (Controls, Controls) {
     let len = controls.len();
-    let mut work = controls.to_vec();
-    let mut left = Vec::with_capacity(len);
-    let mut right = vec![0.0; len];
-    left.push(work[0]);
-    right[len - 1] = work[len - 1];
+    let mut work = [0.0; EXACT_CAPACITY];
+    work[..len].copy_from_slice(controls);
+    let mut left = Controls {
+        values: [0.0; EXACT_CAPACITY],
+        len,
+    };
+    let mut right = Controls {
+        values: [0.0; EXACT_CAPACITY],
+        len,
+    };
+    left.values[0] = work[0];
+    right.values[len - 1] = work[len - 1];
     for remaining in (1..len).rev() {
         for index in 0..remaining {
             work[index] = 0.5 * (work[index] + work[index + 1]);
         }
-        left.push(work[0]);
-        right[remaining - 1] = work[remaining - 1];
+        left.values[len - remaining] = work[0];
+        right.values[remaining - 1] = work[remaining - 1];
     }
     (left, right)
 }
@@ -317,7 +371,7 @@ fn piece_budget(sub: &ExactPiece, order: usize, budget: HullBudget) -> Option<f6
 fn error_patches<'a>(
     exact: &'a [ExactPiece],
     piece: FittedPiece<'a>,
-    derivatives: &'a [Vec<f64>],
+    derivative: &'a [f64],
     domain: (f64, f64),
     order: usize,
     held: impl Fn(&ExactPiece) -> Option<f64> + 'a,
@@ -332,7 +386,7 @@ fn error_patches<'a>(
         }
         let middle = 0.5 * (from + to);
         let half = 0.5 * (to - from);
-        let fitted = composed(&derivatives[order], u_of(middle), half * (2.0 / h));
+        let fitted = composed(derivative, u_of(middle), half * (2.0 / h));
         let signal = &sub.pva[order];
         let truth = composed(
             &signal.coefficients[..signal.len],
@@ -366,11 +420,10 @@ fn error_patches<'a>(
     })
 }
 
-fn derivatives_of(piece: FittedPiece) -> Vec<Vec<f64>> {
+#[cfg(feature = "fit-audit")]
+fn derivatives_of(piece: FittedPiece) -> [Monomials; 3] {
     let h = piece.t1 - piece.t0;
-    (0..3)
-        .map(|order| piece_derivative(piece.mono_u, order, h))
-        .collect()
+    [0, 1, 2].map(|order| piece_derivative(piece.mono_u, order, h))
 }
 
 /// The `u` of a point of `[domain]` where `piece` is not proven within
@@ -383,10 +436,10 @@ pub(crate) fn first_unproven(
     budget: HullBudget,
 ) -> Option<f64> {
     let h = piece.t1 - piece.t0;
-    let derivatives = derivatives_of(piece);
     for order in [0, 1, 2] {
+        let derivative = piece_derivative(piece.mono_u, order, h);
         let held = |sub: &ExactPiece| piece_budget(sub, order, budget);
-        for (patch, limit) in error_patches(exact, piece, &derivatives, domain, order, held) {
+        for (patch, limit) in error_patches(exact, piece, &derivative, domain, order, held) {
             if let Some(t) = first_unproven_patch(
                 &patch.controls,
                 (patch.from, patch.to),
@@ -426,20 +479,22 @@ fn patch_bound(controls: &[f64], patch: &ErrorPatch, budget: f64, depth: u32) ->
         .min(bound)
 }
 
-/// Proven upper bounds on how far `piece`'s position and acceleration
-/// stray from the signal whose exact polynomials or enclosure over
-/// `domain` are `exact`, everywhere on it, settled against `budget`.
+/// Proven upper bounds on how far `piece`'s position, velocity and
+/// acceleration stray from the signal whose exact polynomials or
+/// enclosure over `domain` are `exact`, everywhere on it, each settled
+/// against its `budgets`.
 #[cfg(feature = "fit-audit")]
 pub(crate) fn error_bounds(
     exact: &[ExactPiece],
     piece: FittedPiece,
     domain: (f64, f64),
-    budget: FitTol,
-) -> [f64; 2] {
+    budgets: [f64; 3],
+) -> [f64; 3] {
     let derivatives = derivatives_of(piece);
-    [(0, budget.pos_mm), (2, budget.accel_mm_s2)].map(|(order, budget)| {
+    [0, 1, 2].map(|order| {
+        let budget = budgets[order];
         let held = |sub: &ExactPiece| sub.bounds(order).then_some(budget);
-        error_patches(exact, piece, &derivatives, domain, order, held)
+        error_patches(exact, piece, &derivatives[order], domain, order, held)
             .map(|(patch, budget)| patch_bound(&patch.controls, &patch, budget, 0))
             .fold(0.0_f64, f64::max)
     })

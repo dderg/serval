@@ -173,15 +173,16 @@ impl Tracked {
         shifted
     }
 
-    fn derivative(&self, order: usize) -> Self {
-        let mut derivative = Self::ZERO;
+    /// Writes the `order`-th derivative into `derivative`, whose every
+    /// slot it sets.
+    fn derivative_into(&self, order: usize, derivative: &mut Self) {
+        *derivative = Self::ZERO;
         derivative.len = self.len.saturating_sub(order);
         for power in 0..derivative.len {
             let falling = FALLING_FACTORIALS[power + order][order];
             derivative.values[power] = self.values[power + order] * falling;
             derivative.magnitudes[power] = self.magnitudes[power + order] * falling;
         }
-        derivative
     }
 
     fn add(&mut self, other: &Self, sign: f64) {
@@ -563,6 +564,16 @@ impl RecentChunks {
     }
 }
 
+/// What one span's exact polynomials evaluate in and reuse from chunk to
+/// chunk and kernel piece to kernel piece: the input's series past two
+/// window edges, and one kernel piece's moments and their bounds, each read
+/// only as far as the evaluation writes it.
+struct ConvolutionScratch {
+    edge_series: [EdgeSeries; 2],
+    moments: [[f64; EXACT_CAPACITY]; MOMENT_ORDERS],
+    magnitudes: MomentBounds,
+}
+
 /// One point mass of `x` and its derivatives: `weights[m]` multiplies
 /// `δ⁽ᵐ⁾(s − at)` in derivative order `order`.
 struct PointMass {
@@ -630,6 +641,11 @@ impl ExactConvolution<'_> {
             .chain(std::iter::once(above.unwrap_or(RealSum::float(hi))))
             .collect();
         let mut pieces = Vec::with_capacity(points.len() - 1);
+        let mut scratch = ConvolutionScratch {
+            edge_series: [[Tracked::ZERO; MOMENT_ORDERS]; 2],
+            moments: [[0.0; EXACT_CAPACITY]; MOMENT_ORDERS],
+            magnitudes: [[0.0; EXACT_CAPACITY]; MOMENT_ORDERS],
+        };
         for pair in points.windows(2) {
             let first_inside = pair[0].first_float_above();
             let last_inside = pair[1].last_float_below();
@@ -658,8 +674,9 @@ impl ExactConvolution<'_> {
                 let center =
                     (chunk_lo + 0.5 * (chunk_hi - chunk_lo)).clamp(first_inside, last_inside);
                 let radius = next_toward((center - chunk_lo).max(chunk_hi - center), f64::INFINITY);
-                let Some(pva) = recent.read(center, radius, || self.polynomials_at(center, radius))
-                else {
+                let Some(pva) = recent.read(center, radius, || {
+                    self.polynomials_at(center, radius, &mut scratch)
+                }) else {
                     let (first_held, last_held) = (first_inside.max(lo), last_inside.min(hi));
                     if first_held == last_held && (first_held == lo || first_held == hi) {
                         continue;
@@ -728,18 +745,29 @@ impl ExactConvolution<'_> {
         jumps.chain(impulses)
     }
 
-    fn polynomials_at(&self, center: f64, radius: f64) -> Option<[LocalPolynomial; 3]> {
+    fn polynomials_at(
+        &self,
+        center: f64,
+        radius: f64,
+        scratch: &mut ConvolutionScratch,
+    ) -> Option<[LocalPolynomial; 3]> {
         let mut total = [CentredSum::ZERO; MOMENT_ORDERS];
         let mut point_masses = 0;
-        let mut previous_lower: Option<(RealSum, EdgeSeries)> = None;
+        let ConvolutionScratch {
+            edge_series,
+            moments,
+            magnitudes,
+        } = scratch;
+        let mut previous_lower: Option<(RealSum, usize)> = None;
         for piece in &self.kernel.pieces {
             let lower = RealSum::of(center, -piece.end);
             let upper = RealSum::of(center, -piece.start);
             let degree = piece.at_start.len - 1;
-            let mut moments = [[0.0; EXACT_CAPACITY]; MOMENT_ORDERS];
-            let mut magnitudes: MomentBounds = [[0.0; EXACT_CAPACITY]; MOMENT_ORDERS];
+            for bounds in magnitudes.iter_mut() {
+                bounds[..=degree].fill(0.0);
+            }
             {
-                let [position, velocity, acceleration] = &mut moments;
+                let [position, velocity, acceleration] = &mut *moments;
                 if !self.table.integrate_bounded_moments(
                     lower.head,
                     upper.head,
@@ -750,29 +778,34 @@ impl ExactConvolution<'_> {
                         &mut velocity[..=degree],
                         &mut acceleration[..=degree],
                     ],
-                    Some(&mut magnitudes),
+                    Some(&mut *magnitudes),
                 ) {
                     return None;
                 }
             }
             for mass in self.point_masses_within(lower, upper) {
                 point_masses += 1;
-                add_point_mass(
-                    &mut moments,
-                    &mut magnitudes,
-                    &mass,
-                    mass.at - upper.head,
-                    degree,
-                );
+                add_point_mass(moments, magnitudes, &mass, mass.at - upper.head, degree);
             }
-            let upper_series = match previous_lower {
-                Some((edge, series)) if edge.head == upper.head && edge.tail == upper.tail => {
-                    series
+            let upper_slot = match previous_lower {
+                Some((edge, slot)) if edge.head == upper.head && edge.tail == upper.tail => slot,
+                _ => {
+                    let slot = previous_lower.map_or(0, |(_, slot)| 1 - slot);
+                    if !self.table.series_past_into(upper, &mut edge_series[slot]) {
+                        return None;
+                    }
+                    slot
                 }
-                _ => self.table.series_past(upper)?,
             };
-            let lower_series = self.table.series_past(lower)?;
-            previous_lower = Some((lower, lower_series));
+            let lower_slot = 1 - upper_slot;
+            if !self
+                .table
+                .series_past_into(lower, &mut edge_series[lower_slot])
+            {
+                return None;
+            }
+            previous_lower = Some((lower, lower_slot));
+            let (upper_series, lower_series) = (&edge_series[upper_slot], &edge_series[lower_slot]);
             for order in 0..MOMENT_ORDERS {
                 let mut at_upper =
                     frozen_window(&piece.at_start, &moments[order], &magnitudes[order]);
@@ -858,15 +891,10 @@ fn add_point_mass(
             }
             let signed = if derivative % 2 == 0 { weight } else { -weight };
             let scale = weight.abs();
-            for (((moment, magnitude), falling), power) in moments[derivative..len]
-                .iter_mut()
-                .zip(&mut magnitudes[derivative..len])
-                .zip(&FALLING_FACTORIALS[derivative..len])
-                .zip(&powers[..len - derivative])
-            {
-                let term = falling[derivative] * power;
-                *moment += signed * term;
-                *magnitude += scale * term.abs();
+            for power in derivative..len {
+                let term = FALLING_FACTORIALS[power][derivative] * powers[power - derivative];
+                moments[power] += signed * term;
+                magnitudes[power] += scale * term.abs();
             }
         }
     }
@@ -919,25 +947,28 @@ impl AxisSignalTable {
         }
     }
 
-    /// The Taylor series, about `edge.head`, of every derivative order of
-    /// the region of `x` the real `edge` lies inside: a piece, or a clamped
-    /// hold. `None` where that region is history or lookahead the table
-    /// does not clamp.
-    fn series_past(&self, edge: RealSum) -> Option<EdgeSeries> {
-        let mut series = [Tracked::ZERO; MOMENT_ORDERS];
-        if edge.order_of(self.first_t) == Ordering::Greater {
+    /// Writes into `series` the Taylor series, about `edge.head`, of every
+    /// derivative order of the region of `x` the real `edge` lies inside: a
+    /// piece, or a clamped hold. `false` where that region is history or
+    /// lookahead the table does not clamp.
+    fn series_past_into(&self, edge: RealSum, series: &mut EdgeSeries) -> bool {
+        let held = if edge.order_of(self.first_t) == Ordering::Greater {
             if !self.boundary.clamps_before_signal() {
-                return None;
+                return false;
             }
-            series[0] = Tracked::exact(&[self.held_before()]);
-            return Some(series);
-        }
-        if edge.order_of(self.last_t) == Ordering::Less {
+            Some(self.held_before())
+        } else if edge.order_of(self.last_t) == Ordering::Less {
             if !self.lookahead.clamps_past_signal() {
-                return None;
+                return false;
             }
-            series[0] = Tracked::exact(&[self.held_after()]);
-            return Some(series);
+            Some(self.held_after())
+        } else {
+            None
+        };
+        if let Some(value) = held {
+            series[0] = Tracked::exact(&[value]);
+            series[1..].fill(Tracked::ZERO);
+            return true;
         }
         let piece = self
             .starts
@@ -950,9 +981,9 @@ impl AxisSignalTable {
         );
         let shifted = Tracked::exact(&self.coeffs[piece]).shifted(edge.head - self.origins[piece]);
         for (order, slot) in series.iter_mut().enumerate() {
-            *slot = shifted.derivative(order);
+            shifted.derivative_into(order, slot);
         }
-        Some(series)
+        true
     }
 }
 

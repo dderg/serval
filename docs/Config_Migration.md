@@ -152,6 +152,7 @@ k: 0.040
 follows: x, y, z
 motors: e_motor
 post_processors: extruder_pa
+max_accel: 20000
 
 [extruder]
 # Heater and thermistor settings omitted here.
@@ -160,7 +161,7 @@ max_extrude_only_velocity: 50
 max_extrude_only_accel: 5000
 ```
 
-The mainline `pressure_advance_smooth_time` has no counterpart here: the advance runs without a smoothing kernel, and `[axis e]` inherits the extrude-only caps as the extruder's limits. See [Pressure advance](#pressure-advance).
+The mainline `pressure_advance_smooth_time` has no counterpart here: the advance runs without a smoothing kernel, and `[axis e]` inherits the extrude-only caps as the extruder's limits unless it sets its own. Mainline never limited the advance, and the extrude-only cap only ever had to cover retracts and primes, so set `[axis e] max_accel` to the extruder motor's pressure-advance-capable acceleration ([how to choose it](Config_Reference_Motion.md#axis-name)). See [Pressure advance](#pressure-advance).
 
 `corner_deviation` is the canonical corner budget in mm. It defaults to 0.04 when neither corner option is set ([why](Config_Reference_Motion.md#why-the-corner-budget-defaults-to-004-mm)). `square_corner_velocity` is still accepted as a legacy alias, converted internally as `scv² · (√2 − 1) / max_accel` — note this maps typical mainline values to a far tighter budget than intended (5 mm/s at 3000 mm/s² ≈ 0.0035 mm), so prefer setting `corner_deviation` directly or leaving both unset. Set at most one of the two. `max_z_velocity` and `max_z_accel` must be at most the corresponding global caps and default to them.
 
@@ -264,7 +265,7 @@ were simply never carried across:
 | Section | Note |
 |---|---|
 | `[input_shaper]` | Replaced by `[post_processor]` chains (see above). |
-| `[extruder_smoother]` | Replaced by a `smooth_triangle` post-processor. |
+| `[extruder_smoother]` | **No counterpart needed; delete it.** The advance runs unblurred along the shaped path (see [Pressure advance](#pressure-advance)); a `smooth_triangle` post-processor after the advance is an explicit override. |
 | `[ringing_test]`, `[pa_test]` | Kalico's calibration-pattern generators. The `RINGING_TEST` / `PA_TEST` commands go with them, so macros that call them break too. |
 | `[manual_stepper]` | Drives a stepper outside the kinematic model, which the motor/axis split has no room for. Mods that depend on it (filament changers, nozzle wipers, `[trad_rack]`) do not load. |
 | `[endstop_phase]` | Incompatible with the new stepper model. |
@@ -313,12 +314,14 @@ k: 0.040
 follows: x, y, z
 post_processors: extruder_pa
 max_velocity: 50
-max_accel: 5000
+max_accel: 20000
 ```
 
 Set `max_velocity` and `max_accel` to what the extruder motor can do (mm/s and mm/s² of filament); on the `[extruder]` axis each one left unset inherits `max_extrude_only_velocity` / `max_extrude_only_accel`. An advance needs both, set or inherited, and without a kernel it also needs finite extrude-only caps, which bound the moves the extruder makes on its own (retracts, primes) and default from `nozzle_diameter` and `filament_diameter` when both are set. The advance then runs unblurred along the shaped path: the velocity planner slows extruding moves, corners included, so the advanced extruder stays within those limits, and every extrusion-ratio step (travel to extrusion, a flow change, a wipe) is ramped along the path over a time the limits and `k` derive (see the ratio ramp in the [Motion configuration reference](Config_Reference_Motion.md#axis-name)). Corners lay the commanded bead; the cost is time.
 
-`pressure_advance_smooth_time` has no counterpart in that chain; delete it. A smoothing kernel after the advance (`type: smooth_triangle`, `smooth_time: ...`, named after the advance in `post_processors`) stays legal as an explicit override: it lowers the extruder acceleration corners ask for and bulges the bead at every corner in exchange, by more the wider it is. The trade-off is measured in [Evaluating an extruder chain](../README.md#evaluating-an-extruder-chain).
+`[axis e] max_accel` is the extruder motor's pressure-advance-capable acceleration, not the retract cap: a direct drive typically follows 20000 mm/s² or more, an Ender-3-class bowden about 5000. Inheriting `max_extrude_only_accel` (by default about a quarter of `[printer] max_accel` for a 0.4 mm nozzle on 1.75 mm filament) slows every corner of an extruding move. The [Motion configuration reference](Config_Reference_Motion.md#axis-name) describes a calibration print that finds the drive's value.
+
+`pressure_advance_smooth_time` has no counterpart in that chain; delete it. A smoothing kernel after the advance (`type: smooth_triangle`, `smooth_time: ...`, named after the advance in `post_processors`) stays legal as an explicit override for an extruder too weak to follow the exact advance at a speed you need: it lowers the extruder acceleration corners ask for, so the planner slows extruding corners less, and bulges the bead at every corner in exchange, by more the wider it is and the faster the corner. A mainline-style `smooth_time: 0.040` is far too wide for that: on the bench printer it bulges a 45° corner by +127% at 100 mm/s and +195% at 300 mm/s in the captured steps, where the kernel-free chain stays within step quantization. The trade-off is measured in [Evaluating an extruder chain](../README.md#evaluating-an-extruder-chain).
 
 A config written for an earlier version of this fork that sets `ratio_ramp_time` on its follower axis is rejected at load. Delete the option and set the axis's `max_velocity` / `max_accel` (or the `[extruder]`'s extrude-only caps they inherit); the ramp time of each step follows from them. A chain that kept a short kernel next to the ramp can drop the kernel.
 

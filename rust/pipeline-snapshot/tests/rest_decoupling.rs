@@ -1,7 +1,7 @@
 //! A full stop decouples planning: the motion after a rest plans the same
-//! from rest as it does after everything before it. analyze.py relies on
-//! this when it plans every rest-delimited epoch of a bench print as its
-//! own stream and holds the capture against that reference.
+//! from rest as it does after everything before it, within the followers'
+//! fit tolerance. analyze.py does not lean on it: it holds a bench capture
+//! against the print planned as one stream, as the live host plans it.
 
 use std::path::Path;
 
@@ -217,27 +217,6 @@ fn the_bench_epochs_print_plans_each_epoch_from_rest_as_in_the_stream() {
         &gcode,
         &corpus::repo().join("tools/bench/printer.cfg"),
     );
-}
-
-/// The bench printer's advance with no smoothing kernel, under the
-/// extrude-only caps it then needs: the ratio ramp and the advance's rest
-/// valleys alone decouple the epochs.
-#[test]
-fn the_bench_epochs_print_with_a_kernel_free_advance_plans_each_epoch_from_rest_as_in_the_stream() {
-    let gcode = std::fs::read_to_string(corpus::repo().join("tools/bench/gcode/epochs.gcode"))
-        .expect("epochs gcode");
-    let config = std::fs::read_to_string(corpus::repo().join("tools/bench/printer.cfg"))
-        .expect("bench config")
-        .replace("post_processors: pa, st", "post_processors: pa")
-        .replace(
-            "[virtual_sdcard]",
-            "max_extrude_only_velocity: 50\nmax_extrude_only_accel: 5000\n\n[virtual_sdcard]",
-        );
-    let dir = std::env::temp_dir().join(format!("rest_decoupling_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch dir");
-    let path = dir.join("printer_kernel_free.cfg");
-    std::fs::write(&path, config).expect("kernel-free config writes");
-    assert_rest_decoupled_at_both_tolerances("epochs_kernel_free", &gcode, &path);
 }
 
 #[test]

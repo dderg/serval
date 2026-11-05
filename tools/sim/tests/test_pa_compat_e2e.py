@@ -13,7 +13,9 @@ def _extruder_status(world):
 
 def test_set_pressure_advance_drives_post_processors(sim_world):
     world = sim_world(
-        lambda w: configs.neptune_print_config(w.h7_pty, str(w.gcode_dir)),
+        lambda w: configs.with_extruder_smoothing(
+            configs.neptune_print_config(w.h7_pty, str(w.gcode_dir)), 0.04
+        ),
         dual_mcu=False,
     )
     status = _extruder_status(world)
@@ -37,8 +39,8 @@ def test_set_pressure_advance_drives_post_processors(sim_world):
 def test_set_pressure_advance_reports_disabled_without_processors(sim_world):
     def config(w):
         cfg = configs.neptune_print_config(w.h7_pty, str(w.gcode_dir))
-        assert "post_processors: pa, st\n" in cfg
-        return cfg.replace("post_processors: pa, st\n", "")
+        assert "post_processors: pa\n" in cfg
+        return cfg.replace("post_processors: pa\n", "")
 
     world = sim_world(config, dual_mcu=False)
     status = _extruder_status(world)

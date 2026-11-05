@@ -23,9 +23,15 @@
 //! `|a| + k·|ȧ|`. At a steady speed the bounds are exact:
 //! `τ ≥ √(6kΔ/A)` wherever `τ ≤ 2k`, with `Δ = |Δr|·v`, and `τ ≥ 3Δ/(2A)`
 //! without an advance. The ramp time is the shortest in
-//! [`RATIO_RAMP_MIN_TIME_S`, `RATIO_RAMP_MAX_TIME_S`] that keeps both within
-//! the follower's limits; where even the longest does not, the planner
-//! lowers the leader speed at the step ([`RatioRampRule::step_speed_cap`]).
+//! [`RATIO_RAMP_MIN_TIME_S`, `RATIO_RAMP_MAX_TIME_S`] whose addition fits
+//! within what the path's own demand leaves of the follower's limits, and
+//! never within less than [`RAMP_HEADROOM_FLOOR`] of them: the ramp's
+//! addition vanishes with its step, so a small step takes a short ramp even
+//! where the path alone runs at the limits. Holding the path within the
+//! limits is the planner's: where even the longest ramp does not fit, or a
+//! rest of the leaders leaves the ramp less path than it takes
+//! ([`rest_room_reach_mm`]), it lowers the leader speed at the step
+//! ([`RatioRampRule::step_speed_cap`]).
 
 /// The shortest ratio ramp.
 pub const RATIO_RAMP_MIN_TIME_S: f64 = 0.005;
@@ -40,8 +46,44 @@ pub const RATIO_RAMP_MAX_TIME_S: f64 = 0.03;
 /// acceleration and jerk; under this speed the lead the advance holds,
 /// `k·r·v`, is too small to matter to the flow.
 pub const ADVANCE_VALLEY_SPEED_MM_S: f64 = 2.0;
+/// The steepest a ratio ramp's half-width climbs per unit of path away
+/// from a node of its width field, a rest of the leaders among them: the
+/// window `d` along the path from a rest is at most `ENVELOPE_SLOPE·d`
+/// wide.
+pub const RATIO_RAMP_ENVELOPE_SLOPE: f64 = 0.25;
+/// The share of the path between a ratio step and a rest of the leaders
+/// that the step's ramp takes on that side. A window `u` past the step,
+/// under the rest's cone `c·(d − u)`, reaches back to the step only while
+/// `u ≤ c·(d − u)`: out to `c/(1 + c)` of the way, where a window of that
+/// half-width laid freely would end too.
+const REST_ROOM_RAMP_SHARE: f64 = RATIO_RAMP_ENVELOPE_SLOPE / (1.0 + RATIO_RAMP_ENVELOPE_SLOPE);
 
 const BISECTIONS: usize = 64;
+/// The share of each follower limit a ratio ramp may always add to the
+/// path's own demand, however near the limit that already runs. With no
+/// floor the headroom closes as the path's demand reaches the limit, and
+/// the ramp time leaps from the shortest to the longest for any step there,
+/// however small.
+const RAMP_HEADROOM_FLOOR: f64 = 0.25;
+
+/// How far along the path a rest of the leaders narrows the ramp of a
+/// ratio step they cross at up to `speed`: past it, the step's share of
+/// the room holds the longest ramp.
+#[must_use]
+pub fn rest_room_reach_mm(speed: f64) -> f64 {
+    0.5 * speed * RATIO_RAMP_MAX_TIME_S / REST_ROOM_RAMP_SHARE
+}
+
+/// The longest ramp a ratio step crossed at `speed`, `room_mm` along the
+/// path from a rest of the leaders, gets: the half of it on the rest's side
+/// laid over the step's share of the room.
+fn rest_room_ramp_time(speed: f64, room_mm: f64) -> f64 {
+    if speed > 0.0 {
+        2.0 * REST_ROOM_RAMP_SHARE * room_mm / speed
+    } else {
+        f64::INFINITY
+    }
+}
 
 /// What a follower's ratio ramp is held to: the advance's slope and the
 /// follower motor's velocity and acceleration limits.
@@ -86,23 +128,39 @@ fn ramp_ratio(k: f64, speed: f64, weight: f64, tau: f64) -> f64 {
 
 impl RatioRampRule {
     /// The follower's peak velocity and acceleration over a ramp of `tau`
-    /// seconds across `step`.
+    /// seconds across `step`: the leaders' own advanced flow plus what the
+    /// ramp adds to it.
     #[must_use]
     pub fn demand(&self, tau: f64, step: &RatioStep) -> (f64, f64) {
+        let (own_velocity, own_accel) = self.own_demand(step);
+        let (ramp_velocity, ramp_accel) = self.ramp_demand(tau, step);
+        (own_velocity + ramp_velocity, own_accel + ramp_accel)
+    }
+
+    /// The advanced flow at the larger ratio about `step`, ramp or not.
+    fn own_demand(&self, step: &RatioStep) -> (f64, f64) {
         let k = self.advance_slope_s;
         let (v, a, j) = (
             step.speed_mm_s,
             step.accel_mm_s2.abs(),
             step.jerk_mm_s3.abs(),
         );
+        (step.peak_ratio * (v + k * a), step.peak_ratio * (a + k * j))
+    }
+
+    /// What a ramp of `tau` seconds adds to the follower's peak velocity
+    /// and acceleration across `step`: proportional to the step, and
+    /// shrinking as the ramp lengthens.
+    fn ramp_demand(&self, tau: f64, step: &RatioStep) -> (f64, f64) {
+        let k = self.advance_slope_s;
+        let (v, a) = (step.speed_mm_s, step.accel_mm_s2.abs());
         let advanced = v + k * a;
         let rate = v + 2.0 * k * a;
         (
-            (step.peak_ratio
-                + step.ratio_step * (velocity_overshoot(ramp_ratio(k, v, advanced, tau)) - 1.0))
+            step.ratio_step
+                * (velocity_overshoot(ramp_ratio(k, v, advanced, tau)) - 1.0)
                 * advanced,
-            step.ratio_step * rate / tau * acceleration_gain(ramp_ratio(k, v, rate, tau))
-                + step.peak_ratio * (a + k * j),
+            step.ratio_step * rate / tau * acceleration_gain(ramp_ratio(k, v, rate, tau)),
         )
     }
 
@@ -111,8 +169,24 @@ impl RatioRampRule {
         velocity <= self.max_velocity_mm_s && accel <= self.max_accel_mm_s2
     }
 
-    /// The ramp time for `step`: the shortest that fits the limits, or the
-    /// longest ramp where none does.
+    /// How much a ramp across `step` may add to the follower's velocity and
+    /// acceleration: what the leaders' own flow leaves of each limit, and
+    /// never under [`RAMP_HEADROOM_FLOOR`] of it.
+    fn ramp_headroom(&self, step: &RatioStep) -> (f64, f64) {
+        let (own_velocity, own_accel) = self.own_demand(step);
+        let headroom = |limit: f64, own: f64| (limit - own).max(RAMP_HEADROOM_FLOOR * limit);
+        (
+            headroom(self.max_velocity_mm_s, own_velocity),
+            headroom(self.max_accel_mm_s2, own_accel),
+        )
+    }
+
+    /// The ramp time for `step`: the shortest whose demand fits within the
+    /// ramp's headroom ([`Self::ramp_headroom`]), or the longest ramp where
+    /// none does. Its demand is continuous in the ramp time and every input
+    /// and falls as the ramp lengthens, and the headroom is continuous and
+    /// positive, so the ramp time is continuous in its inputs and the
+    /// shortest as the step vanishes.
     #[must_use]
     pub fn ramp_time(&self, step: &RatioStep) -> f64 {
         assert!(
@@ -128,16 +202,21 @@ impl RatioRampRule {
                 && step.speed_mm_s >= 0.0,
             "a ratio ramp is asked for an ill-formed step {step:?}"
         );
-        if self.fits(RATIO_RAMP_MIN_TIME_S, step) {
+        let (velocity_headroom, accel_headroom) = self.ramp_headroom(step);
+        let fits = |tau: f64| {
+            let (velocity, accel) = self.ramp_demand(tau, step);
+            velocity <= velocity_headroom && accel <= accel_headroom
+        };
+        if fits(RATIO_RAMP_MIN_TIME_S) {
             return RATIO_RAMP_MIN_TIME_S;
         }
-        if !self.fits(RATIO_RAMP_MAX_TIME_S, step) {
+        if !fits(RATIO_RAMP_MAX_TIME_S) {
             return RATIO_RAMP_MAX_TIME_S;
         }
         let (mut short, mut long) = (RATIO_RAMP_MIN_TIME_S, RATIO_RAMP_MAX_TIME_S);
         for _ in 0..BISECTIONS {
             let mid = 0.5 * (short + long);
-            if self.fits(mid, step) {
+            if fits(mid) {
                 long = mid;
             } else {
                 short = mid;
@@ -148,17 +227,29 @@ impl RatioRampRule {
 
     /// The largest leader speed at which a ratio step of `ratio_step`
     /// whose larger side extrudes `peak_ratio` per path millimetre, crossed
-    /// under an acceleration of up to `accel` and a jerk of up to `jerk`,
-    /// fits the limits within the longest ramp; zero where even a crossing
-    /// at rest does not.
+    /// under an acceleration of up to `accel` and a jerk of up to `jerk`
+    /// `rest_room_mm` along the path from the leaders' nearest rest, fits
+    /// the limits within the longest ramp the room leaves it; zero where
+    /// even a crossing at rest does not.
     #[must_use]
-    pub fn step_speed_cap(&self, ratio_step: f64, peak_ratio: f64, accel: f64, jerk: f64) -> f64 {
+    pub fn step_speed_cap(
+        &self,
+        ratio_step: f64,
+        peak_ratio: f64,
+        accel: f64,
+        jerk: f64,
+        rest_room_mm: f64,
+    ) -> f64 {
+        assert!(
+            rest_room_mm >= 0.0,
+            "a ratio step lies {rest_room_mm} mm from the leaders' nearest rest"
+        );
         if ratio_step <= 0.0 {
             return f64::INFINITY;
         }
         let fits_at = |speed_mm_s: f64| {
             self.fits(
-                RATIO_RAMP_MAX_TIME_S,
+                RATIO_RAMP_MAX_TIME_S.min(rest_room_ramp_time(speed_mm_s, rest_room_mm)),
                 &RatioStep {
                     ratio_step,
                     peak_ratio,

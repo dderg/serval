@@ -7,6 +7,7 @@ import re
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -25,6 +26,11 @@ FORBIDDEN_PINS = {
     "PA14": "F401 SWD clock pin",
     "PA8": "reserved for clock output",
 }
+F407_DRIVEN_PINS = {"PA9": "PD8", "PA10": "PD9", "PA15": "PD10", "PB0": "PD11"}
+PIN_TOKEN = re.compile(
+    r"([\^~!]*)(?:[A-Za-z_]\w*:)?\b(P[A-K]\d{1,2})\b", flags=re.IGNORECASE
+)
+KEY_LINE = re.compile(r"^(\w+)\s*[:=]")
 
 
 class BenchError(RuntimeError):
@@ -139,6 +145,25 @@ def read_deployed() -> dict:
     return json.loads(ssh(f"cat {DEPLOY_RECORD}"))
 
 
+def flashed_firmware() -> dict:
+    """What each board was last flashed with, by board, as the deploy record
+    holds it: a sync replaces the host's identity, never the boards'."""
+    record = ssh(f"cat {DEPLOY_RECORD} 2>/dev/null || true").strip()
+    return json.loads(record).get("firmware", {}) if record else {}
+
+
+def record_firmware(board: str, identity: dict) -> None:
+    record = ssh(f"cat {DEPLOY_RECORD} 2>/dev/null || true").strip()
+    deployed = json.loads(record) if record else {}
+    deployed.setdefault("firmware", {})[board] = identity
+    write_deployed(deployed)
+
+
+def mcu_version(mcu: str = "mcu") -> str:
+    status = http("GET", f"/printer/objects/query?{urllib.parse.quote(mcu)}")
+    return status["status"][mcu]["mcu_version"]
+
+
 def klipper_pid() -> int:
     return int(ssh("systemctl show -p MainPID --value klipper").strip())
 
@@ -187,14 +212,50 @@ def scp_from_pi(remote: str, local: Path, recursive: bool = False) -> None:
     )
 
 
+def is_input_pin_key(section: str, key: str) -> bool:
+    """The config keys a pin is only ever read through: an endstop, or the
+    probe's trigger."""
+    return key == "endstop_pin" or (
+        section.split()[:1] == ["probe"] and key == "pin"
+    )
+
+
 def validate_config(text: str) -> None:
+    """Refuse a printer config that would make the F401 drive a pin it must
+    not. The SWD pins and the MCO pin are never klippy's. The phase-2
+    endstop/probe lines are driven push-pull by the F407 from its boot, so
+    on the F401 they may only be read: an output there would fight the
+    F407's driver. The F407 drives them low when not triggered, so they
+    must read active-high: an inverted (`!`) pin would see a trigger at
+    rest."""
+    section, key = "", ""
     for number, line in enumerate(text.splitlines(), 1):
-        code = line.split("#", 1)[0]
-        for pin in re.findall(r"\bP[A-K]\d{1,2}\b", code, flags=re.IGNORECASE):
-            reason = FORBIDDEN_PINS.get(pin.upper())
+        code = re.split(r"[#;]", line, maxsplit=1)[0]
+        stripped = code.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section, key = stripped[1:-1].strip().lower(), ""
+            continue
+        if code[:1] not in (" ", "\t"):
+            match = KEY_LINE.match(stripped)
+            key = match.group(1).lower() if match else ""
+        for modifiers, token in PIN_TOKEN.findall(code):
+            pin = token.upper()
+            reason = FORBIDDEN_PINS.get(pin)
             if reason:
                 raise BenchError(
-                    f"config line {number}: pin {pin.upper()} is forbidden ({reason})"
+                    f"config line {number}: pin {pin} is forbidden ({reason})"
+                )
+            if pin in F407_DRIVEN_PINS and not is_input_pin_key(section, key):
+                raise BenchError(
+                    f"config line {number}: pin {pin} is driven by the F407's "
+                    f"{F407_DRIVEN_PINS[pin]}; it may only be an endstop_pin or "
+                    f"the [probe] pin, not {key or 'a value'} in [{section}]"
+                )
+            if pin in F407_DRIVEN_PINS and "!" in modifiers:
+                raise BenchError(
+                    f"config line {number}: pin {pin} is inverted; the F407's "
+                    f"{F407_DRIVEN_PINS[pin]} drives it low when not triggered, "
+                    "so it must read active-high"
                 )
 
 
@@ -211,3 +272,17 @@ def prepare_printer(config: Path = REPO_CFG) -> None:
     wait_settled()
     push_config(config)
     firmware_restart()
+
+
+MCO_LIVE_ATTACH_BROKEN = (
+    "a live SWD attach (openocd-target-live.cfg) reads the running F401's "
+    "flash and peripherals as 0 and drops the MCU off USB ('Lost "
+    "communication with MCU'); mmw's read-modify-write on those zeros "
+    "clobbered RCC_CFGR (system clock to HSI), RCC_AHB1ENR and GPIOA_MODER "
+    "(USB pins) on the first hardware run. MCO1 stays off until the attach "
+    "is fixed: deploy.py reset-target recovers the F401"
+)
+
+
+def enable_mco() -> None:
+    raise BenchError(MCO_LIVE_ATTACH_BROKEN)

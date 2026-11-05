@@ -41,7 +41,9 @@ max_accel: 3000
 #   advance, or a nonlinear advance before one) holds each piece of its
 #   advanced fit, of duration h, to the looser of this and 8*e/h^2, e being
 #   its scaled path deviation: the acceleration error a piece pinned at
-#   both ends can carry while staying within e.
+#   both ends can carry while staying within e. Where no kernel follows the
+#   advance, a piece the looser budget would carry past the axis's
+#   max_accel plus this is held to this.
 ```
 
 `corner_deviation` is the canonical corner budget. Setting both corner options is an error. `max_accel_to_decel` and `minimum_cruise_ratio` are explicitly unsupported rather than ignored.
@@ -281,14 +283,15 @@ follows: x, y, z
 #   Optional comma-separated axis names. Default is an empty list.
 motors: e_motor
 #   Optional comma-separated motor names. Default is an empty list.
-post_processors: extruder_pa, extruder_smoothing
+post_processors: extruder_pa
 #   Optional comma-separated named post-processors. Default is an empty list.
 #   On an axis that follows others, a pressure advance (or any derivative-gain
 #   stage) needs the axis's max_velocity and max_accel, set or inherited; the
-#   chain is rejected otherwise. A smoothing kernel in the same list is
-#   optional; without one the advance also needs finite [extruder]
-#   max_extrude_only_velocity and max_extrude_only_accel, which bound the
-#   moves the extruder makes on its own (retracts, primes).
+#   chain is rejected otherwise. The recommended extruder chain is the
+#   advance alone; a smoothing kernel after it is an explicit override (see
+#   the [post_processor <name>] section). Without one the advance also needs
+#   finite [extruder] max_extrude_only_velocity and max_extrude_only_accel,
+#   which bound the moves the extruder makes on its own (retracts, primes).
 #max_velocity:
 #max_accel:
 #   Optional, on an axis that follows others. Must be above 0 (mm/s,
@@ -309,6 +312,26 @@ post_processors: extruder_pa, extruder_smoothing
 #   unset is inherited from max_extrude_only_velocity /
 #   max_extrude_only_accel (the same motor). An advance needs both, set or
 #   inherited.
+#   On the [extruder] axis max_accel is the extruder motor's
+#   pressure-advance-capable acceleration: the filament acceleration the
+#   drive follows without skipping while the advance adds k times the
+#   path's jerk to every corner and curve. It is a property of the drive,
+#   not of the print, so set it explicitly rather than inheriting the
+#   extrude-only cap, which only ever had to cover retracts and primes. A
+#   value below what the motor can do costs print time at every corner; a
+#   value above it skips steps. A direct drive typically follows 20000 or
+#   more. A bowden drive pushes the whole filament column against the
+#   tube's friction and the nozzle's back pressure, mostly through an
+#   ungeared drive gear, and is lower; 5000 is a safe start for an
+#   Ender-3-class bowden (with k around 0.5, upstream Klipper's default
+#   40 ms advance smoothing already asks about 4400 at its corners). To
+#   find the drive's value, print a pressure advance calibration pattern
+#   (or any part with sharp corners and fast perimeters) at the tuned k,
+#   raising max_accel between prints (it is read at restart). Stop at the
+#   first print that shows any of: clicks or knocks from the extruder,
+#   under-extrusion or gaps right after corners, or layer lines whose
+#   width shifts from layer to layer; set max_accel 20-30% below the last
+#   clean value.
 #instantaneous_corner_velocity: 1.0
 #   Optional, on an axis that follows others. Default is 1.0, as upstream
 #   Klipper's [extruder] option. Must be above 0 (mm/s). The velocity
@@ -344,23 +367,46 @@ advance through its slope `k` (a linear advance's `k`, a nonlinear one's
 `τ = max(5 ms, 1.5·Δ/A_e)`. An axis with neither limit set or inherited
 ramps every step over 5 ms. Where even 30 ms would exceed the limits at
 the speed the path allows, the velocity planner lowers the toolhead speed
-at the step instead, and that time is the cost. The former
-`ratio_ramp_time` option was removed; setting it is a config error.
+at the step instead, and that time is the cost. Near a rest the kernel's
+half-width is at most a quarter of the path left to it, so a step a few
+ramp lengths short of an extrude-only move or the end of a print gets only
+a fifth of the path to that rest on its side; where that is less than its
+τ takes, the velocity planner slows the step until the shorter ramp fits
+the limits. The former `ratio_ramp_time` option was
+removed; setting it is a config error.
 
 On every chain the advance applies only to the extrusion laid along the
 leaders' path, as Klipper advances only extruding moves that travel, so
 retracts, primes and other extrude-only moves keep their own motion and
 their extrude-only caps; with a kernel, the advance is fitted into that
-extrusion before the kernel smooths it. Where the leaders turn around (a
+extrusion before the kernel smooths it. A retract the toolhead makes while
+it moves (a wipe: a negative extrusion ratio along the path) is a retract
+too, and is not advanced: the advance reads the laid ratio held at zero
+wherever it is negative, ramped along the path exactly as the laid ratio
+is, so it releases the lead of the extrusion before a wipe over the ramp
+into it and rebuilds the lead of the extrusion after over the ramp out of
+it, the same ramps the ratio step itself takes, with no velocity step.
+The wipe's own filament motion `|r|·v` keeps the extrude-only caps, as in
+Klipper: the velocity planner holds the move to
+`max_extrude_only_velocity / |r|` and `max_extrude_only_accel / |r|`.
+Where the leaders turn around (a
 wipe that reverses along the line) or come to rest across an extrude-only
 move or dwell, the advance drops its lead to zero exactly where their speed
-does: it keeps the lead through the input shaper's spill around the rest,
-then releases it before the rest and rebuilds it after over that spill plus
-the reach of the longest ramp, rising from the rest point, so the extruder
-never asks much more than the advance's own `k·r·accel` there; a rest the
-leaders pass through without stopping keeps the full advance. Without a
-kernel, any extruder position step, or velocity step beyond the leaders'
-fit rounding, is refused before it is emitted; leaders without an
+does, rising from the rest point, so the extruder never asks much more than
+the advance's own `k·r·accel` there. At a rest it releases the lead before
+and rebuilds it after over the input shaper's spill around the rest alone
+wherever the shortest ramp the extruder's limits allow for that lead fits
+within the spill, over the spill plus that ramp's reach elsewhere, and over
+the spill plus the reach of the longest ramp where a ratio step lies so near
+the rest that its own ramp, at the speed the leaders cross it there, would
+leave those limits; a rest the leaders pass through without stopping keeps
+the full advance. Around a rest, the flow
+switches from the move before's ratio to the move after's where the shaped
+leaders reach the rest point, even where the shaped axes curve into it
+unlike each other and cover more path than their straight distance from it;
+the move before's material is spread over that whole path.
+Without a kernel, any extruder position step, or velocity step beyond the
+leaders' fit rounding, is refused before it is emitted; leaders without an
 acceleration-continuous kernel produce such steps. The trade-off against a
 kernel is measured in "Evaluating an extruder chain" in the README.
 
@@ -456,9 +502,11 @@ damping_ratio: 0.7
 #   Required. Must be in [0, 1).
 ```
 
-Attach a named post-processor to an axis with `post_processors: name1, name2`. On an axis that follows others, an advance (`linear_pressure_advance`, `tanh_pressure_advance`, `recipr_pressure_advance`, or another derivative-gain stage with a nonzero gain) must share its chain with a smoothing kernel: an advance turns every extrusion-ratio change taken at speed into an instant position step, which only a kernel makes followable, so the config compiler rejects the chain without one. A zero advance is accepted, and raising it at runtime on such a chain is rejected the same way. The fork has ZV, MZV, bell, and triangle smoothing kernels; it does not provide an EI-family input-shaper type.
+Attach a named post-processor to an axis with `post_processors: name1, name2`. On an axis that follows others, an advance (`linear_pressure_advance`, `tanh_pressure_advance`, `recipr_pressure_advance`, or another derivative-gain stage with a nonzero gain) needs the axis's `max_velocity` and `max_accel`, set or inherited from the `[extruder]`'s extrude-only caps; the config compiler rejects the chain without them. It needs no smoothing kernel: the recommended extruder chain is the advance alone, which the velocity planner holds to those limits and whose ratio steps it ramps (see `[axis <name>]` above). The fork has ZV, MZV, bell, and triangle smoothing kernels; it does not provide an EI-family input-shaper type.
 
-To judge an extruder chain (pressure advance plus its smoothing kernel) before printing, run `python3 tools/corner_flow.py printer.cfg`: it reports bead over- and under-fill at standard corners, flow changes and travel transitions, and accepts `--sweep smooth_time=...` and `--set name.param=value`. See [Evaluating an extruder chain](../README.md#evaluating-an-extruder-chain) for how to read it.
+A smoothing kernel after the advance on the extruder (`type: smooth_triangle`, named after the advance in `post_processors`) is an explicit override, never a default. It lowers the extruder acceleration corners ask for, so the planner slows extruding corners less, and pays with a bead bulge at every corner that grows with the kernel's width and the corner speed: on the bench printer at 150 mm/s a 45° corner bulges +159% with `smooth_time: 0.04` and +7% with 0.005, where the kernel-free chain lays the commanded bead. Use it only for an extruder too weak to follow the exact advance at a speed you need.
+
+To judge an extruder chain before printing, run `python3 tools/corner_flow.py printer.cfg`: it reports bead over- and under-fill at standard corners, flow changes and travel transitions, and accepts `--set name.param=value`; on a config carrying a kernel override, `--kernel-free` compares it with the chain without the kernel and `--sweep smooth_time=...` varies its width. See [Evaluating an extruder chain](../README.md#evaluating-an-extruder-chain) for how to read it.
 
 ## `[extruder]`
 
@@ -473,10 +521,13 @@ The motion-owned portion of `[extruder]` is limited to the axis association and 
 #   Optional. Must be above 0 (mm/s). Default, as in upstream Klipper, is
 #   [printer] max_velocity * 4 * nozzle_diameter^2 / filament_area, with
 #   filament_area = pi * (filament_diameter/2)^2; no default without both
-#   diameters.
+#   diameters. As in upstream Klipper it also caps a retract the toolhead
+#   makes while it moves (a wipe): the move runs at no more than this over
+#   its retract ratio.
 #max_extrude_only_accel:
 #   Optional. Must be above 0 (mm/s^2). Default is [printer] max_accel
-#   scaled the same way.
+#   scaled the same way, and it caps a moving retract's acceleration the
+#   same way.
 ```
 
 When using the pressure-advance compatibility command, `axis` identifies the `[axis <name>]` chain from which `linear_pressure_advance` (`k`) and `smooth_triangle` (`smooth_time`) targets are resolved. The compatibility command is documented in the migration guide; the configuration itself uses named post-processors.
