@@ -34,10 +34,12 @@
 //!   the acceleration tolerance carried across the narrowest floor, or
 //!   jumps that are not known — an image of more than one pair, of a clamp
 //!   edge, or of an input the table alone does not describe;
-//! - one where the shaped signal enters or leaves exact rest: the image of
-//!   a break into a resting input under the kernel's last cut, or out of
-//!   one under its first. A piece across it could only approximate the
-//!   rest, moving within tolerance where nothing moves;
+//! - one where the shaped signal enters or leaves an exact cruise, rest
+//!   included: the image of a break into an input holding its velocity
+//!   under the kernel's last cut, or out of one under its first. A piece
+//!   across it could only approximate the cruise, its velocity wandering
+//!   within tolerance where the plan holds it, and past the limit where
+//!   the plan cruises at it;
 //! - the first image at least `minimum_span` past the last seed. Halving a
 //!   span across many images pays a ladder per level for rungs that cannot
 //!   reach across it, so the seeds cut a target into spans a rung usually
@@ -59,6 +61,12 @@ const SERIES_CAPACITY: usize = 2 * MOMENT_POWER_CAPACITY;
 /// the shaped signal bends on the scale of the kernel, so a span this much
 /// shorter than it is one a rung fits outright.
 const MINIMUM_SPAN_OF_SUPPORT: f64 = 0.25;
+
+/// The share of the acceleration tolerance under which an input piece's
+/// acceleration, bounded over the whole piece, holds its velocity: the
+/// residue of a source fit's higher terms along a cruise, far below what
+/// any fit resolves.
+const CRUISE_ACCELERATION_SHARE: f64 = 1.0 / (1_u64 << 30) as f64;
 
 /// The input break and kernel cut whose sum an output break is.
 #[derive(Clone, Copy, Debug)]
@@ -203,7 +211,7 @@ impl ShapedBreaks {
     }
 
     /// Keeps `seeds`' first and last, every interior seed that may carry a
-    /// velocity break or bounds an exact rest, and the first seed at least
+    /// velocity break or bounds an exact cruise, and the first seed at least
     /// `minimum_span` past the last one kept. `input` is `None` where the
     /// convolution's input is not the table alone, and no seed's jumps are
     /// known.
@@ -222,7 +230,7 @@ impl ShapedBreaks {
         for &t in interior {
             let last_kept = *kept.last().expect("kept seeds start with the first");
             let anchors = self.image_at(t).is_none_or(|image| {
-                self.bounds_rest(input, image)
+                self.bounds_cruise(input, image, fit_tol)
                     || self
                         .image_jumps(input, image)
                         .is_none_or(|jumps| !jumps.below_any_velocity_break(fit_tol))
@@ -239,24 +247,43 @@ impl ShapedBreaks {
         Some(input_jumps_at(input, image.input_break)?.image_through(self.kernel_jumps[image.cut]))
     }
 
-    /// Whether the shaped signal enters or leaves exact rest at `image`:
-    /// the input rests past its break and the kernel's last cut closes the
-    /// window behind it, or the input rests before it and the first cut
-    /// opens the window onto it.
-    fn bounds_rest(&self, input: &AxisSignalTable, image: KernelImage) -> bool {
-        let at_rest = |piece: usize| input.coeffs[piece][1..].iter().all(|&c| c == 0.0);
+    /// Whether the shaped signal enters or leaves an exact cruise at
+    /// `image`: the input holds its velocity past its break and the
+    /// kernel's last cut closes the window behind it, or the input holds it
+    /// before the break and the first cut opens the window onto it.
+    fn bounds_cruise(&self, input: &AxisSignalTable, image: KernelImage, fit_tol: FitTol) -> bool {
+        let cruises = |piece: usize| {
+            acceleration_bound(input, piece) <= CRUISE_ACCELERATION_SHARE * fit_tol.accel_mm_s2
+        };
         let after = input
             .starts
             .partition_point(|&start| start < image.input_break);
         let enters = image.cut == self.kernel_jumps.len() - 1
             && input.starts.get(after) == Some(&image.input_break)
-            && at_rest(after);
+            && cruises(after);
         let leaves = image.cut == 0
             && after > 0
             && input.ends[after - 1] == image.input_break
-            && at_rest(after - 1);
+            && cruises(after - 1);
         enters || leaves
     }
+}
+
+/// `Σₖ k(k−1)|cₖ|ρᵏ⁻²` over input piece `piece`, with `ρ` its farther end
+/// from the origin it is expanded about: no less than its acceleration
+/// anywhere on it.
+fn acceleration_bound(input: &AxisSignalTable, piece: usize) -> f64 {
+    let origin = input.origins[piece];
+    let reach = (input.starts[piece] - origin)
+        .abs()
+        .max((input.ends[piece] - origin).abs());
+    let mut reach_power = 1.0;
+    let mut bound = 0.0;
+    for (power, &coefficient) in input.coeffs[piece].iter().enumerate().skip(2) {
+        bound += (power * (power - 1)) as f64 * coefficient.abs() * reach_power;
+        reach_power *= reach;
+    }
+    bound
 }
 
 /// The input's derivative jumps at a seam between two of its pieces; `None`
