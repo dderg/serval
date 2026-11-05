@@ -176,6 +176,7 @@ WORKDIR /kalico
 COPY klippy/ /kalico/klippy/
 COPY tools/__init__.py /kalico/tools/__init__.py
 COPY tools/sim/ /kalico/tools/sim/
+COPY tools/bench/dispatch_record.py /kalico/tools/bench/dispatch_record.py
 COPY pyproject.toml /kalico/pyproject.toml
 
 # Firmware ELFs
