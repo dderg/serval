@@ -342,12 +342,15 @@ def test_a_pinned_floor_shortfall_that_shrinks_passes():
     assert verdict.problems == ()
 
 
-def test_a_pinned_floor_shortfall_that_vanishes_fails_until_unpinned():
+def test_a_pinned_floor_shortfall_that_vanishes_passes_and_says_to_unpin():
     verdict = gate.judge(
         "c", entry(), measurement(stream=13.0), model(1.6), pinned(1.6, 1.6)
     )
-    assert "unpin" in verdict.problems[0]
-    assert "#693" in verdict.problems[0]
+    assert verdict.problems == ()
+    assert len(verdict.notes) == 1
+    assert "Ir predicts, 2.08x, reaches the 2.0x floor" in verdict.notes[0]
+    assert "unpin" in verdict.notes[0]
+    assert "#693" in verdict.notes[0]
 
 
 def test_a_pin_on_another_config_leaves_the_floor_in_force():

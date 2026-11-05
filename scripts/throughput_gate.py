@@ -54,8 +54,9 @@ The gate fails when, for any config:
   PI_FLOOR_FAILS off turns this into a warning). A config FLOOR_SHORTFALLS
   pins below the floor, to the issue that owns the shortfall, misses it
   instead when a prediction falls below the pinned one by more than
-  SHORTFALL_TOLERANCE_PCT or its band (a regression), or reaches the floor
-  beyond its band (unpin it); a pinned shortfall that shrinks passes;
+  SHORTFALL_TOLERANCE_PCT or its band (a regression). A pinned shortfall
+  that shrinks passes; one whose prediction reaches the floor is judged
+  against the floor again, and the report says to unpin it;
 - the calibration replay is inconsistent (below).
 
 Both Pi predictions come from fits over paired points that
@@ -220,6 +221,7 @@ class Verdict:
     band_pct: tuple[float, float]
     problems: tuple[str, ...]
     warnings: tuple[str, ...]
+    notes: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -855,24 +857,30 @@ def floor_miss(source: str, predicted: float, band_pct: float) -> str | None:
     )
 
 
+def pin_vanished(
+    source: str, predicted: float, band_pct: float, issue: int
+) -> str | None:
+    if predicted / (1.0 + band_pct / 100.0) < PI_FLOOR_X:
+        return None
+    return (
+        f"{prediction(source, predicted, band_pct)} reaches the "
+        f"{PI_FLOOR_X:.1f}x floor: unpin the shortfall FLOOR_SHORTFALLS holds "
+        f"for #{issue}"
+    )
+
+
 def shortfall_miss(
     source: str, predicted: float, band_pct: float, pinned_x: float, issue: int
 ) -> str | None:
-    window = prediction(source, predicted, band_pct)
-    if predicted / (1.0 + band_pct / 100.0) >= PI_FLOOR_X:
-        return (
-            f"{window} reaches the {PI_FLOOR_X:.1f}x floor: unpin the "
-            f"shortfall FLOOR_SHORTFALLS holds for #{issue}"
-        )
     drift_pct = 100.0 * (predicted - pinned_x) / pinned_x
     tolerance_pct = max(SHORTFALL_TOLERANCE_PCT, band_pct)
-    if drift_pct < -tolerance_pct:
-        return (
-            f"{window} grew the floor shortfall pinned at "
-            f"{pinned_x:.2f}x for #{issue} ({drift_pct:+.2f} %, limit "
-            f"{tolerance_pct:.1f} %)"
-        )
-    return None
+    if drift_pct >= -tolerance_pct:
+        return None
+    return (
+        f"{prediction(source, predicted, band_pct)} grew the floor shortfall "
+        f"pinned at {pinned_x:.2f}x for #{issue} ({drift_pct:+.2f} %, limit "
+        f"{tolerance_pct:.1f} %)"
+    )
 
 
 def judge(
@@ -891,12 +899,16 @@ def judge(
     ]
     pin = shortfalls.get(config)
     floor_misses = []
+    notes = []
     for index, (source, value, band) in enumerate(
         zip(("Ir", "the live cost"), predicted, bands)
     ):
+        vanished = pin and pin_vanished(source, value, band, pin.issue)
+        if vanished:
+            notes.append(vanished)
         miss = (
             floor_miss(source, value, band)
-            if pin is None
+            if pin is None or vanished
             else shortfall_miss(
                 source, value, band, pin.predicted_x[index], pin.issue
             )
@@ -914,6 +926,7 @@ def judge(
         bands,
         tuple(problems),
         tuple(floor_misses),
+        tuple(notes),
     )
 
 
@@ -978,6 +991,8 @@ def report(
                 f"  Ir shrank {verdict.ir_delta_pct:+.2f} %: an accept would "
                 "ratchet the baseline down"
             )
+        for note in verdict.notes:
+            print(f"  NOTE: {note}")
         for problem in verdict.problems:
             print(f"  FAIL: {problem}")
         for warning in verdict.warnings:
