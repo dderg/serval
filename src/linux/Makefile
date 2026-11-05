@@ -6,6 +6,7 @@ src-y += linux/main.c linux/timer.c linux/console.c linux/watchdog.c
 src-y += linux/pca9685.c linux/spidev.c linux/analog.c linux/hard_pwm.c
 src-$(CONFIG_MCU_SIM_TMCUART_BYPASS) += linux/sim_chip_socket.c
 src-y += linux/i2c.c linux/gpio.c generic/crc16_ccitt.c generic/alloc.c
+src-y += generic/gpio_edge_none.c
 src-y += linux/sensor_ds18b20.c
 
 ifeq ($(CONFIG_MOTION_RUNTIME),y)

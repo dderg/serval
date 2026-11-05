@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 from fakes import FakeEngine, FakeMcu, FakePrinter
 
@@ -41,6 +43,7 @@ def _fake_mcu(engine=None, handle=7):
                 "pin_value": 0,
                 "tripped": 0,
                 "trip_clock": 0,
+                "edge_timed": 1,
             }
         ),
     )
@@ -107,6 +110,39 @@ def test_is_triggered_applies_invert():
     assert endstop.is_triggered() is True
     mcu.state_cmd.response = {"oid": 0, "armed": 0, "pin_value": 1}
     assert endstop.is_triggered() is False
+
+
+def test_trip_state_says_whether_the_edge_timed_the_trip():
+    mcu = _fake_mcu()
+    endstop = _connected(mcu, MotionEndstop(_pin_params(mcu), 3))
+    mcu.state_cmd.response = {
+        "oid": 0,
+        "armed": 0,
+        "pin_value": 1,
+        "tripped": 1,
+        "trip_clock": 1234,
+        "edge_timed": 0,
+    }
+    assert endstop.query_trip_state() == {
+        "tripped": True,
+        "trip_clock": 1234,
+        "edge_timed": False,
+    }
+
+
+def test_ready_reports_how_each_endstop_times_its_trips(caplog):
+    mcu = _fake_mcu()
+    _connected(mcu, MotionEndstop(_pin_params(mcu, pin="PA9"), 3))
+    with caplog.at_level(logging.INFO, logger="kalico.event"):
+        mcu.get_printer().send_event("klippy:ready")
+    (record,) = [
+        r for r in caplog.records if getattr(r, "event", None) == "trip_timing"
+    ]
+    assert record.edge_timed is True
+    assert record.getMessage() == (
+        "endstop 3 (pin PA9 on mcu 'mcu'): trips timed by the pin edge interrupt"
+    )
+
 
 
 def test_arm_sends_rest_ticks():
@@ -204,7 +240,11 @@ def test_query_trip_state_not_tripped():
     es = MotionEndstop(_pin_params(mcu), 7)
     for cb in mcu.config_callbacks:
         cb()
-    assert es.query_trip_state() == {"tripped": False, "trip_clock": 0}
+    assert es.query_trip_state() == {
+        "tripped": False,
+        "trip_clock": 0,
+        "edge_timed": True,
+    }
 
 
 def test_query_trip_state_tripped_returns_latched_clock():
@@ -218,10 +258,12 @@ def test_query_trip_state_tripped_returns_latched_clock():
         "pin_value": 1,
         "tripped": 1,
         "trip_clock": 0xDEADBEEF,
+        "edge_timed": 1,
     }
     assert es.query_trip_state() == {
         "tripped": True,
         "trip_clock": 0xDEADBEEF,
+        "edge_timed": True,
     }
 
 

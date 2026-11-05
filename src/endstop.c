@@ -4,6 +4,7 @@
 #include "board/irq.h"
 #include "board/misc.h"
 #include "command.h"
+#include "generic/gpio_edge.h"
 #include "sched.h"
 #include "trsync.h"
 #include "mcu_transport_dispatch.h"
@@ -19,11 +20,13 @@ struct endstop {
     uint32_t pin_id;
     uint32_t last_clear_clock;
     struct gpio_in pin;
+    struct gpio_edge edge;
     uint64_t trip_clock;
     struct trsync *ts;
     uint8_t trigger_reason;
     uint8_t endstop_id;
     uint8_t invert;
+    uint8_t edge_timed;
     uint8_t armed;
     uint8_t trip_pending;
     uint8_t trip_processing;
@@ -36,35 +39,61 @@ struct endstop {
 static struct task_wake endstop_trip_wake;
 
 static uint_fast8_t
+endstop_active(struct endstop *e)
+{
+    return (gpio_in_read(e->pin) ? 1 : 0) ^ e->invert;
+}
+
+static void
+endstop_trip(struct endstop *e, uint32_t trip_time)
+{
+    uint64_t now64 = runtime_widened_host_clock();
+    int32_t trip_delta = (int32_t)(trip_time - (uint32_t)now64);
+    e->trip_clock = now64 + (int64_t)trip_delta;
+    if (e->group && e->motor != ENDSTOP_UNBOUND) {
+        uint8_t binding_count = runtime_motor_binding_count(e->motor);
+        if (binding_count) {
+            if (e->stepper >= binding_count)
+                shutdown("bad endstop binding");
+        }
+        e->trip_clock = now64;
+    }
+    e->armed = 0;
+    if (e->edge_timed)
+        gpio_edge_disarm(&e->edge);
+    e->trip_pending = 1;
+    e->tripped = 1;
+    if (e->ts) {
+        if (!e->group)
+            classic_stop_gate_at(now64);
+        trsync_do_trigger(e->ts, e->trigger_reason);
+    }
+    sched_wake_task(&endstop_trip_wake);
+}
+
+static void
+endstop_edge(struct gpio_edge *edge, uint32_t entry_time)
+{
+    struct endstop *e = container_of(edge, struct endstop, edge);
+    if (!e->armed || !endstop_active(e))
+        return;
+    sched_del_timer(&e->time);
+    endstop_trip(e, entry_time);
+}
+
+static uint_fast8_t
 endstop_event(struct timer *t)
 {
     struct endstop *e = container_of(t, struct endstop, time);
-    uint8_t raw = gpio_in_read(e->pin) ? 1 : 0;
-    uint8_t active = raw ^ e->invert;
+    uint_fast8_t active = endstop_active(e);
     uint32_t obs_clock = timer_read_time();
     if (active && e->armed) {
-        uint64_t now64 = runtime_widened_host_clock();
+        if (e->edge_timed && gpio_edge_pending(&e->edge)) {
+            e->time.waketime += e->rest_ticks;
+            return SF_RESCHEDULE;
+        }
         uint32_t gap = obs_clock - e->last_clear_clock;
-        uint32_t mid32 = e->last_clear_clock + gap / 2;
-        int32_t mid_delta = (int32_t)(mid32 - (uint32_t)now64);
-        e->trip_clock = now64 + (int64_t)mid_delta;
-        if (e->group && e->motor != ENDSTOP_UNBOUND) {
-            uint8_t binding_count = runtime_motor_binding_count(e->motor);
-            if (binding_count) {
-                if (e->stepper >= binding_count)
-                    shutdown("bad endstop binding");
-            }
-            e->trip_clock = now64;
-        }
-        e->armed = 0;
-        e->trip_pending = 1;
-        e->tripped = 1;
-        if (e->ts) {
-            if (!e->group)
-                classic_stop_gate_at(now64);
-            trsync_do_trigger(e->ts, e->trigger_reason);
-        }
-        sched_wake_task(&endstop_trip_wake);
+        endstop_trip(e, e->last_clear_clock + gap / 2);
         return SF_DONE;
     }
     e->last_clear_clock = obs_clock;
@@ -109,6 +138,8 @@ command_config_endstop(uint32_t *args)
         if (other != e && other->pin_id == e->pin_id)
             shutdown("endstop: duplicate pin");
     }
+    e->edge.on_edge_irq = endstop_edge;
+    e->edge_timed = gpio_edge_claim(&e->edge, e->pin_id);
 }
 DECL_COMMAND(command_config_endstop,
              "config_endstop oid=%c endstop_id=%c pin=%u pull_up=%c invert=%c"
@@ -118,10 +149,14 @@ void
 command_query_endstop(uint32_t *args)
 {
     struct endstop *e = oid_lookup(args[0], command_config_endstop);
+    irqstatus_t flag = irq_save();
     sched_del_timer(&e->time);
+    if (e->edge_timed)
+        gpio_edge_disarm(&e->edge);
     e->rest_ticks = args[1];
     if (!e->rest_ticks) {
         e->armed = 0;
+        irq_restore(flag);
         return;
     }
     e->tripped = 0;
@@ -129,6 +164,9 @@ command_query_endstop(uint32_t *args)
     e->last_clear_clock = timer_read_time();
     e->time.waketime = e->last_clear_clock + e->rest_ticks;
     sched_add_timer(&e->time);
+    if (e->edge_timed)
+        gpio_edge_arm(&e->edge, !e->invert);
+    irq_restore(flag);
 }
 DECL_COMMAND(command_query_endstop,
              "query_endstop oid=%c rest_ticks=%u");
@@ -139,8 +177,9 @@ command_endstop_query_state(uint32_t *args)
     struct endstop *e = oid_lookup(args[0], command_config_endstop);
     uint8_t raw = gpio_in_read(e->pin) ? 1 : 0;
     sendf("endstop_state oid=%c armed=%c pin_value=%c tripped=%c"
-          " trip_clock=%u",
-          args[0], e->armed, raw, e->tripped, (uint32_t)e->trip_clock);
+          " trip_clock=%u edge_timed=%c",
+          args[0], e->armed, raw, e->tripped, (uint32_t)e->trip_clock,
+          e->edge_timed);
 }
 DECL_COMMAND(command_endstop_query_state, "endstop_query_state oid=%c");
 

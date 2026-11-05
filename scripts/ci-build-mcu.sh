@@ -35,6 +35,7 @@ for TARGET in "${CONFIGS[@]}"; do
 
     size out/klipper.elf
     python3 tools/bench/step_benchmark_emu.py out
+    python3 tools/bench/endstop_edge_emu.py out
     # `make distclean` wipes out/ (including DICTDIR); recreate before stashing.
     mkdir -p "${DICTDIR}"
     cp out/klipper.dict "${DICTDIR}/${NAME}.dict"
