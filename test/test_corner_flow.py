@@ -48,3 +48,12 @@ def test_the_table_reports_each_case_s_planned_print_time():
     head, _, line = cf.table([row], "").splitlines()
     assert head.split()[-1] == "t"
     assert line.split()[-1] == "1.234"
+
+
+def test_the_audited_corpus_is_the_cases_corner_flow_measures():
+    corpus = Path(__file__).resolve().parents[1] / (
+        "tools/sim/gcode/corner_flow_cases.gcode"
+    )
+    assert corpus.read_text() == cf.cases_gcode(
+        (0.4, 0.2, 1.75), list(cf.SPEEDS_MM_S)
+    )

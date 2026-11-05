@@ -556,7 +556,12 @@ duration `h` is held to the acceleration budget
 being that position tolerance. Every rung meets the signal's position at
 both piece ends, and an error pinned there whose acceleration stays within
 `8ε/h²` stays within `ε` in between (`|δ(t)| ≤ max|δ''|·t(h−t)/2`): the
-acceleration budget spends the position budget, no more. The melt lag `K`
+acceleration budget spends the position budget, no more. Its motor still
+holds `[axis e] max_accel`: a piece whose acceleration the looser budget
+would carry past `max_accel + max_accel_deviation` is refit to the absolute
+budget, which holds a signal planned within the limit within that (a
+ratio ramp released at 150 mm/s on a 20 000 mm/s² extruder took a cubic
+72 mm/s² past it). The melt lag `K`
 the bead model uses (`e_cmd = e_out + K·ė_out`, `tools/corner_flow.py`)
 turns a command error within `ε` into a nozzle-flow error of at most
 `2ε/K` — `ε = 0.5 · 0.005 · 0.033 ≈ 83 nm` of filament and `K = 0.02 s`

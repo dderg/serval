@@ -9,7 +9,7 @@ pub(crate) use ladder::ladder_candidate;
 pub(crate) use ladder::{
     AccelerationTrend, HeldSample, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget, LadderFailure,
     LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth, SeamContinuity, VelocitySign,
-    exact_piece, held_miss, ladder_fit, quintic_in_u,
+    acceleration_bound, exact_piece, held_miss, ladder_fit, quintic_in_u,
 };
 
 use geometry::FollowerDemand;
@@ -22,7 +22,7 @@ pub struct FitTol {
 }
 
 /// How a fit holds a piece's acceleration error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AccelBudget {
     /// `accel_mm_s2` on every piece. A toolhead's acceleration error is
     /// force the frame feels, whatever it does to position.
@@ -31,14 +31,17 @@ pub enum AccelBudget {
     /// `8·pos_mm/h²`. Every accepted piece meets the signal's position at
     /// both ends, and an error pinned at both ends with
     /// `|δ''| ≤ 8·pos_mm/h²` stays within `pos_mm` between them
-    /// (`|δ(t)| ≤ max|δ''|·t·(h − t)/2 ≤ max|δ''|·h²/8`): the acceleration
+    /// (`|δ(t)| ≤ max|δ''|·t·(h − t)/2`): the acceleration
     /// budget spends the position budget and no more. A follower's
     /// acceleration moves nothing but material, and the nozzle's melt lag
     /// `K` (`e_cmd = e_out + K·ė_out`) turns a command error held within
     /// `pos_mm` into a nozzle-flow error of at most `2·pos_mm/K` whatever
     /// its acceleration; the acceleration error bounds the command's own
-    /// feed-rate error, which that lag filters away.
-    PositionEquivalent,
+    /// feed-rate error, which that lag filters away. Its motor still holds
+    /// `accel_limit_mm_s2`: a piece the looser budget would carry past it
+    /// by more than `accel_mm_s2` is held to `accel_mm_s2`, as the
+    /// absolute budget holds a signal within its limit to.
+    PositionEquivalent { accel_limit_mm_s2: f64 },
 }
 
 const FOLLOWER_TOL_SCALE_MIN: f64 = 1e-2;
@@ -57,9 +60,27 @@ impl FitTol {
     pub(crate) fn for_piece(self, h: f64) -> Self {
         let accel_mm_s2 = match self.accel_budget {
             AccelBudget::Absolute => self.accel_mm_s2,
-            AccelBudget::PositionEquivalent => self.accel_mm_s2.max(8.0 * self.pos_mm / (h * h)),
+            AccelBudget::PositionEquivalent { .. } => {
+                self.accel_mm_s2.max(8.0 * self.pos_mm / (h * h))
+            }
         };
         Self::absolute(self.pos_mm, accel_mm_s2)
+    }
+
+    /// The acceleration no piece may reach where its budget is looser than
+    /// `accel_mm_s2`: the follower's limit plus `accel_mm_s2`.
+    pub(crate) fn accel_ceiling(self) -> f64 {
+        match self.accel_budget {
+            AccelBudget::Absolute => f64::INFINITY,
+            AccelBudget::PositionEquivalent { accel_limit_mm_s2 } => {
+                accel_limit_mm_s2 + self.accel_mm_s2
+            }
+        }
+    }
+
+    /// This tolerance under the absolute budget.
+    pub(crate) const fn absolute_budget(self) -> Self {
+        Self::absolute(self.pos_mm, self.accel_mm_s2)
     }
 
     #[cfg(test)]

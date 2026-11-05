@@ -14,7 +14,7 @@ use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
     AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE, LADDER_PROBES_U, LadderBudget,
     LadderFailure, LadderMiss, LadderPolicy, LadderPva, LadderSpan, LadderTruth, SeamContinuity,
-    VelocitySign, exact_piece, held_miss, ladder_fit, quintic_in_u,
+    VelocitySign, acceleration_bound, exact_piece, held_miss, ladder_fit, quintic_in_u,
 };
 use crate::types::{BaseItem, Control, PostProcessError, TrajectoryItem};
 use crate::worker_pool::WorkerPool;
@@ -4382,6 +4382,15 @@ fn shaped_ladder<S: TrackSignal>(
         },
     ) {
         Ok(coefficients) => {
+            if piece_tol.accel_mm_s2 > fit_tol.accel_mm_s2
+                && acceleration_bound(&coefficients, h) > fit_tol.accel_ceiling()
+            {
+                let absolute = SpanFitPolicy {
+                    fit_tol: fit_tol.absolute_budget(),
+                    ..*policy
+                };
+                return shaped_ladder(sig, exact, t0, t1, slivers, &absolute, keeps_closest_rung);
+            }
             let resolved = (start_past_sliver, end_past_sliver);
             let piece = FittedPiece {
                 mono_u: &coefficients,

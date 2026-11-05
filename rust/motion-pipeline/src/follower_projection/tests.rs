@@ -1934,14 +1934,17 @@ fn a_ratio_ramped_advance_takes_a_leader_acceleration_step_within_its_allowance(
 
 #[test]
 fn a_follower_fit_scales_the_position_tolerance_and_keeps_its_acceleration_budget() {
+    let budget = AccelBudget::PositionEquivalent {
+        accel_limit_mm_s2: EXTRUDER_ACCEL_LIMIT,
+    };
     let tolerance = super::follower_fit_tol(
         crate::lowering::FitTol {
-            accel_budget: AccelBudget::PositionEquivalent,
+            accel_budget: budget,
             ..crate::lowering::FitTol::absolute(0.005, 50.0)
         },
         0.02,
     );
-    assert_eq!(tolerance.accel_budget, AccelBudget::PositionEquivalent);
+    assert_eq!(tolerance.accel_budget, budget);
     assert!((tolerance.pos_mm - 1e-4).abs() < 1e-18);
     assert_eq!(tolerance.accel_mm_s2, 50.0);
 }
@@ -1957,9 +1960,10 @@ fn e_chain(stages: &[(&str, &'static dyn PostProcessorAlgo, Vec<f64>)]) -> Compi
 }
 
 fn source_budget(chain: &CompiledChain) -> AccelBudget {
-    super::source_accel_budget(super::LeadingAdvance::of(chain))
+    super::source_accel_budget(super::LeadingAdvance::of(chain), EXTRUDER_ACCEL_LIMIT)
 }
 
+const EXTRUDER_ACCEL_LIMIT: f64 = 20_000.0;
 const LINEAR_ADVANCE: f64 = 0.02;
 const SMOOTH_TIME: f64 = 0.01;
 const TANH: [f64; 3] = [0.02, 0.05, 2.0];
@@ -1977,7 +1981,12 @@ fn a_source_fitted_to_the_advanced_signal_spends_its_position_budget() {
             ("st", &algos::SmoothTriangle, vec![SMOOTH_TIME]),
         ]),
     ] {
-        assert_eq!(source_budget(&chain), AccelBudget::PositionEquivalent);
+        assert_eq!(
+            source_budget(&chain),
+            AccelBudget::PositionEquivalent {
+                accel_limit_mm_s2: EXTRUDER_ACCEL_LIMIT
+            }
+        );
     }
 }
 

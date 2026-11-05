@@ -34,11 +34,20 @@ const NODE_SPACING_S: f64 = RATIO_RAMP_MIN_TIME_S / WIDTH_NODES_PER_RAMP_TIME;
 /// time tick of path exactly, and a tie there would hang the choice on how
 /// the path's rounding falls.
 const NODE_SPACING_PER_WIDTH: f64 = 0.75;
+/// The path one time tick covers at cruise on the shortest ramp, in units
+/// of that ramp's width `V·τ/2`; on a longer ramp a tick is less of it.
+const TICK_WIDTHS: f64 = 2.0 / WIDTH_NODES_PER_RAMP_TIME;
+/// How far apart on the path two moving width nodes lie at most at cruise,
+/// in units of the width `V·τ/2` both target: a sample becomes a node on
+/// the first tick past both half a ramp time after the last node and
+/// [`NODE_SPACING_PER_WIDTH`] of a width along the path from it.
+const NODE_GAP_WIDTHS: f64 =
+    (1.0 + 0.5 * TICK_WIDTHS).max(NODE_SPACING_PER_WIDTH + TICK_WIDTHS);
 /// How far along the path a seam holds the width its ramp asks for, in
 /// units of that width `V·τ/2`: a window that wide reaches the seam from
 /// up to one width away, and the nodes bracketing that reach lie within
-/// one more.
-const SEAM_WIDTH_PLATEAU_WIDTHS: f64 = 2.0;
+/// one node gap more.
+const SEAM_WIDTH_PLATEAU_WIDTHS: f64 = 1.0 + NODE_GAP_WIDTHS;
 /// How fast the ramp time a seam asks for falls off in time away from it:
 /// at a steady speed the width target `v·τ/2` then falls off along the
 /// path no faster than [`ENVELOPE_SLOPE`].
@@ -47,13 +56,23 @@ const RAMP_TIME_SLOPE: f64 = 2.0 * ENVELOPE_SLOPE;
 /// within one ramp time of the seam, then falls off.
 const RAMP_TIME_REACH_S: f64 =
     RATIO_RAMP_MAX_TIME_S + (RATIO_RAMP_MAX_TIME_S - RATIO_RAMP_MIN_TIME_S) / RAMP_TIME_SLOPE;
+/// How far in time a seam's width reaches at cruise: until the longest
+/// ramp's falls off its plateau by [`ENVELOPE_SLOPE`] to the shortest
+/// ramp's own width. A node short of that would cap the plateau by its
+/// cone.
+const SEAM_WIDTH_REACH_S: f64 = (RATIO_RAMP_MAX_TIME_S
+    * (1.0 + ENVELOPE_SLOPE * SEAM_WIDTH_PLATEAU_WIDTHS)
+    - RATIO_RAMP_MIN_TIME_S)
+    / (2.0 * ENVELOPE_SLOPE);
+/// How far in time a seam raises the ramp time or the width around it.
+const SEAM_REACH_S: f64 = RAMP_TIME_REACH_S.max(SEAM_WIDTH_REACH_S);
 /// How far in time the seams whose steps a window may gather with one lie
 /// from it: half the longest ramp.
 const CLUSTER_REACH_S: f64 = 0.5 * RATIO_RAMP_MAX_TIME_S;
 /// How long after a node the leaders must be laid before its target is
 /// known: every seam that raises its ramp time or its width, and every
 /// seam those gather, lies within.
-const TARGET_DELAY_S: f64 = RAMP_TIME_REACH_S + CLUSTER_REACH_S;
+const TARGET_DELAY_S: f64 = SEAM_REACH_S + CLUSTER_REACH_S;
 /// The ramp time over which a turnaround or crawl valley releases and
 /// rebuilds the advance's lead, the longest, whatever the step there; and
 /// the furthest a rest valley reaches past its spill ([`RestSide::width`]).
@@ -687,10 +706,10 @@ impl WidthField {
     fn seams_reaching(&self, t: f64) -> std::ops::Range<usize> {
         let first = self
             .seams
-            .partition_point(|seam| seam.t < t - RAMP_TIME_REACH_S);
+            .partition_point(|seam| seam.t < t - SEAM_REACH_S);
         let last = self
             .seams
-            .partition_point(|seam| seam.t <= t + RAMP_TIME_REACH_S);
+            .partition_point(|seam| seam.t <= t + SEAM_REACH_S);
         first..last
     }
 
