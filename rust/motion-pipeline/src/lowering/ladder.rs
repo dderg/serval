@@ -348,7 +348,9 @@ pub(crate) struct LadderTruth<'a> {
     pub acceleration: &'a dyn Fn(f64) -> f64,
     /// A rung's worst miss over the tolerance where a span reaching a
     /// square-root onset is held to it between the probes; zero elsewhere.
-    /// Read only once a rung has passed the probes, or to rank the misses.
+    /// Read only once a rung has passed the probes, or to rank the misses;
+    /// unless it ranks them, any miss past the tolerance may stand for the
+    /// worst.
     pub held_miss: &'a dyn Fn(&[f64]) -> f64,
     /// Whether a miss's closest rung is the closest at the held points as
     /// well: only where the closest rung is kept, at the floor.
@@ -426,34 +428,111 @@ fn preserves_acceleration_monotonicity(mono_u: &[f64], trend: AccelerationTrend)
     })
 }
 
+/// A rung's position and acceleration errors at the ladder's probes, each
+/// read once for both its acceptance and, where it is refused, its rank:
+/// acceptance reads them in order up to the first past the tolerance, and
+/// only a refused rung's rank reads the rest.
+struct ProbeErrors<'r> {
+    mono_u: &'r [f64],
+    dd_scale: f64,
+    position: [f64; LADDER_PROBES_U.len()],
+    acceleration: [f64; LADDER_PROBES_U.len()],
+    read: usize,
+}
+
+impl<'r> ProbeErrors<'r> {
+    fn of(mono_u: &'r [f64], h: f64) -> Self {
+        Self {
+            mono_u,
+            dd_scale: (2.0 / h) * (2.0 / h),
+            position: [0.0; LADDER_PROBES_U.len()],
+            acceleration: [0.0; LADDER_PROBES_U.len()],
+            read: 0,
+        }
+    }
+
+    fn read_next(&mut self, truth: &LadderTruth) {
+        let (index, u) = (self.read, LADDER_PROBES_U[self.read]);
+        self.position[index] = (eval_mono(self.mono_u, u) - (truth.position)(u)).abs();
+        self.acceleration[index] =
+            (eval_mono_dd(self.mono_u, u) * self.dd_scale - (truth.acceleration)(u)).abs();
+        self.read += 1;
+    }
+
+    fn within(&mut self, truth: &LadderTruth, tol: FitTol) -> bool {
+        while self.read < LADDER_PROBES_U.len() {
+            self.read_next(truth);
+            let index = self.read - 1;
+            if !(self.position[index] <= tol.pos_mm && self.acceleration[index] <= tol.accel_mm_s2)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn all(&mut self, truth: &LadderTruth) -> &Self {
+        while self.read < LADDER_PROBES_U.len() {
+            self.read_next(truth);
+        }
+        self
+    }
+}
+
 /// An endpoint-anchored rung is only allowed to hand its caller a piece whose
 /// endpoint velocities are still the signal's: the position and acceleration
 /// probes pass a velocity step at either end that a rung solved from the
 /// relative travel is free to leave there. Where the truth holds the span
 /// between the probes, the rung must hold the tolerance there too.
 fn candidate_ok(
-    mono_u: &[f64],
+    errors: &mut ProbeErrors,
     h: f64,
     truth: &LadderTruth,
     budget: LadderBudget,
     policy: LadderPolicy,
 ) -> bool {
-    let dd_scale = (2.0 / h) * (2.0 / h);
+    let mono_u = errors.mono_u;
     [-1.0, 1.0].into_iter().all(|u| {
         (eval_mono_d(mono_u, u) * (2.0 / h) - (truth.velocity)(u)).abs() <= budget.velocity
-    }) && (match policy.velocity_sign {
-        #[cfg(test)]
-        VelocitySign::Certified => preserves_certified_velocity_sign(mono_u, truth.velocity),
-        VelocitySign::Unconstrained => true,
-    }) && policy
-        .acceleration_monotonicity
-        .is_none_or(|trend| preserves_acceleration_monotonicity(mono_u, trend))
-        && LADDER_PROBES_U.iter().all(|&u| {
-            (eval_mono(mono_u, u) - (truth.position)(u)).abs() <= budget.tol.pos_mm
-                && (eval_mono_dd(mono_u, u) * dd_scale - (truth.acceleration)(u)).abs()
-                    <= budget.tol.accel_mm_s2
+    }) && errors.within(truth, budget.tol)
+        && (match policy.velocity_sign {
+            #[cfg(test)]
+            VelocitySign::Certified => preserves_certified_velocity_sign(mono_u, truth.velocity),
+            VelocitySign::Unconstrained => true,
         })
+        && policy
+            .acceleration_monotonicity
+            .is_none_or(|trend| preserves_acceleration_monotonicity(mono_u, trend))
         && (truth.held_miss)(mono_u) <= 1.0
+}
+
+/// The probe a refused rung misses worst at and its miss there over the
+/// budgets, the held miss counted where it ranks the rungs.
+fn worst_miss(
+    errors: &mut ProbeErrors,
+    h: f64,
+    truth: &LadderTruth,
+    budget: LadderBudget,
+) -> (f64, f64) {
+    let errors = errors.all(truth);
+    let mono_u = errors.mono_u;
+    let (probe, score) = LADDER_PROBES_U
+        .iter()
+        .enumerate()
+        .map(|(index, &probe)| {
+            let position = errors.position[index] / budget.tol.pos_mm;
+            let velocity = (eval_mono_d(mono_u, probe) * (2.0 / h) - (truth.velocity)(probe)).abs()
+                / budget.velocity;
+            let acceleration = errors.acceleration[index] / budget.tol.accel_mm_s2;
+            (probe, position.max(velocity).max(acceleration))
+        })
+        .max_by(|left, right| left.1.total_cmp(&right.1))
+        .expect("ladder probes are empty");
+    if truth.held_ranks_misses {
+        (probe, score.max((truth.held_miss)(mono_u)))
+    } else {
+        (probe, score)
+    }
 }
 
 pub(crate) fn ladder_fit(
@@ -477,12 +556,14 @@ pub(crate) fn ladder_fit(
                 h,
                 endpoint_delta,
             );
-            if candidate_ok(&anchored_acceleration_quadratic, h, truth, budget, policy) {
+            let mut errors = ProbeErrors::of(&anchored_acceleration_quadratic, h);
+            if candidate_ok(&mut errors, h, truth, budget, policy) {
                 return Ok(anchored_acceleration_quadratic);
             }
             let anchored_quadratic =
                 quadratic_in_u(truth_p(-1.0), truth_v(-1.0), h, endpoint_delta);
-            if candidate_ok(&anchored_quadratic, h, truth, budget, policy) {
+            let mut errors = ProbeErrors::of(&anchored_quadratic, h);
+            if candidate_ok(&mut errors, h, truth, budget, policy) {
                 return Ok(anchored_quadratic);
             }
         }
@@ -492,50 +573,26 @@ pub(crate) fn ladder_fit(
             h,
             endpoint_delta,
         );
-        if candidate_ok(&cubic, h, truth, budget, policy) {
+        let mut errors = ProbeErrors::of(&cubic, h);
+        if candidate_ok(&mut errors, h, truth, budget, policy) {
             return Ok(cubic);
         }
     }
-    let dd_scale = (2.0 / h) * (2.0 / h);
-    let worst_miss = |candidate: &[f64]| {
-        LADDER_PROBES_U
-            .iter()
-            .map(|&probe| {
-                let position =
-                    (eval_mono(candidate, probe) - truth_p(probe)).abs() / budget.tol.pos_mm;
-                let velocity = (eval_mono_d(candidate, probe) * (2.0 / h) - truth_v(probe)).abs()
-                    / budget.velocity;
-                let acceleration = (eval_mono_dd(candidate, probe) * dd_scale - truth_a(probe))
-                    .abs()
-                    / budget.tol.accel_mm_s2;
-                (probe, position.max(velocity).max(acceleration))
-            })
-            .max_by(|left, right| left.1.total_cmp(&right.1))
-            .map(|(probe, score)| {
-                (
-                    probe,
-                    if truth.held_ranks_misses {
-                        score.max((truth.held_miss)(candidate))
-                    } else {
-                        score
-                    },
-                )
-            })
-            .expect("ladder probes are empty")
-    };
     let quintic = ladder_candidate(base, 5, truth_p);
-    if candidate_ok(&quintic, h, truth, budget, policy) {
+    let mut errors = ProbeErrors::of(&quintic, h);
+    if candidate_ok(&mut errors, h, truth, budget, policy) {
         return Ok(quintic);
     }
-    let (mut u, mut closest_score) = worst_miss(&quintic);
+    let (mut u, mut closest_score) = worst_miss(&mut errors, h, truth, budget);
     let mut closest = quintic;
     if h >= policy.high_degree_span_floor {
         for degree in [6, 7, 9, 11, LADDER_MAX_DEGREE] {
             let candidate = ladder_candidate(base, degree, truth_p);
-            if candidate_ok(&candidate, h, truth, budget, policy) {
+            let mut errors = ProbeErrors::of(&candidate, h);
+            if candidate_ok(&mut errors, h, truth, budget, policy) {
                 return Ok(candidate);
             }
-            let (probe, score) = worst_miss(&candidate);
+            let (probe, score) = worst_miss(&mut errors, h, truth, budget);
             if score < closest_score {
                 (u, closest_score, closest) = (probe, score, candidate);
             }
@@ -546,6 +603,7 @@ pub(crate) fn ladder_fit(
         velocity: truth_v(u),
         acceleration: truth_a(u),
     };
+    let dd_scale = (2.0 / h) * (2.0 / h);
     let candidate = LadderPva {
         position: eval_mono(&closest, u),
         velocity: eval_mono_d(&closest, u) * (2.0 / h),
