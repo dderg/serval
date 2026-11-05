@@ -132,6 +132,24 @@ pub(crate) enum PostProcessError {
         resolution: f64,
     },
     #[error(
+        "axis {axis} ({fit_context}): the fit over [{t_start}, {t_end}] cannot follow its \
+         source at t={t}, where the advance asks the motor for {demand_mm_s2} mm/s^2, past its \
+         {limit_mm_s2} mm/s^2 acceleration limit by more than the {budget_mm_s2} mm/s^2 fit \
+         budget. No kernel follows the advance, so its acceleration reaches the motor as is. \
+         The planner holds an advanced extruder's demand r·(a + k·j) within the limit: a \
+         larger one is a planner bug, or a track it did not plan"
+    )]
+    AdvancedDemandOverLimit {
+        axis: usize,
+        fit_context: &'static str,
+        t_start: f64,
+        t_end: f64,
+        t: f64,
+        demand_mm_s2: f64,
+        limit_mm_s2: f64,
+        budget_mm_s2: f64,
+    },
+    #[error(
         "axis {axis}: an unshaped leader leaves its curvature cap as a square root of the \
          time on [{from}, {to}], where the advance on this follower changes its velocity by \
          {change} mm/s faster than any fit resolves — beyond the {allowance} mm/s allowance \

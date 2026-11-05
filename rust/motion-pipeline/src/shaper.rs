@@ -12,7 +12,7 @@ use trajectory::{
 
 use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
-    AccelerationExemption, AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE,
+    AccelBudget, AccelerationExemption, AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE,
     LADDER_PROBES_U, LadderBudget, LadderFailure, LadderMiss, LadderPolicy, LadderPva, LadderSpan,
     LadderTruth, SeamContinuity, VelocitySign, acceleration_bound, exact_piece, held_miss,
     ladder_accept, ladder_fit, quintic_in_u,
@@ -5038,6 +5038,9 @@ fn refine_span_against<S: TrackSignal>(
             return Ok(());
         }
         let probe_t = nurbs::fmadd(0.5 * (failure.u + 1.0), t1 - t0, t0);
+        if let Some(over_limit) = demand_over_limit(policy, &failure, probe_t, (t0, t1)) {
+            return Err(over_limit);
+        }
         return Err(PostProcessError::FitTolerance {
             axis: policy.axis,
             t_start: t0,
@@ -5107,6 +5110,34 @@ fn refine_span_against<S: TrackSignal>(
         refinement_splits,
         out,
         [None, Some(end_edge)],
+    )
+}
+
+/// A fit spending its position budget within the follower's acceleration
+/// limit that fails where its source asks past that limit by more than the
+/// budget fails on the demand: no piece the motor can follow holds the
+/// source there.
+fn demand_over_limit(
+    policy: &SpanFitPolicy,
+    failure: &LadderFailure,
+    t: f64,
+    (t_start, t_end): (f64, f64),
+) -> Option<PostProcessError> {
+    let AccelBudget::PositionEquivalent { accel_limit_mm_s2 } = policy.fit_tol.accel_budget else {
+        return None;
+    };
+    let demand = failure.source.acceleration;
+    (demand.abs() > policy.fit_tol.accel_ceiling()).then_some(
+        PostProcessError::AdvancedDemandOverLimit {
+            axis: policy.axis,
+            fit_context: policy.fit_context,
+            t_start,
+            t_end,
+            t,
+            demand_mm_s2: demand,
+            limit_mm_s2: accel_limit_mm_s2,
+            budget_mm_s2: policy.fit_tol.accel_mm_s2,
+        },
     )
 }
 
