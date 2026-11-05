@@ -19,6 +19,7 @@ RESUME_AFTER_S = 1.5
 CAPTURE_LEAD_S = 0.4
 BRAKE_AT_WAYPOINT = 14
 STRAYED_WAYPOINT = 4
+DENSE_SAMPLE_PERIOD_S = 4e-6
 
 
 def _zigzag_gcode() -> str:
@@ -34,13 +35,6 @@ def _zigzag_gcode() -> str:
         lines.append(f"G1 X{x} Y{y} E0.6 F4800")
         lines.append(f"G1 X{x} Y{y + 2} E0.06")
     return "\n".join(lines) + "\n"
-
-
-def _require_snapshot_engine() -> None:
-    try:
-        analyze.harness._import_engine()
-    except ImportError as exc:
-        pytest.skip(str(exc))
 
 
 def _encode(record: dispatch_record.DispatchRecord) -> bytes:
@@ -67,20 +61,18 @@ def _encode(record: dispatch_record.DispatchRecord) -> bytes:
             int(record.flags[index]),
             len(samples),
         )
-        out += np.ascontiguousarray(samples, "<f8").tobytes()
+        rows = np.column_stack(
+            [record.segment_times(index), samples.reshape(len(samples), -1)]
+        )
+        out += np.ascontiguousarray(rows, "<f8").tobytes()
     return bytes(out)
 
 
 def _plan_record(
     job: analyze.Job, waypoints: list[dict]
 ) -> dispatch_record.DispatchRecord:
-    engine = analyze.harness._import_engine()
-    return dispatch_record.parse(
-        bytes(
-            engine.pipeline_snapshot_dispatch_record(
-                waypoints, job.config.config_text, job.step_benchmarks
-            )
-        )
+    return analyze.planned_dispatch_record(
+        job, replace(analyze.plan_waypoints(job), waypoints=waypoints)
     )
 
 
@@ -146,7 +138,6 @@ def _synthesize_capture(job: analyze.Job, reference: analyze.Reference) -> None:
 
 @pytest.fixture(scope="module")
 def braked_run(tmp_path_factory):
-    _require_snapshot_engine()
     run_dir = _write_run(tmp_path_factory.mktemp("braked"), None)
     record = _live_record_braked_at(
         analyze.load_job(run_dir), BRAKE_AT_WAYPOINT
@@ -197,7 +188,6 @@ def test_the_reference_holds_the_rest_the_brake_inserted(braked_run):
 def test_a_dispatched_segment_off_the_plan_away_from_brakes_is_a_divergence(
     tmp_path,
 ):
-    _require_snapshot_engine()
     job = analyze.load_job(_write_run(tmp_path, None))
     record = _live_record_braked_at(job, BRAKE_AT_WAYPOINT)
     strayed_line = int(np.unique(record.source_line)[STRAYED_WAYPOINT])
@@ -224,7 +214,6 @@ def test_a_dispatched_segment_off_the_plan_away_from_brakes_is_a_divergence(
 def test_the_extruder_is_judged_only_until_the_first_brake(
     tmp_path, waypoint, judged
 ):
-    _require_snapshot_engine()
     job = analyze.load_job(_write_run(tmp_path, None))
     record = _live_record_braked_at(job, BRAKE_AT_WAYPOINT)
     line = int(np.unique(record.source_line)[waypoint])
@@ -247,7 +236,6 @@ def test_the_extruder_is_judged_only_until_the_first_brake(
 def test_a_record_of_the_plan_matches_it_and_keeps_the_plan_as_reference(
     tmp_path,
 ):
-    _require_snapshot_engine()
     job = analyze.load_job(_write_run(tmp_path, None))
     plan = _plan_record(job, analyze.plan_waypoints(job).waypoints)
     run_dir = _write_run(tmp_path, replace(plan, t0=np.full(len(plan), 7.0)))
@@ -259,21 +247,46 @@ def test_a_record_of_the_plan_matches_it_and_keeps_the_plan_as_reference(
     assert report["brake_windows"] == []
 
 
-def test_the_plans_own_record_steps_like_the_plan(tmp_path):
-    _require_snapshot_engine()
-    job = analyze.load_job(_write_run(tmp_path, None))
-    plan = _plan_record(job, analyze.plan_waypoints(job).waypoints)
-    planned = analyze.planned_blocks(job, analyze.plan_waypoints(job))
-    recorded = analyze.dispatched_blocks(job, plan)
-    assert [b.duration_s for b in recorded] == pytest.approx(
-        [b.duration_s for b in planned], abs=1e-9
+def _densely_sampled_steps(
+    job: analyze.Job, planned: analyze.PlannedPrint, motor: analyze.Motor
+) -> analyze.StepEvents:
+    ((t_start, t_end, rows),) = (
+        analyze.harness._import_engine().pipeline_snapshot_epoch_samples(
+            planned.waypoints,
+            job.config.config_text,
+            [0, 1, 2, 3],
+            DENSE_SAMPLE_PERIOD_S,
+            job.step_benchmarks,
+        )
     )
+    positions = np.asarray(rows)[:, :, 0]
+    steps = np.asarray(motor.axis_weights) @ positions / motor.step_mm
+    times = np.linspace(0.0, t_end - t_start, steps.size)
+    state = analyze.PlayState.resting_at(steps[0])
+    return analyze.lattice_steps(times, steps, state)
+
+
+def test_the_reference_steps_where_the_plan_crosses_each_step(tmp_path):
+    job = analyze.load_job(_write_run(tmp_path, None))
+    planned = analyze.plan_waypoints(job)
+    reference = analyze.planned_blocks(job, planned)
     for motor in job.motors:
-        p, _, _ = analyze._motor_steps(motor, planned)
-        r, _, _ = analyze._motor_steps(motor, recorded)
-        assert r.level.tolist() == p.level.tolist()
-        shift_steps = np.abs(r.time - p.time) * np.maximum(r.rate_hz, p.rate_hz)
-        assert np.all(shift_steps < 1e-3)
+        steps, _, _ = analyze._motor_steps(motor, reference)
+        truth = _densely_sampled_steps(job, planned, motor)
+        assert steps.level.tolist() == truth.level.tolist(), motor.role
+        shift_steps = np.abs(steps.time - truth.time) * truth.rate_hz
+        assert shift_steps.max(initial=0.0) < 1e-3, motor.role
+
+
+def _moving_segment() -> bytes:
+    span = 0.5e-3
+    rows = np.zeros((2, 1 + 4 * 3))
+    rows[1, 0] = span
+    return (
+        bytes([dispatch_record.KIND_SEGMENT])
+        + dispatch_record.SEGMENT.pack(1.0, 0.0, span, 5, 1, 2)
+        + rows.astype("<f8").tobytes()
+    )
 
 
 def test_a_record_with_a_nudge_is_refused(tmp_path):
@@ -281,9 +294,7 @@ def test_a_record_with_a_nudge_is_refused(tmp_path):
         dispatch_record.HEADER.pack(dispatch_record.MAGIC, 4, 0.5e-3)
         + bytes([dispatch_record.KIND_NUDGE])
         + dispatch_record.NUDGE.pack(1.0, 0.0, 0.1, 0, 2)
-        + bytes([dispatch_record.KIND_SEGMENT])
-        + dispatch_record.SEGMENT.pack(1.0, 0.0, 0.1, 5, 1, 2)
-        + bytes(2 * 4 * 3 * 8)
+        + _moving_segment()
     )
     with pytest.raises(analyze.AnalysisError, match="1 nudges bypassed"):
         analyze.load_dispatch_record(tmp_path)
@@ -291,12 +302,7 @@ def test_a_record_with_a_nudge_is_refused(tmp_path):
 
 def test_only_one_record_may_hold_the_print(tmp_path):
     empty = dispatch_record.HEADER.pack(dispatch_record.MAGIC, 4, 0.5e-3)
-    moving = (
-        empty
-        + bytes([dispatch_record.KIND_SEGMENT])
-        + dispatch_record.SEGMENT.pack(1.0, 0.0, 0.1, 5, 1, 2)
-        + bytes(2 * 4 * 3 * 8)
-    )
+    moving = empty + _moving_segment()
     (tmp_path / "dispatch_record_p1_s0.bin").write_bytes(empty)
     (tmp_path / "dispatch_record_p1_s1.bin").write_bytes(moving)
     assert len(analyze.load_dispatch_record(tmp_path)) == 1

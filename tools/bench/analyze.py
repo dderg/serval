@@ -46,7 +46,7 @@ import re
 import shlex
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 
 import numpy as np
@@ -81,7 +81,6 @@ ROLE_AXIS_WEIGHTS = {
     "e": (0.0, 0.0, 0.0, 1.0),
 }
 FOLLOWER_ROLES = frozenset({"e"})
-REFERENCE_SAMPLE_PERIOD_S = 0.5e-3
 REFERENCE_FINE_FACTOR = 50
 REFERENCE_CHUNK_INTERVALS = 20_000
 REFERENCE_BLOCK_SEPARATION_S = 100.0
@@ -647,23 +646,7 @@ def _motor_pva_steps(motor: Motor, axes_pva: np.ndarray) -> np.ndarray:
     return np.einsum("a,asc->sc", weights, axes_pva) / motor.step_mm
 
 
-def reference_block(
-    job: Job, epoch: tuple[float, float, np.ndarray], stream_offset_s: float
-) -> ReferenceBlock:
-    t_start, t_end, axes_pva = epoch
-    duration = t_end - t_start
-    return ReferenceBlock(
-        stream_offset_s=stream_offset_s,
-        duration_s=duration,
-        sample_times=np.linspace(0.0, duration, axes_pva.shape[1]),
-        motor_pva_steps={
-            m.role: _motor_pva_steps(m, axes_pva) for m in job.motors
-        },
-    )
-
-
-def _quintic_hermite_basis(fine_factor: int) -> np.ndarray:
-    s = np.arange(fine_factor) / fine_factor
+def _quintic_hermite_basis(s: np.ndarray) -> np.ndarray:
     s2, s3, s4, s5 = s**2, s**3, s**4, s**5
     return np.stack(
         [
@@ -678,24 +661,33 @@ def _quintic_hermite_basis(fine_factor: int) -> np.ndarray:
     )
 
 
+def _hermite_coefs(lo: np.ndarray, hi: np.ndarray, h: np.ndarray) -> np.ndarray:
+    return np.stack(
+        [
+            lo[..., 0],
+            h * lo[..., 1],
+            h * h * lo[..., 2],
+            hi[..., 0],
+            h * hi[..., 1],
+            h * h * hi[..., 2],
+        ]
+    )
+
+
 def upsample(
     times: np.ndarray, pva: np.ndarray, fine_factor: int
 ) -> tuple[np.ndarray, np.ndarray]:
-    h = np.diff(times)
-    coefs = np.stack(
-        [
-            pva[:-1, 0],
-            h * pva[:-1, 1],
-            h * h * pva[:-1, 2],
-            pva[1:, 0],
-            h * pva[1:, 1],
-            h * h * pva[1:, 2],
-        ]
-    )
-    basis = _quintic_hermite_basis(fine_factor)
+    """The samples' quintic Hermite interpolant at `fine_factor` points per
+    interval. Two samples at one instant are the two sides of a corner; the
+    empty interval between them is skipped."""
+    starts = np.flatnonzero(np.diff(times) > 0.0)
+    h = times[starts + 1] - times[starts]
+    coefs = _hermite_coefs(pva[starts], pva[starts + 1], h)
+    basis = _quintic_hermite_basis(np.arange(fine_factor) / fine_factor)
     fine_p = (basis @ coefs).T.reshape(-1)
     fine_t = (
-        times[:-1, None] + h[:, None] * (np.arange(fine_factor) / fine_factor)
+        times[starts, None]
+        + h[:, None] * (np.arange(fine_factor) / fine_factor)
     ).reshape(-1)
     return (
         np.append(fine_t, times[-1]),
@@ -805,18 +797,19 @@ def _motor_steps(
 
 
 def planned_blocks(job: Job, planned: PlannedPrint) -> list[ReferenceBlock]:
+    """The plan's own dispatch record as reference blocks, one per epoch
+    between two rests, set REFERENCE_BLOCK_SEPARATION_S apart."""
+    runs = dispatched_blocks(job, planned_dispatch_record(job, planned))
+    if len(runs) != len(planned.blocks):
+        raise AnalysisError(
+            f"the stream plan moves in {len(runs)} epochs between rests, "
+            f"the print's dwells split it into {len(planned.blocks)}"
+        )
     blocks = []
     offset = 0.0
-    for epoch in stream_epochs(
-        job,
-        planned,
-        job.config.config_text,
-        [0, 1, 2, 3],
-        REFERENCE_SAMPLE_PERIOD_S,
-    ):
-        block = reference_block(job, epoch, offset)
-        blocks.append(block)
-        offset += block.duration_s + REFERENCE_BLOCK_SEPARATION_S
+    for run in runs:
+        blocks.append(replace(run, stream_offset_s=offset))
+        offset += run.duration_s + REFERENCE_BLOCK_SEPARATION_S
     return blocks
 
 
@@ -847,17 +840,11 @@ def dispatched_blocks(
     origin = float(record.host_start()[0])
     blocks = []
     for lo, hi in dispatched_runs(record):
-        times, rows = [], []
-        for index in range(lo, hi):
-            samples = record.segment_samples(index)
-            n = len(samples)
-            local = record.t_start[index] + (
-                record.t_end[index] - record.t_start[index]
-            ) * np.arange(n) / (n - 1)
-            local[-1] = record.t_end[index]
-            keep = n if index == hi - 1 else n - 1
-            times.append(record.t0[index] + local[:keep])
-            rows.append(samples[:keep])
+        times = [
+            record.t0[index] + record.segment_times(index)
+            for index in range(lo, hi)
+        ]
+        rows = [record.segment_samples(index) for index in range(lo, hi)]
         host = np.concatenate(times)
         axes_pva = np.concatenate(rows).transpose(1, 0, 2)
         blocks.append(
@@ -904,11 +891,13 @@ def build_reference(job: Job) -> Reference:
     )
 
 
-def planned_dispatch_record(job: Job) -> dispatch_record.DispatchRecord:
+def planned_dispatch_record(
+    job: Job, planned: PlannedPrint
+) -> dispatch_record.DispatchRecord:
     engine = harness._import_engine()
     try:
         data = engine.pipeline_snapshot_dispatch_record(
-            plan_waypoints(job).waypoints,
+            planned.waypoints,
             job.config.config_text,
             job.step_benchmarks,
         )
@@ -917,13 +906,32 @@ def planned_dispatch_record(job: Job) -> dispatch_record.DispatchRecord:
     return dispatch_record.parse(bytes(data), "plan")
 
 
-def _motor_positions_steps(
+def _record_motor_pva_steps(
     job: Job, record: dispatch_record.DispatchRecord
 ) -> np.ndarray:
     per_step = np.array(
         [np.asarray(m.axis_weights) / m.step_mm for m in job.motors]
     ).T
-    return record.samples[:, :, 0] @ per_step
+    return np.einsum("nac,am->nmc", record.samples, per_step)
+
+
+def hermite_positions(
+    times: np.ndarray, pva: np.ndarray, query: np.ndarray
+) -> np.ndarray:
+    """The samples' quintic Hermite interpolant at `query`, which must lie
+    in the samples' span; `pva` is samples x ... x (p, v, a)."""
+    i = np.clip(np.searchsorted(times, query, "right") - 1, 0, times.size - 2)
+    h = times[i + 1] - times[i]
+    if not np.all(h > 0.0):
+        raise AnalysisError(
+            f"query {query[h <= 0.0]} lands on an empty interval"
+        )
+    s = (query - times[i]) / h
+    coefs = _hermite_coefs(
+        pva[i], pva[i + 1], np.expand_dims(h, tuple(range(1, pva.ndim - 1)))
+    )
+    basis = _quintic_hermite_basis(s)
+    return np.einsum("qk,kq...->q...", basis, coefs)
 
 
 @dataclass(frozen=True)
@@ -942,18 +950,24 @@ class DispatchComparison:
 
     def deviation(self, i: int, j: int) -> SegmentDeviation:
         """How far live segment `i` strays from planned segment `j` in motor
-        steps, wherever both stand at the same instant of their own. A
-        follower is compared from where the segment starts it."""
+        steps, at every planned sample, with the live segment read at the
+        same instant of its own. A follower is compared from where the
+        segment starts it."""
         live, plan = self.live, self.plan
         live_span = live.t_end[i] - live.t_start[i]
         plan_span = plan.t_end[j] - plan.t_start[j]
-        a = self.live_steps[live.sample_start[i] : live.sample_start[i + 1]]
-        b = self.plan_steps[plan.sample_start[j] : plan.sample_start[j + 1]]
-        if (
-            abs(live_span - plan_span) > DISPATCH_DURATION_TOLERANCE_S
-            or a.shape != b.shape
-        ):
+        if abs(live_span - plan_span) > DISPATCH_DURATION_TOLERANCE_S:
             return SegmentDeviation(math.inf, math.inf)
+        live_local = live.segment_times(i) - live.t_start[i]
+        plan_local = plan.segment_times(j) - plan.t_start[j]
+        a = hermite_positions(
+            live_local,
+            self.live_steps[live.sample_start[i] : live.sample_start[i + 1]],
+            np.minimum(plan_local, live_local[-1]),
+        )
+        b = self.plan_steps[
+            plan.sample_start[j] : plan.sample_start[j + 1], :, 0
+        ]
         diff = np.abs(a - b)
         followers = [m.track_restarts_per_block for m in self.job.motors]
         leaders = [not f for f in followers]
@@ -998,13 +1012,13 @@ def compare_dispatch_with_plan(
     stops on a corner the plan cuts, so the path it lays, and with it the
     extrusion budget the follower spreads over what follows, differs from
     the plan's for the rest of the print; how far is reported, not judged."""
-    plan = planned_dispatch_record(job)
+    plan = planned_dispatch_record(job, plan_waypoints(job))
     comparison = DispatchComparison(
         job,
         live,
         plan,
-        _motor_positions_steps(job, live),
-        _motor_positions_steps(job, plan),
+        _record_motor_pva_steps(job, live),
+        _record_motor_pva_steps(job, plan),
     )
     matcher = difflib.SequenceMatcher(
         None,
@@ -1273,6 +1287,8 @@ def nearest_same_key(
 class EpochSteps:
     capture: dict[str, StepEvents]
     reference: dict[str, StepEvents]
+    capture_start: dict[str, int]
+    reference_start: dict[str, int]
 
     def roles(self) -> list[str]:
         return [
@@ -1383,11 +1399,17 @@ def align_epoch(
     return alignment
 
 
+def _count_before(events: StepEvents, t: float, start_count: int) -> int:
+    index = int(np.searchsorted(events.time, t, "left"))
+    return int(events.level[index - 1]) if index else start_count
+
+
 def epoch_steps(
     capture_events: dict[str, StepEvents],
     reference_events: dict[str, StepEvents],
     capture_epoch: Epoch,
     reference_epoch: Epoch,
+    start_counts: dict[str, int],
 ) -> EpochSteps:
     return EpochSteps(
         capture={
@@ -1398,6 +1420,14 @@ def epoch_steps(
             r: ev.between(reference_epoch.start_s, reference_epoch.end_s)
             for r, ev in reference_events.items()
         },
+        capture_start={
+            r: _count_before(ev, capture_epoch.start_s, start_counts[r])
+            for r, ev in capture_events.items()
+        },
+        reference_start={
+            r: _count_before(ev, reference_epoch.start_s, start_counts[r])
+            for r, ev in reference_events.items()
+        },
     )
 
 
@@ -1405,12 +1435,12 @@ PositionWindow = Callable[[float, float], "np.ndarray | None"]
 
 
 def _counts_after(
-    events: StepEvents, event_times: np.ndarray, at: np.ndarray
+    events: StepEvents, start: int, event_times: np.ndarray, at: np.ndarray
 ) -> np.ndarray:
+    if not len(events):
+        return np.full(at.size, start, np.int64)
     index = np.searchsorted(event_times, at, "right") - 1
-    return np.where(
-        index >= 0, events.level[np.maximum(index, 0)], events.start_count()
-    )
+    return np.where(index >= 0, events.level[np.maximum(index, 0)], start)
 
 
 def _stays_in_count_band(
@@ -1438,9 +1468,11 @@ def _steps_near_their_lines(
 
 def edge_ties(
     capture: StepEvents,
+    capture_start: int,
     capture_stream_s: np.ndarray,
     capture_unmatched: np.ndarray,
     reference: StepEvents,
+    reference_start: int,
     reference_unmatched: np.ndarray,
     positions: PositionWindow,
     trajectory_s: tuple[float, float] | None,
@@ -1452,14 +1484,18 @@ def edge_ties(
     times = np.concatenate(([-math.inf], event_times))
     capture_counts = np.concatenate(
         (
-            [capture.start_count()],
-            _counts_after(capture, capture_stream_s, event_times),
+            [capture_start],
+            _counts_after(
+                capture, capture_start, capture_stream_s, event_times
+            ),
         )
     )
     reference_counts = np.concatenate(
         (
-            [reference.start_count()],
-            _counts_after(reference, reference.time, event_times),
+            [reference_start],
+            _counts_after(
+                reference, reference_start, reference.time, event_times
+            ),
         )
     )
     disagreement = capture_counts - reference_counts
@@ -1566,38 +1602,49 @@ def measure_epoch(
     matches = {}
     for role, cap in steps.capture.items():
         ref = steps.reference[role]
-        if not len(cap) or not len(ref):
+        if not len(cap) and not len(ref):
             matches[role] = MatchedSteps(
-                np.empty(0), np.empty(0), np.empty(0), len(cap), len(ref), 0
+                np.empty(0), np.empty(0), np.empty(0), 0, 0, 0
             )
             continue
-        nearest, late = match_capture_to_reference(steps, role, alignment)
-        ref_capture_t = alignment.to_capture(ref.time)
-        reverse_nearest, reverse = nearest_same_key(
-            _step_keys(ref), ref_capture_t, _step_keys(cap), cap.time
-        )
-        capture_rivals = same_key_count(
-            _step_keys(cap), cap.time, _step_keys(ref), ref_capture_t
-        )
-        reference_rivals = same_key_count(
-            _step_keys(ref), ref_capture_t, _step_keys(cap), cap.time
-        )
-        matched = _is_pair(
-            late, capture_rivals, reference_rivals[np.maximum(nearest, 0)]
-        )
-        reference_unmatched = ~_is_pair(
-            reverse,
-            reference_rivals,
-            capture_rivals[np.maximum(reverse_nearest, 0)],
-        )
+        cap_stream_t = alignment.to_stream(cap.time)
+        if len(cap) and len(ref):
+            nearest, late = match_capture_to_reference(steps, role, alignment)
+            ref_capture_t = alignment.to_capture(ref.time)
+            reverse_nearest, reverse = nearest_same_key(
+                _step_keys(ref), ref_capture_t, _step_keys(cap), cap.time
+            )
+            capture_rivals = same_key_count(
+                _step_keys(cap), cap.time, _step_keys(ref), ref_capture_t
+            )
+            reference_rivals = same_key_count(
+                _step_keys(ref), ref_capture_t, _step_keys(cap), cap.time
+            )
+            matched = _is_pair(
+                late, capture_rivals, reference_rivals[np.maximum(nearest, 0)]
+            )
+            reference_unmatched = ~_is_pair(
+                reverse,
+                reference_rivals,
+                capture_rivals[np.maximum(reverse_nearest, 0)],
+            )
+            anchor_s = float(ref.time[0])
+        else:
+            nearest = np.zeros(len(cap), np.int64)
+            late = np.zeros(len(cap))
+            matched = np.zeros(len(cap), bool)
+            reference_unmatched = np.ones(len(ref), bool)
+            anchor_s = float(ref.time[0] if len(ref) else cap_stream_t[0])
         capture_tie, reference_tie, rest_ties = edge_ties(
             cap,
-            alignment.to_stream(cap.time),
+            steps.capture_start[role],
+            cap_stream_t,
             ~matched,
             ref,
+            steps.reference_start[role],
             reference_unmatched,
             lambda lo, hi, role=role: reference.positions(role, lo, hi),
-            reference.trajectory_span_s(float(ref.time[0])),
+            reference.trajectory_span_s(anchor_s),
         )
         matches[role] = MatchedSteps(
             late_s=late[matched],
@@ -1722,7 +1769,9 @@ def align_all(
         reference_epochs,
     )
     steps = [
-        epoch_steps(capture_events, reference.events, cap, ref)
+        epoch_steps(
+            capture_events, reference.events, cap, ref, reference.start_counts
+        )
         for cap, ref in pairs
     ]
     alignments: list[Alignment | None] = [None] * len(pairs)

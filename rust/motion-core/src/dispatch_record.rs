@@ -14,12 +14,16 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use trajectory::ContinuousSegment;
+use trajectory::continuous::{interior_time_above, interior_time_below};
 
 pub const DISPATCH_RECORD_DIR_ENV: &str = "SERVAL_DISPATCH_RECORD_DIR";
-pub const DISPATCH_RECORD_MAGIC: [u8; 8] = *b"SVDREC1\0";
+pub const DISPATCH_RECORD_MAGIC: [u8; 8] = *b"SVDREC2\0";
 pub const RECORDED_AXES: u32 = 4;
 /// The largest spacing between two samples inside a recorded segment.
 pub const SAMPLE_INTERVAL_S: f64 = 0.5e-3;
+/// Breakpoints closer than this are one corner: the sliver between them is
+/// below the device's step-time resolution.
+pub const MIN_BREAKPOINT_GAP_S: f64 = 1e-9;
 pub const HEADER_LEN: usize = 20;
 pub const SEGMENT_FRESH_EPOCH: u8 = 1 << 0;
 pub const SEGMENT_REST_AT_END: u8 = 1 << 1;
@@ -52,25 +56,61 @@ pub fn encode_header(out: &mut Vec<u8>) {
     out.extend_from_slice(&SAMPLE_INTERVAL_S.to_le_bytes());
 }
 
-/// Samples a segment over `[t_start, t_end]` takes: both ends, no two
-/// further apart than [`SAMPLE_INTERVAL_S`].
-pub fn sample_count(t_start: f64, t_end: f64) -> Result<u32, String> {
+/// One recorded sample: the instant `t` it stands for and the time `eval_t`
+/// the segment is read at — one ulp inside the breakpoint interval the
+/// sample belongs to, so a corner is read from both of its sides.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SampleInstant {
+    pub t: f64,
+    pub eval_t: f64,
+}
+
+/// The instants a segment is sampled at: every breakpoint of the segment,
+/// read once from each side, and no two samples inside one breakpoint
+/// interval further apart than [`SAMPLE_INTERVAL_S`]. Between two samples
+/// the segment is then one smooth piece, which interpolating its
+/// (position, velocity, acceleration) reproduces; across a corner it is not.
+pub fn sample_instants(seg: &ContinuousSegment) -> Result<Vec<SampleInstant>, String> {
+    let (t_start, t_end) = (seg.t_start, seg.t_end);
     if !(t_start.is_finite() && t_end.is_finite() && t_end >= t_start) {
         return Err(format!(
             "segment span [{t_start}, {t_end}] is not a finite forward interval"
         ));
     }
-    let intervals = checked_cast::f64_to_u32(((t_end - t_start) / SAMPLE_INTERVAL_S).ceil())
-        .map_err(|e| format!("segment span [{t_start}, {t_end}] needs {e} samples"))?;
-    intervals
-        .checked_add(1)
-        .map(|n| n.max(2))
-        .ok_or_else(|| format!("segment span [{t_start}, {t_end}] overflows the sample count"))
+    let mut corners = vec![t_start];
+    for breakpoint in seg.breakpoints() {
+        let last = corners[corners.len() - 1];
+        if breakpoint - last >= MIN_BREAKPOINT_GAP_S && t_end - breakpoint >= MIN_BREAKPOINT_GAP_S {
+            corners.push(breakpoint);
+        }
+    }
+    corners.push(t_end);
+    let mut instants = Vec::new();
+    for window in corners.windows(2) {
+        let (from, to) = (window[0], window[1]);
+        let intervals = checked_cast::f64_to_u32(((to - from) / SAMPLE_INTERVAL_S).ceil())
+            .map_err(|e| format!("segment span [{from}, {to}] needs {e} samples"))?
+            .max(1);
+        for k in 0..=intervals {
+            let (t, eval_t) = if k == 0 {
+                (from, interior_time_above(from))
+            } else if k == intervals {
+                (to, interior_time_below(to))
+            } else {
+                let t = from + (to - from) * f64::from(k) / f64::from(intervals);
+                (t, t)
+            };
+            instants.push(SampleInstant {
+                t,
+                eval_t: eval_t.clamp(t_start, t_end),
+            });
+        }
+    }
+    Ok(instants)
 }
 
 /// One SEGMENT record: the segment anchored on host origin `t0`, sampled
-/// per [`sample_count`] on its own carrier. On error `out` is left as it
-/// was.
+/// at its [`sample_instants`]. On error `out` is left as it was.
 pub fn encode_segment(
     out: &mut Vec<u8>,
     seg: &ContinuousSegment,
@@ -99,14 +139,21 @@ fn append_segment(
             seg.axes.len()
         ));
     }
-    let n = sample_count(seg.t_start, seg.t_end)?;
+    let instants = sample_instants(seg)?;
+    let n = u32::try_from(instants.len()).map_err(|_| {
+        format!(
+            "segment at line {} needs {} samples",
+            seg.source_line,
+            instants.len()
+        )
+    })?;
     let flags = if fresh_epoch { SEGMENT_FRESH_EPOCH } else { 0 }
         | if seg.rest_at_end {
             SEGMENT_REST_AT_END
         } else {
             0
         };
-    out.reserve(1 + 3 * 8 + 4 + 1 + 4 + n as usize * axes * 3 * 8);
+    out.reserve(1 + 3 * 8 + 4 + 1 + 4 + instants.len() * (1 + axes * 3) * 8);
     out.push(RecordKind::Segment as u8);
     out.extend_from_slice(&t0.to_le_bytes());
     out.extend_from_slice(&seg.t_start.to_le_bytes());
@@ -114,17 +161,14 @@ fn append_segment(
     out.extend_from_slice(&seg.source_line.to_le_bytes());
     out.push(flags);
     out.extend_from_slice(&n.to_le_bytes());
-    let last = n - 1;
-    let span = seg.t_end - seg.t_start;
-    for k in 0..n {
-        let t = if k == last {
-            seg.t_end
-        } else {
-            seg.t_start + span * f64::from(k) / f64::from(last)
-        };
+    for SampleInstant { t, eval_t } in instants {
+        out.extend_from_slice(&t.to_le_bytes());
         for axis in 0..axes {
-            let pva = seg.eval_axis(axis, t).map_err(|e| {
-                format!("segment at line {} axis {axis} t={t}: {e}", seg.source_line)
+            let pva = seg.eval_axis(axis, eval_t).map_err(|e| {
+                format!(
+                    "segment at line {} axis {axis} t={eval_t}: {e}",
+                    seg.source_line
+                )
             })?;
             out.extend_from_slice(&pva.position.to_le_bytes());
             out.extend_from_slice(&pva.velocity.to_le_bytes());

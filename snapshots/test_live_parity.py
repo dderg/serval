@@ -30,10 +30,7 @@ BENCH_CFG = REPO / "tools" / "bench" / "printer.cfg"
 
 @pytest.fixture(scope="module")
 def engine():
-    try:
-        return harness._import_engine()
-    except ImportError as exc:
-        pytest.skip(str(exc))
+    return harness._import_engine()
 
 
 def live_steps(gcode: str, cfg: Path) -> list[tuple]:
