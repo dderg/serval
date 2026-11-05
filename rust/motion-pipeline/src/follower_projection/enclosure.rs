@@ -20,7 +20,7 @@ use crate::shaper::axis_enclosure::{AxisWindows, FORMULA_EDGE_SLACK};
 use crate::shaper::taylor::{self, Ball, TaylorModel, Window};
 use crate::shaper::{Enclosure, ExactPiece};
 
-use super::ratio_ramp::{REACH_INSET_ULPS, ValleyWeight};
+use super::ratio_ramp::{PathReach, REACH_INSET_ULPS, ValleyWeight};
 use super::{AdvancedFollowerSignal, ChainStage, FollowerSignal, LaidRead, RatioSpan, SpanSide};
 
 /// What the table and its smoothing lay over a window's reach: `(e, r,
@@ -407,10 +407,15 @@ impl<'a> FollowerSignal<'a> {
         let held = (centre + spread - self.s_owned_end).max(0.0);
         s.widen(held);
         let reach = inside_read((reach.0, reach.1 + held));
+        let path_reach = PathReach {
+            lo: reach.0,
+            hi: reach.1,
+            exact: (reach.0 == read.0, reach.1 == read.1),
+        };
         let formulas = self.table_formulas(centre, reach);
         let laid = match self.laid_on_floats(&formulas, reach) {
             Some(laid) => laid,
-            None => self.laid_models(&s, &formulas, reach)?,
+            None => self.laid_models(&s, &formulas, path_reach)?,
         };
         let raw = match (&windows.raw, self.raw_delta) {
             (Some(raw), Some((_, at_start))) => {
@@ -450,7 +455,7 @@ impl<'a> FollowerSignal<'a> {
                     (true, None, None) => TaylorModel::constant(Ball::exact(0.0)),
                 };
                 let ValleyWeight::Model([weight, weight_slope, weight_curvature]) =
-                    self.state.smoothing.valley_weight_model(&s, reach)?
+                    self.state.smoothing.valley_weight_model(&s, path_reach)?
                 else {
                     let jerk = if with_jerk {
                         let mut jerk = ratio
@@ -538,7 +543,7 @@ impl<'a> FollowerSignal<'a> {
         &self,
         s: &TaylorModel,
         formulas: &[TableFormula],
-        reach: (f64, f64),
+        reach: PathReach,
     ) -> Option<LaidModels> {
         let correction = self.state.smoothing.correction_model(s, reach)?;
         let [base_e, base_ratio, base_slope] = formulas[0].laid(s);
@@ -552,7 +557,7 @@ impl<'a> FollowerSignal<'a> {
             curvature: correction.d3,
             departures: formulas[1..]
                 .iter()
-                .filter_map(|formula| formula.departure_from(&formulas[0], reach))
+                .filter_map(|formula| formula.departure_from(&formulas[0], reach.span()))
                 .collect(),
         })
     }

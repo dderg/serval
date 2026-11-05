@@ -33,16 +33,41 @@ const BINOMIALS: [[f64; 6]; 6] = [
 /// read.
 pub(in crate::follower_projection) const REACH_INSET_ULPS: f64 = 4.0;
 
-/// The points `reach` is read at for its formula: its ends moved
-/// [`REACH_INSET_ULPS`] inside, or its ends themselves where it is no
-/// wider than that: a reach that narrow holds only floats a bend may
-/// separate.
-fn read_points((lo, hi): (f64, f64)) -> (f64, f64) {
-    let inset = REACH_INSET_ULPS * f64::EPSILON * lo.abs().max(hi.abs()).max(1.0);
-    if hi - lo > 2.0 * inset {
-        (lo + inset, hi - inset)
-    } else {
-        (lo, hi)
+/// The path distances `[lo, hi]` a window's odometer reads, and which of
+/// its ends the odometer reads itself — the distance it starts from, or
+/// the one it holds at — rather than reaching only as its model's bound.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::follower_projection) struct PathReach {
+    pub(in crate::follower_projection) lo: f64,
+    pub(in crate::follower_projection) hi: f64,
+    pub(in crate::follower_projection) exact: (bool, bool),
+}
+
+impl PathReach {
+    /// The one distance `at`, read itself.
+    fn point(at: f64) -> Self {
+        Self {
+            lo: at,
+            hi: at,
+            exact: (true, true),
+        }
+    }
+
+    pub(in crate::follower_projection) fn span(self) -> (f64, f64) {
+        (self.lo, self.hi)
+    }
+
+    /// The points the reach is read at for its formula: a bound end moved
+    /// [`REACH_INSET_ULPS`] inside, an end the odometer reads itself kept,
+    /// or both ends themselves where the reach is no wider than two insets:
+    /// a reach that narrow holds only floats a bend may separate.
+    fn read_points(self) -> (f64, f64) {
+        let inset = REACH_INSET_ULPS * f64::EPSILON * self.lo.abs().max(self.hi.abs()).max(1.0);
+        if self.hi - self.lo <= 2.0 * inset {
+            return (self.lo, self.hi);
+        }
+        let inset_of = |exact: bool| if exact { 0.0 } else { inset };
+        (self.lo + inset_of(self.exact.0), self.hi - inset_of(self.exact.1))
     }
 }
 
@@ -317,15 +342,30 @@ const NARROW_FLOATS: usize = 64;
 /// `reach` split off from each of its end floats in turn: where the
 /// evaluator flips a formula on an end float itself, the float reads one
 /// and the rest of the reach the other.
-fn end_apart((lo, hi): (f64, f64)) -> [[(f64, f64); 2]; 2] {
+fn end_apart(reach: PathReach) -> [[PathReach; 2]; 2] {
+    let PathReach { lo, hi, exact } = reach;
     [
-        [(lo, lo), (trajectory::next_toward(lo, hi), hi)],
-        [(lo, trajectory::next_toward(hi, lo)), (hi, hi)],
+        [
+            PathReach::point(lo),
+            PathReach {
+                lo: trajectory::next_toward(lo, hi),
+                hi,
+                exact: (false, exact.1),
+            },
+        ],
+        [
+            PathReach {
+                lo,
+                hi: trajectory::next_toward(hi, lo),
+                exact: (exact.0, false),
+            },
+            PathReach::point(hi),
+        ],
     ]
 }
 
 /// Every float of `reach` where it is no wider than its read points inset
-/// ([`read_points`]) and holds at most [`NARROW_FLOATS`] of them: a reach
+/// ([`PathReach::read_points`]) and holds at most [`NARROW_FLOATS`] of them: a reach
 /// that narrow that reads more than one formula reads each at some of its
 /// floats, and the evaluator reads no other.
 pub(in crate::follower_projection) fn narrow_floats((lo, hi): (f64, f64)) -> Option<Vec<f64>> {
@@ -371,12 +411,12 @@ type WidthInterval = Result<usize, (usize, usize)>;
 impl WidthField {
     /// The node interval every point of `reach` reads; `None` where its
     /// ends read different ones or lie past the nodes.
-    fn width_interval(&self, reach: (f64, f64)) -> Option<WidthInterval> {
+    fn width_interval(&self, reach: PathReach) -> Option<WidthInterval> {
         let (first, last) = (self.nodes.first()?.s, self.nodes.last()?.s);
-        if reach.0 < first - SPAN_LOOKUP_SLACK_MM || reach.1 > last + SPAN_LOOKUP_SLACK_MM {
+        if reach.lo < first - SPAN_LOOKUP_SLACK_MM || reach.hi > last + SPAN_LOOKUP_SLACK_MM {
             return None;
         }
-        let reach = read_points(reach);
+        let reach = reach.read_points();
         let interval = self.formula_at(reach.0);
         (self.formula_at(reach.1) == interval).then_some(interval)
     }
@@ -535,7 +575,7 @@ impl RatioSmoothing {
     pub(in crate::follower_projection) fn correction_model(
         &self,
         s: &TaylorModel,
-        reach: (f64, f64),
+        reach: PathReach,
     ) -> Option<ModelJet> {
         if let Some(formula) = self.correction_formula(reach) {
             return self.correction_by(formula, s);
@@ -563,10 +603,10 @@ impl RatioSmoothing {
 
     /// Every formula a reach too narrow to place its bends in reads, one per
     /// float.
-    fn narrow_formulas(&self, reach: (f64, f64)) -> Option<Vec<CorrectionFormula>> {
+    fn narrow_formulas(&self, reach: PathReach) -> Option<Vec<CorrectionFormula>> {
         let mut formulas: Vec<CorrectionFormula> = Vec::new();
-        for at in narrow_floats(reach)? {
-            let formula = self.correction_formula((at, at))?;
+        for at in narrow_floats(reach.span())? {
+            let formula = self.correction_formula(PathReach::point(at))?;
             if !formulas.contains(&formula) {
                 formulas.push(formula);
             }
@@ -624,11 +664,11 @@ impl RatioSmoothing {
 
     /// The formula of the correction every point of `reach` reads; `None`
     /// where its ends read different ones.
-    fn correction_formula(&self, reach: (f64, f64)) -> Option<CorrectionFormula> {
+    fn correction_formula(&self, reach: PathReach) -> Option<CorrectionFormula> {
         if self.is_inert() {
             return Some(CorrectionFormula::Zero);
         }
-        let read = read_points(reach);
+        let read = reach.read_points();
         let widths = (self.width.jet(read.0).value, self.width.jet(read.1).value);
         if widths.0 <= 0.0 && widths.1 <= 0.0 {
             return Some(CorrectionFormula::Zero);
@@ -643,11 +683,11 @@ impl RatioSmoothing {
     /// it, at one end: the rest reads none, the rest of the reach one
     /// smoothed formula, and the window reads no seams there, or it would
     /// divide by the vanishing width; `None` for any other reach.
-    fn formulas_across_rest(&self, reach: (f64, f64)) -> Option<Vec<CorrectionFormula>> {
+    fn formulas_across_rest(&self, reach: PathReach) -> Option<Vec<CorrectionFormula>> {
         if self.is_inert() {
             return None;
         }
-        let read = read_points(reach);
+        let read = reach.read_points();
         let widths = (self.width.jet(read.0).value, self.width.jet(read.1).value);
         if (widths.0 <= 0.0) == (widths.1 <= 0.0) {
             return None;
@@ -818,7 +858,7 @@ impl RatioSmoothing {
     pub(in crate::follower_projection) fn valley_weight_model(
         &self,
         s: &TaylorModel,
-        reach: (f64, f64),
+        reach: PathReach,
     ) -> Option<ValleyWeight> {
         if let Some(weight) = self.valley_weight_on(s, reach) {
             return Some(weight);
@@ -829,9 +869,9 @@ impl RatioSmoothing {
                 .all(|&part| self.valley_weight_on(s, part).is_some())
         }) {
             Some(parts) => parts.to_vec(),
-            None => narrow_floats(reach)?
+            None => narrow_floats(reach.span())?
                 .into_iter()
-                .map(|at| (at, at))
+                .map(PathReach::point)
                 .collect(),
         };
         let mut base: Option<[TaylorModel; 3]> = None;
@@ -852,9 +892,9 @@ impl RatioSmoothing {
 
     /// [`Self::valley_weight_model`] where every point of `reach` lies on
     /// one side of every valley; `None` where it does not.
-    fn valley_weight_on(&self, s: &TaylorModel, reach: (f64, f64)) -> Option<ValleyWeight> {
+    fn valley_weight_on(&self, s: &TaylorModel, reach: PathReach) -> Option<ValleyWeight> {
         let mut total: Option<[TaylorModel; 3]> = None;
-        let reach = read_points(reach);
+        let reach = reach.read_points();
         for valley in self.valleys_over(reach.0, reach.1) {
             let side = valley.side(reach.0);
             if valley.side(reach.1) != side {

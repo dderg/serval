@@ -913,3 +913,89 @@ fn a_travel_into_an_extrusion_at_speed_projects_an_advance_without_a_position_st
     let plain = project_all_at_once(&track, &chains(follower_chain(None, None)));
     assert_advance_vanishes_at_rests(&track, (&advanced, &plain), (0.0, 0.0)).unwrap();
 }
+
+/// Found by `an_advanced_follower_streams_like_it_projects_all_at_once`: the
+/// track ends braking to rest on a 0.3 mm extrusion whose advance valley
+/// ends a few ulps short of the distance the odometer holds at. A window
+/// at the end read its valley weight only at its reach's read points, both
+/// held `REACH_INSET_ULPS` inside as though the held end were a model's
+/// bound, so the enclosure modelled the valley's floor while the evaluator
+/// read the weight rising past its edge.
+#[test]
+fn a_valley_ending_at_the_held_distance_is_read_where_the_odometer_holds() {
+    let stroke = |reverse, length, pace, end_speed, shaped_speed_scale, ratio| Step::Stroke {
+        reverse,
+        length,
+        pace,
+        end_speed,
+        shaped_speed_scale,
+        ratio,
+    };
+    let steps = [
+        stroke(false, 14.006260582811029, 17.976123724121013, 0.0, 0.5, 0.0),
+        stroke(
+            true,
+            11.589545153384146,
+            198.5669823063583,
+            282.0078021629391,
+            0.5,
+            0.0,
+        ),
+        stroke(false, 6.39115674128842, 151.21810994284485, 0.0, 0.5, 0.0),
+        Step::Hold {
+            duration: 0.1588836059157494,
+        },
+        stroke(false, 7.461898630061303, 70.73586902220231, 0.0, 0.5, 0.0),
+        Step::Hold { duration: 0.001 },
+        stroke(false, 8.230183401156815, 1.0, 233.34449227524152, 0.5, 0.0),
+        stroke(false, 14.037768973590564, 14.421470002337493, 0.0, 0.5, 0.0),
+        stroke(
+            true,
+            17.93862444348957,
+            177.98004765687443,
+            266.9742134996778,
+            1.4947442970163234,
+            0.0,
+        ),
+        stroke(
+            false,
+            0.29924418940333664,
+            190.73881143711841,
+            0.0,
+            0.5,
+            0.01,
+        ),
+    ];
+    let track = build_profiled_track(1.6478748667490133, &steps, Profile::Quintic);
+    project_all_at_once(&track, &chains(follower_chain(Some(0.005), None)));
+}
+
+/// Found with the reach ends above: a 1 mm extrusion braking to rest at
+/// the owned end, whose valley starts on that end. The window's reach is
+/// five ulps wide, its far end held there and its near end a model bound
+/// two ulps short of where the odometer reads. A reach that narrow is read
+/// at both its ends, or insetting the bound end alone lands it past the
+/// valley's start and models the floor the evaluator has not yet reached.
+#[test]
+fn a_narrow_reach_ending_at_the_held_distance_is_read_at_both_ends() {
+    let stroke = |reverse, length, pace, end_speed, shaped_speed_scale, ratio| Step::Stroke {
+        reverse,
+        length,
+        pace,
+        end_speed,
+        shaped_speed_scale,
+        ratio,
+    };
+    let steps = [
+        stroke(false, 14.746572659837897, 1.0, 245.68730956002668, 0.5, 0.0),
+        stroke(false, 19.75052821019146, 176.84472443377894, 0.0, 0.5, 0.0),
+        stroke(false, 2.313147509973915, 104.13276346556947, 8.605632143614917, 1.031896588354458, 0.0),
+        stroke(false, 0.9888171877570381, 132.48399565213282, 0.0, 0.5, 0.09828959521922047),
+        stroke(false, 0.05, 1.0, 0.0, 0.5, 0.0),
+    ];
+    let track = build_profiled_track(2.7478488454874617, &steps, Profile::Quintic);
+    project_all_at_once(
+        &track,
+        &chains(follower_chain(Some(0.0607965931472197), None)),
+    );
+}

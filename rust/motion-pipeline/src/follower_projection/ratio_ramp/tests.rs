@@ -7,8 +7,8 @@ use trajectory::{ContinuousAxis, ContinuousSegment};
 use super::super::{FollowerState, SpanSide};
 use super::{
     AdvanceValley, CLUSTER_REACH_S, CROSSING_PROBES, Crossing, ENVELOPE_SLOPE, KERNEL_PEAK,
-    NODE_SPACING_PER_WIDTH, NODE_SPACING_S, RampLeg, RestSide, ShapedLeaders, Spill, TimedSeam,
-    WIDTH_SLOPE_BOUND, WidthField, slowest_crawl,
+    NODE_SPACING_PER_WIDTH, NODE_SPACING_S, PathReach, RampLeg, RestSide, ShapedLeaders, Spill,
+    TimedSeam, WIDTH_SLOPE_BOUND, WidthField, slowest_crawl,
 };
 
 /// `(length, ratio at start, ratio at end)` per span.
@@ -917,10 +917,11 @@ fn the_smoothing_models_hold_its_correction_and_valley_weight_between_bends() {
                     );
                     let (centre, radius) = (0.5 * (lo + hi), 0.5 * (hi - lo));
                     let s = TaylorModel::affine(Ball::exact(centre), radius);
-                    let reach = (
-                        trajectory::next_toward(lo, f64::INFINITY),
-                        trajectory::next_toward(hi, f64::NEG_INFINITY),
-                    );
+                    let reach = PathReach {
+                        lo: trajectory::next_toward(lo, f64::INFINITY),
+                        hi: trajectory::next_toward(hi, f64::NEG_INFINITY),
+                        exact: (false, false),
+                    };
                     let correction = state
                         .smoothing
                         .correction_model(&s, reach)
