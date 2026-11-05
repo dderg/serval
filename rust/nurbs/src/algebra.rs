@@ -61,16 +61,60 @@ impl PiecewisePolynomialKernel {
     /// [`MOMENT_GRID_STEPS`] steps per piece.
     #[must_use]
     pub fn absolute_moments(&self) -> (f64, f64) {
-        self.pieces
-            .iter()
-            .fold((0.0, 0.0), |(mass, moment), piece| {
-                let h = (piece.u_end - piece.u_start) / MOMENT_GRID_STEPS as f64;
-                (0..MOMENT_GRID_STEPS).fold((mass, moment), |(mass, moment), step| {
-                    let u = piece.u_start + (step as f64 + 0.5) * h;
-                    let weight = piece.evaluate(u).abs() * h;
-                    (mass + weight, moment + u.abs() * weight)
-                })
+        self.absolute_steps()
+            .fold((0.0, 0.0), |(mass, moment), step| {
+                (mass + step.weight(), moment + step.u.abs() * step.weight())
             })
+    }
+
+    /// At each radius `x`, `(∫_{|u|≤x} |w|, ∫|w(u)|·(x − |u|)⁺ du)`: the
+    /// mass of `|w|` within `x` of the origin and its integral over the
+    /// radius, by the midpoint rule of [`Self::absolute_moments`].
+    #[must_use]
+    pub fn absolute_mass_within(&self, radii: &[f64]) -> Vec<(f64, f64)> {
+        radii
+            .iter()
+            .map(|&radius| {
+                self.absolute_steps()
+                    .filter(|step| step.u.abs() <= radius)
+                    .fold((0.0, 0.0), |(mass, integral), step| {
+                        (
+                            mass + step.weight(),
+                            integral + (radius - step.u.abs()) * step.weight(),
+                        )
+                    })
+            })
+            .collect()
+    }
+
+    /// The least `|w|` within `radius` of the origin: over the midpoint
+    /// rule's steps there, the origin and both ends.
+    #[must_use]
+    pub fn least_absolute_within(&self, radius: f64) -> f64 {
+        let beside = |u: f64| {
+            self.value_beside(u, true)
+                .abs()
+                .min(self.value_beside(u, false).abs())
+        };
+        self.absolute_steps()
+            .filter(|step| step.u.abs() <= radius)
+            .map(|step| step.absolute)
+            .chain([-radius, 0.0, radius].map(beside))
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    fn absolute_steps(&self) -> impl Iterator<Item = AbsoluteStep> + '_ {
+        self.pieces.iter().flat_map(|piece| {
+            let width = (piece.u_end - piece.u_start) / MOMENT_GRID_STEPS as f64;
+            (0..MOMENT_GRID_STEPS).map(move |step| {
+                let u = piece.u_start + (step as f64 + 0.5) * width;
+                AbsoluteStep {
+                    u,
+                    absolute: piece.evaluate(u).abs(),
+                    width,
+                }
+            })
+        })
     }
 
     pub fn from_pieces(pieces: Vec<crate::bezier::BezierPiece>) -> Result<Self, AlgebraError> {
@@ -160,6 +204,20 @@ impl PiecewisePolynomialKernel {
                 }
             })
             .map_or(0.0, |p| p.evaluate(u))
+    }
+}
+
+/// One step of the midpoint rule over a kernel: its midpoint, `|w|` there
+/// and its width.
+struct AbsoluteStep {
+    u: f64,
+    absolute: f64,
+    width: f64,
+}
+
+impl AbsoluteStep {
+    fn weight(&self) -> f64 {
+        self.absolute * self.width
     }
 }
 
