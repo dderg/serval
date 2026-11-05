@@ -386,10 +386,14 @@ command_reset_step_clock(uint32_t *args)
 }
 DECL_COMMAND(command_reset_step_clock, "reset_step_clock oid=%c clock=%u");
 
-// The host stamps its projected mcu clock into this probe; the receipt
-// delta is the one-way host->mcu wire+demux latency plus projection error,
-// the direction the barrier-ack clock echo cannot see. The reset-surviving
-// worst latch feeds the crash replay; big deltas also emit live.
+// The host stamps its projected mcu clock into this probe as it hands it to
+// the transport, ahead of the motion it sends; the receipt delta is the
+// one-way host->mcu wire, the mcu's dispatch and the projection error, the
+// direction the barrier-ack clock echo cannot see. The reset-surviving worst
+// latch feeds the crash replay; a delta past what healthy runs reach also
+// emits live.
+#define WIRE_PROBE_LATE_US 10000
+
 void
 command_kalico_wire_probe(uint32_t *args)
 {
@@ -397,7 +401,7 @@ command_kalico_wire_probe(uint32_t *args)
     int32_t delta = (int32_t)(timer_read_time() - claimed);
     extern void diag_note_wire_probe(int32_t delta);
     diag_note_wire_probe(delta);
-    if (delta > (int32_t)timer_from_us(5000))
+    if (delta > (int32_t)timer_from_us(WIRE_PROBE_LATE_US))
         event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_MOTION,
                        EVENT_LOG_EVENT_MOTION_WIRE_PROBE_LATE, 0,
                        (uint32_t)delta, claimed);
