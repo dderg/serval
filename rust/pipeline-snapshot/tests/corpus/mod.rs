@@ -15,6 +15,7 @@ use planner_config::from_doc::{planner_config_from_text, read_motion_settings};
 
 pub mod extruder;
 pub mod known_extruder_excesses;
+pub mod path_accuracy;
 
 pub const SIM_GCODES: [&str; 4] = [
     "voron_first_layers",
@@ -200,6 +201,37 @@ pub fn corpus() -> Vec<Case> {
             name,
             gcode,
             config,
+        })
+        .collect()
+}
+
+const CORNER_FLOW_CASES: &str = "tools/sim/gcode/corner_flow_cases.gcode";
+const CORNER_FLOW_CASE_MARKER: &str = "; corner_flow case: ";
+
+/// `tools/corner_flow.py`'s synthetic corners, zigzag, flow change, travel
+/// steps and retract at each of its speeds, each planned on its own from
+/// rest as it measures them.
+pub fn corner_flow_cases(configs: &[&str]) -> Vec<(String, String, PathBuf)> {
+    let all = std::fs::read_to_string(repo().join(CORNER_FLOW_CASES))
+        .unwrap_or_else(|e| panic!("read {CORNER_FLOW_CASES}: {e}"));
+    let cases: Vec<(&str, &str)> = all
+        .split(CORNER_FLOW_CASE_MARKER)
+        .filter(|case| !case.is_empty())
+        .map(|case| {
+            case.split_once('\n')
+                .unwrap_or_else(|| panic!("a corner_flow case without G-code: {case:?}"))
+        })
+        .collect();
+    configs
+        .iter()
+        .flat_map(|config| {
+            cases.iter().map(move |(name, gcode)| {
+                (
+                    format!("corner_flow {name}/{config}"),
+                    (*gcode).to_string(),
+                    repo().join(config),
+                )
+            })
         })
         .collect()
 }

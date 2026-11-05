@@ -54,6 +54,18 @@ fn every_corpus_case_plans() {
                         failures.push(format!("{}: {excess}", case.name));
                     }
                 }
+                if let Some(accuracy) =
+                    corpus::path_accuracy::audit(&snapshot, &case.gcode, &case.config)
+                {
+                    println!("{:<70} {}", "", accuracy.summary());
+                    if let Some(first) = accuracy.lost.first() {
+                        failures.push(format!(
+                            "{}: the shaped path never nears {} vertices, first {first:?}",
+                            case.name,
+                            accuracy.lost.len()
+                        ));
+                    }
+                }
             }
             Ok(snapshot) => failures.push(format!(
                 "{}: traversal time {}",

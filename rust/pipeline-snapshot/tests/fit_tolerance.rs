@@ -197,37 +197,6 @@ fn every_fit_piece_of_the_dense_print_holds_the_fit_tolerance_on_the_bowden_corn
     ]));
 }
 
-const CORNER_FLOW_CASES: &str = "tools/sim/gcode/corner_flow_cases.gcode";
-const CORNER_FLOW_CASE_MARKER: &str = "; corner_flow case: ";
-
-/// `tools/corner_flow.py`'s synthetic corners, zigzag, flow change, travel
-/// steps and retract at each of its speeds, each planned on its own from
-/// rest as it measures them.
-fn corner_flow_cases(configs: &[&str]) -> Vec<(String, String, PathBuf)> {
-    let all = std::fs::read_to_string(corpus::repo().join(CORNER_FLOW_CASES))
-        .unwrap_or_else(|e| panic!("read {CORNER_FLOW_CASES}: {e}"));
-    let cases: Vec<(&str, &str)> = all
-        .split(CORNER_FLOW_CASE_MARKER)
-        .filter(|case| !case.is_empty())
-        .map(|case| {
-            case.split_once('\n')
-                .unwrap_or_else(|| panic!("a corner_flow case without G-code: {case:?}"))
-        })
-        .collect();
-    configs
-        .iter()
-        .flat_map(|config| {
-            cases.iter().map(move |(name, gcode)| {
-                (
-                    format!("corner_flow {name}/{config}"),
-                    (*gcode).to_string(),
-                    corpus::repo().join(config),
-                )
-            })
-        })
-        .collect()
-}
-
 /// The corner_flow cases on the bench configs and the 70 000 mm/s² Trident
 /// ramp chain, whose extrude-to-travel steps at 150 and 300 mm/s ramp the
 /// extruder right up to its 20 000 mm/s² limit.
@@ -235,5 +204,5 @@ fn corner_flow_cases(configs: &[&str]) -> Vec<(String, String, PathBuf)> {
 fn every_fit_piece_of_the_corner_flow_cases_holds_the_fit_tolerance_on_the_bench_configs() {
     let mut configs = corpus::SIM_CONFIGS.to_vec();
     configs.push("tools/bench/configs/trident_ramp.cfg");
-    assert_every_accepted_fit_piece_holds(corner_flow_cases(&configs));
+    assert_every_accepted_fit_piece_holds(corpus::corner_flow_cases(&configs));
 }
