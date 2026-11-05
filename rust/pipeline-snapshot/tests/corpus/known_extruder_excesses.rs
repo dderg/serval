@@ -169,19 +169,6 @@ pub const KNOWN: &[KnownExcesses] = &[
         count: 9,
         worst: 5495.1,
     },
-    // TODO(floor-guard): the print-start prime steps e velocity.
-    KnownExcesses {
-        case: "voron_dense_top_layers/rust/motion-core/tests/configs/neptune_sim_print.cfg",
-        class: ExcessClass::VelocityStep,
-        count: 1,
-        worst: 0.9949,
-    },
-    KnownExcesses {
-        case: "voron_dense_top_layers_zhop/rust/motion-core/tests/configs/neptune_sim_print.cfg",
-        class: ExcessClass::VelocityStep,
-        count: 1,
-        worst: 0.9949,
-    },
     // TODO(bound-ext, floor-slivers): the ladder chases an unshaped onset's singular advance.
     KnownExcesses {
         case: "voron_dense_top_layers/rust/motion-core/tests/configs/neptune_sim_print.cfg",
