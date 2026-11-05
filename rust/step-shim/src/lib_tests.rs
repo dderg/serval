@@ -1537,3 +1537,43 @@ fn an_extend_and_retract_opened_on_their_epoch_cut_clocks_step_the_same_count() 
         EPOCH_FREQS * EPOCH_FREQS
     );
 }
+
+#[test]
+fn a_cut_the_mcu_never_received_keeps_stepping_on_the_lattice_it_queued() {
+    let mut shim = seeded(cfg(), 8);
+    let before = span(1_000, LATTICE_OFFSET, 0.1, 1_000);
+    shim.push_spans(0, &[before]).unwrap();
+    let mut frames = shim.drain(u64::MAX).unwrap();
+    let cut_at = 2_040;
+    frames.extend(shim.cut_keeping_step_clock(0, cut_at).unwrap());
+    let after = span(cut_at, 0.1 + LATTICE_OFFSET, 0.1, 1_000);
+    shim.push_spans(0, &[after]).unwrap();
+    let resumed = shim.drain(u64::MAX).unwrap();
+
+    assert!(
+        reset_clocks(&resumed).is_empty(),
+        "the mcu still holds the queued steps, so a reset_step_clock would wait \
+         for them to play out: {resumed:?}"
+    );
+    frames.extend(resumed);
+    let expected: Vec<u64> = (1..=10)
+        .map(|k| 1_000 + 100 * k - 25)
+        .chain((1..=10).map(|k| cut_at + 100 * k - 25))
+        .collect();
+    assert_eq!(replayed_step_clocks(&frames), expected);
+    assert_eq!(shim.commanded_steps(0), 20);
+}
+
+#[test]
+fn a_cut_keeps_a_high_precision_carry_the_mcu_still_holds() {
+    let mut shim = seeded(hp_cfg(), 8);
+    shim.push_spans(0, &[span(1_000, LATTICE_OFFSET, 0.1, 1_000)])
+        .unwrap();
+    shim.drain(u64::MAX).unwrap();
+    shim.cut_keeping_step_clock(0, 2_040).unwrap();
+    shim.push_spans(0, &[span(2_040, 0.1 + LATTICE_OFFSET, 0.1, 1_000)])
+        .unwrap();
+    let resumed = shim.drain(u64::MAX).unwrap();
+    assert!(reset_clocks(&resumed).is_empty(), "{resumed:?}");
+    assert_eq!(shim.commanded_steps(0), 20);
+}

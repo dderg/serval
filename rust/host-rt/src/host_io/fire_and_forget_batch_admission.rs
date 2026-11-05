@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::host_io::fire_and_forget_depth::FIRE_AND_FORGET_HIGH_WATER;
 use crate::host_io::parser::ArgValue;
-use crate::host_io::test_harness::{FakeSerialPort, ReactorHarness};
+use crate::host_io::test_harness::ReactorHarness;
 use crate::host_io::window::MAX_PENDING_BLOCKS;
 use crate::host_io::wire::{
     MESSAGE_HEADER_SIZE, MESSAGE_TRAILER_SIZE, extract_packet, pack_blocks,
@@ -80,20 +80,23 @@ fn drain_until_quiet(h: &mut ReactorHarness) {
 #[test]
 fn a_batch_accepted_past_the_high_water_mark_keeps_every_block_in_order() {
     let mut h = ReactorHarness::new();
-    let submissions = fill_window(&mut h);
-    let filler = fill_to_high_water(&mut h);
-
     let burst = burst_payloads();
     let blocks = pack_blocks(&burst).expect("the burst packs");
     assert!(
         blocks.len() > 1,
         "the burst must span several blocks for this to say anything about ordering"
     );
+    h.reactor
+        .outbound
+        .fire_and_forget_depth
+        .reserve(blocks.len())
+        .expect("admitted before the backlog reached its high water mark");
+    let submissions = fill_window(&mut h);
+    let filler = fill_to_high_water(&mut h);
 
     h.submission_tx
         .send(ReactorCommand::FireAndForgetBatch {
-            payloads: burst.clone(),
-            reserved_blocks: 0,
+            blocks: blocks.clone(),
             enqueued_at: std::time::Instant::now(),
         })
         .expect("the reactor is listening");
@@ -146,10 +149,9 @@ fn the_published_depth_reopens_once_the_backlog_drains() {
 
 #[test]
 fn a_batch_is_refused_whole_while_the_reactor_is_at_its_high_water_mark() {
-    let (port, _handles) = FakeSerialPort::new();
-    let io = McuHostIo::from_port_skip_identify(port, "test");
-    let frames: Vec<(&str, Vec<(String, ArgValue)>)> =
-        vec![("queue_step", vec![("oid".to_string(), ArgValue::Int(7))])];
+    let (tx, rx) = std::sync::mpsc::channel();
+    let io = McuHostIo::from_submission_tx_for_test(tx, None, queue_step_parser());
+    let frames = vec![queue_step(100)];
 
     io.fire_and_forget_depth()
         .publish(FIRE_AND_FORGET_HIGH_WATER);
@@ -158,14 +160,12 @@ fn a_batch_is_refused_whole_while_the_reactor_is_at_its_high_water_mark() {
         matches!(refused, TransportError::Backpressure),
         "a bulk sender must be told to retry the whole burst, got {refused:?}"
     );
+    assert!(rx.try_recv().is_err(), "a refused burst queues nothing");
 
     io.fire_and_forget_depth()
         .publish(FIRE_AND_FORGET_HIGH_WATER - 1);
-    let admitted = io.send_args_batch(&frames);
-    assert!(
-        !matches!(admitted, Err(TransportError::Backpressure)),
-        "below the high water mark the gate must let the burst through, got {admitted:?}"
-    );
+    io.send_args_batch(&frames)
+        .expect("below the high water mark the gate lets the burst through");
 }
 
 #[test]
@@ -241,4 +241,75 @@ fn shutdown_zeroes_the_depth_and_refuses_later_bursts() {
         .reserve(1)
         .expect_err("a closed reactor admits nothing");
     assert!(matches!(refused, TransportError::Closed), "{refused:?}");
+}
+
+fn queue_step_parser() -> std::sync::Arc<crate::host_io::parser::MsgProtoParser> {
+    let mut commands = indexmap::IndexMap::new();
+    commands.insert(
+        "queue_step oid=%c interval=%u count=%hu add=%hi".to_string(),
+        20,
+    );
+    commands.insert("kalico_wire_probe clock=%u".to_string(), 21);
+    let dictionary = crate::host_io::parser::DataDictionary {
+        commands,
+        responses: indexmap::IndexMap::new(),
+        output: indexmap::IndexMap::new(),
+        enumerations: indexmap::IndexMap::new(),
+        config: serde_json::json!({}),
+        version: "v".into(),
+        app: "kalico".into(),
+        build_versions: None,
+        license: None,
+    };
+    std::sync::Arc::new(
+        crate::host_io::parser::MsgProtoParser::from_dictionary(dictionary)
+            .expect("a two-command dictionary"),
+    )
+}
+
+fn queue_step(interval: i64) -> (&'static str, Vec<(String, ArgValue)>) {
+    (
+        "queue_step",
+        vec![
+            ("oid".to_string(), ArgValue::Int(6)),
+            ("interval".to_string(), ArgValue::Int(interval)),
+            ("count".to_string(), ArgValue::Int(4)),
+            ("add".to_string(), ArgValue::Int(0)),
+        ],
+    )
+}
+
+/// The bench's short-rest resume handed the transport 299 step commands at
+/// once. They pack into a fraction as many blocks; claiming one block per
+/// command shut the gate on the wire probe and the next pass's burst until
+/// the reactor got the cpu back.
+#[test]
+fn a_burst_claims_the_blocks_it_packs_into_not_one_per_command() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let io = McuHostIo::from_submission_tx_for_test(tx, None, queue_step_parser());
+    let burst: Vec<_> = (0..299).map(|i| queue_step(200_000 + i)).collect();
+    let headroom = 80;
+    io.fire_and_forget_depth()
+        .publish(FIRE_AND_FORGET_HIGH_WATER - headroom);
+
+    io.send_args_batch(&burst)
+        .expect("the burst fits the headroom");
+    let Ok(ReactorCommand::FireAndForgetBatch { blocks, .. }) = rx.try_recv() else {
+        panic!("the burst reached the reactor's channel");
+    };
+    assert!(
+        blocks.len() < headroom,
+        "{} blocks for {} commands",
+        blocks.len(),
+        burst.len()
+    );
+    assert_eq!(
+        io.fire_and_forget_depth().queued_blocks(),
+        FIRE_AND_FORGET_HIGH_WATER - headroom + blocks.len()
+    );
+    io.send_args_batch(&[(
+        "kalico_wire_probe",
+        vec![("clock".to_string(), ArgValue::Int(7))],
+    )])
+    .expect("the probe still fits behind the burst");
 }
