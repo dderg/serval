@@ -332,13 +332,24 @@ fn ac_fres1_near_straight_clothoid_offset_keeps_full_precision() {
         ),
         (1e-12, 1e-24, 100.0, (100.0, 5.000000000166666e-9)),
         (1e-12, 1e-30, 100.0, (100.0, 5e-9)),
-        (-3e-9, 2e-14, 50.0, (49.999999999999815, -3.749583333333326e-6)),
-        (2e-5, 1e-15, 50.0, (49.999991666667064, 0.024999997937500067)),
+        (
+            -3e-9,
+            2e-14,
+            50.0,
+            (49.999999999999815, -3.749583333333326e-6),
+        ),
+        (
+            2e-5,
+            1e-15,
+            50.0,
+            (49.999991666667064, 0.024999997937500067),
+        ),
     ];
     for (kappa_0, sigma, s, (rx, ry)) in cases {
         let (cx, cy) = clothoid_offset(kappa_0, sigma, s);
         assert!(
-            (cx - rx).abs() <= 4.0 * f64::EPSILON * rx && (cy - ry).abs() <= 8.0 * f64::EPSILON * ry.abs(),
+            (cx - rx).abs() <= 4.0 * f64::EPSILON * rx
+                && (cy - ry).abs() <= 8.0 * f64::EPSILON * ry.abs(),
             "offset mismatch k0={kappa_0} sigma={sigma} s={s}: ({cx:e},{cy:e}) vs ({rx:e},{ry:e})"
         );
     }
