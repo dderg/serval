@@ -1,0 +1,3 @@
+# JSON-aware merge of concurrent throughput-gate accepts (scripts/merge_throughput_baseline.py;
+# registered in the shared git config by scripts/install-git-guards.sh)
+tools/bench/throughput_baseline.json merge=throughput-baseline

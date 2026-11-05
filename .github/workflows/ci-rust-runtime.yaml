@@ -389,11 +389,23 @@ jobs:
   # print single-threaded, against tools/bench/throughput_baseline.json, and
   # the Pi 5 2-core worst window they predict against the 2x floor. A PR
   # that moves the baselines states why in a ```throughput-accept block.
-  throughput-gate:
+  # One job per config: the live replay is 5 sequential reps per config pinned to
+  # two cores (~170 s each of ~500 s in one job), so the gate was the workflow's
+  # critical path at 704 s median. Each shard still builds and replays the
+  # calibration commit itself, so the live normalisation holds per job.
+  throughput-shard:
     needs: changes
     if: needs.changes.outputs.throughput == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg
+          - tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg
+          - tools/bench/configs/trident_kernel.cfg
+    name: throughput-gate shard (${{ matrix.config }})
     steps:
       - uses: actions/checkout@v4
         with:
@@ -410,9 +422,21 @@ jobs:
           workspaces: rust
           key: throughput-gate
       - name: Replay instruction counts against the committed baselines
-        run: ./scripts/ci.sh throughput-gate
+        run: ./scripts/ci.sh throughput-gate --configs ${{ matrix.config }}
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
+
+  # The required check keeps its old name: it passes exactly when every shard
+  # passed, so branch protection and PRs still running the old workflow are
+  # unaffected by the sharding.
+  throughput-gate:
+    needs: [changes, throughput-shard]
+    if: always() && needs.changes.outputs.throughput == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every throughput shard passed
+        run: test "${{ needs.throughput-shard.result }}" = success
 
   rust-ethercat-hw:
     needs: changes
