@@ -1,5 +1,7 @@
-//! The planner corpus: every snapshot case plus the four real sim prints on
-//! both bench configs (51 + 4 x 2 = 59 cases). Shared by the corpus test, the
+//! The planner corpus: every snapshot case plus the six real sim prints on
+//! both bench configs (51 + 6 x 2 = 63 cases). The `_zhop` prints are their
+//! sources with a 0.4 mm z-hop around every retract
+//! (`tools/sim/gcode/gen_zhop.py`). Shared by the corpus test, the
 //! fit audit and ad-hoc probes (`scripts/corpus.sh --probe FILE.rs`).
 //!
 //! `CORPUS_FILTER=substr` keeps the cases whose name contains it;
@@ -17,9 +19,11 @@ pub mod extruder;
 pub mod known_extruder_excesses;
 pub mod path_accuracy;
 
-pub const SIM_GCODES: [&str; 4] = [
+pub const SIM_GCODES: [&str; 6] = [
     "voron_first_layers",
     "voron_dense_top_layers",
+    "voron_first_layers_zhop",
+    "voron_dense_top_layers_zhop",
     "trident_follower_cache_regression",
     "trident_mesh_clock_regression",
 ];
