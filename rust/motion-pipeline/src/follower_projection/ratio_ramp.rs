@@ -8,7 +8,7 @@ use trajectory::ContinuousSegment;
 
 use super::{
     FloorLeaders, LeaderReads, RatioSpan, SPAN_LOOKUP_SLACK_MM, SPAN_MIN_LEN_MM, ShapedLeaders,
-    axis_grid, integrate,
+    Table, axis_grid, integrate,
 };
 
 mod jet;
@@ -130,6 +130,98 @@ impl Seam {
             step,
             slope_after,
         })
+    }
+}
+
+/// The seams of one span table as the smoothing sums them: where its ratio
+/// or its slope steps, the table's slope behind the first of them, and how
+/// far along the path its spans have been examined for seams.
+#[derive(Debug, Default)]
+pub(super) struct SeamTable {
+    seams: Vec<Seam>,
+    base_slope: Option<f64>,
+    examined_through: f64,
+}
+
+impl SeamTable {
+    /// Nothing to smooth: the table has no seam and no slope.
+    fn is_inert(&self) -> bool {
+        self.seams.is_empty() && self.base_slope.unwrap_or(0.0) == 0.0
+    }
+
+    /// Records the seams of the spans not yet examined, the table's slope
+    /// behind them first if none is known yet, and returns the range of
+    /// those spans.
+    fn record(&mut self, spans: &[RatioSpan]) -> std::ops::Range<usize> {
+        if self.base_slope.is_none() {
+            self.base_slope = Some(spans[0].ratio_slope());
+        }
+        let first = spans
+            .partition_point(|span| span.s0 <= self.examined_through)
+            .max(1);
+        for index in first..spans.len() {
+            let (before, after) = (&spans[index - 1], &spans[index]);
+            self.examined_through = after.s0;
+            if let Some(seam) = Seam::between(before, after) {
+                self.seams.push(seam);
+            }
+        }
+        first..spans.len()
+    }
+
+    fn seams_near(&self, lo: f64, hi: f64) -> &[Seam] {
+        let first = self.seams.partition_point(|seam| seam.s <= lo);
+        let last = self.seams.partition_point(|seam| seam.s < hi);
+        &self.seams[first..last.max(first)]
+    }
+
+    /// Drops the seams at or behind `back_edge`, carrying the slope the
+    /// last of them opens.
+    fn prune_through(&mut self, back_edge: f64) {
+        let drop = self.seams.partition_point(|seam| seam.s <= back_edge);
+        if drop > 0 {
+            self.base_slope = Some(self.seams[drop - 1].slope_after);
+            self.seams.drain(..drop);
+        }
+    }
+
+    /// `X = Ẽ − E` at `s` with its first three path derivatives under the
+    /// width field `width`: the extrusion, ratio, slope and curvature the
+    /// smoothing adds to the table's, summed over the seams in the window
+    /// and the spans between them by their moments ([`SeamMoments`]), and
+    /// over the spans running past its edges ([`edge_spans`]).
+    fn correction(&self, width: &WidthField, s: f64) -> Jet {
+        if self.is_inert() {
+            return Jet::ZERO;
+        }
+        let h = width.jet(s);
+        if h.value <= 0.0 {
+            return Jet::ZERO;
+        }
+        let (lo, hi) = (s - h.value, s + h.value);
+        let first = self.seams.partition_point(|seam| seam.s <= lo);
+        let slope_left = first
+            .checked_sub(1)
+            .map_or(self.base_slope.unwrap_or(0.0), |last| {
+                self.seams[last].slope_after
+            });
+        let window = self.seams_near(lo, hi);
+        let mut moments = SeamMoments::default();
+        for seam in window {
+            moments.add_step(s - seam.s, seam.step);
+        }
+        for pair in window.windows(2) {
+            let (seam, next) = (pair[0], pair[1]);
+            moments.add_span((s - seam.s, s - next.s), seam.slope_after, next.s - seam.s);
+        }
+        let inverse = h.recip();
+        let ends = window
+            .first()
+            .zip(window.last())
+            .map(|(first_seam, last_seam)| {
+                (s - first_seam.s, s - last_seam.s, last_seam.slope_after)
+            });
+        moments.correction(h, inverse) + edge_spans(h, inverse, slope_left, ends)
     }
 }
 
@@ -1029,11 +1121,10 @@ impl WidthSearch<'_> {
 #[derive(Debug, Default)]
 pub(super) struct RatioSmoothing {
     width: WidthField,
-    seams: Vec<Seam>,
-    base_slope: Option<f64>,
+    laid: SeamTable,
+    advance: SeamTable,
     valleys: Vec<AdvanceValley>,
     open_rest: Option<OpenRest>,
-    examined_through: f64,
     floor: f64,
     taken_through: f64,
     reach_into_next: Option<Crossing>,
@@ -1046,9 +1137,9 @@ impl RatioSmoothing {
         *self = Self::default();
     }
 
-    /// Nothing to smooth: the table has no seam and no slope.
+    /// Nothing to smooth: the laid table has no seam and no slope.
     pub(super) fn is_inert(&self) -> bool {
-        self.seams.is_empty() && self.base_slope.unwrap_or(0.0) == 0.0
+        self.laid.is_inert()
     }
 
     /// Where on the path the last segment still waiting on the smoothing
@@ -1085,9 +1176,15 @@ impl RatioSmoothing {
     }
 
     /// Takes in `leg`'s spans: the width nodes it covers, the seams the
-    /// table gained with the ramp time `rule` derives for each, and the
-    /// advance valleys its opening seam and its slowest point inside need.
-    pub(super) fn lay(&mut self, spans: &[RatioSpan], leg: &RampLeg, rule: &RatioRampRule) {
+    /// table gained with the ramp time `rule` derives for each, the seams
+    /// `advance_spans`, the table an advance reads, gained, and the advance
+    /// valleys its opening seam and its slowest point inside need.
+    pub(super) fn lay(
+        &mut self,
+        (spans, advance_spans): (&[RatioSpan], &[RatioSpan]),
+        leg: &RampLeg,
+        rule: &RatioRampRule,
+    ) {
         assert!(
             self.width.rule.is_none_or(|laid| laid == *rule) || self.width.is_settled(),
             "a follower's ratio ramp rule changed from {:?} to {rule:?} with ratio steps still \
@@ -1101,9 +1198,6 @@ impl RatioSmoothing {
             self.width.extend(leaders, leg, table_end);
             self.close_at(leg.start_s);
             return;
-        }
-        if self.base_slope.is_none() {
-            self.base_slope = Some(spans[0].ratio_slope());
         }
         let (t_start, t_end) = leg.support;
         let opening = Crossing::valley_at(leaders, t_start);
@@ -1137,7 +1231,7 @@ impl RatioSmoothing {
                 self.lay_valley(turn, reach, turn_crossing.crawl_floor());
             }
         }
-        let new_seams = self.record_seams(spans);
+        let new_seams = self.record_seams((spans, advance_spans));
         self.width.widen_seams_into(leaders, leg.support);
         self.time_seams(&spans[new_seams.start.saturating_sub(1)..], leaders, leg);
         self.keep_tail(leaders, leg);
@@ -1165,20 +1259,14 @@ impl RatioSmoothing {
         });
     }
 
-    /// Records the seams of the spans not yet examined, and returns the
-    /// range of those spans.
-    fn record_seams(&mut self, spans: &[RatioSpan]) -> std::ops::Range<usize> {
-        let first = spans
-            .partition_point(|span| span.s0 <= self.examined_through)
-            .max(1);
-        for index in first..spans.len() {
-            let (before, after) = (&spans[index - 1], &spans[index]);
-            self.examined_through = after.s0;
-            if let Some(seam) = Seam::between(before, after) {
-                self.seams.push(seam);
-            }
-        }
-        first..spans.len()
+    /// Records the seams of both tables' spans not yet examined, and
+    /// returns the range of the laid table's.
+    fn record_seams(
+        &mut self,
+        (spans, advance_spans): (&[RatioSpan], &[RatioSpan]),
+    ) -> std::ops::Range<usize> {
+        self.advance.record(advance_spans);
+        self.laid.record(spans)
     }
 
     /// Hands the width field the seams between consecutive `spans`, timed
@@ -1319,49 +1407,22 @@ impl RatioSmoothing {
         lo
     }
 
-    /// `X = Ẽ − E` at `s` with its first three path derivatives: the
-    /// extrusion, ratio, slope and curvature the smoothing adds to the
-    /// table's, summed over the seams in the window and the spans between
-    /// them by their moments ([`SeamMoments`]), and over the spans running
-    /// past its edges ([`edge_spans`]).
+    /// `X = Ẽ − E` of the laid table at `s` with its first three path
+    /// derivatives ([`SeamTable::correction`]).
     pub(super) fn correction(&self, s: f64) -> Jet {
-        if self.is_inert() {
-            return Jet::ZERO;
-        }
-        let h = self.width.jet(s);
-        if h.value <= 0.0 {
-            return Jet::ZERO;
-        }
-        let (lo, hi) = (s - h.value, s + h.value);
-        let first = self.seams.partition_point(|seam| seam.s <= lo);
-        let slope_left = first
-            .checked_sub(1)
-            .map_or(self.base_slope.unwrap_or(0.0), |last| {
-                self.seams[last].slope_after
-            });
-        let window = self.seams_near(lo, hi);
-        let mut moments = SeamMoments::default();
-        for seam in window {
-            moments.add_step(s - seam.s, seam.step);
-        }
-        for pair in window.windows(2) {
-            let (seam, next) = (pair[0], pair[1]);
-            moments.add_span((s - seam.s, s - next.s), seam.slope_after, next.s - seam.s);
-        }
-        let inverse = h.recip();
-        let ends = window
-            .first()
-            .zip(window.last())
-            .map(|(first_seam, last_seam)| {
-                (s - first_seam.s, s - last_seam.s, last_seam.slope_after)
-            });
-        moments.correction(h, inverse) + edge_spans(h, inverse, slope_left, ends)
+        self.correction_of(Table::Laid, s)
     }
 
-    fn seams_near(&self, lo: f64, hi: f64) -> &[Seam] {
-        let first = self.seams.partition_point(|seam| seam.s <= lo);
-        let last = self.seams.partition_point(|seam| seam.s < hi);
-        &self.seams[first..last.max(first)]
+    /// [`Self::correction`] of `table`.
+    pub(super) fn correction_of(&self, table: Table, s: f64) -> Jet {
+        self.seam_table(table).correction(&self.width, s)
+    }
+
+    fn seam_table(&self, table: Table) -> &SeamTable {
+        match table {
+            Table::Laid => &self.laid,
+            Table::Advance => &self.advance,
+        }
     }
 
     /// Whether the smoothing changes anything over `[lo, hi]`.
@@ -1370,8 +1431,8 @@ impl RatioSmoothing {
             return false;
         }
         let (widest, _) = self.width.bounds(lo, hi);
-        self.base_slope.unwrap_or(0.0) != 0.0
-            || !self.seams_near(lo - widest, hi + widest).is_empty()
+        self.laid.base_slope.unwrap_or(0.0) != 0.0
+            || !self.laid.seams_near(lo - widest, hi + widest).is_empty()
     }
 
     /// `(max |r̃|, max |r̃'|)` over `[lo, hi]`, see [`RatioSmoothing`].
@@ -1403,6 +1464,7 @@ impl RatioSmoothing {
         }
         let stretch = (1.0 + WIDTH_SLOPE_BOUND) * (1.0 + WIDTH_SLOPE_BOUND);
         let steps = self
+            .laid
             .seams_near(reach_lo, reach_hi)
             .iter()
             .map(|seam| {
@@ -1437,10 +1499,10 @@ impl RatioSmoothing {
     }
 
     /// Where over `[lo, hi]` the smoothed ratio's curvature, or the
-    /// advance's read weight, bends: where each seam enters and leaves a
-    /// window, the width nodes, and the valley ends. A window edge lies on
-    /// its side of the seam clamped to the nodes, so one that side puts
-    /// outside `[lo, hi]` is not searched for.
+    /// advance's read, bends: where each seam of either table enters and
+    /// leaves a window, the width nodes, and the valley ends. A window edge
+    /// lies on its side of the seam clamped to the nodes, so one that side
+    /// puts outside `[lo, hi]` is not searched for.
     pub(super) fn bends(&self, lo: f64, hi: f64) -> Vec<f64> {
         let mut bends: Vec<f64> = self.valley_ends(lo, hi).collect();
         if self.is_inert() {
@@ -1452,7 +1514,16 @@ impl RatioSmoothing {
             self.width.nodes[0].s,
             self.width.nodes[self.width.nodes.len() - 1].s,
         );
-        for seam in self.seams_near(lo - widest, hi + widest) {
+        let laid = self.laid.seams_near(lo - widest, hi + widest);
+        let advance_only = self
+            .advance
+            .seams_near(lo - widest, hi + widest)
+            .iter()
+            .filter(|seam| {
+                laid.binary_search_by(|laid| laid.s.total_cmp(&seam.s))
+                    .is_err()
+            });
+        for seam in laid.iter().chain(advance_only) {
             let anchor = seam.s.clamp(first, last);
             if anchor >= lo {
                 bends.push(self.window_edge(seam.s, -1.0, widest));
@@ -1552,11 +1623,8 @@ impl RatioSmoothing {
         }
         self.width.prune_before(s);
         let back_edge = s - self.width.width(s);
-        let drop = self.seams.partition_point(|seam| seam.s <= back_edge);
-        if drop > 0 {
-            self.base_slope = Some(self.seams[drop - 1].slope_after);
-            self.seams.drain(..drop);
-        }
+        self.laid.prune_through(back_edge);
+        self.advance.prune_through(back_edge);
     }
 
     /// Within a leg whose raw leaders rest, the shaped leaders rest where
