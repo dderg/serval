@@ -26,6 +26,9 @@ use ring::TickRing;
 const COUNT_MAGIC: [u8; 4] = *b"SVC1";
 const EVENT_MAGIC: [u8; 4] = *b"SVE1";
 const THROUGHPUT_MAGIC: [u8; 4] = *b"SVT1";
+const IDENTITY_MAGIC: [u8; 4] = *b"SVI1";
+const BUILD_ID: &[u8] = env!("CAPTURE_FW_BUILD_ID").as_bytes();
+const _: () = assert!(BUILD_ID.len() <= FRAME_PAYLOAD_LEN);
 const FRAME_HEADER_LEN: usize = 16;
 const TICKS_PER_FRAME: usize = 128;
 const TICK_BYTES: usize = CHANNEL_COUNT;
@@ -36,6 +39,7 @@ const CMD_START: u8 = b'S';
 const CMD_EVENTS: u8 = b'E';
 const CMD_STOP: u8 = b'X';
 const CMD_THROUGHPUT: u8 = b'T';
+const CMD_IDENTITY: u8 = b'I';
 const NO_FAULT: u16 = 0;
 const USB_VID_ST: u16 = 0x0483;
 const USB_PID_VCP: u16 = 0x5740;
@@ -197,6 +201,18 @@ impl Stream {
         self.frame_len = FRAME_MAX_LEN;
     }
 
+    fn stage_identity(&mut self) {
+        self.frame[0..4].copy_from_slice(&IDENTITY_MAGIC);
+        self.frame[4..14].fill(0);
+        self.frame[12..14].copy_from_slice(&(BUILD_ID.len() as u16).to_le_bytes());
+        self.frame[14] = STATUS_DATA;
+        self.frame[15] = 0;
+        let payload_end = FRAME_HEADER_LEN + BUILD_ID.len();
+        self.frame[FRAME_HEADER_LEN..payload_end].copy_from_slice(BUILD_ID);
+        self.frame_len = payload_end;
+        self.sent = 0;
+    }
+
     fn pending_fault(&self) -> Option<u16> {
         let fault = FAULT.load(Ordering::Acquire);
         (fault != NO_FAULT && !self.fault_reported).then_some(fault)
@@ -297,6 +313,10 @@ impl Stream {
                 [CMD_EVENTS, mask] => self.start_events(mask),
                 [CMD_THROUGHPUT, _] => self.start_throughput(),
                 [CMD_STOP, _] => self.stop(),
+                [CMD_IDENTITY, _] => {
+                    self.stop();
+                    self.stage_identity();
+                }
                 _ => panic!("unknown command"),
             }
         }

@@ -7,8 +7,8 @@ use trajectory::{ContinuousAxis, ContinuousSegment};
 use super::super::{FollowerState, SpanSide, Table as SpanTable};
 use super::{
     AdvanceValley, CLUSTER_REACH_S, CROSSING_PROBES, Crossing, ENVELOPE_SLOPE, KERNEL_PEAK,
-    NODE_SPACING_PER_WIDTH, NODE_SPACING_S, RampLeg, RestSide, ShapedLeaders, Spill, TimedSeam,
-    WIDTH_SLOPE_BOUND, WidthField, slowest_crawl,
+    NODE_SPACING_PER_WIDTH, NODE_SPACING_S, PathReach, RampLeg, RestSide, ShapedLeaders, Spill,
+    TimedSeam, WIDTH_SLOPE_BOUND, WidthField, slowest_crawl,
 };
 
 /// `(length, ratio at start, ratio at end)` per span.
@@ -833,6 +833,88 @@ fn a_rest_valley_covers_the_ratio_step_its_leg_lays_short_of_the_rest() {
     );
 }
 
+/// The odometer and the path the leaders cover reach a resting leg's ratio
+/// step to different roundings, the step a few dozen ulps short of the
+/// rest or past it. The width rests on the step itself, so no window
+/// straddles it however close past it: one that did would smooth the
+/// material over picometres and read its step as a curvature that no
+/// enclosure of the follower holds.
+#[test]
+fn the_width_rests_on_the_ratio_step_a_resting_leg_lays_beside_the_rest() {
+    let travel = 10.0;
+    for off_rest in [-4e-7, 2e-11] {
+        let tail = REST_LEG_SPILL_MM + off_rest;
+        let mut state = FollowerState::default();
+        state.push_span(travel, 0.0, 0.0);
+        state.push_span(tail, 0.0, 0.0);
+        state.push_span(REST_LEG_SPILL_MM - off_rest, 0.03, 0.03);
+        let shaped = braking_into_a_rest_and_leaving();
+        let shaped_leaders = ShapedLeaders::of(&shaped, &[0, 1]);
+        let leg = RampLeg {
+            shaped: &shaped,
+            leaders: &[0, 1],
+            shaped_leaders: &shaped_leaders,
+            support: (shaped.t_start, shaped.t_end),
+            start_s: travel,
+            rests: true,
+        };
+        let rule = RatioRampRule {
+            advance_slope_s: 0.5,
+            max_velocity_mm_s: 45.0,
+            max_accel_mm_s2: 2000.0,
+        };
+        state
+            .smoothing
+            .lay((&state.spans, &state.advance_spans), &leg, &rule);
+        state.smoothing.close_at(travel + 2.0 * REST_LEG_SPILL_MM);
+        let ratio_step = travel + tail;
+        let width = &state.smoothing.width;
+        assert_eq!(
+            width.width(ratio_step),
+            0.0,
+            "a ratio step {off_rest} mm off the rest at {ratio_step} mm"
+        );
+        for past in [1e-13, 1e-12, 1e-11, 1e-9, 1e-7] {
+            let s = ratio_step + past;
+            assert!(
+                width.width(s) < past,
+                "a {} mm window {past} mm past the ratio step {off_rest} mm off the rest \
+                 straddles it",
+                width.width(s)
+            );
+        }
+    }
+}
+
+/// Leaving a rest, the leaders creep a rounding's worth before they move:
+/// the first time sample past it lies micrometres off the rest, where its
+/// cone caps the window to a sliver. Kept as a node, the smootherstep to
+/// the next flattened every window up to that node onto the sliver; the
+/// width rises off the rest to the first node the cone does not cap
+/// instead, no narrower than the cone along the way.
+#[test]
+fn the_width_leaving_a_rest_rises_with_the_rest_cone() {
+    let creep = 1.83e-6;
+    let path_per_sample = 0.25;
+    let mut field = WidthField::default();
+    field.place_rest(0.0);
+    field.place_sample(0.0, 0.0);
+    let mut s = creep;
+    for tick in 1..40 {
+        field.place_sample(s, tick as f64 * NODE_SPACING_S);
+        s += path_per_sample;
+    }
+    field.close(s);
+    for d in [1e-5, 1e-4, 1e-3, 0.028, 0.1, 0.5] {
+        let width = field.width(d);
+        assert!(
+            width >= ENVELOPE_SLOPE * d,
+            "a {width} mm window {d} mm past the rest, under its {} mm cone",
+            ENVELOPE_SLOPE * d
+        );
+    }
+}
+
 /// The leaders brake into a rest a rounding past the last time node: the
 /// node stacks with the rest where the leaders stop, so the window closes
 /// there however they move on after it.
@@ -1002,10 +1084,11 @@ fn the_smoothing_models_hold_its_correction_and_valley_weight_between_bends() {
                     );
                     let (centre, radius) = (0.5 * (lo + hi), 0.5 * (hi - lo));
                     let s = TaylorModel::affine(Ball::exact(centre), radius);
-                    let reach = (
-                        trajectory::next_toward(lo, f64::INFINITY),
-                        trajectory::next_toward(hi, f64::NEG_INFINITY),
-                    );
+                    let reach = PathReach {
+                        lo: trajectory::next_toward(lo, f64::INFINITY),
+                        hi: trajectory::next_toward(hi, f64::NEG_INFINITY),
+                        exact: (false, false),
+                    };
                     let correction = state
                         .smoothing
                         .correction_model(SpanTable::Laid, &s, reach)
@@ -1619,12 +1702,16 @@ fn a_reach_starting_on_a_step_an_ulp_past_a_rest_holds_the_step_window() {
         let last = floats[floats.len() - 1];
         floats.push(trajectory::next_toward(last, f64::INFINITY));
     }
-    let reach = (step_at, floats[floats.len() - 1]);
+    let reach = PathReach {
+        lo: step_at,
+        hi: floats[floats.len() - 1],
+        exact: (false, false),
+    };
     assert!(
         state.smoothing.correction(step_at).d1 != 0.0,
         "the step's window must open at the step for the reach to read it"
     );
-    let (centre, radius) = (0.5 * (reach.0 + reach.1), 0.5 * (reach.1 - reach.0));
+    let (centre, radius) = (0.5 * (reach.lo + reach.hi), 0.5 * (reach.hi - reach.lo));
     let s = TaylorModel::affine(Ball::exact(centre), radius);
     let Some(correction) = state.smoothing.correction_model(SpanTable::Laid, &s, reach) else {
         return;
