@@ -182,6 +182,34 @@ around its fast-forward), so a relative path typed in the wrong directory fails 
 editing main (5 edits used relative paths in the window). A `post-checkout` hook, installed with the other guards,
 prints the `wt.sh` hint on a plain `git worktree add`.
 
+# CI critical path, round 3
+
+Measured on five green PR runs (11-05): throughput-gate 704 s, rust-fuzz 407 s, rust-test 321 s, replay-budget
+163 s, fit-audit 162 s; everything else under 130 s. The Rust workflow is as slow as its slowest job.
+- Compile, not tests, was the cost: rust-fuzz spent 360 s compiling 142 test binaries and ~60 s running
+  them (rust-test 176 s compiling, 103 s testing). rust-cache hits, but it never caches workspace crates, so
+  every run rebuilds them, and `[profile.dev] debug = true` made that 12 GB of objects. Cold
+  `cargo test --workspace --no-run -j4`: 369 s with full debuginfo, 136 s with `debug = "line-tables-only"`
+  (5.9 GB; 173 s and 313 MB with `debug = 0`). Panics and backtraces keep file:line. Do not cache workspace
+  crates across checkouts: cargo's freshness test is source mtime against artifact mtime (see "Never share one
+  target dir"), and a fresh checkout's mtimes cannot tell a changed file from an unchanged one.
+- throughput-gate: ~500 of its 704 s were 15 sequential live reps (5 per config, pinned to two cores). It runs
+  as a matrix of three `throughput-shard` jobs, one per config (`--configs`), and the required check
+  `throughput-gate` is a tiny aggregator that passes when every shard passed, so branch protection and PRs on
+  the old workflow are unaffected. `--accept` stays unsharded (it rewrites all three Ir values).
+- rust-fuzz red, classified over the 117 PR runs since 11-04 04:00: 9 runs had a red rust-fuzz job (21 job
+  failures). 5 runs (15 jobs) were the ubuntu-26.04 link failure, fixed by the pin and #707; 1 run (3 jobs) was a
+  compile error in the PR itself (E0061), correctly not triaged; 3 runs (3 jobs) were real fresh-seed
+  counterexamples (law_fuzz, planner_fuzz rng seed, root_cursor_fuzz), for which `fuzz_triage` fired: it opened
+  #709, #723 and #724, replayed the seeds on main, reran and let the landings continue. Those three bugs are
+  still open; the triage makes them non-blocking, it does not fix them.
+- Concurrent baseline accepts: `tools/bench/throughput_baseline.json` is merged field by field by a git merge
+  driver (`scripts/merge_throughput_baseline.py`, registered by `install-git-guards.sh`, selected by
+  `.gitattributes`): configs accepted on both sides keep the lower Ir (the stricter, fail-safe baseline),
+  different configs both survive, `commit`/`reason` keep both, a calibration changed on both sides stays a
+  conflict. GitHub's own merge ignores drivers, so `land_queue` merges main again (up to twice) when the PR
+  goes DIRTY after green checks and aborts with the conflicted file list on a real conflict.
+
 # Disk space
 
 /home filled to 22 MB free and rustc ICE'd for every agent. The sources were: ~495 scratch

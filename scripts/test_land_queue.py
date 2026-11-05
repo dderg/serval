@@ -114,3 +114,65 @@ def test_everything_already_exact_leaves_nothing_to_accept():
 
 def test_a_case_missing_from_the_check_output_is_still_accepted():
     assert lq.not_yet_accepted(["z/p/c"], CHECK) == ["z/p/c"]
+
+
+def test_a_dirty_pr_is_detected_from_the_merge_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        lq.pending, "run", lambda args, cwd=None, env=None: "DIRTY\n"
+    )
+    assert lq.pr_is_dirty(tmp_path, "b")
+    monkeypatch.setattr(
+        lq.pending, "run", lambda args, cwd=None, env=None: "BLOCKED\n"
+    )
+    assert not lq.pr_is_dirty(tmp_path, "b")
+
+
+def _repo_with_conflicting_main(tmp_path):
+    import subprocess as sp
+
+    def git(cwd, *a):
+        return sp.run(
+            ["git", *a], cwd=cwd, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    origin = tmp_path / "origin.git"
+    git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
+    repo = tmp_path / "repo"
+    git(tmp_path, "clone", "-q", str(origin), str(repo))
+    for k, v in (("user.email", "t@t"), ("user.name", "t")):
+        git(repo, "config", k, v)
+    (repo / "f").write_text("1\n")
+    git(repo, "add", "f")
+    git(repo, "commit", "-qm", "base")
+    git(repo, "push", "-q", "origin", "main")
+    git(repo, "checkout", "-q", "-b", "topic")
+    return repo, git
+
+
+def test_remerge_main_brings_in_a_clean_main_and_reports_true(tmp_path):
+    repo, git = _repo_with_conflicting_main(tmp_path)
+    (repo / "g").write_text("topic\n")
+    git(repo, "add", "g")
+    git(repo, "commit", "-qm", "topic")
+    git(repo, "checkout", "-q", "main")
+    (repo / "h").write_text("main\n")
+    git(repo, "add", "h")
+    git(repo, "commit", "-qm", "main moves")
+    git(repo, "push", "-q", "origin", "main")
+    git(repo, "checkout", "-q", "topic")
+    assert lq.remerge_main(repo, lq.Entry("topic", "t", "")) is True
+    assert (repo / "h").exists()
+
+
+def test_remerge_main_aborts_a_real_conflict_and_names_the_files(tmp_path):
+    repo, git = _repo_with_conflicting_main(tmp_path)
+    (repo / "f").write_text("topic\n")
+    git(repo, "commit", "-qam", "topic edit")
+    git(repo, "checkout", "-q", "main")
+    (repo / "f").write_text("main\n")
+    git(repo, "commit", "-qam", "main edit")
+    git(repo, "push", "-q", "origin", "main")
+    git(repo, "checkout", "-q", "topic")
+    with pytest.raises(lq.QueueError, match="Conflicted files:\nf"):
+        lq.remerge_main(repo, lq.Entry("topic", "t", ""))
+    assert git(repo, "status", "--porcelain") == ""
