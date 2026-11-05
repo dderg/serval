@@ -821,6 +821,7 @@ fn a_rest_valley_covers_the_ratio_step_its_leg_lays_short_of_the_rest() {
         advance_slope_s: 0.5,
         max_velocity_mm_s: 45.0,
         max_accel_mm_s2: 2000.0,
+        kernel_jerk_per_accel_hz: f64::INFINITY,
     };
     state
         .smoothing
@@ -862,6 +863,7 @@ fn the_width_rests_on_the_ratio_step_a_resting_leg_lays_beside_the_rest() {
             advance_slope_s: 0.5,
             max_velocity_mm_s: 45.0,
             max_accel_mm_s2: 2000.0,
+            kernel_jerk_per_accel_hz: f64::INFINITY,
         };
         state
             .smoothing
@@ -1169,6 +1171,7 @@ fn a_slow_corner_beside_a_ratio_step_does_not_narrow_its_window() {
         advance_slope_s: 0.02,
         max_velocity_mm_s: 50.0,
         max_accel_mm_s2: 5000.0,
+        kernel_jerk_per_accel_hz: f64::INFINITY,
     };
     let (seam_t, brake, end) = (0.052, 0.05, 0.12);
     let mut field = WidthField {
@@ -1283,6 +1286,7 @@ fn moving_width_nodes_lie_a_window_apart() {
             advance_slope_s: 0.02,
             max_velocity_mm_s: 50.0,
             max_accel_mm_s2: 5000.0,
+            kernel_jerk_per_accel_hz: f64::INFINITY,
         }),
         ..WidthField::default()
     };
@@ -1309,6 +1313,7 @@ fn a_stream_creeping_off_a_rest_keeps_no_node_a_sliver_past_it() {
             advance_slope_s: 0.02,
             max_velocity_mm_s: 50.0,
             max_accel_mm_s2: 5000.0,
+            kernel_jerk_per_accel_hz: f64::INFINITY,
         }),
         ..WidthField::default()
     };
@@ -1452,6 +1457,7 @@ fn a_crawl_lays_a_valley_only_where_the_advance_would_leave_the_limit() {
         advance_slope_s: 0.5,
         max_velocity_mm_s: 50.0,
         max_accel_mm_s2: 2000.0,
+        kernel_jerk_per_accel_hz: f64::INFINITY,
     };
     let crawl = Crossing {
         speed: 0.647,
@@ -1475,6 +1481,39 @@ fn a_crawl_lays_a_valley_only_where_the_advance_would_leave_the_limit() {
         ..rule
     };
     assert!(turnaround.needs_valley(&no_advance, 0.0337));
+}
+
+/// The P1 bowden kernel crawl of `voron_first_layers` at t≈63.92 s: read
+/// through the path speed, `r·(a + k·s⃛)` asks for 30000 mm/s² of the
+/// extruder's 5000, but the 40 ms triangle after the advance meets
+/// `s̈`'s slope only up to its total variation of 100 Hz times `a`,
+/// `r·a·(1 + 100·k)` ≈ 3700 mm/s². Releasing the lead there drove the
+/// extruder to 49.4 mm/s against its 45.
+#[test]
+fn a_kernel_after_the_advance_spares_a_crawl_its_valley() {
+    let kernel_free = RatioRampRule {
+        advance_slope_s: 0.5,
+        max_velocity_mm_s: 45.0,
+        max_accel_mm_s2: 5000.0,
+        kernel_jerk_per_accel_hz: f64::INFINITY,
+    };
+    let crawl = Crossing {
+        speed: 0.705,
+        rate: 2156.0,
+        jerk: 1.74e6,
+    };
+    let ratio = 0.034;
+    assert!(crawl.needs_valley(&kernel_free, ratio));
+    let smoothed = RatioRampRule {
+        kernel_jerk_per_accel_hz: 2.0 / (0.5 * 0.04),
+        ..kernel_free
+    };
+    assert!(!crawl.needs_valley(&smoothed, ratio));
+    let turnaround = Crossing {
+        speed: 0.0,
+        ..crawl
+    };
+    assert!(turnaround.needs_valley(&smoothed, ratio));
 }
 
 const CRAWL_LEG_SEAM_SPEED_MM_S: f64 = 2.83;
@@ -1600,6 +1639,7 @@ const DIRECT_DRIVE: RatioRampRule = RatioRampRule {
     advance_slope_s: 0.03,
     max_velocity_mm_s: 50.0,
     max_accel_mm_s2: 20000.0,
+    kernel_jerk_per_accel_hz: f64::INFINITY,
 };
 
 /// A rest valley's side spans the spill alone where the extruder releases
@@ -1639,6 +1679,7 @@ fn a_rest_side_reaches_the_longest_ramp_where_the_lead_or_a_near_step_needs_it()
         advance_slope_s: 0.5,
         max_velocity_mm_s: 45.0,
         max_accel_mm_s2: 2000.0,
+        kernel_jerk_per_accel_hz: f64::INFINITY,
     };
     let table = line_into_rest(1.0, LINE_RATIO);
     assert_eq!(

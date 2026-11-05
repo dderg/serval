@@ -399,6 +399,11 @@ impl StepRootCursor {
         Ok(model)
     }
 
+    /// Every root in `[lo, hi]` for a window certified to move along
+    /// `slope`. `lo` is not always a clock the cursor has already rooted: a
+    /// drain pass starts on the first clock after the last one, so a reversal
+    /// landing exactly there owes its root at `lo` against the slope the rest
+    /// of the window certifies.
     fn emit_run(
         &mut self,
         lane: Lane,
@@ -414,6 +419,10 @@ impl StepRootCursor {
         let run_end = self.position_at(lane, hi)?;
         let mut search_from = lo;
         let mut search_position = self.position_at(lane, lo)?;
+        if self.level_reached(search_position) == Some(slope.opposite()) {
+            self.reject_drift(lane, lo, search_position, slope.opposite())?;
+            self.push_root(lane, lo, slope.opposite(), out)?;
+        }
         let mut predictor = Predictor::for_run(
             lane.view,
             lo,
@@ -431,17 +440,7 @@ impl StepRootCursor {
                 if !opposite.reached(run_end, opposite_level) {
                     return Ok(());
                 }
-                let level_after_one_step =
-                    opposite_level + f64::from(opposite.advance()) * self.microstep_mm;
-                if opposite.reached(run_end, level_after_one_step) {
-                    return Err(ShimError::LatticeDrift {
-                        motor: lane.motor,
-                        source_line: lane.view.signal.source_line,
-                        clock: hi,
-                        position: run_end,
-                        nominal: self.frame().nominal_position(self.microstep_mm),
-                    });
-                }
+                self.reject_drift(lane, hi, run_end, opposite)?;
                 let (clock, position) = self.solve_crossing(
                     lane,
                     (search_from, search_position),
@@ -474,6 +473,30 @@ impl StepRootCursor {
                 }
             }
         }
+    }
+
+    /// A position past the level one step beyond `slope`'s next threshold is
+    /// a signal that left the lattice, not a burst of steps owed at once.
+    fn reject_drift(
+        &self,
+        lane: Lane,
+        clock: u64,
+        position: f64,
+        slope: Slope,
+    ) -> Result<(), ShimError> {
+        let frame = self.frame();
+        let level_after_one_step = frame.threshold(self.microstep_mm, slope)
+            + f64::from(slope.advance()) * self.microstep_mm;
+        if slope.reached(position, level_after_one_step) {
+            return Err(ShimError::LatticeDrift {
+                motor: lane.motor,
+                source_line: lane.view.signal.source_line,
+                clock,
+                position,
+                nominal: frame.nominal_position(self.microstep_mm),
+            });
+        }
+        Ok(())
     }
 
     /// The first clock in `(lo, hi]` whose position reaches `level`, by
@@ -611,15 +634,18 @@ impl StepRootCursor {
         out: &mut Vec<StepRoot>,
     ) -> Result<(), ShimError> {
         let position = self.position_at(lane, clock)?;
-        let lattice = self.frame();
-        let slope = if position >= lattice.threshold(self.microstep_mm, Slope::Rising) {
-            Slope::Rising
-        } else if position <= lattice.threshold(self.microstep_mm, Slope::Falling) {
-            Slope::Falling
-        } else {
+        let Some(slope) = self.level_reached(position) else {
             return Ok(());
         };
         self.emit_run(lane, clock, clock, slope, None, out)
+    }
+
+    /// The direction whose next lattice threshold `position` has reached.
+    fn level_reached(&self, position: f64) -> Option<Slope> {
+        let lattice = self.frame();
+        [Slope::Rising, Slope::Falling]
+            .into_iter()
+            .find(|&slope| slope.reached(position, lattice.threshold(self.microstep_mm, slope)))
     }
 
     /// The window carries no certified slope, so it is halved until one half
