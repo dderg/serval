@@ -76,7 +76,17 @@ pub fn rest_room_reach_mm(speed: f64) -> f64 {
 
 /// The longest ramp a ratio step crossed at `speed`, `room_mm` along the
 /// path from a rest of the leaders, gets: the half of it on the rest's side
-/// laid over the step's share of the room.
+/// laid over the step's share of the room, and never over
+/// [`RATIO_RAMP_MAX_TIME_S`].
+#[must_use]
+pub fn longest_ramp_time(speed: f64, room_mm: f64) -> f64 {
+    assert!(
+        room_mm >= 0.0,
+        "a ratio step lies {room_mm} mm from the leaders' nearest rest"
+    );
+    RATIO_RAMP_MAX_TIME_S.min(rest_room_ramp_time(speed, room_mm))
+}
+
 fn rest_room_ramp_time(speed: f64, room_mm: f64) -> f64 {
     if speed > 0.0 {
         2.0 * REST_ROOM_RAMP_SHARE * room_mm / speed
@@ -110,13 +120,15 @@ pub struct RatioStep {
 
 /// A ratio step as the planner lets the leaders cross it: `step` at their
 /// shaped speed there, `rest_room_mm` along the path from their nearest
-/// rest, and their own advanced flow there at most `own_flow_mm_s`, which
-/// the planner can bound tighter than the step's speed and acceleration
-/// alone do.
+/// rest, their shaped speed at most `edge_speed_mm_s` half the
+/// [`longest_ramp_time`] either side of it, and their own advanced flow
+/// there at most `own_flow_mm_s`, which the planner can bound tighter than
+/// the step's speed and acceleration alone do.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StepCrossing {
     pub step: RatioStep,
     pub rest_room_mm: f64,
+    pub edge_speed_mm_s: f64,
     pub own_flow_mm_s: f64,
 }
 
@@ -166,35 +178,54 @@ impl RatioRampRule {
     /// and acceleration across `step`: proportional to the step, and
     /// shrinking as the ramp lengthens.
     fn ramp_demand(&self, tau: f64, step: &RatioStep) -> (f64, f64) {
+        (self.ramp_velocity(tau, step), self.ramp_accel(tau, step))
+    }
+
+    fn ramp_velocity(&self, tau: f64, step: &RatioStep) -> f64 {
         let k = self.advance_slope_s;
         let (v, a) = (step.speed_mm_s, step.accel_mm_s2.abs());
         let advanced = v + k * a;
+        step.ratio_step * (velocity_overshoot(ramp_ratio(k, v, advanced, tau)) - 1.0) * advanced
+    }
+
+    fn ramp_accel(&self, tau: f64, step: &RatioStep) -> f64 {
+        let k = self.advance_slope_s;
+        let (v, a) = (step.speed_mm_s, step.accel_mm_s2.abs());
         let rate = v + 2.0 * k * a;
-        (
-            step.ratio_step
-                * (velocity_overshoot(ramp_ratio(k, v, advanced, tau)) - 1.0)
-                * advanced,
-            step.ratio_step * rate / tau * acceleration_gain(ramp_ratio(k, v, rate, tau)),
-        )
+        step.ratio_step * rate / tau * acceleration_gain(ramp_ratio(k, v, rate, tau))
     }
 
     /// Whether the leaders crossing a ratio step as `crossing` lays out keep
     /// the follower within its limits over the longest ramp the step's rest
-    /// room leaves it.
+    /// room leaves it. The leaders' own flow, and the velocity the ramp adds
+    /// to it, are read at the step: the overshoot `k·r̃′·v²` peaks inside
+    /// the ramp, where the smoothed ratio climbs fastest. Without a follower
+    /// kernel the acceleration the ramp adds is read at the ramp's edges,
+    /// where the smoothed ratio's curvature steps and the advance turns it
+    /// into `k·r̃″·v³`; a follower kernel spreads that step over its own
+    /// width, so with one it is read at the step too.
     #[must_use]
     pub fn crossing_fits(&self, crossing: &StepCrossing) -> bool {
-        assert!(
-            crossing.rest_room_mm >= 0.0,
-            "a ratio step lies {} mm from the leaders' nearest rest",
-            crossing.rest_room_mm
-        );
         let step = &crossing.step;
-        let tau =
-            RATIO_RAMP_MAX_TIME_S.min(rest_room_ramp_time(step.speed_mm_s, crossing.rest_room_mm));
+        assert!(
+            crossing.edge_speed_mm_s >= step.speed_mm_s,
+            "the leaders cross a ratio step at {} mm/s and its ramp's edges at {} mm/s",
+            step.speed_mm_s,
+            crossing.edge_speed_mm_s
+        );
+        let tau = longest_ramp_time(step.speed_mm_s, crossing.rest_room_mm);
+        let accel_read_at = if self.kernel_jerk_per_accel_hz.is_infinite() {
+            RatioStep {
+                speed_mm_s: crossing.edge_speed_mm_s,
+                ..*step
+            }
+        } else {
+            *step
+        };
         let (own_velocity, own_accel) = self.own_demand(step);
-        let (ramp_velocity, ramp_accel) = self.ramp_demand(tau, step);
-        own_velocity.min(crossing.own_flow_mm_s) + ramp_velocity <= self.max_velocity_mm_s
-            && own_accel + ramp_accel <= self.max_accel_mm_s2
+        own_velocity.min(crossing.own_flow_mm_s) + self.ramp_velocity(tau, step)
+            <= self.max_velocity_mm_s
+            && own_accel + self.ramp_accel(tau, &accel_read_at) <= self.max_accel_mm_s2
     }
 
     /// How much a ramp across `step` may add to the follower's velocity and

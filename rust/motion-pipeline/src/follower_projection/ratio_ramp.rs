@@ -65,13 +65,24 @@ const SEAM_WIDTH_REACH_S: f64 = (RATIO_RAMP_MAX_TIME_S
     / (2.0 * ENVELOPE_SLOPE);
 /// How far in time a seam raises the ramp time or the width around it.
 const SEAM_REACH_S: f64 = RAMP_TIME_REACH_S.max(SEAM_WIDTH_REACH_S);
+/// How far along the path a seam's width reaches before it falls off to
+/// nothing, in units of that width: its plateau, then [`ENVELOPE_SLOPE`]
+/// of it per unit of path.
+const SEAM_WIDTH_REACH_WIDTHS: f64 = SEAM_WIDTH_PLATEAU_WIDTHS + 1.0 / ENVELOPE_SLOPE;
+/// How long the leaders take at most from a node to a seam whose width
+/// reaches it along the path, accelerating steadily from rest: over `t` at
+/// `a` they cover `a·t²/2` and cross at up to `V = a·(t + τ_max/2)`, whose
+/// width `V·τ_max/2` reaches [`SEAM_WIDTH_REACH_WIDTHS`] of itself, so
+/// `t² ≤ K·(t + τ_max/2)` with `K` that many longest ramps, and `t` falls
+/// short of `K + τ_max/2`. From a faster start they cover the path sooner.
+const SEAM_PATH_REACH_S: f64 = (SEAM_WIDTH_REACH_WIDTHS + 0.5) * RATIO_RAMP_MAX_TIME_S;
 /// How far in time the seams whose steps a window may gather with one lie
 /// from it: half the longest ramp.
 const CLUSTER_REACH_S: f64 = 0.5 * RATIO_RAMP_MAX_TIME_S;
 /// How long after a node the leaders must be laid before its target is
 /// known: every seam that raises its ramp time or its width, and every
 /// seam those gather, lies within.
-const TARGET_DELAY_S: f64 = SEAM_REACH_S + CLUSTER_REACH_S;
+const TARGET_DELAY_S: f64 = SEAM_REACH_S.max(SEAM_PATH_REACH_S) + CLUSTER_REACH_S;
 /// The ramp time over which a turnaround or crawl valley releases and
 /// rebuilds the advance's lead, the longest, whatever the step there; and
 /// the furthest a rest valley reaches past its spill ([`RestSide::width`]).
@@ -530,13 +541,17 @@ fn ramp_reach_within(t: f64, (start, end): (f64, f64)) -> (f64, f64) {
 /// window below `H_σ` exactly where the leaders are fast. So each seam
 /// also asks for its width ([`Self::seam_width_at`]): every node within
 /// [`SEAM_WIDTH_PLATEAU_WIDTHS`] widths of it on the path targets at least
-/// `H_σ`, falling off by [`ENVELOPE_SLOPE`] beyond, so only a rest narrows
-/// a seam's window below its width, and the planner slows a step where the
-/// rest leaves its ramp too little path ([`geometry::rest_room_reach_mm`]).
+/// `H_σ`, falling off by [`ENVELOPE_SLOPE`] beyond, however long the
+/// leaders take between the two, up to a rest, which no window reaches
+/// across. So only a rest narrows a seam's window below its width, and the
+/// planner slows a step where the rest leaves its ramp too little path
+/// ([`geometry::rest_room_reach_mm`]).
 ///
 /// The leaders are sampled every half of the shortest ramp in time. A
 /// sample becomes a node once every seam that sets its ramp time `τ` or its
-/// width is laid, and only half its own ramp time after the last one and no
+/// width is laid — the seams within [`SEAM_PATH_REACH_S`] after it, the
+/// furthest a steady acceleration from rest crosses one whose width reaches
+/// back to it — and only half its own ramp time after the last one and no
 /// nearer on the path than [`NODE_SPACING_PER_WIDTH`] times the narrower of
 /// the two targets: the smootherstep between two of them bends `h` no
 /// sharper than a window's own width allows. Off a rest, a sample becomes a
@@ -571,6 +586,8 @@ struct WidthField {
     before_pending: f64,
     last_kept: Option<LastKept>,
     final_prefix: usize,
+    /// Where the leaders last rested, which no seam's width reaches across.
+    rest_behind: Option<f64>,
 }
 
 impl WidthField {
@@ -720,22 +737,59 @@ impl WidthField {
             })
     }
 
+    /// The width seam `index`'s ramp asks for, `V·τ/2`.
+    fn seam_width(&mut self, index: usize) -> f64 {
+        0.5 * self.seams[index].crossing.speed * self.seam_ramp_time(index)
+    }
+
+    /// Whether seam `index`'s width reaches a node at `s` past it along the
+    /// path, with no rest between.
+    fn reaches_along_path(&mut self, index: usize, s: f64) -> bool {
+        let seam_s = self.seams[index].s;
+        self.rest_behind.is_none_or(|rest| seam_s > rest)
+            && s - seam_s < SEAM_WIDTH_REACH_WIDTHS * self.seam_width(index)
+    }
+
     /// The width the seams around ask for at the node at `t`, `s`: each its
     /// ramp's `V·τ/2` within [`SEAM_WIDTH_PLATEAU_WIDTHS`] of it on the
-    /// path, falling off by [`ENVELOPE_SLOPE`] beyond (see [`WidthField`]).
-    fn seam_width_at(&mut self, t: f64, s: f64) -> f64 {
-        self.seams_reaching(t).fold(0.0, |width, index| {
-            let ramp_time = self.seam_ramp_time(index);
+    /// path, falling off by [`ENVELOPE_SLOPE`] beyond (see [`WidthField`]),
+    /// from every seam within [`SEAM_REACH_S`] of it in time, and from every
+    /// other laid between the rests behind it and at `rest_ahead`.
+    fn seam_width_at(&mut self, t: f64, s: f64, rest_ahead: f64) -> f64 {
+        let rest_behind = self.rest_behind.unwrap_or(f64::NEG_INFINITY);
+        let laid = self
+            .seams
+            .partition_point(|seam| seam.t <= t + SEAM_PATH_REACH_S);
+        (0..laid).fold(0.0, |width, index| {
             let seam = self.seams[index];
-            let seam_width = 0.5 * seam.crossing.speed * ramp_time;
+            let within_time = (seam.t - t).abs() <= SEAM_REACH_S;
+            if !(within_time || (rest_behind < seam.s && seam.s < rest_ahead)) {
+                return width;
+            }
+            let seam_width = self.seam_width(index);
             let beyond_plateau =
                 ((s - seam.s).abs() - SEAM_WIDTH_PLATEAU_WIDTHS * seam_width).max(0.0);
             width.max(seam_width - ENVELOPE_SLOPE * beyond_plateau)
         })
     }
 
+    /// Where the leaders rest next after the first candidate, as far as
+    /// the candidates show it.
+    fn rest_ahead(&self) -> f64 {
+        self.candidates
+            .iter()
+            .skip(1)
+            .find_map(|candidate| match *candidate {
+                Candidate::Rest(s) => Some(s),
+                Candidate::Time(sample) if sample.base == Some(0.0) => Some(sample.s),
+                Candidate::Time(_) => None,
+            })
+            .unwrap_or(f64::INFINITY)
+    }
+
     /// Turns every candidate at or before `through` whose base is known
-    /// into a node or drops it, in order.
+    /// into a node or drops it, in order, then every seam no candidate
+    /// still to come takes a ramp time or a width from.
     fn assign(&mut self, through: f64) {
         while let Some(&candidate) = self.candidates.front() {
             match candidate {
@@ -754,11 +808,22 @@ impl WidthField {
             self.candidates.pop_front();
             self.pending = self.pending.and_then(|pending| pending.checked_sub(1));
         }
-        let needed_from = match self.candidates.front() {
-            Some(Candidate::Time(sample)) => sample.t,
-            _ => through,
-        } - TARGET_DELAY_S;
-        let drop = self.seams.partition_point(|seam| seam.t < needed_from);
+        let (needed_from, front_s) = match self.candidates.front() {
+            Some(&Candidate::Time(sample)) => (sample.t, sample.s),
+            Some(&Candidate::Rest(s)) => (through, s),
+            None => (
+                through,
+                self.nodes.last().map_or(f64::NEG_INFINITY, |node| node.s),
+            ),
+        };
+        let needed_from = needed_from - TARGET_DELAY_S;
+        let mut drop = 0;
+        while drop < self.seams.len()
+            && self.seams[drop].t < needed_from
+            && !self.reaches_along_path(drop, front_s)
+        {
+            drop += 1;
+        }
         self.seams.drain(..drop);
         self.closed_seams = self.closed_seams.saturating_sub(drop);
     }
@@ -767,6 +832,7 @@ impl WidthField {
         self.push_rest(s);
         let rest = self.nodes.last().expect("a rest leaves a node").s;
         self.last_kept = Some(LastKept::Rest(rest));
+        self.rest_behind = Some(rest);
     }
 
     /// Makes `sample` a node of target `base` scaled to the ramp time
@@ -779,8 +845,9 @@ impl WidthField {
     /// step in it unramped.
     fn keep_if_due(&mut self, sample: TimeSample, base: f64) {
         let ramp_time = self.ramp_time_at(sample.t);
-        let target =
-            (base * ramp_time / RATIO_RAMP_MIN_TIME_S).max(self.seam_width_at(sample.t, sample.s));
+        let rest_ahead = self.rest_ahead();
+        let target = (base * ramp_time / RATIO_RAMP_MIN_TIME_S)
+            .max(self.seam_width_at(sample.t, sample.s, rest_ahead));
         let due = match self
             .last_kept
             .expect("the width field lays a rest before its first sample")
