@@ -42,7 +42,7 @@ def test_a_failing_cancel_does_not_hide_why_the_print_failed(
     monkeypatch.setattr(run, "poll_print", print_fails)
     monkeypatch.setattr(run, "cancel_active_print", cancel_fails)
     with pytest.raises(run.BenchError, match="capture stalled") as raised:
-        run.execute(tmp_path, "x.gcode", {}, 1.0, False, False)
+        run.execute(tmp_path, "x.gcode", {}, 1.0, False, False, False)
     assert any("No registered callback" in n for n in raised.value.__notes__)
     assert any(src.endswith("klippy.log") for src in bench)
     assert (
@@ -86,3 +86,19 @@ def test_a_klippy_without_mcus_is_refused(monkeypatch):
     monkeypatch.setattr(run, "http", lambda *_a: {"objects": ["print_stats"]})
     with pytest.raises(run.BenchError, match="no mcu objects"):
         run.mcu_step_benchmarks()
+
+
+def test_a_completed_run_fetches_the_dispatch_record_it_asked_for(
+    tmp_path, monkeypatch, bench
+):
+    monkeypatch.setattr(run, "poll_print", lambda *_a: {"state": "complete"})
+    run.execute(tmp_path, "x.gcode", {}, 1.0, False, False, True)
+    assert f"{run.PI_DISPATCH_RECORD_DIR}/dispatch_record_*.bin" in bench
+
+
+def test_each_requested_recording_gets_its_own_pi_directory():
+    assert run.recordings(tap=False, dispatch_record=False) == {}
+    assert run.recordings(tap=True, dispatch_record=True) == {
+        run.STEP_TAP_ENV: run.PI_STEP_TAP_DIR,
+        run.DISPATCH_RECORD_ENV: run.PI_DISPATCH_RECORD_DIR,
+    }
