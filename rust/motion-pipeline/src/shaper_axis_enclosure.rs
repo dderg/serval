@@ -327,22 +327,22 @@ impl<'a> AxisLaw<'a> {
     }
 
     fn models(&self, window: &WindowReading) -> [TaylorModel; 3] {
-        self.models_unless(window, |_| false)
+        self.models_unless(window, None)
             .expect("a reading refusing no acceleration reads every model")
     }
 
-    /// [`Self::models`], or `None` once the acceleration's model is one
-    /// `refused` refuses: its position and velocity are then left unread.
+    /// [`Self::models`], or `None` once the acceleration's model is wider
+    /// than `refused`: its position and velocity are then left unread.
     fn models_unless(
         &self,
         window: &WindowReading,
-        refused: impl Fn(&TaylorModel) -> bool,
+        refused: Option<f64>,
     ) -> Option<[TaylorModel; 3]> {
         let Tangential { s, v, a } = &window.state;
         match self {
             AxisLaw::Warped { surface, path } => {
                 let models = warped_models(surface, path.each_ref().map(|law| law.models(window)));
-                (!refused(&models[2])).then_some(models)
+                (!refuses(refused, &models[2])).then_some(models)
             }
             _ => self.flat_models(window, (s, v, a), refused),
         }
@@ -352,10 +352,10 @@ impl<'a> AxisLaw<'a> {
         &self,
         window: &WindowReading,
         (s, v, a): (&TaylorModel, &TaylorModel, &TaylorModel),
-        refused: impl Fn(&TaylorModel) -> bool,
+        refused: Option<f64>,
     ) -> Option<[TaylorModel; 3]> {
         let unless_refused =
-            |acceleration: TaylorModel| (!refused(&acceleration)).then_some(acceleration);
+            |acceleration: TaylorModel| (!refuses(refused, &acceleration)).then_some(acceleration);
         Some(match *self {
             AxisLaw::Warped { .. } => unreachable!("a warped law reads its path's flat laws"),
             AxisLaw::Constant(position) => {
@@ -742,7 +742,7 @@ pub(crate) struct AxisReading<'a> {
 
 impl AxisReading<'_> {
     fn models(&self, window: &WindowReading) -> [TaylorModel; 3] {
-        self.models_unless(window, |_| false)
+        self.models_unless(window, None)
             .expect("a reading refusing no acceleration reads every model")
     }
 
@@ -750,7 +750,7 @@ impl AxisReading<'_> {
     fn models_unless(
         &self,
         window: &WindowReading,
-        refused: impl Fn(&TaylorModel) -> bool,
+        refused: Option<f64>,
     ) -> Option<[TaylorModel; 3]> {
         let [position, velocity, acceleration] = self.law.models_unless(window, refused)?;
         Some([
@@ -759,6 +759,12 @@ impl AxisReading<'_> {
             acceleration,
         ])
     }
+}
+
+/// Whether an acceleration model is wider than the accuracy `refused`
+/// asks for, where it asks for one.
+fn refuses(refused: Option<f64>, acceleration: &TaylorModel) -> bool {
+    refused.is_some_and(|accuracy| acceleration.rad() > accuracy)
 }
 
 /// One window's tangential state, and the path trigonometry and squared
@@ -827,9 +833,7 @@ pub(crate) fn analytic_axes_enclosure(
                         spread_trig: std::cell::OnceCell::new(),
                         speed_squared: std::cell::OnceCell::new(),
                     });
-                    readings[axis].models_unless(reading, |acceleration| {
-                        refused_acceleration.is_some_and(|accuracy| acceleration.rad() > accuracy)
-                    })
+                    readings[axis].models_unless(reading, refused_acceleration)
                 },
                 outs,
             );
