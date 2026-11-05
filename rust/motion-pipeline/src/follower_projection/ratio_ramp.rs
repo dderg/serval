@@ -2122,9 +2122,12 @@ fn ratio_steps_within(spans: &[RatioSpan], from: f64, to: f64) -> Option<(f64, f
 /// launches, the shaped velocity passes through zero off the raw seam,
 /// inside either move, where the seam's crossing does not see it; where the
 /// axes are shaped unlike each other it passes a hair beside zero instead.
-/// A leg whose every knot interval, or whose slowest probe, provably stays
-/// faster has none, and one slowest at an end leaves it to that seam's
-/// crossing.
+/// Such a crawl can hide in the probe interval next to a seam the leaders
+/// cross too fast to crawl there, so that interval is searched as well as
+/// the slowest probe's, however the leg's two seam speeds compare: mirrored
+/// seams tie to rounding, which the clock offset decides. A leg whose every
+/// knot interval, or every searched probe, provably stays faster has none,
+/// and one slowest at an end leaves it to that seam's crossing.
 fn slowest_crawl(
     leaders: &ShapedLeaders,
     leg: &RampLeg,
@@ -2135,26 +2138,33 @@ fn slowest_crawl(
         return None;
     }
     let speed = LegSpeed::over(path, table_end);
-    let (slowest_probe, slowest) = speed
+    let probe_speed = |index: usize| speed.at(speed.probes[index]);
+    let (slowest_probe, _) = speed
         .probes
         .iter()
         .map(|&t| speed.at(t))
         .enumerate()
         .min_by(|left, right| left.1.total_cmp(&right.1))
         .expect("a leg has probes");
-    if slowest >= ADVANCE_VALLEY_SPEED_MM_S
-        && speed.outruns_rest_near(slowest_probe, ADVANCE_VALLEY_SPEED_MM_S)
-    {
-        return None;
-    }
-    let turn = speed.slowest_near(slowest_probe);
     let last_probe = speed.probes.len() - 1;
-    let at_an_end = [0, last_probe]
+    let next_to_a_fast_seam = [0, last_probe]
         .into_iter()
-        .any(|end| slowest_probe == end && speed.at(turn) >= slowest);
-    if at_an_end {
-        return None;
-    }
+        .filter(|&end| end != slowest_probe && probe_speed(end) >= ADVANCE_VALLEY_SPEED_MM_S);
+    let (turn, _) = std::iter::once(slowest_probe)
+        .chain(next_to_a_fast_seam)
+        .filter_map(|index| {
+            let searched_speed = probe_speed(index);
+            if searched_speed >= ADVANCE_VALLEY_SPEED_MM_S
+                && speed.outruns_rest_near(index, ADVANCE_VALLEY_SPEED_MM_S)
+            {
+                return None;
+            }
+            let turn = speed.slowest_near(index);
+            let turn_speed = speed.at(turn);
+            let at_an_end = (index == 0 || index == last_probe) && turn_speed >= searched_speed;
+            (!at_an_end).then_some((turn, turn_speed))
+        })
+        .min_by(|left, right| left.1.total_cmp(&right.1))?;
     let crossing = Crossing::valley_at(leaders, turn);
     crossing.crawls().then(|| (speed.path_at(turn), crossing))
 }

@@ -49,7 +49,7 @@ fn every_corpus_case_plans() {
                 {
                     println!("{:<70} {}", "", audit.summary());
                     if let Some(excess) =
-                        corpus::known_extruder_excesses::extruder_excess(&case.config, &audit)
+                        corpus::known_extruder_excesses::extruder_excess(&case.name, &audit)
                     {
                         failures.push(format!("{}: {excess}", case.name));
                     }
