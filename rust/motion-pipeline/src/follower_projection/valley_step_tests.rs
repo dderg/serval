@@ -137,6 +137,53 @@ fn reversal(
     segments
 }
 
+/// The leaders speed out of a rest along `y` while the extruder lays
+/// `ratio`, brake into a crawl at `crawl` mm/s, their path speed
+/// `crawl + curve·t²` over the 0.1 s around it, speed up again and come to
+/// rest; the extrusion ends in a travel `before_crawl` seconds before the
+/// crawl.
+fn crawl_past_a_step(
+    crawl: f64,
+    curve: f64,
+    before_crawl: f64,
+    ratio: f64,
+) -> Vec<ContinuousSegment> {
+    let mut segments = Vec::new();
+    let (mut t, mut y, mut e) = (0.0, 100.0, 0.0);
+    let mut lay = |mut moved: Vec<f64>, duration: f64, ratio: f64| {
+        moved[0] += y;
+        segments.push(leg(&moved, (t, t + duration), (ratio, 1.0), e));
+        let [end_y, _, _] = eval(&moved, duration);
+        e += ratio * (end_y - y);
+        (t, y) = (t + duration, end_y);
+    };
+    let (half, rise_time, brake_time) = (0.05, 0.25, 0.2);
+    let entry = crawl + curve * half * half;
+    let entry_accel = 2.0 * curve * half;
+    let peak = entry + 0.5 * entry_accel * brake_time;
+    let braked = 0.5 * (peak + entry) * brake_time;
+    let rise = quintic(
+        [0.0, 0.0, 0.0],
+        [0.5 * peak * rise_time, peak, 0.0],
+        rise_time,
+    );
+    lay(rise, rise_time, ratio);
+    let brake = quintic([0.0, peak, 0.0], [braked, entry, -entry_accel], brake_time);
+    lay(brake, brake_time, ratio);
+    let through = |from: f64| vec![0.0, crawl + curve * from * from, curve * from, curve / 3.0];
+    lay(through(-half), half - before_crawl, ratio);
+    lay(through(-before_crawl), half + before_crawl, 0.0);
+    let leave = quintic([0.0, entry, entry_accel], [braked, peak, 0.0], brake_time);
+    lay(leave, brake_time, 0.0);
+    let stop = quintic(
+        [0.0, peak, 0.0],
+        [0.5 * peak * rise_time, 0.0, 0.0],
+        rise_time,
+    );
+    lay(stop, rise_time, 0.0);
+    segments
+}
+
 fn project(track: &[ContinuousSegment]) -> Vec<ContinuousSegment> {
     let follower = CompiledChain::compile(&[trajectory::PostProcessorInstance::new(
         "pa",
@@ -224,4 +271,14 @@ fn a_ratio_step_up_at_a_turnaround_keeps_the_extruder_within_its_limit() {
 #[test]
 fn a_ratio_step_up_at_a_turnaround_into_a_long_leg_keeps_the_extruder_within_its_limit() {
     assert_within_the_extruder_limit(&reversal((40.0, 300.0), 864.0, (0.0, 0.033_26)));
+}
+
+/// A crawl 15 ms past where an extrusion ends in a travel (the shape of
+/// `voron_dense_top_layers` at s=448.51 on the p1 bowden profile, gscale
+/// 0.45): the laid ratio is zero over the crawl valley's before side, but
+/// the advance reads the extrusion's ramp there, which a side sized for no
+/// ratio at all rebuilds the lead too steeply for (6900 mm/s²).
+#[test]
+fn a_crawl_valley_side_sizes_its_rebuild_by_the_ramped_ratio_the_advance_reads() {
+    assert_within_the_extruder_limit(&crawl_past_a_step(1.8, 30_000.0, 0.015, 0.034));
 }
