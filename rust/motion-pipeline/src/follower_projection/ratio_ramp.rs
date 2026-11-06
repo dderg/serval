@@ -1526,16 +1526,30 @@ impl RatioSmoothing {
         }
     }
 
-    /// A valley at `turn`, unless the last one laid sits there already: a
-    /// crawl at a seam is the slowest point of the leg before or after it
-    /// too.
+    /// A valley at `turn`, unless the last one laid already holds the
+    /// weight flat at zero there ([`AdvanceValley::holds_zero_at`]): a crawl
+    /// at a seam is the slowest point of the leg before or after it too,
+    /// read a hair inside that leg. Laid twice, the advance would read the
+    /// product of two weights there and rebuild its lead steeper than
+    /// either; neighbours still overlap where their crawls lie closer than
+    /// their reach.
     fn lay_valley(&mut self, turn: f64, reach: f64, floor: f64) {
-        let laid_there = self
+        if self
             .valleys
             .last()
-            .is_some_and(|valley| (valley.end - turn).abs() <= SPAN_LOOKUP_SLACK_MM);
-        if laid_there {
+            .is_some_and(|valley| valley.holds_zero_at(turn))
+        {
             return;
+        }
+        if let Some(laid) = self
+            .valleys
+            .iter()
+            .find(|valley| valley.holds_zero_at(turn))
+        {
+            panic!(
+                "follower projection: the crawl at s={turn} lies where the advance valley \
+                 {laid:?} already holds the weight at zero, behind the last one laid"
+            );
         }
         self.valleys.push(AdvanceValley {
             start: turn,
@@ -2133,6 +2147,15 @@ impl AdvanceValley {
 
     fn reach_end(&self) -> f64 {
         self.end + self.after
+    }
+
+    /// Whether the valley holds the weight flat at zero at `s`: on
+    /// `[start, end]`, and within its floor `f` either side, over which the
+    /// weight leaves zero flat (`ψ ≈ 3d²/(2f·w)` for `d ≪ f`); where it has
+    /// no floor, to a path lookup's rounding.
+    fn holds_zero_at(&self, s: f64) -> bool {
+        let flat = self.floor.max(SPAN_LOOKUP_SLACK_MM);
+        s >= self.start - flat && s <= self.end + flat
     }
 
     fn weight(&self, s: f64) -> (f64, f64, f64) {
