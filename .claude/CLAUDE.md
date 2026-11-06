@@ -131,9 +131,12 @@ from `origin/main`, creating one only when none is idle. A fresh worktree's firs
 `ci.sh quick` is ~250-310 s of cold compile; a reused pool worktree with a one-crate
 edit took 131 s under load 60 (cold 310 s on the same box), and ~40 s when nothing
 changed. `land-pr.sh` returns a pool worktree to idle (detached at `origin/main`, its
-branch deleted) instead of removing it. Allocation is serialised by an flock and recorded in a lease (`<gitdir>/wt-lease`: owner pid,
-topic) that `land-pr.sh` removes; a worktree with a branch, any uncommitted or untracked file, or a live
-lease is never idle (`wt.sh list` shows the lease). Other worktree names are removed after landing
+branch deleted) instead of removing it. Allocation is serialised by an flock and recorded in a lease (`<gitdir>/wt-lease`: owner, topic)
+that `land-pr.sh` removes. A worktree is idle only if it is detached, clean (untracked files count), its lease
+topic's branch no longer exists, and no other process has its cwd inside it (`scripts/worktree_users.sh`; an
+agent's persistent shell keeps its cwd there between commands, a pid in the lease could not). `land-pr.sh`
+leaves a tree on its branch, with the pids listed, while another process has its cwd in it. `wt.sh list`
+shows lease and users. Other worktree names are removed after landing
 as before.
 
 Ship with one command from the branch's worktree: `python3 scripts/ship.py --title T

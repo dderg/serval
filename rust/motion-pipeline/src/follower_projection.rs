@@ -1237,6 +1237,7 @@ impl KernelFit<'_> {
                 kernel: &exact_kernel,
                 impulses: &[],
                 position_offset: 0.0,
+                bounds_jerk: false,
             },
         );
         let output_monotonicity = if nonnegative_demand && !gained_input {
@@ -1592,6 +1593,85 @@ pub(crate) fn leader_seam_continuity(chains: &AxisChainSet, leader: usize) -> Se
         SeamContinuity::Acceleration
     } else {
         SeamContinuity::Velocity
+    }
+}
+
+/// How a leader's fitted jerk reaches the followers whose advances read it
+/// with no kernel after them ([`LeadingAdvance::is_ramped`]). Such an
+/// advance turns the path's jerk `s⃛` into follower acceleration at `G·r`,
+/// its steepest slope `G` times the follower's ratio `r`, and nothing after
+/// it averages a fit's jerk error away; `s⃛` moves by at most `√n` times the
+/// largest of its `n` leaders' jerk errors. `followers` holds a bit per
+/// follower axis, `gain` the largest `G·√n` among them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LeaderJerkRead {
+    followers: u64,
+    gain: f64,
+}
+
+impl LeaderJerkRead {
+    const UNREAD: Self = Self {
+        followers: 0,
+        gain: 0.0,
+    };
+
+    pub(crate) fn of(chains: &AxisChainSet, leader: usize) -> Self {
+        chains
+            .projected_followers()
+            .filter(|(_, leaders)| leaders.contains(&leader))
+            .filter_map(|(follower, leaders)| {
+                let advance = LeadingAdvance::of(&chains.chains[follower])
+                    .filter(|advance| advance.is_ramped())?;
+                let leader_count = leaders.len() as f64;
+                Some((
+                    follower,
+                    steepest_advance_slope(advance.stage) * leader_count.sqrt(),
+                ))
+            })
+            .fold(Self::UNREAD, |read, (follower, gain)| Self {
+                followers: read.followers
+                    | Self::bit(follower).unwrap_or_else(|| {
+                        panic!("follower axis {follower} exceeds the jerk read's axis mask")
+                    }),
+                gain: read.gain.max(gain),
+            })
+    }
+
+    fn bit(axis: usize) -> Option<u64> {
+        u32::try_from(axis)
+            .ok()
+            .and_then(|axis| 1_u64.checked_shl(axis))
+    }
+
+    /// The jerk error a leader's fit may make whose shaped signal is the
+    /// convolution of `segments` over `reach`, for the share it reaches each
+    /// follower's acceleration with to stay within `accel_tol`: unbounded
+    /// where no follower reads it or none extrudes along the path there. A
+    /// move of the follower alone rides no leader, and a segment outside
+    /// the reach shapes none of the fit.
+    pub(crate) fn jerk_budget(
+        self,
+        accel_tol: f64,
+        segments: &[&ContinuousSegment],
+        (reach_start, reach_end): (f64, f64),
+    ) -> f64 {
+        let ratio = segments
+            .iter()
+            .filter(|segment| {
+                segment.spatial_path && segment.t_end > reach_start && segment.t_start < reach_end
+            })
+            .flat_map(|segment| segment.followers.iter())
+            .filter(|demand| {
+                Self::bit(demand.axis_index).is_some_and(|bit| self.followers & bit != 0)
+            })
+            .map(|demand| demand.ratio.abs().max(demand.ratio_end.abs()))
+            .fold(0.0_f64, f64::max);
+        let reach = self.gain * ratio;
+        if reach > 0.0 {
+            accel_tol / reach
+        } else {
+            f64::INFINITY
+        }
     }
 }
 
@@ -3619,20 +3699,21 @@ impl<'a> FollowerSignal<'a> {
             .iter()
             .filter(|span| span.s1 >= s_lo - SPAN_LOOKUP_SLACK_MM && span.s0 < self.s_owned_end)
             .all(|span| span.r0 == 0.0 && span.r1 == 0.0);
-        let tail_zero = match self
+        let ridden_last = self
             .state
             .spans
             .iter()
             .rev()
-            .find(|span| span.s0 < self.s_owned_end)
-        {
+            .find(|span| span.s0 < self.s_owned_end);
+        let tail_zero = match ridden_last {
             Some(last) if self.s_owned_end > last.s1 => last.r1 == 0.0,
             _ => true,
         };
-        let smoothed = self
-            .state
-            .smoothing
-            .touches(s_lo - SPAN_LOOKUP_SLACK_MM, s_hi + SPAN_LOOKUP_SLACK_MM);
+        let smoothed = ridden_last.is_some()
+            && self
+                .state
+                .smoothing
+                .touches(s_lo - SPAN_LOOKUP_SLACK_MM, s_hi + SPAN_LOOKUP_SLACK_MM);
         (overlapping_zero && tail_zero && !smoothed).then(|| self.eval(self.grid[0]))
     }
 

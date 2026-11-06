@@ -20,6 +20,10 @@ pub struct FitTol {
     pub pos_mm: f64,
     pub accel_mm_s2: f64,
     pub accel_budget: AccelBudget,
+    /// How far a piece's jerk may stray from the signal's: unbounded but
+    /// where a follower reads the fitted jerk itself
+    /// ([`crate::follower_projection::LeaderJerkRead`]).
+    pub jerk_mm_s3: f64,
 }
 
 /// How a fit holds a piece's acceleration error.
@@ -53,7 +57,13 @@ impl FitTol {
             pos_mm,
             accel_mm_s2,
             accel_budget: AccelBudget::Absolute,
+            jerk_mm_s3: f64::INFINITY,
         }
+    }
+
+    /// This tolerance with its jerk held to `jerk_mm_s3`.
+    pub(crate) const fn with_jerk(self, jerk_mm_s3: f64) -> Self {
+        Self { jerk_mm_s3, ..self }
     }
 
     /// The tolerance one piece of duration `h` is held to, its acceleration
@@ -65,7 +75,11 @@ impl FitTol {
                 self.accel_mm_s2.max(8.0 * self.pos_mm / (h * h))
             }
         };
-        Self::absolute(self.pos_mm, accel_mm_s2)
+        Self {
+            accel_mm_s2,
+            accel_budget: AccelBudget::Absolute,
+            ..self
+        }
     }
 
     /// The acceleration no piece may reach where its budget is looser than
@@ -81,7 +95,10 @@ impl FitTol {
 
     /// This tolerance under the absolute budget.
     pub(crate) const fn absolute_budget(self) -> Self {
-        Self::absolute(self.pos_mm, self.accel_mm_s2)
+        Self {
+            accel_budget: AccelBudget::Absolute,
+            ..self
+        }
     }
 
     #[cfg(test)]

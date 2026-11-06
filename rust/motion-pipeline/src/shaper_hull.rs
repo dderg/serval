@@ -61,12 +61,18 @@ pub(crate) struct HullBudget {
 /// instructions on the P3 kernel profile's dense print.
 pub(crate) const ENCLOSURE_BUDGET_SHARE: f64 = 1.0 / 16.0;
 
+/// The derivative order of jerk, which the hull proves only against exact
+/// polynomials and only where the budget holds it ([`FitTol::jerk_mm_s3`]).
+const JERK: usize = 3;
+
 impl HullBudget {
     fn of_order(self, order: usize) -> f64 {
         match order {
             0 => self.tol.pos_mm,
             1 => self.velocity,
-            _ => self.tol.accel_mm_s2,
+            2 => self.tol.accel_mm_s2,
+            JERK => self.tol.jerk_mm_s3,
+            _ => panic!("the hull holds no derivative of order {order}"),
         }
     }
 
@@ -413,7 +419,7 @@ fn piece_budget(sub: &ExactPiece, order: usize, budget: HullBudget) -> Option<f6
     match (order, sub.unshaped_step) {
         (1, Some(step)) => Some(budget.velocity.min(step.allowance())),
         (1, None) => budget.velocity.is_finite().then_some(budget.velocity),
-        (2, Some(_)) => None,
+        (2 | JERK, Some(_)) => None,
         _ => Some(budget.of_order(order)),
     }
 }
@@ -440,7 +446,13 @@ fn error_polynomials<'a>(
         let middle = 0.5 * (from + to);
         let half = 0.5 * (to - from);
         let fitted = composed(derivative, u_of(middle), half * (2.0 / h));
-        let signal = &sub.pva[order];
+        let jerk;
+        let signal = if order == JERK {
+            jerk = sub.jerk();
+            &jerk
+        } else {
+            &sub.pva[order]
+        };
         let truth = composed(
             &signal.coefficients[..signal.len],
             (middle - sub.center) / sub.radius,
@@ -473,17 +485,33 @@ fn derivatives_of(piece: FittedPiece) -> [Monomials; 3] {
     [0, 1, 2].map(|order| piece_derivative(piece.mono_u, order, h))
 }
 
-/// The `u` of a point of `[domain]` where `piece` is not proven within
-/// `budget` of the signal whose exact polynomials over that domain are
-/// `exact`, or `None` when every order holds its budget everywhere there.
+/// Where a piece is not proven: the `u` of the point, and whether it is a
+/// jerk miss. A piece follows the jerk of one polynomial at a time: across
+/// a break it may miss it however short, and halving the span about the
+/// break only narrows its pieces toward the floor, where splitting at the
+/// break leaves each side one ([`super::exact::ExactSpan::break_nearest`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Unproven {
+    pub u: f64,
+    pub misses_jerk: bool,
+}
+
+/// Where `piece` is not proven within `budget` on `[domain]` of the
+/// signal whose exact polynomials over that domain are `exact`, or `None`
+/// when every order holds its budget everywhere there.
 pub(crate) fn first_unproven(
     exact: &[ExactPiece],
     piece: FittedPiece,
     domain: (f64, f64),
     budget: HullBudget,
-) -> Option<f64> {
+) -> Option<Unproven> {
     let h = piece.t1 - piece.t0;
-    for order in [0, 1, 2] {
+    let orders = if budget.tol.jerk_mm_s3.is_finite() {
+        0..=JERK
+    } else {
+        0..=2
+    };
+    for order in orders {
         let derivative = piece_derivative(piece.mono_u, order, h);
         let held = |sub: &ExactPiece| piece_budget(sub, order, budget);
         for (error, limit) in error_polynomials(exact, piece, &derivative, domain, order, held) {
@@ -499,7 +527,10 @@ pub(crate) fn first_unproven(
                 patch.level_rounding,
                 0,
             ) {
-                return Some((2.0 * (t - piece.t0) / h - 1.0).clamp(-1.0, 1.0));
+                return Some(Unproven {
+                    u: (2.0 * (t - piece.t0) / h - 1.0).clamp(-1.0, 1.0),
+                    misses_jerk: order == JERK,
+                });
             }
         }
     }

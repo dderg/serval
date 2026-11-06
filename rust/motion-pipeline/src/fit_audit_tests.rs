@@ -351,6 +351,7 @@ fn local(coefficients: &[f64]) -> LocalPolynomial {
         coefficients: padded,
         len: coefficients.len(),
         rounding: 0.0,
+        slope_rounding: 0.0,
     }
 }
 
