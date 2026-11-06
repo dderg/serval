@@ -27,8 +27,8 @@
 //! `δₖ` moves `e` by at most `Σ|δₖ|` on `|y| ≤ 1`, and a Bernstein error moves
 //! the hull bound by at most its own size, so the terms add.
 
-use super::{TRANSLATION_BINOMIALS, horner_shift_in_place};
 use super::exact::{EXACT_CAPACITY, ExactPiece, ExactRounding};
+use super::{TRANSLATION_BINOMIALS, horner_shift_in_place};
 use crate::lowering::FitTol;
 
 /// How many times a patch the hull cannot settle is halved before it is
