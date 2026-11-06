@@ -1401,6 +1401,76 @@ fn a_ratio_step_crossed_at_cruise_holds_its_width_over_every_window_reaching_it(
     }
 }
 
+/// A corner blend ramping the ratio down at 0.2 per millimetre ends the
+/// laid table 0.014 mm past its step. The next leg may carry that slope on
+/// or end it; read as endless, the blend's moving bend took the longest
+/// ramp and spread the line's ratio a millimetre into a z-hop past the
+/// crawl after it. The step takes no ramp time until the run past it is
+/// known, and its 0.014 mm run then carries no slope.
+#[test]
+fn a_ratio_step_waits_for_the_run_past_it_where_that_run_ends_the_table() {
+    let speed = 66.0;
+    let (seam_t, end) = (0.1, 0.3);
+    let mut field = WidthField {
+        rule: Some(DIRECT_DRIVE),
+        ..WidthField::default()
+    };
+    field.place_rest(0.0);
+    field.add_seam(TimedSeam {
+        t: seam_t,
+        s: speed * seam_t,
+        crossing: Crossing {
+            speed,
+            rate: 0.0,
+            jerk: 0.0,
+        },
+        step: 0.0028,
+        peak_ratio: LINE_RATIO,
+        slides: [
+            RatioSlide::FLAT,
+            RatioSlide {
+                slope: -0.2,
+                length_mm: 0.014,
+            },
+        ],
+        run_open: true,
+        ramp_time: None,
+    });
+    let mut t = NODE_SPACING_S;
+    while t < end {
+        field.place_sample(speed * t, t);
+        t += NODE_SPACING_S;
+    }
+    field.assign(end);
+    assert!(
+        field.seams[0].ramp_time.is_none(),
+        "the step took a {:?} s ramp before the run past it was known",
+        field.seams[0].ramp_time
+    );
+    let open = field.seams[0];
+    field.seams[0].run_open = false;
+    assert_eq!(field.seam_ramp_time(0), RATIO_RAMP_MIN_TIME_S);
+    let endless = RatioStep {
+        ratio_step: open.step,
+        peak_ratio: open.peak_ratio,
+        slides: [
+            RatioSlide::FLAT,
+            RatioSlide {
+                length_mm: f64::INFINITY,
+                ..open.slides[1]
+            },
+        ],
+        speed_mm_s: speed,
+        accel_mm_s2: 0.0,
+        jerk_mm_s3: 0.0,
+    };
+    let endless_ramp_time = DIRECT_DRIVE.ramp_time(&endless);
+    assert!(
+        endless_ramp_time > 3.0 * RATIO_RAMP_MIN_TIME_S,
+        "read as endless the run asks only a {endless_ramp_time} s ramp"
+    );
+}
+
 /// Moving width nodes lie most of the narrower of their targets apart on
 /// the path, so the smootherstep between two of them bends the width no
 /// sharper than a window's own width allows.

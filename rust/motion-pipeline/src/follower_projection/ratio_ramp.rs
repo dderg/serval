@@ -1140,6 +1140,19 @@ struct TimedSeam {
     ramp_time: Option<f64>,
 }
 
+impl TimedSeam {
+    /// Whether the run past the seam is as long as its ramp time can read:
+    /// closed, or laid past the path the longest ramp covers at the
+    /// crossing's speed, beyond which a longer run asks the same ramp
+    /// ([`geometry::RatioSlide::moving_slope`]). A ramp time derived from a
+    /// run still short of that could read a slope the next leg extends as
+    /// a short one, or one it ends as an endless one, which widens the
+    /// window far past what the step asks.
+    fn run_known(&self) -> bool {
+        !self.run_open || self.slides[1].length_mm >= self.crossing.speed * RATIO_RAMP_MAX_TIME_S
+    }
+}
+
 /// Whether the two spans of `pair` meet on one straight run of the ratio,
 /// cut only by rounding.
 fn carries_on(pair: &[RatioSpan]) -> bool {
@@ -1162,9 +1175,9 @@ fn run_through(spans: &[RatioSpan], index: usize) -> (usize, usize) {
 }
 
 /// `spans[index]`'s slope over the run holding it, and whether that run
-/// ends the table, which may lay more of it: over the run's whole path,
-/// and unbounded where the run starts the table, which may have dropped
-/// spans of it, or ends it. A flat span's run is flat throughout, since a
+/// ends the table, which may lay more of it: over the run's path laid so
+/// far, and unbounded where the run starts the table, which may have
+/// dropped spans of it. A flat span's run is flat throughout, since a
 /// slope off zero is a significant seam, and carries no slope however long.
 fn run_slide(spans: &[RatioSpan], index: usize) -> (RatioSlide, bool) {
     let slope = spans[index].ratio_slope();
@@ -1172,18 +1185,24 @@ fn run_slide(spans: &[RatioSpan], index: usize) -> (RatioSlide, bool) {
         return (RatioSlide::FLAT, false);
     }
     let (first, last) = run_through(spans, index);
-    let open = last + 1 == spans.len();
-    let length_mm = if first == 0 || open {
+    let length_mm = if first == 0 {
         f64::INFINITY
     } else {
         spans[last].s1 - spans[first].s0
     };
-    (RatioSlide { slope, length_mm }, open)
+    (RatioSlide { slope, length_mm }, last + 1 == spans.len())
 }
 
-/// The slide of the run through `spans[index]` ([`run_slide`]).
+/// The slide of the run through `spans[index]` ([`run_slide`]), unbounded
+/// where the run ends the table.
 fn slide_through(spans: &[RatioSpan], index: usize) -> RatioSlide {
-    run_slide(spans, index).0
+    match run_slide(spans, index) {
+        (slide, true) => RatioSlide {
+            length_mm: f64::INFINITY,
+            ..slide
+        },
+        (slide, false) => slide,
+    }
 }
 
 /// The last moving node the width field kept: when and where, its ramp
@@ -1417,6 +1436,13 @@ impl WidthField {
             return ramp_time;
         }
         let seam = self.seams[index];
+        assert!(
+            seam.run_known(),
+            "the ratio step at {} mm takes its ramp time while the {} mm run past it still ends \
+             the laid table",
+            seam.s,
+            seam.slides[1].length_mm
+        );
         let (step, peak_ratio) = self
             .seams
             .iter()
@@ -1506,9 +1532,23 @@ impl WidthField {
             .unwrap_or(f64::INFINITY)
     }
 
-    /// Turns every candidate at or before `through` whose base is known
-    /// into a node or drops it, in order, then every seam no candidate
-    /// still to come takes a ramp time or a width from.
+    /// Whether every seam a node at `t` reads a ramp time or a width from
+    /// ([`Self::ramp_time_at`], [`Self::seam_width_at`]) knows the run past
+    /// it, or took its ramp time already.
+    fn seams_known_around(&self, t: f64) -> bool {
+        let read = self
+            .seams
+            .partition_point(|seam| seam.t <= t + SEAM_REACH_S.max(SEAM_PATH_REACH_S));
+        self.seams[..read]
+            .iter()
+            .all(|seam| seam.ramp_time.is_some() || seam.run_known())
+    }
+
+    /// Turns every candidate at or before `through` whose base is known,
+    /// and whose seams around know the runs past them
+    /// ([`TimedSeam::run_known`]), into a node or drops it, in order, then
+    /// every seam no candidate still to come takes a ramp time or a width
+    /// from.
     fn assign(&mut self, through: f64) {
         while let Some(&candidate) = self.candidates.front() {
             match candidate {
@@ -1519,8 +1559,10 @@ impl WidthField {
                     };
                     if base == 0.0 {
                         self.rest_at(sample.s);
-                    } else {
+                    } else if self.seams_known_around(sample.t) {
                         self.keep_if_due(sample, base);
+                    } else {
+                        break;
                     }
                 }
             }
@@ -1539,6 +1581,7 @@ impl WidthField {
         let mut drop = 0;
         while drop < self.seams.len()
             && self.seams[drop].t < needed_from
+            && self.seams[drop].run_known()
             && !self.reaches_along_path(drop, front_s)
         {
             drop += 1;
@@ -1617,9 +1660,13 @@ impl WidthField {
     }
 
     /// A floor at `s`: the leaders rest there and nothing after reaches
-    /// back, so the sample still waiting on the path ahead takes `s` as it,
-    /// and every candidate becomes a node or is dropped.
+    /// back, so every run past a seam ends there, the sample still waiting
+    /// on the path ahead takes `s` as it, and every candidate becomes a
+    /// node or is dropped.
     fn close(&mut self, s: f64) {
+        for seam in &mut self.seams {
+            seam.run_open = false;
+        }
         if let Some(pending) = self.pending.take() {
             self.resolve(pending, s);
         }
