@@ -1,18 +1,18 @@
 {
   "slice_lines": 1000,
-  "commit": "053a9b198eea9008495420b4a9fee5bdc1ab1a80",
-  "reason": "p3_voron_direct_drive_ramp: +3.2% Ir arrived on main with #792 (turning guard), after the baseline ratchet #791 measured 5b8872f77; this branch adds +0.05% on top (local pinned Ir: main 0f71191f5 20,884.3M, branch 20,893.7M)",
+  "commit": "b04c051a83b5bb43c7cdb21fe56cf81cae63f6f8",
+  "reason": "turning guard: the emission horizon brakes through curves in closed form instead of integrating a disk rail per held curve every feed. Pinned slice Ir vs main dc95e5631: p3_voron_direct_drive_ramp 19,035.5M -> 18,239.9M (-4.18%), p3_voron_direct_drive_kernel +0.01%, trident_kernel +0.04%; the ratchet also takes up main's own drops since 053a9b198 (#795 and later)",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 21475558126,
+      "ir": 18239705616,
       "stream_secs": 6.374
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 20471239922,
+      "ir": 18138789153,
       "stream_secs": 6.049
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 25293611572,
+      "ir": 22423163723,
       "stream_secs": 5.465
     }
   },

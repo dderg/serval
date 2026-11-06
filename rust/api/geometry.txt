@@ -879,7 +879,7 @@ pub trait geometry::velocity::FanOut
 pub fn geometry::velocity::FanOut::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
 impl geometry::velocity::FanOut for geometry::velocity::Serial
 pub fn geometry::velocity::Serial::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
-pub fn geometry::velocity::brake_horizon(&[geometry::velocity::BrakeMove], impl core::iter::traits::double_ended::DoubleEndedIterator<Item = f64> + core::iter::traits::exact_size::ExactSizeIterator, f64) -> core::result::Result<core::option::Option<usize>, geometry::velocity::VelocityError>
+pub fn geometry::velocity::brake_horizon(&[geometry::velocity::BrakeMove], impl core::iter::traits::double_ended::DoubleEndedIterator<Item = f64> + core::iter::traits::exact_size::ExactSizeIterator) -> core::option::Option<usize>
 pub fn geometry::velocity::brake_move(&geometry::frontend::Move, &geometry::ExtrusionBudget, bool, core::option::Option<(&geometry::frontend::Move, &geometry::ExtrusionBudget, &geometry::velocity::BrakeMove)>, f64, geometry::velocity::VelocityPlanParams<'_>) -> core::result::Result<geometry::velocity::BrakeMove, geometry::velocity::VelocityError>
 pub fn geometry::velocity::extrusion_budgets(&[geometry::frontend::Move], f64, f64) -> alloc::vec::Vec<geometry::ExtrusionBudget>
 pub fn geometry::velocity::plan_velocity_stops(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams<'_>) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
@@ -1366,7 +1366,7 @@ pub fn geometry::FanOut::lead_and_follow(&self, usize, impl core::ops::function:
 impl geometry::velocity::FanOut for geometry::velocity::Serial
 pub fn geometry::velocity::Serial::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
 pub fn geometry::axis_set([bool; 3]) -> usize
-pub fn geometry::brake_horizon(&[geometry::velocity::BrakeMove], impl core::iter::traits::double_ended::DoubleEndedIterator<Item = f64> + core::iter::traits::exact_size::ExactSizeIterator, f64) -> core::result::Result<core::option::Option<usize>, geometry::velocity::VelocityError>
+pub fn geometry::brake_horizon(&[geometry::velocity::BrakeMove], impl core::iter::traits::double_ended::DoubleEndedIterator<Item = f64> + core::iter::traits::exact_size::ExactSizeIterator) -> core::option::Option<usize>
 pub fn geometry::brake_move(&geometry::frontend::Move, &geometry::ExtrusionBudget, bool, core::option::Option<(&geometry::frontend::Move, &geometry::ExtrusionBudget, &geometry::velocity::BrakeMove)>, f64, geometry::velocity::VelocityPlanParams<'_>) -> core::result::Result<geometry::velocity::BrakeMove, geometry::velocity::VelocityError>
 pub fn geometry::corner_deviation_from_scv(f64, f64) -> f64
 pub fn geometry::extrusion_budgets(&[geometry::frontend::Move], f64, f64) -> alloc::vec::Vec<geometry::ExtrusionBudget>

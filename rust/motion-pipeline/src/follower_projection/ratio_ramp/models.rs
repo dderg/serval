@@ -409,6 +409,29 @@ pub(in crate::follower_projection) struct ModelJet {
 }
 
 impl ModelJet {
+    fn add(&self, other: &Self) -> Self {
+        Self {
+            value: self.value.add(&other.value),
+            d1: self.d1.add(&other.d1),
+            d2: self.d2.add(&other.d2),
+            d3: self.d3.add(&other.d3),
+        }
+    }
+
+    /// The jet widened, model by model, by how far `other` departs from it.
+    fn widened_by(mut self, other: &Self) -> Self {
+        for (model, other) in [
+            (&mut self.value, &other.value),
+            (&mut self.d1, &other.d1),
+            (&mut self.d2, &other.d2),
+            (&mut self.d3, &other.d3),
+        ] {
+            let departure = other.sub(model).bound();
+            model.widen(departure);
+        }
+        self
+    }
+
     pub(in crate::follower_projection) fn zero() -> Self {
         let zero = TaylorModel::constant(Ball::exact(0.0));
         Self {
@@ -595,6 +618,18 @@ impl RatioSmoothing {
         reach: PathReach,
     ) -> Option<ModelJet> {
         let seams = self.seam_table(table);
+        let steps = self.step_models(seams, s, reach);
+        Some(self.slope_model(seams, s, reach)?.add(&steps))
+    }
+
+    /// The slope's share of the correction ([`SeamTable::slope_correction`])
+    /// on the model `s` of the path.
+    fn slope_model(
+        &self,
+        seams: &SeamTable,
+        s: &TaylorModel,
+        reach: PathReach,
+    ) -> Option<ModelJet> {
         if let Some(formula) = self.correction_formula(seams, reach) {
             return self.correction_by(seams, formula, s);
         }
@@ -605,18 +640,34 @@ impl RatioSmoothing {
         let (first, others) = formulas.split_first()?;
         let mut base = self.correction_by(seams, *first, s)?;
         for &other in others {
-            let other = self.correction_by(seams, other, s)?;
-            for (model, other) in [
-                (&mut base.value, &other.value),
-                (&mut base.d1, &other.d1),
-                (&mut base.d2, &other.d2),
-                (&mut base.d3, &other.d3),
-            ] {
-                let departure = other.sub(model).bound();
-                model.widen(departure);
-            }
+            base = base.widened_by(&self.correction_by(seams, other, s)?);
         }
         Some(base)
+    }
+
+    /// What the ratio steps whose own windows reach into `reach` add to the
+    /// correction on the model `s` of the path
+    /// ([`SeamTable::step_corrections`]): inside a step's window a
+    /// polynomial in its distance from the step on either side of it,
+    /// nothing outside. A reach across the step or a window edge reads each
+    /// formula it spans, the first widened by how far the others depart
+    /// from it.
+    fn step_models(&self, seams: &SeamTable, s: &TaylorModel, reach: PathReach) -> ModelJet {
+        let (lo, hi) = reach.span();
+        seams
+            .steps_reaching(&self.width, (lo, hi))
+            .fold(ModelJet::zero(), |total, (seam, h)| {
+                let sides = [
+                    (lo <= seam.s - h || hi >= seam.s + h).then(ModelJet::zero),
+                    (lo < seam.s).then(|| step_side_model(&seam, h, s, false)),
+                    (hi >= seam.s).then(|| step_side_model(&seam, h, s, true)),
+                ];
+                let mut read = sides.into_iter().flatten();
+                let first = read
+                    .next()
+                    .expect("a step reaching the reach reads a formula there");
+                total.add(&read.fold(first, |hull, other| hull.widened_by(&other)))
+            })
     }
 
     /// Every formula a reach too narrow to place its bends in reads, one per
@@ -636,7 +687,8 @@ impl RatioSmoothing {
         Some(formulas)
     }
 
-    /// The correction's jet on the model `s` of the path by `formula`.
+    /// The slope's correction jet on the model `s` of the path by
+    /// `formula`.
     fn correction_by(
         &self,
         seams: &SeamTable,
@@ -823,27 +875,8 @@ impl RatioSmoothing {
         let is_behind = |index: usize| first + index < behind_end;
         let offset_of = |seam: &Seam| Ball::rounded(centre - seam.s, 1);
         let zero = Ball::exact(0.0);
-        let mut step = [zero; SMOOTHED_RAMP.len()];
         let mut slope = [zero; SMOOTHED_HALF_SQUARE.len()];
         let mut kink = [zero; 3];
-        let mut steps = false;
-        for (index, seam) in seams
-            .iter()
-            .enumerate()
-            .filter(|(_, seam)| seam.step != 0.0)
-        {
-            steps = true;
-            let (offset, ratio_step) = (offset_of(seam), Ball::exact(seam.step));
-            let mut power = Ball::exact(1.0);
-            for moment in &mut step {
-                *moment = *moment + ratio_step * power;
-                power = power * offset;
-            }
-            if is_behind(index) {
-                kink[0] = kink[0] + ratio_step * offset;
-                kink[1] = kink[1] + ratio_step;
-            }
-        }
         for (index, pair) in seams.windows(2).enumerate() {
             let (seam, next) = (&pair[0], &pair[1]);
             if seam.slope_after == 0.0 {
@@ -877,9 +910,6 @@ impl RatioSmoothing {
                 }
             };
             moment(&slope, index, SMOOTHED_HALF_SQUARE[index]);
-            if let Some(k) = index.checked_sub(1).filter(|_| steps) {
-                moment(&step, k, SMOOTHED_RAMP[k]);
-            }
             if index == 0 && seams.is_empty() {
                 coefficients[0] =
                     coefficients[0] + Ball::exact(KERNEL_HALF_VARIANCE) * Ball::exact(slope_left);
@@ -985,5 +1015,28 @@ impl ValleyWeight {
             }
             ValleyWeight::Model(models) => models,
         }
+    }
+}
+
+/// `Δ·h·(P(x) − x)` past the step, `Δ·h·P(x)` before it, with
+/// `x = (s − σ)/h` and `P` the smoothed ramp ([`super::step_correction`]),
+/// with its first three path derivatives on the model `s` of the path.
+fn step_side_model(seam: &Seam, h: f64, s: &TaylorModel, past: bool) -> ModelJet {
+    let inverse = 1.0 / h;
+    let x = s.add_ball(Ball::exact(-seam.s)).scale(Ball::exact(inverse));
+    let kink = if past { 1.0 } else { 0.0 };
+    let derivative = |coefficients: &[f64], power: i32| {
+        let mut factor = Ball::exact(seam.step) * Ball::exact(h);
+        for _ in 0..power {
+            factor = factor * Ball::exact(inverse);
+        }
+        taylor::polynomial_of_balls(coefficients.iter().map(|&c| Ball::exact(c)), &x).scale(factor)
+    };
+    let [a0, a1, a2, a3, a4] = SMOOTHED_RAMP;
+    ModelJet {
+        value: derivative(&[a0, a1 - kink, a2, a3, a4], 0),
+        d1: derivative(&[a1 - kink, 2.0 * a2, 3.0 * a3, 4.0 * a4], 1),
+        d2: derivative(&[2.0 * a2, 6.0 * a3, 12.0 * a4], 2),
+        d3: derivative(&[6.0 * a3, 24.0 * a4], 3),
     }
 }

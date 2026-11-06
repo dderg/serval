@@ -294,6 +294,28 @@ fn assert_physical_limits(m: &Move, velocity: &MoveVelocity) -> Result<(), TestC
     Ok(())
 }
 
+/// The brake moves of the stream's first `scales.len()` moves, each on its
+/// budget scaled by its scale.
+fn floor_brakes(stream: &Stream, scales: &[f64]) -> Vec<BrakeMove> {
+    let mut brakes: Vec<BrakeMove> = Vec::with_capacity(scales.len());
+    for (k, &scale) in scales.iter().enumerate() {
+        let previous = k
+            .checked_sub(1)
+            .map(|up| (&stream.moves[up], &stream.budgets[up], &brakes[up]));
+        let brake = brake_move(
+            &stream.moves[k],
+            &stream.budgets[k],
+            stream.stop_before[k],
+            previous,
+            scale,
+            params(0.0),
+        )
+        .expect("the window's moves have caps");
+        brakes.push(brake);
+    }
+    brakes
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 128,
@@ -390,28 +412,8 @@ proptest! {
         let reach = 1 + ((reach * n as f64) as usize).min(n - 1);
         let scales = &scales[..reach];
         let seams = &stream.window.boundary_speeds[..=reach];
-        let mut brakes: Vec<BrakeMove> = Vec::with_capacity(reach);
-        for k in 0..reach {
-            let previous = k
-                .checked_sub(1)
-                .map(|up| (&stream.moves[up], &stream.budgets[up], &brakes[up]));
-            let brake = brake_move(
-                &stream.moves[k],
-                &stream.budgets[k],
-                stream.stop_before[k],
-                previous,
-                scales[k],
-                params(0.0),
-            )
-            .expect("the window's moves have caps");
-            brakes.push(brake);
-        }
-        let horizon = brake_horizon(
-            &brakes,
-            seams[..reach].iter().copied(),
-            params(0.0).integration_tol,
-        )
-        .expect("the window's moves have a brake envelope");
+        let brakes = floor_brakes(&stream, scales);
+        let horizon = brake_horizon(&brakes, seams[..reach].iter().copied());
         let Some(standing) = horizon else {
             return Ok(());
         };
@@ -426,5 +428,32 @@ proptest! {
             0.0,
         );
         prop_assert!(braked.is_ok(), "braking from seam {standing} to rest at {reach}: {braked:?}");
+    }
+
+    /// A brake move's entry speed never exceeds what the planner's disk
+    /// rail reaches back from the same exit speed through the move.
+    #[test]
+    fn a_brake_entry_stays_under_the_disk_rail(
+        stream in arb_stream(),
+        scales in prop::collection::vec(0.3f64..1.0, 64),
+        exits in prop::collection::vec(0.0f64..1.0, 64),
+    ) {
+        let n = stream.moves.len();
+        let brakes = floor_brakes(&stream, &scales[..n]);
+        let tol = params(0.0).integration_tol;
+        for (brake, share) in brakes.iter().zip(&exits) {
+            let kin = &brake.kin;
+            let exit_cap = disk::limit_speed(kin.kappa_abs(kin.length), kin.accel);
+            let exit = share * kin.flat_ceiling.min(exit_cap).min(500.0);
+            let rail = disk::disk_reach_v_rev(&brake.kin, exit, brake.kin.length, tol)
+                .expect("the disk rail integrates")
+                .v;
+            let entry = brake.entry_speed(exit);
+            prop_assert!(
+                entry <= rail + tol * (1.0 + rail),
+                "line {}: entry {entry} over the rail's {rail} from exit {exit}",
+                brake.line_no
+            );
+        }
     }
 }
