@@ -338,7 +338,11 @@ def test_a_side_is_summarised_from_its_fastest_runs_and_its_reps():
 
 
 def pinned(ir_x: float) -> dict[str, gate.FloorShortfall]:
-    return {"c": gate.FloorShortfall(issue=693, predicted_ir_x=ir_x)}
+    return {
+        "c": gate.FloorShortfall(
+            issue=693, predicted_ir_x=ir_x, pinned_cores_x=2.3
+        )
+    }
 
 
 def test_a_pinned_floor_shortfall_passes_at_its_pinned_prediction():
@@ -347,6 +351,10 @@ def test_a_pinned_floor_shortfall_passes_at_its_pinned_prediction():
     )
     assert verdict.predicted_x == pytest.approx((1.6, 1.4))
     assert verdict.problems == ()
+    assert verdict.notes == (
+        "the 2-core floor shortfall is pinned to #693 at 1.60x; the Pi "
+        "measured the pinned tree at 2.30x on cores 0,1,2",
+    )
 
 
 def test_a_pinned_floor_shortfall_that_grows_fails_naming_its_issue():
@@ -413,9 +421,14 @@ def test_a_pinned_shortfall_only_warns_while_the_floor_checks_are_off(
 
 def test_a_pin_at_or_above_the_floor_is_refused():
     with pytest.raises(ValueError):
-        gate.FloorShortfall(issue=693, predicted_ir_x=2.0)
+        gate.FloorShortfall(issue=693, predicted_ir_x=2.0, pinned_cores_x=2.3)
     with pytest.raises(ValueError):
-        gate.FloorShortfall(issue=693, predicted_ir_x=2.1)
+        gate.FloorShortfall(issue=693, predicted_ir_x=2.1, pinned_cores_x=2.3)
+
+
+def test_a_pin_the_pi_misses_the_floor_on_one_core_more_is_refused():
+    with pytest.raises(ValueError):
+        gate.FloorShortfall(issue=693, predicted_ir_x=1.8, pinned_cores_x=1.99)
 
 
 def test_a_missing_or_stale_pi_calibration_fails_with_the_recheck_command():

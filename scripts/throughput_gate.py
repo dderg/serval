@@ -66,7 +66,10 @@ The gate fails when, for any config:
   A config FLOOR_SHORTFALLS pins below the floor, to the issue that owns
   the shortfall, misses it instead when its Ir prediction falls below the
   pinned one by more than SHORTFALL_TOLERANCE_PCT (a regression); its live
-  prediction is not judged. A pinned shortfall that shrinks passes; once
+  prediction is not judged. A pin needs the Pi's own worst window at the
+  pinned tree on PINNED_CORES, one core more than the floor's, at or above
+  the floor, which scripts/throughput_pi.py measures for every pinned
+  config. A pinned shortfall that shrinks passes; once
   its Ir prediction reaches the floor, both predictions are judged against
   the floor again, and the report says to unpin it;
 - the calibration replay is inconsistent (below).
@@ -181,6 +184,7 @@ LIVE_FASTEST = 2
 LIVE_BAND_SIGMAS = 3.0
 LIVE_CORES = "0,1"
 PI_FLOOR_X = 2.0
+PINNED_CORES = "0,1,2"
 SHORTFALL_TOLERANCE_PCT = 2.0
 PI_FLOOR_FAILS = True
 PI_CALIBRATION_STALE_DAYS = 3
@@ -241,16 +245,26 @@ class Verdict:
 @dataclass(frozen=True)
 class FloorShortfall:
     """A config's Pi 2-core worst window below PI_FLOOR_X, as the gate
-    predicts it from Ir, owned by GitHub issue `issue`."""
+    predicts it from Ir, owned by GitHub issue `issue`. The pin holds only
+    while the Pi keeps the config realtime with one core more:
+    `pinned_cores_x` is the Pi's worst window under `taskset -c PINNED_CORES`
+    at the pinned tree, the lowest of its runs, as scripts/throughput_pi.py
+    measures it, at or above PI_FLOOR_X."""
 
     issue: int
     predicted_ir_x: float
+    pinned_cores_x: float
 
     def __post_init__(self) -> None:
         if not self.predicted_ir_x < PI_FLOOR_X:
             raise ValueError(
                 f"a floor shortfall pins an Ir prediction below {PI_FLOOR_X}x, "
                 f"not {self.predicted_ir_x}"
+            )
+        if not self.pinned_cores_x >= PI_FLOOR_X:
+            raise ValueError(
+                f"a floor shortfall needs the Pi at or above {PI_FLOOR_X}x on "
+                f"cores {PINNED_CORES}, not {self.pinned_cores_x}"
             )
 
 
@@ -992,6 +1006,11 @@ def judge(
             "Ir", ir_x, 0.0, pin.predicted_ir_x, pin.issue
         )
         floor_misses = [shortfall] if shortfall else []
+        notes.append(
+            f"the 2-core floor shortfall is pinned to #{pin.issue} at "
+            f"{pin.predicted_ir_x:.2f}x; the Pi measured the pinned tree at "
+            f"{pin.pinned_cores_x:.2f}x on cores {PINNED_CORES}"
+        )
     if PI_FLOOR_FAILS:
         problems.extend(floor_misses)
         floor_misses = []
