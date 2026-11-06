@@ -4,7 +4,10 @@ Shared by the live smoke and the live homing tests. Needs ETHERCAT_RT_STUB
 (an ethercat-rt-stub whose DC grid is on CLOCK_MONOTONIC_RAW, as the
 ethercat-rt repository's stub is) and KLIPPER_LINUX_MCU (out/klipper.elf
 built from test/configs/linuxprocess.config); kv2-notes/gate.sh builds and
-exports both.
+exports both. The linux MCU runs SCHED_FIFO (its -r flag) where the user's
+RLIMIT_RTPRIO allows it, as klipper-mcu does in production: a time-shared
+MCU process misses step deadlines by more than the 1 ms "Stepper too far in
+past" bound on a loaded box.
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import resource
 import socket
 import subprocess
 import sys
@@ -105,7 +109,7 @@ class Printer:
         self.api_path = tmp / "api.sock"
         self.log = tmp / "klippy.log"
         self.mcu = subprocess.Popen(
-            [LINUX_MCU, "-I", str(self.mcu_tty)],
+            [LINUX_MCU, "-I", str(self.mcu_tty)] + realtime_flag(),
             env=dict(os.environ, **(mcu_env or {})),
         )
         wait_for(lambda: self.mcu_tty.exists(), "the linux MCU tty")
@@ -140,3 +144,10 @@ class Printer:
         for proc in (self.klippy, self.mcu):
             proc.terminate()
             proc.wait(10)
+
+
+def realtime_flag():
+    """The linux MCU asks for half the maximum SCHED_FIFO priority."""
+    wanted = os.sched_get_priority_max(os.SCHED_FIFO) // 2
+    soft, _ = resource.getrlimit(resource.RLIMIT_RTPRIO)
+    return ["-r"] if soft >= wanted else []
