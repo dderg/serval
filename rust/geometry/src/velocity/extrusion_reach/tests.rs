@@ -163,7 +163,11 @@ fn the_ramp_spreads_at_the_fastest_speed_the_leaders_reach_nearby() {
 #[test]
 fn a_rest_keeps_the_extrusion_beyond_it_out_of_reach() {
     for filament in [1.0, 0.001] {
-        let moves = stream(&[(10.0, 0.0, 150.0), (0.0, filament, 40.0), (10.0, RATIO, 150.0)]);
+        let moves = stream(&[
+            (10.0, 0.0, 150.0),
+            (0.0, filament, 40.0),
+            (10.0, RATIO, 150.0),
+        ]);
         assert_ratios(&batch(&moves), &[0.0, 0.0, RATIO]);
     }
     let brief = least_rest_to_rest_time(0.001, 40.0, 5000.0);
