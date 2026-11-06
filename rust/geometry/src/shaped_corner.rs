@@ -29,10 +29,10 @@ const THETA_NODES: usize = 37;
 const BLEND_THETA_MAX_DEG: f64 = 179.0;
 const CUT_OCTAVE_LOW: i32 = -8;
 const CUT_NODES: usize = 13;
-const RATIO_NODES: usize = 9;
+const RATIO_NODES: usize = 5;
 const ORIENTATIONS: usize = 12;
-const STEPS_PER_SIGMA: f64 = 16.0;
-const SEARCH_SIGMAS: f64 = 2.0;
+const STEPS_PER_SIGMA: f64 = 10.0;
+const SEARCH_SIGMAS: f64 = 1.5;
 const RK_SUBSTEPS: usize = 4;
 const BLEND_SAMPLES: usize = 256;
 const SPEED_OCTAVE_LOW: i32 = -10;
@@ -42,8 +42,8 @@ const CIRCLE_OMEGA_MAX: f64 = 3.0;
 const CIRCLE_PHASES: usize = 64;
 const CIRCLE_RATE_FLOOR: f64 = 1e-3;
 const SQUARE_CORNER_RAD: f64 = std::f64::consts::FRAC_PI_2;
-const ACCEL_BISECTIONS: u32 = 48;
-const RATIO_BISECTIONS: u32 = 40;
+const ACCEL_BISECTIONS: u32 = 32;
+const RATIO_BISECTIONS: u32 = 24;
 const CUT_CANDIDATES: i32 = 16;
 const ROOM_ACCEL_OCTAVES: i32 = 10;
 const TURN_EPS_RAD: f64 = 1e-6;
@@ -150,6 +150,7 @@ fn kernel_value(kernel: &PiecewisePolynomialKernel, u: f64) -> f64 {
 
 /// The canonical blend of one turn: its halves sampled from the vertex,
 /// cut 1 at the apex.
+#[derive(Debug)]
 struct Blend {
     theta: f64,
     half1: Vec<[f64; 2]>,
@@ -300,7 +301,8 @@ fn distance_to_chord(a: [f64; 2], b: [f64; 2]) -> f64 {
     } else {
         0.0
     };
-    libm::hypot(a[0] + along * d[0], a[1] + along * d[1])
+    let (x, y) = (a[0] + along * d[0], a[1] + along * d[1]);
+    (x * x + y * y).sqrt()
 }
 
 fn theta_node(index: usize) -> f64 {
@@ -331,14 +333,24 @@ fn bracket(position: f64, count: usize) -> (usize, f64) {
     (index, clamped - index as f64)
 }
 
+/// One turn node's share of the table, each part filled the first time a
+/// corner reads it: a print turns at a handful of angles and cuts.
+#[derive(Debug, Default)]
+struct ThetaRow {
+    floor: OnceLock<f64>,
+    blend: OnceLock<Blend>,
+    cuts: [OnceLock<[f64; RATIO_NODES]>; CUT_NODES],
+}
+
 /// The shaper's rounding of corners and arcs for one pair of X and Y
-/// kernels.
-#[derive(Debug, Clone, PartialEq)]
+/// kernels, filled cell by cell as corners read it.
+#[derive(Debug)]
 pub struct ShapedCorners {
     sigma_s: f64,
-    peak_curvature_cut: [f64; THETA_NODES],
-    floor: [f64; THETA_NODES],
-    miss: Vec<f64>,
+    taps: [Taps; 2],
+    offset: i64,
+    search: i64,
+    rows: [ThetaRow; THETA_NODES],
     square_at_speed: [f64; SPEED_NODES],
     /// `(1 − ρ)/ω̂²`, `ρ` the least radius of a unit circle crossed at `ω̂`
     /// radians per `T`, node 0 at a vanishing rate.
@@ -364,66 +376,108 @@ impl ShapedCorners {
             kernels.map(|kernel| kernel.map_or_else(Taps::identity, |k| Taps::of(k, sigma_s)));
         let search = (SEARCH_SIGMAS * STEPS_PER_SIGMA) as i64;
         let offset = search + taps[0].reach().max(taps[1].reach());
-        let count = (offset + 1) as usize;
-        let miss_of = |points: &dyn Fn(f64) -> [f64; 2], arcs: &[f64]| {
-            let (xs, ys): (Vec<f64>, Vec<f64>) = (-offset..=offset)
-                .map(|k| {
-                    let s = arcs[k.unsigned_abs() as usize];
-                    points(if k < 0 { -s } else { s })
-                })
-                .map(|p| (p[0], p[1]))
-                .unzip();
-            worst_miss(&taps, &xs, &ys, offset, search)
-        };
-        let sharp = |theta: f64, v0: f64| {
-            let exit = [libm::cos(theta), libm::sin(theta)];
-            let arcs = arc_from_apex(|_| 0.0, v0, count);
-            miss_of(
-                &|s: f64| {
-                    if s < 0.0 {
-                        [s, 0.0]
-                    } else {
-                        [s * exit[0], s * exit[1]]
-                    }
-                },
-                &arcs,
-            )
-        };
-        let mut floor = [0.0; THETA_NODES];
-        let mut peak_curvature_cut = [0.0; THETA_NODES];
-        let mut miss = vec![0.0; THETA_NODES * CUT_NODES * RATIO_NODES];
-        for t in 1..THETA_NODES {
-            floor[t] = sharp(theta_node(t), 0.0);
-            let blend = Blend::of(theta_node(t).min(BLEND_THETA_MAX_DEG.to_radians()));
-            peak_curvature_cut[t] = blend.peak_curvature_cut();
-            for c in 0..CUT_NODES {
-                let cut = cut_node(c);
-                let cap = (cut / blend.peak_curvature_cut()).sqrt();
-                let mut envelope = 0.0_f64;
-                for r in 0..RATIO_NODES {
-                    let arcs =
-                        arc_from_apex(|s| blend.curvature(cut, s), ratio_node(r) * cap, count);
-                    envelope = envelope.max(miss_of(&|s| blend.point(cut, s), &arcs));
-                    miss[(t * CUT_NODES + c) * RATIO_NODES + r] = envelope;
-                }
-            }
-        }
-        peak_curvature_cut[0] = peak_curvature_cut[1];
-        let square_at_speed = std::array::from_fn(|i| sharp(SQUARE_CORNER_RAD, speed_node(i)));
         let circle = std::array::from_fn(|i| {
             let omega_hat = circle_node(i);
             (1.0 - circle_radius_ratio(&taps, omega_hat)) / (omega_hat * omega_hat)
         });
-        Some(Self {
+        let mut corners = Self {
             sigma_s,
-            peak_curvature_cut,
-            floor,
-            miss,
-            square_at_speed,
+            taps,
+            offset,
+            search,
+            rows: std::array::from_fn(|_| ThetaRow::default()),
+            square_at_speed: [0.0; SPEED_NODES],
             circle,
+        };
+        corners.square_at_speed =
+            std::array::from_fn(|i| corners.sharp_miss(SQUARE_CORNER_RAD, speed_node(i)));
+        Some(corners)
+    }
+
+    /// The worst closest approach to the vertex, over the corner's
+    /// orientations, of the motion at `points(s)` along arcs `arcs` from the
+    /// apex at each grid instant.
+    fn shaped_miss(&self, points: &dyn Fn(f64) -> [f64; 2], arcs: &[f64]) -> f64 {
+        let offset = self.offset;
+        let (xs, ys): (Vec<f64>, Vec<f64>) = (-offset..=offset)
+            .map(|k| {
+                let s = arcs[k.unsigned_abs() as usize];
+                points(if k < 0 { -s } else { s })
+            })
+            .map(|p| (p[0], p[1]))
+            .unzip();
+        worst_miss(&self.taps, &xs, &ys, offset, self.search)
+    }
+
+    fn samples(&self) -> usize {
+        (self.offset + 1) as usize
+    }
+
+    /// The miss of a sharp corner turning `theta` crossed at `v0` (in `A·T`).
+    fn sharp_miss(&self, theta: f64, v0: f64) -> f64 {
+        let exit = [libm::cos(theta), libm::sin(theta)];
+        let arcs = arc_from_apex(|_| 0.0, v0, self.samples());
+        self.shaped_miss(
+            &|s: f64| {
+                if s < 0.0 {
+                    [s, 0.0]
+                } else {
+                    [s * exit[0], s * exit[1]]
+                }
+            },
+            &arcs,
+        )
+    }
+
+    fn floor_hat(&self, t: usize) -> f64 {
+        *self.rows[t].floor.get_or_init(|| {
+            if t == 0 {
+                0.0
+            } else {
+                self.sharp_miss(theta_node(t), 0.0)
+            }
         })
     }
 
+    fn blend(&self, t: usize) -> &Blend {
+        let t = t.max(1);
+        self.rows[t]
+            .blend
+            .get_or_init(|| Blend::of(theta_node(t).min(BLEND_THETA_MAX_DEG.to_radians())))
+    }
+
+    /// `m` at turn node `t` and cut node `c` for each ratio node, rising in
+    /// the ratio.
+    fn cell(&self, t: usize, c: usize) -> &[f64; RATIO_NODES] {
+        self.rows[t].cuts[c].get_or_init(|| {
+            if t == 0 {
+                return [0.0; RATIO_NODES];
+            }
+            let blend = self.blend(t);
+            let cut = cut_node(c);
+            let cap = (cut / blend.peak_curvature_cut()).sqrt();
+            let mut envelope = 0.0_f64;
+            std::array::from_fn(|r| {
+                let arcs = arc_from_apex(
+                    |s| blend.curvature(cut, s),
+                    ratio_node(r) * cap,
+                    self.samples(),
+                );
+                envelope = envelope.max(self.shaped_miss(&|s| blend.point(cut, s), &arcs));
+                envelope
+            })
+        })
+    }
+}
+
+/// Tables of one kernel pair are one table.
+impl PartialEq for ShapedCorners {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
+impl ShapedCorners {
     /// The process's one table for this pair of kernels, built on first use
     /// and kept for the process's life: a printer holds a handful of kernel
     /// pairs, and every pipeline on them shares the table.
@@ -457,14 +511,14 @@ impl ShapedCorners {
 
     /// `m` at turn node `t`, cut `ĉ` over the length unit, ratio node `r`.
     fn cut_row(&self, t: usize, cut_hat: f64, r: usize) -> f64 {
-        let at = |c: usize| self.miss[(t * CUT_NODES + c) * RATIO_NODES + r];
+        let at = |c: usize| self.cell(t, c)[r];
         let lowest = cut_node(0);
         let highest = cut_node(CUT_NODES - 1);
         if cut_hat <= 0.0 {
-            self.floor[t]
+            self.floor_hat(t)
         } else if cut_hat < lowest {
             let f = cut_hat / lowest;
-            self.floor[t] * (1.0 - f) + at(0) * f
+            self.floor_hat(t) * (1.0 - f) + at(0) * f
         } else if cut_hat > highest {
             at(CUT_NODES - 1) - highest + cut_hat
         } else {
@@ -473,11 +527,15 @@ impl ShapedCorners {
         }
     }
 
-    fn at_ratio_node(&self, theta: f64, cut_mm: f64, accel: f64, r: usize) -> f64 {
+    /// The miss at each speed-ratio node of a corner turning `theta`, cut
+    /// `cut_mm`, at `accel`: linear in the ratio between nodes.
+    fn ratio_curve(&self, theta: f64, cut_mm: f64, accel: f64) -> [f64; RATIO_NODES] {
         let unit = self.length_unit(accel);
         let cut_hat = cut_mm / unit;
-        let raw = self.by_theta(theta, |t| self.cut_row(t, cut_hat, r));
-        unit * (cut_hat + PREDICTION_MARGIN * (raw - cut_hat).max(0.0))
+        std::array::from_fn(|r| {
+            let raw = self.by_theta(theta, |t| self.cut_row(t, cut_hat, r));
+            unit * (cut_hat + PREDICTION_MARGIN * (raw - cut_hat).max(0.0))
+        })
     }
 
     /// The shaped path's closest approach to the vertex of a corner turning
@@ -485,16 +543,16 @@ impl ShapedCorners {
     /// `speed_ratio` of the blend's curvature ceiling under `accel`.
     #[must_use]
     pub fn miss_mm(&self, theta: f64, cut_mm: f64, speed_ratio: f64, accel: f64) -> f64 {
+        let curve = self.ratio_curve(theta, cut_mm, accel);
         let (r, f) = bracket(speed_ratio * (RATIO_NODES - 1) as f64, RATIO_NODES);
-        self.at_ratio_node(theta, cut_mm, accel, r) * (1.0 - f)
-            + self.at_ratio_node(theta, cut_mm, accel, r + 1) * f
+        curve[r] * (1.0 - f) + curve[r + 1] * f
     }
 
     /// The miss of a stop at the sharp corner: what the shaper alone rounds
     /// it by at `accel`.
     #[must_use]
     pub fn floor_mm(&self, theta: f64, accel: f64) -> f64 {
-        PREDICTION_MARGIN * self.length_unit(accel) * self.by_theta(theta, |t| self.floor[t])
+        PREDICTION_MARGIN * self.length_unit(accel) * self.by_theta(theta, |t| self.floor_hat(t))
     }
 
     /// What crossing a sharp 90° corner at `scv` adds to its floor at
@@ -503,7 +561,7 @@ impl ShapedCorners {
     #[must_use]
     pub fn scv_allowance_mm(&self, scv: f64, accel: f64) -> f64 {
         let speed_hat = scv / (accel * self.sigma_s);
-        let square_floor = self.by_theta(SQUARE_CORNER_RAD, |t| self.floor[t]);
+        let square_floor = self.by_theta(SQUARE_CORNER_RAD, |t| self.floor_hat(t));
         let at_speed = if speed_hat <= speed_node(0) {
             let f = speed_hat / speed_node(0);
             square_floor * (1.0 - f) + self.square_at_speed[0] * f
@@ -539,7 +597,7 @@ impl ShapedCorners {
     /// from the vertex.
     #[must_use]
     pub fn blend_peak_curvature(&self, theta: f64, cut_mm: f64) -> f64 {
-        self.by_theta(theta, |t| self.peak_curvature_cut[t]) / cut_mm
+        self.by_theta(theta, |t| self.blend(t).peak_curvature_cut()) / cut_mm
     }
 
     /// The largest share of its curvature ceiling a blend may cross its apex
@@ -552,23 +610,16 @@ impl ShapedCorners {
         accel: f64,
         budget_mm: f64,
     ) -> Option<f64> {
-        let miss = |ratio: f64| self.miss_mm(theta, cut_mm, ratio, accel);
-        if miss(0.0) > budget_mm {
+        let curve = self.ratio_curve(theta, cut_mm, accel);
+        if curve[0] > budget_mm {
             return None;
         }
-        if miss(1.0) <= budget_mm {
+        let Some(over) = (1..RATIO_NODES).find(|&r| curve[r] > budget_mm) else {
             return Some(1.0);
-        }
-        let (mut lo, mut hi) = (0.0, 1.0);
-        for _ in 0..RATIO_BISECTIONS {
-            let mid = 0.5 * (lo + hi);
-            if miss(mid) <= budget_mm {
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        }
-        Some(lo)
+        };
+        let (below, above) = (curve[over - 1], curve[over]);
+        let f = (budget_mm - below) / (above - below);
+        Some((over - 1) as f64 / (RATIO_NODES - 1) as f64 + f / (RATIO_NODES - 1) as f64)
     }
 
     /// The acceleration a corner whose stop at `accel` misses past
@@ -753,16 +804,53 @@ pub fn blend_apex(up: &Move, down: &Move) -> Option<(f64, f64)> {
     if !blends_lines {
         return None;
     }
-    let entry = first.point_at(0.0);
-    let entry_heading = first.heading_at(0.0);
-    let exit = second.point_at(second.s_len());
-    let exit_heading = second.heading_at(second.s_len());
+    let entry = first.start_pose;
+    let entry_heading = first.u;
+    let (exit, exit_heading) = clothoid_end(second);
     let theta = libm::acos(dot(entry_heading, exit_heading).clamp(-1.0, 1.0));
     if theta < TURN_EPS_RAD {
         return None;
     }
     let vertex = tangent_meet(entry, entry_heading, exit, exit_heading);
-    Some((theta, norm(sub(first.point_at(first.s_len()), vertex))))
+    Some((theta, norm(sub(second.start_pose, vertex))))
+}
+
+/// Where a clothoid ends and its heading there, its position integrated by
+/// four-point Gauss-Legendre quadrature of its heading `φ = κ₀·s + σ·s²/2`:
+/// cheaper than the Fresnel evaluation and well within the cut's
+/// tolerance over a blend half's turn.
+fn clothoid_end(c: &Clothoid) -> ([f64; 3], [f64; 3]) {
+    const NODES: [f64; 4] = [
+        -0.861_136_311_594_052_6,
+        -0.339_981_043_584_856_3,
+        0.339_981_043_584_856_3,
+        0.861_136_311_594_052_6,
+    ];
+    const WEIGHTS: [f64; 4] = [
+        0.347_854_845_137_453_9,
+        0.652_145_154_862_546_1,
+        0.652_145_154_862_546_1,
+        0.347_854_845_137_453_9,
+    ];
+    let heading = |s: f64| libm::sincos(c.kappa_0 * s + 0.5 * c.sigma * s * s);
+    let half = 0.5 * c.length;
+    let (mut along_u, mut along_v) = (0.0, 0.0);
+    for (node, weight) in NODES.iter().zip(WEIGHTS) {
+        let (sin, cos) = heading(half * (1.0 + node));
+        along_u += weight * half * cos;
+        along_v += weight * half * sin;
+    }
+    let (sin, cos) = heading(c.length);
+    let at = |a: f64, b: f64| -> [f64; 3] { std::array::from_fn(|k| a * c.u[k] + b * c.v[k]) };
+    let offset = at(along_u, along_v);
+    (
+        [
+            c.start_pose[0] + offset[0],
+            c.start_pose[1] + offset[1],
+            c.start_pose[2] + offset[2],
+        ],
+        at(cos, sin),
+    )
 }
 
 /// The point midway between the closest points of the lines through
@@ -822,7 +910,7 @@ fn circle_radius_ratio(taps: &[Taps; 2], omega_hat: f64) -> f64 {
             let (sin, cos) = libm::sincos(u);
             let x = gx.0 * cos - gx.1 * sin;
             let y = gy.0 * sin + gy.1 * cos;
-            libm::hypot(x, y)
+            (x * x + y * y).sqrt()
         })
         .fold(f64::INFINITY, f64::min)
 }
