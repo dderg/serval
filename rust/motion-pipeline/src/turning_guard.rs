@@ -769,9 +769,7 @@ impl TurningGuard {
         let (back, ahead) = self.span;
         let timing = self.entries.timing[index];
         let lead = timing.t1() + VALLEY_LEAD_BUDGET_S;
-        if !self.arrived(lead + (ahead + 2) as f64 * h)
-            || !self.scanned_through((lead / h).ceil() as i64)
-        {
+        if !self.arrived(lead + (ahead + 2) as f64 * h) {
             return Check::NotReady;
         }
         let m = &self.entries.moves[index];
@@ -780,6 +778,9 @@ impl TurningGuard {
         };
         if m.segment.spatial.is_none() {
             return Check::Passed;
+        }
+        if !self.scanned_through((lead / h).ceil() as i64) {
+            return Check::NotReady;
         }
         let last = (timing.t1() / h).ceil() as i64;
         let first = ((timing.t0 / h).floor() as i64)
