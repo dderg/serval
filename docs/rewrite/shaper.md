@@ -367,9 +367,9 @@ toward a slow corner 14.8 mm on, and a ratio step the leaders crossed
 
 The cap searches the planned speed `v₀` at the join, not the shaped one.
 The planned speeds within the leaders' kernel reach of the join stay under
-the fastest ceiling `C` within the move's reach
-(`ExtrusionBudget::fastest_ceiling_mm_s`) and within `A` per second of
-`v₀`, so a kernel `w` shapes them into a speed of at most
+the fastest speed `C` the leaders can reach within the move's reach
+(`ExtrusionBudget::fastest_reachable_mm_s`, see below) and within `A` per
+second of `v₀`, so a kernel `w` shapes them into a speed of at most
 `∫|w(u)|·min(C, v₀ + A·|u|) du = mass·C − A·Φ((C − v₀)/A)`
 (`geometry::LeaderSpill`, which tabulates `Φ(x) = ∫|w|·(x − |u|)⁺` and its
 slope over 16 cells of the kernels' reach). It reaches `mass·C` as `v₀`
@@ -382,6 +382,22 @@ planned `v + k·a ≤ min(Q, v₀ + k·A + A·|u|)`, with `Q` the least of
 own flow never reaches `V_e` from the step's independent worst case of
 speed and budget, the way a noise step of `Δr ≤ 3e-5` once forced a stop
 at every such join of the Trident first layers.
+
+A move's reachable speed `U` (`ExtrusionBudget::reachable`) is the fastest
+the planner can cross it. It is the lesser of the move's feed ceiling and
+the envelope of the seam limits (the feed ceilings, the disks at the seams'
+curvature, the rests, the stream's ends) carried forward from behind and
+backward from ahead. Each move contributes the acceleration its extruder's
+acceleration cap leaves it on its own ratio at rest. `ExtrusionReach`
+computes `U` in the stream stage, so it is stable under windows and replan
+spans. The step cap, the ramp window (`0.5·C·τ_max`) and the rest room read
+the fastest `U` in reach. Each move's ceiling is held to `U`, which loses
+the plan nothing. Where `r_b·(v + k·A) ≤ V_e` still binds, the ceiling and
+the budget trade on that line: the pair taken is the one that crosses the
+run between the seams bounding `U` soonest, never a ceiling the run cannot
+reach (`LinearRate::capped`). The step-capacity cap trades the same way.
+A looser `max_velocity` therefore no longer drops the budget for a ceiling
+the plan never reaches.
 
 Without a follower kernel the acceleration the ramp adds is read at the
 ramp's edges, half the longest ramp either side of the join: the smoothed

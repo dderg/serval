@@ -78,7 +78,7 @@ fn stream_under(caps: ExtruderCaps, pieces: &[(f64, f64, f64)]) -> Vec<Move> {
 }
 
 fn batch(moves: &[Move]) -> Vec<f64> {
-    extrusion_budgets(moves, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
+    extrusion_budgets(moves, 0.0, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
         .iter()
         .map(|budget| budget.ratio_in_reach)
         .collect()
@@ -131,7 +131,7 @@ fn a_travel_meets_the_extrusion_its_spill_carries_across_the_blends_beside_it() 
 #[test]
 fn the_ratio_step_in_reach_spans_the_ratios_with_travel_at_none() {
     let steps = |moves: &[Move]| -> Vec<f64> {
-        extrusion_budgets(moves, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
+        extrusion_budgets(moves, 0.0, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
             .iter()
             .map(|budget| budget.ratio_step_in_reach)
             .collect()
@@ -165,10 +165,14 @@ fn ratios_beyond_the_spill_and_the_ramp_stay_out_of_reach() {
     assert_ratios(&batch(&moves), &[2.0 * RATIO; 3]);
 }
 
+/// The travel between two slow extrusions reaches `√(10² + A·L)` over its
+/// length `L` at the stream's acceleration `A`, far under its feed: the
+/// spill and the ramp spread at that speed, so the far extrusion comes
+/// into reach where the travel is shorter than that speed times the spill
+/// and half the ramp.
 #[test]
 fn the_ramp_spreads_at_the_fastest_speed_the_leaders_reach_nearby() {
-    let spilled = 1000.0 * SPILL_S;
-    let ramp = 1000.0 * 0.5 * RAMP_TIME_S;
+    let reach_s = SPILL_S + 0.5 * RAMP_TIME_S;
     let slow = |travel: f64| {
         batch(&stream(&[
             (10.0, RATIO, 10.0),
@@ -176,11 +180,11 @@ fn the_ramp_spreads_at_the_fastest_speed_the_leaders_reach_nearby() {
             (10.0, 2.0 * RATIO, 10.0),
         ]))
     };
-    assert_ratios(&slow(spilled + 0.9 * ramp), &[2.0 * RATIO; 3]);
-    assert_ratios(
-        &slow(spilled + 1.1 * ramp),
-        &[RATIO, 2.0 * RATIO, 2.0 * RATIO],
-    );
+    let climb = reach_s * reach_s * STREAM_ACCEL;
+    let edge = 0.5 * (climb + (climb * climb + 4.0 * 100.0 * reach_s * reach_s).sqrt());
+    assert!((100.0 + STREAM_ACCEL * edge).sqrt() < 1000.0);
+    assert_ratios(&slow(0.9 * edge), &[2.0 * RATIO; 3]);
+    assert_ratios(&slow(1.1 * edge), &[RATIO, 2.0 * RATIO, 2.0 * RATIO]);
 }
 
 /// Its holds keep an extrude-only move between motion longer than the
@@ -211,6 +215,7 @@ fn a_streamed_move_settles_once_the_moves_after_it_cover_its_reach() {
         (travel, 0.0, 150.0),
         (travel, 0.0, 150.0),
         (0.3 * speed_window_mm, 0.0, 150.0),
+        (10.0, 0.0, 150.0),
     ]);
     let mut reach = reach();
     for m in &moves[..3] {
@@ -221,9 +226,14 @@ fn a_streamed_move_settles_once_the_moves_after_it_cover_its_reach() {
         "the moves ahead fall short of its reach"
     );
     reach.push(moves[3].clone());
+    assert!(
+        reach.pop().is_none(),
+        "the last move ahead in its reach waits for the move after it to bound its speed"
+    );
+    reach.push(moves[4].clone());
     assert_ratios(&settled(&mut reach), &[RATIO]);
     reach.close();
-    assert_ratios(&settled(&mut reach), &[RATIO, RATIO, 0.0]);
+    assert_ratios(&settled(&mut reach), &[RATIO, RATIO, 0.0, 0.0]);
 }
 
 #[test]
@@ -248,7 +258,7 @@ fn a_stream_settles_every_move_as_the_whole_print_would() {
     budgets.extend(std::iter::from_fn(|| reach.pop().map(|(_, budget)| budget)));
     assert_eq!(
         budgets,
-        extrusion_budgets(&moves, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
+        extrusion_budgets(&moves, 0.0, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
     );
 }
 
@@ -263,7 +273,7 @@ fn a_move_reads_the_path_to_the_nearest_rest_where_it_narrows_a_ramp() {
         (narrows_within + 2.0, 2.0 * RATIO, 150.0),
         (narrows_within - 1.0, RATIO, 150.0),
     ]);
-    let rooms: Vec<f64> = extrusion_budgets(&moves, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
+    let rooms: Vec<f64> = extrusion_budgets(&moves, 0.0, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
         .iter()
         .map(|budget| budget.rest_room_mm)
         .collect();
@@ -312,7 +322,7 @@ fn an_extrude_only_move_holds_for_the_kernel_reach_beside_motion_where_the_extru
         (10.0, RATIO, 150.0),
         (0.0, -0.5, 40.0),
     ]);
-    let holds: Vec<[f64; 2]> = extrusion_budgets(&moves, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
+    let holds: Vec<[f64; 2]> = extrusion_budgets(&moves, 0.0, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
         .iter()
         .map(|budget| budget.rest_holds_s)
         .collect();
@@ -357,7 +367,7 @@ fn an_extrude_only_move_holds_until_the_shaped_path_settles_within_the_radius() 
             (0.0, -0.5, 40.0),
         ],
     );
-    let holds: Vec<[f64; 2]> = extrusion_budgets(&moves, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
+    let holds: Vec<[f64; 2]> = extrusion_budgets(&moves, 0.0, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
         .iter()
         .map(|budget| budget.rest_holds_s)
         .collect();
@@ -390,7 +400,8 @@ fn the_holds_of_a_brief_rest_cover_the_kernels_on_both_sides_together() {
             (10.0, RATIO, 150.0),
         ],
     );
-    let [before, after] = extrusion_budgets(&moves, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)[1].rest_holds_s;
+    let [before, after] =
+        extrusion_budgets(&moves, 0.0, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)[1].rest_holds_s;
     let run = least_rest_to_rest_time(filament, 40.0, EXTRUDE_ONLY.1);
     assert!(
         before < KERNEL_REACH_S && after < KERNEL_REACH_S,
@@ -455,10 +466,11 @@ fn hop_stream(hop_mm: f64) -> Vec<Move> {
 
 #[test]
 fn a_z_hop_longer_than_the_kernels_leaves_no_hold_on_its_side() {
-    let holds: Vec<[f64; 2]> = extrusion_budgets(&hop_stream(0.4), EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
-        .iter()
-        .map(|budget| budget.rest_holds_s)
-        .collect();
+    let holds: Vec<[f64; 2]> =
+        extrusion_budgets(&hop_stream(0.4), 0.0, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
+            .iter()
+            .map(|budget| budget.rest_holds_s)
+            .collect();
     assert!(0.4 / 40.0 > KERNEL_REACH_S);
     let hold = settled_hold();
     assert_eq!(holds[1], [hold, 0.0], "{holds:?}");
@@ -471,7 +483,7 @@ fn a_z_hop_shorter_than_the_kernels_shortens_the_hold_by_its_least_time() {
     let lead = hop_mm / 40.0;
     assert!(lead < settled_hold());
     let holds: Vec<[f64; 2]> =
-        extrusion_budgets(&hop_stream(hop_mm), EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
+        extrusion_budgets(&hop_stream(hop_mm), 0.0, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
             .iter()
             .map(|budget| budget.rest_holds_s)
             .collect();
@@ -514,7 +526,7 @@ fn the_axes_in_reach_are_those_the_path_moves_on_within_the_spill() {
             line_move(ends[0], ends[1], RATIO, ctx).unwrap()
         })
         .collect();
-    let axes: Vec<[bool; 3]> = extrusion_budgets(&moves, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
+    let axes: Vec<[bool; 3]> = extrusion_budgets(&moves, 0.0, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
         .iter()
         .map(|budget| budget.axes_in_reach)
         .collect();

@@ -23,7 +23,9 @@ mod reconstruct;
 mod step_capacity;
 mod z_caps;
 
-pub use extrusion_reach::{ExtrusionBudget, ExtrusionReach, extrusion_budgets};
+pub use extrusion_reach::{
+    ExtrusionBudget, ExtrusionReach, ReachableSpeed, SeamLimit, extrusion_budgets,
+};
 pub use law::{LawSegment, RailPair, RailPairShape, ScalarLaw};
 
 use disk::Kinematics;
@@ -256,6 +258,7 @@ pub fn plan_velocity_stops_reconstruct_prefix(
         stop_before,
         &extrusion_reach::extrusion_budgets(
             moves,
+            params.entry_v,
             params.max_extrude_only_velocity_mm_s,
             params.max_extrude_only_accel_mm_s2,
         ),
@@ -609,7 +612,7 @@ fn build_move_caps(
                     Some(extruder) => {
                         extruder_caps::extruder_capped(seg, extruder, budget, kappa_peak, z_capped)
                     }
-                    None => z_capped,
+                    None => (z_capped.0.min(budget.reachable.peak_mm_s), z_capped.1),
                 };
                 let limits = extruder_caps::moving_retract_capped(
                     &m.segment,
@@ -652,8 +655,7 @@ fn build_move_caps(
                     ratio_in_reach,
                     capacity,
                 ),
-                length,
-                kappa_peak,
+                &budget.reachable,
                 limits,
             ),
             None => (limits, None),
