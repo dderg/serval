@@ -19,6 +19,7 @@ fn caps() -> ExtruderCaps {
         advance_slope_s: 0.02,
         advance_curvature_s2_per_mm: 0.0,
         path_jerk_per_accel_hz: [0.0, 1000.0, 1000.0, 1000.0, 0.0, 1000.0, 1000.0, 1000.0],
+        leader_peak_hz: [500.0, 500.0, 0.0],
         unshaped_leaders: [false, false, true],
         own_jerk_per_accel_hz: f64::INFINITY,
         instantaneous_corner_velocity_mm_s: 1.0,
@@ -125,6 +126,26 @@ fn a_travel_meets_the_extrusion_its_spill_carries_across_the_blends_beside_it() 
         (10.0, line, 150.0),
     ]);
     assert_ratios(&batch(&moves), &[line; 5]);
+}
+
+#[test]
+fn the_ratio_step_in_reach_spans_the_ratios_with_travel_at_none() {
+    let steps = |moves: &[Move]| -> Vec<f64> {
+        extrusion_budgets(moves, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
+            .iter()
+            .map(|budget| budget.ratio_step_in_reach)
+            .collect()
+    };
+    let through_travel = stream(&[
+        (10.0, RATIO, 150.0),
+        (0.45, 0.0, 150.0),
+        (10.0, RATIO, 150.0),
+    ]);
+    assert_ratios(&steps(&through_travel), &[RATIO; 3]);
+    let into_a_wider_line = stream(&[(10.0, RATIO, 150.0), (10.0, 1.5 * RATIO, 150.0)]);
+    assert_ratios(&steps(&into_a_wider_line), &[0.5 * RATIO; 2]);
+    let even = stream(&[(10.0, RATIO, 150.0), (10.0, RATIO, 150.0)]);
+    assert_eq!(steps(&even), [0.0; 2]);
 }
 
 #[test]

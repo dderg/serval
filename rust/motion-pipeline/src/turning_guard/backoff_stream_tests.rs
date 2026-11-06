@@ -69,8 +69,8 @@ fn without_a_z_shaper() -> String {
 }
 
 /// A printer whose planner reads the advance's jerk at `jerk_gain_share`
-/// of the gain its kernels have, so the guard behind it, which reads the
-/// whole gain, meets the demand of a planner that under-estimates it.
+/// of the switch gain it plans at, so the guard behind it, which reads the
+/// whole variation, meets the demand of a planner that under-estimates it.
 pub(super) struct UnsoundPlanner {
     cfg: PlannerConfig,
     config: StreamConfig,
@@ -93,9 +93,7 @@ impl UnsoundPlanner {
             chains,
             real,
             planned_under: ExtruderCaps {
-                path_jerk_per_accel_hz: real
-                    .path_jerk_per_accel_hz
-                    .map(|gain| jerk_gain_share * gain),
+                leader_peak_hz: real.leader_peak_hz.map(|gain| jerk_gain_share * gain),
                 ..real
             },
         }

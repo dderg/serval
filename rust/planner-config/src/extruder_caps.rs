@@ -79,6 +79,14 @@ pub fn extruder_caps(
             path_jerk_per_accel_hz: std::array::from_fn::<_, SPATIAL_AXIS_SETS, _>(|set| {
                 path_jerk_per_accel(&shaped, set)
             }),
+            leader_peak_hz: std::array::from_fn(|axis| {
+                shaped
+                    .iter()
+                    .find(|(leader, _)| *leader == axis)
+                    .map_or(0.0, |(_, kernel)| {
+                        PiecewisePolynomialKernel::directional_peak(&[kernel])
+                    })
+            }),
             unshaped_leaders,
             own_jerk_per_accel_hz: chain.kernel_jerk_per_accel_hz(),
             instantaneous_corner_velocity_mm_s: chain.instantaneous_corner_velocity(),

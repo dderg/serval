@@ -91,8 +91,12 @@ fn eval(coeffs: &[f64], t: f64) -> [f64; 3] {
 
 /// The leaders brake at `accel` from `cruise` into a turnaround while the
 /// extruder lays `ratio_in`, then head back out of it as hard up to
-/// `cruise` again while it lays `ratio_out`, and come to rest.
-fn reversal(cruise: f64, accel: f64, (ratio_in, ratio_out): (f64, f64)) -> Vec<ContinuousSegment> {
+/// `leave` while it lays `ratio_out`, and come to rest.
+fn reversal(
+    (cruise, leave): (f64, f64),
+    accel: f64,
+    (ratio_in, ratio_out): (f64, f64),
+) -> Vec<ContinuousSegment> {
     let mut segments = Vec::new();
     let (mut t, mut y, mut e) = (0.0, 100.0, 0.0);
     let mut lay = |mut moved: Vec<f64>, duration: f64, (ratio, sense): (f64, f64)| {
@@ -115,8 +119,12 @@ fn reversal(cruise: f64, accel: f64, (ratio_in, ratio_out): (f64, f64)) -> Vec<C
     );
     let brake_time = cruise / accel;
     lay(vec![0.0, cruise, -0.5 * accel], brake_time, (ratio_in, 1.0));
-    let out = lay(vec![0.0, 0.0, -0.5 * accel], brake_time, (ratio_out, -1.0));
-    let stop_time = 0.15;
+    let out = lay(
+        vec![0.0, 0.0, -0.5 * accel],
+        leave / accel,
+        (ratio_out, -1.0),
+    );
+    let stop_time = (2.0 * leave / accel).max(0.15);
     lay(
         quintic(
             [0.0, out, -accel],
@@ -197,7 +205,7 @@ fn assert_within_the_extruder_limit(track: &[ContinuousSegment]) {
 /// (`voron_first_layers` line 3654 into 3655 on the p1 bowden profile).
 #[test]
 fn a_ratio_step_down_at_a_turnaround_keeps_the_extruder_within_its_limit() {
-    assert_within_the_extruder_limit(&reversal(40.0, 861.19, (0.033_645, 0.0)));
+    assert_within_the_extruder_limit(&reversal((40.0, 40.0), 861.19, (0.033_645, 0.0)));
 }
 
 /// A travel reversing into an extrusion back over it (`corner_flow`'s
@@ -205,5 +213,15 @@ fn a_ratio_step_down_at_a_turnaround_keeps_the_extruder_within_its_limit() {
 /// profile).
 #[test]
 fn a_ratio_step_up_at_a_turnaround_keeps_the_extruder_within_its_limit() {
-    assert_within_the_extruder_limit(&reversal(40.0, 864.0, (0.0, 0.033_26)));
+    assert_within_the_extruder_limit(&reversal((40.0, 40.0), 864.0, (0.0, 0.033_26)));
+}
+
+/// The same step where the extrusion keeps accelerating long past the
+/// turnaround (`corner_flow_cases` at s=2521.08 on the p1 bowden profile):
+/// the side trail probes that leg far apart, none between the edge of the
+/// valley's zero stretch, which the leaders already cross at speed, and
+/// the stretch of the side where the rebuild bends hardest.
+#[test]
+fn a_ratio_step_up_at_a_turnaround_into_a_long_leg_keeps_the_extruder_within_its_limit() {
+    assert_within_the_extruder_limit(&reversal((40.0, 300.0), 864.0, (0.0, 0.033_26)));
 }

@@ -588,6 +588,7 @@ impl CrawlSide {
             "a crawl side spans a positive width, not {width} mm"
         );
         RebuildsWithin {
+            width,
             fastest: self.fastest,
             pieces: floor_pieces(self.floor, width)
                 .into_iter()
@@ -620,6 +621,7 @@ impl CrawlSide {
 /// once per floor piece.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RebuildsWithin {
+    width: f64,
     fastest: f64,
     pieces: Vec<(SideSpan, f64)>,
 }
@@ -649,6 +651,53 @@ impl RebuildsWithin {
                 bend.max(weight.fold.1 * cubed) + 3.0 * weight.slope.1 * speed * accel
             })
             .fold(0.0, f64::max)
+    }
+
+    /// Whether the rebuild asks no more than `room` of leaders between two
+    /// readings of them, `near` and `far`, each their distance from the
+    /// crawl, signed (negative inside the zero stretch), and their speed
+    /// there, `near.0 ≤ far.0`. Between the readings `|s̈|` is within
+    /// `accel`, and `ṡ²` changes by at most `2·growth` per mm: from either
+    /// reading, `ṡ² ≤ v² + 2·growth·|Δd|`. Readings far apart say nothing of
+    /// the leaders between them but that, so the part of the side between
+    /// them is read in pieces no wider than the side over
+    /// [`CRAWL_SIDE_DISTANCE_PIECES`], each at the speed both bounds leave
+    /// over it ([`Self::at`]), once the whole of it read at once does not
+    /// fit.
+    #[must_use]
+    pub fn fits_between(
+        &self,
+        near: (f64, f64),
+        far: (f64, f64),
+        (growth, accel): (f64, f64),
+        room: f64,
+    ) -> bool {
+        assert!(
+            near.0 <= far.0 && near.1 >= 0.0 && far.1 >= 0.0 && growth >= 0.0,
+            "a crawl side's readings are ill-formed: {near:?} to {far:?}, ṡ² growing at most \
+             {growth} mm/s² per mm"
+        );
+        let (lo, hi) = (near.0.max(0.0), far.0.min(self.width));
+        if lo > hi {
+            return true;
+        }
+        let speed_over = |(from, to): (f64, f64)| {
+            let from_near = near.1 * near.1 + 2.0 * growth * (to - near.0);
+            let from_far = far.1 * far.1 + 2.0 * growth * (far.0 - from);
+            libm::sqrt(from_near.min(from_far))
+        };
+        let fits = |range: (f64, f64)| self.at(range, speed_over(range), accel) <= room;
+        if fits((lo, hi)) {
+            return true;
+        }
+        let longest = self.width / f64::from(CRAWL_SIDE_DISTANCE_PIECES);
+        let pieces = libm::ceil((hi - lo) / longest).max(1.0) as u32;
+        let step = (hi - lo) / f64::from(pieces);
+        (0..pieces).all(|piece| {
+            let from = lo + f64::from(piece) * step;
+            let to = if piece + 1 == pieces { hi } else { from + step };
+            fits((from, to))
+        })
     }
 }
 

@@ -82,6 +82,7 @@ fn extruder(machine: &Machine) -> ExtruderCaps {
         advance_slope_s: machine.slope,
         advance_curvature_s2_per_mm: 0.0,
         path_jerk_per_accel_hz: [0.0, 900.0, 700.0, 1100.0, 0.0, 900.0, 700.0, 1100.0],
+        leader_peak_hz: [550.0, 550.0, 0.0],
         unshaped_leaders: [false; 3],
         own_jerk_per_accel_hz: f64::INFINITY,
         instantaneous_corner_velocity_mm_s: 2.0,

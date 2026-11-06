@@ -38,6 +38,7 @@ fn realizable_accel(m: &Move) -> f64 {
     let (_, accel) = m.limits.extruder.map_or(z_held, |caps| {
         let own = ExtrusionBudget {
             ratio_in_reach: extruding_ratio(m, caps.axis_index),
+            ratio_step_in_reach: 0.0,
             axes_in_reach: moves_on(segment),
             rest_holds_s: [0.0; 2],
             rest_room_mm: f64::INFINITY,
@@ -132,14 +133,14 @@ fn least_rest_to_rest_time(length: f64, speed: f64, accel: f64) -> f64 {
 
 /// What the marks dropped from the history leave behind: where the last
 /// of them ends, their fastest ceiling, their largest acceleration and the
-/// largest they can realize, and their largest ratio per axis.
+/// largest they can realize, and the span of their ratios per axis.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Dropped {
     end_mm: f64,
     ceiling_mm_s: f64,
     accel_mm_s2: f64,
     realizable_accel_mm_s2: f64,
-    ratios: Vec<(usize, f64)>,
+    ratios: Vec<(usize, RatioSpan)>,
 }
 
 impl Dropped {
@@ -152,16 +153,20 @@ impl Dropped {
             return;
         };
         match self.ratios.iter_mut().find(|(on, _)| *on == axis) {
-            Some((_, largest)) => *largest = largest.max(ratio),
-            None => self.ratios.push((axis, ratio)),
+            Some((_, span)) => *span = span.with(ratio),
+            None => self.ratios.push((axis, RatioSpan::of(ratio))),
         }
     }
 
     fn ratio_on(&self, axis: usize) -> f64 {
+        self.span_on(axis).map_or(0.0, |span| span.largest)
+    }
+
+    fn span_on(&self, axis: usize) -> Option<RatioSpan> {
         self.ratios
             .iter()
             .find(|(on, _)| *on == axis)
-            .map_or(0.0, |(_, ratio)| *ratio)
+            .map(|(_, span)| *span)
     }
 }
 
@@ -199,6 +204,38 @@ struct ShapedScan {
 
 fn either(a: [bool; 3], b: [bool; 3]) -> [bool; 3] {
     std::array::from_fn(|axis| a[axis] || b[axis])
+}
+
+/// The largest and least extrusion ratios over a stretch of path, travel
+/// counting as 0.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RatioSpan {
+    largest: f64,
+    least: f64,
+}
+
+impl RatioSpan {
+    fn of(ratio: f64) -> Self {
+        Self {
+            largest: ratio,
+            least: ratio,
+        }
+    }
+
+    fn with(self, ratio: f64) -> Self {
+        self.union(Self::of(ratio))
+    }
+
+    fn union(self, other: Self) -> Self {
+        Self {
+            largest: self.largest.max(other.largest),
+            least: self.least.min(other.least),
+        }
+    }
+
+    fn step(&self) -> f64 {
+        self.largest - self.least
+    }
 }
 
 /// The spatial axes `segment` moves on.
@@ -407,11 +444,12 @@ impl Marks {
         Some(axes)
     }
 
-    /// The largest ratio on one side of `marks[index]` its demand meets:
-    /// over the marks the leaders reach within the spill, then over the
-    /// path a ramp `ramp_mm` wide lays beyond where the spill ends, both up
-    /// to the first rest, which the rest holds keep the shaped path still
-    /// across. `None` while moves still to come could add to it.
+    /// The ratios on one side of `marks[index]` its demand meets, its own
+    /// included: over the marks the leaders reach within the spill, then
+    /// over the path a ramp `ramp_mm` wide lays beyond where the spill ends,
+    /// both up to the first rest, which the rest holds keep the shaped path
+    /// still across. `None` while moves still to come could add to them.
+    /// The dropped marks count where the scan reaches them.
     fn ratio_beside(
         &self,
         index: usize,
@@ -419,10 +457,10 @@ impl Marks {
         reach: Reach,
         ramp_mm: f64,
         closed: bool,
-    ) -> Option<f64> {
+    ) -> Option<RatioSpan> {
         let toward = if ahead { 1.0 } else { -1.0 };
         let mut elapsed = 0.0;
-        let mut ratio: f64 = 0.0;
+        let mut span = RatioSpan::of(self.marks[index].ratio_on(reach.axis));
         let mut spill_edge = SpillEdge {
             mm: self.marks[index].far_edge_mm(ahead),
             behind_rest: false,
@@ -431,9 +469,9 @@ impl Marks {
         for other in self.beside(index, ahead) {
             if in_spill {
                 if other.rest {
-                    return Some(ratio);
+                    return Some(span);
                 }
-                ratio = ratio.max(other.ratio_on(reach.axis));
+                span = span.with(other.ratio_on(reach.axis));
                 let spill_left_s = reach.spill_s - elapsed;
                 elapsed += other.least_time_s;
                 spill_edge = if elapsed <= reach.spill_s {
@@ -452,9 +490,9 @@ impl Marks {
                 continue;
             }
             if !spill_edge.reaches(toward, other.near_edge_mm(ahead), other.rest, ramp_mm) {
-                return Some(ratio);
+                return Some(span);
             }
-            ratio = ratio.max(other.ratio_on(reach.axis));
+            span = span.with(other.ratio_on(reach.axis));
         }
         let unknown_edge_mm = if ahead {
             self.path_end_mm
@@ -462,12 +500,16 @@ impl Marks {
             self.dropped.end_mm
         };
         if !in_spill && !spill_edge.reaches(toward, unknown_edge_mm, false, ramp_mm) {
-            return Some(ratio);
+            return Some(span);
         }
         match (ahead, closed) {
-            (true, true) => Some(ratio),
+            (true, true) => Some(span),
             (true, false) => None,
-            (false, _) => Some(ratio.max(self.dropped.ratio_on(reach.axis))),
+            (false, _) => Some(
+                self.dropped
+                    .span_on(reach.axis)
+                    .map_or(span, |dropped| span.union(dropped)),
+            ),
         }
     }
 
@@ -497,21 +539,19 @@ impl Marks {
         Some(strongest)
     }
 
-    /// The largest ratio the demand of `marks[index]`, `reach` around it
-    /// with ceilings up to `fastest`, meets.
+    /// The ratios the demand of `marks[index]`, `reach` around it with
+    /// ceilings up to `fastest`, meets.
     fn ratio_in_reach(
         &self,
         index: usize,
         reach: Reach,
         fastest: f64,
         closed: bool,
-    ) -> Option<f64> {
+    ) -> Option<RatioSpan> {
         let ramp_mm = 0.5 * fastest * RATIO_RAMP_MAX_TIME_S;
-        let mut ratio = self.marks[index].ratio_on(reach.axis);
-        for ahead in [false, true] {
-            ratio = ratio.max(self.ratio_beside(index, ahead, reach, ramp_mm, closed)?);
-        }
-        Some(ratio)
+        let behind = self.ratio_beside(index, false, reach, ramp_mm, closed)?;
+        let ahead = self.ratio_beside(index, true, reach, ramp_mm, closed)?;
+        Some(behind.union(ahead))
     }
 
     /// The path from the start of `marks[index]` to the leaders' nearest
@@ -678,8 +718,10 @@ impl Marks {
         let extruding = match self.marks[index].reach {
             Some(reach) => {
                 let fastest = self.fastest_in_reach(index, reach, closed)?;
+                let ratios = self.ratio_in_reach(index, reach, fastest, closed)?;
                 ExtrudingReach {
-                    ratio_in_reach: self.ratio_in_reach(index, reach, fastest, closed)?,
+                    ratio_in_reach: ratios.largest,
+                    ratio_step_in_reach: ratios.step(),
                     rest_room_mm: self.rest_room(index, reach, fastest, closed)?,
                     fastest_ceiling_mm_s: fastest,
                     strongest_accel_mm_s2: self.strongest_in_reach(index, reach, closed)?,
@@ -689,6 +731,7 @@ impl Marks {
         };
         Some(ExtrusionBudget {
             ratio_in_reach: extruding.ratio_in_reach,
+            ratio_step_in_reach: extruding.ratio_step_in_reach,
             axes_in_reach: self.axes_in_reach(index, closed)?,
             rest_holds_s: self.rest_holds(index, closed)?,
             rest_room_mm: extruding.rest_room_mm,
@@ -707,20 +750,23 @@ impl Marks {
 }
 
 /// What a move's plan takes from the moves around it: the largest
-/// extrusion ratio its extruder demand can meet, the spatial axes the path
-/// moves on within the leaders' spill of it, whose kernels the shaped
-/// path's jerk there passes through, for an extrude-only move how long it
-/// holds the toolhead still before and after its own motion, so the
-/// extruder never adds the leaders' spill to it, the path from its start
-/// to the leaders' nearest rest where that narrows the ratio ramp of a step
-/// there, and the fastest planned ceiling within the leaders' reach of it,
-/// which bounds the shaped speed at its joins (infinite on a move no
-/// extruder budget reaches), and the largest acceleration a move within
-/// that reach may take, which a ratio ramp at its joins rides (0 on a move
-/// no extruder budget reaches).
+/// extrusion ratio its extruder demand can meet and the largest step of the
+/// ratio there, the larger ratio less the smaller with travel at 0, whose
+/// ramp its budget leaves room for, the spatial axes the path moves on
+/// within the leaders' spill of it, whose kernels the shaped path's jerk
+/// there passes through, for an extrude-only move how long it holds the
+/// toolhead still before and after its own motion, so the extruder never
+/// adds the leaders' spill to it, the path from its start to the leaders'
+/// nearest rest where that narrows the ratio ramp of a step there, and the
+/// fastest planned ceiling within the leaders' reach of it, which bounds
+/// the shaped speed at its joins (infinite on a move no extruder budget
+/// reaches), and the largest acceleration a move within that reach may
+/// take, which a ratio ramp at its joins rides (0 on a move no extruder
+/// budget reaches).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExtrusionBudget {
     pub ratio_in_reach: f64,
+    pub ratio_step_in_reach: f64,
     pub axes_in_reach: [bool; 3],
     pub rest_holds_s: [f64; 2],
     pub rest_room_mm: f64,
@@ -731,6 +777,7 @@ pub struct ExtrusionBudget {
 /// The part of an [`ExtrusionBudget`] a move's extruder reach gives it.
 struct ExtrudingReach {
     ratio_in_reach: f64,
+    ratio_step_in_reach: f64,
     rest_room_mm: f64,
     fastest_ceiling_mm_s: f64,
     strongest_accel_mm_s2: f64,
@@ -739,6 +786,7 @@ struct ExtrudingReach {
 impl ExtrudingReach {
     const NONE: Self = Self {
         ratio_in_reach: 0.0,
+        ratio_step_in_reach: 0.0,
         rest_room_mm: f64::INFINITY,
         fastest_ceiling_mm_s: f64::INFINITY,
         strongest_accel_mm_s2: 0.0,

@@ -104,6 +104,16 @@ fn rest_room_ramp_time(speed: f64, room_mm: f64) -> f64 {
     }
 }
 
+/// What the longest ramp across a ratio step of `ratio_step` adds to the
+/// follower's acceleration per unit of the leaders' acceleration where they
+/// cross the step at rest, an advance of slope `advance_slope_s` reading
+/// it: `Δr·2k/τ_max·g(0)`, the part of the ramp's acceleration
+/// ([`RatioRampRule::demand`]) no slower crossing lowers.
+#[must_use]
+pub fn ramp_accel_at_rest_per_accel(advance_slope_s: f64, ratio_step: f64) -> f64 {
+    ratio_step * 2.0 * advance_slope_s / RATIO_RAMP_MAX_TIME_S * acceleration_gain(0.0)
+}
+
 /// What a follower's ratio ramp is held to: the advance's slope, the
 /// follower motor's velocity and acceleration limits, and the jerk gain of
 /// the kernel smoothing the advanced follower, infinite without one.

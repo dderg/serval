@@ -206,3 +206,24 @@ fn a_box_kernel_keeps_its_tail_moments_and_its_edges_as_variation() {
         );
     }
 }
+
+#[test]
+fn one_unimodal_kernel_peaks_at_half_its_total_variation() {
+    let parabola =
+        PiecewisePolynomialKernel::single_poly_from_absolute(vec![0.75, 0.0, -0.75], (-1.0, 1.0));
+    let peak = PiecewisePolynomialKernel::directional_peak(&[&parabola]);
+    let variation = PiecewisePolynomialKernel::directional_variation(&[&parabola]);
+    assert!((peak - 0.75).abs() < 1e-12, "{peak}");
+    assert!(
+        (peak - 0.5 * variation).abs() < 1e-5,
+        "{peak} vs {variation}"
+    );
+}
+
+#[test]
+fn kernels_peak_at_the_tallest_one_whatever_the_direction() {
+    let early = boxed(1.0, (-1.0, 0.0));
+    let late = boxed(0.5, (0.0, 1.0));
+    let peak = PiecewisePolynomialKernel::directional_peak(&[&early, &late]);
+    assert!((peak - 1.0).abs() < 1e-12, "{peak}");
+}
