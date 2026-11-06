@@ -92,3 +92,49 @@ fn the_jerk_rate_bounds_the_slope_variation() {
         assert!(cells.jerk_rate_per_accel <= 2.0 * variation + 1e-6);
     }
 }
+
+/// `|w(b⁺) − w(b⁻)|` summed over the piece ends `b` in `(from, to]`.
+fn steps_within(kernel: &PiecewisePolynomialKernel, from: f64, to: f64) -> f64 {
+    let left = |b: f64| {
+        kernel
+            .pieces
+            .iter()
+            .find(|piece| piece.u_start < b && b <= piece.u_end)
+            .map_or(0.0, |piece| piece.evaluate(b))
+    };
+    kernel
+        .pieces
+        .iter()
+        .flat_map(|piece| [piece.u_start, piece.u_end])
+        .filter(|&b| b > from && b <= to)
+        .map(|b| (value(kernel, b) - left(b)).abs())
+        .sum()
+}
+
+#[test]
+fn the_drift_weights_bound_the_kernel_moved_by_a_shift_within_a_cell() {
+    for kernel in kernels() {
+        let cells = KernelCells::new(&kernel, H);
+        assert_eq!(cells.drift_weights.len(), cells.value.len() + 1);
+        for (index, weight) in cells.drift_weights.iter().enumerate() {
+            let a = (cells.first + index as i64 - 1) as f64 * H;
+            for shift in [H / 7.0, H / 2.0, H] {
+                for step in 0..=200 {
+                    let u = a + H * f64::from(step) / 200.0;
+                    let moved = (value(&kernel, u + shift) - value(&kernel, u)).abs();
+                    let allowed = shift * weight + steps_within(&kernel, u, u + shift);
+                    assert!(
+                        moved <= allowed * (1.0 + 1e-9) + 1e-9,
+                        "cell {index}: w moves {moved} over {shift} from {u}, weight {weight}"
+                    );
+                }
+            }
+        }
+        let peak = cells.drift_weights.iter().fold(0.0_f64, |a, &b| a.max(b));
+        let mean = cells.drift_weights.iter().sum::<f64>() / cells.drift_weights.len() as f64;
+        assert!(
+            mean < 0.8 * peak,
+            "the weights follow the kernel's slope: mean {mean} against peak {peak}"
+        );
+    }
+}
