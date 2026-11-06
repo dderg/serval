@@ -328,13 +328,17 @@ fn peak_ratio_over(spans: &[RatioSpan], (lo, hi): (f64, f64)) -> f64 {
 
 /// The ratio steps a crawl valley holds the weight at zero around: each
 /// step's window is kept within `window` of it
-/// ([`geometry::crawl_step_window`]), and the valley's zero stretch spans
-/// the crawl and every owned window. Inside it the advance reads none of a
-/// ramp; only its flow `r̃·ṡ` reaches the follower, whose acceleration
-/// `r̃·s̈ + r̃′·ṡ²` takes `|r̃′| ≤ ¾·|Δ|/h` over a window of half-width `h`.
-/// A narrower window the width field lays is one the ramp rule budgets.
-/// The leaders' path acceleration across the stretch is at most `A`, so
-/// `ṡ² ≤ v² + 2A·d` a distance `d` from the crawl they cross at `v`.
+/// ([`geometry::crawl_step_window`]), with every seam of the sloped run of
+/// spans either side of it, which the smoothing may join into one cluster
+/// ramped over the narrowest of their windows ([`SeamTable::joins`]), and
+/// the valley's zero stretch spans the crawl and every owned run's
+/// windows. Inside it the advance reads none of a ramp; only its flow
+/// `r̃·ṡ` reaches the follower, whose acceleration `r̃·s̈ + r̃′·ṡ²` takes
+/// `|r̃′| ≤ ¾·|Δ|/h` from a step over a window of half-width `h`, besides
+/// the table's own slope. A narrower window the width field lays is one
+/// the ramp rule budgets. The leaders' path acceleration across the
+/// stretch is at most `A`, so `ṡ² ≤ v² + 2A·d` a distance `d` from the
+/// crawl they cross at `v`.
 pub(super) struct StepWindows {
     turn: f64,
     crossing: Crossing,
@@ -344,12 +348,45 @@ pub(super) struct StepWindows {
 }
 
 /// A ratio step a crawl valley holds the weight at zero around: which
-/// table it steps, where, and by how much.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// table it steps, where, by how much, and the seams of the sloped run of
+/// spans either side of it, its own among them, whose windows the valley
+/// caps with it.
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct OwnedStep {
     pub(super) table: Table,
     pub(super) s: f64,
     step: f64,
+    pub(super) run: Vec<f64>,
+}
+
+impl OwnedStep {
+    /// The step `seam` of `spans` at their index `at`, with the seams of
+    /// the sloped spans running from it either way.
+    fn of(table: Table, spans: &[RatioSpan], at: usize, seam: &Seam) -> Self {
+        let mut first = at;
+        while first > 1 && spans[first - 1].ratio_slope() != 0.0 {
+            first -= 1;
+        }
+        let mut past = at;
+        while past + 1 < spans.len() && spans[past].ratio_slope() != 0.0 {
+            past += 1;
+        }
+        let run = (first..=past)
+            .filter(|&index| Seam::between(&spans[index - 1], &spans[index]).is_some())
+            .map(|index| spans[index].s0)
+            .collect();
+        Self {
+            table,
+            s: seam.s,
+            step: seam.step.abs(),
+            run,
+        }
+    }
+
+    /// The first and last seam of its run.
+    fn extent(&self) -> (f64, f64) {
+        (self.run[0], self.run[self.run.len() - 1])
+    }
 }
 
 impl StepWindows {
@@ -367,30 +404,38 @@ impl StepWindows {
     }
 
     /// Owns every ratio step of either table on the path `[lo, hi]` not
-    /// owned yet; whether there was one.
+    /// owned yet, with its run, where `untaken` holds for every seam of the
+    /// run: the projection has read none of their ramps yet. Whether there
+    /// was one.
     pub(super) fn own_within(
         &mut self,
         (laid, advance): (&[RatioSpan], &[RatioSpan]),
         (lo, hi): (f64, f64),
+        untaken: &dyn Fn(f64) -> bool,
     ) -> bool {
         if !self.guarded {
             return false;
         }
         let before = self.owned.len();
         for (table, spans) in [(Table::Laid, laid), (Table::Advance, advance)] {
-            let first = spans.partition_point(|span| span.s1 < lo).saturating_sub(1);
+            let first = spans
+                .partition_point(|span| span.s1 < lo)
+                .saturating_sub(1)
+                .max(1);
             let last = spans.partition_point(|span| span.s0 <= hi);
-            let steps = spans[first..last.max(first)]
-                .windows(2)
-                .filter_map(|pair| Seam::between(&pair[0], &pair[1]))
-                .filter(|seam| seam.step != 0.0 && lo <= seam.s && seam.s <= hi);
-            for seam in steps {
-                let owned = OwnedStep {
-                    table,
-                    s: seam.s,
-                    step: seam.step.abs(),
+            for at in first..last {
+                let Some(seam) = Seam::between(&spans[at - 1], &spans[at]) else {
+                    continue;
                 };
-                if !self.owned.contains(&owned) {
+                let owned_already = self
+                    .owned
+                    .iter()
+                    .any(|owned| owned.table == table && owned.s == seam.s);
+                if seam.step == 0.0 || seam.s < lo || seam.s > hi || owned_already {
+                    continue;
+                }
+                let owned = OwnedStep::of(table, spans, at, &seam);
+                if owned.run.iter().all(|&s| untaken(s)) {
                     self.owned.push(owned);
                 }
             }
@@ -399,12 +444,13 @@ impl StepWindows {
     }
 
     /// Where the valley holds the weight at zero: the crawl, and every
-    /// owned step's window.
+    /// owned run's windows.
     pub(super) fn zero_stretch(&self) -> (f64, f64) {
         self.owned
             .iter()
             .fold((self.turn, self.turn), |(lo, hi), owned| {
-                (lo.min(owned.s - self.window), hi.max(owned.s + self.window))
+                let (first, last) = owned.extent();
+                (lo.min(first - self.window), hi.max(last + self.window))
             })
     }
 
@@ -457,9 +503,11 @@ impl StepWindows {
     }
 
     /// Fails loudly where the flow over the zero stretch asks more than the
-    /// follower's limit: `r·A` at the largest ratio laid there, plus
+    /// follower's limit: `r·A` at the largest ratio laid there, and
     /// `¾·|Δ|·ṡ²/window` for each owned step of the laid table, `ṡ²` read
-    /// at its window's far edge from the crawl.
+    /// as far from the crawl as its run's windows reach. The table's own
+    /// slopes, which a window of any width averages to no steeper, are the
+    /// planner's to hold.
     pub(super) fn assert_flow_fits(
         &self,
         trail: &SideTrail,
@@ -471,14 +519,15 @@ impl StepWindows {
         }
         let zero = self.zero_stretch();
         let path_accel = self.path_accel(trail);
+        let reaching = |(first, last): (f64, f64)| {
+            let farthest = (first - self.turn).abs().max((last - self.turn).abs());
+            self.speed_squared_within(path_accel, farthest + self.window)
+        };
         let ramps: f64 = self
             .owned
             .iter()
             .filter(|owned| owned.table == Table::Laid)
-            .map(|owned| {
-                let far_edge = (owned.s - self.turn).abs() + self.window;
-                0.75 * owned.step * self.speed_squared_within(path_accel, far_edge) / self.window
-            })
+            .map(|owned| 0.75 * owned.step * reaching(owned.extent()) / self.window)
             .sum();
         let flow = peak_ratio_over(laid, zero) * path_accel + ramps;
         assert!(

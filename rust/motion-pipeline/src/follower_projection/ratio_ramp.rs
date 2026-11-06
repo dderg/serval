@@ -2210,7 +2210,8 @@ impl RatioSmoothing {
         }
         let guarded = guarded_by_the_turning_guard(rule);
         let mut steps = StepWindows::around(turn, crawl.1, reach, guarded);
-        steps.own_within(tables, (turn - steps.window, turn + steps.window));
+        let untaken = |s: f64| self.step_window_untaken(s);
+        steps.own_within(tables, (turn - steps.window, turn + steps.window), &untaken);
         let rested = self.rested_through(turn);
         let laid = (&self.trail, tables.0, table_end);
         let (zero, sides, floors) = loop {
@@ -2224,15 +2225,21 @@ impl RatioSmoothing {
                         edges.1
                     )
                 });
+            let widens_the_last = guarded && self.last_crawl_reach_end() > zero.0 - reach;
             let (start, before) = if !guarded {
                 (zero.0, reach.min(self.back_reach_limit(zero.0)))
-            } else if self.last_crawl_reach_end() > zero.0 - reach {
+            } else if widens_the_last {
                 (zero.0, reach)
             } else {
                 crawl_side(Side::Before, edges.0, reach, laid, rule, zero.0 - rested)?
                     .map_or((rested, 0.0), |before| (zero.0, before))
             };
-            if !steps.own_within(tables, (start - before, zero.1 + after)) {
+            let side_from = if widens_the_last {
+                zero.0
+            } else {
+                start - before
+            };
+            if !steps.own_within(tables, (side_from, zero.1 + after), &untaken) {
                 break (
                     (start, zero.1),
                     (before, after),
@@ -2242,32 +2249,34 @@ impl RatioSmoothing {
         };
         steps.assert_flow_fits(&self.trail, tables.0, rule);
         for owned in &steps.owned {
-            self.assert_step_window_untaken(owned.s);
-            let seams = match owned.table {
-                Table::Laid => &mut self.laid,
-                Table::Advance => &mut self.advance,
-            };
-            seams.cap_step(owned.s, steps.window);
+            for &s in &owned.run {
+                assert!(
+                    self.step_window_untaken(s),
+                    "follower projection: a crawl valley caps the seam at s={s}, whose window \
+                     the projection has taken through s={}",
+                    self.taken_through
+                );
+                let seams = match owned.table {
+                    Table::Laid => &mut self.laid,
+                    Table::Advance => &mut self.advance,
+                };
+                seams.cap_step(s, steps.window);
+            }
         }
         self.place_valley(turn, (zero, sides), floors);
         Ok(())
     }
 
-    /// Fails loudly where the projection has taken path the window the
-    /// width field lays around the ratio step at `s` reaches: its advance
-    /// read the step's ramp before a crawl valley capped it.
-    fn assert_step_window_untaken(&self, s: f64) {
+    /// Whether the projection has taken no path the window the width field
+    /// lays around the seam at `s` reaches: none has read its ramp yet, so
+    /// a crawl valley may still cap it.
+    fn step_window_untaken(&self, s: f64) -> bool {
         let read_from = match self.width.nodes.first() {
             None => s,
             Some(first) if s >= first.s => s - self.width.step_width(s),
             Some(_) => f64::NEG_INFINITY,
         };
-        assert!(
-            self.taken_through <= read_from,
-            "follower projection: a crawl valley caps the ratio step at s={s}, whose window from \
-             s={read_from} the projection has taken through s={}",
-            self.taken_through
-        );
+        self.taken_through <= read_from
     }
 
     fn last_crawl_reach_end(&self) -> f64 {
@@ -2992,26 +3001,38 @@ impl RatioSmoothing {
 
     /// Fails loudly where the ramp of a ratio step of `table` reaches `s`
     /// inside a crawl valley's side of a follower the turning guard holds
-    /// ([`guarded_by_the_turning_guard`]): the advance would read the
-    /// ramp's curvature there on top of the side's rebuild, which no rule
-    /// budgets. Such a valley owns the steps inside its sides and caps
-    /// their windows within its zero stretch ([`Self::lay_valley`]); a step
-    /// past a side whose window reaches back into it is not owned. A
-    /// follower behind its own kernel has that kernel spread both.
-    pub(super) fn assert_no_ramp_in_a_crawl_side(&self, table: Table, s: f64) {
-        if !self
+    /// ([`guarded_by_the_turning_guard`]) and the follower's acceleration
+    /// there, its flow's `flow_accel` and the advance's slope times
+    /// `advanced_accel`, the second time derivative of the weighted read,
+    /// passes its limit: the ramp's rule and the side's rebuild each fit it
+    /// alone, and nothing budgets their sum. Such a valley owns the steps
+    /// inside its sides and holds the weight at zero over their windows
+    /// ([`Self::lay_valley`]); a step past a side whose window reaches back
+    /// into it is not owned. A follower behind its own kernel has that
+    /// kernel spread both.
+    pub(super) fn assert_ramp_in_a_crawl_side_fits(
+        &self,
+        table: Table,
+        s: f64,
+        (flow_accel, advanced_accel): (f64, f64),
+    ) {
+        let Some(rule) = self
             .width
             .rule
-            .is_some_and(|rule| guarded_by_the_turning_guard(&rule))
-        {
+            .filter(|rule| guarded_by_the_turning_guard(rule))
+        else {
             return;
-        }
+        };
         let Some(valley) = self
             .valleys_over(s, s)
             .find(|valley| valley.kind == ValleyKind::Crawl && valley.weight(s).0 > 0.0)
         else {
             return;
         };
+        let accel = (flow_accel + rule.advance_slope_s * advanced_accel).abs();
+        if accel <= rule.max_accel_mm_s2 {
+            return;
+        }
         if let Some(cluster) = self
             .seam_table(table)
             .clusters_reaching(&self.width, (s, s))
@@ -3020,8 +3041,8 @@ impl RatioSmoothing {
             panic!(
                 "follower projection: the ratio steps of the cluster {:?} of the {table:?} table \
                  ramp over {} mm either side, into the side of the crawl valley {valley:?} at \
-                 s={s}",
-                cluster.seams, cluster.width
+                 s={s}, where the follower asks {accel} mm/s², past its limit of {} mm/s²",
+                cluster.seams, cluster.width, rule.max_accel_mm_s2
             );
         }
     }

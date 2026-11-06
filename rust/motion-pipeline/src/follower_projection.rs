@@ -3547,29 +3547,33 @@ impl<'a> FollowerSignal<'a> {
             laid,
             ..
         } = *read;
+        let flow_accel = laid.ratio * rate_deriv + laid.slope * rate * rate;
         let laid = match self.advance_table() {
             Table::Laid => laid,
             Table::Advance => self.laid_on(Table::Advance, s),
         };
         let rate_second = self.rate_second(t, read);
         let (weight, weight_slope, weight_curvature) = self.state.smoothing.valley_weight(s);
-        if weight > 0.0 && weight < 1.0 {
-            self.state
-                .smoothing
-                .assert_no_ramp_in_a_crawl_side(self.advance_table(), s);
-        }
         let weighted = laid.ratio * weight;
         let weighted_slope = laid.slope * weight + laid.ratio * weight_slope;
         let weighted_curvature = laid.curvature * weight
             + 2.0 * laid.slope * weight_slope
             + laid.ratio * weight_curvature;
-        (
+        let read = (
             weighted * rate,
             weighted_slope * rate * rate + weighted * rate_deriv,
             weighted * rate_second
                 + 3.0 * weighted_slope * rate * rate_deriv
                 + weighted_curvature * rate * rate * rate,
-        )
+        );
+        if weight > 0.0 && weight < 1.0 {
+            self.state.smoothing.assert_ramp_in_a_crawl_side_fits(
+                self.advance_table(),
+                s,
+                (flow_accel, read.2),
+            );
+        }
+        read
     }
 
     fn s_offset(&self, t: f64) -> f64 {
