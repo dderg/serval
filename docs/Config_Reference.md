@@ -2226,28 +2226,25 @@ the [command reference](G-Codes.md#input_shaper).
 
 ### [corner_deviation]
 
-Junction speed from the input-shaped corner deviation. When this section
-is present it replaces the `square_corner_velocity` junction speed
-limit. Each junction then runs at the highest speed for which the
-corner, after input shaping, stays within `max_deviation` of the
-commanded path. The bound includes the rounding the shaper adds even
-when the toolhead stops at the corner (about `σ²·accel/2`, σ being the
-shaper's time spread), and the overlap of nearby corners on curves and
-short segments.
+Junction speed referenced to the input shaper's own corner rounding. When
+this section is present it replaces the `square_corner_velocity`
+junction speed limit. Input shaping rounds every corner, even one where
+the toolhead stops, by up to about `σ²·accel/2` (σ being the shaper's
+time spread; 0.2-0.35 mm at typical settings). Each junction runs at the
+highest speed whose corner, after shaping, rounds no more than a stop at
+that corner already can. Acceleration is never changed.
 
-- If even a stop at a corner would exceed `max_deviation`, the
-  acceleration of the two moves around that corner is lowered until the
-  stop fits.
-- On curves made of short segments, the cruise speed of segments shorter
-  than the shaper's duration is capped as well as the junction speed.
-- With different X and Y shapers, a diagonal move leaves its line while
-  it accelerates; its acceleration is lowered if that would exceed
-  `max_deviation`.
-- With an input smoother (`smooth_*`), the velocity step at a corner is
-  applied over the smoother's duration and adds its own acceleration.
-  Steps within one smoother duration may use at most half of
-  `max_accel`, and the acceleration of the adjacent moves is lowered so
-  that the total stays within `max_accel`.
+- On curves the speed is capped so that the shaped curve stays within the
+  same rounding, and segments shorter than the shaper's duration get that
+  cap as their cruise speed.
+- `max_deviation` lowers junction speeds further, so that corners round
+  at most that much. A corner whose stop alone rounds more than
+  `max_deviation` stops; its acceleration is not lowered.
+- With an input smoother (`smooth_*`), a velocity step at a corner is
+  applied over the smoother's duration and adds acceleration. Junction
+  speeds are limited so that the executed acceleration stays within
+  about 5% above `max_accel` (the default `square_corner_velocity`
+  reaches about 3% above). The limit is approximate.
 - While input shaping is disabled on X or Y, every change of direction
   stops, the same as `square_corner_velocity: 0`.
 
@@ -2258,10 +2255,10 @@ shaper changes, which takes about a second.
 
 ```
 [corner_deviation]
-max_deviation:
+#max_deviation:
 #   The largest distance, in mm, that the input-shaped toolhead path may
-#   deviate from the commanded path at a corner. This parameter must be
-#   provided.
+#   deviate from the commanded path at a corner whose stop rounds less
+#   than this. The default is to allow the rounding of a stop.
 ```
 
 ### [adxl345]
