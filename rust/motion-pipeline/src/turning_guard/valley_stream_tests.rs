@@ -444,7 +444,11 @@ impl ValleyReference {
         let within = leaders.rebuilds_within(width);
         samples.iter().all(|&(distance, own, v, path_accel)| {
             let either_way = (-path_accel, path_accel);
-            own + k * ratio * within.at((distance, distance), (0.0, v), either_way).min(whole)
+            own + k
+                * ratio
+                * within
+                    .at((distance, distance), (0.0, v), either_way)
+                    .min(whole)
                 <= caps.max_accel_mm_s2
         })
     }

@@ -599,10 +599,12 @@ impl Reserve {
                 };
                 CellLeaders {
                     leaders: Leaders {
-                        distance: slot.distance_along(n, path, |from, to| {
-                            track.drift(from, to, h, fit)
-                        }),
-                        speed: ((cell.speed.0 - fit.speed).max(0.0), cell.speed.1 + fit.speed),
+                        distance: slot
+                            .distance_along(n, path, |from, to| track.drift(from, to, h, fit)),
+                        speed: (
+                            (cell.speed.0 - fit.speed).max(0.0),
+                            cell.speed.1 + fit.speed,
+                        ),
                         outward,
                     },
                     within: OnceCell::new(),
