@@ -38,14 +38,20 @@ fn params(entry_v: f64) -> VelocityPlanParams<'static> {
         max_extrude_only_accel_mm_s2: EXTRUDE_ONLY_A,
         entry_v,
         step_capacity: None,
+        shaped_corners: None,
     }
 }
 
 fn limits(accel: f64, (z_velocity, z_accel): (f64, f64), extruder: ExtruderCaps) -> VelocityLimits {
-    VelocityLimits::try_new(500.0, accel, 0.05, f64::INFINITY)
-        .and_then(|limits| limits.with_z_caps(z_velocity, z_accel))
-        .and_then(|limits| limits.with_extruder_caps(Some(extruder)))
-        .expect("valid limits")
+    VelocityLimits::try_new(
+        500.0,
+        accel,
+        crate::CornerBudget::Shaped(0.05),
+        f64::INFINITY,
+    )
+    .and_then(|limits| limits.with_z_caps(z_velocity, z_accel))
+    .and_then(|limits| limits.with_extruder_caps(Some(extruder)))
+    .expect("valid limits")
 }
 
 fn extruder(max_velocity: f64, max_accel: f64, slope: f64) -> ExtruderCaps {

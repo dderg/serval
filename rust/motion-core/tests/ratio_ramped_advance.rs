@@ -69,8 +69,13 @@ fn config() -> StreamConfig {
     config.integration_tol = 1e-7;
     config.max_extrude_only_velocity_mm_s = EXTRUDE_ONLY_VELOCITY;
     config.max_extrude_only_accel_mm_s2 = EXTRUDE_ONLY_ACCEL;
-    config.limits = geometry::VelocityLimits::try_new(1000.0, 20_000.0, 0.04, f64::INFINITY)
-        .expect("test limits are valid");
+    config.limits = geometry::VelocityLimits::try_new(
+        1000.0,
+        20_000.0,
+        geometry::CornerBudget::Shaped(0.04),
+        f64::INFINITY,
+    )
+    .expect("test limits are valid");
     config
 }
 

@@ -304,7 +304,12 @@ fn real_snapshot(
     let gcode = "G90\nM83\nG1 X60 Y0 F9000\nG1 X60 Y60\nG1 X0 Y60\n";
     let waypoints = pipeline_snapshot::waypoints::parse_gcode(
         gcode,
-        &pipeline_snapshot::CartesianLimits::without_z_caps(300.0, 3000.0, f64::INFINITY, 0.0),
+        &pipeline_snapshot::CartesianLimits::without_z_caps(
+            300.0,
+            3000.0,
+            f64::INFINITY,
+            pipeline_snapshot::CornerBudget::Shaped(0.0),
+        ),
     )
     .unwrap();
     pipeline_snapshot::pipeline_snapshot(
@@ -312,7 +317,7 @@ fn real_snapshot(
         pipeline_snapshot::SnapshotParams {
             max_velocity: 300.0,
             max_accel: 3000.0,
-            corner_deviation: pipeline_snapshot::corner_deviation_from_scv(5.0, 3000.0),
+            corner: pipeline_snapshot::CornerBudget::ScvEquivalent(5.0),
             max_jerk: f64::INFINITY,
             max_z_velocity: None,
             max_z_accel: None,

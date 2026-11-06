@@ -76,7 +76,7 @@ fn unshaped_kernel_free_advance() -> SnapshotParams {
     SnapshotParams {
         max_velocity: MAX_VELOCITY,
         max_accel: MAX_ACCEL,
-        corner_deviation: 0.04,
+        corner: geometry::CornerBudget::Shaped(0.04),
         max_jerk: f64::INFINITY,
         max_z_velocity: None,
         max_z_accel: None,
@@ -105,7 +105,7 @@ fn plan(gcode: &str) -> ExactTrajectory {
             MAX_VELOCITY,
             MAX_ACCEL,
             f64::INFINITY,
-            0.04,
+            geometry::CornerBudget::Shaped(0.04),
         ),
     )
     .expect("parse");

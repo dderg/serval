@@ -768,7 +768,7 @@ def _reference_epochs(job: analyze.Job) -> list[list[tuple]]:
                 (
                     tuple(e - s for s, e in zip(m["start"], m["end"])),
                     m["feedrate"],
-                    (m["velocity"], m["accel"], m["corner_deviation"]),
+                    (m["velocity"], m["accel"], m["corner"]),
                 )
                 for m in moves
             ]

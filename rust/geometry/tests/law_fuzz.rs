@@ -251,6 +251,7 @@ impl PlanCase {
                 max_extrude_only_accel_mm_s2: EXTRUDE_ONLY_A,
                 entry_v: self.entry,
                 step_capacity: None,
+                shaped_corners: None,
             },
         )
     }
@@ -268,8 +269,13 @@ fn arb_plan_case() -> impl Strategy<Value = PlanCase> {
             // The feed may exceed a member's curvature caps: the brake into a
             // tighter end then hugs the cap, which the rail must follow
             // smoothly enough for its seams to close.
-            let limits = VelocityLimits::try_new(MAX_FEED_MM_S, accel, 0.02, f64::INFINITY)
-                .expect("planner limits");
+            let limits = VelocityLimits::try_new(
+                MAX_FEED_MM_S,
+                accel,
+                geometry::CornerBudget::Shaped(0.02),
+                f64::INFINITY,
+            )
+            .expect("planner limits");
             let moves: Vec<Move> = segments
                 .into_iter()
                 .enumerate()

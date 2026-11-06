@@ -1526,16 +1526,30 @@ impl RatioSmoothing {
         }
     }
 
-    /// A valley at `turn`, unless the last one laid sits there already: a
-    /// crawl at a seam is the slowest point of the leg before or after it
-    /// too.
+    /// A valley at `turn`, unless the last one laid already holds the
+    /// weight flat at zero there ([`AdvanceValley::holds_zero_at`]): a crawl
+    /// at a seam is the slowest point of the leg before or after it too,
+    /// read a hair inside that leg. Laid twice, the advance would read the
+    /// product of two weights there and rebuild its lead steeper than
+    /// either; neighbours still overlap where their crawls lie closer than
+    /// their reach.
     fn lay_valley(&mut self, turn: f64, reach: f64, floor: f64) {
-        let laid_there = self
+        if self
             .valleys
             .last()
-            .is_some_and(|valley| (valley.end - turn).abs() <= SPAN_LOOKUP_SLACK_MM);
-        if laid_there {
+            .is_some_and(|valley| valley.holds_zero_at(turn))
+        {
             return;
+        }
+        if let Some(laid) = self
+            .valleys
+            .iter()
+            .find(|valley| valley.holds_zero_at(turn))
+        {
+            panic!(
+                "follower projection: the crawl at s={turn} lies where the advance valley \
+                 {laid:?} already holds the weight at zero, behind the last one laid"
+            );
         }
         self.valleys.push(AdvanceValley {
             start: turn,
@@ -1770,16 +1784,22 @@ impl RatioSmoothing {
                 .is_some()
     }
 
-    /// `(max |r̃|, max |r̃'|)` over `[lo, hi]`, see [`RatioSmoothing`].
+    /// `(max |r̃|, max |r̃'|)` over `[lo, hi]`, see [`RatioSmoothing`]: from
+    /// the spans the windows over the stretch average, `s ± h(s)` growing
+    /// along the path, and those either side of every step whose own window
+    /// reaches into it. A span only touching that reach is read nowhere on
+    /// the stretch, so nothing laid past what the stretch reads decides the
+    /// bound.
     pub(super) fn ratio_bounds(&self, spans: &[RatioSpan], lo: f64, hi: f64) -> (f64, f64) {
-        let (widest, curvature) = self.width.bounds(lo, hi);
-        let (reach_lo, reach_hi) = (
-            lo - widest - SPAN_LOOKUP_SLACK_MM,
-            hi + widest + SPAN_LOOKUP_SLACK_MM,
-        );
-        let ridden = spans
-            .iter()
-            .filter(|span| span.s1 >= reach_lo && span.s0 <= reach_hi);
+        let (_, curvature) = self.width.bounds(lo, hi);
+        let reaching: Vec<(Seam, f64)> = self.laid.steps_reaching(&self.width, (lo, hi)).collect();
+        let (reach_lo, reach_hi) = (lo - self.reach_back(lo), hi + self.reach_back(hi));
+        let ridden = spans.iter().filter(|span| {
+            (span.s1 > reach_lo && span.s0 < reach_hi)
+                || reaching
+                    .iter()
+                    .any(|(seam, _)| span.s1 == seam.s || span.s0 == seam.s)
+        });
         let (low, high, slope) = ridden.fold(
             (f64::INFINITY, f64::NEG_INFINITY, 0.0_f64),
             |(low, high, slope), span| {
@@ -1798,39 +1818,14 @@ impl RatioSmoothing {
             return (0.0, 0.0);
         }
         let stretch = (1.0 + WIDTH_SLOPE_BOUND) * (1.0 + WIDTH_SLOPE_BOUND);
-        let steps = self
-            .laid
-            .seams_near(reach_lo, reach_hi)
+        let steps = reaching
             .iter()
-            .map(|seam| {
-                let narrowest = self.narrowest_window_over(seam.s);
-                if narrowest > 0.0 {
-                    KERNEL_PEAK * seam.step.abs() / narrowest
-                } else {
-                    0.0
-                }
-            })
+            .map(|(seam, h)| KERNEL_PEAK * seam.step.abs() / h)
             .sum::<f64>();
         (
             low.abs().max(high.abs()),
             stretch * (slope + steps) + KERNEL_ABS_MOMENT * curvature * (high - low),
         )
-    }
-
-    /// A lower bound of `h(s)` wherever `seam` is inside the window at `s`:
-    /// `h(s) > h(seam)/(1 + λ)` by the width's slope bound, and `h(s)`
-    /// exceeds the distance to the seam, so a seam past the nodes is no
-    /// nearer than the last of them.
-    fn narrowest_window_over(&self, seam: f64) -> f64 {
-        let nodes = &self.width.nodes;
-        let (first, last) = (nodes[0].s, nodes[nodes.len() - 1].s);
-        if seam < first {
-            first - seam
-        } else if seam > last {
-            seam - last
-        } else {
-            self.width.width(seam) / (1.0 + WIDTH_SLOPE_BOUND)
-        }
     }
 
     /// Where over `[lo, hi]` the smoothed ratio's curvature, or the
@@ -2152,6 +2147,15 @@ impl AdvanceValley {
 
     fn reach_end(&self) -> f64 {
         self.end + self.after
+    }
+
+    /// Whether the valley holds the weight flat at zero at `s`: on
+    /// `[start, end]`, and within its floor `f` either side, over which the
+    /// weight leaves zero flat (`ψ ≈ 3d²/(2f·w)` for `d ≪ f`); where it has
+    /// no floor, to a path lookup's rounding.
+    fn holds_zero_at(&self, s: f64) -> bool {
+        let flat = self.floor.max(SPAN_LOOKUP_SLACK_MM);
+        s >= self.start - flat && s <= self.end + flat
     }
 
     fn weight(&self, s: f64) -> (f64, f64, f64) {

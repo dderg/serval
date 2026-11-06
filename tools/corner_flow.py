@@ -56,8 +56,17 @@ has none of that kind):
   acceleration (mm/s^2) while the nozzle moves.
 - ``|ve|*`` / ``|ae|*``: the same peaks over the whole run, the travel,
   retract and prime transitions at rest included.
-- Material the extruder moves while the unshaped toolhead rests (a retract
-  and its prime) lays no bead and is left out of the bead columns.
+- Material the extruder moves while the shaped toolhead rests (a retract
+  and its prime) never reaches the melt model: the melt holds the pressure
+  it had when the toolhead stopped, so a retract at rest neither spills
+  nor starves the bead after it. Material moved while the unshaped
+  toolhead rests lays no bead and is left out of the bead columns.
+- ``in%`` / ``out``: for an extruder move the G-code makes at rest (a
+  retract, a prime), the least share of it the plan makes while the shaped
+  toolhead stops there, and the most filament (mm) it moves while the
+  toolhead moves instead.
+- ``miss``: the largest distance from a case corner to the shaped path
+  (mm), the corner's path accuracy against ``corner_deviation``.
 - ``dE_gc``: final e minus the G-code's total E (mm). Negative by design
   where the shaped path cuts a corner: the bead follows the shorter path.
 - ``dE_adv``: what the run lays beyond the bead ratio times its own shaped
@@ -125,6 +134,17 @@ class Geometry:
             [START, *((move.x, move.y) for move in self.moves)]
         )
 
+    def rest_moves(self) -> list[tuple[tuple[float, float], float]]:
+        """Where the toolhead rests for an extruder-only move, and the
+        filament (mm) that move commands."""
+        found = []
+        x, y = START
+        for move in self.moves:
+            if (move.x, move.y) == (x, y):
+                found.append(((x, y), move.e))
+            x, y = move.x, move.y
+        return found
+
     def corner_ratios(self) -> list[tuple[float, float]]:
         """The bead (over the nominal) of the path moves into and out of
         each corner."""
@@ -164,6 +184,9 @@ class Row:
     de_gcode: float = math.nan
     de_advance: float = math.nan
     time_s: float = math.nan
+    miss_mm: float = math.nan
+    rest_inside: float = math.nan
+    rest_outside_mm: float = math.nan
     error: str = ""
     corners: list[dict] = field(default_factory=list)
     steps: list[dict] = field(default_factory=list)
@@ -465,9 +488,17 @@ def measure(
         ratio,
     )
     bead_area = width * height
-    for apex, ratios in zip(
-        flow_metric.apex_indices(xy, geometry.corners), geometry.corner_ratios()
+    for (apex, ratios), corner in zip(
+        zip(
+            flow_metric.apex_indices(xy, geometry.corners),
+            geometry.corner_ratios(),
+        ),
+        geometry.corners,
     ):
+        miss = float(np.hypot(*(xy[apex] - np.asarray(corner))))
+        row.miss_mm = (
+            miss if math.isnan(row.miss_mm) else max(row.miss_mm, miss)
+        )
         if flow_metric.is_ratio_step(*ratios):
             row.steps.append(
                 flow_metric.step_report(
@@ -489,6 +520,16 @@ def measure(
         row.moved_nl = max(s["moved_nl"] for s in row.steps)
         row.net_nl = max((s["net_nl"] for s in row.steps), key=abs)
         row.switch_mm = max(s["switch_mm"] for s in row.steps)
+    vertices = geometry.vertices()
+    stays = flow_metric.vertex_dwells(xy, vertices)
+    for at, filament in geometry.rest_moves():
+        rest = flow_metric.rest_report(
+            e_cmd, stays[vertices.index(at)], filament
+        )
+        row.rest_inside = min(row.rest_inside, rest["inside"], key=_nan_last)
+        row.rest_outside_mm = max(
+            row.rest_outside_mm, rest["outside_mm"], key=_nan_first
+        )
     moving = speed_xy > flow_metric.MOVING_SPEED_MM_S
     row.ve_max = float(ve[moving].max())
     row.ve_min = float(ve[moving].min())
@@ -502,6 +543,14 @@ def measure(
             plain_xy, plain[2][:, 0], ratio
         )
     return row
+
+
+def _nan_last(value: float) -> float:
+    return math.inf if math.isnan(value) else value
+
+
+def _nan_first(value: float) -> float:
+    return -math.inf if math.isnan(value) else value
 
 
 def _signed(value: float) -> str:
@@ -572,7 +621,8 @@ def table(rows: list[Row], sweep_name: str) -> str:
         f"{'case':<10} {'mm/s':>4} | {'peak':>6} {'dip':>5} {'w>5%':>5} "
         f"{'blob':>6} | {'moved':>6} {'net':>6} {'sw':>5} | "
         f"{'ve+':>6} {'ve-':>6} {'ae':>7} | {'|ve|*':>6} "
-        f"{'|ae|*':>7} | {'dE_gc':>8} {'dE_adv':>8} | {'t':>6}"
+        f"{'|ae|*':>7} | {'dE_gc':>8} {'dE_adv':>8} | {'miss':>6} | "
+        f"{'in%':>5} {'out':>7} | {'t':>6}"
     )
     if sweep_name:
         head = f"{sweep_name:>11} " + head
@@ -594,6 +644,9 @@ def table(rows: list[Row], sweep_name: str) -> str:
             f"{row.ve_max:>6.1f} {row.ve_min:>6.1f} {row.ae_max:>7.0f} | "
             f"{row.ve_all:>6.1f} {row.ae_all:>7.0f} | "
             f"{row.de_gcode:>+8.4f} {_signed(row.de_advance):>8} | "
+            f"{_cell(row.miss_mm, '.3f', 6)} | "
+            f"{_cell(row.rest_inside * 100.0, '.1f', 5)} "
+            f"{_cell(row.rest_outside_mm, '.1e', 7)} | "
             f"{row.time_s:>6.3f}"
         )
     return "\n".join(lines)

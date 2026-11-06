@@ -53,6 +53,57 @@ impl StreamConfig {
     pub(crate) fn fit_tol(&self) -> crate::lowering::FitTol {
         crate::lowering::FitTol::absolute(self.fit_tol_mm, self.fit_tol_accel_mm_s2)
     }
+
+    /// The config with the corner budget held on the path `chains` shape:
+    /// the X and Y kernels' rounding, see [`geometry::ShapedCorners`].
+    pub(crate) fn with_shaped_corners(self, chains: &AxisChainSet) -> Self {
+        let kernel = |axis: usize| chains.chains.get(axis).and_then(|chain| chain.kernel());
+        let shaped_corners = geometry::ShapedCorners::interned([kernel(0), kernel(1)]);
+        if let Some(corners) = shaped_corners {
+            log_corner_floor(corners, self.limits);
+        }
+        Self {
+            corner: geometry::CornerFitConfig {
+                shaped_corners,
+                ..self.corner
+            },
+            ..self
+        }
+    }
+}
+
+/// What the shaper alone rounds a stopped 90° and 180° corner by at the
+/// config's acceleration, and for an explicit `corner_deviation` the
+/// accelerations at which each fits it: the trade a budget under the floor
+/// buys with slower corners.
+fn log_corner_floor(corners: &geometry::ShapedCorners, limits: geometry::VelocityLimits) {
+    let accel = limits.accel_mm_s2;
+    let floor_90 = corners.floor_mm(std::f64::consts::FRAC_PI_2, accel);
+    let floor_180 = corners.floor_mm(std::f64::consts::PI, accel);
+    let (budget, fits_at_90, fits_at_180) = match limits.corner {
+        geometry::CornerBudget::Shaped(mm) => (
+            mm,
+            accel * (mm / floor_90).min(1.0),
+            accel * (mm / floor_180).min(1.0),
+        ),
+        geometry::CornerBudget::OverFloor(_) | geometry::CornerBudget::ScvEquivalent(_) => {
+            (f64::NAN, accel, accel)
+        }
+    };
+    tracing::info!(
+        subsystem = "motion",
+        event = "corner_floor",
+        max_accel = accel,
+        corner_budget = ?limits.corner,
+        floor_90_mm = floor_90,
+        floor_180_mm = floor_180,
+        corner_deviation_mm = budget,
+        accel_fitting_90 = fits_at_90,
+        accel_fitting_180 = fits_at_180,
+        "the shaper rounds a stopped corner by {floor_90:.4} mm at 90° and {floor_180:.4} mm at \
+         180° at {accel} mm/s²; corners whose stop rounds past the budget slow to fit it \
+         (90° at {fits_at_90:.0} mm/s², 180° at {fits_at_180:.0} mm/s²)"
+    );
 }
 
 #[derive(Debug)]

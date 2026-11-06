@@ -122,7 +122,7 @@ fn run_waypoints(limits: FuzzLimits, waypoints: &[Waypoint]) -> (ExactTrajectory
     let params = SnapshotParams {
         max_velocity: limits.max_velocity,
         max_accel: limits.max_accel,
-        corner_deviation,
+        corner: geometry::CornerBudget::Shaped(corner_deviation),
         max_jerk: f64::INFINITY,
         max_z_velocity: None,
         max_z_accel: None,
@@ -140,7 +140,7 @@ fn run_waypoints(limits: FuzzLimits, waypoints: &[Waypoint]) -> (ExactTrajectory
             limits.max_velocity,
             limits.max_accel,
             f64::INFINITY,
-            corner_deviation,
+            geometry::CornerBudget::Shaped(corner_deviation),
         ),
         ..PlannerConfig::default()
     };
