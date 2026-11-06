@@ -9,9 +9,13 @@ struct shaper_pulses {
 };
 
 struct move;
+struct coord;
+struct stepper_kinematics;
 
 int init_shaper(int n, double a[], double t[], struct shaper_pulses *sp);
 double shaper_calc_position(const struct move *m, int axis, double move_time
                             , const struct shaper_pulses *sp);
+int input_shaper_calc_pva(struct stepper_kinematics *sk, const struct move *m
+                          , double move_time, struct coord *pva);
 
 #endif  // kin_shaper.h

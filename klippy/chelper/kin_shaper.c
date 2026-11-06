@@ -351,3 +351,167 @@ input_shaper_alloc(void)
     is->m.move_t = 2. * DUMMY_T;
     return &is->sk;
 }
+
+
+/****************************************************************
+ * Shaped position, velocity and acceleration (servo setpoints)
+ ****************************************************************/
+
+static inline void
+axis_pva(const struct move *m, int axis, double move_time, double pva[3])
+{
+    double axis_r = m->axes_r.axis[axis - 'x'];
+    double accel = 2. * m->half_accel;
+    pva[0] = get_axis_position(m, axis, move_time);
+    pva[1] = axis_r * (m->start_v + accel * move_time);
+    pva[2] = axis_r * accel;
+}
+
+static void
+shaper_calc_pva(const struct move *m, int axis, double move_time
+                , const struct shaper_pulses *sp, double pva[3])
+{
+    pva[0] = pva[1] = pva[2] = 0.;
+    int i;
+    for (i = 0; i < sp->num_pulses; ++i) {
+        double t = move_time + sp->pulses[i].t, a = sp->pulses[i].a;
+        const struct move *pm = m;
+        while (t < 0.) {
+            pm = list_prev_entry(pm, node);
+            t += pm->move_t;
+        }
+        while (t > pm->move_t) {
+            t -= pm->move_t;
+            pm = list_next_entry(pm, node);
+        }
+        double p[3];
+        axis_pva(pm, axis, t, p);
+        pva[0] += a * p[0];
+        pva[1] += a * p[1];
+        pva[2] += a * p[2];
+    }
+}
+
+static inline double
+axis_velocity_jump(const struct move *prev, const struct move *next, int axis)
+{
+    double v_end = prev->axes_r.axis[axis - 'x']
+        * (prev->start_v + 2. * prev->half_accel * prev->move_t);
+    return next->axes_r.axis[axis - 'x'] * next->start_v - v_end;
+}
+
+// Derivative of the it0 antiderivative: the smoother weight at s
+static double
+smoother_density(const struct smoother *sm, double s)
+{
+    double q = 0., dq = 0.;
+    int i;
+    for (i = 0; i < sm->n; ++i) {
+        dq = dq * s + q;
+        q = q * s + sm->c0[i];
+    }
+    return q + s * dq;
+}
+
+static inline void
+smoother_add_move_pva(const struct move *m, int axis, double t0
+                      , const smoother_antiderivatives *ad, double pva[3])
+{
+    pva[0] += integrate_move(m, axis, m->start_pos.axis[axis - 'x'], t0, ad);
+    pva[1] += integrate_velocity(m, axis, t0, ad);
+    pva[2] += 2. * m->half_accel * m->axes_r.axis[axis - 'x'] * ad->it0;
+}
+
+// range_integrate() of position, velocity and acceleration. A velocity
+// jump at a move boundary inside the kernel window contributes the jump
+// times the kernel weight at the boundary to the acceleration.
+static void
+smoother_calc_pva(const struct move *m, int axis, double move_time
+                  , const struct smoother *sm, double pva[3])
+{
+    pva[0] = pva[1] = pva[2] = 0.;
+    move_time += sm->t_offs;
+    while (unlikely(move_time < 0.)) {
+        m = list_prev_entry(m, node);
+        move_time += m->move_t;
+    }
+    while (unlikely(move_time > m->move_t)) {
+        move_time -= m->move_t;
+        m = list_next_entry(m, node);
+    }
+    double start = move_time - sm->hst, end = move_time + sm->hst;
+    double t0 = move_time;
+    if (unlikely(start >= 0. && end <= m->move_t)) {
+        smoother_add_move_pva(m, axis, t0, &sm->pm_diff, pva);
+        return;
+    }
+    smoother_antiderivatives left =
+        likely(start < 0.) ? calc_antiderivatives(sm, t0) : sm->p_hst;
+    smoother_antiderivatives right =
+        likely(end > m->move_t) ? calc_antiderivatives(sm, t0 - m->move_t)
+                                : sm->m_hst;
+    smoother_antiderivatives diff = diff_antiderivatives(&right, &left);
+    smoother_add_move_pva(m, axis, t0, &diff, pva);
+    const struct move *prev = m;
+    while (likely(start < 0.)) {
+        const struct move *later = prev;
+        prev = list_prev_entry(prev, node);
+        pva[2] += axis_velocity_jump(prev, later, axis)
+            * smoother_density(sm, t0);
+        start += prev->move_t;
+        t0 += prev->move_t;
+        smoother_antiderivatives r = left;
+        left = likely(start < 0.) ? calc_antiderivatives(sm, t0)
+                                  : sm->p_hst;
+        diff = diff_antiderivatives(&r, &left);
+        smoother_add_move_pva(prev, axis, t0, &diff, pva);
+    }
+    t0 = move_time;
+    while (likely(end > m->move_t)) {
+        const struct move *earlier = m;
+        end -= m->move_t;
+        t0 -= m->move_t;
+        m = list_next_entry(m, node);
+        pva[2] += axis_velocity_jump(earlier, m, axis)
+            * smoother_density(sm, t0);
+        smoother_antiderivatives l = right;
+        right = likely(end > m->move_t) ? calc_antiderivatives(sm,
+                                                               t0 - m->move_t)
+                                        : sm->m_hst;
+        diff = diff_antiderivatives(&right, &l);
+        smoother_add_move_pva(m, axis, t0, &diff, pva);
+    }
+}
+
+static void
+shaped_axis_pva(const struct move *m, int axis, double move_time
+                , const struct shaper_pulses *sp, const struct smoother *sm
+                , double pva[3])
+{
+    if (sp->num_pulses)
+        shaper_calc_pva(m, axis, move_time, sp, pva);
+    else if (sm->hst)
+        smoother_calc_pva(m, axis, move_time, sm, pva);
+    else
+        axis_pva(m, axis, move_time, pva);
+}
+
+int
+input_shaper_calc_pva(struct stepper_kinematics *sk, const struct move *m
+                      , double move_time, struct coord *pva)
+{
+    if (sk->calc_position_cb != shaper_x_calc_position
+        && sk->calc_position_cb != shaper_y_calc_position
+        && sk->calc_position_cb != shaper_xy_calc_position)
+        return -1;
+    struct input_shaper *is = container_of(sk, struct input_shaper, sk);
+    double axes[3][3];
+    shaped_axis_pva(m, 'x', move_time, &is->sp_x, &is->sm_x, axes[0]);
+    shaped_axis_pva(m, 'y', move_time, &is->sp_y, &is->sm_y, axes[1]);
+    axis_pva(m, 'z', move_time, axes[2]);
+    int axis, order;
+    for (axis = 0; axis < 3; ++axis)
+        for (order = 0; order < 3; ++order)
+            pva[order].axis[axis] = axes[axis][order];
+    return 0;
+}
