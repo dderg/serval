@@ -107,6 +107,15 @@ pub struct AdvanceValley {
     pub before: f64,
     pub after: f64,
     pub floor: f64,
+    pub kind: ValleyKind,
+}
+
+/// Whether a valley releases the lead around a turnaround or crawl, or a
+/// rest (see [`AdvanceValley`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValleyKind {
+    Crawl,
+    Rest,
 }
 
 impl AdvanceValley {

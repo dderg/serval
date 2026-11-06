@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use geometry::{
     ADVANCE_VALLEY_SPEED_MM_S, AdvanceValley, RATIO_RAMP_ENVELOPE_SLOPE as ENVELOPE_SLOPE,
     RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep,
-    TURNAROUND_SPEED_TIME_S, crawl_floor, leader_reach, turns_around, valley_reach,
+    TURNAROUND_SPEED_TIME_S, ValleyKind, crawl_floor, leader_reach, turns_around, valley_reach,
 };
 use trajectory::ContinuousSegment;
 
@@ -1526,11 +1526,13 @@ impl RatioSmoothing {
     /// A valley at `turn`, unless the last one laid already holds the
     /// weight flat at zero there ([`AdvanceValley::holds_zero_at`]): a crawl
     /// at a seam is the slowest point of the leg before or after it too,
-    /// read a hair inside that leg. Laid twice, the advance would read the
-    /// product of two weights there and rebuild its lead steeper than
-    /// either; neighbours still overlap where their crawls lie closer than
-    /// their reach. The turning guard bounds the lead's rebuild from the
-    /// same rule, so a crawl valley reaches back all of `reach` or fails
+    /// read a hair inside that leg. A crawl whose sides would overlap the
+    /// last crawl valley's widens it instead: the advance releases its lead
+    /// once and rebuilds it once across both, holding the weight at zero
+    /// between them, where two valleys would multiply their weights and
+    /// rebuild it steeper than either. Laid crawl valleys never overlap.
+    /// The turning guard bounds the lead's release and rebuild from the same
+    /// rule, so a new crawl valley reaches back all of `reach` or fails
     /// loudly: the guard cannot see what the projection has taken.
     fn lay_valley(&mut self, turn: f64, reach: f64, floor: f64) {
         if self
@@ -1550,19 +1552,58 @@ impl RatioSmoothing {
                  {laid:?} already holds the weight at zero, behind the last one laid"
             );
         }
-        let back = self.back_reach_limit(turn);
-        assert!(
-            back >= reach,
-            "follower projection: the crawl valley at s={turn} reaches {reach} mm back, but \
-             the projection has taken the path to {back} mm before it"
-        );
-        self.valleys.push(AdvanceValley {
-            start: turn,
-            end: turn,
-            before: reach,
-            after: reach,
-            floor,
-        });
+        let overlapped = self
+            .valleys
+            .iter_mut()
+            .rev()
+            .find(|valley| valley.kind == ValleyKind::Crawl)
+            .filter(|last| turn - reach < last.reach_end());
+        match overlapped {
+            Some(last) => {
+                assert!(
+                    turn > last.end,
+                    "follower projection: the crawl at s={turn} lies behind the end of the last \
+                     crawl valley {last:?}"
+                );
+                last.end = turn;
+                last.after = last.after.max(reach);
+                last.floor = last.floor.max(floor);
+            }
+            None => {
+                let back = self.back_reach_limit(turn);
+                assert!(
+                    back >= reach,
+                    "follower projection: the crawl valley at s={turn} reaches {reach} mm back, \
+                     but the projection has taken the path to {back} mm before it"
+                );
+                self.valleys.push(AdvanceValley {
+                    start: turn,
+                    end: turn,
+                    before: reach,
+                    after: reach,
+                    floor,
+                    kind: ValleyKind::Crawl,
+                });
+            }
+        }
+        self.assert_crawl_valleys_apart();
+    }
+
+    fn assert_crawl_valleys_apart(&self) {
+        let mut crawls = self
+            .valleys
+            .iter()
+            .filter(|valley| valley.kind == ValleyKind::Crawl);
+        let Some(mut previous) = crawls.next() else {
+            return;
+        };
+        for valley in crawls {
+            assert!(
+                previous.reach_end() <= valley.reach_start(),
+                "follower projection: the crawl valleys {previous:?} and {valley:?} overlap"
+            );
+            previous = valley;
+        }
     }
 
     /// Records the seams of both tables' spans not yet examined, and
@@ -2055,6 +2096,7 @@ impl RatioSmoothing {
                 before,
                 after: 0.0,
                 floor: 0.0,
+                kind: ValleyKind::Rest,
             });
         }
         self.open_rest = Some(OpenRest {

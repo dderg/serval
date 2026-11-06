@@ -1,4 +1,4 @@
-use geometry::{AdvanceValley, SideWeight};
+use geometry::{AdvanceValley, SideWeight, ValleyKind};
 
 use super::super::test_motion::Rng;
 use super::{Factor, coupled_bend, weigh};
@@ -75,6 +75,7 @@ fn the_weighed_product_bounds_every_subset_of_laid_valleys() {
                     before: width,
                     after: width,
                     floor: rng.between(0.0, 0.01),
+                    kind: ValleyKind::Crawl,
                 }
             })
             .collect();

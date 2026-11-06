@@ -36,8 +36,8 @@
 mod valley;
 
 pub use valley::{
-    AdvanceValley, SideWeight, TURNAROUND_SPEED_TIME_S, VALLEY_RAMP_TIME_S, crawl_floor,
-    leader_reach, turns_around, valley_reach, widest_crawl_reach,
+    AdvanceValley, SideWeight, TURNAROUND_SPEED_TIME_S, VALLEY_RAMP_TIME_S, ValleyKind,
+    crawl_floor, leader_reach, turns_around, valley_reach, widest_crawl_reach,
 };
 
 /// The shortest ratio ramp.

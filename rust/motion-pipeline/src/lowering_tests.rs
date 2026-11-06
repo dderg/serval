@@ -11,6 +11,7 @@ const POSITION_EQUIVALENT: FitTol = FitTol {
     accel_budget: AccelBudget::PositionEquivalent {
         accel_limit_mm_s2: f64::INFINITY,
     },
+    jerk_mm_s3: f64::INFINITY,
 };
 
 #[test]

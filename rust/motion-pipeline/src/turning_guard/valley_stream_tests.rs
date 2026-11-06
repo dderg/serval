@@ -1,6 +1,6 @@
 use geometry::path::CurvatureProfile;
 use geometry::path::lowering::PositionProfile;
-use geometry::{ADVANCE_VALLEY_SPEED_MM_S, AdvanceValley, crawl_floor, valley_reach};
+use geometry::{ADVANCE_VALLEY_SPEED_MM_S, AdvanceValley, ValleyKind, crawl_floor, valley_reach};
 use nurbs::algebra::PiecewisePolynomialKernel;
 
 use super::backoff_stream_tests::{UnsoundPlanner, line};
@@ -330,6 +330,7 @@ impl ValleyReference {
                 before: reach,
                 after: reach,
                 floor,
+                kind: ValleyKind::Crawl,
             }),
         }
     }

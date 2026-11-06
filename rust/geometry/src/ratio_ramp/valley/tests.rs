@@ -1,7 +1,7 @@
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
 
-use super::{AdvanceValley, SideWeight, crawl_floor, valley_reach};
+use super::{AdvanceValley, SideWeight, ValleyKind, crawl_floor, valley_reach};
 
 /// A range around `value` reaching `below` and `above` of it, never under
 /// `least`.
@@ -40,7 +40,14 @@ proptest! {
     ) {
         let width = valley_reach(speed, rate);
         let floor = crawl_floor(speed, rate);
-        let valley = AdvanceValley { start: 10.0, end: 10.0, before: width, after: width, floor };
+        let valley = AdvanceValley {
+            start: 10.0,
+            end: 10.0,
+            before: width,
+            after: width,
+            floor,
+            kind: ValleyKind::Crawl,
+        };
         let distance = share * width;
         let s = if after { 10.0 + distance } else { 10.0 - distance };
         let (weight, slope, curvature) = valley.weight(s);
