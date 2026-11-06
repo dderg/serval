@@ -1532,24 +1532,24 @@ impl WidthField {
             .unwrap_or(f64::INFINITY)
     }
 
-    /// Whether every seam a node at `t` reads a ramp time or a width from
-    /// ([`Self::ramp_time_at`], [`Self::seam_width_at`]) knows the run past
-    /// it, or took its ramp time already.
-    fn seams_known_around(&self, t: f64) -> bool {
-        let read = self
-            .seams
-            .partition_point(|seam| seam.t <= t + SEAM_REACH_S.max(SEAM_PATH_REACH_S));
-        self.seams[..read]
+    /// When the first seam still to take its ramp time that does not know
+    /// the run past it ([`TimedSeam::run_known`]) lies, if any: no node a
+    /// ramp time or a width from it reaches ([`Self::ramp_time_at`],
+    /// [`Self::seam_width_at`]) can be kept yet.
+    fn unknown_run_from(&self) -> f64 {
+        self.seams
             .iter()
-            .all(|seam| seam.ramp_time.is_some() || seam.run_known())
+            .find(|seam| seam.ramp_time.is_none() && !seam.run_known())
+            .map_or(f64::INFINITY, |seam| seam.t)
     }
 
     /// Turns every candidate at or before `through` whose base is known,
     /// and whose seams around know the runs past them
-    /// ([`TimedSeam::run_known`]), into a node or drops it, in order, then
-    /// every seam no candidate still to come takes a ramp time or a width
-    /// from.
+    /// ([`Self::unknown_run_from`]), into a node or drops it, in order,
+    /// then every seam no candidate still to come takes a ramp time or a
+    /// width from.
     fn assign(&mut self, through: f64) {
+        let unknown_run_from = self.unknown_run_from();
         while let Some(&candidate) = self.candidates.front() {
             match candidate {
                 Candidate::Rest(s) => self.rest_at(s),
@@ -1559,7 +1559,7 @@ impl WidthField {
                     };
                     if base == 0.0 {
                         self.rest_at(sample.s);
-                    } else if self.seams_known_around(sample.t) {
+                    } else if sample.t + SEAM_REACH_S.max(SEAM_PATH_REACH_S) < unknown_run_from {
                         self.keep_if_due(sample, base);
                     } else {
                         break;
