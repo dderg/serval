@@ -3,8 +3,8 @@ use std::collections::VecDeque;
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{CurvatureProfile, Segment};
 use geometry::{
-    ExtrusionBudget, Move, MoveVelocity, ScalarLaw, VelocityError, VelocityPlanParams,
-    brake_horizon, replan_span, seam_requires_stop,
+    BrakeMove, ExtrusionBudget, Move, MoveVelocity, ScalarLaw, VelocityError, VelocityPlanParams,
+    brake_horizon, brake_move, replan_span, seam_requires_stop,
 };
 use trajectory::AxisChainSet;
 
@@ -38,9 +38,10 @@ const BACKOFF_STEP_MIN: f64 = 0.5;
 const BACKOFF_EXPONENT: f64 = 2.0 / 3.0;
 /// A back-off aims this far under the limit, so the pass after it settles.
 const BACKOFF_AIM: f64 = 0.98;
-/// Back-offs a single move may take before the guard gives up: each one
-/// lowers its budget by at least `1 − BACKOFF_STEP_MAX`.
-const BACKOFFS_MAX: u32 = 64;
+/// The least share of its budget a back-off may leave a move: a move asked
+/// to drop under it fails loudly ([`Stuck`]), and the guard emits only what
+/// stands even with every held move at it ([`TurningGuard::emittable`]).
+const SCALE_FLOOR: f64 = 1.0 / 32.0;
 
 /// Holds the advance's turning demand within the extruder's acceleration
 /// limit on kernel-free followers, slowing only where it binds.
@@ -59,9 +60,10 @@ const BACKOFFS_MAX: u32 = 64;
 /// [`CellMotion::between`]). Where a cell's bound exceeds the limit it
 /// scales the acceleration budgets of the moves that cell reads, re-plans
 /// the span between two seams the change leaves standing
-/// ([`geometry::replan_span`]) and checks again: each pass lowers budgets
-/// only, and the demand falls with them, so it settles; a move backed off
-/// [`BACKOFFS_MAX`] times fails loudly.
+/// ([`geometry::replan_span`]), never raising a seam's speed, and checks
+/// again: each pass lowers budgets only, and the demand falls with them,
+/// so it settles; a move asked to drop under [`SCALE_FLOOR`] of its budget
+/// fails loudly.
 ///
 /// Its output reads its input alone: a move is checked once the planned
 /// motion its stretch reads has arrived, a re-plan waits for the seams it
@@ -76,6 +78,13 @@ pub(crate) struct TurningGuard {
     history: VecDeque<MoveSummary>,
     grid: PlannedGrid,
     carried_position: Option<[f64; 3]>,
+    /// The seam the last emission stood on: no back-off scales or re-plans
+    /// a move before it, so the motion emitted and what its proofs read
+    /// never change.
+    frozen: usize,
+    /// The last standing seam found and the reach it was found for: it
+    /// stands for any reach at or past that one.
+    standing: Option<(usize, usize)>,
 }
 
 /// The moves the guard holds, one column per field.
@@ -85,9 +94,13 @@ struct Entries {
     velocities: Vec<MoveVelocity>,
     budgets: Vec<ExtrusionBudget>,
     stops: Vec<bool>,
+    /// Each move as the emission horizon reads it, at [`SCALE_FLOOR`].
+    floor_brakes: Vec<BrakeMove>,
     scales: Vec<f64>,
     backoffs: Vec<u32>,
-    checked: Vec<bool>,
+    /// The first grid cell of a move whose check is still to prove, `None`
+    /// once every cell is.
+    unproven: Vec<Option<i64>>,
     timing: Vec<Timing>,
     summaries: Vec<MoveSummary>,
     /// Whether the segment the moves belong to ends here, at rest.
@@ -165,12 +178,13 @@ impl CellCheck<'_> {
             ),
             motion.turning_ceiling(),
         );
-        (asked > self.caps.max_accel_mm_s2).then_some(Check::Binds {
+        (asked > self.caps.max_accel_mm_s2).then_some(Check::Binds(Binding {
+            cell: n as f64 * h,
             from: read.0,
             to: read.1,
             demand: asked,
             max_accel: self.caps.max_accel_mm_s2,
-        })
+        }))
     }
 }
 
@@ -182,12 +196,18 @@ fn expect_sample(kernels: &FollowerKernels, grid: &PlannedGrid, n: i64) -> shado
 enum Check {
     Passed,
     NotReady,
-    Binds {
-        from: f64,
-        to: f64,
-        demand: f64,
-        max_accel: f64,
-    },
+    Binds(Binding),
+}
+
+/// A grid cell starting at `cell` whose shaped motion asks `demand` of the
+/// extruder against `max_accel`, reading the planned time `[from, to]`.
+#[derive(Debug, Clone, Copy)]
+struct Binding {
+    cell: f64,
+    from: f64,
+    to: f64,
+    demand: f64,
+    max_accel: f64,
 }
 
 enum Resettle {
@@ -210,6 +230,8 @@ impl TurningGuard {
             history: VecDeque::new(),
             grid: PlannedGrid::default(),
             carried_position: None,
+            frozen: 0,
+            standing: None,
         }
     }
 
@@ -231,7 +253,7 @@ impl TurningGuard {
                 self.entries.closed = true;
                 self.settle();
                 assert!(
-                    self.entries.checked.iter().all(|&checked| checked),
+                    self.entries.unproven.iter().all(Option::is_none),
                     "turning guard: a drained segment left a move unchecked"
                 );
                 let count = self.entries.moves.len();
@@ -270,6 +292,8 @@ impl TurningGuard {
         self.entries = Entries::default();
         self.history.clear();
         self.grid.clear();
+        self.frozen = 0;
+        self.standing = None;
     }
 
     fn h(&self) -> f64 {
@@ -284,11 +308,25 @@ impl TurningGuard {
             velocity,
             budget,
         } = planned;
-        let entries = &mut self.entries;
-        let stop = entries
+        let held = &self.entries;
+        let stop = held
             .moves
             .last()
             .is_some_and(|before| seam_requires_stop(before, &geometry, self.config.corner));
+        let floor_brake = brake_move(
+            &geometry,
+            &budget,
+            stop,
+            held.moves
+                .last()
+                .zip(held.budgets.last())
+                .zip(held.floor_brakes.last())
+                .map(|((m, budget), brake)| (m, budget, brake)),
+            SCALE_FLOOR,
+            self.plan_params(),
+        )
+        .unwrap_or_else(|error| panic!("turning guard: brake caps failed: {error:?}"));
+        let entries = &mut self.entries;
         let previous = entries.timing.last().copied();
         let timing = timing_of(&geometry, &velocity, previous, self.carried_position);
         if let Some(start) = timing.start {
@@ -308,9 +346,10 @@ impl TurningGuard {
         entries.velocities.push(velocity);
         entries.budgets.push(budget);
         entries.stops.push(stop);
+        entries.floor_brakes.push(floor_brake);
         entries.scales.push(1.0);
         entries.backoffs.push(0);
-        entries.checked.push(false);
+        entries.unproven.push(Some(i64::MIN));
         entries.timing.push(timing);
     }
 
@@ -318,19 +357,14 @@ impl TurningGuard {
     fn settle(&mut self) {
         loop {
             self.extend_grid();
-            let Some(index) = self.entries.checked.iter().position(|&checked| !checked) else {
+            let Some(index) = self.entries.unproven.iter().position(Option::is_some) else {
                 return;
             };
             match self.check(index) {
-                Check::Passed => self.entries.checked[index] = true,
+                Check::Passed => self.entries.unproven[index] = None,
                 Check::NotReady => return,
-                Check::Binds {
-                    from,
-                    to,
-                    demand,
-                    max_accel,
-                } => {
-                    if let Resettle::NeedsMore = self.back_off(from, to, demand, max_accel) {
+                Check::Binds(binding) => {
+                    if let Resettle::NeedsMore = self.back_off(binding) {
                         return;
                     }
                 }
@@ -377,8 +411,10 @@ impl TurningGuard {
             caps: &caps,
             nearby: &nearby,
         };
-        let first = (timing.t0 / h).floor() as i64;
         let last = (timing.t1() / h).ceil() as i64;
+        let first = ((timing.t0 / h).floor() as i64)
+            .max(self.entries.unproven[index].expect("turning guard: checking a proven move"))
+            .min(last);
         let mut from = expect_sample(&follower.coarse, &self.grid, first);
         for n in first..last {
             let to = expect_sample(&follower.coarse, &self.grid, n + 1);
@@ -463,18 +499,27 @@ impl TurningGuard {
             .chain(after)
     }
 
-    /// Scales the budgets of the moves the planned time `[from, to]` holds
-    /// and re-plans around them; the moves whose stretch reads what moved
-    /// are checked again.
-    fn back_off(&mut self, from: f64, to: f64, demand: f64, max_accel: f64) -> Resettle {
+    /// Scales the budgets of the moves the planned time a binding cell
+    /// reads holds, from the frozen seam on, and re-plans around them; the
+    /// moves whose stretch reads what moved are checked again.
+    fn back_off(&mut self, binding: Binding) -> Resettle {
+        let Binding {
+            from,
+            to,
+            demand,
+            max_accel,
+            ..
+        } = binding;
         let step = (libm::pow(max_accel / demand, BACKOFF_EXPONENT) * BACKOFF_AIM)
             .clamp(BACKOFF_STEP_MIN, BACKOFF_STEP_MAX);
         let timing = &self.entries.timing;
-        let first = timing.partition_point(|timing| timing.t1() <= from);
+        let first = timing
+            .partition_point(|timing| timing.t1() <= from)
+            .max(self.frozen);
         let last = timing.partition_point(|timing| timing.t0 < to);
         assert!(
             first < last,
-            "turning guard: the binding window [{from}, {to}] holds no move"
+            "turning guard: the binding window [{from}, {to}] holds no move past the frozen seam"
         );
         let saved = (
             self.entries.scales[first..last].to_vec(),
@@ -482,12 +527,10 @@ impl TurningGuard {
         );
         for index in first..last {
             self.entries.scales[index] *= step;
-            count_backoff(
-                &mut self.entries.backoffs[index],
-                self.entries.moves[index].source.start_line,
-                self.entries.timing[index].t0,
-                (demand, max_accel),
-            );
+            self.entries.backoffs[index] += 1;
+            if self.entries.scales[index] < SCALE_FLOOR {
+                self.stuck(index, binding).fail();
+            }
         }
         match self.resettle(first, last) {
             Resettle::Done => Resettle::Done,
@@ -499,16 +542,36 @@ impl TurningGuard {
         }
     }
 
+    fn stuck(&self, index: usize, binding: Binding) -> Stuck {
+        let entries = &self.entries;
+        Stuck {
+            binding,
+            line: entries.moves[index].source.start_line,
+            backoffs: entries.backoffs[index],
+            frozen: (
+                entries.timing[self.frozen].t0,
+                entries.moves[self.frozen].source.start_line,
+            ),
+        }
+    }
+
     /// Re-plans the span around the moves `[first, last)` between two seams
-    /// whose speeds it leaves standing: back from just before them until the
-    /// entry seam's speed can still brake into the scaled budgets, on until
-    /// the exit seam's speed is reached again.
+    /// whose speeds it leaves standing, no seam over the speed it has:
+    /// back from just before them until the entry seam's speed can still
+    /// brake into the scaled budgets, never past the frozen seam, on until
+    /// the exit seam's speed is reached again. The moves from the first one
+    /// whose plan changed on are re-timed.
     fn resettle(&mut self, first: usize, last: usize) -> Resettle {
         let count = self.entries.moves.len();
-        let mut lo = first.saturating_sub(1);
+        let mut lo = first.saturating_sub(1).max(self.frozen);
         let mut hi = (last + 1).min(count);
         let profile = loop {
             let exit_v = self.entries.velocities[hi - 1].exit_v;
+            let ceilings: Vec<f64> = self.entries.velocities[lo..hi]
+                .iter()
+                .map(|velocity| velocity.entry_v)
+                .chain(std::iter::once(exit_v))
+                .collect();
             let params = VelocityPlanParams {
                 entry_v: self.entries.velocities[lo].entry_v,
                 ..self.plan_params()
@@ -518,28 +581,15 @@ impl TurningGuard {
                 &self.entries.stops[lo..hi],
                 &self.entries.budgets[lo..hi],
                 &self.entries.scales[lo..hi],
+                &ceilings,
                 params,
                 exit_v,
             ) {
-                Err(VelocityError::OverCommitted { .. }) => {
-                    assert!(
-                        lo > 0,
-                        "turning guard: a back-off at line {} reaches past the moves already \
-                         emitted",
-                        self.entries.moves[first].source.start_line
-                    );
-                    lo -= 1;
-                }
+                Err(VelocityError::OverCommitted { .. }) => lo = self.reach_back(lo, first),
                 Err(VelocityError::Infeasible {
                     member: 0, line_no, ..
                 }) if line_no == self.entries.moves[lo].source.start_line => {
-                    assert!(
-                        lo > 0,
-                        "turning guard: a back-off at line {} reaches past the moves already \
-                         emitted",
-                        self.entries.moves[first].source.start_line
-                    );
-                    lo -= 1;
+                    lo = self.reach_back(lo, first);
                 }
                 Err(error) => panic!("turning guard: re-plan failed: {error:?}"),
                 Ok(profile) => {
@@ -558,11 +608,32 @@ impl TurningGuard {
                 }
             }
         };
+        let changed = profile
+            .moves
+            .iter()
+            .zip(&self.entries.velocities[lo..hi])
+            .position(|(planned, held)| planned != held)
+            .map(|offset| lo + offset);
         for (offset, velocity) in profile.moves.into_iter().enumerate() {
             self.entries.velocities[lo + offset] = velocity;
         }
-        self.retime_from(lo);
+        if let Some(changed) = changed {
+            self.retime_from(changed);
+        }
         Resettle::Done
+    }
+
+    /// The seam before `lo` a re-plan of the back-off at `first` reaches
+    /// back to, failing loudly at the frozen seam.
+    fn reach_back(&self, lo: usize, first: usize) -> usize {
+        assert!(
+            lo > self.frozen,
+            "turning guard: a back-off at line {} re-plans past the frozen seam at t={} (line {})",
+            self.entries.moves[first].source.start_line,
+            self.entries.timing[self.frozen].t0,
+            self.entries.moves[self.frozen].source.start_line,
+        );
+        lo - 1
     }
 
     fn plan_params(&self) -> VelocityPlanParams<'_> {
@@ -576,13 +647,20 @@ impl TurningGuard {
     }
 
     /// Re-times the moves from `index` on after their velocities changed,
-    /// forgets the grid past the change and re-opens every move whose
-    /// stretch reads it.
+    /// forgets the grid past the change and re-opens every cell that reads
+    /// it: a cell reads the grid up to `ahead + 2` samples on, and the
+    /// sample the change straddles carries the acceleration over it.
     fn retime_from(&mut self, index: usize) {
         let h = self.h();
-        let (_, ahead) = self.span;
+        let (back, ahead) = self.span;
         let entries = &mut self.entries;
         let changed_at = entries.timing[index].t0;
+        let held_from = entries.timing[0].t0;
+        assert!(
+            held_from == 0.0 || changed_at - (back + ahead + 4) as f64 * h >= held_from,
+            "turning guard: a re-plan from t={changed_at} changes motion the moves emitted up to \
+             t={held_from} were proven against"
+        );
         for at in index..entries.moves.len() {
             let previous = (at > 0).then(|| entries.timing[at - 1]);
             let mut timing = timing_of(&entries.moves[at], &entries.velocities[at], previous, None);
@@ -600,12 +678,14 @@ impl TurningGuard {
                 &timing,
             );
         }
+        let straddled = (changed_at / h).floor() as i64;
+        let reopened_from = straddled - ahead - 2;
         for at in 0..entries.moves.len() {
-            if entries.timing[at].t1() + (ahead + 2) as f64 * h >= changed_at {
-                entries.checked[at] = false;
+            if (entries.timing[at].t1() / h).ceil() as i64 > reopened_from {
+                let unproven = &mut entries.unproven[at];
+                *unproven = Some(unproven.map_or(reopened_from, |from| from.min(reopened_from)));
             }
         }
-        let straddled = (changed_at / h).floor() as i64;
         self.grid.truncate_from(straddled + 1);
         let cell_accel = self.cell_accel(straddled as f64 * h, (straddled + 1) as f64 * h);
         self.grid.set_cell_accel(straddled, cell_accel);
@@ -721,88 +801,95 @@ impl TurningGuard {
         })
     }
 
-    /// Emits the held moves no later check can reach.
+    /// Emits the held moves no later check can reach, and freezes the seam
+    /// that holds them standing.
     fn emit_settled(&mut self, output: &mut impl FnMut(PlannedItem) -> bool) -> bool {
-        let count = self.emittable();
+        let (count, standing) = self.emittable();
+        if count > 0 {
+            self.frozen = standing;
+        }
         self.emit(count, output)
     }
 
     /// How many held moves no later back-off can change, nor the motion
-    /// their own stretch reads.
+    /// their own stretch reads, and the seam that stands for them.
     ///
     /// A back-off scales moves the planned time a pending check reads,
     /// which starts no earlier than `u` (the kernels' backward reach)
     /// before the first move still unchecked, or the end of what has
     /// arrived; the first move overlapping it is the earliest it can touch.
-    /// Its re-plan reaches back only to a seam whose speed cannot brake into
-    /// the scaled budgets, and never past the last seam a rest at that
-    /// move's start leaves standing ([`geometry::brake_horizon`]): any
-    /// lowering past the rest leaves the plan before that seam alone. A
-    /// move leaves only once its stretch's kernels read nothing past it.
-    fn emittable(&self) -> usize {
+    /// Its re-plan re-opens the cells that read what it changed, whose own
+    /// back-offs reach further back, as far as the frozen seam: any move
+    /// held may fall to [`SCALE_FLOOR`] of its budget, and no re-plan raises
+    /// a seam. The seam a rest at that earliest move leaves standing with
+    /// every move at the floor ([`geometry::brake_horizon`]) therefore
+    /// stands whatever the pending checks do. A move leaves only once its
+    /// stretch's kernels read nothing past it.
+    fn emittable(&mut self) -> (usize, usize) {
         let h = self.h();
         let (back, ahead) = self.span;
         let timing = &self.entries.timing;
         let earliest = self
             .entries
-            .checked
+            .unproven
             .iter()
-            .position(|&checked| !checked)
+            .position(Option::is_some)
             .map_or(self.segment_end(), |index| timing[index].t0)
             - (back + 2) as f64 * h;
         let reach = timing.partition_point(|timing| timing.t1() <= earliest);
         let Some(standing) = self.horizon(reach) else {
-            return 0;
+            return (0, self.frozen);
         };
+        self.standing = Some((standing, reach));
+        let timing = &self.entries.timing;
         let standing_t = timing
             .get(standing)
             .map_or(self.segment_end(), |timing| timing.t0);
-        timing[..standing]
-            .partition_point(|timing| timing.t1() + (back + ahead + 4) as f64 * h <= standing_t)
+        let count = timing[..standing]
+            .partition_point(|timing| timing.t1() + (back + ahead + 4) as f64 * h <= standing_t);
+        (count, standing)
     }
 
-    /// The last seam at or before `reach` a rest at seam `reach` leaves
-    /// standing.
+    /// The last seam at or before `reach`, and at or past the frozen one, a
+    /// rest at seam `reach` leaves standing with every move at
+    /// [`SCALE_FLOOR`] of its budget. A seam found for an earlier reach
+    /// still stands: the brake envelope only rises as the rest moves on, and
+    /// the seams' speeds only fall.
     fn horizon(&self, reach: usize) -> Option<usize> {
-        if reach == 0 {
+        let since = match self.standing {
+            Some((standing, found_for)) if found_for <= reach => standing,
+            _ => self.frozen,
+        };
+        if reach <= since {
             return None;
         }
         let entries = &self.entries;
-        let mut span = 8;
-        loop {
-            let lo = reach.saturating_sub(span);
-            let seams: Vec<f64> = entries.velocities[lo..reach]
+        brake_horizon(
+            &entries.floor_brakes[since..reach],
+            entries.velocities[since..reach]
                 .iter()
-                .map(|velocity| velocity.entry_v)
-                .chain(std::iter::once(entries.velocities[reach - 1].exit_v))
-                .collect();
-            let found = brake_horizon(
-                &entries.moves[lo..reach],
-                &entries.stops[lo..reach],
-                &entries.budgets[lo..reach],
-                &entries.scales[lo..reach],
-                &seams,
-                self.plan_params(),
-            )
-            .unwrap_or_else(|error| panic!("turning guard: brake horizon failed: {error:?}"));
-            match found {
-                Some(seam) => return Some(lo + seam),
-                None if lo == 0 => return None,
-                None => span *= 2,
-            }
-        }
+                .map(|velocity| velocity.entry_v),
+            self.config.integration_tol,
+        )
+        .unwrap_or_else(|error| panic!("turning guard: brake horizon failed: {error:?}"))
+        .map(|seam| since + seam)
     }
 
     fn emit(&mut self, count: usize, output: &mut impl FnMut(PlannedItem) -> bool) -> bool {
         if count == 0 {
             return true;
         }
+        self.frozen = self.frozen.saturating_sub(count);
+        self.standing = self.standing.and_then(|(standing, found_for)| {
+            Some((standing.checked_sub(count)?, found_for - count))
+        });
         let entries = &mut self.entries;
         self.history.extend(entries.summaries.drain(..count));
         entries.stops.drain(..count);
+        entries.floor_brakes.drain(..count);
         entries.scales.drain(..count);
         entries.backoffs.drain(..count);
-        entries.checked.drain(..count);
+        entries.unproven.drain(..count);
         entries.timing.drain(..count);
         for ((geometry, velocity), budget) in entries
             .moves
@@ -822,16 +909,36 @@ impl TurningGuard {
     }
 }
 
-/// Counts one more back-off of the move at `line`, starting at `t0`, that
-/// still asks `demand` against `max_accel`; past [`BACKOFFS_MAX`] the guard
-/// fails loudly rather than slow the move without end.
-fn count_backoff(backoffs: &mut u32, line: u32, t0: f64, (demand, max_accel): (f64, f64)) {
-    *backoffs += 1;
-    assert!(
-        *backoffs <= BACKOFFS_MAX,
-        "turning guard: line {line} at t={t0:.6}s still asks {demand:.0} mm/s² of the extruder \
-         after {BACKOFFS_MAX} back-offs (limit {max_accel:.0} mm/s²)"
-    );
+/// A binding cell whose back-offs would take line `line`'s budget under
+/// [`SCALE_FLOOR`] after `backoffs` of them; `frozen` is the time and line
+/// of the frozen seam the window may not reach past.
+#[derive(Debug)]
+struct Stuck {
+    binding: Binding,
+    line: u32,
+    backoffs: u32,
+    frozen: (f64, u32),
+}
+
+impl Stuck {
+    #[cold]
+    #[inline(never)]
+    fn fail(&self) -> ! {
+        let Binding {
+            cell,
+            from,
+            to,
+            demand,
+            max_accel,
+        } = self.binding;
+        panic!(
+            "turning guard: the cell at t={cell:.6}s still asks {demand:.0} mm/s² of the \
+             extruder (limit {max_accel:.0} mm/s²) after {} back-offs of line {}, the next \
+             taking it under {SCALE_FLOOR} of its budget; the cell reads [{from:.6}, {to:.6}]s, \
+             the frozen seam is at t={:.6}s (line {})",
+            self.backoffs, self.line, self.frozen.0, self.frozen.1
+        );
+    }
 }
 
 /// The kernel-free followers with an advance, each with the kernels of the
@@ -987,6 +1094,8 @@ fn summary_of(
     }
 }
 
+#[cfg(test)]
+mod backoff_stream_tests;
 #[cfg(test)]
 mod test_motion;
 #[cfg(test)]
