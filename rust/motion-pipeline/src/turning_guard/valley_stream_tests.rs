@@ -1,8 +1,8 @@
 use geometry::path::CurvatureProfile;
 use geometry::path::lowering::PositionProfile;
 use geometry::{
-    ADVANCE_VALLEY_SPEED_MM_S, AdvanceValley, CrawlSide, ValleyKind, crawl_floor, crawl_side_width,
-    valley_reach,
+    ADVANCE_VALLEY_SPEED_MM_S, AdvanceValley, CrawlSide, VALLEY_LEAD_BUDGET_S, ValleyKind,
+    crawl_floor, crawl_side_width, valley_reach,
 };
 use nurbs::algebra::PiecewisePolynomialKernel;
 
@@ -482,5 +482,42 @@ fn a_valley_rebuild_under_an_under_estimated_jerk_gain_stays_within_the_extruder
         share <= 1.0 + 1e-9,
         "the advance asks {share:.4}× the extruder's limit at t={at:.6} s, by {} valleys",
         reference.valleys.len()
+    );
+}
+
+/// The guard holds back the motion within [`VALLEY_LEAD_BUDGET_S`] of what
+/// has arrived, where a crawl still to come may lay a valley side, and a
+/// drain releases all of it: every move leaves, in order, by the drain.
+#[test]
+fn a_drain_releases_the_moves_the_lead_budget_held_back() {
+    let planner = UnsoundPlanner::new(P1_RAMP, 1.0);
+    let planned = planner.plan(&near_reversal_zigzag());
+    let lines: Vec<u32> = planned
+        .iter()
+        .filter_map(|item| match item {
+            PlannedItem::Move(planned) => Some(planned.geometry.source.start_line),
+            _ => None,
+        })
+        .collect();
+    let (emitted, at_drains) = planner.guard_through_drains(planned);
+    let emitted_lines: Vec<u32> = emitted
+        .iter()
+        .map(|planned| planned.geometry.source.start_line)
+        .collect();
+    assert_eq!(
+        emitted_lines, lines,
+        "a drained stream left moves held, or emitted them out of order"
+    );
+    let &[before_drain] = at_drains.as_slice() else {
+        panic!("the zigzag drains once, at its end: {at_drains:?}");
+    };
+    let held: f64 = emitted[before_drain..]
+        .iter()
+        .flat_map(|planned| planned.velocity.phases.iter())
+        .map(|phase| phase.dt)
+        .sum();
+    assert!(
+        held >= VALLEY_LEAD_BUDGET_S,
+        "the guard held back {held} s of motion before the drain, under the lead budget"
     );
 }

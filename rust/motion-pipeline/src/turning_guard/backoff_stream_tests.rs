@@ -123,13 +123,27 @@ impl UnsoundPlanner {
     }
 
     pub fn guard(&self, planned: impl IntoIterator<Item = PlannedItem>) -> Vec<PlannedMove> {
+        self.guard_through_drains(planned).0
+    }
+
+    /// The moves the guard emits, and how many it had emitted as each drain
+    /// arrived.
+    pub fn guard_through_drains(
+        &self,
+        planned: impl IntoIterator<Item = PlannedItem>,
+    ) -> (Vec<PlannedMove>, Vec<usize>) {
         let mut guard = TurningGuard::new(self.config.clone(), &self.chains);
         let mut emitted = Vec::new();
+        let mut at_drains = Vec::new();
         for item in planned {
             let item = match item {
                 PlannedItem::Move(mut planned) => {
                     planned.geometry.limits.extruder = Some(self.real);
                     PlannedItem::Move(planned)
+                }
+                PlannedItem::Drain => {
+                    at_drains.push(emitted.len());
+                    PlannedItem::Drain
                 }
                 other => other,
             };
@@ -140,7 +154,7 @@ impl UnsoundPlanner {
                 true
             }));
         }
-        emitted
+        (emitted, at_drains)
     }
 
     /// Guards the plan of `lines`: every move leaves, proven, so a second

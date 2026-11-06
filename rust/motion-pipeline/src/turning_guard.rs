@@ -67,6 +67,21 @@ const SCALE_FLOOR: f64 = 1.0 / 32.0;
 /// so it settles; a move asked to drop under [`SCALE_FLOOR`] of its budget
 /// fails loudly.
 ///
+/// Where the shaped path may crawl, the follower projection lays an advance
+/// valley and sizes each side so its rebuild fits what the leaders' own
+/// demand leaves of the limit ([`geometry::crawl_side_width`]). The guard
+/// finds the runs of cells that may crawl, takes the widest grid side the
+/// leaders cover within [`VALLEY_LEAD_BUDGET_S`] either side of each, and
+/// proves every cell such a side may reach with the room its rebuild there
+/// needs added ([`valley::Crawl`]): the projection then finds a side no
+/// wider that fits, and reaches back no further than it holds the path.
+/// A crawl whose side cannot fit within the budget backs the moves around
+/// it off, and fails loudly where no back-off can help ([`ValleyStuck`]).
+/// Rest valleys, where the leaders rest over an extrude-only move or a
+/// dwell, are not bounded here: the planner's step and rest-room budgets
+/// size them, and none of 4805 residual excesses of the p1 gain-share 0.45
+/// ablation lay in one.
+///
 /// Its output reads its input alone: a move is checked once the planned
 /// motion its stretch reads has arrived, a re-plan waits for the seams it
 /// needs, and a move leaves only once no later back-off can reach it or
