@@ -119,10 +119,12 @@ pub geometry::frontend::ExtruderCaps::max_accel_mm_s2: f64
 pub geometry::frontend::ExtruderCaps::max_velocity_mm_s: f64
 pub geometry::frontend::ExtruderCaps::own_jerk_per_accel_hz: f64
 pub geometry::frontend::ExtruderCaps::path_jerk_per_accel_hz: [f64; 8]
+pub geometry::frontend::ExtruderCaps::path_jerk_per_accel_switch_hz: [f64; 8]
 pub geometry::frontend::ExtruderCaps::rest_settle: geometry::RestSettleId
 pub geometry::frontend::ExtruderCaps::unshaped_leaders: [bool; 3]
 impl geometry::frontend::ExtruderCaps
 pub fn geometry::frontend::ExtruderCaps::path_jerk_gain(&self, [bool; 3]) -> f64
+pub fn geometry::frontend::ExtruderCaps::planned_path_jerk_gain(&self, [bool; 3]) -> f64
 pub fn geometry::frontend::ExtruderCaps::ratio_ramp_rule(&self) -> geometry::ratio_ramp::RatioRampRule
 pub fn geometry::frontend::ExtruderCaps::stricter(core::option::Option<Self>, core::option::Option<Self>) -> core::option::Option<Self>
 pub struct geometry::frontend::LeaderSpill
@@ -1055,10 +1057,12 @@ pub geometry::ExtruderCaps::max_accel_mm_s2: f64
 pub geometry::ExtruderCaps::max_velocity_mm_s: f64
 pub geometry::ExtruderCaps::own_jerk_per_accel_hz: f64
 pub geometry::ExtruderCaps::path_jerk_per_accel_hz: [f64; 8]
+pub geometry::ExtruderCaps::path_jerk_per_accel_switch_hz: [f64; 8]
 pub geometry::ExtruderCaps::rest_settle: geometry::RestSettleId
 pub geometry::ExtruderCaps::unshaped_leaders: [bool; 3]
 impl geometry::frontend::ExtruderCaps
 pub fn geometry::frontend::ExtruderCaps::path_jerk_gain(&self, [bool; 3]) -> f64
+pub fn geometry::frontend::ExtruderCaps::planned_path_jerk_gain(&self, [bool; 3]) -> f64
 pub fn geometry::frontend::ExtruderCaps::ratio_ramp_rule(&self) -> geometry::ratio_ramp::RatioRampRule
 pub fn geometry::frontend::ExtruderCaps::stricter(core::option::Option<Self>, core::option::Option<Self>) -> core::option::Option<Self>
 pub struct geometry::ExtrusionBudget

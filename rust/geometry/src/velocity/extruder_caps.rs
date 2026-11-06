@@ -33,8 +33,9 @@ fn budgeted_ratio(ratio: f64) -> f64 {
 /// curvature and `J` the bound on the shaped path's `σ⃛`.
 ///
 /// `σ⃛ = j·t̂ + a_⊥²/|v|` on the shaped path: the jerk's tangential part,
-/// at most `G·A` with `G` the jerk gain of the shaped axes the path moves on
-/// within the leaders' spill of the segment, plus the turning of the tangent
+/// `G·A` with `G` the planned jerk gain of the shaped axes the path moves
+/// on within the leaders' spill of the segment
+/// ([`ExtruderCaps::planned_path_jerk_gain`]), plus the turning of the tangent
 /// under the normal acceleration, `v³κ²` at speed `v` on curvature `κ`,
 /// where the disk keeps `v ≤ √(A/κ)`. A follower kernel `w_e` bounds the
 /// same term by `G_e·A` on its own, differentiating `σ̈ ≤ A` rather than
@@ -118,7 +119,7 @@ pub(super) fn extruder_capped(
         ratio: budgeted_ratio(ratio_in_reach),
         slope: caps.advance_slope_s,
         curvature: caps.advance_curvature_s2_per_mm,
-        path_gain: caps.path_jerk_gain(budget.axes_in_reach),
+        path_gain: caps.planned_path_jerk_gain(budget.axes_in_reach),
         own_gain: caps.own_jerk_per_accel_hz,
         kappa_peak,
         unshaped_share: unshaped_plane_sq.sqrt().min(1.0),

@@ -24,6 +24,7 @@ fn caps(max_velocity: f64, max_accel: f64, slope: f64) -> ExtruderCaps {
         advance_slope_s: slope,
         advance_curvature_s2_per_mm: 0.0,
         path_jerk_per_accel_hz: GAINS,
+        path_jerk_per_accel_switch_hz: GAINS,
         unshaped_leaders: [false; 3],
         own_jerk_per_accel_hz: f64::INFINITY,
         instantaneous_corner_velocity_mm_s: 1.0,
@@ -121,6 +122,20 @@ fn a_straight_extrusion_gets_the_largest_budget_its_advance_jerk_fits() {
         (accel - exact).abs() < 1e-9 * exact,
         "{accel} against {exact}"
     );
+}
+
+#[test]
+fn a_chain_without_a_follower_kernel_budgets_the_switch_gain_and_a_kernel_follower_the_variation() {
+    let mut caps = caps(1000.0, 2000.0, 0.5);
+    caps.path_jerk_per_accel_switch_hz = GAINS.map(|gain| 0.4 * gain);
+    let budget = |caps: &ExtruderCaps| {
+        extruder_capped(&line_x(50.0), caps, &around(RATIO, X), 0.0, (150.0, 3000.0)).1
+    };
+    let stepped = 2000.0 / (RATIO * (1.0 + 0.5 * 0.4 * X_GAIN));
+    assert!((budget(&caps) - stepped).abs() < 1e-9 * stepped);
+    caps.own_jerk_per_accel_hz = 1e6;
+    let varied = 2000.0 / (RATIO * (1.0 + 0.5 * X_GAIN));
+    assert!((budget(&caps) - varied).abs() < 1e-9 * varied);
 }
 
 #[test]

@@ -112,6 +112,48 @@ fn the_bimodal_mzv_kernel_gains_more_than_twice_its_peak_and_the_plane_more_than
 }
 
 #[test]
+fn the_switch_gain_is_twice_the_tallest_kernel_peak_of_the_set() {
+    let caps = caps_of(
+        limited(&["pa"]),
+        &[pp("pa", "linear_pressure_advance", &[("k", 0.03)])],
+    )
+    .unwrap()[0];
+    let switch = |f: f64| {
+        2.0 * PiecewisePolynomialKernel::directional_peak(&[&trajectory::build_smooth_mzv_kernel(
+            f,
+        )])
+    };
+    let (x, y) = (switch(75.0), switch(62.0));
+    assert_eq!(
+        caps.path_jerk_per_accel_switch_hz,
+        [0.0, x, y, x.max(y), 0.0, x, y, x.max(y)]
+    );
+    assert!(x < caps.path_jerk_gain([true, false, false]));
+    assert_eq!(
+        caps.planned_path_jerk_gain([true, true, false]),
+        x.max(y),
+        "a chain without a follower kernel plans at the switch gain"
+    );
+}
+
+#[test]
+fn the_switch_gain_never_exceeds_the_variation() {
+    let caps = caps_of(
+        limited(&["pa"]),
+        &[pp("pa", "linear_pressure_advance", &[("k", 0.03)])],
+    )
+    .unwrap()[0];
+    let variation = caps.path_jerk_per_accel_hz;
+    for (set, switch) in caps.path_jerk_per_accel_switch_hz.iter().enumerate() {
+        assert!(
+            *switch <= variation[set],
+            "set {set}: {switch} over {}",
+            variation[set]
+        );
+    }
+}
+
+#[test]
 fn the_reach_takes_the_widest_leader_kernel() {
     let caps = caps_of(
         limited(&["pa"]),
@@ -133,6 +175,12 @@ fn a_kernel_on_the_follower_bounds_its_own_jerk() {
     )
     .unwrap();
     assert!((caps[0].own_jerk_per_accel_hz - 2.0 * 2.0 / 0.01).abs() < 1e-9);
+    let plane = [true, true, false];
+    assert_eq!(
+        caps[0].planned_path_jerk_gain(plane),
+        caps[0].path_jerk_gain(plane),
+        "a kernel follower plans at the total variation"
+    );
 }
 
 #[test]
