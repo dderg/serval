@@ -1,11 +1,12 @@
 use std::collections::VecDeque;
 
 use geometry::{
-    CrawlSide, RatioRampRule, VALLEY_LEAD_BUDGET_S, crawl_side_width, side_weight, turns_around,
+    CrawlSide, RatioRampRule, VALLEY_LEAD_BUDGET_S, crawl_side_width, crawl_step_window,
+    side_weight, turns_around,
 };
 
-use super::super::RatioSpan;
-use super::{Crossing, RampLeg};
+use super::super::{RatioSpan, Table};
+use super::{Crossing, RampLeg, Seam};
 
 /// Probes per leg the side trail reads the leaders at, both ends included
 /// once more.
@@ -297,4 +298,171 @@ fn peak_ratio_over(spans: &[RatioSpan], (lo, hi): (f64, f64)) -> f64 {
         .filter(|span| span.s1 >= lo && span.s0 <= hi)
         .map(|span| span.r0.abs().max(span.r1.abs()))
         .fold(0.0, f64::max)
+}
+
+/// The ratio steps a crawl valley holds the weight at zero around: each
+/// step's window is kept within `window` of it
+/// ([`geometry::crawl_step_window`]), and the valley's zero stretch spans
+/// the crawl and every owned window. Inside it the advance reads none of a
+/// ramp; only its flow `r̃·ṡ` reaches the follower, whose acceleration
+/// `r̃·s̈ + r̃′·ṡ²` takes `|r̃′| ≤ ¾·|Δ|/h` over a window of half-width `h`.
+/// A narrower window the width field lays is one the ramp rule budgets.
+/// The leaders' path acceleration across the stretch is at most `A`, so
+/// `ṡ² ≤ v² + 2A·d` a distance `d` from the crawl they cross at `v`.
+pub(super) struct StepWindows {
+    turn: f64,
+    crossing: Crossing,
+    pub(super) window: f64,
+    guarded: bool,
+    pub(super) owned: Vec<OwnedStep>,
+}
+
+/// A ratio step a crawl valley holds the weight at zero around: which
+/// table it steps, where, and by how much.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct OwnedStep {
+    pub(super) table: Table,
+    pub(super) s: f64,
+    step: f64,
+}
+
+impl StepWindows {
+    /// No step owned yet around the crawl at `turn` the leaders cross as
+    /// `crossing`, `reach` from it; a follower the turning guard does not
+    /// hold owns none.
+    pub(super) fn around(turn: f64, crossing: Crossing, reach: f64, guarded: bool) -> Self {
+        Self {
+            turn,
+            crossing,
+            window: crawl_step_window(reach),
+            guarded,
+            owned: Vec::new(),
+        }
+    }
+
+    /// Owns every ratio step of either table on the path `[lo, hi]` not
+    /// owned yet; whether there was one.
+    pub(super) fn own_within(
+        &mut self,
+        (laid, advance): (&[RatioSpan], &[RatioSpan]),
+        (lo, hi): (f64, f64),
+    ) -> bool {
+        if !self.guarded {
+            return false;
+        }
+        let before = self.owned.len();
+        for (table, spans) in [(Table::Laid, laid), (Table::Advance, advance)] {
+            let first = spans.partition_point(|span| span.s1 < lo).saturating_sub(1);
+            let last = spans.partition_point(|span| span.s0 <= hi);
+            let steps = spans[first..last.max(first)]
+                .windows(2)
+                .filter_map(|pair| Seam::between(&pair[0], &pair[1]))
+                .filter(|seam| seam.step != 0.0 && lo <= seam.s && seam.s <= hi);
+            for seam in steps {
+                let owned = OwnedStep {
+                    table,
+                    s: seam.s,
+                    step: seam.step.abs(),
+                };
+                if !self.owned.contains(&owned) {
+                    self.owned.push(owned);
+                }
+            }
+        }
+        self.owned.len() > before
+    }
+
+    /// Where the valley holds the weight at zero: the crawl, and every
+    /// owned step's window.
+    pub(super) fn zero_stretch(&self) -> (f64, f64) {
+        self.owned
+            .iter()
+            .fold((self.turn, self.turn), |(lo, hi), owned| {
+                (lo.min(owned.s - self.window), hi.max(owned.s + self.window))
+            })
+    }
+
+    /// The most path acceleration the leaders take across the zero
+    /// stretch, or at the crawl.
+    fn path_accel(&self, trail: &SideTrail) -> f64 {
+        trail
+            .over(self.zero_stretch(), Side::After)
+            .path_accel
+            .max(self.crossing.rate)
+    }
+
+    /// `v² + 2A·d`: the most `ṡ²` a `distance` from the crawl.
+    fn speed_squared_within(&self, path_accel: f64, distance: f64) -> f64 {
+        self.crossing.speed * self.crossing.speed + 2.0 * path_accel * distance
+    }
+
+    /// How the leaders cross the zero stretch's edges, where the sides
+    /// leave from: the crawl's crossing at an edge no owned window moves,
+    /// else at most as fast as the stretch's path acceleration takes them
+    /// from the crawl to the edge, which with that acceleration sets the
+    /// floor `v²/a` the side keeps flat.
+    pub(super) fn edges(
+        &self,
+        trail: &SideTrail,
+        table_end: f64,
+    ) -> Result<(Crossing, Crossing), Unlaid> {
+        if self.owned.is_empty() {
+            return Ok((self.crossing, self.crossing));
+        }
+        let zero = self.zero_stretch();
+        if zero.1 > trail.through() && table_end.is_finite() {
+            return Err(Unlaid::Waits);
+        }
+        let path_accel = self.path_accel(trail);
+        let edge = |distance: f64| {
+            if distance == 0.0 {
+                return self.crossing;
+            }
+            Crossing {
+                speed: self.speed_squared_within(path_accel, distance).sqrt(),
+                rate: path_accel,
+                jerk: self.crossing.jerk,
+            }
+        };
+        Ok((edge(self.turn - zero.0), edge(zero.1 - self.turn)))
+    }
+
+    /// Fails loudly where the flow over the zero stretch asks more than the
+    /// follower's limit: `r·A` at the largest ratio laid there, plus
+    /// `¾·|Δ|·ṡ²/window` for each owned step of the laid table, `ṡ²` read
+    /// at its window's far edge from the crawl.
+    pub(super) fn assert_flow_fits(
+        &self,
+        trail: &SideTrail,
+        laid: &[RatioSpan],
+        rule: &RatioRampRule,
+    ) {
+        if self.owned.is_empty() {
+            return;
+        }
+        let zero = self.zero_stretch();
+        let path_accel = self.path_accel(trail);
+        let ramps: f64 = self
+            .owned
+            .iter()
+            .filter(|owned| owned.table == Table::Laid)
+            .map(|owned| {
+                let far_edge = (owned.s - self.turn).abs() + self.window;
+                0.75 * owned.step * self.speed_squared_within(path_accel, far_edge) / self.window
+            })
+            .sum();
+        let flow = peak_ratio_over(laid, zero) * path_accel + ramps;
+        assert!(
+            flow <= rule.max_accel_mm_s2,
+            "follower projection: the ratio steps {:?} the crawl valley at s={} ({:?}) holds at \
+             zero over [{}, {}] ask {flow} mm/s² of the follower's flow at a path acceleration \
+             of {path_accel} mm/s², past its limit of {} mm/s²",
+            self.owned,
+            self.turn,
+            self.crossing,
+            zero.0,
+            zero.1,
+            rule.max_accel_mm_s2
+        );
+    }
 }
