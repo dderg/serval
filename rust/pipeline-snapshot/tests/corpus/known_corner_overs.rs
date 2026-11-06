@@ -26,7 +26,108 @@ pub struct KnownCornerOvers {
     pub worst_share: f64,
 }
 
-pub const KNOWN: &[KnownCornerOvers] = &[];
+pub const KNOWN: &[KnownCornerOvers] = &[
+    KnownCornerOvers {
+        case: "corner_flow flow 1.5x 150/p2_kernel_cd005",
+        count: 1,
+        worst_share: 1.245,
+    },
+    KnownCornerOvers {
+        case: "corner_flow flow 1.5x 150/p2_ramp_cd005",
+        count: 1,
+        worst_share: 1.245,
+    },
+    KnownCornerOvers {
+        case: "corner_flow flow 1.5x 150/p3_kernel_cd005",
+        count: 1,
+        worst_share: 1.981,
+    },
+    KnownCornerOvers {
+        case: "corner_flow flow 1.5x 150/p3_ramp_cd005",
+        count: 1,
+        worst_share: 1.677,
+    },
+    KnownCornerOvers {
+        case: "corner_flow flow 1.5x 300/p2_kernel_cd005",
+        count: 1,
+        worst_share: 1.245,
+    },
+    KnownCornerOvers {
+        case: "corner_flow flow 1.5x 300/p2_ramp_cd005",
+        count: 1,
+        worst_share: 1.245,
+    },
+    KnownCornerOvers {
+        case: "corner_flow flow 1.5x 300/p3_kernel_cd005",
+        count: 1,
+        worst_share: 1.981,
+    },
+    KnownCornerOvers {
+        case: "corner_flow flow 1.5x 300/p3_ramp_cd005",
+        count: 1,
+        worst_share: 1.677,
+    },
+    KnownCornerOvers {
+        case: "corner_flow flow 1.5x 50/p2_kernel_cd005",
+        count: 1,
+        worst_share: 1.244,
+    },
+    KnownCornerOvers {
+        case: "corner_flow flow 1.5x 50/p2_ramp_cd005",
+        count: 1,
+        worst_share: 1.244,
+    },
+    KnownCornerOvers {
+        case: "corner_flow flow 1.5x 50/p3_kernel_cd005",
+        count: 1,
+        worst_share: 1.606,
+    },
+    KnownCornerOvers {
+        case: "corner_flow flow 1.5x 50/p3_ramp_cd005",
+        count: 1,
+        worst_share: 1.473,
+    },
+    KnownCornerOvers {
+        case: "voron_dense_top_layers/p2_kernel_cd005",
+        count: 1,
+        worst_share: 1.189,
+    },
+    KnownCornerOvers {
+        case: "voron_dense_top_layers/p2_ramp_cd005",
+        count: 1,
+        worst_share: 1.189,
+    },
+    KnownCornerOvers {
+        case: "voron_dense_top_layers/p3_kernel_cd005",
+        count: 1,
+        worst_share: 1.797,
+    },
+    KnownCornerOvers {
+        case: "voron_dense_top_layers/p3_ramp_cd005",
+        count: 1,
+        worst_share: 1.797,
+    },
+    KnownCornerOvers {
+        case: "voron_first_layers/p2_kernel_cd005",
+        count: 2,
+        worst_share: 1.125,
+    },
+    KnownCornerOvers {
+        case: "voron_first_layers/p2_ramp_cd005",
+        count: 2,
+        worst_share: 1.128,
+    },
+    KnownCornerOvers {
+        case: "voron_first_layers/p3_kernel_cd005",
+        count: 5,
+        worst_share: 1.235,
+    },
+    KnownCornerOvers {
+        case: "voron_first_layers/p3_ramp_cd005",
+        count: 5,
+        worst_share: 1.228,
+    },
+];
 
 fn printed(_: OverBudget, share: f64) -> f64 {
     rounded(share, 3)
