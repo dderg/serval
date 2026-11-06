@@ -1002,6 +1002,32 @@ fn a_stop_between_a_travel_and_an_extrusion_lays_nothing_ahead_of_it() {
     );
 }
 
+/// A hold opening the stream reads nothing laid before it: the sloped
+/// span the stroke after it lays, and the smoothing over that slope, leave
+/// it held still however many segments one call brings.
+#[test]
+fn a_hold_opening_the_stream_holds_still_whatever_is_laid_after_it() {
+    let steps = [
+        Step::Hold { duration: 0.05 },
+        Step::Stroke {
+            reverse: false,
+            length: 5.0,
+            pace: 50.0,
+            end_speed: 0.0,
+            shaped_speed_scale: 1.0,
+            ratio: 0.05,
+        },
+    ];
+    let mut track = build_profiled_track(0.0, &steps, Profile::Quintic);
+    let ramp: Arc<[FollowerDemand]> = Arc::from([FollowerDemand::ramp(E_AXIS, 0.02, 0.08)]);
+    track.base[1].followers = Arc::clone(&ramp);
+    track.frontier[1].followers = ramp;
+    let chains = chains(follower_chain(None, Some(0.01)));
+    let one_at_a_time = project_streamed(&track, &chains, &[1]);
+    let together = project_streamed(&track, &chains, &[2]);
+    assert_same_bits(&together, &one_at_a_time).unwrap();
+}
+
 /// Found by `an_advance_integrates_to_zero_across_every_rest`: a travel
 /// crossed into an extrusion at 77 mm/s, the extrusion braking to rest.
 #[test]
