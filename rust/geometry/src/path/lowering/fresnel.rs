@@ -119,6 +119,19 @@ const fn power_integrals() -> [f64; 2 * SMALL_TURN_ORDER + 1] {
     integrals
 }
 
+/// `n` as a float for every order of the small-turn series.
+const ORDERS: [f64; SMALL_TURN_ORDER + 1] = orders();
+
+const fn orders() -> [f64; SMALL_TURN_ORDER + 1] {
+    let mut orders = [0.0; SMALL_TURN_ORDER + 1];
+    let mut n = 0;
+    while n < orders.len() {
+        orders[n] = n as f64;
+        n += 1;
+    }
+    orders
+}
+
 fn polevl(x: f64, coef: &[f64]) -> f64 {
     coef.iter().fold(0.0, |acc, &c| acc * x + c)
 }
@@ -218,9 +231,12 @@ fn fresh_clothoid_offset(kappa_0: f64, sigma: f64, s: f64) -> (f64, f64) {
 fn small_turn_offset(a: f64, b: f64, s: f64) -> (f64, f64) {
     let mut a_terms = [1.0; SMALL_TURN_ORDER + 1];
     let mut b_terms = [1.0; SMALL_TURN_ORDER + 1];
+    let (mut a_term, mut b_term) = (1.0, 1.0);
     for n in 1..=SMALL_TURN_ORDER {
-        a_terms[n] = a_terms[n - 1] * a / n as f64;
-        b_terms[n] = b_terms[n - 1] * b / n as f64;
+        a_term = a_term * a / ORDERS[n];
+        b_term = b_term * b / ORDERS[n];
+        a_terms[n] = a_term;
+        b_terms[n] = b_term;
     }
     let mut by_power_of_i = [0.0; 4];
     let mut k = SMALL_TURN_ORDER + 1;
