@@ -610,7 +610,7 @@ impl Marks {
             }
             let seam = self.seam_at(ahead + 1, closed)?;
             slowest = slowest.slower(SeamReach {
-                speed_mm_s: seam.speed_mm_s.hypot(back.speed_mm_s),
+                speed_mm_s: libm::hypot(seam.speed_mm_s, back.speed_mm_s),
                 limit: seam.limit,
                 run_mm: back.run_mm,
             });
