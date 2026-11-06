@@ -1922,9 +1922,9 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#corner-deviation-and-kernel-smoothing-are-separate-knobs" class="md-nav__link">
+  <a href="#the-corner-budget-holds-the-shaped-path" class="md-nav__link">
     <span class="md-ellipsis">
-      Corner deviation and kernel smoothing are separate knobs
+      The corner budget holds the shaped path
     </span>
   </a>
   
@@ -2600,31 +2600,46 @@ at its far Gauss node, where the power basis's conversion error has grown the
 most, before use. An ill-conditioned conversion falls back to direct
 NURBS evaluation; it must never inject false velocity or acceleration into the
 follower source.</p>
-<h2 id="corner-deviation-and-kernel-smoothing-are-separate-knobs">Corner deviation and kernel smoothing are separate knobs<a class="headerlink" href="#corner-deviation-and-kernel-smoothing-are-separate-knobs" title="Permanent link">&para;</a></h2>
-<p>Kernels round corners: convolving a corner traversed at accel <code>a</code> with a
-kernel of variance <code>σ²</code> pulls the path inward by <code>≈ ½·σ²·a</code>. That smoothing
-is deliberately <strong>not</strong> deducted from the fitter's corner budget: the
-clothoid fitter always spends the full <code>corner_deviation</code> on blend
-geometry (<code>junction_deviation</code> in <code>rust/geometry/src/fitter.rs</code>), so the
-fitted path is identical whatever kernels are active and whatever the
-acceleration limit is. An earlier design subtracted the kernel's
-worst-case share (predicted at the accel <em>cap</em>), which made the fitted
-rounding shrink — down to a full-stop sharp corner — as the accel limit
-grew, because the corner never actually rides the cap. The
-<code>snapshots/cases/corner_accel/</code> cases pin the accel-invariance that
-replaced it. The kernel's inward pull rides on top of the blend and
-scales with the acceleration actually ridden through the corner; it is
-the shaper's own quality/smoothing tradeoff, tuned by kernel duration.</p>
+<h2 id="the-corner-budget-holds-the-shaped-path">The corner budget holds the shaped path<a class="headerlink" href="#the-corner-budget-holds-the-shaped-path" title="Permanent link">&para;</a></h2>
+<p>Kernels round corners: convolving a corner with a kernel of variance <code>σ²</code>
+pulls the path inward by up to <code>≈ ½·σ²·a</code>, <code>a</code> the acceleration the corner is
+crossed with. The corner budget is held on the path after that pull, not on
+the planned path (<code>docs/Config_Reference_Motion.md</code>, "Corner budget on the
+shaped path"). <code>geometry::ShapedCorners</code> predicts a corner's shaped miss.
+It reads a table built once per X/Y kernel pair by convolving a canonical
+corner (a symmetric clothoid blend crossed at a share of its curvature
+ceiling under the acceleration disk), worst over its orientation, with
+lengths in <code>A·σ²</code> so one table serves every acceleration. The engine audit
+(<code>scripts/corpus.sh --path-accuracy</code>) checks the prediction end to end.</p>
+<ul>
+<li>The fitter cuts each line-line corner by the amount that lets the shaped
+  apex be crossed fastest within the budget, at the move's <code>max_accel</code>
+  (<code>junction_deviation</code> in <code>rust/geometry/src/fitter.rs</code>). Arc runs and
+  collinear merges are fitted to half the budget.</li>
+<li>The planner (<code>rust/geometry/src/velocity/corner_caps.rs</code>) reads each
+  corner's planned acceleration after the extruder and step-capacity caps.
+  It caps the speed of the blend halves at the apex speed the prediction
+  allows, and caps each curve's speed so the shaper's pull stays in the
+  budget's room. Where a stop at the corner would round it past an explicit
+  budget, it slows the moves that reach the corner. The planner splits the
+  lines either side of such a corner (<code>motion-pipeline/src/planner/approach.rs</code>),
+  so only a short approach slows. Each committed move carries its hold
+  baked into its limits (<code>MoveVelocity::corner_held</code>), so a turning-guard
+  re-plan keeps it without the corner's context.</li>
+</ul>
+<p>The implicit budgets (no corner option, or <code>square_corner_velocity</code>) start
+at each corner's own floor at its planned acceleration. They never slow a
+corner below the acceleration the planner gives it anyway, so the fitted
+rounding no longer collapses toward a stop as <code>max_accel</code> grows, which
+sank the earlier deduction at the acceleration cap.</p>
 <p>Known open items:</p>
 <ul>
 <li>the planner does not yet fold the <code>k2·jerk</code> motor-acceleration demand of
   <code>mode_inverse</code> into its accel limits (TODO at the top of
   <code>rust/geometry/src/frontend.rs</code>) — at high jerk settings the motor command
   can demand more accel than <code>max_accel</code>;</li>
-<li>when the kernel share exceeds the whole SCV budget the collision behavior
-  is still to be decided;</li>
-<li>the per-junction deduction uses the worst-case σ², which is blunt for
-  dense facets.</li>
+<li>the prediction assumes a symmetric blend braked and left at the full disk;
+  an asymmetric blend or a slower approach is covered by its margin only.</li>
 </ul>
 <h2 id="observing-it">Observing it<a class="headerlink" href="#observing-it" title="Permanent link">&para;</a></h2>
 <p>Snapshots carry the motor-command trajectory (<code>traj_*_pieces</code>) and, whenever

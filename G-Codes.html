@@ -7759,8 +7759,11 @@ VELOCITY argument for fields that represent velocities.</p>
 [MINIMUM_CRUISE_RATIO=&lt;value&gt;] [ACCEL_TO_DECEL=&lt;value&gt;]</code>: This command
 can alter the velocity and acceleration limits specified in the printer
 config. <code>MINIMUM_CRUISE_RATIO</code> and <code>ACCEL_TO_DECEL</code> are accepted as
-legacy no-ops. <code>SQUARE_CORNER_VELOCITY</code> and <code>CORNER_DEVIATION</code> are
-aliases; specify at most one.</p>
+legacy no-ops. <code>SQUARE_CORNER_VELOCITY</code> and <code>CORNER_DEVIATION</code> set the
+same corner budget; specify at most one. A <code>SQUARE_CORNER_VELOCITY</code> is
+kept as a speed and converted at each move's acceleration. With no
+parameters the command reports the limits in effect, including the
+corner budget's kind and value.</p>
 <h4 id="reset_velocity_limit">RESET_VELOCITY_LIMIT<a class="headerlink" href="#reset_velocity_limit" title="Permanent link">&para;</a></h4>
 <p><code>RESET_VELOCITY_LIMIT</code>: This command resets the velocity limits to the
 values specified in the printer config file. See the
