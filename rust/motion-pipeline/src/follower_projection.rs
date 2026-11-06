@@ -610,8 +610,19 @@ pub(crate) fn project_followers(
             for (offset, read) in reads.into_iter().enumerate() {
                 let i = first_new + offset;
                 let table_start = state.s_ingested_end;
-                let shaped_ds =
-                    state.ingest(&base[i], &frontier[i], axis, leaders, &base[i + 1..], &read);
+                let Some(shaped_ds) = state.ingest(
+                    &base[i],
+                    &frontier[i],
+                    axis,
+                    leaders,
+                    Upcoming {
+                        segments: &base[i + 1..],
+                        complete: lookahead.clamps_past_signal(),
+                    },
+                    &read,
+                ) else {
+                    break;
+                };
                 let s_start = state.aligned_span_start(state.s_queued_end);
                 let leg = RampLeg {
                     shaped: &frontier[i],
@@ -1819,16 +1830,17 @@ impl FollowerState {
     /// extrudes the material of the path it is shaped onto. Any shaped arc
     /// beyond them joins one of them ([`Self::push_rest_arcs`]): a separate
     /// idle span would step the ratio, and so the follower's velocity, where
-    /// the leaders are already moving.
+    /// the leaders are already moving. A resting segment whose next move
+    /// `upcoming` does not hold yet is left unlaid: `None`.
     fn ingest(
         &mut self,
         raw: &ContinuousSegment,
         shaped: &ContinuousSegment,
         axis: usize,
         leaders: &[usize],
-        upcoming: &[ContinuousSegment],
+        upcoming: Upcoming,
         read: &IngestRead,
-    ) -> f64 {
+    ) -> Option<f64> {
         let IngestRead {
             shaped_ds,
             ref odometer,
@@ -1851,9 +1863,12 @@ impl FollowerState {
                 through
             );
         }
+        if !raw_moves && shaped_ds > SPAN_MIN_LEN_MM && !upcoming.reaches_motion() {
+            return None;
+        }
         self.ingested_through_t = Some(raw.t_end);
         if shaped_ds <= SPAN_MIN_LEN_MM {
-            return shaped_ds;
+            return Some(shaped_ds);
         }
         if raw_moves {
             let (r0, r1) = raw
@@ -1863,7 +1878,7 @@ impl FollowerState {
                 .filter(|_| raw.spatial_path)
                 .map_or((0.0, 0.0), |f| (f.ratio, f.ratio_end));
             self.push_span(shaped_ds, r0, r1);
-            return shaped_ds;
+            return Some(shaped_ds);
         }
         let tail = leader_distance(shaped, raw, leaders, SegmentEdge::Start).min(shaped_ds);
         let lead = leader_distance(shaped, raw, leaders, SegmentEdge::End).min(shaped_ds - tail);
@@ -1871,16 +1886,12 @@ impl FollowerState {
         let tail_ratio = self.spans.last().map_or(0.0, |span| span.r1);
         if lead <= SPAN_LOOKUP_SLACK_MM && idle <= SPAN_LOOKUP_SLACK_MM {
             self.push_span(shaped_ds, tail_ratio, tail_ratio);
-            return shaped_ds;
+            return Some(shaped_ds);
         }
-        let lead_ratio = upcoming
-            .iter()
-            .find(|seg| seg.spatial_path)
-            .and_then(|seg| seg.followers.iter().find(|f| f.axis_index == axis))
-            .map_or(0.0, |f| f.ratio);
+        let lead_ratio = upcoming.lead_ratio(axis);
         let rest_arc = odometer.covered_until(arrival_at_rest(raw, shaped, leaders));
         self.push_rest_arcs((tail, idle, lead), rest_arc, (tail_ratio, lead_ratio));
-        shaped_ds
+        Some(shaped_ds)
     }
 
     /// Lays a rest segment's arcs, the ratio stepping from the tail's to
@@ -2136,8 +2147,11 @@ impl FollowerState {
             SpanSide::Before => spans.partition_point(|span| span.s1 < s),
         };
         match spans.get(idx) {
-            Some(span) if s >= span.s0 => (span.ratio_at(s), span.ratio_slope()),
-            Some(span) => (span.r0, 0.0),
+            Some(span) if s > span.s0 || (s == span.s0 && side == SpanSide::After) => {
+                (span.ratio_at(s), span.ratio_slope())
+            }
+            Some(span) if side == SpanSide::After => (span.r0, 0.0),
+            Some(_) => (0.0, 0.0),
             None => (spans.last().map_or(0.0, |span| span.r1), 0.0),
         }
     }
@@ -2328,6 +2342,34 @@ fn shaped_leader_arc_length(
         })
         .sum();
     (length, OdometerLeaves { grid, leaves })
+}
+
+/// The raw segments after one being ingested, and whether they are all
+/// there will be before the stream next rests: a forced flush holds every
+/// segment it ever will.
+#[derive(Clone, Copy)]
+struct Upcoming<'a> {
+    segments: &'a [ContinuousSegment],
+    complete: bool,
+}
+
+impl Upcoming<'_> {
+    fn next_motion(&self) -> Option<&ContinuousSegment> {
+        self.segments.iter().find(|segment| segment.spatial_path)
+    }
+
+    /// Whether the next move is known: held, or known never to come.
+    fn reaches_motion(&self) -> bool {
+        self.complete || self.next_motion().is_some()
+    }
+
+    /// The ratio the next move opens on for `axis`, none where no move
+    /// follows.
+    fn lead_ratio(&self, axis: usize) -> f64 {
+        self.next_motion()
+            .and_then(|segment| segment.followers.iter().find(|f| f.axis_index == axis))
+            .map_or(0.0, |f| f.ratio)
+    }
 }
 
 /// One newly ingested segment as ingest reads it: its shaped leaders, the
