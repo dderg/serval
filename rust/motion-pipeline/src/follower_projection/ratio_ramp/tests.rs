@@ -9,8 +9,8 @@ use trajectory::{ContinuousAxis, ContinuousSegment};
 use super::super::{FollowerState, SpanSide, Table as SpanTable};
 use super::{
     AdvanceValley, CLUSTER_REACH_S, CROSSING_PROBES, Crossing, ENVELOPE_SLOPE, KERNEL_PEAK,
-    NODE_SPACING_PER_WIDTH, NODE_SPACING_S, PathReach, RampLeg, RestSide, ShapedLeaders, Spill,
-    TimedSeam, WIDTH_SLOPE_BOUND, WidthField, slowest_crawl,
+    NODE_SPACING_PER_WIDTH, NODE_SPACING_S, PathReach, RampLeg, RatioSmoothing, RestSide,
+    ShapedLeaders, Spill, TimedSeam, WIDTH_SLOPE_BOUND, WidthField, slowest_crawl,
 };
 
 /// `(length, ratio at start, ratio at end)` per span.
@@ -1616,6 +1616,35 @@ fn a_kernel_after_the_advance_spares_a_crawl_its_valley() {
         ..crawl
     };
     assert!(turnaround.needs_valley(&smoothed, ratio));
+}
+
+/// The P1 Bowden crawl of `voron_first_layers` at t≈10.485 s (gscale 0.45
+/// ablation): the seam into the leg crawls at 1.651 mm/s and lays its
+/// valley, and the leg's own slowest point, 1e-5 mm on, is the same crawl
+/// read a hair inside the leg. It lies where that valley already holds the
+/// weight at zero, within its floor `v²/a`, so the advance reads one valley
+/// there, not the product `W₁·W₂` that steepens the lead's rebuild.
+#[test]
+fn a_crawl_inside_a_laid_valleys_floor_lays_no_second_valley() {
+    let (turn, reach, floor) = (468.816, 0.184_87, 3.830e-3);
+    let mut smoothing = RatioSmoothing::default();
+    smoothing.lay_valley(turn, reach, floor);
+    smoothing.lay_valley(turn + 1e-5, 0.184_83, 3.831e-3);
+    let laid = AdvanceValley {
+        start: turn,
+        end: turn,
+        before: reach,
+        after: reach,
+        floor,
+    };
+    for k in -19..=19 {
+        let s = turn + reach * f64::from(k) / 20.0;
+        assert_eq!(
+            smoothing.valley_weight(s),
+            laid.weight(s),
+            "the advance reads the crawl at s={s} mm through more than its valley"
+        );
+    }
 }
 
 const CRAWL_LEG_SEAM_SPEED_MM_S: f64 = 2.83;
