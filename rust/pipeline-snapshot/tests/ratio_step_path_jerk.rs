@@ -13,7 +13,9 @@ fn dense_slice() -> String {
     let gcode = std::fs::read_to_string(corpus::repo().join(DENSE)).expect("the dense print reads");
     let lines: Vec<&str> = gcode.lines().collect();
     let body = lines[SLICE_LINES.start() - 1..*SLICE_LINES.end()].join("\n");
-    format!("G21\nG90\nM83\nSET_KINEMATIC_POSITION X=120.056 Y=150.717 Z=45\nG1 F25953.656\n{body}\n")
+    format!(
+        "G21\nG90\nM83\nSET_KINEMATIC_POSITION X=120.056 Y=150.717 Z=45\nG1 F25953.656\n{body}\n"
+    )
 }
 
 #[test]
