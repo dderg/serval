@@ -4,6 +4,7 @@ from pathlib import Path
 
 WT = Path(__file__).with_name("wt.sh")
 LAND = Path(__file__).with_name("land-pr.sh")
+USERS = Path(__file__).with_name("worktree_users.sh")
 
 
 def git(cwd, *args):
@@ -120,21 +121,54 @@ def test_concurrent_allocations_never_share_an_idle_worktree(tmp_path):
     assert len(set(paths)) == 6, paths
 
 
-def test_a_lease_held_by_a_live_pid_makes_a_detached_clean_worktree_busy(
+def test_a_lease_whose_topic_branch_still_exists_keeps_a_detached_clean_worktree_busy(
+    tmp_path,
+):
+    repo = make_repo(tmp_path)
+    first = Path(wt(repo, tmp_path, "new", "topic-a").stdout.strip())
+    git(first, "switch", "-q", "--detach", "origin/main")
+    lease = Path(git(first, "rev-parse", "--absolute-git-dir")) / "wt-lease"
+    assert "topic=topic-a" in lease.read_text()
+    second = Path(wt(repo, tmp_path, "new", "topic-b").stdout.strip())
+    assert second == tmp_path / "serval-pool-2"
+    git(first, "branch", "-D", "topic-a")
+    third = Path(wt(repo, tmp_path, "new", "topic-c").stdout.strip())
+    assert third == first
+
+
+def test_a_process_with_its_cwd_inside_makes_an_idle_looking_worktree_busy(
     tmp_path,
 ):
     repo = make_repo(tmp_path)
     first = Path(wt(repo, tmp_path, "new", "topic-a").stdout.strip())
     git(first, "switch", "-q", "--detach", "origin/main")
     git(first, "branch", "-D", "topic-a")
-    lease = Path(git(first, "rev-parse", "--absolute-git-dir")) / "wt-lease"
-    assert lease.exists() and f"pid={os.getpid()}" in lease.read_text()
-    lease.write_text(f"pid={os.getpid()}\ntopic=held\n")
-    second = Path(wt(repo, tmp_path, "new", "topic-b").stdout.strip())
-    assert second == tmp_path / "serval-pool-2"
-    lease.write_text("pid=999999999\ntopic=dead\n")
+    (first / "sub").mkdir()
+    sitter = subprocess.Popen(["sleep", "30"], cwd=first / "sub")
+    try:
+        second = Path(wt(repo, tmp_path, "new", "topic-b").stdout.strip())
+        assert second == tmp_path / "serval-pool-2"
+        users = subprocess.run(
+            ["bash", str(USERS), str(first)], capture_output=True, text=True
+        ).stdout
+        assert users.startswith(str(sitter.pid))
+    finally:
+        sitter.kill()
+        sitter.wait()
     third = Path(wt(repo, tmp_path, "new", "topic-c").stdout.strip())
     assert third == first
+
+
+def test_the_callers_own_cwd_does_not_make_a_worktree_busy(tmp_path):
+    repo = make_repo(tmp_path)
+    first = Path(wt(repo, tmp_path, "new", "topic-a").stdout.strip())
+    users = subprocess.run(
+        ["bash", str(USERS), str(first)],
+        cwd=first,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert users == ""
 
 
 def test_an_untracked_file_makes_a_worktree_busy(tmp_path):
