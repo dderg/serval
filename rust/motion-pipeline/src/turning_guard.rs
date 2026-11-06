@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::VecDeque;
 
 use geometry::path::lowering::PositionProfile;
@@ -13,11 +14,13 @@ use crate::types::{Control, PlannedItem, PlannedMove, StreamConfig};
 mod kernel_cells;
 mod screen;
 mod shadow;
+mod variation;
 
 use screen::{MoveSummary, Read};
 use shadow::{
     AdvanceDemand, CellMotion, FollowerKernels, GridSample, PlannedGrid, Ride, shaped_at,
 };
+use variation::{PhaseSpan, phase_spans, variation_over};
 
 /// The guard's coarsest grid step: the planned motion is sampled, and the
 /// shaped motion bounded, every this many seconds or finer.
@@ -77,6 +80,10 @@ pub(crate) struct TurningGuard {
     entries: Entries,
     history: VecDeque<MoveSummary>,
     grid: PlannedGrid,
+    /// The planned motion on the grid [`GRID_ZOOM`] times finer, sampled
+    /// where a binding cell is checked again and kept until a re-plan
+    /// changes it or no check reads it.
+    fine_grid: RefCell<PlannedGrid>,
     carried_position: Option<[f64; 3]>,
     /// The seam the last emission stood on: no back-off scales or re-plans
     /// a move before it, so the motion emitted and what its proofs read
@@ -102,6 +109,9 @@ struct Entries {
     /// once every cell is.
     unproven: Vec<Option<i64>>,
     timing: Vec<Timing>,
+    /// Each move's phases in time, which bound the variation of its
+    /// planned acceleration ([`variation_over`]).
+    spans: Vec<Vec<PhaseSpan>>,
     summaries: Vec<MoveSummary>,
     /// Whether the segment the moves belong to ends here, at rest.
     closed: bool,
@@ -229,6 +239,7 @@ impl TurningGuard {
             entries: Entries::default(),
             history: VecDeque::new(),
             grid: PlannedGrid::default(),
+            fine_grid: RefCell::new(PlannedGrid::default()),
             carried_position: None,
             frozen: 0,
             standing: None,
@@ -292,6 +303,7 @@ impl TurningGuard {
         self.entries = Entries::default();
         self.history.clear();
         self.grid.clear();
+        self.fine_grid.borrow_mut().clear();
         self.frozen = 0;
         self.standing = None;
     }
@@ -342,6 +354,9 @@ impl TurningGuard {
         entries
             .summaries
             .push(summary_of(&geometry, &velocity, &budget, &timing));
+        entries
+            .spans
+            .push(phase_spans(&geometry, &velocity, timing.t0));
         entries.moves.push(geometry);
         entries.velocities.push(velocity);
         entries.budgets.push(budget);
@@ -434,8 +449,15 @@ impl TurningGuard {
     fn zoom(&self, follower: &Follower, cell: &CellCheck, n: i64) -> Option<Check> {
         let fine = &follower.fine;
         let (back, ahead) = fine.sample_span();
-        let mut grid = PlannedGrid::default();
-        for k in n * GRID_ZOOM - back - 1..=(n + 1) * GRID_ZOOM + ahead + 1 {
+        let (first, last) = (n * GRID_ZOOM - back - 1, (n + 1) * GRID_ZOOM + ahead + 1);
+        let mut grid = self.fine_grid.borrow_mut();
+        let resume = if grid.get(first).is_some() {
+            grid.end()
+        } else {
+            grid.clear();
+            first
+        };
+        for k in resume..=last {
             let sample = self.sample(k, fine.h).unwrap_or_else(|| {
                 panic!(
                     "turning guard: the planned motion misses t={}",
@@ -675,6 +697,7 @@ impl TurningGuard {
                 timing.arc0 = entries.timing[at].arc0;
             }
             entries.timing[at] = timing;
+            entries.spans[at] = phase_spans(&entries.moves[at], &entries.velocities[at], timing.t0);
             entries.summaries[at] = summary_of(
                 &entries.moves[at],
                 &entries.velocities[at],
@@ -691,8 +714,17 @@ impl TurningGuard {
             }
         }
         self.grid.truncate_from(straddled + 1);
-        let cell_accel = self.cell_accel(straddled as f64 * h, (straddled + 1) as f64 * h);
-        self.grid.set_cell_accel(straddled, cell_accel);
+        let bounds = self.cell_bounds(straddled as f64 * h, (straddled + 1) as f64 * h);
+        self.grid.set_cell_bounds(straddled, bounds);
+        let fine_h = h / GRID_ZOOM as f64;
+        let fine_straddled = (changed_at / fine_h).floor() as i64;
+        let fine_bounds = self.cell_bounds(
+            fine_straddled as f64 * fine_h,
+            (fine_straddled + 1) as f64 * fine_h,
+        );
+        let mut fine_grid = self.fine_grid.borrow_mut();
+        fine_grid.truncate_from(fine_straddled + 1);
+        fine_grid.set_cell_bounds(fine_straddled, fine_bounds);
     }
 
     /// Samples the planned motion on the grid as far as it has arrived,
@@ -728,6 +760,9 @@ impl TurningGuard {
         }
         let keep_from = (first.t0 / h).floor() as i64 - back - 4;
         self.grid.trim_before(keep_from);
+        self.fine_grid
+            .borrow_mut()
+            .trim_before(keep_from * GRID_ZOOM);
         let forget = keep_from as f64 * h - h;
         while self
             .history
@@ -748,9 +783,10 @@ impl TurningGuard {
         if next > last.t1() && !self.entries.closed {
             return None;
         }
-        let cell_accel = self.cell_accel(tau, next);
+        let (cell_accel, cell_variation) = self.cell_bounds(tau, next);
         let at_rest = |position: [f64; 3], arc: f64| GridSample {
             cell_accel,
+            cell_variation,
             ..GridSample::at_rest(position, arc)
         };
         if tau < first.t0 {
@@ -781,7 +817,44 @@ impl TurningGuard {
             velocity: heading.map(|component| component * speed),
             arc: at.arc0 + s,
             cell_accel,
+            cell_variation,
         })
+    }
+
+    /// The planned acceleration's bounds over the cell `[from, to]`: its
+    /// largest per axis ([`Self::cell_accel`]) and its variation
+    /// ([`Self::cell_variation`]).
+    fn cell_bounds(&self, from: f64, to: f64) -> ([f64; 3], [f64; 3]) {
+        (self.cell_accel(from, to), self.cell_variation(from, to))
+    }
+
+    /// Each axis's variation of the planned acceleration over the cell
+    /// `[from, to)` of the held moves, at rest before a segment's start and
+    /// after a closed one's end; infinite where the cell reaches moves
+    /// already emitted.
+    fn cell_variation(&self, from: f64, to: f64) -> [f64; 3] {
+        let entries = &self.entries;
+        let Some(first) = entries.timing.first() else {
+            return [f64::INFINITY; 3];
+        };
+        if from < first.t0 && first.t0 > 0.0 {
+            return [f64::INFINITY; 3];
+        }
+        let lo = entries
+            .timing
+            .partition_point(|timing| timing.t1() < from)
+            .saturating_sub(1);
+        let before = (lo == 0).then(|| PhaseSpan::rest(f64::NEG_INFINITY, first.t0));
+        let after = entries
+            .closed
+            .then(|| PhaseSpan::rest(self.segment_end(), f64::INFINITY));
+        variation_over(
+            before
+                .iter()
+                .chain(entries.spans[lo..].iter().flatten())
+                .chain(after.iter()),
+            (from, to),
+        )
     }
 
     /// Each axis's planned acceleration bound over the moves, held or
@@ -893,6 +966,7 @@ impl TurningGuard {
         entries.backoffs.drain(..count);
         entries.unproven.drain(..count);
         entries.timing.drain(..count);
+        entries.spans.drain(..count);
         for ((geometry, velocity), budget) in entries
             .moves
             .drain(..count)

@@ -114,12 +114,12 @@ pub geometry::frontend::ExtruderCaps::advance_slope_s: f64
 pub geometry::frontend::ExtruderCaps::axis_index: usize
 pub geometry::frontend::ExtruderCaps::instantaneous_corner_velocity_mm_s: f64
 pub geometry::frontend::ExtruderCaps::leader_kernel_reach_s: f64
+pub geometry::frontend::ExtruderCaps::leader_peak_hz: [f64; 3]
 pub geometry::frontend::ExtruderCaps::leader_spill: geometry::LeaderSpillId
 pub geometry::frontend::ExtruderCaps::max_accel_mm_s2: f64
 pub geometry::frontend::ExtruderCaps::max_velocity_mm_s: f64
 pub geometry::frontend::ExtruderCaps::own_jerk_per_accel_hz: f64
 pub geometry::frontend::ExtruderCaps::path_jerk_per_accel_hz: [f64; 8]
-pub geometry::frontend::ExtruderCaps::path_jerk_per_accel_switch_hz: [f64; 8]
 pub geometry::frontend::ExtruderCaps::rest_settle: geometry::RestSettleId
 pub geometry::frontend::ExtruderCaps::unshaped_leaders: [bool; 3]
 impl geometry::frontend::ExtruderCaps
@@ -197,6 +197,7 @@ pub const geometry::frontend::SETTLE_CELLS: usize
 pub const geometry::frontend::SETTLE_SHARE_OF_PATH_DEVIATION: f64
 pub const geometry::frontend::SPATIAL_AXIS_SETS: usize
 pub const geometry::frontend::SPILL_CELLS: usize
+pub const geometry::frontend::SWITCH_STEP_PER_BUDGET: f64
 pub fn geometry::frontend::axis_set([bool; 3]) -> usize
 pub fn geometry::frontend::corner_deviation_from_scv(f64, f64) -> f64
 pub fn geometry::frontend::line_move([f64; 3], [f64; 3], f64, geometry::frontend::MoveContext) -> core::result::Result<geometry::frontend::Move, geometry::frontend::FrontendError>
@@ -1052,12 +1053,12 @@ pub geometry::ExtruderCaps::advance_slope_s: f64
 pub geometry::ExtruderCaps::axis_index: usize
 pub geometry::ExtruderCaps::instantaneous_corner_velocity_mm_s: f64
 pub geometry::ExtruderCaps::leader_kernel_reach_s: f64
+pub geometry::ExtruderCaps::leader_peak_hz: [f64; 3]
 pub geometry::ExtruderCaps::leader_spill: geometry::LeaderSpillId
 pub geometry::ExtruderCaps::max_accel_mm_s2: f64
 pub geometry::ExtruderCaps::max_velocity_mm_s: f64
 pub geometry::ExtruderCaps::own_jerk_per_accel_hz: f64
 pub geometry::ExtruderCaps::path_jerk_per_accel_hz: [f64; 8]
-pub geometry::ExtruderCaps::path_jerk_per_accel_switch_hz: [f64; 8]
 pub geometry::ExtruderCaps::rest_settle: geometry::RestSettleId
 pub geometry::ExtruderCaps::unshaped_leaders: [bool; 3]
 impl geometry::frontend::ExtruderCaps

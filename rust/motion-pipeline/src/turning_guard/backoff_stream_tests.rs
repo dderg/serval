@@ -93,9 +93,7 @@ impl UnsoundPlanner {
             chains,
             real,
             planned_under: ExtruderCaps {
-                path_jerk_per_accel_switch_hz: real
-                    .path_jerk_per_accel_switch_hz
-                    .map(|gain| jerk_gain_share * gain),
+                leader_peak_hz: real.leader_peak_hz.map(|gain| jerk_gain_share * gain),
                 ..real
             },
         }

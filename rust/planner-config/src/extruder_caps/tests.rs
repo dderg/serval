@@ -112,43 +112,30 @@ fn the_bimodal_mzv_kernel_gains_more_than_twice_its_peak_and_the_plane_more_than
 }
 
 #[test]
-fn the_switch_gain_is_twice_the_tallest_kernel_peak_of_the_set() {
+fn a_chain_without_a_follower_kernel_plans_at_twice_the_tallest_peak_it_moves_through() {
     let caps = caps_of(
         limited(&["pa"]),
         &[pp("pa", "linear_pressure_advance", &[("k", 0.03)])],
     )
     .unwrap()[0];
-    let switch = |f: f64| {
-        2.0 * PiecewisePolynomialKernel::directional_peak(&[&trajectory::build_smooth_mzv_kernel(
-            f,
-        )])
+    let peak = |f: f64| {
+        PiecewisePolynomialKernel::directional_peak(&[&trajectory::build_smooth_mzv_kernel(f)])
     };
-    let (x, y) = (switch(75.0), switch(62.0));
-    assert_eq!(
-        caps.path_jerk_per_accel_switch_hz,
-        [0.0, x, y, x.max(y), 0.0, x, y, x.max(y)]
-    );
-    assert!(x < caps.path_jerk_gain([true, false, false]));
+    let (x, y) = (peak(75.0), peak(62.0));
+    assert_eq!(caps.leader_peak_hz, [x, y, 0.0]);
+    assert_eq!(caps.planned_path_jerk_gain([true, false, false]), 2.0 * x);
     assert_eq!(
         caps.planned_path_jerk_gain([true, true, false]),
-        x.max(y),
-        "a chain without a follower kernel plans at the switch gain"
+        2.0 * x.max(y)
     );
-}
-
-#[test]
-fn the_switch_gain_never_exceeds_the_variation() {
-    let caps = caps_of(
-        limited(&["pa"]),
-        &[pp("pa", "linear_pressure_advance", &[("k", 0.03)])],
-    )
-    .unwrap()[0];
-    let variation = caps.path_jerk_per_accel_hz;
-    for (set, switch) in caps.path_jerk_per_accel_switch_hz.iter().enumerate() {
+    for axes in [
+        [true, false, false],
+        [false, true, false],
+        [true, true, true],
+    ] {
         assert!(
-            *switch <= variation[set],
-            "set {set}: {switch} over {}",
-            variation[set]
+            caps.planned_path_jerk_gain(axes) < caps.path_jerk_gain(axes),
+            "a multimodal kernel switches under its variation on {axes:?}"
         );
     }
 }

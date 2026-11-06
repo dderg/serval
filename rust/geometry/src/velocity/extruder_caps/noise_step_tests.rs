@@ -20,7 +20,7 @@ fn trident_like_extruder() -> ExtruderCaps {
         advance_slope_s: 0.02,
         advance_curvature_s2_per_mm: 0.0,
         path_jerk_per_accel_hz: [0.0; 8],
-        path_jerk_per_accel_switch_hz: [0.0; 8],
+        leader_peak_hz: [0.0; 3],
         unshaped_leaders: [false; 3],
         own_jerk_per_accel_hz: f64::INFINITY,
         instantaneous_corner_velocity_mm_s: 1.0,
