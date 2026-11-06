@@ -16,6 +16,7 @@ use crate::worker_pool::WorkerPool;
 const E_AXIS: usize = 3;
 const FIT_TOL: FitTol = FitTol::absolute(1e-4, 50.0);
 const EXTRUDER_MAX_ACCEL: f64 = 5000.0;
+const EXTRUDER_MAX_VELOCITY: f64 = 120.0;
 const ADVANCE_K: f64 = 0.5;
 
 /// The quintic in local time over `[0, duration]` leaving `start` and
@@ -184,7 +185,190 @@ fn crawl_past_a_step(
     segments
 }
 
-fn project(track: &[ContinuousSegment]) -> Vec<ContinuousSegment> {
+/// Motion along one axis piece by piece: each piece's time span and its
+/// polynomial in the time since the span's start.
+type Profile = Vec<((f64, f64), Vec<f64>)>;
+
+/// `p(x + by)`'s coefficients from `p(x)`'s.
+fn shifted(coeffs: &[f64], by: f64) -> Vec<f64> {
+    let mut out = vec![0.0; coeffs.len()];
+    for (power, &c) in coeffs.iter().enumerate() {
+        let mut binomial = 1.0;
+        for (lower, slot) in out.iter_mut().enumerate().take(power + 1) {
+            *slot += c * binomial * libm::pow(by, f64::from((power - lower) as i32));
+            binomial *= (power - lower) as f64 / (lower + 1) as f64;
+        }
+    }
+    out
+}
+
+/// The pieces of `profile` over `(from, to)`, scaled by `scale` about the
+/// profile's value at `from` and moved to start at `start`, each of
+/// degree five.
+fn sliced(profile: &Profile, (from, to): (f64, f64), scale: f64, start: f64) -> Vec<BezierPiece> {
+    let origin = at(profile, from);
+    profile
+        .iter()
+        .filter(|((t0, t1), _)| *t1 > from + 1e-12 && *t0 < to - 1e-12)
+        .map(|((t0, t1), coeffs)| {
+            let begin = t0.max(from);
+            let mut local = shifted(coeffs, begin - t0);
+            local.resize(6, 0.0);
+            for c in &mut local {
+                *c *= scale;
+            }
+            local[0] += start - scale * origin;
+            BezierPiece {
+                u_start: begin,
+                u_end: t1.min(to),
+                coeffs: local,
+            }
+        })
+        .collect()
+}
+
+fn at(profile: &Profile, t: f64) -> f64 {
+    let ((t0, _), coeffs) = profile
+        .iter()
+        .find(|((t0, t1), _)| *t0 <= t && t <= *t1)
+        .unwrap_or_else(|| panic!("the profile does not reach t={t}"));
+    eval(coeffs, t - t0)[0]
+}
+
+/// The leaders' segments over `spans`, each laying `ratio` of the path
+/// `profile` takes them along `y` at `x = 100`.
+fn segments(profile: &Profile, spans: &[((f64, f64), f64)]) -> Vec<ContinuousSegment> {
+    let mut e = 0.0;
+    spans
+        .iter()
+        .map(|&(span, ratio)| {
+            let pieces = |scale: f64, start: f64| {
+                ContinuousAxis::Spline(Arc::new(bezier_pieces_to_nurbs(&sliced(
+                    profile, span, scale, start,
+                ))))
+            };
+            let followers: Vec<FollowerDemand> = (ratio != 0.0)
+                .then(|| FollowerDemand::constant(E_AXIS, ratio))
+                .into_iter()
+                .collect();
+            let segment = ContinuousSegment {
+                axes: Arc::from([
+                    spline(vec![100.0], span),
+                    pieces(1.0, at(profile, span.0)),
+                    spline(vec![0.2], span),
+                    pieces(ratio, e),
+                ]),
+                followers: Arc::from(followers),
+                spatial_path: true,
+                t_start: span.0,
+                t_end: span.1,
+                motor_mask: 0,
+                source_line: 1,
+                rest_at_end: false,
+            };
+            e += ratio * (at(profile, span.1) - at(profile, span.0));
+            segment
+        })
+        .collect()
+}
+
+/// The leaders speed out of a rest while the extruder lays `ratio`, cruise
+/// at `cruise`, brake at `accel` into a dwell and leave it gently. The
+/// raw moves brake at a constant rate and stop at the dwell's start; the
+/// shaped ones bring the braking on over `onset` and ease it off at a
+/// constant jerk over `ease`, coming to rest `ease/2` into the dwell. The
+/// raw and the shaped segments, in that order.
+fn shaped_stop_into_a_dwell(
+    cruise: f64,
+    accel: f64,
+    (onset, ease): (f64, f64),
+    ratio: f64,
+) -> (Vec<ContinuousSegment>, Vec<ContinuousSegment>) {
+    let rise_time = 0.15;
+    let settle = |from: f64, to: f64| {
+        quintic(
+            [0.0, from, 0.0],
+            [0.5 * (from + to) * rise_time, to, 0.0],
+            rise_time,
+        )
+    };
+    let mut shaped: Profile = Vec::new();
+    let (mut t, mut y) = (0.0, 100.0);
+    let mut lay = |profile: &mut Profile, mut moved: Vec<f64>, duration: f64| {
+        moved[0] += y;
+        let [end_y, _, _] = eval(&moved, duration);
+        profile.push(((t, t + duration), moved));
+        (t, y) = (t + duration, end_y);
+        (t, y)
+    };
+    lay(&mut shaped, settle(0.0, cruise), rise_time);
+    lay(&mut shaped, vec![0.0, cruise], 0.2);
+    let onset_drop = 0.5 * accel * onset;
+    let ease_drop = 0.5 * accel * ease;
+    let hold = (cruise - onset_drop - ease_drop) / accel;
+    assert!(
+        hold > 0.0,
+        "the leaders brake to rest within the onset and the ease"
+    );
+    lay(
+        &mut shaped,
+        quintic(
+            [0.0, cruise, 0.0],
+            [
+                cruise * onset - accel * onset * onset / 6.0,
+                cruise - onset_drop,
+                -accel,
+            ],
+            onset,
+        ),
+        onset,
+    );
+    lay(
+        &mut shaped,
+        vec![0.0, cruise - onset_drop, -0.5 * accel],
+        hold,
+    );
+    let (rest_at, rest) = lay(
+        &mut shaped,
+        vec![0.0, ease_drop, -0.5 * accel, accel / (6.0 * ease)],
+        ease,
+    );
+    let dwell_end = rest_at + 0.05;
+    lay(&mut shaped, vec![0.0], dwell_end - rest_at);
+    lay(&mut shaped, settle(0.0, cruise), rise_time);
+    lay(&mut shaped, settle(cruise, 0.0), rise_time);
+    let stop_at = rest_at - 0.5 * ease;
+    let cruise_from = shaped[1].0.0;
+    let cruised = at(&shaped, cruise_from);
+    let braking = 2.0 * (cruised + cruise * (stop_at - cruise_from) - rest) / cruise;
+    let brake_from = stop_at - braking;
+    assert!(
+        braking > 0.0 && brake_from > cruise_from,
+        "the raw moves brake within the cruise"
+    );
+    let mut raw: Profile = shaped[..1].to_vec();
+    raw.push(((cruise_from, brake_from), vec![cruised, cruise]));
+    raw.push((
+        (brake_from, stop_at),
+        vec![
+            cruised + cruise * (brake_from - cruise_from),
+            cruise,
+            -0.5 * cruise / braking,
+        ],
+    ));
+    raw.push(((stop_at, dwell_end), vec![rest]));
+    raw.extend_from_slice(&shaped[shaped.len() - 2..]);
+    let spans: Vec<((f64, f64), f64)> = raw
+        .iter()
+        .map(|&(span, _)| (span, if span.0 == stop_at { 0.0 } else { ratio }))
+        .collect();
+    (segments(&raw, &spans), segments(&shaped, &spans))
+}
+
+fn project(
+    (base, frontier): (&[ContinuousSegment], &[ContinuousSegment]),
+    max_velocity_mm_s: f64,
+) -> Vec<ContinuousSegment> {
     let follower = CompiledChain::compile(&[trajectory::PostProcessorInstance::new(
         "pa",
         &trajectory::algos::LinearPressureAdvance,
@@ -192,7 +376,7 @@ fn project(track: &[ContinuousSegment]) -> Vec<ContinuousSegment> {
     )])
     .expect("an advance compiles")
     .with_follower_limits(trajectory::FollowerLimits {
-        max_velocity_mm_s: 120.0,
+        max_velocity_mm_s,
         max_accel_mm_s2: EXTRUDER_MAX_ACCEL,
     });
     let chains = AxisChainSet {
@@ -205,11 +389,11 @@ fn project(track: &[ContinuousSegment]) -> Vec<ContinuousSegment> {
         followers: vec![(E_AXIS, vec![0, 1, 2])],
     };
     let pool = WorkerPool::new();
-    let mut committed = track.to_vec();
+    let mut committed = frontier.to_vec();
     project_followers(
         ProjectionWindow {
-            base: track,
-            frontier: track,
+            base,
+            frontier,
             chains: &chains,
             fit_tol: FIT_TOL,
             lookahead: Lookahead::Forced,
@@ -224,27 +408,44 @@ fn project(track: &[ContinuousSegment]) -> Vec<ContinuousSegment> {
 }
 
 fn assert_within_the_extruder_limit(track: &[ContinuousSegment]) {
-    let committed = project(track);
-    let mut worst = (0.0_f64, 0.0);
+    assert_within_the_extruder_limits((track, track), EXTRUDER_MAX_VELOCITY);
+}
+
+fn assert_within_the_extruder_limits(
+    tracks: (&[ContinuousSegment], &[ContinuousSegment]),
+    max_velocity: f64,
+) {
+    let committed = project(tracks, max_velocity);
+    let mut fastest = (0.0_f64, 0.0);
+    let mut strongest = (0.0_f64, 0.0);
     for segment in &committed {
         let samples = 4000;
         for k in 0..=samples {
             let t = segment.t_start
                 + (segment.t_end - segment.t_start) * f64::from(k) / f64::from(samples);
-            let accel = segment.axes[E_AXIS]
+            let pva = segment.axes[E_AXIS]
                 .eval_pva(t)
-                .unwrap_or_else(|error| panic!("extruder at t={t}: {error:?}"))
-                .acceleration;
-            if accel.abs() > worst.0 {
-                worst = (accel.abs(), t);
+                .unwrap_or_else(|error| panic!("extruder at t={t}: {error:?}"));
+            if pva.velocity.abs() > fastest.0 {
+                fastest = (pva.velocity.abs(), t);
+            }
+            if pva.acceleration.abs() > strongest.0 {
+                strongest = (pva.acceleration.abs(), t);
             }
         }
     }
     assert!(
-        worst.0 <= EXTRUDER_MAX_ACCEL + FIT_TOL.accel_mm_s2,
+        strongest.0 <= EXTRUDER_MAX_ACCEL + FIT_TOL.accel_mm_s2,
         "the extruder accelerates at {} mm/s² at t={}, past its {EXTRUDER_MAX_ACCEL} mm/s² limit",
-        worst.0,
-        worst.1
+        strongest.0,
+        strongest.1
+    );
+    let speed_miss = 2.0 * (FIT_TOL.pos_mm * FIT_TOL.accel_mm_s2).sqrt();
+    assert!(
+        fastest.0 <= max_velocity + speed_miss,
+        "the extruder moves at {} mm/s at t={}, past its {max_velocity} mm/s limit",
+        fastest.0,
+        fastest.1
     );
 }
 
@@ -281,4 +482,32 @@ fn a_ratio_step_up_at_a_turnaround_into_a_long_leg_keeps_the_extruder_within_its
 #[test]
 fn a_crawl_valley_side_sizes_its_rebuild_by_the_ramped_ratio_the_advance_reads() {
     assert_within_the_extruder_limit(&crawl_past_a_step(1.8, 30_000.0, 0.015, 0.034));
+}
+
+/// The leaders brake into a dwell while the extruder lays the ratio of a
+/// dense top layer, their own demand within the extruder's limit, the
+/// shaped braking easing off into the rest ([`shaped_stop_into_a_dwell`]):
+/// the rest valley's before side, as wide as the ramp the planner budgets
+/// for releasing the lead, rebuilds it far steeper than the limit, the
+/// shape of `voron_dense_top_layers_zhop` at t=14.934 on the p4 high-accel
+/// profile once the crawl valley reserves stop covering it.
+#[test]
+fn a_rest_valley_side_sizes_its_rebuild_within_the_extruder_limit() {
+    let (raw, shaped) = shaped_stop_into_a_dwell(50.0, 2000.0, (0.02, 0.01), 0.034);
+    assert_within_the_extruder_limits((&raw, &shaped), EXTRUDER_MAX_VELOCITY);
+}
+
+/// A turnaround whose advanced flow stays within 20 mm/s on either side:
+/// the valley's sides release and rebuild the lead while the leaders brake
+/// and speed up across them, which adds `k·r·W′·ṡ²`, up to `8/9·k·r·a`, to
+/// the flow, past the limit.
+#[test]
+fn a_crawl_valley_side_sizes_its_rebuild_within_the_extruder_velocity() {
+    assert_within_the_extruder_limits(
+        (
+            &reversal((40.0, 40.0), 864.0, (0.033_6, 0.033_6)),
+            &reversal((40.0, 40.0), 864.0, (0.033_6, 0.033_6)),
+        ),
+        20.0,
+    );
 }
