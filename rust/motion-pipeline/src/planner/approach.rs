@@ -39,6 +39,11 @@ pub(super) struct Approaches {
     /// The last held move when it is a clothoid that may yet turn out to
     /// open a corner blend; a curve otherwise.
     unsettled_clothoid: Option<u64>,
+    /// The move leaving the last stop, and whether an extruding axis steps
+    /// its ratio across it. A corner's approach ends at a stop: the toolhead
+    /// starts afresh past it, and the ratio ramp away from a ratio step rides
+    /// the acceleration of the move leaving it, which no approach slows.
+    stop_departure: Option<(u64, bool)>,
 }
 
 /// A blend still held, as its curve cap needs it once the next corner
@@ -61,6 +66,7 @@ impl Approaches {
             since_corner_mm: f64::INFINITY,
             last_apex: None,
             unsettled_clothoid: None,
+            stop_departure: None,
         }
     }
 
@@ -71,9 +77,7 @@ impl Approaches {
             return;
         };
         let mut pieces = vec![m];
-        if let Some((accel, approach_mm)) = self.slowing_ahead.take() {
-            self.slow_ahead(&mut pieces, accel, approach_mm);
-        }
+        let carried = self.slowing_ahead.take();
         let leg_mm = self.since_corner_mm;
         let verdict = self.held.back().map_or(Verdict::None, |(id, previous)| {
             let before = last(previous);
@@ -81,12 +85,18 @@ impl Approaches {
                 Verdict::Stop {
                     turns: stop_turn(before, &pieces[0]).is_some(),
                     slowed: stopped_corner_accel(before, &pieces[0], corners),
+                    departs_slowed: !steps_extrusion(before, &pieces[0]),
                 }
             } else {
                 BlendCorner::of(before, &pieces[0], corners)
                     .map_or(Verdict::None, |apex| Verdict::Blend(*id, apex))
             }
         });
+        if let Some((accel, approach_mm)) =
+            carried.filter(|_| !matches!(verdict, Verdict::Stop { .. }))
+        {
+            self.slow_ahead(&mut pieces, accel, approach_mm);
+        }
         let closes_blend = matches!(verdict, Verdict::Blend(..));
         if let Some(id) = self.unsettled_clothoid.take() {
             if !closes_blend {
@@ -104,11 +114,18 @@ impl Approaches {
         }
         let corner = match verdict {
             Verdict::None => false,
-            Verdict::Stop { turns, slowed } => {
+            Verdict::Stop {
+                turns,
+                slowed,
+                departs_slowed,
+            } => {
                 if let Some((accel, approach_mm)) = slowed {
                     self.slow_back(self.held.len(), accel, approach_mm);
-                    self.slow_ahead(&mut pieces, accel, approach_mm);
+                    if departs_slowed {
+                        self.slow_ahead(&mut pieces, accel, approach_mm);
+                    }
                 }
+                self.stop_departure = Some((self.next_id, !departs_slowed));
                 if turns {
                     self.close_curve(corners, leg_mm);
                 }
@@ -154,7 +171,12 @@ impl Approaches {
     /// before `end`, splitting the line it ends on.
     fn slow_back(&mut self, end: usize, accel: f64, approach_mm: f64) {
         let mut left = approach_mm;
-        for (_, pieces) in self.held.range_mut(..end).rev() {
+        let stop_departure = self.stop_departure;
+        for (id, pieces) in self.held.range_mut(..end).rev() {
+            let departs_stop = stop_departure.filter(|(departure, _)| departure == id);
+            if departs_stop.is_some_and(|(_, ramps)| ramps) {
+                return;
+            }
             let mut index = pieces.len();
             while left > 0.0 && index > 0 {
                 index -= 1;
@@ -169,7 +191,7 @@ impl Approaches {
                     left -= length;
                 }
             }
-            if left <= 0.0 {
+            if left <= 0.0 || departs_stop.is_some() {
                 return;
             }
         }
@@ -250,6 +272,7 @@ impl Approaches {
         self.since_corner_mm = f64::INFINITY;
         self.last_apex = None;
         self.unsettled_clothoid = None;
+        self.stop_departure = None;
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -309,6 +332,7 @@ enum Verdict {
     Stop {
         turns: bool,
         slowed: Option<(f64, f64)>,
+        departs_slowed: bool,
     },
     Blend(u64, BlendCorner),
 }
@@ -353,6 +377,23 @@ fn cap_curve(m: &mut Move, corners: &ShapedCorners) {
         let room = corners.curve_room_mm(m.limits.corner, radius, m.limits.accel_mm_s2);
         cap_speed(m, corners.arc_speed_cap(radius, room));
     }
+}
+
+/// Whether an extruding axis changes its ratio across the seam from
+/// `before` into `after`. The ratio ramp away from such a rest rides the
+/// acceleration of the moves after it, so the departure keeps its own: a
+/// slowed approach there would step the acceleration up under the ramp.
+fn steps_extrusion(before: &Move, after: &Move) -> bool {
+    let ratio_on = |followers: &[geometry::FollowerDemand], axis: usize, end: bool| {
+        followers
+            .iter()
+            .find(|f| f.axis_index == axis)
+            .map_or(0.0, |f| if end { f.ratio_end } else { f.ratio })
+    };
+    let (up, down) = (&before.segment.followers, &after.segment.followers);
+    up.iter()
+        .chain(down)
+        .any(|f| ratio_on(up, f.axis_index, true) != ratio_on(down, f.axis_index, false))
 }
 
 fn cap_speed(m: &mut Move, speed: f64) {
