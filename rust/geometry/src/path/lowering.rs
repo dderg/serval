@@ -14,6 +14,15 @@ pub trait PositionProfile {
     /// tangential jerk `j`, acceleration `a_t` and speed `v`, the exact per-axis jerk
     /// is `j·ĥ + 3·v·a_t·(dĥ/ds) + v³·(d²ĥ/ds²)`.
     fn d2heading_ds2(&self, s: f64) -> [f64; 3];
+    /// `[ĥ, dĥ/ds, d²ĥ/ds²]` at `s`, bit for bit what the three methods
+    /// give, each trigonometric read made once.
+    fn heading_frame_at(&self, s: f64) -> [[f64; 3]; 3] {
+        [
+            self.heading_at(s),
+            self.dheading_ds(s),
+            self.d2heading_ds2(s),
+        ]
+    }
 }
 
 fn axpby(a: f64, u: [f64; 3], b: f64, v: [f64; 3]) -> [f64; 3] {
@@ -115,6 +124,19 @@ impl PositionProfile for Arc {
             self.v,
         )
     }
+
+    fn heading_frame_at(&self, s: f64) -> [[f64; 3]; 3] {
+        let theta = self.angle_at(s);
+        let sign = self.sweep.signum();
+        let (sin, cos) = (libm::sin(theta), libm::cos(theta));
+        let inv_r = 1.0 / self.radius;
+        let inv_r2 = 1.0 / (self.radius * self.radius);
+        [
+            axpby(-sign * sin, self.u, sign * cos, self.v),
+            axpby(-inv_r * cos, self.u, -inv_r * sin, self.v),
+            axpby(sign * inv_r2 * sin, self.u, -sign * inv_r2 * cos, self.v),
+        ]
+    }
 }
 
 impl Clothoid {
@@ -160,6 +182,22 @@ impl PositionProfile for Clothoid {
             self.v,
         )
     }
+
+    fn heading_frame_at(&self, s: f64) -> [[f64; 3]; 3] {
+        let phi = self.heading_angle_at(s);
+        let kappa = self.kappa_0 + self.sigma * s;
+        let (sin, cos) = (libm::sin(phi), libm::cos(phi));
+        [
+            axpby(cos, self.u, sin, self.v),
+            axpby(-kappa * sin, self.u, kappa * cos, self.v),
+            axpby(
+                -self.sigma * sin - kappa * kappa * cos,
+                self.u,
+                self.sigma * cos - kappa * kappa * sin,
+                self.v,
+            ),
+        ]
+    }
 }
 
 impl PositionProfile for Segment {
@@ -192,6 +230,14 @@ impl PositionProfile for Segment {
             Segment::Line(l) => l.d2heading_ds2(s),
             Segment::Arc(a) => a.d2heading_ds2(s),
             Segment::Clothoid(c) => c.d2heading_ds2(s),
+        }
+    }
+
+    fn heading_frame_at(&self, s: f64) -> [[f64; 3]; 3] {
+        match self {
+            Segment::Line(l) => l.heading_frame_at(s),
+            Segment::Arc(a) => a.heading_frame_at(s),
+            Segment::Clothoid(c) => c.heading_frame_at(s),
         }
     }
 }
