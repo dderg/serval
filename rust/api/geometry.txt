@@ -479,6 +479,7 @@ pub geometry::ratio_ramp::CrawlSide::signed_from: f64
 pub geometry::ratio_ramp::CrawlSide::speed: f64
 impl geometry::CrawlSide
 pub fn geometry::CrawlSide::either_way(f64, f64, f64, (f64, f64)) -> Self
+pub fn geometry::CrawlSide::lead_velocity(&self, f64) -> f64
 pub fn geometry::CrawlSide::rebuild(&self, f64) -> f64
 pub fn geometry::CrawlSide::rebuilds_within(&self, f64) -> geometry::RebuildsWithin
 pub struct geometry::ratio_ramp::RatioRampRule
@@ -500,7 +501,8 @@ pub geometry::ratio_ramp::RatioStep::speed_mm_s: f64
 pub struct geometry::ratio_ramp::RebuildsWithin
 impl geometry::RebuildsWithin
 pub fn geometry::RebuildsWithin::at(&self, (f64, f64), f64, f64) -> f64
-pub fn geometry::RebuildsWithin::fits_between(&self, (f64, f64), (f64, f64), (f64, f64), f64) -> bool
+pub fn geometry::RebuildsWithin::fits_between(&self, (f64, f64), (f64, f64), (f64, f64), (f64, f64)) -> bool
+pub fn geometry::RebuildsWithin::lead_velocity_at(&self, (f64, f64), f64) -> f64
 pub struct geometry::ratio_ramp::SideWeight
 pub geometry::ratio_ramp::SideWeight::bend: (f64, f64)
 pub geometry::ratio_ramp::SideWeight::bend_scale: (f64, f64)
@@ -1133,6 +1135,7 @@ pub geometry::CrawlSide::signed_from: f64
 pub geometry::CrawlSide::speed: f64
 impl geometry::CrawlSide
 pub fn geometry::CrawlSide::either_way(f64, f64, f64, (f64, f64)) -> Self
+pub fn geometry::CrawlSide::lead_velocity(&self, f64) -> f64
 pub fn geometry::CrawlSide::rebuild(&self, f64) -> f64
 pub fn geometry::CrawlSide::rebuilds_within(&self, f64) -> geometry::RebuildsWithin
 pub struct geometry::CubicSegment
@@ -1348,7 +1351,8 @@ pub geometry::RatioStep::speed_mm_s: f64
 pub struct geometry::RebuildsWithin
 impl geometry::RebuildsWithin
 pub fn geometry::RebuildsWithin::at(&self, (f64, f64), f64, f64) -> f64
-pub fn geometry::RebuildsWithin::fits_between(&self, (f64, f64), (f64, f64), (f64, f64), f64) -> bool
+pub fn geometry::RebuildsWithin::fits_between(&self, (f64, f64), (f64, f64), (f64, f64), (f64, f64)) -> bool
+pub fn geometry::RebuildsWithin::lead_velocity_at(&self, (f64, f64), f64) -> f64
 pub struct geometry::RestSettle
 pub geometry::RestSettle::radius_mm: f64
 pub geometry::RestSettle::sides: [geometry::frontend::SettleSide; 2]
