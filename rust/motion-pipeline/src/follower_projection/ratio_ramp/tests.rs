@@ -2263,7 +2263,7 @@ fn assert_ramp_within_rule(crossing: &RampCrossing) -> Result<(), TestCaseError>
     let seams = crossing.seams();
     let laid = &state.smoothing.laid;
     let start = laid.seams.partition_point(|seam| seam.s < seams[0]);
-    let cluster = laid.cluster_at(&state.smoothing.width, start);
+    let cluster = laid.cluster_holding(&state.smoothing.width, start);
     prop_assume!(cluster.seams.len() == laid.seams.len() - start);
     let h = cluster.width;
     prop_assume!(h > 0.0 && crossing.variation() > 0.0);
