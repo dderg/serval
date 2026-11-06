@@ -1114,9 +1114,9 @@ impl TurningGuard {
     /// Forgets the crawls whose sides reach no cell from `first_cell` on,
     /// the first any held move's check reads, and the cells neither they
     /// nor a crawl still to find read: a crawl found again after a re-plan
-    /// starts no earlier than the first held move, and reads back the
-    /// [`VALLEY_LEAD_BUDGET_S`] and the kernels' reach from there. Returns
-    /// the first cell still tracked.
+    /// starts no earlier than the first held move, a kept crawl, or the
+    /// open run, and reads back the [`VALLEY_LEAD_BUDGET_S`] and the
+    /// kernels' reach from there. Returns the first cell still tracked.
     fn forget_unreachable_crawls(&mut self, first_cell: i64) -> i64 {
         let h = self.h();
         let (_, ahead) = self.span;
@@ -1129,10 +1129,14 @@ impl TurningGuard {
         } = &mut self.valleys;
         crawls.retain(|crawl| crawl.reach().1 >= first_cell);
         let budget_cells = (VALLEY_LEAD_BUDGET_S / h).ceil() as i64;
-        let keep = crawls.iter().map(|crawl| crawl.cells().0).chain(*run).fold(
-            first_cell.min(*scanned) - ahead - 3 - budget_cells,
-            i64::min,
-        );
+        let keep = crawls
+            .iter()
+            .map(|crawl| crawl.cells().0)
+            .chain(*run)
+            .fold(first_cell.min(*scanned), i64::min)
+            - ahead
+            - 3
+            - budget_cells;
         track.trim_before(keep);
         keep
     }
@@ -1349,7 +1353,18 @@ impl TurningGuard {
     /// A back-off scales moves the planned time a pending check reads,
     /// which starts no earlier than `u` (the kernels' backward reach)
     /// before the first move still unchecked, or the end of what has
-    /// arrived; the first move overlapping it is the earliest it can touch.
+    /// arrived, nor than `u` before the first cell of a crawl valley side
+    /// that cell's check adds room for ([`CellCheck::asks`]). A crawl's
+    /// sides read the motion up to [`VALLEY_LEAD_BUDGET_S`] past its run,
+    /// and a re-plan there resizes them, so the sides of every crawl whose
+    /// run ends within that budget and the kernels' reach before the first
+    /// move unchecked count; the first move overlapping the earliest of
+    /// these is the earliest a back-off can touch. The motion it changes
+    /// moves the shaped motion `w` (the kernels' forward reach) before it,
+    /// where a crawl may then be found whose before side reaches the
+    /// [`VALLEY_LEAD_BUDGET_S`] further back and whose cells' checks back
+    /// off from `u` before that: the first move overlapping there is the
+    /// earliest any back-off the pending checks lead to can touch.
     /// Its re-plan re-opens the cells that read what it changed, whose own
     /// back-offs reach further back, as far as the frozen seam: any move
     /// held may fall to [`SCALE_FLOOR`] of its budget, and no re-plan raises
@@ -1362,14 +1377,24 @@ impl TurningGuard {
         let (back, ahead) = self.span;
         let timing = &self.entries.timing;
         let crawls_found_to = self.valleys.run.unwrap_or(self.valleys.scanned) as f64 * h;
-        let earliest = self
+        let unchecked_from = self
             .entries
             .unproven
             .iter()
             .position(Option::is_some)
             .map_or(self.segment_end(), |index| timing[index].t0)
-            .min(crawls_found_to)
-            - (back + 2) as f64 * h;
+            .min(crawls_found_to);
+        let unchecked_cell = (unchecked_from / h).floor() as i64;
+        let budget_cells = (VALLEY_LEAD_BUDGET_S / h).ceil() as i64;
+        let sides_from = self
+            .valleys
+            .crawls
+            .iter()
+            .filter(|crawl| crawl.cells().1 + budget_cells + ahead + 2 >= unchecked_cell)
+            .map(|crawl| crawl.before.cells.0 as f64 * h)
+            .fold(unchecked_from, f64::min);
+        let touched_from = sides_from - (back + 2) as f64 * h;
+        let earliest = touched_from - (ahead + back + 2) as f64 * h - VALLEY_LEAD_BUDGET_S;
         let reach = timing.partition_point(|timing| timing.t1() <= earliest);
         let Some(standing) = self.horizon(reach) else {
             return (0, self.frozen);

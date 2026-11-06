@@ -2175,8 +2175,10 @@ impl RatioSmoothing {
     /// over which the advance builds or releases its lead from the rest out,
     /// and reaches past the seam only where the lead or a ratio step near
     /// the rest needs it ([`RestSide::width`]). A rest leg the leaders cross
-    /// without coming to rest opens none. Returns whether `leg` closes a
-    /// rest valley.
+    /// without coming to rest opens none. The crawls still waiting lie
+    /// before the rest and are laid first, reading the leaders at rest past
+    /// the trail, as the turning guard leaves room for them: valleys are
+    /// laid in path order. Returns whether `leg` closes a rest valley.
     fn lay_rest_valley(
         &mut self,
         spans: &[RatioSpan],
@@ -2221,6 +2223,9 @@ impl RatioSmoothing {
             },
         );
         if self.open_rest.is_none() {
+            for crawl in std::mem::take(&mut self.waiting_crawls) {
+                self.lay_crawl_valley(spans, rule, crawl, f64::INFINITY);
+            }
             let side = RestSide {
                 rest: rest_start,
                 seam,
@@ -2925,12 +2930,17 @@ impl Crossing {
     /// limit: `r·(a + k·J)`, `J` the slope of the path's acceleration the
     /// follower meets ([`Self::advanced_jerk`]). Elsewhere releasing the
     /// lead over the crawl's short reach would ask more of the follower
-    /// than the crawl.
+    /// than the crawl. A follower the turning guard holds
+    /// ([`guarded_by_the_turning_guard`]) releases it at every crawl: the
+    /// guard bounds the turning `a⊥²/v` the path speed carries only down to
+    /// [`ADVANCE_VALLEY_SPEED_MM_S`], and leaves room for the rebuild of a
+    /// valley at every crawl it may find.
     fn needs_valley(self, rule: &RatioRampRule, ratio: f64) -> bool {
         self.turns_around()
             || (self.crawls()
-                && ratio * (self.rate + rule.advance_slope_s * self.advanced_jerk(rule))
-                    > rule.max_accel_mm_s2)
+                && (guarded_by_the_turning_guard(rule)
+                    || ratio * (self.rate + rule.advance_slope_s * self.advanced_jerk(rule))
+                        > rule.max_accel_mm_s2))
     }
 
     /// The path speed's second rate `s⃛` carries the tangent's turning
