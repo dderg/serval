@@ -1905,11 +1905,9 @@ impl RatioSmoothing {
         let steps_reach_back_to = if width_final >= table_end {
             table_end - width.width(table_end)
         } else {
-            let nearest_unfinal = self
-                .laid
-                .seams
-                .iter()
-                .find(|seam| seam.step != 0.0 && seam.s > width_final)
+            let laid_steps = &self.laid.steps;
+            let nearest_unfinal = laid_steps
+                .get(laid_steps.partition_point(|seam| seam.s <= width_final))
                 .map_or(table_end, |seam| seam.s.min(table_end));
             width_final - width.width(width_final)
                 + (1.0 - WIDTH_SLOPE_BOUND) * (nearest_unfinal - width_final)
