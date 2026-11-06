@@ -2298,7 +2298,15 @@ there — a 1.5 mm/s corner 1.8 mm before a step crossed at 46 mm/s lies
 last rest, and nodes before it within <code>SEAM_PATH_REACH_S</code> = 217.5 ms, the
 longest a steady acceleration from rest takes to a step whose width reaches
 back to its start (<code>t² ≤ K·(t + τ_max/2)</code>, <code>K</code> = 6.75 longest ramps), so
-each node waits 232.5 ms of laid leaders for its target.</p>
+each node waits 232.5 ms of laid leaders for its target. Off a rest the
+width holds that cone at least, as the cap's <code>c·d/(1 + c)</code> and the rest
+valley's check of a step beside the rest (<code>RestSide::narrows_a_step</code>)
+read it: a sample becomes a node there only once the cone stops capping
+its target, and where the first lies far past the rest for its target, a
+node marks the peak where the two cones meet. Rising toward the first node
+alone, <code>h</code> once climbed 0.21 per millimetre off a prime on the fast bench,
+toward a slow corner 14.8 mm on, and a ratio step the leaders crossed
+0.19 mm past the prime took the extruder to 1.2× <code>max_accel</code>.</p>
 <p>The cap searches the planned speed <code>v₀</code> at the join, not the shaped one.
 The planned speeds within the leaders' kernel reach of the join stay under
 the fastest ceiling <code>C</code> within the move's reach
