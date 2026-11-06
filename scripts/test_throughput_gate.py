@@ -160,23 +160,52 @@ def test_the_live_cost_never_fails_on_drift():
         assert verdict.problems == ()
 
 
-def test_a_live_prediction_below_the_floor_within_its_residual_is_only_noted():
+def test_a_live_prediction_below_the_floor_fails_without_a_pi_measurement():
     below = model(2.5, 1.0, 1.96)
     verdict = gate.judge("c", entry(), measurement(band_pct=1.0), below)
-    assert verdict.problems == ()
-    assert len(verdict.notes) == 1
+    assert len(verdict.problems) == 1
     assert (
         "the live cost predicts, 1.96x +-1.0 %, below the 2.0x floor"
-        in (verdict.notes[0])
+        in verdict.problems[0]
     )
     assert (
         "optimistically 2.16x with the live model's 9.0 % residual"
-        in (verdict.notes[0])
+        in verdict.problems[0]
     )
-    assert "Ir decides the floor" in verdict.notes[0]
+    assert gate.PI_COMMAND in verdict.problems[0]
 
 
-def test_a_live_prediction_fails_only_below_its_optimistic_bound():
+def test_a_pi_measurement_of_the_tree_at_the_floor_decides_over_the_predictions():
+    below = model(1.9, 1.0, 1.86)
+    verdict = gate.judge(
+        "c", entry(), measurement(band_pct=1.0), below, pi_worst_x=2.03
+    )
+    assert verdict.problems == ()
+    assert len(verdict.notes) == 2
+    assert all(
+        "measured this tree's worst window at 2.03x" in n for n in verdict.notes
+    )
+
+
+def test_a_pi_measurement_below_the_floor_fails_once():
+    verdict = gate.judge(
+        "c", entry(), measurement(), model(1.9, 1.0, 1.86), pi_worst_x=1.95
+    )
+    assert verdict.problems == (
+        "the Pi measured this tree's worst window at 1.95x, below the 2.0x floor",
+    )
+
+
+def test_ir_above_the_floor_no_longer_excuses_a_live_miss():
+    """#804: Ir predicted 2.09x, the live replay 1.86x, the Pi 1.78x."""
+    verdict = gate.judge(
+        "c", entry(), measurement(band_pct=0.5), model(2.09, 1.0, 1.86)
+    )
+    assert len(verdict.problems) == 1
+    assert "the live cost predicts, 1.86x" in verdict.problems[0]
+
+
+def test_a_live_prediction_below_its_optimistic_bound_says_no_model_error_explains_it():
     optimistic = 1.81 * 1.01 * 1.09
     assert optimistic < 2.0
     verdict = gate.judge(
@@ -184,21 +213,15 @@ def test_a_live_prediction_fails_only_below_its_optimistic_bound():
     )
     assert len(verdict.problems) == 1
     assert f"optimistically {optimistic:.2f}x" in verdict.problems[0]
-    assert verdict.problems[0].endswith("even that misses the floor")
-    noisy = gate.judge(
-        "c", entry(), measurement(band_pct=5.0), model(2.5, 1.0, 1.81)
-    )
-    assert noisy.problems == ()
+    assert "even that misses the floor" in verdict.problems[0]
 
 
-def test_an_unseen_cpu_model_widens_the_live_bound_by_the_cpu_left_out_residual():
-    seen = gate.judge("c", entry(), measurement(), model(2.5, 1.0, 1.82))
-    assert len(seen.problems) == 1
+def test_an_unseen_cpu_model_states_the_cpu_left_out_residual():
     unseen = gate.judge(
         "c", entry(), measurement(cpu="Unseen CPU"), model(2.5, 1.0, 1.82)
     )
-    assert unseen.problems == ()
-    assert "12.0 % residual" in unseen.notes[0]
+    assert len(unseen.problems) == 1
+    assert "12.0 % residual" in unseen.problems[0]
 
 
 def test_the_live_band_carries_through_alpha():
@@ -227,8 +250,8 @@ def test_the_live_prediction_divides_the_calibration_window_by_the_cost_over_it(
         "c", entry(), measurement(vs_calibration=1.01), model(2.5, 1.0, 2.01)
     )
     assert verdict.predicted_x[1] == pytest.approx(2.01 / 1.01)
-    assert verdict.problems == ()
-    assert "Ir decides the floor" in verdict.notes[0]
+    assert len(verdict.problems) == 1
+    assert "the live cost predicts, 1.99x" in verdict.problems[0]
     steeper = gate.judge(
         "c",
         entry(),
@@ -289,7 +312,7 @@ def test_a_floor_miss_only_warns_while_the_floor_checks_are_off(monkeypatch):
     assert verdict.problems == ()
     assert len(verdict.warnings) == 2
     assert "below the 2.0x floor" in verdict.warnings[0]
-    assert verdict.warnings[1].endswith("even that misses the floor")
+    assert "even that misses the floor" in verdict.warnings[1]
 
 
 def test_the_summary_names_an_unseen_cpu_model_without_failing():
@@ -454,3 +477,22 @@ def test_the_lab_sync_rewrites_only_changed_files_and_drops_the_rest(tmp_path):
     assert (dest / "crate" / "src" / "lib.rs").read_text() == "fn b() {}"
     assert kept.stat().st_mtime_ns == kept_mtime
     assert not (dest / "stale.rs").exists()
+
+
+def test_a_pi_measurement_counts_only_for_the_trees_it_measured(
+    tmp_path, monkeypatch
+):
+    trees = {"rust": "a1", "tools/bench/configs": "b2", "tools/sim/gcode": "c3"}
+    window = tmp_path / "pi_window.json"
+    window.write_text(
+        '{"trees": {"rust": "a1", "tools/bench/configs": "b2", '
+        '"tools/sim/gcode": "c3"}, "measured_at": "2026-11-06T00:00:00+00:00", '
+        '"worst_x": {"c": [2.04, 2.01]}}'
+    )
+    monkeypatch.setattr(gate, "PI_WINDOW", window)
+    monkeypatch.setattr(gate, "ROOT", tmp_path)
+    assert gate.pi_measured_worst(trees) == {"c": 2.01}
+    assert gate.pi_measured_worst({**trees, "rust": "changed"}) == {}
+    assert gate.pi_measured_worst(None) == {}
+    window.unlink()
+    assert gate.pi_measured_worst(trees) == {}
