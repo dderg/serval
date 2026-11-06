@@ -2,7 +2,7 @@ use geometry::path::CurvatureProfile;
 use geometry::path::lowering::PositionProfile;
 use geometry::{
     ADVANCE_VALLEY_SPEED_MM_S, AdvanceValley, CrawlSide, VALLEY_LEAD_BUDGET_S, ValleyKind,
-    crawl_floor, crawl_side_width, valley_reach,
+    crawl_floor, crawl_side_width, side_weight, valley_reach,
 };
 use nurbs::algebra::PiecewisePolynomialKernel;
 
@@ -306,6 +306,12 @@ impl ValleyReference {
         self.arcs[i] + gauss(from, t, |tau| shaped.speed(tau))
     }
 
+    /// Lays the valley at the crawl the shaped leaders cross at `t`, as the
+    /// projection lays it: a before side reaching no further back than the
+    /// rest the stream starts from, the weight held at zero back to it
+    /// where none fits, and failing loudly where the side reaches back
+    /// past the [`VALLEY_LEAD_BUDGET_S`] of motion before the crawl, which
+    /// the projection has taken.
     fn lay(&mut self, shaped: &Shaped, caps: &geometry::ExtruderCaps, t: f64) {
         let [velocity, accel, _] = shaped.motion(t);
         let (speed, rate) = (norm(velocity), norm(accel));
@@ -324,44 +330,55 @@ impl ValleyReference {
         }
         let floor = crawl_floor(speed, rate);
         let crawl = (turn, speed, rate, floor);
-        let side = |window: &dyn Fn(f64) -> (f64, f64)| {
-            crawl_side_width(reach, |width| {
-                self.rebuild_fits(shaped, caps, crawl, window(width), width)
-            })
-            .unwrap_or_else(|| panic!("no width fits the side of the crawl at s={turn}"))
-        };
-        let after = side(&|width| (turn, turn + width));
+        let after = crawl_side_width(reach, |width| {
+            self.rebuild_fits(shaped, caps, crawl, (turn, turn + width), width)
+        })
+        .unwrap_or_else(|| panic!("no width fits the after side of the crawl at s={turn}"));
         let last_reach_end = self
             .valleys
             .last()
             .map_or(f64::NEG_INFINITY, AdvanceValley::reach_end);
-        let before = if last_reach_end > turn - reach {
-            reach
+        let (start, before) = if last_reach_end > turn - reach {
+            (turn, reach)
         } else {
-            side(&|width| (turn - width, turn))
+            crawl_side_width(reach, |width| {
+                width > turn || self.rebuild_fits(shaped, caps, crawl, (turn - width, turn), width)
+            })
+            .filter(|&width| width <= turn)
+            .map_or((0.0, 0.0), |width| (turn, width))
         };
         match self.valleys.last_mut() {
-            Some(last) if turn - before < last.reach_end() => {
+            Some(last) if start - before < last.reach_end() => {
                 last.end = turn;
                 last.after = after;
                 last.floor_after = floor;
             }
-            _ => self.valleys.push(AdvanceValley {
-                start: turn,
-                end: turn,
-                before,
-                after,
-                floor_before: floor,
-                floor_after: floor,
-                kind: ValleyKind::Crawl,
-            }),
+            _ => {
+                let budget = turn - self.arc_at(shaped, (t - VALLEY_LEAD_BUDGET_S).max(0.0));
+                assert!(
+                    turn - start + before <= budget,
+                    "the crawl at s={turn} lays a valley reaching {} mm back, past the {budget} mm \
+                     the leaders cover in the lead budget before it",
+                    turn - start + before
+                );
+                self.valleys.push(AdvanceValley {
+                    start,
+                    end: turn,
+                    before,
+                    after,
+                    floor_before: floor,
+                    floor_after: floor,
+                    kind: ValleyKind::Crawl,
+                });
+            }
         }
     }
 
     /// Whether a side `width` wide over the path `window` of the crawl
     /// `(turn, speed, rate, floor)` rebuilds the lead within what the
     /// leaders' own demand over it leaves of the extruder's limit, read as
-    /// the projection reads it off the leaders ([`CrawlSide::rebuild`]).
+    /// the projection reads it off the leaders: `r·max(|s̈|, |s̈ + k·W·s⃛|)`
+    /// with the side's weight `W` there, and [`CrawlSide::rebuild`].
     fn rebuild_fits(
         &self,
         shaped: &Shaped,
@@ -373,6 +390,7 @@ impl ValleyReference {
         let (back, ahead) = shaped.reach();
         let k = caps.advance_slope_s;
         let (mut base, mut ratio, mut accel, mut fastest) = (0.0_f64, 0.0_f64, rate, speed);
+        let mut outward = (f64::INFINITY, f64::NEG_INFINITY);
         for ((&t, &s), &[velocity, acceleration, jerk]) in
             self.times.iter().zip(&self.arcs).zip(&self.motions)
         {
@@ -389,10 +407,16 @@ impl ValleyReference {
             let turning = norm(cross(acceleration, velocity)).powi(2)
                 / (v * v)
                 / v.max(ADVANCE_VALLEY_SPEED_MM_S);
-            let path_accel = along(acceleration).abs();
-            base = base.max(here * (path_accel + k * (along(jerk).abs() + turning)));
+            let path_accel = along(acceleration);
+            let weight = side_weight((s - turn).abs(), width, floor).0;
+            let own = path_accel
+                .abs()
+                .max((path_accel + k * weight * (along(jerk) + turning)).abs());
+            base = base.max(here * own);
             ratio = ratio.max(here);
-            accel = accel.max(path_accel);
+            accel = accel.max(path_accel.abs());
+            let away = (s - turn).signum() * path_accel;
+            outward = (outward.0.min(away), outward.1.max(away));
             fastest = fastest.max(v);
         }
         let room = caps.max_accel_mm_s2 - base;
@@ -405,6 +429,12 @@ impl ValleyReference {
             accel,
             fastest,
             floor: (floor, floor),
+            outward: if outward.0 <= outward.1 {
+                outward
+            } else {
+                (-accel, accel)
+            },
+            signed_from: 0.0,
         };
         k * ratio * leaders.rebuild(width) <= room
     }

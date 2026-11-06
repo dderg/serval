@@ -1508,11 +1508,13 @@ impl RatioSmoothing {
 
     /// A valley at the crawl `turn` where reading the path speed through it
     /// at the ratio within its reach would ask too much of the follower,
-    /// each side as wide as its rebuild needs ([`crawl_side`]). The advance
-    /// there reads the ratio laid after the table's end too, so a reach
-    /// running past `table_end`, or an after side past the leaders probed,
-    /// waits for the next leg; an infinite `table_end`, where the leaders
-    /// come to rest past the table, lays it with what is laid.
+    /// each side as wide as its rebuild needs ([`crawl_side`]), the reach
+    /// no further back than the leaders last rested
+    /// ([`Self::rested_through`]). The advance there reads the ratio laid
+    /// after the table's end too, so a reach running past `table_end`, or
+    /// an after side past the leaders probed, waits for the next leg; an
+    /// infinite `table_end`, where the leaders come to rest past the table,
+    /// lays it with what is laid.
     fn lay_crawl_valley(
         &mut self,
         spans: &[RatioSpan],
@@ -1520,7 +1522,9 @@ impl RatioSmoothing {
         (turn, crossing): (f64, Crossing),
         table_end: f64,
     ) {
-        let reach = crossing.valley_reach().min(turn - self.floor);
+        let reach = crossing
+            .valley_reach()
+            .min(turn - self.rested_through(turn));
         if reach <= SPAN_MIN_LEN_MM {
             return;
         }
@@ -1536,13 +1540,26 @@ impl RatioSmoothing {
         }
     }
 
+    /// Where the leaders last rested before `turn`: the floor, or the end
+    /// of the last rest valley laid before it.
+    fn rested_through(&self, turn: f64) -> f64 {
+        self.valleys
+            .iter()
+            .rev()
+            .find(|valley| valley.kind == ValleyKind::Rest && valley.end <= turn)
+            .map_or(self.floor, |rest| rest.end.max(self.floor))
+    }
+
     /// The valley at the crawl `turn`, unless the last one laid already
     /// holds the weight flat at zero there ([`AdvanceValley::holds_zero_at`]):
     /// a crawl at a seam is the slowest point of the leg before or after it
     /// too, read a hair inside that leg. Each side is as wide as its rebuild
     /// needs ([`crawl_side`]), past the leaders' `reach`; the before side
     /// only where the valley does not widen the last one over it
-    /// ([`Self::place_valley`]).
+    /// ([`Self::place_valley`]). Where no before side reaching no further
+    /// back than the leaders last rested fits, the valley holds the weight
+    /// at zero back to there instead: the leaders leave that rest with no
+    /// lead to release, and the after side rebuilds it.
     fn lay_valley(
         &mut self,
         spans: &[RatioSpan],
@@ -1560,13 +1577,22 @@ impl RatioSmoothing {
             return Ok(());
         }
         let laid = (&self.trail, spans, table_end);
-        let after = crawl_side(Side::After, crawl, reach, laid, rule, f64::INFINITY)?;
-        let before = if self.last_crawl_reach_end() > turn - reach {
-            reach
+        let after = crawl_side(Side::After, crawl, reach, laid, rule, f64::INFINITY)?
+            .unwrap_or_else(|| {
+                panic!(
+                    "follower projection: no width of the After side of the crawl valley at \
+                     s={turn} ({:?}) fits its rebuild within the follower's limit",
+                    crawl.1
+                )
+            });
+        let rested = self.rested_through(turn);
+        let (start, before) = if self.last_crawl_reach_end() > turn - reach {
+            (turn, reach)
         } else {
-            crawl_side(Side::Before, crawl, reach, laid, rule, turn - self.floor)?
+            crawl_side(Side::Before, crawl, reach, laid, rule, turn - rested)?
+                .map_or((rested, 0.0), |before| (turn, before))
         };
-        self.place_valley(turn, (before, after), crawl.1.crawl_floor());
+        self.place_valley(turn, (start, before, after), crawl.1.crawl_floor());
         Ok(())
     }
 
@@ -1578,16 +1604,17 @@ impl RatioSmoothing {
             .map_or(f64::NEG_INFINITY, AdvanceValley::reach_end)
     }
 
-    /// A crawl valley at `turn` with its sides `before` and `after` wide.
-    /// A crawl whose sides would overlap the last crawl valley's widens it
-    /// instead: the advance releases its lead once and rebuilds it once
-    /// across both, from this crawl, holding the weight at zero between
-    /// them, where two valleys would multiply their weights and rebuild it
-    /// steeper than either. Laid crawl valleys never overlap. The turning
-    /// guard leaves room for the sides from the same rule, so a new crawl
-    /// valley reaches back all of `before` or fails loudly: the guard cannot
-    /// see what the projection has taken.
-    fn place_valley(&mut self, turn: f64, (before, after): (f64, f64), floor: f64) {
+    /// A crawl valley at `turn`, its weight at zero from `start` on, with
+    /// its sides `before` and `after` wide. A crawl whose sides would
+    /// overlap the last crawl valley's widens it instead: the advance
+    /// releases its lead once and rebuilds it once across both, from this
+    /// crawl, holding the weight at zero between them, where two valleys
+    /// would multiply their weights and rebuild it steeper than either.
+    /// Laid crawl valleys never overlap. The turning guard leaves room for
+    /// the sides from the same rule, so a new crawl valley reaches back all
+    /// of `before` or fails loudly: the guard cannot see what the
+    /// projection has taken.
+    fn place_valley(&mut self, turn: f64, (start, before, after): (f64, f64, f64), floor: f64) {
         if self
             .valleys
             .last()
@@ -1610,7 +1637,7 @@ impl RatioSmoothing {
             .iter_mut()
             .rev()
             .find(|valley| valley.kind == ValleyKind::Crawl)
-            .filter(|last| turn - before < last.reach_end());
+            .filter(|last| start - before < last.reach_end());
         match overlapped {
             Some(last) => {
                 assert!(
@@ -1625,12 +1652,13 @@ impl RatioSmoothing {
             None => {
                 let back = self.back_reach_limit(turn);
                 assert!(
-                    back >= before,
-                    "follower projection: the crawl valley at s={turn} reaches {before} mm back, \
-                     but the projection has taken the path to {back} mm before it"
+                    back >= turn - start + before,
+                    "follower projection: the crawl valley at s={turn} reaches {} mm back, but \
+                     the projection has taken the path to {back} mm before it",
+                    turn - start + before
                 );
                 self.valleys.push(AdvanceValley {
-                    start: turn,
+                    start,
                     end: turn,
                     before,
                     after,

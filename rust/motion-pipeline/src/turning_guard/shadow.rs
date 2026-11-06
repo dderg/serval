@@ -46,6 +46,10 @@ impl PlannedGrid {
         self.base + self.samples.len() as i64
     }
 
+    pub fn base(&self) -> i64 {
+        self.base
+    }
+
     pub fn is_empty(&self) -> bool {
         self.samples.is_empty()
     }

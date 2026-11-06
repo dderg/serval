@@ -22,6 +22,18 @@ pub const TURNAROUND_SPEED_TIME_S: f64 = 1e-6;
 /// that much path untaken behind its table's end.
 pub const VALLEY_LEAD_BUDGET_S: f64 = 0.1;
 
+/// The widest a side's floor is kept, as a share of the side: a crawl
+/// floor `v²/a` past it would flatten the weight's start and steepen its
+/// end, and leave whoever bounds the side without the crawl's
+/// acceleration a floor as wide as the side to bound the rebuild over.
+const CRAWL_FLOOR_SIDE_SHARE: f64 = 0.125;
+
+/// The floor a side `width` wide keeps of `floor`.
+#[must_use]
+pub fn kept_floor(floor: f64, width: f64) -> f64 {
+    floor.min(CRAWL_FLOOR_SIDE_SHARE * width)
+}
+
 /// How many geometric pieces [`SideWeight::within`] bounds a width range
 /// over: each pairs a narrower span of widths with the floors and shares
 /// ahead they allow.
@@ -73,7 +85,8 @@ pub fn crawl_floor(speed: f64, rate: f64) -> f64 {
 /// path speed is zero or a crawl, and `W = ψ(x) = 1 − (1 − x)³` within
 /// `before`/`after` of it, meeting 1 flat to second order. `x` is the
 /// distance `d` out over that width, both flattened over the side's floor
-/// `f` as `√(d² + f²) − f`: with no floor, where the leaders rest or turn
+/// `f`, kept within [`CRAWL_FLOOR_SIDE_SHARE`] of the side, as
+/// `√(d² + f²) − f`: with no floor, where the leaders rest or turn
 /// around, the weight rises off zero with a slope their zero speed makes
 /// harmless; across a crawl at speed `v` and acceleration `a`, the floor
 /// is `v²/a` ([`crawl_floor`]), about where the acceleration takes over
@@ -162,21 +175,33 @@ impl AdvanceValley {
         } else {
             return (0.0, 0.0, 0.0);
         };
-        if distance >= width {
-            return (1.0, 0.0, 0.0);
-        }
-        let floor = floor.min(width);
-        let spread = libm::hypot(distance, floor);
-        let slope = distance / spread;
-        let bend = floor / spread * (floor / spread) / spread;
-        let span = flattened(width, floor);
-        let inside = 1.0 - flattened(distance, floor) / span;
-        (
-            1.0 - inside * inside * inside,
-            outward * 3.0 * inside * inside * slope / span,
-            -6.0 * inside * slope * slope / (span * span) + 3.0 * inside * inside * bend / span,
-        )
+        let (weight, slope, bend) = side_weight(distance, width, floor);
+        (weight, outward * slope, bend)
     }
+}
+
+/// `(W, dW/dd, d²W/dd²)` of a valley's side `width` wide whose floor is
+/// `floor`, at the distance `d` out from its zero stretch
+/// ([`AdvanceValley`]).
+#[must_use]
+pub fn side_weight(distance: f64, width: f64, floor: f64) -> (f64, f64, f64) {
+    if distance <= 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+    if distance >= width {
+        return (1.0, 0.0, 0.0);
+    }
+    let floor = kept_floor(floor, width);
+    let spread = libm::hypot(distance, floor);
+    let slope = distance / spread;
+    let bend = floor / spread * (floor / spread) / spread;
+    let span = flattened(width, floor);
+    let inside = 1.0 - flattened(distance, floor) / span;
+    (
+        1.0 - inside * inside * inside,
+        3.0 * inside * inside * slope / span,
+        -6.0 * inside * slope * slope / (span * span) + 3.0 * inside * inside * bend / span,
+    )
 }
 
 /// `d²/(√(d² + f²) + f) = √(d² + f²) − f`, zero at zero distance.
@@ -190,7 +215,8 @@ fn flattened(distance: f64, floor: f64) -> f64 {
 /// Bounds on one side of a valley's weight where the distance `d` from its
 /// zero stretch, the side's width `w` and the valley's floor `f` are each
 /// known within a range. With the share of the side still ahead
-/// `ι = 1 − (√(d² + f̃²) − f̃)/w̃`, `w̃ = √(w² + f̃²) − f̃`, `f̃ = min(f, w)`,
+/// `ι = 1 − (√(d² + f̃²) − f̃)/w̃`, `w̃ = √(w² + f̃²) − f̃`, `f̃` the floor kept
+/// ([`kept_floor`]),
 /// the slope `σ = d/√(d² + f̃²)` and the bend `β = f̃²/(d² + f̃²)^{3/2}`
 /// ([`AdvanceValley::weight`]):
 /// `W = 1 − ι³`, `|dW/dd| = 3ι²σ/w̃`, `d²W/dd² = (3ι²/w̃)·β − 6ισ²/w̃²`.
@@ -208,8 +234,8 @@ fn flattened(distance: f64, floor: f64) -> f64 {
 /// the width at `w̃ = 3x` and `ι/w̃² = (w̃ − x)/w̃³` at `w̃ = 1.5x`, so each is
 /// read at the nearest distance and the width in range closest to its
 /// peak, where the corners alone would pair the widest share ahead with
-/// the narrowest side. Since `f̃ ≤ w`, `w̃ ≥ (√2 − 1)·w` and no narrower than
-/// the narrowest width flattened over a floor of its own size.
+/// the narrowest side. Since `f̃ ≤ w/8`, `w̃ ≥ (√(65/64) − 1/8)·w` and no
+/// narrower than the narrowest width flattened over the most floor it keeps.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SideWeight {
     pub weight: (f64, f64),
@@ -280,13 +306,13 @@ impl SideWeight {
         if d0 >= w1 {
             return Self::OUTSIDE;
         }
-        let (fe0, fe1) = (f0.min(w0), f1.min(w1));
+        let (fe0, fe1) = (kept_floor(f0, w0), kept_floor(f1, w1));
         let inside = |d: f64, w: f64, f: f64| 1.0 - flattened(d, f) / flattened(w, f);
         let inside = (
             inside(d1, w0, fe0).clamp(0.0, 1.0),
             inside(d0, w1, fe1).clamp(0.0, 1.0),
         );
-        let span = (flattened(w0, fe1.min(w0)), flattened(w1, fe0));
+        let span = (flattened(w0, kept_floor(fe1, w0)), flattened(w1, fe0));
         let nearest = flattened(d0, fe1);
         let share_peak = |peak_at: f64, power: i32| {
             let span = (peak_at * nearest).clamp(span.0.max(nearest), span.1);
@@ -375,23 +401,57 @@ pub struct CrawlSide {
     /// The range the side's floor lies in: none, or a crawl's
     /// ([`crawl_floor`]) of at most `v` and at most `A`.
     pub floor: (f64, f64),
+    /// The range of the path acceleration away from the crawl, `o`: `s̈`
+    /// over the after side, `−s̈` over the before side, within `±A`, where
+    /// the leaders lie further than [`Self::signed_from`] from the crawl.
+    pub outward: (f64, f64),
+    /// The distance from the crawl within which `o` is known only within
+    /// `±A`.
+    pub signed_from: f64,
 }
 
 impl CrawlSide {
+    /// The leaders within `accel` either way across the side.
+    #[must_use]
+    pub fn either_way(speed: f64, accel: f64, fastest: f64, floor: (f64, f64)) -> Self {
+        Self {
+            speed,
+            accel,
+            fastest,
+            floor,
+            outward: (-accel, accel),
+            signed_from: 0.0,
+        }
+    }
+
     /// The most `|W″·ṡ³ + 3W′·ṡ·s̈|` asks over a side `width` wide, which an
     /// advance of slope `k` at ratio `r` turns into `k·r` times as much
-    /// follower acceleration. Leaving the crawl at `v` under `|s̈| ≤ A` the
-    /// leaders are at most `√(v² + 2A·d)` fast at a distance `d`, and never
-    /// past [`Self::fastest`]; the side is split into
+    /// follower acceleration. With `Ŵ` the weight over the distance `d`
+    /// from the crawl, that is `Ŵ″·ṡ³ + 3Ŵ′·ṡ·o`, `Ŵ′ ≥ 0`. Leaving the
+    /// crawl at `v`, `ṡ² = v² + 2∫o·dd`: with `o` within `±A` up to the
+    /// distance `s` ([`Self::signed_from`]) and within `[o₀, o₁]` past it,
+    /// the leaders are at most `√(v² + 2A·min(d, s) + 2·max(o₁, 0)·(d − s)⁺)`
+    /// fast at a distance `d`, never past [`Self::fastest`], and at least
+    /// `√(2·max(o₀, 0)·(d − s)⁺)`; the side is split into
     /// [`CRAWL_SIDE_DISTANCE_PIECES`] pieces of distance, each bounded by
-    /// [`SideWeight::at_width`] with the speed at its far end, and its bend
-    /// by [`coupled_bend`] too, which neither a vanishing floor nor a
-    /// vanishing distance makes diverge. `W″ = bend_scale·β − fold`, of
-    /// opposite signs, so either bounds `|W″|`.
+    /// [`SideWeight::at_width`] with the speed and `o` ranges over it, and
+    /// its bend by [`coupled_bend`] too, which neither a vanishing floor
+    /// nor a vanishing distance makes diverge. `Ŵ″ = bend_scale·β − fold`:
+    /// the rebuild's largest and least values pair each term's own extreme,
+    /// so a fold and a slope of opposite signs, where the leaders speed up
+    /// away from the crawl, offset.
     #[must_use]
     pub fn rebuild(&self, width: f64) -> f64 {
+        let (out_lo, out_hi) = self.outward;
         assert!(
-            width > 0.0 && self.speed >= 0.0 && self.accel >= 0.0 && self.fastest >= self.speed,
+            width > 0.0
+                && self.speed >= 0.0
+                && self.accel >= 0.0
+                && self.fastest >= self.speed
+                && -self.accel <= out_lo
+                && out_lo <= out_hi
+                && out_hi <= self.accel
+                && self.signed_from >= 0.0,
             "a crawl side is ill-formed: {self:?} over {width} mm"
         );
         floor_pieces(self.floor, width)
@@ -402,8 +462,15 @@ impl CrawlSide {
 
     fn rebuild_over(&self, width: f64, floor: (f64, f64)) -> f64 {
         let step = width / f64::from(CRAWL_SIDE_DISTANCE_PIECES);
-        let coupled = coupled_bend(self.speed, self.accel, floor.1, width);
-        let (speed_sq, accel) = (self.speed * self.speed, self.accel);
+        let reaches_the_cap = floor.1 >= kept_floor(self.floor.1, width);
+        let crawl_floor = if reaches_the_cap {
+            self.floor.1
+        } else {
+            floor.1
+        };
+        let coupled = coupled_bend(self.speed, self.accel, crawl_floor, width);
+        let speed_sq = self.speed * self.speed;
+        let (accel, signed_from) = (self.accel, self.signed_from);
         (0..CRAWL_SIDE_DISTANCE_PIECES)
             .map(|piece| {
                 let near = f64::from(piece) * step;
@@ -412,15 +479,43 @@ impl CrawlSide {
                 } else {
                     f64::from(piece + 1) * step
                 };
+                let (out_lo, out_hi) = if near >= signed_from {
+                    self.outward
+                } else {
+                    (-accel, accel)
+                };
                 let weight = SideWeight::at_width((near, far), width, floor);
-                let speed = libm::sqrt(speed_sq + 2.0 * accel * far).min(self.fastest);
-                let cubed = speed * speed * speed;
+                let rising = 2.0 * accel * far.min(signed_from)
+                    + 2.0 * self.outward.1.max(0.0) * (far - signed_from).max(0.0);
+                let fastest = libm::sqrt(speed_sq + rising).min(self.fastest);
+                let slowest =
+                    libm::sqrt(2.0 * self.outward.0.max(0.0) * (near - signed_from).max(0.0))
+                        .min(fastest);
+                let (fastest_cubed, slowest_cubed) =
+                    (fastest * fastest * fastest, slowest * slowest * slowest);
                 let bend = if weight.bend.1 == 0.0 {
                     0.0
                 } else {
-                    weight.bend_scale.1 * (weight.bend.1 * cubed).min(coupled)
+                    weight.bend_scale.1 * (weight.bend.1 * fastest_cubed).min(coupled)
                 };
-                (weight.fold.1 * cubed).max(bend) + 3.0 * weight.slope.1 * speed * accel
+                let least_bend = weight.bend_scale.0 * weight.bend.0 * slowest_cubed;
+                let lead = |out: f64| {
+                    3.0 * if out >= 0.0 {
+                        weight.slope.1 * fastest * out
+                    } else {
+                        weight.slope.0 * slowest * out
+                    }
+                };
+                let least_lead = |out: f64| {
+                    3.0 * if out >= 0.0 {
+                        weight.slope.0 * slowest * out
+                    } else {
+                        weight.slope.1 * fastest * out
+                    }
+                };
+                let largest = bend - weight.fold.0 * slowest_cubed + lead(out_hi);
+                let least = least_bend - weight.fold.1 * fastest_cubed + least_lead(out_lo);
+                largest.max(-least).max(0.0)
             })
             .fold(0.0, f64::max)
     }
@@ -430,7 +525,7 @@ impl CrawlSide {
 /// ([`CRAWL_SIDE_FLOOR_PIECES`]) down to [`CRAWL_SIDE_FLOOR_SHARE_MIN`] of
 /// the side and one more to its least floor; a single floor is one piece.
 fn floor_pieces(floor: (f64, f64), width: f64) -> Vec<(f64, f64)> {
-    let most = floor.1.min(width);
+    let most = kept_floor(floor.1, width);
     let least = floor.0.min(most);
     if least == most {
         return vec![(least, most)];
@@ -457,24 +552,25 @@ fn floor_pieces(floor: (f64, f64), width: f64) -> Vec<(f64, f64)> {
 /// `floor`: the floor's bend `β = f̃²/(d² + f̃²)^{3/2}`, `f̃ = min(f, w)`,
 /// times the cube of the path speed at a distance `d` from a crawl at
 /// `v_c` with the path acceleration within `A` between, `σ̇² ≤ v_c² + 2A·d`.
-/// With `x = d/f̃`, `σ̇³·β ≤ ((q + 2A·f̃·x)/(1 + x²))^{3/2}/f̃`, `q = v_c²`,
-/// and `(q + 2A·f̃·x)/(1 + x²)` peaks over `x` at `(q + √(q² + 4A²f̃²))/2`,
-/// which rises with `q`. A crawl floor `f = v_c²/a ≤ w` with `a ≤ A` keeps
-/// `q ≤ A·f̃`, so the bound is `(φ·A·f̃)^{3/2}/f̃ = φ^{3/2}·A^{3/2}·√f̃`, `φ`
-/// the golden ratio, rising with the floor; where the side caps the floor,
-/// `f̃ = w` and `q ≤ speed²`, `speed` at least the crawl's. With no floor
-/// at all `β` vanishes.
+/// With `x = d/f̃`, `σ̇³·β ≤ ((q + 2A·f̃·x)/(1 + x²))^{3/2}/f̃` for any
+/// `q ≥ v_c²`, and `(q + 2A·f̃·x)/(1 + x²)` peaks over `x` at
+/// `(q + √(q² + 4A²f̃²))/2`, which rises with `q` and, `q` held, with `f̃`.
+/// `speed` bounds `v_c`, and a crawl floor `f = v_c²/a` the side keeps
+/// whole, with `a ≤ A`, keeps `v_c² ≤ A·f̃` too, where the bound is at most
+/// `(φ·A·f̃)^{3/2}/f̃ = φ^{3/2}·A^{3/2}·√f̃`, `φ` the golden ratio. With no
+/// floor at all `β` vanishes.
 #[must_use]
 pub fn coupled_bend(speed: f64, accel: f64, floor: f64, width: f64) -> f64 {
-    let kept = floor.min(width);
+    let kept = kept_floor(floor, width);
     if kept == 0.0 {
         return 0.0;
     }
     let level = accel * kept;
-    let q = if floor >= width {
-        level.max(speed * speed)
+    let crawl_speed_sq = speed * speed;
+    let q = if kept < floor {
+        crawl_speed_sq
     } else {
-        level
+        level.min(crawl_speed_sq)
     };
     let peak = 0.5 * (q + libm::hypot(q, 2.0 * level));
     peak * libm::sqrt(peak) / kept

@@ -14,6 +14,7 @@
 
 use crate::follower_projection::Table;
 use crate::shaper::taylor::{self, Ball, TaylorModel};
+use geometry::kept_floor;
 
 use super::{
     AdvanceValley, FALL_TO_REST, KERNEL_HALF_VARIANCE, RISE_FROM_REST, RatioSmoothing,
@@ -558,7 +559,7 @@ impl ValleyModel for AdvanceValley {
                 1.0,
             ),
         };
-        let floor = floor.min(width);
+        let floor = kept_floor(floor, width);
         let (flattened, slope, bend) = if floor == 0.0 {
             (distance, constant(1.0), constant(0.0))
         } else {

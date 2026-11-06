@@ -37,21 +37,31 @@ impl FitMiss {
 }
 
 /// The shaped motion's speed and acceleration ranges across one grid
-/// cell, and how fast its heading turns at most, `|a × v|/|v|²`.
+/// cell, how fast its heading turns at most, `|a × v|/|v|²`, and the range
+/// of its path acceleration `s̈`: [`CellMotion::tangential_accel`] where
+/// the cell is no slower than [`ADVANCE_VALLEY_SPEED_MM_S`], within the
+/// acceleration's size elsewhere.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct CellBounds {
     pub speed: (f64, f64),
     pub accel: (f64, f64),
     pub turn: f64,
+    pub tangential: (f64, f64),
 }
 
 impl CellBounds {
     pub fn of_motion(motion: &CellMotion) -> Self {
         let speed = (motion.speed_floor.max(0.0), motion.speed_ceiling);
+        let strongest = motion.accel_ceiling;
         Self {
             speed,
-            accel: (motion.accel_floor, motion.accel_ceiling),
-            turn: turn_rate(motion.cross_ceiling, motion.accel_ceiling, speed.0),
+            accel: (motion.accel_floor, strongest),
+            turn: turn_rate(motion.cross_ceiling, strongest, speed.0),
+            tangential: if speed.0 >= ADVANCE_VALLEY_SPEED_MM_S {
+                motion.tangential_accel
+            } else {
+                (-strongest, strongest)
+            },
         }
     }
 
@@ -61,21 +71,35 @@ impl CellBounds {
             speed: (shaped.speed_floor, norm(shaped.fastest)),
             accel: (0.0, strongest),
             turn: turn_rate(shaped.cross_ceiling(), strongest, shaped.speed_floor),
+            tangential: (-strongest, strongest),
         }
     }
 
     pub fn union(self, other: Self) -> Self {
+        let hull = |a: (f64, f64), b: (f64, f64)| (a.0.min(b.0), a.1.max(b.1));
         Self {
-            speed: (
-                self.speed.0.min(other.speed.0),
-                self.speed.1.max(other.speed.1),
-            ),
-            accel: (
-                self.accel.0.min(other.accel.0),
-                self.accel.1.max(other.accel.1),
-            ),
+            speed: hull(self.speed, other.speed),
+            accel: hull(self.accel, other.accel),
             turn: self.turn.max(other.turn),
+            tangential: hull(self.tangential, other.tangential),
         }
+    }
+
+    /// The range of the fitted leaders' path acceleration across the cell:
+    /// with their velocity within `δ` of the shaped `v` and their
+    /// acceleration within `α` of it, their direction strays by at most
+    /// `2δ/|v|`, so `s̈` by at most `α + 2δ·(|a| + α)/|v|`; where the shaped
+    /// speed may fall to `2δ`, within the acceleration's size.
+    fn fitted_tangential(&self, fit: FitMiss) -> (f64, f64) {
+        let strongest = self.accel.1 + fit.accel;
+        if self.speed.0 <= 2.0 * fit.speed {
+            return (-strongest, strongest);
+        }
+        let stray = fit.accel + 2.0 * fit.speed * strongest / self.speed.0;
+        (
+            (self.tangential.0 - stray).max(-strongest),
+            (self.tangential.1 + stray).min(strongest),
+        )
     }
 }
 
@@ -337,13 +361,49 @@ impl Slot {
     }
 
     /// The fitted leaders over the cells `cells` of one side of the slot's
-    /// valley, as its rebuild reads them ([`CrawlSide`]).
-    fn leaders(&self, track: &CellTrack, cells: (i64, i64), fit: FitMiss) -> CrawlSide {
+    /// valley, as its rebuild reads them ([`CrawlSide`]): within the run,
+    /// where the crawl may lie anywhere, the path acceleration away from it
+    /// either way; past the run's furthest reach from the crawl, its sign
+    /// read off the `shadow` convolution's bounds of the cells beyond the
+    /// run ([`CellBounds::fitted_tangential`]), the track's box bounding
+    /// only its size.
+    fn leaders(
+        &self,
+        track: &CellTrack,
+        cells: (i64, i64),
+        (h, fit): (f64, FitMiss),
+        shadow: &dyn Fn(i64) -> CellBounds,
+    ) -> CrawlSide {
+        let accel = track.strongest(cells.0, cells.1) + fit.accel;
+        let either_way = CrawlSide::either_way(
+            self.speed,
+            accel,
+            (track.fastest(cells.0, cells.1) + fit.speed).max(self.speed),
+            self.floor,
+        );
+        let (m0, m1) = self.cells;
+        let (beyond, sign) = if cells.0 < m0 {
+            ((cells.0, m0 - 1), -1.0)
+        } else if cells.1 > m1 {
+            ((m1 + 1, cells.1), 1.0)
+        } else {
+            return either_way;
+        };
+        let outward = (beyond.0..=beyond.1)
+            .map(|n| {
+                let (lo, hi) = shadow(n).fitted_tangential(fit);
+                if sign > 0.0 { (lo, hi) } else { (-hi, -lo) }
+            })
+            .fold((accel, -accel), |(lo, hi), (cell_lo, cell_hi)| {
+                (lo.min(cell_lo), hi.max(cell_hi))
+            });
         CrawlSide {
-            speed: self.speed,
-            accel: track.strongest(cells.0, cells.1) + fit.accel,
-            fastest: (track.fastest(cells.0, cells.1) + fit.speed).max(self.speed),
-            floor: self.floor,
+            outward: (
+                outward.0.clamp(-accel, accel),
+                outward.1.clamp(-accel, accel),
+            ),
+            signed_from: track.path(m0, m1).1 + track.drift(m0, m1, h, fit),
+            ..either_way
         }
     }
 }
@@ -360,6 +420,19 @@ pub(super) struct Reserve {
     pub width: f64,
     pub cells: (i64, i64),
     pub rebuild: f64,
+}
+
+impl Reserve {
+    /// A side that leaves no room over the cells `cells`: the projection
+    /// lays it where the weight held at zero, or a side reading no motion
+    /// past it, needs none.
+    pub fn none(cells: (i64, i64)) -> Self {
+        Self {
+            width: 0.0,
+            cells,
+            rebuild: 0.0,
+        }
+    }
 }
 
 /// A run of grid cells where the shaped speed may fall under the fitted
@@ -415,62 +488,94 @@ impl Crawl {
     /// cell that may lie within it of the run. The projection reaches no
     /// further back than where the leaders last rested, nor than the
     /// segment's table, which starts at the start of cell
-    /// `table_start + 1`; where either lies inside the budget and no grid
-    /// width fits within the path since, it may lay the side as narrow as
-    /// the leaders' reach or that path, whichever is narrower, and the room
-    /// is left for that side, the rebuild falling as the side widens.
+    /// `table_start + 1`; where either lies inside the budget or within the
+    /// widest reach of the slot, the projection holds the weight at zero
+    /// back to there wherever no side fits, and no room is left
+    /// ([`Reserve::none`]).
     pub fn found(
         slot: Slot,
         line: u32,
         track: &CellTrack,
-        table_start: Option<i64>,
-        h: f64,
-        fit: FitMiss,
+        table_start: i64,
+        (h, fit): (f64, FitMiss),
+        shadow: &dyn Fn(i64) -> CellBounds,
     ) -> Result<Self, Overreach> {
         let (first, last) = slot.cells;
         let budget_from = first - (VALLEY_LEAD_BUDGET_S / h).floor() as i64;
-        let since_rest = (budget_from.max(track.base())..first)
+        let within_reach = |n: i64| {
+            n >= budget_from
+                || track.path(n + 1, first - 1).1 + track.drift(n + 1, last, h, fit) <= slot.width.1
+        };
+        let rested = (track.base()..first)
             .rev()
-            .find(|&n| track.get(n).speed.1 == 0.0)
-            .map(|rest| rest + 1);
-        let bound = since_rest
-            .into_iter()
-            .chain(table_start.map(|cell| cell + 1))
-            .max()
-            .filter(|&bound| bound > budget_from);
-        let earliest = bound.unwrap_or(budget_from);
+            .take_while(|&n| within_reach(n))
+            .any(|n| track.get(n).speed.1 == 0.0);
+        let table_within_reach = table_start >= budget_from
+            || (table_start + 1 >= track.base() && within_reach(table_start));
+        if rested || table_within_reach {
+            return Ok(Self {
+                slot,
+                line,
+                before: Reserve::none(slot.cells),
+                after: None,
+            });
+        }
         assert!(
-            earliest >= track.base(),
-            "turning guard: the crawl at cell {first} reads cells from {earliest} the track no \
-             longer holds (from {})",
+            budget_from >= track.base(),
+            "turning guard: the crawl at cell {first} reads cells from {budget_from} the track \
+             no longer holds (from {})",
             track.base()
         );
-        let covered = (earliest..first)
+        let covered = (budget_from..first)
             .map(|n| track.path(n, first - 1).0 - track.drift(n, last, h, fit))
             .fold(0.0_f64, f64::max);
-        let width = match widest_crawl_side_within(slot.width.1, covered) {
-            Some(width) => width,
-            None if bound.is_some() => slot.width.0.min(covered).max(f64::MIN_POSITIVE),
-            None => {
-                return Err(Overreach {
-                    width: slot.width.1,
-                    covered,
-                    width_at_rest: valley_reach(slot.speed, fit.accel),
-                });
+        let Some(width) = widest_crawl_side_within(slot.width.1, covered) else {
+            if std::env::var("GVDBG").is_ok() {
+                eprintln!(
+                    "GVDBG overreach slot={slot:?} budget_from={budget_from} first={first} covered={covered}"
+                );
+                for n in budget_from..=last {
+                    let c = track.get(n);
+                    eprintln!(
+                        "GVDBG cell {n} t={:.6} speed={:?} accel={:?} path_to_first={:?} drift={}",
+                        n as f64 * h,
+                        c.speed,
+                        c.accel,
+                        if n < first {
+                            track.path(n, first - 1)
+                        } else {
+                            (0.0, 0.0)
+                        },
+                        track.drift(n.min(first), last, h, fit)
+                    );
+                }
             }
+            return Err(Overreach {
+                width: slot.width.1,
+                covered,
+                width_at_rest: valley_reach(slot.speed, fit.accel),
+            });
         };
         let mut side_from = first;
-        while side_from > earliest && slot.distance(track, side_from - 1, h, fit).0 < width {
+        while side_from > budget_from && slot.distance(track, side_from - 1, h, fit).0 < width {
             side_from -= 1;
         }
         let cells = (side_from, last);
+        let rebuild = slot.leaders(track, cells, (h, fit), shadow).rebuild(width);
+        if std::env::var("GVDBG").is_ok() {
+            eprintln!(
+                "GVDBG before t={:.6} slot={slot:?} width={width} covered={covered} leaders={:?} rebuild={rebuild}",
+                first as f64 * h,
+                slot.leaders(track, cells, (h, fit), shadow),
+            );
+        }
         Ok(Self {
             slot,
             line,
             before: Reserve {
                 width,
                 cells,
-                rebuild: slot.leaders(track, cells, fit).rebuild(width),
+                rebuild,
             },
             after: None,
         })
@@ -480,10 +585,17 @@ impl Crawl {
     /// the leaders' least path in the [`VALLEY_LEAD_BUDGET_S`] after the
     /// run covers once those cells are tracked; where they cover too
     /// little, the first grid width past the leaders' reach once the path
-    /// after the run covers it; and where the segment ends first (`all` its
-    /// cells tracked), as narrow as the projection may lay it before the
-    /// end. `None` while it waits.
-    pub fn resolve_after(&mut self, track: &CellTrack, all: bool, h: f64, fit: FitMiss) -> bool {
+    /// after the run covers it. Where the segment ends first (`all` its
+    /// cells tracked) no room is left ([`Reserve::none`]): past its end the
+    /// leaders rest, and the projection, reading no motion there, widens
+    /// the side until it fits. `false` while it waits.
+    pub fn resolve_after(
+        &mut self,
+        track: &CellTrack,
+        all: bool,
+        (h, fit): (f64, FitMiss),
+        shadow: &dyn Fn(i64) -> CellBounds,
+    ) -> bool {
         let slot = self.slot;
         let (first, last) = slot.cells;
         let horizon = last + (VALLEY_LEAD_BUDGET_S / h).floor() as i64;
@@ -499,24 +611,32 @@ impl Crawl {
         let within_budget = widest_crawl_side_within(slot.width.1, covered_to(horizon.min(to)));
         let width = match within_budget {
             Some(width) => width,
-            None => {
-                let covered = covered_to(to);
-                match widest_crawl_side_within(slot.width.1, covered) {
-                    Some(width) => width,
-                    None if all => slot.width.0.min(covered).max(f64::MIN_POSITIVE),
-                    None => return false,
+            None => match widest_crawl_side_within(slot.width.1, covered_to(to)) {
+                Some(width) => width,
+                None if all => {
+                    self.after = Some(Reserve::none(slot.cells));
+                    return true;
                 }
-            }
+                None => return false,
+            },
         };
         let mut side_to = last;
         while side_to < to && slot.distance(track, side_to + 1, h, fit).0 < width {
             side_to += 1;
         }
         let cells = (first, side_to);
+        let rebuild = slot.leaders(track, cells, (h, fit), shadow).rebuild(width);
+        if std::env::var("GVDBG").is_ok() {
+            eprintln!(
+                "GVDBG after t={:.6} slot={slot:?} width={width} all={all} leaders={:?} rebuild={rebuild}",
+                first as f64 * h,
+                slot.leaders(track, cells, (h, fit), shadow)
+            );
+        }
         self.after = Some(Reserve {
             width,
             cells,
-            rebuild: slot.leaders(track, cells, fit).rebuild(width),
+            rebuild,
         });
         true
     }

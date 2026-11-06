@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use geometry::{
-    ADVANCE_VALLEY_SPEED_MM_S, CrawlSide, RatioRampRule, VALLEY_LEAD_BUDGET_S, crawl_side_width,
+    CrawlSide, RatioRampRule, VALLEY_LEAD_BUDGET_S, crawl_side_width, side_weight, turns_around,
 };
 
 use super::super::RatioSpan;
@@ -11,25 +11,25 @@ use super::{Crossing, LegPath};
 /// once more.
 const TRAIL_PROBES_PER_LEG: usize = 16;
 
-/// The leaders at one probe of the side trail: where on the path, how
-/// fast, `|s̈|`, and `|v̂·j| + a⊥²/max(ṡ, ADVANCE_VALLEY_SPEED_MM_S)`, the
-/// path speed's second rate an advance reads (its turning part through a
-/// crawl read at the speed a valley leaves it reading).
+/// The leaders at one probe of the side trail: the leg it reads, where on
+/// the path, how fast, and the path speed's rate `s̈`, signed, as they
+/// leave the probe ([`Crossing::speed_and_path_accel`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct TrailProbe {
+    leg: u64,
     t: f64,
     s: f64,
     speed: f64,
     path_accel: f64,
-    path_jerk: f64,
 }
 
-/// The most the leaders ask along a stretch of the side trail.
+/// The most the leaders ask along a stretch of the side trail: how fast,
+/// `|s̈|`, and the range of `s̈` away from the crawl.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct SideMotion {
     pub(super) fastest: f64,
     pub(super) path_accel: f64,
-    pub(super) path_jerk: f64,
+    pub(super) outward: (f64, f64),
 }
 
 /// The leaders along the path, probed leg by leg, as far back as a crawl
@@ -38,12 +38,14 @@ pub(super) struct SideMotion {
 #[derive(Debug, Default)]
 pub(super) struct SideTrail {
     probes: VecDeque<TrailProbe>,
+    legs: u64,
 }
 
 impl SideTrail {
     /// Probes the leaders of the leg `path` follows over `support`, the
     /// path read no further than `table_end`.
     pub(super) fn record(&mut self, path: &LegPath, (t_start, t_end): (f64, f64), table_end: f64) {
+        self.legs += 1;
         for index in 0..=TRAIL_PROBES_PER_LEG {
             let t = if index == TRAIL_PROBES_PER_LEG {
                 t_end
@@ -51,14 +53,13 @@ impl SideTrail {
                 t_start + (t_end - t_start) * index as f64 / TRAIL_PROBES_PER_LEG as f64
             };
             let s = (path.start_s + path.covered(t)).min(table_end);
-            let (states, leaders) = path.leaders.pvaj_states(t);
-            let (speed, path_accel, path_jerk) = path_derivatives(&states[..leaders]);
+            let (speed, path_accel) = Crossing::speed_and_path_accel(path.leaders, t);
             self.probes.push_back(TrailProbe {
+                leg: self.legs,
                 t,
                 s,
                 speed,
                 path_accel,
-                path_jerk,
             });
         }
     }
@@ -97,64 +98,93 @@ impl SideTrail {
     }
 
     /// The most the leaders ask between the probes that bracket the path
-    /// `[lo, hi]`.
-    fn over(&self, (lo, hi): (f64, f64)) -> SideMotion {
+    /// `[lo, hi]` of a side reaching `side` from its crawl.
+    fn over(&self, (lo, hi): (f64, f64), side: Side) -> SideMotion {
         let first = self
             .probes
             .partition_point(|probe| probe.s < lo)
             .saturating_sub(1);
         let last = self.probes.partition_point(|probe| probe.s <= hi);
-        self.probes
-            .range(first..(last + 1).min(self.probes.len()))
-            .fold(
-                SideMotion {
-                    fastest: 0.0,
-                    path_accel: 0.0,
-                    path_jerk: 0.0,
-                },
-                |most, probe| SideMotion {
-                    fastest: most.fastest.max(probe.speed),
-                    path_accel: most.path_accel.max(probe.path_accel),
-                    path_jerk: most.path_jerk.max(probe.path_jerk),
-                },
-            )
+        let bracket = self.probes.range(first..(last + 1).min(self.probes.len()));
+        let (fastest, path_accel, outward) = bracket.fold(
+            (0.0_f64, 0.0_f64, (f64::INFINITY, f64::NEG_INFINITY)),
+            |(fastest, path_accel, (lo, hi)), probe| {
+                let out = probe.outward(side);
+                (
+                    fastest.max(probe.speed),
+                    path_accel.max(probe.path_accel.abs()),
+                    (lo.min(out), hi.max(out)),
+                )
+            },
+        );
+        SideMotion {
+            fastest,
+            path_accel,
+            outward: if outward.0 <= outward.1 {
+                outward
+            } else {
+                (0.0, 0.0)
+            },
+        }
+    }
+
+    /// The largest `read` of each probe on the path `[lo, hi]` of a side
+    /// reaching `side` from its crawl, and of the probe next to them across
+    /// the crawl, with the mean `s⃛` over each interval of its leg it
+    /// bounds: the change of `s̈` over the interval's length. The leaders
+    /// are a fit, which holds their acceleration within its tolerance `A`
+    /// but leaves their jerk free, so a sliver piece may carry any; the
+    /// mean is within `2A/Δt` of the leaders' own whatever pieces the fit
+    /// lays (as [`Crossing::over`] reads it). Legs' supports overlap, so an
+    /// interval spans one leg's probes only.
+    fn most_within(
+        &self,
+        (lo, hi): (f64, f64),
+        side: Side,
+        read: impl Fn(&TrailProbe, f64) -> f64,
+    ) -> f64 {
+        let first = self.probes.partition_point(|probe| probe.s < lo);
+        let last = self.probes.partition_point(|probe| probe.s <= hi);
+        let (first, last) = match side {
+            Side::After => (first.saturating_sub(1), last),
+            Side::Before => (first, (last + 1).min(self.probes.len())),
+        };
+        let mean_jerk = |from: &TrailProbe, to: &TrailProbe| {
+            (from.leg == to.leg && to.t > from.t)
+                .then(|| (to.path_accel - from.path_accel) / (to.t - from.t))
+        };
+        let mut most = 0.0_f64;
+        for index in first..last {
+            let probe = &self.probes[index];
+            let jerks = [
+                index
+                    .checked_sub(1)
+                    .and_then(|previous| mean_jerk(&self.probes[previous], probe)),
+                self.probes
+                    .get(index + 1)
+                    .and_then(|next| mean_jerk(probe, next)),
+            ];
+            for jerk in jerks.into_iter().flatten() {
+                most = most.max(read(probe, jerk));
+            }
+        }
+        most
     }
 }
 
-/// The leaders' path speed `ṡ`, `|s̈|` and `|v̂·j| + a⊥²/max(ṡ, 2 mm/s)`
-/// from their states, `a⊥²` summed through Lagrange's identity as
-/// [`super::super::speed_second_of`] does. At rest the whole acceleration
-/// leaves along the path.
-fn path_derivatives(states: &[(f64, f64, f64, f64)]) -> (f64, f64, f64) {
-    let norm = |pick: fn(&(f64, f64, f64, f64)) -> f64| {
-        states
-            .iter()
-            .map(|state| pick(state) * pick(state))
-            .sum::<f64>()
-            .sqrt()
-    };
-    let speed = norm(|state| state.1);
-    if speed == 0.0 {
-        return (0.0, norm(|state| state.2), norm(|state| state.3));
-    }
-    let along = |pick: fn(&(f64, f64, f64, f64)) -> f64| {
-        states
-            .iter()
-            .map(|state| state.1 / speed * pick(state))
-            .sum::<f64>()
-    };
-    let mut normal_squared = 0.0;
-    for (index, &(_, v_i, a_i, _)) in states.iter().enumerate() {
-        for &(_, v_j, a_j, _) in &states[index + 1..] {
-            let normal = v_i / speed * a_j - v_j / speed * a_i;
-            normal_squared += normal * normal;
+impl TrailProbe {
+    /// The path acceleration away from the crawl a side reaching `side`
+    /// reads here: `s̈` after it, `−s̈` before; where the leaders rest or
+    /// turn around their speed rises off zero either way.
+    fn outward(&self, side: Side) -> f64 {
+        if turns_around(self.speed, self.path_accel.abs()) {
+            return self.path_accel.abs();
+        }
+        match side {
+            Side::After => self.path_accel,
+            Side::Before => -self.path_accel,
         }
     }
-    (
-        speed,
-        along(|state| state.2).abs(),
-        along(|state| state.3).abs() + normal_squared / speed.max(ADVANCE_VALLEY_SPEED_MM_S),
-    )
 }
 
 /// Which way from its crawl a valley's side reaches.
@@ -174,13 +204,22 @@ pub(super) enum Unlaid {
 /// The width of the `side` of the crawl valley at `turn` the leaders cross
 /// as `crossing`: the narrowest [`crawl_side_width`] lays where the rebuild
 /// `k·r·|W″·ṡ³ + 3W′·ṡ·s̈|` over it ([`CrawlSide::rebuild`]) fits what the
-/// leaders' own demand there leaves of the follower's limit,
-/// `A_e − r·(|s̈| + k·|s⃛|)`, `r` the largest ratio laid within it and the
-/// leaders read off the trail, never under the leaders' `reach`. A side
-/// reaches no further back than `limit`. With an infinite `table_end` the
-/// leaders rest past the trail, and the side reads it as far as it goes. It fails loudly where the leaders
-/// leave the follower no room, and where no width within the limits fits:
-/// it never narrows a side to make it fit.
+/// leaders' own demand there leaves of the follower's limit, `r` the
+/// largest ratio laid within it and the leaders read off the trail, never
+/// under the leaders' `reach`; `None` where none reaching no further than
+/// `limit` fits. With an infinite `table_end` the leaders rest past the
+/// trail, and the side reads it as far as it goes. It fails loudly where
+/// the leaders leave the follower no room: it never narrows a side to make
+/// it fit.
+///
+/// The advance reads `r·(s̈ + k·Φ·s⃛)`, `Φ` the product of the valleys'
+/// weights, at most this side's `W(d)` at a distance `d` from the crawl:
+/// `|s̈ + k·Φ·s⃛|` is linear in `Φ`, so at most `|s̈|` or `|s̈ + k·W·s⃛|`,
+/// read signed at each probe ([`SideTrail::most_within`]).
+///
+/// A follower behind its own kernel keeps the leaders' reach: the turning
+/// guard holds kernel-free followers only and leaves no room for its
+/// sides, so a wider one would reach past what the projection holds back.
 pub(super) fn crawl_side(
     side: Side,
     (turn, crossing): (f64, Crossing),
@@ -188,7 +227,10 @@ pub(super) fn crawl_side(
     (trail, spans, table_end): (&SideTrail, &[RatioSpan], f64),
     rule: &RatioRampRule,
     limit: f64,
-) -> Result<f64, Unlaid> {
+) -> Result<Option<f64>, Unlaid> {
+    if rule.kernel_jerk_per_accel_hz.is_finite() {
+        return Ok(Some(reach));
+    }
     let slope = rule.advance_slope_s;
     let floor = crossing.crawl_floor();
     let mut waits = false;
@@ -206,39 +248,45 @@ pub(super) fn crawl_side(
         }
         let window = (window.0, window.1.min(trail.through()));
         let ratio = peak_ratio_over(spans, window);
-        let motion = trail.over(window);
-        let room = rule.max_accel_mm_s2 - ratio * (motion.path_accel + slope * motion.path_jerk);
+        let motion = trail.over(window, side);
+        let own = trail.most_within(window, side, |probe, path_jerk| {
+            let distance = match side {
+                Side::Before => turn - probe.s,
+                Side::After => probe.s - turn,
+            };
+            let weight = side_weight(distance, width, floor).0;
+            probe
+                .path_accel
+                .abs()
+                .max((probe.path_accel + slope * weight * path_jerk).abs())
+        });
+        let room = rule.max_accel_mm_s2 - ratio * own;
         assert!(
             room > 0.0,
             "follower projection: the leaders ask {} mm/s² of the follower within {width} mm \
              {side:?} the crawl at s={turn} ({crossing:?}, {motion:?}, ratio {ratio}), past its \
              limit of {} mm/s² before its valley rebuilds the lead",
-            rule.max_accel_mm_s2 - room,
+            ratio * own,
             rule.max_accel_mm_s2
         );
+        let accel = motion.path_accel.max(crossing.rate);
         let leaders = CrawlSide {
             speed: crossing.speed,
-            accel: motion.path_accel.max(crossing.rate),
+            accel,
             fastest: motion.fastest.max(crossing.speed),
             floor: (floor, floor),
+            outward: (
+                motion.outward.0.clamp(-accel, accel),
+                motion.outward.1.clamp(-accel, accel),
+            ),
+            signed_from: 0.0,
         };
         slope * ratio * leaders.rebuild(width) <= room
     });
     if waits {
         return Err(Unlaid::Waits);
     }
-    let width = width.unwrap_or_else(|| {
-        panic!(
-            "follower projection: no width of the {side:?} side of the crawl valley at s={turn} \
-             ({crossing:?}) fits its rebuild within the follower's limit"
-        )
-    });
-    assert!(
-        width <= limit,
-        "follower projection: the {side:?} side of the crawl valley at s={turn} ({crossing:?}) \
-         needs {width} mm to fit its rebuild, past the {limit} mm it may reach"
-    );
-    Ok(width)
+    Ok(width.filter(|&width| width <= limit))
 }
 
 /// The largest extrusion ratio `spans` lay over the path `[lo, hi]`.
