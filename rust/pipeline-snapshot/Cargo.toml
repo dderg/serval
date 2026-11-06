@@ -11,6 +11,7 @@ license.workspace = true
 crossbeam-channel = "0.5"
 gcode = { path = "../gcode" }
 geometry = { path = "../geometry" }
+libm = { version = "0.2", default-features = false }
 motion-pipeline = { path = "../motion-pipeline" }
 nurbs = { path = "../nurbs" }
 planner-config = { path = "../planner-config" }
@@ -29,7 +30,6 @@ required-features = ["fit-audit"]
 source-tree = { path = "../source-tree" }
 config-doc = { path = "../config-doc" }
 planner-config = { path = "../planner-config", features = ["doc"] }
-libm = { version = "0.2", default-features = false }
 proptest = "1"
 serde_json = { version = "1", features = ["float_roundtrip"] }
 tracing = "0.1"

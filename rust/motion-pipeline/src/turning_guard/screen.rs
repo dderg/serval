@@ -76,8 +76,10 @@ impl Read {
 /// path crosses the move, each axis's planned velocity `v_k` lies in a box
 /// `[lo_k, hi_k]` (speed range times heading-component range, per move,
 /// joined), and its planned acceleration within `±α_k`. Splitting a kernel
-/// into its positive and negative parts, `∫w·v_k` lies in
-/// `[W⁺·lo_k − W⁻·hi_k, W⁺·hi_k − W⁻·lo_k]` and `|∫w·a_k| ≤ (W⁺ + W⁻)·α_k`,
+/// into its positive and negative parts, of masses `W⁺ ∈ [W⁺₋, W⁺₊]` and
+/// `W⁻ ∈ [W⁻₋, W⁻₊]`, `∫w·v_k` lies within the least and largest of
+/// `W⁺·v − W⁻·v′` over those masses and `v, v′ ∈ [lo_k, hi_k]`, and
+/// `|∫w·a_k| ≤ (W⁺₊ + W⁻₊)·α_k`,
 /// so the shaped velocity `v` lies in a box whose distance from the origin
 /// bounds `|v|` below, and the shaped acceleration `a` in one bounding it
 /// above, along with `|a × v|`; the shaped jerk stays within the kernels'
@@ -167,11 +169,12 @@ impl ShapedBox {
             if !(lo <= hi) {
                 continue;
             }
-            let (least, most) = (positive * lo - negative * hi, positive * hi - negative * lo);
+            let least = least_product(positive, lo) - most_product(negative, hi);
+            let most = most_product(positive, hi) - least_product(negative, lo);
             let gap = least.max(-most).max(0.0);
             gap_sq += gap * gap;
             fastest[axis] = least.abs().max(most.abs());
-            strongest[axis] = (positive + negative) * accel[axis];
+            strongest[axis] = (positive.1 + negative.1) * accel[axis];
         }
         Self {
             speed_floor: gap_sq.sqrt(),
@@ -195,6 +198,16 @@ impl ShapedBox {
             .sum();
         cross_sq.sqrt()
     }
+}
+
+/// The least `m·v` over a mass `m` within `(least, most)`.
+fn least_product((least, most): (f64, f64), v: f64) -> f64 {
+    if v >= 0.0 { least * v } else { most * v }
+}
+
+/// The largest `m·v` over a mass `m` within `(least, most)`.
+fn most_product((least, most): (f64, f64), v: f64) -> f64 {
+    if v >= 0.0 { most * v } else { least * v }
 }
 
 #[cfg(test)]

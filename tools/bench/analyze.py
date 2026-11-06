@@ -58,6 +58,7 @@ for _path in (REPO_ROOT / "snapshots", REPO_ROOT / "klippy", REPO_ROOT):
 
 import capture_aux  # noqa: E402
 import capture_events  # noqa: E402
+import corner_budget_bench  # noqa: E402
 import corner_flow_bench  # noqa: E402
 import dispatch_record  # noqa: E402
 import harness  # noqa: E402
@@ -2339,6 +2340,12 @@ def main(argv: list[str] | None = None) -> int:
         help="also measure nozzle flow through every extruding corner",
     )
     parser.add_argument(
+        "--corner-budget",
+        action="store_true",
+        help="also hold every extruding corner's captured XY miss to the "
+        "config's corner budget (needs an event-mode run)",
+    )
+    parser.add_argument(
         "--step-benchmark",
         type=SuppliedBenchmark.parse,
         metavar="PULSED,BOTH_EDGE,CLOCK_HZ",
@@ -2372,6 +2379,20 @@ def main(argv: list[str] | None = None) -> int:
                 inputs, planned, config_text, axes, period
             ),
         )
+    if args.corner_budget:
+        planned = plan_waypoints(inputs)
+        verdict["corner_budget"] = corner_budget_bench.report(
+            inputs,
+            detail,
+            planned,
+            ROLE_AXIS_WEIGHTS,
+            lambda config_text, axes, period: stream_epochs(
+                inputs, planned, config_text, axes, period
+            ),
+            harness._import_engine(),
+        )
+        verdict["checks"]["corner_budget_held"] = verdict["corner_budget"]["ok"]
+        verdict["ok"] = all(verdict["checks"].values())
     verdict["plots"] = save_plots(inputs, detail)
     text = json.dumps(verdict, indent=2)
     (args.run_dir / "analysis.json").write_text(text + "\n")

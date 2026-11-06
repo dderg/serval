@@ -177,7 +177,8 @@ pub(super) enum Unlaid {
 /// leaders' own demand there leaves of the follower's limit,
 /// `A_e − r·(|s̈| + k·|s⃛|)`, `r` the largest ratio laid within it and the
 /// leaders read off the trail, never under the leaders' `reach`. A side
-/// reaches no further back than `limit`. It fails loudly where the leaders
+/// reaches no further back than `limit`. With an infinite `table_end` the
+/// leaders rest past the trail, and the side reads it as far as it goes. It fails loudly where the leaders
 /// leave the follower no room, and where no width within the limits fits:
 /// it never narrows a side to make it fit.
 pub(super) fn crawl_side(
@@ -199,10 +200,11 @@ pub(super) fn crawl_side(
             Side::Before => (turn - width, turn),
             Side::After => (turn, turn + width),
         };
-        if window.1 > trail.through().min(table_end) {
+        if window.1 > trail.through().min(table_end) && table_end.is_finite() {
             waits = true;
             return true;
         }
+        let window = (window.0, window.1.min(trail.through()));
         let ratio = peak_ratio_over(spans, window);
         let motion = trail.over(window);
         let room = rule.max_accel_mm_s2 - ratio * (motion.path_accel + slope * motion.path_jerk);

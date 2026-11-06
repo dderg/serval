@@ -48,7 +48,7 @@ uv run python tools/bench/deploy.py flash-capture  # build capture-fw in its own
 uv run python tools/bench/deploy.py config         # validate + push printer.cfg, FIRMWARE_RESTART
 uv run python tools/bench/deploy.py mco            # MCO1 = HSE/4 on PA8; halts the F401 core for a few ms and leaves DBGMCU_CR (sleep-debug bits) at 0 (capture-fw/PHASE2.md §3)
 uv run python tools/bench/run.py <gcode> [--runs-dir ~/bench/runs] [--timeout 1800] [--events [--step-tap]] [--sim configs/full.sim.json --config configs/full.cfg]
-uv run python tools/bench/analyze.py <run_dir> [--gap S] [--corner-flow] [--step-benchmark PULSED,BOTH_EDGE,CLOCK_HZ]
+uv run python tools/bench/analyze.py <run_dir> [--gap S] [--corner-flow] [--corner-budget] [--step-benchmark PULSED,BOTH_EDGE,CLOCK_HZ]
 uv run python tools/bench/capture.py --help        # standalone capture (--events for event mode)
 uv run python tools/bench/buzz.py --motor a --steps 2000 --period-us 100  # event-mode calibration against busy-waited DIAG_STEPPER_BUZZ steps
 uv run python tools/bench/cdc_throughput.py --seconds 60  # capture-board USB throughput probe (firmware mode "T"; Gate 0 of capture-fw/EVENT_MODE.md)
@@ -144,6 +144,25 @@ Main's derived ratio ramp (deployed head 29f8add16), event mode:
 - `configs/ramp.cfg` (the same limits with `smooth_triangle` 2 ms after the advance), run `corner_flow/20261104-065422`.
   - Offline peaks ≤ 1.6 % at every corner.
   - Captured peaks reach 27 % at a 45° interior corner at 300 mm/s, but the reference steps show 28 % there too. The quantization bound is 26.4 points on peak and 2.3 on dip, and the capture stays within 7.6 / 4.4 points of the reference.
+
+### Corner budget (`--corner-budget`)
+
+`analyze.py --corner-budget` (event-mode runs) adds `corner_budget` to `analysis.json` and the check `corner_budget_held`. It takes every extruding vertex the config's corner budget holds, as the path-accuracy audit reads it (`pipeline_snapshot::corner_budget` through the engine's `corner_vertex_budgets`): under the default budget, the corners the fitter keeps; under `corner_deviation` or `square_corner_velocity`, curve vertices too. Each vertex is read where the stream plan comes closest to it (the audit's cursor). Its XY miss is measured on the plan, on the reference a/b steps and on the captured a/b steps, all over the same instants within 1 mm of path either side. The capture passes when its miss is at most the vertex's budget + `max_path_deviation` + the step quantization (2 steps on each motor through corexy, 0.025 mm on the bench). `tools/bench/corner_budget_bench.py` holds the measurement; `configs/printer_default_corner.cfg` and `configs/fast_default_corner.cfg` are the bench configs with the default budget.
+
+Main 3fa11d9cc + this analyzer (runs `20261106-054219` to `-055612`, corner_flow and voron_first_layers on each config):
+
+| config | print | held vertices | worst plan share | worst capture share | max \|reference − plan\| mm | max \|capture − reference\| mm |
+|---|---|---|---|---|---|---|
+| printer.cfg (cd 0.21) | corner_flow | 182 | 0.847 | 0.863 | 0.0095 | 0.0019 |
+| printer.cfg (cd 0.21) | first layers | 3703 | 0.889 | 0.899 | 0.0142 | 0.0059 |
+| printer default | corner_flow | 54 | 0.837 | 0.859 | 0.0108 | 0.0004 |
+| printer default | first layers | 1463 | 0.891 | 0.890 | 0.0136 | 0.0010 |
+| fast.cfg (cd 0.5) | corner_flow | 182 | 0.833 | 0.839 | 0.0098 | 0.0022 |
+| fast.cfg (cd 0.5) | first layers | 3703 | 0.764 | 0.765 | 0.0147 | 0.0048 |
+| fast default | corner_flow | 54 | 0.386 | 0.387 | 0.0112 | 0.0008 |
+| fast default | first layers | 1467 | 0.331 | 0.332 | 0.0123 | 0.0010 |
+
+Every held vertex is within its bound; every analyzer check passes on all eight runs.
 
 ## Recovery
 

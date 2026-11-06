@@ -1460,7 +1460,9 @@ impl RatioSmoothing {
         let leaders = leg.shaped_leaders;
         let table_end = spans.last().map_or(leg.start_s, |last| last.s1);
         if table_end <= leg.start_s {
-            self.waiting_crawls.clear();
+            for crawl in std::mem::take(&mut self.waiting_crawls) {
+                self.lay_crawl_valley(spans, rule, crawl, f64::INFINITY);
+            }
             self.width.extend(leaders, leg, table_end);
             self.close_at(leg.start_s);
             return;
@@ -1509,7 +1511,8 @@ impl RatioSmoothing {
     /// each side as wide as its rebuild needs ([`crawl_side`]). The advance
     /// there reads the ratio laid after the table's end too, so a reach
     /// running past `table_end`, or an after side past the leaders probed,
-    /// waits for the next leg.
+    /// waits for the next leg; an infinite `table_end`, where the leaders
+    /// come to rest past the table, lays it with what is laid.
     fn lay_crawl_valley(
         &mut self,
         spans: &[RatioSpan],
