@@ -374,6 +374,31 @@ fn the_velocity_a_ramp_adds_is_read_at_the_step_however_fast_its_edges() {
     );
 }
 
+/// The projection lays a step's window `V·τ/2` wide at the fastest speed
+/// `V` the leaders cross its ramp at, and a rest's cone narrows it to the
+/// step's share of the room: a step crossed slowly into a hard
+/// acceleration has its ramp read over the window the room leaves at its
+/// edges' speed, not at the step's.
+#[test]
+fn a_rest_narrows_the_ramp_to_the_window_its_fastest_edge_lays() {
+    let rule = RatioRampRule {
+        advance_slope_s: 0.02,
+        max_velocity_mm_s: 50.0,
+        max_accel_mm_s2: 20000.0,
+        kernel_jerk_per_accel_hz: f64::INFINITY,
+    };
+    let travel_switch = seam(0.0337, 23590.0, 10.0);
+    let cap = travel_switch.cap(&rule, FASTEST_MM_S);
+    let edge_speed = travel_switch.edge_speed(cap);
+    let edge_ramp_time = longest_ramp_time(edge_speed, travel_switch.rest_room_mm);
+    let (velocity, accel_demand) = travel_switch.demand(&rule, edge_ramp_time, cap);
+    assert!(
+        velocity <= 50.0 + 1e-9 && accel_demand <= 20000.0 + 1e-9,
+        "a travel switch capped at {cap} mm/s, its edges {edge_speed} mm/s fast over a \
+         {edge_ramp_time} s window, asks {velocity} mm/s and {accel_demand} mm/s²"
+    );
+}
+
 const P4: RatioRampRule = RatioRampRule {
     advance_slope_s: 0.02,
     max_velocity_mm_s: 50.0,
