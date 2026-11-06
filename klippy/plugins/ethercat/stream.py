@@ -52,6 +52,11 @@ class ServoLane:
         self.cycle_ns = cycle_ns
         self.held_counts = None
         self.origin_mm_q16 = None
+        self.last_motion_index = None
+
+    def reanchor(self):
+        """Start a new epoch at the next run; only valid while holding."""
+        self.held_counts = None
 
     def build_run(self, start_index, pos, vel, acc, count) -> wire.LaneRun:
         servo = self.servo
@@ -76,7 +81,10 @@ class ServoLane:
             )
             for i in range(count)
         ]
-        if not vel[count - 1] and not acc[count - 1]:
+        moving = [i for i in range(count) if vel[i] or acc[i]]
+        if moving:
+            self.last_motion_index = start_index + moving[-1]
+        if not moving or moving[-1] != count - 1:
             flags |= wire.FLAG_TAIL
         return wire.LaneRun(
             axis_idx=servo.axis_index,
