@@ -144,11 +144,12 @@ fn gentle_vertical_blend() -> Segment {
 }
 
 /// The z acceleration a profile under `(ceiling, accel)` can reach at
-/// worst on `segment`.
+/// worst on `segment`, its rail straying the acceleration defect past the
+/// budget.
 fn worst_z_accel(segment: &Segment, ceiling: f64, accel: f64) -> f64 {
     let lean = segment.lean_on(Z_AXIS);
     let (_, kappa_peak) = crate::path::CurvatureProfile::kappa_peak(segment);
-    accel * lean.heading + ceiling * ceiling * kappa_peak * lean.normal
+    (accel + RAIL_ACCELERATION_DEFECT) * lean.heading + ceiling * ceiling * kappa_peak * lean.normal
 }
 
 /// A long gentle blend in a vertical plane — every bit of its normal
@@ -171,25 +172,27 @@ fn gentle_blend_at_printing_speed_keeps_its_speed_and_most_of_the_path_budget() 
 }
 
 /// The same blend at travel speed: the normal load alone would pass the z
-/// cap, so tangential and normal parts split it — the ceiling drops to
-/// where the normal part fits half the cap, the disk budget to where the
-/// tangential part fits the other half.
+/// cap, so tangential and normal parts split what the rail defect leaves of
+/// it — the ceiling drops to where the normal part fits half, the disk
+/// budget to where the tangential part fits the other half.
 #[test]
 fn gentle_blend_at_travel_speed_splits_the_z_cap() {
     let gentle = gentle_vertical_blend();
     let lean = gentle.lean_on(Z_AXIS);
     let (_, kappa_peak) = crate::path::CurvatureProfile::kappa_peak(&gentle);
     let (ceiling, accel) = z_capped(&gentle, &limits(), kappa_peak, 1000.0);
-    let half = 0.5 * MAX_Z_ACCEL;
+    let half = 0.5 * (MAX_Z_ACCEL - RAIL_ACCELERATION_DEFECT * lean.heading);
     assert!((ceiling * ceiling * kappa_peak * lean.normal - half).abs() < 1e-9 * half);
     assert!((accel * lean.heading - half).abs() < 1e-9 * half);
+    assert!((worst_z_accel(&gentle, ceiling, accel) - MAX_Z_ACCEL).abs() < 1e-9 * MAX_Z_ACCEL);
     assert!(ceiling > 500.0 && accel > 200.0 * MAX_Z_ACCEL);
 }
 
 /// The XY half of a tight z-hop corner: its heading climbs to 45° and all
 /// of its normal acceleration lands on z. Splitting the z cap would halve
-/// both parts; cutting the whole disk budget to the z cap leaves the speed
-/// ceiling at the z speed cap's and crosses the corner sooner.
+/// both parts; cutting the whole disk budget to the z cap, less the rail
+/// defect, leaves the speed ceiling at the z speed cap's and crosses the
+/// corner sooner.
 #[test]
 fn tight_z_corner_cuts_the_whole_budget_to_the_z_cap() {
     let length = 0.084;
@@ -209,7 +212,10 @@ fn tight_z_corner_cuts_the_whole_budget_to_the_z_cap() {
     assert!((heading - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12);
     assert_eq!(
         z_capped(&corner, &limits(), kappa_peak, 150.0),
-        (MAX_Z_VELOCITY / heading, MAX_Z_ACCEL)
+        (
+            MAX_Z_VELOCITY / heading,
+            MAX_Z_ACCEL - RAIL_ACCELERATION_DEFECT
+        )
     );
 }
 

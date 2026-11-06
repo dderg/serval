@@ -1,6 +1,7 @@
 use crate::GeometryError;
 use crate::path::{Line, PathSegment, Segment};
 use crate::segment::{FollowerDemand, SourceRange};
+use crate::velocity::law::RAIL_ACCELERATION_DEFECT;
 
 mod leader_spill;
 pub use leader_spill::{LeaderSpill, LeaderSpillId, SPILL_CELLS};
@@ -308,6 +309,9 @@ impl VelocityLimits {
         }
         if !(self.max_z_velocity_mm_s > 0.0 && self.max_z_accel_mm_s2 > 0.0) {
             return Err("z caps must be positive (infinity leaves z to the path caps)");
+        }
+        if !(self.max_z_accel_mm_s2 > RAIL_ACCELERATION_DEFECT) {
+            return Err("max_z_accel must exceed the disk rail's acceleration defect");
         }
         self.extruder.as_ref().map_or(Ok(()), ExtruderCaps::check)
     }

@@ -229,6 +229,7 @@ fn velocity_limits_z_caps_validate() {
     for (velocity, accel) in [
         (0.0, 100.0),
         (25.0, -1.0),
+        (25.0, crate::velocity::law::RAIL_ACCELERATION_DEFECT),
         (f64::NAN, 100.0),
         (25.0, f64::NAN),
     ] {
