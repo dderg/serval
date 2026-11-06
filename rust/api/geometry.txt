@@ -524,6 +524,7 @@ pub const geometry::ratio_ramp::VALLEY_RAMP_TIME_S: f64
 pub fn geometry::ratio_ramp::coupled_bend(f64, f64, f64, f64) -> f64
 pub fn geometry::ratio_ramp::crawl_floor(f64, f64) -> f64
 pub fn geometry::ratio_ramp::crawl_side_width(f64, impl core::ops::function::FnMut(f64) -> bool) -> core::option::Option<f64>
+pub fn geometry::ratio_ramp::crawl_step_window(f64) -> f64
 pub fn geometry::ratio_ramp::kept_floor(f64, f64) -> f64
 pub fn geometry::ratio_ramp::leader_reach(f64, f64, f64) -> f64
 pub fn geometry::ratio_ramp::longest_ramp_time(f64, f64) -> f64
@@ -776,6 +777,8 @@ pub fn geometry::velocity::law::LawSegment::time_at_distance(&self, f64) -> core
 pub fn geometry::velocity::law::LawSegment::until_arc(f64, f64, f64, geometry::velocity::law::ScalarLaw, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
 impl core::cmp::PartialEq for geometry::velocity::law::LawSegment
 pub fn geometry::velocity::law::LawSegment::eq(&self, &Self) -> bool
+impl core::fmt::Debug for geometry::velocity::law::LawSegment
+pub fn geometry::velocity::law::LawSegment::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct geometry::velocity::law::PairDefect
 pub geometry::velocity::law::PairDefect::acceleration: f64
 pub geometry::velocity::law::PairDefect::arc: f64
@@ -887,6 +890,8 @@ pub fn geometry::velocity::law::LawSegment::time_at_distance(&self, f64) -> core
 pub fn geometry::velocity::law::LawSegment::until_arc(f64, f64, f64, geometry::velocity::law::ScalarLaw, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
 impl core::cmp::PartialEq for geometry::velocity::law::LawSegment
 pub fn geometry::velocity::law::LawSegment::eq(&self, &Self) -> bool
+impl core::fmt::Debug for geometry::velocity::law::LawSegment
+pub fn geometry::velocity::law::LawSegment::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct geometry::velocity::MoveVelocity
 pub geometry::velocity::MoveVelocity::accel: f64
 pub geometry::velocity::MoveVelocity::corner_speed_mm_s: f64
@@ -1230,6 +1235,8 @@ pub fn geometry::velocity::law::LawSegment::time_at_distance(&self, f64) -> core
 pub fn geometry::velocity::law::LawSegment::until_arc(f64, f64, f64, geometry::velocity::law::ScalarLaw, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
 impl core::cmp::PartialEq for geometry::velocity::law::LawSegment
 pub fn geometry::velocity::law::LawSegment::eq(&self, &Self) -> bool
+impl core::fmt::Debug for geometry::velocity::law::LawSegment
+pub fn geometry::velocity::law::LawSegment::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct geometry::LeaderSpill
 pub geometry::LeaderSpill::cell_s: f64
 pub geometry::LeaderSpill::core_density_per_s: f64
@@ -1485,6 +1492,7 @@ pub fn geometry::corner_deviation_from_scv(f64, f64) -> f64
 pub fn geometry::coupled_bend(f64, f64, f64, f64) -> f64
 pub fn geometry::crawl_floor(f64, f64) -> f64
 pub fn geometry::crawl_side_width(f64, impl core::ops::function::FnMut(f64) -> bool) -> core::option::Option<f64>
+pub fn geometry::crawl_step_window(f64) -> f64
 pub fn geometry::extrusion_budgets(&[geometry::frontend::Move], f64, f64) -> alloc::vec::Vec<geometry::ExtrusionBudget>
 pub fn geometry::kept_floor(f64, f64) -> f64
 pub fn geometry::leader_reach(f64, f64, f64) -> f64

@@ -428,17 +428,64 @@ pub(super) struct Reserve {
 }
 
 /// The fitted leaders across a crawl valley side: as its rebuild reads
-/// them, cell by cell, and joined over all its cells, which bounds what
-/// the rebuild asks in any of them ([`RebuildsWithin`] grows with the
-/// distance range, the speed and the acceleration); and the bound over the
-/// whole side ([`CrawlSide::rebuild`]) once read.
+/// them, cell by cell, joined over every [`REBUILD_SCREEN_CELLS`] of them
+/// and over all its cells, each of which bounds what the rebuild asks in
+/// any cell it joins ([`RebuildsWithin`] grows with the distance range, the
+/// speed and the acceleration); and the bound over the whole side
+/// ([`CrawlSide::rebuild`]) once read.
 #[derive(Debug, Clone, PartialEq)]
 struct SideLeaders {
     side: CrawlSide,
     within: RebuildsWithin,
     cells: Vec<CellLeaders>,
+    blocks: Vec<CellBlock>,
     joined: f64,
     whole: OnceCell<f64>,
+}
+
+/// How many neighbouring cells of a side one [`CellBlock`] joins.
+const REBUILD_SCREEN_CELLS: usize = 32;
+
+/// The fitted leaders over neighbouring cells of a crawl valley side,
+/// joined, and what [`RebuildsWithin`] bounds the rebuild by in any of them
+/// once read.
+#[derive(Debug, Clone, PartialEq)]
+struct CellBlock {
+    leaders: JoinedLeaders,
+    within: OnceCell<f64>,
+}
+
+/// The distance range, the fastest speed and the strongest acceleration
+/// of the fitted leaders over some cells of a crawl valley side.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct JoinedLeaders {
+    distance: (f64, f64),
+    speed: f64,
+    accel: f64,
+}
+
+impl JoinedLeaders {
+    fn over(cells: &[CellLeaders]) -> Self {
+        cells.iter().fold(
+            Self {
+                distance: (f64::INFINITY, 0.0),
+                speed: 0.0,
+                accel: 0.0,
+            },
+            |joined, cell| Self {
+                distance: (
+                    joined.distance.0.min(cell.distance.0),
+                    joined.distance.1.max(cell.distance.1),
+                ),
+                speed: joined.speed.max(cell.speed),
+                accel: joined.accel.max(cell.accel),
+            },
+        )
+    }
+
+    fn rebuild(&self, within: &RebuildsWithin) -> f64 {
+        within.at(self.distance, self.speed, self.accel)
+    }
 }
 
 /// The fitted leaders in one cell of a crawl valley side: their distance
@@ -492,28 +539,23 @@ impl Reserve {
                 }
             })
             .collect();
-        let (distance, speed, accel) = crossing.iter().fold(
-            ((f64::INFINITY, 0.0_f64), 0.0_f64, 0.0_f64),
-            |(distance, speed, accel), cell| {
-                (
-                    (
-                        distance.0.min(cell.distance.0),
-                        distance.1.max(cell.distance.1),
-                    ),
-                    speed.max(cell.speed),
-                    accel.max(cell.accel),
-                )
-            },
-        );
         let within = side.rebuilds_within(width);
+        let blocks = crossing
+            .chunks(REBUILD_SCREEN_CELLS)
+            .map(|cells| CellBlock {
+                leaders: JoinedLeaders::over(cells),
+                within: OnceCell::new(),
+            })
+            .collect();
         Self {
             width,
             cells,
             leaders: Some(SideLeaders {
                 side,
-                joined: within.at(distance, speed, accel),
+                joined: JoinedLeaders::over(&crossing).rebuild(&within),
                 within,
                 cells: crossing,
+                blocks,
                 whole: OnceCell::new(),
             }),
         }
@@ -535,7 +577,15 @@ impl Reserve {
         if !binds(leaders.joined) {
             return None;
         }
-        let cell = &leaders.cells[usize::try_from(n - self.cells.0).expect("a cell of the side")];
+        let index = usize::try_from(n - self.cells.0).expect("a cell of the side");
+        let block = &leaders.blocks[index / REBUILD_SCREEN_CELLS];
+        let screened = *block
+            .within
+            .get_or_init(|| block.leaders.rebuild(&leaders.within));
+        if !binds(screened) {
+            return None;
+        }
+        let cell = &leaders.cells[index];
         let within = *cell
             .within
             .get_or_init(|| leaders.within.at(cell.distance, cell.speed, cell.accel));
