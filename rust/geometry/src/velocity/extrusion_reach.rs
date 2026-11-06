@@ -524,7 +524,7 @@ impl Marks {
                 return Some((slowest, envelope.with(beyond)));
             }
             let seam = self.seam_at(ahead + 1, closed)?;
-            slowest = slowest.min(seam.speed_mm_s.hypot(back));
+            slowest = slowest.min(libm::hypot(seam.speed_mm_s, back));
             envelope = envelope.with(SeamTerm {
                 limit: seam.limit,
                 run_mm,

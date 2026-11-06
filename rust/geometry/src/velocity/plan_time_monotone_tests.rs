@@ -277,3 +277,101 @@ proptest! {
         no_slower("extruder cap", ROUNDING, loosened, held)?;
     }
 }
+
+#[test]
+#[ignore]
+fn probe_case_extruder() {
+    let print = Print {
+        steps: vec![
+            (0.6846275237418586, 191.7750505587267, 1.0369783128477945, 0.0),
+            (-1.819485713051994, 169.93119969427502, 0.0, 0.0),
+            (0.0, 20.0, 0.0, 0.0),
+        ],
+        ratio: 0.01,
+        machine: Machine {
+            max_velocity: 122.08770514165185,
+            accel: 43590.70820248824,
+            e_velocity: 56.72837436396845,
+            e_accel: 25852.208081292276,
+            slope: 0.048200266251837216,
+            kernel_reach_s: 0.002,
+        },
+    };
+    let (moves, stop) = print.fitted().unwrap();
+    for scale in [1.0, 1.0016576970418982] {
+        eprintln!("=== scale {scale}");
+        let t = plan(&moves, &stop, |l| VelocityLimits {
+            extruder: l.extruder.map(|caps| ExtruderCaps {
+                max_accel_mm_s2: scale * caps.max_accel_mm_s2,
+                ..caps
+            }),
+            ..l
+        });
+        eprintln!("time {t}");
+    }
+}
+
+#[test]
+#[ignore]
+fn probe_worst_slowdown() {
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+    let n: u64 = std::env::var("PROBE_N").map_or(2000, |s| s.parse().unwrap());
+    let threads: u64 = std::env::var("PROBE_THREADS").map_or(8, |s| s.parse().unwrap());
+    let per = n / threads;
+    let results: Vec<[(f64, String); 3]> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
+            .map(|t| {
+                scope.spawn(move || {
+                    let mut seed = [0u8; 32];
+                    seed[..8].copy_from_slice(&(t + 7919).to_le_bytes());
+                    let mut runner = TestRunner::new_with_rng(
+                        Config::default(),
+                        TestRng::from_seed(RngAlgorithm::ChaCha, &seed),
+                    );
+                    let strat = (arb_print(), 1.0f64..2.0, 1.0f64..2.0);
+                    let mut worst: [(f64, String); 3] = Default::default();
+                    for _ in 0..per {
+                        let (print, scale, scale2) = strat.new_tree(&mut runner).unwrap().current();
+                        let Some((moves, stop)) = print.fitted() else {
+                            continue;
+                        };
+                        let held = plan(&moves, &stop, |l| l);
+                        let acc = plan(&moves, &stop, |l| VelocityLimits {
+                            accel_mm_s2: scale * l.accel_mm_s2,
+                            ..l
+                        });
+                        let vel = plan(&moves, &stop, |l| VelocityLimits {
+                            max_velocity_mm_s: scale * l.max_velocity_mm_s,
+                            ..l
+                        });
+                        let ext = plan(&moves, &stop, |l| VelocityLimits {
+                            extruder: l.extruder.map(|caps| ExtruderCaps {
+                                max_velocity_mm_s: scale * caps.max_velocity_mm_s,
+                                max_accel_mm_s2: scale2 * caps.max_accel_mm_s2,
+                                ..caps
+                            }),
+                            ..l
+                        });
+                        for (k, t) in [acc, vel, ext].into_iter().enumerate() {
+                            let rel = t / held - 1.0;
+                            if rel > worst[k].0 {
+                                worst[k] = (rel, format!("{print:?} scale {scale} {scale2}"));
+                            }
+                        }
+                    }
+                    worst
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for (k, name) in ["max_accel", "max_velocity", "extruder"].iter().enumerate() {
+        let w = results
+            .iter()
+            .map(|r| r[k].clone())
+            .fold((0.0, String::new()), |a, b| if b.0 > a.0 { b } else { a });
+        let slower = results.iter().filter(|r| r[k].0 > 1e-9).count();
+        println!("PROBE {name} worst {:.3e} threads_with_slower {slower}\nPROBE_CASE {name} {}", w.0, w.1);
+    }
+}

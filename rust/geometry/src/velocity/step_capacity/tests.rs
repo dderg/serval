@@ -5,7 +5,7 @@ use crate::path::lowering::PositionProfile;
 use crate::path::{Arc, CurvatureProfile, Line};
 use crate::segment::SourceRange;
 use crate::step_capacity::{FollowerStepLoad, McuStepLoad};
-use crate::velocity::SeamLimit;
+use crate::velocity::{SeamEnvelope, SeamLimit};
 use crate::velocity::{VelocityPlanParams, plan_velocity_warm_start, warm_start_params};
 
 const COREXY: [[f64; 3]; 3] = [[1.0, 1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 0.0, 1.0]];
@@ -50,17 +50,12 @@ fn demand_along(capacity: &StepCapacity, segment: &Segment) -> MotorDemand {
 
 /// A move `length` long between rests.
 fn between_rests(length: f64) -> ReachableSpeed {
+    let rest = SeamEnvelope::of(SeamLimit::ceiling(0.0));
     ReachableSpeed {
         peak_mm_s: f64::INFINITY,
-        entry: SeamLimit {
-            ceiling_mm_s: 0.0,
-            kappa: 0.0,
-        },
-        exit: SeamLimit {
-            ceiling_mm_s: 0.0,
-            kappa: 0.0,
-        },
-        run_mm: length,
+        behind: rest,
+        ahead: rest,
+        length_mm: length,
     }
 }
 

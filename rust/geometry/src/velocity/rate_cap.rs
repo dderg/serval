@@ -1,7 +1,6 @@
-use super::extrusion_reach::ReachableSpeed;
+use super::seam_envelope::ReachableSpeed;
 
 const GOLDEN_SECTION_STEPS: u32 = 64;
-const BISECTION_STEPS: u32 = 64;
 
 /// A motor rate under a speed ceiling `v` and an acceleration budget `A`
 /// that an advance makes grow with both: `per_velocity·v + per_accel·A`.
@@ -16,94 +15,69 @@ impl LinearRate {
         self.per_velocity * v + self.per_accel * accel
     }
 
-    /// `rate ≤ max` on a move the plan crosses at no more than `reachable`,
-    /// under a ceiling held to the reachable peak, which loses the plan
-    /// nothing. Where the budget does not fit at that ceiling, the trade
-    /// ([`Self::traded`]) reads the move's own ceiling: a reachable peak
-    /// that rises with a looser limit leaves the pair it picks standing.
+    /// The ceiling and budget under which `rate ≤ max` and the budget
+    /// fits every other cap, `fitting_ceiling(A)` the fastest speed at
+    /// which a budget `A` fits them, on a move the plan crosses at no more
+    /// than `reachable`. Where `reached`, the ceiling held to the reachable
+    /// peak, fits the whole budget, both stay. Otherwise every budget `A`
+    /// takes the fastest speed it fits at, and the budget is the one whose
+    /// pair takes the run soonest ([`ReachableSpeed::run_time`]): a looser
+    /// limit only raises the speed each budget fits at, so the least time
+    /// it finds never rises.
     pub(super) fn capped(
         &self,
         max: f64,
         reachable: &ReachableSpeed,
         (ceiling, accel): (f64, f64),
+        fitting_ceiling: impl Fn(f64) -> f64,
     ) -> (f64, f64) {
         let reached = ceiling.min(reachable.peak_mm_s);
-        if self.at(reached, accel) <= max {
+        let speed_at = |budget: f64| {
+            reached
+                .min(fitting_ceiling(budget))
+                .min((max - self.per_accel * budget) / self.per_velocity)
+        };
+        if speed_at(accel) >= reached {
             return (reached, accel);
         }
-        let (speed, budget) = self.traded(max, reachable, (ceiling, accel));
-        (speed.min(reachable.peak_mm_s), budget)
-    }
-
-    /// Of the ceilings `v` and budgets `A` on `rate = max`, the pair that
-    /// takes the run `reachable` bounds, from one seam's limit to the
-    /// other's, soonest. The run at `A` peaks at
-    /// [`ReachableSpeed::run_peak`], and a ceiling above that only gives up
-    /// budget, so the ceiling stays at or under where it meets that peak;
-    /// the budget stays whole where the plan never reaches the ceiling it
-    /// leaves. Where the run peaks faster than `rate = max` lets the move go
-    /// at any budget, the budget stays and the ceiling gives way, or each
-    /// gets half of `max` when neither alone fits.
-    fn traded(
-        &self,
-        max: f64,
-        reachable: &ReachableSpeed,
-        (ceiling, accel): (f64, f64),
-    ) -> (f64, f64) {
-        let Self {
-            per_velocity,
-            per_accel,
-        } = *self;
-        let cut_ceiling = (max - per_accel * accel) / per_velocity;
-        if per_accel == 0.0 {
-            return (cut_ceiling, accel);
-        }
-        let still_speed = max / per_velocity;
-        let budget_at = |v: f64| (max - per_velocity * v) / per_accel;
-        let peak_at = |v: f64| reachable.run_peak(budget_at(v));
-        if peak_at(still_speed) >= still_speed {
-            return if cut_ceiling > 0.0 {
-                (cut_ceiling, accel)
+        let budget_top = if self.per_accel > 0.0 {
+            accel.min(max / self.per_accel)
+        } else {
+            accel
+        };
+        let budget = least_on(0.0, budget_top, |budget| {
+            let speed = speed_at(budget);
+            if speed > 0.0 {
+                reachable.run_time(speed, budget)
             } else {
-                (0.5 * still_speed, accel.min(0.5 * max / per_accel))
-            };
-        }
-        let (mut under, mut over) = (0.0, still_speed);
-        for _ in 0..BISECTION_STEPS {
-            let mid = 0.5 * (under + over);
-            if peak_at(mid) > mid {
-                under = mid;
-            } else {
-                over = mid;
+                f64::INFINITY
             }
-        }
-        let top = under.min(ceiling);
-        if top <= cut_ceiling {
-            return (cut_ceiling, accel);
-        }
-        let speed = least_on(cut_ceiling.max(0.0), top, |v| {
-            run_time(reachable, v, budget_at(v))
         });
-        (speed, budget_at(speed).min(accel))
+        let speed = speed_at(budget);
+        assert!(
+            speed > 0.0 && budget > 0.0,
+            "no budget up to {accel} fits rate {self:?} ≤ {max} at any speed under {reached}: \
+             it picked {budget} at {speed}"
+        );
+        if std::env::var("ZZTRADE").is_ok() {
+            let time = |b: f64| reachable.run_time(speed_at(b), b);
+            let grid: Vec<String> = (1..=10)
+                .map(|i| {
+                    let b = budget_top * i as f64 / 10.0;
+                    format!("{b:.0}:{:.0}:{:.6}", speed_at(b), time(b))
+                })
+                .collect();
+            eprintln!(
+                "ZZTRADE reached {reached:.4} accel {accel:.1} top {budget_top:.1} -> ({speed:.4}, {budget:.1}) t {:.6} | {} | behind {:?} ahead {:?} len {}",
+                time(budget),
+                grid.join(" "),
+                reachable.behind.terms(),
+                reachable.ahead.terms(),
+                reachable.length_mm
+            );
+        }
+        (speed, budget)
     }
-}
-
-/// The least time the run `reachable` bounds takes from its entry seam's
-/// limit to its exit seam's at speeds up to `ceiling` and accelerations up
-/// to `accel`.
-fn run_time(reachable: &ReachableSpeed, ceiling: f64, accel: f64) -> f64 {
-    let run = reachable.run_mm;
-    let climb = 2.0 * accel * run;
-    let entry = reachable.entry.at(accel).min(ceiling);
-    let exit = reachable
-        .exit
-        .at(accel)
-        .min(ceiling)
-        .min((entry * entry + climb).sqrt());
-    let entry = entry.min((exit * exit + climb).sqrt());
-    let peak = ceiling.min((0.5 * (entry * entry + exit * exit) + accel * run).sqrt());
-    let ramps_mm = (2.0 * peak * peak - entry * entry - exit * exit) / (2.0 * accel);
-    (2.0 * peak - entry - exit) / accel + (run - ramps_mm).max(0.0) / peak
 }
 
 /// Where `time` is least on `[low, high]` as golden-section search finds

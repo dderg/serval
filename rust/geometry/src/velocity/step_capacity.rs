@@ -3,7 +3,7 @@ use crate::path::Segment;
 use crate::step_capacity::{SPATIAL_LANES, StepCapacity, StepCapacityOverload};
 
 use super::extruder_caps;
-use super::extrusion_reach::ReachableSpeed;
+use super::seam_envelope::ReachableSpeed;
 use super::rate_cap::LinearRate;
 
 const MCU_CAPACITY_SHARE: f64 = 1.0;
@@ -109,7 +109,7 @@ pub(super) fn step_capacity_capped(
             });
         }
         if rate.at(capped.0, capped.1) > MCU_CAPACITY_SHARE {
-            capped = rate.capped(MCU_CAPACITY_SHARE, reachable, capped);
+            capped = rate.capped(MCU_CAPACITY_SHARE, reachable, capped, |_| f64::INFINITY);
         }
     }
     (capped, overload)
