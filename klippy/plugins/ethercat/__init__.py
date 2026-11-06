@@ -5,6 +5,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 from __future__ import annotations
 
+import math
 import shlex
 
 from klippy.extras import motion_queuing
@@ -18,6 +19,7 @@ from .stream import EthercatError, ServoLane, split_run
 CYCLE_US_QUANTUM = 250
 DEFAULT_SOCKET = "/tmp/kalico-ethercat.sock"
 ANCHOR_LEADS = 2
+MAX_ENDSTOP_ID = 255
 
 
 class EthercatBus:
@@ -65,12 +67,17 @@ class EthercatBus:
         self.last_step_gen_time = 0.0
         self.servos = []
         self.lanes = []
+        self.endstops = []
+        self._resume_on_set_position = False
         printer.lookup_object("pins").register_chip("ethercat", self)
         mq = printer.load_object(config, "motion_queuing")
         mq.register_flush_callback(self._flush)
         printer.register_event_handler("klippy:connect", self._connect)
         printer.register_event_handler("klippy:shutdown", self._shutdown)
         printer.register_event_handler("klippy:disconnect", self._disconnect)
+        printer.register_event_handler(
+            "toolhead:set_position", self._handle_set_position
+        )
 
     # PrinterStepper hook ("servo: ethercat" in a stepper section)
     def setup_stepper(self, config, units_in_radians):
@@ -85,7 +92,14 @@ class EthercatBus:
                 "ethercat:%s: EtherCAT pins are servo endstops, not %s"
                 % (pin_params["pin"], pin_type)
             )
-        return ServoEndstop(self.printer, pin_params["pin"])
+        if len(self.endstops) == MAX_ENDSTOP_ID:
+            raise self.printer.config_error(
+                "ethercat:%s: more than %d EtherCAT endstops"
+                % (pin_params["pin"], MAX_ENDSTOP_ID)
+            )
+        endstop = ServoEndstop(self, pin_params["pin"], len(self.endstops) + 1)
+        self.endstops.append(endstop)
+        return endstop
 
     # Lifecycle
     def _connect(self):
@@ -105,6 +119,8 @@ class EthercatBus:
             ServoLane(servo, slot, self.cycle_ns)
             for slot, servo in enumerate(servos)
         ]
+        for lane in self.lanes:
+            lane.servo.attach_lane(lane, self.endpoint)
         self.endpoint.connect(self.lanes)
         if self.live:
             self.endpoint.enable_drives()
@@ -144,6 +160,59 @@ class EthercatBus:
     def get_status(self, eventtime):
         return self.endpoint.get_status()
 
+    # Homing
+    def lane_of(self, servo):
+        for lane in self.lanes:
+            if lane.servo is servo:
+                return lane
+        raise EthercatError("%s has no lane" % (servo.get_name(),))
+
+    def hold_after_trip(self, endstop_name, homing_lanes, contact, cursors):
+        """The endpoint cut the stream on a homing trip and holds every slot
+        at the last sample it played. Returns the trigger print time."""
+        grid = self.endpoint.grid
+        if cursors is None or not all(
+            cursors[lane.slot_idx] for lane in homing_lanes
+        ):
+            self._fail(
+                "endstop '%s' tripped before the endpoint reported its"
+                " playback position (%r)" % (endstop_name, cursors)
+            )
+        halt = grid.index_of_clock(cursors[homing_lanes[0].slot_idx]) - 1
+        for lane in self.lanes:
+            if lane in homing_lanes:
+                lane.servo.hold_at_mcu_position(lane.mcu_position_at(halt))
+            elif lane.last_motion_index is not None and (
+                lane.last_motion_index >= halt
+            ):
+                self._fail(
+                    "endstop '%s' cut the stream at index %d while %s was"
+                    " moving (motion queued up to index %d)"
+                    % (
+                        endstop_name,
+                        halt,
+                        lane.servo.get_name(),
+                        lane.last_motion_index,
+                    )
+                )
+        self._resume_on_set_position = True
+        return grid.print_time(grid.index_of_clock(contact))
+
+    def _handle_set_position(self):
+        """Homing ends by setting the toolhead position; the trapq then no
+        longer holds the motion the trip cut off and streaming resumes."""
+        if not self._resume_on_set_position:
+            return
+        self._resume_on_set_position = False
+        self.endpoint.resume_stream()
+        for lane in self.lanes:
+            lane.reanchor()
+        self.next_index = None
+
+    def _fail(self, msg):
+        self.printer.invoke_shutdown("ethercat: " + msg)
+        raise self.printer.command_error(msg)
+
     # Streaming
     def _flush(self, flush_time, step_gen_time):
         try:
@@ -153,7 +222,7 @@ class EthercatBus:
             raise
 
     def _emit_until(self, step_gen_time):
-        if not self.lanes:
+        if not self.lanes or self.endpoint.stream_halted:
             return
         grid = self.endpoint.grid
         end = grid.first_index_at_or_after(step_gen_time)
@@ -166,7 +235,7 @@ class EthercatBus:
                 # packing this batch takes time before the push is checked
                 anchor = now + ANCHOR_LEADS * lead
                 if start is None:
-                    start = anchor
+                    start = max(anchor, self._first_samplable_index())
                 else:
                     start = self._skip_behind_real_time(
                         start, min(anchor, end), now
@@ -184,6 +253,15 @@ class EthercatBus:
         for chunk in zip(*runs):
             self.endpoint.push(list(chunk))
         self.next_index = end
+
+    def _first_samplable_index(self):
+        """A homing trip leaves the cut-off move in the trapq history up to
+        the print time homing set the position at; the servo held still
+        through it, so a new epoch starts once no sample reaches into it."""
+        earliest = max(lane.servo.earliest_sample_time() for lane in self.lanes)
+        if earliest == -math.inf:
+            return 0
+        return self.endpoint.grid.first_index_at_or_after(earliest)
 
     def _skip_behind_real_time(self, start, stop, now):
         """The stream fell behind the endpoint's play index. That is only

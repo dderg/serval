@@ -19,6 +19,7 @@ from .timemap import RAW_NS_PER_S, EndpointClockMap, EndpointGrid, SyntheticGrid
 EXECUTOR_SETPOINT_RING = 1
 ENGINE_STATE_FAULT = 3
 SLAVE_STATE_OK = 0
+ERR_PIECES_WHILE_HALTED = -315
 SOCKET_WAIT_S = 15.0
 CALL_TIMEOUT_S = 5.0
 TERMINATE_WAIT_S = 5.0
@@ -28,6 +29,7 @@ TERMINATE_WAIT_S = 5.0
 ENDPOINT_FAULTS = {
     -172 & 0xFFFF: "internal invariant (grid regression)",
     -304 & 0xFFFF: "run interval differs from the DC cycle",
+    -309 & 0xFFFF: "unknown slot",
     -313 & 0xFFFF: "setpoints while the drives are parked",
     -314 & 0xFFFF: "setpoints while a drive is faulted",
     -315 & 0xFFFF: "setpoints while the stream is halted",
@@ -36,6 +38,8 @@ ENDPOINT_FAULTS = {
     -319 & 0xFFFF: "ring full",
     -320 & 0xFFFF: "unknown lane",
     -321 & 0xFFFF: "run rejected (hole, overlap, no anchor or origin shift)",
+    -360 & 0xFFFF: "zero torque trip threshold",
+    -361 & 0xFFFF: "slot shares its axis with more than one other slot",
     0x8611: "drive following error",
     0x8700: "drive sync loss",
     0xFE10: "DC frame late",
@@ -61,6 +65,7 @@ class FileEndpoint:
         self._rings = {}
         self._correlation_id = 0
         self.pushed_cycles = 0
+        self.stream_halted = False
 
     def connect(self, lanes):
         self._file = open(self.path, "wb")
@@ -83,6 +88,12 @@ class FileEndpoint:
         )
         self._file.write(wire.encode_frame(wire.CHANNEL_PIECES, payload))
         self.pushed_cycles += len(lanes[0].samples)
+
+    def arm_endstop(self, endstop_id, slot_thresholds, on_trip):
+        pass
+
+    def disarm_endstop(self, endstop_id, slots):
+        pass
 
     def get_status(self):
         return {"mode": "file", "pushed_cycles": self.pushed_cycles}
@@ -240,6 +251,8 @@ class LiveEndpoint:
         self.min_free_cycles = None
         self.pushed_cycles = 0
         self.anchors = 0
+        self.stream_halted = False
+        self._armed = {}
 
     # Setup
     def connect(self, lanes):
@@ -348,6 +361,43 @@ class LiveEndpoint:
             )
         self.enabled = True
 
+    def _call_ok(self, kind, body, what):
+        _, reply = self.client.call(kind, body)
+        result = wire.decode_result(reply)
+        if result:
+            raise EthercatError(
+                "endpoint refused to %s: %s" % (what, describe_fault(result))
+            )
+
+    # Homing
+    def arm_endstop(self, endstop_id, slot_thresholds, on_trip):
+        """on_trip(contact_clock, playback_clocks) runs on the socket
+        thread, with the playback cursors of the cycle before the trip."""
+        self._armed[endstop_id] = on_trip
+        for slot, tenth_pct in slot_thresholds:
+            self._call_ok(
+                wire.Kind.ARM_SENSORLESS_ENDSTOP,
+                wire.encode_arm_sensorless_endstop(
+                    slot, endstop_id, tenth_pct, True
+                ),
+                "arm endstop %d on slot %d" % (endstop_id, slot),
+            )
+
+    def disarm_endstop(self, endstop_id, slots):
+        for slot in slots:
+            self._call_ok(
+                wire.Kind.ARM_SENSORLESS_ENDSTOP,
+                wire.encode_arm_sensorless_endstop(slot, endstop_id, 0, False),
+                "disarm endstop %d on slot %d" % (endstop_id, slot),
+            )
+        del self._armed[endstop_id]
+
+    def resume_stream(self):
+        self._call_ok(wire.Kind.RESUME_STREAM, b"", "resume the stream")
+        for ring in self._rings.values():
+            ring.discard()
+        self.stream_halted = False
+
     # Streaming
     def now_index(self):
         return self.grid.index_at_or_after_clock(
@@ -373,6 +423,8 @@ class LiveEndpoint:
 
     def _on_push_reply(self, kind, body):
         resp = wire.decode_push_sample_runs_response(body)
+        if resp.result == ERR_PIECES_WHILE_HALTED and self.stream_halted:
+            return
         if resp.result:
             self._fault(
                 "endpoint rejected a run: %s" % describe_fault(resp.result)
@@ -398,9 +450,17 @@ class LiveEndpoint:
                 )
         elif kind == wire.Kind.ENDSTOP_TRIP:
             trip = wire.decode_endstop_trip(body)
-            self._fault(
-                "unexpected endstop trip %d at clock %d"
-                % (trip.endstop_id, trip.trip_clock)
+            on_trip = self._armed.get(trip.endstop_id)
+            if on_trip is None:
+                self._fault(
+                    "unexpected endstop trip %d at clock %d"
+                    % (trip.endstop_id, trip.trip_clock)
+                )
+                return
+            self.stream_halted = True
+            hb = self.last_heartbeat
+            on_trip(
+                trip.trip_clock, hb.playback_clocks if hb is not None else None
             )
         else:
             self._fault("unexpected endpoint message 0x%04x" % (kind,))

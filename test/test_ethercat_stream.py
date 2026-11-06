@@ -6,6 +6,7 @@ import pytest
 
 from klippy.plugins.ethercat import wire
 from klippy.plugins.ethercat.stream import (
+    SAMPLE_HISTORY_S,
     EthercatError,
     ServoLane,
     SlotRing,
@@ -109,8 +110,11 @@ class FakeServo:
     def get_name(self):
         return "stepper_fake"
 
-    def drive_counts(self, pos):
+    def get_mcu_position(self, pos):
         return round(pos / self.step)
+
+    def drive_counts_of(self, mcu_pos):
+        return mcu_pos
 
     def drive_velocity(self, vel):
         return round(vel / self.step)
@@ -133,3 +137,35 @@ def test_lane_refuses_to_anchor_while_moving():
     lane = ServoLane(FakeServo(), 0, CYCLE_NS)
     with pytest.raises(EthercatError, match="while moving"):
         lane.build_run(0, [1.0], [0.5], [0.0], 1)
+
+
+def test_lane_reports_the_sample_played_at_an_index():
+    lane = ServoLane(FakeServo(), 0, CYCLE_NS)
+    lane.build_run(10, [1.0, 1.0], [0.0, 0.0], [0.0, 0.0], 2)
+    lane.build_run(12, [1.001, 1.004, 1.009], [1.0] * 3, [0.0] * 3, 3)
+    assert [lane.mcu_position_at(i) for i in range(10, 15)] == [
+        1000,
+        1000,
+        1001,
+        1004,
+        1009,
+    ]
+    # A servo holds its last target once the stream ends
+    assert lane.mcu_position_at(50) == 1009
+    with pytest.raises(EthercatError, match="no sample at index 9"):
+        lane.mcu_position_at(9)
+
+
+def test_lane_history_keeps_the_newest_samples():
+    lane = ServoLane(FakeServo(), 0, CYCLE_NS)
+    kept = round(SAMPLE_HISTORY_S * 1e9 / CYCLE_NS)
+    block = 1000
+    blocks = 3 * kept // block
+    for b in range(blocks):
+        lane.build_run(
+            b * block, [0.0] * block, [0.0] * block, [0.0] * block, block
+        )
+    newest = blocks * block - 1
+    assert lane.mcu_position_at(newest - kept + 1) == 0
+    with pytest.raises(EthercatError, match="no sample"):
+        lane.mcu_position_at(newest - kept - block)

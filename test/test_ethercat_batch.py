@@ -171,21 +171,57 @@ def test_mcu_endstop_on_servo_rail_is_a_config_error(request, tmp_path):
     assert "cannot stop EtherCAT servo stepper_x" in run.log
 
 
-def test_servo_homing_fails_loudly(request, tmp_path):
+def test_g28_homes_servo_and_stepper_rails(request, tmp_path):
+    gcode = (
+        "G28\n"
+        'ASSERT TEST="{printer.toolhead.position.x == 0}"\n'
+        'ASSERT TEST="{printer.toolhead.position.y == 0}"\n'
+        'ASSERT TEST="{printer.toolhead.position.z == 0}"\n'
+        "G1 X20 F6000\nM400\n"
+    )
+    run = run_batch(
+        tmp_path,
+        servo_config("mzv", x_shadow=False),
+        gcode,
+        dictionary_path(request),
+    )
+    assert run.returncode == 0, run.log[-4000:]
+    runs, t, pos, vel, resolution = servo_trajectory(run)
+    # Batch homing triggers at the end of the move, which forces the axis
+    # 1.5 axis lengths past position_endstop; X then moves 20 mm out.
+    homing_travel = -1.5 * 250.0
+    lowest = int(np.argmin(pos))
+    assert abs(pos[lowest] - pos[0] - homing_travel) <= resolution
+    assert abs(pos[-1] - pos[lowest] - 20.0) <= resolution
+    assert vel[-1] == 0.0
+
+
+def test_servo_endstop_refuses_a_stepper_it_cannot_stop(request, tmp_path):
     run = run_batch(
         tmp_path, servo_config("mzv"), "G28 X\n", dictionary_path(request)
     )
     assert run.returncode != 0
     assert (
-        "servo homing (the endpoint's torque trip) is not implemented"
-        in run.log
+        "EtherCAT endstop 'x' cannot stop stepper_x1, which is not an"
+        " EtherCAT servo" in run.log
     )
 
 
-def test_query_endstops_reports_servo_rails_as_not_homeable(request, tmp_path):
+def test_servo_homing_needs_a_torque_threshold(request, tmp_path):
+    run = run_batch(
+        tmp_path,
+        servo_config("mzv", x_shadow=False, x_homing=""),
+        "G28 X\n",
+        dictionary_path(request),
+    )
+    assert run.returncode != 0
+    assert "stepper_x: set homing_torque to home" in run.log
+
+
+def test_query_endstops_reports_servo_endstops_open(request, tmp_path):
     gcode = (
         "QUERY_ENDSTOPS\n"
-        "ASSERT TEST=\"{printer.query_endstops.last_query.x == 'not homeable'}\"\n"
+        'ASSERT TEST="{printer.query_endstops.last_query.x == 0}"\n'
         'ASSERT TEST="{printer.query_endstops.last_query.y == 0}"\n'
     )
     run = run_batch(

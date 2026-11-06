@@ -19,6 +19,8 @@ UNIT_COORDS = (
 )
 LINEARITY_PROBES = ((37.0, -11.0, 5.0), (-123.0, 71.0, -29.0))
 LINEARITY_REL_TOLERANCE = 1e-9
+# 0x6077 torque actual is i16 in 0.1 % of rated torque
+MAX_HOMING_TORQUE_PCT = 3276.7
 
 SAMPLE_ERRORS = {
     -1: "no stepper kinematics or trapq",
@@ -83,6 +85,14 @@ class ServoStepper:
         self._step_dist = self._rotation_dist / self._counts_per_rotation
         self._invert_dir = config.getboolean("invert_dir", False)
         self._dir_sign = -1 if self._invert_dir else 1
+        homing_torque = config.getfloat(
+            "homing_torque", None, above=0.0, maxval=MAX_HOMING_TORQUE_PCT
+        )
+        self.homing_torque_tenth_pct = None
+        if homing_torque is not None:
+            self.homing_torque_tenth_pct = max(1, round(homing_torque * 10.0))
+        self._lane = None
+        self._endpoint = None
         self._mcu = printer.lookup_object("mcu")
         motion_queuing = printer.load_object(config, "motion_queuing")
         self._syncemitter = motion_queuing.allocate_syncemitter(
@@ -166,6 +176,34 @@ class ServoStepper:
     def mcu_to_commanded_position(self, mcu_pos):
         return mcu_pos * self._step_dist - self._mcu_position_offset
 
+    def attach_lane(self, lane, endpoint):
+        self._lane = lane
+        self._endpoint = endpoint
+
+    def get_past_mcu_position(self, print_time):
+        grid = self._endpoint.grid
+        index = grid.first_index_at_or_after(print_time)
+        if grid.print_time(index) > print_time:
+            index -= 1
+        return self._lane.mcu_position_at(index)
+
+    def hold_at_mcu_position(self, mcu_pos):
+        """Make the commanded position the sample the endpoint holds after
+        it cut the stream (homing trip); sampling resumes from there."""
+        offset, row = probe_linear_map(self._stepper_kinematics)
+        along = (self.mcu_to_commanded_position(mcu_pos) - offset) / sum(
+            r * r for r in row
+        )
+        ffi_main, ffi_lib = chelper.get_ffi()
+        ffi_lib.itersolve_set_position(
+            self._stepper_kinematics, *(along * r for r in row)
+        )
+        if self.get_mcu_position() != mcu_pos:
+            raise EthercatError(
+                "%s: cannot hold at MCU position %d (commanded %d)"
+                % (self._name, mcu_pos, self.get_mcu_position())
+            )
+
     def dump_steps(self, count, start_clock, end_clock):
         return [], 0
 
@@ -226,8 +264,8 @@ class ServoStepper:
         )
 
     # Drive units
-    def drive_counts(self, pos):
-        return self._dir_sign * self.get_mcu_position(pos)
+    def drive_counts_of(self, mcu_pos):
+        return self._dir_sign * mcu_pos
 
     def drive_velocity(self, vel):
         return round_half_away(self._dir_sign * vel / self._step_dist)
@@ -269,3 +307,8 @@ class ServoStepper:
                 )
             )
         return pos, vel, acc
+
+    def earliest_sample_time(self):
+        self._sync_sampler_kinematics()
+        ffi_main, ffi_lib = chelper.get_ffi()
+        return ffi_lib.servo_sampler_earliest_sample(self._sampler)

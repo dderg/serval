@@ -260,14 +260,8 @@ rotation_distance: 40
 endstop_pin: {x_endstop}
 position_endstop: 0
 position_max: 250
-
-[stepper_x1]
-step_pin: PA0
-dir_pin: PA1
-enable_pin: !PA2
-microsteps: 16
-rotation_distance: 40
-
+{x_homing}
+{x_shadow}
 [stepper_y]
 step_pin: PB0
 dir_pin: !PB1
@@ -306,7 +300,26 @@ M400
 """.format(*START)
 
 
-def servo_config(shaper, x_endstop="ethercat:x", cycle_us=CYCLE_US):
+X_SHADOW = """[stepper_x1]
+step_pin: PA0
+dir_pin: PA1
+enable_pin: !PA2
+microsteps: 16
+rotation_distance: 40
+"""
+
+
+def servo_config(
+    shaper,
+    x_endstop="ethercat:x",
+    cycle_us=CYCLE_US,
+    x_shadow=True,
+    x_homing="homing_torque: 50\nhoming_retract_dist: 0",
+):
     return PRINTER_CFG.format(
-        cycle_us=cycle_us, shaper=shaper, x_endstop=x_endstop
+        cycle_us=cycle_us,
+        shaper=shaper,
+        x_endstop=x_endstop,
+        x_shadow=X_SHADOW if x_shadow else "",
+        x_homing=x_homing,
     )

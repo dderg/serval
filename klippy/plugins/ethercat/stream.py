@@ -5,11 +5,16 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 from __future__ import annotations
 
+import collections
 import dataclasses
+import math
 
 from . import wire
 
 Q16 = 1 << 16
+# Pushed samples kept per lane for get_past_mcu_position(); a homing trigger
+# lies within the step-generation horizon (~0.7 s) of the newest sample.
+SAMPLE_HISTORY_S = 4.0
 
 
 class EthercatError(Exception):
@@ -44,6 +49,8 @@ class ServoLane:
     The endpoint latches each epoch's drive origin from the target it is
     holding, so a run's pos_counts are counts relative to the position held
     when the epoch started. Re-anchoring is only valid while stationary.
+    The lane also remembers the MCU position of every sample it built, for
+    the positions the servo held at past print times.
     """
 
     def __init__(self, servo, slot_idx, cycle_ns):
@@ -53,6 +60,9 @@ class ServoLane:
         self.held_counts = None
         self.origin_mm_q16 = None
         self.last_motion_index = None
+        self._history = collections.deque()
+        self._history_cycles = 0
+        self._history_limit = math.ceil(SAMPLE_HISTORY_S * 1e9 / cycle_ns)
 
     def reanchor(self):
         """Start a new epoch at the next run; only valid while holding."""
@@ -60,6 +70,7 @@ class ServoLane:
 
     def build_run(self, start_index, pos, vel, acc, count) -> wire.LaneRun:
         servo = self.servo
+        mcu_pos = [servo.get_mcu_position(pos[i]) for i in range(count)]
         flags = 0
         if self.held_counts is None:
             if vel[0] or acc[0]:
@@ -68,13 +79,13 @@ class ServoLane:
                     " (velocity %r, accel %r)"
                     % (servo.get_name(), start_index, vel[0], acc[0])
                 )
-            self.held_counts = servo.drive_counts(pos[0])
+            self.held_counts = servo.drive_counts_of(mcu_pos[0])
             self.origin_mm_q16 = round_half_away(pos[0] * Q16)
             flags |= wire.FLAG_REANCHOR
         held = self.held_counts
         samples = [
             wire.SetpointSample(
-                servo.drive_counts(pos[i]) - held,
+                servo.drive_counts_of(mcu_pos[i]) - held,
                 servo.drive_velocity(vel[i]),
                 0,
                 acc[i],
@@ -86,6 +97,7 @@ class ServoLane:
             self.last_motion_index = start_index + moving[-1]
         if not moving or moving[-1] != count - 1:
             flags |= wire.FLAG_TAIL
+        self._remember(start_index, mcu_pos)
         return wire.LaneRun(
             axis_idx=servo.axis_index,
             slot_idx=self.slot_idx,
@@ -94,6 +106,30 @@ class ServoLane:
             start_index=start_index,
             interval_ticks=self.cycle_ns,
             samples=samples,
+        )
+
+    def _remember(self, start_index, mcu_pos):
+        self._history.append((start_index, mcu_pos))
+        self._history_cycles += len(mcu_pos)
+        while (
+            self._history_cycles - len(self._history[0][1])
+            >= self._history_limit
+        ):
+            self._history_cycles -= len(self._history.popleft()[1])
+
+    def mcu_position_at(self, index):
+        """MCU position of the sample the endpoint played at grid index:
+        a servo holds its last sample past the end of a run."""
+        for start, mcu_pos in reversed(self._history):
+            if index >= start:
+                return mcu_pos[min(index - start, len(mcu_pos) - 1)]
+        raise EthercatError(
+            "%s: no sample at index %d (history starts at %s)"
+            % (
+                self.servo.get_name(),
+                index,
+                self._history[0][0] if self._history else "nothing pushed",
+            )
         )
 
 
@@ -117,6 +153,11 @@ class SlotRing:
         self.cycle_ns = cycle_ns
         self.ring_depth_cycles = ring_depth_cycles
         self.min_lead_cycles = min_lead_cycles
+        self.discard()
+
+    def discard(self):
+        """The endpoint dropped the ring (homing trip): the next run must
+        anchor a new epoch."""
         self.next_index = None
         self.origin_mm_q16 = None
         self.tail = True
