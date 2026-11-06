@@ -675,23 +675,56 @@ impl SpanReading<'_> {
                 .any(|cluster| span.s1 >= cluster.first() && span.s0 <= cluster.last().s)
     }
 
-    /// The lowest and highest ratio of the `spans` read, the last one's end
-    /// ratio held on past the table where the moving reach runs past it;
-    /// `None` where none is read.
+    /// The lowest and highest ratio of the `spans` read
+    /// ([`read_ratio_range`]).
     fn ratio_range(&self, spans: &[RatioSpan]) -> Option<(f64, f64)> {
-        let read = spans.iter().filter(|span| self.reads(span));
-        let (low, high) = read.fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), span| {
+        read_ratio_range(
+            spans,
+            self.moving,
+            self.clusters
+                .iter()
+                .map(|cluster| (cluster.first(), cluster.last().s)),
+        )
+    }
+}
+
+/// The lowest and highest ratio of the `spans` the smoothing reads: those
+/// overlapping the `moving` reach, those touching the seams `[first, last]`
+/// of each of the `clusters`, and the last one's end ratio held on past the
+/// table where the moving reach runs past it; `None` where none is read.
+fn read_ratio_range(
+    spans: &[RatioSpan],
+    moving: (f64, f64),
+    clusters: impl Iterator<Item = (f64, f64)>,
+) -> Option<(f64, f64)> {
+    let hull = |range: (f64, f64), read: &[RatioSpan]| {
+        read.iter().fold(range, |(low, high), span| {
             (
                 low.min(span.r0.min(span.r1)),
                 high.max(span.r0.max(span.r1)),
             )
-        });
-        let (low, high) = match spans.last() {
-            Some(last) if self.moving.1 > last.s1 => (low.min(last.r1), high.max(last.r1)),
-            _ => (low, high),
-        };
-        (low <= high).then_some((low, high))
-    }
+        })
+    };
+    let within = |from: usize, past: usize| &spans[from..past.max(from)];
+    let moved = within(
+        spans.partition_point(|span| span.s1 <= moving.0),
+        spans.partition_point(|span| span.s0 < moving.1),
+    );
+    let (low, high) = clusters.fold(
+        hull((f64::INFINITY, f64::NEG_INFINITY), moved),
+        |range, (first, last)| {
+            let touching = within(
+                spans.partition_point(|span| span.s1 < first),
+                spans.partition_point(|span| span.s0 <= last),
+            );
+            hull(range, touching)
+        },
+    );
+    let (low, high) = match spans.last() {
+        Some(last) if moving.1 > last.s1 => (low.min(last.r1), high.max(last.r1)),
+        _ => (low, high),
+    };
+    (low <= high).then_some((low, high))
 }
 
 /// Seams in path order beside the slope the table holds before the first.
@@ -2665,7 +2698,7 @@ impl RatioSmoothing {
         if self.is_inert() {
             return false;
         }
-        let (back, ahead) = (lo - self.reach_back(lo), hi + self.reach_back(hi));
+        let (back, ahead) = self.moving_reach(lo, hi);
         if self.laid.slope_left_of(back) != 0.0 {
             return true;
         }
@@ -2689,25 +2722,21 @@ impl RatioSmoothing {
                 .is_some()
     }
 
-    /// Which spans the smoothed laid table reads anywhere on `[lo, hi]`
-    /// ([`Self::reading_in`]).
-    pub(super) fn reading(&self, lo: f64, hi: f64) -> SpanReading<'_> {
-        self.reading_in(Table::Laid, lo, hi)
+    /// The path the moving windows over `[lo, hi]` average, `s ± h(s)`
+    /// growing along the path.
+    fn moving_reach(&self, lo: f64, hi: f64) -> (f64, f64) {
+        (lo - self.reach_back(lo), hi + self.reach_back(hi))
     }
 
-    /// Which spans the smoothed `table` reads anywhere on `[lo, hi]`: those
-    /// the moving windows there average, `s ± h(s)` growing along the path,
-    /// and those either side of every seam of a cluster of `table` whose
-    /// own window reaches into it. A span only touching the windows' reach
-    /// is read nowhere on the stretch, so nothing laid past what it reads
-    /// decides which.
-    pub(super) fn reading_in(&self, table: Table, lo: f64, hi: f64) -> SpanReading<'_> {
+    /// Which spans the smoothed table reads anywhere on `[lo, hi]`: those
+    /// the moving windows there average ([`Self::moving_reach`]), and those
+    /// either side of every seam of a cluster whose own window reaches into
+    /// it. A span only touching the windows' reach is read nowhere on the
+    /// stretch, so nothing laid past what it reads decides which.
+    pub(super) fn reading(&self, lo: f64, hi: f64) -> SpanReading<'_> {
         SpanReading {
-            moving: (lo - self.reach_back(lo), hi + self.reach_back(hi)),
-            clusters: self
-                .seam_table(table)
-                .clusters_reaching(&self.width, (lo, hi))
-                .collect(),
+            moving: self.moving_reach(lo, hi),
+            clusters: self.laid.clusters_reaching(&self.width, (lo, hi)).collect(),
         }
     }
 
@@ -2728,12 +2757,15 @@ impl RatioSmoothing {
     }
 
     /// `max |r̃|` over `[lo, hi]` of `table`, laid as `spans`: the largest
-    /// ratio of the spans the smoothed table reads there
-    /// ([`Self::reading_in`]), the smoothed ratio being a convex
-    /// combination of theirs.
+    /// ratio of the spans the smoothed table reads there, as
+    /// [`Self::reading`] reads the laid table's, the smoothed ratio being a
+    /// convex combination of theirs.
     pub(super) fn peak_ratio_in(&self, table: Table, spans: &[RatioSpan], lo: f64, hi: f64) -> f64 {
-        self.reading_in(table, lo, hi)
-            .ratio_range(spans)
+        let clusters = self
+            .seam_table(table)
+            .clusters_reaching(&self.width, (lo, hi))
+            .map(|cluster| (cluster.first(), cluster.last().s));
+        read_ratio_range(spans, self.moving_reach(lo, hi), clusters)
             .map_or(0.0, |(low, high)| low.abs().max(high.abs()))
     }
 
