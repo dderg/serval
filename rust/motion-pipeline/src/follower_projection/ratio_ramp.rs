@@ -193,6 +193,8 @@ pub(super) struct SeamTable {
     base_slope: Option<f64>,
     examined_through: f64,
     revision: u64,
+    /// The first seam recorded since the clusters were last built.
+    recorded_from: Option<usize>,
     clusters: Clusters,
 }
 
@@ -207,6 +209,35 @@ struct Clusters {
     spans: Vec<ClusterSpan>,
     kinks: Vec<Seam>,
     stationary: Vec<usize>,
+    /// The stationary share of each cluster, piece by piece
+    /// ([`ClusterPiece`]), and which of them each cluster holds.
+    pieces: Vec<ClusterPiece>,
+    piece_ranges: Vec<std::ops::Range<usize>>,
+    /// How far from its seams any cluster's stationary share reaches at
+    /// most.
+    widest_reach: f64,
+}
+
+/// One piece of a cluster's stationary share of `X`: the polynomial in
+/// `s − from` it is over `[from, to)`, between two floats where a seam
+/// enters or leaves the cluster's window or passes its point
+/// ([`window_edges`]), where the window holds the same seams throughout.
+#[derive(Clone, Copy, Debug)]
+struct ClusterPiece {
+    from: f64,
+    to: f64,
+    coefficients: [f64; SMOOTHED_HALF_SQUARE.len()],
+    /// How far each coefficient may be off the exact one.
+    roundings: [f64; SMOOTHED_HALF_SQUARE.len()],
+}
+
+/// The seams of a cluster inside one window, `first..past`, and the end
+/// of those behind its point.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ClusterWindow {
+    first: usize,
+    past: usize,
+    behind: usize,
 }
 
 /// One cluster of a table: its seams `start..end` and its width.
@@ -237,6 +268,7 @@ impl SeamTable {
             let (before, after) = (&spans[index - 1], &spans[index]);
             self.examined_through = after.s0;
             if let Some(seam) = Seam::between(before, after) {
+                self.recorded_from.get_or_insert(self.seams.len());
                 self.seams.push(seam);
                 self.revision = next_revision();
             }
@@ -245,19 +277,55 @@ impl SeamTable {
     }
 
     /// Rebuilds the clusters where the seams or the width field changed
-    /// since they were built.
+    /// since they were built: from the cluster holding the seam before the
+    /// first one recorded since, or the first one whose width may have
+    /// changed ([`WidthField::changed_from`]), whose join with it may have.
+    /// A cluster rebuilt on the same seams at the same width keeps its
+    /// pieces.
     fn refresh(&mut self, width: &WidthField) {
-        if self.clusters.width_revision == width.revision
-            && self.clusters.seams_revision == self.revision
-        {
+        let width_changed = self.clusters.width_revision != width.revision;
+        if !width_changed && self.clusters.seams_revision == self.revision {
             return;
         }
-        let mut spans = Vec::new();
-        let mut start = 0;
+        let mut from = self.recorded_from.take().unwrap_or(self.seams.len());
+        if width_changed {
+            from = from.min(
+                self.seams
+                    .partition_point(|seam| seam.s < width.changed_from),
+            );
+        }
+        let kept = from.checked_sub(1).map_or(0, |before| {
+            self.clusters
+                .spans
+                .partition_point(|span| span.end <= before)
+        });
+        let mut start = self.clusters.spans.get(kept).map_or(0, |span| span.start);
+        if kept == 0 {
+            start = 0;
+        }
+        let clusters = &mut self.clusters;
+        let kept_stationary = clusters.stationary.partition_point(|&index| index < kept);
+        let rebuilt: Vec<(ClusterSpan, Vec<ClusterPiece>)> = clusters.stationary[kept_stationary..]
+            .iter()
+            .zip(&clusters.piece_ranges[kept_stationary..])
+            .map(|(&index, range)| {
+                (
+                    clusters.spans[index],
+                    clusters.pieces[range.clone()].to_vec(),
+                )
+            })
+            .collect();
+        clusters.spans.truncate(kept);
+        clusters.kinks.truncate(kept);
+        clusters.stationary.truncate(kept_stationary);
+        clusters.piece_ranges.truncate(kept_stationary);
+        clusters
+            .pieces
+            .truncate(clusters.piece_ranges.last().map_or(0, |range| range.end));
         while start < self.seams.len() {
             let end = self.cluster_end(width, start);
             let seams = &self.seams[start..end];
-            spans.push(ClusterSpan {
+            let span = ClusterSpan {
                 start,
                 end,
                 width: seams
@@ -265,31 +333,45 @@ impl SeamTable {
                     .filter(|seam| seam.significant || seams.len() == 1)
                     .map(|seam| width.step_width(seam.s))
                     .fold(f64::INFINITY, f64::min),
+            };
+            let clusters = &mut self.clusters;
+            clusters.kinks.push(Seam {
+                s: seams[0].s,
+                step: 0.0,
+                slope_after: seams[seams.len() - 1].slope_after,
+                significant: true,
             });
+            if (seams.len() > 1 || seams[0].step != 0.0) && span.width > 0.0 {
+                clusters.stationary.push(clusters.spans.len());
+                let first = clusters.pieces.len();
+                let unchanged = rebuilt
+                    .binary_search_by(|(old, _)| old.start.cmp(&start))
+                    .ok()
+                    .map(|index| &rebuilt[index])
+                    .filter(|(old, _)| old.end == end && old.width == span.width);
+                match unchanged {
+                    Some((_, pieces)) => clusters.pieces.extend_from_slice(pieces),
+                    None => clusters.pieces.extend(cluster_pieces(seams, span.width)),
+                }
+                clusters.piece_ranges.push(first..clusters.pieces.len());
+            }
+            clusters.spans.push(span);
             start = end;
         }
-        let kinks = spans
+        let clusters = &mut self.clusters;
+        clusters.widest_reach = clusters
+            .stationary
             .iter()
-            .map(|span| Seam {
-                s: self.seams[span.start].s,
-                step: 0.0,
-                slope_after: self.seams[span.end - 1].slope_after,
-                significant: true,
+            .zip(&clusters.piece_ranges)
+            .map(|(&index, range)| {
+                let span = clusters.spans[index];
+                let pieces = &clusters.pieces[range.clone()];
+                (self.seams[span.start].s - pieces[0].from)
+                    .max(pieces[pieces.len() - 1].to - self.seams[span.end - 1].s)
             })
-            .collect();
-        let stationary = spans
-            .iter()
-            .enumerate()
-            .filter(|(_, span)| span.end - span.start > 1 || self.seams[span.start].step != 0.0)
-            .map(|(index, _)| index)
-            .collect();
-        self.clusters = Clusters {
-            width_revision: width.revision,
-            seams_revision: self.revision,
-            spans,
-            kinks,
-            stationary,
-        };
+            .fold(0.0, f64::max);
+        clusters.width_revision = width.revision;
+        clusters.seams_revision = self.revision;
     }
 
     /// The clusters, built under `width` as it stands.
@@ -310,11 +392,22 @@ impl SeamTable {
     fn cluster(&self, span: ClusterSpan) -> SeamCluster<'_> {
         SeamCluster {
             seams: &self.seams[span.start..span.end],
+            pieces: &[],
             width: span.width,
         }
     }
 
+    /// The stationary cluster `stationary`, the index into
+    /// [`Clusters::stationary`], with its pieces.
+    fn stationary_cluster(&self, clusters: &Clusters, stationary: usize) -> SeamCluster<'_> {
+        SeamCluster {
+            pieces: &self.clusters.pieces[clusters.piece_ranges[stationary].clone()],
+            ..self.cluster(clusters.spans[clusters.stationary[stationary]])
+        }
+    }
+
     /// The cluster holding seam `index`.
+    #[cfg(test)]
     fn cluster_holding(&self, width: &WidthField, index: usize) -> SeamCluster<'_> {
         let spans = &self.fresh(width).spans;
         self.cluster(spans[spans.partition_point(|span| span.end <= index)])
@@ -339,6 +432,32 @@ impl SeamTable {
             self.base_slope = Some(self.seams[drop - 1].slope_after);
             self.seams.drain(..drop);
             self.revision = next_revision();
+            let clusters = &mut self.clusters;
+            let dropped = clusters.spans.partition_point(|span| span.end <= drop);
+            clusters.spans.drain(..dropped);
+            for span in &mut clusters.spans {
+                span.start -= drop;
+                span.end -= drop;
+            }
+            clusters.kinks.drain(..dropped);
+            let dropped_stationary = clusters
+                .stationary
+                .partition_point(|&index| index < dropped);
+            clusters.stationary.drain(..dropped_stationary);
+            for index in &mut clusters.stationary {
+                *index -= dropped;
+            }
+            clusters.piece_ranges.drain(..dropped_stationary);
+            let dropped_pieces = clusters
+                .piece_ranges
+                .first()
+                .map_or(clusters.pieces.len(), |range| range.start);
+            clusters.pieces.drain(..dropped_pieces);
+            for range in &mut clusters.piece_ranges {
+                *range = range.start - dropped_pieces..range.end - dropped_pieces;
+            }
+            clusters.seams_revision = self.revision;
+            self.recorded_from = self.recorded_from.map(|index| index.saturating_sub(drop));
         }
         self.seams
             .first()
@@ -415,35 +534,28 @@ impl SeamTable {
     }
 
     /// The clusters with a stationary share whose windows reach into
-    /// `[lo, hi]` ([`SeamCluster::support`]), in path order. A cluster's
-    /// width is no more than the width at its seams, which rises no faster
-    /// than `λ` away from the stretch, so every seam ending a cluster that
-    /// reaches it lies within `h/(1 − λ)` of it, `h` the widest the stretch
-    /// holds.
+    /// `[lo, hi]` ([`SeamCluster::support`]), in path order: every one whose
+    /// first seam lies short of the widest cluster's reach past `hi`, and
+    /// its last no further than that before `lo`.
     fn clusters_reaching<'a>(
         &'a self,
         width: &'a WidthField,
         (lo, hi): (f64, f64),
     ) -> impl Iterator<Item = SeamCluster<'a>> + 'a {
-        let reach = if width.nodes.is_empty() {
-            0.0
-        } else {
-            width.bounds(lo, hi).0 / (1.0 - WIDTH_SLOPE_BOUND)
-        };
         let clusters = self.fresh(width);
+        let reach = clusters.widest_reach;
         let span = |index: &usize| clusters.spans[*index];
         let first = clusters
             .stationary
             .partition_point(|index| self.seams[span(index).end - 1].s <= lo - reach);
         let past = clusters
             .stationary
-            .partition_point(|index| self.seams[span(index).start].s < hi + reach);
-        clusters.stationary[first..past.max(first)]
-            .iter()
-            .map(move |index| self.cluster(span(index)))
+            .partition_point(|index| self.seams[span(index).start].s <= hi + reach);
+        (first..past.max(first))
+            .map(move |stationary| self.stationary_cluster(clusters, stationary))
             .filter(move |cluster| {
                 let (from, to) = cluster.support();
-                from < hi && to > lo
+                from <= hi && to > lo
             })
     }
 
@@ -560,6 +672,7 @@ fn slope_correction(view: &SeamView<'_>, h: Jet, s: f64) -> Jet {
 #[derive(Clone, Copy, Debug)]
 struct SeamCluster<'a> {
     seams: &'a [Seam],
+    pieces: &'a [ClusterPiece],
     width: f64,
 }
 
@@ -578,132 +691,148 @@ impl SeamCluster<'_> {
         self.last().slope_after
     }
 
-    /// `(σ_first − h, σ_last + h)`, outside which the stationary share is
-    /// nothing; empty at no width, where the table stands unsmoothed.
+    /// Where the stationary share is something: from the first float the
+    /// first seam enters the window to the first the last leaves it;
+    /// empty for a cluster without one.
     fn support(&self) -> (f64, f64) {
-        if self.width <= 0.0 {
-            return (f64::INFINITY, f64::NEG_INFINITY);
-        }
-        (self.first() - self.width, self.last().s + self.width)
-    }
-
-    /// The floats where the seam at `seam` enters and leaves the window
-    /// that reads it ([`Self::window_at`]): the first `s` with
-    /// `seam < s + h`, and the first with `seam <= s − h`.
-    fn window_edges(&self, seam: f64) -> [f64; 2] {
-        let h = self.width;
-        let first_holding = |start: f64, holds: &dyn Fn(f64) -> bool| {
-            let mut s = start;
-            while !holds(s) {
-                s = trajectory::next_toward(s, f64::INFINITY);
-            }
-            loop {
-                let before = trajectory::next_toward(s, f64::NEG_INFINITY);
-                if !holds(before) {
-                    return s;
-                }
-                s = before;
-            }
-        };
-        [
-            first_holding(seam - h, &|s| seam < s + h),
-            first_holding(seam + h, &|s| seam <= s - h),
-        ]
-    }
-
-    /// Which of the cluster's seams the window at `s` holds, and the end
-    /// of those behind `s`.
-    fn window_at(&self, s: f64) -> ClusterWindow {
-        let h = self.width;
-        let first = self.seams.partition_point(|seam| seam.s <= s - h);
-        let past = self.seams.partition_point(|seam| seam.s < s + h).max(first);
-        ClusterWindow {
-            first,
-            past,
-            behind: self
-                .seams
-                .partition_point(|seam| seam.s <= s)
-                .clamp(first, past),
+        match (self.pieces.first(), self.pieces.last()) {
+            (Some(first), Some(last)) => (first.from, last.to),
+            _ => (f64::INFINITY, f64::NEG_INFINITY),
         }
     }
 
-    /// The stationary share of `X` at `s`: the cluster's slopes less the
-    /// one it leaves on, averaged over the window ([`cluster_slope_correction`]),
-    /// and each ratio step in the window smoothed over it
-    /// ([`step_correction`]).
+    /// The piece holding `s`, if any.
+    fn piece_at(&self, s: f64) -> Option<&ClusterPiece> {
+        let index = self
+            .pieces
+            .partition_point(|piece| piece.from <= s)
+            .checked_sub(1)?;
+        let piece = &self.pieces[index];
+        (s < piece.to).then_some(piece)
+    }
+
+    /// The stationary share of `X` at `s` ([`cluster_pieces`]).
     fn correction(&self, s: f64) -> Jet {
-        let window = self.window_at(s);
-        let steps = self.seams[window.first..window.past]
-            .iter()
-            .enumerate()
-            .filter(|(_, seam)| seam.step != 0.0)
-            .fold(Jet::ZERO, |total, (index, seam)| {
-                total + step_correction(seam, self.width, s, window.first + index < window.behind)
-            });
-        if self.seams.len() == 1 {
-            return steps;
+        self.piece_at(s).map_or(Jet::ZERO, |piece| {
+            Jet::variable(s)
+                .offset(-piece.from)
+                .poly(&piece.coefficients)
+        })
+    }
+}
+
+/// The pieces of the stationary share of `X` of a cluster holding `seams`,
+/// averaged over the half-width `h`: in each, with `x = (s − σ)/h`, each
+/// ratio step `Δ` the window holds adds `Δ·h·(P₁(x) − x₊)`, the smoothed
+/// ramp less the table's own kink ([`SMOOTHED_RAMP`]); the cluster's slopes
+/// less the one it leaves on add what the window's moments of them make
+/// ([`models::cluster_slope_polynomial`]), read span by span as a rise
+/// over each, so a corner blend nanometres long, whose slope steps by
+/// millions, leaves no two steps cancelling to an ulp of `m·h²`.
+fn cluster_pieces(seams: &[Seam], h: f64) -> Vec<ClusterPiece> {
+    let mut cuts: Vec<f64> = seams
+        .iter()
+        .flat_map(|seam| {
+            let [enters, leaves] = window_edges(seam.s, h);
+            [enters, seam.s, leaves]
+        })
+        .collect();
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup();
+    cuts.windows(2)
+        .map(|pair| {
+            let (from, to) = (pair[0], pair[1]);
+            let first = seams.partition_point(|seam| seam.s <= from - h);
+            let past = seams.partition_point(|seam| seam.s < from + h).max(first);
+            let window = ClusterWindow {
+                first,
+                past,
+                behind: seams
+                    .partition_point(|seam| seam.s <= from)
+                    .clamp(first, past),
+            };
+            let slope = models::cluster_slope_polynomial(seams, h, window, from, to - from);
+            let mut coefficients = slope.map(|term| term.mid);
+            let mut roundings = slope.map(|term| term.rad);
+            for (index, seam) in seams.iter().enumerate().take(past).skip(first) {
+                if seam.step == 0.0 {
+                    continue;
+                }
+                let mut ramp = SMOOTHED_RAMP.to_vec();
+                if index < window.behind {
+                    ramp[1] -= 1.0;
+                }
+                add_composed(
+                    (&mut coefficients, &mut roundings),
+                    &ramp,
+                    seam.step * h,
+                    (from - seam.s) / h,
+                    h,
+                );
+            }
+            ClusterPiece {
+                from,
+                to,
+                coefficients,
+                roundings,
+            }
+        })
+        .collect()
+}
+
+/// Adds `factor·q((y + offset·h)/h)` to `coefficients`, in powers of `y`:
+/// `q` shifted by `offset` and scaled by `1/h`; each coefficient's
+/// rounding to `roundings`, a few operations on terms no larger than the
+/// magnitudes summed, within `γ` of them.
+fn add_composed(
+    (coefficients, roundings): (&mut [f64], &mut [f64]),
+    q: &[f64],
+    factor: f64,
+    offset: f64,
+    h: f64,
+) {
+    let mut shifted = q.to_vec();
+    let mut magnitudes: Vec<f64> = q.iter().map(|c| c.abs()).collect();
+    for lowest in 0..shifted.len() {
+        for power in (lowest + 1..shifted.len()).rev() {
+            shifted[power - 1] += offset * shifted[power];
+            magnitudes[power - 1] += offset.abs() * magnitudes[power];
         }
-        cluster_slope_correction(self, window, s) + steps
+    }
+    let gamma = 4.0 * (q.len() as f64 + 3.0) * f64::EPSILON;
+    let mut scale = factor;
+    for ((slot, rounding), (term, magnitude)) in coefficients
+        .iter_mut()
+        .zip(roundings.iter_mut())
+        .zip(shifted.iter().zip(&magnitudes))
+    {
+        *slot += scale * term;
+        *rounding += gamma * (scale.abs() * magnitude + slot.abs());
+        scale /= h;
     }
 }
 
-/// The seams of a cluster inside one window, `first..past`, and the end
-/// of those behind its point.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct ClusterWindow {
-    first: usize,
-    past: usize,
-    behind: usize,
-}
-
-/// The stationary share of a cluster's slope correction at `s`, the
-/// window `window` there: its spans' slopes less the one it leaves on, by
-/// their moments ([`SeamMoments`]) inside the window and past its edges
-/// ([`edge_spans`]). Flat either side of the cluster, it is nothing
-/// outside its window.
-fn cluster_slope_correction(cluster: &SeamCluster, window: ClusterWindow, s: f64) -> Jet {
-    let out = cluster.slope_out();
-    let h = Jet::constant(cluster.width);
-    let slope_left = window
-        .first
-        .checked_sub(1)
-        .map_or(0.0, |last| cluster.seams[last].slope_after - out);
-    let inside = &cluster.seams[window.first..window.past];
-    let mut moments = SeamMoments::default();
-    for pair in inside.windows(2) {
-        let (seam, next) = (pair[0], pair[1]);
-        moments.add_span(
-            (s - seam.s, s - next.s),
-            seam.slope_after - out,
-            next.s - seam.s,
-        );
-    }
-    let inverse = h.recip();
-    let ends = inside
-        .first()
-        .zip(inside.last())
-        .map(|(first_seam, last_seam)| {
-            (
-                s - first_seam.s,
-                s - last_seam.s,
-                last_seam.slope_after - out,
-            )
-        });
-    moments.correction(h, inverse) + edge_spans(h, inverse, slope_left, ends)
-}
-
-/// `Δ·h·G₁(x)` at `x = (s − σ)/h` for the step `Δ` at `σ` inside the
-/// window of half-width `h` at `s`: the smoothed ramp less the table's
-/// own kink `Δ·(s − σ)₊`, the kink's where the seam lies `behind` `s`.
-fn step_correction(seam: &Seam, h: f64, s: f64, behind: bool) -> Jet {
-    let x = Jet::variable(s).offset(-seam.s).scale(1.0 / h);
-    let smoothed = x.poly(&SMOOTHED_RAMP);
-    let kinked = if behind {
-        smoothed + x.scale(-1.0)
-    } else {
-        smoothed
+/// The floats where the seam at `seam` enters and leaves the window of
+/// half-width `h` that reads it ([`cluster_pieces`]): the first `s`
+/// with `seam < s + h`, and the first with `seam <= s − h`.
+fn window_edges(seam: f64, h: f64) -> [f64; 2] {
+    let first_holding = |start: f64, holds: &dyn Fn(f64) -> bool| {
+        let mut s = start;
+        while !holds(s) {
+            s = trajectory::next_toward(s, f64::INFINITY);
+        }
+        loop {
+            let before = trajectory::next_toward(s, f64::NEG_INFINITY);
+            if !holds(before) {
+                return s;
+            }
+            s = before;
+        }
     };
-    kinked.scale(h).scale(seam.step)
+    [
+        first_holding(seam - h, &|s| seam < s + h),
+        first_holding(seam + h, &|s| seam <= s - h),
+    ]
 }
 
 /// The spans inside one window as [`slope_correction`] sums
@@ -1013,6 +1142,10 @@ struct WidthField {
     /// Which state the nodes stand in ([`next_revision`]): every change to
     /// a node takes a fresh one.
     revision: u64,
+    /// The first path distance whose width may have changed since the
+    /// seam clusters were last built ([`SeamTable::refresh`]); none past
+    /// the end, every one at the start.
+    changed_from: f64,
 }
 
 impl WidthField {
@@ -1394,7 +1527,7 @@ impl WidthField {
                 target: 0.0,
                 envelope: 0.0,
             });
-            self.revision = next_revision();
+            self.changed(self.nodes.len() - 1);
         }
     }
 
@@ -1420,7 +1553,7 @@ impl WidthField {
         );
         let target = moving.iter().map(|node| node.target).fold(0.0, f64::max);
         self.nodes.truncate(opening + 1);
-        self.revision = next_revision();
+        self.changed(opening + 1);
         Some(target)
     }
 
@@ -1432,7 +1565,7 @@ impl WidthField {
                 .is_some_and(|last| last.target > 0.0 && rest <= last.s + REST_TARGET_MM)
         {
             self.nodes.pop();
-            self.revision = next_revision();
+            self.changed(self.nodes.len());
         }
     }
 
@@ -1488,6 +1621,19 @@ impl WidthField {
         for node in &mut self.nodes[first_pulled..] {
             node.s = rest;
         }
+        self.changed(first_pulled);
+    }
+
+    /// Records that node `index` or those past it changed: the width
+    /// changes from the node before it on, and with a fresh revision.
+    /// Dropping nodes off the front changes no width a kept seam reads, the
+    /// field keeping the node at or before the first.
+    fn changed(&mut self, index: usize) {
+        let from = index
+            .checked_sub(1)
+            .and_then(|before| self.nodes.get(before))
+            .map_or(f64::NEG_INFINITY, |node| node.s);
+        self.changed_from = self.changed_from.min(from);
         self.revision = next_revision();
     }
 
@@ -1501,14 +1647,16 @@ impl WidthField {
             envelope = envelope.min(self.cone(index - 1, index));
         }
         self.nodes[index].envelope = envelope;
-        self.revision = next_revision();
+        let mut lowest = index;
         for back in (0..index).rev() {
             let lowered = self.cone(back + 1, back);
             if lowered >= self.nodes[back].envelope {
                 break;
             }
             self.nodes[back].envelope = lowered;
+            lowest = back;
         }
+        self.changed(lowest);
     }
 
     /// A node is final once no later node can lower it: every node still
@@ -1691,9 +1839,6 @@ impl WidthField {
             .min(self.final_prefix.saturating_sub(1));
         self.nodes.drain(..keep);
         self.final_prefix -= keep;
-        if keep > 0 {
-            self.revision = next_revision();
-        }
     }
 }
 
@@ -1844,6 +1989,7 @@ impl RatioSmoothing {
     fn refresh_clusters(&mut self) {
         self.laid.refresh(&self.width);
         self.advance.refresh(&self.width);
+        self.width.changed_from = f64::INFINITY;
     }
 
     /// A rest valley opens with no end: the advance reads nothing from its
@@ -2435,24 +2581,27 @@ impl RatioSmoothing {
     /// `(max |r̃|, max |r̃'|)` over `[lo, hi]`, see [`RatioSmoothing`]: the
     /// ratio within the spans the smoothed table reads there
     /// ([`Self::reading`]); the slope within the moving window's bound on
-    /// their slopes, and what each cluster reaching in adds over its own
-    /// window, its slopes less the one it leaves on and `¾` of its steps
-    /// over its width. A span only touching the stretch is read nowhere on
+    /// the slopes it averages there, each cluster's gathered at its first
+    /// seam ([`SeamTable::moving_view`]), and what each cluster reaching in
+    /// adds over its own window, its slopes less the one it leaves on and
+    /// `¾` of its steps over its width. A span only touching the stretch is read nowhere on
     /// it, so nothing laid past what the stretch reads decides the bound.
     pub(super) fn ratio_bounds(&self, spans: &[RatioSpan], lo: f64, hi: f64) -> (f64, f64) {
         let (_, curvature) = self.width.bounds(lo, hi);
         let reading = self.reading(lo, hi);
         let ridden = spans.iter().filter(|span| reading.reads(span));
-        let (low, high, slope) = ridden.fold(
-            (f64::INFINITY, f64::NEG_INFINITY, 0.0_f64),
-            |(low, high, slope), span| {
-                (
-                    low.min(span.r0.min(span.r1)),
-                    high.max(span.r0.max(span.r1)),
-                    slope.max(span.ratio_slope().abs()),
-                )
-            },
-        );
+        let (low, high) = ridden.fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), span| {
+            (
+                low.min(span.r0.min(span.r1)),
+                high.max(span.r0.max(span.r1)),
+            )
+        });
+        let moving = self.laid.moving_view(&self.width, reading.moving);
+        let slope = moving
+            .seams
+            .iter()
+            .map(|kink| kink.slope_after.abs())
+            .fold(moving.slope_before.abs(), f64::max);
         let (low, high) = match spans.last() {
             Some(last) if reading.moving.1 > last.s1 => (low.min(last.r1), high.max(last.r1)),
             _ => (low, high),
@@ -2489,7 +2638,7 @@ impl RatioSmoothing {
     /// advance's read, bends: where each kink the moving window averages
     /// ([`SeamTable::moving_view`]) enters and leaves a window, where each
     /// seam enters and leaves its cluster's own window
-    /// ([`SeamCluster::window_edges`]), the width nodes, and the valley
+    /// ([`window_edges`]), the width nodes, and the valley
     /// ends. A stretch the smoothing does not touch bends only at valley
     /// ends, whatever the smoothing holds elsewhere: the advance's table
     /// steps its ratio only where the laid one does, and its slope only
@@ -2530,12 +2679,8 @@ impl RatioSmoothing {
         }
         for table in [&self.laid, &self.advance] {
             for cluster in table.clusters_reaching(&self.width, (lo, hi)) {
-                bends.extend(
-                    cluster
-                        .seams
-                        .iter()
-                        .flat_map(|seam| cluster.window_edges(seam.s)),
-                );
+                bends.extend(cluster.pieces.iter().map(|piece| piece.from));
+                bends.extend(cluster.pieces.last().map(|piece| piece.to));
             }
         }
         bends
