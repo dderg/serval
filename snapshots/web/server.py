@@ -89,12 +89,8 @@ def playground_case(name: str) -> dict:
     }
     if cfg.corner_deviation is not None:
         config["corner_deviation"] = cfg.corner_deviation
-    else:
-        config["square_corner_velocity"] = (
-            5.0
-            if cfg.square_corner_velocity is None
-            else cfg.square_corner_velocity
-        )
+    if cfg.square_corner_velocity is not None:
+        config["square_corner_velocity"] = cfg.square_corner_velocity
     if cfg.max_extrude_only_velocity is not None:
         config["max_extrude_only_velocity"] = cfg.max_extrude_only_velocity
     if cfg.max_extrude_only_accel is not None:

@@ -49,7 +49,7 @@ pub planner_config::PostProcessorConfigError::UnsupportedKind::kind: alloc::stri
 pub planner_config::PostProcessorConfigError::UnsupportedKind::name: alloc::string::String
 pub planner_config::PostProcessorConfigError::UnsupportedKind::supported: alloc::string::String
 pub enum planner_config::RuntimeLimitError
-pub planner_config::RuntimeLimitError::InvalidCornerDeviation
+pub planner_config::RuntimeLimitError::InvalidCornerBudget(&'static str)
 pub planner_config::RuntimeLimitError::NotPositive
 pub planner_config::RuntimeLimitError::NotPositive::name: &'static str
 pub struct planner_config::AxisDecl
@@ -72,7 +72,7 @@ pub fn planner_config::AxisRegistry::validate_motor_mapping(&self, &[alloc::stri
 impl core::default::Default for planner_config::AxisRegistry
 pub fn planner_config::AxisRegistry::default() -> Self
 pub struct planner_config::CartesianLimits
-pub planner_config::CartesianLimits::corner_deviation: f64
+pub planner_config::CartesianLimits::corner: geometry::frontend::CornerBudget
 pub planner_config::CartesianLimits::max_accel: f64
 pub planner_config::CartesianLimits::max_jerk: f64
 pub planner_config::CartesianLimits::max_velocity: f64
@@ -80,7 +80,7 @@ pub planner_config::CartesianLimits::max_z_accel: f64
 pub planner_config::CartesianLimits::max_z_velocity: f64
 impl planner_config::CartesianLimits
 pub fn planner_config::CartesianLimits::validate(&self) -> core::result::Result<(), &'static str>
-pub fn planner_config::CartesianLimits::without_z_caps(f64, f64, f64, f64) -> Self
+pub fn planner_config::CartesianLimits::without_z_caps(f64, f64, f64, geometry::frontend::CornerBudget) -> Self
 impl core::default::Default for planner_config::CartesianLimits
 pub fn planner_config::CartesianLimits::default() -> Self
 pub struct planner_config::PlannerConfig
@@ -97,7 +97,7 @@ pub planner_config::PlannerConfig::runtime: planner_config::RuntimeLimits
 impl planner_config::PlannerConfig
 pub fn planner_config::PlannerConfig::check_kernel_free_advance_extrude_only_caps(&self) -> core::result::Result<(), alloc::string::String>
 pub fn planner_config::PlannerConfig::compile_active_chains(&self) -> core::result::Result<trajectory::chain::AxisChainSet, planner_config::PostProcessorConfigError>
-pub fn planner_config::PlannerConfig::effective_limits(&self) -> (f64, f64, f64)
+pub fn planner_config::PlannerConfig::effective_limits(&self) -> (f64, f64, geometry::frontend::CornerBudget)
 impl core::default::Default for planner_config::PlannerConfig
 pub fn planner_config::PlannerConfig::default() -> Self
 pub struct planner_config::PostProcessorDecl
@@ -113,13 +113,18 @@ pub fn planner_config::PostProcessorSet::set_param(&mut self, &str, &str, f64) -
 pub fn planner_config::PostProcessorSet::try_new(&planner_config::AxisRegistry, &[planner_config::PostProcessorDecl]) -> core::result::Result<Self, planner_config::PostProcessorConfigError>
 pub struct planner_config::RuntimeLimits
 pub planner_config::RuntimeLimits::accel: core::option::Option<f64>
-pub planner_config::RuntimeLimits::corner_deviation: core::option::Option<f64>
+pub planner_config::RuntimeLimits::corner: core::option::Option<geometry::frontend::CornerBudget>
 pub planner_config::RuntimeLimits::velocity: core::option::Option<f64>
 impl planner_config::RuntimeLimits
-pub fn planner_config::RuntimeLimits::effective(&self, &planner_config::CartesianLimits) -> (f64, f64, f64)
+pub fn planner_config::RuntimeLimits::effective(&self, &planner_config::CartesianLimits) -> (f64, f64, geometry::frontend::CornerBudget)
 pub fn planner_config::RuntimeLimits::set_accel_cap(&mut self, core::option::Option<f64>) -> core::result::Result<(), planner_config::RuntimeLimitError>
 pub fn planner_config::RuntimeLimits::set_corner_deviation(&mut self, core::option::Option<f64>) -> core::result::Result<(), planner_config::RuntimeLimitError>
+pub fn planner_config::RuntimeLimits::set_square_corner_velocity(&mut self, core::option::Option<f64>) -> core::result::Result<(), planner_config::RuntimeLimitError>
 pub fn planner_config::RuntimeLimits::set_velocity_cap(&mut self, core::option::Option<f64>) -> core::result::Result<(), planner_config::RuntimeLimitError>
-pub const planner_config::DEFAULT_CORNER_DEVIATION_MM: f64
+pub const planner_config::CORNER_KIND_DEFAULT: &str
+pub const planner_config::CORNER_KIND_DEVIATION: &str
+pub const planner_config::CORNER_KIND_SCV: &str
 pub const planner_config::RATIO_RAMP_RULE: &str
+pub fn planner_config::corner_budget_from_parts(&str, f64) -> core::result::Result<geometry::frontend::CornerBudget, alloc::string::String>
+pub fn planner_config::corner_budget_parts(geometry::frontend::CornerBudget) -> (&'static str, f64)
 pub fn planner_config::extruder_caps(&planner_config::AxisRegistry, &trajectory::chain::AxisChainSet, f64) -> core::result::Result<alloc::vec::Vec<geometry::frontend::ExtruderCaps>, alloc::string::String>

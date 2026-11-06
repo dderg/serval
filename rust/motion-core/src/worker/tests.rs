@@ -321,7 +321,13 @@ fn limited_line(
     let ctx = MoveContext {
         extruder_axis: 3,
         feedrate_mm_s: feed,
-        limits: VelocityLimits::try_new(1_000.0, accel, 5.0, f64::INFINITY).unwrap(),
+        limits: VelocityLimits::try_new(
+            1_000.0,
+            accel,
+            geometry::CornerBudget::Shaped(5.0),
+            f64::INFINITY,
+        )
+        .unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,
@@ -853,7 +859,13 @@ fn cfg_cap(max_buffer_moves: usize) -> StreamConfig {
         fit_tol_mm: 1e-3,
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves,
-        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, f64::INFINITY).unwrap(),
+        limits: VelocityLimits::try_new(
+            300.0,
+            5000.0,
+            geometry::CornerBudget::Shaped(5.0),
+            f64::INFINITY,
+        )
+        .unwrap(),
         step_capacity: None,
     }
 }
@@ -862,7 +874,13 @@ fn ctx(line_no: u32) -> MoveContext {
     MoveContext {
         extruder_axis: 3,
         feedrate_mm_s: 80.0,
-        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, f64::INFINITY).unwrap(),
+        limits: VelocityLimits::try_new(
+            300.0,
+            5000.0,
+            geometry::CornerBudget::Shaped(5.0),
+            f64::INFINITY,
+        )
+        .unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,
@@ -1845,7 +1863,13 @@ fn beacon_scan_path_live_worker_velocity_stays_bounded() {
         .expect("compiles"),
         trajectory::CompiledChain::default(),
     );
-    let limits = VelocityLimits::try_new(2800.0, 100000.0, 0.695, f64::INFINITY).unwrap();
+    let limits = VelocityLimits::try_new(
+        2800.0,
+        100000.0,
+        geometry::CornerBudget::Shaped(0.695),
+        f64::INFINITY,
+    )
+    .unwrap();
     let config = StreamConfig {
         corner: CornerFitConfig::default(),
         integration_tol: 1e-4,

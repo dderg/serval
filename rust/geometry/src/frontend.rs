@@ -1,6 +1,7 @@
 use crate::GeometryError;
 use crate::path::{Line, PathSegment, Segment};
 use crate::segment::{FollowerDemand, SourceRange};
+use crate::velocity::law::RAIL_ACCELERATION_DEFECT;
 
 mod leader_spill;
 pub use leader_spill::{LeaderSpill, LeaderSpillId, SPILL_CELLS};
@@ -27,6 +28,57 @@ pub fn scv_from_corner_deviation(corner_deviation_mm: f64, accel_mm_s2: f64) -> 
     (corner_deviation_mm * accel_mm_s2 / CORNER_DEVIATION_SCV_FACTOR).sqrt()
 }
 
+/// The corner budget a move is planned under.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CornerBudget {
+    /// `corner_deviation`: the shaped path misses every corner's vertex by at most this many mm.
+    Shaped(f64),
+    /// Neither corner option set: the shaper's own rounding of the corner at its planned
+    /// acceleration, plus this many mm.
+    OverFloor(f64),
+    /// `square_corner_velocity` (mm/s): that rounding plus what a sharp 90° corner taken at
+    /// this speed adds to it.
+    ScvEquivalent(f64),
+}
+
+/// The allowance over the shaper's floor a `[printer]` that sets neither corner option gets,
+/// in mm. The same at every `max_accel`: see `docs/Config_Reference_Motion.md` for the
+/// profile study behind it.
+pub const DEFAULT_CORNER_ALLOWANCE_MM: f64 = 0.04;
+
+impl CornerBudget {
+    /// The raw cut the fitter spends while no shaper prediction applies.
+    #[must_use]
+    pub fn unshaped_cut_mm(self, accel_mm_s2: f64) -> f64 {
+        match self {
+            Self::Shaped(mm) | Self::OverFloor(mm) => mm,
+            Self::ScvEquivalent(scv) => corner_deviation_from_scv(scv, accel_mm_s2),
+        }
+    }
+
+    /// The budget holding both `self` and `other`, for a segment that inherits from two
+    /// moves: the smaller payload of a shared kind, else the one cutting less at `accel_mm_s2`.
+    #[must_use]
+    pub fn stricter(self, other: Self, accel_mm_s2: f64) -> Self {
+        match (self, other) {
+            (Self::Shaped(a), Self::Shaped(b)) => Self::Shaped(a.min(b)),
+            (Self::OverFloor(a), Self::OverFloor(b)) => Self::OverFloor(a.min(b)),
+            (Self::ScvEquivalent(a), Self::ScvEquivalent(b)) => Self::ScvEquivalent(a.min(b)),
+            _ if other.unshaped_cut_mm(accel_mm_s2) < self.unshaped_cut_mm(accel_mm_s2) => other,
+            _ => self,
+        }
+    }
+
+    pub fn validate(self) -> Result<(), &'static str> {
+        let (Self::Shaped(value) | Self::OverFloor(value) | Self::ScvEquivalent(value)) = self;
+        if value.is_finite() && value >= 0.0 {
+            Ok(())
+        } else {
+            Err("the corner budget must be finite and non-negative")
+        }
+    }
+}
+
 /// A move's motion caps. The first four bound the toolhead path; the z caps
 /// bound the z axis alone, so the planner applies them to whatever share of
 /// the path's motion each fitted segment puts on z. `try_new` leaves z
@@ -37,7 +89,7 @@ pub fn scv_from_corner_deviation(corner_deviation_mm: f64, accel_mm_s2: f64) -> 
 pub struct VelocityLimits {
     pub max_velocity_mm_s: f64,
     pub accel_mm_s2: f64,
-    pub corner_deviation_mm: f64,
+    pub corner: CornerBudget,
     pub max_jerk_mm_s3: f64,
     pub max_z_velocity_mm_s: f64,
     pub max_z_accel_mm_s2: f64,
@@ -208,13 +260,13 @@ impl VelocityLimits {
     pub fn try_new(
         max_velocity_mm_s: f64,
         accel_mm_s2: f64,
-        corner_deviation_mm: f64,
+        corner: CornerBudget,
         max_jerk_mm_s3: f64,
     ) -> Result<Self, &'static str> {
         let limits = Self {
             max_velocity_mm_s,
             accel_mm_s2,
-            corner_deviation_mm,
+            corner,
             max_jerk_mm_s3,
             max_z_velocity_mm_s: f64::INFINITY,
             max_z_accel_mm_s2: f64::INFINITY,
@@ -251,14 +303,15 @@ impl VelocityLimits {
         if !(self.accel_mm_s2.is_finite() && self.accel_mm_s2 > 0.0) {
             return Err("accel must be finite and positive");
         }
-        if !(self.corner_deviation_mm.is_finite() && self.corner_deviation_mm >= 0.0) {
-            return Err("corner_deviation must be finite and non-negative");
-        }
+        self.corner.validate()?;
         if !(self.max_jerk_mm_s3 > 0.0) {
             return Err("max_jerk must be positive (infinity disables jerk limiting)");
         }
         if !(self.max_z_velocity_mm_s > 0.0 && self.max_z_accel_mm_s2 > 0.0) {
             return Err("z caps must be positive (infinity leaves z to the path caps)");
+        }
+        if !(self.max_z_accel_mm_s2 > RAIL_ACCELERATION_DEFECT) {
+            return Err("max_z_accel must exceed the disk rail's acceleration defect");
         }
         self.extruder.as_ref().map_or(Ok(()), ExtruderCaps::check)
     }

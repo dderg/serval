@@ -641,6 +641,9 @@ impl TurningGuard {
         lo - 1
     }
 
+    /// The planner bakes each move's corner hold into its limits before it
+    /// arrives ([`geometry::MoveVelocity::corner_held`]), so a re-plan here
+    /// holds no corner again.
     fn plan_params(&self) -> VelocityPlanParams<'_> {
         VelocityPlanParams {
             integration_tol: self.config.integration_tol,
@@ -648,6 +651,7 @@ impl TurningGuard {
             max_extrude_only_accel_mm_s2: self.config.max_extrude_only_accel_mm_s2,
             entry_v: 0.0,
             step_capacity: self.config.step_capacity.as_deref(),
+            shaped_corners: None,
         }
     }
 

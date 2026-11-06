@@ -53,8 +53,13 @@ fn config() -> StreamConfig {
     let mut config = default_stream_config();
     config.fit_tol_mm = 0.005;
     config.integration_tol = 1e-7;
-    config.limits = geometry::VelocityLimits::try_new(1000.0, 20_000.0, 0.04, f64::INFINITY)
-        .expect("test limits are valid");
+    config.limits = geometry::VelocityLimits::try_new(
+        1000.0,
+        20_000.0,
+        geometry::CornerBudget::Shaped(0.04),
+        f64::INFINITY,
+    )
+    .expect("test limits are valid");
     config
 }
 
@@ -146,11 +151,12 @@ fn rise_width(track: &Track) -> f64 {
     track.path[high] - track.path[low]
 }
 
-/// The extrusion the planner lays for `script` along the raw path: the
+/// The extrusion the planner lays for `script` along the raw path under
+/// the leaders of `chains`, which set the corners the path cuts: the
 /// extruder passed through, following nothing.
-fn planned_e(script: Vec<StreamInput>) -> f64 {
-    let mut chains = plain();
+fn planned_e(script: Vec<StreamInput>, mut chains: AxisChainSet) -> f64 {
     chains.followers.clear();
+    chains.chains[EXTRUDER_AXIS] = CompiledChain::default();
     final_e(&collect_shaped_segments_from_script(
         script,
         config(),
@@ -218,12 +224,12 @@ fn a_ratio_ramp_lays_exactly_the_planned_material() {
         ),
         (cornering.to_string(), unshaped(CompiledChain::default())),
     ] {
+        let planned = planned_e(script(&gcode), chains.clone());
         let laid = final_e(&collect_shaped_segments_from_script(
             script(&gcode),
             config(),
             chains,
         ));
-        let planned = planned_e(script(&gcode));
         assert!(
             (laid - planned).abs() < 1e-9,
             "the ramped follower ends at {laid} mm, the planner lays {planned}"
@@ -305,7 +311,7 @@ fn a_ratio_ramp_lays_the_planned_material_through_retracts_and_drains() {
         config(),
         unshaped(CompiledChain::default()),
     ));
-    let planned = planned_e(twice());
+    let planned = planned_e(twice(), unshaped(CompiledChain::default()));
     assert!(
         (laid - planned).abs() < 1e-9,
         "the ramped follower ends at {laid} mm, the planner lays {planned}"
@@ -336,7 +342,7 @@ fn a_kernel_chain_ramps_its_ratio_steps_too() {
         .e
         .last()
         .expect("sampled");
-    let planned = planned_e(script(&gcode));
+    let planned = planned_e(script(&gcode), plain());
     assert!(
         (laid - planned).abs() < 1e-6,
         "the ramp under a kernel ends at {laid} mm, the planner lays {planned}"

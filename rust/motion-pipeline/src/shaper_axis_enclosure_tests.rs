@@ -14,7 +14,13 @@ const WINDOWS_PER_SEGMENT: u32 = 6;
 const CHECKS_PER_PIECE: u32 = 24;
 
 fn limits() -> VelocityLimits {
-    VelocityLimits::try_new(300.0, 25_000.0, 0.05, f64::INFINITY).unwrap()
+    VelocityLimits::try_new(
+        300.0,
+        25_000.0,
+        geometry::CornerBudget::Shaped(0.05),
+        f64::INFINITY,
+    )
+    .unwrap()
 }
 
 fn config() -> StreamConfig {

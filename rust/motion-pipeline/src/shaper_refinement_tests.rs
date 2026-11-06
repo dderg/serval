@@ -1201,7 +1201,7 @@ fn rail_braking_off_its_curvature_cap() -> AnalyticMoveSpan {
             limits: VelocityLimits::try_new(
                 1000.0,
                 70_000.0,
-                0.000_147_933_415_133_248_27,
+                geometry::CornerBudget::Shaped(0.000_147_933_415_133_248_27),
                 f64::INFINITY,
             )
             .expect("limits"),

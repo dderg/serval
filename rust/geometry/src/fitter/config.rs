@@ -1,5 +1,7 @@
 use std::f64::consts::PI;
 
+use crate::shaped_corner::ShapedCorners;
+
 const COLLINEAR_EPS_RAD: f64 = 1e-3;
 
 /// The largest per-axis velocity step a junction left unblended may take:
@@ -28,6 +30,9 @@ pub struct CornerFitConfig {
     /// iteration solve a joint ODE), so the fitter instead proves each ramp
     /// feasible in closed form — see [`ramps_admitted`].
     pub ramp_accel_budget_mm_s2: f64,
+    /// The shaper's rounding the corner budget is held to on the shaped
+    /// path; `None` where no kernel shapes X or Y.
+    pub shaped_corners: Option<&'static ShapedCorners>,
 }
 
 impl Default for CornerFitConfig {
@@ -38,6 +43,7 @@ impl Default for CornerFitConfig {
             theta_max_rad: PI - COLLINEAR_EPS_RAD,
             extrusion_ramp_rel_tol: EXTRUSION_RAMP_REL_TOL,
             ramp_accel_budget_mm_s2: f64::INFINITY,
+            shaped_corners: None,
         }
     }
 }

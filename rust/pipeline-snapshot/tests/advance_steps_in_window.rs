@@ -62,7 +62,7 @@ fn bench_shapers_with_extruder_chain(e_chain: Vec<PostProcessorDecl>) -> Snapsho
     SnapshotParams {
         max_velocity: MAX_VELOCITY,
         max_accel: MAX_ACCEL,
-        corner_deviation: 0.04,
+        corner: geometry::CornerBudget::Shaped(0.04),
         max_jerk: f64::INFINITY,
         max_z_velocity: None,
         max_z_accel: None,
@@ -98,7 +98,7 @@ fn final_extruder_position(e_chain: Vec<PostProcessorDecl>) -> (f64, f64) {
             MAX_VELOCITY,
             MAX_ACCEL,
             f64::INFINITY,
-            0.0,
+            geometry::CornerBudget::Shaped(0.0),
         ),
     )
     .expect("parse");

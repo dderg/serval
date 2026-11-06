@@ -7,6 +7,9 @@ use geometry::{
 };
 
 use crate::step_capacity_log::{StepCapacityLog, StepCapacityReport};
+use approach::Approaches;
+
+mod approach;
 use crate::types::{Control, PlannedItem, PlannedMove, StreamConfig, StreamInput};
 use crate::worker_pool::WorkerPool;
 
@@ -30,6 +33,7 @@ const QUIET_PLAN_MIN_MOVES: usize = 32;
 /// [`ExtrusionReach`]): a move's budget never changes after it is planned,
 /// so the forward ceilings the finality barrier rests on stay final.
 pub struct Planner {
+    approaches: Approaches,
     reach: ExtrusionReach,
     moves: Vec<Move>,
     budgets: Vec<ExtrusionBudget>,
@@ -43,6 +47,7 @@ pub struct Planner {
 impl Planner {
     pub fn new(config: StreamConfig, workers: Arc<WorkerPool>) -> Self {
         Self {
+            approaches: Approaches::new(config.corner),
             reach: ExtrusionReach::new(
                 config.max_extrude_only_velocity_mm_s,
                 config.max_extrude_only_accel_mm_s2,
@@ -94,6 +99,7 @@ impl Planner {
     ) -> bool {
         match &ctrl {
             Control::Reset { .. } => {
+                self.approaches.clear();
                 self.reach.clear();
                 self.moves.clear();
                 self.budgets.clear();
@@ -105,7 +111,7 @@ impl Planner {
             | Control::SetMesh { .. }
             | Control::Dispatch(_) => {
                 assert!(
-                    self.moves.is_empty() && self.reach.is_empty(),
+                    self.moves.is_empty() && self.reach.is_empty() && self.approaches.is_empty(),
                     "planner: control token arrived with {} undrained moves — a Drain must \
                      precede it",
                     self.moves.len()
@@ -116,6 +122,14 @@ impl Planner {
     }
 
     fn absorb(&mut self, m: Move, output: &mut impl FnMut(PlannedItem) -> bool) -> bool {
+        let mut released = Vec::new();
+        self.approaches.push(m, &mut |piece| released.push(piece));
+        released
+            .into_iter()
+            .all(|piece| self.absorb_released(piece, output))
+    }
+
+    fn absorb_released(&mut self, m: Move, output: &mut impl FnMut(PlannedItem) -> bool) -> bool {
         self.reach.push(m);
         self.admit_settled();
         self.moves_since_plan += 1;
@@ -172,6 +186,7 @@ impl Planner {
                 max_extrude_only_accel_mm_s2: self.config.max_extrude_only_accel_mm_s2,
                 entry_v: self.entry_v,
                 step_capacity: self.config.step_capacity.as_deref(),
+                shaped_corners: self.config.corner.shaped_corners,
             },
             &*self.workers,
             select_prefix,
@@ -200,6 +215,8 @@ impl Planner {
     /// and emit everything.
     fn drain_to_rest(&mut self, output: &mut impl FnMut(PlannedItem) -> bool) -> bool {
         self.moves_since_plan = 0;
+        let reach = &mut self.reach;
+        self.approaches.flush(&mut |piece| reach.push(piece));
         self.reach.close();
         self.admit_settled();
         if self.moves.is_empty() {
@@ -262,7 +279,7 @@ impl Planner {
                 ));
             }
             if !output(PlannedItem::Move(PlannedMove {
-                geometry,
+                geometry: velocity.corner_held(geometry),
                 velocity,
                 budget,
             })) {
