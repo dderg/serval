@@ -42,7 +42,7 @@ impl RunFit {
         head_arc_tangent: Option<[f64; 3]>,
         corner: CornerFitConfig,
     ) -> Result<Option<RunFit>, FitError> {
-        let tol = span_tolerance(facets);
+        let tol = span_tolerance(facets, corner);
         if !tol.is_finite() {
             return Ok(None);
         }

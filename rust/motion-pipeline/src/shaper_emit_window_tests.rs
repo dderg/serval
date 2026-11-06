@@ -41,7 +41,7 @@ fn limits() -> VelocityLimits {
     VelocityLimits::try_new(
         300.0,
         ACCEL_MM_S2,
-        geometry::corner_deviation_from_scv(5.0, ACCEL_MM_S2),
+        geometry::CornerBudget::Shaped(geometry::corner_deviation_from_scv(5.0, ACCEL_MM_S2)),
         f64::INFINITY,
     )
     .unwrap()

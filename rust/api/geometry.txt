@@ -46,6 +46,7 @@ pub struct geometry::fitter::CornerFitConfig
 pub geometry::fitter::CornerFitConfig::extrusion_ramp_rel_tol: f64
 pub geometry::fitter::CornerFitConfig::ramp_accel_budget_mm_s2: f64
 pub geometry::fitter::CornerFitConfig::seam_velocity_step_mm_s: f64
+pub geometry::fitter::CornerFitConfig::shaped_corners: core::option::Option<&'static geometry::shaped_corner::ShapedCorners>
 pub geometry::fitter::CornerFitConfig::theta_max_rad: f64
 pub geometry::fitter::CornerFitConfig::theta_min_rad: f64
 impl core::default::Default for geometry::CornerFitConfig
@@ -86,6 +87,14 @@ pub fn geometry::fitter::spatial_end(&geometry::frontend::Move) -> core::option:
 pub fn geometry::fitter::spatial_start(&geometry::frontend::Move) -> core::option::Option<[f64; 3]>
 pub fn geometry::fitter::trim_line_move(&geometry::frontend::Move, f64, f64) -> core::result::Result<core::option::Option<geometry::frontend::Move>, geometry::fitter::FitError>
 pub mod geometry::frontend
+pub enum geometry::frontend::CornerBudget
+pub geometry::frontend::CornerBudget::OverFloor(f64)
+pub geometry::frontend::CornerBudget::ScvEquivalent(f64)
+pub geometry::frontend::CornerBudget::Shaped(f64)
+impl geometry::frontend::CornerBudget
+pub fn geometry::frontend::CornerBudget::stricter(self, Self, f64) -> Self
+pub fn geometry::frontend::CornerBudget::unshaped_cut_mm(self, f64) -> f64
+pub fn geometry::frontend::CornerBudget::validate(self) -> core::result::Result<(), &'static str>
 pub enum geometry::frontend::FrontendError
 pub geometry::frontend::FrontendError::InvalidFeedrate
 pub geometry::frontend::FrontendError::InvalidFeedrate::line_no: u32
@@ -170,17 +179,18 @@ impl geometry::frontend::SettleSide
 pub fn geometry::frontend::SettleSide::hold_s(&self, f64, f64, &geometry::SettleDemand) -> f64
 pub struct geometry::frontend::VelocityLimits
 pub geometry::frontend::VelocityLimits::accel_mm_s2: f64
-pub geometry::frontend::VelocityLimits::corner_deviation_mm: f64
+pub geometry::frontend::VelocityLimits::corner: geometry::frontend::CornerBudget
 pub geometry::frontend::VelocityLimits::extruder: core::option::Option<geometry::frontend::ExtruderCaps>
 pub geometry::frontend::VelocityLimits::max_jerk_mm_s3: f64
 pub geometry::frontend::VelocityLimits::max_velocity_mm_s: f64
 pub geometry::frontend::VelocityLimits::max_z_accel_mm_s2: f64
 pub geometry::frontend::VelocityLimits::max_z_velocity_mm_s: f64
 impl geometry::frontend::VelocityLimits
-pub fn geometry::frontend::VelocityLimits::try_new(f64, f64, f64, f64) -> core::result::Result<Self, &'static str>
+pub fn geometry::frontend::VelocityLimits::try_new(f64, f64, geometry::frontend::CornerBudget, f64) -> core::result::Result<Self, &'static str>
 pub fn geometry::frontend::VelocityLimits::with_extruder_caps(self, core::option::Option<geometry::frontend::ExtruderCaps>) -> core::result::Result<Self, &'static str>
 pub fn geometry::frontend::VelocityLimits::with_z_caps(self, f64, f64) -> core::result::Result<Self, &'static str>
 pub const geometry::frontend::CORNER_DEVIATION_SCV_FACTOR: f64
+pub const geometry::frontend::DEFAULT_CORNER_ALLOWANCE_MM: f64
 pub const geometry::frontend::SETTLE_CELLS: usize
 pub const geometry::frontend::SETTLE_SHARE_OF_PATH_DEVIATION: f64
 pub const geometry::frontend::SPATIAL_AXIS_SETS: usize
@@ -494,6 +504,35 @@ pub fn geometry::segment::FollowerDemand::span(&self, f64, f64, f64) -> Self
 pub struct geometry::segment::SourceRange
 pub geometry::segment::SourceRange::end_line: u32
 pub geometry::segment::SourceRange::start_line: u32
+pub mod geometry::shaped_corner
+pub struct geometry::shaped_corner::ShapedCorners
+impl geometry::shaped_corner::ShapedCorners
+pub fn geometry::shaped_corner::ShapedCorners::apex_speed_ratio(&self, f64, f64, f64, f64) -> core::option::Option<f64>
+pub fn geometry::shaped_corner::ShapedCorners::approach_mm(&self, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::arc_fit_tolerance_mm(&self, geometry::frontend::CornerBudget, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::arc_shrink_mm(&self, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::arc_speed_cap(&self, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::blend_cut_mm(&self, geometry::frontend::CornerBudget, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::blend_peak_curvature(&self, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::budget_mm(&self, geometry::frontend::CornerBudget, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::corner_accel(&self, f64, f64, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::curve_room_mm(&self, geometry::frontend::CornerBudget, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::floor_mm(&self, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::holds_curves(geometry::frontend::CornerBudget) -> bool
+pub fn geometry::shaped_corner::ShapedCorners::interned([core::option::Option<&nurbs::algebra::PiecewisePolynomialKernel>; 2]) -> core::option::Option<&'static Self>
+pub fn geometry::shaped_corner::ShapedCorners::miss_mm(&self, f64, f64, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::reach_mm(&self, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::scv_allowance_mm(&self, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::slows(&self, geometry::frontend::CornerBudget, f64, f64, f64) -> bool
+impl geometry::shaped_corner::ShapedCorners
+pub fn geometry::shaped_corner::ShapedCorners::new([core::option::Option<&nurbs::algebra::PiecewisePolynomialKernel>; 2]) -> core::option::Option<Self>
+impl core::cmp::PartialEq for geometry::shaped_corner::ShapedCorners
+pub fn geometry::shaped_corner::ShapedCorners::eq(&self, &Self) -> bool
+pub const geometry::shaped_corner::ARC_FIT_SHARE: f64
+pub const geometry::shaped_corner::PREDICTION_MARGIN: f64
+pub const geometry::shaped_corner::STOP_SHARE: f64
+pub fn geometry::shaped_corner::blend_apex(&geometry::frontend::Move, &geometry::frontend::Move) -> core::option::Option<(f64, f64)>
+pub fn geometry::shaped_corner::stop_turn(&geometry::frontend::Move, &geometry::frontend::Move) -> core::option::Option<f64>
 pub mod geometry::space
 pub struct geometry::space::GcodePos(pub [f64; 3])
 impl geometry::space::GcodePos
@@ -753,6 +792,7 @@ pub geometry::velocity::ExtrusionBudget::fastest_ceiling_mm_s: f64
 pub geometry::velocity::ExtrusionBudget::ratio_in_reach: f64
 pub geometry::velocity::ExtrusionBudget::rest_holds_s: [f64; 2]
 pub geometry::velocity::ExtrusionBudget::rest_room_mm: f64
+pub geometry::velocity::ExtrusionBudget::strongest_accel_mm_s2: f64
 pub struct geometry::velocity::ExtrusionReach
 impl geometry::ExtrusionReach
 pub fn geometry::ExtrusionReach::clear(&mut self)
@@ -789,6 +829,7 @@ impl core::cmp::PartialEq for geometry::velocity::law::LawSegment
 pub fn geometry::velocity::law::LawSegment::eq(&self, &Self) -> bool
 pub struct geometry::velocity::MoveVelocity
 pub geometry::velocity::MoveVelocity::accel: f64
+pub geometry::velocity::MoveVelocity::corner_speed_mm_s: f64
 pub geometry::velocity::MoveVelocity::entry_v: f64
 pub geometry::velocity::MoveVelocity::exit_v: f64
 pub geometry::velocity::MoveVelocity::length: f64
@@ -797,6 +838,8 @@ pub geometry::velocity::MoveVelocity::phases: alloc::vec::Vec<geometry::velocity
 pub geometry::velocity::MoveVelocity::samples: alloc::vec::Vec<geometry::velocity::VelSample>
 pub geometry::velocity::MoveVelocity::source: geometry::segment::SourceRange
 pub geometry::velocity::MoveVelocity::step_capacity_overload: core::option::Option<geometry::step_capacity::StepCapacityOverload>
+impl geometry::velocity::MoveVelocity
+pub fn geometry::velocity::MoveVelocity::corner_held(&self, geometry::frontend::Move) -> geometry::frontend::Move
 pub struct geometry::velocity::RailPair
 pub geometry::velocity::RailPair::s_hi: f64
 pub geometry::velocity::RailPair::s_lo: f64
@@ -817,6 +860,7 @@ pub geometry::velocity::VelocityPlanParams::entry_v: f64
 pub geometry::velocity::VelocityPlanParams::integration_tol: f64
 pub geometry::velocity::VelocityPlanParams::max_extrude_only_accel_mm_s2: f64
 pub geometry::velocity::VelocityPlanParams::max_extrude_only_velocity_mm_s: f64
+pub geometry::velocity::VelocityPlanParams::shaped_corners: core::option::Option<&'static geometry::shaped_corner::ShapedCorners>
 pub geometry::velocity::VelocityPlanParams::step_capacity: core::option::Option<&'a geometry::step_capacity::StepCapacity>
 pub struct geometry::velocity::VelocityProfile
 pub geometry::velocity::VelocityProfile::barrier: usize
@@ -842,6 +886,14 @@ pub fn geometry::velocity::plan_velocity_stops(&[geometry::frontend::Move], &[bo
 pub fn geometry::velocity::plan_velocity_stops_reconstruct_prefix(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams<'_>, usize) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
 pub fn geometry::velocity::plan_velocity_stops_select_prefix<F, W>(&[geometry::frontend::Move], &[bool], &[geometry::ExtrusionBudget], geometry::velocity::VelocityPlanParams<'_>, &W, F) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError> where F: core::ops::function::FnOnce(usize) -> usize, W: geometry::velocity::FanOut
 pub fn geometry::velocity::replan_span(&[geometry::frontend::Move], &[bool], &[geometry::ExtrusionBudget], &[f64], &[f64], geometry::velocity::VelocityPlanParams<'_>, f64) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
+pub enum geometry::CornerBudget
+pub geometry::CornerBudget::OverFloor(f64)
+pub geometry::CornerBudget::ScvEquivalent(f64)
+pub geometry::CornerBudget::Shaped(f64)
+impl geometry::frontend::CornerBudget
+pub fn geometry::frontend::CornerBudget::stricter(self, Self, f64) -> Self
+pub fn geometry::frontend::CornerBudget::unshaped_cut_mm(self, f64) -> f64
+pub fn geometry::frontend::CornerBudget::validate(self) -> core::result::Result<(), &'static str>
 pub enum geometry::FitError
 pub geometry::FitError::Internal
 pub geometry::FitError::Internal::line_no: u32
@@ -978,6 +1030,7 @@ pub struct geometry::CornerFitConfig
 pub geometry::CornerFitConfig::extrusion_ramp_rel_tol: f64
 pub geometry::CornerFitConfig::ramp_accel_budget_mm_s2: f64
 pub geometry::CornerFitConfig::seam_velocity_step_mm_s: f64
+pub geometry::CornerFitConfig::shaped_corners: core::option::Option<&'static geometry::shaped_corner::ShapedCorners>
 pub geometry::CornerFitConfig::theta_max_rad: f64
 pub geometry::CornerFitConfig::theta_min_rad: f64
 impl core::default::Default for geometry::CornerFitConfig
@@ -1014,6 +1067,7 @@ pub geometry::ExtrusionBudget::fastest_ceiling_mm_s: f64
 pub geometry::ExtrusionBudget::ratio_in_reach: f64
 pub geometry::ExtrusionBudget::rest_holds_s: [f64; 2]
 pub geometry::ExtrusionBudget::rest_room_mm: f64
+pub geometry::ExtrusionBudget::strongest_accel_mm_s2: f64
 pub struct geometry::ExtrusionReach
 impl geometry::ExtrusionReach
 pub fn geometry::ExtrusionReach::clear(&mut self)
@@ -1146,6 +1200,7 @@ pub geometry::MoveContext::limits: geometry::frontend::VelocityLimits
 pub geometry::MoveContext::source: geometry::segment::SourceRange
 pub struct geometry::MoveVelocity
 pub geometry::MoveVelocity::accel: f64
+pub geometry::MoveVelocity::corner_speed_mm_s: f64
 pub geometry::MoveVelocity::entry_v: f64
 pub geometry::MoveVelocity::exit_v: f64
 pub geometry::MoveVelocity::length: f64
@@ -1154,6 +1209,8 @@ pub geometry::MoveVelocity::phases: alloc::vec::Vec<geometry::velocity::law::Law
 pub geometry::MoveVelocity::samples: alloc::vec::Vec<geometry::velocity::VelSample>
 pub geometry::MoveVelocity::source: geometry::segment::SourceRange
 pub geometry::MoveVelocity::step_capacity_overload: core::option::Option<geometry::step_capacity::StepCapacityOverload>
+impl geometry::velocity::MoveVelocity
+pub fn geometry::velocity::MoveVelocity::corner_held(&self, geometry::frontend::Move) -> geometry::frontend::Move
 pub struct geometry::RailPair
 pub geometry::RailPair::s_hi: f64
 pub geometry::RailPair::s_lo: f64
@@ -1200,6 +1257,29 @@ pub geometry::SettleDemand::max_accel_mm_s2: f64
 pub geometry::SettleDemand::max_velocity_mm_s: f64
 pub geometry::SettleDemand::own_jerk_per_accel_hz: f64
 pub geometry::SettleDemand::ratio: f64
+pub struct geometry::ShapedCorners
+impl geometry::shaped_corner::ShapedCorners
+pub fn geometry::shaped_corner::ShapedCorners::apex_speed_ratio(&self, f64, f64, f64, f64) -> core::option::Option<f64>
+pub fn geometry::shaped_corner::ShapedCorners::approach_mm(&self, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::arc_fit_tolerance_mm(&self, geometry::frontend::CornerBudget, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::arc_shrink_mm(&self, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::arc_speed_cap(&self, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::blend_cut_mm(&self, geometry::frontend::CornerBudget, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::blend_peak_curvature(&self, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::budget_mm(&self, geometry::frontend::CornerBudget, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::corner_accel(&self, f64, f64, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::curve_room_mm(&self, geometry::frontend::CornerBudget, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::floor_mm(&self, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::holds_curves(geometry::frontend::CornerBudget) -> bool
+pub fn geometry::shaped_corner::ShapedCorners::interned([core::option::Option<&nurbs::algebra::PiecewisePolynomialKernel>; 2]) -> core::option::Option<&'static Self>
+pub fn geometry::shaped_corner::ShapedCorners::miss_mm(&self, f64, f64, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::reach_mm(&self, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::scv_allowance_mm(&self, f64, f64) -> f64
+pub fn geometry::shaped_corner::ShapedCorners::slows(&self, geometry::frontend::CornerBudget, f64, f64, f64) -> bool
+impl geometry::shaped_corner::ShapedCorners
+pub fn geometry::shaped_corner::ShapedCorners::new([core::option::Option<&nurbs::algebra::PiecewisePolynomialKernel>; 2]) -> core::option::Option<Self>
+impl core::cmp::PartialEq for geometry::shaped_corner::ShapedCorners
+pub fn geometry::shaped_corner::ShapedCorners::eq(&self, &Self) -> bool
 pub struct geometry::SourceRange
 pub geometry::SourceRange::end_line: u32
 pub geometry::SourceRange::start_line: u32
@@ -1242,14 +1322,14 @@ pub geometry::VelSample::s: f64
 pub geometry::VelSample::v: f64
 pub struct geometry::VelocityLimits
 pub geometry::VelocityLimits::accel_mm_s2: f64
-pub geometry::VelocityLimits::corner_deviation_mm: f64
+pub geometry::VelocityLimits::corner: geometry::frontend::CornerBudget
 pub geometry::VelocityLimits::extruder: core::option::Option<geometry::frontend::ExtruderCaps>
 pub geometry::VelocityLimits::max_jerk_mm_s3: f64
 pub geometry::VelocityLimits::max_velocity_mm_s: f64
 pub geometry::VelocityLimits::max_z_accel_mm_s2: f64
 pub geometry::VelocityLimits::max_z_velocity_mm_s: f64
 impl geometry::frontend::VelocityLimits
-pub fn geometry::frontend::VelocityLimits::try_new(f64, f64, f64, f64) -> core::result::Result<Self, &'static str>
+pub fn geometry::frontend::VelocityLimits::try_new(f64, f64, geometry::frontend::CornerBudget, f64) -> core::result::Result<Self, &'static str>
 pub fn geometry::frontend::VelocityLimits::with_extruder_caps(self, core::option::Option<geometry::frontend::ExtruderCaps>) -> core::result::Result<Self, &'static str>
 pub fn geometry::frontend::VelocityLimits::with_z_caps(self, f64, f64) -> core::result::Result<Self, &'static str>
 pub struct geometry::VelocityPlanParams<'a>
@@ -1257,6 +1337,7 @@ pub geometry::VelocityPlanParams::entry_v: f64
 pub geometry::VelocityPlanParams::integration_tol: f64
 pub geometry::VelocityPlanParams::max_extrude_only_accel_mm_s2: f64
 pub geometry::VelocityPlanParams::max_extrude_only_velocity_mm_s: f64
+pub geometry::VelocityPlanParams::shaped_corners: core::option::Option<&'static geometry::shaped_corner::ShapedCorners>
 pub geometry::VelocityPlanParams::step_capacity: core::option::Option<&'a geometry::step_capacity::StepCapacity>
 pub struct geometry::VelocityProfile
 pub geometry::VelocityProfile::barrier: usize
@@ -1273,6 +1354,7 @@ pub geometry::VelocityReport::stops: u32
 pub geometry::VelocityReport::traversal_time_s: f64
 pub const geometry::ADVANCE_VALLEY_SPEED_MM_S: f64
 pub const geometry::CORNER_DEVIATION_SCV_FACTOR: f64
+pub const geometry::DEFAULT_CORNER_ALLOWANCE_MM: f64
 pub const geometry::MIN_DEVICE_INTERVAL_S: f64
 pub const geometry::RATIO_RAMP_ENVELOPE_SLOPE: f64
 pub const geometry::RATIO_RAMP_MAX_TIME_S: f64

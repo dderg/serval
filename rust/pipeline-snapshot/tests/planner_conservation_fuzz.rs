@@ -85,7 +85,7 @@ fn plan(limits: Limits, points: &[Waypoint]) -> ExactTrajectory {
     let params = SnapshotParams {
         max_velocity: limits.max_velocity,
         max_accel: limits.max_accel,
-        corner_deviation: corner_deviation(limits),
+        corner: geometry::CornerBudget::Shaped(corner_deviation(limits)),
         max_jerk: f64::INFINITY,
         max_z_velocity: None,
         max_z_accel: None,
@@ -628,7 +628,7 @@ fn a_faceted_curve_keeps_the_corner_budget_between_its_vertices() {
             limits.max_velocity,
             limits.max_accel,
             f64::INFINITY,
-            corner_deviation(limits),
+            geometry::CornerBudget::Shaped(corner_deviation(limits)),
         ),
     )
     .expect("G-code parses");
@@ -657,7 +657,7 @@ fn adjacent_arc_runs_meet_without_a_velocity_step() {
             limits.max_velocity,
             limits.max_accel,
             f64::INFINITY,
-            corner_deviation(limits),
+            geometry::CornerBudget::Shaped(corner_deviation(limits)),
         ),
     )
     .expect("G-code parses");

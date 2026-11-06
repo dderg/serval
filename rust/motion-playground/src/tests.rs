@@ -69,13 +69,28 @@ fn partials_are_schema_complete_snapshots() {
     }
 }
 
+fn without_span_limits(json: &str) -> serde_json::Value {
+    let mut snap: serde_json::Value = serde_json::from_str(json).unwrap();
+    for span in snap["trajectory"]["spans"].as_array_mut().unwrap() {
+        span.as_object_mut().unwrap().remove("limits");
+    }
+    snap
+}
+
+fn span_corners(json: &str) -> Vec<serde_json::Value> {
+    let snap: serde_json::Value = serde_json::from_str(json).unwrap();
+    snap["trajectory"]["spans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|span| span["limits"]["corner"].clone())
+        .collect()
+}
+
 #[test]
-fn corner_deviation_replaces_scv_with_identical_output() {
+fn corner_deviation_at_the_scv_conversion_plans_the_same_motion() {
     let gcode = zigzag_gcode();
-    // The exact f64 the scv config resolves to (corner_deviation_from_scv),
-    // rendered with Rust's round-trip formatting so serde parses it back
-    // bit-identically.
-    let budget = 5.0_f64 * 5.0 * (std::f64::consts::SQRT_2 - 1.0) / 3000.0;
+    let budget = pipeline_snapshot::corner_deviation_from_scv(5.0, 3000.0);
     let deviation_config = format!(
         r#"{{
         "max_velocity": 300,
@@ -84,9 +99,18 @@ fn corner_deviation_replaces_scv_with_identical_output() {
         "max_jerk": 0
     }}"#
     );
-    assert_eq!(
-        plan_json(&gcode, CONFIG).unwrap(),
-        plan_json(&gcode, &deviation_config).unwrap()
+    let scv = plan_json(&gcode, CONFIG).unwrap();
+    let deviation = plan_json(&gcode, &deviation_config).unwrap();
+    assert_eq!(without_span_limits(&scv), without_span_limits(&deviation));
+    assert!(
+        span_corners(&scv)
+            .iter()
+            .all(|c| *c == serde_json::json!({"kind": "square_corner_velocity", "value": 5.0}))
+    );
+    assert!(
+        span_corners(&deviation)
+            .iter()
+            .all(|c| *c == serde_json::json!({"kind": "corner_deviation", "value": budget}))
     );
 }
 
@@ -104,16 +128,19 @@ fn scv_and_corner_deviation_together_are_rejected() {
 }
 
 #[test]
-fn missing_corner_budget_is_rejected() {
+fn missing_corner_budget_plans_the_default_allowance() {
     let config = r#"{
         "max_velocity": 300,
         "max_accel": 3000,
         "max_jerk": 0
     }"#;
-    let err = plan_json("G90\nG1 X10 F6000\n", config).unwrap_err();
+    let json = plan_json("G90\nG1 X10 F6000\nG1 Y10\n", config).unwrap();
+    let corners = span_corners(&json);
+    assert!(!corners.is_empty());
     assert!(
-        err.contains("one of square_corner_velocity or corner_deviation"),
-        "got: {err}"
+        corners
+            .iter()
+            .all(|c| *c == serde_json::json!({"kind": "default", "value": 0.04}))
     );
 }
 

@@ -181,7 +181,6 @@ impl ExtendedArgs<'_> {
 /// `SET_VELOCITY_LIMIT`, as `Motion.cmd_SET_VELOCITY_LIMIT` handles it.
 fn set_velocity_limit(
     args: &ExtendedArgs<'_>,
-    config: &CartesianLimits,
     runtime: &mut RuntimeLimits,
 ) -> Result<(), WaypointError> {
     args.float("MINIMUM_CRUISE_RATIO", Bound::Any)?;
@@ -203,9 +202,11 @@ fn set_velocity_limit(
     if accel.is_some() {
         runtime.set_accel_cap(accel).map_err(runtime_limit)?;
     }
-    let corner_deviation = square_corner_velocity
-        .map(|scv| geometry::corner_deviation_from_scv(scv, config.max_accel))
-        .or(corner_deviation);
+    if square_corner_velocity.is_some() {
+        runtime
+            .set_square_corner_velocity(square_corner_velocity)
+            .map_err(runtime_limit)?;
+    }
     if corner_deviation.is_some() {
         runtime
             .set_corner_deviation(corner_deviation)
@@ -643,7 +644,6 @@ fn g4_dwell_s(params: &gcode::Params, line: u32) -> Result<f64, WaypointError> {
 /// is refused by name, and the rest are ignored as live ignores them —
 /// their arguments are never read, so `M117 Hello` is as harmless here.
 struct Interpreter<'a> {
-    config: &'a CartesianLimits,
     toolhead: Toolhead<'a>,
     gcode_move: GCodeMove,
     waypoints: Vec<Waypoint>,
@@ -725,7 +725,7 @@ impl Interpreter<'_> {
         };
         let move_speed = match name {
             "SET_VELOCITY_LIMIT" => {
-                set_velocity_limit(&args, self.config, &mut self.toolhead.runtime)?;
+                set_velocity_limit(&args, &mut self.toolhead.runtime)?;
                 None
             }
             "RESET_VELOCITY_LIMIT" => {
@@ -766,7 +766,6 @@ const MIRRORED_EXTENDED: [&str; 6] = [
 
 pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>, WaypointError> {
     let mut interpreter = Interpreter {
-        config,
         toolhead: Toolhead {
             config,
             runtime: RuntimeLimits::default(),

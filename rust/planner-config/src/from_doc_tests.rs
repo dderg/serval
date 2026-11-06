@@ -1,4 +1,5 @@
 use config_doc::Document;
+use geometry::{CornerBudget, DEFAULT_CORNER_ALLOWANCE_MM};
 
 use crate::from_doc::{ConsumedValue, read_motion_settings};
 
@@ -20,7 +21,7 @@ fn printer_defaults_match_motion_setup() {
     let c = s.cartesian;
     assert_eq!(c.max_velocity, 300.0);
     assert_eq!(c.max_accel, 3000.0);
-    assert_eq!(c.corner_deviation, 0.04);
+    assert_eq!(c.corner, CornerBudget::OverFloor(0.04));
     assert_eq!(c.max_jerk, f64::INFINITY);
     assert_eq!(c.max_z_velocity, 300.0);
     assert_eq!(c.max_z_accel, 3000.0);
@@ -39,37 +40,33 @@ fn scv_and_corner_deviation_are_exclusive() {
 }
 
 #[test]
-fn explicit_corner_deviation_wins() {
+fn explicit_corner_deviation_is_a_shaped_budget() {
     let s = settings("[printer]\nmax_velocity: 300\nmax_accel: 3000\ncorner_deviation: 0.02\n");
-    assert_eq!(s.cartesian.corner_deviation, 0.02);
+    assert_eq!(s.cartesian.corner, CornerBudget::Shaped(0.02));
 }
 
 #[test]
-fn neither_corner_option_defaults_to_the_same_deviation_at_any_accel() {
+fn neither_corner_option_defaults_to_the_same_allowance_at_any_accel() {
     for accel in ["1000", "3000", "70000"] {
         let s = settings(&format!(
             "[printer]\nmax_velocity: 300\nmax_accel: {accel}\n"
         ));
         assert_eq!(
-            s.cartesian.corner_deviation,
-            crate::DEFAULT_CORNER_DEVIATION_MM,
+            s.cartesian.corner,
+            CornerBudget::OverFloor(DEFAULT_CORNER_ALLOWANCE_MM),
             "{accel}"
         );
     }
 }
 
 #[test]
-fn explicit_legacy_scv_keeps_its_converted_budget() {
-    let s = settings("[printer]\nmax_velocity: 300\nmax_accel: 3000\nsquare_corner_velocity: 5\n");
-    let expected = 25.0 * (std::f64::consts::SQRT_2 - 1.0) / 3000.0;
-    assert!((s.cartesian.corner_deviation - expected).abs() < 1e-15);
-}
-
-#[test]
-fn scv_converts_via_accel() {
-    let s = settings("[printer]\nmax_velocity: 300\nmax_accel: 2000\nsquare_corner_velocity: 8\n");
-    let expected = 64.0 * (std::f64::consts::SQRT_2 - 1.0) / 2000.0;
-    assert!((s.cartesian.corner_deviation - expected).abs() < 1e-15);
+fn legacy_scv_stays_a_speed_unconverted() {
+    for (accel, scv) in [("3000", 5.0), ("2000", 8.0)] {
+        let s = settings(&format!(
+            "[printer]\nmax_velocity: 300\nmax_accel: {accel}\nsquare_corner_velocity: {scv}\n"
+        ));
+        assert_eq!(s.cartesian.corner, CornerBudget::ScvEquivalent(scv));
+    }
 }
 
 #[test]

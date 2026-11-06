@@ -48,6 +48,7 @@ impl Pipeline {
         home_pos: Vec<f64>,
         t_start: f64,
     ) -> Self {
+        let config = config.with_shaped_corners(&chains);
         let workers = Arc::new(WorkerPool::new());
         let fit_tol = config.fit_tol();
         Self {

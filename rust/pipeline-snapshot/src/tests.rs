@@ -15,7 +15,7 @@ fn default_limits() -> geometry::VelocityLimits {
     geometry::VelocityLimits::try_new(
         300.0,
         3000.0,
-        geometry::corner_deviation_from_scv(5.0, 3000.0),
+        geometry::CornerBudget::Shaped(geometry::corner_deviation_from_scv(5.0, 3000.0)),
         f64::INFINITY,
     )
     .unwrap()
@@ -492,7 +492,9 @@ fn snapshot_serializes_to_the_baseline_schema() {
         SnapshotParams {
             max_velocity: 300.0,
             max_accel: 3000.0,
-            corner_deviation: geometry::corner_deviation_from_scv(5.0, 3000.0),
+            corner: geometry::CornerBudget::Shaped(geometry::corner_deviation_from_scv(
+                5.0, 3000.0,
+            )),
             max_jerk: f64::INFINITY,
             max_z_velocity: None,
             max_z_accel: None,
@@ -667,7 +669,8 @@ fn clothoid_disk_ride_tracks_scalar_acceleration_without_phase_steps() {
     let mut params = default_axis_snapshot_params();
     params.max_velocity = 300.0;
     params.max_accel = 1000.0;
-    params.corner_deviation = geometry::corner_deviation_from_scv(5.0, 1000.0);
+    params.corner =
+        geometry::CornerBudget::Shaped(geometry::corner_deviation_from_scv(5.0, 1000.0));
     let snap = pipeline_snapshot(&waypoints, params).unwrap();
     let clothoids: Vec<(f64, f64)> = snap
         .trajectory
@@ -732,7 +735,8 @@ fn low_feed_corner_from_rest_rides_the_disk() {
     let mut params = default_axis_snapshot_params();
     params.max_velocity = 4.5;
     params.max_accel = 1000.0;
-    params.corner_deviation = geometry::corner_deviation_from_scv(5.0, 1000.0);
+    params.corner =
+        geometry::CornerBudget::Shaped(geometry::corner_deviation_from_scv(5.0, 1000.0));
     let snap = pipeline_snapshot(&waypoints, params).unwrap();
     let clothoids: Vec<(f64, f64)> = snap
         .trajectory
@@ -795,7 +799,9 @@ fn finite_max_jerk_is_rejected_like_the_live_config() {
         SnapshotParams {
             max_velocity: 300.0,
             max_accel: 3000.0,
-            corner_deviation: geometry::corner_deviation_from_scv(5.0, 3000.0),
+            corner: geometry::CornerBudget::Shaped(geometry::corner_deviation_from_scv(
+                5.0, 3000.0,
+            )),
             max_jerk: 100_000.0,
             max_z_velocity: None,
             max_z_accel: None,
@@ -818,7 +824,7 @@ fn default_axis_snapshot_params() -> SnapshotParams {
     SnapshotParams {
         max_velocity: 300.0,
         max_accel: 3000.0,
-        corner_deviation: geometry::corner_deviation_from_scv(5.0, 3000.0),
+        corner: geometry::CornerBudget::Shaped(geometry::corner_deviation_from_scv(5.0, 3000.0)),
         max_jerk: f64::INFINITY,
         max_z_velocity: None,
         max_z_accel: None,
@@ -1300,10 +1306,21 @@ fn default_gcode_circle_loops_stay_concentric_across_corner_deviation() {
     for cd in [0.05, 0.3] {
         let waypoints = waypoints::parse_gcode(
             &text,
-            &CartesianLimits::without_z_caps(300.0, 3000.0, f64::INFINITY, cd),
+            &CartesianLimits::without_z_caps(
+                300.0,
+                3000.0,
+                f64::INFINITY,
+                geometry::CornerBudget::Shaped(cd),
+            ),
         )
         .unwrap();
-        let limits = geometry::VelocityLimits::try_new(300.0, 3000.0, cd, f64::INFINITY).unwrap();
+        let limits = geometry::VelocityLimits::try_new(
+            300.0,
+            3000.0,
+            geometry::CornerBudget::Shaped(cd),
+            f64::INFINITY,
+        )
+        .unwrap();
         let moves = plan_steps(&waypoints, base(limits)).unwrap();
         let (fitted, _, _) = run_pipeline_streaming(
             &moves,
@@ -1356,7 +1373,7 @@ fn shaped_follower_params(e_chain: &[planner_config::PostProcessorDecl]) -> Snap
     let mut params = default_axis_snapshot_params();
     params.max_velocity = 1000.0;
     params.max_accel = 10_000.0;
-    params.corner_deviation = 0.21;
+    params.corner = geometry::CornerBudget::Shaped(0.21);
     let mut x = axis("x", &[]);
     x.post_processors = vec!["shx".to_string()];
     let mut y = axis("y", &[]);

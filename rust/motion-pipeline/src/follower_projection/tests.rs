@@ -2337,7 +2337,13 @@ fn an_advanced_follower_enclosure_holds_every_sample_through_a_reversal() {
 /// Planar moves through `points` lowered to the analytic segments the
 /// shaper reads, with no chain shaping them.
 fn unshaped_segments(points: &[[f64; 2]], feedrate: f64) -> Vec<ContinuousSegment> {
-    let limits = geometry::VelocityLimits::try_new(300.0, 25_000.0, 0.05, f64::INFINITY).unwrap();
+    let limits = geometry::VelocityLimits::try_new(
+        300.0,
+        25_000.0,
+        geometry::CornerBudget::Shaped(0.05),
+        f64::INFINITY,
+    )
+    .unwrap();
     let config = crate::types::StreamConfig {
         corner: geometry::CornerFitConfig::default(),
         integration_tol: 1e-7,

@@ -116,7 +116,7 @@ pub(crate) fn snapshot_parity_record(
     let planner = planner_config::from_doc::planner_config_from_text(config_text)
         .map_err(PyValueError::new_err)?;
     let record = snapshot_core::stream_record(
-        &waypoints_from_py(waypoints),
+        &waypoints_from_py(waypoints)?,
         &planner,
         step_capacity.as_ref(),
     )

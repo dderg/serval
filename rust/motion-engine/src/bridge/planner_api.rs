@@ -462,8 +462,9 @@ impl PyMotionEngine {
         Ok(())
     }
 
-    fn effective_limits(&self) -> (f64, f64, f64) {
-        self.planner_config.lock_ok().effective_limits()
+    fn effective_limits(&self) -> (f64, f64, (&'static str, f64)) {
+        let (velocity, accel, corner) = self.planner_config.lock_ok().effective_limits();
+        (velocity, accel, planner_config::corner_budget_parts(corner))
     }
     #[pyo3(signature = (velocity))]
     fn set_velocity_cap(&self, velocity: Option<f64>) -> PyResult<()> {
@@ -493,6 +494,14 @@ impl PyMotionEngine {
             .lock_ok()
             .runtime
             .set_corner_deviation(corner_deviation)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+    #[pyo3(signature = (square_corner_velocity))]
+    fn set_square_corner_velocity(&self, square_corner_velocity: Option<f64>) -> PyResult<()> {
+        self.planner_config
+            .lock_ok()
+            .runtime
+            .set_square_corner_velocity(square_corner_velocity)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
     pub(super) fn update_post_processor(&self, name: &str, key: &str, value: f64) -> PyResult<()> {
