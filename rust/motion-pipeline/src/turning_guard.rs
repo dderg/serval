@@ -869,9 +869,7 @@ impl TurningGuard {
             entries.velocities[since..reach]
                 .iter()
                 .map(|velocity| velocity.entry_v),
-            self.config.integration_tol,
         )
-        .unwrap_or_else(|error| panic!("turning guard: brake horizon failed: {error:?}"))
         .map(|seam| since + seam)
     }
 
