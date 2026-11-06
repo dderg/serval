@@ -23,11 +23,6 @@ rounding a Klipper machine with that value and the same shapers prints,
 in place of its old near-zero cut (0.00015 mm at 70000 mm/s²). Configs
 that relied on `corner_deviation` as the planned cut can raise it by the
 floor the startup event reports.
-Until #796 lands, an explicit `corner_deviation` does not hold at
-corners within the shaper's reach of a move leaving a rest where the
-extrusion ratio steps (travel to extrusion, a flow change): that move
-keeps its acceleration, so such corners miss by up to about twice the
-budget (0.05 mm profiles).
 
 20261103: The `ratio_ramp_time` option of a follower axis is removed;
 setting it is a config error that names the rule replacing it. Every

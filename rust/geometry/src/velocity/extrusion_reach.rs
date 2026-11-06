@@ -4,9 +4,8 @@ use crate::Move;
 use crate::frontend::{ExtruderCaps, LeaderSpillId, SettleDemand};
 use crate::path::CurvatureProfile;
 
-use super::extruder_caps::budgeted_ratio;
-
-const Z_AXIS: usize = 2;
+use super::extruder_caps::extruder_capped;
+use super::z_caps::z_capped;
 use crate::ratio_ramp::{RATIO_RAMP_MAX_TIME_S, rest_room_reach_mm};
 
 /// The largest extrusion ratio `m` lays along the path on `axis`: 0 for
@@ -24,29 +23,30 @@ pub(super) fn extruding_ratio(m: &Move, axis: usize) -> f64 {
         .fold(0.0, f64::max)
 }
 
-/// The most acceleration `m` can be planned at from its own caps alone: its
-/// limit, held by the z cap on the share of it z takes
-/// ([`super::z_caps::z_capped`]) and by the extruder's acceleration on its
-/// own extrusion ratio ([`super::extruder_caps::extruder_capped`]).
+/// The most acceleration `m` can be planned at from its own caps alone:
+/// its limit, held by the z cap ([`super::z_caps::z_capped`]) and by the
+/// extruder caps on its own extrusion ratio and axes
+/// ([`super::extruder_caps::extruder_capped`]), which the ratio and axes
+/// within its reach only tighten.
 fn realizable_accel(m: &Move) -> f64 {
-    let accel = m.limits.accel_mm_s2;
     let Some(segment) = &m.segment.spatial else {
-        return accel;
+        return m.limits.accel_mm_s2;
     };
-    let lean = segment.lean_on(Z_AXIS);
-    let z_held = if lean.heading > 0.0 {
-        accel.min(m.limits.max_z_accel_mm_s2 / lean.plane.min(lean.heading))
-    } else {
-        accel
-    };
-    m.limits.extruder.map_or(z_held, |caps| {
-        let ratio = budgeted_ratio(extruding_ratio(m, caps.axis_index));
-        if ratio > 0.0 {
-            z_held.min(caps.max_accel_mm_s2 / ratio)
-        } else {
-            z_held
-        }
-    })
+    let (_, kappa_peak) = segment.kappa_peak();
+    let path_ceiling = m.feedrate_mm_s.min(m.limits.max_velocity_mm_s);
+    let z_held = z_capped(segment, &m.limits, kappa_peak, path_ceiling);
+    let (_, accel) = m.limits.extruder.map_or(z_held, |caps| {
+        let own = ExtrusionBudget {
+            ratio_in_reach: extruding_ratio(m, caps.axis_index),
+            axes_in_reach: moves_on(segment),
+            rest_holds_s: [0.0; 2],
+            rest_room_mm: f64::INFINITY,
+            fastest_ceiling_mm_s: f64::INFINITY,
+            strongest_accel_mm_s2: 0.0,
+        };
+        extruder_capped(segment, &caps, &own, kappa_peak, z_held)
+    });
+    accel
 }
 
 /// What the extruder's demand while the leaders cross one move can draw on.

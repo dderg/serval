@@ -39,11 +39,9 @@ pub(super) struct Approaches {
     /// The last held move when it is a clothoid that may yet turn out to
     /// open a corner blend; a curve otherwise.
     unsettled_clothoid: Option<u64>,
-    /// The move leaving the last stop, and whether an extruding axis steps
-    /// its ratio across it. A corner's approach ends at a stop: the toolhead
-    /// starts afresh past it, and the ratio ramp away from a ratio step rides
-    /// the acceleration of the move leaving it, which no approach slows.
-    stop_departure: Option<(u64, bool)>,
+    /// The move leaving the last stop. A corner's approach ends there: the
+    /// toolhead starts afresh past it.
+    stop_departure: Option<u64>,
 }
 
 /// A blend still held, as its curve cap needs it once the next corner
@@ -85,7 +83,6 @@ impl Approaches {
                 Verdict::Stop {
                     turns: stop_turn(before, &pieces[0]).is_some(),
                     slowed: stopped_corner_accel(before, &pieces[0], corners),
-                    departs_slowed: !steps_extrusion(before, &pieces[0]),
                 }
             } else {
                 BlendCorner::of(before, &pieces[0], corners)
@@ -114,18 +111,12 @@ impl Approaches {
         }
         let corner = match verdict {
             Verdict::None => false,
-            Verdict::Stop {
-                turns,
-                slowed,
-                departs_slowed,
-            } => {
+            Verdict::Stop { turns, slowed } => {
                 if let Some((accel, approach_mm)) = slowed {
                     self.slow_back(self.held.len(), accel, approach_mm);
-                    if departs_slowed {
-                        self.slow_ahead(&mut pieces, accel, approach_mm);
-                    }
+                    self.slow_ahead(&mut pieces, accel, approach_mm);
                 }
-                self.stop_departure = Some((self.next_id, !departs_slowed));
+                self.stop_departure = Some(self.next_id);
                 if turns {
                     self.close_curve(corners, leg_mm);
                 }
@@ -173,10 +164,6 @@ impl Approaches {
         let mut left = approach_mm;
         let stop_departure = self.stop_departure;
         for (id, pieces) in self.held.range_mut(..end).rev() {
-            let departs_stop = stop_departure.filter(|(departure, _)| departure == id);
-            if departs_stop.is_some_and(|(_, ramps)| ramps) {
-                return;
-            }
             let mut index = pieces.len();
             while left > 0.0 && index > 0 {
                 index -= 1;
@@ -191,7 +178,7 @@ impl Approaches {
                     left -= length;
                 }
             }
-            if left <= 0.0 || departs_stop.is_some() {
+            if left <= 0.0 || stop_departure == Some(*id) {
                 return;
             }
         }
@@ -332,7 +319,6 @@ enum Verdict {
     Stop {
         turns: bool,
         slowed: Option<(f64, f64)>,
-        departs_slowed: bool,
     },
     Blend(u64, BlendCorner),
 }
@@ -377,23 +363,6 @@ fn cap_curve(m: &mut Move, corners: &ShapedCorners) {
         let room = corners.curve_room_mm(m.limits.corner, radius, m.limits.accel_mm_s2);
         cap_speed(m, corners.arc_speed_cap(radius, room));
     }
-}
-
-/// Whether an extruding axis changes its ratio across the seam from
-/// `before` into `after`. The ratio ramp away from such a rest rides the
-/// acceleration of the moves after it, so the departure keeps its own: a
-/// slowed approach there would step the acceleration up under the ramp.
-fn steps_extrusion(before: &Move, after: &Move) -> bool {
-    let ratio_on = |followers: &[geometry::FollowerDemand], axis: usize, end: bool| {
-        followers
-            .iter()
-            .find(|f| f.axis_index == axis)
-            .map_or(0.0, |f| if end { f.ratio_end } else { f.ratio })
-    };
-    let (up, down) = (&before.segment.followers, &after.segment.followers);
-    up.iter()
-        .chain(down)
-        .any(|f| ratio_on(up, f.axis_index, true) != ratio_on(down, f.axis_index, false))
 }
 
 fn cap_speed(m: &mut Move, speed: f64) {

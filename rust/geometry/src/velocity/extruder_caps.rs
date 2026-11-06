@@ -18,7 +18,7 @@ const BISECTION_STEPS: u32 = 64;
 const RATIO_LEVELS_PER_OCTAVE: f64 = 4.0;
 
 /// `ratio` rounded up to its level, 0 for travel and retraction.
-pub(super) fn budgeted_ratio(ratio: f64) -> f64 {
+fn budgeted_ratio(ratio: f64) -> f64 {
     if ratio <= 0.0 {
         return 0.0;
     }
