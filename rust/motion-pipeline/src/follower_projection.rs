@@ -660,8 +660,7 @@ pub(crate) fn project_followers(
         let workers = if cfg!(target_arch = "wasm32") {
             1
         } else {
-            std::thread::available_parallelism()
-                .map_or(1, |cores| cores.get().min(source_jobs.len()))
+            crate::worker_pool::cores().min(source_jobs.len())
         };
         let state_ref: &FollowerState = &*state;
         let source_fits = pool
@@ -872,8 +871,7 @@ pub(crate) fn project_followers(
                 let workers = if cfg!(target_arch = "wasm32") {
                     1
                 } else {
-                    std::thread::available_parallelism()
-                        .map_or(1, |cores| cores.get().min(groups.len()))
+                    crate::worker_pool::cores().min(groups.len())
                 };
                 let state_ref: &FollowerState = &*state;
                 let fitted = pool
@@ -2488,7 +2486,7 @@ fn ingest_reads<'a>(
     let workers = if cfg!(target_arch = "wasm32") {
         1
     } else {
-        std::thread::available_parallelism().map_or(1, |cores| cores.get().min(raw.len()))
+        crate::worker_pool::cores().min(raw.len())
     };
     pool.map_indexed(
         workers,
