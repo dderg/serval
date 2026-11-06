@@ -267,6 +267,33 @@ struct Tangential {
     a: TaylorModel,
 }
 
+impl Tangential {
+    /// The state a phase reads in its own time, read in stream time at
+    /// `span`'s clock rate ([`AnalyticMoveSpan::clock_rate`]).
+    fn on_stream_clock(self, span: &AnalyticMoveSpan) -> Self {
+        let rate = Ball::exact(span.clock_rate());
+        Self {
+            s: self.s,
+            v: self.v.scale(rate),
+            a: self.a.scale(rate).scale(rate),
+        }
+    }
+}
+
+/// `window`'s time into `phase` on `span`'s phase clock
+/// ([`AnalyticMoveSpan::phase_time`]).
+fn phase_tau(span: &AnalyticMoveSpan, phase: &LawSegment, window: &Window) -> TaylorModel {
+    window
+        .time_since(span.t_start)
+        .scale(Ball::exact(span.clock_rate()))
+        .add_ball(Ball::exact(-phase.t0))
+}
+
+/// `phase`'s own time at stream time `t` on `span`'s clock.
+fn phase_local(span: &AnalyticMoveSpan, phase: &LawSegment, t: f64) -> f64 {
+    span.phase_time(t) - phase.t0
+}
+
 /// How an analytic axis reads the law's state.
 enum AxisLaw<'a> {
     Constant(f64),
@@ -841,7 +868,6 @@ pub(crate) fn analytic_axes_enclosure(
         }
     };
     for (phase, start, end) in span.phase_extents() {
-        let origin = span.t_start + phase.t0;
         let (from, to) = (lo.max(start), hi.min(end));
         if from >= to {
             continue;
@@ -852,7 +878,7 @@ pub(crate) fn analytic_axes_enclosure(
                 enclose(
                     (from, to),
                     &|window: Window| {
-                        let tau = window.time_since(origin);
+                        let tau = phase_tau(span, phase, &window);
                         Tangential {
                             s: polynomial_of_balls(
                                 [arc_origin, Ball::exact(phase.v0), Ball::exact(0.5 * a0)]
@@ -865,14 +891,17 @@ pub(crate) fn analytic_axes_enclosure(
                             ),
                             a: TaylorModel::constant(Ball::exact(a0)),
                         }
+                        .on_stream_clock(span)
                     },
                     &mut outs,
                 );
             }
             ScalarLaw::DiskRail { .. } => {
                 let arc_base = phase.s0 - span.source_distance_origin;
-                for pair in phase.rail_pairs(from - origin, to - origin) {
-                    let knot_time = |tau| rail_knot_time(phase, origin, (start, end), tau);
+                for pair in
+                    phase.rail_pairs(phase_local(span, phase, from), phase_local(span, phase, to))
+                {
+                    let knot_time = |tau| rail_knot_time(span, phase, (start, end), tau);
                     let range = (from.max(knot_time(pair.t_lo)), to.min(knot_time(pair.t_hi)));
                     if range.0 >= range.1 {
                         continue;
@@ -880,7 +909,11 @@ pub(crate) fn analytic_axes_enclosure(
                     let interpolant = PairInterpolant::new(&pair, arc_base);
                     enclose(
                         range,
-                        &|window: Window| interpolant.state(&window.time_since(origin)),
+                        &|window: Window| {
+                            interpolant
+                                .state(&phase_tau(span, phase, &window))
+                                .on_stream_clock(span)
+                        },
                         &mut outs,
                     );
                 }
@@ -890,13 +923,18 @@ pub(crate) fn analytic_axes_enclosure(
     Some(outs)
 }
 
-fn rail_knot_time(phase: &LawSegment, origin: f64, (start, end): (f64, f64), tau: f64) -> f64 {
+fn rail_knot_time(
+    span: &AnalyticMoveSpan,
+    phase: &LawSegment,
+    (start, end): (f64, f64),
+    tau: f64,
+) -> f64 {
     if tau <= 0.0 {
         start
     } else if tau >= phase.dt {
         end
     } else {
-        origin + tau
+        span.stream_time(phase.t0 + tau)
     }
 }
 
@@ -913,7 +951,7 @@ pub(crate) struct SquareRootOnset {
 }
 
 impl SquareRootOnset {
-    fn of(pair: &RailPair, origin: f64) -> Option<Self> {
+    fn of(pair: &RailPair, span: &AnalyticMoveSpan, phase: &LawSegment) -> Option<Self> {
         let RailPairShape::Departure {
             from_lo,
             coefficients: [_, c3, _, _],
@@ -927,10 +965,11 @@ impl SquareRootOnset {
         } else {
             (pair.t_hi, pair.t_lo)
         };
+        let rate = span.clock_rate();
         (c3 != 0.0).then(|| Self {
-            at: origin + at,
-            far: origin + far,
-            jerk_coefficient: 0.75 * c3.abs() / (h * h.sqrt()),
+            at: span.stream_time(phase.t0 + at),
+            far: span.stream_time(phase.t0 + far),
+            jerk_coefficient: 0.75 * c3.abs() / (h * h.sqrt()) * rate * rate * rate.sqrt(),
         })
     }
 }
@@ -1439,11 +1478,10 @@ impl<'a> AxisWindows<'a> {
                     .phase_extents()
                     .find(|&(_, _, end)| window.center < end)
                     .or_else(|| span.phase_extents().last())?;
-                let origin = span.t_start + phase.t0;
                 if !covers(start, end) {
                     return None;
                 }
-                let tau = window.time_since(origin);
+                let tau = phase_tau(span, phase, &window);
                 let (state, tangential_jerk) = match phase.law {
                     ScalarLaw::ConstAccel { a0 } => (
                         Tangential {
@@ -1465,9 +1503,9 @@ impl<'a> AxisWindows<'a> {
                         TaylorModel::constant(Ball::exact(0.0)),
                     ),
                     ScalarLaw::DiskRail { kappa0, sigma, .. } => {
-                        let centre = window.center - origin;
+                        let centre = phase_local(span, phase, window.center);
                         let reads = |pair: &RailPair| {
-                            let knot_time = |tau| rail_knot_time(phase, origin, (start, end), tau);
+                            let knot_time = |tau| rail_knot_time(span, phase, (start, end), tau);
                             covers(knot_time(pair.t_lo), knot_time(pair.t_hi))
                         };
                         let pair = match phase.rail_pairs(centre, centre).next() {
@@ -1495,14 +1533,16 @@ impl<'a> AxisWindows<'a> {
                         (state, jerk)
                     }
                 };
+                let rate = Ball::exact(span.clock_rate());
                 let reading_window = WindowReading {
-                    state,
+                    state: state.on_stream_clock(span),
                     trig: std::cell::OnceCell::new(),
                     spread_trig: std::cell::OnceCell::new(),
                     speed_squared: std::cell::OnceCell::new(),
                 };
                 let [p, v, a] = reading.models(&reading_window);
                 let j = if with_jerk {
+                    let tangential_jerk = tangential_jerk.scale(rate).scale(rate).scale(rate);
                     reading.law.jerk(&reading_window, &tangential_jerk)?
                 } else {
                     TaylorModel::UNBOUNDED
@@ -1547,10 +1587,9 @@ impl<'a> AxisWindows<'a> {
             .iter()
             .filter(|phase| matches!(phase.law, ScalarLaw::DiskRail { .. }))
             .flat_map(|phase| {
-                let origin = span.t_start + phase.t0;
                 phase
-                    .rail_pairs(lo - origin, hi - origin)
-                    .filter_map(move |pair| SquareRootOnset::of(&pair, origin))
+                    .rail_pairs(phase_local(span, phase, lo), phase_local(span, phase, hi))
+                    .filter_map(move |pair| SquareRootOnset::of(&pair, span, phase))
             })
             .collect()
     }
@@ -1568,18 +1607,18 @@ impl<'a> AxisWindows<'a> {
                 span,
                 surface_seams,
                 ..
-            } => {
-                span.phase_extents()
-                    .flat_map(|(phase, start, end)| {
-                        let origin = span.t_start + phase.t0;
-                        std::iter::once(end).chain(phase.rail_pairs(lo - origin, hi - origin).map(
-                            move |pair| rail_knot_time(phase, origin, (start, end), pair.t_hi),
-                        ))
-                    })
-                    .chain(surface_seams.iter().copied())
-                    .filter(inside)
-                    .collect()
-            }
+            } => span
+                .phase_extents()
+                .flat_map(|(phase, start, end)| {
+                    std::iter::once(end).chain(
+                        phase
+                            .rail_pairs(phase_local(span, phase, lo), phase_local(span, phase, hi))
+                            .map(move |pair| rail_knot_time(span, phase, (start, end), pair.t_hi)),
+                    )
+                })
+                .chain(surface_seams.iter().copied())
+                .filter(inside)
+                .collect(),
             Self::Hold(_) => Vec::new(),
             Self::Buzz { envelopes, .. } => envelopes
                 .iter()

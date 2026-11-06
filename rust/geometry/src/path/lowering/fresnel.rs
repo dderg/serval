@@ -163,7 +163,35 @@ fn fresnel_cs(x: f64) -> (f64, f64) {
     if x < 0.0 { (-c, -s) } else { (c, s) }
 }
 
+const OFFSET_SLOTS: usize = 256;
+
+thread_local! {
+    /// The offsets this thread read lately, each by the bits of the
+    /// `(κ₀, σ, s)` it was read at, in the slot those bits hash to: the
+    /// axes of one toolhead sample and the fits probing a segment read the
+    /// same arcs again.
+    static OFFSETS: std::cell::RefCell<[([u64; 3], (f64, f64)); OFFSET_SLOTS]> =
+        const { std::cell::RefCell::new([([u64::MAX; 3], (0.0, 0.0)); OFFSET_SLOTS]) };
+}
+
 pub(super) fn clothoid_offset(kappa_0: f64, sigma: f64, s: f64) -> (f64, f64) {
+    let key = [kappa_0.to_bits(), sigma.to_bits(), s.to_bits()];
+    let slot = ((key[0] ^ key[1].rotate_left(21) ^ key[2].rotate_left(42))
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        >> (64 - OFFSET_SLOTS.trailing_zeros())) as usize;
+    OFFSETS.with(|offsets| {
+        let mut offsets = offsets.borrow_mut();
+        let (read_at, offset) = offsets[slot];
+        if read_at == key {
+            return offset;
+        }
+        let offset = fresh_clothoid_offset(kappa_0, sigma, s);
+        offsets[slot] = (key, offset);
+        offset
+    })
+}
+
+fn fresh_clothoid_offset(kappa_0: f64, sigma: f64, s: f64) -> (f64, f64) {
     if sigma == 0.0 {
         return constant_curvature_offset(kappa_0, s);
     }
@@ -184,7 +212,9 @@ pub(super) fn clothoid_offset(kappa_0: f64, sigma: f64, s: f64) -> (f64, f64) {
 /// `s·Σ_{j,k} (ia)ʲ/j! · (ib)ᵏ/k! · ∫₀¹ τ^{j+2k} dτ`. No term depends on
 /// where the spiral centre is, so the result keeps a few ulps of `s` however
 /// small `σ` gets. Summing from the highest power down keeps each partial
-/// sum small until its leading term lands.
+/// sum small until its leading term lands. Plain index loops over the
+/// fixed orders let the compiler unroll the whole triangle; reversed
+/// enumerating iterators kept it a loop at a third of the speed.
 fn small_turn_offset(a: f64, b: f64, s: f64) -> (f64, f64) {
     let mut a_terms = [1.0; SMALL_TURN_ORDER + 1];
     let mut b_terms = [1.0; SMALL_TURN_ORDER + 1];
@@ -193,9 +223,14 @@ fn small_turn_offset(a: f64, b: f64, s: f64) -> (f64, f64) {
         b_terms[n] = b_terms[n - 1] * b / n as f64;
     }
     let mut by_power_of_i = [0.0; 4];
-    for (k, b_term) in b_terms.iter().enumerate().rev() {
-        for (j, a_term) in a_terms[..=SMALL_TURN_ORDER - k].iter().enumerate().rev() {
-            by_power_of_i[(j + k) % 4] += a_term * b_term * POWER_INTEGRALS[j + 2 * k];
+    let mut k = SMALL_TURN_ORDER + 1;
+    while k > 0 {
+        k -= 1;
+        let b_term = b_terms[k];
+        let mut j = SMALL_TURN_ORDER - k + 1;
+        while j > 0 {
+            j -= 1;
+            by_power_of_i[(j + k) % 4] += a_terms[j] * b_term * POWER_INTEGRALS[j + 2 * k];
         }
     }
     (

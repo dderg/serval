@@ -2660,3 +2660,42 @@ fn a_span_whose_duration_has_no_cut_count_is_refused_not_cut_into_nothing() {
         );
     }
 }
+
+/// Deep into a stream the span's end `t_start + dt` rounds onto the stream
+/// clock: read at the stream's rate the cruise would reach its end before
+/// `t_end` and stand still across the rest. On the span's own clock the
+/// last stream ulp still carries the cruise's velocity.
+#[test]
+fn a_span_keeps_its_velocity_into_its_rounded_end() {
+    let (t_start, dt, speed) = (18.739_584_855_907_204, 9.615_245_006_080_707e-5, 9.33);
+    let length = speed * dt;
+    let span = AnalyticMoveSpan::try_new(
+        move_with(
+            Segment::Line(Line::try_new([0.0, 0.0, 0.0], [length, 0.0, 0.0]).unwrap()),
+            vec![],
+        ),
+        Arc::from([LawSegment::new(
+            0.0,
+            dt,
+            0.0,
+            speed,
+            ScalarLaw::ConstAccel { a0: 0.0 },
+        )]),
+        0.0,
+        t_start,
+        t_start + dt,
+        Arc::from([0.0, 0.0, 0.0]),
+        SurfaceMode::None,
+    )
+    .unwrap();
+    let end = span.t_end;
+    let before = next_toward(end, f64::NEG_INFINITY);
+    let travel =
+        span.eval_axis(0, end).unwrap().position - span.eval_axis(0, before).unwrap().position;
+    let expected = speed * (end - before);
+    assert!(
+        (travel - expected).abs() <= 1e-3 * expected,
+        "the last ulp before t_end travels {travel} mm, the cruise {expected} mm"
+    );
+    close(span.eval_axis(0, end).unwrap().position, length);
+}

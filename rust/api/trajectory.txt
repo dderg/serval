@@ -290,11 +290,14 @@ pub trajectory::continuous::AnalyticMoveSpan::t_end: f64
 pub trajectory::continuous::AnalyticMoveSpan::t_start: f64
 impl trajectory::continuous::AnalyticMoveSpan
 pub fn trajectory::continuous::AnalyticMoveSpan::cap_contact_times(&self) -> impl core::iter::traits::iterator::Iterator<Item = f64> + '_
+pub fn trajectory::continuous::AnalyticMoveSpan::clock_rate(&self) -> f64
 pub fn trajectory::continuous::AnalyticMoveSpan::eval_axis(&self, usize, f64) -> core::result::Result<trajectory::continuous::Pva, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::AnalyticMoveSpan::eval_axis_pvaj(&self, usize, f64) -> core::result::Result<trajectory::continuous::Pvaj, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::AnalyticMoveSpan::has_variable_surface(&self) -> bool
 pub fn trajectory::continuous::AnalyticMoveSpan::phase_extents(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&geometry::velocity::law::LawSegment, f64, f64)> + '_
 pub fn trajectory::continuous::AnalyticMoveSpan::phase_seam_times(&self) -> impl core::iter::traits::iterator::Iterator<Item = f64> + '_
+pub fn trajectory::continuous::AnalyticMoveSpan::phase_time(&self, f64) -> f64
+pub fn trajectory::continuous::AnalyticMoveSpan::stream_time(&self, f64) -> f64
 pub fn trajectory::continuous::AnalyticMoveSpan::surface_seam_times(&self) -> core::option::Option<alloc::vec::Vec<f64>>
 pub fn trajectory::continuous::AnalyticMoveSpan::try_new(geometry::frontend::Move, alloc::rcs::arc::Arc<[geometry::velocity::law::LawSegment]>, f64, f64, f64, alloc::rcs::arc::Arc<[f64]>, trajectory::continuous::SurfaceMode) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
 pub struct trajectory::continuous::BuzzProfile
@@ -424,7 +427,6 @@ pub trajectory::continuous::RelativeSplinePiece::curve: alloc::rcs::arc::Arc<nur
 pub trajectory::continuous::RelativeSplinePiece::t_end: f64
 pub trajectory::continuous::RelativeSplinePiece::t_start: f64
 pub const trajectory::continuous::MAX_SPAN_SECS: f64
-pub fn trajectory::continuous::analytic_phase_boundary(f64, f64) -> f64
 pub fn trajectory::continuous::interior_time_above(f64) -> f64
 pub fn trajectory::continuous::interior_time_below(f64) -> f64
 pub fn trajectory::continuous::next_toward(f64, f64) -> f64
@@ -549,11 +551,14 @@ pub trajectory::AnalyticMoveSpan::t_end: f64
 pub trajectory::AnalyticMoveSpan::t_start: f64
 impl trajectory::continuous::AnalyticMoveSpan
 pub fn trajectory::continuous::AnalyticMoveSpan::cap_contact_times(&self) -> impl core::iter::traits::iterator::Iterator<Item = f64> + '_
+pub fn trajectory::continuous::AnalyticMoveSpan::clock_rate(&self) -> f64
 pub fn trajectory::continuous::AnalyticMoveSpan::eval_axis(&self, usize, f64) -> core::result::Result<trajectory::continuous::Pva, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::AnalyticMoveSpan::eval_axis_pvaj(&self, usize, f64) -> core::result::Result<trajectory::continuous::Pvaj, trajectory::continuous::ContinuousError>
 pub fn trajectory::continuous::AnalyticMoveSpan::has_variable_surface(&self) -> bool
 pub fn trajectory::continuous::AnalyticMoveSpan::phase_extents(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&geometry::velocity::law::LawSegment, f64, f64)> + '_
 pub fn trajectory::continuous::AnalyticMoveSpan::phase_seam_times(&self) -> impl core::iter::traits::iterator::Iterator<Item = f64> + '_
+pub fn trajectory::continuous::AnalyticMoveSpan::phase_time(&self, f64) -> f64
+pub fn trajectory::continuous::AnalyticMoveSpan::stream_time(&self, f64) -> f64
 pub fn trajectory::continuous::AnalyticMoveSpan::surface_seam_times(&self) -> core::option::Option<alloc::vec::Vec<f64>>
 pub fn trajectory::continuous::AnalyticMoveSpan::try_new(geometry::frontend::Move, alloc::rcs::arc::Arc<[geometry::velocity::law::LawSegment]>, f64, f64, f64, alloc::rcs::arc::Arc<[f64]>, trajectory::continuous::SurfaceMode) -> core::result::Result<Self, trajectory::continuous::ContinuousError>
 pub struct trajectory::AxisChainSet
