@@ -2409,6 +2409,10 @@ impl<'l, 'a> LegSpeed<'l, 'a> {
     }
 
     fn path_at(&self, t: f64) -> f64 {
+        let leg_end = self.path.grid[self.path.grid.len() - 1];
+        if t >= leg_end {
+            return self.table_end;
+        }
         (self.path.start_s + self.path.covered(t)).min(self.table_end)
     }
 }
