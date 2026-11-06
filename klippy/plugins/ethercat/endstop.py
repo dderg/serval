@@ -6,10 +6,11 @@
 from __future__ import annotations
 
 HOMING_UNAVAILABLE = (
-    "EtherCAT servo endstop '%s' cannot home or report a state yet: servo"
-    " homing needs the live endpoint's torque trip. Position servo axes with"
+    "EtherCAT servo endstop '%s' cannot home: servo homing (the endpoint's"
+    " torque trip) is not implemented yet. Position servo axes with"
     " SET_KINEMATIC_POSITION."
 )
+QUERY_STATE = "not homeable"
 
 
 class ServoEndstop:
@@ -17,7 +18,8 @@ class ServoEndstop:
 
     An MCU endstop stops steppers by oid on its own MCU and cannot stop a
     servo, so servo rails take their endstop from the servo bus. Homing
-    through it arrives with the live endpoint; until then every use fails.
+    through it does not exist yet, so every homing use fails;
+    QUERY_ENDSTOPS reports it as not homeable.
     """
 
     def __init__(self, printer, name):
@@ -45,3 +47,6 @@ class ServoEndstop:
 
     def query_endstop(self, print_time):
         raise self._unavailable()
+
+    def query_endstop_state(self, print_time):
+        return QUERY_STATE

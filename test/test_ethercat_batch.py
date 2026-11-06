@@ -13,10 +13,14 @@ import math
 import numpy as np
 import pytest
 from ethercat_support import (
+    CYCLE_US,
+    GCODE,
+    START,
     decode_servo_runs,
     dictionary_path,
     lane_samples,
     run_batch,
+    servo_config,
     step_trace,
 )
 
@@ -24,67 +28,6 @@ from klippy.plugins.ethercat import wire
 from klippy.plugins.ethercat.stream import Q16
 from klippy.stepper import MAX_STEPCOMPRESS_ERROR
 from tools.motion_eval import analysis
-
-CYCLE_US = 250
-START = (100.0, 100.0, 10.0)
-
-PRINTER_CFG = """
-[mcu]
-serial: /dev/null
-
-[printer]
-kinematics: cartesian
-max_velocity: 300
-max_accel: 5000
-square_corner_velocity: 5
-max_z_velocity: 10
-max_z_accel: 100
-
-[ethercat]
-cycle_us: {cycle_us}
-
-[stepper_x]
-servo: ethercat
-ethercat_slave: 0
-ethercat_axis: 0
-encoder_counts_per_rev: 131072
-rotation_distance: 40
-endstop_pin: {x_endstop}
-position_endstop: 0
-position_max: 250
-
-[stepper_x1]
-step_pin: PA0
-dir_pin: PA1
-enable_pin: !PA2
-microsteps: 16
-rotation_distance: 40
-
-[stepper_y]
-step_pin: PB0
-dir_pin: !PB1
-enable_pin: !PB2
-microsteps: 16
-rotation_distance: 40
-endstop_pin: PB3
-position_endstop: 0
-position_max: 250
-
-[stepper_z]
-step_pin: PC0
-dir_pin: PC1
-enable_pin: !PC2
-microsteps: 16
-rotation_distance: 8
-endstop_pin: PC3
-position_endstop: 0
-position_max: 200
-
-[input_shaper]
-shaper_type: {shaper}
-shaper_freq_x: 50
-shaper_freq_y: 40
-"""
 
 DELTA_CFG = """
 [mcu]
@@ -123,22 +66,6 @@ microsteps: 16
 rotation_distance: 40
 endstop_pin: PD2
 """
-
-GCODE = """SET_KINEMATIC_POSITION X={0} Y={1} Z={2}
-G1 X150 Y120 F9000
-G1 X120 Y160 F12000
-G1 X180 Y150 F6000
-G4 P300
-G1 X110 Y110 F15000
-G1 X100 Y100 F3000
-M400
-""".format(*START)
-
-
-def servo_config(shaper, x_endstop="ethercat:x"):
-    return PRINTER_CFG.format(
-        cycle_us=CYCLE_US, shaper=shaper, x_endstop=x_endstop
-    )
 
 
 @pytest.fixture(scope="module", params=["mzv", "smooth_mzv"])
@@ -249,4 +176,19 @@ def test_servo_homing_fails_loudly(request, tmp_path):
         tmp_path, servo_config("mzv"), "G28 X\n", dictionary_path(request)
     )
     assert run.returncode != 0
-    assert "servo homing needs the live endpoint" in run.log
+    assert (
+        "servo homing (the endpoint's torque trip) is not implemented"
+        in run.log
+    )
+
+
+def test_query_endstops_reports_servo_rails_as_not_homeable(request, tmp_path):
+    gcode = (
+        "QUERY_ENDSTOPS\n"
+        "ASSERT TEST=\"{printer.query_endstops.last_query.x == 'not homeable'}\"\n"
+        'ASSERT TEST="{printer.query_endstops.last_query.y == 0}"\n'
+    )
+    run = run_batch(
+        tmp_path, servo_config("mzv"), gcode, dictionary_path(request)
+    )
+    assert run.returncode == 0, run.log[-4000:]
