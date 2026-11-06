@@ -62,13 +62,10 @@ pub const fn gamma(roundings: usize) -> f64 {
     accumulated / (1.0 - accumulated)
 }
 
+/// `bound` raised past its rounding; a NaN bound reads as unbounded, the
+/// operand `min` returns in its place.
 pub fn upper(bound: f64) -> f64 {
-    let inflated = bound * (1.0 + BOUND_ROUNDING) + f64::MIN_POSITIVE;
-    if inflated.is_nan() {
-        f64::INFINITY
-    } else {
-        inflated
-    }
+    (bound * (1.0 + BOUND_ROUNDING) + f64::MIN_POSITIVE).min(f64::INFINITY)
 }
 
 /// An upper bound on `baseⁿ` for a non-negative `base`.
