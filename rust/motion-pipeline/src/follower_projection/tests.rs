@@ -2674,3 +2674,111 @@ fn the_follower_reads_a_boundarys_formula_from_its_crossing_on() {
         );
     }
 }
+
+fn source_fit_on(
+    state: &FollowerState,
+    leading: Option<super::LeadingAdvance>,
+) -> super::SourceProjection {
+    let shaped = cusp_segment(
+        vec![0.0, 80.0, -300.0],
+        vec![0.0, 5.0, 100.0, -900.0],
+        0.0,
+        0.1,
+    );
+    let source = super::FollowerSource {
+        shaped: &shaped,
+        raw: &shaped,
+        axis: 3,
+        leaders: &[0, 1],
+        reads: &leader_reads(&shaped, &[0, 1]),
+        state,
+        s_start: 0.0,
+        s_length: super::leader_arc_length(&shaped, &[0, 1]),
+    };
+    super::fit_source_projection(
+        source,
+        crate::lowering::FitTol::absolute(1e-4, 50.0),
+        leading,
+    )
+    .unwrap_or_else(|error| panic!("source fit failed: {error:?}"))
+}
+
+fn state_laying(spans: &[(f64, f64, f64)]) -> FollowerState {
+    let mut state = FollowerState::default();
+    for &(length, r0, r1) in spans {
+        state.push_span(length, r0, r1);
+    }
+    state
+}
+
+fn assert_same_source(fitted: &super::SourceProjection, reference: &super::SourceProjection) {
+    assert_eq!(fitted.track, reference.track);
+    assert_eq!(fitted.reach_retracts, reference.reach_retracts);
+    assert_eq!(fitted.tol_scale.to_bits(), reference.tol_scale.to_bits());
+    assert_eq!(
+        fitted.e_end_relative.to_bits(),
+        reference.e_end_relative.to_bits()
+    );
+    assert_eq!(
+        fitted.window_advance_steps.len(),
+        reference.window_advance_steps.len()
+    );
+}
+
+/// Whether the advance reads the laid table or its retract-free copy, and
+/// whether the kernel after it may hold its input monotone, is decided by
+/// the spans the fit reaches alone: a retract laid past them, or none,
+/// fits the same bits.
+#[test]
+fn a_source_fit_reads_nothing_laid_past_its_reach() {
+    let segment_span = (50.0, 0.05, 0.05);
+    let alone = state_laying(&[segment_span]);
+    let with_a_later_retract = state_laying(&[segment_span, (5.0, -0.2, -0.2), (5.0, 0.05, 0.05)]);
+    let kernel_stage = trajectory::ChainStage::NonlinearAdvance(trajectory::NonlinearAdvance {
+        model: trajectory::AdvanceModel::Tanh,
+        linear_advance: 0.02,
+        nonlinear_offset: 0.03,
+        linearization_velocity: 1.0,
+    });
+    let leadings = [
+        None,
+        Some(kernel_advance(&kernel_stage)),
+        Some(ramped_advance(&RAMPED_ADVANCE_STAGE)),
+    ];
+    for leading in leadings {
+        let reference = source_fit_on(&alone, leading);
+        assert!(!reference.reach_retracts);
+        assert_same_source(&source_fit_on(&with_a_later_retract, leading), &reference);
+    }
+}
+
+#[test]
+fn a_retract_within_the_reach_is_read() {
+    let state = state_laying(&[(50.0, -0.05, 0.05)]);
+    assert!(source_fit_on(&state, None).reach_retracts);
+}
+
+/// A segment owning only zero-ratio spans holds still, whatever ratio the
+/// spans laid past its owned end take.
+#[test]
+fn a_constant_source_stays_constant_whatever_is_laid_past_it() {
+    let shaped = cusp_segment(vec![0.0, 80.0, -300.0], vec![0.0, 0.0], 0.0, 0.1);
+    let s_length = super::leader_arc_length(&shaped, &[0, 1]);
+    let alone = state_laying(&[(s_length, 0.0, 0.0)]);
+    let followed = state_laying(&[(s_length, 0.0, 0.0), (5.0, 0.05, 0.05)]);
+    let constant_of = |state: &FollowerState| {
+        FollowerSignal::new(
+            &shaped,
+            &shaped,
+            3,
+            &[0, 1],
+            state,
+            odometer_from_start(&shaped),
+            0.0,
+        )
+        .constant_value()
+        .map(f64::to_bits)
+    };
+    assert!(constant_of(&alone).is_some());
+    assert_eq!(constant_of(&followed), constant_of(&alone));
+}

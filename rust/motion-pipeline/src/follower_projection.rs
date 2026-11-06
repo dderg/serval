@@ -170,6 +170,9 @@ struct SourceProjection {
     /// The position tolerance scale the segment is fit and welded to
     /// ([`riding_tol_scale`]).
     tol_scale: f64,
+    /// Whether a span the source's reach reads retracts
+    /// ([`FollowerState::retracts_within`]).
+    reach_retracts: bool,
 }
 
 /// The position step an advance before projection makes where the follower
@@ -484,6 +487,7 @@ fn fit_source_projection(
         input_end,
         window_advance_steps,
         tol_scale,
+        reach_retracts: sig.reach_retracts,
     })
 }
 
@@ -723,6 +727,7 @@ pub(crate) fn project_followers(
                 input_end,
                 window_advance_steps,
                 tol_scale,
+                reach_retracts,
             } = source_result?;
             state.s_shaped = s_end;
             state.e_end = Some(base_position + e_end_relative);
@@ -784,6 +789,7 @@ pub(crate) fn project_followers(
                 join_advance_step,
                 window_advance_steps,
                 tol_scale,
+                reach_retracts,
                 extrude_only: if raw.spatial_path {
                     Vec::new()
                 } else {
@@ -1102,10 +1108,7 @@ impl KernelFit<'_> {
         for piece in &mut input_pieces {
             piece.coeffs.resize(piece.coeffs.len().max(6), 0.0);
         }
-        let nonnegative_demand = state
-            .spans
-            .iter()
-            .all(|span| span.r0 >= 0.0 && span.r1 >= 0.0);
+        let nonnegative_demand = !window.iter().any(|segment| segment.reach_retracts);
         let group_tol = follower_fit_tol(
             fit_tol,
             group
@@ -1635,6 +1638,8 @@ struct ProjSeg {
     window_advance_steps: Vec<AdvanceStep>,
     /// The position tolerance scale the segment's source was fit to.
     tol_scale: f64,
+    /// Whether a span the segment's source reach reads retracts.
+    reach_retracts: bool,
     /// The extrude-only motion folded into `track`, which a kernel's linear
     /// advance leaves unadvanced.
     extrude_only: Vec<extrude_only::ExtrudeOnlyPiece>,
@@ -1718,9 +1723,6 @@ pub(crate) struct FollowerState {
     spans: Vec<RatioSpan>,
     /// [`Table::Advance`]: `spans` with every negative ratio held at zero.
     advance_spans: Vec<RatioSpan>,
-    /// How many of `spans` retract somewhere, and so differ from their
-    /// part of `advance_spans`.
-    retracting_spans: usize,
     ingested_through_t: Option<f64>,
     s_ingested_end: f64,
     s_shaped: f64,
@@ -1749,7 +1751,6 @@ impl FollowerState {
     pub(crate) fn reset_timeline(&mut self) {
         self.spans.clear();
         self.advance_spans.clear();
-        self.retracting_spans = 0;
         self.ingested_through_t = None;
         self.s_ingested_end = 0.0;
         self.s_shaped = 0.0;
@@ -1978,9 +1979,6 @@ impl FollowerState {
             e0,
         };
         self.spans.push(span);
-        if span.retracts() {
-            self.retracting_spans += 1;
-        }
         for (s0, s1, r0, r1) in span.advance_parts().into_iter().flatten() {
             let e0 = self
                 .advance_spans
@@ -1997,10 +1995,6 @@ impl FollowerState {
         let committed = self.s_shaped - SPAN_LOOKUP_SLACK_MM;
         let keep_after = committed - self.smoothing.reach_back(committed);
         let keep_from = self.spans.partition_point(|span| span.s1 < keep_after);
-        self.retracting_spans -= self.spans[..keep_from]
-            .iter()
-            .filter(|span| span.retracts())
-            .count();
         self.spans.drain(..keep_from);
         let keep_advance_from = self
             .advance_spans
@@ -2183,14 +2177,19 @@ impl FollowerState {
         }
     }
 
-    /// The table an advance reads: [`Table::Advance`], which is the laid
-    /// table itself wherever that retracts nowhere.
-    fn advance_table(&self) -> Table {
-        if self.retracting_spans > 0 {
-            Table::Advance
-        } else {
-            Table::Laid
-        }
+    /// Whether a span the smoothed table reads anywhere on `[s_lo, s_hi]`
+    /// retracts: a window there averages the table no further than its
+    /// width either side, so nothing laid past that reach decides it.
+    fn retracts_within(&self, s_lo: f64, s_hi: f64) -> bool {
+        let lo = s_lo - SPAN_LOOKUP_SLACK_MM;
+        let hi = s_hi + SPAN_LOOKUP_SLACK_MM;
+        let (reach_lo, reach_hi) = (
+            lo - self.smoothing.reach_back(lo),
+            hi + self.smoothing.reach_back(hi),
+        );
+        self.spans
+            .iter()
+            .any(|span| span.retracts() && span.s1 > reach_lo && span.s0 < reach_hi)
     }
 
     fn aligned_span_start(&self, s: f64) -> f64 {
@@ -3120,6 +3119,9 @@ pub(crate) struct FollowerSignal<'a> {
     odometer_scale: f64,
     s_owned_end: f64,
     ratio_bounds: RatioBounds,
+    /// Whether a span the signal's reach reads retracts, so that its
+    /// advance reads [`Table::Advance`] there.
+    reach_retracts: bool,
     start_sliver: Option<SpeedZeroSliver>,
     end_sliver: Option<SpeedZeroSliver>,
     pva_memo: PvaMemo,
@@ -3192,6 +3194,7 @@ impl<'a> FollowerSignal<'a> {
         let s_end = odometer.start + odometer.length;
         let s_owned_end = state.owned_span_end(odometer.start, s_end);
         let ratio_bounds = RatioBounds::ridden(state, odometer.start, s_owned_end);
+        let reach_retracts = state.retracts_within(odometer.start, s_end);
 
         let mut sig = Self {
             state,
@@ -3207,6 +3210,7 @@ impl<'a> FollowerSignal<'a> {
             odometer_scale,
             s_owned_end: f64::INFINITY,
             ratio_bounds,
+            reach_retracts,
             start_sliver: None,
             end_sliver: None,
             pva_memo: PvaMemo::default(),
@@ -3374,10 +3378,20 @@ impl<'a> FollowerSignal<'a> {
         self.odometer_scale * self.leader_speed_second_deriv(t, &read.motion, read.speed)
     }
 
+    /// The table the advance reads: [`Table::Advance`], which is the laid
+    /// table itself wherever that retracts nowhere within the reach.
+    fn advance_table(&self) -> Table {
+        if self.reach_retracts {
+            Table::Advance
+        } else {
+            Table::Laid
+        }
+    }
+
     /// `d(R·W)/ds` at `s`: the path slope of the ratio a ratio-ramped
     /// advance reads.
     fn ramped_read_slope(&self, s: f64) -> f64 {
-        let (ratio, slope) = self.ratio_and_slope_on(self.state.advance_table(), s);
+        let (ratio, slope) = self.ratio_and_slope_on(self.advance_table(), s);
         let (weight, weight_slope, _) = self.state.smoothing.valley_weight(s);
         slope * weight + ratio * weight_slope
     }
@@ -3416,7 +3430,7 @@ impl<'a> FollowerSignal<'a> {
             laid,
             ..
         } = *read;
-        let laid = match self.state.advance_table() {
+        let laid = match self.advance_table() {
             Table::Laid => laid,
             Table::Advance => self.laid_on(Table::Advance, s),
         };
@@ -3561,7 +3575,13 @@ impl<'a> FollowerSignal<'a> {
             .iter()
             .filter(|span| span.s1 >= s_lo - SPAN_LOOKUP_SLACK_MM && span.s0 < self.s_owned_end)
             .all(|span| span.r0 == 0.0 && span.r1 == 0.0);
-        let tail_zero = match self.state.spans.last() {
+        let tail_zero = match self
+            .state
+            .spans
+            .iter()
+            .rev()
+            .find(|span| span.s0 < self.s_owned_end)
+        {
             Some(last) if self.s_owned_end > last.s1 => last.r1 == 0.0,
             _ => true,
         };
@@ -3587,7 +3607,7 @@ impl<'a> FollowerSignal<'a> {
             let support_end = *self.grid.last().expect("follower grid is seeded");
             let mut boundaries = self
                 .state
-                .spans_of(self.state.advance_table())
+                .spans_of(self.advance_table())
                 .iter()
                 .flat_map(|span| [span.s0, span.s1])
                 .chain(self.state.smoothing.bends(
