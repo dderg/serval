@@ -71,6 +71,55 @@ fn a_crawl_leaves_room_for_the_widest_grid_side_the_lead_budget_covers_before_it
 }
 
 #[test]
+fn the_block_screen_leaves_every_cell_s_rebuild_as_its_own_bound_reads_it() {
+    let fit = FitMiss::of(0.005, 50.0);
+    let crawl_cells = (800, 810);
+    let mut track = CellTrack::default();
+    for n in 0..1200 {
+        let bounds = if (crawl_cells.0..=crawl_cells.1).contains(&n) {
+            crawling()
+        } else {
+            let wave = (n as f64 * 0.05).sin();
+            cell(10.0 + 4.0 * wave, 300.0 + 250.0 * wave)
+        };
+        track.push(n, bounds, H, fit);
+    }
+    let slot = Slot::over(&track, crawl_cells, fit).expect("the run crawls");
+    let crawl = Crawl::found(slot, 1, &track, -1, (H, fit), &|n| track.get(n))
+        .expect("the side fits the budget");
+    let side = &crawl.before;
+    let leaders = side.leaders.as_ref().expect("the side leaves room");
+    let whole = leaders.side.rebuild(side.width);
+    let own: Vec<f64> = leaders
+        .cells
+        .iter()
+        .map(|cell| leaders.within.at(cell.distance, cell.speed, cell.accel))
+        .collect();
+    let (least, most) = own
+        .iter()
+        .fold((f64::INFINITY, 0.0_f64), |(lo, hi), &rebuild| {
+            (lo.min(rebuild), hi.max(rebuild))
+        });
+    assert!(
+        least < most && own.len() > 2 * super::REBUILD_SCREEN_CELLS,
+        "the side's cells read one rebuild, {least}..{most}, over {} cells",
+        own.len()
+    );
+    for step in 0..=16 {
+        let threshold = least + (most - least) * f64::from(step) / 16.0;
+        for (offset, &rebuild) in own.iter().enumerate() {
+            let n = side.cells.0 + offset as i64;
+            let expected = (rebuild > threshold).then(|| rebuild.min(whole));
+            assert_eq!(
+                side.rebuild_where(n, |bound| bound > threshold),
+                expected,
+                "cell {n} over the threshold {threshold}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_crawl_s_after_side_waits_for_the_lead_budget_past_its_run() {
     let fit = FitMiss::of(0.005, 50.0);
     let crawl_cells = (800, 810);
