@@ -87,22 +87,17 @@ fn pair_models(pair: &RailPair) -> ([TaylorModel; 3], f64) {
         RailPairShape::Quintic { rise, slopes } => {
             let v = quintic_monomials(pair.v_lo, pair.v_hi - pair.v_lo, slopes);
             let rising = quintic_monomials(0.0, rise, slopes);
-            let a: Vec<f64> = rising
-                .iter()
-                .enumerate()
-                .skip(1)
-                .map(|(power, c)| power as f64 * c / h)
-                .collect();
-            let mass: Vec<f64> = std::iter::once(0.0)
-                .chain(
-                    v.iter()
-                        .enumerate()
-                        .map(|(power, c)| c / (power + 1) as f64),
-                )
-                .collect();
+            let a: [f64; 5] = std::array::from_fn(|index| {
+                let power = index + 1;
+                power as f64 * rising[power] / h
+            });
+            let mass: [f64; 7] = std::array::from_fn(|power| match power {
+                0 => 0.0,
+                _ => v[power - 1] / power as f64,
+            });
             let full: f64 = mass.iter().sum();
             let correction = pair.s_hi - pair.s_lo - h * full;
-            let mut s: Vec<f64> = mass.iter().map(|c| h * c).collect();
+            let mut s = mass.map(|c| h * c);
             s[0] += pair.s_lo;
             s[1] += correction;
             ([model(&v), model(&a), model(&s)], correction)

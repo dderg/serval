@@ -173,16 +173,39 @@ impl Tracked {
         shifted
     }
 
+    /// Writes `coefficients`, exact, shifted by `shift` into `shifted`,
+    /// whose every slot it sets.
+    fn exact_shifted_into(coefficients: &[f64], shift: f64, shifted: &mut Self) {
+        let len = coefficients.len();
+        assert!(len <= EXACT_CAPACITY);
+        let mut magnitudes = [0.0; EXACT_CAPACITY];
+        for (magnitude, value) in magnitudes.iter_mut().zip(coefficients) {
+            *magnitude = value.abs();
+        }
+        shifted.truncate_to(len);
+        taylor_shift(coefficients, shift, &mut shifted.values[..len]);
+        taylor_shift(&magnitudes[..len], shift.abs(), &mut shifted.magnitudes[..len]);
+    }
+
     /// Writes the `order`-th derivative into `derivative`, whose every
     /// slot it sets.
     fn derivative_into(&self, order: usize, derivative: &mut Self) {
-        *derivative = Self::ZERO;
-        derivative.len = self.len.saturating_sub(order);
+        derivative.truncate_to(self.len.saturating_sub(order));
         for power in 0..derivative.len {
             let falling = FALLING_FACTORIALS[power + order][order];
             derivative.values[power] = self.values[power + order] * falling;
             derivative.magnitudes[power] = self.magnitudes[power + order] * falling;
         }
+    }
+
+    /// Shortens or lengthens to `len`, zeroing the slots the old length
+    /// held past the new one and leaving the rest to the caller to set.
+    fn truncate_to(&mut self, len: usize) {
+        if len < self.len {
+            self.values[len..self.len].fill(0.0);
+            self.magnitudes[len..self.len].fill(0.0);
+        }
+        self.len = len;
     }
 
     fn add(&mut self, other: &Self, sign: f64) {
@@ -647,7 +670,7 @@ pub(crate) struct ExactConvolution<'a> {
 #[derive(Default)]
 pub(crate) struct RecentChunks(std::sync::Mutex<RecentChunkList>);
 
-type RecentChunkList = Vec<((u64, u64), Option<[LocalPolynomial; 3]>)>;
+type RecentChunkList = std::collections::VecDeque<((u64, u64), Option<[LocalPolynomial; 3]>)>;
 
 /// How many chunks [`RecentChunks`] keeps: a span reaches into one on
 /// either side.
@@ -667,9 +690,9 @@ impl RecentChunks {
         }
         let polynomials = compute();
         if recent.len() == RECENT_CHUNKS {
-            recent.remove(0);
+            recent.pop_front();
         }
-        recent.push((key, polynomials));
+        recent.push_back((key, polynomials));
         polynomials
     }
 }
@@ -678,13 +701,27 @@ impl RecentChunks {
 /// chunk and kernel piece to kernel piece: the input's series past two
 /// window edges, one kernel piece's moments and their bounds, and the
 /// frozen window and sliver terms each order adds, each read only as far
-/// as the evaluation writes it.
+/// as the evaluation writes it. Each thread keeps one
+/// ([`CONVOLUTION_SCRATCH`]) across every evaluation it runs.
 struct ConvolutionScratch {
     edge_series: [EdgeSeries; 2],
     moments: [[f64; EXACT_CAPACITY]; MOMENT_ORDERS],
     magnitudes: MomentBounds,
     at_upper: Tracked,
     convolved: Tracked,
+}
+
+thread_local! {
+    static CONVOLUTION_SCRATCH: std::cell::RefCell<ConvolutionScratch> =
+        const {
+            std::cell::RefCell::new(ConvolutionScratch {
+                edge_series: [[Tracked::ZERO; MOMENT_ORDERS]; 2],
+                moments: [[0.0; EXACT_CAPACITY]; MOMENT_ORDERS],
+                magnitudes: [[0.0; EXACT_CAPACITY]; MOMENT_ORDERS],
+                at_upper: Tracked::ZERO,
+                convolved: Tracked::ZERO,
+            })
+        };
 }
 
 /// One point mass of `x` and its derivatives: `weights[m]` multiplies
@@ -754,13 +791,6 @@ impl ExactConvolution<'_> {
             .chain(std::iter::once(above.unwrap_or(RealSum::float(hi))))
             .collect();
         let mut pieces = Vec::with_capacity(points.len() - 1);
-        let mut scratch = ConvolutionScratch {
-            edge_series: [[Tracked::ZERO; MOMENT_ORDERS]; 2],
-            moments: [[0.0; EXACT_CAPACITY]; MOMENT_ORDERS],
-            magnitudes: [[0.0; EXACT_CAPACITY]; MOMENT_ORDERS],
-            at_upper: Tracked::ZERO,
-            convolved: Tracked::ZERO,
-        };
         for pair in points.windows(2) {
             let first_inside = pair[0].first_float_above();
             let last_inside = pair[1].last_float_below();
@@ -780,6 +810,7 @@ impl ExactConvolution<'_> {
             let chunk_near = |t: f64| ((t - extent_lo) / extent * chunks).max(0.0) as usize;
             let first_chunk = chunk_near(lo).saturating_sub(1);
             let past_chunk = (chunk_near(hi) + 2).min(chunk_count);
+            pieces.reserve(past_chunk.saturating_sub(first_chunk));
             for chunk in first_chunk..past_chunk {
                 let (chunk_lo, chunk_hi) = (chunk_edge(chunk), chunk_edge(chunk + 1));
                 let (piece_lo, piece_hi) = (chunk_lo.max(lo), chunk_hi.min(hi));
@@ -790,7 +821,8 @@ impl ExactConvolution<'_> {
                     (chunk_lo + 0.5 * (chunk_hi - chunk_lo)).clamp(first_inside, last_inside);
                 let radius = next_toward((center - chunk_lo).max(chunk_hi - center), f64::INFINITY);
                 let Some(pva) = recent.read(center, radius, || {
-                    self.polynomials_at(center, radius, &mut scratch)
+                    CONVOLUTION_SCRATCH
+                        .with_borrow_mut(|scratch| self.polynomials_at(center, radius, scratch))
                 }) else {
                     let (first_held, last_held) = (first_inside.max(lo), last_inside.min(hi));
                     if first_held == last_held && (first_held == lo || first_held == hi) {
@@ -1101,8 +1133,11 @@ impl AxisSignalTable {
             None
         };
         if let Some(value) = held {
-            series[0] = Tracked::exact(&[value]);
-            series[1..].fill(Tracked::ZERO);
+            let [position, higher @ ..] = series;
+            Tracked::exact_shifted_into(&[value], 0.0, position);
+            for slot in higher {
+                slot.truncate_to(0);
+            }
             return true;
         }
         let piece = self
@@ -1115,7 +1150,11 @@ impl AxisSignalTable {
             "a window edge inside the signal lies past its last piece's end"
         );
         let [position, higher @ ..] = series;
-        *position = Tracked::exact(&self.coeffs[piece]).shifted(edge.head - self.origins[piece]);
+        Tracked::exact_shifted_into(
+            &self.coeffs[piece],
+            edge.head - self.origins[piece],
+            position,
+        );
         for (order, slot) in (1..).zip(higher.iter_mut()) {
             position.derivative_into(order, slot);
         }

@@ -376,6 +376,9 @@ fn between_each_float(
     (from >= hi).then_some(())
 }
 
+/// The most signals [`enclose_axes`] encloses together.
+const ENCLOSED_AXES_MAX: usize = 16;
+
 /// Encloses several signals over `[lo, hi]` whose windows share work:
 /// `model(window, axis, shared, refused)` reads signal `axis` on `window`,
 /// `shared` holding what the window's first reading built for the rest.
@@ -389,8 +392,13 @@ pub(crate) fn enclose_axes<S>(
     model: &impl Fn(Window, usize, &mut Option<S>, Option<f64>) -> Option<[TaylorModel; 3]>,
     outs: &mut [Vec<ExactPiece>],
 ) {
-    let axes: Vec<usize> = (0..outs.len()).collect();
-    enclose_axes_to_depth((lo, hi), accuracy, model, &axes, 0, outs);
+    assert!(
+        outs.len() <= ENCLOSED_AXES_MAX,
+        "{} signals enclosed together exceed the {ENCLOSED_AXES_MAX} a window holds",
+        outs.len()
+    );
+    let axes: [usize; ENCLOSED_AXES_MAX] = std::array::from_fn(|axis| axis);
+    enclose_axes_to_depth((lo, hi), accuracy, model, &axes[..outs.len()], 0, outs);
 }
 
 fn enclose_axes_to_depth<S>(
@@ -405,10 +413,12 @@ fn enclose_axes_to_depth<S>(
     let middle = window.center;
     let last = depth == ENCLOSURE_MAX_DEPTH || middle <= lo || middle >= hi;
     let mut shared = None;
-    let mut unresolved = Vec::new();
+    let mut unresolved = [0; ENCLOSED_AXES_MAX];
+    let mut unresolved_len = 0;
     for &axis in axes {
         let Some(models) = model(window, axis, &mut shared, (!last).then_some(accuracy[2])) else {
-            unresolved.push(axis);
+            unresolved[unresolved_len] = axis;
+            unresolved_len += 1;
             continue;
         };
         let resolved = models
@@ -418,14 +428,16 @@ fn enclose_axes_to_depth<S>(
         if resolved || last {
             outs[axis].push(piece(window, &models));
         } else {
-            unresolved.push(axis);
+            unresolved[unresolved_len] = axis;
+            unresolved_len += 1;
         }
     }
-    if unresolved.is_empty() {
+    if unresolved_len == 0 {
         return;
     }
-    enclose_axes_to_depth((lo, middle), accuracy, model, &unresolved, depth + 1, outs);
-    enclose_axes_to_depth((middle, hi), accuracy, model, &unresolved, depth + 1, outs);
+    let unresolved = &unresolved[..unresolved_len];
+    enclose_axes_to_depth((lo, middle), accuracy, model, unresolved, depth + 1, outs);
+    enclose_axes_to_depth((middle, hi), accuracy, model, unresolved, depth + 1, outs);
 }
 
 #[cfg(test)]
