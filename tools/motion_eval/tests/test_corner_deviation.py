@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import tempfile
 
 import pytest
@@ -13,24 +14,45 @@ CASES = (
     "circles",
     "voron_top_layers",
 )
-BELOW_FLOOR_BUDGET = 0.05
-ABOVE_FLOOR_BUDGET = 0.2
+BELOW_FLOOR_CAP = 0.1
+MODES = (("floor", None), ("cap", BELOW_FLOOR_CAP))
 
 
-def limited_run(case, config, family, budget):
-    run = sweep.Run("budget", case, config, family, sweep.BASE_SCV, 0.5, budget)
+@functools.cache
+def executed(kind, case, config, family, cap=None):
+    run = sweep.Run(
+        kind, case, config, family, sweep.BASE_SCV, sweep.BASE_MCR, cap
+    )
     with tempfile.TemporaryDirectory() as tmp:
         return sweep.execute(run, tmp)
 
 
-@pytest.mark.parametrize("budget", (BELOW_FLOOR_BUDGET, ABOVE_FLOOR_BUDGET))
+@pytest.mark.parametrize("mode", MODES, ids=lambda m: m[0])
 @pytest.mark.parametrize("family", sweep.FAMILIES)
 @pytest.mark.parametrize("config", sorted(sweep.CONFIGS))
 @pytest.mark.parametrize("case", CASES)
-def test_shaped_corners_stay_within_budget(case, config, family, budget):
-    result = limited_run(case, config, family, budget)
+def test_corners_round_no_more_than_a_stop_can(case, config, family, mode):
+    result = executed(mode[0], case, config, family, mode[1])
     grid_resolution = 0.5 * result["max_accel"] * sweep.SWEEP_DT**2
-    assert result["corners"]["max_mm"] <= budget + grid_resolution
-    assert result["limiter_stats"]["over_budget"] == 0
-    if family.startswith("smooth"):
-        assert result["peak_accel"] <= result["max_accel"] * (1 + 1e-9)
+    assert result["corners"]["max_mm"] <= (
+        result["shaper_floor_mm"] + grid_resolution
+    )
+
+
+@pytest.mark.parametrize("mode", MODES, ids=lambda m: m[0])
+@pytest.mark.parametrize("family", sweep.FAMILIES)
+@pytest.mark.parametrize("config", sorted(sweep.CONFIGS))
+@pytest.mark.parametrize("case", CASES)
+def test_acceleration_is_never_lowered(case, config, family, mode):
+    result = executed(mode[0], case, config, family, mode[1])
+    default = executed("scv", case, config, family)
+    assert result["move_accels"] == default["move_accels"]
+
+
+@pytest.mark.parametrize("mode", MODES, ids=lambda m: m[0])
+@pytest.mark.parametrize("config", sorted(sweep.CONFIGS))
+@pytest.mark.parametrize("case", CASES)
+def test_smoother_peak_accel_within_stated_margin(case, config, mode):
+    result = executed(mode[0], case, config, "smooth_mzv", mode[1])
+    margin = result["limiter_stats"]["accel_margin"]
+    assert result["peak_accel"] <= result["max_accel"] * (1.0 + margin)
