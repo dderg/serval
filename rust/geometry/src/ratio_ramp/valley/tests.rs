@@ -272,7 +272,7 @@ proptest! {
 fn the_coupled_bend_bound_is_the_golden_ratio_to_the_three_halves_where_the_floor_bends() {
     let (accel, floor) = (4000.0, 3.8e-4);
     let bound = coupled_bend(1.9, accel, floor, 0.18);
-    let expected = GOLDEN_RATIO.powf(1.5) * accel.powf(1.5) * floor.sqrt();
+    let expected = libm::pow(GOLDEN_RATIO, 1.5) * libm::pow(accel, 1.5) * floor.sqrt();
     assert!(
         (bound - expected).abs() <= 1e-9 * expected,
         "the coupled bound {bound} is not φ^1.5·A^1.5·√f = {expected}"
@@ -309,5 +309,5 @@ fn a_crawl_side_wider_than_its_reach_lies_on_the_grid() {
     let widest =
         widest_crawl_side_within(reach, width).expect("the grid has widths past the reach");
     assert_eq!(widest, width, "the laid width is a grid width");
-    assert!(width >= 0.3 && width < 0.3 * 2.0_f64.powf(1.0 / 8.0));
+    assert!(width >= 0.3 && width < 0.3 * libm::pow(2.0, 1.0 / 8.0));
 }

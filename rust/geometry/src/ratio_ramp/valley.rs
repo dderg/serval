@@ -716,9 +716,8 @@ pub fn crawl_side_width(reach: f64, mut fits: impl FnMut(f64) -> bool) -> Option
     if fits(reach) {
         return Some(reach);
     }
-    (crawl_side_grid_step_past(reach)..)
+    (crawl_side_grid_step_past(reach)..crawl_side_grid_step_past(CRAWL_SIDE_WIDEST_MM))
         .map(crawl_side_grid)
-        .take_while(|&width| width <= CRAWL_SIDE_WIDEST_MM)
         .find(|&width| fits(width))
 }
 
