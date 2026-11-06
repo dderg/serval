@@ -291,16 +291,6 @@ impl CellTrack {
         let linear = fit.speed * (to + 1 - from) as f64 * h;
         linear.min(fit.position * (2.0 * f64::from(runs) + over.turning) + over.stray)
     }
-
-    /// The largest acceleration across the cells `from..=to`.
-    fn strongest(&self, from: i64, to: i64) -> f64 {
-        (from..=to).fold(0.0, |most: f64, n| most.max(self.get(n).accel.1))
-    }
-
-    /// The largest speed across the cells `from..=to`.
-    fn fastest(&self, from: i64, to: i64) -> f64 {
-        (from..=to).fold(0.0, |most: f64, n| most.max(self.get(n).speed.1))
-    }
 }
 
 /// Where along a run of crawling cells the follower projection may lay
@@ -399,24 +389,25 @@ impl Slot {
     }
 
     /// The fitted leaders over the cells `cells` of one side of the slot's
-    /// valley, as its rebuild reads them ([`CrawlSide`]): within the run,
-    /// where the crawl may lie anywhere, the path acceleration away from it
-    /// either way; past the run's furthest reach from the crawl, its sign
-    /// read off the `shadow` convolution's bounds of the cells beyond the
-    /// run ([`CellBounds::fitted_tangential`]), the track's box bounding
-    /// only its size.
+    /// valley, as its rebuild reads them ([`CrawlSide`]), off the cells'
+    /// `bounds` in order: within the run, where the crawl may lie anywhere,
+    /// the path acceleration away from it either way; past the run's
+    /// furthest reach from the crawl, its sign read off the bounds of the
+    /// cells beyond the run ([`CellBounds::fitted_tangential`]).
     fn leaders(
         &self,
         track: &CellTrack,
-        cells: (i64, i64),
+        (cells, bounds): ((i64, i64), &[CellBounds]),
         (h, fit): (f64, FitMiss),
-        shadow: &dyn Fn(i64) -> CellBounds,
     ) -> CrawlSide {
-        let accel = track.strongest(cells.0, cells.1) + fit.accel;
+        let (fastest, strongest) = bounds.iter().fold((0.0_f64, 0.0_f64), |(v, a), cell| {
+            (v.max(cell.speed.1), a.max(cell.accel.1))
+        });
+        let accel = strongest + fit.accel;
         let either_way = CrawlSide::either_way(
             self.speed,
             accel,
-            (track.fastest(cells.0, cells.1) + fit.speed).max(self.speed),
+            (fastest + fit.speed).max(self.speed),
             self.floor,
         );
         let (m0, m1) = self.cells;
@@ -427,9 +418,11 @@ impl Slot {
         } else {
             return either_way;
         };
-        let outward = (beyond.0..=beyond.1)
-            .map(|n| {
-                let (lo, hi) = shadow(n).fitted_tangential(fit);
+        let index = |n: i64| usize::try_from(n - cells.0).expect("a cell of the side");
+        let outward = bounds[index(beyond.0)..=index(beyond.1)]
+            .iter()
+            .map(|cell| {
+                let (lo, hi) = cell.fitted_tangential(fit);
                 if sign > 0.0 { (lo, hi) } else { (-hi, -lo) }
             })
             .fold((accel, -accel), |(lo, hi), (cell_lo, cell_hi)| {
@@ -548,7 +541,10 @@ impl Reserve {
     /// run, a cell's shaped motion is bounded by both the track and its
     /// `shadow` convolution, which a box over a whole move leaves far
     /// looser: that sets the path to the run, so the distance, the speed
-    /// there, and the sign of the path acceleration away from the crawl.
+    /// and path acceleration there, and its sign away from the crawl, in
+    /// each cell and over the whole side. A box keeps the fastest and
+    /// strongest motion anywhere along its move, which slowing the move's
+    /// end into the crawl leaves as it is while it narrows the side.
     /// Within the run the crawl may lie either way.
     fn over(
         slot: &Slot,
@@ -557,7 +553,6 @@ impl Reserve {
         (h, fit): (f64, FitMiss),
         shadow: &dyn Fn(i64) -> CellBounds,
     ) -> Self {
-        let side = slot.leaders(track, cells, (h, fit), shadow);
         let (m0, m1) = slot.cells;
         let beyond_the_run = |n: i64| n < m0 || n > m1;
         let bounds: Vec<CellBounds> = (cells.0..=cells.1)
@@ -570,6 +565,7 @@ impl Reserve {
                 }
             })
             .collect();
+        let side = slot.leaders(track, (cells, &bounds), (h, fit));
         let covered: Vec<(f64, f64)> = std::iter::once((0.0, 0.0))
             .chain(bounds.iter().scan((0.0, 0.0), |(least, most), cell| {
                 *least += cell.speed.0 * h;

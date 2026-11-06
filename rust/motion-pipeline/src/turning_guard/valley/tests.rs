@@ -191,3 +191,99 @@ fn track_with_rest(crawl: (i64, i64), rest: i64, fit: FitMiss) -> CellTrack {
     }
     track
 }
+
+/// The first cell of the move that brakes into the crawl of
+/// [`braking_into_a_crawl`].
+const BRAKE_CELL: i64 = 600;
+
+/// Cell `n` of a long move braking from 46 to 10 mm/s, then of one braking
+/// on into a crawl at 0.5 mm/s over the cells `crawl`, all at `scale` of
+/// their speed: the shaped motion itself, and what the track holds, the
+/// box over the long move, which keeps its unscaled entry and its
+/// 2000 mm/s² junction whatever the scale, and the motion itself where the
+/// braking move may crawl.
+fn braking_into_a_crawl(scale: f64, crawl: (i64, i64), n: i64) -> (CellBounds, CellBounds) {
+    if n >= crawl.0 {
+        let crawling = CellBounds {
+            speed: (0.0, scale * 0.5),
+            accel: (0.0, scale * scale * 300.0),
+            turn: f64::INFINITY,
+            tangential: (-scale * scale * 300.0, scale * scale * 300.0),
+        };
+        return (crawling, crawling);
+    }
+    let (entry, exit, crawl_speed) = (46.0, 10.0, 0.5);
+    let along = |from: f64, to: f64, (first, past): (i64, i64)| {
+        let span = (past - first) as f64;
+        (
+            scale * (from + (to - from) * (n - first) as f64 / span),
+            scale * scale * (from - to) / (span * H),
+        )
+    };
+    let (speed, accel) = if n < BRAKE_CELL {
+        along(entry, exit, (0, BRAKE_CELL))
+    } else {
+        along(exit, crawl_speed, (BRAKE_CELL, crawl.0))
+    };
+    let shaped = CellBounds {
+        speed: (speed, speed),
+        accel: (accel, accel),
+        turn: 0.0,
+        tangential: (-accel, -accel),
+    };
+    let tracked = if n < BRAKE_CELL {
+        CellBounds {
+            speed: (scale * exit, 60.0),
+            accel: (0.0, 2000.0),
+            turn: 0.0,
+            tangential: (-2000.0, 2000.0),
+        }
+    } else {
+        shaped
+    };
+    (shaped, tracked)
+}
+
+/// The most the before side of the crawl past [`braking_into_a_crawl`]
+/// at `scale` leaves room for in any of its cells.
+fn reserved_braking_at(scale: f64) -> f64 {
+    let fit = FitMiss::of(0.005, 50.0);
+    let crawl_cells = (800, 810);
+    let mut track = CellTrack::default();
+    for n in 0..1200 {
+        track.push(n, braking_into_a_crawl(scale, crawl_cells, n).1, H, fit);
+    }
+    let slot = Slot::over(&track, crawl_cells, fit).expect("the run crawls");
+    let shaped = |n: i64| braking_into_a_crawl(scale, crawl_cells, n).0;
+    let crawl = Crawl::found(slot, 1, &track, -1, (H, fit), &shaped).expect("the side fits");
+    let (first, last) = crawl.before.cells;
+    (first..=last)
+        .filter_map(|n| crawl.before.rebuild_where(n, |_| true))
+        .fold(0.0, f64::max)
+}
+
+/// The guard backs off a move braking into a crawl by slowing it, which
+/// narrows the before side the lead budget covers. The room it leaves for
+/// the rebuild must not grow with it, or the back-off raises the demand it
+/// answers: the cells are read at their own motion, not at the fastest and
+/// strongest the box over their move holds (`trident_follower_cache_regression`
+/// line 935 on the p1 bowden profile, 5000 to 18540 mm/s² over 19
+/// back-offs).
+#[test]
+fn slowing_the_approach_to_a_crawl_never_grows_the_room_its_valley_side_needs() {
+    let reserved: Vec<(f64, f64)> = [1.0, 0.8, 0.6, 0.45, 0.35]
+        .into_iter()
+        .map(|scale| (scale, reserved_braking_at(scale)))
+        .collect();
+    for pair in reserved.windows(2) {
+        assert!(
+            pair[1].1 <= pair[0].1,
+            "slowing the approach from {} to {} of its speed grows the reserve from {} to {}: \
+             {reserved:?}",
+            pair[0].0,
+            pair[1].0,
+            pair[0].1,
+            pair[1].1
+        );
+    }
+}

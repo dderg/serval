@@ -664,9 +664,8 @@ impl RebuildsWithin {
             let from_far = far.1 * far.1 + 2.0 * growth * (far.0 - from);
             libm::sqrt(from_near.min(from_far))
         };
-        let fits = |range: (f64, f64)| {
-            self.at(range, (0.0, speed_over(range)), (-accel, accel)) <= room
-        };
+        let fits =
+            |range: (f64, f64)| self.at(range, (0.0, speed_over(range)), (-accel, accel)) <= room;
         if fits((lo, hi)) {
             return true;
         }
