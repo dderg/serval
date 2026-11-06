@@ -2,8 +2,8 @@ use std::cell::OnceCell;
 use std::collections::VecDeque;
 
 use geometry::{
-    ADVANCE_VALLEY_SPEED_MM_S, CrawlSide, VALLEY_LEAD_BUDGET_S, turns_around, valley_reach,
-    widest_crawl_side_within,
+    ADVANCE_VALLEY_SPEED_MM_S, CrawlSide, RebuildsWithin, VALLEY_LEAD_BUDGET_S, turns_around,
+    valley_reach, widest_crawl_side_within,
 };
 
 use super::screen::ShapedBox;
@@ -429,12 +429,13 @@ pub(super) struct Reserve {
 
 /// The fitted leaders across a crawl valley side: as its rebuild reads
 /// them, cell by cell, and joined over all its cells, which bounds what
-/// the rebuild asks in any of them ([`CrawlSide::rebuild_within`] grows
-/// with the distance range, the speed and the acceleration); and the bound
-/// over the whole side ([`CrawlSide::rebuild`]) once read.
+/// the rebuild asks in any of them ([`RebuildsWithin`] grows with the
+/// distance range, the speed and the acceleration); and the bound over the
+/// whole side ([`CrawlSide::rebuild`]) once read.
 #[derive(Debug, Clone, PartialEq)]
 struct SideLeaders {
     side: CrawlSide,
+    within: RebuildsWithin,
     cells: Vec<CellLeaders>,
     joined: f64,
     whole: OnceCell<f64>,
@@ -442,8 +443,8 @@ struct SideLeaders {
 
 /// The fitted leaders in one cell of a crawl valley side: their distance
 /// range from the crawl, how fast they are and how hard they accelerate at
-/// most, and what [`CrawlSide::rebuild_within`] bounds the rebuild there
-/// by once read.
+/// most, and what [`RebuildsWithin`] bounds the rebuild there by once
+/// read.
 #[derive(Debug, Clone, PartialEq)]
 struct CellLeaders {
     distance: (f64, f64),
@@ -471,8 +472,7 @@ impl Reserve {
     /// The side `width` wide over the cells `cells` of the `slot`'s
     /// valley: in each, the least of the bound over the whole side
     /// ([`CrawlSide::rebuild`]) and the one the cell's own fitted leaders
-    /// set at their distance from the crawl
-    /// ([`CrawlSide::rebuild_within`]).
+    /// set at their distance from the crawl ([`RebuildsWithin`]).
     fn over(
         slot: &Slot,
         track: &CellTrack,
@@ -505,12 +505,14 @@ impl Reserve {
                 )
             },
         );
+        let within = side.rebuilds_within(width);
         Self {
             width,
             cells,
             leaders: Some(SideLeaders {
                 side,
-                joined: side.rebuild_within(width, distance, speed, accel),
+                joined: within.at(distance, speed, accel),
+                within,
                 cells: crossing,
                 whole: OnceCell::new(),
             }),
@@ -534,11 +536,9 @@ impl Reserve {
             return None;
         }
         let cell = &leaders.cells[usize::try_from(n - self.cells.0).expect("a cell of the side")];
-        let within = *cell.within.get_or_init(|| {
-            leaders
-                .side
-                .rebuild_within(self.width, cell.distance, cell.speed, cell.accel)
-        });
+        let within = *cell
+            .within
+            .get_or_init(|| leaders.within.at(cell.distance, cell.speed, cell.accel));
         binds(within).then(|| {
             within.min(
                 *leaders

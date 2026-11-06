@@ -208,7 +208,7 @@ proptest! {
                 if weight < 1.0 && step % 10 == 0 {
                     let met = (curvature * v * v * v + 3.0 * slope * v * rate).abs();
                     let distance = around(s, spreads[0] * width, spreads[1] * width, 0.0);
-                    let bound = side.rebuild_within(width, distance, v, rate.abs());
+                    let bound = side.rebuilds_within(width).at(distance, v, rate.abs());
                     prop_assert!(
                         met <= bound * (1.0 + 1e-6) + 1e-9,
                         "at {s} mm, {v} mm/s and {rate} mm/s² the leaders meet a rebuild of \

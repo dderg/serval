@@ -298,22 +298,52 @@ impl SideWeight {
     }
 
     fn within_widths(distance: (f64, f64), width: (f64, f64), floor: (f64, f64)) -> Self {
-        let ((d0, d1), (w0, w1), (f0, f1)) = (distance, width, floor);
+        SideSpan::over(width, floor).weight_within(distance)
+    }
+}
+
+/// A side's width and floor ranges with what [`SideWeight`]'s bounds read
+/// of them alone: the floors kept, the widths flattened over them, and the
+/// span the slope, fold and bend scale are read within.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SideSpan {
+    width: (f64, f64),
+    kept: (f64, f64),
+    flattened: (f64, f64),
+    span: (f64, f64),
+}
+
+impl SideSpan {
+    fn over(width: (f64, f64), floor: (f64, f64)) -> Self {
+        let ((w0, w1), (f0, f1)) = (width, floor);
         assert!(
-            0.0 <= d0 && d0 <= d1 && 0.0 < w0 && w0 <= w1 && 0.0 <= f0 && f0 <= f1,
-            "a valley side's ranges are out of order: distance {distance:?}, width {width:?}, \
-             floor {floor:?}"
+            0.0 < w0 && w0 <= w1 && 0.0 <= f0 && f0 <= f1,
+            "a valley side's ranges are out of order: width {width:?}, floor {floor:?}"
         );
-        if d0 >= w1 {
-            return Self::OUTSIDE;
-        }
         let (fe0, fe1) = (kept_floor(f0, w0), kept_floor(f1, w1));
-        let inside = |d: f64, w: f64, f: f64| 1.0 - flattened(d, f) / flattened(w, f);
-        let inside = (
-            inside(d1, w0, fe0).clamp(0.0, 1.0),
-            inside(d0, w1, fe1).clamp(0.0, 1.0),
+        Self {
+            width,
+            kept: (fe0, fe1),
+            flattened: (flattened(w0, fe0), flattened(w1, fe1)),
+            span: (flattened(w0, kept_floor(fe1, w0)), flattened(w1, fe0)),
+        }
+    }
+
+    fn weight_within(&self, distance: (f64, f64)) -> SideWeight {
+        let (d0, d1) = distance;
+        assert!(
+            0.0 <= d0 && d0 <= d1,
+            "a valley side's distance range is out of order: {distance:?}"
         );
-        let span = (flattened(w0, kept_floor(fe1, w0)), flattened(w1, fe0));
+        if d0 >= self.width.1 {
+            return SideWeight::OUTSIDE;
+        }
+        let (fe0, fe1) = self.kept;
+        let span = self.span;
+        let inside = (
+            (1.0 - flattened(d1, fe0) / self.flattened.0).clamp(0.0, 1.0),
+            (1.0 - flattened(d0, fe1) / self.flattened.1).clamp(0.0, 1.0),
+        );
         let nearest = flattened(d0, fe1);
         let share_peak = |peak_at: f64, power: i32| {
             let span = (peak_at * nearest).clamp(span.0.max(nearest), span.1);
@@ -347,7 +377,7 @@ impl SideWeight {
             },
         );
         let (i0, i1) = inside;
-        Self {
+        SideWeight {
             weight: (1.0 - i1 * i1 * i1, 1.0 - i0 * i0 * i0),
             slope: (3.0 * i0 * i0 * slope.0 / span.1, 3.0 * rising * slope.1),
             fold: (
@@ -357,12 +387,6 @@ impl SideWeight {
             bend_scale: (3.0 * i0 * i0 / span.1, 3.0 * rising),
             bend,
         }
-    }
-
-    /// [`Self::within`] a single `width`.
-    #[must_use]
-    pub fn at_width(distance: (f64, f64), width: f64, floor: (f64, f64)) -> Self {
-        Self::within_widths(distance, (width, width), floor)
     }
 }
 
@@ -463,13 +487,13 @@ impl CrawlSide {
 
     fn rebuild_over(&self, width: f64, floor: (f64, f64)) -> f64 {
         let step = width / f64::from(CRAWL_SIDE_DISTANCE_PIECES);
-        let reaches_the_cap = floor.1 >= kept_floor(self.floor.1, width);
-        let crawl_floor = if reaches_the_cap {
-            self.floor.1
-        } else {
-            floor.1
-        };
-        let coupled = coupled_bend(self.speed, self.accel, crawl_floor, width);
+        let coupled = coupled_bend(
+            self.speed,
+            self.accel,
+            self.crawl_floor(width, floor),
+            width,
+        );
+        let side = SideSpan::over((width, width), floor);
         let speed_sq = self.speed * self.speed;
         let (accel, signed_from) = (self.accel, self.signed_from);
         (0..CRAWL_SIDE_DISTANCE_PIECES)
@@ -485,7 +509,7 @@ impl CrawlSide {
                 } else {
                     (-accel, accel)
                 };
-                let weight = SideWeight::at_width((near, far), width, floor);
+                let weight = side.weight_within((near, far));
                 let rising = 2.0 * accel * far.min(signed_from)
                     + 2.0 * self.outward.1.max(0.0) * (far - signed_from).max(0.0);
                 let fastest = libm::sqrt(speed_sq + rising).min(self.fastest);
@@ -521,44 +545,82 @@ impl CrawlSide {
             .fold(0.0, f64::max)
     }
 
-    /// The most `|W″·ṡ³ + 3W′·ṡ·s̈|` asks of leaders within `distance` of
-    /// the crawl, a `(least, largest)` range, no faster than `speed` and
-    /// with `|s̈|` within `accel` there, over a side `width` wide:
-    /// `|W″| ≤ max(bend_scale·β, fold)` with `β·ṡ³` within
-    /// [`coupled_bend`] too, and `|W′|` within its slope, read by
-    /// [`SideWeight::at_width`] over that distance. It reads the leaders
-    /// where they are, which bounds a side across a long crawl far closer
-    /// than [`Self::rebuild`], whose speed grows from the crawl's with the
-    /// strongest acceleration anywhere along the side.
+    /// The floor the bend of a side `width` wide reads over the piece
+    /// `floor` of its floor range: the crawl's own where the piece reaches
+    /// the floor the side keeps of it.
+    fn crawl_floor(&self, width: f64, floor: (f64, f64)) -> f64 {
+        if floor.1 >= kept_floor(self.floor.1, width) {
+            self.floor.1
+        } else {
+            floor.1
+        }
+    }
+
+    /// [`RebuildsWithin`] a side `width` wide.
     #[must_use]
-    pub fn rebuild_within(&self, width: f64, distance: (f64, f64), speed: f64, accel: f64) -> f64 {
+    pub fn rebuilds_within(&self, width: f64) -> RebuildsWithin {
         assert!(
-            width > 0.0 && speed >= 0.0 && accel >= 0.0 && 0.0 <= distance.0,
+            width > 0.0,
+            "a crawl side spans a positive width, not {width} mm"
+        );
+        RebuildsWithin {
+            fastest: self.fastest,
+            pieces: floor_pieces(self.floor, width)
+                .into_iter()
+                .map(|floor| {
+                    (
+                        SideSpan::over((width, width), floor),
+                        coupled_bend(
+                            self.speed,
+                            self.accel,
+                            self.crawl_floor(width, floor),
+                            width,
+                        ),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The most `|W″·ṡ³ + 3W′·ṡ·s̈|` asks of leaders within a distance range of
+/// a crawl, no faster than a speed and with `|s̈|` within an acceleration
+/// there, over a side of one width ([`CrawlSide::rebuilds_within`]):
+/// `|W″| ≤ max(bend_scale·β, fold)` with `β·ṡ³` within [`coupled_bend`]
+/// too, and `|W′|` within its slope, read by [`SideWeight`] over that
+/// distance, the side's floor range split as [`CrawlSide::rebuild`] splits
+/// it. It reads the leaders where they are, which bounds a side across a
+/// long crawl far closer than [`CrawlSide::rebuild`], whose speed grows
+/// from the crawl's with the strongest acceleration anywhere along the
+/// side. What reads neither the distance nor the leaders there is read
+/// once per floor piece.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RebuildsWithin {
+    fastest: f64,
+    pieces: Vec<(SideSpan, f64)>,
+}
+
+impl RebuildsWithin {
+    /// The most the rebuild asks of leaders within `distance` of the crawl,
+    /// a `(least, largest)` range, no faster than `speed` and with `|s̈|`
+    /// within `accel` there.
+    #[must_use]
+    pub fn at(&self, distance: (f64, f64), speed: f64, accel: f64) -> f64 {
+        assert!(
+            speed >= 0.0 && accel >= 0.0 && 0.0 <= distance.0,
             "a crawl side's leaders are ill-formed: {speed} mm/s, {accel} mm/s² within \
-             {distance:?} mm of a side {width} mm wide"
+             {distance:?} mm"
         );
         let speed = speed.min(self.fastest);
         let cubed = speed * speed * speed;
-        floor_pieces(self.floor, width)
-            .into_iter()
-            .map(|floor| {
-                let reaches_the_cap = floor.1 >= kept_floor(self.floor.1, width);
-                let crawl_floor = if reaches_the_cap {
-                    self.floor.1
-                } else {
-                    floor.1
-                };
-                let weight = SideWeight::at_width(distance, width, floor);
+        self.pieces
+            .iter()
+            .map(|(side, coupled)| {
+                let weight = side.weight_within(distance);
                 let bend = if weight.bend.1 == 0.0 || cubed == 0.0 {
                     0.0
                 } else {
-                    weight.bend_scale.1
-                        * (weight.bend.1 * cubed).min(coupled_bend(
-                            self.speed,
-                            self.accel,
-                            crawl_floor,
-                            width,
-                        ))
+                    weight.bend_scale.1 * (weight.bend.1 * cubed).min(*coupled)
                 };
                 bend.max(weight.fold.1 * cubed) + 3.0 * weight.slope.1 * speed * accel
             })
