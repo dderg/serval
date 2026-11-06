@@ -1,24 +1,24 @@
 {
   "slice_lines": 1000,
-  "commit": "b04c051a83b5bb43c7cdb21fe56cf81cae63f6f8",
-  "reason": "turning guard: the emission horizon brakes through curves in closed form instead of integrating a disk rail per held curve every feed. Pinned slice Ir vs main dc95e5631: p3_voron_direct_drive_ramp 19,035.5M -> 18,239.9M (-4.18%), p3_voron_direct_drive_kernel +0.01%, trident_kernel +0.04%; the ratchet also takes up main's own drops since 053a9b198 (#795 and later)",
+  "commit": "77cf41c165475a07ae4edf8b139b1f8e052f1719",
+  "reason": "Ratchet to main 77cf41c16 (after #815, #816 and #817) for the 2026-11-06 Pi re-check, which re-pins the calibration commit here and adds #804's pair, #815's parent and #817's parent as calibration points; Ir shrank 11-35 % since b04c051a8.",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 18239705616,
-      "stream_secs": 6.374
+      "ir": 13210634966,
+      "stream_secs": 6.004
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 18138789153,
-      "stream_secs": 6.049
+      "ir": 12038912179,
+      "stream_secs": 5.75
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 22423163723,
-      "stream_secs": 5.465
+      "ir": 19651406347,
+      "stream_secs": 4.624
     }
   },
   "pi_calibration": {
-    "measured_at": "2026-11-05T19:23:54+00:00",
-    "commit": "cbb61ef5c6b6273600678fb9b2afe22eac42b7c2",
+    "measured_at": "2026-11-06T10:20:19+00:00",
+    "commit": "77cf41c165475a07ae4edf8b139b1f8e052f1719",
     "variants": [
       {
         "label": "728a1d720",
@@ -54,336 +54,394 @@
       {
         "label": "6aa1cb275",
         "commit": "6aa1cb2757343385a67c2bae4cef824a0b21e368"
+      },
+      {
+        "label": "76e188237",
+        "commit": "76e188237d573df85c61f17ca968983678b1dd8f"
+      },
+      {
+        "label": "3fa11d9cc",
+        "commit": "3fa11d9cc89208ea0f6216cb4bd96199ad21812b"
+      },
+      {
+        "label": "59e960419",
+        "commit": "59e9604194b6e7389310dfd4c04676c6b371245c"
+      },
+      {
+        "label": "434df12ca",
+        "commit": "434df12ca81152c2e777daeacf6db291c140c4fd"
       }
     ],
     "configs": {
       "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
         "ir": {
-          "factor": 1.098553190008296,
-          "intercept": 25.047740689535747,
-          "max_residual_pct": 9.76,
-          "max_loo_residual_pct": 10.31,
+          "factor": 1.2758124854219068,
+          "intercept": 28.979953541601795,
+          "max_residual_pct": 35.45,
+          "max_loo_residual_pct": 35.45,
           "residual_pct": {
-            "6aa1cb275": -0.66,
-            "70ef61704+emit-batch-1": -0.43,
-            "70ef61704+emit-batch-8": -1.59,
-            "70ef61704+seed-selection-reverted": -0.66,
-            "728a1d720": -9.76,
-            "8d567d184": -4.07,
-            "a577d8340": -2.03,
-            "c73bd41d5": -4.66
+            "3fa11d9cc": 35.45,
+            "434df12ca": 1.1,
+            "59e960419": 23.21,
+            "6aa1cb275": 11.51,
+            "70ef61704+emit-batch-1": 13.1,
+            "70ef61704+emit-batch-8": 12.85,
+            "70ef61704+seed-selection-reverted": 11.78,
+            "728a1d720": -9.86,
+            "76e188237": 21.55,
+            "8d567d184": 0.62,
+            "a577d8340": 8.7,
+            "c73bd41d5": -0.41
           },
           "loo_residual_pct": {
-            "6aa1cb275": -0.82,
-            "70ef61704+emit-batch-1": -0.53,
-            "70ef61704+emit-batch-8": -2.04,
-            "70ef61704+seed-selection-reverted": -0.82,
-            "728a1d720": -10.31,
-            "8d567d184": -4.07,
-            "a577d8340": -2.33,
-            "c73bd41d5": -4.66
+            "3fa11d9cc": 35.45,
+            "434df12ca": 1.1,
+            "59e960419": 23.54,
+            "6aa1cb275": 11.52,
+            "70ef61704+emit-batch-1": 13.11,
+            "70ef61704+emit-batch-8": 12.89,
+            "70ef61704+seed-selection-reverted": 11.79,
+            "728a1d720": -18.91,
+            "76e188237": 23.84,
+            "8d567d184": 0.77,
+            "a577d8340": 8.74,
+            "c73bd41d5": -0.51
           }
         },
         "live": {
-          "factor": 1.1100497976692636,
-          "intercept": 0.9555114450274363,
-          "max_residual_pct": 29.11,
-          "max_loo_residual_pct": 32.41,
-          "max_cpu_out_residual_pct": 29.33,
+          "factor": 0.9950215676838788,
+          "intercept": 1.534714366238164,
+          "max_residual_pct": 37.0,
+          "max_loo_residual_pct": 36.99,
+          "max_cpu_out_residual_pct": 36.96,
           "by_cpu": {
             "AMD EPYC 7763 64-Core Processor": {
-              "jobs": 11,
-              "max_residual_pct": 23.4,
-              "max_loo_residual_pct": 26.43,
-              "max_cpu_out_residual_pct": 23.18,
+              "jobs": 16,
+              "max_residual_pct": 31.96,
+              "max_loo_residual_pct": 31.97,
+              "max_cpu_out_residual_pct": 31.9,
               "residual_pct": {
-                "6aa1cb275": -9.32,
-                "70ef61704+emit-batch-1": -9.24,
-                "70ef61704+emit-batch-8": -2.72,
-                "70ef61704+seed-selection-reverted": -9.82,
-                "728a1d720": -23.4,
-                "8d567d184": -11.01,
-                "a577d8340": -14.94,
-                "c73bd41d5": -11.16
+                "3fa11d9cc": 31.96,
+                "434df12ca": 1.21,
+                "59e960419": 25.24,
+                "6aa1cb275": -5.64,
+                "70ef61704+emit-batch-1": -4.45,
+                "70ef61704+emit-batch-8": 1.7,
+                "70ef61704+seed-selection-reverted": -5.82,
+                "728a1d720": -13.04,
+                "76e188237": 16.53,
+                "8d567d184": -2.26,
+                "a577d8340": -10.06,
+                "c73bd41d5": -2.8
               },
               "loo_residual_pct": {
-                "6aa1cb275": -10.08,
-                "70ef61704+emit-batch-1": -9.92,
-                "70ef61704+emit-batch-8": -2.75,
-                "70ef61704+seed-selection-reverted": -10.56,
-                "728a1d720": -26.43,
-                "8d567d184": -11.02,
-                "a577d8340": -15.8,
-                "c73bd41d5": -11.17
+                "3fa11d9cc": 31.97,
+                "434df12ca": 1.21,
+                "59e960419": 25.5,
+                "6aa1cb275": -5.68,
+                "70ef61704+emit-batch-1": -4.48,
+                "70ef61704+emit-batch-8": 1.7,
+                "70ef61704+seed-selection-reverted": -5.86,
+                "728a1d720": -21.07,
+                "76e188237": 18.81,
+                "8d567d184": -1.77,
+                "a577d8340": -10.42,
+                "c73bd41d5": -2.38
               },
               "cpu_out_residual_pct": {
-                "6aa1cb275": -9.57,
-                "70ef61704+emit-batch-1": -9.49,
-                "70ef61704+emit-batch-8": -3.06,
-                "70ef61704+seed-selection-reverted": -10.06,
-                "728a1d720": -23.18,
-                "8d567d184": -10.97,
-                "a577d8340": -15.09,
-                "c73bd41d5": -11.13
+                "3fa11d9cc": 31.9,
+                "434df12ca": 1.2,
+                "59e960419": 25.01,
+                "6aa1cb275": -5.85,
+                "70ef61704+emit-batch-1": -4.67,
+                "70ef61704+emit-batch-8": 1.64,
+                "70ef61704+seed-selection-reverted": -6.03,
+                "728a1d720": -14.21,
+                "76e188237": 15.82,
+                "8d567d184": -3.09,
+                "a577d8340": -10.43,
+                "c73bd41d5": -3.62
               }
             },
             "AMD EPYC 9V45 96-Core Processor": {
               "jobs": 10,
-              "max_residual_pct": 22.69,
-              "max_loo_residual_pct": 25.68,
-              "max_cpu_out_residual_pct": 22.42,
+              "max_residual_pct": 32.95,
+              "max_loo_residual_pct": 32.96,
+              "max_cpu_out_residual_pct": 32.93,
               "residual_pct": {
-                "6aa1cb275": -9.84,
-                "70ef61704+emit-batch-1": -9.51,
-                "70ef61704+emit-batch-8": -2.25,
-                "70ef61704+seed-selection-reverted": -9.46,
-                "728a1d720": -22.69,
-                "8d567d184": -10.37,
-                "a577d8340": -17.0,
-                "c73bd41d5": -10.5
+                "3fa11d9cc": 32.95,
+                "434df12ca": 1.43,
+                "59e960419": 25.68,
+                "6aa1cb275": -4.24,
+                "70ef61704+emit-batch-1": -3.3,
+                "70ef61704+emit-batch-8": 3.44,
+                "70ef61704+seed-selection-reverted": -4.51,
+                "728a1d720": -10.99,
+                "76e188237": 18.22,
+                "8d567d184": -0.66,
+                "a577d8340": -10.39,
+                "c73bd41d5": -1.07
               },
               "loo_residual_pct": {
-                "6aa1cb275": -10.58,
-                "70ef61704+emit-batch-1": -10.18,
-                "70ef61704+emit-batch-8": -2.28,
-                "70ef61704+seed-selection-reverted": -10.21,
-                "728a1d720": -25.68,
-                "8d567d184": -10.38,
-                "a577d8340": -17.77,
-                "c73bd41d5": -10.51
+                "3fa11d9cc": 32.96,
+                "434df12ca": 1.43,
+                "59e960419": 25.93,
+                "6aa1cb275": -4.27,
+                "70ef61704+emit-batch-1": -3.32,
+                "70ef61704+emit-batch-8": 3.44,
+                "70ef61704+seed-selection-reverted": -4.54,
+                "728a1d720": -19.0,
+                "76e188237": 20.45,
+                "8d567d184": -0.18,
+                "a577d8340": -10.75,
+                "c73bd41d5": -0.66
               },
               "cpu_out_residual_pct": {
-                "6aa1cb275": -10.13,
-                "70ef61704+emit-batch-1": -9.8,
-                "70ef61704+emit-batch-8": -2.66,
-                "70ef61704+seed-selection-reverted": -9.75,
-                "728a1d720": -22.42,
-                "8d567d184": -10.33,
-                "a577d8340": -17.16,
-                "c73bd41d5": -10.46
+                "3fa11d9cc": 32.93,
+                "434df12ca": 1.43,
+                "59e960419": 25.56,
+                "6aa1cb275": -4.34,
+                "70ef61704+emit-batch-1": -3.4,
+                "70ef61704+emit-batch-8": 3.42,
+                "70ef61704+seed-selection-reverted": -4.61,
+                "728a1d720": -11.61,
+                "76e188237": 17.85,
+                "8d567d184": -1.1,
+                "a577d8340": -10.59,
+                "c73bd41d5": -1.5
               }
             },
             "AMD EPYC 9V74 80-Core Processor": {
-              "jobs": 19,
-              "max_residual_pct": 23.84,
-              "max_loo_residual_pct": 26.89,
-              "max_cpu_out_residual_pct": 23.64,
+              "jobs": 10,
+              "max_residual_pct": 31.77,
+              "max_loo_residual_pct": 31.78,
+              "max_cpu_out_residual_pct": 31.73,
               "residual_pct": {
-                "6aa1cb275": -8.67,
-                "70ef61704+emit-batch-1": -8.84,
-                "70ef61704+emit-batch-8": -3.03,
-                "70ef61704+seed-selection-reverted": -9.22,
-                "728a1d720": -23.84,
-                "8d567d184": -10.43,
-                "a577d8340": -15.37,
-                "c73bd41d5": -10.57
+                "3fa11d9cc": 31.77,
+                "434df12ca": 1.26,
+                "59e960419": 25.49,
+                "6aa1cb275": -4.15,
+                "70ef61704+emit-batch-1": -3.03,
+                "70ef61704+emit-batch-8": 2.32,
+                "70ef61704+seed-selection-reverted": -4.32,
+                "728a1d720": -12.81,
+                "76e188237": 16.57,
+                "8d567d184": -0.78,
+                "a577d8340": -9.63,
+                "c73bd41d5": -1.4
               },
               "loo_residual_pct": {
-                "6aa1cb275": -9.44,
-                "70ef61704+emit-batch-1": -9.52,
-                "70ef61704+emit-batch-8": -3.06,
-                "70ef61704+seed-selection-reverted": -9.98,
-                "728a1d720": -26.89,
-                "8d567d184": -10.44,
-                "a577d8340": -16.22,
-                "c73bd41d5": -10.58
+                "3fa11d9cc": 31.78,
+                "434df12ca": 1.26,
+                "59e960419": 25.75,
+                "6aa1cb275": -4.18,
+                "70ef61704+emit-batch-1": -3.05,
+                "70ef61704+emit-batch-8": 2.32,
+                "70ef61704+seed-selection-reverted": -4.35,
+                "728a1d720": -20.84,
+                "76e188237": 18.85,
+                "8d567d184": -0.29,
+                "a577d8340": -9.99,
+                "c73bd41d5": -0.99
               },
               "cpu_out_residual_pct": {
-                "6aa1cb275": -8.89,
-                "70ef61704+emit-batch-1": -9.06,
-                "70ef61704+emit-batch-8": -3.33,
-                "70ef61704+seed-selection-reverted": -9.44,
-                "728a1d720": -23.64,
-                "8d567d184": -10.4,
-                "a577d8340": -15.5,
-                "c73bd41d5": -10.54
+                "3fa11d9cc": 31.73,
+                "434df12ca": 1.25,
+                "59e960419": 25.33,
+                "6aa1cb275": -4.28,
+                "70ef61704+emit-batch-1": -3.17,
+                "70ef61704+emit-batch-8": 2.28,
+                "70ef61704+seed-selection-reverted": -4.46,
+                "728a1d720": -13.65,
+                "76e188237": 16.07,
+                "8d567d184": -1.36,
+                "a577d8340": -9.89,
+                "c73bd41d5": -1.98
               }
             },
             "AMD Ryzen 7 7800X3D 8-Core Processor": {
               "jobs": 1,
-              "max_residual_pct": 29.11,
-              "max_loo_residual_pct": 32.41,
-              "max_cpu_out_residual_pct": 29.33,
+              "max_residual_pct": 30.54,
+              "max_loo_residual_pct": 30.56,
+              "max_cpu_out_residual_pct": 30.47,
               "residual_pct": {
-                "6aa1cb275": -6.86,
-                "70ef61704+emit-batch-1": -6.55,
-                "70ef61704+emit-batch-8": -1.13,
-                "70ef61704+seed-selection-reverted": -8.17,
-                "728a1d720": -29.11,
-                "8d567d184": -11.58,
-                "a577d8340": -17.07,
-                "c73bd41d5": -10.14
+                "3fa11d9cc": 30.54,
+                "434df12ca": 1.14,
+                "59e960419": 24.59,
+                "6aa1cb275": -0.95,
+                "70ef61704+emit-batch-1": 0.32,
+                "70ef61704+emit-batch-8": 6.21,
+                "70ef61704+seed-selection-reverted": -1.6,
+                "728a1d720": -17.81,
+                "76e188237": 17.27,
+                "8d567d184": 0.56,
+                "a577d8340": -10.34,
+                "c73bd41d5": 1.84
               },
               "loo_residual_pct": {
-                "6aa1cb275": -7.69,
-                "70ef61704+emit-batch-1": -7.29,
-                "70ef61704+emit-batch-8": -1.16,
-                "70ef61704+seed-selection-reverted": -8.95,
-                "728a1d720": -32.41,
-                "8d567d184": -11.59,
-                "a577d8340": -17.83,
-                "c73bd41d5": -10.15
+                "3fa11d9cc": 30.56,
+                "434df12ca": 1.14,
+                "59e960419": 24.87,
+                "6aa1cb275": -0.97,
+                "70ef61704+emit-batch-1": 0.31,
+                "70ef61704+emit-batch-8": 6.21,
+                "70ef61704+seed-selection-reverted": -1.63,
+                "728a1d720": -25.87,
+                "76e188237": 19.53,
+                "8d567d184": 1.04,
+                "a577d8340": -10.7,
+                "c73bd41d5": 2.24
               },
               "cpu_out_residual_pct": {
-                "6aa1cb275": -6.61,
-                "70ef61704+emit-batch-1": -6.29,
-                "70ef61704+emit-batch-8": -0.8,
-                "70ef61704+seed-selection-reverted": -7.93,
-                "728a1d720": -29.33,
-                "8d567d184": -11.61,
-                "a577d8340": -16.95,
-                "c73bd41d5": -10.16
+                "3fa11d9cc": 30.47,
+                "434df12ca": 1.12,
+                "59e960419": 24.37,
+                "6aa1cb275": -1.08,
+                "70ef61704+emit-batch-1": 0.18,
+                "70ef61704+emit-batch-8": 6.22,
+                "70ef61704+seed-selection-reverted": -1.75,
+                "728a1d720": -18.95,
+                "76e188237": 16.6,
+                "8d567d184": -0.22,
+                "a577d8340": -10.7,
+                "c73bd41d5": 1.08
               }
             },
             "INTEL(R) XEON(R) PLATINUM 8573C": {
-              "jobs": 1,
-              "max_residual_pct": 14.45,
-              "max_loo_residual_pct": 16.96,
-              "max_cpu_out_residual_pct": 14.61,
+              "jobs": 5,
+              "max_residual_pct": 36.47,
+              "max_loo_residual_pct": 36.47,
+              "max_cpu_out_residual_pct": 36.46,
               "residual_pct": {
-                "6aa1cb275": 0.51,
-                "70ef61704+emit-batch-1": 0.88,
-                "70ef61704+emit-batch-8": 4.18,
-                "70ef61704+seed-selection-reverted": 0.54,
-                "728a1d720": -14.45,
-                "8d567d184": -3.04,
-                "a577d8340": -14.06,
-                "c73bd41d5": -3.47
+                "3fa11d9cc": 36.47,
+                "434df12ca": 1.04,
+                "59e960419": 26.88,
+                "6aa1cb275": 9.87,
+                "70ef61704+emit-batch-1": 11.37,
+                "70ef61704+emit-batch-8": 14.77,
+                "70ef61704+seed-selection-reverted": 10.11,
+                "728a1d720": 1.65,
+                "76e188237": 22.69,
+                "8d567d184": 11.48,
+                "a577d8340": -3.84,
+                "c73bd41d5": 10.57
               },
               "loo_residual_pct": {
-                "6aa1cb275": -0.54,
-                "70ef61704+emit-batch-1": -0.08,
-                "70ef61704+emit-batch-8": 4.14,
-                "70ef61704+seed-selection-reverted": -0.51,
-                "728a1d720": -16.96,
-                "8d567d184": -3.03,
-                "a577d8340": -14.97,
-                "c73bd41d5": -3.46
+                "3fa11d9cc": 36.47,
+                "434df12ca": 1.04,
+                "59e960419": 27.12,
+                "6aa1cb275": 9.87,
+                "70ef61704+emit-batch-1": 11.37,
+                "70ef61704+emit-batch-8": 14.78,
+                "70ef61704+seed-selection-reverted": 10.11,
+                "728a1d720": -6.11,
+                "76e188237": 24.77,
+                "8d567d184": 11.9,
+                "a577d8340": -4.12,
+                "c73bd41d5": 10.93
               },
               "cpu_out_residual_pct": {
-                "6aa1cb275": 0.81,
-                "70ef61704+emit-batch-1": 1.18,
-                "70ef61704+emit-batch-8": 4.54,
-                "70ef61704+seed-selection-reverted": 0.84,
-                "728a1d720": -14.61,
-                "8d567d184": -3.02,
-                "a577d8340": -13.92,
-                "c73bd41d5": -3.45
-              }
-            },
-            "Intel(R) Xeon(R) 6973P-C": {
-              "jobs": 1,
-              "max_residual_pct": 16.43,
-              "max_loo_residual_pct": 17.22,
-              "max_cpu_out_residual_pct": 16.27,
-              "residual_pct": {
-                "6aa1cb275": 2.11,
-                "70ef61704+emit-batch-1": 3.46,
-                "70ef61704+emit-batch-8": 0.8,
-                "70ef61704+seed-selection-reverted": 3.11,
-                "728a1d720": -14.14,
-                "8d567d184": -5.24,
-                "a577d8340": -16.43,
-                "c73bd41d5": -3.99
-              },
-              "loo_residual_pct": {
-                "6aa1cb275": 1.01,
-                "70ef61704+emit-batch-1": 2.44,
-                "70ef61704+emit-batch-8": 0.77,
-                "70ef61704+seed-selection-reverted": 1.98,
-                "728a1d720": -16.62,
-                "8d567d184": -5.24,
-                "a577d8340": -17.22,
-                "c73bd41d5": -3.98
-              },
-              "cpu_out_residual_pct": {
-                "6aa1cb275": 2.53,
-                "70ef61704+emit-batch-1": 3.9,
-                "70ef61704+emit-batch-8": 1.24,
-                "70ef61704+seed-selection-reverted": 3.54,
-                "728a1d720": -14.35,
-                "8d567d184": -5.24,
-                "a577d8340": -16.27,
-                "c73bd41d5": -3.97
+                "3fa11d9cc": 36.46,
+                "434df12ca": 1.07,
+                "59e960419": 27.17,
+                "6aa1cb275": 9.84,
+                "70ef61704+emit-batch-1": 11.34,
+                "70ef61704+emit-batch-8": 14.56,
+                "70ef61704+seed-selection-reverted": 10.08,
+                "728a1d720": 3.3,
+                "76e188237": 23.63,
+                "8d567d184": 12.52,
+                "a577d8340": -3.41,
+                "c73bd41d5": 11.61
               }
             },
             "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": {
-              "jobs": 1,
-              "max_residual_pct": 11.09,
-              "max_loo_residual_pct": 13.37,
-              "max_cpu_out_residual_pct": 11.13,
+              "jobs": 3,
+              "max_residual_pct": 37.0,
+              "max_loo_residual_pct": 36.99,
+              "max_cpu_out_residual_pct": 36.96,
               "residual_pct": {
-                "6aa1cb275": -0.41,
-                "70ef61704+emit-batch-1": 0.03,
-                "70ef61704+emit-batch-8": 2.83,
-                "70ef61704+seed-selection-reverted": 0.01,
-                "728a1d720": -11.09,
-                "8d567d184": -3.47,
-                "a577d8340": -10.05,
-                "c73bd41d5": -4.12
+                "3fa11d9cc": 37.0,
+                "434df12ca": 1.4,
+                "59e960419": 27.6,
+                "6aa1cb275": 6.72,
+                "70ef61704+emit-batch-1": 8.19,
+                "70ef61704+emit-batch-8": 10.78,
+                "70ef61704+seed-selection-reverted": 6.94,
+                "728a1d720": 3.05,
+                "76e188237": 22.04,
+                "8d567d184": 8.87,
+                "a577d8340": -1.85,
+                "c73bd41d5": 7.9
               },
               "loo_residual_pct": {
-                "6aa1cb275": -1.44,
-                "70ef61704+emit-batch-1": -0.89,
-                "70ef61704+emit-batch-8": 2.79,
-                "70ef61704+seed-selection-reverted": -1.02,
-                "728a1d720": -13.37,
-                "8d567d184": -3.46,
-                "a577d8340": -11.17,
-                "c73bd41d5": -4.11
+                "3fa11d9cc": 36.99,
+                "434df12ca": 1.4,
+                "59e960419": 27.82,
+                "6aa1cb275": 6.72,
+                "70ef61704+emit-batch-1": 8.18,
+                "70ef61704+emit-batch-8": 10.79,
+                "70ef61704+seed-selection-reverted": 6.94,
+                "728a1d720": -4.68,
+                "76e188237": 24.14,
+                "8d567d184": 9.31,
+                "a577d8340": -2.11,
+                "c73bd41d5": 8.27
               },
               "cpu_out_residual_pct": {
-                "6aa1cb275": -0.33,
-                "70ef61704+emit-batch-1": 0.12,
-                "70ef61704+emit-batch-8": 2.92,
-                "70ef61704+seed-selection-reverted": 0.09,
-                "728a1d720": -11.13,
-                "8d567d184": -3.47,
-                "a577d8340": -10.01,
-                "c73bd41d5": -4.11
+                "3fa11d9cc": 36.96,
+                "434df12ca": 1.42,
+                "59e960419": 27.89,
+                "6aa1cb275": 6.77,
+                "70ef61704+emit-batch-1": 8.24,
+                "70ef61704+emit-batch-8": 10.66,
+                "70ef61704+seed-selection-reverted": 6.99,
+                "728a1d720": 4.78,
+                "76e188237": 23.04,
+                "8d567d184": 10.01,
+                "a577d8340": -1.44,
+                "c73bd41d5": 9.02
               }
             }
           },
-          "pi_cost": 0.3307047536396294,
+          "pi_cost": 0.19219720881981495,
           "speed_x": {
-            "min": 0.9084434995047997,
-            "max": 2.1224939231585083
+            "min": 0.8320667270664108,
+            "max": 2.005437153655439
           },
-          "max_calibration_spread_pct": 4.881619153969541
+          "max_calibration_spread_pct": 2.079760167611333
         },
         "points": {
           "728a1d720": {
             "pi_worst_x": [
-              2.25,
-              2.23
+              2.24,
+              2.24
             ],
-            "ir": 27830219922,
+            "ir": 27829541866,
             "stream_secs": 6.588,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": 0.37844,
-              "AMD EPYC 9V45 96-Core Processor": 0.37012,
-              "AMD EPYC 9V74 80-Core Processor": 0.38363,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.44816,
-              "INTEL(R) XEON(R) PLATINUM 8573C": 0.27893,
-              "Intel(R) Xeon(R) 6973P-C": 0.2756,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.24414
+              "AMD EPYC 7763 64-Core Processor": 0.87225,
+              "AMD EPYC 9V45 96-Core Processor": 0.84886,
+              "AMD EPYC 9V74 80-Core Processor": 0.86965,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.92896,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.7154,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.70167
             }
           },
           "c73bd41d5": {
             "pi_worst_x": [
-              2.77,
-              2.77
+              2.78,
+              2.79
             ],
-            "ir": 21747745378,
+            "ir": 21749576762,
             "stream_secs": 6.594,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": 0.04956,
-              "AMD EPYC 9V45 96-Core Processor": 0.04286,
-              "AMD EPYC 9V74 80-Core Processor": 0.04356,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.03925,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.02526,
-              "Intel(R) Xeon(R) 6973P-C": -0.02039,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.01917
+              "AMD EPYC 7763 64-Core Processor": 0.54336,
+              "AMD EPYC 9V45 96-Core Processor": 0.52563,
+              "AMD EPYC 9V74 80-Core Processor": 0.52897,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.49652,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.41382,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.43843
             }
           },
           "8d567d184": {
@@ -391,117 +449,174 @@
               2.78,
               2.76
             ],
-            "ir": 21698416134,
+            "ir": 21697807721,
             "stream_secs": 6.594,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": 0.05126,
-              "AMD EPYC 9V45 96-Core Processor": 0.04482,
-              "AMD EPYC 9V74 80-Core Processor": 0.04541,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.05703,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.026,
-              "Intel(R) Xeon(R) 6973P-C": -0.00531,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.02197
+              "AMD EPYC 7763 64-Core Processor": 0.54509,
+              "AMD EPYC 9V45 96-Core Processor": 0.52876,
+              "AMD EPYC 9V74 80-Core Processor": 0.52994,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.51648,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.41287,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.43663
             }
           },
           "70ef61704+seed-selection-reverted": {
             "pi_worst_x": [
-              4.31,
-              4.24
+              4.27,
+              4.26
             ],
-            "ir": 18417523046,
+            "ir": 18416971472,
             "stream_secs": 8.541,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.34742,
-              "AMD EPYC 9V45 96-Core Processor": -0.35103,
-              "AMD EPYC 9V74 80-Core Processor": -0.35338,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.36383,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.44541,
-              "Intel(R) Xeon(R) 6973P-C": -0.46818,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.44067
+              "AMD EPYC 7763 64-Core Processor": 0.14613,
+              "AMD EPYC 9V45 96-Core Processor": 0.13223,
+              "AMD EPYC 9V74 80-Core Processor": 0.13022,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.10209,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.01088,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.01841
             }
           },
           "70ef61704+emit-batch-8": {
             "pi_worst_x": [
               4.42,
-              4.43
+              4.38
             ],
-            "ir": 17886361287,
+            "ir": 17886621443,
             "stream_secs": 8.541,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.45321,
-              "AMD EPYC 9V45 96-Core Processor": -0.45751,
-              "AMD EPYC 9V74 80-Core Processor": -0.45026,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.46778,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.51487,
-              "Intel(R) Xeon(R) 6973P-C": -0.48522,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.50313
+              "AMD EPYC 7763 64-Core Processor": 0.04099,
+              "AMD EPYC 9V45 96-Core Processor": 0.02392,
+              "AMD EPYC 9V74 80-Core Processor": 0.03489,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.00263,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.08047,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.04494
             }
           },
           "70ef61704+emit-batch-1": {
             "pi_worst_x": [
-              4.23,
+              4.21,
               4.28
             ],
-            "ir": 18418301748,
+            "ir": 18417361719,
             "stream_secs": 8.541,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.35105,
-              "AMD EPYC 9V45 96-Core Processor": -0.34838,
-              "AMD EPYC 9V74 80-Core Processor": -0.35506,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.37746,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.4463,
-              "Intel(R) Xeon(R) 6973P-C": -0.4691,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.43875
+              "AMD EPYC 7763 64-Core Processor": 0.14353,
+              "AMD EPYC 9V45 96-Core Processor": 0.13141,
+              "AMD EPYC 9V74 80-Core Processor": 0.12866,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.0945,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.0105,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.01865
             }
           },
           "a577d8340": {
             "pi_worst_x": [
-              3.95,
-              3.98
+              3.97,
+              3.97
             ],
-            "ir": 19915280723,
+            "ir": 19914743325,
             "stream_secs": 8.55,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.23101,
-              "AMD EPYC 9V45 96-Core Processor": -0.20884,
-              "AMD EPYC 9V74 80-Core Processor": -0.22642,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.20813,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.24027,
-              "Intel(R) Xeon(R) 6973P-C": -0.21505,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.28129
+              "AMD EPYC 7763 64-Core Processor": 0.26327,
+              "AMD EPYC 9V45 96-Core Processor": 0.267,
+              "AMD EPYC 9V74 80-Core Processor": 0.25853,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.26645,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.19606,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.17547
             }
           },
           "6aa1cb275": {
             "pi_worst_x": [
-              4.26,
-              4.24
+              4.3,
+              4.27
             ],
-            "ir": 18418426520,
+            "ir": 18417308138,
             "stream_secs": 8.541,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.35239,
-              "AMD EPYC 9V45 96-Core Processor": -0.34721,
-              "AMD EPYC 9V74 80-Core Processor": -0.3589,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.37651,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.44515,
-              "Intel(R) Xeon(R) 6973P-C": -0.45941,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.43683
+              "AMD EPYC 7763 64-Core Processor": 0.14191,
+              "AMD EPYC 9V45 96-Core Processor": 0.12709,
+              "AMD EPYC 9V74 80-Core Processor": 0.1261,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.09306,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.01109,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.01811
+            }
+          },
+          "76e188237": {
+            "pi_worst_x": [
+              2.7,
+              2.76
+            ],
+            "ir": 18400678732,
+            "stream_secs": 6.374,
+            "live_log_cost": {
+              "AMD EPYC 7763 64-Core Processor": 0.39045,
+              "AMD EPYC 9V45 96-Core Processor": 0.37595,
+              "AMD EPYC 9V74 80-Core Processor": 0.39005,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.38405,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.33867,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.34398
+            }
+          },
+          "3fa11d9cc": {
+            "pi_worst_x": [
+              3.49,
+              3.42
+            ],
+            "ir": 13229360861,
+            "stream_secs": 6.004,
+            "live_log_cost": {
+              "AMD EPYC 7763 64-Core Processor": 0.02788,
+              "AMD EPYC 9V45 96-Core Processor": 0.02035,
+              "AMD EPYC 9V74 80-Core Processor": 0.02934,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.03874,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.00592,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.00975
+            }
+          },
+          "59e960419": {
+            "pi_worst_x": [
+              3.3,
+              3.32
+            ],
+            "ir": 14653521733,
+            "stream_secs": 6.004,
+            "live_log_cost": {
+              "AMD EPYC 7763 64-Core Processor": 0.11635,
+              "AMD EPYC 9V45 96-Core Processor": 0.11281,
+              "AMD EPYC 9V74 80-Core Processor": 0.11431,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.1215,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.10325,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.09758
+            }
+          },
+          "434df12ca": {
+            "pi_worst_x": [
+              4.54,
+              4.57
+            ],
+            "ir": 13324940536,
+            "stream_secs": 6.004,
+            "live_log_cost": {
+              "AMD EPYC 7763 64-Core Processor": 0.00977,
+              "AMD EPYC 9V45 96-Core Processor": 0.00758,
+              "AMD EPYC 9V74 80-Core Processor": 0.00933,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.01054,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.01145,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.00788
             }
           },
           "calibration": {
             "pi_worst_x": [
-              2.61,
-              2.6
+              4.77,
+              4.64
             ],
-            "ir": 21869311888,
-            "stream_secs": 6.537,
+            "ir": 13212052741,
+            "stream_secs": 6.004,
             "live_log_cost": {
               "AMD EPYC 7763 64-Core Processor": 0.0,
               "AMD EPYC 9V45 96-Core Processor": 0.0,
               "AMD EPYC 9V74 80-Core Processor": 0.0,
               "AMD Ryzen 7 7800X3D 8-Core Processor": 0.0,
               "INTEL(R) XEON(R) PLATINUM 8573C": 0.0,
-              "Intel(R) Xeon(R) 6973P-C": 0.0,
               "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.0
             }
           }
@@ -509,348 +624,389 @@
       },
       "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
         "ir": {
-          "factor": 1.3279161913892692,
-          "intercept": 30.257396818097956,
-          "max_residual_pct": 8.67,
-          "max_loo_residual_pct": 10.33,
+          "factor": 1.0972258669728858,
+          "intercept": 25.13001756407107,
+          "max_residual_pct": 7.68,
+          "max_loo_residual_pct": 8.84,
           "residual_pct": {
-            "6aa1cb275": 3.1,
-            "70ef61704+emit-batch-1": 3.54,
-            "70ef61704+emit-batch-8": -0.43,
-            "70ef61704+seed-selection-reverted": 0.22,
-            "728a1d720": -8.67,
-            "8d567d184": 1.26,
-            "a577d8340": 4.11,
-            "c73bd41d5": 0.48
+            "3fa11d9cc": 5.76,
+            "434df12ca": 0.63,
+            "59e960419": 5.04,
+            "6aa1cb275": 0.76,
+            "70ef61704+emit-batch-1": 1.63,
+            "70ef61704+emit-batch-8": -3.66,
+            "70ef61704+seed-selection-reverted": 0.8,
+            "728a1d720": -7.68,
+            "76e188237": 4.33,
+            "8d567d184": 1.07,
+            "a577d8340": 3.07,
+            "c73bd41d5": 1.82
           },
           "loo_residual_pct": {
-            "6aa1cb275": 3.3,
-            "70ef61704+emit-batch-1": 3.76,
-            "70ef61704+emit-batch-8": -0.44,
-            "70ef61704+seed-selection-reverted": 0.27,
-            "728a1d720": -10.33,
-            "8d567d184": 1.54,
-            "a577d8340": 4.63,
-            "c73bd41d5": 0.64
+            "3fa11d9cc": 5.76,
+            "434df12ca": 0.63,
+            "59e960419": 5.04,
+            "6aa1cb275": 0.84,
+            "70ef61704+emit-batch-1": 1.81,
+            "70ef61704+emit-batch-8": -3.97,
+            "70ef61704+seed-selection-reverted": 0.92,
+            "728a1d720": -8.84,
+            "76e188237": 4.47,
+            "8d567d184": 1.25,
+            "a577d8340": 3.5,
+            "c73bd41d5": 2.16
           }
         },
         "live": {
-          "factor": 1.0677608895273172,
-          "intercept": 1.0543120297715298,
-          "max_residual_pct": 16.73,
-          "max_loo_residual_pct": 17.13,
-          "max_cpu_out_residual_pct": 19.41,
+          "factor": 1.0304507359388009,
+          "intercept": 1.5810384379124025,
+          "max_residual_pct": 12.89,
+          "max_loo_residual_pct": 13.6,
+          "max_cpu_out_residual_pct": 14.46,
           "by_cpu": {
             "AMD EPYC 7763 64-Core Processor": {
               "jobs": 10,
-              "max_residual_pct": 7.83,
-              "max_loo_residual_pct": 8.61,
-              "max_cpu_out_residual_pct": 7.94,
+              "max_residual_pct": 9.16,
+              "max_loo_residual_pct": 9.87,
+              "max_cpu_out_residual_pct": 9.69,
               "residual_pct": {
-                "6aa1cb275": -1.62,
-                "70ef61704+emit-batch-1": -1.17,
-                "70ef61704+emit-batch-8": 3.92,
-                "70ef61704+seed-selection-reverted": 0.28,
-                "728a1d720": -7.83,
-                "8d567d184": 2.08,
-                "a577d8340": -1.26,
-                "c73bd41d5": 3.69
+                "3fa11d9cc": -1.76,
+                "434df12ca": 0.82,
+                "59e960419": -2.77,
+                "6aa1cb275": -4.17,
+                "70ef61704+emit-batch-1": -3.16,
+                "70ef61704+emit-batch-8": 1.64,
+                "70ef61704+seed-selection-reverted": -1.23,
+                "728a1d720": -9.16,
+                "76e188237": -2.12,
+                "8d567d184": -0.55,
+                "a577d8340": -3.45,
+                "c73bd41d5": 1.46
               },
               "loo_residual_pct": {
-                "6aa1cb275": -1.78,
-                "70ef61704+emit-batch-1": -1.46,
-                "70ef61704+emit-batch-8": 3.93,
-                "70ef61704+seed-selection-reverted": 0.56,
-                "728a1d720": -8.61,
-                "8d567d184": 2.84,
-                "a577d8340": -1.86,
-                "c73bd41d5": 5.05
+                "3fa11d9cc": -1.76,
+                "434df12ca": 0.82,
+                "59e960419": -2.77,
+                "6aa1cb275": -4.28,
+                "70ef61704+emit-batch-1": -3.19,
+                "70ef61704+emit-batch-8": 1.93,
+                "70ef61704+seed-selection-reverted": -1.09,
+                "728a1d720": -9.87,
+                "76e188237": -2.14,
+                "8d567d184": -0.26,
+                "a577d8340": -3.9,
+                "c73bd41d5": 2.18
               },
               "cpu_out_residual_pct": {
-                "6aa1cb275": -1.71,
-                "70ef61704+emit-batch-1": -1.26,
-                "70ef61704+emit-batch-8": 3.9,
-                "70ef61704+seed-selection-reverted": 0.16,
-                "728a1d720": -7.94,
-                "8d567d184": 1.96,
-                "a577d8340": -1.38,
-                "c73bd41d5": 3.55
+                "3fa11d9cc": -1.81,
+                "434df12ca": 0.82,
+                "59e960419": -2.83,
+                "6aa1cb275": -4.69,
+                "70ef61704+emit-batch-1": -3.68,
+                "70ef61704+emit-batch-8": 1.22,
+                "70ef61704+seed-selection-reverted": -1.81,
+                "728a1d720": -9.69,
+                "76e188237": -2.42,
+                "8d567d184": -1.15,
+                "a577d8340": -4.02,
+                "c73bd41d5": 0.83
               }
             },
             "AMD EPYC 9V45 96-Core Processor": {
               "jobs": 10,
-              "max_residual_pct": 4.93,
-              "max_loo_residual_pct": 5.66,
-              "max_cpu_out_residual_pct": 5.0,
+              "max_residual_pct": 5.47,
+              "max_loo_residual_pct": 6.18,
+              "max_cpu_out_residual_pct": 5.76,
               "residual_pct": {
-                "6aa1cb275": -1.72,
-                "70ef61704+emit-batch-1": -1.35,
-                "70ef61704+emit-batch-8": 4.13,
-                "70ef61704+seed-selection-reverted": 0.22,
-                "728a1d720": -4.93,
-                "8d567d184": 2.25,
-                "a577d8340": -2.98,
-                "c73bd41d5": 3.45
+                "3fa11d9cc": -1.86,
+                "434df12ca": 1.49,
+                "59e960419": -2.26,
+                "6aa1cb275": -2.5,
+                "70ef61704+emit-batch-1": -1.96,
+                "70ef61704+emit-batch-8": 2.5,
+                "70ef61704+seed-selection-reverted": -1.18,
+                "728a1d720": -5.47,
+                "76e188237": -0.6,
+                "8d567d184": -0.16,
+                "a577d8340": -3.63,
+                "c73bd41d5": 1.85
               },
               "loo_residual_pct": {
-                "6aa1cb275": -1.88,
-                "70ef61704+emit-batch-1": -1.64,
-                "70ef61704+emit-batch-8": 4.14,
-                "70ef61704+seed-selection-reverted": 0.49,
-                "728a1d720": -5.66,
-                "8d567d184": 3.0,
-                "a577d8340": -3.61,
-                "c73bd41d5": 4.81
+                "3fa11d9cc": -1.87,
+                "434df12ca": 1.49,
+                "59e960419": -2.27,
+                "6aa1cb275": -2.61,
+                "70ef61704+emit-batch-1": -1.99,
+                "70ef61704+emit-batch-8": 2.79,
+                "70ef61704+seed-selection-reverted": -1.04,
+                "728a1d720": -6.18,
+                "76e188237": -0.63,
+                "8d567d184": 0.13,
+                "a577d8340": -4.07,
+                "c73bd41d5": 2.56
               },
               "cpu_out_residual_pct": {
-                "6aa1cb275": -1.78,
-                "70ef61704+emit-batch-1": -1.41,
-                "70ef61704+emit-batch-8": 4.11,
-                "70ef61704+seed-selection-reverted": 0.13,
-                "728a1d720": -5.0,
-                "8d567d184": 2.17,
-                "a577d8340": -3.07,
-                "c73bd41d5": 3.35
+                "3fa11d9cc": -1.9,
+                "434df12ca": 1.49,
+                "59e960419": -2.3,
+                "6aa1cb275": -2.78,
+                "70ef61704+emit-batch-1": -2.25,
+                "70ef61704+emit-batch-8": 2.27,
+                "70ef61704+seed-selection-reverted": -1.5,
+                "728a1d720": -5.76,
+                "76e188237": -0.77,
+                "8d567d184": -0.49,
+                "a577d8340": -3.94,
+                "c73bd41d5": 1.5
               }
             },
             "AMD EPYC 9V74 80-Core Processor": {
-              "jobs": 19,
-              "max_residual_pct": 7.46,
-              "max_loo_residual_pct": 8.24,
-              "max_cpu_out_residual_pct": 7.75,
+              "jobs": 9,
+              "max_residual_pct": 8.01,
+              "max_loo_residual_pct": 8.72,
+              "max_cpu_out_residual_pct": 8.59,
               "residual_pct": {
-                "6aa1cb275": -2.39,
-                "70ef61704+emit-batch-1": -2.44,
-                "70ef61704+emit-batch-8": 2.74,
-                "70ef61704+seed-selection-reverted": -1.47,
-                "728a1d720": -7.46,
-                "8d567d184": 1.4,
-                "a577d8340": -3.08,
-                "c73bd41d5": 2.81
+                "3fa11d9cc": -2.15,
+                "434df12ca": 0.65,
+                "59e960419": -3.29,
+                "6aa1cb275": -3.99,
+                "70ef61704+emit-batch-1": -3.71,
+                "70ef61704+emit-batch-8": 1.11,
+                "70ef61704+seed-selection-reverted": -2.45,
+                "728a1d720": -8.01,
+                "76e188237": -1.86,
+                "8d567d184": -0.6,
+                "a577d8340": -4.52,
+                "c73bd41d5": 1.37
               },
               "loo_residual_pct": {
-                "6aa1cb275": -2.55,
-                "70ef61704+emit-batch-1": -2.73,
-                "70ef61704+emit-batch-8": 2.76,
-                "70ef61704+seed-selection-reverted": -1.18,
-                "728a1d720": -8.24,
-                "8d567d184": 2.16,
-                "a577d8340": -3.71,
-                "c73bd41d5": 4.19
+                "3fa11d9cc": -2.15,
+                "434df12ca": 0.65,
+                "59e960419": -3.29,
+                "6aa1cb275": -4.1,
+                "70ef61704+emit-batch-1": -3.74,
+                "70ef61704+emit-batch-8": 1.41,
+                "70ef61704+seed-selection-reverted": -2.31,
+                "728a1d720": -8.72,
+                "76e188237": -1.88,
+                "8d567d184": -0.31,
+                "a577d8340": -4.97,
+                "c73bd41d5": 2.09
               },
               "cpu_out_residual_pct": {
-                "6aa1cb275": -2.62,
-                "70ef61704+emit-batch-1": -2.68,
-                "70ef61704+emit-batch-8": 2.68,
-                "70ef61704+seed-selection-reverted": -1.8,
-                "728a1d720": -7.75,
-                "8d567d184": 1.06,
-                "a577d8340": -3.4,
-                "c73bd41d5": 2.44
+                "3fa11d9cc": -2.21,
+                "434df12ca": 0.64,
+                "59e960419": -3.36,
+                "6aa1cb275": -4.55,
+                "70ef61704+emit-batch-1": -4.27,
+                "70ef61704+emit-batch-8": 0.66,
+                "70ef61704+seed-selection-reverted": -3.09,
+                "728a1d720": -8.59,
+                "76e188237": -2.19,
+                "8d567d184": -1.25,
+                "a577d8340": -5.14,
+                "c73bd41d5": 0.68
               }
             },
             "AMD Ryzen 7 7800X3D 8-Core Processor": {
               "jobs": 1,
-              "max_residual_pct": 16.73,
-              "max_loo_residual_pct": 17.13,
-              "max_cpu_out_residual_pct": 19.41,
+              "max_residual_pct": 9.62,
+              "max_loo_residual_pct": 10.06,
+              "max_cpu_out_residual_pct": 10.92,
               "residual_pct": {
-                "6aa1cb275": -11.95,
-                "70ef61704+emit-batch-1": -16.73,
-                "70ef61704+emit-batch-8": 1.08,
-                "70ef61704+seed-selection-reverted": -7.68,
-                "728a1d720": -8.95,
-                "8d567d184": -4.39,
-                "a577d8340": -12.73,
-                "c73bd41d5": -2.24
+                "3fa11d9cc": -2.3,
+                "434df12ca": 0.86,
+                "59e960419": -3.65,
+                "6aa1cb275": -6.86,
+                "70ef61704+emit-batch-1": -6.2,
+                "70ef61704+emit-batch-8": 2.98,
+                "70ef61704+seed-selection-reverted": -7.28,
+                "728a1d720": -7.86,
+                "76e188237": -0.81,
+                "8d567d184": -4.82,
+                "a577d8340": -9.62,
+                "c73bd41d5": -2.1
               },
               "loo_residual_pct": {
-                "6aa1cb275": -12.15,
-                "70ef61704+emit-batch-1": -17.13,
-                "70ef61704+emit-batch-8": 1.09,
-                "70ef61704+seed-selection-reverted": -7.37,
-                "728a1d720": -9.75,
-                "8d567d184": -3.55,
-                "a577d8340": -13.46,
-                "c73bd41d5": -0.77
+                "3fa11d9cc": -2.3,
+                "434df12ca": 0.86,
+                "59e960419": -3.66,
+                "6aa1cb275": -6.97,
+                "70ef61704+emit-batch-1": -6.23,
+                "70ef61704+emit-batch-8": 3.27,
+                "70ef61704+seed-selection-reverted": -7.14,
+                "728a1d720": -8.58,
+                "76e188237": -0.84,
+                "8d567d184": -4.53,
+                "a577d8340": -10.06,
+                "c73bd41d5": -1.38
               },
               "cpu_out_residual_pct": {
-                "6aa1cb275": -14.38,
-                "70ef61704+emit-batch-1": -19.41,
-                "70ef61704+emit-batch-8": 0.42,
-                "70ef61704+seed-selection-reverted": -10.68,
-                "728a1d720": -11.39,
-                "8d567d184": -7.42,
-                "a577d8340": -15.77,
-                "c73bd41d5": -5.56
+                "3fa11d9cc": -2.44,
+                "434df12ca": 0.84,
+                "59e960419": -3.8,
+                "6aa1cb275": -8.04,
+                "70ef61704+emit-batch-1": -7.38,
+                "70ef61704+emit-batch-8": 2.04,
+                "70ef61704+seed-selection-reverted": -8.62,
+                "728a1d720": -9.08,
+                "76e188237": -1.5,
+                "8d567d184": -6.18,
+                "a577d8340": -10.92,
+                "c73bd41d5": -3.54
               }
             },
             "INTEL(R) XEON(R) PLATINUM 8573C": {
-              "jobs": 1,
-              "max_residual_pct": 11.5,
-              "max_loo_residual_pct": 12.69,
-              "max_cpu_out_residual_pct": 12.39,
+              "jobs": 2,
+              "max_residual_pct": 12.89,
+              "max_loo_residual_pct": 13.6,
+              "max_cpu_out_residual_pct": 14.46,
               "residual_pct": {
-                "6aa1cb275": 7.57,
-                "70ef61704+emit-batch-1": 7.84,
-                "70ef61704+emit-batch-8": 9.86,
-                "70ef61704+seed-selection-reverted": 9.24,
-                "728a1d720": -0.77,
-                "8d567d184": 10.29,
-                "a577d8340": 1.33,
-                "c73bd41d5": 11.5
+                "3fa11d9cc": -0.39,
+                "434df12ca": 0.9,
+                "59e960419": -1.13,
+                "6aa1cb275": 8.65,
+                "70ef61704+emit-batch-1": 9.61,
+                "70ef61704+emit-batch-8": 11.46,
+                "70ef61704+seed-selection-reverted": 11.57,
+                "728a1d720": 1.59,
+                "76e188237": 1.03,
+                "8d567d184": 11.41,
+                "a577d8340": 2.67,
+                "c73bd41d5": 12.89
               },
               "loo_residual_pct": {
-                "6aa1cb275": 7.45,
-                "70ef61704+emit-batch-1": 7.63,
-                "70ef61704+emit-batch-8": 9.86,
-                "70ef61704+seed-selection-reverted": 9.46,
-                "728a1d720": -1.43,
-                "8d567d184": 10.92,
-                "a577d8340": 0.75,
-                "c73bd41d5": 12.69
+                "3fa11d9cc": -0.39,
+                "434df12ca": 0.9,
+                "59e960419": -1.13,
+                "6aa1cb275": 8.55,
+                "70ef61704+emit-batch-1": 9.59,
+                "70ef61704+emit-batch-8": 11.74,
+                "70ef61704+seed-selection-reverted": 11.71,
+                "728a1d720": 0.88,
+                "76e188237": 1.01,
+                "8d567d184": 11.7,
+                "a577d8340": 2.23,
+                "c73bd41d5": 13.6
               },
               "cpu_out_residual_pct": {
-                "6aa1cb275": 8.01,
-                "70ef61704+emit-batch-1": 8.28,
-                "70ef61704+emit-batch-8": 9.86,
-                "70ef61704+seed-selection-reverted": 9.95,
-                "728a1d720": -0.1,
-                "8d567d184": 11.05,
-                "a577d8340": 2.12,
-                "c73bd41d5": 12.39
-              }
-            },
-            "Intel(R) Xeon(R) 6973P-C": {
-              "jobs": 1,
-              "max_residual_pct": 12.63,
-              "max_loo_residual_pct": 13.23,
-              "max_cpu_out_residual_pct": 13.32,
-              "residual_pct": {
-                "6aa1cb275": 4.4,
-                "70ef61704+emit-batch-1": 11.13,
-                "70ef61704+emit-batch-8": 8.03,
-                "70ef61704+seed-selection-reverted": 9.07,
-                "728a1d720": -0.59,
-                "8d567d184": 12.63,
-                "a577d8340": -0.42,
-                "c73bd41d5": 10.82
-              },
-              "loo_residual_pct": {
-                "6aa1cb275": 4.27,
-                "70ef61704+emit-batch-1": 10.96,
-                "70ef61704+emit-batch-8": 8.03,
-                "70ef61704+seed-selection-reverted": 9.3,
-                "728a1d720": -1.25,
-                "8d567d184": 13.23,
-                "a577d8340": -1.02,
-                "c73bd41d5": 12.02
-              },
-              "cpu_out_residual_pct": {
-                "6aa1cb275": 4.88,
-                "70ef61704+emit-batch-1": 11.49,
-                "70ef61704+emit-batch-8": 8.07,
-                "70ef61704+seed-selection-reverted": 9.76,
-                "728a1d720": 0.04,
-                "8d567d184": 13.32,
-                "a577d8340": 0.37,
-                "c73bd41d5": 11.69
+                "3fa11d9cc": -0.26,
+                "434df12ca": 0.92,
+                "59e960419": -1.0,
+                "6aa1cb275": 9.89,
+                "70ef61704+emit-batch-1": 10.86,
+                "70ef61704+emit-batch-8": 12.44,
+                "70ef61704+seed-selection-reverted": 13.01,
+                "728a1d720": 2.91,
+                "76e188237": 1.78,
+                "8d567d184": 12.88,
+                "a577d8340": 4.09,
+                "c73bd41d5": 14.46
               }
             },
             "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": {
               "jobs": 1,
-              "max_residual_pct": 11.85,
-              "max_loo_residual_pct": 13.02,
-              "max_cpu_out_residual_pct": 12.85,
+              "max_residual_pct": 11.32,
+              "max_loo_residual_pct": 12.03,
+              "max_cpu_out_residual_pct": 12.69,
               "residual_pct": {
-                "6aa1cb275": 8.04,
-                "70ef61704+emit-batch-1": 8.94,
-                "70ef61704+emit-batch-8": 8.61,
-                "70ef61704+seed-selection-reverted": 10.65,
-                "728a1d720": 0.2,
-                "8d567d184": 10.49,
-                "a577d8340": 4.7,
-                "c73bd41d5": 11.85
+                "3fa11d9cc": 0.49,
+                "434df12ca": 0.98,
+                "59e960419": -0.31,
+                "6aa1cb275": 7.08,
+                "70ef61704+emit-batch-1": 7.83,
+                "70ef61704+emit-batch-8": 7.64,
+                "70ef61704+seed-selection-reverted": 10.36,
+                "728a1d720": 0.69,
+                "76e188237": 0.9,
+                "8d567d184": 8.89,
+                "a577d8340": 3.69,
+                "c73bd41d5": 11.32
               },
               "loo_residual_pct": {
-                "6aa1cb275": 7.93,
-                "70ef61704+emit-batch-1": 8.75,
-                "70ef61704+emit-batch-8": 8.61,
-                "70ef61704+seed-selection-reverted": 10.87,
-                "728a1d720": -0.44,
-                "8d567d184": 11.12,
-                "a577d8340": 4.17,
-                "c73bd41d5": 13.02
+                "3fa11d9cc": 0.49,
+                "434df12ca": 0.98,
+                "59e960419": -0.32,
+                "6aa1cb275": 6.97,
+                "70ef61704+emit-batch-1": 7.8,
+                "70ef61704+emit-batch-8": 7.92,
+                "70ef61704+seed-selection-reverted": 10.49,
+                "728a1d720": -0.01,
+                "76e188237": 0.87,
+                "8d567d184": 9.18,
+                "a577d8340": 3.25,
+                "c73bd41d5": 12.03
               },
               "cpu_out_residual_pct": {
-                "6aa1cb275": 8.53,
-                "70ef61704+emit-batch-1": 9.42,
-                "70ef61704+emit-batch-8": 8.65,
-                "70ef61704+seed-selection-reverted": 11.43,
-                "728a1d720": 0.93,
-                "8d567d184": 11.35,
-                "a577d8340": 5.53,
-                "c73bd41d5": 12.85
+                "3fa11d9cc": 0.59,
+                "434df12ca": 0.99,
+                "59e960419": -0.22,
+                "6aa1cb275": 8.16,
+                "70ef61704+emit-batch-1": 8.92,
+                "70ef61704+emit-batch-8": 8.51,
+                "70ef61704+seed-selection-reverted": 11.61,
+                "728a1d720": 1.85,
+                "76e188237": 1.54,
+                "8d567d184": 10.17,
+                "a577d8340": 4.92,
+                "c73bd41d5": 12.69
               }
             }
           },
-          "pi_cost": 0.32021286769946544,
+          "pi_cost": 0.18479428829580957,
           "speed_x": {
-            "min": 0.8345148597167588,
-            "max": 1.970635628763376
+            "min": 0.8100272739413512,
+            "max": 1.9262212622347705
           },
-          "max_calibration_spread_pct": 1.960744526789271
+          "max_calibration_spread_pct": 2.737716267764956
         },
         "points": {
           "728a1d720": {
             "pi_worst_x": [
-              2.22,
+              2.21,
               2.22
             ],
-            "ir": 28643879417,
+            "ir": 28643257985,
             "stream_secs": 6.202,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": 0.31687,
-              "AMD EPYC 9V45 96-Core Processor": 0.28784,
-              "AMD EPYC 9V74 80-Core Processor": 0.31316,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.32836,
-              "INTEL(R) XEON(R) PLATINUM 8573C": 0.24773,
-              "Intel(R) Xeon(R) 6973P-C": 0.2461,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.23865
+              "AMD EPYC 7763 64-Core Processor": 0.85794,
+              "AMD EPYC 9V45 96-Core Processor": 0.81933,
+              "AMD EPYC 9V74 80-Core Processor": 0.84573,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.84422,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.74948,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.75804
             }
           },
           "c73bd41d5": {
             "pi_worst_x": [
-              1.88,
+              1.9,
               1.89
             ],
-            "ir": 30211458857,
+            "ir": 30211164147,
             "stream_secs": 6.202,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": 0.36222,
-              "AMD EPYC 9V45 96-Core Processor": 0.3644,
-              "AMD EPYC 9V74 80-Core Processor": 0.3702,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.41745,
-              "INTEL(R) XEON(R) PLATINUM 8573C": 0.29423,
-              "Intel(R) Xeon(R) 6973P-C": 0.29997,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.29135
+              "AMD EPYC 7763 64-Core Processor": 0.90246,
+              "AMD EPYC 9V45 96-Core Processor": 0.89877,
+              "AMD EPYC 9V74 80-Core Processor": 0.90333,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.93712,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.79886,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.81245
             }
           },
           "8d567d184": {
             "pi_worst_x": [
-              1.99,
-              1.98
+              2.0,
+              2.0
             ],
-            "ir": 28886976596,
+            "ir": 28886253091,
             "stream_secs": 6.202,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": 0.32834,
-              "AMD EPYC 9V45 96-Core Processor": 0.32677,
-              "AMD EPYC 9V74 80-Core Processor": 0.33465,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.38971,
-              "INTEL(R) XEON(R) PLATINUM 8573C": 0.25596,
-              "Intel(R) Xeon(R) 6973P-C": 0.23628,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.25427
+              "AMD EPYC 7763 64-Core Processor": 0.86702,
+              "AMD EPYC 9V45 96-Core Processor": 0.86322,
+              "AMD EPYC 9V74 80-Core Processor": 0.86753,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.90963,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.75679,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.77902
             }
           },
           "70ef61704+seed-selection-reverted": {
@@ -858,100 +1014,158 @@
               2.03,
               2.03
             ],
-            "ir": 28570268823,
+            "ir": 28568957787,
             "stream_secs": 6.202,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": 0.32164,
-              "AMD EPYC 9V45 96-Core Processor": 0.32228,
-              "AMD EPYC 9V74 80-Core Processor": 0.33815,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.39919,
-              "INTEL(R) XEON(R) PLATINUM 8573C": 0.24153,
-              "Intel(R) Xeon(R) 6973P-C": 0.24297,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.2295
+              "AMD EPYC 7763 64-Core Processor": 0.85918,
+              "AMD EPYC 9V45 96-Core Processor": 0.85869,
+              "AMD EPYC 9V74 80-Core Processor": 0.87124,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.92055,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.74092,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.75157
             }
           },
           "70ef61704+emit-batch-8": {
             "pi_worst_x": [
-              2.61,
-              2.61
+              2.62,
+              2.6
             ],
-            "ir": 23760485555,
+            "ir": 23760006609,
             "stream_secs": 6.202,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": 0.05292,
-              "AMD EPYC 9V45 96-Core Processor": 0.05108,
-              "AMD EPYC 9V74 80-Core Processor": 0.0636,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.0789,
-              "INTEL(R) XEON(R) PLATINUM 8573C": 0.00089,
-              "Intel(R) Xeon(R) 6973P-C": 0.01663,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.0116
+              "AMD EPYC 7763 64-Core Processor": 0.59128,
+              "AMD EPYC 9V45 96-Core Processor": 0.58307,
+              "AMD EPYC 9V74 80-Core Processor": 0.59629,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.57858,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.50171,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.53556
             }
           },
           "70ef61704+emit-batch-1": {
             "pi_worst_x": [
-              2.26,
+              2.28,
               2.26
             ],
-            "ir": 25714171257,
+            "ir": 25713693000,
             "stream_secs": 6.202,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": 0.23482,
-              "AMD EPYC 9V45 96-Core Processor": 0.23652,
-              "AMD EPYC 9V74 80-Core Processor": 0.2469,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.39521,
-              "INTEL(R) XEON(R) PLATINUM 8573C": 0.15313,
-              "Intel(R) Xeon(R) 6973P-C": 0.12497,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.1436
+              "AMD EPYC 7763 64-Core Processor": 0.77423,
+              "AMD EPYC 9V45 96-Core Processor": 0.76225,
+              "AMD EPYC 9V74 80-Core Processor": 0.7797,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.80514,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.65397,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.66989
             }
           },
           "a577d8340": {
             "pi_worst_x": [
-              2.1,
-              2.08
+              2.09,
+              2.09
             ],
-            "ir": 27342867427,
+            "ir": 27342805678,
             "stream_secs": 6.221,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": 0.31338,
-              "AMD EPYC 9V45 96-Core Processor": 0.32989,
-              "AMD EPYC 9V74 80-Core Processor": 0.33083,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.42903,
-              "INTEL(R) XEON(R) PLATINUM 8573C": 0.28917,
-              "Intel(R) Xeon(R) 6973P-C": 0.30547,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.25847
+              "AMD EPYC 7763 64-Core Processor": 0.85305,
+              "AMD EPYC 9V45 96-Core Processor": 0.8548,
+              "AMD EPYC 9V74 80-Core Processor": 0.86386,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.91705,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.79336,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.78377
             }
           },
           "6aa1cb275": {
             "pi_worst_x": [
               2.28,
-              2.27
+              2.28
             ],
-            "ir": 25709487410,
+            "ir": 25708851781,
             "stream_secs": 6.202,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": 0.23494,
-              "AMD EPYC 9V45 96-Core Processor": 0.2359,
-              "AMD EPYC 9V74 80-Core Processor": 0.2423,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.33879,
-              "INTEL(R) XEON(R) PLATINUM 8573C": 0.15133,
-              "Intel(R) Xeon(R) 6973P-C": 0.17935,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.14721
+              "AMD EPYC 7763 64-Core Processor": 0.77586,
+              "AMD EPYC 9V45 96-Core Processor": 0.75906,
+              "AMD EPYC 9V74 80-Core Processor": 0.77401,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.80349,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.65394,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.66815
+            }
+          },
+          "76e188237": {
+            "pi_worst_x": [
+              3.16,
+              3.11
+            ],
+            "ir": 18303886809,
+            "stream_secs": 6.049,
+            "live_log_cost": {
+              "AMD EPYC 7763 64-Core Processor": 0.45398,
+              "AMD EPYC 9V45 96-Core Processor": 0.43911,
+              "AMD EPYC 9V74 80-Core Processor": 0.4514,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.44114,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.42324,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.42456
+            }
+          },
+          "3fa11d9cc": {
+            "pi_worst_x": [
+              4.53,
+              4.6
+            ],
+            "ir": 12198332268,
+            "stream_secs": 5.75,
+            "live_log_cost": {
+              "AMD EPYC 7763 64-Core Processor": 0.08543,
+              "AMD EPYC 9V45 96-Core Processor": 0.08649,
+              "AMD EPYC 9V74 80-Core Processor": 0.08931,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.09079,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.07201,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.06347
+            }
+          },
+          "59e960419": {
+            "pi_worst_x": [
+              4.56,
+              4.56
+            ],
+            "ir": 12200362291,
+            "stream_secs": 5.75,
+            "live_log_cost": {
+              "AMD EPYC 7763 64-Core Processor": 0.08911,
+              "AMD EPYC 9V45 96-Core Processor": 0.08406,
+              "AMD EPYC 9V74 80-Core Processor": 0.09431,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.09794,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.07283,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.06488
+            }
+          },
+          "434df12ca": {
+            "pi_worst_x": [
+              4.76,
+              4.79
+            ],
+            "ir": 12200238740,
+            "stream_secs": 5.75,
+            "live_log_cost": {
+              "AMD EPYC 7763 64-Core Processor": 0.01221,
+              "AMD EPYC 9V45 96-Core Processor": 0.00578,
+              "AMD EPYC 9V74 80-Core Processor": 0.01391,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.01187,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.01145,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.01075
             }
           },
           "calibration": {
             "pi_worst_x": [
-              2.87,
-              2.92
+              4.88,
+              4.86
             ],
-            "ir": 22088135157,
-            "stream_secs": 6.213,
+            "ir": 12039867647,
+            "stream_secs": 5.75,
             "live_log_cost": {
               "AMD EPYC 7763 64-Core Processor": 0.0,
               "AMD EPYC 9V45 96-Core Processor": 0.0,
               "AMD EPYC 9V74 80-Core Processor": 0.0,
               "AMD Ryzen 7 7800X3D 8-Core Processor": 0.0,
               "INTEL(R) XEON(R) PLATINUM 8573C": 0.0,
-              "Intel(R) Xeon(R) 6973P-C": 0.0,
               "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.0
             }
           }
@@ -959,277 +1173,357 @@
       },
       "tools/bench/configs/trident_kernel.cfg": {
         "ir": {
-          "factor": 0.5908305188382261,
-          "intercept": 13.844386075497317,
-          "max_residual_pct": 10.71,
-          "max_loo_residual_pct": 11.13,
+          "factor": 0.948093463910262,
+          "intercept": 21.717382983459615,
+          "max_residual_pct": 14.44,
+          "max_loo_residual_pct": 14.51,
           "residual_pct": {
-            "6aa1cb275": -1.42,
-            "70ef61704+emit-batch-1": -1.01,
-            "70ef61704+emit-batch-8": -6.56,
-            "70ef61704+seed-selection-reverted": 5.49,
-            "728a1d720": -9.01,
-            "8d567d184": 6.35,
-            "a577d8340": 2.37,
-            "c73bd41d5": 10.71
+            "3fa11d9cc": 12.11,
+            "434df12ca": -0.33,
+            "59e960419": 12.08,
+            "6aa1cb275": 0.8,
+            "70ef61704+emit-batch-1": 1.22,
+            "70ef61704+emit-batch-8": -4.41,
+            "70ef61704+seed-selection-reverted": 3.25,
+            "728a1d720": -14.44,
+            "76e188237": -0.64,
+            "8d567d184": 2.19,
+            "a577d8340": 1.69,
+            "c73bd41d5": 5.1
           },
           "loo_residual_pct": {
-            "6aa1cb275": -1.8,
-            "70ef61704+emit-batch-1": -1.28,
-            "70ef61704+emit-batch-8": -8.38,
-            "70ef61704+seed-selection-reverted": 5.98,
-            "728a1d720": -9.27,
-            "8d567d184": 6.85,
-            "a577d8340": 2.75,
-            "c73bd41d5": 11.13
+            "3fa11d9cc": 12.13,
+            "434df12ca": -0.33,
+            "59e960419": 12.09,
+            "6aa1cb275": 1.09,
+            "70ef61704+emit-batch-1": 1.66,
+            "70ef61704+emit-batch-8": -6.24,
+            "70ef61704+seed-selection-reverted": 3.34,
+            "728a1d720": -14.51,
+            "76e188237": -0.64,
+            "8d567d184": 2.22,
+            "a577d8340": 1.91,
+            "c73bd41d5": 5.11
           }
         },
         "live": {
-          "factor": 0.7180122652691083,
-          "intercept": 0.6523251860396901,
-          "max_residual_pct": 23.06,
-          "max_loo_residual_pct": 23.11,
-          "max_cpu_out_residual_pct": 23.1,
+          "factor": 0.8779831076671728,
+          "intercept": 0.6981347220709843,
+          "max_residual_pct": 12.66,
+          "max_loo_residual_pct": 12.66,
+          "max_cpu_out_residual_pct": 12.9,
           "by_cpu": {
             "AMD EPYC 7763 64-Core Processor": {
               "jobs": 5,
-              "max_residual_pct": 8.91,
-              "max_loo_residual_pct": 9.16,
-              "max_cpu_out_residual_pct": 9.07,
+              "max_residual_pct": 12.0,
+              "max_loo_residual_pct": 12.0,
+              "max_cpu_out_residual_pct": 12.0,
               "residual_pct": {
-                "6aa1cb275": -4.05,
-                "70ef61704+emit-batch-1": -3.62,
-                "70ef61704+emit-batch-8": -2.63,
-                "70ef61704+seed-selection-reverted": 2.01,
-                "728a1d720": -8.91,
-                "8d567d184": 3.49,
-                "a577d8340": -2.14,
-                "c73bd41d5": 6.95
+                "3fa11d9cc": 3.04,
+                "434df12ca": 0.1,
+                "59e960419": 3.05,
+                "6aa1cb275": -4.86,
+                "70ef61704+emit-batch-1": -4.31,
+                "70ef61704+emit-batch-8": -2.06,
+                "70ef61704+seed-selection-reverted": -0.12,
+                "728a1d720": -12.0,
+                "76e188237": -4.83,
+                "8d567d184": -0.07,
+                "a577d8340": -4.57,
+                "c73bd41d5": 3.3
               },
               "loo_residual_pct": {
-                "6aa1cb275": -4.48,
-                "70ef61704+emit-batch-1": -3.95,
-                "70ef61704+emit-batch-8": -3.37,
-                "70ef61704+seed-selection-reverted": 2.42,
-                "728a1d720": -9.16,
-                "8d567d184": 3.8,
-                "a577d8340": -2.28,
-                "c73bd41d5": 7.12
+                "3fa11d9cc": 3.24,
+                "434df12ca": 0.1,
+                "59e960419": 3.25,
+                "6aa1cb275": -4.95,
+                "70ef61704+emit-batch-1": -4.32,
+                "70ef61704+emit-batch-8": -2.27,
+                "70ef61704+seed-selection-reverted": -0.05,
+                "728a1d720": -12.0,
+                "76e188237": -4.85,
+                "8d567d184": -0.01,
+                "a577d8340": -4.61,
+                "c73bd41d5": 3.26
               },
               "cpu_out_residual_pct": {
-                "6aa1cb275": -4.45,
-                "70ef61704+emit-batch-1": -4.02,
-                "70ef61704+emit-batch-8": -3.2,
-                "70ef61704+seed-selection-reverted": 1.79,
-                "728a1d720": -9.07,
-                "8d567d184": 3.27,
-                "a577d8340": -2.42,
-                "c73bd41d5": 6.82
+                "3fa11d9cc": 3.37,
+                "434df12ca": 0.13,
+                "59e960419": 3.38,
+                "6aa1cb275": -5.26,
+                "70ef61704+emit-batch-1": -4.71,
+                "70ef61704+emit-batch-8": -2.77,
+                "70ef61704+seed-selection-reverted": -0.19,
+                "728a1d720": -12.0,
+                "76e188237": -4.77,
+                "8d567d184": -0.14,
+                "a577d8340": -4.75,
+                "c73bd41d5": 3.4
               }
             },
             "AMD EPYC 9V45 96-Core Processor": {
-              "jobs": 8,
-              "max_residual_pct": 8.17,
-              "max_loo_residual_pct": 8.46,
-              "max_cpu_out_residual_pct": 8.4,
+              "jobs": 7,
+              "max_residual_pct": 11.03,
+              "max_loo_residual_pct": 11.05,
+              "max_cpu_out_residual_pct": 11.07,
               "residual_pct": {
-                "6aa1cb275": -4.54,
-                "70ef61704+emit-batch-1": -4.04,
-                "70ef61704+emit-batch-8": -3.08,
-                "70ef61704+seed-selection-reverted": 1.24,
-                "728a1d720": -8.17,
-                "8d567d184": 2.74,
-                "a577d8340": -3.68,
-                "c73bd41d5": 6.55
+                "3fa11d9cc": 2.08,
+                "434df12ca": 0.07,
+                "59e960419": 2.32,
+                "6aa1cb275": -5.36,
+                "70ef61704+emit-batch-1": -5.13,
+                "70ef61704+emit-batch-8": -2.82,
+                "70ef61704+seed-selection-reverted": -1.43,
+                "728a1d720": -11.03,
+                "76e188237": -5.75,
+                "8d567d184": -1.32,
+                "a577d8340": -6.49,
+                "c73bd41d5": 1.99
               },
               "loo_residual_pct": {
-                "6aa1cb275": -4.96,
-                "70ef61704+emit-batch-1": -4.37,
-                "70ef61704+emit-batch-8": -3.81,
-                "70ef61704+seed-selection-reverted": 1.61,
-                "728a1d720": -8.46,
-                "8d567d184": 3.03,
-                "a577d8340": -3.8,
-                "c73bd41d5": 6.71
+                "3fa11d9cc": 2.3,
+                "434df12ca": 0.07,
+                "59e960419": 2.53,
+                "6aa1cb275": -5.45,
+                "70ef61704+emit-batch-1": -5.15,
+                "70ef61704+emit-batch-8": -3.02,
+                "70ef61704+seed-selection-reverted": -1.4,
+                "728a1d720": -11.05,
+                "76e188237": -5.77,
+                "8d567d184": -1.3,
+                "a577d8340": -6.52,
+                "c73bd41d5": 1.93
               },
               "cpu_out_residual_pct": {
-                "6aa1cb275": -5.02,
-                "70ef61704+emit-batch-1": -4.53,
-                "70ef61704+emit-batch-8": -3.78,
-                "70ef61704+seed-selection-reverted": 0.99,
-                "728a1d720": -8.4,
-                "8d567d184": 2.49,
-                "a577d8340": -3.98,
-                "c73bd41d5": 6.4
+                "3fa11d9cc": 2.46,
+                "434df12ca": 0.1,
+                "59e960419": 2.69,
+                "6aa1cb275": -5.77,
+                "70ef61704+emit-batch-1": -5.53,
+                "70ef61704+emit-batch-8": -3.54,
+                "70ef61704+seed-selection-reverted": -1.46,
+                "728a1d720": -11.07,
+                "76e188237": -5.65,
+                "8d567d184": -1.36,
+                "a577d8340": -6.61,
+                "c73bd41d5": 2.14
               }
             },
             "AMD EPYC 9V74 80-Core Processor": {
-              "jobs": 12,
-              "max_residual_pct": 8.63,
-              "max_loo_residual_pct": 8.9,
-              "max_cpu_out_residual_pct": 8.86,
+              "jobs": 4,
+              "max_residual_pct": 11.62,
+              "max_loo_residual_pct": 11.63,
+              "max_cpu_out_residual_pct": 11.65,
               "residual_pct": {
-                "6aa1cb275": -4.64,
-                "70ef61704+emit-batch-1": -4.49,
-                "70ef61704+emit-batch-8": -3.51,
-                "70ef61704+seed-selection-reverted": 0.51,
-                "728a1d720": -8.63,
-                "8d567d184": 2.61,
-                "a577d8340": -3.3,
-                "c73bd41d5": 6.09
+                "3fa11d9cc": 2.47,
+                "434df12ca": -0.05,
+                "59e960419": 2.19,
+                "6aa1cb275": -5.33,
+                "70ef61704+emit-batch-1": -5.22,
+                "70ef61704+emit-batch-8": -3.2,
+                "70ef61704+seed-selection-reverted": -1.98,
+                "728a1d720": -11.62,
+                "76e188237": -5.2,
+                "8d567d184": -1.28,
+                "a577d8340": -5.71,
+                "c73bd41d5": 2.14
               },
               "loo_residual_pct": {
-                "6aa1cb275": -5.05,
-                "70ef61704+emit-batch-1": -4.81,
-                "70ef61704+emit-batch-8": -4.22,
-                "70ef61704+seed-selection-reverted": 0.84,
-                "728a1d720": -8.9,
-                "8d567d184": 2.9,
-                "a577d8340": -3.43,
-                "c73bd41d5": 6.24
+                "3fa11d9cc": 2.68,
+                "434df12ca": -0.05,
+                "59e960419": 2.41,
+                "6aa1cb275": -5.41,
+                "70ef61704+emit-batch-1": -5.23,
+                "70ef61704+emit-batch-8": -3.4,
+                "70ef61704+seed-selection-reverted": -1.96,
+                "728a1d720": -11.63,
+                "76e188237": -5.21,
+                "8d567d184": -1.26,
+                "a577d8340": -5.74,
+                "c73bd41d5": 2.08
               },
               "cpu_out_residual_pct": {
-                "6aa1cb275": -5.16,
-                "70ef61704+emit-batch-1": -5.01,
-                "70ef61704+emit-batch-8": -4.25,
-                "70ef61704+seed-selection-reverted": 0.26,
-                "728a1d720": -8.86,
-                "8d567d184": 2.34,
-                "a577d8340": -3.63,
-                "c73bd41d5": 5.94
+                "3fa11d9cc": 2.85,
+                "434df12ca": -0.01,
+                "59e960419": 2.58,
+                "6aa1cb275": -5.75,
+                "70ef61704+emit-batch-1": -5.63,
+                "70ef61704+emit-batch-8": -3.93,
+                "70ef61704+seed-selection-reverted": -1.99,
+                "728a1d720": -11.65,
+                "76e188237": -5.12,
+                "8d567d184": -1.32,
+                "a577d8340": -5.86,
+                "c73bd41d5": 2.28
               }
             },
             "AMD Ryzen 7 7800X3D 8-Core Processor": {
               "jobs": 1,
-              "max_residual_pct": 23.06,
-              "max_loo_residual_pct": 23.11,
-              "max_cpu_out_residual_pct": 23.1,
+              "max_residual_pct": 12.66,
+              "max_loo_residual_pct": 12.66,
+              "max_cpu_out_residual_pct": 12.65,
               "residual_pct": {
-                "6aa1cb275": -9.18,
-                "70ef61704+emit-batch-1": -11.96,
-                "70ef61704+emit-batch-8": -23.06,
-                "70ef61704+seed-selection-reverted": -14.82,
-                "728a1d720": -10.85,
-                "8d567d184": -3.18,
-                "a577d8340": -10.24,
-                "c73bd41d5": -0.37
+                "3fa11d9cc": 1.15,
+                "434df12ca": -0.62,
+                "59e960419": 1.14,
+                "6aa1cb275": -8.57,
+                "70ef61704+emit-batch-1": -8.29,
+                "70ef61704+emit-batch-8": -4.64,
+                "70ef61704+seed-selection-reverted": -7.04,
+                "728a1d720": -12.66,
+                "76e188237": -5.03,
+                "8d567d184": -5.52,
+                "a577d8340": -10.44,
+                "c73bd41d5": -2.42
               },
               "loo_residual_pct": {
-                "6aa1cb275": -9.46,
-                "70ef61704+emit-batch-1": -12.11,
-                "70ef61704+emit-batch-8": -23.11,
-                "70ef61704+seed-selection-reverted": -15.12,
-                "728a1d720": -11.03,
-                "8d567d184": -3.09,
-                "a577d8340": -10.28,
-                "c73bd41d5": -0.43
+                "3fa11d9cc": 1.39,
+                "434df12ca": -0.62,
+                "59e960419": 1.38,
+                "6aa1cb275": -8.62,
+                "70ef61704+emit-batch-1": -8.3,
+                "70ef61704+emit-batch-8": -4.83,
+                "70ef61704+seed-selection-reverted": -7.17,
+                "728a1d720": -12.66,
+                "76e188237": -5.04,
+                "8d567d184": -5.59,
+                "a577d8340": -10.44,
+                "c73bd41d5": -2.53
               },
               "cpu_out_residual_pct": {
-                "6aa1cb275": -9.46,
-                "70ef61704+emit-batch-1": -12.16,
-                "70ef61704+emit-batch-8": -23.1,
-                "70ef61704+seed-selection-reverted": -14.64,
-                "728a1d720": -10.97,
-                "8d567d184": -3.24,
-                "a577d8340": -10.32,
-                "c73bd41d5": -0.32
+                "3fa11d9cc": 1.41,
+                "434df12ca": -0.58,
+                "59e960419": 1.4,
+                "6aa1cb275": -8.74,
+                "70ef61704+emit-batch-1": -8.46,
+                "70ef61704+emit-batch-8": -5.05,
+                "70ef61704+seed-selection-reverted": -6.94,
+                "728a1d720": -12.65,
+                "76e188237": -4.98,
+                "8d567d184": -5.46,
+                "a577d8340": -10.43,
+                "c73bd41d5": -2.23
               }
             },
             "INTEL(R) XEON(R) PLATINUM 8573C": {
-              "jobs": 1,
-              "max_residual_pct": 12.84,
-              "max_loo_residual_pct": 13.23,
-              "max_cpu_out_residual_pct": 13.51,
+              "jobs": 2,
+              "max_residual_pct": 12.0,
+              "max_loo_residual_pct": 12.08,
+              "max_cpu_out_residual_pct": 12.43,
               "residual_pct": {
-                "6aa1cb275": 2.52,
-                "70ef61704+emit-batch-1": 3.06,
-                "70ef61704+emit-batch-8": 0.98,
-                "70ef61704+seed-selection-reverted": 8.3,
-                "728a1d720": -4.46,
-                "8d567d184": 9.21,
-                "a577d8340": -0.53,
-                "c73bd41d5": 12.84
+                "3fa11d9cc": 4.47,
+                "434df12ca": 0.43,
+                "59e960419": 4.69,
+                "6aa1cb275": 4.94,
+                "70ef61704+emit-batch-1": 5.65,
+                "70ef61704+emit-batch-8": 4.16,
+                "70ef61704+seed-selection-reverted": 9.3,
+                "728a1d720": -4.97,
+                "76e188237": -3.45,
+                "8d567d184": 8.56,
+                "a577d8340": -1.04,
+                "c73bd41d5": 12.0
               },
               "loo_residual_pct": {
-                "6aa1cb275": 1.9,
-                "70ef61704+emit-batch-1": 2.57,
-                "70ef61704+emit-batch-8": 0.11,
-                "70ef61704+seed-selection-reverted": 9.0,
-                "728a1d720": -4.89,
-                "8d567d184": 9.73,
-                "a577d8340": -0.69,
-                "c73bd41d5": 13.23
+                "3fa11d9cc": 4.65,
+                "434df12ca": 0.43,
+                "59e960419": 4.86,
+                "6aa1cb275": 4.77,
+                "70ef61704+emit-batch-1": 5.63,
+                "70ef61704+emit-batch-8": 3.87,
+                "70ef61704+seed-selection-reverted": 9.68,
+                "728a1d720": -5.06,
+                "76e188237": -3.45,
+                "8d567d184": 8.82,
+                "a577d8340": -1.11,
+                "c73bd41d5": 12.08
               },
               "cpu_out_residual_pct": {
-                "6aa1cb275": 3.97,
-                "70ef61704+emit-batch-1": 4.52,
-                "70ef61704+emit-batch-8": 2.67,
-                "70ef61704+seed-selection-reverted": 9.25,
-                "728a1d720": -3.78,
-                "8d567d184": 10.13,
-                "a577d8340": 0.26,
-                "c73bd41d5": 13.51
+                "3fa11d9cc": 3.82,
+                "434df12ca": 0.38,
+                "59e960419": 4.06,
+                "6aa1cb275": 6.72,
+                "70ef61704+emit-batch-1": 7.46,
+                "70ef61704+emit-batch-8": 6.37,
+                "70ef61704+seed-selection-reverted": 10.23,
+                "728a1d720": -4.41,
+                "76e188237": -3.49,
+                "8d567d184": 9.42,
+                "a577d8340": -0.35,
+                "c73bd41d5": 12.43
               }
             },
             "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": {
               "jobs": 1,
-              "max_residual_pct": 13.89,
-              "max_loo_residual_pct": 14.32,
-              "max_cpu_out_residual_pct": 14.85,
+              "max_residual_pct": 12.41,
+              "max_loo_residual_pct": 12.49,
+              "max_cpu_out_residual_pct": 12.9,
               "residual_pct": {
-                "6aa1cb275": 3.06,
-                "70ef61704+emit-batch-1": 3.42,
-                "70ef61704+emit-batch-8": 0.96,
-                "70ef61704+seed-selection-reverted": 9.56,
-                "728a1d720": -3.74,
-                "8d567d184": 9.91,
-                "a577d8340": 1.54,
-                "c73bd41d5": 13.89
+                "3fa11d9cc": 5.87,
+                "434df12ca": 0.01,
+                "59e960419": 5.77,
+                "6aa1cb275": 5.22,
+                "70ef61704+emit-batch-1": 5.64,
+                "70ef61704+emit-batch-8": 3.58,
+                "70ef61704+seed-selection-reverted": 10.29,
+                "728a1d720": -5.04,
+                "76e188237": -2.46,
+                "8d567d184": 8.47,
+                "a577d8340": 1.31,
+                "c73bd41d5": 12.41
               },
               "loo_residual_pct": {
-                "6aa1cb275": 2.43,
-                "70ef61704+emit-batch-1": 2.93,
-                "70ef61704+emit-batch-8": 0.08,
-                "70ef61704+seed-selection-reverted": 10.31,
-                "728a1d720": -4.2,
-                "8d567d184": 10.46,
-                "a577d8340": 1.35,
-                "c73bd41d5": 14.32
+                "3fa11d9cc": 6.02,
+                "434df12ca": 0.01,
+                "59e960419": 5.92,
+                "6aa1cb275": 5.05,
+                "70ef61704+emit-batch-1": 5.61,
+                "70ef61704+emit-batch-8": 3.29,
+                "70ef61704+seed-selection-reverted": 10.7,
+                "728a1d720": -5.12,
+                "76e188237": -2.46,
+                "8d567d184": 8.72,
+                "a577d8340": 1.22,
+                "c73bd41d5": 12.49
               },
               "cpu_out_residual_pct": {
-                "6aa1cb275": 4.99,
-                "70ef61704+emit-batch-1": 5.35,
-                "70ef61704+emit-batch-8": 3.15,
-                "70ef61704+seed-selection-reverted": 10.9,
-                "728a1d720": -2.79,
-                "8d567d184": 11.16,
-                "a577d8340": 2.74,
-                "c73bd41d5": 14.85
+                "3fa11d9cc": 5.29,
+                "434df12ca": -0.07,
+                "59e960419": 5.18,
+                "6aa1cb275": 7.14,
+                "70ef61704+emit-batch-1": 7.56,
+                "70ef61704+emit-batch-8": 5.87,
+                "70ef61704+seed-selection-reverted": 11.36,
+                "728a1d720": -4.44,
+                "76e188237": -2.43,
+                "8d567d184": 9.38,
+                "a577d8340": 2.25,
+                "c73bd41d5": 12.9
               }
             }
           },
-          "pi_cost": 0.45302917921016544,
+          "pi_cost": 0.4255451821370843,
           "speed_x": {
-            "min": 0.826716756266452,
-            "max": 1.890888342383568
+            "min": 0.8508836376215378,
+            "max": 1.952524757401903
           },
-          "max_calibration_spread_pct": 1.5664303450120487
+          "max_calibration_spread_pct": 3.2191378811496696
         },
         "points": {
           "728a1d720": {
             "pi_worst_x": [
-              2.28,
+              2.29,
               2.29
             ],
-            "ir": 32320085435,
+            "ir": 32320322121,
             "stream_secs": 7.404,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.10943,
-              "AMD EPYC 9V45 96-Core Processor": -0.12063,
-              "AMD EPYC 9V74 80-Core Processor": -0.11362,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.07938,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.17582,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.1863
+              "AMD EPYC 7763 64-Core Processor": -0.00299,
+              "AMD EPYC 9V45 96-Core Processor": -0.0154,
+              "AMD EPYC 9V74 80-Core Processor": -0.0078,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.00567,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.0905,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.08969
             }
           },
           "c73bd41d5": {
@@ -1237,63 +1531,63 @@
               1.89,
               1.9
             ],
-            "ir": 32453887645,
+            "ir": 32452736282,
             "stream_secs": 7.543,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.07159,
-              "AMD EPYC 9V45 96-Core Processor": -0.06638,
-              "AMD EPYC 9V74 80-Core Processor": -0.06036,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.02711,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.14635,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.15926
+              "AMD EPYC 7763 64-Core Processor": 0.03314,
+              "AMD EPYC 9V45 96-Core Processor": 0.0477,
+              "AMD EPYC 9V74 80-Core Processor": 0.04604,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.09799,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.05898,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.06309
             }
           },
           "8d567d184": {
             "pi_worst_x": [
-              2.04,
-              2.05
+              2.06,
+              2.06
             ],
-            "ir": 30526874301,
+            "ir": 30527892717,
             "stream_secs": 7.543,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.13221,
-              "AMD EPYC 9V45 96-Core Processor": -0.12212,
-              "AMD EPYC 9V74 80-Core Processor": -0.12037,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.03949,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.20714,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.21606
+              "AMD EPYC 7763 64-Core Processor": -0.02724,
+              "AMD EPYC 9V45 96-Core Processor": -0.01285,
+              "AMD EPYC 9V74 80-Core Processor": -0.01328,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.03674,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.12152,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.12058
             }
           },
           "70ef61704+seed-selection-reverted": {
             "pi_worst_x": [
-              2.07,
-              2.08
+              2.06,
+              2.07
             ],
-            "ir": 30193018977,
+            "ir": 30195042590,
             "stream_secs": 7.543,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.13254,
-              "AMD EPYC 9V45 96-Core Processor": -0.12192,
-              "AMD EPYC 9V74 80-Core Processor": -0.11182,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.11856,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.2158,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.23187
+              "AMD EPYC 7763 64-Core Processor": -0.02665,
+              "AMD EPYC 9V45 96-Core Processor": -0.01158,
+              "AMD EPYC 9V74 80-Core Processor": -0.00526,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.05514,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.12932,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.13956
             }
           },
           "70ef61704+emit-batch-8": {
             "pi_worst_x": [
-              2.56,
-              2.55
+              2.57,
+              2.56
             ],
-            "ir": 26045311776,
+            "ir": 26046194874,
             "stream_secs": 7.543,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.35814,
-              "AMD EPYC 9V45 96-Core Processor": -0.35164,
-              "AMD EPYC 9V74 80-Core Processor": -0.34543,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.0302,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.40886,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.40852
+              "AMD EPYC 7763 64-Core Processor": -0.25181,
+              "AMD EPYC 9V45 96-Core Processor": -0.24296,
+              "AMD EPYC 9V74 80-Core Processor": -0.23845,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.22134,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.32192,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.31557
             }
           },
           "70ef61704+emit-batch-1": {
@@ -1301,56 +1595,120 @@
               2.4,
               2.39
             ],
-            "ir": 26363590137,
+            "ir": 26363029958,
             "stream_secs": 7.543,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.25364,
-              "AMD EPYC 9V45 96-Core Processor": -0.24748,
-              "AMD EPYC 9V74 80-Core Processor": -0.24091,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.12754,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.34697,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.35182
+              "AMD EPYC 7763 64-Core Processor": -0.14709,
+              "AMD EPYC 9V45 96-Core Processor": -0.13721,
+              "AMD EPYC 9V74 80-Core Processor": -0.13616,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.09866,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.25987,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.25976
             }
           },
           "a577d8340": {
             "pi_worst_x": [
-              2.22,
-              2.22
+              2.23,
+              2.23
             ],
-            "ir": 28239321267,
+            "ir": 28241230399,
             "stream_secs": 7.548,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.17208,
-              "AMD EPYC 9V45 96-Core Processor": -0.14998,
-              "AMD EPYC 9V74 80-Core Processor": -0.15546,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.05174,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.19485,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.22351
+              "AMD EPYC 7763 64-Core Processor": -0.06502,
+              "AMD EPYC 9V45 96-Core Processor": -0.04186,
+              "AMD EPYC 9V74 80-Core Processor": -0.05135,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.00732,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.10645,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.13308
             }
           },
           "6aa1cb275": {
             "pi_worst_x": [
-              2.4,
-              2.41
+              2.41,
+              2.4
             ],
-            "ir": 26362237170,
+            "ir": 26362122526,
             "stream_secs": 7.543,
             "live_log_cost": {
-              "AMD EPYC 7763 64-Core Processor": -0.25316,
-              "AMD EPYC 9V45 96-Core Processor": -0.246,
-              "AMD EPYC 9V74 80-Core Processor": -0.2446,
-              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.17668,
-              "INTEL(R) XEON(R) PLATINUM 8573C": -0.34549,
-              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.35277
+              "AMD EPYC 7763 64-Core Processor": -0.1452,
+              "AMD EPYC 9V45 96-Core Processor": -0.13919,
+              "AMD EPYC 9V74 80-Core Processor": -0.13962,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": -0.09997,
+              "INTEL(R) XEON(R) PLATINUM 8573C": -0.25694,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.25998
+            }
+          },
+          "76e188237": {
+            "pi_worst_x": [
+              2.07,
+              2.07
+            ],
+            "ir": 22665832922,
+            "stream_secs": 5.465,
+            "live_log_cost": {
+              "AMD EPYC 7763 64-Core Processor": 0.02294,
+              "AMD EPYC 9V45 96-Core Processor": 0.03398,
+              "AMD EPYC 9V74 80-Core Processor": 0.02729,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.02523,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.0065,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": -0.00511
+            }
+          },
+          "3fa11d9cc": {
+            "pi_worst_x": [
+              1.78,
+              1.77
+            ],
+            "ir": 19916215267,
+            "stream_secs": 4.624,
+            "live_log_cost": {
+              "AMD EPYC 7763 64-Core Processor": 0.11073,
+              "AMD EPYC 9V45 96-Core Processor": 0.12143,
+              "AMD EPYC 9V74 80-Core Processor": 0.11702,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.13175,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.09502,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.07985
+            }
+          },
+          "59e960419": {
+            "pi_worst_x": [
+              1.78,
+              1.77
+            ],
+            "ir": 19922980352,
+            "stream_secs": 4.624,
+            "live_log_cost": {
+              "AMD EPYC 7763 64-Core Processor": 0.11062,
+              "AMD EPYC 9V45 96-Core Processor": 0.11876,
+              "AMD EPYC 9V74 80-Core Processor": 0.12011,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.1319,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.09262,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.08095
+            }
+          },
+          "434df12ca": {
+            "pi_worst_x": [
+              2.01,
+              1.99
+            ],
+            "ir": 19925652279,
+            "stream_secs": 4.624,
+            "live_log_cost": {
+              "AMD EPYC 7763 64-Core Processor": 0.01022,
+              "AMD EPYC 9V45 96-Core Processor": 0.01063,
+              "AMD EPYC 9V74 80-Core Processor": 0.01195,
+              "AMD Ryzen 7 7800X3D 8-Core Processor": 0.01846,
+              "INTEL(R) XEON(R) PLATINUM 8573C": 0.00654,
+              "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz": 0.01132
             }
           },
           "calibration": {
             "pi_worst_x": [
-              1.92,
-              1.94
+              2.01,
+              2.02
             ],
-            "ir": 27559922110,
-            "stream_secs": 5.538,
+            "ir": 19648703294,
+            "stream_secs": 4.624,
             "live_log_cost": {
               "AMD EPYC 7763 64-Core Processor": 0.0,
               "AMD EPYC 9V45 96-Core Processor": 0.0,
