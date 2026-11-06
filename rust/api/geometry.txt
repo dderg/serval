@@ -125,6 +125,7 @@ pub geometry::frontend::ExtruderCaps::unshaped_leaders: [bool; 3]
 impl geometry::frontend::ExtruderCaps
 pub fn geometry::frontend::ExtruderCaps::path_jerk_gain(&self, [bool; 3]) -> f64
 pub fn geometry::frontend::ExtruderCaps::planned_path_jerk_gain(&self, [bool; 3]) -> f64
+pub fn geometry::frontend::ExtruderCaps::plans_isolated_switches(&self) -> bool
 pub fn geometry::frontend::ExtruderCaps::ratio_ramp_rule(&self) -> geometry::ratio_ramp::RatioRampRule
 pub fn geometry::frontend::ExtruderCaps::stricter(core::option::Option<Self>, core::option::Option<Self>) -> core::option::Option<Self>
 pub struct geometry::frontend::LeaderSpill
@@ -499,6 +500,7 @@ pub geometry::ratio_ramp::RatioStep::speed_mm_s: f64
 pub struct geometry::ratio_ramp::RebuildsWithin
 impl geometry::RebuildsWithin
 pub fn geometry::RebuildsWithin::at(&self, (f64, f64), f64, f64) -> f64
+pub fn geometry::RebuildsWithin::fits_between(&self, (f64, f64), (f64, f64), (f64, f64), f64) -> bool
 pub struct geometry::ratio_ramp::SideWeight
 pub geometry::ratio_ramp::SideWeight::bend: (f64, f64)
 pub geometry::ratio_ramp::SideWeight::bend_scale: (f64, f64)
@@ -528,6 +530,7 @@ pub fn geometry::ratio_ramp::crawl_step_window(f64) -> f64
 pub fn geometry::ratio_ramp::kept_floor(f64, f64) -> f64
 pub fn geometry::ratio_ramp::leader_reach(f64, f64, f64) -> f64
 pub fn geometry::ratio_ramp::longest_ramp_time(f64, f64) -> f64
+pub fn geometry::ratio_ramp::ramp_accel_at_rest_per_accel(f64, f64) -> f64
 pub fn geometry::ratio_ramp::rest_room_reach_mm(f64) -> f64
 pub fn geometry::ratio_ramp::side_weight(f64, f64, f64) -> (f64, f64, f64)
 pub fn geometry::ratio_ramp::turns_around(f64, f64) -> bool
@@ -853,6 +856,7 @@ pub struct geometry::velocity::ExtrusionBudget
 pub geometry::velocity::ExtrusionBudget::axes_in_reach: [bool; 3]
 pub geometry::velocity::ExtrusionBudget::fastest_ceiling_mm_s: f64
 pub geometry::velocity::ExtrusionBudget::ratio_in_reach: f64
+pub geometry::velocity::ExtrusionBudget::ratio_step_in_reach: f64
 pub geometry::velocity::ExtrusionBudget::rest_holds_s: [f64; 2]
 pub geometry::velocity::ExtrusionBudget::rest_room_mm: f64
 pub geometry::velocity::ExtrusionBudget::strongest_accel_mm_s2: f64
@@ -1157,12 +1161,14 @@ pub geometry::ExtruderCaps::unshaped_leaders: [bool; 3]
 impl geometry::frontend::ExtruderCaps
 pub fn geometry::frontend::ExtruderCaps::path_jerk_gain(&self, [bool; 3]) -> f64
 pub fn geometry::frontend::ExtruderCaps::planned_path_jerk_gain(&self, [bool; 3]) -> f64
+pub fn geometry::frontend::ExtruderCaps::plans_isolated_switches(&self) -> bool
 pub fn geometry::frontend::ExtruderCaps::ratio_ramp_rule(&self) -> geometry::ratio_ramp::RatioRampRule
 pub fn geometry::frontend::ExtruderCaps::stricter(core::option::Option<Self>, core::option::Option<Self>) -> core::option::Option<Self>
 pub struct geometry::ExtrusionBudget
 pub geometry::ExtrusionBudget::axes_in_reach: [bool; 3]
 pub geometry::ExtrusionBudget::fastest_ceiling_mm_s: f64
 pub geometry::ExtrusionBudget::ratio_in_reach: f64
+pub geometry::ExtrusionBudget::ratio_step_in_reach: f64
 pub geometry::ExtrusionBudget::rest_holds_s: [f64; 2]
 pub geometry::ExtrusionBudget::rest_room_mm: f64
 pub geometry::ExtrusionBudget::strongest_accel_mm_s2: f64
@@ -1342,6 +1348,7 @@ pub geometry::RatioStep::speed_mm_s: f64
 pub struct geometry::RebuildsWithin
 impl geometry::RebuildsWithin
 pub fn geometry::RebuildsWithin::at(&self, (f64, f64), f64, f64) -> f64
+pub fn geometry::RebuildsWithin::fits_between(&self, (f64, f64), (f64, f64), (f64, f64), f64) -> bool
 pub struct geometry::RestSettle
 pub geometry::RestSettle::radius_mm: f64
 pub geometry::RestSettle::sides: [geometry::frontend::SettleSide; 2]
