@@ -165,10 +165,13 @@ impl Seam {
 
 /// The seams of one span table as the smoothing sums them: where its ratio
 /// or its slope steps, the table's slope behind the first of them, and how
-/// far along the path its spans have been examined for seams.
+/// far along the path its spans have been examined for seams. `steps`
+/// holds, in path order, the seams whose ratio steps: a step's window
+/// reaches past dozens of seams that only bend the slope.
 #[derive(Debug, Default)]
 pub(super) struct SeamTable {
     seams: Vec<Seam>,
+    steps: Vec<Seam>,
     base_slope: Option<f64>,
     examined_through: f64,
 }
@@ -194,15 +197,21 @@ impl SeamTable {
             self.examined_through = after.s0;
             if let Some(seam) = Seam::between(before, after) {
                 self.seams.push(seam);
+                if seam.step != 0.0 {
+                    self.steps.push(seam);
+                }
             }
         }
         first..spans.len()
     }
 
     fn seams_near(&self, lo: f64, hi: f64) -> &[Seam] {
-        let first = self.seams.partition_point(|seam| seam.s <= lo);
-        let last = self.seams.partition_point(|seam| seam.s < hi);
-        &self.seams[first..last.max(first)]
+        within(&self.seams, lo, hi)
+    }
+
+    /// The seams strictly inside `(lo, hi)` whose ratio steps.
+    fn steps_near(&self, lo: f64, hi: f64) -> &[Seam] {
+        within(&self.steps, lo, hi)
     }
 
     /// Drops the seams at or behind `back_edge`, carrying the slope the
@@ -212,6 +221,8 @@ impl SeamTable {
         if drop > 0 {
             self.base_slope = Some(self.seams[drop - 1].slope_after);
             self.seams.drain(..drop);
+            let dropped_steps = self.steps.partition_point(|seam| seam.s <= back_edge);
+            self.steps.drain(..dropped_steps);
         }
     }
 
@@ -274,9 +285,8 @@ impl SeamTable {
     /// at `s`.
     fn step_corrections(&self, width: &WidthField, h: f64, s: f64) -> Jet {
         let reach = h / (1.0 - WIDTH_SLOPE_BOUND);
-        self.seams_near(s - reach, s + reach)
+        self.steps_near(s - reach, s + reach)
             .iter()
-            .filter(|seam| seam.step != 0.0)
             .fold(Jet::ZERO, |total, seam| {
                 total + step_correction(seam, width.step_width(seam.s), s)
             })
@@ -294,12 +304,18 @@ impl SeamTable {
         } else {
             width.bounds(lo, hi).0 / (1.0 - WIDTH_SLOPE_BOUND)
         };
-        self.seams_near(lo - reach, hi + reach)
+        self.steps_near(lo - reach, hi + reach)
             .iter()
-            .filter(|seam| seam.step != 0.0)
             .map(|seam| (*seam, width.step_width(seam.s)))
             .filter(move |&(seam, h)| h > 0.0 && seam.s - h < hi && seam.s + h > lo)
     }
+}
+
+/// The seams of `seams`, in path order, strictly inside `(lo, hi)`.
+fn within(seams: &[Seam], lo: f64, hi: f64) -> &[Seam] {
+    let first = seams.partition_point(|seam| seam.s <= lo);
+    let last = seams.partition_point(|seam| seam.s < hi);
+    &seams[first..last.max(first)]
 }
 
 /// `Δ·h·G₁(x)` at `x = (s − σ)/h` for the step `Δ` at `σ` smoothed over
@@ -1889,11 +1905,9 @@ impl RatioSmoothing {
         let steps_reach_back_to = if width_final >= table_end {
             table_end - width.width(table_end)
         } else {
-            let nearest_unfinal = self
-                .laid
-                .seams
-                .iter()
-                .find(|seam| seam.step != 0.0 && seam.s > width_final)
+            let laid_steps = &self.laid.steps;
+            let nearest_unfinal = laid_steps
+                .get(laid_steps.partition_point(|seam| seam.s <= width_final))
                 .map_or(table_end, |seam| seam.s.min(table_end));
             width_final - width.width(width_final)
                 + (1.0 - WIDTH_SLOPE_BOUND) * (nearest_unfinal - width_final)
