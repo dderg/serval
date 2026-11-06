@@ -1318,6 +1318,7 @@ fn a_slow_corner_beside_a_ratio_step_does_not_narrow_its_window() {
         step: 0.034,
         peak_ratio: 0.034,
         slides: [RatioSlide::FLAT; 2],
+        run_open: false,
         ramp_time: None,
     });
     let seam_width = 0.5 * CORNER_SPEED_MM_S * field.seam_ramp_time(0);
@@ -1384,6 +1385,7 @@ fn a_ratio_step_crossed_at_cruise_holds_its_width_over_every_window_reaching_it(
                 step: LINE_RATIO,
                 peak_ratio: LINE_RATIO,
                 slides: [RatioSlide::FLAT; 2],
+                run_open: false,
                 ramp_time: None,
             });
             let seam_width = 0.5 * speed * field.seam_ramp_time(0);
@@ -1460,6 +1462,7 @@ fn a_stream_creeping_off_a_rest_keeps_no_node_a_sliver_past_it() {
         step: 0.034,
         peak_ratio: 0.034,
         slides: [RatioSlide::FLAT; 2],
+        run_open: false,
         ramp_time: None,
     });
     let mut t = 0.0;

@@ -3,9 +3,9 @@ use std::collections::VecDeque;
 use geometry::{
     ADVANCE_VALLEY_SPEED_MM_S, AdvanceValley, RATIO_RAMP_ENVELOPE_SLOPE as ENVELOPE_SLOPE,
     RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S,
-    RATIO_RAMP_NODE_SPACING_PER_WIDTH as NODE_SPACING_PER_WIDTH, RatioRampRule, RatioSlide,
-    RatioStep, TURNAROUND_SPEED_TIME_S, ValleyKind, crawl_floor, leader_reach, turns_around,
-    valley_reach,
+    RATIO_RAMP_NODE_SPACING_PER_WIDTH as NODE_SPACING_PER_WIDTH,
+    RATIO_RAMP_NODE_SPACING_S as NODE_SPACING_S, RatioRampRule, RatioSlide, RatioStep,
+    TURNAROUND_SPEED_TIME_S, ValleyKind, crawl_floor, leader_reach, turns_around, valley_reach,
 };
 use trajectory::ContinuousSegment;
 
@@ -27,8 +27,7 @@ pub(super) use models::{PathReach, ValleyWeight, narrow_floats};
 /// `1.875·ENVELOPE_SLOPE` between two moving nodes.
 pub(super) const WIDTH_SLOPE_BOUND: f64 = 3.0 * ENVELOPE_SLOPE;
 /// Width nodes per ramp time: one every half of the shortest ramp.
-const WIDTH_NODES_PER_RAMP_TIME: f64 = 2.0;
-const NODE_SPACING_S: f64 = RATIO_RAMP_MIN_TIME_S / WIDTH_NODES_PER_RAMP_TIME;
+const WIDTH_NODES_PER_RAMP_TIME: f64 = RATIO_RAMP_MIN_TIME_S / NODE_SPACING_S;
 /// The path one time tick covers at cruise on the shortest ramp, in units
 /// of that ramp's width `V·τ/2`; on a longer ramp a tick is less of it.
 const TICK_WIDTHS: f64 = 2.0 / WIDTH_NODES_PER_RAMP_TIME;
@@ -1062,8 +1061,9 @@ impl Candidate {
 /// cross it, how fast and under what acceleration, how far the ratio moves
 /// there — its step and the change along the span it opens, which a window
 /// may gather as one step where that span is short — the largest ratio
-/// about it, and the spans either side, whose slope the moving window
-/// carries where they are long.
+/// about it, the slides either side, whose slope the moving window carries
+/// where they are long, and whether the run past it reaches the end of the
+/// table laid so far, which may lengthen it ([`WidthField::close_runs`]).
 #[derive(Debug, Clone, Copy)]
 struct TimedSeam {
     t: f64,
@@ -1072,27 +1072,40 @@ struct TimedSeam {
     step: f64,
     peak_ratio: f64,
     slides: [RatioSlide; 2],
+    run_open: bool,
     ramp_time: Option<f64>,
 }
 
-/// The slide `spans[index]` runs on: its slope, over the path the spans
-/// either side carry it on, cut from it only by rounding. A run the table
-/// ends or starts on may carry on past what is laid, so its length is
-/// unbounded.
-fn slide_through(spans: &[RatioSpan], index: usize) -> RatioSlide {
-    let carries_on =
-        |pair: &[RatioSpan]| Seam::between(&pair[0], &pair[1]).is_none_or(|seam| !seam.significant);
-    let first = index
-        - spans[..=index]
-            .windows(2)
-            .rev()
-            .take_while(|pair| carries_on(pair))
-            .count();
-    let last = index
+/// Whether the two spans of `pair` meet on one straight run of the ratio,
+/// cut only by rounding.
+fn carries_on(pair: &[RatioSpan]) -> bool {
+    Seam::between(&pair[0], &pair[1]).is_none_or(|seam| !seam.significant)
+}
+
+/// The first and the last span of the run that carries `spans[index]`'s
+/// slope on.
+fn run_through(spans: &[RatioSpan], index: usize) -> (usize, usize) {
+    let behind = spans[..=index]
+        .windows(2)
+        .rev()
+        .take_while(|pair| carries_on(pair))
+        .count();
+    (index - behind, run_end(spans, index))
+}
+
+/// The last span of the run that carries `spans[index]`'s slope on.
+fn run_end(spans: &[RatioSpan], index: usize) -> usize {
+    index
         + spans[index..]
             .windows(2)
             .take_while(|pair| carries_on(pair))
-            .count();
+            .count()
+}
+
+/// `spans[index]`'s slope over the run `(first, last)` holding it: over its
+/// whole path, and unbounded where the run starts the table, which may have
+/// dropped spans of it, or ends it, which may lay more.
+fn slide_over(spans: &[RatioSpan], index: usize, (first, last): (usize, usize)) -> RatioSlide {
     let length_mm = if first == 0 || last + 1 == spans.len() {
         f64::INFINITY
     } else {
@@ -1102,6 +1115,11 @@ fn slide_through(spans: &[RatioSpan], index: usize) -> RatioSlide {
         slope: spans[index].ratio_slope(),
         length_mm,
     }
+}
+
+/// [`slide_over`] the run through `spans[index]`.
+fn slide_through(spans: &[RatioSpan], index: usize) -> RatioSlide {
+    slide_over(spans, index, run_through(spans, index))
 }
 
 /// The last moving node the width field kept: when and where, its ramp
@@ -1291,6 +1309,27 @@ impl WidthField {
             self.seams.last().map_or(f64::NAN, |last| last.t)
         );
         self.seams.push(seam);
+    }
+
+    /// Closes the run past every seam still to take its ramp time that the
+    /// table laid since ends: its slide then covers the run's whole path.
+    fn close_runs(&mut self, spans: &[RatioSpan]) {
+        let first = self.closed_seams;
+        for seam in &mut self.seams[first..] {
+            if !seam.run_open || seam.ramp_time.is_some() {
+                continue;
+            }
+            let index = spans.partition_point(|span| span.s0 < seam.s);
+            assert!(
+                spans.get(index).is_some_and(|span| span.s0 == seam.s),
+                "the ratio step at {} mm has no span opening at it in the table from {:?} mm",
+                seam.s,
+                spans.first().map(|span| span.s0)
+            );
+            let run = run_through(spans, index);
+            seam.slides[1] = slide_over(spans, index, run);
+            seam.run_open = run.1 + 1 == spans.len();
+        }
     }
 
     /// Widens every open seam whose ramp reaches into the leg over
@@ -2147,6 +2186,7 @@ impl RatioSmoothing {
             leg,
         );
         self.keep_tail(&mut crossings, leg);
+        self.width.close_runs(spans);
         self.width.assign(t_end - TARGET_DELAY_S);
         self.reach_into_next = Some(Crossing::valley_at(leaders, t_end));
         self.refresh_clusters();
@@ -2469,7 +2509,15 @@ impl RatioSmoothing {
         leg: &RampLeg,
     ) {
         let path = LegPath::of(crossings.leaders, leg);
+        let mut run = None;
         for index in from + 1..spans.len() {
+            let behind = *run.get_or_insert_with(|| run_through(spans, index - 1));
+            let ahead = if index <= behind.1 {
+                behind
+            } else {
+                (index, run_end(spans, index))
+            };
+            run = Some(ahead);
             let (before, after) = (&spans[index - 1], &spans[index]);
             let Some(seam) = Seam::between(before, after) else {
                 continue;
@@ -2489,7 +2537,11 @@ impl RatioSmoothing {
                 crossing,
                 step: seam.step.abs() + (after.r1 - after.r0).abs(),
                 peak_ratio: before.r1.abs().max(after.r0.abs()).max(after.r1.abs()),
-                slides: [slide_through(spans, index - 1), slide_through(spans, index)],
+                slides: [
+                    slide_over(spans, index - 1, behind),
+                    slide_over(spans, index, ahead),
+                ],
+                run_open: ahead.1 + 1 == spans.len(),
                 ramp_time: None,
             });
         }

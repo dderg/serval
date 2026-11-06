@@ -33,9 +33,10 @@ pub use frontend::{
 pub use ratio_ramp::{
     ADVANCE_VALLEY_SPEED_MM_S, AdvanceValley, CRAWL_SIDE_WIDEST_MM, CrawlSide,
     RATIO_RAMP_ENVELOPE_SLOPE, RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S,
-    RATIO_RAMP_NODE_SPACING_PER_WIDTH, RatioRampRule, RatioSlide, RatioStep, RebuildsWithin,
-    SideWeight, TURNAROUND_SPEED_TIME_S, VALLEY_LEAD_BUDGET_S, VALLEY_RAMP_TIME_S, ValleyKind,
-    WIDTH_SQUARE_CURVATURE_BOUND, WIDTH_SQUARE_SLOPE_BOUND, coupled_bend, crawl_floor,
+    RATIO_RAMP_NODE_SPACING_PER_WIDTH, RATIO_RAMP_NODE_SPACING_S, RatioRampRule, RatioSlide,
+    RatioStep, RebuildsWithin, SideWeight, TURNAROUND_SPEED_TIME_S, VALLEY_LEAD_BUDGET_S,
+    VALLEY_RAMP_TIME_S, ValleyKind, WIDTH_SQUARE_CURVATURE_BOUND,
+    WIDTH_SQUARE_CURVATURE_PER_GAP_BOUND, WIDTH_SQUARE_SLOPE_BOUND, coupled_bend, crawl_floor,
     crawl_side_width, crawl_step_window, kept_floor, leader_reach, rest_room_reach_mm, side_weight,
     turns_around, valley_reach, widest_crawl_reach, widest_crawl_side_within,
 };
