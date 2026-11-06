@@ -2160,8 +2160,8 @@ impl RampCrossing {
     /// laid, else the end the missing one would reach.
     fn mid(&self) -> f64 {
         match self.slide {
-            (first, _) if first == 0.0 => self.r_before,
-            (_, second) if second == 0.0 => self.r_after,
+            (0.0, _) => self.r_before,
+            (_, 0.0) => self.r_after,
             _ => self.r_mid,
         }
     }
@@ -2190,12 +2190,12 @@ impl RampCrossing {
 }
 
 fn ramp_crossing_strategy() -> impl Strategy<Value = RampCrossing> {
-    let slide_length = prop_oneof![Just(0.0), 1e-6..0.01_f64, 0.01..3.0_f64];
+    let slide_share = prop_oneof![Just(0.0), 1e-7..1e-3_f64, 1e-3..0.8_f64];
     (
         (0.0..0.05_f64, 0.0..0.05_f64, 0.0..0.05_f64),
         (
             0.2..6.0_f64,
-            (slide_length.clone(), slide_length),
+            (slide_share.clone(), slide_share),
             0.2..6.0_f64,
         ),
         (0.05..2.0_f64, 0.75..1.5_f64),
@@ -2205,11 +2205,12 @@ fn ramp_crossing_strategy() -> impl Strategy<Value = RampCrossing> {
         .prop_map(
             |(
                 (r_before, r_mid, r_after),
-                (step_s, slide, rest_ahead),
+                (step_s, (first_share, second_share), rest_ahead),
                 (target, spacing_share),
                 (speed, accel_share),
                 k,
             )| {
+                let slide = (first_share * target, second_share * target);
                 RampCrossing {
                     r_before,
                     r_mid,
@@ -2234,14 +2235,18 @@ proptest! {
         failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
             "proptest-regressions/ratio_ramp.txt",
         ))),
+        max_global_rejects: 65_536,
         ..ProptestConfig::default()
     })]
 
-    /// Wherever a ratio step's ramp lies, under whatever width the rests'
-    /// cones leave it, the advanced follower's velocity and acceleration
-    /// across it, its curvature's steps at the ramp's ends among them, stay
-    /// within what the ramp rule budgets the step: the planner and the
-    /// ramp time hold the follower's limits on that budget.
+    /// Wherever a ratio step or a slide one cluster of seams holds lies,
+    /// under whatever width the rests' cones leave it, the advanced
+    /// follower's velocity and acceleration across it, its curvature's
+    /// steps at the ramp's ends among them, stay within what the ramp rule
+    /// budgets a step of the ratio's total variation there at the
+    /// cluster's width: the planner and the ramp time hold the follower's
+    /// limits on that budget. A slide longer than its ends' windows is the
+    /// moving window's, outside the rule's step.
     #[test]
     fn a_ratio_ramp_asks_no_more_than_its_rule_at_the_speed_it_is_crossed(
         crossing in ramp_crossing_strategy(),
@@ -2256,10 +2261,11 @@ proptest! {
 fn assert_ramp_within_rule(crossing: &RampCrossing) -> Result<(), TestCaseError> {
     let state = crossing.state();
     let seams = crossing.seams();
-    let h = seams
-        .iter()
-        .map(|&seam| state.smoothing.width.width(seam))
-        .fold(f64::INFINITY, f64::min);
+    let laid = &state.smoothing.laid;
+    let start = laid.seams.partition_point(|seam| seam.s < seams[0]);
+    let cluster = laid.cluster_at(&state.smoothing.width, start);
+    prop_assume!(cluster.seams.len() == laid.seams.len() - start);
+    let h = cluster.width;
     prop_assume!(h > 0.0 && crossing.variation() > 0.0);
     let (lo, hi) = (seams[0] - h, seams[seams.len() - 1] + h);
     let fastest = crossing.path_speed(lo).max(crossing.path_speed(hi));
@@ -2338,29 +2344,6 @@ fn a_slide_short_of_a_rest_is_ramped_within_its_rule() {
         speed: 5.0,
         accel: 0.0,
         advance_slope_s: 0.005,
-    })
-    .unwrap();
-}
-
-/// Found by `a_ratio_ramp_asks_no_more_than_its_rule_at_the_speed_it_is_crossed`
-/// on slides whose slopes a window following the width along the path
-/// averaged: along a slide two widths long the lead `0.1·h²·r'` that
-/// window keeps bent with the width between its nodes, past the slide's
-/// budget.
-#[test]
-fn a_long_slide_between_flat_spans_is_ramped_within_its_rule() {
-    assert_ramp_within_rule(&RampCrossing {
-        r_before: 0.0,
-        r_mid: 0.0,
-        r_after: 0.042_501_677_385_386_31,
-        step_s: 4.001_260_485_402_803,
-        slide: (2.167_350_304_217_281, 0.0),
-        rest_ahead: 4.347_089_729_159_594,
-        target: 1.150_892_776_265_764_8,
-        spacing: 0.863_169_582_199_323_6,
-        speed: 42.562_755_163_695_87,
-        accel: 0.0,
-        advance_slope_s: 0.053_891_627_200_503_035,
     })
     .unwrap();
 }

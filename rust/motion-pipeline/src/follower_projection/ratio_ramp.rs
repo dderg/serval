@@ -240,9 +240,8 @@ impl SeamTable {
     /// The first seam of the first cluster whose smoothing may still
     /// change: one holding a seam past `width_final`, where the width is
     /// not final yet, or one a seam past it may still join — the next seam
-    /// laid, or one still to come at `table_end` or past it, along the
-    /// sloped span the cluster leaves on or closer than the widest the two
-    /// widths may yet be together.
+    /// laid, or one still to come at `table_end` or past it, closer than
+    /// the widest the two widths may yet be together.
     fn first_unfinal(&self, width: &WidthField, width_final: f64, table_end: f64) -> Option<f64> {
         let widest = |s: f64| {
             if s <= width_final {
@@ -256,12 +255,11 @@ impl SeamTable {
             let cluster = self.cluster_at(width, start);
             let end = start + cluster.seams.len();
             let last = cluster.last().s;
-            let sloped = cluster.slope_out() != 0.0;
             let settled = last <= width_final
                 && match self.seams.get(end) {
                     Some(next) if next.s <= width_final => true,
-                    Some(next) => !sloped && next.s - last >= widest(last) + widest(next.s),
-                    None => !sloped && table_end - last >= widest(last) + widest(table_end),
+                    Some(next) => next.s - last >= widest(last) + widest(next.s),
+                    None => table_end - last >= widest(last) + widest(table_end),
                 };
             if !settled {
                 return Some(cluster.first());
@@ -282,14 +280,15 @@ impl SeamTable {
     }
 
     /// Whether the significant seams `a < b`, the next after `a`, join: a
-    /// sloped span runs from one to the other, or their own windows
-    /// overlap; never across a rest, where the width is zero.
+    /// sloped span runs between them, short enough that their own windows
+    /// overlap. A seam a rest holds has none; a span of constant ratio
+    /// between two changes leaves each its own; and a sloped span longer
+    /// than its ends' windows leaves its slope to the moving window, which
+    /// narrows along it as the width does toward a rest.
     fn joins(&self, width: &WidthField, a: usize, b: usize) -> bool {
         let (before, after) = (self.seams[a].s, self.seams[b].s);
-        let (h_before, h_after) = (width.step_width(before), width.step_width(after));
-        h_before > 0.0
-            && h_after > 0.0
-            && (self.seams[a].slope_after != 0.0 || after - before < h_before + h_after)
+        self.seams[a].slope_after != 0.0
+            && after - before < width.step_width(before) + width.step_width(after)
     }
 
     fn significant_after(&self, index: usize) -> Option<usize> {
@@ -437,6 +436,24 @@ impl SeamTable {
     }
 }
 
+/// Which spans the smoothed table reads over a stretch
+/// ([`RatioSmoothing::reading`]): those overlapping the moving windows'
+/// reach, and those touching a cluster reaching the stretch.
+pub(super) struct SpanReading<'a> {
+    moving: (f64, f64),
+    clusters: Vec<SeamCluster<'a>>,
+}
+
+impl SpanReading<'_> {
+    pub(super) fn reads(&self, span: &RatioSpan) -> bool {
+        (span.s1 > self.moving.0 && span.s0 < self.moving.1)
+            || self
+                .clusters
+                .iter()
+                .any(|cluster| span.s1 >= cluster.first() && span.s0 <= cluster.last().s)
+    }
+}
+
 /// Seams in path order beside the slope the table holds before the first.
 struct SeamView {
     seams: Vec<Seam>,
@@ -475,23 +492,20 @@ fn slope_correction(view: &SeamView, h: Jet, s: f64) -> Jet {
     moments.correction(h, inverse) + edge_spans(h, inverse, slope_left, ends)
 }
 
-/// A run of the table's seams that sloped spans join, or whose own
-/// windows, `h(σ)` either side of each, overlap, between two rests: a lone
-/// seam, a corner blend's ratio slide, an arc's ramps, a step beside a
-/// kink. A window that followed the width along the path would sweep a
+/// A run of the table's seams that sloped spans join, each shorter than
+/// the windows, `h(σ)` either side of its ends, overlap ([`SeamTable::joins`]):
+/// a lone seam, or a corner blend's ratio slide. A window that followed the width along the path would sweep a
 /// ratio change there at `1 ± h'` times the path's speed, and step the
 /// ratio's curvature at its edge by `(1 ∓ h')²` times what the ramp rule
-/// budgets ([`geometry::RatioRampRule`]); along a slope, the lead
-/// `0.1·h²·r'` it keeps would bend with the width's own third derivative.
-/// So the cluster's change is split in two: its change of slope, gathered
-/// into one kink at its first seam, which the moving window averages and
-/// lets down to nothing at every rest — nothing at all where the cluster
-/// opens and closes on spans of constant ratio; and the rest of its
-/// change, its ratio steps and its slopes less the one it leaves on, flat
-/// either side, averaged over one stationary half-width, the narrowest its
-/// seams hold. Averaged over one width, a change whose ratio varies by `V`
-/// in total asks no more of the ratio's derivatives than a step of `V`
-/// there.
+/// budgets ([`geometry::RatioRampRule`]). So the cluster's change is split
+/// in two: its change of slope, gathered into one kink at its first seam,
+/// which the moving window averages and lets down to nothing at every
+/// rest — nothing at all where the cluster opens and closes on spans of
+/// constant ratio; and the rest of its change, its ratio steps and its
+/// slopes less the one it leaves on, flat either side, averaged over one
+/// stationary half-width, the narrowest its seams hold. Averaged over one
+/// width, a change whose ratio varies by `V` in total asks no more of the
+/// ratio's derivatives than a step of `V` there.
 #[derive(Clone, Copy, Debug)]
 struct SeamCluster<'a> {
     seams: &'a [Seam],
@@ -1512,11 +1526,15 @@ impl WidthField {
         }
     }
 
-    /// The half-width a ratio step at `s` is smoothed over: the width
-    /// there, none past the last node, whose width no evaluation within
-    /// [`RatioSmoothing::final_through`] reads.
+    /// The half-width a seam at `s` is smoothed over: the width there;
+    /// none past the last node, whose width no evaluation within
+    /// [`RatioSmoothing::final_through`] reads, nor before the first, where
+    /// the field opened past a seam no evaluation reads.
     fn step_width(&self, s: f64) -> f64 {
-        if s > self.nodes[self.nodes.len() - 1].s + SPAN_LOOKUP_SLACK_MM {
+        let (Some(first), Some(last)) = (self.nodes.first(), self.nodes.last()) else {
+            return 0.0;
+        };
+        if s < first.s - SPAN_LOOKUP_SLACK_MM || s > last.s + SPAN_LOOKUP_SLACK_MM {
             return 0.0;
         }
         self.width(s)
@@ -2310,19 +2328,21 @@ impl RatioSmoothing {
                 .is_some()
     }
 
-    /// The path the smoothed table reads its spans over anywhere on
-    /// `[lo, hi]`: what the moving windows there average, and the seams of
-    /// every cluster whose own window reaches into it, with the spans either
-    /// side.
-    pub(super) fn read_span(&self, lo: f64, hi: f64) -> (f64, f64) {
-        self.laid.clusters_reaching(&self.width, (lo, hi)).fold(
-            (lo - self.reach_back(lo), hi + self.reach_back(hi)),
-            |(from, to), cluster| (from.min(cluster.first()), to.max(cluster.last().s)),
-        )
+    /// Which spans the smoothed table reads anywhere on `[lo, hi]`: those
+    /// the moving windows there average, `s ± h(s)` growing along the path,
+    /// and those either side of every seam of a cluster whose own window
+    /// reaches into it. A span only touching the windows' reach is read
+    /// nowhere on the stretch, so nothing laid past what it reads decides
+    /// which.
+    pub(super) fn reading(&self, lo: f64, hi: f64) -> SpanReading<'_> {
+        SpanReading {
+            moving: (lo - self.reach_back(lo), hi + self.reach_back(hi)),
+            clusters: self.laid.clusters_reaching(&self.width, (lo, hi)).collect(),
+        }
     }
 
     /// The first path distance the smoothing from `s` on reads its spans
-    /// and seams at ([`Self::read_span`]): what the window at `s` averages,
+    /// and seams at ([`Self::reading`]): what the window at `s` averages,
     /// and the first seam of every cluster of either table reaching `s` or
     /// past it.
     pub(super) fn read_from(&self, s: f64) -> f64 {
@@ -2339,22 +2359,15 @@ impl RatioSmoothing {
 
     /// `(max |r̃|, max |r̃'|)` over `[lo, hi]`, see [`RatioSmoothing`]: the
     /// ratio within the spans the smoothed table reads there
-    /// ([`Self::read_span`]); the slope within the moving window's bound on
+    /// ([`Self::reading`]); the slope within the moving window's bound on
     /// their slopes, and what each cluster reaching in adds over its own
     /// window, its slopes less the one it leaves on and `¾` of its steps
     /// over its width. A span only touching the stretch is read nowhere on
     /// it, so nothing laid past what the stretch reads decides the bound.
     pub(super) fn ratio_bounds(&self, spans: &[RatioSpan], lo: f64, hi: f64) -> (f64, f64) {
         let (_, curvature) = self.width.bounds(lo, hi);
-        let (moving_lo, moving_hi) = (lo - self.reach_back(lo), hi + self.reach_back(hi));
-        let clusters: Vec<SeamCluster> =
-            self.laid.clusters_reaching(&self.width, (lo, hi)).collect();
-        let ridden = spans.iter().filter(|span| {
-            (span.s1 > moving_lo && span.s0 < moving_hi)
-                || clusters
-                    .iter()
-                    .any(|cluster| span.s1 >= cluster.first() && span.s0 <= cluster.last().s)
-        });
+        let reading = self.reading(lo, hi);
+        let ridden = spans.iter().filter(|span| reading.reads(span));
         let (low, high, slope) = ridden.fold(
             (f64::INFINITY, f64::NEG_INFINITY, 0.0_f64),
             |(low, high, slope), span| {
@@ -2366,14 +2379,15 @@ impl RatioSmoothing {
             },
         );
         let (low, high) = match spans.last() {
-            Some(last) if moving_hi > last.s1 => (low.min(last.r1), high.max(last.r1)),
+            Some(last) if reading.moving.1 > last.s1 => (low.min(last.r1), high.max(last.r1)),
             _ => (low, high),
         };
         if low > high {
             return (0.0, 0.0);
         }
         let stretch = (1.0 + WIDTH_SLOPE_BOUND) * (1.0 + WIDTH_SLOPE_BOUND);
-        let stationary = clusters
+        let stationary = reading
+            .clusters
             .iter()
             .map(|cluster| {
                 let out = cluster.slope_out();

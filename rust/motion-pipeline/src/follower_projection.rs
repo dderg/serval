@@ -2274,13 +2274,13 @@ impl FollowerState {
     }
 
     /// Whether a span the smoothed table reads anywhere on `[s_lo, s_hi]`
-    /// retracts ([`RatioSmoothing::read_span`]): nothing laid past what it
+    /// retracts ([`RatioSmoothing::reading`]): nothing laid past what it
     /// reads decides this.
     fn retracts_within(&self, s_lo: f64, s_hi: f64) -> bool {
-        let (reach_lo, reach_hi) = self.smoothing.read_span(s_lo, s_hi);
+        let reading = self.smoothing.reading(s_lo, s_hi);
         self.spans
             .iter()
-            .any(|span| span.retracts() && span.s1 >= reach_lo && span.s0 <= reach_hi)
+            .any(|span| span.retracts() && reading.reads(span))
     }
 
     fn aligned_span_start(&self, s: f64) -> f64 {
