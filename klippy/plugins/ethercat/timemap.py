@@ -120,6 +120,12 @@ class EndpointGrid:
         grid_index, grid_clock = self.anchor
         return grid_index + math.ceil((clock - grid_clock) / self.cycle_ns)
 
+    def index_of_clock(self, clock):
+        """The grid index a clock the endpoint stamped names; each cycle
+        converts its clock afresh, so it sits nanoseconds off the grid."""
+        grid_index, grid_clock = self.anchor
+        return grid_index + round((clock - grid_clock) / self.cycle_ns)
+
     def first_index_at_or_after(self, print_time):
         estimate = self.index_at_or_after_clock(
             self.clock_map.exact_clock(print_time)

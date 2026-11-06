@@ -89,6 +89,23 @@ def test_endpoint_grid_refuses_to_go_back():
         grid.update(10, 0)
 
 
+def test_endpoint_clocks_name_the_nearest_grid_index():
+    sync = main_sync(DRIFT_PPM)
+    grid = EndpointGrid(
+        EndpointClockMap(Reactor(), sync, 20.0),
+        CYCLE_NS,
+        1000,
+        int(20.5 * RAW_NS_PER_S),
+    )
+    # Each endpoint cycle converts its clock to RAW afresh: a few ns either
+    # side of the grid
+    jitter_ns = 3
+    for index in (990, 1000, 1007):
+        clock = grid.clock(index)
+        assert grid.index_of_clock(clock - jitter_ns) == index
+        assert grid.index_of_clock(clock + jitter_ns) == index
+
+
 def test_synthetic_grid():
     grid = SyntheticGrid(CYCLE_NS)
     assert grid.interval == CYCLE_NS / RAW_NS_PER_S
