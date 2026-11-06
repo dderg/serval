@@ -355,20 +355,27 @@ impl RatioRampRule {
     /// The ramp's own acceleration, and the moving window's slope bend
     /// `0.1·m·v·((h²)″·(v + 3k·a) + k·v·(h²)‴·v)` along the slide that
     /// bends it the most ([`RatioSlide::width_square_curvature_per_speed`]).
+    /// A follower kernel of jerk gain `J` reads `k·v³·(h²)‴`, the advance's
+    /// derivative of `k·v²·(h²)″`, as at most `J·k·v²·|(h²)″|`.
     fn ramp_accel(&self, tau: f64, step: &RatioStep) -> f64 {
         let k = self.advance_slope_s;
         let (v, a) = (step.speed_mm_s, step.accel_mm_s2.abs());
         let rate = v + 2.0 * k * a;
         let ramp = step.ratio_step * rate / tau * acceleration_gain(ramp_ratio(k, v, rate, tau));
+        let kernel_square_curvature_per_speed =
+            self.kernel_jerk_per_accel_hz * WIDTH_SQUARE_SLOPE_BOUND;
         let bend = step
             .slides
             .iter()
             .map(|slide| {
+                let square_curvature_per_speed = slide
+                    .width_square_curvature_per_speed(v, tau)
+                    .min(kernel_square_curvature_per_speed);
                 KERNEL_HALF_VARIANCE
                     * slide.moving_slope(v * tau)
                     * v
                     * (WIDTH_SQUARE_SLOPE_BOUND * (v + 3.0 * k * a)
-                        + k * v * slide.width_square_curvature_per_speed(v, tau))
+                        + k * v * square_curvature_per_speed)
             })
             .fold(0.0, f64::max);
         ramp + bend

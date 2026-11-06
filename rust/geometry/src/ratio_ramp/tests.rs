@@ -655,3 +655,34 @@ fn a_run_bends_its_window_no_sharper_than_half_its_length_allows() {
     );
     assert!(accel_of(short) < 0.5 * accel_of(f64::INFINITY));
 }
+
+#[test]
+fn a_follower_kernel_bends_a_run_no_sharper_than_its_jerk_gain_allows() {
+    let (k, speed, tau, slope, jerk_gain) = (0.5, 100.0, 0.002, 2.0e-4, 100.0);
+    let step = RatioStep {
+        slides: [
+            RatioSlide::FLAT,
+            RatioSlide {
+                slope,
+                length_mm: f64::INFINITY,
+            },
+        ],
+        ..cruise(0.0, speed)
+    };
+    let smoothed = RatioRampRule {
+        kernel_jerk_per_accel_hz: jerk_gain,
+        ..unlimited(k)
+    };
+    let expected = KERNEL_HALF_VARIANCE
+        * slope
+        * speed
+        * speed
+        * WIDTH_SQUARE_SLOPE_BOUND
+        * (1.0 + k * jerk_gain);
+    let asked = smoothed.demand(tau, &step).1;
+    assert!(
+        (asked - expected).abs() <= 1e-12 * expected,
+        "a kernel chain's endless run asks {asked}, expected {expected}"
+    );
+    assert!(asked < unlimited(k).demand(tau, &step).1);
+}

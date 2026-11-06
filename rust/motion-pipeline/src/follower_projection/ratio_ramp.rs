@@ -1090,36 +1090,36 @@ fn run_through(spans: &[RatioSpan], index: usize) -> (usize, usize) {
         .rev()
         .take_while(|pair| carries_on(pair))
         .count();
-    (index - behind, run_end(spans, index))
+    let ahead = spans[index..]
+        .windows(2)
+        .take_while(|pair| carries_on(pair))
+        .count();
+    (index - behind, index + ahead)
 }
 
-/// The last span of the run that carries `spans[index]`'s slope on.
-fn run_end(spans: &[RatioSpan], index: usize) -> usize {
-    index
-        + spans[index..]
-            .windows(2)
-            .take_while(|pair| carries_on(pair))
-            .count()
-}
-
-/// `spans[index]`'s slope over the run `(first, last)` holding it: over its
-/// whole path, and unbounded where the run starts the table, which may have
-/// dropped spans of it, or ends it, which may lay more.
-fn slide_over(spans: &[RatioSpan], index: usize, (first, last): (usize, usize)) -> RatioSlide {
-    let length_mm = if first == 0 || last + 1 == spans.len() {
+/// `spans[index]`'s slope over the run holding it, and whether that run
+/// ends the table, which may lay more of it: over the run's whole path,
+/// and unbounded where the run starts the table, which may have dropped
+/// spans of it, or ends it. A flat span's run is flat throughout, since a
+/// slope off zero is a significant seam, and carries no slope however long.
+fn run_slide(spans: &[RatioSpan], index: usize) -> (RatioSlide, bool) {
+    let slope = spans[index].ratio_slope();
+    if slope == 0.0 {
+        return (RatioSlide::FLAT, false);
+    }
+    let (first, last) = run_through(spans, index);
+    let open = last + 1 == spans.len();
+    let length_mm = if first == 0 || open {
         f64::INFINITY
     } else {
         spans[last].s1 - spans[first].s0
     };
-    RatioSlide {
-        slope: spans[index].ratio_slope(),
-        length_mm,
-    }
+    (RatioSlide { slope, length_mm }, open)
 }
 
-/// [`slide_over`] the run through `spans[index]`.
+/// The slide of the run through `spans[index]` ([`run_slide`]).
 fn slide_through(spans: &[RatioSpan], index: usize) -> RatioSlide {
-    slide_over(spans, index, run_through(spans, index))
+    run_slide(spans, index).0
 }
 
 /// The last moving node the width field kept: when and where, its ramp
@@ -1326,9 +1326,9 @@ impl WidthField {
                 seam.s,
                 spans.first().map(|span| span.s0)
             );
-            let run = run_through(spans, index);
-            seam.slides[1] = slide_over(spans, index, run);
-            seam.run_open = run.1 + 1 == spans.len();
+            let (slide, open) = run_slide(spans, index);
+            seam.slides[1] = slide;
+            seam.run_open = open;
         }
     }
 
@@ -2509,15 +2509,7 @@ impl RatioSmoothing {
         leg: &RampLeg,
     ) {
         let path = LegPath::of(crossings.leaders, leg);
-        let mut run = None;
         for index in from + 1..spans.len() {
-            let behind = *run.get_or_insert_with(|| run_through(spans, index - 1));
-            let ahead = if index <= behind.1 {
-                behind
-            } else {
-                (index, run_end(spans, index))
-            };
-            run = Some(ahead);
             let (before, after) = (&spans[index - 1], &spans[index]);
             let Some(seam) = Seam::between(before, after) else {
                 continue;
@@ -2531,17 +2523,15 @@ impl RatioSmoothing {
                     crossings.over(ramp_reach_within(t, leg.support)),
                     |widest, tail| widest.widest(tail.crossing),
                 );
+            let (ahead, run_open) = run_slide(spans, index);
             self.width.add_seam(TimedSeam {
                 s: after.s0,
                 t,
                 crossing,
                 step: seam.step.abs() + (after.r1 - after.r0).abs(),
                 peak_ratio: before.r1.abs().max(after.r0.abs()).max(after.r1.abs()),
-                slides: [
-                    slide_over(spans, index - 1, behind),
-                    slide_over(spans, index, ahead),
-                ],
-                run_open: ahead.1 + 1 == spans.len(),
+                slides: [slide_through(spans, index - 1), ahead],
+                run_open,
                 ramp_time: None,
             });
         }
