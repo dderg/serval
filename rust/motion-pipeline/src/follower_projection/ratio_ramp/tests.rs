@@ -1163,7 +1163,8 @@ fn the_smoothing_models_hold_its_correction_and_valley_weight_between_bends() {
                     end: 0.3 * total,
                     before: 1.5,
                     after: 2.0,
-                    floor: 0.3,
+                    floor_before: 0.3,
+                    floor_after: 0.3,
                     kind: super::ValleyKind::Crawl,
                 },
                 super::AdvanceValley {
@@ -1171,7 +1172,8 @@ fn the_smoothing_models_hold_its_correction_and_valley_weight_between_bends() {
                     end: 0.6 * total + 1.0,
                     before: 0.8,
                     after: 0.5,
-                    floor: 0.0,
+                    floor_before: 0.0,
+                    floor_after: 0.0,
                     kind: super::ValleyKind::Rest,
                 },
             ];
@@ -1507,7 +1509,8 @@ fn a_crawl_valley_leaves_zero_flat_and_its_derivatives_are_exact() {
         end: 5.0,
         before: 2.0,
         after: 1.5,
-        floor: 0.01,
+        floor_before: 0.01,
+        floor_after: 0.01,
         kind: ValleyKind::Crawl,
     };
     for side in [-1.0, 1.0] {
@@ -1541,7 +1544,8 @@ fn a_crawl_valley_leaves_zero_flat_and_its_derivatives_are_exact() {
         }
     }
     let kinked = AdvanceValley {
-        floor: 0.0,
+        floor_before: 0.0,
+        floor_after: 0.0,
         ..crawl
     };
     let (_, slope, _) = kinked.weight(5.0 + 1e-9);
@@ -1631,14 +1635,15 @@ fn a_kernel_after_the_advance_spares_a_crawl_its_valley() {
 fn a_crawl_inside_a_laid_valleys_floor_lays_no_second_valley() {
     let (turn, reach, floor) = (468.816, 0.184_87, 3.830e-3);
     let mut smoothing = RatioSmoothing::default();
-    smoothing.lay_valley(turn, reach, floor);
-    smoothing.lay_valley(turn + 1e-5, 0.184_83, 3.831e-3);
+    smoothing.place_valley(turn, (reach, reach), floor);
+    smoothing.place_valley(turn + 1e-5, (0.184_83, 0.184_83), 3.831e-3);
     let laid = AdvanceValley {
         start: turn,
         end: turn,
         before: reach,
         after: reach,
-        floor,
+        floor_before: floor,
+        floor_after: floor,
         kind: ValleyKind::Crawl,
     };
     for k in -19..=19 {
@@ -1655,21 +1660,22 @@ fn a_crawl_inside_a_laid_valleys_floor_lays_no_second_valley() {
 /// and again at the step's own slowest point, 0.02 mm on, past the first
 /// valley's floor but well within its reach. The advance releases its lead
 /// once and rebuilds it once: one valley holding the weight at zero across
-/// both, its after side as wide as the wider of the two, not the product
-/// `W₁·W₂`, which rebuilds the lead up to twice as steeply.
+/// both, its after side the later crawl's with that crawl's floor, not the
+/// product `W₁·W₂`, which rebuilds the lead up to twice as steeply.
 #[test]
 fn a_crawl_within_the_last_crawl_valleys_reach_widens_it_to_one_valley() {
     let (turn, reach, floor) = (500.0, 0.18, 4.0e-3);
     let (next, next_reach, next_floor) = (500.02, 0.17, 3.0e-3);
     let mut smoothing = RatioSmoothing::default();
-    smoothing.lay_valley(turn, reach, floor);
-    smoothing.lay_valley(next, next_reach, next_floor);
+    smoothing.place_valley(turn, (reach, reach), floor);
+    smoothing.place_valley(next, (next_reach, next_reach), next_floor);
     let merged = AdvanceValley {
         start: turn,
         end: next,
         before: reach,
-        after: reach,
-        floor,
+        after: next_reach,
+        floor_before: floor,
+        floor_after: next_floor,
         kind: ValleyKind::Crawl,
     };
     for k in -40..=40 {
@@ -1685,14 +1691,15 @@ fn a_crawl_within_the_last_crawl_valleys_reach_widens_it_to_one_valley() {
 #[test]
 fn crawls_further_apart_than_their_reach_lay_a_valley_each() {
     let mut smoothing = RatioSmoothing::default();
-    smoothing.lay_valley(500.0, 0.18, 4.0e-3);
-    smoothing.lay_valley(500.4, 0.17, 3.0e-3);
+    smoothing.place_valley(500.0, (0.18, 0.18), 4.0e-3);
+    smoothing.place_valley(500.4, (0.17, 0.17), 3.0e-3);
     let first = AdvanceValley {
         start: 500.0,
         end: 500.0,
         before: 0.18,
         after: 0.18,
-        floor: 4.0e-3,
+        floor_before: 4.0e-3,
+        floor_after: 4.0e-3,
         kind: ValleyKind::Crawl,
     };
     let second = AdvanceValley {
@@ -1700,7 +1707,8 @@ fn crawls_further_apart_than_their_reach_lay_a_valley_each() {
         end: 500.4,
         before: 0.17,
         after: 0.17,
-        floor: 3.0e-3,
+        floor_before: 3.0e-3,
+        floor_after: 3.0e-3,
         kind: ValleyKind::Crawl,
     };
     for k in -40..=40 {

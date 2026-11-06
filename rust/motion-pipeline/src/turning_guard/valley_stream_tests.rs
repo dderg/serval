@@ -1,6 +1,9 @@
 use geometry::path::CurvatureProfile;
 use geometry::path::lowering::PositionProfile;
-use geometry::{ADVANCE_VALLEY_SPEED_MM_S, AdvanceValley, ValleyKind, crawl_floor, valley_reach};
+use geometry::{
+    ADVANCE_VALLEY_SPEED_MM_S, AdvanceValley, CrawlSide, ValleyKind, crawl_floor, crawl_side_width,
+    valley_reach,
+};
 use nurbs::algebra::PiecewisePolynomialKernel;
 
 use super::backoff_stream_tests::{UnsoundPlanner, line};
@@ -241,9 +244,11 @@ impl Shaped<'_> {
 /// The advance's demand on the extruder along a guarded stream, read the
 /// way the follower projection lays its valleys: at every seam the shaped
 /// leaders cross under [`ADVANCE_VALLEY_SPEED_MM_S`] and at every move's
-/// slowest point inside under it, each a valley from the shared rule
-/// merged into the last where their sides overlap, whether or not the
-/// projection would find reading the path through too steep there.
+/// slowest point inside under it, each a valley from the shared rule, each
+/// side as wide as its rebuild needs ([`crawl_side_width`]) where the
+/// leaders' own demand leaves room, merged into the last where their sides
+/// overlap, whether or not the projection would find reading the path
+/// through too steep there.
 struct ValleyReference {
     times: Vec<f64>,
     arcs: Vec<f64>,
@@ -254,7 +259,7 @@ struct ValleyReference {
 const REFERENCE_STEP_S: f64 = 5e-5;
 
 impl ValleyReference {
-    fn new(shaped: &Shaped) -> Self {
+    fn new(shaped: &Shaped, caps: &geometry::ExtruderCaps) -> Self {
         let count = (shaped.path.end / REFERENCE_STEP_S).ceil() as usize;
         let times: Vec<f64> = (0..=count).map(|i| i as f64 * REFERENCE_STEP_S).collect();
         let motions: Vec<[[f64; 3]; 3]> = times.iter().map(|&t| shaped.motion(t)).collect();
@@ -275,7 +280,7 @@ impl ValleyReference {
             }
             let t1 = t0 + planned.velocity.phases.iter().map(|p| p.dt).sum::<f64>();
             if *t0 > 0.0 {
-                reference.lay(shaped, *t0);
+                reference.lay(shaped, caps, *t0);
             }
             let first = (*t0 / REFERENCE_STEP_S).ceil() as usize;
             let last = ((t1 / REFERENCE_STEP_S).floor() as usize).min(count);
@@ -289,7 +294,7 @@ impl ValleyReference {
                 (reference.times[slowest] + REFERENCE_STEP_S).min(t1),
             );
             if turn - t0 > REFERENCE_STEP_S && t1 - turn > REFERENCE_STEP_S {
-                reference.lay(shaped, turn);
+                reference.lay(shaped, caps, turn);
             }
         }
         reference
@@ -301,7 +306,7 @@ impl ValleyReference {
         self.arcs[i] + gauss(from, t, |tau| shaped.speed(tau))
     }
 
-    fn lay(&mut self, shaped: &Shaped, t: f64) {
+    fn lay(&mut self, shaped: &Shaped, caps: &geometry::ExtruderCaps, t: f64) {
         let [velocity, accel, _] = shaped.motion(t);
         let (speed, rate) = (norm(velocity), norm(accel));
         if speed >= ADVANCE_VALLEY_SPEED_MM_S {
@@ -318,21 +323,90 @@ impl ValleyReference {
             return;
         }
         let floor = crawl_floor(speed, rate);
+        let crawl = (turn, speed, rate, floor);
+        let side = |window: &dyn Fn(f64) -> (f64, f64)| {
+            crawl_side_width(reach, |width| {
+                self.rebuild_fits(shaped, caps, crawl, window(width), width)
+            })
+            .unwrap_or_else(|| panic!("no width fits the side of the crawl at s={turn}"))
+        };
+        let after = side(&|width| (turn, turn + width));
+        let last_reach_end = self
+            .valleys
+            .last()
+            .map_or(f64::NEG_INFINITY, AdvanceValley::reach_end);
+        let before = if last_reach_end > turn - reach {
+            reach
+        } else {
+            side(&|width| (turn - width, turn))
+        };
         match self.valleys.last_mut() {
-            Some(last) if turn - reach < last.reach_end() => {
+            Some(last) if turn - before < last.reach_end() => {
                 last.end = turn;
-                last.after = last.after.max(reach);
-                last.floor = last.floor.max(floor);
+                last.after = after;
+                last.floor_after = floor;
             }
             _ => self.valleys.push(AdvanceValley {
                 start: turn,
                 end: turn,
-                before: reach,
-                after: reach,
-                floor,
+                before,
+                after,
+                floor_before: floor,
+                floor_after: floor,
                 kind: ValleyKind::Crawl,
             }),
         }
+    }
+
+    /// Whether a side `width` wide over the path `window` of the crawl
+    /// `(turn, speed, rate, floor)` rebuilds the lead within what the
+    /// leaders' own demand over it leaves of the extruder's limit, read as
+    /// the projection reads it off the leaders ([`CrawlSide::rebuild`]).
+    fn rebuild_fits(
+        &self,
+        shaped: &Shaped,
+        caps: &geometry::ExtruderCaps,
+        (turn, speed, rate, floor): (f64, f64, f64, f64),
+        (lo, hi): (f64, f64),
+        width: f64,
+    ) -> bool {
+        let (back, ahead) = shaped.reach();
+        let k = caps.advance_slope_s;
+        let (mut base, mut ratio, mut accel, mut fastest) = (0.0_f64, 0.0_f64, rate, speed);
+        for ((&t, &s), &[velocity, acceleration, jerk]) in
+            self.times.iter().zip(&self.arcs).zip(&self.motions)
+        {
+            if s < lo || s > hi {
+                continue;
+            }
+            let here = shaped.path.ratio_near((t - ahead, t - back));
+            let v = norm(velocity);
+            if !here.is_finite() || v == 0.0 {
+                continue;
+            }
+            let along =
+                |x: [f64; 3]| (x[0] * velocity[0] + x[1] * velocity[1] + x[2] * velocity[2]) / v;
+            let turning = norm(cross(acceleration, velocity)).powi(2)
+                / (v * v)
+                / v.max(ADVANCE_VALLEY_SPEED_MM_S);
+            let path_accel = along(acceleration).abs();
+            base = base.max(here * (path_accel + k * (along(jerk).abs() + turning)));
+            ratio = ratio.max(here);
+            accel = accel.max(path_accel);
+            fastest = fastest.max(v);
+        }
+        let room = caps.max_accel_mm_s2 - base;
+        assert!(
+            room > 0.0,
+            "the leaders ask {base} mm/s² of the extruder within {width} mm of the crawl at s={turn}"
+        );
+        let leaders = CrawlSide {
+            speed,
+            accel,
+            fastest,
+            floor: (floor, floor),
+        };
+        k * ratio * leaders.rebuild(width) <= room
     }
 
     fn weight(&self, s: f64) -> (f64, f64, f64) {
@@ -398,7 +472,7 @@ fn a_valley_rebuild_under_an_under_estimated_jerk_gain_stays_within_the_extruder
         path: PlannedPath::new(&emitted),
         kernels: leaders.map(|axis| planner.chains.chains[axis].kernel()),
     };
-    let reference = ValleyReference::new(&shaped);
+    let reference = ValleyReference::new(&shaped, &planner.real);
     assert!(
         !reference.valleys.is_empty(),
         "the zigzag lays no advance valley"

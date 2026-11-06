@@ -14,6 +14,14 @@ pub const VALLEY_RAMP_TIME_S: f64 = RATIO_RAMP_MAX_TIME_S;
 /// fit's rounding, far under the rate times this.
 pub const TURNAROUND_SPEED_TIME_S: f64 = 1e-6;
 
+/// The longest a crawl valley's side may take the leaders before its
+/// crawl: the share of the pump's lead (`MAX_LEAD_SECS`, 2 s, in
+/// motion-core's pump loop) the turning guard and the follower projection
+/// spend holding motion back for the valleys still to come within reach
+/// of it. The guard leaves room for a side that wide; the projection keeps
+/// that much path untaken behind its table's end.
+pub const VALLEY_LEAD_BUDGET_S: f64 = 0.1;
+
 /// How many geometric pieces [`SideWeight::within`] bounds a width range
 /// over: each pairs a narrower span of widths with the floors and shares
 /// ahead they allow.
@@ -64,15 +72,17 @@ pub fn crawl_floor(speed: f64, rate: f64) -> f64 {
 /// weighted down to zero: `W = 0` on `[start, end]`, where the leaders'
 /// path speed is zero or a crawl, and `W = ψ(x) = 1 − (1 − x)³` within
 /// `before`/`after` of it, meeting 1 flat to second order. `x` is the
-/// distance `d` out over that width, both flattened over the valley's
-/// `floor` `f` as `√(d² + f²) − f`: with no floor, where the leaders rest
-/// or turn around, the weight rises off zero with a slope their zero speed
-/// makes harmless; across a crawl at speed `v` and acceleration `a`, the
-/// floor is `v²/a` ([`crawl_floor`]), about where the acceleration takes
-/// over from the crawl, and the weight leaves zero flat, since `W'·ṡ²` of
-/// opposite signs either side would step the advanced velocity. The laid
-/// ratio, and so the material, is untouched; only the lead the advance
-/// builds is released over the path before and rebuilt after.
+/// distance `d` out over that width, both flattened over the side's floor
+/// `f` as `√(d² + f²) − f`: with no floor, where the leaders rest or turn
+/// around, the weight rises off zero with a slope their zero speed makes
+/// harmless; across a crawl at speed `v` and acceleration `a`, the floor
+/// is `v²/a` ([`crawl_floor`]), about where the acceleration takes over
+/// from the crawl, and the weight leaves zero flat, since `W'·ṡ²` of
+/// opposite signs either side would step the advanced velocity. Each side
+/// keeps the floor of the crawl it leaves from, so a valley widened over a
+/// later crawl rebuilds the lead from that crawl alone. The laid ratio,
+/// and so the material, is untouched; only the lead the advance builds is
+/// released over the path before and rebuilt after.
 ///
 /// Rising from a rest the leaders leave at acceleration `a`, the lead
 /// `k·r·W·ṡ` catches up with the advance's `k·r·ṡ` at a rate of at most
@@ -85,14 +95,16 @@ pub fn crawl_floor(speed: f64, rate: f64) -> f64 {
 ///   while its rate does not ([`turns_around`]), so the rate steps from
 ///   `−a` to `+a`, and an advance reading `r·ṡ` would step the follower's
 ///   velocity by `2·k·r·a` whatever the ratio's own shape. The valley is
-///   that seam, each side reaching as far as the leaders turn around in
-///   half the ramp time ([`valley_reach`]).
+///   that seam, each side reaching at least as far as the leaders turn
+///   around in half the ramp time ([`valley_reach`]), and as far as the
+///   rebuild needs to fit the follower's limit ([`crawl_side_width`]).
 /// - A crawl: the leaders' slowest point, under
 ///   [`ADVANCE_VALLEY_SPEED_MM_S`], at a seam or inside a leg. The path
 ///   speed's second derivative carries the tangent's turning there,
 ///   `a⊥²/v`, which an advance would turn into follower acceleration
 ///   however the planner bounds the path's own. Only where that leaves the
-///   follower's limit: releasing the lead asks for some too.
+///   follower's limit: releasing the lead asks for some too. Its sides are
+///   sized as a turnaround's.
 /// - A rest: an extrude-only move or a dwell, where the shaped leaders come
 ///   to rest between the kernel spill of the move before and of the move
 ///   after, and the fit's back-and-forth near the rest point has its own
@@ -106,7 +118,8 @@ pub struct AdvanceValley {
     pub end: f64,
     pub before: f64,
     pub after: f64,
-    pub floor: f64,
+    pub floor_before: f64,
+    pub floor_after: f64,
     pub kind: ValleyKind,
 }
 
@@ -130,29 +143,29 @@ impl AdvanceValley {
     }
 
     /// Whether the valley holds the weight flat at zero at `s`: on
-    /// `[start, end]`, and within its floor `f` either side, over which the
-    /// weight leaves zero flat (`ψ ≈ 3d²/(2f·w)` for `d ≪ f`); where it has
-    /// no floor, to `rounding`.
+    /// `[start, end]`, and within each side's floor `f`, over which the
+    /// weight leaves zero flat (`ψ ≈ 3d²/(2f·w)` for `d ≪ f`); where a side
+    /// has no floor, to `rounding`.
     #[must_use]
     pub fn holds_zero_at(&self, s: f64, rounding: f64) -> bool {
-        let flat = self.floor.max(rounding);
-        s >= self.start - flat && s <= self.end + flat
+        s >= self.start - self.floor_before.max(rounding)
+            && s <= self.end + self.floor_after.max(rounding)
     }
 
     /// `(W, W', W'')` at `s`, the derivatives along the path.
     #[must_use]
     pub fn weight(&self, s: f64) -> (f64, f64, f64) {
-        let (distance, width, outward) = if s < self.start {
-            (self.start - s, self.before, -1.0)
+        let (distance, width, floor, outward) = if s < self.start {
+            (self.start - s, self.before, self.floor_before, -1.0)
         } else if s > self.end {
-            (s - self.end, self.after, 1.0)
+            (s - self.end, self.after, self.floor_after, 1.0)
         } else {
             return (0.0, 0.0, 0.0);
         };
         if distance >= width {
             return (1.0, 0.0, 0.0);
         }
-        let floor = self.floor.min(width);
+        let floor = floor.min(width);
         let spread = libm::hypot(distance, floor);
         let slope = distance / spread;
         let bend = floor / spread * (floor / spread) / spread;
@@ -318,6 +331,204 @@ impl SideWeight {
             bend,
         }
     }
+
+    /// [`Self::within`] a single `width`.
+    #[must_use]
+    pub fn at_width(distance: (f64, f64), width: f64, floor: (f64, f64)) -> Self {
+        Self::within_widths(distance, (width, width), floor)
+    }
+}
+
+/// How many pieces of its width [`CrawlSide::rebuild`] bounds a side over.
+const CRAWL_SIDE_DISTANCE_PIECES: u32 = 32;
+
+/// How many geometric pieces [`CrawlSide::rebuild`] splits a floor range
+/// into, each paired with the widths and distances on its own.
+const CRAWL_SIDE_FLOOR_PIECES: i32 = 8;
+
+/// The narrowest floor, as a share of the side, a range of floors is split
+/// down to geometrically before its last piece runs to its least floor.
+const CRAWL_SIDE_FLOOR_SHARE_MIN: f64 = 1.0 / 65_536.0;
+
+/// The widths a crawl side is laid at past its leaders' reach: a geometric
+/// grid of [`CRAWL_SIDE_GRID_STEPS_PER_DOUBLING`] steps per doubling from
+/// this, so that whoever bounds the leaders looser picks from the same
+/// widths and never a narrower one ([`crawl_side_width`]).
+const CRAWL_SIDE_GRID_UNIT_MM: f64 = 1e-3;
+const CRAWL_SIDE_GRID_STEPS_PER_DOUBLING: f64 = 8.0;
+
+/// The widest a crawl side is laid: past it no room fits a rebuild.
+pub const CRAWL_SIDE_WIDEST_MM: f64 = 1e3;
+
+/// How the leaders cross one side of a crawl or turnaround valley, as the
+/// advance rebuilding (or releasing) its lead over it reads them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CrawlSide {
+    /// The path speed at the crawl, `v`.
+    pub speed: f64,
+    /// The most path acceleration `|s̈|` across the side, `A`: at least the
+    /// crawl's whole acceleration `a`, so a crawl floor `v²/a` is at least
+    /// `v²/A`.
+    pub accel: f64,
+    /// The fastest the leaders cross the side.
+    pub fastest: f64,
+    /// The range the side's floor lies in: none, or a crawl's
+    /// ([`crawl_floor`]) of at most `v` and at most `A`.
+    pub floor: (f64, f64),
+}
+
+impl CrawlSide {
+    /// The most `|W″·ṡ³ + 3W′·ṡ·s̈|` asks over a side `width` wide, which an
+    /// advance of slope `k` at ratio `r` turns into `k·r` times as much
+    /// follower acceleration. Leaving the crawl at `v` under `|s̈| ≤ A` the
+    /// leaders are at most `√(v² + 2A·d)` fast at a distance `d`, and never
+    /// past [`Self::fastest`]; the side is split into
+    /// [`CRAWL_SIDE_DISTANCE_PIECES`] pieces of distance, each bounded by
+    /// [`SideWeight::at_width`] with the speed at its far end, and its bend
+    /// by [`coupled_bend`] too, which neither a vanishing floor nor a
+    /// vanishing distance makes diverge. `W″ = bend_scale·β − fold`, of
+    /// opposite signs, so either bounds `|W″|`.
+    #[must_use]
+    pub fn rebuild(&self, width: f64) -> f64 {
+        assert!(
+            width > 0.0 && self.speed >= 0.0 && self.accel >= 0.0 && self.fastest >= self.speed,
+            "a crawl side is ill-formed: {self:?} over {width} mm"
+        );
+        floor_pieces(self.floor, width)
+            .into_iter()
+            .map(|floor| self.rebuild_over(width, floor))
+            .fold(0.0, f64::max)
+    }
+
+    fn rebuild_over(&self, width: f64, floor: (f64, f64)) -> f64 {
+        let step = width / f64::from(CRAWL_SIDE_DISTANCE_PIECES);
+        let coupled = coupled_bend(self.speed, self.accel, floor.1, width);
+        let (speed_sq, accel) = (self.speed * self.speed, self.accel);
+        (0..CRAWL_SIDE_DISTANCE_PIECES)
+            .map(|piece| {
+                let near = f64::from(piece) * step;
+                let far = if piece + 1 == CRAWL_SIDE_DISTANCE_PIECES {
+                    width
+                } else {
+                    f64::from(piece + 1) * step
+                };
+                let weight = SideWeight::at_width((near, far), width, floor);
+                let speed = libm::sqrt(speed_sq + 2.0 * accel * far).min(self.fastest);
+                let cubed = speed * speed * speed;
+                let bend = if weight.bend.1 == 0.0 {
+                    0.0
+                } else {
+                    weight.bend_scale.1 * (weight.bend.1 * cubed).min(coupled)
+                };
+                (weight.fold.1 * cubed).max(bend) + 3.0 * weight.slope.1 * speed * accel
+            })
+            .fold(0.0, f64::max)
+    }
+}
+
+/// The floor range `floor` within a side `width` wide, in geometric pieces
+/// ([`CRAWL_SIDE_FLOOR_PIECES`]) down to [`CRAWL_SIDE_FLOOR_SHARE_MIN`] of
+/// the side and one more to its least floor; a single floor is one piece.
+fn floor_pieces(floor: (f64, f64), width: f64) -> Vec<(f64, f64)> {
+    let most = floor.1.min(width);
+    let least = floor.0.min(most);
+    if least == most {
+        return vec![(least, most)];
+    }
+    let split_from = (CRAWL_SIDE_FLOOR_SHARE_MIN * width).clamp(least, most);
+    let ratio = libm::pow(most / split_from, 1.0 / f64::from(CRAWL_SIDE_FLOOR_PIECES));
+    let edge = |piece: i32| match piece {
+        0 => split_from,
+        CRAWL_SIDE_FLOOR_PIECES => most,
+        _ => (split_from * libm::pow(ratio, f64::from(piece))).min(most),
+    };
+    let mut pieces = Vec::with_capacity(CRAWL_SIDE_FLOOR_PIECES as usize + 1);
+    if least < split_from {
+        pieces.push((least, split_from));
+    }
+    pieces.extend((0..CRAWL_SIDE_FLOOR_PIECES).map(|piece| {
+        let (lo, hi) = (edge(piece), edge(piece + 1));
+        (lo.min(hi), hi)
+    }));
+    pieces
+}
+
+/// `σ̇³·β` at most over a side `width` wide whose floor is at most
+/// `floor`: the floor's bend `β = f̃²/(d² + f̃²)^{3/2}`, `f̃ = min(f, w)`,
+/// times the cube of the path speed at a distance `d` from a crawl at
+/// `v_c` with the path acceleration within `A` between, `σ̇² ≤ v_c² + 2A·d`.
+/// With `x = d/f̃`, `σ̇³·β ≤ ((q + 2A·f̃·x)/(1 + x²))^{3/2}/f̃`, `q = v_c²`,
+/// and `(q + 2A·f̃·x)/(1 + x²)` peaks over `x` at `(q + √(q² + 4A²f̃²))/2`,
+/// which rises with `q`. A crawl floor `f = v_c²/a ≤ w` with `a ≤ A` keeps
+/// `q ≤ A·f̃`, so the bound is `(φ·A·f̃)^{3/2}/f̃ = φ^{3/2}·A^{3/2}·√f̃`, `φ`
+/// the golden ratio, rising with the floor; where the side caps the floor,
+/// `f̃ = w` and `q ≤ speed²`, `speed` at least the crawl's. With no floor
+/// at all `β` vanishes.
+#[must_use]
+pub fn coupled_bend(speed: f64, accel: f64, floor: f64, width: f64) -> f64 {
+    let kept = floor.min(width);
+    if kept == 0.0 {
+        return 0.0;
+    }
+    let level = accel * kept;
+    let q = if floor >= width {
+        level.max(speed * speed)
+    } else {
+        level
+    };
+    let peak = 0.5 * (q + libm::hypot(q, 2.0 * level));
+    peak * libm::sqrt(peak) / kept
+}
+
+fn crawl_side_grid(step: i32) -> f64 {
+    CRAWL_SIDE_GRID_UNIT_MM * libm::exp2(f64::from(step) / CRAWL_SIDE_GRID_STEPS_PER_DOUBLING)
+}
+
+/// The first step of the crawl side grid past `width`.
+fn crawl_side_grid_step_past(width: f64) -> i32 {
+    let mut step = (libm::log2(width / CRAWL_SIDE_GRID_UNIT_MM)
+        * CRAWL_SIDE_GRID_STEPS_PER_DOUBLING)
+        .floor() as i32;
+    while crawl_side_grid(step) <= width {
+        step += 1;
+    }
+    while crawl_side_grid(step - 1) > width {
+        step -= 1;
+    }
+    step
+}
+
+/// The width a crawl side is laid at: its leaders' `reach` where the
+/// rebuild `fits` it, else the first width of the side grid past the reach
+/// it fits; `None` where none up to [`CRAWL_SIDE_WIDEST_MM`] does. Whoever
+/// reads the leaders within looser bounds, and so finds the rebuild
+/// fitting at fewer widths, never picks a narrower side: every grid width
+/// it fits at, a tighter reading fits at too.
+#[must_use]
+pub fn crawl_side_width(reach: f64, mut fits: impl FnMut(f64) -> bool) -> Option<f64> {
+    assert!(
+        reach > 0.0 && reach.is_finite(),
+        "a crawl side is asked for past a reach of {reach} mm"
+    );
+    if fits(reach) {
+        return Some(reach);
+    }
+    (crawl_side_grid_step_past(reach)..)
+        .map(crawl_side_grid)
+        .take_while(|&width| width <= CRAWL_SIDE_WIDEST_MM)
+        .find(|&width| fits(width))
+}
+
+/// The widest width of the crawl side grid ([`crawl_side_width`]) past
+/// `reach` and within `limit`, `None` where the grid has none between.
+#[must_use]
+pub fn widest_crawl_side_within(reach: f64, limit: f64) -> Option<f64> {
+    if limit <= reach {
+        return None;
+    }
+    let past_limit = crawl_side_grid_step_past(limit.min(CRAWL_SIDE_WIDEST_MM));
+    let widest = crawl_side_grid(past_limit - 1);
+    (widest > reach).then_some(widest)
 }
 
 #[cfg(test)]

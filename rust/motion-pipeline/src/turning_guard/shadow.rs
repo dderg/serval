@@ -350,8 +350,7 @@ impl CellMotion {
 
 /// What the advance asks of the extruder's motor at most: `r·(σ̈ + k·σ⃛)`
 /// plus the advance's curvature `c·(r·σ̈)²`, with `σ̈ = a·v̂` and
-/// `σ⃛ = j·v̂ + a⊥²/|v|`, the turning term never negative; inside advance
-/// valleys of weight `Φ`, `r·(σ̈ + k·(Φ·σ⃛ + 3Φ′·σ̇·σ̈ + Φ″·σ̇³))`.
+/// `σ⃛ = j·v̂ + a⊥²/|v|`, the turning term never negative.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct AdvanceDemand {
     pub ratio: f64,
@@ -359,51 +358,13 @@ pub(super) struct AdvanceDemand {
     pub curvature_s2_per_mm: f64,
 }
 
-/// What the advance valleys around a cell weigh the advance by: their
-/// weights' product `Φ` within `[weight_floor, 1]`, `|Φ′·σ̇|` within
-/// `rebuild` and `Φ″·σ̇³` within `[−fold, bend]`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct ValleyRead {
-    pub weight_floor: f64,
-    pub rebuild: f64,
-    pub fold: f64,
-    pub bend: f64,
-}
-
-impl ValleyRead {
-    pub const NONE: Self = Self {
-        weight_floor: 1.0,
-        rebuild: 0.0,
-        fold: 0.0,
-        bend: 0.0,
-    };
-}
-
 impl AdvanceDemand {
     /// The demand with `σ̈` within `accel`, `j·v̂` within `jerk` and the
     /// turning term within `[0, turning]`.
     pub fn of(&self, accel: (f64, f64), jerk: (f64, f64), turning: f64) -> f64 {
-        self.weighted(accel, jerk, turning, &ValleyRead::NONE)
-    }
-
-    /// [`Self::of`] read through the advance valleys `valley`.
-    pub fn weighted(
-        &self,
-        accel: (f64, f64),
-        jerk: (f64, f64),
-        turning: f64,
-        valley: &ValleyRead,
-    ) -> f64 {
-        let jerk_most = jerk.1 + turning;
-        let weighted = (
-            jerk.0.min(valley.weight_floor * jerk.0),
-            jerk_most.max(valley.weight_floor * jerk_most),
-        );
-        let steepest = accel.0.abs().max(accel.1.abs());
-        let rebuild = 3.0 * valley.rebuild * steepest;
-        let least = accel.0 + self.slope_s * (weighted.0 - rebuild - valley.fold);
-        let most = accel.1 + self.slope_s * (weighted.1 + rebuild + valley.bend);
-        let base = self.ratio * steepest;
+        let least = accel.0 + self.slope_s * jerk.0;
+        let most = accel.1 + self.slope_s * (jerk.1 + turning);
+        let base = self.ratio * accel.0.abs().max(accel.1.abs());
         self.ratio * least.abs().max(most.abs()) + self.curvature_s2_per_mm * base * base
     }
 

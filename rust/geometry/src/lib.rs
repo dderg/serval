@@ -31,10 +31,11 @@ pub use frontend::{
     line_move, scv_from_corner_deviation,
 };
 pub use ratio_ramp::{
-    ADVANCE_VALLEY_SPEED_MM_S, AdvanceValley, RATIO_RAMP_ENVELOPE_SLOPE, RATIO_RAMP_MAX_TIME_S,
-    RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep, SideWeight, TURNAROUND_SPEED_TIME_S,
-    VALLEY_RAMP_TIME_S, ValleyKind, crawl_floor, leader_reach, rest_room_reach_mm, turns_around,
-    valley_reach, widest_crawl_reach,
+    ADVANCE_VALLEY_SPEED_MM_S, AdvanceValley, CRAWL_SIDE_WIDEST_MM, CrawlSide,
+    RATIO_RAMP_ENVELOPE_SLOPE, RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule,
+    RatioStep, SideWeight, TURNAROUND_SPEED_TIME_S, VALLEY_LEAD_BUDGET_S, VALLEY_RAMP_TIME_S,
+    ValleyKind, coupled_bend, crawl_floor, crawl_side_width, leader_reach, rest_room_reach_mm,
+    turns_around, valley_reach, widest_crawl_reach, widest_crawl_side_within,
 };
 pub use segment::{CubicSegment, FollowerDemand, SourceRange};
 pub use shaped_corner::ShapedCorners;

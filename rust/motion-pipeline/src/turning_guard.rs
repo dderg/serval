@@ -3,8 +3,8 @@ use std::collections::VecDeque;
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{CurvatureProfile, Segment};
 use geometry::{
-    BrakeMove, ExtrusionBudget, Move, MoveVelocity, ScalarLaw, VelocityError, VelocityPlanParams,
-    brake_horizon, brake_move, replan_span, seam_requires_stop,
+    BrakeMove, ExtrusionBudget, Move, MoveVelocity, ScalarLaw, VALLEY_LEAD_BUDGET_S, VelocityError,
+    VelocityPlanParams, brake_horizon, brake_move, replan_span, seam_requires_stop,
 };
 use trajectory::AxisChainSet;
 
@@ -17,10 +17,9 @@ mod valley;
 
 use screen::{MoveSummary, Read, ShapedBox};
 use shadow::{
-    AdvanceDemand, CellMotion, FollowerKernels, GridSample, PlannedGrid, Ride, ValleyRead,
-    shaped_at,
+    AdvanceDemand, CellMotion, FollowerKernels, GridSample, PlannedGrid, Ride, shaped_at,
 };
-use valley::{CellBounds, CellTrack, Crawl, FitMiss, Slot, VALLEY_LEAD_BUDGET_S};
+use valley::{CellBounds, CellTrack, Crawl, FitMiss, Slot};
 
 /// The guard's coarsest grid step: the planned motion is sampled, and the
 /// shaped motion bounded, every this many seconds or finer.
@@ -163,19 +162,33 @@ struct Follower {
 }
 
 /// What a move's cells are checked against: its advance, its extruder's
-/// caps, the planned moves its stretch reads, and the advance valleys that
-/// may reach it.
+/// caps, the planned moves its stretch reads, and the room crawl valley
+/// sides that may reach it leave for their rebuilds.
 struct CellCheck<'a> {
     demand: AdvanceDemand,
     caps: &'a geometry::ExtruderCaps,
     nearby: &'a [MoveSummary],
-    valleys: Option<&'a Valleys>,
+    reserves: &'a [Reservation],
+}
+
+/// The follower acceleration a crawl valley side's rebuild may ask over
+/// the guard's grid cells `cells`, `k·r·`[`valley::Reserve::rebuild`] at
+/// the largest ratio laid over the planned time `window` its kernels read.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Reservation {
+    cells: (i64, i64),
+    asked: f64,
+    window: (f64, f64),
 }
 
 impl CellCheck<'_> {
     /// The binding of the grid cell `n` between the samples `from` and
-    /// `to`, `None` where its demand fits; the valleys are read for the
-    /// guard's grid cell `valley_cell` holding it.
+    /// `to`, `None` where its demand fits. Within a crawl valley side,
+    /// read for the guard's grid cell `valley_cell` holding it, the
+    /// advance reads `Φ·σ⃛` with the weight `Φ` anywhere in `[0, 1]`, and
+    /// the room the side's rebuild needs is added; a binding there backs
+    /// off the moves the side reads too, whose acceleration the rebuild
+    /// grows with.
     fn asks(
         &self,
         kernels: &FollowerKernels,
@@ -183,7 +196,6 @@ impl CellCheck<'_> {
         to: &shadow::ShapedSample,
         n: i64,
         valley_cell: i64,
-        coarse_h: f64,
     ) -> Option<Check> {
         let h = kernels.h;
         let (back, ahead) = kernels.sample_span();
@@ -196,33 +208,42 @@ impl CellCheck<'_> {
                 .filter(|s| s.t1 > read.0 && s.t0 < read.1),
         );
         let jerk_gain = self.caps.path_jerk_gain(reach.axes) * reach.accel;
-        let valley = self.valleys.map_or(ValleyRead::NONE, |valleys| {
-            valley::read(
-                &valleys.crawls,
-                &valleys.track,
-                valley_cell,
-                (motion.speed_floor.max(0.0), motion.speed_ceiling),
-                coarse_h,
-                valleys.fit,
-            )
-        });
-        let asked = AdvanceDemand {
+        let jerk = (
+            motion.tangential_jerk.0.max(-jerk_gain),
+            motion.tangential_jerk.1.min(jerk_gain),
+        );
+        let demand = AdvanceDemand {
             ratio: self.demand.ratio.min(reach.ratio),
             ..self.demand
-        }
-        .weighted(
-            motion.tangential_accel,
+        };
+        let sides = self
+            .reserves
+            .iter()
+            .filter(|side| side.cells.0 <= valley_cell && valley_cell <= side.cells.1);
+        let (asked, window) = sides.fold(
             (
-                motion.tangential_jerk.0.max(-jerk_gain),
-                motion.tangential_jerk.1.min(jerk_gain),
+                demand.of(motion.tangential_accel, jerk, motion.turning_ceiling()),
+                read,
             ),
-            motion.turning_ceiling(),
-            &valley,
+            |(asked, window), side| {
+                let weighted = demand.of(
+                    motion.tangential_accel,
+                    (
+                        jerk.0.min(0.0),
+                        (jerk.1 + motion.turning_ceiling()).max(0.0),
+                    ),
+                    0.0,
+                );
+                (
+                    asked.max(weighted + side.asked),
+                    (window.0.min(side.window.0), window.1.max(side.window.1)),
+                )
+            },
         );
         (asked > self.caps.max_accel_mm_s2).then_some(Check::Binds(Binding {
             cell: n as f64 * h,
-            from: read.0,
-            to: read.1,
+            from: window.0,
+            to: window.1,
             demand: asked,
             max_accel: self.caps.max_accel_mm_s2,
             asked: Asked::Accel,
@@ -486,10 +507,19 @@ impl TurningGuard {
             self.valleys.track.push(n, bounds, h, fit);
             self.valleys.scanned += 1;
         }
-        if self.entries.closed && self.valleys.scanned >= last_cell {
+        let all = self.entries.closed && self.valleys.scanned >= last_cell;
+        if all {
             if let Some(start) = self.valleys.run.take() {
-                return self.close_run(start, last_cell - 1);
+                if let Some(binding) = self.close_run(start, last_cell - 1) {
+                    return Some(binding);
+                }
             }
+        }
+        let Valleys {
+            track, crawls, fit, ..
+        } = &mut self.valleys;
+        for crawl in crawls.iter_mut().filter(|crawl| crawl.after.is_none()) {
+            crawl.resolve_after(track, all, h, *fit);
         }
         None
     }
@@ -565,12 +595,13 @@ impl TurningGuard {
     }
 
     /// Closes the run of crawling cells `start..=end` into a crawl, the
-    /// one valley the projection lays across the crawls along it. Where
-    /// its valley's side may reach back past [`VALLEY_LEAD_BUDGET_S`] of
-    /// motion, the run is scanned again after the back-off it returns,
-    /// which lowers the budgets its kernels read and with them the rate
-    /// the side's width grows with; where even a crawl at the fit's
-    /// tolerance of a rate would, it fails loudly.
+    /// one valley the projection lays across the crawls along it, with
+    /// room left for its before side ([`Crawl::found`]). Where that side
+    /// may reach back past [`VALLEY_LEAD_BUDGET_S`] of motion, the run is
+    /// scanned again after the back-off it returns, which lowers the
+    /// budgets its kernels read and with them the rate the side's width
+    /// grows with; where even a crawl at the fit's tolerance of a rate
+    /// would, it fails loudly.
     fn close_run(&mut self, start: i64, end: i64) -> Option<Binding> {
         let h = self.h();
         let (back, ahead) = self.span;
@@ -584,39 +615,32 @@ impl TurningGuard {
         let track = &self.valleys.track;
         let slot = Slot::over(track, (start, end), fit)
             .expect("turning guard: a run of crawling cells holds a cell the leaders may crawl in");
-        let mut crawl = Crawl { slot, line };
         let table_start = (from <= VALLEY_LEAD_BUDGET_S).then_some(-1);
-        match crawl.before_side(&self.valleys.track, table_start, h, fit) {
-            Ok(()) => {
-                if let Some(last) = self.valleys.crawls.last() {
-                    crawl
-                        .slot
-                        .widen_by_merge(&last.slot, &self.valleys.track, h, fit);
-                }
+        match Crawl::found(slot, line, track, table_start, h, fit) {
+            Ok(crawl) => {
                 self.valleys.crawls.push(crawl);
                 None
             }
             Err(overreach) => {
                 self.valleys.scanned = start;
                 self.valleys.track.truncate_from(start);
-                let binding = Binding {
+                if overreach.width_at_rest > overreach.covered {
+                    ValleyStuck {
+                        crawl: from,
+                        line,
+                        speed: slot.speed,
+                        overreach,
+                    }
+                    .fail();
+                }
+                Some(Binding {
                     cell: from,
                     from: from - back as f64 * h,
                     to: to + ahead as f64 * h,
                     demand: overreach.width,
                     max_accel: overreach.covered,
                     asked: Asked::ValleySide,
-                };
-                if overreach.width_at_rest > overreach.covered {
-                    ValleyStuck {
-                        crawl: from,
-                        line,
-                        speed: crawl.slot.speed,
-                        overreach,
-                    }
-                    .fail();
-                }
-                Some(binding)
+                })
             }
         }
     }
@@ -651,15 +675,19 @@ impl TurningGuard {
         let first = ((timing.t0 / h).floor() as i64)
             .max(self.entries.unproven[index].expect("turning guard: checking a proven move"))
             .min(last);
-        let valleys = &self.valleys;
-        let near_a_crawl = first < last
-            && valleys
-                .crawls
-                .iter()
-                .any(|crawl| crawl.reaches(&valleys.track, (first, last - 1), h, valleys.fit));
+        let crawls = &self.valleys.crawls;
+        if crawls
+            .iter()
+            .any(|crawl| crawl.after.is_none() && crawl.cells().0 < last)
+        {
+            return Check::NotReady;
+        }
+        let reserves: Vec<Reservation> = (first < last)
+            .then(|| self.reservations(&caps, (first, last - 1)))
+            .unwrap_or_default();
         let window = (timing.t0 - back as f64 * h, timing.t1() + ahead as f64 * h);
         let nearby: Vec<MoveSummary> = self.summaries_over(window).collect();
-        if !near_a_crawl
+        if reserves.is_empty()
             && screen::passes(
                 &follower.coarse,
                 nearby.iter().copied(),
@@ -674,12 +702,12 @@ impl TurningGuard {
             demand,
             caps: &caps,
             nearby: &nearby,
-            valleys: near_a_crawl.then_some(valleys),
+            reserves: &reserves,
         };
         let mut from = expect_sample(&follower.coarse, &self.grid, first);
         for n in first..last {
             let to = expect_sample(&follower.coarse, &self.grid, n + 1);
-            if cell.asks(&follower.coarse, &from, &to, n, n, h).is_some() {
+            if cell.asks(&follower.coarse, &from, &to, n, n).is_some() {
                 if let Some(binds) = self.zoom(follower, &cell, n) {
                     return binds;
                 }
@@ -708,7 +736,7 @@ impl TurningGuard {
         let mut from = expect_sample(fine, &grid, n * GRID_ZOOM);
         for m in n * GRID_ZOOM..(n + 1) * GRID_ZOOM {
             let to = expect_sample(fine, &grid, m + 1);
-            if let Some(binds) = cell.asks(fine, &from, &to, m, n, self.h()) {
+            if let Some(binds) = cell.asks(fine, &from, &to, m, n) {
                 return Some(binds);
             }
             from = to;
@@ -967,13 +995,14 @@ impl TurningGuard {
         self.grid.set_cell_accel(straddled, cell_accel);
     }
 
-    /// Forgets the cells scanned from `n` on, and the crawls among them.
+    /// Forgets the cells scanned from `n` on, and the crawls whose sides
+    /// may reach them, whose room reads them.
     fn forget_crawls_from(&mut self, n: i64) {
         let valleys = &mut self.valleys;
         let rescan_from = valleys
             .crawls
             .iter()
-            .filter(|crawl| crawl.cells().1 >= n)
+            .filter(|crawl| crawl.reach().1 >= n)
             .map(|crawl| crawl.cells().0)
             .chain(valleys.run.take())
             .fold(n, i64::min);
@@ -982,7 +1011,7 @@ impl TurningGuard {
         valleys.track.truncate_from(valleys.scanned);
     }
 
-    /// Forgets the crawls whose valleys reach no cell from `first_cell` on,
+    /// Forgets the crawls whose sides reach no cell from `first_cell` on,
     /// the first any held move's check reads, and the cells neither they
     /// nor a crawl still to find read: a crawl found again after a re-plan
     /// starts no earlier than the first held move, and reads back the
@@ -995,18 +1024,51 @@ impl TurningGuard {
             crawls,
             scanned,
             run,
-            fit,
+            ..
         } = &mut self.valleys;
-        if track.end() > track.base() {
-            let probe = first_cell.min(track.end() - 1);
-            crawls.retain(|crawl| crawl.reaches(track, (probe, i64::MAX), h, *fit));
-        }
+        crawls.retain(|crawl| crawl.reach().1 >= first_cell);
         let budget_cells = (VALLEY_LEAD_BUDGET_S / h).ceil() as i64;
         let keep = crawls.iter().map(|crawl| crawl.cells().0).chain(*run).fold(
             first_cell.min(*scanned) - ahead - 3 - budget_cells,
             i64::min,
         );
         track.trim_before(keep);
+    }
+
+    /// The room the crawl valley sides that may reach the cells
+    /// `from..=to` leave for their rebuilds, for the follower `caps`
+    /// describe: each at the largest ratio laid over the planned time its
+    /// cells' kernels read.
+    fn reservations(
+        &self,
+        caps: &geometry::ExtruderCaps,
+        (from, to): (i64, i64),
+    ) -> Vec<Reservation> {
+        let h = self.h();
+        let (back, ahead) = self.span;
+        self.valleys
+            .crawls
+            .iter()
+            .filter(|crawl| crawl.reaches((from, to)))
+            .flat_map(|crawl| std::iter::once(crawl.before).chain(crawl.after))
+            .filter(|side| side.cells.0 <= to && from <= side.cells.1)
+            .map(|side| {
+                let window = (
+                    (side.cells.0 - back) as f64 * h,
+                    (side.cells.1 + 1 + ahead) as f64 * h,
+                );
+                let ratio = self
+                    .summaries_over(window)
+                    .filter_map(|summary| summary.ratio)
+                    .filter(|&(axis, _)| axis == caps.axis_index)
+                    .fold(0.0_f64, |most, (_, ratio)| most.max(ratio));
+                Reservation {
+                    cells: side.cells,
+                    asked: caps.advance_slope_s * ratio * side.rebuild,
+                    window,
+                }
+            })
+            .collect()
     }
 
     /// Samples the planned motion on the grid as far as it has arrived,

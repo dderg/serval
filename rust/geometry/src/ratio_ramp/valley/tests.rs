@@ -1,7 +1,12 @@
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
 
-use super::{AdvanceValley, SideWeight, ValleyKind, crawl_floor, valley_reach};
+use super::{
+    AdvanceValley, CrawlSide, SideWeight, ValleyKind, coupled_bend, crawl_floor, crawl_side_width,
+    turns_around, valley_reach, widest_crawl_side_within,
+};
+
+const GOLDEN_RATIO: f64 = 1.618_033_988_749_895;
 
 /// A range around `value` reaching `below` and `above` of it, never under
 /// `least`.
@@ -16,6 +21,45 @@ fn contains((lo, hi): (f64, f64), value: f64, what: &str) -> Result<(), TestCase
         "{what} {value} lies outside [{lo}, {hi}]"
     );
     Ok(())
+}
+
+fn crawl_valley(width: f64, floor: f64) -> AdvanceValley {
+    AdvanceValley {
+        start: 10.0,
+        end: 10.0,
+        before: width,
+        after: width,
+        floor_before: floor,
+        floor_after: floor,
+        kind: ValleyKind::Crawl,
+    }
+}
+
+/// The leaders leaving a crawl at `speed`, their path acceleration held
+/// within `accel` in `pieces` stretches of `durations` at `shares` of it,
+/// never past `fastest` nor back through rest; the most
+/// `|W″·ṡ³ + 3W′·ṡ·s̈|` they meet on the valley's after side.
+fn realized_rebuild(
+    valley: &AdvanceValley,
+    (speed, accel, fastest): (f64, f64, f64),
+    pieces: &[(f64, f64)],
+) -> f64 {
+    let steps_per_piece = 400;
+    let (mut s, mut v) = (0.0_f64, speed);
+    let mut most = 0.0_f64;
+    for &(share, duration) in pieces {
+        let dt = duration / f64::from(steps_per_piece);
+        for _ in 0..steps_per_piece {
+            let rate = (share * accel).clamp(-v / dt, (fastest - v) / dt);
+            let (weight, slope, curvature) = valley.weight(valley.end + s);
+            if weight < 1.0 {
+                most = most.max((curvature * v * v * v + 3.0 * slope * v * rate).abs());
+            }
+            s += v * dt + 0.5 * rate * dt * dt;
+            v = (v + rate * dt).clamp(0.0, fastest);
+        }
+    }
+    most
 }
 
 proptest! {
@@ -40,14 +84,7 @@ proptest! {
     ) {
         let width = valley_reach(speed, rate);
         let floor = crawl_floor(speed, rate);
-        let valley = AdvanceValley {
-            start: 10.0,
-            end: 10.0,
-            before: width,
-            after: width,
-            floor,
-            kind: ValleyKind::Crawl,
-        };
+        let valley = crawl_valley(width, floor);
         let distance = share * width;
         let s = if after { 10.0 + distance } else { 10.0 - distance };
         let (weight, slope, curvature) = valley.weight(s);
@@ -64,4 +101,112 @@ proptest! {
         );
         contains(curvature_bounds, curvature, "the curvature")?;
     }
+
+    /// `σ̇³·β` stays within [`coupled_bend`] wherever the speed builds from
+    /// the crawl under the side's acceleration, the floor the crawl's own
+    /// or a wider one within the range.
+    #[test]
+    fn the_coupled_bend_bound_holds_wherever_the_speed_builds_from_the_crawl(
+        accel in 1.0f64..60_000.0,
+        rate_share in 1e-3f64..1.0,
+        speed in 0.0f64..2.0,
+        width in 1e-4f64..20.0,
+        log_distance in -8.0f64..6.0,
+        floor_widening in 1.0f64..50.0,
+    ) {
+        let floor = crawl_floor(speed, rate_share * accel);
+        prop_assume!(floor > 0.0);
+        let range = (floor, floor * floor_widening);
+        let kept = (floor * floor_widening).min(width);
+        let distance = kept * libm::exp(log_distance);
+        let speed_sq = speed * speed + 2.0 * accel * distance;
+        let spread_sq = distance * distance + kept * kept;
+        let asked = speed_sq * speed_sq.sqrt() * kept * kept / (spread_sq * spread_sq.sqrt());
+        let bound = coupled_bend(speed, accel, range.1, width);
+        prop_assert!(
+            asked <= bound * (1.0 + 1e-9),
+            "σ̇³β {asked} past the coupled bound {bound}"
+        );
+    }
+
+    /// The leaders leaving a crawl however they please within the side's
+    /// speed and acceleration never meet more rebuild than
+    /// [`CrawlSide::rebuild`] bounds, at the width the rule lays or wider.
+    #[test]
+    fn a_crawl_side_bounds_the_rebuild_the_leaders_meet_over_it(
+        speed in 0.0f64..2.0,
+        accel in 1.0f64..20_000.0,
+        rate_share in 1e-3f64..1.0,
+        fastest_over in 0.0f64..200.0,
+        widening in 1.0f64..40.0,
+        pieces in prop::collection::vec((-1.0f64..1.0, 1e-4f64..0.02), 1..6),
+    ) {
+        let rate = rate_share * accel;
+        let floor = crawl_floor(speed, rate);
+        let width = valley_reach(speed, rate) * widening;
+        let fastest = speed + fastest_over;
+        let side = CrawlSide { speed, accel, fastest, floor: (floor, floor) };
+        let realized = realized_rebuild(&crawl_valley(width, floor), (speed, accel, fastest), &pieces);
+        let bound = side.rebuild(width);
+        prop_assert!(
+            realized <= bound * (1.0 + 1e-6),
+            "the leaders meet a rebuild of {realized}, past its bound {bound}"
+        );
+    }
+
+    /// The width the rule lays fits the room, and a side read within
+    /// looser bounds never lays a narrower one.
+    #[test]
+    fn a_crawl_side_is_laid_where_its_rebuild_fits_and_looser_bounds_never_narrow_it(
+        speed in 0.0f64..2.0,
+        accel in 1.0f64..20_000.0,
+        rate_share in 1e-3f64..1.0,
+        fastest_over in 0.0f64..200.0,
+        room in 10.0f64..1e6,
+        loosen in prop::array::uniform4(0.0f64..1.0),
+        limit_share in 1.0f64..200.0,
+    ) {
+        let rate = rate_share * accel;
+        let floor = crawl_floor(speed, rate);
+        let reach = valley_reach(speed, rate);
+        let tight = CrawlSide { speed, accel, fastest: speed + fastest_over, floor: (floor, floor) };
+        let loose = CrawlSide {
+            speed: speed + loosen[0] * (2.0 - speed),
+            accel: accel * (1.0 + loosen[1]),
+            fastest: tight.fastest * (1.0 + loosen[2]) + loosen[0] * 2.0,
+            floor: (if turns_around(speed, rate) { 0.0 } else { floor * (1.0 - loosen[3]) }, f64::INFINITY),
+        };
+        let loose_reach = valley_reach(loose.speed, loose.accel).max(reach);
+        let width = crawl_side_width(reach, |width| tight.rebuild(width) <= room);
+        if let Some(width) = width {
+            prop_assert!(tight.rebuild(width) <= room, "laid {width} where its rebuild does not fit");
+        }
+        if let Some(grid) = widest_crawl_side_within(loose_reach, loose_reach * limit_share) {
+            if loose.rebuild(grid) <= room {
+                let width = width.expect("a side fitting under looser bounds fits under tighter ones");
+                prop_assert!(width <= grid, "laid {width}, past the {grid} a looser read fits at");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_coupled_bend_bound_is_the_golden_ratio_to_the_three_halves_where_the_floor_bends() {
+    let (accel, floor) = (4000.0, 3.8e-3);
+    let bound = coupled_bend(1.9, accel, floor, 0.18);
+    let expected = GOLDEN_RATIO.powf(1.5) * accel.powf(1.5) * floor.sqrt();
+    assert!(
+        (bound - expected).abs() <= 1e-9 * expected,
+        "the coupled bound {bound} is not φ^1.5·A^1.5·√f = {expected}"
+    );
+}
+
+#[test]
+fn a_crawl_side_wider_than_its_reach_lies_on_the_grid() {
+    let reach = 0.05;
+    let width = crawl_side_width(reach, |width| width >= 0.3).expect("a wide enough side fits");
+    let widest =
+        widest_crawl_side_within(reach, width).expect("the grid has widths past the reach");
+    assert_eq!(widest, width, "the laid width is a grid width");
+    assert!(width >= 0.3 && width < 0.3 * 2.0_f64.powf(1.0 / 8.0));
 }

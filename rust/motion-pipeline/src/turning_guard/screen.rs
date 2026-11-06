@@ -110,15 +110,9 @@ pub(super) fn passes(
     let shaped = ShapedBox::over(kernels, window);
     let speed = shaped.speed_floor.max(ADVANCE_VALLEY_SPEED_MM_S);
     let accel_ceiling = norm(shaped.strongest);
-    let cross_sq: f64 = [(0, 1), (0, 2), (1, 2)]
-        .iter()
-        .map(|&(i, j)| {
-            let term =
-                shaped.strongest[i] * shaped.fastest[j] + shaped.strongest[j] * shaped.fastest[i];
-            term * term
-        })
-        .sum();
-    let turning = (cross_sq / (speed * speed * speed)).min(accel_ceiling * accel_ceiling / speed);
+    let cross = shaped.cross_ceiling();
+    let turning =
+        (cross * cross / (speed * speed * speed)).min(accel_ceiling * accel_ceiling / speed);
     demand.within(
         accel_ceiling,
         jerk_gain(shaped.moves_on) * shaped.accel_bound,
@@ -186,6 +180,20 @@ impl ShapedBox {
             accel_bound,
             moves_on,
         }
+    }
+
+    /// `|a × v|` at most: each component `a_i·v_j − a_j·v_i` within
+    /// `strongest_i·fastest_j + strongest_j·fastest_i`.
+    pub fn cross_ceiling(&self) -> f64 {
+        let cross_sq: f64 = [(0, 1), (0, 2), (1, 2)]
+            .iter()
+            .map(|&(i, j)| {
+                let term =
+                    self.strongest[i] * self.fastest[j] + self.strongest[j] * self.fastest[i];
+                term * term
+            })
+            .sum();
+        cross_sq.sqrt()
     }
 }
 

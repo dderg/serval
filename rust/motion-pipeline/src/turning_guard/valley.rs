@@ -1,22 +1,12 @@
 use std::collections::VecDeque;
 
-use geometry::{ADVANCE_VALLEY_SPEED_MM_S, SideWeight, turns_around, valley_reach};
+use geometry::{
+    ADVANCE_VALLEY_SPEED_MM_S, CrawlSide, VALLEY_LEAD_BUDGET_S, turns_around, valley_reach,
+    widest_crawl_side_within,
+};
 
 use super::screen::ShapedBox;
-use super::shadow::{CellMotion, ValleyRead, norm};
-
-/// The longest a crawl valley's side may take the leaders before its
-/// crawl: the share of the pump's lead (`MAX_LEAD_SECS`, 2 s, in
-/// motion-core's pump loop) the guard spends holding a move back for the
-/// valleys still to come within its reach. A move is proven once the
-/// motion this much past it has arrived; a crawl whose side would reach
-/// further back is backed off until it does not ([`Crawl::before_side`]).
-pub(super) const VALLEY_LEAD_BUDGET_S: f64 = 0.1;
-
-/// The most slots of one cell's valleys whose every subset of laid ones
-/// is weighed apart ([`weigh`]); past it each slot's weight is read as 1
-/// wherever it multiplies another's slope.
-const SUBSETS_WEIGHED_MAX_SLOTS: usize = 6;
+use super::shadow::{CellMotion, norm};
 
 /// How far the fitted leaders the follower projection reads its valleys
 /// off may stray from the shaped motion the guard bounds: in position by
@@ -46,25 +36,31 @@ impl FitMiss {
     }
 }
 
-/// The shaped motion's speed and acceleration ranges across one grid cell.
+/// The shaped motion's speed and acceleration ranges across one grid
+/// cell, and how fast its heading turns at most, `|a × v|/|v|²`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct CellBounds {
     pub speed: (f64, f64),
     pub accel: (f64, f64),
+    pub turn: f64,
 }
 
 impl CellBounds {
     pub fn of_motion(motion: &CellMotion) -> Self {
+        let speed = (motion.speed_floor.max(0.0), motion.speed_ceiling);
         Self {
-            speed: (motion.speed_floor.max(0.0), motion.speed_ceiling),
+            speed,
             accel: (motion.accel_floor, motion.accel_ceiling),
+            turn: turn_rate(motion.cross_ceiling, motion.accel_ceiling, speed.0),
         }
     }
 
     pub fn of_box(shaped: &ShapedBox) -> Self {
+        let strongest = norm(shaped.strongest);
         Self {
             speed: (shaped.speed_floor, norm(shaped.fastest)),
-            accel: (0.0, norm(shaped.strongest)),
+            accel: (0.0, strongest),
+            turn: turn_rate(shaped.cross_ceiling(), strongest, shaped.speed_floor),
         }
     }
 
@@ -78,7 +74,18 @@ impl CellBounds {
                 self.accel.0.min(other.accel.0),
                 self.accel.1.max(other.accel.1),
             ),
+            turn: self.turn.max(other.turn),
         }
+    }
+}
+
+/// `|a × v|/|v|²` at most, with `|a × v|` within `cross`, `|a|` within
+/// `accel` and `|v|` at least `speed`.
+fn turn_rate(cross: f64, accel: f64, speed: f64) -> f64 {
+    if speed > 0.0 {
+        (cross / (speed * speed)).min(accel / speed)
+    } else {
+        f64::INFINITY
     }
 }
 
@@ -101,9 +108,9 @@ struct TrackedCell {
 }
 
 /// Sums over tracked cells: the least and most path covered; the turning
-/// `Σ A/v·h` and the speed miss's share `Σ δ²/(2(v − δ))·h` of the cells
-/// faster than twice the fit's speed miss `δ`, `Σ δ·h` of the others; and
-/// how many runs of fast cells start.
+/// `Σ |a × v|/v²·h` and the speed miss's share `Σ δ²/(2(v − δ))·h` of the
+/// cells faster than twice the fit's speed miss `δ`, `Σ δ·h` of the
+/// others; and how many runs of fast cells start.
 #[derive(Debug, Clone, Copy, Default)]
 struct Odometer {
     floor: f64,
@@ -164,12 +171,7 @@ impl CellTrack {
         let through = Odometer {
             floor: before.floor + speed * h,
             ceiling: before.ceiling + bounds.speed.1 * h,
-            turning: before.turning
-                + if fast {
-                    bounds.accel.1 / speed * h
-                } else {
-                    0.0
-                },
+            turning: before.turning + if fast { bounds.turn * h } else { 0.0 },
             stray: before.stray
                 + if fast {
                     fit.speed * fit.speed / (2.0 * (speed - fit.speed)) * h
@@ -230,9 +232,9 @@ impl CellTrack {
     /// path's over the cells `from..=to`. Where the shaped speed `v`
     /// outruns the speed miss `δ`, `|v + u| ≤ |v| + u·v̂ + |u|²/(2(|v| − δ))`
     /// and `≥ |v| + u·v̂`, and `∫u·v̂ = [e·v̂] − ∫e·dv̂/dt` with the position
-    /// miss `|e| ≤ p`: within `p·(2 + Θ)` over a run of such cells turning
-    /// `Θ ≤ ∫A/v`; elsewhere within `δ` a second. The time times `δ`
-    /// bounds it too.
+    /// miss `|e| ≤ p`: within `p·(2 + Θ)` over a run of such cells whose
+    /// heading turns `Θ = ∫|dv̂/dt| = ∫|a × v|/v²`; elsewhere within `δ` a
+    /// second. The time times `δ` bounds it too.
     pub fn drift(&self, from: i64, to: i64, h: f64, fit: FitMiss) -> f64 {
         if to < from {
             return 0.0;
@@ -250,14 +252,19 @@ impl CellTrack {
     fn strongest(&self, from: i64, to: i64) -> f64 {
         (from..=to).fold(0.0, |most: f64, n| most.max(self.get(n).accel.1))
     }
+
+    /// The largest speed across the cells `from..=to`.
+    fn fastest(&self, from: i64, to: i64) -> f64 {
+        (from..=to).fold(0.0, |most: f64, n| most.max(self.get(n).speed.1))
+    }
 }
 
 /// Where along a run of crawling cells the follower projection may lay
-/// its advance valley, and how wide: its zero stretch spans the crawls it
-/// finds there, at seams and at the legs' slowest points, all within the
-/// cells `cells`; the projection reads their speed and rate off the fitted
-/// leaders, which set the sides' width and the floor by the shared rule
-/// ([`geometry::valley_reach`], [`geometry::crawl_floor`]).
+/// its advance valley: its zero stretch spans the crawls it finds there,
+/// at seams and at the legs' slowest points, all within the cells
+/// `cells`; the projection reads their speed and rate off the fitted
+/// leaders, which set the leaders' reach, the least each side spans
+/// ([`geometry::valley_reach`]), and the floor ([`geometry::crawl_floor`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Slot {
     pub cells: (i64, i64),
@@ -313,22 +320,6 @@ impl Slot {
         slot
     }
 
-    /// Widens the slot to what the projection lays where it merges the
-    /// valley into the `last` crawl's, their sides overlapping: the after
-    /// side then as wide as the wider of the two, over either floor.
-    pub fn widen_by_merge(&mut self, last: &Self, track: &CellTrack, h: f64, fit: FitMiss) {
-        let (gap_from, gap_to) = (last.cells.1 + 1, self.cells.0 - 1);
-        let drift = track.drift(last.cells.0, self.cells.1, h, fit);
-        let apart = (track.path(gap_from, gap_to).0 - drift).max(0.0);
-        if apart < last.width.1 + self.width.1 {
-            self.width.1 = self.width.1.max(last.width.1);
-            self.floor = (
-                self.floor.0.min(last.floor.0),
-                self.floor.1.max(last.floor.1),
-            );
-        }
-    }
-
     /// The path range from a point in cell `n` to the slot's centre, the
     /// fitted leaders' odometer straying from the shaped path's by at most
     /// [`CellTrack::drift`] over the cells between.
@@ -345,184 +336,55 @@ impl Slot {
         ((least - drift).max(0.0), most + drift)
     }
 
-    /// The slot's valley read from cell `n` whose fitted speed lies within
-    /// `speed`, `None` where it cannot reach the cell. The leaders reach
-    /// the cell's speed from the crawl's within the side: `σ̇² ≤ v² + 2A·d`
-    /// with `A` the acceleration between and `d < w`, so a cell faster than
-    /// any crawl builds lies outside every side, and one it does lie in
-    /// reads a crawl at least `√(σ̇² − 2A·d)` fast, whose side is at least
-    /// that crawl's reach ([`geometry::valley_reach`]) wide.
-    fn read(
-        &self,
-        track: &CellTrack,
-        n: i64,
-        speed: (f64, f64),
-        h: f64,
-        fit: FitMiss,
-    ) -> Option<Factor> {
-        let distance = self.distance(track, n, h, fit);
-        if distance.0 >= self.width.1 {
-            return None;
+    /// The fitted leaders over the cells `cells` of one side of the slot's
+    /// valley, as its rebuild reads them ([`CrawlSide`]).
+    fn leaders(&self, track: &CellTrack, cells: (i64, i64), fit: FitMiss) -> CrawlSide {
+        CrawlSide {
+            speed: self.speed,
+            accel: track.strongest(cells.0, cells.1) + fit.accel,
+            fastest: (track.fastest(cells.0, cells.1) + fit.speed).max(self.speed),
+            floor: self.floor,
         }
-        let strongest = track.strongest(n.min(self.cells.0), n.max(self.cells.1)) + fit.accel;
-        let crawl_sq = speed.0 * speed.0 - 2.0 * strongest * distance.1.min(self.width.1);
-        if crawl_sq > self.speed * self.speed {
-            return None;
-        }
-        let narrowest = self
-            .width
-            .0
-            .max(distance.0)
-            .max(valley_reach(crawl_sq.max(0.0).sqrt(), 0.0));
-        let width = (narrowest.min(self.width.1), self.width.1);
-        let side = SideWeight::within(distance, width, self.floor);
-        let fastest = speed.1;
-        let cubed = fastest * fastest * fastest;
-        let leaving_floor = self.floor.1.min(width.1);
-        let bend = if leaving_floor == 0.0 {
-            0.0
-        } else {
-            side.bend_scale.1
-                * (side.bend.1 * cubed).min(coupled_bend(
-                    strongest,
-                    leaving_floor,
-                    self.speed,
-                    width.0,
-                    self.floor.1 > width.0,
-                ))
-        };
-        Some(Factor {
-            weight: side.weight,
-            rebuild: side.slope.1 * fastest,
-            fold: side.fold.1 * cubed,
-            bend,
-        })
     }
 }
 
-/// `σ̇³·β` at most: the floor's bend `β = f̃²/(d² + f̃²)^{3/2}` times the
-/// cube of the fitted path speed at a distance `d` from the crawl, where
-/// the path's acceleration stays within `strongest` (`A`) between. The
-/// speed there is `σ̇² ≤ v² + 2A·d` with `v` the crawl's speed; with
-/// `p = v²/(A·f̃)` and `x = d/f̃`, `σ̇³·β ≤ A^{3/2}·√f̃·((p + 2x)/(1 + x²))^{3/2}`,
-/// and `(p + 2x)/(1 + x²)` peaks over `x` at `(p + √(p² + 4))/2`. Where the
-/// weight bends over the floor `f = v²/a` itself (`f̃ = f`), `p = a/A ≤ 1`
-/// and the bound is `φ^{3/2}·A^{3/2}·√f`, `φ` the golden ratio; where the
-/// side's width `w` caps the floor, `p ≤ v²/(A·w)`. Neither a vanishing
-/// floor nor a vanishing distance makes it diverge, which their ranges
-/// alone do.
-pub(super) fn coupled_bend(
-    strongest: f64,
-    leaving_floor: f64,
-    crawl_speed: f64,
-    narrowest: f64,
-    width_caps_floor: bool,
-) -> f64 {
-    let share = if width_caps_floor {
-        (crawl_speed * crawl_speed / (strongest * narrowest)).max(1.0)
-    } else {
-        1.0
-    };
-    let peak = 0.5 * (share + (share * share + 4.0).sqrt());
-    strongest * strongest.sqrt() * leaving_floor.sqrt() * peak * peak.sqrt()
-}
-
-/// One slot's valley as a cell reads it: its weight's range, `|W′·σ̇|`,
-/// and the fold and bend `W″·σ̇³` reaches below and above zero.
+/// One side of a crawl valley as the guard leaves room for it: the widest
+/// the follower projection lays it ([`geometry::crawl_side_width`] picks a
+/// grid width no wider wherever this one fits), the cells it may reach
+/// from wherever in the run the crawl lies, and the most
+/// `|W″·ṡ³ + 3W′·ṡ·s̈|` its rebuild asks there ([`CrawlSide::rebuild`]),
+/// which an advance of slope `k` at ratio `r` turns into `k·r` times as
+/// much follower acceleration.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Factor {
-    weight: (f64, f64),
-    rebuild: f64,
-    fold: f64,
-    bend: f64,
-}
-
-/// The advance reads the product `Φ = Π W_j` of the valleys laid, any
-/// subset of the slots' (one the projection finds the path too steep to
-/// read through at): `Φ′ = Σ_j W_j′·Π_{i≠j} W_i` and
-/// `Φ″ = Σ_j W_j″·Π_{i≠j} W_i + 2·Σ_{j<k} W_j′·W_k′·Π_{i≠j,k} W_i`. Each
-/// subset is bounded with the other factors at their largest weight, and
-/// the worst subset taken; past [`SUBSETS_WEIGHED_MAX_SLOTS`] every other
-/// factor is read at 1.
-fn weigh(factors: &[Factor], speed: f64) -> ValleyRead {
-    let weight_floor = factors.iter().map(|factor| factor.weight.0).product();
-    let mut read = ValleyRead {
-        weight_floor,
-        ..ValleyRead::NONE
-    };
-    if factors.len() > SUBSETS_WEIGHED_MAX_SLOTS {
-        let read_at_one = vec![1.0; factors.len()];
-        widen_by_subset(&mut read, factors, &read_at_one, |_| true, speed);
-        return read;
-    }
-    let largest: Vec<f64> = factors.iter().map(|factor| factor.weight.1).collect();
-    for laid in 1..(1_u32 << factors.len()) {
-        widen_by_subset(
-            &mut read,
-            factors,
-            &largest,
-            |j| laid & (1 << j) != 0,
-            speed,
-        );
-    }
-    read
-}
-
-/// Widens `read` to the valleys of the subset `laid` of `factors`, the
-/// other factors of each product read at `largest`.
-fn widen_by_subset(
-    read: &mut ValleyRead,
-    factors: &[Factor],
-    largest: &[f64],
-    laid: impl Fn(usize) -> bool,
-    speed: f64,
-) {
-    let others = |skip: &[usize]| -> f64 {
-        (0..factors.len())
-            .filter(|&i| laid(i) && !skip.contains(&i))
-            .map(|i| largest[i])
-            .product()
-    };
-    let (mut rebuild, mut fold, mut bend, mut cross) = (0.0, 0.0, 0.0, 0.0);
-    for (j, factor) in factors.iter().enumerate().filter(|&(j, _)| laid(j)) {
-        let rest = others(&[j]);
-        rebuild += factor.rebuild * rest;
-        fold += factor.fold * rest;
-        bend += factor.bend * rest;
-        for (k, other) in factors
-            .iter()
-            .enumerate()
-            .skip(j + 1)
-            .filter(|&(k, _)| laid(k))
-        {
-            cross += 2.0 * factor.rebuild * other.rebuild * speed * others(&[j, k]);
-        }
-    }
-    read.rebuild = read.rebuild.max(rebuild);
-    read.fold = read.fold.max(fold + cross);
-    read.bend = read.bend.max(bend + cross);
+pub(super) struct Reserve {
+    pub width: f64,
+    pub cells: (i64, i64),
+    pub rebuild: f64,
 }
 
 /// A run of grid cells where the shaped speed may fall under the fitted
-/// leaders' crawl ([`FitMiss::crawl_speed`]), and the one valley the
-/// follower projection lays across the crawls it finds along it: it widens
-/// the last crawl valley over any crawl whose sides would overlap it.
+/// leaders' crawl ([`FitMiss::crawl_speed`]), the one valley the follower
+/// projection lays across the crawls it finds along it, and the room its
+/// sides leave for their rebuilds: the after side once the motion
+/// [`VALLEY_LEAD_BUDGET_S`] past the run is tracked.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Crawl {
     pub slot: Slot,
     /// The source line of the move the run starts in.
     pub line: u32,
+    pub before: Reserve,
+    pub after: Option<Reserve>,
 }
 
-/// Why a crawl's valley does not fit before it.
+/// Why a crawl's valley side does not fit within the
+/// [`VALLEY_LEAD_BUDGET_S`] of motion beside it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Overreach {
-    /// The widest the valley's side may be.
+    /// The widest the leaders' reach makes the side.
     pub width: f64,
-    /// The least path the leaders cover in the [`VALLEY_LEAD_BUDGET_S`]
-    /// before the crawl.
+    /// The least path the leaders cover in the budget beside the crawl.
     pub covered: f64,
-    /// The widest the side would be with the leaders' rate at the crawl
+    /// The widest the reach would be with the leaders' rate at the crawl
     /// at the fit's tolerance alone.
     pub width_at_rest: f64,
 }
@@ -532,94 +394,131 @@ impl Crawl {
         self.slot.cells
     }
 
-    /// Whether its valley may reach a cell of `from..=to`.
-    pub fn reaches(&self, track: &CellTrack, (from, to): (i64, i64), h: f64, fit: FitMiss) -> bool {
-        let slot = &self.slot;
-        let nearest = if to < slot.cells.0 {
-            to
-        } else if from > slot.cells.1 {
-            from
-        } else {
-            return true;
-        };
-        slot.distance(track, nearest, h, fit).0 < slot.width.1
+    /// The cells its sides may reach: past the run without end while the
+    /// after side waits.
+    pub fn reach(&self) -> (i64, i64) {
+        (
+            self.before.cells.0,
+            self.after.map_or(i64::MAX, |after| after.cells.1),
+        )
     }
 
-    /// Checks that its valley's side fits within the path the leaders
-    /// cover in the [`VALLEY_LEAD_BUDGET_S`] before the crawl, walking back
-    /// from its first cell until the least path covered reaches the widest
-    /// side; where the segment's table starts inside the budget, at the
-    /// start of cell `table_start + 1`, the projection narrows the side to
-    /// the path since ([`geometry::valley_reach`] taken within the table).
-    pub fn before_side(
-        &mut self,
+    /// Whether its sides may reach a cell of `from..=to`.
+    pub fn reaches(&self, (from, to): (i64, i64)) -> bool {
+        let (first, last) = self.reach();
+        first <= to && from <= last
+    }
+
+    /// The crawl over the slot, with room left for its before side: as
+    /// wide as the widest grid width the leaders' least path in the
+    /// [`VALLEY_LEAD_BUDGET_S`] before the run covers, and reaching every
+    /// cell that may lie within it of the run. The projection reaches no
+    /// further back than where the leaders last rested, nor than the
+    /// segment's table, which starts at the start of cell
+    /// `table_start + 1`; where either lies inside the budget and no grid
+    /// width fits within the path since, it may lay the side as narrow as
+    /// the leaders' reach or that path, whichever is narrower, and the room
+    /// is left for that side, the rebuild falling as the side widens.
+    pub fn found(
+        slot: Slot,
+        line: u32,
         track: &CellTrack,
         table_start: Option<i64>,
         h: f64,
         fit: FitMiss,
-    ) -> Result<(), Overreach> {
-        let (first, last) = self.slot.cells;
-        let widest = self.slot.width.1;
-        let budget_cells = (VALLEY_LEAD_BUDGET_S / h).floor() as i64;
-        let earliest = table_start.map_or(first - budget_cells, |cell| {
-            (first - budget_cells).max(cell + 1)
-        });
+    ) -> Result<Self, Overreach> {
+        let (first, last) = slot.cells;
+        let budget_from = first - (VALLEY_LEAD_BUDGET_S / h).floor() as i64;
+        let since_rest = (budget_from.max(track.base())..first)
+            .rev()
+            .find(|&n| track.get(n).speed.1 == 0.0)
+            .map(|rest| rest + 1);
+        let bound = since_rest
+            .into_iter()
+            .chain(table_start.map(|cell| cell + 1))
+            .max()
+            .filter(|&bound| bound > budget_from);
+        let earliest = bound.unwrap_or(budget_from);
         assert!(
             earliest >= track.base(),
             "turning guard: the crawl at cell {first} reads cells from {earliest} the track no \
              longer holds (from {})",
             track.base()
         );
-        let mut covered = 0.0_f64;
-        for n in (earliest..first).rev() {
-            let drift = track.drift(n, last, h, fit);
-            covered = covered.max(track.path(n, first - 1).0 - drift);
-            if covered >= widest {
-                return Ok(());
+        let covered = (earliest..first)
+            .map(|n| track.path(n, first - 1).0 - track.drift(n, last, h, fit))
+            .fold(0.0_f64, f64::max);
+        let width = match widest_crawl_side_within(slot.width.1, covered) {
+            Some(width) => width,
+            None if bound.is_some() => slot.width.0.min(covered).max(f64::MIN_POSITIVE),
+            None => {
+                return Err(Overreach {
+                    width: slot.width.1,
+                    covered,
+                    width_at_rest: valley_reach(slot.speed, fit.accel),
+                });
             }
+        };
+        let mut side_from = first;
+        while side_from > earliest && slot.distance(track, side_from - 1, h, fit).0 < width {
+            side_from -= 1;
         }
-        if let Some(cell) = table_start {
-            let drift = track.drift(cell + 1, last, h, fit);
-            let shortest = (track.path(cell + 1, first - 1).0 - drift).max(0.0);
-            let longest = track.path(cell + 1, last).1 + drift;
-            self.slot.width = (
-                self.slot.width.0.min(shortest),
-                self.slot.width.1.min(longest),
-            );
-            return Ok(());
-        }
-        Err(Overreach {
-            width: widest,
-            covered: covered.max(0.0),
-            width_at_rest: valley_reach(self.slot.speed, fit.accel),
+        let cells = (side_from, last);
+        Ok(Self {
+            slot,
+            line,
+            before: Reserve {
+                width,
+                cells,
+                rebuild: slot.leaders(track, cells, fit).rebuild(width),
+            },
+            after: None,
         })
     }
-}
 
-/// What the valleys of `crawls` weigh the advance by in cell `n`, whose
-/// shaped speed lies within `speed`. Where two may reach it, the
-/// projection may have merged them, holding the weight at zero there.
-pub(super) fn read(
-    crawls: &[Crawl],
-    track: &CellTrack,
-    n: i64,
-    speed: (f64, f64),
-    h: f64,
-    fit: FitMiss,
-) -> ValleyRead {
-    let fitted = ((speed.0 - fit.speed).max(0.0), speed.1 + fit.speed);
-    let factors: Vec<Factor> = crawls
-        .iter()
-        .filter_map(|crawl| crawl.slot.read(track, n, fitted, h, fit))
-        .collect();
-    let read = weigh(&factors, fitted.1);
-    if factors.len() > 1 {
-        ValleyRead {
-            weight_floor: 0.0,
-            ..read
+    /// Leaves room for the after side: as wide as the widest grid width
+    /// the leaders' least path in the [`VALLEY_LEAD_BUDGET_S`] after the
+    /// run covers once those cells are tracked; where they cover too
+    /// little, the first grid width past the leaders' reach once the path
+    /// after the run covers it; and where the segment ends first (`all` its
+    /// cells tracked), as narrow as the projection may lay it before the
+    /// end. `None` while it waits.
+    pub fn resolve_after(&mut self, track: &CellTrack, all: bool, h: f64, fit: FitMiss) -> bool {
+        let slot = self.slot;
+        let (first, last) = slot.cells;
+        let horizon = last + (VALLEY_LEAD_BUDGET_S / h).floor() as i64;
+        let to = track.end() - 1;
+        let covered_to = |end: i64| {
+            (last + 1..=end)
+                .map(|n| track.path(last + 1, n).0 - track.drift(first, n, h, fit))
+                .fold(0.0_f64, f64::max)
+        };
+        if to < horizon && !all {
+            return false;
         }
-    } else {
-        read
+        let within_budget = widest_crawl_side_within(slot.width.1, covered_to(horizon.min(to)));
+        let width = match within_budget {
+            Some(width) => width,
+            None => {
+                let covered = covered_to(to);
+                match widest_crawl_side_within(slot.width.1, covered) {
+                    Some(width) => width,
+                    None if all => slot.width.0.min(covered).max(f64::MIN_POSITIVE),
+                    None => return false,
+                }
+            }
+        };
+        let mut side_to = last;
+        while side_to < to && slot.distance(track, side_to + 1, h, fit).0 < width {
+            side_to += 1;
+        }
+        let cells = (first, side_to);
+        self.after = Some(Reserve {
+            width,
+            cells,
+            rebuild: slot.leaders(track, cells, fit).rebuild(width),
+        });
+        true
     }
 }
 

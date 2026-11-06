@@ -542,17 +542,23 @@ impl ValleyModel for AdvanceValley {
     /// `f` from below, which it never passes.
     fn weight_model(&self, side: ValleySide, s: &TaylorModel) -> [TaylorModel; 3] {
         let constant = |value: f64| TaylorModel::constant(Ball::exact(value));
-        let (distance, width, outward) = match side {
+        let (distance, width, floor, outward) = match side {
             ValleySide::Outside => return [constant(1.0), constant(0.0), constant(0.0)],
             ValleySide::Inside => return [constant(0.0), constant(0.0), constant(0.0)],
             ValleySide::Before => (
                 s.scale(Ball::exact(-1.0)).add_ball(Ball::exact(self.start)),
                 self.before,
+                self.floor_before,
                 -1.0,
             ),
-            ValleySide::After => (s.add_ball(Ball::exact(-self.end)), self.after, 1.0),
+            ValleySide::After => (
+                s.add_ball(Ball::exact(-self.end)),
+                self.after,
+                self.floor_after,
+                1.0,
+            ),
         };
-        let floor = self.floor.min(width);
+        let floor = floor.min(width);
         let (flattened, slope, bend) = if floor == 0.0 {
             (distance, constant(1.0), constant(0.0))
         } else {
