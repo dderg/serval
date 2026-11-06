@@ -14,6 +14,7 @@ from . import wire
 from .endpoint import FileEndpoint, LiveEndpoint
 from .endstop import ServoEndstop
 from .servo_stepper import ServoStepper
+from .shaping import ServoShapingGuard
 from .stream import EthercatError, ServoLane, split_run
 
 CYCLE_US_QUANTUM = 250
@@ -104,6 +105,8 @@ class EthercatBus:
     # Lifecycle
     def _connect(self):
         self._check_endstops()
+        if self.servos:
+            ServoShapingGuard(self.printer, self.servos).check_config()
         servos = sorted(self.servos, key=lambda s: s.slave_position)
         for first, second in zip(servos, servos[1:]):
             if first.slave_position == second.slave_position:

@@ -272,7 +272,11 @@ endstop_pin: PB3
 position_endstop: 0
 position_max: 250
 
-[stepper_z]
+{z_rail}
+{input_shaper}
+"""
+
+Z_STEPPER = """[stepper_z]
 step_pin: PC0
 dir_pin: PC1
 enable_pin: !PC2
@@ -281,8 +285,20 @@ rotation_distance: 8
 endstop_pin: PC3
 position_endstop: 0
 position_max: 200
+"""
 
-[input_shaper]
+Z_SERVO = """[stepper_z]
+servo: ethercat
+ethercat_slave: 1
+ethercat_axis: 2
+encoder_counts_per_rev: 131072
+rotation_distance: 8
+endstop_pin: ethercat:z
+position_endstop: 0
+position_max: 200
+"""
+
+INPUT_SHAPER = """[input_shaper]
 shaper_type: {shaper}
 shaper_freq_x: 50
 shaper_freq_y: 40
@@ -315,11 +331,16 @@ def servo_config(
     cycle_us=CYCLE_US,
     x_shadow=True,
     x_homing="homing_torque: 50\nhoming_retract_dist: 0",
+    z_servo=False,
 ):
+    """shaper None leaves out [input_shaper]."""
     return PRINTER_CFG.format(
         cycle_us=cycle_us,
-        shaper=shaper,
         x_endstop=x_endstop,
         x_shadow=X_SHADOW if x_shadow else "",
         x_homing=x_homing,
+        z_rail=Z_SERVO if z_servo else Z_STEPPER,
+        input_shaper=""
+        if shaper is None
+        else INPUT_SHAPER.format(shaper=shaper),
     )

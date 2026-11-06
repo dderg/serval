@@ -263,6 +263,11 @@ class ServoStepper:
             self._stepper_kinematics, axis.encode()
         )
 
+    def moved_axes(self):
+        """Toolhead axes whose motion moves this servo."""
+        _, row = probe_linear_map(self._stepper_kinematics)
+        return [axis for axis, r in zip("xyz", row) if r]
+
     # Drive units
     def drive_counts_of(self, mcu_pos):
         return self._dir_sign * mcu_pos

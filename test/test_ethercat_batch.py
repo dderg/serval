@@ -68,7 +68,11 @@ endstop_pin: PD2
 """
 
 
-@pytest.fixture(scope="module", params=["mzv", "smooth_mzv"])
+SMOOTHER = "smooth_mzv"
+SMOOTHING_REQUIRED = "EtherCAT servos need an enabled input smoother"
+
+
+@pytest.fixture(scope="module", params=["smooth_mzv", "smooth_ei"])
 def shadow_run(request, tmp_path_factory):
     tmp = tmp_path_factory.mktemp("ethercat_" + request.param)
     run = run_batch(
@@ -163,7 +167,7 @@ def test_nonlinear_kinematics_is_a_config_error(request, tmp_path):
 def test_mcu_endstop_on_servo_rail_is_a_config_error(request, tmp_path):
     run = run_batch(
         tmp_path,
-        servo_config("mzv", x_endstop="PA3"),
+        servo_config(SMOOTHER, x_endstop="PA3"),
         "G4 P1\n",
         dictionary_path(request),
     )
@@ -181,7 +185,7 @@ def test_g28_homes_servo_and_stepper_rails(request, tmp_path):
     )
     run = run_batch(
         tmp_path,
-        servo_config("mzv", x_shadow=False),
+        servo_config(SMOOTHER, x_shadow=False),
         gcode,
         dictionary_path(request),
     )
@@ -198,7 +202,7 @@ def test_g28_homes_servo_and_stepper_rails(request, tmp_path):
 
 def test_servo_endstop_refuses_a_stepper_it_cannot_stop(request, tmp_path):
     run = run_batch(
-        tmp_path, servo_config("mzv"), "G28 X\n", dictionary_path(request)
+        tmp_path, servo_config(SMOOTHER), "G28 X\n", dictionary_path(request)
     )
     assert run.returncode != 0
     assert (
@@ -210,7 +214,7 @@ def test_servo_endstop_refuses_a_stepper_it_cannot_stop(request, tmp_path):
 def test_servo_homing_needs_a_torque_threshold(request, tmp_path):
     run = run_batch(
         tmp_path,
-        servo_config("mzv", x_shadow=False, x_homing=""),
+        servo_config(SMOOTHER, x_shadow=False, x_homing=""),
         "G28 X\n",
         dictionary_path(request),
     )
@@ -225,6 +229,68 @@ def test_query_endstops_reports_servo_endstops_open(request, tmp_path):
         'ASSERT TEST="{printer.query_endstops.last_query.y == 0}"\n'
     )
     run = run_batch(
-        tmp_path, servo_config("mzv"), gcode, dictionary_path(request)
+        tmp_path, servo_config(SMOOTHER), gcode, dictionary_path(request)
+    )
+    assert run.returncode == 0, run.log[-4000:]
+
+
+@pytest.mark.parametrize(
+    "shaper,z_servo,problem",
+    [
+        ("mzv", False, "stepper_x moves X shaped by the pulse shaper 'mzv'"),
+        ("ei", False, "stepper_x moves X shaped by the pulse shaper 'ei'"),
+        (None, False, "stepper_x moves X with input shaping off"),
+        (SMOOTHER, True, "stepper_z moves Z which [input_shaper] cannot"),
+    ],
+)
+def test_unsmoothed_servo_axis_is_a_config_error(
+    request, tmp_path, shaper, z_servo, problem
+):
+    run = run_batch(
+        tmp_path,
+        servo_config(shaper, z_servo=z_servo),
+        "G4 P1\n",
+        dictionary_path(request),
+    )
+    assert run.returncode != 0
+    assert problem in run.log and SMOOTHING_REQUIRED in run.log
+
+
+@pytest.mark.parametrize(
+    "command,problem",
+    [
+        (
+            "SET_INPUT_SHAPER SHAPER_TYPE_X=mzv",
+            "shaped by the pulse shaper 'mzv'",
+        ),
+        ("SET_INPUT_SHAPER SHAPER_TYPE=zv", "shaped by the pulse shaper 'zv'"),
+        ("SET_INPUT_SHAPER SHAPER_FREQ_X=0", "with its smoother 'smooth_mzv'"),
+        ("DISABLE_INPUT_SHAPER AXIS=x", "with its smoother 'smooth_mzv'"),
+    ],
+)
+def test_unsmoothing_a_servo_axis_is_a_command_error(
+    request, tmp_path, command, problem
+):
+    gcode = "%s\n" % (command,)
+    run = run_batch(
+        tmp_path, servo_config(SMOOTHER), gcode, dictionary_path(request)
+    )
+    assert run.returncode != 0
+    assert "stepper_x moves X " + problem in run.log
+    assert SMOOTHING_REQUIRED in run.log
+    # Refused before it took effect: the post-command check never fired
+    assert "Transition to shutdown state: ethercat" not in run.log
+
+
+def test_shaping_changes_off_servo_axes_are_allowed(request, tmp_path):
+    gcode = (
+        "SET_KINEMATIC_POSITION X=100 Y=100 Z=10\n"
+        "SET_INPUT_SHAPER SHAPER_TYPE_Y=mzv SHAPER_FREQ_Y=40"
+        " SHAPER_TYPE_X=smooth_ei\n"
+        "DISABLE_INPUT_SHAPER AXIS=y\n"
+        "G1 X120 Y120 F6000\nM400\n"
+    )
+    run = run_batch(
+        tmp_path, servo_config(SMOOTHER), gcode, dictionary_path(request)
     )
     assert run.returncode == 0, run.log[-4000:]
