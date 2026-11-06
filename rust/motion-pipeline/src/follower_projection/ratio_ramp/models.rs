@@ -1062,14 +1062,14 @@ impl ValleyWeight {
 /// cluster's support, the first widened by how far the others depart from
 /// it.
 fn cluster_model(cluster: &SeamCluster, s: &TaylorModel, reach: PathReach) -> ModelJet {
-    let (read_lo, read_hi) = reach.read_points();
+    let (lo, hi) = reach.span();
     let (support_from, support_to) = cluster.support();
-    let first = cluster.pieces.partition_point(|piece| piece.to <= read_lo);
+    let first = cluster.pieces.partition_point(|piece| piece.to <= lo);
     let past = cluster
         .pieces
-        .partition_point(|piece| piece.from <= read_hi)
+        .partition_point(|piece| piece.from <= hi)
         .max(first);
-    let outside = (read_lo < support_from || read_hi >= support_to).then(ModelJet::zero);
+    let outside = (lo < support_from || hi >= support_to).then(ModelJet::zero);
     cluster.pieces[first..past]
         .iter()
         .map(|piece| piece_model(piece, s))

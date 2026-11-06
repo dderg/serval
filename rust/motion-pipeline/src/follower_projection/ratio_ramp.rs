@@ -200,7 +200,8 @@ pub(super) struct SeamTable {
 
 /// Where the clusters of a table's seams lie under one width field: each
 /// cluster's seams and width in path order, the kinks the moving window
-/// averages, one per cluster ([`SeamCluster`]), and the clusters with a
+/// averages, one at each cluster that changes the slope ([`SeamCluster`]),
+/// and the clusters with a
 /// stationary share — a ratio step, or more than one seam.
 #[derive(Debug, Default)]
 struct Clusters {
@@ -316,7 +317,11 @@ impl SeamTable {
             })
             .collect();
         clusters.spans.truncate(kept);
-        clusters.kinks.truncate(kept);
+        let kept_kinks = match self.seams.get(start) {
+            Some(seam) if start > 0 => clusters.kinks.partition_point(|kink| kink.s < seam.s),
+            _ => 0,
+        };
+        clusters.kinks.truncate(kept_kinks);
         clusters.stationary.truncate(kept_stationary);
         clusters.piece_ranges.truncate(kept_stationary);
         clusters
@@ -335,12 +340,19 @@ impl SeamTable {
                     .fold(f64::INFINITY, f64::min),
             };
             let clusters = &mut self.clusters;
-            clusters.kinks.push(Seam {
-                s: seams[0].s,
-                step: 0.0,
-                slope_after: seams[seams.len() - 1].slope_after,
-                significant: true,
-            });
+            let slope_in = clusters
+                .kinks
+                .last()
+                .map_or(self.base_slope.unwrap_or(0.0), |kink| kink.slope_after);
+            let slope_out = seams[seams.len() - 1].slope_after;
+            if slope_out != slope_in {
+                clusters.kinks.push(Seam {
+                    s: seams[0].s,
+                    step: 0.0,
+                    slope_after: slope_out,
+                    significant: true,
+                });
+            }
             if (seams.len() > 1 || seams[0].step != 0.0) && span.width > 0.0 {
                 clusters.stationary.push(clusters.spans.len());
                 let first = clusters.pieces.len();
@@ -430,6 +442,7 @@ impl SeamTable {
             .map_or(past, |span| span.start);
         if drop > 0 {
             self.base_slope = Some(self.seams[drop - 1].slope_after);
+            let kept_from = self.seams.get(drop).map_or(f64::INFINITY, |seam| seam.s);
             self.seams.drain(..drop);
             self.revision = next_revision();
             let clusters = &mut self.clusters;
@@ -439,7 +452,8 @@ impl SeamTable {
                 span.start -= drop;
                 span.end -= drop;
             }
-            clusters.kinks.drain(..dropped);
+            let dropped_kinks = clusters.kinks.partition_point(|kink| kink.s < kept_from);
+            clusters.kinks.drain(..dropped_kinks);
             let dropped_stationary = clusters
                 .stationary
                 .partition_point(|&index| index < dropped);
