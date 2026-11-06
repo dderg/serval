@@ -880,6 +880,62 @@ fn a_rest_valley_covers_the_ratio_step_its_leg_lays_short_of_the_rest() {
     );
 }
 
+/// How far the odometer's table of a leg can run past the leg's quadrature
+/// of its leaders' speed: 13 ulps at 921 mm, as `voron_dense_top_layers_zhop`
+/// on the printer config laid a stop into a retract.
+const LEG_TABLE_PAST_QUADRATURE_MM: f64 = 1.5e-12;
+
+/// Leaders resting through a rest leg's end rest up to the seam the next
+/// leg opens on, wherever the leg's quadrature of their path rounds short
+/// of the table. A valley closing short of the seam would ramp the advance
+/// back in over that rounding alone, under the leaders creeping to their
+/// stop, where one ulp of path steps the weight the advance reads by a
+/// fifth.
+#[test]
+fn leaders_resting_through_a_legs_end_rest_up_to_its_seam() {
+    let travel = 10.0;
+    let duration = 2.0 * REST_LEG_HALF_TIME_S;
+    let rest_leg_table_mm = REST_LEG_SPILL_MM + LEG_TABLE_PAST_QUADRATURE_MM;
+    let rule = RatioRampRule {
+        advance_slope_s: 0.5,
+        max_velocity_mm_s: 45.0,
+        max_accel_mm_s2: 2000.0,
+        kernel_jerk_per_accel_hz: f64::INFINITY,
+    };
+    let mut state = FollowerState::default();
+    state.push_span(travel, 0.03, 0.03);
+    state.push_span(rest_leg_table_mm, 0.03, 0.03);
+    let seam = state.s_ingested_end;
+    let stopping = braking_to_standstill(0.0, duration);
+    let stopping_leaders = ShapedLeaders::of(&stopping, &[0, 1]);
+    let stop = RampLeg {
+        rests: true,
+        ..moving_leg(&stopping, &stopping_leaders, travel)
+    };
+    state
+        .smoothing
+        .lay((&state.spans, &state.advance_spans), &stop, &rule);
+    state.push_span(REST_LEG_SPILL_MM, 0.03, 0.03);
+    let leaving = starting_from_standstill(duration, duration);
+    let leaving_leaders = ShapedLeaders::of(&leaving, &[0, 1]);
+    state.smoothing.lay(
+        (&state.spans, &state.advance_spans),
+        &moving_leg(&leaving, &leaving_leaders, seam),
+        &rule,
+    );
+    for s in [
+        seam - 0.5 * LEG_TABLE_PAST_QUADRATURE_MM,
+        trajectory::next_toward(seam, f64::NEG_INFINITY),
+    ] {
+        let (weight, _, _) = state.smoothing.valley_weight(s);
+        assert_eq!(
+            weight, 0.0,
+            "the advance reads the rest leg at {s} mm, before the seam at {seam} mm, with \
+             weight {weight}"
+        );
+    }
+}
+
 /// The odometer and the path the leaders cover reach a resting leg's ratio
 /// step to different roundings, the step a few dozen ulps short of the
 /// rest or past it. The width rests on the step itself, so no window
