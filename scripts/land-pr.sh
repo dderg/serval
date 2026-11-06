@@ -152,11 +152,17 @@ finish() {
         cd "$safe"
         case "$(basename "$tree")" in
             serval-pool-*)
-                git -C "$tree" switch -q --detach origin/main \
-                    && git branch -D "$branch" >/dev/null \
-                    && rm -f "$(git -C "$tree" rev-parse --absolute-git-dir)/wt-lease" \
-                    && echo "land-pr: $tree is idle again (warm target kept; scripts/wt.sh new reuses it)" \
-                    || echo "land-pr: $tree has uncommitted changes and stays on $branch" >&2
+                users="$("$(dirname "$0")/worktree_users.sh" "$tree")"
+                if [ -n "$users" ]; then
+                    echo "land-pr: $tree stays on $branch: other processes have their cwd in it:" >&2
+                    echo "$users" >&2
+                else
+                    git -C "$tree" switch -q --detach origin/main \
+                        && git branch -D "$branch" >/dev/null \
+                        && rm -f "$(git -C "$tree" rev-parse --absolute-git-dir)/wt-lease" \
+                        && echo "land-pr: $tree is idle again (warm target kept; scripts/wt.sh new reuses it)" \
+                        || echo "land-pr: $tree has uncommitted changes and stays on $branch" >&2
+                fi
                 ;;
             *)
                 slot="$(basename "$tree" | tr '[:upper:]' '[:lower:]')"
