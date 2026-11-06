@@ -71,16 +71,16 @@ fn without_a_z_shaper() -> String {
 /// A printer whose planner reads the advance's jerk at `jerk_gain_share`
 /// of the gain its kernels have, so the guard behind it, which reads the
 /// whole gain, meets the demand of a planner that under-estimates it.
-struct UnsoundPlanner {
+pub(super) struct UnsoundPlanner {
     cfg: PlannerConfig,
     config: StreamConfig,
-    chains: AxisChainSet,
-    real: ExtruderCaps,
+    pub chains: AxisChainSet,
+    pub real: ExtruderCaps,
     planned_under: ExtruderCaps,
 }
 
 impl UnsoundPlanner {
-    fn new(profile: &str, jerk_gain_share: f64) -> Self {
+    pub fn new(profile: &str, jerk_gain_share: f64) -> Self {
         let cfg = planner_config::from_doc::planner_config_from_text(profile).unwrap();
         let config = stream_config(&cfg, None).unwrap();
         let chains = cfg.compile_active_chains().unwrap();
@@ -101,7 +101,7 @@ impl UnsoundPlanner {
         }
     }
 
-    fn plan(&self, lines: &[GcodeLine]) -> Vec<PlannedItem> {
+    pub fn plan(&self, lines: &[GcodeLine]) -> Vec<PlannedItem> {
         let base = GcodeMoveBase::of(&self.cfg, &[self.planned_under]).unwrap();
         let runtime = RuntimeLimits::default();
         let mut fit = FitStage::new(self.config.corner).into_driver();
@@ -122,14 +122,28 @@ impl UnsoundPlanner {
         planned
     }
 
-    fn guard(&self, planned: impl IntoIterator<Item = PlannedItem>) -> Vec<PlannedMove> {
+    pub fn guard(&self, planned: impl IntoIterator<Item = PlannedItem>) -> Vec<PlannedMove> {
+        self.guard_through_drains(planned).0
+    }
+
+    /// The moves the guard emits, and how many it had emitted as each drain
+    /// arrived.
+    pub fn guard_through_drains(
+        &self,
+        planned: impl IntoIterator<Item = PlannedItem>,
+    ) -> (Vec<PlannedMove>, Vec<usize>) {
         let mut guard = TurningGuard::new(self.config.clone(), &self.chains);
         let mut emitted = Vec::new();
+        let mut at_drains = Vec::new();
         for item in planned {
             let item = match item {
                 PlannedItem::Move(mut planned) => {
                     planned.geometry.limits.extruder = Some(self.real);
                     PlannedItem::Move(planned)
+                }
+                PlannedItem::Drain => {
+                    at_drains.push(emitted.len());
+                    PlannedItem::Drain
                 }
                 other => other,
             };
@@ -140,7 +154,7 @@ impl UnsoundPlanner {
                 true
             }));
         }
-        emitted
+        (emitted, at_drains)
     }
 
     /// Guards the plan of `lines`: every move leaves, proven, so a second
@@ -177,7 +191,13 @@ fn again(emitted: &[PlannedMove]) -> impl Iterator<Item = PlannedItem> + '_ {
         .chain(std::iter::once(PlannedItem::Drain))
 }
 
-fn line(seq: u32, start: [f64; 2], end: [f64; 2], de: f64, feedrate_mm_s: f64) -> GcodeLine {
+pub(super) fn line(
+    seq: u32,
+    start: [f64; 2],
+    end: [f64; 2],
+    de: f64,
+    feedrate_mm_s: f64,
+) -> GcodeLine {
     GcodeLine {
         start: [start[0], start[1], 0.0],
         delta: [end[0] - start[0], end[1] - start[1], 0.0],

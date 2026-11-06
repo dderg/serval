@@ -6,7 +6,9 @@ use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
 use trajectory::{ContinuousAxis, ContinuousSegment};
 
-use super::super::{FollowerState, SpanSide, Table as SpanTable};
+use super::super::{
+    FollowerState, OdometerLeaves, SpanSide, Table as SpanTable, shaped_leader_arc_length,
+};
 use super::{
     AdvanceValley, CLUSTER_REACH_S, CROSSING_PROBES, Crossing, ENVELOPE_SLOPE, KERNEL_PEAK,
     NODE_SPACING_PER_WIDTH, NODE_SPACING_S, PathReach, RampLeg, RatioSmoothing, RestSide,
@@ -764,17 +766,24 @@ fn braking_to_standstill(t0: f64, duration: f64) -> ContinuousSegment {
 
 fn moving_leg<'a>(
     shaped: &'a ContinuousSegment,
-    shaped_leaders: &'a ShapedLeaders<'a>,
+    (shaped_leaders, odometer): (&'a ShapedLeaders<'a>, &'a OdometerLeaves),
     start_s: f64,
 ) -> RampLeg<'a> {
     RampLeg {
         shaped,
         leaders: &[0, 1],
         shaped_leaders,
+        odometer,
         support: (shaped.t_start, shaped.t_end),
         start_s,
         rests: false,
     }
+}
+
+/// The odometer ingest sums the arc of the leaders `shaped_leaders` read
+/// off `shaped` with.
+fn odometer(shaped: &ContinuousSegment, shaped_leaders: &ShapedLeaders) -> OdometerLeaves {
+    shaped_leader_arc_length(shaped, &[0, 1], shaped_leaders).1
 }
 
 /// The width field's time samples from `t0` on, as `(s − s0, t − t0)`.
@@ -799,26 +808,29 @@ fn a_leg_opening_from_standstill_samples_the_width_as_planned_from_rest() {
     let duration = 0.02;
     let from_rest = starting_from_standstill(0.0, duration);
     let from_rest_leaders = ShapedLeaders::of(&from_rest, &[0, 1]);
+    let from_rest_odometer = odometer(&from_rest, &from_rest_leaders);
     let mut planned_from_rest = WidthField::default();
     planned_from_rest.extend(
         &from_rest_leaders,
-        &moving_leg(&from_rest, &from_rest_leaders, 0.0),
+        &moving_leg(&from_rest, (&from_rest_leaders, &from_rest_odometer), 0.0),
         REST_LEG_SPILL_MM,
     );
     let stand_still_at = 0.0337;
     let before = braking_to_standstill(stand_still_at - duration, duration);
     let before_leaders = ShapedLeaders::of(&before, &[0, 1]);
+    let before_odometer = odometer(&before, &before_leaders);
     let after = starting_from_standstill(stand_still_at, duration);
     let after_leaders = ShapedLeaders::of(&after, &[0, 1]);
+    let after_odometer = odometer(&after, &after_leaders);
     let mut stream = WidthField::default();
     stream.extend(
         &before_leaders,
-        &moving_leg(&before, &before_leaders, 0.0),
+        &moving_leg(&before, (&before_leaders, &before_odometer), 0.0),
         REST_LEG_SPILL_MM,
     );
     stream.extend(
         &after_leaders,
-        &moving_leg(&after, &after_leaders, REST_LEG_SPILL_MM),
+        &moving_leg(&after, (&after_leaders, &after_odometer), REST_LEG_SPILL_MM),
         2.0 * REST_LEG_SPILL_MM,
     );
     let (streamed, from_rest) = (
@@ -855,10 +867,12 @@ fn a_rest_valley_covers_the_ratio_step_its_leg_lays_short_of_the_rest() {
     state.push_span(REST_LEG_SPILL_MM + short_of_rest, 0.03, 0.03);
     let shaped = braking_into_a_rest_and_leaving();
     let shaped_leaders = ShapedLeaders::of(&shaped, &[0, 1]);
+    let shaped_odometer = odometer(&shaped, &shaped_leaders);
     let leg = RampLeg {
         shaped: &shaped,
         leaders: &[0, 1],
         shaped_leaders: &shaped_leaders,
+        odometer: &shaped_odometer,
         support: (shaped.t_start, shaped.t_end),
         start_s: travel,
         rests: true,
@@ -908,9 +922,10 @@ fn leaders_resting_through_a_legs_end_rest_up_to_its_seam() {
     let seam = state.s_ingested_end;
     let stopping = braking_to_standstill(0.0, duration);
     let stopping_leaders = ShapedLeaders::of(&stopping, &[0, 1]);
+    let stopping_odometer = odometer(&stopping, &stopping_leaders);
     let stop = RampLeg {
         rests: true,
-        ..moving_leg(&stopping, &stopping_leaders, travel)
+        ..moving_leg(&stopping, (&stopping_leaders, &stopping_odometer), travel)
     };
     state
         .smoothing
@@ -918,9 +933,10 @@ fn leaders_resting_through_a_legs_end_rest_up_to_its_seam() {
     state.push_span(REST_LEG_SPILL_MM, 0.03, 0.03);
     let leaving = starting_from_standstill(duration, duration);
     let leaving_leaders = ShapedLeaders::of(&leaving, &[0, 1]);
+    let leaving_odometer = odometer(&leaving, &leaving_leaders);
     state.smoothing.lay(
         (&state.spans, &state.advance_spans),
-        &moving_leg(&leaving, &leaving_leaders, seam),
+        &moving_leg(&leaving, (&leaving_leaders, &leaving_odometer), seam),
         &rule,
     );
     for s in [
@@ -953,10 +969,12 @@ fn the_width_rests_on_the_ratio_step_a_resting_leg_lays_beside_the_rest() {
         state.push_span(REST_LEG_SPILL_MM - off_rest, 0.03, 0.03);
         let shaped = braking_into_a_rest_and_leaving();
         let shaped_leaders = ShapedLeaders::of(&shaped, &[0, 1]);
+        let shaped_odometer = odometer(&shaped, &shaped_leaders);
         let leg = RampLeg {
             shaped: &shaped,
             leaders: &[0, 1],
             shaped_leaders: &shaped_leaders,
+            odometer: &shaped_odometer,
             support: (shaped.t_start, shaped.t_end),
             start_s: travel,
             rests: true,
@@ -1163,7 +1181,8 @@ fn the_smoothing_models_hold_its_correction_and_valley_weight_between_bends() {
                     end: 0.3 * total,
                     before: 1.5,
                     after: 2.0,
-                    floor: 0.3,
+                    floor_before: 0.3,
+                    floor_after: 0.3,
                     kind: super::ValleyKind::Crawl,
                 },
                 super::AdvanceValley {
@@ -1171,7 +1190,8 @@ fn the_smoothing_models_hold_its_correction_and_valley_weight_between_bends() {
                     end: 0.6 * total + 1.0,
                     before: 0.8,
                     after: 0.5,
-                    floor: 0.0,
+                    floor_before: 0.0,
+                    floor_after: 0.0,
                     kind: super::ValleyKind::Rest,
                 },
             ];
@@ -1507,7 +1527,8 @@ fn a_crawl_valley_leaves_zero_flat_and_its_derivatives_are_exact() {
         end: 5.0,
         before: 2.0,
         after: 1.5,
-        floor: 0.01,
+        floor_before: 0.01,
+        floor_after: 0.01,
         kind: ValleyKind::Crawl,
     };
     for side in [-1.0, 1.0] {
@@ -1541,7 +1562,8 @@ fn a_crawl_valley_leaves_zero_flat_and_its_derivatives_are_exact() {
         }
     }
     let kinked = AdvanceValley {
-        floor: 0.0,
+        floor_before: 0.0,
+        floor_after: 0.0,
         ..crawl
     };
     let (_, slope, _) = kinked.weight(5.0 + 1e-9);
@@ -1551,31 +1573,39 @@ fn a_crawl_valley_leaves_zero_flat_and_its_derivatives_are_exact() {
     );
 }
 
-/// A crawl is worth a valley only where an advance reading the path speed
-/// through it would leave the follower's acceleration limit. The Bowden
-/// crawl of `voron_dense_top_layers` at t≈148.07 s on the P1 kernel config
-/// asks `r·(a + k·s⃛)` ≈ 370 mm/s² of its 2000; releasing its lead there
-/// asked 2610. A turnaround releases it whatever the advance asks.
+/// A crawl behind a kernel the turning guard does not hold is worth a
+/// valley only where an advance reading the path speed through it would
+/// leave the follower's acceleration limit: there the kernel bounds the
+/// advance's jerk, and releasing the lead over the crawl's reach asks more
+/// than the crawl. A follower the guard holds lays one at every crawl,
+/// whose turning the guard bounds only down to the valley speed. A
+/// turnaround releases it whatever the advance asks.
 #[test]
-fn a_crawl_lays_a_valley_only_where_the_advance_would_leave_the_limit() {
-    let rule = RatioRampRule {
+fn a_crawl_lays_a_valley_where_the_guard_holds_the_follower_or_the_advance_would_leave_the_limit() {
+    let guarded = RatioRampRule {
         advance_slope_s: 0.5,
         max_velocity_mm_s: 50.0,
         max_accel_mm_s2: 2000.0,
         kernel_jerk_per_accel_hz: f64::INFINITY,
+    };
+    let behind_a_kernel = RatioRampRule {
+        kernel_jerk_per_accel_hz: 100.0,
+        ..guarded
     };
     let crawl = Crossing {
         speed: 0.647,
         rate: 119.0,
         jerk: 119.0 * 119.0 / 0.647,
     };
-    assert!(!crawl.needs_valley(&rule, 0.0337));
-    assert!(crawl.needs_valley(&rule, 0.2));
+    assert!(crawl.needs_valley(&guarded, 0.0337));
+    assert!(!crawl.needs_valley(&behind_a_kernel, 0.2));
+    assert!(crawl.needs_valley(&behind_a_kernel, 0.5));
     let cruise = Crossing {
         speed: 2.5,
         ..crawl
     };
-    assert!(!cruise.needs_valley(&rule, 0.2));
+    assert!(!cruise.needs_valley(&guarded, 0.5));
+    assert!(!cruise.needs_valley(&behind_a_kernel, 0.5));
     let turnaround = Crossing {
         speed: 0.0,
         rate: 119.0,
@@ -1583,7 +1613,7 @@ fn a_crawl_lays_a_valley_only_where_the_advance_would_leave_the_limit() {
     };
     let no_advance = RatioRampRule {
         advance_slope_s: 0.0,
-        ..rule
+        ..guarded
     };
     assert!(turnaround.needs_valley(&no_advance, 0.0337));
 }
@@ -1631,14 +1661,15 @@ fn a_kernel_after_the_advance_spares_a_crawl_its_valley() {
 fn a_crawl_inside_a_laid_valleys_floor_lays_no_second_valley() {
     let (turn, reach, floor) = (468.816, 0.184_87, 3.830e-3);
     let mut smoothing = RatioSmoothing::default();
-    smoothing.lay_valley(turn, reach, floor);
-    smoothing.lay_valley(turn + 1e-5, 0.184_83, 3.831e-3);
+    smoothing.place_valley(turn, (turn, reach, reach), floor);
+    smoothing.place_valley(turn + 1e-5, (turn + 1e-5, 0.184_83, 0.184_83), 3.831e-3);
     let laid = AdvanceValley {
         start: turn,
         end: turn,
         before: reach,
         after: reach,
-        floor,
+        floor_before: floor,
+        floor_after: floor,
         kind: ValleyKind::Crawl,
     };
     for k in -19..=19 {
@@ -1655,21 +1686,22 @@ fn a_crawl_inside_a_laid_valleys_floor_lays_no_second_valley() {
 /// and again at the step's own slowest point, 0.02 mm on, past the first
 /// valley's floor but well within its reach. The advance releases its lead
 /// once and rebuilds it once: one valley holding the weight at zero across
-/// both, its after side as wide as the wider of the two, not the product
-/// `W₁·W₂`, which rebuilds the lead up to twice as steeply.
+/// both, its after side the later crawl's with that crawl's floor, not the
+/// product `W₁·W₂`, which rebuilds the lead up to twice as steeply.
 #[test]
 fn a_crawl_within_the_last_crawl_valleys_reach_widens_it_to_one_valley() {
     let (turn, reach, floor) = (500.0, 0.18, 4.0e-3);
     let (next, next_reach, next_floor) = (500.02, 0.17, 3.0e-3);
     let mut smoothing = RatioSmoothing::default();
-    smoothing.lay_valley(turn, reach, floor);
-    smoothing.lay_valley(next, next_reach, next_floor);
+    smoothing.place_valley(turn, (turn, reach, reach), floor);
+    smoothing.place_valley(next, (next, next_reach, next_reach), next_floor);
     let merged = AdvanceValley {
         start: turn,
         end: next,
         before: reach,
-        after: reach,
-        floor,
+        after: next_reach,
+        floor_before: floor,
+        floor_after: next_floor,
         kind: ValleyKind::Crawl,
     };
     for k in -40..=40 {
@@ -1685,14 +1717,15 @@ fn a_crawl_within_the_last_crawl_valleys_reach_widens_it_to_one_valley() {
 #[test]
 fn crawls_further_apart_than_their_reach_lay_a_valley_each() {
     let mut smoothing = RatioSmoothing::default();
-    smoothing.lay_valley(500.0, 0.18, 4.0e-3);
-    smoothing.lay_valley(500.4, 0.17, 3.0e-3);
+    smoothing.place_valley(500.0, (500.0, 0.18, 0.18), 4.0e-3);
+    smoothing.place_valley(500.4, (500.4, 0.17, 0.17), 3.0e-3);
     let first = AdvanceValley {
         start: 500.0,
         end: 500.0,
         before: 0.18,
         after: 0.18,
-        floor: 4.0e-3,
+        floor_before: 4.0e-3,
+        floor_after: 4.0e-3,
         kind: ValleyKind::Crawl,
     };
     let second = AdvanceValley {
@@ -1700,7 +1733,8 @@ fn crawls_further_apart_than_their_reach_lay_a_valley_each() {
         end: 500.4,
         before: 0.17,
         after: 0.17,
-        floor: 3.0e-3,
+        floor_before: 3.0e-3,
+        floor_after: 3.0e-3,
         kind: ValleyKind::Crawl,
     };
     for k in -40..=40 {
@@ -1716,6 +1750,52 @@ fn crawls_further_apart_than_their_reach_lay_a_valley_each() {
             ),
             "the crawls at 500 and 500.4 mm read at s={s} mm"
         );
+    }
+}
+
+/// The smoothing of a follower whose kernel-free advance reads its valleys.
+fn advanced_smoothing() -> RatioSmoothing {
+    let mut smoothing = RatioSmoothing::default();
+    smoothing.width.rule = Some(RatioRampRule {
+        advance_slope_s: 0.5,
+        max_velocity_mm_s: 45.0,
+        max_accel_mm_s2: 2000.0,
+        kernel_jerk_per_accel_hz: f64::INFINITY,
+    });
+    smoothing
+}
+
+/// A crawl valley holding the weight at zero back to where no rest or
+/// floor holds it steps the weight from 1 to 0 there, which the advance
+/// reads as a step in the follower's velocity: it fails loudly.
+#[test]
+#[should_panic(expected = "steps its weight at s=499.5")]
+fn a_crawl_valley_held_at_zero_back_to_where_the_leaders_move_fails_loudly() {
+    let mut smoothing = advanced_smoothing();
+    smoothing.place_valley(500.0, (499.5, 0.0, 0.18), 4.0e-3);
+}
+
+/// Held at zero back to the floor, where the leaders rest, or to the end
+/// of a rest valley, the weight is zero either side of the held stretch's
+/// start.
+#[test]
+fn a_crawl_valley_held_at_zero_back_to_a_rest_keeps_the_weight_continuous() {
+    let mut floored = advanced_smoothing();
+    floored.close_at(499.5);
+    floored.place_valley(500.0, (499.5, 0.0, 0.18), 4.0e-3);
+    let mut rested = advanced_smoothing();
+    rested.valleys.push(AdvanceValley {
+        start: 499.4,
+        end: 499.5,
+        before: 0.2,
+        after: 0.0,
+        floor_before: 0.0,
+        floor_after: 0.0,
+        kind: ValleyKind::Rest,
+    });
+    rested.place_valley(500.0, (499.5, 0.0, 0.18), 4.0e-3);
+    for s in [499.5 - 1e-9, 499.5 + 1e-9] {
+        assert_eq!(rested.valley_weight(s).0, 0.0, "the weight at s={s} mm");
     }
 }
 
@@ -1789,7 +1869,8 @@ fn a_crawl_right_before_a_legs_end_is_found_whichever_seam_is_slower() {
     for end_excess_mm_s in [-1e-6, 0.0, 1e-6] {
         let (shaped, reversal_t) = reversing_just_before_its_end(3.0, end_excess_mm_s);
         let shaped_leaders = ShapedLeaders::of(&shaped, &[0, 1]);
-        let leg = moving_leg(&shaped, &shaped_leaders, 100.0);
+        let shaped_odometer = odometer(&shaped, &shaped_leaders);
+        let leg = moving_leg(&shaped, (&shaped_leaders, &shaped_odometer), 100.0);
         let found = slowest_crawl(&shaped_leaders, &leg, f64::INFINITY);
         let Some((_, crossing)) = found else {
             panic!(

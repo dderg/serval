@@ -145,8 +145,10 @@ impl Track {
     }
 }
 
-/// The extruder's peak speed, acceleration and jerk over a track: `r` times
-/// the shaped leaders' along a stroke, an extrude-only move's own.
+/// The extruder's peak speed, acceleration and jerk over a track: the
+/// track's largest ratio times the shaped leaders' along any stroke, since
+/// a ratio ramp carries a stroke's ratio into its neighbours, and an
+/// extrude-only move's own.
 #[derive(Debug, Clone, Copy, Default)]
 struct ExtruderPeaks {
     speed: f64,
@@ -171,6 +173,14 @@ impl ExtruderPeaks {
             speed: self.speed.max(other.speed),
             accel: self.accel.max(other.accel),
             jerk: self.jerk.max(other.jerk),
+        }
+    }
+
+    fn scaled(self, ratio: f64) -> Self {
+        Self {
+            speed: ratio * self.speed,
+            accel: ratio * self.accel,
+            jerk: ratio * self.jerk,
         }
     }
 
@@ -400,6 +410,7 @@ fn build_profiled_track(heading: f64, steps: &[Step], profile: Profile) -> Track
     let (mut t, mut along, mut e, mut sense) = (0.0, 0.0, 0.0, 1.0_f64);
     let (mut raw_speed, mut shaped_speed) = (0.0_f64, 0.0_f64);
     let (mut travelled, mut last_ratio) = (0.0_f64, None);
+    let (mut stroke_peaks, mut stroke_ratio) = (ExtruderPeaks::default(), 0.0_f64);
     let mut track = Track {
         base: Vec::new(),
         frontier: Vec::new(),
@@ -452,9 +463,8 @@ fn build_profiled_track(heading: f64, steps: &[Step], profile: Profile) -> Track
                     .push(segment([sx, sy, sz, e_line(&raw)], span, &followers, true));
                 track.fastest_shaped_mm_s =
                     track.fastest_shaped_mm_s.max(peak_speed(&shaped, duration));
-                track.extruder_peaks = track
-                    .extruder_peaks
-                    .widest(ExtruderPeaks::of(&shaped, duration, ratio));
+                stroke_peaks = stroke_peaks.widest(ExtruderPeaks::of(&shaped, duration, 1.0));
+                stroke_ratio = stroke_ratio.max(ratio.abs());
                 track.truth.push(Truth::Stroke {
                     shaped,
                     ratio,
@@ -498,6 +508,9 @@ fn build_profiled_track(heading: f64, steps: &[Step], profile: Profile) -> Track
             }
         }
     }
+    track.extruder_peaks = track
+        .extruder_peaks
+        .widest(stroke_peaks.scaled(stroke_ratio));
     track
 }
 
