@@ -8,21 +8,27 @@ lookahead with the highest junction speed whose corner, after input
 shaping, stays within max_deviation (mm). The shaped path error is
 e(t) = (K*P)(t) - P(t) for the commanded path P and shaper kernel K.
 
-An isolated junction (both adjacent moves take longer than the kernel's
-time support) is bounded exactly by a table of the canonical corner:
-decelerate at the move accel into the vertex, change direction, accelerate
-out; the table spans corner angle and orientation and is built from the
-active X/Y shapers. Where moves are shorter than the kernel, the bound is
-|e| <= sigma^2 * |accel| / 2 + |sum of velocity steps * R(t)|, with
-R = K*ramp - ramp, summed over the junctions inside the kernel support;
-each new step is also added to the error booked at the earlier junctions
-it overlaps, and every junction's speed is capped so that a curve
-continuing at its curvature stays within budget. Neighbour timing uses the
-fastest feasible traversal of the moves between them, which overlaps the
-kernels the most.
+Each junction's own corner is bounded by a table of the isolated corner,
+the worst over each leg decelerating or accelerating at the move accel
+(an accelerating-in leg starts from rest, a decelerating-out leg comes to
+rest); the table spans corner angle and orientation and is built from the
+active X/Y shapers. Neighbouring junctions inside the kernel's time support
+add their velocity steps, |dv| * R(t) with R = K*ramp - ramp, and the
+stop-corner floors they leave (weighted by how long their accel phases
+last against the kernel support); all acceleration-induced error together
+is capped by sigma^2 * |accel| / 2. Each new step and floor is also added
+to the error booked at the earlier junctions it overlaps. Along a curve,
+junction speed and the cruise speed of moves shorter than the kernel
+support are capped so that a curve continuing at its curvature stays
+within budget. Neighbour timing uses the fastest feasible traversal of the
+moves between them, which overlaps the kernels the most.
 
 A corner whose stop alone (v=0) exceeds the budget gets the accel of both
-adjacent moves lowered until the stop fits. With an input smoother the
+adjacent moves lowered until the stop fits, keeping half of the remaining
+room when the next move is shorter than the kernel support (a second stop
+may follow). With different X and Y shapers an accelerating diagonal move
+leaves the path sideways by |sigma_x^2 - sigma_y^2| * |accel * ux * uy| / 2;
+its accel is lowered to keep that within budget. With an input smoother the
 executed acceleration of a velocity step is |dv| * kernel density: the
 steps inside one kernel support may use at most half of max_accel, and the
 accel of the adjacent moves is lowered so the total stays within max_accel.
@@ -49,6 +55,7 @@ RAMP_ERROR_POINTS = 256
 MIN_DIRECTION_CHANGE = 1e-9
 JUMP_ACCEL_SHARE = 0.5
 ACCEL_SEARCH_STEPS = 24
+NEXT_STOP_ROOM = 0.5
 
 
 class Kernel:
@@ -151,8 +158,17 @@ class CornerTable:
         )
         reach = max(abs(kx.s_lo), abs(kx.s_hi), abs(ky.s_lo), abs(ky.s_hi))
         t = np.arange(-reach - MODEL_DT, reach + 2 * MODEL_DT, MODEL_DT)
-        moments = [_corner_moments(np, t, k) for k in (kx, ky)]
-        N, Q, N2, Q2 = (np.stack([m[i] for m in moments], -1) for i in range(4))
+        moments = [_stop_moments(np, t, k) for k in (kx, ky)]
+        N2, Q2 = (np.stack([m[i] for m in moments], -1) for i in (0, 1))
+        legs = [
+            [
+                np.stack(
+                    [_leg_offsets(np, t, k, w, sign) for k in (kx, ky)], -1
+                )
+                for sign in (1.0, -1.0)
+            ]
+            for _leg_offsets in (_in_leg_offsets, _out_leg_offsets)
+        ]
         thetas = np.where(np.abs(thetas) > 1e-6, thetas, 1e-3)
         self.g = []
         profile = np.zeros(len(t))
@@ -163,7 +179,7 @@ class CornerTable:
                 continue
             u1 = np.array([math.cos(alpha), math.sin(alpha)])
             u2 = np.stack([np.cos(alpha + thetas), np.sin(alpha + thetas)], -1)
-            dev = _corner_deviation(np, w, u1, u2, N, Q, N2, Q2)
+            dev = _corner_deviation(np, u1, u2, legs)
             self.g.append(np.maximum.accumulate(dev, axis=-1).tolist())
             stop = _stop_profile(np, u1, u2, N2, Q2)
             peak = np.maximum(dev[:, :1], 1e-300)
@@ -228,12 +244,12 @@ class CornerTable:
         return glo + min(frac, 1.0) * (self.value(cell, i) - glo)
 
 
-def _corner_moments(np, t, kernel):
+def _stop_moments(np, t, kernel):
     w = np.array(kernel.weights)
     tau = t[:, None] + np.array(kernel.shifts)[None, :]
     before = np.minimum(tau, 0.0)
     after = np.maximum(tau, 0.0)
-    return before @ w, after @ w, (before * before) @ w, (after * after) @ w
+    return (before * before) @ w, (after * after) @ w
 
 
 def _stop_profile(np, u1, u2, N2, Q2):
@@ -247,12 +263,47 @@ def _stop_profile(np, u1, u2, N2, Q2):
     return np.minimum(*legs)
 
 
-def _corner_deviation(np, w, u1, u2, N, Q, N2, Q2):
-    """Deviation of the canonical corner per turn (rows of u2) and w."""
+def _in_leg_offsets(np, t, kernel, w, decelerating):
+    """Kernel-weighted position before the vertex per unit accel, for a leg
+    reaching the vertex at speed w*accel while decelerating (+1) or
+    accelerating (-1); an accelerating leg was at rest until -w."""
+    tau = np.minimum(t[:, None] + np.array(kernel.shifts)[None, :], 0.0)
+    tau = tau[None, :, :]
+    wc = w[:, None, None]
+    if decelerating < 0.0:
+        tau = np.maximum(tau, -wc)
+    return (wc * tau - 0.5 * decelerating * tau * tau) @ np.array(
+        kernel.weights
+    )
+
+
+def _out_leg_offsets(np, t, kernel, w, accelerating):
+    """Kernel-weighted position after the vertex per unit accel, for a leg
+    leaving at speed w*accel while accelerating (+1) or decelerating (-1);
+    a decelerating leg comes to rest at w."""
+    tau = np.maximum(t[:, None] + np.array(kernel.shifts)[None, :], 0.0)
+    tau = tau[None, :, :]
+    wc = w[:, None, None]
+    if accelerating < 0.0:
+        tau = np.minimum(tau, wc)
+    return (wc * tau + 0.5 * accelerating * tau * tau) @ np.array(
+        kernel.weights
+    )
+
+
+def _corner_deviation(np, u1, u2, legs):
+    """Deviation of an isolated corner per turn (rows of u2) and w, the
+    worst over the accel sign of each leg."""
     u2 = u2[:, None, None, :]
-    B = u1 * N + u2 * Q
-    A = 0.5 * (u2 * Q2 - u1 * N2)
-    S = A + w[None, :, None, None] * B
+    worst = None
+    for leg_in in legs[0]:
+        for leg_out in legs[1]:
+            dev = _leg_deviation(np, u1 * leg_in + u2 * leg_out, u1, u2)
+            worst = dev if worst is None else np.maximum(worst, dev)
+    return worst
+
+
+def _leg_deviation(np, S, u1, u2):
     legs = []
     for direction in (-np.broadcast_to(u1, u2.shape), u2):
         along = np.maximum((S * direction).sum(axis=-1), 0.0)
@@ -396,13 +447,17 @@ class CornerDeviation:
         self.last_move = move
         upx, upy = prev_move.axes_r[0], prev_move.axes_r[1]
         umx, umy = move.axes_r[0], move.axes_r[1]
+        kx, ky = self.kernels
+        budget = self.max_deviation
+        sideways = 0.5 * abs(kx.variance - ky.variance) * abs(umx * umy)
+        if sideways * move.accel > budget:
+            self.stats["accel_lowered"] += 1
+            move.limit_speed(math.sqrt(move.max_cruise_v2), budget / sideways)
         dux, duy = abs(umx - upx), abs(umy - upy)
         du = math.hypot(dux, duy)
         if du < MIN_DIRECTION_CHANGE:
             self._advance(prev_move, cap_v2)
             return cap_v2
-        kx, ky = self.kernels
-        budget = self.max_deviation
         accel = max(prev_move.accel, move.accel)
         table = self.table
         turn = math.atan2(upx * umy - upy * umx, upx * umx + upy * umy)
@@ -418,9 +473,12 @@ class CornerDeviation:
             xy_length = prev_move.move_d * math.hypot(upx, upy)
             xy_length += move.move_d * math.hypot(umx, umy)
             curvature = 2.0 * abs(turn) / xy_length
-            speed = min(
-                speed, math.sqrt(2.0 * room / (self.variance * curvature))
-            )
+            curve_speed = math.sqrt(2.0 * room / (self.variance * curvature))
+            curve_reach = 2.0 * curve_speed * self.window
+            for m in (prev_move, move):
+                if m.move_d < curve_reach and curve_speed**2 < m.max_cruise_v2:
+                    m.limit_speed(curve_speed, m.accel)
+            speed = min(speed, curve_speed)
         now = self._advance(prev_move, speed * speed)
         history = self.history
         while history and now - history[0].time >= self.window:
@@ -458,10 +516,14 @@ class CornerDeviation:
             self.stats["over_budget"] += 1
             speed = 0.0
         elif accel_error(accel) > level:
+            target = level
+            if min_traversal_time(move, 0.0, move.max_cruise_v2) < self.window:
+                unavoidable = accel_error(0.0)
+                target = unavoidable + NEXT_STOP_ROOM * (level - unavoidable)
             lo, hi = 0.0, accel
             for _ in range(ACCEL_SEARCH_STEPS):
                 mid = 0.5 * (lo + hi)
-                if accel_error(mid) <= level:
+                if accel_error(mid) <= target:
                     lo = mid
                 else:
                     hi = mid

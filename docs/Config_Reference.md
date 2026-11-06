@@ -2238,6 +2238,11 @@ short segments.
 - If even a stop at a corner would exceed `max_deviation`, the
   acceleration of the two moves around that corner is lowered until the
   stop fits.
+- On curves made of short segments, the cruise speed of segments shorter
+  than the shaper's duration is capped as well as the junction speed.
+- With different X and Y shapers, a diagonal move leaves its line while
+  it accelerates; its acceleration is lowered if that would exceed
+  `max_deviation`.
 - With an input smoother (`smooth_*`), the velocity step at a corner is
   applied over the smoother's duration and adds its own acceleration.
   Steps within one smoother duration may use at most half of
