@@ -184,7 +184,11 @@ impl Tracked {
         }
         shifted.truncate_to(len);
         taylor_shift(coefficients, shift, &mut shifted.values[..len]);
-        taylor_shift(&magnitudes[..len], shift.abs(), &mut shifted.magnitudes[..len]);
+        taylor_shift(
+            &magnitudes[..len],
+            shift.abs(),
+            &mut shifted.magnitudes[..len],
+        );
     }
 
     /// Writes the `order`-th derivative into `derivative`, whose every
