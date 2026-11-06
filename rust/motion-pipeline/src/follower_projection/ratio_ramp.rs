@@ -1,19 +1,22 @@
 use std::collections::VecDeque;
 
 use geometry::{
-    ADVANCE_VALLEY_SPEED_MM_S, RATIO_RAMP_ENVELOPE_SLOPE as ENVELOPE_SLOPE, RATIO_RAMP_MAX_TIME_S,
-    RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep,
+    ADVANCE_VALLEY_SPEED_MM_S, AdvanceValley, RATIO_RAMP_ENVELOPE_SLOPE as ENVELOPE_SLOPE,
+    RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep,
+    TURNAROUND_SPEED_TIME_S, ValleyKind, crawl_floor, leader_reach, turns_around, valley_reach,
 };
 use trajectory::ContinuousSegment;
 
 use super::{
-    FloorLeaders, LeaderReads, RatioSpan, SPAN_LOOKUP_SLACK_MM, SPAN_MIN_LEN_MM, ShapedLeaders,
-    Table, axis_grid, integrate,
+    FloorLeaders, LeaderReads, OdometerLeaves, RatioSpan, SPAN_LOOKUP_SLACK_MM, SPAN_MIN_LEN_MM,
+    ShapedLeaders, Table, axis_grid, integrate,
 };
 
+mod crawl_sides;
 mod jet;
 mod models;
 
+use crawl_sides::{Side, SideTrail, Unlaid, crawl_side};
 pub(super) use jet::Jet;
 use jet::{horner, horner_with_slope};
 pub(super) use models::{PathReach, ValleyWeight, narrow_floats};
@@ -83,10 +86,6 @@ const CLUSTER_REACH_S: f64 = 0.5 * RATIO_RAMP_MAX_TIME_S;
 /// known: every seam that raises its ramp time or its width, and every
 /// seam those gather, lies within.
 const TARGET_DELAY_S: f64 = SEAM_REACH_S.max(SEAM_PATH_REACH_S) + CLUSTER_REACH_S;
-/// The ramp time over which a turnaround or crawl valley releases and
-/// rebuilds the advance's lead, the longest, whatever the step there; and
-/// the furthest a rest valley reaches past its spill ([`RestSide::width`]).
-const VALLEY_RAMP_TIME_S: f64 = RATIO_RAMP_MAX_TIME_S;
 /// A node's target below which the leaders count as resting there: the
 /// fit's back-and-forth around a rest point, far under any ramp.
 const REST_TARGET_MM: f64 = SPAN_LOOKUP_SLACK_MM;
@@ -118,12 +117,14 @@ const REST_PROBES_PER_INTERVAL: usize = 8;
 const REST_REFINEMENTS: usize = 64;
 
 /// One segment's shaped leaders as the smoothing reads them: where on the
-/// span table it starts, the time it covers, and whether its raw leaders
-/// rest along it (an extrude-only move or a dwell).
+/// span table it starts, the time it covers, the path they cover by each
+/// instant of it (the odometer ingest summed its arc with), and whether its
+/// raw leaders rest along it (an extrude-only move or a dwell).
 pub(super) struct RampLeg<'a> {
     pub(super) shaped: &'a ContinuousSegment,
     pub(super) leaders: &'a [usize],
     pub(super) shaped_leaders: &'a ShapedLeaders<'a>,
+    pub(super) odometer: &'a OdometerLeaves,
     pub(super) support: (f64, f64),
     pub(super) start_s: f64,
     pub(super) rests: bool,
@@ -1397,9 +1398,11 @@ pub(super) struct RatioSmoothing {
     reach_into_next: Option<Crossing>,
     laid_tails: VecDeque<LegTail>,
     backlog: VecDeque<PendingSegment>,
-    /// The slowest point of the last leg, where a valley reaching past the
-    /// laid table waits for the ratio the next leg lays there.
-    waiting_crawl: Option<(f64, Crossing)>,
+    /// Crawls whose valleys wait for the ratio or the leaders past the laid
+    /// table: the next leg's spans decide whether one is laid, and how
+    /// wide its after side reaches.
+    waiting_crawls: Vec<(f64, Crossing)>,
+    trail: SideTrail,
 }
 
 impl RatioSmoothing {
@@ -1418,7 +1421,7 @@ impl RatioSmoothing {
     pub(super) fn close_at(&mut self, s: f64) {
         self.floor = self.floor.max(s);
         self.reach_into_next = None;
-        self.waiting_crawl = None;
+        self.waiting_crawls.clear();
         self.laid_tails.clear();
         self.close_rest(s, 0.0);
         self.width.close(s);
@@ -1434,8 +1437,14 @@ impl RatioSmoothing {
             .valleys
             .last_mut()
             .expect("an open rest valley is the last laid");
+        assert_eq!(
+            valley.kind,
+            ValleyKind::Rest,
+            "follower projection: a valley {valley:?} was laid over an open rest"
+        );
         valley.end = end.max(valley.start);
         valley.after = after;
+        self.assert_weight_continuous();
     }
 
     /// Takes in `leg`'s spans: the width nodes it covers, the seams the
@@ -1458,13 +1467,17 @@ impl RatioSmoothing {
         self.width.rule = Some(*rule);
         let leaders = leg.shaped_leaders;
         let table_end = spans.last().map_or(leg.start_s, |last| last.s1);
-        if let Some(crawl) = self.waiting_crawl.take() {
-            self.lay_crawl_valley(spans, rule, crawl, f64::INFINITY);
-        }
         if table_end <= leg.start_s {
+            for crawl in std::mem::take(&mut self.waiting_crawls) {
+                self.lay_crawl_valley(spans, rule, crawl, f64::INFINITY);
+            }
             self.width.extend(leaders, leg, table_end);
             self.close_at(leg.start_s);
             return;
+        }
+        self.trail.record(leg, table_end);
+        for crawl in std::mem::take(&mut self.waiting_crawls) {
+            self.lay_crawl_valley(spans, rule, crawl, table_end);
         }
         let (t_start, t_end) = leg.support;
         let opening = Crossing::valley_at(leaders, t_start);
@@ -1472,18 +1485,14 @@ impl RatioSmoothing {
             .reach_into_next
             .map_or(opening, |closing| closing.common(opening));
         let seam = leg.start_s;
-        let reach = crossing.reach(VALLEY_RAMP_TIME_S).min(seam - self.floor);
+        let reach = crossing.valley_reach().min(seam - self.floor);
         if reach <= SPAN_MIN_LEN_MM {
             self.width.place_rest(seam);
         }
         self.width.extend(leaders, leg, table_end);
         let closes_a_rest = self.lay_rest_valley(spans, leg, rule, crossing, table_end);
-        if reach > SPAN_MIN_LEN_MM
-            && self.open_rest.is_none()
-            && !closes_a_rest
-            && crossing.needs_valley(rule, peak_ratio_within(spans, seam, reach))
-        {
-            self.lay_valley(seam, reach, crossing.crawl_floor());
+        if reach > SPAN_MIN_LEN_MM && self.open_rest.is_none() && !closes_a_rest {
+            self.lay_crawl_valley(spans, rule, (seam, crossing), table_end);
         }
         let slowest = (!leg.rests && self.open_rest.is_none())
             .then(|| slowest_crawl(leaders, leg, table_end))
@@ -1505,9 +1514,15 @@ impl RatioSmoothing {
     }
 
     /// A valley at the crawl `turn` where reading the path speed through it
-    /// at the ratio within its reach would ask too much of the follower.
-    /// The advance there reads the ratio laid after the table's end too, so
-    /// a reach running past `table_end` waits for the next leg's spans.
+    /// at the ratio within its reach would ask too much of the follower,
+    /// each side as wide as its rebuild needs ([`crawl_side`]), the reach
+    /// no further back than the leaders last rested
+    /// ([`Self::rested_through`]). The advance there reads the ratio laid
+    /// after the table's end too, so a reach running past `table_end`, or
+    /// an after side past the leaders probed, waits for the next leg; an
+    /// infinite `table_end`, where the leaders come to rest past the table,
+    /// lays it with what is laid. A crawl behind one still waiting waits
+    /// too: valleys are laid in path order.
     fn lay_crawl_valley(
         &mut self,
         spans: &[RatioSpan],
@@ -1515,50 +1530,131 @@ impl RatioSmoothing {
         (turn, crossing): (f64, Crossing),
         table_end: f64,
     ) {
-        let reach = crossing.reach(VALLEY_RAMP_TIME_S).min(turn - self.floor);
+        if !self.waiting_crawls.is_empty() {
+            self.waiting_crawls.push((turn, crossing));
+            return;
+        }
+        let reach = crossing
+            .valley_reach()
+            .min(turn - self.rested_through(turn));
         if reach <= SPAN_MIN_LEN_MM {
             return;
         }
-        if crossing.needs_valley(rule, peak_ratio_within(spans, turn, reach)) {
-            self.lay_valley(turn, reach, crossing.crawl_floor());
-        } else if turn + reach > table_end {
-            self.waiting_crawl = Some((turn, crossing));
+        if !crossing.needs_valley(rule, peak_ratio_within(spans, turn, reach)) {
+            if turn + reach > table_end {
+                self.waiting_crawls.push((turn, crossing));
+            }
+            return;
+        }
+        if let Err(Unlaid::Waits) = self.lay_valley(spans, rule, (turn, crossing), reach, table_end)
+        {
+            self.waiting_crawls.push((turn, crossing));
         }
     }
 
-    /// A valley at `turn`, unless the last one laid already holds the
-    /// weight flat at zero there ([`AdvanceValley::holds_zero_at`]): a crawl
-    /// at a seam is the slowest point of the leg before or after it too,
-    /// read a hair inside that leg. A crawl whose sides would overlap the
-    /// last crawl valley's widens it instead: the advance releases its lead
-    /// once and rebuilds it once across both, holding the weight at zero
-    /// between them, where two valleys would multiply their weights and
-    /// rebuild it steeper than either. Laid crawl valleys never overlap.
-    fn lay_valley(&mut self, turn: f64, reach: f64, floor: f64) {
+    /// Where the leaders last rested before `turn`: the floor, or the end
+    /// of the last rest valley laid before it.
+    fn rested_through(&self, turn: f64) -> f64 {
+        self.valleys
+            .iter()
+            .rev()
+            .find(|valley| valley.kind == ValleyKind::Rest && valley.end <= turn)
+            .map_or(self.floor, |rest| rest.end.max(self.floor))
+    }
+
+    /// The valley at the crawl `turn`, unless the last one laid already
+    /// holds the weight flat at zero there ([`AdvanceValley::holds_zero_at`]):
+    /// a crawl at a seam is the slowest point of the leg before or after it
+    /// too, read a hair inside that leg. Each side is as wide as its rebuild
+    /// needs ([`crawl_side`]), past the leaders' `reach`; the before side
+    /// only where the valley does not widen the last one over it
+    /// ([`Self::place_valley`]). Where no before side reaching no further
+    /// back than the leaders last rested fits, the valley holds the weight
+    /// at zero back to there instead: the leaders leave that rest with no
+    /// lead to release, and the after side rebuilds it. A follower the
+    /// turning guard does not hold ([`guarded_by_the_turning_guard`]) has
+    /// no room left for its sides: its before side is the leaders' reach,
+    /// as far back as the projection still holds the path.
+    fn lay_valley(
+        &mut self,
+        spans: &[RatioSpan],
+        rule: &RatioRampRule,
+        crawl: (f64, Crossing),
+        reach: f64,
+        table_end: f64,
+    ) -> Result<(), Unlaid> {
+        let turn = crawl.0;
         if self
             .valleys
             .last()
-            .is_some_and(|valley| valley.holds_zero_at(turn))
+            .is_some_and(|valley| valley.holds_zero_at(turn, SPAN_LOOKUP_SLACK_MM))
+        {
+            return Ok(());
+        }
+        let laid = (&self.trail, spans, table_end);
+        let after = crawl_side(Side::After, crawl, reach, laid, rule, f64::INFINITY)?
+            .unwrap_or_else(|| {
+                panic!(
+                    "follower projection: no width of the After side of the crawl valley at \
+                     s={turn} ({:?}) fits its rebuild within the follower's limit",
+                    crawl.1
+                )
+            });
+        let rested = self.rested_through(turn);
+        let (start, before) = if !guarded_by_the_turning_guard(rule) {
+            (turn, reach.min(self.back_reach_limit(turn)))
+        } else if self.last_crawl_reach_end() > turn - reach {
+            (turn, reach)
+        } else {
+            crawl_side(Side::Before, crawl, reach, laid, rule, turn - rested)?
+                .map_or((rested, 0.0), |before| (turn, before))
+        };
+        self.place_valley(turn, (start, before, after), crawl.1.crawl_floor());
+        Ok(())
+    }
+
+    fn last_crawl_reach_end(&self) -> f64 {
+        self.valleys
+            .iter()
+            .rev()
+            .find(|valley| valley.kind == ValleyKind::Crawl)
+            .map_or(f64::NEG_INFINITY, AdvanceValley::reach_end)
+    }
+
+    /// A crawl valley at `turn`, its weight at zero from `start` on, with
+    /// its sides `before` and `after` wide. A crawl whose sides would
+    /// overlap the last crawl valley's widens it instead: the advance
+    /// releases its lead once and rebuilds it once across both, from this
+    /// crawl, holding the weight at zero between them, where two valleys
+    /// would multiply their weights and rebuild it steeper than either.
+    /// Laid crawl valleys never overlap. The turning guard leaves room for
+    /// the sides from the same rule, so a new crawl valley reaches back all
+    /// of `before` or fails loudly: the guard cannot see what the
+    /// projection has taken.
+    fn place_valley(&mut self, turn: f64, (start, before, after): (f64, f64, f64), floor: f64) {
+        if self
+            .valleys
+            .last()
+            .is_some_and(|valley| valley.holds_zero_at(turn, SPAN_LOOKUP_SLACK_MM))
         {
             return;
         }
         if let Some(laid) = self
             .valleys
             .iter()
-            .find(|valley| valley.holds_zero_at(turn))
+            .find(|valley| valley.holds_zero_at(turn, SPAN_LOOKUP_SLACK_MM))
         {
             panic!(
                 "follower projection: the crawl at s={turn} lies where the advance valley \
                  {laid:?} already holds the weight at zero, behind the last one laid"
             );
         }
-        let before = reach.min(self.back_reach_limit(turn));
         let overlapped = self
             .valleys
             .iter_mut()
             .rev()
             .find(|valley| valley.kind == ValleyKind::Crawl)
-            .filter(|last| turn - before < last.reach_end());
+            .filter(|last| start - before < last.reach_end());
         match overlapped {
             Some(last) => {
                 assert!(
@@ -1567,19 +1663,30 @@ impl RatioSmoothing {
                      crawl valley {last:?}"
                 );
                 last.end = turn;
-                last.after = last.after.max(reach);
-                last.floor = last.floor.max(floor);
+                last.after = after;
+                last.floor_after = floor;
             }
-            None => self.valleys.push(AdvanceValley {
-                start: turn,
-                end: turn,
-                before,
-                after: reach,
-                floor,
-                kind: ValleyKind::Crawl,
-            }),
+            None => {
+                let back = self.back_reach_limit(turn);
+                assert!(
+                    back >= turn - start + before,
+                    "follower projection: the crawl valley at s={turn} reaches {} mm back, but \
+                     the projection has taken the path to {back} mm before it",
+                    turn - start + before
+                );
+                self.valleys.push(AdvanceValley {
+                    start,
+                    end: turn,
+                    before,
+                    after,
+                    floor_before: floor,
+                    floor_after: floor,
+                    kind: ValleyKind::Crawl,
+                });
+            }
         }
         self.assert_crawl_valleys_apart();
+        self.assert_weight_continuous();
     }
 
     fn assert_crawl_valleys_apart(&self) {
@@ -1596,6 +1703,46 @@ impl RatioSmoothing {
                 "follower projection: the crawl valleys {previous:?} and {valley:?} overlap"
             );
             previous = valley;
+        }
+    }
+
+    /// The weight `W` is continuous across every crawl valley an advance
+    /// reads: a side laid zero wide steps it between 1 and 0 at the
+    /// valley's edge, which only another valley holding zero up to that
+    /// edge from the side's way, or the floor, leaves unread. A rest
+    /// valley's own edges lie where the leaders rest, whose zero speed
+    /// leaves its steps unread; a follower with no advance reads none.
+    fn assert_weight_continuous(&self) {
+        if self
+            .width
+            .rule
+            .is_none_or(|rule| rule.advance_slope_s == 0.0)
+        {
+            return;
+        }
+        let crawls = self
+            .valleys
+            .iter()
+            .filter(|valley| valley.kind == ValleyKind::Crawl);
+        for valley in crawls {
+            let steps = [
+                (valley.before == 0.0).then_some((valley.start, Side::Before)),
+                (valley.after == 0.0 && valley.end.is_finite())
+                    .then_some((valley.end, Side::After)),
+            ];
+            for (edge, side) in steps.into_iter().flatten() {
+                let unread = edge <= self.floor
+                    || self.valleys.iter().any(|other| {
+                        !std::ptr::eq(other, valley) && holds_zero_up_to(other, edge, side)
+                    });
+                assert!(
+                    unread,
+                    "follower projection: the advance valley {valley:?} steps its weight at \
+                     s={edge} on its {side:?} side, where no other valley holds it at zero \
+                     (floor {}, valleys {:?})",
+                    self.floor, self.valleys
+                );
+            }
         }
     }
 
@@ -1691,6 +1838,7 @@ impl RatioSmoothing {
                 .max(last.table_end)
                 .max(last.s_start + last.s_length);
         }
+        self.trail.forget_before(self.floor.max(self.taken_through));
         drained
     }
 
@@ -1698,28 +1846,32 @@ impl RatioSmoothing {
     /// floor, and not into a segment already taken for projection, whose
     /// advance read the weight before the valley existed. The reserve
     /// [`Self::unlaid_valley_reach`] keeps this from binding where the
-    /// leaders' reach changes slowly; a seam whose crossing reaches much
-    /// further than the one the reserve was taken at (hard braking into a
-    /// rest right after a cruise) releases the advance over what is left.
+    /// leaders' reach changes slowly; a rest side whose seam's crossing
+    /// reaches much further than the one the reserve was taken at (hard
+    /// braking into a rest right after a cruise) releases the advance over
+    /// what is left, and a crawl valley fails loudly ([`Self::lay_valley`]).
     fn back_reach_limit(&self, seam: f64) -> f64 {
         (seam - self.floor.max(self.taken_through)).max(0.0)
     }
 
     /// How far back from the table's end a valley the next leg may open
-    /// there, or lay at a crawl waiting on its spans, reaches: a rest or a
-    /// turnaround releases the advance over the leaders' reach at that
-    /// seam, which is no further than the reach of the crossing the last
-    /// leg closed on.
+    /// there, or lay at a crawl still to come or waiting on its spans,
+    /// reaches: a rest or a turnaround releases the advance over the
+    /// leaders' reach at that seam, which is no further than the reach of
+    /// the crossing the last leg closed on; a crawl valley's side reaches
+    /// back no further than the leaders cover in the
+    /// [`geometry::VALLEY_LEAD_BUDGET_S`] before it, which the turning guard
+    /// leaves its rebuild room within.
     fn unlaid_valley_reach(&self, table_end: f64) -> f64 {
         let opening = self.reach_into_next.map_or(0.0, |closing| {
-            closing
-                .reach(VALLEY_RAMP_TIME_S)
-                .min(table_end - self.floor)
+            closing.valley_reach().min(table_end - self.floor)
         });
-        let waiting = self.waiting_crawl.map_or(0.0, |(turn, crossing)| {
-            table_end - turn + crossing.reach(VALLEY_RAMP_TIME_S).min(turn - self.floor)
-        });
-        opening.max(waiting)
+        let lead = table_end
+            - self
+                .trail
+                .lead_budget_back()
+                .map_or(self.floor, |back| back.max(self.floor));
+        opening.max(lead)
     }
 
     /// How far the smoothed ratio is final: its width there is, every
@@ -2024,8 +2176,10 @@ impl RatioSmoothing {
     /// over which the advance builds or releases its lead from the rest out,
     /// and reaches past the seam only where the lead or a ratio step near
     /// the rest needs it ([`RestSide::width`]). A rest leg the leaders cross
-    /// without coming to rest opens none. Returns whether `leg` closes a
-    /// rest valley.
+    /// without coming to rest opens none. The crawls still waiting lie
+    /// before the rest and are laid first, reading the leaders at rest past
+    /// the trail, as the turning guard leaves room for them: valleys are
+    /// laid in path order. Returns whether `leg` closes a rest valley.
     fn lay_rest_valley(
         &mut self,
         spans: &[RatioSpan],
@@ -2070,6 +2224,9 @@ impl RatioSmoothing {
             },
         );
         if self.open_rest.is_none() {
+            for crawl in std::mem::take(&mut self.waiting_crawls) {
+                self.lay_crawl_valley(spans, rule, crawl, f64::INFINITY);
+            }
             let side = RestSide {
                 rest: rest_start,
                 seam,
@@ -2089,9 +2246,11 @@ impl RatioSmoothing {
                 end: f64::INFINITY,
                 before,
                 after: 0.0,
-                floor: 0.0,
+                floor_before: 0.0,
+                floor_after: 0.0,
                 kind: ValleyKind::Rest,
             });
+            self.assert_weight_continuous();
         }
         self.open_rest = Some(OpenRest {
             end: rest_end,
@@ -2128,108 +2287,6 @@ impl RatioSmoothing {
                 valley.reach_end(),
             ]
         })
-    }
-}
-
-/// A stretch of path where a ratio-ramped advance reads the laid ratio
-/// weighted down to zero: `W = 0` on `[start, end]`, where the leaders'
-/// path speed is zero or a crawl, and `W = ψ(x) = 1 − (1 − x)³` within
-/// `before`/`after` of it, meeting 1 flat to second order. `x` is the
-/// distance `d` out over that width, both flattened over the valley's
-/// `floor` `f` as `√(d² + f²) − f`: with no floor, where the leaders rest
-/// or turn around, the weight rises off zero with a slope their zero speed
-/// makes harmless; across a crawl at speed `v` and acceleration `a`, the
-/// floor is `v²/a`, about where the acceleration takes over from the
-/// crawl, and the weight leaves zero flat, since `W'·ṡ²` of opposite signs
-/// either side would step the advanced velocity. The laid ratio, and so the
-/// material, is untouched; only the lead the advance builds is released
-/// over the path before and rebuilt after.
-///
-/// Rising from a rest the leaders leave at acceleration `a`, the lead
-/// `k·r·W·ṡ` catches up with the advance's `k·r·ṡ` at a rate of at most
-/// `1.653·k·r·a` (the peak of `d/du (u·ψ(u²))`): the advance's natural
-/// rate, overshot by what catching up from zero takes, and over a shaped
-/// start whose acceleration builds from zero, much less. A crawl's floor
-/// keeps that, since the leaders cover it within about `v/a`.
-///
-/// - A turnaround: the leaders' path speed passes through zero at a seam
-///   while its rate does not, so the rate steps from `−a` to `+a`, and an
-///   advance reading `r·ṡ` would step the follower's velocity by `2·k·r·a`
-///   whatever the ratio's own shape. The valley is that seam, each side
-///   reaching as far as the leaders turn around in half the ramp time.
-/// - A crawl: the leaders' slowest point, under
-///   [`ADVANCE_VALLEY_SPEED_MM_S`], at a seam or inside a leg
-///   ([`slowest_crawl`]). The path speed's second derivative carries the
-///   tangent's turning there, `a⊥²/v`, which an advance would turn into
-///   follower acceleration however the planner bounds the path's own. Only
-///   where that leaves the follower's limit ([`Crossing::needs_valley`]):
-///   releasing the lead asks for some too.
-/// - A rest: an extrude-only move or a dwell, where the shaped leaders come
-///   to rest between the kernel spill of the move before and of the move
-///   after, and the fit's back-and-forth near the rest point has its own
-///   turnarounds and short idle spans an advance would turn into steps. The
-///   valley is the stretch where the leaders rest, each side spanning the
-///   spill, and past the raw seam only where the lead or a ratio step near
-///   the rest needs it ([`RestSide::width`]).
-#[derive(Debug, Clone, Copy)]
-struct AdvanceValley {
-    start: f64,
-    end: f64,
-    before: f64,
-    after: f64,
-    floor: f64,
-    kind: ValleyKind,
-}
-
-/// Whether a valley releases the lead around a turnaround or crawl, or a
-/// rest (see [`AdvanceValley`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ValleyKind {
-    Crawl,
-    Rest,
-}
-
-impl AdvanceValley {
-    fn reach_start(&self) -> f64 {
-        self.start - self.before
-    }
-
-    fn reach_end(&self) -> f64 {
-        self.end + self.after
-    }
-
-    /// Whether the valley holds the weight flat at zero at `s`: on
-    /// `[start, end]`, and within its floor `f` either side, over which the
-    /// weight leaves zero flat (`ψ ≈ 3d²/(2f·w)` for `d ≪ f`); where it has
-    /// no floor, to a path lookup's rounding.
-    fn holds_zero_at(&self, s: f64) -> bool {
-        let flat = self.floor.max(SPAN_LOOKUP_SLACK_MM);
-        s >= self.start - flat && s <= self.end + flat
-    }
-
-    fn weight(&self, s: f64) -> (f64, f64, f64) {
-        let (distance, width, outward) = if s < self.start {
-            (self.start - s, self.before, -1.0)
-        } else if s > self.end {
-            (s - self.end, self.after, 1.0)
-        } else {
-            return (0.0, 0.0, 0.0);
-        };
-        if distance >= width {
-            return (1.0, 0.0, 0.0);
-        }
-        let floor = self.floor.min(width);
-        let flattened = |d: f64| d * d / (libm::hypot(d, floor) + floor);
-        let spread = libm::hypot(distance, floor);
-        let slope = distance / spread;
-        let bend = floor / spread * (floor / spread) / spread;
-        let span = flattened(width);
-        let inside = 1.0 - flattened(distance) / span;
-        (
-            1.0 - inside * inside * inside,
-            outward * 3.0 * inside * inside * slope / span,
-            -6.0 * inside * slope * slope / (span * span) + 3.0 * inside * inside * bend / span,
-        )
     }
 }
 
@@ -2289,7 +2346,7 @@ impl RestSide {
     ///   rest — always reaches out.
     fn width(self, spans: &[RatioSpan], rule: &RatioRampRule, table_end: f64) -> f64 {
         let spill_mm = (self.seam - self.rest).abs();
-        let longest = self.crossing.reach(VALLEY_RAMP_TIME_S);
+        let longest = self.crossing.valley_reach();
         let far = self.seam + self.outward * longest;
         let reach = (self.rest.min(far), self.rest.max(far));
         if far > table_end || self.narrows_a_step(spans, rule, reach) {
@@ -2682,10 +2739,25 @@ fn peak_ratio_within(spans: &[RatioSpan], s: f64, reach: f64) -> f64 {
         .fold(0.0, f64::max)
 }
 
-/// The time a turnaround's rate takes to build the speed the leaders cross
-/// its seam with: the shaped leaders' velocities there are zero to their
-/// fit's rounding, far under the rate times this.
-const TURNAROUND_SPEED_TIME_S: f64 = 1e-6;
+/// Whether `valley`'s weight is zero up to `edge` from the `side` of it a
+/// zero-wide side of another valley would read 1 on: its zero stretch
+/// spans `edge`, and does not end there with a step of its own that way.
+fn holds_zero_up_to(valley: &AdvanceValley, edge: f64, side: Side) -> bool {
+    let spans = valley.start <= edge && edge <= valley.end;
+    let steps_there = match side {
+        Side::Before => valley.start == edge && valley.before == 0.0,
+        Side::After => valley.end == edge && valley.after == 0.0,
+    };
+    spans && !steps_there
+}
+
+/// Whether the turning guard leaves room for this follower's crawl valley
+/// sides: it holds an advance no kernel follows, read off the same caps
+/// as the guard's own demand.
+fn guarded_by_the_turning_guard(rule: &RatioRampRule) -> bool {
+    rule.advance_slope_s > 0.0 && !rule.kernel_jerk_per_accel_hz.is_finite()
+}
+
 /// Probes a ramp's crossing is searched with for the leaders' fastest
 /// speed, acceleration and jerk.
 const CROSSING_PROBES: usize = 16;
@@ -2834,14 +2906,17 @@ impl Crossing {
 
     /// How far the leaders reach from the seam in half the ramp time.
     fn reach(self, ramp_time: f64) -> f64 {
-        (self.speed + 0.5 * self.rate * ramp_time) * 0.5 * ramp_time
+        leader_reach(self.speed, self.rate, ramp_time)
     }
 
-    /// The leaders turn around at the seam: they cross it at a speed their
-    /// rate builds within [`TURNAROUND_SPEED_TIME_S`], the rounding of an
-    /// exact zero, while that rate itself is no rounding.
+    /// How far a turnaround or crawl valley here reaches each way.
+    fn valley_reach(self) -> f64 {
+        valley_reach(self.speed, self.rate)
+    }
+
+    /// The leaders turn around at the seam ([`turns_around`]).
     fn turns_around(self) -> bool {
-        self.rate > 0.0 && self.speed <= self.rate * TURNAROUND_SPEED_TIME_S
+        turns_around(self.speed, self.rate)
     }
 
     /// The leaders turn around, or crawl under
@@ -2856,12 +2931,17 @@ impl Crossing {
     /// limit: `r·(a + k·J)`, `J` the slope of the path's acceleration the
     /// follower meets ([`Self::advanced_jerk`]). Elsewhere releasing the
     /// lead over the crawl's short reach would ask more of the follower
-    /// than the crawl.
+    /// than the crawl. A follower the turning guard holds
+    /// ([`guarded_by_the_turning_guard`]) releases it at every crawl: the
+    /// guard bounds the turning `a⊥²/v` the path speed carries only down to
+    /// [`ADVANCE_VALLEY_SPEED_MM_S`], and leaves room for the rebuild of a
+    /// valley at every crawl it may find.
     fn needs_valley(self, rule: &RatioRampRule, ratio: f64) -> bool {
         self.turns_around()
             || (self.crawls()
-                && ratio * (self.rate + rule.advance_slope_s * self.advanced_jerk(rule))
-                    > rule.max_accel_mm_s2)
+                && (guarded_by_the_turning_guard(rule)
+                    || ratio * (self.rate + rule.advance_slope_s * self.advanced_jerk(rule))
+                        > rule.max_accel_mm_s2))
     }
 
     /// The path speed's second rate `s⃛` carries the tangent's turning
@@ -2875,15 +2955,9 @@ impl Crossing {
         }
     }
 
-    /// The floor a valley here keeps flat (see [`AdvanceValley`]): `v²/a`,
-    /// about where the acceleration takes over from the crawl, and none
-    /// where the leaders turn around.
+    /// The floor a valley here keeps flat ([`crawl_floor`]).
     fn crawl_floor(self) -> f64 {
-        if self.turns_around() || self.speed == 0.0 {
-            0.0
-        } else {
-            self.speed * self.speed / self.rate
-        }
+        crawl_floor(self.speed, self.rate)
     }
 }
 

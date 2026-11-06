@@ -14,6 +14,7 @@
 
 use crate::follower_projection::Table;
 use crate::shaper::taylor::{self, Ball, TaylorModel};
+use geometry::kept_floor;
 
 use super::{
     AdvanceValley, FALL_TO_REST, KERNEL_HALF_VARIANCE, RISE_FROM_REST, RatioSmoothing,
@@ -506,7 +507,14 @@ enum ValleySide {
     After,
 }
 
-impl AdvanceValley {
+/// The Taylor-model reading of a laid valley, beside its point weight
+/// ([`AdvanceValley::weight`]).
+trait ValleyModel {
+    fn side(&self, s: f64) -> ValleySide;
+    fn weight_model(&self, side: ValleySide, s: &TaylorModel) -> [TaylorModel; 3];
+}
+
+impl ValleyModel for AdvanceValley {
     fn side(&self, s: f64) -> ValleySide {
         if self.reach_start() >= s || self.reach_end() <= s {
             return ValleySide::Outside;
@@ -535,17 +543,23 @@ impl AdvanceValley {
     /// `f` from below, which it never passes.
     fn weight_model(&self, side: ValleySide, s: &TaylorModel) -> [TaylorModel; 3] {
         let constant = |value: f64| TaylorModel::constant(Ball::exact(value));
-        let (distance, width, outward) = match side {
+        let (distance, width, floor, outward) = match side {
             ValleySide::Outside => return [constant(1.0), constant(0.0), constant(0.0)],
             ValleySide::Inside => return [constant(0.0), constant(0.0), constant(0.0)],
             ValleySide::Before => (
                 s.scale(Ball::exact(-1.0)).add_ball(Ball::exact(self.start)),
                 self.before,
+                self.floor_before,
                 -1.0,
             ),
-            ValleySide::After => (s.add_ball(Ball::exact(-self.end)), self.after, 1.0),
+            ValleySide::After => (
+                s.add_ball(Ball::exact(-self.end)),
+                self.after,
+                self.floor_after,
+                1.0,
+            ),
         };
-        let floor = self.floor.min(width);
+        let floor = kept_floor(floor, width);
         let (flattened, slope, bend) = if floor == 0.0 {
             (distance, constant(1.0), constant(0.0))
         } else {

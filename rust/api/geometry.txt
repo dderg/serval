@@ -453,6 +453,33 @@ pub fn geometry::path::line::Line::kappa_endpoints(&self) -> (f64, f64)
 pub fn geometry::path::line::Line::kappa_peak(&self) -> (f64, f64)
 pub fn geometry::path::line::Line::s_len(&self) -> f64
 pub mod geometry::ratio_ramp
+pub enum geometry::ratio_ramp::ValleyKind
+pub geometry::ratio_ramp::ValleyKind::Crawl
+pub geometry::ratio_ramp::ValleyKind::Rest
+pub struct geometry::ratio_ramp::AdvanceValley
+pub geometry::ratio_ramp::AdvanceValley::after: f64
+pub geometry::ratio_ramp::AdvanceValley::before: f64
+pub geometry::ratio_ramp::AdvanceValley::end: f64
+pub geometry::ratio_ramp::AdvanceValley::floor_after: f64
+pub geometry::ratio_ramp::AdvanceValley::floor_before: f64
+pub geometry::ratio_ramp::AdvanceValley::kind: geometry::ValleyKind
+pub geometry::ratio_ramp::AdvanceValley::start: f64
+impl geometry::AdvanceValley
+pub fn geometry::AdvanceValley::holds_zero_at(&self, f64, f64) -> bool
+pub fn geometry::AdvanceValley::reach_end(&self) -> f64
+pub fn geometry::AdvanceValley::reach_start(&self) -> f64
+pub fn geometry::AdvanceValley::weight(&self, f64) -> (f64, f64, f64)
+pub struct geometry::ratio_ramp::CrawlSide
+pub geometry::ratio_ramp::CrawlSide::accel: f64
+pub geometry::ratio_ramp::CrawlSide::fastest: f64
+pub geometry::ratio_ramp::CrawlSide::floor: (f64, f64)
+pub geometry::ratio_ramp::CrawlSide::outward: (f64, f64)
+pub geometry::ratio_ramp::CrawlSide::signed_from: f64
+pub geometry::ratio_ramp::CrawlSide::speed: f64
+impl geometry::CrawlSide
+pub fn geometry::CrawlSide::either_way(f64, f64, f64, (f64, f64)) -> Self
+pub fn geometry::CrawlSide::rebuild(&self, f64) -> f64
+pub fn geometry::CrawlSide::rebuilds_within(&self, f64) -> geometry::RebuildsWithin
 pub struct geometry::ratio_ramp::RatioRampRule
 pub geometry::ratio_ramp::RatioRampRule::advance_slope_s: f64
 pub geometry::ratio_ramp::RatioRampRule::kernel_jerk_per_accel_hz: f64
@@ -469,17 +496,43 @@ pub geometry::ratio_ramp::RatioStep::jerk_mm_s3: f64
 pub geometry::ratio_ramp::RatioStep::peak_ratio: f64
 pub geometry::ratio_ramp::RatioStep::ratio_step: f64
 pub geometry::ratio_ramp::RatioStep::speed_mm_s: f64
+pub struct geometry::ratio_ramp::RebuildsWithin
+impl geometry::RebuildsWithin
+pub fn geometry::RebuildsWithin::at(&self, (f64, f64), f64, f64) -> f64
+pub struct geometry::ratio_ramp::SideWeight
+pub geometry::ratio_ramp::SideWeight::bend: (f64, f64)
+pub geometry::ratio_ramp::SideWeight::bend_scale: (f64, f64)
+pub geometry::ratio_ramp::SideWeight::fold: (f64, f64)
+pub geometry::ratio_ramp::SideWeight::slope: (f64, f64)
+pub geometry::ratio_ramp::SideWeight::weight: (f64, f64)
+impl geometry::SideWeight
+pub const geometry::SideWeight::OUTSIDE: Self
+pub fn geometry::SideWeight::within((f64, f64), (f64, f64), (f64, f64)) -> Self
 pub struct geometry::ratio_ramp::StepCrossing
 pub geometry::ratio_ramp::StepCrossing::edge_speed_mm_s: f64
 pub geometry::ratio_ramp::StepCrossing::own_flow_mm_s: f64
 pub geometry::ratio_ramp::StepCrossing::rest_room_mm: f64
 pub geometry::ratio_ramp::StepCrossing::step: geometry::ratio_ramp::RatioStep
 pub const geometry::ratio_ramp::ADVANCE_VALLEY_SPEED_MM_S: f64
+pub const geometry::ratio_ramp::CRAWL_SIDE_WIDEST_MM: f64
 pub const geometry::ratio_ramp::RATIO_RAMP_ENVELOPE_SLOPE: f64
 pub const geometry::ratio_ramp::RATIO_RAMP_MAX_TIME_S: f64
 pub const geometry::ratio_ramp::RATIO_RAMP_MIN_TIME_S: f64
+pub const geometry::ratio_ramp::TURNAROUND_SPEED_TIME_S: f64
+pub const geometry::ratio_ramp::VALLEY_LEAD_BUDGET_S: f64
+pub const geometry::ratio_ramp::VALLEY_RAMP_TIME_S: f64
+pub fn geometry::ratio_ramp::coupled_bend(f64, f64, f64, f64) -> f64
+pub fn geometry::ratio_ramp::crawl_floor(f64, f64) -> f64
+pub fn geometry::ratio_ramp::crawl_side_width(f64, impl core::ops::function::FnMut(f64) -> bool) -> core::option::Option<f64>
+pub fn geometry::ratio_ramp::kept_floor(f64, f64) -> f64
+pub fn geometry::ratio_ramp::leader_reach(f64, f64, f64) -> f64
 pub fn geometry::ratio_ramp::longest_ramp_time(f64, f64) -> f64
 pub fn geometry::ratio_ramp::rest_room_reach_mm(f64) -> f64
+pub fn geometry::ratio_ramp::side_weight(f64, f64, f64) -> (f64, f64, f64)
+pub fn geometry::ratio_ramp::turns_around(f64, f64) -> bool
+pub fn geometry::ratio_ramp::valley_reach(f64, f64) -> f64
+pub fn geometry::ratio_ramp::widest_crawl_reach(f64) -> f64
+pub fn geometry::ratio_ramp::widest_crawl_side_within(f64, f64) -> core::option::Option<f64>
 pub mod geometry::segment
 pub struct geometry::segment::CubicSegment
 pub geometry::segment::CubicSegment::feedrate_mm_s: f64
@@ -1010,6 +1063,9 @@ pub geometry::UnblendReason::NoBudget
 pub geometry::UnblendReason::NonSpatial
 pub geometry::UnblendReason::StreamCut
 pub geometry::UnblendReason::ZeroDeviation
+pub enum geometry::ValleyKind
+pub geometry::ValleyKind::Crawl
+pub geometry::ValleyKind::Rest
 pub enum geometry::VelocityError
 pub geometry::VelocityError::Diverged
 pub geometry::VelocityError::Diverged::line_no: u32
@@ -1036,6 +1092,19 @@ pub geometry::VelocityError::OverCommitted::line_no: u32
 impl core::error::Error for geometry::velocity::VelocityError
 impl core::fmt::Display for geometry::velocity::VelocityError
 pub fn geometry::velocity::VelocityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct geometry::AdvanceValley
+pub geometry::AdvanceValley::after: f64
+pub geometry::AdvanceValley::before: f64
+pub geometry::AdvanceValley::end: f64
+pub geometry::AdvanceValley::floor_after: f64
+pub geometry::AdvanceValley::floor_before: f64
+pub geometry::AdvanceValley::kind: geometry::ValleyKind
+pub geometry::AdvanceValley::start: f64
+impl geometry::AdvanceValley
+pub fn geometry::AdvanceValley::holds_zero_at(&self, f64, f64) -> bool
+pub fn geometry::AdvanceValley::reach_end(&self) -> f64
+pub fn geometry::AdvanceValley::reach_start(&self) -> f64
+pub fn geometry::AdvanceValley::weight(&self, f64) -> (f64, f64, f64)
 pub struct geometry::BrakeMove
 pub struct geometry::CornerFitConfig
 pub geometry::CornerFitConfig::extrusion_ramp_rel_tol: f64
@@ -1046,6 +1115,17 @@ pub geometry::CornerFitConfig::theta_max_rad: f64
 pub geometry::CornerFitConfig::theta_min_rad: f64
 impl core::default::Default for geometry::CornerFitConfig
 pub fn geometry::CornerFitConfig::default() -> Self
+pub struct geometry::CrawlSide
+pub geometry::CrawlSide::accel: f64
+pub geometry::CrawlSide::fastest: f64
+pub geometry::CrawlSide::floor: (f64, f64)
+pub geometry::CrawlSide::outward: (f64, f64)
+pub geometry::CrawlSide::signed_from: f64
+pub geometry::CrawlSide::speed: f64
+impl geometry::CrawlSide
+pub fn geometry::CrawlSide::either_way(f64, f64, f64, (f64, f64)) -> Self
+pub fn geometry::CrawlSide::rebuild(&self, f64) -> f64
+pub fn geometry::CrawlSide::rebuilds_within(&self, f64) -> geometry::RebuildsWithin
 pub struct geometry::CubicSegment
 pub geometry::CubicSegment::feedrate_mm_s: f64
 pub geometry::CubicSegment::followers: alloc::vec::Vec<geometry::segment::FollowerDemand>
@@ -1252,6 +1332,9 @@ pub geometry::RatioStep::jerk_mm_s3: f64
 pub geometry::RatioStep::peak_ratio: f64
 pub geometry::RatioStep::ratio_step: f64
 pub geometry::RatioStep::speed_mm_s: f64
+pub struct geometry::RebuildsWithin
+impl geometry::RebuildsWithin
+pub fn geometry::RebuildsWithin::at(&self, (f64, f64), f64, f64) -> f64
 pub struct geometry::RestSettle
 pub geometry::RestSettle::radius_mm: f64
 pub geometry::RestSettle::sides: [geometry::frontend::SettleSide; 2]
@@ -1297,6 +1380,15 @@ impl geometry::shaped_corner::ShapedCorners
 pub fn geometry::shaped_corner::ShapedCorners::new([core::option::Option<&nurbs::algebra::PiecewisePolynomialKernel>; 2]) -> core::option::Option<Self>
 impl core::cmp::PartialEq for geometry::shaped_corner::ShapedCorners
 pub fn geometry::shaped_corner::ShapedCorners::eq(&self, &Self) -> bool
+pub struct geometry::SideWeight
+pub geometry::SideWeight::bend: (f64, f64)
+pub geometry::SideWeight::bend_scale: (f64, f64)
+pub geometry::SideWeight::fold: (f64, f64)
+pub geometry::SideWeight::slope: (f64, f64)
+pub geometry::SideWeight::weight: (f64, f64)
+impl geometry::SideWeight
+pub const geometry::SideWeight::OUTSIDE: Self
+pub fn geometry::SideWeight::within((f64, f64), (f64, f64), (f64, f64)) -> Self
 pub struct geometry::SourceRange
 pub geometry::SourceRange::end_line: u32
 pub geometry::SourceRange::start_line: u32
@@ -1371,6 +1463,7 @@ pub geometry::VelocityReport::stops: u32
 pub geometry::VelocityReport::traversal_time_s: f64
 pub const geometry::ADVANCE_VALLEY_SPEED_MM_S: f64
 pub const geometry::CORNER_DEVIATION_SCV_FACTOR: f64
+pub const geometry::CRAWL_SIDE_WIDEST_MM: f64
 pub const geometry::DEFAULT_CORNER_ALLOWANCE_MM: f64
 pub const geometry::MIN_DEVICE_INTERVAL_S: f64
 pub const geometry::RATIO_RAMP_ENVELOPE_SLOPE: f64
@@ -1378,6 +1471,9 @@ pub const geometry::RATIO_RAMP_MAX_TIME_S: f64
 pub const geometry::RATIO_RAMP_MIN_TIME_S: f64
 pub const geometry::SEAM_VELOCITY_STEP_MM_S: f64
 pub const geometry::SPATIAL_AXIS_SETS: usize
+pub const geometry::TURNAROUND_SPEED_TIME_S: f64
+pub const geometry::VALLEY_LEAD_BUDGET_S: f64
+pub const geometry::VALLEY_RAMP_TIME_S: f64
 pub trait geometry::FanOut
 pub fn geometry::FanOut::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
 impl geometry::velocity::FanOut for geometry::velocity::Serial
@@ -1386,7 +1482,12 @@ pub fn geometry::axis_set([bool; 3]) -> usize
 pub fn geometry::brake_horizon(&[geometry::velocity::BrakeMove], impl core::iter::traits::double_ended::DoubleEndedIterator<Item = f64> + core::iter::traits::exact_size::ExactSizeIterator) -> core::option::Option<usize>
 pub fn geometry::brake_move(&geometry::frontend::Move, &geometry::ExtrusionBudget, bool, core::option::Option<(&geometry::frontend::Move, &geometry::ExtrusionBudget, &geometry::velocity::BrakeMove)>, f64, geometry::velocity::VelocityPlanParams<'_>) -> core::result::Result<geometry::velocity::BrakeMove, geometry::velocity::VelocityError>
 pub fn geometry::corner_deviation_from_scv(f64, f64) -> f64
+pub fn geometry::coupled_bend(f64, f64, f64, f64) -> f64
+pub fn geometry::crawl_floor(f64, f64) -> f64
+pub fn geometry::crawl_side_width(f64, impl core::ops::function::FnMut(f64) -> bool) -> core::option::Option<f64>
 pub fn geometry::extrusion_budgets(&[geometry::frontend::Move], f64, f64) -> alloc::vec::Vec<geometry::ExtrusionBudget>
+pub fn geometry::kept_floor(f64, f64) -> f64
+pub fn geometry::leader_reach(f64, f64, f64) -> f64
 pub fn geometry::line_move([f64; 3], [f64; 3], f64, geometry::frontend::MoveContext) -> core::result::Result<geometry::frontend::Move, geometry::frontend::FrontendError>
 pub fn geometry::plan_velocity_stops_reconstruct_prefix(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams<'_>, usize) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
 pub fn geometry::plan_velocity_stops_select_prefix<F, W>(&[geometry::frontend::Move], &[bool], &[geometry::ExtrusionBudget], geometry::velocity::VelocityPlanParams<'_>, &W, F) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError> where F: core::ops::function::FnOnce(usize) -> usize, W: geometry::velocity::FanOut
@@ -1394,3 +1495,8 @@ pub fn geometry::replan_span(&[geometry::frontend::Move], &[bool], &[geometry::E
 pub fn geometry::rest_room_reach_mm(f64) -> f64
 pub fn geometry::scv_from_corner_deviation(f64, f64) -> f64
 pub fn geometry::seam_requires_stop(&geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig) -> bool
+pub fn geometry::side_weight(f64, f64, f64) -> (f64, f64, f64)
+pub fn geometry::turns_around(f64, f64) -> bool
+pub fn geometry::valley_reach(f64, f64) -> f64
+pub fn geometry::widest_crawl_reach(f64) -> f64
+pub fn geometry::widest_crawl_side_within(f64, f64) -> core::option::Option<f64>

@@ -363,27 +363,25 @@ const FIT_GROUP_SPAN_S: f64 = 0.04;
 /// start, so the shaper shapes and commits whole groups, and each group —
 /// and with it every fit — depends on its own segments alone, never on how
 /// the emits are cut.
-pub(crate) fn fit_group_ends(segments: &[ContinuousSegment]) -> Vec<usize> {
-    let mut ends = Vec::new();
+pub(crate) fn fit_group_ends(segments: &[ContinuousSegment]) -> impl Iterator<Item = usize> + '_ {
     let mut start = 0;
-    for (index, segment) in segments.iter().enumerate() {
-        if index + 1 - start == FIT_GROUP_SEGMENTS
-            || segment.t_end - segments[start].t_start >= FIT_GROUP_SPAN_S
-            || segment.rest_at_end
-        {
-            ends.push(index + 1);
-            start = index + 1;
-        }
-    }
-    ends
+    segments
+        .iter()
+        .enumerate()
+        .filter_map(move |(index, segment)| {
+            let closes = index + 1 - start == FIT_GROUP_SEGMENTS
+                || segment.t_end - segments[start].t_start >= FIT_GROUP_SPAN_S
+                || segment.rest_at_end;
+            closes.then(|| {
+                start = index + 1;
+                start
+            })
+        })
 }
 
 /// The most of the first `count` segments that fill whole fit groups.
 pub(crate) fn whole_groups(segments: &[ContinuousSegment], count: usize) -> usize {
-    fit_group_ends(&segments[..count])
-        .last()
-        .copied()
-        .unwrap_or(0)
+    fit_group_ends(&segments[..count]).last().unwrap_or(0)
 }
 
 /// The fit groups `segments` falls into, every one of them whole unless
@@ -392,7 +390,7 @@ pub(crate) fn fit_groups(
     segments: &[ContinuousSegment],
     clamps_past_signal: bool,
 ) -> Vec<std::ops::Range<usize>> {
-    let mut ends = fit_group_ends(segments);
+    let mut ends: Vec<usize> = fit_group_ends(segments).collect();
     if ends.last().copied().unwrap_or(0) < segments.len() {
         assert!(
             clamps_past_signal,
@@ -509,10 +507,9 @@ impl PendingSegments {
         &mut self,
         chains: &AxisChainSet,
         fit_tol: FitTol,
-        pool: &WorkerPool,
     ) -> Result<(usize, usize), PostProcessError> {
         let fresh = &mut self.segments.make_contiguous()[self.materialized..];
-        let rebuilt = materialize_changed_sources(fresh, chains, fit_tol, pool)?;
+        let rebuilt = materialize_changed_sources(fresh, chains, fit_tol)?;
         let segments = fresh.len();
         self.materialized = self.segments.len();
         Ok((segments, rebuilt))
@@ -636,7 +633,7 @@ impl Shaper {
         let started = crate::timing::stopwatch();
         let (segments, rebuilt) = self
             .pending
-            .materialize(&self.chains, self.fit_tol, &self.pool)
+            .materialize(&self.chains, self.fit_tol)
             .unwrap_or_else(|error| panic!("shaper: {error}"));
         let elapsed_us = started.elapsed_us();
         crate::timing::record_stage(crate::timing::Stage::MaterializeSource, elapsed_us);
@@ -966,87 +963,39 @@ fn materialize_source_axis(
     Ok(ContinuousAxis::Spline(Arc::new(curve)))
 }
 
-/// Fits the changed sources of every segment in `segments`, one pool job
-/// per axis: each fit reads only its own segment's source, so the batch an
-/// emit needs fans out whole. Returns how many axes it rebuilt.
-fn materialize_changed_sources<S: BorrowMut<ContinuousSegment> + Sync>(
+/// Fits the changed sources of every segment in `segments` on the calling
+/// thread; a segment's axes share one enclosure of its span, built once for
+/// all of them. Fanning the axes out made every participant but the first
+/// wait on that build, and the fits' own fan-outs then ran nested inside
+/// helpers: on the Pi 5's two cores the planning thread, which hands the
+/// shaper one segment at a time, lost trident_kernel 5 % of its worst
+/// window to it. Returns how many axes it rebuilt.
+fn materialize_changed_sources<S: BorrowMut<ContinuousSegment>>(
     segments: &mut [S],
     chains: &AxisChainSet,
     fit_tol: FitTol,
-    pool: &WorkerPool,
 ) -> Result<usize, PostProcessError> {
-    let jobs: Vec<(usize, usize)> = segments
-        .iter()
-        .enumerate()
-        .flat_map(|(index, segment)| {
-            axes_to_materialize(segment.borrow(), chains).map(move |axis| (index, axis))
-        })
-        .collect();
-    let participants = if cfg!(target_arch = "wasm32") {
-        1
-    } else {
-        std::thread::available_parallelism()
-            .map_or(1, |cores| cores.get())
-            .min(jobs.len())
-    };
     let accuracy = HullBudget {
         tol: fit_tol,
         velocity: f64::INFINITY,
     }
     .enclosure_accuracy();
-    let shared: Vec<Option<SpanEnclosures>> = segments
-        .iter()
-        .enumerate()
-        .map(|(index, segment)| {
-            let segment = segment.borrow();
-            let analytic = |axis: usize| match &segment.axes[axis] {
-                ContinuousAxis::Analytic { span, .. } if axis_enclosure::encloses(span, axis) => {
-                    Some(span)
-                }
-                _ => None,
-            };
-            let span = jobs
-                .iter()
-                .filter(|&&(job_index, _)| job_index == index)
-                .find_map(|&(_, axis)| analytic(axis))?;
-            let axes = jobs
-                .iter()
-                .filter(|&&(job_index, axis)| {
-                    job_index == index
-                        && analytic(axis).is_some_and(|other| Arc::ptr_eq(other, span))
-                })
-                .map(|&(_, axis)| axis)
-                .collect();
-            Some(SpanEnclosures {
-                span: Arc::clone(span),
-                axes,
-                whole: (segment.t_start, segment.t_end),
-                accuracy,
-                built: std::sync::OnceLock::new(),
+    let mut rebuilt = 0;
+    for segment in segments.iter_mut() {
+        let axes: Vec<usize> = axes_to_materialize(segment.borrow(), chains).collect();
+        let shared = SpanEnclosures::of_segment(segment.borrow(), &axes, accuracy);
+        let sources = axes
+            .iter()
+            .map(|&axis| {
+                materialize_source_axis(segment.borrow(), axis, chains, fit_tol, shared.as_ref())
             })
-        })
-        .collect();
-    let fitted = pool
-        .map_indexed(
-            participants,
-            jobs.len(),
-            || (),
-            |(), job| {
-                let (index, axis) = jobs[job];
-                materialize_source_axis(
-                    segments[index].borrow(),
-                    axis,
-                    chains,
-                    fit_tol,
-                    shared[index].as_ref(),
-                )
-            },
-        )
-        .expect("source materialize thread panicked");
-    for (&(index, axis), source) in jobs.iter().zip(fitted) {
-        Arc::make_mut(&mut segments[index].borrow_mut().axes)[axis] = source?;
+            .collect::<Result<Vec<_>, _>>()?;
+        for (&axis, source) in axes.iter().zip(sources) {
+            Arc::make_mut(&mut segment.borrow_mut().axes)[axis] = source;
+            rebuilt += 1;
+        }
     }
-    Ok(jobs.len())
+    Ok(rebuilt)
 }
 
 /// The share of a piece's tolerance the audit lets an enclosure's bound
@@ -1086,7 +1035,6 @@ pub(crate) fn proven_error_bounds<S: TrackSignal>(
 pub(crate) struct SourceMaterializer {
     chains: AxisChainSet,
     fit_tol: FitTol,
-    pool: Arc<WorkerPool>,
 }
 
 impl SourceMaterializer {
@@ -1094,7 +1042,6 @@ impl SourceMaterializer {
         Self {
             chains: shaper.chains.clone(),
             fit_tol: shaper.fit_tol,
-            pool: Arc::clone(&shaper.pool),
         }
     }
 
@@ -1113,7 +1060,7 @@ impl SourceMaterializer {
                     BaseItem::Drain | BaseItem::Control(_) => None,
                 })
                 .collect();
-            materialize_changed_sources(&mut segments, &self.chains, self.fit_tol, &self.pool)
+            materialize_changed_sources(&mut segments, &self.chains, self.fit_tol)
                 .unwrap_or_else(|error| panic!("shaper: {error}"));
             let Some((swap, after)) = after.split_first_mut() else {
                 break;
@@ -1156,6 +1103,29 @@ struct SpanEnclosures {
 }
 
 impl SpanEnclosures {
+    /// What `segment`'s `axes` that read the span of the first of them read
+    /// analytically share; `None` where none reads an analytic span.
+    fn of_segment(segment: &ContinuousSegment, axes: &[usize], accuracy: [f64; 3]) -> Option<Self> {
+        let analytic = |axis: usize| match &segment.axes[axis] {
+            ContinuousAxis::Analytic { span, .. } if axis_enclosure::encloses(span, axis) => {
+                Some(span)
+            }
+            _ => None,
+        };
+        let span = axes.iter().find_map(|&axis| analytic(axis))?;
+        Some(Self {
+            span: Arc::clone(span),
+            axes: axes
+                .iter()
+                .copied()
+                .filter(|&axis| analytic(axis).is_some_and(|other| Arc::ptr_eq(other, span)))
+                .collect(),
+            whole: (segment.t_start, segment.t_end),
+            accuracy,
+            built: std::sync::OnceLock::new(),
+        })
+    }
+
     fn of(&self, axis: usize) -> Option<&[ExactPiece]> {
         let slot = self.axes.iter().position(|&shared| shared == axis)?;
         let built = self.built.get_or_init(|| {
@@ -3117,11 +3087,13 @@ impl AxisSignalTable {
         pieces: impl IntoIterator<Item = &'p BezierPiece>,
         bounds: SignalBounds,
     ) -> Self {
+        let pieces = pieces.into_iter();
+        let (piece_count, _) = pieces.size_hint();
         let mut table = Self {
-            starts: Vec::new(),
-            ends: Vec::new(),
-            origins: Vec::new(),
-            coeffs: Vec::new(),
+            starts: Vec::with_capacity(piece_count),
+            ends: Vec::with_capacity(piece_count),
+            origins: Vec::with_capacity(piece_count),
+            coeffs: Vec::with_capacity(piece_count),
             first_t: bounds.first_t,
             last_t: bounds.last_t,
             boundary: bounds.boundary,

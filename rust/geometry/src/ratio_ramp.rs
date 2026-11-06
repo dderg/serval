@@ -33,6 +33,15 @@
 //! ([`rest_room_reach_mm`]), it lowers the leader speed at the step
 //! ([`RatioRampRule::step_speed_cap`]).
 
+mod valley;
+
+pub use valley::{
+    AdvanceValley, CRAWL_SIDE_WIDEST_MM, CrawlSide, RebuildsWithin, SideWeight,
+    TURNAROUND_SPEED_TIME_S, VALLEY_LEAD_BUDGET_S, VALLEY_RAMP_TIME_S, ValleyKind, coupled_bend,
+    crawl_floor, crawl_side_width, kept_floor, leader_reach, side_weight, turns_around,
+    valley_reach, widest_crawl_reach, widest_crawl_side_within,
+};
+
 /// The shortest ratio ramp.
 pub const RATIO_RAMP_MIN_TIME_S: f64 = 0.005;
 /// The longest ratio ramp: past it the planner slows the step instead of

@@ -1,4 +1,4 @@
-use super::shadow::{AdvanceDemand, FollowerKernels};
+use super::shadow::{AdvanceDemand, FollowerKernels, norm};
 use geometry::ADVANCE_VALLEY_SPEED_MM_S;
 
 /// What the screen reads of one planned move: when it runs, how fast, the
@@ -109,56 +109,95 @@ pub(super) fn passes(
     jerk_gain: impl Fn([bool; 3]) -> f64,
     max_accel: f64,
 ) -> bool {
-    let mut velocity = [(f64::INFINITY, f64::NEG_INFINITY); 3];
-    let mut accel = [0.0_f64; 3];
-    let mut accel_bound = 0.0_f64;
-    let mut moves_on = [false; 3];
-    for summary in window {
-        accel_bound = accel_bound.max(summary.accel_bound);
+    let shaped = ShapedBox::over(kernels, window);
+    let speed = shaped.speed_floor.max(ADVANCE_VALLEY_SPEED_MM_S);
+    let accel_ceiling = norm(shaped.strongest);
+    let cross = shaped.cross_ceiling();
+    let turning =
+        (cross * cross / (speed * speed * speed)).min(accel_ceiling * accel_ceiling / speed);
+    demand.within(
+        accel_ceiling,
+        jerk_gain(shaped.moves_on) * shaped.accel_bound,
+        turning,
+    ) <= max_accel
+}
+
+/// The box the shaped motion stays in while the shaped path crosses a
+/// move, from the planned moves within the kernels' reach of it (see
+/// [`passes`]): `|v|` at least `speed_floor`, each axis's `|v_k|` within
+/// `fastest` and `|a_k|` within `strongest`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct ShapedBox {
+    pub speed_floor: f64,
+    pub fastest: [f64; 3],
+    pub strongest: [f64; 3],
+    pub accel_bound: f64,
+    pub moves_on: [bool; 3],
+}
+
+impl ShapedBox {
+    pub fn over(kernels: &FollowerKernels, window: impl Iterator<Item = MoveSummary>) -> Self {
+        let mut velocity = [(f64::INFINITY, f64::NEG_INFINITY); 3];
+        let mut accel = [0.0_f64; 3];
+        let mut accel_bound = 0.0_f64;
+        let mut moves_on = [false; 3];
+        for summary in window {
+            accel_bound = accel_bound.max(summary.accel_bound);
+            for axis in 0..3 {
+                accel[axis] = accel[axis].max(summary.accel[axis]);
+                moves_on[axis] |= summary.moves_on[axis];
+                let (lo, hi) = match summary.heading {
+                    None => (0.0, 0.0),
+                    Some(heading) => {
+                        let (slow, fast) = summary.speed;
+                        let (least, most) = heading[axis];
+                        (
+                            (slow * least).min(fast * least),
+                            (slow * most).max(fast * most),
+                        )
+                    }
+                };
+                velocity[axis] = (velocity[axis].0.min(lo), velocity[axis].1.max(hi));
+            }
+        }
+        let mut gap_sq = 0.0;
+        let mut fastest = [0.0; 3];
+        let mut strongest = [0.0; 3];
         for axis in 0..3 {
-            accel[axis] = accel[axis].max(summary.accel[axis]);
-            moves_on[axis] |= summary.moves_on[axis];
-            let (lo, hi) = match summary.heading {
-                None => (0.0, 0.0),
-                Some(heading) => {
-                    let (slow, fast) = summary.speed;
-                    let (least, most) = heading[axis];
-                    (
-                        (slow * least).min(fast * least),
-                        (slow * most).max(fast * most),
-                    )
-                }
-            };
-            velocity[axis] = (velocity[axis].0.min(lo), velocity[axis].1.max(hi));
+            let (positive, negative) = kernels.masses(axis);
+            let (lo, hi) = velocity[axis];
+            if !(lo <= hi) {
+                continue;
+            }
+            let least = least_product(positive, lo) - most_product(negative, hi);
+            let most = most_product(positive, hi) - least_product(negative, lo);
+            let gap = least.max(-most).max(0.0);
+            gap_sq += gap * gap;
+            fastest[axis] = least.abs().max(most.abs());
+            strongest[axis] = (positive.1 + negative.1) * accel[axis];
+        }
+        Self {
+            speed_floor: gap_sq.sqrt(),
+            fastest,
+            strongest,
+            accel_bound,
+            moves_on,
         }
     }
-    let mut gap_sq = 0.0;
-    let mut fastest = [0.0; 3];
-    let mut strongest = [0.0; 3];
-    for axis in 0..3 {
-        let (positive, negative) = kernels.masses(axis);
-        let (lo, hi) = velocity[axis];
-        if !(lo <= hi) {
-            continue;
-        }
-        let least = least_product(positive, lo) - most_product(negative, hi);
-        let most = most_product(positive, hi) - least_product(negative, lo);
-        let gap = least.max(-most).max(0.0);
-        gap_sq += gap * gap;
-        fastest[axis] = least.abs().max(most.abs());
-        strongest[axis] = (positive.1 + negative.1) * accel[axis];
+
+    /// `|a × v|` at most: each component `a_i·v_j − a_j·v_i` within
+    /// `strongest_i·fastest_j + strongest_j·fastest_i`.
+    pub fn cross_ceiling(&self) -> f64 {
+        let cross_sq: f64 = [(0, 1), (0, 2), (1, 2)]
+            .iter()
+            .map(|&(i, j)| {
+                let term =
+                    self.strongest[i] * self.fastest[j] + self.strongest[j] * self.fastest[i];
+                term * term
+            })
+            .sum();
+        cross_sq.sqrt()
     }
-    let speed = gap_sq.sqrt().max(ADVANCE_VALLEY_SPEED_MM_S);
-    let accel_ceiling = (strongest.iter().map(|a| a * a).sum::<f64>()).sqrt();
-    let cross_sq: f64 = [(0, 1), (0, 2), (1, 2)]
-        .iter()
-        .map(|&(i, j)| {
-            let term = strongest[i] * fastest[j] + strongest[j] * fastest[i];
-            term * term
-        })
-        .sum();
-    let turning = (cross_sq / (speed * speed * speed)).min(accel_ceiling * accel_ceiling / speed);
-    demand.within(accel_ceiling, jerk_gain(moves_on) * accel_bound, turning) <= max_accel
 }
 
 /// The least `m·v` over a mass `m` within `(least, most)`.

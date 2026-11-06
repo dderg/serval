@@ -48,18 +48,21 @@ The gate fails when, for any config:
 - Ir grew more than IR_TOLERANCE_PCT over its baseline. Ir is deterministic,
   so it is the drift signal. Shrinkage passes: the next accept ratchets the
   baseline down;
-- the Pi 5 2-core worst 5 s window the Ir prediction gives is below
-  PI_FLOOR_X (PI_FLOOR_FAILS off turns this into a warning). Ir is
-  deterministic, so it decides the floor;
-- even the live prediction's optimistic bound misses PI_FLOOR_X: the
-  prediction raised by this job's live band and by the live model's
-  residual, its worst leave-one-out residual on this runner's CPU model (on
-  an unseen CPU model, its worst residual on a CPU model left out of the
-  fit). The live model misses the Pi by 10-15 % on any one runner CPU, so a
-  live prediction just under the floor is within its own error: it is
-  reported, and Ir decides. A live prediction below even its optimistic
-  bound is a regression no residual explains, such as #663's thread
-  handoffs, which Ir cannot see.
+- the Pi 5 2-core worst 5 s window either prediction gives is below
+  PI_FLOOR_X (PI_FLOOR_FAILS off turns this into a warning), the live one
+  raised by this job's live band, unless the Pi itself measured this tree
+  at or above the floor (PI_WINDOW, written by PI_COMMAND), which then
+  decides. Neither prediction alone is trusted below the floor: #804 sped
+  the dense print's second half up 18 %, which the slice's Ir never
+  reaches, so Ir predicted 2.09x where the Pi measured 1.78x, while the
+  live replay of the full print predicted 1.86x; a live prediction that
+  close to the Pi is within the live model's worst residual on some runner,
+  so letting that residual excuse it let the regression land. A live
+  prediction below even its optimistic bound, raised by the live model's
+  residual too (its worst leave-one-out residual on this runner's CPU
+  model; on an unseen CPU model, its worst residual on a CPU model left
+  out of the fit), is a regression no model error explains, such as
+  #663's thread handoffs; the report says so.
   A config FLOOR_SHORTFALLS pins below the floor, to the issue that owns
   the shortfall, misses it instead when its Ir prediction falls below the
   pinned one by more than SHORTFALL_TOLERANCE_PCT (a regression); its live
@@ -191,6 +194,8 @@ EXTRACTED_MARKER = ".extracted"
 CI_ROOT = Path("/home/runner/work/serval/serval")
 CI_CARGO_HOME = "/home/runner/.cargo"
 DOCKER_CACHE = RUST / "target" / "throughput-gate"
+PI_WINDOW = ROOT / "tools" / "bench" / "pi_window.json"
+PI_COMMAND = "python3 scripts/throughput_pi.py"
 ACCEPT_BLOCK = re.compile(r"```throughput-accept[ \t]*\n(.*?)```", re.S)
 STREAM_SECS = re.compile(r"\bstream_secs=([0-9.]+)")
 Replay = TypeVar("Replay")
@@ -878,14 +883,14 @@ def live_optimistic_x(
     return predicted * (1.0 + band_pct / 100.0) * (1.0 + residual_pct / 100.0)
 
 
-def live_floor_verdict(
+def live_floor_miss(
     predicted: float, band_pct: float, residual_pct: float
-) -> tuple[str | None, str | None]:
-    """(a failure, a note) for the live prediction: it fails only when even
-    its optimistic bound, raised by this job's rep band and the model's
-    residual, misses the floor; below the floor within them it is noted."""
+) -> str | None:
+    """The live prediction's floor miss: below the floor even raised by this
+    job's rep band. It states the optimistic bound the live model's residual
+    gives too, and when even that misses, says no model error explains it."""
     if predicted * (1.0 + band_pct / 100.0) >= PI_FLOOR_X:
-        return None, None
+        return None
     optimistic = live_optimistic_x(predicted, band_pct, residual_pct)
     stated = (
         f"{prediction('the live cost', predicted, band_pct)} below the "
@@ -893,8 +898,31 @@ def live_floor_verdict(
         f"live model's {residual_pct:.1f} % residual"
     )
     if optimistic < PI_FLOOR_X:
-        return f"{stated}: even that misses the floor", None
-    return None, f"{stated}: Ir decides the floor; measure the Pi"
+        return f"{stated}: even that misses the floor"
+    return stated
+
+
+def pi_floor_verdict(
+    misses: list[str], pi_worst_x: float | None
+) -> tuple[list[str], list[str]]:
+    """(floor misses, notes) once the Pi's own measurement of this tree, if
+    any, is weighed against the predictions' misses: it decides when there
+    is one, and without one every miss stands, naming how to measure."""
+    if not misses:
+        return [], []
+    if pi_worst_x is None:
+        return [
+            f"{miss}; no Pi measurement of this tree overrides it: measure "
+            f"the Pi with {PI_COMMAND} and commit {PI_WINDOW.relative_to(ROOT)}"
+            for miss in misses
+        ], []
+    measured = f"the Pi measured this tree's worst window at {pi_worst_x:.2f}x"
+    if pi_worst_x < PI_FLOOR_X:
+        return [f"{measured}, below the {PI_FLOOR_X:.1f}x floor"], []
+    return [], [
+        f"{miss}; {measured}, at or above the floor, and decides"
+        for miss in misses
+    ]
 
 
 def pin_vanished(source: str, predicted: float, issue: int) -> str | None:
@@ -927,6 +955,7 @@ def judge(
     measurement: Measurement,
     model: dict,
     shortfalls: dict[str, FloorShortfall] = FLOOR_SHORTFALLS,
+    pi_worst_x: float | None = None,
 ) -> Verdict:
     ir_delta_pct = 100.0 * (measurement.ir - entry["ir"]) / entry["ir"]
     predicted = predicted_worst_x(model, measurement)
@@ -936,23 +965,33 @@ def judge(
         *calibration_replay_problems(model["live"], measurement),
     ]
     pin = shortfalls.get(config)
-    floor_misses = []
     notes = []
     ir_x, live_x = predicted
     vanished = pin and pin_vanished("Ir", ir_x, pin.issue)
     if vanished:
         notes.append(vanished)
     if pin is None or vanished:
-        ir_miss = floor_miss("Ir", ir_x)
-        live_miss, live_note = live_floor_verdict(
-            live_x, bands[1], live_residual_pct(model["live"], measurement.cpu)
+        floor_misses, pi_notes = pi_floor_verdict(
+            [
+                miss
+                for miss in (
+                    floor_miss("Ir", ir_x),
+                    live_floor_miss(
+                        live_x,
+                        bands[1],
+                        live_residual_pct(model["live"], measurement.cpu),
+                    ),
+                )
+                if miss
+            ],
+            pi_worst_x,
         )
+        notes.extend(pi_notes)
     else:
-        ir_miss = shortfall_miss("Ir", ir_x, 0.0, pin.predicted_ir_x, pin.issue)
-        live_miss, live_note = None, None
-    floor_misses.extend(miss for miss in (ir_miss, live_miss) if miss)
-    if live_note:
-        notes.append(live_note)
+        shortfall = shortfall_miss(
+            "Ir", ir_x, 0.0, pin.predicted_ir_x, pin.issue
+        )
+        floor_misses = [shortfall] if shortfall else []
     if PI_FLOOR_FAILS:
         problems.extend(floor_misses)
         floor_misses = []
@@ -1035,6 +1074,36 @@ def report(
             print(f"  FAIL: {problem}")
         for warning in verdict.warnings:
             print(f"  WARN (PI_FLOOR_FAILS is off): {warning}")
+
+
+def measured_trees() -> dict[str, str] | None:
+    """The git tree of each of MEASURED_TREES at HEAD, `None` while any has
+    uncommitted changes: only committed code has an identity a Pi
+    measurement can name."""
+    dirty = run(
+        ["git", "status", "--porcelain", "--", *MEASURED_TREES], cwd=ROOT
+    )
+    if dirty.strip():
+        return None
+    return {
+        tree: run(["git", "rev-parse", f"HEAD:{tree}"], cwd=ROOT).strip()
+        for tree in MEASURED_TREES
+    }
+
+
+def pi_measured_worst(trees: dict[str, str] | None) -> dict[str, float]:
+    """Each config's Pi 2-core worst window PI_WINDOW records, the lowest of
+    its runs, when it measured exactly `trees`; nothing otherwise."""
+    if trees is None or not PI_WINDOW.exists():
+        return {}
+    recorded = json.loads(PI_WINDOW.read_text())
+    if recorded["trees"] != trees:
+        print(
+            f"{PI_WINDOW.relative_to(ROOT)} measured other trees than this "
+            "checkout's: it decides nothing"
+        )
+        return {}
+    return {config: min(runs) for config, runs in recorded["worst_x"].items()}
 
 
 def head_commit() -> str:
@@ -1132,8 +1201,15 @@ def main() -> int:
         )
         print(f"wrote {BASELINE.relative_to(ROOT)}")
 
+    pi_worst = pi_measured_worst(measured_trees())
     verdicts = [
-        judge(c, entries[c], measurements[c], calibration["configs"][c])
+        judge(
+            c,
+            entries[c],
+            measurements[c],
+            calibration["configs"][c],
+            pi_worst_x=pi_worst.get(c),
+        )
         for c in configs
     ]
     report(verdicts, reference_commit, calibration)
@@ -1145,9 +1221,9 @@ def main() -> int:
         return 1
     print(
         f"throughput gate: PASS ({len(verdicts)} configs: Ir grew at most "
-        f"{IR_TOLERANCE_PCT} %, Ir predicts the Pi window at or above "
-        f"{PI_FLOOR_X}x or its pinned shortfall, and no live prediction misses "
-        "it even at its optimistic bound)"
+        f"{IR_TOLERANCE_PCT} %, and Ir and the live replay predict the Pi "
+        f"window at or above {PI_FLOOR_X}x, its pinned shortfall, or a Pi "
+        "measurement of this tree reaches it)"
     )
     return 0
 
