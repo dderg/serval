@@ -178,6 +178,49 @@ proptest! {
         prop_assert!(signed <= bound * (1.0 + 1e-12), "the signed bound {signed} is looser than {bound}");
     }
 
+    /// Read where they are, the leaders leaving a crawl however they
+    /// please within the side's speed and acceleration meet no more rebuild
+    /// than [`CrawlSide::rebuild_within`] bounds at their own distance,
+    /// speed and acceleration.
+    #[test]
+    fn the_rebuild_read_where_the_leaders_are_bounds_what_they_meet_there(
+        speed in 0.0f64..2.0,
+        accel in 1.0f64..20_000.0,
+        rate_share in 1e-3f64..1.0,
+        fastest_over in 0.0f64..200.0,
+        widening in 1.0f64..40.0,
+        pieces in prop::collection::vec((-1.0f64..1.0, 1e-4f64..0.02), 1..6),
+        spreads in prop::array::uniform2(0.0f64..0.3),
+    ) {
+        let rate = rate_share * accel;
+        let floor = crawl_floor(speed, rate);
+        let width = valley_reach(speed, rate) * widening;
+        let fastest = speed + fastest_over;
+        let side = CrawlSide::either_way(speed, accel, fastest, (floor, floor));
+        let valley = crawl_valley(width, floor);
+        let steps_per_piece = 400;
+        let (mut s, mut v) = (0.0_f64, speed);
+        for &(share, duration) in &pieces {
+            let dt = duration / f64::from(steps_per_piece);
+            for step in 0..steps_per_piece {
+                let rate = (share * accel).clamp(-v / dt, (fastest - v) / dt);
+                let (weight, slope, curvature) = valley.weight(valley.end + s);
+                if weight < 1.0 && step % 10 == 0 {
+                    let met = (curvature * v * v * v + 3.0 * slope * v * rate).abs();
+                    let distance = around(s, spreads[0] * width, spreads[1] * width, 0.0);
+                    let bound = side.rebuild_within(width, distance, v, rate.abs());
+                    prop_assert!(
+                        met <= bound * (1.0 + 1e-6) + 1e-9,
+                        "at {s} mm, {v} mm/s and {rate} mm/s² the leaders meet a rebuild of \
+                         {met}, past its bound {bound} within {distance:?}"
+                    );
+                }
+                s += v * dt + 0.5 * rate * dt * dt;
+                v = (v + rate * dt).clamp(0.0, fastest);
+            }
+        }
+    }
+
     /// The width the rule lays fits the room, and a side read within
     /// looser bounds never lays a narrower one.
     #[test]

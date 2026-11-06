@@ -519,6 +519,50 @@ impl CrawlSide {
             })
             .fold(0.0, f64::max)
     }
+
+    /// The most `|W″·ṡ³ + 3W′·ṡ·s̈|` asks of leaders within `distance` of
+    /// the crawl, a `(least, largest)` range, no faster than `speed` and
+    /// with `|s̈|` within `accel` there, over a side `width` wide:
+    /// `|W″| ≤ max(bend_scale·β, fold)` with `β·ṡ³` within
+    /// [`coupled_bend`] too, and `|W′|` within its slope, read by
+    /// [`SideWeight::at_width`] over that distance. It reads the leaders
+    /// where they are, which bounds a side across a long crawl far closer
+    /// than [`Self::rebuild`], whose speed grows from the crawl's with the
+    /// strongest acceleration anywhere along the side.
+    #[must_use]
+    pub fn rebuild_within(&self, width: f64, distance: (f64, f64), speed: f64, accel: f64) -> f64 {
+        assert!(
+            width > 0.0 && speed >= 0.0 && accel >= 0.0 && 0.0 <= distance.0,
+            "a crawl side's leaders are ill-formed: {speed} mm/s, {accel} mm/s² within \
+             {distance:?} mm of a side {width} mm wide"
+        );
+        let speed = speed.min(self.fastest);
+        let cubed = speed * speed * speed;
+        floor_pieces(self.floor, width)
+            .into_iter()
+            .map(|floor| {
+                let reaches_the_cap = floor.1 >= kept_floor(self.floor.1, width);
+                let crawl_floor = if reaches_the_cap {
+                    self.floor.1
+                } else {
+                    floor.1
+                };
+                let weight = SideWeight::at_width(distance, width, floor);
+                let bend = if weight.bend.1 == 0.0 || cubed == 0.0 {
+                    0.0
+                } else {
+                    weight.bend_scale.1
+                        * (weight.bend.1 * cubed).min(coupled_bend(
+                            self.speed,
+                            self.accel,
+                            crawl_floor,
+                            width,
+                        ))
+                };
+                bend.max(weight.fold.1 * cubed) + 3.0 * weight.slope.1 * speed * accel
+            })
+            .fold(0.0, f64::max)
+    }
 }
 
 /// The floor range `floor` within a side `width` wide, in geometric pieces

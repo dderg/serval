@@ -201,17 +201,27 @@ struct CellCheck<'a> {
     demand: AdvanceDemand,
     caps: &'a geometry::ExtruderCaps,
     nearby: &'a [MoveSummary],
-    reserves: &'a [Reservation],
+    reserves: &'a [Reservation<'a>],
 }
 
-/// The follower acceleration a crawl valley side's rebuild may ask over
-/// the guard's grid cells `cells`, `k·r·`[`valley::Reserve::rebuild`] at
-/// the largest ratio laid over the planned time `window` its kernels read.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Reservation {
-    cells: (i64, i64),
-    asked: f64,
+/// The follower acceleration a crawl valley side's rebuild may ask in each
+/// of its cells, `k·r·`[`valley::Reserve::rebuild_at`] at the largest
+/// ratio laid over the planned time `window` its kernels read.
+#[derive(Debug, Clone, Copy)]
+struct Reservation<'a> {
+    side: &'a valley::Reserve,
+    scale: f64,
     window: (f64, f64),
+}
+
+impl Reservation<'_> {
+    fn holds(&self, cell: i64) -> bool {
+        self.side.cells.0 <= cell && cell <= self.side.cells.1
+    }
+
+    fn asked_at(&self, cell: i64) -> f64 {
+        self.scale * self.side.rebuild_at(cell)
+    }
 }
 
 impl CellCheck<'_> {
@@ -249,10 +259,7 @@ impl CellCheck<'_> {
             ratio: self.demand.ratio.min(reach.ratio),
             ..self.demand
         };
-        let sides = self
-            .reserves
-            .iter()
-            .filter(|side| side.cells.0 <= valley_cell && valley_cell <= side.cells.1);
+        let sides = self.reserves.iter().filter(|side| side.holds(valley_cell));
         let (asked, window) = sides.fold(
             (
                 demand.of(motion.tangential_accel, jerk, motion.turning_ceiling()),
@@ -268,26 +275,11 @@ impl CellCheck<'_> {
                     0.0,
                 );
                 (
-                    asked.max(weighted + side.asked),
+                    asked.max(weighted + side.asked_at(valley_cell)),
                     (window.0.min(side.window.0), window.1.max(side.window.1)),
                 )
             },
         );
-        if asked > self.caps.max_accel_mm_s2 && std::env::var("GVDBG").is_ok() {
-            let base = demand.of(motion.tangential_accel, jerk, motion.turning_ceiling());
-            let reserved: Vec<f64> = self
-                .reserves
-                .iter()
-                .filter(|side| side.cells.0 <= valley_cell && valley_cell <= side.cells.1)
-                .map(|side| side.asked)
-                .collect();
-            eprintln!(
-                "GVDBG asks n={n} t={:.6} base={base} reserved={reserved:?} speed_floor={} accel={:?}",
-                n as f64 * h,
-                motion.speed_floor,
-                motion.tangential_accel
-            );
-        }
         (asked > self.caps.max_accel_mm_s2).then_some(Check::Binds(Binding {
             cell: n as f64 * h,
             from: window.0,
@@ -889,9 +881,6 @@ impl TurningGuard {
             max_accel,
             ..
         } = binding;
-        if std::env::var("GVDBG").is_ok() {
-            eprintln!("GVDBG backoff {binding:?}");
-        }
         let step = (libm::pow(max_accel / demand, BACKOFF_EXPONENT) * BACKOFF_AIM)
             .clamp(BACKOFF_STEP_MIN, BACKOFF_STEP_MAX);
         let timing = &self.entries.timing;
@@ -1156,14 +1145,14 @@ impl TurningGuard {
         &self,
         caps: &geometry::ExtruderCaps,
         (from, to): (i64, i64),
-    ) -> Vec<Reservation> {
+    ) -> Vec<Reservation<'_>> {
         let h = self.h();
         let (back, ahead) = self.span;
         self.valleys
             .crawls
             .iter()
             .filter(|crawl| crawl.reaches((from, to)))
-            .flat_map(|crawl| std::iter::once(crawl.before).chain(crawl.after))
+            .flat_map(|crawl| std::iter::once(&crawl.before).chain(crawl.after.as_ref()))
             .filter(|side| side.cells.0 <= to && from <= side.cells.1)
             .map(|side| {
                 let window = (
@@ -1176,8 +1165,8 @@ impl TurningGuard {
                     .filter(|&(axis, _)| axis == caps.axis_index)
                     .fold(0.0_f64, |most, (_, ratio)| most.max(ratio));
                 Reservation {
-                    cells: side.cells,
-                    asked: caps.advance_slope_s * ratio * side.rebuild,
+                    side,
+                    scale: caps.advance_slope_s * ratio,
                     window,
                 }
             })

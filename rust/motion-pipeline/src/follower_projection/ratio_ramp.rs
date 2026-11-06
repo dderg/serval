@@ -1435,8 +1435,14 @@ impl RatioSmoothing {
             .valleys
             .last_mut()
             .expect("an open rest valley is the last laid");
+        assert_eq!(
+            valley.kind,
+            ValleyKind::Rest,
+            "follower projection: a valley {valley:?} was laid over an open rest"
+        );
         valley.end = end.max(valley.start);
         valley.after = after;
+        self.assert_weight_continuous();
     }
 
     /// Takes in `leg`'s spans: the width nodes it covers, the seams the
@@ -1669,6 +1675,7 @@ impl RatioSmoothing {
             }
         }
         self.assert_crawl_valleys_apart();
+        self.assert_weight_continuous();
     }
 
     fn assert_crawl_valleys_apart(&self) {
@@ -1685,6 +1692,38 @@ impl RatioSmoothing {
                 "follower projection: the crawl valleys {previous:?} and {valley:?} overlap"
             );
             previous = valley;
+        }
+    }
+
+    /// The weight `W` is continuous across every crawl valley: a side laid
+    /// zero wide steps it between 1 and 0 at the valley's edge, which only
+    /// another valley holding zero up to that edge from the side's way, or
+    /// the floor, leaves unread. A rest valley's own edges lie where the
+    /// leaders rest, whose zero speed leaves its steps unread.
+    fn assert_weight_continuous(&self) {
+        let crawls = self
+            .valleys
+            .iter()
+            .filter(|valley| valley.kind == ValleyKind::Crawl);
+        for valley in crawls {
+            let steps = [
+                (valley.before == 0.0).then_some((valley.start, Side::Before)),
+                (valley.after == 0.0 && valley.end.is_finite())
+                    .then_some((valley.end, Side::After)),
+            ];
+            for (edge, side) in steps.into_iter().flatten() {
+                let unread = edge <= self.floor
+                    || self.valleys.iter().any(|other| {
+                        !std::ptr::eq(other, valley) && holds_zero_up_to(other, edge, side)
+                    });
+                assert!(
+                    unread,
+                    "follower projection: the advance valley {valley:?} steps its weight at \
+                     s={edge} on its {side:?} side, where no other valley holds it at zero \
+                     (floor {}, valleys {:?})",
+                    self.floor, self.valleys
+                );
+            }
         }
     }
 
@@ -2187,6 +2226,7 @@ impl RatioSmoothing {
                 floor_after: 0.0,
                 kind: ValleyKind::Rest,
             });
+            self.assert_weight_continuous();
         }
         self.open_rest = Some(OpenRest {
             end: rest_end,
@@ -2673,6 +2713,18 @@ fn peak_ratio_within(spans: &[RatioSpan], s: f64, reach: f64) -> f64 {
         .filter(|span| span.s1 >= s - reach && span.s0 <= s + reach)
         .map(|span| span.r0.abs().max(span.r1.abs()))
         .fold(0.0, f64::max)
+}
+
+/// Whether `valley`'s weight is zero up to `edge` from the `side` of it a
+/// zero-wide side of another valley would read 1 on: its zero stretch
+/// spans `edge`, and does not end there with a step of its own that way.
+fn holds_zero_up_to(valley: &AdvanceValley, edge: f64, side: Side) -> bool {
+    let spans = valley.start <= edge && edge <= valley.end;
+    let steps_there = match side {
+        Side::Before => valley.start == edge && valley.before == 0.0,
+        Side::After => valley.end == edge && valley.after == 0.0,
+    };
+    spans && !steps_there
 }
 
 /// Probes a ramp's crossing is searched with for the leaders' fastest

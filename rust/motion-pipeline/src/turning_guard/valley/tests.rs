@@ -47,7 +47,7 @@ fn a_crawl_leaves_room_for_the_widest_grid_side_the_lead_budget_covers_before_it
         .expect("the side fits the budget");
     let budget_cells = (VALLEY_LEAD_BUDGET_S / H).floor() as i64;
     let covered = (crawl_cells.0 - budget_cells..crawl_cells.0)
-        .map(|n| track.path(n, crawl_cells.0 - 1).0 - track.drift(n, crawl_cells.1, H, fit))
+        .map(|n| track.path(n, crawl_cells.0 - 1).0 - track.drift(n, crawl_cells.0 - 1, H, fit))
         .fold(0.0_f64, f64::max);
     let widest = widest_crawl_side_within(slot.width.1, covered).expect("a grid width fits");
     assert_eq!(crawl.before.width, widest);
@@ -57,10 +57,17 @@ fn a_crawl_leaves_room_for_the_widest_grid_side_the_lead_budget_covers_before_it
         reached_back >= widest,
         "the side reaches {reached_back} mm of cells back, short of its {widest} mm"
     );
-    let expected =
+    let whole_side =
         CrawlSide::either_way(slot.speed, 300.0 + fit.accel, 10.0 + fit.speed, slot.floor)
             .rebuild(widest);
-    assert_eq!(crawl.before.rebuild, expected);
+    let (first, last) = crawl.before.cells;
+    let most = (first..=last)
+        .map(|n| crawl.before.rebuild_at(n))
+        .fold(0.0, f64::max);
+    assert!(
+        0.0 < most && most <= whole_side,
+        "the side's cells ask up to {most}, past the whole side's {whole_side}"
+    );
 }
 
 #[test]
@@ -78,7 +85,7 @@ fn a_crawl_s_after_side_waits_for_the_lead_budget_past_its_run() {
     );
     let long = track_with_crawl(10.0, crawl_cells, crawl_cells.1 + budget_cells + 1, fit);
     assert!(crawl.resolve_after(&long, false, (H, fit), &|n| long.get(n)));
-    let after = crawl.after.expect("the after side settled");
+    let after = crawl.after.clone().expect("the after side settled");
     assert!(after.cells.0 == crawl_cells.0 && after.cells.1 > crawl_cells.1);
     assert_eq!(crawl.reach(), (crawl.before.cells.0, after.cells.1));
 }

@@ -487,9 +487,11 @@ impl ValleyReference {
     }
 }
 
-#[test]
-fn a_valley_rebuild_under_an_under_estimated_jerk_gain_stays_within_the_extruder_limit() {
-    let planner = UnsoundPlanner::new(P1_RAMP, 0.45);
+/// Guards the zigzag planned under `jerk_gain_share` of the jerk gain on
+/// `profile` and lays the reference projection's valleys over it: every
+/// side within the lead budget, the advance within the extruder's limit.
+fn assert_the_guarded_zigzag_s_valleys_fit(profile: &str, jerk_gain_share: f64) {
+    let planner = UnsoundPlanner::new(profile, jerk_gain_share);
     let planned = planner.plan(&near_reversal_zigzag());
     let moves = planned
         .iter()
@@ -513,6 +515,21 @@ fn a_valley_rebuild_under_an_under_estimated_jerk_gain_stays_within_the_extruder
         "the advance asks {share:.4}× the extruder's limit at t={at:.6} s, by {} valleys",
         reference.valleys.len()
     );
+}
+
+#[test]
+fn a_valley_rebuild_under_an_under_estimated_jerk_gain_stays_within_the_extruder_limit() {
+    assert_the_guarded_zigzag_s_valleys_fit(P1_RAMP, 0.45);
+}
+
+/// Under an extruder limit of 2000 mm/s² the leaders' own demand beside
+/// the zigzag's crawls leaves a side the lead budget allows too little room
+/// for its rebuild: only the room the guard leaves for it, backing the
+/// moves the side reads off, keeps the side within the budget.
+#[test]
+fn the_guard_leaves_a_valley_side_within_the_lead_budget_room_for_its_rebuild() {
+    let tight = P1_RAMP.replace("max_accel: 5000", "max_accel: 2000");
+    assert_the_guarded_zigzag_s_valleys_fit(&tight, 0.45);
 }
 
 /// The guard holds back the motion within [`VALLEY_LEAD_BUDGET_S`] of what

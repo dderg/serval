@@ -1727,6 +1727,40 @@ fn crawls_further_apart_than_their_reach_lay_a_valley_each() {
     }
 }
 
+/// A crawl valley holding the weight at zero back to where no rest or
+/// floor holds it steps the weight from 1 to 0 there, which the advance
+/// reads as a step in the follower's velocity: it fails loudly.
+#[test]
+#[should_panic(expected = "steps its weight at s=499.5")]
+fn a_crawl_valley_held_at_zero_back_to_where_the_leaders_move_fails_loudly() {
+    let mut smoothing = RatioSmoothing::default();
+    smoothing.place_valley(500.0, (499.5, 0.0, 0.18), 4.0e-3);
+}
+
+/// Held at zero back to the floor, where the leaders rest, or to the end
+/// of a rest valley, the weight is zero either side of the held stretch's
+/// start.
+#[test]
+fn a_crawl_valley_held_at_zero_back_to_a_rest_keeps_the_weight_continuous() {
+    let mut floored = RatioSmoothing::default();
+    floored.close_at(499.5);
+    floored.place_valley(500.0, (499.5, 0.0, 0.18), 4.0e-3);
+    let mut rested = RatioSmoothing::default();
+    rested.valleys.push(AdvanceValley {
+        start: 499.4,
+        end: 499.5,
+        before: 0.2,
+        after: 0.0,
+        floor_before: 0.0,
+        floor_after: 0.0,
+        kind: ValleyKind::Rest,
+    });
+    rested.place_valley(500.0, (499.5, 0.0, 0.18), 4.0e-3);
+    for s in [499.5 - 1e-9, 499.5 + 1e-9] {
+        assert_eq!(rested.valley_weight(s).0, 0.0, "the weight at s={s} mm");
+    }
+}
+
 const CRAWL_LEG_SEAM_SPEED_MM_S: f64 = 2.83;
 const CRAWL_LEG_PEAK_GAIN_MM_S: f64 = 3.0 * CRAWL_LEG_SEAM_SPEED_MM_S;
 const CRAWL_LEG_SIDEWAYS_MM_S: f64 = 0.3;
