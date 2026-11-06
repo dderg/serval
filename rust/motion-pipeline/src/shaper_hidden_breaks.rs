@@ -53,6 +53,7 @@ use trajectory::ShapedSignal;
 
 use super::{
     AxisSignalTable, MIN_DEVICE_INTERVAL_S, MOMENT_POWER_CAPACITY, differentiate_in_place,
+    stored_acceleration_noise,
 };
 use crate::lowering::FitTol;
 
@@ -276,10 +277,18 @@ impl ShapedBreaks {
     /// Whether the shaped signal enters or leaves a cruise at `image`: the
     /// input holds its velocity on one side of its break and changes it
     /// there. A break the cruise runs through, between two pieces holding
-    /// one velocity, bounds none.
+    /// one velocity, bounds none. A piece too short for its stored
+    /// coefficients to resolve [`CRUISE_ACCELERATION_SHARE`] of the
+    /// tolerance holds its velocity within what they do resolve.
     fn bounds_cruise(&self, input: &AxisSignalTable, image: KernelImage, fit_tol: FitTol) -> bool {
         let held_accel = CRUISE_ACCELERATION_SHARE * fit_tol.accel_mm_s2;
-        let cruises = |piece: usize| acceleration_bound(input, piece) <= held_accel;
+        let cruises = |piece: usize| {
+            let stored = stored_acceleration_noise(
+                position_bound(input, piece),
+                input.ends[piece] - input.starts[piece],
+            );
+            acceleration_bound(input, piece) <= held_accel.max(stored)
+        };
         let right = input
             .starts
             .partition_point(|&start| start < image.input_break);
@@ -315,6 +324,23 @@ impl ShapedBreaks {
             && holds(after - 1);
         enters || leaves
     }
+}
+
+/// `Σₖ |cₖ|ρᵏ` over input piece `piece`, with `ρ` its farther end from
+/// the origin it is expanded about: no less than its position anywhere on
+/// it.
+fn position_bound(input: &AxisSignalTable, piece: usize) -> f64 {
+    let origin = input.origins[piece];
+    let reach = (input.starts[piece] - origin)
+        .abs()
+        .max((input.ends[piece] - origin).abs());
+    let mut reach_power = 1.0;
+    let mut bound = 0.0;
+    for &coefficient in &input.coeffs[piece] {
+        bound += coefficient.abs() * reach_power;
+        reach_power *= reach;
+    }
+    bound
 }
 
 /// `Σₖ k(k−1)|cₖ|ρᵏ⁻²` over input piece `piece`, with `ρ` its farther end
