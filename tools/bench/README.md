@@ -162,7 +162,18 @@ Main 3fa11d9cc + this analyzer (runs `20261106-054219` to `-055612`, corner_flow
 | fast default | corner_flow | 54 | 0.386 | 0.387 | 0.0112 | 0.0008 |
 | fast default | first layers | 1467 | 0.331 | 0.332 | 0.0123 | 0.0010 |
 
-Every held vertex is within its bound; every analyzer check passes on all eight runs.
+Every held vertex is within its bound, and every analyzer check passes on all eight runs.
+
+The tighter explicit budgets were run on main 2a9597f4b (runs `corner_budget/20261106-063113` to `-063704`), with `printer.cfg` and `fast.cfg` changed only in `corner_deviation`:
+
+| config | print | held vertices (corners) | worst plan share | worst capture share | max \|reference − plan\| mm | max \|capture − reference\| mm |
+|---|---|---|---|---|---|---|
+| printer cd 0.1 | corner_flow | 182 (54) | 0.842 | 0.919 | 0.0094 | 0.0022 |
+| printer cd 0.1 | first layers | 3703 (1498) | 0.882 | 0.973 | 0.0124 | 0.0010 |
+| fast cd 0.3 | corner_flow | 182 (54) | 0.841 | 0.843 | 0.0111 | 0.0020 |
+| fast cd 0.3 | first layers | 3703 (1436) | 0.838 | 0.862 | 0.0146 | 0.0011 |
+
+All four pass. The captured miss stays under the bare budget, before slack and quantization: worst 0.0973 of 0.1 mm and 0.2586 of 0.3 mm. At cd 0.1 the capture's share rises above the plan's (0.973 vs 0.882) by the step quantization, because the reference steps show the same 0.973.
 
 ## Recovery
 
