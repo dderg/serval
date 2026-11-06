@@ -46,11 +46,12 @@ fn spline(coeffs: Vec<f64>, (t0, t1): (f64, f64)) -> ContinuousAxis {
     }])))
 }
 
-/// One leg of the leaders along `y` at `x = 100`, moving towards `+y`
-/// wherever the extruder lays `ratio` of the path they cover, from `e0`.
-fn leg(y: &[f64], span: (f64, f64), ratio: f64, e0: f64) -> ContinuousSegment {
+/// One leg of the leaders along `y` at `x = 100`, moving towards `sense`
+/// (±1) along it, while the extruder lays `ratio` of the path they cover
+/// from `e0`.
+fn leg(y: &[f64], span: (f64, f64), (ratio, sense): (f64, f64), e0: f64) -> ContinuousSegment {
     let e: Vec<f64> = std::iter::once(e0)
-        .chain(y[1..].iter().map(|c| ratio * c))
+        .chain(y[1..].iter().map(|c| sense * ratio * c))
         .collect();
     let followers: Vec<FollowerDemand> = (ratio != 0.0)
         .then(|| FollowerDemand::constant(E_AXIS, ratio))
@@ -88,45 +89,43 @@ fn eval(coeffs: &[f64], t: f64) -> [f64; 3] {
     out
 }
 
-/// The leaders brake at `decel` from `cruise` into a turnaround while the
-/// extruder lays `ratio`, then travel back out of it, accelerating as hard,
-/// with nothing laid: an extrusion ending in a travel that reverses over it
-/// (`voron_first_layers` line 3654 into 3655 on the p1 bowden profile).
-fn extrusion_into_a_reversing_travel(
-    cruise: f64,
-    decel: f64,
-    ratio: f64,
-) -> Vec<ContinuousSegment> {
+/// The leaders brake at `accel` from `cruise` into a turnaround while the
+/// extruder lays `ratio_in`, then head back out of it as hard up to
+/// `cruise` again while it lays `ratio_out`, and come to rest.
+fn reversal(cruise: f64, accel: f64, (ratio_in, ratio_out): (f64, f64)) -> Vec<ContinuousSegment> {
     let mut segments = Vec::new();
     let (mut t, mut y, mut e) = (0.0, 100.0, 0.0);
+    let mut lay = |mut moved: Vec<f64>, duration: f64, (ratio, sense): (f64, f64)| {
+        moved[0] += y;
+        segments.push(leg(&moved, (t, t + duration), (ratio, sense), e));
+        let [end_y, end_v, _] = eval(&moved, duration);
+        e += sense * ratio * (end_y - y);
+        (t, y) = (t + duration, end_y);
+        end_v
+    };
     let rise_time = 0.15;
-    let rise = quintic(
-        [y, 0.0, 0.0],
-        [y + 0.6 * cruise * rise_time, cruise, -decel],
+    lay(
+        quintic(
+            [0.0, 0.0, 0.0],
+            [0.6 * cruise * rise_time, cruise, -accel],
+            rise_time,
+        ),
         rise_time,
+        (ratio_in, 1.0),
     );
-    segments.push(leg(&rise, (t, t + rise_time), ratio, e));
-    let [end_y, _, _] = eval(&rise, rise_time);
-    e += ratio * (end_y - y);
-    (t, y) = (t + rise_time, end_y);
-    let brake_time = cruise / decel;
-    let brake = vec![y, cruise, -0.5 * decel];
-    segments.push(leg(&brake, (t, t + brake_time), ratio, e));
-    let [turn_y, _, _] = eval(&brake, brake_time);
-    e += ratio * (turn_y - y);
-    (t, y) = (t + brake_time, turn_y);
-    let back_time = 0.03;
-    let back = vec![y, 0.0, -0.5 * decel];
-    segments.push(leg(&back, (t, t + back_time), 0.0, e));
-    let [back_y, back_v, _] = eval(&back, back_time);
-    (t, y) = (t + back_time, back_y);
-    let stop_time = 0.1;
-    let stop = quintic(
-        [y, back_v, -decel],
-        [y + 0.5 * back_v * stop_time, 0.0, 0.0],
+    let brake_time = cruise / accel;
+    lay(vec![0.0, cruise, -0.5 * accel], brake_time, (ratio_in, 1.0));
+    let out = lay(vec![0.0, 0.0, -0.5 * accel], brake_time, (ratio_out, -1.0));
+    let stop_time = 0.15;
+    lay(
+        quintic(
+            [0.0, out, -accel],
+            [0.6 * out * stop_time, 0.0, 0.0],
+            stop_time,
+        ),
         stop_time,
+        (ratio_out, -1.0),
     );
-    segments.push(leg(&stop, (t, t + stop_time), 0.0, e));
     segments
 }
 
@@ -169,10 +168,8 @@ fn project(track: &[ContinuousSegment]) -> Vec<ContinuousSegment> {
     committed
 }
 
-#[test]
-fn a_ratio_step_at_a_turnaround_keeps_the_extruder_within_its_limit() {
-    let track = extrusion_into_a_reversing_travel(40.0, 861.19, 0.033_645);
-    let committed = project(&track);
+fn assert_within_the_extruder_limit(track: &[ContinuousSegment]) {
+    let committed = project(track);
     let mut worst = (0.0_f64, 0.0);
     for segment in &committed {
         let samples = 4000;
@@ -194,4 +191,19 @@ fn a_ratio_step_at_a_turnaround_keeps_the_extruder_within_its_limit() {
         worst.0,
         worst.1
     );
+}
+
+/// An extrusion ending in a travel that reverses over it
+/// (`voron_first_layers` line 3654 into 3655 on the p1 bowden profile).
+#[test]
+fn a_ratio_step_down_at_a_turnaround_keeps_the_extruder_within_its_limit() {
+    assert_within_the_extruder_limit(&reversal(40.0, 861.19, (0.033_645, 0.0)));
+}
+
+/// A travel reversing into an extrusion back over it (`corner_flow`'s
+/// travel to the origin into the flow case's first line, on the p1 bowden
+/// profile).
+#[test]
+fn a_ratio_step_up_at_a_turnaround_keeps_the_extruder_within_its_limit() {
+    assert_within_the_extruder_limit(&reversal(40.0, 864.0, (0.0, 0.033_26)));
 }
