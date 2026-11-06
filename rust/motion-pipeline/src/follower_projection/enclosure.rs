@@ -322,12 +322,21 @@ impl<'a> FollowerSignal<'a> {
             return vec![TableFormula::Empty];
         };
         let region_of = |s: f64| {
-            if s < first.s0 {
+            let side = self.side_at(s);
+            if side == SpanSide::Before && s <= first.s0 {
+                assert!(
+                    first.e0 == 0.0,
+                    "a read from before the table at {s} past its start: the table was pruned \
+                     to {}",
+                    first.s0
+                );
+                TableFormula::Empty
+            } else if s < first.s0 {
                 TableFormula::Before(first)
             } else if s > last.s1 {
                 TableFormula::Past(last)
             } else {
-                let index = match self.side_at(s) {
+                let index = match side {
                     SpanSide::After => spans.partition_point(|span| span.s1 <= s),
                     SpanSide::Before => spans.partition_point(|span| span.s1 < s),
                 };
