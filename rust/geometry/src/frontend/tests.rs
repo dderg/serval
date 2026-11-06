@@ -3,7 +3,7 @@ use super::*;
 use crate::path::{Line, Segment};
 
 fn limits() -> VelocityLimits {
-    VelocityLimits::try_new(300.0, 3000.0, 5.0, 100_000.0).unwrap()
+    VelocityLimits::try_new(300.0, 3000.0, crate::CornerBudget::Shaped(5.0), 100_000.0).unwrap()
 }
 
 fn ctx() -> MoveContext {
@@ -112,7 +112,7 @@ fn invalid_limits_rejected() {
         bad.limits = VelocityLimits {
             max_velocity_mm_s: mv,
             accel_mm_s2: ac,
-            corner_deviation_mm: scv,
+            corner: CornerBudget::Shaped(scv),
             max_jerk_mm_s3: jerk,
             ..limits()
         };
@@ -126,20 +126,98 @@ fn invalid_limits_rejected() {
 
 #[test]
 fn velocity_limits_try_new_validates() {
-    assert!(VelocityLimits::try_new(300.0, 3000.0, 5.0, 100_000.0).is_ok());
-    assert!(VelocityLimits::try_new(300.0, 3000.0, 0.0, 100_000.0).is_ok());
-    assert!(VelocityLimits::try_new(300.0, 3000.0, 5.0, f64::INFINITY).is_ok());
-    assert!(VelocityLimits::try_new(0.0, 3000.0, 5.0, 100_000.0).is_err());
-    assert!(VelocityLimits::try_new(300.0, -1.0, 5.0, 100_000.0).is_err());
-    assert!(VelocityLimits::try_new(300.0, 3000.0, f64::NAN, 100_000.0).is_err());
-    assert!(VelocityLimits::try_new(300.0, 3000.0, 5.0, 0.0).is_err());
-    assert!(VelocityLimits::try_new(300.0, 3000.0, 5.0, -1.0).is_err());
-    assert!(VelocityLimits::try_new(300.0, 3000.0, 5.0, f64::NAN).is_err());
+    assert!(
+        VelocityLimits::try_new(300.0, 3000.0, crate::CornerBudget::Shaped(5.0), 100_000.0).is_ok()
+    );
+    assert!(
+        VelocityLimits::try_new(300.0, 3000.0, crate::CornerBudget::Shaped(0.0), 100_000.0).is_ok()
+    );
+    assert!(
+        VelocityLimits::try_new(
+            300.0,
+            3000.0,
+            crate::CornerBudget::Shaped(5.0),
+            f64::INFINITY
+        )
+        .is_ok()
+    );
+    assert!(
+        VelocityLimits::try_new(0.0, 3000.0, crate::CornerBudget::Shaped(5.0), 100_000.0).is_err()
+    );
+    assert!(
+        VelocityLimits::try_new(300.0, -1.0, crate::CornerBudget::Shaped(5.0), 100_000.0).is_err()
+    );
+    assert!(
+        VelocityLimits::try_new(
+            300.0,
+            3000.0,
+            crate::CornerBudget::Shaped(f64::NAN),
+            100_000.0
+        )
+        .is_err()
+    );
+    assert!(VelocityLimits::try_new(300.0, 3000.0, crate::CornerBudget::Shaped(5.0), 0.0).is_err());
+    assert!(
+        VelocityLimits::try_new(300.0, 3000.0, crate::CornerBudget::Shaped(5.0), -1.0).is_err()
+    );
+    assert!(
+        VelocityLimits::try_new(300.0, 3000.0, crate::CornerBudget::Shaped(5.0), f64::NAN).is_err()
+    );
+}
+
+#[test]
+fn corner_budget_unshaped_cut_is_the_payload_or_the_scv_conversion() {
+    assert_eq!(CornerBudget::Shaped(0.03).unshaped_cut_mm(5000.0), 0.03);
+    assert_eq!(CornerBudget::OverFloor(0.04).unshaped_cut_mm(5000.0), 0.04);
+    assert_eq!(
+        CornerBudget::ScvEquivalent(5.0).unshaped_cut_mm(3000.0),
+        corner_deviation_from_scv(5.0, 3000.0)
+    );
+    assert_eq!(
+        CornerBudget::ScvEquivalent(5.0).unshaped_cut_mm(6000.0),
+        corner_deviation_from_scv(5.0, 6000.0)
+    );
+}
+
+#[test]
+fn corner_budget_validate_rejects_negative_and_non_finite_payloads() {
+    for make in [
+        CornerBudget::Shaped,
+        CornerBudget::OverFloor,
+        CornerBudget::ScvEquivalent,
+    ] {
+        assert!(make(0.0).validate().is_ok());
+        assert!(make(0.5).validate().is_ok());
+        for bad in [-1e-9, f64::NAN, f64::INFINITY] {
+            assert!(make(bad).validate().is_err(), "{:?}", make(bad));
+        }
+    }
+}
+
+#[test]
+fn corner_budget_stricter_keeps_the_kind_or_the_smaller_cut() {
+    assert_eq!(
+        CornerBudget::Shaped(0.02).stricter(CornerBudget::Shaped(0.01), 3000.0),
+        CornerBudget::Shaped(0.01)
+    );
+    assert_eq!(
+        CornerBudget::ScvEquivalent(5.0).stricter(CornerBudget::ScvEquivalent(8.0), 3000.0),
+        CornerBudget::ScvEquivalent(5.0)
+    );
+    assert_eq!(
+        CornerBudget::OverFloor(0.04).stricter(CornerBudget::ScvEquivalent(5.0), 3000.0),
+        CornerBudget::ScvEquivalent(5.0)
+    );
+    assert_eq!(
+        CornerBudget::Shaped(0.001).stricter(CornerBudget::ScvEquivalent(5.0), 3000.0),
+        CornerBudget::Shaped(0.001)
+    );
 }
 
 #[test]
 fn velocity_limits_z_caps_validate() {
-    let path = VelocityLimits::try_new(300.0, 3000.0, 5.0, 100_000.0).unwrap();
+    let path = VelocityLimits::try_new(300.0, 3000.0, crate::CornerBudget::Shaped(5.0), 100_000.0)
+        .unwrap();
     assert_eq!(path.max_z_velocity_mm_s, f64::INFINITY);
     assert_eq!(path.max_z_accel_mm_s2, f64::INFINITY);
     let capped = path.with_z_caps(25.0, 100.0).unwrap();
@@ -151,6 +229,7 @@ fn velocity_limits_z_caps_validate() {
     for (velocity, accel) in [
         (0.0, 100.0),
         (25.0, -1.0),
+        (25.0, crate::velocity::law::RAIL_ACCELERATION_DEFECT),
         (f64::NAN, 100.0),
         (25.0, f64::NAN),
     ] {

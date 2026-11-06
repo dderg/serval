@@ -48,12 +48,17 @@ fn plan_from(stream_start_s: f64) -> Vec<ContinuousSegment> {
             MAX_VELOCITY,
             MAX_ACCEL,
             f64::INFINITY,
-            0.0,
+            geometry::CornerBudget::Shaped(0.0),
         ),
     )
     .expect("parse");
     let planner = PlannerConfig {
-        cartesian: CartesianLimits::without_z_caps(MAX_VELOCITY, MAX_ACCEL, f64::INFINITY, 0.21),
+        cartesian: CartesianLimits::without_z_caps(
+            MAX_VELOCITY,
+            MAX_ACCEL,
+            f64::INFINITY,
+            geometry::CornerBudget::Shaped(0.21),
+        ),
         ..PlannerConfig::default()
     };
     let base = live_config::GcodeMoveBase::from_parts(

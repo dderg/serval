@@ -43,30 +43,28 @@ fn parse_inputs(
     } else {
         cfg.max_jerk
     };
-    if cfg.square_corner_velocity.is_some() && cfg.corner_deviation.is_some() {
-        return Err(
-            "square_corner_velocity and corner_deviation are both set — corner_deviation \
-             is the canonical corner budget and square_corner_velocity is its legacy \
-             alias; set exactly one"
-                .to_string(),
-        );
-    }
-    if cfg.square_corner_velocity.is_none() && cfg.corner_deviation.is_none() {
-        return Err("one of square_corner_velocity or corner_deviation is required".to_string());
-    }
-    let corner_deviation = cfg.corner_deviation.unwrap_or_else(|| {
-        pipeline_snapshot::corner_deviation_from_scv(
-            cfg.square_corner_velocity.expect("validated above"),
-            cfg.max_accel,
-        )
-    });
+    let corner = match (cfg.corner_deviation, cfg.square_corner_velocity) {
+        (Some(_), Some(_)) => {
+            return Err(
+                "square_corner_velocity and corner_deviation are both set — corner_deviation \
+                 is the canonical corner budget and square_corner_velocity is its legacy \
+                 alias; set exactly one"
+                    .to_string(),
+            );
+        }
+        (Some(deviation), None) => pipeline_snapshot::CornerBudget::Shaped(deviation),
+        (None, Some(scv)) => pipeline_snapshot::CornerBudget::ScvEquivalent(scv),
+        (None, None) => {
+            pipeline_snapshot::CornerBudget::OverFloor(pipeline_snapshot::DEFAULT_CORNER_ALLOWANCE_MM)
+        }
+    };
     let waypoints = parse_gcode(
         gcode_text,
         &pipeline_snapshot::CartesianLimits::without_z_caps(
             cfg.max_velocity,
             cfg.max_accel,
             max_jerk,
-            corner_deviation,
+            corner,
         ),
     )
     .map_err(|e| e.to_string())?;
@@ -77,7 +75,7 @@ fn parse_inputs(
         SnapshotParams {
             max_velocity: cfg.max_velocity,
             max_accel: cfg.max_accel,
-            corner_deviation,
+            corner,
             max_jerk,
             max_z_velocity: None,
             max_z_accel: None,

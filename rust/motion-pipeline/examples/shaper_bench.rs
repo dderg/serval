@@ -21,7 +21,13 @@ use motion_pipeline::{Pipeline, StreamConfig, StreamInput, TrajectoryItem};
 use trajectory::{AxisChainSet, PostProcessorInstance};
 
 fn limits() -> VelocityLimits {
-    VelocityLimits::try_new(2800.0, 100_000.0, 0.04, 40_000_000.0).unwrap()
+    VelocityLimits::try_new(
+        2800.0,
+        100_000.0,
+        geometry::CornerBudget::Shaped(0.04),
+        40_000_000.0,
+    )
+    .unwrap()
 }
 
 /// The bench's [printer] max_z_velocity/max_z_accel, so layer changes fit

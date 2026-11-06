@@ -20,7 +20,7 @@ fn cfg() -> StreamConfig {
         limits: VelocityLimits::try_new(
             300.0,
             5000.0,
-            geometry::corner_deviation_from_scv(5.0, 5000.0),
+            geometry::CornerBudget::Shaped(geometry::corner_deviation_from_scv(5.0, 5000.0)),
             f64::INFINITY,
         )
         .unwrap(),
@@ -90,7 +90,7 @@ fn ctx(line_no: u32, feed: f64) -> MoveContext {
         limits: VelocityLimits::try_new(
             300.0,
             5000.0,
-            geometry::corner_deviation_from_scv(5.0, 5000.0),
+            geometry::CornerBudget::Shaped(geometry::corner_deviation_from_scv(5.0, 5000.0)),
             f64::INFINITY,
         )
         .unwrap(),
@@ -117,7 +117,7 @@ fn cfg_bench() -> StreamConfig {
         limits: VelocityLimits::try_new(
             100.0,
             1000.0,
-            geometry::corner_deviation_from_scv(5.0, 1000.0),
+            geometry::CornerBudget::Shaped(geometry::corner_deviation_from_scv(5.0, 1000.0)),
             f64::INFINITY,
         )
         .unwrap(),
@@ -132,7 +132,7 @@ fn line_bench(line_no: u32, start: [f64; 3], end: [f64; 3]) -> geometry::Move {
         limits: VelocityLimits::try_new(
             100.0,
             1000.0,
-            geometry::corner_deviation_from_scv(5.0, 1000.0),
+            geometry::CornerBudget::Shaped(geometry::corner_deviation_from_scv(5.0, 1000.0)),
             f64::INFINITY,
         )
         .unwrap(),
@@ -1165,7 +1165,7 @@ fn arc_run_into_sharp_corner_stays_contiguous_at_high_scv() {
     let limits = VelocityLimits::try_new(
         100.0,
         1000.0,
-        geometry::corner_deviation_from_scv(25.0, 1000.0),
+        geometry::CornerBudget::Shaped(geometry::corner_deviation_from_scv(25.0, 1000.0)),
         f64::INFINITY,
     )
     .unwrap();
@@ -1211,7 +1211,7 @@ fn blends_consuming_a_full_arc_emit_no_degenerate_remainder() {
     let limits = VelocityLimits::try_new(
         100.0,
         1000.0,
-        geometry::corner_deviation_from_scv(25.0, 1000.0),
+        geometry::CornerBudget::Shaped(geometry::corner_deviation_from_scv(25.0, 1000.0)),
         f64::INFINITY,
     )
     .unwrap();
@@ -1424,7 +1424,7 @@ fn a_drain_declares_the_park_after_its_last_segment() {
     config.limits = VelocityLimits::try_new(
         300.0,
         5000.0,
-        geometry::corner_deviation_from_scv(5.0, 5000.0),
+        geometry::CornerBudget::Shaped(geometry::corner_deviation_from_scv(5.0, 5000.0)),
         f64::INFINITY,
     )
     .unwrap();
@@ -3385,7 +3385,13 @@ fn stroke_dwell_stroke_keeps_shaper_history() {
         .expect("compiles"),
         trajectory::CompiledChain::default(),
     );
-    let limits = VelocityLimits::try_new(1000.0, 10000.0, 0.21, f64::INFINITY).unwrap();
+    let limits = VelocityLimits::try_new(
+        1000.0,
+        10000.0,
+        geometry::CornerBudget::Shaped(0.21),
+        f64::INFINITY,
+    )
+    .unwrap();
     let config = StreamConfig {
         corner: CornerFitConfig::default(),
         integration_tol: 1e-4,
@@ -3473,7 +3479,13 @@ fn beacon_scan_path_shaped_velocity_stays_bounded() {
         .expect("compiles"),
         trajectory::CompiledChain::default(),
     );
-    let limits = VelocityLimits::try_new(2800.0, 100000.0, 0.695, f64::INFINITY).unwrap();
+    let limits = VelocityLimits::try_new(
+        2800.0,
+        100000.0,
+        geometry::CornerBudget::Shaped(0.695),
+        f64::INFINITY,
+    )
+    .unwrap();
     let config = StreamConfig {
         corner: CornerFitConfig::default(),
         integration_tol: 1e-4,
@@ -3670,7 +3682,13 @@ fn voron0_config() -> StreamConfig {
         fit_tol_mm: 0.005,
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 128,
-        limits: VelocityLimits::try_new(600.0, 20000.0, 0.04, f64::INFINITY).unwrap(),
+        limits: VelocityLimits::try_new(
+            600.0,
+            20000.0,
+            geometry::CornerBudget::Shaped(0.04),
+            f64::INFINITY,
+        )
+        .unwrap(),
         step_capacity: None,
     }
 }
@@ -3682,7 +3700,13 @@ fn voron0_config() -> StreamConfig {
 /// the shaped Z column here has the same length the bench produces.
 fn voron0_stream() -> (Vec<f64>, Vec<StreamInput>) {
     let xy_limits = voron0_config().limits;
-    let z_limits = VelocityLimits::try_new(20.0, 500.0, 0.04, f64::INFINITY).unwrap();
+    let z_limits = VelocityLimits::try_new(
+        20.0,
+        500.0,
+        geometry::CornerBudget::Shaped(0.04),
+        f64::INFINITY,
+    )
+    .unwrap();
     let mv = |line_no: u32,
               start: [f64; 3],
               end: [f64; 3],

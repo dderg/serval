@@ -31,7 +31,7 @@ pub fn default_stream_config() -> StreamConfig {
         limits: VelocityLimits::try_new(
             100.0,
             1000.0,
-            geometry::corner_deviation_from_scv(5.0, 1000.0),
+            geometry::CornerBudget::ScvEquivalent(5.0),
             f64::INFINITY,
         )
         .expect("bench limits (max_v=100 accel=1000 scv=5 jerk=inf) are valid"),

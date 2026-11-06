@@ -12,7 +12,8 @@ fn ctx(line_no: u32) -> MoveContext {
     MoveContext {
         extruder_axis: 0,
         feedrate_mm_s: MAX_V,
-        limits: VelocityLimits::try_new(MAX_V, ACCEL, SCV, MAX_JERK).unwrap(),
+        limits: VelocityLimits::try_new(MAX_V, ACCEL, crate::CornerBudget::Shaped(SCV), MAX_JERK)
+            .unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,

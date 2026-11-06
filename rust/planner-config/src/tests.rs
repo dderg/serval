@@ -1,35 +1,51 @@
 use super::*;
 
 #[test]
-fn cartesian_validate_accepts_zero_and_positive_corner_deviation() {
+fn cartesian_validate_accepts_zero_and_positive_corner_budgets() {
     let mut c = CartesianLimits::default();
-    c.corner_deviation = 0.0;
-    assert!(c.validate().is_ok());
-    c.corner_deviation = 8.0;
-    assert!(c.validate().is_ok());
+    for make in [
+        CornerBudget::Shaped,
+        CornerBudget::OverFloor,
+        CornerBudget::ScvEquivalent,
+    ] {
+        c.corner = make(0.0);
+        assert!(c.validate().is_ok());
+        c.corner = make(8.0);
+        assert!(c.validate().is_ok());
+    }
 }
 
 #[test]
-fn cartesian_validate_rejects_negative_or_nan_corner_deviation() {
+fn cartesian_validate_rejects_negative_or_nan_corner_budgets() {
     let mut c = CartesianLimits::default();
-    c.corner_deviation = -1.0;
-    assert!(c.validate().is_err());
-    c.corner_deviation = f64::NAN;
-    assert!(c.validate().is_err());
+    for make in [
+        CornerBudget::Shaped,
+        CornerBudget::OverFloor,
+        CornerBudget::ScvEquivalent,
+    ] {
+        c.corner = make(-1.0);
+        assert!(c.validate().is_err());
+        c.corner = make(f64::NAN);
+        assert!(c.validate().is_err());
+    }
 }
 
 #[test]
-fn default_limits_use_the_reader_default_corner_deviation() {
-    assert_eq!(CartesianLimits::default().corner_deviation, 0.04);
+fn default_limits_plan_corners_over_the_shaper_floor() {
+    assert_eq!(
+        CartesianLimits::default().corner,
+        CornerBudget::OverFloor(DEFAULT_CORNER_ALLOWANCE_MM)
+    );
+    assert_eq!(DEFAULT_CORNER_ALLOWANCE_MM, 0.04);
 }
 
 #[test]
 fn effective_limits_without_overrides_are_the_config_base() {
     let cfg = PlannerConfig::default();
-    let (v, a, corner_deviation) = cfg.effective_limits();
+    let (v, a, corner) = cfg.effective_limits();
     assert_eq!(v, cfg.cartesian.max_velocity);
     assert_eq!(a, cfg.cartesian.max_accel);
-    assert_eq!(corner_deviation, cfg.cartesian.corner_deviation);
+    assert_eq!(corner, cfg.cartesian.corner);
 }
 
 #[test]
@@ -46,9 +62,20 @@ fn effective_limits_runtime_caps_clamp_but_never_raise() {
 fn effective_limits_runtime_corner_deviation_replaces_the_base() {
     let mut cfg = PlannerConfig::default();
     cfg.runtime.set_corner_deviation(Some(0.01)).unwrap();
-    assert_eq!(cfg.effective_limits().2, 0.01);
+    assert_eq!(cfg.effective_limits().2, CornerBudget::Shaped(0.01));
     cfg.runtime.set_corner_deviation(None).unwrap();
-    assert_eq!(cfg.effective_limits().2, cfg.cartesian.corner_deviation);
+    assert_eq!(cfg.effective_limits().2, cfg.cartesian.corner);
+}
+
+#[test]
+fn effective_limits_runtime_square_corner_velocity_replaces_the_base_unconverted() {
+    let mut cfg = PlannerConfig::default();
+    cfg.runtime.set_square_corner_velocity(Some(5.0)).unwrap();
+    assert_eq!(cfg.effective_limits().2, CornerBudget::ScvEquivalent(5.0));
+    cfg.runtime.set_corner_deviation(Some(0.02)).unwrap();
+    assert_eq!(cfg.effective_limits().2, CornerBudget::Shaped(0.02));
+    cfg.runtime.set_square_corner_velocity(None).unwrap();
+    assert_eq!(cfg.effective_limits().2, cfg.cartesian.corner);
 }
 
 #[test]
@@ -66,11 +93,41 @@ fn runtime_caps_refuse_non_positive_or_non_finite_values_and_keep_the_old_cap() 
         );
     }
     assert_eq!(runtime.accel, Some(500.0));
-    assert_eq!(
+    runtime.set_corner_deviation(Some(0.03)).unwrap();
+    assert!(matches!(
         runtime.set_corner_deviation(Some(-0.1)),
-        Err(RuntimeLimitError::InvalidCornerDeviation)
-    );
+        Err(RuntimeLimitError::InvalidCornerBudget(_))
+    ));
+    assert!(matches!(
+        runtime.set_square_corner_velocity(Some(f64::NAN)),
+        Err(RuntimeLimitError::InvalidCornerBudget(_))
+    ));
+    assert_eq!(runtime.corner, Some(CornerBudget::Shaped(0.03)));
     runtime.set_corner_deviation(Some(0.0)).unwrap();
+}
+
+#[test]
+fn corner_budget_parts_round_trip_every_kind() {
+    for (budget, kind) in [
+        (CornerBudget::Shaped(0.02), "corner_deviation"),
+        (CornerBudget::OverFloor(0.04), "default"),
+        (CornerBudget::ScvEquivalent(8.0), "square_corner_velocity"),
+    ] {
+        let (name, value) = corner_budget_parts(budget);
+        assert_eq!(name, kind);
+        assert_eq!(corner_budget_from_parts(name, value), Ok(budget));
+    }
+}
+
+#[test]
+fn corner_budget_from_parts_refuses_unknown_kinds_and_bad_values() {
+    assert!(
+        corner_budget_from_parts("junction_deviation", 0.02)
+            .unwrap_err()
+            .contains("unknown corner budget kind")
+    );
+    assert!(corner_budget_from_parts("corner_deviation", -0.1).is_err());
+    assert!(corner_budget_from_parts("square_corner_velocity", f64::NAN).is_err());
 }
 
 #[test]

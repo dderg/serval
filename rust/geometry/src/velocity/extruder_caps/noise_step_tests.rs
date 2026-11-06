@@ -39,9 +39,14 @@ fn trident_like_extruder() -> ExtruderCaps {
 }
 
 fn plan_ratios(ratios: &[f64]) -> VelocityProfile {
-    let limits = VelocityLimits::try_new(500.0, ACCEL_MM_S2, 0.0, f64::INFINITY)
-        .and_then(|limits| limits.with_extruder_caps(Some(trident_like_extruder())))
-        .expect("valid limits");
+    let limits = VelocityLimits::try_new(
+        500.0,
+        ACCEL_MM_S2,
+        crate::CornerBudget::Shaped(0.0),
+        f64::INFINITY,
+    )
+    .and_then(|limits| limits.with_extruder_caps(Some(trident_like_extruder())))
+    .expect("valid limits");
     let moves: Vec<_> = ratios
         .iter()
         .enumerate()

@@ -316,8 +316,13 @@ impl Case {
                     segment: PathSegment::try_new(segment, self.followers())
                         .expect("valid follower demands"),
                     feedrate_mm_s: 100.0,
-                    limits: VelocityLimits::try_new(500.0, self.accel_budget, 0.1, f64::INFINITY)
-                        .expect("valid limits"),
+                    limits: VelocityLimits::try_new(
+                        500.0,
+                        self.accel_budget,
+                        geometry::CornerBudget::Shaped(0.1),
+                        f64::INFINITY,
+                    )
+                    .expect("valid limits"),
                     source: SourceRange {
                         start_line: 7,
                         end_line: 7,
@@ -558,8 +563,13 @@ impl InflectionCase {
                     )
                     .expect("valid follower demands"),
                     feedrate_mm_s: 100.0,
-                    limits: VelocityLimits::try_new(500.0, self.accel_budget, 0.1, f64::INFINITY)
-                        .expect("valid limits"),
+                    limits: VelocityLimits::try_new(
+                        500.0,
+                        self.accel_budget,
+                        geometry::CornerBudget::Shaped(0.1),
+                        f64::INFINITY,
+                    )
+                    .expect("valid limits"),
                     source: SourceRange {
                         start_line: 7,
                         end_line: 7,

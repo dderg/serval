@@ -16,8 +16,8 @@ const DEBOUNCE_MS = 250;
 const CONFIG_FIELDS = [
   { id: "max_velocity", required: true },
   { id: "max_accel", required: true },
-  // Exactly one of corner_deviation (canonical) / square_corner_velocity
-  // (legacy alias) must be set — the planner validates and reports it.
+  // At most one of corner_deviation (canonical) / square_corner_velocity
+  // (legacy alias); neither plans the default allowance over the shaper floor.
   { id: "corner_deviation", required: false },
   { id: "square_corner_velocity", required: false },
   { id: "max_jerk", required: true },
