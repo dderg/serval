@@ -496,12 +496,13 @@ fn the_ramp_at_rest_adds_its_per_accel_share_over_the_longest_ramp() {
     }
 }
 
-/// The largest `|(h²)″|` and `h·|(h²)‴|` along `h = from + (to − from)·q(x)`
-/// over `x = s/gap` in `[0, 1]`, `q` and its first three derivatives given
-/// at `x`.
-fn square_bends(from: f64, to: f64, gap: f64, q: impl Fn(f64) -> [f64; 4]) -> (f64, f64) {
+/// The largest `|(h²)″|`, `h·|(h²)‴|` and `gap·|(h²)‴|` against what
+/// [`width_square_curvature_per_gap`] allows at `h/gap`, along
+/// `h = from + (to − from)·q(x)` over `x = s/gap` in `[0, 1]`, `q` and its
+/// first three derivatives given at `x`.
+fn square_bends(from: f64, to: f64, gap: f64, q: impl Fn(f64) -> [f64; 4]) -> [f64; 3] {
     let samples = 20_000;
-    (0..=samples).fold((0.0_f64, 0.0_f64), |(slope, curvature), i| {
+    (0..=samples).fold([0.0_f64; 3], |[slope, curvature, gap_share], i| {
         let [value, d1, d2, d3] = q(f64::from(i) / f64::from(samples));
         let rise = to - from;
         let h = from + rise * value;
@@ -510,10 +511,12 @@ fn square_bends(from: f64, to: f64, gap: f64, q: impl Fn(f64) -> [f64; 4]) -> (f
             rise * d2 / gap.powi(2),
             rise * d3 / gap.powi(3),
         );
-        (
+        let square_curvature = (2.0 * (3.0 * h1 * h2 + h * h3)).abs();
+        [
             slope.max((2.0 * (h1 * h1 + h * h2)).abs()),
-            curvature.max((h * 2.0 * (3.0 * h1 * h2 + h * h3)).abs()),
-        )
+            curvature.max(h * square_curvature),
+            gap_share.max(gap * square_curvature / width_square_curvature_per_gap(h / gap)),
+        ]
     })
 }
 
@@ -542,33 +545,43 @@ fn the_width_square_bounds_hold_every_node_pair_the_field_lays_and_are_reached()
     let narrowest = gap / RATIO_RAMP_NODE_SPACING_PER_WIDTH;
     let widest_rise = RATIO_RAMP_ENVELOPE_SLOPE * gap;
     let steps = 40;
-    let mut peaks = (0.0_f64, 0.0_f64);
+    let mut peaks = [0.0_f64; 3];
     for i in 0..=steps {
         let narrower = narrowest * f64::from(i) / f64::from(steps);
         for j in 0..=steps {
             let wider = narrower + widest_rise * f64::from(j) / f64::from(steps);
             for (from, to) in [(narrower, wider), (wider, narrower)] {
-                let (slope, curvature) = square_bends(from, to, gap, smootherstep);
-                peaks = (peaks.0.max(slope), peaks.1.max(curvature));
+                let bends = square_bends(from, to, gap, smootherstep);
+                peaks = std::array::from_fn(|n| peaks[n].max(bends[n]));
             }
         }
     }
-    let (rest_slope, rest_curvature) = square_bends(0.0, widest_rise, gap, rise_from_rest);
+    let [rest_slope, rest_curvature, rest_gap_share] =
+        square_bends(0.0, widest_rise, gap, rise_from_rest);
     assert!(
         rest_slope <= WIDTH_SQUARE_SLOPE_BOUND && rest_curvature <= WIDTH_SQUARE_CURVATURE_BOUND,
         "a rise off a rest bends h² by {rest_slope} and {rest_curvature}"
     );
     assert!(
-        peaks.0 <= WIDTH_SQUARE_SLOPE_BOUND && peaks.0 >= WIDTH_SQUARE_SLOPE_BOUND - 1e-3,
-        "the smootherstep bends h² by up to {}, bound {WIDTH_SQUARE_SLOPE_BOUND}",
-        peaks.0
+        (rest_gap_share - 1.0).abs() <= 1e-12,
+        "a rise off a rest bends h²'s slope by {rest_gap_share} of its gap bound at the rest"
     );
     assert!(
-        peaks.1 <= WIDTH_SQUARE_CURVATURE_BOUND * (1.0 + 1e-12)
-            && peaks.1 >= WIDTH_SQUARE_CURVATURE_BOUND * (1.0 - 1e-12),
+        peaks[0] <= WIDTH_SQUARE_SLOPE_BOUND && peaks[0] >= WIDTH_SQUARE_SLOPE_BOUND - 1e-3,
+        "the smootherstep bends h² by up to {}, bound {WIDTH_SQUARE_SLOPE_BOUND}",
+        peaks[0]
+    );
+    assert!(
+        peaks[1] <= WIDTH_SQUARE_CURVATURE_BOUND * (1.0 + 1e-12)
+            && peaks[1] >= WIDTH_SQUARE_CURVATURE_BOUND * (1.0 - 1e-12),
         "the smootherstep bends h²'s slope by up to {} against h, bound \
          {WIDTH_SQUARE_CURVATURE_BOUND}",
-        peaks.1
+        peaks[1]
+    );
+    assert!(
+        peaks[2] <= 1.0 + 1e-12 && peaks[2] >= 1.0 - 1e-12,
+        "the smootherstep bends h²'s slope by up to {} of its gap bound",
+        peaks[2]
     );
 }
 
@@ -602,4 +615,43 @@ fn a_moving_slope_lengthens_the_ramp_it_asks_for() {
         ..flat
     };
     assert!(rule.ramp_time(&sloped) > rule.ramp_time(&flat));
+}
+
+#[test]
+fn a_run_bends_its_window_no_sharper_than_half_its_length_allows() {
+    let (k, speed, tau, slope) = (0.5, 100.0, 0.002, 2.0e-4);
+    let gap = speed * RATIO_RAMP_NODE_SPACING_S;
+    let accel_of = |length_mm: f64| {
+        let step = RatioStep {
+            slides: [RatioSlide::FLAT, RatioSlide { slope, length_mm }],
+            ..cruise(0.0, speed)
+        };
+        unlimited(k).demand(tau, &step).1
+    };
+    let bend = |per_gap: f64| {
+        KERNEL_HALF_VARIANCE
+            * slope
+            * speed
+            * speed
+            * (WIDTH_SQUARE_SLOPE_BOUND + k * speed * per_gap / gap)
+    };
+    let short = speed * tau;
+    let within = |asked: f64, expected: f64| (asked - expected).abs() <= 1e-12 * expected;
+    assert!(
+        within(
+            accel_of(short),
+            bend(width_square_curvature_per_gap(0.5 * short / gap))
+        ),
+        "a run one ramp path long asks {}",
+        accel_of(short)
+    );
+    assert!(
+        within(
+            accel_of(f64::INFINITY),
+            bend(WIDTH_SQUARE_CURVATURE_PER_GAP_BOUND)
+        ),
+        "an endless run asks {}",
+        accel_of(f64::INFINITY)
+    );
+    assert!(accel_of(short) < 0.5 * accel_of(f64::INFINITY));
 }

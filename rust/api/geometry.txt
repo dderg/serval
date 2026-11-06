@@ -528,6 +528,7 @@ pub const geometry::ratio_ramp::RATIO_RAMP_ENVELOPE_SLOPE: f64
 pub const geometry::ratio_ramp::RATIO_RAMP_MAX_TIME_S: f64
 pub const geometry::ratio_ramp::RATIO_RAMP_MIN_TIME_S: f64
 pub const geometry::ratio_ramp::RATIO_RAMP_NODE_SPACING_PER_WIDTH: f64
+pub const geometry::ratio_ramp::RATIO_RAMP_NODE_SPACING_S: f64
 pub const geometry::ratio_ramp::TURNAROUND_SPEED_TIME_S: f64
 pub const geometry::ratio_ramp::VALLEY_LEAD_BUDGET_S: f64
 pub const geometry::ratio_ramp::VALLEY_RAMP_TIME_S: f64
@@ -547,6 +548,7 @@ pub fn geometry::ratio_ramp::turns_around(f64, f64) -> bool
 pub fn geometry::ratio_ramp::valley_reach(f64, f64) -> f64
 pub fn geometry::ratio_ramp::widest_crawl_reach(f64) -> f64
 pub fn geometry::ratio_ramp::widest_crawl_side_within(f64, f64) -> core::option::Option<f64>
+pub fn geometry::ratio_ramp::width_square_curvature_per_gap(f64) -> f64
 pub mod geometry::segment
 pub struct geometry::segment::CubicSegment
 pub geometry::segment::CubicSegment::feedrate_mm_s: f64
@@ -1501,6 +1503,7 @@ pub const geometry::RATIO_RAMP_ENVELOPE_SLOPE: f64
 pub const geometry::RATIO_RAMP_MAX_TIME_S: f64
 pub const geometry::RATIO_RAMP_MIN_TIME_S: f64
 pub const geometry::RATIO_RAMP_NODE_SPACING_PER_WIDTH: f64
+pub const geometry::RATIO_RAMP_NODE_SPACING_S: f64
 pub const geometry::SEAM_VELOCITY_STEP_MM_S: f64
 pub const geometry::SPATIAL_AXIS_SETS: usize
 pub const geometry::TURNAROUND_SPEED_TIME_S: f64
@@ -1535,3 +1538,4 @@ pub fn geometry::turns_around(f64, f64) -> bool
 pub fn geometry::valley_reach(f64, f64) -> f64
 pub fn geometry::widest_crawl_reach(f64) -> f64
 pub fn geometry::widest_crawl_side_within(f64, f64) -> core::option::Option<f64>
+pub fn geometry::width_square_curvature_per_gap(f64) -> f64

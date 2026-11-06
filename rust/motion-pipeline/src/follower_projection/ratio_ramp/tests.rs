@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use geometry::{
     RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioSlide, RatioStep,
-    WIDTH_SQUARE_CURVATURE_BOUND, WIDTH_SQUARE_SLOPE_BOUND,
+    WIDTH_SQUARE_CURVATURE_BOUND, WIDTH_SQUARE_SLOPE_BOUND, width_square_curvature_per_gap,
 };
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 use proptest::prelude::*;
@@ -1478,7 +1478,8 @@ const CREEP_JERK_MM_S3: f64 = 1500.0;
 
 /// The nodes of `field` lie a window apart, and `h²` bends within what
 /// the ramp rule budgets the moving window's slope term for
-/// ([`WIDTH_SQUARE_SLOPE_BOUND`], [`WIDTH_SQUARE_CURVATURE_BOUND`]).
+/// ([`WIDTH_SQUARE_SLOPE_BOUND`], [`WIDTH_SQUARE_CURVATURE_BOUND`],
+/// [`width_square_curvature_per_gap`] over the gap between the nodes).
 fn assert_moving_nodes_lie_a_window_apart(field: &WidthField) {
     for pair in field.nodes.windows(2) {
         let (a, b) = (pair[0], pair[1]);
@@ -1492,15 +1493,20 @@ fn assert_moving_nodes_lie_a_window_apart(field: &WidthField) {
                 b.target
             );
         }
-        for s in probes(b.s - a.s, 64).map(|offset| a.s + offset) {
+        let gap = b.s - a.s;
+        for s in probes(gap, 64).map(|offset| a.s + offset) {
             let h = field.jet(s);
             let square = h * h;
             assert!(
                 square.d2.abs() <= WIDTH_SQUARE_SLOPE_BOUND * (1.0 + 1e-9)
-                    && h.value * square.d3.abs() <= WIDTH_SQUARE_CURVATURE_BOUND * (1.0 + 1e-9),
-                "the width bends h² by {} and h·(h²)‴ by {} at {s} mm",
+                    && h.value * square.d3.abs() <= WIDTH_SQUARE_CURVATURE_BOUND * (1.0 + 1e-9)
+                    && gap * square.d3.abs()
+                        <= width_square_curvature_per_gap(h.value / gap) * (1.0 + 1e-9),
+                "the width bends h² by {}, h·(h²)‴ by {} and gap·(h²)‴ by {} at {s} mm, {gap} \
+                 mm between nodes",
                 square.d2,
-                h.value * square.d3
+                h.value * square.d3,
+                gap * square.d3
             );
         }
     }
@@ -2267,14 +2273,23 @@ fn ramp_crossing_strategy() -> impl Strategy<Value = RampCrossing> {
         )
 }
 
+fn proptest_cases() -> u32 {
+    std::env::var("PROPTEST_CASES").map_or(256, |cases| {
+        cases.parse().expect("PROPTEST_CASES must be an integer")
+    })
+}
+
+/// The slide strategy gives up on two cases in three whose budget passes the
+/// extruder's limit, which the planner would slow.
+const REJECTS_PER_CASE: u32 = 4;
+
 proptest! {
     #![proptest_config(ProptestConfig {
-        cases: std::env::var("PROPTEST_CASES")
-            .map_or(256, |cases| cases.parse().expect("PROPTEST_CASES must be an integer")),
+        cases: proptest_cases(),
         failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
             "proptest-regressions/ratio_ramp.txt",
         ))),
-        max_global_rejects: 65_536,
+        max_global_rejects: (REJECTS_PER_CASE * proptest_cases()).max(65_536),
         ..ProptestConfig::default()
     })]
 
@@ -2405,9 +2420,10 @@ fn a_slide_short_of_a_rest_is_ramped_within_its_rule() {
 /// `rest_ahead` further on, under a width field asking for `base` times
 /// each of `factors` in turn every `spacing` mm, no closer than the real
 /// field lays its nodes ([`NODE_SPACING_PER_WIDTH`] of the narrower
-/// target), crossed by leaders at `speed` accelerating at `accel` with an
-/// advance of `advance_slope_s`, the extruder accelerating at up to
-/// `max_accel`.
+/// target, and the path the leaders cover in [`NODE_SPACING_S`] at their
+/// fastest about the slide), crossed by leaders at `speed` accelerating at
+/// `accel` with an advance of `advance_slope_s`, the extruder accelerating
+/// at up to `max_accel`.
 #[derive(Debug, Clone)]
 struct SlideCrossing {
     ratios: [f64; 4],
@@ -2489,6 +2505,9 @@ fn slide_crossing_strategy() -> impl Strategy<Value = SlideCrossing> {
             )| {
                 let slide = slide_widths * base;
                 let narrowest = factors.iter().copied().fold(1.0, f64::min);
+                let accel = accel_share * speed * speed / (slide + 2.0 * base);
+                let speed_at = |s: f64| (speed * speed + 2.0 * accel * (s - start)).max(0.0).sqrt();
+                let fastest = speed_at(start - base).max(speed_at(start + slide + base));
                 SlideCrossing {
                     ratios: [
                         r_before,
@@ -2501,9 +2520,9 @@ fn slide_crossing_strategy() -> impl Strategy<Value = SlideCrossing> {
                     rest_ahead,
                     base,
                     factors,
-                    spacing: spacing_share * narrowest * base,
+                    spacing: (spacing_share * narrowest * base).max(fastest * NODE_SPACING_S),
                     speed,
-                    accel: accel_share * speed * speed / (slide + 2.0 * base),
+                    accel,
                     advance_slope_s,
                     max_accel,
                 }
