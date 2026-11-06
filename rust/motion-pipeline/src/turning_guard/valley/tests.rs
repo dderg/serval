@@ -62,7 +62,7 @@ fn a_crawl_leaves_room_for_the_widest_grid_side_the_lead_budget_covers_before_it
             .rebuild(widest);
     let (first, last) = crawl.before.cells;
     let most = (first..=last)
-        .map(|n| crawl.before.rebuild_at(n))
+        .filter_map(|n| crawl.before.rebuild_where(n, |_| true))
         .fold(0.0, f64::max);
     assert!(
         0.0 < most && most <= whole_side,

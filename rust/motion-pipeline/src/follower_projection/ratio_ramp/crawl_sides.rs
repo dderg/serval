@@ -5,7 +5,7 @@ use geometry::{
 };
 
 use super::super::RatioSpan;
-use super::{Crossing, LegPath};
+use super::{Crossing, RampLeg};
 
 /// Probes per leg the side trail reads the leaders at, both ends included
 /// once more.
@@ -42,9 +42,10 @@ pub(super) struct SideTrail {
 }
 
 impl SideTrail {
-    /// Probes the leaders of the leg `path` follows over `support`, the
-    /// path read no further than `table_end`.
-    pub(super) fn record(&mut self, path: &LegPath, (t_start, t_end): (f64, f64), table_end: f64) {
+    /// Probes the leaders of `leg` over its support, the path read off the
+    /// odometer that summed its arc and no further than `table_end`.
+    pub(super) fn record(&mut self, leg: &RampLeg, table_end: f64) {
+        let (t_start, t_end) = leg.support;
         self.legs += 1;
         for index in 0..=TRAIL_PROBES_PER_LEG {
             let t = if index == TRAIL_PROBES_PER_LEG {
@@ -52,8 +53,8 @@ impl SideTrail {
             } else {
                 t_start + (t_end - t_start) * index as f64 / TRAIL_PROBES_PER_LEG as f64
             };
-            let s = (path.start_s + path.covered(t)).min(table_end);
-            let (speed, path_accel) = Crossing::speed_and_path_accel(path.leaders, t);
+            let s = (leg.start_s + leg.odometer.covered_until(t)).min(table_end);
+            let (speed, path_accel) = Crossing::speed_and_path_accel(leg.shaped_leaders, t);
             self.probes.push_back(TrailProbe {
                 leg: self.legs,
                 t,

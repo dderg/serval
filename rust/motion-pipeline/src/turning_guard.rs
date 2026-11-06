@@ -19,7 +19,8 @@ mod variation;
 
 use screen::{MoveSummary, Read, ShapedBox};
 use shadow::{
-    AdvanceDemand, CellMotion, FollowerKernels, GridSample, PlannedGrid, Ride, shaped_at,
+    AdvanceDemand, CellMotion, FollowerKernels, GridMemo, GridSample, PlannedGrid, Ride,
+    ShapedSample, shaped_at,
 };
 use valley::{CellBounds, CellTrack, Crawl, FitMiss, Slot};
 use variation::{PhaseSpan, phase_spans, variation_over};
@@ -100,6 +101,9 @@ pub(crate) struct TurningGuard {
     entries: Entries,
     history: VecDeque<MoveSummary>,
     grid: PlannedGrid,
+    /// The shaped motion's bounds across each cell of `grid` from its
+    /// shadow convolution, joined over the followers.
+    shadows: RefCell<GridMemo<CellBounds>>,
     /// The planned motion on each zoom level's grid ([`GRID_ZOOMS`]),
     /// sampled where a binding cell is checked again and kept until a
     /// re-plan changes it or no check reads it.
@@ -125,6 +129,16 @@ struct Valleys {
     scanned: i64,
     run: Option<i64>,
     fit: FitMiss,
+}
+
+impl Valleys {
+    /// Forgets the cells tracked from `n` on, which are scanned anew.
+    fn truncate_track_from(&mut self, n: i64) {
+        self.track.truncate_from(n);
+        for crawl in &mut self.crawls {
+            crawl.forget_track_from(n);
+        }
+    }
 }
 
 /// Whether the shaped path may crawl while it crosses a held move: never,
@@ -183,10 +197,20 @@ impl Timing {
 }
 
 /// A follower's leader kernels on the guard's grid, and on each zoom
-/// level's ([`GRID_ZOOMS`]).
+/// level's ([`GRID_ZOOMS`]), with the shaped motion at each instant of the
+/// guard's grid once read.
 struct Follower {
     coarse: FollowerKernels,
     fine: [FollowerKernels; ZOOM_LEVELS],
+    samples: RefCell<GridMemo<ShapedSample>>,
+}
+
+impl Follower {
+    fn sample(&self, grid: &PlannedGrid, n: i64) -> ShapedSample {
+        self.samples
+            .borrow_mut()
+            .get_or_insert_with(n, || expect_sample(&self.coarse, grid, n))
+    }
 }
 
 /// How many cells of zoom level `level`'s grid one coarse cell holds.
@@ -205,8 +229,8 @@ struct CellCheck<'a> {
 }
 
 /// The follower acceleration a crawl valley side's rebuild may ask in each
-/// of its cells, `k·r·`[`valley::Reserve::rebuild_at`] at the largest
-/// ratio laid over the planned time `window` its kernels read.
+/// of its cells, `k·r` times [`valley::Reserve::rebuild_where`] at the
+/// largest ratio laid over the planned time `window` its kernels read.
 #[derive(Debug, Clone, Copy)]
 struct Reservation<'a> {
     side: &'a valley::Reserve,
@@ -219,8 +243,13 @@ impl Reservation<'_> {
         self.side.cells.0 <= cell && cell <= self.side.cells.1
     }
 
-    fn asked_at(&self, cell: i64) -> f64 {
-        self.scale * self.side.rebuild_at(cell)
+    /// What cell `cell` asks with the side's rebuild on top of `weighted`,
+    /// `None` where a bound on the rebuild keeps it within `limit`.
+    fn binding_ask(&self, weighted: f64, cell: i64, limit: f64) -> Option<f64> {
+        let asks = |rebuild: f64| weighted + self.scale * rebuild;
+        self.side
+            .rebuild_where(cell, |rebuild| asks(rebuild) > limit)
+            .map(asks)
     }
 }
 
@@ -274,8 +303,9 @@ impl CellCheck<'_> {
                     ),
                     0.0,
                 );
+                let binding = side.binding_ask(weighted, valley_cell, self.caps.max_accel_mm_s2);
                 (
-                    asked.max(weighted + side.asked_at(valley_cell)),
+                    binding.map_or(asked, |binding| asked.max(binding)),
                     (window.0.min(side.window.0), window.1.max(side.window.1)),
                 )
             },
@@ -293,19 +323,26 @@ impl CellCheck<'_> {
 
 /// The shaped motion's bounds across cell `n` from its shadow convolution,
 /// joined over the followers.
-fn shadow_bounds(followers: &[(usize, Follower)], grid: &PlannedGrid, n: i64) -> CellBounds {
-    followers
-        .iter()
-        .map(|(_, follower)| {
-            let from = expect_sample(&follower.coarse, grid, n);
-            let to = expect_sample(&follower.coarse, grid, n + 1);
-            CellBounds::of_motion(&CellMotion::between(&follower.coarse, &from, &to))
-        })
-        .reduce(CellBounds::union)
-        .expect("turning guard: scanning without a follower")
+fn shadow_bounds(
+    followers: &[(usize, Follower)],
+    grid: &PlannedGrid,
+    shadows: &RefCell<GridMemo<CellBounds>>,
+    n: i64,
+) -> CellBounds {
+    shadows.borrow_mut().get_or_insert_with(n, || {
+        followers
+            .iter()
+            .map(|(_, follower)| {
+                let from = follower.sample(grid, n);
+                let to = follower.sample(grid, n + 1);
+                CellBounds::of_motion(&CellMotion::between(&follower.coarse, &from, &to))
+            })
+            .reduce(CellBounds::union)
+            .expect("turning guard: scanning without a follower")
+    })
 }
 
-fn expect_sample(kernels: &FollowerKernels, grid: &PlannedGrid, n: i64) -> shadow::ShapedSample {
+fn expect_sample(kernels: &FollowerKernels, grid: &PlannedGrid, n: i64) -> ShapedSample {
     shaped_at(kernels, grid, n).unwrap_or_else(|| {
         panic!(
             "turning guard: the grid misses t={} (sample {n}; the grid holds [{}, {}))",
@@ -355,6 +392,7 @@ impl TurningGuard {
             .iter()
             .map(|(_, follower)| follower.coarse.sample_span())
             .fold((1, 0), |(back, ahead), (b, a)| (back.max(b), ahead.max(a)));
+        let h = grid_step(&followers);
         Self {
             valleys: Valleys {
                 track: CellTrack::default(),
@@ -368,8 +406,11 @@ impl TurningGuard {
             span,
             entries: Entries::default(),
             history: VecDeque::new(),
-            grid: PlannedGrid::default(),
-            fine_grids: std::array::from_fn(|_| RefCell::new(PlannedGrid::default())),
+            grid: PlannedGrid::new(h),
+            shadows: RefCell::default(),
+            fine_grids: std::array::from_fn(|level| {
+                RefCell::new(PlannedGrid::new(h / zoom_scale(level) as f64))
+            }),
             carried_position: None,
             frozen: 0,
             standing: None,
@@ -433,6 +474,10 @@ impl TurningGuard {
         self.entries = Entries::default();
         self.history.clear();
         self.grid.clear();
+        self.shadows.get_mut().clear();
+        for (_, follower) in &mut self.followers {
+            follower.samples.get_mut().clear();
+        }
         for grid in &self.fine_grids {
             grid.borrow_mut().clear();
         }
@@ -445,9 +490,7 @@ impl TurningGuard {
     }
 
     fn h(&self) -> f64 {
-        self.followers
-            .first()
-            .map_or(GRID_S, |(_, follower)| follower.coarse.h)
+        grid_step(&self.followers)
     }
 
     fn admit(&mut self, planned: PlannedMove) {
@@ -588,8 +631,8 @@ impl TurningGuard {
         let Valleys {
             track, crawls, fit, ..
         } = &mut self.valleys;
-        let (grid, followers) = (&self.grid, &self.followers);
-        let shadow = |n: i64| shadow_bounds(followers, grid, n);
+        let (grid, followers, shadows) = (&self.grid, &self.followers, &self.shadows);
+        let shadow = |n: i64| shadow_bounds(followers, grid, shadows, n);
         for crawl in crawls.iter_mut().filter(|crawl| crawl.after.is_none()) {
             crawl.resolve_after(track, all, (h, *fit), &shadow);
         }
@@ -624,7 +667,7 @@ impl TurningGuard {
         if let Some(bounds) = boxed {
             return Some(bounds);
         }
-        Some(shadow_bounds(&self.followers, &self.grid, n))
+        Some(shadow_bounds(&self.followers, &self.grid, &self.shadows, n))
     }
 
     /// Whether the shaped path may crawl across held move `index`, from its
@@ -681,7 +724,7 @@ impl TurningGuard {
         let slot = Slot::over(track, (start, end), fit)
             .expect("turning guard: a run of crawling cells holds a cell the leaders may crawl in");
         let segment_table_start = -1;
-        let shadow = |n: i64| shadow_bounds(&self.followers, &self.grid, n);
+        let shadow = |n: i64| shadow_bounds(&self.followers, &self.grid, &self.shadows, n);
         let found = Crawl::found(slot, line, track, segment_table_start, (h, fit), &shadow);
         match found {
             Ok(crawl) => {
@@ -690,7 +733,7 @@ impl TurningGuard {
             }
             Err(overreach) => {
                 self.valleys.scanned = start;
-                self.valleys.track.truncate_from(start);
+                self.valleys.truncate_track_from(start);
                 if overreach.width_at_rest > overreach.covered {
                     ValleyStuck {
                         crawl: from,
@@ -771,9 +814,9 @@ impl TurningGuard {
             nearby: &nearby,
             reserves: &reserves,
         };
-        let mut from = expect_sample(&follower.coarse, &self.grid, first);
+        let mut from = follower.sample(&self.grid, first);
         for n in first..last {
-            let to = expect_sample(&follower.coarse, &self.grid, n + 1);
+            let to = follower.sample(&self.grid, n + 1);
             if cell.asks(&follower.coarse, &from, &to, n, n).is_some() {
                 if let Some(binds) = self.zoom(follower, &cell, 0, n) {
                     return binds;
@@ -1076,6 +1119,11 @@ impl TurningGuard {
         self.grid.truncate_from(straddled + 1);
         let bounds = self.cell_bounds(straddled as f64 * h, (straddled + 1) as f64 * h);
         self.grid.set_cell_bounds(straddled, bounds);
+        let samples_read_from = straddled - ahead;
+        for (_, follower) in &self.followers {
+            follower.samples.borrow_mut().forget_from(samples_read_from);
+        }
+        self.shadows.get_mut().forget_from(samples_read_from - 1);
         for (level, grid) in self.fine_grids.iter().enumerate() {
             let fine_h = h / zoom_scale(level) as f64;
             let fine_straddled = (changed_at / fine_h).floor() as i64;
@@ -1104,11 +1152,12 @@ impl TurningGuard {
         valleys.crawls.retain(|crawl| crawl.cells().1 < rescan_from);
         for crawl in &mut valleys.crawls {
             if crawl.reach().1 >= rescan_from {
-                crawl.after = None;
+                crawl.reopen_after();
             }
         }
         valleys.scanned = valleys.scanned.min(rescan_from);
-        valleys.track.truncate_from(valleys.scanned);
+        let scanned = valleys.scanned;
+        valleys.truncate_track_from(scanned);
     }
 
     /// Forgets the crawls whose sides reach no cell from `first_cell` on,
@@ -1213,6 +1262,10 @@ impl TurningGuard {
         let tracked_from = self.forget_unreachable_crawls(first_cell);
         let keep_from = tracked_from - back - 4;
         self.grid.trim_before(keep_from);
+        self.shadows.get_mut().forget_before(keep_from);
+        for (_, follower) in &self.followers {
+            follower.samples.borrow_mut().forget_before(keep_from);
+        }
         for (level, grid) in self.fine_grids.iter().enumerate() {
             grid.borrow_mut().trim_before(keep_from * zoom_scale(level));
         }
@@ -1582,10 +1635,18 @@ fn guarded_followers(chains: &AxisChainSet) -> Vec<(usize, Follower)> {
                     fine: std::array::from_fn(|level| {
                         FollowerKernels::new(axes, h / zoom_scale(level) as f64)
                     }),
+                    samples: RefCell::default(),
                 },
             )
         })
         .collect()
+}
+
+/// The guard's grid step: its followers' kernels', all on one grid.
+fn grid_step(followers: &[(usize, Follower)]) -> f64 {
+    followers
+        .first()
+        .map_or(GRID_S, |(_, follower)| follower.coarse.h)
 }
 
 /// Where a move lies along its segment after `previous`, and how hard it

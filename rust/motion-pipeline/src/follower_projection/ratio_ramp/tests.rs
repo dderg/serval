@@ -6,7 +6,9 @@ use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
 use trajectory::{ContinuousAxis, ContinuousSegment};
 
-use super::super::{FollowerState, SpanSide, Table as SpanTable};
+use super::super::{
+    FollowerState, OdometerLeaves, SpanSide, Table as SpanTable, shaped_leader_arc_length,
+};
 use super::{
     AdvanceValley, CLUSTER_REACH_S, CROSSING_PROBES, Crossing, ENVELOPE_SLOPE, KERNEL_PEAK,
     NODE_SPACING_PER_WIDTH, NODE_SPACING_S, PathReach, RampLeg, RatioSmoothing, RestSide,
@@ -764,17 +766,24 @@ fn braking_to_standstill(t0: f64, duration: f64) -> ContinuousSegment {
 
 fn moving_leg<'a>(
     shaped: &'a ContinuousSegment,
-    shaped_leaders: &'a ShapedLeaders<'a>,
+    (shaped_leaders, odometer): (&'a ShapedLeaders<'a>, &'a OdometerLeaves),
     start_s: f64,
 ) -> RampLeg<'a> {
     RampLeg {
         shaped,
         leaders: &[0, 1],
         shaped_leaders,
+        odometer,
         support: (shaped.t_start, shaped.t_end),
         start_s,
         rests: false,
     }
+}
+
+/// The odometer ingest sums the arc of the leaders `shaped_leaders` read
+/// off `shaped` with.
+fn odometer(shaped: &ContinuousSegment, shaped_leaders: &ShapedLeaders) -> OdometerLeaves {
+    shaped_leader_arc_length(shaped, &[0, 1], shaped_leaders).1
 }
 
 /// The width field's time samples from `t0` on, as `(s − s0, t − t0)`.
@@ -799,26 +808,29 @@ fn a_leg_opening_from_standstill_samples_the_width_as_planned_from_rest() {
     let duration = 0.02;
     let from_rest = starting_from_standstill(0.0, duration);
     let from_rest_leaders = ShapedLeaders::of(&from_rest, &[0, 1]);
+    let from_rest_odometer = odometer(&from_rest, &from_rest_leaders);
     let mut planned_from_rest = WidthField::default();
     planned_from_rest.extend(
         &from_rest_leaders,
-        &moving_leg(&from_rest, &from_rest_leaders, 0.0),
+        &moving_leg(&from_rest, (&from_rest_leaders, &from_rest_odometer), 0.0),
         REST_LEG_SPILL_MM,
     );
     let stand_still_at = 0.0337;
     let before = braking_to_standstill(stand_still_at - duration, duration);
     let before_leaders = ShapedLeaders::of(&before, &[0, 1]);
+    let before_odometer = odometer(&before, &before_leaders);
     let after = starting_from_standstill(stand_still_at, duration);
     let after_leaders = ShapedLeaders::of(&after, &[0, 1]);
+    let after_odometer = odometer(&after, &after_leaders);
     let mut stream = WidthField::default();
     stream.extend(
         &before_leaders,
-        &moving_leg(&before, &before_leaders, 0.0),
+        &moving_leg(&before, (&before_leaders, &before_odometer), 0.0),
         REST_LEG_SPILL_MM,
     );
     stream.extend(
         &after_leaders,
-        &moving_leg(&after, &after_leaders, REST_LEG_SPILL_MM),
+        &moving_leg(&after, (&after_leaders, &after_odometer), REST_LEG_SPILL_MM),
         2.0 * REST_LEG_SPILL_MM,
     );
     let (streamed, from_rest) = (
@@ -855,10 +867,12 @@ fn a_rest_valley_covers_the_ratio_step_its_leg_lays_short_of_the_rest() {
     state.push_span(REST_LEG_SPILL_MM + short_of_rest, 0.03, 0.03);
     let shaped = braking_into_a_rest_and_leaving();
     let shaped_leaders = ShapedLeaders::of(&shaped, &[0, 1]);
+    let shaped_odometer = odometer(&shaped, &shaped_leaders);
     let leg = RampLeg {
         shaped: &shaped,
         leaders: &[0, 1],
         shaped_leaders: &shaped_leaders,
+        odometer: &shaped_odometer,
         support: (shaped.t_start, shaped.t_end),
         start_s: travel,
         rests: true,
@@ -908,9 +922,10 @@ fn leaders_resting_through_a_legs_end_rest_up_to_its_seam() {
     let seam = state.s_ingested_end;
     let stopping = braking_to_standstill(0.0, duration);
     let stopping_leaders = ShapedLeaders::of(&stopping, &[0, 1]);
+    let stopping_odometer = odometer(&stopping, &stopping_leaders);
     let stop = RampLeg {
         rests: true,
-        ..moving_leg(&stopping, &stopping_leaders, travel)
+        ..moving_leg(&stopping, (&stopping_leaders, &stopping_odometer), travel)
     };
     state
         .smoothing
@@ -918,9 +933,10 @@ fn leaders_resting_through_a_legs_end_rest_up_to_its_seam() {
     state.push_span(REST_LEG_SPILL_MM, 0.03, 0.03);
     let leaving = starting_from_standstill(duration, duration);
     let leaving_leaders = ShapedLeaders::of(&leaving, &[0, 1]);
+    let leaving_odometer = odometer(&leaving, &leaving_leaders);
     state.smoothing.lay(
         (&state.spans, &state.advance_spans),
-        &moving_leg(&leaving, &leaving_leaders, seam),
+        &moving_leg(&leaving, (&leaving_leaders, &leaving_odometer), seam),
         &rule,
     );
     for s in [
@@ -953,10 +969,12 @@ fn the_width_rests_on_the_ratio_step_a_resting_leg_lays_beside_the_rest() {
         state.push_span(REST_LEG_SPILL_MM - off_rest, 0.03, 0.03);
         let shaped = braking_into_a_rest_and_leaving();
         let shaped_leaders = ShapedLeaders::of(&shaped, &[0, 1]);
+        let shaped_odometer = odometer(&shaped, &shaped_leaders);
         let leg = RampLeg {
             shaped: &shaped,
             leaders: &[0, 1],
             shaped_leaders: &shaped_leaders,
+            odometer: &shaped_odometer,
             support: (shaped.t_start, shaped.t_end),
             start_s: travel,
             rests: true,
@@ -1851,7 +1869,8 @@ fn a_crawl_right_before_a_legs_end_is_found_whichever_seam_is_slower() {
     for end_excess_mm_s in [-1e-6, 0.0, 1e-6] {
         let (shaped, reversal_t) = reversing_just_before_its_end(3.0, end_excess_mm_s);
         let shaped_leaders = ShapedLeaders::of(&shaped, &[0, 1]);
-        let leg = moving_leg(&shaped, &shaped_leaders, 100.0);
+        let shaped_odometer = odometer(&shaped, &shaped_leaders);
+        let leg = moving_leg(&shaped, (&shaped_leaders, &shaped_odometer), 100.0);
         let found = slowest_crawl(&shaped_leaders, &leg, f64::INFINITY);
         let Some((_, crossing)) = found else {
             panic!(

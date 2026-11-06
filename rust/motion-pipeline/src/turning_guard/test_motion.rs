@@ -197,7 +197,7 @@ impl Motion {
     /// The motion on the grid `k·h` for `k` in `range`, with each cell's
     /// acceleration bound and variation.
     pub fn grid(&self, h: f64, range: std::ops::Range<i64>) -> PlannedGrid {
-        let mut grid = PlannedGrid::default();
+        let mut grid = PlannedGrid::new(h);
         let mut arc = self.arc(range.start as f64 * h);
         for k in range {
             let (tau, next) = (k as f64 * h, (k + 1) as f64 * h);

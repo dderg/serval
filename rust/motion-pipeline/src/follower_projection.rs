@@ -628,6 +628,7 @@ pub(crate) fn project_followers(
                     shaped: &frontier[i],
                     leaders,
                     shaped_leaders: &read.shaped_leaders,
+                    odometer: &read.odometer,
                     support: projection_support(&base[i], &frontier[i], axis, leaders),
                     start_s: table_start,
                     rests: !read.raw_moves,

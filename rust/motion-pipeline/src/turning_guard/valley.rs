@@ -1,3 +1,4 @@
+use std::cell::OnceCell;
 use std::collections::VecDeque;
 
 use geometry::{
@@ -415,14 +416,40 @@ impl Slot {
 /// One side of a crawl valley as the guard leaves room for it: the widest
 /// the follower projection lays it ([`geometry::crawl_side_width`] picks a
 /// grid width no wider wherever this one fits), the cells it may reach
-/// from wherever in the run the crawl lies, and for each of them the most
-/// `|W″·ṡ³ + 3W′·ṡ·s̈|` its rebuild asks there, which an advance of slope
+/// from wherever in the run the crawl lies, and how its fitted leaders
+/// cross each of them. The most `|W″·ṡ³ + 3W′·ṡ·s̈|` its rebuild asks in a
+/// cell is read off them once a check needs it, which an advance of slope
 /// `k` at ratio `r` turns into `k·r` times as much follower acceleration.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Reserve {
     pub width: f64,
     pub cells: (i64, i64),
-    rebuilds: Vec<f64>,
+    leaders: Option<SideLeaders>,
+}
+
+/// The fitted leaders across a crawl valley side: as its rebuild reads
+/// them, cell by cell, and joined over all its cells, which bounds what
+/// the rebuild asks in any of them ([`CrawlSide::rebuild_within`] grows
+/// with the distance range, the speed and the acceleration); and the bound
+/// over the whole side ([`CrawlSide::rebuild`]) once read.
+#[derive(Debug, Clone, PartialEq)]
+struct SideLeaders {
+    side: CrawlSide,
+    cells: Vec<CellLeaders>,
+    joined: f64,
+    whole: OnceCell<f64>,
+}
+
+/// The fitted leaders in one cell of a crawl valley side: their distance
+/// range from the crawl, how fast they are and how hard they accelerate at
+/// most, and what [`CrawlSide::rebuild_within`] bounds the rebuild there
+/// by once read.
+#[derive(Debug, Clone, PartialEq)]
+struct CellLeaders {
+    distance: (f64, f64),
+    speed: f64,
+    accel: f64,
+    within: OnceCell<f64>,
 }
 
 impl Reserve {
@@ -430,10 +457,14 @@ impl Reserve {
     /// lays it where the weight held at zero, or a side reading no motion
     /// past it, needs none.
     pub fn none(cells: (i64, i64)) -> Self {
+        assert!(
+            cells.0 <= cells.1,
+            "turning guard: a crawl side spans at least one cell, not {cells:?}"
+        );
         Self {
             width: 0.0,
             cells,
-            rebuilds: vec![0.0; cell_count(cells)],
+            leaders: None,
         }
     }
 
@@ -450,40 +481,72 @@ impl Reserve {
         shadow: &dyn Fn(i64) -> CellBounds,
     ) -> Self {
         let side = slot.leaders(track, cells, (h, fit), shadow);
-        let whole_side = side.rebuild(width);
-        let rebuilds = (cells.0..=cells.1)
+        let crossing: Vec<CellLeaders> = (cells.0..=cells.1)
             .map(|n| {
                 let cell = track.get(n);
-                let distance = slot.distance(track, n, h, fit);
-                side.rebuild_within(
-                    width,
-                    distance,
-                    cell.speed.1 + fit.speed,
-                    cell.accel.1 + fit.accel,
-                )
-                .min(whole_side)
+                CellLeaders {
+                    distance: slot.distance(track, n, h, fit),
+                    speed: cell.speed.1 + fit.speed,
+                    accel: cell.accel.1 + fit.accel,
+                    within: OnceCell::new(),
+                }
             })
             .collect();
+        let (distance, speed, accel) = crossing.iter().fold(
+            ((f64::INFINITY, 0.0_f64), 0.0_f64, 0.0_f64),
+            |(distance, speed, accel), cell| {
+                (
+                    (
+                        distance.0.min(cell.distance.0),
+                        distance.1.max(cell.distance.1),
+                    ),
+                    speed.max(cell.speed),
+                    accel.max(cell.accel),
+                )
+            },
+        );
         Self {
             width,
             cells,
-            rebuilds,
+            leaders: Some(SideLeaders {
+                side,
+                joined: side.rebuild_within(width, distance, speed, accel),
+                cells: crossing,
+                whole: OnceCell::new(),
+            }),
         }
     }
 
-    /// The most the rebuild asks in cell `n`, one of the side's.
-    pub fn rebuild_at(&self, n: i64) -> f64 {
+    /// The most the rebuild asks in cell `n`, one of the side's, where
+    /// `binds` holds for a bound on it; `None` where a bound it does not
+    /// hold for shows the rebuild cannot bind. `binds` holds for every
+    /// bound past one it holds for.
+    pub fn rebuild_where(&self, n: i64, binds: impl Fn(f64) -> bool) -> Option<f64> {
         assert!(
             self.cells.0 <= n && n <= self.cells.1,
             "turning guard: cell {n} lies outside the crawl side over {:?}",
             self.cells
         );
-        self.rebuilds[usize::try_from(n - self.cells.0).expect("a cell of the side")]
+        let Some(leaders) = &self.leaders else {
+            return binds(0.0).then_some(0.0);
+        };
+        if !binds(leaders.joined) {
+            return None;
+        }
+        let cell = &leaders.cells[usize::try_from(n - self.cells.0).expect("a cell of the side")];
+        let within = *cell.within.get_or_init(|| {
+            leaders
+                .side
+                .rebuild_within(self.width, cell.distance, cell.speed, cell.accel)
+        });
+        binds(within).then(|| {
+            within.min(
+                *leaders
+                    .whole
+                    .get_or_init(|| leaders.side.rebuild(self.width)),
+            )
+        })
     }
-}
-
-fn cell_count((from, to): (i64, i64)) -> usize {
-    usize::try_from(to - from + 1).expect("a crawl side spans at least one cell")
 }
 
 /// A run of grid cells where the shaped speed may fall under the fitted
@@ -498,6 +561,27 @@ pub(super) struct Crawl {
     pub line: u32,
     pub before: Reserve,
     pub after: Option<Reserve>,
+    covered_after: CoveredAfter,
+}
+
+/// The least path the fitted leaders cover from the end of a run to each
+/// cell tracked past it, read through cell `through`: the most of it over
+/// those cells, and over those within [`VALLEY_LEAD_BUDGET_S`] of the run.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CoveredAfter {
+    through: i64,
+    most: f64,
+    within_budget: f64,
+}
+
+impl CoveredAfter {
+    fn from_run_end(last: i64) -> Self {
+        Self {
+            through: last,
+            most: 0.0,
+            within_budget: 0.0,
+        }
+    }
 }
 
 /// Why a crawl's valley side does not fit within the
@@ -569,6 +653,7 @@ impl Crawl {
                 line,
                 before: Reserve::none(slot.cells),
                 after: None,
+                covered_after: CoveredAfter::from_run_end(last),
             });
         }
         assert!(
@@ -597,7 +682,48 @@ impl Crawl {
             line,
             before: Reserve::over(&slot, track, (cells, width), (h, fit), shadow),
             after: None,
+            covered_after: CoveredAfter::from_run_end(last),
         })
+    }
+
+    /// Waits for the after side again, the cells past the run to be
+    /// tracked anew.
+    pub fn reopen_after(&mut self) {
+        self.after = None;
+        self.covered_after = CoveredAfter::from_run_end(self.slot.cells.1);
+    }
+
+    /// Forgets what it read of the cells from `n` on, which the track
+    /// holds anew.
+    pub fn forget_track_from(&mut self, n: i64) {
+        if self.covered_after.through >= n {
+            self.covered_after = CoveredAfter::from_run_end(self.slot.cells.1);
+        }
+    }
+
+    /// Reads the least path the leaders cover past the run on through cell
+    /// `to`, which the track holds.
+    fn cover_after_through(&mut self, track: &CellTrack, to: i64, (h, fit): (f64, FitMiss)) {
+        let last = self.slot.cells.1;
+        let horizon = last + (VALLEY_LEAD_BUDGET_S / h).floor() as i64;
+        assert!(
+            self.covered_after.through <= to,
+            "turning guard: the crawl at cell {} read the track through cell {} it holds only \
+             through {to}",
+            self.slot.cells.0,
+            self.covered_after.through
+        );
+        let covered = &mut self.covered_after;
+        while covered.through < to {
+            covered.through += 1;
+            let n = covered.through;
+            covered.most = covered
+                .most
+                .max(track.path(last + 1, n).0 - track.drift(last + 1, n, h, fit));
+            if n <= horizon {
+                covered.within_budget = covered.most;
+            }
+        }
     }
 
     /// Leaves room for the after side: as wide as the widest grid width
@@ -619,18 +745,15 @@ impl Crawl {
         let (first, last) = slot.cells;
         let horizon = last + (VALLEY_LEAD_BUDGET_S / h).floor() as i64;
         let to = track.end() - 1;
-        let covered_to = |end: i64| {
-            (last + 1..=end)
-                .map(|n| track.path(last + 1, n).0 - track.drift(last + 1, n, h, fit))
-                .fold(0.0_f64, f64::max)
-        };
         if to < horizon && !all {
             return false;
         }
-        let within_budget = widest_crawl_side_within(slot.width.1, covered_to(horizon.min(to)));
+        self.cover_after_through(track, to, (h, fit));
+        let covered = self.covered_after;
+        let within_budget = widest_crawl_side_within(slot.width.1, covered.within_budget);
         let width = match within_budget {
             Some(width) => width,
-            None => match widest_crawl_side_within(slot.width.1, covered_to(to)) {
+            None => match widest_crawl_side_within(slot.width.1, covered.most) {
                 Some(width) => width,
                 None if all => {
                     self.after = Some(Reserve::none(slot.cells));

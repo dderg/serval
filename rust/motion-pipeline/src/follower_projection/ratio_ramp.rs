@@ -8,8 +8,8 @@ use geometry::{
 use trajectory::ContinuousSegment;
 
 use super::{
-    FloorLeaders, LeaderReads, RatioSpan, SPAN_LOOKUP_SLACK_MM, SPAN_MIN_LEN_MM, ShapedLeaders,
-    Table, axis_grid, integrate,
+    FloorLeaders, LeaderReads, OdometerLeaves, RatioSpan, SPAN_LOOKUP_SLACK_MM, SPAN_MIN_LEN_MM,
+    ShapedLeaders, Table, axis_grid, integrate,
 };
 
 mod crawl_sides;
@@ -117,12 +117,14 @@ const REST_PROBES_PER_INTERVAL: usize = 8;
 const REST_REFINEMENTS: usize = 64;
 
 /// One segment's shaped leaders as the smoothing reads them: where on the
-/// span table it starts, the time it covers, and whether its raw leaders
-/// rest along it (an extrude-only move or a dwell).
+/// span table it starts, the time it covers, the path they cover by each
+/// instant of it (the odometer ingest summed its arc with), and whether its
+/// raw leaders rest along it (an extrude-only move or a dwell).
 pub(super) struct RampLeg<'a> {
     pub(super) shaped: &'a ContinuousSegment,
     pub(super) leaders: &'a [usize],
     pub(super) shaped_leaders: &'a ShapedLeaders<'a>,
+    pub(super) odometer: &'a OdometerLeaves,
     pub(super) support: (f64, f64),
     pub(super) start_s: f64,
     pub(super) rests: bool,
@@ -1473,8 +1475,7 @@ impl RatioSmoothing {
             self.close_at(leg.start_s);
             return;
         }
-        self.trail
-            .record(&LegPath::of(leaders, leg), leg.support, table_end);
+        self.trail.record(leg, table_end);
         for crawl in std::mem::take(&mut self.waiting_crawls) {
             self.lay_crawl_valley(spans, rule, crawl, table_end);
         }
