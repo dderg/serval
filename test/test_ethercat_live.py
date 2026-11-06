@@ -3,9 +3,9 @@
 klippy runs live against a Klipper linux-process MCU, which supplies the
 print_time clock; every axis is an EtherCAT servo, so the MCU drives no pins.
 Needs ETHERCAT_RT_STUB (an ethercat-rt-stub whose DC grid is on
-CLOCK_MONOTONIC_RAW, see kv2-notes/ethercat-rt-stub-clock.patch) and
+CLOCK_MONOTONIC_RAW, as the ethercat-rt repository's stub is) and
 KLIPPER_LINUX_MCU (out/klipper.elf built from test/configs/linuxprocess.config);
-skipped without them.
+skipped without them. kv2-notes/gate.sh builds and exports both.
 """
 
 from __future__ import annotations

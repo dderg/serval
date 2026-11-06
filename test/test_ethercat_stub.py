@@ -1,11 +1,12 @@
-"""The plugin's wire codecs against serval's ethercat-rt-stub.
+"""The plugin's wire codecs against ethercat-rt-stub.
 
 The stub runs the real endpoint command dispatch, setpoint ring and DC loop
 over a simulated drive. Set ETHERCAT_RT_STUB to its binary; without it these
-tests are skipped. Build it out of tree from a copy of serval's rust/:
+tests are skipped. kv2-notes/gate.sh builds it from the ethercat-rt
+repository (extracted from serval):
 
-    CARGO_TARGET_DIR=~/.cache/kv2-ethercat-target \
-        cargo build -p ethercat-rt --bin ethercat-rt-stub --release --locked
+    CARGO_TARGET_DIR=~/.cache/ethercat-rt-target cargo build --release \
+        --manifest-path ~/Developer/ethercat-rt/Cargo.toml --bin ethercat-rt-stub
 """
 
 from __future__ import annotations
