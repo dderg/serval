@@ -198,11 +198,13 @@ impl Timing {
 
 /// A follower's leader kernels on the guard's grid, and on each zoom
 /// level's ([`GRID_ZOOMS`]), with the shaped motion at each instant of the
-/// guard's grid once read.
+/// guard's grid once read, and at each instant of a zoom level's grid once
+/// read while that grid holds the samples it read.
 struct Follower {
     coarse: FollowerKernels,
     fine: [FollowerKernels; ZOOM_LEVELS],
     samples: RefCell<GridMemo<ShapedSample>>,
+    fine_samples: [RefCell<GridMemo<ShapedSample>>; ZOOM_LEVELS],
 }
 
 impl Follower {
@@ -210,6 +212,12 @@ impl Follower {
         self.samples
             .borrow_mut()
             .get_or_insert_with(n, || expect_sample(&self.coarse, grid, n))
+    }
+
+    fn fine_sample(&self, level: usize, grid: &PlannedGrid, m: i64) -> ShapedSample {
+        self.fine_samples[level]
+            .borrow_mut()
+            .get_or_insert_with(m, || expect_sample(&self.fine[level], grid, m))
     }
 }
 
@@ -477,6 +485,9 @@ impl TurningGuard {
         self.shadows.get_mut().clear();
         for (_, follower) in &mut self.followers {
             follower.samples.get_mut().clear();
+            for samples in &mut follower.fine_samples {
+                samples.get_mut().clear();
+            }
         }
         for grid in &self.fine_grids {
             grid.borrow_mut().clear();
@@ -841,6 +852,9 @@ impl TurningGuard {
             grid.end()
         } else {
             grid.clear();
+            for (_, follower) in &self.followers {
+                follower.fine_samples[level].borrow_mut().clear();
+            }
             first
         };
         for k in resume..=last {
@@ -852,9 +866,9 @@ impl TurningGuard {
             });
             grid.push(k, sample);
         }
-        let mut from = expect_sample(fine, &grid, n * factor);
+        let mut from = follower.fine_sample(level, &grid, n * factor);
         for m in n * factor..(n + 1) * factor {
-            let to = expect_sample(fine, &grid, m + 1);
+            let to = follower.fine_sample(level, &grid, m + 1);
             if let Some(binds) = cell.asks(fine, &from, &to, m, m.div_euclid(zoom_scale(level))) {
                 let deeper = if level + 1 < ZOOM_LEVELS {
                     self.zoom(follower, cell, level + 1, m)
@@ -1135,6 +1149,12 @@ impl TurningGuard {
             let mut grid = grid.borrow_mut();
             grid.truncate_from(fine_straddled + 1);
             grid.set_cell_bounds(fine_straddled, fine_bounds);
+            for (_, follower) in &self.followers {
+                let (_, fine_ahead) = follower.fine[level].sample_span();
+                follower.fine_samples[level]
+                    .borrow_mut()
+                    .forget_from(fine_straddled - fine_ahead);
+            }
         }
     }
 
@@ -1268,7 +1288,13 @@ impl TurningGuard {
             follower.samples.borrow_mut().forget_before(keep_from);
         }
         for (level, grid) in self.fine_grids.iter().enumerate() {
-            grid.borrow_mut().trim_before(keep_from * zoom_scale(level));
+            let fine_keep_from = keep_from * zoom_scale(level);
+            grid.borrow_mut().trim_before(fine_keep_from);
+            for (_, follower) in &self.followers {
+                follower.fine_samples[level]
+                    .borrow_mut()
+                    .forget_before(fine_keep_from);
+            }
         }
         let forget = keep_from as f64 * h - h;
         while self
@@ -1637,6 +1663,7 @@ fn guarded_followers(chains: &AxisChainSet) -> Vec<(usize, Follower)> {
                         FollowerKernels::new(axes, h / zoom_scale(level) as f64)
                     }),
                     samples: RefCell::default(),
+                    fine_samples: std::array::from_fn(|_| RefCell::default()),
                 },
             )
         })
