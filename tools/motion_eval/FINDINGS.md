@@ -22,36 +22,39 @@
    - Extruder `instantaneous_corner_velocity` costs under 1%.
    - Accel ramps that remain once all corner limits are gone cost 6% (bench)
      and 2% (fast).
-3. **The shaper-aware corner limit (harness prototype) is faster at equal
-   deviation, but only on curved or dense geometry.** The prototype sets the
-   junction speed so that the predicted *shaped* corner deviation stays within
-   a budget, and caps speed on curves at `σ²v²κ/2 ≤ budget`. Results with
-   corner p99 no worse than the default (scv 5, mcr 0.5):
-   - circles: −38% (bench), −23% (fast)
-   - voron top layers: −25 to −26% (bench), −16% (fast, smooth_mzv)
-   - isolated corners and first-layer perimeters: −2 to +0.2%; these are
-     dominated by the shaper's rounding at stops (the floor), which no junction
-     speed changes.
-   - one regression: fast + mzv on voron top layers, +9.6%. The predictor
-     underestimates the deviation of dense corner sequences at 30 000 mm/s², so
-     it needs a low budget there.
+3. **The product `[corner_deviation] max_deviation` holds its budget on the
+   whole corpus, and is faster on curved geometry at equal worst-case
+   deviation.** Over 1296 budget runs (9 cases × 2 configs × mzv/smooth_mzv
+   × 12 budgets × 3 mcr), the measured corner maximum never exceeds the
+   budget by more than 1.9e-6 mm, which is below the 50 µs sampling
+   tolerance. Compared at equal *maximum* deviation (the fastest budget
+   whose max ≤ the default's max in that case):
+   - circles: −33% (bench mzv), −18% (bench smooth_mzv), −27/−25% (fast)
+   - voron top layers: −25% (fast, both shapers), −3% (bench)
+   - isolated corners, first-layer perimeters, arcs on mzv: −2.4 to +1.4%
+   - slower: zigzag infill +5 to +15%, arcs on smoothers +11% (fast) and
+     +48% (bench)
 
-   The best single setting for the whole corpus (p99 ≤ default in every case)
-   gives −3.5% (bench, mzv), −3.7% (bench, smooth_mzv), −1.3% (fast,
-   smooth_mzv) and +1.7% (fast, mzv). The corpus total is dominated by the
-   70 s first-layer slice, which barely moves.
-4. **Side effects.** Faster corners raise the instantaneous velocity steps
-   that mzv lets through: 3.7 mm/s at the default against about 9 mm/s at an
+   One budget for the whole corpus (max ≤ default in every case) gives
+   −0.4% (bench mzv), +3.0% (bench smooth_mzv), +0.3% (fast mzv) and
+   −1.3% (fast smooth_mzv). The 70 s first-layer slice dominates the total.
+4. **Side effects.** With mzv, faster corners let larger velocity steps
+   through: 3.7 mm/s at the default against 10–30 mm/s at an
    equal-deviation budget. That is harmless for the tuned mode, but it is a
-   risk for torque and for off-frequency modes. Smoothers let no steps through,
-   but executed peak accel rises above the configured max as junction speed
-   grows: on bench, 10.5–10.6k mm/s² at equal-deviation budgets and 13.6k at
-   scv 35, against 10k configured.
-5. **Next.** Replace the SCV junction term with a shaped-deviation budget
-   (vertex term + curve term), with the default budget near the shaper floor.
-   Before that, fix prediction for corner sequences shorter than the kernel.
-   Leave `minimum_cruise_ratio` alone. Ringing from the larger mzv velocity
-   steps can only be judged on hardware.
+   risk for torque and for off-frequency modes. With smoothers, the limiter
+   bounds executed peak accel to max_accel; that cap is the likely cause of
+   the slower arcs [INFERENCE].
+   The bound held in 647 of 648 smoother runs (one run reached 10 080
+   against 10 000 mm/s²).
+5. **Planner CPU: the <20% target is not met.** The Python limiter adds
+   about 18 µs per move to upstream's 4.4 µs lookahead (+424%) on this
+   host. In absolute terms that is a small share of one core even for dense
+   G-code, but a Pi 5 will be slower [INFERENCE]. Reaching the target needs
+   the limiter in C or Rust.
+6. **Next.** Ringing from the larger mzv velocity steps can only be judged
+   on hardware. Bench mzv voron top layers gains only 3%: the per-junction
+   bound sums neighbour contributions conservatively, so the measured
+   maximum sits well below the budget there (budget 0.15 measures 0.133).
 
 ## Setup
 
@@ -137,80 +140,108 @@ Per case, scv 1 → 5 → 20 (mcr 0.5):
 | fast | voron_top_layers | 9.36 → 6.53 → 3.58 | 0.018 → 0.034 → 0.198 | 0.121 → 0.138 → 0.256 |
 | fast | circles | 5.92 → 4.31 → 2.86 | 0.017 → 0.025 → 0.066 | 0.137 → 0.149 → 0.211 |
 
-## Shaper-aware budget vs SCV at equal deviation
+## `[corner_deviation]` vs SCV at equal maximum deviation
 
-The fastest setting with corner p99 ≤ the default's p99 in every case. One
-setting is used for the whole corpus:
+The product limiter (`klippy/extras/corner_deviation.py`, hooked into
+`Move.calc_junction` through `ToolHead.set_junction_limiter`) replaces the SCV
+junction term. Budget runs use `[corner_deviation] max_deviation` and no
+SCV. Each case uses the fastest budget/mcr setting whose measured corner
+**max** is ≤ the default's (scv 5, mcr 0.5) max in that case.
 
-| config | shaper | default corpus s | best SCV setting | budget setting | s | vs default |
-|---|---|---|---|---|---|---|
-| bench | mzv | 119.3 | scv 5, mcr 0.5 (the default) | budget 0.09, mcr 0 | 115.1 | −3.5% |
-| bench | smooth_mzv | 119.3 | scv 5, mcr 0.5 | budget 0.1, mcr 0.25 | 114.8 | −3.7% |
-| fast | mzv | 108.6 | scv 5, mcr 0.5 | budget 0.03, mcr 0.5 | 110.5 | +1.7% |
-| fast | smooth_mzv | 108.6 | scv 5, mcr 0.5 | budget 0.05, mcr 0.5 | 107.2 | −1.3% |
-
-Per case, with the best setting chosen separately for each case. No SCV/mcr
-setting beats the default except on zigzag, where scv 1–2 with mcr 0 is
-2.4% faster:
-
-| config | shaper | case | default s / p99 mm | budget setting | s | vs default |
-|---|---|---|---|---|---|---|
-| bench | mzv | circles | 5.37 / 0.129 | 0.1, mcr 0.5 | 3.32 | −38.2% |
-| bench | mzv | voron_top_layers | 8.72 / 0.123 | 0.09, mcr 0 | 6.53 | −25.1% |
-| bench | mzv | voron_first_layer_perimeters | 74.69 / 0.190 | 0.15, mcr 0 | 73.20 | −2.0% |
-| bench | mzv | zigzag_infill | 5.35 / 0.137 | 0.08, mcr 0 | 5.22 | −2.4% (scv 1 mcr 0: 5.20) |
-| bench | mzv | corners_turn90 | 6.35 / 0.194 | 0.15, mcr 0.25 | 6.36 | +0.0% |
-| bench | smooth_mzv | circles | 5.37 / 0.133 | 0.1, mcr 0 | 3.31 | −38.4% |
-| bench | smooth_mzv | voron_top_layers | 8.72 / 0.128 | 0.1, mcr 0.25 | 6.45 | −26.0% |
-| fast | mzv | circles | 4.31 / 0.145 | 0.05, mcr 0.5 | 3.31 | −23.1% |
-| fast | mzv | voron_top_layers | 6.53 / 0.133 | 0.03, mcr 0 | 7.16 | +9.6% |
-| fast | smooth_mzv | circles | 4.31 / 0.149 | 0.05, mcr 0 | 3.31 | −23.3% |
-| fast | smooth_mzv | voron_top_layers | 6.53 / 0.138 | 0.05, mcr 0.5 | 5.48 | −16.2% |
-| fast | smooth_mzv | zigzag_infill | 3.27 / 0.168 | 0.08, mcr 0 | 3.22 | −1.5% |
-
-### Pareto front, voron_top_layers, bench mzv (SCV and budget runs)
-
-Default for reference: scv 5, mcr 0.5 → 8.72 s, p99 0.123, max jump 3.7.
-Every SCV point is dominated except scv 35.
-
-| setting | s | p50 mm | p99 mm | max mm | max jump mm/s |
+| config | shaper | default s | best single budget (all cases) | s | vs default |
 |---|---|---|---|---|---|
-| budget 0.03, mcr 0.5 | 10.97 | 0.027 | 0.100 | 0.120 | 3.7 |
-| budget 0.05, mcr 0.5 | 8.04 | 0.059 | 0.108 | 0.125 | 6.0 |
-| budget 0.07, mcr 0.5 | 7.12 | 0.081 | 0.110 | 0.127 | 7.4 |
-| budget 0.09, mcr 0.5 | 6.67 | 0.100 | 0.117 | 0.137 | 8.8 |
-| budget 0.1, mcr 0.5 | 6.50 | 0.109 | 0.124 | 0.141 | 9.6 |
-| budget 0.12, mcr 0.5 | 6.21 | 0.128 | 0.142 | 0.144 | 10.1 |
-| budget 0.15, mcr 0.5 | 5.88 | 0.153 | 0.169 | 0.170 | 10.9 |
-| budget 0.2, mcr 0.5 | 5.55 | 0.183 | 0.215 | 0.216 | 14.7 |
-| scv 35, mcr 0.25 | 5.43 | 0.190 | 0.221 | 0.245 | 17.5 |
+| bench | mzv | 119.3 | 0.15, mcr 0.5 | 118.8 | −0.4% |
+| bench | smooth_mzv | 119.3 | 0.15, mcr 0 | 122.9 | +3.0% |
+| fast | mzv | 108.6 | 0.15, mcr 0 | 108.9 | +0.3% |
+| fast | smooth_mzv | 108.6 | 0.2, mcr 0.25 | 107.2 | −1.3% |
+
+Per case (max step: largest velocity step mzv lets through; smoothers let
+none through):
+
+| config | shaper | case | default s / max mm | budget, mcr | s | vs default | max step mm/s default / budget |
+|---|---|---|---|---|---|---|---|
+| bench | mzv | circles | 5.37 / 0.152 | 0.15, 0 | 3.61 | −32.8% | 3.7 / 10.3 |
+| bench | mzv | voron_top_layers | 8.72 / 0.135 | 0.15, 0.5 | 8.49 | −2.6% | 3.7 / 9.9 |
+| bench | mzv | voron_first_layer_perimeters | 74.69 / 0.201 | 0.2, 0 | 72.90 | −2.4% | 3.7 / 21.5 |
+| bench | mzv | zigzag_infill | 5.35 / 0.149 | 0.15, 0 | 5.44 | +5.5% (scv 2 mcr 0: −3.6%) | 3.6 / 5.0 |
+| bench | mzv | corners_turn90 | 6.35 / 0.201 | 0.2, 0 | 6.31 | −0.7% | 2.0 / 6.7 |
+| bench | mzv | arcs | 0.91 / 0.208 | 0.4, 0.5 | 0.91 | +0.0% | 2.9 / 2.9 |
+| bench | smooth_mzv | circles | 5.37 / 0.156 | 0.15, 0 | 4.40 | −18.0% | |
+| bench | smooth_mzv | voron_top_layers | 8.72 / 0.136 | 0.2, 0 | 8.42 | −3.5% | |
+| bench | smooth_mzv | zigzag_infill | 5.35 / 0.152 | 0.2, 0 | 5.62 | +9.8% | |
+| bench | smooth_mzv | arcs | 0.91 / 0.215 | 0.25, 0 | 1.34 | +48.2% | |
+| fast | mzv | circles | 4.31 / 0.192 | 0.15, 0 | 3.17 | −26.5% | 3.7 / 14.7 |
+| fast | mzv | voron_top_layers | 6.53 / 0.164 | 0.2, 0 | 4.91 | −24.8% | 3.7 / 17.9 |
+| fast | mzv | voron_first_layer_perimeters | 70.51 / 0.234 | 0.25, 0.25 | 69.99 | −0.7% | 3.7 / 29.6 |
+| fast | mzv | zigzag_infill | 3.27 / 0.167 | 0.2, 0.5 | 3.43 | +6.2% | 3.6 / 5.0 |
+| fast | smooth_mzv | circles | 4.31 / 0.198 | 0.2, 0 | 3.23 | −25.1% | |
+| fast | smooth_mzv | voron_top_layers | 6.53 / 0.166 | 0.25, 0 | 4.93 | −24.6% | |
+| fast | smooth_mzv | zigzag_infill | 3.27 / 0.170 | 0.2, 0.25 | 3.68 | +14.5% | |
+| fast | smooth_mzv | arcs | 0.88 / 0.096 | 0.15, 0 | 0.98 | +11.1% | |
+
+Isolated corners (turn 45/90/135/170°) are within −0.9 to +1.4% everywhere.
+The full table, including peak accel, is in `.build/sweep/tables.md`.
+
+### Physical invariants (1296 budget runs, all cases)
+
+| invariant | result |
+|---|---|
+| measured corner max ≤ max_deviation | worst excess 1.9e-6 mm, below ½·max_accel·(50 µs)² (12.5e-6 mm at 10k) |
+| smoother peak executed accel ≤ max_accel | 647 of 648 runs; voron_top_layers bench smooth_mzv 0.12 mcr 0 reached 10 080 |
+| no limiter registered: trapq identical to upstream toolhead | 9 cases × 2 configs, `tests/test_junction_hook.py` |
+
+`tests/test_corner_deviation.py` asserts the first two invariants on the
+corner, circle, zigzag and top-layer cases for both configs and shaper
+families at budgets 0.05 and 0.2.
+
+### Planner CPU (this host, median per run)
+
+| config | lookahead µs/move, scv 5 | with limiter | of which limiter | added |
+|---|---|---|---|---|
+| bench | 4.4 | 23.1 | 18.0 | +424% |
+| fast | 4.4 | 23.5 | 18.2 | +435% |
+
+The <20% target is not met in Python.
+
+### Pareto front, voron_top_layers, bench mzv
+
+Default: scv 5, mcr 0.5 → 8.72 s, max 0.135 (dominated by budget 0.15).
+
+| setting | s | p99 mm | max mm | max step mm/s |
+|---|---|---|---|---|
+| budget 0.1, mcr 0.25 | 10.48 | 0.067 | 0.068 | 7.7 |
+| budget 0.12, mcr 0.25 | 9.19 | 0.082 | 0.109 | 8.7 |
+| budget 0.15, mcr 0.5 | 8.49 | 0.112 | 0.133 | 9.9 |
+| budget 0.2, mcr 0 | 7.71 | 0.143 | 0.146 | 18.5 |
+| scv 8, mcr 0.25 | 6.79 | 0.166 | 0.167 | 5.9 |
+| budget 0.25, mcr 0.25 | 6.28 | 0.200 | 0.202 | 20.1 |
+| scv 12, mcr 0.25 | 5.81 | 0.210 | 0.210 | 8.9 |
+| scv 35, mcr 0.25 | 5.43 | 0.221 | 0.245 | 17.5 |
 
 ### Pareto front, voron_top_layers, fast smooth_mzv
 
-Default: scv 5, mcr 0.5 → 6.53 s, p99 0.138.
+Default: scv 5, mcr 0.5 → 6.53 s, max 0.166.
 
-| setting | s | p50 mm | p99 mm | max mm | peak accel |
-|---|---|---|---|---|---|
-| budget 0.03, mcr 0.5 | 7.70 | 0.025 | 0.120 | 0.158 | 30002 |
-| budget 0.05, mcr 0.5 | 5.48 | 0.057 | 0.134 | 0.159 | 30002 |
-| budget 0.07, mcr 0.5 | 4.53 | 0.087 | 0.146 | 0.166 | 30002 |
-| budget 0.1, mcr 0.5 | 4.07 | 0.119 | 0.149 | 0.187 | 30002 |
-| budget 0.15, mcr 0.5 | 3.70 | 0.165 | 0.178 | 0.200 | 30002 |
-| budget 0.2, mcr 0.5 | 3.46 | 0.209 | 0.221 | 0.223 | 31059 |
-| budget 0.3, mcr 0 | 3.29 | 0.247 | 0.268 | 0.308 | 34712 |
+| setting | s | p99 mm | max mm | peak accel |
+|---|---|---|---|---|
+| budget 0.1, mcr 0 | 6.90 | 0.057 | 0.062 | 29889 |
+| budget 0.15, mcr 0.25 | 5.96 | 0.094 | 0.098 | 29429 |
+| budget 0.2, mcr 0.25 | 5.53 | 0.127 | 0.142 | 29431 |
+| budget 0.25, mcr 0.25 | 4.95 | 0.135 | 0.161 | 29409 |
+| scv 12, mcr 0.25 | 4.34 | 0.169 | 0.201 | 30644 |
+| scv 35, mcr 0.25 | 3.31 | 0.267 | 0.269 | 33423 |
 
 ## Caveats
 
 - Everything here is offline: geometric deviation of the commanded stepper
   motion. Frame dynamics, ringing, extrusion and pressure advance are not
   modelled. The velocity steps are only a proxy for ringing.
-- The prototype's prediction is per vertex (decelerate at full accel into
-  the corner, accelerate out) plus a curvature cap. It misses runs of corners
-  shorter than the kernel, so it exceeds its budget on dense geometry, worst
-  at 30 000 mm/s². Results are compared at *measured* deviation, so this
-  costs speed but does not flatter the prototype.
+- The limiter's bound is conservative per junction: it books neighbour
+  steps and stop floors as absolute sums, so the measured max often sits
+  below the budget, which costs speed on dense geometry.
 - Rest stops still round at the floor. Like SCV, the budget limit cannot
-  change that without slowing the approach (serval did that).
+  change that without lowering accel; below the floor it does lower accel
+  around the corner, which is what costs time at small budgets.
 
 ## Upstream issues found on the way
 
@@ -227,6 +258,6 @@ Default: scv 5, mcr 0.5 → 6.53 s, p99 0.138.
 
 ```
 python3 ~/Developer/serval/scripts/slots.py run -- \
-    uv run python -m tools.motion_eval.sweep --jobs 12   # 2232 runs, ~8 min
+    uv run python -m tools.motion_eval.sweep --jobs 12   # 2232 runs, ~10 min
 # tables: tools/motion_eval/.build/sweep/tables.md (all sweeps, all fronts)
 ```
