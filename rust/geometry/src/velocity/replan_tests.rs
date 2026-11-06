@@ -406,14 +406,8 @@ proptest! {
         let reach = 1 + ((reach * n as f64) as usize).min(n - 1);
         let scales = &scales[..reach];
         let seams = &stream.window.boundary_speeds[..=reach];
-        let mut brakes = floor_brakes(&stream, scales);
-        let horizon = brake_horizon(
-            &mut brakes,
-            seams[..reach].iter().copied(),
-            reach as u64,
-            params(0.0).integration_tol,
-        )
-        .expect("the window's moves have a brake envelope");
+        let brakes = floor_brakes(&stream, scales);
+        let horizon = brake_horizon(&brakes, seams[..reach].iter().copied());
         let Some(standing) = horizon else {
             return Ok(());
         };
@@ -430,37 +424,30 @@ proptest! {
         prop_assert!(braked.is_ok(), "braking from seam {standing} to rest at {reach}: {braked:?}");
     }
 
-    /// The envelope the moves keep between horizons finds what integrating
-    /// it afresh finds, for rests that move on and spans that start anywhere
-    /// before them.
+    /// A brake move's entry speed never exceeds what the planner's disk
+    /// rail reaches back from the same exit speed through the move.
     #[test]
-    fn a_kept_brake_envelope_finds_the_fresh_horizon(
+    fn a_brake_entry_stays_under_the_disk_rail(
         stream in arb_stream(),
         scales in prop::collection::vec(0.3f64..1.0, 64),
-        starts in prop::collection::vec(0.0f64..1.0, 64),
+        exits in prop::collection::vec(0.0f64..1.0, 64),
     ) {
         let n = stream.moves.len();
-        let scales = &scales[..n];
-        let seams = &stream.window.boundary_speeds[..n];
-        let mut kept = floor_brakes(&stream, scales);
-        for reach in 1..=n {
-            let since = ((starts[reach - 1] * reach as f64) as usize).min(reach - 1);
-            let tol = params(0.0).integration_tol;
-            let found = brake_horizon(
-                &mut kept[since..reach],
-                seams[since..reach].iter().copied(),
-                reach as u64,
-                tol,
-            )
-            .expect("the window's moves have a brake envelope");
-            let fresh = brake_horizon(
-                &mut floor_brakes(&stream, scales)[since..reach],
-                seams[since..reach].iter().copied(),
-                reach as u64,
-                tol,
-            )
-            .expect("the window's moves have a brake envelope");
-            prop_assert_eq!(found, fresh, "rest at seam {}, span from {}", reach, since);
+        let brakes = floor_brakes(&stream, &scales[..n]);
+        let tol = params(0.0).integration_tol;
+        for (brake, share) in brakes.iter().zip(&exits) {
+            let kin = &brake.kin;
+            let exit_cap = disk::limit_speed(kin.kappa_abs(kin.length), kin.accel);
+            let exit = share * kin.flat_ceiling.min(exit_cap).min(500.0);
+            let rail = disk::disk_reach_v_rev(&brake.kin, exit, brake.kin.length, tol)
+                .expect("the disk rail integrates")
+                .v;
+            let entry = brake.entry_speed(exit);
+            prop_assert!(
+                entry <= rail + tol * (1.0 + rail),
+                "line {}: entry {entry} over the rail's {rail} from exit {exit}",
+                brake.line_no
+            );
         }
     }
 }

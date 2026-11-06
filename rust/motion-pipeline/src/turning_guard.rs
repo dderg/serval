@@ -85,9 +85,6 @@ pub(crate) struct TurningGuard {
     /// The last standing seam found and the reach it was found for: it
     /// stands for any reach at or past that one.
     standing: Option<(usize, usize)>,
-    /// How many of the segment's moves have left: a held move's index plus
-    /// this numbers its seams the same from one horizon to the next.
-    emitted: u64,
 }
 
 /// The moves the guard holds, one column per field.
@@ -235,7 +232,6 @@ impl TurningGuard {
             carried_position: None,
             frozen: 0,
             standing: None,
-            emitted: 0,
         }
     }
 
@@ -298,7 +294,6 @@ impl TurningGuard {
         self.grid.clear();
         self.frozen = 0;
         self.standing = None;
-        self.emitted = 0;
     }
 
     fn h(&self) -> f64 {
@@ -860,7 +855,7 @@ impl TurningGuard {
     /// [`SCALE_FLOOR`] of its budget. A seam found for an earlier reach
     /// still stands: the brake envelope only rises as the rest moves on, and
     /// the seams' speeds only fall.
-    fn horizon(&mut self, reach: usize) -> Option<usize> {
+    fn horizon(&self, reach: usize) -> Option<usize> {
         let since = match self.standing {
             Some((standing, found_for)) if found_for <= reach => standing,
             _ => self.frozen,
@@ -868,16 +863,13 @@ impl TurningGuard {
         if reach <= since {
             return None;
         }
-        let entries = &mut self.entries;
+        let entries = &self.entries;
         brake_horizon(
-            &mut entries.floor_brakes[since..reach],
+            &entries.floor_brakes[since..reach],
             entries.velocities[since..reach]
                 .iter()
                 .map(|velocity| velocity.entry_v),
-            self.emitted + reach as u64,
-            self.config.integration_tol,
         )
-        .unwrap_or_else(|error| panic!("turning guard: brake horizon failed: {error:?}"))
         .map(|seam| since + seam)
     }
 
@@ -886,7 +878,6 @@ impl TurningGuard {
             return true;
         }
         self.frozen = self.frozen.saturating_sub(count);
-        self.emitted += count as u64;
         self.standing = self.standing.and_then(|(standing, found_for)| {
             Some((standing.checked_sub(count)?, found_for - count))
         });

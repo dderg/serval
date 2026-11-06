@@ -314,24 +314,39 @@ pub fn replan_span(
 }
 
 /// What [`brake_horizon`] reads of a move: its kinematics on its
-/// acceleration budget scaled by a fixed factor, the ceiling of the seam
-/// into it, `None` at the start of a span, and the brake envelope's speed
-/// at its entry once that no longer depends on where the rest lies.
+/// acceleration budget scaled by a fixed factor, and the ceiling of the seam
+/// into it, `None` at the start of a span.
 pub struct BrakeMove {
     kin: Kinematics,
     entry_ceiling: Option<f64>,
     line_no: u32,
-    settled_entry: Option<SettledEntry>,
 }
 
-/// The brake envelope's speed at a move's entry, before the seam's ceiling,
-/// the same for a rest at seam `from` or any later one: a ceiling after the
-/// move clamped the envelope there, and an envelope from a later rest only
-/// rises.
-#[derive(Clone, Copy)]
-struct SettledEntry {
-    speed: f64,
-    from: u64,
+impl BrakeMove {
+    /// The fastest the move can be entered at and still leave at `exit`,
+    /// or a bound under it. A line reads it off its budget exactly. On a
+    /// curve the disk leaves at least `a/√2` of the budget `a` along the
+    /// path while the turning `v²·κ` takes at most `a/√2`, which holds up
+    /// to `v_c = √(a/(√2·κ_max))`, under every curvature cap the move
+    /// rides; braking at `a/√2` up to `v_c` therefore never asks for more
+    /// than the disk rail gives, and costs no rail integration.
+    fn entry_speed(&self, exit: f64) -> f64 {
+        let kin = &self.kin;
+        let exit = exit.min(kin.flat_ceiling);
+        if kin.is_straight() {
+            let w = exit * exit + 2.0 * kin.accel * kin.length;
+            return w.max(0.0).sqrt().min(kin.flat_ceiling);
+        }
+        let kappa_max = kin.kappa_abs(0.0).max(kin.kappa_abs(kin.length));
+        let tangential = kin.accel * std::f64::consts::FRAC_1_SQRT_2;
+        let turning_bound = disk::limit_speed(kappa_max, tangential);
+        let exit = exit.min(turning_bound);
+        (exit * exit + 2.0 * tangential * kin.length)
+            .sqrt()
+            .min(turning_bound)
+            .min(kin.flat_ceiling)
+            .min(disk::limit_speed(kin.kappa_abs(0.0), kin.accel))
+    }
 }
 
 /// Move `m`'s [`BrakeMove`] on its budget scaled by `accel_scale`, entered
@@ -373,48 +388,25 @@ pub fn brake_move(
         kin,
         entry_ceiling,
         line_no: m.source.start_line,
-        settled_entry: None,
     })
 }
 
 /// The latest seam of `moves` (an index into `moves`, the seam entering
 /// that move) whose speed in `entry_speeds` a rest at their far end could
-/// not lower: there the brake envelope from that rest, through the moves'
-/// ceilings and scaled budgets, reaches at least the seam's speed. Any
-/// lowering of the plan at or past the far end then leaves every seam up to
-/// it standing, the plan before a seam reading only that seam's speed.
-/// `None` where no seam of `moves` stands clear.
-///
-/// `rest` numbers the far end's seam in a count that numbers every seam of
-/// the moves the same in each call: where a seam's ceiling clamps the
-/// envelope, the envelope before it holds for every later rest, and the
-/// moves keep it ([`SettledEntry`]) instead of integrating it again.
+/// not lower: there a brake envelope from that rest, through the moves'
+/// ceilings and scaled budgets and never above the one the planner's disk
+/// rails give ([`BrakeMove::entry_speed`]), reaches at least the seam's
+/// speed. Any lowering of the plan at or past the far end then leaves every
+/// seam up to it standing, the plan before a seam reading only that seam's
+/// speed. `None` where no seam of `moves` stands clear.
 pub fn brake_horizon(
-    moves: &mut [BrakeMove],
+    moves: &[BrakeMove],
     entry_speeds: impl DoubleEndedIterator<Item = f64> + ExactSizeIterator,
-    rest: u64,
-    integration_tol: f64,
-) -> Result<Option<usize>, VelocityError> {
+) -> Option<usize> {
     assert_eq!(entry_speeds.len(), moves.len(), "one entry speed per move");
     let mut brake = 0.0_f64;
-    let mut settled_from: Option<u64> = None;
-    for (k, (brake_move, seam_speed)) in moves.iter_mut().zip(entry_speeds).enumerate().rev() {
-        let entry = match brake_move.settled_entry {
-            Some(settled) if settled.from <= rest => {
-                settled_from = Some(settled.from);
-                settled.speed
-            }
-            _ => {
-                let kin = &brake_move.kin;
-                let speed = disk::disk_reach_v_rev(kin, brake, kin.length, integration_tol)
-                    .ok_or(VelocityError::Diverged {
-                        line_no: brake_move.line_no,
-                    })?
-                    .v;
-                brake_move.settled_entry = settled_from.map(|from| SettledEntry { speed, from });
-                speed
-            }
-        };
+    for (k, (brake_move, seam_speed)) in moves.iter().zip(entry_speeds).enumerate().rev() {
+        let entry = brake_move.entry_speed(brake);
         brake = if k == 0 {
             entry
         } else {
@@ -424,16 +416,13 @@ pub fn brake_horizon(
                     brake_move.line_no
                 )
             });
-            if entry >= ceiling {
-                settled_from.get_or_insert(rest);
-            }
             entry.min(ceiling)
         };
         if seam_speed <= brake {
-            return Ok(Some(k));
+            return Some(k);
         }
     }
-    Ok(None)
+    None
 }
 
 /// How a plan ends and scales its budgets: a window brakes to rest at its
