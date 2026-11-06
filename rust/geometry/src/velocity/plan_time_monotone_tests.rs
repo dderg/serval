@@ -150,25 +150,9 @@ impl Print {
     }
 }
 
-/// A plan's print time, and the speed ceiling and acceleration budget each
-/// move's own caps leave it.
+/// A plan's print time.
 struct Plan {
     time_s: f64,
-    move_caps: Vec<(f64, f64)>,
-}
-
-impl Plan {
-    /// Whether every move's own caps are at least `held`'s: the extruder's
-    /// velocity trade between ceiling and budget
-    /// ([`super::rate_cap::LinearRate::capped`]) can give up either for the
-    /// other as the limits loosen.
-    fn caps_no_tighter_than(&self, held: &Self) -> bool {
-        self.move_caps.iter().zip(&held.move_caps).all(
-            |(&(ceiling, accel), &(held_ceiling, held_accel))| {
-                ceiling >= held_ceiling && accel >= held_accel
-            },
-        )
-    }
 }
 
 /// The planner's plan of `moves` with every move's limits loosened by
@@ -194,17 +178,6 @@ fn plan(
         step_capacity: None,
         shaped_corners: None,
     };
-    let move_caps = build_move_caps(
-        &loosened,
-        &budgets,
-        None,
-        params,
-        &mut VelocityReport::default(),
-    )
-    .expect("the fitted print has caps")
-    .iter()
-    .map(|caps| (caps.kin.flat_ceiling, caps.kin.accel))
-    .collect();
     let time_s = plan_velocity_stops_select_prefix(
         &loosened,
         stop_before,
@@ -216,7 +189,7 @@ fn plan(
     .expect("the fitted print plans")
     .report
     .traversal_time_s;
-    Plan { time_s, move_caps }
+    Plan { time_s }
 }
 
 fn no_slower(what: &str, loosened: &Plan, held: &Plan) -> Result<(), TestCaseError> {
@@ -239,9 +212,10 @@ proptest! {
     })]
 
     /// Loosening every move's acceleration never slows a print extruding
-    /// one ratio up to rounding noise, where the moves' own caps loosen with
-    /// it: no cap the planner derives at the joins, the noise steps' among
-    /// them, tightens as the budget grows.
+    /// one ratio up to rounding noise: no cap the planner derives at the
+    /// joins, the noise steps' among them, tightens as the budget grows,
+    /// and no move trades a speed its plan reaches for an acceleration it
+    /// gives up.
     #[test]
     fn a_looser_acceleration_never_slows_a_held_ratio(print in arb_print(), scale in 1.0f64..2.0) {
         let Some((moves, stop_before)) = print.fitted() else {
@@ -252,7 +226,44 @@ proptest! {
             accel_mm_s2: scale * limits.accel_mm_s2,
             ..limits
         });
-        prop_assume!(loosened.caps_no_tighter_than(&held));
         no_slower("max_accel", &loosened, &held)?;
+    }
+
+    /// Loosening every move's speed limit never slows a print extruding one
+    /// ratio: the extruder's velocity cap trades the budget only for speed
+    /// the plan can reach, and the joins read the speeds the plan can reach.
+    #[test]
+    fn a_looser_speed_limit_never_slows_a_held_ratio(print in arb_print(), scale in 1.0f64..2.0) {
+        let Some((moves, stop_before)) = print.fitted() else {
+            return Ok(());
+        };
+        let held = plan(&moves, &stop_before, |limits| limits);
+        let loosened = plan(&moves, &stop_before, |limits| VelocityLimits {
+            max_velocity_mm_s: scale * limits.max_velocity_mm_s,
+            ..limits
+        });
+        no_slower("max_velocity", &loosened, &held)?;
+    }
+
+    /// Loosening the extruder's speed and acceleration caps never slows a
+    /// print extruding one ratio.
+    #[test]
+    fn looser_extruder_caps_never_slow_a_held_ratio(
+        print in arb_print(),
+        (velocity_scale, accel_scale) in (1.0f64..2.0, 1.0f64..2.0),
+    ) {
+        let Some((moves, stop_before)) = print.fitted() else {
+            return Ok(());
+        };
+        let held = plan(&moves, &stop_before, |limits| limits);
+        let loosened = plan(&moves, &stop_before, |limits| VelocityLimits {
+            extruder: limits.extruder.map(|caps| ExtruderCaps {
+                max_velocity_mm_s: velocity_scale * caps.max_velocity_mm_s,
+                max_accel_mm_s2: accel_scale * caps.max_accel_mm_s2,
+                ..caps
+            }),
+            ..limits
+        });
+        no_slower("extruder cap", &loosened, &held)?;
     }
 }
