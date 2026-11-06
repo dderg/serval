@@ -3016,11 +3016,7 @@ impl RatioSmoothing {
         s: f64,
         (flow_accel, advanced_accel): (f64, f64),
     ) {
-        let Some(rule) = self
-            .width
-            .rule
-            .filter(|rule| guarded_by_the_turning_guard(rule))
-        else {
+        let Some(rule) = self.width.rule.filter(guarded_by_the_turning_guard) else {
             return;
         };
         let Some(valley) = self
