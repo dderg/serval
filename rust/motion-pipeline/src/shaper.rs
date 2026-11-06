@@ -363,27 +363,25 @@ const FIT_GROUP_SPAN_S: f64 = 0.04;
 /// start, so the shaper shapes and commits whole groups, and each group —
 /// and with it every fit — depends on its own segments alone, never on how
 /// the emits are cut.
-pub(crate) fn fit_group_ends(segments: &[ContinuousSegment]) -> Vec<usize> {
-    let mut ends = Vec::new();
+pub(crate) fn fit_group_ends(segments: &[ContinuousSegment]) -> impl Iterator<Item = usize> + '_ {
     let mut start = 0;
-    for (index, segment) in segments.iter().enumerate() {
-        if index + 1 - start == FIT_GROUP_SEGMENTS
-            || segment.t_end - segments[start].t_start >= FIT_GROUP_SPAN_S
-            || segment.rest_at_end
-        {
-            ends.push(index + 1);
-            start = index + 1;
-        }
-    }
-    ends
+    segments
+        .iter()
+        .enumerate()
+        .filter_map(move |(index, segment)| {
+            let closes = index + 1 - start == FIT_GROUP_SEGMENTS
+                || segment.t_end - segments[start].t_start >= FIT_GROUP_SPAN_S
+                || segment.rest_at_end;
+            closes.then(|| {
+                start = index + 1;
+                start
+            })
+        })
 }
 
 /// The most of the first `count` segments that fill whole fit groups.
 pub(crate) fn whole_groups(segments: &[ContinuousSegment], count: usize) -> usize {
-    fit_group_ends(&segments[..count])
-        .last()
-        .copied()
-        .unwrap_or(0)
+    fit_group_ends(&segments[..count]).last().unwrap_or(0)
 }
 
 /// The fit groups `segments` falls into, every one of them whole unless
@@ -392,7 +390,7 @@ pub(crate) fn fit_groups(
     segments: &[ContinuousSegment],
     clamps_past_signal: bool,
 ) -> Vec<std::ops::Range<usize>> {
-    let mut ends = fit_group_ends(segments);
+    let mut ends: Vec<usize> = fit_group_ends(segments).collect();
     if ends.last().copied().unwrap_or(0) < segments.len() {
         assert!(
             clamps_past_signal,
@@ -3089,11 +3087,13 @@ impl AxisSignalTable {
         pieces: impl IntoIterator<Item = &'p BezierPiece>,
         bounds: SignalBounds,
     ) -> Self {
+        let pieces = pieces.into_iter();
+        let (piece_count, _) = pieces.size_hint();
         let mut table = Self {
-            starts: Vec::new(),
-            ends: Vec::new(),
-            origins: Vec::new(),
-            coeffs: Vec::new(),
+            starts: Vec::with_capacity(piece_count),
+            ends: Vec::with_capacity(piece_count),
+            origins: Vec::with_capacity(piece_count),
+            coeffs: Vec::with_capacity(piece_count),
             first_t: bounds.first_t,
             last_t: bounds.last_t,
             boundary: bounds.boundary,

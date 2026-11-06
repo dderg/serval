@@ -87,7 +87,7 @@ impl LeaderPrefitter {
         loop {
             self.segments.make_contiguous();
             let (segments, _) = self.segments.as_slices();
-            let Some(&end) = fit_group_ends(&segments[self.group_start..]).first() else {
+            let Some(end) = fit_group_ends(&segments[self.group_start..]).next() else {
                 break;
             };
             let group = &segments[self.group_start..self.group_start + end];

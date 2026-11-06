@@ -228,7 +228,8 @@ pub(crate) fn ladder_candidate(
     degree: usize,
     truth_p: &dyn Fn(f64) -> f64,
 ) -> Vec<f64> {
-    let mut c = base.to_vec();
+    let mut c = Vec::with_capacity(base.len().max(degree + 1));
+    c.extend_from_slice(base);
     match degree {
         5 => {}
         6 => {
