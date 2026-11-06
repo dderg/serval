@@ -66,12 +66,14 @@ The gate fails when, for any config:
   A config FLOOR_SHORTFALLS pins below the floor, to the issue that owns
   the shortfall, misses it instead when its Ir prediction falls below the
   pinned one by more than SHORTFALL_TOLERANCE_PCT (a regression); its live
-  prediction is not judged. A pin needs the Pi's own worst window at the
-  pinned tree on PINNED_CORES, one core more than the floor's, at or above
-  the floor, which scripts/throughput_pi.py measures for every pinned
-  config. A pinned shortfall that shrinks passes; once
+  prediction is not judged. A pinned shortfall that shrinks passes; once
   its Ir prediction reaches the floor, both predictions are judged against
   the floor again, and the report says to unpin it;
+- a config FLOOR_SHORTFALLS pins has no Pi worst window on PINNED_CORES,
+  one core more than the floor's, at or above PI_FLOOR_X in PI_WINDOW for
+  exactly this tree: a 2-core shortfall ships only while the Pi keeps the
+  config realtime with a third core. PI_COMMAND measures it for every
+  pinned config; a stale or missing measurement fails like a low one;
 - the calibration replay is inconsistent (below).
 
 Both Pi predictions come from fits over paired points that
@@ -183,8 +185,8 @@ LIVE_REPS = 5
 LIVE_FASTEST = 2
 LIVE_BAND_SIGMAS = 3.0
 LIVE_CORES = "0,1"
-PI_FLOOR_X = 2.0
 PINNED_CORES = "0,1,2"
+PI_FLOOR_X = 2.0
 SHORTFALL_TOLERANCE_PCT = 2.0
 PI_FLOOR_FAILS = True
 PI_CALIBRATION_STALE_DAYS = 3
@@ -245,26 +247,18 @@ class Verdict:
 @dataclass(frozen=True)
 class FloorShortfall:
     """A config's Pi 2-core worst window below PI_FLOOR_X, as the gate
-    predicts it from Ir, owned by GitHub issue `issue`. The pin holds only
-    while the Pi keeps the config realtime with one core more:
-    `pinned_cores_x` is the Pi's worst window under `taskset -c PINNED_CORES`
-    at the pinned tree, the lowest of its runs, as scripts/throughput_pi.py
-    measures it, at or above PI_FLOOR_X."""
+    predicts it from Ir, owned by GitHub issue `issue`. It passes only while
+    PI_WINDOW holds this tree's Pi worst window on PINNED_CORES at or above
+    PI_FLOOR_X."""
 
     issue: int
     predicted_ir_x: float
-    pinned_cores_x: float
 
     def __post_init__(self) -> None:
         if not self.predicted_ir_x < PI_FLOOR_X:
             raise ValueError(
                 f"a floor shortfall pins an Ir prediction below {PI_FLOOR_X}x, "
                 f"not {self.predicted_ir_x}"
-            )
-        if not self.pinned_cores_x >= PI_FLOOR_X:
-            raise ValueError(
-                f"a floor shortfall needs the Pi at or above {PI_FLOOR_X}x on "
-                f"cores {PINNED_CORES}, not {self.pinned_cores_x}"
             )
 
 
@@ -949,6 +943,21 @@ def pin_vanished(source: str, predicted: float, issue: int) -> str | None:
     )
 
 
+def pinned_cores_miss(issue: int, pinned_cores_x: float | None) -> str | None:
+    needs = (
+        f"the floor shortfall pinned for #{issue} needs the Pi's worst window "
+        f"on cores {PINNED_CORES} at or above the {PI_FLOOR_X:.1f}x floor"
+    )
+    if pinned_cores_x is None:
+        return (
+            f"{needs}, and {PI_WINDOW.relative_to(ROOT)} has none for this "
+            f"tree: measure the Pi with {PI_COMMAND} and commit the file"
+        )
+    if pinned_cores_x < PI_FLOOR_X:
+        return f"{needs}; the Pi measured this tree at {pinned_cores_x:.2f}x"
+    return None
+
+
 def shortfall_miss(
     source: str, predicted: float, band_pct: float, pinned_x: float, issue: int
 ) -> str | None:
@@ -970,6 +979,7 @@ def judge(
     model: dict,
     shortfalls: dict[str, FloorShortfall] = FLOOR_SHORTFALLS,
     pi_worst_x: float | None = None,
+    pi_pinned_cores_x: float | None = None,
 ) -> Verdict:
     ir_delta_pct = 100.0 * (measurement.ir - entry["ir"]) / entry["ir"]
     predicted = predicted_worst_x(model, measurement)
@@ -1006,11 +1016,16 @@ def judge(
             "Ir", ir_x, 0.0, pin.predicted_ir_x, pin.issue
         )
         floor_misses = [shortfall] if shortfall else []
-        notes.append(
-            f"the 2-core floor shortfall is pinned to #{pin.issue} at "
-            f"{pin.predicted_ir_x:.2f}x; the Pi measured the pinned tree at "
-            f"{pin.pinned_cores_x:.2f}x on cores {PINNED_CORES}"
-        )
+    if pin is not None:
+        pinned_miss = pinned_cores_miss(pin.issue, pi_pinned_cores_x)
+        if pinned_miss:
+            floor_misses.append(pinned_miss)
+        else:
+            notes.append(
+                f"the floor shortfall pinned for #{pin.issue} holds: the Pi "
+                f"measured this tree's worst window at {pi_pinned_cores_x:.2f}x "
+                f"on cores {PINNED_CORES}"
+            )
     if PI_FLOOR_FAILS:
         problems.extend(floor_misses)
         floor_misses = []
@@ -1110,19 +1125,40 @@ def measured_trees() -> dict[str, str] | None:
     }
 
 
-def pi_measured_worst(trees: dict[str, str] | None) -> dict[str, float]:
-    """Each config's Pi 2-core worst window PI_WINDOW records, the lowest of
-    its runs, when it measured exactly `trees`; nothing otherwise."""
+@dataclass(frozen=True)
+class PiWindow:
+    """The lowest of the Pi's runs per config PI_WINDOW records for this
+    checkout's trees: worst_x on LIVE_CORES, pinned_cores_x on PINNED_CORES
+    (measured only for pinned configs)."""
+
+    worst_x: dict[str, float]
+    pinned_cores_x: dict[str, float]
+
+
+def pi_window(trees: dict[str, str] | None) -> PiWindow:
+    """PI_WINDOW's measurements when it measured exactly `trees`; none
+    otherwise."""
+    none = PiWindow({}, {})
     if trees is None or not PI_WINDOW.exists():
-        return {}
+        return none
     recorded = json.loads(PI_WINDOW.read_text())
     if recorded["trees"] != trees:
         print(
             f"{PI_WINDOW.relative_to(ROOT)} measured other trees than this "
             "checkout's: it decides nothing"
         )
-        return {}
-    return {config: min(runs) for config, runs in recorded["worst_x"].items()}
+        return none
+    pinned = recorded.get("pinned_cores_worst_x", {})
+    if pinned and recorded["pinned_cores"] != PINNED_CORES:
+        raise GateError(
+            f"{PI_WINDOW.relative_to(ROOT)} measured pinned configs on cores "
+            f"{recorded['pinned_cores']}, the gate pins on {PINNED_CORES}: "
+            f"re-measure with {PI_COMMAND}"
+        )
+    return PiWindow(
+        {config: min(runs) for config, runs in recorded["worst_x"].items()},
+        {config: min(runs) for config, runs in pinned.items()},
+    )
 
 
 def head_commit() -> str:
@@ -1220,14 +1256,15 @@ def main() -> int:
         )
         print(f"wrote {BASELINE.relative_to(ROOT)}")
 
-    pi_worst = pi_measured_worst(measured_trees())
+    window = pi_window(measured_trees())
     verdicts = [
         judge(
             c,
             entries[c],
             measurements[c],
             calibration["configs"][c],
-            pi_worst_x=pi_worst.get(c),
+            pi_worst_x=window.worst_x.get(c),
+            pi_pinned_cores_x=window.pinned_cores_x.get(c),
         )
         for c in configs
     ]
@@ -1242,7 +1279,8 @@ def main() -> int:
         f"throughput gate: PASS ({len(verdicts)} configs: Ir grew at most "
         f"{IR_TOLERANCE_PCT} %, and Ir and the live replay predict the Pi "
         f"window at or above {PI_FLOOR_X}x, its pinned shortfall, or a Pi "
-        "measurement of this tree reaches it)"
+        "measurement of this tree reaches it; the Pi measured every pinned "
+        f"config at or above {PI_FLOOR_X}x on cores {PINNED_CORES})"
     )
     return 0
 

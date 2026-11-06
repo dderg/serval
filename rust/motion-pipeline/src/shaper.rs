@@ -2447,8 +2447,7 @@ fn fit_columns(
     let target_workers = if cfg!(target_arch = "wasm32") || targets.len() < 4 {
         1
     } else {
-        std::thread::available_parallelism()
-            .map_or(1, |cores| cores.get())
+        crate::worker_pool::cores()
             .div_ceil(columns.len().max(1))
             .min(4)
             .min(targets.len())
