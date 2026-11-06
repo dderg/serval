@@ -176,7 +176,7 @@ fn higher_ladder_candidate(base: &[f64], degree: usize, truth_p: &dyn Fn(f64) ->
     let count = degree - 5;
     let first = (HIGH_LADDER_NODES_U.len() - count) / 2;
     let nodes = &HIGH_LADDER_NODES_U[first..first + count];
-    let mut system = vec![vec![0.0; count + 1]; count];
+    let mut system = [[0.0; HIGH_LADDER_NODES_U.len() + 1]; HIGH_LADDER_NODES_U.len()];
     for (row, &u) in nodes.iter().enumerate() {
         let bump = eval_mono(&BUMP6, u);
         let mut power = 1.0;
@@ -209,7 +209,8 @@ fn higher_ladder_candidate(base: &[f64], degree: usize, truth_p: &dyn Fn(f64) ->
             }
         }
     }
-    let mut candidate = base.to_vec();
+    let mut candidate = Vec::with_capacity(degree + 1);
+    candidate.extend_from_slice(base);
     candidate.resize(degree + 1, 0.0);
     for q_power in 0..count {
         let q = system[q_power][count];

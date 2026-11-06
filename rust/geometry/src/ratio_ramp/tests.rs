@@ -308,16 +308,17 @@ fn a_rest_beside_a_step_caps_its_speed_at_the_ramp_the_room_leaves() {
         beside_rest < 0.8 * free,
         "a rest {room_mm} mm away caps the step at {beside_rest} mm/s, free {free} mm/s"
     );
-    let ramp_time = rest_room_ramp_time(beside_rest, room_mm);
+    let beside = seam(ratio, accel, room_mm);
+    let ramp_time = rest_room_ramp_time(beside.edge_speed(beside_rest), room_mm);
     assert!(ramp_time < RATIO_RAMP_MAX_TIME_S, "{ramp_time}");
-    let (velocity, accel_demand) =
-        seam(ratio, accel, room_mm).demand(&rule, ramp_time, beside_rest);
+    let (velocity, accel_demand) = beside.demand(&rule, ramp_time, beside_rest);
     assert!(velocity <= 50.0 + 1e-9 && accel_demand <= 20000.0 + 1e-9);
     assert!(
         (velocity - 50.0).abs() < 1e-6 || (accel_demand - 20000.0).abs() < 1e-6,
         "the capped step asks {velocity} mm/s and {accel_demand} mm/s² of the extruder"
     );
-    let past_reach = rest_room_reach_mm(free) * (1.0 + 1e-9);
+    let past_reach =
+        rest_room_reach_mm(seam(ratio, accel, f64::INFINITY).edge_speed(free)) * (1.0 + 1e-9);
     assert_eq!(
         seam(ratio, accel, past_reach).cap(&rule, FASTEST_MM_S),
         free
@@ -371,6 +372,31 @@ fn the_velocity_a_ramp_adds_is_read_at_the_step_however_fast_its_edges() {
         cap,
         travel_switch.cap_read_at_the_step(&rule, FASTEST_MM_S),
         "where the velocity holds the step, faster edges leave its cap"
+    );
+}
+
+/// The projection lays a step's window `V·τ/2` wide at the fastest speed
+/// `V` the leaders cross its ramp at, and a rest's cone narrows it to the
+/// step's share of the room: a step crossed slowly into a hard
+/// acceleration has its ramp read over the window the room leaves at its
+/// edges' speed, not at the step's.
+#[test]
+fn a_rest_narrows_the_ramp_to_the_window_its_fastest_edge_lays() {
+    let rule = RatioRampRule {
+        advance_slope_s: 0.02,
+        max_velocity_mm_s: 50.0,
+        max_accel_mm_s2: 20000.0,
+        kernel_jerk_per_accel_hz: f64::INFINITY,
+    };
+    let travel_switch = seam(0.0337, 23590.0, 10.0);
+    let cap = travel_switch.cap(&rule, FASTEST_MM_S);
+    let edge_speed = travel_switch.edge_speed(cap);
+    let edge_ramp_time = longest_ramp_time(edge_speed, travel_switch.rest_room_mm);
+    let (velocity, accel_demand) = travel_switch.demand(&rule, edge_ramp_time, cap);
+    assert!(
+        velocity <= 50.0 + 1e-9 && accel_demand <= 20000.0 + 1e-9,
+        "a travel switch capped at {cap} mm/s, its edges {edge_speed} mm/s fast over a \
+         {edge_ramp_time} s window, asks {velocity} mm/s and {accel_demand} mm/s²"
     );
 }
 

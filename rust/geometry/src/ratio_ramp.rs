@@ -216,13 +216,17 @@ impl RatioRampRule {
 
     /// Whether the leaders crossing a ratio step as `crossing` lays out keep
     /// the follower within its limits over the longest ramp the step's rest
-    /// room leaves it. The leaders' own flow, and the velocity the ramp adds
-    /// to it, are read at the step: the overshoot `k·r̃′·v²` peaks inside
-    /// the ramp, where the smoothed ratio climbs fastest. Without a follower
-    /// kernel the acceleration the ramp adds is read at the ramp's edges,
-    /// where the smoothed ratio's curvature steps and the advance turns it
-    /// into `k·r̃″·v³`; a follower kernel spreads that step over its own
-    /// width, so with one it is read at the step too.
+    /// room leaves it. The projection lays the step's window `V·τ/2` wide at
+    /// the fastest speed `V` the leaders cross the ramp at, its edges', and
+    /// a rest's cone narrows that window to the step's share of the room,
+    /// so the room's ramp is the one it leaves at the edges' speed. The
+    /// leaders' own flow, and the velocity the ramp adds to it, are read at
+    /// the step: the overshoot `k·r̃′·v²` peaks inside the ramp, where the
+    /// smoothed ratio climbs fastest. Without a follower kernel the
+    /// acceleration the ramp adds is read at the ramp's edges, where the
+    /// smoothed ratio's curvature steps and the advance turns it into
+    /// `k·r̃″·v³`; a follower kernel spreads that step over its own width,
+    /// so with one it is read at the step too.
     #[must_use]
     pub fn crossing_fits(&self, crossing: &StepCrossing) -> bool {
         let step = &crossing.step;
@@ -232,7 +236,7 @@ impl RatioRampRule {
             step.speed_mm_s,
             crossing.edge_speed_mm_s
         );
-        let tau = longest_ramp_time(step.speed_mm_s, crossing.rest_room_mm);
+        let tau = longest_ramp_time(crossing.edge_speed_mm_s, crossing.rest_room_mm);
         let accel_read_at = if self.kernel_jerk_per_accel_hz.is_infinite() {
             RatioStep {
                 speed_mm_s: crossing.edge_speed_mm_s,
