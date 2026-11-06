@@ -130,49 +130,44 @@ impl SideTrail {
         }
     }
 
-    /// The largest `read` of each probe on the path `[lo, hi]` of a side
-    /// reaching `side` from its crawl, and of the probe next to them across
-    /// the crawl, with the mean `s⃛` over each interval of its leg it
-    /// bounds: the change of `s̈` over the interval's length. The leaders
-    /// are a fit, which holds their acceleration within its tolerance `A`
-    /// but leaves their jerk free, so a sliver piece may carry any; the
-    /// mean is within `2A/Δt` of the leaders' own whatever pieces the fit
-    /// lays (as [`Crossing::over`] reads it). Legs' supports overlap, so an
-    /// interval spans one leg's probes only.
-    fn most_within(
+    /// The intervals between neighbouring probes of one leg on the path
+    /// `[lo, hi]` of a side reaching `side` from its crawl, and next to
+    /// them across its ends, each with the mean `s⃛` over it: the change of
+    /// `s̈` over the interval's length. The leaders are a fit, which holds
+    /// their acceleration within its tolerance `A` but leaves their jerk
+    /// free, so a sliver piece may carry any; the mean is within `2A/Δt` of
+    /// the leaders' own whatever pieces the fit lays (as [`Crossing::over`]
+    /// reads it). Legs' supports overlap, so an interval spans one leg's
+    /// probes only.
+    fn intervals_within(
         &self,
         (lo, hi): (f64, f64),
         side: Side,
-        read: impl Fn(&TrailProbe, f64) -> f64,
-    ) -> f64 {
+    ) -> impl Iterator<Item = Interval<'_>> + Clone {
         let first = self.probes.partition_point(|probe| probe.s < lo);
         let last = self.probes.partition_point(|probe| probe.s <= hi);
         let (first, last) = match side {
             Side::After => (first.saturating_sub(1), last),
             Side::Before => (first, (last + 1).min(self.probes.len())),
         };
-        let mean_jerk = |from: &TrailProbe, to: &TrailProbe| {
-            (from.leg == to.leg && to.t > from.t)
-                .then(|| (to.path_accel - from.path_accel) / (to.t - from.t))
-        };
-        let mut most = 0.0_f64;
-        for index in first..last {
-            let probe = &self.probes[index];
-            let jerks = [
-                index
-                    .checked_sub(1)
-                    .and_then(|previous| mean_jerk(&self.probes[previous], probe)),
-                self.probes
-                    .get(index + 1)
-                    .and_then(|next| mean_jerk(probe, next)),
-            ];
-            for jerk in jerks.into_iter().flatten() {
-                most = most.max(read(probe, jerk));
-            }
-        }
-        most
+        (first.saturating_sub(1)..last.min(self.probes.len().saturating_sub(1))).filter_map(
+            |index| {
+                let (from, to) = (&self.probes[index], &self.probes[index + 1]);
+                (from.leg == to.leg && to.t > from.t).then(|| {
+                    (
+                        from,
+                        to,
+                        (to.path_accel - from.path_accel) / (to.t - from.t),
+                    )
+                })
+            },
+        )
     }
 }
+
+/// Two neighbouring probes of one leg and the mean `s⃛` between them
+/// ([`SideTrail::intervals_within`]).
+type Interval<'a> = (&'a TrailProbe, &'a TrailProbe, f64);
 
 impl TrailProbe {
     /// The path acceleration away from the crawl a side reaching `side`
@@ -226,23 +221,27 @@ impl Edge {
 }
 
 /// The width of the `side` of the crawl valley leaving its zero stretch at
-/// `edge`: the narrowest [`crawl_side_width`] lays where, at every
-/// probe of the trail over it, the leaders' own demand there and the
-/// rebuild `k·|W″·ṡ³ + 3W′·ṡ·s̈|` there ([`geometry::RebuildsWithin`] at the probe,
-/// within the bound over the whole side, [`CrawlSide::rebuild`]), both at
-/// `r`, fit the follower's limit; `r` the largest ratio laid within it and
-/// the leaders read off the trail, never under the leaders' `reach`; `None`
-/// where none reaching no further than `limit` fits. The turning guard
-/// proves the same sum cell by cell for the widest side the lead budget
-/// covers, so a side no wider fits here. With an infinite `table_end` the leaders rest past the
-/// trail, and the side reads it as far as it goes. It fails loudly where
-/// the leaders leave the follower no room: it never narrows a side to make
-/// it fit.
+/// `edge`: the narrowest [`crawl_side_width`] lays where, over every
+/// interval between neighbouring probes of the trail over it, the
+/// leaders' own demand there and the rebuild `k·|W″·ṡ³ + 3W′·ṡ·s̈|` there
+/// ([`geometry::RebuildsWithin::fits_between`], within the bound over the
+/// whole side, [`CrawlSide::rebuild`]), both at `r`, fit the follower's
+/// limit; `r` the largest ratio laid within it and the leaders read off
+/// the trail, never under the leaders' `reach`; `None` where none reaching
+/// no further than `limit` fits. The probes say nothing of the leaders
+/// between them but how fast `s̈` lets their speed change, which past the
+/// edge of a zero stretch the leaders cross at speed is where the rebuild
+/// bends hardest. The turning guard proves the same sum cell by cell for
+/// the widest side the lead budget covers, so a side no wider fits here.
+/// With an infinite `table_end` the leaders rest past the trail, and the
+/// side reads it as far as it goes. It fails loudly where the leaders leave
+/// the follower no room: it never narrows a side to make it fit.
 ///
 /// The advance reads `r·(s̈ + k·Φ·s⃛)`, `Φ` the product of the valleys'
 /// weights, at most this side's `W(d)` at a distance `d` from the crawl:
 /// `|s̈ + k·Φ·s⃛|` is linear in `Φ`, so at most `|s̈|` or `|s̈ + k·W·s⃛|`,
-/// read signed at each probe ([`SideTrail::most_within`]).
+/// read signed at the corners of each interval's `s̈` and `W`, with its
+/// mean `s⃛` ([`SideTrail::intervals_within`]).
 ///
 /// A follower behind its own kernel keeps the leaders' reach: the turning
 /// guard holds kernel-free followers only and leaves no room for its
@@ -284,14 +283,20 @@ pub(super) fn crawl_side(
             Side::Before => turn - probe.s,
             Side::After => probe.s - turn,
         };
-        let own_at = |probe: &TrailProbe, path_jerk: f64| {
-            let weight = side_weight(distance_of(probe), width, floor).0;
-            probe
-                .path_accel
-                .abs()
-                .max((probe.path_accel + slope * weight * path_jerk).abs())
+        let own_over = |(from, to, path_jerk): Interval| {
+            let weights = [from, to].map(|probe| side_weight(distance_of(probe), width, floor).0);
+            [from.path_accel, to.path_accel]
+                .into_iter()
+                .flat_map(|accel| {
+                    weights
+                        .map(|weight| accel.abs().max((accel + slope * weight * path_jerk).abs()))
+                })
+                .fold(0.0, f64::max)
         };
-        let own = trail.most_within(window, side, own_at);
+        let own = trail
+            .intervals_within(window, side)
+            .map(own_over)
+            .fold(0.0, f64::max);
         let room = rule.max_accel_mm_s2 - ratio * own;
         assert!(
             room > 0.0,
@@ -301,6 +306,9 @@ pub(super) fn crawl_side(
             ratio * own,
             rule.max_accel_mm_s2
         );
+        if ratio == 0.0 || slope == 0.0 {
+            return true;
+        }
         let accel = motion.path_accel.max(crossing.rate);
         let leaders = CrawlSide {
             speed: crossing.speed,
@@ -315,14 +323,18 @@ pub(super) fn crawl_side(
         };
         let whole = leaders.rebuild(width);
         let within = leaders.rebuilds_within(width);
-        let asked = trail.most_within(window, side, |probe, path_jerk| {
-            let distance = distance_of(probe).max(0.0);
-            let rebuild = within
-                .at((distance, distance), probe.speed, probe.path_accel.abs())
-                .min(whole);
-            own_at(probe, path_jerk) + slope * rebuild
-        });
-        ratio * asked <= rule.max_accel_mm_s2
+        trail.intervals_within(window, side).all(|interval| {
+            let room = (rule.max_accel_mm_s2 / ratio - own_over(interval)) / slope;
+            let (from, to, _) = interval;
+            let readings = [from, to].map(|probe| (distance_of(probe), probe.speed));
+            let (near, far) = if readings[0].0 <= readings[1].0 {
+                (readings[0], readings[1])
+            } else {
+                (readings[1], readings[0])
+            };
+            let interval_accel = from.path_accel.abs().max(to.path_accel.abs());
+            whole <= room || within.fits_between(near, far, (accel, interval_accel), room)
+        })
     });
     if waits {
         return Err(Unlaid::Waits);
