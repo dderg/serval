@@ -4,7 +4,7 @@ use geometry::ExtruderCaps;
 use planner_config::{PlannerConfig, RuntimeLimits};
 use trajectory::AxisChainSet;
 
-use super::screen::{JerkBound, MoveSummary};
+use super::screen::{Blocks, JerkBound, MoveSummary};
 use super::{TurningGuard, expect_sample};
 use crate::fit_stage::FitStage;
 use crate::live_config::{GcodeLine, GcodeMoveBase, extruder_caps, stream_config};
@@ -300,25 +300,36 @@ fn the_screen_jerk_bound_holds_the_shadow_convolution_of_planned_streams() {
         let (back, ahead) = guard.span;
         let (_, follower) = &guard.followers[0];
         for timing in &guard.entries.timing {
-            let stretch = ((timing.t0 / h).floor() * h, (timing.t1() / h).ceil() * h);
+            let stretch = (
+                (timing.t0 / h).floor() as i64,
+                (timing.t1() / h).ceil() as i64,
+            );
             let window: Vec<MoveSummary> = guard
-                .summaries_over((stretch.0 - back as f64 * h, stretch.1 + ahead as f64 * h))
+                .summaries_over((
+                    (stretch.0 - back) as f64 * h,
+                    (stretch.1 + ahead) as f64 * h,
+                ))
                 .collect();
-            let mut bound = JerkBound::new(&follower.coarse, stretch);
+            let blocks = Blocks::new(&follower.coarse, stretch);
+            let mut bound = JerkBound::new(&follower.coarse, blocks);
             for summary in &window {
                 bound.add(summary);
             }
-            let per_axis = bound.finish().per_axis;
-            for n in (stretch.0 / h).round() as i64..=(stretch.1 / h).round() as i64 {
-                let sample = expect_sample(&follower.coarse, &guard.grid, n);
-                for axis in 0..3 {
-                    let proven = sample.jerk[axis].abs() - sample.jerk_miss[axis];
-                    assert!(
-                        proven <= per_axis[axis] * (1.0 + 1e-9) + 1e-6,
-                        "t={}: axis {axis}'s shaped jerk is at least {proven} over the bound {}",
-                        n as f64 * h,
-                        per_axis[axis]
-                    );
+            let sums = bound.finish();
+            for n in stretch.0..stretch.1 {
+                let block = sums[blocks.of_cell(n)];
+                for at in [n, n + 1] {
+                    let sample = expect_sample(&follower.coarse, &guard.grid, at);
+                    for axis in 0..3 {
+                        let proven = sample.jerk[axis].abs() - sample.jerk_miss[axis];
+                        assert!(
+                            proven <= block[axis] * (1.0 + 1e-9) + 1e-6,
+                            "t={}: axis {axis}'s shaped jerk is at least {proven} over the \
+                             bound {}",
+                            at as f64 * h,
+                            block[axis]
+                        );
+                    }
                 }
                 checked += 1;
             }

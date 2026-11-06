@@ -395,17 +395,22 @@ impl TurningGuard {
         if m.segment.spatial.is_none() {
             return Check::Passed;
         }
-        let stretch = ((timing.t0 / h).floor() * h, (timing.t1() / h).ceil() * h);
-        let window = (stretch.0 - back as f64 * h, stretch.1 + ahead as f64 * h);
+        let last = (timing.t1() / h).ceil() as i64;
+        let stretch = ((timing.t0 / h).floor() as i64, last);
+        let window = (
+            (stretch.0 - back) as f64 * h,
+            (stretch.1 + ahead) as f64 * h,
+        );
         let nearby: Vec<MoveSummary> = self.summaries_over(window).collect();
-        if screen::passes(
+        let verdict = screen::screen(
             &follower.coarse,
-            nearby.iter().copied(),
+            &nearby,
             stretch,
             &demand,
             |axes| caps.path_jerk_gain(axes),
             caps.max_accel_mm_s2,
-        ) {
+        );
+        if verdict.proves_all() {
             return Check::Passed;
         }
         let cell = CellCheck {
@@ -413,19 +418,23 @@ impl TurningGuard {
             caps: &caps,
             nearby: &nearby,
         };
-        let last = (timing.t1() / h).ceil() as i64;
-        let first = ((timing.t0 / h).floor() as i64)
+        let first = stretch
+            .0
             .max(self.entries.unproven[index].expect("turning guard: checking a proven move"))
             .min(last);
-        let mut from = expect_sample(&follower.coarse, &self.grid, first);
-        for n in first..last {
+        let mut sampled: Option<(i64, shadow::ShapedSample)> = None;
+        for n in (first..last).filter(|&n| !verdict.proves(n)) {
+            let from = match sampled {
+                Some((at, sample)) if at == n => sample,
+                _ => expect_sample(&follower.coarse, &self.grid, n),
+            };
             let to = expect_sample(&follower.coarse, &self.grid, n + 1);
             if cell.asks(&follower.coarse, &from, &to, n).is_some() {
                 if let Some(binds) = self.zoom(follower, &cell, n) {
                     return binds;
                 }
             }
-            from = to;
+            sampled = Some((n + 1, to));
         }
         Check::Passed
     }

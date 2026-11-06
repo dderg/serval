@@ -1,5 +1,3 @@
-use std::collections::VecDeque;
-
 use super::kernel_cells::{KernelCells, Of};
 use super::shadow::{AdvanceDemand, FollowerKernels, Leader, norm};
 use geometry::ADVANCE_VALLEY_SPEED_MM_S;
@@ -121,11 +119,13 @@ impl Read {
 }
 
 /// Everything a move's own stretch of the shaped path asks of the
-/// extruder's advance at most, from the planned moves within the kernels'
-/// reach of it alone, without convolving them: the pre-filter.
+/// extruder's advance at most, block by block of the stretch ([`Blocks`]),
+/// from the planned moves within the kernels' reach of each block alone,
+/// without convolving them: the pre-filter. The shadow convolution checks
+/// the cells of every block the screen does not prove.
 ///
 /// **Bound.** Over the planned time `W` the kernels read while the shaped
-/// path crosses the move, each axis's planned velocity `v_k` lies in a box
+/// path crosses a block, each axis's planned velocity `v_k` lies in a box
 /// `[lo_k, hi_k]` (speed range times heading-component range, per move,
 /// joined), and its planned acceleration within `±α_k`. Splitting a kernel
 /// into its positive and negative parts, `∫w·v_k` lies in
@@ -136,23 +136,23 @@ impl Read {
 /// `j_k(t) = ∫ w_k(t − τ) da_k(τ) + Σ Δv_k·w_k′(t − τ_Δ)`, the planned
 /// acceleration's changes `da_k` and velocity steps `Δv_k` read through the
 /// kernel; bounding `|w_k(t − τ)|` (and `|w_k′|`) by its largest over the
-/// stretch's instants `t` and the time `τ` each change takes
-/// ([`JerkBound`]) bounds `|j_k|` by `J_k`, and `|j·v̂|` by `|J|` and by
-/// the kernels' directional variation `G` times the largest planned
-/// acceleration. The advance's demand `r·(σ̈ + k·σ⃛) + c·(r·σ̈)²` then stays
-/// within `r·(|a| + k·(min(|J|, G·A) + a⊥²/|v|)) + c·(r·|a|)²`, with
+/// block's instants `t` and the time `τ` each change takes ([`JerkBound`])
+/// bounds `|j_k|` by `J_k`, and `|j·v̂|` by `|J|` and by the kernels'
+/// directional variation `G` times the largest planned acceleration. The
+/// advance's demand `r·(σ̈ + k·σ⃛) + c·(r·σ̈)²` then stays within
+/// `r·(|a| + k·(min(|J|, G·A) + a⊥²/|v|)) + c·(r·|a|)²`, with
 /// `a⊥²/|v| = |a × v|²/|v|³ ≤ |a|²/|v|`, wherever the shaped speed is at
 /// least [`ADVANCE_VALLEY_SPEED_MM_S`] (slower, the advance lays a valley).
 ///
-/// **Conservative.** A move the screen passes asks no more than `max_accel`
-/// anywhere along its own stretch: every term above bounds its counterpart
-/// at every instant of that stretch, whatever the plan does within the
-/// boxes. For the jerk: `a_k` is of bounded variation, so `da_k` is its
+/// **Conservative.** A block the screen proves asks no more than
+/// `max_accel` at any of its instants: every term above bounds its
+/// counterpart at every instant of the block, whatever the plan does within
+/// the boxes. For the jerk: `a_k` is of bounded variation, so `da_k` is its
 /// steps, placed at their instants, plus a continuous part whose mass over
 /// a move is at most the move's [`AccelChanges::variation`]; the seams'
 /// steps are the difference of the neighbours' end values; and
 /// `|∫ w da_k| ≤ ∫ |w| d|da_k|`, with `|w(t − τ)|` at most its cell bound
-/// over the `u = t − τ` the stretch and each change's time span reach.
+/// over the `u = t − τ` the block and each change's time span reach.
 /// Changes before the window or after it lie past the kernels' reach of
 /// every instant of the stretch. It widens the predicate the slow-corner
 /// study started from (headings spanning half a turn within the spill, no
@@ -162,24 +162,76 @@ impl Read {
 /// planned speed only, and nothing keeps that from zero where the plan
 /// slows, which a stop is the extreme of; and a turn wider than the
 /// kernel's reach still folds the shaped speed where the axes' kernels
-/// differ. The box needs none of them: it passes a move exactly when its
-/// own bound fits, and the shadow convolution decides every move it does
+/// differ. The box needs none of them: it proves a block exactly when its
+/// own bound fits, and the shadow convolution decides every block it does
 /// not.
-pub(super) fn passes(
+pub(super) fn screen(
     kernels: &FollowerKernels,
-    window: impl Iterator<Item = MoveSummary>,
-    stretch: (f64, f64),
+    window: &[MoveSummary],
+    stretch: (i64, i64),
     demand: &AdvanceDemand,
     jerk_gain: impl Fn([bool; 3]) -> f64,
     max_accel: f64,
-) -> bool {
+) -> Verdict {
+    let blocks = Blocks::new(kernels, stretch);
+    let mut jerk = JerkBound::new(kernels, blocks);
+    for summary in window {
+        jerk.add(summary);
+    }
+    let jerk = jerk.finish();
+    let last_read = blocks.reads(blocks.count() - 1).1;
+    assert!(
+        window.last().is_some_and(|summary| summary.t1 >= last_read),
+        "turning guard: the screen's window ends before t={last_read}, which the stretch reads"
+    );
+    let mut start = 0;
+    let proven = (0..blocks.count())
+        .map(|block| {
+            let (from, to) = blocks.reads(block);
+            while window[start].t1 < from {
+                start += 1;
+            }
+            let read = window[start..]
+                .iter()
+                .take_while(|summary| summary.t0 <= to);
+            demand_bound(kernels, read, jerk[block], &jerk_gain, demand) <= max_accel
+        })
+        .collect();
+    Verdict { blocks, proven }
+}
+
+/// Which blocks of a stretch the screen proves.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Verdict {
+    blocks: Blocks,
+    proven: Vec<bool>,
+}
+
+impl Verdict {
+    /// Whether the screen proves the grid cell `n` of the stretch.
+    pub fn proves(&self, n: i64) -> bool {
+        self.proven[self.blocks.of_cell(n)]
+    }
+
+    pub fn proves_all(&self) -> bool {
+        self.proven.iter().all(|proven| *proven)
+    }
+}
+
+/// The demand bound of [`screen`] on the instants that read `summaries`,
+/// where the shaped jerk is within `jerk` on each axis.
+fn demand_bound<'a>(
+    kernels: &FollowerKernels,
+    summaries: impl Iterator<Item = &'a MoveSummary>,
+    jerk: [f64; 3],
+    jerk_gain: impl Fn([bool; 3]) -> f64,
+    demand: &AdvanceDemand,
+) -> f64 {
     let mut velocity = [(f64::INFINITY, f64::NEG_INFINITY); 3];
     let mut accel = [0.0_f64; 3];
     let mut accel_bound = 0.0_f64;
     let mut moves_on = [false; 3];
-    let mut jerk = JerkBound::new(kernels, stretch);
-    for summary in window {
-        jerk.add(&summary);
+    for summary in summaries {
         accel_bound = accel_bound.max(summary.accel_bound);
         for axis in 0..3 {
             accel[axis] = accel[axis].max(summary.accel[axis]);
@@ -223,21 +275,105 @@ pub(super) fn passes(
         })
         .sum();
     let turning = (cross_sq / (speed * speed * speed)).min(accel_ceiling * accel_ceiling / speed);
-    let tangential_jerk = jerk
-        .finish()
-        .tangential
-        .min(jerk_gain(moves_on) * accel_bound);
-    demand.within(accel_ceiling, tangential_jerk, turning) <= max_accel
+    let tangential_jerk = norm(jerk).min(jerk_gain(moves_on) * accel_bound);
+    demand.within(accel_ceiling, tangential_jerk, turning)
 }
 
-/// The bound on the shaped jerk at every instant of a stretch from the
-/// changes of the planned motion the window's summaries hold, in time
-/// order. The stretch is cut into blocks of about
-/// [`BLOCKS_PER_KERNEL`]-th of the widest kernel's support: on each, `J_k`
-/// bounds axis `k`'s jerk by the changes within the kernel's reach of it,
-/// each through the largest `|w_k|` the block's instants read it at, and
-/// `|J|` the jerk's magnitude; the largest over the blocks bounds the
-/// stretch, and changes far apart in time meet on no block.
+/// How many blocks across the widest kernel's support [`Blocks`] cuts a
+/// stretch into.
+const BLOCKS_PER_KERNEL: usize = 8;
+
+/// A move's stretch of shaped instants, the grid cells `first..end`, cut
+/// into blocks of `cells` cells, about [`BLOCKS_PER_KERNEL`]-th of the
+/// widest kernel's support each, and the kernel cells `reach.0..reach.1`
+/// across the axes, raw ones reading `u = 0`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Blocks {
+    first: i64,
+    end: i64,
+    cells: i64,
+    h: f64,
+    reach: (i64, i64),
+}
+
+impl Blocks {
+    pub fn new(kernels: &FollowerKernels, (first, end): (i64, i64)) -> Self {
+        assert!(
+            first <= end,
+            "turning guard: a stretch from cell {first} to {end}"
+        );
+        let (mut reach, mut widest) = ((0, 0), 0);
+        for leader in &kernels.axes {
+            if let Leader::Shaped(cells) = leader {
+                let span = cells.span();
+                reach = (reach.0.min(span.0), reach.1.max(span.1));
+                widest = widest.max(span.1 - span.0);
+            }
+        }
+        Self {
+            first,
+            end,
+            cells: (widest as usize).div_ceil(BLOCKS_PER_KERNEL).max(1) as i64,
+            h: kernels.h,
+            reach,
+        }
+    }
+
+    pub fn count(&self) -> usize {
+        ((self.end - self.first) as usize)
+            .div_ceil(self.cells as usize)
+            .max(1)
+    }
+
+    pub fn of_cell(&self, n: i64) -> usize {
+        assert!(
+            (self.first..self.end).contains(&n),
+            "turning guard: cell {n} lies outside the stretch {}..{}",
+            self.first,
+            self.end
+        );
+        ((n - self.first) / self.cells) as usize
+    }
+
+    /// The grid cells of block `block`, `from..to`.
+    fn cells_of(&self, block: usize) -> (i64, i64) {
+        let from = self.first + block as i64 * self.cells;
+        (from, (from + self.cells).min(self.end).max(from))
+    }
+
+    /// The instants of block `block`.
+    pub fn instants(&self, block: usize) -> (f64, f64) {
+        let (from, to) = self.cells_of(block);
+        (from as f64 * self.h, to as f64 * self.h)
+    }
+
+    /// The planned time block `block`'s instants read.
+    fn reads(&self, block: usize) -> (f64, f64) {
+        let (from, to) = self.cells_of(block);
+        (
+            (from - self.reach.1) as f64 * self.h,
+            (to - self.reach.0) as f64 * self.h,
+        )
+    }
+
+    /// The blocks whose instants read planned time in `[from, to]`, a cell
+    /// either side taken in for the rounding of the times.
+    fn reading(&self, (from, to): (f64, f64)) -> Option<(usize, usize)> {
+        let cell = |t: f64| (t / self.h).floor() as i64;
+        let block_of = |n: i64| (n - self.first).div_euclid(self.cells);
+        let (lo, hi) = (
+            block_of(cell(from) + self.reach.0 - 1).max(0),
+            block_of(cell(to) + self.reach.1 + 1).min(self.count() as i64 - 1),
+        );
+        (lo <= hi).then_some((lo as usize, hi as usize))
+    }
+}
+
+/// The bound `J_k` on each shaped axis's jerk over each block of a
+/// stretch, from the changes of the planned motion the window's summaries
+/// hold, in time order: each change through the largest `|w_k|` the
+/// block's instants read it at, so changes far apart in time meet on no
+/// block.
 ///
 /// A planned velocity step `Δv_k` reads through the kernel's regular slope
 /// as `Δv_k·w_k′`; where it meets one of the kernel's own steps it steps
@@ -246,56 +382,17 @@ pub(super) fn passes(
 /// extruder's instantaneous corner velocity instead.
 pub(super) struct JerkBound<'a> {
     kernels: &'a FollowerKernels,
-    stretch: (f64, f64),
-    /// The kernels' support, `u ∈ [reach.0, reach.1]` across the axes.
-    reach: (f64, f64),
-    block: f64,
-    count: usize,
-    /// The open blocks from `first` on, `J_k` each.
-    open: VecDeque<[f64; 3]>,
-    first: usize,
-    peaks: JerkPeaks,
+    blocks: Blocks,
+    sums: Vec<[f64; 3]>,
     before: Option<AccelChanges>,
 }
 
-/// How many blocks across the widest kernel's support [`JerkBound`] cuts a
-/// stretch into.
-const BLOCKS_PER_KERNEL: usize = 8;
-
-/// The largest `J_k` over a stretch's blocks and the largest `|J|`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct JerkPeaks {
-    pub per_axis: [f64; 3],
-    pub tangential: f64,
-}
-
 impl<'a> JerkBound<'a> {
-    pub fn new(kernels: &'a FollowerKernels, stretch: (f64, f64)) -> Self {
-        let h = kernels.h;
-        let (mut reach, mut widest) = ((f64::INFINITY, f64::NEG_INFINITY), 0);
-        for leader in &kernels.axes {
-            if let Leader::Shaped(cells) = leader {
-                let span = cells.span();
-                reach = (
-                    reach.0.min(span.0 as f64 * h),
-                    reach.1.max(span.1 as f64 * h),
-                );
-                widest = widest.max(span.1 - span.0);
-            }
-        }
-        let block = h * ((widest as usize).div_ceil(BLOCKS_PER_KERNEL)).max(1) as f64;
+    pub fn new(kernels: &'a FollowerKernels, blocks: Blocks) -> Self {
         Self {
             kernels,
-            stretch,
-            reach,
-            block,
-            count: (((stretch.1 - stretch.0) / block).ceil() as usize).max(1),
-            open: VecDeque::new(),
-            first: 0,
-            peaks: JerkPeaks {
-                per_axis: [0.0; 3],
-                tangential: 0.0,
-            },
+            blocks,
+            sums: vec![[0.0; 3]; blocks.count()],
             before: None,
         }
     }
@@ -312,15 +409,13 @@ impl<'a> JerkBound<'a> {
     /// with `ε` the furthest `a` strays from `a(τ_a)`, at most the
     /// variation and twice its bound: each block takes the smaller.
     pub fn add(&mut self, summary: &MoveSummary) {
-        let (back, _) = self.kernels.sample_span();
+        let first_read = self.blocks.reads(0).0;
         assert!(
-            self.before.is_some() || summary.t0 <= self.stretch.0 - back as f64 * self.kernels.h,
-            "turning guard: the screen's window starts at t={} inside the kernels' reach of the \
-             stretch from t={}",
+            self.before.is_some() || summary.t0 <= first_read,
+            "turning guard: the screen's window starts at t={} after t={first_read}, which the \
+             stretch reads",
             summary.t0,
-            self.stretch.0
         );
-        self.close_before(summary.t0);
         let changes = summary.changes;
         let h = self.kernels.h;
         if let Some(before) = self.before {
@@ -379,65 +474,25 @@ impl<'a> JerkBound<'a> {
         self.before = Some(changes);
     }
 
-    /// Adds `bound(k, kernel, block)` of a change somewhen in `span` to
-    /// every block it reaches on every shaped axis.
+    /// Adds `bound(k, kernel, instants)` of a change somewhen in `span` to
+    /// every block that reads it, on every shaped axis.
     fn spread(&mut self, span: (f64, f64), bound: impl Fn(usize, &KernelCells, (f64, f64)) -> f64) {
-        let reached = (span.0 + self.reach.0, span.1 + self.reach.1);
-        if reached.1 < self.stretch.0 || reached.0 > self.stretch.1 {
+        let Some((from, to)) = self.blocks.reading(span) else {
             return;
-        }
-        let block_of = |t: f64| (((t - self.stretch.0) / self.block).floor().max(0.0) as usize);
-        let (from, to) = (block_of(reached.0), block_of(reached.1).min(self.count - 1));
-        while self.first + self.open.len() <= to {
-            self.open.push_back([0.0; 3]);
-        }
-        assert!(
-            from >= self.first,
-            "turning guard: a change from t={} reaches the screen's block {from}, closed before \
-             block {}",
-            span.0,
-            self.first
-        );
+        };
         for block in from..=to {
-            let instants = (
-                self.stretch.0 + block as f64 * self.block,
-                (self.stretch.0 + (block + 1) as f64 * self.block).min(self.stretch.1),
-            );
-            let sums = &mut self.open[block - self.first];
+            let instants = self.blocks.instants(block);
             for (axis, leader) in self.kernels.axes.iter().enumerate() {
                 if let Leader::Shaped(cells) = leader {
-                    sums[axis] += bound(axis, cells, instants);
+                    self.sums[block][axis] += bound(axis, cells, instants);
                 }
             }
         }
     }
 
-    /// Closes the blocks no change from `t` on reaches.
-    fn close_before(&mut self, t: f64) {
-        let reached = t + self.reach.0;
-        while let Some(sums) = self.open.front().copied() {
-            let ends = self.stretch.0 + (self.first + 1) as f64 * self.block;
-            if ends >= reached {
-                return;
-            }
-            self.close(sums);
-            self.open.pop_front();
-            self.first += 1;
-        }
-    }
-
-    fn close(&mut self, sums: [f64; 3]) {
-        for (peak, sum) in self.peaks.per_axis.iter_mut().zip(sums) {
-            *peak = peak.max(sum);
-        }
-        self.peaks.tangential = self.peaks.tangential.max(norm(sums));
-    }
-
-    pub fn finish(mut self) -> JerkPeaks {
-        while let Some(sums) = self.open.pop_front() {
-            self.close(sums);
-        }
-        self.peaks
+    /// `J_k` of every block.
+    pub fn finish(self) -> Vec<[f64; 3]> {
+        self.sums
     }
 }
 
