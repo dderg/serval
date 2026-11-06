@@ -49,9 +49,11 @@ fn a_crawl_leaves_room_for_the_widest_grid_side_the_lead_budget_covers_before_it
     let covered = (crawl_cells.0 - budget_cells..crawl_cells.0)
         .map(|n| track.path(n, crawl_cells.0 - 1).0 - track.drift(n, crawl_cells.0 - 1, H, fit))
         .fold(0.0_f64, f64::max);
-    let widest = widest_crawl_side_within(slot.width.1, covered).expect("a grid width fits");
+    let zero_reach = slot.zero_reach();
+    let widest =
+        widest_crawl_side_within(slot.width.1, covered - zero_reach).expect("a grid width fits");
     assert_eq!(crawl.before.width, widest);
-    assert!(widest <= covered && widest > slot.width.1);
+    assert!(widest + zero_reach <= covered && widest > slot.width.1);
     let reached_back = track.path(crawl.before.cells.0, crawl_cells.0 - 1).1;
     assert!(
         reached_back >= widest,

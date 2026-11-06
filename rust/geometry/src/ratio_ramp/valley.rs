@@ -84,6 +84,16 @@ pub fn crawl_step_window(reach: f64) -> f64 {
     CRAWL_STEP_WINDOW_REACH_SHARE * reach
 }
 
+/// How far past its crawl a valley's zero stretch reaches over the ratio
+/// steps within [`crawl_step_window`] of the crawl, `reach` the leaders'
+/// there: a step at the window's edge, held at zero over its own window.
+/// Its sides start that much further out, which whoever leaves room for
+/// them leaves too.
+#[must_use]
+pub fn crawl_zero_reach(reach: f64) -> f64 {
+    2.0 * crawl_step_window(reach)
+}
+
 /// The leaders turn around where they cross at a speed their rate builds
 /// within [`TURNAROUND_SPEED_TIME_S`], the rounding of an exact zero, while
 /// that rate itself is no rounding.

@@ -1666,7 +1666,11 @@ impl RatioSmoothing {
                     .map_or((rested, 0.0), |before| (zero.0, before))
             };
             if !steps.own_within(tables, (start - before, zero.1 + after)) {
-                break ((start, zero.1), (before, after), (edges.0.floor, edges.1.floor));
+                break (
+                    (start, zero.1),
+                    (before, after),
+                    (edges.0.floor, edges.1.floor),
+                );
             }
         };
         steps.assert_flow_fits(&self.trail, tables.0, rule);
@@ -2361,19 +2365,32 @@ impl RatioSmoothing {
     }
 
     /// Fails loudly where the ramp of a ratio step of `table` reaches `s`
-    /// inside a crawl valley's side: the advance would read the ramp's
-    /// curvature there on top of the side's rebuild, which no rule budgets.
-    /// A crawl valley owns the steps inside its sides and caps their
-    /// windows within its zero stretch ([`Self::lay_valley`]); a step past
-    /// a side whose window reaches back into it is not owned.
+    /// inside a crawl valley's side of a follower the turning guard holds
+    /// ([`guarded_by_the_turning_guard`]): the advance would read the
+    /// ramp's curvature there on top of the side's rebuild, which no rule
+    /// budgets. Such a valley owns the steps inside its sides and caps
+    /// their windows within its zero stretch ([`Self::lay_valley`]); a step
+    /// past a side whose window reaches back into it is not owned. A
+    /// follower behind its own kernel has that kernel spread both.
     pub(super) fn assert_no_ramp_in_a_crawl_side(&self, table: Table, s: f64) {
+        if !self
+            .width
+            .rule
+            .is_some_and(|rule| guarded_by_the_turning_guard(&rule))
+        {
+            return;
+        }
         let Some(valley) = self
             .valleys_over(s, s)
             .find(|valley| valley.kind == ValleyKind::Crawl && valley.weight(s).0 > 0.0)
         else {
             return;
         };
-        if let Some((seam, h)) = self.seam_table(table).steps_reaching(&self.width, (s, s)).next() {
+        if let Some((seam, h)) = self
+            .seam_table(table)
+            .steps_reaching(&self.width, (s, s))
+            .next()
+        {
             panic!(
                 "follower projection: the ratio step {seam:?} of the {table:?} table ramps over \
                  {h} mm either side, into the side of the crawl valley {valley:?} at s={s}"
