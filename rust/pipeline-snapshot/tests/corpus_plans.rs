@@ -58,6 +58,28 @@ fn plan_case(case: &corpus::Case) -> Outcome {
                     outcome.failures.push(format!("{}: {excess}", case.name));
                 }
             }
+            if let Some(accuracy) =
+                corpus::path_accuracy::audit(&snapshot, &case.gcode, &case.config)
+            {
+                outcome
+                    .report
+                    .push(format!("{:<70} {}", "", accuracy.summary()));
+                if let Some(first) = accuracy.lost.first() {
+                    outcome.failures.push(format!(
+                        "{}: the shaped path never nears {} vertices, first {first:?}",
+                        case.name,
+                        accuracy.lost.len()
+                    ));
+                }
+                if let Some((at, miss, budget, _)) = accuracy.over_budget.first() {
+                    outcome.failures.push(format!(
+                        "{}: the shaped path misses {} extruding vertices past their corner \
+                         budget, first {at:?} by {miss:.4} mm against {budget:.4} mm",
+                        case.name,
+                        accuracy.over_budget.len()
+                    ));
+                }
+            }
         }
         Ok(snapshot) => outcome.failures.push(format!(
             "{}: traversal time {}",

@@ -17,7 +17,7 @@ const PRINT_MM: f64 = 0.5;
 const PRINT_V: f64 = 50.0;
 
 fn limits() -> VelocityLimits {
-    VelocityLimits::try_new(MAX_V, ACCEL, 0.04, JERK).unwrap()
+    VelocityLimits::try_new(MAX_V, ACCEL, geometry::CornerBudget::Shaped(0.04), JERK).unwrap()
 }
 
 fn config(max_buffer_moves: usize) -> StreamConfig {
@@ -183,7 +183,13 @@ const RAMP_FEEDS: [f64; 5] = [10.0, 30.0, 80.0, 200.0, 10.0];
 const RAMP_E_PER_MM: f64 = 0.05;
 
 fn ramp_limits() -> VelocityLimits {
-    VelocityLimits::try_new(300.0, 3000.0, 5.0, f64::INFINITY).unwrap()
+    VelocityLimits::try_new(
+        300.0,
+        3000.0,
+        geometry::CornerBudget::Shaped(5.0),
+        f64::INFINITY,
+    )
+    .unwrap()
 }
 
 /// The speed_ramp shape, repeated: collinear 40 mm extruding moves whose
@@ -319,11 +325,23 @@ const MAX_Z_V: f64 = 25.0;
 const MAX_Z_ACCEL: f64 = 100.0;
 
 fn layer_limits() -> VelocityLimits {
-    VelocityLimits::try_new(LAYER_TRAVEL_V, LAYER_ACCEL, 0.04, JERK).unwrap()
+    VelocityLimits::try_new(
+        LAYER_TRAVEL_V,
+        LAYER_ACCEL,
+        geometry::CornerBudget::Shaped(0.04),
+        JERK,
+    )
+    .unwrap()
 }
 
 fn layer_change_limits() -> VelocityLimits {
-    VelocityLimits::try_new(MAX_Z_V, MAX_Z_ACCEL, 0.04, JERK).unwrap()
+    VelocityLimits::try_new(
+        MAX_Z_V,
+        MAX_Z_ACCEL,
+        geometry::CornerBudget::Shaped(0.04),
+        JERK,
+    )
+    .unwrap()
 }
 
 fn layer_config() -> StreamConfig {

@@ -132,8 +132,13 @@ fn move_time_s(mv: &MoveVelocity) -> f64 {
 }
 
 fn stream_config() -> StreamConfig {
-    let limits = geometry::VelocityLimits::try_new(MAX_VELOCITY, MAX_ACCEL, SCV, f64::INFINITY)
-        .expect("valid limits");
+    let limits = geometry::VelocityLimits::try_new(
+        MAX_VELOCITY,
+        MAX_ACCEL,
+        geometry::CornerBudget::Shaped(SCV),
+        f64::INFINITY,
+    )
+    .expect("valid limits");
     StreamConfig {
         corner: geometry::CornerFitConfig::default(),
         integration_tol: PRODUCTION_INTEGRATION_TOL,

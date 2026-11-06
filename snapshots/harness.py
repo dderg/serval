@@ -68,7 +68,7 @@ def read_printer_config(cfg_path: Path) -> PrinterConfigData:
     # Parse through klippy's own loader so includes resolve exactly like the
     # live printer; the engine's pipeline_snapshot re-reads the motion
     # sections from the serialized document with the same Rust reader
-    # (defaults, bounds, scv conversion) init_planner uses.
+    # (defaults, bounds, corner budget kind) init_planner uses.
     from klippy import configfile
 
     loader = configfile.PrinterConfig.__new__(configfile.PrinterConfig)

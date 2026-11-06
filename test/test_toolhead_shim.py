@@ -2,7 +2,7 @@ import pytest
 from fakes import FakeEngine as _FakeEngine
 from fakes import FakeKin, FakeMcu, FakePrinter, FakeReactor
 
-from klippy import gcode
+from klippy import gcode, motion_setup
 from klippy.kinematics import extruder as extruder_mod
 from klippy.motion import Motion, ToolheadShim
 
@@ -20,6 +20,7 @@ EXPECTED_STATUS_KEYS = {
     "minimum_cruise_ratio",
     "square_corner_velocity",
     "corner_deviation",
+    "corner_budget",
 }
 
 LEGACY_METHODS = [
@@ -61,7 +62,7 @@ def toolhead_fixture():
     toolhead.extruder = extruder_mod.DummyExtruder(printer)
     toolhead._max_velocity = 300.0
     toolhead._max_accel = 3000.0
-    toolhead._corner_deviation = 0.0034517796864424596
+    toolhead._corner = ("square_corner_velocity", 5.0)
     toolhead._planner_ready = False
 
     printer.add_object("toolhead", ToolheadShim(toolhead))
@@ -72,6 +73,16 @@ def test_toolhead_status_keys_exact(toolhead_fixture):
     toolhead = toolhead_fixture.lookup_object("toolhead")
     status = toolhead.get_status(EVENTTIME)
     assert set(status.keys()) == EXPECTED_STATUS_KEYS
+
+
+def test_toolhead_status_reports_the_set_corner_kind_verbatim(toolhead_fixture):
+    toolhead = toolhead_fixture.lookup_object("toolhead")
+    status = toolhead.get_status(EVENTTIME)
+    assert status["corner_budget"] == "square_corner_velocity"
+    assert status["square_corner_velocity"] == 5.0
+    assert status["corner_deviation"] == pytest.approx(
+        motion_setup.corner_deviation_from_scv(5.0, 3000.0)
+    )
 
 
 def test_toolhead_method_surface_complete(toolhead_fixture):

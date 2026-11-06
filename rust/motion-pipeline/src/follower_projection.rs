@@ -3619,20 +3619,21 @@ impl<'a> FollowerSignal<'a> {
             .iter()
             .filter(|span| span.s1 >= s_lo - SPAN_LOOKUP_SLACK_MM && span.s0 < self.s_owned_end)
             .all(|span| span.r0 == 0.0 && span.r1 == 0.0);
-        let tail_zero = match self
+        let ridden_last = self
             .state
             .spans
             .iter()
             .rev()
-            .find(|span| span.s0 < self.s_owned_end)
-        {
+            .find(|span| span.s0 < self.s_owned_end);
+        let tail_zero = match ridden_last {
             Some(last) if self.s_owned_end > last.s1 => last.r1 == 0.0,
             _ => true,
         };
-        let smoothed = self
-            .state
-            .smoothing
-            .touches(s_lo - SPAN_LOOKUP_SLACK_MM, s_hi + SPAN_LOOKUP_SLACK_MM);
+        let smoothed = ridden_last.is_some()
+            && self
+                .state
+                .smoothing
+                .touches(s_lo - SPAN_LOOKUP_SLACK_MM, s_hi + SPAN_LOOKUP_SLACK_MM);
         (overlapping_zero && tail_zero && !smoothed).then(|| self.eval(self.grid[0]))
     }
 

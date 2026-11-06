@@ -80,6 +80,7 @@ version = "0.1.0"
 dependencies = [
  "libm",
  "nurbs",
+ "taylor-model",
 ]
 
 [[package]]
@@ -119,6 +120,8 @@ dependencies = [
  "geometry",
  "libm",
  "nurbs",
+ "planner-config",
+ "taylor-model",
  "thiserror",
  "tracing",
  "trajectory",
@@ -173,6 +176,7 @@ name = "planner-config"
 version = "0.1.0"
 dependencies = [
  "geometry",
+ "nurbs",
  "thiserror",
  "trajectory",
 ]
@@ -259,6 +263,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "taylor-model"
+version = "0.1.0"
+dependencies = [
+ "libm",
 ]
 
 [[package]]

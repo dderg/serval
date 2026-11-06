@@ -178,7 +178,7 @@ fn ident_stroke_dwell_pattern_has_no_position_weld() {
     cfg.limits = geometry::VelocityLimits::try_new(
         2800.0,
         50000.0,
-        geometry::corner_deviation_from_scv(5.0, 50000.0),
+        geometry::CornerBudget::Shaped(geometry::corner_deviation_from_scv(5.0, 50000.0)),
         f64::INFINITY,
     )
     .expect("trident bench limits are valid");

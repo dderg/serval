@@ -201,7 +201,13 @@ impl AnalyticShape {
             segment: PathSegment::try_new(Segment::Line(line), vec![])
                 .expect("a follower-free path"),
             feedrate_mm_s: 100.0,
-            limits: VelocityLimits::try_new(100.0, 1_000.0, 0.1, f64::INFINITY).expect("limits"),
+            limits: VelocityLimits::try_new(
+                100.0,
+                1_000.0,
+                geometry::CornerBudget::Shaped(0.1),
+                f64::INFINITY,
+            )
+            .expect("limits"),
             source: SourceRange {
                 start_line: 0,
                 end_line: 0,

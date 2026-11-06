@@ -9,7 +9,8 @@
 
 use config_doc::Document;
 
-use crate::{AxisDecl, CartesianLimits, DEFAULT_CORNER_DEVIATION_MM, PostProcessorDecl};
+use crate::{AxisDecl, CartesianLimits, PostProcessorDecl};
+use geometry::{CornerBudget, DEFAULT_CORNER_ALLOWANCE_MM};
 
 const UNSUPPORTED_PRINTER_KEYS: [&str; 2] = ["max_accel_to_decel", "minimum_cruise_ratio"];
 const LEGACY_STEPPER_AXES: [char; 5] = ['x', 'y', 'z', 'a', 'b'];
@@ -364,7 +365,7 @@ impl Reader<'_> {
 
         let scv = self.getfloat("printer", "square_corner_velocity", Bounds::min(0.0))?;
         let corner_deviation = self.getfloat("printer", "corner_deviation", Bounds::min(0.0))?;
-        let corner_deviation = match (scv, corner_deviation) {
+        let corner = match (scv, corner_deviation) {
             (Some(_), Some(_)) => {
                 return Err(
                     "[printer] square_corner_velocity and corner_deviation are both \
@@ -373,9 +374,9 @@ impl Reader<'_> {
                         .to_owned(),
                 );
             }
-            (_, Some(deviation)) => deviation,
-            (Some(scv), None) => geometry::corner_deviation_from_scv(scv, max_accel),
-            (None, None) => DEFAULT_CORNER_DEVIATION_MM,
+            (_, Some(deviation)) => CornerBudget::Shaped(deviation),
+            (Some(scv), None) => CornerBudget::ScvEquivalent(scv),
+            (None, None) => CornerBudget::OverFloor(DEFAULT_CORNER_ALLOWANCE_MM),
         };
 
         let max_jerk = self.getfloat_or("printer", "max_jerk", 0.0, Bounds::min(0.0))?;
@@ -413,7 +414,7 @@ impl Reader<'_> {
                 max_jerk,
                 max_z_velocity,
                 max_z_accel,
-                corner_deviation,
+                corner,
             },
             fit_tolerance_mm,
             fit_tolerance_accel_mm_s2,

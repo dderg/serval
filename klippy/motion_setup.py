@@ -42,6 +42,24 @@ def scv_from_corner_deviation(corner_deviation, max_accel):
     return math.sqrt(corner_deviation * max_accel / CORNER_DEVIATION_SCV_FACTOR)
 
 
+CORNER_KIND_DEVIATION = "corner_deviation"
+CORNER_KIND_DEFAULT = "default"
+CORNER_KIND_SCV = "square_corner_velocity"
+
+
+def corner_values(corner, accel):
+    """`(corner_deviation, square_corner_velocity)` a `(kind, value)` corner
+    budget reports: the value as given for the option that set it, the other
+    one through the legacy conversion at `accel`. A default budget reports its
+    allowance as the corner_deviation."""
+    kind, value = corner
+    if kind in (CORNER_KIND_DEVIATION, CORNER_KIND_DEFAULT):
+        return value, scv_from_corner_deviation(value, accel)
+    if kind == CORNER_KIND_SCV:
+        return corner_deviation_from_scv(value, accel), value
+    raise ValueError("unknown corner budget kind %r" % (kind,))
+
+
 STEP_MODE_MODULATED = 0
 STEP_MODE_STEP_TIME = 1
 LANE_KIND_PULSE = 0

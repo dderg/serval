@@ -43,7 +43,7 @@ fn bench_shapers_with_unkerneled_e() -> SnapshotParams {
     SnapshotParams {
         max_velocity: MAX_VELOCITY,
         max_accel: MAX_ACCEL,
-        corner_deviation: 0.21,
+        corner: geometry::CornerBudget::Shaped(0.21),
         max_jerk: f64::INFINITY,
         max_z_velocity: None,
         max_z_accel: None,
@@ -74,7 +74,7 @@ fn dense_top_layer_shapes_with_an_unkerneled_extruder() {
             MAX_VELOCITY,
             MAX_ACCEL,
             f64::INFINITY,
-            0.0,
+            geometry::CornerBudget::Shaped(0.0),
         ),
     )
     .expect("parse");
@@ -94,14 +94,16 @@ fn neptune_discontinuity_with_tanh_advance(
             MAX_VELOCITY,
             MAX_ACCEL,
             f64::INFINITY,
-            0.0,
+            geometry::CornerBudget::Shaped(0.0),
         ),
     )
     .expect("parse");
     let params = SnapshotParams {
         max_velocity: MAX_VELOCITY,
         max_accel: MAX_ACCEL,
-        corner_deviation: geometry::corner_deviation_from_scv(20.0, MAX_ACCEL),
+        corner: geometry::CornerBudget::Shaped(geometry::corner_deviation_from_scv(
+            20.0, MAX_ACCEL,
+        )),
         max_jerk: f64::INFINITY,
         max_z_velocity: None,
         max_z_accel: None,

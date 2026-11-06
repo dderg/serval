@@ -10,13 +10,21 @@ use crate::types::{BaseItem, StreamConfig, TrajectoryItem};
 
 const MAX_VELOCITY: f64 = 300.0;
 const MAX_ACCEL: f64 = 25_000.0;
-const CORNER_DEVIATION: f64 = 0.05;
+/// Wide enough that the fitter cuts each corner as far as its apex may ride
+/// the curvature cap within the shaped budget.
+const CORNER_DEVIATION: f64 = 0.5;
 const FEEDRATE: f64 = 200.0;
 const SMOOTH_TIME: f64 = 0.010;
 const LEADER: usize = 0;
 
 fn limits() -> VelocityLimits {
-    VelocityLimits::try_new(MAX_VELOCITY, MAX_ACCEL, CORNER_DEVIATION, f64::INFINITY).unwrap()
+    VelocityLimits::try_new(
+        MAX_VELOCITY,
+        MAX_ACCEL,
+        geometry::CornerBudget::Shaped(CORNER_DEVIATION),
+        f64::INFINITY,
+    )
+    .unwrap()
 }
 
 fn config() -> StreamConfig {

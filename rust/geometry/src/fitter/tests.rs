@@ -15,7 +15,7 @@ fn ctx(line_no: u32, accel: f64, scv: f64) -> MoveContext {
         limits: VelocityLimits::try_new(
             200.0,
             accel,
-            crate::corner_deviation_from_scv(scv, accel),
+            crate::CornerBudget::Shaped(crate::corner_deviation_from_scv(scv, accel)),
             100_000.0,
         )
         .unwrap(),
@@ -633,7 +633,13 @@ fn disabled_jerk_limiting_never_rejects_ramps_on_its_own() {
         let ctx = MoveContext {
             extruder_axis: E_AXIS,
             feedrate_mm_s: 100.0,
-            limits: VelocityLimits::try_new(200.0, 3000.0, 5.0, f64::INFINITY).unwrap(),
+            limits: VelocityLimits::try_new(
+                200.0,
+                3000.0,
+                crate::CornerBudget::Shaped(5.0),
+                f64::INFINITY,
+            )
+            .unwrap(),
             source: SourceRange {
                 start_line: line_no,
                 end_line: line_no,
@@ -687,7 +693,8 @@ fn non_finite_line_yields_fit_error_with_source_line() {
     let bad = Move {
         segment: bad_segment,
         feedrate_mm_s: 100.0,
-        limits: VelocityLimits::try_new(200.0, 3000.0, 5.0, 100_000.0).unwrap(),
+        limits: VelocityLimits::try_new(200.0, 3000.0, crate::CornerBudget::Shaped(5.0), 100_000.0)
+            .unwrap(),
         source: SourceRange {
             start_line: 2,
             end_line: 2,
@@ -717,7 +724,9 @@ fn corner_blend_deviation_is_the_raw_budget_regardless_of_accel() {
     let delta = 0.05;
     let vertex = [50.0, 0.0, 0.0];
     let deviation_at = |accel: f64| {
-        let limits = VelocityLimits::try_new(200.0, accel, delta, 100_000.0).unwrap();
+        let limits =
+            VelocityLimits::try_new(200.0, accel, crate::CornerBudget::Shaped(delta), 100_000.0)
+                .unwrap();
         let m = |line_no, start, end| {
             line_move(
                 start,

@@ -67,8 +67,13 @@ fn span_duration_census() {
 
     let mut cfg = default_stream_config();
     let corner_dev = geometry::corner_deviation_from_scv(5.0, 50000.0);
-    cfg.limits = geometry::VelocityLimits::try_new(1000.0, 50000.0, corner_dev, f64::INFINITY)
-        .expect("trident limits are valid");
+    cfg.limits = geometry::VelocityLimits::try_new(
+        1000.0,
+        50000.0,
+        geometry::CornerBudget::Shaped(corner_dev),
+        f64::INFINITY,
+    )
+    .expect("trident limits are valid");
     let moves = parse_gcode_to_moves(&source, cfg.limits);
     eprintln!("parsed {} moves from {path}", moves.len());
     assert!(!moves.is_empty());

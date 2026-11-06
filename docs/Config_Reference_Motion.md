@@ -16,15 +16,23 @@ max_accel: 3000
 #   Optional. Default is 0, i.e. jerk limiting is disabled. Only 0 is
 #   accepted — the continuous trajectory pipeline rejects a finite jerk
 #   limit.
-#corner_deviation: 0.04
-#   Optional canonical corner budget in mm: how far the planned path may
-#   cut a corner's vertex. Default is 0.04, at every max_accel, when
-#   neither corner option is set. Must be >= 0. Set this XOR
-#   square_corner_velocity.
+#corner_deviation:
+#   Optional corner budget in mm, no default: how far the toolhead path
+#   after the input shaper (the shaped path) may miss each corner's G-code
+#   vertex. A strict promise: where even a stop at the corner would round
+#   it by more (the shaper's floor, see "Corner budget on the shaped
+#   path" below), the planner slows the acceleration into and out of that
+#   corner until it fits. Must be >= 0. Set this XOR
+#   square_corner_velocity; with neither set, each corner may miss by its
+#   shaper floor plus 0.04 mm.
 #square_corner_velocity:
-#   Optional legacy alias, no default. Must be >= 0. Set this XOR
-#   corner_deviation; it is converted to the corner-deviation budget
-#   scv^2 * (sqrt(2) - 1) / max_accel (5 mm/s at 3000 mm/s^2 is 0.0035 mm).
+#   Optional, no default, in mm/s. Must be >= 0. Set this XOR
+#   corner_deviation. Each corner may miss its vertex by its shaper floor
+#   plus what crossing a sharp 90° corner at this speed adds to the floor
+#   through the same kernels, both at the corner's own planned
+#   acceleration: the smoothing Klipper's square_corner_velocity gives.
+#   Without an X or Y kernel it is the legacy cut
+#   scv^2 * (sqrt(2) - 1) / accel at each move's planned acceleration.
 #max_z_velocity: 300
 #   Optional. Default is max_velocity. Must be > 0 and <= max_velocity.
 #   Z speed limit in mm/s.
@@ -46,7 +54,7 @@ max_accel: 3000
 #   max_accel plus this is held to this.
 ```
 
-`corner_deviation` is the canonical corner budget. Setting both corner options is an error. `max_accel_to_decel` and `minimum_cruise_ratio` are explicitly unsupported rather than ignored.
+Setting both corner options is an error. `max_accel_to_decel` and `minimum_cruise_ratio` are explicitly unsupported rather than ignored.
 
 `max_z_velocity` and `max_z_accel` bound the z axis alone, not the toolhead path. The planner applies them to each fitted segment after corner blending, using the z share of that segment's heading and of its curvature. That covers corners between an XY line and an XYZ move, such as layer changes and z-hops: the turn can put z acceleration on the blend even where its heading barely climbs, so the planner slows the blend until z stays within both caps. The caps never raise a limit; they only lower the speed ceiling and the acceleration budget of segments that move z.
 
@@ -73,28 +81,21 @@ Worked example: the bench printer (`tools/bench/printer.cfg`: CoreXY, 80 steps/m
 
 The startup line reports about 190 % summed worst-case demand, so the cap can bind.
 
-### Why the corner budget defaults to 0.04 mm
+### Corner budget on the shaped path
 
-A config that sets neither corner option used to inherit Klipper's implicit `square_corner_velocity: 5`. That is a budget of 0.0035 mm at 3000 mm/s² and 0.00015 mm at 70000 mm/s², so every corner tighter than about 135° was close to a full stop. The default is now `corner_deviation: 0.04` at every `max_accel`. The value comes from a profile study of four machines, each replaying a dense top-layer print (`tools/sim/gcode/voron_dense_top_layers.gcode`) on one pinned core, as a proxy for a Pi-class host's realtime margin:
+The corner budget bounds the shaped path, the one the input shaper hands the motors, not the planned one: the miss of a corner is the closest the shaped path comes to its G-code vertex. Two things round a corner. The planner blends it with a clothoid pair whose apex cuts the vertex by a chosen amount, and the shaper's X and Y kernels pull the path further inward. A kernel averages the motion over its width, so a corner crossed faster, or braked into and accelerated out of harder, is rounded more. Even a full stop at the vertex at acceleration `A` is rounded: that is the corner's floor. It grows with the turn and in proportion to `A` and to the kernels' variance. At 10000 mm/s² behind the bench printer's 50 Hz MZV / 44 Hz ZV pair it is about 0.12 mm at 90° and 0.17 mm at 180°.
 
-- P1: bowden bedslinger, 3k mm/s², PA 0.5.
-- P2: i3 direct drive, 5k mm/s², PA 0.05.
-- P3: Voron direct drive, 15k mm/s², PA 0.03.
-- P4: Trident, 70k mm/s², PA 0.02.
+The planner predicts the shaped miss of every corner from the configured X and Y kernels (`rust/geometry/src/shaped_corner.rs`). The table belongs to the kernel pair and is filled lazily, a cell the first time a corner needs it, by convolving a canonical corner, worst over its orientation against the axes, with a 20% margin on the shaper's share. Each corner then gets the cut whose apex the shaped path may cross fastest within its budget, and an apex speed that keeps the predicted miss within it. Under `corner_deviation` and `square_corner_velocity`, arcs and merged runs of facets are fitted to a quarter of the budget, and their speed keeps the shaper's inward pull on the curve within the rest. Corners close together trace a curve the shaper shrinks as a whole. A blend's apex is therefore also held to the speed at which a circle through its turn, over the shorter leg to a neighbouring corner, keeps that shrink within the budget's room beyond the cut.
 
-| Corner budget | Dense-print segments | Print time, P1 / P2 / P3 / P4 (s) | Worst single-core realtime factor | Nozzle miss at a vertex, P1 … P4 (mm) |
-|---|---|---|---|---|
-| `square_corner_velocity: 5` | 18.3k–19.7k | 65.2 / 51.9 / 39.3 / 29.1 | 1.2× (P4) | 0.081 … 0.128 |
-| 0.01 | 8.2k | 58.1 / 41.3 / 24.4 / 16.8 | 1.9× (P4) | 0.092 … 0.154 |
-| 0.02 | 1.27k | 50.3 / 35.3 / 20.9 / 15.4 | 6.2× (P4) | 0.106 … 0.170 |
-| **0.04** | **1.31k** | **50.0 / 35.1 / 20.7 / 15.3** | **6.3× (P4)** | **0.131 … 0.197** |
-| 0.08 | 1.21k | 49.8 / 34.9 / 20.7 / 15.3 | 7.9× (P4) | 0.175 … 0.245 |
+What the budget is depends on how it is set:
 
-- **Throughput has a cliff.** The print's facets merge only once the budget exceeds about 0.015 mm: 11.7k segments at 0.005, 3.7k at 0.0125, 1.5k at 0.015, and flat from 0.0175 up. At 0.01 and below, P3 and P4 fall under 3× realtime on one core. 0.04 leaves more than twice the budget the cliff needs, for G-code with coarser facets than this print.
-- **Quality is nearly flat from 0.02 to 0.04.** The nozzle's miss at a vertex is mostly the input shaper's own smoothing (the scv-5 row). Going from 0.02 to 0.04 adds about 0.025 mm to it, some 6% of a 0.4 mm line. Corner bead error under exact pressure advance stays at about 0.1% on P2–P4 and 0.9% on P1. Peak extruder acceleration at corners falls 8–11% (P4: 58k to 54k mm/s²), which leaves the extruder more headroom.
-- **0.08 buys little.** Its throughput change is small and inconsistent: P4 with exact advance goes from 6.3× to 7.9×, the Trident bench config from 6.9× to 5.9×. It adds another 0.045 mm of vertex miss. With an extruder smoothing kernel, the corner bead error on P1 and P2 grows again (P1 1.5% to 2.8%, P2 1.7% to 2.9%).
+- **`corner_deviation`** is the whole budget, the same for every corner. Where a stop at the corner's planned acceleration would round it past the budget, the acceleration of a short approach either side of it (the path a stop at that acceleration covers in about six standard deviations of the wider kernel, ending at any stop on the way) drops to where a stop takes half the budget's room beyond the cut. The corner is held to its budget at a cost in time. At startup the planner logs a `corner_floor` event naming the floor at 90° and 180° at `max_accel` and the acceleration at which each fits the budget.
+- **Neither option set**: each corner may miss by its floor at the acceleration it is planned at (after the extruder and step-capacity caps) plus 0.04 mm. The planner never slows a corner for this budget below the acceleration it plans anyway. This budget holds corners alone: a corner is a stop or a blend the planner cuts at a vertex, while arcs, merged runs of facets and clothoids easing between curves are fitted to 0.04 mm and left to the shaper, as before. A machine whose extruder caps hold corners well under `max_accel` keeps its sharp corners, and a corner taken at `max_accel` gets the shaper's own rounding plus 0.04 mm.
+- **`square_corner_velocity`**: as above, with the allowance taken from Klipper. It is what crossing a sharp 90° corner at that speed adds to the floor, through the same kernels and at the same acceleration, which is the smoothing a Klipper machine with that `square_corner_velocity` and these shapers prints.
 
-Configs that set either option keep it. To keep the old near-stop corners, set `square_corner_velocity: 5` explicitly.
+Without an X or Y kernel the shaped path is the planned one and the floor is zero: `corner_deviation` and the default are the planned cut, and `square_corner_velocity` converts to Klipper's junction deviation `scv² · (√2 − 1) / accel`.
+
+The path-accuracy audit measures this on the corpus and every machine profile: `scripts/corpus.sh --path-accuracy` (`rust/pipeline-snapshot/tests/path_accuracy.rs`). It holds every extruding vertex of the shaped path to its budget, and under the default every corner the fitter keeps: a vertex inside a fitted arc run or a consumed cluster of facets is a curve. For the implicit budgets the audit takes the floor at `max_accel`, a looser bound than the planner's.
 
 ## `[kinematics]`
 

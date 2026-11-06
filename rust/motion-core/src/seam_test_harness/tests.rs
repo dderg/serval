@@ -99,8 +99,13 @@ const CRASH_VORON_CUBE: &str = include_str!("crash_voron_cube.gcode");
 
 fn bench_config() -> StreamConfig {
     let mut cfg = default_stream_config();
-    cfg.limits =
-        VelocityLimits::try_new(500.0, 8000.0, 20.0, f64::INFINITY).expect("bench limits valid");
+    cfg.limits = VelocityLimits::try_new(
+        500.0,
+        8000.0,
+        geometry::CornerBudget::Shaped(20.0),
+        f64::INFINITY,
+    )
+    .expect("bench limits valid");
     cfg
 }
 

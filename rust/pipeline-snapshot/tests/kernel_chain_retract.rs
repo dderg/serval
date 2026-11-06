@@ -55,7 +55,7 @@ fn bowden_kernel_chain(e_chain: &[&str]) -> SnapshotParams {
     SnapshotParams {
         max_velocity: MAX_VELOCITY,
         max_accel: MAX_ACCEL,
-        corner_deviation: 0.04,
+        corner: geometry::CornerBudget::Shaped(0.04),
         max_jerk: f64::INFINITY,
         max_z_velocity: None,
         max_z_accel: None,
@@ -87,7 +87,7 @@ fn extruder_at_rest(e_chain: &[&str]) -> Vec<(f64, f64, f64)> {
             MAX_VELOCITY,
             MAX_ACCEL,
             f64::INFINITY,
-            0.0,
+            geometry::CornerBudget::Shaped(0.0),
         ),
     )
     .expect("parse");
