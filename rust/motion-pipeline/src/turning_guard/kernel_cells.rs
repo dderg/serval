@@ -32,9 +32,13 @@ pub(super) struct KernelCells {
     /// `∫|w″| + Σ|Δw′|`: the shaped jerk's rate per unit of planned
     /// acceleration, away from the steps the kernel's own jumps take.
     pub jerk_rate_per_accel: f64,
-    /// `max |w′|` off the kernel's steps: the shaped jerk's rate per unit
-    /// of the planned acceleration's variation over the kernels' reach.
-    pub slope_peak: f64,
+    /// Per planned cell the shaped motion at `t_n` reads, from the one just
+    /// past the kernel's start (`n − first`) back through each kernel
+    /// cell's: `max |w′|`, off the kernel's steps, over the kernel cells a
+    /// read shifted by up to one cell reaches from there. The shaped jerk
+    /// moves by at most `δ·Σ weightₘ·Vₘ` within `δ ≤ h` of `t_n`, `Vₘ` the
+    /// planned acceleration's variation over cell `m`.
+    pub drift_weights: Vec<f64>,
     /// Upper bounds on `∫w⁺` and `∫w⁻`.
     pub positive_mass: f64,
     pub negative_mass: f64,
@@ -64,7 +68,7 @@ impl KernelCells {
             slope,
             jumps: jump_total(&kernel.pieces),
             jerk_rate_per_accel: absolute_integral(&curvatures) + jump_total(&slopes),
-            slope_peak: peak(&slopes),
+            drift_weights: drift_weights(&cell_peaks(&slopes, first, last, h)),
             positive_mass,
             negative_mass,
         }
@@ -75,12 +79,28 @@ fn differentiated(pieces: &[BezierPiece]) -> Vec<BezierPiece> {
     pieces.iter().map(BezierPiece::differentiate).collect()
 }
 
-/// A bound on `|f|` over the pieces: their cuts' largest Bernstein
-/// coefficient.
-fn peak(pieces: &[BezierPiece]) -> f64 {
-    cuts(pieces)
-        .map(|(_, coefficients)| largest_magnitude(&coefficients))
-        .fold(0.0, f64::max)
+/// A bound on `|f|` over each cell `[j·h, (j+1)·h]`, `j` in `first..last`.
+fn cell_peaks(pieces: &[BezierPiece], first: i64, last: i64, h: f64) -> Vec<f64> {
+    (first..last)
+        .map(|j| {
+            let (a, b) = (j as f64 * h, (j + 1) as f64 * h);
+            pieces
+                .iter()
+                .filter(|piece| piece.u_start < b && piece.u_end > a)
+                .map(|piece| {
+                    let (lo, hi) = (a.max(piece.u_start), b.min(piece.u_end));
+                    largest_magnitude(&bernstein(&piece.coeffs, piece.u_start, lo, hi))
+                })
+                .fold(0.0, f64::max)
+        })
+        .collect()
+}
+
+fn drift_weights(peaks: &[f64]) -> Vec<f64> {
+    let reach = |cell: usize| peaks[cell].max(peaks.get(cell + 1).copied().unwrap_or(0.0));
+    std::iter::once(peaks[0])
+        .chain((0..peaks.len()).map(reach))
+        .collect()
 }
 
 fn piece_at(pieces: &[BezierPiece], u: f64) -> Option<&BezierPiece> {

@@ -163,8 +163,9 @@ impl FollowerKernels {
 
 /// The shaped motion at a grid instant: velocity, acceleration and jerk
 /// per axis, each within its radius of the truth, the largest planned
-/// acceleration bound per axis over the cells it read, and the total
-/// variation of the planned acceleration over them and the next cell.
+/// acceleration bound per axis over the cells it read, and a bound on the
+/// rate the jerk drifts at within a cell after it from the planned
+/// acceleration's variation ([`KernelCells::drift_weights`]).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub(super) struct ShapedSample {
     pub velocity: [f64; 3],
@@ -174,7 +175,7 @@ pub(super) struct ShapedSample {
     pub accel_miss: [f64; 3],
     pub jerk_miss: [f64; 3],
     pub window_accel: [f64; 3],
-    pub window_variation: [f64; 3],
+    pub jerk_drift: [f64; 3],
 }
 
 /// The shaped motion at `t_n = n·h`, `None` where the grid lacks a cell it
@@ -218,7 +219,17 @@ pub(super) fn shaped_at(
             Leader::Shaped(cells) => {
                 let mut sums = [0.0; 6];
                 let mut window = 0.0_f64;
-                let mut variation = grid.get(n - cells.first)?.cell_variation[axis];
+                let weighted = |weight: f64, swing: f64| {
+                    if swing.is_finite() {
+                        weight * swing
+                    } else {
+                        f64::INFINITY
+                    }
+                };
+                let mut drift = weighted(
+                    cells.drift_weights[0],
+                    grid.get(n - cells.first)?.cell_variation[axis],
+                );
                 for (offset, (value, slope)) in cells.value.iter().zip(&cells.slope).enumerate() {
                     let m = n - (cells.first + offset as i64) - 1;
                     let lo = grid.get(m)?;
@@ -226,7 +237,7 @@ pub(super) fn shaped_at(
                     let accel = lo.cell_accel[axis];
                     let swing = lo.cell_variation[axis];
                     window = window.max(accel);
-                    variation += swing;
+                    drift += weighted(cells.drift_weights[offset + 1], swing);
                     let moved = hi.position[axis] - lo.position[axis];
                     let turned = hi.velocity[axis] - lo.velocity[axis];
                     let defect = 0.5 * h * (hi.velocity[axis] + lo.velocity[axis]) - moved;
@@ -252,7 +263,7 @@ pub(super) fn shaped_at(
                 out.jerk[axis] = sums[4];
                 out.jerk_miss[axis] = sums[5] + cells.jumps * window;
                 out.window_accel[axis] = window;
-                out.window_variation[axis] = variation;
+                out.jerk_drift[axis] = drift;
             }
         }
     }
@@ -281,9 +292,8 @@ impl CellMotion {
     /// the acceleration's slope is the jerk, Lipschitz at the kernel's rate
     /// times the planned acceleration, stepping by `2·|J_b|·A` where a
     /// kernel step meets a planned acceleration step. The jerk at `t_n + δ`
-    /// is also within `max|w′|·∫|a(τ + δ) − a(τ)| ≤ max|w′|·δ·V` of the
-    /// jerk at `t_n`, `V` the planned acceleration's variation over what the
-    /// cell reads (`window_variation`), whichever is less. A product of two
+    /// is also within `δ·D` of the jerk at `t_n`, `D` its drift
+    /// (`jerk_drift`), whichever is less. A product of two
     /// chords is a quadratic, within a quarter of its leading coefficient
     /// of the chord through its ends.
     pub fn between(kernels: &FollowerKernels, from: &ShapedSample, to: &ShapedSample) -> Self {
@@ -303,7 +313,7 @@ impl CellMotion {
                 Leader::Shaped(cells) => {
                     let rate = cells.jerk_rate_per_accel * window;
                     let step = 2.0 * cells.jumps * window;
-                    let drift = rate.min(cells.slope_peak * from.window_variation[axis]);
+                    let drift = rate.min(from.jerk_drift[axis]);
                     jerk_radius[axis] =
                         from.jerk_miss[axis].max(to.jerk_miss[axis]) + 0.5 * drift * h + step;
                     jerk[axis] = from.jerk[axis].abs().max(to.jerk[axis].abs()) + jerk_radius[axis];
