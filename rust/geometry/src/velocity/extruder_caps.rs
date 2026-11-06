@@ -3,7 +3,7 @@ use crate::frontend::ExtruderCaps;
 use std::sync::Arc;
 
 use crate::frontend::LeaderSpill;
-use crate::path::Segment;
+use crate::path::{CurvatureProfile, Segment};
 use crate::ratio_ramp::{RatioStep, StepCrossing, longest_ramp_time, ramp_accel_at_rest_per_accel};
 
 use super::rate_cap::LinearRate;
@@ -126,12 +126,16 @@ pub(super) fn extruder_capped(
         kappa_peak,
         (reached, accel),
     );
-    if demand.ratio == 0.0 {
+    let rate = demand.velocity_rate();
+    if demand.ratio == 0.0 || rate.at(reached, accel) <= caps.max_velocity_mm_s {
         return (reached, accel);
     }
-    demand
-        .velocity_rate()
-        .capped(caps.max_velocity_mm_s, &budget.reachable, (ceiling, accel))
+    rate.capped(
+        caps.max_velocity_mm_s,
+        segment.s_len(),
+        kappa_peak,
+        (reached, accel),
+    )
 }
 
 /// What a segment's extruder demand meets around it: the largest

@@ -5,7 +5,6 @@ use crate::path::lowering::PositionProfile;
 use crate::path::{Arc, CurvatureProfile, Line};
 use crate::segment::SourceRange;
 use crate::step_capacity::{FollowerStepLoad, McuStepLoad};
-use crate::velocity::SeamLimit;
 use crate::velocity::{VelocityPlanParams, plan_velocity_warm_start, warm_start_params};
 
 const COREXY: [[f64; 3]; 3] = [[1.0, 1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 0.0, 1.0]];
@@ -48,24 +47,8 @@ fn demand_along(capacity: &StepCapacity, segment: &Segment) -> MotorDemand {
     }
 }
 
-/// A move `length` long between rests.
-fn between_rests(length: f64) -> ReachableSpeed {
-    ReachableSpeed {
-        peak_mm_s: f64::INFINITY,
-        entry: SeamLimit {
-            ceiling_mm_s: 0.0,
-            kappa: 0.0,
-        },
-        exit: SeamLimit {
-            ceiling_mm_s: 0.0,
-            kappa: 0.0,
-        },
-        run_mm: length,
-    }
-}
-
 fn capped(capacity: &StepCapacity, demand: MotorDemand, length: f64) -> (f64, f64) {
-    step_capacity_capped(capacity, demand, &between_rests(length), UNCAPPED).0
+    step_capacity_capped(capacity, demand, length, 0.0, UNCAPPED).0
 }
 
 #[test]
@@ -97,12 +80,8 @@ fn a_diagonal_on_corexy_steps_one_motor_at_root_two() {
 fn a_move_within_capacity_is_left_alone() {
     let capacity = corexy(vec![mcu("mcu", [1e-5, 1e-5, 0.0], 0.0)]);
     let x = line([100.0, 0.0, 0.0]);
-    let (limits, overload) = step_capacity_capped(
-        &capacity,
-        demand_along(&capacity, &x),
-        &between_rests(100.0),
-        UNCAPPED,
-    );
+    let (limits, overload) =
+        step_capacity_capped(&capacity, demand_along(&capacity, &x), 100.0, 0.0, UNCAPPED);
     assert_eq!(limits, UNCAPPED);
     assert_eq!(overload, None);
 }
@@ -111,12 +90,8 @@ fn a_move_within_capacity_is_left_alone() {
 fn a_binding_cap_reports_the_demand_it_refused() {
     let capacity = one_board();
     let x = line([100.0, 0.0, 0.0]);
-    let (_, overload) = step_capacity_capped(
-        &capacity,
-        demand_along(&capacity, &x),
-        &between_rests(100.0),
-        UNCAPPED,
-    );
+    let (_, overload) =
+        step_capacity_capped(&capacity, demand_along(&capacity, &x), 100.0, 0.0, UNCAPPED);
     let overload = overload.expect("the cap binds");
     assert_eq!(overload.mcu_index, 0);
     let demand = UNCAPPED.0 * 2.0 * XY_SHARE;
@@ -167,12 +142,8 @@ fn every_mcu_is_held_and_the_busiest_is_reported() {
     ]);
     let climbing = line([100.0, 0.0, 10.0]);
     let demand = demand_along(&capacity, &climbing);
-    let ((ceiling, _), overload) = step_capacity_capped(
-        &capacity,
-        demand,
-        &between_rests(climbing.s_len()),
-        UNCAPPED,
-    );
+    let ((ceiling, _), overload) =
+        step_capacity_capped(&capacity, demand, climbing.s_len(), 0.0, UNCAPPED);
     let used: Vec<f64> = mcu_rates(&capacity, demand)
         .map(|rate| rate.at(ceiling, UNCAPPED.1))
         .collect();
