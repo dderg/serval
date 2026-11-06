@@ -10,7 +10,7 @@ use super::super::{FollowerState, SpanSide, Table as SpanTable};
 use super::{
     AdvanceValley, CLUSTER_REACH_S, CROSSING_PROBES, Crossing, ENVELOPE_SLOPE, KERNEL_PEAK,
     NODE_SPACING_PER_WIDTH, NODE_SPACING_S, PathReach, RampLeg, RatioSmoothing, RestSide,
-    ShapedLeaders, Spill, TimedSeam, WIDTH_SLOPE_BOUND, WidthField, slowest_crawl,
+    ShapedLeaders, Spill, TimedSeam, ValleyKind, WIDTH_SLOPE_BOUND, WidthField, slowest_crawl,
 };
 
 /// `(length, ratio at start, ratio at end)` per span.
@@ -1164,6 +1164,7 @@ fn the_smoothing_models_hold_its_correction_and_valley_weight_between_bends() {
                     before: 1.5,
                     after: 2.0,
                     floor: 0.3,
+                    kind: super::ValleyKind::Crawl,
                 },
                 super::AdvanceValley {
                     start: 0.6 * total,
@@ -1171,6 +1172,7 @@ fn the_smoothing_models_hold_its_correction_and_valley_weight_between_bends() {
                     before: 0.8,
                     after: 0.5,
                     floor: 0.0,
+                    kind: super::ValleyKind::Rest,
                 },
             ];
             let mut points: Vec<f64> = state.spans.iter().map(|span| span.s0).collect();
@@ -1506,6 +1508,7 @@ fn a_crawl_valley_leaves_zero_flat_and_its_derivatives_are_exact() {
         before: 2.0,
         after: 1.5,
         floor: 0.01,
+        kind: ValleyKind::Crawl,
     };
     for side in [-1.0, 1.0] {
         let (weight, slope, _) = crawl.weight(5.0 + side * 1e-9);
@@ -1636,6 +1639,7 @@ fn a_crawl_inside_a_laid_valleys_floor_lays_no_second_valley() {
         before: reach,
         after: reach,
         floor,
+        kind: ValleyKind::Crawl,
     };
     for k in -19..=19 {
         let s = turn + reach * f64::from(k) / 20.0;
@@ -1643,6 +1647,74 @@ fn a_crawl_inside_a_laid_valleys_floor_lays_no_second_valley() {
             smoothing.valley_weight(s),
             laid.weight(s),
             "the advance reads the crawl at s={s} mm through more than its valley"
+        );
+    }
+}
+
+/// A near-reversal through a short step crawls at the seam into the step
+/// and again at the step's own slowest point, 0.02 mm on, past the first
+/// valley's floor but well within its reach. The advance releases its lead
+/// once and rebuilds it once: one valley holding the weight at zero across
+/// both, its after side as wide as the wider of the two, not the product
+/// `W₁·W₂`, which rebuilds the lead up to twice as steeply.
+#[test]
+fn a_crawl_within_the_last_crawl_valleys_reach_widens_it_to_one_valley() {
+    let (turn, reach, floor) = (500.0, 0.18, 4.0e-3);
+    let (next, next_reach, next_floor) = (500.02, 0.17, 3.0e-3);
+    let mut smoothing = RatioSmoothing::default();
+    smoothing.lay_valley(turn, reach, floor);
+    smoothing.lay_valley(next, next_reach, next_floor);
+    let merged = AdvanceValley {
+        start: turn,
+        end: next,
+        before: reach,
+        after: reach,
+        floor,
+        kind: ValleyKind::Crawl,
+    };
+    for k in -40..=40 {
+        let s = 500.01 + 0.2 * f64::from(k) / 40.0;
+        assert_eq!(
+            smoothing.valley_weight(s),
+            merged.weight(s),
+            "the advance reads the crawls at s={s} mm through more than one valley"
+        );
+    }
+}
+
+#[test]
+fn crawls_further_apart_than_their_reach_lay_a_valley_each() {
+    let mut smoothing = RatioSmoothing::default();
+    smoothing.lay_valley(500.0, 0.18, 4.0e-3);
+    smoothing.lay_valley(500.4, 0.17, 3.0e-3);
+    let first = AdvanceValley {
+        start: 500.0,
+        end: 500.0,
+        before: 0.18,
+        after: 0.18,
+        floor: 4.0e-3,
+        kind: ValleyKind::Crawl,
+    };
+    let second = AdvanceValley {
+        start: 500.4,
+        end: 500.4,
+        before: 0.17,
+        after: 0.17,
+        floor: 3.0e-3,
+        kind: ValleyKind::Crawl,
+    };
+    for k in -40..=40 {
+        let s = 500.2 + 0.4 * f64::from(k) / 40.0;
+        let (w1, w1s, w1c) = first.weight(s);
+        let (w2, w2s, w2c) = second.weight(s);
+        assert_eq!(
+            smoothing.valley_weight(s),
+            (
+                w1 * w2,
+                w1s * w2 + w1 * w2s,
+                w1c * w2 + 2.0 * w1s * w2s + w1 * w2c
+            ),
+            "the crawls at 500 and 500.4 mm read at s={s} mm"
         );
     }
 }
