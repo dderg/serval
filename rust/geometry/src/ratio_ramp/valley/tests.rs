@@ -181,7 +181,9 @@ proptest! {
     /// Read where they are, the leaders leaving a crawl however they
     /// please within the side's speed and acceleration meet no more rebuild
     /// than [`CrawlSide::rebuild_within`] bounds at their own distance,
-    /// speed and acceleration.
+    /// speed and acceleration, and no more `W′·ṡ²` than
+    /// [`RebuildsWithin::lead_velocity_at`] bounds there and
+    /// [`CrawlSide::lead_velocity`] over the whole side.
     #[test]
     fn the_rebuild_read_where_the_leaders_are_bounds_what_they_meet_there(
         speed in 0.0f64..2.0,
@@ -197,6 +199,8 @@ proptest! {
         let width = valley_reach(speed, rate) * widening;
         let fastest = speed + fastest_over;
         let side = CrawlSide::either_way(speed, accel, fastest, (floor, floor));
+        let within = side.rebuilds_within(width);
+        let whole_velocity = side.lead_velocity(width);
         let valley = crawl_valley(width, floor);
         let steps_per_piece = 400;
         let (mut s, mut v) = (0.0_f64, speed);
@@ -208,11 +212,23 @@ proptest! {
                 if weight < 1.0 && step % 10 == 0 {
                     let met = (curvature * v * v * v + 3.0 * slope * v * rate).abs();
                     let distance = around(s, spreads[0] * width, spreads[1] * width, 0.0);
-                    let bound = side.rebuilds_within(width).at(distance, v, rate.abs());
+                    let bound = within.at(distance, v, rate.abs());
                     prop_assert!(
                         met <= bound * (1.0 + 1e-6) + 1e-9,
                         "at {s} mm, {v} mm/s and {rate} mm/s² the leaders meet a rebuild of \
                          {met}, past its bound {bound} within {distance:?}"
+                    );
+                    let lead = slope.abs() * v * v;
+                    let lead_bound = within.lead_velocity_at(distance, v);
+                    prop_assert!(
+                        lead <= lead_bound * (1.0 + 1e-6) + 1e-9,
+                        "at {s} mm and {v} mm/s the leaders meet a lead velocity of {lead}, past \
+                         its bound {lead_bound} within {distance:?}"
+                    );
+                    prop_assert!(
+                        lead <= whole_velocity * (1.0 + 1e-6) + 1e-9,
+                        "at {s} mm and {v} mm/s the leaders meet a lead velocity of {lead}, past \
+                         the side's bound {whole_velocity}"
                     );
                 }
                 s += v * dt + 0.5 * rate * dt * dt;

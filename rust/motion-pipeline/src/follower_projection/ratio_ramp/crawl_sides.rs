@@ -170,6 +170,18 @@ impl SideTrail {
 /// ([`SideTrail::intervals_within`]).
 type Interval<'a> = (&'a TrailProbe, &'a TrailProbe, f64);
 
+/// The leaders' own demand over an interval of a side's trail
+/// ([`crawl_side`]), `Φ` within the side's weight there: the most
+/// `|s̈ + k·Φ·s⃛|`, the range of the flow `r̃·(ṡ + k·Φ·s̈)` at each probe's
+/// smoothed ratio `r̃`, and both with no advance at all, `|s̈|` and `r̃·ṡ`,
+/// which no width of the side changes.
+#[derive(Debug, Clone, Copy)]
+struct Own {
+    accel: f64,
+    flow: (f64, f64),
+    bare: (f64, f64),
+}
+
 impl TrailProbe {
     /// The path acceleration away from the crawl a side reaching `side`
     /// reads here: `s̈` after it, `−s̈` before; where the leaders rest or
@@ -219,35 +231,60 @@ impl Edge {
             floor: crossing.crawl_floor(),
         }
     }
+
+    /// The edge of a rest valley's zero stretch at `s` on the side
+    /// reaching `side` from it, with no floor: the leaders cross it no
+    /// faster, nor accelerating harder, than at the trail's probes
+    /// bracketing it.
+    pub(super) fn at_rest(s: f64, side: Side, trail: &SideTrail) -> Self {
+        let motion = trail.over((s, s), side);
+        Self {
+            s,
+            crossing: Crossing {
+                speed: motion.fastest,
+                rate: motion.path_accel,
+                jerk: 0.0,
+            },
+            floor: 0.0,
+        }
+    }
 }
 
-/// The width of the `side` of the crawl valley leaving its zero stretch at
-/// `edge`: the narrowest [`crawl_side_width`] lays where, over every
-/// interval between neighbouring probes of the trail over it, the
-/// leaders' own demand there and the rebuild `k·|W″·ṡ³ + 3W′·ṡ·s̈|` there
-/// ([`geometry::RebuildsWithin::fits_between`], within the bound over the
-/// whole side, [`CrawlSide::rebuild`]), both at `r`, fit the follower's
-/// limit; `r` the largest ratio the smoothed advance table, laid as
-/// `advance`, reads over the part of the interval within the side
-/// ([`RatioSmoothing::peak_ratio_in`]), and the leaders read off the
-/// trail, never under the leaders' `reach`; `None` where none reaching no
-/// further than `limit` fits. The probes say nothing of the leaders
-/// between them but how fast `s̈` lets their speed change, which past the
-/// edge of a zero stretch the leaders cross at speed is where the rebuild
-/// bends hardest. The turning guard proves the same sum cell by cell for
-/// the widest side the lead budget covers, so a side no wider fits here.
-/// With an infinite `table_end` the leaders rest past the trail, and the
-/// side reads it as far as it goes; else a side whose ratio the smoothing
-/// reads past `table_end` waits for the spans laid there
-/// ([`RatioSmoothing::reads_within`]). It fails loudly where the leaders
-/// leave the follower no room in any interval: it never narrows a side to
-/// make it fit.
+/// The width of the `side` of the crawl or rest valley leaving its zero
+/// stretch at `edge`: the narrowest [`crawl_side_width`] lays where, over
+/// every interval between neighbouring probes of the trail over it, the
+/// leaders' own demand there and the rebuild there both fit the
+/// follower's limits at `r`: `k·|W″·ṡ³ + 3W′·ṡ·s̈|` with the leaders' own
+/// acceleration, `k·W′·ṡ²` with their own velocity
+/// ([`geometry::RebuildsWithin::fits_between`], within the bounds over
+/// the whole side, [`CrawlSide::rebuild`] and
+/// [`CrawlSide::lead_velocity`]); `r` the largest ratio the smoothed
+/// advance table, laid as `advance`, reads over the part of the interval
+/// within the side ([`RatioSmoothing::peak_ratio_in`]), and the leaders
+/// read off the trail, never under the leaders' `reach`; `None` where none
+/// reaching no further than `limit` fits. The probes say nothing of the
+/// leaders between them but how fast `s̈` lets their speed change, which
+/// past the edge of a zero stretch the leaders cross at speed is where
+/// the rebuild bends hardest. The turning guard proves the same sums cell
+/// by cell for the widest side the lead budget covers, so a side no wider
+/// fits here. With an infinite `table_end` the leaders rest past the
+/// trail, and the side reads it as far as it goes; else a side whose ratio
+/// the smoothing reads past `table_end` waits for the spans laid there
+/// ([`RatioSmoothing::reads_within`]). A width under whose weight the
+/// leaders' own advanced demand leaves no room does not fit; it fails
+/// loudly where they leave the follower none with no advance at all,
+/// which no width changes: it never narrows a side to make it fit.
 ///
-/// The advance reads `r·(s̈ + k·Φ·s⃛)`, `Φ` the product of the valleys'
-/// weights, at most this side's `W(d)` at a distance `d` from the crawl:
-/// `|s̈ + k·Φ·s⃛|` is linear in `Φ`, so at most `|s̈|` or `|s̈ + k·W·s⃛|`,
-/// read signed at the corners of each interval's `s̈` and `W`, with its
-/// mean `s⃛` ([`SideTrail::intervals_within`]).
+/// The advance reads `r·(s̈ + k·Φ·s⃛)` and `r·(ṡ + k·Φ·s̈)`, `Φ` the product
+/// of the valleys' weights, at most this side's `W(d)` at a distance `d`
+/// from the crawl times the weight of the first `others` valleys laid
+/// ([`RatioSmoothing::laid_weight`]): each is linear in `Φ`, so at most its
+/// value at `Φ = 0` or at that bound, read signed at the corners of each
+/// interval's leaders and weights, with its mean `s⃛`
+/// ([`SideTrail::intervals_within`]). The weight falls along the path into
+/// the zero stretch and rises out of it, so the rebuild's `k·r·W′·ṡ²`
+/// takes from the flow before the edge and adds to it after: before, it
+/// fits against the least flow, after, the most.
 ///
 /// A follower behind its own kernel keeps the leaders' reach: the turning
 /// guard holds kernel-free followers only and leaves no room for its
@@ -256,7 +293,7 @@ pub(super) fn crawl_side(
     side: Side,
     edge: Edge,
     reach: f64,
-    (smoothing, advance, table_end): (&RatioSmoothing, &[RatioSpan], f64),
+    (smoothing, advance, table_end, others): (&RatioSmoothing, &[RatioSpan], f64, usize),
     rule: &RatioRampRule,
     limit: f64,
 ) -> Result<Option<f64>, Unlaid> {
@@ -293,14 +330,40 @@ pub(super) fn crawl_side(
             Side::After => probe.s - turn,
         };
         let own_over = |(from, to, path_jerk): Interval| {
-            let weights = [from, to].map(|probe| side_weight(distance_of(probe), width, floor).0);
-            [from.path_accel, to.path_accel]
+            let weights = [from, to].map(|probe| {
+                side_weight(distance_of(probe), width, floor).0
+                    * smoothing.laid_weight(others, probe.s)
+            });
+            let accel = [from.path_accel, to.path_accel]
                 .into_iter()
                 .flat_map(|accel| {
                     weights
                         .map(|weight| accel.abs().max((accel + slope * weight * path_jerk).abs()))
                 })
-                .fold(0.0, f64::max)
+                .fold(0.0, f64::max);
+            let ratios = [from, to]
+                .map(|probe| smoothing.peak_ratio_in(Table::Advance, advance, probe.s, probe.s));
+            let flow = [from, to]
+                .into_iter()
+                .zip(ratios)
+                .flat_map(|(probe, ratio)| {
+                    std::iter::once(probe.speed)
+                        .chain(
+                            weights.map(|weight| probe.speed + slope * weight * probe.path_accel),
+                        )
+                        .map(move |velocity| ratio * velocity)
+                })
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), velocity| {
+                    (lo.min(velocity), hi.max(velocity))
+                });
+            Own {
+                accel,
+                flow,
+                bare: (
+                    from.path_accel.abs().max(to.path_accel.abs()),
+                    (ratios[0] * from.speed).max(ratios[1] * to.speed),
+                ),
+            }
         };
         let ratio_over = |(from, to, _): Interval| {
             let (lo, hi) = (
@@ -314,7 +377,7 @@ pub(super) fn crawl_side(
         };
         let accel = motion.path_accel.max(crossing.rate);
         let rebuilds = OnceCell::new();
-        let rebuild_fits = |interval: Interval, ratio: f64, own: f64| {
+        let rebuild_fits = |interval: Interval, ratio: f64, own: Own| {
             let (whole, within) = rebuilds.get_or_init(|| {
                 let leaders = CrawlSide {
                     speed: crossing.speed,
@@ -327,9 +390,19 @@ pub(super) fn crawl_side(
                     ),
                     signed_from: 0.0,
                 };
-                (leaders.rebuild(width), leaders.rebuilds_within(width))
+                (
+                    (leaders.rebuild(width), leaders.lead_velocity(width)),
+                    leaders.rebuilds_within(width),
+                )
             });
-            let room = (rule.max_accel_mm_s2 / ratio - own) / slope;
+            let velocity_room = match side {
+                Side::Before => rule.max_velocity_mm_s + own.flow.0,
+                Side::After => rule.max_velocity_mm_s - own.flow.1,
+            };
+            let room = (
+                (rule.max_accel_mm_s2 / ratio - own.accel) / slope,
+                velocity_room / (slope * ratio),
+            );
             let (from, to, _) = interval;
             let readings = [from, to].map(|probe| (distance_of(probe), probe.speed));
             let (near, far) = if readings[0].0 <= readings[1].0 {
@@ -338,24 +411,31 @@ pub(super) fn crawl_side(
                 (readings[1], readings[0])
             };
             let interval_accel = from.path_accel.abs().max(to.path_accel.abs());
-            *whole <= room || within.fits_between(near, far, (accel, interval_accel), room)
+            (whole.0 <= room.0 && whole.1 <= room.1)
+                || within.fits_between(near, far, (accel, interval_accel), room)
         };
         trail
             .intervals_within(window, side)
             .fold(true, |fits, interval| {
                 let (ratio, own) = (ratio_over(interval), own_over(interval));
                 assert!(
-                    ratio * own < rule.max_accel_mm_s2,
-                    "follower projection: the leaders ask {} mm/s² of the follower between \
-                     s={} and s={} within {width} mm {side:?} the crawl at s={turn} \
-                     ({crossing:?}, {motion:?}, ratio {ratio}), past its limit of {} mm/s² \
-                     before its valley rebuilds the lead",
-                    ratio * own,
+                    ratio * own.bare.0 < rule.max_accel_mm_s2
+                        && own.bare.1 < rule.max_velocity_mm_s,
+                    "follower projection: the leaders ask {} mm/s² and {} mm/s of the follower \
+                     between s={} and s={} {side:?} the valley edge at s={turn} ({crossing:?}, \
+                     {motion:?}, ratio {ratio}) with no advance at all, past its limits of {} \
+                     mm/s² and {} mm/s",
+                    ratio * own.bare.0,
+                    own.bare.1,
                     interval.0.s,
                     interval.1.s,
-                    rule.max_accel_mm_s2
+                    rule.max_accel_mm_s2,
+                    rule.max_velocity_mm_s
                 );
-                fits && (ratio == 0.0 || slope == 0.0 || rebuild_fits(interval, ratio, own))
+                let own_fits = ratio * own.accel < rule.max_accel_mm_s2
+                    && own.flow.0.abs().max(own.flow.1.abs()) < rule.max_velocity_mm_s;
+                fits && own_fits
+                    && (ratio == 0.0 || slope == 0.0 || rebuild_fits(interval, ratio, own))
             })
     });
     if waits {

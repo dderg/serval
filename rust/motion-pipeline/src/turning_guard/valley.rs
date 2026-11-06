@@ -345,6 +345,16 @@ impl Slot {
         slot
     }
 
+    /// The slot beside cells where the leaders rest: the projection lays
+    /// the side of the rest valley there from an edge inside it, which
+    /// keeps no floor.
+    pub fn beside_rest(self) -> Self {
+        Self {
+            floor: (0.0, self.floor.1),
+            ..self
+        }
+    }
+
     /// The path range from a point in cell `n` to the slot's centre, the
     /// fitted leaders' odometer straying from the shaped path's by at most
     /// [`CellTrack::drift`] over the cells between. The odometer never
@@ -413,16 +423,27 @@ impl Slot {
     }
 }
 
+/// Which way from its crawl, or rest, a valley side reaches along the
+/// path: its rebuild's `k·r·W′·ṡ²` takes from the advanced flow before
+/// it and adds to it after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Toward {
+    Before,
+    After,
+}
+
 /// One side of a crawl valley as the guard leaves room for it: the widest
 /// the follower projection lays it ([`geometry::crawl_side_width`] picks a
-/// grid width no wider wherever this one fits), the cells it may reach
-/// from wherever in the run the crawl lies, and how its fitted leaders
-/// cross each of them. The most `|W″·ṡ³ + 3W′·ṡ·s̈|` its rebuild asks in a
-/// cell is read off them once a check needs it, which an advance of slope
-/// `k` at ratio `r` turns into `k·r` times as much follower acceleration.
+/// grid width no wider wherever this one fits), which way it reaches, the
+/// cells it may reach from wherever in the run the crawl lies, and how its
+/// fitted leaders cross each of them. The most `|W″·ṡ³ + 3W′·ṡ·s̈|` and
+/// `W′·ṡ²` its rebuild asks in a cell are read off them once a check
+/// needs them, which an advance of slope `k` at ratio `r` turns into
+/// `k·r` times as much follower acceleration and velocity.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Reserve {
     pub width: f64,
+    pub toward: Toward,
     pub cells: (i64, i64),
     leaders: Option<SideLeaders>,
 }
@@ -431,28 +452,47 @@ pub(super) struct Reserve {
 /// them, cell by cell, joined over every [`REBUILD_SCREEN_CELLS`] of them
 /// and over all its cells, each of which bounds what the rebuild asks in
 /// any cell it joins ([`RebuildsWithin`] grows with the distance range, the
-/// speed and the acceleration); and the bound over the whole side
-/// ([`CrawlSide::rebuild`]) once read.
+/// speed and the acceleration); and the bounds over the whole side
+/// ([`CrawlSide::rebuild`], [`CrawlSide::lead_velocity`]) once read.
 #[derive(Debug, Clone, PartialEq)]
 struct SideLeaders {
     side: CrawlSide,
     within: RebuildsWithin,
     cells: Vec<CellLeaders>,
     blocks: Vec<CellBlock>,
-    joined: f64,
-    whole: OnceCell<f64>,
+    joined: [f64; 2],
+    whole: [OnceCell<f64>; 2],
+}
+
+/// What a side's rebuild asks of the leaders: `|W″·ṡ³ + 3W′·ṡ·s̈|`, or
+/// `W′·ṡ²`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ask {
+    Rebuild,
+    Lead,
+}
+
+impl Ask {
+    const BOTH: [Self; 2] = [Self::Rebuild, Self::Lead];
+
+    fn index(self) -> usize {
+        match self {
+            Self::Rebuild => 0,
+            Self::Lead => 1,
+        }
+    }
 }
 
 /// How many neighbouring cells of a side one [`CellBlock`] joins.
 const REBUILD_SCREEN_CELLS: usize = 32;
 
 /// The fitted leaders over neighbouring cells of a crawl valley side,
-/// joined, and what [`RebuildsWithin`] bounds the rebuild by in any of them
-/// once read.
+/// joined, and what [`RebuildsWithin`] bounds each of the rebuild's asks by
+/// in any of them once read.
 #[derive(Debug, Clone, PartialEq)]
 struct CellBlock {
     leaders: JoinedLeaders,
-    within: OnceCell<f64>,
+    within: [OnceCell<f64>; 2],
 }
 
 /// The distance range, the fastest speed and the strongest acceleration
@@ -474,56 +514,59 @@ impl JoinedLeaders {
             },
             |joined, cell| Self {
                 distance: (
-                    joined.distance.0.min(cell.distance.0),
-                    joined.distance.1.max(cell.distance.1),
+                    joined.distance.0.min(cell.leaders.distance.0),
+                    joined.distance.1.max(cell.leaders.distance.1),
                 ),
-                speed: joined.speed.max(cell.speed),
-                accel: joined.accel.max(cell.accel),
+                speed: joined.speed.max(cell.leaders.speed),
+                accel: joined.accel.max(cell.leaders.accel),
             },
         )
     }
 
-    fn rebuild(&self, within: &RebuildsWithin) -> f64 {
-        within.at(self.distance, self.speed, self.accel)
+    fn ask(&self, within: &RebuildsWithin, ask: Ask) -> f64 {
+        match ask {
+            Ask::Rebuild => within.at(self.distance, self.speed, self.accel),
+            Ask::Lead => within.lead_velocity_at(self.distance, self.speed),
+        }
     }
 }
 
 /// The fitted leaders in one cell of a crawl valley side: their distance
 /// range from the crawl, how fast they are and how hard they accelerate at
-/// most, and what [`RebuildsWithin`] bounds the rebuild there by once
-/// read.
+/// most, and what [`RebuildsWithin`] bounds each of the rebuild's asks by
+/// there once read.
 #[derive(Debug, Clone, PartialEq)]
 struct CellLeaders {
-    distance: (f64, f64),
-    speed: f64,
-    accel: f64,
-    within: OnceCell<f64>,
+    leaders: JoinedLeaders,
+    within: [OnceCell<f64>; 2],
 }
 
 impl Reserve {
     /// A side that leaves no room over the cells `cells`: the projection
     /// lays it where the weight held at zero, or a side reading no motion
     /// past it, needs none.
-    pub fn none(cells: (i64, i64)) -> Self {
+    pub fn none(cells: (i64, i64), toward: Toward) -> Self {
         assert!(
             cells.0 <= cells.1,
             "turning guard: a crawl side spans at least one cell, not {cells:?}"
         );
         Self {
             width: 0.0,
+            toward,
             cells,
             leaders: None,
         }
     }
 
-    /// The side `width` wide over the cells `cells` of the `slot`'s
-    /// valley: in each, the least of the bound over the whole side
-    /// ([`CrawlSide::rebuild`]) and the one the cell's own fitted leaders
-    /// set at their distance from the crawl ([`RebuildsWithin`]).
+    /// The side `width` wide reaching `toward` over the cells `cells` of
+    /// the `slot`'s valley: in each, the least of the bounds over the whole
+    /// side ([`CrawlSide::rebuild`], [`CrawlSide::lead_velocity`]) and the
+    /// ones the cell's own fitted leaders set at their distance from the
+    /// crawl ([`RebuildsWithin`]).
     fn over(
         slot: &Slot,
         track: &CellTrack,
-        (cells, width): ((i64, i64), f64),
+        (cells, width, toward): ((i64, i64), f64, Toward),
         (h, fit): (f64, FitMiss),
         shadow: &dyn Fn(i64) -> CellBounds,
     ) -> Self {
@@ -532,10 +575,12 @@ impl Reserve {
             .map(|n| {
                 let cell = track.get(n);
                 CellLeaders {
-                    distance: slot.distance(track, n, h, fit),
-                    speed: cell.speed.1 + fit.speed,
-                    accel: cell.accel.1 + fit.accel,
-                    within: OnceCell::new(),
+                    leaders: JoinedLeaders {
+                        distance: slot.distance(track, n, h, fit),
+                        speed: cell.speed.1 + fit.speed,
+                        accel: cell.accel.1 + fit.accel,
+                    },
+                    within: Default::default(),
                 }
             })
             .collect();
@@ -544,19 +589,21 @@ impl Reserve {
             .chunks(REBUILD_SCREEN_CELLS)
             .map(|cells| CellBlock {
                 leaders: JoinedLeaders::over(cells),
-                within: OnceCell::new(),
+                within: Default::default(),
             })
             .collect();
+        let joined = JoinedLeaders::over(&crossing);
         Self {
             width,
+            toward,
             cells,
             leaders: Some(SideLeaders {
                 side,
-                joined: JoinedLeaders::over(&crossing).rebuild(&within),
+                joined: Ask::BOTH.map(|ask| joined.ask(&within, ask)),
                 within,
                 cells: crossing,
                 blocks,
-                whole: OnceCell::new(),
+                whole: Default::default(),
             }),
         }
     }
@@ -566,6 +613,20 @@ impl Reserve {
     /// hold for shows the rebuild cannot bind. `binds` holds for every
     /// bound past one it holds for.
     pub fn rebuild_where(&self, n: i64, binds: impl Fn(f64) -> bool) -> Option<f64> {
+        self.ask_where(n, Ask::Rebuild, binds)
+    }
+
+    /// The most `W′·ṡ²` the rebuild asks in cell `n`, one of the side's,
+    /// where `binds` holds for a bound on it, as [`Self::rebuild_where`].
+    pub fn lead_velocity_where(&self, n: i64, binds: impl Fn(f64) -> bool) -> Option<f64> {
+        self.ask_where(n, Ask::Lead, binds)
+    }
+
+    /// The bound on what the rebuild asks of the leaders in cell `n` as
+    /// `ask` reads it, over all the side's cells, over the block of them
+    /// holding `n`, and over `n` alone, each read only where `binds` held
+    /// for the last; at most the bound over the whole side.
+    fn ask_where(&self, n: i64, ask: Ask, binds: impl Fn(f64) -> bool) -> Option<f64> {
         assert!(
             self.cells.0 <= n && n <= self.cells.1,
             "turning guard: cell {n} lies outside the crawl side over {:?}",
@@ -574,27 +635,23 @@ impl Reserve {
         let Some(leaders) = &self.leaders else {
             return binds(0.0).then_some(0.0);
         };
-        if !binds(leaders.joined) {
+        let at = ask.index();
+        if !binds(leaders.joined[at]) {
             return None;
         }
         let index = usize::try_from(n - self.cells.0).expect("a cell of the side");
         let block = &leaders.blocks[index / REBUILD_SCREEN_CELLS];
-        let screened = *block
-            .within
-            .get_or_init(|| block.leaders.rebuild(&leaders.within));
+        let screened = *block.within[at].get_or_init(|| block.leaders.ask(&leaders.within, ask));
         if !binds(screened) {
             return None;
         }
         let cell = &leaders.cells[index];
-        let within = *cell
-            .within
-            .get_or_init(|| leaders.within.at(cell.distance, cell.speed, cell.accel));
+        let within = *cell.within[at].get_or_init(|| cell.leaders.ask(&leaders.within, ask));
         binds(within).then(|| {
-            within.min(
-                *leaders
-                    .whole
-                    .get_or_init(|| leaders.side.rebuild(self.width)),
-            )
+            within.min(*leaders.whole[at].get_or_init(|| match ask {
+                Ask::Rebuild => leaders.side.rebuild(self.width),
+                Ask::Lead => leaders.side.lead_velocity(self.width),
+            }))
         })
     }
 }
@@ -676,12 +733,17 @@ impl Crawl {
     /// `table_start + 1`; where either lies inside the budget or within the
     /// widest reach of the slot, the projection holds the weight at zero
     /// back to there wherever no side fits, and no room is left
-    /// ([`Reserve::none`]).
+    /// ([`Reserve::none`]). A run the leaders come to rest past
+    /// (`into_rest`) holds the edge of the rest valley the projection lays
+    /// there, whose before side reaches back past an earlier rest as far as
+    /// its rebuild needs, and fails loudly where no side within the path
+    /// the projection still holds fits: room is left for it whatever lies
+    /// before, over the budget and no further back than the table.
     pub fn found(
         slot: Slot,
         line: u32,
         track: &CellTrack,
-        table_start: i64,
+        (table_start, into_rest): (i64, bool),
         (h, fit): (f64, FitMiss),
         shadow: &dyn Fn(i64) -> CellBounds,
     ) -> Result<Self, Overreach> {
@@ -697,15 +759,20 @@ impl Crawl {
             .any(|n| track.get(n).speed.1 == 0.0);
         let table_within_reach = table_start >= budget_from
             || (table_start + 1 >= track.base() && within_reach(table_start));
-        if rested || table_within_reach {
+        if !into_rest && (rested || table_within_reach) {
             return Ok(Self {
                 slot,
                 line,
-                before: Reserve::none(slot.cells),
+                before: Reserve::none(slot.cells, Toward::Before),
                 after: None,
                 covered_after: CoveredAfter::from_run_end(last),
             });
         }
+        let budget_from = if into_rest {
+            budget_from.max(table_start + 1).min(first)
+        } else {
+            budget_from
+        };
         assert!(
             budget_from >= track.base(),
             "turning guard: the crawl at cell {first} reads cells from {budget_from} the track \
@@ -716,6 +783,15 @@ impl Crawl {
             .map(|n| track.path(n, first - 1).0 - track.drift(n, first - 1, h, fit))
             .fold(0.0_f64, f64::max);
         let Some(width) = widest_crawl_side_within(slot.width.1, covered) else {
+            if table_within_reach {
+                return Ok(Self {
+                    slot,
+                    line,
+                    before: Reserve::none(slot.cells, Toward::Before),
+                    after: None,
+                    covered_after: CoveredAfter::from_run_end(last),
+                });
+            }
             return Err(Overreach {
                 width: slot.width.1,
                 covered,
@@ -730,7 +806,13 @@ impl Crawl {
         Ok(Self {
             slot,
             line,
-            before: Reserve::over(&slot, track, (cells, width), (h, fit), shadow),
+            before: Reserve::over(
+                &slot,
+                track,
+                (cells, width, Toward::Before),
+                (h, fit),
+                shadow,
+            ),
             after: None,
             covered_after: CoveredAfter::from_run_end(last),
         })
@@ -806,7 +888,7 @@ impl Crawl {
             None => match widest_crawl_side_within(slot.width.1, covered.most) {
                 Some(width) => width,
                 None if all => {
-                    self.after = Some(Reserve::none(slot.cells));
+                    self.after = Some(Reserve::none(slot.cells, Toward::After));
                     return true;
                 }
                 None => return false,
@@ -820,7 +902,7 @@ impl Crawl {
         self.after = Some(Reserve::over(
             &slot,
             track,
-            (cells, width),
+            (cells, width, Toward::After),
             (h, fit),
             shadow,
         ));

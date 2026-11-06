@@ -76,18 +76,20 @@ const SCALE_FLOOR: f64 = 1.0 / 32.0;
 ///
 /// Where the shaped path may crawl, the follower projection lays an advance
 /// valley and sizes each side so its rebuild fits what the leaders' own
-/// demand leaves of the limit ([`geometry::crawl_side_width`]). The guard
-/// finds the runs of cells that may crawl, takes the widest grid side the
-/// leaders cover within [`VALLEY_LEAD_BUDGET_S`] either side of each, and
-/// proves every cell such a side may reach with the room its rebuild there
-/// needs added ([`valley::Crawl`]): the projection then finds a side no
-/// wider that fits, and reaches back no further than it holds the path.
-/// A crawl whose side cannot fit within the budget backs the moves around
-/// it off, and fails loudly where no back-off can help ([`ValleyStuck`]).
-/// Rest valleys, where the leaders rest over an extrude-only move or a
-/// dwell, are not bounded here: the planner's step and rest-room budgets
-/// size them, and none of 4805 residual excesses of the p1 gain-share 0.45
-/// ablation lay in one.
+/// demand leaves of the limits ([`geometry::crawl_side_width`]): the
+/// acceleration, and the velocity its `k·r·W′·ṡ²` adds to the flow. The
+/// guard finds the runs of cells that may crawl, takes the widest grid
+/// side the leaders cover within [`VALLEY_LEAD_BUDGET_S`] either side of
+/// each, and proves every cell such a side may reach with the room its
+/// rebuild there needs added to both ([`valley::Crawl`]): the projection
+/// then finds a side no wider that fits, and reaches back no further than
+/// it holds the path. A crawl whose side cannot fit within the budget
+/// backs the moves around it off, and fails loudly where no back-off can
+/// help ([`ValleyStuck`]). Rest valleys, where the leaders rest over an
+/// extrude-only move or a dwell, are sized by the same rule from the edge
+/// of the rest, which the runs of cells either side of the resting cells
+/// hold: those runs leave room for a side with no floor, the one before a
+/// rest whatever rest lies before it ([`Self::close_run`]).
 ///
 /// Its output reads its input alone: a move is checked once the planned
 /// motion its stretch reads has arrived, a re-plan waits for the seams it
@@ -236,9 +238,11 @@ struct CellCheck<'a> {
     reserves: &'a [Reservation<'a>],
 }
 
-/// The follower acceleration a crawl valley side's rebuild may ask in each
-/// of its cells, `k·r` times [`valley::Reserve::rebuild_where`] at the
-/// largest ratio laid over the planned time `window` its kernels read.
+/// The follower acceleration and velocity a crawl valley side's rebuild
+/// may ask in each of its cells, `k·r` times
+/// [`valley::Reserve::rebuild_where`] and
+/// [`valley::Reserve::lead_velocity_where`] at the largest ratio laid over
+/// the planned time `window` its kernels read.
 #[derive(Debug, Clone, Copy)]
 struct Reservation<'a> {
     side: &'a valley::Reserve,
@@ -259,16 +263,30 @@ impl Reservation<'_> {
             .rebuild_where(cell, |rebuild| asks(rebuild) > limit)
             .map(asks)
     }
+
+    /// How fast cell `cell` moves the follower with the side's rebuild on
+    /// the advanced flow, its own within `flow`: `k·r·W′·ṡ²` takes from it
+    /// before the valley and adds to it after; `None` where a bound on the
+    /// rebuild keeps it within `limit`.
+    fn binding_velocity(&self, flow: (f64, f64), cell: i64, limit: f64) -> Option<f64> {
+        let asks = |lead: f64| match self.side.toward {
+            valley::Toward::Before => self.scale * lead - flow.0,
+            valley::Toward::After => flow.1 + self.scale * lead,
+        };
+        self.side
+            .lead_velocity_where(cell, |lead| asks(lead) > limit)
+            .map(asks)
+    }
 }
 
 impl CellCheck<'_> {
     /// The binding of the grid cell `n` between the samples `from` and
     /// `to`, `None` where its demand fits. Within a crawl valley side,
     /// read for the guard's grid cell `valley_cell` holding it, the
-    /// advance reads `Φ·σ⃛` with the weight `Φ` anywhere in `[0, 1]`, and
-    /// the room the side's rebuild needs is added; a binding there backs
-    /// off the moves the side reads too, whose acceleration the rebuild
-    /// grows with.
+    /// advance reads `Φ·σ⃛` and `Φ·σ̈` with the weight `Φ` anywhere in
+    /// `[0, 1]`, and the room the side's rebuild needs is added, to the
+    /// acceleration and to the velocity; a binding there backs off the
+    /// moves the side reads too, whose acceleration the rebuild grows with.
     fn asks(
         &self,
         kernels: &FollowerKernels,
@@ -296,8 +314,8 @@ impl CellCheck<'_> {
             ratio: self.demand.ratio.min(reach.ratio),
             ..self.demand
         };
-        let sides = self.reserves.iter().filter(|side| side.holds(valley_cell));
-        let (asked, window) = sides.fold(
+        let sides = || self.reserves.iter().filter(|side| side.holds(valley_cell));
+        let (asked, window) = sides().fold(
             (
                 demand.of(motion.tangential_accel, jerk, motion.turning_ceiling()),
                 read,
@@ -318,14 +336,32 @@ impl CellCheck<'_> {
                 )
             },
         );
-        (asked > self.caps.max_accel_mm_s2).then_some(Check::Binds(Binding {
-            cell: n as f64 * h,
-            from: window.0,
-            to: window.1,
-            demand: asked,
-            max_accel: self.caps.max_accel_mm_s2,
-            asked: Asked::Accel,
-        }))
+        let binds = |demand: f64, limit: f64, asked: Asked| {
+            Check::Binds(Binding {
+                cell: n as f64 * h,
+                from: window.0,
+                to: window.1,
+                demand,
+                max_accel: limit,
+                asked,
+            })
+        };
+        if asked > self.caps.max_accel_mm_s2 {
+            return Some(binds(asked, self.caps.max_accel_mm_s2, Asked::Accel));
+        }
+        let flow = (
+            demand.ratio
+                * (motion.speed_floor + demand.slope_s * motion.tangential_accel.0.min(0.0)),
+            demand.ratio
+                * (motion.speed_ceiling + demand.slope_s * motion.tangential_accel.1.max(0.0)),
+        );
+        let velocity = sides()
+            .filter_map(|side| {
+                side.binding_velocity(flow, valley_cell, self.caps.max_velocity_mm_s)
+            })
+            .fold(0.0, f64::max);
+        (velocity > self.caps.max_velocity_mm_s)
+            .then(|| binds(velocity, self.caps.max_velocity_mm_s, Asked::Velocity))
     }
 }
 
@@ -368,7 +404,8 @@ enum Check {
 }
 
 /// A grid cell starting at `cell` whose shaped motion asks `demand` of the
-/// extruder against `max_accel`, reading the planned time `[from, to]`;
+/// extruder's acceleration, or of its velocity inside a valley side,
+/// against the limit `max_accel`, reading the planned time `[from, to]`;
 /// or a crawl from `cell` whose valley side may be `demand` wide, past the
 /// `max_accel` of path the leaders cover in the [`VALLEY_LEAD_BUDGET_S`]
 /// before it, its kernels reading `[from, to]`.
@@ -385,6 +422,7 @@ struct Binding {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Asked {
     Accel,
+    Velocity,
     ValleySide,
 }
 
@@ -623,7 +661,7 @@ impl TurningGuard {
             if bounds.speed.0 < crawl_speed && !rests {
                 self.valleys.run.get_or_insert(n);
             } else if let Some(start) = self.valleys.run.take() {
-                if let Some(binding) = self.close_run(start, n - 1) {
+                if let Some(binding) = self.close_run(start, n - 1, rests) {
                     return Some(binding);
                 }
             }
@@ -634,7 +672,7 @@ impl TurningGuard {
         let all = self.entries.closed && self.valleys.scanned >= last_cell;
         if all {
             if let Some(start) = self.valleys.run.take() {
-                if let Some(binding) = self.close_run(start, last_cell - 1) {
+                if let Some(binding) = self.close_run(start, last_cell - 1, false) {
                     return Some(binding);
                 }
             }
@@ -715,13 +753,15 @@ impl TurningGuard {
 
     /// Closes the run of crawling cells `start..=end` into a crawl, the
     /// one valley the projection lays across the crawls along it, with
-    /// room left for its before side ([`Crawl::found`]). Where that side
-    /// may reach back past [`VALLEY_LEAD_BUDGET_S`] of motion, the run is
-    /// scanned again after the back-off it returns, which lowers the
-    /// budgets its kernels read and with them the rate the side's width
-    /// grows with; where even a crawl at the fit's tolerance of a rate
-    /// would, it fails loudly.
-    fn close_run(&mut self, start: i64, end: i64) -> Option<Binding> {
+    /// room left for its before side ([`Crawl::found`]). A run beside cells
+    /// where the leaders rest, before them (`into_rest`) or after, holds
+    /// the edge of a side of the rest valley the projection lays there
+    /// ([`Slot::beside_rest`]). Where that side may reach back past
+    /// [`VALLEY_LEAD_BUDGET_S`] of motion, the run is scanned again after
+    /// the back-off it returns, which lowers the budgets its kernels read
+    /// and with them the rate the side's width grows with; where even a
+    /// crawl at the fit's tolerance of a rate would, it fails loudly.
+    fn close_run(&mut self, start: i64, end: i64, into_rest: bool) -> Option<Binding> {
         let h = self.h();
         let (back, ahead) = self.span;
         let fit = self.valleys.fit;
@@ -734,9 +774,22 @@ impl TurningGuard {
         let track = &self.valleys.track;
         let slot = Slot::over(track, (start, end), fit)
             .expect("turning guard: a run of crawling cells holds a cell the leaders may crawl in");
+        let after_rest = start > track.base() && track.get(start - 1).speed.1 == 0.0;
+        let slot = if into_rest || after_rest {
+            slot.beside_rest()
+        } else {
+            slot
+        };
         let segment_table_start = -1;
         let shadow = |n: i64| shadow_bounds(&self.followers, &self.grid, &self.shadows, n);
-        let found = Crawl::found(slot, line, track, segment_table_start, (h, fit), &shadow);
+        let found = Crawl::found(
+            slot,
+            line,
+            track,
+            (segment_table_start, into_rest),
+            (h, fit),
+            &shadow,
+        );
         match found {
             Ok(crawl) => {
                 self.valleys.crawls.push(crawl);
@@ -1576,6 +1629,10 @@ impl Stuck {
             Asked::Accel => format!(
                 "the cell at t={cell:.6}s still asks {demand:.0} mm/s² of the extruder (limit \
                  {max_accel:.0} mm/s²)"
+            ),
+            Asked::Velocity => format!(
+                "the cell at t={cell:.6}s still moves the extruder at {demand:.2} mm/s inside a \
+                 valley side (limit {max_accel:.2} mm/s)"
             ),
             Asked::ValleySide => format!(
                 "the crawl from t={cell:.6}s still lays a valley side up to {demand:.4} mm wide, \

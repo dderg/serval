@@ -510,7 +510,6 @@ impl CrawlSide {
     }
 
     fn rebuild_over(&self, width: f64, floor: (f64, f64)) -> f64 {
-        let step = width / f64::from(CRAWL_SIDE_DISTANCE_PIECES);
         let coupled = coupled_bend(
             self.speed,
             self.accel,
@@ -518,25 +517,16 @@ impl CrawlSide {
             width,
         );
         let side = SideSpan::over((width, width), floor);
-        let speed_sq = self.speed * self.speed;
         let (accel, signed_from) = (self.accel, self.signed_from);
-        (0..CRAWL_SIDE_DISTANCE_PIECES)
-            .map(|piece| {
-                let near = f64::from(piece) * step;
-                let far = if piece + 1 == CRAWL_SIDE_DISTANCE_PIECES {
-                    width
-                } else {
-                    f64::from(piece + 1) * step
-                };
+        distance_pieces(width)
+            .map(|(near, far)| {
                 let (out_lo, out_hi) = if near >= signed_from {
                     self.outward
                 } else {
                     (-accel, accel)
                 };
                 let weight = side.weight_within((near, far));
-                let rising = 2.0 * accel * far.min(signed_from)
-                    + 2.0 * self.outward.1.max(0.0) * (far - signed_from).max(0.0);
-                let fastest = libm::sqrt(speed_sq + rising).min(self.fastest);
+                let fastest = self.fastest_within(far);
                 let slowest =
                     libm::sqrt(2.0 * self.outward.0.max(0.0) * (near - signed_from).max(0.0))
                         .min(fastest);
@@ -565,6 +555,37 @@ impl CrawlSide {
                 let largest = bend - weight.fold.0 * slowest_cubed + lead(out_hi);
                 let least = least_bend - weight.fold.1 * fastest_cubed + least_lead(out_lo);
                 largest.max(-least).max(0.0)
+            })
+            .fold(0.0, f64::max)
+    }
+
+    /// How fast the leaders cross a side at most within `far` of the crawl
+    /// ([`Self::rebuild`]).
+    fn fastest_within(&self, far: f64) -> f64 {
+        let rising = 2.0 * self.accel * far.min(self.signed_from)
+            + 2.0 * self.outward.1.max(0.0) * (far - self.signed_from).max(0.0);
+        libm::sqrt(self.speed * self.speed + rising).min(self.fastest)
+    }
+
+    /// The most `W′·ṡ²` asks over a side `width` wide, which an advance of
+    /// slope `k` at ratio `r` turns into `k·r` times as much follower
+    /// velocity, rebuilding the lead: `W′` read by [`SideWeight`] over each
+    /// piece of distance and the side's floor range as [`Self::rebuild`]
+    /// reads them, at the fastest the leaders cross that piece.
+    #[must_use]
+    pub fn lead_velocity(&self, width: f64) -> f64 {
+        assert!(
+            width > 0.0 && self.speed >= 0.0 && self.fastest >= self.speed,
+            "a crawl side is ill-formed: {self:?} over {width} mm"
+        );
+        floor_pieces(self.floor, width)
+            .into_iter()
+            .flat_map(|floor| {
+                let side = SideSpan::over((width, width), floor);
+                distance_pieces(width).map(move |(near, far)| {
+                    let fastest = self.fastest_within(far);
+                    side.weight_within((near, far)).slope.1 * fastest * fastest
+                })
             })
             .fold(0.0, f64::max)
     }
@@ -653,16 +674,33 @@ impl RebuildsWithin {
             .fold(0.0, f64::max)
     }
 
+    /// The most `W′·ṡ²` asks of leaders within `distance` of the crawl, a
+    /// `(least, largest)` range, no faster than `speed` there
+    /// ([`CrawlSide::lead_velocity`]).
+    #[must_use]
+    pub fn lead_velocity_at(&self, distance: (f64, f64), speed: f64) -> f64 {
+        assert!(
+            speed >= 0.0 && 0.0 <= distance.0,
+            "a crawl side's leaders are ill-formed: {speed} mm/s within {distance:?} mm"
+        );
+        let speed = speed.min(self.fastest);
+        self.pieces
+            .iter()
+            .map(|(side, _)| side.weight_within(distance).slope.1 * speed * speed)
+            .fold(0.0, f64::max)
+    }
+
     /// Whether the rebuild asks no more than `room` of leaders between two
     /// readings of them, `near` and `far`, each their distance from the
     /// crawl, signed (negative inside the zero stretch), and their speed
-    /// there, `near.0 ≤ far.0`. Between the readings `|s̈|` is within
-    /// `accel`, and `ṡ²` changes by at most `2·growth` per mm: from either
-    /// reading, `ṡ² ≤ v² + 2·growth·|Δd|`. Readings far apart say nothing of
-    /// the leaders between them but that, so the part of the side between
-    /// them is read in pieces no wider than the side over
-    /// [`CRAWL_SIDE_DISTANCE_PIECES`], each at the speed both bounds leave
-    /// over it ([`Self::at`]), once the whole of it read at once does not
+    /// there, `near.0 ≤ far.0`: `room.0` of `|W″·ṡ³ + 3W′·ṡ·s̈|` ([`Self::at`])
+    /// and `room.1` of `W′·ṡ²` ([`Self::lead_velocity_at`]). Between the
+    /// readings `|s̈|` is within `accel`, and `ṡ²` changes by at most
+    /// `2·growth` per mm: from either reading, `ṡ² ≤ v² + 2·growth·|Δd|`.
+    /// Readings far apart say nothing of the leaders between them but that,
+    /// so the part of the side between them is read in pieces no wider than
+    /// the side over [`CRAWL_SIDE_DISTANCE_PIECES`], each at the speed both
+    /// bounds leave over it, once the whole of it read at once does not
     /// fit.
     #[must_use]
     pub fn fits_between(
@@ -670,7 +708,7 @@ impl RebuildsWithin {
         near: (f64, f64),
         far: (f64, f64),
         (growth, accel): (f64, f64),
-        room: f64,
+        room: (f64, f64),
     ) -> bool {
         assert!(
             near.0 <= far.0 && near.1 >= 0.0 && far.1 >= 0.0 && growth >= 0.0,
@@ -686,7 +724,10 @@ impl RebuildsWithin {
             let from_far = far.1 * far.1 + 2.0 * growth * (far.0 - from);
             libm::sqrt(from_near.min(from_far))
         };
-        let fits = |range: (f64, f64)| self.at(range, speed_over(range), accel) <= room;
+        let fits = |range: (f64, f64)| {
+            let speed = speed_over(range);
+            self.at(range, speed, accel) <= room.0 && self.lead_velocity_at(range, speed) <= room.1
+        };
         if fits((lo, hi)) {
             return true;
         }
@@ -699,6 +740,21 @@ impl RebuildsWithin {
             fits((from, to))
         })
     }
+}
+
+/// The [`CRAWL_SIDE_DISTANCE_PIECES`] pieces of distance across a side
+/// `width` wide, each `(near, far)`.
+fn distance_pieces(width: f64) -> impl Iterator<Item = (f64, f64)> {
+    let step = width / f64::from(CRAWL_SIDE_DISTANCE_PIECES);
+    (0..CRAWL_SIDE_DISTANCE_PIECES).map(move |piece| {
+        let near = f64::from(piece) * step;
+        let far = if piece + 1 == CRAWL_SIDE_DISTANCE_PIECES {
+            width
+        } else {
+            f64::from(piece + 1) * step
+        };
+        (near, far)
+    })
 }
 
 /// The floor range `floor` within a side `width` wide, in geometric pieces

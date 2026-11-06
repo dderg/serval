@@ -236,12 +236,13 @@ fn at(profile: &Profile, t: f64) -> f64 {
 }
 
 /// The leaders' segments over `spans`, each laying `ratio` of the path
-/// `profile` takes them along `y` at `x = 100`.
-fn segments(profile: &Profile, spans: &[((f64, f64), f64)]) -> Vec<ContinuousSegment> {
+/// `profile` takes them along `y` at `x = 100`, heading towards `sense`
+/// (±1) along it.
+fn segments(profile: &Profile, spans: &[((f64, f64), (f64, f64))]) -> Vec<ContinuousSegment> {
     let mut e = 0.0;
     spans
         .iter()
-        .map(|&(span, ratio)| {
+        .map(|&(span, (ratio, sense))| {
             let pieces = |scale: f64, start: f64| {
                 ContinuousAxis::Spline(Arc::new(bezier_pieces_to_nurbs(&sliced(
                     profile, span, scale, start,
@@ -256,7 +257,7 @@ fn segments(profile: &Profile, spans: &[((f64, f64), f64)]) -> Vec<ContinuousSeg
                     spline(vec![100.0], span),
                     pieces(1.0, at(profile, span.0)),
                     spline(vec![0.2], span),
-                    pieces(ratio, e),
+                    pieces(sense * ratio, e),
                 ]),
                 followers: Arc::from(followers),
                 spatial_path: true,
@@ -266,10 +267,70 @@ fn segments(profile: &Profile, spans: &[((f64, f64), f64)]) -> Vec<ContinuousSeg
                 source_line: 1,
                 rest_at_end: false,
             };
-            e += ratio * (at(profile, span.1) - at(profile, span.0));
+            e += sense * ratio * (at(profile, span.1) - at(profile, span.0));
             segment
         })
         .collect()
+}
+
+/// The leaders speed out of a rest while the extruder lays `ratio`, cruise
+/// at `cruise`, brake into a turnaround at `accel`, the braking building
+/// up over `onset`, and head back out of it as hard, easing off over
+/// `onset` into a cruise back at `cruise`, and come to rest.
+fn turnaround_between_cruises(
+    cruise: f64,
+    accel: f64,
+    onset: f64,
+    ratio: f64,
+) -> Vec<ContinuousSegment> {
+    let rise_time = 0.15;
+    let settle = |from: f64, to: f64| {
+        quintic(
+            [0.0, from, 0.0],
+            [0.5 * (from + to) * rise_time, to, 0.0],
+            rise_time,
+        )
+    };
+    let mut profile: Profile = Vec::new();
+    let mut spans = Vec::new();
+    let (mut t, mut y) = (0.0, 100.0);
+    let mut lay = |mut moved: Vec<f64>, duration: f64, sense: f64| {
+        moved[0] += y;
+        let [end_y, _, _] = eval(&moved, duration);
+        profile.push(((t, t + duration), moved));
+        spans.push(((t, t + duration), (ratio, sense)));
+        (t, y) = (t + duration, end_y);
+    };
+    let braked = cruise - 0.5 * accel * onset;
+    assert!(
+        braked > 0.0,
+        "the leaders brake into the turnaround past the onset"
+    );
+    lay(settle(0.0, cruise), rise_time, 1.0);
+    lay(vec![0.0, cruise], 0.2, 1.0);
+    lay(
+        quintic(
+            [0.0, cruise, 0.0],
+            [cruise * onset - accel * onset * onset / 6.0, braked, -accel],
+            onset,
+        ),
+        onset,
+        1.0,
+    );
+    lay(vec![0.0, braked, -0.5 * accel], braked / accel, 1.0);
+    lay(vec![0.0, 0.0, -0.5 * accel], braked / accel, -1.0);
+    lay(
+        quintic(
+            [0.0, -braked, -accel],
+            [-braked * onset - accel * onset * onset / 3.0, -cruise, 0.0],
+            onset,
+        ),
+        onset,
+        -1.0,
+    );
+    lay(vec![0.0, -cruise], 0.2, -1.0);
+    lay(settle(-cruise, 0.0), rise_time, -1.0);
+    segments(&profile, &spans)
 }
 
 /// The leaders speed out of a rest while the extruder lays `ratio`, cruise
@@ -358,9 +419,9 @@ fn shaped_stop_into_a_dwell(
     ));
     raw.push(((stop_at, dwell_end), vec![rest]));
     raw.extend_from_slice(&shaped[shaped.len() - 2..]);
-    let spans: Vec<((f64, f64), f64)> = raw
+    let spans: Vec<((f64, f64), (f64, f64))> = raw
         .iter()
-        .map(|&(span, _)| (span, if span.0 == stop_at { 0.0 } else { ratio }))
+        .map(|&(span, _)| (span, (if span.0 == stop_at { 0.0 } else { ratio }, 1.0)))
         .collect();
     (segments(&raw, &spans), segments(&shaped, &spans))
 }
@@ -497,17 +558,12 @@ fn a_rest_valley_side_sizes_its_rebuild_within_the_extruder_limit() {
     assert_within_the_extruder_limits((&raw, &shaped), EXTRUDER_MAX_VELOCITY);
 }
 
-/// A turnaround whose advanced flow stays within 20 mm/s on either side:
-/// the valley's sides release and rebuild the lead while the leaders brake
-/// and speed up across them, which adds `k·r·W′·ṡ²`, up to `8/9·k·r·a`, to
-/// the flow, past the limit.
+/// A turnaround between two cruises whose advanced flow stays within
+/// 20 mm/s on either side: the valley's sides release and rebuild the lead
+/// while the leaders brake and speed up across them, which adds
+/// `k·r·W′·ṡ²`, up to `8/9·k·r·a`, to the flow, past the limit.
 #[test]
 fn a_crawl_valley_side_sizes_its_rebuild_within_the_extruder_velocity() {
-    assert_within_the_extruder_limits(
-        (
-            &reversal((40.0, 40.0), 864.0, (0.033_6, 0.033_6)),
-            &reversal((40.0, 40.0), 864.0, (0.033_6, 0.033_6)),
-        ),
-        20.0,
-    );
+    let track = turnaround_between_cruises(40.0, 864.0, 0.02, 0.033_6);
+    assert_within_the_extruder_limits((&track, &track), 20.0);
 }
