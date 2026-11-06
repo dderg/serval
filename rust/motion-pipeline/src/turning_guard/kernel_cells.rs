@@ -39,9 +39,9 @@ pub(super) struct KernelCells {
     /// moves by at most `δ·Σ weightₘ·Vₘ` within `δ ≤ h` of `t_n`, `Vₘ` the
     /// planned acceleration's variation over cell `m`.
     pub drift_weights: Vec<f64>,
-    /// Upper bounds on `∫w⁺` and `∫w⁻`.
-    pub positive_mass: f64,
-    pub negative_mass: f64,
+    /// Bounds on `∫w⁺` and `∫w⁻`, least and most.
+    pub positive_mass: (f64, f64),
+    pub negative_mass: (f64, f64),
 }
 
 impl KernelCells {
@@ -223,19 +223,28 @@ fn absolute_integral(pieces: &[BezierPiece]) -> f64 {
         .sum()
 }
 
-/// Upper bounds on `(∫w⁺, ∫w⁻)`: a cut whose Bernstein coefficients share a
-/// sign counts on that side only, any other on both.
-fn signed_masses(pieces: &[BezierPiece]) -> (f64, f64) {
-    cuts(pieces).fold((0.0, 0.0), |(positive, negative), (width, coefficients)| {
-        let bound = width * largest_magnitude(&coefficients);
-        if coefficients.iter().all(|&c| c >= 0.0) {
-            (positive + bound, negative)
-        } else if coefficients.iter().all(|&c| c <= 0.0) {
-            (positive, negative + bound)
-        } else {
-            (positive + bound, negative + bound)
-        }
-    })
+/// Bounds on `(∫w⁺, ∫w⁻)`, each `(least, most)`: a cut whose Bernstein
+/// coefficients share a sign counts on that side only, its integral being
+/// its width times their mean; any other counts nothing towards either
+/// least and its largest `|w|` towards both most.
+fn signed_masses(pieces: &[BezierPiece]) -> ((f64, f64), (f64, f64)) {
+    cuts(pieces).fold(
+        ((0.0, 0.0), (0.0, 0.0)),
+        |(positive, negative), (width, coefficients)| {
+            let mass = width * coefficients.iter().sum::<f64>() / coefficients.len() as f64;
+            if coefficients.iter().all(|&c| c >= 0.0) {
+                ((positive.0 + mass, positive.1 + mass), negative)
+            } else if coefficients.iter().all(|&c| c <= 0.0) {
+                (positive, (negative.0 - mass, negative.1 - mass))
+            } else {
+                let bound = width * largest_magnitude(&coefficients);
+                (
+                    (positive.0, positive.1 + bound),
+                    (negative.0, negative.1 + bound),
+                )
+            }
+        },
+    )
 }
 
 #[cfg(test)]

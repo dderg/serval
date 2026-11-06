@@ -151,12 +151,13 @@ impl FollowerKernels {
             })
     }
 
-    /// Upper bounds on the leaders' kernel masses, `(∫w⁺, ∫w⁻)` per axis.
-    pub fn masses(&self, axis: usize) -> (f64, f64) {
+    /// Bounds on the leaders' kernel masses per axis, `(∫w⁺, ∫w⁻)`, each
+    /// `(least, most)`.
+    pub fn masses(&self, axis: usize) -> ((f64, f64), (f64, f64)) {
         match &self.axes[axis] {
             Leader::Shaped(cells) => (cells.positive_mass, cells.negative_mass),
-            Leader::Unshaped => (1.0, 0.0),
-            Leader::Unfollowed => (0.0, 0.0),
+            Leader::Unshaped => ((1.0, 1.0), (0.0, 0.0)),
+            Leader::Unfollowed => ((0.0, 0.0), (0.0, 0.0)),
         }
     }
 }

@@ -52,7 +52,7 @@ fn each_cell_bounds_the_kernel_and_its_slope_about_their_linearisation() {
 }
 
 #[test]
-fn the_masses_bound_the_kernel_parts() {
+fn the_masses_bracket_the_kernel_parts() {
     for kernel in kernels() {
         let cells = KernelCells::new(&kernel, H);
         let (lo, hi) = kernel.support();
@@ -62,16 +62,16 @@ fn the_masses_bound_the_kernel_parts() {
             let w = value(&kernel, lo + (f64::from(step) + 0.5) * width) * width;
             if w >= 0.0 { (p + w, n) } else { (p, n - w) }
         });
-        assert!(
-            cells.positive_mass >= positive * (1.0 - 1e-6),
-            "{} < {positive}",
-            cells.positive_mass
-        );
-        assert!(
-            cells.negative_mass >= negative * (1.0 - 1e-6),
-            "{} < {negative}",
-            cells.negative_mass
-        );
+        for (name, (least, most), truth) in [
+            ("positive", cells.positive_mass, positive),
+            ("negative", cells.negative_mass, negative),
+        ] {
+            let slack = 1e-6 * (positive + negative);
+            assert!(
+                least <= truth + slack && truth <= most + slack,
+                "{name} mass {truth} outside [{least}, {most}]"
+            );
+        }
     }
 }
 

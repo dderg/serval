@@ -98,7 +98,14 @@ MATRIX = [
         "corner_flow",
         BENCH / "gcode" / "corner_flow.gcode",
         run_args=["--events"],
-        analyze_args=["--corner-flow"],
+        analyze_args=["--corner-flow", "--corner-budget"],
+    ),
+    Row(
+        "corner_budget_default",
+        BENCH / "gcode" / "corner_flow.gcode",
+        BENCH / "configs" / "printer_default_corner.cfg",
+        run_args=["--events"],
+        analyze_args=["--corner-budget"],
     ),
     Row(
         "single_motor_cap",
@@ -216,6 +223,10 @@ def run_row(row: Row, suite_dir: Path, lock_timeout_s: float) -> dict:
             if "corner_flow" in verdict:
                 result["corner_flow_max_abs"] = verdict["corner_flow"][
                     "max_abs"
+                ]
+            if "corner_budget" in verdict:
+                result["corner_budget_worst"] = verdict["corner_budget"][
+                    "worst"
                 ]
     result["wall_s"] = time.monotonic() - started
     result["passed"] = bool(
