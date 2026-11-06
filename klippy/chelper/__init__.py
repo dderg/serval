@@ -44,6 +44,7 @@ SOURCE_FILES = [
     "kin_shaper.c",
     "kin_idex.c",
     "integrate.c",
+    "servo_sample.c",
 ]
 DEST_LIB = "c_helper.so"
 OTHER_FILES = [
@@ -212,6 +213,22 @@ defs_kin_shaper = """
     struct stepper_kinematics * input_shaper_alloc(void);
 """
 
+defs_servo_sample = """
+    struct servo_sample_error {
+        double time, position, linear_position;
+    };
+
+    struct servo_sampler *servo_sampler_alloc(void);
+    void servo_sampler_free(struct servo_sampler *ss);
+    void servo_sampler_set_kinematics(struct servo_sampler *ss
+        , struct stepper_kinematics *sk, double offset
+        , double row_x, double row_y, double row_z);
+    int32_t servo_sampler_generate(struct servo_sampler *ss
+        , double start_time, double interval, int count
+        , double *pos, double *vel, double *acc
+        , struct servo_sample_error *err);
+"""
+
 defs_kin_idex = """
     void dual_carriage_set_sk(struct stepper_kinematics *sk
         , struct stepper_kinematics *orig_sk);
@@ -296,6 +313,7 @@ defs_all = [
     defs_kin_extruder,
     defs_kin_shaper,
     defs_kin_idex,
+    defs_servo_sample,
 ]
 
 
