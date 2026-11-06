@@ -215,12 +215,16 @@ pub struct RatioStep {
 }
 
 impl RatioStep {
+    /// The slides beside the step that slope: a flat one bends nothing.
+    fn sloped_slides(&self) -> impl Iterator<Item = &RatioSlide> {
+        self.slides.iter().filter(|slide| slide.slope != 0.0)
+    }
+
     /// The steepest ratio slope the moving window carries beside the step
     /// on a ramp of `tau` seconds at `speed_mm_s`
     /// ([`RatioSlide::moving_slope`]).
     fn moving_slope(&self, speed_mm_s: f64, tau: f64) -> f64 {
-        self.slides
-            .iter()
+        self.sloped_slides()
             .map(|slide| slide.moving_slope(speed_mm_s * tau))
             .fold(0.0, f64::max)
     }
@@ -365,8 +369,7 @@ impl RatioRampRule {
         let kernel_square_curvature_per_speed =
             self.kernel_jerk_per_accel_hz * WIDTH_SQUARE_SLOPE_BOUND;
         let bend = step
-            .slides
-            .iter()
+            .sloped_slides()
             .map(|slide| {
                 let square_curvature_per_speed = slide
                     .width_square_curvature_per_speed(v, tau)
