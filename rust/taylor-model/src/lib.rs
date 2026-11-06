@@ -192,19 +192,22 @@ fn ragged_product(left: &[f64], right: &[f64]) -> ([f64; TAYLOR_LEN], f64) {
 }
 
 /// [`ragged_product`] of the first `left_len` of `left` and all of `right`,
-/// whose coefficients past its length are zeros, over fixed bounds the
+/// whose coefficients past `right_len` are zeros, over fixed bounds the
 /// compiler unrolls. Bit for bit the same when `left` is finite: each
 /// coefficient and the truncated sum add the same terms in the same order,
 /// with zero products between them, and a sum started at `+0.0` is never
-/// `-0.0`, so adding a zero leaves it as it is.
+/// `-0.0`, so adding a zero leaves it as it is. Where the product's degree
+/// fits, every truncated term is such a zero, and the sweep is skipped.
 #[inline]
 fn padded_product(
     left: &[f64; TAYLOR_LEN],
     left_len: usize,
     right: &[f64; TAYLOR_LEN],
+    right_len: usize,
 ) -> ([f64; TAYLOR_LEN], f64) {
     let mut coefficients = [0.0; TAYLOR_LEN];
     let mut truncated = 0.0;
+    let truncates = left_len + right_len > TAYLOR_LEN + 1;
     for i in 0..TAYLOR_LEN {
         if i == left_len {
             break;
@@ -213,8 +216,10 @@ fn padded_product(
         for j in 0..TAYLOR_LEN - i {
             coefficients[i + j] += a * right[j];
         }
-        for &b in &right[TAYLOR_LEN - i..] {
-            truncated += (a * b).abs();
+        if truncates {
+            for &b in &right[TAYLOR_LEN - i..] {
+                truncated += (a * b).abs();
+            }
         }
     }
     (coefficients, truncated)
@@ -390,7 +395,7 @@ impl TaylorModel {
         }
         let (a_magnitude, b_magnitude) = (self.magnitude(), other.magnitude());
         let (coefficients, truncated) = if a_magnitude.is_finite() {
-            padded_product(&self.coefficients, self.len, &other.coefficients)
+            padded_product(&self.coefficients, self.len, &other.coefficients, other.len)
         } else {
             ragged_product(self.coefficients(), other.coefficients())
         };
