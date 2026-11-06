@@ -308,16 +308,17 @@ fn a_rest_beside_a_step_caps_its_speed_at_the_ramp_the_room_leaves() {
         beside_rest < 0.8 * free,
         "a rest {room_mm} mm away caps the step at {beside_rest} mm/s, free {free} mm/s"
     );
-    let ramp_time = rest_room_ramp_time(beside_rest, room_mm);
+    let beside = seam(ratio, accel, room_mm);
+    let ramp_time = rest_room_ramp_time(beside.edge_speed(beside_rest), room_mm);
     assert!(ramp_time < RATIO_RAMP_MAX_TIME_S, "{ramp_time}");
-    let (velocity, accel_demand) =
-        seam(ratio, accel, room_mm).demand(&rule, ramp_time, beside_rest);
+    let (velocity, accel_demand) = beside.demand(&rule, ramp_time, beside_rest);
     assert!(velocity <= 50.0 + 1e-9 && accel_demand <= 20000.0 + 1e-9);
     assert!(
         (velocity - 50.0).abs() < 1e-6 || (accel_demand - 20000.0).abs() < 1e-6,
         "the capped step asks {velocity} mm/s and {accel_demand} mm/s² of the extruder"
     );
-    let past_reach = rest_room_reach_mm(free) * (1.0 + 1e-9);
+    let past_reach =
+        rest_room_reach_mm(seam(ratio, accel, f64::INFINITY).edge_speed(free)) * (1.0 + 1e-9);
     assert_eq!(
         seam(ratio, accel, past_reach).cap(&rule, FASTEST_MM_S),
         free
