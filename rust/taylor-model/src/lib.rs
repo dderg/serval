@@ -191,14 +191,35 @@ fn ragged_product(left: &[f64], right: &[f64]) -> ([f64; TAYLOR_LEN], f64) {
     (coefficients, truncated)
 }
 
-/// [`ragged_product`] of the first `left_len` of `left` and all of `right`,
-/// whose coefficients past its length are zeros, over fixed bounds the
-/// compiler unrolls. Bit for bit the same when `left` is finite: each
-/// coefficient and the truncated sum add the same terms in the same order,
-/// with zero products between them, and a sum started at `+0.0` is never
-/// `-0.0`, so adding a zero leaves it as it is.
+/// [`ragged_product`] of the first `left_len` of `left` and the first
+/// `right_len` of `right`, whose coefficients past it are zeros, over fixed
+/// bounds the compiler unrolls for each right length. Bit for bit the same
+/// when `left` is finite: each coefficient and the truncated sum add the
+/// same terms in the same order, without the zero products between them,
+/// and a sum started at `+0.0` is never `-0.0`, so a zero added leaves it as
+/// it is.
 #[inline]
 fn padded_product(
+    left: &[f64; TAYLOR_LEN],
+    left_len: usize,
+    right: &[f64; TAYLOR_LEN],
+    right_len: usize,
+) -> ([f64; TAYLOR_LEN], f64) {
+    match right_len {
+        0 => product_with_right_len::<0>(left, left_len, right),
+        1 => product_with_right_len::<1>(left, left_len, right),
+        2 => product_with_right_len::<2>(left, left_len, right),
+        3 => product_with_right_len::<3>(left, left_len, right),
+        4 => product_with_right_len::<4>(left, left_len, right),
+        5 => product_with_right_len::<5>(left, left_len, right),
+        6 => product_with_right_len::<6>(left, left_len, right),
+        7 => product_with_right_len::<7>(left, left_len, right),
+        _ => product_with_right_len::<TAYLOR_LEN>(left, left_len, right),
+    }
+}
+
+#[inline]
+fn product_with_right_len<const RIGHT_LEN: usize>(
     left: &[f64; TAYLOR_LEN],
     left_len: usize,
     right: &[f64; TAYLOR_LEN],
@@ -210,10 +231,11 @@ fn padded_product(
             break;
         }
         let a = left[i];
-        for j in 0..TAYLOR_LEN - i {
+        let kept = RIGHT_LEN.min(TAYLOR_LEN - i);
+        for j in 0..kept {
             coefficients[i + j] += a * right[j];
         }
-        for &b in &right[TAYLOR_LEN - i..] {
+        for &b in &right[kept..RIGHT_LEN] {
             truncated += (a * b).abs();
         }
     }
@@ -303,8 +325,18 @@ impl TaylorModel {
         self.rad = upper(self.rad + extra);
     }
 
+    /// `Σ|cₖ|`, summed over the fixed capacity the compiler unrolls: the
+    /// zeros past the length add `+0.0` to a sum that is never `-0.0` once
+    /// its first term is in.
     fn magnitude(&self) -> f64 {
-        self.coefficients().iter().map(|c| c.abs()).sum()
+        if self.len == 0 {
+            return self.coefficients().iter().map(|c| c.abs()).sum();
+        }
+        let mut magnitude = self.coefficients[0].abs();
+        for coefficient in &self.coefficients[1..] {
+            magnitude += coefficient.abs();
+        }
+        magnitude
     }
 
     /// An upper bound on `|f|` over the window.
@@ -390,7 +422,7 @@ impl TaylorModel {
         }
         let (a_magnitude, b_magnitude) = (self.magnitude(), other.magnitude());
         let (coefficients, truncated) = if a_magnitude.is_finite() {
-            padded_product(&self.coefficients, self.len, &other.coefficients)
+            padded_product(&self.coefficients, self.len, &other.coefficients, other.len)
         } else {
             ragged_product(self.coefficients(), other.coefficients())
         };
