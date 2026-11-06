@@ -1555,31 +1555,39 @@ fn a_crawl_valley_leaves_zero_flat_and_its_derivatives_are_exact() {
     );
 }
 
-/// A crawl is worth a valley only where an advance reading the path speed
-/// through it would leave the follower's acceleration limit. The Bowden
-/// crawl of `voron_dense_top_layers` at t≈148.07 s on the P1 kernel config
-/// asks `r·(a + k·s⃛)` ≈ 370 mm/s² of its 2000; releasing its lead there
-/// asked 2610. A turnaround releases it whatever the advance asks.
+/// A crawl behind a kernel the turning guard does not hold is worth a
+/// valley only where an advance reading the path speed through it would
+/// leave the follower's acceleration limit: there the kernel bounds the
+/// advance's jerk, and releasing the lead over the crawl's reach asks more
+/// than the crawl. A follower the guard holds lays one at every crawl,
+/// whose turning the guard bounds only down to the valley speed. A
+/// turnaround releases it whatever the advance asks.
 #[test]
-fn a_crawl_lays_a_valley_only_where_the_advance_would_leave_the_limit() {
-    let rule = RatioRampRule {
+fn a_crawl_lays_a_valley_where_the_guard_holds_the_follower_or_the_advance_would_leave_the_limit() {
+    let guarded = RatioRampRule {
         advance_slope_s: 0.5,
         max_velocity_mm_s: 50.0,
         max_accel_mm_s2: 2000.0,
         kernel_jerk_per_accel_hz: f64::INFINITY,
+    };
+    let behind_a_kernel = RatioRampRule {
+        kernel_jerk_per_accel_hz: 100.0,
+        ..guarded
     };
     let crawl = Crossing {
         speed: 0.647,
         rate: 119.0,
         jerk: 119.0 * 119.0 / 0.647,
     };
-    assert!(!crawl.needs_valley(&rule, 0.0337));
-    assert!(crawl.needs_valley(&rule, 0.2));
+    assert!(crawl.needs_valley(&guarded, 0.0337));
+    assert!(!crawl.needs_valley(&behind_a_kernel, 0.2));
+    assert!(crawl.needs_valley(&behind_a_kernel, 0.5));
     let cruise = Crossing {
         speed: 2.5,
         ..crawl
     };
-    assert!(!cruise.needs_valley(&rule, 0.2));
+    assert!(!cruise.needs_valley(&guarded, 0.5));
+    assert!(!cruise.needs_valley(&behind_a_kernel, 0.5));
     let turnaround = Crossing {
         speed: 0.0,
         rate: 119.0,
@@ -1587,7 +1595,7 @@ fn a_crawl_lays_a_valley_only_where_the_advance_would_leave_the_limit() {
     };
     let no_advance = RatioRampRule {
         advance_slope_s: 0.0,
-        ..rule
+        ..guarded
     };
     assert!(turnaround.needs_valley(&no_advance, 0.0337));
 }
