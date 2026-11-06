@@ -59,25 +59,26 @@ class EndpointGrid:
 
     grid_clock already includes the endpoint's group delay, so the clock of
     index n is the instant whose commanded motion that cycle must carry.
+    The pair is replaced as one tuple: the socket thread updates it while
+    the reactor reads it.
     """
 
     def __init__(self, clock_map, cycle_ns, grid_index, grid_clock):
         self.clock_map = clock_map
         self.cycle_ns = cycle_ns
-        self.grid_index = grid_index
-        self.grid_clock = grid_clock
+        self.anchor = (grid_index, grid_clock)
 
     def update(self, grid_index, grid_clock):
-        if grid_index < self.grid_index:
+        if grid_index < self.anchor[0]:
             raise GridRegression(
                 "endpoint grid index went back from %d to %d"
-                % (self.grid_index, grid_index)
+                % (self.anchor[0], grid_index)
             )
-        self.grid_index = grid_index
-        self.grid_clock = grid_clock
+        self.anchor = (grid_index, grid_clock)
 
     def clock(self, index):
-        return self.grid_clock + (index - self.grid_index) * self.cycle_ns
+        grid_index, grid_clock = self.anchor
+        return grid_clock + (index - grid_index) * self.cycle_ns
 
     def print_time(self, index):
         return self.clock_map.clock_to_print_time(self.clock(index))
@@ -86,10 +87,13 @@ class EndpointGrid:
     def interval(self):
         return self.cycle_ns / self.clock_map.clock_adj[1]
 
+    def index_at_or_after_clock(self, clock):
+        grid_index, grid_clock = self.anchor
+        return grid_index + math.ceil((clock - grid_clock) / self.cycle_ns)
+
     def first_index_at_or_after(self, print_time):
-        clock = self.clock_map.exact_clock(print_time)
-        estimate = self.grid_index + math.ceil(
-            (clock - self.grid_clock) / self.cycle_ns
+        estimate = self.index_at_or_after_clock(
+            self.clock_map.exact_clock(print_time)
         )
         return _settle_at_or_after(self, print_time, estimate)
 
