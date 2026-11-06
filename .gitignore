@@ -13,6 +13,7 @@ ci_cache/
 _test_.*
 klippy/plugins/*
 !klippy/plugins/__init__.py
+!klippy/plugins/ethercat/
 .vscode
 .idea/*
 
