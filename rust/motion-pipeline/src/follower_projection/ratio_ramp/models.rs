@@ -506,7 +506,14 @@ enum ValleySide {
     After,
 }
 
-impl AdvanceValley {
+/// The Taylor-model reading of a laid valley, beside its point weight
+/// ([`AdvanceValley::weight`]).
+trait ValleyModel {
+    fn side(&self, s: f64) -> ValleySide;
+    fn weight_model(&self, side: ValleySide, s: &TaylorModel) -> [TaylorModel; 3];
+}
+
+impl ValleyModel for AdvanceValley {
     fn side(&self, s: f64) -> ValleySide {
         if self.reach_start() >= s || self.reach_end() <= s {
             return ValleySide::Outside;
