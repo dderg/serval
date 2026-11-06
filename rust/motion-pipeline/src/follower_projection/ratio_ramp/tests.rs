@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
-use geometry::{RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule};
+use geometry::{RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep};
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
+use proptest::prelude::*;
+use proptest::test_runner::FileFailurePersistence;
 use trajectory::{ContinuousAxis, ContinuousSegment};
 
 use super::super::{FollowerState, SpanSide, Table as SpanTable};
@@ -120,6 +122,23 @@ fn probes(length: f64, count: usize) -> impl Iterator<Item = f64> {
     (1..count).map(move |k| length * k as f64 / count as f64 + 1e-7)
 }
 
+/// The stretch of the table the smoothing averages at `s`: the window
+/// there, and both sides of every ratio step whose own window reaches it.
+fn averaged_stretch(state: &FollowerState, s: f64) -> (f64, f64) {
+    let h = state.smoothing.width.width(s);
+    state
+        .smoothing
+        .laid
+        .steps_reaching(&state.smoothing.width, (s, s))
+        .filter(|&(seam, width)| (s - seam.s).abs() < width)
+        .fold((s - h, s + h), |(lo, hi), (seam, _)| {
+            (
+                lo.min(trajectory::next_toward(seam.s, f64::NEG_INFINITY)),
+                hi.max(trajectory::next_toward(seam.s, f64::INFINITY)),
+            )
+        })
+}
+
 /// The table's own ratio range over `[lo, hi]`.
 fn table_range(state: &FollowerState, lo: f64, hi: f64) -> (f64, f64) {
     state
@@ -170,8 +189,8 @@ fn the_smoothed_ratio_stays_within_the_ratios_its_window_spans() {
             let total = length(&table);
             let state = smoothed(&table, field(total));
             for s in probes(total, 20_000) {
-                let h = state.smoothing.width.width(s);
-                let (low, high) = table_range(&state, s - h, s + h);
+                let (lo, hi) = averaged_stretch(&state, s);
+                let (low, high) = table_range(&state, lo, hi);
                 let (ratio, _) = state.ratio_and_slope(s, SpanSide::After);
                 assert!(
                     ratio >= low - 1e-12 && ratio <= high + 1e-12,
@@ -190,8 +209,8 @@ fn the_smoothing_lays_exactly_the_table_material_wherever_the_window_is_flat() {
             let state = smoothed(&table, field(total));
             let mut flat_probes = 0;
             for s in probes(total, 5_000) {
-                let h = state.smoothing.width.width(s);
-                let (low, high) = table_range(&state, s - h, s + h);
+                let (lo, hi) = averaged_stretch(&state, s);
+                let (low, high) = table_range(&state, lo, hi);
                 if low != high {
                     continue;
                 }
@@ -275,8 +294,8 @@ fn the_advance_reads_the_laid_ratio_held_at_zero_where_it_retracts() {
         let state = smoothed(&table, field(total));
         let (mut extruding, mut retracting) = (0, 0);
         for s in probes(total, 20_000) {
-            let h = state.smoothing.width.width(s);
-            let (low, high) = table_range(&state, s - h, s + h);
+            let (lo, hi) = averaged_stretch(&state, s);
+            let (low, high) = table_range(&state, lo, hi);
             let (read, _) = state.ratio_and_slope_on(SpanTable::Advance, s, SpanSide::After);
             assert!(
                 read >= -1e-12 && read <= high.max(0.0) + 1e-12,
@@ -1844,4 +1863,165 @@ fn a_reach_starting_on_a_step_an_ulp_past_a_rest_holds_the_step_window() {
             correction.d1.rad()
         );
     }
+}
+
+/// A ratio step `Δ = r_after − r_before` at `step_s`, between rests `0`
+/// and `step_s + rest_ahead`, under a width field asking for `target`
+/// every `spacing` mm, crossed by leaders at `speed` accelerating at
+/// `accel`, never by so much they stop within a window of the target.
+#[derive(Debug, Clone, Copy)]
+struct RampCrossing {
+    r_before: f64,
+    r_after: f64,
+    step_s: f64,
+    rest_ahead: f64,
+    target: f64,
+    spacing: f64,
+    speed: f64,
+    accel: f64,
+    advance_slope_s: f64,
+}
+
+impl RampCrossing {
+    fn state(&self) -> FollowerState {
+        let length = self.step_s + self.rest_ahead;
+        let table = vec![
+            (self.step_s, self.r_before, self.r_before),
+            (self.rest_ahead, self.r_after, self.r_after),
+        ];
+        smoothed(&table, width(length, self.spacing, |_| self.target))
+    }
+
+    fn path_speed(&self, s: f64) -> f64 {
+        (self.speed * self.speed + 2.0 * self.accel * (s - self.step_s)).sqrt()
+    }
+
+    /// The advanced follower's velocity and acceleration at `s`,
+    /// `f + k·ḟ` and its rate, with `f = r̃(s)·ṡ`.
+    fn follower_demand(&self, state: &FollowerState, s: f64) -> (f64, f64) {
+        let laid = state.laid_on(SpanTable::Laid, s, SpanSide::After);
+        let (r, slope, curvature) = (laid.ratio, laid.slope, laid.curvature);
+        let (v, a, k) = (self.path_speed(s), self.accel, self.advance_slope_s);
+        let velocity = r * v + k * (slope * v * v + r * a);
+        let acceleration =
+            slope * v * v + r * a + k * (curvature * v * v * v + 3.0 * slope * v * a);
+        (velocity, acceleration)
+    }
+}
+
+fn ramp_crossing_strategy() -> impl Strategy<Value = RampCrossing> {
+    (
+        (0.0..0.05_f64, 0.0..0.05_f64),
+        (0.2..6.0_f64, 0.2..6.0_f64),
+        (0.05..2.0_f64, 0.05..0.5_f64),
+        (5.0..300.0_f64, -0.45..0.45_f64),
+        0.005..0.08_f64,
+    )
+        .prop_map(
+            |(
+                (r_before, r_after),
+                (step_s, rest_ahead),
+                (target, spacing),
+                (speed, accel_share),
+                k,
+            )| {
+                RampCrossing {
+                    r_before,
+                    r_after,
+                    step_s,
+                    rest_ahead,
+                    target,
+                    spacing,
+                    speed,
+                    accel: accel_share * speed * speed / target,
+                    advance_slope_s: k,
+                }
+            },
+        )
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: std::env::var("PROPTEST_CASES")
+            .map_or(256, |cases| cases.parse().expect("PROPTEST_CASES must be an integer")),
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
+            "proptest-regressions/ratio_ramp.txt",
+        ))),
+        ..ProptestConfig::default()
+    })]
+
+    /// Wherever a ratio step's ramp lies, under whatever width the rests'
+    /// cones leave it, the advanced follower's velocity and acceleration
+    /// across it, its curvature's steps at the ramp's ends among them, stay
+    /// within what the ramp rule budgets the step: the planner and the
+    /// ramp time hold the follower's limits on that budget.
+    #[test]
+    fn a_ratio_ramp_asks_no_more_than_its_rule_at_the_speed_it_is_crossed(
+        crossing in ramp_crossing_strategy(),
+    ) {
+        assert_ramp_within_rule(&crossing)?;
+    }
+}
+
+/// The advanced follower across `crossing`'s ramp against the rule's
+/// budget for it (see
+/// `a_ratio_ramp_asks_no_more_than_its_rule_at_the_speed_it_is_crossed`).
+fn assert_ramp_within_rule(crossing: &RampCrossing) -> Result<(), TestCaseError> {
+    let state = crossing.state();
+    let h = state.smoothing.width.width(crossing.step_s);
+    prop_assume!(h > 0.0 && crossing.r_after != crossing.r_before);
+    let (lo, hi) = (crossing.step_s - h, crossing.step_s + h);
+    let fastest = crossing.path_speed(lo).max(crossing.path_speed(hi));
+    let rule = RatioRampRule {
+        advance_slope_s: crossing.advance_slope_s,
+        max_velocity_mm_s: f64::INFINITY,
+        max_accel_mm_s2: f64::INFINITY,
+        kernel_jerk_per_accel_hz: f64::INFINITY,
+    };
+    let step = RatioStep {
+        ratio_step: (crossing.r_after - crossing.r_before).abs(),
+        peak_ratio: crossing.r_after.max(crossing.r_before),
+        speed_mm_s: fastest,
+        accel_mm_s2: crossing.accel.abs(),
+        jerk_mm_s3: 0.0,
+    };
+    let (velocity_budget, accel_budget) = rule.demand(2.0 * h / fastest, &step);
+    let samples = 2_000;
+    let edge_inset = 1e-9 * h;
+    let points = (0..=samples)
+        .map(|k| lo + (hi - lo) * f64::from(k) / f64::from(samples))
+        .chain([lo + edge_inset, hi - edge_inset]);
+    for s in points {
+        let (velocity, acceleration) = crossing.follower_demand(&state, s);
+        prop_assert!(
+            velocity.abs() <= velocity_budget * (1.0 + 1e-9) + 1e-9,
+            "the follower runs at {velocity} mm/s at {s} mm across a ramp budgeted {velocity_budget}"
+        );
+        prop_assert!(
+            acceleration.abs() <= accel_budget * (1.0 + 1e-9) + 1e-6,
+            "the follower accelerates at {acceleration} mm/s² at {s} mm across a ramp budgeted \
+                 {accel_budget}"
+        );
+    }
+    Ok(())
+}
+
+/// Found by `a_ratio_ramp_asks_no_more_than_its_rule_at_the_speed_it_is_crossed`
+/// on windows that followed the width along the path: a step 0.2 mm short
+/// of a rest, whose cone narrows the window past it at a quarter of the
+/// path, read 2.5 times its budget where the window's back edge left it.
+#[test]
+fn a_step_short_of_a_rest_is_ramped_within_its_rule() {
+    assert_ramp_within_rule(&RampCrossing {
+        r_before: 0.0,
+        r_after: 0.040_570_777_556_576_1,
+        step_s: 0.2,
+        rest_ahead: 0.2,
+        target: 0.05,
+        spacing: 0.05,
+        speed: 5.0,
+        accel: 0.0,
+        advance_slope_s: 0.005,
+    })
+    .unwrap();
 }
