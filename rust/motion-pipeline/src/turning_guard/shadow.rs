@@ -30,14 +30,66 @@ impl GridSample {
     }
 }
 
-/// The planned motion sampled on the grid, from grid index `base` on.
-#[derive(Debug, Default)]
+/// The planned motion sampled on the grid `h` apart, from grid index `base`
+/// on, with what [`shaped_at`] reads of each cell between two samples.
+#[derive(Debug)]
 pub(super) struct PlannedGrid {
+    h: f64,
     base: i64,
     samples: VecDeque<GridSample>,
+    cells: VecDeque<[CellTerms; 3]>,
+}
+
+/// The planned motion over the cell `[τ_k, τ_k+1]` on one axis as
+/// [`shaped_at`] reads it: how far it moves, how much its velocity turns,
+/// the trapezoid's defect `h/2·(v_k + v_k+1) − Δp`, the bound on its
+/// acceleration and that bound's variation, the least of the path
+/// travelled and half a cell of the velocity's swing, and `h·min(A, V/2)`.
+#[derive(Debug, Clone, Copy)]
+struct CellTerms {
+    moved: f64,
+    turned: f64,
+    defect: f64,
+    accel: f64,
+    swing: f64,
+    travel_miss: f64,
+    reach: f64,
+}
+
+impl CellTerms {
+    fn between(lo: &GridSample, hi: &GridSample, h: f64) -> [Self; 3] {
+        std::array::from_fn(|axis| {
+            let accel = lo.cell_accel[axis];
+            let swing = lo.cell_variation[axis];
+            let moved = hi.position[axis] - lo.position[axis];
+            let velocity_swing = if swing.is_finite() {
+                accel * h
+            } else {
+                f64::INFINITY
+            };
+            Self {
+                moved,
+                turned: hi.velocity[axis] - lo.velocity[axis],
+                defect: 0.5 * h * (hi.velocity[axis] + lo.velocity[axis]) - moved,
+                accel,
+                swing,
+                travel_miss: (hi.arc - lo.arc).min(0.5 * h * velocity_swing),
+                reach: h * accel.min(0.5 * swing),
+            }
+        })
+    }
 }
 
 impl PlannedGrid {
+    pub fn new(h: f64) -> Self {
+        Self {
+            h,
+            base: 0,
+            samples: VecDeque::new(),
+            cells: VecDeque::new(),
+        }
+    }
+
     pub fn get(&self, k: i64) -> Option<&GridSample> {
         usize::try_from(k - self.base)
             .ok()
@@ -49,19 +101,41 @@ impl PlannedGrid {
         self.base + self.samples.len() as i64
     }
 
+    pub fn base(&self) -> i64 {
+        self.base
+    }
+
     pub fn is_empty(&self) -> bool {
         self.samples.is_empty()
+    }
+
+    /// The terms of the `count` cells up to cell `newest`, newest first;
+    /// `None` unless both samples of each are on the grid.
+    fn cells_back_from(
+        &self,
+        newest: i64,
+        count: usize,
+    ) -> Option<impl Iterator<Item = &[CellTerms; 3]>> {
+        let last = usize::try_from(newest - self.base).ok()?;
+        let first = last.checked_sub(count.checked_sub(1)?)?;
+        (last < self.cells.len()).then(|| self.cells.range(first..=last).rev())
     }
 
     /// Resets the planned acceleration bounds of the cell from index `k`,
     /// where one is sampled.
     pub fn set_cell_bounds(&mut self, k: i64, (accel, variation): ([f64; 3], [f64; 3])) {
-        if let Some(sample) = usize::try_from(k - self.base)
+        let Some(index) = usize::try_from(k - self.base)
             .ok()
-            .and_then(|index| self.samples.get_mut(index))
-        {
-            sample.cell_accel = accel;
-            sample.cell_variation = variation;
+            .filter(|&index| index < self.samples.len())
+        else {
+            return;
+        };
+        let sample = &mut self.samples[index];
+        sample.cell_accel = accel;
+        sample.cell_variation = variation;
+        if index < self.cells.len() {
+            self.cells[index] =
+                CellTerms::between(&self.samples[index], &self.samples[index + 1], self.h);
         }
     }
 
@@ -70,6 +144,10 @@ impl PlannedGrid {
             self.base = k;
         }
         assert_eq!(k, self.end(), "the planned grid is sampled in order");
+        if let Some(before) = self.samples.back() {
+            self.cells
+                .push_back(CellTerms::between(before, &sample, self.h));
+        }
         self.samples.push_back(sample);
     }
 
@@ -77,18 +155,71 @@ impl PlannedGrid {
     pub fn truncate_from(&mut self, k: i64) {
         let keep = usize::try_from(k - self.base).unwrap_or(0);
         self.samples.truncate(keep);
+        self.cells.truncate(keep.saturating_sub(1));
     }
 
     /// Forgets the samples before index `k`, which no check reads again.
     pub fn trim_before(&mut self, k: i64) {
         while self.base < k && !self.samples.is_empty() {
             self.samples.pop_front();
+            self.cells.pop_front();
             self.base += 1;
         }
     }
 
     pub fn clear(&mut self) {
         self.samples.clear();
+        self.cells.clear();
+    }
+}
+
+/// Values computed at most once per grid index, kept from index `base` on
+/// until the planned motion they read changes.
+#[derive(Debug)]
+pub(super) struct GridMemo<T> {
+    base: i64,
+    slots: VecDeque<Option<T>>,
+}
+
+impl<T> Default for GridMemo<T> {
+    fn default() -> Self {
+        Self {
+            base: 0,
+            slots: VecDeque::new(),
+        }
+    }
+}
+
+impl<T: Copy> GridMemo<T> {
+    pub fn get_or_insert_with(&mut self, n: i64, compute: impl FnOnce() -> T) -> T {
+        if self.slots.is_empty() {
+            self.base = n;
+        }
+        while n < self.base {
+            self.slots.push_front(None);
+            self.base -= 1;
+        }
+        let index = usize::try_from(n - self.base).expect("an index at or past the memo's base");
+        if index >= self.slots.len() {
+            self.slots.resize(index + 1, None);
+        }
+        *self.slots[index].get_or_insert_with(compute)
+    }
+
+    pub fn forget_from(&mut self, n: i64) {
+        let keep = usize::try_from(n - self.base).unwrap_or(0);
+        self.slots.truncate(keep);
+    }
+
+    pub fn forget_before(&mut self, n: i64) {
+        while self.base < n && !self.slots.is_empty() {
+            self.slots.pop_front();
+            self.base += 1;
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.slots.clear();
     }
 }
 
@@ -205,6 +336,11 @@ pub(super) fn shaped_at(
     n: i64,
 ) -> Option<ShapedSample> {
     let h = kernels.h;
+    assert!(
+        grid.h == h,
+        "turning guard: kernels on a {h} s grid read a {} s one",
+        grid.h
+    );
     let mut out = ShapedSample::default();
     for (axis, leader) in kernels.axes.iter().enumerate() {
         match leader {
@@ -231,31 +367,23 @@ pub(super) fn shaped_at(
                     cells.drift_weights[0],
                     grid.get(n - cells.first)?.cell_variation[axis],
                 );
-                for (offset, (value, slope)) in cells.value.iter().zip(&cells.slope).enumerate() {
-                    let m = n - (cells.first + offset as i64) - 1;
-                    let lo = grid.get(m)?;
-                    let hi = grid.get(m + 1)?;
-                    let accel = lo.cell_accel[axis];
-                    let swing = lo.cell_variation[axis];
-                    window = window.max(accel);
-                    drift += weighted(cells.drift_weights[offset + 1], swing);
-                    let moved = hi.position[axis] - lo.position[axis];
-                    let turned = hi.velocity[axis] - lo.velocity[axis];
-                    let defect = 0.5 * h * (hi.velocity[axis] + lo.velocity[axis]) - moved;
-                    let travelled = hi.arc - lo.arc;
-                    let velocity_swing = if swing.is_finite() {
-                        accel * h
-                    } else {
-                        f64::INFINITY
-                    };
-                    let reach = h * accel.min(0.5 * swing);
-                    sums[0] += value.at * moved;
-                    sums[1] += value.slope.abs() * accel * h * h * h / 12.0
-                        + value.miss * travelled.min(0.5 * h * velocity_swing);
-                    sums[2] += value.at * turned - value.slope * defect;
-                    sums[3] += value.miss * reach;
-                    sums[4] += slope.at * turned - slope.slope * defect;
-                    sums[5] += slope.miss * reach;
+                let planned = grid.cells_back_from(n - cells.first - 1, cells.value.len())?;
+                let kernel = cells
+                    .value
+                    .iter()
+                    .zip(&cells.slope)
+                    .zip(&cells.drift_weights[1..]);
+                for (((value, slope), drift_weight), terms) in kernel.zip(planned) {
+                    let terms = &terms[axis];
+                    window = window.max(terms.accel);
+                    drift += weighted(*drift_weight, terms.swing);
+                    sums[0] += value.at * terms.moved;
+                    sums[1] += value.slope.abs() * terms.accel * h * h * h / 12.0
+                        + value.miss * terms.travel_miss;
+                    sums[2] += value.at * terms.turned - value.slope * terms.defect;
+                    sums[3] += value.miss * terms.reach;
+                    sums[4] += slope.at * terms.turned - slope.slope * terms.defect;
+                    sums[5] += slope.miss * terms.reach;
                 }
                 out.velocity[axis] = sums[0];
                 out.velocity_miss[axis] = sums[1];
@@ -272,12 +400,14 @@ pub(super) fn shaped_at(
 }
 
 /// Bounds on the shaped motion across the grid cell between two samples
-/// `h` apart: the least speed, the largest acceleration, `|a × v|` and
-/// jerk, and the range of the acceleration and jerk along the velocity
+/// `h` apart: the least and the largest speed and acceleration, `|a × v|`
+/// and jerk, and the range of the acceleration and jerk along the velocity
 /// wherever the speed is at least [`ADVANCE_VALLEY_SPEED_MM_S`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct CellMotion {
     pub speed_floor: f64,
+    pub speed_ceiling: f64,
+    pub accel_floor: f64,
     pub accel_ceiling: f64,
     pub cross_ceiling: f64,
     pub jerk_ceiling: f64,
@@ -358,6 +488,8 @@ impl CellMotion {
         };
         Self {
             speed_floor,
+            speed_ceiling: fastest_bound,
+            accel_floor: (distance_to_segment(from.accel, to.accel) - accel_radius).max(0.0),
             accel_ceiling,
             cross_ceiling: chord_cross
                 + strongest * velocity_radius
