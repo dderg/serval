@@ -1,18 +1,18 @@
 {
   "slice_lines": 1000,
-  "commit": "5b8872f779f2c419e6b7caeb3fd6f26d071af67e",
-  "reason": "Ratchet the baseline to main 5b8872f77: main sits 8 % below the old reference, so the 2 % drift band guards main's level",
+  "commit": "053a9b198eea9008495420b4a9fee5bdc1ab1a80",
+  "reason": "p3_voron_direct_drive_ramp: +3.2% Ir arrived on main with #792 (turning guard), after the baseline ratchet #791 measured 5b8872f77; this branch adds +0.05% on top (local pinned Ir: main 0f71191f5 20,884.3M, branch 20,893.7M)",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 20815233245,
+      "ir": 21475558126,
       "stream_secs": 6.374
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 20448843026,
+      "ir": 20471239922,
       "stream_secs": 6.049
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 25260603633,
+      "ir": 25293611572,
       "stream_secs": 5.465
     }
   },
