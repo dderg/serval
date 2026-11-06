@@ -17,10 +17,7 @@ import sys
 import time
 
 from klippy import chelper, printer, serialhdl, toolhead
-from klippy.extras import input_shaper
-
-from . import shaper_corner
-from .run import NO_CORNER_BUDGET
+from klippy.extras import input_shaper, motion_queuing
 
 TRAPQ_APPEND_FIELDS = (
     "print_time",
@@ -134,10 +131,10 @@ class StepHistory:
 
 
 class Capture:
-    def __init__(self, corner_budget_mm=None):
+    def __init__(self):
         self.toolhead = None
         self.printer = None
-        self.corner_budget_mm = corner_budget_mm
+        self.timing = {"lookahead_s": 0.0, "junction_limiter_s": 0.0}
         self.moves = []
         self.linear_maps = {}
         self.steppers = None
@@ -157,7 +154,7 @@ class Capture:
         )
         real_append = toolhead_obj.trapq_append
         real_set_position = toolhead_obj.set_position
-        real_flush = toolhead_obj.lookahead.flush
+        real_flush = self._timed(toolhead_obj.lookahead.flush, "lookahead_s")
         requested = collections.deque()
 
         def flush(lazy=False):
@@ -192,10 +189,30 @@ class Capture:
         toolhead_obj.trapq_append = trapq_append
         toolhead_obj.set_position = set_position
         toolhead_obj.lookahead.flush = flush
-        if self.corner_budget_mm is not None:
-            shaper_corner.install(
-                toolhead_obj, self.corner_budget_mm, _shaper_state
+        toolhead_obj.lookahead.add_move = self._timed(
+            toolhead_obj.lookahead.add_move, "lookahead_s"
+        )
+        self.printer.register_event_handler("klippy:ready", self._time_limiter)
+
+    def _time_limiter(self):
+        limiter = getattr(self.toolhead, "junction_limiter", None)
+        if limiter is not None:
+            self.toolhead.junction_limiter = self._timed(
+                limiter, "junction_limiter_s"
             )
+
+    def _timed(self, func, key):
+        timing = self.timing
+        clock = time.perf_counter
+
+        def timed(*args, **kwargs):
+            start = clock()
+            try:
+                return func(*args, **kwargs)
+            finally:
+                timing[key] += clock() - start
+
+        return timed
 
     def _snapshot_start(self):
         th = self.toolhead
@@ -240,12 +257,16 @@ class Capture:
                 stepper.get_mcu_position()
             )
             self.steppers[name]["step_history"] = self.history.entries[name]
+        limiter = self.printer.lookup_object("corner_deviation", None)
         return {
             "moves": self.moves,
             "steppers": self.steppers,
             "shaper": self.shaper,
             "settings": self.settings,
-            "corner_budget_mm": self.corner_budget_mm,
+            "timing": self.timing,
+            "corner_deviation": None
+            if limiter is None
+            else limiter.get_status(None),
         }
 
 
@@ -280,10 +301,8 @@ def drain_before_disconnect(capture):
 
 
 def main():
-    capture_path, budget_arg = sys.argv[1:3]
-    capture = Capture(
-        None if budget_arg == NO_CORNER_BUDGET else float(budget_arg)
-    )
+    capture_path = sys.argv[1]
+    capture = Capture()
     real_init = toolhead.ToolHead.__init__
 
     def init(self, config):
@@ -292,7 +311,8 @@ def main():
 
     toolhead.ToolHead.__init__ = init
     drain_before_disconnect(capture)
-    sys.argv = ["klippy"] + sys.argv[3:]
+    motion_queuing.MOVE_HISTORY_EXPIRE = math.inf
+    sys.argv = ["klippy"] + sys.argv[2:]
     printer.main()
     with open(capture_path, "w") as f:
         json.dump(capture.finish(), f)

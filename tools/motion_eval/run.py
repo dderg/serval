@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -14,7 +15,6 @@ from . import mcu_dict, stepdecode
 REPO_ROOT = mcu_dict.REPO_ROOT
 MAIN_MCU = "mcu"
 LOG_TAIL_CHARS = 6000
-NO_CORNER_BUDGET = "-"
 
 
 class KlippyRunError(RuntimeError):
@@ -42,7 +42,7 @@ def run_klippy(
     gcode: str,
     start_xyz,
     mcu_config=mcu_dict.DEFAULT_MCU_CONFIG,
-    corner_budget_mm=None,
+    klippy_root=REPO_ROOT,
 ) -> RawRun:
     dictionary = mcu_dict.build(mcu_config)
     with tempfile.TemporaryDirectory(prefix="motion_eval_") as tmp:
@@ -57,9 +57,6 @@ def run_klippy(
             "-m",
             "tools.motion_eval.capture",
             str(capture_path),
-            NO_CORNER_BUDGET
-            if corner_budget_mm is None
-            else repr(float(corner_budget_mm)),
             str(pathlib.Path(config_path).resolve()),
             "-i",
             str(gcode_path),
@@ -70,7 +67,10 @@ def run_klippy(
             "-l",
             str(log_path),
         ]
-        res = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+        env = dict(os.environ, PYTHONPATH=str(REPO_ROOT))
+        res = subprocess.run(
+            cmd, cwd=klippy_root, env=env, capture_output=True, text=True
+        )
         if res.returncode or not capture_path.exists():
             log = log_path.read_text() if log_path.exists() else ""
             raise KlippyRunError(
