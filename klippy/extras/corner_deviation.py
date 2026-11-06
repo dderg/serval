@@ -65,6 +65,19 @@ class Kernel:
             self._exact_ramp_error(self.r_lo + i * self.r_step)
             for i in range(RAMP_ERROR_POINTS)
         ]
+        order = sorted(range(len(shifts)), key=lambda i: shifts[i])
+        self.d_step = (self.s_hi - self.s_lo) / max(len(shifts) - 1, 1)
+        peak_weight = max(weights)
+        self.d_values = [density_peak * weights[i] / peak_weight for i in order]
+
+    def density_at_shift(self, s):
+        """Kernel density (1/s) at shift s; zero for pulse shapers."""
+        idx = (s - self.s_lo) / self.d_step
+        if not self.density_peak or idx <= 0.0 or idx >= len(self.d_values) - 1:
+            return 0.0
+        i = int(idx)
+        d = self.d_values
+        return d[i] + (idx - i) * (d[i + 1] - d[i])
 
     def _exact_ramp_error(self, s):
         shaped = sum(
@@ -142,6 +155,7 @@ class CornerTable:
         N, Q, N2, Q2 = (np.stack([m[i] for m in moments], -1) for i in range(4))
         thetas = np.where(np.abs(thetas) > 1e-6, thetas, 1e-3)
         self.g = []
+        profile = np.zeros(len(t))
         isotropic = kx.shifts == ky.shifts and kx.weights == ky.weights
         for alpha in alphas:
             if isotropic and self.g:
@@ -151,11 +165,29 @@ class CornerTable:
             u2 = np.stack([np.cos(alpha + thetas), np.sin(alpha + thetas)], -1)
             dev = _corner_deviation(np, w, u1, u2, N, Q, N2, Q2)
             self.g.append(np.maximum.accumulate(dev, axis=-1).tolist())
+            stop = _stop_profile(np, u1, u2, N2, Q2)
+            peak = np.maximum(dev[:, :1], 1e-300)
+            profile = np.maximum(profile, (stop / peak).max(axis=0))
         self.w = w.tolist()
         self.alpha_step = math.radians(TABLE_ALPHA_DEG)
         self.theta_step = math.radians(TABLE_THETA_DEG)
         self.alpha_max = len(alphas) - 1.000001
         self.theta_max = len(thetas) - 1.000001
+        half = int(round(0.5 * reach / MODEL_DT))
+        self.profile = [
+            float(profile[max(0, i - half) : i + half + 1].max())
+            for i in range(len(profile))
+        ]
+        self.profile_t0 = float(t[0])
+
+    def stop_share(self, dt):
+        """Upper envelope of a stop corner's deviation at time dt from the
+        corner, as a share of its peak deviation."""
+        idx = (dt - self.profile_t0) / MODEL_DT
+        if idx <= 0.0 or idx >= len(self.profile) - 1:
+            return 0.0
+        i = int(idx)
+        return max(self.profile[i], self.profile[i + 1])
 
     def cell(self, ux, uy, turn):
         alpha = math.atan2(uy, ux)
@@ -204,6 +236,17 @@ def _corner_moments(np, t, kernel):
     return before @ w, after @ w, (before * before) @ w, (after * after) @ w
 
 
+def _stop_profile(np, u1, u2, N2, Q2):
+    """Distance of the shaped stop corner to its legs over time, per turn."""
+    u2 = u2[:, None, :]
+    S = 0.5 * (u2 * Q2 - u1 * N2)
+    legs = []
+    for direction in (-np.broadcast_to(u1, u2.shape), u2):
+        along = np.maximum((S * direction).sum(axis=-1), 0.0)
+        legs.append(np.linalg.norm(S - along[..., None] * direction, axis=-1))
+    return np.minimum(*legs)
+
+
 def _corner_deviation(np, w, u1, u2, N, Q, N2, Q2):
     """Deviation of the canonical corner per turn (rows of u2) and w."""
     u2 = u2[:, None, None, :]
@@ -239,13 +282,14 @@ def min_traversal_time(move, start_v2, end_v2):
 
 
 class Junction:
-    __slots__ = ("time", "dvx", "dvy", "deviation", "ax", "ay")
+    __slots__ = ("time", "dvx", "dvy", "deviation", "floor", "ax", "ay")
 
-    def __init__(self, time, dvx, dvy, deviation, ax, ay):
+    def __init__(self, time, dvx, dvy, deviation, floor, ax, ay):
         self.time = time
         self.dvx = dvx
         self.dvy = dvy
         self.deviation = deviation
+        self.floor = floor
         self.ax = ax
         self.ay = ay
 
@@ -377,47 +421,59 @@ class CornerDeviation:
             speed = min(
                 speed, math.sqrt(2.0 * room / (self.variance * curvature))
             )
-        before = self.last_time
         now = self._advance(prev_move, speed * speed)
         history = self.history
         while history and now - history[0].time >= self.window:
             history.popleft()
-        ex = ey = 0.0
-        others_x = others_y = 0.0
+        steps_x = steps_y = neighbour_floors = others_x = others_y = 0.0
+        expected_floor = (
+            accel * floor * self._persistence(prev_move, move, speed, accel)
+        )
         for j in history:
             dt = now - j.time
-            ex += j.dvx * kx.ramp_error(dt)
-            ey += j.dvy * ky.ramp_error(dt)
+            steps_x += j.dvx * kx.ramp_error(dt)
+            steps_y += j.dvy * ky.ramp_error(dt)
+            neighbour_floors += j.floor * table.stop_share(dt)
             others_x = max(others_x, j.ax)
             others_y = max(others_y, j.ay)
+            share = table.stop_share(-dt)
+            room_j = budget - j.deviation - expected_floor * share
             overlap = math.hypot(
                 dux * kx.ramp_error(-dt), duy * ky.ramp_error(-dt)
             )
             if overlap > 0.0:
-                speed = min(speed, max(budget - j.deviation, 0.0) / overlap)
-        isolated = (
-            now - before >= self.window
-            and min_traversal_time(move, speed * speed, move.max_cruise_v2)
-            >= self.window
+                speed = min(speed, max(room_j, 0.0) / overlap)
+        shares = (
+            max(abs(upx), abs(umx)),
+            max(abs(upy), abs(umy)),
+            others_x,
+            others_y,
         )
-        if isolated:
-            speed, accel, deviation = self._isolated(
-                prev_move, move, cell, speed, accel, ex, ey
-            )
+
+        def accel_error(a):
+            return min(a * floor + neighbour_floors, self._floor(a, shares))
+
+        level = budget - math.hypot(steps_x, steps_y)
+        if accel_error(0.0) >= level:
+            self.stats["over_budget"] += 1
+            speed = 0.0
+        elif accel_error(accel) > level:
+            lo, hi = 0.0, accel
+            for _ in range(ACCEL_SEARCH_STEPS):
+                mid = 0.5 * (lo + hi)
+                if accel_error(mid) <= level:
+                    lo = mid
+                else:
+                    hi = mid
+            speed = 0.0
+            if lo > 0.0:
+                accel = lo
+                self._lower_accel(prev_move, move, accel)
+            else:
+                self.stats["over_budget"] += 1
         else:
-            share_x = max(abs(upx), abs(umx))
-            share_y = max(abs(upy), abs(umy))
-            speed, accel, deviation = self._overlapping(
-                prev_move,
-                move,
-                speed,
-                accel,
-                ex,
-                ey,
-                dux * kx.ramp_error(0.0),
-                duy * ky.ramp_error(0.0),
-                (share_x, share_y, others_x, others_y),
-            )
+            level -= accel_error(accel) - accel * floor
+            speed = min(speed, accel * table.max_w(cell, level / accel))
         if kx.density_peak or ky.density_peak:
             speed, accel = self._accel_bound(
                 prev_move, move, speed, accel, dux, duy
@@ -427,39 +483,34 @@ class CornerDeviation:
         if v2 < cap_v2:
             self.stats["limited"] += 1
         speed = math.sqrt(v2)
+        own_floor = (
+            accel * floor * self._persistence(prev_move, move, speed, accel)
+        )
         for j in history:
             dt = now - j.time
-            j.deviation += speed * math.hypot(
+            j.deviation += own_floor * table.stop_share(
+                -dt
+            ) + speed * math.hypot(
                 dux * kx.ramp_error(-dt), duy * ky.ramp_error(-dt)
             )
-        if isolated:
-            deviation = accel * table.at(cell, speed / accel)
         history.append(
             Junction(
                 now,
                 speed * dux,
                 speed * duy,
-                deviation,
+                math.hypot(steps_x, steps_y)
+                + accel_error(accel)
+                + accel * (table.at(cell, speed / accel) - floor),
+                own_floor,
                 prev_move.accel * abs(upx),
                 prev_move.accel * abs(upy),
             )
         )
         return v2
 
-    def _isolated(self, prev_move, move, cell, speed, accel, ex, ey):
-        table = self.table
-        level = self.max_deviation - math.hypot(ex, ey)
-        floor = table.value(cell, 0)
-        if level <= 0.0:
-            self.stats["over_budget"] += 1
-            return 0.0, accel, None
-        if floor * accel > level:
-            accel = level / floor
-            self._lower_accel(prev_move, move, accel)
-            return 0.0, accel, None
-        return min(speed, accel * table.max_w(cell, level / accel)), accel, None
-
     def _floor(self, accel, shares):
+        """sigma^2 * |accel| / 2: bound on the shaped error caused by any
+        acceleration profile inside the kernel support."""
         share_x, share_y, others_x, others_y = shares
         kx, ky = self.kernels
         return 0.5 * math.hypot(
@@ -467,42 +518,23 @@ class CornerDeviation:
             ky.variance * max(accel * share_y, others_y),
         )
 
-    def _overlapping(
-        self, prev_move, move, speed, accel, ex, ey, cx, cy, shares
-    ):
-        """Rigorous bound when another junction or accel phase is inside the
-        kernel support: |e| <= sigma^2 * |accel| / 2 + |velocity steps|."""
-        budget = self.max_deviation
-        steps = math.hypot(ex, ey)
-        room = budget - self._floor(accel, shares)
-        if steps >= room:
-            if self._floor(0.0, shares) + steps >= budget:
-                self.stats["over_budget"] += 1
-                return 0.0, accel, self._floor(accel, shares) + steps
-            lo, hi = 0.0, accel
-            for _ in range(ACCEL_SEARCH_STEPS):
-                mid = 0.5 * (lo + hi)
-                if self._floor(mid, shares) + steps <= budget:
-                    lo = mid
-                else:
-                    hi = mid
-            self._lower_accel(prev_move, move, lo)
-            return 0.0, lo, self._floor(lo, shares) + steps
-        cc = cx * cx + cy * cy
-        if cc > 0.0:
-            ec = ex * cx + ey * cy
-            disc = ec * ec - cc * (ex * ex + ey * ey - room * room)
-            speed = min(speed, (math.sqrt(max(disc, 0.0)) - ec) / cc)
-        deviation = budget - room + math.hypot(ex + speed * cx, ey + speed * cy)
-        return speed, accel, deviation
+    def _persistence(self, prev_move, move, speed, accel):
+        """Share of a full stop-corner floor a junction produces: the accel
+        phases around it last (sqrt(v^2 + accel*L) - v) / accel at most, L
+        the longer adjacent move, and only phases spanning the kernel
+        support leave the full floor."""
+        length = max(prev_move.move_d, move.move_d)
+        phase = (math.sqrt(speed * speed + accel * length) - speed) / accel
+        return min(1.0, phase / self.window)
 
     def _accel_bound(self, prev_move, move, speed, accel, dux, duy):
         kx, ky = self.kernels
         max_accel = self.toolhead.max_accel
         nx = ny = other_x = other_y = 0.0
+        now = self.last_time
         for j in self.history:
-            nx += j.dvx * kx.density_peak
-            ny += j.dvy * ky.density_peak
+            nx += j.dvx * kx.density_at_shift(j.time - now)
+            ny += j.dvy * ky.density_at_shift(j.time - now)
             other_x = max(other_x, j.ax)
             other_y = max(other_y, j.ay)
         axes = (
