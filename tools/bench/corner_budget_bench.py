@@ -57,9 +57,10 @@ def _motor_mm(events, step_mm: float, t: np.ndarray) -> np.ndarray:
         raise RuntimeError("a corner motor never stepped in the run")
     lo = max(int(np.searchsorted(events.time, t[0], "left")) - 1, 0)
     hi = int(np.searchsorted(events.time, t[-1], "right")) + 1
-    return np.interp(
-        t, events.time[lo:hi], events.level[lo:hi].astype(np.float64)
-    ) * step_mm
+    return (
+        np.interp(t, events.time[lo:hi], events.level[lo:hi].astype(np.float64))
+        * step_mm
+    )
 
 
 def _steps_xy(events, motors, axis_weights, t_events) -> np.ndarray:
@@ -104,7 +105,9 @@ def _block_of(blocks, plan_t: float):
     for block in blocks:
         if block["t_start"] <= plan_t <= block["t_end"]:
             return block
-    raise RuntimeError(f"no planned epoch holds the vertex reached at t={plan_t}")
+    raise RuntimeError(
+        f"no planned epoch holds the vertex reached at t={plan_t}"
+    )
 
 
 def report(inputs, detail: dict, planned, axis_weights, stream_epochs, engine):

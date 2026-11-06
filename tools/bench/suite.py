@@ -225,7 +225,9 @@ def run_row(row: Row, suite_dir: Path, lock_timeout_s: float) -> dict:
                     "max_abs"
                 ]
             if "corner_budget" in verdict:
-                result["corner_budget_worst"] = verdict["corner_budget"]["worst"]
+                result["corner_budget_worst"] = verdict["corner_budget"][
+                    "worst"
+                ]
     result["wall_s"] = time.monotonic() - started
     result["passed"] = bool(
         result["error"] is None
