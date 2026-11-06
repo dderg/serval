@@ -1,0 +1,5 @@
+# Extruder steps spanning more than CLOCK_DIFF_MAX in one batch-mode
+# generation window used to overflow the stepcompress queue
+CONFIG stepcompress_far_step.cfg
+DICTIONARY stm32h723.dict
+GCODE stepcompress_far_step.gcode
