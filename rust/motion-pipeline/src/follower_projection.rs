@@ -2082,11 +2082,11 @@ impl FollowerState {
         self.s_ingested_end = s1;
     }
 
-    /// Drops the spans behind the committed path, but for those a window
-    /// there still averages over.
+    /// Drops the spans behind the committed path, but for those the
+    /// smoothing from there on still reads ([`RatioSmoothing::read_from`]).
     fn prune_spans(&mut self) {
         let committed = self.s_shaped - SPAN_LOOKUP_SLACK_MM;
-        let keep_after = committed - self.smoothing.reach_back(committed);
+        let keep_after = self.smoothing.read_from(committed);
         let keep_from = self.spans.partition_point(|span| span.s1 < keep_after);
         self.spans.drain(..keep_from);
         let keep_advance_from = self
@@ -2274,17 +2274,13 @@ impl FollowerState {
     }
 
     /// Whether a span the smoothed table reads anywhere on `[s_lo, s_hi]`
-    /// retracts: a window there averages the table no further than its
-    /// width either side, and a span only touching that reach is read
-    /// nowhere, so nothing laid past it decides this.
+    /// retracts ([`RatioSmoothing::reading`]): nothing laid past what it
+    /// reads decides this.
     fn retracts_within(&self, s_lo: f64, s_hi: f64) -> bool {
-        let (reach_lo, reach_hi) = (
-            s_lo - self.smoothing.reach_back(s_lo),
-            s_hi + self.smoothing.reach_back(s_hi),
-        );
+        let reading = self.smoothing.reading(s_lo, s_hi);
         self.spans
             .iter()
-            .any(|span| span.retracts() && span.s1 > reach_lo && span.s0 < reach_hi)
+            .any(|span| span.retracts() && reading.reads(span))
     }
 
     fn aligned_span_start(&self, s: f64) -> f64 {

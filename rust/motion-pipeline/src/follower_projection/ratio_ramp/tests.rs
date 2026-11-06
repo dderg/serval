@@ -124,19 +124,19 @@ fn probes(length: f64, count: usize) -> impl Iterator<Item = f64> {
     (1..count).map(move |k| length * k as f64 / count as f64 + 1e-7)
 }
 
-/// The stretch of the table the smoothing averages at `s`: the window
-/// there, and both sides of every ratio step whose own window reaches it.
+/// The stretch of the table the smoothing averages at `s`: the moving
+/// window there, and every cluster of seams it or its own window reaches,
+/// with both sides of its seams.
 fn averaged_stretch(state: &FollowerState, s: f64) -> (f64, f64) {
     let h = state.smoothing.width.width(s);
     state
         .smoothing
         .laid
-        .steps_reaching(&state.smoothing.width, (s, s))
-        .filter(|&(seam, width)| (s - seam.s).abs() < width)
-        .fold((s - h, s + h), |(lo, hi), (seam, _)| {
+        .clusters_reaching(&state.smoothing.width, (s - h, s + h))
+        .fold((s - h, s + h), |(lo, hi), cluster| {
             (
-                lo.min(trajectory::next_toward(seam.s, f64::NEG_INFINITY)),
-                hi.max(trajectory::next_toward(seam.s, f64::INFINITY)),
+                lo.min(trajectory::next_toward(cluster.first(), f64::NEG_INFINITY)),
+                hi.max(trajectory::next_toward(cluster.last().s, f64::INFINITY)),
             )
         })
 }
@@ -2103,15 +2103,21 @@ fn a_reach_starting_on_a_step_an_ulp_past_a_rest_holds_the_step_window() {
     }
 }
 
-/// A ratio step `Δ = r_after − r_before` at `step_s`, between rests `0`
-/// and `step_s + rest_ahead`, under a width field asking for `target`
-/// every `spacing` mm, crossed by leaders at `speed` accelerating at
-/// `accel`, never by so much they stop within a window of the target.
+/// A ratio change from `r_before` to `r_after` starting at `step_s`: a
+/// step, or a slide through `r_mid` over the two lengths of `slide`, a
+/// corner blend's ratio ramp, either of which may be zero, between rests
+/// `0` and `rest_ahead` past the change's end, under a width field asking
+/// for `target` every `spacing` mm, no closer than the real field lays its
+/// nodes ([`super::NODE_SPACING_PER_WIDTH`] of the target), crossed by
+/// leaders at `speed` accelerating at `accel`, never by so much they stop
+/// within the change and a window of the target.
 #[derive(Debug, Clone, Copy)]
 struct RampCrossing {
     r_before: f64,
+    r_mid: f64,
     r_after: f64,
     step_s: f64,
+    slide: (f64, f64),
     rest_ahead: f64,
     target: f64,
     spacing: f64,
@@ -2122,12 +2128,48 @@ struct RampCrossing {
 
 impl RampCrossing {
     fn state(&self) -> FollowerState {
-        let length = self.step_s + self.rest_ahead;
-        let table = vec![
+        let (first, second) = self.slide;
+        let length = self.step_s + first + second + self.rest_ahead;
+        let mid = self.mid();
+        let table = [
             (self.step_s, self.r_before, self.r_before),
+            (first, self.r_before, mid),
+            (second, mid, self.r_after),
             (self.rest_ahead, self.r_after, self.r_after),
-        ];
+        ]
+        .into_iter()
+        .filter(|&(span, _, _)| span > 0.0)
+        .collect();
         smoothed(&table, width(length, self.spacing, |_| self.target))
+    }
+
+    /// Where the change's seams lie: its start, and the slide's inner seam
+    /// and end where it has them.
+    fn seams(&self) -> Vec<f64> {
+        let (first, second) = self.slide;
+        let mut seams = vec![self.step_s];
+        for end in [self.step_s + first, self.step_s + first + second] {
+            if end > seams[seams.len() - 1] {
+                seams.push(end);
+            }
+        }
+        seams
+    }
+
+    /// The ratio between the slide's two lengths: `r_mid` where both are
+    /// laid, else the end the missing one would reach.
+    fn mid(&self) -> f64 {
+        match self.slide {
+            (0.0, _) => self.r_before,
+            (_, 0.0) => self.r_after,
+            _ => self.r_mid,
+        }
+    }
+
+    /// The ratio's total variation across the change.
+    fn variation(&self) -> f64 {
+        let mid = self.mid();
+        (mid - self.r_before).abs() + (self.r_after - mid).abs()
     }
 
     fn path_speed(&self, s: f64) -> f64 {
@@ -2148,30 +2190,38 @@ impl RampCrossing {
 }
 
 fn ramp_crossing_strategy() -> impl Strategy<Value = RampCrossing> {
+    let slide_share = prop_oneof![Just(0.0), 1e-7..1e-3_f64, 1e-3..0.8_f64];
     (
-        (0.0..0.05_f64, 0.0..0.05_f64),
-        (0.2..6.0_f64, 0.2..6.0_f64),
-        (0.05..2.0_f64, 0.05..0.5_f64),
+        (0.0..0.05_f64, 0.0..0.05_f64, 0.0..0.05_f64),
+        (
+            0.2..6.0_f64,
+            (slide_share.clone(), slide_share),
+            0.2..6.0_f64,
+        ),
+        (0.05..2.0_f64, 0.75..1.5_f64),
         (5.0..300.0_f64, -0.45..0.45_f64),
         0.005..0.08_f64,
     )
         .prop_map(
             |(
-                (r_before, r_after),
-                (step_s, rest_ahead),
-                (target, spacing),
+                (r_before, r_mid, r_after),
+                (step_s, (first_share, second_share), rest_ahead),
+                (target, spacing_share),
                 (speed, accel_share),
                 k,
             )| {
+                let slide = (first_share * target, second_share * target);
                 RampCrossing {
                     r_before,
+                    r_mid,
                     r_after,
                     step_s,
+                    slide,
                     rest_ahead,
                     target,
-                    spacing,
+                    spacing: spacing_share * target,
                     speed,
-                    accel: accel_share * speed * speed / target,
+                    accel: accel_share * speed * speed / (target + slide.0 + slide.1),
                     advance_slope_s: k,
                 }
             },
@@ -2185,14 +2235,18 @@ proptest! {
         failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
             "proptest-regressions/ratio_ramp.txt",
         ))),
+        max_global_rejects: 65_536,
         ..ProptestConfig::default()
     })]
 
-    /// Wherever a ratio step's ramp lies, under whatever width the rests'
-    /// cones leave it, the advanced follower's velocity and acceleration
-    /// across it, its curvature's steps at the ramp's ends among them, stay
-    /// within what the ramp rule budgets the step: the planner and the
-    /// ramp time hold the follower's limits on that budget.
+    /// Wherever a ratio step or a slide one cluster of seams holds lies,
+    /// under whatever width the rests' cones leave it, the advanced
+    /// follower's velocity and acceleration across it, its curvature's
+    /// steps at the ramp's ends among them, stay within what the ramp rule
+    /// budgets a step of the ratio's total variation there at the
+    /// cluster's width: the planner and the ramp time hold the follower's
+    /// limits on that budget. A slide longer than its ends' windows is the
+    /// moving window's, outside the rule's step.
     #[test]
     fn a_ratio_ramp_asks_no_more_than_its_rule_at_the_speed_it_is_crossed(
         crossing in ramp_crossing_strategy(),
@@ -2206,9 +2260,14 @@ proptest! {
 /// `a_ratio_ramp_asks_no_more_than_its_rule_at_the_speed_it_is_crossed`).
 fn assert_ramp_within_rule(crossing: &RampCrossing) -> Result<(), TestCaseError> {
     let state = crossing.state();
-    let h = state.smoothing.width.width(crossing.step_s);
-    prop_assume!(h > 0.0 && crossing.r_after != crossing.r_before);
-    let (lo, hi) = (crossing.step_s - h, crossing.step_s + h);
+    let seams = crossing.seams();
+    let laid = &state.smoothing.laid;
+    let start = laid.seams.partition_point(|seam| seam.s < seams[0]);
+    let cluster = laid.cluster_holding(&state.smoothing.width, start);
+    prop_assume!(cluster.seams.len() == laid.seams.len() - start);
+    let h = cluster.width;
+    prop_assume!(h > 0.0 && crossing.variation() > 0.0);
+    let (lo, hi) = (seams[0] - h, seams[seams.len() - 1] + h);
     let fastest = crossing.path_speed(lo).max(crossing.path_speed(hi));
     let rule = RatioRampRule {
         advance_slope_s: crossing.advance_slope_s,
@@ -2217,8 +2276,8 @@ fn assert_ramp_within_rule(crossing: &RampCrossing) -> Result<(), TestCaseError>
         kernel_jerk_per_accel_hz: f64::INFINITY,
     };
     let step = RatioStep {
-        ratio_step: (crossing.r_after - crossing.r_before).abs(),
-        peak_ratio: crossing.r_after.max(crossing.r_before),
+        ratio_step: crossing.variation(),
+        peak_ratio: crossing.r_after.max(crossing.r_before).max(crossing.mid()),
         speed_mm_s: fastest,
         accel_mm_s2: crossing.accel.abs(),
         jerk_mm_s3: 0.0,
@@ -2252,8 +2311,33 @@ fn assert_ramp_within_rule(crossing: &RampCrossing) -> Result<(), TestCaseError>
 fn a_step_short_of_a_rest_is_ramped_within_its_rule() {
     assert_ramp_within_rule(&RampCrossing {
         r_before: 0.0,
+        r_mid: 0.0,
         r_after: 0.040_570_777_556_576_1,
         step_s: 0.2,
+        slide: (0.0, 0.0),
+        rest_ahead: 0.2,
+        target: 0.05,
+        spacing: 0.05,
+        speed: 5.0,
+        accel: 0.0,
+        advance_slope_s: 0.005,
+    })
+    .unwrap();
+}
+
+/// Found by `a_ratio_ramp_asks_no_more_than_its_rule_at_the_speed_it_is_crossed`
+/// on slides whose slopes a window following the width along the path
+/// averaged: a corner blend's slide a micrometre long, 0.2 mm short of a
+/// rest, read 2.5 times its budget where the window's back edge left it,
+/// as the step it all but is did.
+#[test]
+fn a_slide_short_of_a_rest_is_ramped_within_its_rule() {
+    assert_ramp_within_rule(&RampCrossing {
+        r_before: 0.0,
+        r_mid: 0.0,
+        r_after: 0.001_835_452_892_171_063_4,
+        step_s: 0.2,
+        slide: (0.0, 1e-6),
         rest_ahead: 0.2,
         target: 0.05,
         spacing: 0.05,
