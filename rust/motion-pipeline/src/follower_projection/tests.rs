@@ -2593,6 +2593,60 @@ fn only_the_leaders_a_kernel_free_advance_reads_fit_acceleration_continuous_seam
     assert_eq!(continuity(CompiledChain::default()), [Velocity; 3]);
 }
 
+#[test]
+fn a_kernel_free_advance_holds_its_leaders_jerk_to_what_its_acceleration_tolerance_takes() {
+    let compile = |instances: &[PostProcessorInstance]| CompiledChain::compile(instances).unwrap();
+    let pa = || PostProcessorInstance::new("pa", &algos::LinearPressureAdvance, vec![0.04]);
+    let shaped = || {
+        compile(&[PostProcessorInstance::new(
+            "is",
+            &algos::SmoothBell,
+            vec![0.01605],
+        )])
+    };
+    let chains_with = |follower: CompiledChain| trajectory::AxisChainSet {
+        chains: vec![shaped(), shaped(), shaped(), follower],
+        followers: vec![(3, vec![0, 1])],
+    };
+    let segment = |t_start: f64, ratio: f64, spatial_path: bool| ContinuousSegment {
+        axes: Arc::from([]),
+        followers: Arc::from([geometry::FollowerDemand::constant(3, ratio)]),
+        spatial_path,
+        t_start,
+        t_end: t_start + 0.1,
+        motor_mask: 0,
+        source_line: 0,
+        rest_at_end: false,
+    };
+    let (printing, retract, beyond) = (
+        segment(0.0, 0.04, true),
+        segment(0.1, -1.0, false),
+        segment(0.3, 0.08, true),
+    );
+    let segments = [&printing, &retract, &beyond];
+    let reach = (0.0, 0.25);
+    let read = super::LeaderJerkRead::of(&chains_with(compile(&[pa()])), 0);
+    let budget = read.jerk_budget(50.0, &segments, reach);
+    let expected = 50.0 / (0.04 * 2.0_f64.sqrt() * 0.04);
+    assert!(
+        (budget - expected).abs() <= 1e-9 * expected,
+        "the printing ratio alone sets the budget: {budget} against {expected}"
+    );
+    assert_eq!(
+        super::LeaderJerkRead::of(&chains_with(compile(&[pa()])), 2)
+            .jerk_budget(50.0, &segments, reach),
+        f64::INFINITY
+    );
+    let kerneled = compile(&[
+        pa(),
+        PostProcessorInstance::new("st", &algos::SmoothTriangle, vec![0.002]),
+    ]);
+    assert_eq!(
+        super::LeaderJerkRead::of(&chains_with(kerneled), 0).jerk_budget(50.0, &segments, reach),
+        f64::INFINITY
+    );
+}
+
 /// A leader of the voron_dense_top_layers print on the p3 kernel profile
 /// overshooting a stop by a third of a micrometre per second before it
 /// moves on: the odometer leaf over the stop runs under that speed, so its

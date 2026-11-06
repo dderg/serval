@@ -183,6 +183,37 @@ fn an_onset_exemption_holds_velocity_to_its_allowance_and_frees_acceleration() {
     assert!(verdict_on(&signal, &swing(1.1)).is_some());
 }
 
+/// A jerk budget holds a rung's jerk against the signal's, read off its
+/// acceleration polynomial; without one the hull leaves jerk free.
+#[test]
+fn a_jerk_budget_holds_the_rung_s_jerk_to_the_signal_s() {
+    let signal_jerk = 400.0;
+    let half = 0.5 * (T1 - T0);
+    let mut signal = resting_signal();
+    signal[0].pva[2] = local(&[0.0, signal_jerk * half]);
+    let with_jerk = |jerk_mm_s3: f64| HullBudget {
+        tol: FitTol::absolute(f64::INFINITY, f64::INFINITY).with_jerk(jerk_mm_s3),
+        velocity: f64::INFINITY,
+    };
+    let cubic_of_jerk = |jerk: f64| [0.0, 0.0, 0.0, jerk * half.powi(3) / 6.0];
+    let verdict = |rung_jerk: f64, budget: HullBudget| {
+        first_unproven(
+            &signal,
+            FittedPiece {
+                mono_u: &cubic_of_jerk(rung_jerk),
+                t0: T0,
+                t1: T1,
+            },
+            (T0, T1),
+            budget,
+        )
+    };
+    assert_eq!(verdict(signal_jerk + 0.9, with_jerk(1.0)), None);
+    assert!(verdict(signal_jerk + 1.1, with_jerk(1.0)).is_some());
+    assert!(verdict(signal_jerk - 1.1, with_jerk(1.0)).is_some());
+    assert_eq!(verdict(signal_jerk + 1.0e6, with_jerk(f64::INFINITY)), None);
+}
+
 /// Every error the magnitude test proves, the hull proves at its first
 /// look too: skipping the Bernstein conversion changes no verdict.
 #[test]

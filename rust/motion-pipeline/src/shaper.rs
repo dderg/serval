@@ -10,7 +10,7 @@ use trajectory::{
     RelativeSplinePiece, ShapedSignal, next_toward,
 };
 
-use crate::follower_projection::{FollowerState, project_followers};
+use crate::follower_projection::{FollowerState, LeaderJerkRead, project_followers};
 use crate::lowering::{
     AccelBudget, AccelerationExemption, AccelerationTrend, FitTol, HeldSample, LADDER_MAX_DEGREE,
     LADDER_PROBES_U, LadderBudget, LadderFailure, LadderMiss, LadderPolicy, LadderPva, LadderSpan,
@@ -1550,9 +1550,12 @@ fn constant_axis_column(
 #[derive(Clone, Copy)]
 pub(crate) enum ColumnSignal {
     /// A leader's shaped signal, whose seams carry what the followers
-    /// reading it need ([`crate::follower_projection::leader_seam_continuity`]).
+    /// reading it need ([`crate::follower_projection::leader_seam_continuity`])
+    /// and whose jerk holds what the advances reading it turn into their
+    /// followers' acceleration ([`LeaderJerkRead`]).
     Shaped {
         seam_continuity: SeamContinuity,
+        jerk_read: LeaderJerkRead,
     },
     MotorCommand {
         k1: f64,
@@ -1577,8 +1580,29 @@ impl ColumnSignal {
 
     fn seam_continuity(self) -> SeamContinuity {
         match self {
-            Self::Shaped { seam_continuity } => seam_continuity,
+            Self::Shaped {
+                seam_continuity, ..
+            } => seam_continuity,
             Self::MotorCommand { .. } => SeamContinuity::Velocity,
+        }
+    }
+
+    /// `fit_tol` for a fit of this signal over `group`, under `kernel`,
+    /// from the segments it reads.
+    fn group_tol(
+        self,
+        fit_tol: FitTol,
+        group: &[ContinuousSegment],
+        kernel: &nurbs::algebra::PiecewisePolynomialKernel,
+        segments: &[&ContinuousSegment],
+    ) -> FitTol {
+        match self {
+            Self::Shaped { jerk_read, .. } => {
+                let (k_lo, k_hi) = kernel.support();
+                let reach = (group[0].t_start - k_hi, group[group.len() - 1].t_end - k_lo);
+                fit_tol.with_jerk(jerk_read.jerk_budget(fit_tol.accel_mm_s2, segments, reach))
+            }
+            Self::MotorCommand { .. } => fit_tol,
         }
     }
 }
@@ -1743,7 +1767,7 @@ fn fit_group_alone(
             signal_breakpoints(read.segments, axis),
             group[0].t_start,
         ),
-        fit_tol,
+        signal.group_tol(fit_tol, group, kernel, read.segments),
         signal,
         1,
         pool,
@@ -1830,6 +1854,7 @@ pub(crate) fn leader_columns(chains: &AxisChainSet, n_axes: usize) -> Vec<FitCol
                     seam_continuity: crate::follower_projection::leader_seam_continuity(
                         chains, axis,
                     ),
+                    jerk_read: LeaderJerkRead::of(chains, axis),
                 },
             })
         })
@@ -4603,6 +4628,11 @@ fn shaped_ladder<S: TrackSignal>(
                 tol: piece_tol,
                 velocity: policy.velocity_budget,
             };
+            assert!(
+                exact.is_some() || !piece_tol.jerk_mm_s3.is_finite(),
+                "{} axis {axis}: a jerk budget is proven only against exact polynomials",
+                policy.fit_context
+            );
             let unproven = match exact {
                 Some(exact) => hull::first_unproven(
                     exact.over(resolved.0, resolved.1),

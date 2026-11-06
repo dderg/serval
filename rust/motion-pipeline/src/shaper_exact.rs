@@ -465,6 +465,29 @@ impl ExactPiece {
         order < 2 || self.unshaped_step.is_none()
     }
 
+    /// The signal's jerk on the piece, its acceleration polynomial's time
+    /// derivative. The computed and exact acceleration polynomials differ
+    /// by one of degree `d` within `rounding` on `|x| ≤ 1`, whose
+    /// derivative Markov's inequality holds within `d²·rounding`.
+    pub(crate) fn jerk(&self) -> LocalPolynomial {
+        let acceleration = &self.pva[2];
+        let len = acceleration.len.saturating_sub(1);
+        let mut coefficients = [0.0; EXACT_CAPACITY];
+        let mut magnitude = 0.0;
+        for (power, slot) in coefficients[..len].iter_mut().enumerate() {
+            let falling = (power + 1) as f64;
+            *slot = acceleration.coefficients[power + 1] * falling / self.radius;
+            magnitude += slot.abs();
+        }
+        let degree = len as f64;
+        LocalPolynomial {
+            coefficients,
+            len,
+            rounding: degree * degree * acceleration.rounding / self.radius
+                + 2.0 * f64::EPSILON * magnitude,
+        }
+    }
+
     pub(crate) fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let x = (t - self.center) / self.radius;
         (

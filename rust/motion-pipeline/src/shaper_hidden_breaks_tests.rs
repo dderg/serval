@@ -127,6 +127,55 @@ fn an_image_is_seeded_only_past_the_minimum_span_or_at_a_rest() {
     );
 }
 
+/// An image whose jerk step passes the jerk tolerance a fit holds stays a
+/// seed however close to the last: halving a span about it would narrow
+/// its pieces to the floor. Without a jerk tolerance it is left to the fit.
+#[test]
+fn an_image_whose_jerk_step_passes_the_jerk_tolerance_stays_a_seed() {
+    let kernel = build_smooth_zv_kernel(44.0);
+    let track = rest_then_accelerate();
+    let source = ShapedSignalSource::new(
+        &kernel,
+        table_over(&track, 0.0, 2.0 * BREAK_S),
+        track.knots().to_vec(),
+        0.0,
+    );
+    let breaks = &source.shaped_breaks;
+    let input = source.hidden_break_input().expect("the table is the input");
+    let (stepping, jerk_step) = breaks
+        .times()
+        .iter()
+        .filter_map(|&t| {
+            let image = breaks.image_at(t)?;
+            let jumps = breaks.image_jumps(input, image)?;
+            (!breaks.bounds_rest(input, image) && jumps.len > 3 && jumps.orders[3] != 0.0)
+                .then_some((t, jumps.orders[3].abs()))
+        })
+        .next()
+        .expect("an accelerating break's interior images step the shaped jerk");
+    let close = 0.5 * breaks.minimum_span;
+    let select = |jerk_mm_s3: f64| {
+        breaks.select_seeds(
+            vec![stepping - close, stepping, stepping + close],
+            Some(input),
+            FIT_TOL.with_jerk(jerk_mm_s3),
+            CruiseEnds::LeftToTheFit,
+        )
+    };
+    assert_eq!(
+        select(0.5 * jerk_step),
+        vec![stepping - close, stepping, stepping + close]
+    );
+    assert_eq!(
+        select(2.0 * jerk_step),
+        vec![stepping - close, stepping + close]
+    );
+    assert_eq!(
+        select(f64::INFINITY),
+        vec![stepping - close, stepping + close]
+    );
+}
+
 const CRUISE_MM_S: f64 = 50.0;
 const BRAKE_MM_S2: f64 = 3_000.0;
 /// The sixth-power term a source fit leaves along a cruise, its
