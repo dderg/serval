@@ -183,7 +183,9 @@ proptest! {
     /// than [`CrawlSide::rebuilds_within`] bounds at their own distance,
     /// speed and path acceleration away from the crawl, each read within a
     /// range around them, nor than it bounds with the acceleration read
-    /// either way.
+    /// either way; and no more `W′·ṡ²` than
+    /// [`RebuildsWithin::lead_velocity_at`] bounds there and
+    /// [`CrawlSide::lead_velocity`] over the whole side.
     #[test]
     fn the_rebuild_read_where_the_leaders_are_bounds_what_they_meet_there(
         speed in 0.0f64..2.0,
@@ -200,6 +202,7 @@ proptest! {
         let fastest = speed + fastest_over;
         let side = CrawlSide::either_way(speed, accel, fastest, (floor, floor));
         let within = side.rebuilds_within(width);
+        let whole_velocity = side.lead_velocity(width);
         let valley = crawl_valley(width, floor);
         let steps_per_piece = 400;
         let (mut s, mut v) = (0.0_f64, speed);
@@ -228,6 +231,18 @@ proptest! {
                     prop_assert!(
                         signed <= either_way * (1.0 + 1e-12),
                         "the signed read {signed} is looser than {either_way} read either way"
+                    );
+                    let lead = slope.abs() * v * v;
+                    let lead_bound = within.lead_velocity_at(distance, v);
+                    prop_assert!(
+                        lead <= lead_bound * (1.0 + 1e-6) + 1e-9,
+                        "at {s} mm and {v} mm/s the leaders meet a lead velocity of {lead}, past \
+                         its bound {lead_bound} within {distance:?}"
+                    );
+                    prop_assert!(
+                        lead <= whole_velocity * (1.0 + 1e-6) + 1e-9,
+                        "at {s} mm and {v} mm/s the leaders meet a lead velocity of {lead}, past \
+                         the side's bound {whole_velocity}"
                     );
                 }
                 s += v * dt + 0.5 * rate * dt * dt;

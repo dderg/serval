@@ -646,7 +646,9 @@ pub(crate) fn project_followers(
                 take_final_sources(state, (base, frontier), axis, &mut source_jobs);
             }
             if lookahead.clamps_past_signal() {
-                state.smoothing.close_at(state.s_ingested_end);
+                state
+                    .smoothing
+                    .close_at(state.s_ingested_end, &state.advance_spans);
                 take_final_sources(state, (base, frontier), axis, &mut source_jobs);
             }
             timing.ingest_us += ingest_started.elapsed_us();
