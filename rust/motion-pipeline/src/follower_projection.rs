@@ -380,11 +380,12 @@ fn fit_source_projection(
                 advanced_velocity: AdvancedFollowerSignal::new(&sig, advance, &[], tolerance)
                     .eval_pva(t)
                     .1,
+                onset_offset: 0.0,
             }),
         }
     };
-    let input_start = input_state(t_start);
-    let input_end = input_state(t_end);
+    let mut input_start = input_state(t_start);
+    let mut input_end = input_state(t_end);
     let steps_beyond_rounding = match leading {
         Some(advance) => advance_steps_at(advance, &sig, &breakpoints.fit_seeds, (t_start, t_end))
             .filter(|step| !step.is_rounding())
@@ -472,6 +473,11 @@ fn fit_source_projection(
                     },
                     &advanced,
                 )?;
+                if let Some(exempt) = advanced.exempt_accelerations(t_start, t_end) {
+                    let pieces = extract_bezier_pieces(&track);
+                    input_start.hold_onset_offset(t_start, piece_run_start_pv(&pieces).1, &exempt);
+                    input_end.hold_onset_offset(t_end, piece_run_end_pv(&pieces).1, &exempt);
+                }
                 (track, steps)
             }
             None => (fit_axis_from_signal(fit, &sig)?, steps_beyond_rounding),
@@ -625,8 +631,6 @@ pub(crate) fn project_followers(
                 };
                 let s_start = state.aligned_span_start(state.s_queued_end);
                 let leg = RampLeg {
-                    shaped: &frontier[i],
-                    leaders,
                     shaped_leaders: &read.shaped_leaders,
                     odometer: &read.odometer,
                     support: projection_support(&base[i], &frontier[i], axis, leaders),
@@ -1335,13 +1339,16 @@ struct SeamInput {
     ramped: Option<RampedSeam>,
 }
 
-/// What a ratio-ramped advance reads at a seam, its path slope, and the
-/// velocity the advance makes of it, which no kernel smooths after it.
+/// What a ratio-ramped advance reads at a seam, its path slope, the
+/// velocity the advance makes of it, which no kernel smooths after it, and
+/// how far the fit's velocity sits off that one where the seam lies inside
+/// a square-root onset sliver ([`UnshapedLeaderStep`]).
 #[derive(Debug, Clone, Copy)]
 struct RampedSeam {
     read_velocity: f64,
     read_slope: f64,
     advanced_velocity: f64,
+    onset_offset: f64,
 }
 
 impl SeamInput {
@@ -1377,17 +1384,41 @@ impl SeamInput {
                         .max(1.0)
     }
 
+    fn hold_onset_offset(&mut self, t: f64, fitted_velocity: f64, exempt: &ExemptAccelerations) {
+        if !exempt
+            .stretches
+            .iter()
+            .any(|&(from, to)| from <= t && t <= to)
+        {
+            return;
+        }
+        let ramped = self
+            .ramped
+            .as_mut()
+            .expect("an advanced follower's seam reads its advance");
+        let offset = fitted_velocity - ramped.advanced_velocity;
+        assert!(
+            offset.abs() <= exempt.velocity,
+            "the fit's velocity {fitted_velocity} at t={t} inside an onset sliver sits {offset} \
+             mm/s off the advanced velocity {}, past the {} mm/s its exemption admits",
+            ramped.advanced_velocity,
+            exempt.velocity
+        );
+        ramped.onset_offset = offset;
+    }
+
     /// The velocity step a kernel-free emission carries at the seam as a
     /// C0 corner rather than weld: the follower's own step, and on a
     /// ratio-ramped advance also what the leaders' acceleration rounding
     /// makes of the advanced velocity there — a weld spreading it over a
     /// segment shorter than a millisecond would exceed the acceleration
-    /// budget, and [`refuse_ramped_join_velocity_step`] has bounded it.
+    /// budget, and [`refuse_ramped_join_velocity_step`] has bounded it —
+    /// and what either side's fit leaves off it inside an onset sliver.
     fn emitted_velocity_step(&self, right: &Self) -> f64 {
         match (self.ramped, right.ramped) {
             (Some(left_ramped), Some(right_ramped)) => {
-                right_ramped.advanced_velocity
-                    - left_ramped.advanced_velocity
+                right_ramped.advanced_velocity + right_ramped.onset_offset
+                    - (left_ramped.advanced_velocity + left_ramped.onset_offset)
                     - right.ratio * (right.leader_speed - self.leader_speed)
             }
             _ => self.signal_velocity_step(right),
@@ -1924,11 +1955,11 @@ impl FollowerState {
         read: &IngestRead,
     ) -> Option<f64> {
         let IngestRead {
-            shaped_ds,
             ref odometer,
             raw_moves,
             ..
         } = *read;
+        let shaped_ds = odometer.total();
         if let Some(through) = self.ingested_through_t {
             assert!(
                 raw.t_end > through + GRID_DEDUP_EPS_S,
@@ -2374,7 +2405,7 @@ fn axis_breakpoints(axis: &ContinuousAxis) -> Vec<f64> {
 }
 
 fn leader_arc_length(seg: &ContinuousSegment, leaders: &[usize]) -> f64 {
-    shaped_leader_arc_length(seg, leaders, &ShapedLeaders::of(seg, leaders)).0
+    shaped_leader_odometer(seg, leaders, &ShapedLeaders::of(seg, leaders)).total()
 }
 
 /// Whether the raw leaders of `raw` cover more than [`SPAN_MIN_LEN_MM`]: at
@@ -2393,32 +2424,19 @@ fn raw_leaders_move(raw: &ContinuousSegment, leaders: &[usize]) -> bool {
     chord > MOVING_CHORD_MM || leader_arc_length(raw, leaders) > SPAN_MIN_LEN_MM
 }
 
-/// The arc length the leaders of `seg` cover, with the odometer leaves it
-/// sums.
-fn shaped_leader_arc_length(
+fn shaped_leader_odometer(
     seg: &ContinuousSegment,
     leaders: &[usize],
     shaped_leaders: &ShapedLeaders,
-) -> (f64, OdometerLeaves) {
-    let grid = axis_grid(seg, leaders);
-    let mut leaves = Vec::new();
-    let length = grid
-        .windows(2)
-        .map(|window| {
-            let mut length = 0.0;
-            odometer_leaves(
-                &|t| shaped_leaders.speed(t),
-                window[0],
-                window[1],
-                &mut |end, leaf| {
-                    length += leaf.covered_until(end);
-                    leaves.push((end, leaf));
-                },
-            );
-            length
-        })
-        .sum();
-    (length, OdometerLeaves { grid, leaves })
+) -> OdometerLeaves {
+    let mut odometer = OdometerLeaves::over(axis_grid(seg, leaders));
+    for index in 1..odometer.grid.len() {
+        let (from, to) = (odometer.grid[index - 1], odometer.grid[index]);
+        odometer_leaves(&|t| shaped_leaders.speed(t), from, to, &mut |end, leaf| {
+            odometer.push(end, leaf);
+        });
+    }
+    odometer
 }
 
 /// The raw segments after one being ingested, and whether they are all
@@ -2450,11 +2468,9 @@ impl Upcoming<'_> {
 }
 
 /// One newly ingested segment as ingest reads it: its shaped leaders, the
-/// arc length they cover with the odometer leaves summing it, and whether
-/// its raw leaders move.
+/// odometer summing the arc they cover, and whether its raw leaders move.
 struct IngestRead<'a> {
     shaped_leaders: ShapedLeaders<'a>,
-    shaped_ds: f64,
     odometer: OdometerLeaves,
     raw_moves: bool,
 }
@@ -2480,11 +2496,9 @@ fn ingest_reads<'a>(
         || (),
         |(), i| {
             let shaped_leaders = ShapedLeaders::of(&shaped[i], leaders);
-            let (shaped_ds, odometer) =
-                shaped_leader_arc_length(&shaped[i], leaders, &shaped_leaders);
+            let odometer = shaped_leader_odometer(&shaped[i], leaders, &shaped_leaders);
             IngestRead {
                 shaped_leaders,
-                shaped_ds,
                 odometer,
                 raw_moves: raw_leaders_move(&raw[i], leaders),
             }
@@ -2686,24 +2700,46 @@ impl LeaderPieces {
 }
 
 /// The odometer leaves over one segment's leader knot grid, in order, each
-/// with the end it covers to.
+/// with the end it covers to and the arc covered from the segment's start
+/// through it.
 #[derive(Debug)]
 struct OdometerLeaves {
     grid: Vec<f64>,
     leaves: Vec<(f64, OdometerLeaf)>,
+    covered_through: Vec<f64>,
 }
 
 impl OdometerLeaves {
-    /// The arc the leaders cover from the segment's start until `t`.
-    fn covered_until(&self, t: f64) -> f64 {
-        let mut covered = 0.0;
-        for (end, leaf) in &self.leaves {
-            if t <= *end {
-                return covered + leaf.covered_until(t);
-            }
-            covered += leaf.covered_until(*end);
+    fn over(grid: Vec<f64>) -> Self {
+        Self {
+            grid,
+            leaves: Vec::new(),
+            covered_through: Vec::new(),
         }
-        covered
+    }
+
+    fn push(&mut self, end: f64, leaf: OdometerLeaf) {
+        let through = self.total() + leaf.covered_until(end);
+        self.leaves.push((end, leaf));
+        self.covered_through.push(through);
+    }
+
+    fn total(&self) -> f64 {
+        self.covered_through.last().copied().unwrap_or(0.0)
+    }
+
+    fn covered_until(&self, t: f64) -> f64 {
+        if t <= self.grid[0] {
+            return 0.0;
+        }
+        let index = self.leaves.partition_point(|(end, _)| *end < t);
+        let Some((_, leaf)) = self.leaves.get(index) else {
+            return self.total();
+        };
+        let before = index
+            .checked_sub(1)
+            .map_or(0.0, |previous| self.covered_through[previous]);
+        before + leaf.covered_until(t)
     }
 }
 
@@ -4992,23 +5028,6 @@ fn adaptive_gauss_kronrod<L>(
     let middle = 0.5 * (a + b);
     adaptive_gauss_kronrod(rule, (a, middle), 0.5 * tol, depth - 1, leaf);
     adaptive_gauss_kronrod(rule, (middle, b), 0.5 * tol, depth - 1, leaf);
-}
-
-fn integrate(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
-    let mut total = 0.0;
-    if b - a > 0.0 {
-        adaptive_gauss_kronrod(
-            &|a, b, tol, last_chance| {
-                let (kronrod, gauss) = kronrod_and_gauss(&kronrod_samples(f, a, b), 0.5 * (b - a));
-                (last_chance || (kronrod - gauss).abs() <= tol).then_some(kronrod)
-            },
-            (a, b),
-            INTEGRAL_TOL_MM,
-            INTEGRAL_MAX_DEPTH,
-            &mut |_, value| total += value,
-        );
-    }
-    total
 }
 
 /// Maps `f` at the Kronrod nodes to the Chebyshev coefficients of the
