@@ -21,7 +21,7 @@ fn ctx(line_no: u32, feed: f64) -> MoveContext {
         limits: VelocityLimits::try_new(
             300.0,
             5000.0,
-            geometry::corner_deviation_from_scv(5.0, 5000.0),
+            geometry::CornerBudget::Shaped(geometry::corner_deviation_from_scv(5.0, 5000.0)),
             100_000.0,
         )
         .unwrap(),
@@ -43,7 +43,7 @@ fn loose_line(line_no: u32, start: [f64; 3], end: [f64; 3], e: f64) -> Move {
     c.limits = VelocityLimits::try_new(
         300.0,
         3000.0,
-        geometry::corner_deviation_from_scv(9.0, 3000.0),
+        geometry::CornerBudget::Shaped(geometry::corner_deviation_from_scv(9.0, 3000.0)),
         100_000.0,
     )
     .unwrap();
@@ -433,7 +433,9 @@ fn set_mesh_rebases_the_travel_align_anchor() {
 
 fn cd_ctx(line_no: u32, cd: f64) -> MoveContext {
     let mut c = ctx(line_no, 80.0);
-    c.limits = VelocityLimits::try_new(300.0, 5000.0, cd, 100_000.0).unwrap();
+    c.limits =
+        VelocityLimits::try_new(300.0, 5000.0, geometry::CornerBudget::Shaped(cd), 100_000.0)
+            .unwrap();
     c
 }
 
@@ -581,7 +583,13 @@ fn shallow_arc_ease_never_wraps_into_a_full_circle() {
                 .sum::<f64>()
                 .sqrt();
             let mut c = ctx(1 + i as u32, feed);
-            c.limits = VelocityLimits::try_new(2800.0, 100_000.0, 0.03, f64::INFINITY).unwrap();
+            c.limits = VelocityLimits::try_new(
+                2800.0,
+                100_000.0,
+                geometry::CornerBudget::Shaped(0.03),
+                f64::INFINITY,
+            )
+            .unwrap();
             line_move(w[0], w[1], e, c).unwrap()
         })
         .collect();

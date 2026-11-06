@@ -216,7 +216,7 @@ pub enum JunctionPlan {
 /// append: an arc through a longer prefix would also pass through this one.
 #[must_use]
 pub fn arc_candidate_fits(facets: &[Move], config: CornerFitConfig) -> bool {
-    let tol = span_tolerance(facets);
+    let tol = span_tolerance(facets, config);
     tol.is_finite() && kernels::arc_candidate(facets, config, tol)
 }
 
@@ -282,11 +282,11 @@ fn shortest_executable_halves(m_in: &Move, m_out: &Move) -> [f64; 2] {
 }
 
 /// The cocircularity tolerance the run detector derives from the moves' corner
-/// limits: the smallest positive corner deviation in the window.
-fn span_tolerance(moves: &[Move]) -> f64 {
+/// limits: the smallest positive [`fit_tolerance`] in the window.
+fn span_tolerance(moves: &[Move], config: CornerFitConfig) -> f64 {
     moves
         .iter()
-        .map(|m| m.limits.corner_deviation_mm)
+        .map(|m| fit_tolerance(m.limits, config))
         .filter(|d| d.is_finite() && *d > 0.0)
         .fold(f64::INFINITY, f64::min)
 }
@@ -391,7 +391,7 @@ pub fn facet_consumption_candidate(
     if theta1 <= config.theta_min_rad || theta1 >= config.theta_max_rad {
         return false;
     }
-    let delta = junction_deviation(m_in.limits).min(junction_deviation(m_mid.limits));
+    let delta = junction_deviation(m_in.limits, m_mid.limits, theta1, config);
     if !(delta.is_finite() && delta > 0.0) {
         return false;
     }
@@ -478,10 +478,14 @@ pub fn plan_facet_consumption(
         return Ok(None);
     }
 
-    let delta = std::iter::once(m_in)
+    let chain: Vec<&Move> = std::iter::once(m_in)
         .chain(mids.iter().copied())
         .chain(std::iter::once(m_out))
-        .map(|m| junction_deviation(m.limits))
+        .collect();
+    let delta = chain
+        .windows(2)
+        .zip(&thetas)
+        .map(|(pair, theta)| junction_deviation(pair[0].limits, pair[1].limits, *theta, config))
         .fold(f64::INFINITY, f64::min);
     if !(delta.is_finite() && delta > 0.0) {
         return Ok(None);
@@ -629,7 +633,9 @@ fn consumption_limits(
         .reduce(|a, b| VelocityLimits {
             max_velocity_mm_s: a.max_velocity_mm_s.min(b.max_velocity_mm_s),
             accel_mm_s2: a.accel_mm_s2.min(b.accel_mm_s2),
-            corner_deviation_mm: a.corner_deviation_mm.min(b.corner_deviation_mm),
+            corner: a
+                .corner
+                .stricter(b.corner, a.accel_mm_s2.min(b.accel_mm_s2)),
             max_jerk_mm_s3: a.max_jerk_mm_s3.min(b.max_jerk_mm_s3),
             max_z_velocity_mm_s: a.max_z_velocity_mm_s.min(b.max_z_velocity_mm_s),
             max_z_accel_mm_s2: a.max_z_accel_mm_s2.min(b.max_z_accel_mm_s2),
@@ -683,7 +689,7 @@ fn classify_junction(
         return Ok(JunctionPlan::Unblended(UnblendReason::NearReversal));
     }
 
-    let delta = junction_deviation(m_in.limits).min(junction_deviation(m_out.limits));
+    let delta = junction_deviation(m_in.limits, m_out.limits, theta, config);
     if delta <= 0.0 {
         return Ok(JunctionPlan::Unblended(UnblendReason::ZeroDeviation));
     }
@@ -828,14 +834,32 @@ fn biclothoid_followers(
     )
 }
 
-/// The deviation budget a clothoid corner blend may spend: the move's
-/// `corner_deviation` limit, verbatim. Smoothing kernels downstream add their
-/// own inward pull on top — deliberately NOT deducted here, so the fitted
-/// geometry depends only on this knob and never on acceleration or the active
-/// post-processor chain. Arc-run fitting and collinear merging use the raw
-/// limit as a reconstruction tolerance for the same reason.
-fn junction_deviation(limits: VelocityLimits) -> f64 {
-    limits.corner_deviation_mm
+/// The cut a clothoid blend turning `theta` between moves under `a` and `b`
+/// spends: the one whose apex the shaped corner crosses fastest within the
+/// corner budget ([`crate::ShapedCorners::blend_cut_mm`]), or the budget's own cut
+/// where no kernel shapes X or Y.
+fn junction_deviation(
+    a: VelocityLimits,
+    b: VelocityLimits,
+    theta: f64,
+    config: CornerFitConfig,
+) -> f64 {
+    let accel = a.accel_mm_s2.min(b.accel_mm_s2);
+    let budget = a.corner.stricter(b.corner, accel);
+    config.shaped_corners.map_or_else(
+        || budget.unshaped_cut_mm(accel),
+        |corners| corners.blend_cut_mm(budget, theta, accel),
+    )
+}
+
+/// The tolerance an arc run or a collinear merge is fitted to under
+/// `limits`: [`crate::ShapedCorners::arc_fit_tolerance_mm`], or the budget's own
+/// cut where no kernel shapes X or Y.
+pub(crate) fn fit_tolerance(limits: VelocityLimits, config: CornerFitConfig) -> f64 {
+    config.shaped_corners.map_or_else(
+        || limits.corner.unshaped_cut_mm(limits.accel_mm_s2),
+        |corners| corners.arc_fit_tolerance_mm(limits.corner, limits.accel_mm_s2),
+    )
 }
 
 #[cfg(test)]

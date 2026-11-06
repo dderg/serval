@@ -8,6 +8,22 @@ All dates in this document are approximate.
 
 ## Changes
 
+20261106: The corner budget now bounds the path after the input shaper
+instead of the planned one (see "Corner budget on the shaped path" in
+Config_Reference_Motion.md). An explicit `corner_deviation` is now the
+most the shaped path may miss each corner's vertex. The shaper's own
+rounding used to come on top of it, 1.4 to 1.8 times the budget on the
+bench configs, so corners now come out sharper. Where even a stop at a
+corner rounds past it, the planner slows the approach to that corner;
+the `corner_floor` startup event shows where that happens. With neither
+corner option set, each corner may miss by the shaper's rounding of a
+stop there plus 0.04 mm; that default bounds corners alone and leaves
+arcs and runs of facets to the shaper as before. `square_corner_velocity` now grants the
+rounding a Klipper machine with that value and the same shapers prints,
+in place of its old near-zero cut (0.00015 mm at 70000 mm/s²). Configs
+that relied on `corner_deviation` as the planned cut can raise it by the
+floor the startup event reports.
+
 20261103: The `ratio_ramp_time` option of a follower axis is removed;
 setting it is a config error that names the rule replacing it. Every
 axis that follows others now ramps each extrusion-ratio step (travel to
@@ -59,7 +75,7 @@ machines it fell below 3× realtime on a single core. Configs that set
 either option keep it, and setting both is still an error. To keep
 the old corners, set `square_corner_velocity: 5` explicitly. The
 measurements behind the value are in the
-[motion config reference](Config_Reference_Motion.md#why-the-corner-budget-defaults-to-004-mm).
+[motion config reference](Config_Reference_Motion.md#corner-budget-on-the-shaped-path).
 
 20260729: CAN bus micro-controllers are supported again on this fork.
 `[mcu] canbus_uuid` is accepted instead of `serial`, alongside a new

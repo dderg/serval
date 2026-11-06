@@ -2,7 +2,7 @@
 
 Each case feeds the same G-code to klippy's own handlers (``live_replay``)
 and to ``_motion_engine.parse_gcode``, then compares the moves move for move:
-displacement, feedrate and the effective (velocity, accel, corner_deviation)
+displacement, feedrate and the effective (velocity, accel, (corner kind, value))
 the planner runs each under, plus every stop at rest between two moves and
 the time the toolhead holds there. Everything up to the first move with
 displacement, or a SET_KINEMATIC_POSITION before it, is the snapshot's anchor
@@ -68,7 +68,7 @@ def snapshot_steps(engine, gcode: str, cfg: Path) -> list[tuple]:
                 "move",
                 tuple(e - s for s, e in zip(move["start"], move["end"])),
                 move["feedrate"],
-                (move["velocity"], move["accel"], move["corner_deviation"]),
+                (move["velocity"], move["accel"], move["corner"]),
             )
         )
     return compared
@@ -108,11 +108,10 @@ def test_set_velocity_limit_velocity_and_corner_fields_match_live(engine):
         "G1 X10 Y50 E1 F6000\n",
     )
     assert [limits for *_, limits in steps] == [
-        (1000.0, 10_000.0, steps[0][3][2]),
-        (400.0, 10_000.0, 0.05),
-        (400.0, 10_000.0, 0.05),
+        (1000.0, 10_000.0, ("square_corner_velocity", 12.0)),
+        (400.0, 10_000.0, ("corner_deviation", 0.05)),
+        (400.0, 10_000.0, ("corner_deviation", 0.05)),
     ]
-    assert steps[0][3][2] != 0.21
 
 
 def test_reset_velocity_limit_matches_live(engine):
@@ -125,8 +124,8 @@ def test_reset_velocity_limit_matches_live(engine):
         "G1 X50 Y50 F6000\n",
     )
     assert [limits for *_, limits in steps] == [
-        (300.0, 800.0, 0.01),
-        (1000.0, 10_000.0, 0.21),
+        (300.0, 800.0, ("corner_deviation", 0.01)),
+        (1000.0, 10_000.0, ("corner_deviation", 0.21)),
     ]
 
 

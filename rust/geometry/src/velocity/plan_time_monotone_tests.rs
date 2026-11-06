@@ -106,7 +106,7 @@ impl Print {
         let limits = VelocityLimits::try_new(
             self.machine.max_velocity,
             self.machine.accel,
-            0.05,
+            crate::CornerBudget::Shaped(0.05),
             f64::INFINITY,
         )
         .and_then(|limits| limits.with_extruder_caps(Some(extruder(&self.machine))))
@@ -191,6 +191,7 @@ fn plan(
         max_extrude_only_accel_mm_s2: EXTRUDE_ONLY_A,
         entry_v: 0.0,
         step_capacity: None,
+        shaped_corners: None,
     };
     let move_caps = build_move_caps(
         &loosened,

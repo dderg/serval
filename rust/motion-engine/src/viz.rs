@@ -8,19 +8,20 @@ use snapshot_core::waypoints::Waypoint;
 use snapshot_core::{ExactTrajectory, SampleSide, Snapshot, StreamRecord};
 use trajectory::ContinuousSegment;
 
-use planner_config::RuntimeLimits;
 use planner_config::from_doc::{MotionSettings, read_motion_settings};
+use planner_config::{RuntimeLimits, corner_budget_from_parts, corner_budget_parts};
 
 use crate::step_benchmarks::{PyStepBenchmark, optional_step_capacity_input};
 
 /// The runtime limit overrides in force for a waypoint's move, as Python
-/// sees them: `None` is "no override, the config base applies".
+/// sees them: `None` is "no override, the config base applies"; `corner`
+/// is `(kind, value)` as [`corner_budget_parts`] names it.
 #[derive(IntoPyObject, FromPyObject)]
 #[pyo3(from_item_all)]
 pub(crate) struct PyRuntimeLimits {
     velocity: Option<f64>,
     accel: Option<f64>,
-    corner_deviation: Option<f64>,
+    corner: Option<(String, f64)>,
 }
 
 /// A waypoint as a Python dict: `position` is `[x, y, z, e]`;
@@ -43,25 +44,36 @@ impl From<Waypoint> for PyWaypoint {
             runtime: PyRuntimeLimits {
                 velocity: w.runtime.velocity,
                 accel: w.runtime.accel,
-                corner_deviation: w.runtime.corner_deviation,
+                corner: w.runtime.corner.map(|corner| {
+                    let (kind, value) = corner_budget_parts(corner);
+                    (kind.to_owned(), value)
+                }),
             },
             dwell_before_s: w.dwell_before_s,
         }
     }
 }
 
-impl From<PyWaypoint> for Waypoint {
-    fn from(w: PyWaypoint) -> Self {
-        Self {
+impl TryFrom<PyWaypoint> for Waypoint {
+    type Error = PyErr;
+
+    fn try_from(w: PyWaypoint) -> PyResult<Self> {
+        let corner = w
+            .runtime
+            .corner
+            .map(|(kind, value)| corner_budget_from_parts(&kind, value))
+            .transpose()
+            .map_err(PyValueError::new_err)?;
+        Ok(Self {
             position: w.position,
             feedrate: w.feedrate,
             runtime: RuntimeLimits {
                 velocity: w.runtime.velocity,
                 accel: w.runtime.accel,
-                corner_deviation: w.runtime.corner_deviation,
+                corner,
             },
             dwell_before_s: w.dwell_before_s,
-        }
+        })
     }
 }
 
@@ -74,7 +86,7 @@ pub(crate) struct PyMoveSpec {
     feedrate: f64,
     velocity: f64,
     accel: f64,
-    corner_deviation: f64,
+    corner: (&'static str, f64),
     dwell_before_s: Option<f64>,
 }
 
@@ -85,8 +97,8 @@ fn motion_settings(config_text: &str) -> PyResult<MotionSettings> {
     Ok(settings)
 }
 
-pub(crate) fn waypoints_from_py(waypoints: Vec<PyWaypoint>) -> Vec<Waypoint> {
-    waypoints.into_iter().map(Waypoint::from).collect()
+pub(crate) fn waypoints_from_py(waypoints: Vec<PyWaypoint>) -> PyResult<Vec<Waypoint>> {
+    waypoints.into_iter().map(Waypoint::try_from).collect()
 }
 
 fn planner(config_text: &str) -> PyResult<snapshot_core::PlannerConfig> {
@@ -120,7 +132,7 @@ pub(crate) fn pipeline_snapshot(
     step_benchmarks: Option<Vec<PyStepBenchmark>>,
 ) -> PyResult<String> {
     let snap = snapshot_from_config(
-        &waypoints_from_py(waypoints),
+        &waypoints_from_py(waypoints)?,
         config_text,
         step_benchmarks.as_deref(),
     )?;
@@ -149,7 +161,7 @@ pub(crate) fn snapshot_moves(
         &motion_pipeline::live_config::extruder_caps(&planner).map_err(PyValueError::new_err)?,
     )
     .map_err(PyValueError::new_err)?;
-    let specs = snapshot_core::move_specs(&waypoints_from_py(waypoints), base)
+    let specs = snapshot_core::move_specs(&waypoints_from_py(waypoints)?, base)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(specs
         .into_iter()
@@ -159,7 +171,7 @@ pub(crate) fn snapshot_moves(
             feedrate: spec.feedrate,
             velocity: spec.limits.max_velocity_mm_s,
             accel: spec.limits.accel_mm_s2,
-            corner_deviation: spec.limits.corner_deviation_mm,
+            corner: corner_budget_parts(spec.limits.corner),
             dwell_before_s: spec.dwell_before_s,
         })
         .collect())
@@ -168,8 +180,9 @@ pub(crate) fn snapshot_moves(
 /// The live engine's runtime limit state over a config's base limits:
 /// the same [`RuntimeLimits`] setters and clamp `MotionEngine` exposes as
 /// `set_velocity_cap` / `set_accel_cap` / `set_corner_deviation` /
-/// `effective_limits`, without a planner behind it — the motion engine a
-/// G-code replay through klippy's own handlers talks to.
+/// `set_square_corner_velocity` / `effective_limits`, without a planner
+/// behind it — the motion engine a G-code replay through klippy's own
+/// handlers talks to.
 #[pyclass]
 pub(crate) struct PlannerLimits {
     base: planner_config::CartesianLimits,
@@ -207,8 +220,16 @@ impl PlannerLimits {
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
-    fn effective_limits(&self) -> (f64, f64, f64) {
-        self.runtime.effective(&self.base)
+    #[pyo3(signature = (square_corner_velocity))]
+    fn set_square_corner_velocity(&mut self, square_corner_velocity: Option<f64>) -> PyResult<()> {
+        self.runtime
+            .set_square_corner_velocity(square_corner_velocity)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    fn effective_limits(&self) -> (f64, f64, (&'static str, f64)) {
+        let (velocity, accel, corner) = self.runtime.effective(&self.base);
+        (velocity, accel, corner_budget_parts(corner))
     }
 }
 
@@ -230,7 +251,7 @@ pub(crate) fn pipeline_snapshot_axis_samples(
         return Err(PyValueError::new_err("samples must be at least 2"));
     }
     let snap = snapshot_from_config(
-        &waypoints_from_py(waypoints),
+        &waypoints_from_py(waypoints)?,
         config_text,
         step_benchmarks.as_deref(),
     )?;
@@ -275,7 +296,7 @@ pub(crate) fn pipeline_snapshot_epoch_samples(
     }
     let step_capacity = optional_step_capacity_input(config_text, step_benchmarks.as_deref())?;
     let record = snapshot_core::stream_record(
-        &waypoints_from_py(waypoints),
+        &waypoints_from_py(waypoints)?,
         &planner(config_text)?,
         step_capacity.as_ref(),
     )
@@ -332,7 +353,7 @@ pub(crate) fn pipeline_snapshot_dispatch_record<'py>(
 ) -> PyResult<Bound<'py, PyBytes>> {
     let step_capacity = optional_step_capacity_input(config_text, step_benchmarks.as_deref())?;
     let record = snapshot_core::stream_record(
-        &waypoints_from_py(waypoints),
+        &waypoints_from_py(waypoints)?,
         &planner(config_text)?,
         step_capacity.as_ref(),
     )

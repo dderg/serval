@@ -25,14 +25,14 @@ type RefTuple = (String, String, String);
 /// Bumped on any change to the Python-visible surface; klippy's loader
 /// refuses a module whose API_VERSION does not match, so a stale build
 /// fails loud instead of running with skewed semantics.
-const API_VERSION: u32 = 4;
+const API_VERSION: u32 = 5;
 
 /// Parse the motion-owned config sections ([printer] limits, [kinematics]
 /// + [motor] topology, [axis], [post_processor], [extruder]
 /// extrude-only caps) with the same reader the engine's init_planner uses.
 /// Returns:
 ///   ((max_velocity, max_accel, max_jerk, max_z_velocity, max_z_accel,
-///     corner_deviation),
+///     (corner_kind, corner_value)),
 ///    [(axis, follows, motors, post_processors)],
 ///    (kind, [(lane_idx, axis, motors, drive)], [(axis, motors, slot)])
 ///        or None when the config has no [kinematics] section,
@@ -44,7 +44,7 @@ fn read_motion_settings(
     py: Python<'_>,
     config_text: &str,
 ) -> PyResult<(
-    (f64, f64, f64, f64, f64, f64),
+    (f64, f64, f64, f64, f64, (&'static str, f64)),
     Vec<(String, Vec<String>, Vec<String>, Vec<String>)>,
     Option<(
         String,
@@ -70,7 +70,7 @@ fn read_motion_settings(
         c.max_jerk,
         c.max_z_velocity,
         c.max_z_accel,
-        c.corner_deviation,
+        planner_config::corner_budget_parts(c.corner),
     );
     let axes = settings
         .axes

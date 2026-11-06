@@ -269,7 +269,13 @@ fn install_test_pipeline(
 }
 
 fn test_limits() -> geometry::VelocityLimits {
-    geometry::VelocityLimits::try_new(300.0, 5000.0, 5.0, f64::INFINITY).unwrap()
+    geometry::VelocityLimits::try_new(
+        300.0,
+        5000.0,
+        geometry::CornerBudget::Shaped(5.0),
+        f64::INFINITY,
+    )
+    .unwrap()
 }
 
 fn stream_config_from(cfg: &PlannerConfig) -> (motion_pipeline::StreamConfig, Vec<f64>) {

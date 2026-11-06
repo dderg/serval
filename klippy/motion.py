@@ -261,8 +261,12 @@ class Motion:
         return (
             self._max_velocity,
             self._max_accel,
-            self._corner_deviation,
+            self._corner,
         )
+
+    def _effective_corner_values(self):
+        _velocity, accel, corner = self._effective_limits()
+        return motion_setup.corner_values(corner, accel)
 
     @property
     def max_velocity(self):
@@ -274,12 +278,11 @@ class Motion:
 
     @property
     def corner_deviation(self):
-        return self._effective_limits()[2]
+        return self._effective_corner_values()[0]
 
     @property
     def square_corner_velocity(self):
-        _velocity, accel, corner_deviation = self._effective_limits()
-        return motion_setup.scv_from_corner_deviation(corner_deviation, accel)
+        return self._effective_corner_values()[1]
 
     def get_status(self, eventtime):
         print_time = (
@@ -288,7 +291,10 @@ class Motion:
             else 0.0
         )
         estimated_print_time = self.mcu.estimated_print_time(eventtime)
-        velocity, accel, corner_deviation = self._effective_limits()
+        velocity, accel, corner = self._effective_limits()
+        corner_deviation, square_corner_velocity = motion_setup.corner_values(
+            corner, accel
+        )
         res = dict(self.kin.get_status(eventtime))
         res.update(
             {
@@ -300,10 +306,9 @@ class Motion:
                 "max_velocity": velocity,
                 "max_accel": accel,
                 "minimum_cruise_ratio": 0.0,
-                "square_corner_velocity": motion_setup.scv_from_corner_deviation(
-                    corner_deviation, accel
-                ),
+                "square_corner_velocity": square_corner_velocity,
                 "corner_deviation": corner_deviation,
+                "corner_budget": corner[0],
             }
         )
         return res
@@ -724,7 +729,7 @@ class Motion:
                 _max_jerk,
                 self.max_z_velocity,
                 self.max_z_accel,
-                self._corner_deviation,
+                self._corner,
             ),
             self.axis_sections,
             self.kinematics_decl,
@@ -774,15 +779,20 @@ class Motion:
                 "set exactly one"
             )
         if v is None and a is None and scv is None and corner_deviation is None:
-            velocity, accel, deviation = self._effective_limits()
+            velocity, accel, corner = self._effective_limits()
+            deviation, square_corner_velocity = motion_setup.corner_values(
+                corner, accel
+            )
             gcmd.respond_info(
-                "velocity=%s accel=%s corner_deviation=%s"
-                " square_corner_velocity=%s"
+                "velocity=%s accel=%s corner_budget=%s:%s"
+                " corner_deviation=%s square_corner_velocity=%s"
                 % (
                     velocity,
                     accel,
+                    corner[0],
+                    corner[1],
                     deviation,
-                    motion_setup.scv_from_corner_deviation(deviation, accel),
+                    square_corner_velocity,
                 )
             )
             return
@@ -790,18 +800,16 @@ class Motion:
             self.engine.set_velocity_cap(v)
         if a is not None:
             self.engine.set_accel_cap(a)
-        if scv is not None:
-            corner_deviation = motion_setup.corner_deviation_from_scv(
-                scv, self._max_accel
-            )
-        if corner_deviation is not None:
-            try:
+        try:
+            if scv is not None:
+                self.engine.set_square_corner_velocity(scv)
+            if corner_deviation is not None:
                 self.engine.set_corner_deviation(corner_deviation)
-            except ValueError as e:
-                gcmd.respond_info(
-                    "Warning: SET_VELOCITY_LIMIT left corner_deviation "
-                    "unchanged: %s" % (e,)
-                )
+        except ValueError as e:
+            gcmd.respond_info(
+                "Warning: SET_VELOCITY_LIMIT left the corner budget "
+                "unchanged: %s" % (e,)
+            )
 
     cmd_SET_POST_PROCESSOR_help = (
         "Update a [post_processor] parameter; applies from the next replan"

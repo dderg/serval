@@ -39,8 +39,8 @@ def test_playground_case_maps_config_shape():
         "post_processor_config",
     ):
         assert key in config
-    assert ("corner_deviation" in config) != (
-        "square_corner_velocity" in config
+    assert not (
+        "corner_deviation" in config and "square_corner_velocity" in config
     )
     assert isinstance(config["max_velocity"], float)
 

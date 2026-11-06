@@ -45,10 +45,15 @@ fn stream(pieces: &[(f64, f64, f64)]) -> Vec<Move> {
 }
 
 fn stream_under(caps: ExtruderCaps, pieces: &[(f64, f64, f64)]) -> Vec<Move> {
-    let limits = VelocityLimits::try_new(1000.0, STREAM_ACCEL, 0.0, f64::INFINITY)
-        .unwrap()
-        .with_extruder_caps(Some(caps))
-        .unwrap();
+    let limits = VelocityLimits::try_new(
+        1000.0,
+        STREAM_ACCEL,
+        crate::CornerBudget::Shaped(0.0),
+        f64::INFINITY,
+    )
+    .unwrap()
+    .with_extruder_caps(Some(caps))
+    .unwrap();
     let mut x = 0.0;
     pieces
         .iter()
@@ -388,10 +393,15 @@ fn settled_hold() -> f64 {
 /// travel along x, the hop back down, a prime and an extrusion: the
 /// retract and the prime meet the travel only across the unshaped z.
 fn hop_stream(hop_mm: f64) -> Vec<Move> {
-    let limits = VelocityLimits::try_new(1000.0, STREAM_ACCEL, 0.0, f64::INFINITY)
-        .unwrap()
-        .with_extruder_caps(Some(roomy_caps()))
-        .unwrap();
+    let limits = VelocityLimits::try_new(
+        1000.0,
+        STREAM_ACCEL,
+        crate::CornerBudget::Shaped(0.0),
+        f64::INFINITY,
+    )
+    .unwrap()
+    .with_extruder_caps(Some(roomy_caps()))
+    .unwrap();
     let points: [([f64; 3], f64, f64); 7] = [
         ([10.0, 0.0, 0.0], 10.0 * RATIO, 150.0),
         ([10.0, 0.0, 0.0], -0.5, 40.0),
@@ -451,10 +461,15 @@ fn a_z_hop_shorter_than_the_kernels_shortens_the_hold_by_its_least_time() {
 
 #[test]
 fn the_axes_in_reach_are_those_the_path_moves_on_within_the_spill() {
-    let limits = VelocityLimits::try_new(1000.0, 20_000.0, 0.0, f64::INFINITY)
-        .unwrap()
-        .with_extruder_caps(Some(caps()))
-        .unwrap();
+    let limits = VelocityLimits::try_new(
+        1000.0,
+        20_000.0,
+        crate::CornerBudget::Shaped(0.0),
+        f64::INFINITY,
+    )
+    .unwrap()
+    .with_extruder_caps(Some(caps()))
+    .unwrap();
     let corners = [
         [0.0, 0.0, 0.0],
         [10.0, 0.0, 0.0],

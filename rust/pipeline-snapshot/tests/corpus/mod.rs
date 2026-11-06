@@ -18,9 +18,11 @@ use pipeline_snapshot::{SampleSide, pipeline_snapshot_for_config};
 use planner_config::from_doc::{planner_config_from_text, read_motion_settings};
 
 pub mod extruder;
+pub mod known_corner_overs;
 pub mod known_extruder_excesses;
 #[cfg(feature = "fit-audit")]
 pub mod known_fit_violations;
+pub mod path_accuracy;
 pub mod ratchet;
 pub mod retract_placement;
 

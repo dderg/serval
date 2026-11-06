@@ -22,7 +22,12 @@ fn stream_case(
     let text = std::fs::read_to_string(&path).expect("read case gcode");
     let waypoints = parse_gcode(
         &text,
-        &CartesianLimits::without_z_caps(max_velocity, max_accel, f64::INFINITY, 0.0),
+        &CartesianLimits::without_z_caps(
+            max_velocity,
+            max_accel,
+            f64::INFINITY,
+            geometry::CornerBudget::Shaped(0.0),
+        ),
     )
     .expect("parse");
     let planner_config = PlannerConfig {
@@ -30,7 +35,7 @@ fn stream_case(
             max_velocity,
             max_accel,
             f64::INFINITY,
-            geometry::corner_deviation_from_scv(scv, max_accel),
+            geometry::CornerBudget::Shaped(geometry::corner_deviation_from_scv(scv, max_accel)),
         ),
         max_extrude_only_velocity: Some(100.0),
         max_extrude_only_accel: Some(1000.0),
