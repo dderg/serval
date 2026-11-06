@@ -36,6 +36,7 @@
 use std::sync::{Arc, OnceLock};
 
 mod defect;
+mod variation;
 
 pub use defect::{PairDefect, RAIL_ACCELERATION_DEFECT, RAIL_ARC_DEFECT, RAIL_SPEED_SLACK};
 

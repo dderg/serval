@@ -195,21 +195,21 @@ impl Motion {
     }
 
     /// The motion on the grid `k·h` for `k` in `range`, with each cell's
-    /// acceleration bound.
+    /// acceleration bound and variation.
     pub fn grid(&self, h: f64, range: std::ops::Range<i64>) -> PlannedGrid {
         let mut grid = PlannedGrid::default();
         let mut arc = self.arc(range.start as f64 * h);
         for k in range {
             let (tau, next) = (k as f64 * h, (k + 1) as f64 * h);
             let (position, velocity, _) = self.state(tau);
-            let cell_accel = self.cell_accel(tau, next);
             grid.push(
                 k,
                 GridSample {
                     position,
                     velocity,
                     arc,
-                    cell_accel,
+                    cell_accel: self.cell_accel(tau, next),
+                    cell_variation: self.cell_variation(tau, next),
                 },
             );
             arc += gauss(tau, next, |t| norm(self.state(t).1));
@@ -225,6 +225,17 @@ impl Motion {
             let a = self.state(0.5 * (span[0] + span[1])).2;
             std::array::from_fn(|axis| acc[axis].max(a[axis].abs()))
         })
+    }
+
+    /// The acceleration's total variation over `[from, to)`: its jumps
+    /// there.
+    fn cell_variation(&self, from: f64, to: f64) -> [f64; 3] {
+        self.steps()
+            .into_iter()
+            .filter(|&(at, _)| at >= from && at < to)
+            .fold([0.0; 3], |acc, (_, jump)| {
+                std::array::from_fn(|axis| acc[axis] + jump[axis].abs())
+            })
     }
 
     /// The exact shaped velocity, acceleration and jerk at `t` through the

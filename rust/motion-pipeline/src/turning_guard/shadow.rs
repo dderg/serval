@@ -6,7 +6,8 @@ use nurbs::algebra::PiecewisePolynomialKernel;
 use super::kernel_cells::KernelCells;
 
 /// The planned motion at one instant `τ_k = k·h` of the guard's grid, and
-/// a bound on each axis's planned acceleration over the cell `[τ_k, τ_k+1]`.
+/// over the cell `[τ_k, τ_k+1]` a bound on each axis's planned acceleration
+/// and on its total variation, infinite where the velocity may step.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct GridSample {
     pub position: [f64; 3],
@@ -14,6 +15,7 @@ pub(super) struct GridSample {
     /// The path length travelled since the segment began.
     pub arc: f64,
     pub cell_accel: [f64; 3],
+    pub cell_variation: [f64; 3],
 }
 
 impl GridSample {
@@ -23,6 +25,7 @@ impl GridSample {
             velocity: [0.0; 3],
             arc,
             cell_accel: [0.0; 3],
+            cell_variation: [0.0; 3],
         }
     }
 }
@@ -50,14 +53,15 @@ impl PlannedGrid {
         self.samples.is_empty()
     }
 
-    /// Resets the planned acceleration bound of the cell from index `k`,
+    /// Resets the planned acceleration bounds of the cell from index `k`,
     /// where one is sampled.
-    pub fn set_cell_accel(&mut self, k: i64, cell_accel: [f64; 3]) {
+    pub fn set_cell_bounds(&mut self, k: i64, (accel, variation): ([f64; 3], [f64; 3])) {
         if let Some(sample) = usize::try_from(k - self.base)
             .ok()
             .and_then(|index| self.samples.get_mut(index))
         {
-            sample.cell_accel = cell_accel;
+            sample.cell_accel = accel;
+            sample.cell_variation = variation;
         }
     }
 
@@ -159,8 +163,10 @@ impl FollowerKernels {
 }
 
 /// The shaped motion at a grid instant: velocity, acceleration and jerk
-/// per axis, each within its radius of the truth, and the largest planned
-/// acceleration bound per axis over the cells it read.
+/// per axis, each within its radius of the truth, the largest planned
+/// acceleration bound per axis over the cells it read, and a bound on the
+/// rate the jerk drifts at within a cell after it from the planned
+/// acceleration's variation ([`KernelCells::drift_weights`]).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub(super) struct ShapedSample {
     pub velocity: [f64; 3],
@@ -170,17 +176,22 @@ pub(super) struct ShapedSample {
     pub accel_miss: [f64; 3],
     pub jerk_miss: [f64; 3],
     pub window_accel: [f64; 3],
+    pub jerk_drift: [f64; 3],
 }
 
 /// The shaped motion at `t_n = n·h`, `None` where the grid lacks a cell it
 /// reads.
 ///
 /// Each kernel cell `j` reads the planned cell `m = n − j − 1`, where
-/// `w(t_n − τ) = α − β·(τ − τ_mid) + e` with `|e| ≤ ρ`:
+/// `w(t_n − τ) = α − β·(τ − τ_mid) + e` with `|e| ≤ ρ` and `∫e = 0` over
+/// the cell ([`super::kernel_cells`]), so `∫e·f = ∫e·(f − c)` for any
+/// constant `c`, at most `ρ·h·osc(f)/2` with `c` midway, and at most
+/// `ρ·∫|f|` too:
 /// - `∫ w·v = α·ΔP − β·∫(τ − τ_mid)·v + ∫e·v`; the middle term is at most
-///   `A·h³/12` (`v` is `A`-Lipschitz), the last `ρ·Δs`;
+///   `A·h³/12` (`v` is `A`-Lipschitz), the last `ρ·min(Δs, A·h²/2)`;
 /// - `∫ w·a = α·Δv − β·T + ∫e·a` with `T = ∫(τ − τ_mid)·a
-///   = h/2·(v_m + v_m+1) − ΔP` exactly, the last at most `ρ·A·h`;
+///   = h/2·(v_m + v_m+1) − ΔP` exactly, the last at most
+///   `ρ·h·min(A, V/2)` with `V` the cell's variation of `a`;
 /// - the jerk, `∫ w′·a` over the regular slope plus `Σ J_b·a(t − u_b)` over
 ///   the kernel's steps, the same way with `w′`'s cells and `|J_b|·A`.
 ///
@@ -209,23 +220,42 @@ pub(super) fn shaped_at(
             Leader::Shaped(cells) => {
                 let mut sums = [0.0; 6];
                 let mut window = 0.0_f64;
+                let weighted = |weight: f64, swing: f64| {
+                    if swing.is_finite() {
+                        weight * swing
+                    } else {
+                        f64::INFINITY
+                    }
+                };
+                let mut drift = weighted(
+                    cells.drift_weights[0],
+                    grid.get(n - cells.first)?.cell_variation[axis],
+                );
                 for (offset, (value, slope)) in cells.value.iter().zip(&cells.slope).enumerate() {
                     let m = n - (cells.first + offset as i64) - 1;
                     let lo = grid.get(m)?;
                     let hi = grid.get(m + 1)?;
                     let accel = lo.cell_accel[axis];
+                    let swing = lo.cell_variation[axis];
                     window = window.max(accel);
+                    drift += weighted(cells.drift_weights[offset + 1], swing);
                     let moved = hi.position[axis] - lo.position[axis];
                     let turned = hi.velocity[axis] - lo.velocity[axis];
                     let defect = 0.5 * h * (hi.velocity[axis] + lo.velocity[axis]) - moved;
                     let travelled = hi.arc - lo.arc;
+                    let velocity_swing = if swing.is_finite() {
+                        accel * h
+                    } else {
+                        f64::INFINITY
+                    };
+                    let reach = h * accel.min(0.5 * swing);
                     sums[0] += value.at * moved;
-                    sums[1] +=
-                        value.slope.abs() * accel * h * h * h / 12.0 + value.miss * travelled;
+                    sums[1] += value.slope.abs() * accel * h * h * h / 12.0
+                        + value.miss * travelled.min(0.5 * h * velocity_swing);
                     sums[2] += value.at * turned - value.slope * defect;
-                    sums[3] += value.miss * accel * h;
+                    sums[3] += value.miss * reach;
                     sums[4] += slope.at * turned - slope.slope * defect;
-                    sums[5] += slope.miss * accel * h;
+                    sums[5] += slope.miss * reach;
                 }
                 out.velocity[axis] = sums[0];
                 out.velocity_miss[axis] = sums[1];
@@ -234,6 +264,7 @@ pub(super) fn shaped_at(
                 out.jerk[axis] = sums[4];
                 out.jerk_miss[axis] = sums[5] + cells.jumps * window;
                 out.window_accel[axis] = window;
+                out.jerk_drift[axis] = drift;
             }
         }
     }
@@ -261,7 +292,9 @@ impl CellMotion {
     /// `K`: the velocity's slope is the acceleration, bounded by the jerk;
     /// the acceleration's slope is the jerk, Lipschitz at the kernel's rate
     /// times the planned acceleration, stepping by `2·|J_b|·A` where a
-    /// kernel step meets a planned acceleration step. A product of two
+    /// kernel step meets a planned acceleration step. The jerk at `t_n + δ`
+    /// is also within `δ·D` of the jerk at `t_n`, `D` its drift
+    /// (`jerk_drift`), whichever is less. A product of two
     /// chords is a quadratic, within a quarter of its leading coefficient
     /// of the chord through its ends.
     pub fn between(kernels: &FollowerKernels, from: &ShapedSample, to: &ShapedSample) -> Self {
@@ -281,8 +314,9 @@ impl CellMotion {
                 Leader::Shaped(cells) => {
                     let rate = cells.jerk_rate_per_accel * window;
                     let step = 2.0 * cells.jumps * window;
+                    let drift = rate.min(from.jerk_drift[axis]);
                     jerk_radius[axis] =
-                        from.jerk_miss[axis].max(to.jerk_miss[axis]) + 0.5 * rate * h + step;
+                        from.jerk_miss[axis].max(to.jerk_miss[axis]) + 0.5 * drift * h + step;
                     jerk[axis] = from.jerk[axis].abs().max(to.jerk[axis].abs()) + jerk_radius[axis];
                     velocity_radius[axis] = from.velocity_miss[axis].max(to.velocity_miss[axis])
                         + jerk[axis] * h * h / 8.0;

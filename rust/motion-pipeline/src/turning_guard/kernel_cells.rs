@@ -32,6 +32,13 @@ pub(super) struct KernelCells {
     /// `∫|w″| + Σ|Δw′|`: the shaped jerk's rate per unit of planned
     /// acceleration, away from the steps the kernel's own jumps take.
     pub jerk_rate_per_accel: f64,
+    /// Per planned cell the shaped motion at `t_n` reads, from the one just
+    /// past the kernel's start (`n − first`) back through each kernel
+    /// cell's: `max |w′|`, off the kernel's steps, over the kernel cells a
+    /// read shifted by up to one cell reaches from there. The shaped jerk
+    /// moves by at most `δ·Σ weightₘ·Vₘ` within `δ ≤ h` of `t_n`, `Vₘ` the
+    /// planned acceleration's variation over cell `m`.
+    pub drift_weights: Vec<f64>,
     /// Bounds on `∫w⁺` and `∫w⁻`, least and most.
     pub positive_mass: (f64, f64),
     pub negative_mass: (f64, f64),
@@ -61,6 +68,7 @@ impl KernelCells {
             slope,
             jumps: jump_total(&kernel.pieces),
             jerk_rate_per_accel: absolute_integral(&curvatures) + jump_total(&slopes),
+            drift_weights: drift_weights(&cell_peaks(&slopes, first, last, h)),
             positive_mass,
             negative_mass,
         }
@@ -71,6 +79,30 @@ fn differentiated(pieces: &[BezierPiece]) -> Vec<BezierPiece> {
     pieces.iter().map(BezierPiece::differentiate).collect()
 }
 
+/// A bound on `|f|` over each cell `[j·h, (j+1)·h]`, `j` in `first..last`.
+fn cell_peaks(pieces: &[BezierPiece], first: i64, last: i64, h: f64) -> Vec<f64> {
+    (first..last)
+        .map(|j| {
+            let (a, b) = (j as f64 * h, (j + 1) as f64 * h);
+            pieces
+                .iter()
+                .filter(|piece| piece.u_start < b && piece.u_end > a)
+                .map(|piece| {
+                    let (lo, hi) = (a.max(piece.u_start), b.min(piece.u_end));
+                    largest_magnitude(&bernstein(&piece.coeffs, piece.u_start, lo, hi))
+                })
+                .fold(0.0, f64::max)
+        })
+        .collect()
+}
+
+fn drift_weights(peaks: &[f64]) -> Vec<f64> {
+    let reach = |cell: usize| peaks[cell].max(peaks.get(cell + 1).copied().unwrap_or(0.0));
+    std::iter::once(peaks[0])
+        .chain((0..peaks.len()).map(reach))
+        .collect()
+}
+
 fn piece_at(pieces: &[BezierPiece], u: f64) -> Option<&BezierPiece> {
     pieces
         .iter()
@@ -78,10 +110,11 @@ fn piece_at(pieces: &[BezierPiece], u: f64) -> Option<&BezierPiece> {
 }
 
 /// `f` (the pieces, zero outside them) linearised about the middle of
-/// `[a, b]` with its slope `df` there.
+/// `[a, b]` with its slope `df` there, through its mean over `[a, b]`: the
+/// miss integrates to nothing across the cell, so a planned quantity
+/// constant over it reads none of it.
 fn linearise(f: &[BezierPiece], df: &[BezierPiece], a: f64, b: f64) -> Linear {
     let mid = 0.5 * (a + b);
-    let at = piece_at(f, mid).map_or(0.0, |piece| piece.evaluate(mid));
     let slope = piece_at(df, mid).map_or(0.0, |piece| piece.evaluate(mid));
     let mut cuts = vec![a, b];
     cuts.extend(
@@ -91,17 +124,30 @@ fn linearise(f: &[BezierPiece], df: &[BezierPiece], a: f64, b: f64) -> Linear {
     );
     cuts.sort_by(f64::total_cmp);
     cuts.dedup();
-    let miss = cuts
+    let spans: Vec<(f64, f64, Option<&BezierPiece>)> = cuts
         .windows(2)
-        .map(|span| {
-            let (origin, mut residual) = piece_at(f, 0.5 * (span[0] + span[1]))
-                .map_or((span[0], vec![0.0, 0.0]), |piece| {
-                    (piece.u_start, piece.coeffs.clone())
-                });
+        .map(|span| (span[0], span[1], piece_at(f, 0.5 * (span[0] + span[1]))))
+        .collect();
+    let at = spans
+        .iter()
+        .map(|&(lo, hi, piece)| {
+            piece.map_or(0.0, |piece| {
+                let coefficients = bernstein(&piece.coeffs, piece.u_start, lo, hi);
+                (hi - lo) * coefficients.iter().sum::<f64>() / coefficients.len() as f64
+            })
+        })
+        .sum::<f64>()
+        / (b - a);
+    let miss = spans
+        .iter()
+        .map(|&(lo, hi, piece)| {
+            let (origin, mut residual) = piece.map_or((lo, vec![0.0, 0.0]), |piece| {
+                (piece.u_start, piece.coeffs.clone())
+            });
             residual.resize(residual.len().max(2), 0.0);
             residual[0] -= at + slope * (origin - mid);
             residual[1] -= slope;
-            largest_magnitude(&bernstein(&residual, origin, span[0], span[1]))
+            largest_magnitude(&bernstein(&residual, origin, lo, hi))
         })
         .fold(0.0, f64::max);
     Linear { at, slope, miss }
