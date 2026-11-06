@@ -235,14 +235,15 @@ impl SeamTable {
         if self.is_inert() {
             return Jet::ZERO;
         }
-        self.slope_correction(width, s) + self.step_corrections(width, s)
-    }
-
-    fn slope_correction(&self, width: &WidthField, s: f64) -> Jet {
         let h = width.jet(s);
         if h.value <= 0.0 {
             return Jet::ZERO;
         }
+        self.slope_correction(h, s) + self.step_corrections(width, h.value, s)
+    }
+
+    /// The slope's share of `X` under the window of width `h` at `s`.
+    fn slope_correction(&self, h: Jet, s: f64) -> Jet {
         let (lo, hi) = (s - h.value, s + h.value);
         let slope_left = self.slope_left_of(lo);
         let window = self.seams_near(lo, hi);
@@ -268,12 +269,10 @@ impl SeamTable {
     /// `1 ± h'` times the path's speed, and step the ratio's curvature at
     /// its edge by `(1 ∓ h')²` times what the ramp rule budgets
     /// ([`geometry::RatioRampRule`]). The width's slope bound `λ` places
-    /// every step that reaches `s` within `h(s)/(1 − λ)` of it.
-    fn step_corrections(&self, width: &WidthField, s: f64) -> Jet {
-        if width.nodes.is_empty() {
-            return Jet::ZERO;
-        }
-        let reach = width.width(s) / (1.0 - WIDTH_SLOPE_BOUND);
+    /// every step that reaches `s` within `h/(1 − λ)` of it, `h` the width
+    /// at `s`.
+    fn step_corrections(&self, width: &WidthField, h: f64, s: f64) -> Jet {
+        let reach = h / (1.0 - WIDTH_SLOPE_BOUND);
         self.seams_near(s - reach, s + reach)
             .iter()
             .filter(|seam| seam.step != 0.0)
