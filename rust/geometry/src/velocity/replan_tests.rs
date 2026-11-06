@@ -394,7 +394,7 @@ proptest! {
                     &stream.moves[lo + k - 1],
                     &stream.moves[lo + k],
                     (&stream.budgets[lo + k - 1], &stream.budgets[lo + k]),
-                    up_accel.max(dn_accel),
+                    (up_accel.max(dn_accel), up_accel.max(dn_accel)),
                 ),
             )?;
         }

@@ -789,10 +789,13 @@ fn seam_ceiling(
         up_move,
         dn_move,
         (up_budget, dn_budget),
-        up.accel
-            .max(dn.accel)
-            .max(up_budget.strongest_accel_mm_s2)
-            .max(dn_budget.strongest_accel_mm_s2),
+        (
+            up.accel.max(dn.accel),
+            up.accel
+                .max(dn.accel)
+                .max(up_budget.strongest_accel_mm_s2)
+                .max(dn_budget.strongest_accel_mm_s2),
+        ),
     );
     if step_ceiling < ceiling {
         report.ratio_step_bound += 1;

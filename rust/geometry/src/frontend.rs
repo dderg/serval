@@ -205,6 +205,14 @@ impl ExtruderCaps {
         self.path_jerk_per_accel_hz[axis_set(axes)]
     }
 
+    /// Whether the planner budgets the shaped path's jerk at the gain of
+    /// an isolated switch ([`Self::planned_path_jerk_gain`]): on a chain
+    /// without a follower kernel.
+    #[must_use]
+    pub fn plans_isolated_switches(&self) -> bool {
+        self.own_jerk_per_accel_hz.is_infinite()
+    }
+
     /// The jerk gain the planner budgets the shaped path around a segment
     /// that moves on `axes` at. Without a follower kernel, the gain of a
     /// switch the kernels meet alone: a switch steps the acceleration by up
@@ -220,7 +228,7 @@ impl ExtruderCaps {
     #[must_use]
     pub fn planned_path_jerk_gain(&self, axes: [bool; 3]) -> f64 {
         let variation = self.path_jerk_gain(axes);
-        if self.own_jerk_per_accel_hz.is_finite() {
+        if !self.plans_isolated_switches() {
             return variation;
         }
         let peak = (0..3)

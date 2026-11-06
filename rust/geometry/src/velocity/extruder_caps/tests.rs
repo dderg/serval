@@ -37,6 +37,7 @@ fn caps(max_velocity: f64, max_accel: f64, slope: f64) -> ExtruderCaps {
 fn around(ratio_in_reach: f64, axes_in_reach: [bool; 3]) -> ExtrusionBudget {
     ExtrusionBudget {
         ratio_in_reach,
+        ratio_step_in_reach: 0.0,
         axes_in_reach,
         rest_holds_s: [0.0; 2],
         rest_room_mm: f64::INFINITY,
@@ -73,6 +74,7 @@ fn demand_of(caps: &ExtruderCaps, path_gain: f64, kappa_peak: f64) -> Demand {
         kappa_peak,
         unshaped_share: 0.0,
         ratio_in_reach: RATIO,
+        step_ramp_per_accel: 0.0,
     }
 }
 
@@ -136,6 +138,28 @@ fn a_chain_without_a_follower_kernel_budgets_the_switch_gain_and_a_kernel_follow
     caps.own_jerk_per_accel_hz = 1e6;
     let varied = 2000.0 / (RATIO * (1.0 + 0.5 * X_GAIN));
     assert!((budget(&caps) - varied).abs() < 1e-9 * varied);
+}
+
+#[test]
+fn a_ratio_step_in_reach_leaves_its_ramp_room_to_cross_at_rest_without_a_follower_kernel() {
+    let mut caps = caps(1000.0, 2000.0, 0.5);
+    caps.leader_peak_hz = [0.2 * X_GAIN; 3];
+    let stepped = ExtrusionBudget {
+        ratio_step_in_reach: RATIO,
+        ..around(RATIO, X)
+    };
+    let budget = |caps: &ExtruderCaps, around: &ExtrusionBudget| {
+        extruder_capped(&line_x(50.0), caps, around, 0.0, (150.0, 3000.0)).1
+    };
+    let ramp = ramp_accel_at_rest_per_accel(0.5, RATIO);
+    let roomy = 2000.0 / (RATIO * (1.0 + 0.5 * 0.4 * X_GAIN) + ramp);
+    assert!(
+        (budget(&caps, &stepped) - roomy).abs() < 1e-9 * roomy,
+        "{} against {roomy}",
+        budget(&caps, &stepped)
+    );
+    caps.own_jerk_per_accel_hz = 1e6;
+    assert_eq!(budget(&caps, &stepped), budget(&caps, &around(RATIO, X)));
 }
 
 #[test]
@@ -331,7 +355,8 @@ fn the_planner_caps_the_climbing_travel_after_an_extrusion_on_an_unshaped_leader
             .map(|sample| sample.a.abs())
             .fold(0.0, f64::max)
     };
-    let cap = 2000.0 / (RATIO * (1.0 + 0.5 * X_GAIN));
+    let ramp = ramp_accel_at_rest_per_accel(0.5, RATIO);
+    let cap = 2000.0 / (RATIO * (1.0 + 0.5 * X_GAIN) + ramp);
     let z_share = 5.0 / 2525.0_f64.sqrt();
     assert!(velocity_step(&extruder, RATIO, cap, z_share) <= 1.0);
     assert!(
@@ -395,7 +420,8 @@ fn the_planner_budgets_a_travel_at_the_extrusion_a_ramp_carries_across_the_blend
         .iter()
         .map(|sample| sample.a.abs())
         .fold(0.0, f64::max);
-    let cap = 2000.0 / (line * (1.0 + 0.5 * X_GAIN));
+    let ramp = ramp_accel_at_rest_per_accel(0.5, line);
+    let cap = 2000.0 / (line * (1.0 + 0.5 * X_GAIN) + ramp);
     assert!(
         (travel_peak - cap).abs() < 1e-6 * cap,
         "{travel_peak} against {cap}"

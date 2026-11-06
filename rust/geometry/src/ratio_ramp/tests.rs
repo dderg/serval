@@ -444,3 +444,22 @@ fn the_ramp_time_is_continuous_in_the_leaders_own_demand() {
         );
     }
 }
+
+#[test]
+fn the_ramp_at_rest_adds_its_per_accel_share_over_the_longest_ramp() {
+    for (k, ratio_step, accel) in [(0.5, 0.0337, 1213.0), (0.02, 0.0168, 25_000.0)] {
+        let at_rest = RatioStep {
+            ratio_step,
+            peak_ratio: 0.0,
+            speed_mm_s: 0.0,
+            accel_mm_s2: accel,
+            jerk_mm_s3: 0.0,
+        };
+        let (_, ramp_accel) = unlimited(k).demand(RATIO_RAMP_MAX_TIME_S, &at_rest);
+        let expected = ramp_accel_at_rest_per_accel(k, ratio_step) * accel;
+        assert!(
+            (ramp_accel - expected).abs() <= 1e-12 * expected,
+            "{ramp_accel} against {expected}"
+        );
+    }
+}

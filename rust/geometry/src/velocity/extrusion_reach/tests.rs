@@ -129,6 +129,26 @@ fn a_travel_meets_the_extrusion_its_spill_carries_across_the_blends_beside_it() 
 }
 
 #[test]
+fn the_ratio_step_in_reach_spans_the_ratios_with_travel_at_none() {
+    let steps = |moves: &[Move]| -> Vec<f64> {
+        extrusion_budgets(moves, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
+            .iter()
+            .map(|budget| budget.ratio_step_in_reach)
+            .collect()
+    };
+    let through_travel = stream(&[
+        (10.0, RATIO, 150.0),
+        (0.45, 0.0, 150.0),
+        (10.0, RATIO, 150.0),
+    ]);
+    assert_ratios(&steps(&through_travel), &[RATIO; 3]);
+    let into_a_wider_line = stream(&[(10.0, RATIO, 150.0), (10.0, 1.5 * RATIO, 150.0)]);
+    assert_ratios(&steps(&into_a_wider_line), &[0.5 * RATIO; 2]);
+    let even = stream(&[(10.0, RATIO, 150.0), (10.0, RATIO, 150.0)]);
+    assert_eq!(steps(&even), [0.0; 2]);
+}
+
+#[test]
 fn ratios_beyond_the_spill_and_the_ramp_stay_out_of_reach() {
     let travel = 150.0 * (SPILL_S + 0.5 * RAMP_TIME_S) + 0.1;
     let moves = stream(&[
