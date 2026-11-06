@@ -3,8 +3,8 @@ use crate::path::Segment;
 use crate::step_capacity::{SPATIAL_LANES, StepCapacity, StepCapacityOverload};
 
 use super::extruder_caps;
-use super::seam_envelope::ReachableSpeed;
 use super::rate_cap::LinearRate;
+use super::seam_envelope::ReachableSpeed;
 
 const MCU_CAPACITY_SHARE: f64 = 1.0;
 

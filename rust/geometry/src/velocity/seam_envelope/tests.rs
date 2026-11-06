@@ -18,16 +18,19 @@ fn curved(ceiling: f64, kappa: f64, run_mm: f64) -> SeamTerm {
 }
 
 fn envelope(terms: &[SeamTerm]) -> SeamEnvelope {
-    terms[1..]
-        .iter()
-        .fold(SeamEnvelope::of(terms[0].limit).across(terms[0].run_mm), |envelope, term| {
-            envelope.with(*term)
-        })
+    terms[1..].iter().fold(
+        SeamEnvelope::of(terms[0].limit).across(terms[0].run_mm),
+        |envelope, term| envelope.with(*term),
+    )
 }
 
 #[test]
 fn a_rest_drops_every_seam_beyond_it() {
-    let kept = envelope(&[straight(80.0, 30.0), curved(200.0, 2.0, 12.0), straight(0.0, 5.0)]);
+    let kept = envelope(&[
+        straight(80.0, 30.0),
+        curved(200.0, 2.0, 12.0),
+        straight(0.0, 5.0),
+    ]);
     assert_eq!(kept.terms(), &[straight(0.0, 5.0)]);
 }
 
@@ -78,18 +81,18 @@ fn the_envelope_holds_the_least_of_its_seams_at_every_budget() {
 #[test]
 fn a_move_between_rests_takes_its_trapezoid() {
     let length = 10.0;
+    let (ceiling, accel) = (50.0, 1000.0);
     let reach = ReachableSpeed {
         peak_mm_s: 100.0,
         behind: SeamEnvelope::of(SeamLimit::ceiling(0.0)),
         ahead: SeamEnvelope::of(SeamLimit::ceiling(0.0)),
         length_mm: length,
     };
-    let (ceiling, accel) = (50.0, 1000.0);
     let ramp_mm = ceiling * ceiling / (2.0 * accel);
     let expected = 2.0 * ceiling / accel + (length - 2.0 * ramp_mm) / ceiling;
-    assert!((reach.run_time(ceiling, accel) - expected).abs() <= 1e-12 * expected);
+    assert!((reach.run_time((ceiling, accel), accel) - expected).abs() <= 1e-12 * expected);
     let triangle = 2.0 * (length / accel).sqrt();
-    assert!((reach.run_time(1e6, accel) - triangle).abs() <= 1e-12 * triangle);
+    assert!((reach.run_time((1e6, accel), accel) - triangle).abs() <= 1e-12 * triangle);
 }
 
 #[test]
@@ -103,7 +106,25 @@ fn the_run_reads_the_seams_beyond_the_move() {
         length_mm: length,
     };
     let triangle = 2.0 * ((6.0 + length) / accel).sqrt();
-    assert!((reach.run_time(1e6, accel) - triangle).abs() <= 1e-12 * triangle);
-    let peak_sq = 2.0 * accel * 6.0 * 0.5 + accel * length;
-    assert!((reach.run_peak(accel) - peak_sq.min(2.0 * accel * length).sqrt()).abs() <= 1e-9);
+    assert!((reach.run_time((1e6, accel), accel) - triangle).abs() <= 1e-12 * triangle);
+}
+
+#[test]
+fn the_moves_around_climb_at_their_own_budget() {
+    let (length, behind_mm) = (4.0, 6.0);
+    let (accel, around) = (2000.0, 500.0);
+    let reach = ReachableSpeed {
+        peak_mm_s: 1e6,
+        behind: SeamEnvelope::of(SeamLimit::ceiling(0.0)).across(behind_mm),
+        ahead: SeamEnvelope::of(SeamLimit::ceiling(0.0)),
+        length_mm: length,
+    };
+    let entry = (2.0 * around * behind_mm).sqrt();
+    let peak = (0.5 * (entry * entry + 2.0 * accel * length)).sqrt();
+    let expected = entry / around + (2.0 * peak - entry) / accel;
+    let time = reach.run_time((1e6, accel), around);
+    assert!(
+        (time - expected).abs() <= 1e-12 * expected,
+        "{time} {expected}"
+    );
 }

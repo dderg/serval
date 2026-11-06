@@ -24,9 +24,7 @@ mod seam_envelope;
 mod step_capacity;
 mod z_caps;
 
-pub use extrusion_reach::{
-    ExtrusionBudget, ExtrusionReach, extrusion_budgets,
-};
+pub use extrusion_reach::{ExtrusionBudget, ExtrusionReach, extrusion_budgets};
 pub use law::{LawSegment, RailPair, RailPairShape, ScalarLaw};
 pub use seam_envelope::{ReachableSpeed, SeamEnvelope, SeamLimit, SeamTerm};
 
@@ -691,12 +689,12 @@ fn check_entry_ceiling(
     entry_v: f64,
     tol: f64,
 ) -> Result<(), VelocityError> {
-    let entry_ceiling = {
-        let kin0 = &caps[0].kin;
-        kin0.flat_ceiling
-            .min(disk::limit_speed(kin0.kappa0.abs(), kin0.accel))
-    };
-    if entry_v > entry_ceiling + tol * (1.0 + entry_ceiling) {
+    let kin0 = &caps[0].kin;
+    let curvature_cap = disk::limit_speed(kin0.kappa0.abs(), kin0.accel);
+    let over_flat = entry_v > kin0.flat_ceiling + tol * (1.0 + kin0.flat_ceiling);
+    let over_curve =
+        entry_v * entry_v > curvature_cap * curvature_cap * (1.0 + law::CAP_START_SLACK);
+    if over_flat || over_curve {
         return Err(VelocityError::OverCommitted {
             line_no: moves[0].source.start_line,
         });

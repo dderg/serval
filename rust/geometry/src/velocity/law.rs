@@ -1272,7 +1272,7 @@ const RAIL_KNOTS_MAX: usize = 1 << 16;
 
 /// How far above its curvature cap a rail may start, in `v²`: rounding of
 /// a speed read off the cap.
-const CAP_START_SLACK: f64 = 1e-9;
+pub(super) const CAP_START_SLACK: f64 = 1e-9;
 
 /// The size the next step tries after one of `size` whose worse defect was
 /// `excess` times its allowance.

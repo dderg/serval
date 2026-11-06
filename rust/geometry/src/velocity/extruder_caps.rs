@@ -110,7 +110,7 @@ impl Demand {
             return 0.0;
         }
         let turning = spare / (self.slope * self.ratio * self.kappa_peak * self.kappa_peak);
-        turning.cbrt().min(saturated)
+        libm::cbrt(turning).min(saturated)
     }
 
     /// The largest budget whose advance velocity steps, `k·r·2A·U` at the

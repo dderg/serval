@@ -947,6 +947,25 @@ fn warm_start_entry_above_move_ceiling_fails_loudly() {
 }
 
 #[test]
+fn warm_start_entry_over_the_curvature_cap_within_the_tolerance_is_over_committed() {
+    let (radius, accel) = (10.0_f64, 1000.0_f64);
+    let curvature_cap = (accel * radius).sqrt();
+    let entry_v = curvature_cap * (1.0 + 10.0 * super::law::CAP_START_SLACK);
+    assert!(
+        entry_v < curvature_cap + DEFAULT_INTEGRATION_TOL * (1.0 + curvature_cap),
+        "the entry must sit within the integration tolerance of the cap"
+    );
+    let out = outcome(
+        vec![arc_move(radius, 1.0, 200.0, 200.0, accel, 9)],
+        Vec::new(),
+    );
+    assert_eq!(
+        plan_warm(&out, entry_v),
+        Err(VelocityError::OverCommitted { line_no: 9 })
+    );
+}
+
+#[test]
 fn warm_start_negative_or_nan_entry_is_invalid_config() {
     let out = outcome(vec![line_move(100.0, 30.0, 200.0, 1000.0, 1)], Vec::new());
     assert_eq!(plan_warm(&out, -1.0), Err(VelocityError::InvalidConfig));

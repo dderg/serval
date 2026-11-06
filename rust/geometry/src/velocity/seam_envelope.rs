@@ -211,47 +211,47 @@ impl ReachableSpeed {
         }
     }
 
-    /// The fastest the move peaks at with every move on its run planned at
-    /// a budget `accel`.
-    pub fn run_peak(&self, accel: f64) -> f64 {
-        peak_between(
-            self.behind.speed_sq(accel).sqrt(),
-            self.ahead.speed_sq(accel).sqrt(),
-            accel,
-            self.length_mm,
-        )
-    }
-
     /// The least time the leaders take over the run, from the farthest seam
-    /// kept behind to the farthest ahead, with every move on it planned at
-    /// a budget `accel`, every seam held to its limit and the move to
-    /// `ceiling`. The move lies on `[0, L]`; along the run the fastest
-    /// speed squared is, between neighbouring seams, the least of a climb
-    /// from the seams before, a brake into the seams after, and on the move
-    /// `ceiling²`: linear pieces, each crossed in `2·Δx/(√g₀ + √g₁)`.
-    pub fn run_time(&self, ceiling: f64, accel: f64) -> f64 {
-        let length = self.length_mm;
+    /// kept behind to the farthest ahead, every seam held to its limit, the
+    /// move planned at a budget `accel` under `ceiling` and the moves around
+    /// it at `around_accel`: the move's own seams take its disk at `accel`,
+    /// the others theirs at `around_accel`. Along the climb
+    /// `y = ∫a dx` the fastest speed squared rises by at most 2 per unit, so
+    /// between neighbouring seams it is the least of a launch from the seams
+    /// before, a brake into the seams after, and on the move `ceiling²`:
+    /// linear pieces, each crossed at an acceleration `a` in
+    /// `2·Δy/(a·(√g₀ + √g₁))`.
+    pub fn run_time(&self, (ceiling, accel): (f64, f64), around_accel: f64) -> f64 {
+        let move_climb = accel * self.length_mm;
+        let limit_sq = |term: &SeamTerm| {
+            let budget = if term.run_mm == 0.0 {
+                accel
+            } else {
+                around_accel
+            };
+            let limit = term.limit.at(budget);
+            limit * limit
+        };
         let mut seams = [(0.0, 0.0); 2 * ENVELOPE_TERMS_MAX + 2];
         let mut count = 0;
-        let mut add = |at: f64, limit: f64| {
-            seams[count] = (at, limit * limit);
+        let mut add = |at: f64, limit_sq: f64| {
+            seams[count] = (at, limit_sq);
             count += 1;
         };
         for term in self.behind.terms() {
-            add(-term.run_mm, term.limit.at(accel));
+            add(-around_accel * term.run_mm, limit_sq(term));
         }
-        add(0.0, ceiling);
-        add(length, ceiling);
+        add(0.0, ceiling * ceiling);
+        add(move_climb, ceiling * ceiling);
         for term in self.ahead.terms() {
-            add(length + term.run_mm, term.limit.at(accel));
+            add(move_climb + around_accel * term.run_mm, limit_sq(term));
         }
         let seams = &mut seams[..count];
         seams.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let climb = 2.0 * accel;
         let mut braking = [f64::INFINITY; 2 * ENVELOPE_TERMS_MAX + 2];
         for index in (0..count).rev() {
             let (at, limit_sq) = seams[index];
-            let own = limit_sq + climb * at;
+            let own = limit_sq + CLIMB_PER_UNIT * at;
             braking[index] = if index + 1 < count {
                 own.min(braking[index + 1])
             } else {
@@ -262,26 +262,35 @@ impl ReachableSpeed {
         let mut time = 0.0;
         for index in 0..count - 1 {
             let (from, limit_sq) = seams[index];
-            launch = launch.min(limit_sq - climb * from);
+            launch = launch.min(limit_sq - CLIMB_PER_UNIT * from);
             let to = seams[index + 1].0;
             if to <= from {
                 continue;
             }
-            let cap = if from >= 0.0 && to <= length {
-                ceiling * ceiling
+            let (cap, there_accel) = if from >= 0.0 && to <= move_climb {
+                (ceiling * ceiling, accel)
             } else {
-                f64::INFINITY
+                (f64::INFINITY, around_accel)
             };
-            time += piece_time(from, to, (launch, braking[index + 1], cap), climb);
+            time += piece_time(from, to, (launch, braking[index + 1], cap)) / there_accel;
         }
         time
     }
 }
 
-/// The time over `[from, to]` at the speed whose square is the least of
-/// `launch + c·x`, `brake − c·x` and `cap`.
-fn piece_time(from: f64, to: f64, (launch, brake, cap): (f64, f64, f64), climb: f64) -> f64 {
-    let speed_sq = |x: f64| (launch + climb * x).min(brake - climb * x).min(cap).max(0.0);
+/// How fast the speed squared rises per unit of climb `y = ∫a dx`.
+const CLIMB_PER_UNIT: f64 = 2.0;
+
+/// The climb `∫dy/√g` over `[from, to]` of the speed whose square `g` is
+/// the least of `launch + 2y`, `brake − 2y` and `cap`.
+fn piece_time(from: f64, to: f64, (launch, brake, cap): (f64, f64, f64)) -> f64 {
+    let climb = CLIMB_PER_UNIT;
+    let speed_sq = |y: f64| {
+        (launch + climb * y)
+            .min(brake - climb * y)
+            .min(cap)
+            .max(0.0)
+    };
     let mut cuts = [
         from,
         (brake - launch) / (2.0 * climb),

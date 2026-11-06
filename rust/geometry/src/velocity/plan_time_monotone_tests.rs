@@ -13,27 +13,24 @@ const EXTRUDE_ONLY_V: f64 = 40.0;
 const EXTRUDE_ONLY_A: f64 = 2500.0;
 /// The relative slack the extruder caps' property allows: rounding only.
 const ROUNDING: f64 = 1e-9;
-/// The relative slack a looser `max_accel` gets. The extruder's
-/// acceleration cap reads the turning `v³κ²` of a curved move at its
-/// reachable speed, which a looser budget raises: on a blend half before a
-/// slow turn its budget falls (17983 to 17156 mm/s² at κ 6.36, 48.8 to
-/// 52.6 mm/s), the braking into the turn starts earlier on the move before
-/// it, and the print takes 2.7e-5 longer. The trade's run model and the plan
-/// also disagree by up to 3e-6 where its least run time is not the plan's.
-/// TODO: 1e-5 once the speed and budget trade jointly with the turning-aware
-/// acceleration cap.
-const LOOSER_ACCEL_SLACK: f64 = 1e-4;
-/// The relative slack a looser `max_velocity` gets. A move's reachable speed
-/// keeps the one seam that binds it at the acceleration the planner can
-/// reach, and the trade reads that seam's run: where a looser limit lifts a
-/// near seam bound by its ceiling above a far one bound by a curve, the run
-/// jumps (0.20 mm to 4.01 mm into a 20 mm/s turn), the trade picks a
-/// different pair and the print takes longer, by 3.8e-3 at worst over
-/// 20000 random prints (170 of them slower at all). The ratio window
-/// reading the reachable speed above the ceiling the trade then cuts moves
-/// the plan by 1e-7. TODO: 1e-5 once the reachable speed keeps every seam
-/// that can bind.
-const LOOSER_SPEED_SLACK: f64 = 1e-2;
+/// The relative slack a looser `max_accel` gets: the trade's run model
+/// against the plan (B). The trade picks each capped move's ceiling and
+/// budget by the least run time with the moves around it at the budget it
+/// settles on, and neighbours there run at their own budgets, on curves
+/// whose interior the model reads only at the seams: on the persisted
+/// lead-line print a looser budget moves one 0.59 mm move's settled budget
+/// from 14070 to 14650 mm/s², the model gains 2.3e-5 s and the plan loses
+/// 1.17e-4 s, 1.1e-4 of the print. Over 16000 random prints the worst is
+/// 6.1e-7. TODO: 1e-5 once the reach carries the moves beside each move,
+/// their budgets and their curves' interiors, into the run model.
+const LOOSER_ACCEL_SLACK: f64 = 2e-4;
+/// The relative slack a looser `max_velocity` gets: the same run model
+/// against the plan (B), 2.1e-5 at worst over 16000 random prints (4 of
+/// them above 1e-5), where a higher reachable speed moves a flat optimum of
+/// the model by a few mm/s; and the ratio window reading the reachable
+/// speed above the ceiling the trade then cuts (C), 1e-7. TODO: 1e-5 with
+/// the neighbours and curve interiors in the run model.
+const LOOSER_SPEED_SLACK: f64 = 3e-5;
 /// The largest relative error a slicer's rounding of the extrusion lays
 /// on a held ratio: the trident first layers step by up to 3e-4 of it.
 const RATIO_NOISE: f64 = 5e-4;
@@ -275,103 +272,5 @@ proptest! {
             ..limits
         });
         no_slower("extruder cap", ROUNDING, loosened, held)?;
-    }
-}
-
-#[test]
-#[ignore]
-fn probe_case_extruder() {
-    let print = Print {
-        steps: vec![
-            (0.6846275237418586, 191.7750505587267, 1.0369783128477945, 0.0),
-            (-1.819485713051994, 169.93119969427502, 0.0, 0.0),
-            (0.0, 20.0, 0.0, 0.0),
-        ],
-        ratio: 0.01,
-        machine: Machine {
-            max_velocity: 122.08770514165185,
-            accel: 43590.70820248824,
-            e_velocity: 56.72837436396845,
-            e_accel: 25852.208081292276,
-            slope: 0.048200266251837216,
-            kernel_reach_s: 0.002,
-        },
-    };
-    let (moves, stop) = print.fitted().unwrap();
-    for scale in [1.0, 1.0016576970418982] {
-        eprintln!("=== scale {scale}");
-        let t = plan(&moves, &stop, |l| VelocityLimits {
-            extruder: l.extruder.map(|caps| ExtruderCaps {
-                max_accel_mm_s2: scale * caps.max_accel_mm_s2,
-                ..caps
-            }),
-            ..l
-        });
-        eprintln!("time {t}");
-    }
-}
-
-#[test]
-#[ignore]
-fn probe_worst_slowdown() {
-    use proptest::strategy::ValueTree;
-    use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
-    let n: u64 = std::env::var("PROBE_N").map_or(2000, |s| s.parse().unwrap());
-    let threads: u64 = std::env::var("PROBE_THREADS").map_or(8, |s| s.parse().unwrap());
-    let per = n / threads;
-    let results: Vec<[(f64, String); 3]> = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..threads)
-            .map(|t| {
-                scope.spawn(move || {
-                    let mut seed = [0u8; 32];
-                    seed[..8].copy_from_slice(&(t + 7919).to_le_bytes());
-                    let mut runner = TestRunner::new_with_rng(
-                        Config::default(),
-                        TestRng::from_seed(RngAlgorithm::ChaCha, &seed),
-                    );
-                    let strat = (arb_print(), 1.0f64..2.0, 1.0f64..2.0);
-                    let mut worst: [(f64, String); 3] = Default::default();
-                    for _ in 0..per {
-                        let (print, scale, scale2) = strat.new_tree(&mut runner).unwrap().current();
-                        let Some((moves, stop)) = print.fitted() else {
-                            continue;
-                        };
-                        let held = plan(&moves, &stop, |l| l);
-                        let acc = plan(&moves, &stop, |l| VelocityLimits {
-                            accel_mm_s2: scale * l.accel_mm_s2,
-                            ..l
-                        });
-                        let vel = plan(&moves, &stop, |l| VelocityLimits {
-                            max_velocity_mm_s: scale * l.max_velocity_mm_s,
-                            ..l
-                        });
-                        let ext = plan(&moves, &stop, |l| VelocityLimits {
-                            extruder: l.extruder.map(|caps| ExtruderCaps {
-                                max_velocity_mm_s: scale * caps.max_velocity_mm_s,
-                                max_accel_mm_s2: scale2 * caps.max_accel_mm_s2,
-                                ..caps
-                            }),
-                            ..l
-                        });
-                        for (k, t) in [acc, vel, ext].into_iter().enumerate() {
-                            let rel = t / held - 1.0;
-                            if rel > worst[k].0 {
-                                worst[k] = (rel, format!("{print:?} scale {scale} {scale2}"));
-                            }
-                        }
-                    }
-                    worst
-                })
-            })
-            .collect();
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
-    for (k, name) in ["max_accel", "max_velocity", "extruder"].iter().enumerate() {
-        let w = results
-            .iter()
-            .map(|r| r[k].clone())
-            .fold((0.0, String::new()), |a, b| if b.0 > a.0 { b } else { a });
-        let slower = results.iter().filter(|r| r[k].0 > 1e-9).count();
-        println!("PROBE {name} worst {:.3e} threads_with_slower {slower}\nPROBE_CASE {name} {}", w.0, w.1);
     }
 }
