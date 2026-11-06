@@ -2,37 +2,32 @@
 
 klippy runs live against a Klipper linux-process MCU, which supplies the
 print_time clock; every axis is an EtherCAT servo, so the MCU drives no pins.
-Needs ETHERCAT_RT_STUB (an ethercat-rt-stub whose DC grid is on
-CLOCK_MONOTONIC_RAW, as the ethercat-rt repository's stub is) and
-KLIPPER_LINUX_MCU (out/klipper.elf built from test/configs/linuxprocess.config);
-skipped without them. kv2-notes/gate.sh builds and exports both.
+See ethercat_live_support for the binaries it needs.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import pathlib
-import socket
-import subprocess
-import sys
 import threading
 import time
 
 import pytest
-from ethercat_support import GCODE, REPO_ROOT
-
-STUB = os.environ.get("ETHERCAT_RT_STUB")
-LINUX_MCU = os.environ.get("KLIPPER_LINUX_MCU")
-pytestmark = pytest.mark.skipif(
-    not (STUB and LINUX_MCU),
-    reason="ETHERCAT_RT_STUB and KLIPPER_LINUX_MCU not set",
+from ethercat_live_support import (
+    API_TIMEOUT_S,
+    STUB,
+    STUB_CYCLE_US,
+    Api,
+    Printer,
+    needs_live,
+    short_tmp,
+    spawn_stub,
+    wait_for,
 )
+from ethercat_support import GCODE
 
-READY_TIMEOUT_S = 30.0
+pytestmark = needs_live
+
 SETTLE_S = 1.5
-API_TIMEOUT_S = 60.0
-STUB_CYCLE_US = 1000
+COUNTS_PER_MM = [131072 / 40, 131072 / 40, 131072 / 8]
 
 PRINTER_CFG = """
 [mcu]
@@ -93,109 +88,30 @@ LONG_MOVES = "\n".join(
 SECOND_PRINT = "G1 X60 Y140 Z12 F6000\nG1 X100 Y100 Z10 F6000\nM400"
 
 
-class Api:
-    def __init__(self, path):
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.connect(str(path))
-        self.sock.settimeout(API_TIMEOUT_S)
-        self.buf = b""
-        self.next_id = 0
-        self.lock = threading.Lock()
-
-    def call(self, method, **params):
-        with self.lock:
-            self.next_id += 1
-            req = {"id": self.next_id, "method": method, "params": params}
-            self.sock.sendall(json.dumps(req).encode() + b"\x03")
-            while True:
-                while b"\x03" not in self.buf:
-                    chunk = self.sock.recv(65536)
-                    if not chunk:
-                        raise ConnectionError("klippy closed the API socket")
-                    self.buf += chunk
-                msg, self.buf = self.buf.split(b"\x03", 1)
-                resp = json.loads(msg)
-                if resp.get("id") == req["id"]:
-                    return resp
-
-    def status(self, *objects):
-        resp = self.call("objects/query", objects={o: None for o in objects})
-        return resp["result"]["status"]
-
-
-class Printer:
-    def __init__(self, tmp, endpoint):
-        self.tmp = tmp
-        self.mcu_tty = tmp / "mcu"
-        self.api_path = tmp / "api.sock"
-        self.log = tmp / "klippy.log"
-        self.mcu = subprocess.Popen([LINUX_MCU, "-I", str(self.mcu_tty)])
-        _wait(lambda: self.mcu_tty.exists(), "the linux MCU tty")
-        config = tmp / "printer.cfg"
-        config.write_text(
-            PRINTER_CFG.format(
-                mcu_tty=self.mcu_tty,
-                cycle_us=STUB_CYCLE_US,
-                socket=tmp / "ec.sock",
-                endpoint=endpoint,
-            )
-        )
-        self.klippy = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "klippy",
-                str(config),
-                "-l",
-                str(self.log),
-                "-a",
-                str(self.api_path),
-            ],
-            cwd=REPO_ROOT,
-            env=dict(os.environ, PYTHONPATH=str(REPO_ROOT)),
-        )
-        _wait(lambda: self.api_path.exists(), "the klippy API socket")
-        self.api = Api(self.api_path)
-        _wait(
-            lambda: self.state()[0] in ("ready", "shutdown", "error"),
-            "klippy to start",
-            READY_TIMEOUT_S,
-        )
-
-    def state(self):
-        info = self.api.call("info")["result"]
-        return info["state"], info["state_message"]
-
-    def close(self):
-        for proc in (self.klippy, self.mcu):
-            proc.terminate()
-            proc.wait(10)
-
-
-def _wait(predicate, what, timeout=READY_TIMEOUT_S):
-    deadline = time.monotonic() + timeout
-    while not predicate():
-        if time.monotonic() > deadline:
-            raise AssertionError("timed out waiting for " + what)
-        time.sleep(0.05)
-
-
 @pytest.fixture
 def tmp(tmp_path_factory):
-    # Unix socket paths are limited to ~100 bytes; pytest's are long
-    return pathlib.Path(tmp_path_factory.mktemp("ec", numbered=True))
+    return short_tmp(tmp_path_factory)
+
+
+def printer_cfg(tmp, endpoint):
+    return PRINTER_CFG.format(
+        mcu_tty="{mcu_tty}",
+        cycle_us=STUB_CYCLE_US,
+        socket=tmp / "ec.sock",
+        endpoint=endpoint,
+    )
 
 
 def test_live_print_streams_every_cycle_to_the_stub(tmp):
-    printer = Printer(tmp, "endpoint_binary: %s" % (STUB,))
+    printer = Printer(tmp, printer_cfg(tmp, "endpoint_binary: %s" % (STUB,)))
     try:
         assert printer.state()[0] == "ready", printer.state()
-        resp = printer.api.call("gcode/script", script=GCODE)
+        resp = printer.api.script(GCODE)
         assert "error" not in resp, resp
         # Idle long enough for real time to pass the stream's end, so the
         # next print must re-anchor after verifying the gap held still
         time.sleep(SETTLE_S)
-        resp = printer.api.call("gcode/script", script=SECOND_PRINT)
+        resp = printer.api.script(SECOND_PRINT)
         assert "error" not in resp, resp
         time.sleep(SETTLE_S)
         state = printer.state()
@@ -213,23 +129,17 @@ def test_live_print_streams_every_cycle_to_the_stub(tmp):
 
 
 def test_endpoint_death_mid_print_shuts_down(tmp):
-    sock = tmp / "ec.sock"
-    stub = subprocess.Popen(
-        [STUB, "--socket", str(sock)]
-        + sum((["--slave", str(s), "--axis", str(s)] for s in range(3)), [])
+    stub = spawn_stub(
+        tmp / "ec.sock", [(axis, COUNTS_PER_MM[axis]) for axis in range(3)]
     )
-    printer = Printer(tmp, "")
+    printer = Printer(tmp, printer_cfg(tmp, ""))
     try:
         assert printer.state()[0] == "ready", printer.state()
-        printer.api.call(
-            "gcode/script", script="SET_KINEMATIC_POSITION X=100 Y=100 Z=10"
-        )
+        printer.api.script("SET_KINEMATIC_POSITION X=100 Y=100 Z=10")
         script_api = Api(printer.api_path)
         script_result = []
         moving = threading.Thread(
-            target=lambda: script_result.append(
-                script_api.call("gcode/script", script=LONG_MOVES)
-            ),
+            target=lambda: script_result.append(script_api.script(LONG_MOVES)),
             daemon=True,
         )
         moving.start()
@@ -240,9 +150,11 @@ def test_endpoint_death_mid_print_shuts_down(tmp):
             ]
             return bool(retired) and min(retired) > 0
 
-        _wait(playing, "the stub to play samples")
+        wait_for(playing, "the stub to play samples")
         stub.kill()
-        _wait(lambda: printer.state()[0] == "shutdown", "klippy to shut down")
+        wait_for(
+            lambda: printer.state()[0] == "shutdown", "klippy to shut down"
+        )
         state, message = printer.state()
         assert "ethercat: lost the endpoint" in message, message
         moving.join(API_TIMEOUT_S)
