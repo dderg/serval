@@ -1727,13 +1727,25 @@ fn crawls_further_apart_than_their_reach_lay_a_valley_each() {
     }
 }
 
+/// The smoothing of a follower whose kernel-free advance reads its valleys.
+fn advanced_smoothing() -> RatioSmoothing {
+    let mut smoothing = RatioSmoothing::default();
+    smoothing.width.rule = Some(RatioRampRule {
+        advance_slope_s: 0.5,
+        max_velocity_mm_s: 45.0,
+        max_accel_mm_s2: 2000.0,
+        kernel_jerk_per_accel_hz: f64::INFINITY,
+    });
+    smoothing
+}
+
 /// A crawl valley holding the weight at zero back to where no rest or
 /// floor holds it steps the weight from 1 to 0 there, which the advance
 /// reads as a step in the follower's velocity: it fails loudly.
 #[test]
 #[should_panic(expected = "steps its weight at s=499.5")]
 fn a_crawl_valley_held_at_zero_back_to_where_the_leaders_move_fails_loudly() {
-    let mut smoothing = RatioSmoothing::default();
+    let mut smoothing = advanced_smoothing();
     smoothing.place_valley(500.0, (499.5, 0.0, 0.18), 4.0e-3);
 }
 
@@ -1742,10 +1754,10 @@ fn a_crawl_valley_held_at_zero_back_to_where_the_leaders_move_fails_loudly() {
 /// start.
 #[test]
 fn a_crawl_valley_held_at_zero_back_to_a_rest_keeps_the_weight_continuous() {
-    let mut floored = RatioSmoothing::default();
+    let mut floored = advanced_smoothing();
     floored.close_at(499.5);
     floored.place_valley(500.0, (499.5, 0.0, 0.18), 4.0e-3);
-    let mut rested = RatioSmoothing::default();
+    let mut rested = advanced_smoothing();
     rested.valleys.push(AdvanceValley {
         start: 499.4,
         end: 499.5,

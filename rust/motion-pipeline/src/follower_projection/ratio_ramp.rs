@@ -1520,7 +1520,8 @@ impl RatioSmoothing {
     /// after the table's end too, so a reach running past `table_end`, or
     /// an after side past the leaders probed, waits for the next leg; an
     /// infinite `table_end`, where the leaders come to rest past the table,
-    /// lays it with what is laid.
+    /// lays it with what is laid. A crawl behind one still waiting waits
+    /// too: valleys are laid in path order.
     fn lay_crawl_valley(
         &mut self,
         spans: &[RatioSpan],
@@ -1528,6 +1529,10 @@ impl RatioSmoothing {
         (turn, crossing): (f64, Crossing),
         table_end: f64,
     ) {
+        if !self.waiting_crawls.is_empty() {
+            self.waiting_crawls.push((turn, crossing));
+            return;
+        }
         let reach = crossing
             .valley_reach()
             .min(turn - self.rested_through(turn));
@@ -1565,7 +1570,10 @@ impl RatioSmoothing {
     /// ([`Self::place_valley`]). Where no before side reaching no further
     /// back than the leaders last rested fits, the valley holds the weight
     /// at zero back to there instead: the leaders leave that rest with no
-    /// lead to release, and the after side rebuilds it.
+    /// lead to release, and the after side rebuilds it. A follower the
+    /// turning guard does not hold ([`guarded_by_the_turning_guard`]) has
+    /// no room left for its sides: its before side is the leaders' reach,
+    /// as far back as the projection still holds the path.
     fn lay_valley(
         &mut self,
         spans: &[RatioSpan],
@@ -1592,7 +1600,9 @@ impl RatioSmoothing {
                 )
             });
         let rested = self.rested_through(turn);
-        let (start, before) = if self.last_crawl_reach_end() > turn - reach {
+        let (start, before) = if !guarded_by_the_turning_guard(rule) {
+            (turn, reach.min(self.back_reach_limit(turn)))
+        } else if self.last_crawl_reach_end() > turn - reach {
             (turn, reach)
         } else {
             crawl_side(Side::Before, crawl, reach, laid, rule, turn - rested)?
@@ -1695,12 +1705,20 @@ impl RatioSmoothing {
         }
     }
 
-    /// The weight `W` is continuous across every crawl valley: a side laid
-    /// zero wide steps it between 1 and 0 at the valley's edge, which only
-    /// another valley holding zero up to that edge from the side's way, or
-    /// the floor, leaves unread. A rest valley's own edges lie where the
-    /// leaders rest, whose zero speed leaves its steps unread.
+    /// The weight `W` is continuous across every crawl valley an advance
+    /// reads: a side laid zero wide steps it between 1 and 0 at the
+    /// valley's edge, which only another valley holding zero up to that
+    /// edge from the side's way, or the floor, leaves unread. A rest
+    /// valley's own edges lie where the leaders rest, whose zero speed
+    /// leaves its steps unread; a follower with no advance reads none.
     fn assert_weight_continuous(&self) {
+        if self
+            .width
+            .rule
+            .is_none_or(|rule| rule.advance_slope_s == 0.0)
+        {
+            return;
+        }
         let crawls = self
             .valleys
             .iter()
@@ -2725,6 +2743,13 @@ fn holds_zero_up_to(valley: &AdvanceValley, edge: f64, side: Side) -> bool {
         Side::After => valley.end == edge && valley.after == 0.0,
     };
     spans && !steps_there
+}
+
+/// Whether the turning guard leaves room for this follower's crawl valley
+/// sides: it holds an advance no kernel follows, read off the same caps
+/// as the guard's own demand.
+fn guarded_by_the_turning_guard(rule: &RatioRampRule) -> bool {
+    rule.advance_slope_s > 0.0 && !rule.kernel_jerk_per_accel_hz.is_finite()
 }
 
 /// Probes a ramp's crossing is searched with for the leaders' fastest
