@@ -226,13 +226,19 @@ impl SeamTable {
 
     /// `X = Ẽ − E` at `s` with its first three path derivatives under the
     /// width field `width`: the extrusion, ratio, slope and curvature the
-    /// smoothing adds to the table's, summed over the seams in the window
-    /// and the spans between them by their moments ([`SeamMoments`]), and
-    /// over the spans running past its edges ([`edge_spans`]).
+    /// smoothing adds to the table's. The table's slope is averaged by the
+    /// window at `s`, summed over the seams in it and the spans between
+    /// them by their moments ([`SeamMoments`]) and over the spans running
+    /// past its edges ([`edge_spans`]); each ratio step by its own window
+    /// ([`Self::step_corrections`]).
     fn correction(&self, width: &WidthField, s: f64) -> Jet {
         if self.is_inert() {
             return Jet::ZERO;
         }
+        self.slope_correction(width, s) + self.step_corrections(width, s)
+    }
+
+    fn slope_correction(&self, width: &WidthField, s: f64) -> Jet {
         let h = width.jet(s);
         if h.value <= 0.0 {
             return Jet::ZERO;
@@ -241,9 +247,6 @@ impl SeamTable {
         let slope_left = self.slope_left_of(lo);
         let window = self.seams_near(lo, hi);
         let mut moments = SeamMoments::default();
-        for seam in window {
-            moments.add_step(s - seam.s, seam.step);
-        }
         for pair in window.windows(2) {
             let (seam, next) = (pair[0], pair[1]);
             moments.add_span((s - seam.s, s - next.s), seam.slope_after, next.s - seam.s);
@@ -257,21 +260,76 @@ impl SeamTable {
             });
         moments.correction(h, inverse) + edge_spans(h, inverse, slope_left, ends)
     }
+
+    /// What the ratio steps whose windows reach `s` add to `X`. A step
+    /// `Δ` at `σ` is smoothed by the window the width field holds at the
+    /// step itself, `Δ·h·G₁((s − σ)/h)` with `h = h(σ)`: a window that
+    /// followed the width along the path would cross the step at
+    /// `1 ± h'` times the path's speed, and step the ratio's curvature at
+    /// its edge by `(1 ∓ h')²` times what the ramp rule budgets
+    /// ([`geometry::RatioRampRule`]). The width's slope bound `λ` places
+    /// every step that reaches `s` within `h(s)/(1 − λ)` of it.
+    fn step_corrections(&self, width: &WidthField, s: f64) -> Jet {
+        if width.nodes.is_empty() {
+            return Jet::ZERO;
+        }
+        let reach = width.width(s) / (1.0 - WIDTH_SLOPE_BOUND);
+        self.seams_near(s - reach, s + reach)
+            .iter()
+            .filter(|seam| seam.step != 0.0)
+            .fold(Jet::ZERO, |total, seam| {
+                total + step_correction(seam, width.step_width(seam.s), s)
+            })
+    }
+
+    /// The ratio steps whose own windows reach into `[lo, hi]`, each with
+    /// its half-width.
+    fn steps_reaching<'a>(
+        &'a self,
+        width: &'a WidthField,
+        (lo, hi): (f64, f64),
+    ) -> impl Iterator<Item = (Seam, f64)> + 'a {
+        let reach = if width.nodes.is_empty() {
+            0.0
+        } else {
+            width.bounds(lo, hi).0 / (1.0 - WIDTH_SLOPE_BOUND)
+        };
+        self.seams_near(lo - reach, hi + reach)
+            .iter()
+            .filter(|seam| seam.step != 0.0)
+            .map(|seam| (*seam, width.step_width(seam.s)))
+            .filter(move |&(seam, h)| h > 0.0 && seam.s - h < hi && seam.s + h > lo)
+    }
 }
 
-/// The seams inside one window as [`RatioSmoothing::correction`] sums
-/// them, each at `u = s − σ`: the moments `Σ Δ·uᵏ` of their ratio steps,
-/// the moments `Σ m·(u_aᵏ − u_bᵏ)` of the table's slope over each span
-/// between two of them, and the table's own kink behind `s` they carry,
-/// with its two derivatives.
+/// `Δ·h·G₁(x)` at `x = (s − σ)/h` for the step `Δ` at `σ` smoothed over
+/// the half-width `h`: the smoothed ramp less the table's own kink
+/// `Δ·(s − σ)₊`, nothing outside the window.
+fn step_correction(seam: &Seam, h: f64, s: f64) -> Jet {
+    if h <= 0.0 || (s - seam.s).abs() >= h {
+        return Jet::ZERO;
+    }
+    let x = Jet::variable(s).offset(-seam.s).scale(1.0 / h);
+    let smoothed = x.poly(&SMOOTHED_RAMP);
+    let kinked = if x.value >= 0.0 {
+        smoothed + x.scale(-1.0)
+    } else {
+        smoothed
+    };
+    kinked.scale(h).scale(seam.step)
+}
+
+/// The spans inside one window as [`SeamTable::slope_correction`] sums
+/// them, each seam at `u = s − σ`: the moments `Σ m·(u_aᵏ − u_bᵏ)` of the
+/// table's slope over each span between two seams, and the table's own
+/// kink behind `s` they carry, with its two derivatives.
 ///
-/// With `a`, `b` the coefficients of [`SMOOTHED_RAMP`] and
-/// [`SMOOTHED_HALF_SQUARE`], `h·G₁(u/h) = Σₖ aₖ·uᵏ·h¹⁻ᵏ − u₊` and
-/// `h²·G₂(u/h) = Σₖ bₖ·uᵏ·h²⁻ᵏ − u₊²/2`. A ratio step adds `Δ·h·G₁`; the
-/// slope `m` over a span adds `m·h²·(G₂(x_a) − G₂(x_b))`, its ends'
-/// `x = u/h`, which sums to the slope steps' `Δm·h²·G₂` and the slope
-/// behind the window's `0.1·h²·m`. So the correction is the moments
-/// weighted by powers of `h`, and a moment's path derivative is
+/// With `b` the coefficients of [`SMOOTHED_HALF_SQUARE`],
+/// `h²·G₂(u/h) = Σₖ bₖ·uᵏ·h²⁻ᵏ − u₊²/2`. The slope `m` over a span adds
+/// `m·h²·(G₂(x_a) − G₂(x_b))`, its ends' `x = u/h`, which sums to the
+/// slope steps' `Δm·h²·G₂` and the slope behind the window's `0.1·h²·m`.
+/// So the correction is the moments weighted by powers of `h`, and a
+/// moment's path derivative is
 /// `(Σ c·uᵏ)' = k·Σ c·uᵏ⁻¹`: each seam costs a few products whatever the
 /// jets of `h`. A span inside the window enters as its rise `m·(u_a − u_b)`
 /// times `(u_aᵏ − u_bᵏ)/(u_a − u_b)`, never as two slope steps of opposite
@@ -280,29 +338,11 @@ impl SeamTable {
 /// the window's edges are [`edge_spans`].
 #[derive(Default)]
 struct SeamMoments {
-    step: [f64; SMOOTHED_RAMP.len()],
     slope: [f64; SMOOTHED_HALF_SQUARE.len()],
     behind: [f64; 3],
-    steps: bool,
 }
 
 impl SeamMoments {
-    fn add_step(&mut self, u: f64, step: f64) {
-        if step == 0.0 {
-            return;
-        }
-        self.steps = true;
-        let mut power = 1.0;
-        for moment in &mut self.step {
-            *moment += step * power;
-            power *= u;
-        }
-        if u >= 0.0 {
-            self.behind[0] += step * u;
-            self.behind[1] += step;
-        }
-    }
-
     /// The span of slope `slope` and `length` between the seams at
     /// `u_a > u_b`. A seam at `s` lies behind it, as the table reads the
     /// span it opens there.
@@ -345,9 +385,9 @@ impl SeamMoments {
         }
     }
 
-    /// `X` but for [`edge_spans`] with the width `h` and its inverse: the
-    /// moments of power `k` of the slope weigh with `h²⁻ᵏ`, of the ratio
-    /// steps with `h¹⁻ᵏ`; `h⁰` is no product.
+    /// The slope's `X` but for [`edge_spans`] with the width `h` and its
+    /// inverse: the moments of power `k` weigh with `h²⁻ᵏ`; `h⁰` is no
+    /// product.
     fn correction(&self, h: Jet, inverse: Jet) -> Jet {
         let inverse_squared = inverse * inverse;
         let powers_of_h = [
@@ -368,14 +408,7 @@ impl SeamMoments {
             .iter()
             .enumerate()
             .fold(kink, |total, (index, &power)| {
-                let slope_term =
-                    Self::moment(&self.slope, index).scale(SMOOTHED_HALF_SQUARE[index]);
-                let weight = match index.checked_sub(1) {
-                    Some(k) if self.steps => {
-                        slope_term + Self::moment(&self.step, k).scale(SMOOTHED_RAMP[k])
-                    }
-                    _ => slope_term,
-                };
+                let weight = Self::moment(&self.slope, index).scale(SMOOTHED_HALF_SQUARE[index]);
                 total + power.map_or(weight, |power| power * weight)
             })
     }
@@ -1157,6 +1190,16 @@ impl WidthField {
         }
     }
 
+    /// The half-width a ratio step at `s` is smoothed over: the width
+    /// there, none past the last node, whose width no evaluation within
+    /// [`RatioSmoothing::final_through`] reads.
+    fn step_width(&self, s: f64) -> f64 {
+        if s > self.nodes[self.nodes.len() - 1].s + SPAN_LOOKUP_SLACK_MM {
+            return 0.0;
+        }
+        self.width(s)
+    }
+
     /// [`Self::jet`]'s value alone, by the same arithmetic.
     fn width(&self, s: f64) -> f64 {
         match self.interval(s) {
@@ -1627,20 +1670,36 @@ impl RatioSmoothing {
         opening.max(waiting)
     }
 
-    /// How far the smoothed ratio is final: its width there is, and every
-    /// window reaches no further than the table.
+    /// How far the smoothed ratio is final: its width there is, every
+    /// window reaches no further than the table, and no ratio step whose
+    /// own window is not final yet reaches back to it. A step at `σ` is
+    /// smoothed over `h(σ)` ([`SeamTable::step_corrections`]), and `σ − h`
+    /// rises along the final width (`|h'| < 1`), by at least `1 − λ` per
+    /// unit of path past the last point it is final at.
     fn final_through(&mut self, table_end: f64) -> f64 {
         let Some(width_final) = self.width.final_through() else {
             return self.floor;
         };
         let width = self.width.searcher();
         let fits = |s: f64| s + width.width(s) <= table_end;
-        let mut hi = width_final.min(table_end);
+        let steps_reach_back_to = if width_final >= table_end {
+            table_end - width.width(table_end)
+        } else {
+            let nearest_unfinal = self
+                .laid
+                .seams
+                .iter()
+                .find(|seam| seam.step != 0.0 && seam.s > width_final)
+                .map_or(table_end, |seam| seam.s.min(table_end));
+            width_final - width.width(width_final)
+                + (1.0 - WIDTH_SLOPE_BOUND) * (nearest_unfinal - width_final)
+        };
+        let mut hi = width_final.min(table_end).min(steps_reach_back_to);
         if fits(hi) {
-            return hi;
+            return hi.max(self.floor);
         }
         let mut lo = self.width.nodes[0].s.max(self.floor);
-        if !fits(lo) {
+        if !fits(lo) || lo > hi {
             return self.floor;
         }
         for _ in 0..WIDTH_BISECTIONS {
@@ -1676,13 +1735,14 @@ impl RatioSmoothing {
     }
 
     /// Whether the smoothing changes anything over `[lo, hi]`: the table
-    /// slopes where the windows there open, or a window there reaches a
-    /// seam. `s ± h(s)` grows along the path (`|h'| < 1`), so a seam
-    /// outside the stretch is reached from the stretch's end nearer it, if
-    /// at all, and one inside from itself, unless the leaders rest on it,
-    /// where no window reaches it — though the windows past it still open
-    /// on the slope it leaves. Only the width over the stretch decides,
-    /// never what is laid past it.
+    /// slopes where the windows there open, a window there reaches a seam,
+    /// or a ratio step's own window reaches into it. `s ± h(s)` grows along
+    /// the path (`|h'| < 1`), so a seam outside the stretch is reached from
+    /// the stretch's end nearer it, if at all, and one inside from itself,
+    /// unless the leaders rest on it, where no window reaches it — though
+    /// the windows past it still open on the slope it leaves. Only the
+    /// width over the stretch and at the steps reaching it decides, never
+    /// what is laid past it.
     pub(super) fn touches(&self, lo: f64, hi: f64) -> bool {
         if self.is_inert() {
             return false;
@@ -1704,6 +1764,11 @@ impl RatioSmoothing {
                     self.reach_back(seam.s) > 0.0 || seam.slope_after != 0.0
                 }
             })
+            || self
+                .laid
+                .steps_reaching(&self.width, (lo, hi))
+                .next()
+                .is_some()
     }
 
     /// `(max |r̃|, max |r̃'|)` over `[lo, hi]`, see [`RatioSmoothing`].
@@ -1771,7 +1836,8 @@ impl RatioSmoothing {
 
     /// Where over `[lo, hi]` the smoothed ratio's curvature, or the
     /// advance's read, bends: where each seam of either table enters and
-    /// leaves a window, the width nodes, and the valley ends. A stretch the
+    /// leaves a window, where each ratio step's own window opens and
+    /// closes, the width nodes, and the valley ends. A stretch the
     /// smoothing does not touch bends only at valley ends, whatever the
     /// smoothing holds elsewhere: the advance's table steps its ratio only
     /// where the laid one does, and its slope only there or inside a laid
@@ -1806,6 +1872,13 @@ impl RatioSmoothing {
             if anchor <= hi {
                 bends.push(self.window_edge(seam.s, 1.0, widest));
             }
+        }
+        for table in [&self.laid, &self.advance] {
+            bends.extend(
+                table
+                    .steps_reaching(&self.width, (lo, hi))
+                    .flat_map(|(seam, h)| [seam.s - h, seam.s + h]),
+            );
         }
         bends
     }
@@ -1887,6 +1960,9 @@ impl RatioSmoothing {
         }
     }
 
+    /// Drops what no window from `s` on reaches: the width nodes and the
+    /// seams behind the farthest a ratio step's own window can reach `s`
+    /// from, `h(s)/(1 − λ)` back ([`SeamTable::step_corrections`]).
     pub(super) fn prune_before(&mut self, s: f64) {
         self.valleys.retain(|valley| valley.reach_end() >= s);
         let (Some(first), Some(last)) = (self.width.nodes.first(), self.width.nodes.last()) else {
@@ -1896,8 +1972,8 @@ impl RatioSmoothing {
         if first.s > s {
             return;
         }
-        self.width.prune_before(s);
-        let back_edge = s - self.width.width(s);
+        let back_edge = s - self.width.width(s) / (1.0 - WIDTH_SLOPE_BOUND);
+        self.width.prune_before(back_edge);
         self.laid.prune_through(back_edge);
         self.advance.prune_through(back_edge);
     }

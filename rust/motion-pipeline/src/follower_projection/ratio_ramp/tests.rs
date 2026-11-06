@@ -120,6 +120,23 @@ fn probes(length: f64, count: usize) -> impl Iterator<Item = f64> {
     (1..count).map(move |k| length * k as f64 / count as f64 + 1e-7)
 }
 
+/// The stretch of the table the smoothing averages at `s`: the window
+/// there, and both sides of every ratio step whose own window reaches it.
+fn averaged_stretch(state: &FollowerState, s: f64) -> (f64, f64) {
+    let h = state.smoothing.width.width(s);
+    state
+        .smoothing
+        .laid
+        .steps_reaching(&state.smoothing.width, (s, s))
+        .filter(|&(seam, width)| (s - seam.s).abs() < width)
+        .fold((s - h, s + h), |(lo, hi), (seam, _)| {
+            (
+                lo.min(trajectory::next_toward(seam.s, f64::NEG_INFINITY)),
+                hi.max(trajectory::next_toward(seam.s, f64::INFINITY)),
+            )
+        })
+}
+
 /// The table's own ratio range over `[lo, hi]`.
 fn table_range(state: &FollowerState, lo: f64, hi: f64) -> (f64, f64) {
     state
@@ -170,8 +187,8 @@ fn the_smoothed_ratio_stays_within_the_ratios_its_window_spans() {
             let total = length(&table);
             let state = smoothed(&table, field(total));
             for s in probes(total, 20_000) {
-                let h = state.smoothing.width.width(s);
-                let (low, high) = table_range(&state, s - h, s + h);
+                let (lo, hi) = averaged_stretch(&state, s);
+                let (low, high) = table_range(&state, lo, hi);
                 let (ratio, _) = state.ratio_and_slope(s, SpanSide::After);
                 assert!(
                     ratio >= low - 1e-12 && ratio <= high + 1e-12,
@@ -190,8 +207,8 @@ fn the_smoothing_lays_exactly_the_table_material_wherever_the_window_is_flat() {
             let state = smoothed(&table, field(total));
             let mut flat_probes = 0;
             for s in probes(total, 5_000) {
-                let h = state.smoothing.width.width(s);
-                let (low, high) = table_range(&state, s - h, s + h);
+                let (lo, hi) = averaged_stretch(&state, s);
+                let (low, high) = table_range(&state, lo, hi);
                 if low != high {
                     continue;
                 }
@@ -275,8 +292,8 @@ fn the_advance_reads_the_laid_ratio_held_at_zero_where_it_retracts() {
         let state = smoothed(&table, field(total));
         let (mut extruding, mut retracting) = (0, 0);
         for s in probes(total, 20_000) {
-            let h = state.smoothing.width.width(s);
-            let (low, high) = table_range(&state, s - h, s + h);
+            let (lo, hi) = averaged_stretch(&state, s);
+            let (low, high) = table_range(&state, lo, hi);
             let (read, _) = state.ratio_and_slope_on(SpanTable::Advance, s, SpanSide::After);
             assert!(
                 read >= -1e-12 && read <= high.max(0.0) + 1e-12,
