@@ -557,7 +557,7 @@ fn an_exact_piece_s_jerk_matches_a_double_double_slope_within_its_rounding_bound
                     assert_eq!(jerk.rounding, f64::INFINITY, "{name}: an unbounded jerk");
                     continue;
                 }
-                let step = 2.0_f64.powi((1e-3 * piece.radius).log2().floor() as i32);
+                let step = 2.0_f64.powi(libm::floor(libm::log2(1e-3 * piece.radius)) as i32);
                 if step < 1e3 * f64::EPSILON * piece.center.abs() {
                     continue;
                 }
