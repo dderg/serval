@@ -376,9 +376,11 @@ impl ValleyReference {
 
     /// Whether a side `width` wide over the path `window` of the crawl
     /// `(turn, speed, rate, floor)` rebuilds the lead within what the
-    /// leaders' own demand over it leaves of the extruder's limit, read as
-    /// the projection reads it off the leaders: `r·max(|s̈|, |s̈ + k·W·s⃛|)`
-    /// with the side's weight `W` there, and [`CrawlSide::rebuild`].
+    /// extruder's limit holds, at every sample over it, the leaders' own
+    /// demand there and the rebuild there, as the projection reads them off
+    /// the leaders: `r·max(|s̈|, |s̈ + k·W·s⃛|)` with the side's weight `W`
+    /// there, and [`geometry::RebuildsWithin`] at the sample within
+    /// [`CrawlSide::rebuild`] at the largest ratio over the side.
     fn rebuild_fits(
         &self,
         shaped: &Shaped,
@@ -391,6 +393,7 @@ impl ValleyReference {
         let k = caps.advance_slope_s;
         let (mut base, mut ratio, mut accel, mut fastest) = (0.0_f64, 0.0_f64, rate, speed);
         let mut outward = (f64::INFINITY, f64::NEG_INFINITY);
+        let mut samples = Vec::new();
         for ((&t, &s), &[velocity, acceleration, jerk]) in
             self.times.iter().zip(&self.arcs).zip(&self.motions)
         {
@@ -413,6 +416,7 @@ impl ValleyReference {
                 .abs()
                 .max((path_accel + k * weight * (along(jerk) + turning)).abs());
             base = base.max(here * own);
+            samples.push(((s - turn).abs(), here * own, v, path_accel.abs()));
             ratio = ratio.max(here);
             accel = accel.max(path_accel.abs());
             let away = (s - turn).signum() * path_accel;
@@ -436,7 +440,12 @@ impl ValleyReference {
             },
             signed_from: 0.0,
         };
-        k * ratio * leaders.rebuild(width) <= room
+        let whole = leaders.rebuild(width);
+        let within = leaders.rebuilds_within(width);
+        samples.iter().all(|&(distance, own, v, path_accel)| {
+            own + k * ratio * within.at((distance, distance), v, path_accel).min(whole)
+                <= caps.max_accel_mm_s2
+        })
     }
 
     fn weight(&self, s: f64) -> (f64, f64, f64) {

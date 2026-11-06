@@ -203,12 +203,15 @@ pub(super) enum Unlaid {
 }
 
 /// The width of the `side` of the crawl valley at `turn` the leaders cross
-/// as `crossing`: the narrowest [`crawl_side_width`] lays where the rebuild
-/// `k·r·|W″·ṡ³ + 3W′·ṡ·s̈|` over it ([`CrawlSide::rebuild`]) fits what the
-/// leaders' own demand there leaves of the follower's limit, `r` the
-/// largest ratio laid within it and the leaders read off the trail, never
-/// under the leaders' `reach`; `None` where none reaching no further than
-/// `limit` fits. With an infinite `table_end` the leaders rest past the
+/// as `crossing`: the narrowest [`crawl_side_width`] lays where, at every
+/// probe of the trail over it, the leaders' own demand there and the
+/// rebuild `k·|W″·ṡ³ + 3W′·ṡ·s̈|` there ([`geometry::RebuildsWithin`] at the probe,
+/// within the bound over the whole side, [`CrawlSide::rebuild`]), both at
+/// `r`, fit the follower's limit; `r` the largest ratio laid within it and
+/// the leaders read off the trail, never under the leaders' `reach`; `None`
+/// where none reaching no further than `limit` fits. The turning guard
+/// proves the same sum cell by cell for the widest side the lead budget
+/// covers, so a side no wider fits here. With an infinite `table_end` the leaders rest past the
 /// trail, and the side reads it as far as it goes. It fails loudly where
 /// the leaders leave the follower no room: it never narrows a side to make
 /// it fit.
@@ -250,17 +253,18 @@ pub(super) fn crawl_side(
         let window = (window.0, window.1.min(trail.through()));
         let ratio = peak_ratio_over(spans, window);
         let motion = trail.over(window, side);
-        let own = trail.most_within(window, side, |probe, path_jerk| {
-            let distance = match side {
-                Side::Before => turn - probe.s,
-                Side::After => probe.s - turn,
-            };
-            let weight = side_weight(distance, width, floor).0;
+        let distance_of = |probe: &TrailProbe| match side {
+            Side::Before => turn - probe.s,
+            Side::After => probe.s - turn,
+        };
+        let own_at = |probe: &TrailProbe, path_jerk: f64| {
+            let weight = side_weight(distance_of(probe), width, floor).0;
             probe
                 .path_accel
                 .abs()
                 .max((probe.path_accel + slope * weight * path_jerk).abs())
-        });
+        };
+        let own = trail.most_within(window, side, own_at);
         let room = rule.max_accel_mm_s2 - ratio * own;
         assert!(
             room > 0.0,
@@ -282,7 +286,16 @@ pub(super) fn crawl_side(
             ),
             signed_from: 0.0,
         };
-        slope * ratio * leaders.rebuild(width) <= room
+        let whole = leaders.rebuild(width);
+        let within = leaders.rebuilds_within(width);
+        let asked = trail.most_within(window, side, |probe, path_jerk| {
+            let distance = distance_of(probe).max(0.0);
+            let rebuild = within
+                .at((distance, distance), probe.speed, probe.path_accel.abs())
+                .min(whole);
+            own_at(probe, path_jerk) + slope * rebuild
+        });
+        ratio * asked <= rule.max_accel_mm_s2
     });
     if waits {
         return Err(Unlaid::Waits);
