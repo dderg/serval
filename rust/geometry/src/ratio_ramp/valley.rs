@@ -156,13 +156,14 @@ impl AdvanceValley {
     }
 
     /// Whether the valley holds the weight flat at zero at `s`: on
-    /// `[start, end]`, and within each side's floor `f`, over which the
-    /// weight leaves zero flat (`ψ ≈ 3d²/(2f·w)` for `d ≪ f`); where a side
-    /// has no floor, to `rounding`.
+    /// `[start, end]`, and within each side's floor `f` as the side keeps it
+    /// ([`kept_floor`]), over which the weight leaves zero flat
+    /// (`ψ ≈ 3d²/(2f·w)` for `d ≪ f`); where a side has no floor, to
+    /// `rounding`.
     #[must_use]
     pub fn holds_zero_at(&self, s: f64, rounding: f64) -> bool {
-        s >= self.start - self.floor_before.max(rounding)
-            && s <= self.end + self.floor_after.max(rounding)
+        s >= self.start - kept_floor(self.floor_before, self.before).max(rounding)
+            && s <= self.end + kept_floor(self.floor_after, self.after).max(rounding)
     }
 
     /// `(W, W', W'')` at `s`, the derivatives along the path.

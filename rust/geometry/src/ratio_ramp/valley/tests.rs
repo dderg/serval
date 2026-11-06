@@ -284,6 +284,24 @@ fn the_coupled_bend_bound_is_the_golden_ratio_to_the_three_halves_where_the_floo
     );
 }
 
+/// A crawl whose path acceleration all but vanishes has a floor `v²/a` of
+/// kilometres; its side keeps the floor within a share of its width, and
+/// the weight leaves zero past it, so the valley holds zero no further out.
+#[test]
+fn a_valley_holds_zero_only_within_the_floor_its_side_keeps() {
+    let width = 0.0114;
+    let valley = crawl_valley(width, crawl_floor(0.76, 3.7e-10));
+    let kept = kept_floor(valley.floor_after, width);
+    assert!(valley.holds_zero_at(valley.end + kept, 0.0));
+    assert!(!valley.holds_zero_at(valley.end + 2.0 * kept, 0.0));
+    assert!(!valley.holds_zero_at(valley.start - 2.0 * kept, 0.0));
+    assert!(
+        valley.weight(valley.end + 2.0 * kept).0 > 0.0,
+        "the weight leaves zero past the kept floor"
+    );
+    assert!(!valley.holds_zero_at(valley.end + 18.8, 0.0));
+}
+
 #[test]
 fn a_crawl_side_wider_than_its_reach_lies_on_the_grid() {
     let reach = 0.05;
