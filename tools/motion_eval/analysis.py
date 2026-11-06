@@ -26,6 +26,7 @@ MIN_VELOCITY_JUMP = 1e-9
 STRAIGHT_COS = 1.0 - 1e-9
 FLOAT_TOLERANCE_MM = 1e-9
 KERNEL_DESCRIBE_POINTS = 2001
+SMOOTHER_OVERSAMPLE = 4
 
 
 class ModelMismatch(AssertionError):
@@ -281,12 +282,15 @@ def executed_axis(seg, kernel, axis, t0, dt, n, cmd_jump_times, cmd_jumps):
         jv = (dv[:, None] * kernel.weights[None, :]).ravel()
         jt, jv = _merge_jumps(jt, jv)
         return AxisMotion(pos, vel, acc, jt, jv)
-    m_lo, w = kernel.grid_weights(dt)
-    ext = t0 + dt * np.arange(m_lo, n + m_lo + len(w) - 1)
+    h = dt / SMOOTHER_OVERSAMPLE
+    fine_n = (n - 1) * SMOOTHER_OVERSAMPLE + 1
+    m_lo, w = kernel.grid_weights(h)
+    ext = t0 + h * np.arange(m_lo, fine_n + m_lo + len(w) - 1)
     p, v, a = seg.eval(ext)
-    pos = _correlate_valid(p[:, axis], w)
-    vel = _correlate_valid(v[:, axis], w)
-    acc = _correlate_valid(a[:, axis], w)
+    pos, vel, acc = (
+        _correlate_valid(f[:, axis], w)[::SMOOTHER_OVERSAMPLE]
+        for f in (p, v, a)
+    )
     reach = kernel.half_width + abs(kernel.t_offs)
     t = t0 + dt * np.arange(n)
     for tj, dvj in zip(cmd_jump_times, dv):
