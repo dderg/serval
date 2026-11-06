@@ -114,10 +114,7 @@ impl WorkerPool {
     /// A pool sized to the cores the calling thread does not occupy, up to
     /// [`HELPERS_MAX`].
     pub fn new() -> Self {
-        Self::with_helpers(
-            std::thread::available_parallelism()
-                .map_or(0, |cores| (cores.get() - 1).min(HELPERS_MAX)),
-        )
+        Self::with_helpers((cores() - 1).min(HELPERS_MAX))
     }
 
     pub(crate) fn with_helpers(helper_count: usize) -> Self {
@@ -248,6 +245,15 @@ impl WorkerPool {
         own?;
         helper_panic.map_or(Ok(()), Err)
     }
+}
+
+/// The cores this process may run on, read once: `available_parallelism`
+/// reads the affinity mask and the cgroup quota files on every call, and
+/// the fan-outs ask before every emit.
+pub(crate) fn cores() -> usize {
+    static CORES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CORES
+        .get_or_init(|| std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get))
 }
 
 impl Default for WorkerPool {
