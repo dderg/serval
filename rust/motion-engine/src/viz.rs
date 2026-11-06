@@ -341,8 +341,9 @@ type EpochSamples = (f64, f64, Vec<Vec<(f64, f64, f64)>>);
 /// One interior vertex of a print's G-code polyline under its corner
 /// budget ([`snapshot_core::corner_budget`]): where it is, how sharply the
 /// polyline turns there, whether the toolhead extrudes through it, whether
-/// the fitter keeps it as a corner, whether the budget holds it, and the
-/// most its shaped miss may be.
+/// the fitter keeps it as a corner, whether the budget holds it, the most
+/// its shaped miss may be, and the plan's closest approach to it: how
+/// close and when, on the stream plan's clock.
 #[derive(IntoPyObject)]
 pub(crate) struct PyCornerVertex {
     position: [f64; 3],
@@ -351,6 +352,8 @@ pub(crate) struct PyCornerVertex {
     corner: bool,
     held: bool,
     budget_mm: f64,
+    plan_miss_mm: f64,
+    plan_t: f64,
 }
 
 /// A print's corner budget as `(kind, value)`, how far its shaped carriers
@@ -364,17 +367,27 @@ pub(crate) struct PyCornerBudgets {
 
 /// What `config_text`'s corner budget holds the shaped path to at each
 /// interior vertex of `waypoints`' polyline, as the path-accuracy audit
-/// reads it.
+/// reads it, against the print planned as one stream as
+/// [`pipeline_snapshot_epoch_samples`] plans it.
 #[pyfunction]
+#[pyo3(signature = (waypoints, config_text, step_benchmarks = None))]
 pub(crate) fn corner_vertex_budgets(
     waypoints: Vec<PyWaypoint>,
     config_text: &str,
+    step_benchmarks: Option<Vec<PyStepBenchmark>>,
 ) -> PyResult<PyCornerBudgets> {
-    use snapshot_core::corner_budget::{Polyline, corner_budgets};
+    use snapshot_core::corner_budget::{Polyline, corner_budgets, walk};
     let waypoints = waypoints_from_py(waypoints)?;
+    let planner = planner(config_text)?;
     let line = Polyline::of(&waypoints);
-    let budgets = corner_budgets(&line, &waypoints, &planner(config_text)?)
+    let budgets = corner_budgets(&line, &waypoints, &planner)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let step_capacity = optional_step_capacity_input(config_text, step_benchmarks.as_deref())?;
+    let record = snapshot_core::stream_record(&waypoints, &planner, step_capacity.as_ref())
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let trajectory = ExactTrajectory::from_segments(&record.segments)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let approaches = walk(&trajectory, &line).approaches;
     let vertices = budgets
         .vertices
         .iter()
@@ -387,6 +400,8 @@ pub(crate) fn corner_vertex_budgets(
                 corner: budget.corner,
                 held: budget.held,
                 budget_mm: budget.mm,
+                plan_miss_mm: approaches[vertex].miss_mm,
+                plan_t: approaches[vertex].t,
             })
         })
         .collect();

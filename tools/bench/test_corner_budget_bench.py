@@ -19,12 +19,12 @@ class _Events:
     level: np.ndarray
 
 
-def test_corexy_quantization_is_one_step_on_each_motor_mapped_back():
+def test_corexy_quantization_is_two_steps_on_each_motor_mapped_back():
     motors = {"a": _Motor(0.0125), "b": _Motor(0.0125)}
     bound = corner_budget_bench.quantization_mm(
         motors, analyze.ROLE_AXIS_WEIGHTS
     )
-    assert bound == pytest.approx(0.0125)
+    assert bound == pytest.approx(0.025)
 
 
 def test_a_miss_is_the_closest_chord_not_the_closest_sample():
@@ -40,18 +40,13 @@ def test_a_motor_between_steps_moves_on_the_line_joining_them():
     assert mm == pytest.approx([5.0, 5.25, 6.0])
 
 
-def test_vertices_are_found_in_the_order_the_nozzle_reaches_them():
-    t = np.linspace(0.0, 1.0, 101)
-    out_and_back = np.where(t < 0.5, t * 20.0, (1.0 - t) * 20.0)
-    xy = np.column_stack([out_and_back, np.zeros_like(t)])
-    cursor = corner_budget_bench._Cursor([(t, xy)])
-    first = cursor.find(np.array([5.0, 0.0]))
-    second = cursor.find(np.array([5.0, 0.0]))
-    assert first[1] < 50 < second[1]
+def test_a_window_spans_the_plan_within_its_path_length_of_the_apex():
+    t = np.linspace(0.0, 1.0, 1001)
+    xy = np.column_stack([t * 10.0, np.zeros_like(t)])
+    lo, hi = corner_budget_bench._window(t, xy, 0.5)
+    assert (lo, hi) == pytest.approx((0.4, 0.6), abs=2e-3)
 
 
-def test_a_vertex_the_plan_never_nears_fails_loudly():
-    t = np.linspace(0.0, 1.0, 11)
-    xy = np.column_stack([t, np.zeros_like(t)])
-    with pytest.raises(RuntimeError, match="never nears"):
-        corner_budget_bench._Cursor([(t, xy)]).find(np.array([50.0, 50.0]))
+def test_a_vertex_no_planned_epoch_holds_fails_loudly():
+    with pytest.raises(RuntimeError, match="no planned epoch"):
+        corner_budget_bench._block_of([{"t_start": 0.0, "t_end": 1.0}], 2.0)

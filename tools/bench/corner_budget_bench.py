@@ -10,12 +10,16 @@ audit's reading of it) is missed by three XY paths:
 - capture: the captured a and b steps, mapped to stream time by the
   epoch's alignment.
 
-A step lands on its lattice line at its time, so a motor's path is
-rebuilt by joining its steps linearly; between two steps the motor stays
-within one step of that line. The rebuilt XY therefore strays from the
-motion it samples by at most the step quantization: the corexy map of one
-step on each motor. The captured miss must stay within the vertex's
-budget, the shaped carriers' `max_path_deviation` and that quantization.
+Each vertex is read where the stream plan comes closest to it (the
+path-accuracy audit's cursor, `plan_t`), over the stretch of the plan
+within WINDOW_MM of path either side, on the same instants for every
+source. A motor's path is rebuilt by joining its steps linearly: a step
+fires as the motion crosses half way to the next lattice line and a
+reversal between two steps leaves the join a further step off, so the
+rebuilt XY strays from the motion by at most the corexy map of
+QUANTIZATION_STEPS on each motor. The captured miss must stay within the
+vertex's budget, the shaped carriers' `max_path_deviation` and that
+quantization.
 """
 
 from __future__ import annotations
@@ -26,17 +30,20 @@ import numpy as np
 
 PLAN_DT_S = 1e-4
 FINE_DT_S = 1e-5
-APEX_SEARCH_MM = 2.0
-SEARCH_CHUNK = 20_000
+WINDOW_MM = 1.0
+QUANTIZATION_STEPS = 2.0
 XY_ROLES = ("a", "b")
 SOURCES = ("plan", "reference", "capture")
 
 
 def quantization_mm(motors: dict, axis_weights: dict) -> float:
     """The farthest the XY rebuilt from a and b steps strays from the motion
-    they sample: one step on each motor, mapped back through corexy."""
+    they sample: QUANTIZATION_STEPS on each motor, mapped back through
+    corexy."""
     matrix = np.array([axis_weights[role][:2] for role in XY_ROLES])
-    steps = np.array([motors[role].step_mm for role in XY_ROLES])
+    steps = QUANTIZATION_STEPS * np.array(
+        [motors[role].step_mm for role in XY_ROLES]
+    )
     return max(
         float(np.hypot(*np.linalg.solve(matrix, steps * np.array(signs))))
         for signs in itertools.product((-1.0, 1.0), repeat=2)
@@ -80,37 +87,24 @@ def _miss(xy: np.ndarray, vertex: np.ndarray) -> float:
     return float(np.hypot(*(nearest - vertex).T).min())
 
 
-class _Cursor:
-    """Walks the plan's samples forward through the blocks: each vertex is
-    found after the one before it, as the nozzle reaches them in order."""
+def _window(t: np.ndarray, xy: np.ndarray, apex: float) -> tuple[float, float]:
+    """The plan's instants within WINDOW_MM of path either side of `apex`."""
+    centre = int(np.clip(np.searchsorted(t, apex), 0, len(t) - 1))
+    bounds = []
+    for step in (-1, 1):
+        index, travelled = centre, 0.0
+        while 0 < index < len(t) - 1 and travelled < WINDOW_MM:
+            travelled += float(np.hypot(*(xy[index + step] - xy[index])))
+            index += step
+        bounds.append(t[index])
+    return bounds[0], bounds[1]
 
-    def __init__(self, blocks):
-        self.blocks = blocks
-        self.block = 0
-        self.index = 0
 
-    def find(self, vertex: np.ndarray):
-        while self.block < len(self.blocks):
-            t, xy = self.blocks[self.block][:2]
-            start = self.index
-            while start < len(t):
-                stop = min(start + SEARCH_CHUNK, len(t))
-                distance = np.hypot(*(xy[start:stop] - vertex).T)
-                near = np.flatnonzero(distance < APEX_SEARCH_MM)
-                if near.size:
-                    first = start + int(near[0])
-                    last = first
-                    while (
-                        last + 1 < len(t)
-                        and np.hypot(*(xy[last + 1] - vertex)) < APEX_SEARCH_MM
-                    ):
-                        last += 1
-                    self.index = last + 1
-                    return self.block, first, last
-                start = stop
-            self.block += 1
-            self.index = 0
-        raise RuntimeError(f"the plan never nears the vertex {vertex.tolist()}")
+def _block_of(blocks, plan_t: float):
+    for block in blocks:
+        if block["t_start"] <= plan_t <= block["t_end"]:
+            return block
+    raise RuntimeError(f"no planned epoch holds the vertex reached at t={plan_t}")
 
 
 def report(inputs, detail: dict, planned, axis_weights, stream_epochs, engine):
@@ -118,7 +112,7 @@ def report(inputs, detail: dict, planned, axis_weights, stream_epochs, engine):
     the reference steps' and the captured steps' XY miss, and whether the
     capture stays within budget + carrier slack + step quantization."""
     budgets = engine.corner_vertex_budgets(
-        planned.waypoints, inputs.config.config_text
+        planned.waypoints, inputs.config.config_text, inputs.step_benchmarks
     )
     motors = {m.role: m for m in inputs.motors}
     quantization = quantization_mm(motors, axis_weights)
@@ -126,39 +120,41 @@ def report(inputs, detail: dict, planned, axis_weights, stream_epochs, engine):
     reference = detail["reference"]
     epochs = detail["epochs"]
     capture_events = detail["capture_events"]
-    plan_blocks = []
+    blocks = []
     for (t_start, t_end, rows), reference_block in zip(
         stream_epochs(inputs.config.config_text, [0, 1], PLAN_DT_S),
         reference.blocks,
         strict=True,
     ):
-        t = np.linspace(0.0, t_end - t_start, rows.shape[1])
         offset = reference_block.stream_offset_s
-        alignment = next(
-            epoch.alignment
-            for epoch in epochs
-            if epoch.reference.end_s >= offset
-            and epoch.reference.start_s <= offset + reference_block.duration_s
+        blocks.append(
+            {
+                "t_start": t_start,
+                "t_end": t_end,
+                "t": np.linspace(0.0, t_end - t_start, rows.shape[1]),
+                "xy": np.column_stack([rows[0][:, 0], rows[1][:, 0]]),
+                "offset": offset,
+                "alignment": next(
+                    epoch.alignment
+                    for epoch in epochs
+                    if epoch.reference.end_s >= offset
+                    and epoch.reference.start_s
+                    <= offset + reference_block.duration_s
+                ),
+            }
         )
-        plan_blocks.append(
-            (t, np.column_stack([rows[0][:, 0], rows[1][:, 0]]), offset, alignment)
-        )
-    cursor = _Cursor(plan_blocks)
     rows = []
     for vertex in budgets["vertices"]:
         if not (vertex["held"] and vertex["extrudes"]):
             continue
         point = np.array(vertex["position"][:2])
-        block, first, last = cursor.find(point)
-        t, xy, offset, alignment = plan_blocks[block]
-        lo, hi = max(first - 1, 0), min(last + 1, len(t) - 1)
-        fine = np.arange(t[lo], t[hi], FINE_DT_S)
-        plan_xy = np.column_stack(
-            [np.interp(fine, t, xy[:, axis]) for axis in (0, 1)]
-        )
-        stream_t = fine + offset
+        block = _block_of(blocks, vertex["plan_t"])
+        t, xy = block["t"], block["xy"]
+        lo, hi = _window(t, xy, vertex["plan_t"] - block["t_start"])
+        fine = np.arange(lo, hi + FINE_DT_S, FINE_DT_S)
+        stream_t = fine + block["offset"]
         misses = {
-            "plan": _miss(plan_xy, point),
+            "plan": vertex["plan_miss_mm"],
             "reference": _miss(
                 _steps_xy(reference.events, motors, axis_weights, stream_t),
                 point,
@@ -168,7 +164,7 @@ def report(inputs, detail: dict, planned, axis_weights, stream_epochs, engine):
                     capture_events,
                     motors,
                     axis_weights,
-                    alignment.to_capture(stream_t),
+                    block["alignment"].to_capture(stream_t),
                 ),
                 point,
             ),
