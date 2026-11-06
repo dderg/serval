@@ -3557,6 +3557,11 @@ impl<'a> FollowerSignal<'a> {
         };
         let rate_second = self.rate_second(t, read);
         let (weight, weight_slope, weight_curvature) = self.state.smoothing.valley_weight(s);
+        if weight > 0.0 && weight < 1.0 {
+            self.state
+                .smoothing
+                .assert_no_ramp_in_a_crawl_side(self.advance_table(), s);
+        }
         let weighted = laid.ratio * weight;
         let weighted_slope = laid.slope * weight + laid.ratio * weight_slope;
         let weighted_curvature = laid.curvature * weight

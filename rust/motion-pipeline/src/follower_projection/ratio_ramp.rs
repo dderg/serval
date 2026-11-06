@@ -1649,7 +1649,7 @@ impl RatioSmoothing {
         let (zero, sides, floors) = loop {
             let zero = steps.zero_stretch();
             let edges = steps.edges(&self.trail, table_end)?;
-            let after = crawl_side(Side::After, (zero.1, edges.1), reach, laid, rule, f64::INFINITY)?
+            let after = crawl_side(Side::After, edges.1, reach, laid, rule, f64::INFINITY)?
                 .unwrap_or_else(|| {
                     panic!(
                         "follower projection: no width of the After side of the crawl valley at \
@@ -1662,12 +1662,11 @@ impl RatioSmoothing {
             } else if self.last_crawl_reach_end() > zero.0 - reach {
                 (zero.0, reach)
             } else {
-                crawl_side(Side::Before, (zero.0, edges.0), reach, laid, rule, zero.0 - rested)?
+                crawl_side(Side::Before, edges.0, reach, laid, rule, zero.0 - rested)?
                     .map_or((rested, 0.0), |before| (zero.0, before))
             };
-            let floors = (edges.0.crawl_floor(), edges.1.crawl_floor());
             if !steps.own_within(tables, (start - before, zero.1 + after)) {
-                break ((start, zero.1), (before, after), floors);
+                break ((start, zero.1), (before, after), (edges.0.floor, edges.1.floor));
             }
         };
         steps.assert_flow_fits(&self.trail, tables.0, rule);
@@ -2359,6 +2358,27 @@ impl RatioSmoothing {
                 let (v, v1, v2) = valley.weight(s);
                 (w * v, w1 * v + w * v1, w2 * v + 2.0 * w1 * v1 + w * v2)
             })
+    }
+
+    /// Fails loudly where the ramp of a ratio step of `table` reaches `s`
+    /// inside a crawl valley's side: the advance would read the ramp's
+    /// curvature there on top of the side's rebuild, which no rule budgets.
+    /// A crawl valley owns the steps inside its sides and caps their
+    /// windows within its zero stretch ([`Self::lay_valley`]); a step past
+    /// a side whose window reaches back into it is not owned.
+    pub(super) fn assert_no_ramp_in_a_crawl_side(&self, table: Table, s: f64) {
+        let Some(valley) = self
+            .valleys_over(s, s)
+            .find(|valley| valley.kind == ValleyKind::Crawl && valley.weight(s).0 > 0.0)
+        else {
+            return;
+        };
+        if let Some((seam, h)) = self.seam_table(table).steps_reaching(&self.width, (s, s)).next() {
+            panic!(
+                "follower projection: the ratio step {seam:?} of the {table:?} table ramps over \
+                 {h} mm either side, into the side of the crawl valley {valley:?} at s={s}"
+            );
+        }
     }
 
     fn valleys_over(&self, lo: f64, hi: f64) -> impl Iterator<Item = &AdvanceValley> + '_ {

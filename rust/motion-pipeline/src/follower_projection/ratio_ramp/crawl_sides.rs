@@ -203,8 +203,30 @@ pub(super) enum Unlaid {
     Waits,
 }
 
-/// The width of the `side` of the crawl valley at `turn` the leaders cross
-/// as `crossing`: the narrowest [`crawl_side_width`] lays where the rebuild
+/// Where a crawl valley's side leaves its zero stretch: the path `s` of
+/// the stretch's edge, how the leaders cross it, and the floor the side
+/// keeps flat there.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Edge {
+    pub(super) s: f64,
+    pub(super) crossing: Crossing,
+    pub(super) floor: f64,
+}
+
+impl Edge {
+    /// The edge at the crawl `turn` itself, with the crawl's floor
+    /// ([`Crossing::crawl_floor`]).
+    pub(super) fn at_crawl(turn: f64, crossing: Crossing) -> Self {
+        Self {
+            s: turn,
+            crossing,
+            floor: crossing.crawl_floor(),
+        }
+    }
+}
+
+/// The width of the `side` of the crawl valley leaving its zero stretch at
+/// `edge`: the narrowest [`crawl_side_width`] lays where the rebuild
 /// `k·r·|W″·ṡ³ + 3W′·ṡ·s̈|` over it ([`CrawlSide::rebuild`]) fits what the
 /// leaders' own demand there leaves of the follower's limit, `r` the
 /// largest ratio laid within it and the leaders read off the trail, never
@@ -224,7 +246,7 @@ pub(super) enum Unlaid {
 /// sides, so a wider one would reach past what the projection holds back.
 pub(super) fn crawl_side(
     side: Side,
-    (turn, crossing): (f64, Crossing),
+    edge: Edge,
     reach: f64,
     (trail, spans, table_end): (&SideTrail, &[RatioSpan], f64),
     rule: &RatioRampRule,
@@ -234,7 +256,11 @@ pub(super) fn crawl_side(
         return Ok(Some(reach));
     }
     let slope = rule.advance_slope_s;
-    let floor = crossing.crawl_floor();
+    let Edge {
+        s: turn,
+        crossing,
+        floor,
+    } = edge;
     let mut waits = false;
     let width = crawl_side_width(reach, |width| {
         if width > limit {
@@ -396,35 +422,38 @@ impl StepWindows {
         self.crossing.speed * self.crossing.speed + 2.0 * path_accel * distance
     }
 
-    /// How the leaders cross the zero stretch's edges, where the sides
-    /// leave from: the crawl's crossing at an edge no owned window moves,
-    /// else at most as fast as the stretch's path acceleration takes them
-    /// from the crawl to the edge, which with that acceleration sets the
-    /// floor `v²/a` the side keeps flat.
-    pub(super) fn edges(
-        &self,
-        trail: &SideTrail,
-        table_end: f64,
-    ) -> Result<(Crossing, Crossing), Unlaid> {
+    /// Where the sides leave the zero stretch: the crawl itself where no
+    /// owned window moves the edge, else the stretch's edge, which the
+    /// leaders cross at most as fast as the stretch's path acceleration `A`
+    /// takes them from the crawl, `v_e`. The leaders move there, so the
+    /// side leaves zero flat over the floor `v_e²/A` whatever the crawl's.
+    pub(super) fn edges(&self, trail: &SideTrail, table_end: f64) -> Result<(Edge, Edge), Unlaid> {
+        let at_crawl = Edge::at_crawl(self.turn, self.crossing);
         if self.owned.is_empty() {
-            return Ok((self.crossing, self.crossing));
+            return Ok((at_crawl, at_crawl));
         }
         let zero = self.zero_stretch();
         if zero.1 > trail.through() && table_end.is_finite() {
             return Err(Unlaid::Waits);
         }
         let path_accel = self.path_accel(trail);
-        let edge = |distance: f64| {
+        let edge = |s: f64| {
+            let distance = (s - self.turn).abs();
             if distance == 0.0 {
-                return self.crossing;
+                return at_crawl;
             }
-            Crossing {
-                speed: self.speed_squared_within(path_accel, distance).sqrt(),
-                rate: path_accel,
-                jerk: self.crossing.jerk,
+            let speed_squared = self.speed_squared_within(path_accel, distance);
+            Edge {
+                s,
+                crossing: Crossing {
+                    speed: speed_squared.sqrt(),
+                    rate: path_accel,
+                    jerk: self.crossing.jerk,
+                },
+                floor: speed_squared / path_accel,
             }
         };
-        Ok((edge(self.turn - zero.0), edge(zero.1 - self.turn)))
+        Ok((edge(zero.0), edge(zero.1)))
     }
 
     /// Fails loudly where the flow over the zero stretch asks more than the
