@@ -533,6 +533,22 @@ impl SeamTable {
         })
     }
 
+    /// Where the window of the cluster ending on the last significant seam
+    /// opens, where a seam laid at `table_end` or past it may still join it
+    /// ([`Self::joins`]): `σ − h(σ)` rises along the path, so one `σ′` past
+    /// `table_end` joins it only where `table_end` lies closer to it than
+    /// their widths there. Joining narrows the window, so it opens no
+    /// earlier than it does now.
+    fn joinable_opening(&self, width: &WidthField, table_end: f64, reach: f64) -> Option<f64> {
+        let clusters = self.fresh(width);
+        let last = self.seams.iter().rposition(|seam| seam.significant)?;
+        let seam = self.seams[last];
+        let joinable =
+            seam.slope_after != 0.0 && table_end - seam.s < self.step_width(width, seam.s) + reach;
+        let span = clusters.spans[clusters.spans.partition_point(|span| span.end <= last)];
+        joinable.then(|| self.seams[span.start].s - span.width)
+    }
+
     /// The table's slope just past `s`, as the seams laid so far leave it.
     fn slope_left_of(&self, s: f64) -> f64 {
         self.seams
@@ -657,6 +673,24 @@ impl SpanReading<'_> {
                 .clusters
                 .iter()
                 .any(|cluster| span.s1 >= cluster.first() && span.s0 <= cluster.last().s)
+    }
+
+    /// The lowest and highest ratio of the `spans` read, the last one's end
+    /// ratio held on past the table where the moving reach runs past it;
+    /// `None` where none is read.
+    fn ratio_range(&self, spans: &[RatioSpan]) -> Option<(f64, f64)> {
+        let read = spans.iter().filter(|span| self.reads(span));
+        let (low, high) = read.fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), span| {
+            (
+                low.min(span.r0.min(span.r1)),
+                high.max(span.r0.max(span.r1)),
+            )
+        });
+        let (low, high) = match spans.last() {
+            Some(last) if self.moving.1 > last.s1 => (low.min(last.r1), high.max(last.r1)),
+            _ => (low, high),
+        };
+        (low <= high).then_some((low, high))
     }
 }
 
@@ -2076,17 +2110,14 @@ impl RatioSmoothing {
         let leaders = leg.shaped_leaders;
         let table_end = spans.last().map_or(leg.start_s, |last| last.s1);
         if table_end <= leg.start_s {
+            self.width.extend(leaders, leg, table_end);
             for crawl in std::mem::take(&mut self.waiting_crawls) {
                 self.lay_crawl_valley((spans, advance_spans), rule, crawl, f64::INFINITY);
             }
-            self.width.extend(leaders, leg, table_end);
             self.close_at(leg.start_s);
             return;
         }
         self.trail.record(leg, table_end);
-        for crawl in std::mem::take(&mut self.waiting_crawls) {
-            self.lay_crawl_valley((spans, advance_spans), rule, crawl, table_end);
-        }
         let (t_start, t_end) = leg.support;
         let opening = Crossing::valley_at(leaders, t_start);
         let crossing = self
@@ -2098,6 +2129,10 @@ impl RatioSmoothing {
             self.width.place_rest(seam);
         }
         self.width.extend(leaders, leg, table_end);
+        let new_seams = self.record_seams((spans, advance_spans));
+        for crawl in std::mem::take(&mut self.waiting_crawls) {
+            self.lay_crawl_valley((spans, advance_spans), rule, crawl, table_end);
+        }
         let closes_a_rest =
             self.lay_rest_valley((spans, advance_spans), leg, rule, crossing, table_end);
         if reach > SPAN_MIN_LEN_MM && self.open_rest.is_none() && !closes_a_rest {
@@ -2109,7 +2144,6 @@ impl RatioSmoothing {
         if let Some(crawl) = slowest {
             self.lay_crawl_valley((spans, advance_spans), rule, crawl, table_end);
         }
-        let new_seams = self.record_seams((spans, advance_spans));
         let mut crossings = LegCrossings::of(leaders);
         self.width.widen_seams_into(&mut crossings, leg.support);
         self.time_seams(
@@ -2208,12 +2242,13 @@ impl RatioSmoothing {
         {
             return Ok(());
         }
+        self.refresh_clusters();
         let guarded = guarded_by_the_turning_guard(rule);
         let mut steps = StepWindows::around(turn, crawl.1, reach, guarded);
         let untaken = |s: f64| self.step_window_untaken(s);
         steps.own_within(tables, (turn - steps.window, turn + steps.window), &untaken);
         let rested = self.rested_through(turn);
-        let laid = (&self.trail, tables.0, table_end);
+        let laid = (&*self, tables.1, table_end);
         let (zero, sides, floors) = loop {
             let zero = steps.zero_stretch();
             let edges = steps.edges(&self.trail, table_end)?;
@@ -2247,7 +2282,7 @@ impl RatioSmoothing {
                 );
             }
         };
-        steps.assert_flow_fits(&self.trail, tables.0, rule);
+        steps.assert_flow_fits(self, tables.0, rule);
         for owned in &steps.owned {
             for &s in &owned.run {
                 assert!(
@@ -2654,16 +2689,25 @@ impl RatioSmoothing {
                 .is_some()
     }
 
-    /// Which spans the smoothed table reads anywhere on `[lo, hi]`: those
-    /// the moving windows there average, `s ± h(s)` growing along the path,
-    /// and those either side of every seam of a cluster whose own window
-    /// reaches into it. A span only touching the windows' reach is read
-    /// nowhere on the stretch, so nothing laid past what it reads decides
-    /// which.
+    /// Which spans the smoothed laid table reads anywhere on `[lo, hi]`
+    /// ([`Self::reading_in`]).
     pub(super) fn reading(&self, lo: f64, hi: f64) -> SpanReading<'_> {
+        self.reading_in(Table::Laid, lo, hi)
+    }
+
+    /// Which spans the smoothed `table` reads anywhere on `[lo, hi]`: those
+    /// the moving windows there average, `s ± h(s)` growing along the path,
+    /// and those either side of every seam of a cluster of `table` whose
+    /// own window reaches into it. A span only touching the windows' reach
+    /// is read nowhere on the stretch, so nothing laid past what it reads
+    /// decides which.
+    pub(super) fn reading_in(&self, table: Table, lo: f64, hi: f64) -> SpanReading<'_> {
         SpanReading {
             moving: (lo - self.reach_back(lo), hi + self.reach_back(hi)),
-            clusters: self.laid.clusters_reaching(&self.width, (lo, hi)).collect(),
+            clusters: self
+                .seam_table(table)
+                .clusters_reaching(&self.width, (lo, hi))
+                .collect(),
         }
     }
 
@@ -2683,37 +2727,52 @@ impl RatioSmoothing {
             .fold(s - self.reach_back(s), f64::min)
     }
 
+    /// `max |r̃|` over `[lo, hi]` of `table`, laid as `spans`: the largest
+    /// ratio of the spans the smoothed table reads there
+    /// ([`Self::reading_in`]), the smoothed ratio being a convex
+    /// combination of theirs.
+    pub(super) fn peak_ratio_in(&self, table: Table, spans: &[RatioSpan], lo: f64, hi: f64) -> f64 {
+        self.reading_in(table, lo, hi)
+            .ratio_range(spans)
+            .map_or(0.0, |(low, high)| low.abs().max(high.abs()))
+    }
+
+    /// Whether the smoothed `table` up to `hi` reads nothing laid past
+    /// `table_end`: the moving window at `hi` stops short of it, the window
+    /// of a seam at `table_end` or past it, `σ − h(σ)` rising along the
+    /// path, opens past `hi`, and so does that of the cluster such a seam
+    /// may still join ([`SeamTable::joinable_opening`]).
+    pub(super) fn reads_within(&self, table: Table, hi: f64, table_end: f64) -> bool {
+        let reach = self.reach_back(table_end);
+        hi + self.reach_back(hi) <= table_end
+            && table_end - reach >= hi
+            && self
+                .seam_table(table)
+                .joinable_opening(&self.width, table_end, reach)
+                .is_none_or(|opening| opening > hi)
+    }
+
     /// `(max |r̃|, max |r̃'|)` over `[lo, hi]`, see [`RatioSmoothing`]: the
     /// ratio within the spans the smoothed table reads there
     /// ([`Self::reading`]); the slope within the moving window's bound on
     /// the slopes it averages there, each cluster's gathered at its first
     /// seam ([`SeamTable::moving_view`]), and what each cluster reaching in
     /// adds over its own window, its slopes less the one it leaves on and
-    /// `¾` of its steps over its width. A span only touching the stretch is read nowhere on
-    /// it, so nothing laid past what the stretch reads decides the bound.
+    /// `¾` of its steps over its width. A span only touching the stretch is
+    /// read nowhere on it, so nothing laid past what the stretch reads
+    /// decides the bound.
     pub(super) fn ratio_bounds(&self, spans: &[RatioSpan], lo: f64, hi: f64) -> (f64, f64) {
         let (_, curvature) = self.width.bounds(lo, hi);
         let reading = self.reading(lo, hi);
-        let ridden = spans.iter().filter(|span| reading.reads(span));
-        let (low, high) = ridden.fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), span| {
-            (
-                low.min(span.r0.min(span.r1)),
-                high.max(span.r0.max(span.r1)),
-            )
-        });
+        let Some((low, high)) = reading.ratio_range(spans) else {
+            return (0.0, 0.0);
+        };
         let moving = self.laid.moving_view(&self.width, reading.moving);
         let slope = moving
             .seams
             .iter()
             .map(|kink| kink.slope_after.abs())
             .fold(moving.slope_before.abs(), f64::max);
-        let (low, high) = match spans.last() {
-            Some(last) if reading.moving.1 > last.s1 => (low.min(last.r1), high.max(last.r1)),
-            _ => (low, high),
-        };
-        if low > high {
-            return (0.0, 0.0);
-        }
         let stretch = (1.0 + WIDTH_SLOPE_BOUND) * (1.0 + WIDTH_SLOPE_BOUND);
         let stationary = reading
             .clusters
