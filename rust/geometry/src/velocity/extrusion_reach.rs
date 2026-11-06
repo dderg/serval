@@ -3,6 +3,10 @@ use std::collections::VecDeque;
 use crate::Move;
 use crate::frontend::{ExtruderCaps, LeaderSpillId, SettleDemand};
 use crate::path::CurvatureProfile;
+
+use super::extruder_caps::budgeted_ratio;
+
+const Z_AXIS: usize = 2;
 use crate::ratio_ramp::{RATIO_RAMP_MAX_TIME_S, rest_room_reach_mm};
 
 /// The largest extrusion ratio `m` lays along the path on `axis`: 0 for
@@ -18,6 +22,31 @@ pub(super) fn extruding_ratio(m: &Move, axis: usize) -> f64 {
         .filter(|follower| follower.axis_index == axis)
         .map(|follower| follower.ratio.max(follower.ratio_end))
         .fold(0.0, f64::max)
+}
+
+/// The most acceleration `m` can be planned at from its own caps alone: its
+/// limit, held by the z cap on the share of it z takes
+/// ([`super::z_caps::z_capped`]) and by the extruder's acceleration on its
+/// own extrusion ratio ([`super::extruder_caps::extruder_capped`]).
+fn realizable_accel(m: &Move) -> f64 {
+    let accel = m.limits.accel_mm_s2;
+    let Some(segment) = &m.segment.spatial else {
+        return accel;
+    };
+    let lean = segment.lean_on(Z_AXIS);
+    let z_held = if lean.heading > 0.0 {
+        accel.min(m.limits.max_z_accel_mm_s2 / lean.plane.min(lean.heading))
+    } else {
+        accel
+    };
+    m.limits.extruder.map_or(z_held, |caps| {
+        let ratio = budgeted_ratio(extruding_ratio(m, caps.axis_index));
+        if ratio > 0.0 {
+            z_held.min(caps.max_accel_mm_s2 / ratio)
+        } else {
+            z_held
+        }
+    })
 }
 
 /// What the extruder's demand while the leaders cross one move can draw on.
@@ -63,6 +92,7 @@ struct Mark {
     ceiling_mm_s: f64,
     least_time_s: f64,
     accel_mm_s2: f64,
+    realizable_accel_mm_s2: f64,
     rest: bool,
     moves_on: [bool; 3],
     extruding: Option<(usize, f64)>,
@@ -101,13 +131,14 @@ fn least_rest_to_rest_time(length: f64, speed: f64, accel: f64) -> f64 {
 }
 
 /// What the marks dropped from the history leave behind: where the last
-/// of them ends, their fastest ceiling, their largest acceleration and
-/// their largest ratio per axis.
+/// of them ends, their fastest ceiling, their largest acceleration and the
+/// largest they can realize, and their largest ratio per axis.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Dropped {
     end_mm: f64,
     ceiling_mm_s: f64,
     accel_mm_s2: f64,
+    realizable_accel_mm_s2: f64,
     ratios: Vec<(usize, f64)>,
 }
 
@@ -116,6 +147,7 @@ impl Dropped {
         self.end_mm = mark.end_mm;
         self.ceiling_mm_s = self.ceiling_mm_s.max(mark.ceiling_mm_s);
         self.accel_mm_s2 = self.accel_mm_s2.max(mark.accel_mm_s2);
+        self.realizable_accel_mm_s2 = self.realizable_accel_mm_s2.max(mark.realizable_accel_mm_s2);
         let Some((axis, ratio)) = mark.extruding else {
             return;
         };
@@ -245,6 +277,7 @@ impl Marks {
             ceiling_mm_s,
             least_time_s,
             accel_mm_s2: m.limits.accel_mm_s2,
+            realizable_accel_mm_s2: realizable_accel(m),
             rest,
             moves_on: m.segment.spatial.as_ref().map_or([false; 3], moves_on),
             extruding: m
@@ -337,8 +370,8 @@ impl Marks {
             window_s,
             closed,
             0.0,
-            |strongest: f64, other| strongest.max(other.accel_mm_s2),
-            |strongest, dropped| strongest.max(dropped.accel_mm_s2),
+            |strongest: f64, other| strongest.max(other.realizable_accel_mm_s2),
+            |strongest, dropped| strongest.max(dropped.realizable_accel_mm_s2),
         )
     }
 
@@ -447,12 +480,13 @@ impl Marks {
     }
 
     /// The largest acceleration a move within the speed window of
-    /// `marks[index]` may take, its own included: what the toolhead may do
-    /// over the reach of a ratio ramp at its joins, however a short move
-    /// beside it is slowed. `None` while moves still to come could raise it.
+    /// `marks[index]` can realize, its own included ([`realizable_accel`]):
+    /// what the toolhead may do over the reach of a ratio ramp at its joins,
+    /// however a short move beside it is slowed. `None` while moves still to
+    /// come could raise it.
     fn strongest_in_reach(&self, index: usize, reach: Reach, closed: bool) -> Option<f64> {
         let window_s = reach.speed_window_s();
-        let mut strongest = self.marks[index].accel_mm_s2;
+        let mut strongest = self.marks[index].realizable_accel_mm_s2;
         for ahead in [false, true] {
             strongest = strongest.max(self.strongest_beside(index, ahead, window_s, closed)?);
         }
