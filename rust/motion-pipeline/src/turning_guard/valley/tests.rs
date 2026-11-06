@@ -79,7 +79,7 @@ fn the_block_screen_leaves_every_cell_s_rebuild_as_its_own_bound_reads_it() {
         let bounds = if (crawl_cells.0..=crawl_cells.1).contains(&n) {
             crawling()
         } else {
-            let wave = (n as f64 * 0.05).sin();
+            let wave = libm::sin(n as f64 * 0.05);
             cell(10.0 + 4.0 * wave, 300.0 + 250.0 * wave)
         };
         track.push(n, bounds, H, fit);
