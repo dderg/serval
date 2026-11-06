@@ -20,13 +20,15 @@ mod extrusion_reach;
 pub mod law;
 mod rate_cap;
 mod reconstruct;
+mod seam_envelope;
 mod step_capacity;
 mod z_caps;
 
 pub use extrusion_reach::{
-    ExtrusionBudget, ExtrusionReach, ReachableSpeed, SeamLimit, extrusion_budgets,
+    ExtrusionBudget, ExtrusionReach, extrusion_budgets,
 };
 pub use law::{LawSegment, RailPair, RailPairShape, ScalarLaw};
+pub use seam_envelope::{ReachableSpeed, SeamEnvelope, SeamLimit, SeamTerm};
 
 use disk::Kinematics;
 

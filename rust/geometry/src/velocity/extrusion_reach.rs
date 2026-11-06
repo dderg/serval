@@ -4,15 +4,10 @@ use crate::Move;
 use crate::frontend::{ExtruderCaps, LeaderSpillId, SettleDemand};
 use crate::path::CurvatureProfile;
 
-use super::disk;
 use super::extruder_caps::{DemandReach, extruder_accel_cap};
+use super::seam_envelope::{ReachableSpeed, SeamEnvelope, SeamLimit, SeamTerm};
 use super::z_caps::z_capped;
 use crate::ratio_ramp::{RATIO_RAMP_MAX_TIME_S, rest_room_reach_mm};
-
-/// The relative margin a move's reachable speed keeps over the envelope it
-/// is read off, so a plan that reaches the envelope to the last rounding
-/// never rides the ceiling it becomes.
-const REACHABLE_SLACK: f64 = 1e-9;
 
 /// The largest extrusion ratio `m` lays along the path on `axis`: 0 for
 /// travel, retraction (a negative ratio) and an extrude-only move, whose
@@ -84,90 +79,43 @@ fn realizable_accel(m: &Move, reachable_mm_s: f64) -> f64 {
     )
 }
 
-/// What holds the leaders at a seam: the feed ceilings either side, and
-/// the disk of the sharper curvature there, `√(A/κ)` under a budget `A`.
+/// A seam as the reach reads it: the fastest the leaders cross it at the
+/// acceleration the moves either side can take, and its limit.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SeamLimit {
-    pub ceiling_mm_s: f64,
-    pub kappa: f64,
-}
-
-impl SeamLimit {
-    fn ceiling(ceiling_mm_s: f64) -> Self {
-        Self {
-            ceiling_mm_s,
-            kappa: 0.0,
-        }
-    }
-
-    /// The speed limit under a budget `accel` on both sides.
-    pub fn at(&self, accel: f64) -> f64 {
-        self.ceiling_mm_s.min(disk::limit_speed(self.kappa, accel))
-    }
-}
-
-/// The fastest the leaders can cross a seam: at most its speed limit
-/// `w`, and at most `√(wᵢ² + 2·Σ Aₘ·Lₘ)` from any other seam `i` with the
-/// moves between at their acceleration limits. Kept with the limit of the
-/// seam that binds and the path from it.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct SeamReach {
+struct Seam {
     speed_mm_s: f64,
     limit: SeamLimit,
-    run_mm: f64,
 }
 
-impl SeamReach {
-    fn at(speed_mm_s: f64, limit: SeamLimit) -> Self {
-        Self {
-            speed_mm_s,
-            limit,
-            run_mm: 0.0,
-        }
-    }
-
+impl Seam {
     fn rest() -> Self {
-        Self::at(0.0, SeamLimit::ceiling(0.0))
-    }
-
-    /// This seam's reach carried `length` along the path, accelerating at
-    /// `accel`.
-    fn across(self, length: f64, accel: f64) -> Self {
         Self {
-            speed_mm_s: (self.speed_mm_s * self.speed_mm_s + 2.0 * accel * length).sqrt(),
-            run_mm: self.run_mm + length,
-            ..self
+            speed_mm_s: 0.0,
+            limit: SeamLimit::ceiling(0.0),
         }
     }
+}
 
-    fn slower(self, other: Self) -> Self {
-        if other.speed_mm_s < self.speed_mm_s {
-            other
-        } else {
-            self
-        }
-    }
+/// The speed a reach of `speed` climbs to over `length` at `accel`.
+fn climbed(speed: f64, length: f64, accel: f64) -> f64 {
+    (speed * speed + 2.0 * accel * length).sqrt()
 }
 
 /// One side of a seam as the move there limits it: the fastest the move
 /// lets the leaders cross the seam at the acceleration it can take, its
-/// feed ceiling and the curvature it meets the seam on, and the reach of
-/// the seams behind.
+/// feed ceiling and the curvature it meets the seam on.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct SeamSide {
     speed_mm_s: f64,
     limit: SeamLimit,
-    forward: SeamReach,
 }
 
 impl SeamSide {
     /// The start of a stream the leaders enter at `entry_mm_s`.
     fn start(entry_mm_s: f64) -> Self {
-        let limit = SeamLimit::ceiling(entry_mm_s);
         Self {
             speed_mm_s: entry_mm_s,
-            limit,
-            forward: SeamReach::at(entry_mm_s, limit),
+            limit: SeamLimit::ceiling(entry_mm_s),
         }
     }
 
@@ -181,73 +129,20 @@ impl SeamSide {
         Self {
             speed_mm_s: limit.at(accel),
             limit,
-            forward: SeamReach::rest(),
         }
     }
 
     /// The seam where `self` meets `other`: the slower of their speeds,
     /// the lower ceiling and the sharper curvature.
-    fn meeting(&self, other: &Self) -> (f64, SeamLimit) {
-        (
-            self.speed_mm_s.min(other.speed_mm_s),
-            SeamLimit {
+    fn meeting(&self, other: &Self) -> Seam {
+        Seam {
+            speed_mm_s: self.speed_mm_s.min(other.speed_mm_s),
+            limit: SeamLimit {
                 ceiling_mm_s: self.limit.ceiling_mm_s.min(other.limit.ceiling_mm_s),
                 kappa: self.limit.kappa.max(other.limit.kappa),
             },
-        )
-    }
-}
-
-/// The fastest the leaders can cross a move on the planned path,
-/// `peak_mm_s`, from the moves' feed ceilings, the disk limits at the seams
-/// and the rests, the leaders accelerating no faster than the extruder's
-/// acceleration cap on a move's own ratio lets its limit
-/// ([`reaching_accel`]): whatever acceleration and seam caps the planner
-/// derives, its plan of the move stays at or under it. The seams that
-/// bound it either side hold the leaders under `entry` and `exit`,
-/// `run_mm` apart along the path, the move among the moves between.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ReachableSpeed {
-    pub peak_mm_s: f64,
-    pub entry: SeamLimit,
-    pub exit: SeamLimit,
-    pub run_mm: f64,
-}
-
-impl ReachableSpeed {
-    /// A move `length` long whose entry seam the leaders reach from behind
-    /// at `behind` and whose exit seam they reach from ahead at `ahead`,
-    /// under `ceiling` and accelerating at up to `accel`.
-    fn across(behind: SeamReach, ahead: SeamReach, ceiling: f64, accel: f64, length: f64) -> Self {
-        let peak = peak_between(behind.speed_mm_s, ahead.speed_mm_s, accel, length);
-        Self {
-            peak_mm_s: (peak * (1.0 + REACHABLE_SLACK)).min(ceiling),
-            entry: behind.limit,
-            exit: ahead.limit,
-            run_mm: behind.run_mm + ahead.run_mm + length,
         }
     }
-
-    /// The fastest the run peaks at with every move on it planned at a
-    /// budget `accel`.
-    pub fn run_peak(&self, accel: f64) -> f64 {
-        peak_between(
-            self.entry.at(accel),
-            self.exit.at(accel),
-            accel,
-            self.run_mm,
-        )
-    }
-}
-
-/// The fastest a path `length` long is crossed from `entry` to `exit`
-/// accelerating at up to `accel`.
-fn peak_between(entry: f64, exit: f64, accel: f64, length: f64) -> f64 {
-    let climb = 2.0 * accel * length;
-    (0.5 * (entry * entry + exit * exit + climb))
-        .min(entry * entry + climb)
-        .min(exit * exit + climb)
-        .sqrt()
 }
 
 /// What the extruder's demand while the leaders cross one move can draw on.
@@ -282,8 +177,9 @@ impl Reach {
 
 /// One move as the reach reads it: where it lies along the stream's path,
 /// its feed ceiling, the acceleration it may take and the most the planner
-/// can plan it at ([`reaching_accel`]), the limit of the seam it starts
-/// at and the reach of the seams behind there, an extrude-only move's
+/// can plan it at ([`reaching_accel`]), the seam it starts at, the fastest
+/// the seams behind let the leaders reach that seam and the envelope of the
+/// seams behind that can bind there, an extrude-only move's
 /// least time, the spatial axes it moves on, what it extrudes, the reach
 /// of the extruder it is budgeted for, the extruder's caps, where the
 /// leaders last rest before it, and once the moves after it bound how fast
@@ -297,8 +193,9 @@ struct Mark {
     ceiling_mm_s: f64,
     accel_mm_s2: f64,
     reaching_accel_mm_s2: f64,
-    seam: SeamReach,
-    forward: SeamReach,
+    seam: Seam,
+    forward_mm_s: f64,
+    behind: SeamEnvelope,
     rest_time_s: f64,
     rest: bool,
     moves_on: [bool; 3],
@@ -505,11 +402,14 @@ struct Marks {
     last_rest_mm: f64,
     rests_mm: VecDeque<f64>,
     tail: SeamSide,
+    forward_mm_s: f64,
+    behind: SeamEnvelope,
     settled_count: usize,
 }
 
 impl Marks {
     fn new(extrude_only: ExtrudeOnly, entry_mm_s: f64) -> Self {
+        let tail = SeamSide::start(entry_mm_s);
         Self {
             marks: VecDeque::new(),
             path_end_mm: 0.0,
@@ -517,7 +417,9 @@ impl Marks {
             extrude_only,
             last_rest_mm: 0.0,
             rests_mm: VecDeque::new(),
-            tail: SeamSide::start(entry_mm_s),
+            tail,
+            forward_mm_s: entry_mm_s,
+            behind: SeamEnvelope::of(tail.limit),
             settled_count: 0,
         }
     }
@@ -541,15 +443,17 @@ impl Marks {
                 ),
             };
         let reaching = reaching_accel(m);
-        let (entry_speed, entry_limit) =
-            self.tail
-                .meeting(&SeamSide::of(ceiling_mm_s, entry_kappa, reaching));
-        let seam = SeamReach::at(entry_speed, entry_limit);
-        let forward = self.tail.forward.slower(seam);
-        self.tail = SeamSide {
-            forward: forward.across(length, reaching),
-            ..SeamSide::of(ceiling_mm_s, exit_kappa, reaching)
-        };
+        let seam = self
+            .tail
+            .meeting(&SeamSide::of(ceiling_mm_s, entry_kappa, reaching));
+        let forward_mm_s = self.forward_mm_s.min(seam.speed_mm_s);
+        let behind = self.behind.with(SeamTerm {
+            limit: seam.limit,
+            run_mm: 0.0,
+        });
+        self.tail = SeamSide::of(ceiling_mm_s, exit_kappa, reaching);
+        self.forward_mm_s = climbed(forward_mm_s, length, reaching);
+        self.behind = behind.across(length);
         self.path_end_mm += length;
         let rest = m.segment.spatial.is_none();
         self.marks.push_back(Mark {
@@ -559,7 +463,8 @@ impl Marks {
             accel_mm_s2: accel,
             reaching_accel_mm_s2: reaching,
             seam,
-            forward,
+            forward_mm_s,
+            behind,
             rest_time_s,
             rest,
             moves_on: m.segment.spatial.as_ref().map_or([false; 3], moves_on),
@@ -582,40 +487,50 @@ impl Marks {
         }
     }
 
-    /// The seam entering `marks[seam]`, its limit alone, the end of the
-    /// stream's a rest once it is closed; `None` past the moves known.
-    fn seam_at(&self, seam: usize, closed: bool) -> Option<SeamReach> {
+    /// The seam entering `marks[seam]`, the end of the stream's a rest
+    /// once it is closed; `None` past the moves known.
+    fn seam_at(&self, seam: usize, closed: bool) -> Option<Seam> {
         match self.marks.get(seam) {
             Some(mark) => Some(mark.seam),
-            None if closed => Some(SeamReach::rest()),
+            None if closed => Some(Seam::rest()),
             None => None,
         }
     }
 
     /// The reach from ahead of the seam leaving `marks[index]`: its own
-    /// limit, and the limit of every seam ahead carried back to it, up to
-    /// where the climb back alone is as fast as the slowest so far. `None`
-    /// while moves still to come could lower it.
-    fn backward_at_exit(&self, index: usize, closed: bool) -> Option<SeamReach> {
+    /// speed, and that of every seam ahead carried back to it, up to where
+    /// the climb back alone is as fast as the slowest so far; with the
+    /// envelope of the seams it passed and of a rest where it stopped,
+    /// which every seam beyond is no tighter than. `None` while moves still
+    /// to come could lower it.
+    fn backward_at_exit(&self, index: usize, closed: bool) -> Option<(f64, SeamEnvelope)> {
+        let rest = Seam::rest();
         if self.marks[index].rest {
-            return Some(SeamReach::rest());
+            return Some((rest.speed_mm_s, SeamEnvelope::of(rest.limit)));
         }
-        let mut slowest = self.seam_at(index + 1, closed)?;
-        let mut back = SeamReach::rest();
+        let exit = self.seam_at(index + 1, closed)?;
+        let mut slowest = exit.speed_mm_s;
+        let mut envelope = SeamEnvelope::of(exit.limit);
+        let (mut back, mut run_mm) = (0.0, 0.0);
         for ahead in index + 1..self.marks.len() {
             let mark = &self.marks[ahead];
-            back = back.across(mark.length_mm(), mark.reaching_accel_mm_s2);
-            if back.speed_mm_s >= slowest.speed_mm_s {
-                return Some(slowest);
+            back = climbed(back, mark.length_mm(), mark.reaching_accel_mm_s2);
+            run_mm += mark.length_mm();
+            if back >= slowest {
+                let beyond = SeamTerm {
+                    limit: rest.limit,
+                    run_mm,
+                };
+                return Some((slowest, envelope.with(beyond)));
             }
             let seam = self.seam_at(ahead + 1, closed)?;
-            slowest = slowest.slower(SeamReach {
-                speed_mm_s: seam.speed_mm_s.hypot(back.speed_mm_s),
+            slowest = slowest.min(seam.speed_mm_s.hypot(back));
+            envelope = envelope.with(SeamTerm {
                 limit: seam.limit,
-                run_mm: back.run_mm,
+                run_mm,
             });
         }
-        Some(slowest)
+        Some((slowest, envelope))
     }
 
     /// Settles the reachable speed of every mark whose exit seam the moves
@@ -632,22 +547,22 @@ impl Marks {
             let Some(ahead) = self.backward_at_exit(index, closed) else {
                 return;
             };
-            let mark = self.marks[index];
+            let mark = &self.marks[index];
             let length = mark.length_mm();
             let reachable = ReachableSpeed::across(
-                mark.forward,
+                (mark.forward_mm_s, mark.behind),
                 ahead,
-                mark.ceiling_mm_s,
-                mark.reaching_accel_mm_s2,
+                (mark.ceiling_mm_s, mark.reaching_accel_mm_s2),
                 length,
             );
+            let least_time_s = if mark.rest {
+                mark.rest_time_s
+            } else {
+                length / reachable.peak_mm_s
+            };
             self.marks[index].settled = Some(Settled {
                 reachable,
-                least_time_s: if mark.rest {
-                    mark.rest_time_s
-                } else {
-                    length / reachable.peak_mm_s
-                },
+                least_time_s,
                 realizable_accel_mm_s2: realizable_accel(
                     &moves[index - first],
                     reachable.peak_mm_s,
