@@ -521,6 +521,8 @@ pub const geometry::ratio_ramp::VALLEY_RAMP_TIME_S: f64
 pub fn geometry::ratio_ramp::coupled_bend(f64, f64, f64, f64) -> f64
 pub fn geometry::ratio_ramp::crawl_floor(f64, f64) -> f64
 pub fn geometry::ratio_ramp::crawl_side_width(f64, impl core::ops::function::FnMut(f64) -> bool) -> core::option::Option<f64>
+pub fn geometry::ratio_ramp::crawl_step_window(f64) -> f64
+pub fn geometry::ratio_ramp::crawl_zero_reach(f64) -> f64
 pub fn geometry::ratio_ramp::kept_floor(f64, f64) -> f64
 pub fn geometry::ratio_ramp::leader_reach(f64, f64, f64) -> f64
 pub fn geometry::ratio_ramp::longest_ramp_time(f64, f64) -> f64
@@ -1486,6 +1488,8 @@ pub fn geometry::corner_deviation_from_scv(f64, f64) -> f64
 pub fn geometry::coupled_bend(f64, f64, f64, f64) -> f64
 pub fn geometry::crawl_floor(f64, f64) -> f64
 pub fn geometry::crawl_side_width(f64, impl core::ops::function::FnMut(f64) -> bool) -> core::option::Option<f64>
+pub fn geometry::crawl_step_window(f64) -> f64
+pub fn geometry::crawl_zero_reach(f64) -> f64
 pub fn geometry::extrusion_budgets(&[geometry::frontend::Move], f64, f64) -> alloc::vec::Vec<geometry::ExtrusionBudget>
 pub fn geometry::kept_floor(f64, f64) -> f64
 pub fn geometry::leader_reach(f64, f64, f64) -> f64
