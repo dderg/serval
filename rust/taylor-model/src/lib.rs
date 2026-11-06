@@ -62,13 +62,10 @@ pub const fn gamma(roundings: usize) -> f64 {
     accumulated / (1.0 - accumulated)
 }
 
+/// `bound` raised past its rounding; a NaN bound reads as unbounded, the
+/// operand `min` returns in its place.
 pub fn upper(bound: f64) -> f64 {
-    let inflated = bound * (1.0 + BOUND_ROUNDING) + f64::MIN_POSITIVE;
-    if inflated.is_nan() {
-        f64::INFINITY
-    } else {
-        inflated
-    }
+    (bound * (1.0 + BOUND_ROUNDING) + f64::MIN_POSITIVE).min(f64::INFINITY)
 }
 
 /// An upper bound on `baseⁿ` for a non-negative `base`.
@@ -459,16 +456,18 @@ impl TaylorModel {
         let deviation: f64 = self.coefficients[1..self.len].iter().map(|c| c.abs()).sum();
         let negligible = TRIM_SHARE * (self.coefficients[0].abs() + deviation);
         let working = self.working_share * deviation;
+        let mut len = self.len;
         let mut dropped = 0.0;
-        while self.len > 1 {
-            let last = self.coefficients[self.len - 1].abs();
+        while len > 1 {
+            let last = self.coefficients[len - 1].abs();
             if last > negligible && dropped + last > working {
                 break;
             }
-            self.len -= 1;
+            len -= 1;
             dropped += last;
-            self.coefficients[self.len] = 0.0;
         }
+        self.coefficients[len..self.len].fill(0.0);
+        self.len = len;
         self.rad = upper(self.rad + dropped);
     }
 
@@ -729,26 +728,23 @@ fn polynomial_of_affine(coefficients: &[Ball], tau: &TaylorModel) -> TaylorModel
     for (slot, coefficient) in work.iter_mut().zip(coefficients) {
         *slot = coefficient.mid;
     }
+    let (coefficients_out, scaled_magnitude) = match n {
+        1 => shifted_and_scaled::<1>(work, centre, slope),
+        2 => shifted_and_scaled::<2>(work, centre, slope),
+        3 => shifted_and_scaled::<3>(work, centre, slope),
+        4 => shifted_and_scaled::<4>(work, centre, slope),
+        5 => shifted_and_scaled::<5>(work, centre, slope),
+        6 => shifted_and_scaled::<6>(work, centre, slope),
+        7 => shifted_and_scaled::<7>(work, centre, slope),
+        TAYLOR_LEN => shifted_and_scaled::<TAYLOR_LEN>(work, centre, slope),
+        _ => unreachable!("an affine argument's polynomial exceeds a Taylor model"),
+    };
     let mut out = TaylorModel {
-        coefficients: [0.0; TAYLOR_LEN],
+        coefficients: coefficients_out,
         len: n,
         rad: 0.0,
         working_share: tau.working_share,
     };
-    let mut scale = 1.0;
-    let mut scaled_magnitude = 0.0;
-    let top = work[n - 1];
-    for lowest in 0..n {
-        let mut higher = top;
-        for slot in work[lowest..n - 1].iter_mut().rev() {
-            higher = *slot + centre * higher;
-            *slot = higher;
-        }
-        let scaled = work[lowest] * scale;
-        out.coefficients[lowest] = scaled;
-        scaled_magnitude += scaled.abs();
-        scale *= slope;
-    }
     let reach = upper(centre.abs() + slope.abs());
     let wide_reach = upper(reach + offset_rad);
     let mut reach_power = 1.0;
@@ -773,6 +769,34 @@ fn polynomial_of_affine(coefficients: &[Ball], tau: &TaylorModel) -> TaylorModel
             + offset_rad * upper(derivative),
     );
     out.trimmed()
+}
+
+/// The first `N` of `work` Taylor-shifted to `centre` by repeated Horner
+/// passes, each output coefficient scaled by `slopeʲ`, and the magnitude of
+/// the scaled coefficients: over a fixed length the compiler keeps every
+/// pass in registers.
+#[inline]
+fn shifted_and_scaled<const N: usize>(
+    mut work: [f64; TAYLOR_LEN],
+    centre: f64,
+    slope: f64,
+) -> ([f64; TAYLOR_LEN], f64) {
+    let mut out = [0.0; TAYLOR_LEN];
+    let mut scale = 1.0;
+    let mut scaled_magnitude = 0.0;
+    let top = work[N - 1];
+    for lowest in 0..N {
+        let mut higher = top;
+        for slot in (lowest..N - 1).rev() {
+            higher = work[slot] + centre * higher;
+            work[slot] = higher;
+        }
+        let scaled = work[lowest] * scale;
+        out[lowest] = scaled;
+        scaled_magnitude += scaled.abs();
+        scale *= slope;
+    }
+    (out, scaled_magnitude)
 }
 
 #[cfg(test)]
